@@ -186,6 +186,7 @@ void start_kernel_post_init(void) {
     nullranddevinit();  // Register /dev/null, /dev/random, /dev/zero
     fbdevinit();        // Register /dev/fb0 (framebuffer, if Bochs VGA detected)
     ps2mouse_init();    // Register /dev/mouse (PS/2 mouse)
+    ps2kbd_init();       // Register /dev/kbd (PS/2 keyboard)
     ttydevinit();       // Register /dev/tty (controlling terminal device)
     ptmxinit();         // Register /dev/ptmx (PTY multiplexer)
     gendisk_init();     // Generic disk layer (partition discovery)

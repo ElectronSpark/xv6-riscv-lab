@@ -18,4 +18,5 @@ add_library(dev OBJECT
     loop.c
     fb.c
     ps2mouse.c
+    ps2kbd.c
 )

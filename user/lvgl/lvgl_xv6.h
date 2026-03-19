@@ -108,8 +108,35 @@ struct fb_gpu_copy {
 };
 
 /* ══════════════════════════════════════════════════════════════════════
- *  Input driver (mouse)
+ *  Input driver (mouse + keyboard)
  * ══════════════════════════════════════════════════════════════════════ */
+
+/* Keyboard event (matches kernel struct kbd_event) */
+typedef struct {
+    uint8_t keycode;        /* ASCII code (0 if non-printable) */
+    uint8_t scancode;       /* raw PS/2 scancode */
+    uint8_t pressed;        /* 1 = press, 0 = release */
+    uint8_t modifiers;      /* bit0=shift, bit1=ctrl, bit2=alt */
+} lv_kbd_event_t;
+
+#define LV_KBD_MOD_SHIFT  0x01
+#define LV_KBD_MOD_CTRL   0x02
+#define LV_KBD_MOD_ALT    0x04
+
+/* Special (non-ASCII) key codes (0x80+) — matches kernel KBD_KEY_* */
+#define LV_KEY_UP      0x80
+#define LV_KEY_DOWN    0x81
+#define LV_KEY_LEFT    0x82
+#define LV_KEY_RIGHT   0x83
+#define LV_KEY_HOME    0x84
+#define LV_KEY_END     0x85
+#define LV_KEY_PGUP    0x86
+#define LV_KEY_PGDN    0x87
+#define LV_KEY_INSERT  0x88
+#define LV_KEY_DELETE  0x89
+
+/* Keyboard callback: receives key events when a widget has focus */
+typedef void (*lv_kbd_cb_t)(lv_kbd_event_t *ev, void *user_data);
 
 typedef struct {
     int         mouse_fd;
@@ -117,6 +144,9 @@ typedef struct {
     int16_t     y;
     uint8_t     buttons;        /* bit0=left, bit1=right */
     int         pressed;        /* left button currently pressed */
+    int         kbd_fd;         /* file descriptor for /dev/kbd */
+    lv_kbd_cb_t kbd_cb;         /* keyboard event callback */
+    void       *kbd_cb_data;    /* user data for keyboard callback */
 } lv_indev_t;
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -150,7 +180,7 @@ typedef enum {
 } lv_obj_type_t;
 
 #define LV_OBJ_MAX_CHILDREN 32
-#define LV_LABEL_MAX_TEXT   256
+#define LV_LABEL_MAX_TEXT   2048
 
 typedef enum {
     LV_ALIGN_TOP_LEFT = 0,
@@ -353,6 +383,9 @@ void      lv_font_measure(const char *text, int *out_w, int *out_h);
 
 /* Check if GPU acceleration is available */
 int       lv_gpu_available(void);
+
+/* Register a keyboard event callback (called each frame for pending keys) */
+void      lv_indev_set_kbd_callback(lv_kbd_cb_t cb, void *user_data);
 
 /* Fill a screen rectangle with a solid color (bypasses local buffer) */
 int       lv_gpu_fill_rect(int x, int y, int w, int h, lv_color_t color);

@@ -15,6 +15,10 @@
 #include <signal.h>
 #include <string.h>
 #include <stdint.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include <termios.h>
 
 static volatile int g_running = 1;
 
@@ -24,6 +28,24 @@ static lv_obj_t *win_sysinfo;
 static lv_obj_t *win_calc;
 static lv_obj_t *win_settings;
 static lv_obj_t *win_about;
+static lv_obj_t *win_terminal;
+
+/* ── Terminal state ──────────────────────────────────────────────── */
+
+#define TERM_COLS  80
+#define TERM_ROWS  24
+#define TERM_ESC_MAX 32
+
+static lv_obj_t  *term_label;
+static int        term_master_fd = -1;
+static int        term_shell_pid = -1;
+static char       term_buf[TERM_ROWS][TERM_COLS];
+static int        term_row;
+static int        term_col;
+static int        term_esc_state;              /* 0=normal, 1=ESC, 2=CSI */
+static char       term_esc_buf[TERM_ESC_MAX];
+static int        term_esc_idx;
+static int        term_dirty;
 
 /* ── Calculator state ────────────────────────────────────────────── */
 
@@ -51,6 +73,8 @@ static void create_sysinfo(void);
 static void create_calc(void);
 static void create_settings(void);
 static void create_about(void);
+static void create_terminal(void);
+static void term_poll(void);
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Window close callbacks
@@ -92,6 +116,26 @@ static void on_about_close(lv_obj_t *obj, lv_event_t e)
     win_about = NULL;
 }
 
+static void on_terminal_close(lv_obj_t *obj, lv_event_t e)
+{
+    if (e != LV_EVENT_CLOSE) return;
+    /* Unregister keyboard callback first */
+    lv_indev_set_kbd_callback(NULL, NULL);
+    /* Kill shell and close PTY */
+    if (term_shell_pid > 0) {
+        kill(term_shell_pid, SIGKILL);
+        waitpid(term_shell_pid, NULL, 0);
+        term_shell_pid = -1;
+    }
+    if (term_master_fd >= 0) {
+        close(term_master_fd);
+        term_master_fd = -1;
+    }
+    lv_obj_del(obj);
+    win_terminal = NULL;
+    term_label = NULL;
+}
+
 /* ══════════════════════════════════════════════════════════════════════
  *  Taskbar button callbacks
  * ══════════════════════════════════════════════════════════════════════ */
@@ -126,6 +170,14 @@ static void btn_about_cb(lv_obj_t *obj, lv_event_t e)
     if (e != LV_EVENT_CLICKED) return;
     if (win_about) { on_about_close(win_about, LV_EVENT_CLOSE); }
     else create_about();
+}
+
+static void btn_terminal_cb(lv_obj_t *obj, lv_event_t e)
+{
+    (void)obj;
+    if (e != LV_EVENT_CLICKED) return;
+    if (win_terminal) { on_terminal_close(win_terminal, LV_EVENT_CLOSE); }
+    else create_terminal();
 }
 
 static void btn_quit_cb(lv_obj_t *obj, lv_event_t e)
@@ -546,6 +598,358 @@ static void create_about(void)
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ *  Terminal Emulator
+ * ══════════════════════════════════════════════════════════════════════ */
+
+static void term_clear(void)
+{
+    for (int r = 0; r < TERM_ROWS; r++)
+        memset(term_buf[r], ' ', TERM_COLS);
+    term_row = term_col = 0;
+    term_dirty = 1;
+}
+
+static void term_scroll_up(void)
+{
+    for (int r = 0; r < TERM_ROWS - 1; r++)
+        memcpy(term_buf[r], term_buf[r + 1], TERM_COLS);
+    memset(term_buf[TERM_ROWS - 1], ' ', TERM_COLS);
+    term_dirty = 1;
+}
+
+static void term_putchar(char c)
+{
+    switch (c) {
+    case '\r':
+        term_col = 0;
+        break;
+    case '\n':
+        term_col = 0;
+        term_row++;
+        if (term_row >= TERM_ROWS) {
+            term_scroll_up();
+            term_row = TERM_ROWS - 1;
+        }
+        break;
+    case '\b':
+        if (term_col > 0) term_col--;
+        break;
+    case '\t':
+        term_col = (term_col + 8) & ~7;
+        if (term_col >= TERM_COLS) term_col = TERM_COLS - 1;
+        break;
+    case '\033':
+        term_esc_state = 1;
+        term_esc_idx = 0;
+        break;
+    case '\a':   /* bell — ignore */
+        break;
+    case 0x7f:   /* DEL — treat as backspace-erase */
+        if (term_col > 0) {
+            term_col--;
+            term_buf[term_row][term_col] = ' ';
+        }
+        break;
+    default:
+        if ((unsigned char)c >= 32) {
+            term_buf[term_row][term_col] = c;
+            term_col++;
+            if (term_col >= TERM_COLS) {
+                term_col = 0;
+                term_row++;
+                if (term_row >= TERM_ROWS) {
+                    term_scroll_up();
+                    term_row = TERM_ROWS - 1;
+                }
+            }
+        }
+        break;
+    }
+    term_dirty = 1;
+}
+
+static void term_process_csi(void)
+{
+    int params[4] = {0, 0, 0, 0};
+    int nparam = 0;
+    char final_ch = term_esc_buf[term_esc_idx - 1];
+
+    /* Parse semicolon-separated numbers */
+    int val = 0;
+    int has_val = 0;
+    for (int i = 0; i < term_esc_idx - 1; i++) {
+        char ch = term_esc_buf[i];
+        if (ch >= '0' && ch <= '9') {
+            val = val * 10 + (ch - '0');
+            has_val = 1;
+        } else if (ch == ';') {
+            if (nparam < 4) params[nparam++] = val;
+            val = 0; has_val = 0;
+        }
+    }
+    if (has_val && nparam < 4) params[nparam++] = val;
+
+    switch (final_ch) {
+    case 'H': case 'f':  /* Cursor position */
+        term_row = (nparam > 0 && params[0] > 0) ? params[0] - 1 : 0;
+        term_col = (nparam > 1 && params[1] > 0) ? params[1] - 1 : 0;
+        if (term_row >= TERM_ROWS) term_row = TERM_ROWS - 1;
+        if (term_col >= TERM_COLS) term_col = TERM_COLS - 1;
+        break;
+    case 'A':  /* Cursor up */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          term_row -= n; if (term_row < 0) term_row = 0;
+        } break;
+    case 'B':  /* Cursor down */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          term_row += n; if (term_row >= TERM_ROWS) term_row = TERM_ROWS - 1;
+        } break;
+    case 'C':  /* Cursor forward */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          term_col += n; if (term_col >= TERM_COLS) term_col = TERM_COLS - 1;
+        } break;
+    case 'D':  /* Cursor back */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          term_col -= n; if (term_col < 0) term_col = 0;
+        } break;
+    case 'J':  /* Erase display */
+        { int mode = (nparam > 0) ? params[0] : 0;
+          if (mode == 2 || mode == 3) {
+              term_clear();
+          } else if (mode == 0) {
+              memset(&term_buf[term_row][term_col], ' ', TERM_COLS - term_col);
+              for (int r = term_row + 1; r < TERM_ROWS; r++)
+                  memset(term_buf[r], ' ', TERM_COLS);
+          } else if (mode == 1) {
+              for (int r = 0; r < term_row; r++)
+                  memset(term_buf[r], ' ', TERM_COLS);
+              memset(term_buf[term_row], ' ', term_col + 1);
+          }
+        } break;
+    case 'K':  /* Erase line */
+        { int mode = (nparam > 0) ? params[0] : 0;
+          if (mode == 0)
+              memset(&term_buf[term_row][term_col], ' ', TERM_COLS - term_col);
+          else if (mode == 1)
+              memset(term_buf[term_row], ' ', term_col + 1);
+          else if (mode == 2)
+              memset(term_buf[term_row], ' ', TERM_COLS);
+        } break;
+    case 'm':  /* SGR — ignore color/attribute codes */
+        break;
+    case 'G':  /* Cursor horizontal absolute */
+        term_col = (nparam > 0 && params[0] > 0) ? params[0] - 1 : 0;
+        if (term_col >= TERM_COLS) term_col = TERM_COLS - 1;
+        break;
+    case 'd':  /* Cursor vertical absolute */
+        term_row = (nparam > 0 && params[0] > 0) ? params[0] - 1 : 0;
+        if (term_row >= TERM_ROWS) term_row = TERM_ROWS - 1;
+        break;
+    case 'P':  /* Delete characters */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          int rem = TERM_COLS - term_col - n;
+          if (rem > 0)
+              memmove(&term_buf[term_row][term_col],
+                      &term_buf[term_row][term_col + n], rem);
+          memset(&term_buf[term_row][TERM_COLS - n], ' ', n);
+        } break;
+    case '@':  /* Insert characters */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          int rem = TERM_COLS - term_col - n;
+          if (rem > 0)
+              memmove(&term_buf[term_row][term_col + n],
+                      &term_buf[term_row][term_col], rem);
+          memset(&term_buf[term_row][term_col], ' ', n);
+        } break;
+    default:
+        break;
+    }
+    term_dirty = 1;
+}
+
+static void term_feed(const char *data, int len)
+{
+    for (int i = 0; i < len; i++) {
+        char c = data[i];
+
+        if (term_esc_state == 1) {
+            if (c == '[') {
+                term_esc_state = 2;
+                term_esc_idx = 0;
+            } else {
+                term_esc_state = 0;
+            }
+            continue;
+        }
+
+        if (term_esc_state == 2) {
+            if (term_esc_idx < TERM_ESC_MAX)
+                term_esc_buf[term_esc_idx++] = c;
+            if (c >= 0x40 && c <= 0x7E) {
+                term_process_csi();
+                term_esc_state = 0;
+            } else if (term_esc_idx >= TERM_ESC_MAX) {
+                term_esc_state = 0;
+            }
+            continue;
+        }
+
+        term_putchar(c);
+    }
+}
+
+static void term_refresh_label(void)
+{
+    if (!term_label || !term_dirty) return;
+    term_dirty = 0;
+
+    /* Build display string: rows separated by newlines */
+    char display[TERM_ROWS * (TERM_COLS + 1) + 1];
+    int pos = 0;
+    for (int r = 0; r < TERM_ROWS; r++) {
+        /* Find last non-space char in row */
+        int len = TERM_COLS;
+        while (len > 0 && term_buf[r][len - 1] == ' ') len--;
+        memcpy(&display[pos], term_buf[r], len);
+        pos += len;
+        if (r < TERM_ROWS - 1)
+            display[pos++] = '\n';
+    }
+    display[pos] = '\0';
+    lv_label_set_text(term_label, display);
+}
+
+static void term_kbd_cb(lv_kbd_event_t *ev, void *user_data)
+{
+    (void)user_data;
+    if (!ev->pressed || term_master_fd < 0) return;
+
+    uint8_t key = ev->keycode;
+
+    /* Special keys → escape sequences */
+    if (key >= LV_KEY_UP && key <= LV_KEY_DELETE) {
+        const char *seq = NULL;
+        switch (key) {
+        case LV_KEY_UP:     seq = "\033[A"; break;
+        case LV_KEY_DOWN:   seq = "\033[B"; break;
+        case LV_KEY_RIGHT:  seq = "\033[C"; break;
+        case LV_KEY_LEFT:   seq = "\033[D"; break;
+        case LV_KEY_HOME:   seq = "\033[H"; break;
+        case LV_KEY_END:    seq = "\033[F"; break;
+        case LV_KEY_DELETE: seq = "\033[3~"; break;
+        case LV_KEY_PGUP:   seq = "\033[5~"; break;
+        case LV_KEY_PGDN:   seq = "\033[6~"; break;
+        default: break;
+        }
+        if (seq) write(term_master_fd, seq, strlen(seq));
+        return;
+    }
+
+    if (key == 0) return;
+
+    /* Enter sends CR */
+    char c = (char)key;
+    if (c == '\n') c = '\r';
+
+    write(term_master_fd, &c, 1);
+}
+
+static void term_poll(void)
+{
+    if (term_master_fd < 0) return;
+
+    /* Read available data from PTY master (non-blocking) */
+    char buf[512];
+    for (;;) {
+        int n = read(term_master_fd, buf, sizeof(buf));
+        if (n <= 0) break;
+        term_feed(buf, n);
+    }
+    term_refresh_label();
+}
+
+static void create_terminal(void)
+{
+    /* Open PTY master */
+    int master = open("/dev/ptmx", O_RDWR | O_NOCTTY);
+    if (master < 0) return;
+
+    /* Get slave index */
+    unsigned int idx = 0;
+    if (ioctl(master, TIOCGPTN, &idx) < 0) {
+        close(master);
+        return;
+    }
+
+    /* Build slave path */
+    char pts_path[32];
+    snprintf(pts_path, sizeof(pts_path), "/dev/pts/%u", idx);
+
+    /* Set master non-blocking */
+    int fl = fcntl(master, F_GETFL, 0);
+    fcntl(master, F_SETFL, fl | O_NONBLOCK);
+
+    /* Fork shell process */
+    int pid = fork();
+    if (pid < 0) {
+        close(master);
+        return;
+    }
+
+    if (pid == 0) {
+        /* ── Child process ── */
+        close(master);
+        setsid();
+
+        int slave = open(pts_path, O_RDWR);
+        if (slave < 0) _exit(1);
+
+        /* Set terminal size */
+        struct winsize ws;
+        memset(&ws, 0, sizeof(ws));
+        ws.ws_row = TERM_ROWS;
+        ws.ws_col = TERM_COLS;
+        ioctl(slave, TIOCSWINSZ, &ws);
+
+        dup2(slave, 0);
+        dup2(slave, 1);
+        dup2(slave, 2);
+        if (slave > 2) close(slave);
+
+        char *argv[] = { "sh", NULL };
+        char *envp[] = { "TERM=dumb", "HOME=/", "PATH=/bin:/usr/bin", NULL };
+        execve("/bin/sh", argv, envp);
+        _exit(1);
+    }
+
+    /* ── Parent process ── */
+    term_master_fd = master;
+    term_shell_pid = pid;
+    term_clear();
+
+    /* Create window */
+    int16_t win_w = (int16_t)(TERM_COLS * LV_FONT_WIDTH + 16);
+    int16_t win_h = (int16_t)(TERM_ROWS * LV_FONT_HEIGHT + LV_WIN_TITLE_H + 8);
+
+    win_terminal = lv_win_create(lv_scr_act());
+    lv_win_set_title(win_terminal, "Terminal");
+    lv_obj_set_pos(win_terminal, 40, 20);
+    lv_obj_set_size(win_terminal, win_w, win_h);
+    lv_obj_add_event_cb(win_terminal, on_terminal_close, LV_EVENT_CLOSE, NULL);
+
+    lv_obj_t *c = lv_win_get_content(win_terminal);
+    lv_obj_set_style_bg_color(c, lv_color_make(0, 0, 0));
+
+    term_label = lv_label_create(c);
+    lv_obj_set_pos(term_label, 0, 0);
+    lv_obj_set_style_text_color(term_label, lv_color_make(192, 192, 192));
+    lv_label_set_text(term_label, "");
+
+    /* Register keyboard callback for terminal input */
+    lv_indev_set_kbd_callback(term_kbd_cb, NULL);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  *  Main — Desktop setup
  * ══════════════════════════════════════════════════════════════════════ */
 
@@ -615,6 +1019,14 @@ int main(void)
     lv_obj_add_event_cb(b, btn_about_cb, LV_EVENT_CLICKED, NULL);
     bx += 71;
 
+    b = lv_btn_create(taskbar);
+    lv_btn_set_text(b, "Term");
+    lv_obj_set_pos(b, bx, 0);
+    lv_obj_set_size(b, 60, 28);
+    lv_obj_set_style_bg_color(b, lv_color_make(40, 100, 50));
+    lv_obj_add_event_cb(b, btn_terminal_cb, LV_EVENT_CLICKED, NULL);
+    bx += 66;
+
     /* Quit button (red, right side) */
     lv_obj_t *quit = lv_btn_create(taskbar);
     lv_btn_set_text(quit, "Quit");
@@ -633,6 +1045,7 @@ int main(void)
 
     while (g_running) {
         lv_timer_handler();
+        term_poll();
         usleep(16000);  /* ~60 fps */
     }
 

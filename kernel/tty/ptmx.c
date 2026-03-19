@@ -36,6 +36,7 @@
 #include "vfs/file.h"
 #include "vfs/poll.h"
 #include "vfs/pipe.h"
+#include "vfs/fcntl.h"
 #include "tty/tty.h"
 #include "tty/termios.h"
 #include "devtmpfs.h"
@@ -244,6 +245,19 @@ static ssize_t ptmx_fops_read(struct vfs_file *file, char *buf,
     struct pty_pair *pair = (struct pty_pair *)file->private_data;
     if (pair == NULL || pair->slave == NULL)
         return -ENXIO;
+
+    /* Honour O_NONBLOCK on the master fd: temporarily set the pipe's
+     * non-blocking read flag so pipe_read returns -EAGAIN instead of
+     * sleeping when no data is available. */
+    struct pipe *outp = pair->slave->output_pipe;
+    if (outp && (file->f_flags & O_NONBLOCK)) {
+        int old = pipe_get_flags(outp);
+        pipe_set_flags(outp, old | (1 << PIPE_FLAGS_NONBLOCK_RD));
+        ssize_t ret = pty_master_read(pair->slave, buf, count, user);
+        pipe_set_flags(outp, old);
+        return ret;
+    }
+
     return pty_master_read(pair->slave, buf, count, user);
 }
 

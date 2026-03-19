@@ -239,6 +239,11 @@ static int indev_init(void)
     g_indev.mouse_fd = open("/dev/mouse", O_RDONLY | O_NONBLOCK);
     if (g_indev.mouse_fd < 0)
         g_indev.mouse_fd = -1;
+    g_indev.kbd_fd = open("/dev/kbd", O_RDONLY | O_NONBLOCK);
+    if (g_indev.kbd_fd < 0)
+        g_indev.kbd_fd = -1;
+    g_indev.kbd_cb = NULL;
+    g_indev.kbd_cb_data = NULL;
     /* Start cursor in center of screen */
     g_indev.x = (int16_t)(g_disp.width / 2);
     g_indev.y = (int16_t)(g_disp.height / 2);
@@ -268,6 +273,23 @@ static void indev_read(void)
 
         g_indev.buttons = ev.buttons;
     }
+}
+
+static void indev_read_kbd(void)
+{
+    if (g_indev.kbd_fd < 0 || !g_indev.kbd_cb)
+        return;
+
+    lv_kbd_event_t ev;
+    while (read(g_indev.kbd_fd, &ev, sizeof(ev)) == sizeof(ev)) {
+        g_indev.kbd_cb(&ev, g_indev.kbd_cb_data);
+    }
+}
+
+void lv_indev_set_kbd_callback(lv_kbd_cb_t cb, void *user_data)
+{
+    g_indev.kbd_cb = cb;
+    g_indev.kbd_cb_data = user_data;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -1014,6 +1036,7 @@ int lv_timer_handler(void)
     int prev_btn = g_indev.buttons & 1;
     int16_t prev_x = g_indev.x, prev_y = g_indev.y;
     indev_read();
+    indev_read_kbd();
     int cur_btn = g_indev.buttons & 1;
 
     /* 2. Hit test & dispatch events */
