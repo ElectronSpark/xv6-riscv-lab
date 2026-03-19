@@ -952,12 +952,68 @@ static void settings_reset_cb(lv_obj_t *obj, lv_event_t e)
     settings_color_cb(NULL, LV_EVENT_VALUE_CHANGED);
 }
 
+/* ── Resolution change ───────────────────────────────────────────── */
+#define FBIOPUT_VSCREENINFO  0x4601
+struct resolution_opt { uint32_t w; uint32_t h; };
+static const struct resolution_opt res_options[] = {
+    {  640,  480 },
+    {  800,  600 },
+    { 1024,  768 },
+    { 1280,  720 },
+    { 1280, 1024 },
+    { 1440,  900 },
+    { 1600, 1200 },
+    { 1920, 1080 },
+};
+#define NUM_RES_OPTIONS (int)(sizeof(res_options)/sizeof(res_options[0]))
+
+static lv_obj_t *settings_res_lbl;
+
+static void settings_res_cb(lv_obj_t *obj, lv_event_t e)
+{
+    if (e != LV_EVENT_CLICKED) return;
+    int idx = (int)(intptr_t)obj->user_data;
+    if (idx < 0 || idx >= NUM_RES_OPTIONS) return;
+
+    uint32_t nw = res_options[idx].w;
+    uint32_t nh = res_options[idx].h;
+
+    /* Check if this is already the current resolution */
+    lv_disp_t *d = lv_disp_get();
+    if (d->width == nw && d->height == nh)
+        return;
+
+    /* Apply via ioctl */
+    int fd = open("/dev/fb0", O_RDWR);
+    if (fd < 0) return;
+
+    struct { uint32_t xres; uint32_t yres; uint32_t bpp; uint32_t pitch; } req;
+    req.xres = nw;
+    req.yres = nh;
+    req.bpp = 32;
+    req.pitch = 0;
+    if (ioctl(fd, FBIOPUT_VSCREENINFO, &req) < 0) {
+        close(fd);
+        if (settings_res_lbl)
+            lv_label_set_text(settings_res_lbl, "Failed to set resolution");
+        return;
+    }
+    close(fd);
+
+    /* Re-exec desktop to reinitialize GUI at new resolution */
+    lv_deinit();
+    char *argv[] = { "desktop", "--skip-login", NULL };
+    char *envp[] = { "TERM=dumb", "HOME=/", "PATH=/bin:/usr/bin", NULL };
+    execve("/bin/desktop", argv, envp);
+    _exit(1);
+}
+
 static void create_settings(void)
 {
     win_settings = lv_win_create(lv_scr_act());
     lv_win_set_title(win_settings, "Settings");
     lv_obj_set_pos(win_settings, 200, 100);
-    lv_obj_set_size(win_settings, 360, 300);
+    lv_obj_set_size(win_settings, 360, 480);
     lv_obj_add_event_cb(win_settings, on_settings_close, LV_EVENT_CLOSE, NULL);
 
     lv_obj_t *c = lv_win_get_content(win_settings);
@@ -1028,6 +1084,52 @@ static void create_settings(void)
     lv_obj_set_size(reset, 140, 32);
     lv_obj_set_style_bg_color(reset, lv_color_make(100, 100, 110));
     lv_obj_add_event_cb(reset, settings_reset_cb, LV_EVENT_CLICKED, NULL);
+    y += 44;
+
+    /* ── Display Resolution ───────────────────────────────────── */
+    l = lv_label_create(c);
+    lv_label_set_text(l, "Display Resolution");
+    lv_obj_set_style_text_color(l, lv_color_make(0, 160, 255));
+    lv_obj_set_pos(l, 0, y); y += 24;
+
+    settings_res_lbl = lv_label_create(c);
+    {
+        lv_disp_t *d = lv_disp_get();
+        char rbuf[48];
+        snprintf(rbuf, sizeof(rbuf), "Current: %dx%d", d->width, d->height);
+        lv_label_set_text(settings_res_lbl, rbuf);
+    }
+    lv_obj_set_pos(settings_res_lbl, 0, y); y += 24;
+
+    /* Resolution option buttons — 2 columns */
+    {
+        int col0_x = 0, col1_x = 170;
+        int bw = 150, bh = 28;
+        lv_disp_t *d = lv_disp_get();
+        for (int i = 0; i < NUM_RES_OPTIONS; i++) {
+            int col = i % 2;
+            int row = i / 2;
+            int bx = col ? col1_x : col0_x;
+            int by = y + row * (bh + 4);
+            char txt[20];
+            snprintf(txt, sizeof(txt), "%dx%d",
+                     res_options[i].w, res_options[i].h);
+            lv_obj_t *rb = lv_btn_create(c);
+            lv_btn_set_text(rb, txt);
+            lv_obj_set_pos(rb, (int16_t)bx, (int16_t)by);
+            lv_obj_set_size(rb, (int16_t)bw, (int16_t)bh);
+            lv_obj_add_event_cb(rb, settings_res_cb, LV_EVENT_CLICKED,
+                                (void*)(intptr_t)i);
+            /* Highlight current resolution */
+            if (d->width == res_options[i].w &&
+                d->height == res_options[i].h)
+                lv_obj_set_style_bg_color(rb, lv_color_make(40, 120, 200));
+            else
+                lv_obj_set_style_bg_color(rb, lv_color_make(80, 80, 90));
+        }
+        y += ((NUM_RES_OPTIONS + 1) / 2) * (bh + 4);
+    }
+
     tb_add_dyn_btn(&win_settings, "Cfg");
 }
 
@@ -2628,10 +2730,16 @@ static void create_terminal(void)
  *  Main — Desktop setup
  * ══════════════════════════════════════════════════════════════════════ */
 
-int main(void)
+int main(int argc, char *argv[])
 {
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
+
+    int skip_login = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--skip-login") == 0)
+            skip_login = 1;
+    }
 
     if (lv_init() < 0)
         return 1;
@@ -2642,6 +2750,7 @@ int main(void)
     int16_t scr_h = (int16_t)d->height;
 
     /* ── Login screen ──────────────────────────────────────────── */
+    if (!skip_login)
     {
         lv_obj_set_style_bg_color(scr, lv_color_make(18, 32, 52));
         lv_refr_now();
@@ -2962,9 +3071,9 @@ int main(void)
     lv_deinit();
 
     /* Re-exec the desktop to restart the session */
-    char *argv[] = { "desktop", NULL };
-    char *envp[] = { "TERM=dumb", "HOME=/", "PATH=/bin:/usr/bin", NULL };
-    execve("/bin/desktop", argv, envp);
+    char *re_argv[] = { "desktop", NULL };
+    char *re_envp[] = { "TERM=dumb", "HOME=/", "PATH=/bin:/usr/bin", NULL };
+    execve("/bin/desktop", re_argv, re_envp);
 
     /* If execve fails, just exit */
     return 0;

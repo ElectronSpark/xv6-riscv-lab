@@ -12,6 +12,7 @@
 
 /* ── ioctl commands (Linux fbdev compatible subset) ── */
 #define FBIOGET_VSCREENINFO  0x4600
+#define FBIOPUT_VSCREENINFO  0x4601   /* set resolution (WxH) at runtime */
 #define FBIOGET_FSCREENINFO  0x4602
 
 /* ── GPU acceleration ioctl commands ── */

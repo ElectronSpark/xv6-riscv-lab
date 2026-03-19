@@ -22,6 +22,7 @@
 #include <mm/vm.h>
 #include <printf.h>
 #include <lock/spinlock.h>
+#include <cmdline.h>
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -123,8 +124,32 @@ void fb_pci_init(uint8 bus, uint8 dev, uint8 func)
     uint16 id = bga_read_reg(VBE_DISPI_INDEX_ID);
     printf("FB: BGA ID = 0x%x\n", id);
 
-    /* Set default video mode */
-    bga_set_mode(FB_DEFAULT_WIDTH, FB_DEFAULT_HEIGHT, FB_DEFAULT_BPP);
+    /* Set video mode — check cmdline "video=WxH" first, else defaults */
+    uint32 width = FB_DEFAULT_WIDTH;
+    uint32 height = FB_DEFAULT_HEIGHT;
+    {
+        char vbuf[32];
+        if (cmdline_get_param("video", vbuf, sizeof(vbuf)) == 0) {
+            /* Parse "WIDTHxHEIGHT" */
+            uint32 w = 0, h = 0;
+            const char *p = vbuf;
+            while (*p >= '0' && *p <= '9')
+                w = w * 10 + (*p++ - '0');
+            if (*p == 'x' || *p == 'X') {
+                p++;
+                while (*p >= '0' && *p <= '9')
+                    h = h * 10 + (*p++ - '0');
+            }
+            if (w >= 640 && w <= 2560 && h >= 480 && h <= 1600) {
+                width = w;
+                height = h;
+                printf("FB: using cmdline resolution %dx%d\n", w, h);
+            } else {
+                printf("FB: ignoring invalid video=%s, using default\n", vbuf);
+            }
+        }
+    }
+    bga_set_mode(width, height, FB_DEFAULT_BPP);
 
     printf("FB: mode set to %dx%dx%d (pitch=%d, size=%d)\n",
            fb_state.xres, fb_state.yres, fb_state.bpp,
@@ -407,6 +432,30 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         gpu_copy_rect_locked(cmd.src_x, cmd.src_y,
                              cmd.dst_x, cmd.dst_y, w, h);
         spin_unlock(&fb_state.lock);
+        return 0;
+    }
+
+    case FBIOPUT_VSCREENINFO: {
+        struct fb_var_screeninfo req;
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+
+        /* Validate requested resolution */
+        if (req.xres < 640 || req.xres > 2560 ||
+            req.yres < 480 || req.yres > 1600)
+            return -EINVAL;
+
+        spin_lock(&fb_state.lock);
+        bga_set_mode(req.xres, req.yres, FB_DEFAULT_BPP);
+
+        /* Clear framebuffer to black after mode change */
+        volatile uint32 *pixels = (volatile uint32 *)fb_state.fb_virt;
+        uint32 npx = fb_state.xres * fb_state.yres;
+        for (uint32 i = 0; i < npx; i++)
+            pixels[i] = 0x00000000;
+        spin_unlock(&fb_state.lock);
+
+        printf("FB: resolution changed to %dx%d\n", fb_state.xres, fb_state.yres);
         return 0;
     }
 
