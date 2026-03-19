@@ -65,9 +65,12 @@ if(NOT DEFINED MEMORY)
 endif()
 
 # x86 PCI devices: virtio-blk-pci disks + e1000 NIC
+# iothreads move virtio-blk I/O processing off QEMU's main loop into
+# dedicated host threads, enabling true parallel queue processing.
 set(X86_DISK_OPTS
-    -drive file=${CMAKE_BINARY_DIR}/fs.img,if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0,num-queues=${CPUS}
-    -drive file=${CMAKE_BINARY_DIR}/xv6fs_test.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1,num-queues=${CPUS}
+    -object iothread,id=iot0 -object iothread,id=iot1
+    -drive file=${CMAKE_BINARY_DIR}/fs.img,if=none,format=raw,id=x0,aio=native,cache.direct=on -device virtio-blk-pci,drive=x0,num-queues=${CPUS},iothread=iot0
+    -drive file=${CMAKE_BINARY_DIR}/xv6fs_test.img,if=none,format=raw,id=x1,aio=native,cache.direct=on -device virtio-blk-pci,drive=x1,num-queues=${CPUS},iothread=iot1
 )
 set(X86_NET_OPTS -netdev user,id=net0,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443,hostfwd=tcp::2222-:22 -object filter-dump,id=net0,netdev=net0,file=packets.pcap -device e1000,netdev=net0)
 set(X86_VGA_OPTS -vga std)

@@ -140,6 +140,10 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
         /* Track which pages we submitted I/O for (bitmask via array) */
         uint8 did_io[XV6FS_READ_BATCH] = {0};
 
+        /* Collect non-uptodate folios for merged cross-folio I/O. */
+        folio_t *io_folios[XV6FS_READ_BATCH];
+        int n_io_folios = 0;
+
         for (int pi = 0; pi < n_pages; pi++) {
             struct pcache_node *pcn = pages[pi]->pcache.pcache_node;
             if (pcn->uptodate)
@@ -152,11 +156,16 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
             /* Mark I/O in progress so concurrent readers wait */
             pcn->io_in_progress = 1;
             did_io[pi] = 1;
-
-            folio_t *folio = page_folio(pages[pi]);
-            xv6fs_submit_folio_reads(ip, xv6_sb, folio,
-                                     bios, XV6FS_READ_MAX_BIOS, &n_bios);
+            io_folios[n_io_folios++] = page_folio(pages[pi]);
         }
+
+        /* Submit merged bios — contiguous folios share one bio with
+         * scatter-gather, reducing virtio request count from N to ~1. */
+        if (n_io_folios > 0)
+            xv6fs_submit_merged_folio_reads(ip, xv6_sb,
+                                            io_folios, n_io_folios,
+                                            bios, XV6FS_READ_MAX_BIOS,
+                                            &n_bios);
 
         /* Kick the device once after all batch bios are queued */
         if (n_bios > 0)

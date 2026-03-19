@@ -33,7 +33,6 @@
 #include "freelist.h"
 #include "dev/fdt.h"
 #include "arch/vm.h"
-#include "smp/atomic.h"
 
 // the address of virtio mmio register r for disk n (MMIO transport only).
 #define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))
@@ -48,6 +47,8 @@ uint64 __virtio_irqno[N_VIRTIO] = {1, 2, 3};
 
 static void virtio_disk_rw(int diskno, int qi, struct bio *bio, uint64 sector,
                            void *buf, size_t size, int write, bool notify);
+static void virtio_disk_rw_sg(int diskno, int qi, struct bio *bio,
+                              uint64 sector, int nsg, int write, bool notify);
 static void virtio_disk_intr(int irq, void *data, device_t *dev);
 static int __virtio_disk_flush(blkdev_t *blkdev);
 
@@ -98,6 +99,11 @@ STATIC struct disk {
     // Number of active virtqueues (1 when MQ not negotiated)
     int num_queues;
 
+    // Round-robin counter for distributing bios across queues.
+    // Enables multi-queue parallelism for single-threaded sequential reads
+    // (batched bios from xv6fs_file_read spread across all queues).
+    uint32 rr_qi;
+
     // Per-queue state (only vqs[0..num_queues-1] are initialized)
     struct virtqueue vqs[MAX_VIRTQUEUES];
 
@@ -136,54 +142,47 @@ static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     int diskno = (blkdev->dev.minor - 1) / GENDISK_MINOR_STRIDE;
     struct disk *disk = &disks[diskno];
 
-    int nq = disk->num_queues;
+    /* Round-robin queue selection: each bio gets the next queue, so batched
+     * submissions (e.g. xv6fs_file_read's 32-folio batch) spread across all
+     * queues.  This enables QEMU's per-queue AIO threads to process I/O in
+     * parallel even from a single reader thread. */
+    int qi = __atomic_fetch_add(&disk->rr_qi, 1, __ATOMIC_RELAXED)
+             % disk->num_queues;
 
-    /* Pin to current CPU while computing the starting queue index and
-     * setting up the bio's in-flight state.  We pop_off before the I/O
-     * loop because virtio_disk_rw may sleep (tq_wait on descriptor
-     * exhaustion) and push_off/pop_off nesting is per-CPU — sleeping
-     * with noff > 0 corrupts the counter for whatever thread runs next.
-     * Each virtio_disk_rw call acquires its own spin_lock (push_off)
-     * for the actual ring manipulation. */
-    push_off();
-    int start_qi = cpuid() % nq;
+    /* Count active segments. */
     uint16 segs = 0;
-
     bio_start_io_acct(bio);
     for (int16 i = 0; i < bio->vec_length; i++) {
         if (bio->bvecs[i].len != 0)
             segs++;
     }
-    bio->inflight_segs = segs;
-    bio->completed_segs = 0;
-    pop_off();
 
-    /* Spread segments round-robin across all queues so the device can
-     * process them in parallel.  Track which queues received work so
-     * we can notify exactly those queues after the loop. */
-    uint8 queues_used = 0; /* bitmask, MAX_VIRTQUEUES <= 8 */
-    uint16 cur_seg = 0;
-    bio_for_each_segment(&bvec, bio, &iter) {
-        int qi = (start_qi + cur_seg) % nq;
-        cur_seg++;
-        queues_used |= (1u << qi);
-        uint64 sector = iter.blkno;
-        page_t *page = bvec.bv_page;
-        assert(page != NULL, "virtio_disk_submit_bio: page is NULL");
-        void *pa = (void *)__page_to_pa(page);
-        assert(pa != NULL,
-               "virtio_disk_submit_bio: page has no physical address");
-        /* Defer notification — we batch-notify after the loop. */
-        virtio_disk_rw(diskno, qi, bio, sector, pa + bvec.offset, bvec.len,
-                       bio_dir_write(bio), false);
-    }
-
-    /* Notify all queues that received segments, unless the caller will
-     * kick the device separately (batch mode). */
-    if (!bio->batch) {
-        for (int qi = 0; qi < nq; qi++) {
-            if (queues_used & (1u << qi))
-                __virtio_disk_notify(disk, diskno, qi);
+    if (segs > 1) {
+        /* Multi-segment bio: use scatter-gather — one virtio request for
+         * all segments.  header + N data descriptors + status = N+2 descs,
+         * one avail-ring entry, one ISR completion. */
+        bio->inflight_segs = 1;
+        bio->completed_segs = 0;
+        bool notify = !bio->batch;
+        virtio_disk_rw_sg(diskno, qi, bio, bio->blkno, segs,
+                          bio_dir_write(bio), notify);
+    } else {
+        /* Single-segment bio: use the simple 3-descriptor path. */
+        bio->inflight_segs = segs;
+        bio->completed_segs = 0;
+        uint16 cur_seg = 0;
+        bio_for_each_segment(&bvec, bio, &iter) {
+            cur_seg++;
+            uint64 sector = iter.blkno;
+            page_t *page = bvec.bv_page;
+            assert(page != NULL, "virtio_disk_submit_bio: page is NULL");
+            void *pa = (void *)__page_to_pa(page);
+            assert(pa != NULL,
+                   "virtio_disk_submit_bio: page has no physical address");
+            bool notify = (cur_seg == segs) && !bio->batch;
+            virtio_disk_rw(diskno, qi, bio, sector,
+                           pa + bvec.offset, bvec.len,
+                           bio_dir_write(bio), notify);
         }
     }
 
@@ -709,6 +708,23 @@ STATIC int alloc3_desc(struct virtqueue *vq, int *idx) {
 }
 
 /*
+ * Allocate @n descriptors (they need not be contiguous).
+ * Returns 0 on success, -1 if not enough free descriptors.
+ */
+STATIC int alloc_n_desc(struct virtqueue *vq, int *idx, int n) {
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    for (int i = 0; i < n; i++) {
+        idx[i] = alloc_desc(vq);
+        if (idx[i] < 0) {
+            for (int j = 0; j < i; j++)
+                free_desc(vq, idx[j]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
  * Allocate two descriptors (for flush: header + status, no data).
  */
 STATIC int alloc2_desc(struct virtqueue *vq, int *idx) {
@@ -900,6 +916,94 @@ static void virtio_disk_rw(int diskno, int qi, struct bio *bio, uint64 sector,
     spin_unlock(&vq->vq_lock);
 }
 
+/*
+ * Scatter-gather virtio-blk request.
+ *
+ * Submit a single virtio-blk request whose data is described by @nsg
+ * scatter-gather entries taken from @bio's bio_vecs.  The descriptor chain
+ * is: header → data[0] → data[1] → … → data[nsg-1] → status.
+ *
+ * This uses (nsg + 2) descriptors and only ONE avail-ring entry, so the
+ * device completes the entire request atomically — one ISR completion
+ * instead of nsg separate ones.  Combined with merged multi-folio bios,
+ * this dramatically reduces per-batch overhead.
+ */
+static void virtio_disk_rw_sg(int diskno, int qi, struct bio *bio,
+                               uint64 sector, int nsg, int write,
+                               bool notify) {
+    struct disk *disk = &disks[diskno];
+    struct virtqueue *vq = &disk->vqs[qi];
+    int ndesc = 2 + nsg; /* header + nsg data + status */
+
+    spin_lock(&vq->vq_lock);
+
+    /* Allocate all descriptors for the SG chain. */
+    int idx[ndesc]; /* VLA, typically ≤ 34 ints = 136 bytes */
+    while (1) {
+        if (alloc_n_desc(vq, idx, ndesc) == 0)
+            break;
+        __virtio_disk_notify(disk, diskno, qi);
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
+        tq_wait(&vq->desc_wait_queue, &vq->vq_lock, NULL);
+    }
+
+    /* Descriptor [0]: header (device-readable). */
+    struct virtio_blk_req *hdr = &vq->ops[idx[0]];
+    hdr->type = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+    hdr->reserved = 0;
+    hdr->sector = sector;
+
+    vq->desc[idx[0]].addr = VA2PA((uint64)hdr);
+    vq->desc[idx[0]].len = sizeof(struct virtio_blk_req);
+    vq->desc[idx[0]].flags = VRING_DESC_F_NEXT;
+    vq->desc[idx[0]].next = idx[1];
+
+    /* Descriptors [1..nsg]: data buffers from bio_vecs. */
+    uint16 data_flags = write ? 0 : VRING_DESC_F_WRITE;
+    struct bio_vec bvec;
+    struct bio_iter iter;
+    int di = 0;
+    bio_for_each_segment(&bvec, bio, &iter) {
+        page_t *page = bvec.bv_page;
+        assert(page != NULL, "virtio_disk_rw_sg: page is NULL");
+        void *pa = (void *)__page_to_pa(page);
+        assert(pa != NULL, "virtio_disk_rw_sg: page has no PA");
+
+        vq->desc[idx[1 + di]].addr = (uint64)(pa + bvec.offset);
+        vq->desc[idx[1 + di]].len = bvec.len;
+        vq->desc[idx[1 + di]].flags = data_flags | VRING_DESC_F_NEXT;
+        vq->desc[idx[1 + di]].next = idx[2 + di]; /* next data or status */
+        di++;
+    }
+
+    /* Descriptor [nsg+1]: status (device-writable). */
+    int si = ndesc - 1;
+    vq->info[idx[0]].status = 0xff;
+    vq->desc[idx[si]].addr = VA2PA((uint64)&vq->info[idx[0]].status);
+    vq->desc[idx[si]].len = 1;
+    vq->desc[idx[si]].flags = VRING_DESC_F_WRITE;
+    vq->desc[idx[si]].next = 0;
+
+    /* Completion tracking: one chain → one completion. */
+    bio->private_data = NULL;
+    vq->info[idx[0]].bio = bio;
+    vq->info[idx[0]].flush_completion = NULL;
+    vq->info[idx[0]].done = false;
+
+    /* Submit to available ring. */
+    vq->avail->ring[vq->avail->idx % NUM] = idx[0];
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    vq->avail->idx += 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    assert(!intr_get(), "virtio_disk_rw_sg: interrupts enabled");
+
+    if (notify)
+        __virtio_disk_notify(disk, diskno, qi);
+
+    spin_unlock(&vq->vq_lock);
+}
+
 static void virtio_disk_intr(int irq, void *data, device_t *dev) {
     uint64 diskno = (uint64)data;
     struct disk *disk = &disks[diskno];
@@ -949,13 +1053,8 @@ static void virtio_disk_intr(int irq, void *data, device_t *dev) {
                 if (bio != NULL) {
                     if (status != 0)
                         bio->error = -EIO;
-                    /* Segments may be spread across multiple queues,
-                     * so completions can race under different vq_locks.
-                     * Use atomic increment; only the thread that
-                     * pushes the count to inflight_segs calls
-                     * bio_complete. */
-                    uint16 prev = atomic_add(&bio->completed_segs, 1);
-                    if (prev + 1 >= bio->inflight_segs)
+                    bio->completed_segs++;
+                    if (bio->completed_segs >= bio->inflight_segs)
                         bio_complete(bio);
                 }
             }

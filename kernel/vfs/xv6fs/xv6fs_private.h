@@ -167,6 +167,13 @@ int xv6fs_submit_folio_reads(struct xv6fs_inode *ip,
                              folio_t *folio, struct bio **bios, int max_bios,
                              int *n_submitted);
 
+// Merged batch I/O: submit reads for multiple contiguous folios as one bio
+int xv6fs_submit_merged_folio_reads(struct xv6fs_inode *ip,
+                                    struct xv6fs_superblock *xv6_sb,
+                                    folio_t **folios, int n_folios,
+                                    struct bio **bios, int max_bios,
+                                    int *n_submitted);
+
 // Helper functions
 void xv6fs_init(void);
 void xv6fs_mount_root(void);
