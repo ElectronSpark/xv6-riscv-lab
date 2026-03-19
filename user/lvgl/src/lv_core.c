@@ -59,6 +59,7 @@ static int        g_initialized;
 static lv_obj_t   g_obj_pool[LV_OBJ_POOL_SIZE];
 static uint8_t    g_obj_used[LV_OBJ_POOL_SIZE];
 static lv_obj_t  *g_pressed_obj = NULL;
+static uint32_t   g_frame_count = 0;
 
 /* Mouse cursor (simple 12×12 arrow drawn on top of everything) */
 static const uint8_t cursor_bmp[12][12] = {
@@ -109,14 +110,11 @@ static void obj_free(lv_obj_t *obj)
 static int disp_init(void)
 {
     g_disp.fb_fd = open("/dev/fb0", O_RDWR);
-    if (g_disp.fb_fd < 0) {
-        fprintf(stderr, "lvgl: cannot open /dev/fb0\n");
+    if (g_disp.fb_fd < 0)
         return -1;
-    }
 
     struct fb_var_screeninfo vinfo;
     if (ioctl(g_disp.fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0) {
-        fprintf(stderr, "lvgl: FBIOGET_VSCREENINFO failed\n");
         close(g_disp.fb_fd);
         return -1;
     }
@@ -130,24 +128,106 @@ static int disp_init(void)
     /* Allocate local rendering buffer */
     g_disp.framebuf = (uint32_t *)malloc(g_disp.fb_size);
     if (!g_disp.framebuf) {
-        fprintf(stderr, "lvgl: cannot allocate framebuffer (%u bytes)\n",
-                g_disp.fb_size);
         close(g_disp.fb_fd);
         return -1;
     }
     memset(g_disp.framebuf, 0, g_disp.fb_size);
 
-    fprintf(stderr, "lvgl: display %ux%ux%u (pitch=%u)\n",
-            g_disp.width, g_disp.height, g_disp.bpp, g_disp.pitch);
+    /* Probe GPU acceleration: try a 1x1 fill rect ioctl */
+    struct fb_gpu_fill probe = { .x = 0, .y = 0, .w = 0, .h = 0, .color = 0 };
+    g_disp.gpu_accel = (ioctl(g_disp.fb_fd, FB_GPU_FILL_RECT, &probe) == 0);
+
     return 0;
 }
 
 static void disp_flush(void)
 {
-    /* Write entire framebuffer in one go.
-     * The kernel /dev/fb0 write copies to MMIO video memory. */
-    lseek(g_disp.fb_fd, 0, SEEK_SET);
-    write(g_disp.fb_fd, g_disp.framebuf, g_disp.fb_size);
+    if (g_disp.gpu_accel) {
+        /* Use GPU blit to send the entire framebuffer */
+        struct fb_gpu_blit cmd;
+        cmd.x = 0;
+        cmd.y = 0;
+        cmd.w = g_disp.width;
+        cmd.h = g_disp.height;
+        cmd.src_pitch = g_disp.width * 4;
+        cmd.pixels = (uint64_t)(uintptr_t)g_disp.framebuf;
+        ioctl(g_disp.fb_fd, FB_GPU_BLIT, &cmd);
+    } else {
+        write(g_disp.fb_fd, g_disp.framebuf, g_disp.fb_size);
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  GPU acceleration API
+ * ══════════════════════════════════════════════════════════════════════ */
+
+static inline uint32_t color_to_pixel(lv_color_t c)
+{
+    return ((uint32_t)c.alpha << 24) | ((uint32_t)c.red << 16) |
+           ((uint32_t)c.green << 8)  | (uint32_t)c.blue;
+}
+
+int lv_gpu_available(void)
+{
+    return g_disp.gpu_accel;
+}
+
+int lv_gpu_fill_rect(int x, int y, int w, int h, lv_color_t color)
+{
+    if (!g_disp.gpu_accel)
+        return -1;
+    struct fb_gpu_fill cmd;
+    cmd.x = (uint32_t)x;
+    cmd.y = (uint32_t)y;
+    cmd.w = (uint32_t)w;
+    cmd.h = (uint32_t)h;
+    cmd.color = color_to_pixel(color);
+    return ioctl(g_disp.fb_fd, FB_GPU_FILL_RECT, &cmd);
+}
+
+int lv_gpu_blit(int x, int y, int w, int h,
+                const uint32_t *pixels, int src_pitch)
+{
+    if (!g_disp.gpu_accel)
+        return -1;
+    struct fb_gpu_blit cmd;
+    cmd.x = (uint32_t)x;
+    cmd.y = (uint32_t)y;
+    cmd.w = (uint32_t)w;
+    cmd.h = (uint32_t)h;
+    cmd.src_pitch = (uint32_t)src_pitch;
+    cmd.pixels = (uint64_t)(uintptr_t)pixels;
+    return ioctl(g_disp.fb_fd, FB_GPU_BLIT, &cmd);
+}
+
+int lv_gpu_copy_rect(int sx, int sy, int dx, int dy, int w, int h)
+{
+    if (!g_disp.gpu_accel)
+        return -1;
+    struct fb_gpu_copy cmd;
+    cmd.src_x = (uint32_t)sx;
+    cmd.src_y = (uint32_t)sy;
+    cmd.dst_x = (uint32_t)dx;
+    cmd.dst_y = (uint32_t)dy;
+    cmd.w = (uint32_t)w;
+    cmd.h = (uint32_t)h;
+    return ioctl(g_disp.fb_fd, FB_GPU_COPY_RECT, &cmd);
+}
+
+int lv_gpu_flush_area(int x, int y, int w, int h)
+{
+    if (!g_disp.gpu_accel)
+        return -1;
+    /* Blit the dirty region from the local framebuffer to screen */
+    uint32_t *src = g_disp.framebuf + (uint32_t)y * g_disp.width + (uint32_t)x;
+    struct fb_gpu_blit cmd;
+    cmd.x = (uint32_t)x;
+    cmd.y = (uint32_t)y;
+    cmd.w = (uint32_t)w;
+    cmd.h = (uint32_t)h;
+    cmd.src_pitch = g_disp.width * 4;
+    cmd.pixels = (uint64_t)(uintptr_t)src;
+    return ioctl(g_disp.fb_fd, FB_GPU_BLIT, &cmd);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -157,10 +237,8 @@ static void disp_flush(void)
 static int indev_init(void)
 {
     g_indev.mouse_fd = open("/dev/mouse", O_RDONLY | O_NONBLOCK);
-    if (g_indev.mouse_fd < 0) {
-        fprintf(stderr, "lvgl: cannot open /dev/mouse (GUI will work without mouse)\n");
+    if (g_indev.mouse_fd < 0)
         g_indev.mouse_fd = -1;
-    }
     /* Start cursor in center of screen */
     g_indev.x = (int16_t)(g_disp.width / 2);
     g_indev.y = (int16_t)(g_disp.height / 2);
@@ -200,15 +278,12 @@ static inline void draw_pixel(int x, int y, lv_color_t c)
 {
     if (x < 0 || x >= (int)g_disp.width || y < 0 || y >= (int)g_disp.height)
         return;
-    g_disp.framebuf[y * g_disp.width + x] =
-        ((uint32_t)c.alpha << 24) | ((uint32_t)c.red << 16) |
-        ((uint32_t)c.green << 8) | (uint32_t)c.blue;
+    g_disp.framebuf[y * g_disp.width + x] = color_to_pixel(c);
 }
 
 static void draw_rect_fill(int x, int y, int w, int h, lv_color_t color)
 {
-    uint32_t pixel = ((uint32_t)color.alpha << 24) | ((uint32_t)color.red << 16) |
-                     ((uint32_t)color.green << 8) | (uint32_t)color.blue;
+    uint32_t pixel = color_to_pixel(color);
 
     for (int row = y; row < y + h; row++) {
         if (row < 0 || row >= (int)g_disp.height)
@@ -933,8 +1008,11 @@ int lv_timer_handler(void)
 {
     if (!g_initialized) return -1;
 
+    g_frame_count++;
+
     /* 1. Read input */
     int prev_btn = g_indev.buttons & 1;
+    int16_t prev_x = g_indev.x, prev_y = g_indev.y;
     indev_read();
     int cur_btn = g_indev.buttons & 1;
 
@@ -1060,10 +1138,7 @@ void lv_refr_now(void)
     if (!g_initialized) return;
 
     /* Clear to screen bg color */
-    uint32_t bg_pixel = ((uint32_t)g_screen.bg_color.alpha << 24) |
-                        ((uint32_t)g_screen.bg_color.red << 16) |
-                        ((uint32_t)g_screen.bg_color.green << 8) |
-                        (uint32_t)g_screen.bg_color.blue;
+    uint32_t bg_pixel = color_to_pixel(g_screen.bg_color);
 
     uint32_t npixels = g_disp.width * g_disp.height;
     for (uint32_t i = 0; i < npixels; i++)

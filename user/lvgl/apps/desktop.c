@@ -554,10 +554,8 @@ int main(void)
     signal(SIGINT, sighandler);
     signal(SIGTERM, sighandler);
 
-    if (lv_init() < 0) {
-        fprintf(stderr, "desktop: lv_init() failed\n");
+    if (lv_init() < 0)
         return 1;
-    }
 
     lv_obj_t *scr = lv_scr_act();
     lv_disp_t *d = lv_disp_get();
@@ -566,6 +564,9 @@ int main(void)
 
     /* Desktop background color (dark blue) */
     lv_obj_set_style_bg_color(scr, lv_color_make(26, 58, 92));
+
+    /* Immediately render one frame to prove rendering works */
+    lv_refr_now();
 
     /* ── Desktop label ─────────────────────────────────────────── */
     lv_obj_t *desk_label = lv_label_create(scr);
@@ -629,14 +630,12 @@ int main(void)
     lv_obj_set_pos(tb_title, (int16_t)(scr_w / 2 - 68), 6);
 
     /* ── Main loop ─────────────────────────────────────────────── */
-    fprintf(stderr, "desktop: running (Ctrl+C to quit)\n");
 
     while (g_running) {
         lv_timer_handler();
         usleep(16000);  /* ~60 fps */
     }
 
-    fprintf(stderr, "desktop: exiting\n");
     lv_deinit();
     return 0;
 }

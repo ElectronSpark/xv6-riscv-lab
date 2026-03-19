@@ -46,6 +46,8 @@
 #define X86_PTE_P       (1ULL << 0)     /* Present */
 #define X86_PTE_W       (1ULL << 1)     /* Writable */
 #define X86_PTE_U       (1ULL << 2)     /* User-accessible */
+#define X86_PTE_PWT     (1ULL << 3)     /* Write-Through */
+#define X86_PTE_PCD     (1ULL << 4)     /* Cache Disable (uncacheable) */
 #define X86_PTE_PS      (1ULL << 7)     /* Page size (2M in PD) */
 #define X86_PTE_G       (1ULL << 8)     /* Global */
 
@@ -174,8 +176,9 @@ static void kvm_build(void)
      * I/O APIC at 0xFEC00000, LAPIC at 0xFEE00000, HPET at 0xFED00000.
      * PCI device BARs typically assigned in 0xFEB00000-0xFEBFFFFF range.
      * Bochs VGA framebuffer typically at 0xFD000000 (16 MB window).
-     * Use uncacheable semantics (no PTE_G) for device MMIO. */
-    uint64 flags_mmio = X86_PTE_P | X86_PTE_W;
+     * Use uncacheable semantics (PCD + no PTE_G) for device MMIO so that
+     * writes go straight to hardware instead of being absorbed by CPU cache. */
+    uint64 flags_mmio = X86_PTE_P | X86_PTE_W | X86_PTE_PCD;
     kvm_map_2m_range(0xFD000000ULL, 0xFF000000ULL, flags_mmio);
 }
 

@@ -1650,20 +1650,30 @@ int page_buddy_init(void) {
 STATIC_INLINE int __page_ref_inc_unlocked(page_t *page) {
     assert(spin_holding(&page->lock),
            "__page_ref_inc_unlocked: page lock not held");
-    if (page->ref_count == 0) {
+    /*
+     * Use atomic fetch-add because page_ref_dec_unlocked() modifies
+     * ref_count via atomic CAS without holding the page lock.
+     */
+    int prev = __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
+    if (prev == 0) {
         // page with 0 reference should be put back to the buddy system
         return -1;
     }
-    page->ref_count++;
-    return page->ref_count;
+    prev = __atomic_fetch_add(&page->ref_count, 1, __ATOMIC_SEQ_CST);
+    return prev + 1;
 }
 
 STATIC_INLINE int __page_ref_dec_unlocked(page_t *page) {
     assert(spin_holding(&page->lock),
            "__page_ref_dec_unlocked: page lock not held");
-    if (page->ref_count > 0) {
-        page->ref_count--;
-        return page->ref_count;
+    /*
+     * Use atomic fetch-sub because page_ref_dec_unlocked() modifies
+     * ref_count via atomic CAS without holding the page lock.
+     */
+    int prev = __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
+    if (prev > 0) {
+        prev = __atomic_fetch_sub(&page->ref_count, 1, __ATOMIC_SEQ_CST);
+        return prev - 1;
     }
     return -1;
 }
@@ -1851,12 +1861,12 @@ int __page_ref_add(page_t *page, int n) {
     if (page == NULL || n <= 0)
         return -1;
     page_lock_acquire(page);
-    if (page->ref_count == 0) {
+    int prev = __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
+    if (prev == 0) {
         page_lock_release(page);
         return -1;
     }
-    page->ref_count += n;
-    int ret = page->ref_count;
+    int ret = __atomic_add_fetch(&page->ref_count, n, __ATOMIC_SEQ_CST);
     page_lock_release(page);
     return ret;
 }
@@ -1871,12 +1881,12 @@ int __page_ref_sub(page_t *page, int n) {
     if (page == NULL || n <= 0)
         return -1;
     page_lock_acquire(page);
-    if (page->ref_count < (unsigned int)n) {
+    int cur = __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
+    if (cur < n) {
         page_lock_release(page);
         return -1;
     }
-    page->ref_count -= n;
-    int ret = page->ref_count;
+    int ret = __atomic_sub_fetch(&page->ref_count, n, __ATOMIC_SEQ_CST);
     page_lock_release(page);
     return ret;
 }
@@ -1913,16 +1923,26 @@ int __page_ref_dec(page_t *page) {
            page, page->tail.head_page);
     page_lock_acquire(page);
     {
-        original_ref_count = page_ref_count(page);
+        /*
+         * Use atomic fetch-sub so the read and decrement are a single
+         * indivisible operation.  page_ref_dec_unlocked() modifies
+         * ref_count via atomic CAS *without* holding the page lock, so
+         * a plain read followed by a plain decrement can race: another
+         * CPU's CAS can land between the two, making the observed
+         * difference != 1.  __atomic_fetch_sub returns the value
+         * *before* the subtraction, so original_ref_count is exact.
+         */
+        original_ref_count =
+            __atomic_fetch_sub(&page->ref_count, 1, __ATOMIC_SEQ_CST);
         if (original_ref_count < 1) {
+            /* Was already 0 (or negative); undo the subtract. */
+            __atomic_fetch_add(&page->ref_count, 1, __ATOMIC_SEQ_CST);
             page_lock_release(page);
-            return 0; // no need to free the page if the ref count is already 0
+            return 0;
         }
-        ret = __page_ref_dec_unlocked(page);
+        ret = original_ref_count - 1;   /* new ref_count after our dec */
     }
     page_lock_release(page);
-    assert(original_ref_count - ret == 1,
-           "__page_ref_dec: ref_count should be decreased by 1");
     if (ret == 0) {
         uint8 order = page->compound_order;
         if (PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE) && page->pcache.pcache_node) {
@@ -2000,7 +2020,7 @@ int page_ref_count(page_t *page) {
     if (page == NULL) {
         return -1;
     }
-    return page->ref_count;
+    return __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
 }
 
 uint64 managed_page_base() { return __managed_start; }

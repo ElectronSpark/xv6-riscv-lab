@@ -105,7 +105,18 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
 
     size_t bytes_read = 0;
 
+    /* Trigger sliding-window readahead: pre-populate upcoming folios
+     * in large batches (up to 256 folios / 16 MB) so the per-batch
+     * loop below mostly hits already-uptodate pages. */
+    if (pc->ops && pc->ops->submit_readahead && pos >= pc->ra_pos)
+        pc->ra_pos = pcache_readahead(pc, pos, isize);
+
     while (bytes_read < count) {
+        /* Sliding readahead: when pos reaches the frontier, prefetch next window */
+        if (pc->ops && pc->ops->submit_readahead &&
+            pos >= pc->ra_pos && pc->ra_pos < isize)
+            pc->ra_pos = pcache_readahead(pc, pc->ra_pos, isize);
+
         /* ── Phase 1: allocate a batch of folios ── */
         page_t *pages[XV6FS_READ_BATCH];
         int n_pages = 0;

@@ -2645,8 +2645,8 @@ void pcache_put_pages(struct pcache *pcache, struct pcache_page_vec *pvec) {
 
 #define PCACHE_RA_WINDOW 256  /* max folios per readahead batch */
 
-static loff_t __pcache_readahead(struct pcache *pcache, loff_t start_pos,
-                                loff_t end_pos)
+loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
+                       loff_t end_pos)
 {
     if (!pcache->ops || !pcache->ops->submit_readahead)
         return start_pos;
@@ -2771,7 +2771,7 @@ ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
                         pcache->ops->submit_readahead;
     loff_t ra_end = isize;  /* readahead up to end-of-file */
     if (do_readahead && pos >= pcache->ra_pos)
-        pcache->ra_pos = __pcache_readahead(pcache, pos, ra_end);
+        pcache->ra_pos = pcache_readahead(pcache, pos, ra_end);
 
     pcache_page_vec_init(&pvec);
 
@@ -2793,7 +2793,7 @@ ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
              * readahead frontier, submit the next batch. */
             if (do_readahead && pos >= pcache->ra_pos &&
                 pcache->ra_pos < ra_end)
-                pcache->ra_pos = __pcache_readahead(
+                pcache->ra_pos = pcache_readahead(
                     pcache, pcache->ra_pos, ra_end);
 
             uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;

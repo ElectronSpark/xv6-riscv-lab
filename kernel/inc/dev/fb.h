@@ -14,6 +14,11 @@
 #define FBIOGET_VSCREENINFO  0x4600
 #define FBIOGET_FSCREENINFO  0x4602
 
+/* ── GPU acceleration ioctl commands ── */
+#define FB_GPU_FILL_RECT     0x4610   /* fill rectangle with solid color */
+#define FB_GPU_BLIT          0x4611   /* copy user buffer to screen rect */
+#define FB_GPU_COPY_RECT     0x4612   /* screen-to-screen rectangle copy */
+
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
     uint32 xres;            /* visible resolution */
@@ -28,6 +33,35 @@ struct fb_fix_screeninfo {
     uint64 smem_start;      /* physical address of framebuffer */
     uint32 smem_len;        /* length of framebuffer mem */
     uint32 line_length;     /* bytes per scanline */
+};
+
+/* GPU fill rectangle command */
+struct fb_gpu_fill {
+    uint32 x;               /* destination x */
+    uint32 y;               /* destination y */
+    uint32 w;               /* width in pixels */
+    uint32 h;               /* height in pixels */
+    uint32 color;           /* ARGB8888 pixel value */
+};
+
+/* GPU blit command: copy user pixel data to a screen rectangle */
+struct fb_gpu_blit {
+    uint32   x;             /* destination x */
+    uint32   y;             /* destination y */
+    uint32   w;             /* width in pixels */
+    uint32   h;             /* height in pixels */
+    uint32   src_pitch;     /* source buffer pitch in bytes */
+    uint64   pixels;        /* pointer to user pixel data (uint32[]) */
+};
+
+/* GPU copy command: screen-to-screen rectangle copy */
+struct fb_gpu_copy {
+    uint32 src_x;           /* source x */
+    uint32 src_y;           /* source y */
+    uint32 dst_x;           /* destination x */
+    uint32 dst_y;           /* destination y */
+    uint32 w;               /* width in pixels */
+    uint32 h;               /* height in pixels */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

@@ -76,7 +76,36 @@ typedef struct {
     uint32_t    bpp;
     uint32_t   *framebuf;      /* local rendering buffer */
     uint32_t    fb_size;        /* total buffer size in bytes */
+    int         gpu_accel;      /* non-zero if GPU ioctls available */
 } lv_disp_t;
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  GPU acceleration (ioctl commands for /dev/fb0)
+ * ══════════════════════════════════════════════════════════════════════ */
+
+#define FB_GPU_FILL_RECT     0x4610   /* fill rectangle with solid color */
+#define FB_GPU_BLIT          0x4611   /* copy user buffer to screen rect */
+#define FB_GPU_COPY_RECT     0x4612   /* screen-to-screen rectangle copy */
+
+/* GPU fill: solid-color rectangle directly on framebuffer */
+struct fb_gpu_fill {
+    uint32_t x, y, w, h;
+    uint32_t color;               /* ARGB8888 */
+};
+
+/* GPU blit: copy pixels from user buffer to screen rectangle */
+struct fb_gpu_blit {
+    uint32_t x, y, w, h;
+    uint32_t src_pitch;           /* source row stride in bytes */
+    uint64_t pixels;              /* user pointer to pixel data */
+};
+
+/* GPU copy: screen-to-screen rectangle copy */
+struct fb_gpu_copy {
+    uint32_t src_x, src_y;
+    uint32_t dst_x, dst_y;
+    uint32_t w, h;
+};
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Input driver (mouse)
@@ -317,5 +346,25 @@ void      lv_font_draw_string(uint32_t *buf, int buf_w, int buf_h,
 
 /* Measure text dimensions */
 void      lv_font_measure(const char *text, int *out_w, int *out_h);
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  API — GPU acceleration
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* Check if GPU acceleration is available */
+int       lv_gpu_available(void);
+
+/* Fill a screen rectangle with a solid color (bypasses local buffer) */
+int       lv_gpu_fill_rect(int x, int y, int w, int h, lv_color_t color);
+
+/* Blit pixels from a user buffer to a screen rectangle */
+int       lv_gpu_blit(int x, int y, int w, int h,
+                       const uint32_t *pixels, int src_pitch);
+
+/* Copy a screen rectangle to another position */
+int       lv_gpu_copy_rect(int sx, int sy, int dx, int dy, int w, int h);
+
+/* Flush only a dirty region from the local framebuffer to the screen */
+int       lv_gpu_flush_area(int x, int y, int w, int h);
 
 #endif /* LVGL_XV6_H */

@@ -172,8 +172,9 @@ static int mouse_read(cdev_t *cdev, bool user, void *buf, size_t count)
     struct mouse_event ev;
 
     spin_lock(&mouse_state.lock);
-    while (ring_empty()) {
-        sleep_on_chan(&mouse_state.ring, &mouse_state.lock);
+    if (ring_empty()) {
+        spin_unlock(&mouse_state.lock);
+        return -EAGAIN;  /* non-blocking: no events available */
     }
     ring_pop(&ev);
     spin_unlock(&mouse_state.lock);

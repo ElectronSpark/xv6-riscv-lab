@@ -77,7 +77,7 @@ set(X86_VGA_OPTS -vga std)
 set(X86_CMDLINE -append "root=/dev/disk0")
 
 add_custom_target(qemu
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} -nographic ${X86_VGA_OPTS} -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
     COMMAND stty sane
     DEPENDS kernel_all fs_img
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}

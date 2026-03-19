@@ -91,6 +91,19 @@ struct iov_iter; /* forward declaration */
  * Returns total bytes read, 0 for EOF, or negative errno.
  * On RWF_NOWAIT, returns -EAGAIN if any required page is not in cache.
  */
+/**
+ * pcache_readahead - batch-prefetch folios into the page cache
+ * @pcache:    the page cache
+ * @start_pos: byte offset to start prefetching from
+ * @end_pos:   byte offset to stop prefetching at (e.g. file size)
+ *
+ * Pre-populates up to PCACHE_RA_WINDOW folios via the filesystem's
+ * submit_readahead callback.  Returns the byte position past the last
+ * folio that was (or already was) up-to-date.
+ */
+loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
+                        loff_t end_pos);
+
 ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
                      loff_t *ppos, loff_t isize, bool user);
 
