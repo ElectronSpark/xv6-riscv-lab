@@ -85,6 +85,10 @@ bool recalc_sigpending_tsk(struct thread *p);
 bool signal_terminated(struct thread *p);
 void handle_signal(void);
 
+/* Crash log: generate text of recent crashes for /proc/crashes.
+ * Returns kmm_alloc'd buffer; caller frees with kvfree. */
+char *crash_log_generate(void);
+
 int sigaction(int signum, struct sigaction *act, struct sigaction *oldact);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 int sigpending(struct thread *p, sigset_t *set);

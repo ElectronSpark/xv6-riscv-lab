@@ -38,6 +38,7 @@
 #include "dev/cdev.h"
 #include "accounting.h"
 #include "timer/timer.h"
+#include "signal.h"
 
 /* snprintf is provided by lwip_port/sys_arch.c – forward-declare it here */
 int snprintf(char *buf, size_t size, const char *fmt, ...);
@@ -129,6 +130,10 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         }
         if (name_len == 7 && memcmp(name, "cpuinfo", 7) == 0) {
             dentry->ino = PROCFS_INO_CPUINFO;
+            return 0;
+        }
+        if (name_len == 7 && memcmp(name, "crashes", 7) == 0) {
+            dentry->ino = PROCFS_INO_CRASHES;
             return 0;
         }
 
@@ -267,9 +272,12 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         } else if (child_idx == 2) {
             name = "cpuinfo";
             ino  = PROCFS_INO_CPUINFO;
+        } else if (child_idx == 3) {
+            name = "crashes";
+            ino  = PROCFS_INO_CRASHES;
         } else {
-            /* pid entries start at child_idx 3 */
-            int nth  = child_idx - 3;
+            /* pid entries start at child_idx 4 */
+            int nth  = child_idx - 4;
             int tgid = procfs_nth_tgid(nth);
             if (tgid < 0) {
                 /* End of directory */
@@ -648,6 +656,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_RESOURCES:
         buf = procfs_gen_resources(pi->pid);
+        break;
+    case PROC_CRASHES:
+        buf = crash_log_generate();
         break;
     default:
         return -EINVAL;

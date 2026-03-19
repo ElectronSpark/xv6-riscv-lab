@@ -44,9 +44,83 @@
 #include "errno.h"
 #include "proc/pgroup.h"
 #include "proc/cred.h"
+#include "timer/timer.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
+
+/* ── Crash log ring buffer ─────────────────────────────────────────── */
+#define CRASH_LOG_SIZE 32
+
+struct crash_entry {
+    uint64 timestamp_ms;  /* get_jiffs() at crash time */
+    int    pid;
+    int    signo;
+    char   name[16];
+};
+
+static struct crash_entry crash_log[CRASH_LOG_SIZE];
+static int crash_log_head = 0;   /* next write index */
+static int crash_log_count = 0;  /* total entries written (saturates at ring) */
+static spinlock_t crash_log_lock;
+
+int snprintf(char *buf, size_t size, const char *fmt, ...);
+
+static void crash_log_record(struct thread *p, int signo)
+{
+    spin_acquire(&crash_log_lock);
+    struct crash_entry *e = &crash_log[crash_log_head % CRASH_LOG_SIZE];
+    e->timestamp_ms = get_jiffs();
+    e->pid = p->tgid;
+    e->signo = signo;
+    memmove(e->name, p->name, 16);
+    e->name[15] = '\0';
+    crash_log_head = (crash_log_head + 1) % CRASH_LOG_SIZE;
+    if (crash_log_count < CRASH_LOG_SIZE)
+        crash_log_count++;
+    spin_release(&crash_log_lock);
+}
+
+/* Generate text for /proc/crashes — caller frees with kvfree */
+char *crash_log_generate(void)
+{
+    char *buf = kmm_alloc(2048);
+    if (!buf) return NULL;
+    int pos = 0;
+
+    spin_acquire(&crash_log_lock);
+    int n = crash_log_count;
+    /* Read from oldest to newest */
+    int start = (crash_log_head - n + CRASH_LOG_SIZE) % CRASH_LOG_SIZE;
+    for (int i = 0; i < n; i++) {
+        struct crash_entry *e = &crash_log[(start + i) % CRASH_LOG_SIZE];
+        uint64 sec = e->timestamp_ms / 1000;
+        uint64 ms  = e->timestamp_ms % 1000;
+        const char *signame;
+        switch (e->signo) {
+        case  4: signame = "SIGILL";  break;
+        case  6: signame = "SIGABRT"; break;
+        case  7: signame = "SIGBUS";  break;
+        case  8: signame = "SIGFPE";  break;
+        case 11: signame = "SIGSEGV"; break;
+        case  5: signame = "SIGTRAP"; break;
+        case 31: signame = "SIGSYS";  break;
+        case  3: signame = "SIGQUIT"; break;
+        default: signame = "SIG?";    break;
+        }
+        pos += snprintf(buf + pos, 2048 - pos,
+                        "%lu.%03lu %d %s %s\n",
+                        (unsigned long)sec, (unsigned long)ms,
+                        e->pid, signame, e->name);
+        if (pos >= 2000) break;
+    }
+    spin_release(&crash_log_lock);
+
+    if (pos == 0)
+        pos += snprintf(buf + pos, 2048 - pos, "(no crashes recorded)\n");
+    buf[pos] = '\0';
+    return buf;
+}
 
 // Forward declarations for helper functions
 static void sigacts_assert_holding(sigacts_t *sa);
@@ -443,6 +517,7 @@ void signal_init(void) {
                     SLAB_FLAG_STATIC);
     slab_cache_init(&__ksiginfo_pool, "ksiginfo", sizeof(ksiginfo_t),
                     SLAB_FLAG_STATIC);
+    spin_init(&crash_log_lock, "crash_log");
 }
 
 // Cap for number of queued ksiginfo entries per signal when SA_SIGINFO set.
@@ -1314,6 +1389,22 @@ void handle_signal(void) {
     recalc_sigpending();
 
     if (THREAD_KILLED(p)) {
+        /* Record crash if a core-dumping signal caused the termination */
+        sigacts_lock(sa);
+        sigset_t term_pending = p->signal.sig_pending_mask & sa->sa_sigterm;
+        if (tg != NULL)
+            term_pending |= tg->shared_pending.sig_pending_mask & sa->sa_sigterm;
+        sigacts_unlock(sa);
+
+        /* Check each signal — if its default action is SIG_ACT_CORE, log it */
+        for (int s = 1; s <= NSIG; s++) {
+            if (sigismember(&term_pending, s) &&
+                signo_default_action(s) == SIG_ACT_CORE) {
+                crash_log_record(p, s);
+                break;
+            }
+        }
+
         exit(-1);
     }
 }

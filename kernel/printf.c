@@ -14,11 +14,24 @@
 #include "printf.h"
 #include "proc/thread.h"
 #include "smp/ipi.h"
+#include <dev/fb.h>
 
 static spinlock_t __panic_bt_lock = SPINLOCK_INITIALIZED("panic_bt_lock");
 
 // Global panic state - set when any core panics
 static volatile int __global_panic_state = 0;
+
+/* Panic text capture buffer — filled during panic for BSOD display */
+#define PANIC_TEXT_SIZE 4096
+static char __panic_textbuf[PANIC_TEXT_SIZE];
+static int  __panic_textpos = 0;
+
+static void panic_capture(const char *s, int n)
+{
+    for (int i = 0; i < n && __panic_textpos < PANIC_TEXT_SIZE - 1; i++)
+        __panic_textbuf[__panic_textpos++] = s[i];
+    __panic_textbuf[__panic_textpos] = '\0';
+}
 
 int panic_state(void) {
     return __atomic_load_n(&__global_panic_state, __ATOMIC_ACQUIRE);
@@ -29,6 +42,14 @@ STATIC struct {
     spinlock_t lock;
     int locking;
 } pr;
+
+/* Wrapper: sends to console and also captures during panic */
+static inline void printf_emit(const char *buf, int len)
+{
+    consputs(buf, len);
+    if (__atomic_load_n(&__global_panic_state, __ATOMIC_RELAXED))
+        panic_capture(buf, len);
+}
 
 STATIC char digits[] = "0123456789abcdef";
 
@@ -104,7 +125,7 @@ int printf(char *fmt, ...) {
             }
             // Flush if buffer is nearly full
             if (outlen >= 500) {
-                consputs(outbuf, outlen);
+                printf_emit(outbuf, outlen);
                 outlen = 0;
             }
             continue;
@@ -170,7 +191,7 @@ int printf(char *fmt, ...) {
                 outbuf[outlen++] = *s;
                 // Flush if buffer is nearly full
                 if (outlen >= 500) {
-                    consputs(outbuf, outlen);
+                    printf_emit(outbuf, outlen);
                     outlen = 0;
                 }
             }
@@ -194,7 +215,7 @@ int printf(char *fmt, ...) {
         }
         // Flush if buffer is nearly full
         if (outlen >= 500) {
-            consputs(outbuf, outlen);
+            printf_emit(outbuf, outlen);
             outlen = 0;
         }
     }
@@ -202,7 +223,7 @@ int printf(char *fmt, ...) {
 
     // Flush remaining buffer
     if (outlen > 0) {
-        consputs(outbuf, outlen);
+        printf_emit(outbuf, outlen);
     }
 
     if (locking)
@@ -265,6 +286,7 @@ void trigger_panic(void) {
 
 void __panic_end() {
     panic_msg_unlock();
+    fb_panic_screen(__panic_textbuf);
     trigger_panic();
 }
 

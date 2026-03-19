@@ -100,5 +100,6 @@ struct fb_gpu_copy {
 void fbdevinit(void);
 int  fb_detected(void);
 void fb_pci_init(uint8 bus, uint8 dev, uint8 func);
+void fb_panic_screen(const char *text);
 
 #endif /* __KERNEL_DEV_FB_H */

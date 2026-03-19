@@ -161,6 +161,14 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         return &pi->vfs_inode;
     }
 
+    if (ino == PROCFS_INO_CRASHES) {
+        pi->type              = PROC_CRASHES;
+        pi->vfs_inode.mode    = S_IFREG | 0444;
+        pi->vfs_inode.n_links = 1;
+        pi->vfs_inode.size    = 4096;
+        return &pi->vfs_inode;
+    }
+
     /* ---- Per-process entries ---- */
 
     if (ino >= PROCFS_PID_BASE && ino < PROCFS_FD_BASE) {
