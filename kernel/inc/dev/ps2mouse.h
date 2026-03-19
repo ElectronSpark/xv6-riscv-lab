@@ -36,11 +36,14 @@
 
 /* Mouse event structure (read from /dev/mouse) */
 struct mouse_event {
-    int16  dx;      /* relative x movement */
-    int16  dy;      /* relative y movement */
+    int16  dx;      /* relative x movement, or absolute x (0-65535) */
+    int16  dy;      /* relative y movement, or absolute y (0-65535) */
     uint8  buttons; /* button state: bit0=left, bit1=right, bit2=middle */
-    uint8  pad[3];  /* pad to 8 bytes */
+    uint8  flags;   /* bit0: 1 = absolute coordinates */
+    uint8  pad[2];  /* pad to 8 bytes */
 };
+
+#define MOUSE_EVENT_F_ABSOLUTE  0x01
 
 void ps2mouse_init(void);
 

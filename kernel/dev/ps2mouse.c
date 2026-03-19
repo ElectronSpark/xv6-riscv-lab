@@ -36,6 +36,92 @@ static inline uint8 ps2_inb(uint16 port)
     return val;
 }
 
+/* ── VMware vmmouse (absolute pointer) ───────────────────────────── */
+
+#define VMWARE_MAGIC            0x564D5868u  /* "VMXh" */
+#define VMWARE_PORT             0x5658u
+
+#define VMCMD_GETVERSION        10
+#define VMCMD_ABSPTR_DATA       39
+#define VMCMD_ABSPTR_STATUS     40
+#define VMCMD_ABSPTR_COMMAND    41
+
+#define VMMOUSE_ENABLE          0x45414552u  /* "REAE" */
+#define VMMOUSE_DISABLE         0x000000F5u
+#define VMMOUSE_REQUEST_ABS     0x53414C41u  /* "ALAS" */
+
+static int vmmouse_available;  /* non-zero if VMware vmmouse works */
+static int vmmouse_nodata;    /* consecutive IRQs with no vmmouse data */
+#define VMMOUSE_NODATA_LIMIT 64  /* disable after this many failures */
+
+static inline void vmware_cmd(uint32 cmd, uint32 param,
+                              uint32 *a, uint32 *b, uint32 *c, uint32 *d)
+{
+    uint32 ra, rb, rc, rd;
+    asm volatile("inl %%dx, %%eax"
+        : "=a"(ra), "=b"(rb), "=c"(rc), "=d"(rd)
+        : "a"(VMWARE_MAGIC), "b"(param), "c"(cmd), "d"(VMWARE_PORT)
+        : "memory");
+    if (a) *a = ra;
+    if (b) *b = rb;
+    if (c) *c = rc;
+    if (d) *d = rd;
+}
+
+static int vmmouse_probe(void)
+{
+    /* Check VMware backdoor: GETVERSION should return magic in EBX */
+    uint32 ver, magic;
+    vmware_cmd(VMCMD_GETVERSION, 0, &ver, &magic, NULL, NULL);
+    if (magic != VMWARE_MAGIC)
+        return 0;
+
+    /* Enable absolute pointer */
+    vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_ENABLE, NULL, NULL, NULL, NULL);
+
+    /* Check status — a working vmmouse returns version, not error */
+    uint32 status;
+    vmware_cmd(VMCMD_ABSPTR_STATUS, 0, &status, NULL, NULL, NULL);
+    if ((status & 0xFFFF0000u) == 0xFFFF0000u) {
+        /* Error or not available — disable and fall back */
+        vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_DISABLE, NULL, NULL, NULL, NULL);
+        return 0;
+    }
+
+    /* Request absolute mode */
+    vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_REQUEST_ABS, NULL, NULL, NULL, NULL);
+
+    /* Verify we're still OK */
+    vmware_cmd(VMCMD_ABSPTR_STATUS, 0, &status, NULL, NULL, NULL);
+    if ((status & 0xFFFF0000u) == 0xFFFF0000u) {
+        vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_DISABLE, NULL, NULL, NULL, NULL);
+        return 0;
+    }
+
+    return 1;
+}
+
+/* Read one absolute-mode event. Returns 1 if data was available, 0 otherwise. */
+static int vmmouse_read(struct mouse_event *ev)
+{
+    uint32 status;
+    vmware_cmd(VMCMD_ABSPTR_STATUS, 0, &status, NULL, NULL, NULL);
+
+    uint32 nwords = status & 0xFFFFu;
+    if (nwords < 4)
+        return 0;  /* no data */
+
+    uint32 s, x, y, z;
+    vmware_cmd(VMCMD_ABSPTR_DATA, 4, &s, &x, &y, &z);
+
+    ev->buttons = (uint8)(s & 0x07);
+    ev->flags   = MOUSE_EVENT_F_ABSOLUTE;
+    ev->dx      = (int16)(x & 0xFFFF);
+    ev->dy      = (int16)(y & 0xFFFF);
+    ev->pad[0]  = ev->pad[1] = 0;
+    return 1;
+}
+
 /* ── PS/2 controller helpers ─────────────────────────────────────── */
 
 static void ps2_wait_input(void)
@@ -122,6 +208,34 @@ static void mouse_irq_handler(int irq, void *data, device_t *dev)
 
     spin_lock(&mouse_state.lock);
 
+    /* Try VMware vmmouse for absolute coordinates first */
+    if (vmmouse_available) {
+        struct mouse_event ev;
+        int got = 0;
+        while (vmmouse_read(&ev)) {
+            ring_push(&ev);
+            got++;
+        }
+        if (got) {
+            /* vmmouse provided data — discard PS/2 trigger byte */
+            vmmouse_nodata = 0;
+            mouse_state.packet_idx = 0;
+            spin_unlock(&mouse_state.lock);
+            wakeup_on_chan(&mouse_state.ring);
+            return;
+        }
+        /* No vmmouse data — maybe QEMU didn't actually create the
+         * vmmouse device.  After enough failures, give up and fall
+         * back to PS/2 permanently. */
+        if (++vmmouse_nodata >= VMMOUSE_NODATA_LIMIT) {
+            vmmouse_available = 0;
+            printf("PS2 mouse: vmmouse not responding, falling back to PS/2\n");
+        }
+        /* Fall through to normal PS/2 processing for this byte */
+    }
+
+    /* Standard PS/2 relative mouse */
+
     /* First byte must have bit 3 set (always-1 bit in PS/2 packet) */
     if (mouse_state.packet_idx == 0 && !(byte & 0x08)) {
         spin_unlock(&mouse_state.lock);
@@ -146,7 +260,8 @@ static void mouse_irq_handler(int irq, void *data, device_t *dev)
             ev.dx = (int16)dx;
             ev.dy = (int16)(-dy);  /* PS/2 Y is inverted */
             ev.buttons = flags & 0x07;
-            ev.pad[0] = ev.pad[1] = ev.pad[2] = 0;
+            ev.flags = 0;
+            ev.pad[0] = ev.pad[1] = 0;
             ring_push(&ev);
             wakeup_on_chan(&mouse_state.ring);
         }
@@ -266,6 +381,16 @@ void ps2mouse_init(void)
     /* Set defaults and enable data reporting */
     ps2_send_mouse_cmd(MOUSE_CMD_SET_DEFAULTS);
     ps2_send_mouse_cmd(MOUSE_CMD_ENABLE);
+
+    /* VMware vmmouse disabled — QEMU's vmport backdoor port responds
+     * to probes (GETVERSION works, ABSPTR_COMMAND succeeds) but the
+     * returned coordinates are always (0,0) unless a real '-device vmmouse'
+     * is linked to the i8042 controller.  Since that requires QEMU machine
+     * glue that we can't set up on all versions, stick with PS/2 relative.
+     * The USB-tablet device in QEMU eliminates host grab without needing
+     * abs coords inside the guest. */
+    vmmouse_available = 0;
+    (void)vmmouse_probe;  /* suppress unused warning */
 
     /* Register IRQ handler */
     static struct irq_desc mouse_irq_desc = {

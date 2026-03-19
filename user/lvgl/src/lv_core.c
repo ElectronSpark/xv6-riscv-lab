@@ -42,8 +42,11 @@ struct mouse_event {
     int16_t  dx;
     int16_t  dy;
     uint8_t  buttons;
-    uint8_t  pad[3];
+    uint8_t  flags;     /* bit 0: 1 = absolute coordinates */
+    uint8_t  pad[2];
 };
+
+#define MOUSE_EVENT_F_ABSOLUTE  0x01
 
 /* ══════════════════════════════════════════════════════════════════════
  *  Global state
@@ -60,6 +63,25 @@ static lv_obj_t   g_obj_pool[LV_OBJ_POOL_SIZE];
 static uint8_t    g_obj_used[LV_OBJ_POOL_SIZE];
 static lv_obj_t  *g_pressed_obj = NULL;
 static uint32_t   g_frame_count = 0;
+
+/* Dirty region tracking for partial flush during drag */
+static int     g_partial_ok = 0;      /* 1 = partial flush is sufficient */
+static int16_t g_dirty_x1, g_dirty_y1, g_dirty_x2, g_dirty_y2;
+
+static void dirty_reset(void) {
+    g_partial_ok = 0;
+    g_dirty_x1 = g_dirty_y1 = 32767;
+    g_dirty_x2 = g_dirty_y2 = -1;
+}
+
+static void dirty_expand(int16_t x, int16_t y, int16_t w, int16_t h) {
+    if (x < g_dirty_x1) g_dirty_x1 = x;
+    if (y < g_dirty_y1) g_dirty_y1 = y;
+    int16_t x2 = (int16_t)(x + w);
+    int16_t y2 = (int16_t)(y + h);
+    if (x2 > g_dirty_x2) g_dirty_x2 = x2;
+    if (y2 > g_dirty_y2) g_dirty_y2 = y2;
+}
 
 /* Mouse cursor (simple 12×12 arrow drawn on top of everything) */
 static const uint8_t cursor_bmp[12][12] = {
@@ -260,8 +282,15 @@ static void indev_read(void)
     struct mouse_event ev;
     /* Read all pending events */
     while (read(g_indev.mouse_fd, &ev, sizeof(ev)) == sizeof(ev)) {
-        g_indev.x += ev.dx;
-        g_indev.y += ev.dy;
+        if (ev.flags & MOUSE_EVENT_F_ABSOLUTE) {
+            /* VMware vmmouse: absolute coords in 0-65535 range */
+            g_indev.x = (int16_t)((uint32_t)ev.dx * g_disp.width / 65536);
+            g_indev.y = (int16_t)((uint32_t)ev.dy * g_disp.height / 65536);
+        } else {
+            /* PS/2 relative */
+            g_indev.x += ev.dx;
+            g_indev.y += ev.dy;
+        }
 
         /* Clamp to screen bounds */
         if (g_indev.x < 0) g_indev.x = 0;
@@ -1140,14 +1169,29 @@ int lv_timer_handler(void)
         }
     }
 
-    /* Window dragging */
+    /* Window dragging — track dirty regions for GPU partial flush */
     if (cur_btn && g_pressed_obj &&
         g_pressed_obj->type == LV_OBJ_TYPE_WINDOW &&
         g_pressed_obj->spec.win.dragging) {
+        g_partial_ok = 1;  /* only drag happened, partial flush OK */
+        /* Mark old position dirty (include shadow +3) */
+        dirty_expand(g_pressed_obj->x, g_pressed_obj->y,
+                     (int16_t)(g_pressed_obj->w + 4),
+                     (int16_t)(g_pressed_obj->h + 4));
         g_pressed_obj->x =
             (int16_t)(g_indev.x - g_pressed_obj->spec.win.drag_ox);
         g_pressed_obj->y =
             (int16_t)(g_indev.y - g_pressed_obj->spec.win.drag_oy);
+        /* Mark new position dirty */
+        dirty_expand(g_pressed_obj->x, g_pressed_obj->y,
+                     (int16_t)(g_pressed_obj->w + 4),
+                     (int16_t)(g_pressed_obj->h + 4));
+    }
+
+    /* Track cursor movement as dirty for partial flush */
+    if (prev_x != g_indev.x || prev_y != g_indev.y) {
+        dirty_expand(prev_x, prev_y, 13, 13);    /* old cursor */
+        dirty_expand(g_indev.x, g_indev.y, 13, 13); /* new cursor */
     }
 
     /* 3. Render */
@@ -1174,6 +1218,23 @@ void lv_refr_now(void)
     /* Draw mouse cursor on top */
     draw_cursor();
 
-    /* Flush to display */
-    disp_flush();
+    /* Flush to display — default full, partial only during drag */
+    if (g_partial_ok && g_disp.gpu_accel &&
+        g_dirty_x1 < g_dirty_x2 && g_dirty_y1 < g_dirty_y2) {
+        /* Clamp dirty rect to screen */
+        if (g_dirty_x1 < 0) g_dirty_x1 = 0;
+        if (g_dirty_y1 < 0) g_dirty_y1 = 0;
+        if (g_dirty_x2 > (int16_t)g_disp.width)
+            g_dirty_x2 = (int16_t)g_disp.width;
+        if (g_dirty_y2 > (int16_t)g_disp.height)
+            g_dirty_y2 = (int16_t)g_disp.height;
+        lv_gpu_flush_area(g_dirty_x1, g_dirty_y1,
+                          g_dirty_x2 - g_dirty_x1,
+                          g_dirty_y2 - g_dirty_y1);
+    } else {
+        disp_flush();
+    }
+
+    /* Reset dirty tracking for next frame */
+    dirty_reset();
 }
