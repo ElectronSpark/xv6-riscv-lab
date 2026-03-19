@@ -91,7 +91,8 @@ static void create_terminal(void);
 static void term_poll_all(void);
 static term_instance_t *term_find_by_win(lv_obj_t *win);
 static void term_focus(int idx);
-static void on_terminal_pressed(lv_obj_t *obj, lv_event_t e);
+static void on_terminal_event(lv_obj_t *obj, lv_event_t e);
+static void on_terminal_close(lv_obj_t *obj, lv_event_t e);
 static void tb_relayout_app_btns(void);
 static void tb_app_btn_cb(lv_obj_t *obj, lv_event_t e);
 static void term_kbd_cb(lv_kbd_event_t *ev, void *user_data);
@@ -136,14 +137,19 @@ static void on_about_close(lv_obj_t *obj, lv_event_t e)
     win_about = NULL;
 }
 
-static void on_terminal_pressed(lv_obj_t *obj, lv_event_t e)
+static void on_terminal_event(lv_obj_t *obj, lv_event_t e)
 {
-    if (e != LV_EVENT_PRESSED) return;
-    term_instance_t *t = term_find_by_win(obj);
-    if (!t) return;
-    int idx = (int)(t - g_terms);
-    if (g_term_focus != idx)
-        term_focus(idx);
+    if (e == LV_EVENT_CLOSE) {
+        on_terminal_close(obj, e);
+        return;
+    }
+    if (e == LV_EVENT_PRESSED) {
+        term_instance_t *t = term_find_by_win(obj);
+        if (!t) return;
+        int idx = (int)(t - g_terms);
+        if (g_term_focus != idx)
+            term_focus(idx);
+    }
 }
 
 static void on_terminal_close(lv_obj_t *obj, lv_event_t e)
@@ -1051,8 +1057,7 @@ static void create_terminal(void)
     lv_win_set_title(t->win, title);
     lv_obj_set_pos(t->win, (int16_t)(40 + off), (int16_t)(20 + off));
     lv_obj_set_size(t->win, win_w, win_h);
-    lv_obj_add_event_cb(t->win, on_terminal_close, LV_EVENT_CLOSE, NULL);
-    lv_obj_add_event_cb(t->win, on_terminal_pressed, LV_EVENT_PRESSED, NULL);
+    lv_obj_add_event_cb(t->win, on_terminal_event, 0, NULL);
 
     lv_obj_t *c = lv_win_get_content(t->win);
     lv_obj_set_style_bg_color(c, lv_color_make(0, 0, 0));

@@ -9,6 +9,9 @@
 #include "lvgl_xv6.h"
 #include <string.h>
 
+/* Clip rect from lv_core.c — when active, skip pixels outside */
+extern int g_clip_active, g_clip_x1, g_clip_y1, g_clip_x2, g_clip_y2;
+
 /* ── Font bitmap data: ASCII 32 (' ') through 126 ('~') ─────────── */
 
 static const uint8_t font8x16[95][16] = {
@@ -117,6 +120,13 @@ void lv_font_draw_char(uint32_t *buf, int buf_w, int buf_h,
     if (ch < 32 || ch > 126)
         return;
 
+    /* Whole-glyph clip rejection */
+    if (g_clip_active) {
+        if (x + 8 <= g_clip_x1 || x >= g_clip_x2 ||
+            y + 16 <= g_clip_y1 || y >= g_clip_y2)
+            return;
+    }
+
     const uint8_t *glyph = font8x16[ch - 32];
     uint32_t pixel = ((uint32_t)color.alpha << 24) | ((uint32_t)color.red << 16) |
                      ((uint32_t)color.green << 8) | (uint32_t)color.blue;
@@ -125,10 +135,14 @@ void lv_font_draw_char(uint32_t *buf, int buf_w, int buf_h,
         int py = y + row;
         if (py < 0 || py >= buf_h)
             continue;
+        if (g_clip_active && (py < g_clip_y1 || py >= g_clip_y2))
+            continue;
         uint8_t bits = glyph[row];
         for (int col = 0; col < 8; col++) {
             int px = x + col;
             if (px < 0 || px >= buf_w)
+                continue;
+            if (g_clip_active && (px < g_clip_x1 || px >= g_clip_x2))
                 continue;
             if (bits & (0x80 >> col))
                 buf[py * buf_w + px] = pixel;

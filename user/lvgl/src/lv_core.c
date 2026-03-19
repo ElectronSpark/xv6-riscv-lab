@@ -68,6 +68,15 @@ static uint32_t   g_frame_count = 0;
 static int     g_partial_ok = 0;      /* 1 = partial flush is sufficient */
 static int16_t g_dirty_x1, g_dirty_y1, g_dirty_x2, g_dirty_y2;
 
+/* GPU-accelerated drag state — wireframe ghost while dragging */
+static int     g_dragging_gpu = 0;    /* 1 = GPU wireframe drag active */
+static int16_t g_ghost_x, g_ghost_y; /* current ghost outline position */
+static int16_t g_ghost_w, g_ghost_h; /* ghost outline size */
+
+/* Clip rectangle — when active, draw_pixel/draw_rect_fill skip pixels outside */
+int     g_clip_active = 0;
+int     g_clip_x1, g_clip_y1, g_clip_x2, g_clip_y2;
+
 static void dirty_reset(void) {
     g_partial_ok = 0;
     g_dirty_x1 = g_dirty_y1 = 32767;
@@ -329,6 +338,9 @@ static inline void draw_pixel(int x, int y, lv_color_t c)
 {
     if (x < 0 || x >= (int)g_disp.width || y < 0 || y >= (int)g_disp.height)
         return;
+    if (g_clip_active && (x < g_clip_x1 || x >= g_clip_x2 ||
+                          y < g_clip_y1 || y >= g_clip_y2))
+        return;
     g_disp.framebuf[y * g_disp.width + x] = color_to_pixel(c);
 }
 
@@ -336,14 +348,25 @@ static void draw_rect_fill(int x, int y, int w, int h, lv_color_t color)
 {
     uint32_t pixel = color_to_pixel(color);
 
-    for (int row = y; row < y + h; row++) {
-        if (row < 0 || row >= (int)g_disp.height)
-            continue;
-        for (int col = x; col < x + w; col++) {
-            if (col < 0 || col >= (int)g_disp.width)
-                continue;
-            g_disp.framebuf[row * g_disp.width + col] = pixel;
-        }
+    /* Apply clip rect early for fast rejection */
+    int x1 = x, y1 = y, x2 = x + w, y2 = y + h;
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > (int)g_disp.width) x2 = (int)g_disp.width;
+    if (y2 > (int)g_disp.height) y2 = (int)g_disp.height;
+    if (g_clip_active) {
+        if (x1 < g_clip_x1) x1 = g_clip_x1;
+        if (y1 < g_clip_y1) y1 = g_clip_y1;
+        if (x2 > g_clip_x2) x2 = g_clip_x2;
+        if (y2 > g_clip_y2) y2 = g_clip_y2;
+    }
+    if (x1 >= x2 || y1 >= y2)
+        return;
+
+    for (int row = y1; row < y2; row++) {
+        uint32_t *dst = g_disp.framebuf + row * g_disp.width + x1;
+        for (int col = x1; col < x2; col++)
+            *dst++ = pixel;
     }
 }
 
@@ -1069,6 +1092,14 @@ int lv_timer_handler(void)
     int cur_btn = g_indev.buttons & 1;
 
     /* 2. Hit test & dispatch events */
+
+    /* Restore window visibility before hit-test if GPU drag is ending,
+     * so the close button can be detected */
+    if (!cur_btn && prev_btn && g_dragging_gpu && g_pressed_obj) {
+        g_pressed_obj->visible = 1;
+        g_dragging_gpu = 0;
+    }
+
     lv_obj_t *hovered = hit_test(&g_screen, g_indev.x, g_indev.y);
 
     /* Button press */
@@ -1090,6 +1121,17 @@ int lv_timer_handler(void)
                         (int16_t)(g_indev.x - hovered->x);
                     hovered->spec.win.drag_oy =
                         (int16_t)(g_indev.y - hovered->y);
+
+                    /* Start GPU wireframe drag: hide window,
+                     * render background once, then only draw outlines */
+                    if (g_disp.gpu_accel) {
+                        g_dragging_gpu = 1;
+                        g_ghost_x = hovered->x;
+                        g_ghost_y = hovered->y;
+                        g_ghost_w = hovered->w;
+                        g_ghost_h = hovered->h;
+                        hovered->visible = 0; /* hide during drag */
+                    }
                 }
             } else {
                 /* Bring parent window to front */
@@ -1113,6 +1155,7 @@ int lv_timer_handler(void)
             if (g_pressed_obj->type == LV_OBJ_TYPE_WINDOW) {
                 /* Window-specific release */
                 g_pressed_obj->spec.win.dragging = 0;
+
                 if (g_pressed_obj == hovered) {
                     int ax, ay;
                     obj_get_abs_pos(g_pressed_obj, &ax, &ay);
@@ -1169,23 +1212,20 @@ int lv_timer_handler(void)
         }
     }
 
-    /* Window dragging — track dirty regions for GPU partial flush */
+    /* Window dragging — GPU wireframe path */
     if (cur_btn && g_pressed_obj &&
         g_pressed_obj->type == LV_OBJ_TYPE_WINDOW &&
         g_pressed_obj->spec.win.dragging) {
-        g_partial_ok = 1;  /* only drag happened, partial flush OK */
-        /* Mark old position dirty (include shadow +3) */
-        dirty_expand(g_pressed_obj->x, g_pressed_obj->y,
-                     (int16_t)(g_pressed_obj->w + 4),
-                     (int16_t)(g_pressed_obj->h + 4));
+
+        /* Update window position */
         g_pressed_obj->x =
             (int16_t)(g_indev.x - g_pressed_obj->spec.win.drag_ox);
         g_pressed_obj->y =
             (int16_t)(g_indev.y - g_pressed_obj->spec.win.drag_oy);
-        /* Mark new position dirty */
-        dirty_expand(g_pressed_obj->x, g_pressed_obj->y,
-                     (int16_t)(g_pressed_obj->w + 4),
-                     (int16_t)(g_pressed_obj->h + 4));
+
+        if (g_dragging_gpu) {
+            g_partial_ok = 1;  /* skip full render */
+        }
     }
 
     /* Track cursor movement as dirty for partial flush */
@@ -1200,40 +1240,97 @@ int lv_timer_handler(void)
     return 0;
 }
 
+/* Helper: clamp rect to screen, return 0 if empty */
+static int clamp_rect(int *x1, int *y1, int *x2, int *y2)
+{
+    if (*x1 < 0) *x1 = 0;
+    if (*y1 < 0) *y1 = 0;
+    if (*x2 > (int)g_disp.width)  *x2 = (int)g_disp.width;
+    if (*y2 > (int)g_disp.height) *y2 = (int)g_disp.height;
+    return (*x1 < *x2 && *y1 < *y2);
+}
+
+/* Draw a wireframe rectangle on the LFB using GPU fill_rect */
+static void gpu_draw_outline(int x, int y, int w, int h, lv_color_t color, int thick)
+{
+    /* Top */
+    lv_gpu_fill_rect(x, y, w, thick, color);
+    /* Bottom */
+    lv_gpu_fill_rect(x, y + h - thick, w, thick, color);
+    /* Left */
+    lv_gpu_fill_rect(x, y + thick, thick, h - 2 * thick, color);
+    /* Right */
+    lv_gpu_fill_rect(x + w - thick, y + thick, thick, h - 2 * thick, color);
+}
+
+/* Erase old ghost outline by re-blitting that area from local framebuffer */
+static void gpu_erase_outline(int x, int y, int w, int h, int thick)
+{
+    /* Top */
+    lv_gpu_flush_area(x, y, w, thick);
+    /* Bottom */
+    lv_gpu_flush_area(x, y + h - thick, w, thick);
+    /* Left */
+    lv_gpu_flush_area(x, y + thick, thick, h - 2 * thick);
+    /* Right */
+    lv_gpu_flush_area(x + w - thick, y + thick, thick, h - 2 * thick);
+}
+
 void lv_refr_now(void)
 {
     if (!g_initialized) return;
 
-    /* Clear to screen bg color */
     uint32_t bg_pixel = color_to_pixel(g_screen.bg_color);
 
+    if (g_dragging_gpu && g_partial_ok) {
+        /* ═══ GPU wireframe drag path ═════════════════════════════ *
+         * Window is hidden. The LFB has the background rendered.    *
+         * We just erase the old ghost outline and draw a new one.   */
+        int new_x = g_pressed_obj->x;
+        int new_y = g_pressed_obj->y;
+        int new_w = g_pressed_obj->w;
+        int new_h = g_pressed_obj->h;
+        int thick = 2;
+
+        lv_color_t outline_color = lv_color_make(0, 120, 215);
+
+        /* Erase old ghost (restore LFB from local framebuffer) */
+        if (g_ghost_x != new_x || g_ghost_y != new_y) {
+            gpu_erase_outline(g_ghost_x, g_ghost_y,
+                              g_ghost_w, g_ghost_h, thick);
+        }
+
+        /* Draw new ghost outline directly on LFB */
+        gpu_draw_outline(new_x, new_y, new_w, new_h, outline_color, thick);
+
+        /* Update ghost position */
+        g_ghost_x = new_x;
+        g_ghost_y = new_y;
+
+        /* Cursor: blit from local fb (cursor was drawn in last full render) */
+        /* Just draw cursor on LFB area */
+        {
+            int cx = g_indev.x, cy = g_indev.y;
+            int cw = 13, ch = 13;
+            int cx2 = cx + cw, cy2 = cy + ch;
+            if (clamp_rect(&cx, &cy, &cx2, &cy2))
+                lv_gpu_flush_area(cx, cy, cx2 - cx, cy2 - cy);
+        }
+
+        dirty_reset();
+        return;
+    }
+
+    /* ── Full refresh (normal frames and drag-end) ───────────────── */
     uint32_t npixels = g_disp.width * g_disp.height;
     for (uint32_t i = 0; i < npixels; i++)
         g_disp.framebuf[i] = bg_pixel;
 
-    /* Render widget tree */
     for (int i = 0; i < g_screen.child_count; i++)
         render_obj(g_screen.children[i]);
 
-    /* Draw mouse cursor on top */
     draw_cursor();
-
-    /* Flush to display — default full, partial only during drag */
-    if (g_partial_ok && g_disp.gpu_accel &&
-        g_dirty_x1 < g_dirty_x2 && g_dirty_y1 < g_dirty_y2) {
-        /* Clamp dirty rect to screen */
-        if (g_dirty_x1 < 0) g_dirty_x1 = 0;
-        if (g_dirty_y1 < 0) g_dirty_y1 = 0;
-        if (g_dirty_x2 > (int16_t)g_disp.width)
-            g_dirty_x2 = (int16_t)g_disp.width;
-        if (g_dirty_y2 > (int16_t)g_disp.height)
-            g_dirty_y2 = (int16_t)g_disp.height;
-        lv_gpu_flush_area(g_dirty_x1, g_dirty_y1,
-                          g_dirty_x2 - g_dirty_x1,
-                          g_dirty_y2 - g_dirty_y1);
-    } else {
-        disp_flush();
-    }
+    disp_flush();
 
     /* Reset dirty tracking for next frame */
     dirty_reset();
