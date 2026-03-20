@@ -319,6 +319,71 @@ uint64 sys_prlimit64(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  sys_getrlimit / sys_setrlimit — legacy rlimit syscalls            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * getrlimit(resource, old_limit_uaddr)
+ *   a0 = resource (RLIMIT_*)
+ *   a1 = old_limit (user pointer)
+ */
+uint64 sys_getrlimit(void) {
+    int resource;
+    uint64 old_addr;
+
+    argint(0, &resource);
+    argaddr(1, &old_addr);
+
+    if (resource < 0 || resource >= RLIMIT_NLIMITS)
+        return -EINVAL;
+
+    struct thread_group *tg = current->thread_group;
+
+    if (old_addr != 0) {
+        if (vm_copyout(current->vm, old_addr, (char *)&tg->rlim[resource],
+                       sizeof(struct rlimit)) < 0)
+            return -EFAULT;
+    }
+
+    return 0;
+}
+
+/*
+ * setrlimit(resource, new_limit_uaddr)
+ *   a0 = resource (RLIMIT_*)
+ *   a1 = new_limit (user pointer)
+ */
+uint64 sys_setrlimit(void) {
+    int resource;
+    uint64 new_addr;
+
+    argint(0, &resource);
+    argaddr(1, &new_addr);
+
+    if (resource < 0 || resource >= RLIMIT_NLIMITS)
+        return -EINVAL;
+
+    struct thread_group *tg = current->thread_group;
+
+    if (new_addr != 0) {
+        struct rlimit new_rl;
+        if (vm_copyin(current->vm, (char *)&new_rl, new_addr,
+                      sizeof(struct rlimit)) < 0)
+            return -EFAULT;
+
+        if (new_rl.rlim_cur > new_rl.rlim_max)
+            return -EINVAL;
+
+        if (new_rl.rlim_max > tg->rlim[resource].rlim_max)
+            return -EPERM;
+
+        tg->rlim[resource] = new_rl;
+    }
+
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /*  System-wide kernel statistics                                     */
 /* ------------------------------------------------------------------ */
 

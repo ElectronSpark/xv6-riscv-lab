@@ -196,6 +196,10 @@
 #define SYS_mq_timedsend_time64          887
 #define SYS_mq_timedreceive_time64       888
 
+// --- Resource limit stubs (high musl numbers) ---
+#define SYS_getrlimit       840
+#define SYS_setrlimit       841
+
 // --- Additional socket stubs (high musl numbers) ---
 #define SYS_sendmmsg        842
 
@@ -261,8 +265,10 @@
 #define SYS_epoll_pwait     986
 #define SYS_epoll_ctl       987
 #define SYS_epoll_create1   988
+#define SYS_eventfd2        985
 #define SYS_membarrier      998
 #define SYS_fadvise64       989
+#define SYS_prlimit64_musl  996
 
 // --- Power management (high number for musl compat) ---
 #define SYS_reboot          873

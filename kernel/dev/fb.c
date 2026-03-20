@@ -28,6 +28,18 @@
 
 /* ── I/O port helpers ────────────────────────────────────────────── */
 
+static inline void fb_outb(uint16 port, uint8 val)
+{
+    asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline uint8 fb_inb(uint16 port)
+{
+    uint8 val;
+    asm volatile("inb %1, %0" : "=a"(val) : "Nd"(port));
+    return val;
+}
+
 static inline void fb_outw(uint16 port, uint16 val)
 {
     asm volatile("outw %0, %1" : : "a"(val), "Nd"(port));
@@ -84,6 +96,24 @@ static void bga_set_mode(uint32 width, uint32 height, uint32 bpp)
     bga_write_reg(VBE_DISPI_INDEX_Y_OFFSET, 0);
     bga_write_reg(VBE_DISPI_INDEX_ENABLE,
                   VBE_DISPI_ENABLED | VBE_DISPI_LFB_ENABLED);
+
+    /*
+     * Ensure VGA Attribute Controller has PAS (Palette Address Source)
+     * bit set.  QEMU's vga_draw_graphic() checks ar_index & 0x20 and
+     * blanks the display if PAS is clear.  BGA mode setting does NOT
+     * touch the legacy VGA registers, so PAS may be left clear after
+     * SeaBIOS → kernel handoff.
+     */
+    fb_inb(0x3DA);          /* Reset AR flip-flop */
+    fb_outb(0x3C0, 0x20);   /* Set PAS bit, index 0 */
+
+    /* Misc Output Register: enable RAM access, color I/O base (0x3D?) */
+    fb_outb(0x3C2, 0x63);
+
+    /* Sequencer register 01h, bit 5 = "Screen Off" — ensure it's clear */
+    fb_outb(0x3C4, 0x01);
+    uint8 seq1 = fb_inb(0x3C5);
+    fb_outb(0x3C5, seq1 & ~0x20);
 
     fb_state.xres  = width;
     fb_state.yres  = height;
@@ -151,16 +181,48 @@ void fb_pci_init(uint8 bus, uint8 dev, uint8 func)
     }
     bga_set_mode(width, height, FB_DEFAULT_BPP);
 
+    /* Read back BGA registers to verify mode was actually set */
+    {
+        uint16 en  = bga_read_reg(VBE_DISPI_INDEX_ENABLE);
+        uint16 rxr = bga_read_reg(VBE_DISPI_INDEX_XRES);
+        uint16 ryr = bga_read_reg(VBE_DISPI_INDEX_YRES);
+        uint16 rbp = bga_read_reg(VBE_DISPI_INDEX_BPP);
+        printf("FB: BGA readback: enable=0x%x xres=%d yres=%d bpp=%d\n",
+               en, rxr, ryr, rbp);
+    }
+
     printf("FB: mode set to %dx%dx%d (pitch=%d, size=%d)\n",
            fb_state.xres, fb_state.yres, fb_state.bpp,
            fb_state.pitch, fb_state.fb_size);
 
-    /* Clear framebuffer to black */
+    /* Write a bright test pattern to verify LFB writes reach the VGA.
+     * Top 16 scanlines: bright blue. Rest: black. */
     {
         volatile uint32 *pixels = (volatile uint32 *)fb_state.fb_virt;
         uint32 npx = fb_state.xres * fb_state.yres;
+        /* Clear to black first */
         for (uint32 i = 0; i < npx; i++)
             pixels[i] = 0x00000000;
+        /* Bright blue bar at top */
+        uint32 bar_rows = 16;
+        for (uint32 y = 0; y < bar_rows && y < fb_state.yres; y++) {
+            for (uint32 x = 0; x < fb_state.xres; x++) {
+                pixels[y * fb_state.xres + x] = 0x000080FF; /* bright blue (BGRX) */
+            }
+        }
+        /* Also write a bright white cross at center for visibility */
+        uint32 cx = fb_state.xres / 2;
+        uint32 cy = fb_state.yres / 2;
+        for (uint32 i = 0; i < 40; i++) {
+            if (cx - 20 + i < fb_state.xres)
+                pixels[cy * fb_state.xres + cx - 20 + i] = 0x00FFFFFF;
+            if (cy - 20 + i < fb_state.yres)
+                pixels[(cy - 20 + i) * fb_state.xres + cx] = 0x00FFFFFF;
+        }
+        /* Read back a pixel to verify the write landed */
+        uint32 readback = pixels[0];
+        printf("FB: LFB test pattern written, readback pixel[0]=0x%x (expect 0x000080FF)\n",
+               readback);
     }
 
     /* Publish as detected — must be last so readers see consistent state */
@@ -374,6 +436,18 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if (either_copyin((char *)&cmd, 1, (uint64)arg, sizeof(cmd)) < 0)
             return -EFAULT;
 
+        /* One-time diagnostic */
+        {
+            static int blit_log = 0;
+            if (blit_log < 3) {
+                blit_log++;
+                printf("FB: GPU_BLIT #%d: x=%d y=%d w=%d h=%d src_pitch=%d pixels=0x%lx\n",
+                       blit_log, cmd.x, cmd.y, cmd.w, cmd.h, cmd.src_pitch, cmd.pixels);
+                printf("FB:   fb_virt=0x%lx fb_phys=0x%lx xres=%d\n",
+                       (uint64)fb_state.fb_virt, fb_state.fb_phys, fb_state.xres);
+            }
+        }
+
         /* Clip to screen bounds */
         if (cmd.x >= fb_state.xres || cmd.y >= fb_state.yres)
             return 0;
@@ -383,7 +457,9 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if (cmd.y + ch > fb_state.yres)
             ch = fb_state.yres - cmd.y;
 
-        /* Copy scanlines from userspace to LFB via bounce buffer */
+        /* Copy scanlines from userspace to LFB via bounce buffer.
+         * Use volatile write loop instead of memcpy to ensure MMIO writes
+         * are not optimized away. */
         uint8 kbuf[4096];
         uint32 max_px = sizeof(kbuf) / 4;
         volatile uint32 *fb = (volatile uint32 *)fb_state.fb_virt;
@@ -402,7 +478,10 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
                 if (either_copyin(kbuf, 1, src_addr + col * 4, chunk * 4) < 0)
                     return -EFAULT;
                 spin_lock(&fb_state.lock);
-                memcpy((void *)(dst + col), kbuf, chunk * 4);
+                /* Volatile write loop for MMIO safety */
+                uint32 *src = (uint32 *)kbuf;
+                for (uint32 p = 0; p < chunk; p++)
+                    dst[col + p] = src[p];
                 spin_unlock(&fb_state.lock);
                 col += chunk;
                 remaining -= chunk;

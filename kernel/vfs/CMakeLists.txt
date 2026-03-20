@@ -10,6 +10,7 @@ add_library(vfs_core OBJECT
     vfs_permission.c
     pipe.c
     unix_socket.c
+    eventfd.c
 )
 
 # Pull in filesystem implementations

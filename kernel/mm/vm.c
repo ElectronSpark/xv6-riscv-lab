@@ -766,10 +766,29 @@ vm_t *vm_copy(vm_t *src)
     vm_wlock(dst);
     uint64 idx = 0;
     void *mt_entry;
+    vma_t *last_vma = NULL;  /* duplicate detection for partial mtree_store_range */
     mt_for_each(&src->vm_mt, mt_entry, idx, MAPLE_MAX) {
         vma_t *vma = (vma_t *)mt_entry;
+
+        /* Skip duplicate: a prior partial mtree_store_range can leave
+         * the same VMA pointer in two disjoint maple tree ranges.
+         * Also skip freed VMAs (sentinel from __vma_free). */
+        if (vma == last_vma)
+            continue;
+        if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC)
+            continue;
+        last_vma = vma;
+
         vma_t *new_vma = vma_alloc(dst, vma->start, VMA_SIZE(vma), vma->flags);
         if (new_vma == NULL) {
+            /* If vma_alloc failed because the range already exists in dst,
+             * this is a non-consecutive duplicate from a partial
+             * mtree_store_range — skip it rather than failing. */
+            uint64 check = vma->start;
+            void *existing = mt_find(&dst->vm_mt, &check,
+                                     vma->start + VMA_SIZE(vma) - 1);
+            if (existing != NULL)
+                continue;
             vm_runlock(src);
             vm_wunlock(dst);
             vm_put(dst);

@@ -161,11 +161,15 @@ static void obj_free(lv_obj_t *obj)
 static int disp_init(void)
 {
     g_disp.fb_fd = open("/dev/fb0", O_RDWR);
-    if (g_disp.fb_fd < 0)
+    if (g_disp.fb_fd < 0) {
+        fprintf(stderr, "[disp] FAILED to open /dev/fb0: fd=%d\n", g_disp.fb_fd);
         return -1;
+    }
+    fprintf(stderr, "[disp] /dev/fb0 opened, fd=%d\n", g_disp.fb_fd);
 
     struct fb_var_screeninfo vinfo;
     if (ioctl(g_disp.fb_fd, FBIOGET_VSCREENINFO, &vinfo) < 0) {
+        fprintf(stderr, "[disp] FBIOGET_VSCREENINFO ioctl FAILED\n");
         close(g_disp.fb_fd);
         return -1;
     }
@@ -175,10 +179,14 @@ static int disp_init(void)
     g_disp.bpp    = vinfo.bits_per_pixel;
     g_disp.pitch  = vinfo.pitch;
     g_disp.fb_size = g_disp.pitch * g_disp.height;
+    fprintf(stderr, "[disp] %dx%dx%d pitch=%d size=%d\n",
+            g_disp.width, g_disp.height, g_disp.bpp,
+            g_disp.pitch, g_disp.fb_size);
 
     /* Allocate local rendering buffer */
     g_disp.framebuf = (uint32_t *)malloc(g_disp.fb_size);
     if (!g_disp.framebuf) {
+        fprintf(stderr, "[disp] malloc framebuf FAILED (size=%d)\n", g_disp.fb_size);
         close(g_disp.fb_fd);
         return -1;
     }
@@ -187,20 +195,25 @@ static int disp_init(void)
     /* Probe GPU acceleration: try a 1x1 fill rect ioctl */
     struct fb_gpu_fill probe = { .x = 0, .y = 0, .w = 0, .h = 0, .color = 0 };
     g_disp.gpu_accel = (ioctl(g_disp.fb_fd, FB_GPU_FILL_RECT, &probe) == 0);
+    fprintf(stderr, "[disp] gpu_accel=%d\n", g_disp.gpu_accel);
 
     /* Allocate shadow buffer for GPU smart flush (partial blit) */
     if (g_disp.gpu_accel) {
         g_shadow = (uint32_t *)malloc(g_disp.fb_size);
         if (g_shadow)
             memset(g_shadow, 0, g_disp.fb_size);
+        fprintf(stderr, "[disp] shadow=%p\n", (void *)g_shadow);
     }
     g_force_full = 1;
 
     return 0;
 }
 
+static int g_flush_count = 0;
+
 static void disp_flush(void)
 {
+    int rc;
     if (g_disp.gpu_accel) {
         /* Use GPU blit to send the entire framebuffer */
         struct fb_gpu_blit cmd;
@@ -210,10 +223,17 @@ static void disp_flush(void)
         cmd.h = g_disp.height;
         cmd.src_pitch = g_disp.width * 4;
         cmd.pixels = (uint64_t)(uintptr_t)g_disp.framebuf;
-        ioctl(g_disp.fb_fd, FB_GPU_BLIT, &cmd);
+        rc = ioctl(g_disp.fb_fd, FB_GPU_BLIT, &cmd);
+        if (g_flush_count < 3)
+            fprintf(stderr, "[disp-flush] GPU full blit %dx%d rc=%d pixels=%p\n",
+                    g_disp.width, g_disp.height, rc, (void *)g_disp.framebuf);
     } else {
-        write(g_disp.fb_fd, g_disp.framebuf, g_disp.fb_size);
+        rc = (int)write(g_disp.fb_fd, g_disp.framebuf, g_disp.fb_size);
+        if (g_flush_count < 3)
+            fprintf(stderr, "[disp-flush] write() rc=%d size=%d\n",
+                    rc, g_disp.fb_size);
     }
+    g_flush_count++;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -1834,6 +1854,20 @@ void lv_refr_now(void)
      * Falls back to full-screen blit on first frame or if shadow
      * buffer is unavailable.
      * ────────────────────────────────────────────────────────────── */
+    {
+        static int refr_log = 0;
+        if (refr_log < 3) {
+            refr_log++;
+            fprintf(stderr, "[refr] frame %d: shadow=%p gpu=%d force_full=%d children=%d\n",
+                    refr_log, (void *)g_shadow, g_disp.gpu_accel,
+                    g_force_full, g_screen.child_count);
+            /* Sample a few pixels from the local buffer to confirm content */
+            fprintf(stderr, "[refr] buf[0]=%08x buf[100]=%08x buf[midscreen]=%08x\n",
+                    g_disp.framebuf[0],
+                    g_disp.framebuf[100],
+                    g_disp.framebuf[g_disp.width * (g_disp.height/2) + g_disp.width/2]);
+        }
+    }
     if (g_shadow && g_disp.gpu_accel && !g_force_full) {
         gpu_smart_flush();
     } else {

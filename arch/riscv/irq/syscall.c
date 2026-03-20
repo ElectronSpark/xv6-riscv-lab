@@ -434,9 +434,12 @@ extern uint64 sys_kevent_wait(void);
 extern uint64 sys_epoll_create1(void);
 extern uint64 sys_epoll_ctl(void);
 extern uint64 sys_epoll_pwait(void);
+extern uint64 sys_eventfd2(void);
 
 // resource limits (accounting.c)
 extern uint64 sys_prlimit64(void);
+extern uint64 sys_getrlimit(void);
+extern uint64 sys_setrlimit(void);
 extern uint64 sys_kstats(void);
 
 // network configuration (lwip_port/lwip_glue.c)
@@ -658,6 +661,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_pselect6_time64] sys_pselect6,
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
+    [SYS_eventfd2] sys_eventfd2,
     [SYS_epoll_pwait] sys_epoll_pwait,
     [SYS_epoll_ctl] sys_epoll_ctl,
     [SYS_epoll_create1] sys_epoll_create1,
@@ -701,6 +705,10 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_fadvise64] sys_fadvise64,
     [SYS_poweroff] sys_poweroff,
     [SYS_reboot] sys_reboot,
+    /* Resource limit syscalls (musl high numbers) */
+    [SYS_getrlimit] sys_getrlimit,
+    [SYS_setrlimit] sys_setrlimit,
+    [SYS_prlimit64_musl] sys_prlimit64,
 };
 
 void syscall(void) {

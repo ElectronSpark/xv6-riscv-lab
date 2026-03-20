@@ -6,7 +6,7 @@
 
 struct vfs_file;
 
-#define PIPESIZE PAGE_SIZE
+#define PIPESIZE (16 * PAGE_SIZE)
 
 #define PIPE_FLAGS_READABLE 1
 #define PIPE_FLAGS_WRITABLE 2

@@ -42,7 +42,7 @@ struct pipe *pipe_alloc(int flags) {
         return ERR_PTR(-ENOMEM);
     }
 
-    void *data = kalloc();
+    void *data = kvmalloc(PIPESIZE);
     if (data == NULL) {
         slab_free(pi);
         return ERR_PTR(-ENOMEM);
@@ -100,7 +100,7 @@ void pipe_close(struct pipe *pi, int writable) {
         spin_unlock(&pi->reader_lock);
     }
     if (freed) {
-        kfree(pi->data);
+        kvfree(pi->data);
         slab_free(pi);
     }
 }

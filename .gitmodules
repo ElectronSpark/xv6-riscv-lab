@@ -46,3 +46,60 @@
 [submodule "user/vim"]
 	path = user/vim
 	url = https://github.com/ElectronSpark/vim.git
+[submodule "user/netsurf-all/buildsystem"]
+	path = user/netsurf-all/buildsystem
+	url = git://git.netsurf-browser.org/buildsystem.git
+[submodule "user/netsurf-all/libparserutils"]
+	path = user/netsurf-all/libparserutils
+	url = git://git.netsurf-browser.org/libparserutils.git
+[submodule "user/netsurf-all/libwapcaplet"]
+	path = user/netsurf-all/libwapcaplet
+	url = git://git.netsurf-browser.org/libwapcaplet.git
+[submodule "user/netsurf-all/libhubbub"]
+	path = user/netsurf-all/libhubbub
+	url = git://git.netsurf-browser.org/libhubbub.git
+[submodule "user/netsurf-all/libcss"]
+	path = user/netsurf-all/libcss
+	url = git://git.netsurf-browser.org/libcss.git
+[submodule "user/netsurf-all/libdom"]
+	path = user/netsurf-all/libdom
+	url = git://git.netsurf-browser.org/libdom.git
+[submodule "user/netsurf-all/libnsbmp"]
+	path = user/netsurf-all/libnsbmp
+	url = git://git.netsurf-browser.org/libnsbmp.git
+[submodule "user/netsurf-all/libnsgif"]
+	path = user/netsurf-all/libnsgif
+	url = git://git.netsurf-browser.org/libnsgif.git
+[submodule "user/netsurf-all/libnsutils"]
+	path = user/netsurf-all/libnsutils
+	url = git://git.netsurf-browser.org/libnsutils.git
+[submodule "user/netsurf-all/libnslog"]
+	path = user/netsurf-all/libnslog
+	url = git://git.netsurf-browser.org/libnslog.git
+[submodule "user/netsurf-all/libnsfb"]
+	path = user/netsurf-all/libnsfb
+	url = git://git.netsurf-browser.org/libnsfb.git
+[submodule "user/netsurf-all/libsvgtiny"]
+	path = user/netsurf-all/libsvgtiny
+	url = git://git.netsurf-browser.org/libsvgtiny.git
+[submodule "user/netsurf-all/libnspsl"]
+	path = user/netsurf-all/libnspsl
+	url = git://git.netsurf-browser.org/libnspsl.git
+[submodule "user/netsurf-all/netsurf"]
+	path = user/netsurf-all/netsurf
+	url = git://git.netsurf-browser.org/netsurf.git
+[submodule "user/libpng"]
+	path = user/libpng
+	url = https://github.com/pnggroup/libpng.git
+[submodule "user/libjpeg-turbo"]
+	path = user/libjpeg-turbo
+	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
+[submodule "user/curl"]
+	path = user/curl
+	url = https://github.com/curl/curl.git
+[submodule "user/libexpat"]
+	path = user/libexpat
+	url = https://github.com/libexpat/libexpat.git
+[submodule "user/freetype"]
+	path = user/freetype
+	url = https://gitlab.freedesktop.org/freetype/freetype.git

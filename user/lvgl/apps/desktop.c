@@ -260,6 +260,10 @@ static int sysmon_refresh_ctr;
 #define TERM_ESC_MAX   32
 #define TERM_MAX       4       /* max simultaneous terminals */
 
+/* Per-cell attribute bits */
+#define TATTR_REVERSE  0x01
+#define TATTR_BOLD     0x02
+
 typedef struct {
     int         active;            /* slot in use */
     lv_obj_t   *win;              /* window widget */
@@ -268,7 +272,10 @@ typedef struct {
     int         master_fd;        /* PTY master fd */
     int         shell_pid;        /* child shell PID */
     char        buf[TERM_ROWS][TERM_COLS];
+    uint8_t     attr[TERM_ROWS][TERM_COLS];  /* per-cell SGR attributes */
+    uint8_t     cur_attr;                     /* current SGR state */
     int         row, col;
+    int         saved_row, saved_col;           /* ESC 7/8 saved cursor */
     int         esc_state;        /* 0=normal, 1=ESC, 2=CSI */
     char        esc_buf[TERM_ESC_MAX];
     int         esc_idx;
@@ -526,7 +533,7 @@ static void on_terminal_close(lv_obj_t *obj, lv_event_t e)
     /* Kill shell and close PTY */
     if (t->shell_pid > 0) {
         kill(t->shell_pid, SIGKILL);
-        waitpid(t->shell_pid, NULL, 0);
+        waitpid(t->shell_pid, NULL, WNOHANG);
     }
     if (t->master_fd >= 0)
         close(t->master_fd);
@@ -2727,17 +2734,22 @@ static term_instance_t *term_alloc(void)
 
 static void ti_clear(term_instance_t *t)
 {
-    for (int r = 0; r < TERM_ROWS; r++)
+    for (int r = 0; r < TERM_ROWS; r++) {
         memset(t->buf[r], ' ', TERM_COLS);
+        memset(t->attr[r], 0, TERM_COLS);
+    }
     t->row = t->col = 0;
     t->dirty = 1;
 }
 
 static void ti_scroll_up(term_instance_t *t)
 {
-    for (int r = 0; r < TERM_ROWS - 1; r++)
+    for (int r = 0; r < TERM_ROWS - 1; r++) {
         memcpy(t->buf[r], t->buf[r + 1], TERM_COLS);
+        memcpy(t->attr[r], t->attr[r + 1], TERM_COLS);
+    }
     memset(t->buf[TERM_ROWS - 1], ' ', TERM_COLS);
+    memset(t->attr[TERM_ROWS - 1], 0, TERM_COLS);
     t->dirty = 1;
 }
 
@@ -2772,11 +2784,13 @@ static void ti_putchar(term_instance_t *t, char c)
         if (t->col > 0) {
             t->col--;
             t->buf[t->row][t->col] = ' ';
+            t->attr[t->row][t->col] = 0;
         }
         break;
     default:
         if ((unsigned char)c >= 32) {
             t->buf[t->row][t->col] = c;
+            t->attr[t->row][t->col] = t->cur_attr;
             t->col++;
             if (t->col >= TERM_COLS) {
                 t->col = 0;
@@ -2841,25 +2855,50 @@ static void ti_process_csi(term_instance_t *t)
               ti_clear(t);
           } else if (mode == 0) {
               memset(&t->buf[t->row][t->col], ' ', TERM_COLS - t->col);
-              for (int r = t->row + 1; r < TERM_ROWS; r++)
+              memset(&t->attr[t->row][t->col], 0, TERM_COLS - t->col);
+              for (int r = t->row + 1; r < TERM_ROWS; r++) {
                   memset(t->buf[r], ' ', TERM_COLS);
+                  memset(t->attr[r], 0, TERM_COLS);
+              }
           } else if (mode == 1) {
-              for (int r = 0; r < t->row; r++)
+              for (int r = 0; r < t->row; r++) {
                   memset(t->buf[r], ' ', TERM_COLS);
+                  memset(t->attr[r], 0, TERM_COLS);
+              }
               memset(t->buf[t->row], ' ', t->col + 1);
+              memset(t->attr[t->row], 0, t->col + 1);
           }
         } break;
     case 'K':
         { int mode = (nparam > 0) ? params[0] : 0;
-          if (mode == 0)
+          if (mode == 0) {
               memset(&t->buf[t->row][t->col], ' ', TERM_COLS - t->col);
-          else if (mode == 1)
+              memset(&t->attr[t->row][t->col], 0, TERM_COLS - t->col);
+          } else if (mode == 1) {
               memset(t->buf[t->row], ' ', t->col + 1);
-          else if (mode == 2)
+              memset(t->attr[t->row], 0, t->col + 1);
+          } else if (mode == 2) {
               memset(t->buf[t->row], ' ', TERM_COLS);
+              memset(t->attr[t->row], 0, TERM_COLS);
+          }
         } break;
     case 'm':
-        break;
+        { /* SGR — Select Graphic Rendition */
+          if (nparam == 0) {
+              /* ESC[m with no params = reset */
+              t->cur_attr = 0;
+          }
+          for (int p = 0; p < nparam; p++) {
+              switch (params[p]) {
+              case 0:  t->cur_attr = 0; break;                    /* reset */
+              case 1:  t->cur_attr |= TATTR_BOLD; break;          /* bold */
+              case 7:  t->cur_attr |= TATTR_REVERSE; break;       /* reverse */
+              case 22: t->cur_attr &= ~TATTR_BOLD; break;         /* bold off */
+              case 27: t->cur_attr &= ~TATTR_REVERSE; break;      /* reverse off */
+              default: break;  /* ignore colors and other attrs */
+              }
+          }
+        } break;
     case 'G':
         t->col = (nparam > 0 && params[0] > 0) ? params[0] - 1 : 0;
         if (t->col >= TERM_COLS) t->col = TERM_COLS - 1;
@@ -2871,27 +2910,125 @@ static void ti_process_csi(term_instance_t *t)
     case 'P':
         { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
           int rem = TERM_COLS - t->col - n;
-          if (rem > 0)
+          if (rem > 0) {
               memmove(&t->buf[t->row][t->col],
                       &t->buf[t->row][t->col + n], rem);
+              memmove(&t->attr[t->row][t->col],
+                      &t->attr[t->row][t->col + n], rem);
+          }
           memset(&t->buf[t->row][TERM_COLS - n], ' ', n);
+          memset(&t->attr[t->row][TERM_COLS - n], 0, n);
         } break;
     case '@':
         { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
           int rem = TERM_COLS - t->col - n;
-          if (rem > 0)
+          if (rem > 0) {
               memmove(&t->buf[t->row][t->col + n],
                       &t->buf[t->row][t->col], rem);
+              memmove(&t->attr[t->row][t->col + n],
+                      &t->attr[t->row][t->col], rem);
+          }
           memset(&t->buf[t->row][t->col], ' ', n);
+          memset(&t->attr[t->row][t->col], 0, n);
+        } break;
+    case 'h': case 'l':
+        /* Private mode set/reset: ESC [ ? Pn h/l */
+        /* ?1049h/l = alternate/normal screen buffer → clear screen */
+        if (t->esc_idx > 0 && t->esc_buf[0] == '?' && nparam > 0 && params[0] == 1049) {
+            ti_clear(t);
+        }
+        /* All other private modes (mouse, bracketed paste) silently ignored */
+        break;
+    case 'r':
+        /* DECSTBM: Set Top and Bottom Margins (scroll region) — ignore for now */
+        break;
+    case 'L':
+        /* Insert N lines at cursor, scrolling down */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          for (int rr = TERM_ROWS - 1; rr >= t->row + n; rr--) {
+              memcpy(t->buf[rr], t->buf[rr - n], TERM_COLS);
+              memcpy(t->attr[rr], t->attr[rr - n], TERM_COLS);
+          }
+          for (int rr = t->row; rr < t->row + n && rr < TERM_ROWS; rr++) {
+              memset(t->buf[rr], ' ', TERM_COLS);
+              memset(t->attr[rr], 0, TERM_COLS);
+          }
+        } break;
+    case 'M':
+        /* Delete N lines at cursor, scrolling up */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          for (int rr = t->row; rr < TERM_ROWS - n; rr++) {
+              memcpy(t->buf[rr], t->buf[rr + n], TERM_COLS);
+              memcpy(t->attr[rr], t->attr[rr + n], TERM_COLS);
+          }
+          for (int rr = TERM_ROWS - n; rr < TERM_ROWS; rr++) {
+              memset(t->buf[rr], ' ', TERM_COLS);
+              memset(t->attr[rr], 0, TERM_COLS);
+          }
+        } break;
+    case 'X':
+        /* Erase N characters (fill with spaces, don't move cursor) */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          int end = t->col + n;
+          if (end > TERM_COLS) end = TERM_COLS;
+          memset(&t->buf[t->row][t->col], ' ', end - t->col);
+          memset(&t->attr[t->row][t->col], 0, end - t->col);
+        } break;
+    case 'S':
+        /* Scroll up N lines */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          for (int s = 0; s < n; s++) ti_scroll_up(t);
+        } break;
+    case 'T':
+        /* Scroll down N lines */
+        { int n = (nparam > 0 && params[0] > 0) ? params[0] : 1;
+          for (int s = 0; s < n; s++) {
+              for (int rr = TERM_ROWS - 1; rr > 0; rr--) {
+                  memcpy(t->buf[rr], t->buf[rr-1], TERM_COLS);
+                  memcpy(t->attr[rr], t->attr[rr-1], TERM_COLS);
+              }
+              memset(t->buf[0], ' ', TERM_COLS);
+              memset(t->attr[0], 0, TERM_COLS);
+          }
         } break;
     default:
+        /* Log unhandled CSI sequences */
+        { static int unk_csi = 0;
+          if (unk_csi < 20) {
+              unk_csi++;
+              char seq[64];
+              int slen = t->esc_idx < 60 ? t->esc_idx : 60;
+              memcpy(seq, t->esc_buf, slen);
+              seq[slen] = '\0';
+              fprintf(stderr, "[term-csi?] unknown: ESC[%s (final='%c')\n", seq, final_ch);
+          }
+        }
         break;
     }
     t->dirty = 1;
 }
 
+static int g_hexdump_done = 0;
+
 static void ti_feed(term_instance_t *t, const char *data, int len)
 {
+    /* One-time hex dump of first large data burst (likely links rendering) */
+    if (!g_hexdump_done && len > 100) {
+        g_hexdump_done = 1;
+        int dlen = len < 256 ? len : 256;
+        fprintf(stderr, "[term-hex] %d bytes (showing %d):\n", len, dlen);
+        for (int hi = 0; hi < dlen; hi += 16) {
+            fprintf(stderr, "  %04x: ", hi);
+            for (int hj = 0; hj < 16 && hi+hj < dlen; hj++)
+                fprintf(stderr, "%02x ", (unsigned char)data[hi+hj]);
+            fprintf(stderr, " |");
+            for (int hj = 0; hj < 16 && hi+hj < dlen; hj++) {
+                unsigned char hc = data[hi+hj];
+                fprintf(stderr, "%c", (hc >= 32 && hc < 127) ? hc : '.');
+            }
+            fprintf(stderr, "|\n");
+        }
+    }
     for (int i = 0; i < len; i++) {
         char c = data[i];
 
@@ -2899,9 +3036,44 @@ static void ti_feed(term_instance_t *t, const char *data, int len)
             if (c == '[') {
                 t->esc_state = 2;
                 t->esc_idx = 0;
+            } else if (c == '(' || c == ')' || c == '*' || c == '+') {
+                /* Charset designation: ESC ( X, ESC ) X — eat next byte */
+                t->esc_state = 3;
+            } else if (c == 'M') {
+                /* ESC M = Reverse Index: move cursor up, scroll down if at top */
+                if (t->row > 0) {
+                    t->row--;
+                } else {
+                    /* Scroll down: shift all rows down by 1 */
+                    for (int r = TERM_ROWS - 1; r > 0; r--) {
+                        memcpy(t->buf[r], t->buf[r-1], TERM_COLS);
+                        memcpy(t->attr[r], t->attr[r-1], TERM_COLS);
+                    }
+                    memset(t->buf[0], ' ', TERM_COLS);
+                    memset(t->attr[0], 0, TERM_COLS);
+                    t->dirty = 1;
+                }
+                t->esc_state = 0;
+            } else if (c == '7') {
+                /* ESC 7 = Save cursor position */
+                t->saved_row = t->row;
+                t->saved_col = t->col;
+                t->esc_state = 0;
+            } else if (c == '8') {
+                /* ESC 8 = Restore cursor position */
+                t->row = t->saved_row;
+                t->col = t->saved_col;
+                t->esc_state = 0;
             } else {
+                /* Other single-char sequences — ignore */
                 t->esc_state = 0;
             }
+            continue;
+        }
+
+        if (t->esc_state == 3) {
+            /* Eat the charset designator byte (e.g. '0', 'B') */
+            t->esc_state = 0;
             continue;
         }
 
@@ -2921,35 +3093,142 @@ static void ti_feed(term_instance_t *t, const char *data, int len)
     }
 }
 
-static void ti_refresh_label(term_instance_t *t)
+/*
+ * Custom render callback: draw the terminal buffer cell-by-cell directly
+ * into the framebuffer, with proper reverse-video support.
+ */
+static int g_term_render_dbg_count = 0;
+static int g_term_bufdump_done = 0;
+
+static void term_render_cb(struct lv_obj *obj, int ax, int ay,
+                           uint32_t *fb, int fb_w)
 {
-    if (!t->label || !t->dirty) return;
-    t->dirty = 0;
+    term_instance_t *t = (term_instance_t *)obj->user_data;
+    if (!t || !t->active) return;
 
-    /* Temporarily insert cursor character */
-    int cr = t->row, cc = t->col;
-    if (cr >= TERM_ROWS) cr = TERM_ROWS - 1;
-    if (cc >= TERM_COLS) cc = TERM_COLS - 1;
-    char saved = t->buf[cr][cc];
-    int is_focused = (g_term_focus >= 0 && &g_terms[g_term_focus] == t);
-    if (is_focused)
-        t->buf[cr][cc] = '_';
+    lv_disp_t *disp = lv_disp_get();
+    int fb_h = disp ? (int)disp->height : 768;
 
-    char display[TERM_ROWS * (TERM_COLS + 1) + 1];
-    int pos = 0;
-    for (int r = 0; r < TERM_ROWS; r++) {
-        int len = TERM_COLS;
-        while (len > 0 && t->buf[r][len - 1] == ' ') len--;
-        memcpy(&display[pos], t->buf[r], len);
-        pos += len;
-        if (r < TERM_ROWS - 1)
-            display[pos++] = '\n';
+    if (g_term_render_dbg_count < 4) {
+        g_term_render_dbg_count++;
+        fprintf(stderr, "[term-render] ax=%d ay=%d obj_w=%d obj_h=%d fb_w=%d fb_h=%d buf00='%c' row=%d col=%d\n",
+                ax, ay, obj->w, obj->h, fb_w, fb_h,
+                t->buf[0][0] >= 32 ? t->buf[0][0] : '?', t->row, t->col);
     }
-    display[pos] = '\0';
-    lv_label_set_text(t->label, display);
 
-    /* Restore original character */
-    t->buf[cr][cc] = saved;
+    lv_color_t fg_normal = lv_color_make(192, 192, 192);
+    lv_color_t bg_normal = lv_color_make(0, 0, 0);
+    lv_color_t fg_reverse = lv_color_make(0, 0, 0);
+    lv_color_t bg_reverse = lv_color_make(192, 192, 192);
+
+    int is_focused = (g_term_focus >= 0 && &g_terms[g_term_focus] == t);
+
+    for (int r = 0; r < TERM_ROWS; r++) {
+        for (int c = 0; c < TERM_COLS; c++) {
+            int px = ax + c * LV_FONT_WIDTH;
+            int py = ay + r * LV_FONT_HEIGHT;
+            char ch = t->buf[r][c];
+            uint8_t at = t->attr[r][c];
+            int rev = !!(at & TATTR_REVERSE);
+
+            /* Cursor: show as reverse block on focused terminal */
+            if (is_focused && r == t->row && c == t->col)
+                rev = !rev;
+
+            lv_color_t fg = rev ? fg_reverse : fg_normal;
+            lv_color_t bg = rev ? bg_reverse : bg_normal;
+
+            /* Draw cell background if reversed */
+            if (rev) {
+                uint32_t pixel = ((uint32_t)bg.alpha << 24) |
+                                 ((uint32_t)bg.red << 16) |
+                                 ((uint32_t)bg.green << 8) |
+                                 (uint32_t)bg.blue;
+                for (int yr = 0; yr < LV_FONT_HEIGHT; yr++) {
+                    int yy = py + yr;
+                    if (yy < 0 || yy >= fb_h) continue;
+                    for (int xr = 0; xr < LV_FONT_WIDTH; xr++) {
+                        int xx = px + xr;
+                        if (xx < 0 || xx >= fb_w) continue;
+                        fb[yy * fb_w + xx] = pixel;
+                    }
+                }
+            }
+
+            /* Draw character glyph */
+            if (ch >= 32 && ch <= 126)
+                lv_font_draw_char(fb, fb_w, fb_h, px, py, ch, fg);
+        }
+    }
+
+    /* One-time diagnostic: verify pixels are actually drawn */
+    if (!g_term_bufdump_done && t->buf[0][0] != ' ') {
+        g_term_bufdump_done = 1;
+
+        /* Draw a bright GREEN 8x8 block at top-left of terminal area.
+         * If user can see this green block, the framebuffer pipeline works. */
+        for (int gy = 0; gy < 8; gy++) {
+            for (int gx = 0; gx < 8; gx++) {
+                int gpx = ax + gx, gpy = ay + gy;
+                if (gpx >= 0 && gpx < fb_w && gpy >= 0 && gpy < fb_h)
+                    fb[gpy * fb_w + gpx] = 0xFF00FF00; /* bright green */
+            }
+        }
+
+        /* Multi-point pixel sampling of the first non-space char */
+        int sr = 0, sc = -1;
+        for (int c = 0; c < TERM_COLS; c++) {
+            if (t->buf[sr][c] != ' ') { sc = c; break; }
+        }
+        if (sc >= 0) {
+            char ch = t->buf[sr][sc];
+            int cpx = ax + sc * LV_FONT_WIDTH;
+            int cpy = ay + sr * LV_FONT_HEIGHT;
+            fprintf(stderr, "[term-pixel-multi] char='%c' at cell(%d,%d) px=(%d,%d):\n",
+                    ch, sr, sc, cpx, cpy);
+            /* Sample 8 positions across the glyph */
+            for (int col = 0; col < 8; col++) {
+                int spx = cpx + col;
+                int spy = cpy + 6; /* row 6 in glyph — most chars have pixels here */
+                if (spx >= 0 && spx < fb_w && spy >= 0 && spy < fb_h) {
+                    uint32_t pval = fb[spy * fb_w + spx];
+                    fprintf(stderr, "  col%d: (%d,%d)=0x%08x%s\n",
+                            col, spx, spy, pval,
+                            pval != 0xFF000000 ? " <-- NON-BLACK" : "");
+                }
+            }
+            /* Count non-black pixels in the first 3 char cells */
+            int nonblack = 0;
+            for (int r = 0; r < LV_FONT_HEIGHT; r++) {
+                for (int c2 = 0; c2 < 3 * LV_FONT_WIDTH; c2++) {
+                    int px2 = cpx + c2, py2 = cpy + r;
+                    if (px2 >= 0 && px2 < fb_w && py2 >= 0 && py2 < fb_h) {
+                        if (fb[py2 * fb_w + px2] != 0xFF000000)
+                            nonblack++;
+                    }
+                }
+            }
+            fprintf(stderr, "[term-pixel-count] %d non-black pixels in first 3 chars\n",
+                    nonblack);
+        }
+
+        /* Report clip state — if clipped, font rendering may be hidden */
+        extern int g_clip_active, g_clip_x1, g_clip_y1, g_clip_x2, g_clip_y2;
+        fprintf(stderr, "[term-clip] g_clip_active=%d",  g_clip_active);
+        if (g_clip_active)
+            fprintf(stderr, " rect=(%d,%d)-(%d,%d)", g_clip_x1, g_clip_y1,
+                    g_clip_x2, g_clip_y2);
+        fprintf(stderr, "\n");
+    }
+}
+
+static void ti_refresh_dirty(term_instance_t *t)
+{
+    if (!t->dirty) return;
+    /* The actual rendering is done by term_render_cb during the
+     * LVGL render pass.  We just need to make sure the widget is
+     * marked dirty so it gets redrawn. */
+    t->dirty = 0;
 }
 
 /* Focus a terminal — route keyboard to it */
@@ -3090,7 +3369,12 @@ static void term_kbd_cb(lv_kbd_event_t *ev, void *user_data)
     char c = (char)key;
     if (c == '\n') c = '\r';
 
-    write(t->master_fd, &c, 1);
+    static int kbd_dbg = 0;
+    ssize_t wr = write(t->master_fd, &c, 1);
+    if (kbd_dbg < 10) {
+        kbd_dbg++;
+        fprintf(stderr, "[term-kbd] key=0x%02x wr=%d fd=%d\n", (unsigned char)c, (int)wr, t->master_fd);
+    }
 }
 
 static void term_poll_all(void)
@@ -3100,12 +3384,49 @@ static void term_poll_all(void)
         if (!t->active || t->master_fd < 0) continue;
 
         char buf[512];
+        int total = 0;
         for (;;) {
             int n = read(t->master_fd, buf, sizeof(buf));
             if (n <= 0) break;
             ti_feed(t, buf, n);
+            total += n;
         }
-        ti_refresh_label(t);
+        if (total > 0) {
+            static int poll_dbg = 0;
+            if (poll_dbg < 20) {
+                poll_dbg++;
+                fprintf(stderr, "[term-poll] term %d: read %d bytes, buf[0][0]='%c'(0x%02x) row=%d col=%d esc=%d\n",
+                        i, total, t->buf[0][0] >= 32 ? t->buf[0][0] : '?',
+                        (unsigned char)t->buf[0][0], t->row, t->col, t->esc_state);
+            }
+            /* Dump buffer after large read (links rendering) — separate counter
+             * so it fires even if the render_cb dump already triggered. */
+            {
+                static int links_dump_count = 0;
+                if (total > 500 && links_dump_count < 3) {
+                    links_dump_count++;
+                    fprintf(stderr, "[term-links-dump] after %d bytes, rows 0-%d:\n",
+                            total, TERM_ROWS - 1);
+                    for (int dr = 0; dr < TERM_ROWS; dr++) {
+                        char line[TERM_COLS + 1];
+                        memcpy(line, t->buf[dr], TERM_COLS);
+                        line[TERM_COLS] = '\0';
+                        for (int e = TERM_COLS - 1; e >= 0 && line[e] == ' '; e--)
+                            line[e] = '\0';
+                        if (line[0] != '\0')
+                            fprintf(stderr, "  row%02d: \"%s\"\n", dr, line);
+                    }
+                    /* Show attr map for rows with content */
+                    for (int dr = 0; dr < 3; dr++) {
+                        fprintf(stderr, "  attr%02d:", dr);
+                        for (int c = 0; c < TERM_COLS; c++)
+                            fprintf(stderr, "%x", t->attr[dr][c]);
+                        fprintf(stderr, "\n");
+                    }
+                }
+            }
+        }
+        ti_refresh_dirty(t);
     }
 }
 
@@ -3185,11 +3506,12 @@ static void create_terminal(void)
 
     lv_obj_t *c = lv_win_get_content(t->win);
     lv_obj_set_style_bg_color(c, lv_color_make(0, 0, 0));
-
-    t->label = lv_label_create(c);
-    lv_obj_set_pos(t->label, 0, 0);
-    lv_obj_set_style_text_color(t->label, lv_color_make(192, 192, 192));
-    lv_label_set_text(t->label, "");
+    c->padding = 0;  /* no padding — terminal fills entire content area */
+    c->render_cb = term_render_cb;
+    c->user_data = t;
+    t->label = NULL; /* rendering handled by term_render_cb */
+    fprintf(stderr, "[term-create] slot=%d win=%p content=%p render_cb=%p user_data=%p\n",
+            slot, (void*)t->win, (void*)c, (void*)(uintptr_t)c->render_cb, c->user_data);
 
     /* Focus this new terminal */
     term_focus(slot);
@@ -3483,6 +3805,11 @@ int main(int argc, char *argv[])
 
         lv_timer_handler();
         term_poll_all();
+        { static int __hb = 0;
+          if (++__hb % 120 == 0)
+              fprintf(stderr, "[desktop-hb] frame %d, terms active: t0=%d t1=%d\n",
+                      __hb, g_terms[0].active, g_terms[1].active);
+        }
 
         /* Update dynamic taskbar button colors based on window state */
         {

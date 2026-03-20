@@ -2057,6 +2057,458 @@ endif()
 set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
 
 # ==============================================================================
+# NetSurf — Graphical web browser (framebuffer, cross-compiled against musl)
+# ==============================================================================
+# External dependencies: libpng, libjpeg-turbo, freetype, libexpat, curl
+# Internal NetSurf libraries: libwapcaplet, libparserutils, libhubbub, libcss,
+#   libdom, libnsfb, libnsgif, libnsbmp, libnsutils, libnslog, libnspsl,
+#   libsvgtiny
+# All added as git submodules.
+# ==============================================================================
+
+set(NETSURF_ALL_DIR "${CMAKE_SOURCE_DIR}/user/netsurf-all")
+set(NETSURF_PREFIX "${CMAKE_BINARY_DIR}/netsurf-prefix")
+set(NETSURF_BIN "${NETSURF_PREFIX}/bin/netsurf")
+set(NETSURF_FS_BIN "${MUSL_SYSROOT}/bin/netsurf")
+
+# External dependency source dirs
+set(LIBPNG_SRC_DIR "${CMAKE_SOURCE_DIR}/user/libpng")
+set(LIBJPEG_SRC_DIR "${CMAKE_SOURCE_DIR}/user/libjpeg-turbo")
+set(FREETYPE_SRC_DIR "${CMAKE_SOURCE_DIR}/user/freetype")
+set(LIBEXPAT_SRC_DIR "${CMAKE_SOURCE_DIR}/user/libexpat")
+set(CURL_SRC_DIR "${CMAKE_SOURCE_DIR}/user/curl")
+
+# Build directories
+set(LIBPNG_BUILD_DIR "${CMAKE_BINARY_DIR}/libpng/build-xv6")
+set(LIBJPEG_BUILD_DIR "${CMAKE_BINARY_DIR}/libjpeg-turbo/build-xv6")
+set(FREETYPE_BUILD_DIR "${CMAKE_BINARY_DIR}/freetype/build-xv6")
+set(LIBEXPAT_BUILD_DIR "${CMAKE_BINARY_DIR}/libexpat/build-xv6")
+set(CURL_BUILD_DIR "${CMAKE_BINARY_DIR}/curl/build-xv6")
+
+# Common cross-compilation flags for autotools-based projects
+set(NETSURF_CFLAGS "--sysroot=${MUSL_SYSROOT} -O2 -nostdinc -ffreestanding -fno-common -fno-pie -no-pie ${USER_ARCH_CFLAGS} -isystem ${MUSL_INCLUDE_DIR} -isystem ${GCC_INCLUDE_DIR_MUSL} -isystem ${MUSL_COMPAT_DIR} -I${MUSL_SYSROOT}/include")
+set(NETSURF_LDFLAGS "-no-pie -nostartfiles -nostdlib ${MUSL_CRT1_O} ${MUSL_CRTI_O} -Wl,--dynamic-linker=${MUSL_DYNAMIC_LINKER_PATH} -Wl,-z,max-page-size=0x1000 -Wl,-z,common-page-size=0x1000 -Wl,--build-id=none -L${MUSL_SYSROOT}/lib -L${NETSURF_PREFIX}/lib")
+set(NETSURF_LIBS "-lc ${LIBGCC_PATH} ${MUSL_CRTN_O}")
+
+if(EXISTS "${NETSURF_ALL_DIR}/netsurf/Makefile" AND EXISTS "${OPENSSL_SRC_DIR}/Configure")
+
+# --- libpng (depends on zlib) ---
+if(EXISTS "${LIBPNG_SRC_DIR}/CMakeLists.txt")
+    add_custom_command(
+        OUTPUT ${NETSURF_PREFIX}/lib/libpng.a
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${LIBPNG_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${LIBPNG_BUILD_DIR}
+                ${CMAKE_COMMAND}
+                    -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+                    -DCMAKE_AR=${CMAKE_AR}
+                    -DCMAKE_RANLIB=${CMAKE_RANLIB}
+                    -DCMAKE_C_FLAGS=${NETSURF_CFLAGS}
+                    -DCMAKE_INSTALL_PREFIX=${NETSURF_PREFIX}
+                    -DCMAKE_SYSTEM_NAME=Linux
+                    -DPNG_SHARED=OFF
+                    -DPNG_TESTS=OFF
+                    -DPNG_TOOLS=OFF
+                    -DZLIB_LIBRARY=${MUSL_SYSROOT}/lib/libz.a
+                    -DZLIB_INCLUDE_DIR=${MUSL_SYSROOT}/include
+                    ${LIBPNG_SRC_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${LIBPNG_BUILD_DIR} make -j16
+        COMMAND ${CMAKE_COMMAND} -E chdir ${LIBPNG_BUILD_DIR} make install
+        DEPENDS ${LIBPNG_SRC_DIR}/CMakeLists.txt musl_sysroot
+        COMMENT "Building libpng (static, musl)"
+    )
+    add_custom_target(libpng_build DEPENDS ${NETSURF_PREFIX}/lib/libpng.a)
+    add_dependencies(libpng_build musl_sysroot)
+endif()
+
+# --- libjpeg-turbo ---
+if(EXISTS "${LIBJPEG_SRC_DIR}/CMakeLists.txt")
+    add_custom_command(
+        OUTPUT ${NETSURF_PREFIX}/lib/libjpeg.a
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${LIBJPEG_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${LIBJPEG_BUILD_DIR}
+                ${CMAKE_COMMAND}
+                    -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+                    -DCMAKE_AR=${CMAKE_AR}
+                    -DCMAKE_RANLIB=${CMAKE_RANLIB}
+                    -DCMAKE_C_FLAGS=${NETSURF_CFLAGS}
+                    -DCMAKE_INSTALL_PREFIX=${NETSURF_PREFIX}
+                    -DCMAKE_SYSTEM_NAME=Linux
+                    -DCMAKE_SYSTEM_PROCESSOR=x86_64
+                    -DENABLE_SHARED=OFF
+                    -DWITH_TURBOJPEG=OFF
+                    -DWITH_JAVA=OFF
+                    -DWITH_SIMD=OFF
+                    ${LIBJPEG_SRC_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${LIBJPEG_BUILD_DIR} make -j16
+        COMMAND ${CMAKE_COMMAND} -E chdir ${LIBJPEG_BUILD_DIR} make install
+        DEPENDS ${LIBJPEG_SRC_DIR}/CMakeLists.txt musl_sysroot
+        COMMENT "Building libjpeg-turbo (static, musl)"
+    )
+    add_custom_target(libjpeg_build DEPENDS ${NETSURF_PREFIX}/lib/libjpeg.a)
+    add_dependencies(libjpeg_build musl_sysroot)
+endif()
+
+# --- libexpat (XML parser, needed by libsvgtiny) ---
+if(EXISTS "${LIBEXPAT_SRC_DIR}/expat/CMakeLists.txt")
+    add_custom_command(
+        OUTPUT ${NETSURF_PREFIX}/lib/libexpat.a
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${LIBEXPAT_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${LIBEXPAT_BUILD_DIR}
+                ${CMAKE_COMMAND}
+                    -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+                    -DCMAKE_AR=${CMAKE_AR}
+                    -DCMAKE_RANLIB=${CMAKE_RANLIB}
+                    -DCMAKE_C_FLAGS=${NETSURF_CFLAGS}
+                    -DCMAKE_INSTALL_PREFIX=${NETSURF_PREFIX}
+                    -DCMAKE_SYSTEM_NAME=Linux
+                    -DEXPAT_SHARED_LIBS=OFF
+                    -DEXPAT_BUILD_TESTS=OFF
+                    -DEXPAT_BUILD_TOOLS=OFF
+                    -DEXPAT_BUILD_EXAMPLES=OFF
+                    -DEXPAT_BUILD_DOCS=OFF
+                    ${LIBEXPAT_SRC_DIR}/expat
+        COMMAND ${CMAKE_COMMAND} -E chdir ${LIBEXPAT_BUILD_DIR} make -j16
+        COMMAND ${CMAKE_COMMAND} -E chdir ${LIBEXPAT_BUILD_DIR} make install
+        DEPENDS ${LIBEXPAT_SRC_DIR}/expat/CMakeLists.txt musl_sysroot
+        COMMENT "Building libexpat (static, musl)"
+    )
+    add_custom_target(libexpat_build DEPENDS ${NETSURF_PREFIX}/lib/libexpat.a)
+    add_dependencies(libexpat_build musl_sysroot)
+endif()
+
+# --- freetype ---
+if(EXISTS "${FREETYPE_SRC_DIR}/CMakeLists.txt")
+    add_custom_command(
+        OUTPUT ${NETSURF_PREFIX}/lib/libfreetype.a
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${FREETYPE_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${FREETYPE_BUILD_DIR}
+                ${CMAKE_COMMAND}
+                    -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+                    -DCMAKE_AR=${CMAKE_AR}
+                    -DCMAKE_RANLIB=${CMAKE_RANLIB}
+                    -DCMAKE_C_FLAGS=${NETSURF_CFLAGS}
+                    -DCMAKE_INSTALL_PREFIX=${NETSURF_PREFIX}
+                    -DCMAKE_SYSTEM_NAME=Linux
+                    -DBUILD_SHARED_LIBS=OFF
+                    -DFT_DISABLE_BZIP2=ON
+                    -DFT_DISABLE_BROTLI=ON
+                    -DFT_DISABLE_HARFBUZZ=ON
+                    -DPNG_LIBRARY=${NETSURF_PREFIX}/lib/libpng.a
+                    -DPNG_PNG_INCLUDE_DIR=${NETSURF_PREFIX}/include
+                    -DZLIB_LIBRARY=${MUSL_SYSROOT}/lib/libz.a
+                    -DZLIB_INCLUDE_DIR=${MUSL_SYSROOT}/include
+                    ${FREETYPE_SRC_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${FREETYPE_BUILD_DIR} make -j16
+        COMMAND ${CMAKE_COMMAND} -E chdir ${FREETYPE_BUILD_DIR} make install
+        DEPENDS ${FREETYPE_SRC_DIR}/CMakeLists.txt musl_sysroot
+        COMMENT "Building freetype (static, musl)"
+    )
+    add_custom_target(freetype_build DEPENDS ${NETSURF_PREFIX}/lib/libfreetype.a)
+    add_dependencies(freetype_build musl_sysroot)
+    if(TARGET libpng_build)
+        add_dependencies(freetype_build libpng_build)
+    endif()
+endif()
+
+# --- libcurl (depends on openssl + zlib) ---
+if(EXISTS "${CURL_SRC_DIR}/CMakeLists.txt")
+    # Write a CMake toolchain file for cross-compiling curl
+    set(CURL_TOOLCHAIN "${CMAKE_BINARY_DIR}/curl/curl-toolchain.cmake")
+    file(WRITE ${CURL_TOOLCHAIN}
+"set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(CMAKE_C_COMPILER ${CMAKE_C_COMPILER})
+set(CMAKE_AR ${CMAKE_AR})
+set(CMAKE_RANLIB ${CMAKE_RANLIB})
+set(CMAKE_C_FLAGS_INIT \"${NETSURF_CFLAGS}\")
+set(CMAKE_FIND_ROOT_PATH \"${MUSL_SYSROOT}\" \"${NETSURF_PREFIX}\" \"${OPENSSL_INSTALL_DIR}\")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+")
+    add_custom_command(
+        OUTPUT ${NETSURF_PREFIX}/lib/libcurl.a
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CURL_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CURL_BUILD_DIR}
+                ${CMAKE_COMMAND}
+                    -DCMAKE_TOOLCHAIN_FILE=${CURL_TOOLCHAIN}
+                    -DCMAKE_INSTALL_PREFIX=${NETSURF_PREFIX}
+                    -DCMAKE_INSTALL_OLDINCLUDEDIR=${MUSL_SYSROOT}/include
+                    -DBUILD_SHARED_LIBS=OFF
+                    -DBUILD_CURL_EXE=OFF
+                    -DCURL_USE_OPENSSL=ON
+                    -DOPENSSL_ROOT_DIR=${OPENSSL_INSTALL_DIR}
+                    -DOPENSSL_CRYPTO_LIBRARY=${OPENSSL_INSTALL_DIR}/lib/libcrypto.a
+                    -DOPENSSL_SSL_LIBRARY=${OPENSSL_INSTALL_DIR}/lib/libssl.a
+                    -DOPENSSL_INCLUDE_DIR=${OPENSSL_INSTALL_DIR}/include
+                    -DPKG_CONFIG_EXECUTABLE=/bin/false
+                    -DZLIB_LIBRARY=${MUSL_SYSROOT}/lib/libz.a
+                    -DZLIB_INCLUDE_DIR=${MUSL_SYSROOT}/include
+                    -DCURL_DISABLE_LDAP=ON
+                    -DCURL_DISABLE_LDAPS=ON
+                    -DHTTP_ONLY=ON
+                    -DCURL_USE_LIBPSL=OFF
+                    -DCURL_USE_LIBSSH2=OFF
+                    -DENABLE_UNIX_SOCKETS=OFF
+                    -DUSE_THREADS_POSIX=ON
+                    -DHAVE_PTHREAD_H=ON
+                    -DCMAKE_USE_PTHREADS_INIT=ON
+                    -DCURL_CA_BUNDLE=none
+                    -DCURL_CA_PATH=none
+                    ${CURL_SRC_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CURL_BUILD_DIR} make -j16
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CURL_BUILD_DIR} make install
+        DEPENDS ${CURL_SRC_DIR}/CMakeLists.txt openssl_build musl_sysroot
+        COMMENT "Building libcurl (static, musl + OpenSSL)"
+    )
+    add_custom_target(curl_build DEPENDS ${NETSURF_PREFIX}/lib/libcurl.a)
+endif()
+
+# --- NetSurf internal libraries + browser (single build script) ---
+# NetSurf's internal libs use their own Makefile build system.
+# We build them all in dependency order via a shell script, then build
+# the main browser with TARGET=framebuffer.
+set(NETSURF_BUILD_SCRIPT "${CMAKE_BINARY_DIR}/netsurf/build_netsurf.sh")
+set(NETSURF_BUILD_DIR "${CMAKE_BINARY_DIR}/netsurf")
+
+file(WRITE ${NETSURF_BUILD_SCRIPT} [=[
+#!/bin/bash
+set -e
+
+# All parameters are passed via environment variables (set by CMake using cmake -E env)
+# Required env vars: NS_SRC, NS_PREFIX, CC, AR, RANLIB, SYSROOT, MUSL_INCLUDE,
+#   GCC_INCLUDE, COMPAT_DIR, ARCH_CFLAGS, CRT1, CRTI, CRTN, LIBGCC, DYN_LINKER, OPENSSL_DIR
+
+export CC AR RANLIB
+
+# Cross-compile CFLAGS for NetSurf internal libs
+export CFLAGS="--sysroot=${SYSROOT} -O2 -nostdinc -ffreestanding -fno-common -fno-pie -no-pie ${ARCH_CFLAGS} -isystem ${MUSL_INCLUDE} -isystem ${GCC_INCLUDE} -isystem ${COMPAT_DIR} -I${NS_PREFIX}/include -I${SYSROOT}/include"
+export CXXFLAGS="${CFLAGS}"
+export LDFLAGS="--sysroot=${SYSROOT} -no-pie -nostartfiles -nostdlib ${CRT1} ${CRTI} -Wl,--dynamic-linker=${DYN_LINKER} -Wl,-z,max-page-size=0x1000 -Wl,-z,common-page-size=0x1000 -Wl,--build-id=none -L${NS_PREFIX}/lib -L${SYSROOT}/lib -L${OPENSSL_DIR}/lib"
+export PREFIX="${NS_PREFIX}"
+export NSSHARED="${NS_SRC}/buildsystem"
+export PKG_CONFIG_LIBDIR="${NS_PREFIX}/lib/pkgconfig:${SYSROOT}/lib/pkgconfig"
+export PKG_CONFIG_PATH="${NS_PREFIX}/lib/pkgconfig:${SYSROOT}/lib/pkgconfig:${OPENSSL_DIR}/lib/pkgconfig"
+
+# Create a CC wrapper that appends CRT/libc/libgcc AFTER all other flags
+# when linking (not compiling). This ensures correct link ordering since
+# NetSurf's Makefile appends pkg-config libraries after env LDFLAGS.
+REAL_CC="${CC}"
+cat > "${NS_PREFIX}/bin/xv6-cc-wrapper" << CCEOF
+#!/bin/bash
+compiling=false
+for arg in "\$@"; do
+    case "\$arg" in -c|-S|-E) compiling=true; break;; esac
+done
+if \$compiling; then
+    exec "${REAL_CC}" "\$@"
+else
+    exec "${REAL_CC}" "\$@" -lc ${LIBGCC} ${CRTN}
+fi
+CCEOF
+chmod +x "${NS_PREFIX}/bin/xv6-cc-wrapper"
+export CC="${NS_PREFIX}/bin/xv6-cc-wrapper"
+
+# Create pkg-config wrapper that searches our prefix
+mkdir -p "${NS_PREFIX}/bin"
+cat > "${NS_PREFIX}/bin/pkg-config" << PKGEOF
+#!/bin/bash
+export PKG_CONFIG_LIBDIR="${PKG_CONFIG_LIBDIR}"
+export PKG_CONFIG_PATH="${PKG_CONFIG_PATH}"
+exec /usr/bin/pkg-config "\$@"
+PKGEOF
+chmod +x "${NS_PREFIX}/bin/pkg-config"
+export PKG_CONFIG="${NS_PREFIX}/bin/pkg-config"
+
+# Build function for NetSurf internal libraries
+ns_build_lib() {
+    local lib="$1"
+    echo "--- Building ${lib} ---"
+    cd "${NS_SRC}/${lib}"
+    make clean 2>/dev/null || true
+    make -j16 NSSHARED="${NSSHARED}" PREFIX="${NS_PREFIX}" Q= COMPONENT_TYPE=lib-static install
+}
+
+echo "=== Building NetSurf internal libraries ==="
+
+# Tier 1: Foundation
+ns_build_lib libwapcaplet
+ns_build_lib libparserutils
+
+# Tier 2: Content processing
+ns_build_lib libhubbub
+ns_build_lib libcss
+ns_build_lib libdom
+
+# Tier 3: Media / framebuffer
+ns_build_lib libnsfb
+ns_build_lib libnsgif
+ns_build_lib libnsbmp
+
+# Tier 4: Utilities
+ns_build_lib libnsutils
+ns_build_lib libnslog
+ns_build_lib libnspsl
+
+# libsvgtiny (needs expat)
+ns_build_lib libsvgtiny
+
+echo "=== Building NetSurf browser (framebuffer) ==="
+cd "${NS_SRC}/netsurf"
+
+# Create Makefile.config for minimal framebuffer build
+cat > Makefile.config << EOF
+# xv6 cross-compilation config
+override NETSURF_USE_JPEG := YES
+override NETSURF_USE_PNG := YES
+override NETSURF_USE_GIF := YES
+override NETSURF_USE_BMP := YES
+override NETSURF_USE_WEBP := NO
+override NETSURF_USE_NSSVG := YES
+override NETSURF_USE_ROSPRITE := NO
+override NETSURF_USE_HARU_PDF := NO
+override NETSURF_USE_NSLOG := YES
+override NETSURF_USE_NSPSL := YES
+override NETSURF_USE_DUKTAPE := NO
+override NETSURF_USE_CURL := YES
+override NETSURF_USE_OPENSSL := YES
+override NETSURF_USE_UTF8PROC := NO
+override NETSURF_FB_FRONTEND := ram
+override NETSURF_FB_FONTLIB := freetype
+EOF
+
+# Build NetSurf with framebuffer target — CC wrapper handles CRT link ordering
+
+make clean TARGET=framebuffer NSSHARED="${NSSHARED}" 2>/dev/null || true
+
+# Build a host-native libpng for the build tools (convert_image needs it)
+echo "--- Building host libpng for build tools ---"
+HOST_PNG_DIR="${NS_PREFIX}/host-png"
+mkdir -p "${HOST_PNG_DIR}/build"
+if [ ! -f "${HOST_PNG_DIR}/lib/libpng.a" ]; then
+    (
+        # Subshell to isolate host build environment
+        unset CC AR RANLIB CFLAGS CXXFLAGS LDFLAGS PKG_CONFIG PKG_CONFIG_LIBDIR PKG_CONFIG_PATH
+        cd "${HOST_PNG_DIR}/build"
+        cmake "${NS_SRC}/../libpng" \
+            -DCMAKE_C_COMPILER=cc \
+            -DCMAKE_INSTALL_PREFIX="${HOST_PNG_DIR}" \
+            -DPNG_SHARED=OFF \
+            -DPNG_TESTS=OFF \
+            -DPNG_TOOLS=OFF
+        make -j16
+        make install
+    )
+fi
+
+cd "${NS_SRC}/netsurf"
+make -j16 TARGET=framebuffer \
+    NSSHARED="${NSSHARED}" \
+    PREFIX="${NS_PREFIX}" \
+    PKG_CONFIG="${PKG_CONFIG}" \
+    BUILD_CFLAGS="-I${HOST_PNG_DIR}/include" \
+    BUILD_LDFLAGS="-L${HOST_PNG_DIR}/lib" \
+    BUILD_LIBPNG_LDFLAGS="-lpng -lz -lm" \
+    NETSURF_FB_RESPATH="/share/netsurf/" \
+    NETSURF_FB_FONTPATH="/share/netsurf/fonts" \
+    Q=
+
+# Copy the binary to the expected output location
+mkdir -p "${NS_PREFIX}/bin"
+# EXETARGET may be in build/Linux-framebuffer/nsfb or just ./nsfb depending on CC name
+if [ -f build/Linux-framebuffer/nsfb ]; then
+    cp -f build/Linux-framebuffer/nsfb "${NS_PREFIX}/bin/netsurf"
+elif [ -f nsfb ]; then
+    cp -f nsfb "${NS_PREFIX}/bin/netsurf"
+else
+    echo "ERROR: nsfb binary not found" >&2
+    exit 1
+fi
+
+# Install resource files to prefix/share/netsurf/
+echo "--- Installing NetSurf resources ---"
+NS_RES="${NS_SRC}/netsurf/frontends/framebuffer/res"
+NS_SHARE="${NS_PREFIX}/share/netsurf"
+mkdir -p "${NS_SHARE}/icons" "${NS_SHARE}/pointers" "${NS_SHARE}/throbber" "${NS_SHARE}/fonts"
+cp -f "${NS_RES}"/*.css "${NS_RES}"/*.html "${NS_RES}"/*.png "${NS_SHARE}/"
+cp -f "${NS_RES}/icons/"* "${NS_SHARE}/icons/" 2>/dev/null || true
+cp -f "${NS_RES}/pointers/"* "${NS_SHARE}/pointers/" 2>/dev/null || true
+cp -f "${NS_RES}/throbber/"* "${NS_SHARE}/throbber/" 2>/dev/null || true
+cp -f "${NS_RES}/fonts/"* "${NS_SHARE}/fonts/" 2>/dev/null || true
+# Install DejaVu TrueType fonts for FreeType rendering
+DEJAVU_DIR="/usr/share/fonts/truetype/dejavu"
+if [ -d "${DEJAVU_DIR}" ]; then
+    for f in DejaVuSans.ttf DejaVuSans-Bold.ttf DejaVuSans-Oblique.ttf DejaVuSans-BoldOblique.ttf \
+             DejaVuSerif.ttf DejaVuSerif-Bold.ttf DejaVuSansMono.ttf DejaVuSansMono-Bold.ttf; do
+        [ -f "${DEJAVU_DIR}/${f}" ] && cp -f "${DEJAVU_DIR}/${f}" "${NS_SHARE}/fonts/"
+    done
+    echo "  DejaVu fonts installed"
+else
+    echo "  WARNING: DejaVu fonts not found at ${DEJAVU_DIR}" >&2
+fi
+# Messages file (English)
+if [ -f "build/Linux-framebuffer/messages/en/Messages" ]; then
+    cp -f "build/Linux-framebuffer/messages/en/Messages" "${NS_SHARE}/Messages"
+elif [ -f "${NS_RES}/Messages" ]; then
+    cp -f "${NS_RES}/Messages" "${NS_SHARE}/Messages"
+fi
+
+echo "=== NetSurf build complete ==="
+]=])
+
+add_custom_command(
+    OUTPUT ${NETSURF_BIN}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${NETSURF_BUILD_DIR}
+    COMMAND ${CMAKE_COMMAND} -E env
+            "NS_SRC=${NETSURF_ALL_DIR}"
+            "NS_PREFIX=${NETSURF_PREFIX}"
+            "CC=${CMAKE_C_COMPILER}"
+            "AR=${CMAKE_AR}"
+            "RANLIB=${CMAKE_RANLIB}"
+            "SYSROOT=${MUSL_SYSROOT}"
+            "MUSL_INCLUDE=${MUSL_INCLUDE_DIR}"
+            "GCC_INCLUDE=${GCC_INCLUDE_DIR_MUSL}"
+            "COMPAT_DIR=${MUSL_COMPAT_DIR}"
+            "ARCH_CFLAGS=${USER_ARCH_CFLAGS}"
+            "CRT1=${MUSL_CRT1_O}"
+            "CRTI=${MUSL_CRTI_O}"
+            "CRTN=${MUSL_CRTN_O}"
+            "LIBGCC=${LIBGCC_PATH}"
+            "DYN_LINKER=${MUSL_DYNAMIC_LINKER_PATH}"
+            "OPENSSL_DIR=${OPENSSL_INSTALL_DIR}"
+            bash ${NETSURF_BUILD_SCRIPT}
+    DEPENDS
+        ${NETSURF_ALL_DIR}/netsurf/Makefile
+        ${NETSURF_PREFIX}/lib/libpng.a
+        ${NETSURF_PREFIX}/lib/libjpeg.a
+        ${NETSURF_PREFIX}/lib/libfreetype.a
+        ${NETSURF_PREFIX}/lib/libcurl.a
+        ${NETSURF_PREFIX}/lib/libexpat.a
+        openssl_build
+        musl_sysroot
+    COMMENT "Building NetSurf browser (framebuffer, all internal libraries)"
+)
+
+# Install netsurf binary and resources into sysroot
+add_custom_command(
+    OUTPUT ${NETSURF_FS_BIN}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/bin
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NETSURF_BIN} ${NETSURF_FS_BIN}
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            ${NETSURF_PREFIX}/share/netsurf ${MUSL_SYSROOT}/share/netsurf
+    DEPENDS ${NETSURF_BIN}
+    COMMENT "Installing NetSurf browser + resources to sysroot"
+)
+
+add_custom_target(netsurf_build DEPENDS ${NETSURF_FS_BIN})
+add_dependencies(user_programs netsurf_build)
+
+else()
+    message(STATUS "Skipping NetSurf build (missing submodule at ${NETSURF_ALL_DIR} or OpenSSL)")
+endif()
+
+# ==============================================================================
 # VIM — Vi IMproved text editor (cross-compiled against musl + ncurses)
 # ==============================================================================
 set(VIM_SRC_DIR "${CMAKE_SOURCE_DIR}/user/vim")
@@ -2435,6 +2887,11 @@ if(TARGET numpy_build)
     set(SYSROOT_TARGETS ${SYSROOT_TARGETS} ${NUMPY_STAMP})
 endif()
 
+# NetSurf browser
+if(TARGET netsurf_build)
+    set(SYSROOT_TARGETS ${SYSROOT_TARGETS} "${NETSURF_FS_BIN}")
+endif()
+
 # Flask + dependencies (installed into sysroot/lib/python3.12/site-packages/)
 if(TARGET flask_install)
     set(SYSROOT_TARGETS ${SYSROOT_TARGETS} ${FLASK_STAMP})
@@ -2495,6 +2952,9 @@ if(SYSROOT_TARGETS)
     endif()
     if(TARGET vim_build)
         add_dependencies(sysroot_populate vim_build)
+    endif()
+    if(TARGET netsurf_build)
+        add_dependencies(sysroot_populate netsurf_build)
     endif()
 endif()
 
