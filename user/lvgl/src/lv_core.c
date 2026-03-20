@@ -81,6 +81,16 @@ static int16_t g_ghost_w, g_ghost_h; /* ghost outline size */
 static uint32_t *g_shadow = NULL;
 static int       g_force_full = 1;    /* force full-screen blit (first frame) */
 
+/* Deferred deletion queue — objects are queued for deletion and removed
+ * at a safe point (start of timer_handler / refr_now) to prevent
+ * child array corruption during event/render iteration. */
+#define DEL_QUEUE_MAX 32
+static lv_obj_t *g_del_queue[DEL_QUEUE_MAX];
+static int       g_del_count = 0;
+static int       g_in_event = 0; /* 1 while processing events in timer_handler */
+
+static void obj_del_immediate(lv_obj_t *obj); /* forward decl */
+
 /* Clip rectangle — when active, draw_pixel/draw_rect_fill skip pixels outside */
 int     g_clip_active = 0;
 int     g_clip_x1, g_clip_y1, g_clip_x2, g_clip_y2;
@@ -694,6 +704,10 @@ static void render_base(lv_obj_t *obj)
     if (obj->border_width > 0)
         draw_rect_border(ax, ay, obj->w, obj->h,
                          obj->border_width, obj->border_color);
+
+    /* Custom render callback (e.g. 3D scene) */
+    if (obj->render_cb)
+        obj->render_cb(obj, ax, ay, g_disp.framebuf, (int)g_disp.width);
 }
 
 static void render_textbox(lv_obj_t *obj)
@@ -985,7 +999,7 @@ lv_obj_t *lv_obj_create(lv_obj_t *parent)
 void lv_obj_clean(lv_obj_t *obj)
 {
     if (!obj) return;
-    for (int i = 0; i < obj->child_count; i++) {
+    for (int i = obj->child_count - 1; i >= 0; i--) {
         lv_obj_clean(obj->children[i]);
         obj_free(obj->children[i]);
         obj->children[i] = NULL;
@@ -993,7 +1007,8 @@ void lv_obj_clean(lv_obj_t *obj)
     obj->child_count = 0;
 }
 
-void lv_obj_del(lv_obj_t *obj)
+/* Immediate (non-deferred) delete — called from flush_deletes */
+static void obj_del_immediate(lv_obj_t *obj)
 {
     if (!obj) return;
 
@@ -1012,6 +1027,37 @@ void lv_obj_del(lv_obj_t *obj)
 
     lv_obj_clean(obj);
     obj_free(obj);
+}
+
+void lv_obj_del(lv_obj_t *obj)
+{
+    if (!obj) return;
+
+    /* If we're inside event processing, defer the deletion */
+    if (g_in_event) {
+        /* Hide immediately so it won't render or receive events */
+        obj->visible = 0;
+        obj->event_cb = NULL;
+        if (g_del_count < DEL_QUEUE_MAX)
+            g_del_queue[g_del_count++] = obj;
+        /* Clear pressed/focused refs immediately */
+        if (obj == g_pressed_obj)  g_pressed_obj = NULL;
+        if (obj == g_focused_textbox) g_focused_textbox = NULL;
+        return;
+    }
+
+    /* Outside event processing — delete immediately */
+    obj_del_immediate(obj);
+}
+
+/* Flush all deferred deletions — called at safe points */
+static void flush_deletes(void)
+{
+    while (g_del_count > 0) {
+        g_del_count--;
+        obj_del_immediate(g_del_queue[g_del_count]);
+        g_del_queue[g_del_count] = NULL;
+    }
 }
 
 void lv_obj_move_to_front(lv_obj_t *obj)
@@ -1418,6 +1464,9 @@ int lv_timer_handler(void)
 {
     if (!g_initialized) return -1;
 
+    /* Flush any deletions deferred from the previous frame */
+    flush_deletes();
+
     g_frame_count++;
 
     /* 1. Read input */
@@ -1428,6 +1477,7 @@ int lv_timer_handler(void)
     int cur_btn = g_indev.buttons & 1;
 
     /* 2. Hit test & dispatch events */
+    g_in_event = 1;
 
     /* Restore window visibility before hit-test if GPU drag is ending,
      * so the close button can be detected */
@@ -1605,6 +1655,9 @@ int lv_timer_handler(void)
             lv_obj_scroll_by(sc, (int16_t)(g_scroll_dz * 30));
         }
     }
+
+    g_in_event = 0;
+    flush_deletes();
 
     /* Track cursor movement as dirty for partial flush */
     if (prev_x != g_indev.x || prev_y != g_indev.y) {

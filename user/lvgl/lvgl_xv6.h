@@ -165,6 +165,13 @@ typedef enum {
 struct lv_obj;
 typedef void (*lv_event_cb_t)(struct lv_obj *obj, lv_event_t event);
 
+/* Custom render callback: called after the object's background is drawn
+ * but before children.  'abs_x/abs_y' are the object's absolute screen
+ * coordinates.  'fb' points to the display's local framebuffer row-major
+ * pixels (width = fb_w). */
+typedef void (*lv_render_cb_t)(struct lv_obj *obj, int abs_x, int abs_y,
+                               uint32_t *fb, int fb_w);
+
 /* ══════════════════════════════════════════════════════════════════════
  *  Object (widget) system
  * ══════════════════════════════════════════════════════════════════════ */
@@ -221,6 +228,10 @@ typedef struct lv_obj {
     /* Events */
     lv_event_cb_t   event_cb;
     void           *user_data;
+
+    /* Custom render callback (optional — called during z-order render) */
+    lv_render_cb_t  render_cb;
+    void           *render_data;
 
     /* Type-specific data */
     union {

@@ -203,6 +203,16 @@ static lv_obj_t *win_netinfo;
 static lv_obj_t *win_power;
 static lv_obj_t *win_usermgr;
 static lv_obj_t *win_netcfg;
+static lv_obj_t *win_demo3d;
+
+/* Resolution confirmation dialog */
+static lv_obj_t *win_res_confirm;
+static lv_obj_t *res_confirm_lbl;
+static volatile int res_confirm_keep;
+static volatile int res_confirm_revert;
+static uint32_t    res_old_w, res_old_h;
+static int         res_countdown;       /* seconds remaining */
+static int         res_countdown_ctr;   /* frame counter (60fps) */
 
 /* Updatable labels for live-data windows */
 static lv_obj_t *sysinfo_data_lbl;
@@ -285,6 +295,15 @@ static struct {
     lv_obj_t **win_ptr;     /* pointer to corresponding window variable */
 } g_dyn_tb[DYN_TB_MAX];
 
+/* ── 3D Demo state ───────────────────────────────────────────────── */
+
+#define D3D_W   280
+#define D3D_H   220
+static uint32_t *d3d_buf;     /* pixel buffer D3D_W * D3D_H */
+static int       d3d_angle_y; /* Y-axis rotation (0..255 = full circle) */
+static int       d3d_angle_x; /* X-axis rotation (0..255 = full circle) */
+static int       d3d_angle_z; /* Z-axis rotation (0..255 = full circle) */
+
 /* ── Calculator state ────────────────────────────────────────────── */
 
 static int32_t    calc_display_val;
@@ -328,6 +347,7 @@ static void create_netinfo(void);
 static void create_power(void);
 static void create_usermgr(void);
 static void create_netcfg(void);
+static void create_demo3d(void);
 static void term_poll_all(void);
 static term_instance_t *term_find_by_win(lv_obj_t *win);
 static void term_focus(int idx);
@@ -464,6 +484,15 @@ static void on_netcfg_close(lv_obj_t *obj, lv_event_t e)
     netcfg_gw_tb = NULL;
     netcfg_dns_tb = NULL;
     netcfg_mode_cb = NULL;
+}
+
+static void on_demo3d_close(lv_obj_t *obj, lv_event_t e)
+{
+    if (e != LV_EVENT_CLOSE) return;
+    tb_remove_dyn_btn(&win_demo3d);
+    lv_obj_del(obj);
+    win_demo3d = NULL;
+    if (d3d_buf) { free(d3d_buf); d3d_buf = NULL; }
 }
 
 static void on_terminal_event(lv_obj_t *obj, lv_event_t e)
@@ -620,6 +649,14 @@ static void btn_netcfg_cb(lv_obj_t *obj, lv_event_t e)
     if (e != LV_EVENT_CLICKED) return;
     if (win_netcfg) { on_netcfg_close(win_netcfg, LV_EVENT_CLOSE); }
     else create_netcfg();
+}
+
+static void btn_demo3d_cb(lv_obj_t *obj, lv_event_t e)
+{
+    (void)obj;
+    if (e != LV_EVENT_CLICKED) return;
+    if (win_demo3d) { on_demo3d_close(win_demo3d, LV_EVENT_CLOSE); }
+    else create_demo3d();
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -1002,10 +1039,100 @@ static void settings_res_cb(lv_obj_t *obj, lv_event_t e)
 
     /* Re-exec desktop to reinitialize GUI at new resolution */
     lv_deinit();
+    /* Pass old resolution so new instance can show confirmation / revert */
+    char pending_arg[40];
+    snprintf(pending_arg, sizeof(pending_arg), "--pending-res=%dx%d",
+             (int)d->width, (int)d->height);
+    char *argv[] = { "desktop", "--skip-login", pending_arg, NULL };
+    char *envp[] = { "TERM=dumb", "HOME=/", "PATH=/bin:/usr/bin", NULL };
+    execve("/bin/desktop", argv, envp);
+    _exit(1);
+}
+
+/* ── Resolution confirmation dialog ────────────────────────────────── */
+
+static void res_keep_cb(lv_obj_t *obj, lv_event_t e)
+{
+    (void)obj;
+    if (e != LV_EVENT_CLICKED) return;
+    res_confirm_keep = 1;
+}
+
+static void res_revert_cb(lv_obj_t *obj, lv_event_t e)
+{
+    (void)obj;
+    if (e != LV_EVENT_CLICKED) return;
+    res_confirm_revert = 1;
+}
+
+static void revert_resolution(void)
+{
+    /* Re-apply old resolution via ioctl */
+    int fd = open("/dev/fb0", O_RDWR);
+    if (fd >= 0) {
+        struct { uint32_t xres; uint32_t yres; uint32_t bpp; uint32_t pitch; } req;
+        req.xres = res_old_w;
+        req.yres = res_old_h;
+        req.bpp  = 32;
+        req.pitch = 0;
+        ioctl(fd, FBIOPUT_VSCREENINFO, &req);
+        close(fd);
+    }
+    /* Re-exec without --pending-res to accept old resolution */
+    lv_deinit();
     char *argv[] = { "desktop", "--skip-login", NULL };
     char *envp[] = { "TERM=dumb", "HOME=/", "PATH=/bin:/usr/bin", NULL };
     execve("/bin/desktop", argv, envp);
     _exit(1);
+}
+
+static void create_res_confirm(void)
+{
+    lv_disp_t *d = lv_disp_get();
+    int16_t dw = (int16_t)(300);
+    int16_t dh = (int16_t)(140);
+    int16_t dx = (int16_t)((d->width  - dw) / 2);
+    int16_t dy = (int16_t)((d->height - dh) / 2);
+
+    win_res_confirm = lv_obj_create(lv_scr_act());
+    lv_obj_set_pos(win_res_confirm, dx, dy);
+    lv_obj_set_size(win_res_confirm, dw, dh);
+    lv_obj_set_style_bg_color(win_res_confirm, lv_color_make(30, 30, 40));
+    lv_obj_set_style_border_width(win_res_confirm, 2);
+    lv_obj_set_style_border_color(win_res_confirm, lv_color_make(80, 140, 220));
+    lv_obj_set_style_pad_all(win_res_confirm, 12);
+
+    lv_obj_t *title = lv_label_create(win_res_confirm);
+    lv_label_set_text(title, "Keep this resolution?");
+    lv_obj_set_style_text_color(title, lv_color_make(220, 220, 230));
+    lv_obj_set_pos(title, 40, 8);
+
+    res_confirm_lbl = lv_label_create(win_res_confirm);
+    lv_obj_set_style_text_color(res_confirm_lbl, lv_color_make(180, 180, 190));
+    lv_obj_set_pos(res_confirm_lbl, 30, 36);
+
+    char buf[80];
+    snprintf(buf, sizeof(buf), "Reverting in %d seconds...", 25);
+    lv_label_set_text(res_confirm_lbl, buf);
+
+    lv_obj_t *keep_btn = lv_btn_create(win_res_confirm);
+    lv_btn_set_text(keep_btn, "Keep Changes");
+    lv_obj_set_pos(keep_btn, 16, 75);
+    lv_obj_set_size(keep_btn, 120, 32);
+    lv_obj_set_style_bg_color(keep_btn, lv_color_make(40, 120, 60));
+    lv_obj_add_event_cb(keep_btn, res_keep_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *rev_btn = lv_btn_create(win_res_confirm);
+    lv_btn_set_text(rev_btn, "Revert");
+    lv_obj_set_pos(rev_btn, 160, 75);
+    lv_obj_set_size(rev_btn, 100, 32);
+    lv_obj_set_style_bg_color(rev_btn, lv_color_make(160, 50, 50));
+    lv_obj_add_event_cb(rev_btn, res_revert_cb, LV_EVENT_CLICKED, NULL);
+
+    res_confirm_keep   = 0;
+    res_confirm_revert = 0;
+    res_countdown      = 25;
+    res_countdown_ctr  = 0;
 }
 
 static void create_settings(void)
@@ -2226,6 +2353,359 @@ static void create_netcfg(void)
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ *  3D Demo — Solid lit icosahedron with filled faces
+ *  Uses fixed-point (16.16) arithmetic — no SSE/float needed.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+#define FP_SHIFT  16
+#define FP_ONE    (1 << FP_SHIFT)
+#define FP_HALF   (1 << (FP_SHIFT - 1))
+#define FP_MUL(a, b)  ((int)(((long long)(a) * (b)) >> FP_SHIFT))
+#define FP_DIV(a, b)  ((int)(((long long)(a) << FP_SHIFT) / (b)))
+#define FP_FROM_INT(x) ((x) << FP_SHIFT)
+
+/* Fixed-point sine table: 256 entries for 0..2π (sin * 32768) */
+static const int fp_sin_tab[256] = {
+        0,  1608,  3212,  4808,  6393,  7962,  9512, 11039,
+    12540, 14010, 15447, 16846, 18205, 19520, 20788, 22006,
+    23170, 24279, 25330, 26320, 27246, 28106, 28899, 29622,
+    30274, 30853, 31357, 31786, 32138, 32413, 32610, 32729,
+    32768, 32729, 32610, 32413, 32138, 31786, 31357, 30853,
+    30274, 29622, 28899, 28106, 27246, 26320, 25330, 24279,
+    23170, 22006, 20788, 19520, 18205, 16846, 15447, 14010,
+    12540, 11039,  9512,  7962,  6393,  4808,  3212,  1608,
+        0, -1608, -3212, -4808, -6393, -7962, -9512,-11039,
+   -12540,-14010,-15447,-16846,-18205,-19520,-20788,-22006,
+   -23170,-24279,-25330,-26320,-27246,-28106,-28899,-29622,
+   -30274,-30853,-31357,-31786,-32138,-32413,-32610,-32729,
+   -32768,-32729,-32610,-32413,-32138,-31786,-31357,-30853,
+   -30274,-29622,-28899,-28106,-27246,-26320,-25330,-24279,
+   -23170,-22006,-20788,-19520,-18205,-16846,-15447,-14010,
+   -12540,-11039, -9512, -7962, -6393, -4808, -3212, -1608,
+        0,  1608,  3212,  4808,  6393,  7962,  9512, 11039,
+    12540, 14010, 15447, 16846, 18205, 19520, 20788, 22006,
+    23170, 24279, 25330, 26320, 27246, 28106, 28899, 29622,
+    30274, 30853, 31357, 31786, 32138, 32413, 32610, 32729,
+    32768, 32729, 32610, 32413, 32138, 31786, 31357, 30853,
+    30274, 29622, 28899, 28106, 27246, 26320, 25330, 24279,
+    23170, 22006, 20788, 19520, 18205, 16846, 15447, 14010,
+    12540, 11039,  9512,  7962,  6393,  4808,  3212,  1608,
+        0, -1608, -3212, -4808, -6393, -7962, -9512,-11039,
+   -12540,-14010,-15447,-16846,-18205,-19520,-20788,-22006,
+   -23170,-24279,-25330,-26320,-27246,-28106,-28899,-29622,
+   -30274,-30853,-31357,-31786,-32138,-32413,-32610,-32729,
+   -32768,-32729,-32610,-32413,-32138,-31786,-31357,-30853,
+   -30274,-29622,-28899,-28106,-27246,-26320,-25330,-24279,
+   -23170,-22006,-20788,-19520,-18205,-16846,-15447,-14010,
+   -12540,-11039, -9512, -7962, -6393, -4808, -3212, -1608,
+};
+
+/* Table period = 128 entries (two full cycles in 256).  cos = sin + 32. */
+static int fp_sin(int angle) { return fp_sin_tab[angle & 255] * 2; }
+static int fp_cos(int angle) { return fp_sin_tab[(angle + 32) & 255] * 2; }
+
+/* ── Triangle rasterizer (scanline fill) ─────────────────────────── */
+
+static void d3d_fill_tri(int x0, int y0, int x1, int y1, int x2, int y2,
+                          uint32_t color)
+{
+    /* Sort vertices by Y (top to bottom: y0 <= y1 <= y2) */
+    if (y0 > y1) { int t; t=x0;x0=x1;x1=t; t=y0;y0=y1;y1=t; }
+    if (y0 > y2) { int t; t=x0;x0=x2;x2=t; t=y0;y0=y2;y2=t; }
+    if (y1 > y2) { int t; t=x1;x1=x2;x2=t; t=y1;y1=y2;y2=t; }
+
+    int total_h = y2 - y0;
+    if (total_h == 0) return;
+
+    for (int y = y0; y <= y2; y++) {
+        if (y < 0 || y >= D3D_H) continue;
+        int second = (y > y1) || (y1 == y0);
+        int seg_h = second ? (y2 - y1) : (y1 - y0);
+        if (seg_h == 0) continue;
+
+        int a = ((y - y0) << 16) / total_h;
+        int b = second ? (((y - y1) << 16) / seg_h)
+                       : (((y - y0) << 16) / seg_h);
+
+        int xa = x0 + (((x2 - x0) * (long long)a) >> 16);
+        int xb = second ? x1 + (((x2 - x1) * (long long)b) >> 16)
+                        : x0 + (((x1 - x0) * (long long)b) >> 16);
+
+        if (xa > xb) { int t = xa; xa = xb; xb = t; }
+        if (xa < 0) xa = 0;
+        if (xb >= D3D_W) xb = D3D_W - 1;
+
+        uint32_t *row = d3d_buf + y * D3D_W;
+        for (int x = xa; x <= xb; x++)
+            row[x] = color;
+    }
+}
+
+/* ── Edge drawer (Bresenham) for face outlines ───────────────────── */
+
+static void d3d_line(int x0, int y0, int x1, int y1, uint32_t color)
+{
+    int dx = x1 - x0, dy = y1 - y0;
+    int sx = dx > 0 ? 1 : -1, sy = dy > 0 ? 1 : -1;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    int err = dx - dy;
+
+    for (;;) {
+        if (x0 >= 0 && x0 < D3D_W && y0 >= 0 && y0 < D3D_H)
+            d3d_buf[y0 * D3D_W + x0] = color;
+        if (x0 == x1 && y0 == y1) break;
+        int e2 = 2 * err;
+        if (e2 > -dy) { err -= dy; x0 += sx; }
+        if (e2 <  dx) { err += dx; y0 += sy; }
+    }
+}
+
+/* ── 3D rotation (Y → X → Z) returning rotated coordinates ──────── */
+
+static void d3d_rotate3(int vx, int vy, int vz, int ay, int ax, int az,
+                         int *rx, int *ry, int *rz)
+{
+    /* Rotate around Y axis */
+    int cy = fp_cos(ay), sny = fp_sin(ay);
+    int x1 = FP_MUL(vx, cy) + FP_MUL(vz, sny);
+    int z1 = FP_MUL(-vx, sny) + FP_MUL(vz, cy);
+
+    /* Rotate around X axis */
+    int cx = fp_cos(ax), snx = fp_sin(ax);
+    int y1 = FP_MUL(vy, cx) - FP_MUL(z1, snx);
+    int z2 = FP_MUL(vy, snx) + FP_MUL(z1, cx);
+
+    /* Rotate around Z axis */
+    int cz = fp_cos(az), snz = fp_sin(az);
+    *rx = FP_MUL(x1, cz) - FP_MUL(y1, snz);
+    *ry = FP_MUL(x1, snz) + FP_MUL(y1, cz);
+    *rz = z2;
+}
+
+/* ── Perspective projection from rotated 3D → screen 2D ──────────── */
+
+static void d3d_project3d(int rx, int ry, int rz, int *sx, int *sy)
+{
+    /* Camera at z=-8; large offset reduces perspective distortion */
+    int d = FP_FROM_INT(8) + rz;
+    if (d < FP_ONE) d = FP_ONE;
+    int scale = FP_DIV(FP_FROM_INT(240), d);
+    *sx = D3D_W / 2 + (FP_MUL(rx, scale) >> FP_SHIFT);
+    *sy = D3D_H / 2 - (FP_MUL(ry, scale) >> FP_SHIFT);
+}
+
+/* ── Icosahedron model (12 vertices, 20 triangular faces) ────────── */
+
+#define ICO_1  FP_ONE                          /* 1.0 */
+#define ICO_T  ((FP_ONE * 1618) / 1000)        /* φ ≈ 1.618 */
+
+/* Vertices: (±1, ±φ, 0), (0, ±1, ±φ), (±φ, 0, ±1) scaled by 1.3 */
+static const int ico_vx[12] = {
+    -ICO_1,  ICO_1, -ICO_1,  ICO_1,
+     0,       0,      0,      0,
+     ICO_T,  ICO_T, -ICO_T, -ICO_T
+};
+static const int ico_vy[12] = {
+     ICO_T,  ICO_T, -ICO_T, -ICO_T,
+    -ICO_1,  ICO_1, -ICO_1,  ICO_1,
+     0,       0,      0,      0
+};
+static const int ico_vz[12] = {
+     0,  0,  0,  0,
+     ICO_T,  ICO_T, -ICO_T, -ICO_T,
+    -ICO_1,  ICO_1, -ICO_1,  ICO_1
+};
+
+/* 20 faces (CCW winding from outside) */
+static const int ico_faces[20][3] = {
+    {0,11,5},  {0,5,1},   {0,1,7},   {0,7,10},  {0,10,11},
+    {1,5,9},   {5,11,4},  {11,10,2}, {10,7,6},  {7,1,8},
+    {3,9,4},   {3,4,2},   {3,2,6},   {3,6,8},   {3,8,9},
+    {4,9,5},   {2,4,11},  {6,2,10},  {8,6,7},   {9,8,1}
+};
+
+/* Base colors per face group (XRGB) — warm/cool bands for gem look */
+static const uint32_t ico_base[20] = {
+    0xE07050, 0xE87858, 0xD06848, 0xE07050, 0xE87858,   /* top cap: coral */
+    0xE0B060, 0xD8A858, 0xE8B868, 0xE0B060, 0xD8A858,   /* upper: gold */
+    0x5098D8, 0x4890D0, 0x58A0E0, 0x5098D8, 0x4890D0,   /* lower: blue */
+    0x50C898, 0x48C090, 0x58D0A0, 0x50C898, 0x48C090    /* bottom cap: teal */
+};
+
+/* Light direction in view space (from upper-right-front toward scene) */
+#define LIGHT_X  ((FP_ONE * 3) / 10)     /* 0.3 */
+#define LIGHT_Y  ((FP_ONE * 5) / 10)     /* 0.5 */
+#define LIGHT_Z  ((FP_ONE * (-8)) / 10)  /* -0.8 (into screen toward model) */
+
+/* ── Render one frame ──────────────────────────────────────────────── */
+
+static void d3d_render_frame(void)
+{
+    /* Dark gradient background (deep blue) */
+    for (int y = 0; y < D3D_H; y++) {
+        int b = 12 + y * 16 / D3D_H;
+        int g = b / 3;
+        int r = b / 4;
+        uint32_t bg = 0xFF000000u | ((uint32_t)r << 16) |
+                      ((uint32_t)g << 8) | (uint32_t)b;
+        for (int x = 0; x < D3D_W; x++)
+            d3d_buf[y * D3D_W + x] = bg;
+    }
+
+    /* Subtle starfield */
+    for (int i = 0; i < 50; i++) {
+        int px = (i * 7919 + 1283) % D3D_W;
+        int py = (i * 6271 + 947) % D3D_H;
+        uint8_t bri = (uint8_t)(50 + (i * 37) % 80);
+        d3d_buf[py * D3D_W + px] =
+            0xFF000000u | ((uint32_t)bri << 16) |
+            ((uint32_t)bri << 8) | bri;
+    }
+
+    int ay = d3d_angle_y, ax = d3d_angle_x, az = d3d_angle_z;
+
+    /* ── Rotate all 12 vertices ──────────────────────────────────── */
+    int rvx[12], rvy[12], rvz[12], scx[12], scy[12];
+    for (int i = 0; i < 12; i++) {
+        d3d_rotate3(ico_vx[i], ico_vy[i], ico_vz[i],
+                    ay, ax, az, &rvx[i], &rvy[i], &rvz[i]);
+        d3d_project3d(rvx[i], rvy[i], rvz[i], &scx[i], &scy[i]);
+    }
+
+    /* ── Per-face: backface cull, compute depth & lighting ───────── */
+    struct { int idx; int depth; int raw_dot; } vis[20];
+    int nvis = 0;
+
+    for (int f = 0; f < 20; f++) {
+        int i0 = ico_faces[f][0];
+        int i1 = ico_faces[f][1];
+        int i2 = ico_faces[f][2];
+
+        /* Face normal in rotated 3D space (cross product of edges) */
+        int e1x = rvx[i1] - rvx[i0], e1y = rvy[i1] - rvy[i0],
+            e1z = rvz[i1] - rvz[i0];
+        int e2x = rvx[i2] - rvx[i0], e2y = rvy[i2] - rvy[i0],
+            e2z = rvz[i2] - rvz[i0];
+        int nx = FP_MUL(e1y, e2z) - FP_MUL(e1z, e2y);
+        int ny = FP_MUL(e1z, e2x) - FP_MUL(e1x, e2z);
+        int nz = FP_MUL(e1x, e2y) - FP_MUL(e1y, e2x);
+
+        /* Backface cull: camera looks in +Z, front faces have nz < 0 */
+        if (nz >= 0) continue;
+
+        /* Depth for painter's sort (average Z of rotated vertices) */
+        int avg_z = (rvz[i0] + rvz[i1] + rvz[i2]) / 3;
+
+        /* Diffuse lighting: dot(face_normal, light_direction) */
+        int dot = FP_MUL(nx, LIGHT_X) + FP_MUL(ny, LIGHT_Y) +
+                  FP_MUL(nz, LIGHT_Z);
+        if (dot < 0) dot = 0;
+
+        vis[nvis].idx = f;
+        vis[nvis].depth = avg_z;
+        vis[nvis].raw_dot = dot;
+        nvis++;
+    }
+
+    /* Normalize shading: find max dot across visible faces */
+    int max_dot = 1;
+    for (int i = 0; i < nvis; i++)
+        if (vis[i].raw_dot > max_dot) max_dot = vis[i].raw_dot;
+
+    /* ── Painter's sort: draw far faces first (highest avg_z) ────── */
+    for (int i = 0; i < nvis - 1; i++)
+        for (int j = i + 1; j < nvis; j++)
+            if (vis[j].depth > vis[i].depth) {
+                int ti = vis[i].idx; vis[i].idx = vis[j].idx; vis[j].idx = ti;
+                int td = vis[i].depth;
+                vis[i].depth = vis[j].depth; vis[j].depth = td;
+                int tr = vis[i].raw_dot;
+                vis[i].raw_dot = vis[j].raw_dot; vis[j].raw_dot = tr;
+            }
+
+    /* ── Draw filled, shaded faces with edge highlights ──────────── */
+    for (int fi = 0; fi < nvis; fi++) {
+        int f = vis[fi].idx;
+        int i0 = ico_faces[f][0];
+        int i1 = ico_faces[f][1];
+        int i2 = ico_faces[f][2];
+
+        /* Compute shade (ambient + normalized diffuse) */
+        int shade = 50 + (vis[fi].raw_dot * 200) / max_dot;
+        if (shade > 250) shade = 250;
+
+        /* Apply shading to face base color */
+        uint32_t base = ico_base[f];
+        int cr = (int)((base >> 16) & 0xFF) * shade / 255;
+        int cg = (int)((base >> 8)  & 0xFF) * shade / 255;
+        int cb = (int)( base        & 0xFF) * shade / 255;
+        uint32_t fill = 0xFF000000u | ((uint32_t)cr << 16) |
+                        ((uint32_t)cg << 8) | (uint32_t)cb;
+
+        /* Fill the triangle */
+        d3d_fill_tri(scx[i0], scy[i0], scx[i1], scy[i1],
+                     scx[i2], scy[i2], fill);
+
+        /* Bright edge highlight (faceted gem look) */
+        int er = cr + (255 - cr) / 3;
+        int eg = cg + (255 - cg) / 3;
+        int eb = cb + (255 - cb) / 3;
+        uint32_t edge = 0xFF000000u | ((uint32_t)er << 16) |
+                        ((uint32_t)eg << 8) | (uint32_t)eb;
+        d3d_line(scx[i0], scy[i0], scx[i1], scy[i1], edge);
+        d3d_line(scx[i1], scy[i1], scx[i2], scy[i2], edge);
+        d3d_line(scx[i2], scy[i2], scx[i0], scy[i0], edge);
+    }
+
+    /* Advance rotation angles (128 = full revolution) */
+    d3d_angle_y += 1;
+    d3d_angle_x += 1;
+    d3d_angle_z += 0;
+}
+
+/* LVGL render callback: blit d3d_buf into local framebuffer during z-order pass */
+static void d3d_render_cb(lv_obj_t *obj, int abs_x, int abs_y,
+                           uint32_t *fb, int fb_w)
+{
+    (void)obj;
+    if (!d3d_buf) return;
+    for (int y = 0; y < D3D_H; y++) {
+        int dy = abs_y + y;
+        if (dy < 0) continue;
+        for (int x = 0; x < D3D_W; x++) {
+            int dx = abs_x + x;
+            if (dx < 0) continue;
+            fb[dy * fb_w + dx] = d3d_buf[y * D3D_W + x];
+        }
+    }
+}
+
+static void create_demo3d(void)
+{
+    win_demo3d = lv_win_create(lv_scr_act());
+    lv_win_set_title(win_demo3d, "3D Demo");
+    lv_obj_set_pos(win_demo3d, 120, 50);
+    lv_obj_set_size(win_demo3d, (int16_t)(D3D_W + 4), (int16_t)(D3D_H + 28));
+    lv_obj_add_event_cb(win_demo3d, on_demo3d_close, LV_EVENT_CLOSE, NULL);
+
+    lv_obj_t *c = lv_win_get_content(win_demo3d);
+    lv_obj_set_style_bg_color(c, lv_color_make(0, 0, 0));
+    c->render_cb = d3d_render_cb;
+
+    /* Allocate pixel buffer */
+    if (!d3d_buf)
+        d3d_buf = (uint32_t *)malloc(D3D_W * D3D_H * 4);
+    if (d3d_buf)
+        memset(d3d_buf, 0, D3D_W * D3D_H * 4);
+    d3d_angle_y = 0;
+    d3d_angle_x = 0;
+    d3d_angle_z = 0;
+
+    tb_add_dyn_btn(&win_demo3d, "3D");
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  *  Terminal Emulator (multi-instance)
  * ══════════════════════════════════════════════════════════════════════ */
 
@@ -2736,9 +3216,23 @@ int main(int argc, char *argv[])
     signal(SIGTERM, sighandler);
 
     int skip_login = 0;
+    int pending_res = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--skip-login") == 0)
             skip_login = 1;
+        else if (strncmp(argv[i], "--pending-res=", 14) == 0) {
+            /* Parse old resolution: --pending-res=WxH */
+            unsigned int pw = 0, ph = 0;
+            const char *p = argv[i] + 14;
+            while (*p >= '0' && *p <= '9') { pw = pw * 10 + (*p - '0'); p++; }
+            if (*p == 'x') p++;
+            while (*p >= '0' && *p <= '9') { ph = ph * 10 + (*p - '0'); p++; }
+            if (pw > 0 && ph > 0) {
+                res_old_w = pw;
+                res_old_h = ph;
+                pending_res = 1;
+            }
+        }
     }
 
     if (lv_init() < 0)
@@ -2957,6 +3451,7 @@ int main(int argc, char *argv[])
         MENU_ITEM("Power",    btn_power_cb);
         MENU_ITEM("Users",    btn_usermgr_cb);
         MENU_ITEM("Internet", btn_netcfg_cb);
+        MENU_ITEM("3D Demo",  btn_demo3d_cb);
         MENU_ITEM("Log Out",  btn_logout_cb);
 
         #undef MENU_ITEM
@@ -2975,9 +3470,17 @@ int main(int argc, char *argv[])
     lv_obj_set_pos(g_clock_lbl, (int16_t)(scr_w - 140), 6);
     g_clock_refresh_ctr = 0;
 
+    /* Show resolution confirmation dialog if we just changed resolution */
+    if (pending_res)
+        create_res_confirm();
+
     /* ── Main loop ─────────────────────────────────────────────── */
 
     while (g_running) {
+        /* Pre-render 3D scene into buffer (LVGL's render_cb will blit it) */
+        if (win_demo3d && d3d_buf)
+            d3d_render_frame();
+
         lv_timer_handler();
         term_poll_all();
 
@@ -3006,6 +3509,31 @@ int main(int argc, char *argv[])
                 if (!g_terms[t].active || !g_terms[t].tb_btn) continue;
                 g_terms[t].tb_btn->bg_color =
                     (g_terms[t].win == topwin) ? c_fg : c_bg;
+            }
+        }
+
+        /* Resolution confirmation countdown */
+        if (win_res_confirm) {
+            if (res_confirm_keep) {
+                /* User accepted — dismiss dialog */
+                lv_obj_del(win_res_confirm);
+                win_res_confirm = NULL;
+                res_confirm_lbl = NULL;
+            } else if (res_confirm_revert || res_countdown <= 0) {
+                /* User clicked revert or timeout — revert resolution */
+                revert_resolution();  /* does not return */
+            } else {
+                /* Tick countdown (~60 fps) */
+                if (++res_countdown_ctr >= 60) {
+                    res_countdown_ctr = 0;
+                    res_countdown--;
+                    if (res_confirm_lbl) {
+                        char cbuf[60];
+                        snprintf(cbuf, sizeof(cbuf),
+                                 "Reverting in %d seconds...", res_countdown);
+                        lv_label_set_text(res_confirm_lbl, cbuf);
+                    }
+                }
             }
         }
 
