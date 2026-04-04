@@ -25,6 +25,19 @@ typedef signed short int16;
 typedef signed int int32;
 typedef signed long int64;
 
+typedef uint8 uint8_t;
+typedef uint16 uint16_t;
+typedef uint32 uint32_t;
+typedef uint64 uint64_t;
+
+typedef int8 int8_t;
+typedef int16 int16_t;
+typedef int32 int32_t;
+typedef int64 int64_t;
+
+typedef uint64_t uintptr_t;
+typedef int64_t intptr_t;
+
 typedef uint64 pde_t;
 
 typedef uint64 cpumask_t;
@@ -43,10 +56,10 @@ typedef int pid_t;
 
 #if !defined(ON_HOST_OS)
 #if !defined(ssize_t)
-typedef typeof(-sizeof(int)) ssize_t;
+typedef int64 ssize_t;
 #endif /* ssize_t */
 #if !defined(loff_t)
-typedef long long loff_t;
+typedef int64 loff_t;
 #endif /* loff_t */
 #if !defined(dev_t)
 typedef uint32 dev_t;

@@ -375,7 +375,7 @@ void xv6fs_run_file_ops_smoketest(void) {
     if (new_pos == 0) {
         printf("xv6fs_file_test: " PASS " seek to beginning\n");
     } else {
-        printf("xv6fs_file_test: " FAIL " seek errno=%lld\n", new_pos);
+        printf("xv6fs_file_test: " FAIL " seek errno=%ld\n", new_pos);
     }
 
     // Close file
@@ -385,9 +385,9 @@ void xv6fs_run_file_ops_smoketest(void) {
     // Check file size
     vfs_ilock(testfile);
     if ((loff_t)test_data_len == testfile->size) {
-        printf("xv6fs_file_test: " PASS " file size=%lld\n", testfile->size);
+        printf("xv6fs_file_test: " PASS " file size=%ld\n", testfile->size);
     } else {
-        printf("xv6fs_file_test: " WARN " file size=%lld expected=%lu\n",
+        printf("xv6fs_file_test: " WARN " file size=%ld expected=%lu\n",
                testfile->size, test_data_len);
     }
     vfs_iunlock(testfile);
@@ -453,7 +453,7 @@ void xv6fs_run_truncate_smoketest(void) {
     if (ret != 0) {
         printf("xv6fs_truncate: " FAIL " grow to 512 bytes, errno=%d\n", ret);
     } else {
-        printf("xv6fs_truncate: " PASS " grow to 512 bytes, size=%lld\n",
+        printf("xv6fs_truncate: " PASS " grow to 512 bytes, size=%ld\n",
                testfile->size);
     }
 
@@ -462,7 +462,7 @@ void xv6fs_run_truncate_smoketest(void) {
     if (ret != 0) {
         printf("xv6fs_truncate: " FAIL " grow to 3 blocks, errno=%d\n", ret);
     } else {
-        printf("xv6fs_truncate: " PASS " grow to 3 blocks, size=%lld\n",
+        printf("xv6fs_truncate: " PASS " grow to 3 blocks, size=%ld\n",
                testfile->size);
     }
 
@@ -474,7 +474,7 @@ void xv6fs_run_truncate_smoketest(void) {
                ret);
     } else {
         printf("xv6fs_truncate: " PASS
-               " partial shrink to 2 blocks, size=%lld\n",
+               " partial shrink to 2 blocks, size=%ld\n",
                testfile->size);
     }
 
@@ -486,7 +486,7 @@ void xv6fs_run_truncate_smoketest(void) {
                ret);
     } else {
         printf("xv6fs_truncate: " PASS
-               " partial shrink to 500 bytes, size=%lld\n",
+               " partial shrink to 500 bytes, size=%ld\n",
                testfile->size);
     }
 
@@ -495,7 +495,7 @@ void xv6fs_run_truncate_smoketest(void) {
     if (ret != 0) {
         printf("xv6fs_truncate: " FAIL " shrink to zero, errno=%d\n", ret);
     } else {
-        printf("xv6fs_truncate: " PASS " shrink to zero, size=%lld\n",
+        printf("xv6fs_truncate: " PASS " shrink to zero, size=%ld\n",
                testfile->size);
     }
 
@@ -504,7 +504,7 @@ void xv6fs_run_truncate_smoketest(void) {
     if (ret != 0) {
         printf("xv6fs_truncate: " FAIL " grow after shrink, errno=%d\n", ret);
     } else {
-        printf("xv6fs_truncate: " PASS " grow after shrink, size=%lld\n",
+        printf("xv6fs_truncate: " PASS " grow after shrink, size=%ld\n",
                testfile->size);
     }
 
@@ -513,7 +513,7 @@ void xv6fs_run_truncate_smoketest(void) {
     if (ret != 0) {
         printf("xv6fs_truncate: " FAIL " same size no-op, errno=%d\n", ret);
     } else {
-        printf("xv6fs_truncate: " PASS " same size no-op, size=%lld\n",
+        printf("xv6fs_truncate: " PASS " same size no-op, size=%ld\n",
                testfile->size);
     }
 
@@ -1066,9 +1066,9 @@ void xv6fs_run_large_file_smoketest(void) {
     // Verify file size
     vfs_ilock(testfile);
     if (testfile->size == 10 * BSIZE) {
-        printf("xv6fs_largefile: " PASS " file size=%lld\n", testfile->size);
+        printf("xv6fs_largefile: " PASS " file size=%ld\n", testfile->size);
     } else {
-        printf("xv6fs_largefile: " FAIL " file size=%lld expected=%d\n",
+        printf("xv6fs_largefile: " FAIL " file size=%ld expected=%d\n",
                testfile->size, 10 * BSIZE);
     }
     vfs_iunlock(testfile);
@@ -1128,7 +1128,7 @@ void xv6fs_run_large_file_smoketest(void) {
                    bytes_read, (unsigned char)read_buf[0]);
         }
     } else {
-        printf("xv6fs_largefile: " FAIL " seek to block 5: pos=%lld\n",
+        printf("xv6fs_largefile: " FAIL " seek to block 5: pos=%ld\n",
                new_pos);
     }
 
