@@ -110,7 +110,7 @@ static inline list_node_t *make_list(const int arr[], int arr_length) {
                 destroy_list(head);
                 return NULL;
             }
-            list_node_push(head, node, entry);
+            list_node_push_back(head, node, entry);
         }
     }
 

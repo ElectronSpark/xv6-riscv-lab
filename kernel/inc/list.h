@@ -212,6 +212,42 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
  */
 #define LIST_FIRST_ENTRY_RCU(head) list_next_rcu(head)
 
+#define __LIST_NODE_FROM_ENTRY_OR_NULL(head, entry, type, member)             \
+    ({                                                                         \
+        list_node_t *__entry = (entry);                                        \
+        type *__result = NULL;                                                 \
+        if (__entry != NULL && __entry != (head)) {                            \
+            __result = container_of(__entry, type, member);                    \
+        }                                                                      \
+        __result;                                                              \
+    })
+
+#define __LIST_NODE_FROM_SAMPLE_OR_NULL(head, entry, sample, member)          \
+    __LIST_NODE_FROM_ENTRY_OR_NULL(head, entry, typeof(*(sample)), member)
+
+#define __LIST_NODE_STEP_OR_NULL(head, node, member, entry)                   \
+    ({                                                                         \
+        typeof(*(node)) *__result = NULL;                                      \
+        if ((node) != NULL) {                                                  \
+            __result =                                                         \
+                __LIST_NODE_FROM_SAMPLE_OR_NULL(head, entry, node, member);    \
+        }                                                                      \
+        __result;                                                              \
+    })
+
+#define __LIST_NODE_PUSH(head, node, member, push_fn)                         \
+    push_fn(head, &((node)->member))
+
+#define __LIST_NODE_POP(head, type, member, pop_fn)                           \
+    ({                                                                         \
+        list_node_t *__entry = pop_fn(head);                                   \
+        type *__result = NULL;                                                 \
+        if (__entry != NULL) {                                                 \
+            __result = container_of(__entry, type, member);                    \
+        }                                                                      \
+        __result;                                                              \
+    })
+
 /**
  * LIST_FIRST_NODE_RCU - Get first node from list (RCU-safe)
  * @head: the list head
@@ -220,15 +256,8 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
  *
  * Returns NULL if the list is empty.
  */
-#define LIST_FIRST_NODE_RCU(head, type, member)                                \
-    ({                                                                         \
-        list_node_t *__first_entry = list_next_rcu(head);                      \
-        type *__result = NULL;                                                 \
-        if (!LIST_ENTRY_IS_HEAD(head, __first_entry)) {                        \
-            __result = container_of(__first_entry, type, member);              \
-        }                                                                      \
-        __result;                                                              \
-    })
+#define LIST_FIRST_NODE_RCU(head, type, member)                               \
+    __LIST_NODE_FROM_ENTRY_OR_NULL(head, list_next_rcu(head), type, member)
 
 /**
  * list_next_or_null_rcu - Get next element or NULL if at end (RCU-safe)
@@ -237,13 +266,8 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
  * @type: the type of the container struct
  * @member: the name of the list_node_t within the struct
  */
-#define list_next_or_null_rcu(head, ptr, type, member)                         \
-    ({                                                                         \
-        list_node_t *__head = (head);                                          \
-        list_node_t *__ptr = (ptr);                                            \
-        list_node_t *__next = READ_ONCE(__ptr->next);                          \
-        __next != __head ? list_entry_rcu(__next, type, member) : NULL;        \
-    })
+#define list_next_or_null_rcu(head, ptr, type, member)                        \
+    __LIST_NODE_FROM_ENTRY_OR_NULL(head, READ_ONCE((ptr)->next), type, member)
 
 /* <--- RCU List Traversal Macros ---> */
 
@@ -276,11 +300,10 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
  * This primitive may safely run concurrently with _rcu list-mutation
  * primitives as long as it's guarded by rcu_read_lock().
  */
-#define list_foreach_node_rcu(head, pos, member)                               \
-    for ((pos) = list_entry_rcu(list_next_rcu(head), typeof(*(pos)), member);  \
-         &(pos)->member != (head);                                             \
-         (pos) = list_entry_rcu(list_next_rcu(&(pos)->member), typeof(*(pos)), \
-                                member))
+#define list_foreach_node_rcu(head, pos, member)                              \
+    for ((pos) = LIST_FIRST_NODE_RCU(head, typeof(*(pos)), member);           \
+         (pos) != NULL;                                                       \
+         (pos) = LIST_NEXT_NODE_RCU(head, pos, member))
 
 /**
  * list_foreach_node_continue_rcu - Continue node iteration (RCU-safe)
@@ -288,12 +311,10 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
  * @pos: the current position (pointer to container type)
  * @member: the name of the list_node_t within the container
  */
-#define list_foreach_node_continue_rcu(head, pos, member)                      \
-    for ((pos) = list_entry_rcu(list_next_rcu(&(pos)->member), typeof(*(pos)), \
-                                member);                                       \
-         &(pos)->member != (head);                                             \
-         (pos) = list_entry_rcu(list_next_rcu(&(pos)->member), typeof(*(pos)), \
-                                member))
+#define list_foreach_node_continue_rcu(head, pos, member)                     \
+    for ((pos) = LIST_NEXT_NODE_RCU(head, pos, member);                       \
+         (pos) != NULL;                                                       \
+         (pos) = LIST_NEXT_NODE_RCU(head, pos, member))
 
 /**
  * list_foreach_node_from_rcu - Iterate from current position (RCU-safe)
@@ -304,10 +325,9 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
  * Iterate over the tail of a list starting from the given position,
  * which must have been in the list when the RCU read lock was taken.
  */
-#define list_foreach_node_from_rcu(head, pos, member)                          \
-    for (; &(pos)->member != (head);                                           \
-         (pos) = list_entry_rcu(list_next_rcu(&(pos)->member), typeof(*(pos)), \
-                                member))
+#define list_foreach_node_from_rcu(head, pos, member)                         \
+    for (; (pos) != NULL;                                                     \
+         (pos) = LIST_NEXT_NODE_RCU(head, pos, member))
 
 /* <--- macros manipulating entries ---> */
 #define LIST_NEXT_ENTRY(entry) ((entry)->next)
@@ -338,20 +358,9 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
 // Returns (node_type *):
 //   - the address of the next node
 //   - NULL if the given node is the last node of a list
-#define LIST_NEXT_NODE(head, node, member)                                     \
-    ({                                                                         \
-        list_node_t *__current_entry = NULL;                                   \
-        list_node_t *__next_entry = NULL;                                      \
-        typeof(*node) *__result = NULL;                                        \
-        if ((node) != NULL) {                                                  \
-            __current_entry = &((node)->member);                               \
-            __next_entry = LIST_NEXT_ENTRY(__current_entry);                   \
-            if (!LIST_ENTRY_IS_HEAD(head, __next_entry)) {                     \
-                __result = container_of(__next_entry, typeof(*node), member);  \
-            }                                                                  \
-        }                                                                      \
-        __result;                                                              \
-    })
+#define LIST_NEXT_NODE(head, node, member)                                    \
+    __LIST_NODE_STEP_OR_NULL(head, node, member,                              \
+                             LIST_NEXT_ENTRY(&((node)->member)))
 
 // get the previous node of a node
 //
@@ -366,20 +375,9 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
 // Returns (node_type *):
 //   - the address of the previous node
 //   - NULL if the given node is the first node of a list
-#define LIST_PREV_NODE(head, node, member)                                     \
-    ({                                                                         \
-        list_node_t *__current_entry = NULL;                                   \
-        list_node_t *__prev_entry = NULL;                                      \
-        typeof(*node) *__result = NULL;                                        \
-        if ((node) != NULL) {                                                  \
-            __current_entry = &((node)->member);                               \
-            __prev_entry = LIST_PREV_ENTRY(__current_entry);                   \
-            if (!LIST_ENTRY_IS_HEAD(head, __prev_entry)) {                     \
-                __result = container_of(__prev_entry, typeof(*node), member);  \
-            }                                                                  \
-        }                                                                      \
-        __result;                                                              \
-    })
+#define LIST_PREV_NODE(head, node, member)                                    \
+    __LIST_NODE_STEP_OR_NULL(head, node, member,                              \
+                             LIST_PREV_ENTRY(&((node)->member)))
 
 // get the first node of a list
 //
@@ -394,15 +392,8 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
 // Returns (node_type *):
 //   - the address of the first node in the given list
 //   - NULL if the given list is empty
-#define LIST_FIRST_NODE(head, type, member)                                    \
-    ({                                                                         \
-        list_node_t *__first_entry = LIST_FIRST_ENTRY(head);                   \
-        type *__result = NULL;                                                 \
-        if (!LIST_ENTRY_IS_HEAD(head, __first_entry)) {                        \
-            __result = container_of(__first_entry, type, member);              \
-        }                                                                      \
-        __result;                                                              \
-    })
+#define LIST_FIRST_NODE(head, type, member)                                   \
+    __LIST_NODE_FROM_ENTRY_OR_NULL(head, LIST_FIRST_ENTRY(head), type, member)
 
 // get the last node of a list
 //
@@ -417,15 +408,8 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
 // Returns (node_type *):
 //   - the address of the last node in the given list
 //   - NULL if the given list is empty
-#define LIST_LAST_NODE(head, type, member)                                     \
-    ({                                                                         \
-        list_node_t *__last_entry = LIST_LAST_ENTRY(head);                     \
-        type *__result = NULL;                                                 \
-        if (!LIST_ENTRY_IS_HEAD(head, __last_entry)) {                         \
-            __result = container_of(__last_entry, type, member);               \
-        }                                                                      \
-        __result;                                                              \
-    })
+#define LIST_LAST_NODE(head, type, member)                                    \
+    __LIST_NODE_FROM_ENTRY_OR_NULL(head, LIST_LAST_ENTRY(head), type, member)
 
 // to check if a node is detached
 //
@@ -505,12 +489,14 @@ static inline void list_entry_replace(list_node_t *old, list_node_t *new) {
 }
 
 // push a node into the start of a list
-static inline void list_entry_push_back(list_node_t *head, list_node_t *entry) {
+static inline void list_entry_push_front(list_node_t *head,
+                                         list_node_t *entry) {
     list_entry_insert(head, entry);
 }
 
 // push a node into the end of a list
-static inline void list_entry_push(list_node_t *head, list_node_t *entry) {
+static inline void list_entry_push_back(list_node_t *head,
+                                        list_node_t *entry) {
     list_entry_insert(LIST_PREV_ENTRY(head), entry);
 }
 
@@ -530,9 +516,9 @@ static inline void list_entry_insert_bulk(list_node_t *prev,
     list_entry_init(source_head);
 }
 
-// take the fisrt node out from a list
+// take the first node out from a list
 // return NULL if the list is empty
-static inline list_node_t *list_entry_pop_back(list_node_t *head) {
+static inline list_node_t *list_entry_pop_front(list_node_t *head) {
     list_node_t *first_entry = LIST_FIRST_ENTRY(head);
     if (LIST_ENTRY_IS_HEAD(head, first_entry)) {
         return NULL;
@@ -543,7 +529,7 @@ static inline list_node_t *list_entry_pop_back(list_node_t *head) {
 
 // take the last node out from a list
 // return NULL if the list is empty
-static inline list_node_t *list_entry_pop(list_node_t *head) {
+static inline list_node_t *list_entry_pop_back(list_node_t *head) {
     list_node_t *last_entry = LIST_LAST_ENTRY(head);
     if (LIST_ENTRY_IS_HEAD(head, last_entry)) {
         return NULL;
@@ -584,8 +570,8 @@ static inline list_node_t *list_entry_pop(list_node_t *head) {
 //       the node to insert
 //   - member:
 //       the member of the list entry in the structure of the node
-#define list_node_push_back(head, node, member)                                \
-    list_entry_push_back(head, &((node)->member))
+#define list_node_push_front(head, node, member)                              \
+    __LIST_NODE_PUSH(head, node, member, list_entry_push_front)
 
 // add a node at the end of a list
 //
@@ -596,8 +582,8 @@ static inline list_node_t *list_entry_pop(list_node_t *head) {
 //       the node to insert
 //   - member:
 //       the member of the list entry in the structure of the node
-#define list_node_push(head, node, member)                                     \
-    list_entry_push(head, &((node)->member))
+#define list_node_push_back(head, node, member)                               \
+    __LIST_NODE_PUSH(head, node, member, list_entry_push_back)
 
 // get remove the first node of a list
 //
@@ -612,15 +598,8 @@ static inline list_node_t *list_entry_pop(list_node_t *head) {
 // Returns (node_type *):
 //   - the address of the node popped
 //   - NULL if the given list is empty
-#define list_node_pop_back(head, type, member)                                 \
-    ({                                                                         \
-        list_node_t *__last_entry = list_entry_pop_back(head);                 \
-        type *__result = NULL;                                                 \
-        if (__last_entry != NULL) {                                            \
-            __result = container_of(__last_entry, type, member);               \
-        }                                                                      \
-        __result;                                                              \
-    })
+#define list_node_pop_front(head, type, member)                               \
+    __LIST_NODE_POP(head, type, member, list_entry_pop_front)
 
 // get remove the last node of a list
 //
@@ -635,15 +614,8 @@ static inline list_node_t *list_entry_pop(list_node_t *head) {
 // Returns (node_type *):
 //   - the address of the node popped
 //   - NULL if the given list is empty
-#define list_node_pop(head, type, member)                                      \
-    ({                                                                         \
-        list_node_t *__last_entry = list_entry_pop(head);                      \
-        type *__result = NULL;                                                 \
-        if (__last_entry != NULL) {                                            \
-            __result = container_of(__last_entry, type, member);               \
-        }                                                                      \
-        __result;                                                              \
-    })
+#define list_node_pop_back(head, type, member)                                \
+    __LIST_NODE_POP(head, type, member, list_entry_pop_back)
 
 /* <- traverse lists -> */
 
@@ -874,18 +846,8 @@ static inline void list_entry_splice_tail_rcu(list_node_t *list,
  *
  * Returns the next node, or NULL if at the end of the list.
  */
-#define LIST_NEXT_NODE_RCU(head, node, member)                                 \
-    ({                                                                         \
-        list_node_t *__next_entry = NULL;                                      \
-        typeof(*(node)) *__result = NULL;                                      \
-        if ((node) != NULL) {                                                  \
-            __next_entry = list_next_rcu(&((node)->member));                   \
-            if (!LIST_ENTRY_IS_HEAD(head, __next_entry)) {                     \
-                __result =                                                     \
-                    container_of(__next_entry, typeof(*(node)), member);       \
-            }                                                                  \
-        }                                                                      \
-        __result;                                                              \
-    })
+#define LIST_NEXT_NODE_RCU(head, node, member)                                \
+    __LIST_NODE_STEP_OR_NULL(head, node, member,                              \
+                             list_next_rcu(&((node)->member)))
 
 #endif /* __BI_DIRECTIONAL_H */

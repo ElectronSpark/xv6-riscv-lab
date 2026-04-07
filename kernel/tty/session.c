@@ -90,7 +90,7 @@ struct session *session_alloc(pid_t sid) {
     s->ref_cnt = 1;
     s->t_cnt = 0;
     s->pg_cnt = 0;
-    list_node_push(&session_list, s, global_entry);
+    list_node_push_back(&session_list, s, global_entry);
     return s;
 }
 
@@ -133,7 +133,7 @@ int session_add_thread(struct session *s, struct thread *t) {
     t->session = s;
     t->sid = s->sid;
     list_entry_init(&t->sid_entry);
-    list_node_push(&s->threads, t, sid_entry);
+    list_node_push_back(&s->threads, t, sid_entry);
     s->t_cnt++;
     session_ref(s);
     return 0;
@@ -178,7 +178,7 @@ int session_add_pg(struct session *s, struct pgroup *pg) {
         return -EEXIST;
     pg->session = s;
     list_entry_init(&pg->list_entry);
-    list_entry_push(&s->pgrps, &pg->list_entry);
+    list_entry_push_back(&s->pgrps, &pg->list_entry);
     s->pg_cnt++;
     session_ref(s);
     return 0;

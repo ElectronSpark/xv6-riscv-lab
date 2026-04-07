@@ -120,7 +120,7 @@ int pgroup_add_thread(struct pgroup *pg, struct thread *t) {
     t->pgroup = pg;
     t->pgid = pg->pgid;
     list_entry_init(&t->pg_entry);
-    list_node_push(&pg->threads, t, pg_entry);
+    list_node_push_back(&pg->threads, t, pg_entry);
     pg->t_cnt++;
     return 0;
 }
@@ -163,7 +163,7 @@ int pgroup_add_tg(struct pgroup *pg, struct thread_group *tg) {
     if (tg->pgroup != NULL)
         return -EEXIST;
     list_entry_init(&tg->list_entry);
-    list_node_push(&pg->thread_groups, tg, list_entry);
+    list_node_push_back(&pg->thread_groups, tg, list_entry);
     tg->pgroup = pg;
     pg->p_cnt++;
     return 0;

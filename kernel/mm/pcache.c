@@ -204,7 +204,7 @@ static void __pcache_register(struct pcache *pcache) {
     __pcache_global_lock();
     __pcache_spin_lock(pcache);
     if (LIST_ENTRY_IS_DETACHED(&pcache->list_entry)) {
-        list_node_push_back(&__global_pcache_list, pcache, list_entry);
+        list_node_push_front(&__global_pcache_list, pcache, list_entry);
         __global_pcache_count++;
     } else {
         printf("warning: __pcache_register: pcache already registered");
@@ -929,7 +929,7 @@ static void __pcache_push_lru(struct pcache *pcache, page_t *page) {
     assert(page->ref_count == 1, "__pcache_push_lru: page ref_count is not 1");
     assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry),
            "__pcache_push_lru: pcache node already in lru or dirty list");
-    list_node_push_back(&pcache->lru, pcnode, lru_entry);
+    list_node_push_front(&pcache->lru, pcnode, lru_entry);
     pcache->lru_count++;
 }
 
@@ -1002,7 +1002,7 @@ static void __pcache_push_dirty(struct pcache *pcache, page_t *page) {
     } else {
         list_node_detach(pcnode, lru_entry);
     }
-    list_node_push_back(&pcache->dirty_list, pcnode, lru_entry);
+    list_node_push_front(&pcache->dirty_list, pcnode, lru_entry);
 }
 
 // Pop a dirty page from pcache dirty list

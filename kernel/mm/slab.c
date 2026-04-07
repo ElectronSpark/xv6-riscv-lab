@@ -827,7 +827,8 @@ STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums,
             panic("__slab_cache_shrink_unlocked: list empty but count > 0");
         }
 
-        slab = list_node_pop_back(&cache->global_free_list, slab_t, list_entry);
+        slab = list_node_pop_front(&cache->global_free_list, slab_t,
+                       list_entry);
         if (slab == NULL) {
             panic("__slab_cache_shrink_unlocked: slab == NULL");
         }
@@ -843,7 +844,7 @@ STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums,
             panic("__slab_cache_shrink_unlocked: slab_total did not decrease");
         }
 
-        list_node_push_back(tmp_list, slab, list_entry);
+        list_node_push_front(tmp_list, slab, list_entry);
         counter++;
     }
 
@@ -921,7 +922,7 @@ void *slab_alloc(slab_cache_t *cache) {
             // Move from partial to full list
             list_node_detach(slab, list_entry);
             __atomic_fetch_sub(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
-            list_node_push_back(&pcpu_cache->full_list, slab, list_entry);
+            list_node_push_front(&pcpu_cache->full_list, slab, list_entry);
             __atomic_fetch_add(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
             slab->state = SLAB_STATE_FULL;
         }
@@ -939,7 +940,8 @@ void *slab_alloc(slab_cache_t *cache) {
     __global_free_lock(cache);
 
     if (!LIST_IS_EMPTY(&cache->global_free_list)) {
-        slab = list_node_pop_back(&cache->global_free_list, slab_t, list_entry);
+        slab = list_node_pop_front(&cache->global_free_list, slab_t,
+                       list_entry);
         __atomic_fetch_sub(&cache->global_free_count, 1, __ATOMIC_RELEASE);
         __global_free_unlock(cache);
 
@@ -953,11 +955,11 @@ void *slab_alloc(slab_cache_t *cache) {
         // Add to local partial or full list
         __percpu_cache_lock_cpu(cache, cpu_id);
         if (__SLAB_FULL(slab)) {
-            list_node_push_back(&pcpu_cache->full_list, slab, list_entry);
+            list_node_push_front(&pcpu_cache->full_list, slab, list_entry);
             __atomic_fetch_add(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
             slab->state = SLAB_STATE_FULL;
         } else {
-            list_node_push_back(&pcpu_cache->partial_list, slab, list_entry);
+            list_node_push_front(&pcpu_cache->partial_list, slab, list_entry);
             __atomic_fetch_add(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
             slab->state = SLAB_STATE_PARTIAL;
         }
@@ -995,11 +997,11 @@ void *slab_alloc(slab_cache_t *cache) {
     // Add to appropriate list
     __percpu_cache_lock_cpu(cache, cpu_id);
     if (__SLAB_FULL(slab)) {
-        list_node_push_back(&pcpu_cache->full_list, slab, list_entry);
+        list_node_push_front(&pcpu_cache->full_list, slab, list_entry);
         __atomic_fetch_add(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
         slab->state = SLAB_STATE_FULL;
     } else {
-        list_node_push_back(&pcpu_cache->partial_list, slab, list_entry);
+        list_node_push_front(&pcpu_cache->partial_list, slab, list_entry);
         __atomic_fetch_add(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
         slab->state = SLAB_STATE_PARTIAL;
     }
@@ -1092,7 +1094,7 @@ void slab_free(void *obj) {
 
         // Add to global free list
         __global_free_lock(cache);
-        list_node_push_back(&cache->global_free_list, slab, list_entry);
+        list_node_push_front(&cache->global_free_list, slab, list_entry);
         __atomic_fetch_add(&cache->global_free_count, 1, __ATOMIC_RELEASE);
         __global_free_unlock(cache);
 
@@ -1103,7 +1105,7 @@ void slab_free(void *obj) {
 
         // Move to owner CPU's partial list (implements the special case
         // requirement)
-        list_node_push_back(&pcpu_cache->partial_list, slab, list_entry);
+        list_node_push_front(&pcpu_cache->partial_list, slab, list_entry);
         __atomic_fetch_add(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
         slab->state = SLAB_STATE_PARTIAL;
 
@@ -1129,13 +1131,13 @@ void slab_free(void *obj) {
         for (int i = 0;
              i < target_shrink && !LIST_IS_EMPTY(&cache->global_free_list);
              i++) {
-            slab_t *free_slab = list_node_pop_back(&cache->global_free_list,
+            slab_t *free_slab = list_node_pop_front(&cache->global_free_list,
                                                    slab_t, list_entry);
             if (free_slab != NULL) {
                 __atomic_fetch_sub(&cache->global_free_count, 1,
                                    __ATOMIC_RELEASE);
                 __slab_detach(cache, free_slab);
-                list_node_push_back(&tmp_list, free_slab, list_entry);
+                list_node_push_front(&tmp_list, free_slab, list_entry);
             }
         }
         __global_free_unlock(cache);
@@ -1220,7 +1222,7 @@ void slab_free_noshrink(void *obj) {
 
         // Add to global free list
         __global_free_lock(cache);
-        list_node_push_back(&cache->global_free_list, slab, list_entry);
+        list_node_push_front(&cache->global_free_list, slab, list_entry);
         __atomic_fetch_add(&cache->global_free_count, 1, __ATOMIC_RELEASE);
         __global_free_unlock(cache);
 
@@ -1230,7 +1232,7 @@ void slab_free_noshrink(void *obj) {
         __atomic_fetch_sub(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
 
         // Move to owner CPU's partial list
-        list_node_push_back(&pcpu_cache->partial_list, slab, list_entry);
+        list_node_push_front(&pcpu_cache->partial_list, slab, list_entry);
         __atomic_fetch_add(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
         slab->state = SLAB_STATE_PARTIAL;
 

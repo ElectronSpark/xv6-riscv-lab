@@ -343,7 +343,7 @@ int devtmpfs_create_node(const char *name, mode_t mode, dev_t dev) {
     list_entry_init(&node->list_entry);
 
     spin_lock(&__devtmpfs_lock);
-    list_entry_push_back(&__devtmpfs_nodes, &node->list_entry);
+    list_entry_push_front(&__devtmpfs_nodes, &node->list_entry);
     spin_unlock(&__devtmpfs_lock);
 
     /*

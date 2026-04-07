@@ -160,7 +160,7 @@ void binit(void) {
         b->dirty = 0;
         mutex_init(&b->lock, "buffer");
         // Add to free list
-        list_entry_push(&bcache.free_list, &b->free_entry);
+        list_entry_push_back(&bcache.free_list, &b->free_entry);
     }
     __buf_cache_prealloc();
 }
@@ -194,7 +194,7 @@ STATIC struct buf *bget(uint dev, uint blockno) {
     }
 
     // Pop from free list (get oldest free buffer for LRU behavior)
-    b = list_node_pop_back(&bcache.free_list, struct buf, free_entry);
+    b = list_node_pop_front(&bcache.free_list, struct buf, free_entry);
 
     // Remove from hash table if it was caching a different block
     b1 = __bcache_hlist_pop(b->dev, b->blockno);
@@ -324,7 +324,7 @@ void bwrite_async(struct buf *b) {
     if (!b->dirty) {
         b->dirty = 1;
         // Add to dirty list (at tail for FIFO writeback order)
-        list_node_push_back(&bcache.dirty_list, b, dirty_entry);
+        list_node_push_front(&bcache.dirty_list, b, dirty_entry);
         bcache.dirty_count++;
     }
     spin_unlock(&bcache.lock);
@@ -345,7 +345,7 @@ void bsync(void) {
         }
 
         // Get oldest dirty buffer (FIFO order)
-        b = list_node_pop_back(&bcache.dirty_list, struct buf, dirty_entry);
+        b = list_node_pop_front(&bcache.dirty_list, struct buf, dirty_entry);
         b->dirty = 0;
         bcache.dirty_count--;
 
@@ -380,7 +380,7 @@ void bsync(void) {
         spin_lock(&bcache.lock);
         b->refcnt--;
         if (b->refcnt == 0) {
-            list_node_push(&bcache.free_list, b, free_entry);
+            list_node_push_back(&bcache.free_list, b, free_entry);
         }
         spin_unlock(&bcache.lock);
     }
@@ -411,7 +411,7 @@ void brelse(struct buf *b) {
     if (b->refcnt == 0) {
         // no one is waiting for it.
         // Add to free list (most recently used at head, oldest at tail)
-        list_node_push(&bcache.free_list, b, free_entry);
+        list_node_push_back(&bcache.free_list, b, free_entry);
     }
 
     spin_unlock(&bcache.lock);
@@ -432,7 +432,7 @@ void bunpin(struct buf *b) {
     b->refcnt--;
     // If refcnt becomes 0, add to free list
     if (b->refcnt == 0) {
-        list_node_push(&bcache.free_list, b, free_entry);
+        list_node_push_back(&bcache.free_list, b, free_entry);
     }
     spin_unlock(&bcache.lock);
 }

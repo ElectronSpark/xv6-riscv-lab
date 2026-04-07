@@ -114,7 +114,7 @@ static void __add_chunk_to_freelist(struct earalloc_chunk *chunk) {
            "__add_chunk_to_freelist: chunk not aligned to its size");
 
     if (list_idx >= 0 && list_idx < EARLYALLOC_ORDERS) {
-        list_entry_push_back(&earalloc_params.free_lists[list_idx],
+        list_entry_push_front(&earalloc_params.free_lists[list_idx],
                              &chunk->list_entry);
     }
 }
@@ -217,7 +217,7 @@ static struct earalloc_chunk *__get_chunk_from_freelist(int target_order) {
     // Try to find a chunk in the target order's free list
     if (!LIST_IS_EMPTY(&earalloc_params.free_lists[list_idx])) {
         list_node_t *entry =
-            list_entry_pop_back(&earalloc_params.free_lists[list_idx]);
+            list_entry_pop_front(&earalloc_params.free_lists[list_idx]);
         struct earalloc_chunk *chunk =
             container_of(entry, struct earalloc_chunk, list_entry);
         assert(chunk->magic == EARLYALLOC_CHUNK_MAGIC,
@@ -236,7 +236,7 @@ static struct earalloc_chunk *__get_chunk_from_freelist(int target_order) {
         if (!LIST_IS_EMPTY(&earalloc_params.free_lists[idx])) {
             // Found a larger chunk, split it down to the target order
             list_node_t *entry =
-                list_entry_pop_back(&earalloc_params.free_lists[idx]);
+                list_entry_pop_front(&earalloc_params.free_lists[idx]);
             struct earalloc_chunk *chunk =
                 container_of(entry, struct earalloc_chunk, list_entry);
             assert(chunk->magic == EARLYALLOC_CHUNK_MAGIC,

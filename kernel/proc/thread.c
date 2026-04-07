@@ -184,7 +184,7 @@ void attach_child(struct thread *parent, struct thread *child) {
 
     // Attach the child to the parent.
     child->parent = parent;
-    list_entry_push(&parent->children, &child->siblings);
+    list_entry_push_back(&parent->children, &child->siblings);
     parent->children_count++;
 }
 

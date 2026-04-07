@@ -525,7 +525,7 @@ STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
     } else if (pool->count == 0) {
         panic("__buddy_push_page");
     }
-    list_node_push_back(&pool->lru_head, page, buddy.lru_entry);
+    list_node_push_front(&pool->lru_head, page, buddy.lru_entry);
     pool->count++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
@@ -534,7 +534,8 @@ STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
 // header. Return NULL if the given pool is empty
 // Will not do validity check here
 STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool) {
-    page_t *ret = list_node_pop_back(&pool->lru_head, page_t, buddy.lru_entry);
+    page_t *ret = list_node_pop_front(&pool->lru_head, page_t,
+                                      buddy.lru_entry);
     if (ret == NULL) {
         if (pool->count > 0) {
             panic("__buddy_pop_page");
@@ -736,7 +737,8 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
         push_off();
         if (!LIST_IS_EMPTY(&cache->lru_head)) {
             page =
-                list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
+                list_node_pop_front(&cache->lru_head, page_t,
+                                    buddy.lru_entry);
             if (page != NULL) {
                 // Mark as intermediate to indicate it's being allocated
                 // (consistent with order > 0 path)
@@ -753,7 +755,8 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
         spin_lock(&cache->lock);
         if (!LIST_IS_EMPTY(&cache->lru_head)) {
             page =
-                list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
+                list_node_pop_front(&cache->lru_head, page_t,
+                                    buddy.lru_entry);
             if (page != NULL) {
                 // It is safe to change the state here as we hold the cache
                 // lock, and no other CPU can access this page right now.
@@ -821,7 +824,7 @@ STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
             // Verify tail structure after setup
             __debug_verify_tail_structure(page, order,
                                           "__pcpu_cache_put(order=0)");
-            list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
+            list_node_push_front(&cache->lru_head, page, buddy.lru_entry);
             PCPU_CACHE_COUNT_INC(cache);
             ret = 0;
             page_lock_release(page);
@@ -845,7 +848,7 @@ STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
             // Verify tail structure after setup
             __debug_verify_tail_structure(page, order,
                                           "__pcpu_cache_put(order>0)");
-            list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
+            list_node_push_front(&cache->lru_head, page, buddy.lru_entry);
             PCPU_CACHE_COUNT_INC(cache);
             ret = 0;
             page_lock_release(page);

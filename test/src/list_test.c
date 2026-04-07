@@ -82,7 +82,7 @@ list_node_t *make_list(const int arr[], int arr_length) {
             destroy_list(head);
             return NULL;
         }
-        list_node_push(head, node, entry);
+        list_node_push_back(head, node, entry);
     }
     return head;
 }
@@ -156,7 +156,7 @@ void test_push(list_node_t *head, int argc, int argv[]) {
             printf("failed to create node\n");
             return;
         }
-        list_node_push(head, node, entry);
+        list_node_push_back(head, node, entry);
     }
 }
 ADD_CASE_INPUT(test_push_empty_1, {});
@@ -181,7 +181,7 @@ void test_push_back(list_node_t *head, int argc, int argv[]) {
             printf("failed to create node\n");
             return;
         }
-        list_node_push_back(head, node, entry);
+        list_node_push_front(head, node, entry);
     }
 }
 ADD_CASE_INPUT(test_push_back_empty_1, {});
@@ -207,7 +207,7 @@ void test_pop(list_node_t *head, int argc, int argv[]) {
     bool expect_failure = argv[1];
 
     for (int i = 0; i < pop_nodes; i++) {
-        node = list_node_pop(head, test_node_t, entry);
+        node = list_node_pop_back(head, test_node_t, entry);
         if ((node == NULL && !expect_failure) ||
             (node != NULL && expect_failure)) {
             FAILURE();
@@ -246,7 +246,7 @@ void test_pop_back(list_node_t *head, int argc, int argv[]) {
     bool expect_failure = argv[1];
 
     for (int i = 0; i < pop_nodes; i++) {
-        node = list_node_pop_back(head, test_node_t, entry);
+        node = list_node_pop_front(head, test_node_t, entry);
         if ((node == NULL && !expect_failure) ||
             (node != NULL && expect_failure)) {
             FAILURE();

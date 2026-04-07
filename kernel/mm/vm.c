@@ -1033,8 +1033,8 @@ vm_t *vm_init(void) {
     vma->start = UVMBOTTOM; // Start of user virtual memory
     vma->end = UVMTOP;      // End of user virtual memory
     rb_insert_color(&vm->vm_tree, &vma->rb_entry);
-    list_node_push(&vm->vm_free_list, vma, free_list_entry);
-    list_node_push(&vm->vm_list, vma, list_entry);
+    list_node_push_back(&vm->vm_free_list, vma, free_list_entry);
+    list_node_push_back(&vm->vm_list, vma, list_entry);
 
     vm->pagetable = uvmcreate();
     if (vm->pagetable == NULL) {
@@ -1447,7 +1447,7 @@ int vma_free(vm_t *vm, vma_t *vma) {
     }
 
     __vma_set_free(vma); // Set the VMA as free
-    list_node_push_back(&vm->vm_free_list, vma, free_list_entry);
+    list_node_push_front(&vm->vm_free_list, vma, free_list_entry);
     if (left != NULL && left->flags == PROT_NONE) {
         // Merge with the left VMA
         vma = vma_merge(left, vma);

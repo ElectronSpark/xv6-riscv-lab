@@ -17,7 +17,7 @@ static spinlock_t kobject_lock = SPINLOCK_INITIALIZED("kobject_lock");
 
 static void __kobject_attach(struct kobject *obj) {
     spin_lock(&kobject_lock);
-    list_node_push_back(&__kobject_list, obj, list_entry);
+    list_node_push_front(&__kobject_list, obj, list_entry);
     int64 count = __atomic_add_fetch(&__kobject_count, 1, __ATOMIC_SEQ_CST);
     assert(count > 0, "kobject count underflow");
     spin_unlock(&kobject_lock);

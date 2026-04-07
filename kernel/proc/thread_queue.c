@@ -174,7 +174,7 @@ int tq_push(tq_t *q, tnode_t *node) {
     }
 
     __tnode_to_list(node); // Initialize the node as a list node
-    list_node_push(&q->head, node, list.entry);
+    list_node_push_back(&q->head, node, list.entry);
     node->list.queue = q;
     q->counter++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);

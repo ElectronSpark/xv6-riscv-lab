@@ -87,7 +87,7 @@ static void __vfs_rooti_init(void) {
 }
 
 static void __vfs_register_fs_type_locked(struct vfs_fs_type *fs_type) {
-    list_node_push(&vfs_fs_types, fs_type, list_entry);
+    list_node_push_back(&vfs_fs_types, fs_type, list_entry);
     fs_type->registered = 1;
     vfs_fs_type_count++;
     assert(vfs_fs_type_count <= MAX_FS_TYPES,
@@ -256,7 +256,7 @@ static bool __vfs_init_superblock_valid(struct vfs_superblock *sb) {
 }
 
 static void __vfs_attach_superblock_to_fstype(struct vfs_superblock *sb) {
-    list_node_push_back(&sb->fs_type->superblocks, sb, siblings);
+    list_node_push_front(&sb->fs_type->superblocks, sb, siblings);
     sb->fs_type->sb_count++;
     sb->registered = 1;
     assert(sb->fs_type->sb_count > 0,
@@ -1098,7 +1098,7 @@ int vfs_make_orphan(struct vfs_inode *inode) {
     }
 
     inode->orphan = 1;
-    list_node_push(&sb->orphan_list, inode, orphan_entry);
+    list_node_push_back(&sb->orphan_list, inode, orphan_entry);
     sb->orphan_count++;
 
     // For backend fs: persist to on-disk orphan journal
@@ -1267,7 +1267,7 @@ int vfs_unmount_lazy(struct vfs_inode *mountpoint) {
             if (!inode->orphan) {
                 vfs_ilock(inode);
                 inode->orphan = 1;
-                list_node_push(&sb->orphan_list, inode, orphan_entry);
+                list_node_push_back(&sb->orphan_list, inode, orphan_entry);
                 sb->orphan_count++;
                 vfs_iunlock(inode);
             }

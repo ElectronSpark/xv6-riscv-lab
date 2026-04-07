@@ -180,7 +180,7 @@ int thread_group_alloc(struct thread *leader) {
     leader->thread_group = tg;
     leader->tgid = leader->pid;
     list_entry_init(&leader->tg_entry);
-    list_entry_push(&tg->thread_list, &leader->tg_entry);
+    list_entry_push_back(&tg->thread_list, &leader->tg_entry);
 
     return 0;
 }
@@ -226,7 +226,7 @@ void thread_group_add(struct thread_group *tg, struct thread *child) {
     child->thread_group = tg;
     child->tgid = tg->tgid;
     list_entry_init(&child->tg_entry);
-    list_entry_push(&tg->thread_list, &child->tg_entry);
+    list_entry_push_back(&tg->thread_list, &child->tg_entry);
     thread_group_get(tg); // One ref per member thread
     if (!THREAD_ZOMBIE(child)) {
         atomic_inc(&tg->live_threads);
@@ -482,7 +482,7 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
         if (ksi != NULL) {
             *ksi = *info;
             list_entry_init(&ksi->list_entry);
-            list_entry_push(&sq->queue, &ksi->list_entry);
+            list_entry_push_back(&sq->queue, &ksi->list_entry);
         }
     } else {
         // Standard (non-SA_SIGINFO) signal: if already pending, coalesce.

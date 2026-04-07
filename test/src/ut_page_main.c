@@ -29,7 +29,7 @@ static void ut_flush_pcpu_caches(void) {
         for (int order = 0; order <= SLAB_DEFAULT_ORDER; order++) {
             pcpu_cache_t *cache = &__pcpu_caches[cpu][order];
             while (!LIST_IS_EMPTY(&cache->lru_head)) {
-                page_t *page = list_node_pop_back(&cache->lru_head, page_t,
+                page_t *page = list_node_pop_front(&cache->lru_head, page_t,
                                                   buddy.lru_entry);
                 if (page == NULL) {
                     break;

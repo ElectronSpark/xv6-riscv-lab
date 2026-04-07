@@ -94,7 +94,7 @@ void __hlist_replace_node_entry(hlist_entry_t *old, hlist_entry_t *new) {
 // The caller will guarantee the validity of the parameters
 void __hlist_insert_node_entry(hlist_t *hlist, hlist_bucket_t *bucket,
                                hlist_entry_t *entry) {
-    list_node_push_back(bucket, entry, list_entry);
+    list_node_push_front(bucket, entry, list_entry);
     entry->bucket = bucket;
     hlist->elem_cnt += 1;
 }

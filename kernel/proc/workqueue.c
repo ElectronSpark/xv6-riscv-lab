@@ -159,7 +159,7 @@ void free_work_struct(struct work_struct *work) {
 static void __enqueue_work(struct workqueue *wq, struct work_struct *work) {
     assert(LIST_NODE_IS_DETACHED(work, entry),
            "enqueue_work: work struct is already enqueued");
-    list_node_push_back(&wq->work_list, work, entry);
+    list_node_push_front(&wq->work_list, work, entry);
     wq->pending_works++;
 }
 
@@ -168,7 +168,7 @@ static void __enqueue_work(struct workqueue *wq, struct work_struct *work) {
 // Caller should hold the lock of the wq
 static struct work_struct *__dequeue_work(struct workqueue *wq) {
     struct work_struct *work =
-        list_node_pop(&wq->work_list, struct work_struct, entry);
+        list_node_pop_back(&wq->work_list, struct work_struct, entry);
     if (work != NULL) {
         wq->pending_works--;
     }
@@ -361,7 +361,7 @@ static int __create_worker(struct workqueue *wq) {
     tcb_lock(worker);
     worker->wq = wq;
     wq->nr_workers++;
-    list_node_push(&wq->worker_list, worker, wq_entry);
+    list_node_push_back(&wq->worker_list, worker, wq_entry);
     tcb_unlock(worker);
     wakeup(worker);
     return 0;

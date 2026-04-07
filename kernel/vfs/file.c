@@ -62,7 +62,7 @@ static void __vfs_file_unlock(struct vfs_file *file) {
 
 static void __vfs_ftable_attatch(struct vfs_file *file) {
     spin_lock(&__vfs_ftable_lock);
-    list_node_push(&__vfs_ftable, file, list_entry);
+    list_node_push_back(&__vfs_ftable, file, list_entry);
     int count = __atomic_add_fetch(&__vfs_open_file_count, 1, __ATOMIC_SEQ_CST);
     spin_unlock(&__vfs_ftable_lock);
     assert(count > 0, "vfs file open count overflow");

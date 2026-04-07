@@ -36,7 +36,7 @@ static void test_push_empty(void **state) {
     for (int i = 0; i < args_size; i++) {
         test_node_t *node = make_node(args[i]);
         assert_non_null(node);
-        list_node_push(head, node, entry);
+        list_node_push_back(head, node, entry);
     }
 
     assert_true(compare_list_arr(head, expected, expected_size));
@@ -63,7 +63,7 @@ static void test_push_back_empty(void **state) {
     for (int i = 0; i < loop_count; i++) {
         test_node_t *node = make_node(args[i]);
         assert_non_null(node);
-        list_node_push_back(head, node, entry);
+        list_node_push_front(head, node, entry);
     }
 
     assert_true(compare_list_arr(head, expected, expected_size));
@@ -77,7 +77,7 @@ static void test_pop_empty(void **state) {
     assert_non_null(head);
 
     // Try to pop from empty list - should return NULL
-    test_node_t *node = list_node_pop(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
     assert_null(node);
 
     assert_true(LIST_IS_EMPTY(head));
@@ -91,7 +91,7 @@ static void test_pop_1(void **state) {
     list_node_t *head = make_list(input, 1);
     assert_non_null(head);
 
-    test_node_t *node = list_node_pop(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
     assert_non_null(node);
     assert_int_equal(node->val, 1);
     destroy_node(node);
@@ -107,7 +107,7 @@ static void test_pop_2(void **state) {
     list_node_t *head = make_list(input, 2);
     assert_non_null(head);
 
-    test_node_t *node = list_node_pop(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
     assert_non_null(node);
     assert_int_equal(node->val, 2);
     destroy_node(node);
@@ -123,7 +123,7 @@ static void test_pop_3(void **state) {
     list_node_t *head = make_list(input, 3);
     assert_non_null(head);
 
-    test_node_t *node = list_node_pop(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
     assert_non_null(node);
     assert_int_equal(node->val, 3);
     destroy_node(node);
@@ -140,7 +140,7 @@ static void test_pop_back_empty(void **state) {
     assert_non_null(head);
 
     // Try to pop_back from empty list - should return NULL
-    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_front(head, test_node_t, entry);
     assert_null(node);
 
     assert_true(LIST_IS_EMPTY(head));
@@ -154,7 +154,7 @@ static void test_pop_back_1(void **state) {
     list_node_t *head = make_list(input, 1);
     assert_non_null(head);
 
-    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_front(head, test_node_t, entry);
     assert_non_null(node);
     assert_int_equal(node->val, 1);
     destroy_node(node);
@@ -170,7 +170,7 @@ static void test_pop_back_2(void **state) {
     list_node_t *head = make_list(input, 2);
     assert_non_null(head);
 
-    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_front(head, test_node_t, entry);
     assert_non_null(node);
     assert_int_equal(node->val, 1);
     destroy_node(node);
@@ -186,7 +186,7 @@ static void test_pop_back_3(void **state) {
     list_node_t *head = make_list(input, 3);
     assert_non_null(head);
 
-    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_front(head, test_node_t, entry);
     assert_non_null(node);
     assert_int_equal(node->val, 1);
     destroy_node(node);
@@ -401,7 +401,7 @@ static void test_push_elements(void **state) {
     for (int i = 5; i >= 1; i--) {
         test_node_t *node = make_node(i);
         assert_non_null(node);
-        list_node_push(head, node, entry);
+        list_node_push_back(head, node, entry);
     }
     // Verify the list contains the elements in reverse order
     int expected[] = {5, 4, 3, 2, 1};
@@ -422,7 +422,7 @@ static void test_push_back_elements(void **state) {
     for (int i = 5; i >= 1; i--) {
         test_node_t *node = make_node(i);
         assert_non_null(node);
-        list_node_push_back(head, node, entry);
+        list_node_push_front(head, node, entry);
     }
 
     // Verify the list contains the elements in original order
@@ -443,7 +443,7 @@ static void test_pop_elements(void **state) {
 
     // Pop the elements one by one and verify
     for (int i = 1; i <= 5; i++) {
-        test_node_t *node = list_node_pop(head, test_node_t, entry);
+        test_node_t *node = list_node_pop_back(head, test_node_t, entry);
         assert_non_null(node);
         assert_int_equal(node->val, i);
         destroy_node(node);
@@ -453,7 +453,7 @@ static void test_pop_elements(void **state) {
     assert_true(LIST_IS_EMPTY(head));
 
     // Try to pop from empty list
-    test_node_t *node = list_node_pop(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
     assert_null(node);
 
     destroy_list(head);
@@ -470,7 +470,7 @@ static void test_pop_back_elements(void **state) {
 
     // Pop the elements from back one by one and verify
     for (int i = 5; i >= 1; i--) {
-        test_node_t *node = list_node_pop_back(head, test_node_t, entry);
+        test_node_t *node = list_node_pop_front(head, test_node_t, entry);
         assert_non_null(node);
         assert_int_equal(node->val, i);
         destroy_node(node);
@@ -480,7 +480,7 @@ static void test_pop_back_elements(void **state) {
     assert_true(LIST_IS_EMPTY(head));
 
     // Try to pop_back from empty list
-    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
+    test_node_t *node = list_node_pop_front(head, test_node_t, entry);
     assert_null(node);
 
     destroy_list(head);

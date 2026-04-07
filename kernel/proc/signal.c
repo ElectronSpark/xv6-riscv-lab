@@ -497,7 +497,7 @@ int __signal_send(struct thread *p, ksiginfo_t *info) {
         *ksi = *info; // Copy the signal info
         list_entry_init(&ksi->list_entry);
         // Add to pending queue
-        list_node_push(&p->signal.sig_pending[info->signo - 1].queue, ksi,
+        list_node_push_back(&p->signal.sig_pending[info->signo - 1].queue, ksi,
                        list_entry);
     }
 

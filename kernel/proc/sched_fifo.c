@@ -51,7 +51,7 @@ static void __fifo_enqueue_task(struct rq *rq, struct sched_entity *se) {
     struct fifo_rq *fifo_rq = container_of(rq, struct fifo_rq, rq);
     int idx = __fifo_minor_prio(se);
     struct fifo_subqueue *sq = __fifo_get_subqueue(fifo_rq, idx);
-    list_node_push(&sq->head, se, list_entry);
+    list_node_push_back(&sq->head, se, list_entry);
     sq->count++;
     fifo_rq->ready_mask |= (1 << idx);
 }
@@ -77,7 +77,7 @@ static void __fifo_put_prev_task(struct rq *rq, struct sched_entity *se) {
     int idx = __fifo_minor_prio(se);
     struct fifo_subqueue *sq = __fifo_get_subqueue(fifo_rq, idx);
 
-    list_node_push(&sq->head, se, list_entry);
+    list_node_push_back(&sq->head, se, list_entry);
 
     // Set the subqueue ready bit (subqueue now has at least one task in list)
     fifo_rq->ready_mask |= (1 << idx);

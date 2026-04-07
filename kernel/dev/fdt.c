@@ -428,7 +428,7 @@ static bool __fdt_insert_node(struct fdt_blob_info *blob,
 
     parent->child_count++;
     blob->n_nodes++;
-    list_node_push(&blob->all_nodes, new_node, list_entry);
+    list_node_push_back(&blob->all_nodes, new_node, list_entry);
     return true;
 }
 
@@ -905,7 +905,7 @@ static int __fdt_index_compat_string(struct fdt_blob_info *blob,
         return -1;
 
     // Add link to hash node's list
-    list_entry_push_back(&hash_node->nodes, &link->list_entry);
+    list_entry_push_front(&hash_node->nodes, &link->list_entry);
     hash_node->count++;
 
     // Note: We don't add link to fdt_node's compat_links here because each link

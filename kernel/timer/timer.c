@@ -145,7 +145,7 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
     }
     struct rb_node *prev = rb_prev_node(&node->rb);
     if (prev == NULL) {
-        list_node_push_back(&timer->list_head, node, list_entry);
+        list_node_push_front(&timer->list_head, node, list_entry);
         timer->next_tick = node->expires;
     } else {
         struct timer_node *prev_node =
