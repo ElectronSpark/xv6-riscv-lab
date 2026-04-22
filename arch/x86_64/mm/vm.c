@@ -469,10 +469,9 @@ static void __freewalk(pagetable_t pagetable, int level, uint64 base_va)
             __freewalk((pagetable_t)child, level - 1, va);
             pagetable[i] = 0;
         } else {
-            /* Level 0 (PT): this is a leaf — should have been cleared. */
-            printf("freewalk: LEAK va=0x%lx pte=0x%lx pa=0x%lx\n",
-                   (unsigned long)va, (unsigned long)pte,
-                   (unsigned long)PTE2PA(pte));
+            /* Level 0 (PT): this is a leaf — should have been cleared.
+             * Per-leak printf suppressed to avoid masking userspace output;
+             * total leak count is still reported by freewalk(). */
             /* Clear it to allow scanning the rest of the page table. */
             pagetable[i] = 0;
             __freewalk_leak_count++;
