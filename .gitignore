@@ -1,0 +1,14 @@
+# Build artifacts
+build/
+build-*/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor
+*.swp
+*.swo
+.vscode/
+.idea/
+compile_commands.json
