@@ -1,0 +1,1068 @@
+//
+// driver for qemu's virtio disk device.
+// Supports both MMIO transport (RISC-V) and PCI transport (x86).
+//
+// MMIO: qemu ... -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+// PCI:  qemu ... -device virtio-blk-pci,drive=x0
+//
+
+#include "types.h"
+#include "string.h"
+#include "riscv.h"
+#include "defs.h"
+#include "printf.h"
+#include "param.h"
+#include <mm/memlayout.h>
+#include "lock/spinlock.h"
+#include "lock/completion.h"
+#include "proc/tq.h"
+#include "vfs/xv6fs/ondisk.h" // for BSIZE
+#include "dev/buf.h"
+#include "dev/bio.h"
+#include "dev/virtio.h"
+#include "dev/pci.h"
+#include "dev/blkdev.h"
+#include "dev/gendisk.h"
+#include <mm/page.h>
+#include <mm/pgtable.h>
+#include <mm/vm.h>
+#include "errno.h"
+#include "proc/sched.h"
+#include "proc/thread.h"
+#include "trap.h"
+#include "freelist.h"
+#include "dev/fdt.h"
+#include "arch/vm.h"
+
+// the address of virtio mmio register r for disk n (MMIO transport only).
+#define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))
+
+// These are initialized from platform info at runtime
+uint64 __virtio_mmio_base[N_VIRTIO] = {
+    (uint64)PA2VA(0x10001000),
+    (uint64)PA2VA(0x10002000),
+    (uint64)PA2VA(0x10003000),
+};
+uint64 __virtio_irqno[N_VIRTIO] = {1, 2, 3};
+
+static void virtio_disk_rw(int diskno, int qi, struct bio *bio, uint64 sector,
+                           void *buf, size_t size, int write, bool notify);
+static void virtio_disk_rw_sg(int diskno, int qi, struct bio *bio,
+                              uint64 sector, int nsg, int write, bool notify);
+static void virtio_disk_intr(int irq, void *data, device_t *dev);
+static int __virtio_disk_flush(blkdev_t *blkdev);
+
+/// Minor number stride per disk: disk0=1, disk1=17, disk2=33, etc.
+/// Partitions occupy minors base+1 .. base+15.
+#define GENDISK_MINOR_STRIDE 16
+
+/// Maximum number of virtqueues per disk (capped at NCPU).
+#define MAX_VIRTQUEUES NCPU
+
+/// Per-virtqueue state.  One instance per request queue.
+struct virtqueue {
+    // DMA descriptor ring (kalloc'd, NUM entries)
+    struct virtq_desc *desc;
+    // Available ring (kalloc'd)
+    struct virtq_avail *avail;
+    // Used ring (kalloc'd)
+    struct virtq_used *used;
+
+    // Descriptor book-keeping
+    char free[NUM];
+    uint16 used_idx;
+    uint16 free_list[NUM];
+    struct freelist desc_freelist;
+
+    // In-flight operation tracking (indexed by head descriptor)
+    struct {
+        struct bio *bio;
+        bool done;
+        char status;
+        completion_t *flush_completion;
+    } info[NUM];
+
+    // Per-descriptor command headers
+    struct virtio_blk_req ops[NUM];
+
+    // Per-queue lock (replaces the old per-disk lock)
+    spinlock_t vq_lock;
+
+    // Wait queue for processes waiting for free descriptors
+    tq_t desc_wait_queue;
+
+    // PCI: per-queue notification offset (from queue_notify_off register)
+    uint16 queue_notify_off;
+};
+
+STATIC struct disk {
+    // Number of active virtqueues (1 when MQ not negotiated)
+    int num_queues;
+
+    // Round-robin counter for distributing bios across queues.
+    // Enables multi-queue parallelism for single-threaded sequential reads
+    // (batched bios from xv6fs_file_read spread across all queues).
+    uint32 rr_qi;
+
+    // Per-queue state (only vqs[0..num_queues-1] are initialized)
+    struct virtqueue vqs[MAX_VIRTQUEUES];
+
+    // PCI transport state (valid when pci_state.use_pci == 1)
+    struct virtio_pci_state pci_state;
+
+    // Mapped device-specific config region (PCI only, for reading num_queues)
+    volatile uint8 *dev_cfg;
+
+    // Feature: device supports VIRTIO_BLK_T_FLUSH
+    int has_flush;
+
+} disks[N_VIRTIO_DISK];
+
+/// Notify the device about queue @a qi.
+static inline void __virtio_disk_notify(struct disk *disk, int diskno,
+                                        int qi) {
+    if (disk->pci_state.use_pci) {
+        volatile uint16 *notify_addr = (volatile uint16 *)
+            ((uint8 *)disk->pci_state.notify_base +
+             disk->vqs[qi].queue_notify_off *
+                 disk->pci_state.notify_off_multiplier);
+        *notify_addr = qi;
+    } else {
+        *R(diskno, VIRTIO_MMIO_QUEUE_NOTIFY) = qi;
+    }
+}
+
+static int __virtio_disk_open(blkdev_t *blkdev) { return 0; }
+
+static int __virtio_disk_release(blkdev_t *blkdev) { return 0; }
+
+static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
+    struct bio_vec bvec;
+    struct bio_iter iter;
+    int diskno = (blkdev->dev.minor - 1) / GENDISK_MINOR_STRIDE;
+    struct disk *disk = &disks[diskno];
+
+    /* Round-robin queue selection: each bio gets the next queue, so batched
+     * submissions (e.g. xv6fs_file_read's 32-folio batch) spread across all
+     * queues.  This enables QEMU's per-queue AIO threads to process I/O in
+     * parallel even from a single reader thread. */
+    int qi = __atomic_fetch_add(&disk->rr_qi, 1, __ATOMIC_RELAXED)
+             % disk->num_queues;
+
+    /* Count active segments. */
+    uint16 segs = 0;
+    bio_start_io_acct(bio);
+    for (int16 i = 0; i < bio->vec_length; i++) {
+        if (bio->bvecs[i].len != 0)
+            segs++;
+    }
+
+    if (segs > 1) {
+        /* Multi-segment bio: use scatter-gather — one virtio request for
+         * all segments.  header + N data descriptors + status = N+2 descs,
+         * one avail-ring entry, one ISR completion. */
+        bio->inflight_segs = 1;
+        bio->completed_segs = 0;
+        bool notify = !bio->batch;
+        virtio_disk_rw_sg(diskno, qi, bio, bio->blkno, segs,
+                          bio_dir_write(bio), notify);
+    } else {
+        /* Single-segment bio: use the simple 3-descriptor path. */
+        bio->inflight_segs = segs;
+        bio->completed_segs = 0;
+        uint16 cur_seg = 0;
+        bio_for_each_segment(&bvec, bio, &iter) {
+            cur_seg++;
+            uint64 sector = iter.blkno;
+            page_t *page = bvec.bv_page;
+            assert(page != NULL, "virtio_disk_submit_bio: page is NULL");
+            void *pa = (void *)__page_to_pa(page);
+            assert(pa != NULL,
+                   "virtio_disk_submit_bio: page has no physical address");
+            bool notify = (cur_seg == segs) && !bio->batch;
+            virtio_disk_rw(diskno, qi, bio, sector,
+                           pa + bvec.offset, bvec.len,
+                           bio_dir_write(bio), notify);
+        }
+    }
+
+    // I/O has been submitted to the device.  Completion (bio_complete)
+    // is signalled by virtio_disk_intr when the device finishes.
+    // Callers wait via bio_await().
+    return 0;
+}
+
+static void __virtio_disk_kick(blkdev_t *blkdev) {
+    int diskno = (blkdev->dev.minor - 1) / GENDISK_MINOR_STRIDE;
+    struct disk *disk = &disks[diskno];
+
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    for (int qi = 0; qi < disk->num_queues; qi++)
+        __virtio_disk_notify(disk, diskno, qi);
+}
+
+static blkdev_ops_t __virtio_disk_ops = {.open = __virtio_disk_open,
+                                         .release = __virtio_disk_release,
+                                         .submit_bio =
+                                             __virtio_disk_submit_bio,
+                                         .flush = __virtio_disk_flush,
+                                         .kick = __virtio_disk_kick};
+
+static blkdev_t virtio_disk_devs[N_VIRTIO_DISK] = {
+    {
+        .dev =
+            {
+                .major = 2,
+                .minor = 1,   /* disk0: base minor 1, parts 2..16 */
+                .devname = "disk0",
+                .devmode = S_IFBLK | 0600,
+            },
+        .readable = 1,
+        .writable = 1,
+        .block_shift = 0, // 2^0 * 512 = 512 bytes per block
+    },
+    {
+        .dev =
+            {
+                .major = 2,
+                .minor = 17,  /* disk1: base minor 17, parts 18..32 */
+                .devname = "disk1",
+                .devmode = S_IFBLK | 0600,
+            },
+        .readable = 1,
+        .writable = 1,
+        .block_shift = 0, // 2^0 * 512 = 512 bytes per block
+    },
+};
+
+#if !defined(__x86_64__) && !defined(__i386__)
+static void __virtio_blkdev_init(int diskno) {
+    virtio_disk_devs[diskno].ops = __virtio_disk_ops;
+    int errno = blkdev_register(&virtio_disk_devs[diskno]);
+    assert(errno == 0, "virtio_blkdev_init: blkdev_register failed: %d", errno);
+    struct irq_desc virtio_irq_desc = {
+        .handler = virtio_disk_intr,
+        .data = (void *)(uint64)diskno,
+        .dev = &virtio_disk_devs[diskno].dev,
+    };
+    errno =
+        register_irq_handler(PLIC_IRQ(VIRTIO0_IRQ + diskno), &virtio_irq_desc);
+    assert(errno == 0, "virtio_blkdev_init: register_irq_handler failed: %d",
+           errno);
+    /* Probe for GPT/MBR partitions — must be after IRQ registration
+     * so that BIO completions can be delivered. */
+    gendisk_probe(&virtio_disk_devs[diskno]);
+}
+
+static void __virtio_disk_init_one(int diskno) {
+    struct disk *disk = &disks[diskno];
+    struct virtqueue *vq = &disk->vqs[0];
+    uint32 status = 0;
+
+    spin_init(&vq->vq_lock, "virtio_disk");
+
+    if (*R(diskno, VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976 ||
+        *R(diskno, VIRTIO_MMIO_VERSION) != 2 ||
+        *R(diskno, VIRTIO_MMIO_DEVICE_ID) != 2 ||
+        *R(diskno, VIRTIO_MMIO_VENDOR_ID) != 0x554d4551) {
+        printf("virtio_disk: slot %d is not a block device, skipping\n",
+               diskno);
+        return;
+    }
+
+    // reset device
+    *R(diskno, VIRTIO_MMIO_STATUS) = status;
+
+    // set ACKNOWLEDGE status bit
+    status |= VIRTIO_CONFIG_S_ACKNOWLEDGE;
+    *R(diskno, VIRTIO_MMIO_STATUS) = status;
+
+    // set DRIVER status bit
+    status |= VIRTIO_CONFIG_S_DRIVER;
+    *R(diskno, VIRTIO_MMIO_STATUS) = status;
+
+    // negotiate features
+    uint64 features = *R(diskno, VIRTIO_MMIO_DEVICE_FEATURES);
+    disk->has_flush = !!(features & (1 << VIRTIO_BLK_F_FLUSH));
+    features &= ~(1 << VIRTIO_BLK_F_RO);
+    features &= ~(1 << VIRTIO_BLK_F_SCSI);
+    features &= ~(1 << VIRTIO_BLK_F_CONFIG_WCE);
+    features &= ~(1 << VIRTIO_BLK_F_MQ);
+    features &= ~(1 << VIRTIO_F_ANY_LAYOUT);
+    features &= ~(1 << VIRTIO_RING_F_EVENT_IDX);
+    features &= ~(1 << VIRTIO_RING_F_INDIRECT_DESC);
+    // Keep VIRTIO_BLK_F_FLUSH if device supports it
+    *R(diskno, VIRTIO_MMIO_DRIVER_FEATURES) = features;
+
+    // tell device that feature negotiation is complete.
+    status |= VIRTIO_CONFIG_S_FEATURES_OK;
+    *R(diskno, VIRTIO_MMIO_STATUS) = status;
+
+    // re-read status to ensure FEATURES_OK is set.
+    status = *R(diskno, VIRTIO_MMIO_STATUS);
+    if (!(status & VIRTIO_CONFIG_S_FEATURES_OK))
+        panic("virtio disk %d FEATURES_OK unset", diskno);
+
+    // initialize queue 0.
+    *R(diskno, VIRTIO_MMIO_QUEUE_SEL) = 0;
+
+    // ensure queue 0 is not in use.
+    if (*R(diskno, VIRTIO_MMIO_QUEUE_READY))
+        panic("virtio disk %d should not be ready", diskno);
+
+    // check maximum queue size.
+    uint32 max = *R(diskno, VIRTIO_MMIO_QUEUE_NUM_MAX);
+    if (max == 0)
+        panic("virtio disk %d has no queue 0", diskno);
+    if (max < NUM)
+        panic("virtio disk %d max queue too short", diskno);
+
+    // allocate and zero queue memory.
+    vq->desc = kalloc();
+    vq->avail = kalloc();
+    vq->used = kalloc();
+    if (!vq->desc || !vq->avail || !vq->used)
+        panic("virtio disk %d kalloc", diskno);
+    memset(vq->desc, 0, PGSIZE);
+    memset(vq->avail, 0, PGSIZE);
+    memset(vq->used, 0, PGSIZE);
+
+    // set queue size.
+    *R(diskno, VIRTIO_MMIO_QUEUE_NUM) = NUM;
+
+    // Write physical addresses of virtqueue components to device.
+    // kalloc() returns raw physical addresses — no VA2PA needed.
+    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_LOW) = (uint64)vq->desc;
+    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_HIGH) = (uint64)vq->desc >> 32;
+    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_LOW) = (uint64)vq->avail;
+    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_HIGH) = (uint64)vq->avail >> 32;
+    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_LOW) = (uint64)vq->used;
+    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_HIGH) = (uint64)vq->used >> 32;
+
+    // queue is ready.
+    *R(diskno, VIRTIO_MMIO_QUEUE_READY) = 0x1;
+
+    // all NUM descriptors start out unused.
+    freelist_init(&vq->desc_freelist, vq->free, vq->free_list, NUM);
+    tq_init(&vq->desc_wait_queue, "virtio_desc_wait", &vq->vq_lock);
+
+    // MMIO: single queue only
+    disk->num_queues = 1;
+    vq->queue_notify_off = 0;
+
+    // tell device we're completely ready.
+    status |= VIRTIO_CONFIG_S_DRIVER_OK;
+    *R(diskno, VIRTIO_MMIO_STATUS) = status;
+
+    __virtio_blkdev_init(diskno);
+    // plic.c and trap.c arrange for interrupts from VIRTIO IRQs.
+}
+#endif /* !__x86_64__ && !__i386__ */
+
+#if defined(__x86_64__) || defined(__i386__)
+//
+// PCI transport initialization for x86.
+// Uses virtio modern PCI capabilities to find BAR regions.
+//
+extern pagetable_t kernel_pagetable;
+
+static uint64 __virtio_pci_map_mmio_window(uint64 bar, uint32 offset,
+                                           uint32 length) {
+    if (bar & 0x1)
+        panic("virtio_disk_pci: capability uses I/O BAR 0x%lx", bar);
+
+    uint64 target = bar + offset;
+    uint64 start = PGROUNDDOWN(target);
+    uint64 end = PGROUNDUP(target + (length ? length : 1));
+    uint64 size = end - start;
+    uint64 map_base;
+    vma_t *vma;
+
+    vm_wlock(kernel_vm);
+    map_base = vm_find_free_range(kernel_vm, size, 0);
+    if (map_base == 0) {
+        vm_wunlock(kernel_vm);
+        panic("virtio_disk_pci: failed to allocate MMIO VA window");
+    }
+
+    vma = vma_alloc(kernel_vm, map_base, size,
+                    PROT_READ | PROT_WRITE | VMA_FLAG_KERNEL);
+    vm_wunlock(kernel_vm);
+    if (vma == NULL)
+        panic("virtio_disk_pci: failed to reserve MMIO VA window");
+
+    for (uint64 page_off = 0; page_off < size; page_off += PGSIZE) {
+        uint64 va = map_base + page_off;
+        uint64 pa = start + page_off;
+
+        if (arch_vm_map(kernel_pagetable, va, PGSIZE, pa,
+                        PTE_R | PTE_W) != 0)
+            panic("virtio_disk_pci: failed to map MMIO page pa=0x%lx", pa);
+    }
+
+    arch_tlb_flush();
+    return map_base + (target - start);
+}
+
+static void __virtio_blkdev_init_pci(int diskno, uint8 irq_line) {
+    virtio_disk_devs[diskno].ops = __virtio_disk_ops;
+    int errno = blkdev_register(&virtio_disk_devs[diskno]);
+    assert(errno == 0, "virtio_blkdev_init_pci: blkdev_register failed: %d",
+           errno);
+    struct irq_desc virtio_irq_desc = {
+        .handler = virtio_disk_intr,
+        .data = (void *)(uint64)diskno,
+        .dev = &virtio_disk_devs[diskno].dev,
+    };
+    // On x86, PCI device uses IOAPIC IRQ line from PIIX3 routing
+    errno = register_irq_handler(PLIC_IRQ(irq_line), &virtio_irq_desc);
+    if (errno != 0) {
+        printf("virtio_blkdev_init_pci: WARNING: IRQ %d registration failed "
+               "(%d), disk %d interrupts unavailable\n",
+               irq_line, errno, diskno);
+        return;
+    }
+    // PCI interrupts are level-triggered, active-low
+    extern void plic_enable_irq_level(int irq);
+    plic_enable_irq_level(irq_line);
+    /* Probe for GPT/MBR partitions — must be after IRQ registration
+     * so that BIO completions can be delivered. */
+    gendisk_probe(&virtio_disk_devs[diskno]);
+}
+
+static void __virtio_disk_init_one_pci(int diskno) {
+    struct virtio_pci_discovery *vd = pci_get_virtio_blk(diskno);
+    if (!vd || !vd->found) {
+        printf("virtio_disk_pci: no PCI device for disk %d\n", diskno);
+        return;
+    }
+
+    struct disk *disk = &disks[diskno];
+    disk->pci_state.use_pci = 1;
+
+    // Read common config capability: bar, offset, length
+    uint8 ccap = vd->common_cfg_cap;
+    uint8 ncap = vd->notify_cfg_cap;
+    uint8 icap = vd->isr_cfg_cap;
+    uint8 dcap = vd->device_cfg_cap;
+
+    if (!ccap || !ncap || !icap)
+        panic("virtio_disk_pci: missing PCI capabilities");
+
+    // Read cap fields via PCI config space
+    uint8 cc_bar = pci_config_read8(vd->bus, vd->dev, vd->func, ccap + 4);
+    uint32 cc_off = pci_config_read32(vd->bus, vd->dev, vd->func, ccap + 8);
+    uint32 cc_len = pci_config_read32(vd->bus, vd->dev, vd->func, ccap + 12);
+
+    uint8 n_bar = pci_config_read8(vd->bus, vd->dev, vd->func, ncap + 4);
+    uint32 n_off = pci_config_read32(vd->bus, vd->dev, vd->func, ncap + 8);
+    uint32 n_len = pci_config_read32(vd->bus, vd->dev, vd->func, ncap + 12);
+    uint32 n_mult = pci_config_read32(vd->bus, vd->dev, vd->func, ncap + 16);
+
+    uint8 i_bar = pci_config_read8(vd->bus, vd->dev, vd->func, icap + 4);
+    uint32 i_off = pci_config_read32(vd->bus, vd->dev, vd->func, icap + 8);
+    uint32 i_len = pci_config_read32(vd->bus, vd->dev, vd->func, icap + 12);
+
+    // Get BAR base addresses (mask off type bits)
+    uint64 cc_base = (uint64)(vd->bar[cc_bar] & ~0xFU);
+    uint64 n_base = (uint64)(vd->bar[n_bar] & ~0xFU);
+    uint64 i_base = (uint64)(vd->bar[i_bar] & ~0xFU);
+
+    // If BAR is 64-bit (bit 2:1 = 10b), combine with next BAR
+    if ((vd->bar[cc_bar] & 0x6) == 0x4 && cc_bar < 5)
+        cc_base |= ((uint64)vd->bar[cc_bar + 1]) << 32;
+    if ((vd->bar[n_bar] & 0x6) == 0x4 && n_bar < 5)
+        n_base |= ((uint64)vd->bar[n_bar + 1]) << 32;
+    if ((vd->bar[i_bar] & 0x6) == 0x4 && i_bar < 5)
+        i_base |= ((uint64)vd->bar[i_bar + 1]) << 32;
+
+    printf("virtio_disk_pci: disk %d common@BAR%d+0x%x notify@BAR%d+0x%x(mult=%d) isr@BAR%d+0x%x\n",
+           diskno, cc_bar, cc_off, n_bar, n_off, n_mult, i_bar, i_off);
+    printf("virtio_disk_pci: BAR bases: common=0x%lx notify=0x%lx isr=0x%lx\n",
+           cc_base, n_base, i_base);
+
+    uint64 cfg_va = __virtio_pci_map_mmio_window(cc_base, cc_off, cc_len);
+    uint64 notify_va = __virtio_pci_map_mmio_window(n_base, n_off, n_len);
+    uint64 isr_va = __virtio_pci_map_mmio_window(i_base, i_off, i_len);
+
+    // Map device-specific config BAR (for reading num_queues etc.)
+    volatile uint8 *dev_cfg_ptr = NULL;
+    if (dcap) {
+        uint8 d_bar = pci_config_read8(vd->bus, vd->dev, vd->func, dcap + 4);
+        uint32 d_off = pci_config_read32(vd->bus, vd->dev, vd->func, dcap + 8);
+        uint32 d_len = pci_config_read32(vd->bus, vd->dev, vd->func, dcap + 12);
+        uint64 d_base = (uint64)(vd->bar[d_bar] & ~0xFU);
+        if ((vd->bar[d_bar] & 0x6) == 0x4 && d_bar < 5)
+            d_base |= ((uint64)vd->bar[d_bar + 1]) << 32;
+        uint64 dev_cfg_va = __virtio_pci_map_mmio_window(d_base, d_off, d_len);
+        dev_cfg_ptr = (volatile uint8 *)dev_cfg_va;
+    }
+    disk->dev_cfg = dev_cfg_ptr;
+
+    printf("virtio_disk_pci: mapped VAs common=0x%lx notify=0x%lx isr=0x%lx\n",
+           cfg_va, notify_va, isr_va);
+
+    volatile struct virtio_pci_common_cfg *cfg =
+        (volatile struct virtio_pci_common_cfg *)cfg_va;
+    volatile uint16 *notify = (volatile uint16 *)notify_va;
+    volatile uint8 *isr = (volatile uint8 *)isr_va;
+
+    disk->pci_state.common_cfg = cfg;
+    disk->pci_state.notify_base = notify;
+    disk->pci_state.notify_off_multiplier = n_mult;
+    disk->pci_state.isr = isr;
+
+    // --- Virtio initialization sequence (modern PCI) ---
+
+    // Reset device
+    cfg->device_status = 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    // Wait for reset to complete
+    while (cfg->device_status != 0)
+        ;
+
+    uint8 status = 0;
+
+    // Set ACKNOWLEDGE
+    status |= VIRTIO_CONFIG_S_ACKNOWLEDGE;
+    cfg->device_status = status;
+
+    // Set DRIVER
+    status |= VIRTIO_CONFIG_S_DRIVER;
+    cfg->device_status = status;
+
+    // Negotiate features (read features word 0)
+    cfg->device_feature_select = 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    uint32 features = cfg->device_feature;
+    disk->has_flush = !!(features & (1 << VIRTIO_BLK_F_FLUSH));
+    int has_mq = !!(features & (1 << VIRTIO_BLK_F_MQ));
+    features &= ~(1 << VIRTIO_BLK_F_RO);
+    features &= ~(1 << VIRTIO_BLK_F_SCSI);
+    features &= ~(1 << VIRTIO_BLK_F_CONFIG_WCE);
+    // Keep VIRTIO_BLK_F_MQ if device supports it
+    features &= ~(1 << VIRTIO_F_ANY_LAYOUT);
+    features &= ~(1 << VIRTIO_RING_F_EVENT_IDX);
+    features &= ~(1 << VIRTIO_RING_F_INDIRECT_DESC);
+    // Keep VIRTIO_BLK_F_FLUSH if device supports it
+    cfg->driver_feature_select = 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    cfg->driver_feature = features;
+
+    // FEATURES_OK
+    status |= VIRTIO_CONFIG_S_FEATURES_OK;
+    cfg->device_status = status;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    status = cfg->device_status;
+    if (!(status & VIRTIO_CONFIG_S_FEATURES_OK))
+        panic("virtio disk pci %d FEATURES_OK unset", diskno);
+
+    // Determine number of queues
+    int num_queues = 1;
+    if (has_mq && dev_cfg_ptr) {
+        // virtio_blk_config.num_queues is at offset 34 (le16)
+        uint16 dev_num_queues = *(volatile uint16 *)(dev_cfg_ptr + 34);
+        if (dev_num_queues > 1) {
+            num_queues = dev_num_queues;
+            if (num_queues > MAX_VIRTQUEUES)
+                num_queues = MAX_VIRTQUEUES;
+        }
+        printf("virtio_disk_pci: disk %d MQ supported, device offers %d queues, using %d\n",
+               diskno, dev_num_queues, num_queues);
+    } else if (has_mq) {
+        printf("virtio_disk_pci: disk %d MQ feature but no device config cap, using 1 queue\n",
+               diskno);
+    }
+    disk->num_queues = num_queues;
+
+    // Initialize each virtqueue
+    for (int qi = 0; qi < num_queues; qi++) {
+        struct virtqueue *vq = &disk->vqs[qi];
+
+        cfg->queue_select = qi;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+        uint16 max = cfg->queue_size;
+        if (max == 0)
+            panic("virtio disk pci %d has no queue %d", diskno, qi);
+        if (max < NUM) {
+            printf("virtio_disk_pci: disk %d queue %d max size %d, using that\n",
+                   diskno, qi, max);
+        }
+
+        // Allocate and zero queue memory.
+        // kalloc() returns PHYSICAL ADDRESSES — usable as pointers via
+        // the PML4[0] identity map but already correct for DMA.
+        vq->desc = kalloc();
+        vq->avail = kalloc();
+        vq->used = kalloc();
+        if (!vq->desc || !vq->avail || !vq->used)
+            panic("virtio disk pci %d queue %d kalloc", diskno, qi);
+        memset(vq->desc, 0, PGSIZE);
+        memset(vq->avail, 0, PGSIZE);
+        memset(vq->used, 0, PGSIZE);
+
+        // Set queue size
+        cfg->queue_size = NUM;
+
+        // Write physical addresses of virtqueue components
+        cfg->queue_desc = (uint64)vq->desc;
+        cfg->queue_driver = (uint64)vq->avail;
+        cfg->queue_device = (uint64)vq->used;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+        // Enable queue
+        cfg->queue_enable = 1;
+
+        // Save per-queue notification offset
+        vq->queue_notify_off = cfg->queue_notify_off;
+
+        // Initialize freelist, lock, and wait queue
+        spin_init(&vq->vq_lock, "virtio_vq_pci");
+        freelist_init(&vq->desc_freelist, vq->free, vq->free_list, NUM);
+        tq_init(&vq->desc_wait_queue, "virtio_desc_wait_pci", &vq->vq_lock);
+    }
+
+    // DRIVER_OK
+    status |= VIRTIO_CONFIG_S_DRIVER_OK;
+    cfg->device_status = status;
+
+    printf("virtio_disk_pci: disk %d initialized, %d queue(s), irq=%d\n",
+           diskno, num_queues, vd->irq_line);
+
+    __virtio_blkdev_init_pci(diskno, vd->irq_line);
+}
+#endif /* __x86_64__ */
+
+void virtio_disk_init(void) {
+    if (!platform.has_virtio || platform.virtio_count == 0)
+        return;
+
+    int num_disks = platform.virtio_count;
+    if (num_disks > N_VIRTIO_DISK)
+        num_disks = N_VIRTIO_DISK;
+
+#if defined(__x86_64__) || defined(__i386__)
+    // On x86, use PCI transport
+    for (int i = 0; i < num_disks; i++) {
+        __virtio_disk_init_one_pci(i);
+    }
+#else
+    // On RISC-V, use MMIO transport
+    for (int i = 0; i < num_disks; i++) {
+        __virtio_disk_init_one(i);
+    }
+#endif
+}
+
+// find a free descriptor, mark it non-free, return its index.
+STATIC int alloc_desc(struct virtqueue *vq) {
+    return freelist_alloc(&vq->desc_freelist);
+}
+
+// mark a descriptor as free.
+STATIC void free_desc(struct virtqueue *vq, int i) {
+    if (freelist_free(&vq->desc_freelist, i) != 0)
+        panic("free_desc: invalid free");
+
+    vq->desc[i].addr = 0;
+    vq->desc[i].len = 0;
+    vq->desc[i].flags = 0;
+    vq->desc[i].next = 0;
+
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    // Wake waiters if enough descriptors are free
+    // Note: We're already holding vq_lock, so wake directly
+    if (freelist_available(&vq->desc_freelist) >= 3) {
+        tq_wakeup_all(&vq->desc_wait_queue, 0, 0);
+    }
+}
+
+// free a chain of descriptors.
+STATIC void free_chain(struct virtqueue *vq, int i) {
+    while (1) {
+        int flag = vq->desc[i].flags;
+        int nxt = vq->desc[i].next;
+        free_desc(vq, i);
+        if (flag & VRING_DESC_F_NEXT)
+            i = nxt;
+        else
+            break;
+    }
+}
+
+// allocate three descriptors (they need not be contiguous).
+// disk transfers always use three descriptors.
+STATIC int alloc3_desc(struct virtqueue *vq, int *idx) {
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    for (int i = 0; i < 3; i++) {
+        idx[i] = alloc_desc(vq);
+        if (idx[i] < 0) {
+            for (int j = 0; j < i; j++)
+                free_desc(vq, idx[j]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Allocate @n descriptors (they need not be contiguous).
+ * Returns 0 on success, -1 if not enough free descriptors.
+ */
+STATIC int alloc_n_desc(struct virtqueue *vq, int *idx, int n) {
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    for (int i = 0; i < n; i++) {
+        idx[i] = alloc_desc(vq);
+        if (idx[i] < 0) {
+            for (int j = 0; j < i; j++)
+                free_desc(vq, idx[j]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Allocate two descriptors (for flush: header + status, no data).
+ */
+STATIC int alloc2_desc(struct virtqueue *vq, int *idx) {
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    for (int i = 0; i < 2; i++) {
+        idx[i] = alloc_desc(vq);
+        if (idx[i] < 0) {
+            for (int j = 0; j < i; j++)
+                free_desc(vq, idx[j]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Issue a VIRTIO_BLK_T_FLUSH command to the device and wait for completion.
+ * Called from blkdev_ops.flush.
+ *
+ * The flush command uses two descriptors:
+ *   [0] header: type=VIRTIO_BLK_T_FLUSH, sector=0
+ *   [1] status: 1-byte device-written status
+ */
+static int __virtio_disk_flush(blkdev_t *blkdev) {
+    int diskno = (blkdev->dev.minor - 1) / GENDISK_MINOR_STRIDE;
+    struct disk *disk = &disks[diskno];
+    struct virtqueue *vq = &disk->vqs[0]; // flush always uses queue 0
+
+    if (!disk->has_flush)
+        return 0; // device does not support flush, treat as no-op
+
+    completion_t flush_done;
+    completion_init(&flush_done);
+
+    spin_lock(&vq->vq_lock);
+
+    int idx[2];
+    while (1) {
+        if (alloc2_desc(vq, idx) == 0)
+            break;
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
+        tq_wait(&vq->desc_wait_queue, &vq->vq_lock, NULL);
+    }
+
+    struct virtio_blk_req *buf0 = &vq->ops[idx[0]];
+    buf0->type = VIRTIO_BLK_T_FLUSH;
+    buf0->reserved = 0;
+    buf0->sector = 0;
+
+    // Descriptor 0: header (device reads)
+    // buf0 = &vq->ops[] — static BSS, higher-half VA → needs VA2PA.
+    vq->desc[idx[0]].addr = VA2PA((uint64)buf0);
+    vq->desc[idx[0]].len = sizeof(struct virtio_blk_req);
+    vq->desc[idx[0]].flags = VRING_DESC_F_NEXT;
+    vq->desc[idx[0]].next = idx[1];
+
+    // Descriptor 1: status (device writes)
+    // &vq->info[].status — static BSS, higher-half VA → needs VA2PA.
+    vq->info[idx[0]].status = 0xff;
+    vq->desc[idx[1]].addr = VA2PA((uint64)&vq->info[idx[0]].status);
+    vq->desc[idx[1]].len = 1;
+    vq->desc[idx[1]].flags = VRING_DESC_F_WRITE;
+    vq->desc[idx[1]].next = 0;
+
+    // Completion-based notification: interrupt handler signals flush_done
+    vq->info[idx[0]].bio = NULL;
+    vq->info[idx[0]].done = false;
+    vq->info[idx[0]].flush_completion = &flush_done;
+
+    // Submit to available ring
+    vq->avail->ring[vq->avail->idx % NUM] = idx[0];
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    vq->avail->idx += 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    // Notify queue 0
+    __virtio_disk_notify(disk, diskno, 0);
+
+    spin_unlock(&vq->vq_lock);
+
+    // Wait for completion outside the lock — interrupt handler signals this
+    wait_for_completion(&flush_done);
+
+    // Safe to read status: the interrupt handler did NOT free the chain,
+    // so info[idx[0]].status is still valid.
+    char status = vq->info[idx[0]].status;
+
+    // Now free the descriptor chain ourselves
+    spin_lock(&vq->vq_lock);
+    vq->info[idx[0]].bio = NULL;
+    vq->info[idx[0]].flush_completion = NULL;
+    free_chain(vq, idx[0]);
+    spin_unlock(&vq->vq_lock);
+
+    return (status == VIRTIO_BLK_S_OK) ? 0 : -EIO;
+}
+
+static void virtio_disk_rw(int diskno, int qi, struct bio *bio, uint64 sector,
+                           void *buf, size_t size, int write, bool notify) {
+    struct disk *disk = &disks[diskno];
+    struct virtqueue *vq = &disk->vqs[qi];
+    assert(size > 0 && size <= BIO_MAX_SIZE,
+           "virtio_disk_rw: size must be >0 and <=BIO_MAX_SIZE");
+    assert(buf != NULL, "virtio_disk_rw: buf is NULL");
+
+    spin_lock(&vq->vq_lock);
+
+    // the spec's Section 5.2 says that legacy block operations use
+    // three descriptors: one for type/reserved/sector, one for the
+    // data, one for a 1-byte status result.
+
+    // allocate the three descriptors.
+    int idx[3];
+    while (1) {
+        if (alloc3_desc(vq, idx) == 0) {
+            break;
+        }
+        // No free descriptors — kick the device first so it processes
+        // any already-queued avail ring entries (which may free descriptors
+        // on completion), then sleep until descriptors are freed.
+        __virtio_disk_notify(disk, diskno, qi);
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
+        tq_wait(&vq->desc_wait_queue, &vq->vq_lock, NULL);
+    }
+
+    // format the three descriptors.
+    // qemu's virtio-blk.c reads them.
+
+    struct virtio_blk_req *buf0 = &vq->ops[idx[0]];
+
+    if (write)
+        buf0->type = VIRTIO_BLK_T_OUT; // write the disk
+    else
+        buf0->type = VIRTIO_BLK_T_IN; // read the disk
+    buf0->reserved = 0;
+    buf0->sector = sector;
+
+    /*
+     * Descriptor DMA addresses:
+     *   buf0 = &vq->ops[idx] — static BSS, higher-half VA → needs VA2PA.
+     *   buf  = from __page_to_pa() in submit_bio — already a PA, no VA2PA.
+     *   &vq->info[].status — static BSS, higher-half VA → needs VA2PA.
+     */
+    vq->desc[idx[0]].addr = VA2PA((uint64)buf0);
+    vq->desc[idx[0]].len = sizeof(struct virtio_blk_req);
+    vq->desc[idx[0]].flags = VRING_DESC_F_NEXT;
+    vq->desc[idx[0]].next = idx[1];
+
+    vq->desc[idx[1]].addr = (uint64)buf;  /* buf is already a PA */
+    vq->desc[idx[1]].len = size;
+    if (write)
+        vq->desc[idx[1]].flags = 0; // device reads b->data
+    else
+        vq->desc[idx[1]].flags = VRING_DESC_F_WRITE; // device writes b->data
+    vq->desc[idx[1]].flags |= VRING_DESC_F_NEXT;
+    vq->desc[idx[1]].next = idx[2];
+
+    vq->info[idx[0]].status = 0xff; // device writes 0 on success
+    vq->desc[idx[2]].addr = VA2PA((uint64)&vq->info[idx[0]].status);
+    vq->desc[idx[2]].len = 1;
+    vq->desc[idx[2]].flags = VRING_DESC_F_WRITE; // device writes the status
+    vq->desc[idx[2]].next = 0;
+
+    // record struct buf for virtio_disk_intr().
+    bio->private_data = NULL;
+    vq->info[idx[0]].bio = bio;
+    vq->info[idx[0]].flush_completion = NULL; // not a flush
+
+    // tell the device the first index in our chain of descriptors.
+    vq->avail->ring[vq->avail->idx % NUM] = idx[0];
+
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    // tell the device another avail ring entry is available.
+    vq->avail->idx += 1; // not % NUM ...
+
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    assert(!intr_get(), "virtio_disk_rw: interrupts enabled");
+
+    // Notify the device only if requested (non-batch or last segment)
+    if (notify)
+        __virtio_disk_notify(disk, diskno, qi);
+
+    // Submit only — completion is handled by virtio_disk_intr() which
+    // frees the descriptor chain and signals the bio via bio_complete().
+    // Callers wait for I/O via bio_await().
+    vq->info[idx[0]].done = false;
+    spin_unlock(&vq->vq_lock);
+}
+
+/*
+ * Scatter-gather virtio-blk request.
+ *
+ * Submit a single virtio-blk request whose data is described by @nsg
+ * scatter-gather entries taken from @bio's bio_vecs.  The descriptor chain
+ * is: header → data[0] → data[1] → … → data[nsg-1] → status.
+ *
+ * This uses (nsg + 2) descriptors and only ONE avail-ring entry, so the
+ * device completes the entire request atomically — one ISR completion
+ * instead of nsg separate ones.  Combined with merged multi-folio bios,
+ * this dramatically reduces per-batch overhead.
+ */
+static void virtio_disk_rw_sg(int diskno, int qi, struct bio *bio,
+                               uint64 sector, int nsg, int write,
+                               bool notify) {
+    struct disk *disk = &disks[diskno];
+    struct virtqueue *vq = &disk->vqs[qi];
+    int ndesc = 2 + nsg; /* header + nsg data + status */
+
+    spin_lock(&vq->vq_lock);
+
+    /* Allocate all descriptors for the SG chain. */
+    int idx[ndesc]; /* VLA, typically ≤ 34 ints = 136 bytes */
+    while (1) {
+        if (alloc_n_desc(vq, idx, ndesc) == 0)
+            break;
+        __virtio_disk_notify(disk, diskno, qi);
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
+        tq_wait(&vq->desc_wait_queue, &vq->vq_lock, NULL);
+    }
+
+    /* Descriptor [0]: header (device-readable). */
+    struct virtio_blk_req *hdr = &vq->ops[idx[0]];
+    hdr->type = write ? VIRTIO_BLK_T_OUT : VIRTIO_BLK_T_IN;
+    hdr->reserved = 0;
+    hdr->sector = sector;
+
+    vq->desc[idx[0]].addr = VA2PA((uint64)hdr);
+    vq->desc[idx[0]].len = sizeof(struct virtio_blk_req);
+    vq->desc[idx[0]].flags = VRING_DESC_F_NEXT;
+    vq->desc[idx[0]].next = idx[1];
+
+    /* Descriptors [1..nsg]: data buffers from bio_vecs. */
+    uint16 data_flags = write ? 0 : VRING_DESC_F_WRITE;
+    struct bio_vec bvec;
+    struct bio_iter iter;
+    int di = 0;
+    bio_for_each_segment(&bvec, bio, &iter) {
+        page_t *page = bvec.bv_page;
+        assert(page != NULL, "virtio_disk_rw_sg: page is NULL");
+        void *pa = (void *)__page_to_pa(page);
+        assert(pa != NULL, "virtio_disk_rw_sg: page has no PA");
+
+        vq->desc[idx[1 + di]].addr = (uint64)(pa + bvec.offset);
+        vq->desc[idx[1 + di]].len = bvec.len;
+        vq->desc[idx[1 + di]].flags = data_flags | VRING_DESC_F_NEXT;
+        vq->desc[idx[1 + di]].next = idx[2 + di]; /* next data or status */
+        di++;
+    }
+
+    /* Descriptor [nsg+1]: status (device-writable). */
+    int si = ndesc - 1;
+    vq->info[idx[0]].status = 0xff;
+    vq->desc[idx[si]].addr = VA2PA((uint64)&vq->info[idx[0]].status);
+    vq->desc[idx[si]].len = 1;
+    vq->desc[idx[si]].flags = VRING_DESC_F_WRITE;
+    vq->desc[idx[si]].next = 0;
+
+    /* Completion tracking: one chain → one completion. */
+    bio->private_data = NULL;
+    vq->info[idx[0]].bio = bio;
+    vq->info[idx[0]].flush_completion = NULL;
+    vq->info[idx[0]].done = false;
+
+    /* Submit to available ring. */
+    vq->avail->ring[vq->avail->idx % NUM] = idx[0];
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    vq->avail->idx += 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    assert(!intr_get(), "virtio_disk_rw_sg: interrupts enabled");
+
+    if (notify)
+        __virtio_disk_notify(disk, diskno, qi);
+
+    spin_unlock(&vq->vq_lock);
+}
+
+static void virtio_disk_intr(int irq, void *data, device_t *dev) {
+    uint64 diskno = (uint64)data;
+    struct disk *disk = &disks[diskno];
+
+    // Acknowledge the interrupt: PCI vs MMIO transport
+    if (disk->pci_state.use_pci) {
+        volatile uint8 isr_status = *disk->pci_state.isr;
+        (void)isr_status;
+    } else {
+        *R(diskno, VIRTIO_MMIO_INTERRUPT_ACK) =
+            *R(diskno, VIRTIO_MMIO_INTERRUPT_STATUS) & 0x3;
+    }
+
+    // Process completions across all queues
+    for (int qi = 0; qi < disk->num_queues; qi++) {
+        struct virtqueue *vq = &disk->vqs[qi];
+        spin_lock(&vq->vq_lock);
+
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+        while (vq->used_idx != vq->used->idx) {
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            int id = vq->used->ring[vq->used_idx % NUM].id;
+
+            char status = vq->info[id].status;
+            struct bio *bio = vq->info[id].bio;
+            completion_t *flush_comp = vq->info[id].flush_completion;
+
+            if (flush_comp != NULL) {
+                if (status != 0)
+                    printf("virtio_disk: flush returned status %d\n", status);
+                complete_all(flush_comp);
+            } else {
+                if (status != 0) {
+                    printf("ERROR: id=%d status=%d buf=%p blockno=0x%lx\n", id,
+                           status, bio, bio ? bio->blkno : 0);
+                    panic("virtio_disk_intr status: %d", status);
+                }
+
+                assert(vq->info[id].done == false,
+                       "virtio_disk_intr: already done");
+                vq->info[id].done = true;
+
+                vq->info[id].bio = NULL;
+                free_chain(vq, id);
+
+                if (bio != NULL) {
+                    if (status != 0)
+                        bio->error = -EIO;
+                    bio->completed_segs++;
+                    if (bio->completed_segs >= bio->inflight_segs)
+                        bio_complete(bio);
+                }
+            }
+
+            vq->used_idx += 1;
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        }
+
+        spin_unlock(&vq->vq_lock);
+    }
+}

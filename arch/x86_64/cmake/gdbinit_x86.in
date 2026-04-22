@@ -1,0 +1,9 @@
+# xv6 x86_64 GDB init — auto-generated
+set architecture i386:x86-64
+set disassembly-flavor intel
+target remote localhost:1234
+symbol-file kernel/kernel
+
+# Break on panic and exception halt
+b __panic_end
+b trigger_panic

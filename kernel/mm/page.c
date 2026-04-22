@@ -1,0 +1,2384 @@
+// Physical page allocator using the buddy system algorithm.
+//
+// The buddy system manages free pages by organizing them into pools of
+// different orders (power-of-2 sizes). This enables efficient allocation and
+// coalescing of physically contiguous memory regions.
+//
+// KEY FEATURES:
+//   - Per-order fine-grained locking for concurrent access
+//   - Per-CPU hot page cache for frequently allocated orders (0-8)
+//   - Lock-free order 0 cache using interrupt disabling
+//   - Lazy buddy merging with MERGING state to prevent races
+//   - Reference counting for shared pages
+//
+// LOCKING HIERARCHY (to prevent deadlocks):
+//   1. Per-CPU cache locks (push_off/pop_off for order 0, spinlocks for 1-8)
+//   2. Buddy pool locks (always acquired in ascending order)
+//   3. Individual page locks (acquired while holding pool locks)
+//
+// BUDDY STATES:
+//   - BUDDY_STATE_FREE: Page is in buddy pool, available for allocation
+//   - BUDDY_STATE_INTERMEDIATE: Page is being merged with its buddy
+//   - BUDDY_STATE_CACHED: Page is in per-CPU cache
+//
+// ORGANIZATION:
+//   1. Global Data & Configuration
+//   2. Debugging & Sanitization
+//   3. Locking Primitives
+//   4. Validation & Helper Functions
+//   5. Page Initialization
+//   6. Buddy Pool Operations (List Management)
+//   7. Buddy Finding & State Management
+//   8. Buddy Splitting & Merging
+//   9. Per-CPU Page Cache
+//  10. Buddy Allocation (Core Algorithm)
+//  11. Buddy Deallocation
+//  12. Buddy System Initialization
+//  13. Reference Counting (Internal)
+//  14. Public API - Allocation & Deallocation
+//  15. Public API - Page Locking
+//  16. Public API - Reference Counting
+//  17. Public API - Address Translation
+//  18. Statistics & Debugging
+
+#include "types.h"
+#include "string.h"
+#include "param.h"
+#include <mm/memlayout.h>
+#include "lock/spinlock.h"
+#include "riscv.h"
+#include "defs.h"
+#include "printf.h"
+#include "list.h"
+#include <mm/page.h>
+#include "page_private.h"
+#include <mm/slab.h>
+#include <smp/percpu.h>
+#include "smp/atomic.h"
+#include <mm/early_allocator.h>
+#include "dev/fdt.h"
+#include <mm/memstat.h>
+#include <mm/mm_watermark.h>
+#include <mm/shrinker.h>
+
+#ifdef __x86_64__
+static inline void x86_page_dbg_outb(uint16 port, uint8 value) {
+    asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static void x86_page_dbg_puts(const char *s) {
+    while (*s) {
+        x86_page_dbg_outb(0xE9, (uint8)*s++);
+    }
+}
+
+#define X86_PAGE_MARK(msg) x86_page_dbg_puts(msg)
+#else
+#define X86_PAGE_MARK(msg) ((void)0)
+#endif
+
+// ============================================================================
+// SECTION 1: Global Data & Configuration
+// ============================================================================
+
+STATIC buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
+
+// High memory zone data is defined after pcpu_cache_t below.
+
+// Per-CPU hot page cache for small allocations (orders 0 to SLAB_DEFAULT_ORDER)
+// This reduces lock contention for the most frequent allocations
+#define PCPU_CACHE_MAX_ORDER SLAB_DEFAULT_ORDER
+/*
+ * PCPU_CACHE_SIZE: number of compound pages cached per CPU per order.
+ *
+ * Performance note: this was originally 4.  With PCACHE_FOLIO_ORDER=4
+ * (64 KB folios), a sequential 16 MB write allocates 256 order-4 pages.
+ * With a cache depth of 4, 252 out of 256 allocations fell through to the
+ * global buddy allocator, hitting multiple spinlocks on each alloc/free.
+ * Profiling showed pcache_get_page was 55-71% of tmpfs write time, with
+ * buddy allocation (alloc_pages + free_pages) as the dominant cost.
+ *
+ * Increasing to 32 reduced pcache_get_page cycles by ~57% and was a
+ * key contributor to the overall 2.9x tmpfs write throughput improvement.
+ * The memory overhead is modest: 32 * 64 KB = 2 MB per CPU per order.
+ */
+#define PCPU_CACHE_SIZE 32
+#define PCPU_HOT_PAGE_CACHE_SIZE 64 // hot pages(order 0) per CPU
+
+// Atomic operations for per-CPU cache counters with overflow/underflow checks
+#define PCPU_CACHE_COUNT_INC(cache)                                            \
+    do {                                                                       \
+        uint32 __old_count =                                                   \
+            __atomic_fetch_add(&(cache)->count, 1, __ATOMIC_RELEASE);          \
+        assert(__old_count < (uint32) - 1, "PCPU cache counter overflow");     \
+    } while (0)
+
+#define PCPU_CACHE_COUNT_DEC(cache)                                            \
+    do {                                                                       \
+        uint32 __old_count =                                                   \
+            __atomic_fetch_sub(&(cache)->count, 1, __ATOMIC_RELEASE);          \
+        assert(__old_count > 0, "PCPU cache counter underflow");               \
+    } while (0)
+
+#define PCPU_CACHE_COUNT_LOAD(cache)                                           \
+    __atomic_load_n(&(cache)->count, __ATOMIC_ACQUIRE)
+
+typedef struct {
+    list_node_t lru_head; // List of cached pages
+    _Atomic uint32 count; // Number of pages in cache (atomic for thread-safety)
+    spinlock_t lock; // Lock for orders > 0 (order 0 is lock-free via push_off)
+} pcpu_cache_t;
+
+STATIC pcpu_cache_t __pcpu_caches[NCPU][PCPU_CACHE_MAX_ORDER + 1];
+
+// High memory zone descriptor.
+// Each non-first memory region gets its own zone with separate buddy pools
+// and per-CPU caches.  This avoids assuming a single highmem region and
+// naturally prevents buddy merges across non-contiguous regions.
+#define MAX_HIGHMEM_ZONES (MAX_MEM_REGIONS - 1)
+
+typedef struct {
+    buddy_pool_t pools[PAGE_BUDDY_MAX_ORDER + 1];
+    pcpu_cache_t pcpu_caches[NCPU][PCPU_CACHE_MAX_ORDER + 1];
+    uint64 base;  // Physical start address of this zone
+    uint64 end;   // Physical end address (exclusive)
+} highmem_zone_t;
+
+STATIC highmem_zone_t __highmem_zones[MAX_HIGHMEM_ZONES];
+STATIC int __num_highmem_zones = 0;
+
+// Every physical pages
+// TODO: The number of managed pages are fix right now.
+STATIC page_t *__pages = NULL;
+// The start address and the end address of the managed memory
+STATIC uint64 __managed_start;
+STATIC uint64 __managed_end;
+
+// buddy pool of lower order must be locked before the buddy pool of higher
+// order
+
+// ============================================================================
+// SECTION 2: Debugging & Sanitization
+// ============================================================================
+
+#ifdef KERNEL_PAGE_SANITIZER
+STATIC_INLINE void __page_sanitizer_check(const char *op, page_t *page,
+                                          uint64 order, uint64 flags) {
+    if (page == NULL) {
+        return;
+    }
+    assert(order <= PAGE_BUDDY_MAX_ORDER,
+           "__page_sanitizer_check: invalid order");
+    assert(!flags || page->flags == flags,
+           "__page_sanitizer_check: page flags mismatch, expected 0x%lx, got "
+           "0x%lx",
+           flags, page->flags);
+    assert(page - __pages < TOTALPAGES,
+           "__page_sanitizer_check: page out of bounds");
+    assert((page->physical_address - __managed_start) >> PAGE_SHIFT ==
+               (page - __pages),
+           "__page_sanitizer_check: page physical address mismatch, "
+           "expected 0x%lx, got 0x%lx",
+           __managed_start + ((page - __pages) << PAGE_SHIFT),
+           page->physical_address);
+    for (uint64 i = 0; i < (1UL << order); i++) {
+        assert(page[i].physical_address ==
+                   page->physical_address + (i << PAGE_SHIFT),
+               "__page_sanitizer_check: page physical address mismatch, "
+               "expected 0x%lx, got 0x%lx",
+               page->physical_address + (i << PAGE_SHIFT),
+               page[i].physical_address);
+    }
+    printf("%s: order %ld, flags 0x%lx, page 0x%lx\n", op, order, flags,
+           __page_to_pa(page));
+}
+
+// Debug: verify all tail pages in a compound page point to the correct header
+// and have the correct type. Panics if corruption is detected.
+STATIC_INLINE void __debug_verify_tail_structure(page_t *header, uint64 order,
+                                                 const char *context) {
+    if (order == 0)
+        return;
+
+    uint64 count = 1UL << order;
+    for (uint64 i = 1; i < count; i++) {
+        uint64 tail_type = PAGE_FLAG_GET_TYPE(header[i].flags);
+        if (tail_type != PAGE_TYPE_TAIL) {
+            panic("%s: tail page[%ld] has type %ld, expected TAIL, header=%p, "
+                  "pa=0x%lx",
+                  context, i, tail_type, header, header->physical_address);
+        }
+        if (header[i].tail.head_page != header) {
+            panic(
+                "%s: tail page[%ld] points to %p, expected header %p, pa=0x%lx",
+                context, i, header[i].tail.head_page, header,
+                header->physical_address);
+        }
+    }
+}
+#else
+#define __page_sanitizer_check(op, page, order, flags)                         \
+    do {                                                                       \
+    } while (0)
+#define __debug_verify_tail_structure(header, order, context)                  \
+    do {                                                                       \
+    } while (0)
+#endif
+
+// ============================================================================
+// SECTION 3: Locking Primitives
+// ============================================================================
+
+// Check if a physical address is in any high memory zone.
+// High memory is any memory region beyond the first one.
+STATIC_INLINE bool __pa_is_highmem(uint64 physical) {
+    for (int z = 0; z < __num_highmem_zones; z++) {
+        if (physical >= __highmem_zones[z].base &&
+            physical < __highmem_zones[z].end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Find the highmem zone that contains the given physical address.
+// Returns the zone pointer, or NULL if the address is in lowmem or unknown.
+STATIC_INLINE highmem_zone_t *__pa_to_highmem_zone(uint64 physical) {
+    for (int z = 0; z < __num_highmem_zones; z++) {
+        if (physical >= __highmem_zones[z].base &&
+            physical < __highmem_zones[z].end) {
+            return &__highmem_zones[z];
+        }
+    }
+    return NULL;
+}
+
+// Check if a page is in the high memory zone
+STATIC_INLINE bool __page_is_highmem(page_t *page) {
+    return page != NULL && (page->flags & PAGE_FLAG_HIGHMEM);
+}
+
+// Get the buddy pool array for a given physical address
+STATIC_INLINE buddy_pool_t *__get_pools_for_pa(uint64 physical) {
+    highmem_zone_t *zone = __pa_to_highmem_zone(physical);
+    return zone ? zone->pools : __buddy_pools;
+}
+
+// Get the buddy pool array for a given page.
+// Uses address-based detection because buddy operations overwrite page->flags.
+STATIC_INLINE buddy_pool_t *__get_pools_for_page(page_t *page) {
+    return __get_pools_for_pa(page->physical_address);
+}
+
+// Get the per-CPU cache for a given page and order on the current CPU.
+// Uses address-based detection because buddy operations overwrite page->flags.
+STATIC_INLINE pcpu_cache_t *__get_pcpu_cache_for_page(page_t *page,
+                                                       uint64 order) {
+    int cpu_id = cpuid();
+    highmem_zone_t *zone = __pa_to_highmem_zone(page->physical_address);
+    if (zone) {
+        return &zone->pcpu_caches[cpu_id][order];
+    }
+    return &__pcpu_caches[cpu_id][order];
+}
+
+// Acquire the spinlock of a specific buddy pool
+STATIC_INLINE void __buddy_pool_lock(uint64 order) {
+    if (order > PAGE_BUDDY_MAX_ORDER) {
+        panic("__buddy_pool_lock: invalid order");
+    }
+    spin_lock(&__buddy_pools[order].lock);
+}
+
+// Release the spinlock of a specific buddy pool
+STATIC_INLINE void __buddy_pool_unlock(uint64 order) {
+    if (order > PAGE_BUDDY_MAX_ORDER) {
+        panic("__buddy_pool_unlock: invalid order");
+    }
+    spin_unlock(&__buddy_pools[order].lock);
+}
+
+// Acquire spinlocks for a range of buddy pools (from low to high order)
+// This maintains lock ordering to prevent deadlock
+STATIC_INLINE void __buddy_pool_lock_range(uint64 order_start,
+                                           uint64 order_end) {
+    if (order_start > order_end || order_end > PAGE_BUDDY_MAX_ORDER) {
+        panic("__buddy_pool_lock_range: invalid order range");
+    }
+    for (uint64 i = order_start; i <= order_end; i++) {
+        spin_lock(&__buddy_pools[i].lock);
+    }
+}
+
+// Release spinlocks for a range of buddy pools (in reverse order)
+STATIC_INLINE void __buddy_pool_unlock_range(uint64 order_start,
+                                             uint64 order_end) {
+    if (order_start > order_end || order_end > PAGE_BUDDY_MAX_ORDER) {
+        panic("__buddy_pool_unlock_range: invalid order range");
+    }
+    for (int64 i = order_end; i >= (int64)order_start; i--) {
+        spin_unlock(&__buddy_pools[i].lock);
+    }
+}
+
+// Pool-aware locking for specific pool arrays
+STATIC_INLINE void __pools_lock(buddy_pool_t *pools, uint64 order) {
+    if (order > PAGE_BUDDY_MAX_ORDER) {
+        panic("__pools_lock: invalid order");
+    }
+    spin_lock(&pools[order].lock);
+}
+
+STATIC_INLINE void __pools_unlock(buddy_pool_t *pools, uint64 order) {
+    if (order > PAGE_BUDDY_MAX_ORDER) {
+        panic("__pools_unlock: invalid order");
+    }
+    spin_unlock(&pools[order].lock);
+}
+
+STATIC_INLINE void __pools_lock_range(buddy_pool_t *pools, uint64 order_start,
+                                      uint64 order_end) {
+    if (order_start > order_end || order_end > PAGE_BUDDY_MAX_ORDER) {
+        panic("__pools_lock_range: invalid order range");
+    }
+    for (uint64 i = order_start; i <= order_end; i++) {
+        spin_lock(&pools[i].lock);
+    }
+}
+
+STATIC_INLINE void __pools_unlock_range(buddy_pool_t *pools, uint64 order_start,
+                                        uint64 order_end) {
+    if (order_start > order_end || order_end > PAGE_BUDDY_MAX_ORDER) {
+        panic("__pools_unlock_range: invalid order range");
+    }
+    for (int64 i = order_end; i >= (int64)order_start; i--) {
+        spin_unlock(&pools[i].lock);
+    }
+}
+
+// ============================================================================
+// SECTION 4: Validation & Helper Functions
+// ============================================================================
+
+// Get the total number of usable managed pages (excludes gaps between regions)
+STATIC_INLINE uint64 __total_pages() {
+    uint64 total = 0;
+    for (int i = 0; i < platform.mem_count; i++) {
+        uint64 rstart = platform.mem[i].base;
+        uint64 rend = rstart + platform.mem[i].size;
+        // Clamp to managed range
+        if (rstart < __managed_start) rstart = __managed_start;
+        if (rend > __managed_end) rend = __managed_end;
+        if (rstart < rend) {
+            total += (rend - rstart) >> PAGE_SHIFT;
+        }
+    }
+    return total;
+}
+
+// To check if a physical address is within the range of the managed address
+#define ADDR_IN_MANAGED(addr) ((addr) >= KERNBASE && (addr) < __managed_end)
+
+// Check if a base address of a page is valid
+// A valid page base address should be aligned to the page size and within
+// managed memory
+STATIC_INLINE bool __page_base_validity(uint64 physical) {
+    if ((physical & PAGE_MASK) || !ADDR_IN_MANAGED(physical)) {
+        return false;
+    }
+    return true;
+}
+
+// Check if flags are valid during initialization
+STATIC_INLINE bool __page_init_flags_validity(uint64 flags) {
+    if (flags & (~(PAGE_FLAG_LOCKED | PAGE_FLAG_HIGHMEM))) {
+        return false;
+    }
+    return true;
+}
+
+// Check if flags are valid during allocation
+STATIC_INLINE bool __page_flags_validity(uint64 flags) {
+    // Strip GFP flags before checking page flags
+    uint64 page_flags = PAGE_FLAGS_FROM_GFP(flags);
+    // @TODO: Some flags need to be mutually exclusive
+    if (PAGE_FLAG_GET_TYPE(page_flags) >= __PAGE_TYPE_MAX) {
+        return false;
+    }
+    if (page_flags & PAGE_FLAG_MASK) {
+        return false;
+    }
+    return true;
+}
+
+// To check if a page can be put back to the buddy system as a free page to be
+// allocated again.
+STATIC_INLINE bool __page_is_freeable(page_t *page) {
+    if (page->flags & PAGE_FLAG_LOCKED)
+        return false;
+    if (page->ref_count > 1) {
+        // Cannot free a page that has been referenced by others
+        return false;
+    }
+    return true;
+}
+
+// Check if a page type supports the tail page pattern.
+// Types that support tail pages only need their header initialized during
+// allocation - tail pages keep PAGE_TYPE_TAIL and inherit properties from
+// header. Currently only BUDDY and SLAB types support this optimization.
+STATIC_INLINE bool __page_type_supports_tail(uint64 flags) {
+    uint64 type = PAGE_FLAG_GET_TYPE(flags);
+    return (type == PAGE_TYPE_BUDDY || type == PAGE_TYPE_SLAB ||
+            type == PAGE_TYPE_PCACHE || type == PAGE_TYPE_ANON);
+}
+
+// Check if a compound page already has valid tail structure.
+// Returns true if the page type supports tail pages and the stored order
+// matches. This is used to skip tail reinitialization during free when the page
+// came from a type that supports tail pages (BUDDY/SLAB).
+// Note: We only check the header's order - direct access to buddy tail page
+// descriptors is not allowed.
+STATIC_INLINE bool __page_has_valid_tail_structure(page_t *page, uint64 order) {
+    uint64 page_type = PAGE_FLAG_GET_TYPE(page->flags);
+
+    // Only BUDDY and SLAB types support tail pages
+    // Check order matches for alignment - use the stored order to verify
+    // this is a whole compound page being freed
+    if (page_type == PAGE_TYPE_BUDDY || page_type == PAGE_TYPE_SLAB ||
+        page_type == PAGE_TYPE_PCACHE || page_type == PAGE_TYPE_ANON) {
+        return page->compound_order == order;
+    }
+
+    return false;
+}
+
+// ============================================================================
+// SECTION 5: Page Initialization
+// ============================================================================
+
+// Initialize a page descriptor (full initialization including spinlock)
+// Only use this during boot or when the page is guaranteed to not be
+// accessible by other threads.
+// No validity check here
+STATIC_INLINE void __page_init(page_t *page, uint64 physical, int ref_count,
+                               uint64 flags) {
+    memset(page, 0, sizeof(page_t));
+    page->physical_address = physical;
+    page->flags = flags;
+    page->ref_count = ref_count;
+    spin_init(&page->lock, "page_t");
+}
+
+// Reinitialize a page descriptor for allocation (preserves spinlock)
+// Use this when recycling a page from buddy system or cache.
+// The spinlock must already be initialized and must not be held by anyone.
+// No validity check here
+STATIC_INLINE void __page_reinit(page_t *page, uint64 physical, int ref_count,
+                                 uint64 flags) {
+    // Save the lock - it should already be properly initialized
+    // Clear everything except the lock
+    page->physical_address = physical;
+    page->flags = flags;
+    page->ref_count = ref_count;
+    page->compound_order = 0;
+    // Clear union fields to avoid stale data being interpreted as valid
+    // pointers. For SLAB: slab.slab will be set by __slab_make after
+    // allocation. For BUDDY: buddy fields will be set by buddy functions. This
+    // prevents garbage in lru_entry.prev from being read as slab.slab.
+    page->slab.slab = NULL;
+    // Note: We do NOT reinitialize the spinlock - it remains valid
+}
+
+// Initialize buddy pools and per-CPU caches
+STATIC_INLINE void __buddy_pool_init() {
+    static char *lock_names[PAGE_BUDDY_MAX_ORDER + 1] = {
+        "buddy_pool_0", "buddy_pool_1", "buddy_pool_2", "buddy_pool_3",
+        "buddy_pool_4", "buddy_pool_5", "buddy_pool_6", "buddy_pool_7",
+        "buddy_pool_8", "buddy_pool_9", "buddy_pool_10"};
+
+    // Initialize lowmem pools
+    for (int i = 0; i < PAGE_BUDDY_MAX_ORDER + 1; i++) {
+        __buddy_pools[i].count = 0;
+        list_entry_init(&__buddy_pools[i].lru_head);
+        spin_init(&__buddy_pools[i].lock, lock_names[i]);
+    }
+
+    // Initialize highmem zone pools
+    for (int z = 0; z < __num_highmem_zones; z++) {
+        for (int i = 0; i < PAGE_BUDDY_MAX_ORDER + 1; i++) {
+            __highmem_zones[z].pools[i].count = 0;
+            list_entry_init(&__highmem_zones[z].pools[i].lru_head);
+            spin_init(&__highmem_zones[z].pools[i].lock, "hm_pool");
+        }
+    }
+
+    // Initialize lowmem per-CPU caches
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        for (int order = 0; order <= PCPU_CACHE_MAX_ORDER; order++) {
+            pcpu_cache_t *cache = &__pcpu_caches[cpu][order];
+            list_entry_init(&cache->lru_head);
+            cache->count = 0;
+            spin_init(&cache->lock, "pcpu_cache");
+        }
+    }
+
+    // Initialize highmem zone per-CPU caches
+    for (int z = 0; z < __num_highmem_zones; z++) {
+        for (int cpu = 0; cpu < NCPU; cpu++) {
+            for (int order = 0; order <= PCPU_CACHE_MAX_ORDER; order++) {
+                pcpu_cache_t *cache =
+                    &__highmem_zones[z].pcpu_caches[cpu][order];
+                list_entry_init(&cache->lru_head);
+                cache->count = 0;
+                spin_init(&cache->lock, "pcpu_hm");
+            }
+        }
+    }
+}
+
+// Initialize a range of page descriptors with specific flags
+STATIC_INLINE int __init_range_flags(uint64 pa_start, uint64 pa_end,
+                                     uint64 flags) {
+    page_t *page;
+    if (pa_start >= pa_end) {
+        // The start address must be lower than the end address
+        printf("invalid range, pa_start: 0x%lx, pa_end: 0x%lx\n", pa_start,
+               pa_end);
+        return -1;
+    }
+    if (!__page_base_validity(pa_start) ||
+        !__page_base_validity(pa_end - PAGE_SIZE)) {
+        // Both pa_start and pa_end should be valid physical base page addresses
+        printf("invalid range base, pa_start: 0x%lx, pa_end: 0x%lx\n", pa_start,
+               pa_end);
+        return -1;
+    }
+    if (!__page_init_flags_validity(flags)) {
+        // Invalid flags
+        printf("invalid flags: 0x%lx\n", flags);
+        return -1;
+    }
+
+    printf("init pages from 0x%lx to 0x%lx with flags 0x%lx\n", pa_start,
+           pa_end, flags);
+
+    for (uint64 base = pa_start; base < pa_end; base += PAGE_SIZE) {
+        page = __pa_to_page(base);
+        if (page == NULL) {
+            printf("failed to get page for physical address 0x%lx\n", base);
+            return -1;
+        }
+        __page_init(page, base, 0, flags);
+    }
+
+    return 0;
+}
+
+// Initialize a single page descriptor as a buddy tail page
+// Tail pages use PAGE_TYPE_TAIL and only store a pointer to their header.
+// All other properties are inherited from the header page.
+STATIC_INLINE void __page_as_buddy_tail(page_t *page, page_t *buddy_head) {
+    page->flags = PAGE_TYPE_TAIL;
+    page->ref_count = 0;
+    page->tail.head_page = buddy_head;
+}
+
+// Initialize a single page descriptor as a buddy page (legacy - for header
+// pages)
+STATIC_INLINE void __page_as_buddy(page_t *page, page_t *buddy_head,
+                                   uint64 order, uint32 state) {
+    if (page == buddy_head) {
+        // This is the header page
+        page->flags = PAGE_TYPE_BUDDY;
+        page->ref_count = 0;
+        page->compound_order = order;
+        page->buddy.state = state;
+        list_entry_init(&page->buddy.lru_entry);
+    } else {
+        // This is a tail page - minimal initialization
+        __page_as_buddy_tail(page, buddy_head);
+    }
+}
+
+// Initialize only the header page before commit.
+// Only sets the essential fields for header identification during merge/split.
+// Tail pages are NOT touched - they will be initialized at commit time.
+STATIC_INLINE void __page_as_buddy_header(page_t *page, uint64 order,
+                                          uint32 state) {
+    page->flags = PAGE_TYPE_BUDDY;
+    page->ref_count = 0;
+    page->compound_order = order;
+    page->buddy.state = state;
+    // Note: lru_entry will be initialized at commit time
+}
+
+// Initialize a single page descriptor as a buddy page
+// including page spinlock
+STATIC_INLINE void __page_as_buddy_init(page_t *page, page_t *buddy_head,
+                                        uint64 order, uint32 state) {
+    __page_init(page, page->physical_address, 0, PAGE_TYPE_BUDDY);
+    if (page != buddy_head) {
+        // Tail page - set as tail
+        __page_as_buddy_tail(page, buddy_head);
+    } else {
+        page->compound_order = order;
+        page->buddy.state = state;
+        list_entry_init(&page->buddy.lru_entry);
+    }
+}
+
+// Initialize a continuous range of pages as a buddy page in specific order
+// Will not check validity here
+// Uses tail pages for all pages except the header
+STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order,
+                                         uint32 state) {
+    // Initialize header
+    buddy_head->flags = PAGE_TYPE_BUDDY;
+    buddy_head->ref_count = 0;
+    buddy_head->compound_order = order;
+    buddy_head->buddy.state = state;
+    list_entry_init(&buddy_head->buddy.lru_entry);
+
+    // Initialize tail pages with minimal data
+    uint64 count = 1UL << order;
+    for (uint64 i = 1; i < count; i++) {
+        __page_as_buddy_tail(&buddy_head[i], buddy_head);
+    }
+}
+
+// Convert a compound page to buddy, preserving existing valid tail pages.
+// Only updates the header page. Use this when the page already has valid
+// tail structure (all tails have PAGE_TYPE_TAIL pointing to header).
+// This avoids O(2^order) tail page updates during free.
+STATIC_INLINE void __page_as_buddy_group_preserve_tails(page_t *buddy_head,
+                                                        uint64 order,
+                                                        uint32 state) {
+    // Only update the header - tail pages already have valid structure
+    buddy_head->flags = PAGE_TYPE_BUDDY;
+    buddy_head->ref_count = 0;
+    buddy_head->compound_order = order;
+    buddy_head->buddy.state = state;
+    list_entry_init(&buddy_head->buddy.lru_entry);
+}
+
+// Initialize a continuous range of pages as a buddy page in specific order
+// including page spinlock
+// Will not check validity here
+// Uses tail pages for all pages except the header
+STATIC_INLINE void __page_as_buddy_group_init(page_t *buddy_head, uint64 order,
+                                              uint32 state) {
+    // Initialize header with full initialization
+    __page_init(buddy_head, buddy_head->physical_address, 0, PAGE_TYPE_BUDDY);
+    buddy_head->compound_order = order;
+    buddy_head->buddy.state = state;
+    list_entry_init(&buddy_head->buddy.lru_entry);
+
+    // Initialize tail pages with minimal data
+    uint64 count = 1UL << order;
+    for (uint64 i = 1; i < count; i++) {
+        // Only set essential fields for tail pages
+        spin_init(&buddy_head[i].lock, "page_t");
+        buddy_head[i].physical_address =
+            buddy_head->physical_address + (i << PAGE_SHIFT);
+        __page_as_buddy_tail(&buddy_head[i], buddy_head);
+    }
+}
+
+// ============================================================================
+// SECTION 6: Buddy Pool Operations (List Management)
+// ============================================================================
+
+// Attach a buddy head page into the corresponding buddy pool and increase the
+// count value of the buddy pool by one.
+// Will not do validity check here
+STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
+    if (LIST_IS_EMPTY(&pool->lru_head)) {
+        if (pool->count != 0) {
+            panic("__buddy_push_page");
+        }
+    } else if (pool->count == 0) {
+        panic("__buddy_push_page");
+    }
+    list_node_push_back(&pool->lru_head, page, buddy.lru_entry);
+    pool->count++;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+}
+
+// Pop a buddy page from a pool and return the page descriptor of the buddy
+// header. Return NULL if the given pool is empty
+// Will not do validity check here
+STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool) {
+    page_t *ret = list_node_pop_back(&pool->lru_head, page_t, buddy.lru_entry);
+    if (ret == NULL) {
+        if (pool->count > 0) {
+            panic("__buddy_pop_page");
+        }
+        return NULL;
+    }
+    pool->count--;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return ret;
+}
+
+// Detach a buddy head page from a buddy pool and decrease the count value by
+// one.
+// Will not do validity check here
+STATIC_INLINE void __buddy_detach_page(buddy_pool_t *pool, page_t *page) {
+    if (LIST_IS_EMPTY(&pool->lru_head)) {
+        panic("__buddy_detach_page");
+    }
+    pool->count--;
+    list_node_detach(page, buddy.lru_entry);
+}
+
+// ============================================================================
+// SECTION 7: Buddy Finding & State Management
+// ============================================================================
+
+// Try to calculate the address of a page's buddy with the page's physical
+// address. Will not validate the value of order
+STATIC_INLINE uint64 __get_buddy_addr(uint64 physical, uint32 order) {
+    uint64 __buddy_base_address =
+        PAGE_ADDR_GET_BUDDY_GROUP_ADDR(physical, order);
+    __buddy_base_address ^= PAGE_BUDDY_BYTES(order);
+    return __buddy_base_address;
+}
+
+// Try to find a page's buddy and lock both of them.
+// Return the buddy page descriptor if found. The buddy page will be marked as
+// INTERMEDIATE state to prevent other threads from allocating it.
+// Return NULL if didn't find. In this case, they will be left unlocked.
+STATIC_INLINE page_t *__lock_get_buddy_page(page_t *page) {
+    uint64 buddy_base;
+    page_t *buddy_head;
+    if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
+        // Must be the page descriptor of a buddy header page
+        return NULL;
+    }
+    if (page->compound_order >= PAGE_BUDDY_MAX_ORDER) {
+        // Page size reach PAGE_BUDDY_MAX_ORDER doesn't have buddy
+        return NULL;
+    }
+    buddy_base = __get_buddy_addr(page->physical_address, page->compound_order);
+    buddy_head = __pa_to_page(buddy_base);
+    if (buddy_head == NULL) {
+        // Buddy address is out of managed range
+        return NULL;
+    }
+
+    __lock_two_pages(page, buddy_head);
+    if (buddy_head == NULL || !PAGE_IS_BUDDY_GROUP_HEAD(buddy_head) ||
+        buddy_head->compound_order != page->compound_order) {
+        // Didn't find a complete buddy page.
+        __unlock_two_pages(page, buddy_head);
+        return NULL;
+    }
+    if (LIST_ENTRY_IS_DETACHED(&buddy_head->buddy.lru_entry)) {
+        // The buddy header page is not in the buddy pool, which means it's
+        // holding by someone else right now.
+        __unlock_two_pages(page, buddy_head);
+        return NULL;
+    }
+    // Check buddy state: must be FREE (not CACHED or MERGING)
+    // Pages in per-CPU cache have BUDDY_STATE_CACHED
+    if (buddy_head->buddy.state != BUDDY_STATE_FREE) {
+        __unlock_two_pages(page, buddy_head);
+        return NULL;
+    }
+    buddy_head->buddy.state = BUDDY_STATE_INTERMEDIATE;
+    return buddy_head;
+}
+
+// Update tail pages after splitting operations.
+// The header page is assumed to already have the correct order set.
+// This function updates the state to FREE.
+// OPTIMIZATION: Only updates the LATER HALF of the buddy group.
+// The first half's tail pages already point to this header from before the
+// split.
+STATIC_INLINE void __page_order_change_commit(page_t *page) {
+    if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
+        panic("__page_order_change_commit");
+    }
+
+    // Update header state only (order and buddy_head already correct)
+    page->buddy.state = BUDDY_STATE_FREE;
+    list_entry_init(&page->buddy.lru_entry);
+
+    // Tail pages inherit properties from header - no updates needed.
+    // They already have PAGE_TYPE_TAIL and point to a valid header
+    // (the original header before split, which is now either this page
+    // or has been updated during the split process).
+}
+
+// Commit for the later half (new buddy) created during split.
+// Only updates the later half's tail pages to point to the new header.
+STATIC_INLINE void __page_split_commit_later_half(page_t *new_header,
+                                                  uint64 order) {
+    uint64 count = 1UL << order;
+
+    // Initialize header
+    new_header->buddy.state = BUDDY_STATE_FREE;
+    list_entry_init(&new_header->buddy.lru_entry);
+
+    // Only update tail pages of this new buddy (later half)
+    // These pages previously pointed to the old (larger) header
+    for (uint64 i = 1; i < count; i++) {
+        __page_as_buddy_tail(&new_header[i], new_header);
+    }
+}
+
+// Commit for the later half after merging.
+// Updates the later half's tail pages (including the old header) to point to
+// the merged header.
+STATIC_INLINE void __page_merge_commit_later_half(page_t *merged_header,
+                                                  uint64 merged_order) {
+    uint64 half_count = 1UL << (merged_order - 1);
+    page_t *later_half_start = merged_header + half_count;
+
+    // Update all pages in the later half (including its old header) to be tails
+    for (uint64 i = 0; i < half_count; i++) {
+        __page_as_buddy_tail(&later_half_start[i], merged_header);
+    }
+}
+
+// ============================================================================
+// SECTION 8: Buddy Splitting & Merging
+// ============================================================================
+
+// Split a buddy page in half and return the header page of the later half of
+// the splitted buddy pages. This function will not update the tail pages
+// immediately to avoid useless updates. Have to call __page_order_change_commit
+// after page splitting.
+// Return NULL if failed to split
+STATIC_INLINE page_t *__buddy_split(page_t *page) {
+    int order_after;
+    page_t *buddy;
+    if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
+        return NULL;
+    }
+    if (page->compound_order == 0) {
+        // A single page cannot be splitted.
+        return NULL;
+    }
+    order_after = page->compound_order - 1;
+    buddy = page + (1UL << order_after);
+    page->compound_order = order_after; // Update order in header
+    // Only initialize buddy header - tail pages will be set at commit time
+    __page_as_buddy_header(buddy, order_after, BUDDY_STATE_INTERMEDIATE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return buddy;
+}
+
+// Merge two buddy pages and return the header page of the merged
+// buddy page. This function will not update the tail pages immediately
+// to avoid useless updates. Have to call __page_order_change_commit after page
+// splitting.
+// Return NULL if failed to merge
+STATIC_INLINE page_t *__buddy_merge(page_t *page1, page_t *page2) {
+    page_t *header;
+    uint64 order_after;
+    if (!PAGES_ARE_BUDDIES(page1, page2)) {
+        return NULL;
+    }
+    if (page1->physical_address < page2->physical_address) {
+        header = page1;
+    } else {
+        header = page2;
+    }
+    order_after = page1->compound_order + 1;
+    header->compound_order = order_after; // Update order in header
+    return header;
+}
+
+// ============================================================================
+// SECTION 9: Per-CPU Page Cache
+// ============================================================================
+
+// Try to pop one page from a single per-CPU cache (order-0 lock-free path).
+STATIC_INLINE page_t *__pcpu_try_pop_order0(pcpu_cache_t *cache,
+                                             uint64 order) {
+    page_t *page = NULL;
+    push_off();
+    if (!LIST_IS_EMPTY(&cache->lru_head)) {
+        page = list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
+        if (page != NULL) {
+            page->buddy.state = BUDDY_STATE_INTERMEDIATE;
+            PCPU_CACHE_COUNT_DEC(cache);
+            __debug_verify_tail_structure(page, order,
+                                          "__pcpu_cache_get(order=0)");
+        }
+    }
+    pop_off();
+    return page;
+}
+
+// Try to pop one page from a single per-CPU cache (order>0 spinlock path).
+STATIC_INLINE page_t *__pcpu_try_pop(pcpu_cache_t *cache, uint64 order) {
+    page_t *page = NULL;
+    spin_lock(&cache->lock);
+    if (!LIST_IS_EMPTY(&cache->lru_head)) {
+        page = list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
+        if (page != NULL) {
+            page->buddy.state = BUDDY_STATE_INTERMEDIATE;
+            PCPU_CACHE_COUNT_DEC(cache);
+            __debug_verify_tail_structure(page, order,
+                                          "__pcpu_cache_get(order>0)");
+        }
+    }
+    spin_unlock(&cache->lock);
+    return page;
+}
+
+// Try to get a page from per-CPU cache
+// Returns NULL if cache is empty
+STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
+    if (order > PCPU_CACHE_MAX_ORDER) {
+        return NULL;
+    }
+
+    bool want_highmem = (flags & GFP_HIGHMEM) && __num_highmem_zones > 0;
+    uint64 page_flags = PAGE_FLAGS_FROM_GFP(flags);
+
+    int cpu_id = cpuid();
+    page_t *page = NULL;
+
+    if (want_highmem) {
+        // Try each highmem zone's cache
+        for (int z = 0; z < __num_highmem_zones && page == NULL; z++) {
+            pcpu_cache_t *cache =
+                &__highmem_zones[z].pcpu_caches[cpu_id][order];
+            page = (order == 0) ? __pcpu_try_pop_order0(cache, order)
+                                : __pcpu_try_pop(cache, order);
+        }
+    } else {
+        pcpu_cache_t *cache = &__pcpu_caches[cpu_id][order];
+        page = (order == 0) ? __pcpu_try_pop_order0(cache, order)
+                            : __pcpu_try_pop(cache, order);
+    }
+
+    if (page != NULL) {
+        // Reinitialize pages for user allocation.
+        // Use __page_reinit to preserve spinlocks - another thread may be
+        // trying to lock these pages in __lock_get_buddy_page.
+        if (__page_type_supports_tail(page_flags)) {
+            // For types that support tail pages, only reinit header.
+            // Tail pages already have PAGE_TYPE_TAIL and point to header.
+            __page_reinit(page, page->physical_address, 1, page_flags);
+        } else {
+            // For other types, reinit all pages in the group.
+            uint64 page_count = 1UL << order;
+            for (uint64 i = 0; i < page_count; i++) {
+                __page_reinit(&page[i], page[i].physical_address, 1,
+                              page_flags);
+            }
+        }
+    }
+
+    return page;
+}
+
+// Try to put a page into per-CPU cache
+// Returns 0 on success, -1 if cache is full
+STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
+    if (order > PCPU_CACHE_MAX_ORDER) {
+        return -1;
+    }
+
+    // Select cache based on page's zone (address-based, since flags get
+    // overwritten by buddy operations)
+    pcpu_cache_t *cache = __get_pcpu_cache_for_page(page, order);
+    uint32 cache_limit =
+        (order == 0) ? PCPU_HOT_PAGE_CACHE_SIZE : PCPU_CACHE_SIZE;
+    int ret = -1;
+
+    // Check if page already has valid tail structure before taking locks.
+    // This allows us to skip O(2^order) tail page updates during free.
+    // __page_has_valid_tail_structure checks page type and tail validity.
+    bool preserve_tails = __page_has_valid_tail_structure(page, order);
+
+    if (order == 0) {
+        // Lock-free for order 0 using interrupt disabling
+        push_off();
+        uint32 current_count = PCPU_CACHE_COUNT_LOAD(cache);
+        if (current_count < cache_limit) {
+            // Initialize page as buddy before caching
+            page_lock_acquire(page);
+            if (preserve_tails) {
+                __page_as_buddy_group_preserve_tails(page, order,
+                                                     BUDDY_STATE_CACHED);
+            } else {
+                __page_as_buddy_group(page, order, BUDDY_STATE_CACHED);
+            }
+            // Verify tail structure after setup
+            __debug_verify_tail_structure(page, order,
+                                          "__pcpu_cache_put(order=0)");
+            list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
+            PCPU_CACHE_COUNT_INC(cache);
+            ret = 0;
+            page_lock_release(page);
+        }
+        pop_off();
+    } else {
+        // Use spinlock for orders > 0 (for future cross-CPU stealing)
+        spin_lock(&cache->lock);
+        uint32 current_count = PCPU_CACHE_COUNT_LOAD(cache);
+        if (current_count < cache_limit) {
+            // Initialize page as buddy before caching
+            page_lock_acquire(page);
+            if (preserve_tails) {
+                // Tail pages already have valid structure, only update header
+                __page_as_buddy_group_preserve_tails(page, order,
+                                                     BUDDY_STATE_CACHED);
+            } else {
+                // Need to reinitialize all pages including tails
+                __page_as_buddy_group(page, order, BUDDY_STATE_CACHED);
+            }
+            // Verify tail structure after setup
+            __debug_verify_tail_structure(page, order,
+                                          "__pcpu_cache_put(order>0)");
+            list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
+            PCPU_CACHE_COUNT_INC(cache);
+            ret = 0;
+            page_lock_release(page);
+        }
+        spin_unlock(&cache->lock);
+    }
+
+    return ret;
+}
+
+// ============================================================================
+// SECTION 10: Buddy Allocation (Core Algorithm)
+// ============================================================================
+
+// Internal buddy allocation from a specific pool set
+STATIC page_t *__buddy_get_from_pools(buddy_pool_t *pools, uint64 order,
+                                      uint64 page_flags) {
+    buddy_pool_t *pool = NULL;
+    page_t *page = NULL;
+    page_t *buddy = NULL;
+    uint64 tmp_order = order;
+    uint64 found_order = 0; // Track which order we found a page at
+
+    // Need to search higher orders - lock only when taking out
+    // Try to find a bigger buddy page to split
+    for (tmp_order = order; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
+        __pools_lock(pools, tmp_order);
+        pool = &pools[tmp_order];
+        page = __buddy_pop_page(pool);
+        if (page != NULL) {
+            // Set state to INTERMEDIATE atomically with pop under pool lock
+            // This prevents race with __lock_get_buddy_page
+            page->buddy.state = BUDDY_STATE_INTERMEDIATE;
+            // Verify tail structure when popping from pool
+            __debug_verify_tail_structure(page, tmp_order,
+                                          "__buddy_get(pop from pool)");
+        }
+        __pools_unlock(pools, tmp_order); // Unlock after state is set
+
+        // break the for loop when finding a free buddy page
+        if (page != NULL) {
+            found_order = tmp_order; // Save which order we found the page at
+            break;
+        }
+    }
+
+    // if still not found available buddy pages after the for loop, then
+    // there's no buddy page that meets the requirement.
+    if (page == NULL) {
+        // All locks already released
+        return NULL;
+    }
+
+    // if found one, split it and return the header page from one of the
+    // splitted groups. Lock each order only when putting buddy back.
+    tmp_order = found_order;
+    while (tmp_order > order) {
+        buddy = __buddy_split(page);
+        if (buddy == NULL) {
+            // There's no way the splitting operation here would fail. If it
+            // happens, then something wrong happened.
+            panic("__buddy_get(): failed splitting buddy pages");
+        }
+
+        // put the later half back - lock only when putting in
+        // Use __page_split_commit_later_half to only update the new buddy's
+        // tail pages
+        tmp_order--;
+        pool = &pools[tmp_order];
+        __pools_lock(pools, tmp_order);
+        __page_split_commit_later_half(buddy, tmp_order);
+        // Verify tail structure after split
+        __debug_verify_tail_structure(buddy, tmp_order,
+                                      "__buddy_get(after split)");
+        __buddy_push_page(pool, buddy);
+        __pools_unlock(pools, tmp_order); // Unlock immediately after putting in
+    };
+
+    // Reinitialize pages for user allocation.
+    // Use __page_reinit to preserve spinlocks - another thread may be
+    // trying to lock these pages in __lock_get_buddy_page.
+    if (__page_type_supports_tail(page_flags)) {
+        // For types that support tail pages, only reinit header.
+        // Tail pages already have PAGE_TYPE_TAIL and point to header.
+        __page_reinit(page, page->physical_address, 1, page_flags);
+    } else {
+        // For other types, reinit all pages in the group.
+        uint64 page_count = 1UL << order;
+        for (uint64 i = 0; i < page_count; i++) {
+            __page_reinit(&page[i], page[i].physical_address, 1, page_flags);
+        }
+    }
+    return page;
+}
+
+STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
+    if (!__page_flags_validity(flags)) {
+        return NULL;
+    }
+    if (order > PAGE_BUDDY_MAX_ORDER) {
+        return NULL;
+    }
+
+    // Strip GFP flags to get page-level flags for storage
+    uint64 page_flags = PAGE_FLAGS_FROM_GFP(flags);
+    bool want_highmem = (flags & GFP_HIGHMEM) && __num_highmem_zones > 0;
+    page_t *page = NULL;
+
+    // Try per-CPU cache first for small orders
+    if (order <= PCPU_CACHE_MAX_ORDER) {
+        page = __pcpu_cache_get(order, flags);
+        if (page != NULL) {
+            return page; // Cache hit - page already initialized
+        }
+    }
+
+    if (want_highmem) {
+        // Try each highmem zone's pools, return on first success
+        for (int z = 0; z < __num_highmem_zones; z++) {
+            page = __buddy_get_from_pools(__highmem_zones[z].pools, order,
+                                          page_flags);
+            if (page != NULL) {
+                return page;
+            }
+        }
+    }
+
+    // Try lowmem pools
+    page = __buddy_get_from_pools(__buddy_pools, order, page_flags);
+    return page;
+}
+
+// ============================================================================
+// SECTION 10: Buddy Deallocation (Single Page)
+// ============================================================================
+
+// Common merge-and-insert logic for both __buddy_put and __page_free
+// Assumes page is already initialized as a buddy at start_order with MERGING
+// state. Uses the correct pool set based on the page's zone.
+STATIC void __buddy_merge_and_insert(page_t *page, uint64 start_order) {
+    // Determine which pool set this page belongs to based on its address
+    buddy_pool_t *pools = __get_pools_for_pa(page->physical_address);
+    buddy_pool_t *pool = NULL;
+    page_t *buddy = NULL;
+    uint64 tmp_order;
+
+    for (tmp_order = start_order; tmp_order <= PAGE_BUDDY_MAX_ORDER;
+         tmp_order++) {
+        pool = &pools[tmp_order];
+
+        // Lock pool to search for buddy
+        __pools_lock(pools, tmp_order);
+
+        buddy = __lock_get_buddy_page(page);
+        if (buddy != NULL) {
+            // Buddy found, detach it from pool
+            __buddy_detach_page(pool, buddy);
+            __pools_unlock(pools, tmp_order);
+
+            // Merge the buddies while still holding both page locks
+            // This prevents race conditions where another thread could observe
+            // inconsistent order values during the merge
+            page_t *merged = __buddy_merge(page, buddy);
+            if (merged == NULL) {
+                __unlock_two_pages(page, buddy);
+                panic("__buddy_merge_and_insert(): failed to merge buddies");
+            }
+
+            // Update later half's tail pages to point to merged header
+            // merged->compound_order is already set to tmp_order + 1 by
+            // __buddy_merge
+            __page_merge_commit_later_half(merged, merged->compound_order);
+            // Verify tail structure after merge
+            __debug_verify_tail_structure(
+                merged, merged->compound_order,
+                "__buddy_merge_and_insert(after merge)");
+
+            // Now unlock after the order has been updated
+            __unlock_two_pages(page, buddy);
+            page = merged;
+        } else {
+            // No buddy found, add page to pool and finish
+            page_lock_acquire(page);
+            __page_order_change_commit(page);
+            // Verify tail structure before pushing to pool
+            __debug_verify_tail_structure(
+                page, tmp_order, "__buddy_merge_and_insert(push to pool)");
+            __buddy_push_page(pool, page);
+            page_lock_release(page);
+            __pools_unlock(pools, tmp_order);
+            return;
+        }
+    }
+}
+
+// Put a page back to buddy system
+// Right now pages can only be put one by one
+STATIC int __buddy_put(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
+    if (!__page_is_freeable(page)) {
+        // cannot free a page that's not freeable
+        return -1;
+    }
+
+    // Try per-CPU cache first for order 0 pages
+    if (__pcpu_cache_put(page, 0) == 0) {
+        return 0; // Successfully cached
+    }
+
+    // Cache full or order > PCPU_CACHE_MAX_ORDER, go to buddy system
+    // For single page (order 0), no tail pages exist, so just init header.
+    // Tail pages are only relevant for compound allocations (order > 0).
+    page_lock_acquire(page);
+    __page_as_buddy_header(page, 0, BUDDY_STATE_INTERMEDIATE);
+    page_lock_release(page);
+
+    // Use common merge-and-insert logic starting from order 0
+    __buddy_merge_and_insert(page, 0);
+    return 0;
+}
+
+/**
+ * page_free_anon_batch - Free a batch of order-0 anonymous pages efficiently.
+ *
+ * Uses lock-free atomic refcount decrement to avoid per-page spinlock
+ * overhead.  If the atomic fetch-sub returns 1 (we were the last ref),
+ * the page is placed into the per-CPU cache or collected for buddy-merge.
+ * Interrupts are disabled once for the entire batch.
+ *
+ * Callers must have already cleared PTEs and flushed TLBs.
+ * @pages:  array of page_t pointers (order 0, PAGE_TYPE_ANON)
+ * @count:  number of entries
+ */
+void page_free_anon_batch(page_t **pages, int count)
+{
+    page_t *overflow[256];
+    int noverflow = 0;
+
+    push_off();
+    for (int i = 0; i < count; i++) {
+        page_t *pg = pages[i];
+        if (pg == NULL)
+            continue;
+
+        /* Lock-free decrement: exactly one thread sees old==1. */
+        int old = __atomic_fetch_sub(&pg->ref_count, 1, __ATOMIC_ACQ_REL);
+        if (old <= 0) {
+            /* Underflow — undo (should not happen). */
+            __atomic_fetch_add(&pg->ref_count, 1, __ATOMIC_RELAXED);
+            continue;
+        }
+        if (old > 1) {
+            /* Other references remain — done with this page. */
+            continue;
+        }
+        /* old == 1: we freed the last ref.  Page is exclusively ours. */
+        pcpu_cache_t *cache = __get_pcpu_cache_for_page(pg, 0);
+        uint32 cur = PCPU_CACHE_COUNT_LOAD(cache);
+        if (cur < PCPU_HOT_PAGE_CACHE_SIZE) {
+            __page_as_buddy_header(pg, 0, BUDDY_STATE_CACHED);
+            list_entry_init(&pg->buddy.lru_entry);
+            list_node_push_back(&cache->lru_head, pg, buddy.lru_entry);
+            PCPU_CACHE_COUNT_INC(cache);
+        } else {
+            /* Per-CPU cache full — defer to buddy merge. */
+            __page_as_buddy_header(pg, 0, BUDDY_STATE_INTERMEDIATE);
+            if (noverflow < 256)
+                overflow[noverflow++] = pg;
+        }
+    }
+    pop_off();
+
+    /* Phase 2: merge overflow pages into buddy system (needs locks). */
+    for (int i = 0; i < noverflow; i++)
+        __buddy_merge_and_insert(overflow[i], 0);
+}
+
+// ============================================================================
+// SECTION 11: Buddy System Initialization
+// ============================================================================
+
+static void __page_buddy_reserve_range(uint64 pa_start, uint64 pa_end,
+                                       uint64 region_start, uint64 region_end) {
+    uint64 r_start = max(PGROUNDDOWN(region_start), pa_start);
+    // Don't need round up here since we are marking reserved pages
+    uint64 r_end = min(PGROUNDUP(region_end), pa_end);
+    if (r_start >= r_end) {
+        printf("reserved mem out of range: 0x%lx to 0x%lx\n", region_start,
+               region_end);
+        return;
+    }
+    printf("reserving pages from 0x%lx to 0x%lx\n", r_start, r_end);
+    for (uint64 base = r_start; base < r_end; base += PAGE_SIZE) {
+        page_t *page = __pa_to_page(base);
+        assert(page != NULL, "__page_buddy_reserve_range(): get NULL page");
+        page->flags |= PAGE_FLAG_LOCKED;
+    }
+}
+
+// Check if a physical address falls within any reserved region from FDT
+static void __mark_reserved_page(uint64 pa_start, uint64 pa_end) {
+    // Check ramdisk region
+    if (platform.has_ramdisk && platform.ramdisk_base != 0) {
+        // __page_buddy_reserve_range will do the rounding
+        uint64 rd_start = platform.ramdisk_base;
+        uint64 rd_end = platform.ramdisk_base + platform.ramdisk_size;
+        __page_buddy_reserve_range(pa_start, pa_end, rd_start, rd_end);
+    }
+
+    // Check reserved memory regions from FDT
+    for (int i = 0; i < platform.reserved_count; i++) {
+        uint64 res_start = platform.reserved[i].base;
+        uint64 res_end = platform.reserved[i].base + platform.reserved[i].size;
+        __page_buddy_reserve_range(pa_start, pa_end, res_start, res_end);
+    }
+}
+
+// Find the next available (non-reserved) page starting from start_pa
+// Will also set the the reserved pages' flags to LOCKED
+static uint64 __page_init_find_next_avail(uint64 start_pa, uint64 end_pa) {
+    uint64 pa = start_pa;
+    while (pa < end_pa) {
+        page_t *page = __pa_to_page(pa);
+        assert(page != NULL, "__page_init_find_next_avail(): get NULL page");
+        if (!(page->flags & PAGE_FLAG_LOCKED)) {
+            break;
+        }
+        pa += PAGE_SIZE;
+    }
+    return pa;
+}
+
+static uint64 __page_init_find_current_end(uint64 start_pa, uint64 end_pa) {
+    uint64 pa = start_pa;
+    while (pa < end_pa) {
+        page_t *page = __pa_to_page(pa);
+        assert(page != NULL, "__page_init_find_current_end(): get NULL page");
+        if (page->flags & PAGE_FLAG_LOCKED) {
+            break;
+        }
+        pa += PAGE_SIZE;
+    }
+    return pa;
+}
+
+static void __page_buddy_init_as_order(uint64 pa_start, int order,
+                                       buddy_pool_t *pools) {
+    page_t *buddy_head = __pa_to_page(pa_start);
+    assert(buddy_head != NULL, "__page_buddy_init_as_order(): get NULL page");
+    __page_as_buddy_group_init(buddy_head, order, BUDDY_STATE_FREE);
+    // Verify tail structure after init
+    __debug_verify_tail_structure(buddy_head, order,
+                                  "__page_buddy_init_as_order");
+
+    buddy_pool_t *pool = &pools[order];
+    __buddy_push_page(pool, buddy_head);
+}
+
+static void __page_buddy_init_range(uint64 pa_start, uint64 pa_end,
+                                    buddy_pool_t *pools) {
+    if (pa_start >= pa_end) {
+        return;
+    }
+    size_t remain_size = pa_end - pa_start;
+    int order = 0;
+    size_t block_size = PAGE_SIZE << order;
+    uint64 pa = pa_start;
+
+    // Try to initialize smaller heading blocks
+    while (remain_size >= block_size && order < PAGE_BUDDY_MAX_ORDER) {
+        if (pa & block_size) {
+            // Found a small block
+            __page_buddy_init_as_order(pa, order, pools);
+            remain_size -= block_size;
+            pa += block_size;
+        }
+        order++;
+        block_size = PAGE_SIZE << order;
+    }
+
+    // When there's blocks of PAGE_BUDDY_MAX_ORDER, the following condition
+    // will be true.
+    while (remain_size >= block_size) {
+        __page_buddy_init_as_order(pa, order, pools);
+        remain_size -= block_size;
+        pa += block_size;
+    }
+
+    // Now try to initialize smaller tailing blocks
+    while (remain_size > 0 && order >= 0) {
+        if (remain_size >= block_size) {
+            // Found a small block
+            __page_buddy_init_as_order(pa, order, pools);
+            remain_size -= block_size;
+            pa += block_size;
+        }
+        order--;
+        if (order >= 0)
+            block_size = PAGE_SIZE << order;
+    }
+}
+
+// Check if a physical address falls within any FDT memory region
+__attribute__((unused))
+static bool __pa_in_any_mem_region(uint64 pa) {
+    for (int i = 0; i < platform.mem_count; i++) {
+        uint64 base = platform.mem[i].base;
+        uint64 end = base + platform.mem[i].size;
+        if (pa >= base && pa < end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Initialize a single memory region's buddy pages
+// Handles gap detection and correct pool selection
+static void __page_buddy_init_region(uint64 region_start, uint64 region_end,
+                                     buddy_pool_t *pools, const char *label) {
+    // Mark reserved pages in this region
+    __mark_reserved_page(region_start, region_end);
+
+    uint64 base = __page_init_find_next_avail(region_start, region_end);
+    uint64 curr_end = __page_init_find_current_end(base, region_end);
+
+    while (base < region_end) {
+        __page_buddy_init_range(base, curr_end, pools);
+        printf("%s buddy init range: 0x%lx - 0x%lx\n", label, base, curr_end);
+        base = __page_init_find_next_avail(curr_end, region_end);
+        curr_end = __page_init_find_current_end(base, region_end);
+    }
+}
+
+// Init buddy system and add the given range of pages into it
+int page_buddy_init(void) {
+    size_t page_arr_size = sizeof(page_t) * TOTALPAGES;
+    __pages = (page_t *)early_alloc_align(page_arr_size, PGSIZE);
+    // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after early_alloc_align\n");
+    assert(__pages != NULL, "page_buddy_init(): failed to allocate page array");
+    __managed_start = PGROUNDUP(VA2PA(early_alloc_end_ptr()));
+    __managed_end = PHYSTOP;
+    // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after managed range set\n");
+    printf("page_buddy_init(): page array at 0x%lx, size 0x%lx\n",
+           (uint64)__pages, page_arr_size);
+    printf("__managed_start: 0x%lx, __managed_end: 0x%lx\n", __managed_start,
+           __managed_end);
+    assert(KERNBASE < __managed_start,
+           "page_buddy_init(): KERNBASE: 0x%lx not less than pa_start: 0x%lx",
+           KERNBASE, __managed_start);
+    assert(__managed_end <= PHYSTOP,
+           "page_buddy_init(): managed_end: 0x%lx higher than PHYSTOP: 0x%lx",
+           __managed_end, PHYSTOP);
+    assert(__managed_start < __managed_end,
+           "page_buddy_init(): managed_start: 0x%lx not less than managed_end: "
+           "0x%lx",
+           __managed_start, __managed_end);
+
+    // Initialize kernel text/data pages as locked
+    // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: before lower lock init\n");
+    assert(__init_range_flags(KERNBASE, __managed_start, PAGE_FLAG_LOCKED) == 0,
+           "page_buddy_init(): lower locked memory: 0x%lx to 0x%lx", KERNBASE,
+           __managed_start);
+    // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after lower lock init\n");
+
+    // Initialize pages for each memory region and gaps between them
+    // First pass: mark all pages. Gaps between regions are LOCKED.
+    uint64 prev_region_end = __managed_start;
+
+    for (int i = 0; i < platform.mem_count; i++) {
+        uint64 region_start = platform.mem[i].base;
+        uint64 region_end = region_start + platform.mem[i].size;
+
+        // For the first region, start from __managed_start (after kernel)
+        if (i == 0) {
+            region_start = __managed_start;
+        }
+
+        // Clamp to managed range
+        if (region_start < __managed_start) {
+            region_start = __managed_start;
+        }
+        if (region_end > __managed_end) {
+            region_end = __managed_end;
+        }
+        if (region_start >= region_end) {
+            continue;
+        }
+
+        // Lock the gap between previous region and this one
+        if (prev_region_end < region_start) {
+            printf("page_buddy_init(): locking gap 0x%lx to 0x%lx\n",
+                   prev_region_end, region_start);
+            assert(
+                __init_range_flags(prev_region_end, region_start,
+                                   PAGE_FLAG_LOCKED) == 0,
+                "page_buddy_init(): gap locked memory: 0x%lx to 0x%lx",
+                prev_region_end, region_start);
+        }
+
+        // Initialize this region's pages
+        bool is_highmem = (i > 0);
+        uint64 init_flags = is_highmem ? PAGE_FLAG_HIGHMEM : 0;
+        assert(__init_range_flags(region_start, region_end, init_flags) == 0,
+               "page_buddy_init(): region %d range: 0x%lx to 0x%lx", i,
+               region_start, region_end);
+
+        prev_region_end = region_end;
+    }
+
+    // Lock any remaining space after the last region
+    if (prev_region_end < __managed_end) {
+        assert(__init_range_flags(prev_region_end, __managed_end,
+                                  PAGE_FLAG_LOCKED) == 0,
+               "page_buddy_init(): trailing locked memory: 0x%lx to 0x%lx",
+               prev_region_end, __managed_end);
+    }
+    if (__managed_end < PHYSTOP) {
+        assert(__init_range_flags(__managed_end, PHYSTOP, PAGE_FLAG_LOCKED) ==
+                   0,
+               "page_buddy_init(): higher locked memory: 0x%lx to 0x%lx",
+               __managed_end, PHYSTOP);
+    }
+
+    // Register highmem zones before initializing pools.
+    // Each non-first memory region becomes a separate highmem zone.
+    __num_highmem_zones = 0;
+    for (int i = 1; i < platform.mem_count; i++) {
+        uint64 region_start = platform.mem[i].base;
+        uint64 region_end = region_start + platform.mem[i].size;
+        if (region_start < __managed_start) {
+            region_start = __managed_start;
+        }
+        if (region_end > __managed_end) {
+            region_end = __managed_end;
+        }
+        if (region_start >= region_end) {
+            continue;
+        }
+        if (__num_highmem_zones >= MAX_HIGHMEM_ZONES) {
+            panic("page_buddy_init: too many highmem zones");
+        }
+        __highmem_zones[__num_highmem_zones].base = region_start;
+        __highmem_zones[__num_highmem_zones].end = region_end;
+        __num_highmem_zones++;
+    }
+
+    __buddy_pool_init();
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after buddy_pool_init\n");
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: before second pass\n");
+
+    // Second pass: initialize buddy pools for each region
+    for (int i = 0; i < platform.mem_count; i++) {
+        uint64 region_start = platform.mem[i].base;
+        uint64 region_end = region_start + platform.mem[i].size;
+
+        if (i == 0) {
+            region_start = __managed_start;
+        }
+        if (region_start < __managed_start) {
+            region_start = __managed_start;
+        }
+        if (region_end > __managed_end) {
+            region_end = __managed_end;
+        }
+        if (region_start >= region_end) {
+            continue;
+        }
+
+        buddy_pool_t *pools;
+        const char *label;
+        if (i == 0) {
+            pools = __buddy_pools;
+            label = "lowmem";
+        } else {
+            highmem_zone_t *zone = __pa_to_highmem_zone(region_start);
+            assert(zone != NULL,
+                   "page_buddy_init: highmem zone not found for region %d", i);
+            pools = zone->pools;
+            label = "highmem";
+        }
+
+        printf("page_buddy_init(): initializing %s region [%d] "
+               "0x%lx - 0x%lx (%ld MB)\n",
+               label, i, region_start, region_end,
+               (region_end - region_start) / (1024 * 1024));
+
+        X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: init region\n");
+
+        __page_buddy_init_region(region_start, region_end, pools, label);
+        X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: region done\n");
+    }
+
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after second pass\n");
+
+#if !defined(HOST_TEST) && !defined(__x86_64__)
+    print_buddy_system_stat(1);
+#endif
+
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: done\n");
+
+    return 0;
+}
+
+// ============================================================================
+// SECTION 12: Reference Counting (Internal)
+// ============================================================================
+
+STATIC_INLINE int __page_ref_inc_unlocked(page_t *page) {
+    assert(spin_holding(&page->lock),
+           "__page_ref_inc_unlocked: page lock not held");
+    /*
+     * Use atomic fetch-add because page_ref_dec_unlocked() modifies
+     * ref_count via atomic CAS without holding the page lock.
+     */
+    int prev = __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
+    if (prev == 0) {
+        // page with 0 reference should be put back to the buddy system
+        return -1;
+    }
+    prev = __atomic_fetch_add(&page->ref_count, 1, __ATOMIC_SEQ_CST);
+    return prev + 1;
+}
+
+STATIC_INLINE int __page_ref_dec_unlocked(page_t *page) {
+    assert(spin_holding(&page->lock),
+           "__page_ref_dec_unlocked: page lock not held");
+    /*
+     * Use atomic fetch-sub because page_ref_dec_unlocked() modifies
+     * ref_count via atomic CAS without holding the page lock.
+     */
+    int prev = __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
+    if (prev > 0) {
+        prev = __atomic_fetch_sub(&page->ref_count, 1, __ATOMIC_SEQ_CST);
+        return prev - 1;
+    }
+    return -1;
+}
+
+// ============================================================================
+// SECTION 13: Public API - Allocation & Deallocation
+// ============================================================================
+
+page_t *__page_alloc(uint64 order, uint64 flags) {
+    if (order > PAGE_BUDDY_MAX_ORDER) {
+        return NULL;
+    }
+    page_t *ret = __buddy_get(order, flags);
+    __page_sanitizer_check("page_alloc", ret, order, flags);
+    if (ret != NULL) {
+        ret->compound_order = (uint8)order;
+
+        // Watermark check: if free pages dropped below LOW, wake kswapd
+        if (!(flags & (GFP_NORECLAIM | GFP_NOWATERMARK))) {
+            if (!mm_watermark_ok(WMARK_LOW)) {
+                kswapd_wake();
+            }
+        }
+        return ret;
+    }
+
+    // Allocation failed — attempt reclaim if allowed
+    if (!(flags & (GFP_NORECLAIM | GFP_NOWATERMARK))) {
+        mm_try_reclaim(order, flags);
+        // Retry after reclaim
+        ret = __buddy_get(order, flags);
+        if (ret != NULL) {
+            ret->compound_order = (uint8)order;
+        }
+    }
+    return ret;
+}
+
+// The base address of the page should be aligned to order
+// Otherwise panic
+void __page_free(page_t *page, uint64 order) {
+    __page_sanitizer_check("page_free", page, order, 0);
+    uint64 count = 1UL << order;
+
+    if (page == NULL) {
+        return;
+    }
+
+    assert(order <= PAGE_BUDDY_MAX_ORDER, "__page_free(): order too large");
+    assert(!(page->physical_address & PAGE_BUDDY_OFFSET_MASK(order)),
+           "free pages not aligned to order");
+
+    // The passed order must match the page's compound_order.
+    // Mismatches would silently leak tail pages (order too small) or
+    // corrupt adjacent pages (order too large).
+    assert(page->compound_order == order,
+           "__page_free(): order mismatch (type=%ld compound_order=%d, "
+           "passed=%ld)",
+           PAGE_FLAG_GET_TYPE(page->flags), page->compound_order, order);
+    // Should never try to free a TAIL page directly - only headers
+    assert(!PAGE_IS_TYPE(page, PAGE_TYPE_TAIL),
+           "__page_free(): trying to free TAIL page directly at %p", page);
+
+    // Check that all pages in the block are freeable
+    for (uint64 i = 0; i < count; i++) {
+        if (!__page_is_freeable(&page[i])) {
+            panic("__page_free(): trying to free non-freeable page");
+        }
+    }
+
+    // Try per-CPU cache first for cacheable orders
+    if (order <= PCPU_CACHE_MAX_ORDER) {
+        if (__pcpu_cache_put(page, order) == 0) {
+            return; // Successfully cached
+        }
+    }
+
+    // Cache full or order > PCPU_CACHE_MAX_ORDER, go to buddy system
+    // Check if page has valid tail structure before entering buddy system.
+    // If not, we need to initialize all pages in the group.
+    bool has_valid_tails = __page_has_valid_tail_structure(page, order);
+
+    page_lock_acquire(page);
+    if (has_valid_tails) {
+        // Tails are already valid, only update header
+        __page_as_buddy_header(page, order, BUDDY_STATE_INTERMEDIATE);
+    } else {
+        // Need to set up the full buddy group including tails
+        __page_as_buddy_group(page, order, BUDDY_STATE_INTERMEDIATE);
+    }
+    page_lock_release(page);
+
+    // Use common merge-and-insert logic starting from the given order
+    __buddy_merge_and_insert(page, order);
+}
+
+// Helper function for __page_alloc. Convert the page struct to the base
+// address of the page
+void *page_alloc(uint64 order, uint64 flags) {
+    void *pa;
+    page_t *page = __page_alloc(order, flags);
+    if (page == NULL) {
+        return NULL;
+    }
+
+    pa = (void *)__page_to_pa(page);
+
+    if (pa) {
+        memset((char *)pa, 5, PGSIZE << order); // fill with junk
+    } else
+        panic("page_alloc");
+    return pa;
+}
+
+// Helper function for __page_free. Convert the base address of the page to be
+// free to page struct
+void page_free(void *ptr, uint64 order) {
+    page_t *page = __pa_to_page((uint64)ptr);
+    __page_free(page, order);
+}
+
+// ============================================================================
+// SECTION 14: Public API - Page Locking
+// ============================================================================
+
+void page_lock_acquire(page_t *page) {
+    if (page == NULL) {
+        return;
+    }
+    spin_lock(&page->lock);
+}
+
+void page_lock_release(page_t *page) {
+    if (page == NULL) {
+        return;
+    }
+    spin_unlock(&page->lock);
+}
+
+void page_lock_assert_holding(page_t *page) {
+    if (page == NULL) {
+        return;
+    }
+    assert(spin_holding(&page->lock), "page_lock_assert_holding failed");
+}
+
+void page_lock_assert_unholding(page_t *page) {
+    if (page == NULL) {
+        return;
+    }
+    assert(!spin_holding(&page->lock), "page_lock_assert_unholding failed");
+}
+
+// ============================================================================
+// SECTION 15: Public API - Reference Counting
+// ============================================================================
+
+int __page_ref_inc(page_t *page) {
+    int ret = 0;
+    if (page == NULL) {
+        return -1;
+    }
+    page_lock_acquire(page);
+    {
+        ret = __page_ref_inc_unlocked(page);
+    }
+    page_lock_release(page);
+    return ret;
+}
+
+int page_ref_inc_unlocked(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
+    return __page_ref_inc_unlocked(page);
+}
+
+/**
+ * __page_ref_add - increment refcount by @n under a single lock hold.
+ *
+ * Equivalent to calling __page_ref_inc() @n times but with only one
+ * spinlock acquire/release pair, saving 2*(n-1) atomic operations.
+ */
+int __page_ref_add(page_t *page, int n) {
+    if (page == NULL || n <= 0)
+        return -1;
+    page_lock_acquire(page);
+    int prev = __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
+    if (prev == 0) {
+        page_lock_release(page);
+        return -1;
+    }
+    int ret = __atomic_add_fetch(&page->ref_count, n, __ATOMIC_SEQ_CST);
+    page_lock_release(page);
+    return ret;
+}
+
+/**
+ * __page_ref_sub - decrement refcount by @n under a single lock hold.
+ *
+ * Caller must ensure refcount stays > 0 after subtraction (i.e. this is
+ * only for dropping extra PTE references while the page remains live).
+ */
+int __page_ref_sub(page_t *page, int n) {
+    if (page == NULL || n <= 0)
+        return -1;
+    page_lock_acquire(page);
+    int cur = __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
+    if (cur < n) {
+        page_lock_release(page);
+        return -1;
+    }
+    int ret = __atomic_sub_fetch(&page->ref_count, n, __ATOMIC_SEQ_CST);
+    page_lock_release(page);
+    return ret;
+}
+
+int page_ref_dec_unlocked(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
+    // Atomically decrement only when ref_count > 1.  The 2→1 transition
+    // (dropping the last caller reference while the cache still holds one)
+    // is the lowest this path may go.  The 1→0 transition is reserved for
+    // __page_ref_dec which runs under the page lock.
+    int old;
+    if (!atomic_oper_cond_hook(&page->ref_count, (VAL - 1), (VAL > 1),
+                               old = VAL, /* success: capture pre-dec value */
+                               /* no failure hook */)) {
+        return -1;
+    }
+    return old - 1;
+}
+
+int __page_ref_dec(page_t *page) {
+    int original_ref_count = -1;
+    int ret = 0;
+    __page_sanitizer_check("__page_ref_dec", page, 0, 0);
+    if (page == NULL) {
+        return -1;
+    }
+    // Tail pages must never be ref-counted directly; callers should
+    // resolve to the head page (via page_folio) or use page_ref_dec()
+    // which resolves automatically.
+    assert(!PAGE_IS_TYPE(page, PAGE_TYPE_TAIL),
+           "__page_ref_dec(): called on TAIL page %p (head=%p)",
+           page, page->tail.head_page);
+    page_lock_acquire(page);
+    {
+        /*
+         * Use atomic fetch-sub so the read and decrement are a single
+         * indivisible operation.  page_ref_dec_unlocked() modifies
+         * ref_count via atomic CAS *without* holding the page lock, so
+         * a plain read followed by a plain decrement can race: another
+         * CPU's CAS can land between the two, making the observed
+         * difference != 1.  __atomic_fetch_sub returns the value
+         * *before* the subtraction, so original_ref_count is exact.
+         */
+        original_ref_count =
+            __atomic_fetch_sub(&page->ref_count, 1, __ATOMIC_SEQ_CST);
+        if (original_ref_count < 1) {
+            /* Was already 0 (or negative); undo the subtract. */
+            __atomic_fetch_add(&page->ref_count, 1, __ATOMIC_SEQ_CST);
+            page_lock_release(page);
+            return 0;
+        }
+        ret = original_ref_count - 1;   /* new ref_count after our dec */
+    }
+    page_lock_release(page);
+    if (ret == 0) {
+        uint8 order = page->compound_order;
+        if (PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE) && page->pcache.pcache_node) {
+            // Free the page cache node
+            slab_free(page->pcache.pcache_node);
+            page->pcache.pcache_node = NULL;
+        }
+        __page_sanitizer_check("page_free", page, 0, 0);
+        if (order > 0) {
+            // Compound page: free via __page_free which handles all orders
+            __page_free(page, order);
+        } else {
+            if (__buddy_put(page) != 0) {
+                panic("page_ref_dec");
+            }
+        }
+    }
+    return ret;
+}
+
+// Return the reference count of a page
+// Return -1 if failed
+int page_refcnt(void *physical) {
+    page_t *page = __pa_to_page((uint64)physical);
+    if (page != NULL && PAGE_IS_TYPE(page, PAGE_TYPE_TAIL) &&
+        page->tail.head_page != NULL)
+        page = page->tail.head_page;
+    return page_ref_count(page);
+}
+
+// Helper function to __page_ref_inc.
+// Resolves tail pages to their head page so that ref-counting always
+// operates on the compound head.
+int page_ref_inc(void *ptr) {
+    page_t *page = __pa_to_page((uint64)ptr);
+    if (page != NULL && PAGE_IS_TYPE(page, PAGE_TYPE_TAIL) &&
+        page->tail.head_page != NULL)
+        page = page->tail.head_page;
+    return __page_ref_inc(page);
+}
+
+// Helper function to __page_ref_dec.
+// Resolves tail pages to their head page so that ref-counting always
+// operates on the compound head, preventing silent leaks.
+int page_ref_dec(void *ptr) {
+    page_t *page = __pa_to_page((uint64)ptr);
+    if (page != NULL && PAGE_IS_TYPE(page, PAGE_TYPE_TAIL) &&
+        page->tail.head_page != NULL)
+        page = page->tail.head_page;
+    return __page_ref_dec(page);
+}
+
+// ============================================================================
+// SECTION 16: Public API - Address Translation
+// ============================================================================
+
+// Get a page struct from its physical base address
+page_t *__pa_to_page(uint64 physical) {
+    if (__page_base_validity(physical)) {
+        return &__pages[(physical - KERNBASE) >> PAGE_SHIFT];
+    }
+    return NULL;
+}
+
+// Get the physical address of a page
+uint64 __page_to_pa(page_t *page) {
+    if (page == NULL) {
+        return 0;
+    }
+    return page->physical_address;
+}
+
+// Get the reference count of a page
+int page_ref_count(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
+    return __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
+}
+
+uint64 managed_page_base() { return __managed_start; }
+
+// ============================================================================
+// SECTION 17: Statistics & Debugging
+// ============================================================================
+
+// Record the number of buddies in each order
+// Will return an array of order 0 to size - 1
+void page_buddy_stat(uint64 *ret_arr, bool *empty_arr, size_t size) {
+    if (ret_arr == NULL || size < PAGE_BUDDY_MAX_ORDER + 1) {
+        return;
+    }
+    // Lock all orders to get a consistent snapshot
+    __buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER && i < size; i++) {
+        ret_arr[i] = __buddy_pools[i].count;
+        if (empty_arr != NULL) {
+            empty_arr[i] = LIST_IS_EMPTY(&__buddy_pools[i].lru_head);
+        }
+    }
+    __buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
+}
+
+// Helper function to print size in human-readable format
+STATIC void __print_size(uint64 bytes) {
+    if (bytes >= (1UL << 30)) {
+        // GB
+        uint64 gb = bytes >> 30;
+        uint64 mb = (bytes & ((1UL << 30) - 1)) >> 20;
+        printf("%ld.%ldG", gb, (mb * 10) / 1024);
+    } else if (bytes >= (1UL << 20)) {
+        // MB
+        uint64 mb = bytes >> 20;
+        uint64 kb = (bytes & ((1UL << 20) - 1)) >> 10;
+        printf("%ld.%ldM", mb, (kb * 10) / 1024);
+    } else if (bytes >= (1UL << 10)) {
+        // KB
+        uint64 kb = bytes >> 10;
+        printf("%ldK", kb);
+    } else {
+        // Bytes
+        printf("%ldB", bytes);
+    }
+}
+
+static void __buddy_stat_totals(uint64 *total_free_pages,
+                                uint64 *total_cached_pages, uint64 *ret_arr,
+                                bool *empty_arr) {
+    *total_free_pages = 0;
+    *total_cached_pages = 0;
+
+    // Lowmem pools
+    page_buddy_stat(ret_arr, empty_arr, PAGE_BUDDY_MAX_ORDER + 1);
+
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+        uint64 order_pages = (1UL << i) * ret_arr[i];
+        *total_free_pages += order_pages;
+
+        // Add per-CPU cache stats for cacheable orders
+        if (i <= PCPU_CACHE_MAX_ORDER) {
+            uint64 cache_total = 0;
+            for (int cpu = 0; cpu < NCPU; cpu++) {
+                // Use atomic load for lock-free read
+                cache_total += PCPU_CACHE_COUNT_LOAD(&__pcpu_caches[cpu][i]);
+            }
+
+            if (cache_total > 0) {
+                uint64 cached_pages = (1UL << i) * cache_total;
+                *total_cached_pages += cached_pages;
+            }
+        }
+    }
+
+    // Add highmem zone stats
+    for (int z = 0; z < __num_highmem_zones; z++) {
+        highmem_zone_t *zone = &__highmem_zones[z];
+
+        __pools_lock_range(zone->pools, 0, PAGE_BUDDY_MAX_ORDER);
+        for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+            *total_free_pages += (1UL << i) * zone->pools[i].count;
+        }
+        __pools_unlock_range(zone->pools, 0, PAGE_BUDDY_MAX_ORDER);
+
+        for (int i = 0; i <= PCPU_CACHE_MAX_ORDER; i++) {
+            for (int cpu = 0; cpu < NCPU; cpu++) {
+                uint32 cnt =
+                    PCPU_CACHE_COUNT_LOAD(&zone->pcpu_caches[cpu][i]);
+                if (cnt > 0) {
+                    *total_cached_pages += (1UL << i) * cnt;
+                }
+            }
+        }
+    }
+}
+
+void print_buddy_system_stat(int detailed) {
+    uint64 total_free_pages = 0;
+    uint64 total_cached_pages = 0;
+    uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = {0};
+    bool empty_arr[PAGE_BUDDY_MAX_ORDER + 1] = {false};
+
+    __buddy_stat_totals(&total_free_pages, &total_cached_pages, ret_arr,
+                        empty_arr);
+
+    if (detailed <= 0) {
+        printf("Buddy: %ld free + %ld cached = %ld pages (", total_free_pages,
+               total_cached_pages, total_free_pages + total_cached_pages);
+        __print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
+        printf(")\n");
+        return;
+    }
+
+    if (detailed) {
+        printf("Buddy System Statistics:\n");
+        printf("========================\n");
+    }
+
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+        uint64 order_pages = (1UL << i) * ret_arr[i];
+        uint64 order_bytes = order_pages * PAGE_SIZE;
+
+        if (detailed) {
+            printf("order(%d): %ld blocks (", i, ret_arr[i]);
+            __print_size(order_bytes);
+            printf(")");
+        }
+
+        if (i <= PCPU_CACHE_MAX_ORDER) {
+            uint64 cache_total = 0;
+            for (int cpu = 0; cpu < NCPU; cpu++) {
+                cache_total += PCPU_CACHE_COUNT_LOAD(&__pcpu_caches[cpu][i]);
+            }
+
+            if (cache_total > 0) {
+                uint64 cached_pages = (1UL << i) * cache_total;
+                uint64 cached_bytes = cached_pages * PAGE_SIZE;
+
+                if (detailed) {
+                    printf(" + %ld cached (", cache_total);
+                    __print_size(cached_bytes);
+                    printf(")");
+                }
+            }
+        }
+
+        if (detailed) {
+            printf("\n");
+        }
+    }
+
+    if (detailed) {
+        printf("------------------------\n");
+    }
+    printf("Buddy: %ld free + %ld cached = %ld pages (", total_free_pages,
+           total_cached_pages, total_free_pages + total_cached_pages);
+    __print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
+    printf(")\n");
+
+    // Print high memory stats for each zone
+    for (int z = 0; z < __num_highmem_zones; z++) {
+        highmem_zone_t *zone = &__highmem_zones[z];
+        uint64 hm_free = 0, hm_cached = 0;
+        uint64 hm_arr[PAGE_BUDDY_MAX_ORDER + 1] = {0};
+
+        __pools_lock_range(zone->pools, 0, PAGE_BUDDY_MAX_ORDER);
+        for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+            hm_arr[i] = zone->pools[i].count;
+        }
+        __pools_unlock_range(zone->pools, 0, PAGE_BUDDY_MAX_ORDER);
+
+        for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+            hm_free += (1UL << i) * hm_arr[i];
+            if (i <= PCPU_CACHE_MAX_ORDER) {
+                for (int cpu = 0; cpu < NCPU; cpu++) {
+                    hm_cached += (1UL << i) *
+                        PCPU_CACHE_COUNT_LOAD(
+                            &zone->pcpu_caches[cpu][i]);
+                }
+            }
+        }
+
+        if (detailed) {
+            printf("High Memory Zone %d [0x%lx - 0x%lx]:\n",
+                   z, zone->base, zone->end);
+            for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+                uint64 order_pages = (1UL << i) * hm_arr[i];
+                printf("  order(%d): %ld blocks (", i, hm_arr[i]);
+                __print_size(order_pages * PAGE_SIZE);
+                printf(")\n");
+            }
+            printf("  ------------------------\n");
+        }
+        printf("Highmem[%d]: %ld free + %ld cached = %ld pages (",
+               z, hm_free, hm_cached, hm_free + hm_cached);
+        __print_size((hm_free + hm_cached) * PAGE_SIZE);
+        printf(")\n");
+    }
+}
+
+void __check_page_pointer_in_range(void *ptr) {
+    assert(ptr != NULL, "__check_page_pointer_in_range: NULL pointer");
+    assert(ptr > (void *)__pages && ptr < (void *)&__pages[TOTALPAGES],
+           "__check_page_pointer_in_range: page pointer out of range");
+}
+
+// Helper function to check the integrity of the buddy system
+void check_buddy_system_integrity(void) {
+    uint64 total_free_pages = 0;
+    // Lock all orders to check integrity consistently
+    __buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+        int count = __buddy_pools[i].count;
+        bool empty = LIST_IS_EMPTY(&__buddy_pools[i].lru_head);
+        page_t *pos = NULL;
+        page_t *tmp = NULL;
+        assert(count >= 0, "buddy pool count is negative");
+        assert(empty || count > 0, "buddy pool is not empty but count is zero");
+        assert(!empty || count == 0,
+               "buddy pool is empty but count is not zero");
+        total_free_pages += (1UL << i) * count;
+        if (!empty) {
+            __check_page_pointer_in_range(__buddy_pools[i].lru_head.prev);
+            __check_page_pointer_in_range(__buddy_pools[i].lru_head.next);
+            printf("prev page: %p, next page: %p\n",
+                   (__buddy_pools[i].lru_head.prev),
+                   (__buddy_pools[i].lru_head.next));
+        }
+
+        list_foreach_node_safe(&__buddy_pools[i].lru_head, pos, tmp,
+                               buddy.lru_entry) {
+            // check if the page is a valid buddy page
+            assert(PAGE_IS_BUDDY_GROUP_HEAD(pos),
+                   "buddy page is not a group head");
+            assert(pos->compound_order == i, "buddy page order mismatch");
+            __check_page_pointer_in_range(pos);
+            assert(__page_to_pa(pos) == pos->physical_address,
+                   "buddy page physical address mismatch");
+            count--;
+            printf("count = %d, buddy page: %p, order: %d, physical: 0x%lx\n",
+                   count, pos, pos->compound_order, pos->physical_address);
+        }
+        assert(count == 0, "buddy pool count mismatch, expected 0, got %d",
+               count);
+    }
+    __buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
+}
+
+/*
+ * Scan all page_t descriptors and tally counts per page type.
+ * Since PAGE_TYPE_ANON == 0, uninitialized page descriptors appear as "Anon".
+ * We split anon pages by refcount to distinguish actually-in-use pages from
+ * uninitialized slots.
+ */
+static void __page_type_breakdown(int verbose) {
+    uint64 counts[__PAGE_TYPE_MAX] = {0};
+    uint64 total = TOTALPAGES;
+    uint64 anon_ref0 = 0;     /* type==ANON, refcount==0 (uninit/freed) */
+    uint64 anon_ref1 = 0;     /* type==ANON, refcount==1 (single user) */
+    uint64 anon_refn = 0;     /* type==ANON, refcount>1  (COW shared)  */
+    uint64 anon_refsum = 0;
+    uint64 pgtab_ref0 = 0;
+    uint64 pcache_cnt = 0;
+
+    for (uint64 i = 0; i < total; i++) {
+        uint64 f = __atomic_load_n(&__pages[i].flags, __ATOMIC_RELAXED);
+        uint64 t = PAGE_FLAG_GET_TYPE(f);
+        int rc = __atomic_load_n(&__pages[i].ref_count, __ATOMIC_RELAXED);
+        if (t < __PAGE_TYPE_MAX)
+            counts[t]++;
+        if (t == PAGE_TYPE_ANON) {
+            if (rc == 0)      anon_ref0++;
+            else if (rc == 1) anon_ref1++;
+            else              anon_refn++;
+            if (rc > 0)       anon_refsum += (uint64)rc;
+        } else if (t == PAGE_TYPE_PGTABLE && rc == 0) {
+            pgtab_ref0++;
+        } else if (t == PAGE_TYPE_PCACHE) {
+            pcache_cnt++;
+        }
+    }
+
+    uint64 anon_active = anon_ref1 + anon_refn;
+
+    printf("Pages: Anon=%ld(active=%ld,cow=%ld,idle=%ld), "
+           "Buddy=%ld, Slab=%ld, PgTable=%ld, PCache=%ld, Tail=%ld\n",
+           counts[PAGE_TYPE_ANON], anon_active, anon_refn, anon_ref0,
+           counts[PAGE_TYPE_BUDDY], counts[PAGE_TYPE_SLAB],
+           counts[PAGE_TYPE_PGTABLE], pcache_cnt, counts[PAGE_TYPE_TAIL]);
+
+    if (verbose) {
+        printf("  Anon refcount sum: %ld  (ref==1: %ld, ref>1: %ld)\n",
+               anon_refsum, anon_ref1, anon_refn);
+        if (pgtab_ref0 > 0)
+            printf("  PgTable with ref==0: %ld (possible leak)\n", pgtab_ref0);
+    }
+}
+
+uint64 sys_memstat(void) {
+    int flags_arg;
+    argint(0, &flags_arg);
+    uint32 flags = (uint32)flags_arg;
+    uint64 total_free_pages = 0;
+    uint64 total_cached_pages = 0;
+    uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = {0};
+    bool empty_arr[PAGE_BUDDY_MAX_ORDER + 1] = {false};
+    uint64 free_bytes = 0;
+    uint64 used_bytes = 0;
+    uint64 ret = 0;
+
+    if (flags & MEMSTAT_INCLUDE_BUDDY) {
+        if (flags & MEMSTAT_DETAILED) {
+            print_buddy_system_stat(1);
+        } else if (flags & MEMSTAT_VERBOSE) {
+            print_buddy_system_stat(0);
+        }
+    }
+
+    if (flags & MEMSTAT_INCLUDE_SLAB) {
+        if (flags & MEMSTAT_DETAILED) {
+            slab_dump_all(2);
+        } else if (flags & MEMSTAT_VERBOSE) {
+            slab_dump_all(1);
+        }
+    }
+
+    /* Page type breakdown — always shown when verbose or detailed */
+    if (flags & (MEMSTAT_VERBOSE | MEMSTAT_DETAILED)) {
+        __page_type_breakdown(flags & MEMSTAT_DETAILED);
+    }
+
+    __buddy_stat_totals(&total_free_pages, &total_cached_pages, ret_arr,
+                        empty_arr);
+    free_bytes = (total_free_pages + total_cached_pages) * PAGE_SIZE;
+
+    uint64 managed_bytes = __total_pages() * PAGE_SIZE;
+    used_bytes =
+        (managed_bytes > free_bytes) ? (managed_bytes - free_bytes) : 0;
+
+    if ((flags & (MEMSTAT_VERBOSE | MEMSTAT_DETAILED)) != 0) {
+        if (flags & MEMSTAT_ADD_FREE) {
+            printf("Free: ");
+            __print_size(free_bytes);
+            printf("\n");
+        }
+        if (flags & MEMSTAT_ADD_USED) {
+            printf("Used: ");
+            __print_size(used_bytes);
+            printf("\n");
+        }
+    }
+
+    if (flags & MEMSTAT_ADD_FREE) {
+        ret += free_bytes;
+    }
+    if (flags & MEMSTAT_ADD_USED) {
+        ret += used_bytes;
+    }
+    return ret;
+}

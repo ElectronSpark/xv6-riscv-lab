@@ -1,0 +1,202 @@
+#include <param.h>
+#include <types.h>
+#include "string.h"
+#include <riscv.h>
+#include <defs.h>
+#include "printf.h"
+#include <dev/blkdev.h>
+#include <dev/bio.h>
+#include <mm/page.h>
+#include <mm/folio.h>
+#include <errno.h>
+#include <mm/vm.h>
+
+static void __bio_relase_kobj_cb(struct kobject *obj) {
+    struct bio *bio = container_of(obj, struct bio, kobj);
+    /*
+     * __bio_add_seg does NOT take a page reference, so we must NOT
+     * decrement page refs here.  Page lifetime is the caller's
+     * responsibility.
+     */
+    kvfree(bio);
+}
+
+struct bio *bio_alloc(blkdev_t *bdev, int16 vec_length, bool rw,
+                      void (*end_io)(struct bio *bio), void *private_data) {
+    struct bio *bio = NULL;
+    if (bdev == NULL || vec_length <= 0 || vec_length > BIO_MAX_VECS) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
+    }
+    size_t bio_size = sizeof(struct bio) + vec_length * sizeof(struct bio_vec);
+    bio = (struct bio *)kvmalloc(bio_size);
+    if (bio == NULL) {
+        return ERR_PTR(-ENOMEM); // Memory allocation failed
+    }
+    memset(bio, 0, bio_size);
+    bio->bdev = bdev;
+    bio->block_shift = bdev->block_shift;
+    bio->vec_length = vec_length;
+    bio->rw = rw;
+    bio->end_io = end_io;
+    bio->private_data = private_data;
+    bio->kobj.name = "bio";
+    bio->kobj.ops.release = __bio_relase_kobj_cb;
+    kobject_init(&bio->kobj);
+    completion_init(&bio->io_completion);
+    return bio;
+}
+
+static int __bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint32 len,
+                        uint16 offset) {
+    if (bio == NULL || page == NULL || len == 0) {
+        return -EINVAL; // Invalid arguments
+    }
+    if (bio->valid || bio->done) {
+        return -EIO; // Cannot add segment to a submitted or completed bio
+    }
+    if (bio->vec_length <= 0 || bio->vec_length > BIO_MAX_VECS) {
+        return -EINVAL; // Invalid bio vector length
+    }
+    if (idx < 0 || idx >= bio->vec_length) {
+        return -EINVAL; // Invalid index
+    }
+    uint32 total_size = bio->size - bio->bvecs[idx].len;
+    total_size += len;
+    if (total_size > BIO_MAX_SIZE) {
+        return -E2BIG; // Total size exceeds maximum allowed
+    }
+    bio->bvecs[idx].bv_page = page;
+    bio->bvecs[idx].len = len;
+    bio->bvecs[idx].offset = offset;
+    bio->size = total_size;
+    return 0;
+}
+
+int bio_add_folio(struct bio *bio, folio_t *folio, uint32 len, uint16 offset) {
+    if (bio == NULL || folio == NULL || len == 0)
+        return -EINVAL;
+
+    uint32 folio_bytes = (uint32)folio_size(folio);
+    if ((uint32)offset >= folio_bytes)
+        return -EINVAL;
+    if (len > folio_bytes - (uint32)offset)
+        return -EINVAL;
+
+    page_t *head = &folio->page;
+
+    /*
+     * Compound folios (order > 0) are physically contiguous, so we can
+     * use a single bio_vec segment for the entire range.  This dramatically
+     * reduces the number of per-segment device commands (e.g. one virtio
+     * descriptor chain instead of N).
+     */
+    if (folio_order(folio) > 0) {
+        int slot = -1;
+        for (int i = 0; i < bio->vec_length; i++) {
+            if (bio->bvecs[i].bv_page == NULL) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+            return -ENOSPC;
+        return __bio_add_seg(bio, head, slot, len, offset);
+    }
+
+    /* Order-0 path: single page, split at page boundaries. */
+    uint32 remaining = len;
+    uint16 off = offset;
+
+    while (remaining > 0) {
+        unsigned int page_idx = off / PGSIZE;
+        uint16 page_off  = off % PGSIZE;
+        uint32 seg_len   = PGSIZE - page_off;
+        if (seg_len > remaining)
+            seg_len = remaining;
+
+        /* Find next free bvec slot */
+        int slot = -1;
+        for (int i = 0; i < bio->vec_length; i++) {
+            if (bio->bvecs[i].bv_page == NULL) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+            return -ENOSPC;
+
+        int ret = __bio_add_seg(bio, &head[page_idx], slot, seg_len, page_off);
+        if (ret != 0)
+            return ret;
+
+        off       += seg_len;
+        remaining -= seg_len;
+    }
+    return 0;
+}
+
+int bio_dup(struct bio *bio) {
+    if (bio == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    kobject_get(&bio->kobj);
+    return 0;
+}
+
+int bio_release(struct bio *bio) {
+    if (bio == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    kobject_put(&bio->kobj);
+    return 0;
+}
+
+int bio_validate(struct bio *bio, blkdev_t *blkdev) {
+    if (bio == NULL || blkdev == NULL) {
+        return -EINVAL;
+    }
+    if (bio->bdev != blkdev) {
+        return -EINVAL;
+    }
+    if (bio->block_shift != blkdev->block_shift) {
+        return -EINVAL;
+    }
+    if (bio->vec_length <= 0 || bio->vec_length > BIO_MAX_VECS) {
+        return -EINVAL;
+    }
+    if (bio->size > BIO_MAX_SIZE) {
+        return -EINVAL;
+    }
+    if (kobject_refcount(&bio->kobj) <= 0) {
+        return -EINVAL;
+    }
+    if (bio->error != 0) {
+        return -EINVAL;
+    }
+    if (bio->valid || bio->done) {
+        return -EINVAL;
+    }
+
+    uint32 total_size = 0;
+    for (int i = 0; i < bio->vec_length; i++) {
+        struct bio_vec *bvec = &bio->bvecs[i];
+        if (bvec->bv_page == NULL) {
+            return -EINVAL;
+        }
+        /* Compound pages (folios) can hold more than PGSIZE bytes */
+        uint32 max_seg = (uint32)PGSIZE << bvec->bv_page->compound_order;
+        if ((uint32)bvec->offset + (uint32)bvec->len > max_seg) {
+            return -EINVAL;
+        }
+        total_size += bvec->len;
+        if (total_size > BIO_MAX_SIZE) {
+            return -EINVAL;
+        }
+    }
+
+    if (total_size != bio->size) {
+        return -EINVAL;
+    }
+
+    return 0;
+}

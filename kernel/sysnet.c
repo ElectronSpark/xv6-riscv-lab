@@ -1,0 +1,172 @@
+/*
+ * sysnet.c - Network system calls
+ *
+ * Socket management and UDP packet handling.
+ * Legacy sockalloc removed - VFS uses vfs_sockalloc in kernel/vfs/file.c
+ * instead.
+ */
+
+#include "types.h"
+#include "param.h"
+#include <mm/memlayout.h>
+#include "riscv.h"
+#include "lock/spinlock.h"
+#include "lock/mutex_types.h"
+#include "proc/thread.h"
+#include "defs.h"
+#include "printf.h"
+#include "dev/net.h"
+#include <mm/vm.h>
+#include "signal.h"
+#include "proc/sched.h"
+#include "errno.h"
+
+struct sock {
+    struct sock *next; // the next socket in the list
+    uint32 raddr;      // the remote IPv4 address
+    uint16 lport;      // the local UDP port number
+    uint16 rport;      // the remote UDP port number
+    spinlock_t lock;   // protects the rxq
+    struct mbufq rxq;  // a queue of packets waiting to be received
+};
+
+spinlock_t sock_lock = SPINLOCK_INITIALIZED("socktbl");
+struct sock *sockets;
+
+void sockinit(void) {}
+
+// Legacy sockalloc removed - VFS uses vfs_sockalloc in vfs/file.c
+
+void sockclose(struct sock *si) {
+    struct sock **pos;
+    struct mbuf *m;
+
+    // remove from list of sockets
+    spin_lock(&sock_lock);
+    pos = &sockets;
+    while (*pos) {
+        if (*pos == si) {
+            *pos = si->next;
+            break;
+        }
+        pos = &(*pos)->next;
+    }
+    spin_unlock(&sock_lock);
+
+    // free any pending mbufs
+    while (!mbufq_empty(&si->rxq)) {
+        m = mbufq_pophead(&si->rxq);
+        mbuffree(m);
+    }
+
+    kfree((char *)si);
+}
+
+int sockread(struct sock *si, uint64 addr, int n) {
+    struct thread *pr = current;
+    struct mbuf *m;
+    int len;
+
+    spin_lock(&si->lock);
+    while (mbufq_empty(&si->rxq) && !killed(pr)) {
+        if (sleep_on_chan_interruptible(&si->rxq, &si->lock) != 0) {
+            spin_unlock(&si->lock);
+            return -EINTR;
+        }
+    }
+    if (killed(pr)) {
+        spin_unlock(&si->lock);
+        return -EINTR;
+    }
+    m = mbufq_pophead(&si->rxq);
+    spin_unlock(&si->lock);
+
+    len = m->len;
+    if (len > n)
+        len = n;
+    if (vm_copyout(pr->vm, addr, m->head, len) < 0) {
+        mbuffree(m);
+        return -EFAULT;
+    }
+    mbuffree(m);
+    return len;
+}
+
+int sockwrite(struct sock *si, uint64 addr, int n) {
+    struct thread *pr = current;
+    struct mbuf *m;
+
+    if (n < 0)
+        return -EINVAL;
+    /* Clamp to maximum mbuf payload to avoid panic in mbufput */
+    int max_payload = MBUF_SIZE - MBUF_DEFAULT_HEADROOM;
+    if (n > max_payload)
+        return -EMSGSIZE;
+
+    m = mbufalloc(MBUF_DEFAULT_HEADROOM);
+    if (!m)
+        return -ENOMEM;
+
+    if (vm_copyin(pr->vm, mbufput(m, n), addr, n) < 0) {
+        mbuffree(m);
+        return -EFAULT;
+    }
+#ifdef USE_LWIP
+    /* TODO: implement lwIP-based UDP send */
+    mbuffree(m);
+    return -1;
+#else
+    net_tx_udp(m, si->raddr, si->lport, si->rport);
+#endif
+    return n;
+}
+
+/*
+ * sockpoll - check whether a legacy UDP socket has data ready
+ *
+ * Returns the subset of @events that are currently satisfied.
+ */
+int sockpoll(struct sock *si, short events) {
+    short revents = 0;
+
+    spin_lock(&si->lock);
+    if ((events & (0x0001 | 0x0040)) && !mbufq_empty(&si->rxq)) {
+        revents |= (events & (0x0001 | 0x0040)); /* POLLIN | POLLRDNORM */
+    }
+    spin_unlock(&si->lock);
+
+    /* UDP write is always possible (fire and forget) */
+    if (events & (0x0004 | 0x0100)) {
+        revents |= (events & (0x0004 | 0x0100)); /* POLLOUT | POLLWRNORM */
+    }
+
+    return revents;
+}
+
+// called by protocol handler layer to deliver UDP packets
+void sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport) {
+    //
+    // Find the socket that handles this mbuf and deliver it, waking
+    // any sleeping reader. Free the mbuf if there are no sockets
+    // registered to handle it.
+    //
+    struct sock *si;
+
+    spin_lock(&sock_lock);
+    si = sockets;
+    while (si) {
+        if (si->raddr == raddr && si->lport == lport && si->rport == rport)
+            goto found;
+        si = si->next;
+    }
+    spin_unlock(&sock_lock);
+    mbuffree(m);
+    return;
+
+found:
+    spin_lock(&si->lock);
+    mbufq_pushtail(&si->rxq, m);
+    wakeup_on_chan(&si->rxq);
+    spin_unlock(&si->lock);
+    spin_unlock(&sock_lock);
+}

@@ -1,0 +1,178 @@
+# ==============================================================================
+# QEMU and GDB Configuration — RISC-V
+# ==============================================================================
+# This file handles QEMU setup, GDB initialization, and related debug targets
+# for the RISC-V architecture.
+# ==============================================================================
+
+find_program(QEMU_EXECUTABLE NAMES qemu-system-riscv64 qemu-system-riscv32 qemu-system-riscv)
+if(NOT QEMU_EXECUTABLE)
+    message(WARNING "QEMU executable not found. Please install QEMU or set the QEMU environment variable.")
+    return()
+endif()
+
+set(QEMU ${QEMU_EXECUTABLE})
+
+# Generate a unique GDB port based on user id to avoid conflicts
+execute_process(
+    COMMAND id -u
+    OUTPUT_VARIABLE USER_ID
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+math(EXPR GDBPORT "${USER_ID} % 5000 + 25000")
+
+# Generate QEMU GDB stub options
+# Check if QEMU supports the '-gdb' option
+execute_process(
+    COMMAND ${QEMU} -help
+    OUTPUT_VARIABLE QEMU_HELP
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+# GDB stub connection: prefer -gdb flag, fall back to deprecated -s/-p
+if(QEMU_HELP MATCHES "-gdb")
+    set(QEMUGDB -gdb tcp::${GDBPORT})
+else()
+    set(QEMUGDB -s -p ${GDBPORT})
+endif()
+
+# Default CPU count (overridden by CPUS env var)
+if(NOT DEFINED ENV{CPUS} OR "$ENV{CPUS}" STREQUAL "")
+    set(CPUS 6)
+else()
+    set(CPUS $ENV{CPUS})
+endif()
+
+# Network port forwarding (unique per user)
+math(EXPR FWDPORT1 "${USER_ID} % 5000 + 25999")
+math(EXPR FWDPORT2 "${USER_ID} % 5000 + 30999")
+
+# Configure OpenSBI BIOS option for QEMU
+if(OPENSBI_MODE STREQUAL "none")
+    set(QEMU_BIOS_OPT -bios none)
+elseif(OPENSBI_MODE STREQUAL "default")
+    set(QEMU_BIOS_OPT -bios default)
+elseif(OPENSBI_MODE STREQUAL "build" OR OPENSBI_MODE STREQUAL "external")
+    set(QEMU_BIOS_OPT -bios ${OPENSBI_PATH})
+endif()
+
+# Compose QEMU options
+# Use xv6.bin flat binary with Linux boot header (unified with Orange Pi)
+# RISC-V QEMU boots directly from virtio disk (no ramdisk/initrd).
+#
+# NOTE: QEMU's -kernel option for RISC-V does NOT support gzip-compressed
+# kernels. Only U-Boot's 'booti' command can decompress gzip kernels.
+# Therefore, QEMU always uses uncompressed images.
+# Compressed images (xv6.bin.gz, fs.img.gz) are for U-Boot deployment only.
+
+set(QEMU_KERNEL_IMG ${CMAKE_BINARY_DIR}/kernel/xv6.bin)
+
+set(QEMUOPTS_PARAM
+    ${QEMU_BIOS_OPT}
+    -kernel ${QEMU_KERNEL_IMG}
+    -m 4G
+    -smp ${CPUS}
+    -nographic
+    -global virtio-mmio.force-legacy=false
+    -drive file=fs.img,if=none,format=raw,id=x0
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+    -drive file=xv6fs_test.img,if=none,format=raw,id=x1
+    -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+    -append "root=/dev/disk0"
+    -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443,hostfwd=udp::6969-:69,hostfwd=tcp::5001-:5001,hostfwd=tcp::2222-:22
+    -object filter-dump,id=net0,netdev=net0,file=packets.pcap
+    -device e1000,netdev=net0,bus=pcie.0
+)
+
+set(QEMUOPTS
+    -machine virt
+    ${QEMUOPTS_PARAM}
+)
+
+set(QEMUOPTS_DTB
+    -machine virt,dumpdtb=${CMAKE_BINARY_DIR}/virt.dtb
+    ${QEMUOPTS_PARAM}
+)
+
+# Base dependencies for QEMU targets
+# Use kernel_with_symbols which has embedded symbols
+# kernel_all generates xv6.bin (the flat binary with Linux boot header)
+set(QEMU_BASE_DEPS
+    kernel_all
+    kernel_with_symbols
+    fs_img
+)
+
+# ==============================================================================
+# QEMU Targets
+# ==============================================================================
+
+add_custom_target(qemu-dts
+    COMMAND ${QEMU} ${QEMUOPTS_DTB}
+    COMMAND dtc -o virt.dts -O dts -I dtb ${CMAKE_BINARY_DIR}/virt.dtb
+    DEPENDS ${QEMU_BASE_DEPS}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Generate the device tree file"
+)
+
+add_custom_target(qemu
+    COMMAND ${QEMU} ${QEMUOPTS}
+    COMMAND stty sane
+    DEPENDS ${QEMU_BASE_DEPS}
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running QEMU with kernel and fs.img"
+)
+
+# Add OpenSBI dependency if building from source
+if(OPENSBI_MODE STREQUAL "build")
+    add_dependencies(qemu-dts ${OPENSBI_DEPENDENCY})
+    add_dependencies(qemu ${OPENSBI_DEPENDENCY})
+endif()
+
+# ==============================================================================
+# GDB Configuration
+# ==============================================================================
+
+# Generate .gdbinit from template
+add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/.gdbinit
+    COMMAND sed "s/:1234/:${GDBPORT}/" < ${CMAKE_SOURCE_DIR}/.gdbinit.tmpl-riscv > ${CMAKE_BINARY_DIR}/.gdbinit
+    COMMAND echo "b __panic_end" >> ${CMAKE_BINARY_DIR}/.gdbinit
+    COMMAND echo "thread 1" >> ${CMAKE_BINARY_DIR}/.gdbinit
+    DEPENDS ${CMAKE_SOURCE_DIR}/.gdbinit.tmpl-riscv
+    COMMENT "Generating .gdbinit with unique GDB port"
+)
+
+add_custom_target(gdbinit ALL
+    DEPENDS ${CMAKE_BINARY_DIR}/.gdbinit
+)
+
+# Add custom target to run QEMU with GDB stub
+add_custom_target(qemu-gdb
+    COMMAND ${CMAKE_COMMAND} -E echo "*** Now run 'gdb' in another window."
+    COMMAND ${QEMU} ${QEMUOPTS} -S ${QEMUGDB}
+    COMMAND stty sane
+    DEPENDS ${QEMU_BASE_DEPS}
+            ${CMAKE_BINARY_DIR}/.gdbinit
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running QEMU with GDB stub"
+)
+
+# Add OpenSBI dependency to qemu-gdb if building from source
+if(OPENSBI_MODE STREQUAL "build")
+    add_dependencies(qemu-gdb ${OPENSBI_DEPENDENCY})
+endif()
+
+# ==============================================================================
+# Utility Targets
+# ==============================================================================
+add_custom_target(print-gdbport
+    COMMAND ${CMAKE_COMMAND} -E echo "[GDBPORT NUMBER]: ${GDBPORT}"
+)
+
+add_custom_target(grade
+    COMMAND ${CMAKE_COMMAND} -E env
+            LAB=$ENV{LAB}
+            python3 "grade-lab-$ENV{LAB}"
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running grade-lab-$ENV{LAB}"
+)

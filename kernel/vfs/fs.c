@@ -1,0 +1,2578 @@
+#include "types.h"
+#include "string.h"
+#include "riscv.h"
+#include "defs.h"
+#include "printf.h"
+#include "param.h"
+#include "errno.h"
+#include "bits.h"
+#include "vfs/stat.h"
+#include "lock/spinlock.h"
+#include "lock/mutex_types.h"
+#include "lock/rwsem.h"
+#include "proc/thread.h"
+#include "proc/sched.h"
+#include "proc/workqueue.h"
+#include "vfs/fs.h"
+#include "vfs/file.h"
+#include "vfs/file_lock.h"
+#include "vfs_private.h"
+#include "list.h"
+#include "hlist.h"
+#include <mm/slab.h>
+#include "tmpfs/tmpfs_smoketest.h"
+#include "xv6fs/xv6fs_smoketest.h"
+#include <mm/vm.h>
+
+// Locking order
+// 1. mount mutex acquired via vfs_mount_lock()
+// 2. vfs_superblock lock
+// 3. vfs_inode lock
+//
+// When multiple locks of the same type are needed, always acquire in
+// hierarchical order For example:
+// 1. acquire parent superblock lock before child superblock lock
+// 2. acquire directory inode lock before child inode lock
+// When cross filesystem, need to release inode lock before acquiring another
+// filesystem's inode lock. Acquiring inode lock must be done after acquiring
+// any superblock lock, including mounted superblock lock.
+
+static slab_cache_t vfs_fs_type_cache = {0};
+static slab_cache_t vfs_superblock_cache = {0};
+static slab_cache_t vfs_struct_cache = {0};
+static struct mutex __mount_mutex = {0};
+static list_node_t vfs_fs_types = {0};
+static uint16 vfs_fs_type_count = 0;
+
+// Workqueue for deferred iput operations.
+// vfs_iput() can block on superblock wlock, inode mutex, and transactions.
+// It must not be called directly from RCU callbacks since that can cause
+// deadlocks (RCU callbacks block on locks held by threads waiting for
+// RCU grace periods). Instead, RCU callbacks queue work to this workqueue.
+static struct workqueue *__vfs_deferred_iput_wq = NULL;
+
+// The absolute root inode of the VFS
+// It is a special inode that serves as the root of the entire filesystem tree
+// It does not belong to any superblock or filesystem
+// It does not have any data or operations associated with it
+struct vfs_inode vfs_root_inode = {0};
+
+#define MAX_FS_TYPES 256
+
+/******************************************************************************
+ * Pre declareed functions
+ *****************************************************************************/
+static struct vfs_inode *__vfs_inode_hash_add(struct vfs_superblock *sb,
+                                              struct vfs_inode *inode);
+static void __vfs_init_superblock_structure(struct vfs_superblock *sb,
+                                            struct vfs_fs_type *fs_type);
+static bool __vfs_superblock_ops_valid(struct vfs_superblock *sb);
+static bool __vfs_init_superblock_valid(struct vfs_superblock *sb);
+static void __vfs_attach_superblock_to_fstype(struct vfs_superblock *sb);
+static void __vfs_detach_superblock_from_fstype(struct vfs_superblock *sb);
+static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint);
+static void __vfs_set_mountpoint(struct vfs_superblock *sb,
+                                 struct vfs_inode *mountpoint);
+static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint);
+static struct fs_struct *__vfs_struct_alloc_init(void);
+static void __vfs_struct_free(struct fs_struct *fs);
+
+/******************************************************************************
+ * Private functions
+ *****************************************************************************/
+// initialize rooti
+static void __vfs_rooti_init(void) {
+    memset(&vfs_root_inode, 0, sizeof(vfs_root_inode));
+    vfs_root_inode.ino = 0;
+    vfs_root_inode.mode = S_IFDIR | 0755;
+    vfs_root_inode.valid = 1;
+}
+
+static void __vfs_register_fs_type_locked(struct vfs_fs_type *fs_type) {
+    list_node_push(&vfs_fs_types, fs_type, list_entry);
+    fs_type->registered = 1;
+    vfs_fs_type_count++;
+    assert(vfs_fs_type_count <= MAX_FS_TYPES,
+           "Exceeded maximum filesystem types");
+}
+
+static void __vfs_unregister_fs_type_locked(struct vfs_fs_type *fs_type) {
+    list_node_detach(fs_type, list_entry);
+    fs_type->registered = 0;
+    vfs_fs_type_count--;
+    assert(vfs_fs_type_count <= MAX_FS_TYPES,
+           "Filesystem types count underflow");
+}
+
+static struct vfs_fs_type *__vfs_get_fs_type_locked(const char *name) {
+    struct vfs_fs_type *pos, *tmp;
+    size_t name_len = strlen(name);
+    list_foreach_node_safe(&vfs_fs_types, pos, tmp, list_entry) {
+        if (strncmp(pos->name, name, name_len) == 0) {
+            return pos; // Found
+        }
+    }
+    return NULL; // Not found
+}
+
+// File System Type Kobject callbacks
+static void __vfs_fs_type_kobj_release(struct kobject *kobj) {
+    struct vfs_fs_type *fs_type = container_of(kobj, struct vfs_fs_type, kobj);
+    slab_free(fs_type);
+}
+
+// Superblock hash callback functions
+static uint64 __vfs_superblock_inode_hash_func(void *node) {
+    struct vfs_inode *inode = (struct vfs_inode *)node;
+    return hlist_hash_uint64(inode->ino);
+}
+
+static int __vfs_superblock_inode_id_cmp_func(hlist_t *hlist, void *node,
+                                              void *key) {
+    (void)hlist;
+    struct vfs_inode *inode_node = (struct vfs_inode *)node;
+    struct vfs_inode *inode_key = (struct vfs_inode *)key;
+    if (inode_node->ino > inode_key->ino) {
+        return 1;
+    } else if (inode_node->ino < inode_key->ino) {
+        return -1;
+    } else {
+        return 0;
+    }
+}
+
+static void *__vfs_superblock_inode_get_node_func(hlist_entry_t *entry) {
+    if (entry == NULL) {
+        return NULL;
+    }
+    return container_of(entry, struct vfs_inode, hash_entry);
+}
+
+static hlist_entry_t *__vfs_superblock_inode_get_entry_func(void *node) {
+    if (node == NULL) {
+        return NULL;
+    }
+    struct vfs_inode *inode = (struct vfs_inode *)node;
+    return &inode->hash_entry;
+}
+
+static struct hlist_func_struct __vfs_superblock_inode_hlist_funcs = {
+    .hash = __vfs_superblock_inode_hash_func,
+    .cmp_node = __vfs_superblock_inode_id_cmp_func,
+    .get_node = __vfs_superblock_inode_get_node_func,
+    .get_entry = __vfs_superblock_inode_get_entry_func,
+};
+
+// Try to get an inode from superblock's inode hash list by inode number
+static struct vfs_inode *__vfs_inode_hash_get(struct vfs_superblock *sb,
+                                              uint64 ino) {
+    struct vfs_inode key_inode = {0};
+    key_inode.ino = ino;
+    hlist_entry_t *entry = hlist_get(&sb->inodes, &key_inode);
+    if (entry == NULL) {
+        return NULL;
+    }
+    return container_of(entry, struct vfs_inode, hash_entry);
+}
+
+static struct vfs_inode *__vfs_inode_hash_add(struct vfs_superblock *sb,
+                                              struct vfs_inode *inode) {
+    return hlist_put(&sb->inodes, inode, false);
+}
+
+// Superblock structure helpers
+
+static void __vfs_init_superblock_structure(struct vfs_superblock *sb,
+                                            struct vfs_fs_type *fs_type) {
+    list_entry_init(&sb->siblings);
+    list_entry_init(&sb->orphan_list);
+    list_entry_init(&sb->inode_lru);
+    sb->inode_lru_count = 0;
+    hlist_init(&sb->inodes, VFS_SUPERBLOCK_HASH_BUCKETS,
+               &__vfs_superblock_inode_hlist_funcs);
+    sb->fs_type = fs_type;
+    sb->orphan_count = 0;
+    __atomic_store_n(&sb->refcount, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&sb->mount_count, 0, __ATOMIC_SEQ_CST);
+    rwsem_init(&sb->lock, RWLOCK_PRIO_READ, "vfs_superblock_lock");
+    spin_init(&sb->spinlock, "vfs_superblock_spinlock");
+}
+
+static int __vfs_init_sb_rooti(struct vfs_superblock *sb) {
+    __vfs_inode_init(sb->root_inode);
+retry_add:;
+    struct vfs_inode *inode = vfs_add_inode(sb, sb->root_inode);
+    if (IS_ERR_OR_NULL(inode)) {
+        if (PTR_ERR(inode) == -EAGAIN) {
+            // Should not happen during init, but handle gracefully
+            vfs_superblock_unlock(sb);
+            scheduler_yield();
+            vfs_superblock_wlock(sb);
+            if (!sb->valid && sb->initialized) {
+                return -EINVAL;
+            }
+            goto retry_add;
+        }
+        if (inode == NULL) {
+            return -ENOENT; // Failed to add root inode
+        }
+        return PTR_ERR(inode);
+    }
+    if (inode != sb->root_inode) {
+        vfs_iunlock(inode);
+        return -EEXIST; // Root inode already exists
+    }
+    sb->root_inode->parent = sb->root_inode;
+    vfs_iunlock(sb->root_inode);
+    return 0;
+}
+
+static bool __vfs_superblock_ops_valid(struct vfs_superblock *sb) {
+    if (sb->ops == NULL) {
+        return false;
+    }
+    if (sb->ops->alloc_inode == NULL || sb->ops->get_inode == NULL ||
+        sb->ops->sync_fs == NULL || sb->ops->unmount_begin == NULL) {
+        return false;
+    }
+    return true;
+}
+
+// After a filesystem's mount callback returns a freshly allocated superblock,
+// the VFS validates it with this helper before attaching it to the mount tree.
+// Note: sb->device is set by vfs_mount after this validation, so we don't check
+// it here.
+static bool __vfs_init_superblock_valid(struct vfs_superblock *sb) {
+    if (sb == NULL) {
+        return false;
+    }
+    if (sb->valid || sb->dirty) {
+        return false;
+    }
+    if (!__vfs_superblock_ops_valid(sb)) {
+        return false;
+    }
+    if (sb->mountpoint != NULL || sb->parent_sb != NULL) {
+        // At this point, the superblock has not been mounted yet
+        return false;
+    }
+    return true;
+}
+
+static void __vfs_attach_superblock_to_fstype(struct vfs_superblock *sb) {
+    list_node_push_back(&sb->fs_type->superblocks, sb, siblings);
+    sb->fs_type->sb_count++;
+    sb->registered = 1;
+    assert(sb->fs_type->sb_count > 0,
+           "Filesystem type superblock count overflow");
+}
+
+static void __vfs_detach_superblock_from_fstype(struct vfs_superblock *sb) {
+    list_node_detach(sb, siblings);
+    sb->fs_type->sb_count--;
+    sb->registered = 0;
+    assert(sb->fs_type->sb_count >= 0,
+           "Filesystem type superblock count underflow");
+}
+
+// Turn a directory inode into a temporary mountpoint placeholder.
+// Caller must hold the parent superblock write lock and the inode lock.
+// On success the inode type is flipped to MNT and its refcount is incremented.
+static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
+    if (mountpoint != &vfs_root_inode) {
+        VFS_SUPERBLOCK_ASSERT_WHOLDING(
+            mountpoint->sb, "Mountpoint inode's superblock lock must be write "
+                            "held to turn into mountpoint");
+    }
+    VFS_INODE_ASSERT_HOLDING(
+        mountpoint,
+        "Mountpoint inode lock must be held to turn into mountpoint");
+    if (vfs_inode_refcount(mountpoint) > 2) {
+        return -EBUSY; // Mountpoint inode is in use
+    }
+    if (!S_ISDIR(mountpoint->mode)) {
+        return -ENOTDIR; // Mountpoint must be a directory
+    }
+    if (vfs_inode_is_local_root(mountpoint)) {
+        return -EBUSY; // Cannot mount on root inode
+    }
+    if (mountpoint->mount) {
+        return -EBUSY; // Already a mountpoint
+    }
+    mountpoint->mount = 1;
+    mountpoint->mnt_rooti = NULL;
+    mountpoint->mnt_sb = NULL;
+    if (mountpoint != &vfs_root_inode) {
+        vfs_superblock_mountcount_inc(mountpoint->sb);
+        // Hold a reference on the mountpoint while the filesystem is mounted
+        // (skip for vfs_root_inode which has no superblock)
+        vfs_idup(mountpoint);
+    }
+    return 0;
+}
+
+// Set the mountpoint inode of a superblock.
+// Caller must hold the parent superblock write lock and the mountpoint inode
+// lock; this helper assumes the refcount was raised by __vfs_turn_mountpoint().
+static void __vfs_set_mountpoint(struct vfs_superblock *sb,
+                                 struct vfs_inode *mountpoint) {
+    if (mountpoint != &vfs_root_inode) {
+        VFS_SUPERBLOCK_ASSERT_WHOLDING(mountpoint->sb,
+                                       "Mountpoint inode's superblock lock "
+                                       "must be write held to set mountpoint");
+    }
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(
+        sb, "Superblock lock must be write held to set mountpoint");
+    VFS_INODE_ASSERT_HOLDING(
+        mountpoint, "Mountpoint inode lock must be held to set mountpoint");
+    assert(mountpoint->mount, "Mountpoint inode is not marked as a mountpoint");
+    assert(sb->mountpoint == NULL, "Superblock mountpoint is already set");
+    sb->mountpoint = mountpoint;
+    sb->parent_sb = mountpoint->sb;
+    mountpoint->mnt_sb = sb;
+    mountpoint->mnt_rooti = sb->root_inode;
+    // Note: We do NOT add a ref on root_inode here - sb->root_inode owns it.
+    // Code accessing mnt_rooti (like vfs_get_mnt_rooti) must call vfs_idup.
+}
+
+// Clear the mountpoint inode of a superblock, undoing __vfs_set_mountpoint().
+// Caller must hold the parent superblock write lock and the mountpoint inode
+// lock. Caller must also call vfs_iput on mountpoint after releasing locks.
+static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint) {
+    if (mountpoint != &vfs_root_inode) {
+        VFS_SUPERBLOCK_ASSERT_WHOLDING(
+            mountpoint->sb, "Mountpoint inode's superblock lock must be write "
+                            "held to clear mountpoint");
+    }
+    VFS_INODE_ASSERT_HOLDING(
+        mountpoint, "Mountpoint inode lock must be held to clear mountpoint");
+    assert(mountpoint->mount, "Mountpoint inode type is not MNT");
+    if (mountpoint != &vfs_root_inode) {
+        vfs_superblock_mountcount_dec(mountpoint->sb);
+    }
+    mountpoint->mnt_sb = NULL;
+    mountpoint->mnt_rooti = NULL;
+    mountpoint->mount = 0;
+}
+
+static struct fs_struct *__vfs_struct_alloc_init(void) {
+    struct fs_struct *fs = slab_alloc(&vfs_struct_cache);
+    if (fs == NULL) {
+        return NULL;
+    }
+    memset(fs, 0, sizeof(*fs));
+    spin_init(&fs->lock, "fs_struct_lock");
+    smp_store_release(&fs->ref_count, 1);
+    return fs;
+}
+
+static void __vfs_struct_free(struct fs_struct *fs) { slab_free(fs); }
+
+/******************************************************************************
+ * Files System Type Public APIs
+ *****************************************************************************/
+/******************************************************************************
+ * tmpfs smoketest kernel thread
+ * Runs tmpfs tests in a separate kernel thread with chroot to /tmp (tmpfs)
+ *****************************************************************************/
+static int __tmpfs_smoketest_kthread(uint64 arg1, uint64 arg2) {
+    (void)arg1;
+    (void)arg2;
+
+    // Resolve /tmp path (tmpfs is already mounted there by parent)
+    struct vfs_inode *tmp_root = vfs_namei("/tmp", 4);
+    if (IS_ERR_OR_NULL(tmp_root)) {
+        printf("tmpfs_smoketest: failed to resolve /tmp, errno=%ld\n",
+               PTR_ERR_OR(tmp_root, -ENOENT));
+        return -1;
+    }
+
+    // Chroot into the tmpfs at /tmp
+    int ret = vfs_chroot(tmp_root);
+    vfs_iput(tmp_root);
+    if (ret != 0) {
+        printf("tmpfs_smoketest: failed to chroot to /tmp, errno=%d\n", ret);
+        return ret;
+    }
+
+    printf("tmpfs_smoketest: chrooted into /tmp (tmpfs), running tests...\n");
+    tmpfs_run_all_smoketests();
+    printf("tmpfs_smoketest: tests completed\n");
+
+    return 0;
+}
+
+// Start the tmpfs smoketest kernel thread
+void tmpfs_smoketest_start(void) {
+    struct thread *p = kthread_create("tmpfs_test", __tmpfs_smoketest_kthread,
+                                      0, 0, KERNEL_STACK_ORDER);
+    if (IS_ERR_OR_NULL(p)) {
+        printf("tmpfs_smoketest: failed to create kernel thread\n");
+        return;
+    }
+
+    wakeup(p);
+    printf("tmpfs_smoketest: kernel thread started (pid=%d)\n", p->pid);
+}
+
+/*
+ * vfs_init - Initialize the VFS subsystem and root inode.
+ *
+ * Locking:
+ *   - None.
+ */
+void vfs_init(void) {
+    __vfs_rooti_init();
+    list_entry_init(&vfs_fs_types);
+    mutex_init(&__mount_mutex, "vfs_mount_mutex");
+    __vfs_file_lock_global_init();
+    int ret = slab_cache_init(&vfs_superblock_cache, "vfs_superblock_cache",
+                              sizeof(struct vfs_superblock),
+                              SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
+    assert(ret == 0,
+           "Failed to initialize vfs_superblock_cache slab cache, errno=%d",
+           ret);
+    ret = slab_cache_init(&vfs_fs_type_cache, "vfs_fs_type_cache",
+                          sizeof(struct vfs_fs_type),
+                          SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
+    assert(ret == 0,
+           "Failed to initialize vfs_fs_type_cache slab cache, errno=%d", ret);
+    ret = slab_cache_init(&vfs_struct_cache, "vfs_struct_cache",
+                          sizeof(struct fs_struct),
+                          SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
+    assert(ret == 0,
+           "Failed to initialize vfs_struct_cache slab cache, errno=%d", ret);
+    vfs_fs_type_count = 0;
+
+    // Create single-threaded workqueue for deferred iput operations.
+    // Using max_active=1 serializes all deferred iputs, reducing lock
+    // contention on vfs_superblock_wlock. This prevents the "thundering herd"
+    // effect where many workers simultaneously compete for the same locks,
+    // potentially causing deadlock with threads doing regular FS operations
+    // (create/write). This must be done early, before any file operations that
+    // might use RCU.
+    __vfs_deferred_iput_wq = workqueue_create("vfs_iput_wq", 1);
+    assert(__vfs_deferred_iput_wq != NULL,
+           "Failed to create vfs_iput workqueue");
+
+    struct thread *thread = current;
+    assert(thread != NULL, "vfs_init must be called from a thread context");
+    __vfs_inode_init(&vfs_root_inode);
+    __vfs_dcache_global_init();
+    __vfs_file_init();
+    uio_init();
+    thread->fs = vfs_struct_init();
+        assert(thread->fdtable != NULL,
+            "vfs_init: current thread must already have an fdtable");
+
+    // Initialize filesystem types (registers them with VFS)
+    tmpfs_init();
+    xv6fs_init();
+    ext4fs_init();
+    devtmpfs_init();
+    procfs_init();
+
+    // Mount filesystems
+    //
+    // Boot sequence:
+    //   1. tmpfs_mount_root()  — temporary root for staging
+    //   2. devtmpfs at /dev    — device nodes needed for root device lookup
+    //   3. ext4fs_mount_root() — mount real root at /root, move /dev there,
+    //                            then chroot into it
+    //
+    // Other filesystems (/tmp, /proc, etc.) are mounted later by init
+    // from /etc/fstab.
+    tmpfs_mount_root();
+
+    // Mount devtmpfs at /dev early — ext4fs_mount_root needs device nodes
+    // to find the root block device specified in boot cmdline (root=).
+    {
+        struct vfs_inode *tmpfs_root = vfs_root_inode.mnt_rooti;
+        if (tmpfs_root != NULL) {
+            struct vfs_inode *dev_dir = vfs_mkdir(tmpfs_root, 0755, "dev", 3);
+            if (!IS_ERR_OR_NULL(dev_dir))
+                vfs_iput(dev_dir);
+        }
+    }
+    ret = vfs_mount_path("devtmpfs", "/dev", 4, NULL, 0, 0, NULL);
+    if (ret == 0) {
+        printf("devtmpfs: mounted at /dev\n");
+
+        /* Pre-create /dev/pts directory for PTY slaves */
+        struct vfs_inode *dev_inode = vfs_namei("/dev", 4);
+        if (!IS_ERR_OR_NULL(dev_inode)) {
+            struct vfs_inode *pts_dir =
+                vfs_mkdir(dev_inode, 0755, "pts", 3);
+            if (!IS_ERR_OR_NULL(pts_dir))
+                vfs_iput(pts_dir);
+            vfs_iput(dev_inode);
+        }
+    } else {
+        printf("devtmpfs: failed to mount at /dev, errno=%d\n", ret);
+    }
+
+    // Mount real root filesystem and chroot into it.
+    // ext4fs_mount_root() will also move /dev into the new root.
+    ext4fs_mount_root();
+
+    // Optional: run smoke tests in a separate kernel thread with chroot to /tmp
+    // tmpfs_smoketest_start();
+    // xv6fs_run_all_smoketests();
+}
+
+/*
+ * vfs_get_deferred_iput_wq - Get the VFS deferred iput workqueue.
+ *
+ * Returns the workqueue used for deferred iput operations. RCU callbacks
+ * that need to call vfs_fput() or vfs_iput() should queue work to this
+ * workqueue instead of calling those functions directly.
+ *
+ * Returns: Pointer to the workqueue, or NULL if not yet initialized.
+ */
+struct workqueue *vfs_get_deferred_iput_wq(void) {
+    return __vfs_deferred_iput_wq;
+}
+
+/*
+ * __vfs_iput_work_func - Workqueue callback to release inode reference
+ * @work: Work struct containing inode to release
+ *
+ * Called by workqueue worker to perform vfs_iput(). This runs in a normal
+ * kthread context where blocking on locks is allowed.
+ */
+static void __vfs_iput_work_func(struct work_struct *work) {
+    struct vfs_inode *inode = (struct vfs_inode *)work->data;
+    vfs_iput(inode);
+    free_work_struct(work);
+}
+
+/*
+ * __vfs_queue_deferred_iput - Queue iput to workqueue
+ *
+ * Use this when you need to call vfs_iput but can't because you're holding
+ * locks that vfs_iput would try to acquire (e.g., superblock wlock).
+ *
+ * @inode: Inode to release (caller's reference will be transferred)
+ */
+static void __vfs_queue_deferred_iput(struct vfs_inode *inode) {
+    struct workqueue *wq = vfs_get_deferred_iput_wq();
+
+    // If workqueue not available (early init or shutdown), fall back to direct
+    // call
+    if (wq == NULL) {
+        vfs_iput(inode);
+        return;
+    }
+
+    struct work_struct *work =
+        create_work_struct(__vfs_iput_work_func, (uint64)inode);
+    if (work == NULL) {
+        // Allocation failed, fall back to direct call (risky but better than
+        // leak)
+        printf("__vfs_queue_deferred_iput: failed to allocate work_struct, "
+               "falling back to direct vfs_iput\n");
+        vfs_iput(inode);
+        return;
+    }
+
+    queue_work(wq, work);
+}
+
+/*
+ * __vfs_shrink_caches - Shrink VFS slab caches to release unused pages.
+ *
+ * This should be called when checking for memory leaks to ensure that
+ * empty slab pages are returned to the page allocator.
+ */
+void __vfs_shrink_caches(void) {
+    slab_cache_shrink(&vfs_superblock_cache, 0x7fffffff);
+    slab_cache_shrink(&vfs_fs_type_cache, 0x7fffffff);
+    __vfs_file_shrink_cache();
+}
+
+/*
+ * vfs_fs_type_allocate - Allocate an empty filesystem type descriptor.
+ *
+ * Locking:
+ *   - None. Caller performs subsequent initialization before registration.
+ *
+ * Returns:
+ *   - Pointer to struct vfs_fs_type on success, NULL on allocation failure.
+ */
+struct vfs_fs_type *vfs_fs_type_allocate(void) {
+    struct vfs_fs_type *fs_type = slab_alloc(&vfs_fs_type_cache);
+    if (fs_type == NULL) {
+        return NULL;
+    }
+    memset(fs_type, 0, sizeof(*fs_type));
+    list_entry_init(&fs_type->list_entry);
+    list_entry_init(&fs_type->superblocks);
+    return fs_type;
+}
+
+void vfs_fs_type_free(struct vfs_fs_type *fs_type) { slab_free(fs_type); }
+
+/*
+ * vfs_register_fs_type - Register a filesystem driver in the global list.
+ *
+ * Locking:
+ *   - Caller must hold the mount mutex via vfs_mount_lock().
+ *
+ * Returns:
+ *   - 0 on success or negative errno on failure.
+ */
+int vfs_register_fs_type(struct vfs_fs_type *fs_type) {
+    // Make sure the fs_type is not registered and is empty
+    if (!holding_mutex(&__mount_mutex)) {
+        return -EPERM; // Must hold mount mutex to register fs_type
+    }
+    if (fs_type == NULL || fs_type->name == NULL || fs_type->ops == NULL) {
+        return -EINVAL; // Invalid arguments
+    }
+    if (fs_type->ops->mount == NULL || fs_type->ops->free == NULL) {
+        return -EINVAL; // Invalid filesystem operations
+    }
+    if (fs_type->sb_count != 0) {
+        return -EINVAL; // sb_count must be zero for a new fs_type
+    }
+    if (fs_type->registered) {
+        return -EALREADY; // Filesystem type already registered
+    }
+    fs_type->kobj.ops.release = __vfs_fs_type_kobj_release;
+    fs_type->kobj.name = "fs_type";
+    kobject_init(&fs_type->kobj);
+    if (vfs_fs_type_count >= MAX_FS_TYPES) {
+        return -ENOSPC; // No space for more filesystem types
+    }
+    struct vfs_fs_type *existing = __vfs_get_fs_type_locked(fs_type->name);
+    if (existing != NULL) {
+        return -EEXIST; // Filesystem type with the same name already exists
+    }
+    __vfs_register_fs_type_locked(fs_type);
+    return 0;
+}
+
+/*
+ * vfs_unregister_fs_type - Remove a filesystem driver from the global list.
+ *
+ * Locking:
+ *   - Caller must hold the mount mutex via vfs_mount_lock().
+ *
+ * Returns:
+ *   - 0 on success or negative errno if the driver is busy/not found.
+ */
+int vfs_unregister_fs_type(const char *name) {
+    if (name == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    if (!holding_mutex(&__mount_mutex)) {
+        return -EPERM; // Must hold mount mutex to register fs_type
+    }
+    struct vfs_fs_type *pos = __vfs_get_fs_type_locked(name);
+    if (pos != NULL) {
+        // @ TODO: inform all mounted superblocks of this fs_type after
+        // unregistering
+        __vfs_unregister_fs_type_locked(pos);
+        kobject_put(&pos->kobj);
+        return 0; // Successfully unregistered
+    }
+    return -ENOENT; // Filesystem type not found
+}
+
+/*
+ * vfs_mount_lock - Acquire the global mount mutex.
+ *
+ * Locking:
+ *   - None; this helper acquires the mutex on behalf of the caller.
+ */
+void vfs_mount_lock(void) { mutex_lock(&__mount_mutex); }
+
+/*
+ * vfs_mount_unlock - Release the global mount mutex.
+ *
+ * Locking:
+ *   - Caller must currently hold the mutex via vfs_mount_lock().
+ */
+void vfs_mount_unlock(void) { mutex_unlock(&__mount_mutex); }
+
+/******************************************************************************
+ * Superblock Public APIs
+ *****************************************************************************/
+/*
+ * vfs_mount - Attach a filesystem instance to a directory mountpoint.
+ *
+ * Locking:
+ *   - Caller holds vfs_mount_lock().
+ *   - Caller holds the parent superblock write lock (except for
+ * vfs_root_inode).
+ *   - Caller holds the mountpoint inode mutex (and any device inode lock if
+ * applicable).
+ *
+ * On success:
+ *   - Returns 0, caller still holds all locks and must release them.
+ *
+ * On failure:
+ *   - Returns negative errno.
+ *   - vfs_mount releases mountpoint inode lock and superblock lock.
+ *   - Caller must still release vfs_mount_lock().
+ */
+int vfs_mount(const char *type, struct vfs_inode *mountpoint,
+              struct vfs_inode *device, int flags, const char *data) {
+    struct vfs_fs_type *fs_type = NULL;
+    struct vfs_superblock *sb = NULL;
+    int ret_val = 0;
+
+    if (type == NULL || mountpoint == NULL) {
+        printf("vfs_mount: invalid arguments\n");
+        return -EINVAL; // Invalid arguments
+    }
+
+    if (!holding_mutex(&__mount_mutex)) {
+        printf("vfs_mount: mount mutex not held\n");
+        return -EPERM; // Must hold mount mutex to register fs_type
+    }
+
+    ret_val = __vfs_dir_inode_valid_holding(mountpoint);
+    if (ret_val != 0) {
+        printf("vfs_mount: mountpoint inode not valid, errno=%d\n", ret_val);
+        return ret_val;
+    }
+    if (mountpoint != &vfs_root_inode) {
+        if (!vfs_superblock_wholding(mountpoint->sb)) {
+            printf("vfs_mount: mountpoint superblock write lock not held\n");
+            return -EPERM; // Caller must hold write lock of the superblock
+        }
+        if (!mountpoint->sb->valid) {
+            printf("vfs_mount: mountpoint superblock is not valid\n");
+            return -EINVAL; // Mountpoint's superblock is not valid
+        }
+        if (!S_ISDIR(mountpoint->mode)) {
+            printf("vfs_mount: mountpoint is not a directory\n");
+            return -EINVAL; // Mountpoint must be a directory
+        }
+    }
+
+    ret_val = __vfs_turn_mountpoint(mountpoint);
+    if (ret_val != 0) {
+        printf("vfs_mount: failed to turn mountpoint, errno=%d\n", ret_val);
+        return ret_val; // Failed to turn mountpoint
+    }
+
+    fs_type = vfs_get_fs_type(type);
+    if (fs_type == NULL) {
+        printf("vfs_mount: filesystem type '%s' not found\n", type);
+        ret_val = -ENODEV; // Filesystem type not found
+        goto ret;
+    }
+    if (!fs_type->registered) {
+        printf("vfs_mount: filesystem type '%s' not registered\n", type);
+        ret_val = -ENODEV; // Filesystem type not registered
+        goto ret;
+    }
+    // Ask the filesystem type to allocate and initialise a new superblock
+    // The superblock is private to the filesystem until we attach it, so no
+    // locking is needed yet
+    ret_val = fs_type->ops->mount(mountpoint, device, flags, data, &sb);
+    if (ret_val != 0) {
+        printf("vfs_mount: filesystem type '%s' mount failed, errno=%d\n", type,
+               ret_val);
+        goto ret; // mount failed
+    }
+    // Validate the returned superblock
+    if (!__vfs_init_superblock_valid(sb)) {
+        printf("vfs_mount: invalid superblock returned by mount\n");
+        ret_val = -EINVAL; // Invalid superblock returned by mount
+        goto ret;
+    }
+    if (sb->total_blocks && (sb->used_blocks > sb->total_blocks)) {
+        printf("vfs_mount: superblock used_blocks exceeds total_blocks\n");
+        ret_val = -EINVAL; // Invalid superblock block usage
+        goto ret;
+    }
+    if (sb->root_inode == NULL) {
+        printf("vfs_mount: superblock has no root inode\n");
+        ret_val = -EINVAL; // Superblock has no root inode
+        goto ret;
+    }
+    if (sb->root_inode->valid) {
+        printf("vfs_mount: root inode already marked valid\n");
+        ret_val = -EINVAL; // Root inode is not ready
+        goto ret;
+    }
+    __vfs_init_superblock_structure(sb, fs_type);
+    vfs_superblock_wlock(sb); // Must hold superblock lock to init root inode
+    ret_val = __vfs_init_sb_rooti(sb);
+    if (ret_val != 0) {
+        printf(
+            "vfs_mount: failed to initialize superblock root inode, errno=%d\n",
+            ret_val);
+        goto ret;
+    }
+
+    // Attach superblock to filesystem type
+    __vfs_attach_superblock_to_fstype(sb);
+    sb->device = device;
+    __vfs_set_mountpoint(sb, mountpoint);
+    sb->root_inode->sb = sb; // Associate root inode with superblock
+    ret_val = 0;             // Successfully mounted
+
+ret:
+    if (ret_val != 0) {
+        if (sb) {
+            if (sb->root_inode) {
+                sb->root_inode->ops->free_inode(sb->root_inode);
+            }
+            fs_type->ops->free(sb);
+        }
+        // On failure, need to revert mountpoint inode type
+        __vfs_clear_mountpoint(mountpoint);
+        // Release locks before putting mountpoint
+        vfs_iunlock(mountpoint);
+        if (mountpoint->sb != NULL) {
+            vfs_superblock_unlock(mountpoint->sb);
+        }
+        // Put the mountpoint reference taken in __vfs_turn_mountpoint
+        // (skip for vfs_root_inode which has no superblock)
+        if (mountpoint != &vfs_root_inode) {
+            vfs_iput(mountpoint);
+        }
+        vfs_put_fs_type(fs_type);
+        return ret_val;
+    } else if (vfs_superblock_wholding(sb)) {
+        int is_devtmpfs = (fs_type->name && strcmp(fs_type->name, "devtmpfs") == 0);
+        sb->initialized = 1;
+        sb->valid = 1;
+        sb->attached = 1;
+        vfs_superblock_unlock(sb);
+
+        /* devtmpfs: populate device nodes after locks are released.
+         * Each fresh devtmpfs mount starts empty; the registered device
+         * registry must be replayed into the new superblock. */
+        if (is_devtmpfs)
+            devtmpfs_post_mount_populate();
+    }
+    vfs_put_fs_type(fs_type);
+    return ret_val;
+}
+
+/*
+ * __vfs_evict_unused_inodes - Evict all unreferenced inodes from a superblock.
+ *
+ * This removes inodes that have refcount <= 1 from the inode cache.
+ * For backend filesystems, cached inodes have refcount == 1 (base state).
+ * For backendless filesystems, cached inodes have refcount == 0.
+ * Inodes with refcount > 1 are actively in use and cannot be evicted.
+ *
+ * Locking:
+ *   - Caller must hold the superblock write lock.
+ *
+ * Returns:
+ *   - Number of inodes evicted.
+ */
+static size_t __vfs_evict_unused_inodes(struct vfs_superblock *sb) {
+    size_t evicted = 0;
+    struct vfs_inode *inode, *tmp;
+
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(
+        sb, "Superblock lock must be write held to evict inodes");
+
+    hlist_foreach_node_safe(&sb->inodes, inode, tmp, hash_entry) {
+        // Skip inodes that are actively in use (refcount > 1)
+        // refcount == 1 means "cached but not actively used" for backend fs
+        // refcount == 0 means "cached but not actively used" for backendless fs
+        if (inode->ref_count > 1) {
+            continue;
+        }
+
+        // Skip inodes being destroyed
+        if (inode->destroying) {
+            continue;
+        }
+
+        // Skip invalid inodes (already being cleaned up)
+        if (!inode->valid) {
+            continue;
+        }
+
+        // Skip mountpoint inodes (they have extra references from mounts)
+        if (inode->mount) {
+            continue;
+        }
+
+        // Lock the inode to safely remove it
+        vfs_ilock(inode);
+
+        // Double-check after locking
+        if (inode->ref_count > 1 || inode->destroying || !inode->valid ||
+            inode->mount) {
+            vfs_iunlock(inode);
+            continue;
+        }
+
+        // Sync if dirty
+        if (inode->dirty && inode->ops->sync_inode) {
+            inode->ops->sync_inode(inode);
+        }
+
+        // Remove from cache - decrement refcount to 0 if needed
+        if (inode->ref_count == 1) {
+            atomic_dec(&inode->ref_count);
+        }
+        // Remove from LRU if present (device-backed inodes at ref=0)
+        if (!LIST_NODE_IS_DETACHED(inode, lru_entry)) {
+            list_node_detach(inode, lru_entry);
+            sb->inode_lru_count--;
+        }
+        inode->valid = 0;
+        vfs_remove_inode(sb, inode);
+        vfs_iunlock(inode);
+
+        // Free the inode
+        inode->ops->free_inode(inode);
+        evicted++;
+    }
+
+    return evicted;
+}
+
+/*
+ * vfs_evict_lru_inodes - Evict up to @count least-recently-used inodes from a
+ *                        device-backed superblock's LRU list.
+ *
+ * Only device-backed (non-backendless) superblocks maintain an LRU list of
+ * inodes cached at refcount=0.  This function walks the LRU from the oldest
+ * (head) end, syncing dirty inodes and freeing them.  It can be used by
+ * memory-pressure shrinkers or periodic reclaim.
+ *
+ * Locking:
+ *   - Caller must NOT hold the superblock lock (acquired internally).
+ *
+ * Returns:
+ *   - Number of inodes actually evicted.
+ */
+size_t vfs_evict_lru_inodes(struct vfs_superblock *sb, size_t count) {
+    if (sb == NULL || sb->backendless || count == 0)
+        return 0;
+
+    size_t evicted = 0;
+    struct vfs_inode *inode, *tmp;
+
+    vfs_superblock_wlock(sb);
+
+    list_foreach_node_safe(&sb->inode_lru, inode, tmp, lru_entry) {
+        if (evicted >= count)
+            break;
+
+        // Sanity: LRU inodes should be at refcount 0
+        if (inode->ref_count != 0 || inode->destroying || !inode->valid) {
+            // Stale entry — remove from LRU silently
+            list_node_detach(inode, lru_entry);
+            sb->inode_lru_count--;
+            continue;
+        }
+
+        vfs_ilock(inode);
+
+        // Re-check after locking — someone may have revived it
+        if (inode->ref_count != 0 || inode->destroying || !inode->valid) {
+            if (!LIST_NODE_IS_DETACHED(inode, lru_entry)) {
+                list_node_detach(inode, lru_entry);
+                sb->inode_lru_count--;
+            }
+            vfs_iunlock(inode);
+            continue;
+        }
+
+        // Sync dirty inode before eviction
+        if (inode->dirty && inode->ops->sync_inode) {
+            inode->ops->sync_inode(inode);
+        }
+
+        list_node_detach(inode, lru_entry);
+        sb->inode_lru_count--;
+
+        inode->valid = 0;
+        vfs_remove_inode(sb, inode);
+        vfs_iunlock(inode);
+
+        inode->ops->free_inode(inode);
+        evicted++;
+    }
+
+    vfs_superblock_unlock(sb);
+    return evicted;
+}
+
+/*
+ * vfs_unmount - Detach the filesystem rooted at `mountpoint`.
+ *
+ * Locking:
+ *   - Caller holds vfs_mount_lock().
+ *   - Caller holds the parent and child superblock write locks.
+ *   - Caller holds the mountpoint inode mutex and the mounted root inode mutex.
+ *
+ * Returns:
+ *   - 0 on success or negative errno if busy/invalid.
+ */
+int vfs_unmount(struct vfs_inode *mountpoint) {
+    struct vfs_superblock *sb = NULL; // Superblock of the mounted filesystem
+    struct vfs_inode *mounted_inode =
+        NULL; // Root inode of the mounted filesystem
+    int ret_val = 0;
+
+    if (mountpoint == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+
+    if (!holding_mutex(&__mount_mutex)) {
+        return -EPERM; // Must hold mount mutex to register fs_type
+    }
+    if (!holding_mutex(&mountpoint->mutex)) {
+        return -EPERM; // Caller does not hold the mountpoint inode lock
+    }
+    ret_val = __vfs_inode_valid(mountpoint);
+    if (ret_val != 0) {
+        return ret_val;
+    }
+    if (!vfs_superblock_wholding(mountpoint->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (!mountpoint->sb->valid) {
+        return -EINVAL; // Mountpoint's superblock is not valid
+    }
+
+    if (!S_ISDIR(mountpoint->mode)) {
+        return -ENOTDIR; // Mountpoint must be a directory
+    }
+    if (!mountpoint->mount) {
+        return -EINVAL; // Inode is not a mountpoint
+    }
+    sb = mountpoint->mnt_sb;
+    if (sb == NULL) {
+        return -EINVAL; // Mountpoint has no mounted superblock
+    }
+    mounted_inode = sb->root_inode;
+    if (mounted_inode == NULL) {
+        return -EINVAL; // Mounted superblock has no root inode
+    }
+    if (!holding_mutex(&mounted_inode->mutex)) {
+        return -EPERM; // Caller does not hold the inode lock
+    }
+    ret_val = __vfs_inode_valid(mounted_inode);
+    if (ret_val != 0) {
+        return ret_val;
+    }
+    if (!vfs_superblock_wholding(sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (!sb->valid) {
+        return -EINVAL; // Mountpoint's superblock is not valid
+    }
+    // Superblock should have no mounted superblocks under it
+    if ((ret_val = vfs_superblock_mountcount(sb)) > 0) {
+        printf("vfs_unmount: mount_count=%d\n", ret_val);
+        return -EBUSY; // There are still mounted superblocks under this
+                       // superblock
+    }
+    ret_val = 0;
+    // After unmount_begin, superblock should be clean and have no active inodes
+    if (sb->dirty) {
+        printf("vfs_unmount: sb valid=%u dirty=%u\n", sb->valid, sb->dirty);
+        return -EBUSY; // Superblock is still valid or dirty
+    }
+
+    // Begin unmounting
+    if (sb->ops->unmount_begin) {
+        sb->ops->unmount_begin(sb);
+    }
+
+    // Evict all unreferenced inodes from the cache before checking.
+    // Inodes with refcount == 0 are kept for performance but must be
+    // evicted to allow clean unmounting.
+    __vfs_evict_unused_inodes(sb);
+
+    // Superblock should have no active inodes except the root inode.
+    // The root inode is expected to still be in the cache - it will be
+    // removed and freed below.
+    size_t remaining_inodes = hlist_len(&sb->inodes);
+    if (remaining_inodes > 1) {
+        printf("vfs_unmount: remaining inodes=%lu (expected 1 for root)\n",
+               remaining_inodes);
+        return -EBUSY; // There are still active inodes besides root
+    }
+    // Verify the only remaining inode is the root
+    if (remaining_inodes == 1) {
+        struct vfs_inode *only_inode =
+            HLIST_FIRST_NODE(&sb->inodes, struct vfs_inode, hash_entry);
+        if (only_inode != mounted_inode) {
+            printf("vfs_unmount: remaining inode is not root (ino=%lu)\n",
+                   only_inode->ino);
+            return -EBUSY;
+        }
+    }
+
+    // Note: Do NOT call destroy_inode on the root inode during unmount!
+    // destroy_inode frees on-disk data (marks inode type=0), which would
+    // corrupt the filesystem. We just need to clean up in-memory state.
+    mounted_inode->valid = 0;
+    vfs_remove_inode(sb, mounted_inode);
+
+    // Detach superblock from filesystem type
+    __vfs_detach_superblock_from_fstype(sb);
+    // Clear mountpoint
+    __vfs_clear_mountpoint(mountpoint);
+
+    // Unlock root inode before freeing
+    vfs_iunlock(mounted_inode);
+    // Free the root inode (the one ref from __vfs_set_mountpoint's vfs_idup
+    // plus the initial ref from creation - we free directly since it's already
+    // removed from cache)
+    mounted_inode->ops->free_inode(mounted_inode);
+    sb->root_inode = NULL;
+
+    // Free the superblock (caller must release sb lock before this)
+    struct vfs_fs_type *fs_type = sb->fs_type;
+    vfs_superblock_unlock(sb);
+
+    // Release mountpoint lock and put the reference from __vfs_turn_mountpoint
+    vfs_iunlock(mountpoint);
+    if (mountpoint != &vfs_root_inode && mountpoint->sb != NULL) {
+        vfs_superblock_unlock(mountpoint->sb);
+    }
+    // vfs_root_inode has no superblock, skip iput for it
+    if (mountpoint != &vfs_root_inode) {
+        vfs_iput(mountpoint);
+    }
+
+    fs_type->ops->free(sb);
+
+    return 0; // Successfully unmounted
+}
+
+/*
+ * vfs_remount - Change mount flags/options of an already-mounted filesystem.
+ *
+ * Locking:
+ *   - Caller holds vfs_mount_lock().
+ *   - Caller holds the superblock write lock of the mounted filesystem.
+ *   - Caller holds the mounted root inode mutex.
+ *
+ * Returns:
+ *   - 0 on success or negative errno on failure.
+ */
+int vfs_remount(struct vfs_inode *mounted_root, int flags, const char *data) {
+    if (mounted_root == NULL) {
+        return -EINVAL;
+    }
+    if (!holding_mutex(&__mount_mutex)) {
+        return -EPERM;
+    }
+    if (!vfs_inode_is_local_root(mounted_root)) {
+        return -EINVAL; // Not a filesystem root
+    }
+
+    struct vfs_superblock *sb = mounted_root->sb;
+    if (sb == NULL || !sb->valid) {
+        return -EINVAL;
+    }
+    if (!vfs_superblock_wholding(sb)) {
+        return -EPERM;
+    }
+
+    /* Let the filesystem driver apply the new flags if it has a remount op */
+    int ret = 0;
+    if (sb->ops && sb->ops->remount) {
+        ret = sb->ops->remount(sb, flags, data);
+    }
+
+    return ret;
+}
+
+/*
+ * vfs_move_mount - Atomically move a mounted filesystem from old_mountpoint
+ *                  to new_mountpoint.
+ *
+ * Locking:
+ *   - Caller holds vfs_mount_lock().
+ *   - Caller holds write locks on both parent superblocks.
+ *   - Caller holds both mountpoint inode mutexes.
+ *   - Caller holds the child superblock write lock.
+ *
+ * The old mountpoint is cleared and the new mountpoint is set up.
+ * The superblock is detached from old and re-attached to new.
+ *
+ * Returns:
+ *   - 0 on success or negative errno on failure.
+ */
+int vfs_move_mount(struct vfs_inode *old_mountpoint,
+                   struct vfs_inode *new_mountpoint) {
+    int ret;
+
+    if (old_mountpoint == NULL || new_mountpoint == NULL) {
+        return -EINVAL;
+    }
+    if (!holding_mutex(&__mount_mutex)) {
+        return -EPERM;
+    }
+    if (!old_mountpoint->mount) {
+        printf("vfs_move_mount: old path is not a mountpoint\n");
+        return -EINVAL;
+    }
+
+    struct vfs_superblock *sb = old_mountpoint->mnt_sb;
+    if (sb == NULL) {
+        return -EINVAL;
+    }
+    if (!vfs_superblock_wholding(sb)) {
+        return -EPERM;
+    }
+
+    /* Validate new mountpoint */
+    if (!S_ISDIR(new_mountpoint->mode)) {
+        printf("vfs_move_mount: new target is not a directory\n");
+        return -ENOTDIR;
+    }
+    if (new_mountpoint->mount) {
+        printf("vfs_move_mount: new target is already a mountpoint\n");
+        return -EBUSY;
+    }
+    if (vfs_inode_is_local_root(new_mountpoint)) {
+        printf("vfs_move_mount: cannot move onto a filesystem root\n");
+        return -EBUSY;
+    }
+
+    /* Turn new_mountpoint into a mountpoint */
+    ret = __vfs_turn_mountpoint(new_mountpoint);
+    if (ret != 0) {
+        printf("vfs_move_mount: failed to turn new mountpoint, errno=%d\n",
+               ret);
+        return ret;
+    }
+
+    /*
+     * Detach from old mountpoint:
+     * Clear the old mountpoint's mount flag and decrement the old parent
+     * superblock's mount_count.
+     */
+    sb->mountpoint = NULL;
+    __vfs_clear_mountpoint(old_mountpoint);
+
+    /* Attach to new mountpoint */
+    __vfs_set_mountpoint(sb, new_mountpoint);
+
+    return 0;
+}
+
+/*
+ * vfs_make_orphan - Mark an inode as orphan when it's unlinked but still
+ * referenced.
+ *
+ * Locking:
+ *   - Caller must hold the superblock write lock.
+ *   - Caller must hold the inode mutex.
+ *
+ * Returns:
+ *   - 0 on success, negative errno on failure.
+ */
+int vfs_make_orphan(struct vfs_inode *inode) {
+    if (inode == NULL) {
+        return -EINVAL;
+    }
+    struct vfs_superblock *sb = inode->sb;
+    if (sb == NULL) {
+        return -EINVAL;
+    }
+
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Must hold sb wlock to make orphan");
+    VFS_INODE_ASSERT_HOLDING(inode, "Must hold inode lock to make orphan");
+
+    if (inode->orphan) {
+        return 0; // Already orphan
+    }
+    if (inode->n_links != 0) {
+        return -EINVAL; // Not unlinked yet
+    }
+
+    inode->orphan = 1;
+    list_node_push(&sb->orphan_list, inode, orphan_entry);
+    sb->orphan_count++;
+
+    // For backend fs: persist to on-disk orphan journal
+    if (sb->ops->add_orphan) {
+        int ret = sb->ops->add_orphan(sb, inode);
+        if (ret != 0) {
+            // Log error but continue - worst case is block leak on crash
+            printf(
+                "vfs: warning: failed to persist orphan inode %lu, errno=%d\n",
+                inode->ino, ret);
+        }
+    }
+
+    return 0;
+}
+
+/*
+ * __vfs_final_unmount_cleanup - Final cleanup after all orphans are gone.
+ *
+ * Called from vfs_iput when the last orphan inode is freed on a detached fs.
+ * This function frees the superblock and its resources.
+ */
+void __vfs_final_unmount_cleanup(struct vfs_superblock *sb) {
+    if (sb == NULL) {
+        return;
+    }
+
+    // Must be detached with no orphans
+    assert(!sb->attached, "__vfs_final_unmount_cleanup: sb still attached");
+    assert(sb->orphan_count == 0,
+           "__vfs_final_unmount_cleanup: orphans remain");
+
+    vfs_mount_lock();
+    vfs_superblock_wlock(sb);
+
+    // Detach from fs_type if still registered
+    if (sb->registered) {
+        __vfs_detach_superblock_from_fstype(sb);
+    }
+
+    // Free root inode if not already freed
+    if (sb->root_inode != NULL) {
+        struct vfs_inode *rooti = sb->root_inode;
+        vfs_ilock(rooti);
+        if (rooti->ops->destroy_inode) {
+            rooti->ops->destroy_inode(rooti);
+        }
+        rooti->valid = 0;
+        vfs_remove_inode(sb, rooti);
+        vfs_iunlock(rooti);
+        rooti->ops->free_inode(rooti);
+        sb->root_inode = NULL;
+    }
+
+    struct vfs_fs_type *fs_type = sb->fs_type;
+    vfs_superblock_unlock(sb);
+    vfs_mount_unlock();
+
+    // Free superblock
+    fs_type->ops->free(sb);
+}
+
+/*
+ * vfs_unmount_lazy - Detach filesystem immediately, defer cleanup.
+ *
+ * Locking:
+ *   - Caller holds vfs_mount_lock().
+ *   - Caller holds the parent superblock write lock.
+ *   - Caller holds the mountpoint inode mutex.
+ *
+ * Returns:
+ *   - 0 on success (filesystem detached, cleanup may be deferred).
+ *   - -EBUSY if child mounts exist.
+ *   - Other negative errno on failure.
+ */
+int vfs_unmount_lazy(struct vfs_inode *mountpoint) {
+    struct vfs_superblock *sb = NULL;
+    struct vfs_superblock *parent_sb = NULL;
+    struct vfs_inode *rooti = NULL;
+    int ret = 0;
+
+    if (mountpoint == NULL) {
+        return -EINVAL;
+    }
+
+    if (!holding_mutex(&__mount_mutex)) {
+        return -EPERM;
+    }
+    if (!holding_mutex(&mountpoint->mutex)) {
+        return -EPERM;
+    }
+
+    parent_sb = mountpoint->sb;
+    if (parent_sb != NULL && !vfs_superblock_wholding(parent_sb)) {
+        return -EPERM;
+    }
+
+    ret = __vfs_inode_valid(mountpoint);
+    if (ret != 0) {
+        return ret;
+    }
+
+    if (!S_ISDIR(mountpoint->mode)) {
+        return -ENOTDIR;
+    }
+    if (!mountpoint->mount) {
+        return -EINVAL;
+    }
+
+    sb = mountpoint->mnt_sb;
+    if (sb == NULL) {
+        return -EINVAL;
+    }
+
+    // Phase 1: Check for child mounts
+    vfs_superblock_wlock(sb);
+
+    if (vfs_superblock_mountcount(sb) > 0) {
+        vfs_superblock_unlock(sb);
+        return -EBUSY; // Child mounts exist
+    }
+
+    // Set unmounting flag to block new operations
+    sb->unmounting = 1;
+
+    // Phase 2: Detach from mount tree
+    __vfs_clear_mountpoint(mountpoint);
+    sb->mountpoint = NULL;
+    sb->parent_sb = NULL;
+    sb->attached = 0;
+    sb->valid = 0; // Prevent new lookups
+
+    // Unlock and put mountpoint now that we've detached
+    vfs_iunlock(mountpoint);
+    if (mountpoint != &vfs_root_inode && mountpoint->sb != NULL) {
+        vfs_superblock_unlock(mountpoint->sb);
+    }
+    // Put the reference from __vfs_turn_mountpoint (deferred until locks
+    // released) vfs_root_inode has no superblock, skip iput for it
+    if (mountpoint != &vfs_root_inode) {
+        vfs_iput(mountpoint);
+    }
+
+    // Phase 3: Sync if needed (for backend filesystems)
+    if (!sb->backendless && sb->dirty) {
+        sb->syncing = 1;
+        ret = sb->ops->sync_fs(sb, 1);
+        sb->syncing = 0;
+        if (ret != 0) {
+            printf("vfs_unmount_lazy: warning: sync failed, errno=%d\n", ret);
+        }
+    }
+
+    // Call unmount_begin callback
+    if (sb->ops->unmount_begin) {
+        sb->ops->unmount_begin(sb);
+    }
+
+    // Phase 4: Mark all referenced inodes as orphans
+    // Walk the inode hash and mark referenced inodes as orphans
+    rooti = sb->root_inode;
+    struct vfs_inode *inode, *tmp_inode;
+    hlist_foreach_node_safe(&sb->inodes, inode, tmp_inode, hash_entry) {
+        if (inode != rooti && inode->ref_count > 0) {
+            // Mark as orphan - will be cleaned up when last ref drops
+            if (!inode->orphan) {
+                vfs_ilock(inode);
+                inode->orphan = 1;
+                list_node_push(&sb->orphan_list, inode, orphan_entry);
+                sb->orphan_count++;
+                vfs_iunlock(inode);
+            }
+        }
+    }
+
+    // Phase 5: Check if immediate cleanup possible
+    if (sb->orphan_count == 0) {
+        // No orphans - cleanup immediately
+        __vfs_detach_superblock_from_fstype(sb);
+
+        // Free root inode
+        if (rooti != NULL) {
+            vfs_ilock(rooti);
+            if (rooti->ops->destroy_inode) {
+                rooti->ops->destroy_inode(rooti);
+            }
+            rooti->valid = 0;
+            vfs_remove_inode(sb, rooti);
+            vfs_iunlock(rooti);
+            rooti->ops->free_inode(rooti);
+            sb->root_inode = NULL;
+        }
+
+        struct vfs_fs_type *fs_type = sb->fs_type;
+        vfs_superblock_unlock(sb);
+        fs_type->ops->free(sb);
+    } else {
+        // Orphans exist - cleanup deferred to vfs_iput
+        vfs_superblock_unlock(sb);
+    }
+
+    return 0;
+}
+
+/*
+ * vfs_get_mnt_rooti - Fetch the root inode of a mountpoint.
+ *
+ * Locking:
+ *   - Caller should not hold inode or superblock locks of the mounted
+ * filesystem;
+ *   - Caller should not hold the mountpoint inode lock;
+ *   - Caller should hold the parent superblock read lock.
+ *   - After returning, caller should release the parent superblock lock,
+ * acquire the mounted superblock lock and the root inode lock, and verify the
+ * returned inode is still valid.
+ *
+ * Returns:
+ *   - 0 with *ret_rooti referencing the root inode (refcount incremented,
+ * unlocked).
+ *   - Negative errno on failure.
+ *
+ * Notes:
+ *   - Callers must drop the inode via vfs_iput() and verify the inode's
+ *     valid flag before invoking callbacks.
+ */
+int vfs_get_mnt_rooti(struct vfs_inode *mountpoint,
+                      struct vfs_inode **ret_rooti) {
+    if (mountpoint == NULL || ret_rooti == NULL) {
+        return -EINVAL; // Invalid arguments
+    }
+    int ret_val = 0;
+    struct vfs_superblock *sb = NULL;
+    struct vfs_inode *rooti = NULL;
+    vfs_ilock(mountpoint);
+    ret_val = __vfs_dir_inode_valid_holding(mountpoint);
+    if (ret_val != 0) {
+        vfs_iunlock(mountpoint);
+        return ret_val; // Mountpoint inode is not valid
+    }
+    if (!S_ISDIR(mountpoint->mode)) {
+        vfs_iunlock(mountpoint);
+        return -ENOTDIR; // Mountpoint must be a directory
+    }
+    if (!mountpoint->mount) {
+        vfs_iunlock(mountpoint);
+        return -EINVAL; // Inode is not a mountpoint
+    }
+    if ((sb = mountpoint->mnt_sb) == NULL) {
+        vfs_iunlock(mountpoint);
+        return -EINVAL; // Mountpoint has no mounted superblock
+    }
+    if ((rooti = sb->root_inode) == NULL) {
+        vfs_iunlock(mountpoint);
+        return -EINVAL; // Mounted superblock has no root inode
+    }
+    // Take a reference to root inode BEFORE unlocking mountpoint.
+    // Use vfs_idup_not_zero since we don't hold a reference yet.
+    if (!vfs_idup_not_zero(rooti)) {
+        vfs_iunlock(mountpoint);
+        return -EINVAL; // Root inode is being freed
+    }
+    vfs_iunlock(mountpoint);
+
+    // Now we hold a reference, safe to lock
+    vfs_ilock(rooti);
+    *ret_rooti = rooti;
+    return ret_val;
+}
+
+/*
+ * vfs_superblock_rlock - Acquire a superblock read lock.
+ *
+ * Locking:
+ *   - None; acquires the lock when sb != NULL.
+ */
+void vfs_superblock_rlock(struct vfs_superblock *sb) {
+    if (sb) {
+        rwsem_acquire_read(&sb->lock);
+    }
+}
+
+/*
+ * vfs_superblock_wlock - Acquire a superblock write lock.
+ *
+ * Locking:
+ *   - None; acquires the lock when sb != NULL.
+ */
+void vfs_superblock_wlock(struct vfs_superblock *sb) {
+    if (sb) {
+        rwsem_acquire_write(&sb->lock);
+    }
+}
+
+/*
+ * vfs_superblock_wholding - Test whether the caller holds the write lock.
+ *
+ * Locking:
+ *   - None.
+ */
+bool vfs_superblock_wholding(struct vfs_superblock *sb) {
+    if (!sb) {
+        return false;
+    }
+    return rwsem_is_write_holding(&sb->lock);
+}
+
+/*
+ * vfs_superblock_unlock - Release a previously acquired superblock lock.
+ *
+ * Locking:
+ *   - Caller must hold the read or write lock.
+ */
+void vfs_superblock_unlock(struct vfs_superblock *sb) {
+    if (sb) {
+        rwsem_release(&sb->lock);
+    }
+}
+
+// VFS superblock spinlock protects simple fields that need atomic access
+void vfs_superblock_spin_lock(struct vfs_superblock *sb) {
+    assert(sb != NULL, "Superblock cannot be NULL when acquiring spinlock");
+    spin_lock(&sb->spinlock);
+}
+
+void vfs_superblock_spin_unlock(struct vfs_superblock *sb) {
+    assert(sb != NULL, "Superblock cannot be NULL when releasing spinlock");
+    spin_unlock(&sb->spinlock);
+}
+
+void vfs_superblock_mountcount_inc(struct vfs_superblock *sb) {
+    assert(sb != NULL,
+           "Superblock cannot be NULL when incrementing mount count");
+    int cnt = __atomic_add_fetch(&sb->mount_count, 1, __ATOMIC_SEQ_CST);
+    assert(cnt > 0, "Superblock mount count overflow");
+}
+
+void vfs_superblock_mountcount_dec(struct vfs_superblock *sb) {
+    assert(sb != NULL,
+           "Superblock cannot be NULL when decrementing mount count");
+    int cnt = __atomic_sub_fetch(&sb->mount_count, 1, __ATOMIC_SEQ_CST);
+    assert(cnt >= 0, "Superblock mount count underflow");
+    // Note: We don't call vfs_superblock_put here because mount count and
+    // refcount are independent. The mount count tracks child mounts, not
+    // references to the superblock itself.
+}
+
+/**
+ * Increment superblock reference count.
+ *
+ * SAFETY: This function uses only atomic operations and does NOT:
+ * - Acquire any locks
+ * - Sleep or block
+ * - Allocate memory
+ *
+ * This is critical because vfs_inode_get_ref() may call this while
+ * holding the inode lock. Any blocking here would risk deadlock.
+ */
+void vfs_superblock_dup(struct vfs_superblock *sb) {
+    assert(sb != NULL, "Superblock cannot be NULL when duplicating");
+    int ret = __atomic_add_fetch(&sb->refcount, 1, __ATOMIC_SEQ_CST);
+    assert(ret > 0, "Superblock refcount overflow");
+}
+
+void vfs_superblock_put(struct vfs_superblock *sb) {
+    assert(sb != NULL, "Superblock cannot be NULL when putting");
+    assert(!vfs_superblock_wholding(sb),
+           "Cannot put superblock while holding its lock");
+    assert(!holding_mutex(&__mount_mutex),
+           "Cannot put superblock while holding mount mutex");
+    assert(atomic_dec_unless(&sb->refcount, 0),
+           "Superblock refcount underflow");
+}
+
+/*
+ * vfs_alloc_inode - Ask the filesystem to allocate a new inode object.
+ *
+ * Locking:
+ *   - Caller must hold the superblock write lock.
+ *
+ * Returns:
+ *   - inode* (locked) on success with refcount=1, or ERR_PTR(errno).
+ *
+ * EAGAIN Retry Logic:
+ *   This function may return -EAGAIN if the newly allocated inode number
+ *   collides with an inode that is currently being destroyed (has
+ * destroying=1).
+ *
+ *   When the caller receives -EAGAIN, it MUST:
+ *     1. Release the directory inode mutex (vfs_iunlock)
+ *     2. Release the superblock write lock (vfs_superblock_unlock)
+ *     3. End any active transaction (end_transaction)
+ *     4. Yield to let the destroying thread complete
+ *     5. Retry the entire operation from the beginning (re-acquire transaction,
+ *        superblock lock, and inode mutex in that order)
+ *
+ *   This ordering is critical to avoid deadlock:
+ *     - Lock order: transaction → superblock lock → inode mutex
+ *     - The destroying thread releases locks BEFORE calling begin_transaction
+ *     - If we hold locks while waiting for the destroying thread, and it's
+ *       waiting for a transaction held by someone waiting for our locks,
+ *       we have a circular dependency (deadlock)
+ *
+ *   Callers that handle -EAGAIN: vfs_create, vfs_mknod, vfs_mkdir, vfs_symlink
+ */
+struct vfs_inode *vfs_alloc_inode(struct vfs_superblock *sb) {
+    if (sb == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
+    }
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(
+        sb, "vfs_alloc_inode: must hold superblock write lock");
+    if (!sb->valid) {
+        return ERR_PTR(-EINVAL); // Superblock is not valid
+    }
+    if (sb->ops == NULL || sb->ops->alloc_inode == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+    struct vfs_inode *inode = sb->ops->alloc_inode(sb);
+    if (inode == NULL) {
+        return ERR_PTR(-ENOMEM);
+    }
+    if (IS_ERR(inode)) {
+        return inode;
+    }
+    if (inode->ops == NULL || inode->ops->free_inode == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+    __vfs_inode_init(inode);
+    struct vfs_inode *existing = vfs_add_inode(sb, inode);
+    if (IS_ERR_OR_NULL(existing)) {
+        if (PTR_ERR(existing) == -EAGAIN) {
+            // An inode with the same number is being destroyed.
+            // Return EAGAIN to caller - caller must release all locks
+            // (including inode mutex and transaction) before retrying, to avoid
+            // deadlock.
+            inode->ops->free_inode(inode);
+            return ERR_PTR(-EAGAIN);
+        }
+        inode->ops->free_inode(inode);
+        if (existing == NULL) {
+            return ERR_PTR(-ENOENT); // Failed to add inode
+        }
+        return existing;
+    }
+    return inode; // locked
+}
+
+/*
+ * vfs_get_inode - Load an inode from the filesystem driver.
+ *
+ * Locking:
+ *   - Caller must hold the superblock write lock.
+ *   - On success, the returned inode is locked and its refcount is set to 1.
+ *
+ * Returns:
+ *   - inode* (locked) on success or ERR_PTR(errno) on failure.
+ *
+ * EAGAIN Retry Logic:
+ *   This function may return -EAGAIN if the requested inode is currently
+ *   being destroyed (has destroying=1 set by vfs_iput).
+ *
+ *   When the caller receives -EAGAIN, it MUST:
+ *     1. Release any held inode mutexes
+ *     2. Release the superblock write lock
+ *     3. End any active transaction
+ *     4. Yield to let the destroying thread complete
+ *     5. Retry the entire operation from the beginning
+ *
+ *   See vfs_alloc_inode documentation for detailed deadlock explanation.
+ */
+struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
+    if (sb == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
+    }
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(
+        sb, "vfs_get_inode: must hold superblock write lock");
+    if (!sb->valid) {
+        return ERR_PTR(-EINVAL); // Superblock is not valid
+    }
+    if (sb->ops == NULL || sb->ops->get_inode == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+    struct vfs_inode *inode = sb->ops->get_inode(sb, ino);
+    if (inode == NULL) {
+        return ERR_PTR(-ENOENT);
+    }
+    if (IS_ERR(inode)) {
+        return inode;
+    }
+    if (inode->ops == NULL || inode->ops->free_inode == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+    __vfs_inode_init(inode);
+    struct vfs_inode *existing = vfs_add_inode(sb, inode);
+    if (IS_ERR_OR_NULL(existing)) {
+        if (PTR_ERR(existing) == -EAGAIN) {
+            // An inode with the same number is being destroyed.
+            // Return EAGAIN to caller - caller must release all locks
+            // (including inode mutex and transaction) before retrying, to avoid
+            // deadlock.
+            inode->ops->free_inode(inode);
+            return ERR_PTR(-EAGAIN);
+        }
+        inode->ops->free_inode(inode);
+        if (existing == NULL) {
+            return ERR_PTR(-ENOENT); // Failed to add inode
+        }
+        return existing;
+    }
+    if (existing != inode) {
+        // Found existing inode in hash - free the newly loaded one
+        // The existing inode is already locked by vfs_add_inode
+        inode->ops->free_inode(inode);
+        return existing; // Return the existing inode (locked)
+    }
+    return inode; // locked
+}
+
+/*
+ * vfs_sync_superblock - Flush superblock metadata to backing storage.
+ *
+ * Locking:
+ *   - Caller must hold the superblock write lock.
+ *
+ * Returns:
+ *   - 0 on success or negative errno on failure.
+ */
+int vfs_sync_superblock(struct vfs_superblock *sb, int wait) {
+    if (sb == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(
+        sb, "vfs_sync_superblock: must hold superblock write lock");
+    if (!sb->valid) {
+        return -EINVAL; // Superblock is not valid
+    }
+    if (!sb->dirty) {
+        return 0; // Superblock is already clean
+    }
+    int ret = sb->ops->sync_fs(sb, wait);
+    if (ret == 0) {
+        sb->dirty = 0; // Mark superblock as clean
+    }
+    return ret;
+}
+
+/*
+ * vfs_get_fs_type - Look up a filesystem driver by name and take a reference.
+ *
+ * Locking:
+ *   - Caller must hold the mount mutex via vfs_mount_lock().
+ *
+ * Returns:
+ *   - Pointer to struct vfs_fs_type or NULL if not found.
+ */
+struct vfs_fs_type *vfs_get_fs_type(const char *name) {
+    if (name == NULL) {
+        return NULL;
+    }
+    assert(holding_mutex(&__mount_mutex),
+           "vfs_put_fs_type: must hold mount mutex");
+    struct vfs_fs_type *fs_type = __vfs_get_fs_type_locked(name);
+    if (fs_type != NULL) {
+        kobject_get(&fs_type->kobj); // Increase ref count
+    }
+    return fs_type;
+}
+
+/*
+ * vfs_put_fs_type - Drop a reference obtained via vfs_get_fs_type().
+ *
+ * Locking:
+ *   - Caller must hold the mount mutex via vfs_mount_lock().
+ */
+void vfs_put_fs_type(struct vfs_fs_type *fs_type) {
+    if (fs_type == NULL) {
+        return;
+    }
+    assert(holding_mutex(&__mount_mutex),
+           "vfs_put_fs_type: must hold mount mutex");
+    kobject_put(&fs_type->kobj); // Decrease ref count
+}
+
+/*
+ * __vfs_dentry_get_self_inode - Check if dentry->parent is the target inode and
+ * return it.
+ *
+ * For VFS-synthesized entries (e.g., "." or ".." across mount boundaries),
+ * dentry->parent may already reference the target inode. This helper checks
+ * that condition and returns the inode with an incremented refcount.
+ *
+ * Locking:
+ *   - None required; the parent inode is guaranteed to be alive as long as
+ *     the dentry is valid (VFS always caches ancestor directories).
+ *
+ * Returns:
+ *   - Inode pointer with refcount incremented if parent matches the target.
+ *   - NULL if parent is not set or does not match the target.
+ */
+static struct vfs_inode *
+__vfs_dentry_get_self_inode(struct vfs_dentry *dentry) {
+    if (dentry == NULL || dentry->parent == NULL) {
+        return NULL;
+    }
+    if (dentry->parent->sb == dentry->sb &&
+        dentry->parent->ino == dentry->ino) {
+        vfs_idup(dentry->parent);
+        return dentry->parent;
+    }
+    return NULL;
+}
+
+/*
+ * __vfs_set_parent_from_dentry - Set inode's parent pointer from dentry
+ * context.
+ *
+ * Called only on fresh inode load from disk. Directory inodes need their parent
+ * relationship for proper ".." traversal across mount boundaries. The parent
+ * is not stored on disk, so we derive it from the dentry used to look up the
+ * inode.
+ *
+ * Locking:
+ *   - Caller holds the inode lock.
+ */
+static void __vfs_set_parent_from_dentry(struct vfs_inode *inode,
+                                         struct vfs_inode *parent) {
+    // Only set parent for directories (parent is used for ".." traversal)
+    if (parent != NULL && S_ISDIR(inode->mode)) {
+        // Don't set parent to itself (that's a local root indicator)
+        if (inode != parent) {
+            inode->parent = parent;
+            vfs_idup(parent);
+        }
+    }
+}
+
+/*
+ * __vfs_set_name_if_null - Set inode's name from dentry if not already set.
+ *
+ * Directory inodes need their name for getcwd to build the path.
+ * The name may not be set if the inode was created (mkdir) and cached
+ * before being looked up via dentry resolution.
+ *
+ * Locking:
+ *   - Caller holds the inode lock.
+ */
+static void __vfs_set_name_if_null(struct vfs_inode *inode,
+                                   struct vfs_dentry *dentry) {
+    if (S_ISDIR(inode->mode) && inode->name == NULL && dentry->name != NULL &&
+        dentry->name_len > 0) {
+        inode->name = strndup(dentry->name, dentry->name_len);
+    }
+}
+
+/*
+ * __vfs_get_dentry_inode_impl - Internal helper to resolve a dentry to an
+ * inode.
+ *
+ * This is the core implementation that performs cache lookup and, if necessary,
+ * upgrades to a write lock to load the inode from disk. It does NOT check for
+ * VFS-synthesized self-references (dentry->parent == target); callers must
+ * handle that case before calling this function.
+ *
+ * Locking:
+ *   - Caller holds the dentry's superblock read lock on entry. This helper may
+ *     drop the read lock and acquire the write lock internally.
+ *
+ * Returns:
+ *   - Inode pointer on success with refcount incremented (inode unlocked).
+ *   - ERR_PTR(errno) on failure.
+ */
+static struct vfs_inode *
+__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) {
+    struct vfs_inode *inode = NULL;
+
+    // vfs_get_inode_cached now returns with refcount already incremented
+    inode = vfs_get_inode_cached(dentry->sb, dentry->ino);
+    if (!IS_ERR_OR_NULL(inode)) {
+        __vfs_set_name_if_null(inode, dentry);
+        vfs_iunlock(inode);
+        return inode;
+    }
+
+    if (PTR_ERR(inode) != -ENOENT) {
+        return inode;
+    }
+
+    if (!vfs_superblock_wholding(dentry->sb)) {
+        // Suppose holding read lock
+        vfs_superblock_unlock(dentry->sb);
+        vfs_superblock_wlock(dentry->sb);
+    }
+
+    if (!dentry->sb->valid) {
+        return ERR_PTR(-EINVAL);
+    }
+
+    inode = vfs_get_inode_cached(dentry->sb, dentry->ino);
+    if (!IS_ERR_OR_NULL(inode)) {
+        __vfs_set_name_if_null(inode, dentry);
+        vfs_iunlock(inode);
+        return inode;
+    }
+
+    if (PTR_ERR(inode) != -ENOENT) {
+        return inode;
+    }
+
+    inode = vfs_get_inode(dentry->sb, dentry->ino);
+    if (IS_ERR_OR_NULL(inode)) {
+        return inode;
+    }
+
+    // "." and ".." are synthesized by VFS and should always hit the cache
+    assert(
+        !(dentry->name_len == 1 && dentry->name[0] == '.'),
+        "__vfs_get_dentry_inode_impl: \".\" should not reach fresh load path");
+    assert(
+        !(dentry->name_len == 2 && dentry->name[0] == '.' &&
+          dentry->name[1] == '.'),
+        "__vfs_get_dentry_inode_impl: \"..\" should not reach fresh load path");
+
+    // Set parent and name on fresh load - directory inodes need these for ".."
+    // traversal
+    __vfs_set_parent_from_dentry(inode, dentry->parent);
+    __vfs_set_name_if_null(inode, dentry);
+    vfs_iunlock(inode);
+    return inode;
+}
+
+/*
+ * vfs_get_dentry_inode_locked - Resolve a dentry to an inode within a
+ * superblock, populating cache as needed.
+ *
+ * Locking:
+ *   - Caller holds the dentry's superblock read lock on entry. This helper may
+ *     drop the read lock and acquire the write lock internally.
+ *
+ * Returns:
+ *   - Inode pointer on success with refcount incremented (inode unlocked).
+ *   - ERR_PTR(errno) on failure.
+ *
+ * Notes:
+ *   - Callers must avoid holding inode locks that could deadlock with these
+ *     lock transitions and must release the inode via vfs_iput().
+ *   - For VFS-synthesized entries (e.g., "." or ".." across mount boundaries),
+ *     dentry->parent may already reference the target inode; this helper uses
+ *     that shortcut when available.
+ */
+struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
+    struct vfs_inode *inode = NULL;
+    if (dentry == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+    if (dentry->sb == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+
+    if (!dentry->sb->valid) {
+        return ERR_PTR(-EINVAL);
+    }
+
+    // Fast path: if dentry->parent is the target inode itself
+    // (e.g., "." or ".." synthesized by VFS for mount boundaries),
+    // just duplicate the reference instead of cache lookup
+    inode = __vfs_dentry_get_self_inode(dentry);
+    if (inode != NULL) {
+        return inode;
+    }
+
+    return __vfs_get_dentry_inode_impl(dentry);
+}
+
+/*
+ * vfs_get_dentry_inode - Resolve a dentry to an inode, handling
+ * cross-filesystem transitions.
+ *
+ * Locking:
+ *   - None required on entry; this helper acquires and releases the dentry's
+ *     superblock lock internally.
+ *
+ * Returns:
+ *   - Inode pointer on success with refcount incremented (inode unlocked).
+ *   - ERR_PTR(errno) on failure.
+ *
+ * Notes:
+ *   - Handles dentries from vfs_ilookup() and vfs_dir_iter(), including "." and
+ *     ".." entries that may cross filesystem boundaries (mount points).
+ *   - For cross-filesystem "..", dentry->sb points to the parent filesystem's
+ *     superblock, allowing correct resolution.
+ *   - Callers must release the inode via vfs_iput().
+ */
+struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
+    struct vfs_inode *inode = NULL;
+    if (dentry == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+    if (dentry->sb == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+
+    // Fast path: if dentry->parent is the target inode itself
+    // (e.g., "." or ".." synthesized by VFS for mount boundaries),
+    // just duplicate the reference without acquiring locks
+    inode = __vfs_dentry_get_self_inode(dentry);
+    if (inode != NULL) {
+        return inode;
+    }
+
+    vfs_superblock_rlock(dentry->sb);
+    if (!dentry->sb->valid) {
+        vfs_superblock_unlock(dentry->sb);
+        return ERR_PTR(-EINVAL);
+    }
+    inode = __vfs_get_dentry_inode_impl(dentry);
+    vfs_superblock_unlock(dentry->sb);
+    return inode;
+}
+
+/******************************************************************************
+ * Module scope private functions
+ *****************************************************************************/
+/*
+ * vfs_get_inode_cached - Lookup an inode in a superblock's in-memory cache.
+ *
+ * @sb:  Superblock to search.
+ * @ino: Inode number to look up.
+ *
+ * Locking:
+ *   - Caller holds the superblock read or write lock for the entire call.
+ *   - On success, the returned inode is locked; caller must call vfs_iunlock()
+ *     when done.
+ *
+ * Returns:
+ *   - A pointer to the cached inode (locked) on success.
+ *   - ERR_PTR(-ENOENT) if the inode is not cached or was invalidated.
+ *   - ERR_PTR(-EINVAL) if @sb is NULL or the superblock is not valid.
+ */
+struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
+    if (sb == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
+    }
+    if (!sb->valid) {
+        return ERR_PTR(-EINVAL); // Superblock is not valid
+    }
+    struct vfs_inode *inode = __vfs_inode_hash_get(sb, ino);
+    if (inode == NULL) {
+        return ERR_PTR(-ENOENT); // Inode not found
+    }
+    // CRITICAL: Take a reference BEFORE locking to prevent use-after-free.
+    // For backendless filesystems, inodes with refcount=0 but n_links>0 are
+    // kept alive in cache (see vfs_iput). We must allow bumping refcount from
+    // 0 in this case, otherwise the inode becomes inaccessible.
+    //
+    // For backend filesystems, a zombie inode (ref=0, valid=1, not destroying)
+    // can exist in the cache when vfs_iput did a dirty sync and hasn't yet
+    // re-acquired locks to evict it.  If we hold the sb write lock, we can
+    // safely revive it (the evicting thread needs sb wlock to proceed).
+    if (!vfs_idup_not_zero(inode)) {
+        if (inode->valid && !inode->destroying && inode->n_links > 0) {
+            if (sb->backendless || vfs_superblock_wholding(sb)) {
+                atomic_inc(&inode->ref_count);
+                // Remove from LRU — the inode was cached at ref=0
+                if (!LIST_NODE_IS_DETACHED(inode, lru_entry)) {
+                    list_node_detach(inode, lru_entry);
+                    sb->inode_lru_count--;
+                }
+            } else {
+                return ERR_PTR(-ENOENT); // Cannot safely revive without wlock
+            }
+        } else {
+            return ERR_PTR(-ENOENT); // Inode is dying
+        }
+    }
+    vfs_ilock(inode);
+    if (!inode->valid || inode->destroying) {
+        // Inode should be valid when first gotten from the cache,
+        // but it may have been invalidated or is being destroyed.
+        // Release the reference we just took. We can't call vfs_iput here
+        // because caller may hold superblock wlock. Queue to workqueue instead.
+        vfs_iunlock(inode);
+        __vfs_queue_deferred_iput(inode);
+        return ERR_PTR(-ENOENT); // Inode is not valid or being destroyed
+    }
+    // Return with reference held and inode locked
+    return inode;
+}
+
+/*
+ * vfs_add_inode - Insert a newly loaded inode into the cache.
+ *
+ * @sb:    Superblock that owns the inode cache.
+ * @inode: Newly allocated inode to insert (must have inode->ino set,
+ *         inode->sb == NULL, and inode->valid == 0).
+ *
+ * If an inode with the same number already exists in the cache, the existing
+ * inode is returned instead and @inode is left unchanged (caller should free
+ * it).
+ *
+ * Locking:
+ *   - Caller holds the superblock write lock.
+ *   - On success, the returned inode is locked; caller must call vfs_iunlock()
+ *     when done.
+ *
+ * Returns:
+ *   - A pointer to the canonical inode (locked) on success. This is @inode
+ *     itself if newly inserted, or the pre-existing cached inode if a
+ *     duplicate was found.
+ *   - ERR_PTR(-EINVAL) if @sb or @inode is NULL, the superblock is invalid,
+ *     @inode->sb is already set, or @inode->valid is already true.
+ */
+struct vfs_inode *vfs_add_inode(struct vfs_superblock *sb,
+                                struct vfs_inode *inode) {
+    if (sb == NULL || inode == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
+    }
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(
+        sb, "Superblock lock must be write held to add inode");
+    if (!sb->valid && sb->initialized) {
+        return ERR_PTR(-EINVAL); // Superblock is not valid
+    }
+    if (inode->sb != NULL) {
+        return ERR_PTR(-EINVAL); // Inode's superblock does not match
+    }
+    if (inode->valid) {
+        return ERR_PTR(-EINVAL); // Inode to add must not be valid yet
+    }
+    struct vfs_inode *existing = __vfs_inode_hash_get(sb, inode->ino);
+    if (existing != NULL) {
+        // Check if the existing inode is being destroyed.
+        // We check the flag WITHOUT locking the inode to avoid deadlock:
+        // - vfs_iput holds inode lock, releases sb lock, calls destroy_inode
+        // - We hold sb lock, if we tried to lock inode we'd deadlock
+        // The destroying flag is set while holding sb lock + inode lock,
+        // so if it's set and we hold sb lock, the destroying thread has
+        // released sb lock and is in destroy_inode.
+        if (existing->destroying) {
+            // Inode is being destroyed. The destroying thread will remove it
+            // from cache once it re-acquires sb lock (which we currently hold).
+            // Return EAGAIN so caller can release sb lock and retry.
+            return ERR_PTR(-EAGAIN);
+        }
+        // When existing inode is found and not being destroyed, lock and return
+        // it
+        vfs_ilock(existing);
+        // Double-check after locking in case it started destroying
+        if (existing->destroying || !existing->valid) {
+            vfs_iunlock(existing);
+            return ERR_PTR(-EAGAIN);
+        }
+        // Ensure caller gets a proper reference.  For backend filesystems
+        // the inode may be cached at ref_count=0 (zombie awaiting eviction
+        // after dirty sync in vfs_iput).  We hold sb wlock + inode lock so
+        // the inode cannot be freed underneath us.
+        if (existing->ref_count == 0) {
+            existing->ref_count = 1;
+            // Remove from LRU — the inode was cached at ref=0
+            if (!LIST_NODE_IS_DETACHED(existing, lru_entry)) {
+                list_node_detach(existing, lru_entry);
+                sb->inode_lru_count--;
+            }
+        } else {
+            vfs_idup(existing);
+        }
+        return existing; // Inode with the same number already exists
+    }
+    struct vfs_inode *popped = __vfs_inode_hash_add(sb, inode);
+    if (popped != NULL) {
+        // At this point, something is wrong in the hash list implementation
+        panic("vfs_add_inode: inode hash add returned existing inode "
+              "unexpectedly");
+    }
+    inode->valid = 1; // Mark inode as valid
+    inode->sb = sb;   // Associate inode with superblock
+    vfs_ilock(inode);
+    return inode;
+}
+
+/*
+ * vfs_remove_inode - Drop an inode from the cache and mark it invalid.
+ *
+ * Locking:
+ *   - Caller holds the superblock write lock and the inode mutex.
+ *
+ * Returns:
+ *   - 0 on success or negative errno on failure.
+ */
+int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode) {
+    if (sb == NULL || inode == NULL) {
+        return -EINVAL; // Invalid arguments
+    }
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(
+        sb, "Superblock lock must be write held to remove inode");
+    VFS_INODE_ASSERT_HOLDING(inode, "Inode lock must be held to remove inode");
+    // Allow removal from detached superblocks (lazy unmount cleanup)
+    if (!sb->valid && sb->attached) {
+        return -EINVAL; // Superblock is not valid and still attached
+    }
+
+    // If inode was already destroyed (n_links == 0 and destroy_inode called),
+    // valid is already 0. Just remove from hash and clear sb.
+    bool already_destroyed = !inode->valid;
+
+    struct vfs_inode *existing = __vfs_inode_hash_get(sb, inode->ino);
+    if (existing == NULL) {
+        return -ENOENT; // Inode not found in cache
+    }
+    if (existing != inode) {
+        return -ENOENT; // Inode to remove does not match the cached inode
+    }
+    struct vfs_inode *popped = hlist_pop(&sb->inodes, inode);
+    if (popped != inode) {
+        // At this point, something is wrong in the hash list implementation
+        panic("vfs_remove_inode: inode hash pop returned unexpected inode");
+    }
+
+    if (!already_destroyed) {
+        // Normal cache eviction - mark invalid but data may still be on disk
+        inode->valid = 0;
+    }
+    // For destroyed inodes, valid is already 0
+
+    inode->sb = NULL; // Disassociate inode from superblock
+    return 0;
+}
+
+void vfs_release_dentry(struct vfs_dentry *dentry) {
+    if (dentry == NULL) {
+        return;
+    }
+    if (dentry->name) {
+        kvfree(dentry->name);
+        dentry->name = NULL;
+        dentry->name_len = 0;
+    }
+}
+
+struct fs_struct *vfs_struct_init(void) {
+    struct fs_struct *fs = __vfs_struct_alloc_init();
+    assert(fs != NULL, "idle_thread_init: failed to create fs_struct");
+    smp_store_release(&fs->ref_count, 1);
+    spin_init(&fs->lock, "fs_struct_lock");
+    fs->rooti.sb = NULL;
+    fs->rooti.inode = NULL;
+    fs->cwd.sb = NULL;
+    fs->cwd.inode = NULL;
+    return fs;
+}
+
+struct fs_struct *vfs_struct_clone(struct fs_struct *old_fs,
+                                   uint64 clone_flags) {
+    if (old_fs == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+
+    if (clone_flags & CLONE_FS) {
+        // share the fs_struct
+        atomic_inc(&old_fs->ref_count);
+        return old_fs;
+    }
+
+    struct fs_struct *new_fs = __vfs_struct_alloc_init();
+    if (new_fs == NULL) {
+        return ERR_PTR(-ENOMEM);
+    }
+
+    // Get inode pointers under spinlock, but take references outside
+    // (vfs_inode_get_ref may acquire inode mutex, can't hold spinlock)
+    vfs_struct_lock(old_fs);
+    struct vfs_inode *rooti = vfs_inode_deref(&old_fs->rooti);
+    struct vfs_inode *cwdi = vfs_inode_deref(&old_fs->cwd);
+    // Take temporary references while holding spinlock to keep them alive
+    // (these are atomic ops, safe under spinlock)
+    // Use vfs_idup_not_zero since the inodes might be dying during exit
+    bool rooti_ok = rooti && vfs_idup_not_zero(rooti);
+    bool cwdi_ok = cwdi && vfs_idup_not_zero(cwdi);
+    vfs_struct_unlock(old_fs);
+
+    // Now get the full refs outside spinlock
+    int ret = 0;
+    if (rooti_ok) {
+        ret = vfs_inode_get_ref(rooti, &new_fs->rooti);
+        vfs_iput(rooti); // release temporary ref
+        if (ret != 0) {
+            if (cwdi_ok)
+                vfs_iput(cwdi);
+            goto out_free;
+        }
+    }
+    if (cwdi_ok) {
+        ret = vfs_inode_get_ref(cwdi, &new_fs->cwd);
+        vfs_iput(cwdi); // release temporary ref
+        if (ret != 0) {
+            goto out_free;
+        }
+    }
+    ret = 0;
+    return new_fs;
+
+out_free:
+    vfs_inode_put_ref(&new_fs->rooti);
+    vfs_inode_put_ref(&new_fs->cwd);
+    __vfs_struct_free(new_fs);
+    return ERR_PTR(ret);
+}
+
+void vfs_struct_put(struct fs_struct *fs) {
+    if (fs == NULL) {
+        return;
+    }
+    if (!atomic_dec_unless(&fs->ref_count, 1)) {
+        // Release root and cwd inodes
+        vfs_inode_put_ref(&fs->rooti);
+        vfs_inode_put_ref(&fs->cwd);
+        __vfs_struct_free(fs);
+    }
+}
+
+/**
+ * Get a reference to an inode, storing it in the provided ref structure.
+ *
+ * The caller must already hold a valid reference to the inode.
+ * This function simply takes an additional reference and populates
+ * the ref structure.
+ *
+ * @param inode The inode to reference (caller must hold a reference)
+ * @param ref   Output: the inode reference structure to populate
+ * @return 0 on success, -EINVAL if inode is NULL
+ */
+int vfs_inode_get_ref(struct vfs_inode *inode, struct vfs_inode_ref *ref) {
+    if (inode == NULL || ref == NULL) {
+        return -EINVAL;
+    }
+    struct vfs_superblock *sb = inode->sb;
+    if (sb == NULL) {
+        return -EINVAL;
+    }
+    // Caller must already hold a reference, so these can't fail
+    vfs_superblock_dup(sb);
+    vfs_idup(inode);
+    ref->sb = sb;
+    ref->inode = inode;
+    return 0;
+}
+
+void vfs_inode_put_ref(struct vfs_inode_ref *ref) {
+    if (ref == NULL) {
+        return;
+    }
+    if (ref->inode) {
+        vfs_iput(ref->inode);
+        ref->inode = NULL;
+    }
+    if (ref->sb) {
+        vfs_superblock_put(ref->sb);
+        ref->sb = NULL;
+    }
+}
+
+struct vfs_inode *vfs_inode_deref(struct vfs_inode_ref *ref) {
+    if (ref == NULL) {
+        return NULL;
+    }
+    return ref->inode;
+}
+
+/******************************************************************************
+ * Debug: Dump all active inodes
+ ******************************************************************************/
+
+static const char *__inode_mode_str(mode_t mode) {
+    if (S_ISDIR(mode))
+        return "DIR";
+    if (S_ISREG(mode))
+        return "REG";
+    if (S_ISLNK(mode))
+        return "LNK";
+    if (S_ISCHR(mode))
+        return "CHR";
+    if (S_ISBLK(mode))
+        return "BLK";
+    if (S_ISFIFO(mode))
+        return "FIFO";
+    if (S_ISSOCK(mode))
+        return "SOCK";
+    return "???";
+}
+
+// Helper to dump inodes of a single superblock (caller must hold sb rlock)
+static void __dump_sb_inodes(struct vfs_superblock *sb) {
+    struct vfs_inode *inode, *inode_tmp;
+    int inode_count = 0;
+    int active_count = 0;
+
+    // First pass: count inodes
+    hlist_foreach_node_safe(&sb->inodes, inode, inode_tmp, hash_entry) {
+        inode_count++;
+        if (inode->ref_count > 0) {
+            active_count++;
+        }
+    }
+
+    printf("  Superblock %p: valid=%d attached=%d backendless=%d "
+           "inodes: total=%d active=%d\n",
+           sb, sb->valid, sb->attached, sb->backendless, inode_count,
+           active_count);
+
+    // Second pass: print active inodes
+    hlist_foreach_node_safe(&sb->inodes, inode, inode_tmp, hash_entry) {
+        if (inode->ref_count > 0 || inode->n_links > 0) {
+            printf("    ino=%lu type=%s ref=%d n_links=%d valid=%d "
+                   "dirty=%d destroying=%d orphan=%d",
+                   inode->ino, __inode_mode_str(inode->mode), inode->ref_count,
+                   inode->n_links, inode->valid, inode->dirty,
+                   inode->destroying, inode->orphan);
+            if (S_ISDIR(inode->mode)) {
+                // name and parent only apply to directories
+                if (inode->name) {
+                    printf(" name=\"%s\"", inode->name);
+                }
+                if (inode->parent) {
+                    printf(" parent_ino=%lu", inode->parent->ino);
+                }
+            }
+            // Union fields: only access based on inode type
+            if (inode->mount) {
+                // mountpoint uses mnt_sb/mnt_rooti union variant
+                printf(" [mountpoint mnt_sb=%p]", inode->mnt_sb);
+            } else if (S_ISCHR(inode->mode)) {
+                // character device uses cdev union variant
+                printf(" cdev=%u", inode->cdev);
+            } else if (S_ISBLK(inode->mode)) {
+                // block device uses bdev union variant
+                printf(" bdev=%u", inode->bdev);
+            }
+            printf("\n");
+        }
+    }
+}
+
+void vfs_dump_sb_inodes(struct vfs_superblock *sb) {
+    if (!sb) {
+        printf("vfs_dump_sb_inodes: NULL superblock\n");
+        return;
+    }
+
+    printf("\n=== VFS Superblock Inode Dump ===\n");
+    printf("Filesystem type: %s\n", sb->fs_type ? sb->fs_type->name : "(null)");
+
+    vfs_superblock_rlock(sb);
+    __dump_sb_inodes(sb);
+    vfs_superblock_unlock(sb);
+
+    printf("\n=== End of Superblock Inode Dump ===\n\n");
+}
+
+void vfs_dump_inodes(void) {
+    struct vfs_fs_type *fstype, *fstype_tmp;
+    struct vfs_superblock *sb, *sb_tmp;
+
+    printf("\n=== VFS Inode Dump ===\n");
+
+    vfs_mount_lock();
+
+    list_foreach_node_safe(&vfs_fs_types, fstype, fstype_tmp, list_entry) {
+        if (fstype->sb_count == 0) {
+            continue;
+        }
+
+        printf("\nFilesystem type: %s (superblocks: %d)\n", fstype->name,
+               fstype->sb_count);
+
+        list_foreach_node_safe(&fstype->superblocks, sb, sb_tmp, siblings) {
+            vfs_superblock_rlock(sb);
+            __dump_sb_inodes(sb);
+            vfs_superblock_unlock(sb);
+        }
+    }
+
+    vfs_mount_unlock();
+    printf("\n=== End of Inode Dump ===\n\n");
+}

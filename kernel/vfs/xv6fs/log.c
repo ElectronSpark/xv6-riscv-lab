@@ -1,0 +1,285 @@
+/*
+ * xv6fs logging layer
+ *
+ * Per-superblock logging for crash recovery. This is a port of the xv6
+ * logging code to work with the VFS layer, making xv6fs independent
+ * from the legacy fs layer.
+ *
+ * A log transaction contains updates from multiple FS operations.
+ * The logging system only commits when there are no FS operations active.
+ * This ensures atomicity of filesystem operations.
+ *
+ * Locking order (must acquire in this order to avoid deadlock):
+ * 1. vfs_superblock rwsem (if held by caller)
+ * 2. vfs_inode mutex (if held by caller)
+ * 3. log->lock spinlock (acquired by begin_op/end_op)
+ * 4. buffer mutex (acquired by bread during commit)
+ *
+ * CRITICAL: xv6fs_begin_op may sleep waiting for log space via sleep_on_chan.
+ * Callers holding superblock wlock should be aware this can block file I/O
+ * operations that need the same log.
+ */
+
+#include "types.h"
+#include "string.h"
+#include "riscv.h"
+#include "defs.h"
+#include "param.h"
+#include "errno.h"
+#include "lock/spinlock.h"
+#include "proc/sched.h"
+#include "proc/thread.h"
+#include "signal.h"
+#include "proc/tq.h"
+#include <mm/buffer_head.h>
+#include "printf.h"
+#include "vfs/fs.h"
+#include "xv6fs_private.h"
+
+/******************************************************************************
+ * Log recovery
+ ******************************************************************************/
+
+// Copy committed blocks from log to their home location
+static void __xv6fs_install_trans(struct xv6fs_log *log, int recovering) {
+    struct xv6fs_superblock *xv6_sb =
+        container_of(log, struct xv6fs_superblock, log);
+    for (int tail = 0; tail < log->lh.n; tail++) {
+        buffer_head_t *lbh =
+            sb_bread(xv6_sb, log->start + tail + 1); // read log block
+        buffer_head_t *dbh = sb_bread(xv6_sb, log->lh.block[tail]); // read dst
+        memmove(dbh->b_data, lbh->b_data, BSIZE); // copy block to dst
+        if (recovering) {
+            // During recovery, use synchronous writes for safety
+            bh_write(dbh);
+        } else {
+            // Normal operation: use async writes, sync at end
+            bh_write_async(dbh);
+            bh_unpin(dbh);
+        }
+        bh_release(lbh);
+        bh_release(dbh);
+    }
+
+    // Flush all async writes to disk
+    if (!recovering && log->lh.n > 0) {
+        bh_sync(xv6_sb);
+    }
+}
+
+// Read the log header from disk into the in-memory log header
+static void __xv6fs_read_head(struct xv6fs_log *log) {
+    struct xv6fs_superblock *xv6_sb =
+        container_of(log, struct xv6fs_superblock, log);
+    buffer_head_t *bh = sb_bread(xv6_sb, log->start);
+    if (bh == NULL)
+        panic("__xv6fs_read_head: sb_bread failed for log block");
+    struct xv6fs_logheader *lh = (struct xv6fs_logheader *)(bh->b_data);
+    log->lh.n = lh->n;
+    for (int i = 0; i < log->lh.n; i++) {
+        log->lh.block[i] = lh->block[i];
+    }
+    bh_release(bh);
+}
+
+// Write in-memory log header to disk.
+// This is the true point at which the current transaction commits.
+static void __xv6fs_write_head(struct xv6fs_log *log) {
+    struct xv6fs_superblock *xv6_sb =
+        container_of(log, struct xv6fs_superblock, log);
+    buffer_head_t *bh = sb_bread(xv6_sb, log->start);
+    struct xv6fs_logheader *hb = (struct xv6fs_logheader *)(bh->b_data);
+    hb->n = log->lh.n;
+    for (int i = 0; i < log->lh.n; i++) {
+        hb->block[i] = log->lh.block[i];
+    }
+    bh_write(bh);
+    bh_release(bh);
+}
+
+static void __xv6fs_recover_from_log(struct xv6fs_log *log) {
+    __xv6fs_read_head(log);
+    __xv6fs_install_trans(log, 1); // if committed, copy from log to disk
+    log->lh.n = 0;
+    __xv6fs_write_head(log); // clear the log
+}
+
+/******************************************************************************
+ * Commit
+ ******************************************************************************/
+
+// Copy modified blocks from cache to log
+// Uses async writes with a final sync for better I/O batching
+static void __xv6fs_write_log(struct xv6fs_log *log) {
+    struct xv6fs_superblock *xv6_sb =
+        container_of(log, struct xv6fs_superblock, log);
+    for (int tail = 0; tail < log->lh.n; tail++) {
+        buffer_head_t *to = sb_bread(xv6_sb, log->start + tail + 1); // log block
+        buffer_head_t *from = sb_bread(xv6_sb, log->lh.block[tail]); // cache block
+        memmove(to->b_data, from->b_data, BSIZE);
+        bh_write_async(to); // mark dirty, will flush at end
+        bh_release(from);
+        bh_release(to);
+    }
+
+    // Flush all log writes before writing header
+    if (log->lh.n > 0) {
+        bh_sync(xv6_sb);
+    }
+}
+
+static void __xv6fs_commit(struct xv6fs_log *log) {
+    if (log->lh.n > 0) {
+        __xv6fs_write_log(log);  // Write modified blocks from cache to log
+        __xv6fs_write_head(log); // Write header to disk -- the real commit
+        __xv6fs_install_trans(log, 0); // Now install writes to home locations
+        log->lh.n = 0;
+        __xv6fs_write_head(log); // Erase the transaction from the log
+    }
+}
+
+/******************************************************************************
+ * Public API
+ ******************************************************************************/
+
+// Initialize the log for a xv6fs superblock
+void xv6fs_initlog(struct xv6fs_superblock *xv6_sb) {
+    struct xv6fs_log *log = &xv6_sb->log;
+    struct superblock *disk_sb = &xv6_sb->disk_sb;
+
+    if (sizeof(struct xv6fs_logheader) >= BSIZE)
+        panic("xv6fs_initlog: too big logheader");
+
+    spin_init(&log->lock, "xv6fs_log");
+    tq_init(&log->wait_queue, "xv6fs_log_wait", &log->lock);
+    log->start = disk_sb->logstart;
+    log->size = disk_sb->nlog;
+    log->dev = xv6fs_sb_dev(xv6_sb);
+    log->outstanding = 0;
+    log->committing = 0;
+    log->lh.n = 0;
+
+    __xv6fs_recover_from_log(log);
+}
+
+// Common implementation for begin_op with configurable sleep state.
+// @state: THREAD_INTERRUPTIBLE (returns -EINTR on signal) or
+//         THREAD_UNINTERRUPTIBLE (never interrupted, always returns 0).
+static int __xv6fs_begin_op(struct xv6fs_superblock *xv6_sb,
+                            enum thread_state state) {
+    struct xv6fs_log *log = &xv6_sb->log;
+    bool interruptible = (state == THREAD_INTERRUPTIBLE);
+
+    spin_lock(&log->lock);
+    while (1) {
+        if (log->committing) {
+            if (interruptible && signal_pending(current)) {
+                spin_unlock(&log->lock);
+                return -EINTR;
+            }
+            int ret = tq_wait_in_state(&log->wait_queue, &log->lock, NULL,
+                                        state);
+            if (interruptible && ret != 0 && signal_pending(current)) {
+                spin_unlock(&log->lock);
+                return -EINTR;
+            }
+        } else if (log->lh.n + (log->outstanding + 1) * MAXOPBLOCKS >
+                   XV6FS_LOGSIZE) {
+            // this op might exhaust log space; wait for commit.
+            if (interruptible && signal_pending(current)) {
+                spin_unlock(&log->lock);
+                return -EINTR;
+            }
+            int ret = tq_wait_in_state(&log->wait_queue, &log->lock, NULL,
+                                        state);
+            if (interruptible && ret != 0 && signal_pending(current)) {
+                spin_unlock(&log->lock);
+                return -EINTR;
+            }
+        } else {
+            log->outstanding += 1;
+            spin_unlock(&log->lock);
+            break;
+        }
+    }
+    return 0;
+}
+
+// Called at the start of each FS operation (interruptible).
+// Returns -EINTR if a signal is pending; the caller has NOT entered
+// the transaction and may propagate the error or return a short count.
+// CRITICAL: Must be called BEFORE acquiring any VFS-layer locks (superblock,
+// inode) to avoid deadlock, since this function may sleep waiting for log
+// space.
+int xv6fs_begin_op(struct xv6fs_superblock *xv6_sb) {
+    return __xv6fs_begin_op(xv6_sb, THREAD_INTERRUPTIBLE);
+}
+
+// Uninterruptible variant for mid-operation batch boundaries.
+// Use this when a multi-batch operation (e.g., itrunc) has already committed
+// partial work and MUST re-enter a transaction to continue — abandonment
+// would leave the filesystem in an inconsistent state.
+// This variant ignores signals and never fails.
+void xv6fs_begin_op_nointr(struct xv6fs_superblock *xv6_sb) {
+    __xv6fs_begin_op(xv6_sb, THREAD_UNINTERRUPTIBLE);
+}
+
+// Called at the end of each FS operation.
+// Commits if this was the last outstanding operation.
+void xv6fs_end_op(struct xv6fs_superblock *xv6_sb) {
+    struct xv6fs_log *log = &xv6_sb->log;
+    int do_commit = 0;
+
+    spin_lock(&log->lock);
+    log->outstanding -= 1;
+    if (log->committing)
+        panic("xv6fs: log.committing");
+    if (log->outstanding == 0) {
+        do_commit = 1;
+        log->committing = 1;
+    }
+    spin_unlock(&log->lock);
+
+    if (do_commit) {
+        __xv6fs_commit(log);
+
+        // Collect waiters while holding lock, then wake outside lock
+        // to avoid lock convoy (woken threads try to reacquire log->lock)
+        tq_t temp_queue;
+        tq_init(&temp_queue, "xv6fs_log_temp", NULL);
+
+        spin_lock(&log->lock);
+        log->committing = 0;
+        tq_bulk_move(&temp_queue, &log->wait_queue);
+        spin_unlock(&log->lock);
+
+        // Wake all outside the lock
+        if (temp_queue.counter > 0) {
+            tq_wakeup_all(&temp_queue, 0, 0);
+        }
+    }
+}
+
+// Record the block number for writing.
+// Must be called between begin_op and end_op.
+void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, buffer_head_t *bh) {
+    struct xv6fs_log *log = &xv6_sb->log;
+    int i;
+
+    spin_lock(&log->lock);
+    if (log->lh.n >= XV6FS_LOGSIZE || log->lh.n >= log->size - 1)
+        panic("xv6fs: too big a transaction");
+    if (log->outstanding < 1)
+        panic("xv6fs: log_write outside of trans");
+
+    for (i = 0; i < log->lh.n; i++) {
+        if (log->lh.block[i] == (int)bh->b_blocknr) // log absorption
+            break;
+    }
+    log->lh.block[i] = (int)bh->b_blocknr;
+    if (i == log->lh.n) { // Add new block to log?
+        bh_pin(bh);
+        log->lh.n++;
+    }
+    spin_unlock(&log->lock);
+}
