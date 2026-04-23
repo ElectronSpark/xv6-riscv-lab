@@ -98,3 +98,13 @@ void ioapic_disable(int irq)
     lo |= IOAPIC_INT_MASKED;
     ioapic_write(IOAPIC_REG_REDTBL(irq), lo);
 }
+
+void ioapic_dump_irq(int irq)
+{
+    if (irq < 0 || irq >= ioapic_max_redir)
+        return;
+    uint32 lo = ioapic_read(IOAPIC_REG_REDTBL(irq));
+    uint32 hi = ioapic_read(IOAPIC_REG_REDTBL(irq) + 1);
+    printf("[ioapic] IRQ%d redtbl: lo=0x%x hi=0x%x (vec=0x%x mask=%d)\n",
+           irq, lo, hi, lo & 0xff, (lo >> 16) & 1);
+}

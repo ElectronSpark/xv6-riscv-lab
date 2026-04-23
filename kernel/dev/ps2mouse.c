@@ -49,11 +49,10 @@ static inline uint8 ps2_inb(uint16 port)
 
 #define VMMOUSE_ENABLE          0x45414552u  /* "REAE" */
 #define VMMOUSE_DISABLE         0x000000F5u
-#define VMMOUSE_REQUEST_ABS     0x53414C41u  /* "ALAS" */
+#define VMMOUSE_REQUEST_ABS     0x53424152u  /* "RABS" — request absolute */
+#define VMMOUSE_REQUEST_REL     0x4F525245u  /* "ERRO" — request relative */
 
 static int vmmouse_available;  /* non-zero if VMware vmmouse works */
-static int vmmouse_nodata;    /* consecutive IRQs with no vmmouse data */
-#define VMMOUSE_NODATA_LIMIT 64  /* disable after this many failures */
 
 static inline void vmware_cmd(uint32 cmd, uint32 param,
                               uint32 *a, uint32 *b, uint32 *c, uint32 *d)
@@ -77,7 +76,11 @@ static int vmmouse_probe(void)
     if (magic != VMWARE_MAGIC)
         return 0;
 
-    /* Enable absolute pointer */
+    /* Issue READ_ID — upstream QEMU's vmmouse_read_id pushes a 1-word
+     * VERSION token onto the device data queue. We MUST drain that
+     * single word before reading mouse packets, otherwise every
+     * subsequent 4-word read is offset by one (giving the appearance
+     * that buttons are stuck and X/Y are in the wrong registers). */
     vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_ENABLE, NULL, NULL, NULL, NULL);
 
     /* Check status — a working vmmouse returns version, not error */
@@ -87,6 +90,12 @@ static int vmmouse_probe(void)
         /* Error or not available — disable and fall back */
         vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_DISABLE, NULL, NULL, NULL, NULL);
         return 0;
+    }
+
+    /* Drain the VERSION word that READ_ID pushed onto the queue. */
+    if ((status & 0xFFFFu) >= 1) {
+        uint32 dummy;
+        vmware_cmd(VMCMD_ABSPTR_DATA, 1, &dummy, NULL, NULL, NULL);
     }
 
     /* Request absolute mode */
@@ -112,14 +121,45 @@ static int vmmouse_read(struct mouse_event *ev)
     if (nwords < 4)
         return 0;  /* no data */
 
-    uint32 s, x, y, z;
-    vmware_cmd(VMCMD_ABSPTR_DATA, 4, &s, &x, &y, &z);
+    /* Correct register layout per upstream QEMU hw/i386/vmmouse.c
+     * (verified against v9.0.x source): the device's data queue is
+     * filled in vmmouse_mouse_event as [buttons, x, y, dz], and
+     * vmmouse_set_data writes data[0..3] back to EAX..EDX. So:
+     *   EAX = buttons word (VMware bit5=L, bit4=R, bit3=M; bit16 set
+     *         in relative-mode packets)
+     *   EBX = x  (0..0xFFFF in absolute mode)
+     *   ECX = y  (0..0xFFFF in absolute mode)
+     *   EDX = z  (scroll wheel delta) */
+    uint32 buttons, x, y, z;
+    vmware_cmd(VMCMD_ABSPTR_DATA, 4, &buttons, &x, &y, &z);
 
-    ev->buttons = (uint8)(s & 0x07);
+    {
+        static int dbg = 0;
+        if (dbg < 1) {
+            dbg++;
+            printf("[vmmouse] first sample buttons=0x%x x=0x%x y=0x%x z=0x%x\n",
+                   buttons, x, y, z);
+        }
+    }
+
+    /* VMware buttons word: bit5=left, bit4=right, bit3=middle.
+     * Re-pack to xv6 convention (bit0=left, bit1=right, bit2=middle). */
+    uint8 b = 0;
+    if (buttons & 0x20) b |= 0x01;
+    if (buttons & 0x10) b |= 0x02;
+    if (buttons & 0x08) b |= 0x04;
+    ev->buttons = b;
     ev->flags   = MOUSE_EVENT_F_ABSOLUTE;
-    ev->dx      = (int16)(x & 0xFFFF);
-    ev->dy      = (int16)(y & 0xFFFF);
-    ev->dz      = 0;
+    /* QEMU delivers absolute coords in 0..65535. The mouse_event ABI's
+     * dx/dy fields are int16 so the upper half of the range reads as
+     * negative; userspace (wlcomp) must zero-extend before scaling
+     * — see ports/wayland/CMakeLists.txt for the zero-extend patch. */
+    ev->dx      = (int16)(x & 0xFFFFu);
+    ev->dy      = (int16)(y & 0xFFFFu);
+    /* Scroll wheel: QEMU vmmouse_mouse_event stores the host's signed
+     * dz directly into queue[3]. Treat as signed 8-bit (matches PS/2
+     * IntelliMouse convention) and propagate. */
+    ev->dz      = (int8)(z & 0xFFu);
     ev->pad[0]  = 0;
     return 1;
 }
@@ -200,6 +240,23 @@ static int ring_pop(struct mouse_event *ev)
 
 /* ── IRQ handler ──────────────────────────────────────────────────── */
 
+/* Lightweight diagnostic counters (no printf in IRQ context).
+ * Read out from mouse_open() so we know if IRQs ever fired before
+ * the userspace consumer attached. */
+static volatile uint64 dbg_mouse_irqs;
+static volatile uint64 dbg_mouse_bytes;
+static volatile uint64 dbg_mouse_outofsync;
+static volatile uint64 dbg_mouse_packets;
+static volatile uint64 dbg_mouse_overflow;
+static volatile uint64 dbg_mouse_ringpush;
+static volatile uint64 dbg_mouse_reads;
+static volatile uint64 dbg_mouse_reads_ok;
+
+void ps2_diag_irq_seen(void)
+{
+    dbg_mouse_irqs++;
+}
+
 /*
  * Process a single byte that the i8042 has flagged as auxiliary
  * (mouse) data.  Caller must NOT hold mouse_state.lock and must
@@ -207,73 +264,73 @@ static int ring_pop(struct mouse_event *ev)
  */
 void ps2mouse_handle_byte(uint8 byte)
 {
+    /* vmmouse mode: drain absolute X/Y + buttons from the backdoor and
+     * discard the i8042 PS/2 wake-up packets entirely (their dx/dy is
+     * just trigger noise — typically [0x08, 0x01, 0x00] — and would
+     * otherwise be misinterpreted as relative motion).
+     *
+     * Pure PS/2 mode: assemble 3- or 4-byte packets and push events. */
+    dbg_mouse_bytes++;
     spin_lock(&mouse_state.lock);
 
-    /* Try VMware vmmouse for absolute coordinates first */
     if (vmmouse_available) {
         struct mouse_event ev;
         int got = 0;
         while (vmmouse_read(&ev)) {
             ring_push(&ev);
+            dbg_mouse_ringpush++;
+            dbg_mouse_packets++;
             got++;
         }
-        if (got) {
-            /* vmmouse provided data — discard PS/2 trigger byte */
-            vmmouse_nodata = 0;
-            mouse_state.packet_idx = 0;
-            spin_unlock(&mouse_state.lock);
+        /* Discard the trigger byte; do NOT feed PS/2 packet assembly. */
+        mouse_state.packet_idx = 0;
+        spin_unlock(&mouse_state.lock);
+        if (got)
             wakeup_on_chan(&mouse_state.ring);
-            return;
-        }
-        if (++vmmouse_nodata >= VMMOUSE_NODATA_LIMIT) {
-            vmmouse_available = 0;
-            printf("PS2 mouse: vmmouse not responding, falling back to PS/2\n");
-        }
-        /* Fall through to normal PS/2 processing for this byte */
+        return;
     }
 
-    /* Standard PS/2 relative mouse */
-
-    /* First byte must have bit 3 set (always-1 bit in PS/2 packet) */
+    /* Pure PS/2 path */
     if (mouse_state.packet_idx == 0 && !(byte & 0x08)) {
+        dbg_mouse_outofsync++;
         spin_unlock(&mouse_state.lock);
-        return;  /* out of sync, skip */
+        return;
     }
 
     mouse_state.packet[mouse_state.packet_idx++] = byte;
 
-    if (mouse_state.packet_idx == mouse_state.packet_len) {
-        /* Complete packet — decode */
-        uint8 flags = mouse_state.packet[0];
-        int dx = (int)mouse_state.packet[1];
-        int dy = (int)mouse_state.packet[2];
-
-        /* Sign-extend using flags bits 4 and 5 */
-        if (flags & 0x10) dx |= 0xFFFFFF00;
-        if (flags & 0x20) dy |= 0xFFFFFF00;
-
-        /* Discard if overflow bits are set */
-        if (!(flags & 0xC0)) {
-            struct mouse_event ev;
-            ev.dx = (int16)dx;
-            ev.dy = (int16)(-dy);  /* PS/2 Y is inverted */
-            ev.buttons = flags & 0x07;
-            ev.flags = 0;
-            ev.dz = 0;
-            ev.pad[0] = 0;
-
-            /* IntelliMouse 4th byte: scroll wheel delta */
-            if (intellimouse_enabled)
-                ev.dz = (int8)mouse_state.packet[3];
-
-            ring_push(&ev);
-            wakeup_on_chan(&mouse_state.ring);
-        }
-
-        mouse_state.packet_idx = 0;
+    if (mouse_state.packet_idx != mouse_state.packet_len) {
+        spin_unlock(&mouse_state.lock);
+        return;
     }
 
+    dbg_mouse_packets++;
+    uint8 flags = mouse_state.packet[0];
+    int   dx    = (int)mouse_state.packet[1];
+    int   dy    = (int)mouse_state.packet[2];
+    if (flags & 0x10) dx |= 0xFFFFFF00;
+    if (flags & 0x20) dy |= 0xFFFFFF00;
+
+    if (flags & 0xC0) {
+        dbg_mouse_overflow++;
+        mouse_state.packet_idx = 0;
+        spin_unlock(&mouse_state.lock);
+        return;
+    }
+
+    struct mouse_event ev;
+    ev.dx      = (int16)dx;
+    ev.dy      = (int16)(-dy);
+    ev.buttons = flags & 0x07;
+    ev.flags   = 0;
+    ev.dz      = intellimouse_enabled ? (int8)mouse_state.packet[3] : 0;
+    ev.pad[0]  = 0;
+    ring_push(&ev);
+    dbg_mouse_ringpush++;
+
+    mouse_state.packet_idx = 0;
     spin_unlock(&mouse_state.lock);
+    wakeup_on_chan(&mouse_state.ring);
 }
 
 /*
@@ -298,13 +355,20 @@ static void ps2_drain_obf(void)
 static void mouse_irq_handler(int irq, void *data, device_t *dev)
 {
     (void)irq; (void)data; (void)dev;
+    /* Diagnostic counters; periodically dumped from /proc-style code
+     * if needed.  Kept lightweight — no printf in IRQ context. */
+    extern void ps2_diag_irq_seen(void);
+    ps2_diag_irq_seen();
     ps2_drain_obf();
 }
+
+/* DEBUG kthread removed; counters retained for /proc-style introspection. */
+extern void sleep_ms(uint64 ms);
 
 /* ── Character device operations ──────────────────────────────────── */
 
 static int mouse_open(cdev_t *cdev)  {
-    printf("PS2 mouse: /dev/mouse opened\n");
+    (void)cdev;
     return 0;
 }
 static int mouse_release(cdev_t *cdev) { return 0; }
@@ -312,6 +376,7 @@ static int mouse_release(cdev_t *cdev) { return 0; }
 static int mouse_read(cdev_t *cdev, bool user, void *buf, size_t count)
 {
     (void)cdev;
+    dbg_mouse_reads++;
 
     if (count < sizeof(struct mouse_event))
         return -EINVAL;
@@ -325,6 +390,7 @@ static int mouse_read(cdev_t *cdev, bool user, void *buf, size_t count)
     }
     ring_pop(&ev);
     spin_unlock(&mouse_state.lock);
+    dbg_mouse_reads_ok++;
 
     size_t copylen = sizeof(struct mouse_event);
     if (count < copylen)
@@ -395,6 +461,7 @@ void ps2mouse_init(void)
     ps2_send_cmd(PS2_CMD_READ_CONFIG);
     ps2_wait_output();
     uint8 config = ps2_inb(PS2_DATA_PORT);
+    printf("PS2 mouse: config byte before = 0x%x\n", config);
 
     /* Enable IRQ12 (bit 1) and make sure port 2 clock is enabled (bit 5 = 0) */
     config |= 0x02;    /* enable auxiliary interrupt */
@@ -403,6 +470,12 @@ void ps2mouse_init(void)
     ps2_send_cmd(PS2_CMD_WRITE_CONFIG);
     ps2_wait_input();
     ps2_outb(PS2_DATA_PORT, config);
+
+    /* Read it back to confirm */
+    ps2_send_cmd(PS2_CMD_READ_CONFIG);
+    ps2_wait_output();
+    uint8 cfg2 = ps2_inb(PS2_DATA_PORT);
+    printf("PS2 mouse: config byte after  = 0x%x\n", cfg2);
 
     /* Reset mouse */
     ps2_send_mouse_cmd(MOUSE_CMD_RESET);
@@ -443,15 +516,16 @@ void ps2mouse_init(void)
 
     ps2_send_mouse_cmd(MOUSE_CMD_ENABLE);
 
-    /* VMware vmmouse disabled — QEMU's vmport backdoor port responds
-     * to probes (GETVERSION works, ABSPTR_COMMAND succeeds) but the
-     * returned coordinates are always (0,0) unless a real '-device vmmouse'
-     * is linked to the i8042 controller.  Since that requires QEMU machine
-     * glue that we can't set up on all versions, stick with PS/2 relative.
-     * The USB-tablet device in QEMU eliminates host grab without needing
-     * abs coords inside the guest. */
-    vmmouse_available = 0;
-    (void)vmmouse_probe;  /* suppress unused warning */
+    /* VMware vmmouse: provides absolute X/Y coordinates and button
+     * state via the backdoor port. Buttons word in EAX uses
+     * bit5=L bit4=R bit3=M; bit16 marks relative-mode packets. */
+    if (vmmouse_probe()) {
+        vmmouse_available = 1;
+        printf("PS2 mouse: vmmouse absolute mode enabled\n");
+    } else {
+        vmmouse_available = 0;
+        printf("PS2 mouse: vmmouse unavailable, using PS/2 relative\n");
+    }
 
     /* Register IRQ handler */
     static struct irq_desc mouse_irq_desc = {

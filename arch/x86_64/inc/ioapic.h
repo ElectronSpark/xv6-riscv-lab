@@ -49,7 +49,6 @@ void ioapic_init(void);
  * @param dest      Destination LAPIC ID.
  */
 void ioapic_enable(int irq, int vector, int dest);
-
 /**
  * Disable (mask) an IRQ on the I/O APIC.
  *
@@ -62,5 +61,8 @@ void ioapic_disable(int irq);
  * Required for PCI device interrupts routed through the PIIX3.
  */
 void ioapic_enable_level(int irq, int vector, int dest);
+
+/* Debug: dump the redirection-table entry for one IRQ via printf. */
+void ioapic_dump_irq(int irq);
 
 #endif /* _X86_64_IOAPIC_H */

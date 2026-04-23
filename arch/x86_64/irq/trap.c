@@ -275,12 +275,17 @@ void usertrapret(void) {
         my_cpu->asid_gen = cur_gen;
     }
 
-    /* Build CR3 value: with PCID support, include the VM's PCID and the
-     * noflush bit (63) to preserve TLB entries from other PCIDs. */
+    /* Build CR3 value: with PCID support, include the VM's PCID.
+     * NOTE: noflush=0 (force flush) — using noflush=1 caused fork()
+     * to intermittently return the child's pid in the child under KVM,
+     * apparently due to stale TLB entries for the per-CPU TRAPFRAME
+     * slot whose PTE is rewritten by vm_cpu_online() without TLB
+     * invalidation.  TODO: invalidate the trapframe slot precisely so
+     * we can re-enable noflush=1 for performance. */
     uint64 user_cr3;
     if (vm_asid_max() > 0) {
         user_cr3 = MAKE_SATP_PCID((uint64)p->vm->pagetable,
-                                   p->vm->asid, 1);
+                                   p->vm->asid, 0);
     } else {
         user_cr3 = (uint64)p->vm->pagetable;
     }

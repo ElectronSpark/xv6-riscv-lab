@@ -436,18 +436,6 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if (either_copyin((char *)&cmd, 1, (uint64)arg, sizeof(cmd)) < 0)
             return -EFAULT;
 
-        /* One-time diagnostic */
-        {
-            static int blit_log = 0;
-            if (blit_log < 3) {
-                blit_log++;
-                printf("FB: GPU_BLIT #%d: x=%d y=%d w=%d h=%d src_pitch=%d pixels=0x%lx\n",
-                       blit_log, cmd.x, cmd.y, cmd.w, cmd.h, cmd.src_pitch, cmd.pixels);
-                printf("FB:   fb_virt=0x%lx fb_phys=0x%lx xres=%d\n",
-                       (uint64)fb_state.fb_virt, fb_state.fb_phys, fb_state.xres);
-            }
-        }
-
         /* Clip to screen bounds */
         if (cmd.x >= fb_state.xres || cmd.y >= fb_state.yres)
             return 0;
