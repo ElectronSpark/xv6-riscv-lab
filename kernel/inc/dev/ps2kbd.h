@@ -48,4 +48,10 @@ struct kbd_event {
 
 void ps2kbd_init(void);
 
+/* Process one scancode byte read from the i8042 data port.
+ * Exposed so the mouse IRQ handler can dispatch keyboard data
+ * that arrives while it holds the controller (the i8042 has a
+ * single output buffer shared by both devices). */
+void ps2kbd_handle_byte(uint8 byte);
+
 #endif /* __KERNEL_DEV_PS2KBD_H */

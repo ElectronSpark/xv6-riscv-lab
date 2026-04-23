@@ -13,6 +13,7 @@
 #include <string.h>
 #include <dev/cdev.h>
 #include <dev/ps2kbd.h>
+#include <dev/ps2mouse.h>
 #include <trap.h>
 #include <printf.h>
 #include <proc/thread.h>
@@ -124,19 +125,10 @@ static int ring_pop(struct kbd_event *ev)
 
 /* ── IRQ handler ──────────────────────────────────────────────────── */
 
-static void kbd_irq_handler(int irq, void *data, device_t *dev)
+/* Process one scancode byte (called from kbd or mouse IRQ).
+ * Caller must NOT hold kbd_state.lock. */
+void ps2kbd_handle_byte(uint8 scancode)
 {
-    (void)irq; (void)data; (void)dev;
-
-    uint8 status = kbd_inb(PS2_STATUS_PORT);
-    if (!(status & 0x01))
-        return;
-    /* Bit 5: if set, data is from mouse, not keyboard */
-    if (status & 0x20)
-        return;
-
-    uint8 scancode = kbd_inb(PS2_DATA_PORT);
-
     spin_lock(&kbd_state.lock);
 
     /* Handle E0 extended prefix */
@@ -217,6 +209,36 @@ static void kbd_irq_handler(int irq, void *data, device_t *dev)
 
     kbd_state.extended = 0;
     spin_unlock(&kbd_state.lock);
+}
+
+/*
+ * Drain the i8042 output buffer, dispatching each byte to the
+ * appropriate device based on status bit 5 (1 = mouse, 0 = kbd).
+ * The i8042 has one shared output buffer and will not raise any
+ * further IRQ (kbd or mouse) until that buffer is empty, so a
+ * single byte left undrained wedges *both* devices.
+ */
+static void ps2_drain_obf(void)
+{
+    /* Cap the drain count so a stuck/runaway controller cannot
+     * monopolise the CPU.  Real PS/2 traffic is at most one
+     * 4-byte mouse packet plus a few scancodes per IRQ. */
+    for (int i = 0; i < 32; i++) {
+        uint8 status = kbd_inb(PS2_STATUS_PORT);
+        if (!(status & 0x01))
+            return;
+        uint8 byte = kbd_inb(PS2_DATA_PORT);
+        if (status & 0x20)
+            ps2mouse_handle_byte(byte);
+        else
+            ps2kbd_handle_byte(byte);
+    }
+}
+
+static void kbd_irq_handler(int irq, void *data, device_t *dev)
+{
+    (void)irq; (void)data; (void)dev;
+    ps2_drain_obf();
 }
 
 /* ── Character device operations ──────────────────────────────────── */

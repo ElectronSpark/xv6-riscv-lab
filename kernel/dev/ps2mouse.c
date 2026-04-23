@@ -13,6 +13,7 @@
 #include <string.h>
 #include <dev/cdev.h>
 #include <dev/ps2mouse.h>
+#include <dev/ps2kbd.h>
 #include <trap.h>
 #include <printf.h>
 #include <proc/thread.h>
@@ -199,19 +200,13 @@ static int ring_pop(struct mouse_event *ev)
 
 /* ── IRQ handler ──────────────────────────────────────────────────── */
 
-static void mouse_irq_handler(int irq, void *data, device_t *dev)
+/*
+ * Process a single byte that the i8042 has flagged as auxiliary
+ * (mouse) data.  Caller must NOT hold mouse_state.lock and must
+ * have already inspected the status byte to confirm bit 5 is set.
+ */
+void ps2mouse_handle_byte(uint8 byte)
 {
-    (void)irq; (void)data; (void)dev;
-
-    uint8 status = ps2_inb(PS2_STATUS_PORT);
-    if (!(status & 0x01))
-        return;
-    /* Bit 5 of status: data is from mouse (auxiliary port) */
-    if (!(status & 0x20))
-        return;
-
-    uint8 byte = ps2_inb(PS2_DATA_PORT);
-
     spin_lock(&mouse_state.lock);
 
     /* Try VMware vmmouse for absolute coordinates first */
@@ -230,9 +225,6 @@ static void mouse_irq_handler(int irq, void *data, device_t *dev)
             wakeup_on_chan(&mouse_state.ring);
             return;
         }
-        /* No vmmouse data — maybe QEMU didn't actually create the
-         * vmmouse device.  After enough failures, give up and fall
-         * back to PS/2 permanently. */
         if (++vmmouse_nodata >= VMMOUSE_NODATA_LIMIT) {
             vmmouse_available = 0;
             printf("PS2 mouse: vmmouse not responding, falling back to PS/2\n");
@@ -284,9 +276,37 @@ static void mouse_irq_handler(int irq, void *data, device_t *dev)
     spin_unlock(&mouse_state.lock);
 }
 
+/*
+ * Drain the i8042 output buffer, dispatching each byte to the
+ * appropriate device based on status bit 5.  See the matching
+ * helper in ps2kbd.c for the rationale (single shared OB).
+ */
+static void ps2_drain_obf(void)
+{
+    for (int i = 0; i < 32; i++) {
+        uint8 status = ps2_inb(PS2_STATUS_PORT);
+        if (!(status & 0x01))
+            return;
+        uint8 byte = ps2_inb(PS2_DATA_PORT);
+        if (status & 0x20)
+            ps2mouse_handle_byte(byte);
+        else
+            ps2kbd_handle_byte(byte);
+    }
+}
+
+static void mouse_irq_handler(int irq, void *data, device_t *dev)
+{
+    (void)irq; (void)data; (void)dev;
+    ps2_drain_obf();
+}
+
 /* ── Character device operations ──────────────────────────────────── */
 
-static int mouse_open(cdev_t *cdev)  { return 0; }
+static int mouse_open(cdev_t *cdev)  {
+    printf("PS2 mouse: /dev/mouse opened\n");
+    return 0;
+}
 static int mouse_release(cdev_t *cdev) { return 0; }
 
 static int mouse_read(cdev_t *cdev, bool user, void *buf, size_t count)

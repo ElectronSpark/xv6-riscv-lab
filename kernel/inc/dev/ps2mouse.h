@@ -48,4 +48,10 @@ struct mouse_event {
 
 void ps2mouse_init(void);
 
+/* Process one byte read from the i8042 data port that the
+ * controller marked as auxiliary (mouse) data.  Exposed so the
+ * keyboard IRQ handler can dispatch mouse bytes that arrive
+ * while it holds the controller (single shared output buffer). */
+void ps2mouse_handle_byte(uint8 byte);
+
 #endif /* __KERNEL_DEV_PS2MOUSE_H */
