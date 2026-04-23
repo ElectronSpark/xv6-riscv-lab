@@ -158,6 +158,10 @@ static void __start_kernel_secondary_hart(int hartid) {
 
     // Platform-specific per-CPU VM init (RISC-V: turn on paging).
     platform_secondary_cpu_init();
+    // Per-arch hart-local VM setup (x86: enable CR4.PCIDE/PGE so this CPU
+    // can load CR3 values that include a PCID + noflush bit; on RISC-V
+    // this is already handled by platform_secondary_cpu_init).
+    arch_vm_init_hart();
     // Now switch TP to trampoline virtual address (paging is now on)
     mycpu_init(hartid, true);
     idle_thread_init();

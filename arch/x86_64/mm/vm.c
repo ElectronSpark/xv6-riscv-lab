@@ -311,6 +311,28 @@ void arch_vm_init(void)
 
 void arch_vm_init_hart(void)
 {
+    /*
+     * Mirror the BSP's CR4 setup on every AP so that loading a user
+     * CR3 with PCID + noflush bits does not raise #GP.  arch_vm_init
+     * runs only on the BSP; APs come up via ap_trampoline.S which
+     * sets PAE/OSFXSR/OSXMMEXCPT but not PCIDE/PGE.  Without PCIDE,
+     * MOV CR3 with bit 63 (noflush) or any bits 11:0 set is reserved
+     * and faults — silently tolerated by TCG, strictly enforced by
+     * KVM.  We re-check CPUID on each hart in case PCID was masked
+     * for this CPU (it shouldn't be on real SMP, but stay defensive).
+     */
+    {
+        uint32 a, b, c, d;
+        asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"((uint32)1), "c"((uint32)0));
+        uint64 cr4;
+        asm volatile("movq %%cr4, %0" : "=r"(cr4));
+        cr4 |= (1ULL << 7);            /* CR4.PGE — global pages */
+        if (c & (1U << 17))
+            cr4 |= (1ULL << 17);       /* CR4.PCIDE */
+        asm volatile("movq %0, %%cr4" : : "r"(cr4) : "memory");
+    }
+
     kvm_load();
 }
 
