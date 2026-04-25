@@ -303,6 +303,7 @@ extern uint64 sys_sigaltstack(void);
 extern uint64 sys_vfs_fsync(void);
 extern uint64 sys_vfs_fdatasync(void);
 extern uint64 sys_fadvise64(void);
+extern uint64 sys_fallocate(void);
 extern uint64 sys_utimensat(void);
 extern uint64 sys_memfd_create(void);
 extern uint64 sys_inotify_init1(void);
@@ -574,6 +575,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_getrandom_x86] sys_getrandom,
     [SYS_membarrier] sys_membarrier,
     [SYS_fadvise64] sys_fadvise64,
+    [SYS_fallocate] sys_fallocate,
     [SYS_poweroff] sys_poweroff,
     [SYS_reboot] sys_reboot,
     /* Resource limit syscalls (musl high numbers → prlimit64) */

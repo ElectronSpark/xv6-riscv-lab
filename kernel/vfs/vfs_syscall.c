@@ -415,6 +415,10 @@ uint64 sys_vfs_ftruncate(void) {
     return ret;
 }
 
+uint64 sys_fallocate(void) {
+    return -EOPNOTSUPP;
+}
+
 uint64 sys_vfs_fcntl(void) {
     int fd, cmd, arg = 0;
     uint64 uarg = 0;

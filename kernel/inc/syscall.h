@@ -284,6 +284,7 @@
 #define SYS_eventfd2        985
 #define SYS_membarrier      998
 #define SYS_fadvise64       989
+#define SYS_fallocate       990
 #define SYS_prlimit64_musl  996
 
 // --- timerfd (match musl-xv6 syscall.h.in numbers) ---

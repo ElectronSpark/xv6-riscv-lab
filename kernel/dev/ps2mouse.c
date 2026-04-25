@@ -252,6 +252,40 @@ static volatile uint64 dbg_mouse_ringpush;
 static volatile uint64 dbg_mouse_reads;
 static volatile uint64 dbg_mouse_reads_ok;
 
+static int vmmouse_drain_locked(void)
+{
+    struct mouse_event ev;
+    int got = 0;
+
+    while (got < 32 && vmmouse_read(&ev)) {
+        ring_push(&ev);
+        dbg_mouse_ringpush++;
+        dbg_mouse_packets++;
+        got++;
+    }
+
+    return got;
+}
+
+static void vmmouse_poll_thread(uint64 arg1, uint64 arg2)
+{
+    (void)arg1;
+    (void)arg2;
+
+    for (;;) {
+        int got;
+
+        spin_lock(&mouse_state.lock);
+        got = vmmouse_drain_locked();
+        spin_unlock(&mouse_state.lock);
+
+        if (got)
+            wakeup_on_chan(&mouse_state.ring);
+
+        sleep_ms(8);
+    }
+}
+
 void ps2_diag_irq_seen(void)
 {
     dbg_mouse_irqs++;
@@ -274,14 +308,7 @@ void ps2mouse_handle_byte(uint8 byte)
     spin_lock(&mouse_state.lock);
 
     if (vmmouse_available) {
-        struct mouse_event ev;
-        int got = 0;
-        while (vmmouse_read(&ev)) {
-            ring_push(&ev);
-            dbg_mouse_ringpush++;
-            dbg_mouse_packets++;
-            got++;
-        }
+        int got = vmmouse_drain_locked();
         /* Discard the trigger byte; do NOT feed PS/2 packet assembly. */
         mouse_state.packet_idx = 0;
         spin_unlock(&mouse_state.lock);
@@ -349,6 +376,17 @@ static void ps2_drain_obf(void)
             ps2mouse_handle_byte(byte);
         else
             ps2kbd_handle_byte(byte);
+    }
+}
+
+static void ps2mouse_poll_thread(uint64 arg1, uint64 arg2)
+{
+    (void)arg1;
+    (void)arg2;
+
+    for (;;) {
+        ps2_drain_obf();
+        sleep_ms(2);
     }
 }
 
@@ -516,16 +554,11 @@ void ps2mouse_init(void)
 
     ps2_send_mouse_cmd(MOUSE_CMD_ENABLE);
 
-    /* VMware vmmouse: provides absolute X/Y coordinates and button
-     * state via the backdoor port. Buttons word in EAX uses
-     * bit5=L bit4=R bit3=M; bit16 marks relative-mode packets. */
-    if (vmmouse_probe()) {
-        vmmouse_available = 1;
-        printf("PS2 mouse: vmmouse absolute mode enabled\n");
-    } else {
-        vmmouse_available = 0;
-        printf("PS2 mouse: vmmouse unavailable, using PS/2 relative\n");
-    }
+    vmmouse_available = vmmouse_probe();
+    if (vmmouse_available)
+        printf("PS2 mouse: VMware absolute pointer enabled\n");
+    else
+        printf("PS2 mouse: using PS/2 relative mode\n");
 
     /* Register IRQ handler */
     static struct irq_desc mouse_irq_desc = {
@@ -547,6 +580,18 @@ void ps2mouse_init(void)
     /* Register character device */
     ret = cdev_register(&mouse_cdev);
     assert(ret == 0, "ps2mouse_init: cdev_register failed: %d", ret);
+
+    struct thread *poller = kthread_create("ps2mouse_poll",
+                                           ps2mouse_poll_thread, 0, 0, 0);
+    if (IS_ERR_OR_NULL(poller))
+        printf("PS2 mouse: failed to start poll thread\n");
+
+    if (vmmouse_available) {
+        struct thread *vmpoller = kthread_create("vmmouse_poll",
+                                                 vmmouse_poll_thread, 0, 0, 0);
+        if (IS_ERR_OR_NULL(vmpoller))
+            printf("PS2 mouse: failed to start vmmouse poll thread\n");
+    }
 
     printf("PS2 mouse: /dev/mouse registered (IRQ %d)\n", MOUSE_IRQ);
 }
