@@ -39,6 +39,7 @@
 #include "accounting.h"
 #include "timer/timer.h"
 #include "signal.h"
+#include "dev/fdt.h"
 
 /* snprintf is provided by lwip_port/sys_arch.c – forward-declare it here */
 int snprintf(char *buf, size_t size, const char *fmt, ...);
@@ -134,6 +135,10 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         }
         if (name_len == 7 && memcmp(name, "crashes", 7) == 0) {
             dentry->ino = PROCFS_INO_CRASHES;
+            return 0;
+        }
+        if (name_len == 7 && memcmp(name, "cmdline", 7) == 0) {
+            dentry->ino = PROCFS_INO_CMDLINE;
             return 0;
         }
 
@@ -275,9 +280,12 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         } else if (child_idx == 3) {
             name = "crashes";
             ino  = PROCFS_INO_CRASHES;
+        } else if (child_idx == 4) {
+            name = "cmdline";
+            ino = PROCFS_INO_CMDLINE;
         } else {
-            /* pid entries start at child_idx 4 */
-            int nth  = child_idx - 4;
+            /* pid entries start at child_idx 5 */
+            int nth  = child_idx - 5;
             int tgid = procfs_nth_tgid(nth);
             if (tgid < 0) {
                 /* End of directory */
@@ -598,6 +606,18 @@ static char *procfs_gen_cpuinfo(void) {
     return buf;
 }
 
+static char *procfs_gen_cmdline(void) {
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    if (platform.has_cmdline)
+        snprintf(buf, PROCFS_BUF_SIZE, "%s\n", platform.cmdline);
+    else
+        buf[0] = '\0';
+    return buf;
+}
+
 #define PROCFS_RESOURCES_BUF_SIZE 2048
 
 static char *procfs_gen_resources(int tgid) {
@@ -653,6 +673,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_CPUINFO:
         buf = procfs_gen_cpuinfo();
+        break;
+    case PROC_CMDLINE:
+        buf = procfs_gen_cmdline();
         break;
     case PROC_RESOURCES:
         buf = procfs_gen_resources(pi->pid);

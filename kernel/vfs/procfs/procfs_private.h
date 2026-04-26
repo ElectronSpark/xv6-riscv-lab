@@ -54,6 +54,7 @@ enum procfs_entry_type {
     PROC_FD_ENTRY,    /* /proc/<tgid>/fd/<n>  */
     PROC_RESOURCES,   /* /proc/<tgid>/resources */
     PROC_CRASHES,     /* /proc/crashes          */
+    PROC_CMDLINE,     /* /proc/cmdline          */
 };
 
 /* ------------------------------------------------------------------ */
@@ -64,6 +65,7 @@ enum procfs_entry_type {
 #define PROCFS_INO_MEMINFO 3ULL
 #define PROCFS_INO_CPUINFO 4ULL
 #define PROCFS_INO_CRASHES 5ULL
+#define PROCFS_INO_CMDLINE 6ULL
 
 /* Each pid occupies 10 slots; max pid in xv6 fits well within 64-bit */
 #define PROCFS_PID_BASE    100ULL

@@ -41,6 +41,7 @@
 
 #include "dev/netconf.h"
 #include "dev/cdev.h"
+#include "cmdline.h"
 #include <mm/vm.h>
 #include "errno.h"
 
@@ -510,6 +511,9 @@ static volatile int __services_started = 0;
 
 static void __lwip_start_services(void)
 {
+    char netservices_opt[8];
+    char gdbstub_opt[8];
+
     if (__atomic_exchange_n(&__services_started, 1, __ATOMIC_SEQ_CST))
         return;  /* already started */
 
@@ -518,6 +522,13 @@ static void __lwip_start_services(void)
            ip4_addr2_16(netif_ip4_addr(&xv6_netif)),
            ip4_addr3_16(netif_ip4_addr(&xv6_netif)),
            ip4_addr4_16(netif_ip4_addr(&xv6_netif)));
+
+    if (cmdline_get_param("netservices", netservices_opt,
+                          sizeof(netservices_opt)) == 0 &&
+        strcmp(netservices_opt, "0") == 0) {
+        printf("lwip: kernel network services disabled by cmdline\n");
+        return;
+    }
 
     /* Kernel-side telnetd disabled — user-space telnetd handles
      * connections with proper multi-user login authentication. */
@@ -536,8 +547,13 @@ static void __lwip_start_services(void)
     netbiosd_init();
     extern void mdnsd_init(void);
     mdnsd_init();
-    extern void gdbstub_init(void);
-    gdbstub_init();
+    if (cmdline_get_param("gdbstub", gdbstub_opt, sizeof(gdbstub_opt)) == 0 &&
+        strcmp(gdbstub_opt, "0") == 0) {
+        printf("gdbstub: disabled by kernel cmdline\n");
+    } else {
+        extern void gdbstub_init(void);
+        gdbstub_init();
+    }
 }
 
 /* ========================================================================== */
