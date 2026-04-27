@@ -143,6 +143,27 @@ static cdev_t random_cdev = {
         },
 };
 
+static cdev_t urandom_cdev = {
+    .dev =
+        {
+            .major = URANDOM_MAJOR,
+            .minor = URANDOM_MINOR,
+            .devname = "urandom",
+            .devmode = S_IFCHR | 0666,
+        },
+    .readable = 1,
+    .writable = 1,
+    .ops =
+        {
+            .read = random_read,
+            .write = random_write,
+            .open = random_open,
+            .release = random_release,
+            .ioctl = NULL,
+            .poll = NULL, /* /dev/urandom is always ready — handled by fallback */
+        },
+};
+
 /* ------------------------------------------------------------------ */
 /*  /dev/zero — reads return zeroes, writes are discarded             */
 /* ------------------------------------------------------------------ */
@@ -211,6 +232,10 @@ void nullranddevinit(void) {
 
     ret = cdev_register(&random_cdev);
     assert(ret == 0, "nullranddevinit: failed to register random cdev: %d",
+           ret);
+
+    ret = cdev_register(&urandom_cdev);
+    assert(ret == 0, "nullranddevinit: failed to register urandom cdev: %d",
            ret);
 
     ret = cdev_register(&zero_cdev);

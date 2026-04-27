@@ -12,6 +12,8 @@
 #define RANDOM_MINOR 3
 #define ZERO_MAJOR 1
 #define ZERO_MINOR 4
+#define URANDOM_MAJOR 1
+#define URANDOM_MINOR 5
 
 // TTY / PTY device major and minor numbers
 #define TTY_DEV_MAJOR 5

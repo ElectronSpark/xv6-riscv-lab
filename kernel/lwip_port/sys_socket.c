@@ -2588,7 +2588,7 @@ uint64 sys_sendmsg(void)
 
         /* Handle SCM_RIGHTS control message: extract fd to pass */
         if (mh.msg_control != 0 && mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
-            unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int))];
+            unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
             uint64 copy_len = mh.msg_controllen;
             if (copy_len > sizeof(cmsg_buf))
                 copy_len = sizeof(cmsg_buf);
@@ -3286,7 +3286,7 @@ uint64 sys_sendmmsg(void)
 
             if (mh.msg_control != 0 &&
                 mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
-                unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int))];
+                unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
                 uint64 copy_len = mh.msg_controllen;
                 if (copy_len > sizeof(cmsg_buf))
                     copy_len = sizeof(cmsg_buf);
@@ -3297,27 +3297,18 @@ uint64 sys_sendmmsg(void)
                 if (cmsg->cmsg_level == SOL_SOCKET &&
                     cmsg->cmsg_type == SCM_RIGHTS &&
                     cmsg->cmsg_len >= K_CMSG_LEN(sizeof(int))) {
-                    int pass_fd = *(int *)K_CMSG_DATA(cmsg);
-                    struct vfs_file *pass_file = vfs_fdtable_get_file(
-                        current->fdtable, pass_fd);
-                    if (pass_file == NULL)
-                        return sent > 0 ? (uint64)sent : (uint64)-EBADF;
-
-                    struct vfs_file *queued_file = vfs_fdup(pass_file);
-                    vfs_fput(pass_file);
-                    if (queued_file == NULL)
-                        return sent > 0 ? (uint64)sent : (uint64)-ENOMEM;
-
-                    spin_lock(&usk->lock);
-                    int next_tail = (usk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
-                    if (next_tail == usk->scm_head) {
-                        spin_unlock(&usk->lock);
-                        vfs_fput(queued_file);
-                        return sent > 0 ? (uint64)sent : (uint64)-EAGAIN;
+                    size_t payload_len = k_cmsg_payload_len(cmsg);
+                    size_t nfds = payload_len / sizeof(int);
+                    size_t max_fds = (copy_len >= K_CMSG_LEN(0))
+                        ? (copy_len - K_CMSG_LEN(0)) / sizeof(int) : 0;
+                    if (nfds > max_fds)
+                        nfds = max_fds;
+                    if (nfds > 0) {
+                        int *pass_fds = (int *)K_CMSG_DATA(cmsg);
+                        int ret = unix_enqueue_scm_rights(usk, pass_fds, nfds);
+                        if (ret < 0)
+                            return sent > 0 ? (uint64)sent : (uint64)ret;
                     }
-                    usk->scm_queue[usk->scm_tail] = queued_file;
-                    usk->scm_tail = next_tail;
-                    spin_unlock(&usk->lock);
                 }
             }
 
