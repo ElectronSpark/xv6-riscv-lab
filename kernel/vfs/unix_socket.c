@@ -93,6 +93,7 @@ struct vfs_file_ops unix_socket_file_ops = {
 
 #define RING_READABLE(r) ((r)->nwrite - (r)->nread)
 #define RING_WRITABLE(r) (UNIX_BUF_SIZE - RING_READABLE(r))
+#define UNIX_WRITE_LOWAT PAGE_SIZE
 
 static int ring_alloc(struct unix_ring *r)
 {
@@ -425,17 +426,6 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
         total += (ssize_t)got;
     }
 
-    /* Notify kqueue: after reading, our read-side has data */
-    if (total > 0) {
-        spin_lock(&sk->lock);
-        struct vfs_file *sk_rd_file = sk->file ? vfs_fdup(sk->file) : NULL;
-        spin_unlock(&sk->lock);
-        if (sk_rd_file) {
-            vfs_file_knote_notify(sk_rd_file, EVFILT_READ, 0);
-            vfs_fput(sk_rd_file);
-        }
-    }
-
     return total;
 }
 
@@ -526,17 +516,6 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
             }
         }
         total += (ssize_t)chunk;
-    }
-
-    /* kqueue: notify our side writable status */
-    if (total > 0) {
-        spin_lock(&sk->lock);
-        struct vfs_file *sk_wr_file = sk->file ? vfs_fdup(sk->file) : NULL;
-        spin_unlock(&sk->lock);
-        if (sk_wr_file) {
-            vfs_file_knote_notify(sk_wr_file, EVFILT_WRITE, 0);
-            vfs_fput(sk_wr_file);
-        }
     }
 
     return total;
@@ -704,7 +683,7 @@ static int unix_file_poll(struct vfs_file *file, short events)
     if (events & (POLLOUT | POLLWRNORM)) {
         if (peer == NULL)
             revents |= POLLERR;
-        else if (RING_WRITABLE(&sk->tx) > 0)
+        else if (RING_WRITABLE(&sk->tx) >= UNIX_WRITE_LOWAT)
             revents |= (events & (POLLOUT | POLLWRNORM));
     }
 
