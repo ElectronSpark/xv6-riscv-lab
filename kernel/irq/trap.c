@@ -6,6 +6,7 @@
 #include "lock/spinlock.h"
 #include "defs.h"
 #include "proc/thread.h"
+#include "proc/thread_group.h"
 #include "printf.h"
 #include "proc/sched.h"
 #include "signal.h"
@@ -142,7 +143,7 @@ void usertrap(void) {
         // system call
 
         if (killed(current))
-            exit(-1);
+            thread_group_exit(current, -1);
 
         // sepc points to the ecall instruction,
         // but we want to return to the next instruction.
@@ -268,10 +269,10 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
 
     if ((sa->sa_flags & SA_ONSTACK) == 0) {
         if (p == NULL || p->vm == NULL) {
-            exit(-1); // No stack area available
+            thread_group_exit(current, -1); // No stack area available
         }
         if (vm_try_growstack(p->vm, new_sp) != 0) {
-            exit(-1); // No stack area available
+            thread_group_exit(current, -1); // No stack area available
         }
     }
 
@@ -406,7 +407,7 @@ void usertrapret(void) {
 
     if (killed(p)) {
         // If the thread is terminated, exit it.
-        exit(-1);
+        thread_group_exit(p, -1);
     }
 
     handle_signal();

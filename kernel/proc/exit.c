@@ -81,6 +81,17 @@ void reparent(struct thread *p) {
     }
 }
 
+static bool zombie_child_is_reapable(struct thread *child) {
+    if (!THREAD_ZOMBIE(child))
+        return false;
+
+    struct thread_group *tg = child->thread_group;
+    if (tg == NULL || !thread_is_group_leader(child))
+        return true;
+
+    return __atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE) <= 0;
+}
+
 // Exit the current thread.  Does not return.
 // An exited thread remains in the zombie state
 // until its parent calls wait().
@@ -115,6 +126,11 @@ void exit(int status) {
     // If this thread is in a thread group undergoing group exit,
     // use the group exit code.
     struct thread_group *tg = p->thread_group;
+    if (tg != NULL && thread_is_group_leader(p) &&
+        !thread_group_exiting(tg) &&
+        __atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE) > 1) {
+        thread_group_exit(p, status);
+    }
     if (tg != NULL && thread_group_exiting(tg) && tg->group_exit_task != p) {
         status = tg->group_exit_code;
     }
@@ -376,7 +392,7 @@ int wait(uint64 addr) {
             list_foreach_node_safe(&thr->children, child, tmp, siblings) {
                 // Thread state will never transition back from ZOMBIE, so no
                 // need to lock the child.
-                if (THREAD_ZOMBIE(child)) {
+                if (zombie_child_is_reapable(child)) {
                     // Transition to RUNNING immediately — we've found a zombie
                     // and must NOT be in INTERRUPTIBLE during the on_cpu spin.
                     __thread_state_set(p, THREAD_RUNNING);
@@ -489,7 +505,7 @@ int waitpid(int target_pid, uint64 addr, int options) {
                     goto ret;
                 }
 
-                if (THREAD_ZOMBIE(child)) {
+                if (zombie_child_is_reapable(child)) {
                     __thread_state_set(p, THREAD_RUNNING);
                     int spin_count = 0;
                     while (smp_load_acquire(&child->sched_entity->on_cpu)) {

@@ -1054,8 +1054,7 @@ int sigreturn(void) {
     // vm_copyin which needs vm_rlock (sleep lock)
     ucontext_t uc = {0};
     if (restore_sigframe(p, &uc) != 0) {
-        // @TODO:
-        exit(-1); // Restore failed, exit the thread
+        thread_group_exit(p, -1);
     }
 
     // signal_restore now acquires sigacts_lock internally
@@ -1405,7 +1404,7 @@ void handle_signal(void) {
             }
         }
 
-        exit(-1);
+        thread_group_exit(p, -1);
     }
 }
 

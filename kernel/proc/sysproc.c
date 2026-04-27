@@ -67,6 +67,16 @@ uint64 sys_exit(void) {
                current->pid, current->name, n);
 #endif
     }
+    /*
+     * Keep raw exit useful for pthread workers, but do not leave a GUI or
+     * server process half-alive when its thread-group leader exits via the
+     * legacy xv6 syscall path instead of exit_group.
+     */
+    if (thread_is_group_leader(current) && current->thread_group != NULL &&
+        __atomic_load_n(&current->thread_group->live_threads,
+                        __ATOMIC_RELAXED) > 1) {
+        thread_group_exit(current, n);
+    }
     exit(n);
     return 0; // not reached
 }
