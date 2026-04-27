@@ -85,10 +85,8 @@ static inline void ext4fs_inode_map_cache_invalidate(struct vfs_inode *vi)
     struct ext4fs_inode *ei = ext4fs_inode_from_vfs(vi);
     if (ei == NULL)
         return;
-    spin_lock(&ei->map_cache.lock);
     ei->map_cache.valid = 0;
     ei->map_cache.len = 0;
-    spin_unlock(&ei->map_cache.lock);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */

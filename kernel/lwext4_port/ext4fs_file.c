@@ -276,62 +276,9 @@ static int ext4fs_fill_page_from_ref(struct ext4_fs *fs,
             n = (uint)(bytes_to_read - done);
 
         ext4_fsblk_t fblock;
-        int r;
-        struct ext4fs_inode *ei = ext4fs_inode_from_vfs(inode);
-
-        if (ei != NULL) {
-            int hit = 0;
-
-            spin_lock(&ei->map_cache.lock);
-            if (ei->map_cache.valid && iblock >= ei->map_cache.lblk_start &&
-                iblock < ei->map_cache.lblk_start + ei->map_cache.len) {
-                if (ei->map_cache.hole)
-                    fblock = 0;
-                else
-                    fblock = (ext4_fsblk_t)(ei->map_cache.pblk_start +
-                                            (iblock - ei->map_cache.lblk_start));
-                hit = 1;
-            }
-            spin_unlock(&ei->map_cache.lock);
-
-            if (!hit) {
-                ext4_fsblk_t first_fblock;
-                uint32 run_len = 1;
-
-                r = ext4_fs_get_inode_dblk_idx(ref, iblock, &first_fblock, true);
-                if (r != EOK)
-                    return -r;
-
-                for (ext4_lblk_t next = iblock + 1;
-                     next < iblock + EXT4FS_MAP_CACHE_BLOCKS; next++) {
-                    ext4_fsblk_t next_fblock;
-                    r = ext4_fs_get_inode_dblk_idx(ref, next, &next_fblock, true);
-                    if (r != EOK)
-                        break;
-                    if (first_fblock == 0) {
-                        if (next_fblock != 0)
-                            break;
-                    } else if (next_fblock != first_fblock + (next - iblock)) {
-                        break;
-                    }
-                    run_len++;
-                }
-
-                spin_lock(&ei->map_cache.lock);
-                ei->map_cache.lblk_start = iblock;
-                ei->map_cache.pblk_start = first_fblock;
-                ei->map_cache.len = run_len;
-                ei->map_cache.valid = 1;
-                ei->map_cache.hole = (first_fblock == 0);
-                spin_unlock(&ei->map_cache.lock);
-
-                fblock = first_fblock;
-            }
-        } else {
-            r = ext4_fs_get_inode_dblk_idx(ref, iblock, &fblock, true);
-            if (r != EOK)
-                return -r;
-        }
+        int r = ext4_fs_get_inode_dblk_idx(ref, iblock, &fblock, true);
+        if (r != EOK)
+            return -r;
 
         if (fblock == 0) {
             memset((char *)dst + done, 0, n);
