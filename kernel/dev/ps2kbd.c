@@ -289,6 +289,19 @@ static int kbd_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     return -EINVAL;
 }
 
+static int kbd_poll(cdev_t *cdev, short events)
+{
+    (void)cdev;
+    short revents = 0;
+    if (events & 0x01) {  /* POLLIN */
+        spin_lock(&kbd_state.lock);
+        if (!ring_empty())
+            revents |= 0x01;
+        spin_unlock(&kbd_state.lock);
+    }
+    return revents;
+}
+
 static cdev_t kbd_cdev = {
     .dev = {
         .major = KBD_MAJOR,
@@ -304,7 +317,7 @@ static cdev_t kbd_cdev = {
         .open    = kbd_open,
         .release = kbd_release,
         .ioctl   = kbd_ioctl,
-        .poll    = NULL,
+        .poll    = kbd_poll,
     },
 };
 

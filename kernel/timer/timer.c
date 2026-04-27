@@ -109,6 +109,7 @@ void timer_node_init(struct timer_node *node, uint64 expires,
     node->expires = expires;
     node->callback = callback;
     node->data = data;
+    node->retry_limit = retry_limit > 0 ? retry_limit : TIMER_DEFAULT_RETRY_LIMIT;
 }
 
 // Add a timer_node to a timer_root;

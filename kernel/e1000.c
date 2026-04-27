@@ -12,6 +12,7 @@
 #include "dev/netdev.h"
 #include "trap.h"
 #include "kstats.h"
+#include "proc/workqueue.h"
 
 /* Global network I/O counters (read by sys_kstats) */
 uint64 g_net_tx_packets;
@@ -34,6 +35,7 @@ uint64 __e1000_pci_mmio_base = (uint64)PA2VA(0x40000000L);
 uint64 __e1000_pci_irqno = 33;
 
 static void e1000_intr(int irq, void *data, device_t *dev);
+static void e1000_rx_work_func(struct work_struct *work);
 
 #define TX_RING_SIZE 128
 STATIC struct tx_desc tx_ring[TX_RING_SIZE] __ALIGNED(16);
@@ -47,6 +49,9 @@ STATIC struct mbuf *rx_mbufs[RX_RING_SIZE];
 STATIC volatile uint32 *regs;
 
 spinlock_t e1000_lock = SPINLOCK_INITIALIZED("e1000_lock");
+static struct workqueue *e1000_rx_wq;
+static struct work_struct e1000_rx_work;
+static volatile int e1000_rx_work_pending;
 
 // Full reset the device
 // Called by e1000_init()
@@ -238,6 +243,11 @@ void e1000_init(uint32 *xregs) {
     if (e1000_set_rcvaddr(default_mac_address, 0, 1, 0) != 0) {
         panic("e1000_init: MAC address");
     }
+
+    init_work_struct(&e1000_rx_work, e1000_rx_work_func, 0);
+    e1000_rx_wq = workqueue_create("e1000_rx", 2);
+    assert(e1000_rx_wq != NULL, "e1000_init: failed to create rx workqueue");
+
     // multicast table
     for (int i = 0; i < 4096 / 32; i++)
         regs[E1000_MTA + i] = 0;
@@ -360,6 +370,37 @@ STATIC void e1000_recv(void) {
     }
 }
 
+static bool e1000_rx_pending(void) {
+    uint32 index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+    return (rx_ring[index].status & E1000_RXD_STAT_DD) != 0;
+}
+
+static void e1000_rx_work_func(struct work_struct *work) {
+    (void)work;
+
+    e1000_recv();
+    __atomic_store_n(&e1000_rx_work_pending, 0, __ATOMIC_RELEASE);
+
+    if (e1000_rx_pending()) {
+        if (__atomic_exchange_n(&e1000_rx_work_pending, 1,
+                                __ATOMIC_ACQ_REL) == 0) {
+            if (!queue_work(e1000_rx_wq, &e1000_rx_work))
+                __atomic_store_n(&e1000_rx_work_pending, 0,
+                                 __ATOMIC_RELEASE);
+        }
+    }
+}
+
+static void e1000_schedule_rx(void) {
+    if (e1000_rx_wq == NULL)
+        return;
+    if (__atomic_exchange_n(&e1000_rx_work_pending, 1,
+                            __ATOMIC_ACQ_REL) != 0)
+        return;
+    if (!queue_work(e1000_rx_wq, &e1000_rx_work))
+        __atomic_store_n(&e1000_rx_work_pending, 0, __ATOMIC_RELEASE);
+}
+
 static void e1000_intr(int irq, void *data, device_t *dev) {
     // tell the e1000 we've seen this interrupt;
     // without this the e1000 won't raise any
@@ -367,14 +408,14 @@ static void e1000_intr(int irq, void *data, device_t *dev) {
     // Read ICR to auto-clear interrupt causes (standard e1000 practice).
     (void)regs[E1000_ICR];
 
-    e1000_recv();
+    e1000_schedule_rx();
 
     // Re-check: packets may have been delivered by the host (QEMU) during
     // the e1000_recv() loop above.  QEMU's interrupt mitigation timer
     // (128 µs minimum) can absorb the interrupt cause for those packets,
     // so poll once more to avoid a delayed delivery.
-    if (rx_ring[(regs[E1000_RDT] + 1) % RX_RING_SIZE].status & E1000_RXD_STAT_DD)
-        e1000_recv();
+    if (e1000_rx_pending())
+        e1000_schedule_rx();
 }
 
 /*
@@ -393,7 +434,7 @@ void e1000_poll_rx(void) {
     if (rx_ring[index].status & E1000_RXD_STAT_DD) {
         poll_hits++;
         (void)regs[E1000_ICR]; // clear any pending causes
-        e1000_recv();
+        e1000_schedule_rx();
     }
 
     if (0 && (poll_calls % 10000) == 0) {

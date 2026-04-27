@@ -55,6 +55,24 @@ static struct vfs_file_ops kqueue_file_ops = {
     .fault = NULL,
 };
 
+static void kqueue_rescan_registered_locked(struct kqueue *kq) {
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+
+    list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry) {
+        if ((kn->status & (KN_DISABLED | KN_QUEUED | KN_DETACHED)) ||
+            kn->ops == NULL || kn->ops->event == NULL) {
+            continue;
+        }
+        if (!kn->ops->event(kn, 0))
+            continue;
+
+        kn->status |= KN_QUEUED;
+        list_node_push(&kq->ready, kn, ready_entry);
+        kq->nready++;
+    }
+}
+
 /*
  * kqueue_init - initialize the kqueue subsystem
  */
@@ -539,6 +557,7 @@ struct __kq_timed_data {
     spinlock_t *lock;
     struct timer_node *tn;
     uint64 timeout_ms;
+    bool timer_armed;
 };
 
 /*
@@ -549,8 +568,11 @@ struct __kq_timed_data {
  */
 static int __kq_timed_sleep_cb(void *data) {
     struct __kq_timed_data *d = (struct __kq_timed_data *)data;
-    sched_timer_set(d->tn, d->timeout_ms);
-    return spin_sleep_cb(d->lock);
+    d->timer_armed = sched_timer_set(d->tn, d->timeout_ms) == 0;
+    int status = spin_sleep_cb(d->lock);
+    if (!d->timer_armed)
+        scheduler_wakeup(current);
+    return status;
 }
 
 /*
@@ -559,7 +581,8 @@ static int __kq_timed_sleep_cb(void *data) {
  */
 static void __kq_timed_wakeup_cb(void *data, int sleep_cb_status) {
     struct __kq_timed_data *d = (struct __kq_timed_data *)data;
-    sched_timer_done(d->tn);
+    if (d->timer_armed)
+        sched_timer_done(d->tn);
     spin_wake_cb(d->lock, sleep_cb_status);
 }
 
@@ -589,6 +612,8 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             total = -EBADF;
             break;
         }
+
+        kqueue_rescan_registered_locked(kq);
 
         /* Drain ready list */
         while (total < nevents && !LIST_IS_EMPTY(&kq->ready)) {
