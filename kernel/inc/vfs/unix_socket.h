@@ -31,7 +31,7 @@ struct vfs_file_ops;
 #define SOCK_DGRAM     2
 #define SOCK_RAW       3
 #endif
-#define UNIX_BUF_SIZE PAGE_SIZE  /* ring buffer size per direction */
+#define UNIX_BUF_SIZE (64 * PAGE_SIZE)  /* ring buffer size per direction */
 
 /* Maximum number of pending connections for a listening socket */
 #define UNIX_BACKLOG_MAX 128
@@ -124,7 +124,7 @@ struct unix_sock {
     struct vfs_file *file;
 
     /* SCM_RIGHTS: FIFO queue of pending files to deliver to peer via recvmsg */
-#define UNIX_SCM_QUEUE_MAX 8
+#define UNIX_SCM_QUEUE_MAX 64
     struct vfs_file *scm_queue[UNIX_SCM_QUEUE_MAX];
     int scm_head;  /* next slot to dequeue from */
     int scm_tail;  /* next slot to enqueue into */

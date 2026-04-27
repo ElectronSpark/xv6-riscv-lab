@@ -174,6 +174,46 @@ sig_defact signo_default_action(int signo) {
     }
 }
 
+static bool trace_browser_signal(struct thread *p) {
+    if (p == NULL)
+        return false;
+    return strstr(p->name, "mb") != NULL ||
+           strstr(p->name, "MiniBrowser") != NULL ||
+           strstr(p->name, "WebKit") != NULL ||
+           p->pgid == 48 || p->tgid == 48;
+}
+
+static void trace_browser_signal_send(const char *op, int target_pid,
+                                      int signum, struct thread *target) {
+    if (signum != SIGABRT)
+        return;
+    if (!trace_browser_signal(current) && !trace_browser_signal(target))
+        return;
+#ifdef __x86_64__
+    struct trapframe *tf = &current->trapframe->trapframe;
+    printf("signal: %s SIGABRT sender pid=%d tgid=%d name='%s' target=%d",
+           op, current->pid, thread_tgid(current), current->name, target_pid);
+    if (target != NULL)
+        printf(" target_name='%s' target_tgid=%d", target->name,
+               thread_tgid(target));
+    printf(" rip=0x%lx rsp=0x%lx\n", tf->rip, tf->rsp);
+    if (current->vm != NULL)
+        print_user_backtrace(current->vm->pagetable,
+                             tf->rbp, tf->rip, tf->rsp, tf->rip, 16);
+#else
+    printf("signal: %s SIGABRT sender pid=%d tgid=%d name='%s' target=%d\n",
+           op, current->pid, thread_tgid(current), current->name, target_pid);
+#endif
+}
+
+static int first_signal_in_set(sigset_t set) {
+    for (int s = 1; s <= NSIG; s++) {
+        if (sigismember(&set, s))
+            return s;
+    }
+    return 0;
+}
+
 #define SIG_MANDATORY_MASK (SIGNO_MASK(SIGKILL) | SIGNO_MASK(SIGSTOP))
 
 /*
@@ -645,6 +685,10 @@ after_enqueue:
 
     // If the action is to terminate the thread, set the killed flag
     if (is_term) {
+        if (trace_browser_signal(p)) {
+            printf("signal: marking killed pid=%d tgid=%d name='%s' signum=%d default-term\n",
+                   p->pid, p->tgid, p->name, info->signo);
+        }
         THREAD_SET_KILLED(p);
         if (THREAD_STOPPED(p)) {
             // If the thread is stopped, we need to wake it up.
@@ -930,6 +974,11 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
             sigset_t pending_term = p->signal.sig_pending_mask &
                                     sa->sa_sigterm & ~p->signal.sig_mask;
             if (pending_term != 0) {
+                if (trace_browser_signal(p)) {
+                    printf("signal: marking killed pid=%d tgid=%d name='%s' pending_term=%d after-sigaction\n",
+                           p->pid, p->tgid, p->name,
+                           first_signal_in_set(pending_term));
+                }
                 THREAD_SET_KILLED(p);
             }
         } else {
@@ -1002,6 +1051,11 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     // If newly unmasked termination signals are pending, set THREAD_KILLED
     sigset_t pending_term = pending_unmasked & sa->sa_sigterm;
     if (pending_term != 0) {
+        if (trace_browser_signal(p)) {
+            printf("signal: marking killed pid=%d tgid=%d name='%s' pending_term=%d after-mask\n",
+                   p->pid, p->tgid, p->name,
+                   first_signal_in_set(pending_term));
+        }
         THREAD_SET_KILLED(p);
     }
     sigacts_unlock(sa);
@@ -1137,6 +1191,10 @@ static int __deliver_signal(struct thread *p, int signo, ksiginfo_t *info,
                "%d\n",
                sa->sa_handler, signo);
         tcb_lock(p);
+        if (trace_browser_signal(p)) {
+            printf("signal: marking killed pid=%d tgid=%d name='%s' signum=%d invalid-handler\n",
+                   p->pid, p->tgid, p->name, signo);
+        }
         THREAD_SET_KILLED(p);
         tcb_unlock(p);
         return 0;
@@ -1217,6 +1275,12 @@ void handle_signal(void) {
                 recalc_sigpending_tsk(p);
                 sigacts_unlock(sa);
                 continue;  /* re-check for other deliverable signals */
+            }
+            if (trace_browser_signal(p)) {
+                printf("signal: marking killed pid=%d tgid=%d name='%s' pending_term=%d masked=0x%lx sigterm=0x%lx already=%d\n",
+                       p->pid, p->tgid, p->name,
+                       first_signal_in_set(masked & sigterm),
+                       masked, sigterm, THREAD_KILLED(p) ? 1 : 0);
             }
             THREAD_SET_KILLED(p);
             sigacts_unlock(sa);
@@ -1425,6 +1489,7 @@ int kill(int pid, int signum) {
     info.sender = current;
     info.info.si_pid = thread_tgid(current);
 
+    trace_browser_signal_send("kill", pid, signum, NULL);
     return signal_send(pid, &info);
 }
 
@@ -1464,6 +1529,7 @@ int tgkill(int tgid, int tid, int signum) {
     info.signo = signum;
     info.sender = current;
     info.info.si_pid = thread_tgid(current);
+    trace_browser_signal_send("tgkill", tid, signum, p);
     int ret = __signal_send(p, &info);
     rcu_read_unlock();
     return ret;
@@ -1485,6 +1551,7 @@ int tkill(int tid, int signum) {
     info.signo = signum;
     info.sender = current;
     info.info.si_pid = thread_tgid(current);
+    trace_browser_signal_send("tkill", tid, signum, p);
     int ret = __signal_send(p, &info);
     rcu_read_unlock();
     return ret;

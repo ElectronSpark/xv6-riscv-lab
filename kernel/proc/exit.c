@@ -92,6 +92,15 @@ static bool zombie_child_is_reapable(struct thread *child) {
     return __atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE) <= 0;
 }
 
+static bool trace_browser_child(struct thread *child) {
+    if (child == NULL)
+        return false;
+    return strstr(child->name, "mb") != NULL ||
+           strstr(child->name, "MiniBrowser") != NULL ||
+           strstr(child->name, "WebKit") != NULL ||
+           child->pgid == 48 || child->tgid == 48;
+}
+
 // Exit the current thread.  Does not return.
 // An exited thread remains in the zombie state
 // until its parent calls wait().
@@ -411,6 +420,14 @@ int wait(uint64 addr) {
                     }
                     xstate = child->xstate;
                     pid = child->pid;
+                    if (trace_browser_child(child)) {
+                        struct thread_group *ctg = child->thread_group;
+                        int live = ctg ? __atomic_load_n(&ctg->live_threads, __ATOMIC_ACQUIRE) : -1;
+                        printf("wait: reaping pid=%d tgid=%d name='%s' state=%d live=%d xstate=%d parent='%s'\n",
+                               child->pid, child->tgid, child->name,
+                               __thread_state_get(child), live, child->xstate,
+                               child->parent ? child->parent->name : "NULL");
+                    }
                     if (!pid_try_lock_upgrade()) {
                         pid_runlock();
                         pid_wlock();
@@ -521,6 +538,15 @@ int waitpid(int target_pid, uint64 addr, int options) {
                     // Encode exited status: (exit_code << 8) | 0x00
                     xstate = (child->xstate & 0xff) << 8;
                     pid = child->pid;
+                    if (trace_browser_child(child)) {
+                        struct thread_group *ctg = child->thread_group;
+                        int live = ctg ? __atomic_load_n(&ctg->live_threads, __ATOMIC_ACQUIRE) : -1;
+                        printf("waitpid: reaping pid=%d tgid=%d name='%s' state=%d live=%d xstate=%d parent='%s' target=%d\n",
+                               child->pid, child->tgid, child->name,
+                               __thread_state_get(child), live, child->xstate,
+                               child->parent ? child->parent->name : "NULL",
+                               target_pid);
+                    }
                     if (!pid_try_lock_upgrade()) {
                         pid_runlock();
                         pid_wlock();

@@ -354,6 +354,8 @@ char *strstr(char *haystack, const char *needle) {
         return haystack;
 
     size_t haystack_len = strlen(haystack);
+    if (haystack_len < needle_len)
+        return 0;
 
     for (size_t i = 0; i <= haystack_len - needle_len; i++) {
         if (strncmp(haystack + i, needle, needle_len) == 0)

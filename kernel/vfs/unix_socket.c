@@ -96,7 +96,7 @@ struct vfs_file_ops unix_socket_file_ops = {
 
 static int ring_alloc(struct unix_ring *r)
 {
-    r->data = kalloc();
+    r->data = kvmalloc(UNIX_BUF_SIZE);
     if (r->data == NULL)
         return -ENOMEM;
     r->nread = 0;
@@ -107,7 +107,7 @@ static int ring_alloc(struct unix_ring *r)
 static void ring_free(struct unix_ring *r)
 {
     if (r->data != NULL) {
-        kfree(r->data);
+        kvfree(r->data);
         r->data = NULL;
     }
 }

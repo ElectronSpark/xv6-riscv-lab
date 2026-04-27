@@ -127,6 +127,11 @@ void usertrap(void) {
     uint64 va;
     vma_t *vma = NULL;
     uint64 scause = current->trapframe->trapframe.scause;
+    bool trace_browser_fault =
+        strstr(current->name, "mb") != NULL ||
+        strstr(current->name, "MiniBrowser") != NULL ||
+        strstr(current->name, "WebKit") != NULL ||
+        current->pgid == 48 || current->tgid == 48;
 
     if ((current->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
@@ -166,6 +171,12 @@ void usertrap(void) {
             break;
         }
         vm_runlock(current->vm);
+        if (trace_browser_fault) {
+            printf("usertrap: killing pid=%d tgid=%d name='%s' scause=0x%lx sepc=0x%lx stval=0x%lx instruction fault\n",
+                   current->pid, current->tgid, current->name, scause,
+                   current->trapframe->trapframe.sepc,
+                   current->trapframe->trapframe.stval);
+        }
         assert(current->pid != 1, "init exiting");
         kill(current->pid, SIGSEGV);
         break;
@@ -188,6 +199,12 @@ void usertrap(void) {
         // p->pid); printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(),
         // r_stval()); printf("            pgtbl=0x%lx\n",
         // (uint64)current->vm->pagetable);
+        if (trace_browser_fault) {
+            printf("usertrap: killing pid=%d tgid=%d name='%s' scause=0x%lx sepc=0x%lx stval=0x%lx load fault\n",
+                   current->pid, current->tgid, current->name, scause,
+                   current->trapframe->trapframe.sepc,
+                   current->trapframe->trapframe.stval);
+        }
         assert(current->pid != 1, "init exiting");
         kill(current->pid, SIGSEGV);
         break;
@@ -210,6 +227,12 @@ void usertrap(void) {
         // p->pid); printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(),
         // r_stval()); printf("            pgtbl=0x%lx\n",
         // (uint64)current->vm->pagetable);
+        if (trace_browser_fault) {
+            printf("usertrap: killing pid=%d tgid=%d name='%s' scause=0x%lx sepc=0x%lx stval=0x%lx store fault\n",
+                   current->pid, current->tgid, current->name, scause,
+                   current->trapframe->trapframe.sepc,
+                   current->trapframe->trapframe.stval);
+        }
         assert(current->pid != 1, "init exiting");
         kill(current->pid, SIGSEGV);
         break;
@@ -219,6 +242,12 @@ void usertrap(void) {
         // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(),
         // current->pid); printf("            sepc=0x%lx stval=0x%lx\n",
         // r_sepc(), r_stval());
+        if (trace_browser_fault) {
+            printf("usertrap: killing pid=%d tgid=%d name='%s' scause=0x%lx sepc=0x%lx stval=0x%lx unexpected\n",
+                   current->pid, current->tgid, current->name, scause,
+                   current->trapframe->trapframe.sepc,
+                   current->trapframe->trapframe.stval);
+        }
         assert(current->pid != 1, "init exiting");
         kill(current->pid, SIGSEGV);
         break;

@@ -2438,6 +2438,86 @@ struct k_cmsghdr {
 
 #define SENDMSG_MAX_IOV 16
 
+static size_t k_cmsg_payload_len(struct k_cmsghdr *cmsg)
+{
+    uint32 cmsg_len = (uint32)cmsg->cmsg_len;
+    if (cmsg_len < K_CMSG_LEN(0))
+        return 0;
+    return cmsg_len - K_CMSG_LEN(0);
+}
+
+static size_t unix_scm_count_locked(struct unix_sock *sk)
+{
+    if (sk->scm_tail >= sk->scm_head)
+        return sk->scm_tail - sk->scm_head;
+    return UNIX_SCM_QUEUE_MAX - sk->scm_head + sk->scm_tail;
+}
+
+static int unix_enqueue_scm_rights(struct unix_sock *sk, const int *fds,
+                                   size_t nfds)
+{
+    if (nfds == 0)
+        return 0;
+    if (nfds >= UNIX_SCM_QUEUE_MAX)
+        return -EMSGSIZE;
+
+    struct vfs_file *queued[UNIX_SCM_QUEUE_MAX];
+    memset(queued, 0, sizeof(queued));
+
+    for (size_t i = 0; i < nfds; i++) {
+        struct vfs_file *file = vfs_fdtable_get_file(current->fdtable, fds[i]);
+        if (file == NULL) {
+            for (size_t j = 0; j < i; j++)
+                vfs_fput(queued[j]);
+            return -EBADF;
+        }
+
+        queued[i] = vfs_fdup(file);
+        vfs_fput(file);
+        if (queued[i] == NULL) {
+            for (size_t j = 0; j < i; j++)
+                vfs_fput(queued[j]);
+            return -ENOMEM;
+        }
+    }
+
+    spin_lock(&sk->lock);
+    size_t used = unix_scm_count_locked(sk);
+    size_t free_slots = UNIX_SCM_QUEUE_MAX - 1 - used;
+    if (free_slots < nfds) {
+        spin_unlock(&sk->lock);
+        for (size_t i = 0; i < nfds; i++)
+            vfs_fput(queued[i]);
+        return -EAGAIN;
+    }
+
+    for (size_t i = 0; i < nfds; i++) {
+        sk->scm_queue[sk->scm_tail] = queued[i];
+        sk->scm_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
+    }
+    spin_unlock(&sk->lock);
+    return 0;
+}
+
+static size_t unix_dequeue_scm_rights(struct unix_sock *peer,
+                                      struct vfs_file **files,
+                                      size_t max_files)
+{
+    size_t count = 0;
+    if (peer == NULL || max_files == 0)
+        return 0;
+
+    spin_lock(&peer->lock);
+    while (peer->scm_head != peer->scm_tail && count < max_files) {
+        files[count] = peer->scm_queue[peer->scm_head];
+        peer->scm_queue[peer->scm_head] = NULL;
+        peer->scm_head = (peer->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
+        count++;
+    }
+    spin_unlock(&peer->lock);
+    return count;
+}
+
 /*
  * sys_sendmsg(fd, msg, flags) → nbytes / -errno
  *
@@ -2467,50 +2547,6 @@ uint64 sys_sendmsg(void)
         if (vm_copyin(current->vm, &mh, umsg, sizeof(mh)) < 0)
             return (uint64)-EFAULT;
 
-        /* Handle SCM_RIGHTS control message: extract fd to pass */
-        if (mh.msg_control != 0 && mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
-            unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int))];
-            uint64 copy_len = mh.msg_controllen;
-            if (copy_len > sizeof(cmsg_buf))
-                copy_len = sizeof(cmsg_buf);
-            if (vm_copyin(current->vm, cmsg_buf, mh.msg_control, copy_len) < 0)
-                return (uint64)-EFAULT;
-
-            struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
-            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
-                cmsg->cmsg_len >= K_CMSG_LEN(sizeof(int))) {
-                int pass_fd = *(int *)K_CMSG_DATA(cmsg);
-
-                /* Get the vfs_file for the fd being passed */
-                struct vfs_file *pass_file = vfs_fdtable_get_file(
-                    current->fdtable, pass_fd);
-                if (pass_file == NULL)
-                    return (uint64)-EBADF;
-
-                /* Dup the file ref — will be held until recvmsg picks it up */
-                pass_file = vfs_fdup(pass_file);
-                if (pass_file == NULL)
-                    return (uint64)-ENOMEM;
-
-                /* Enqueue on the socket for the peer to pick up */
-                spin_lock(&sk->lock);
-                int next_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
-                if (next_tail == sk->scm_head) {
-                    /* Queue full — drop the oldest entry */
-                    struct vfs_file *dropped = sk->scm_queue[sk->scm_head];
-                    sk->scm_head = (sk->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
-                    spin_unlock(&sk->lock);
-                    if (dropped) vfs_fput(dropped);
-                    spin_lock(&sk->lock);
-                    next_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
-                }
-                sk->scm_queue[sk->scm_tail] = pass_file;
-                sk->scm_tail = next_tail;
-                spin_unlock(&sk->lock);
-            }
-        }
-
-        /* Write the iov data through the normal path */
         if (mh.msg_iovlen == 0)
             return 0;
         if (mh.msg_iovlen > SENDMSG_MAX_IOV)
@@ -2521,13 +2557,68 @@ uint64 sys_sendmsg(void)
         if (vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
             return (uint64)-EFAULT;
 
+        size_t total_len = 0;
+        for (uint64 i = 0; i < mh.msg_iovlen; i++)
+            total_len += iovs[i].iov_len;
+
         /* Get the vfs_file for the socket to call write */
         struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
         if (f == NULL)
             return (uint64)-EBADF;
 
-        /* Honor MSG_DONTWAIT: temporarily set O_NONBLOCK */
+        /*
+         * WebKit's GLib IPC sends descriptor-bearing messages over
+         * nonblocking AF_UNIX streams and treats a successful sendmsg as a
+         * whole IPC message.  Do not enqueue SCM_RIGHTS until the byte payload
+         * can fit, or a later EAGAIN/short write can detach the fd from its
+         * message and corrupt the peer's IPC stream.
+         */
         int saved_fflags = f->f_flags;
+        bool nonblock = (flags & MSG_DONTWAIT) || (saved_fflags & O_NONBLOCK);
+        if (nonblock) {
+            spin_lock(&sk->lock);
+            size_t readable = sk->tx.nwrite - sk->tx.nread;
+            size_t writable = UNIX_BUF_SIZE - readable;
+            spin_unlock(&sk->lock);
+            if (writable < total_len) {
+                vfs_fput(f);
+                return (uint64)-EAGAIN;
+            }
+        }
+
+        /* Handle SCM_RIGHTS control message: extract fd to pass */
+        if (mh.msg_control != 0 && mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
+            unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int))];
+            uint64 copy_len = mh.msg_controllen;
+            if (copy_len > sizeof(cmsg_buf))
+                copy_len = sizeof(cmsg_buf);
+            if (vm_copyin(current->vm, cmsg_buf, mh.msg_control, copy_len) < 0) {
+                vfs_fput(f);
+                return (uint64)-EFAULT;
+            }
+
+            struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
+                (uint32)cmsg->cmsg_len >= K_CMSG_LEN(sizeof(int))) {
+                size_t payload_len = k_cmsg_payload_len(cmsg);
+                size_t nfds = payload_len / sizeof(int);
+                size_t max_fds = (copy_len >= K_CMSG_LEN(0))
+                    ? (copy_len - K_CMSG_LEN(0)) / sizeof(int) : 0;
+                if (nfds > max_fds)
+                    nfds = max_fds;
+                if (nfds > 0) {
+                    int *pass_fds = (int *)K_CMSG_DATA(cmsg);
+                    int ret = unix_enqueue_scm_rights(sk, pass_fds, nfds);
+                    if (ret < 0) {
+                        vfs_fput(f);
+                        return (uint64)ret;
+                    }
+                }
+            }
+        }
+
+        /* Write the iov data through the normal path */
+        /* Honor MSG_DONTWAIT: temporarily set O_NONBLOCK */
         if (flags & MSG_DONTWAIT)
             f->f_flags |= O_NONBLOCK;
 
@@ -2538,12 +2629,14 @@ uint64 sys_sendmsg(void)
                 f, (const char *)(iovs[i].iov_base), iovs[i].iov_len, 1);
             if (n < 0) {
                 f->f_flags = saved_fflags;
+                vfs_fput(f);
                 return total > 0 ? (uint64)total : (uint64)n;
             }
             total += n;
             if ((size_t)n < iovs[i].iov_len) break;
         }
         f->f_flags = saved_fflags;
+        vfs_fput(f);
         return (uint64)total;
     }
 
@@ -2716,6 +2809,7 @@ uint64 sys_recvmsg(void)
         if (flags & MSG_PEEK) {
             if (sk->state != UNIX_STATE_CONNECTED && sk->type == SOCK_STREAM) {
                 f->f_flags = saved_fflags;
+                vfs_fput(f);
                 if (sk->shutdown_flags & UNIX_SHUT_RD)
                     return 0;
                 return (uint64)-ENOTCONN;
@@ -2759,10 +2853,12 @@ uint64 sys_recvmsg(void)
                             goto unix_recvmsg_done;
                         if (saved_fflags & O_NONBLOCK) {
                             f->f_flags = saved_fflags;
+                            vfs_fput(f);
                             return (uint64)-EAGAIN;
                         }
                         if (signal_pending(current)) {
                             f->f_flags = saved_fflags;
+                            vfs_fput(f);
                             return (uint64)-EINTR;
                         }
 
@@ -2773,6 +2869,7 @@ uint64 sys_recvmsg(void)
 
                         if (signal_pending(current)) {
                             f->f_flags = saved_fflags;
+                            vfs_fput(f);
                             return (uint64)-EINTR;
                         }
                         continue;
@@ -2782,6 +2879,7 @@ uint64 sys_recvmsg(void)
                                    iovs[i].iov_base + copied,
                                    tmp, got) < 0) {
                         f->f_flags = saved_fflags;
+                        vfs_fput(f);
                         return total > 0 ? (uint64)total : (uint64)-EFAULT;
                     }
 
@@ -2801,6 +2899,7 @@ uint64 sys_recvmsg(void)
                     f, (char *)(iovs[i].iov_base), iovs[i].iov_len, 1);
                 if (n < 0) {
                     f->f_flags = saved_fflags;
+                    vfs_fput(f);
                     return total > 0 ? (uint64)total : (uint64)n;
                 }
                 total += n;
@@ -2811,6 +2910,7 @@ uint64 sys_recvmsg(void)
 
 unix_recvmsg_done:
         f->f_flags = saved_fflags;
+        vfs_fput(f);
 
         /* Check for pending SCM_RIGHTS file from peer */
         if (mh.msg_control != 0 &&
@@ -2826,44 +2926,57 @@ unix_recvmsg_done:
             peer = sk->peer;
             spin_unlock(&sk->lock);
 
-            struct vfs_file *scm = NULL;
-            if (peer != NULL) {
-                spin_lock(&peer->lock);
-                if (peer->scm_head != peer->scm_tail) {
-                    scm = peer->scm_queue[peer->scm_head];
-                    peer->scm_queue[peer->scm_head] = NULL;
-                    peer->scm_head = (peer->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
-                }
-                spin_unlock(&peer->lock);
-            }
+            size_t max_fds = (mh.msg_controllen >= K_CMSG_SPACE(0))
+                ? (mh.msg_controllen - K_CMSG_SPACE(0)) / sizeof(int) : 0;
+            if (max_fds > UNIX_SCM_QUEUE_MAX)
+                max_fds = UNIX_SCM_QUEUE_MAX;
 
-            if (scm != NULL) {
-                /* Install the file into our fd table */
-                spin_lock(&current->fdtable->lock);
-                int newfd = vfs_fdtable_alloc_fd(current->fdtable, scm);
-                if (newfd >= 0 && (flags & MSG_CMSG_CLOEXEC))
-                    vfs_fdtable_set_fdflags(current->fdtable, newfd, FD_CLOEXEC);
-                spin_unlock(&current->fdtable->lock);
-                if (newfd < 0) {
-                    vfs_fput(scm); /* drop the ref if we can't install */
-                } else {
-                    /* Build cmsg response in kernel buffer */
-                    unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int))];
+            struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
+            memset(scm_files, 0, sizeof(scm_files));
+            size_t scm_count = unix_dequeue_scm_rights(peer, scm_files, max_fds);
+
+            if (scm_count > 0) {
+                int newfds[UNIX_SCM_QUEUE_MAX];
+                size_t installed = 0;
+
+                for (; installed < scm_count; installed++) {
+                    spin_lock(&current->fdtable->lock);
+                    int newfd = vfs_fdtable_alloc_fd(current->fdtable,
+                                                     scm_files[installed]);
+                    if (newfd >= 0 && (flags & MSG_CMSG_CLOEXEC))
+                        vfs_fdtable_set_fdflags(current->fdtable, newfd,
+                                                FD_CLOEXEC);
+                    spin_unlock(&current->fdtable->lock);
+                    vfs_fput(scm_files[installed]);
+                    if (newfd < 0)
+                        break;
+                    newfds[installed] = newfd;
+                }
+
+                for (size_t i = installed + 1; i < scm_count; i++)
+                    vfs_fput(scm_files[i]);
+
+                if (installed > 0) {
+                    unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
                     memset(cmsg_buf, 0, sizeof(cmsg_buf));
                     struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
-                    cmsg->cmsg_len = K_CMSG_LEN(sizeof(int));
+                    cmsg->cmsg_len = K_CMSG_LEN(sizeof(int) * installed);
                     cmsg->cmsg_level = SOL_SOCKET;
                     cmsg->cmsg_type = SCM_RIGHTS;
-                    *(int *)K_CMSG_DATA(cmsg) = newfd;
+                    memmove(K_CMSG_DATA(cmsg), newfds, sizeof(int) * installed);
 
-                    vm_copyout(current->vm, mh.msg_control,
-                               cmsg_buf, sizeof(cmsg_buf));
+                    size_t clen = K_CMSG_SPACE(sizeof(int) * installed);
+                    vm_copyout(current->vm, mh.msg_control, cmsg_buf, clen);
 
-                    /* Update msg_controllen in userspace msghdr */
-                    uint64 clen = sizeof(cmsg_buf);
+                    uint64 uclen = clen;
                     vm_copyout(current->vm,
                                umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
-                               &clen, sizeof(clen));
+                               &uclen, sizeof(uclen));
+                } else {
+                    uint64 zero = 0;
+                    vm_copyout(current->vm,
+                               umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
+                               &zero, sizeof(zero));
                 }
             } else {
                 /* No pending fd — set msg_controllen = 0 */
@@ -3190,22 +3303,19 @@ uint64 sys_sendmmsg(void)
                     if (pass_file == NULL)
                         return sent > 0 ? (uint64)sent : (uint64)-EBADF;
 
-                    pass_file = vfs_fdup(pass_file);
-                    if (pass_file == NULL)
+                    struct vfs_file *queued_file = vfs_fdup(pass_file);
+                    vfs_fput(pass_file);
+                    if (queued_file == NULL)
                         return sent > 0 ? (uint64)sent : (uint64)-ENOMEM;
 
                     spin_lock(&usk->lock);
                     int next_tail = (usk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
                     if (next_tail == usk->scm_head) {
-                        struct vfs_file *dropped = usk->scm_queue[usk->scm_head];
-                        usk->scm_head = (usk->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
                         spin_unlock(&usk->lock);
-                        if (dropped)
-                            vfs_fput(dropped);
-                        spin_lock(&usk->lock);
-                        next_tail = (usk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
+                        vfs_fput(queued_file);
+                        return sent > 0 ? (uint64)sent : (uint64)-EAGAIN;
                     }
-                    usk->scm_queue[usk->scm_tail] = pass_file;
+                    usk->scm_queue[usk->scm_tail] = queued_file;
                     usk->scm_tail = next_tail;
                     spin_unlock(&usk->lock);
                 }
@@ -3221,6 +3331,7 @@ uint64 sys_sendmmsg(void)
 
             n = unix_socket_file_ops.write(f, tmpbuf, total, 1);
             f->f_flags = saved_fflags;
+            vfs_fput(f);
         } else {
             struct lwip_sock *sk = sock_from_fd(sockfd);
             if (sk == NULL)
@@ -3353,6 +3464,7 @@ uint64 sys_recvmmsg(void)
                     f, (char *)(iovs[j].iov_base), iovs[j].iov_len, 1);
                 if (n < 0) {
                     f->f_flags = saved_fflags;
+                    vfs_fput(f);
                     return received > 0 ? (uint64)received : (uint64)n;
                 }
                 total += n;
@@ -3360,6 +3472,7 @@ uint64 sys_recvmmsg(void)
                     break;
             }
             f->f_flags = saved_fflags;
+            vfs_fput(f);
 
             if (mh.msg_control != 0 &&
                 mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
@@ -3390,6 +3503,7 @@ uint64 sys_recvmmsg(void)
                     if (newfd < 0) {
                         vfs_fput(scm);
                     } else {
+                        vfs_fput(scm);
                         unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int))];
                         memset(cmsg_buf, 0, sizeof(cmsg_buf));
                         struct k_cmsghdr *cmsg =
