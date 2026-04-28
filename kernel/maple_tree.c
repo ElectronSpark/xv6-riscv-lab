@@ -72,12 +72,12 @@ void mt_free_fn(void *ptr)
         slab_free(ptr);
 }
 
-void mt_rcu_read_lock(void)
+void mt_rcu_read_lock(void) __acquires(__rcu_context)
 {
     rcu_read_lock();
 }
 
-void mt_rcu_read_unlock(void)
+void mt_rcu_read_unlock(void) __releases(__rcu_context)
 {
     rcu_read_unlock();
 }

@@ -1,6 +1,7 @@
 #ifndef __KERNEL_SIGNAL_H
 #define __KERNEL_SIGNAL_H
 
+#include "compiler.h"
 #include "types.h"
 #include "signal_types.h"
 
@@ -56,8 +57,8 @@ static inline int sigismember(const sigset_t *set, int signo) {
 
 void signal_init(void);
 void sigstack_init(stack_t *stack);
-void sigacts_lock(sigacts_t *sa);
-void sigacts_unlock(sigacts_t *sa);
+void sigacts_lock(sigacts_t *sa) __acquires(sa);
+void sigacts_unlock(sigacts_t *sa) __releases(sa);
 int sigacts_holding(sigacts_t *sa);
 sigacts_t *sigacts_init(void);
 void sigacts_exec(sigacts_t *sa);

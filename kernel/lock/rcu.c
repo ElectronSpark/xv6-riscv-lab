@@ -286,24 +286,31 @@ void rcu_read_lock(void) {
     // section
     push_off();
 
+    mycpu()->rcu_read_lock_nesting++;
+
     struct thread *t = current;
     if (t != NULL) {
-        // Per-thread nesting
+        // Per-thread mirror for diagnostics/tests in normal thread context.
         t->rcu_read_lock_nesting++;
     }
-    // If no thread context (early boot), just the push_off() is sufficient
 }
 
 void rcu_read_unlock(void) {
+    struct cpu_local *c = mycpu();
+    c->rcu_read_lock_nesting--;
+    if (c->rcu_read_lock_nesting < 0) {
+        panic("rcu_read_unlock: unbalanced CPU unlock on cpu %ld", cpuid());
+    }
+
     struct thread *t = current;
     if (t != NULL) {
-        // Decrement per-thread nesting counter
-        t->rcu_read_lock_nesting--;
-
-        if (t->rcu_read_lock_nesting < 0) {
-            panic("rcu_read_unlock: unbalanced unlock in thread %s (pid %d)",
-                  t->name, t->pid);
-        }
+        /*
+         * Thread nesting is only a debug mirror.  IRQ/early paths are
+         * correctly paired by the CPU counter above, but may observe a
+         * different current thread than the one active at lock time.
+         */
+        if (t->rcu_read_lock_nesting > 0)
+            t->rcu_read_lock_nesting--;
     }
 
     // Re-enable interrupts - matching the push_off() in rcu_read_lock()
@@ -311,12 +318,10 @@ void rcu_read_unlock(void) {
 }
 
 int rcu_is_watching(void) {
-    struct thread *t = current;
-    if (t == NULL) {
-        // No thread context - assume not watching
-        return 0;
-    }
-    return t->rcu_read_lock_nesting > 0;
+    push_off();
+    int watching = mycpu()->rcu_read_lock_nesting > 0;
+    pop_off();
+    return watching;
 }
 
 // ============================================================================

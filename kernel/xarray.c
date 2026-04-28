@@ -57,12 +57,12 @@ void xa_free_fn(void *ptr)
         slab_free(ptr);
 }
 
-void xa_rcu_read_lock(void)
+void xa_rcu_read_lock(void) __acquires(__rcu_context)
 {
     rcu_read_lock();
 }
 
-void xa_rcu_read_unlock(void)
+void xa_rcu_read_unlock(void) __releases(__rcu_context)
 {
     rcu_read_unlock();
 }

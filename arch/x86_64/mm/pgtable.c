@@ -19,6 +19,8 @@
 #include "printf.h"
 #include "errno.h"
 
+extern pagetable_t kernel_pagetable;
+
 /* ========================================================================== */
 /*  Page-table page allocator */
 /* ========================================================================== */
@@ -41,6 +43,20 @@ pde_t *pgtab_alloc(void) {
 
 void pgtab_free(void *pa) { page_free(pa, 0); }
 
+static int pgtab_child_valid(pte_t entry, uint64 va, int level,
+                             const char *where)
+{
+    uint64 child_pa = PTE2PA(entry);
+    page_t *child_pg = __pa_to_page(child_pa);
+    if (child_pg != NULL && PAGE_IS_TYPE(child_pg, PAGE_TYPE_PGTABLE))
+        return 1;
+
+    printf("%s: corrupt non-leaf PTE level=%d va=0x%lx pte=0x%lx "
+           "child_pa=0x%lx child_page=%p\n",
+           where, level, va, entry, child_pa, child_pg);
+    return 0;
+}
+
 /* ========================================================================== */
 /*  x86-64 4-level page-table walking */
 /* ========================================================================== */
@@ -54,6 +70,7 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
             pte_t **retl1) {
     assert(VA_IS_VALID(va), "walk: va not canonical");
     assert(pagetable != NULL, "walk: pagetable is null");
+    int validate_children = (pagetable != kernel_pagetable);
 
     pte_t *ret_pte[PAGETABLE_LEVELS];
     for (int i = 0; i < PAGETABLE_LEVELS; i++)
@@ -73,6 +90,9 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
                     *retl1 = pte;
                 return pte;  /* return the level-1 hugepage PTE */
             }
+            if (validate_children &&
+                !pgtab_child_valid(*pte, va, level, "walk"))
+                return NULL;
             pagetable = (pagetable_t)PTE2PA(*pte);
         } else {
             if (!alloc || (pagetable = (pde_t *)pgtab_alloc()) == 0)
@@ -261,11 +281,17 @@ int vm_zap_pte(vm_t *vm, vma_t *vma, uint64 target_pa) {
 pte_t *walk_pmd(pagetable_t pagetable, uint64 va, int alloc) {
     assert(VA_IS_VALID(va), "walk_pmd: va not canonical");
     assert(pagetable != NULL, "walk_pmd: pagetable is null");
+    int validate_children = (pagetable != kernel_pagetable);
 
     /* x86-64: walk levels 3 down to 2, return the level-1 (PDE) slot. */
     for (int level = PAGETABLE_LEVELS - 1; level > 1; level--) {
         pte_t *pte = &pagetable[PX(level, va)];
         if (*pte & PTE_V) {
+            if (*pte & PTE_PS)
+                return NULL;
+            if (validate_children &&
+                !pgtab_child_valid(*pte, va, level, "walk_pmd"))
+                return NULL;
             pagetable = (pagetable_t)PTE2PA(*pte);
         } else {
             if (!alloc || (pagetable = (pde_t *)pgtab_alloc()) == 0)
@@ -282,6 +308,7 @@ int map_hugepage(pagetable_t pagetable, uint64 va, uint64 pa, int perm) {
         panic("map_hugepage: va not 2MB-aligned");
     if ((pa & (HUGEPAGE_SIZE - 1)) != 0)
         panic("map_hugepage: pa not 2MB-aligned");
+    int validate_children = (pagetable != kernel_pagetable);
 
     pte_t *pte = walk_pmd(pagetable, va, 1);
     if (pte == NULL)
@@ -292,6 +319,9 @@ int map_hugepage(pagetable_t pagetable, uint64 va, uint64 pa, int perm) {
          * Reclaim it if every slot is still zero. */
         if (!(*pte & PTE_PS)) {
             pagetable_t l0 = (pagetable_t)PTE2PA(*pte);
+            if (validate_children &&
+                !pgtab_child_valid(*pte, va, 1, "map_hugepage"))
+                return -EFAULT;
             for (int j = 0; j < 512; j++) {
                 if (l0[j] != 0)
                     panic("map_hugepage: remap over non-empty L0");

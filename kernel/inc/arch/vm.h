@@ -35,6 +35,13 @@ void freewalk(pagetable_t pagetable);
 // Free user memory pages then page-table pages.
 void uvmfree(pagetable_t pagetable, uint64 sz);
 
+typedef void (*uvm_leaf_visitor_t)(uint64 va, uint64 size, pte_t pte,
+                                   void *arg);
+
+// Visit present lower-half leaf PTEs without modifying the page table.
+void uvm_visit_present_leafs(pagetable_t pagetable, uvm_leaf_visitor_t visitor,
+                             void *arg);
+
 // Set up trampoline / trapframe page table entries for a new process VM.
 // Returns 0 on success, negative errno on failure.
 int arch_vm_setup_trampoline(struct vm *vm);

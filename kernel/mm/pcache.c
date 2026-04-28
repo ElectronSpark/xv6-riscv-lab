@@ -135,8 +135,8 @@ static void __pcache_mark_dirty(struct pcache *pcache, page_t *page);
 static void __pcache_tree_lock(struct pcache *pcache);
 static void __pcache_tree_unlock(struct pcache *pcache);
 #endif
-static void __pcache_spin_lock(struct pcache *pcache);
-static void __pcache_spin_unlock(struct pcache *pcache);
+static void __pcache_spin_lock(struct pcache *pcache) __acquires(pcache);
+static void __pcache_spin_unlock(struct pcache *pcache) __releases(pcache);
 static void __pcache_spin_assert_holding(struct pcache *pcache);
 
 static void __pcache_node_init(struct pcache_node *node);
@@ -759,10 +759,22 @@ static void __pcache_global_lock_assert_holding(void) {
         "__pcache_global_lock_assert_holding: global pcache spinlock not held");
 }
 
-static void __pcache_global_lock(void) { spin_lock(&__pcache_global_spinlock); }
+static void __pcache_global_lock(void) __acquires(__pcache_global_spinlock)
+{
+#ifdef __CHECKER__
+    __acquire_context(__pcache_global_spinlock);
+#else
+    spin_lock(&__pcache_global_spinlock);
+#endif
+}
 
-static void __pcache_global_unlock(void) {
+static void __pcache_global_unlock(void) __releases(__pcache_global_spinlock)
+{
+#ifdef __CHECKER__
+    __release_context(__pcache_global_spinlock);
+#else
     spin_unlock(&__pcache_global_spinlock);
+#endif
 }
 
 /******************************************************************************
@@ -775,35 +787,46 @@ static struct pcache_node *__pcache_find_key_node(struct pcache *pcache,
 }
 
 /**
- * __pcache_find_and_pin_page - RCU-safe lookup that returns a pinned page.
+ * __pcache_find_and_pin_page - validated lookup that returns a pinned page.
  *
- * Uses explicit rcu_read_lock around the xarray lookup and bumps the page
- * refcount (via __page_ref_inc, which acquires page->lock internally) before
- * dropping the RCU read lock.  This guarantees the returned page pointer
- * remains valid even without the pcache spinlock held.
+ * The xarray node is RCU-freed, but the page_t it points at is not.  A lock-free
+ * load followed by atomic_inc_not_zero can race with the cache dropping its last
+ * reference and recycling the page descriptor for an unrelated allocation.  Pin
+ * under the pcache spinlock and page lock instead, then revalidate the back
+ * pointers before incrementing the refcount.
  *
- * Returns NULL if no entry exists for @blkno.
+ * Returns NULL if no matching live entry exists for @blkno.
  * On success the caller owns one extra reference and must eventually call
  * __page_ref_dec() to release it.
  */
 static page_t *__pcache_find_and_pin_page(struct pcache *pcache,
                                           uint64 blkno) {
-    XA_STATE(xas, &pcache->page_map, PCACHE_PAGE_INDEX(blkno));
+    uint64 base_idx = PCACHE_PAGE_INDEX(blkno);
     page_t *page = NULL;
+    struct pcache_node *node;
 
-    rcu_read_lock();
-    struct pcache_node *node = (struct pcache_node *)xas_load(&xas);
+    __pcache_spin_lock(pcache);
+    node = (struct pcache_node *)xa_load(&pcache->page_map, base_idx);
     if (node != NULL && !xa_is_internal(node)) {
         page = node->page;
         if (page != NULL) {
-            /* Conditional atomic increment: only succeed if ref_count > 0.
-             * A page with ref_count == 0 is being freed via call_rcu and
-             * must not be re-pinned. */
-            if (!atomic_inc_not_zero(&page->ref_count))
+            page_lock_acquire(page);
+            if (node->page != page ||
+                !PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE) ||
+                page->pcache.pcache != pcache ||
+                page->pcache.pcache_node != node ||
+                node->pcache != pcache) {
+                page_lock_release(page);
                 page = NULL;
+            } else if (page_ref_inc_unlocked(page) <= 1) {
+                page_lock_release(page);
+                page = NULL;
+            } else {
+                page_lock_release(page);
+            }
         }
     }
-    rcu_read_unlock();
+    __pcache_spin_unlock(pcache);
     return page;
 }
 
@@ -867,12 +890,22 @@ static void __pcache_tree_unlock(struct pcache *pcache) {
 }
 #endif
 
-static void __pcache_spin_lock(struct pcache *pcache) {
+static void __pcache_spin_lock(struct pcache *pcache) __acquires(pcache)
+{
+#ifdef __CHECKER__
+    __acquire_context(pcache);
+#else
     spin_lock(&pcache->spinlock);
+#endif
 }
 
-static void __pcache_spin_unlock(struct pcache *pcache) {
+static void __pcache_spin_unlock(struct pcache *pcache) __releases(pcache)
+{
+#ifdef __CHECKER__
+    __release_context(pcache);
+#else
     spin_unlock(&pcache->spinlock);
+#endif
 }
 
 static void __pcache_spin_assert_holding(struct pcache *pcache) {
@@ -1165,11 +1198,9 @@ static void __pcache_push_lru(struct pcache *pcache, page_t *page) {
     assert(pcnode->page == page,
            "__pcache_push_lru: pcache_node does not point to the given page");
     /*
-     * The lock-free RCU pin path (__pcache_find_and_pin_page) can
-     * atomically bump ref_count without holding the pcache spinlock
-     * or the page lock.  If that happened between the caller's
-     * page_ref_dec and now, the page has active users again and must
-     * NOT be placed on the LRU.  This is a benign race, not a bug.
+     * Another caller can pin the page between the caller's page_ref_dec and
+     * this LRU transition.  If so, the page has active users again and must not
+     * be placed on the LRU.
      */
     if (READ_ONCE(page->ref_count) != 1)
         return;
@@ -1186,6 +1217,7 @@ static page_t *__pcache_pop_lru(struct pcache *pcache) {
         return NULL;
     }
 retry:
+    ;
     struct pcache_node *pcnode =
         LIST_LAST_NODE(&pcache->lru, struct pcache_node, lru_entry);
     if (pcnode == NULL) {
@@ -1263,6 +1295,7 @@ static page_t *__pcache_pop_dirty(struct pcache *pcache,
         return NULL;
     }
 retry:
+    ;
     struct pcache_node *pcnode =
         LIST_LAST_NODE(&pcache->dirty_list, struct pcache_node, lru_entry);
     if (pcnode == NULL) {
@@ -1311,19 +1344,14 @@ static page_t *__pcache_evict_lru(struct pcache *pcache) {
         return NULL;
     }
     struct pcache_node *pcnode = page->pcache.pcache_node;
-    /* Remove from xarray FIRST so no new RCU lookup can find this node. */
+    /* Remove from xarray first so no new lookup can find this node. */
     __pcache_remove_node(pcache, page);
     __pcache_node_detach_page(pcache, page);
-    /* Sever the page ↔ pcnode link so that any concurrent
-     * __pcache_find_and_pin_page that already loaded the (now-erased)
-     * xarray entry will fail __pcache_page_valid and release the ref. */
+    /* Sever the page <-> pcnode link before dropping the page lock. */
     page->pcache.pcache_node = NULL;
     pcnode->page = NULL;
     page_lock_release(page);
-    /* Defer pcache_node free until after an RCU grace period so that
-     * concurrent rcu_read_lock() holders in __pcache_find_and_pin_page
-     * (which may still be dereferencing the stale xarray slot) see
-     * valid memory. */
+    /* Keep deferred freeing for xarray readers and iterator users. */
     call_rcu(&pcnode->rcu_head, __pcache_node_rcu_free, pcnode);
     return page;
 }
@@ -1564,8 +1592,7 @@ retry_lookup:
         __pcache_test_retry_hook(pcache, base_blkno);
     }
 #endif
-    // RCU-safe lookup: bumps page refcount under RCU so the page cannot
-    // be freed between xa_load and page_lock_acquire.
+    // Validated lookup: bumps the page refcount under pcache/page locks.
     page = __pcache_find_and_pin_page(pcache, base_blkno);
     if (page != NULL) {
         /*
@@ -2554,7 +2581,7 @@ page_t *pcache_get_page_nowait(struct pcache *pcache, uint64 blkno) {
     if (base_blkno + PCACHE_BLKS_PER_PAGE > pcache->blk_count)
         return NULL;
 
-    /* RCU-safe lookup — does not acquire the pcache spinlock */
+    /* Validated lookup; takes pcache/page locks briefly to pin safely. */
     page = __pcache_find_and_pin_page(pcache, base_blkno);
     if (page == NULL)
         return NULL;

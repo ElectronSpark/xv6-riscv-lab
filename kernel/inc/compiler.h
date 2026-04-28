@@ -15,7 +15,86 @@
 #define STATIC_INLINE static inline
 #endif
 
+#ifdef __CHECKER__
 #define __force __attribute__((force))
+#define __bitwise __attribute__((bitwise))
+#define __acquires(x) __attribute__((context(x, 0, 1)))
+#define __releases(x) __attribute__((context(x, 1, 0)))
+#define __must_hold(x) __attribute__((context(x, 1, 1)))
+#define __acquire_context(x) __context__(x, 1)
+#define __release_context(x) __context__(x, -1)
+#else
+#define __force
+#define __bitwise
+#define __acquires(x)
+#define __releases(x)
+#define __must_hold(x)
+#define __acquire_context(x)
+#define __release_context(x)
+#endif
+
+#ifdef __CHECKER__
+/*
+ * Sparse is interested in type and context flow, not the implementation
+ * details of GCC atomics.  Model them as plain accesses so enum and bitfield
+ * users remain analyzable.
+ */
+#define __atomic_load_n(ptr, memorder) (*(ptr))
+#define __atomic_store_n(ptr, val, memorder) ((void)(*(ptr) = (val)))
+#define __atomic_fetch_add(ptr, val, memorder)                                \
+    ({                                                                        \
+        typeof(*(ptr)) __old = *(ptr);                                        \
+        *(ptr) += (val);                                                      \
+        __old;                                                                \
+    })
+#define __atomic_add_fetch(ptr, val, memorder) (*(ptr) += (val))
+#define __atomic_fetch_sub(ptr, val, memorder)                                \
+    ({                                                                        \
+        typeof(*(ptr)) __old = *(ptr);                                        \
+        *(ptr) -= (val);                                                      \
+        __old;                                                                \
+    })
+#define __atomic_sub_fetch(ptr, val, memorder) (*(ptr) -= (val))
+#define __atomic_fetch_and(ptr, val, memorder)                                \
+    ({                                                                        \
+        typeof(*(ptr)) __old = *(ptr);                                        \
+        *(ptr) &= (val);                                                      \
+        __old;                                                                \
+    })
+#define __atomic_and_fetch(ptr, val, memorder) (*(ptr) &= (val))
+#define __atomic_fetch_or(ptr, val, memorder)                                 \
+    ({                                                                        \
+        typeof(*(ptr)) __old = *(ptr);                                        \
+        *(ptr) |= (val);                                                      \
+        __old;                                                                \
+    })
+#define __atomic_or_fetch(ptr, val, memorder) (*(ptr) |= (val))
+#define __atomic_exchange_n(ptr, val, memorder)                               \
+    ({                                                                        \
+        typeof(*(ptr)) __old = *(ptr);                                        \
+        *(ptr) = (val);                                                       \
+        __old;                                                                \
+    })
+#define __atomic_compare_exchange_n(ptr, expected, desired, weak, success,     \
+                                    failure)                                  \
+    ({                                                                        \
+        int __ok = (*(ptr) == *(expected));                                   \
+        if (__ok)                                                             \
+            *(ptr) = (desired);                                               \
+        else                                                                  \
+            *(expected) = *(ptr);                                             \
+        __ok;                                                                 \
+    })
+#define __atomic_test_and_set(ptr, memorder)                                  \
+    ({                                                                        \
+        int __old = !!*(ptr);                                                 \
+        *(ptr) = 1;                                                           \
+        __old;                                                                \
+    })
+#define __atomic_clear(ptr, memorder) ((void)(*(ptr) = 0))
+#define __atomic_thread_fence(memorder) ((void)0)
+#define __atomic_signal_fence(memorder) ((void)0)
+#endif
 
 /** @brief CPU cache line size in bytes */
 #define CACHELINE_SIZE 64UL

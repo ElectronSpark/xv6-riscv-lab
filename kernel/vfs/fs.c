@@ -1614,14 +1614,24 @@ void vfs_superblock_unlock(struct vfs_superblock *sb) {
 }
 
 // VFS superblock spinlock protects simple fields that need atomic access
-void vfs_superblock_spin_lock(struct vfs_superblock *sb) {
+void vfs_superblock_spin_lock(struct vfs_superblock *sb) __acquires(sb)
+{
+#ifdef __CHECKER__
+    __acquire_context(sb);
+#else
     assert(sb != NULL, "Superblock cannot be NULL when acquiring spinlock");
     spin_lock(&sb->spinlock);
+#endif
 }
 
-void vfs_superblock_spin_unlock(struct vfs_superblock *sb) {
+void vfs_superblock_spin_unlock(struct vfs_superblock *sb) __releases(sb)
+{
+#ifdef __CHECKER__
+    __release_context(sb);
+#else
     assert(sb != NULL, "Superblock cannot be NULL when releasing spinlock");
     spin_unlock(&sb->spinlock);
+#endif
 }
 
 void vfs_superblock_mountcount_inc(struct vfs_superblock *sb) {

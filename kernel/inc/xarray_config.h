@@ -59,8 +59,8 @@ typedef spinlock_t xa_lock_t;
  * defs.h here because this header is indirectly included by almost every
  * kernel translation unit and defs.h has its own dependencies. */
 void spin_init(spinlock_t *lock, char *name);
-void spin_lock(spinlock_t *lock);
-void spin_unlock(spinlock_t *lock);
+void spin_lock(spinlock_t *lock) __acquires(lock);
+void spin_unlock(spinlock_t *lock) __releases(lock);
 
 #define XA_LOCK_INITIALIZER(name) SPINLOCK_INITIALIZED(#name ".xa_lock")
 
@@ -69,12 +69,12 @@ static inline void xa_lock_init(xa_lock_t *lock)
     spin_init(lock, "xa_lock");
 }
 
-static inline void xa_spin_lock(xa_lock_t *lock)
+static inline void xa_spin_lock(xa_lock_t *lock) __acquires(lock)
 {
     spin_lock(lock);
 }
 
-static inline void xa_spin_unlock(xa_lock_t *lock)
+static inline void xa_spin_unlock(xa_lock_t *lock) __releases(lock)
 {
     spin_unlock(lock);
 }
@@ -85,8 +85,8 @@ static inline void xa_spin_unlock(xa_lock_t *lock)
 
 typedef void (*xa_rcu_callback_t)(void *);
 
-void xa_rcu_read_lock(void);
-void xa_rcu_read_unlock(void);
+void xa_rcu_read_lock(void) __acquires(__rcu_context);
+void xa_rcu_read_unlock(void) __releases(__rcu_context);
 
 /*
  * xa_call_rcu() takes a void-pointer callback and a node pointer.

@@ -24,9 +24,15 @@ static device_major_t *__dev_table[MAX_MAJOR_DEVICES] = {NULL};
 
 static void __dev_tab_lock_init(void) {}
 
-static void __dev_tab_lock(void) { spin_lock(&__dev_tab_spinlock); }
+static void __dev_tab_lock(void) __acquires(__dev_tab_spinlock)
+{
+    spin_lock(&__dev_tab_spinlock);
+}
 
-static void __dev_tab_unlock(void) { spin_unlock(&__dev_tab_spinlock); }
+static void __dev_tab_unlock(void) __releases(__dev_tab_spinlock)
+{
+    spin_unlock(&__dev_tab_spinlock);
+}
 
 static void __dev_tab_assert_held(void) {
     assert(spin_holding(&__dev_tab_spinlock), "dev_tab_lock not held");

@@ -3,6 +3,10 @@
 
 #include "proc/rq_types.h"
 
+#ifdef __CHECKER__
+extern int __rq_lock_context;
+#endif
+
 // The priority values are made of two parts:
 // - 0bit-1bit: sub-priority (0-3), lower value means higher priority.
 //      Managed by specific scheduling class (e.g., FIFO has 4 sub-queues).
@@ -56,7 +60,7 @@ void rq_register(struct rq *rq, int cls_id, int cpu_id);
  * @brief Acquire the run queue lock for a specific CPU
  * @param cpu_id The CPU whose run queue lock to acquire
  */
-void rq_lock(int cpu_id);
+void rq_lock(int cpu_id) __acquires(__rq_lock_context);
 
 /**
  * @brief Try to acquire the run queue lock without spinning
@@ -66,13 +70,13 @@ void rq_lock(int cpu_id);
  */
 int rq_trylock(int cpu_id);
 
-void rq_unlock(int cpu_id);
-void rq_lock_current(void);
-void rq_unlock_current(void);
-int rq_lock_irqsave(int cpu_id);
-void rq_unlock_irqrestore(int cpu_id, int state);
-int rq_lock_current_irqsave(void);
-void rq_unlock_current_irqrestore(int state);
+void rq_unlock(int cpu_id) __releases(__rq_lock_context);
+void rq_lock_current(void) __acquires(__rq_lock_context);
+void rq_unlock_current(void) __releases(__rq_lock_context);
+int rq_lock_irqsave(int cpu_id) __acquires(__rq_lock_context);
+void rq_unlock_irqrestore(int cpu_id, int state) __releases(__rq_lock_context);
+int rq_lock_current_irqsave(void) __acquires(__rq_lock_context);
+void rq_unlock_current_irqrestore(int state) __releases(__rq_lock_context);
 
 /**
  * @brief Acquire two run queue locks in consistent order
@@ -80,7 +84,7 @@ void rq_unlock_current_irqrestore(int state);
  * @param cpu_id2 Second CPU's run queue
  * @note Locks lower cpu_id first to prevent deadlock
  */
-void rq_lock_two(int cpu_id1, int cpu_id2);
+void rq_lock_two(int cpu_id1, int cpu_id2) __acquires(__rq_lock_context);
 
 /**
  * @brief Try to acquire two run queue locks without spinning
@@ -93,14 +97,16 @@ void rq_lock_two(int cpu_id1, int cpu_id2);
  */
 int rq_trylock_two(int cpu_id1, int cpu_id2);
 
-void rq_unlock_two(int cpu_id1, int cpu_id2);
+void rq_unlock_two(int cpu_id1, int cpu_id2) __releases(__rq_lock_context);
 int rq_holding(int cpu_id);
 int rq_holding_current(void);
 
 // Per-CPU run queue lock_get/put_unlock accessors
-struct rq_percpu *rq_percpu_lock_get(int cpu_id);
-struct rq_percpu *rq_percpu_lock_get_current(void);
-void rq_percpu_put_unlock(struct rq_percpu *rq_pc);
+struct rq_percpu *rq_percpu_lock_get(int cpu_id) __acquires(__rq_lock_context);
+struct rq_percpu *rq_percpu_lock_get_current(void)
+    __acquires(__rq_lock_context);
+void rq_percpu_put_unlock(struct rq_percpu *rq_pc)
+    __releases(__rq_lock_context);
 
 struct rq *rq_select_task_rq(struct sched_entity *se, cpumask_t cpumask);
 

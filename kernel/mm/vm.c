@@ -268,15 +268,18 @@ static void __vma_writeback_dirty_page(vma_t *vma, uint64 va, uint64 pa)
                          write_len);
 }
 
-static void __vma_set_free(vma_t *vma)
+static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
+                              int allow_file_writeback)
 {
     if (vma == NULL || vma->vm == NULL)
         return;
 
-    if ((vma->start & (PGSIZE - 1)) != 0) {
+    if ((start & (PGSIZE - 1)) != 0 || (end & (PGSIZE - 1)) != 0 ||
+        start >= end) {
         printf("__vma_set_free: BAD vma=%p start=0x%lx end=0x%lx "
+               "clear=[0x%lx-0x%lx) "
                "flags=0x%lx file=%p pgoff=0x%lx vm=%p\n",
-               vma, vma->start, vma->end, vma->flags,
+               vma, vma->start, vma->end, start, end, vma->flags,
                vma->file, vma->pgoff, vma->vm);
         if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC) {
             printf("  -> VMA already freed (FREED_MAGIC sentinel) — skipping\n");
@@ -287,6 +290,7 @@ static void __vma_set_free(vma_t *vma)
 
     /* Check if this is a shared file mapping that needs writeback. */
     int shared_file_wb =
+        allow_file_writeback &&
         (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
         (vma->flags & VMA_FLAG_FILE);
     int is_anon_vma = (vma->file == NULL);
@@ -361,7 +365,7 @@ static void __vma_set_free(vma_t *vma)
         pagetable_t pagetable = vma->vm->pagetable;
         pte_t *l0 = NULL;
         uint64 l0_rgn = ~0ULL;
-        for (uint64 a = vma->start; a < vma->end; a += PGSIZE) {
+        for (uint64 a = start; a < end; a += PGSIZE) {
             pte_t *pte;
             uint64 rgn = a >> PXSHIFT(1);
             if (rgn == l0_rgn && l0 != NULL) {
@@ -428,7 +432,7 @@ static void __vma_set_free(vma_t *vma)
                 FLUSH_DEFERRED();
         }
         if (tlb_needs_flush)
-            vm_remote_sfence_range(vma->vm, vma->start, VMA_SIZE(vma));
+            vm_remote_sfence_range(vma->vm, start, end - start);
         /* Phase 2: release all deferred pages after TLB flush. */
         FLUSH_DEFERRED();
     }
@@ -436,6 +440,14 @@ static void __vma_set_free(vma_t *vma)
 #undef VMA_FREE_DEFER_MAX
     g_vm_munmap_pages_freed += pages_freed;
     g_vm_munmap_anon_pages += anon_pages;
+}
+
+static void __vma_set_free(vma_t *vma)
+{
+    if (vma == NULL || vma->vm == NULL)
+        return;
+
+    __vma_clear_range(vma, vma->start, vma->end, 1);
 
     if (vma->file != NULL)
         vfs_fput(vma->file);
@@ -498,6 +510,10 @@ static int __vma_copy(vma_t *dst, vma_t *src)
                     goto hugepage_skip;
                 pte_t *dst_pmd = walk_pmd(pgtb_dst, a, 1);
                 if (dst_pmd == NULL) {
+                    __vma_set_free(dst);
+                    return -ENOMEM;
+                }
+                if (*dst_pmd != 0) {
                     __vma_set_free(dst);
                     return -ENOMEM;
                 }
@@ -650,6 +666,149 @@ static int __mt_update_vma(vm_t *vm, vma_t *vma, uint64 old_start,
     return ret;
 }
 
+static int vma_tree_entry_valid(vm_t *vm, void *entry)
+{
+    vma_t *vma;
+    uint64 ptr = (uint64)entry;
+    pte_t *pte;
+
+    if (entry == NULL)
+        return 1;
+
+    /*
+     * Maple tree values in vm_mt must always be vma_t pointers.  If a user
+     * virtual address leaks into a slot, do not dereference it while printing
+     * diagnostics; that turns a recoverable VMA-tree inconsistency into a
+     * kernel page fault.
+     */
+    if (kernel_vm != NULL && kernel_vm->pagetable != NULL) {
+        pte = walk(kernel_vm->pagetable, ptr, 0, NULL, NULL);
+        if (pte == NULL || !pte_present(pte))
+            return 0;
+        pte = walk(kernel_vm->pagetable, ptr + sizeof(vma_t) - 1,
+                   0, NULL, NULL);
+        if (pte == NULL || !pte_present(pte))
+            return 0;
+    } else if (!vm->is_kernel && ptr >= vm->vm_bottom && ptr < vm->vm_top) {
+        return 0;
+    }
+
+    vma = (vma_t *)entry;
+    if (vma->vm != vm)
+        return 0;
+    if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC)
+        return 0;
+    if ((vma->start & (PGSIZE - 1)) != 0 || vma->start >= vma->end)
+        return 0;
+    if (vma->start < vm->vm_bottom || vma->end > vm->vm_top)
+        return 0;
+
+    return 1;
+}
+
+struct vm_pte_accounting {
+    vm_t *vm;
+    int total_leafs;
+    int missing_vma;
+    int invalid_vma;
+    int printed;
+};
+
+static void vm_count_orphan_leaf(uint64 va, uint64 size, pte_t pte, void *arg)
+{
+    struct vm_pte_accounting *acct = arg;
+    uint64 check = va;
+    void *entry;
+
+    if (va >= TRAPFRAME && va < TRAPFRAME + (NCPU * PGSIZE))
+        return;
+
+    acct->total_leafs++;
+    entry = mt_find(&acct->vm->vm_mt, &check, va + size - 1);
+    if (entry == NULL) {
+        acct->missing_vma++;
+        if (acct->printed < 8) {
+            printf("vm_destroy: orphan mapped leaf va=[0x%lx-0x%lx) "
+                   "pte=0x%lx pid=%d %s\n",
+                   va, va + size, pte,
+                   current ? current->pid : -1,
+                   current ? current->name : "?");
+            acct->printed++;
+        }
+        return;
+    }
+
+    if (!vma_tree_entry_valid(acct->vm, entry) ||
+        ((vma_t *)entry)->start > va || ((vma_t *)entry)->end < va + size) {
+        acct->invalid_vma++;
+        if (acct->printed < 8) {
+            printf("vm_destroy: mapped leaf has bad VMA va=[0x%lx-0x%lx) "
+                   "pte=0x%lx entry=%p pid=%d %s\n",
+                   va, va + size, pte, entry,
+                   current ? current->pid : -1,
+                   current ? current->name : "?");
+            acct->printed++;
+        }
+    }
+}
+
+static void vm_report_pte_accounting(vm_t *vm)
+{
+    if (vm == NULL || vm->pagetable == NULL)
+        return;
+
+    struct vm_pte_accounting acct = {
+        .vm = vm,
+    };
+    uvm_visit_present_leafs(vm->pagetable, vm_count_orphan_leaf, &acct);
+    if (acct.missing_vma != 0 || acct.invalid_vma != 0) {
+        printf("vm_destroy: PTE/VMA mismatch pid=%d %s leafs=%d "
+               "missing_vma=%d invalid_vma=%d\n",
+               current ? current->pid : -1,
+               current ? current->name : "?",
+               acct.total_leafs, acct.missing_vma, acct.invalid_vma);
+    }
+}
+
+static int vm_tree_contains_vma(vm_t *vm, vma_t *needle)
+{
+    if (vm == NULL || needle == NULL)
+        return 0;
+
+    MA_STATE(mas, &vm->vm_mt, 0, 0);
+    void *entry;
+    while ((entry = mas_find(&mas, MAPLE_MAX)) != NULL) {
+        if (entry == needle)
+            return 1;
+    }
+    return 0;
+}
+
+static void vm_clear_vma_slot_range(vm_t *vm, vma_t *vma,
+                                    uint64 slot_start, uint64 slot_end)
+{
+    if (vm == NULL || vma == NULL || slot_start >= slot_end)
+        return;
+
+    if (slot_start < vm->vm_bottom)
+        slot_start = vm->vm_bottom;
+    if (slot_end > vm->vm_top)
+        slot_end = vm->vm_top;
+    if (slot_start >= slot_end)
+        return;
+
+    /*
+     * The maple slot range is the range that actually points at this VMA.
+     * It can differ from vma->start/end after a failed partial range update.
+     * Clear the PTEs for the slot itself so stale disjoint slots cannot leave
+     * mapped pages behind, but only do file writeback when the slot is still
+     * inside the VMA's current file-offset domain.
+     */
+    int allow_writeback =
+        slot_start >= vma->start && slot_end <= vma->end;
+    __vma_clear_range(vma, slot_start, slot_end, allow_writeback);
+}
+
 /* ========================================================================== */
 /*  VM lifecycle                                                              */
 /* ========================================================================== */
@@ -664,6 +823,7 @@ vm_t *vm_init(void)
         return NULL;
     memset(vm, 0, sizeof(vm_t));
     mt_init(&vm->vm_mt);
+    mt_set_in_rcu(&vm->vm_mt);
 
     vm->pagetable = uvmcreate();
     if (vm->pagetable == NULL) {
@@ -712,16 +872,10 @@ static void __vm_destroy(vm_t *vm)
     }
 
     /*
-     * Single-pass destruction, Linux-style.
-     *
-     * Iterate the maple tree, release pages/PTEs and free each VMA
-     * inline.  mtree_destroy() only frees internal tree nodes — it
-     * never dereferences the entry pointers stored in leaf slots —
-     * so it is safe to slab_free the VMAs during iteration.
-     *
-     * Duplicate detection: a prior partial mtree_store_range can leave
-     * the same VMA pointer in two disjoint ranges.  After __vma_free
-     * sets FREED_MAGIC, the second encounter is caught cheaply.
+     * Tear down by maple slot range, not only by vma->start/end.  A failed
+     * partial mtree_store_range can leave the same VMA pointer in stale
+     * disjoint slots.  Those stale slots still describe page-table ranges
+     * that must be cleared before freewalk() runs.
      */
 
     /*
@@ -731,17 +885,35 @@ static void __vm_destroy(vm_t *vm)
      */
     smp_store_release(&vm->cpumask, 0);
 
-    uint64 idx = 0;
-    void *entry;
-    mt_for_each(&vm->vm_mt, entry, idx, MAPLE_MAX) {
-        vma_t *vma = (vma_t *)entry;
+    vm_report_pte_accounting(vm);
 
-        /* Skip already-freed duplicates (FREED_MAGIC sentinel). */
-        if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC)
+    while (1) {
+        MA_STATE(mas, &vm->vm_mt, 0, 0);
+        void *entry = mas_find(&mas, MAPLE_MAX);
+        if (entry == NULL)
+            break;
+
+        uint64 slot_start = mas.min;
+        uint64 slot_last = mas.max;
+        uint64 slot_end;
+        if (slot_last >= vm->vm_top - 1)
+            slot_end = vm->vm_top;
+        else
+            slot_end = slot_last + 1;
+
+        if (!vma_tree_entry_valid(vm, entry)) {
+            mtree_store_range(&vm->vm_mt, slot_start, slot_last, NULL);
             continue;
+        }
 
-        __vma_set_free(vma);
-        __vma_free(vma);
+        vma_t *vma = (vma_t *)entry;
+        vm_clear_vma_slot_range(vm, vma, slot_start, slot_end);
+
+        mtree_store_range(&vm->vm_mt, slot_start, slot_last, NULL);
+        if (!vm_tree_contains_vma(vm, vma)) {
+            __vma_set_free(vma);
+            __vma_free(vma);
+        }
     }
 
     mtree_destroy(&vm->vm_mt);
@@ -826,37 +998,71 @@ vm_t *vm_copy(vm_t *src)
 /*  VM locking                                                                */
 /* ========================================================================== */
 
-void vm_rlock(vm_t *vm) {
+void vm_rlock(vm_t *vm) __acquires(vm)
+{
+#ifdef __CHECKER__
+    __acquire_context(vm);
+#else
     if (vm->is_kernel)
         spin_lock(&vm->spinlock);
     else
         rwsem_acquire_read(&vm->rw_lock);
+#endif
 }
-void vm_runlock(vm_t *vm) {
+void vm_runlock(vm_t *vm) __releases(vm)
+{
+#ifdef __CHECKER__
+    __release_context(vm);
+#else
     if (vm->is_kernel)
         spin_unlock(&vm->spinlock);
     else
         rwsem_release(&vm->rw_lock);
+#endif
 }
-void vm_wlock(vm_t *vm) {
+void vm_wlock(vm_t *vm) __acquires(vm)
+{
+#ifdef __CHECKER__
+    __acquire_context(vm);
+#else
     if (vm->is_kernel)
         spin_lock(&vm->spinlock);
     else
         rwsem_acquire_write(&vm->rw_lock);
+#endif
 }
-void vm_wunlock(vm_t *vm) {
+void vm_wunlock(vm_t *vm) __releases(vm)
+{
+#ifdef __CHECKER__
+    __release_context(vm);
+#else
     if (vm->is_kernel)
         spin_unlock(&vm->spinlock);
     else
         rwsem_release(&vm->rw_lock);
+#endif
 }
 int vm_is_wlocked(vm_t *vm) {
     if (vm->is_kernel)
         return spin_holding(&vm->spinlock);
     return rwsem_is_write_holding(&vm->rw_lock);
 }
-void vm_pgtable_lock(vm_t *vm)   { spin_lock(&vm->spinlock); }
-void vm_pgtable_unlock(vm_t *vm) { spin_unlock(&vm->spinlock); }
+void vm_pgtable_lock(vm_t *vm) __acquires(vm)
+{
+#ifdef __CHECKER__
+    __acquire_context(vm);
+#else
+    spin_lock(&vm->spinlock);
+#endif
+}
+void vm_pgtable_unlock(vm_t *vm) __releases(vm)
+{
+#ifdef __CHECKER__
+    __release_context(vm);
+#else
+    spin_unlock(&vm->spinlock);
+#endif
+}
 
 /* ========================================================================== */
 /*  VMA tree operations                                                       */
@@ -904,6 +1110,11 @@ vma_t *vm_find_area(vm_t *vm, uint64 va)
         return NULL;
     vma_t *vma = (vma_t *)mtree_load(&vm->vm_mt, va);
     if (vma != NULL) {
+        if (!vma_tree_entry_valid(vm, vma)) {
+            printf("vm_find_area: invalid maple entry=%p for va=0x%lx\n",
+                   vma, va);
+            return NULL;
+        }
         assert(VMA_IN_RANGE(vma, va),
                "vm_find_area: va %lx not in range [%lx, %lx)", va, vma->start,
                vma->end);
@@ -947,13 +1158,13 @@ vma_t *vma_split(vma_t *vma, uint64 va)
         return NULL;
     }
 
+    uint64 old_start = vma->start;
     uint64 old_end = vma->end;
     vma->end = va;
 
     /* Update the maple tree: shrink old VMA, insert new VMA.
      * Both stores must succeed; otherwise roll back. */
-    if (__mt_store_vma(vma->vm, vma) != 0) {
-        vma->end = old_end;
+    if (__mt_update_vma(vma->vm, vma, old_start, old_end) != 0) {
         if (new_vma->file != NULL)
             vfs_fput(new_vma->file);
         __vma_free(new_vma);
@@ -962,7 +1173,7 @@ vma_t *vma_split(vma_t *vma, uint64 va)
     if (__mt_store_vma(vma->vm, new_vma) != 0) {
         /* Restore old VMA range and re-store it. */
         vma->end = old_end;
-        __mt_store_vma(vma->vm, vma); /* best-effort restore */
+        __mt_update_vma(vma->vm, vma, old_start, va); /* best-effort restore */
         if (new_vma->file != NULL)
             vfs_fput(new_vma->file);
         __vma_free(new_vma);
@@ -1055,6 +1266,12 @@ vma_t *vma_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
         uint64 check = va;
         void *overlap = mt_find(&vm->vm_mt, &check, va + size - 1);
         if (overlap != NULL) {
+            if (!vma_tree_entry_valid(vm, overlap)) {
+                printf("vma_alloc: invalid maple overlap entry=%p "
+                       "range=[0x%lx-0x%lx]\n",
+                       overlap, va, va + size);
+                return NULL;
+            }
             printf("vma_alloc: FAIL overlap at va=0x%lx size=0x%lx "
                    "overlap_vma=[0x%lx-0x%lx]\n",
                    va, size,
@@ -3135,10 +3352,14 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
             uint64 pa = pte_pa(old_pte);
 
             if (pte_is_hugepage(old_pte)) {
+                if (((new_location + offset) & (HUGEPAGE_SIZE - 1)) != 0)
+                    goto err_new_vma;
                 /* 2MB hugepage: copy PMD entry to new location. */
                 pte_t *new_pmd =
                     walk_pmd(vm->pagetable, new_location + offset, 1);
                 if (new_pmd == NULL)
+                    goto err_new_vma;
+                if (*new_pmd != 0)
                     goto err_new_vma;
                 *new_pmd = *old_pte;
                 if (page_ref_inc((void *)pa) <= 0)
@@ -3463,6 +3684,12 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
     uint64 verify_idx = mas.index;
     void *conflict = mt_find(&vm->vm_mt, &verify_idx, mas.index + size - 1);
     if (conflict != NULL) {
+        if (!vma_tree_entry_valid(vm, conflict)) {
+            printf("vm_find_free_range: invalid maple conflict entry=%p "
+                   "addr=0x%lx size=0x%lx search=[0x%lx,0x%lx]\n",
+                   conflict, mas.index, size, search_bottom, search_top - 1);
+            return 0;
+        }
         vma_t *cv = (vma_t *)conflict;
         printf("vm_find_free_range: BUG mas_empty_area_rev returned occupied "
                "addr=0x%lx size=0x%lx conflict_vma=[0x%lx-0x%lx] "
@@ -3474,6 +3701,12 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
         void *dump_entry;
         int count = 0;
         mt_for_each(&vm->vm_mt, dump_entry, dump_idx, MAPLE_MAX) {
+            if (!vma_tree_entry_valid(vm, dump_entry)) {
+                printf("  VMA[%d]: INVALID entry=%p idx=0x%lx\n",
+                       count, dump_entry, dump_idx);
+                count++;
+                continue;
+            }
             vma_t *dv = (vma_t *)dump_entry;
             if (count < 30 || (dv->start <= mas.index + size && dv->end >= mas.index)) {
                 printf("  VMA[%d]: [0x%lx-0x%lx] flags=0x%lx\n",
@@ -3756,6 +3989,7 @@ void kernel_vm_init(void)
     memset(vm, 0, sizeof(vm_t));
 
     mt_init(&vm->vm_mt);
+    mt_set_in_rcu(&vm->vm_mt);
 
     vm->pagetable = kernel_pagetable;
     vm->trapframe_pte = NULL;     /* no per-process trapframes */

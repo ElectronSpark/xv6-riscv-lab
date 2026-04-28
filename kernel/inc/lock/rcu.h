@@ -4,6 +4,10 @@
 #include "rcu_type.h"
 #include "compiler.h"
 
+#ifdef __CHECKER__
+extern int __rcu_context;
+#endif
+
 // RCU Read-Side Critical Section API
 // These functions mark the boundaries of RCU read-side critical sections.
 // Inside a critical section, the reader holds a reference to RCU-protected data
@@ -20,7 +24,7 @@
  * RCU read-side critical sections are very lightweight - just a counter
  * increment and a compiler barrier.
  */
-void rcu_read_lock(void);
+void rcu_read_lock(void) __acquires(__rcu_context);
 
 /**
  * rcu_read_unlock() - Exit RCU read-side critical section
@@ -29,7 +33,7 @@ void rcu_read_lock(void);
  * a preceding rcu_read_lock(). After this call, the reader no longer holds
  * a reference to the RCU-protected data.
  */
-void rcu_read_unlock(void);
+void rcu_read_unlock(void) __releases(__rcu_context);
 
 /**
  * rcu_dereference() - Safely dereference an RCU-protected pointer

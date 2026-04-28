@@ -5,13 +5,17 @@
 #include "proc/tq.h"
 #include "timer/timer_types.h"
 
+#ifdef __CHECKER__
+extern int __sleep_lock_context;
+#endif
+
 void scheduler_init(void);
 int sched_holding(void);
 int chan_holding(void);
-void sleep_lock(void);
-void sleep_unlock(void);
-int sleep_lock_irqsave(void);
-void sleep_unlock_irqrestore(int state);
+void sleep_lock(void) __acquires(__sleep_lock_context);
+void sleep_unlock(void) __releases(__sleep_lock_context);
+int sleep_lock_irqsave(void) __acquires(__sleep_lock_context);
+void sleep_unlock_irqrestore(int state) __releases(__sleep_lock_context);
 void scheduler_run(void);
 void scheduler_yield(void);
 void get_avenrun(uint64 loads[3]);

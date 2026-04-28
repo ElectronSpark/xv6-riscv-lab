@@ -43,9 +43,15 @@ static void __workqueue_struct_init(struct workqueue *wq) {
     tq_init(&wq->idle_queue, "workqueue_idle", &wq->lock);
 }
 
-static void __wq_lock(struct workqueue *wq) { spin_lock(&wq->lock); }
+static void __wq_lock(struct workqueue *wq) __acquires(wq)
+{
+    spin_lock(&wq->lock);
+}
 
-static void __wq_unlock(struct workqueue *wq) { spin_unlock(&wq->lock); }
+static void __wq_unlock(struct workqueue *wq) __releases(wq)
+{
+    spin_unlock(&wq->lock);
+}
 
 static struct work_struct *__alloc_work_struct(void) {
     struct work_struct *work = slab_alloc(&__work_struct_cache);

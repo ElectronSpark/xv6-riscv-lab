@@ -1,5 +1,6 @@
 #ifndef __KERNEL_VM_H
 #define __KERNEL_VM_H
+#include "compiler.h"
 #include <mm/vm_types.h>
 
 #define VMA_SIZE(__vma) ((__vma)->end - (__vma)->start)
@@ -20,13 +21,13 @@ void vm_remote_sfence(vm_t *vm);
 void vm_remote_sfence_page(vm_t *vm, uint64 va);
 void vm_remote_sfence_range(vm_t *vm, uint64 start, uint64 size);
 void vm_remote_fence_i(vm_t *vm);
-void vm_rlock(vm_t *vm);
-void vm_runlock(vm_t *vm);
-void vm_wlock(vm_t *vm);
-void vm_wunlock(vm_t *vm);
+void vm_rlock(vm_t *vm) __acquires(vm);
+void vm_runlock(vm_t *vm) __releases(vm);
+void vm_wlock(vm_t *vm) __acquires(vm);
+void vm_wunlock(vm_t *vm) __releases(vm);
 int  vm_is_wlocked(vm_t *vm);
-void vm_pgtable_lock(vm_t *vm);
-void vm_pgtable_unlock(vm_t *vm);
+void vm_pgtable_lock(vm_t *vm) __acquires(vm);
+void vm_pgtable_unlock(vm_t *vm) __releases(vm);
 vm_t *vm_init(void);
 void vm_dup(vm_t *vm);
 void vm_put(vm_t *vm);

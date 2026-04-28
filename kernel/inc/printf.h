@@ -6,6 +6,12 @@
 #ifndef __KERNEL_PRINTF_H
 #define __KERNEL_PRINTF_H
 
+#include "compiler.h"
+
+#ifdef __CHECKER__
+extern int __panic_msg_context;
+#endif
+
 /**
  * @brief Check if system is in panic state
  * @return Non-zero if any core has panicked
@@ -26,12 +32,12 @@ void trigger_panic(void) __attribute__((noreturn));
  * @note Used to serialize panic output across multiple cores.
  *       Must be paired with panic_msg_unlock().
  */
-void panic_msg_lock(void);
+void panic_msg_lock(void) __acquires(__panic_msg_context);
 
 /**
  * @brief Release the panic message lock
  */
-void panic_msg_unlock(void);
+void panic_msg_unlock(void) __releases(__panic_msg_context);
 
 /**
  * @brief Kernel printf function
@@ -46,7 +52,7 @@ int printf(char *, ...) __attribute__((format(printf, 1, 2)));
  * Disables interrupts and acquires the panic lock. Must be followed
  * by __panic_end() which does not return.
  */
-void __panic_start(void);
+void __panic_start(void) __acquires(__panic_msg_context);
 
 /**
  * @brief Complete a kernel panic and halt the system
@@ -54,7 +60,8 @@ void __panic_start(void);
  * Prints backtrace (if enabled) and halts all CPUs.
  * This function does not return.
  */
-void __panic_end(void) __attribute__((noreturn));
+void __panic_end(void) __releases(__panic_msg_context)
+    __attribute__((noreturn));
 
 /**
  * @brief Disable backtrace printing during panic

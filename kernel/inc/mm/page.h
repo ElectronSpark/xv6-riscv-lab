@@ -7,9 +7,9 @@
 uint64 managed_page_base();
 page_t *__pa_to_page(uint64 physical);
 uint64 __page_to_pa(page_t *page);
-void page_lock_acquire(page_t *page);
-void page_lock_release(page_t *page);
-void page_lock_assert_holding(page_t *page);
+void page_lock_acquire(page_t *page) __acquires(page);
+void page_lock_release(page_t *page) __releases(page);
+void page_lock_assert_holding(page_t *page) __must_hold(page);
 void page_lock_assert_unholding(page_t *page);
 int page_buddy_init(void);
 
@@ -26,8 +26,8 @@ int __page_ref_inc(page_t *page);
 int __page_ref_dec(page_t *page);
 int __page_ref_add(page_t *page, int n);
 int __page_ref_sub(page_t *page, int n);
-int page_ref_inc_unlocked(page_t *page);
-int page_ref_dec_unlocked(page_t *page);
+int page_ref_inc_unlocked(page_t *page) __must_hold(page);
+int page_ref_dec_unlocked(page_t *page) __must_hold(page);
 int page_refcnt(void *physical);
 int page_ref_inc(void *ptr);
 int page_ref_dec(void *ptr);

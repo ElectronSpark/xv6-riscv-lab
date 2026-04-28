@@ -202,8 +202,8 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
 struct thread *thread_create(void *entry, uint64 arg1, uint64 arg2,
                              int kstack_order);
 void thread_destroy(struct thread *p);
-void tcb_lock(struct thread *p);
-void tcb_unlock(struct thread *p);
+void tcb_lock(struct thread *p) __acquires(p);
+void tcb_unlock(struct thread *p) __releases(p);
 void proc_assert_holding(struct thread *p);
 void thread_init(void);
 void userinit(void);

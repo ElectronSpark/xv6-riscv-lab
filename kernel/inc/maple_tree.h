@@ -262,8 +262,14 @@ static inline void mt_unlock(struct maple_tree *mt) { (void)mt; }
  * mt_next, mt_prev).  Callers using the cursor API directly during
  * RCU reads should bracket their access with these.
  */
-static inline void mt_rcu_lock(void)   { mt_rcu_read_lock(); }
-static inline void mt_rcu_unlock(void) { mt_rcu_read_unlock(); }
+static inline void mt_rcu_lock(void) __acquires(__rcu_context)
+{
+    mt_rcu_read_lock();
+}
+static inline void mt_rcu_unlock(void) __releases(__rcu_context)
+{
+    mt_rcu_read_unlock();
+}
 
 #else
 

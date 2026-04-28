@@ -1799,18 +1799,28 @@ void page_free(void *ptr, uint64 order) {
 // SECTION 14: Public API - Page Locking
 // ============================================================================
 
-void page_lock_acquire(page_t *page) {
+void page_lock_acquire(page_t *page) __acquires(page)
+{
+#ifdef __CHECKER__
+    __acquire_context(page);
+#else
     if (page == NULL) {
         return;
     }
     spin_lock(&page->lock);
+#endif
 }
 
-void page_lock_release(page_t *page) {
+void page_lock_release(page_t *page) __releases(page)
+{
+#ifdef __CHECKER__
+    __release_context(page);
+#else
     if (page == NULL) {
         return;
     }
     spin_unlock(&page->lock);
+#endif
 }
 
 void page_lock_assert_holding(page_t *page) {

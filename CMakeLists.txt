@@ -292,3 +292,22 @@ add_subdirectory(kernel)
 if(ARCH STREQUAL "riscv")
     add_subdirectory(arch/riscv/boot)
 endif()
+
+set(XV6_SPARSE_JOBS "4" CACHE STRING "Parallel sparse jobs for kernel-sparse")
+find_program(SPARSE_EXECUTABLE sparse)
+if(SPARSE_EXECUTABLE)
+    set(_sparse_command ${SPARSE_EXECUTABLE})
+else()
+    set(_sparse_command sparse)
+endif()
+
+add_custom_target(kernel-sparse
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/run_sparse.py
+            --compile-commands ${CMAKE_BINARY_DIR}/compile_commands.json
+            --sparse ${_sparse_command}
+            --jobs ${XV6_SPARSE_JOBS}
+    DEPENDS generate_asm_offsets
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    COMMENT "Running sparse over kernel sources"
+    VERBATIM
+)

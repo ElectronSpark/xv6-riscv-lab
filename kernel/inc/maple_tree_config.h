@@ -44,8 +44,8 @@ typedef spinlock_t mt_lock_t;
 
 /* Forward declarations for the kernel spinlock API. */
 void spin_init(spinlock_t *lock, char *name);
-void spin_lock(spinlock_t *lock);
-void spin_unlock(spinlock_t *lock);
+void spin_lock(spinlock_t *lock) __acquires(lock);
+void spin_unlock(spinlock_t *lock) __releases(lock);
 
 #define MT_LOCK_INITIALIZER SPINLOCK_INITIALIZED("maple_tree.ma_lock")
 
@@ -54,12 +54,12 @@ static inline void mt_lock_init(mt_lock_t *lock)
     spin_init(lock, "maple_tree");
 }
 
-static inline void mt_spin_lock(mt_lock_t *lock)
+static inline void mt_spin_lock(mt_lock_t *lock) __acquires(lock)
 {
     spin_lock(lock);
 }
 
-static inline void mt_spin_unlock(mt_lock_t *lock)
+static inline void mt_spin_unlock(mt_lock_t *lock) __releases(lock)
 {
     spin_unlock(lock);
 }
@@ -70,8 +70,8 @@ static inline void mt_spin_unlock(mt_lock_t *lock)
 
 typedef void (*mt_rcu_callback_t)(void *);
 
-void mt_rcu_read_lock(void);
-void mt_rcu_read_unlock(void);
+void mt_rcu_read_lock(void) __acquires(__rcu_context);
+void mt_rcu_read_unlock(void) __releases(__rcu_context);
 void mt_call_rcu(mt_rcu_callback_t cb, void *node);
 
 /* ====================================================================== */

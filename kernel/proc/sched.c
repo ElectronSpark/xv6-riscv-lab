@@ -91,14 +91,42 @@ static void chan_queue_init(void) {
 
 int chan_holding(void) { return spin_holding(&__sleep_lock); }
 
-void sleep_lock(void) { spin_lock(&__sleep_lock); }
+void sleep_lock(void) __acquires(__sleep_lock_context)
+{
+#ifdef __CHECKER__
+    __acquire_context(__sleep_lock_context);
+#else
+    spin_lock(&__sleep_lock);
+#endif
+}
 
-void sleep_unlock(void) { spin_unlock(&__sleep_lock); }
+void sleep_unlock(void) __releases(__sleep_lock_context)
+{
+#ifdef __CHECKER__
+    __release_context(__sleep_lock_context);
+#else
+    spin_unlock(&__sleep_lock);
+#endif
+}
 
-int sleep_lock_irqsave(void) { return spin_lock_irqsave(&__sleep_lock); }
+int sleep_lock_irqsave(void) __acquires(__sleep_lock_context)
+{
+#ifdef __CHECKER__
+    __acquire_context(__sleep_lock_context);
+    return 0;
+#else
+    return spin_lock_irqsave(&__sleep_lock);
+#endif
+}
 
-void sleep_unlock_irqrestore(int state) {
+void sleep_unlock_irqrestore(int state) __releases(__sleep_lock_context)
+{
+#ifdef __CHECKER__
+    (void)state;
+    __release_context(__sleep_lock_context);
+#else
     spin_unlock_irqrestore(&__sleep_lock, state);
+#endif
 }
 
 /* Scheduler lock functions */

@@ -90,8 +90,14 @@ static inline void xa_unlock(struct xarray *xa) { (void)xa; }
 
 #ifdef XA_CONFIG_RCU
 
-static inline void xa_rcu_lock(void) { xa_rcu_read_lock(); }
-static inline void xa_rcu_unlock(void) { xa_rcu_read_unlock(); }
+static inline void xa_rcu_lock(void) __acquires(__rcu_context)
+{
+    xa_rcu_read_lock();
+}
+static inline void xa_rcu_unlock(void) __releases(__rcu_context)
+{
+    xa_rcu_read_unlock();
+}
 
 #else /* !XA_CONFIG_RCU */
 

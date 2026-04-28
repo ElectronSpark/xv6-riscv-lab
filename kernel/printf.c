@@ -238,7 +238,8 @@ static int __bt_enabled = 1;
 
 void panic_disable_bt(void) { __bt_enabled = 0; }
 
-void __panic_start() {
+void __panic_start() __acquires(__panic_msg_context)
+{
     // Set global panic state FIRST so other cores can see it
     __atomic_store_n(&__global_panic_state, 1, __ATOMIC_RELEASE);
 
@@ -293,7 +294,8 @@ void trigger_panic(void) {
         arch_wait_for_interrupt();
 }
 
-void __panic_end() {
+void __panic_end() __releases(__panic_msg_context)
+{
     panic_msg_unlock();
     fb_panic_screen(__panic_textbuf);
     trigger_panic();
@@ -304,6 +306,20 @@ void printfinit(void) {
     pr.locking = 1;
 }
 
-void panic_msg_lock(void) { spin_lock(&__panic_bt_lock); }
+void panic_msg_lock(void) __acquires(__panic_msg_context)
+{
+#ifdef __CHECKER__
+    __acquire_context(__panic_msg_context);
+#else
+    spin_lock(&__panic_bt_lock);
+#endif
+}
 
-void panic_msg_unlock(void) { spin_unlock(&__panic_bt_lock); }
+void panic_msg_unlock(void) __releases(__panic_msg_context)
+{
+#ifdef __CHECKER__
+    __release_context(__panic_msg_context);
+#else
+    spin_unlock(&__panic_bt_lock);
+#endif
+}

@@ -19,6 +19,8 @@ struct cpu_local {
     int intena;                 // Were interrupts enabled before push_off()?
     uint64 flags;               // CPU flags
     uint64 rcu_timestamp;       // RCU timestamp - updated before context switch
+    int rcu_read_lock_nesting;  // Authoritative RCU read-side nesting on CPU
+    int __pad_rcu;              // keep following 64-bit fields aligned
     uint64 syscall_scratch;     // SWAPGS scratch (%gs:64 on SYSCALL entry)
     uint64 syscall_kstack_top;  // kernel stack top for SYSCALL entry (%gs:72)
     int fpu_owner_tid;          // TID of thread whose FP state is in HW (0 = none)

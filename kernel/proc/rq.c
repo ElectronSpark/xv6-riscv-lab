@@ -292,9 +292,15 @@ void sched_class_register(int id, struct sched_class *cls) {
     rq_global.sched_class[id] = cls;
 }
 
-void rq_lock(int cpu_id) {
+void rq_lock(int cpu_id) __acquires(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    (void)cpu_id;
+    __acquire_context(__rq_lock_context);
+#else
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_lock: invalid cpu_id %d", cpu_id);
     spin_lock(&__rqpc(cpu_id)->rq_lock);
+#endif
 }
 
 // Try to acquire the rq lock without spinning.
@@ -305,42 +311,80 @@ int rq_trylock(int cpu_id) {
     return spin_trylock(&__rqpc(cpu_id)->rq_lock);
 }
 
-void rq_unlock(int cpu_id) {
+void rq_unlock(int cpu_id) __releases(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    (void)cpu_id;
+    __release_context(__rq_lock_context);
+#else
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d",
            cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d",
            cpu_id);
     spin_unlock(&__rqpc(cpu_id)->rq_lock);
+#endif
 }
 
-int rq_lock_irqsave(int cpu_id) {
+int rq_lock_irqsave(int cpu_id) __acquires(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    (void)cpu_id;
+    __acquire_context(__rq_lock_context);
+    return 0;
+#else
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_lock: invalid cpu_id %d", cpu_id);
     return spin_lock_irqsave(&__rqpc(cpu_id)->rq_lock);
+#endif
 }
 
-void rq_unlock_irqrestore(int cpu_id, int state) {
+void rq_unlock_irqrestore(int cpu_id, int state) __releases(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    (void)cpu_id;
+    (void)state;
+    __release_context(__rq_lock_context);
+#else
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d",
            cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d",
            cpu_id);
     spin_unlock_irqrestore(&__rqpc(cpu_id)->rq_lock, state);
+#endif
 }
 
-int rq_lock_current_irqsave(void) {
+int rq_lock_current_irqsave(void) __acquires(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    __acquire_context(__rq_lock_context);
+    return 0;
+#else
     int intr_state = intr_get();
     intr_off();
     // We recorded the interrupt state before disabling interrupts.
     // So we can discard the current interrupt state here.
     rq_lock_irqsave(cpuid());
     return intr_state;
+#endif
 }
 
-void rq_unlock_current_irqrestore(int state) {
+void rq_unlock_current_irqrestore(int state) __releases(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    (void)state;
+    __release_context(__rq_lock_context);
+#else
     int cpu = cpuid();
     rq_unlock_irqrestore(cpu, state);
+#endif
 }
 
-void rq_lock_two(int cpu_id1, int cpu_id2) {
+void rq_lock_two(int cpu_id1, int cpu_id2) __acquires(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    (void)cpu_id1;
+    (void)cpu_id2;
+    __acquire_context(__rq_lock_context);
+#else
     assert(cpu_id1 >= 0 && cpu_id1 < NCPU, "rq_lock_two: invalid cpu_id1 %d",
            cpu_id1);
     assert(cpu_id2 >= 0 && cpu_id2 < NCPU, "rq_lock_two: invalid cpu_id2 %d",
@@ -354,6 +398,7 @@ void rq_lock_two(int cpu_id1, int cpu_id2) {
     } else {
         rq_lock(cpu_id1);
     }
+#endif
 }
 
 // Try to acquire two rq locks without spinning.
@@ -393,7 +438,13 @@ int rq_trylock_two(int cpu_id1, int cpu_id2) {
     return 1;
 }
 
-void rq_unlock_two(int cpu_id1, int cpu_id2) {
+void rq_unlock_two(int cpu_id1, int cpu_id2) __releases(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    (void)cpu_id1;
+    (void)cpu_id2;
+    __release_context(__rq_lock_context);
+#else
     assert(cpu_id1 >= 0 && cpu_id1 < NCPU, "rq_unlock_two: invalid cpu_id1 %d",
            cpu_id1);
     assert(cpu_id2 >= 0 && cpu_id2 < NCPU, "rq_unlock_two: invalid cpu_id2 %d",
@@ -407,17 +458,28 @@ void rq_unlock_two(int cpu_id1, int cpu_id2) {
     } else {
         rq_unlock(cpu_id1);
     }
+#endif
 }
 
-void rq_lock_current(void) {
+void rq_lock_current(void) __acquires(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    __acquire_context(__rq_lock_context);
+#else
     push_off();
     rq_lock(cpuid());
     pop_off();
+#endif
 }
 
-void rq_unlock_current(void) {
+void rq_unlock_current(void) __releases(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    __release_context(__rq_lock_context);
+#else
     int cpu = cpuid();
     rq_unlock(cpu);
+#endif
 }
 
 int rq_holding(int cpu_id) {
@@ -439,13 +501,20 @@ int rq_holding_current(void) {
  *
  * Caller must call rq_percpu_put_unlock() when done.
  */
-struct rq_percpu *rq_percpu_lock_get(int cpu_id) {
+struct rq_percpu *rq_percpu_lock_get(int cpu_id) __acquires(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    (void)cpu_id;
+    __acquire_context(__rq_lock_context);
+    return (struct rq_percpu *)1;
+#else
     if (cpu_id < 0 || cpu_id >= NCPU) {
         return NULL;
     }
     struct rq_percpu *rq_pc = __rqpc(cpu_id);
     spin_lock(&rq_pc->rq_lock);
     return rq_pc;
+#endif
 }
 
 /**
@@ -455,12 +524,19 @@ struct rq_percpu *rq_percpu_lock_get(int cpu_id) {
  * Disables preemption to ensure CPU doesn't change. Caller must call
  * rq_percpu_put_unlock_current() when done.
  */
-struct rq_percpu *rq_percpu_lock_get_current(void) {
+struct rq_percpu *rq_percpu_lock_get_current(void)
+    __acquires(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    __acquire_context(__rq_lock_context);
+    return (struct rq_percpu *)1;
+#else
     push_off(); // Disable preemption to pin to current CPU
     struct rq_percpu *rq_pc = __rqpc_current();
     spin_lock(&rq_pc->rq_lock);
     pop_off();
     return rq_pc;
+#endif
 }
 
 /**
@@ -469,11 +545,18 @@ struct rq_percpu *rq_percpu_lock_get_current(void) {
  *
  * Pairs with rq_percpu_lock_get().
  */
-void rq_percpu_put_unlock(struct rq_percpu *rq_pc) {
+void rq_percpu_put_unlock(struct rq_percpu *rq_pc)
+    __releases(__rq_lock_context)
+{
+#ifdef __CHECKER__
+    (void)rq_pc;
+    __release_context(__rq_lock_context);
+#else
     if (rq_pc == NULL) {
         return;
     }
     spin_unlock(&rq_pc->rq_lock);
+#endif
 }
 
 // Select the appropriate run queue for the given sched_entity and cpumask

@@ -40,6 +40,7 @@
 #include "printf.h"
 #include "memlayout.h"
 #include "seg.h"
+#include <mm/page.h>
 #include <smp/percpu_types.h>
 
 /* ── x86_64 page table entry bit definitions ── */
@@ -462,6 +463,85 @@ pagetable_t uvmcreate(void)
  * skip_idx: PML4 index to skip (shared kernel mapping, e.g. PML4[511]).
  */
 static int __freewalk_leak_count;
+static uint64 __freewalk_first_leak_va;
+static uint64 __freewalk_last_leak_va;
+static uint64 __freewalk_last_leak_end;
+static int __freewalk_range_count;
+
+#define FREEWALK_LEAK_RANGE_MAX 8
+static struct {
+    uint64 start;
+    uint64 end;
+    uint64 pte;
+    int count;
+} __freewalk_leak_ranges[FREEWALK_LEAK_RANGE_MAX];
+
+static void __freewalk_record_leak(uint64 va, uint64 size, pte_t pte)
+{
+    __freewalk_leak_count++;
+    if (__freewalk_leak_count == 1) {
+        __freewalk_first_leak_va = va;
+        __freewalk_last_leak_va = va;
+    } else {
+        __freewalk_last_leak_va = va;
+    }
+
+    if (__freewalk_range_count > 0 &&
+        __freewalk_leak_ranges[__freewalk_range_count - 1].end == va) {
+        __freewalk_leak_ranges[__freewalk_range_count - 1].end = va + size;
+        __freewalk_leak_ranges[__freewalk_range_count - 1].count++;
+        __freewalk_last_leak_end = va + size;
+        return;
+    }
+
+    __freewalk_last_leak_end = va + size;
+    if (__freewalk_range_count >= FREEWALK_LEAK_RANGE_MAX)
+        return;
+
+    __freewalk_leak_ranges[__freewalk_range_count].start = va;
+    __freewalk_leak_ranges[__freewalk_range_count].end = va + size;
+    __freewalk_leak_ranges[__freewalk_range_count].pte = pte;
+    __freewalk_leak_ranges[__freewalk_range_count].count = 1;
+    __freewalk_range_count++;
+}
+
+static void __uvm_visit_present_leafs(pagetable_t pagetable, int level,
+                                      uint64 base_va,
+                                      uvm_leaf_visitor_t visitor, void *arg)
+{
+    static const int shift[] = {12, 21, 30, 39};
+    for (int i = 0; i < 512; i++) {
+        if (level == 3 && i >= 256)
+            break;
+        pte_t pte = pagetable[i];
+        if (!(pte & PTE_V))
+            continue;
+
+        uint64 va = base_va | ((uint64)i << shift[level]);
+        if (level > 0) {
+            if (level == 1 && (pte & PTE_PS)) {
+                visitor(va, HUGEPAGE_SIZE, pte, arg);
+                continue;
+            }
+            uint64 child = PTE2PA(pte);
+            page_t *child_pg = __pa_to_page(child);
+            if (!PAGE_IS_TYPE(child_pg, PAGE_TYPE_PGTABLE))
+                continue;
+            __uvm_visit_present_leafs((pagetable_t)child, level - 1,
+                                      va, visitor, arg);
+        } else {
+            visitor(va, PGSIZE, pte, arg);
+        }
+    }
+}
+
+void uvm_visit_present_leafs(pagetable_t pagetable, uvm_leaf_visitor_t visitor,
+                             void *arg)
+{
+    if (pagetable == NULL || visitor == NULL)
+        return;
+    __uvm_visit_present_leafs(pagetable, 3, 0, visitor, arg);
+}
 
 static void __freewalk(pagetable_t pagetable, int level, uint64 base_va)
 {
@@ -480,7 +560,7 @@ static void __freewalk(pagetable_t pagetable, int level, uint64 base_va)
             if (level == 1 && (pte & PTE_PS)) {
                 /* 2MB hugepage leaf at PD level — leaked, clear it. */
                 pagetable[i] = 0;
-                __freewalk_leak_count++;
+                __freewalk_record_leak(va, HUGEPAGE_SIZE, pte);
                 continue;
             }
             /* Non-leaf: recurse into next level page table.
@@ -488,6 +568,20 @@ static void __freewalk(pagetable_t pagetable, int level, uint64 base_va)
              * usable as pointers via the PML4[0] identity map, so
              * casting directly to pagetable_t is correct here. */
             uint64 child = PTE2PA(pte);
+            page_t *child_pg = __pa_to_page(child);
+            if (!PAGE_IS_TYPE(child_pg, PAGE_TYPE_PGTABLE)) {
+                printf("freewalk: corrupt non-leaf PTE level=%d "
+                       "va=0x%lx pte=0x%lx child=0x%lx type=%lu "
+                       "(pid %d %s)\n",
+                       level, va, pte, child,
+                       child_pg ? (child_pg->flags & PAGE_FLAG_TYPE_MASK) :
+                                  ~0UL,
+                       current ? current->pid : -1,
+                       current ? current->name : "?");
+                pagetable[i] = 0;
+                __freewalk_record_leak(va, 1UL << shift[level], pte);
+                continue;
+            }
             __freewalk((pagetable_t)child, level - 1, va);
             pagetable[i] = 0;
         } else {
@@ -496,7 +590,7 @@ static void __freewalk(pagetable_t pagetable, int level, uint64 base_va)
              * total leak count is still reported by freewalk(). */
             /* Clear it to allow scanning the rest of the page table. */
             pagetable[i] = 0;
-            __freewalk_leak_count++;
+            __freewalk_record_leak(va, PGSIZE, pte);
         }
     }
     pgtab_free((void *)pagetable);
@@ -505,12 +599,27 @@ static void __freewalk(pagetable_t pagetable, int level, uint64 base_va)
 void freewalk(pagetable_t pagetable)
 {
     __freewalk_leak_count = 0;
+    __freewalk_first_leak_va = 0;
+    __freewalk_last_leak_va = 0;
+    __freewalk_last_leak_end = 0;
+    __freewalk_range_count = 0;
     __freewalk(pagetable, 3, 0);
     if (__freewalk_leak_count > 0) {
-        printf("freewalk: WARNING: %d leaked PTE(s) (pid %d %s)\n",
+        printf("freewalk: WARNING: %d leaked PTE(s) va=[0x%lx-0x%lx] "
+               "(pid %d %s)\n",
                __freewalk_leak_count,
+               __freewalk_first_leak_va, __freewalk_last_leak_end,
                current ? current->pid : -1,
                current ? current->name : "?");
+        for (int i = 0; i < __freewalk_range_count; i++) {
+            printf("freewalk: leak range %d [0x%lx-0x%lx) count=%d "
+                   "first_pte=0x%lx\n",
+                   i,
+                   __freewalk_leak_ranges[i].start,
+                   __freewalk_leak_ranges[i].end,
+                   __freewalk_leak_ranges[i].count,
+                   __freewalk_leak_ranges[i].pte);
+        }
     }
 }
 

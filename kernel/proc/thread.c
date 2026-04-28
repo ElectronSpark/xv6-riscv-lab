@@ -93,12 +93,14 @@ static struct thread *__kstack_arrange(void *kstack, size_t kstack_size,
     return p;
 }
 
-void tcb_lock(struct thread *p) {
+void tcb_lock(struct thread *p) __acquires(p)
+{
     assert(p != NULL, "tcb_lock: thread is NULL");
     spin_lock(&p->lock);
 }
 
-void tcb_unlock(struct thread *p) {
+void tcb_unlock(struct thread *p) __releases(p)
+{
     assert(p != NULL, "tcb_unlock: thread is NULL");
     spin_unlock(&p->lock);
 }

@@ -127,15 +127,15 @@ void spin_init(spinlock_t *, char *);
 int spin_holding(spinlock_t *);
 // Basic spin lock functions. Will NOT modify preempt counter or disable
 // interrupts.
-void spin_acquire(spinlock_t *);
-void spin_release(spinlock_t *);
+void spin_acquire(spinlock_t *lock) __acquires(lock);
+void spin_release(spinlock_t *lock) __releases(lock);
 // Default spin lock functions. Will modify preempt counter.
-void spin_lock(spinlock_t *);
-void spin_unlock(spinlock_t *);
-int spin_trylock(spinlock_t *);
+void spin_lock(spinlock_t *lock) __acquires(lock);
+void spin_unlock(spinlock_t *lock) __releases(lock);
+int spin_trylock(spinlock_t *lock);
 // Functions to save/restore interrupt state with spinlock.
-int spin_lock_irqsave(spinlock_t *);
-void spin_unlock_irqrestore(spinlock_t *, int);
+int spin_lock_irqsave(spinlock_t *lock) __acquires(lock);
+void spin_unlock_irqrestore(spinlock_t *lock, int intena) __releases(lock);
 
 // sleeplock.c
 void mutex_lock(mutex_t *);

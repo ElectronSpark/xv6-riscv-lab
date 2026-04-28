@@ -345,9 +345,23 @@ ksiginfo_t *ksiginfo_alloc(void) {
     return ksi;
 }
 
-void sigacts_lock(sigacts_t *sa) { spin_lock(&sa->lock); }
+void sigacts_lock(sigacts_t *sa) __acquires(sa)
+{
+#ifdef __CHECKER__
+    __acquire_context(sa);
+#else
+    spin_lock(&sa->lock);
+#endif
+}
 
-void sigacts_unlock(sigacts_t *sa) { spin_unlock(&sa->lock); }
+void sigacts_unlock(sigacts_t *sa) __releases(sa)
+{
+#ifdef __CHECKER__
+    __release_context(sa);
+#else
+    spin_unlock(&sa->lock);
+#endif
+}
 
 int sigacts_holding(sigacts_t *sa) { return spin_holding(&sa->lock); }
 
