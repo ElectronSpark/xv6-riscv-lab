@@ -25,6 +25,7 @@ struct vfs_superblock;
 struct vfs_superblock_ops;
 struct vfs_inode;
 struct vfs_inode_ops;
+struct vfs_address_space_ops;
 struct vfs_dentry;
 struct vfs_dir_iter;
 struct vfs_file;
@@ -286,6 +287,8 @@ struct vfs_inode {
     // Initialize them as needed
     struct pcache *i_mapping; // page cache for its backend inode data
     struct pcache i_data;     // page cache for its data blocks
+    struct vfs_address_space_ops
+        *a_ops; // regular-file logical block mapping for generic data I/O
     struct vfs_inode_ops *ops;
     int ref_count; // reference count
     void *fs_data; // filesystem-specific data

@@ -1,4 +1,5 @@
 add_library(vfs_core OBJECT
+    address_space.c
     fs.c
     dcache.c
     inode.c
