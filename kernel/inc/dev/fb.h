@@ -19,6 +19,7 @@
 #define FB_GPU_FILL_RECT     0x4610   /* fill rectangle with solid color */
 #define FB_GPU_BLIT          0x4611   /* copy user buffer to screen rect */
 #define FB_GPU_COPY_RECT     0x4612   /* screen-to-screen rectangle copy */
+#define FB_GPU_GET_STATS     0x4613   /* query present/copy counters */
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -63,6 +64,17 @@ struct fb_gpu_copy {
     uint32 dst_y;           /* destination y */
     uint32 w;               /* width in pixels */
     uint32 h;               /* height in pixels */
+};
+
+/* Framebuffer/GPU counters for compositor validation and tuning. */
+struct fb_gpu_stats {
+    uint64 full_blits;         /* blits covering the whole visible screen */
+    uint64 partial_blits;      /* clipped or unclipped sub-rectangle blits */
+    uint64 clipped_blits;      /* blit/fill/copy requests clipped to screen */
+    uint64 rejected_blits;     /* invalid blit requests rejected with errno */
+    uint64 fill_rects;         /* accepted fill-rect operations */
+    uint64 copy_rects;         /* accepted screen-to-screen copies */
+    uint64 blit_bytes;         /* user pixel bytes copied into the LFB */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

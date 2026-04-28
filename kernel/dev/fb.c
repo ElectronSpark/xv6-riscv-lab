@@ -77,10 +77,23 @@ static struct {
     uint32      bpp;
     uint32      pitch;          /* bytes per scanline */
     uint32      fb_size;        /* total framebuffer size in bytes */
+    struct fb_gpu_stats stats;
     spinlock_t  lock;           /* serializes concurrent access */
 } fb_state = {
     .lock = SPINLOCK_INITIALIZED("fb"),
 };
+
+static int fb_cmdline_enabled(const char *key)
+{
+    char buf[16];
+
+    if (cmdline_get_param(key, buf, sizeof(buf)) != 0)
+        return 0;
+    return strcmp(buf, "1") == 0 ||
+           strcmp(buf, "yes") == 0 ||
+           strcmp(buf, "true") == 0 ||
+           strcmp(buf, "on") == 0;
+}
 
 /* ── BGA mode setting ─────────────────────────────────────────────── */
 
@@ -195,9 +208,9 @@ void fb_pci_init(uint8 bus, uint8 dev, uint8 func)
            fb_state.xres, fb_state.yres, fb_state.bpp,
            fb_state.pitch, fb_state.fb_size);
 
-    /* Write a bright test pattern to verify LFB writes reach the VGA.
-     * Top 16 scanlines: bright blue. Rest: black. */
-    {
+    if (fb_cmdline_enabled("fbtest")) {
+        /* Write a bright test pattern to verify LFB writes reach the VGA.
+         * Top 16 scanlines: bright blue. Rest: black. */
         volatile uint32 *pixels = (volatile uint32 *)fb_state.fb_virt;
         uint32 npx = fb_state.xres * fb_state.yres;
         /* Clear to black first */
@@ -223,6 +236,11 @@ void fb_pci_init(uint8 bus, uint8 dev, uint8 func)
         uint32 readback = pixels[0];
         printf("FB: LFB test pattern written, readback pixel[0]=0x%x (expect 0x000080FF)\n",
                readback);
+    } else {
+        volatile uint32 *pixels = (volatile uint32 *)fb_state.fb_virt;
+        uint32 npx = fb_state.xres * fb_state.yres;
+        for (uint32 i = 0; i < npx; i++)
+            pixels[i] = 0x00000000;
     }
 
     /* Publish as detected — must be last so readers see consistent state */
@@ -412,8 +430,11 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
 
     case FB_GPU_FILL_RECT: {
         struct fb_gpu_fill cmd;
+        int clipped = 0;
         if (either_copyin((char *)&cmd, 1, (uint64)arg, sizeof(cmd)) < 0)
             return -EFAULT;
+        if (cmd.w == 0 || cmd.h == 0)
+            return 0;
 
         spin_lock(&fb_state.lock);
         /* Clip to screen bounds */
@@ -421,29 +442,66 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             spin_unlock(&fb_state.lock);
             return 0;
         }
-        if (cmd.x + cmd.w > fb_state.xres)
+        if ((uint64)cmd.x + cmd.w > fb_state.xres) {
             cmd.w = fb_state.xres - cmd.x;
-        if (cmd.y + cmd.h > fb_state.yres)
+            clipped = 1;
+        }
+        if ((uint64)cmd.y + cmd.h > fb_state.yres) {
             cmd.h = fb_state.yres - cmd.y;
+            clipped = 1;
+        }
 
         gpu_fill_rect_locked(cmd.x, cmd.y, cmd.w, cmd.h, cmd.color);
+        fb_state.stats.fill_rects++;
+        if (clipped)
+            fb_state.stats.clipped_blits++;
         spin_unlock(&fb_state.lock);
         return 0;
     }
 
     case FB_GPU_BLIT: {
         struct fb_gpu_blit cmd;
+        uint32 xres, yres;
+        int clipped = 0;
         if (either_copyin((char *)&cmd, 1, (uint64)arg, sizeof(cmd)) < 0)
             return -EFAULT;
 
+        if (cmd.w == 0 || cmd.h == 0)
+            return 0;
+        if (cmd.w > 0xffffffffU / 4) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.rejected_blits++;
+            spin_unlock(&fb_state.lock);
+            return -EINVAL;
+        }
+        if (cmd.pixels == 0 || cmd.src_pitch == 0 ||
+            (cmd.src_pitch & 3) != 0 ||
+            cmd.src_pitch < cmd.w * 4) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.rejected_blits++;
+            spin_unlock(&fb_state.lock);
+            return -EINVAL;
+        }
+
+        spin_lock(&fb_state.lock);
+        xres = fb_state.xres;
+        yres = fb_state.yres;
+        spin_unlock(&fb_state.lock);
+
         /* Clip to screen bounds */
-        if (cmd.x >= fb_state.xres || cmd.y >= fb_state.yres)
+        if (cmd.x >= xres || cmd.y >= yres)
             return 0;
         uint32 cw = cmd.w, ch = cmd.h;
-        if (cmd.x + cw > fb_state.xres)
-            cw = fb_state.xres - cmd.x;
-        if (cmd.y + ch > fb_state.yres)
-            ch = fb_state.yres - cmd.y;
+        if ((uint64)cmd.x + cw > xres) {
+            cw = xres - cmd.x;
+            clipped = 1;
+        }
+        if ((uint64)cmd.y + ch > yres) {
+            ch = yres - cmd.y;
+            clipped = 1;
+        }
+        if (cw == 0 || ch == 0)
+            return 0;
 
         /* Copy scanlines from userspace to LFB via bounce buffer.
          * Use volatile write loop instead of memcpy to ensure MMIO writes
@@ -451,7 +509,17 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         uint8 kbuf[4096];
         uint32 max_px = sizeof(kbuf) / 4;
         volatile uint32 *fb = (volatile uint32 *)fb_state.fb_virt;
-        uint32 stride = fb_state.xres;
+        uint32 stride = xres;
+
+        spin_lock(&fb_state.lock);
+        if (cmd.x == 0 && cmd.y == 0 && cw == xres && ch == yres)
+            fb_state.stats.full_blits++;
+        else
+            fb_state.stats.partial_blits++;
+        if (clipped)
+            fb_state.stats.clipped_blits++;
+        fb_state.stats.blit_bytes += (uint64)cw * ch * 4;
+        spin_unlock(&fb_state.lock);
 
         for (uint32 row = 0; row < ch; row++) {
             uint64 src_addr = cmd.pixels + (uint64)row * cmd.src_pitch;
@@ -480,8 +548,11 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
 
     case FB_GPU_COPY_RECT: {
         struct fb_gpu_copy cmd;
+        int clipped = 0;
         if (either_copyin((char *)&cmd, 1, (uint64)arg, sizeof(cmd)) < 0)
             return -EFAULT;
+        if (cmd.w == 0 || cmd.h == 0)
+            return 0;
 
         spin_lock(&fb_state.lock);
         /* Clip source and destination to screen bounds */
@@ -491,14 +562,39 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             return 0;
         }
         uint32 w = cmd.w, h = cmd.h;
-        if (cmd.src_x + w > fb_state.xres) w = fb_state.xres - cmd.src_x;
-        if (cmd.src_y + h > fb_state.yres) h = fb_state.yres - cmd.src_y;
-        if (cmd.dst_x + w > fb_state.xres) w = fb_state.xres - cmd.dst_x;
-        if (cmd.dst_y + h > fb_state.yres) h = fb_state.yres - cmd.dst_y;
+        if ((uint64)cmd.src_x + w > fb_state.xres) {
+            w = fb_state.xres - cmd.src_x;
+            clipped = 1;
+        }
+        if ((uint64)cmd.src_y + h > fb_state.yres) {
+            h = fb_state.yres - cmd.src_y;
+            clipped = 1;
+        }
+        if ((uint64)cmd.dst_x + w > fb_state.xres) {
+            w = fb_state.xres - cmd.dst_x;
+            clipped = 1;
+        }
+        if ((uint64)cmd.dst_y + h > fb_state.yres) {
+            h = fb_state.yres - cmd.dst_y;
+            clipped = 1;
+        }
 
         gpu_copy_rect_locked(cmd.src_x, cmd.src_y,
                              cmd.dst_x, cmd.dst_y, w, h);
+        fb_state.stats.copy_rects++;
+        if (clipped)
+            fb_state.stats.clipped_blits++;
         spin_unlock(&fb_state.lock);
+        return 0;
+    }
+
+    case FB_GPU_GET_STATS: {
+        struct fb_gpu_stats stats;
+        spin_lock(&fb_state.lock);
+        stats = fb_state.stats;
+        spin_unlock(&fb_state.lock);
+        if (either_copyout(1, (uint64)arg, (char *)&stats, sizeof(stats)) < 0)
+            return -EFAULT;
         return 0;
     }
 
