@@ -480,12 +480,6 @@ uint64 sys_vfs_fcntl(void) {
         break;
     case F_SETFL: {
         int new_flags = (f->f_flags & O_ACCMODE) | (arg & ~(O_ACCMODE | O_CLOEXEC));
-        int old_nb = (f->f_flags & O_NONBLOCK);
-        int new_nb = (new_flags & O_NONBLOCK);
-        if (old_nb != new_nb) {
-            printf("[sock] fcntl fd=%d F_SETFL O_NONBLOCK %d->%d ops=%p\n",
-                   fd, old_nb ? 1 : 0, new_nb ? 1 : 0, f->ops);
-        }
         f->f_flags = new_flags;
         /* Propagate O_NONBLOCK to pipe internal flags.
          * writer_lock protects read_file/write_file pointers and

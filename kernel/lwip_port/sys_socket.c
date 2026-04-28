@@ -59,7 +59,7 @@ extern int argstr(int n, char *buf, int max);
 /* ========================================================================== */
 /* Debug socket tracing (set to 1 to enable)                                  */
 /* ========================================================================== */
-#define SOCK_DEBUG 1
+#define SOCK_DEBUG 0
 #if SOCK_DEBUG
 #define sock_dbg(fmt, ...) printf("[sock] " fmt, ##__VA_ARGS__)
 #else
