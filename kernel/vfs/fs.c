@@ -194,7 +194,7 @@ static void __vfs_init_superblock_structure(struct vfs_superblock *sb,
     sb->orphan_count = 0;
     __atomic_store_n(&sb->refcount, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&sb->mount_count, 0, __ATOMIC_SEQ_CST);
-    rwsem_init(&sb->lock, RWLOCK_PRIO_READ, "vfs_superblock_lock");
+    rwsem_init(&sb->lock, RWLOCK_PRIO_WRITE, "vfs_superblock_lock");
     spin_init(&sb->spinlock, "vfs_superblock_spinlock");
 }
 
@@ -2103,6 +2103,7 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
         return inode;
     }
 
+retry:
     vfs_superblock_rlock(dentry->sb);
     if (!dentry->sb->valid) {
         vfs_superblock_unlock(dentry->sb);
@@ -2110,6 +2111,10 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
     }
     inode = __vfs_get_dentry_inode_impl(dentry);
     vfs_superblock_unlock(dentry->sb);
+    if (IS_ERR(inode) && PTR_ERR(inode) == -EAGAIN) {
+        scheduler_yield();
+        goto retry;
+    }
     return inode;
 }
 
@@ -2152,6 +2157,7 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
     // can exist in the cache when vfs_iput did a dirty sync and hasn't yet
     // re-acquired locks to evict it.  If we hold the sb write lock, we can
     // safely revive it (the evicting thread needs sb wlock to proceed).
+    bool lru_removed = false;
     if (!vfs_idup_not_zero(inode)) {
         if (inode->valid && !inode->destroying && inode->n_links > 0) {
             if (sb->backendless || vfs_superblock_wholding(sb)) {
@@ -2160,6 +2166,7 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
                 if (!LIST_NODE_IS_DETACHED(inode, lru_entry)) {
                     list_node_detach(inode, lru_entry);
                     sb->inode_lru_count--;
+                    lru_removed = true;
                 }
             } else {
                 return ERR_PTR(-ENOENT); // Cannot safely revive without wlock
@@ -2168,7 +2175,23 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
             return ERR_PTR(-ENOENT); // Inode is dying
         }
     }
-    vfs_ilock(inode);
+    /*
+     * Do not sleep on an inode mutex while holding only a superblock read
+     * lock.  vfs_iput() and create/unlink paths need the write lock; if the
+     * mutex owner is queued behind this read lock, blocking here deadlocks
+     * metadata progress.  Drop the speculative reference and let callers
+     * retry after releasing the superblock lock.
+     */
+    if (vfs_superblock_wholding(sb)) {
+        vfs_ilock(inode);
+    } else if (!vfs_ilock_trylock(inode)) {
+        atomic_dec(&inode->ref_count);
+        if (lru_removed && READ_ONCE(inode->ref_count) == 0) {
+            list_node_push(&sb->inode_lru, inode, lru_entry);
+            sb->inode_lru_count++;
+        }
+        return ERR_PTR(-EAGAIN);
+    }
     if (!inode->valid || inode->destroying) {
         // Inode should be valid when first gotten from the cache,
         // but it may have been invalidated or is being destroyed.
