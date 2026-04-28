@@ -23,6 +23,7 @@
 #include "vfs/file.h"
 #include "vfs/file_lock.h"
 #include "vfs/pipe.h"
+#include "vfs/unix_socket.h"
 #include "vfs/fcntl.h"
 #include "vfs/stat.h"
 #include "vfs/xv6fs/ondisk.h" // for DIRSIZ
@@ -345,6 +346,24 @@ uint64 sys_vfs_close(void) {
         return -EBADF;
     }
     spin_unlock(&current->fdtable->lock);
+
+    /*
+     * close(2) must publish AF_UNIX hangup/read-EOF semantics before it
+     * returns when this descriptor owns the final reference.  The final
+     * vfs_fput is RCU-deferred so concurrent fdtable readers cannot observe
+     * freed file memory; without this early release, socketpair peers can miss
+     * an immediate poll(POLLHUP/POLLIN) after close.
+     *
+     * Do not run release early while extra references exist, notably
+     * SCM_RIGHTS in-flight descriptors.  In that case close only drops this
+     * fd's reference and the socket must stay usable for the eventual
+     * receiver-installed descriptor.
+     */
+    if (f->ops == &unix_socket_file_ops && f->ops->release != NULL &&
+        f->private_data != NULL &&
+        __atomic_load_n(&f->ref_count, __ATOMIC_ACQUIRE) == 1) {
+        f->ops->release(vfs_inode_deref(&f->inode), f);
+    }
 
     vfs_file_lock_release(f, current->tgid);
     __vfs_fput_call_rcu(f);

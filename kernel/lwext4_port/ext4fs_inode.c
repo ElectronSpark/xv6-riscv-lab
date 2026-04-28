@@ -865,7 +865,16 @@ static int ext4fs_truncate(struct vfs_inode *inode, loff_t new_size)
         return -r;
     }
 
-    r = ext4_fs_truncate_inode(&ref, (uint64_t)new_size);
+    /*
+     * lwext4's ext4_fs_truncate_inode only shrinks files.  POSIX ftruncate
+     * must also grow regular files, with the extended range reading as zeros.
+     * The xv6 ext4 read path already treats unmapped data blocks as sparse
+     * zeros, so growing only needs to publish the larger inode size.
+     */
+    if ((uint64_t)new_size > (uint64_t)inode->size)
+        r = EOK;
+    else
+        r = ext4_fs_truncate_inode(&ref, (uint64_t)new_size);
     if (r == EOK) {
         ext4_inode_set_size(ref.inode, (uint64_t)new_size);
         ext4fs_stamp_mctime(inode, &ref);
