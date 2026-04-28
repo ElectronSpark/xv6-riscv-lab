@@ -915,6 +915,11 @@ vma_t *vma_split(vma_t *vma, uint64 va)
 {
     if (vma == NULL || vma->vm == NULL)
         return NULL;
+    if ((va & (PGSIZE - 1)) != 0) {
+        printf("vma_split: FAIL unaligned va=0x%lx vma=[0x%lx-0x%lx]\n",
+               va, vma->start, vma->end);
+        return NULL;
+    }
     if (va < vma->start || va >= vma->end)
         return NULL;
     if (va == vma->start)
@@ -2763,10 +2768,33 @@ ret:
 /*  mmap / munmap / mprotect / mremap / msync / mincore / madvise             */
 /* ========================================================================== */
 
+static int vm_normalize_user_range(uint64 *addr, size_t *size)
+{
+    uint64 start;
+    uint64 end;
+
+    if (addr == NULL || size == NULL || *size == 0)
+        return -EINVAL;
+    if (*size > (size_t)(~0ULL - *addr))
+        return -EINVAL;
+
+    start = PGROUNDDOWN(*addr);
+    end = PGROUNDUP(*addr + *size);
+    if (end <= start)
+        return -EINVAL;
+
+    *addr = start;
+    *size = (size_t)(end - start);
+    return 0;
+}
+
 int vm_mmap_region_locked(vm_t *vm, uint64 start, size_t size, uint64 flags,
                           struct vfs_file *file, uint64 pgoff, void *pa)
 {
     if (vm == NULL || vm->pagetable == NULL)
+        return -EINVAL;
+
+    if (size == 0 || size > (size_t)(~0ULL - start))
         return -EINVAL;
 
     uint64 va_end = PGROUNDUP(start + size);
@@ -2866,8 +2894,10 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
         goto out;
     }
 
-    addr = PGROUNDDOWN(addr);
-    size = PGROUNDUP(size);
+    if (vm_normalize_user_range(&addr, &size) != 0) {
+        ret = -EINVAL;
+        goto out;
+    }
 
     if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
         ret = -ENOMEM;
@@ -3002,8 +3032,8 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     if (vm == NULL || vm->pagetable == NULL)
         goto out;
 
-    old_addr = PGROUNDDOWN(old_addr);
-    old_size = PGROUNDUP(old_size);
+    if (vm_normalize_user_range(&old_addr, &old_size) != 0)
+        goto out;
     new_size = PGROUNDUP(new_size);
 
     if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE))
@@ -3175,8 +3205,10 @@ int vm_msync(vm_t *vm, uint64 addr, size_t size, int flags)
         goto out;
     }
 
-    addr = PGROUNDDOWN(addr);
-    size = PGROUNDUP(size);
+    if (vm_normalize_user_range(&addr, &size) != 0) {
+        ret = -EINVAL;
+        goto out;
+    }
 
     if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
         ret = -ENOMEM;
@@ -3302,8 +3334,10 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
         goto out;
     }
 
-    addr = PGROUNDDOWN(addr);
-    size = PGROUNDUP(size);
+    if (vm_normalize_user_range(&addr, &size) != 0) {
+        ret = -EINVAL;
+        goto out;
+    }
 
     if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
         ret = -ENOMEM;
@@ -3395,9 +3429,10 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
     size = PGROUNDUP(size);
 
     uint64 stack_bottom = vm->stack ? vm->stack->start : vm->vm_top - PGSIZE;
-    uint64 heap_end = vm->heap ? (vm->heap->start + vm->heap_size) : vm->vm_bottom;
-    uint64 reserve_end = vm->heap_reserve_end;
+    uint64 heap_end = vm->heap ? vm->heap->end : vm->vm_bottom;
+    uint64 reserve_end = PGROUNDUP(vm->heap_reserve_end);
     uint64 effective_bottom = (reserve_end > heap_end) ? reserve_end : heap_end;
+    effective_bottom = PGROUNDUP(effective_bottom);
 
     /* Reserve the entire potential stack growth region.  The stack can grow
      * down to USTACK_MAX_BOTTOM, so mmap allocations must stay below that
@@ -3604,7 +3639,7 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         return (uint64)-EBADF;
     }
 
-    length = PGROUNDUP(length);
+    size_t map_length = PGROUNDUP(length);
 
     uint64 vm_flags =
         VMA_FLAG_USER | (prot & (PROT_READ | PROT_WRITE | PROT_EXEC));
@@ -3617,7 +3652,7 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
 
     uint64 map_addr;
     if (addr == 0 || (flags & MAP_FIXED) == 0) {
-        map_addr = vm_find_free_range(vm, length, addr);
+        map_addr = vm_find_free_range(vm, map_length, addr);
         if (map_addr == 0) {
             vm_wunlock(vm);
             if (file != NULL)
@@ -3625,8 +3660,14 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
             return (uint64)-ENOMEM;
         }
     } else {
-        map_addr = PGROUNDDOWN(addr);
-        uint64 map_end = map_addr + length;
+        if (addr & (PGSIZE - 1)) {
+            vm_wunlock(vm);
+            if (file != NULL)
+                vfs_fput(file);
+            return (uint64)-EINVAL;
+        }
+        map_addr = addr;
+        uint64 map_end = map_addr + map_length;
         if (__vm_unmap_range_locked(vm, map_addr, map_end) != 0) {
             vm_wunlock(vm);
             if (file != NULL)
@@ -3635,7 +3676,7 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         }
     }
 
-    vma_t *vma = vma_alloc(vm, map_addr, length, vm_flags);
+    vma_t *vma = vma_alloc(vm, map_addr, map_length, vm_flags);
     if (vma == NULL) {
         vm_wunlock(vm);
         if (file != NULL)
@@ -3653,7 +3694,7 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     if (file != NULL && !(vm_flags & PROT_WRITE) &&
         (vm_flags & (PROT_READ | PROT_EXEC))) {
         uint64 eager_flags = VMA_FLAG_USER | (vm_flags & (PROT_READ | PROT_EXEC));
-        uint64 eager_len = length;
+        uint64 eager_len = map_length;
         uint64 eager_max = VM_MMAP_EAGER_PAGES * PGSIZE;
 
         if (eager_len > eager_max)
@@ -3671,8 +3712,8 @@ int vm_munmap(vm_t *vm, uint64 addr, size_t length)
     if (vm == NULL || length == 0)
         return -EINVAL;
 
-    addr = PGROUNDDOWN(addr);
-    length = PGROUNDUP(length);
+    if (vm_normalize_user_range(&addr, &length) != 0)
+        return -EINVAL;
 
     if (addr < vm->vm_bottom || (addr + length) > vm->vm_top)
         return -EINVAL;

@@ -51,7 +51,9 @@ struct __k_utsname {
     char machine[65];
 };
 
-static int trace_clean_browser_exit(void) {
+static int trace_browser_exit(int status) {
+    if (status == 0)
+        return 0;
     const char *name = current->name;
     return name != NULL &&
            (strstr(name, "MiniBrowser") != NULL ||
@@ -62,7 +64,7 @@ static int trace_clean_browser_exit(void) {
 uint64 sys_exit(void) {
     int n;
     argint(0, &n);
-    if (trace_clean_browser_exit()) {
+    if (trace_browser_exit(n)) {
         struct trapframe *tf = &current->trapframe->trapframe;
 #ifdef __x86_64__
         printf("exit: pid=%d name='%s' exit_code=%d rip=0x%lx rsp=0x%lx\n",
@@ -339,7 +341,7 @@ uint64 sys_gettid(void) { return current->pid; }
 uint64 sys_exit_group(void) {
     int n;
     argint(0, &n);
-    if (trace_clean_browser_exit()) {
+    if (trace_browser_exit(n)) {
         struct trapframe *tf = &current->trapframe->trapframe;
 #ifdef __x86_64__
         printf("exit_group: pid=%d name='%s' exit_code=%d rip=0x%lx rsp=0x%lx\n",
