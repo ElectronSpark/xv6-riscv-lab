@@ -228,13 +228,33 @@ int session_remove_pg(struct session *s, struct pgroup *pg) {
 void session_set_ctrl_tty(struct session *s, struct tty *tty) {
     if (s == NULL || s->exited)
         return;
+
+    if (tty != NULL)
+        tty_ref(tty);
+
+    struct tty *old_tty = s->ctrl_tty;
+    if (old_tty == tty) {
+        if (tty != NULL)
+            tty_unref(tty);
+        return;
+    }
+
     s->ctrl_tty = tty;
-    /* Also set the tty's back-pointer */
+    /* Also update the tty back-pointers. */
+    if (old_tty != NULL) {
+        spin_lock(&old_tty->lock);
+        if (old_tty->session == s)
+            old_tty->session = NULL;
+        spin_unlock(&old_tty->lock);
+    }
     if (tty) {
         spin_lock(&tty->lock);
         tty->session = s;
         spin_unlock(&tty->lock);
     }
+
+    if (old_tty != NULL)
+        tty_unref(old_tty);
 }
 
 struct tty *session_get_ctrl_tty(struct session *s) {
@@ -301,14 +321,23 @@ void session_hangup(struct session *s) {
             __hangup_signal_tg(t);
     }
 
+    struct tty *ctrl_tty = s->ctrl_tty;
+
     /* Hang up the controlling terminal.  For a PTY slave this severs
      * the pipe link so the master side gets EOF / POLLHUP. */
-    if (s->ctrl_tty != NULL)
-        tty_hangup(s->ctrl_tty);
+    if (ctrl_tty != NULL)
+        tty_hangup(ctrl_tty);
 
     /* Disassociate the controlling terminal */
     s->ctrl_tty = NULL;
     s->fg_pgrp = NULL;
+    if (ctrl_tty != NULL) {
+        spin_lock(&ctrl_tty->lock);
+        if (ctrl_tty->session == s)
+            ctrl_tty->session = NULL;
+        spin_unlock(&ctrl_tty->lock);
+        tty_unref(ctrl_tty);
+    }
 }
 
 /* ------------------------------------------------------------------ */
