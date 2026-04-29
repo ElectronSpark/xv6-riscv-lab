@@ -176,6 +176,8 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
             remaining -= chunk;
         }
     }
+    virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                               cmd.x, cmd.y, cw, ch);
     return 0;
 }
 
@@ -428,11 +430,15 @@ static int fb_write(cdev_t *cdev, bool user, const void *buf, size_t count)
             spin_unlock(&fb_state.lock);
             done += chunk;
         }
+        virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                                   0, 0, fb_state.xres, fb_state.yres);
         return done;
     } else {
         spin_lock(&fb_state.lock);
         memcpy((void *)fb_state.fb_virt, buf, count);
         spin_unlock(&fb_state.lock);
+        virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                                   0, 0, fb_state.xres, fb_state.yres);
         return count;
     }
 }
@@ -540,6 +546,8 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if (clipped)
             fb_state.stats.clipped_blits++;
         spin_unlock(&fb_state.lock);
+        virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                                   cmd.x, cmd.y, cmd.w, cmd.h);
         return 0;
     }
 
@@ -643,6 +651,8 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if (clipped)
             fb_state.stats.clipped_blits++;
         spin_unlock(&fb_state.lock);
+        virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                                   cmd.dst_x, cmd.dst_y, w, h);
         return 0;
     }
 
@@ -676,6 +686,8 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         for (uint32 i = 0; i < npx; i++)
             pixels[i] = 0x00000000;
         spin_unlock(&fb_state.lock);
+        virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                                   0, 0, fb_state.xres, fb_state.yres);
 
         printf("FB: resolution changed to %dx%d\n", fb_state.xres, fb_state.yres);
         return 0;

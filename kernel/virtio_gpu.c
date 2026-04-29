@@ -14,6 +14,7 @@
 #include "printf.h"
 #include "param.h"
 #include <mm/memlayout.h>
+#include "lock/mutex.h"
 #include "lock/spinlock.h"
 #include "dev/fb.h"
 #include "dev/virtio.h"
@@ -167,6 +168,7 @@ struct virtio_gpu {
     volatile struct virtio_gpu_config *config;
     struct virtio_gpu_queue ctrlq;
     spinlock_t lock;
+    mutex_t op_lock;
     uint32 next_resource_id;
     struct virtio_gpu_resource resources[VIRTIO_GPU_MAX_RESOURCES];
     struct virtio_gpu_resource *scanout_resource;
@@ -783,6 +785,7 @@ void virtio_gpu_init(void)
     struct virtio_gpu *g = &gpu;
     memset(g, 0, sizeof(*g));
     spin_init(&g->lock, "virtio_gpu");
+    mutex_init(&g->op_lock, "virtio_gpuop");
     g->next_resource_id = 1;
     g->pci.use_pci = 1;
     g->pci.common_cfg = (volatile struct virtio_pci_common_cfg *)cfg_va;
@@ -859,6 +862,49 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
     stats->virtio_transfers = vg_stats.transfers;
     stats->virtio_flushes = vg_stats.flushes;
     stats->virtio_scanouts = vg_stats.scanouts;
+}
+
+void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
+                                uint32 x, uint32 y, uint32 w, uint32 h)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *res;
+
+    if (!g->initialized || fb == NULL || w == 0 || h == 0)
+        return;
+
+    mutex_lock(&g->op_lock);
+    res = g->scanout_resource;
+    if (res == NULL || !res->attached || res->backing == NULL)
+        goto out;
+    if (x >= res->width || y >= res->height)
+        goto out;
+    if ((uint64)x + w > res->width)
+        w = res->width - x;
+    if ((uint64)y + h > res->height)
+        h = res->height - y;
+    if (w == 0 || h == 0)
+        goto out;
+
+    uint8 *dst_base = (uint8 *)res->backing;
+    volatile uint8 *src_base = (volatile uint8 *)fb;
+    for (uint32 row = 0; row < h; row++) {
+        volatile uint32 *src =
+            (volatile uint32 *)(src_base + (uint64)(y + row) * src_pitch +
+                                (uint64)x * sizeof(uint32));
+        uint32 *dst =
+            (uint32 *)(dst_base + (uint64)(y + row) * res->width *
+                       sizeof(uint32) + (uint64)x * sizeof(uint32));
+        for (uint32 col = 0; col < w; col++)
+            dst[col] = src[col];
+    }
+
+    if (virtio_gpu_resource_transfer_2d(g, res, x, y, w, h) != 0)
+        goto out;
+    virtio_gpu_resource_flush(g, res, x, y, w, h);
+
+out:
+    mutex_unlock(&g->op_lock);
 }
 
 #else

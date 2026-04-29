@@ -203,6 +203,8 @@ void plic_enable_irq(int);
 void virtio_disk_init(void);
 void virtio_gpu_init(void);
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);
+void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
+                                uint32 x, uint32 y, uint32 w, uint32 h);
 
 // ramdisk.c
 void ramdisk_init(void);
