@@ -62,6 +62,7 @@ static uint8 pci_find_virtio_cap(uint8 bus, uint8 dev, uint8 func,
 
 static struct virtio_pci_discovery virtio_pci_devs[N_VIRTIO_DISK];
 static int virtio_pci_count = 0;
+static int virtio_gpu_pci_count = 0;
 
 struct virtio_pci_discovery *pci_get_virtio_blk(int index)
 {
@@ -180,6 +181,30 @@ static void pci_init_virtio_blk(uint8 bus, uint8 dev, uint8 func)
     platform.virtio_count = virtio_pci_count;
 }
 
+static void pci_note_virtio_gpu(uint8 bus, uint8 dev, uint8 func)
+{
+    uint32 bar[6];
+    uint8 irq = piix3_compute_irq(dev, pci_config_read8(bus, dev, func, 0x3D));
+    uint8 common = pci_find_virtio_cap(bus, dev, func,
+                                       VIRTIO_PCI_CAP_COMMON_CFG);
+    uint8 notify = pci_find_virtio_cap(bus, dev, func,
+                                       VIRTIO_PCI_CAP_NOTIFY_CFG);
+    uint8 isr = pci_find_virtio_cap(bus, dev, func,
+                                    VIRTIO_PCI_CAP_ISR_CFG);
+    uint8 device_cfg = pci_find_virtio_cap(bus, dev, func,
+                                           VIRTIO_PCI_CAP_DEVICE_CFG);
+
+    for (int i = 0; i < 6; i++)
+        bar[i] = pci_read_bar(bus, dev, func, i);
+
+    virtio_gpu_pci_count++;
+    printf("PCI: virtio-gpu detected at %d:%d:%d (driver pending)\n",
+           bus, dev, func);
+    printf("PCI: virtio-gpu BAR0=0x%lx BAR1=0x%lx BAR2=0x%lx BAR4=0x%lx IRQ=%d caps: common=%d notify=%d isr=%d dev=%d\n",
+           (uint64)bar[0], (uint64)bar[1], (uint64)bar[2], (uint64)bar[4],
+           irq, common, notify, isr, device_cfg);
+}
+
 void pci_init(void)
 {
     piix3_init_irq_routing();
@@ -203,14 +228,18 @@ void pci_init(void)
                    (device == PCI_DEVICE_VIRTIO_BLK_TRANSITIONAL ||
                     device == PCI_DEVICE_VIRTIO_BLK_MODERN)) {
             pci_init_virtio_blk(0, dev, 0);
+        } else if (vendor == PCI_VENDOR_VIRTIO &&
+                   (device == PCI_DEVICE_VIRTIO_GPU_TRANSITIONAL ||
+                    device == PCI_DEVICE_VIRTIO_GPU_MODERN)) {
+            pci_note_virtio_gpu(0, dev, 0);
         } else if (vendor == PCI_VENDOR_BOCHS &&
                    device == PCI_DEVICE_BOCHS_VGA) {
             fb_pci_init(0, dev, 0);
         }
     }
 
-    printf("PCI: scan complete, %d virtio-blk device(s) found\n",
-           virtio_pci_count);
+    printf("PCI: scan complete, %d virtio-blk device(s), %d virtio-gpu device(s) found\n",
+           virtio_pci_count, virtio_gpu_pci_count);
 }
 
 #else /* RISC-V / ECAM path */

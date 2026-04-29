@@ -20,6 +20,8 @@
 #define FB_GPU_BLIT          0x4611   /* copy user buffer to screen rect */
 #define FB_GPU_COPY_RECT     0x4612   /* screen-to-screen rectangle copy */
 #define FB_GPU_GET_STATS     0x4613   /* query present/copy counters */
+#define FB_GPU_BO_CREATE     0x4614   /* allocate/map a graphics buffer */
+#define FB_GPU_BO_PRESENT    0x4615   /* present a mapped graphics buffer */
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -56,6 +58,32 @@ struct fb_gpu_blit {
     uint64   pixels;        /* pointer to user pixel data (uint32[]) */
 };
 
+/* Allocate a graphics buffer and map it into the calling process.
+ *
+ * Userspace fills in width/height, then the kernel returns addr, pitch, and
+ * size.  Release is normal munmap(addr, size).  This first-stage ABI is
+ * intentionally process-local; later virtio-gpu/Mesa work can add exportable
+ * handles/fences without changing the basic create/fill/present shape.
+ */
+struct fb_gpu_bo_create {
+    uint32   width;          /* requested width in pixels */
+    uint32   height;         /* requested height in pixels */
+    uint32   flags;          /* reserved, must be 0 */
+    uint32   pitch;          /* returned pitch in bytes */
+    uint64   size;           /* returned mapping size in bytes */
+    uint64   addr;           /* returned user virtual address */
+};
+
+/* Present a mapped graphics buffer to the framebuffer. */
+struct fb_gpu_bo_present {
+    uint32   x;              /* destination x */
+    uint32   y;              /* destination y */
+    uint32   w;              /* width in pixels */
+    uint32   h;              /* height in pixels */
+    uint32   src_pitch;      /* source pitch in bytes */
+    uint64   pixels;         /* mapped buffer address */
+};
+
 /* GPU copy command: screen-to-screen rectangle copy */
 struct fb_gpu_copy {
     uint32 src_x;           /* source x */
@@ -75,6 +103,9 @@ struct fb_gpu_stats {
     uint64 fill_rects;         /* accepted fill-rect operations */
     uint64 copy_rects;         /* accepted screen-to-screen copies */
     uint64 blit_bytes;         /* user pixel bytes copied into the LFB */
+    uint64 bo_allocs;          /* graphics buffer create requests */
+    uint64 bo_bytes;           /* total graphics buffer bytes mapped */
+    uint64 bo_presents;        /* graphics buffer present requests */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */
