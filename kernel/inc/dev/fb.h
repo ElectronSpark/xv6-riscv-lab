@@ -22,6 +22,10 @@
 #define FB_GPU_GET_STATS     0x4613   /* query present/copy counters */
 #define FB_GPU_BO_CREATE     0x4614   /* allocate/map a graphics buffer */
 #define FB_GPU_BO_PRESENT    0x4615   /* present a mapped graphics buffer */
+#define FB_GPU_BO_DESTROY    0x4616   /* destroy a graphics buffer handle */
+#define FB_GPU_BO_IMPORT     0x4617   /* query/import a graphics buffer handle */
+
+#define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -68,10 +72,12 @@ struct fb_gpu_blit {
 struct fb_gpu_bo_create {
     uint32   width;          /* requested width in pixels */
     uint32   height;         /* requested height in pixels */
-    uint32   flags;          /* reserved, must be 0 */
+    uint32   flags;          /* FB_GPU_BO_F_* */
     uint32   pitch;          /* returned pitch in bytes */
     uint64   size;           /* returned mapping size in bytes */
     uint64   addr;           /* returned user virtual address */
+    uint32   handle;         /* returned export/import handle */
+    uint32   reserved;
 };
 
 /* Present a mapped graphics buffer to the framebuffer. */
@@ -82,6 +88,24 @@ struct fb_gpu_bo_present {
     uint32   h;              /* height in pixels */
     uint32   src_pitch;      /* source pitch in bytes */
     uint64   pixels;         /* mapped buffer address */
+    uint32   handle;         /* optional BO handle; overrides pixels/pitch */
+    uint32   flags;          /* reserved, must be 0 */
+};
+
+struct fb_gpu_bo_destroy {
+    uint32   handle;
+    uint32   flags;          /* reserved, must be 0 */
+};
+
+struct fb_gpu_bo_import {
+    uint32   handle;         /* existing exported handle */
+    uint32   flags;          /* reserved, must be 0 */
+    uint32   width;          /* returned width in pixels */
+    uint32   height;         /* returned height in pixels */
+    uint32   pitch;          /* returned pitch in bytes */
+    uint32   reserved;
+    uint64   size;           /* returned mapping size */
+    uint64   addr;           /* creator-local mapping if visible */
 };
 
 /* GPU copy command: screen-to-screen rectangle copy */
@@ -106,6 +130,8 @@ struct fb_gpu_stats {
     uint64 bo_allocs;          /* graphics buffer create requests */
     uint64 bo_bytes;           /* total graphics buffer bytes mapped */
     uint64 bo_presents;        /* graphics buffer present requests */
+    uint64 bo_handles;         /* currently tracked graphics buffer handles */
+    uint64 bo_imports;         /* graphics buffer handle import/query requests */
     uint64 virtio_commands;    /* virtio-gpu control commands completed */
     uint64 virtio_failures;    /* virtio-gpu commands rejected or failed */
     uint64 virtio_timeouts;    /* virtio-gpu commands timed out */
