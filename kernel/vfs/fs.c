@@ -2055,6 +2055,7 @@ __vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) {
  */
 struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
     struct vfs_inode *inode = NULL;
+    bool locked_here = false;
     if (dentry == NULL) {
         return ERR_PTR(-EINVAL);
     }
@@ -2074,7 +2075,25 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
         return inode;
     }
 
-    return __vfs_get_dentry_inode_impl(dentry);
+    /*
+     * Most callers enter with the superblock write lock already held.  Keep
+     * this helper robust for legacy/misnamed call sites too: if there is no
+     * writer, acquire one before taking the inode load path that may populate
+     * the inode cache.
+     */
+    if (!vfs_superblock_wholding(dentry->sb)) {
+        vfs_superblock_wlock(dentry->sb);
+        locked_here = true;
+        if (!dentry->sb->valid) {
+            vfs_superblock_unlock(dentry->sb);
+            return ERR_PTR(-EINVAL);
+        }
+    }
+
+    inode = __vfs_get_dentry_inode_impl(dentry);
+    if (locked_here)
+        vfs_superblock_unlock(dentry->sb);
+    return inode;
 }
 
 /*
