@@ -703,6 +703,16 @@ int fb_detected(void)
     return fb_state.detected;
 }
 
+void fb_get_resolution(uint32 *xres, uint32 *yres)
+{
+    spin_lock(&fb_state.lock);
+    if (xres)
+        *xres = fb_state.xres;
+    if (yres)
+        *yres = fb_state.yres;
+    spin_unlock(&fb_state.lock);
+}
+
 /* ── GPU acceleration primitives ──────────────────────────────────── */
 
 /*
@@ -1122,6 +1132,84 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         return 0;
     }
 
+    case FB_GPU_VIRGL_CTX_CREATE: {
+        struct fb_gpu_virgl_ctx req;
+        int ret;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0)
+            return -EINVAL;
+        req.debug_name[sizeof(req.debug_name) - 1] = 0;
+
+        ret = virtio_gpu_user_context_create(req.debug_name, &req.ctx_id);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            (void)virtio_gpu_user_context_destroy(req.ctx_id);
+            return -EFAULT;
+        }
+        return 0;
+    }
+
+    case FB_GPU_VIRGL_CTX_DESTROY: {
+        struct fb_gpu_virgl_ctx req;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.ctx_id == 0)
+            return -EINVAL;
+        return virtio_gpu_user_context_destroy(req.ctx_id);
+    }
+
+    case FB_GPU_VIRGL_SUBMIT: {
+        struct fb_gpu_virgl_submit req;
+        uint32 *cmds;
+        int ret;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.ctx_id == 0 || req.cmd == 0 ||
+            req.cmd_size == 0 || req.cmd_size > PGSIZE ||
+            (req.cmd_size & (sizeof(uint32) - 1)) != 0)
+            return -EINVAL;
+
+        cmds = kalloc();
+        if (cmds == NULL)
+            return -ENOMEM;
+        if (either_copyin((char *)cmds, 1, req.cmd, req.cmd_size) < 0) {
+            kfree(cmds);
+            return -EFAULT;
+        }
+
+        ret = virtio_gpu_user_submit(req.ctx_id, cmds,
+                                     req.cmd_size / sizeof(uint32),
+                                     &req.fence, &req.signaled);
+        kfree(cmds);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    case FB_GPU_VIRGL_FENCE: {
+        struct fb_gpu_virgl_fence req;
+        int ret;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if ((req.flags & ~FB_GPU_VIRGL_FENCE_WAIT) != 0)
+            return -EINVAL;
+
+        ret = virtio_gpu_user_fence(req.wait_for,
+                                    (req.flags & FB_GPU_VIRGL_FENCE_WAIT) != 0,
+                                    &req.signaled);
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return ret;
+    }
+
     case FB_GPU_COPY_RECT: {
         struct fb_gpu_copy cmd;
         int clipped = 0;
@@ -1443,6 +1531,14 @@ void fb_pci_init(uint8 bus, uint8 dev, uint8 func)
 }
 
 int fb_detected(void) { return 0; }
+
+void fb_get_resolution(uint32 *xres, uint32 *yres)
+{
+    if (xres)
+        *xres = 0;
+    if (yres)
+        *yres = 0;
+}
 
 void fbdevinit(void) {}
 

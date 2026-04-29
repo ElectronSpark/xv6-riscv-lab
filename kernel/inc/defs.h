@@ -205,6 +205,12 @@ void virtio_gpu_init(void);
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);
 void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
                                 uint32 x, uint32 y, uint32 w, uint32 h);
+int virtio_gpu_user_context_create(const char *name, uint32 *ctx_id);
+int virtio_gpu_user_context_destroy(uint32 ctx_id);
+int virtio_gpu_user_submit(uint32 ctx_id, const uint32 *cmds,
+                           uint32 nr_dwords, uint64 *fence,
+                           uint64 *signaled);
+int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled);
 
 // ramdisk.c
 void ramdisk_init(void);

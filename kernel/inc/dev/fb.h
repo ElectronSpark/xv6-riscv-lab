@@ -25,9 +25,14 @@
 #define FB_GPU_BO_DESTROY    0x4616   /* destroy a graphics buffer handle */
 #define FB_GPU_BO_IMPORT     0x4617   /* query/import a graphics buffer handle */
 #define FB_GPU_BO_FENCE      0x4618   /* query/wait BO present fences */
+#define FB_GPU_VIRGL_CTX_CREATE  0x4619 /* create a virtio-gpu 3D context */
+#define FB_GPU_VIRGL_CTX_DESTROY 0x461A /* destroy a virtio-gpu 3D context */
+#define FB_GPU_VIRGL_SUBMIT      0x461B /* submit virgl command dwords */
+#define FB_GPU_VIRGL_FENCE       0x461C /* query/wait virtio-gpu fences */
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
+#define FB_GPU_VIRGL_FENCE_WAIT 0x1   /* wait_for must be signaled */
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -123,6 +128,29 @@ struct fb_gpu_bo_fence {
     uint64   last_present;   /* returned latest issued present fence */
 };
 
+struct fb_gpu_virgl_ctx {
+    uint32   ctx_id;          /* returned/input context id */
+    uint32   flags;           /* reserved, must be 0 */
+    char     debug_name[64];  /* optional create-time debug name */
+};
+
+struct fb_gpu_virgl_submit {
+    uint32   ctx_id;          /* context returned by CTX_CREATE */
+    uint32   flags;           /* reserved, must be 0 */
+    uint32   cmd_size;        /* command bytes at cmd, max one page */
+    uint32   reserved;
+    uint64   cmd;             /* user pointer to uint32 command dwords */
+    uint64   fence;           /* returned submitted fence id */
+    uint64   signaled;        /* returned latest completed fence id */
+};
+
+struct fb_gpu_virgl_fence {
+    uint32   flags;           /* FB_GPU_VIRGL_FENCE_* */
+    uint32   reserved;
+    uint64   wait_for;        /* 0 queries latest completed fence */
+    uint64   signaled;        /* returned latest completed fence id */
+};
+
 /* GPU copy command: screen-to-screen rectangle copy */
 struct fb_gpu_copy {
     uint32 src_x;           /* source x */
@@ -157,6 +185,14 @@ struct fb_gpu_stats {
     uint64 virtio_transfers;   /* transfer-to-host commands completed */
     uint64 virtio_flushes;     /* resource-flush commands completed */
     uint64 virtio_scanouts;    /* set-scanout commands completed */
+    uint64 virtio_capsets;     /* advertised virtio-gpu capsets */
+    uint64 virtio_virgl;       /* nonzero when a virgl capset is present */
+    uint64 virtio_virgl_version; /* max version for the selected virgl capset */
+    uint64 virtio_virgl_size;  /* max capset payload size */
+    uint64 virtio_contexts;    /* completed 3D context create/destroy commands */
+    uint64 virtio_submits;     /* completed 3D command submissions */
+    uint64 virtio_fences;      /* completed virtio-gpu fence submissions */
+    uint64 virtio_last_fence;  /* last completed virtio-gpu fence id */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */
@@ -195,6 +231,7 @@ struct fb_gpu_stats {
 void fbdevinit(void);
 int  fb_detected(void);
 void fb_pci_init(uint8 bus, uint8 dev, uint8 func);
+void fb_get_resolution(uint32 *xres, uint32 *yres);
 void fb_panic_screen(const char *text);
 
 #endif /* __KERNEL_DEV_FB_H */
