@@ -300,7 +300,20 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
             src = (uint8 *)PA2VA(pa) + page_off;
 
             spin_lock(&fb_state.lock);
-            memcpy((void *)(dst + copied), src, chunk);
+            if ((((uint64)(uintptr_t)(dst + copied) | (uint64)(uintptr_t)src |
+                  chunk) & 3) == 0) {
+                volatile uint32 *d32 = (volatile uint32 *)(dst + copied);
+                uint32 *s32 = (uint32 *)src;
+                uint32 words = chunk / sizeof(uint32);
+
+                for (uint32 i = 0; i < words; i++)
+                    d32[i] = s32[i];
+            } else {
+                volatile uint8 *d8 = dst + copied;
+
+                for (uint32 i = 0; i < chunk; i++)
+                    d8[i] = src[i];
+            }
             spin_unlock(&fb_state.lock);
 
             src_off += chunk;
@@ -1165,27 +1178,36 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     case FB_GPU_VIRGL_SUBMIT: {
         struct fb_gpu_virgl_submit req;
         uint32 *cmds;
+        uint32 alloc_len = PGSIZE;
+        int order = 0;
         int ret;
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
         if (req.flags != 0 || req.ctx_id == 0 || req.cmd == 0 ||
-            req.cmd_size == 0 || req.cmd_size > PGSIZE ||
+            req.cmd_size == 0 || req.cmd_size > PGSIZE * 64 ||
             (req.cmd_size & (sizeof(uint32) - 1)) != 0)
             return -EINVAL;
 
-        cmds = kalloc();
+        while (alloc_len < req.cmd_size) {
+            if (order >= PAGE_BUDDY_MAX_ORDER)
+                return -ENOMEM;
+            order++;
+            alloc_len <<= 1;
+        }
+
+        cmds = page_alloc(order, PAGE_TYPE_ANON);
         if (cmds == NULL)
             return -ENOMEM;
         if (either_copyin((char *)cmds, 1, req.cmd, req.cmd_size) < 0) {
-            kfree(cmds);
+            page_free(cmds, order);
             return -EFAULT;
         }
 
         ret = virtio_gpu_user_submit(req.ctx_id, cmds,
                                      req.cmd_size / sizeof(uint32),
                                      &req.fence, &req.signaled);
-        kfree(cmds);
+        page_free(cmds, order);
         if (ret != 0)
             return ret;
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)

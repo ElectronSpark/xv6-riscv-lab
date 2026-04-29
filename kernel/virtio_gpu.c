@@ -756,7 +756,7 @@ static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
         return -EINVAL;
     if (bytes == 0)
         bytes = (uint64)req->width * req->height * sizeof(uint32);
-    if (bytes == 0 || bytes > (uint64)PGSIZE * 256)
+    if (bytes == 0 || bytes > 64ULL * 1024 * 1024)
         return -EINVAL;
     npages = (uint32)PGROUNDUP(bytes) / PGSIZE;
 
@@ -851,16 +851,31 @@ static int virtio_gpu_resource_attach_pages(struct virtio_gpu *g,
 {
     struct virtio_gpu_resource_attach_backing *attach =
         (struct virtio_gpu_resource_attach_backing *)g->cmd_page;
-    struct virtio_gpu_mem_entry *entry =
-        (struct virtio_gpu_mem_entry *)g->data_page;
+    struct virtio_gpu_mem_entry *entry;
     struct virtio_gpu_ctrl_hdr *resp =
         (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+    uint32 entries_len;
+    uint32 alloc_len = PGSIZE;
+    int order = 0;
+    int ret;
 
     if (res->pages == NULL || res->npages == 0 ||
-        res->npages * sizeof(*entry) > PGSIZE)
+        res->npages > UINT32_MAX / sizeof(*entry))
         return -1;
 
-    memset(entry, 0, res->npages * sizeof(*entry));
+    entries_len = res->npages * sizeof(*entry);
+    while (alloc_len < entries_len) {
+        if (order >= PAGE_BUDDY_MAX_ORDER)
+            return -1;
+        order++;
+        alloc_len <<= 1;
+    }
+
+    entry = page_alloc(order, PAGE_TYPE_ANON);
+    if (entry == NULL)
+        return -1;
+
+    memset(entry, 0, entries_len);
     for (uint32 i = 0; i < res->npages; i++) {
         entry[i].addr = __page_to_pa(res->pages[i]);
         entry[i].length = PGSIZE;
@@ -870,9 +885,11 @@ static int virtio_gpu_resource_attach_pages(struct virtio_gpu *g,
     attach->hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
     attach->resource_id = res->id;
     attach->nr_entries = res->npages;
-    if (virtio_gpu_submit(g, attach, sizeof(*attach), entry,
-                          res->npages * sizeof(*entry), false, resp,
-                          sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA) != 0)
+    ret = virtio_gpu_submit(g, attach, sizeof(*attach), entry, entries_len,
+                            false, resp, sizeof(*resp),
+                            VIRTIO_GPU_RESP_OK_NODATA);
+    page_free(entry, order);
+    if (ret != 0)
         return -1;
 
     spin_lock(&g->lock);
@@ -921,6 +938,8 @@ static int virtio_gpu_resource_transfer_2d(struct virtio_gpu *g,
     transfer->r.y = y;
     transfer->r.width = width;
     transfer->r.height = height;
+    transfer->offset = (uint64)y * res->width * sizeof(uint32) +
+                       (uint64)x * sizeof(uint32);
     transfer->resource_id = res->id;
     return virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0, false,
                              resp, sizeof(*resp),
@@ -1165,12 +1184,11 @@ static int virtio_gpu_submit_3d(struct virtio_gpu *g, uint32 ctx_id,
         (struct virtio_gpu_ctrl_hdr *)g->resp_page;
     uint32 bytes = nr_dwords * sizeof(uint32);
 
-    if (nr_dwords == 0 || bytes > PGSIZE) {
+    if (nr_dwords == 0 || bytes > PGSIZE * 64) {
         virtio_gpu_count_failure(g);
         return -1;
     }
 
-    memcpy(g->data_page, cmds, bytes);
     memset(cmd, 0, sizeof(*cmd));
     cmd->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
     cmd->hdr.ctx_id = ctx_id;
@@ -1180,7 +1198,7 @@ static int virtio_gpu_submit_3d(struct virtio_gpu *g, uint32 ctx_id,
     }
     cmd->size = bytes;
 
-    if (virtio_gpu_submit(g, cmd, sizeof(*cmd), g->data_page, bytes, false,
+    if (virtio_gpu_submit(g, cmd, sizeof(*cmd), (void *)cmds, bytes, false,
                           resp, sizeof(*resp),
                           VIRTIO_GPU_RESP_OK_NODATA) != 0)
         return -1;
@@ -1323,7 +1341,7 @@ int virtio_gpu_user_submit(uint32 ctx_id, const uint32 *cmds,
     int ret;
 
     if (ctx_id == 0 || cmds == NULL || nr_dwords == 0 ||
-        nr_dwords > PGSIZE / sizeof(uint32))
+        nr_dwords > (PGSIZE * 64) / sizeof(uint32))
         return -EINVAL;
     if (!g->initialized || !g->virgl_capset_id ||
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))

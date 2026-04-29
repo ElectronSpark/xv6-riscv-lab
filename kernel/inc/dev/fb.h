@@ -142,7 +142,7 @@ struct fb_gpu_virgl_ctx {
 struct fb_gpu_virgl_submit {
     uint32   ctx_id;          /* context returned by CTX_CREATE */
     uint32   flags;           /* reserved, must be 0 */
-    uint32   cmd_size;        /* command bytes at cmd, max one page */
+    uint32   cmd_size;        /* command bytes at cmd, max 256 KiB */
     uint32   reserved;
     uint64   cmd;             /* user pointer to uint32 command dwords */
     uint64   fence;           /* returned submitted fence id */
