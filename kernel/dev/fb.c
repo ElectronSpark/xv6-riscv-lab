@@ -651,6 +651,7 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         spin_lock(&fb_state.lock);
         stats = fb_state.stats;
         spin_unlock(&fb_state.lock);
+        virtio_gpu_get_fb_stats(&stats);
         if (either_copyout(1, (uint64)arg, (char *)&stats, sizeof(stats)) < 0)
             return -EFAULT;
         return 0;

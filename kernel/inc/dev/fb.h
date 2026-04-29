@@ -106,6 +106,13 @@ struct fb_gpu_stats {
     uint64 bo_allocs;          /* graphics buffer create requests */
     uint64 bo_bytes;           /* total graphics buffer bytes mapped */
     uint64 bo_presents;        /* graphics buffer present requests */
+    uint64 virtio_commands;    /* virtio-gpu control commands completed */
+    uint64 virtio_failures;    /* virtio-gpu commands rejected or failed */
+    uint64 virtio_timeouts;    /* virtio-gpu commands timed out */
+    uint64 virtio_resources;   /* currently tracked virtio-gpu resources */
+    uint64 virtio_resource_bytes; /* bytes backing tracked resources */
+    uint64 virtio_transfers;   /* transfer-to-host commands completed */
+    uint64 virtio_flushes;     /* resource-flush commands completed */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

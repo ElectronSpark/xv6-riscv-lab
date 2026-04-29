@@ -23,6 +23,7 @@ struct stat;
 struct superblock;
 struct mbuf;
 struct sock;
+struct fb_gpu_stats;
 
 // start_kernel.c
 void start_kernel(int hartid, void *fdt_base, bool is_boot_hart);
@@ -201,6 +202,7 @@ void plic_enable_irq(int);
 // virtio_disk.c
 void virtio_disk_init(void);
 void virtio_gpu_init(void);
+void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);
 
 // ramdisk.c
 void ramdisk_init(void);

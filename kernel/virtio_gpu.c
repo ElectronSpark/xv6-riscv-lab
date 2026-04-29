@@ -15,6 +15,7 @@
 #include "param.h"
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
+#include "dev/fb.h"
 #include "dev/virtio.h"
 #include "dev/pci.h"
 #include <mm/pgtable.h>
@@ -36,9 +37,9 @@
 #define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x1101
 
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
-#define VIRTIO_GPU_SMOKE_RESOURCE_ID 1
 #define VIRTIO_GPU_SMOKE_WIDTH 32
 #define VIRTIO_GPU_SMOKE_HEIGHT 32
+#define VIRTIO_GPU_MAX_RESOURCES 16
 
 extern pagetable_t kernel_pagetable;
 
@@ -127,15 +128,39 @@ struct virtio_gpu_queue {
     spinlock_t lock;
 };
 
+struct virtio_gpu_stats {
+    uint64 commands;
+    uint64 failures;
+    uint64 timeouts;
+    uint64 resources;
+    uint64 resource_bytes;
+    uint64 transfers;
+    uint64 flushes;
+};
+
+struct virtio_gpu_resource {
+    int in_use;
+    uint32 id;
+    uint32 width;
+    uint32 height;
+    uint32 format;
+    uint32 backing_len;
+    void *backing;
+    int attached;
+};
+
 struct virtio_gpu {
     int initialized;
     struct virtio_pci_state pci;
     volatile struct virtio_gpu_config *config;
     struct virtio_gpu_queue ctrlq;
+    spinlock_t lock;
+    uint32 next_resource_id;
+    struct virtio_gpu_resource resources[VIRTIO_GPU_MAX_RESOURCES];
+    struct virtio_gpu_stats stats;
     void *cmd_page;
     void *resp_page;
     void *data_page;
-    void *resource_page;
 };
 
 static struct virtio_gpu gpu;
@@ -194,11 +219,37 @@ static void virtio_gpu_notify(struct virtio_gpu *g, uint16 queue)
     *notify_addr = queue;
 }
 
+static void virtio_gpu_count_failure(struct virtio_gpu *g)
+{
+    spin_lock(&g->lock);
+    g->stats.failures++;
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_count_timeout(struct virtio_gpu *g)
+{
+    spin_lock(&g->lock);
+    g->stats.timeouts++;
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_count_command(struct virtio_gpu *g, uint32 type)
+{
+    spin_lock(&g->lock);
+    g->stats.commands++;
+    if (type == VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D)
+        g->stats.transfers++;
+    else if (type == VIRTIO_GPU_CMD_RESOURCE_FLUSH)
+        g->stats.flushes++;
+    spin_unlock(&g->lock);
+}
+
 static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
                              void *data, uint32 data_len, bool data_write,
                              void *resp, uint32 resp_len, uint32 expected)
 {
     struct virtio_gpu_queue *q = &g->ctrlq;
+    uint32 type = ((struct virtio_gpu_ctrl_hdr *)cmd)->type;
     struct virtio_gpu_ctrl_hdr *resp_hdr = resp;
 
     int intena = spin_lock_irqsave(&q->lock);
@@ -240,8 +291,9 @@ static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
 
     if (q->used->idx == q->used_idx) {
         spin_unlock_irqrestore(&q->lock, intena);
-        printf("virtio_gpu: command 0x%x timed out\n",
-               ((struct virtio_gpu_ctrl_hdr *)cmd)->type);
+        virtio_gpu_count_timeout(g);
+        virtio_gpu_count_failure(g);
+        printf("virtio_gpu: command 0x%x timed out\n", type);
         return -1;
     }
 
@@ -249,12 +301,187 @@ static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
     spin_unlock_irqrestore(&q->lock, intena);
 
     if (resp_hdr->type != expected) {
+        virtio_gpu_count_failure(g);
         printf("virtio_gpu: command 0x%x response=0x%x expected=0x%x\n",
-               ((struct virtio_gpu_ctrl_hdr *)cmd)->type, resp_hdr->type,
-               expected);
+               type, resp_hdr->type, expected);
         return -1;
     }
 
+    virtio_gpu_count_command(g, type);
+    return 0;
+}
+
+static struct virtio_gpu_resource *virtio_gpu_alloc_resource_slot(
+    struct virtio_gpu *g)
+{
+    for (int i = 0; i < VIRTIO_GPU_MAX_RESOURCES; i++) {
+        if (!g->resources[i].in_use)
+            return &g->resources[i];
+    }
+    return NULL;
+}
+
+static int virtio_gpu_resource_create_2d(struct virtio_gpu *g, uint32 width,
+                                         uint32 height, uint32 format,
+                                         struct virtio_gpu_resource **out)
+{
+    struct virtio_gpu_resource_create_2d *create =
+        (struct virtio_gpu_resource_create_2d *)g->cmd_page;
+    struct virtio_gpu_ctrl_hdr *resp =
+        (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+    uint64 bytes = (uint64)width * height * sizeof(uint32);
+
+    if (width == 0 || height == 0 || bytes == 0 || bytes > PGSIZE) {
+        virtio_gpu_count_failure(g);
+        return -1;
+    }
+
+    spin_lock(&g->lock);
+    struct virtio_gpu_resource *res = virtio_gpu_alloc_resource_slot(g);
+    if (res == NULL) {
+        g->stats.failures++;
+        spin_unlock(&g->lock);
+        return -1;
+    }
+    uint32 id = g->next_resource_id++;
+    if (g->next_resource_id == 0)
+        g->next_resource_id = 1;
+    spin_unlock(&g->lock);
+
+    void *backing = kalloc();
+    if (backing == NULL) {
+        virtio_gpu_count_failure(g);
+        return -1;
+    }
+    memset(backing, 0, PGSIZE);
+
+    memset(create, 0, sizeof(*create));
+    create->hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
+    create->resource_id = id;
+    create->format = format;
+    create->width = width;
+    create->height = height;
+    if (virtio_gpu_submit(g, create, sizeof(*create), NULL, 0, false, resp,
+                          sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA) != 0) {
+        kfree(backing);
+        return -1;
+    }
+
+    spin_lock(&g->lock);
+    memset(res, 0, sizeof(*res));
+    res->in_use = 1;
+    res->id = id;
+    res->width = width;
+    res->height = height;
+    res->format = format;
+    res->backing = backing;
+    res->backing_len = (uint32)bytes;
+    g->stats.resources++;
+    g->stats.resource_bytes += bytes;
+    spin_unlock(&g->lock);
+
+    *out = res;
+    return 0;
+}
+
+static int virtio_gpu_resource_attach_backing(struct virtio_gpu *g,
+                                              struct virtio_gpu_resource *res)
+{
+    struct virtio_gpu_resource_attach_backing *attach =
+        (struct virtio_gpu_resource_attach_backing *)g->cmd_page;
+    struct virtio_gpu_mem_entry *entry =
+        (struct virtio_gpu_mem_entry *)g->data_page;
+    struct virtio_gpu_ctrl_hdr *resp =
+        (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+
+    memset(entry, 0, sizeof(*entry));
+    entry->addr = (uint64)res->backing;
+    entry->length = res->backing_len;
+
+    memset(attach, 0, sizeof(*attach));
+    attach->hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
+    attach->resource_id = res->id;
+    attach->nr_entries = 1;
+    if (virtio_gpu_submit(g, attach, sizeof(*attach), entry, sizeof(*entry),
+                          false, resp, sizeof(*resp),
+                          VIRTIO_GPU_RESP_OK_NODATA) != 0)
+        return -1;
+
+    spin_lock(&g->lock);
+    res->attached = 1;
+    spin_unlock(&g->lock);
+    return 0;
+}
+
+static int virtio_gpu_resource_transfer_2d(struct virtio_gpu *g,
+                                           struct virtio_gpu_resource *res,
+                                           uint32 x, uint32 y, uint32 width,
+                                           uint32 height)
+{
+    struct virtio_gpu_transfer_to_host_2d *transfer =
+        (struct virtio_gpu_transfer_to_host_2d *)g->cmd_page;
+    struct virtio_gpu_ctrl_hdr *resp =
+        (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+
+    memset(transfer, 0, sizeof(*transfer));
+    transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
+    transfer->r.x = x;
+    transfer->r.y = y;
+    transfer->r.width = width;
+    transfer->r.height = height;
+    transfer->resource_id = res->id;
+    return virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0, false,
+                             resp, sizeof(*resp),
+                             VIRTIO_GPU_RESP_OK_NODATA);
+}
+
+static int virtio_gpu_resource_flush(struct virtio_gpu *g,
+                                     struct virtio_gpu_resource *res,
+                                     uint32 x, uint32 y, uint32 width,
+                                     uint32 height)
+{
+    struct virtio_gpu_resource_flush *flush =
+        (struct virtio_gpu_resource_flush *)g->cmd_page;
+    struct virtio_gpu_ctrl_hdr *resp =
+        (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+
+    memset(flush, 0, sizeof(*flush));
+    flush->hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+    flush->r.x = x;
+    flush->r.y = y;
+    flush->r.width = width;
+    flush->r.height = height;
+    flush->resource_id = res->id;
+    return virtio_gpu_submit(g, flush, sizeof(*flush), NULL, 0, false, resp,
+                             sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA);
+}
+
+static int virtio_gpu_resource_unref(struct virtio_gpu *g,
+                                     struct virtio_gpu_resource *res)
+{
+    struct virtio_gpu_resource_unref *unref =
+        (struct virtio_gpu_resource_unref *)g->cmd_page;
+    struct virtio_gpu_ctrl_hdr *resp =
+        (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+    uint32 id = res->id;
+    uint32 backing_len = res->backing_len;
+    void *backing = res->backing;
+
+    memset(unref, 0, sizeof(*unref));
+    unref->hdr.type = VIRTIO_GPU_CMD_RESOURCE_UNREF;
+    unref->resource_id = id;
+    if (virtio_gpu_submit(g, unref, sizeof(*unref), NULL, 0, false, resp,
+                          sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA) != 0)
+        return -1;
+
+    spin_lock(&g->lock);
+    memset(res, 0, sizeof(*res));
+    if (g->stats.resources > 0)
+        g->stats.resources--;
+    if (g->stats.resource_bytes >= backing_len)
+        g->stats.resource_bytes -= backing_len;
+    spin_unlock(&g->lock);
+    kfree(backing);
     return 0;
 }
 
@@ -287,21 +514,15 @@ static int virtio_gpu_submit_display_info(struct virtio_gpu *g)
 
 static int virtio_gpu_smoke_resource(struct virtio_gpu *g)
 {
-    struct virtio_gpu_resource_create_2d *create =
-        (struct virtio_gpu_resource_create_2d *)g->cmd_page;
-    struct virtio_gpu_resource_attach_backing *attach =
-        (struct virtio_gpu_resource_attach_backing *)g->cmd_page;
-    struct virtio_gpu_transfer_to_host_2d *transfer =
-        (struct virtio_gpu_transfer_to_host_2d *)g->cmd_page;
-    struct virtio_gpu_resource_flush *flush =
-        (struct virtio_gpu_resource_flush *)g->cmd_page;
-    struct virtio_gpu_resource_unref *unref =
-        (struct virtio_gpu_resource_unref *)g->cmd_page;
-    struct virtio_gpu_mem_entry *entry =
-        (struct virtio_gpu_mem_entry *)g->data_page;
-    struct virtio_gpu_ctrl_hdr *resp =
-        (struct virtio_gpu_ctrl_hdr *)g->resp_page;
-    uint32 *pixels = (uint32 *)g->resource_page;
+    struct virtio_gpu_resource *res;
+
+    if (virtio_gpu_resource_create_2d(g, VIRTIO_GPU_SMOKE_WIDTH,
+                                      VIRTIO_GPU_SMOKE_HEIGHT,
+                                      VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+                                      &res) != 0)
+        return -1;
+
+    uint32 *pixels = (uint32 *)res->backing;
 
     for (uint32 y = 0; y < VIRTIO_GPU_SMOKE_HEIGHT; y++) {
         for (uint32 x = 0; x < VIRTIO_GPU_SMOKE_WIDTH; x++) {
@@ -312,60 +533,20 @@ static int virtio_gpu_smoke_resource(struct virtio_gpu *g)
         }
     }
 
-    memset(create, 0, sizeof(*create));
-    create->hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_2D;
-    create->resource_id = VIRTIO_GPU_SMOKE_RESOURCE_ID;
-    create->format = VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
-    create->width = VIRTIO_GPU_SMOKE_WIDTH;
-    create->height = VIRTIO_GPU_SMOKE_HEIGHT;
-    if (virtio_gpu_submit(g, create, sizeof(*create), NULL, 0, false, resp,
-                          sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA) != 0)
+    if (virtio_gpu_resource_attach_backing(g, res) != 0)
         return -1;
-
-    memset(entry, 0, sizeof(*entry));
-    entry->addr = (uint64)g->resource_page;
-    entry->length = VIRTIO_GPU_SMOKE_WIDTH * VIRTIO_GPU_SMOKE_HEIGHT *
-                    sizeof(uint32);
-
-    memset(attach, 0, sizeof(*attach));
-    attach->hdr.type = VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING;
-    attach->resource_id = VIRTIO_GPU_SMOKE_RESOURCE_ID;
-    attach->nr_entries = 1;
-    if (virtio_gpu_submit(g, attach, sizeof(*attach), entry, sizeof(*entry),
-                          false, resp, sizeof(*resp),
-                          VIRTIO_GPU_RESP_OK_NODATA) != 0)
+    if (virtio_gpu_resource_transfer_2d(g, res, 0, 0,
+                                        VIRTIO_GPU_SMOKE_WIDTH,
+                                        VIRTIO_GPU_SMOKE_HEIGHT) != 0)
         return -1;
-
-    memset(transfer, 0, sizeof(*transfer));
-    transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D;
-    transfer->r.width = VIRTIO_GPU_SMOKE_WIDTH;
-    transfer->r.height = VIRTIO_GPU_SMOKE_HEIGHT;
-    transfer->resource_id = VIRTIO_GPU_SMOKE_RESOURCE_ID;
-    if (virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0, false,
-                          resp, sizeof(*resp),
-                          VIRTIO_GPU_RESP_OK_NODATA) != 0)
-        return -1;
-
-    memset(flush, 0, sizeof(*flush));
-    flush->hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
-    flush->r.width = VIRTIO_GPU_SMOKE_WIDTH;
-    flush->r.height = VIRTIO_GPU_SMOKE_HEIGHT;
-    flush->resource_id = VIRTIO_GPU_SMOKE_RESOURCE_ID;
-    if (virtio_gpu_submit(g, flush, sizeof(*flush), NULL, 0, false, resp,
-                          sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA) != 0)
-        return -1;
-
-    memset(unref, 0, sizeof(*unref));
-    unref->hdr.type = VIRTIO_GPU_CMD_RESOURCE_UNREF;
-    unref->resource_id = VIRTIO_GPU_SMOKE_RESOURCE_ID;
-    if (virtio_gpu_submit(g, unref, sizeof(*unref), NULL, 0, false, resp,
-                          sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA) != 0)
+    if (virtio_gpu_resource_flush(g, res, 0, 0, VIRTIO_GPU_SMOKE_WIDTH,
+                                  VIRTIO_GPU_SMOKE_HEIGHT) != 0)
         return -1;
 
     printf("virtio_gpu: resource smoke ok resource=%u size=%ux%u bytes=%u\n",
-           VIRTIO_GPU_SMOKE_RESOURCE_ID, VIRTIO_GPU_SMOKE_WIDTH,
-           VIRTIO_GPU_SMOKE_HEIGHT, entry->length);
-    return 0;
+           res->id, VIRTIO_GPU_SMOKE_WIDTH, VIRTIO_GPU_SMOKE_HEIGHT,
+           res->backing_len);
+    return virtio_gpu_resource_unref(g, res);
 }
 
 static int virtio_gpu_queue_init(struct virtio_gpu *g)
@@ -394,9 +575,8 @@ static int virtio_gpu_queue_init(struct virtio_gpu *g)
     g->cmd_page = kalloc();
     g->resp_page = kalloc();
     g->data_page = kalloc();
-    g->resource_page = kalloc();
     if (!q->desc || !q->avail || !q->used || !g->cmd_page || !g->resp_page ||
-        !g->data_page || !g->resource_page)
+        !g->data_page)
         panic("virtio_gpu: kalloc");
 
     memset(q->desc, 0, PGSIZE);
@@ -405,7 +585,6 @@ static int virtio_gpu_queue_init(struct virtio_gpu *g)
     memset(g->cmd_page, 0, PGSIZE);
     memset(g->resp_page, 0, PGSIZE);
     memset(g->data_page, 0, PGSIZE);
-    memset(g->resource_page, 0, PGSIZE);
 
     cfg->queue_size = qsize;
     cfg->queue_desc = (uint64)q->desc;
@@ -461,6 +640,9 @@ void virtio_gpu_init(void)
         virtio_gpu_bar_base(vd, d_bar), d_off, d_len);
 
     struct virtio_gpu *g = &gpu;
+    memset(g, 0, sizeof(*g));
+    spin_init(&g->lock, "virtio_gpu");
+    g->next_resource_id = 1;
     g->pci.use_pci = 1;
     g->pci.common_cfg = (volatile struct virtio_pci_common_cfg *)cfg_va;
     g->pci.notify_base = (volatile uint16 *)notify_va;
@@ -515,8 +697,30 @@ void virtio_gpu_init(void)
     g->initialized = 1;
 }
 
+void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_stats vg_stats;
+
+    if (!g->initialized)
+        return;
+
+    spin_lock(&g->lock);
+    vg_stats = g->stats;
+    spin_unlock(&g->lock);
+
+    stats->virtio_commands = vg_stats.commands;
+    stats->virtio_failures = vg_stats.failures;
+    stats->virtio_timeouts = vg_stats.timeouts;
+    stats->virtio_resources = vg_stats.resources;
+    stats->virtio_resource_bytes = vg_stats.resource_bytes;
+    stats->virtio_transfers = vg_stats.transfers;
+    stats->virtio_flushes = vg_stats.flushes;
+}
+
 #else
 
 void virtio_gpu_init(void) {}
+void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats) { (void)stats; }
 
 #endif
