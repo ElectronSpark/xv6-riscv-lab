@@ -113,6 +113,7 @@ struct fb_gpu_stats {
     uint64 virtio_resource_bytes; /* bytes backing tracked resources */
     uint64 virtio_transfers;   /* transfer-to-host commands completed */
     uint64 virtio_flushes;     /* resource-flush commands completed */
+    uint64 virtio_scanouts;    /* set-scanout commands completed */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

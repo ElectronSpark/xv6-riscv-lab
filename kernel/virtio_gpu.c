@@ -30,6 +30,7 @@
 #define VIRTIO_GPU_CMD_GET_DISPLAY_INFO 0x0100
 #define VIRTIO_GPU_CMD_RESOURCE_CREATE_2D 0x0101
 #define VIRTIO_GPU_CMD_RESOURCE_UNREF     0x0102
+#define VIRTIO_GPU_CMD_SET_SCANOUT        0x0103
 #define VIRTIO_GPU_CMD_RESOURCE_FLUSH     0x0104
 #define VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D 0x0105
 #define VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING 0x0106
@@ -91,6 +92,13 @@ struct virtio_gpu_resource_unref {
     uint32 padding;
 };
 
+struct virtio_gpu_set_scanout {
+    struct virtio_gpu_ctrl_hdr hdr;
+    struct virtio_gpu_rect r;
+    uint32 scanout_id;
+    uint32 resource_id;
+};
+
 struct virtio_gpu_resource_attach_backing {
     struct virtio_gpu_ctrl_hdr hdr;
     uint32 resource_id;
@@ -136,6 +144,7 @@ struct virtio_gpu_stats {
     uint64 resource_bytes;
     uint64 transfers;
     uint64 flushes;
+    uint64 scanouts;
 };
 
 struct virtio_gpu_resource {
@@ -241,6 +250,8 @@ static void virtio_gpu_count_command(struct virtio_gpu *g, uint32 type)
         g->stats.transfers++;
     else if (type == VIRTIO_GPU_CMD_RESOURCE_FLUSH)
         g->stats.flushes++;
+    else if (type == VIRTIO_GPU_CMD_SET_SCANOUT)
+        g->stats.scanouts++;
     spin_unlock(&g->lock);
 }
 
@@ -413,6 +424,30 @@ static int virtio_gpu_resource_attach_backing(struct virtio_gpu *g,
     return 0;
 }
 
+static int virtio_gpu_set_scanout(struct virtio_gpu *g, uint32 scanout_id,
+                                  struct virtio_gpu_resource *res,
+                                  uint32 x, uint32 y, uint32 width,
+                                  uint32 height)
+{
+    struct virtio_gpu_set_scanout *set_scanout =
+        (struct virtio_gpu_set_scanout *)g->cmd_page;
+    struct virtio_gpu_ctrl_hdr *resp =
+        (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+
+    memset(set_scanout, 0, sizeof(*set_scanout));
+    set_scanout->hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
+    set_scanout->r.x = x;
+    set_scanout->r.y = y;
+    set_scanout->r.width = width;
+    set_scanout->r.height = height;
+    set_scanout->scanout_id = scanout_id;
+    set_scanout->resource_id = res ? res->id : 0;
+
+    return virtio_gpu_submit(g, set_scanout, sizeof(*set_scanout), NULL, 0,
+                             false, resp, sizeof(*resp),
+                             VIRTIO_GPU_RESP_OK_NODATA);
+}
+
 static int virtio_gpu_resource_transfer_2d(struct virtio_gpu *g,
                                            struct virtio_gpu_resource *res,
                                            uint32 x, uint32 y, uint32 width,
@@ -535,12 +570,17 @@ static int virtio_gpu_smoke_resource(struct virtio_gpu *g)
 
     if (virtio_gpu_resource_attach_backing(g, res) != 0)
         return -1;
+    if (virtio_gpu_set_scanout(g, 0, res, 0, 0, VIRTIO_GPU_SMOKE_WIDTH,
+                               VIRTIO_GPU_SMOKE_HEIGHT) != 0)
+        return -1;
     if (virtio_gpu_resource_transfer_2d(g, res, 0, 0,
                                         VIRTIO_GPU_SMOKE_WIDTH,
                                         VIRTIO_GPU_SMOKE_HEIGHT) != 0)
         return -1;
     if (virtio_gpu_resource_flush(g, res, 0, 0, VIRTIO_GPU_SMOKE_WIDTH,
                                   VIRTIO_GPU_SMOKE_HEIGHT) != 0)
+        return -1;
+    if (virtio_gpu_set_scanout(g, 0, NULL, 0, 0, 0, 0) != 0)
         return -1;
 
     printf("virtio_gpu: resource smoke ok resource=%u size=%ux%u bytes=%u\n",
@@ -716,6 +756,7 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
     stats->virtio_resource_bytes = vg_stats.resource_bytes;
     stats->virtio_transfers = vg_stats.transfers;
     stats->virtio_flushes = vg_stats.flushes;
+    stats->virtio_scanouts = vg_stats.scanouts;
 }
 
 #else
