@@ -19,6 +19,9 @@
 #include <dev/cdev.h>
 #include <dev/fb.h>
 #include <dev/pci.h>
+#include <mm/page.h>
+#include <mm/pgtable.h>
+#include <mm/rmap.h>
 #include <mm/vm.h>
 #include <proc/thread.h>
 #include <printf.h>
@@ -31,13 +34,16 @@
 
 struct fb_gpu_bo_entry {
     int in_use;
+    int dead;
     uint32 handle;
+    uint32 refs;
     pid_t owner_tgid;
     uint32 width;
     uint32 height;
     uint32 pitch;
+    uint32 npages;
     uint64 size;
-    uint64 addr;
+    page_t **pages;
 };
 
 /* ── I/O port helpers ────────────────────────────────────────────── */
@@ -197,19 +203,189 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
     return 0;
 }
 
+static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
+                           struct fb_gpu_bo_present cmd)
+{
+    uint32 xres, yres;
+    uint32 cw, ch;
+    uint64 offset;
+    uint64 last;
+    int clipped = 0;
+
+    if (bo == NULL)
+        return -EINVAL;
+    if (cmd.w == 0)
+        cmd.w = bo->width;
+    if (cmd.h == 0)
+        cmd.h = bo->height;
+    if (cmd.w == 0 || cmd.h == 0)
+        return 0;
+    if (cmd.w > 0xffffffffU / 4)
+        goto reject;
+
+    offset = cmd.pixels;
+    last = offset + (uint64)(cmd.h - 1) * bo->pitch + (uint64)cmd.w * 4;
+    if (offset >= bo->size || last > bo->size || last < offset)
+        goto reject;
+
+    spin_lock(&fb_state.lock);
+    xres = fb_state.xres;
+    yres = fb_state.yres;
+    spin_unlock(&fb_state.lock);
+
+    if (cmd.x >= xres || cmd.y >= yres)
+        return 0;
+
+    cw = cmd.w;
+    ch = cmd.h;
+    if ((uint64)cmd.x + cw > xres) {
+        cw = xres - cmd.x;
+        clipped = 1;
+    }
+    if ((uint64)cmd.y + ch > yres) {
+        ch = yres - cmd.y;
+        clipped = 1;
+    }
+    if (cw == 0 || ch == 0)
+        return 0;
+
+    spin_lock(&fb_state.lock);
+    if (cmd.x == 0 && cmd.y == 0 && cw == xres && ch == yres)
+        fb_state.stats.full_blits++;
+    else
+        fb_state.stats.partial_blits++;
+    if (clipped)
+        fb_state.stats.clipped_blits++;
+    fb_state.stats.blit_bytes += (uint64)cw * ch * 4;
+    fb_state.stats.bo_presents++;
+    spin_unlock(&fb_state.lock);
+
+    for (uint32 row = 0; row < ch; row++) {
+        uint64 src_off = offset + (uint64)row * bo->pitch;
+        volatile uint8 *dst = fb_state.fb_virt +
+                              ((uint64)(cmd.y + row) * fb_state.pitch) +
+                              (uint64)cmd.x * 4;
+        uint32 remaining = cw * 4;
+        uint32 copied = 0;
+
+        while (remaining > 0) {
+            uint32 page_idx = src_off / PGSIZE;
+            uint32 page_off = src_off & (PGSIZE - 1);
+            uint32 chunk = PGSIZE - page_off;
+            uint64 pa;
+            uint8 *src;
+
+            if (page_idx >= bo->npages)
+                goto reject;
+            if (chunk > remaining)
+                chunk = remaining;
+            pa = __page_to_pa(bo->pages[page_idx]);
+            src = (uint8 *)PA2VA(pa) + page_off;
+
+            spin_lock(&fb_state.lock);
+            memcpy((void *)(dst + copied), src, chunk);
+            spin_unlock(&fb_state.lock);
+
+            src_off += chunk;
+            copied += chunk;
+            remaining -= chunk;
+        }
+    }
+
+    virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                               cmd.x, cmd.y, cw, ch);
+    return 0;
+
+reject:
+    spin_lock(&fb_state.lock);
+    fb_state.stats.rejected_blits++;
+    spin_unlock(&fb_state.lock);
+    return -EINVAL;
+}
+
 static struct fb_gpu_bo_entry *fb_bo_lookup_locked(uint32 handle)
 {
     if (handle == 0)
         return NULL;
     for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
-        if (fb_state.bos[i].in_use && fb_state.bos[i].handle == handle)
+        if (fb_state.bos[i].in_use && !fb_state.bos[i].dead &&
+            fb_state.bos[i].handle == handle)
             return &fb_state.bos[i];
     }
     return NULL;
 }
 
+static void fb_bo_release_pages(page_t **pages, uint32 npages)
+{
+    if (pages == NULL)
+        return;
+    for (uint32 i = 0; i < npages; i++) {
+        if (pages[i] != NULL)
+            page_ref_dec((void *)__page_to_pa(pages[i]));
+    }
+    kvfree(pages);
+}
+
+static void fb_bo_put(struct fb_gpu_bo_entry *bo)
+{
+    page_t **pages = NULL;
+    uint32 npages = 0;
+
+    if (bo == NULL)
+        return;
+
+    spin_lock(&fb_state.lock);
+    if (bo->refs > 0)
+        bo->refs--;
+    if (bo->dead && bo->refs == 0) {
+        pages = bo->pages;
+        npages = bo->npages;
+        memset(bo, 0, sizeof(*bo));
+    }
+    spin_unlock(&fb_state.lock);
+
+    fb_bo_release_pages(pages, npages);
+}
+
+static struct fb_gpu_bo_entry *fb_bo_get(uint32 handle)
+{
+    struct fb_gpu_bo_entry *bo;
+
+    spin_lock(&fb_state.lock);
+    bo = fb_bo_lookup_locked(handle);
+    if (bo != NULL)
+        bo->refs++;
+    spin_unlock(&fb_state.lock);
+    return bo;
+}
+
+static int fb_bo_alloc_pages(uint32 npages, page_t ***pages_out)
+{
+    page_t **pages;
+
+    if (npages == 0 || pages_out == NULL)
+        return -EINVAL;
+    pages = kvmalloc((size_t)npages * sizeof(*pages));
+    if (pages == NULL)
+        return -ENOMEM;
+    memset(pages, 0, (size_t)npages * sizeof(*pages));
+
+    for (uint32 i = 0; i < npages; i++) {
+        pages[i] = __page_alloc(0, PAGE_TYPE_ANON);
+        if (pages[i] == NULL) {
+            fb_bo_release_pages(pages, npages);
+            return -ENOMEM;
+        }
+        memset((void *)PA2VA(__page_to_pa(pages[i])), 0, PGSIZE);
+    }
+
+    *pages_out = pages;
+    return 0;
+}
+
 static int fb_bo_register(uint32 width, uint32 height, uint32 pitch,
-                          uint64 size, uint64 addr, uint32 *handle)
+                          uint64 size, page_t **pages, uint32 npages,
+                          uint32 *handle)
 {
     spin_lock(&fb_state.lock);
     struct fb_gpu_bo_entry *bo = NULL;
@@ -235,16 +411,80 @@ static int fb_bo_register(uint32 width, uint32 height, uint32 pitch,
     bo->width = width;
     bo->height = height;
     bo->pitch = pitch;
+    bo->npages = npages;
     bo->size = size;
-    bo->addr = addr;
+    bo->pages = pages;
+    bo->refs = 1;
     fb_state.stats.bo_handles++;
     *handle = next;
     spin_unlock(&fb_state.lock);
     return 0;
 }
 
+static int fb_bo_destroy(uint32 handle);
+
+static int fb_bo_map_current(struct fb_gpu_bo_entry *bo, uint64 *addr_out)
+{
+    vm_t *vm;
+    vma_t *vma;
+    uint64 addr;
+    uint64 flags;
+    uint64 pte_flags;
+
+    if (bo == NULL || addr_out == NULL || current == NULL ||
+        current->vm == NULL)
+        return -EINVAL;
+
+    vm = current->vm;
+    flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER;
+
+    vm_wlock(vm);
+    addr = vm_find_free_range(vm, (size_t)bo->size, 0);
+    if (addr == 0) {
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+
+    vma = vma_alloc(vm, addr, bo->size, flags);
+    if (vma == NULL) {
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+    if (anon_vma_prepare(vma) != 0) {
+        vma_free(vm, vma);
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+
+    pte_flags = vma2pte_flags(flags);
+    for (uint32 i = 0; i < bo->npages; i++) {
+        uint64 va = addr + (uint64)i * PGSIZE;
+        uint64 pa = __page_to_pa(bo->pages[i]);
+
+        if (page_ref_inc((void *)pa) <= 0) {
+            vma_free(vm, vma);
+            vm_wunlock(vm);
+            return -ENOMEM;
+        }
+        if (mappages(vm->pagetable, va, PGSIZE, pa, pte_flags) != 0) {
+            page_ref_dec((void *)pa);
+            vma_free(vm, vma);
+            vm_wunlock(vm);
+            return -ENOMEM;
+        }
+        page_add_anon_rmap(bo->pages[i], vma, va);
+    }
+
+    vm_wunlock(vm);
+    *addr_out = addr;
+    return 0;
+}
+
 static void fb_bo_destroy_owner(pid_t owner_tgid)
 {
+    uint32 handles[FB_GPU_MAX_BOS];
+    int n = 0;
+
     if (owner_tgid <= 0)
         return;
 
@@ -254,25 +494,31 @@ static void fb_bo_destroy_owner(pid_t owner_tgid)
 
         if (!bo->in_use || bo->owner_tgid != owner_tgid)
             continue;
-        memset(bo, 0, sizeof(*bo));
-        if (fb_state.stats.bo_handles > 0)
-            fb_state.stats.bo_handles--;
+        handles[n++] = bo->handle;
     }
     spin_unlock(&fb_state.lock);
+
+    for (int i = 0; i < n; i++)
+        (void)fb_bo_destroy(handles[i]);
 }
 
 static int fb_bo_destroy(uint32 handle)
 {
+    struct fb_gpu_bo_entry *bo;
+
     spin_lock(&fb_state.lock);
-    struct fb_gpu_bo_entry *bo = fb_bo_lookup_locked(handle);
+    bo = fb_bo_lookup_locked(handle);
     if (bo == NULL) {
         spin_unlock(&fb_state.lock);
         return -ENOENT;
     }
-    memset(bo, 0, sizeof(*bo));
+    bo->in_use = 0;
+    bo->dead = 1;
     if (fb_state.stats.bo_handles > 0)
         fb_state.stats.bo_handles--;
     spin_unlock(&fb_state.lock);
+
+    fb_bo_put(bo);
     return 0;
 }
 
@@ -666,6 +912,9 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         uint64 size;
         uint64 addr;
         uint32 handle;
+        uint32 npages;
+        page_t **pages;
+        int ret;
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
@@ -682,18 +931,32 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if (size == 0 || size > 64ULL * 1024 * 1024)
             return -EINVAL;
 
-        addr = vm_mmap(current->vm, 0, (size_t)size, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        if ((int64)addr < 0)
-            return (int)addr;
-
         req.size = PGROUNDUP(size);
-        req.addr = addr;
-        if (fb_bo_register(req.width, req.height, req.pitch, req.size,
-                           req.addr, &handle) != 0) {
-            (void)vm_munmap(current->vm, addr, (size_t)req.size);
-            return -ENOSPC;
+        npages = req.size / PGSIZE;
+        ret = fb_bo_alloc_pages(npages, &pages);
+        if (ret != 0)
+            return ret;
+
+        ret = fb_bo_register(req.width, req.height, req.pitch, req.size,
+                             pages, npages, &handle);
+        if (ret != 0) {
+            fb_bo_release_pages(pages, npages);
+            return ret;
         }
+
+        struct fb_gpu_bo_entry *bo = fb_bo_get(handle);
+        if (bo == NULL) {
+            (void)fb_bo_destroy(handle);
+            return -ENOENT;
+        }
+        ret = fb_bo_map_current(bo, &addr);
+        fb_bo_put(bo);
+        if (ret != 0) {
+            (void)fb_bo_destroy(handle);
+            return ret;
+        }
+
+        req.addr = addr;
         req.handle = handle;
         req.reserved = 0;
         spin_lock(&fb_state.lock);
@@ -719,28 +982,18 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             return -EINVAL;
 
         if (req.handle != 0) {
-            spin_lock(&fb_state.lock);
-            struct fb_gpu_bo_entry *bo = fb_bo_lookup_locked(req.handle);
+            struct fb_gpu_bo_entry *bo = fb_bo_get(req.handle);
+            int ret;
+
             if (bo == NULL) {
+                spin_lock(&fb_state.lock);
                 fb_state.stats.rejected_blits++;
                 spin_unlock(&fb_state.lock);
                 return -ENOENT;
             }
-            req.src_pitch = bo->pitch;
-            if (req.w == 0)
-                req.w = bo->width;
-            if (req.h == 0)
-                req.h = bo->height;
-            uint64 offset = req.pixels;
-            uint64 last = offset + (uint64)(req.h - 1) * bo->pitch +
-                          (uint64)req.w * 4;
-            if (offset >= bo->size || last > bo->size) {
-                fb_state.stats.rejected_blits++;
-                spin_unlock(&fb_state.lock);
-                return -EINVAL;
-            }
-            req.pixels = bo->addr + offset;
-            spin_unlock(&fb_state.lock);
+            ret = fb_blit_from_bo(bo, req);
+            fb_bo_put(bo);
+            return ret;
         }
 
         blit.x = req.x;
@@ -764,30 +1017,45 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
 
     case FB_GPU_BO_IMPORT: {
         struct fb_gpu_bo_import req;
+        struct fb_gpu_bo_entry *bo;
+        uint64 addr;
+        int ret;
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
         if (req.flags != 0 || req.handle == 0)
             return -EINVAL;
 
-        spin_lock(&fb_state.lock);
-        struct fb_gpu_bo_entry *bo = fb_bo_lookup_locked(req.handle);
+        bo = fb_bo_get(req.handle);
         if (bo == NULL) {
+            spin_lock(&fb_state.lock);
             fb_state.stats.rejected_blits++;
             spin_unlock(&fb_state.lock);
             return -ENOENT;
         }
+
+        ret = fb_bo_map_current(bo, &addr);
+        if (ret != 0) {
+            fb_bo_put(bo);
+            return ret;
+        }
+
         req.width = bo->width;
         req.height = bo->height;
         req.pitch = bo->pitch;
         req.reserved = 0;
         req.size = bo->size;
-        req.addr = bo->addr;
+        req.addr = addr;
+        fb_bo_put(bo);
+
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            (void)vm_munmap(current->vm, addr, (size_t)req.size);
+            return -EFAULT;
+        }
+
+        spin_lock(&fb_state.lock);
         fb_state.stats.bo_imports++;
         spin_unlock(&fb_state.lock);
-
-        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
-            return -EFAULT;
         return 0;
     }
 

@@ -62,12 +62,12 @@ struct fb_gpu_blit {
     uint64   pixels;        /* pointer to user pixel data (uint32[]) */
 };
 
-/* Allocate a graphics buffer and map it into the calling process.
+/* Allocate a kernel-tracked graphics buffer and map it into the caller.
  *
  * Userspace fills in width/height, then the kernel returns addr, pitch, and
- * size.  Release is normal munmap(addr, size).  This first-stage ABI is
- * intentionally process-local; later virtio-gpu/Mesa work can add exportable
- * handles/fences without changing the basic create/fill/present shape.
+ * size.  Release the mapping with normal munmap(addr, size).  If
+ * FB_GPU_BO_F_EXPORTABLE is set, handle can be imported by another process;
+ * each import creates a caller-local mapping of the same BO pages.
  */
 struct fb_gpu_bo_create {
     uint32   width;          /* requested width in pixels */
@@ -80,7 +80,11 @@ struct fb_gpu_bo_create {
     uint32   reserved;
 };
 
-/* Present a mapped graphics buffer to the framebuffer. */
+/* Present a mapped graphics buffer to the framebuffer.
+ *
+ * With handle != 0, pixels is a byte offset inside the BO.  With handle == 0,
+ * pixels is a userspace pointer and src_pitch must be supplied by the caller.
+ */
 struct fb_gpu_bo_present {
     uint32   x;              /* destination x */
     uint32   y;              /* destination y */
@@ -105,7 +109,7 @@ struct fb_gpu_bo_import {
     uint32   pitch;          /* returned pitch in bytes */
     uint32   reserved;
     uint64   size;           /* returned mapping size */
-    uint64   addr;           /* creator-local mapping if visible */
+    uint64   addr;           /* returned caller-local mapping */
 };
 
 /* GPU copy command: screen-to-screen rectangle copy */
