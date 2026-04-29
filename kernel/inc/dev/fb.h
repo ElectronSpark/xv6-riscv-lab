@@ -29,6 +29,11 @@
 #define FB_GPU_VIRGL_CTX_DESTROY 0x461A /* destroy a virtio-gpu 3D context */
 #define FB_GPU_VIRGL_SUBMIT      0x461B /* submit virgl command dwords */
 #define FB_GPU_VIRGL_FENCE       0x461C /* query/wait virtio-gpu fences */
+#define FB_GPU_VIRGL_GET_CAPS    0x461D /* query selected virgl capset payload */
+#define FB_GPU_VIRGL_RESOURCE_CREATE 0x461E /* create/map a virgl resource */
+#define FB_GPU_VIRGL_RESOURCE_DESTROY 0x461F /* destroy a virgl resource */
+#define FB_GPU_VIRGL_TRANSFER_TO_HOST 0x4620 /* upload mapped resource backing */
+#define FB_GPU_VIRGL_TRANSFER_FROM_HOST 0x4621 /* download resource backing */
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
@@ -151,6 +156,52 @@ struct fb_gpu_virgl_fence {
     uint64   signaled;        /* returned latest completed fence id */
 };
 
+struct fb_gpu_virgl_caps {
+    uint32   flags;           /* reserved, must be 0 */
+    uint32   capset_id;       /* returned selected capset id */
+    uint32   capset_version;  /* returned selected capset version */
+    uint32   size;            /* input buffer size, returned payload size */
+    uint64   data;            /* optional user buffer for capset payload */
+};
+
+struct fb_gpu_virgl_resource_create {
+    uint32   ctx_id;          /* optional context to attach the resource to */
+    uint32   flags;           /* virtio resource flags */
+    uint32   resource_id;     /* returned virtio resource id */
+    uint32   target;          /* virgl/VirtIO texture target */
+    uint32   format;          /* virgl/VirtIO format */
+    uint32   bind;            /* virgl bind flags */
+    uint32   width;
+    uint32   height;
+    uint32   depth;
+    uint32   array_size;
+    uint32   last_level;
+    uint32   nr_samples;
+    uint64   size;            /* backing size; 0 means width*height*4 */
+    uint64   addr;            /* returned caller-local mapping */
+};
+
+struct fb_gpu_virgl_resource_destroy {
+    uint32   resource_id;
+    uint32   flags;           /* reserved, must be 0 */
+};
+
+struct fb_gpu_virgl_transfer {
+    uint32   resource_id;
+    uint32   flags;           /* reserved, must be 0 */
+    uint32   x;
+    uint32   y;
+    uint32   z;
+    uint32   w;
+    uint32   h;
+    uint32   d;
+    uint64   offset;
+    uint32   level;
+    uint32   stride;
+    uint32   layer_stride;
+    uint32   padding;
+};
+
 /* GPU copy command: screen-to-screen rectangle copy */
 struct fb_gpu_copy {
     uint32 src_x;           /* source x */
@@ -193,6 +244,8 @@ struct fb_gpu_stats {
     uint64 virtio_submits;     /* completed 3D command submissions */
     uint64 virtio_fences;      /* completed virtio-gpu fence submissions */
     uint64 virtio_last_fence;  /* last completed virtio-gpu fence id */
+    uint64 virtio_irq_completions; /* queue completions observed by IRQ */
+    uint64 virtio_poll_fallbacks;  /* queue waits that fell back to polling */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

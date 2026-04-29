@@ -1210,6 +1210,81 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         return ret;
     }
 
+    case FB_GPU_VIRGL_GET_CAPS: {
+        struct fb_gpu_virgl_caps req;
+        void *caps = NULL;
+        uint32 capset_size = 0;
+        int ret;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0)
+            return -EINVAL;
+        if (req.data != 0) {
+            if (req.size == 0 || req.size > PGSIZE)
+                return -EINVAL;
+            caps = kalloc();
+            if (caps == NULL)
+                return -ENOMEM;
+        }
+
+        ret = virtio_gpu_user_get_caps(caps, req.data ? req.size : 0,
+                                       &req.capset_id,
+                                       &req.capset_version,
+                                       &capset_size);
+        req.size = capset_size;
+        if (ret == 0 && req.data != 0 &&
+            either_copyout(1, req.data, (char *)caps, capset_size) < 0)
+            ret = -EFAULT;
+        if (caps != NULL)
+            kfree(caps);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    case FB_GPU_VIRGL_RESOURCE_CREATE: {
+        struct fb_gpu_virgl_resource_create req;
+        int ret;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        req.resource_id = 0;
+        req.addr = 0;
+        ret = virtio_gpu_user_resource_create(&req);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            (void)virtio_gpu_user_resource_destroy(req.resource_id);
+            if (req.addr != 0 && req.size != 0)
+                (void)vm_munmap(current->vm, req.addr, (size_t)req.size);
+            return -EFAULT;
+        }
+        return 0;
+    }
+
+    case FB_GPU_VIRGL_RESOURCE_DESTROY: {
+        struct fb_gpu_virgl_resource_destroy req;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.resource_id == 0)
+            return -EINVAL;
+        return virtio_gpu_user_resource_destroy(req.resource_id);
+    }
+
+    case FB_GPU_VIRGL_TRANSFER_TO_HOST:
+    case FB_GPU_VIRGL_TRANSFER_FROM_HOST: {
+        struct fb_gpu_virgl_transfer req;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        return virtio_gpu_user_transfer(&req,
+            cmd == FB_GPU_VIRGL_TRANSFER_FROM_HOST);
+    }
+
     case FB_GPU_COPY_RECT: {
         struct fb_gpu_copy cmd;
         int clipped = 0;
