@@ -30,6 +30,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/bio.c
     ${KERNEL_DIR}/exec.c
     ${KERNEL_DIR}/virtio_disk.c
+    ${KERNEL_DIR}/virtio_gpu.c
     ${KERNEL_DIR}/ramdisk.c
     ${KERNEL_DIR}/ksymbols.c
     ${KERNEL_DIR}/e1000.c

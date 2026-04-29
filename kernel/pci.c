@@ -61,6 +61,7 @@ static uint8 pci_find_virtio_cap(uint8 bus, uint8 dev, uint8 func,
 // (struct defined in pci.h)
 
 static struct virtio_pci_discovery virtio_pci_devs[N_VIRTIO_DISK];
+static struct virtio_pci_discovery virtio_gpu_pci_devs[N_VIRTIO_GPU];
 static int virtio_pci_count = 0;
 static int virtio_gpu_pci_count = 0;
 
@@ -69,6 +70,13 @@ struct virtio_pci_discovery *pci_get_virtio_blk(int index)
     if (index < 0 || index >= virtio_pci_count)
         return 0;
     return &virtio_pci_devs[index];
+}
+
+struct virtio_pci_discovery *pci_get_virtio_gpu(int index)
+{
+    if (index < 0 || index >= virtio_gpu_pci_count)
+        return 0;
+    return &virtio_gpu_pci_devs[index];
 }
 
 // ─── PIIX3 PIRQ routing ───────────────────────────────────────────────
@@ -183,26 +191,42 @@ static void pci_init_virtio_blk(uint8 bus, uint8 dev, uint8 func)
 
 static void pci_note_virtio_gpu(uint8 bus, uint8 dev, uint8 func)
 {
-    uint32 bar[6];
-    uint8 irq = piix3_compute_irq(dev, pci_config_read8(bus, dev, func, 0x3D));
-    uint8 common = pci_find_virtio_cap(bus, dev, func,
-                                       VIRTIO_PCI_CAP_COMMON_CFG);
-    uint8 notify = pci_find_virtio_cap(bus, dev, func,
-                                       VIRTIO_PCI_CAP_NOTIFY_CFG);
-    uint8 isr = pci_find_virtio_cap(bus, dev, func,
-                                    VIRTIO_PCI_CAP_ISR_CFG);
-    uint8 device_cfg = pci_find_virtio_cap(bus, dev, func,
-                                           VIRTIO_PCI_CAP_DEVICE_CFG);
+    if (virtio_gpu_pci_count >= N_VIRTIO_GPU) {
+        printf("PCI: too many virtio-gpu devices\n");
+        return;
+    }
+
+    uint16 cmd = pci_config_read16(bus, dev, func, 0x04);
+    cmd |= PCIE_CSCMD_MAE | PCIE_CSCMD_BME;
+    pci_config_write16(bus, dev, func, 0x04, cmd);
+
+    struct virtio_pci_discovery *vd =
+        &virtio_gpu_pci_devs[virtio_gpu_pci_count];
+    vd->found = 1;
+    vd->bus = bus;
+    vd->dev = dev;
+    vd->func = func;
+    vd->irq_line = piix3_compute_irq(dev, pci_config_read8(bus, dev, func,
+                                                            0x3D));
 
     for (int i = 0; i < 6; i++)
-        bar[i] = pci_read_bar(bus, dev, func, i);
+        vd->bar[i] = pci_read_bar(bus, dev, func, i);
+
+    vd->common_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                             VIRTIO_PCI_CAP_COMMON_CFG);
+    vd->notify_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                             VIRTIO_PCI_CAP_NOTIFY_CFG);
+    vd->isr_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                          VIRTIO_PCI_CAP_ISR_CFG);
+    vd->device_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                             VIRTIO_PCI_CAP_DEVICE_CFG);
 
     virtio_gpu_pci_count++;
-    printf("PCI: virtio-gpu detected at %d:%d:%d (driver pending)\n",
-           bus, dev, func);
+    printf("PCI: virtio-gpu detected at %d:%d:%d\n", bus, dev, func);
     printf("PCI: virtio-gpu BAR0=0x%lx BAR1=0x%lx BAR2=0x%lx BAR4=0x%lx IRQ=%d caps: common=%d notify=%d isr=%d dev=%d\n",
-           (uint64)bar[0], (uint64)bar[1], (uint64)bar[2], (uint64)bar[4],
-           irq, common, notify, isr, device_cfg);
+           (uint64)vd->bar[0], (uint64)vd->bar[1], (uint64)vd->bar[2],
+           (uint64)vd->bar[4], vd->irq_line, vd->common_cfg_cap,
+           vd->notify_cfg_cap, vd->isr_cfg_cap, vd->device_cfg_cap);
 }
 
 void pci_init(void)

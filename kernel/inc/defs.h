@@ -200,6 +200,7 @@ void plic_enable_irq(int);
 
 // virtio_disk.c
 void virtio_disk_init(void);
+void virtio_gpu_init(void);
 
 // ramdisk.c
 void ramdisk_init(void);

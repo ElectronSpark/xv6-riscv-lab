@@ -259,6 +259,7 @@ struct virtio_pci_discovery {
 
 // Get discovered virtio-blk PCI device info by index
 struct virtio_pci_discovery *pci_get_virtio_blk(int index);
+struct virtio_pci_discovery *pci_get_virtio_gpu(int index);
 
 // Prototype
 void pci_init(void);

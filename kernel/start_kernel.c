@@ -205,6 +205,7 @@ void start_kernel_post_init(void) {
     ptmxinit();        // Register /dev/ptmx (PTY multiplexer)
     gendisk_init();    // Generic disk layer (partition discovery)
     virtio_disk_init(); // emulated hard disk (QEMU)
+    virtio_gpu_init();  // optional virtio-gpu PCI device (Bochs fb remains fallback)
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
     loop_init();        // Loopback block devices (/dev/loop0..7)
     sockinit();
