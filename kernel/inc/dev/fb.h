@@ -24,8 +24,10 @@
 #define FB_GPU_BO_PRESENT    0x4615   /* present a mapped graphics buffer */
 #define FB_GPU_BO_DESTROY    0x4616   /* destroy a graphics buffer handle */
 #define FB_GPU_BO_IMPORT     0x4617   /* query/import a graphics buffer handle */
+#define FB_GPU_BO_FENCE      0x4618   /* query/wait BO present fences */
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
+#define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -94,6 +96,7 @@ struct fb_gpu_bo_present {
     uint64   pixels;         /* mapped buffer address */
     uint32   handle;         /* optional BO handle; overrides pixels/pitch */
     uint32   flags;          /* reserved, must be 0 */
+    uint64   fence;          /* returned completed fence for handle presents */
 };
 
 struct fb_gpu_bo_destroy {
@@ -110,6 +113,14 @@ struct fb_gpu_bo_import {
     uint32   reserved;
     uint64   size;           /* returned mapping size */
     uint64   addr;           /* returned caller-local mapping */
+};
+
+struct fb_gpu_bo_fence {
+    uint32   handle;         /* existing exported handle */
+    uint32   flags;          /* FB_GPU_BO_FENCE_* */
+    uint64   wait_for;       /* 0 means the BO's latest present fence */
+    uint64   signaled;       /* returned latest completed fence */
+    uint64   last_present;   /* returned latest issued present fence */
 };
 
 /* GPU copy command: screen-to-screen rectangle copy */
@@ -136,6 +147,8 @@ struct fb_gpu_stats {
     uint64 bo_presents;        /* graphics buffer present requests */
     uint64 bo_handles;         /* currently tracked graphics buffer handles */
     uint64 bo_imports;         /* graphics buffer handle import/query requests */
+    uint64 bo_fences;          /* completed graphics buffer present fences */
+    uint64 bo_fence_waits;     /* graphics buffer fence wait/query requests */
     uint64 virtio_commands;    /* virtio-gpu control commands completed */
     uint64 virtio_failures;    /* virtio-gpu commands rejected or failed */
     uint64 virtio_timeouts;    /* virtio-gpu commands timed out */

@@ -43,6 +43,8 @@ struct fb_gpu_bo_entry {
     uint32 pitch;
     uint32 npages;
     uint64 size;
+    uint64 last_fence;
+    uint64 signaled_fence;
     page_t **pages;
 };
 
@@ -99,10 +101,12 @@ static struct {
     uint32      fb_size;        /* total framebuffer size in bytes */
     struct fb_gpu_stats stats;
     uint32      next_bo_handle;
+    uint64      next_bo_fence;
     struct fb_gpu_bo_entry bos[FB_GPU_MAX_BOS];
     spinlock_t  lock;           /* serializes concurrent access */
 } fb_state = {
     .next_bo_handle = 1,
+    .next_bo_fence = 1,
     .lock = SPINLOCK_INITIALIZED("fb"),
 };
 
@@ -203,8 +207,21 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
     return 0;
 }
 
+static uint64 fb_bo_signal_present_locked(struct fb_gpu_bo_entry *bo)
+{
+    uint64 fence = fb_state.next_bo_fence++;
+
+    if (fb_state.next_bo_fence == 0)
+        fb_state.next_bo_fence = 1;
+    bo->last_fence = fence;
+    bo->signaled_fence = fence;
+    fb_state.stats.bo_fences++;
+    return fence;
+}
+
 static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
-                           struct fb_gpu_bo_present cmd)
+                           struct fb_gpu_bo_present cmd,
+                           uint64 *fence_out)
 {
     uint32 xres, yres;
     uint32 cw, ch;
@@ -294,6 +311,10 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
 
     virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
                                cmd.x, cmd.y, cw, ch);
+    spin_lock(&fb_state.lock);
+    if (fence_out)
+        *fence_out = fb_bo_signal_present_locked(bo);
+    spin_unlock(&fb_state.lock);
     return 0;
 
 reject:
@@ -991,18 +1012,27 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
                 spin_unlock(&fb_state.lock);
                 return -ENOENT;
             }
-            ret = fb_blit_from_bo(bo, req);
+            ret = fb_blit_from_bo(bo, req, &req.fence);
             fb_bo_put(bo);
+            if (ret == 0 &&
+                either_copyout(1, (uint64)arg, (char *)&req,
+                               sizeof(req)) < 0)
+                return -EFAULT;
             return ret;
         }
 
+        req.fence = 0;
         blit.x = req.x;
         blit.y = req.y;
         blit.w = req.w;
         blit.h = req.h;
         blit.src_pitch = req.src_pitch;
         blit.pixels = req.pixels;
-        return fb_blit_from_user(blit, 1);
+        int ret = fb_blit_from_user(blit, 1);
+        if (ret == 0 &&
+            either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return ret;
     }
 
     case FB_GPU_BO_DESTROY: {
@@ -1056,6 +1086,39 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         spin_lock(&fb_state.lock);
         fb_state.stats.bo_imports++;
         spin_unlock(&fb_state.lock);
+        return 0;
+    }
+
+    case FB_GPU_BO_FENCE: {
+        struct fb_gpu_bo_fence req;
+        struct fb_gpu_bo_entry *bo;
+        uint64 target;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if ((req.flags & ~FB_GPU_BO_FENCE_WAIT) != 0 || req.handle == 0)
+            return -EINVAL;
+
+        bo = fb_bo_get(req.handle);
+        if (bo == NULL) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.rejected_blits++;
+            spin_unlock(&fb_state.lock);
+            return -ENOENT;
+        }
+
+        spin_lock(&fb_state.lock);
+        target = req.wait_for ? req.wait_for : bo->last_fence;
+        req.last_present = bo->last_fence;
+        req.signaled = bo->signaled_fence;
+        fb_state.stats.bo_fence_waits++;
+        spin_unlock(&fb_state.lock);
+
+        fb_bo_put(bo);
+        if ((req.flags & FB_GPU_BO_FENCE_WAIT) && target > req.signaled)
+            return -EAGAIN;
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
         return 0;
     }
 
