@@ -770,14 +770,50 @@ static void vm_report_pte_accounting(vm_t *vm)
     }
 }
 
+static void *vm_tree_next_slot(vm_t *vm, uint64 *cursor,
+                               uint64 *slot_start, uint64 *slot_last)
+{
+    if (vm == NULL || cursor == NULL)
+        return NULL;
+
+    while (*cursor < vm->vm_top) {
+        MA_STATE(mas, &vm->vm_mt, *cursor, *cursor);
+        void *entry = mas_walk(&mas);
+
+        if (mas.node == NULL)
+            return NULL;
+
+        uint64 next;
+        if (mas.max >= vm->vm_top - 1 || mas.max == MAPLE_MAX)
+            next = vm->vm_top;
+        else
+            next = mas.max + 1;
+
+        if (entry != NULL) {
+            if (slot_start != NULL)
+                *slot_start = mas.min;
+            if (slot_last != NULL)
+                *slot_last = mas.max;
+            *cursor = next;
+            return entry;
+        }
+
+        if (next <= *cursor)
+            return NULL;
+        *cursor = next;
+    }
+
+    return NULL;
+}
+
 static int vm_tree_contains_vma(vm_t *vm, vma_t *needle)
 {
     if (vm == NULL || needle == NULL)
         return 0;
 
-    MA_STATE(mas, &vm->vm_mt, 0, 0);
+    uint64 cursor = vm->vm_bottom;
     void *entry;
-    while ((entry = mas_find(&mas, MAPLE_MAX)) != NULL) {
+    while ((entry = vm_tree_next_slot(vm, &cursor, NULL, NULL)) != NULL) {
         if (entry == needle)
             return 1;
     }
@@ -888,13 +924,13 @@ static void __vm_destroy(vm_t *vm)
     vm_report_pte_accounting(vm);
 
     while (1) {
-        MA_STATE(mas, &vm->vm_mt, 0, 0);
-        void *entry = mas_find(&mas, MAPLE_MAX);
+        uint64 cursor = vm->vm_bottom;
+        uint64 slot_start;
+        uint64 slot_last;
+        void *entry = vm_tree_next_slot(vm, &cursor, &slot_start, &slot_last);
         if (entry == NULL)
             break;
 
-        uint64 slot_start = mas.min;
-        uint64 slot_last = mas.max;
         uint64 slot_end;
         if (slot_last >= vm->vm_top - 1)
             slot_end = vm->vm_top;
@@ -916,6 +952,8 @@ static void __vm_destroy(vm_t *vm)
         }
     }
 
+    vm_report_pte_accounting(vm);
+
     mtree_destroy(&vm->vm_mt);
 
     arch_vm_teardown_trampoline(vm);
@@ -936,10 +974,10 @@ vm_t *vm_copy(vm_t *src)
         return ERR_PTR(-ENOMEM);
     vm_rlock(src);
     vm_wlock(dst);
-    uint64 idx = 0;
     void *mt_entry;
     vma_t *last_vma = NULL;  /* duplicate detection for partial mtree_store_range */
-    mt_for_each(&src->vm_mt, mt_entry, idx, MAPLE_MAX) {
+    uint64 cursor = src->vm_bottom;
+    while ((mt_entry = vm_tree_next_slot(src, &cursor, NULL, NULL)) != NULL) {
         vma_t *vma = (vma_t *)mt_entry;
 
         /* Skip duplicate: a prior partial mtree_store_range can leave
