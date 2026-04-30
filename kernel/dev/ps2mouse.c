@@ -505,8 +505,21 @@ static int mouse_read(cdev_t *cdev, bool user, void *buf, size_t count)
 
 static int mouse_write(cdev_t *cdev, bool user, const void *buf, size_t count)
 {
-    (void)cdev; (void)user; (void)buf; (void)count;
-    return -ENOSYS;
+    struct mouse_event ev;
+
+    (void)cdev;
+    if (count != sizeof(ev))
+        return -EINVAL;
+
+    if (user) {
+        if (either_copyin((char *)&ev, 1, (uint64)buf, sizeof(ev)) < 0)
+            return -EFAULT;
+    } else {
+        memcpy(&ev, buf, sizeof(ev));
+    }
+
+    mouse_input_push_event(&ev);
+    return sizeof(ev);
 }
 
 static int mouse_poll(cdev_t *cdev, short events)
@@ -530,7 +543,7 @@ static cdev_t mouse_cdev = {
         .devmode = S_IFCHR | 0666,
     },
     .readable = 1,
-    .writable = 0,
+    .writable = 1,
     .ops = {
         .read    = mouse_read,
         .write   = mouse_write,
