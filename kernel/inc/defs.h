@@ -217,6 +217,7 @@ int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
                              uint32 *capset_version, uint32 *capset_size);
 int virtio_gpu_user_resource_create(struct fb_gpu_virgl_resource_create *req);
 int virtio_gpu_user_resource_destroy(uint32 resource_id);
+void virtio_gpu_user_destroy_owner(pid_t owner_tgid);
 int virtio_gpu_user_transfer(struct fb_gpu_virgl_transfer *req, int from_host);
 
 // ramdisk.c

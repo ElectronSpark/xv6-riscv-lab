@@ -783,8 +783,10 @@ static int fb_release(cdev_t *cdev)
 {
     (void)cdev;
 
-    if (current)
+    if (current) {
         fb_bo_destroy_owner(current->tgid);
+        virtio_gpu_user_destroy_owner(current->tgid);
+    }
     return 0;
 }
 

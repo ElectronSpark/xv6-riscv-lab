@@ -205,6 +205,10 @@ void exit(int status) {
         }
         proctab_proc_remove(p);
         pid_wunlock();
+
+        if (last_in_group)
+            virtio_gpu_user_destroy_owner(thread_tgid(p));
+
         __free_pid();
 
         // If we're the last thread and the leader is already zombie,
@@ -289,6 +293,9 @@ void exit(int status) {
         last_in_group = thread_group_remove(p);
         pid_wunlock();
     }
+
+    if (last_in_group || tg == NULL)
+        virtio_gpu_user_destroy_owner(thread_tgid(p));
 
     /* Outside pid_wlock: unregister /dev/pts/N from devtmpfs so the
      * device node disappears immediately (can't call cdev_unregister
