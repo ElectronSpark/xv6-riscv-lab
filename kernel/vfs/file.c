@@ -1063,12 +1063,21 @@ int vfs_custom_fd_alloc(struct vfs_file_ops *ops, void *private_data,
     spin_lock(&current->fdtable->lock);
     int fd = vfs_fdtable_alloc_fd(current->fdtable, f);
     spin_unlock(&current->fdtable->lock);
-    vfs_fput(f);          /* drop our ref; fdtable now owns it */
 
     if (fd < 0) {
-        return -EMFILE;
+        /*
+         * fdtable allocation did not take ownership, so the caller still owns
+         * private_data.  Clear the custom hooks before dropping the wrapper to
+         * avoid running release() and freeing caller-owned state behind its
+         * back.
+         */
+        f->ops = NULL;
+        f->private_data = NULL;
+        vfs_fput(f);
+        return fd;
     }
 
+    vfs_fput(f);          /* drop our ref; fdtable now owns it */
     return fd;
 }
 
