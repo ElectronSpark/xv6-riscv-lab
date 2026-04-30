@@ -265,6 +265,8 @@ struct virtio_gpu_stats {
     uint64 virgl_version;
     uint64 virgl_size;
     uint64 contexts;
+    uint64 context_failed;
+    uint64 context_failures;
     uint64 submits;
     uint64 fences;
     uint64 last_fence;
@@ -275,6 +277,7 @@ struct virtio_gpu_stats {
 struct virtio_gpu_resource {
     int in_use;
     uint32 id;
+    uint64 owner_id;
     pid_t owner_tgid;
     uint32 width;
     uint32 height;
@@ -293,7 +296,9 @@ struct virtio_gpu_resource {
 
 struct virtio_gpu_context {
     int in_use;
+    int failed;
     uint32 id;
+    uint64 owner_id;
     pid_t owner_tgid;
 };
 
@@ -325,6 +330,19 @@ struct virtio_gpu {
 };
 
 static struct virtio_gpu gpu;
+
+static int virtio_gpu_owner_matches(uint64 object_owner_id,
+                                    pid_t object_owner_tgid,
+                                    uint64 owner_id, pid_t owner_tgid)
+{
+    if (owner_id != 0)
+        return object_owner_id == owner_id;
+    if (owner_tgid > 0 && object_owner_id != 0)
+        return object_owner_tgid == owner_tgid;
+    if (owner_tgid > 0)
+        return object_owner_tgid == owner_tgid;
+    return 1;
+}
 
 static uint64 virtio_gpu_bar_base(struct virtio_pci_discovery *vd, uint8 bar)
 {
@@ -431,6 +449,8 @@ static void virtio_gpu_count_command(struct virtio_gpu *g, uint32 type)
     spin_unlock(&g->lock);
 }
 
+static void virtio_gpu_mark_all_contexts_failed_locked(struct virtio_gpu *g);
+
 static int virtio_gpu_complete_pending_locked(struct virtio_gpu_queue *q)
 {
     if (q->pending_completion != NULL && q->used->idx != q->used_idx) {
@@ -522,6 +542,9 @@ static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
         spin_unlock_irqrestore(&q->lock, intena);
         virtio_gpu_count_timeout(g);
         virtio_gpu_count_failure(g);
+        spin_lock(&g->lock);
+        virtio_gpu_mark_all_contexts_failed_locked(g);
+        spin_unlock(&g->lock);
         printf("virtio_gpu: command 0x%x timed out\n", type);
         return -1;
     }
@@ -583,6 +606,29 @@ static struct virtio_gpu_context *virtio_gpu_lookup_context_locked(
             return &g->contexts[i];
     }
     return NULL;
+}
+
+static void virtio_gpu_mark_context_failed_locked(struct virtio_gpu *g,
+                                                  struct virtio_gpu_context *ctx)
+{
+    if (ctx == NULL || !ctx->in_use || ctx->failed)
+        return;
+    ctx->failed = 1;
+    g->stats.context_failed++;
+    g->stats.context_failures++;
+}
+
+static void virtio_gpu_mark_all_contexts_failed_locked(struct virtio_gpu *g)
+{
+    for (int i = 0; i < VIRTIO_GPU_MAX_CONTEXTS; i++) {
+        struct virtio_gpu_context *ctx = &g->contexts[i];
+
+        if (!ctx->in_use || ctx->failed)
+            continue;
+        ctx->failed = 1;
+        g->stats.context_failed++;
+        g->stats.context_failures++;
+    }
 }
 
 static int virtio_gpu_backing_order(uint64 bytes, uint32 *alloc_len)
@@ -773,6 +819,8 @@ static int virtio_gpu_resource_create_2d(struct virtio_gpu *g, uint32 width,
 }
 
 static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
+                                         uint64 owner_id,
+                                         pid_t owner_tgid,
                                          struct fb_gpu_virgl_resource_create *req,
                                          struct virtio_gpu_resource **out)
 {
@@ -831,7 +879,8 @@ static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
     memset(res, 0, sizeof(*res));
     res->in_use = 1;
     res->id = id;
-    res->owner_tgid = current ? current->tgid : 0;
+    res->owner_id = owner_id;
+    res->owner_tgid = owner_tgid;
     res->width = req->width;
     res->height = req->height;
     res->depth = create->depth;
@@ -1322,11 +1371,11 @@ out:
         virtio_gpu_destroy_context(g, ctx_id);
 }
 
-int virtio_gpu_user_context_create(const char *name, uint32 *ctx_id)
+int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
+                                   const char *name, uint32 *ctx_id)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
-    pid_t owner = current ? current->tgid : 0;
     uint32 id;
     int ret;
 
@@ -1351,7 +1400,8 @@ int virtio_gpu_user_context_create(const char *name, uint32 *ctx_id)
     memset(ctx, 0, sizeof(*ctx));
     ctx->in_use = 1;
     ctx->id = id;
-    ctx->owner_tgid = owner;
+    ctx->owner_id = owner_id;
+    ctx->owner_tgid = owner_tgid;
     spin_unlock(&g->lock);
 
     ret = virtio_gpu_create_context(g, id, name ? name : "xv6-virgl");
@@ -1370,11 +1420,11 @@ int virtio_gpu_user_context_create(const char *name, uint32 *ctx_id)
     return 0;
 }
 
-int virtio_gpu_user_context_destroy(uint32 ctx_id)
+int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
+                                    uint32 ctx_id)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
-    pid_t owner = current ? current->tgid : 0;
     int ret;
 
     if (ctx_id == 0)
@@ -1391,7 +1441,8 @@ int virtio_gpu_user_context_destroy(uint32 ctx_id)
         mutex_unlock(&g->op_lock);
         return -ENOENT;
     }
-    if (owner != 0 && ctx->owner_tgid != owner) {
+    if (!virtio_gpu_owner_matches(ctx->owner_id, ctx->owner_tgid,
+                                  owner_id, owner_tgid)) {
         spin_unlock(&g->lock);
         mutex_unlock(&g->op_lock);
         return -EPERM;
@@ -1402,25 +1453,28 @@ int virtio_gpu_user_context_destroy(uint32 ctx_id)
     if (ret == 0) {
         spin_lock(&g->lock);
         ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
-        if (ctx != NULL)
+        if (ctx != NULL) {
+            if (ctx->failed && g->stats.context_failed > 0)
+                g->stats.context_failed--;
             memset(ctx, 0, sizeof(*ctx));
+        }
         spin_unlock(&g->lock);
     }
     mutex_unlock(&g->op_lock);
     return ret == 0 ? 0 : -EIO;
 }
 
-int virtio_gpu_user_submit(uint32 ctx_id, const uint32 *cmds,
-                           uint32 nr_dwords, uint64 *fence,
-                           uint64 *signaled)
+int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
+                           uint32 flags, const uint32 *cmds,
+                           uint32 nr_dwords, uint64 *fence, uint64 *signaled)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
-    pid_t owner = current ? current->tgid : 0;
     uint64 fence_id;
     int ret;
 
-    if (ctx_id == 0 || cmds == NULL || nr_dwords == 0 ||
+    if ((flags & ~FB_GPU_VIRGL_SUBMIT_FORCE_FAIL) != 0 ||
+        ctx_id == 0 || cmds == NULL || nr_dwords == 0 ||
         nr_dwords > (PGSIZE * 64) / sizeof(uint32))
         return -EINVAL;
     if (!g->initialized || !g->virgl_capset_id ||
@@ -1433,9 +1487,19 @@ int virtio_gpu_user_submit(uint32 ctx_id, const uint32 *cmds,
         spin_unlock(&g->lock);
         return -ENOENT;
     }
-    if (owner != 0 && ctx->owner_tgid != owner) {
+    if (!virtio_gpu_owner_matches(ctx->owner_id, ctx->owner_tgid,
+                                  owner_id, owner_tgid)) {
         spin_unlock(&g->lock);
         return -EPERM;
+    }
+    if (ctx->failed) {
+        spin_unlock(&g->lock);
+        return -EIO;
+    }
+    if (flags & FB_GPU_VIRGL_SUBMIT_FORCE_FAIL) {
+        virtio_gpu_mark_context_failed_locked(g, ctx);
+        spin_unlock(&g->lock);
+        return -EIO;
     }
     spin_unlock(&g->lock);
 
@@ -1446,8 +1510,13 @@ int virtio_gpu_user_submit(uint32 ctx_id, const uint32 *cmds,
     mutex_lock(&g->op_lock);
     ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, fence_id);
     mutex_unlock(&g->op_lock);
-    if (ret != 0)
+    if (ret != 0) {
+        spin_lock(&g->lock);
+        ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
+        virtio_gpu_mark_context_failed_locked(g, ctx);
+        spin_unlock(&g->lock);
         return -EIO;
+    }
 
     spin_lock(&g->lock);
     if (signaled)
@@ -1514,11 +1583,11 @@ int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
     return ret == 0 ? 0 : -EIO;
 }
 
-int virtio_gpu_user_resource_create(struct fb_gpu_virgl_resource_create *req)
+int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
+                                    struct fb_gpu_virgl_resource_create *req)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
-    pid_t owner = current ? current->tgid : 0;
     struct virtio_gpu_resource *res = NULL;
     uint64 addr;
     int ret;
@@ -1537,15 +1606,20 @@ int virtio_gpu_user_resource_create(struct fb_gpu_virgl_resource_create *req)
             spin_unlock(&g->lock);
             return -ENOENT;
         }
-        if (owner != 0 && ctx->owner_tgid != owner) {
+        if (!virtio_gpu_owner_matches(ctx->owner_id, ctx->owner_tgid,
+                                      owner_id, owner_tgid)) {
             spin_unlock(&g->lock);
             return -EPERM;
+        }
+        if (ctx->failed) {
+            spin_unlock(&g->lock);
+            return -EIO;
         }
         spin_unlock(&g->lock);
     }
 
     mutex_lock(&g->op_lock);
-    ret = virtio_gpu_resource_create_3d(g, req, &res);
+    ret = virtio_gpu_resource_create_3d(g, owner_id, owner_tgid, req, &res);
     if (ret != 0)
         goto out;
     if (virtio_gpu_resource_attach_pages(g, res) != 0) {
@@ -1586,6 +1660,7 @@ out:
 
 static int virtio_gpu_destroy_resource_locked(struct virtio_gpu *g,
                                               uint32 resource_id,
+                                              uint64 owner_id,
                                               pid_t owner_tgid)
 {
     struct virtio_gpu_resource *res;
@@ -1595,7 +1670,9 @@ static int virtio_gpu_destroy_resource_locked(struct virtio_gpu *g,
     spin_lock(&g->lock);
     res = virtio_gpu_lookup_resource_locked(g, resource_id);
     ctx_id = res ? res->ctx_id : 0;
-    if (res != NULL && owner_tgid != 0 && res->owner_tgid != owner_tgid)
+    if (res != NULL &&
+        !virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                  owner_id, owner_tgid))
         res = NULL;
     spin_unlock(&g->lock);
     if (res == NULL)
@@ -1608,10 +1685,10 @@ static int virtio_gpu_destroy_resource_locked(struct virtio_gpu *g,
     return ret == 0 ? 0 : -EIO;
 }
 
-int virtio_gpu_user_resource_destroy(uint32 resource_id)
+int virtio_gpu_user_resource_destroy(uint64 owner_id, pid_t owner_tgid,
+                                     uint32 resource_id)
 {
     struct virtio_gpu *g = &gpu;
-    pid_t owner = current ? current->tgid : 0;
     int ret;
 
     if (resource_id == 0)
@@ -1621,7 +1698,8 @@ int virtio_gpu_user_resource_destroy(uint32 resource_id)
         return -ENODEV;
 
     mutex_lock(&g->op_lock);
-    ret = virtio_gpu_destroy_resource_locked(g, resource_id, owner);
+    ret = virtio_gpu_destroy_resource_locked(g, resource_id, owner_id,
+                                             owner_tgid);
     mutex_unlock(&g->op_lock);
     return ret;
 }
@@ -1657,7 +1735,7 @@ void virtio_gpu_user_destroy_owner(pid_t owner_tgid)
     spin_unlock(&g->lock);
 
     for (uint32 i = 0; i < nresources; i++)
-        (void)virtio_gpu_destroy_resource_locked(g, resource_ids[i],
+        (void)virtio_gpu_destroy_resource_locked(g, resource_ids[i], 0,
                                                  owner_tgid);
 
     for (uint32 i = 0; i < ncontexts; i++) {
@@ -1667,18 +1745,73 @@ void virtio_gpu_user_destroy_owner(pid_t owner_tgid)
             continue;
         spin_lock(&g->lock);
         ctx = virtio_gpu_lookup_context_locked(g, context_ids[i]);
-        if (ctx != NULL && ctx->owner_tgid == owner_tgid)
+        if (ctx != NULL && ctx->owner_tgid == owner_tgid) {
+            if (ctx->failed && g->stats.context_failed > 0)
+                g->stats.context_failed--;
             memset(ctx, 0, sizeof(*ctx));
+        }
         spin_unlock(&g->lock);
     }
     mutex_unlock(&g->op_lock);
 }
 
-int virtio_gpu_user_transfer(struct fb_gpu_virgl_transfer *req, int from_host)
+void virtio_gpu_user_destroy_render_owner(uint64 owner_id)
+{
+    struct virtio_gpu *g = &gpu;
+    uint32 resource_ids[VIRTIO_GPU_MAX_RESOURCES];
+    uint32 context_ids[VIRTIO_GPU_MAX_CONTEXTS];
+    uint32 nresources = 0;
+    uint32 ncontexts = 0;
+
+    if (owner_id == 0)
+        return;
+    if (!g->initialized || !g->virgl_capset_id ||
+        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+        return;
+
+    mutex_lock(&g->op_lock);
+    spin_lock(&g->lock);
+    for (int i = 0; i < VIRTIO_GPU_MAX_RESOURCES; i++) {
+        if (g->resources[i].in_use &&
+            g->resources[i].owner_id == owner_id &&
+            nresources < VIRTIO_GPU_MAX_RESOURCES)
+            resource_ids[nresources++] = g->resources[i].id;
+    }
+    for (int i = 0; i < VIRTIO_GPU_MAX_CONTEXTS; i++) {
+        if (g->contexts[i].in_use &&
+            g->contexts[i].owner_id == owner_id &&
+            ncontexts < VIRTIO_GPU_MAX_CONTEXTS)
+            context_ids[ncontexts++] = g->contexts[i].id;
+    }
+    spin_unlock(&g->lock);
+
+    for (uint32 i = 0; i < nresources; i++)
+        (void)virtio_gpu_destroy_resource_locked(g, resource_ids[i],
+                                                 owner_id, 0);
+
+    for (uint32 i = 0; i < ncontexts; i++) {
+        struct virtio_gpu_context *ctx;
+
+        if (virtio_gpu_destroy_context(g, context_ids[i]) != 0)
+            continue;
+        spin_lock(&g->lock);
+        ctx = virtio_gpu_lookup_context_locked(g, context_ids[i]);
+        if (ctx != NULL && ctx->owner_id == owner_id) {
+            if (ctx->failed && g->stats.context_failed > 0)
+                g->stats.context_failed--;
+            memset(ctx, 0, sizeof(*ctx));
+        }
+        spin_unlock(&g->lock);
+    }
+    mutex_unlock(&g->op_lock);
+}
+
+int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,
+                             struct fb_gpu_virgl_transfer *req,
+                             int from_host)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_resource *res;
-    pid_t owner = current ? current->tgid : 0;
     struct virtio_gpu_transfer_host_3d *cmd =
         (struct virtio_gpu_transfer_host_3d *)g->cmd_page;
     struct virtio_gpu_ctrl_hdr *resp =
@@ -1698,7 +1831,12 @@ int virtio_gpu_user_transfer(struct fb_gpu_virgl_transfer *req, int from_host)
     spin_lock(&g->lock);
     res = virtio_gpu_lookup_resource_locked(g, req->resource_id);
     if (res != NULL) {
-        if ((owner != 0 && res->owner_tgid != owner) ||
+        struct virtio_gpu_context *ctx = NULL;
+        if (res->ctx_id != 0)
+            ctx = virtio_gpu_lookup_context_locked(g, res->ctx_id);
+        if (!virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                      owner_id, owner_tgid) ||
+            (ctx != NULL && ctx->failed) ||
             req->x > res->width || req->w > res->width - req->x ||
             req->y > res->height || req->h > res->height - req->y ||
             req->z > res->depth || req->d > res->depth - req->z ||
@@ -2053,6 +2191,8 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
     stats->virtio_virgl_version = vg_stats.virgl_version;
     stats->virtio_virgl_size = vg_stats.virgl_size;
     stats->virtio_contexts = vg_stats.contexts;
+    stats->virtio_context_failed = vg_stats.context_failed;
+    stats->virtio_context_failures = vg_stats.context_failures;
     stats->virtio_submits = vg_stats.submits;
     stats->virtio_fences = vg_stats.fences;
     stats->virtio_last_fence = vg_stats.last_fence;
@@ -2107,22 +2247,31 @@ out:
 
 void virtio_gpu_init(void) {}
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats) { (void)stats; }
-int virtio_gpu_user_context_create(const char *name, uint32 *ctx_id)
+int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
+                                   const char *name, uint32 *ctx_id)
 {
+    (void)owner_id;
+    (void)owner_tgid;
     (void)name;
     (void)ctx_id;
     return -ENODEV;
 }
-int virtio_gpu_user_context_destroy(uint32 ctx_id)
+int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
+                                    uint32 ctx_id)
 {
+    (void)owner_id;
+    (void)owner_tgid;
     (void)ctx_id;
     return -ENODEV;
 }
-int virtio_gpu_user_submit(uint32 ctx_id, const uint32 *cmds,
-                           uint32 nr_dwords, uint64 *fence,
-                           uint64 *signaled)
+int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
+                           uint32 flags, const uint32 *cmds,
+                           uint32 nr_dwords, uint64 *fence, uint64 *signaled)
 {
+    (void)owner_id;
+    (void)owner_tgid;
     (void)ctx_id;
+    (void)flags;
     (void)cmds;
     (void)nr_dwords;
     (void)fence;
@@ -2146,13 +2295,19 @@ int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
     (void)capset_size;
     return -ENODEV;
 }
-int virtio_gpu_user_resource_create(struct fb_gpu_virgl_resource_create *req)
+int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
+                                    struct fb_gpu_virgl_resource_create *req)
 {
+    (void)owner_id;
+    (void)owner_tgid;
     (void)req;
     return -ENODEV;
 }
-int virtio_gpu_user_resource_destroy(uint32 resource_id)
+int virtio_gpu_user_resource_destroy(uint64 owner_id, pid_t owner_tgid,
+                                     uint32 resource_id)
 {
+    (void)owner_id;
+    (void)owner_tgid;
     (void)resource_id;
     return -ENODEV;
 }
@@ -2160,8 +2315,16 @@ void virtio_gpu_user_destroy_owner(pid_t owner_tgid)
 {
     (void)owner_tgid;
 }
-int virtio_gpu_user_transfer(struct fb_gpu_virgl_transfer *req, int from_host)
+void virtio_gpu_user_destroy_render_owner(uint64 owner_id)
 {
+    (void)owner_id;
+}
+int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,
+                             struct fb_gpu_virgl_transfer *req,
+                             int from_host)
+{
+    (void)owner_id;
+    (void)owner_tgid;
     (void)req;
     (void)from_host;
     return -ENODEV;

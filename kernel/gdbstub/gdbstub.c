@@ -127,6 +127,8 @@ struct gdb_breakpoint {
 /* ──────────────────────────────────────────────────────────────────────────── */
 
 static struct {
+    volatile int     initialized;
+
     /* Target process */
     int              target_pid;      /* TGID of the debugged process */
     struct thread   *target;          /* thread that stopped (trap ctx) */
@@ -2018,6 +2020,9 @@ int gdbstub_signal_stop(struct thread *t, int signo)
  */
 int gdbstub_trap(struct thread *t)
 {
+    if (!__atomic_load_n(&gdb.initialized, __ATOMIC_ACQUIRE))
+        return -1;
+
     int tgid = thread_tgid(t);
     GDB_LOG("trap: tid=%d tgid=%d pc=0x%lx attached=%d target_pid=%d",
               t->pid, tgid, gdb_arch_get_pc(t->trapframe), gdb.attached, gdb.target_pid);
@@ -2312,6 +2317,9 @@ void gdbstub_exit_stop(struct thread *t, int status, int last)
  */
 int gdbstub_check_interrupt(struct thread *t)
 {
+    if (!__atomic_load_n(&gdb.initialized, __ATOMIC_ACQUIRE))
+        return 0;
+
     if (!gdb.attached || thread_tgid(t) != gdb.target_pid)
         return 0;
 
@@ -2710,6 +2718,7 @@ void gdbstub_init(void)
     sem_init(&gdb.target_resume, "gdb_resume", 0);
     sem_init(&gdb.debugger_attached, "gdb_dbgattach", 0);
     gdb.pending_pid = 0;
+    __atomic_store_n(&gdb.initialized, 1, __ATOMIC_RELEASE);
 
     struct thread *t = kthread_create("gdbstub", gdbstub_listener, 0, 0,
                                        KERNEL_STACK_ORDER);

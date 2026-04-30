@@ -27,6 +27,9 @@
 #include <printf.h>
 #include <lock/spinlock.h>
 #include <cmdline.h>
+#include <vfs/file.h>
+#include <vfs/poll.h>
+#include <vfs/vfs_types.h>
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -37,6 +40,7 @@ struct fb_gpu_bo_entry {
     int dead;
     uint32 handle;
     uint32 refs;
+    uint64 owner_id;
     pid_t owner_tgid;
     uint32 width;
     uint32 height;
@@ -46,6 +50,15 @@ struct fb_gpu_bo_entry {
     uint64 last_fence;
     uint64 signaled_fence;
     page_t **pages;
+};
+
+struct fb_gpu_fence_file {
+    struct fb_gpu_bo_entry *bo;
+    uint64 fence;
+};
+
+struct fb_gpu_virgl_fence_file {
+    uint64 fence;
 };
 
 /* ── I/O port helpers ────────────────────────────────────────────── */
@@ -102,12 +115,21 @@ static struct {
     struct fb_gpu_stats stats;
     uint32      next_bo_handle;
     uint64      next_bo_fence;
+    uint64      next_render_owner_id;
     struct fb_gpu_bo_entry bos[FB_GPU_MAX_BOS];
     spinlock_t  lock;           /* serializes concurrent access */
 } fb_state = {
     .next_bo_handle = 1,
     .next_bo_fence = 1,
+    .next_render_owner_id = 1,
     .lock = SPINLOCK_INITIALIZED("fb"),
+};
+
+static cdev_t gpu_cdev;
+
+struct fb_gpu_render_owner {
+    uint64 id;
+    pid_t tgid;
 };
 
 static int fb_cmdline_enabled(const char *key)
@@ -349,6 +371,18 @@ static struct fb_gpu_bo_entry *fb_bo_lookup_locked(uint32 handle)
     return NULL;
 }
 
+static int fb_bo_owner_matches(const struct fb_gpu_bo_entry *bo,
+                               uint64 owner_id, pid_t owner_tgid)
+{
+    if (bo == NULL)
+        return 0;
+    if (owner_id != 0)
+        return bo->owner_id == owner_id;
+    if (owner_tgid > 0 && bo->owner_id != 0)
+        return bo->owner_tgid == owner_tgid;
+    return 1;
+}
+
 static void fb_bo_release_pages(page_t **pages, uint32 npages)
 {
     if (pages == NULL)
@@ -381,16 +415,24 @@ static void fb_bo_put(struct fb_gpu_bo_entry *bo)
     fb_bo_release_pages(pages, npages);
 }
 
-static struct fb_gpu_bo_entry *fb_bo_get(uint32 handle)
+static struct fb_gpu_bo_entry *fb_bo_get_owned(uint32 handle, uint64 owner_id,
+                                               pid_t owner_tgid)
 {
     struct fb_gpu_bo_entry *bo;
 
     spin_lock(&fb_state.lock);
     bo = fb_bo_lookup_locked(handle);
+    if (bo != NULL && !fb_bo_owner_matches(bo, owner_id, owner_tgid))
+        bo = NULL;
     if (bo != NULL)
         bo->refs++;
     spin_unlock(&fb_state.lock);
     return bo;
+}
+
+static struct fb_gpu_bo_entry *fb_bo_get(uint32 handle)
+{
+    return fb_bo_get_owned(handle, 0, 0);
 }
 
 static int fb_bo_alloc_pages(uint32 npages, page_t ***pages_out)
@@ -417,7 +459,46 @@ static int fb_bo_alloc_pages(uint32 npages, page_t ***pages_out)
     return 0;
 }
 
-static int fb_bo_register(uint32 width, uint32 height, uint32 pitch,
+static int fb_bo_clone_pages(struct fb_gpu_bo_entry *bo, page_t ***pages_out)
+{
+    page_t **pages;
+    uint32 i;
+
+    if (bo == NULL || bo->npages == 0 || bo->pages == NULL ||
+        pages_out == NULL)
+        return -EINVAL;
+
+    pages = kvmalloc((size_t)bo->npages * sizeof(*pages));
+    if (pages == NULL)
+        return -ENOMEM;
+    memset(pages, 0, (size_t)bo->npages * sizeof(*pages));
+
+    for (i = 0; i < bo->npages; i++) {
+        uint64 pa;
+
+        if (bo->pages[i] == NULL)
+            goto fail;
+        pa = __page_to_pa(bo->pages[i]);
+        if (page_ref_inc((void *)pa) <= 0)
+            goto fail;
+        pages[i] = bo->pages[i];
+    }
+
+    *pages_out = pages;
+    return 0;
+
+fail:
+    while (i > 0) {
+        i--;
+        if (pages[i] != NULL)
+            page_ref_dec((void *)__page_to_pa(pages[i]));
+    }
+    kvfree(pages);
+    return -ENOMEM;
+}
+
+static int fb_bo_register(uint64 owner_id, pid_t owner_tgid,
+                          uint32 width, uint32 height, uint32 pitch,
                           uint64 size, page_t **pages, uint32 npages,
                           uint32 *handle)
 {
@@ -441,7 +522,8 @@ static int fb_bo_register(uint32 width, uint32 height, uint32 pitch,
     memset(bo, 0, sizeof(*bo));
     bo->in_use = 1;
     bo->handle = next;
-    bo->owner_tgid = current ? current->tgid : 0;
+    bo->owner_id = owner_id;
+    bo->owner_tgid = owner_tgid;
     bo->width = width;
     bo->height = height;
     bo->pitch = pitch;
@@ -450,12 +532,128 @@ static int fb_bo_register(uint32 width, uint32 height, uint32 pitch,
     bo->pages = pages;
     bo->refs = 1;
     fb_state.stats.bo_handles++;
+    fb_state.stats.bo_live_bytes += size;
+    if (fb_state.stats.bo_handles > fb_state.stats.bo_peak_handles)
+        fb_state.stats.bo_peak_handles = fb_state.stats.bo_handles;
+    if (fb_state.stats.bo_live_bytes > fb_state.stats.bo_peak_bytes)
+        fb_state.stats.bo_peak_bytes = fb_state.stats.bo_live_bytes;
     *handle = next;
     spin_unlock(&fb_state.lock);
     return 0;
 }
 
 static int fb_bo_destroy(uint32 handle);
+
+static int fb_bo_fops_release(struct vfs_inode *inode, struct vfs_file *file)
+{
+    (void)inode;
+    struct fb_gpu_bo_entry *bo =
+        file ? (struct fb_gpu_bo_entry *)file->private_data : NULL;
+
+    if (file != NULL)
+        file->private_data = NULL;
+    fb_bo_put(bo);
+    spin_lock(&fb_state.lock);
+    if (fb_state.stats.bo_fd_live > 0)
+        fb_state.stats.bo_fd_live--;
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
+static struct vfs_file_ops fb_bo_file_ops = {
+    .release = fb_bo_fops_release,
+};
+
+static int fb_fence_fops_release(struct vfs_inode *inode,
+                                 struct vfs_file *file)
+{
+    (void)inode;
+    struct fb_gpu_fence_file *fence =
+        file ? (struct fb_gpu_fence_file *)file->private_data : NULL;
+
+    if (file != NULL)
+        file->private_data = NULL;
+    if (fence != NULL) {
+        fb_bo_put(fence->bo);
+        kvfree(fence);
+    }
+    spin_lock(&fb_state.lock);
+    if (fb_state.stats.fence_fd_live > 0)
+        fb_state.stats.fence_fd_live--;
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
+static int fb_fence_fops_poll(struct vfs_file *file, short events)
+{
+    struct fb_gpu_fence_file *fence =
+        file ? (struct fb_gpu_fence_file *)file->private_data : NULL;
+    short revents = 0;
+
+    if (fence == NULL || fence->bo == NULL)
+        return POLLERR | POLLHUP;
+
+    spin_lock(&fb_state.lock);
+    if (fence->bo->signaled_fence >= fence->fence)
+        revents |= (events & (POLLIN | POLLRDNORM));
+    fb_state.stats.fence_fd_polls++;
+    if (revents & (POLLIN | POLLRDNORM))
+        fb_state.stats.fence_fd_poll_ready++;
+    spin_unlock(&fb_state.lock);
+
+    return revents;
+}
+
+static struct vfs_file_ops fb_fence_file_ops = {
+    .poll = fb_fence_fops_poll,
+    .release = fb_fence_fops_release,
+};
+
+static int fb_virgl_fence_fops_release(struct vfs_inode *inode,
+                                       struct vfs_file *file)
+{
+    struct fb_gpu_virgl_fence_file *fence =
+        file ? (struct fb_gpu_virgl_fence_file *)file->private_data : NULL;
+
+    (void)inode;
+    if (file != NULL)
+        file->private_data = NULL;
+    if (fence != NULL)
+        kvfree(fence);
+    spin_lock(&fb_state.lock);
+    if (fb_state.stats.fence_fd_live > 0)
+        fb_state.stats.fence_fd_live--;
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
+static int fb_virgl_fence_fops_poll(struct vfs_file *file, short events)
+{
+    struct fb_gpu_virgl_fence_file *fence =
+        file ? (struct fb_gpu_virgl_fence_file *)file->private_data : NULL;
+    uint64 signaled = 0;
+    short revents = 0;
+
+    if (fence == NULL)
+        return POLLERR | POLLHUP;
+    if (virtio_gpu_user_fence(0, 0, &signaled) != 0)
+        return POLLERR | POLLHUP;
+
+    spin_lock(&fb_state.lock);
+    fb_state.stats.fence_fd_polls++;
+    if (signaled >= fence->fence) {
+        revents |= (events & (POLLIN | POLLRDNORM));
+        if (revents & (POLLIN | POLLRDNORM))
+            fb_state.stats.fence_fd_poll_ready++;
+    }
+    spin_unlock(&fb_state.lock);
+    return revents;
+}
+
+static struct vfs_file_ops fb_virgl_fence_file_ops = {
+    .poll = fb_virgl_fence_fops_poll,
+    .release = fb_virgl_fence_fops_release,
+};
 
 static int fb_bo_map_current(struct fb_gpu_bo_entry *bo, uint64 *addr_out)
 {
@@ -514,7 +712,7 @@ static int fb_bo_map_current(struct fb_gpu_bo_entry *bo, uint64 *addr_out)
     return 0;
 }
 
-static void fb_bo_destroy_owner(pid_t owner_tgid)
+void fb_gpu_destroy_owner(pid_t owner_tgid)
 {
     uint32 handles[FB_GPU_MAX_BOS];
     int n = 0;
@@ -527,6 +725,28 @@ static void fb_bo_destroy_owner(pid_t owner_tgid)
         struct fb_gpu_bo_entry *bo = &fb_state.bos[i];
 
         if (!bo->in_use || bo->owner_tgid != owner_tgid)
+            continue;
+        handles[n++] = bo->handle;
+    }
+    spin_unlock(&fb_state.lock);
+
+    for (int i = 0; i < n; i++)
+        (void)fb_bo_destroy(handles[i]);
+}
+
+void fb_gpu_destroy_render_owner(uint64 owner_id)
+{
+    uint32 handles[FB_GPU_MAX_BOS];
+    int n = 0;
+
+    if (owner_id == 0)
+        return;
+
+    spin_lock(&fb_state.lock);
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        struct fb_gpu_bo_entry *bo = &fb_state.bos[i];
+
+        if (!bo->in_use || bo->owner_id != owner_id)
             continue;
         handles[n++] = bo->handle;
     }
@@ -550,10 +770,33 @@ static int fb_bo_destroy(uint32 handle)
     bo->dead = 1;
     if (fb_state.stats.bo_handles > 0)
         fb_state.stats.bo_handles--;
+    if (fb_state.stats.bo_live_bytes >= bo->size)
+        fb_state.stats.bo_live_bytes -= bo->size;
+    else
+        fb_state.stats.bo_live_bytes = 0;
     spin_unlock(&fb_state.lock);
 
     fb_bo_put(bo);
     return 0;
+}
+
+static int fb_bo_destroy_owned(uint32 handle, uint64 owner_id,
+                               pid_t owner_tgid)
+{
+    struct fb_gpu_bo_entry *bo;
+
+    spin_lock(&fb_state.lock);
+    bo = fb_bo_lookup_locked(handle);
+    if (bo == NULL) {
+        spin_unlock(&fb_state.lock);
+        return -ENOENT;
+    }
+    if (!fb_bo_owner_matches(bo, owner_id, owner_tgid)) {
+        spin_unlock(&fb_state.lock);
+        return -EPERM;
+    }
+    spin_unlock(&fb_state.lock);
+    return fb_bo_destroy(handle);
 }
 
 /* ── BGA mode setting ─────────────────────────────────────────────── */
@@ -782,11 +1025,26 @@ static int fb_open(cdev_t *cdev) { return 0; }
 static int fb_release(cdev_t *cdev)
 {
     (void)cdev;
+    return 0;
+}
 
-    if (current) {
-        fb_bo_destroy_owner(current->tgid);
-        virtio_gpu_user_destroy_owner(current->tgid);
-    }
+static int gpu_open(cdev_t *cdev)
+{
+    (void)cdev;
+    spin_lock(&fb_state.lock);
+    fb_state.stats.gpu_opens++;
+    fb_state.stats.gpu_live_opens++;
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
+static int gpu_release(cdev_t *cdev)
+{
+    (void)cdev;
+    spin_lock(&fb_state.lock);
+    if (fb_state.stats.gpu_live_opens > 0)
+        fb_state.stats.gpu_live_opens--;
+    spin_unlock(&fb_state.lock);
     return 0;
 }
 
@@ -878,9 +1136,12 @@ static int fb_read(cdev_t *cdev, bool user, void *buf, size_t count)
     }
 }
 
-static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
+static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
+                              uint64 owner_id, pid_t owner_tgid)
 {
     (void)cdev;
+    if (owner_tgid == 0 && current != NULL)
+        owner_tgid = current->tgid;
 
     if (!fb_state.detected)
         return -ENODEV;
@@ -983,8 +1244,8 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if (ret != 0)
             return ret;
 
-        ret = fb_bo_register(req.width, req.height, req.pitch, req.size,
-                             pages, npages, &handle);
+        ret = fb_bo_register(owner_id, owner_tgid, req.width, req.height,
+                             req.pitch, req.size, pages, npages, &handle);
         if (ret != 0) {
             fb_bo_release_pages(pages, npages);
             return ret;
@@ -1028,7 +1289,8 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             return -EINVAL;
 
         if (req.handle != 0) {
-            struct fb_gpu_bo_entry *bo = fb_bo_get(req.handle);
+            struct fb_gpu_bo_entry *bo =
+                fb_bo_get_owned(req.handle, owner_id, owner_tgid);
             int ret;
 
             if (bo == NULL) {
@@ -1067,7 +1329,7 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             return -EFAULT;
         if (req.flags != 0 || req.handle == 0)
             return -EINVAL;
-        return fb_bo_destroy(req.handle);
+        return fb_bo_destroy_owned(req.handle, owner_id, owner_tgid);
     }
 
     case FB_GPU_BO_IMPORT: {
@@ -1081,7 +1343,7 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if (req.flags != 0 || req.handle == 0)
             return -EINVAL;
 
-        bo = fb_bo_get(req.handle);
+        bo = fb_bo_get_owned(req.handle, owner_id, owner_tgid);
         if (bo == NULL) {
             spin_lock(&fb_state.lock);
             fb_state.stats.rejected_blits++;
@@ -1114,6 +1376,114 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         return 0;
     }
 
+    case FB_GPU_BO_EXPORT_FD: {
+        struct fb_gpu_bo_export_fd req;
+        struct fb_gpu_bo_entry *bo;
+        int fd;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.handle == 0)
+            return -EINVAL;
+
+        bo = fb_bo_get_owned(req.handle, owner_id, owner_tgid);
+        if (bo == NULL) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.rejected_blits++;
+            spin_unlock(&fb_state.lock);
+            return -ENOENT;
+        }
+
+        fd = vfs_custom_fd_alloc(&fb_bo_file_ops, bo, 0);
+        if (fd < 0) {
+            fb_bo_put(bo);
+            return fd;
+        }
+
+        req.fd = fd;
+        req.reserved = 0;
+        spin_lock(&fb_state.lock);
+        fb_state.stats.bo_fd_exports++;
+        fb_state.stats.bo_fd_live++;
+        if (fb_state.stats.bo_fd_live > fb_state.stats.bo_fd_peak)
+            fb_state.stats.bo_fd_peak = fb_state.stats.bo_fd_live;
+        spin_unlock(&fb_state.lock);
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    case FB_GPU_BO_IMPORT_FD: {
+        struct fb_gpu_bo_import_fd req;
+        struct vfs_file *file;
+        struct fb_gpu_bo_entry *bo;
+        page_t **pages;
+        uint32 handle;
+        uint64 addr;
+        int ret;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.fd < 0)
+            return -EINVAL;
+
+        file = vfs_fdtable_get_file(current->fdtable, req.fd);
+        if (file == NULL)
+            return -EBADF;
+        if (file->ops != &fb_bo_file_ops || file->private_data == NULL) {
+            vfs_fput(file);
+            return -EINVAL;
+        }
+        bo = (struct fb_gpu_bo_entry *)file->private_data;
+
+        ret = fb_bo_clone_pages(bo, &pages);
+        if (ret != 0) {
+            vfs_fput(file);
+            return ret;
+        }
+        ret = fb_bo_register(owner_id, owner_tgid, bo->width, bo->height,
+                             bo->pitch, bo->size, pages, bo->npages, &handle);
+        if (ret != 0) {
+            fb_bo_release_pages(pages, bo->npages);
+            vfs_fput(file);
+            return ret;
+        }
+
+        bo = fb_bo_get(handle);
+        if (bo == NULL) {
+            (void)fb_bo_destroy(handle);
+            vfs_fput(file);
+            return -ENOENT;
+        }
+        ret = fb_bo_map_current(bo, &addr);
+        if (ret != 0) {
+            fb_bo_put(bo);
+            (void)fb_bo_destroy(handle);
+            vfs_fput(file);
+            return ret;
+        }
+
+        req.width = bo->width;
+        req.height = bo->height;
+        req.pitch = bo->pitch;
+        req.handle = handle;
+        req.size = bo->size;
+        req.addr = addr;
+        fb_bo_put(bo);
+        vfs_fput(file);
+
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            (void)vm_munmap(current->vm, addr, (size_t)req.size);
+            (void)fb_bo_destroy(handle);
+            return -EFAULT;
+        }
+
+        spin_lock(&fb_state.lock);
+        fb_state.stats.bo_fd_imports++;
+        spin_unlock(&fb_state.lock);
+        return 0;
+    }
+
     case FB_GPU_BO_FENCE: {
         struct fb_gpu_bo_fence req;
         struct fb_gpu_bo_entry *bo;
@@ -1124,7 +1494,7 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if ((req.flags & ~FB_GPU_BO_FENCE_WAIT) != 0 || req.handle == 0)
             return -EINVAL;
 
-        bo = fb_bo_get(req.handle);
+        bo = fb_bo_get_owned(req.handle, owner_id, owner_tgid);
         if (bo == NULL) {
             spin_lock(&fb_state.lock);
             fb_state.stats.rejected_blits++;
@@ -1147,6 +1517,93 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         return 0;
     }
 
+    case FB_GPU_FENCE_EXPORT_FD: {
+        struct fb_gpu_fence_export_fd req;
+        struct fb_gpu_bo_entry *bo;
+        struct fb_gpu_fence_file *fence_file;
+        uint64 target;
+        int fd;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.handle == 0)
+            return -EINVAL;
+
+        bo = fb_bo_get_owned(req.handle, owner_id, owner_tgid);
+        if (bo == NULL)
+            return -ENOENT;
+
+        spin_lock(&fb_state.lock);
+        target = req.fence ? req.fence : bo->last_fence;
+        req.fence = target;
+        req.signaled = bo->signaled_fence;
+        spin_unlock(&fb_state.lock);
+        if (target == 0) {
+            fb_bo_put(bo);
+            return -EINVAL;
+        }
+
+        fence_file = kvmalloc(sizeof(*fence_file));
+        if (fence_file == NULL) {
+            fb_bo_put(bo);
+            return -ENOMEM;
+        }
+        fence_file->bo = bo;
+        fence_file->fence = target;
+
+        fd = vfs_custom_fd_alloc(&fb_fence_file_ops, fence_file, 0);
+        if (fd < 0) {
+            fb_bo_put(bo);
+            kvfree(fence_file);
+            return fd;
+        }
+
+        req.fd = fd;
+        req.reserved = 0;
+        spin_lock(&fb_state.lock);
+        fb_state.stats.fence_fd_exports++;
+        fb_state.stats.fence_fd_live++;
+        if (fb_state.stats.fence_fd_live > fb_state.stats.fence_fd_peak)
+            fb_state.stats.fence_fd_peak = fb_state.stats.fence_fd_live;
+        spin_unlock(&fb_state.lock);
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    case FB_GPU_FENCE_QUERY: {
+        struct fb_gpu_fence_query req;
+        struct fb_gpu_fence_file *fence_file;
+        struct vfs_file *file;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if ((req.flags & ~FB_GPU_FENCE_WAIT) != 0 || req.fd < 0)
+            return -EINVAL;
+
+        file = vfs_fdtable_get_file(current->fdtable, req.fd);
+        if (file == NULL)
+            return -EBADF;
+        if (file->ops != &fb_fence_file_ops || file->private_data == NULL) {
+            vfs_fput(file);
+            return -EINVAL;
+        }
+
+        fence_file = (struct fb_gpu_fence_file *)file->private_data;
+        spin_lock(&fb_state.lock);
+        req.fence = fence_file->fence;
+        req.signaled = fence_file->bo->signaled_fence;
+        fb_state.stats.fence_fd_queries++;
+        spin_unlock(&fb_state.lock);
+        vfs_fput(file);
+
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        if ((req.flags & FB_GPU_FENCE_WAIT) && req.signaled < req.fence)
+            return -EAGAIN;
+        return 0;
+    }
+
     case FB_GPU_VIRGL_CTX_CREATE: {
         struct fb_gpu_virgl_ctx req;
         int ret;
@@ -1157,11 +1614,13 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             return -EINVAL;
         req.debug_name[sizeof(req.debug_name) - 1] = 0;
 
-        ret = virtio_gpu_user_context_create(req.debug_name, &req.ctx_id);
+        ret = virtio_gpu_user_context_create(owner_id, owner_tgid,
+                                             req.debug_name, &req.ctx_id);
         if (ret != 0)
             return ret;
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
-            (void)virtio_gpu_user_context_destroy(req.ctx_id);
+            (void)virtio_gpu_user_context_destroy(owner_id, owner_tgid,
+                                                  req.ctx_id);
             return -EFAULT;
         }
         return 0;
@@ -1174,7 +1633,8 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             return -EFAULT;
         if (req.flags != 0 || req.ctx_id == 0)
             return -EINVAL;
-        return virtio_gpu_user_context_destroy(req.ctx_id);
+        return virtio_gpu_user_context_destroy(owner_id, owner_tgid,
+                                               req.ctx_id);
     }
 
     case FB_GPU_VIRGL_SUBMIT: {
@@ -1186,7 +1646,8 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
-        if (req.flags != 0 || req.ctx_id == 0 || req.cmd == 0 ||
+        if ((req.flags & ~FB_GPU_VIRGL_SUBMIT_FORCE_FAIL) != 0 ||
+            req.ctx_id == 0 || req.cmd == 0 ||
             req.cmd_size == 0 || req.cmd_size > PGSIZE * 64 ||
             (req.cmd_size & (sizeof(uint32) - 1)) != 0)
             return -EINVAL;
@@ -1206,7 +1667,8 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             return -EFAULT;
         }
 
-        ret = virtio_gpu_user_submit(req.ctx_id, cmds,
+        ret = virtio_gpu_user_submit(owner_id, owner_tgid, req.ctx_id,
+                                     req.flags, cmds,
                                      req.cmd_size / sizeof(uint32),
                                      &req.fence, &req.signaled);
         page_free(cmds, order);
@@ -1232,6 +1694,88 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
             return -EFAULT;
         return ret;
+    }
+
+    case FB_GPU_VIRGL_FENCE_EXPORT_FD: {
+        struct fb_gpu_virgl_fence_export_fd req;
+        struct fb_gpu_virgl_fence_file *fence_file;
+        uint64 signaled = 0;
+        uint64 target;
+        int fd;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0)
+            return -EINVAL;
+        if (virtio_gpu_user_fence(0, 0, &signaled) != 0)
+            return -ENODEV;
+        target = req.fence ? req.fence : signaled;
+        if (target == 0)
+            return -EINVAL;
+
+        fence_file = kvmalloc(sizeof(*fence_file));
+        if (fence_file == NULL)
+            return -ENOMEM;
+        fence_file->fence = target;
+        fd = vfs_custom_fd_alloc(&fb_virgl_fence_file_ops, fence_file, 0);
+        if (fd < 0) {
+            kvfree(fence_file);
+            return fd;
+        }
+
+        req.fd = fd;
+        req.fence = target;
+        req.signaled = signaled;
+        spin_lock(&fb_state.lock);
+        fb_state.stats.fence_fd_exports++;
+        fb_state.stats.fence_fd_live++;
+        if (fb_state.stats.fence_fd_live > fb_state.stats.fence_fd_peak)
+            fb_state.stats.fence_fd_peak = fb_state.stats.fence_fd_live;
+        spin_unlock(&fb_state.lock);
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    case FB_GPU_VIRGL_FENCE_QUERY_FD: {
+        struct fb_gpu_virgl_fence_query_fd req;
+        struct fb_gpu_virgl_fence_file *fence_file;
+        struct vfs_file *file;
+        int ret;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if ((req.flags & ~FB_GPU_VIRGL_FENCE_WAIT) != 0 || req.fd < 0)
+            return -EINVAL;
+
+        file = vfs_fdtable_get_file(current->fdtable, req.fd);
+        if (file == NULL)
+            return -EBADF;
+        if (file->ops != &fb_virgl_fence_file_ops ||
+            file->private_data == NULL) {
+            vfs_fput(file);
+            return -EINVAL;
+        }
+        fence_file = (struct fb_gpu_virgl_fence_file *)file->private_data;
+        req.fence = fence_file->fence;
+        vfs_fput(file);
+
+        ret = virtio_gpu_user_fence(req.fence,
+                                    (req.flags & FB_GPU_VIRGL_FENCE_WAIT) != 0,
+                                    &req.signaled);
+        if (ret != 0) {
+            if (either_copyout(1, (uint64)arg, (char *)&req,
+                               sizeof(req)) < 0)
+                return -EFAULT;
+            return ret;
+        }
+
+        spin_lock(&fb_state.lock);
+        fb_state.stats.fence_fd_queries++;
+        spin_unlock(&fb_state.lock);
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
     }
 
     case FB_GPU_VIRGL_GET_CAPS: {
@@ -1277,11 +1821,12 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             return -EFAULT;
         req.resource_id = 0;
         req.addr = 0;
-        ret = virtio_gpu_user_resource_create(&req);
+        ret = virtio_gpu_user_resource_create(owner_id, owner_tgid, &req);
         if (ret != 0)
             return ret;
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
-            (void)virtio_gpu_user_resource_destroy(req.resource_id);
+            (void)virtio_gpu_user_resource_destroy(owner_id, owner_tgid,
+                                                   req.resource_id);
             if (req.addr != 0 && req.size != 0)
                 (void)vm_munmap(current->vm, req.addr, (size_t)req.size);
             return -EFAULT;
@@ -1296,7 +1841,8 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
             return -EFAULT;
         if (req.flags != 0 || req.resource_id == 0)
             return -EINVAL;
-        return virtio_gpu_user_resource_destroy(req.resource_id);
+        return virtio_gpu_user_resource_destroy(owner_id, owner_tgid,
+                                                req.resource_id);
     }
 
     case FB_GPU_VIRGL_TRANSFER_TO_HOST:
@@ -1305,7 +1851,7 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
-        return virtio_gpu_user_transfer(&req,
+        return virtio_gpu_user_transfer(owner_id, owner_tgid, &req,
             cmd == FB_GPU_VIRGL_TRANSFER_FROM_HOST);
     }
 
@@ -1395,6 +1941,136 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     }
 }
 
+static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
+{
+    return fb_ioctl_for_owner(cdev, cmd, arg, 0,
+                              current ? current->tgid : 0);
+}
+
+static int gpu_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
+{
+    switch (cmd) {
+    case FB_GPU_GET_STATS:
+    case FB_GPU_BO_CREATE:
+    case FB_GPU_BO_DESTROY:
+    case FB_GPU_BO_IMPORT:
+    case FB_GPU_BO_EXPORT_FD:
+    case FB_GPU_BO_IMPORT_FD:
+    case FB_GPU_BO_FENCE:
+    case FB_GPU_FENCE_EXPORT_FD:
+    case FB_GPU_FENCE_QUERY:
+    case FB_GPU_VIRGL_CTX_CREATE:
+    case FB_GPU_VIRGL_CTX_DESTROY:
+    case FB_GPU_VIRGL_SUBMIT:
+    case FB_GPU_VIRGL_FENCE:
+    case FB_GPU_VIRGL_FENCE_EXPORT_FD:
+    case FB_GPU_VIRGL_FENCE_QUERY_FD:
+    case FB_GPU_VIRGL_GET_CAPS:
+    case FB_GPU_VIRGL_RESOURCE_CREATE:
+    case FB_GPU_VIRGL_RESOURCE_DESTROY:
+    case FB_GPU_VIRGL_TRANSFER_TO_HOST:
+    case FB_GPU_VIRGL_TRANSFER_FROM_HOST:
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    spin_lock(&fb_state.lock);
+    fb_state.stats.gpu_ioctls++;
+    spin_unlock(&fb_state.lock);
+    return fb_ioctl(cdev, cmd, arg);
+}
+
+static uint64 gpu_alloc_render_owner_id(void)
+{
+    uint64 id;
+
+    spin_lock(&fb_state.lock);
+    id = fb_state.next_render_owner_id++;
+    if (fb_state.next_render_owner_id == 0)
+        fb_state.next_render_owner_id = 1;
+    spin_unlock(&fb_state.lock);
+    return id;
+}
+
+static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
+{
+    struct fb_gpu_render_owner *owner =
+        file ? (struct fb_gpu_render_owner *)file->private_data : NULL;
+
+    (void)inode;
+    if (file != NULL)
+        file->private_data = NULL;
+    if (owner != NULL) {
+        fb_gpu_destroy_render_owner(owner->id);
+        virtio_gpu_user_destroy_render_owner(owner->id);
+        kvfree(owner);
+    }
+    return gpu_release(&gpu_cdev);
+}
+
+static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    struct fb_gpu_render_owner *owner =
+        file ? (struct fb_gpu_render_owner *)file->private_data : NULL;
+
+    if (owner == NULL)
+        return -EBADF;
+    switch (cmd) {
+    case FB_GPU_GET_STATS:
+    case FB_GPU_BO_CREATE:
+    case FB_GPU_BO_DESTROY:
+    case FB_GPU_BO_IMPORT:
+    case FB_GPU_BO_EXPORT_FD:
+    case FB_GPU_BO_IMPORT_FD:
+    case FB_GPU_BO_FENCE:
+    case FB_GPU_FENCE_EXPORT_FD:
+    case FB_GPU_FENCE_QUERY:
+    case FB_GPU_VIRGL_CTX_CREATE:
+    case FB_GPU_VIRGL_CTX_DESTROY:
+    case FB_GPU_VIRGL_SUBMIT:
+    case FB_GPU_VIRGL_FENCE:
+    case FB_GPU_VIRGL_FENCE_EXPORT_FD:
+    case FB_GPU_VIRGL_FENCE_QUERY_FD:
+    case FB_GPU_VIRGL_GET_CAPS:
+    case FB_GPU_VIRGL_RESOURCE_CREATE:
+    case FB_GPU_VIRGL_RESOURCE_DESTROY:
+    case FB_GPU_VIRGL_TRANSFER_TO_HOST:
+    case FB_GPU_VIRGL_TRANSFER_FROM_HOST:
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    spin_lock(&fb_state.lock);
+    fb_state.stats.gpu_ioctls++;
+    spin_unlock(&fb_state.lock);
+    return fb_ioctl_for_owner(&gpu_cdev, cmd, arg, owner->id, owner->tgid);
+}
+
+static struct vfs_file_ops gpu_file_ops = {
+    .release = gpu_fops_release,
+    .ioctl   = gpu_fops_ioctl,
+};
+
+static int gpu_open_file(cdev_t *cdev, struct vfs_file *file)
+{
+    struct fb_gpu_render_owner *owner;
+    int ret = gpu_open(cdev);
+    if (ret != 0)
+        return ret;
+    owner = kvmalloc(sizeof(*owner));
+    if (owner == NULL) {
+        (void)gpu_release(cdev);
+        return -ENOMEM;
+    }
+    owner->id = gpu_alloc_render_owner_id();
+    owner->tgid = current ? current->tgid : 0;
+    file->ops = &gpu_file_ops;
+    file->private_data = owner;
+    return 0;
+}
+
 static cdev_t fb_cdev = {
     .dev = {
         .major = FB_MAJOR,
@@ -1414,6 +2090,26 @@ static cdev_t fb_cdev = {
     },
 };
 
+static cdev_t gpu_cdev = {
+    .dev = {
+        .major = GPU_MAJOR,
+        .minor = GPU_MINOR,
+        .devname = "gpu0",
+        .devmode = S_IFCHR | 0666,
+    },
+    .readable = 1,
+    .writable = 1,
+    .ops = {
+        .read    = NULL,
+        .write   = NULL,
+        .open    = gpu_open,
+        .release = gpu_release,
+        .ioctl   = gpu_ioctl,
+        .poll    = NULL,
+        .open_file = gpu_open_file,
+    },
+};
+
 void fbdevinit(void)
 {
     if (!fb_state.detected) {
@@ -1423,8 +2119,11 @@ void fbdevinit(void)
 
     int ret = cdev_register(&fb_cdev);
     assert(ret == 0, "fbdevinit: failed to register fb cdev: %d", ret);
+    ret = cdev_register(&gpu_cdev);
+    assert(ret == 0, "fbdevinit: failed to register gpu cdev: %d", ret);
     printf("FB: registered /dev/fb0 (%dx%dx%d)\n",
            fb_state.xres, fb_state.yres, fb_state.bpp);
+    printf("GPU: registered /dev/gpu0 (render facade)\n");
 }
 
 /* ── Panic screen: BSOD-style framebuffer overlay ─────────────────── */

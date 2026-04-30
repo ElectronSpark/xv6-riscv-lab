@@ -47,6 +47,7 @@ struct mouse_event {
 #define MOUSE_EVENT_F_ABSOLUTE  0x01
 
 void ps2mouse_init(void);
+void mouse_input_push_event(const struct mouse_event *ev);
 
 /* Process one byte read from the i8042 data port that the
  * controller marked as auxiliary (mouse) data.  Exposed so the

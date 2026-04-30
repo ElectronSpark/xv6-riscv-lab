@@ -34,10 +34,18 @@
 #define FB_GPU_VIRGL_RESOURCE_DESTROY 0x461F /* destroy a virgl resource */
 #define FB_GPU_VIRGL_TRANSFER_TO_HOST 0x4620 /* upload mapped resource backing */
 #define FB_GPU_VIRGL_TRANSFER_FROM_HOST 0x4621 /* download resource backing */
+#define FB_GPU_BO_EXPORT_FD  0x4622   /* export a BO as a file descriptor */
+#define FB_GPU_BO_IMPORT_FD  0x4623   /* map a BO from an exported fd */
+#define FB_GPU_FENCE_EXPORT_FD 0x4624 /* export a BO fence as an fd */
+#define FB_GPU_FENCE_QUERY     0x4625 /* query/wait an exported fence fd */
+#define FB_GPU_VIRGL_FENCE_EXPORT_FD 0x4626 /* export a virgl fence as an fd */
+#define FB_GPU_VIRGL_FENCE_QUERY_FD  0x4627 /* query/wait a virgl fence fd */
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
+#define FB_GPU_FENCE_WAIT 0x1         /* wait for fence fd to signal */
 #define FB_GPU_VIRGL_FENCE_WAIT 0x1   /* wait_for must be signaled */
+#define FB_GPU_VIRGL_SUBMIT_FORCE_FAIL 0x80000000u /* test-only context fault */
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -125,12 +133,46 @@ struct fb_gpu_bo_import {
     uint64   addr;           /* returned caller-local mapping */
 };
 
+struct fb_gpu_bo_export_fd {
+    uint32   handle;         /* existing exported handle */
+    uint32   flags;          /* reserved, must be 0 */
+    int32    fd;             /* returned fd-like BO capability */
+    uint32   reserved;
+};
+
+struct fb_gpu_bo_import_fd {
+    int32    fd;             /* BO capability returned by EXPORT_FD */
+    uint32   flags;          /* reserved, must be 0 */
+    uint32   width;          /* returned width in pixels */
+    uint32   height;         /* returned height in pixels */
+    uint32   pitch;          /* returned pitch in bytes */
+    uint32   handle;         /* returned caller-local imported BO handle */
+    uint64   size;           /* returned mapping size */
+    uint64   addr;           /* returned caller-local mapping */
+};
+
 struct fb_gpu_bo_fence {
     uint32   handle;         /* existing exported handle */
     uint32   flags;          /* FB_GPU_BO_FENCE_* */
     uint64   wait_for;       /* 0 means the BO's latest present fence */
     uint64   signaled;       /* returned latest completed fence */
     uint64   last_present;   /* returned latest issued present fence */
+};
+
+struct fb_gpu_fence_export_fd {
+    uint32   handle;         /* BO handle whose fence is exported */
+    uint32   flags;          /* reserved, must be 0 */
+    uint64   fence;          /* input target fence; 0 means latest */
+    int32    fd;             /* returned fence capability fd */
+    uint32   reserved;
+    uint64   signaled;       /* returned latest completed fence */
+};
+
+struct fb_gpu_fence_query {
+    int32    fd;             /* fence capability returned by EXPORT_FD */
+    uint32   flags;          /* FB_GPU_FENCE_* */
+    uint64   fence;          /* returned target fence */
+    uint64   signaled;       /* returned latest completed fence */
 };
 
 struct fb_gpu_virgl_ctx {
@@ -141,7 +183,7 @@ struct fb_gpu_virgl_ctx {
 
 struct fb_gpu_virgl_submit {
     uint32   ctx_id;          /* context returned by CTX_CREATE */
-    uint32   flags;           /* reserved, must be 0 */
+    uint32   flags;           /* FB_GPU_VIRGL_SUBMIT_* */
     uint32   cmd_size;        /* command bytes at cmd, max 256 KiB */
     uint32   reserved;
     uint64   cmd;             /* user pointer to uint32 command dwords */
@@ -153,6 +195,20 @@ struct fb_gpu_virgl_fence {
     uint32   flags;           /* FB_GPU_VIRGL_FENCE_* */
     uint32   reserved;
     uint64   wait_for;        /* 0 queries latest completed fence */
+    uint64   signaled;        /* returned latest completed fence id */
+};
+
+struct fb_gpu_virgl_fence_export_fd {
+    uint32   flags;           /* reserved, must be 0 */
+    int32    fd;              /* returned fence capability fd */
+    uint64   fence;           /* input target fence; 0 means latest completed */
+    uint64   signaled;        /* returned latest completed fence id */
+};
+
+struct fb_gpu_virgl_fence_query_fd {
+    int32    fd;              /* fence capability returned by EXPORT_FD */
+    uint32   flags;           /* FB_GPU_VIRGL_FENCE_WAIT */
+    uint64   fence;           /* returned target fence */
     uint64   signaled;        /* returned latest completed fence id */
 };
 
@@ -225,9 +281,25 @@ struct fb_gpu_stats {
     uint64 bo_bytes;           /* total graphics buffer bytes mapped */
     uint64 bo_presents;        /* graphics buffer present requests */
     uint64 bo_handles;         /* currently tracked graphics buffer handles */
+    uint64 bo_live_bytes;      /* bytes currently pinned by tracked BOs */
+    uint64 bo_peak_handles;    /* high-water mark of tracked BO handles */
+    uint64 bo_peak_bytes;      /* high-water mark of tracked BO bytes */
     uint64 bo_imports;         /* graphics buffer handle import/query requests */
+    uint64 bo_fd_exports;      /* graphics buffer fd capability exports */
+    uint64 bo_fd_imports;      /* graphics buffer fd capability imports */
+    uint64 bo_fd_live;         /* currently open BO capability fds */
+    uint64 bo_fd_peak;         /* high-water mark of open BO fds */
     uint64 bo_fences;          /* completed graphics buffer present fences */
     uint64 bo_fence_waits;     /* graphics buffer fence wait/query requests */
+    uint64 fence_fd_exports;   /* BO fence fd capability exports */
+    uint64 fence_fd_queries;   /* BO fence fd query/wait requests */
+    uint64 fence_fd_live;      /* currently open fence capability fds */
+    uint64 fence_fd_peak;      /* high-water mark of open fence fds */
+    uint64 fence_fd_polls;     /* fence capability poll readiness checks */
+    uint64 fence_fd_poll_ready; /* poll checks that reported signaled fences */
+    uint64 gpu_opens;          /* /dev/gpu0 opens */
+    uint64 gpu_live_opens;     /* currently open /dev/gpu0 handles */
+    uint64 gpu_ioctls;         /* /dev/gpu0 render-device ioctl calls */
     uint64 virtio_commands;    /* virtio-gpu control commands completed */
     uint64 virtio_failures;    /* virtio-gpu commands rejected or failed */
     uint64 virtio_timeouts;    /* virtio-gpu commands timed out */
@@ -241,6 +313,8 @@ struct fb_gpu_stats {
     uint64 virtio_virgl_version; /* max version for the selected virgl capset */
     uint64 virtio_virgl_size;  /* max capset payload size */
     uint64 virtio_contexts;    /* completed 3D context create/destroy commands */
+    uint64 virtio_context_failed; /* currently failed user 3D contexts */
+    uint64 virtio_context_failures; /* user 3D contexts marked failed */
     uint64 virtio_submits;     /* completed 3D command submissions */
     uint64 virtio_fences;      /* completed virtio-gpu fence submissions */
     uint64 virtio_last_fence;  /* last completed virtio-gpu fence id */
@@ -279,12 +353,15 @@ struct fb_gpu_stats {
 /* Device numbers */
 #define FB_MAJOR  29
 #define FB_MINOR   0
+#define GPU_MAJOR 30
+#define GPU_MINOR  0
 
 /* Kernel API */
 void fbdevinit(void);
 int  fb_detected(void);
 void fb_pci_init(uint8 bus, uint8 dev, uint8 func);
 void fb_get_resolution(uint32 *xres, uint32 *yres);
+void fb_gpu_destroy_owner(pid_t owner_tgid);
 void fb_panic_screen(const char *text);
 
 #endif /* __KERNEL_DEV_FB_H */

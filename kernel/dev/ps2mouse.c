@@ -53,6 +53,13 @@ static inline uint8 ps2_inb(uint16 port)
 #define VMMOUSE_REQUEST_REL     0x4F525245u  /* "ERRO" — request relative */
 
 static int vmmouse_available;  /* non-zero if VMware vmmouse works */
+static int vmmouse_nodata;
+static volatile uint64 dbg_vmmouse_status_err;
+static volatile uint64 dbg_vmmouse_partial;
+static volatile uint64 dbg_vmmouse_abs_reqs;
+static volatile uint64 dbg_vmmouse_fallbacks;
+
+#define VMMOUSE_NODATA_LIMIT 32
 
 static inline void vmware_cmd(uint32 cmd, uint32 param,
                               uint32 *a, uint32 *b, uint32 *c, uint32 *d)
@@ -118,8 +125,32 @@ static int vmmouse_read(struct mouse_event *ev)
     vmware_cmd(VMCMD_ABSPTR_STATUS, 0, &status, NULL, NULL, NULL);
 
     uint32 nwords = status & 0xFFFFu;
-    if (nwords < 4)
+    if ((status & 0xFFFF0000u) == 0xFFFF0000u) {
+        dbg_vmmouse_status_err++;
+        vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_DISABLE, NULL, NULL, NULL, NULL);
+        vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_ENABLE, NULL, NULL, NULL, NULL);
+        vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_REQUEST_ABS, NULL, NULL, NULL, NULL);
+        dbg_vmmouse_abs_reqs++;
         return 0;  /* no data */
+    }
+
+    if (nwords < 4) {
+        /*
+         * The vmmouse queue can contain a short control token, commonly the
+         * VERSION word produced by ENABLE/READ_ID.  If that token is left
+         * queued, every future poll sees "not enough words" and absolute
+         * pointer input appears frozen.  Drain short packets and re-request
+         * absolute data so the next host motion can produce a full event.
+         */
+        if (nwords > 0) {
+            uint32 dummy;
+            dbg_vmmouse_partial++;
+            vmware_cmd(VMCMD_ABSPTR_DATA, nwords, &dummy, NULL, NULL, NULL);
+            vmware_cmd(VMCMD_ABSPTR_COMMAND, VMMOUSE_REQUEST_ABS, NULL, NULL, NULL, NULL);
+            dbg_vmmouse_abs_reqs++;
+        }
+        return 0;  /* no data */
+    }
 
     /* Correct register layout per upstream QEMU hw/i386/vmmouse.c
      * (verified against v9.0.x source): the device's data queue is
@@ -238,6 +269,14 @@ static int ring_pop(struct mouse_event *ev)
     return 0;
 }
 
+void mouse_input_push_event(const struct mouse_event *ev)
+{
+    spin_lock(&mouse_state.lock);
+    ring_push((struct mouse_event *)ev);
+    spin_unlock(&mouse_state.lock);
+    wakeup_on_chan(&mouse_state.ring);
+}
+
 /* ── IRQ handler ──────────────────────────────────────────────────── */
 
 /* Lightweight diagnostic counters (no printf in IRQ context).
@@ -263,6 +302,8 @@ static int vmmouse_drain_locked(void)
         dbg_mouse_packets++;
         got++;
     }
+    if (got)
+        vmmouse_nodata = 0;
 
     return got;
 }
@@ -309,12 +350,30 @@ void ps2mouse_handle_byte(uint8 byte)
 
     if (vmmouse_available) {
         int got = vmmouse_drain_locked();
-        /* Discard the trigger byte; do NOT feed PS/2 packet assembly. */
-        mouse_state.packet_idx = 0;
-        spin_unlock(&mouse_state.lock);
-        if (got)
+        if (got) {
+            /* Discard the trigger byte; do NOT feed PS/2 packet assembly. */
+            mouse_state.packet_idx = 0;
+            spin_unlock(&mouse_state.lock);
             wakeup_on_chan(&mouse_state.ring);
-        return;
+            return;
+        }
+
+        /*
+         * QEMU can leave vmport/vmmouse advertised while the absolute-data
+         * queue stops yielding packets.  If we keep discarding i8042 bytes in
+         * that state, the pointer appears frozen forever.  After a short run
+         * of empty vmmouse wakeups, fall back to the normal PS/2 packet path.
+         */
+        if (++vmmouse_nodata >= VMMOUSE_NODATA_LIMIT) {
+            vmmouse_available = 0;
+            vmmouse_nodata = 0;
+            dbg_vmmouse_fallbacks++;
+            printf("PS2 mouse: vmmouse no data, falling back to PS/2 relative mode\n");
+        } else {
+            mouse_state.packet_idx = 0;
+            spin_unlock(&mouse_state.lock);
+            return;
+        }
     }
 
     /* Pure PS/2 path */

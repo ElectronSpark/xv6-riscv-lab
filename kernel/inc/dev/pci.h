@@ -110,8 +110,10 @@ struct pci_common_confspace_header {
 #define PCI_DEVICE_VIRTIO_BLK_TRANSITIONAL 0x1001 // virtio block (transitional)
 #define PCI_DEVICE_VIRTIO_NET_TRANSITIONAL 0x1000 // virtio net (transitional)
 #define PCI_DEVICE_VIRTIO_GPU_TRANSITIONAL 0x1010 // virtio gpu (transitional)
+#define PCI_DEVICE_VIRTIO_INPUT_TRANSITIONAL 0x1012 // virtio input (transitional)
 #define PCI_DEVICE_VIRTIO_BLK_MODERN       0x1042 // virtio block (modern only)
 #define PCI_DEVICE_VIRTIO_GPU_MODERN       0x1050 // virtio gpu (modern only)
+#define PCI_DEVICE_VIRTIO_INPUT_MODERN     0x1052 // virtio input (modern only)
 
 // PCI Capability IDs
 #define PCI_CAP_ID_VENDOR   0x09   // Vendor-specific capability (used by virtio)
@@ -260,6 +262,7 @@ struct virtio_pci_discovery {
 // Get discovered virtio-blk PCI device info by index
 struct virtio_pci_discovery *pci_get_virtio_blk(int index);
 struct virtio_pci_discovery *pci_get_virtio_gpu(int index);
+struct virtio_pci_discovery *pci_get_virtio_input(int index);
 
 // Prototype
 void pci_init(void);

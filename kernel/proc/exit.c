@@ -206,8 +206,10 @@ void exit(int status) {
         proctab_proc_remove(p);
         pid_wunlock();
 
-        if (last_in_group)
+        if (last_in_group) {
+            fb_gpu_destroy_owner(thread_tgid(p));
             virtio_gpu_user_destroy_owner(thread_tgid(p));
+        }
 
         __free_pid();
 
@@ -294,8 +296,10 @@ void exit(int status) {
         pid_wunlock();
     }
 
-    if (last_in_group || tg == NULL)
+    if (last_in_group || tg == NULL) {
+        fb_gpu_destroy_owner(thread_tgid(p));
         virtio_gpu_user_destroy_owner(thread_tgid(p));
+    }
 
     /* Outside pid_wlock: unregister /dev/pts/N from devtmpfs so the
      * device node disappears immediately (can't call cdev_unregister

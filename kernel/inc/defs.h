@@ -50,6 +50,8 @@ void consoledevinit(void);
 void nullranddevinit(void);
 void random_fill_bytes(void *buf, size_t count);
 void fbdevinit(void);
+void fb_gpu_destroy_owner(pid_t owner_tgid);
+void fb_gpu_destroy_render_owner(uint64 owner_id);
 void ps2mouse_init(void);
 void ps2kbd_init(void);
 void consoleintr(int);
@@ -204,21 +206,29 @@ void plic_enable_irq(int);
 // virtio_disk.c
 void virtio_disk_init(void);
 void virtio_gpu_init(void);
+void virtio_input_init(void);
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);
 void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
                                 uint32 x, uint32 y, uint32 w, uint32 h);
-int virtio_gpu_user_context_create(const char *name, uint32 *ctx_id);
-int virtio_gpu_user_context_destroy(uint32 ctx_id);
-int virtio_gpu_user_submit(uint32 ctx_id, const uint32 *cmds,
-                           uint32 nr_dwords, uint64 *fence,
-                           uint64 *signaled);
+int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
+                                   const char *name, uint32 *ctx_id);
+int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
+                                    uint32 ctx_id);
+int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
+                           uint32 flags, const uint32 *cmds,
+                           uint32 nr_dwords, uint64 *fence, uint64 *signaled);
 int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled);
 int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
                              uint32 *capset_version, uint32 *capset_size);
-int virtio_gpu_user_resource_create(struct fb_gpu_virgl_resource_create *req);
-int virtio_gpu_user_resource_destroy(uint32 resource_id);
+int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
+                                    struct fb_gpu_virgl_resource_create *req);
+int virtio_gpu_user_resource_destroy(uint64 owner_id, pid_t owner_tgid,
+                                     uint32 resource_id);
 void virtio_gpu_user_destroy_owner(pid_t owner_tgid);
-int virtio_gpu_user_transfer(struct fb_gpu_virgl_transfer *req, int from_host);
+void virtio_gpu_user_destroy_render_owner(uint64 owner_id);
+int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,
+                             struct fb_gpu_virgl_transfer *req,
+                             int from_host);
 
 // ramdisk.c
 void ramdisk_init(void);
