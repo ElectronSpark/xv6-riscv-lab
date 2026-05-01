@@ -27,8 +27,8 @@
 #define NR_THREAD 10000   // maximum number of threads
 // #define NR_THREAD       0xFFFFFFFFFFFFFFUL
 #define NCPU 8              // maximum number of CPUs
-#define NOFILE 512          // open files per thread
-#define NFILE 512           // open files per system
+#define NOFILE 2048         // open files per thread
+#define NFILE 2048          // open files per system
 #define NINODE 50           // maximum number of active i-nodes
 #define NDEV 10             // maximum major device number
 #define ROOTDEV mkdev(2, 1) // device number of file system root disk (virtio)

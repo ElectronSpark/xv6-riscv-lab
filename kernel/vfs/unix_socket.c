@@ -2,7 +2,8 @@
  * unix_socket.c - AF_UNIX (UNIX domain) socket implementation
  *
  * Provides local inter-process communication via SOCK_STREAM (connection-
- * oriented byte stream) and SOCK_DGRAM (connectionless datagram) types.
+ * oriented byte stream), SOCK_SEQPACKET (connection-oriented packet stream),
+ * and SOCK_DGRAM (connectionless datagram) types.
  *
  * Design:
  *   - Each connected socket has a TX ring buffer (like a pipe).
@@ -95,6 +96,35 @@ struct vfs_file_ops unix_socket_file_ops = {
 #define RING_WRITABLE(r) (UNIX_BUF_SIZE - RING_READABLE(r))
 #define UNIX_WRITE_LOWAT PAGE_SIZE
 
+static inline bool unix_sock_connection_oriented(const struct unix_sock *sk)
+{
+    return sk->type == SOCK_STREAM || sk->type == SOCK_SEQPACKET;
+}
+
+static inline size_t unix_packet_count_locked(const struct unix_sock *sk)
+{
+    if (sk->packet_tail >= sk->packet_head)
+        return sk->packet_tail - sk->packet_head;
+    return UNIX_PACKET_QUEUE_MAX - sk->packet_head + sk->packet_tail;
+}
+
+static int unix_packet_enqueue_locked(struct unix_sock *sk, uint end_mark)
+{
+    if (sk->type != SOCK_SEQPACKET)
+        return 0;
+    if (unix_packet_count_locked(sk) >= UNIX_PACKET_QUEUE_MAX - 1)
+        return -EAGAIN;
+    sk->packet_queue[sk->packet_tail] = end_mark;
+    sk->packet_tail = (sk->packet_tail + 1) % UNIX_PACKET_QUEUE_MAX;
+    return 0;
+}
+
+static int unix_packet_has_space_locked(struct unix_sock *sk)
+{
+    return sk->type != SOCK_SEQPACKET ||
+        unix_packet_count_locked(sk) < UNIX_PACKET_QUEUE_MAX - 1;
+}
+
 static int ring_alloc(struct unix_ring *r)
 {
     r->data = kvmalloc(UNIX_BUF_SIZE);
@@ -181,8 +211,9 @@ static struct unix_sock *unix_sock_alloc(void)
 static void unix_sock_free(struct unix_sock *sk)
 {
     while (sk->scm_head != sk->scm_tail) {
-        struct vfs_file *pending = sk->scm_queue[sk->scm_head];
-        sk->scm_queue[sk->scm_head] = NULL;
+        struct vfs_file *pending = sk->scm_queue[sk->scm_head].file;
+        sk->scm_queue[sk->scm_head].file = NULL;
+        sk->scm_queue[sk->scm_head].mark_nread = 0;
         sk->scm_head = (sk->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
         if (pending != NULL)
             vfs_fput(pending);
@@ -352,7 +383,8 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
     if (sk == NULL)
         return -EBADF;
 
-    if (sk->state != UNIX_STATE_CONNECTED && sk->type == SOCK_STREAM) {
+    if (sk->state != UNIX_STATE_CONNECTED &&
+        unix_sock_connection_oriented(sk)) {
         if (sk->shutdown_flags & UNIX_SHUT_RD)
             return 0;
         return -ENOTCONN;
@@ -451,12 +483,20 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
     if (sk->shutdown_flags & UNIX_SHUT_WR)
         return -EPIPE;
 
-    if (sk->state != UNIX_STATE_CONNECTED && sk->type == SOCK_STREAM)
+    if (sk->state != UNIX_STATE_CONNECTED &&
+        unix_sock_connection_oriented(sk))
         return -ENOTCONN;
 
     bool nonblock = (file->f_flags & O_NONBLOCK) != 0;
     ssize_t total = 0;
     char tmp[128];
+
+    spin_lock(&sk->lock);
+    if (!unix_packet_has_space_locked(sk)) {
+        spin_unlock(&sk->lock);
+        return nonblock ? -EAGAIN : -ENOBUFS;
+    }
+    spin_unlock(&sk->lock);
 
     while ((size_t)total < count) {
         /* Copy from user */
@@ -524,6 +564,12 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
         }
         total += (ssize_t)chunk;
     }
+
+    spin_lock(&sk->lock);
+    int pkt_ret = unix_packet_enqueue_locked(sk, sk->tx.nwrite);
+    spin_unlock(&sk->lock);
+    if (pkt_ret < 0)
+        return pkt_ret;
 
     return total;
 }
@@ -672,8 +718,17 @@ static int unix_file_poll(struct vfs_file *file, short events)
 
     /* Check readability: data in peer's tx ring (which we read) */
     if (events & (POLLIN | POLLRDNORM)) {
-        if (peer != NULL && RING_READABLE(&peer->tx) > 0)
-            revents |= (events & (POLLIN | POLLRDNORM));
+        if (peer != NULL) {
+            if (sk->type == SOCK_SEQPACKET) {
+                spin_lock(&peer->lock);
+                bool packet_ready = unix_packet_count_locked(peer) > 0;
+                spin_unlock(&peer->lock);
+                if (packet_ready)
+                    revents |= (events & (POLLIN | POLLRDNORM));
+            } else if (RING_READABLE(&peer->tx) > 0) {
+                revents |= (events & (POLLIN | POLLRDNORM));
+            }
+        }
         else if (peer == NULL || (sk->shutdown_flags & UNIX_SHUT_RD))
             revents |= (events & (POLLIN | POLLRDNORM)); /* EOF */
     }
@@ -741,7 +796,7 @@ static int unix_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
  */
 int unix_sock_create(int type, int protocol, int file_flags)
 {
-    if (type != SOCK_STREAM && type != SOCK_DGRAM)
+    if (type != SOCK_STREAM && type != SOCK_SEQPACKET && type != SOCK_DGRAM)
         return -EPROTOTYPE;
 
     if (protocol != 0)
@@ -827,7 +882,7 @@ int unix_sock_listen(int fd, int backlog)
     if (sk == NULL)
         return -EBADF;
 
-    if (sk->type != SOCK_STREAM)
+    if (sk->type != SOCK_STREAM && sk->type != SOCK_SEQPACKET)
         return -EOPNOTSUPP;
 
     spin_lock(&sk->lock);
@@ -904,7 +959,7 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
         spin_unlock(&client->lock);
         return -ENOMEM;
     }
-    server->type = SOCK_STREAM;
+    server->type = sk->type;
     server->protocol = 0;
     if (ring_alloc(&server->tx) < 0) {
         unix_sock_free(server);
@@ -1174,7 +1229,7 @@ int unix_sock_getsockname(int fd, uint64 uaddr, uint64 uaddrlen)
  */
 int unix_sock_socketpair(int type, int protocol, int file_flags, int sv[2])
 {
-    if (type != SOCK_STREAM && type != SOCK_DGRAM)
+    if (type != SOCK_STREAM && type != SOCK_SEQPACKET && type != SOCK_DGRAM)
         return -EPROTOTYPE;
 
     if (protocol != 0)
@@ -1249,14 +1304,21 @@ int unix_sock_setsockopt(int fd, int level, int optname, uint64 optval,
     /* AF_UNIX sockets have very few options; return success for common ones */
     if (level == 1 /* SOL_SOCKET */) {
         switch (optname) {
-        case 9:  /* SO_KEEPALIVE - no-op for UNIX sockets */
         case 2:  /* SO_REUSEADDR - no-op */
+        case 5:  /* SO_DONTROUTE - no-op for UNIX sockets */
         case 6:  /* SO_BROADCAST - no-op */
-        case 13: /* SO_LINGER - no-op */
-            return 0;
         case 7:  /* SO_SNDBUF */
         case 8:  /* SO_RCVBUF */
-            return 0; /* silently accept */
+        case 9:  /* SO_KEEPALIVE - no-op for UNIX sockets */
+        case 10: /* SO_OOBINLINE - no-op */
+        case 13: /* SO_LINGER - no-op */
+        case 15: /* SO_REUSEPORT - no-op */
+        case 16: /* SO_PASSCRED - credentials are always available */
+        case 18: /* SO_RCVLOWAT */
+        case 19: /* SO_SNDLOWAT */
+        case 20: /* SO_RCVTIMEO_OLD */
+        case 21: /* SO_SNDTIMEO_OLD */
+            return 0;
         }
     }
     return -ENOPROTOOPT;
@@ -1277,6 +1339,34 @@ int unix_sock_getsockopt(int fd, int level, int optname, uint64 optval,
         }
         case 4: /* SO_ERROR */
             val = 0;
+            break;
+        case 2:  /* SO_REUSEADDR */
+        case 5:  /* SO_DONTROUTE */
+        case 6:  /* SO_BROADCAST */
+        case 9:  /* SO_KEEPALIVE */
+        case 10: /* SO_OOBINLINE */
+        case 13: /* SO_LINGER */
+        case 15: /* SO_REUSEPORT */
+        case 16: /* SO_PASSCRED */
+            val = 0;
+            break;
+        case 7:  /* SO_SNDBUF */
+        case 8:  /* SO_RCVBUF */
+            val = UNIX_BUF_SIZE;
+            break;
+        case 18: /* SO_RCVLOWAT */
+        case 19: /* SO_SNDLOWAT */
+            val = 1;
+            break;
+        case 20: /* SO_RCVTIMEO_OLD */
+        case 21: /* SO_SNDTIMEO_OLD */
+            val = 0;
+            break;
+        case 38: /* SO_PROTOCOL */
+            val = 0;
+            break;
+        case 39: /* SO_DOMAIN */
+            val = AF_UNIX;
             break;
         case 30: { /* SO_ACCEPTCONN */
             struct unix_sock *sk = unix_sock_from_fd(fd);

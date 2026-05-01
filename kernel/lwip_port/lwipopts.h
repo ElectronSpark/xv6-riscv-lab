@@ -27,7 +27,7 @@
 #define MEM_LIBC_MALLOC                 0
 #define MEMP_MEM_MALLOC                 0
 #define MEM_ALIGNMENT                   8
-#define MEM_SIZE                        (2 * 1024 * 1024) /* 2MB heap */
+#define MEM_SIZE                        (8 * 1024 * 1024) /* browser-sized TLS/network bursts */
 
 /* Pool sizes
  *
@@ -41,7 +41,7 @@
 #define MEMP_NUM_UDP_PCB                16
 #define MEMP_NUM_TCP_PCB                128
 #define MEMP_NUM_TCP_PCB_LISTEN         16
-#define MEMP_NUM_TCP_SEG                256
+#define MEMP_NUM_TCP_SEG                2048
 #define MEMP_NUM_NETBUF                 32
 #define MEMP_NUM_NETCONN                256
 #define MEMP_NUM_TCPIP_MSG_API          64
@@ -52,7 +52,7 @@
 /* --------------------------------------------------------------------------
  * Pbuf options
  * -------------------------------------------------------------------------- */
-#define PBUF_POOL_SIZE                  2048
+#define PBUF_POOL_SIZE                  4096
 #define PBUF_POOL_BUFSIZE               1536
 
 /* --------------------------------------------------------------------------
@@ -100,7 +100,7 @@
 #define TCP_MSS                         1460
 #define TCP_SND_BUF                     (64 * TCP_MSS)
 #define TCP_SND_QUEUELEN                ((4 * (TCP_SND_BUF) + (TCP_MSS - 1))/(TCP_MSS))
-#define TCP_WND                         (64 * TCP_MSS)
+#define TCP_WND                         (128 * TCP_MSS)
 #define LWIP_TCP_KEEPALIVE              1
 #define LWIP_WND_SCALE                  1
 #define TCP_RCV_SCALE                   2
@@ -215,7 +215,7 @@
 #define DEFAULT_ACCEPTMBOX_SIZE         8
 #define DEFAULT_RAW_RECVMBOX_SIZE       8
 #define DEFAULT_UDP_RECVMBOX_SIZE       8
-#define DEFAULT_TCP_RECVMBOX_SIZE       8
+#define DEFAULT_TCP_RECVMBOX_SIZE       32
 
 /* --------------------------------------------------------------------------
  * Misc

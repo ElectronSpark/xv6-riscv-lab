@@ -517,6 +517,16 @@ void sys_mbox_post(sys_mbox_t *mbox, void *msg)
 err_t sys_mbox_trypost(sys_mbox_t *mbox, void *msg)
 {
     if (sem_trywait(&mbox->not_full) != 0) {
+        static uint64 trypost_full_count;
+        trypost_full_count++;
+        if (trypost_full_count <= 8 || (trypost_full_count % 256) == 0) {
+            int cnt;
+            spin_lock(&mbox->lock);
+            cnt = mbox->count;
+            spin_unlock(&mbox->lock);
+            printf("lwip: mailbox full in trypost (count=%d size=%d total=%lu)\n",
+                   cnt, SYS_MBOX_SIZE, trypost_full_count);
+        }
 #if SYS_ARCH_DEBUG
         mbox_trypost_fail_count++;
         if (mbox_trypost_fail_count <= 5 || (mbox_trypost_fail_count % 100) == 0)
@@ -783,4 +793,3 @@ sys_sem_t *sys_arch_netconn_sem_get(void)
     panic("lwip: netconn_sem_get failed after alloc");
     return NULL; /* unreachable */
 }
-

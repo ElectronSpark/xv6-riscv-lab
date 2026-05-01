@@ -435,26 +435,33 @@ void vfs_fdtable_close_on_exec(struct vfs_fdtable *fdtable) {
         return;
     }
 
-    struct vfs_file *to_close[NOFILE];
-    int close_count = 0;
+    struct vfs_file *to_close[64];
 
-    spin_lock(&fdtable->lock);
-    for (int fd = 0; fd < NOFILE; fd++) {
-        if (!bits_test_and_clear_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63)) {
-            continue;
+    for (;;) {
+        int close_count = 0;
+
+        spin_lock(&fdtable->lock);
+        for (int fd = 0; fd < NOFILE && close_count < NELEM(to_close); fd++) {
+            if (!bits_test_and_clear_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63)) {
+                continue;
+            }
+
+            struct vfs_file *file = vfs_fdtable_dealloc_fd(fdtable, fd);
+            if (IS_FD(file)) {
+                to_close[close_count++] = file;
+            }
+        }
+        spin_unlock(&fdtable->lock);
+
+        if (close_count == 0) {
+            break;
         }
 
-        struct vfs_file *file = vfs_fdtable_dealloc_fd(fdtable, fd);
-        if (IS_FD(file)) {
-            to_close[close_count++] = file;
+        for (int i = 0; i < close_count; i++) {
+            if (current != NULL) {
+                vfs_file_lock_release(to_close[i], current->tgid);
+            }
+            vfs_fput(to_close[i]);
         }
-    }
-    spin_unlock(&fdtable->lock);
-
-    for (int i = 0; i < close_count; i++) {
-        if (current != NULL) {
-            vfs_file_lock_release(to_close[i], current->tgid);
-        }
-        vfs_fput(to_close[i]);
     }
 }

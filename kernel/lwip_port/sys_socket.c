@@ -55,6 +55,7 @@ extern void argint(int n, int *ip);
 extern void argint64(int n, int64 *ip);
 extern void argaddr(int n, uint64 *ip);
 extern int argstr(int n, char *buf, int max);
+extern void sleep_ms(uint64 ms);
 
 /* ========================================================================== */
 /* Debug socket tracing (set to 1 to enable)                                  */
@@ -113,6 +114,9 @@ struct lwip_sock {
 #define SOCK_DGRAM     2
 #define SOCK_RAW       3
 #endif
+#ifndef SOCK_SEQPACKET
+#define SOCK_SEQPACKET 5
+#endif
 #define SOCK_NONBLOCK  0x800
 #define SOCK_CLOEXEC   0x80000
 #define SOCK_TYPE_MASK 0xF
@@ -146,14 +150,23 @@ struct lwip_sock {
 #define SO_REUSEADDR   2
 #define SO_TYPE        3
 #define SO_ERROR       4
+#define SO_DONTROUTE   5
 #define SO_BROADCAST   6
 #define SO_SNDBUF      7
 #define SO_RCVBUF      8
 #define SO_KEEPALIVE   9
+#define SO_OOBINLINE   10
 #define SO_LINGER      13
+#define SO_REUSEPORT   15
+#define SO_PASSCRED    16
+#define SO_PEERCRED    17
+#define SO_RCVLOWAT    18
+#define SO_SNDLOWAT    19
 #define SO_RCVTIMEO    20
 #define SO_SNDTIMEO    21
 #define SO_ACCEPTCONN  30
+#define SO_PROTOCOL    38
+#define SO_DOMAIN      39
 
 /* IPPROTO_IP options */
 #define IP_OPTIONS          4
@@ -196,6 +209,8 @@ struct k_sockaddr_in {
 };
 
 #define K_SOCKADDR_IN_SIZE  16
+
+static int sock_is_nonblock(int fd, int msg_flags);
 
 /* ========================================================================== */
 /* Allocate / free lwip_sock                                                  */
@@ -278,6 +293,141 @@ static int sock_has_rx_data(struct lwip_sock *sk)
     return sys_mbox_valid(&conn->recvmbox) && conn->recvmbox.count > 0;
 }
 
+static err_t sock_tcp_recv_pbuf(struct lwip_sock *sk, struct pbuf **p,
+                                int nonblock)
+{
+    u8_t apiflags = NETCONN_NOAUTORCVD;
+
+    if (nonblock)
+        apiflags |= NETCONN_DONTBLOCK;
+    return netconn_recv_tcp_pbuf_flags(sk->conn, p, apiflags);
+}
+
+static void sock_tcp_recvd(struct lwip_sock *sk, size_t len)
+{
+    if (sk == NULL || sk->conn == NULL || len == 0)
+        return;
+
+    (void)netconn_tcp_recvd(sk->conn, len);
+}
+
+static void sock_notify_if_still_readable(int fd, struct lwip_sock *sk)
+{
+    if (sk == NULL || !sock_has_rx_data(sk))
+        return;
+
+    struct vfs_file *file = vfs_fdtable_get_file(current->fdtable, fd);
+    if (file == NULL)
+        return;
+
+    vfs_file_knote_notify(file, EVFILT_READ, 0);
+    vfs_fput(file);
+}
+
+static void sock_notify_file_if_still_readable(struct vfs_file *file,
+                                               struct lwip_sock *sk)
+{
+    if (file == NULL || sk == NULL || !sock_has_rx_data(sk))
+        return;
+
+    vfs_file_knote_notify(file, EVFILT_READ, 0);
+}
+
+static int sock_tcp_wait_for_more(struct lwip_sock *sk, int nonblock,
+                                  ssize_t total, size_t target, int *waits)
+{
+    if (nonblock || total <= 0 || (size_t)total >= target)
+        return 0;
+    if (waits == NULL || *waits >= 4)
+        return 0;
+    if (signal_pending(current))
+        return 0;
+
+    (*waits)++;
+    sleep_ms(1);
+    return sock_has_rx_data(sk);
+}
+
+static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
+                                 uint64 ubuf, int len, int flags)
+{
+    ssize_t total = 0;
+    int nonblock = sock_is_nonblock(fd, flags);
+    int wait_more = 0;
+
+    while (total < len) {
+        struct pbuf *p = NULL;
+        uint16 poff = 0;
+        bool reused_lastpbuf = false;
+
+        if (sk->lastpbuf != NULL) {
+            p = sk->lastpbuf;
+            poff = sk->lastpbuf_off;
+            reused_lastpbuf = true;
+        } else {
+            err_t err = sock_tcp_recv_pbuf(sk, &p,
+                nonblock || total > 0);
+            if (err != ERR_OK) {
+                if (err == ERR_CLSD)
+                    return total > 0 ? (int)total : 0;
+                if (err == ERR_TIMEOUT && signal_pending(current))
+                    return total > 0 ? (int)total : -EINTR;
+                if (total > 0 && (err == ERR_WOULDBLOCK || err == ERR_TIMEOUT)) {
+                    if (sock_tcp_wait_for_more(sk, nonblock, total,
+                                               (size_t)len, &wait_more))
+                        continue;
+                    return (int)total;
+                }
+                return -lwip_err_to_errno(err);
+            }
+        }
+
+        uint16 avail = p->tot_len - poff;
+        uint16 tocopy = (len - total < avail) ? (uint16)(len - total) : avail;
+        char tmpbuf[1500];
+        uint16 copied = 0;
+
+        while (copied < tocopy) {
+            uint16 chunk = tocopy - copied;
+            if (chunk > sizeof(tmpbuf))
+                chunk = sizeof(tmpbuf);
+            uint16 got = pbuf_copy_partial(p, tmpbuf, chunk, poff + copied);
+            if (got == 0)
+                break;
+            if (vm_copyout(current->vm, ubuf + total + copied, tmpbuf, got) < 0) {
+                if (!reused_lastpbuf)
+                    pbuf_free(p);
+                return total > 0 ? (int)total : -EFAULT;
+            }
+            copied += got;
+        }
+
+        if (flags & MSG_PEEK) {
+            sk->lastpbuf = p;
+            sk->lastpbuf_off = poff;
+        } else if ((uint16)(poff + copied) < p->tot_len) {
+            sk->lastpbuf = p;
+            sk->lastpbuf_off = poff + copied;
+        } else {
+            pbuf_free(p);
+            sk->lastpbuf = NULL;
+            sk->lastpbuf_off = 0;
+        }
+
+        if (!(flags & MSG_PEEK))
+            sock_tcp_recvd(sk, copied);
+
+        total += copied;
+        if (copied == 0 || (flags & MSG_PEEK))
+            break;
+    }
+
+    if (!(flags & MSG_PEEK) && total > 0)
+        sock_notify_if_still_readable(fd, sk);
+
+    return (int)total;
+}
+
 /* ========================================================================== */
 /* VFS file_ops for sockets — allows read()/write()/close() on socket fds     */
 /* ========================================================================== */
@@ -322,101 +472,79 @@ static ssize_t sock_file_read(struct vfs_file *file, char *buf, size_t count,
         return -EBADF;
 
     if (sk->type == SOCK_STREAM) {
-        /* TCP: use netconn_recv_tcp_pbuf for raw bytes */
-        struct pbuf *p = NULL;
-        err_t err;
+        ssize_t total = 0;
+        int nonblock = (file->f_flags & O_NONBLOCK) != 0;
+        int wait_more = 0;
 
-        /* Check for leftover pbuf data from previous partial TCP read */
-        if (sk->lastpbuf != NULL) {
-            p = sk->lastpbuf;
-            uint16 avail = p->tot_len - sk->lastpbuf_off;
-            uint16 tocopy = (count < avail) ? (uint16)count : avail;
+        while ((size_t)total < count) {
+            struct pbuf *p = NULL;
+            uint16 poff = 0;
+            uint16 avail;
+            uint16 tocopy;
+            uint16 copied = 0;
 
-            if (user) {
-                char tmpbuf[1500];
-                uint16 clen = (tocopy > sizeof(tmpbuf)) ? sizeof(tmpbuf) : tocopy;
-                pbuf_copy_partial(p, tmpbuf, clen, sk->lastpbuf_off);
-                if (vm_copyout(current->vm, (uint64)buf, tmpbuf, clen) < 0)
-                    return -EFAULT;
-                tocopy = clen;
+            if (sk->lastpbuf != NULL) {
+                p = sk->lastpbuf;
+                poff = sk->lastpbuf_off;
             } else {
-                pbuf_copy_partial(p, buf, tocopy, sk->lastpbuf_off);
+                err_t err = sock_tcp_recv_pbuf(sk, &p,
+                    nonblock || total > 0);
+                if (err != ERR_OK) {
+                    if (err == ERR_CLSD)
+                        return total > 0 ? total : 0;
+                    if (total > 0 &&
+                        (err == ERR_WOULDBLOCK || err == ERR_TIMEOUT)) {
+                        if (sock_tcp_wait_for_more(sk, nonblock, total,
+                                                   count, &wait_more))
+                            continue;
+                        return total;
+                    }
+                    return -lwip_err_to_errno(err);
+                }
             }
 
-            sk->lastpbuf_off += tocopy;
-            if (sk->lastpbuf_off >= p->tot_len) {
+            avail = p->tot_len - poff;
+            tocopy = (count - total < avail) ? (uint16)(count - total) : avail;
+            while (copied < tocopy) {
+                uint16 chunk = tocopy - copied;
+                uint16 got;
+                char tmpbuf[1500];
+
+                if (chunk > sizeof(tmpbuf))
+                    chunk = sizeof(tmpbuf);
+                got = pbuf_copy_partial(p,
+                    user ? tmpbuf : buf + total + copied,
+                    chunk, poff + copied);
+                if (got == 0)
+                    break;
+                if (user &&
+                    vm_copyout(current->vm, (uint64)buf + total + copied,
+                               tmpbuf, got) < 0) {
+                    if (sk->lastpbuf != p)
+                        pbuf_free(p);
+                    return total > 0 ? total : -EFAULT;
+                }
+                copied += got;
+            }
+
+            if ((uint16)(poff + copied) < p->tot_len) {
+                sk->lastpbuf = p;
+                sk->lastpbuf_off = poff + copied;
+            } else {
                 pbuf_free(p);
                 sk->lastpbuf = NULL;
                 sk->lastpbuf_off = 0;
             }
-            return tocopy;
+            sock_tcp_recvd(sk, copied);
+            total += copied;
+            if (copied == 0)
+                break;
         }
 
-        /* Check for leftover netbuf data from previous recv (UDP-style) */
-        if (sk->lastbuf != NULL) {
-            struct netbuf *nb = sk->lastbuf;
-            uint16 avail = netbuf_len(nb) - sk->lastoffset;
-            uint16 tocopy = (count < avail) ? (uint16)count : avail;
+        if (total > 0)
+            sock_notify_file_if_still_readable(file, sk);
 
-            void *data;
-            u16_t len;
-            netbuf_data(nb, &data, &len);
-
-            if (user) {
-                if (vm_copyout(current->vm, (uint64)buf,
-                               (char *)data + sk->lastoffset, tocopy) < 0)
-                    return -EFAULT;
-            } else {
-                memmove(buf, (char *)data + sk->lastoffset, tocopy);
-            }
-
-            sk->lastoffset += tocopy;
-            if (sk->lastoffset >= netbuf_len(nb)) {
-                netbuf_delete(nb);
-                sk->lastbuf = NULL;
-                sk->lastoffset = 0;
-            }
-            return tocopy;
-        }
-
-        /* O_NONBLOCK: check readiness before blocking */
-        if (file->f_flags & O_NONBLOCK) {
-            int ready = sock_poll_ready(sk, POLLIN);
-            if (!(ready & (POLLIN | POLLHUP | POLLERR)))
-                return -EAGAIN;
-        }
-
-        err = netconn_recv_tcp_pbuf(sk->conn, &p);
-        if (err != ERR_OK) {
-            if (err == ERR_CLSD)
-                return 0; /* EOF */
-            return -lwip_err_to_errno(err);
-        }
-
-        uint16 tocopy = (count < p->tot_len) ? (uint16)count : p->tot_len;
-
-        if (user) {
-            /* Copy pbuf data to user space (may be chained) */
-            char tmpbuf[1500];
-            uint16 clen = (tocopy > sizeof(tmpbuf)) ? sizeof(tmpbuf) : tocopy;
-            pbuf_copy_partial(p, tmpbuf, clen, 0);
-            if (vm_copyout(current->vm, (uint64)buf, tmpbuf, clen) < 0) {
-                pbuf_free(p);
-                return -EFAULT;
-            }
-            tocopy = clen;
-        } else {
-            pbuf_copy_partial(p, buf, tocopy, 0);
-        }
-
-        if (tocopy < p->tot_len) {
-            /* Save remainder for future reads — prevents TCP data loss */
-            sk->lastpbuf = p;
-            sk->lastpbuf_off = tocopy;
-        } else {
-            pbuf_free(p);
-        }
-        return tocopy;
+        return total;
 
     } else {
         /* UDP/RAW: use netconn_recv → netbuf */
@@ -1702,6 +1830,13 @@ uint64 sys_recvfrom(void)
     if (len <= 0)
         return 0;
 
+    if (sk->type == SOCK_STREAM) {
+        int n = sock_tcp_recv_copyout(sk, fd, ubuf, len, flags);
+        if (n >= 0)
+            ACCT_ADD(current->thread_group, net_bytes_recv, n);
+        return (uint64)n;
+    }
+
     /* MSG_DONTWAIT / O_NONBLOCK: check recv readiness */
     if (sock_is_nonblock(fd, flags)) {
         int ready = sock_poll_ready(sk, POLLIN);
@@ -1732,12 +1867,13 @@ uint64 sys_recvfrom(void)
                     sk->lastpbuf = NULL;
                     sk->lastpbuf_off = 0;
                 }
+                sock_tcp_recvd(sk, clen);
             }
             ACCT_ADD(current->thread_group, net_bytes_recv, clen);
             return (uint64)clen;
         }
 
-        err_t err = netconn_recv_tcp_pbuf(sk->conn, &p);
+        err_t err = sock_tcp_recv_pbuf(sk, &p, sock_is_nonblock(fd, flags));
         if (err != ERR_OK) {
             if (err == ERR_CLSD)
                 return 0; /* EOF */
@@ -1767,6 +1903,8 @@ uint64 sys_recvfrom(void)
         } else {
             pbuf_free(p);
         }
+        if (!(flags & MSG_PEEK))
+            sock_tcp_recvd(sk, clen);
         ACCT_ADD(current->thread_group, net_bytes_recv, clen);
         return (uint64)clen;
 
@@ -2453,50 +2591,47 @@ static size_t unix_scm_count_locked(struct unix_sock *sk)
     return UNIX_SCM_QUEUE_MAX - sk->scm_head + sk->scm_tail;
 }
 
-static int unix_enqueue_scm_rights(struct unix_sock *sk, const int *fds,
-                                   size_t nfds)
+static size_t unix_packet_count_locked(struct unix_sock *sk)
 {
-    if (nfds == 0)
+    if (sk->packet_tail >= sk->packet_head)
+        return sk->packet_tail - sk->packet_head;
+    return UNIX_PACKET_QUEUE_MAX - sk->packet_head + sk->packet_tail;
+}
+
+static int unix_packet_enqueue_locked(struct unix_sock *sk, uint end_mark)
+{
+    if (sk->type != SOCK_SEQPACKET)
         return 0;
-    if (nfds >= UNIX_SCM_QUEUE_MAX)
-        return -EMSGSIZE;
-
-    struct vfs_file *queued[UNIX_SCM_QUEUE_MAX];
-    memset(queued, 0, sizeof(queued));
-
-    for (size_t i = 0; i < nfds; i++) {
-        struct vfs_file *file = vfs_fdtable_get_file(current->fdtable, fds[i]);
-        if (file == NULL) {
-            for (size_t j = 0; j < i; j++)
-                vfs_fput(queued[j]);
-            return -EBADF;
-        }
-
-        queued[i] = vfs_fdup(file);
-        vfs_fput(file);
-        if (queued[i] == NULL) {
-            for (size_t j = 0; j < i; j++)
-                vfs_fput(queued[j]);
-            return -ENOMEM;
-        }
-    }
-
-    spin_lock(&sk->lock);
-    size_t used = unix_scm_count_locked(sk);
-    size_t free_slots = UNIX_SCM_QUEUE_MAX - 1 - used;
-    if (free_slots < nfds) {
-        spin_unlock(&sk->lock);
-        for (size_t i = 0; i < nfds; i++)
-            vfs_fput(queued[i]);
+    if (unix_packet_count_locked(sk) >= UNIX_PACKET_QUEUE_MAX - 1)
         return -EAGAIN;
-    }
-
-    for (size_t i = 0; i < nfds; i++) {
-        sk->scm_queue[sk->scm_tail] = queued[i];
-        sk->scm_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
-    }
-    spin_unlock(&sk->lock);
+    sk->packet_queue[sk->packet_tail] = end_mark;
+    sk->packet_tail = (sk->packet_tail + 1) % UNIX_PACKET_QUEUE_MAX;
     return 0;
+}
+
+static int unix_packet_has_space_locked(struct unix_sock *sk)
+{
+    return sk->type != SOCK_SEQPACKET ||
+        unix_packet_count_locked(sk) < UNIX_PACKET_QUEUE_MAX - 1;
+}
+
+static int unix_packet_next_len_locked(struct unix_sock *peer, size_t *len)
+{
+    if (peer->packet_head == peer->packet_tail)
+        return -EAGAIN;
+    uint mark = peer->packet_queue[peer->packet_head];
+    if ((int)(mark - peer->tx.nread) < 0)
+        return -EIO;
+    *len = mark - peer->tx.nread;
+    return 0;
+}
+
+static void unix_packet_pop_locked(struct unix_sock *peer)
+{
+    if (peer->packet_head != peer->packet_tail) {
+        peer->packet_queue[peer->packet_head] = 0;
+        peer->packet_head = (peer->packet_head + 1) % UNIX_PACKET_QUEUE_MAX;
+    }
 }
 
 static size_t unix_dequeue_scm_rights(struct unix_sock *peer,
@@ -2508,14 +2643,100 @@ static size_t unix_dequeue_scm_rights(struct unix_sock *peer,
         return 0;
 
     spin_lock(&peer->lock);
-    while (peer->scm_head != peer->scm_tail && count < max_files) {
-        files[count] = peer->scm_queue[peer->scm_head];
-        peer->scm_queue[peer->scm_head] = NULL;
+    while (peer->scm_head != peer->scm_tail && count < max_files &&
+           (int)(peer->scm_queue[peer->scm_head].mark_nread -
+                 peer->tx.nread) <= 0) {
+        files[count] = peer->scm_queue[peer->scm_head].file;
+        peer->scm_queue[peer->scm_head].file = NULL;
+        peer->scm_queue[peer->scm_head].mark_nread = 0;
         peer->scm_head = (peer->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
         count++;
     }
+    if (count > 0)
+        tq_wakeup_all(&peer->wr_queue, 0, 0);
     spin_unlock(&peer->lock);
     return count;
+}
+
+static size_t unix_ring_write_locked(struct unix_ring *r, const char *buf,
+                                     size_t len)
+{
+    size_t readable = r->nwrite - r->nread;
+    size_t avail = UNIX_BUF_SIZE - readable;
+    size_t towrite = len < avail ? len : avail;
+    uint idx = r->nwrite % UNIX_BUF_SIZE;
+
+    if (towrite == 0)
+        return 0;
+    if (idx + towrite <= UNIX_BUF_SIZE) {
+        memmove(&r->data[idx], buf, towrite);
+    } else {
+        size_t first = UNIX_BUF_SIZE - idx;
+        memmove(&r->data[idx], buf, first);
+        memmove(&r->data[0], buf + first, towrite - first);
+    }
+    smp_store_release(&r->nwrite, r->nwrite + towrite);
+    return towrite;
+}
+
+static size_t unix_ring_read_locked(struct unix_ring *r, char *buf, size_t len)
+{
+    size_t readable = r->nwrite - r->nread;
+    size_t toread = len < readable ? len : readable;
+    uint idx = r->nread % UNIX_BUF_SIZE;
+
+    if (toread == 0)
+        return 0;
+    if (idx + toread <= UNIX_BUF_SIZE) {
+        memmove(buf, &r->data[idx], toread);
+    } else {
+        size_t first = UNIX_BUF_SIZE - idx;
+        memmove(buf, &r->data[idx], first);
+        memmove(buf + first, &r->data[0], toread - first);
+    }
+    smp_store_release(&r->nread, r->nread + toread);
+    return toread;
+}
+
+static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
+                                      size_t len,
+                                      struct vfs_file **scm_files,
+                                      size_t scm_count)
+{
+    if (sk->shutdown_flags & UNIX_SHUT_WR)
+        return -EPIPE;
+    if (sk->state != UNIX_STATE_CONNECTED && sk->type == SOCK_STREAM)
+        return -ENOTCONN;
+    if (sk->peer == NULL)
+        return -EPIPE;
+    if (len > UNIX_BUF_SIZE)
+        return -EMSGSIZE;
+
+    size_t readable = sk->tx.nwrite - sk->tx.nread;
+    size_t writable = UNIX_BUF_SIZE - readable;
+    if (writable < len)
+        return -EAGAIN;
+
+    size_t scm_used = unix_scm_count_locked(sk);
+    size_t scm_free = UNIX_SCM_QUEUE_MAX - 1 - scm_used;
+    if (scm_free < scm_count)
+        return -EAGAIN;
+    if (!unix_packet_has_space_locked(sk))
+        return -EAGAIN;
+
+    size_t wrote = unix_ring_write_locked(&sk->tx, buf, len);
+    if (wrote != len)
+        panic("unix_sendmsg_atomic_locked: short atomic write");
+    uint mark = sk->tx.nwrite;
+    for (size_t i = 0; i < scm_count; i++) {
+        sk->scm_queue[sk->scm_tail].file = scm_files[i];
+        sk->scm_queue[sk->scm_tail].mark_nread = mark;
+        sk->scm_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
+    }
+    int pkt_ret = unix_packet_enqueue_locked(sk, mark);
+    if (pkt_ret < 0)
+        panic("unix_sendmsg_atomic_locked: packet queue lost reservation");
+    return 0;
 }
 
 /*
@@ -2561,39 +2782,35 @@ uint64 sys_sendmsg(void)
         for (uint64 i = 0; i < mh.msg_iovlen; i++)
             total_len += iovs[i].iov_len;
 
-        /* Get the vfs_file for the socket to call write */
-        struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
-        if (f == NULL)
-            return (uint64)-EBADF;
+        if (total_len > UNIX_BUF_SIZE)
+            return (uint64)-EMSGSIZE;
 
-        /*
-         * WebKit's GLib IPC sends descriptor-bearing messages over
-         * nonblocking AF_UNIX streams and treats a successful sendmsg as a
-         * whole IPC message.  Do not enqueue SCM_RIGHTS until the byte payload
-         * can fit, or a later EAGAIN/short write can detach the fd from its
-         * message and corrupt the peer's IPC stream.
-         */
-        int saved_fflags = f->f_flags;
-        bool nonblock = (flags & MSG_DONTWAIT) || (saved_fflags & O_NONBLOCK);
-        if (nonblock) {
-            spin_lock(&sk->lock);
-            size_t readable = sk->tx.nwrite - sk->tx.nread;
-            size_t writable = UNIX_BUF_SIZE - readable;
-            spin_unlock(&sk->lock);
-            if (writable < total_len) {
-                vfs_fput(f);
-                return (uint64)-EAGAIN;
+        char *msg_buf = kvmalloc(total_len ? total_len : 1);
+        if (msg_buf == NULL)
+            return (uint64)-ENOMEM;
+        size_t off = 0;
+        for (uint64 i = 0; i < mh.msg_iovlen; i++) {
+            if (iovs[i].iov_len == 0)
+                continue;
+            if (vm_copyin(current->vm, msg_buf + off, iovs[i].iov_base,
+                          iovs[i].iov_len) < 0) {
+                kvfree(msg_buf);
+                return (uint64)-EFAULT;
             }
+            off += iovs[i].iov_len;
         }
 
-        /* Handle SCM_RIGHTS control message: extract fd to pass */
+        struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
+        memset(scm_files, 0, sizeof(scm_files));
+        size_t scm_count = 0;
+
         if (mh.msg_control != 0 && mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
             unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
             uint64 copy_len = mh.msg_controllen;
             if (copy_len > sizeof(cmsg_buf))
                 copy_len = sizeof(cmsg_buf);
             if (vm_copyin(current->vm, cmsg_buf, mh.msg_control, copy_len) < 0) {
-                vfs_fput(f);
+                kvfree(msg_buf);
                 return (uint64)-EFAULT;
             }
 
@@ -2606,38 +2823,79 @@ uint64 sys_sendmsg(void)
                     ? (copy_len - K_CMSG_LEN(0)) / sizeof(int) : 0;
                 if (nfds > max_fds)
                     nfds = max_fds;
-                if (nfds > 0) {
-                    int *pass_fds = (int *)K_CMSG_DATA(cmsg);
-                    int ret = unix_enqueue_scm_rights(sk, pass_fds, nfds);
-                    if (ret < 0) {
-                        vfs_fput(f);
-                        return (uint64)ret;
+                if (nfds >= UNIX_SCM_QUEUE_MAX) {
+                    kvfree(msg_buf);
+                    return (uint64)-EMSGSIZE;
+                }
+                int *pass_fds = (int *)K_CMSG_DATA(cmsg);
+                for (size_t i = 0; i < nfds; i++) {
+                    struct vfs_file *file =
+                        vfs_fdtable_get_file(current->fdtable, pass_fds[i]);
+                    if (file == NULL) {
+                        for (size_t j = 0; j < scm_count; j++)
+                            vfs_fput(scm_files[j]);
+                        kvfree(msg_buf);
+                        return (uint64)-EBADF;
                     }
+
+                    scm_files[scm_count] = vfs_fdup(file);
+                    vfs_fput(file);
+                    if (scm_files[scm_count] == NULL) {
+                        for (size_t j = 0; j < scm_count; j++)
+                            vfs_fput(scm_files[j]);
+                        kvfree(msg_buf);
+                        return (uint64)-ENOMEM;
+                    }
+                    scm_count++;
                 }
             }
         }
 
-        /* Write the iov data through the normal path */
-        /* Honor MSG_DONTWAIT: temporarily set O_NONBLOCK */
-        if (flags & MSG_DONTWAIT)
-            f->f_flags |= O_NONBLOCK;
-
-        ssize_t total = 0;
-        for (uint64 i = 0; i < mh.msg_iovlen; i++) {
-            if (iovs[i].iov_len == 0) continue;
-            ssize_t n = unix_socket_file_ops.write(
-                f, (const char *)(iovs[i].iov_base), iovs[i].iov_len, 1);
-            if (n < 0) {
-                f->f_flags = saved_fflags;
-                vfs_fput(f);
-                return total > 0 ? (uint64)total : (uint64)n;
+        int ret;
+        int nonblock = sock_is_nonblock(fd, flags);
+        struct vfs_file *notify_file = NULL;
+        for (;;) {
+            spin_lock(&sk->lock);
+            ret = unix_sendmsg_atomic_locked(sk, msg_buf, total_len,
+                                             scm_files, scm_count);
+            if (ret == 0 && sk->peer != NULL) {
+                tq_wakeup_all(&sk->peer->rd_queue, 0, 0);
+                if (sk->peer->file != NULL)
+                    notify_file = vfs_fdup(sk->peer->file);
             }
-            total += n;
-            if ((size_t)n < iovs[i].iov_len) break;
+            if (ret != -EAGAIN || nonblock) {
+                spin_unlock(&sk->lock);
+                break;
+            }
+            if (signal_pending(current)) {
+                ret = -EINTR;
+                spin_unlock(&sk->lock);
+                break;
+            }
+            tq_wait_in_state(&sk->wr_queue, &sk->lock, NULL,
+                             THREAD_INTERRUPTIBLE);
+            spin_unlock(&sk->lock);
+
+            if (signal_pending(current)) {
+                ret = -EINTR;
+                break;
+            }
         }
-        f->f_flags = saved_fflags;
-        vfs_fput(f);
-        return (uint64)total;
+
+        kvfree(msg_buf);
+        if (ret < 0) {
+            for (size_t i = 0; i < scm_count; i++)
+                vfs_fput(scm_files[i]);
+            if (notify_file != NULL)
+                vfs_fput(notify_file);
+            return (uint64)ret;
+        }
+
+        if (notify_file != NULL) {
+            vfs_file_knote_notify(notify_file, EVFILT_READ, 0);
+            vfs_fput(notify_file);
+        }
+        return (uint64)total_len;
     }
 
     struct lwip_sock *sk = sock_from_fd(fd);
@@ -2806,7 +3064,107 @@ uint64 sys_recvmsg(void)
             f->f_flags |= O_NONBLOCK;
 
         ssize_t total = 0;
-        if (flags & MSG_PEEK) {
+        int unix_out_flags = 0;
+        if (sk->type == SOCK_SEQPACKET) {
+            struct unix_sock *peer = NULL;
+            size_t packet_len = 0;
+
+            for (;;) {
+                spin_lock(&sk->lock);
+                peer = sk->peer;
+                bool eof = (peer == NULL)
+                    || (sk->shutdown_flags & UNIX_SHUT_RD)
+                    || (peer != NULL && (peer->shutdown_flags & UNIX_SHUT_WR));
+                spin_unlock(&sk->lock);
+
+                if (peer == NULL || eof)
+                    goto unix_recvmsg_done;
+
+                spin_lock(&peer->lock);
+                int pkt_ret = unix_packet_next_len_locked(peer, &packet_len);
+                spin_unlock(&peer->lock);
+                if (pkt_ret == 0)
+                    break;
+
+                if (saved_fflags & O_NONBLOCK) {
+                    f->f_flags = saved_fflags;
+                    vfs_fput(f);
+                    return (uint64)-EAGAIN;
+                }
+                if (signal_pending(current)) {
+                    f->f_flags = saved_fflags;
+                    vfs_fput(f);
+                    return (uint64)-EINTR;
+                }
+
+                spin_lock(&sk->lock);
+                tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
+                                 THREAD_INTERRUPTIBLE);
+                spin_unlock(&sk->lock);
+
+                if (signal_pending(current)) {
+                    f->f_flags = saved_fflags;
+                    vfs_fput(f);
+                    return (uint64)-EINTR;
+                }
+            }
+
+            size_t capacity = 0;
+            for (uint64 i = 0; i < mh.msg_iovlen; i++)
+                capacity += iovs[i].iov_len;
+            size_t to_copy = packet_len < capacity ? packet_len : capacity;
+            if (packet_len > capacity)
+                unix_out_flags |= MSG_TRUNC;
+
+            char tmp[128];
+            size_t copied_packet = 0;
+            for (uint64 i = 0; i < mh.msg_iovlen && copied_packet < to_copy; i++) {
+                size_t copied_iov = 0;
+                while (copied_iov < iovs[i].iov_len &&
+                       copied_packet < to_copy) {
+                    size_t want = iovs[i].iov_len - copied_iov;
+                    if (want > to_copy - copied_packet)
+                        want = to_copy - copied_packet;
+                    if (want > sizeof(tmp))
+                        want = sizeof(tmp);
+
+                    spin_lock(&peer->lock);
+                    size_t got;
+                    if (flags & MSG_PEEK)
+                        got = unix_ring_peek(&peer->tx, copied_packet,
+                                             tmp, want);
+                    else
+                        got = unix_ring_read_locked(&peer->tx, tmp, want);
+                    spin_unlock(&peer->lock);
+
+                    if (got == 0)
+                        goto unix_recvmsg_done;
+
+                    if (vm_copyout(current->vm,
+                                   iovs[i].iov_base + copied_iov,
+                                   tmp, got) < 0) {
+                        f->f_flags = saved_fflags;
+                        vfs_fput(f);
+                        return total > 0 ? (uint64)total : (uint64)-EFAULT;
+                    }
+
+                    copied_iov += got;
+                    copied_packet += got;
+                    total += got;
+                }
+            }
+
+            if (!(flags & MSG_PEEK)) {
+                spin_lock(&peer->lock);
+                if (packet_len > copied_packet) {
+                    uint mark = peer->packet_queue[peer->packet_head];
+                    smp_store_release(&peer->tx.nread, mark);
+                }
+                unix_packet_pop_locked(peer);
+                tq_wakeup_all(&peer->wr_queue, 0, 0);
+                spin_unlock(&peer->lock);
+            }
+        } else if (flags & MSG_PEEK) {
             if (sk->state != UNIX_STATE_CONNECTED && sk->type == SOCK_STREAM) {
                 f->f_flags = saved_fflags;
                 vfs_fput(f);
@@ -2989,10 +3347,9 @@ unix_recvmsg_done:
         }
 
         /* Clear msg_flags */
-        int zero_flags = 0;
         vm_copyout(current->vm,
                    umsg + __builtin_offsetof(struct k_msghdr, msg_flags),
-                   &zero_flags, sizeof(zero_flags));
+                   &unix_out_flags, sizeof(unix_out_flags));
 
         return (uint64)total;
     }
@@ -3033,73 +3390,102 @@ unix_recvmsg_done:
     ssize_t total = 0;
 
     if (sk->type == SOCK_STREAM) {
-        /* TCP: receive one pbuf, scatter into iovecs */
-        struct pbuf *p = NULL;
-        uint16 poff = 0;
-        uint16 start_off = 0;
-        bool reused_lastpbuf = false;
-
-        /* Check for leftover pbuf from a previous partial read */
-        if (sk->lastpbuf != NULL) {
-            p = sk->lastpbuf;
-            poff = sk->lastpbuf_off;
-            reused_lastpbuf = true;
-        } else {
-            err_t err = netconn_recv_tcp_pbuf(sk->conn, &p);
-            if (err != ERR_OK) {
-                if (err == ERR_CLSD)
-                    return 0;          /* EOF */
-                if (err == ERR_TIMEOUT && signal_pending(current))
-                    return (uint64)-EINTR;
-                return (uint64)-lwip_err_to_errno(err);
-            }
-        }
-
-        start_off = poff;
-
-        uint16 avail = p->tot_len;
+        /*
+         * TCP: drain available pbufs into the scatter list.  Returning a
+         * single MSS-sized pbuf for every recvmsg() makes large HTTPS
+         * streams depend on a tight readiness/read loop and can leave user
+         * space asleep with the TCP window unadvertised.
+         */
+        uint64 iov_idx = 0;
+        size_t iov_off = 0;
+        int nonblock = sock_is_nonblock(fd, flags);
+        int wait_more = 0;
         char tmpbuf[1500];
 
-        for (uint64 i = 0; i < mh.msg_iovlen && poff < avail; i++) {
-            size_t want = iovs[i].iov_len;
-            uint16 remain = avail - poff;
-            size_t tocopy = (want < remain) ? want : (size_t)remain;
+        while ((size_t)total < buf_total && iov_idx < mh.msg_iovlen) {
+            struct pbuf *p = NULL;
+            uint16 poff = 0;
+            uint16 start_off = 0;
+            bool reused_lastpbuf = false;
+            size_t copied_from_pbuf = 0;
 
-            /* Copy in chunks through tmpbuf */
-            size_t copied = 0;
-            while (copied < tocopy) {
-                size_t chunk = tocopy - copied;
+            if (sk->lastpbuf != NULL) {
+                p = sk->lastpbuf;
+                poff = sk->lastpbuf_off;
+                reused_lastpbuf = true;
+            } else {
+                err_t err = sock_tcp_recv_pbuf(sk, &p, nonblock || total > 0);
+                if (err != ERR_OK) {
+                    if (err == ERR_CLSD)
+                        return total > 0 ? (uint64)total : 0;
+                    if (err == ERR_TIMEOUT && signal_pending(current))
+                        return total > 0 ? (uint64)total : (uint64)-EINTR;
+                    if (total > 0 && (err == ERR_WOULDBLOCK || err == ERR_TIMEOUT)) {
+                        if (sock_tcp_wait_for_more(sk, nonblock, total,
+                                                   buf_total, &wait_more))
+                            continue;
+                        break;
+                    }
+                    return (uint64)-lwip_err_to_errno(err);
+                }
+            }
+
+            start_off = poff;
+            while (poff < p->tot_len && iov_idx < mh.msg_iovlen) {
+                if (iovs[iov_idx].iov_len == 0 ||
+                    iov_off >= iovs[iov_idx].iov_len) {
+                    iov_idx++;
+                    iov_off = 0;
+                    continue;
+                }
+
+                size_t want = iovs[iov_idx].iov_len - iov_off;
+                uint16 remain = p->tot_len - poff;
+                size_t chunk = want < remain ? want : (size_t)remain;
                 if (chunk > sizeof(tmpbuf))
                     chunk = sizeof(tmpbuf);
+
                 uint16 got = pbuf_copy_partial(p, tmpbuf, (uint16)chunk, poff);
                 if (got == 0)
                     break;
+
                 if (vm_copyout(current->vm,
-                               iovs[i].iov_base + copied,
+                               iovs[iov_idx].iov_base + iov_off,
                                tmpbuf, got) < 0) {
-                    if (!reused_lastpbuf)
+                    if (!(flags & MSG_PEEK) && copied_from_pbuf > 0) {
+                        sk->lastpbuf = p;
+                        sk->lastpbuf_off = poff;
+                    } else if (!reused_lastpbuf) {
                         pbuf_free(p);
+                    }
+                    if (!(flags & MSG_PEEK) && copied_from_pbuf > 0)
+                        sock_tcp_recvd(sk, copied_from_pbuf);
                     return total > 0 ? (uint64)total : (uint64)-EFAULT;
                 }
+
                 poff += got;
-                copied += got;
+                iov_off += got;
                 total += got;
+                copied_from_pbuf += got;
             }
-        }
 
-        if (flags & MSG_PEEK) {
-            sk->lastpbuf = p;
-            sk->lastpbuf_off = start_off;
-        } else if (poff < p->tot_len) {
-            /* Save remainder for future reads — prevents TCP data loss */
-            sk->lastpbuf = p;
-            sk->lastpbuf_off = poff;
-        } else {
-            pbuf_free(p);
-            sk->lastpbuf = NULL;
-            sk->lastpbuf_off = 0;
-        }
+            if (flags & MSG_PEEK) {
+                sk->lastpbuf = p;
+                sk->lastpbuf_off = start_off;
+                break;
+            } else if (poff < p->tot_len) {
+                sk->lastpbuf = p;
+                sk->lastpbuf_off = poff;
+            } else {
+                pbuf_free(p);
+                sk->lastpbuf = NULL;
+                sk->lastpbuf_off = 0;
+            }
 
+            sock_tcp_recvd(sk, copied_from_pbuf);
+            if (copied_from_pbuf == 0)
+                break;
+        }
     } else {
         /* UDP/RAW: receive one datagram, scatter into iovecs */
         struct netbuf *nb = NULL;
@@ -3170,6 +3556,8 @@ unix_recvmsg_done:
 
     if (total > 0)
         ACCT_ADD(current->thread_group, net_bytes_recv, (uint64)total);
+    if (sk->type == SOCK_STREAM && !(flags & MSG_PEEK) && total > 0)
+        sock_notify_if_still_readable(fd, sk);
     return (uint64)total;
 }
 
@@ -3265,10 +3653,10 @@ uint64 sys_sendmmsg(void)
         /* Gather data */
         size_t total = 0;
         char tmpbuf[8192];
-        for (uint64 j = 0; j < mh.msg_iovlen && total < sizeof(tmpbuf); j++) {
+        for (uint64 j = 0; j < mh.msg_iovlen; j++) {
+            if (iovs[j].iov_len > sizeof(tmpbuf) - total)
+                return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
             size_t chunk = iovs[j].iov_len;
-            if (chunk > sizeof(tmpbuf) - total)
-                chunk = sizeof(tmpbuf) - total;
             if (vm_copyin(current->vm, tmpbuf + total,
                           iovs[j].iov_base, chunk) < 0)
                 return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
@@ -3283,6 +3671,13 @@ uint64 sys_sendmmsg(void)
             struct unix_sock *usk = unix_sock_from_fd(sockfd);
             if (usk == NULL)
                 return sent > 0 ? (uint64)sent : (uint64)-EBADF;
+
+            if (total > UNIX_BUF_SIZE)
+                return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
+
+            struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
+            memset(scm_files, 0, sizeof(scm_files));
+            size_t scm_count = 0;
 
             if (mh.msg_control != 0 &&
                 mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
@@ -3303,26 +3698,53 @@ uint64 sys_sendmmsg(void)
                         ? (copy_len - K_CMSG_LEN(0)) / sizeof(int) : 0;
                     if (nfds > max_fds)
                         nfds = max_fds;
+                    if (nfds >= UNIX_SCM_QUEUE_MAX)
+                        return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
                     if (nfds > 0) {
                         int *pass_fds = (int *)K_CMSG_DATA(cmsg);
-                        int ret = unix_enqueue_scm_rights(usk, pass_fds, nfds);
-                        if (ret < 0)
-                            return sent > 0 ? (uint64)sent : (uint64)ret;
+                        for (size_t k = 0; k < nfds; k++) {
+                            struct vfs_file *file =
+                                vfs_fdtable_get_file(current->fdtable, pass_fds[k]);
+                            if (file == NULL) {
+                                for (size_t l = 0; l < scm_count; l++)
+                                    vfs_fput(scm_files[l]);
+                                return sent > 0 ? (uint64)sent : (uint64)-EBADF;
+                            }
+
+                            scm_files[scm_count] = vfs_fdup(file);
+                            vfs_fput(file);
+                            if (scm_files[scm_count] == NULL) {
+                                for (size_t l = 0; l < scm_count; l++)
+                                    vfs_fput(scm_files[l]);
+                                return sent > 0 ? (uint64)sent : (uint64)-ENOMEM;
+                            }
+                            scm_count++;
+                        }
                     }
                 }
             }
 
-            struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, sockfd);
-            if (f == NULL)
-                return sent > 0 ? (uint64)sent : (uint64)-EBADF;
+            struct vfs_file *notify_file = NULL;
+            spin_lock(&usk->lock);
+            n = unix_sendmsg_atomic_locked(usk, tmpbuf, total,
+                                           scm_files, scm_count);
+            if (n == 0 && usk->peer != NULL) {
+                tq_wakeup_all(&usk->peer->rd_queue, 0, 0);
+                if (usk->peer->file != NULL)
+                    notify_file = vfs_fdup(usk->peer->file);
+            }
+            spin_unlock(&usk->lock);
 
-            int saved_fflags = f->f_flags;
-            if (flags & MSG_DONTWAIT)
-                f->f_flags |= O_NONBLOCK;
-
-            n = unix_socket_file_ops.write(f, tmpbuf, total, 1);
-            f->f_flags = saved_fflags;
-            vfs_fput(f);
+            if (n < 0) {
+                for (size_t k = 0; k < scm_count; k++)
+                    vfs_fput(scm_files[k]);
+            } else {
+                n = (ssize_t)total;
+            }
+            if (notify_file != NULL) {
+                vfs_file_knote_notify(notify_file, EVFILT_READ, 0);
+                vfs_fput(notify_file);
+            }
         } else {
             struct lwip_sock *sk = sock_from_fd(sockfd);
             if (sk == NULL)
@@ -3475,9 +3897,12 @@ uint64 sys_recvmmsg(void)
                 struct vfs_file *scm = NULL;
                 if (peer != NULL) {
                     spin_lock(&peer->lock);
-                    if (peer->scm_head != peer->scm_tail) {
-                        scm = peer->scm_queue[peer->scm_head];
-                        peer->scm_queue[peer->scm_head] = NULL;
+                    if (peer->scm_head != peer->scm_tail &&
+                        (int)(peer->scm_queue[peer->scm_head].mark_nread -
+                              peer->tx.nread) <= 0) {
+                        scm = peer->scm_queue[peer->scm_head].file;
+                        peer->scm_queue[peer->scm_head].file = NULL;
+                        peer->scm_queue[peer->scm_head].mark_nread = 0;
                         peer->scm_head =
                             (peer->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
                     }
@@ -3555,7 +3980,8 @@ uint64 sys_recvmmsg(void)
                     poff = sk->lastpbuf_off;
                     reused_lastpbuf = true;
                 } else {
-                    err_t err = netconn_recv_tcp_pbuf(sk->conn, &p);
+                    err_t err = sock_tcp_recv_pbuf(sk, &p,
+                        sock_is_nonblock(sockfd, recv_flags));
                     if (err != ERR_OK) {
                         if (err == ERR_CLSD && received > 0) break;
                         if (err == ERR_CLSD) return 0;
@@ -3600,6 +4026,8 @@ uint64 sys_recvmmsg(void)
                     sk->lastpbuf = NULL;
                     sk->lastpbuf_off = 0;
                 }
+                if (!(flags & MSG_PEEK))
+                    sock_tcp_recvd(sk, (size_t)total);
             } else {
                 struct netbuf *nb = NULL;
                 err_t err = netconn_recv(sk->conn, &nb);

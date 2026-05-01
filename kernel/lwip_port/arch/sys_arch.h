@@ -45,7 +45,13 @@ typedef struct sys_mutex {
  * Mailbox: fixed-size circular buffer guarded by a spinlock,
  *          with two kernel semaphores for blocking.
  * -------------------------------------------------------------------------- */
-#define SYS_MBOX_SIZE 128
+/*
+ * Browser workloads can receive large HTTPS responses as many MSS-sized TCP
+ * pbufs before the WebKit network thread gets scheduled again.  Keep the
+ * mailbox comfortably above TCP_WND / MSS so lwIP does not stall the stream
+ * merely because the netconn recv queue filled.
+ */
+#define SYS_MBOX_SIZE 512
 
 typedef struct sys_mbox {
     spinlock_t lock;       /* protects the circular buffer fields */

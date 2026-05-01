@@ -2,8 +2,9 @@
  * unix_socket.h - AF_UNIX (UNIX domain) socket declarations
  *
  * UNIX domain sockets provide local inter-process communication.
- * Supports SOCK_STREAM (connection-oriented byte stream) and
- * SOCK_DGRAM (connectionless datagram) types.
+ * Supports SOCK_STREAM (connection-oriented byte stream), SOCK_SEQPACKET
+ * (connection-oriented packet stream), and SOCK_DGRAM (connectionless
+ * datagram) types.
  */
 
 #ifndef __KERNEL_VFS_UNIX_SOCKET_H
@@ -30,6 +31,9 @@ struct vfs_file_ops;
 #define SOCK_STREAM    1
 #define SOCK_DGRAM     2
 #define SOCK_RAW       3
+#endif
+#ifndef SOCK_SEQPACKET
+#define SOCK_SEQPACKET 5
 #endif
 #define UNIX_BUF_SIZE (64 * PAGE_SIZE)  /* ring buffer size per direction */
 
@@ -85,7 +89,7 @@ struct unix_sock {
     spinlock_t lock;            /* protects most fields */
     int        refcount;        /* atomic reference count */
     int        state;           /* UNIX_STATE_* */
-    int        type;            /* SOCK_STREAM or SOCK_DGRAM */
+    int        type;            /* SOCK_STREAM, SOCK_SEQPACKET, or SOCK_DGRAM */
     int        protocol;        /* always 0 for AF_UNIX */
     int        shutdown_flags;  /* UNIX_SHUT_RD | UNIX_SHUT_WR */
 
@@ -123,11 +127,24 @@ struct unix_sock {
     /* VFS file back-reference (for kqueue/epoll notification) */
     struct vfs_file *file;
 
-    /* SCM_RIGHTS: FIFO queue of pending files to deliver to peer via recvmsg */
+    /*
+     * SCM_RIGHTS entries are attached to the sender tx stream position.  The
+     * receiver may read a Wayland message in pieces, so descriptors must not
+     * be delivered before the byte stream has reached the message that carried
+     * them.
+     */
 #define UNIX_SCM_QUEUE_MAX 64
-    struct vfs_file *scm_queue[UNIX_SCM_QUEUE_MAX];
+    struct {
+        struct vfs_file *file;
+        uint mark_nread;
+    } scm_queue[UNIX_SCM_QUEUE_MAX];
     int scm_head;  /* next slot to dequeue from */
     int scm_tail;  /* next slot to enqueue into */
+
+#define UNIX_PACKET_QUEUE_MAX 256
+    uint packet_queue[UNIX_PACKET_QUEUE_MAX];
+    int packet_head;  /* next packet end mark to consume */
+    int packet_tail;  /* next packet end mark to enqueue */
 };
 
 /* ========================================================================== */

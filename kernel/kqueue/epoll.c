@@ -368,7 +368,36 @@ uint64 sys_epoll_pwait(void)
         return (uint64)-ENOMEM;
     }
 
-    int nkev = kqueue_wait(kq, kevents, kev_max, timeout);
+    /*
+     * WebKit/GLib commonly uses epoll as an edge-style async wake source.
+     * If a driver or socket callback drops one wakeup, an infinite
+     * kqueue_wait() can park the network process even though readiness is
+     * visible to a fresh poll.  Keep Linux-visible semantics, but implement
+     * blocking waits as short internal timed waits so each slice rescans all
+     * registered fds before sleeping again.
+     */
+    const int rescan_slice_ms = 20;
+    int remaining_ms = timeout;
+    int nkev = 0;
+    for (;;) {
+        int wait_ms = timeout;
+        if (timeout < 0) {
+            wait_ms = rescan_slice_ms;
+        } else if (timeout > rescan_slice_ms) {
+            wait_ms = rescan_slice_ms;
+        }
+
+        nkev = kqueue_wait(kq, kevents, kev_max, wait_ms);
+        if (nkev != 0 || timeout == 0)
+            break;
+        if (timeout < 0)
+            continue;
+
+        remaining_ms -= wait_ms;
+        if (remaining_ms <= 0)
+            break;
+        timeout = remaining_ms;
+    }
 
     if (nkev < 0) {
         kvfree(kevents);
@@ -376,22 +405,40 @@ uint64 sys_epoll_pwait(void)
         return (uint64)nkev;
     }
 
-    /* Convert kevent results → epoll_event and copy to user space.
-     * We output one epoll_event per kevent (no coalescing for simplicity).
-     * Most real-world usage registers either EPOLLIN or EPOLLOUT per fd,
-     * so this rarely produces duplicates. */
+    /*
+     * Convert kevent results → epoll_event.  Linux epoll reports one event
+     * record per watched fd, with readable/writable/error bits ORed together.
+     * GLib's main loop relies on that coalescing when a socket is monitored
+     * for both directions; returning separate records can make dispatch churn
+     * on the writable side and starve the read progress that drives WebKit's
+     * network process.
+     */
+    struct k_epoll_event *out_events =
+        kvmalloc((size_t)maxevents * sizeof(struct k_epoll_event));
+    if (out_events == NULL) {
+        kvfree(kevents);
+        vfs_fput(fp);
+        return (uint64)-ENOMEM;
+    }
+    uint64 *out_ident = kvmalloc((size_t)maxevents * sizeof(uint64));
+    if (out_ident == NULL) {
+        kvfree(out_events);
+        kvfree(kevents);
+        vfs_fput(fp);
+        return (uint64)-ENOMEM;
+    }
+
     int nout = 0;
-    for (int i = 0; i < nkev && nout < maxevents; i++) {
-        struct k_epoll_event ep;
-        memset(&ep, 0, sizeof(ep));
+    for (int i = 0; i < nkev; i++) {
+        uint32 mapped = 0;
 
         /* Map kqueue filter → epoll events */
         switch (kevents[i].filter) {
         case EVFILT_READ:
-            ep.events = EPOLLIN | EPOLLRDNORM;
+            mapped = EPOLLIN | EPOLLRDNORM;
             break;
         case EVFILT_WRITE:
-            ep.events = EPOLLOUT | EPOLLWRNORM;
+            mapped = EPOLLOUT | EPOLLWRNORM;
             break;
         default:
             continue; /* skip filters we don't map */
@@ -399,23 +446,44 @@ uint64 sys_epoll_pwait(void)
 
         /* Map kqueue flags → epoll events */
         if (kevents[i].flags & EV_EOF)
-            ep.events |= EPOLLHUP;
+            mapped |= EPOLLHUP;
         if (kevents[i].flags & EV_ERROR)
-            ep.events |= EPOLLERR;
+            mapped |= EPOLLERR;
 
-        /* Preserve user data from the round-trip */
-        ep.data = kevents[i].udata;
+        int slot = -1;
+        for (int j = 0; j < nout; j++) {
+            if (out_ident[j] == kevents[i].ident &&
+                out_events[j].data == kevents[i].udata) {
+                slot = j;
+                break;
+            }
+        }
 
-        /* Copy this event to user space */
-        uint64 dest = uevents + (uint64)nout * sizeof(struct k_epoll_event);
-        if (vm_copyout(current->vm, dest, &ep, sizeof(ep)) < 0) {
+        if (slot < 0) {
+            if (nout >= maxevents)
+                break;
+            slot = nout++;
+            memset(&out_events[slot], 0, sizeof(out_events[slot]));
+            out_ident[slot] = kevents[i].ident;
+            out_events[slot].data = kevents[i].udata;
+        }
+        out_events[slot].events |= mapped;
+    }
+
+    for (int i = 0; i < nout; i++) {
+        uint64 dest = uevents + (uint64)i * sizeof(struct k_epoll_event);
+        if (vm_copyout(current->vm, dest, &out_events[i],
+                       sizeof(out_events[i])) < 0) {
+            kvfree(out_ident);
+            kvfree(out_events);
             kvfree(kevents);
             vfs_fput(fp);
             return (uint64)-EFAULT;
         }
-        nout++;
     }
 
+    kvfree(out_ident);
+    kvfree(out_events);
     kvfree(kevents);
     vfs_fput(fp);
     return (uint64)nout;
