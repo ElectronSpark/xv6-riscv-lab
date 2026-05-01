@@ -232,6 +232,9 @@
 #define SYS_msgctl          934
 
 // --- Other musl stubs (return -ENOSYS) ---
+#define SYS_munlockall      884
+#define SYS_munlock         885
+#define SYS_mlockall        892
 #define SYS_mlock2          893
 #define SYS_utimensat       938
 #define SYS_clone3          937

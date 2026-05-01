@@ -310,6 +310,9 @@ extern uint64 sys_inotify_init1(void);
 extern uint64 sys_inotify_add_watch(void);
 extern uint64 sys_inotify_rm_watch(void);
 extern uint64 sys_mlock2(void);
+extern uint64 sys_mlockall(void);
+extern uint64 sys_munlock(void);
+extern uint64 sys_munlockall(void);
 extern uint64 sys_membarrier(void);
 
 // Power management (kernel/power.c)
@@ -565,6 +568,9 @@ static uint64 (*syscalls[])(void) = {
     [SYS_getrusage] sys_getrusage,
     [SYS_getpriority] sys_getpriority,
     [SYS_setpriority] sys_setpriority,
+    [SYS_munlockall] sys_munlockall,
+    [SYS_munlock] sys_munlock,
+    [SYS_mlockall] sys_mlockall,
     [SYS_mlock2] sys_mlock2,
     [SYS_memfd_create] sys_memfd_create,
     [SYS_statx] sys_statx,

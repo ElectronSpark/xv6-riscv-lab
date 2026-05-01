@@ -4,7 +4,7 @@
  *
  * Implements: prctl, sysinfo, getrusage, getpriority, setpriority,
  * set_robust_list, clock_settime, sched_rr_get_interval, rt_sigqueueinfo,
- * clone3, mlock2.
+ * clone3, mlock/munlock compatibility.
  */
 
 #include "types.h"
@@ -557,6 +557,32 @@ uint64 sys_clone3(void) {
     return (uint64)thread_clone(&args);
 }
 
+#define MLOCK_ONFAULT 0x1
+#define MCL_CURRENT  0x1
+#define MCL_FUTURE   0x2
+#define MCL_ONFAULT  0x4
+
+static uint64 sys_mlock_range(uint64 addr, uint64 length, int flags)
+{
+    if (flags & ~MLOCK_ONFAULT)
+        return (uint64)-EINVAL;
+
+    if (length == 0)
+        return 0;
+    if (addr + length < addr)
+        return (uint64)-EINVAL;
+
+    /*
+     * xv6 does not swap pages out, so the Linux memory-locking contract is
+     * already satisfied for resident user mappings.  Keep the syscall as a
+     * validated no-op so libraries using secure arenas can run unmodified.
+     */
+    if (addr >= MAXVA || addr + length > MAXVA)
+        return (uint64)-ENOMEM;
+
+    return 0;
+}
+
 uint64 sys_mlock2(void) {
     uint64 addr;
     uint64 length;
@@ -566,12 +592,30 @@ uint64 sys_mlock2(void) {
     argaddr(1, &length);
     argint(2, &flags);
 
-    (void)addr;
-    (void)length;
+    return sys_mlock_range(addr, length, flags);
+}
 
-    if (flags & ~1)
+uint64 sys_mlockall(void) {
+    int flags;
+    argint(0, &flags);
+
+    if (flags & ~(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT))
         return (uint64)-EINVAL;
 
+    return 0;
+}
+
+uint64 sys_munlock(void) {
+    uint64 addr;
+    uint64 length;
+
+    argaddr(0, &addr);
+    argaddr(1, &length);
+
+    return sys_mlock_range(addr, length, 0);
+}
+
+uint64 sys_munlockall(void) {
     return 0;
 }
 

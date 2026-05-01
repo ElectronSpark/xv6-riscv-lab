@@ -175,6 +175,9 @@ static const char *syscall_name(int num) {
     case 950: return "prctl";
     case 851: return "sysinfo";
     case 902: return "getrusage";
+    case 884: return "munlockall";
+    case 885: return "munlock";
+    case 892: return "mlockall";
     case 893: return "mlock2";
     case 894: return "memfd_create";
     case 998: return "membarrier";
@@ -463,6 +466,9 @@ extern uint64 sys_sched_rr_get_interval(void);
 extern uint64 sys_rt_sigqueueinfo(void);
 extern uint64 sys_clone3(void);
 extern uint64 sys_mlock2(void);
+extern uint64 sys_mlockall(void);
+extern uint64 sys_munlock(void);
+extern uint64 sys_munlockall(void);
 
 // Signal syscalls (proc/sys_signal.c)
 extern uint64 sys_sigaltstack(void);
@@ -709,6 +715,9 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_getrusage] sys_getrusage,
     [SYS_getpriority] sys_getpriority,
     [SYS_setpriority] sys_setpriority,
+    [SYS_munlockall] sys_munlockall,
+    [SYS_munlock] sys_munlock,
+    [SYS_mlockall] sys_mlockall,
     [SYS_mlock2] sys_mlock2,
     [SYS_memfd_create] sys_memfd_create,
     [SYS_membarrier] sys_membarrier,
