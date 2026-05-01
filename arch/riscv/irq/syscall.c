@@ -180,6 +180,7 @@ static const char *syscall_name(int num) {
     case 892: return "mlockall";
     case 893: return "mlock2";
     case 894: return "memfd_create";
+    case 279: return "memfd_create";
     case 998: return "membarrier";
     case 938: return "utimensat";
     case 937: return "clone3";
@@ -720,6 +721,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_mlockall] sys_mlockall,
     [SYS_mlock2] sys_mlock2,
     [SYS_memfd_create] sys_memfd_create,
+    [SYS_memfd_create_generic] sys_memfd_create,
     [SYS_membarrier] sys_membarrier,
     [SYS_fadvise64] sys_fadvise64,
     [SYS_fallocate] sys_fallocate,

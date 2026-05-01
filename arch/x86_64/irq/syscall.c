@@ -579,6 +579,8 @@ static uint64 (*syscalls[])(void) = {
     [SYS_inotify_rm_watch] sys_ni_enosys,
     /* Linux x86_64 native __NR_getrandom — OpenSSL direct call */
     [SYS_getrandom_x86] sys_getrandom,
+    [SYS_memfd_create_x86] sys_memfd_create,
+    [SYS_memfd_create_generic] sys_memfd_create,
     [SYS_membarrier] sys_membarrier,
     [SYS_fadvise64] sys_fadvise64,
     [SYS_fallocate] sys_fallocate,

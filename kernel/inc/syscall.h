@@ -270,6 +270,8 @@
 // OpenSSL calls getrandom with the native Linux x86_64 number
 // directly instead of xv6's custom SYS_getrandom (19).
 #define SYS_getrandom_x86   318
+#define SYS_memfd_create_x86 319
+#define SYS_memfd_create_generic 279
 
 #define SYS_socketpair      974
 
