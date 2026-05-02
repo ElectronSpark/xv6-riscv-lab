@@ -485,6 +485,8 @@ static int procfs_getattr(struct vfs_inode *inode, struct stat *st) {
 /* ------------------------------------------------------------------ */
 
 #define PROCFS_BUF_SIZE 4096
+#define PROCFS_MAPS_INITIAL_BUF_SIZE (64 * 1024)
+#define PROCFS_MAPS_MAX_BUF_SIZE     (1024 * 1024)
 
 static char *procfs_gen_status(int tgid) {
     rcu_read_lock();
@@ -554,32 +556,56 @@ static char *procfs_gen_maps(int tgid) {
     if (vm == NULL)
         return ERR_PTR(-ESRCH);
 
-    char *buf = kvmalloc(PROCFS_BUF_SIZE);
-    if (buf == NULL)
-        return ERR_PTR(-ENOMEM);
+    size_t buf_size = PROCFS_MAPS_INITIAL_BUF_SIZE;
 
-    int pos = 0;
-    vm_rlock(vm);
-    vma_t  *vma;
-    uint64  index = 0;
-    mt_for_each(&vm->vm_mt, vma, index, (uint64)(-1ULL)) {
-        char r = (vma->flags & PROT_READ)      ? 'r' : '-';
-        char w = (vma->flags & PROT_WRITE)     ? 'w' : '-';
-        char x = (vma->flags & PROT_EXEC)      ? 'x' : '-';
-        char s = (vma->flags & VMA_FLAG_SHARED) ? 's' : 'p';
-        int n = snprintf(buf + pos, PROCFS_BUF_SIZE - pos,
-                         "%016llx-%016llx %c%c%c%c %08llx 00:00 0\n",
-                         (unsigned long long)vma->start,
-                         (unsigned long long)vma->end,
-                         r, w, x, s,
-                         (unsigned long long)vma->pgoff);
-        if (n < 0 || pos + n >= PROCFS_BUF_SIZE - 1)
-            break;
-        pos += n;
+    for (;;) {
+        char *buf = kvmalloc(buf_size);
+        if (buf == NULL)
+            return ERR_PTR(-ENOMEM);
+
+        size_t pos = 0;
+        bool truncated = false;
+
+        vm_rlock(vm);
+        vma_t  *vma;
+        uint64  index = 0;
+        mt_for_each(&vm->vm_mt, vma, index, (uint64)(-1ULL)) {
+            char r = (vma->flags & PROT_READ)      ? 'r' : '-';
+            char w = (vma->flags & PROT_WRITE)     ? 'w' : '-';
+            char x = (vma->flags & PROT_EXEC)      ? 'x' : '-';
+            char s = (vma->flags & VMA_FLAG_SHARED) ? 's' : 'p';
+            char line[96];
+            int n = snprintf(line, sizeof(line),
+                             "%016llx-%016llx %c%c%c%c %08llx 00:00 0\n",
+                             (unsigned long long)vma->start,
+                             (unsigned long long)vma->end,
+                             r, w, x, s,
+                             (unsigned long long)vma->pgoff);
+            if (n < 0 || (size_t)n >= sizeof(line)) {
+                truncated = true;
+                break;
+            }
+            if (pos + (size_t)n >= buf_size) {
+                truncated = true;
+                break;
+            }
+            memmove(buf + pos, line, (size_t)n);
+            pos += (size_t)n;
+        }
+        vm_runlock(vm);
+
+        if (!truncated) {
+            buf[pos] = '\0';
+            return buf;
+        }
+
+        kvfree(buf);
+        if (buf_size >= PROCFS_MAPS_MAX_BUF_SIZE)
+            return ERR_PTR(-EOVERFLOW);
+        buf_size *= 2;
+        if (buf_size > PROCFS_MAPS_MAX_BUF_SIZE)
+            buf_size = PROCFS_MAPS_MAX_BUF_SIZE;
     }
-    vm_runlock(vm);
-    buf[pos] = '\0';
-    return buf;
 }
 
 static char *procfs_gen_meminfo(void) {

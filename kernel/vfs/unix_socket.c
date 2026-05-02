@@ -713,6 +713,11 @@ static int unix_file_poll(struct vfs_file *file, short events)
         return POLLNVAL;
 
     short revents = 0;
+    struct unix_sock *peer = NULL;
+    int state;
+    int type;
+    int shutdown_flags;
+    size_t tx_writable = 0;
 
     spin_lock(&sk->lock);
 
@@ -724,12 +729,19 @@ static int unix_file_poll(struct vfs_file *file, short events)
         return revents;
     }
 
-    struct unix_sock *peer = sk->peer;
+    state = sk->state;
+    type = sk->type;
+    shutdown_flags = sk->shutdown_flags;
+    peer = sk->peer;
+    if (peer != NULL)
+        unix_sock_get(peer);
+    tx_writable = RING_WRITABLE(&sk->tx);
+    spin_unlock(&sk->lock);
 
     /* Check readability: data in peer's tx ring (which we read) */
     if (events & (POLLIN | POLLRDNORM)) {
         if (peer != NULL) {
-            if (sk->type == SOCK_SEQPACKET) {
+            if (type == SOCK_SEQPACKET) {
                 spin_lock(&peer->lock);
                 bool packet_ready = unix_packet_count_locked(peer) > 0;
                 spin_unlock(&peer->lock);
@@ -747,17 +759,18 @@ static int unix_file_poll(struct vfs_file *file, short events)
     if (events & (POLLOUT | POLLWRNORM)) {
         if (peer == NULL)
             revents |= POLLERR;
-        else if (RING_WRITABLE(&sk->tx) >= UNIX_WRITE_LOWAT)
+        else if (tx_writable >= UNIX_WRITE_LOWAT)
             revents |= (events & (POLLOUT | POLLWRNORM));
     }
 
     /* Error/hangup conditions */
-    if (peer == NULL && sk->state == UNIX_STATE_CONNECTED)
+    if (peer == NULL && state == UNIX_STATE_CONNECTED)
         revents |= POLLHUP;
-    if (sk->shutdown_flags & UNIX_SHUT_WR)
+    if (shutdown_flags & UNIX_SHUT_WR)
         revents |= POLLHUP;
 
-    spin_unlock(&sk->lock);
+    if (peer != NULL)
+        unix_sock_put(peer);
     return revents;
 }
 
