@@ -2857,18 +2857,10 @@ uint64 sys_sendmsg(void)
         int ret;
         int nonblock = sock_is_nonblock(fd, flags);
         struct vfs_file *notify_file = NULL;
-        if (scm_count > 0)
-            printf("unix_sendmsg: fd=%d len=%lu scm=%lu nonblock=%d\n",
-                   fd, (unsigned long)total_len, (unsigned long)scm_count,
-                   nonblock);
         for (;;) {
             spin_lock(&sk->lock);
             ret = unix_sendmsg_atomic_locked(sk, msg_buf, total_len,
                                              scm_files, scm_count);
-            if (scm_count > 0)
-                printf("unix_sendmsg: atomic ret=%d nread=%u nwrite=%u scm_head=%u scm_tail=%u packet_head=%u packet_tail=%u\n",
-                       ret, sk->tx.nread, sk->tx.nwrite, sk->scm_head,
-                       sk->scm_tail, sk->packet_head, sk->packet_tail);
             if (ret == 0 && sk->peer != NULL) {
                 tq_wakeup_all(&sk->peer->rd_queue, 0, 0);
                 if (sk->peer->file != NULL)
@@ -2883,9 +2875,6 @@ uint64 sys_sendmsg(void)
                 spin_unlock(&sk->lock);
                 break;
             }
-            if (scm_count > 0)
-                printf("unix_sendmsg: waiting fd=%d len=%lu scm=%lu\n",
-                       fd, (unsigned long)total_len, (unsigned long)scm_count);
             tq_wait_in_state(&sk->wr_queue, &sk->lock, NULL,
                              THREAD_INTERRUPTIBLE);
             spin_unlock(&sk->lock);

@@ -133,7 +133,7 @@ struct unix_sock {
      * be delivered before the byte stream has reached the message that carried
      * them.
      */
-#define UNIX_SCM_QUEUE_MAX 64
+#define UNIX_SCM_QUEUE_MAX 256
     struct {
         struct vfs_file *file;
         uint mark_nread;
