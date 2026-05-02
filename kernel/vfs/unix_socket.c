@@ -199,6 +199,12 @@ static struct unix_sock *unix_sock_alloc(void)
     if (sk == NULL)
         return NULL;
     memset(sk, 0, sizeof(*sk));
+    sk->scm_queue = kvmalloc(sizeof(*sk->scm_queue) * UNIX_SCM_QUEUE_MAX);
+    if (sk->scm_queue == NULL) {
+        slab_free(sk);
+        return NULL;
+    }
+    memset(sk->scm_queue, 0, sizeof(*sk->scm_queue) * UNIX_SCM_QUEUE_MAX);
     spin_init(&sk->lock, "unix_sock");
     sk->refcount = 1;
     tq_init(&sk->rd_queue, "unix_rd", NULL);
@@ -210,7 +216,7 @@ static struct unix_sock *unix_sock_alloc(void)
 
 static void unix_sock_free(struct unix_sock *sk)
 {
-    while (sk->scm_head != sk->scm_tail) {
+    while (sk->scm_queue != NULL && sk->scm_head != sk->scm_tail) {
         struct vfs_file *pending = sk->scm_queue[sk->scm_head].file;
         sk->scm_queue[sk->scm_head].file = NULL;
         sk->scm_queue[sk->scm_head].mark_nread = 0;
@@ -219,6 +225,10 @@ static void unix_sock_free(struct unix_sock *sk)
             vfs_fput(pending);
     }
     ring_free(&sk->tx);
+    if (sk->scm_queue != NULL) {
+        kvfree(sk->scm_queue);
+        sk->scm_queue = NULL;
+    }
     slab_free(sk);
 }
 

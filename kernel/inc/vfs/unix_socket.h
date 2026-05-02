@@ -82,6 +82,11 @@ struct unix_pending {
     struct unix_pending *next; /* linked-list next pointer */
 };
 
+struct unix_scm_entry {
+    struct vfs_file *file;
+    uint mark_nread;
+};
+
 /*
  * struct unix_sock - per-socket state for an AF_UNIX socket
  */
@@ -134,10 +139,7 @@ struct unix_sock {
      * them.
      */
 #define UNIX_SCM_QUEUE_MAX 256
-    struct {
-        struct vfs_file *file;
-        uint mark_nread;
-    } scm_queue[UNIX_SCM_QUEUE_MAX];
+    struct unix_scm_entry *scm_queue;
     int scm_head;  /* next slot to dequeue from */
     int scm_tail;  /* next slot to enqueue into */
 
