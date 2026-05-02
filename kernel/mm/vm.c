@@ -2272,6 +2272,9 @@ hp_per_page:
                         if (is_pcache)
                             pcache_put_folio(fault_pc_head->pcache.pcache,
                                              page_folio(fault_pc_head));
+                        else if (vma->file->ops != NULL &&
+                                 vma->file->ops->fault != NULL)
+                            page_ref_dec(pa);
                         else
                             page_free(pa, 0);
                         return -ENOMEM;
@@ -2280,6 +2283,9 @@ hp_per_page:
                         if (is_pcache)
                             pcache_put_folio(fault_pc_head->pcache.pcache,
                                              page_folio(fault_pc_head));
+                        else if (vma->file->ops != NULL &&
+                                 vma->file->ops->fault != NULL)
+                            page_ref_dec(pa);
                         else
                             page_free(pa, 0);
                     } else {
@@ -3902,7 +3908,8 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         if (file == NULL)
             return (uint64)-EBADF;
         struct vfs_inode *inode = vfs_inode_deref(&file->inode);
-        if (inode == NULL || !S_ISREG(inode->mode)) {
+        if ((inode == NULL || !S_ISREG(inode->mode)) &&
+            (file->ops == NULL || file->ops->fault == NULL)) {
             vfs_fput(file);
             return (uint64)-ENODEV;
         }

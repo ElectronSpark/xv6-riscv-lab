@@ -35,6 +35,213 @@
 
 #define FB_GPU_MAX_BOS 128
 
+#define DRM_IOCTL_VERSION                      0xc0406400UL
+#define DRM_IOCTL_GET_CAP                      0xc010640cUL
+#define DRM_IOCTL_SET_CLIENT_CAP               0x4010640dUL
+#define DRM_IOCTL_GEM_CLOSE                    0x40086409UL
+#define DRM_IOCTL_PRIME_HANDLE_TO_FD           0xc00c642dUL
+#define DRM_IOCTL_PRIME_FD_TO_HANDLE           0xc00c642eUL
+#define DRM_IOCTL_MODE_CREATE_DUMB             0xc02064b2UL
+#define DRM_IOCTL_MODE_MAP_DUMB                0xc01064b3UL
+#define DRM_IOCTL_MODE_DESTROY_DUMB            0xc00464b4UL
+#define DRM_IOCTL_VIRTGPU_MAP                  0xc0106441UL
+#define DRM_IOCTL_VIRTGPU_EXECBUFFER           0xc0406442UL
+#define DRM_IOCTL_VIRTGPU_GETPARAM             0xc0106443UL
+#define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE      0xc0386444UL
+#define DRM_IOCTL_VIRTGPU_RESOURCE_INFO        0xc0106445UL
+#define DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST   0xc02c6446UL
+#define DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST     0xc02c6447UL
+#define DRM_IOCTL_VIRTGPU_WAIT                 0xc0086448UL
+#define DRM_IOCTL_VIRTGPU_GET_CAPS             0xc0186449UL
+#define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB 0xc030644aUL
+#define DRM_IOCTL_VIRTGPU_CONTEXT_INIT         0xc010644bUL
+
+#define DRM_CAP_DUMB_BUFFER           0x1
+#define DRM_CAP_DUMB_PREFERRED_DEPTH  0x3
+#define DRM_CAP_DUMB_PREFER_SHADOW    0x4
+#define DRM_CAP_PRIME                 0x5
+#define DRM_PRIME_CAP_IMPORT          0x1
+#define DRM_PRIME_CAP_EXPORT          0x2
+#define DRM_CAP_TIMESTAMP_MONOTONIC   0x6
+#define DRM_CAP_SYNCOBJ               0x13
+#define DRM_CAP_SYNCOBJ_TIMELINE      0x14
+
+#define VIRTGPU_PARAM_3D_FEATURES             1
+#define VIRTGPU_PARAM_CAPSET_QUERY_FIX        2
+#define VIRTGPU_PARAM_RESOURCE_BLOB           3
+#define VIRTGPU_PARAM_HOST_VISIBLE            4
+#define VIRTGPU_PARAM_CONTEXT_INIT            6
+#define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs    7
+#define VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME     8
+#define VIRTGPU_WAIT_NOWAIT                   1
+#define VIRTGPU_BLOB_MEM_GUEST                0x0001
+#define VIRTGPU_BLOB_MEM_HOST3D               0x0002
+#define VIRTGPU_BLOB_MEM_HOST3D_GUEST         0x0003
+#define VIRTGPU_BLOB_FLAG_USE_MAPPABLE        0x0001
+#define VIRTGPU_BLOB_FLAG_USE_SHAREABLE       0x0002
+#define VIRTGPU_CONTEXT_PARAM_CAPSET_ID       0x0001
+#define VIRTGPU_CONTEXT_PARAM_NUM_RINGS       0x0002
+#define VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK 0x0003
+#define VIRTGPU_CONTEXT_PARAM_DEBUG_NAME      0x0004
+
+#define GPU_DRM_MMAP_HANDLE_SHIFT 32
+#define GPU_DRM_MMAP_OFFSET(handle) ((uint64)(handle) << GPU_DRM_MMAP_HANDLE_SHIFT)
+#define GPU_DRM_MMAP_HANDLE(offset) ((uint32)((offset) >> GPU_DRM_MMAP_HANDLE_SHIFT))
+#define GPU_DRM_MMAP_PAGE(offset) \
+    (((offset) & ((1ULL << GPU_DRM_MMAP_HANDLE_SHIFT) - 1)) >> PGSHIFT)
+
+struct drm_version_compat {
+    int version_major;
+    int version_minor;
+    int version_patchlevel;
+    uint64 name_len;
+    uint64 name;
+    uint64 date_len;
+    uint64 date;
+    uint64 desc_len;
+    uint64 desc;
+};
+
+struct drm_get_cap_compat {
+    uint64 capability;
+    uint64 value;
+};
+
+struct drm_set_client_cap_compat {
+    uint64 capability;
+    uint64 value;
+};
+
+struct drm_gem_close_compat {
+    uint32 handle;
+    uint32 pad;
+};
+
+struct drm_prime_handle_compat {
+    uint32 handle;
+    uint32 flags;
+    int32 fd;
+};
+
+struct drm_mode_create_dumb_compat {
+    uint32 height;
+    uint32 width;
+    uint32 bpp;
+    uint32 flags;
+    uint32 handle;
+    uint32 pitch;
+    uint64 size;
+};
+
+struct drm_mode_map_dumb_compat {
+    uint32 handle;
+    uint32 pad;
+    uint64 offset;
+};
+
+struct drm_mode_destroy_dumb_compat {
+    uint32 handle;
+};
+
+struct drm_virtgpu_map_compat {
+    uint64 offset;
+    uint32 handle;
+    uint32 pad;
+};
+
+struct drm_virtgpu_getparam_compat {
+    uint64 param;
+    uint64 value;
+};
+
+struct drm_virtgpu_resource_create_compat {
+    uint32 target;
+    uint32 format;
+    uint32 bind;
+    uint32 width;
+    uint32 height;
+    uint32 depth;
+    uint32 array_size;
+    uint32 last_level;
+    uint32 nr_samples;
+    uint32 flags;
+    uint32 bo_handle;
+    uint32 res_handle;
+    uint32 size;
+    uint32 stride;
+};
+
+struct drm_virtgpu_resource_info_compat {
+    uint32 bo_handle;
+    uint32 res_handle;
+    uint32 size;
+    uint32 blob_mem;
+};
+
+struct drm_virtgpu_3d_box_compat {
+    uint32 x, y, z, w, h, d;
+};
+
+struct drm_virtgpu_3d_transfer_compat {
+    uint32 bo_handle;
+    struct drm_virtgpu_3d_box_compat box;
+    uint32 level;
+    uint32 offset;
+    uint32 stride;
+    uint32 layer_stride;
+};
+
+struct drm_virtgpu_3d_wait_compat {
+    uint32 handle;
+    uint32 flags;
+};
+
+struct drm_virtgpu_get_caps_compat {
+    uint32 cap_set_id;
+    uint32 cap_set_ver;
+    uint64 addr;
+    uint32 size;
+    uint32 pad;
+};
+
+struct drm_virtgpu_resource_create_blob_compat {
+    uint32 blob_mem;
+    uint32 blob_flags;
+    uint32 bo_handle;
+    uint32 res_handle;
+    uint64 size;
+    uint32 pad;
+    uint32 cmd_size;
+    uint64 cmd;
+    uint64 blob_id;
+};
+
+struct drm_virtgpu_context_set_param_compat {
+    uint64 param;
+    uint64 value;
+};
+
+struct drm_virtgpu_context_init_compat {
+    uint32 num_params;
+    uint32 pad;
+    uint64 ctx_set_params;
+};
+
+struct drm_virtgpu_execbuffer_compat {
+    uint32 flags;
+    uint32 size;
+    uint64 command;
+    uint64 bo_handles;
+    uint32 num_bo_handles;
+    int32 fence_fd;
+    uint32 ring_idx;
+    uint32 syncobj_stride;
+    uint32 num_in_syncobjs;
+    uint32 num_out_syncobjs;
+    uint64 in_syncobjs;
+    uint64 out_syncobjs;
+};
+
 struct fb_gpu_bo_entry {
     int in_use;
     int dead;
@@ -130,6 +337,8 @@ static cdev_t gpu_cdev;
 struct fb_gpu_render_owner {
     uint64 id;
     pid_t tgid;
+    uint32 default_ctx_id;
+    uint32 capset_id;
 };
 
 static int fb_cmdline_enabled(const char *key)
@@ -433,6 +642,24 @@ static struct fb_gpu_bo_entry *fb_bo_get_owned(uint32 handle, uint64 owner_id,
 static struct fb_gpu_bo_entry *fb_bo_get(uint32 handle)
 {
     return fb_bo_get_owned(handle, 0, 0);
+}
+
+static void *fb_bo_page_for_owner(uint32 handle, uint64 owner_id,
+                                  pid_t owner_tgid, uint64 page_index)
+{
+    struct fb_gpu_bo_entry *bo;
+    void *pa = NULL;
+
+    spin_lock(&fb_state.lock);
+    bo = fb_bo_lookup_locked(handle);
+    if (bo != NULL && fb_bo_owner_matches(bo, owner_id, owner_tgid) &&
+        page_index < bo->npages && bo->pages[page_index] != NULL) {
+        pa = (void *)__page_to_pa(bo->pages[page_index]);
+        if (page_ref_inc(pa) <= 0)
+            pa = NULL;
+    }
+    spin_unlock(&fb_state.lock);
+    return pa;
 }
 
 static int fb_bo_alloc_pages(uint32 npages, page_t ***pages_out)
@@ -1845,6 +2072,75 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
                                                 req.resource_id);
     }
 
+    case FB_GPU_VIRGL_RESOURCE_EXPORT_FD: {
+        struct fb_gpu_virgl_resource_export_fd req;
+        struct fb_gpu_bo_entry *bo;
+        page_t **pages = NULL;
+        uint32 width = 0;
+        uint32 height = 0;
+        uint32 pitch = 0;
+        uint32 npages = 0;
+        uint32 handle = 0;
+        uint64 size = 0;
+        int fd;
+        int ret;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.resource_id == 0)
+            return -EINVAL;
+
+        ret = virtio_gpu_user_resource_export_pages(owner_id, owner_tgid,
+                                                    req.resource_id, &width,
+                                                    &height, &pitch, &size,
+                                                    &pages, &npages);
+        if (ret != 0)
+            return ret;
+
+        ret = fb_bo_register(owner_id, owner_tgid, width, height, pitch, size,
+                             pages, npages, &handle);
+        if (ret != 0) {
+            fb_bo_release_pages(pages, npages);
+            return ret;
+        }
+
+        bo = fb_bo_get(handle);
+        if (bo == NULL) {
+            (void)fb_bo_destroy(handle);
+            return -ENOENT;
+        }
+        fd = vfs_custom_fd_alloc(&fb_bo_file_ops, bo, 0);
+        if (fd < 0) {
+            fb_bo_put(bo);
+            (void)fb_bo_destroy(handle);
+            return fd;
+        }
+
+        req.fd = fd;
+        req.handle = handle;
+        req.width = width;
+        req.height = height;
+        req.pitch = pitch;
+        req.reserved = 0;
+        req.size = size;
+        spin_lock(&fb_state.lock);
+        fb_state.stats.bo_fd_exports++;
+        fb_state.stats.bo_fd_live++;
+        if (fb_state.stats.bo_fd_live > fb_state.stats.bo_fd_peak)
+            fb_state.stats.bo_fd_peak = fb_state.stats.bo_fd_live;
+        spin_unlock(&fb_state.lock);
+
+        /*
+         * The fd owns the exported BO capability. Drop the transient handle
+         * immediately so closing the fd releases the shared page references.
+         */
+        (void)fb_bo_destroy(handle);
+
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
     case FB_GPU_VIRGL_TRANSFER_TO_HOST:
     case FB_GPU_VIRGL_TRANSFER_FROM_HOST: {
         struct fb_gpu_virgl_transfer req;
@@ -1968,6 +2264,7 @@ static int gpu_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     case FB_GPU_VIRGL_GET_CAPS:
     case FB_GPU_VIRGL_RESOURCE_CREATE:
     case FB_GPU_VIRGL_RESOURCE_DESTROY:
+    case FB_GPU_VIRGL_RESOURCE_EXPORT_FD:
     case FB_GPU_VIRGL_TRANSFER_TO_HOST:
     case FB_GPU_VIRGL_TRANSFER_FROM_HOST:
         break;
@@ -1991,6 +2288,612 @@ static uint64 gpu_alloc_render_owner_id(void)
         fb_state.next_render_owner_id = 1;
     spin_unlock(&fb_state.lock);
     return id;
+}
+
+static cdev_t gpu_render_cdev;
+
+static int gpu_copyout_string(uint64 dst, uint64 *len, const char *src)
+{
+    uint64 actual = strlen(src);
+    uint64 n;
+
+    if (len == NULL)
+        return -EINVAL;
+    n = *len;
+    *len = actual;
+    if (dst == 0 || n == 0)
+        return 0;
+    if (n > actual + 1)
+        n = actual + 1;
+    if (n == 0)
+        return 0;
+    if (either_copyout(1, dst, (void *)src, n - 1) < 0)
+        return -EFAULT;
+    {
+        char nul = 0;
+        if (either_copyout(1, dst + n - 1, &nul, 1) < 0)
+            return -EFAULT;
+    }
+    return 0;
+}
+
+static int gpu_user_debug_name(uint64 user_ptr, char name[64])
+{
+    uint32 i;
+
+    if (name == NULL)
+        return -EINVAL;
+    if (user_ptr == 0) {
+        memcpy(name, "xv6-drm", sizeof("xv6-drm"));
+        return 0;
+    }
+
+    for (i = 0; i < 63; i++) {
+        if (either_copyin(&name[i], 1, user_ptr + i, 1) < 0)
+            return -EFAULT;
+        if (name[i] == 0)
+            return 0;
+    }
+    name[63] = 0;
+    return 0;
+}
+
+static int gpu_drm_current_capset(uint32 *capset_id)
+{
+    uint32 id = 0;
+    int ret;
+
+    ret = virtio_gpu_user_get_caps(NULL, 0, &id, NULL, NULL);
+    if (ret != 0)
+        return ret;
+    if (id == 0)
+        return -ENODEV;
+    if (capset_id != NULL)
+        *capset_id = id;
+    return 0;
+}
+
+static int gpu_owner_create_context(struct fb_gpu_render_owner *owner,
+                                    const char *name, uint32 capset_id)
+{
+    int ret;
+    uint32 current_capset = 0;
+
+    if (owner == NULL)
+        return -EBADF;
+    ret = gpu_drm_current_capset(&current_capset);
+    if (ret != 0)
+        return ret;
+    if (capset_id == 0)
+        capset_id = current_capset;
+    if (capset_id != current_capset)
+        return -EINVAL;
+    if (owner->capset_id != 0 && owner->capset_id != capset_id)
+        return -EINVAL;
+    if (owner->default_ctx_id != 0)
+        return 0;
+    ret = virtio_gpu_user_context_create(owner->id, owner->tgid,
+                                         name ? name : "xv6-drm",
+                                         &owner->default_ctx_id);
+    if (ret == 0)
+        owner->capset_id = capset_id;
+    return ret;
+}
+
+static int gpu_owner_ensure_context(struct fb_gpu_render_owner *owner)
+{
+    return gpu_owner_create_context(owner, "xv6-drm", 0);
+}
+
+static int gpu_drm_version(uint64 arg)
+{
+    struct drm_version_compat req;
+    int ret;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    req.version_major = 0;
+    req.version_minor = 1;
+    req.version_patchlevel = 0;
+    ret = gpu_copyout_string(req.name, &req.name_len, "virtio_gpu");
+    if (ret != 0)
+        return ret;
+    ret = gpu_copyout_string(req.date, &req.date_len, "20260502");
+    if (ret != 0)
+        return ret;
+    ret = gpu_copyout_string(req.desc, &req.desc_len,
+                             "xv6 virtio-gpu virgl render node");
+    if (ret != 0)
+        return ret;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_get_cap(uint64 arg)
+{
+    struct drm_get_cap_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    switch (req.capability) {
+    case DRM_CAP_DUMB_BUFFER:
+    case DRM_CAP_TIMESTAMP_MONOTONIC:
+        req.value = 1;
+        break;
+    case DRM_CAP_DUMB_PREFERRED_DEPTH:
+        req.value = 32;
+        break;
+    case DRM_CAP_DUMB_PREFER_SHADOW:
+        req.value = 0;
+        break;
+    case DRM_CAP_PRIME:
+        req.value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT;
+        break;
+    case DRM_CAP_SYNCOBJ:
+    case DRM_CAP_SYNCOBJ_TIMELINE:
+        req.value = 0;
+        break;
+    default:
+        return -EINVAL;
+    }
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_create_dumb(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_mode_create_dumb_compat req;
+    uint64 size;
+    uint32 npages;
+    page_t **pages;
+    uint32 handle;
+    int ret;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.width == 0 || req.height == 0 || req.bpp == 0 ||
+        req.bpp > 64 || req.flags != 0 || req.width > 8192 ||
+        req.height > 8192)
+        return -EINVAL;
+
+    req.pitch = req.width * ((req.bpp + 7) / 8);
+    if (req.pitch == 0 || (uint64)req.pitch > ((uint64)-1) / req.height)
+        return -EINVAL;
+    size = (uint64)req.pitch * req.height;
+    if (size == 0 || size > 256ULL * 1024 * 1024)
+        return -EINVAL;
+    req.size = PGROUNDUP(size);
+    npages = req.size / PGSIZE;
+
+    ret = fb_bo_alloc_pages(npages, &pages);
+    if (ret != 0)
+        return ret;
+
+    ret = fb_bo_register(owner->id, owner->tgid, req.width, req.height,
+                         req.pitch, req.size, pages, npages, &handle);
+    if (ret != 0) {
+        fb_bo_release_pages(pages, npages);
+        return ret;
+    }
+    req.handle = handle;
+    spin_lock(&fb_state.lock);
+    fb_state.stats.bo_allocs++;
+    fb_state.stats.bo_bytes += req.size;
+    spin_unlock(&fb_state.lock);
+
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
+        (void)fb_bo_destroy_owned(req.handle, owner->id, owner->tgid);
+        return -EFAULT;
+    }
+    return 0;
+}
+
+static int gpu_drm_prime_handle_to_fd(struct fb_gpu_render_owner *owner,
+                                      uint64 arg)
+{
+    struct drm_prime_handle_compat req;
+    struct fb_gpu_bo_entry *bo;
+    int fd;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    bo = fb_bo_get_owned(req.handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
+    fd = vfs_custom_fd_alloc(&fb_bo_file_ops, bo, 0);
+    if (fd < 0) {
+        fb_bo_put(bo);
+        return fd;
+    }
+    req.fd = fd;
+    spin_lock(&fb_state.lock);
+    fb_state.stats.bo_fd_exports++;
+    fb_state.stats.bo_fd_live++;
+    if (fb_state.stats.bo_fd_live > fb_state.stats.bo_fd_peak)
+        fb_state.stats.bo_fd_peak = fb_state.stats.bo_fd_live;
+    spin_unlock(&fb_state.lock);
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
+                                      uint64 arg)
+{
+    struct drm_prime_handle_compat req;
+    struct vfs_file *file;
+    struct fb_gpu_bo_entry *bo;
+    page_t **pages;
+    uint32 handle;
+    int ret;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    file = vfs_fdtable_get_file(current->fdtable, req.fd);
+    if (file == NULL)
+        return -EBADF;
+    if (file->ops != &fb_bo_file_ops || file->private_data == NULL) {
+        vfs_fput(file);
+        return -EINVAL;
+    }
+    bo = (struct fb_gpu_bo_entry *)file->private_data;
+    ret = fb_bo_clone_pages(bo, &pages);
+    if (ret != 0) {
+        vfs_fput(file);
+        return ret;
+    }
+    ret = fb_bo_register(owner->id, owner->tgid, bo->width, bo->height,
+                         bo->pitch, bo->size, pages, bo->npages, &handle);
+    if (ret != 0) {
+        fb_bo_release_pages(pages, bo->npages);
+        vfs_fput(file);
+        return ret;
+    }
+    vfs_fput(file);
+    req.handle = handle;
+    spin_lock(&fb_state.lock);
+    fb_state.stats.bo_fd_imports++;
+    spin_unlock(&fb_state.lock);
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
+                                           uint64 arg, int blob)
+{
+    struct fb_gpu_virgl_resource_create create;
+    uint32 out_handle = 0;
+    uint64 out_size = 0;
+    uint32 out_stride = 0;
+    int ret;
+
+    ret = gpu_owner_ensure_context(owner);
+    if (ret != 0)
+        return ret;
+
+    memset(&create, 0, sizeof(create));
+    create.ctx_id = owner->default_ctx_id;
+    if (blob) {
+        struct drm_virtgpu_resource_create_blob_compat req;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.size == 0 ||
+            (req.blob_mem != VIRTGPU_BLOB_MEM_GUEST &&
+             req.blob_mem != VIRTGPU_BLOB_MEM_HOST3D &&
+             req.blob_mem != VIRTGPU_BLOB_MEM_HOST3D_GUEST))
+            return -EINVAL;
+        create.width = req.size > 4096 ? 4096 : (uint32)req.size;
+        create.height = (uint32)((req.size + create.width - 1) / create.width);
+        create.depth = 1;
+        create.array_size = 1;
+        create.format = 1; /* B8G8R8A8_UNORM */
+        create.bind = 0;
+        create.size = req.size;
+        ret = virtio_gpu_user_resource_create(owner->id, owner->tgid, &create);
+        if (ret != 0)
+            return ret;
+        if (create.addr != 0 && create.size != 0)
+            (void)vm_munmap(current->vm, create.addr, (size_t)create.size);
+        req.bo_handle = create.resource_id;
+        req.res_handle = create.resource_id;
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    } else {
+        struct drm_virtgpu_resource_create_compat req;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        create.target = req.target;
+        create.format = req.format;
+        create.bind = req.bind;
+        create.width = req.width;
+        create.height = req.height;
+        create.depth = req.depth;
+        create.array_size = req.array_size;
+        create.last_level = req.last_level;
+        create.nr_samples = req.nr_samples;
+        create.flags = req.flags;
+        create.size = req.size;
+        ret = virtio_gpu_user_resource_create(owner->id, owner->tgid, &create);
+        if (ret != 0)
+            return ret;
+        if (create.addr != 0 && create.size != 0)
+            (void)vm_munmap(current->vm, create.addr, (size_t)create.size);
+        out_handle = create.resource_id;
+        out_size = create.size;
+        out_stride = req.stride ? req.stride : create.width * 4;
+        req.bo_handle = out_handle;
+        req.res_handle = out_handle;
+        req.size = (uint32)out_size;
+        req.stride = out_stride;
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+}
+
+static int gpu_drm_virtgpu_transfer(struct fb_gpu_render_owner *owner,
+                                    uint64 arg, int from_host)
+{
+    struct drm_virtgpu_3d_transfer_compat req;
+    struct fb_gpu_virgl_transfer transfer;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.resource_id = req.bo_handle;
+    transfer.x = req.box.x;
+    transfer.y = req.box.y;
+    transfer.z = req.box.z;
+    transfer.w = req.box.w;
+    transfer.h = req.box.h;
+    transfer.d = req.box.d ? req.box.d : 1;
+    transfer.level = req.level;
+    transfer.offset = req.offset;
+    transfer.stride = req.stride;
+    transfer.layer_stride = req.layer_stride;
+    return virtio_gpu_user_transfer(owner->id, owner->tgid, &transfer,
+                                    from_host);
+}
+
+static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
+                         uint64 arg)
+{
+    if (owner == NULL)
+        return -EBADF;
+
+    switch (cmd) {
+    case DRM_IOCTL_VERSION:
+        return gpu_drm_version(arg);
+    case DRM_IOCTL_GET_CAP:
+        return gpu_drm_get_cap(arg);
+    case DRM_IOCTL_SET_CLIENT_CAP:
+        return 0;
+    case DRM_IOCTL_GEM_CLOSE: {
+        struct drm_gem_close_compat req;
+        int ret;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        ret = fb_bo_destroy_owned(req.handle, owner->id, owner->tgid);
+        if (ret == -ENOENT)
+            ret = virtio_gpu_user_resource_destroy(owner->id, owner->tgid,
+                                                   req.handle);
+        return ret;
+    }
+    case DRM_IOCTL_PRIME_HANDLE_TO_FD:
+        return gpu_drm_prime_handle_to_fd(owner, arg);
+    case DRM_IOCTL_PRIME_FD_TO_HANDLE:
+        return gpu_drm_prime_fd_to_handle(owner, arg);
+    case DRM_IOCTL_MODE_CREATE_DUMB:
+        return gpu_drm_create_dumb(owner, arg);
+    case DRM_IOCTL_MODE_MAP_DUMB:
+    {
+        struct drm_mode_map_dumb_compat req;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        req.offset = GPU_DRM_MMAP_OFFSET(req.handle);
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case DRM_IOCTL_VIRTGPU_MAP: {
+        struct drm_virtgpu_map_compat req;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        req.offset = GPU_DRM_MMAP_OFFSET(req.handle);
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case DRM_IOCTL_MODE_DESTROY_DUMB: {
+        struct drm_mode_destroy_dumb_compat req;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        return fb_bo_destroy_owned(req.handle, owner->id, owner->tgid);
+    }
+    case DRM_IOCTL_VIRTGPU_GETPARAM: {
+        struct drm_virtgpu_getparam_compat req;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        switch (req.param) {
+        case VIRTGPU_PARAM_3D_FEATURES:
+        case VIRTGPU_PARAM_CAPSET_QUERY_FIX:
+        case VIRTGPU_PARAM_CONTEXT_INIT:
+        case VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME:
+            req.value = virtio_gpu_has_virgl() ? 1 : 0;
+            break;
+        case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs:
+        {
+            uint32 capset_id = 0;
+            if (gpu_drm_current_capset(&capset_id) != 0)
+                req.value = 0;
+            else if (capset_id < 64)
+                req.value = 1ULL << capset_id;
+            else
+                req.value = 0;
+            break;
+        }
+        case VIRTGPU_PARAM_RESOURCE_BLOB:
+        case VIRTGPU_PARAM_HOST_VISIBLE:
+            req.value = 0;
+            break;
+        default:
+            return -EINVAL;
+        }
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case DRM_IOCTL_VIRTGPU_CONTEXT_INIT: {
+        struct drm_virtgpu_context_init_compat req;
+        struct drm_virtgpu_context_set_param_compat param;
+        char debug_name[64];
+        uint32 capset_id = 0;
+        uint32 current_capset = 0;
+        uint32 i;
+        int ret;
+
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.pad != 0 || req.num_params > 16)
+            return -EINVAL;
+
+        ret = gpu_drm_current_capset(&current_capset);
+        if (ret != 0)
+            return ret;
+        capset_id = current_capset;
+        memcpy(debug_name, "xv6-drm", sizeof("xv6-drm"));
+
+        if (req.num_params != 0 && req.ctx_set_params == 0)
+            return -EFAULT;
+        for (i = 0; i < req.num_params; i++) {
+            uint64 user_param = req.ctx_set_params +
+                (uint64)i * sizeof(param);
+            if (either_copyin(&param, 1, user_param, sizeof(param)) < 0)
+                return -EFAULT;
+
+            switch (param.param) {
+            case VIRTGPU_CONTEXT_PARAM_CAPSET_ID:
+                if (param.value == 0 || param.value != current_capset)
+                    return -EINVAL;
+                capset_id = (uint32)param.value;
+                break;
+            case VIRTGPU_CONTEXT_PARAM_DEBUG_NAME:
+                ret = gpu_user_debug_name(param.value, debug_name);
+                if (ret != 0)
+                    return ret;
+                break;
+            case VIRTGPU_CONTEXT_PARAM_NUM_RINGS:
+                if (param.value > 1)
+                    return -EINVAL;
+                break;
+            case VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK:
+                if (param.value > 1)
+                    return -EINVAL;
+                break;
+            default:
+                return -EINVAL;
+            }
+        }
+        return gpu_owner_create_context(owner, debug_name, capset_id);
+    }
+    case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE:
+        return gpu_drm_virtgpu_resource_create(owner, arg, 0);
+    case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB:
+        return gpu_drm_virtgpu_resource_create(owner, arg, 1);
+    case DRM_IOCTL_VIRTGPU_RESOURCE_INFO: {
+        struct drm_virtgpu_resource_info_compat req;
+        uint64 size = 0;
+        int ret;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        ret = virtio_gpu_user_resource_info(owner->id, owner->tgid,
+                                            req.bo_handle, NULL, NULL, NULL,
+                                            &size);
+        if (ret != 0)
+            return ret;
+        req.res_handle = req.bo_handle;
+        req.size = (uint32)size;
+        req.blob_mem = 0;
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST:
+        return gpu_drm_virtgpu_transfer(owner, arg, 1);
+    case DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST:
+        return gpu_drm_virtgpu_transfer(owner, arg, 0);
+    case DRM_IOCTL_VIRTGPU_WAIT: {
+        struct drm_virtgpu_3d_wait_compat req;
+        uint64 signaled = 0;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        return virtio_gpu_user_fence(0, !(req.flags & VIRTGPU_WAIT_NOWAIT),
+                                     &signaled);
+    }
+    case DRM_IOCTL_VIRTGPU_GET_CAPS: {
+        struct drm_virtgpu_get_caps_compat req;
+        uint32 capset_id, capset_ver, capset_size;
+        void *caps = NULL;
+        int ret;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.addr != 0 && req.size != 0) {
+            if (req.size > PGSIZE)
+                return -EINVAL;
+            caps = kalloc();
+            if (caps == NULL)
+                return -ENOMEM;
+        }
+        ret = virtio_gpu_user_get_caps(caps, req.addr ? req.size : 0,
+                                       &capset_id, &capset_ver, &capset_size);
+        if (ret == 0 && caps != NULL &&
+            either_copyout(1, req.addr, caps, capset_size) < 0)
+            ret = -EFAULT;
+        if (caps != NULL)
+            kfree(caps);
+        if (ret != 0)
+            return ret;
+        req.cap_set_id = capset_id;
+        req.cap_set_ver = capset_ver;
+        req.size = capset_size;
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case DRM_IOCTL_VIRTGPU_EXECBUFFER: {
+        struct drm_virtgpu_execbuffer_compat req;
+        uint32 *cmds;
+        uint64 fence = 0, signaled = 0;
+        int ret;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+            return -EFAULT;
+        ret = gpu_owner_ensure_context(owner);
+        if (ret != 0)
+            return ret;
+        if (req.command == 0 || req.size == 0 || req.size > PGSIZE * 64 ||
+            (req.size & 3) != 0)
+            return -EINVAL;
+        cmds = kvmalloc(req.size);
+        if (cmds == NULL)
+            return -ENOMEM;
+        if (either_copyin(cmds, 1, req.command, req.size) < 0) {
+            kvfree(cmds);
+            return -EFAULT;
+        }
+        ret = virtio_gpu_user_submit(owner->id, owner->tgid,
+                                     owner->default_ctx_id, 0, cmds,
+                                     req.size / sizeof(uint32), &fence,
+                                     &signaled);
+        kvfree(cmds);
+        return ret;
+    }
+    default:
+        return -EINVAL;
+    }
 }
 
 static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
@@ -2035,11 +2938,12 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case FB_GPU_VIRGL_GET_CAPS:
     case FB_GPU_VIRGL_RESOURCE_CREATE:
     case FB_GPU_VIRGL_RESOURCE_DESTROY:
+    case FB_GPU_VIRGL_RESOURCE_EXPORT_FD:
     case FB_GPU_VIRGL_TRANSFER_TO_HOST:
     case FB_GPU_VIRGL_TRANSFER_FROM_HOST:
         break;
     default:
-        return -EINVAL;
+        return gpu_drm_ioctl(owner, cmd, (uint64)arg);
     }
 
     spin_lock(&fb_state.lock);
@@ -2048,9 +2952,35 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     return fb_ioctl_for_owner(&gpu_cdev, cmd, arg, owner->id, owner->tgid);
 }
 
+static void *gpu_fops_fault(struct vfs_file *file, struct vma *vma, uint64 va)
+{
+    struct fb_gpu_render_owner *owner =
+        file ? (struct fb_gpu_render_owner *)file->private_data : NULL;
+    uint64 off;
+    uint32 handle;
+    uint64 page_index;
+    void *pa;
+
+    if (owner == NULL || vma == NULL || va < vma->start)
+        return NULL;
+
+    off = vma->pgoff + (va - vma->start);
+    handle = GPU_DRM_MMAP_HANDLE(off);
+    page_index = GPU_DRM_MMAP_PAGE(off);
+    if (handle == 0)
+        return NULL;
+
+    pa = fb_bo_page_for_owner(handle, owner->id, owner->tgid, page_index);
+    if (pa != NULL)
+        return pa;
+    return virtio_gpu_user_resource_page(owner->id, owner->tgid, handle,
+                                         page_index);
+}
+
 static struct vfs_file_ops gpu_file_ops = {
     .release = gpu_fops_release,
     .ioctl   = gpu_fops_ioctl,
+    .fault   = gpu_fops_fault,
 };
 
 static int gpu_open_file(cdev_t *cdev, struct vfs_file *file)
@@ -2059,6 +2989,11 @@ static int gpu_open_file(cdev_t *cdev, struct vfs_file *file)
     int ret = gpu_open(cdev);
     if (ret != 0)
         return ret;
+    if (cdev == &gpu_render_cdev && !virtio_gpu_has_virgl()) {
+        printf("GPU: denying /dev/dri/renderD128 open without virgl\n");
+        (void)gpu_release(cdev);
+        return -ENODEV;
+    }
     owner = kvmalloc(sizeof(*owner));
     if (owner == NULL) {
         (void)gpu_release(cdev);
@@ -2110,6 +3045,26 @@ static cdev_t gpu_cdev = {
     },
 };
 
+static cdev_t gpu_render_cdev = {
+    .dev = {
+        .major = DRM_RENDER_MAJOR,
+        .minor = DRM_RENDER_MINOR,
+        .devname = "dri/renderD128",
+        .devmode = S_IFCHR | 0666,
+    },
+    .readable = 1,
+    .writable = 1,
+    .ops = {
+        .read    = NULL,
+        .write   = NULL,
+        .open    = gpu_open,
+        .release = gpu_release,
+        .ioctl   = gpu_ioctl,
+        .poll    = NULL,
+        .open_file = gpu_open_file,
+    },
+};
+
 void fbdevinit(void)
 {
     if (!fb_state.detected) {
@@ -2121,9 +3076,12 @@ void fbdevinit(void)
     assert(ret == 0, "fbdevinit: failed to register fb cdev: %d", ret);
     ret = cdev_register(&gpu_cdev);
     assert(ret == 0, "fbdevinit: failed to register gpu cdev: %d", ret);
+    ret = cdev_register(&gpu_render_cdev);
+    assert(ret == 0, "fbdevinit: failed to register gpu render cdev: %d", ret);
     printf("FB: registered /dev/fb0 (%dx%dx%d)\n",
            fb_state.xres, fb_state.yres, fb_state.bpp);
     printf("GPU: registered /dev/gpu0 (render facade)\n");
+    printf("GPU: registered /dev/dri/renderD128 (DRM render facade)\n");
 }
 
 /* ── Panic screen: BSOD-style framebuffer overlay ─────────────────── */

@@ -26,6 +26,7 @@ struct sock;
 struct fb_gpu_stats;
 struct fb_gpu_virgl_resource_create;
 struct fb_gpu_virgl_transfer;
+typedef struct page_struct page_t;
 
 // start_kernel.c
 void start_kernel(int hartid, void *fdt_base, bool is_boot_hart);
@@ -208,6 +209,7 @@ void virtio_disk_init(void);
 void virtio_gpu_init(void);
 void virtio_input_init(void);
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);
+int virtio_gpu_has_virgl(void);
 void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
                                 uint32 x, uint32 y, uint32 w, uint32 h);
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
@@ -224,6 +226,17 @@ int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
                                     struct fb_gpu_virgl_resource_create *req);
 int virtio_gpu_user_resource_destroy(uint64 owner_id, pid_t owner_tgid,
                                      uint32 resource_id);
+int virtio_gpu_user_resource_export_pages(uint64 owner_id, pid_t owner_tgid,
+                                          uint32 resource_id, uint32 *width,
+                                          uint32 *height, uint32 *pitch,
+                                          uint64 *size, page_t ***pages_out,
+                                          uint32 *npages_out);
+int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
+                                  uint32 resource_id, uint32 *width,
+                                  uint32 *height, uint32 *format,
+                                  uint64 *size);
+void *virtio_gpu_user_resource_page(uint64 owner_id, pid_t owner_tgid,
+                                    uint32 resource_id, uint64 page_index);
 void virtio_gpu_user_destroy_owner(pid_t owner_tgid);
 void virtio_gpu_user_destroy_render_owner(uint64 owner_id);
 int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,

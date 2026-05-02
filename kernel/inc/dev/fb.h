@@ -40,6 +40,7 @@
 #define FB_GPU_FENCE_QUERY     0x4625 /* query/wait an exported fence fd */
 #define FB_GPU_VIRGL_FENCE_EXPORT_FD 0x4626 /* export a virgl fence as an fd */
 #define FB_GPU_VIRGL_FENCE_QUERY_FD  0x4627 /* query/wait a virgl fence fd */
+#define FB_GPU_VIRGL_RESOURCE_EXPORT_FD 0x4628 /* export a virgl resource as a BO fd */
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
@@ -242,6 +243,18 @@ struct fb_gpu_virgl_resource_destroy {
     uint32   flags;           /* reserved, must be 0 */
 };
 
+struct fb_gpu_virgl_resource_export_fd {
+    uint32   resource_id;
+    uint32   flags;           /* reserved, must be 0 */
+    int32    fd;              /* returned BO capability fd */
+    uint32   handle;          /* returned transient BO handle */
+    uint32   width;           /* returned width in pixels */
+    uint32   height;          /* returned height in pixels */
+    uint32   pitch;           /* returned pitch in bytes */
+    uint32   reserved;
+    uint64   size;            /* returned mapping size */
+};
+
 struct fb_gpu_virgl_transfer {
     uint32   resource_id;
     uint32   flags;           /* reserved, must be 0 */
@@ -355,6 +368,8 @@ struct fb_gpu_stats {
 #define FB_MINOR   0
 #define GPU_MAJOR 30
 #define GPU_MINOR  0
+#define DRM_RENDER_MAJOR 226
+#define DRM_RENDER_MINOR 128
 
 /* Kernel API */
 void fbdevinit(void);
