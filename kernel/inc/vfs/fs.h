@@ -9,6 +9,7 @@
 #include "proc/workqueue_types.h"
 
 #define VFS_PATH_MAX 65535
+#define VFS_USER_PATH_MAX 4096
 #define VFS_INODE_MAX_REFCOUNT 0x7FFF0000
 
 void vfs_init(void);

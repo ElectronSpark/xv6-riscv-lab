@@ -1671,8 +1671,12 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
     struct vfs_inode *ret_inode = NULL;
     int symlink_depth = 0;
 
-    /* Allocate a working buffer large enough for symlink expansion */
-    pathbuf = kvmalloc(MAXPATH + 1);
+    if (path_len >= VFS_USER_PATH_MAX) {
+        return ERR_PTR(-ENAMETOOLONG);
+    }
+
+    /* Allocate a Linux PATH_MAX-sized working buffer for user pathnames. */
+    pathbuf = kvmalloc(VFS_USER_PATH_MAX);
     if (pathbuf == NULL)
         return ERR_PTR(-ENOMEM);
 
@@ -1698,11 +1702,7 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
         rooti = mnt_root;
     }
 
-    /* Copy path into the working buffer */
-    if (path_len >= MAXPATH) {
-        /* Truncate to MAXPATH — callers generally use MAXPATH-sized buffers */
-        path_len = MAXPATH - 1;
-    }
+    /* Copy path into the working buffer. Never silently truncate a lookup. */
     memmove(pathbuf, path, path_len);
     pathbuf[path_len] = '\0';
 
@@ -1779,10 +1779,19 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
             }
 
             /* Read the symlink target */
-            char target[MAXPATH];
-            ssize_t tlen = vfs_readlink(next, target, MAXPATH - 1);
+            char *target = kvmalloc(VFS_USER_PATH_MAX);
+            if (target == NULL) {
+                vfs_iput(next);
+                vfs_iput(pos);
+                pos = NULL;
+                ret_inode = INIT_ERR_PTR(-ENOMEM);
+                goto out;
+            }
+
+            ssize_t tlen = vfs_readlink(next, target, VFS_USER_PATH_MAX - 1);
             vfs_iput(next);
             if (tlen < 0) {
+                kvfree(target);
                 vfs_iput(pos);
                 pos = NULL;
                 ret_inode = INIT_ERR_PTR((int)tlen);
@@ -1797,7 +1806,8 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
              */
             size_t rest_len = strlen(rest);
             size_t new_len = (size_t)tlen + (rest_len ? 1 + rest_len : 0);
-            if (new_len >= MAXPATH) {
+            if (new_len >= VFS_USER_PATH_MAX) {
+                kvfree(target);
                 vfs_iput(pos);
                 pos = NULL;
                 ret_inode = INIT_ERR_PTR(-ENAMETOOLONG);
@@ -1805,7 +1815,16 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
             }
 
             /* Save rest before overwriting pathbuf */
-            char saved_rest[MAXPATH];
+            char *saved_rest = NULL;
+            if (rest_len > 0)
+                saved_rest = kvmalloc(rest_len + 1);
+            if (rest_len > 0 && saved_rest == NULL) {
+                kvfree(target);
+                vfs_iput(pos);
+                pos = NULL;
+                ret_inode = INIT_ERR_PTR(-ENOMEM);
+                goto out;
+            }
             if (rest_len > 0)
                 memmove(saved_rest, rest, rest_len + 1);
 
@@ -1816,6 +1835,8 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
                 memmove(pathbuf + tlen + 1, saved_rest, rest_len);
             }
             pathbuf[new_len] = '\0';
+            kvfree(saved_rest);
+            kvfree(target);
 
             /* Reset scan pointer */
             p = pathbuf;
