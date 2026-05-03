@@ -268,10 +268,21 @@ void e1000_init(uint32 *xregs) {
                        E1000_RCTL_SECRC;    // strip CRC
 
     // ask e1000 for receive interrupts.
-    // Instead of RDTR and RADV, using the Interrupt Throttling Register (ITR)
-    // if needs interrupt delay.
-    regs[E1000_RDTR] = 0; // interrupt after every received packet (no timer)
-    regs[E1000_RADV] = 0; // interrupt after every packet (no timer)
+    // Use the receive timers + ITR to coalesce per-packet IRQs.  Without this
+    // every MTU-sized inbound packet triggers a full e1000_intr -> workqueue
+    // -> tcpip_thread -> user-task wakeup chain, capping single-stream
+    // throughput well below the link rate even though the host CPU is mostly
+    // idle.
+    //
+    // RDTR/RADV are in 1.024 us units on 82540:
+    //   RDTR = inter-packet delay; restarts on every received packet, so a
+    //          steady stream gets coalesced indefinitely.
+    //   RADV = absolute delay since the first packet in the current batch;
+    //          bounds worst-case latency so RDTR never starves.
+    // ITR is in 256 ns units and bounds the global IRQ rate.
+    regs[E1000_RDTR] = 8;       // 8 us  inter-packet delay
+    regs[E1000_RADV] = 64;      // 64 us absolute coalescing window
+    regs[E1000_ITR]  = 500;     // ~7800 IRQ/s ceiling (500 * 256 ns ~= 128 us)
     regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
 
     // Register with the netdev abstraction layer

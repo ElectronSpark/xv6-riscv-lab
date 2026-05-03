@@ -106,6 +106,13 @@ struct lwip_sock {
     uint16         lastoffset;   /* offset into lastbuf */
     struct pbuf    *lastpbuf;    /* partially consumed TCP recv pbuf */
     uint16         lastpbuf_off; /* bytes already consumed from lastpbuf */
+    /* Mirrors lwIP upstream sock->sendevent.  Updated by
+     * sock_netconn_callback() in response to NETCONN_EVT_SEND{PLUS,MINUS}.
+     * Reset to 0 when the TCP send buffer is full (non-blocking write
+     * cannot push all data, or sndbuf <= TCP_SNDLOWAT) and to 1 when
+     * lwIP signals that more space is available.  Used by sock_poll_ready()
+     * so EPOLLOUT is only reported when the socket is genuinely writable. */
+    uint8          sendevent;
 };
 
 /* Socket type constants (matching POSIX) — also defined in vfs/unix_socket.h */
@@ -223,6 +230,14 @@ static struct lwip_sock *lwip_sock_alloc(void)
     if (sk == NULL)
         return NULL;
     memset(sk, 0, sizeof(*sk));
+    /*
+     * Match upstream lwIP socket layer: a fresh socket is considered
+     * writable (sendevent=1) and becomes non-writable only when lwIP
+     * fires NETCONN_EVT_SENDMINUS.  This is correct for SOCK_DGRAM/RAW
+     * (always writable) and for SOCK_STREAM where SENDPLUS will refresh
+     * after connect() completes anyway.
+     */
+    sk->sendevent = 1;
     return sk;
 }
 
@@ -422,8 +437,9 @@ static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
             break;
     }
 
-    if (!(flags & MSG_PEEK) && total > 0)
+    if (!(flags & MSG_PEEK) && total > 0) {
         sock_notify_if_still_readable(fd, sk);
+    }
 
     return (int)total;
 }
@@ -458,7 +474,23 @@ static int sock_poll_ready(struct lwip_sock *sk, short events)
     }
 
     if (events & POLLOUT) {
-        revents |= POLLOUT;
+        /*
+         * EPOLLOUT must reflect actual TCP send-buffer availability, not be
+         * unconditionally true.  Returning POLLOUT every wake makes GLib's
+         * epoll-driven main loop spin servicing fake write readiness on
+         * sockets registered for read+write, starving the read drain that
+         * delivers large response bodies (observed for desktop YouTube's
+         * 9.7 MB ytmainappweb script).  Mirror lwIP's upstream sockets.c:
+         * track sendevent via NETCONN_EVT_SEND{PLUS,MINUS} and gate POLLOUT
+         * on it.  Always report POLLOUT in error/closed states so writers
+         * surface EPIPE/ECONNRESET promptly.
+         */
+        if (conn->pending_err != ERR_OK ||
+            (conn->flags & NETCONN_FLAG_MBOXCLOSED)) {
+            revents |= POLLOUT;
+        } else if (sk->sendevent) {
+            revents |= POLLOUT;
+        }
     }
 
     return revents;
@@ -1254,6 +1286,15 @@ static void sock_netconn_callback(struct netconn *conn,
     if (file == NULL)
         return;
 
+    /*
+     * sk lookup: file->private_data is the lwip_sock if the file is a socket.
+     * The vfs_file_ops pointer matches lwip_socket_file_ops only for our
+     * sockets, so this is safe.
+     */
+    struct lwip_sock *sk = (file->ops == &lwip_socket_file_ops)
+                               ? (struct lwip_sock *)file->private_data
+                               : NULL;
+
     switch (evt) {
     case NETCONN_EVT_RCVPLUS:
         vfs_file_knote_notify(file, EVFILT_READ, (int64)len);
@@ -1261,11 +1302,26 @@ static void sock_netconn_callback(struct netconn *conn,
     case NETCONN_EVT_SENDPLUS:
         sock_dbg("callback SENDPLUS conn=%p state=%d len=%d\n",
                  conn, (int)conn->state, (int)len);
+        if (sk != NULL)
+            sk->sendevent = 1;
         vfs_file_knote_notify(file, EVFILT_WRITE, (int64)len);
+        break;
+    case NETCONN_EVT_SENDMINUS:
+        /*
+         * lwIP signals SENDMINUS when the TCP send buffer fills (or a
+         * non-blocking sendto() could not enqueue everything).  Clear
+         * sendevent so subsequent sock_poll_ready() calls stop reporting
+         * POLLOUT until SENDPLUS arrives.  Do NOT notify EVFILT_WRITE here
+         * (becoming non-writable is not a wake event).
+         */
+        if (sk != NULL)
+            sk->sendevent = 0;
         break;
     case NETCONN_EVT_ERROR:
         sock_dbg("callback ERROR conn=%p pending_err=%d\n",
                  conn, (int)conn->pending_err);
+        if (sk != NULL)
+            sk->sendevent = 1; /* surface error to writers via POLLOUT */
         vfs_file_knote_notify(file, EVFILT_READ, 0);
         vfs_file_knote_notify(file, EVFILT_WRITE, 0);
         break;
@@ -4600,8 +4656,9 @@ uint64 sys_recvmmsg(void)
                         break;
                 }
 
-                if (!(recv_flags & MSG_PEEK) && total > 0)
+                if (!(recv_flags & MSG_PEEK) && total > 0) {
                     sock_notify_if_still_readable(sockfd, sk);
+                }
             } else {
                 struct netbuf *nb = NULL;
                 err_t err = netconn_recv(sk->conn, &nb);

@@ -284,10 +284,7 @@ int tq_bulk_move(tq_t *to, tq_t *from) {
  *   5. scheduler_yield() — thread is descheduled
  *   6. On resume: invoke wakeup_callback with the sleep_callback status
  *   7. Self-detach from @q if still enqueued (async wakeup by signal)
- *   8. Restore interrupt state unless the wakeup callback re-acquired a lock
- *      through push_off()-based locking.  In that case the matching unlock must
- *      restore interrupts; enabling them here would allow migration while the
- *      lock still records this CPU as its owner.
+ *   8. Restore interrupt state
  */
 int tq_wait_in_state_cb(tq_t *q, sleep_callback_t sleep_callback,
                         wakeup_callback_t wakeup_callback, void *callback_data,
@@ -327,9 +324,7 @@ int tq_wait_in_state_cb(tq_t *q, sleep_callback_t sleep_callback,
         assert(tq_remove(q, &waiter) == 0,
                "Failed to remove interrupted waiter from queue");
     }
-    if (mycpu()->noff == 0) {
-        intr_restore(intr);
-    }
+    intr_restore(intr);
 
     if (rdata != NULL) {
         *rdata = waiter.data;
@@ -591,9 +586,7 @@ int ttree_wait_in_state_cb(ttree_t *q, uint64 key,
         assert(ttree_remove(q, &waiter) == 0,
                "Failed to remove interrupted waiter from tree");
     }
-    if (mycpu()->noff == 0) {
-        intr_restore(intr);
-    }
+    intr_restore(intr);
 
     if (rdata != NULL) {
         *rdata = waiter.data;
