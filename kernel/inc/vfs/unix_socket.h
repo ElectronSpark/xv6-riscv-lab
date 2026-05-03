@@ -149,8 +149,15 @@ struct unix_sock {
     int scm_head;  /* next slot to dequeue from */
     int scm_tail;  /* next slot to enqueue into */
 
-#define UNIX_PACKET_QUEUE_MAX 256
-    uint packet_queue[UNIX_PACKET_QUEUE_MAX];
+/*
+ * SOCK_SEQPACKET stores payload bytes in the growable tx ring, but it also
+ * needs one boundary mark per queued packet.  WebKit IPC commonly transfers
+ * multi-megabyte resources as many 2048-byte seqpacket messages; keep enough
+ * marks to cover a full 16 MiB ring at that granularity without reporting
+ * artificial EAGAIN while byte capacity remains.
+ */
+#define UNIX_PACKET_QUEUE_MAX 8192
+    uint *packet_queue;
     int packet_head;  /* next packet end mark to consume */
     int packet_tail;  /* next packet end mark to enqueue */
 };
