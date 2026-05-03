@@ -1841,8 +1841,8 @@ void *virtio_gpu_user_resource_page(uint64 owner_id, pid_t owner_tgid,
 void virtio_gpu_user_destroy_owner(pid_t owner_tgid)
 {
     struct virtio_gpu *g = &gpu;
-    uint32 resource_ids[VIRTIO_GPU_MAX_RESOURCES];
-    uint32 context_ids[VIRTIO_GPU_MAX_CONTEXTS];
+    uint32 *resource_ids;
+    uint32 *context_ids;
     uint32 nresources = 0;
     uint32 ncontexts = 0;
 
@@ -1851,6 +1851,16 @@ void virtio_gpu_user_destroy_owner(pid_t owner_tgid)
     if (!g->initialized || !g->virgl_capset_id ||
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return;
+
+    resource_ids = kvmalloc((size_t)VIRTIO_GPU_MAX_RESOURCES *
+                            sizeof(*resource_ids));
+    context_ids = kvmalloc((size_t)VIRTIO_GPU_MAX_CONTEXTS *
+                           sizeof(*context_ids));
+    if (resource_ids == NULL || context_ids == NULL) {
+        kvfree(resource_ids);
+        kvfree(context_ids);
+        return;
+    }
 
     mutex_lock(&g->op_lock);
     spin_lock(&g->lock);
@@ -1887,13 +1897,15 @@ void virtio_gpu_user_destroy_owner(pid_t owner_tgid)
         spin_unlock(&g->lock);
     }
     mutex_unlock(&g->op_lock);
+    kvfree(resource_ids);
+    kvfree(context_ids);
 }
 
 void virtio_gpu_user_destroy_render_owner(uint64 owner_id)
 {
     struct virtio_gpu *g = &gpu;
-    uint32 resource_ids[VIRTIO_GPU_MAX_RESOURCES];
-    uint32 context_ids[VIRTIO_GPU_MAX_CONTEXTS];
+    uint32 *resource_ids;
+    uint32 *context_ids;
     uint32 nresources = 0;
     uint32 ncontexts = 0;
 
@@ -1902,6 +1914,16 @@ void virtio_gpu_user_destroy_render_owner(uint64 owner_id)
     if (!g->initialized || !g->virgl_capset_id ||
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return;
+
+    resource_ids = kvmalloc((size_t)VIRTIO_GPU_MAX_RESOURCES *
+                            sizeof(*resource_ids));
+    context_ids = kvmalloc((size_t)VIRTIO_GPU_MAX_CONTEXTS *
+                           sizeof(*context_ids));
+    if (resource_ids == NULL || context_ids == NULL) {
+        kvfree(resource_ids);
+        kvfree(context_ids);
+        return;
+    }
 
     mutex_lock(&g->op_lock);
     spin_lock(&g->lock);
@@ -1938,6 +1960,8 @@ void virtio_gpu_user_destroy_render_owner(uint64 owner_id)
         spin_unlock(&g->lock);
     }
     mutex_unlock(&g->op_lock);
+    kvfree(resource_ids);
+    kvfree(context_ids);
 }
 
 int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,
