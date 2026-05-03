@@ -2781,7 +2781,7 @@ static int unix_sendmsg_growth_needed_locked(struct unix_sock *sk, size_t len,
 
     size_t readable = sk->tx.nwrite - sk->tx.nread;
     if (readable > UNIX_BUF_MAX_SIZE || len > UNIX_BUF_MAX_SIZE - readable)
-        return -EMSGSIZE;
+        return -EAGAIN;
 
     size_t needed = readable + len;
     if (needed <= sk->tx.capacity)
