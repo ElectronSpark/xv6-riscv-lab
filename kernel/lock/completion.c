@@ -136,22 +136,14 @@ void complete_all(completion_t *c) {
         return;
     }
 
-    // Use a temporary queue to collect waiters, so we can release
-    // the lock before waking them (avoiding lock convoy when woken
-    // threads try to re-acquire c->lock in scheduler_sleep).
-    tq_t temp_queue;
-    tq_init(&temp_queue, "completion_temp", NULL);
-
     spin_lock(&c->lock);
     c->done = MAX_COMPLETIONS;
-    // Move all waiters to temp queue
-    tq_bulk_move(&temp_queue, &c->wait_queue);
-    spin_unlock(&c->lock);
-
-    // Wake all waiters outside the lock
-    if (temp_queue.counter > 0) {
-        tq_wakeup_all(&temp_queue, 0, 0);
+    while (tq_size(&c->wait_queue) > 0) {
+        struct thread *p = tq_wakeup(&c->wait_queue, 0, 0);
+        if (IS_ERR_OR_NULL(p))
+            break;
     }
+    spin_unlock(&c->lock);
 }
 
 bool completion_done(completion_t *c) {
