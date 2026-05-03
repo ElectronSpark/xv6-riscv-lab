@@ -229,12 +229,12 @@ void exit(int status) {
         if (last_in_group && tg != NULL && tg->group_leader != NULL) {
             struct thread *leader = tg->group_leader;
             leader->xstate = status;
-            if (p->killed_signo > 0) {
-                leader->killed_signo = p->killed_signo;
-                leader->killed_code = p->killed_code;
-            } else if (tg->group_exit_signo > 0) {
+            if (tg->group_exit_signo > 0) {
                 leader->killed_signo = tg->group_exit_signo;
                 leader->killed_code = tg->group_exit_kill_code;
+            } else if (!thread_group_exiting(tg) && p->killed_signo > 0) {
+                leader->killed_signo = p->killed_signo;
+                leader->killed_code = p->killed_code;
             }
             pid_rlock();
             struct thread *parent = leader->parent;
