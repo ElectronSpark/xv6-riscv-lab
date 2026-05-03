@@ -40,6 +40,36 @@ static void __completion_do_wake(completion_t *c) {
     }
 }
 
+struct completion_timeout_wait {
+    spinlock_t *lock;
+    struct timer_node *timer;
+    uint64 timeout_ms;
+    bool timer_armed;
+};
+
+static int __completion_timeout_sleep_cb(void *data) {
+    struct completion_timeout_wait *ctx = data;
+
+    ctx->timer_armed =
+        ctx->timeout_ms > 0 && sched_timer_set(ctx->timer, ctx->timeout_ms) == 0;
+
+    int status = spin_sleep_cb(ctx->lock);
+    if (!ctx->timer_armed) {
+        scheduler_wakeup(current);
+    }
+    return status;
+}
+
+static void __completion_timeout_wake_cb(void *data, int status) {
+    struct completion_timeout_wait *ctx = data;
+
+    if (ctx->timer_armed) {
+        sched_timer_done(ctx->timer);
+        ctx->timer_armed = false;
+    }
+    spin_wake_cb(ctx->lock, status);
+}
+
 bool try_wait_for_completion(completion_t *c) {
     if (c == NULL) {
         return false;
@@ -162,10 +192,13 @@ uint64 wait_for_completion_timeout(completion_t *c, uint64 timeout_ms) {
             remaining_ms = 1;
 
         struct timer_node tn = {0};
-        sched_timer_set(&tn, remaining_ms);
-        __thread_state_set(current, THREAD_INTERRUPTIBLE);
-        tq_wait(&c->wait_queue, &c->lock, NULL);
-        sched_timer_done(&tn);
+        struct completion_timeout_wait wait = {
+            .lock = &c->lock,
+            .timer = &tn,
+            .timeout_ms = remaining_ms,
+        };
+        tq_wait_cb(&c->wait_queue, __completion_timeout_sleep_cb,
+                   __completion_timeout_wake_cb, &wait, NULL);
     }
     if (c->done > 0) {
         __completion_do_wake(c);
@@ -212,10 +245,15 @@ int64 wait_for_completion_interruptible_timeout(completion_t *c,
             remaining_ms = 1;
 
         struct timer_node tn = {0};
-        sched_timer_set(&tn, remaining_ms);
-        int ret = tq_wait_in_state(&c->wait_queue, &c->lock, NULL,
-                                   THREAD_INTERRUPTIBLE);
-        sched_timer_done(&tn);
+        struct completion_timeout_wait wait = {
+            .lock = &c->lock,
+            .timer = &tn,
+            .timeout_ms = remaining_ms,
+        };
+        int ret = tq_wait_in_state_cb(&c->wait_queue,
+                                      __completion_timeout_sleep_cb,
+                                      __completion_timeout_wake_cb, &wait, NULL,
+                                      THREAD_INTERRUPTIBLE);
         if (ret != 0) {
             spin_unlock(&c->lock);
             return -EINTR;
