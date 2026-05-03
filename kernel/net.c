@@ -11,6 +11,16 @@
 #include "dev/netdev.h"
 #include "defs.h"
 #include "printf.h"
+#include "lock/spinlock.h"
+
+/* Per-system free-list cache of mbufs to skip page allocator round-trips.
+ * Each mbuf is page-sized; we keep a small pool to absorb burst alloc/free. */
+#define MBUF_CACHE_MAX 128
+static struct {
+    spinlock_t lock;
+    struct mbuf *head;   /* singly-linked via mbuf->next */
+    unsigned int count;
+} mbuf_cache = { .lock = SPINLOCK_INITIALIZED("mbuf_cache"), .head = 0, .count = 0 };
 
 #ifndef USE_LWIP
 STATIC uint32 local_ip =
@@ -63,20 +73,46 @@ struct mbuf *mbufalloc(unsigned int headroom) {
 
     if (headroom > MBUF_SIZE)
         return 0;
-    m = kalloc();
-    if (m == 0)
-        return 0;
+
+    /* Try the per-system cache first. */
+    spin_lock(&mbuf_cache.lock);
+    m = mbuf_cache.head;
+    if (m) {
+        mbuf_cache.head = m->next;
+        mbuf_cache.count--;
+    }
+    spin_unlock(&mbuf_cache.lock);
+
+    if (m == 0) {
+        m = kalloc();
+        if (m == 0)
+            return 0;
+    }
     m->next = 0;
     m->head = (char *)m->buf + headroom;
     m->len = 0;
-    /* Skip zeroing m->buf — kalloc() already cleared the page.
+    /* Skip zeroing m->buf — kalloc() already cleared the page (or the buffer
+     * was previously valid network data that the caller will overwrite).
      * RX path: DMA will overwrite the buffer.
      * TX path: caller copies data into it before use. */
     return m;
 }
 
 // Frees a packet buffer.
-void mbuffree(struct mbuf *m) { kfree(m); }
+void mbuffree(struct mbuf *m) {
+    if (m == 0)
+        return;
+    spin_lock(&mbuf_cache.lock);
+    if (mbuf_cache.count < MBUF_CACHE_MAX) {
+        m->next = mbuf_cache.head;
+        mbuf_cache.head = m;
+        mbuf_cache.count++;
+        spin_unlock(&mbuf_cache.lock);
+        return;
+    }
+    spin_unlock(&mbuf_cache.lock);
+    kfree(m);
+}
 
 // Pushes an mbuf to the end of the queue.
 void mbufq_pushtail(struct mbufq *q, struct mbuf *m) {
