@@ -8,8 +8,18 @@
  *     meminfo              → regular file
  *     cpuinfo              → regular file
  *     zoneinfo             → regular file
+ *     version              → regular file
+ *     uptime               → regular file
+ *     stat                 → regular file
+ *     loadavg              → regular file
+ *     filesystems          → regular file
+ *     mounts               → regular file
+ *     sys/                 → compatibility sysctl tree
  *     <tgid>/
  *       status             → regular file
+ *       stat               → regular file
+ *       cmdline            → regular file
+ *       comm               → regular file
  *       statm              → regular file
  *       cgroup             → regular file
  *       maps               → regular file
@@ -24,13 +34,16 @@
  *   3                             /proc/meminfo
  *   4                             /proc/cpuinfo
  *   7                             /proc/zoneinfo
- *   PROCFS_PID_BASE + tgid*10 + 0  /proc/<tgid>/   (directory)
- *   PROCFS_PID_BASE + tgid*10 + 1  /proc/<tgid>/status
- *   PROCFS_PID_BASE + tgid*10 + 2  /proc/<tgid>/maps
- *   PROCFS_PID_BASE + tgid*10 + 3  /proc/<tgid>/exe
- *   PROCFS_PID_BASE + tgid*10 + 4  /proc/<tgid>/fd/
- *   PROCFS_PID_BASE + tgid*10 + 6  /proc/<tgid>/statm
- *   PROCFS_PID_BASE + tgid*10 + 7  /proc/<tgid>/cgroup
+ *   PROCFS_PID_BASE + tgid*16 + 0  /proc/<tgid>/   (directory)
+ *   PROCFS_PID_BASE + tgid*16 + 1  /proc/<tgid>/status
+ *   PROCFS_PID_BASE + tgid*16 + 2  /proc/<tgid>/maps
+ *   PROCFS_PID_BASE + tgid*16 + 3  /proc/<tgid>/exe
+ *   PROCFS_PID_BASE + tgid*16 + 4  /proc/<tgid>/fd/
+ *   PROCFS_PID_BASE + tgid*16 + 6  /proc/<tgid>/statm
+ *   PROCFS_PID_BASE + tgid*16 + 7  /proc/<tgid>/cgroup
+ *   PROCFS_PID_BASE + tgid*16 + 8  /proc/<tgid>/stat
+ *   PROCFS_PID_BASE + tgid*16 + 9  /proc/<tgid>/cmdline
+ *   PROCFS_PID_BASE + tgid*16 + 10 /proc/<tgid>/comm
  *   PROCFS_FD_BASE  + tgid*1000 + fd  /proc/<tgid>/fd/<fd>
  */
 
@@ -64,6 +77,38 @@ enum procfs_entry_type {
     PROC_RESOURCES,   /* /proc/<tgid>/resources */
     PROC_CRASHES,     /* /proc/crashes          */
     PROC_CMDLINE,     /* /proc/cmdline          */
+    PROC_VERSION,     /* /proc/version          */
+    PROC_UPTIME,      /* /proc/uptime           */
+    PROC_STAT,        /* /proc/stat             */
+    PROC_LOADAVG,     /* /proc/loadavg          */
+    PROC_FILESYSTEMS, /* /proc/filesystems      */
+    PROC_MOUNTS,      /* /proc/mounts           */
+    PROC_SYS_DIR,     /* /proc/sys              */
+    PROC_SYS_KERNEL_DIR,
+    PROC_SYS_VM_DIR,
+    PROC_SYS_FS_DIR,
+    PROC_PID_STAT,    /* /proc/<tgid>/stat      */
+    PROC_PID_CMDLINE, /* /proc/<tgid>/cmdline   */
+    PROC_PID_COMM,    /* /proc/<tgid>/comm      */
+    PROC_SYS_KERNEL_OSTYPE,
+    PROC_SYS_KERNEL_OSRELEASE,
+    PROC_SYS_KERNEL_VERSION,
+    PROC_SYS_KERNEL_HOSTNAME,
+    PROC_SYS_KERNEL_DOMAINNAME,
+    PROC_SYS_KERNEL_RANDOMIZE_VA_SPACE,
+    PROC_SYS_KERNEL_PID_MAX,
+    PROC_SYS_KERNEL_THREADS_MAX,
+    PROC_SYS_VM_OVERCOMMIT_MEMORY,
+    PROC_SYS_VM_OVERCOMMIT_RATIO,
+    PROC_SYS_VM_MAX_MAP_COUNT,
+    PROC_SYS_VM_MMAP_MIN_ADDR,
+    PROC_SYS_VM_SWAPPINESS,
+    PROC_SYS_VM_DIRTY_RATIO,
+    PROC_SYS_VM_DIRTY_BACKGROUND_RATIO,
+    PROC_SYS_FS_FILE_MAX,
+    PROC_SYS_FS_FILE_NR,
+    PROC_SYS_FS_NR_OPEN,
+    PROC_SYS_FS_PIPE_MAX_SIZE,
 };
 
 /* ------------------------------------------------------------------ */
@@ -76,19 +121,52 @@ enum procfs_entry_type {
 #define PROCFS_INO_CRASHES 5ULL
 #define PROCFS_INO_CMDLINE 6ULL
 #define PROCFS_INO_ZONEINFO 7ULL
+#define PROCFS_INO_VERSION 8ULL
+#define PROCFS_INO_UPTIME 9ULL
+#define PROCFS_INO_STAT 10ULL
+#define PROCFS_INO_LOADAVG 11ULL
+#define PROCFS_INO_FILESYSTEMS 12ULL
+#define PROCFS_INO_MOUNTS 13ULL
+#define PROCFS_INO_SYS 14ULL
+#define PROCFS_INO_SYS_KERNEL 15ULL
+#define PROCFS_INO_SYS_VM 16ULL
+#define PROCFS_INO_SYS_FS 17ULL
+#define PROCFS_INO_SYS_KERNEL_OSTYPE 18ULL
+#define PROCFS_INO_SYS_KERNEL_OSRELEASE 19ULL
+#define PROCFS_INO_SYS_KERNEL_VERSION 20ULL
+#define PROCFS_INO_SYS_KERNEL_HOSTNAME 21ULL
+#define PROCFS_INO_SYS_KERNEL_DOMAINNAME 22ULL
+#define PROCFS_INO_SYS_KERNEL_RANDOMIZE_VA_SPACE 23ULL
+#define PROCFS_INO_SYS_KERNEL_PID_MAX 24ULL
+#define PROCFS_INO_SYS_KERNEL_THREADS_MAX 25ULL
+#define PROCFS_INO_SYS_VM_OVERCOMMIT_MEMORY 26ULL
+#define PROCFS_INO_SYS_VM_OVERCOMMIT_RATIO 27ULL
+#define PROCFS_INO_SYS_VM_MAX_MAP_COUNT 28ULL
+#define PROCFS_INO_SYS_VM_MMAP_MIN_ADDR 29ULL
+#define PROCFS_INO_SYS_VM_SWAPPINESS 30ULL
+#define PROCFS_INO_SYS_VM_DIRTY_RATIO 31ULL
+#define PROCFS_INO_SYS_VM_DIRTY_BACKGROUND_RATIO 32ULL
+#define PROCFS_INO_SYS_FS_FILE_MAX 33ULL
+#define PROCFS_INO_SYS_FS_FILE_NR 34ULL
+#define PROCFS_INO_SYS_FS_NR_OPEN 35ULL
+#define PROCFS_INO_SYS_FS_PIPE_MAX_SIZE 36ULL
 
-/* Each pid occupies 10 slots; max pid in xv6 fits well within 64-bit */
+/* Each pid occupies 16 slots; max pid in xv6 fits well within 64-bit */
 #define PROCFS_PID_BASE    100ULL
-#define PROCFS_FD_BASE     (PROCFS_PID_BASE + 100000ULL * 10ULL)
+#define PROCFS_PID_STRIDE  16ULL
+#define PROCFS_FD_BASE     (PROCFS_PID_BASE + 100000ULL * PROCFS_PID_STRIDE)
 
-#define PROCFS_PID_DIR_INO(tgid)    (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 0)
-#define PROCFS_PID_STATUS_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 1)
-#define PROCFS_PID_MAPS_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 2)
-#define PROCFS_PID_EXE_INO(tgid)    (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 3)
-#define PROCFS_PID_FDDIR_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 4)
-#define PROCFS_PID_RESOURCES_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 5)
-#define PROCFS_PID_STATM_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 6)
-#define PROCFS_PID_CGROUP_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 7)
+#define PROCFS_PID_DIR_INO(tgid)    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 0)
+#define PROCFS_PID_STATUS_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 1)
+#define PROCFS_PID_MAPS_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 2)
+#define PROCFS_PID_EXE_INO(tgid)    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 3)
+#define PROCFS_PID_FDDIR_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 4)
+#define PROCFS_PID_RESOURCES_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 5)
+#define PROCFS_PID_STATM_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 6)
+#define PROCFS_PID_CGROUP_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 7)
+#define PROCFS_PID_STAT_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 8)
+#define PROCFS_PID_CMDLINE_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 9)
+#define PROCFS_PID_COMM_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 10)
 #define PROCFS_FD_INO(tgid, fd)     (PROCFS_FD_BASE + (uint64)(tgid)*1000ULL + (uint64)(fd))
 
 /* ------------------------------------------------------------------ */

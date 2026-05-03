@@ -53,6 +53,127 @@ int snprintf(char *buf, size_t size, const char *fmt, ...);
 /* ------------------------------------------------------------------ */
 #define PROCFS_CHILDREN_START 3
 
+struct procfs_static_entry {
+    const char *name;
+    uint64 ino;
+};
+
+static const struct procfs_static_entry procfs_root_entries[] = {
+    {"self", PROCFS_INO_SELF},
+    {"meminfo", PROCFS_INO_MEMINFO},
+    {"cpuinfo", PROCFS_INO_CPUINFO},
+    {"crashes", PROCFS_INO_CRASHES},
+    {"cmdline", PROCFS_INO_CMDLINE},
+    {"zoneinfo", PROCFS_INO_ZONEINFO},
+    {"version", PROCFS_INO_VERSION},
+    {"uptime", PROCFS_INO_UPTIME},
+    {"stat", PROCFS_INO_STAT},
+    {"loadavg", PROCFS_INO_LOADAVG},
+    {"filesystems", PROCFS_INO_FILESYSTEMS},
+    {"mounts", PROCFS_INO_MOUNTS},
+    {"sys", PROCFS_INO_SYS},
+};
+
+static const struct procfs_static_entry procfs_pid_entries[] = {
+    {"status", 0},
+    {"statm", 0},
+    {"cgroup", 0},
+    {"maps", 0},
+    {"exe", 0},
+    {"fd", 0},
+    {"resources", 0},
+    {"stat", 0},
+    {"cmdline", 0},
+    {"comm", 0},
+};
+
+static const struct procfs_static_entry procfs_sys_entries[] = {
+    {"kernel", PROCFS_INO_SYS_KERNEL},
+    {"vm", PROCFS_INO_SYS_VM},
+    {"fs", PROCFS_INO_SYS_FS},
+};
+
+static const struct procfs_static_entry procfs_sys_kernel_entries[] = {
+    {"ostype", PROCFS_INO_SYS_KERNEL_OSTYPE},
+    {"osrelease", PROCFS_INO_SYS_KERNEL_OSRELEASE},
+    {"version", PROCFS_INO_SYS_KERNEL_VERSION},
+    {"hostname", PROCFS_INO_SYS_KERNEL_HOSTNAME},
+    {"domainname", PROCFS_INO_SYS_KERNEL_DOMAINNAME},
+    {"randomize_va_space", PROCFS_INO_SYS_KERNEL_RANDOMIZE_VA_SPACE},
+    {"pid_max", PROCFS_INO_SYS_KERNEL_PID_MAX},
+    {"threads-max", PROCFS_INO_SYS_KERNEL_THREADS_MAX},
+};
+
+static const struct procfs_static_entry procfs_sys_vm_entries[] = {
+    {"overcommit_memory", PROCFS_INO_SYS_VM_OVERCOMMIT_MEMORY},
+    {"overcommit_ratio", PROCFS_INO_SYS_VM_OVERCOMMIT_RATIO},
+    {"max_map_count", PROCFS_INO_SYS_VM_MAX_MAP_COUNT},
+    {"mmap_min_addr", PROCFS_INO_SYS_VM_MMAP_MIN_ADDR},
+    {"swappiness", PROCFS_INO_SYS_VM_SWAPPINESS},
+    {"dirty_ratio", PROCFS_INO_SYS_VM_DIRTY_RATIO},
+    {"dirty_background_ratio", PROCFS_INO_SYS_VM_DIRTY_BACKGROUND_RATIO},
+};
+
+static const struct procfs_static_entry procfs_sys_fs_entries[] = {
+    {"file-max", PROCFS_INO_SYS_FS_FILE_MAX},
+    {"file-nr", PROCFS_INO_SYS_FS_FILE_NR},
+    {"nr_open", PROCFS_INO_SYS_FS_NR_OPEN},
+    {"pipe-max-size", PROCFS_INO_SYS_FS_PIPE_MAX_SIZE},
+};
+
+static int procfs_lookup_static(const struct procfs_static_entry *entries,
+                                int nentries, const char *name,
+                                size_t name_len, uint64 *ino)
+{
+    for (int i = 0; i < nentries; i++) {
+        size_t len = strlen(entries[i].name);
+        if (len == name_len && memcmp(name, entries[i].name, len) == 0) {
+            *ino = entries[i].ino;
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
+static int procfs_emit_static(struct vfs_dir_iter *iter,
+                              struct vfs_dentry *ret_dentry,
+                              const struct procfs_static_entry *entries,
+                              int nentries, int child_idx)
+{
+    if (child_idx < 0 || child_idx >= nentries) {
+        vfs_release_dentry(ret_dentry);
+        ret_dentry->name = NULL;
+        return 0;
+    }
+
+    const char *name = entries[child_idx].name;
+    vfs_release_dentry(ret_dentry);
+    ret_dentry->name = strdup(name);
+    if (ret_dentry->name == NULL)
+        return -ENOMEM;
+    ret_dentry->name_len = (uint16)strlen(name);
+    ret_dentry->ino = entries[child_idx].ino;
+    ret_dentry->cookies = (int64)iter->index;
+    return 0;
+}
+
+static uint64 procfs_pid_entry_ino(int tgid, int child_idx)
+{
+    switch (child_idx) {
+    case 0: return PROCFS_PID_STATUS_INO(tgid);
+    case 1: return PROCFS_PID_STATM_INO(tgid);
+    case 2: return PROCFS_PID_CGROUP_INO(tgid);
+    case 3: return PROCFS_PID_MAPS_INO(tgid);
+    case 4: return PROCFS_PID_EXE_INO(tgid);
+    case 5: return PROCFS_PID_FDDIR_INO(tgid);
+    case 6: return PROCFS_PID_RESOURCES_INO(tgid);
+    case 7: return PROCFS_PID_STAT_INO(tgid);
+    case 8: return PROCFS_PID_CMDLINE_INO(tgid);
+    case 9: return PROCFS_PID_COMM_INO(tgid);
+    default: return 0;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /*  Helper: find the n-th group leader (0-based) in the pid table     */
 /* ------------------------------------------------------------------ */
@@ -123,28 +244,11 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     switch (pi->type) {
 
     case PROC_ROOT: {
-        if (name_len == 4 && memcmp(name, "self", 4) == 0) {
-            dentry->ino = PROCFS_INO_SELF;
-            return 0;
-        }
-        if (name_len == 7 && memcmp(name, "meminfo", 7) == 0) {
-            dentry->ino = PROCFS_INO_MEMINFO;
-            return 0;
-        }
-        if (name_len == 7 && memcmp(name, "cpuinfo", 7) == 0) {
-            dentry->ino = PROCFS_INO_CPUINFO;
-            return 0;
-        }
-        if (name_len == 8 && memcmp(name, "zoneinfo", 8) == 0) {
-            dentry->ino = PROCFS_INO_ZONEINFO;
-            return 0;
-        }
-        if (name_len == 7 && memcmp(name, "crashes", 7) == 0) {
-            dentry->ino = PROCFS_INO_CRASHES;
-            return 0;
-        }
-        if (name_len == 7 && memcmp(name, "cmdline", 7) == 0) {
-            dentry->ino = PROCFS_INO_CMDLINE;
+        uint64 ino;
+        if (procfs_lookup_static(procfs_root_entries,
+                                 NELEM(procfs_root_entries), name, name_len,
+                                 &ino) == 0) {
+            dentry->ino = ino;
             return 0;
         }
 
@@ -173,32 +277,55 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     }
 
     case PROC_PID_DIR: {
-        if (name_len == 6 && memcmp(name, "status", 6) == 0) {
-            dentry->ino = PROCFS_PID_STATUS_INO(pi->pid);
+        for (int i = 0; i < NELEM(procfs_pid_entries); i++) {
+            size_t len = strlen(procfs_pid_entries[i].name);
+            if (len == name_len &&
+                memcmp(name, procfs_pid_entries[i].name, len) == 0) {
+                dentry->ino = procfs_pid_entry_ino(pi->pid, i);
+                return 0;
+            }
+        }
+        return -ENOENT;
+    }
+
+    case PROC_SYS_DIR: {
+        uint64 ino;
+        if (procfs_lookup_static(procfs_sys_entries, NELEM(procfs_sys_entries),
+                                 name, name_len, &ino) == 0) {
+            dentry->ino = ino;
             return 0;
         }
-        if (name_len == 5 && memcmp(name, "statm", 5) == 0) {
-            dentry->ino = PROCFS_PID_STATM_INO(pi->pid);
+        return -ENOENT;
+    }
+
+    case PROC_SYS_KERNEL_DIR: {
+        uint64 ino;
+        if (procfs_lookup_static(procfs_sys_kernel_entries,
+                                 NELEM(procfs_sys_kernel_entries), name,
+                                 name_len, &ino) == 0) {
+            dentry->ino = ino;
             return 0;
         }
-        if (name_len == 6 && memcmp(name, "cgroup", 6) == 0) {
-            dentry->ino = PROCFS_PID_CGROUP_INO(pi->pid);
+        return -ENOENT;
+    }
+
+    case PROC_SYS_VM_DIR: {
+        uint64 ino;
+        if (procfs_lookup_static(procfs_sys_vm_entries,
+                                 NELEM(procfs_sys_vm_entries), name,
+                                 name_len, &ino) == 0) {
+            dentry->ino = ino;
             return 0;
         }
-        if (name_len == 4 && memcmp(name, "maps", 4) == 0) {
-            dentry->ino = PROCFS_PID_MAPS_INO(pi->pid);
-            return 0;
-        }
-        if (name_len == 3 && memcmp(name, "exe", 3) == 0) {
-            dentry->ino = PROCFS_PID_EXE_INO(pi->pid);
-            return 0;
-        }
-        if (name_len == 2 && memcmp(name, "fd", 2) == 0) {
-            dentry->ino = PROCFS_PID_FDDIR_INO(pi->pid);
-            return 0;
-        }
-        if (name_len == 9 && memcmp(name, "resources", 9) == 0) {
-            dentry->ino = PROCFS_PID_RESOURCES_INO(pi->pid);
+        return -ENOENT;
+    }
+
+    case PROC_SYS_FS_DIR: {
+        uint64 ino;
+        if (procfs_lookup_static(procfs_sys_fs_entries,
+                                 NELEM(procfs_sys_fs_entries), name,
+                                 name_len, &ino) == 0) {
+            dentry->ino = ino;
             return 0;
         }
         return -ENOENT;
@@ -254,6 +381,12 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
             parent_ino = PROCFS_INO_ROOT;
         } else if (pi->type == PROC_FDDIR) {
             parent_ino = PROCFS_PID_DIR_INO(pi->pid);
+        } else if (pi->type == PROC_SYS_DIR) {
+            parent_ino = PROCFS_INO_ROOT;
+        } else if (pi->type == PROC_SYS_KERNEL_DIR ||
+                   pi->type == PROC_SYS_VM_DIR ||
+                   pi->type == PROC_SYS_FS_DIR) {
+            parent_ino = PROCFS_INO_SYS;
         } else {
             /* Root dir should never get index 1 from driver side */
             return -EINVAL;
@@ -279,30 +412,12 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
 
     /* ---- /proc/ root children ---- */
     case PROC_ROOT: {
-        const char *name = NULL;
-        uint64      ino  = 0;
-
-        if (child_idx == 0) {
-            name = "self";
-            ino  = PROCFS_INO_SELF;
-        } else if (child_idx == 1) {
-            name = "meminfo";
-            ino  = PROCFS_INO_MEMINFO;
-        } else if (child_idx == 2) {
-            name = "cpuinfo";
-            ino  = PROCFS_INO_CPUINFO;
-        } else if (child_idx == 3) {
-            name = "crashes";
-            ino  = PROCFS_INO_CRASHES;
-        } else if (child_idx == 4) {
-            name = "cmdline";
-            ino = PROCFS_INO_CMDLINE;
-        } else if (child_idx == 5) {
-            name = "zoneinfo";
-            ino = PROCFS_INO_ZONEINFO;
-        } else {
+        if (child_idx < NELEM(procfs_root_entries))
+            return procfs_emit_static(iter, ret_dentry, procfs_root_entries,
+                                      NELEM(procfs_root_entries), child_idx);
+        else {
             /* pid entries start after the static root entries. */
-            int nth  = child_idx - 6;
+            int nth  = child_idx - NELEM(procfs_root_entries);
             int tgid = procfs_nth_tgid(nth);
             if (tgid < 0) {
                 /* End of directory */
@@ -322,45 +437,42 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
             ret_dentry->cookies  = (int64)iter->index;
             return 0;
         }
-
-        vfs_release_dentry(ret_dentry);
-        ret_dentry->name     = strdup(name);
-        if (ret_dentry->name == NULL)
-            return -ENOMEM;
-        ret_dentry->name_len = (uint16)strlen(name);
-        ret_dentry->ino      = ino;
-        ret_dentry->cookies  = (int64)iter->index;
-        return 0;
     }
 
     /* ---- /proc/<tgid>/ children ---- */
     case PROC_PID_DIR: {
-        const char *name = NULL;
-        uint64      ino  = 0;
-
-        switch (child_idx) {
-        case 0: name = "status"; ino = PROCFS_PID_STATUS_INO(pi->pid); break;
-        case 1: name = "statm";  ino = PROCFS_PID_STATM_INO(pi->pid);  break;
-        case 2: name = "cgroup"; ino = PROCFS_PID_CGROUP_INO(pi->pid); break;
-        case 3: name = "maps";   ino = PROCFS_PID_MAPS_INO(pi->pid);   break;
-        case 4: name = "exe";    ino = PROCFS_PID_EXE_INO(pi->pid);    break;
-        case 5: name = "fd";     ino = PROCFS_PID_FDDIR_INO(pi->pid);  break;
-        case 6: name = "resources"; ino = PROCFS_PID_RESOURCES_INO(pi->pid); break;
-        default:
+        if (child_idx < 0 || child_idx >= NELEM(procfs_pid_entries)) {
             vfs_release_dentry(ret_dentry);
             ret_dentry->name = NULL;
             return 0;
         }
 
+        const char *name = procfs_pid_entries[child_idx].name;
         vfs_release_dentry(ret_dentry);
         ret_dentry->name     = strdup(name);
         if (ret_dentry->name == NULL)
             return -ENOMEM;
         ret_dentry->name_len = (uint16)strlen(name);
-        ret_dentry->ino      = ino;
+        ret_dentry->ino      = procfs_pid_entry_ino(pi->pid, child_idx);
         ret_dentry->cookies  = (int64)iter->index;
         return 0;
     }
+
+    case PROC_SYS_DIR:
+        return procfs_emit_static(iter, ret_dentry, procfs_sys_entries,
+                                  NELEM(procfs_sys_entries), child_idx);
+
+    case PROC_SYS_KERNEL_DIR:
+        return procfs_emit_static(iter, ret_dentry, procfs_sys_kernel_entries,
+                                  NELEM(procfs_sys_kernel_entries), child_idx);
+
+    case PROC_SYS_VM_DIR:
+        return procfs_emit_static(iter, ret_dentry, procfs_sys_vm_entries,
+                                  NELEM(procfs_sys_vm_entries), child_idx);
+
+    case PROC_SYS_FS_DIR:
+        return procfs_emit_static(iter, ret_dentry, procfs_sys_fs_entries,
+                                  NELEM(procfs_sys_fs_entries), child_idx);
 
     /* ---- /proc/<tgid>/fd/ children ---- */
     case PROC_FDDIR: {
@@ -1187,6 +1299,257 @@ static char *procfs_gen_cmdline(void) {
     return buf;
 }
 
+static char *procfs_gen_version(void)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, PROCFS_BUF_SIZE,
+             "Linux version 6.6.0-xv6 (xv6-os) #1 SMP PREEMPT %s %s\n",
+             __DATE__, __TIME__);
+    return buf;
+}
+
+static char *procfs_gen_uptime(void)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    uint64 ms = get_jiffs();
+    snprintf(buf, PROCFS_BUF_SIZE, "%lu.%02lu %lu.%02lu\n",
+             (unsigned long)(ms / 1000),
+             (unsigned long)((ms % 1000) / 10),
+             (unsigned long)(ms / 1000),
+             (unsigned long)((ms % 1000) / 10));
+    return buf;
+}
+
+static char *procfs_gen_stat(void)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    uint64 j = get_jiffs();
+    int ncpu = platform.ncpu;
+    if (ncpu < 1)
+        ncpu = 1;
+    if (ncpu > NCPU)
+        ncpu = NCPU;
+    uint64 user = j / 20;
+    uint64 system = j / 20;
+    uint64 idle = j > user + system ? j - user - system : 0;
+    int pos = snprintf(buf, PROCFS_BUF_SIZE,
+                       "cpu  %lu 0 %lu %lu 0 0 0 0 0 0\n",
+                       (unsigned long)user,
+                       (unsigned long)system,
+                       (unsigned long)idle);
+    for (int cpu = 0; cpu < ncpu && (size_t)pos < PROCFS_BUF_SIZE; cpu++) {
+        int n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
+                         "cpu%d %lu 0 %lu %lu 0 0 0 0 0 0\n",
+                         cpu, (unsigned long)(user / ncpu),
+                         (unsigned long)(system / ncpu),
+                         (unsigned long)(idle / ncpu));
+        if (n < 0)
+            break;
+        pos += n;
+    }
+    if ((size_t)pos < PROCFS_BUF_SIZE) {
+        snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
+                 "intr 0\n"
+                 "ctxt 0\n"
+                 "btime 0\n"
+                 "processes 0\n"
+                 "procs_running 1\n"
+                 "procs_blocked 0\n");
+    }
+    return buf;
+}
+
+static char *procfs_gen_loadavg(void)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, PROCFS_BUF_SIZE, "0.00 0.00 0.00 1/%d %d\n",
+             NR_THREAD, current ? current->tgid : 1);
+    return buf;
+}
+
+static char *procfs_gen_filesystems(void)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, PROCFS_BUF_SIZE,
+             "nodev\tproc\n"
+             "nodev\ttmpfs\n"
+             "\text4\n");
+    return buf;
+}
+
+static char *procfs_gen_mounts(void)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, PROCFS_BUF_SIZE,
+             "rootfs / ext4 rw 0 0\n"
+             "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
+             "tmpfs /tmp tmpfs rw,nosuid,nodev 0 0\n");
+    return buf;
+}
+
+static char *procfs_gen_pid_stat(int tgid)
+{
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tgid, &p);
+    if (p == NULL) {
+        rcu_read_unlock();
+        return ERR_PTR(-ESRCH);
+    }
+    char name[17];
+    memmove(name, p->name, 16);
+    name[16] = '\0';
+    char state = thread_state_short(__thread_state_get(p))[0];
+    int ppid = (p->parent != NULL) ? p->parent->tgid : 0;
+    int pgid = p->pgid;
+    int sid = p->sid;
+    vm_t *vm = p->vm;
+    uint64 cputime_raw = 0;
+    if (p->sched_entity)
+        cputime_raw = p->sched_entity->sum_exec_runtime;
+    rcu_read_unlock();
+
+    struct procfs_vm_accounting acct;
+    procfs_collect_vm_accounting(vm, &acct);
+    uint64 hz = __timebase_frequency ? __timebase_frequency : 10000000UL;
+    unsigned long cputime_ticks = (unsigned long)((cputime_raw * HZ) / hz);
+
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, PROCFS_BUF_SIZE,
+             "%d (%s) %c %d %d %d 0 -1 4194304 0 0 0 0 %lu 0 0 0 20 0 1 0 0 %lu %lu 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+             tgid, name, state, ppid, pgid, sid, cputime_ticks,
+             (unsigned long)(acct.size_pages * PGSIZE),
+             (unsigned long)acct.resident_pages);
+    return buf;
+}
+
+static char *procfs_gen_pid_cmdline(int tgid)
+{
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tgid, &p);
+    if (p == NULL || p->thread_group == NULL) {
+        rcu_read_unlock();
+        return ERR_PTR(-ESRCH);
+    }
+    char exec_path[128];
+    safestrcpy(exec_path, p->thread_group->exec_path, sizeof(exec_path));
+    rcu_read_unlock();
+
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, PROCFS_BUF_SIZE, "%s\n", exec_path[0] ? exec_path : "unknown");
+    return buf;
+}
+
+static char *procfs_gen_pid_comm(int tgid)
+{
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tgid, &p);
+    if (p == NULL) {
+        rcu_read_unlock();
+        return ERR_PTR(-ESRCH);
+    }
+    char name[17];
+    memmove(name, p->name, 16);
+    name[16] = '\0';
+    rcu_read_unlock();
+
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, PROCFS_BUF_SIZE, "%s\n", name);
+    return buf;
+}
+
+static char *procfs_gen_sys_file(enum procfs_entry_type type)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    switch (type) {
+    case PROC_SYS_KERNEL_OSTYPE:
+        snprintf(buf, PROCFS_BUF_SIZE, "Linux\n");
+        break;
+    case PROC_SYS_KERNEL_OSRELEASE:
+        snprintf(buf, PROCFS_BUF_SIZE, "6.6.0-xv6\n");
+        break;
+    case PROC_SYS_KERNEL_VERSION:
+        snprintf(buf, PROCFS_BUF_SIZE, "#1 SMP PREEMPT %s %s\n",
+                 __DATE__, __TIME__);
+        break;
+    case PROC_SYS_KERNEL_HOSTNAME:
+        snprintf(buf, PROCFS_BUF_SIZE, "xv6\n");
+        break;
+    case PROC_SYS_KERNEL_DOMAINNAME:
+        snprintf(buf, PROCFS_BUF_SIZE, "(none)\n");
+        break;
+    case PROC_SYS_KERNEL_RANDOMIZE_VA_SPACE:
+        snprintf(buf, PROCFS_BUF_SIZE, "0\n");
+        break;
+    case PROC_SYS_KERNEL_PID_MAX:
+        snprintf(buf, PROCFS_BUF_SIZE, "%d\n", MAXPID);
+        break;
+    case PROC_SYS_KERNEL_THREADS_MAX:
+        snprintf(buf, PROCFS_BUF_SIZE, "%d\n", NR_THREAD);
+        break;
+    case PROC_SYS_VM_OVERCOMMIT_MEMORY:
+        snprintf(buf, PROCFS_BUF_SIZE, "0\n");
+        break;
+    case PROC_SYS_VM_OVERCOMMIT_RATIO:
+        snprintf(buf, PROCFS_BUF_SIZE, "50\n");
+        break;
+    case PROC_SYS_VM_MAX_MAP_COUNT:
+        snprintf(buf, PROCFS_BUF_SIZE, "65530\n");
+        break;
+    case PROC_SYS_VM_MMAP_MIN_ADDR:
+        snprintf(buf, PROCFS_BUF_SIZE, "4096\n");
+        break;
+    case PROC_SYS_VM_SWAPPINESS:
+        snprintf(buf, PROCFS_BUF_SIZE, "0\n");
+        break;
+    case PROC_SYS_VM_DIRTY_RATIO:
+        snprintf(buf, PROCFS_BUF_SIZE, "20\n");
+        break;
+    case PROC_SYS_VM_DIRTY_BACKGROUND_RATIO:
+        snprintf(buf, PROCFS_BUF_SIZE, "10\n");
+        break;
+    case PROC_SYS_FS_FILE_MAX:
+        snprintf(buf, PROCFS_BUF_SIZE, "%d\n", NFILE);
+        break;
+    case PROC_SYS_FS_FILE_NR:
+        snprintf(buf, PROCFS_BUF_SIZE, "0\t0\t%d\n", NFILE);
+        break;
+    case PROC_SYS_FS_NR_OPEN:
+        snprintf(buf, PROCFS_BUF_SIZE, "%d\n", NOFILE);
+        break;
+    case PROC_SYS_FS_PIPE_MAX_SIZE:
+        snprintf(buf, PROCFS_BUF_SIZE, "1048576\n");
+        break;
+    default:
+        kvfree(buf);
+        return ERR_PTR(-EINVAL);
+    }
+    return buf;
+}
+
 #define PROCFS_RESOURCES_BUF_SIZE 2048
 
 static char *procfs_gen_resources(int tgid) {
@@ -1234,6 +1597,15 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_STATUS:
         buf = procfs_gen_status(pi->pid);
         break;
+    case PROC_PID_STAT:
+        buf = procfs_gen_pid_stat(pi->pid);
+        break;
+    case PROC_PID_CMDLINE:
+        buf = procfs_gen_pid_cmdline(pi->pid);
+        break;
+    case PROC_PID_COMM:
+        buf = procfs_gen_pid_comm(pi->pid);
+        break;
     case PROC_STATM:
         buf = procfs_gen_statm(pi->pid);
         break;
@@ -1255,11 +1627,50 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_CMDLINE:
         buf = procfs_gen_cmdline();
         break;
+    case PROC_VERSION:
+        buf = procfs_gen_version();
+        break;
+    case PROC_UPTIME:
+        buf = procfs_gen_uptime();
+        break;
+    case PROC_STAT:
+        buf = procfs_gen_stat();
+        break;
+    case PROC_LOADAVG:
+        buf = procfs_gen_loadavg();
+        break;
+    case PROC_FILESYSTEMS:
+        buf = procfs_gen_filesystems();
+        break;
+    case PROC_MOUNTS:
+        buf = procfs_gen_mounts();
+        break;
     case PROC_RESOURCES:
         buf = procfs_gen_resources(pi->pid);
         break;
     case PROC_CRASHES:
         buf = crash_log_generate();
+        break;
+    case PROC_SYS_KERNEL_OSTYPE:
+    case PROC_SYS_KERNEL_OSRELEASE:
+    case PROC_SYS_KERNEL_VERSION:
+    case PROC_SYS_KERNEL_HOSTNAME:
+    case PROC_SYS_KERNEL_DOMAINNAME:
+    case PROC_SYS_KERNEL_RANDOMIZE_VA_SPACE:
+    case PROC_SYS_KERNEL_PID_MAX:
+    case PROC_SYS_KERNEL_THREADS_MAX:
+    case PROC_SYS_VM_OVERCOMMIT_MEMORY:
+    case PROC_SYS_VM_OVERCOMMIT_RATIO:
+    case PROC_SYS_VM_MAX_MAP_COUNT:
+    case PROC_SYS_VM_MMAP_MIN_ADDR:
+    case PROC_SYS_VM_SWAPPINESS:
+    case PROC_SYS_VM_DIRTY_RATIO:
+    case PROC_SYS_VM_DIRTY_BACKGROUND_RATIO:
+    case PROC_SYS_FS_FILE_MAX:
+    case PROC_SYS_FS_FILE_NR:
+    case PROC_SYS_FS_NR_OPEN:
+    case PROC_SYS_FS_PIPE_MAX_SIZE:
+        buf = procfs_gen_sys_file(pi->type);
         break;
     default:
         return -EINVAL;

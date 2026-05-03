@@ -185,14 +185,65 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         return &pi->vfs_inode;
     }
 
+#define PROCFS_STATIC_DIR(ino_value, type_value) do {                 \
+        if (ino == (ino_value)) {                                     \
+            pi->type              = (type_value);                     \
+            pi->vfs_inode.mode    = S_IFDIR | 0555;                  \
+            pi->vfs_inode.n_links = 2;                               \
+            return &pi->vfs_inode;                                   \
+        }                                                            \
+    } while (0)
+#define PROCFS_STATIC_FILE(ino_value, type_value, size_value) do {    \
+        if (ino == (ino_value)) {                                     \
+            pi->type              = (type_value);                     \
+            pi->vfs_inode.mode    = S_IFREG | 0444;                  \
+            pi->vfs_inode.n_links = 1;                               \
+            pi->vfs_inode.size    = (size_value);                    \
+            return &pi->vfs_inode;                                   \
+        }                                                            \
+    } while (0)
+
+    PROCFS_STATIC_FILE(PROCFS_INO_VERSION, PROC_VERSION, 256);
+    PROCFS_STATIC_FILE(PROCFS_INO_UPTIME, PROC_UPTIME, 64);
+    PROCFS_STATIC_FILE(PROCFS_INO_STAT, PROC_STAT, 4096);
+    PROCFS_STATIC_FILE(PROCFS_INO_LOADAVG, PROC_LOADAVG, 64);
+    PROCFS_STATIC_FILE(PROCFS_INO_FILESYSTEMS, PROC_FILESYSTEMS, 256);
+    PROCFS_STATIC_FILE(PROCFS_INO_MOUNTS, PROC_MOUNTS, 512);
+    PROCFS_STATIC_DIR(PROCFS_INO_SYS, PROC_SYS_DIR);
+    PROCFS_STATIC_DIR(PROCFS_INO_SYS_KERNEL, PROC_SYS_KERNEL_DIR);
+    PROCFS_STATIC_DIR(PROCFS_INO_SYS_VM, PROC_SYS_VM_DIR);
+    PROCFS_STATIC_DIR(PROCFS_INO_SYS_FS, PROC_SYS_FS_DIR);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_KERNEL_OSTYPE, PROC_SYS_KERNEL_OSTYPE, 64);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_KERNEL_OSRELEASE, PROC_SYS_KERNEL_OSRELEASE, 64);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_KERNEL_VERSION, PROC_SYS_KERNEL_VERSION, 128);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_KERNEL_HOSTNAME, PROC_SYS_KERNEL_HOSTNAME, 64);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_KERNEL_DOMAINNAME, PROC_SYS_KERNEL_DOMAINNAME, 64);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_KERNEL_RANDOMIZE_VA_SPACE, PROC_SYS_KERNEL_RANDOMIZE_VA_SPACE, 16);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_KERNEL_PID_MAX, PROC_SYS_KERNEL_PID_MAX, 32);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_KERNEL_THREADS_MAX, PROC_SYS_KERNEL_THREADS_MAX, 32);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_VM_OVERCOMMIT_MEMORY, PROC_SYS_VM_OVERCOMMIT_MEMORY, 16);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_VM_OVERCOMMIT_RATIO, PROC_SYS_VM_OVERCOMMIT_RATIO, 16);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_VM_MAX_MAP_COUNT, PROC_SYS_VM_MAX_MAP_COUNT, 32);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_VM_MMAP_MIN_ADDR, PROC_SYS_VM_MMAP_MIN_ADDR, 32);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_VM_SWAPPINESS, PROC_SYS_VM_SWAPPINESS, 16);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_VM_DIRTY_RATIO, PROC_SYS_VM_DIRTY_RATIO, 16);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_VM_DIRTY_BACKGROUND_RATIO, PROC_SYS_VM_DIRTY_BACKGROUND_RATIO, 16);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_FS_FILE_MAX, PROC_SYS_FS_FILE_MAX, 32);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_FS_FILE_NR, PROC_SYS_FS_FILE_NR, 64);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_FS_NR_OPEN, PROC_SYS_FS_NR_OPEN, 32);
+    PROCFS_STATIC_FILE(PROCFS_INO_SYS_FS_PIPE_MAX_SIZE, PROC_SYS_FS_PIPE_MAX_SIZE, 32);
+
+#undef PROCFS_STATIC_FILE
+#undef PROCFS_STATIC_DIR
+
     /* ---- Per-process entries ---- */
 
     if (ino >= PROCFS_PID_BASE && ino < PROCFS_FD_BASE) {
         uint64 offset = ino - PROCFS_PID_BASE;
-        int    tgid   = (int)(offset / 10);
-        int    slot   = (int)(offset % 10);
+        int    tgid   = (int)(offset / PROCFS_PID_STRIDE);
+        int    slot   = (int)(offset % PROCFS_PID_STRIDE);
 
-        if (tgid <= 0 || slot > 7) {
+        if (tgid <= 0 || slot > 10) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -256,6 +307,24 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.mode    = S_IFREG | 0444;
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 128;
+            break;
+        case 8: /* /proc/<tgid>/stat */
+            pi->type              = PROC_PID_STAT;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 512;
+            break;
+        case 9: /* /proc/<tgid>/cmdline */
+            pi->type              = PROC_PID_CMDLINE;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 512;
+            break;
+        case 10: /* /proc/<tgid>/comm */
+            pi->type              = PROC_PID_COMM;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 64;
             break;
         default:
             slab_free(pi);
