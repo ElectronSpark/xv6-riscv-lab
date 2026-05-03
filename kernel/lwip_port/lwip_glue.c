@@ -278,6 +278,43 @@ static volatile int __lwip_initialized = 0;   /* set after kthread setup     */
 
 /* Interval for polling __netconf_ready (ms) */
 #define NETCONF_POLL_INTERVAL_MS  100
+#define NETCONF_APPLY_TIMEOUT_MS  35000
+
+static int __netconf_wait_boot_ready(void)
+{
+    int elapsed = 0;
+
+    while (!__atomic_load_n(&__lwip_initialized, __ATOMIC_ACQUIRE)) {
+        if (elapsed >= NETCONF_APPLY_TIMEOUT_MS)
+            return -ETIMEDOUT;
+        sleep_ms(NETCONF_POLL_INTERVAL_MS);
+        elapsed += NETCONF_POLL_INTERVAL_MS;
+    }
+
+    return 0;
+}
+
+static int __netconf_wait_runtime_ready(int dhcp)
+{
+    int elapsed = 0;
+
+    while (elapsed < NETCONF_APPLY_TIMEOUT_MS) {
+        if (netif_is_up(&xv6_netif) && netif_is_link_up(&xv6_netif) &&
+            !ip4_addr_isany_val(*netif_ip4_addr(&xv6_netif))) {
+            if (!dhcp)
+                return 0;
+
+            const ip_addr_t *dns = dns_getserver(0);
+            if (dns != NULL && !ip_addr_isany(dns))
+                return 0;
+        }
+
+        sleep_ms(NETCONF_POLL_INTERVAL_MS);
+        elapsed += NETCONF_POLL_INTERVAL_MS;
+    }
+
+    return -ETIMEDOUT;
+}
 
 /**
  * __apply_netconf — shared implementation for applying network configuration.
@@ -295,6 +332,8 @@ static int __apply_netconf(struct netconf_req *req)
 
     /* Runtime reconfiguration (after kthread has finished boot setup) */
     if (__atomic_load_n(&__lwip_initialized, __ATOMIC_ACQUIRE)) {
+        int wait_ret;
+
         if (req->mode == NETCONF_MODE_STATIC) {
             ip4_addr_t ip, mask, gw;
             ip.addr   = req->ip;
@@ -332,6 +371,10 @@ static int __apply_netconf(struct netconf_req *req)
         if (req->hostname[0])
             netif_set_hostname(&xv6_netif, req->hostname);
 
+        wait_ret = __netconf_wait_runtime_ready(req->mode == NETCONF_MODE_DHCP);
+        if (wait_ret < 0)
+            return wait_ret;
+
         return 0;
     }
 
@@ -339,7 +382,7 @@ static int __apply_netconf(struct netconf_req *req)
     __netconf_req = *req;
     __atomic_store_n(&__netconf_ready, 1, __ATOMIC_RELEASE);
 
-    return 0;
+    return __netconf_wait_boot_ready();
 }
 
 /* Syscall argument helpers (defined in arch/.../irq/syscall.c) */
