@@ -40,6 +40,13 @@ static void e1000_rx_work_func(struct work_struct *work);
 #define TX_RING_SIZE 128
 STATIC struct tx_desc tx_ring[TX_RING_SIZE] __ALIGNED(16);
 STATIC struct mbuf *tx_mbufs[TX_RING_SIZE];
+/*
+ * Software shadow of the TX tail pointer.  We are the only writer of
+ * E1000_TDT, so we can advance a local copy and skip the MMIO read on
+ * each transmit.  Each MMIO access on QEMU's emulated NIC costs O(100ns)
+ * — on TCP streams that's a real per-packet cap.
+ */
+static uint32 tx_tail_shadow;
 
 #define RX_RING_SIZE 128
 STATIC struct rx_desc rx_ring[RX_RING_SIZE] __ALIGNED(16);
@@ -150,6 +157,7 @@ int e1000_set_transmission_descriptor_base(struct tx_desc *virtual_base,
     regs[E1000_TDLEN] = size;
     regs[E1000_TDH] = 0;
     regs[E1000_TDT] = 0;
+    tx_tail_shadow = 0;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     return 0;
 }
@@ -280,9 +288,9 @@ void e1000_init(uint32 *xregs) {
     //   RADV = absolute delay since the first packet in the current batch;
     //          bounds worst-case latency so RDTR never starves.
     // ITR is in 256 ns units and bounds the global IRQ rate.
-    regs[E1000_RDTR] = 8;       // 8 us  inter-packet delay
-    regs[E1000_RADV] = 64;      // 64 us absolute coalescing window
-    regs[E1000_ITR]  = 500;     // ~7800 IRQ/s ceiling (500 * 256 ns ~= 128 us)
+    regs[E1000_RDTR] = 0;       // disable inter-packet delay
+    regs[E1000_RADV] = 16;      // 16 us absolute coalescing window
+    regs[E1000_ITR]  = 200;     // ~19500 IRQ/s ceiling (200 * 256 ns ~= 51 us)
     regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
 
     // Register with the netdev abstraction layer
@@ -307,7 +315,7 @@ int e1000_transmit(struct mbuf *m) {
     //
     spin_lock(&e1000_lock);
     // get the current tail pointer of the transmission ring buffer
-    uint32 index = regs[E1000_TDT];
+    uint32 index = tx_tail_shadow;
     if (index >= TX_RING_SIZE) {
         panic("e1000 transmit: ring overflow");
     }
@@ -333,7 +341,8 @@ int e1000_transmit(struct mbuf *m) {
     desc->cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
     tx_mbufs[index] = m;
     // move forward the tail pointer of the transmission ring buffer
-    regs[E1000_TDT] = (regs[E1000_TDT] + 1) % TX_RING_SIZE;
+    tx_tail_shadow = (index + 1) % TX_RING_SIZE;
+    regs[E1000_TDT] = tx_tail_shadow;
     g_net_tx_packets += 1;
     g_net_tx_bytes += m->len;
     spin_unlock(&e1000_lock);
