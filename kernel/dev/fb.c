@@ -37,14 +37,29 @@
 
 #define DRM_IOCTL_VERSION                      0xc0406400UL
 #define DRM_IOCTL_GET_UNIQUE                   0xc0106401UL
+#define DRM_IOCTL_GET_MAGIC                    0x80046402UL
+#define DRM_IOCTL_GET_CLIENT                   0xc0286405UL
+#define DRM_IOCTL_GET_STATS                    0x80f86406UL
+#define DRM_IOCTL_SET_VERSION                  0xc0106407UL
 #define DRM_IOCTL_GET_CAP                      0xc010640cUL
 #define DRM_IOCTL_SET_CLIENT_CAP               0x4010640dUL
+#define DRM_IOCTL_AUTH_MAGIC                   0x40046411UL
+#define DRM_IOCTL_SET_MASTER                   0x0000641eUL
+#define DRM_IOCTL_DROP_MASTER                  0x0000641fUL
 #define DRM_IOCTL_GEM_CLOSE                    0x40086409UL
 #define DRM_IOCTL_PRIME_HANDLE_TO_FD           0xc00c642dUL
 #define DRM_IOCTL_PRIME_FD_TO_HANDLE           0xc00c642eUL
+#define DRM_IOCTL_WAIT_VBLANK                  0xc018643aUL
+#define DRM_IOCTL_MODE_GETRESOURCES            0xc04064a0UL
+#define DRM_IOCTL_MODE_GETCRTC                 0xc06864a1UL
+#define DRM_IOCTL_MODE_GETENCODER              0xc01464a6UL
+#define DRM_IOCTL_MODE_GETCONNECTOR            0xc05064a7UL
+#define DRM_IOCTL_MODE_GETPROPERTY             0xc04064aaUL
+#define DRM_IOCTL_MODE_GETPROPBLOB             0xc01064acUL
 #define DRM_IOCTL_MODE_CREATE_DUMB             0xc02064b2UL
 #define DRM_IOCTL_MODE_MAP_DUMB                0xc01064b3UL
 #define DRM_IOCTL_MODE_DESTROY_DUMB            0xc00464b4UL
+#define DRM_IOCTL_MODE_GETPLANERESOURCES       0xc01064b5UL
 #define DRM_IOCTL_VIRTGPU_MAP                  0xc0106441UL
 #define DRM_IOCTL_VIRTGPU_EXECBUFFER           0xc0406442UL
 #define DRM_IOCTL_VIRTGPU_GETPARAM             0xc0106443UL
@@ -93,6 +108,18 @@
 #define VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK 0x0003
 #define VIRTGPU_CONTEXT_PARAM_DEBUG_NAME      0x0004
 
+#define DRM_MODE_TYPE_PREFERRED               (1 << 3)
+#define DRM_MODE_TYPE_DRIVER                  (1 << 6)
+#define DRM_MODE_FLAG_NHSYNC                  (1 << 1)
+#define DRM_MODE_FLAG_NVSYNC                  (1 << 3)
+#define DRM_MODE_ENCODER_VIRTUAL              5
+#define DRM_MODE_CONNECTOR_VIRTUAL            15
+#define DRM_MODE_CONNECTED                    1
+#define DRM_MODE_SUBPIXEL_UNKNOWN             1
+#define GPU_DRM_CRTC_ID                       1
+#define GPU_DRM_ENCODER_ID                    2
+#define GPU_DRM_CONNECTOR_ID                  3
+
 #define GPU_DRM_MMAP_HANDLE_SHIFT 32
 #define GPU_DRM_MMAP_OFFSET(handle) ((uint64)(handle) << GPU_DRM_MMAP_HANDLE_SHIFT)
 #define GPU_DRM_MMAP_HANDLE(offset) ((uint32)((offset) >> GPU_DRM_MMAP_HANDLE_SHIFT))
@@ -116,6 +143,34 @@ struct drm_unique_compat {
     uint64 unique;
 };
 
+struct drm_auth_compat {
+    uint32 magic;
+};
+
+struct drm_client_compat {
+    int idx;
+    int auth;
+    uint64 pid;
+    uint64 uid;
+    uint64 magic;
+    uint64 iocs;
+};
+
+struct drm_stats_compat {
+    uint64 count;
+    struct {
+        uint64 value;
+        uint32 type;
+    } data[15];
+};
+
+struct drm_set_version_compat {
+    int drm_di_major;
+    int drm_di_minor;
+    int drm_dd_major;
+    int drm_dd_minor;
+};
+
 struct drm_get_cap_compat {
     uint64 capability;
     uint64 value;
@@ -135,6 +190,113 @@ struct drm_prime_handle_compat {
     uint32 handle;
     uint32 flags;
     int32 fd;
+};
+
+union drm_wait_vblank_compat {
+    struct {
+        uint32 type;
+        uint32 sequence;
+        uint64 signal;
+    } request;
+    struct {
+        uint32 type;
+        uint32 sequence;
+        int64 tval_sec;
+        int64 tval_usec;
+    } reply;
+};
+
+struct drm_mode_modeinfo_compat {
+    uint32 clock;
+    uint16 hdisplay;
+    uint16 hsync_start;
+    uint16 hsync_end;
+    uint16 htotal;
+    uint16 hskew;
+    uint16 vdisplay;
+    uint16 vsync_start;
+    uint16 vsync_end;
+    uint16 vtotal;
+    uint16 vscan;
+    uint32 vrefresh;
+    uint32 flags;
+    uint32 type;
+    char name[32];
+};
+
+struct drm_mode_card_res_compat {
+    uint64 fb_id_ptr;
+    uint64 crtc_id_ptr;
+    uint64 connector_id_ptr;
+    uint64 encoder_id_ptr;
+    uint32 count_fbs;
+    uint32 count_crtcs;
+    uint32 count_connectors;
+    uint32 count_encoders;
+    uint32 min_width;
+    uint32 max_width;
+    uint32 min_height;
+    uint32 max_height;
+};
+
+struct drm_mode_crtc_compat {
+    uint64 set_connectors_ptr;
+    uint32 count_connectors;
+    uint32 crtc_id;
+    uint32 fb_id;
+    uint32 x;
+    uint32 y;
+    uint32 gamma_size;
+    uint32 mode_valid;
+    struct drm_mode_modeinfo_compat mode;
+};
+
+struct drm_mode_get_encoder_compat {
+    uint32 encoder_id;
+    uint32 encoder_type;
+    uint32 crtc_id;
+    uint32 possible_crtcs;
+    uint32 possible_clones;
+};
+
+struct drm_mode_get_connector_compat {
+    uint64 encoders_ptr;
+    uint64 modes_ptr;
+    uint64 props_ptr;
+    uint64 prop_values_ptr;
+    uint32 count_modes;
+    uint32 count_props;
+    uint32 count_encoders;
+    uint32 encoder_id;
+    uint32 connector_id;
+    uint32 connector_type;
+    uint32 connector_type_id;
+    uint32 connection;
+    uint32 mm_width;
+    uint32 mm_height;
+    uint32 subpixel;
+    uint32 pad;
+};
+
+struct drm_mode_get_property_compat {
+    uint64 values_ptr;
+    uint64 enum_blob_ptr;
+    uint32 prop_id;
+    uint32 flags;
+    char name[32];
+    uint32 count_values;
+    uint32 count_enum_blobs;
+};
+
+struct drm_mode_get_blob_compat {
+    uint32 blob_id;
+    uint32 length;
+    uint64 data;
+};
+
+struct drm_mode_get_plane_res_compat {
+    uint64 plane_id_ptr;
+    uint32 count_planes;
 };
 
 struct drm_mode_create_dumb_compat {
@@ -2352,6 +2514,104 @@ static int gpu_user_debug_name(uint64 user_ptr, char name[64])
     return 0;
 }
 
+static void gpu_drm_mode_append_uint(char *buf, uint32 *pos, uint32 value)
+{
+    char tmp[10];
+    uint32 n = 0;
+
+    if (buf == NULL || pos == NULL || *pos >= 31)
+        return;
+    if (value == 0) {
+        buf[(*pos)++] = '0';
+        return;
+    }
+    while (value != 0 && n < sizeof(tmp)) {
+        tmp[n++] = '0' + (value % 10);
+        value /= 10;
+    }
+    while (n != 0 && *pos < 31)
+        buf[(*pos)++] = tmp[--n];
+}
+
+static void gpu_drm_get_mode_size(uint32 *width, uint32 *height)
+{
+    uint32 w, h;
+
+    spin_lock(&fb_state.lock);
+    w = fb_state.xres;
+    h = fb_state.yres;
+    spin_unlock(&fb_state.lock);
+    if (w < 640)
+        w = FB_DEFAULT_WIDTH;
+    if (h < 480)
+        h = FB_DEFAULT_HEIGHT;
+    if (width)
+        *width = w;
+    if (height)
+        *height = h;
+}
+
+static void gpu_drm_fill_mode(struct drm_mode_modeinfo_compat *mode)
+{
+    uint32 w, h, pos = 0;
+    uint32 hblank, vblank;
+
+    memset(mode, 0, sizeof(*mode));
+    gpu_drm_get_mode_size(&w, &h);
+
+    hblank = w / 5;
+    if (hblank < 160)
+        hblank = 160;
+    vblank = h / 20;
+    if (vblank < 30)
+        vblank = 30;
+
+    mode->hdisplay = (uint16)w;
+    mode->hsync_start = (uint16)(w + hblank / 3);
+    mode->hsync_end = (uint16)(w + (2 * hblank) / 3);
+    mode->htotal = (uint16)(w + hblank);
+    mode->vdisplay = (uint16)h;
+    mode->vsync_start = (uint16)(h + vblank / 3);
+    mode->vsync_end = (uint16)(h + (2 * vblank) / 3);
+    mode->vtotal = (uint16)(h + vblank);
+    mode->vrefresh = 60;
+    mode->clock = (uint32)(((uint64)mode->htotal * mode->vtotal *
+                            mode->vrefresh) / 1000);
+    if (mode->clock == 0)
+        mode->clock = 40000;
+    mode->flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
+    mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
+
+    gpu_drm_mode_append_uint(mode->name, &pos, w);
+    if (pos < 31)
+        mode->name[pos++] = 'x';
+    gpu_drm_mode_append_uint(mode->name, &pos, h);
+    mode->name[pos < 32 ? pos : 31] = 0;
+}
+
+static int gpu_drm_copyout_u32_array(uint64 ptr, uint32 capacity,
+                                     const uint32 *ids, uint32 count)
+{
+    uint32 n;
+
+    if (ptr == 0 || capacity == 0 || ids == NULL || count == 0)
+        return 0;
+    n = capacity < count ? capacity : count;
+    if (either_copyout(1, ptr, (void *)ids, (uint64)n * sizeof(uint32)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_copyout_mode_array(uint64 ptr, uint32 capacity,
+                                      const struct drm_mode_modeinfo_compat *mode)
+{
+    if (ptr == 0 || capacity == 0 || mode == NULL)
+        return 0;
+    if (either_copyout(1, ptr, (void *)mode, sizeof(*mode)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
 static int gpu_drm_current_capset(uint32 *capset_id)
 {
     uint32 id = 0;
@@ -2479,6 +2739,250 @@ static int gpu_drm_get_cap(uint64 arg)
     default:
         return -EINVAL;
     }
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_get_magic(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_auth_compat req;
+
+    req.magic = owner && owner->id ? (uint32)owner->id : 1;
+    if (req.magic == 0)
+        req.magic = 1;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_auth_magic(uint64 arg)
+{
+    struct drm_auth_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    (void)req;
+    return 0;
+}
+
+static int gpu_drm_get_client(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_client_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.idx != 0)
+        return -EINVAL;
+    req.auth = 1;
+    req.pid = owner ? (uint64)owner->tgid : 0;
+    req.uid = 0;
+    req.magic = owner ? owner->id : 1;
+    spin_lock(&fb_state.lock);
+    req.iocs = fb_state.stats.gpu_ioctls;
+    spin_unlock(&fb_state.lock);
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_get_stats(uint64 arg)
+{
+    struct drm_stats_compat req;
+
+    memset(&req, 0, sizeof(req));
+    req.count = 4;
+    spin_lock(&fb_state.lock);
+    req.data[0].value = fb_state.stats.gpu_ioctls;
+    req.data[1].value = fb_state.stats.bo_allocs;
+    req.data[2].value = fb_state.stats.bo_bytes / 1024;
+    req.data[3].value = fb_state.stats.fence_fd_polls;
+    spin_unlock(&fb_state.lock);
+    req.data[0].type = 3; /* _DRM_STAT_IOCTLS */
+    req.data[1].type = 8; /* _DRM_STAT_COUNT */
+    req.data[2].type = 7; /* _DRM_STAT_BYTE */
+    req.data[3].type = 8; /* _DRM_STAT_COUNT */
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_set_version(uint64 arg)
+{
+    struct drm_set_version_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    req.drm_di_major = 1;
+    if (req.drm_di_minor < 4)
+        req.drm_di_minor = 4;
+    req.drm_dd_major = 0;
+    req.drm_dd_minor = 1;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_wait_vblank(uint64 arg)
+{
+    union drm_wait_vblank_compat req;
+    uint64 ticks = r_time();
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    req.reply.sequence = req.request.sequence + 1;
+    req.reply.tval_sec = (int64)(ticks / 10000000ULL);
+    req.reply.tval_usec = (int64)((ticks % 10000000ULL) / 10ULL);
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_mode_getresources(uint64 arg)
+{
+    struct drm_mode_card_res_compat req;
+    uint32 ids[1];
+    uint32 w, h;
+    int ret;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    gpu_drm_get_mode_size(&w, &h);
+
+    ids[0] = GPU_DRM_CRTC_ID;
+    ret = gpu_drm_copyout_u32_array(req.crtc_id_ptr, req.count_crtcs, ids, 1);
+    if (ret != 0)
+        return ret;
+    ids[0] = GPU_DRM_CONNECTOR_ID;
+    ret = gpu_drm_copyout_u32_array(req.connector_id_ptr,
+                                    req.count_connectors, ids, 1);
+    if (ret != 0)
+        return ret;
+    ids[0] = GPU_DRM_ENCODER_ID;
+    ret = gpu_drm_copyout_u32_array(req.encoder_id_ptr,
+                                    req.count_encoders, ids, 1);
+    if (ret != 0)
+        return ret;
+
+    req.count_fbs = 0;
+    req.count_crtcs = 1;
+    req.count_connectors = 1;
+    req.count_encoders = 1;
+    req.min_width = 1;
+    req.max_width = w > 8192 ? w : 8192;
+    req.min_height = 1;
+    req.max_height = h > 8192 ? h : 8192;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_mode_getcrtc(uint64 arg)
+{
+    struct drm_mode_crtc_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.crtc_id != GPU_DRM_CRTC_ID)
+        return -ENOENT;
+    req.fb_id = 0;
+    req.x = 0;
+    req.y = 0;
+    req.gamma_size = 0;
+    req.mode_valid = 1;
+    gpu_drm_fill_mode(&req.mode);
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_mode_getencoder(uint64 arg)
+{
+    struct drm_mode_get_encoder_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.encoder_id != GPU_DRM_ENCODER_ID)
+        return -ENOENT;
+    req.encoder_type = DRM_MODE_ENCODER_VIRTUAL;
+    req.crtc_id = GPU_DRM_CRTC_ID;
+    req.possible_crtcs = 1;
+    req.possible_clones = 1;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_mode_getconnector(uint64 arg)
+{
+    struct drm_mode_get_connector_compat req;
+    struct drm_mode_modeinfo_compat mode;
+    uint32 encoder = GPU_DRM_ENCODER_ID;
+    int ret;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.connector_id != GPU_DRM_CONNECTOR_ID)
+        return -ENOENT;
+    gpu_drm_fill_mode(&mode);
+    ret = gpu_drm_copyout_u32_array(req.encoders_ptr, req.count_encoders,
+                                    &encoder, 1);
+    if (ret != 0)
+        return ret;
+    ret = gpu_drm_copyout_mode_array(req.modes_ptr, req.count_modes, &mode);
+    if (ret != 0)
+        return ret;
+
+    req.count_modes = 1;
+    req.count_props = 0;
+    req.count_encoders = 1;
+    req.encoder_id = GPU_DRM_ENCODER_ID;
+    req.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
+    req.connector_type_id = 1;
+    req.connection = DRM_MODE_CONNECTED;
+    req.mm_width = mode.hdisplay / 4;
+    req.mm_height = mode.vdisplay / 4;
+    req.subpixel = DRM_MODE_SUBPIXEL_UNKNOWN;
+    req.pad = 0;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_mode_getproperty(uint64 arg)
+{
+    struct drm_mode_get_property_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    req.flags = 0;
+    req.count_values = 0;
+    req.count_enum_blobs = 0;
+    memset(req.name, 0, sizeof(req.name));
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return -EINVAL;
+}
+
+static int gpu_drm_mode_getblob(uint64 arg)
+{
+    struct drm_mode_get_blob_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    req.length = 0;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return -EINVAL;
+}
+
+static int gpu_drm_mode_getplaneresources(uint64 arg)
+{
+    struct drm_mode_get_plane_res_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    req.count_planes = 0;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
@@ -2712,9 +3216,22 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         return gpu_drm_version(arg);
     case DRM_IOCTL_GET_UNIQUE:
         return gpu_drm_get_unique(arg);
+    case DRM_IOCTL_GET_MAGIC:
+        return gpu_drm_get_magic(owner, arg);
+    case DRM_IOCTL_AUTH_MAGIC:
+        return gpu_drm_auth_magic(arg);
+    case DRM_IOCTL_GET_CLIENT:
+        return gpu_drm_get_client(owner, arg);
+    case DRM_IOCTL_GET_STATS:
+        return gpu_drm_get_stats(arg);
+    case DRM_IOCTL_SET_VERSION:
+        return gpu_drm_set_version(arg);
     case DRM_IOCTL_GET_CAP:
         return gpu_drm_get_cap(arg);
     case DRM_IOCTL_SET_CLIENT_CAP:
+        return 0;
+    case DRM_IOCTL_SET_MASTER:
+    case DRM_IOCTL_DROP_MASTER:
         return 0;
     case DRM_IOCTL_GEM_CLOSE: {
         struct drm_gem_close_compat req;
@@ -2731,6 +3248,22 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         return gpu_drm_prime_handle_to_fd(owner, arg);
     case DRM_IOCTL_PRIME_FD_TO_HANDLE:
         return gpu_drm_prime_fd_to_handle(owner, arg);
+    case DRM_IOCTL_WAIT_VBLANK:
+        return gpu_drm_wait_vblank(arg);
+    case DRM_IOCTL_MODE_GETRESOURCES:
+        return gpu_drm_mode_getresources(arg);
+    case DRM_IOCTL_MODE_GETCRTC:
+        return gpu_drm_mode_getcrtc(arg);
+    case DRM_IOCTL_MODE_GETENCODER:
+        return gpu_drm_mode_getencoder(arg);
+    case DRM_IOCTL_MODE_GETCONNECTOR:
+        return gpu_drm_mode_getconnector(arg);
+    case DRM_IOCTL_MODE_GETPROPERTY:
+        return gpu_drm_mode_getproperty(arg);
+    case DRM_IOCTL_MODE_GETPROPBLOB:
+        return gpu_drm_mode_getblob(arg);
+    case DRM_IOCTL_MODE_GETPLANERESOURCES:
+        return gpu_drm_mode_getplaneresources(arg);
     case DRM_IOCTL_MODE_CREATE_DUMB:
         return gpu_drm_create_dumb(owner, arg);
     case DRM_IOCTL_MODE_MAP_DUMB:
