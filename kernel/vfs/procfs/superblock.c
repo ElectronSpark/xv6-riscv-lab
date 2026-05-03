@@ -161,6 +161,14 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         return &pi->vfs_inode;
     }
 
+    if (ino == PROCFS_INO_ZONEINFO) {
+        pi->type              = PROC_ZONEINFO;
+        pi->vfs_inode.mode    = S_IFREG | 0444;
+        pi->vfs_inode.n_links = 1;
+        pi->vfs_inode.size    = 4096;
+        return &pi->vfs_inode;
+    }
+
     if (ino == PROCFS_INO_CRASHES) {
         pi->type              = PROC_CRASHES;
         pi->vfs_inode.mode    = S_IFREG | 0444;
@@ -184,7 +192,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         int    tgid   = (int)(offset / 10);
         int    slot   = (int)(offset % 10);
 
-        if (tgid <= 0 || slot > 5) {
+        if (tgid <= 0 || slot > 7) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -236,6 +244,18 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.mode    = S_IFREG | 0444;
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 4096;
+            break;
+        case 6: /* /proc/<tgid>/statm */
+            pi->type              = PROC_STATM;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 128;
+            break;
+        case 7: /* /proc/<tgid>/cgroup */
+            pi->type              = PROC_CGROUP;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 128;
             break;
         default:
             slab_free(pi);

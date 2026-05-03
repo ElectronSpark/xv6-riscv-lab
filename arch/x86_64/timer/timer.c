@@ -32,6 +32,7 @@
 #include "defs.h"
 #include "lapic.h"
 #include "seg.h"
+#include "timer/sched_timer_private.h"
 
 /* ══════════════════════════════════════════════════════════════
  *  Linker-compat globals (RISC-V legacy)
@@ -182,9 +183,9 @@ void timer_tick_advance(void) {
          * are pending. */
         extern void e1000_poll_rx(void);
         e1000_poll_rx();
+        sched_timer_tick();
+        __do_timer_tick();
     }
-    /* Drive the per-CPU scheduler software-timer tree */
-    sched_timer_tick();
 }
 
 /* Re-arm LAPIC timer for TSC-deadline mode (called from trap handler) */

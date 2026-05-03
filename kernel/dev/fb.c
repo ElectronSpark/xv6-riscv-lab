@@ -36,6 +36,7 @@
 #define FB_GPU_MAX_BOS 128
 
 #define DRM_IOCTL_VERSION                      0xc0406400UL
+#define DRM_IOCTL_GET_UNIQUE                   0xc0106401UL
 #define DRM_IOCTL_GET_CAP                      0xc010640cUL
 #define DRM_IOCTL_SET_CLIENT_CAP               0x4010640dUL
 #define DRM_IOCTL_GEM_CLOSE                    0x40086409UL
@@ -57,14 +58,22 @@
 #define DRM_IOCTL_VIRTGPU_CONTEXT_INIT         0xc010644bUL
 
 #define DRM_CAP_DUMB_BUFFER           0x1
+#define DRM_CAP_VBLANK_HIGH_CRTC      0x2
 #define DRM_CAP_DUMB_PREFERRED_DEPTH  0x3
 #define DRM_CAP_DUMB_PREFER_SHADOW    0x4
 #define DRM_CAP_PRIME                 0x5
 #define DRM_PRIME_CAP_IMPORT          0x1
 #define DRM_PRIME_CAP_EXPORT          0x2
 #define DRM_CAP_TIMESTAMP_MONOTONIC   0x6
+#define DRM_CAP_ASYNC_PAGE_FLIP       0x7
+#define DRM_CAP_CURSOR_WIDTH          0x8
+#define DRM_CAP_CURSOR_HEIGHT         0x9
+#define DRM_CAP_ADDFB2_MODIFIERS      0x10
+#define DRM_CAP_PAGE_FLIP_TARGET      0x11
+#define DRM_CAP_CRTC_IN_VBLANK_EVENT  0x12
 #define DRM_CAP_SYNCOBJ               0x13
 #define DRM_CAP_SYNCOBJ_TIMELINE      0x14
+#define DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP 0x15
 
 #define VIRTGPU_PARAM_3D_FEATURES             1
 #define VIRTGPU_PARAM_CAPSET_QUERY_FIX        2
@@ -100,6 +109,11 @@ struct drm_version_compat {
     uint64 date;
     uint64 desc_len;
     uint64 desc;
+};
+
+struct drm_unique_compat {
+    uint64 unique_len;
+    uint64 unique;
 };
 
 struct drm_get_cap_compat {
@@ -2388,23 +2402,41 @@ static int gpu_owner_ensure_context(struct fb_gpu_render_owner *owner)
 static int gpu_drm_version(uint64 arg)
 {
     struct drm_version_compat req;
+    int has_virgl;
     int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
+    has_virgl = virtio_gpu_has_virgl();
     req.version_major = 0;
     req.version_minor = 1;
     req.version_patchlevel = 0;
-    ret = gpu_copyout_string(req.name, &req.name_len, "virtio_gpu");
+    ret = gpu_copyout_string(req.name, &req.name_len,
+                             has_virgl ? "virtio_gpu" : "xv6_gpu");
     if (ret != 0)
         return ret;
     ret = gpu_copyout_string(req.date, &req.date_len, "20260502");
     if (ret != 0)
         return ret;
     ret = gpu_copyout_string(req.desc, &req.desc_len,
-                             "xv6 virtio-gpu virgl render node");
+                             has_virgl ? "xv6 virtio-gpu virgl render node" :
+                                         "xv6 dumb-buffer render node");
     if (ret != 0)
         return ret;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_get_unique(uint64 arg)
+{
+    struct drm_unique_compat req;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (gpu_copyout_string(req.unique, &req.unique_len,
+                           "pci:0000:00:04.0") != 0)
+        return -EFAULT;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
@@ -2418,6 +2450,7 @@ static int gpu_drm_get_cap(uint64 arg)
         return -EFAULT;
     switch (req.capability) {
     case DRM_CAP_DUMB_BUFFER:
+    case DRM_CAP_VBLANK_HIGH_CRTC:
     case DRM_CAP_TIMESTAMP_MONOTONIC:
         req.value = 1;
         break;
@@ -2430,6 +2463,15 @@ static int gpu_drm_get_cap(uint64 arg)
     case DRM_CAP_PRIME:
         req.value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT;
         break;
+    case DRM_CAP_CURSOR_WIDTH:
+    case DRM_CAP_CURSOR_HEIGHT:
+        req.value = 64;
+        break;
+    case DRM_CAP_ASYNC_PAGE_FLIP:
+    case DRM_CAP_ADDFB2_MODIFIERS:
+    case DRM_CAP_PAGE_FLIP_TARGET:
+    case DRM_CAP_CRTC_IN_VBLANK_EVENT:
+    case DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP:
     case DRM_CAP_SYNCOBJ:
     case DRM_CAP_SYNCOBJ_TIMELINE:
         req.value = 0;
@@ -2668,6 +2710,8 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
     switch (cmd) {
     case DRM_IOCTL_VERSION:
         return gpu_drm_version(arg);
+    case DRM_IOCTL_GET_UNIQUE:
+        return gpu_drm_get_unique(arg);
     case DRM_IOCTL_GET_CAP:
         return gpu_drm_get_cap(arg);
     case DRM_IOCTL_SET_CLIENT_CAP:
@@ -2716,6 +2760,7 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
     }
     case DRM_IOCTL_VIRTGPU_GETPARAM: {
         struct drm_virtgpu_getparam_compat req;
+        uint64 value = 0;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         switch (req.param) {
@@ -2723,27 +2768,30 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         case VIRTGPU_PARAM_CAPSET_QUERY_FIX:
         case VIRTGPU_PARAM_CONTEXT_INIT:
         case VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME:
-            req.value = virtio_gpu_has_virgl() ? 1 : 0;
+            value = virtio_gpu_has_virgl() ? 1 : 0;
             break;
         case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs:
         {
             uint32 capset_id = 0;
             if (gpu_drm_current_capset(&capset_id) != 0)
-                req.value = 0;
+                value = 0;
             else if (capset_id < 64)
-                req.value = 1ULL << capset_id;
+                value = 1ULL << capset_id;
             else
-                req.value = 0;
+                value = 0;
             break;
         }
         case VIRTGPU_PARAM_RESOURCE_BLOB:
         case VIRTGPU_PARAM_HOST_VISIBLE:
-            req.value = 0;
+            value = 0;
             break;
         default:
-            return -EINVAL;
+            value = 0;
+            break;
         }
-        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        if (req.value == 0)
+            return -EFAULT;
+        if (either_copyout(1, req.value, &value, sizeof(value)) < 0)
             return -EFAULT;
         return 0;
     }
@@ -2836,7 +2884,8 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
     }
     case DRM_IOCTL_VIRTGPU_GET_CAPS: {
         struct drm_virtgpu_get_caps_compat req;
-        uint32 capset_id, capset_ver, capset_size;
+        uint32 capset_id = 0, capset_ver = 0, capset_size = 0;
+        uint32 copy_size;
         void *caps = NULL;
         int ret;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
@@ -2850,8 +2899,13 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         }
         ret = virtio_gpu_user_get_caps(caps, req.addr ? req.size : 0,
                                        &capset_id, &capset_ver, &capset_size);
-        if (ret == 0 && caps != NULL &&
-            either_copyout(1, req.addr, caps, capset_size) < 0)
+        if (ret == -ENODEV)
+            ret = 0;
+        copy_size = capset_size;
+        if (copy_size > req.size)
+            copy_size = req.size;
+        if (ret == 0 && caps != NULL && copy_size != 0 &&
+            either_copyout(1, req.addr, caps, copy_size) < 0)
             ret = -EFAULT;
         if (caps != NULL)
             kfree(caps);
@@ -2989,11 +3043,6 @@ static int gpu_open_file(cdev_t *cdev, struct vfs_file *file)
     int ret = gpu_open(cdev);
     if (ret != 0)
         return ret;
-    if (cdev == &gpu_render_cdev && !virtio_gpu_has_virgl()) {
-        printf("GPU: denying /dev/dri/renderD128 open without virgl\n");
-        (void)gpu_release(cdev);
-        return -ENODEV;
-    }
     owner = kvmalloc(sizeof(*owner));
     if (owner == NULL) {
         (void)gpu_release(cdev);

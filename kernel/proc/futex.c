@@ -23,6 +23,8 @@
 #include <mm/pgtable.h>
 #include "errno.h"
 #include "signal.h"
+#include "timer/goldfish_rtc.h"
+#include "timer/timer.h"
 
 // Futex operations (match Linux values)
 #define FUTEX_WAIT          0
@@ -42,6 +44,14 @@
 #define FUTEX_CMD_MASK       ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME)
 
 #define FUTEX_BITSET_MATCH_ANY 0xffffffff
+
+#define NSEC_PER_SEC 1000000000ULL
+#define NSEC_PER_MSEC 1000000ULL
+
+struct futex_timespec {
+    int64 tv_sec;
+    int64 tv_nsec;
+};
 
 /*
  * Futex hash table: waiters are hashed by (vm, user-virtual-address).
@@ -99,6 +109,77 @@ static int futex_read_u32(vm_t *vm, uint64 uaddr, uint32 *val)
     return 0;
 }
 
+static uint64 futex_ns_to_ms_ceil(uint64 ns)
+{
+    if (ns == 0)
+        return 0;
+    return (ns + NSEC_PER_MSEC - 1) / NSEC_PER_MSEC;
+}
+
+static int futex_timespec_to_ns(const struct futex_timespec *ts, uint64 *ns)
+{
+    if (ts->tv_sec < 0 || ts->tv_nsec < 0 ||
+        ts->tv_nsec >= (int64)NSEC_PER_SEC)
+        return -EINVAL;
+
+    uint64 sec = (uint64)ts->tv_sec;
+    if (sec > UINT64_MAX / NSEC_PER_SEC)
+        return -EINVAL;
+    uint64 base = sec * NSEC_PER_SEC;
+    uint64 nsec = (uint64)ts->tv_nsec;
+    if (base > UINT64_MAX - nsec)
+        return -EINVAL;
+    *ns = base + nsec;
+    return 0;
+}
+
+static uint64 futex_now_ns(bool realtime)
+{
+    if (realtime)
+        return goldfish_rtc_read_ns();
+
+    uint64 freq = __timebase_frequency;
+    if (freq == 0)
+        return sched_timer_now_ms() * NSEC_PER_MSEC;
+
+    uint64 ticks = r_time();
+    return (ticks / freq) * NSEC_PER_SEC +
+        ((ticks % freq) * NSEC_PER_SEC) / freq;
+}
+
+static int futex_parse_timeout(uint64 timeout_addr, bool absolute,
+                               bool realtime, bool *has_timeout,
+                               uint64 *timeout_ms)
+{
+    *has_timeout = false;
+    *timeout_ms = 0;
+    if (timeout_addr == 0)
+        return 0;
+
+    struct futex_timespec ts;
+    if (either_copyin(&ts, 1, timeout_addr, sizeof(ts)) < 0)
+        return -EFAULT;
+
+    uint64 timeout_ns;
+    int ret = futex_timespec_to_ns(&ts, &timeout_ns);
+    if (ret < 0)
+        return ret;
+
+    *has_timeout = true;
+    if (!absolute) {
+        *timeout_ms = futex_ns_to_ms_ceil(timeout_ns);
+        return 0;
+    }
+
+    uint64 now_ns = futex_now_ns(realtime);
+    if (timeout_ns <= now_ns) {
+        *timeout_ms = 0;
+        return 0;
+    }
+    *timeout_ms = futex_ns_to_ms_ceil(timeout_ns - now_ns);
+    return 0;
+}
+
 /*
  * futex_wait — sleep if *uaddr == val
  *
@@ -109,7 +190,8 @@ static int futex_read_u32(vm_t *vm, uint64 uaddr, uint32 *val)
  *   4. If *uaddr != val, return -EAGAIN
  *   5. Otherwise, enqueue ourselves and sleep
  */
-static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset) {
+static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset,
+                      bool has_timeout, uint64 timeout_ms) {
     if (bitset == 0)
         return -EINVAL;
 
@@ -138,32 +220,78 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset) {
         return -EAGAIN;
     }
 
+    if (has_timeout && timeout_ms == 0) {
+        spin_unlock(&bucket->lock);
+        return -ETIMEDOUT;
+    }
+
     // Enqueue waiter
     waiter.next = bucket->head;
     bucket->head = &waiter;
 
-    // Sleep — releases bucket->lock and puts thread to sleep.
-    // scheduler_sleep re-acquires bucket->lock before returning, so we
-    // must NOT lock it again here.
-    scheduler_sleep(&bucket->lock, THREAD_INTERRUPTIBLE);
+    struct timer_node tn = {0};
+    uint64 deadline_ms = 0;
+    bool timer_armed = false;
+    bool timeout_arm_failed = false;
+
+    if (!has_timeout) {
+        scheduler_sleep(&bucket->lock, THREAD_INTERRUPTIBLE);
+    } else {
+        /*
+         * Set the sleep state before arming the timer and before releasing the
+         * futex bucket lock. This mirrors sleep_ms() and avoids the
+         * lost-timeout race where a very short timer fires while the caller is
+         * still running.
+         */
+        int intr = intr_off_save();
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        deadline_ms = sched_timer_now_ms() + timeout_ms;
+        if (sched_timer_set(&tn, timeout_ms) == 0) {
+            timer_armed = true;
+            spin_unlock(&bucket->lock);
+            scheduler_yield();
+            spin_lock(&bucket->lock);
+        } else {
+            /*
+             * Do not yield in an interruptible state if no timer was armed:
+             * no callback exists to wake us.  Treat the wait as an immediate
+             * timeout after cleaning the futex queue below.
+             */
+            __thread_state_set(current, THREAD_RUNNING);
+            timeout_arm_failed = true;
+        }
+        intr_restore(intr);
+    }
 
     // We've been woken up. bucket->lock is already held (re-acquired by
-    // scheduler_sleep). Remove ourselves if still linked (spurious wakeup
+    // us above). Remove ourselves if still linked (timeout, spurious wakeup,
     // or signal).
     // Remove ourselves from the list if still present (spurious wakeup / signal)
+    bool still_linked = false;
     struct futex_waiter **pp = &bucket->head;
     while (*pp) {
         if (*pp == &waiter) {
             *pp = waiter.next;
+            still_linked = true;
             break;
         }
         pp = &(*pp)->next;
     }
     spin_unlock(&bucket->lock);
 
+    if (timer_armed)
+        sched_timer_done(&tn);
+
     // Check if we were woken by a signal
     if (signal_pending(current))
         return -EINTR;
+
+    if (timeout_arm_failed)
+        return -ETIMEDOUT;
+
+    if (has_timeout && still_linked &&
+        sched_timer_now_ms() >= deadline_ms)
+        return -ETIMEDOUT;
 
     return 0;
 }
@@ -326,7 +454,7 @@ static int futex_requeue(uint64 uaddr1, int nr_wake, uint64 uaddr2,
  *   a0: uint64  uaddr   — user-space futex word address
  *   a1: int     futex_op — operation (FUTEX_WAIT, FUTEX_WAKE, etc.)
  *   a2: uint32  val     — expected value (WAIT) or count (WAKE)
- *   a3: uint64  timeout — pointer to timespec (unused, ignored for now)
+ *   a3: uint64  timeout — pointer to relative/absolute timespec
  *   a4: uint64  uaddr2  — second futex address (unused)
  *   a5: uint32  val3    — for FUTEX_CMP_REQUEUE, or bitset
  */
@@ -350,16 +478,32 @@ uint64 sys_futex(void) {
         return (uint64)-EINVAL;
 
     int cmd = futex_op & FUTEX_CMD_MASK;
+    bool realtime = (futex_op & FUTEX_CLOCK_REALTIME) != 0;
 
     switch (cmd) {
-    case FUTEX_WAIT:
-        return (uint64)futex_wait(uaddr, val, FUTEX_BITSET_MATCH_ANY);
+    case FUTEX_WAIT: {
+        bool has_timeout;
+        uint64 timeout_ms;
+        int ret = futex_parse_timeout(timeout_or_val2, false, realtime,
+                                      &has_timeout, &timeout_ms);
+        if (ret < 0)
+            return (uint64)ret;
+        return (uint64)futex_wait(uaddr, val, FUTEX_BITSET_MATCH_ANY,
+                                  has_timeout, timeout_ms);
+    }
 
     case FUTEX_WAKE:
         return (uint64)futex_wake(uaddr, val, FUTEX_BITSET_MATCH_ANY);
 
-    case FUTEX_WAIT_BITSET:
-        return (uint64)futex_wait(uaddr, val, val3);
+    case FUTEX_WAIT_BITSET: {
+        bool has_timeout;
+        uint64 timeout_ms;
+        int ret = futex_parse_timeout(timeout_or_val2, true, realtime,
+                                      &has_timeout, &timeout_ms);
+        if (ret < 0)
+            return (uint64)ret;
+        return (uint64)futex_wait(uaddr, val, val3, has_timeout, timeout_ms);
+    }
 
     case FUTEX_WAKE_BITSET:
         return (uint64)futex_wake(uaddr, val, val3);

@@ -452,6 +452,19 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
                 else
                     kn->status &= ~KN_DISABLED;
                 spin_unlock(&kq->lock);
+
+                /*
+                 * EV_ADD also acts as a modify operation for an existing
+                 * registration.  Linux epoll users commonly change masks after
+                 * partially handling buffered IPC.  If readiness became true
+                 * before the MOD, no new edge may arrive, so re-check the
+                 * source after updating the knote.
+                 */
+                if (!(kn->status & KN_DISABLED) &&
+                    kn->ops != NULL && kn->ops->event != NULL &&
+                    kn->ops->event(kn, 0)) {
+                    knote_enqueue(kn);
+                }
             } else {
                 /* Create new knote */
                 spin_unlock(&kq->lock);
@@ -623,6 +636,20 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             kq->nready--;
             kn->status &= ~KN_QUEUED;
 
+            /*
+             * EVFILT_READ/WRITE are level-triggered by default.  A readiness
+             * edge can become stale while the knote sits on the ready list
+             * (for example, epoll_ctl() can queue an unconnected socket error,
+             * then a nonblocking connect moves the socket to EINPROGRESS).
+             * Re-check before reporting level-triggered file readiness.
+             */
+            if (!(kn->flags & EV_CLEAR) &&
+                (kn->filter == EVFILT_READ || kn->filter == EVFILT_WRITE) &&
+                kn->ops != NULL && kn->ops->event != NULL &&
+                !kn->ops->event(kn, 0)) {
+                continue;
+            }
+
             /* Fill in kevent for user */
             eventlist[total].ident = kn->ident;
             eventlist[total].filter = kn->filter;
@@ -752,6 +779,8 @@ static int kqueue_file_poll(struct vfs_file *file, short events) {
     if (kq == NULL)
         return POLLNVAL;
     spin_lock(&kq->lock);
+    if (events & (POLLIN | POLLRDNORM))
+        kqueue_rescan_registered_locked(kq);
     if ((events & (POLLIN | POLLRDNORM)) && kq->nready > 0)
         revents |= (events & (POLLIN | POLLRDNORM));
     spin_unlock(&kq->lock);

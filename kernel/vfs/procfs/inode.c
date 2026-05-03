@@ -29,6 +29,8 @@
 #include "hlist.h"
 #include <mm/slab.h>
 #include <mm/vm.h>
+#include <mm/mm_watermark.h>
+#include "arch/vm.h"
 #include "proc/thread.h"
 #include "proc/thread_group.h"
 #include "proc/sched.h"
@@ -133,6 +135,10 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             dentry->ino = PROCFS_INO_CPUINFO;
             return 0;
         }
+        if (name_len == 8 && memcmp(name, "zoneinfo", 8) == 0) {
+            dentry->ino = PROCFS_INO_ZONEINFO;
+            return 0;
+        }
         if (name_len == 7 && memcmp(name, "crashes", 7) == 0) {
             dentry->ino = PROCFS_INO_CRASHES;
             return 0;
@@ -169,6 +175,14 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     case PROC_PID_DIR: {
         if (name_len == 6 && memcmp(name, "status", 6) == 0) {
             dentry->ino = PROCFS_PID_STATUS_INO(pi->pid);
+            return 0;
+        }
+        if (name_len == 5 && memcmp(name, "statm", 5) == 0) {
+            dentry->ino = PROCFS_PID_STATM_INO(pi->pid);
+            return 0;
+        }
+        if (name_len == 6 && memcmp(name, "cgroup", 6) == 0) {
+            dentry->ino = PROCFS_PID_CGROUP_INO(pi->pid);
             return 0;
         }
         if (name_len == 4 && memcmp(name, "maps", 4) == 0) {
@@ -283,9 +297,12 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         } else if (child_idx == 4) {
             name = "cmdline";
             ino = PROCFS_INO_CMDLINE;
+        } else if (child_idx == 5) {
+            name = "zoneinfo";
+            ino = PROCFS_INO_ZONEINFO;
         } else {
-            /* pid entries start at child_idx 5 */
-            int nth  = child_idx - 5;
+            /* pid entries start after the static root entries. */
+            int nth  = child_idx - 6;
             int tgid = procfs_nth_tgid(nth);
             if (tgid < 0) {
                 /* End of directory */
@@ -323,10 +340,12 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
 
         switch (child_idx) {
         case 0: name = "status"; ino = PROCFS_PID_STATUS_INO(pi->pid); break;
-        case 1: name = "maps";   ino = PROCFS_PID_MAPS_INO(pi->pid);   break;
-        case 2: name = "exe";    ino = PROCFS_PID_EXE_INO(pi->pid);    break;
-        case 3: name = "fd";     ino = PROCFS_PID_FDDIR_INO(pi->pid);  break;
-        case 4: name = "resources"; ino = PROCFS_PID_RESOURCES_INO(pi->pid); break;
+        case 1: name = "statm";  ino = PROCFS_PID_STATM_INO(pi->pid);  break;
+        case 2: name = "cgroup"; ino = PROCFS_PID_CGROUP_INO(pi->pid); break;
+        case 3: name = "maps";   ino = PROCFS_PID_MAPS_INO(pi->pid);   break;
+        case 4: name = "exe";    ino = PROCFS_PID_EXE_INO(pi->pid);    break;
+        case 5: name = "fd";     ino = PROCFS_PID_FDDIR_INO(pi->pid);  break;
+        case 6: name = "resources"; ino = PROCFS_PID_RESOURCES_INO(pi->pid); break;
         default:
             vfs_release_dentry(ret_dentry);
             ret_dentry->name = NULL;
@@ -488,6 +507,66 @@ static int procfs_getattr(struct vfs_inode *inode, struct stat *st) {
 #define PROCFS_MAPS_INITIAL_BUF_SIZE (64 * 1024)
 #define PROCFS_MAPS_MAX_BUF_SIZE     (1024 * 1024)
 
+struct procfs_vm_accounting {
+    vm_t *vm;
+    uint64 size_pages;
+    uint64 resident_pages;
+    uint64 shared_pages;
+    uint64 text_pages;
+    uint64 data_pages;
+    uint64 stack_pages;
+    uint64 exec_pages;
+    uint64 file_pages;
+};
+
+static void procfs_vm_count_leaf(uint64 va, uint64 size,
+                                 pte_t pte __attribute__((unused)),
+                                 void *arg)
+{
+    struct procfs_vm_accounting *acct = arg;
+    uint64 check = va;
+    vma_t *vma = mt_find(&acct->vm->vm_mt, &check, va + size - 1);
+    if (vma == NULL || vma->start > va || vma->end < va + size)
+        return;
+
+    uint64 pages = size / PGSIZE;
+    acct->resident_pages += pages;
+    if (vma->flags & VMA_FLAG_SHARED)
+        acct->shared_pages += pages;
+    if (vma->flags & PROT_EXEC)
+        acct->text_pages += pages;
+    if (vma->flags & VMA_FLAG_FILE)
+        acct->file_pages += pages;
+}
+
+static void procfs_collect_vm_accounting(vm_t *vm,
+                                         struct procfs_vm_accounting *acct)
+{
+    memset(acct, 0, sizeof(*acct));
+    acct->vm = vm;
+    if (vm == NULL)
+        return;
+
+    vm_rlock(vm);
+    vma_t *vma;
+    uint64 index = 0;
+    mt_for_each(&vm->vm_mt, vma, index, (uint64)(-1ULL)) {
+        if ((vma->flags & VMA_FLAG_USER) == 0)
+            continue;
+        uint64 pages = (vma->end - vma->start) / PGSIZE;
+        acct->size_pages += pages;
+        if (vma->flags & VMA_FLAG_GROWSDOWN)
+            acct->stack_pages += pages;
+        if (vma->flags & PROT_EXEC)
+            acct->exec_pages += pages;
+        if ((vma->flags & PROT_WRITE) || (vma->flags & VMA_FLAG_GROWSUP) ||
+            (vma->flags & VMA_FLAG_GROWSDOWN))
+            acct->data_pages += pages;
+    }
+    uvm_visit_present_leafs(vm->pagetable, procfs_vm_count_leaf, acct);
+    vm_runlock(vm);
+}
+
 static char *procfs_gen_status(int tgid) {
     rcu_read_lock();
     struct thread *p = NULL;
@@ -501,9 +580,24 @@ static char *procfs_gen_status(int tgid) {
     name[16] = '\0';
     int              ppid     = (p->parent != NULL) ? p->parent->tgid : 0;
     const char      *statestr = thread_state_short(__thread_state_get(p));
-    unsigned long    heap_kb  = 0;
-    if (p->vm != NULL)
-        heap_kb = (unsigned long)(p->vm->heap_size >> 10);
+    const char      *statelong = thread_state_to_str(__thread_state_get(p));
+    vm_t            *vm       = p->vm;
+    int              pid      = p->pid;
+    int              pgid     = p->pgid;
+    int              sid      = p->sid;
+    int              threads  = 1;
+    int              kthread  = THREAD_USER_SPACE(p) ? 0 : 1;
+    uint64           sigpnd   = smp_load_acquire(&p->signal.sig_pending_mask);
+    uint64           sigblk   = p->signal.sig_mask;
+    uint64           shdpnd   = 0;
+    uint32           p_uid    = 0;
+    uint32           p_gid    = 0;
+    uint32           p_euid   = 0;
+    uint32           p_egid   = 0;
+    uint32           p_suid   = 0;
+    uint32           p_sgid   = 0;
+    uint32           groups[NGROUPS_MAX];
+    int              ngroups  = 0;
     /* Cumulative CPU time (raw timer ticks at TIMEBASE_FREQUENCY Hz) */
     uint64 cputime_raw = 0;
     uint32 util_avg = 0;
@@ -514,34 +608,166 @@ static char *procfs_gen_status(int tgid) {
         load_contrib = p->sched_entity->load_avg_contrib;
     }
     /* Credentials */
-    uint32 p_uid = 0, p_gid = 0;
     if (p->thread_group) {
-        p_uid = p->thread_group->uid;
-        p_gid = p->thread_group->gid;
+        struct thread_group *tg = p->thread_group;
+        threads = __atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE);
+        shdpnd = smp_load_acquire(&tg->shared_pending.sig_pending_mask);
+        p_uid = tg->uid;
+        p_gid = tg->gid;
+        p_euid = tg->euid;
+        p_egid = tg->egid;
+        p_suid = tg->suid;
+        p_sgid = tg->sgid;
+        ngroups = tg->ngroups;
+        if (ngroups > NGROUPS_MAX)
+            ngroups = NGROUPS_MAX;
+        for (int i = 0; i < ngroups; i++)
+            groups[i] = tg->groups[i];
     }
     rcu_read_unlock();
+
+    struct procfs_vm_accounting vmacct;
+    procfs_collect_vm_accounting(vm, &vmacct);
 
     char *buf = kvmalloc(PROCFS_BUF_SIZE);
     if (buf == NULL)
         return ERR_PTR(-ENOMEM);
 
-    snprintf(buf, PROCFS_BUF_SIZE,
-             "Name:\t%s\n"
-             "Pid:\t%d\n"
-             "PPid:\t%d\n"
-             "State:\t%s\n"
-             "Uid:\t%u\n"
-             "Gid:\t%u\n"
-             "VmSize:\t%lu kB\n"
-             "CpuTime:\t%lu\n"
-             "UtilAvg:\t%u\n"
-             "LoadContrib:\t%lu\n",
-             name, tgid, ppid, statestr,
-             (unsigned)p_uid, (unsigned)p_gid,
-             heap_kb,
-             (unsigned long)cputime_raw,
-             (unsigned)util_avg,
-             (unsigned long)load_contrib);
+    unsigned long vm_size_kb = (unsigned long)((vmacct.size_pages * PGSIZE) / 1024);
+    unsigned long vm_rss_kb = (unsigned long)((vmacct.resident_pages * PGSIZE) / 1024);
+    unsigned long rss_file_kb = (unsigned long)((vmacct.file_pages * PGSIZE) / 1024);
+    if (rss_file_kb > vm_rss_kb)
+        rss_file_kb = vm_rss_kb;
+    unsigned long rss_anon_kb = vm_rss_kb - rss_file_kb;
+    unsigned long vm_data_kb = (unsigned long)((vmacct.data_pages * PGSIZE) / 1024);
+    unsigned long vm_stk_kb = (unsigned long)((vmacct.stack_pages * PGSIZE) / 1024);
+    unsigned long vm_exe_kb = (unsigned long)((vmacct.exec_pages * PGSIZE) / 1024);
+    unsigned long vm_pte_kb = (unsigned long)((vmacct.size_pages * sizeof(pte_t)) / 1024);
+    if (vmacct.size_pages != 0 && vm_pte_kb == 0)
+        vm_pte_kb = 4;
+
+    int pos = snprintf(buf, PROCFS_BUF_SIZE,
+                       "Name:\t%s\n"
+                       "Umask:\t%04o\n"
+                       "State:\t%s (%s)\n"
+                       "Tgid:\t%d\n"
+                       "Ngid:\t0\n"
+                       "Pid:\t%d\n"
+                       "PPid:\t%d\n"
+                       "TracerPid:\t0\n"
+                       "Uid:\t%u\t%u\t%u\t%u\n"
+                       "Gid:\t%u\t%u\t%u\t%u\n"
+                       "FDSize:\t%d\n"
+                       "Groups:",
+                       name, 0022, statestr, statelong, tgid, pid, ppid,
+                       (unsigned)p_uid, (unsigned)p_euid,
+                       (unsigned)p_suid, (unsigned)p_euid,
+                       (unsigned)p_gid, (unsigned)p_egid,
+                       (unsigned)p_sgid, (unsigned)p_egid,
+                       NOFILE);
+    if (pos < 0)
+        pos = 0;
+    if ((size_t)pos < PROCFS_BUF_SIZE) {
+        for (int i = 0; i < ngroups && (size_t)pos < PROCFS_BUF_SIZE; i++) {
+            int n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
+                             "\t%u", (unsigned)groups[i]);
+            if (n < 0)
+                break;
+            pos += n;
+        }
+    }
+    if ((size_t)pos < PROCFS_BUF_SIZE) {
+        snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
+                 "\n"
+                 "NStgid:\t%d\n"
+                 "NSpid:\t%d\n"
+                 "NSpgid:\t%d\n"
+                 "NSsid:\t%d\n"
+                 "Kthread:\t%d\n"
+                 "VmPeak:\t%8lu kB\n"
+                 "VmSize:\t%8lu kB\n"
+                 "VmLck:\t%8u kB\n"
+                 "VmPin:\t%8u kB\n"
+                 "VmHWM:\t%8lu kB\n"
+                 "VmRSS:\t%8lu kB\n"
+                 "RssAnon:\t%8lu kB\n"
+                 "RssFile:\t%8lu kB\n"
+                 "RssShmem:\t%8u kB\n"
+                 "VmData:\t%8lu kB\n"
+                 "VmStk:\t%8lu kB\n"
+                 "VmExe:\t%8lu kB\n"
+                 "VmLib:\t%8u kB\n"
+                 "VmPTE:\t%8lu kB\n"
+                 "VmSwap:\t%8u kB\n"
+                 "HugetlbPages:\t%8u kB\n"
+                 "CoreDumping:\t0\n"
+                 "THP_enabled:\t0\n"
+                 "Threads:\t%d\n"
+                 "SigQ:\t0/%d\n"
+                 "SigPnd:\t%016llx\n"
+                 "ShdPnd:\t%016llx\n"
+                 "SigBlk:\t%016llx\n"
+                 "SigIgn:\t%016llx\n"
+                 "SigCgt:\t%016llx\n"
+                 "CapInh:\t%016llx\n"
+                 "CapPrm:\t%016llx\n"
+                 "CapEff:\t%016llx\n"
+                 "CapBnd:\t%016llx\n"
+                 "CapAmb:\t%016llx\n"
+                 "NoNewPrivs:\t0\n"
+                 "Seccomp:\t0\n"
+                 "Seccomp_filters:\t0\n"
+                 "Cpus_allowed:\t1\n"
+                 "Cpus_allowed_list:\t0\n"
+                 "Mems_allowed:\t00000001\n"
+                 "Mems_allowed_list:\t0\n"
+                 "voluntary_ctxt_switches:\t0\n"
+                 "nonvoluntary_ctxt_switches:\t0\n"
+                 "CpuTime:\t%lu\n"
+                 "UtilAvg:\t%u\n"
+                 "LoadContrib:\t%lu\n",
+                 tgid, pid, pgid, sid, kthread,
+                 vm_size_kb, vm_size_kb, 0, 0, vm_rss_kb, vm_rss_kb,
+                 rss_anon_kb, rss_file_kb, 0, vm_data_kb, vm_stk_kb,
+                 vm_exe_kb, 0, vm_pte_kb, 0, 0, threads, NSIG,
+                 (unsigned long long)sigpnd,
+                 (unsigned long long)shdpnd,
+                 (unsigned long long)sigblk,
+                 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL,
+                 (unsigned long)cputime_raw,
+                 (unsigned)util_avg,
+                 (unsigned long)load_contrib);
+    }
+    return buf;
+}
+
+static char *procfs_gen_statm(int tgid) {
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tgid, &p);
+    vm_t *vm = (p != NULL) ? p->vm : NULL;
+    rcu_read_unlock();
+
+    if (vm == NULL)
+        return ERR_PTR(-ESRCH);
+
+    struct procfs_vm_accounting acct;
+    procfs_collect_vm_accounting(vm, &acct);
+
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    /*
+     * Linux /proc/<pid>/statm fields, in pages:
+     * size resident shared text lib data dt.  lib and dt are legacy fields.
+     */
+    snprintf(buf, PROCFS_BUF_SIZE, "%lu %lu %lu %lu 0 %lu 0\n",
+             (unsigned long)acct.size_pages,
+             (unsigned long)acct.resident_pages,
+             (unsigned long)acct.shared_pages,
+             (unsigned long)acct.text_pages,
+             (unsigned long)acct.data_pages);
     return buf;
 }
 
@@ -612,11 +838,145 @@ static char *procfs_gen_meminfo(void) {
     char *buf = kvmalloc(PROCFS_BUF_SIZE);
     if (buf == NULL)
         return ERR_PTR(-ENOMEM);
+
+    const struct mm_watermark_state *wm = mm_watermark_get_state();
+    uint64 total_pages = (wm != NULL) ? wm->total_pages : 0;
+    if (total_pages == 0)
+        total_pages = get_total_free_pages();
+
+    uint64 free_pages = get_total_free_pages();
+    uint64 cached_pages = (wm != NULL) ? wm->cached_pages : 0;
+    uint64 low_pages = (wm != NULL) ? wm->wmark[WMARK_LOW] : 0;
+    uint64 high_pages = (wm != NULL) ? wm->wmark[WMARK_HIGH] : low_pages;
+    uint64 available_pages = free_pages;
+    if (available_pages > low_pages)
+        available_pages -= low_pages;
+    if (available_pages > total_pages)
+        available_pages = total_pages;
+
+    uint64 total_kb = (total_pages * PGSIZE) / 1024;
+    uint64 free_kb = (free_pages * PGSIZE) / 1024;
+    uint64 available_kb = (available_pages * PGSIZE) / 1024;
+    uint64 cached_kb = (cached_pages * PGSIZE) / 1024;
+    uint64 active_file_kb = cached_kb / 2;
+    uint64 inactive_file_kb = cached_kb - active_file_kb;
+    uint64 commit_limit_kb = total_kb;
+    uint64 slab_kb = (high_pages * PGSIZE) / 1024;
+
     snprintf(buf, PROCFS_BUF_SIZE,
-             "MemTotal:        1048576 kB\n"
-             "MemFree:          524288 kB\n"
-             "Buffers:               0 kB\n"
-             "Cached:                0 kB\n");
+             "MemTotal:        %8lu kB\n"
+             "MemFree:         %8lu kB\n"
+             "MemAvailable:    %8lu kB\n"
+             "Buffers:         %8u kB\n"
+             "Cached:          %8lu kB\n"
+             "SwapCached:      %8u kB\n"
+             "Active:          %8lu kB\n"
+             "Inactive:        %8lu kB\n"
+             "Active(anon):    %8u kB\n"
+             "Inactive(anon):  %8u kB\n"
+             "Active(file):    %8lu kB\n"
+             "Inactive(file):  %8lu kB\n"
+             "Unevictable:     %8u kB\n"
+             "Mlocked:         %8u kB\n"
+             "SwapTotal:       %8u kB\n"
+             "SwapFree:        %8u kB\n"
+             "Dirty:           %8u kB\n"
+             "Writeback:       %8u kB\n"
+             "AnonPages:       %8u kB\n"
+             "Mapped:          %8u kB\n"
+             "Shmem:           %8u kB\n"
+             "KReclaimable:    %8lu kB\n"
+             "Slab:            %8lu kB\n"
+             "SReclaimable:    %8lu kB\n"
+             "SUnreclaim:      %8u kB\n"
+             "KernelStack:     %8u kB\n"
+             "PageTables:      %8u kB\n"
+             "CommitLimit:     %8lu kB\n"
+             "Committed_AS:    %8u kB\n"
+             "VmallocTotal:    %8lu kB\n"
+             "VmallocUsed:     %8u kB\n"
+             "VmallocChunk:    %8lu kB\n",
+             (unsigned long)total_kb,
+             (unsigned long)free_kb,
+             (unsigned long)available_kb,
+             0,
+             (unsigned long)cached_kb,
+             0,
+             (unsigned long)active_file_kb,
+             (unsigned long)inactive_file_kb,
+             0,
+             0,
+             (unsigned long)active_file_kb,
+             (unsigned long)inactive_file_kb,
+             0,
+             0,
+             0,
+             0,
+             0,
+             0,
+             0,
+             0,
+             0,
+             (unsigned long)slab_kb,
+             (unsigned long)slab_kb,
+             (unsigned long)slab_kb,
+             0,
+             0,
+             0,
+             (unsigned long)commit_limit_kb,
+             0,
+             (unsigned long)(~0ULL / 1024),
+             0,
+             (unsigned long)(~0ULL / 1024));
+    return buf;
+}
+
+static char *procfs_gen_zoneinfo(void) {
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    const struct mm_watermark_state *wm = mm_watermark_get_state();
+    uint64 total_pages = (wm != NULL) ? wm->total_pages : 0;
+    if (total_pages == 0)
+        total_pages = get_total_free_pages();
+    uint64 free_pages = get_total_free_pages();
+    uint64 min_pages = (wm != NULL) ? wm->wmark[WMARK_MIN] : 0;
+    uint64 low_pages = (wm != NULL) ? wm->wmark[WMARK_LOW] : 0;
+    uint64 high_pages = (wm != NULL) ? wm->wmark[WMARK_HIGH] : 0;
+
+    snprintf(buf, PROCFS_BUF_SIZE,
+             "Node 0, zone   Normal\n"
+             "  pages free     %lu\n"
+             "        min      %lu\n"
+             "        low      %lu\n"
+             "        high     %lu\n"
+             "        spanned  %lu\n"
+             "        present  %lu\n"
+             "        managed  %lu\n"
+             "        protection: (0, 0, 0)\n",
+             (unsigned long)free_pages,
+             (unsigned long)min_pages,
+             (unsigned long)low_pages,
+             (unsigned long)high_pages,
+             (unsigned long)total_pages,
+             (unsigned long)total_pages,
+             (unsigned long)total_pages);
+    return buf;
+}
+
+static char *procfs_gen_cgroup(int tgid) {
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tgid, &p);
+    rcu_read_unlock();
+    if (p == NULL)
+        return ERR_PTR(-ESRCH);
+
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, PROCFS_BUF_SIZE, "0::/init.scope\n");
     return buf;
 }
 
@@ -691,6 +1051,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_STATUS:
         buf = procfs_gen_status(pi->pid);
         break;
+    case PROC_STATM:
+        buf = procfs_gen_statm(pi->pid);
+        break;
     case PROC_MAPS:
         buf = procfs_gen_maps(pi->pid);
         break;
@@ -699,6 +1062,12 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_CPUINFO:
         buf = procfs_gen_cpuinfo();
+        break;
+    case PROC_ZONEINFO:
+        buf = procfs_gen_zoneinfo();
+        break;
+    case PROC_CGROUP:
+        buf = procfs_gen_cgroup(pi->pid);
         break;
     case PROC_CMDLINE:
         buf = procfs_gen_cmdline();

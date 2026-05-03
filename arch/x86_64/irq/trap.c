@@ -30,6 +30,33 @@
 
 #define USER_FAULT_AROUND_PAGES 2048UL
 
+static const char *fault_vma_file_name(vma_t *vma)
+{
+    if (vma == NULL || vma->file == NULL || vma->file->inode.inode == NULL)
+        return "-";
+    if (vma->file->inode.inode->name != NULL)
+        return vma->file->inode.inode->name;
+    return "(unnamed)";
+}
+
+static void print_fault_vma(vm_t *vm, const char *label, uint64 addr)
+{
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL) {
+        printf("  %s: addr=0x%lx vma=(none)\n", label, addr);
+        return;
+    }
+
+    uint64 file_off = vma->pgoff + (addr - vma->start);
+    printf("  %s: addr=0x%lx map=[0x%lx-0x%lx) %c%c%c pgoff=0x%lx file_off=0x%lx file=%p name=%s\n",
+           label, addr, vma->start, vma->end,
+           (vma->flags & PROT_READ) ? 'r' : '-',
+           (vma->flags & PROT_WRITE) ? 'w' : '-',
+           (vma->flags & PROT_EXEC) ? 'x' : '-',
+           vma->pgoff, file_off, (void *)vma->file,
+           fault_vma_file_name(vma));
+}
+
 /* ──────────────────────────────────────────────────────────────
  *  User-ABI signal types — exact binary layout that musl (and
  *  Linux) expects on the user stack.  The kernel's own types
@@ -900,6 +927,14 @@ void x86_trap_handler(struct trapframe *tf) {
                     " (SIGSEGV handler=%p sigacts=%p)\n",
                     current->pid, current->name, cr2, tf->err, tf->rip,
                     handler_addr, (void *)sa);
+                printf("  regs: rax=0x%lx rbx=0x%lx rcx=0x%lx rdx=0x%lx\n",
+                       tf->rax, tf->rbx, tf->rcx, tf->rdx);
+                printf("        rdi=0x%lx rsi=0x%lx rbp=0x%lx rsp=0x%lx\n",
+                       tf->rdi, tf->rsi, tf->rbp, tf->rsp);
+                vm_rlock(current->vm);
+                print_fault_vma(current->vm, "fault-ip", tf->rip);
+                print_fault_vma(current->vm, "fault-va", cr2);
+                vm_runlock(current->vm);
                 /* Dump all executable VMAs for library identification */
                 {
                     void *mt_entry;
@@ -908,12 +943,13 @@ void x86_trap_handler(struct trapframe *tf) {
                     mt_for_each(&current->vm->vm_mt, mt_entry, mt_idx, MAPLE_MAX) {
                         vma_t *v = (vma_t *)mt_entry;
                         if ((v->flags & PROT_EXEC) || v->file)
-                            printf("  [0x%lx-0x%lx) %c%c%c pgoff=0x%lx file=%p\n",
+                            printf("  [0x%lx-0x%lx) %c%c%c pgoff=0x%lx file=%p name=%s\n",
                                    v->start, v->end,
                                    (v->flags & PROT_READ) ? 'r' : '-',
                                    (v->flags & PROT_WRITE) ? 'w' : '-',
                                    (v->flags & PROT_EXEC) ? 'x' : '-',
-                                   v->pgoff, (void *)v->file);
+                                   v->pgoff, (void *)v->file,
+                                   fault_vma_file_name(v));
                     }
                     printf("  --- end VMA map ---\n");
                 }

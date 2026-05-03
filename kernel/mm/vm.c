@@ -2353,6 +2353,34 @@ __do_pte_check:
 uint64 g_vm_copyout_fast_hits = 0;
 uint64 g_vm_copyout_fast_bytes = 0;
 
+static bool vm_copyout_fast_src(const void *src, uint64 len,
+                                const void **src_safe)
+{
+    uint64 start = (uint64)src;
+    uint64 end = start + len;
+
+    if (end < start)
+        return false;
+
+    if (start >= PAGE_OFFSET) {
+        *src_safe = src;
+        return true;
+    }
+
+    /*
+     * The fast path runs while the process page table is loaded.  Only the
+     * higher-half direct map is guaranteed there; low-half kernel-VM mappings
+     * from kvmalloc() are only present in the kernel page table and must use
+     * the slow path.
+     */
+    if (start >= KERNBASE && end <= PHYSTOP) {
+        *src_safe = (const void *)(start + PAGE_OFFSET);
+        return true;
+    }
+
+    return false;
+}
+
 int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
 {
     uint64 copy_start = r_time();
@@ -2441,9 +2469,12 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
             }
             if (!fast_ok) break;
 
-            /* Convert src to higher-half VA for access under user CR3. */
-            const void *src_safe = ((uint64)fsrc < PAGE_OFFSET)
-                ? (const void *)((uint64)fsrc + PAGE_OFFSET) : fsrc;
+            /* Convert physical/direct-map sources for access under user CR3. */
+            const void *src_safe;
+            if (!vm_copyout_fast_src(fsrc, chunk, &src_safe)) {
+                fast_ok = false;
+                break;
+            }
 
             int was = intr_off_save();
             uint64 kcr3 = r_satp();

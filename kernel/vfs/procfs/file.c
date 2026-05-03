@@ -63,7 +63,6 @@ static ssize_t procfs_reg_read(struct vfs_file *file, char *buf, size_t count,
         memmove(buf, data + pos, chunk);
     }
 
-    file->f_pos += (loff_t)chunk;
     return (ssize_t)chunk;
 }
 

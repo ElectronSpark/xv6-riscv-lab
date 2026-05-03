@@ -93,7 +93,7 @@ struct vfs_file_ops unix_socket_file_ops = {
 /* ========================================================================== */
 
 #define RING_READABLE(r) ((r)->nwrite - (r)->nread)
-#define RING_WRITABLE(r) (UNIX_BUF_SIZE - RING_READABLE(r))
+#define RING_WRITABLE(r) ((r)->capacity - RING_READABLE(r))
 #define UNIX_WRITE_LOWAT PAGE_SIZE
 
 static inline bool unix_sock_connection_oriented(const struct unix_sock *sk)
@@ -127,9 +127,10 @@ static int unix_packet_has_space_locked(struct unix_sock *sk)
 
 static int ring_alloc(struct unix_ring *r)
 {
-    r->data = kvmalloc(UNIX_BUF_SIZE);
+    r->data = kvmalloc(UNIX_BUF_DEFAULT_SIZE);
     if (r->data == NULL)
         return -ENOMEM;
+    r->capacity = UNIX_BUF_DEFAULT_SIZE;
     r->nread = 0;
     r->nwrite = 0;
     return 0;
@@ -141,6 +142,7 @@ static void ring_free(struct unix_ring *r)
         kvfree(r->data);
         r->data = NULL;
     }
+    r->capacity = 0;
 }
 
 /*
@@ -153,11 +155,11 @@ static size_t ring_write(struct unix_ring *r, const char *buf, size_t len)
     if (avail == 0)
         return 0;
     size_t towrite = len < avail ? len : avail;
-    uint idx = r->nwrite % UNIX_BUF_SIZE;
-    if (idx + towrite <= UNIX_BUF_SIZE) {
+    uint idx = r->nwrite % r->capacity;
+    if (idx + towrite <= r->capacity) {
         memmove(&r->data[idx], buf, towrite);
     } else {
-        size_t first = UNIX_BUF_SIZE - idx;
+        size_t first = r->capacity - idx;
         memmove(&r->data[idx], buf, first);
         memmove(&r->data[0], buf + first, towrite - first);
     }
@@ -175,11 +177,11 @@ static size_t ring_read(struct unix_ring *r, char *buf, size_t len)
     if (avail == 0)
         return 0;
     size_t toread = len < avail ? len : avail;
-    uint idx = r->nread % UNIX_BUF_SIZE;
-    if (idx + toread <= UNIX_BUF_SIZE) {
+    uint idx = r->nread % r->capacity;
+    if (idx + toread <= r->capacity) {
         memmove(buf, &r->data[idx], toread);
     } else {
-        size_t first = UNIX_BUF_SIZE - idx;
+        size_t first = r->capacity - idx;
         memmove(buf, &r->data[idx], first);
         memmove(buf + first, &r->data[0], toread - first);
     }
@@ -248,6 +250,83 @@ static inline void unix_sock_put(struct unix_sock *sk)
         unix_sock_free(sk);
 }
 
+void unix_sock_get_ref(struct unix_sock *sk)
+{
+    if (sk != NULL)
+        unix_sock_get(sk);
+}
+
+void unix_sock_put_ref(struct unix_sock *sk)
+{
+    if (sk != NULL)
+        unix_sock_put(sk);
+}
+
+static inline struct unix_sock *unix_sock_ref_peer_locked(struct unix_sock *sk)
+{
+    struct unix_sock *peer = sk->peer;
+    if (peer != NULL)
+        unix_sock_get(peer);
+    return peer;
+}
+
+static void unix_sock_cancel_pending_connect(struct unix_sock *sk, int err)
+{
+    struct unix_sock *target;
+
+    spin_lock(&sk->lock);
+    target = sk->connect_target;
+    if (target != NULL)
+        unix_sock_get(target);
+    spin_unlock(&sk->lock);
+
+    if (target == NULL)
+        return;
+
+    bool removed = false;
+    spin_lock(&target->lock);
+    struct unix_pending **pp = &target->pending_head;
+    struct unix_pending *prev = NULL;
+    while (*pp != NULL) {
+        struct unix_pending *p = *pp;
+        if (p->sock == sk) {
+            *pp = p->next;
+            if (target->pending_tail == p)
+                target->pending_tail = prev;
+            target->pending_count--;
+            slab_free(p);
+            removed = true;
+            break;
+        }
+        prev = p;
+        pp = &(*pp)->next;
+    }
+    if (target->pending_head == NULL)
+        target->pending_tail = NULL;
+    spin_unlock(&target->lock);
+
+    if (removed) {
+        bool drop_target_ref = false;
+
+        spin_lock(&sk->lock);
+        if (sk->connect_target == target) {
+            sk->connect_target = NULL;
+            sk->so_error = err;
+            if (sk->state == UNIX_STATE_CONNECTING)
+                sk->state = UNIX_STATE_UNCONNECTED;
+            drop_target_ref = true;
+            tq_wakeup_all(&sk->conn_queue, -1, 0);
+        }
+        spin_unlock(&sk->lock);
+
+        if (drop_target_ref)
+            unix_sock_put(target);
+        unix_sock_put(sk);  /* drop pending-queue reference */
+    }
+
+    unix_sock_put(target);  /* drop temporary reference */
+}
+
 /* ========================================================================== */
 /* Bind registry                                                              */
 /* ========================================================================== */
@@ -259,6 +338,7 @@ static struct unix_sock *bind_lookup(const char *path)
     while (e != NULL) {
         if (strncmp(e->path, path, UNIX_PATH_MAX) == 0) {
             struct unix_sock *sk = e->sock;
+            unix_sock_get(sk);
             spin_unlock(&bind_list_lock);
             return sk;
         }
@@ -289,6 +369,7 @@ static int bind_register(const char *path, struct unix_sock *sk)
     }
     strncpy(e->path, path, UNIX_PATH_MAX);
     e->sock = sk;
+    unix_sock_get(sk);
     e->next = bind_list_head;
     bind_list_head = e;
     spin_unlock(&bind_list_lock);
@@ -302,9 +383,11 @@ static void bind_unregister(const char *path)
     while (*pp != NULL) {
         if (strncmp((*pp)->path, path, UNIX_PATH_MAX) == 0) {
             struct unix_bind_entry *e = *pp;
+            struct unix_sock *sk = e->sock;
             *pp = e->next;
             slab_free(e);
             spin_unlock(&bind_list_lock);
+            unix_sock_put(sk);
             return;
         }
         pp = &(*pp)->next;
@@ -409,7 +492,7 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
         size_t got = 0;
 
         spin_lock(&sk->lock);
-        peer = sk->peer;
+        peer = unix_sock_ref_peer_locked(sk);
         if (peer == NULL || (sk->shutdown_flags & UNIX_SHUT_RD)) {
             spin_unlock(&sk->lock);
             /* EOF: peer disconnected or read-shut */
@@ -436,25 +519,38 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
 
         if (got == 0) {
             /* No data available */
-            if (total > 0)
+            if (total > 0) {
+                unix_sock_put(peer);
                 break; /* short read */
+            }
 
             /* Check if peer is gone (broken pipe = EOF) */
+            bool eof;
             spin_lock(&sk->lock);
-            if (sk->peer == NULL ||
-                (sk->peer->shutdown_flags & UNIX_SHUT_WR)) {
-                spin_unlock(&sk->lock);
+            eof = sk->peer == NULL;
+            spin_unlock(&sk->lock);
+            if (!eof) {
+                spin_lock(&peer->lock);
+                eof = (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
+                spin_unlock(&peer->lock);
+            }
+            if (eof) {
+                unix_sock_put(peer);
                 break; /* EOF */
             }
-            spin_unlock(&sk->lock);
 
-            if (nonblock)
+            if (nonblock) {
+                unix_sock_put(peer);
                 return total > 0 ? total : -EAGAIN;
+            }
 
-            if (signal_pending(current))
+            if (signal_pending(current)) {
+                unix_sock_put(peer);
                 return total > 0 ? total : -EINTR;
+            }
 
             /* Sleep waiting for data */
+            unix_sock_put(peer);
             spin_lock(&sk->lock);
             tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
                              THREAD_INTERRUPTIBLE);
@@ -467,12 +563,15 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
 
         /* Copy to user/kernel buffer */
         if (user) {
-            if (vm_copyout(current->vm, (uint64)(buf + total), tmp, got) < 0)
+            if (vm_copyout(current->vm, (uint64)(buf + total), tmp, got) < 0) {
+                unix_sock_put(peer);
                 break;
+            }
         } else {
             memmove(buf + total, tmp, got);
         }
         total += (ssize_t)got;
+        unix_sock_put(peer);
     }
 
     return total;
@@ -530,6 +629,7 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
                 spin_unlock(&sk->lock);
                 return total > 0 ? total : -EPIPE;
             }
+            unix_sock_get(peer);
             size_t w = ring_write(&sk->tx, tmp + wrote, chunk - wrote);
             if (w > 0)
                 tq_wakeup_all(&peer->rd_queue, 0, 0);
@@ -537,8 +637,6 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
 
             if (w > 0) {
                 wrote += w;
-                /* Take a real reference under peer->lock to avoid a
-                 * use-after-free if the peer is concurrently released. */
                 spin_lock(&peer->lock);
                 struct vfs_file *pf =
                     peer->file ? vfs_fdup(peer->file) : NULL;
@@ -548,6 +646,7 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
                     vfs_fput(pf);
                 }
             }
+            unix_sock_put(peer);
 
             if (wrote < chunk) {
                 /* Ring full, need to wait for peer to read */
@@ -594,6 +693,8 @@ static int unix_file_release(struct vfs_inode *inode, struct vfs_file *file)
     if (sk == NULL)
         return 0;
 
+    unix_sock_cancel_pending_connect(sk, ECONNRESET);
+
     spin_lock(&sk->lock);
 
     /*
@@ -612,10 +713,21 @@ static int unix_file_release(struct vfs_inode *inode, struct vfs_file *file)
     struct unix_pending *p = sk->pending_head;
     while (p != NULL) {
         struct unix_pending *next = p->next;
+        bool drop_target_ref = false;
+
         /* Wake the connecting socket so it gets ECONNREFUSED */
         spin_lock(&p->sock->lock);
+        if (p->sock->connect_target == sk) {
+            p->sock->connect_target = NULL;
+            drop_target_ref = true;
+        }
+        p->sock->so_error = ECONNREFUSED;
+        p->sock->state = UNIX_STATE_UNCONNECTED;
         tq_wakeup_all(&p->sock->conn_queue, -1, 0);
         spin_unlock(&p->sock->lock);
+        if (drop_target_ref)
+            unix_sock_put(sk);
+        unix_sock_put(p->sock);
         slab_free(p);
         p = next;
     }
@@ -717,6 +829,7 @@ static int unix_file_poll(struct vfs_file *file, short events)
     int state;
     int type;
     int shutdown_flags;
+    int so_error;
     size_t tx_writable = 0;
 
     spin_lock(&sk->lock);
@@ -732,6 +845,7 @@ static int unix_file_poll(struct vfs_file *file, short events)
     state = sk->state;
     type = sk->type;
     shutdown_flags = sk->shutdown_flags;
+    so_error = sk->so_error;
     peer = sk->peer;
     if (peer != NULL)
         unix_sock_get(peer);
@@ -747,23 +861,35 @@ static int unix_file_poll(struct vfs_file *file, short events)
                 spin_unlock(&peer->lock);
                 if (packet_ready)
                     revents |= (events & (POLLIN | POLLRDNORM));
-            } else if (RING_READABLE(&peer->tx) > 0) {
-                revents |= (events & (POLLIN | POLLRDNORM));
+            } else {
+                spin_lock(&peer->lock);
+                bool stream_ready = RING_READABLE(&peer->tx) > 0;
+                spin_unlock(&peer->lock);
+                if (stream_ready)
+                    revents |= (events & (POLLIN | POLLRDNORM));
             }
         }
-        else if (peer == NULL || (sk->shutdown_flags & UNIX_SHUT_RD))
-            revents |= (events & (POLLIN | POLLRDNORM)); /* EOF */
+        else if (peer == NULL || (sk->shutdown_flags & UNIX_SHUT_RD)) {
+            if (state != UNIX_STATE_CONNECTING)
+                revents |= (events & (POLLIN | POLLRDNORM)); /* EOF */
+        }
     }
 
     /* Check writability: space in our tx ring */
     if (events & (POLLOUT | POLLWRNORM)) {
-        if (peer == NULL)
+        if (state == UNIX_STATE_CONNECTING) {
+            if (peer != NULL)
+                revents |= (events & (POLLOUT | POLLWRNORM));
+        } else if (peer == NULL) {
             revents |= POLLERR;
-        else if (tx_writable >= UNIX_WRITE_LOWAT)
+        } else if (tx_writable >= UNIX_WRITE_LOWAT) {
             revents |= (events & (POLLOUT | POLLWRNORM));
+        }
     }
 
     /* Error/hangup conditions */
+    if (so_error)
+        revents |= POLLERR;
     if (peer == NULL && state == UNIX_STATE_CONNECTED)
         revents |= POLLHUP;
     if (shutdown_flags & UNIX_SHUT_WR)
@@ -787,10 +913,14 @@ static int unix_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case 0x541B: { /* FIONREAD */
         int count = 0;
         spin_lock(&sk->lock);
-        struct unix_sock *peer = sk->peer;
-        if (peer != NULL)
-            count = (int)RING_READABLE(&peer->tx);
+        struct unix_sock *peer = unix_sock_ref_peer_locked(sk);
         spin_unlock(&sk->lock);
+        if (peer != NULL) {
+            spin_lock(&peer->lock);
+            count = (int)RING_READABLE(&peer->tx);
+            spin_unlock(&peer->lock);
+            unix_sock_put(peer);
+        }
         if (vm_copyout(current->vm, (uint64)arg, &count, sizeof(count)) < 0)
             return -EFAULT;
         return 0;
@@ -973,13 +1103,26 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
     spin_unlock(&sk->lock);
     slab_free(pen);
 
+    bool drop_target_ref = false;
+    spin_lock(&client->lock);
+    if (client->connect_target == sk) {
+        client->connect_target = NULL;
+        drop_target_ref = true;
+    }
+    spin_unlock(&client->lock);
+    if (drop_target_ref)
+        unix_sock_put(sk);
+
     /* Create a new server-side socket to pair with the client */
     struct unix_sock *server = unix_sock_alloc();
     if (server == NULL) {
         /* Reject the connection */
         spin_lock(&client->lock);
+        client->so_error = ECONNREFUSED;
+        client->state = UNIX_STATE_UNCONNECTED;
         tq_wakeup_all(&client->conn_queue, -1, 0);
         spin_unlock(&client->lock);
+        unix_sock_put(client);
         return -ENOMEM;
     }
     server->type = sk->type;
@@ -987,8 +1130,11 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
     if (ring_alloc(&server->tx) < 0) {
         unix_sock_free(server);
         spin_lock(&client->lock);
+        client->so_error = ECONNREFUSED;
+        client->state = UNIX_STATE_UNCONNECTED;
         tq_wakeup_all(&client->conn_queue, -1, 0);
         spin_unlock(&client->lock);
+        unix_sock_put(client);
         return -ENOMEM;
     }
 
@@ -1001,8 +1147,11 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
     if (newfd < 0) {
         unix_sock_free(server);
         spin_lock(&client->lock);
+        client->so_error = ECONNREFUSED;
+        client->state = UNIX_STATE_UNCONNECTED;
         tq_wakeup_all(&client->conn_queue, -1, 0);
         spin_unlock(&client->lock);
+        unix_sock_put(client);
         return newfd;
     }
 
@@ -1024,8 +1173,16 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
     server->state = UNIX_STATE_CONNECTED;
     /* Wake the connecting client */
     tq_wakeup_all(&client->conn_queue, 0, 0);
+    struct vfs_file *client_file =
+        client->file ? vfs_fdup(client->file) : NULL;
     spin_unlock(&server->lock);
     spin_unlock(&client->lock);
+
+    if (client_file) {
+        vfs_file_knote_notify(client_file, EVFILT_WRITE, 0);
+        vfs_file_knote_notify(client_file, EVFILT_READ, 0);
+        vfs_fput(client_file);
+    }
 
     /* Copy peer address back if requested */
     if (uaddr != 0 && uaddrlen != 0) {
@@ -1040,6 +1197,7 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
         vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
     }
 
+    unix_sock_put(client);  /* drop pending-queue reference */
     return newfd;
 }
 
@@ -1071,6 +1229,10 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
         spin_unlock(&sk->lock);
         return -EISCONN;
     }
+    if (sk->state == UNIX_STATE_CONNECTING) {
+        spin_unlock(&sk->lock);
+        return -EALREADY;
+    }
     if (sk->state == UNIX_STATE_LISTENING) {
         spin_unlock(&sk->lock);
         return -EINVAL;
@@ -1085,10 +1247,12 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     spin_lock(&target->lock);
     if (target->state != UNIX_STATE_LISTENING) {
         spin_unlock(&target->lock);
+        unix_sock_put(target);
         return -ECONNREFUSED;
     }
     if (target->pending_count >= target->backlog) {
         spin_unlock(&target->lock);
+        unix_sock_put(target);
         return -EAGAIN;
     }
 
@@ -1096,10 +1260,23 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     struct unix_pending *pen = slab_alloc(&__unix_pending_cache);
     if (pen == NULL) {
         spin_unlock(&target->lock);
+        unix_sock_put(target);
         return -ENOMEM;
     }
+
+    spin_lock(&sk->lock);
+    sk->peer_pid = current->tgid;
+    sk->peer_uid = current->thread_group->uid;
+    sk->peer_gid = current->thread_group->gid;
+    sk->so_error = 0;
+    sk->state = UNIX_STATE_CONNECTING;
+    sk->connect_target = target;
+    unix_sock_get(target);
+    spin_unlock(&sk->lock);
+
     pen->sock = sk;
     pen->next = NULL;
+    unix_sock_get(sk);  /* pending queue owns this reference */
     if (target->pending_tail != NULL)
         target->pending_tail->next = pen;
     else
@@ -1116,6 +1293,7 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
         vfs_file_knote_notify(target_file, EVFILT_READ, 0);
         vfs_fput(target_file);
     }
+    unix_sock_put(target);
 
     /* Check if non-blocking */
     struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
@@ -1126,11 +1304,6 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     if (nonblock)
         return -EINPROGRESS;
 
-    /* Store connecting process credentials for SO_PEERCRED */
-    sk->peer_pid = current->tgid;
-    sk->peer_uid = current->thread_group->uid;
-    sk->peer_gid = current->thread_group->gid;
-
     /* Block until accepted or error */
     spin_lock(&sk->lock);
     while (sk->state != UNIX_STATE_CONNECTED) {
@@ -1138,14 +1311,22 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
                          THREAD_INTERRUPTIBLE);
         spin_unlock(&sk->lock);
 
-        if (signal_pending(current))
+        if (signal_pending(current)) {
+            spin_lock(&sk->lock);
+            bool connected = sk->state == UNIX_STATE_CONNECTED;
+            spin_unlock(&sk->lock);
+            if (connected)
+                return 0;
+            unix_sock_cancel_pending_connect(sk, ECONNRESET);
             return -EINTR;
+        }
 
         spin_lock(&sk->lock);
-        /* If we were rejected (peer is still NULL and state not connected) */
-        if (sk->peer == NULL && sk->state != UNIX_STATE_CONNECTED) {
+        if (sk->so_error != 0) {
+            int err = sk->so_error;
+            sk->so_error = 0;
             spin_unlock(&sk->lock);
-            return -ECONNREFUSED;
+            return -err;
         }
     }
     spin_unlock(&sk->lock);
@@ -1169,7 +1350,7 @@ int unix_sock_shutdown(int fd, int how)
     if (how == 1 || how == 2) /* SHUT_WR or SHUT_RDWR */
         sk->shutdown_flags |= UNIX_SHUT_WR;
 
-    struct unix_sock *peer = sk->peer;
+    struct unix_sock *peer = unix_sock_ref_peer_locked(sk);
     spin_unlock(&sk->lock);
 
     if (peer != NULL) {
@@ -1190,6 +1371,8 @@ int unix_sock_shutdown(int fd, int how)
     tq_wakeup_all(&sk->rd_queue, 0, 0);
     tq_wakeup_all(&sk->wr_queue, 0, 0);
     spin_unlock(&sk->lock);
+    if (peer != NULL)
+        unix_sock_put(peer);
 
     return 0;
 }
@@ -1360,9 +1543,27 @@ int unix_sock_getsockopt(int fd, int level, int optname, uint64 optval,
             val = sk->type;
             break;
         }
-        case 4: /* SO_ERROR */
-            val = 0;
+        case 4: { /* SO_ERROR */
+            struct unix_sock *sk = unix_sock_from_fd(fd);
+            if (sk == NULL)
+                return -EBADF;
+            spin_lock(&sk->lock);
+            if (sk->so_error != 0) {
+                val = sk->so_error;
+                sk->so_error = 0;
+            } else if (sk->state == UNIX_STATE_CONNECTING) {
+                val = EINPROGRESS;
+            } else if (unix_sock_connection_oriented(sk) &&
+                       sk->state != UNIX_STATE_CONNECTED &&
+                       sk->state != UNIX_STATE_BOUND &&
+                       sk->state != UNIX_STATE_UNCONNECTED) {
+                val = ENOTCONN;
+            } else {
+                val = 0;
+            }
+            spin_unlock(&sk->lock);
             break;
+        }
         case 2:  /* SO_REUSEADDR */
         case 5:  /* SO_DONTROUTE */
         case 6:  /* SO_BROADCAST */
@@ -1375,7 +1576,7 @@ int unix_sock_getsockopt(int fd, int level, int optname, uint64 optval,
             break;
         case 7:  /* SO_SNDBUF */
         case 8:  /* SO_RCVBUF */
-            val = UNIX_BUF_SIZE;
+            val = UNIX_BUF_MAX_SIZE;
             break;
         case 18: /* SO_RCVLOWAT */
         case 19: /* SO_SNDLOWAT */

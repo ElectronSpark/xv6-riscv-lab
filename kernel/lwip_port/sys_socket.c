@@ -1380,12 +1380,12 @@ static size_t unix_ring_peek(const struct unix_ring *r, uint start_off,
 
     avail -= start_off;
     size_t toread = len < avail ? len : avail;
-    uint idx = (r->nread + start_off) % UNIX_BUF_SIZE;
+    uint idx = (r->nread + start_off) % r->capacity;
 
-    if (idx + toread <= UNIX_BUF_SIZE) {
+    if (idx + toread <= r->capacity) {
         memmove(buf, &r->data[idx], toread);
     } else {
-        size_t first = UNIX_BUF_SIZE - idx;
+        size_t first = r->capacity - idx;
         memmove(buf, &r->data[idx], first);
         memmove(buf + first, &r->data[0], toread - first);
     }
@@ -2549,9 +2549,11 @@ struct k_msghdr {
     uint32 msg_namelen;     /* socklen_t               */
     uint32 __pad0;
     uint64 msg_iov;         /* struct iovec *msg_iov   */
-    uint64 msg_iovlen;      /* size_t                  */
+    int    msg_iovlen;      /* int                     */
+    int    __pad1;
     uint64 msg_control;     /* void *msg_control       */
-    uint64 msg_controllen;  /* size_t                  */
+    uint32 msg_controllen;  /* socklen_t               */
+    uint32 __pad2;
     int    msg_flags;       /* int                     */
 };
 
@@ -2562,7 +2564,8 @@ struct k_iovec {
 
 /* Kernel-space cmsghdr — must match LP64 POSIX layout (musl) */
 struct k_cmsghdr {
-    uint64 cmsg_len;        /* data byte count incl. header */
+    uint32 cmsg_len;        /* data byte count incl. header */
+    uint32 __pad1;
     int    cmsg_level;
     int    cmsg_type;
     /* followed by cmsg data */
@@ -2662,16 +2665,16 @@ static size_t unix_ring_write_locked(struct unix_ring *r, const char *buf,
                                      size_t len)
 {
     size_t readable = r->nwrite - r->nread;
-    size_t avail = UNIX_BUF_SIZE - readable;
+    size_t avail = r->capacity - readable;
     size_t towrite = len < avail ? len : avail;
-    uint idx = r->nwrite % UNIX_BUF_SIZE;
+    uint idx = r->nwrite % r->capacity;
 
     if (towrite == 0)
         return 0;
-    if (idx + towrite <= UNIX_BUF_SIZE) {
+    if (idx + towrite <= r->capacity) {
         memmove(&r->data[idx], buf, towrite);
     } else {
-        size_t first = UNIX_BUF_SIZE - idx;
+        size_t first = r->capacity - idx;
         memmove(&r->data[idx], buf, first);
         memmove(&r->data[0], buf + first, towrite - first);
     }
@@ -2683,19 +2686,107 @@ static size_t unix_ring_read_locked(struct unix_ring *r, char *buf, size_t len)
 {
     size_t readable = r->nwrite - r->nread;
     size_t toread = len < readable ? len : readable;
-    uint idx = r->nread % UNIX_BUF_SIZE;
+    uint idx = r->nread % r->capacity;
 
     if (toread == 0)
         return 0;
-    if (idx + toread <= UNIX_BUF_SIZE) {
+    if (idx + toread <= r->capacity) {
         memmove(buf, &r->data[idx], toread);
     } else {
-        size_t first = UNIX_BUF_SIZE - idx;
+        size_t first = r->capacity - idx;
         memmove(buf, &r->data[idx], first);
         memmove(buf + first, &r->data[0], toread - first);
     }
     smp_store_release(&r->nread, r->nread + toread);
     return toread;
+}
+
+static int unix_ring_capacity_for(size_t needed, size_t *capacity)
+{
+    if (needed > UNIX_BUF_MAX_SIZE)
+        return -EMSGSIZE;
+
+    size_t new_capacity = UNIX_BUF_DEFAULT_SIZE;
+    while (new_capacity < needed) {
+        if (new_capacity > UNIX_BUF_MAX_SIZE / 2) {
+            new_capacity = UNIX_BUF_MAX_SIZE;
+            break;
+        }
+        new_capacity *= 2;
+    }
+    if (new_capacity < needed)
+        return -EMSGSIZE;
+
+    *capacity = new_capacity;
+    return 0;
+}
+
+static void unix_rebase_stream_marks_locked(struct unix_sock *sk,
+                                            uint old_nread)
+{
+    int idx;
+
+    for (idx = sk->scm_head; idx != sk->scm_tail;
+         idx = (idx + 1) % UNIX_SCM_QUEUE_MAX) {
+        uint mark = sk->scm_queue[idx].mark_nread;
+        sk->scm_queue[idx].mark_nread =
+            (uint)((int)(mark - old_nread) < 0 ? 0 : mark - old_nread);
+    }
+
+    for (idx = sk->packet_head; idx != sk->packet_tail;
+         idx = (idx + 1) % UNIX_PACKET_QUEUE_MAX) {
+        uint mark = sk->packet_queue[idx];
+        sk->packet_queue[idx] =
+            (uint)((int)(mark - old_nread) < 0 ? 0 : mark - old_nread);
+    }
+}
+
+static char *unix_ring_install_storage_locked(struct unix_sock *sk,
+                                              char *new_data,
+                                              size_t new_capacity)
+{
+    struct unix_ring *r = &sk->tx;
+
+    if (new_capacity <= r->capacity)
+        return new_data;
+
+    char *old_data = r->data;
+    size_t old_capacity = r->capacity;
+    uint old_nread = r->nread;
+    size_t readable = r->nwrite - r->nread;
+    size_t copied = 0;
+
+    while (copied < readable) {
+        uint idx = (r->nread + copied) % old_capacity;
+        size_t chunk = old_capacity - idx;
+        if (chunk > readable - copied)
+            chunk = readable - copied;
+        memmove(new_data + copied, old_data + idx, chunk);
+        copied += chunk;
+    }
+
+    r->data = new_data;
+    r->capacity = new_capacity;
+    r->nread = 0;
+    r->nwrite = (uint)readable;
+    unix_rebase_stream_marks_locked(sk, old_nread);
+    return old_data;
+}
+
+static int unix_sendmsg_growth_needed_locked(struct unix_sock *sk, size_t len,
+                                             size_t *capacity)
+{
+    if (len > UNIX_BUF_MAX_SIZE)
+        return -EMSGSIZE;
+
+    size_t readable = sk->tx.nwrite - sk->tx.nread;
+    if (readable > UNIX_BUF_MAX_SIZE || len > UNIX_BUF_MAX_SIZE - readable)
+        return -EMSGSIZE;
+
+    size_t needed = readable + len;
+    if (needed <= sk->tx.capacity)
+        return 0;
+    return unix_ring_capacity_for(needed, capacity);
 }
 
 static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
@@ -2709,11 +2800,8 @@ static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
         return -ENOTCONN;
     if (sk->peer == NULL)
         return -EPIPE;
-    if (len > UNIX_BUF_SIZE)
-        return -EMSGSIZE;
-
     size_t readable = sk->tx.nwrite - sk->tx.nread;
-    size_t writable = UNIX_BUF_SIZE - readable;
+    size_t writable = sk->tx.capacity - readable;
     if (writable < len)
         return -EAGAIN;
 
@@ -2773,7 +2861,7 @@ uint64 sys_sendmsg(void)
 
         if (mh.msg_iovlen == 0)
             return 0;
-        if (mh.msg_iovlen > SENDMSG_MAX_IOV)
+        if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
             return (uint64)-EMSGSIZE;
 
         struct k_iovec iovs[SENDMSG_MAX_IOV];
@@ -2785,7 +2873,7 @@ uint64 sys_sendmsg(void)
         for (uint64 i = 0; i < mh.msg_iovlen; i++)
             total_len += iovs[i].iov_len;
 
-        if (total_len > UNIX_BUF_SIZE)
+        if (total_len > UNIX_BUF_MAX_SIZE)
             return (uint64)-EMSGSIZE;
 
         char *msg_buf = kvmalloc(total_len ? total_len : 1);
@@ -2857,8 +2945,42 @@ uint64 sys_sendmsg(void)
         int ret;
         int nonblock = sock_is_nonblock(fd, flags);
         struct vfs_file *notify_file = NULL;
+        char *grow_data = NULL;
+        size_t grow_capacity = 0;
         for (;;) {
             spin_lock(&sk->lock);
+            char *old_data = NULL;
+            if (grow_data != NULL) {
+                old_data = unix_ring_install_storage_locked(sk,
+                                                            grow_data,
+                                                            grow_capacity);
+                grow_data = NULL;
+                grow_capacity = 0;
+            }
+            size_t needed_capacity = 0;
+            ret = unix_sendmsg_growth_needed_locked(sk, total_len,
+                                                    &needed_capacity);
+            if (old_data != NULL) {
+                spin_unlock(&sk->lock);
+                kvfree(old_data);
+                continue;
+            }
+            if (ret < 0) {
+                spin_unlock(&sk->lock);
+                break;
+            }
+
+            if (needed_capacity != 0) {
+                spin_unlock(&sk->lock);
+                grow_data = kvmalloc(needed_capacity);
+                if (grow_data == NULL) {
+                    ret = -ENOMEM;
+                    break;
+                }
+                grow_capacity = needed_capacity;
+                continue;
+            }
+
             ret = unix_sendmsg_atomic_locked(sk, msg_buf, total_len,
                                              scm_files, scm_count);
             if (ret == 0 && sk->peer != NULL) {
@@ -2866,7 +2988,7 @@ uint64 sys_sendmsg(void)
                 if (sk->peer->file != NULL)
                     notify_file = vfs_fdup(sk->peer->file);
             }
-            if (ret != -EAGAIN || nonblock) {
+            if (ret == 0 || ret != -EAGAIN || nonblock) {
                 spin_unlock(&sk->lock);
                 break;
             }
@@ -2885,6 +3007,8 @@ uint64 sys_sendmsg(void)
             }
         }
 
+        if (grow_data != NULL)
+            kvfree(grow_data);
         kvfree(msg_buf);
         if (ret < 0) {
             for (size_t i = 0; i < scm_count; i++)
@@ -2919,7 +3043,7 @@ uint64 sys_sendmsg(void)
 
     if (mh.msg_iovlen == 0)
         return 0;
-    if (mh.msg_iovlen > SENDMSG_MAX_IOV)
+    if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
         return (uint64)-EMSGSIZE;
 
     /* Copy iovec array from user space */
@@ -3048,7 +3172,7 @@ uint64 sys_recvmsg(void)
 
         if (mh.msg_iovlen == 0)
             return 0;
-        if (mh.msg_iovlen > SENDMSG_MAX_IOV)
+        if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
             return (uint64)-EINVAL;
 
         struct k_iovec iovs[SENDMSG_MAX_IOV];
@@ -3073,33 +3197,49 @@ uint64 sys_recvmsg(void)
             size_t packet_len = 0;
 
             for (;;) {
+                bool read_shutdown;
+                bool peer_write_shutdown = false;
+                int pkt_ret = -EAGAIN;
+
                 spin_lock(&sk->lock);
                 peer = sk->peer;
-                bool eof = (peer == NULL)
-                    || (sk->shutdown_flags & UNIX_SHUT_RD)
-                    || (peer != NULL && (peer->shutdown_flags & UNIX_SHUT_WR));
+                unix_sock_get_ref(peer);
+                read_shutdown = (sk->shutdown_flags & UNIX_SHUT_RD) != 0;
                 spin_unlock(&sk->lock);
 
-                if (peer == NULL || eof)
+                if (peer == NULL) {
+                    unix_sock_put_ref(peer);
                     goto unix_recvmsg_done;
+                }
 
                 spin_lock(&peer->lock);
-                int pkt_ret = unix_packet_next_len_locked(peer, &packet_len);
+                pkt_ret = unix_packet_next_len_locked(peer, &packet_len);
+                peer_write_shutdown =
+                    (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
                 spin_unlock(&peer->lock);
                 if (pkt_ret == 0)
                     break;
 
+                if (read_shutdown || peer_write_shutdown) {
+                    unix_sock_put_ref(peer);
+                    goto unix_recvmsg_done;
+                }
+
                 if (saved_fflags & O_NONBLOCK) {
+                    unix_sock_put_ref(peer);
                     f->f_flags = saved_fflags;
                     vfs_fput(f);
                     return (uint64)-EAGAIN;
                 }
                 if (signal_pending(current)) {
+                    unix_sock_put_ref(peer);
                     f->f_flags = saved_fflags;
                     vfs_fput(f);
                     return (uint64)-EINTR;
                 }
 
+                unix_sock_put_ref(peer);
+                peer = NULL;
                 spin_lock(&sk->lock);
                 tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
                                  THREAD_INTERRUPTIBLE);
@@ -3116,8 +3256,11 @@ uint64 sys_recvmsg(void)
             for (uint64 i = 0; i < mh.msg_iovlen; i++)
                 capacity += iovs[i].iov_len;
             size_t to_copy = packet_len < capacity ? packet_len : capacity;
-            if (packet_len > capacity)
+            if (packet_len > capacity) {
                 unix_out_flags |= MSG_TRUNC;
+                printf("unix_recvmsg: seqpacket trunc pid=%d fd=%d packet=%lu capacity=%lu\n",
+                       current->pid, fd, packet_len, capacity);
+            }
 
             char tmp[128];
             size_t copied_packet = 0;
@@ -3140,12 +3283,18 @@ uint64 sys_recvmsg(void)
                         got = unix_ring_read_locked(&peer->tx, tmp, want);
                     spin_unlock(&peer->lock);
 
-                    if (got == 0)
+                    if (got == 0) {
+                        printf("unix_recvmsg: seqpacket short pid=%d fd=%d packet=%lu copied=%lu want=%lu\n",
+                               current->pid, fd, packet_len, copied_packet,
+                               to_copy);
+                        unix_sock_put_ref(peer);
                         goto unix_recvmsg_done;
+                    }
 
                     if (vm_copyout(current->vm,
                                    iovs[i].iov_base + copied_iov,
                                    tmp, got) < 0) {
+                        unix_sock_put_ref(peer);
                         f->f_flags = saved_fflags;
                         vfs_fput(f);
                         return total > 0 ? (uint64)total : (uint64)-EFAULT;
@@ -3167,6 +3316,7 @@ uint64 sys_recvmsg(void)
                 tq_wakeup_all(&peer->wr_queue, 0, 0);
                 spin_unlock(&peer->lock);
             }
+            unix_sock_put_ref(peer);
         } else if (flags & MSG_PEEK) {
             if (sk->state != UNIX_STATE_CONNECTED && sk->type == SOCK_STREAM) {
                 f->f_flags = saved_fflags;
@@ -3190,6 +3340,7 @@ uint64 sys_recvmsg(void)
 
                     spin_lock(&sk->lock);
                     peer = sk->peer;
+                    unix_sock_get_ref(peer);
                     spin_unlock(&sk->lock);
 
                     size_t got = 0;
@@ -3200,28 +3351,38 @@ uint64 sys_recvmsg(void)
                     }
 
                     if (got == 0) {
-                        if (total > 0)
+                        if (total > 0) {
+                            unix_sock_put_ref(peer);
                             goto unix_recvmsg_done;
+                        }
 
+                        unix_sock_put_ref(peer);
+                        peer = NULL;
                         spin_lock(&sk->lock);
                         peer = sk->peer;
+                        unix_sock_get_ref(peer);
                         bool eof = (peer == NULL)
                             || (sk->shutdown_flags & UNIX_SHUT_RD)
                             || (peer != NULL && (peer->shutdown_flags & UNIX_SHUT_WR));
                         spin_unlock(&sk->lock);
 
-                        if (eof)
+                        if (eof) {
+                            unix_sock_put_ref(peer);
                             goto unix_recvmsg_done;
+                        }
                         if (saved_fflags & O_NONBLOCK) {
+                            unix_sock_put_ref(peer);
                             f->f_flags = saved_fflags;
                             vfs_fput(f);
                             return (uint64)-EAGAIN;
                         }
                         if (signal_pending(current)) {
+                            unix_sock_put_ref(peer);
                             f->f_flags = saved_fflags;
                             vfs_fput(f);
                             return (uint64)-EINTR;
                         }
+                        unix_sock_put_ref(peer);
 
                         spin_lock(&sk->lock);
                         tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
@@ -3239,6 +3400,7 @@ uint64 sys_recvmsg(void)
                     if (vm_copyout(current->vm,
                                    iovs[i].iov_base + copied,
                                    tmp, got) < 0) {
+                        unix_sock_put_ref(peer);
                         f->f_flags = saved_fflags;
                         vfs_fput(f);
                         return total > 0 ? (uint64)total : (uint64)-EFAULT;
@@ -3247,6 +3409,7 @@ uint64 sys_recvmsg(void)
                     copied += got;
                     peek_off += got;
                     total += got;
+                    unix_sock_put_ref(peer);
 
                     if (got < want)
                         break;
@@ -3277,7 +3440,7 @@ unix_recvmsg_done:
         if (mh.msg_control != 0 &&
             mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
             if (flags & MSG_PEEK) {
-                uint64 zero = 0;
+                uint32 zero = 0;
                 vm_copyout(current->vm,
                            umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
                            &zero, sizeof(zero));
@@ -3285,6 +3448,7 @@ unix_recvmsg_done:
             struct unix_sock *peer = NULL;
             spin_lock(&sk->lock);
             peer = sk->peer;
+            unix_sock_get_ref(peer);
             spin_unlock(&sk->lock);
 
             size_t max_fds = (mh.msg_controllen >= K_CMSG_SPACE(0))
@@ -3295,6 +3459,7 @@ unix_recvmsg_done:
             struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
             memset(scm_files, 0, sizeof(scm_files));
             size_t scm_count = unix_dequeue_scm_rights(peer, scm_files, max_fds);
+            unix_sock_put_ref(peer);
 
             if (scm_count > 0) {
                 int newfds[UNIX_SCM_QUEUE_MAX];
@@ -3329,19 +3494,19 @@ unix_recvmsg_done:
                     size_t clen = K_CMSG_SPACE(sizeof(int) * installed);
                     vm_copyout(current->vm, mh.msg_control, cmsg_buf, clen);
 
-                    uint64 uclen = clen;
+                    uint32 uclen = (uint32)clen;
                     vm_copyout(current->vm,
                                umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
                                &uclen, sizeof(uclen));
                 } else {
-                    uint64 zero = 0;
+                    uint32 zero = 0;
                     vm_copyout(current->vm,
                                umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
                                &zero, sizeof(zero));
                 }
             } else {
                 /* No pending fd — set msg_controllen = 0 */
-                uint64 zero = 0;
+                uint32 zero = 0;
                 vm_copyout(current->vm,
                            umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
                            &zero, sizeof(zero));
@@ -3375,7 +3540,7 @@ unix_recvmsg_done:
 
     if (mh.msg_iovlen == 0)
         return 0;
-    if (mh.msg_iovlen > SENDMSG_MAX_IOV)
+    if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
         return (uint64)-EINVAL;
 
     /* Copy iovec array */
@@ -3552,7 +3717,7 @@ unix_recvmsg_done:
                 &out_flags, sizeof(out_flags));
 
     /* Clear msg_controllen (no ancillary data support) */
-    uint64 zero = 0;
+    uint32 zero = 0;
     vm_copyout(current->vm,
                 umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
                 &zero, sizeof(zero));
@@ -3645,7 +3810,8 @@ uint64 sys_sendmmsg(void)
         if (vm_copyin(current->vm, &mh, entry_addr, sizeof(mh)) < 0)
             return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
 
-        if (mh.msg_iovlen == 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
+        if (mh.msg_iovlen == 0 || mh.msg_iovlen < 0 ||
+            mh.msg_iovlen > SENDMSG_MAX_IOV)
             return sent > 0 ? (uint64)sent : (uint64)-EINVAL;
 
         struct k_iovec iovs[SENDMSG_MAX_IOV];
@@ -3675,7 +3841,7 @@ uint64 sys_sendmmsg(void)
             if (usk == NULL)
                 return sent > 0 ? (uint64)sent : (uint64)-EBADF;
 
-            if (total > UNIX_BUF_SIZE)
+            if (total > UNIX_BUF_MAX_SIZE)
                 return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
 
             struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
@@ -3848,7 +4014,8 @@ uint64 sys_recvmmsg(void)
         if (vm_copyin(current->vm, &mh, entry_addr, sizeof(mh)) < 0)
             return received > 0 ? (uint64)received : (uint64)-EFAULT;
 
-        if (mh.msg_iovlen == 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
+        if (mh.msg_iovlen == 0 || mh.msg_iovlen < 0 ||
+            mh.msg_iovlen > SENDMSG_MAX_IOV)
             return received > 0 ? (uint64)received : (uint64)-EINVAL;
 
         struct k_iovec iovs[SENDMSG_MAX_IOV];
@@ -3940,7 +4107,7 @@ uint64 sys_recvmmsg(void)
                         memmove(K_CMSG_DATA(cmsg), newfds,
                                 sizeof(int) * installed);
 
-                        uint64 clen = K_CMSG_SPACE(sizeof(int) * installed);
+                        uint32 clen = (uint32)K_CMSG_SPACE(sizeof(int) * installed);
                         vm_copyout(current->vm, mh.msg_control,
                                    cmsg_buf, clen);
                         vm_copyout(current->vm,
@@ -3948,14 +4115,14 @@ uint64 sys_recvmmsg(void)
                                                                    msg_controllen),
                                    &clen, sizeof(clen));
                     } else {
-                        uint64 zero = 0;
+                        uint32 zero = 0;
                         vm_copyout(current->vm,
                                    entry_addr + __builtin_offsetof(struct k_msghdr,
                                                                    msg_controllen),
                                    &zero, sizeof(zero));
                     }
                 } else {
-                    uint64 zero = 0;
+                    uint32 zero = 0;
                     vm_copyout(current->vm,
                                entry_addr + __builtin_offsetof(struct k_msghdr,
                                                                msg_controllen),

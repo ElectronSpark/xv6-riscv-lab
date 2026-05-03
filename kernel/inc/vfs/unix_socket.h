@@ -35,7 +35,9 @@ struct vfs_file_ops;
 #ifndef SOCK_SEQPACKET
 #define SOCK_SEQPACKET 5
 #endif
-#define UNIX_BUF_SIZE (64 * PAGE_SIZE)  /* ring buffer size per direction */
+#define UNIX_BUF_DEFAULT_SIZE (64 * PAGE_SIZE)        /* initial ring size */
+#define UNIX_BUF_MAX_SIZE     (16 * 1024 * 1024)      /* maximum growable ring */
+#define UNIX_BUF_SIZE         UNIX_BUF_DEFAULT_SIZE   /* compatibility alias */
 
 /* Maximum number of pending connections for a listening socket */
 #define UNIX_BACKLOG_MAX 128
@@ -46,6 +48,7 @@ struct vfs_file_ops;
 #define UNIX_STATE_LISTENING    2
 #define UNIX_STATE_CONNECTED    3
 #define UNIX_STATE_SHUTDOWN     4
+#define UNIX_STATE_CONNECTING   5
 
 /* Shutdown flags */
 #define UNIX_SHUT_RD   1
@@ -69,7 +72,8 @@ struct sockaddr_un {
  * Uses the same nread/nwrite wrap-around scheme as kernel pipes.
  */
 struct unix_ring {
-    char  *data;            /* UNIX_BUF_SIZE buffer */
+    char  *data;            /* growable byte ring */
+    size_t capacity;        /* allocated bytes in data */
     uint   nread;           /* bytes read (monotonic) */
     uint   nwrite;          /* bytes written (monotonic) */
 };
@@ -97,6 +101,7 @@ struct unix_sock {
     int        type;            /* SOCK_STREAM, SOCK_SEQPACKET, or SOCK_DGRAM */
     int        protocol;        /* always 0 for AF_UNIX */
     int        shutdown_flags;  /* UNIX_SHUT_RD | UNIX_SHUT_WR */
+    int        so_error;        /* pending async socket error for SO_ERROR */
 
     /* Bind address */
     char       bind_path[UNIX_PATH_MAX];
@@ -104,6 +109,7 @@ struct unix_sock {
 
     /* Connected peer (SOCK_STREAM) */
     struct unix_sock *peer;
+    struct unix_sock *connect_target;
 
     /* Peer credentials (set during connect, read via SO_PEERCRED) */
     int  peer_pid;
@@ -180,6 +186,8 @@ int  unix_sock_is_unix(struct vfs_file *f);
 
 /* Get unix_sock from fd (returns NULL if not a unix socket) */
 struct unix_sock *unix_sock_from_fd(int fd);
+void unix_sock_get_ref(struct unix_sock *sk);
+void unix_sock_put_ref(struct unix_sock *sk);
 
 /* Extern file_ops for AF_UNIX sockets */
 extern struct vfs_file_ops unix_socket_file_ops;

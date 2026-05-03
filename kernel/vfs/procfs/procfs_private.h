@@ -7,8 +7,11 @@
  *     self                 → symlink  → /proc/<current-tgid>
  *     meminfo              → regular file
  *     cpuinfo              → regular file
+ *     zoneinfo             → regular file
  *     <tgid>/
  *       status             → regular file
+ *       statm              → regular file
+ *       cgroup             → regular file
  *       maps               → regular file
  *       exe                → symlink  → executable path
  *       fd/
@@ -20,11 +23,14 @@
  *   2                             /proc/self
  *   3                             /proc/meminfo
  *   4                             /proc/cpuinfo
+ *   7                             /proc/zoneinfo
  *   PROCFS_PID_BASE + tgid*10 + 0  /proc/<tgid>/   (directory)
  *   PROCFS_PID_BASE + tgid*10 + 1  /proc/<tgid>/status
  *   PROCFS_PID_BASE + tgid*10 + 2  /proc/<tgid>/maps
  *   PROCFS_PID_BASE + tgid*10 + 3  /proc/<tgid>/exe
  *   PROCFS_PID_BASE + tgid*10 + 4  /proc/<tgid>/fd/
+ *   PROCFS_PID_BASE + tgid*10 + 6  /proc/<tgid>/statm
+ *   PROCFS_PID_BASE + tgid*10 + 7  /proc/<tgid>/cgroup
  *   PROCFS_FD_BASE  + tgid*1000 + fd  /proc/<tgid>/fd/<fd>
  */
 
@@ -46,9 +52,12 @@ enum procfs_entry_type {
     PROC_SELF,        /* /proc/self           */
     PROC_MEMINFO,     /* /proc/meminfo        */
     PROC_CPUINFO,     /* /proc/cpuinfo        */
+    PROC_ZONEINFO,    /* /proc/zoneinfo       */
     PROC_PID_DIR,     /* /proc/<tgid>/        */
     PROC_STATUS,      /* /proc/<tgid>/status  */
     PROC_MAPS,        /* /proc/<tgid>/maps    */
+    PROC_STATM,       /* /proc/<tgid>/statm   */
+    PROC_CGROUP,      /* /proc/<tgid>/cgroup  */
     PROC_EXE,         /* /proc/<tgid>/exe     */
     PROC_FDDIR,       /* /proc/<tgid>/fd/     */
     PROC_FD_ENTRY,    /* /proc/<tgid>/fd/<n>  */
@@ -66,6 +75,7 @@ enum procfs_entry_type {
 #define PROCFS_INO_CPUINFO 4ULL
 #define PROCFS_INO_CRASHES 5ULL
 #define PROCFS_INO_CMDLINE 6ULL
+#define PROCFS_INO_ZONEINFO 7ULL
 
 /* Each pid occupies 10 slots; max pid in xv6 fits well within 64-bit */
 #define PROCFS_PID_BASE    100ULL
@@ -77,6 +87,8 @@ enum procfs_entry_type {
 #define PROCFS_PID_EXE_INO(tgid)    (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 3)
 #define PROCFS_PID_FDDIR_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 4)
 #define PROCFS_PID_RESOURCES_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 5)
+#define PROCFS_PID_STATM_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 6)
+#define PROCFS_PID_CGROUP_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 7)
 #define PROCFS_FD_INO(tgid, fd)     (PROCFS_FD_BASE + (uint64)(tgid)*1000ULL + (uint64)(fd))
 
 /* ------------------------------------------------------------------ */
