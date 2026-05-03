@@ -33,19 +33,20 @@
  *
  * PBUF_POOL_SIZE and MEMP_NUM_PBUF must be large enough to cover:
  *   - pbufs held in TCP recv buffers (TCP_WND/MSS per connection)
- *   - pbufs in-flight from ISR to tcpip thread (MEMP_NUM_TCPIP_MSG_INPKT)
+ *   - pbufs in-flight from ISR to tcpip thread (MEMP_NUM_TCPIP_MSG_INPKT),
+ *     including several concurrent browser TCP streams with 128-MSS windows
  *   - pbufs for ARP, ICMP, UDP, etc.
  * If pbufs exhaust, ALL networking dies — even ping and ARP stop working.
  */
-#define MEMP_NUM_PBUF                   512
+#define MEMP_NUM_PBUF                   1024
 #define MEMP_NUM_UDP_PCB                16
 #define MEMP_NUM_TCP_PCB                128
 #define MEMP_NUM_TCP_PCB_LISTEN         16
-#define MEMP_NUM_TCP_SEG                2048
+#define MEMP_NUM_TCP_SEG                4096
 #define MEMP_NUM_NETBUF                 32
 #define MEMP_NUM_NETCONN                256
 #define MEMP_NUM_TCPIP_MSG_API          64
-#define MEMP_NUM_TCPIP_MSG_INPKT        128
+#define MEMP_NUM_TCPIP_MSG_INPKT        1024
 #define MEMP_NUM_ARP_QUEUE              32
 #define MEMP_NUM_SYS_TIMEOUT            32
 
@@ -215,7 +216,7 @@
 #define DEFAULT_ACCEPTMBOX_SIZE         8
 #define DEFAULT_RAW_RECVMBOX_SIZE       8
 #define DEFAULT_UDP_RECVMBOX_SIZE       8
-#define DEFAULT_TCP_RECVMBOX_SIZE       32
+#define DEFAULT_TCP_RECVMBOX_SIZE       256
 
 /* --------------------------------------------------------------------------
  * Misc

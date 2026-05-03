@@ -61,6 +61,7 @@ typedef struct sys_mbox {
     int head;
     int tail;
     int count;
+    int max;
     int valid;
 } sys_mbox_t;
 

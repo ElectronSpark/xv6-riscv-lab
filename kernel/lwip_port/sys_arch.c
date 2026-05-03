@@ -471,15 +471,20 @@ void sys_mutex_free(sys_mutex_t *mutex)
 
 err_t sys_mbox_new(sys_mbox_t *mbox, int size)
 {
-    (void)size; /* We use a fixed-size circular buffer */
     if (mbox == NULL)
         return ERR_ARG;
+
+    int max = size;
+    if (max <= 0 || max > SYS_MBOX_SIZE)
+        max = SYS_MBOX_SIZE;
+
     spin_init(&mbox->lock, "lwip_mbox");
     sem_init(&mbox->not_empty, "lwip_mbox_rd", 0);
-    sem_init(&mbox->not_full,  "lwip_mbox_wr", SYS_MBOX_SIZE);
+    sem_init(&mbox->not_full,  "lwip_mbox_wr", max);
     mbox->head = 0;
     mbox->tail = 0;
     mbox->count = 0;
+    mbox->max = max;
     mbox->valid = 1;
     return ERR_OK;
 }
