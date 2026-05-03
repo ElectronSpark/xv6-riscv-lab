@@ -3282,60 +3282,58 @@ uint64 sys_recvmsg(void)
                        current->pid, fd, packet_len, capacity);
             }
 
-            char tmp[128];
-            size_t copied_packet = 0;
-            for (uint64 i = 0; i < mh.msg_iovlen && copied_packet < to_copy; i++) {
-                size_t copied_iov = 0;
-                while (copied_iov < iovs[i].iov_len &&
-                       copied_packet < to_copy) {
-                    size_t want = iovs[i].iov_len - copied_iov;
-                    if (want > to_copy - copied_packet)
-                        want = to_copy - copied_packet;
-                    if (want > sizeof(tmp))
-                        want = sizeof(tmp);
-
-                    spin_lock(&peer->lock);
-                    size_t got;
-                    if (flags & MSG_PEEK)
-                        got = unix_ring_peek(&peer->tx, copied_packet,
-                                             tmp, want);
-                    else
-                        got = unix_ring_read_locked(&peer->tx, tmp, want);
-                    spin_unlock(&peer->lock);
-
-                    if (got == 0) {
-                        printf("unix_recvmsg: seqpacket short pid=%d fd=%d packet=%lu copied=%lu want=%lu\n",
-                               current->pid, fd, packet_len, copied_packet,
-                               to_copy);
-                        unix_sock_put_ref(peer);
-                        goto unix_recvmsg_done;
-                    }
-
-                    if (vm_copyout(current->vm,
-                                   iovs[i].iov_base + copied_iov,
-                                   tmp, got) < 0) {
-                        unix_sock_put_ref(peer);
-                        f->f_flags = saved_fflags;
-                        vfs_fput(f);
-                        return total > 0 ? (uint64)total : (uint64)-EFAULT;
-                    }
-
-                    copied_iov += got;
-                    copied_packet += got;
-                    total += got;
-                }
+            char *packet_buf = kvmalloc(to_copy ? to_copy : 1);
+            if (packet_buf == NULL) {
+                unix_sock_put_ref(peer);
+                f->f_flags = saved_fflags;
+                vfs_fput(f);
+                return (uint64)-ENOMEM;
             }
 
-            if (!(flags & MSG_PEEK)) {
-                spin_lock(&peer->lock);
+            size_t copied_packet = 0;
+            spin_lock(&peer->lock);
+            if (flags & MSG_PEEK) {
+                copied_packet = unix_ring_peek(&peer->tx, 0, packet_buf,
+                                               to_copy);
+            } else {
+                copied_packet = unix_ring_read_locked(&peer->tx, packet_buf,
+                                                      to_copy);
                 if (packet_len > copied_packet) {
                     uint mark = peer->packet_queue[peer->packet_head];
                     smp_store_release(&peer->tx.nread, mark);
                 }
                 unix_packet_pop_locked(peer);
                 tq_wakeup_all(&peer->wr_queue, 0, 0);
-                spin_unlock(&peer->lock);
             }
+            spin_unlock(&peer->lock);
+
+            if (copied_packet != to_copy) {
+                printf("unix_recvmsg: seqpacket short pid=%d fd=%d packet=%lu copied=%lu want=%lu\n",
+                       current->pid, fd, packet_len, copied_packet, to_copy);
+                kvfree(packet_buf);
+                unix_sock_put_ref(peer);
+                goto unix_recvmsg_done;
+            }
+
+            size_t packet_off = 0;
+            for (uint64 i = 0; i < mh.msg_iovlen && packet_off < copied_packet; i++) {
+                size_t want = iovs[i].iov_len;
+                if (want > copied_packet - packet_off)
+                    want = copied_packet - packet_off;
+                if (want == 0)
+                    continue;
+                if (vm_copyout(current->vm, iovs[i].iov_base,
+                               packet_buf + packet_off, want) < 0) {
+                    kvfree(packet_buf);
+                    unix_sock_put_ref(peer);
+                    f->f_flags = saved_fflags;
+                    vfs_fput(f);
+                    return total > 0 ? (uint64)total : (uint64)-EFAULT;
+                }
+                packet_off += want;
+                total += want;
+            }
+            kvfree(packet_buf);
             unix_sock_put_ref(peer);
         } else if (flags & MSG_PEEK) {
             if (sk->state != UNIX_STATE_CONNECTED && sk->type == SOCK_STREAM) {

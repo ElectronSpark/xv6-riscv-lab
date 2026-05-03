@@ -368,6 +368,8 @@ struct fb_gpu_stats {
 #define FB_MINOR   0
 #define GPU_MAJOR 30
 #define GPU_MINOR  0
+#define DRM_PRIMARY_MAJOR 226
+#define DRM_PRIMARY_MINOR   0
 #define DRM_RENDER_MAJOR 226
 #define DRM_RENDER_MINOR 128
 

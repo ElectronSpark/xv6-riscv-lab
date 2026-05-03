@@ -3094,6 +3094,26 @@ static cdev_t gpu_cdev = {
     },
 };
 
+static cdev_t gpu_primary_cdev = {
+    .dev = {
+        .major = DRM_PRIMARY_MAJOR,
+        .minor = DRM_PRIMARY_MINOR,
+        .devname = "dri/card0",
+        .devmode = S_IFCHR | 0666,
+    },
+    .readable = 1,
+    .writable = 1,
+    .ops = {
+        .read    = NULL,
+        .write   = NULL,
+        .open    = gpu_open,
+        .release = gpu_release,
+        .ioctl   = gpu_ioctl,
+        .poll    = NULL,
+        .open_file = gpu_open_file,
+    },
+};
+
 static cdev_t gpu_render_cdev = {
     .dev = {
         .major = DRM_RENDER_MAJOR,
@@ -3125,12 +3145,21 @@ void fbdevinit(void)
     assert(ret == 0, "fbdevinit: failed to register fb cdev: %d", ret);
     ret = cdev_register(&gpu_cdev);
     assert(ret == 0, "fbdevinit: failed to register gpu cdev: %d", ret);
-    ret = cdev_register(&gpu_render_cdev);
-    assert(ret == 0, "fbdevinit: failed to register gpu render cdev: %d", ret);
+    ret = cdev_register(&gpu_primary_cdev);
+    assert(ret == 0, "fbdevinit: failed to register gpu primary cdev: %d", ret);
+    if (virtio_gpu_has_virgl()) {
+        ret = cdev_register(&gpu_render_cdev);
+        assert(ret == 0,
+               "fbdevinit: failed to register gpu render cdev: %d", ret);
+    }
     printf("FB: registered /dev/fb0 (%dx%dx%d)\n",
            fb_state.xres, fb_state.yres, fb_state.bpp);
     printf("GPU: registered /dev/gpu0 (render facade)\n");
-    printf("GPU: registered /dev/dri/renderD128 (DRM render facade)\n");
+    printf("GPU: registered /dev/dri/card0 (DRM primary facade)\n");
+    if (virtio_gpu_has_virgl())
+        printf("GPU: registered /dev/dri/renderD128 (DRM render facade)\n");
+    else
+        printf("GPU: no virgl render node advertised\n");
 }
 
 /* ── Panic screen: BSOD-style framebuffer overlay ─────────────────── */
