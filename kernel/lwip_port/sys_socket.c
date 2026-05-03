@@ -4167,6 +4167,7 @@ uint64 sys_recvmmsg(void)
         int recv_flags = (i > 0) ? (flags | MSG_DONTWAIT) : flags;
         ssize_t total = 0;
         int msg_flags = 0;
+        int count_zero_message = 0;
 
         if (domain == AF_UNIX) {
             struct unix_sock *usk = unix_sock_from_fd(sockfd);
@@ -4242,6 +4243,7 @@ uint64 sys_recvmmsg(void)
                 }
 
                 if (peer != NULL) {
+                    count_zero_message = 1;
                     size_t capacity = 0;
                     for (uint64 j = 0; j < mh.msg_iovlen; j++)
                         capacity += iovs[j].iov_len;
@@ -4607,6 +4609,7 @@ uint64 sys_recvmmsg(void)
                     if (received > 0) break;
                     return (uint64)-lwip_err_to_errno(err);
                 }
+                count_zero_message = 1;
                 void *data;
                 u16_t dlen;
                 netbuf_data(nb, &data, &dlen);
@@ -4638,9 +4641,16 @@ uint64 sys_recvmmsg(void)
                    entry_addr + __builtin_offsetof(struct k_msghdr, msg_flags),
                    &msg_flags, sizeof(msg_flags));
 
+        /*
+         * Zero-length datagrams/seqpackets are real messages.  A
+         * zero-length stream result is EOF (or no additional data after
+         * previous stream messages) and must not consume a mmsghdr slot.
+         */
+        if (total == 0 && !count_zero_message)
+            break;
+
         received++;
 
-        /* If we got 0 bytes (EOF on stream), stop */
         if (total == 0)
             break;
     }
