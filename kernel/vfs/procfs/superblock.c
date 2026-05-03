@@ -243,7 +243,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         int    tgid   = (int)(offset / PROCFS_PID_STRIDE);
         int    slot   = (int)(offset % PROCFS_PID_STRIDE);
 
-        if (tgid <= 0 || slot > 17) {
+        if (tgid <= 0 || slot > 18) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -367,10 +367,48 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.mode    = S_IFDIR | 0555;
             pi->vfs_inode.n_links = 2;
             break;
+        case 18: /* /proc/<tgid>/fdinfo/ */
+            pi->type              = PROC_FDINFODIR;
+            pi->vfs_inode.mode    = S_IFDIR | 0555;
+            pi->vfs_inode.n_links = 2;
+            break;
         default:
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
+        return &pi->vfs_inode;
+    }
+
+    /* ---- fdinfo entries ---- */
+
+    if (ino >= PROCFS_FDINFO_BASE) {
+        uint64 offset = ino - PROCFS_FDINFO_BASE;
+        int    tgid   = (int)(offset / 1000);
+        int    fd     = (int)(offset % 1000);
+
+        if (tgid <= 0 || fd < 0 || fd >= NOFILE) {
+            slab_free(pi);
+            return ERR_PTR(-ENOENT);
+        }
+
+        rcu_read_lock();
+        struct thread *p = NULL;
+        get_pid_thread(tgid, &p);
+        int valid = (p != NULL && p->tgid == tgid && p->fdtable != NULL &&
+                     p->fdtable->files[fd] != NULL);
+        rcu_read_unlock();
+
+        if (!valid) {
+            slab_free(pi);
+            return ERR_PTR(-ENOENT);
+        }
+
+        pi->type              = PROC_FDINFO_ENTRY;
+        pi->pid               = tgid;
+        pi->fd                = fd;
+        pi->vfs_inode.mode    = S_IFREG | 0444;
+        pi->vfs_inode.n_links = 1;
+        pi->vfs_inode.size    = 128;
         return &pi->vfs_inode;
     }
 
@@ -383,7 +421,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         int    tid    = (int)(rem / PROCFS_TASK_TID_STRIDE);
         int    slot   = (int)(rem % PROCFS_TASK_TID_STRIDE);
 
-        if (tgid <= 0 || tid <= 0 || slot < 0 || slot > 13) {
+        if (tgid <= 0 || tid <= 0 || slot < 0 || slot > 15) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -485,6 +523,16 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.mode    = S_IFREG | 0400;
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 0;
+            break;
+        case 14: /* fd */
+            pi->type              = PROC_TASK_FDDIR;
+            pi->vfs_inode.mode    = S_IFDIR | 0555;
+            pi->vfs_inode.n_links = 2;
+            break;
+        case 15: /* fdinfo */
+            pi->type              = PROC_TASK_FDINFODIR;
+            pi->vfs_inode.mode    = S_IFDIR | 0555;
+            pi->vfs_inode.n_links = 2;
             break;
         default:
             slab_free(pi);

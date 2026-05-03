@@ -24,6 +24,7 @@
 #include "lock/rcu.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
+#include "vfs/fcntl.h"
 #include "../vfs_private.h"
 #include "list.h"
 #include "hlist.h"
@@ -92,6 +93,7 @@ static const struct procfs_static_entry procfs_pid_entries[] = {
     {"environ", 0},
     {"auxv", 0},
     {"task", 0},
+    {"fdinfo", 0},
 };
 
 static const struct procfs_static_entry procfs_task_entries[] = {
@@ -108,6 +110,8 @@ static const struct procfs_static_entry procfs_task_entries[] = {
     {"limits", 0},
     {"environ", 0},
     {"auxv", 0},
+    {"fd", 0},
+    {"fdinfo", 0},
 };
 
 static const struct procfs_static_entry procfs_sys_entries[] = {
@@ -200,6 +204,7 @@ static uint64 procfs_pid_entry_ino(int tgid, int child_idx)
     case 14: return PROCFS_PID_ENVIRON_INO(tgid);
     case 15: return PROCFS_PID_AUXV_INO(tgid);
     case 16: return PROCFS_PID_TASKDIR_INO(tgid);
+    case 17: return PROCFS_PID_FDINFODIR_INO(tgid);
     default: return 0;
     }
 }
@@ -280,10 +285,10 @@ static int procfs_valid_tid_in_tgid(int tgid, int tid)
 /*  Helper: find the n-th open fd (0-based) in a fdtable              */
 /* ------------------------------------------------------------------ */
 
-static int procfs_nth_fd(int tgid, int n) {
+static int procfs_nth_fd(int pid, int n) {
     rcu_read_lock();
     struct thread *p = NULL;
-    get_pid_thread(tgid, &p);
+    get_pid_thread(pid, &p);
     if (p == NULL || p->fdtable == NULL) {
         rcu_read_unlock();
         return -1;
@@ -437,7 +442,10 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         return -ENOENT;
     }
 
-    case PROC_FDDIR: {
+    case PROC_FDDIR:
+    case PROC_FDINFODIR:
+    case PROC_TASK_FDDIR:
+    case PROC_TASK_FDINFODIR: {
         if (name_len == 0 || name_len > 7)
             return -ENOENT;
         int fdnum = 0;
@@ -452,7 +460,7 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         /* Verify fd is open for this process */
         rcu_read_lock();
         struct thread *p = NULL;
-        get_pid_thread(pi->pid, &p);
+        get_pid_thread(pi->tid > 0 ? pi->tid : pi->pid, &p);
         int valid = (p != NULL && p->fdtable != NULL &&
                      p->fdtable->files[fdnum] != NULL);
         rcu_read_unlock();
@@ -460,7 +468,10 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         if (!valid)
             return -ENOENT;
 
-        dentry->ino = PROCFS_FD_INO(pi->pid, fdnum);
+        dentry->ino = (pi->type == PROC_FDINFODIR ||
+                       pi->type == PROC_TASK_FDINFODIR)
+                          ? PROCFS_FDINFO_INO(pi->pid, fdnum)
+                          : PROCFS_FD_INO(pi->pid, fdnum);
         return 0;
     }
 
@@ -485,10 +496,14 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         uint64 parent_ino;
         if (pi->type == PROC_PID_DIR) {
             parent_ino = PROCFS_INO_ROOT;
-        } else if (pi->type == PROC_FDDIR || pi->type == PROC_TASKDIR) {
+        } else if (pi->type == PROC_FDDIR || pi->type == PROC_FDINFODIR ||
+                   pi->type == PROC_TASKDIR) {
             parent_ino = PROCFS_PID_DIR_INO(pi->pid);
         } else if (pi->type == PROC_TASK_TID_DIR) {
             parent_ino = PROCFS_PID_TASKDIR_INO(pi->pid);
+        } else if (pi->type == PROC_TASK_FDDIR ||
+                   pi->type == PROC_TASK_FDINFODIR) {
+            parent_ino = PROCFS_TASK_TID_DIR_INO(pi->pid, pi->tid);
         } else if (pi->type == PROC_SYS_DIR) {
             parent_ino = PROCFS_INO_ROOT;
         } else if (pi->type == PROC_SYS_KERNEL_DIR ||
@@ -622,9 +637,12 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         return procfs_emit_static(iter, ret_dentry, procfs_sys_fs_entries,
                                   NELEM(procfs_sys_fs_entries), child_idx);
 
-    /* ---- /proc/<tgid>/fd/ children ---- */
-    case PROC_FDDIR: {
-        int fd = procfs_nth_fd(pi->pid, child_idx);
+    /* ---- fd and fdinfo children ---- */
+    case PROC_FDDIR:
+    case PROC_FDINFODIR:
+    case PROC_TASK_FDDIR:
+    case PROC_TASK_FDINFODIR: {
+        int fd = procfs_nth_fd(pi->tid > 0 ? pi->tid : pi->pid, child_idx);
         if (fd < 0) {
             vfs_release_dentry(ret_dentry);
             ret_dentry->name = NULL;
@@ -638,7 +656,10 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         if (ret_dentry->name == NULL)
             return -ENOMEM;
         ret_dentry->name_len = (uint16)nlen;
-        ret_dentry->ino      = PROCFS_FD_INO(pi->pid, fd);
+        ret_dentry->ino      = (pi->type == PROC_FDINFODIR ||
+                                pi->type == PROC_TASK_FDINFODIR)
+                                   ? PROCFS_FDINFO_INO(pi->pid, fd)
+                                   : PROCFS_FD_INO(pi->pid, fd);
         ret_dentry->cookies  = (int64)iter->index;
         return 0;
     }
@@ -1596,6 +1617,54 @@ static char *procfs_gen_empty(void)
     return buf;
 }
 
+static char *procfs_gen_fdinfo(int pid, int fd)
+{
+    char *buf = kvmalloc(256);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(pid, &p);
+    if (p == NULL || p->fdtable == NULL || fd < 0 || fd >= NOFILE) {
+        rcu_read_unlock();
+        kvfree(buf);
+        return ERR_PTR(-ESRCH);
+    }
+
+    struct vfs_fdtable *ft = p->fdtable;
+    spin_lock(&ft->lock);
+    struct vfs_file *f = ft->files[fd];
+    if (f == NULL) {
+        spin_unlock(&ft->lock);
+        rcu_read_unlock();
+        kvfree(buf);
+        return ERR_PTR(-EBADF);
+    }
+
+    int fdflags = 0;
+    if (bits_test_bit64(&ft->cloexec_bitmap[fd >> 6], fd & 63))
+        fdflags |= O_CLOEXEC;
+    int flags = f->f_flags | fdflags;
+    struct vfs_inode *fi = f->inode.inode;
+    loff_t pos = (fi != NULL && S_ISREG(fi->mode)) ? f->f_pos : 0;
+    uint64 ino = fi != NULL ? fi->ino : 0;
+    spin_unlock(&ft->lock);
+    rcu_read_unlock();
+
+    char flagbuf[11];
+    flagbuf[sizeof(flagbuf) - 1] = '\0';
+    uint value = (uint)flags;
+    for (int i = (int)sizeof(flagbuf) - 2; i >= 0; i--) {
+        flagbuf[i] = (char)('0' + (value & 7));
+        value >>= 3;
+    }
+
+    snprintf(buf, 256, "pos:\t%lld\nflags:\t%s\nmnt_id:\t0\nino:\t%llu\n",
+             (long long)pos, flagbuf, (unsigned long long)ino);
+    return buf;
+}
+
 static char *procfs_gen_smaps(int tgid)
 {
     /* A conservative smaps implementation: one header per VMA plus the
@@ -1955,6 +2024,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_TASK_ENVIRON:
     case PROC_TASK_AUXV:
         buf = procfs_gen_empty();
+        break;
+    case PROC_FDINFO_ENTRY:
+        buf = procfs_gen_fdinfo(pi->pid, pi->fd);
         break;
     case PROC_RESOURCES:
         buf = procfs_gen_resources(pi->pid);

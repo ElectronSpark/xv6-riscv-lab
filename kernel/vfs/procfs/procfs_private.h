@@ -42,6 +42,8 @@
  *       exe                → symlink  → executable path
  *       fd/
  *         <n>              → symlink  → target path
+ *       fdinfo/
+ *         <n>              → regular file
  *
  * Inode number encoding (deterministic from content type + PID):
  *
@@ -90,6 +92,8 @@ enum procfs_entry_type {
     PROC_EXE,         /* /proc/<tgid>/exe     */
     PROC_FDDIR,       /* /proc/<tgid>/fd/     */
     PROC_FD_ENTRY,    /* /proc/<tgid>/fd/<n>  */
+    PROC_FDINFODIR,   /* /proc/<tgid>/fdinfo/ */
+    PROC_FDINFO_ENTRY, /* /proc/<tgid>/fdinfo/<n> */
     PROC_RESOURCES,   /* /proc/<tgid>/resources */
     PROC_CRASHES,     /* /proc/crashes          */
     PROC_CMDLINE,     /* /proc/cmdline          */
@@ -127,6 +131,8 @@ enum procfs_entry_type {
     PROC_TASK_LIMITS,
     PROC_TASK_ENVIRON,
     PROC_TASK_AUXV,
+    PROC_TASK_FDDIR,
+    PROC_TASK_FDINFODIR,
     PROC_SYS_KERNEL_OSTYPE,
     PROC_SYS_KERNEL_OSRELEASE,
     PROC_SYS_KERNEL_VERSION,
@@ -211,6 +217,7 @@ enum procfs_entry_type {
 #define PROCFS_PID_AUXV_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 15)
 #define PROCFS_PID_SMAPS_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 16)
 #define PROCFS_PID_TASKDIR_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 17)
+#define PROCFS_PID_FDINFODIR_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 18)
 #define PROCFS_FD_INO(tgid, fd)     (PROCFS_FD_BASE + (uint64)(tgid)*1000ULL + (uint64)(fd))
 
 /*
@@ -225,6 +232,11 @@ enum procfs_entry_type {
     (PROCFS_TASK_BASE + (uint64)(tgid) * PROCFS_TASK_TGID_STRIDE + \
      (uint64)(tid) * PROCFS_TASK_TID_STRIDE + (uint64)(slot))
 #define PROCFS_TASK_TID_DIR_INO(tgid, tid) PROCFS_TASK_INO(tgid, tid, 0)
+
+#define PROCFS_FDINFO_BASE \
+    (PROCFS_TASK_BASE + 100000ULL * PROCFS_TASK_TGID_STRIDE)
+#define PROCFS_FDINFO_INO(tgid, fd) \
+    (PROCFS_FDINFO_BASE + (uint64)(tgid) * 1000ULL + (uint64)(fd))
 
 /* ------------------------------------------------------------------ */
 /*  Embedded VFS inode                                                */
