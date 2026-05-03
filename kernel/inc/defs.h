@@ -49,6 +49,7 @@ void bh_global_init(void);
 void consoleinit(void);
 void consoledevinit(void);
 void nullranddevinit(void);
+void ossaudiodevinit(void);
 void random_fill_bytes(void *buf, size_t count);
 void fbdevinit(void);
 void fb_gpu_destroy_owner(pid_t owner_tgid);

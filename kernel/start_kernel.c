@@ -198,6 +198,7 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
 void start_kernel_post_init(void) {
     consoledevinit();  // Initialize and register the console character device
     nullranddevinit(); // Register /dev/null, /dev/random, /dev/zero
+    ossaudiodevinit(); // Register OSS-compatible virtual audio devices
     fbdevinit();       // Register /dev/fb0 (framebuffer, if Bochs VGA detected)
     ps2mouse_init();   // Register /dev/mouse (PS/2 mouse)
     ps2kbd_init();     // Register /dev/kbd (PS/2 keyboard)

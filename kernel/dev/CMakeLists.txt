@@ -5,6 +5,7 @@ add_library(dev OBJECT
     blkdev.c
     iosched.c
     nullrand.c
+    ossaudio.c
     bio.c
     netdev.c
     yt8531.c
