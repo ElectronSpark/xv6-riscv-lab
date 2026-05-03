@@ -4164,6 +4164,7 @@ uint64 sys_recvmmsg(void)
 
         /* Determine domain */
         int domain = sock_domain_from_fd(sockfd);
+        int recv_flags = (i > 0) ? (flags | MSG_DONTWAIT) : flags;
         ssize_t total = 0;
 
         if (domain == AF_UNIX) {
@@ -4176,21 +4177,57 @@ uint64 sys_recvmmsg(void)
                 return received > 0 ? (uint64)received : (uint64)-EBADF;
 
             int saved_fflags = f->f_flags;
-            if (flags & MSG_DONTWAIT)
+            if (recv_flags & MSG_DONTWAIT)
                 f->f_flags |= O_NONBLOCK;
 
+            int hit_scm_barrier = 0;
             for (uint64 j = 0; j < mh.msg_iovlen; j++) {
-                if (iovs[j].iov_len == 0)
-                    continue;
-                ssize_t n = unix_socket_file_ops.read(
-                    f, (char *)(iovs[j].iov_base), iovs[j].iov_len, 1);
-                if (n < 0) {
-                    f->f_flags = saved_fflags;
-                    vfs_fput(f);
-                    return received > 0 ? (uint64)received : (uint64)n;
+                size_t copied_iov = 0;
+                while (copied_iov < iovs[j].iov_len) {
+                    struct unix_sock *peer;
+                    size_t want = iovs[j].iov_len - copied_iov;
+                    size_t barrier_bytes = 0;
+
+                    if (!(recv_flags & MSG_PEEK)) {
+                        spin_lock(&usk->lock);
+                        peer = usk->peer;
+                        unix_sock_get_ref(peer);
+                        spin_unlock(&usk->lock);
+
+                        if (peer != NULL) {
+                            spin_lock(&peer->lock);
+                            if (unix_next_scm_barrier_locked(peer,
+                                                             &barrier_bytes)) {
+                                if (barrier_bytes == 0)
+                                    hit_scm_barrier = 1;
+                                else if (want > barrier_bytes)
+                                    want = barrier_bytes;
+                            }
+                            spin_unlock(&peer->lock);
+                        }
+                        unix_sock_put_ref(peer);
+                    }
+
+                    if (want == 0 || hit_scm_barrier)
+                        break;
+
+                    ssize_t n = unix_socket_file_ops.read(
+                        f, (char *)(iovs[j].iov_base + copied_iov), want, 1);
+                    if (n < 0) {
+                        f->f_flags = saved_fflags;
+                        vfs_fput(f);
+                        return received > 0 ? (uint64)received : (uint64)n;
+                    }
+                    total += n;
+                    copied_iov += (size_t)n;
+                    if ((size_t)n < want)
+                        break;
+                    if (barrier_bytes != 0 && (size_t)n == barrier_bytes) {
+                        hit_scm_barrier = 1;
+                        break;
+                    }
                 }
-                total += n;
-                if ((size_t)n < iovs[j].iov_len)
+                if (hit_scm_barrier || copied_iov < iovs[j].iov_len)
                     break;
             }
             f->f_flags = saved_fflags;
@@ -4201,6 +4238,7 @@ uint64 sys_recvmmsg(void)
                 struct unix_sock *peer = NULL;
                 spin_lock(&usk->lock);
                 peer = usk->peer;
+                unix_sock_get_ref(peer);
                 spin_unlock(&usk->lock);
 
                 size_t max_fds = (mh.msg_controllen >= K_CMSG_SPACE(0))
@@ -4212,6 +4250,7 @@ uint64 sys_recvmmsg(void)
                 memset(scm_files, 0, sizeof(scm_files));
                 size_t scm_count = unix_dequeue_scm_rights(peer, scm_files,
                                                            max_fds);
+                unix_sock_put_ref(peer);
 
                 if (scm_count > 0) {
                     int newfds[UNIX_SCM_QUEUE_MAX];
@@ -4221,7 +4260,7 @@ uint64 sys_recvmmsg(void)
                         spin_lock(&current->fdtable->lock);
                         int newfd = vfs_fdtable_alloc_fd(current->fdtable,
                                                          scm_files[installed]);
-                        if (newfd >= 0 && (flags & MSG_CMSG_CLOEXEC))
+                        if (newfd >= 0 && (recv_flags & MSG_CMSG_CLOEXEC))
                             vfs_fdtable_set_fdflags(current->fdtable, newfd,
                                                     FD_CLOEXEC);
                         spin_unlock(&current->fdtable->lock);
@@ -4278,10 +4317,6 @@ uint64 sys_recvmmsg(void)
             struct lwip_sock *sk = sock_from_fd(sockfd);
             if (sk == NULL)
                 return received > 0 ? (uint64)received : (uint64)-EBADF;
-
-            /* For the first message, block normally.  For subsequent
-             * messages, use MSG_DONTWAIT to avoid blocking. */
-            int recv_flags = (i > 0) ? (flags | 0x40 /*MSG_DONTWAIT*/) : flags;
 
             if (sock_is_nonblock(sockfd, recv_flags)) {
                 int ready = sock_poll_ready(sk, POLLIN);
