@@ -2311,6 +2311,8 @@ void virtio_gpu_init(void)
     virtio_gpu_submit_display_info(g);
     virtio_gpu_smoke_resource(g);
     virtio_gpu_init_persistent_scanout(g);
+    if (virtio_gpu_has_virgl())
+        fb_gpu_register_virgl_render_node();
 }
 
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)

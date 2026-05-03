@@ -3134,31 +3134,75 @@ static cdev_t gpu_render_cdev = {
     },
 };
 
+static bool fb_cdev_registered;
+static bool gpu_cdev_registered;
+static bool gpu_primary_cdev_registered;
+static bool gpu_render_cdev_registered;
+
+static int gpu_register_base_devices(void)
+{
+    int ret;
+
+    if (!gpu_cdev_registered) {
+        ret = cdev_register(&gpu_cdev);
+        if (ret != 0)
+            return ret;
+        gpu_cdev_registered = true;
+        printf("GPU: registered /dev/gpu0 (render facade)\n");
+    }
+
+    if (!gpu_primary_cdev_registered) {
+        ret = cdev_register(&gpu_primary_cdev);
+        if (ret != 0)
+            return ret;
+        gpu_primary_cdev_registered = true;
+        printf("GPU: registered /dev/dri/card0 (DRM primary facade)\n");
+    }
+
+    return 0;
+}
+
+int fb_gpu_register_virgl_render_node(void)
+{
+    int ret;
+
+    ret = gpu_register_base_devices();
+    if (ret != 0)
+        return ret;
+
+    if (!virtio_gpu_has_virgl())
+        return gpu_render_cdev_registered ? 0 : -ENODEV;
+
+    if (!gpu_render_cdev_registered) {
+        ret = cdev_register(&gpu_render_cdev);
+        if (ret != 0)
+            return ret;
+        gpu_render_cdev_registered = true;
+        printf("GPU: registered /dev/dri/renderD128 (DRM render facade)\n");
+    }
+
+    return 0;
+}
+
 void fbdevinit(void)
 {
     if (!fb_state.detected) {
         printf("FB: no Bochs VGA detected, skipping /dev/fb0\n");
-        return;
+    } else {
+        if (!fb_cdev_registered) {
+            int ret = cdev_register(&fb_cdev);
+            assert(ret == 0, "fbdevinit: failed to register fb cdev: %d", ret);
+            fb_cdev_registered = true;
+        }
+
+        printf("FB: registered /dev/fb0 (%dx%dx%d)\n",
+               fb_state.xres, fb_state.yres, fb_state.bpp);
     }
 
-    int ret = cdev_register(&fb_cdev);
-    assert(ret == 0, "fbdevinit: failed to register fb cdev: %d", ret);
-    ret = cdev_register(&gpu_cdev);
-    assert(ret == 0, "fbdevinit: failed to register gpu cdev: %d", ret);
-    ret = cdev_register(&gpu_primary_cdev);
-    assert(ret == 0, "fbdevinit: failed to register gpu primary cdev: %d", ret);
-    if (virtio_gpu_has_virgl()) {
-        ret = cdev_register(&gpu_render_cdev);
-        assert(ret == 0,
-               "fbdevinit: failed to register gpu render cdev: %d", ret);
-    }
-    printf("FB: registered /dev/fb0 (%dx%dx%d)\n",
-           fb_state.xres, fb_state.yres, fb_state.bpp);
-    printf("GPU: registered /dev/gpu0 (render facade)\n");
-    printf("GPU: registered /dev/dri/card0 (DRM primary facade)\n");
-    if (virtio_gpu_has_virgl())
-        printf("GPU: registered /dev/dri/renderD128 (DRM render facade)\n");
-    else
+    int ret = fb_gpu_register_virgl_render_node();
+    if (ret != 0 && ret != -ENODEV)
+        assert(ret == 0, "fbdevinit: failed to register gpu devices: %d", ret);
+    if (!virtio_gpu_has_virgl())
         printf("GPU: no virgl render node advertised\n");
 }
 
@@ -3375,6 +3419,8 @@ void fb_get_resolution(uint32 *xres, uint32 *yres)
 }
 
 void fbdevinit(void) {}
+
+int fb_gpu_register_virgl_render_node(void) { return -ENODEV; }
 
 void fb_panic_screen(const char *text) { (void)text; }
 
