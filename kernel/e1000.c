@@ -347,12 +347,20 @@ STATIC void e1000_recv(void) {
     // Check for packets that have arrived from the e1000
     // Create and deliver an mbuf for each packet (using net_rx()).
     //
+    /*
+     * Read the tail pointer once and advance a local copy through every
+     * descriptor that is DD-ready.  Writing E1000_RDT once per batch
+     * (instead of once per packet) eliminates an MMIO round-trip per
+     * received frame — those reads/writes are in the hundreds of
+     * nanoseconds each, and at MTU-sized packets they were a real cap.
+     */
+    uint32 last_rdt = regs[E1000_RDT];
+    uint32 index = (last_rdt + 1) % RX_RING_SIZE;
     while (1) {
-        uint32 index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
         struct rx_desc *desc = rx_ring + index;
         if (!(desc->status & E1000_RXD_STAT_DD)) {
             // keep processing RX Descriptor until meeting an unfinished one.
-            return;
+            break;
         }
         struct mbuf *buf = rx_mbufs[index];
         buf->len = desc->length;
@@ -363,9 +371,9 @@ STATIC void e1000_recv(void) {
         // allocate a new buffer
         struct mbuf *newbuf = mbufalloc(0);
         if (newbuf == NULL) {
-            // Re-use old slot by resetting status; packet is already consumed.
-            // No new buffer available — hardware will drop the next packet
-            // into this slot and we'll lose it, but at least we don't crash.
+            // No new buffer available — leave the slot consumed and
+            // publish progress so far so the NIC can keep racing ahead
+            // of us into the slots we already advanced past.
             desc->status = 0;
             regs[E1000_RDT] = index;
             return;
@@ -375,10 +383,11 @@ STATIC void e1000_recv(void) {
         /* kalloc() returns a PA; use it directly as the DMA address. */
         desc->addr = (uint64)newbuf->head;
         desc->status = 0;
-        // tell the Ethernet controller that we have finished processing
-        // this packet.
-        regs[E1000_RDT] = index;
+        last_rdt = index;
+        index = (index + 1) % RX_RING_SIZE;
     }
+    if (last_rdt != regs[E1000_RDT])
+        regs[E1000_RDT] = last_rdt;
 }
 
 static bool e1000_rx_pending(void) {

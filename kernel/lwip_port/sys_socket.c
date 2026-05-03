@@ -369,6 +369,7 @@ static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
     ssize_t total = 0;
     int nonblock = sock_is_nonblock(fd, flags);
     int wait_more = 0;
+    size_t recvd_acc = 0;
 
     while (total < len) {
         struct pbuf *p = NULL;
@@ -391,8 +392,10 @@ static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
                     if (sock_tcp_wait_for_more(sk, nonblock, total,
                                                (size_t)len, &wait_more))
                         continue;
-                    return (int)total;
+                    break;
                 }
+                if (recvd_acc > 0)
+                    sock_tcp_recvd(sk, recvd_acc);
                 return -lwip_err_to_errno(err);
             }
         }
@@ -412,6 +415,8 @@ static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
             if (vm_copyout(current->vm, ubuf + total + copied, tmpbuf, got) < 0) {
                 if (!reused_lastpbuf)
                     pbuf_free(p);
+                if (recvd_acc > 0)
+                    sock_tcp_recvd(sk, recvd_acc);
                 return total > 0 ? (int)total : -EFAULT;
             }
             copied += got;
@@ -430,12 +435,23 @@ static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
         }
 
         if (!(flags & MSG_PEEK))
-            sock_tcp_recvd(sk, copied);
+            recvd_acc += copied;
 
         total += copied;
         if (copied == 0 || (flags & MSG_PEEK))
             break;
     }
+
+    /*
+     * Batch the netconn_tcp_recvd() call across the whole recv() so we
+     * post a single MSG_RECVD to tcpip_thread instead of one per pbuf
+     * consumed.  Each MSG_RECVD is a tcpip-mbox round-trip plus a
+     * tcpip_thread wake-up; for a streaming receiver pulling MTU-sized
+     * packets that round-trip dominated end-to-end latency and capped
+     * single-stream throughput well below link rate.
+     */
+    if (recvd_acc > 0)
+        sock_tcp_recvd(sk, recvd_acc);
 
     if (!(flags & MSG_PEEK) && total > 0) {
         sock_notify_if_still_readable(fd, sk);
@@ -4561,6 +4577,7 @@ uint64 sys_recvmmsg(void)
                 int nonblock = sock_is_nonblock(sockfd, recv_flags);
                 int wait_more = 0;
                 char tmpbuf[1500];
+                size_t recvd_acc = 0;
 
                 while ((size_t)total < buf_total && iov_idx < mh.msg_iovlen) {
                     struct pbuf *p = NULL;
@@ -4593,6 +4610,8 @@ uint64 sys_recvmmsg(void)
                                     continue;
                                 break;
                             }
+                            if (recvd_acc > 0)
+                                sock_tcp_recvd(sk, recvd_acc);
                             if (received > 0)
                                 break;
                             return (uint64)-lwip_err_to_errno(err);
@@ -4627,8 +4646,10 @@ uint64 sys_recvmmsg(void)
                             } else if (!reused_lastpbuf) {
                                 pbuf_free(p);
                             }
-                            if (!(recv_flags & MSG_PEEK) && copied_from_pbuf > 0)
-                                sock_tcp_recvd(sk, copied_from_pbuf);
+                            if (!(recv_flags & MSG_PEEK))
+                                recvd_acc += copied_from_pbuf;
+                            if (recvd_acc > 0)
+                                sock_tcp_recvd(sk, recvd_acc);
                             return received > 0 ? (uint64)received : (uint64)-EFAULT;
                         }
 
@@ -4651,10 +4672,15 @@ uint64 sys_recvmmsg(void)
                         sk->lastpbuf_off = 0;
                     }
 
-                    sock_tcp_recvd(sk, copied_from_pbuf);
+                    if (!(recv_flags & MSG_PEEK))
+                        recvd_acc += copied_from_pbuf;
                     if (copied_from_pbuf == 0)
                         break;
                 }
+
+                /* Single MSG_RECVD round-trip per recvmmsg() entry. */
+                if (!(recv_flags & MSG_PEEK) && recvd_acc > 0)
+                    sock_tcp_recvd(sk, recvd_acc);
 
                 if (!(recv_flags & MSG_PEEK) && total > 0) {
                     sock_notify_if_still_readable(sockfd, sk);
