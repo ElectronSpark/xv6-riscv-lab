@@ -101,11 +101,16 @@ static int sysfs_decode_device_attr(uint64 ino, uint64 base,
     case 4: attr = SYSFS_ATTR_REVISION; break;
     case 5: attr = SYSFS_ATTR_UEVENT; break;
     case 6: attr = SYSFS_ATTR_SUBSYSTEM; break;
+    case 7: attr = SYSFS_ATTR_MODALIAS; break;
+    case 8: attr = SYSFS_ATTR_CLASS; break;
+    case 9: attr = SYSFS_ATTR_DRIVER_LINK; break;
     default: return -ENOENT;
     }
 
     sysfs_fill_inode(si, ino,
-                     attr == SYSFS_ATTR_SUBSYSTEM ? SYSFS_SYMLINK : SYSFS_FILE,
+                     (attr == SYSFS_ATTR_SUBSYSTEM ||
+                      attr == SYSFS_ATTR_DRIVER_LINK) ?
+                     SYSFS_SYMLINK : SYSFS_FILE,
                      kind, attr);
     return 0;
 }
@@ -155,15 +160,28 @@ struct vfs_inode *sysfs_get_inode(struct vfs_superblock *sb, uint64 ino)
     case SYSFS_INO_DEV_CHAR:
     case SYSFS_INO_BUS:
     case SYSFS_INO_BUS_PCI:
+    case SYSFS_INO_BUS_PCI_DEVICES:
+    case SYSFS_INO_BUS_PCI_DRIVERS:
+    case SYSFS_INO_BUS_PCI_DRIVER_VIRTIO:
     case SYSFS_INO_CLASS:
     case SYSFS_INO_CLASS_DRM:
+    case SYSFS_INO_DEVICES:
+    case SYSFS_INO_DEVICES_PCI_ROOT:
+    case SYSFS_INO_PCI_DEVICE:
+    case SYSFS_INO_PCI_DRM:
         sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_NONE, SYSFS_ATTR_NONE);
+        break;
+    case SYSFS_INO_BUS_PCI_DEVICE_LINK:
+    case SYSFS_INO_BUS_PCI_DRIVER_DEVICE_LINK:
+        sysfs_fill_inode(si, ino, SYSFS_SYMLINK, SYSFS_DEV_DRM_PRIMARY,
+                         SYSFS_ATTR_NONE);
         break;
     case SYSFS_INO_DRM_PRIMARY:
         sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_DRM_PRIMARY,
                          SYSFS_ATTR_NONE);
         break;
     case SYSFS_INO_DRM_PRIMARY_DEVICE:
+    case SYSFS_INO_DRM_PRIMARY_DEVICE_DRM:
         sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_DRM_PRIMARY,
                          SYSFS_ATTR_NONE);
         break;
@@ -172,6 +190,7 @@ struct vfs_inode *sysfs_get_inode(struct vfs_superblock *sb, uint64 ino)
                          SYSFS_ATTR_NONE);
         break;
     case SYSFS_INO_DRM_RENDER_DEVICE:
+    case SYSFS_INO_DRM_RENDER_DEVICE_DRM:
         sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_DRM_RENDER,
                          SYSFS_ATTR_NONE);
         break;
