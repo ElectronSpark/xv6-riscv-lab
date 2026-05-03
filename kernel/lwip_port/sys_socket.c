@@ -4494,64 +4494,112 @@ uint64 sys_recvmmsg(void)
             }
 
             if (sk->type == SOCK_STREAM) {
-                struct pbuf *p = NULL;
-                uint16 poff = 0;
-                uint16 start_off = 0;
-                bool reused_lastpbuf = false;
+                size_t buf_total = 0;
+                for (uint64 j = 0; j < mh.msg_iovlen; j++)
+                    buf_total += iovs[j].iov_len;
 
-                if (sk->lastpbuf != NULL) {
-                    p = sk->lastpbuf;
-                    poff = sk->lastpbuf_off;
-                    reused_lastpbuf = true;
-                } else {
-                    err_t err = sock_tcp_recv_pbuf(sk, &p,
-                        sock_is_nonblock(sockfd, recv_flags));
-                    if (err != ERR_OK) {
-                        if (err == ERR_CLSD && received > 0) break;
-                        if (err == ERR_CLSD) return 0;
-                        if (received > 0) break;
-                        return (uint64)-lwip_err_to_errno(err);
-                    }
-                }
-
-                start_off = poff;
-
+                uint64 iov_idx = 0;
+                size_t iov_off = 0;
+                int nonblock = sock_is_nonblock(sockfd, recv_flags);
+                int wait_more = 0;
                 char tmpbuf[1500];
-                for (uint64 j = 0; j < mh.msg_iovlen && poff < p->tot_len; j++) {
-                    size_t want = iovs[j].iov_len;
-                    uint16 remain = p->tot_len - poff;
-                    size_t tocopy = (want < remain) ? want : (size_t)remain;
-                    size_t copied = 0;
-                    while (copied < tocopy) {
-                        size_t chunk = tocopy - copied;
-                        if (chunk > sizeof(tmpbuf)) chunk = sizeof(tmpbuf);
-                        uint16 got = pbuf_copy_partial(p, tmpbuf, (uint16)chunk, poff);
-                        if (got == 0) break;
-                        if (vm_copyout(current->vm, iovs[j].iov_base + copied,
+
+                while ((size_t)total < buf_total && iov_idx < mh.msg_iovlen) {
+                    struct pbuf *p = NULL;
+                    uint16 poff = 0;
+                    uint16 start_off = 0;
+                    bool reused_lastpbuf = false;
+                    size_t copied_from_pbuf = 0;
+
+                    if (sk->lastpbuf != NULL) {
+                        p = sk->lastpbuf;
+                        poff = sk->lastpbuf_off;
+                        reused_lastpbuf = true;
+                    } else {
+                        err_t err = sock_tcp_recv_pbuf(sk, &p,
+                            nonblock || total > 0);
+                        if (err != ERR_OK) {
+                            if (err == ERR_CLSD && received > 0)
+                                break;
+                            if (err == ERR_CLSD)
+                                return 0;
+                            if (err == ERR_TIMEOUT && signal_pending(current)) {
+                                if (received > 0)
+                                    break;
+                                return total > 0 ? (uint64)total : (uint64)-EINTR;
+                            }
+                            if (total > 0 &&
+                                (err == ERR_WOULDBLOCK || err == ERR_TIMEOUT)) {
+                                if (sock_tcp_wait_for_more(sk, nonblock, total,
+                                                           buf_total, &wait_more))
+                                    continue;
+                                break;
+                            }
+                            if (received > 0)
+                                break;
+                            return (uint64)-lwip_err_to_errno(err);
+                        }
+                    }
+
+                    start_off = poff;
+                    while (poff < p->tot_len && iov_idx < mh.msg_iovlen) {
+                        if (iovs[iov_idx].iov_len == 0 ||
+                            iov_off >= iovs[iov_idx].iov_len) {
+                            iov_idx++;
+                            iov_off = 0;
+                            continue;
+                        }
+
+                        size_t want = iovs[iov_idx].iov_len - iov_off;
+                        uint16 remain = p->tot_len - poff;
+                        size_t chunk = want < remain ? want : (size_t)remain;
+                        if (chunk > sizeof(tmpbuf))
+                            chunk = sizeof(tmpbuf);
+
+                        uint16 got = pbuf_copy_partial(p, tmpbuf, (uint16)chunk,
+                                                       poff);
+                        if (got == 0)
+                            break;
+                        if (vm_copyout(current->vm,
+                                       iovs[iov_idx].iov_base + iov_off,
                                        tmpbuf, got) < 0) {
-                            if (!reused_lastpbuf)
+                            if (!(recv_flags & MSG_PEEK) && copied_from_pbuf > 0) {
+                                sk->lastpbuf = p;
+                                sk->lastpbuf_off = poff;
+                            } else if (!reused_lastpbuf) {
                                 pbuf_free(p);
+                            }
+                            if (!(recv_flags & MSG_PEEK) && copied_from_pbuf > 0)
+                                sock_tcp_recvd(sk, copied_from_pbuf);
                             return received > 0 ? (uint64)received : (uint64)-EFAULT;
                         }
+
                         poff += got;
-                        copied += got;
+                        iov_off += got;
                         total += got;
+                        copied_from_pbuf += got;
                     }
+
+                    if (recv_flags & MSG_PEEK) {
+                        sk->lastpbuf = p;
+                        sk->lastpbuf_off = start_off;
+                        break;
+                    } else if (poff < p->tot_len) {
+                        sk->lastpbuf = p;
+                        sk->lastpbuf_off = poff;
+                    } else {
+                        pbuf_free(p);
+                        sk->lastpbuf = NULL;
+                        sk->lastpbuf_off = 0;
+                    }
+
+                    sock_tcp_recvd(sk, copied_from_pbuf);
+                    if (copied_from_pbuf == 0)
+                        break;
                 }
 
-                if (flags & MSG_PEEK) {
-                    sk->lastpbuf = p;
-                    sk->lastpbuf_off = start_off;
-                } else if (poff < p->tot_len) {
-                    sk->lastpbuf = p;
-                    sk->lastpbuf_off = poff;
-                } else {
-                    pbuf_free(p);
-                    sk->lastpbuf = NULL;
-                    sk->lastpbuf_off = 0;
-                }
-                if (!(flags & MSG_PEEK))
-                    sock_tcp_recvd(sk, (size_t)total);
+                if (!(recv_flags & MSG_PEEK) && total > 0)
+                    sock_notify_if_still_readable(sockfd, sk);
             } else {
                 struct netbuf *nb = NULL;
                 err_t err = netconn_recv(sk->conn, &nb);
