@@ -3873,15 +3873,10 @@ uint64 sys_sendmmsg(void)
 
         /* Gather data */
         size_t total = 0;
-        char tmpbuf[8192];
         for (uint64 j = 0; j < mh.msg_iovlen; j++) {
-            if (iovs[j].iov_len > sizeof(tmpbuf) - total)
+            if (iovs[j].iov_len > UNIX_BUF_MAX_SIZE - total)
                 return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
-            size_t chunk = iovs[j].iov_len;
-            if (vm_copyin(current->vm, tmpbuf + total,
-                          iovs[j].iov_base, chunk) < 0)
-                return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
-            total += chunk;
+            total += iovs[j].iov_len;
         }
 
         /* Send via the lwip send path */
@@ -3896,6 +3891,21 @@ uint64 sys_sendmmsg(void)
             if (total > UNIX_BUF_MAX_SIZE)
                 return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
 
+            char *msg_buf = kvmalloc(total ? total : 1);
+            if (msg_buf == NULL)
+                return sent > 0 ? (uint64)sent : (uint64)-ENOMEM;
+            size_t off = 0;
+            for (uint64 j = 0; j < mh.msg_iovlen; j++) {
+                if (iovs[j].iov_len == 0)
+                    continue;
+                if (vm_copyin(current->vm, msg_buf + off,
+                              iovs[j].iov_base, iovs[j].iov_len) < 0) {
+                    kvfree(msg_buf);
+                    return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
+                }
+                off += iovs[j].iov_len;
+            }
+
             struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
             memset(scm_files, 0, sizeof(scm_files));
             size_t scm_count = 0;
@@ -3906,8 +3916,10 @@ uint64 sys_sendmmsg(void)
                 uint64 copy_len = mh.msg_controllen;
                 if (copy_len > sizeof(cmsg_buf))
                     copy_len = sizeof(cmsg_buf);
-                if (vm_copyin(current->vm, cmsg_buf, mh.msg_control, copy_len) < 0)
+                if (vm_copyin(current->vm, cmsg_buf, mh.msg_control, copy_len) < 0) {
+                    kvfree(msg_buf);
                     return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
+                }
 
                 struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
                 if (cmsg->cmsg_level == SOL_SOCKET &&
@@ -3919,8 +3931,10 @@ uint64 sys_sendmmsg(void)
                         ? (copy_len - K_CMSG_LEN(0)) / sizeof(int) : 0;
                     if (nfds > max_fds)
                         nfds = max_fds;
-                    if (nfds >= UNIX_SCM_QUEUE_MAX)
+                    if (nfds >= UNIX_SCM_QUEUE_MAX) {
+                        kvfree(msg_buf);
                         return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
+                    }
                     if (nfds > 0) {
                         int *pass_fds = (int *)K_CMSG_DATA(cmsg);
                         for (size_t k = 0; k < nfds; k++) {
@@ -3929,6 +3943,7 @@ uint64 sys_sendmmsg(void)
                             if (file == NULL) {
                                 for (size_t l = 0; l < scm_count; l++)
                                     vfs_fput(scm_files[l]);
+                                kvfree(msg_buf);
                                 return sent > 0 ? (uint64)sent : (uint64)-EBADF;
                             }
 
@@ -3937,6 +3952,7 @@ uint64 sys_sendmmsg(void)
                             if (scm_files[scm_count] == NULL) {
                                 for (size_t l = 0; l < scm_count; l++)
                                     vfs_fput(scm_files[l]);
+                                kvfree(msg_buf);
                                 return sent > 0 ? (uint64)sent : (uint64)-ENOMEM;
                             }
                             scm_count++;
@@ -3946,17 +3962,74 @@ uint64 sys_sendmmsg(void)
             }
 
             struct vfs_file *notify_file = NULL;
-            spin_lock(&usk->lock);
-            n = unix_sendmsg_atomic_locked(usk, tmpbuf, total,
-                                           scm_files, scm_count);
-            if (n == 0 && usk->peer != NULL) {
-                tq_wakeup_all(&usk->peer->rd_queue, 0, 0);
-                if (usk->peer->file != NULL)
-                    notify_file = vfs_fdup(usk->peer->file);
-            }
-            spin_unlock(&usk->lock);
+            char *grow_data = NULL;
+            size_t grow_capacity = 0;
+            int ret;
+            int nonblock = sock_is_nonblock(sockfd, flags);
+            for (;;) {
+                spin_lock(&usk->lock);
+                char *old_data = NULL;
+                if (grow_data != NULL) {
+                    old_data = unix_ring_install_storage_locked(usk,
+                                                                grow_data,
+                                                                grow_capacity);
+                    grow_data = NULL;
+                    grow_capacity = 0;
+                }
 
-            if (n < 0) {
+                size_t needed_capacity = 0;
+                ret = unix_sendmsg_growth_needed_locked(usk, total,
+                                                        &needed_capacity);
+                if (old_data != NULL) {
+                    spin_unlock(&usk->lock);
+                    kvfree(old_data);
+                    continue;
+                }
+                if (ret < 0) {
+                    spin_unlock(&usk->lock);
+                    break;
+                }
+                if (needed_capacity != 0) {
+                    spin_unlock(&usk->lock);
+                    grow_data = kvmalloc(needed_capacity);
+                    if (grow_data == NULL) {
+                        ret = -ENOMEM;
+                        break;
+                    }
+                    grow_capacity = needed_capacity;
+                    continue;
+                }
+
+                ret = unix_sendmsg_atomic_locked(usk, msg_buf, total,
+                                                 scm_files, scm_count);
+                if (ret == 0 && usk->peer != NULL) {
+                    tq_wakeup_all(&usk->peer->rd_queue, 0, 0);
+                    if (usk->peer->file != NULL)
+                        notify_file = vfs_fdup(usk->peer->file);
+                }
+                if (ret == 0 || ret != -EAGAIN || nonblock) {
+                    spin_unlock(&usk->lock);
+                    break;
+                }
+                if (signal_pending(current)) {
+                    ret = -EINTR;
+                    spin_unlock(&usk->lock);
+                    break;
+                }
+                tq_wait_in_state(&usk->wr_queue, &usk->lock, NULL,
+                                 THREAD_INTERRUPTIBLE);
+                spin_unlock(&usk->lock);
+
+                if (signal_pending(current)) {
+                    ret = -EINTR;
+                    break;
+                }
+            }
+            if (grow_data != NULL)
+                kvfree(grow_data);
+            kvfree(msg_buf);
+
+            if (ret < 0) {
                 for (size_t k = 0; k < scm_count; k++)
                     vfs_fput(scm_files[k]);
             } else {
@@ -3966,10 +4039,24 @@ uint64 sys_sendmmsg(void)
                 vfs_file_knote_notify(notify_file, EVFILT_READ, 0);
                 vfs_fput(notify_file);
             }
+            if (ret < 0)
+                n = ret;
         } else {
             struct lwip_sock *sk = sock_from_fd(sockfd);
             if (sk == NULL)
                 return sent > 0 ? (uint64)sent : (uint64)-EBADF;
+
+            char tmpbuf[8192];
+            if (total > sizeof(tmpbuf))
+                return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
+            size_t off = 0;
+            for (uint64 j = 0; j < mh.msg_iovlen; j++) {
+                size_t chunk = iovs[j].iov_len;
+                if (vm_copyin(current->vm, tmpbuf + off,
+                              iovs[j].iov_base, chunk) < 0)
+                    return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
+                off += chunk;
+            }
 
             if (sk->type == SOCK_STREAM) {
                 size_t written = 0;
