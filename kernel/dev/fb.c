@@ -3422,6 +3422,22 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         int ret;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
+
+        ret = virtio_gpu_user_get_caps(NULL, 0, &capset_id, &capset_ver,
+                                       &capset_size);
+        if (ret == -ENODEV) {
+            capset_id = 0;
+            capset_ver = 0;
+            capset_size = 0;
+            ret = 0;
+        }
+        if (ret != 0)
+            return ret;
+        if (req.cap_set_id != 0 && req.cap_set_id != capset_id)
+            return -EINVAL;
+        if (req.cap_set_ver != 0 && req.cap_set_ver > capset_ver)
+            return -EINVAL;
+
         if (req.addr != 0 && req.size != 0) {
             if (req.size > PGSIZE)
                 return -EINVAL;
@@ -3429,10 +3445,8 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
             if (caps == NULL)
                 return -ENOMEM;
         }
-        ret = virtio_gpu_user_get_caps(caps, req.addr ? req.size : 0,
-                                       &capset_id, &capset_ver, &capset_size);
-        if (ret == -ENODEV)
-            ret = 0;
+        if (caps != NULL)
+            ret = virtio_gpu_user_get_caps(caps, req.size, NULL, NULL, NULL);
         copy_size = capset_size;
         if (copy_size > req.size)
             copy_size = req.size;
