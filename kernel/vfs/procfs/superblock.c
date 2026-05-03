@@ -243,7 +243,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         int    tgid   = (int)(offset / PROCFS_PID_STRIDE);
         int    slot   = (int)(offset % PROCFS_PID_STRIDE);
 
-        if (tgid <= 0 || slot > 16) {
+        if (tgid <= 0 || slot > 17) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -362,10 +362,135 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 4096;
             break;
+        case 17: /* /proc/<tgid>/task/ */
+            pi->type              = PROC_TASKDIR;
+            pi->vfs_inode.mode    = S_IFDIR | 0555;
+            pi->vfs_inode.n_links = 2;
+            break;
         default:
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
+        return &pi->vfs_inode;
+    }
+
+    /* ---- /proc/<tgid>/task/<tid>/ entries ---- */
+
+    if (ino >= PROCFS_TASK_BASE) {
+        uint64 offset = ino - PROCFS_TASK_BASE;
+        int    tgid   = (int)(offset / PROCFS_TASK_TGID_STRIDE);
+        uint64 rem    = offset % PROCFS_TASK_TGID_STRIDE;
+        int    tid    = (int)(rem / PROCFS_TASK_TID_STRIDE);
+        int    slot   = (int)(rem % PROCFS_TASK_TID_STRIDE);
+
+        if (tgid <= 0 || tid <= 0 || slot < 0 || slot > 13) {
+            slab_free(pi);
+            return ERR_PTR(-ENOENT);
+        }
+
+        rcu_read_lock();
+        struct thread *p = NULL;
+        get_pid_thread(tid, &p);
+        int valid = (p != NULL && p->tgid == tgid);
+        rcu_read_unlock();
+
+        if (!valid) {
+            slab_free(pi);
+            return ERR_PTR(-ENOENT);
+        }
+
+        pi->pid = tgid;
+        pi->tid = tid;
+
+        switch (slot) {
+        case 0: /* /proc/<tgid>/task/<tid>/ */
+            pi->type              = PROC_TASK_TID_DIR;
+            pi->vfs_inode.mode    = S_IFDIR | 0555;
+            pi->vfs_inode.n_links = 2;
+            break;
+        case 1: /* status */
+            pi->type              = PROC_TASK_STATUS;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 4096;
+            break;
+        case 2: /* stat */
+            pi->type              = PROC_TASK_STAT;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 512;
+            break;
+        case 3: /* statm */
+            pi->type              = PROC_TASK_STATM;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 128;
+            break;
+        case 4: /* comm */
+            pi->type              = PROC_TASK_COMM;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 64;
+            break;
+        case 5: /* cmdline */
+            pi->type              = PROC_TASK_CMDLINE;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 512;
+            break;
+        case 6: /* maps */
+            pi->type              = PROC_TASK_MAPS;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 4096;
+            break;
+        case 7: /* smaps */
+            pi->type              = PROC_TASK_SMAPS;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 4096;
+            break;
+        case 8: /* cgroup */
+            pi->type              = PROC_TASK_CGROUP;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 128;
+            break;
+        case 9: /* mountinfo */
+            pi->type              = PROC_TASK_MOUNTINFO;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 1024;
+            break;
+        case 10: /* mounts */
+            pi->type              = PROC_TASK_MOUNTS;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 512;
+            break;
+        case 11: /* limits */
+            pi->type              = PROC_TASK_LIMITS;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 1024;
+            break;
+        case 12: /* environ */
+            pi->type              = PROC_TASK_ENVIRON;
+            pi->vfs_inode.mode    = S_IFREG | 0400;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 0;
+            break;
+        case 13: /* auxv */
+            pi->type              = PROC_TASK_AUXV;
+            pi->vfs_inode.mode    = S_IFREG | 0400;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 0;
+            break;
+        default:
+            slab_free(pi);
+            return ERR_PTR(-ENOENT);
+        }
+
         return &pi->vfs_inode;
     }
 

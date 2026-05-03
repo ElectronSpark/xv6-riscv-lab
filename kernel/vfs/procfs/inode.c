@@ -91,6 +91,23 @@ static const struct procfs_static_entry procfs_pid_entries[] = {
     {"limits", 0},
     {"environ", 0},
     {"auxv", 0},
+    {"task", 0},
+};
+
+static const struct procfs_static_entry procfs_task_entries[] = {
+    {"status", 0},
+    {"stat", 0},
+    {"statm", 0},
+    {"comm", 0},
+    {"cmdline", 0},
+    {"maps", 0},
+    {"smaps", 0},
+    {"cgroup", 0},
+    {"mountinfo", 0},
+    {"mounts", 0},
+    {"limits", 0},
+    {"environ", 0},
+    {"auxv", 0},
 };
 
 static const struct procfs_static_entry procfs_sys_entries[] = {
@@ -182,8 +199,14 @@ static uint64 procfs_pid_entry_ino(int tgid, int child_idx)
     case 13: return PROCFS_PID_LIMITS_INO(tgid);
     case 14: return PROCFS_PID_ENVIRON_INO(tgid);
     case 15: return PROCFS_PID_AUXV_INO(tgid);
+    case 16: return PROCFS_PID_TASKDIR_INO(tgid);
     default: return 0;
     }
+}
+
+static uint64 procfs_task_entry_ino(int tgid, int tid, int child_idx)
+{
+    return PROCFS_TASK_INO(tgid, tid, child_idx + 1);
 }
 
 /* ------------------------------------------------------------------ */
@@ -208,6 +231,49 @@ static int procfs_nth_tgid(int n) {
     struct __nth_tgid_arg arg = {.target = n, .cnt = 0, .result = -1};
     proctab_for_each_tgid(__nth_tgid_cb, &arg);
     return arg.result;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Helper: find the n-th thread (0-based) in a thread group          */
+/* ------------------------------------------------------------------ */
+
+struct __nth_tid_arg {
+    int tgid;
+    int target;
+    int cnt;
+    int result;
+};
+
+static void __nth_tid_cb(struct thread *p, void *arg)
+{
+    struct __nth_tid_arg *a = arg;
+    if (a->result >= 0 || p->tgid != a->tgid)
+        return;
+    if (a->cnt++ == a->target)
+        a->result = p->pid;
+}
+
+static int procfs_nth_tid(int tgid, int n)
+{
+    struct __nth_tid_arg arg = {
+        .tgid = tgid,
+        .target = n,
+        .cnt = 0,
+        .result = -1,
+    };
+    proctab_for_each_rcu(__nth_tid_cb, &arg);
+    return arg.result;
+}
+
+static int procfs_valid_tid_in_tgid(int tgid, int tid)
+{
+    int valid;
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tid, &p);
+    valid = p != NULL && p->tgid == tgid;
+    rcu_read_unlock();
+    return valid;
 }
 
 /* ------------------------------------------------------------------ */
@@ -294,6 +360,34 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             if (len == name_len &&
                 memcmp(name, procfs_pid_entries[i].name, len) == 0) {
                 dentry->ino = procfs_pid_entry_ino(pi->pid, i);
+                return 0;
+            }
+        }
+        return -ENOENT;
+    }
+
+    case PROC_TASKDIR: {
+        if (name_len == 0 || name_len > 7)
+            return -ENOENT;
+        int tid = 0;
+        for (size_t i = 0; i < name_len; i++) {
+            if (name[i] < '0' || name[i] > '9')
+                return -ENOENT;
+            tid = tid * 10 + (name[i] - '0');
+        }
+        if (tid <= 0 || !procfs_valid_tid_in_tgid(pi->pid, tid))
+            return -ENOENT;
+
+        dentry->ino = PROCFS_TASK_TID_DIR_INO(pi->pid, tid);
+        return 0;
+    }
+
+    case PROC_TASK_TID_DIR: {
+        for (int i = 0; i < NELEM(procfs_task_entries); i++) {
+            size_t len = strlen(procfs_task_entries[i].name);
+            if (len == name_len &&
+                memcmp(name, procfs_task_entries[i].name, len) == 0) {
+                dentry->ino = procfs_task_entry_ino(pi->pid, pi->tid, i);
                 return 0;
             }
         }
@@ -391,8 +485,10 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         uint64 parent_ino;
         if (pi->type == PROC_PID_DIR) {
             parent_ino = PROCFS_INO_ROOT;
-        } else if (pi->type == PROC_FDDIR) {
+        } else if (pi->type == PROC_FDDIR || pi->type == PROC_TASKDIR) {
             parent_ino = PROCFS_PID_DIR_INO(pi->pid);
+        } else if (pi->type == PROC_TASK_TID_DIR) {
+            parent_ino = PROCFS_PID_TASKDIR_INO(pi->pid);
         } else if (pi->type == PROC_SYS_DIR) {
             parent_ino = PROCFS_INO_ROOT;
         } else if (pi->type == PROC_SYS_KERNEL_DIR ||
@@ -467,6 +563,46 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         ret_dentry->name_len = (uint16)strlen(name);
         ret_dentry->ino      = procfs_pid_entry_ino(pi->pid, child_idx);
         ret_dentry->cookies  = (int64)iter->index;
+        return 0;
+    }
+
+    /* ---- /proc/<tgid>/task/ children ---- */
+    case PROC_TASKDIR: {
+        int tid = procfs_nth_tid(pi->pid, child_idx);
+        if (tid < 0) {
+            vfs_release_dentry(ret_dentry);
+            ret_dentry->name = NULL;
+            return 0;
+        }
+
+        char nbuf[12];
+        int nlen = snprintf(nbuf, sizeof(nbuf), "%d", tid);
+        vfs_release_dentry(ret_dentry);
+        ret_dentry->name = strndup(nbuf, nlen);
+        if (ret_dentry->name == NULL)
+            return -ENOMEM;
+        ret_dentry->name_len = (uint16)nlen;
+        ret_dentry->ino = PROCFS_TASK_TID_DIR_INO(pi->pid, tid);
+        ret_dentry->cookies = (int64)iter->index;
+        return 0;
+    }
+
+    /* ---- /proc/<tgid>/task/<tid>/ children ---- */
+    case PROC_TASK_TID_DIR: {
+        if (child_idx < 0 || child_idx >= NELEM(procfs_task_entries)) {
+            vfs_release_dentry(ret_dentry);
+            ret_dentry->name = NULL;
+            return 0;
+        }
+
+        const char *name = procfs_task_entries[child_idx].name;
+        vfs_release_dentry(ret_dentry);
+        ret_dentry->name = strdup(name);
+        if (ret_dentry->name == NULL)
+            return -ENOMEM;
+        ret_dentry->name_len = (uint16)strlen(name);
+        ret_dentry->ino = procfs_task_entry_ino(pi->pid, pi->tid, child_idx);
+        ret_dentry->cookies = (int64)iter->index;
         return 0;
     }
 
@@ -706,6 +842,7 @@ static char *procfs_gen_status(int tgid) {
     const char      *statestr = thread_state_short(__thread_state_get(p));
     const char      *statelong = thread_state_to_str(__thread_state_get(p));
     vm_t            *vm       = p->vm;
+    int              real_tgid = p->tgid;
     int              pid      = p->pid;
     int              pgid     = p->pgid;
     int              sid      = p->sid;
@@ -772,7 +909,7 @@ static char *procfs_gen_status(int tgid) {
 
     int pos = snprintf(buf, PROCFS_BUF_SIZE,
                        "Name:\t%s\n"
-                       "Umask:\t%04o\n"
+                       "Umask:\t%u\n"
                        "State:\t%s (%s)\n"
                        "Tgid:\t%d\n"
                        "Ngid:\t0\n"
@@ -783,7 +920,7 @@ static char *procfs_gen_status(int tgid) {
                        "Gid:\t%u\t%u\t%u\t%u\n"
                        "FDSize:\t%d\n"
                        "Groups:",
-                       name, 0022, statestr, statelong, tgid, pid, ppid,
+                       name, 22, statestr, statelong, real_tgid, pid, ppid,
                        (unsigned)p_uid, (unsigned)p_euid,
                        (unsigned)p_suid, (unsigned)p_euid,
                        (unsigned)p_gid, (unsigned)p_egid,
@@ -864,7 +1001,7 @@ static char *procfs_gen_status(int tgid) {
                  "CpuTime:\t%lu\n"
                  "UtilAvg:\t%u\n"
                  "LoadContrib:\t%lu\n",
-                 tgid, pid, pgid, sid, kthread,
+                 real_tgid, pid, pgid, sid, kthread,
                  vm_size_kb, vm_size_kb, 0, 0, vm_rss_kb, vm_rss_kb,
                  rss_anon_kb, rss_file_kb, 0, vm_data_kb, vm_stk_kb,
                  vm_exe_kb, 0, vm_pte_kb, 0, 0, threads, NSIG,
@@ -1734,22 +1871,35 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_STATUS:
         buf = procfs_gen_status(pi->pid);
         break;
+    case PROC_TASK_STATUS:
+        buf = procfs_gen_status(pi->tid);
+        break;
     case PROC_PID_STAT:
         buf = procfs_gen_pid_stat(pi->pid);
         break;
+    case PROC_TASK_STAT:
+        buf = procfs_gen_pid_stat(pi->tid);
+        break;
     case PROC_PID_CMDLINE:
+    case PROC_TASK_CMDLINE:
         buf = procfs_gen_pid_cmdline(pi->pid);
         break;
     case PROC_PID_COMM:
         buf = procfs_gen_pid_comm(pi->pid);
         break;
+    case PROC_TASK_COMM:
+        buf = procfs_gen_pid_comm(pi->tid);
+        break;
     case PROC_STATM:
+    case PROC_TASK_STATM:
         buf = procfs_gen_statm(pi->pid);
         break;
     case PROC_MAPS:
+    case PROC_TASK_MAPS:
         buf = procfs_gen_maps(pi->pid);
         break;
     case PROC_PID_SMAPS:
+    case PROC_TASK_SMAPS:
         buf = procfs_gen_smaps(pi->pid);
         break;
     case PROC_MEMINFO:
@@ -1763,6 +1913,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_CGROUP:
         buf = procfs_gen_cgroup(pi->pid);
+        break;
+    case PROC_TASK_CGROUP:
+        buf = procfs_gen_cgroup(pi->tid);
         break;
     case PROC_CMDLINE:
         buf = procfs_gen_cmdline();
@@ -1786,16 +1939,21 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         buf = procfs_gen_mounts();
         break;
     case PROC_PID_MOUNTS:
+    case PROC_TASK_MOUNTS:
         buf = procfs_gen_mounts();
         break;
     case PROC_PID_MOUNTINFO:
+    case PROC_TASK_MOUNTINFO:
         buf = procfs_gen_mountinfo();
         break;
     case PROC_PID_LIMITS:
+    case PROC_TASK_LIMITS:
         buf = procfs_gen_limits();
         break;
     case PROC_PID_ENVIRON:
     case PROC_PID_AUXV:
+    case PROC_TASK_ENVIRON:
+    case PROC_TASK_AUXV:
         buf = procfs_gen_empty();
         break;
     case PROC_RESOURCES:

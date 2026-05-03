@@ -192,6 +192,7 @@ int get_pid_thread(int pid, struct thread **pp);
  * proctab_for_each_rcu).  @fn must not block or sleep.
  */
 void proctab_for_each_tgid(void (*fn)(int tgid, void *arg), void *arg);
+void proctab_for_each_rcu(void (*fn)(struct thread *p, void *arg), void *arg);
 void exit(int);
 void vfork_done(struct thread *p);
 int thread_clone(struct clone_args *args);

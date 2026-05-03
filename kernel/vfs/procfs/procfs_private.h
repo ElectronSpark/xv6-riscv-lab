@@ -22,6 +22,16 @@
  *       comm               → regular file
  *       statm              → regular file
  *       cgroup             → regular file
+ *       task/
+ *         <tid>/           → per-thread directory
+ *           stat           → regular file
+ *           status         → regular file
+ *           comm           → regular file
+ *           statm          → regular file
+ *           cmdline        → regular file
+ *           maps           → regular file
+ *           smaps          → regular file
+ *           cgroup         → regular file
  *       maps               → regular file
  *       smaps              → regular file
  *       mountinfo          → regular file
@@ -102,6 +112,21 @@ enum procfs_entry_type {
     PROC_PID_ENVIRON,   /* /proc/<tgid>/environ   */
     PROC_PID_AUXV,      /* /proc/<tgid>/auxv      */
     PROC_PID_SMAPS,     /* /proc/<tgid>/smaps     */
+    PROC_TASKDIR,       /* /proc/<tgid>/task      */
+    PROC_TASK_TID_DIR,  /* /proc/<tgid>/task/<tid> */
+    PROC_TASK_STATUS,
+    PROC_TASK_STAT,
+    PROC_TASK_STATM,
+    PROC_TASK_COMM,
+    PROC_TASK_CMDLINE,
+    PROC_TASK_MAPS,
+    PROC_TASK_SMAPS,
+    PROC_TASK_CGROUP,
+    PROC_TASK_MOUNTINFO,
+    PROC_TASK_MOUNTS,
+    PROC_TASK_LIMITS,
+    PROC_TASK_ENVIRON,
+    PROC_TASK_AUXV,
     PROC_SYS_KERNEL_OSTYPE,
     PROC_SYS_KERNEL_OSRELEASE,
     PROC_SYS_KERNEL_VERSION,
@@ -185,7 +210,21 @@ enum procfs_entry_type {
 #define PROCFS_PID_ENVIRON_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 14)
 #define PROCFS_PID_AUXV_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 15)
 #define PROCFS_PID_SMAPS_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 16)
+#define PROCFS_PID_TASKDIR_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 17)
 #define PROCFS_FD_INO(tgid, fd)     (PROCFS_FD_BASE + (uint64)(tgid)*1000ULL + (uint64)(fd))
+
+/*
+ * Per-thread entries sit above fd symlinks.  Decode these before PROCFS_FD_BASE
+ * consumers, since every value above PROCFS_FD_BASE was historically treated as
+ * an fd inode.
+ */
+#define PROCFS_TASK_BASE        (PROCFS_FD_BASE + 100000ULL * 1000ULL)
+#define PROCFS_TASK_TID_STRIDE  32ULL
+#define PROCFS_TASK_TGID_STRIDE (100000ULL * PROCFS_TASK_TID_STRIDE)
+#define PROCFS_TASK_INO(tgid, tid, slot) \
+    (PROCFS_TASK_BASE + (uint64)(tgid) * PROCFS_TASK_TGID_STRIDE + \
+     (uint64)(tid) * PROCFS_TASK_TID_STRIDE + (uint64)(slot))
+#define PROCFS_TASK_TID_DIR_INO(tgid, tid) PROCFS_TASK_INO(tgid, tid, 0)
 
 /* ------------------------------------------------------------------ */
 /*  Embedded VFS inode                                                */
@@ -194,6 +233,7 @@ struct procfs_inode {
     struct vfs_inode       vfs_inode; /* must be first — cast-compatible */
     enum procfs_entry_type type;
     int                    pid;       /* tgid; 0 for global entries       */
+    int                    tid;       /* only valid for PROC_TASK_*       */
     int                    fd;        /* only valid for PROC_FD_ENTRY      */
 };
 
