@@ -4166,6 +4166,7 @@ uint64 sys_recvmmsg(void)
         int domain = sock_domain_from_fd(sockfd);
         int recv_flags = (i > 0) ? (flags | MSG_DONTWAIT) : flags;
         ssize_t total = 0;
+        int msg_flags = 0;
 
         if (domain == AF_UNIX) {
             struct unix_sock *usk = unix_sock_from_fd(sockfd);
@@ -4180,15 +4181,184 @@ uint64 sys_recvmmsg(void)
             if (recv_flags & MSG_DONTWAIT)
                 f->f_flags |= O_NONBLOCK;
 
-            int hit_scm_barrier = 0;
-            for (uint64 j = 0; j < mh.msg_iovlen; j++) {
-                size_t copied_iov = 0;
-                while (copied_iov < iovs[j].iov_len) {
-                    struct unix_sock *peer;
-                    size_t want = iovs[j].iov_len - copied_iov;
-                    size_t barrier_bytes = 0;
+            int out_flags = 0;
+            if (usk->type == SOCK_SEQPACKET) {
+                struct unix_sock *peer = NULL;
+                size_t packet_len = 0;
 
-                    if (!(recv_flags & MSG_PEEK)) {
+                for (;;) {
+                    bool read_shutdown;
+                    bool peer_write_shutdown = false;
+                    int pkt_ret;
+
+                    spin_lock(&usk->lock);
+                    peer = usk->peer;
+                    unix_sock_get_ref(peer);
+                    read_shutdown = (usk->shutdown_flags & UNIX_SHUT_RD) != 0;
+                    spin_unlock(&usk->lock);
+
+                    if (peer == NULL) {
+                        unix_sock_put_ref(peer);
+                        break;
+                    }
+
+                    spin_lock(&peer->lock);
+                    pkt_ret = unix_packet_next_len_locked(peer, &packet_len);
+                    peer_write_shutdown =
+                        (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
+                    spin_unlock(&peer->lock);
+                    if (pkt_ret == 0)
+                        break;
+
+                    if (read_shutdown || peer_write_shutdown) {
+                        unix_sock_put_ref(peer);
+                        peer = NULL;
+                        break;
+                    }
+                    if (saved_fflags & O_NONBLOCK) {
+                        unix_sock_put_ref(peer);
+                        f->f_flags = saved_fflags;
+                        vfs_fput(f);
+                        return received > 0 ? (uint64)received : (uint64)-EAGAIN;
+                    }
+                    if (signal_pending(current)) {
+                        unix_sock_put_ref(peer);
+                        f->f_flags = saved_fflags;
+                        vfs_fput(f);
+                        return received > 0 ? (uint64)received : (uint64)-EINTR;
+                    }
+
+                    unix_sock_put_ref(peer);
+                    peer = NULL;
+                    spin_lock(&usk->lock);
+                    tq_wait_in_state(&usk->rd_queue, &usk->lock, NULL,
+                                     THREAD_INTERRUPTIBLE);
+                    spin_unlock(&usk->lock);
+                    if (signal_pending(current)) {
+                        f->f_flags = saved_fflags;
+                        vfs_fput(f);
+                        return received > 0 ? (uint64)received : (uint64)-EINTR;
+                    }
+                }
+
+                if (peer != NULL) {
+                    size_t capacity = 0;
+                    for (uint64 j = 0; j < mh.msg_iovlen; j++)
+                        capacity += iovs[j].iov_len;
+                    size_t to_copy = packet_len < capacity ? packet_len : capacity;
+                    if (packet_len > capacity)
+                        out_flags |= MSG_TRUNC;
+
+                    char *packet_buf = kvmalloc(to_copy ? to_copy : 1);
+                    if (packet_buf == NULL) {
+                        unix_sock_put_ref(peer);
+                        f->f_flags = saved_fflags;
+                        vfs_fput(f);
+                        return received > 0 ? (uint64)received : (uint64)-ENOMEM;
+                    }
+
+                    size_t copied_packet;
+                    spin_lock(&peer->lock);
+                    if (recv_flags & MSG_PEEK) {
+                        copied_packet = unix_ring_peek(&peer->tx, 0,
+                                                       packet_buf, to_copy);
+                    } else {
+                        copied_packet = unix_ring_read_locked(&peer->tx,
+                                                             packet_buf, to_copy);
+                        if (packet_len > copied_packet) {
+                            uint mark = peer->packet_queue[peer->packet_head];
+                            smp_store_release(&peer->tx.nread, mark);
+                        }
+                        unix_packet_pop_locked(peer);
+                        tq_wakeup_all(&peer->wr_queue, 0, 0);
+                    }
+                    spin_unlock(&peer->lock);
+
+                    if (copied_packet != to_copy) {
+                        kvfree(packet_buf);
+                        unix_sock_put_ref(peer);
+                        f->f_flags = saved_fflags;
+                        vfs_fput(f);
+                        return received > 0 ? (uint64)received : (uint64)-EIO;
+                    }
+
+                    size_t packet_off = 0;
+                    for (uint64 j = 0; j < mh.msg_iovlen &&
+                         packet_off < copied_packet; j++) {
+                        size_t want = iovs[j].iov_len;
+                        if (want > copied_packet - packet_off)
+                            want = copied_packet - packet_off;
+                        if (want == 0)
+                            continue;
+                        if (vm_copyout(current->vm, iovs[j].iov_base,
+                                       packet_buf + packet_off, want) < 0) {
+                            kvfree(packet_buf);
+                            unix_sock_put_ref(peer);
+                            f->f_flags = saved_fflags;
+                            vfs_fput(f);
+                            return received > 0 ? (uint64)received : (uint64)-EFAULT;
+                        }
+                        packet_off += want;
+                        total += want;
+                    }
+                    kvfree(packet_buf);
+                    unix_sock_put_ref(peer);
+                }
+            } else if (recv_flags & MSG_PEEK) {
+                size_t peek_off = 0;
+                char tmp[128];
+
+                for (uint64 j = 0; j < mh.msg_iovlen; j++) {
+                    size_t copied_iov = 0;
+                    while (copied_iov < iovs[j].iov_len) {
+                        struct unix_sock *peer;
+                        size_t want = iovs[j].iov_len - copied_iov;
+                        if (want > sizeof(tmp))
+                            want = sizeof(tmp);
+
+                        spin_lock(&usk->lock);
+                        peer = usk->peer;
+                        unix_sock_get_ref(peer);
+                        spin_unlock(&usk->lock);
+
+                        size_t got = 0;
+                        if (peer != NULL) {
+                            spin_lock(&peer->lock);
+                            got = unix_ring_peek(&peer->tx, peek_off, tmp, want);
+                            spin_unlock(&peer->lock);
+                        }
+
+                        if (got == 0) {
+                            unix_sock_put_ref(peer);
+                            break;
+                        }
+                        if (vm_copyout(current->vm,
+                                       iovs[j].iov_base + copied_iov,
+                                       tmp, got) < 0) {
+                            unix_sock_put_ref(peer);
+                            f->f_flags = saved_fflags;
+                            vfs_fput(f);
+                            return received > 0 ? (uint64)received : (uint64)-EFAULT;
+                        }
+                        copied_iov += got;
+                        peek_off += got;
+                        total += got;
+                        unix_sock_put_ref(peer);
+                        if (got < want)
+                            break;
+                    }
+                    if (copied_iov < iovs[j].iov_len)
+                        break;
+                }
+            } else {
+                int hit_scm_barrier = 0;
+                for (uint64 j = 0; j < mh.msg_iovlen; j++) {
+                    size_t copied_iov = 0;
+                    while (copied_iov < iovs[j].iov_len) {
+                        struct unix_sock *peer;
+                        size_t want = iovs[j].iov_len - copied_iov;
+                        size_t barrier_bytes = 0;
+
                         spin_lock(&usk->lock);
                         peer = usk->peer;
                         unix_sock_get_ref(peer);
@@ -4206,29 +4376,30 @@ uint64 sys_recvmmsg(void)
                             spin_unlock(&peer->lock);
                         }
                         unix_sock_put_ref(peer);
-                    }
 
-                    if (want == 0 || hit_scm_barrier)
-                        break;
+                        if (want == 0 || hit_scm_barrier)
+                            break;
 
-                    ssize_t n = unix_socket_file_ops.read(
-                        f, (char *)(iovs[j].iov_base + copied_iov), want, 1);
-                    if (n < 0) {
-                        f->f_flags = saved_fflags;
-                        vfs_fput(f);
-                        return received > 0 ? (uint64)received : (uint64)n;
+                        ssize_t n = unix_socket_file_ops.read(
+                            f, (char *)(iovs[j].iov_base + copied_iov),
+                            want, 1);
+                        if (n < 0) {
+                            f->f_flags = saved_fflags;
+                            vfs_fput(f);
+                            return received > 0 ? (uint64)received : (uint64)n;
+                        }
+                        total += n;
+                        copied_iov += (size_t)n;
+                        if ((size_t)n < want)
+                            break;
+                        if (barrier_bytes != 0 && (size_t)n == barrier_bytes) {
+                            hit_scm_barrier = 1;
+                            break;
+                        }
                     }
-                    total += n;
-                    copied_iov += (size_t)n;
-                    if ((size_t)n < want)
+                    if (hit_scm_barrier || copied_iov < iovs[j].iov_len)
                         break;
-                    if (barrier_bytes != 0 && (size_t)n == barrier_bytes) {
-                        hit_scm_barrier = 1;
-                        break;
-                    }
                 }
-                if (hit_scm_barrier || copied_iov < iovs[j].iov_len)
-                    break;
             }
             f->f_flags = saved_fflags;
             vfs_fput(f);
@@ -4308,11 +4479,7 @@ uint64 sys_recvmmsg(void)
                 }
             }
 
-            int zero_flags = 0;
-            vm_copyout(current->vm,
-                       entry_addr + __builtin_offsetof(struct k_msghdr,
-                                                       msg_flags),
-                       &zero_flags, sizeof(zero_flags));
+            msg_flags = out_flags;
         } else {
             struct lwip_sock *sk = sock_from_fd(sockfd);
             if (sk == NULL)
@@ -4419,11 +4586,9 @@ uint64 sys_recvmmsg(void)
                    entry_addr + sizeof(struct k_msghdr),
                    &msg_len, sizeof(msg_len));
 
-        /* Clear msg_flags */
-        int zero_flags = 0;
         vm_copyout(current->vm,
                    entry_addr + __builtin_offsetof(struct k_msghdr, msg_flags),
-                   &zero_flags, sizeof(zero_flags));
+                   &msg_flags, sizeof(msg_flags));
 
         received++;
 
