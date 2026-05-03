@@ -2471,23 +2471,22 @@ static cdev_t gpu_render_cdev;
 static int gpu_copyout_string(uint64 dst, uint64 *len, const char *src)
 {
     uint64 actual = strlen(src);
-    uint64 n;
+    uint64 n, cap;
 
     if (len == NULL)
         return -EINVAL;
-    n = *len;
+    cap = *len;
+    n = cap;
     *len = actual;
     if (dst == 0 || n == 0)
         return 0;
-    if (n > actual + 1)
-        n = actual + 1;
-    if (n == 0)
-        return 0;
-    if (either_copyout(1, dst, (void *)src, n - 1) < 0)
+    if (n > actual)
+        n = actual;
+    if (either_copyout(1, dst, (void *)src, n) < 0)
         return -EFAULT;
-    {
+    if (cap > n) {
         char nul = 0;
-        if (either_copyout(1, dst + n - 1, &nul, 1) < 0)
+        if (either_copyout(1, dst + n, &nul, 1) < 0)
             return -EFAULT;
     }
     return 0;
