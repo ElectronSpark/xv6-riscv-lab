@@ -78,6 +78,8 @@ struct thread_group {
     // Group-wide exit coordination
     _Atomic int group_exit;         // Non-zero if exit_group() has been called
     int group_exit_code;            // Exit code from exit_group()
+    int group_exit_signo;           // Terminating signal for wait status
+    int group_exit_kill_code;       // Kernel reason code for signal exits
     struct thread *group_exit_task; // Thread that initiated exit_group()
 
     // Group stop support  (SIGSTOP/SIGTSTP to the process)

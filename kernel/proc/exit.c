@@ -101,6 +101,12 @@ static bool trace_browser_child(struct thread *child) {
            child->pgid == 48 || child->tgid == 48;
 }
 
+static int wait_status_from_child(struct thread *child) {
+    if (child != NULL && child->killed_signo > 0)
+        return child->killed_signo & 0x7f;
+    return (child->xstate & 0xff) << 8;
+}
+
 // Exit the current thread.  Does not return.
 // An exited thread remains in the zombie state
 // until its parent calls wait().
@@ -142,6 +148,10 @@ void exit(int status) {
     }
     if (tg != NULL && thread_group_exiting(tg) && tg->group_exit_task != p) {
         status = tg->group_exit_code;
+        if (tg->group_exit_signo > 0) {
+            p->killed_signo = tg->group_exit_signo;
+            p->killed_code = tg->group_exit_kill_code;
+        }
     }
 
     // Notify GDB stub before tearing down resources (VM, fds, etc.).
@@ -219,6 +229,13 @@ void exit(int status) {
         if (last_in_group && tg != NULL && tg->group_leader != NULL) {
             struct thread *leader = tg->group_leader;
             leader->xstate = status;
+            if (p->killed_signo > 0) {
+                leader->killed_signo = p->killed_signo;
+                leader->killed_code = p->killed_code;
+            } else if (tg->group_exit_signo > 0) {
+                leader->killed_signo = tg->group_exit_signo;
+                leader->killed_code = tg->group_exit_kill_code;
+            }
             pid_rlock();
             struct thread *parent = leader->parent;
             pid_runlock();
@@ -548,13 +565,16 @@ int waitpid(int target_pid, uint64 addr, int options) {
                     }
                     // Encode exited status: (exit_code << 8) | 0x00
                     xstate = (child->xstate & 0xff) << 8;
+                    if (child->killed_signo > 0)
+                        xstate = wait_status_from_child(child);
                     pid = child->pid;
                     if (trace_browser_child(child)) {
                         struct thread_group *ctg = child->thread_group;
                         int live = ctg ? __atomic_load_n(&ctg->live_threads, __ATOMIC_ACQUIRE) : -1;
-                        printf("waitpid: reaping pid=%d tgid=%d name='%s' state=%d live=%d xstate=%d parent='%s' target=%d\n",
+                        printf("waitpid: reaping pid=%d tgid=%d name='%s' state=%d live=%d xstate=%d wait_status=%d killed_signo=%d killed_code=%d parent='%s' target=%d\n",
                                child->pid, child->tgid, child->name,
                                __thread_state_get(child), live, child->xstate,
+                               xstate, child->killed_signo, child->killed_code,
                                child->parent ? child->parent->name : "NULL",
                                target_pid);
                     }

@@ -130,6 +130,8 @@ int thread_group_alloc(struct thread *leader) {
     __atomic_store_n(&tg->refcount, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->group_exit, 0, __ATOMIC_SEQ_CST);
     tg->group_exit_code = 0;
+    tg->group_exit_signo = 0;
+    tg->group_exit_kill_code = 0;
     tg->group_exit_task = NULL;
     tg->group_stop_count = 0;
     tg->group_stop_signo = 0;
@@ -171,6 +173,8 @@ int thread_group_alloc_kernel(struct thread_group **out_tg, pid_t tgid) {
     __atomic_store_n(&tg->refcount, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->group_exit, 0, __ATOMIC_SEQ_CST);
     tg->group_exit_code = 0;
+    tg->group_exit_signo = 0;
+    tg->group_exit_kill_code = 0;
     tg->group_exit_task = NULL;
     tg->group_stop_count = 0;
     tg->group_stop_signo = 0;
@@ -285,6 +289,8 @@ void thread_group_exit(struct thread *p, int code) {
     }
 
     tg->group_exit_code = code;
+    tg->group_exit_signo = p->killed_signo;
+    tg->group_exit_kill_code = p->killed_code;
     tg->group_exit_task = p;
 
     // Send SIGKILL to all other threads in the group.
@@ -296,6 +302,8 @@ void thread_group_exit(struct thread *p, int code) {
         if (t == p)
             continue;
         // Set the killed flag directly — SIGKILL bypasses all signal logic
+        t->killed_signo = SIGKILL;
+        t->killed_code = 2;
         THREAD_SET_KILLED(t);
         THREAD_SET_SIGPENDING(t);
         // Wake sleeping/stopped threads via the scheduler so they are
@@ -380,6 +388,8 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
         struct thread *tmp;
         list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
             THREAD_SET_KILLED(t);
+            t->killed_signo = SIGKILL;
+            t->killed_code = 2;
             THREAD_SET_SIGPENDING(t);
             if (THREAD_SLEEPING(t)) {
                 scheduler_wakeup_interruptible(t);

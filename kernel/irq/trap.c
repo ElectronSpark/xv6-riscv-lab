@@ -436,6 +436,13 @@ void usertrapret(void) {
 
     if (killed(p)) {
         // If the thread is terminated, exit it.
+        if ((strstr(p->name, "mb") != NULL ||
+             strstr(p->name, "MiniBrowser") != NULL ||
+             strstr(p->name, "WebKit") != NULL ||
+             p->pgid == 48 || p->tgid == 48)) {
+            printf("usertrapret: exiting killed pid=%d tgid=%d name='%s' signo=%d code=%d\n",
+                   p->pid, p->tgid, p->name, p->killed_signo, p->killed_code);
+        }
         thread_group_exit(p, -1);
     }
 

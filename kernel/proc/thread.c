@@ -69,6 +69,8 @@ static void __pcb_init(struct thread *p, struct vfs_fdtable *fdtable) {
     p->fs = NULL;
     p->fdtable = fdtable;
     p->fpu_state = NULL;  /* FPU state allocated on first FP use (lazy) */
+    p->killed_signo = 0;
+    p->killed_code = 0;
     if (p->sched_entity != NULL) {
         memset(p->sched_entity, 0, sizeof(*(p->sched_entity)));
         sched_entity_init(p->sched_entity, p);

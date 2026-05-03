@@ -183,16 +183,39 @@ static bool trace_browser_signal(struct thread *p) {
            p->pgid == 48 || p->tgid == 48;
 }
 
+static const char *kill_code_name(int code) {
+    switch (code) {
+    case 1: return "signal-default";
+    case 2: return "thread-group-exit";
+    case 3: return "pending-after-sigaction";
+    case 4: return "pending-after-mask";
+    case 5: return "invalid-handler";
+    case 6: return "pending-delivery";
+    case 7: return "forced-trap-return";
+    default: return "unknown";
+    }
+}
+
+static void mark_thread_killed(struct thread *p, int signo, int code) {
+    if (p == NULL)
+        return;
+    if (signo > 0) {
+        p->killed_signo = signo;
+        p->killed_code = code;
+    } else if (p->killed_signo == 0) {
+        p->killed_code = code;
+    }
+    THREAD_SET_KILLED(p);
+}
+
 static void trace_browser_signal_send(const char *op, int target_pid,
                                       int signum, struct thread *target) {
-    if (signum != SIGABRT)
-        return;
     if (!trace_browser_signal(current) && !trace_browser_signal(target))
         return;
 #ifdef __x86_64__
     struct trapframe *tf = &current->trapframe->trapframe;
-    printf("signal: %s SIGABRT sender pid=%d tgid=%d name='%s' target=%d",
-           op, current->pid, thread_tgid(current), current->name, target_pid);
+    printf("signal: %s signum=%d sender pid=%d tgid=%d name='%s' target=%d",
+           op, signum, current->pid, thread_tgid(current), current->name, target_pid);
     if (target != NULL)
         printf(" target_name='%s' target_tgid=%d", target->name,
                thread_tgid(target));
@@ -201,8 +224,8 @@ static void trace_browser_signal_send(const char *op, int target_pid,
         print_user_backtrace(current->vm->pagetable,
                              tf->rbp, tf->rip, tf->rsp, tf->rip, 16);
 #else
-    printf("signal: %s SIGABRT sender pid=%d tgid=%d name='%s' target=%d\n",
-           op, current->pid, thread_tgid(current), current->name, target_pid);
+    printf("signal: %s signum=%d sender pid=%d tgid=%d name='%s' target=%d\n",
+           op, signum, current->pid, thread_tgid(current), current->name, target_pid);
 #endif
 }
 
@@ -703,7 +726,7 @@ after_enqueue:
             printf("signal: marking killed pid=%d tgid=%d name='%s' signum=%d default-term\n",
                    p->pid, p->tgid, p->name, info->signo);
         }
-        THREAD_SET_KILLED(p);
+        mark_thread_killed(p, info->signo, 1);
         if (THREAD_STOPPED(p)) {
             // If the thread is stopped, we need to wake it up.
             scheduler_wakeup_stopped(p);
@@ -993,7 +1016,7 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
                            p->pid, p->tgid, p->name,
                            first_signal_in_set(pending_term));
                 }
-                THREAD_SET_KILLED(p);
+                mark_thread_killed(p, first_signal_in_set(pending_term), 3);
             }
         } else {
             // User-installed handler: preserve user-supplied disposition data.
@@ -1070,7 +1093,7 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
                    p->pid, p->tgid, p->name,
                    first_signal_in_set(pending_term));
         }
-        THREAD_SET_KILLED(p);
+        mark_thread_killed(p, first_signal_in_set(pending_term), 4);
     }
     sigacts_unlock(sa);
 
@@ -1209,7 +1232,7 @@ static int __deliver_signal(struct thread *p, int signo, ksiginfo_t *info,
             printf("signal: marking killed pid=%d tgid=%d name='%s' signum=%d invalid-handler\n",
                    p->pid, p->tgid, p->name, signo);
         }
-        THREAD_SET_KILLED(p);
+        mark_thread_killed(p, signo, 5);
         tcb_unlock(p);
         return 0;
     }
@@ -1296,7 +1319,7 @@ void handle_signal(void) {
                        first_signal_in_set(masked & sigterm),
                        masked, sigterm, THREAD_KILLED(p) ? 1 : 0);
             }
-            THREAD_SET_KILLED(p);
+            mark_thread_killed(p, first_signal_in_set(masked & sigterm), 6);
             sigacts_unlock(sa);
             break;
         }
@@ -1474,12 +1497,19 @@ void handle_signal(void) {
         sigacts_unlock(sa);
 
         /* Check each signal — if its default action is SIG_ACT_CORE, log it */
-        for (int s = 1; s <= NSIG; s++) {
+        if (p->killed_signo > 0 && signo_default_action(p->killed_signo) == SIG_ACT_CORE) {
+            crash_log_record(p, p->killed_signo);
+        } else for (int s = 1; s <= NSIG; s++) {
             if (sigismember(&term_pending, s) &&
                 signo_default_action(s) == SIG_ACT_CORE) {
                 crash_log_record(p, s);
                 break;
             }
+        }
+        if (trace_browser_signal(p)) {
+            printf("signal: exiting killed pid=%d tgid=%d name='%s' signo=%d code=%d reason=%s\n",
+                   p->pid, p->tgid, p->name, p->killed_signo,
+                   p->killed_code, kill_code_name(p->killed_code));
         }
 
         thread_group_exit(p, -1);

@@ -121,6 +121,8 @@ struct thread {
     list_node_t children;  // List of child threads
     int children_count;    // Number of children
     int xstate;            // Exit status to be returned to parent's wait
+    int killed_signo;      // Signal that caused THREAD_KILLED, if any
+    int killed_code;       // Kernel reason code for THREAD_KILLED
     list_node_t siblings;  // List of sibling threads
     __STRUCT_CACHELINE_PADDING;
 
