@@ -3315,7 +3315,7 @@ out:
 uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
                  int flags, uint64 new_addr)
 {
-    uint64 ret = (uint64)-1;
+    uint64 ret = (uint64)-EINVAL;
     uint64 new_location = 0;
     uint64 new_location_end = 0;
     vma_t *new_vma = NULL;
@@ -3358,8 +3358,10 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     if (new_size < old_size) {
         uint64 shrink_start = old_addr + new_size;
         vma_t *tail = vma_split(vma, shrink_start);
-        if (tail == NULL)
+        if (tail == NULL) {
+            ret = (uint64)-ENOMEM;
             goto out;
+        }
         if (vma_free(vm, tail) != 0)
             goto out;
         vm_remote_sfence_range(vm, shrink_start, old_size - new_size);
@@ -3385,8 +3387,10 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
         goto out;
     }
 
-    if (!(flags & MREMAP_MAYMOVE))
+    if (!(flags & MREMAP_MAYMOVE)) {
+        ret = (uint64)-ENOMEM;
         goto out;
+    }
 
     if (flags & MREMAP_FIXED) {
         new_location = new_addr;
@@ -3402,24 +3406,32 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
             goto out;
     } else {
         new_location = vm_find_free_range(vm, new_size, 0);
-        if (new_location == 0)
+        if (new_location == 0) {
+            ret = (uint64)-ENOMEM;
             goto out;
+        }
         new_location_end = new_location + new_size;
     }
 
     new_vma = vma_alloc(vm, new_location, new_size, vma->flags);
-    if (new_vma == NULL)
+    if (new_vma == NULL) {
+        ret = (uint64)-ENOMEM;
         goto out;
+    }
 
     if (vma->file != NULL) {
         new_vma->file = vfs_fdup(vma->file);
-        if (new_vma->file == NULL)
+        if (new_vma->file == NULL) {
+            ret = (uint64)-ENOMEM;
             goto err_new_vma;
+        }
         new_vma->pgoff = vma->pgoff;
     }
 
-    if (vma->anon_vma != NULL && anon_vma_fork(new_vma, vma) != 0)
+    if (vma->anon_vma != NULL && anon_vma_fork(new_vma, vma) != 0) {
+        ret = (uint64)-ENOMEM;
         goto err_new_vma;
+    }
 
     for (uint64 offset = 0; offset < old_size;) {
         pte_t *old_pte = walk(vm->pagetable, old_addr + offset, 0, NULL, NULL);
@@ -3432,13 +3444,17 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
                 /* 2MB hugepage: copy PMD entry to new location. */
                 pte_t *new_pmd =
                     walk_pmd(vm->pagetable, new_location + offset, 1);
-                if (new_pmd == NULL)
+                if (new_pmd == NULL) {
+                    ret = (uint64)-ENOMEM;
                     goto err_new_vma;
+                }
                 if (*new_pmd != 0)
                     goto err_new_vma;
                 *new_pmd = *old_pte;
-                if (page_ref_inc((void *)pa) <= 0)
+                if (page_ref_inc((void *)pa) <= 0) {
+                    ret = (uint64)-ENOMEM;
                     goto err_new_vma;
+                }
                 page_t *pg = __pa_to_page(pa);
                 if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
                     page_add_anon_rmap(pg, new_vma, new_location + offset);
@@ -3448,8 +3464,10 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
 
             pte_t *new_pte =
                 walk(vm->pagetable, new_location + offset, 1, NULL, NULL);
-            if (new_pte == NULL)
+            if (new_pte == NULL) {
+                ret = (uint64)-ENOMEM;
                 goto err_new_vma;
+            }
             if (*new_pte != 0)
                 goto err_new_vma;
 
@@ -3457,8 +3475,10 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
              * The old VMA remains intact until the new one is fully built,
              * so failures can unwind by freeing the new VMA only. */
             *new_pte = *old_pte;
-            if (page_ref_inc((void *)pa) <= 0)
+            if (page_ref_inc((void *)pa) <= 0) {
+                ret = (uint64)-ENOMEM;
                 goto err_new_vma;
+            }
             page_t *pg = __pa_to_page(pa);
             /* Only update rmap for HEAD pages (PAGE_TYPE_ANON).
              * Tail pages are skipped — their union stores head_page. */

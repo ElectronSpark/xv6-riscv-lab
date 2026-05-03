@@ -2661,6 +2661,23 @@ static size_t unix_dequeue_scm_rights(struct unix_sock *peer,
     return count;
 }
 
+static int unix_next_scm_barrier_locked(struct unix_sock *peer, size_t *bytes)
+{
+    uint mark;
+
+    if (peer == NULL || peer->scm_head == peer->scm_tail)
+        return 0;
+
+    mark = peer->scm_queue[peer->scm_head].mark_nread;
+    if ((int)(mark - peer->tx.nread) <= 0) {
+        *bytes = 0;
+        return 1;
+    }
+
+    *bytes = (size_t)(mark - peer->tx.nread);
+    return 1;
+}
+
 static size_t unix_ring_write_locked(struct unix_ring *r, const char *buf,
                                      size_t len)
 {
@@ -3416,18 +3433,52 @@ uint64 sys_recvmsg(void)
                 }
             }
         } else {
+            int hit_scm_barrier = 0;
             for (uint64 i = 0; i < mh.msg_iovlen; i++) {
-                if (iovs[i].iov_len == 0)
-                    continue;
-                ssize_t n = unix_socket_file_ops.read(
-                    f, (char *)(iovs[i].iov_base), iovs[i].iov_len, 1);
-                if (n < 0) {
-                    f->f_flags = saved_fflags;
-                    vfs_fput(f);
-                    return total > 0 ? (uint64)total : (uint64)n;
+                size_t copied_iov = 0;
+                while (copied_iov < iovs[i].iov_len) {
+                    struct unix_sock *peer;
+                    size_t want = iovs[i].iov_len - copied_iov;
+                    size_t barrier_bytes = 0;
+
+                    spin_lock(&sk->lock);
+                    peer = sk->peer;
+                    unix_sock_get_ref(peer);
+                    spin_unlock(&sk->lock);
+
+                    if (peer != NULL) {
+                        spin_lock(&peer->lock);
+                        if (unix_next_scm_barrier_locked(peer,
+                                                         &barrier_bytes)) {
+                            if (barrier_bytes == 0)
+                                hit_scm_barrier = 1;
+                            else if (want > barrier_bytes)
+                                want = barrier_bytes;
+                        }
+                        spin_unlock(&peer->lock);
+                    }
+                    unix_sock_put_ref(peer);
+
+                    if (want == 0 || hit_scm_barrier)
+                        break;
+
+                    ssize_t n = unix_socket_file_ops.read(
+                        f, (char *)(iovs[i].iov_base + copied_iov), want, 1);
+                    if (n < 0) {
+                        f->f_flags = saved_fflags;
+                        vfs_fput(f);
+                        return total > 0 ? (uint64)total : (uint64)n;
+                    }
+                    total += n;
+                    copied_iov += (size_t)n;
+                    if ((size_t)n < want)
+                        break;
+                    if (barrier_bytes != 0 && (size_t)n == barrier_bytes) {
+                        hit_scm_barrier = 1;
+                        break;
+                    }
                 }
-                total += n;
-                if ((size_t)n < iovs[i].iov_len)
+                if (hit_scm_barrier)
                     break;
             }
         }

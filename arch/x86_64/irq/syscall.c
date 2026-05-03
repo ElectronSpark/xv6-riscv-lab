@@ -18,6 +18,7 @@
 #include "param.h"
 #include "string.h"
 #include "seg.h"    /* wrmsr, rdmsr, MSR_FS_BASE */
+#include "cmdline.h"
 
 int fetchaddr(uint64 addr, uint64 *ip) {
     struct thread *p = current;
@@ -592,6 +593,40 @@ static uint64 (*syscalls[])(void) = {
     [SYS_prlimit64_musl] sys_prlimit64,
 };
 
+static int webkit_sysret_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_sysret_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int is_webkit_process_name(const char *name)
+{
+    return strncmp(name, "MiniBrowser", 11) == 0 ||
+        strncmp(name, "WebKit", 6) == 0;
+}
+
+static int is_expected_transient_errno(int err)
+{
+    switch (err) {
+    case EAGAIN:
+    case EINTR:
+    case EINPROGRESS:
+    case ENOENT:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 /*
  * syscall — dispatch system call.
  *
@@ -601,11 +636,25 @@ static uint64 (*syscalls[])(void) = {
 void syscall(void) {
     struct thread *p = current;
     int num = (int)p->trapframe->trapframe.rax;
+    uint64 a0 = p->trapframe->trapframe.rdi;
+    uint64 a1 = p->trapframe->trapframe.rsi;
+    uint64 a2 = p->trapframe->trapframe.rdx;
+    uint64 a3 = p->trapframe->trapframe.r10;
+    uint64 ret;
 
     if (num > 0 && num < (int)NELEM(syscalls) && syscalls[num]) {
         p->trapframe->trapframe.rax = syscalls[num]();
     } else {
         printf("pid %d %s: unknown syscall %d\n", p->pid, p->name, num);
         p->trapframe->trapframe.rax = (uint64)-ENOSYS;
+    }
+
+    ret = p->trapframe->trapframe.rax;
+    if (webkit_sysret_trace_enabled() && is_webkit_process_name(p->name) &&
+        (int64)ret < 0 &&
+        !is_expected_transient_errno((int)(-(int64)ret))) {
+        printf("webkit-sysret: pid=%d tgid=%d name=%s sys=%d ret=%ld "
+               "args=%lx,%lx,%lx,%lx\n",
+               p->pid, p->tgid, p->name, num, (int64)ret, a0, a1, a2, a3);
     }
 }
