@@ -38,7 +38,7 @@
  *   - pbufs for ARP, ICMP, UDP, etc.
  * If pbufs exhaust, ALL networking dies — even ping and ARP stop working.
  */
-#define MEMP_NUM_PBUF                   2048
+#define MEMP_NUM_PBUF                   4096
 #define MEMP_NUM_UDP_PCB                16
 #define MEMP_NUM_TCP_PCB                128
 #define MEMP_NUM_TCP_PCB_LISTEN         16
@@ -46,14 +46,14 @@
 #define MEMP_NUM_NETBUF                 256
 #define MEMP_NUM_NETCONN                256
 #define MEMP_NUM_TCPIP_MSG_API          256
-#define MEMP_NUM_TCPIP_MSG_INPKT        2048
+#define MEMP_NUM_TCPIP_MSG_INPKT        4096
 #define MEMP_NUM_ARP_QUEUE              32
 #define MEMP_NUM_SYS_TIMEOUT            32
 
 /* --------------------------------------------------------------------------
  * Pbuf options
  * -------------------------------------------------------------------------- */
-#define PBUF_POOL_SIZE                  8192
+#define PBUF_POOL_SIZE                  16384
 #define PBUF_POOL_BUFSIZE               1536
 
 /* --------------------------------------------------------------------------

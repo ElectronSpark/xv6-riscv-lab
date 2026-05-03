@@ -51,7 +51,7 @@ typedef struct sys_mutex {
  * mailbox comfortably above TCP_WND / MSS so lwIP does not stall the stream
  * merely because the netconn recv queue filled.
  */
-#define SYS_MBOX_SIZE 512
+#define SYS_MBOX_SIZE 1024
 
 typedef struct sys_mbox {
     spinlock_t lock;       /* protects the circular buffer fields */
