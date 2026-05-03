@@ -229,7 +229,8 @@ static void unix_sock_free(struct unix_sock *sk)
     while (sk->scm_queue != NULL && sk->scm_head != sk->scm_tail) {
         struct vfs_file *pending = sk->scm_queue[sk->scm_head].file;
         sk->scm_queue[sk->scm_head].file = NULL;
-        sk->scm_queue[sk->scm_head].mark_nread = 0;
+        sk->scm_queue[sk->scm_head].start_nread = 0;
+        sk->scm_queue[sk->scm_head].end_nread = 0;
         sk->scm_head = (sk->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
         if (pending != NULL)
             vfs_fput(pending);

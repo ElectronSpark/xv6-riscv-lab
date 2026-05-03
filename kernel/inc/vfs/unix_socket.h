@@ -88,7 +88,8 @@ struct unix_pending {
 
 struct unix_scm_entry {
     struct vfs_file *file;
-    uint mark_nread;
+    uint start_nread;
+    uint end_nread;
 };
 
 /*

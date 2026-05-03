@@ -2647,11 +2647,12 @@ static size_t unix_dequeue_scm_rights(struct unix_sock *peer,
 
     spin_lock(&peer->lock);
     while (peer->scm_head != peer->scm_tail && count < max_files &&
-           (int)(peer->scm_queue[peer->scm_head].mark_nread -
-                 peer->tx.nread) <= 0) {
+           (int)(peer->scm_queue[peer->scm_head].start_nread -
+                 peer->tx.nread) < 0) {
         files[count] = peer->scm_queue[peer->scm_head].file;
         peer->scm_queue[peer->scm_head].file = NULL;
-        peer->scm_queue[peer->scm_head].mark_nread = 0;
+        peer->scm_queue[peer->scm_head].start_nread = 0;
+        peer->scm_queue[peer->scm_head].end_nread = 0;
         peer->scm_head = (peer->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
         count++;
     }
@@ -2668,7 +2669,7 @@ static int unix_next_scm_barrier_locked(struct unix_sock *peer, size_t *bytes)
     if (peer == NULL || peer->scm_head == peer->scm_tail)
         return 0;
 
-    mark = peer->scm_queue[peer->scm_head].mark_nread;
+    mark = peer->scm_queue[peer->scm_head].end_nread;
     if ((int)(mark - peer->tx.nread) <= 0) {
         *bytes = 0;
         return 1;
@@ -2745,9 +2746,12 @@ static void unix_rebase_stream_marks_locked(struct unix_sock *sk,
 
     for (idx = sk->scm_head; idx != sk->scm_tail;
          idx = (idx + 1) % UNIX_SCM_QUEUE_MAX) {
-        uint mark = sk->scm_queue[idx].mark_nread;
-        sk->scm_queue[idx].mark_nread =
-            (uint)((int)(mark - old_nread) < 0 ? 0 : mark - old_nread);
+        uint start = sk->scm_queue[idx].start_nread;
+        uint end = sk->scm_queue[idx].end_nread;
+        sk->scm_queue[idx].start_nread =
+            (uint)((int)(start - old_nread) < 0 ? 0 : start - old_nread);
+        sk->scm_queue[idx].end_nread =
+            (uint)((int)(end - old_nread) < 0 ? 0 : end - old_nread);
     }
 
     for (idx = sk->packet_head; idx != sk->packet_tail;
@@ -2829,16 +2833,15 @@ static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
     if (!unix_packet_has_space_locked(sk))
         return -EAGAIN;
 
-    uint scm_mark = sk->tx.nwrite;
+    uint scm_start = sk->tx.nwrite;
     size_t wrote = unix_ring_write_locked(&sk->tx, buf, len);
     if (wrote != len)
         panic("unix_sendmsg_atomic_locked: short atomic write");
     uint mark = sk->tx.nwrite;
-    if (scm_count > 0 && len > 0)
-        scm_mark++;
     for (size_t i = 0; i < scm_count; i++) {
         sk->scm_queue[sk->scm_tail].file = scm_files[i];
-        sk->scm_queue[sk->scm_tail].mark_nread = scm_mark;
+        sk->scm_queue[sk->scm_tail].start_nread = scm_start;
+        sk->scm_queue[sk->scm_tail].end_nread = mark;
         sk->scm_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
     }
     int pkt_ret = unix_packet_enqueue_locked(sk, mark);
