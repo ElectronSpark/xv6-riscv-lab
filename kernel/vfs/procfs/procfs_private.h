@@ -23,6 +23,12 @@
  *       statm              → regular file
  *       cgroup             → regular file
  *       maps               → regular file
+ *       smaps              → regular file
+ *       mountinfo          → regular file
+ *       mounts             → regular file
+ *       limits             → regular file
+ *       environ            → regular file
+ *       auxv               → regular file
  *       exe                → symlink  → executable path
  *       fd/
  *         <n>              → symlink  → target path
@@ -34,16 +40,16 @@
  *   3                             /proc/meminfo
  *   4                             /proc/cpuinfo
  *   7                             /proc/zoneinfo
- *   PROCFS_PID_BASE + tgid*16 + 0  /proc/<tgid>/   (directory)
- *   PROCFS_PID_BASE + tgid*16 + 1  /proc/<tgid>/status
- *   PROCFS_PID_BASE + tgid*16 + 2  /proc/<tgid>/maps
- *   PROCFS_PID_BASE + tgid*16 + 3  /proc/<tgid>/exe
- *   PROCFS_PID_BASE + tgid*16 + 4  /proc/<tgid>/fd/
- *   PROCFS_PID_BASE + tgid*16 + 6  /proc/<tgid>/statm
- *   PROCFS_PID_BASE + tgid*16 + 7  /proc/<tgid>/cgroup
- *   PROCFS_PID_BASE + tgid*16 + 8  /proc/<tgid>/stat
- *   PROCFS_PID_BASE + tgid*16 + 9  /proc/<tgid>/cmdline
- *   PROCFS_PID_BASE + tgid*16 + 10 /proc/<tgid>/comm
+ *   PROCFS_PID_BASE + tgid*32 + 0  /proc/<tgid>/   (directory)
+ *   PROCFS_PID_BASE + tgid*32 + 1  /proc/<tgid>/status
+ *   PROCFS_PID_BASE + tgid*32 + 2  /proc/<tgid>/maps
+ *   PROCFS_PID_BASE + tgid*32 + 3  /proc/<tgid>/exe
+ *   PROCFS_PID_BASE + tgid*32 + 4  /proc/<tgid>/fd/
+ *   PROCFS_PID_BASE + tgid*32 + 6  /proc/<tgid>/statm
+ *   PROCFS_PID_BASE + tgid*32 + 7  /proc/<tgid>/cgroup
+ *   PROCFS_PID_BASE + tgid*32 + 8  /proc/<tgid>/stat
+ *   PROCFS_PID_BASE + tgid*32 + 9  /proc/<tgid>/cmdline
+ *   PROCFS_PID_BASE + tgid*32 + 10 /proc/<tgid>/comm
  *   PROCFS_FD_BASE  + tgid*1000 + fd  /proc/<tgid>/fd/<fd>
  */
 
@@ -90,6 +96,12 @@ enum procfs_entry_type {
     PROC_PID_STAT,    /* /proc/<tgid>/stat      */
     PROC_PID_CMDLINE, /* /proc/<tgid>/cmdline   */
     PROC_PID_COMM,    /* /proc/<tgid>/comm      */
+    PROC_PID_MOUNTINFO, /* /proc/<tgid>/mountinfo */
+    PROC_PID_MOUNTS,    /* /proc/<tgid>/mounts    */
+    PROC_PID_LIMITS,    /* /proc/<tgid>/limits    */
+    PROC_PID_ENVIRON,   /* /proc/<tgid>/environ   */
+    PROC_PID_AUXV,      /* /proc/<tgid>/auxv      */
+    PROC_PID_SMAPS,     /* /proc/<tgid>/smaps     */
     PROC_SYS_KERNEL_OSTYPE,
     PROC_SYS_KERNEL_OSRELEASE,
     PROC_SYS_KERNEL_VERSION,
@@ -151,9 +163,9 @@ enum procfs_entry_type {
 #define PROCFS_INO_SYS_FS_NR_OPEN 35ULL
 #define PROCFS_INO_SYS_FS_PIPE_MAX_SIZE 36ULL
 
-/* Each pid occupies 16 slots; max pid in xv6 fits well within 64-bit */
+/* Each pid occupies 32 slots; max pid in xv6 fits well within 64-bit */
 #define PROCFS_PID_BASE    100ULL
-#define PROCFS_PID_STRIDE  16ULL
+#define PROCFS_PID_STRIDE  32ULL
 #define PROCFS_FD_BASE     (PROCFS_PID_BASE + 100000ULL * PROCFS_PID_STRIDE)
 
 #define PROCFS_PID_DIR_INO(tgid)    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 0)
@@ -167,6 +179,12 @@ enum procfs_entry_type {
 #define PROCFS_PID_STAT_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 8)
 #define PROCFS_PID_CMDLINE_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 9)
 #define PROCFS_PID_COMM_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 10)
+#define PROCFS_PID_MOUNTINFO_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 11)
+#define PROCFS_PID_MOUNTS_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 12)
+#define PROCFS_PID_LIMITS_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 13)
+#define PROCFS_PID_ENVIRON_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 14)
+#define PROCFS_PID_AUXV_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 15)
+#define PROCFS_PID_SMAPS_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 16)
 #define PROCFS_FD_INO(tgid, fd)     (PROCFS_FD_BASE + (uint64)(tgid)*1000ULL + (uint64)(fd))
 
 /* ------------------------------------------------------------------ */

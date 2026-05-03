@@ -243,7 +243,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         int    tgid   = (int)(offset / PROCFS_PID_STRIDE);
         int    slot   = (int)(offset % PROCFS_PID_STRIDE);
 
-        if (tgid <= 0 || slot > 10) {
+        if (tgid <= 0 || slot > 16) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -325,6 +325,42 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.mode    = S_IFREG | 0444;
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 64;
+            break;
+        case 11: /* /proc/<tgid>/mountinfo */
+            pi->type              = PROC_PID_MOUNTINFO;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 1024;
+            break;
+        case 12: /* /proc/<tgid>/mounts */
+            pi->type              = PROC_PID_MOUNTS;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 512;
+            break;
+        case 13: /* /proc/<tgid>/limits */
+            pi->type              = PROC_PID_LIMITS;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 1024;
+            break;
+        case 14: /* /proc/<tgid>/environ */
+            pi->type              = PROC_PID_ENVIRON;
+            pi->vfs_inode.mode    = S_IFREG | 0400;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 0;
+            break;
+        case 15: /* /proc/<tgid>/auxv */
+            pi->type              = PROC_PID_AUXV;
+            pi->vfs_inode.mode    = S_IFREG | 0400;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 0;
+            break;
+        case 16: /* /proc/<tgid>/smaps */
+            pi->type              = PROC_PID_SMAPS;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 4096;
             break;
         default:
             slab_free(pi);

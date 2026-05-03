@@ -79,12 +79,18 @@ static const struct procfs_static_entry procfs_pid_entries[] = {
     {"statm", 0},
     {"cgroup", 0},
     {"maps", 0},
+    {"smaps", 0},
     {"exe", 0},
     {"fd", 0},
     {"resources", 0},
     {"stat", 0},
     {"cmdline", 0},
     {"comm", 0},
+    {"mountinfo", 0},
+    {"mounts", 0},
+    {"limits", 0},
+    {"environ", 0},
+    {"auxv", 0},
 };
 
 static const struct procfs_static_entry procfs_sys_entries[] = {
@@ -164,12 +170,18 @@ static uint64 procfs_pid_entry_ino(int tgid, int child_idx)
     case 1: return PROCFS_PID_STATM_INO(tgid);
     case 2: return PROCFS_PID_CGROUP_INO(tgid);
     case 3: return PROCFS_PID_MAPS_INO(tgid);
-    case 4: return PROCFS_PID_EXE_INO(tgid);
-    case 5: return PROCFS_PID_FDDIR_INO(tgid);
-    case 6: return PROCFS_PID_RESOURCES_INO(tgid);
-    case 7: return PROCFS_PID_STAT_INO(tgid);
-    case 8: return PROCFS_PID_CMDLINE_INO(tgid);
-    case 9: return PROCFS_PID_COMM_INO(tgid);
+    case 4: return PROCFS_PID_SMAPS_INO(tgid);
+    case 5: return PROCFS_PID_EXE_INO(tgid);
+    case 6: return PROCFS_PID_FDDIR_INO(tgid);
+    case 7: return PROCFS_PID_RESOURCES_INO(tgid);
+    case 8: return PROCFS_PID_STAT_INO(tgid);
+    case 9: return PROCFS_PID_CMDLINE_INO(tgid);
+    case 10: return PROCFS_PID_COMM_INO(tgid);
+    case 11: return PROCFS_PID_MOUNTINFO_INO(tgid);
+    case 12: return PROCFS_PID_MOUNTS_INO(tgid);
+    case 13: return PROCFS_PID_LIMITS_INO(tgid);
+    case 14: return PROCFS_PID_ENVIRON_INO(tgid);
+    case 15: return PROCFS_PID_AUXV_INO(tgid);
     default: return 0;
     }
 }
@@ -1399,6 +1411,131 @@ static char *procfs_gen_mounts(void)
     return buf;
 }
 
+static char *procfs_gen_mountinfo(void)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    /*
+     * Linux /proc/<pid>/mountinfo format:
+     * mount-id parent-id major:minor root mountpoint options optional - type
+     * source super-options.  GLib/GIO parses this before falling back to
+     * /proc/mounts, so keep it structurally faithful even though xv6 has a
+     * simple fixed mount topology.
+     */
+    snprintf(buf, PROCFS_BUF_SIZE,
+             "21 0 8:1 / / rw,relatime - ext4 rootfs rw\n"
+             "22 21 0:3 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n"
+             "23 21 0:4 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw\n");
+    return buf;
+}
+
+static char *procfs_gen_limits(void)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, PROCFS_BUF_SIZE,
+             "Limit                     Soft Limit           Hard Limit           Units     \n"
+             "Max cpu time              unlimited            unlimited            seconds   \n"
+             "Max file size             unlimited            unlimited            bytes     \n"
+             "Max data size             unlimited            unlimited            bytes     \n"
+             "Max stack size            unlimited            unlimited            bytes     \n"
+             "Max core file size        0                    0                    bytes     \n"
+             "Max resident set          unlimited            unlimited            bytes     \n"
+             "Max processes             %d                  %d                  processes \n"
+             "Max open files            %d                  %d                  files     \n"
+             "Max address space         unlimited            unlimited            bytes     \n",
+             NR_THREAD, NR_THREAD, NOFILE, NOFILE);
+    return buf;
+}
+
+static char *procfs_gen_empty(void)
+{
+    char *buf = kvmalloc(1);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    buf[0] = '\0';
+    return buf;
+}
+
+static char *procfs_gen_smaps(int tgid)
+{
+    /* A conservative smaps implementation: one header per VMA plus the
+     * Linux fields most parsers look for.  Values are synthetic but stable. */
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tgid, &p);
+    vm_t *vm = (p != NULL) ? p->vm : NULL;
+    rcu_read_unlock();
+
+    if (vm == NULL)
+        return ERR_PTR(-ESRCH);
+
+    size_t buf_size = PROCFS_MAPS_INITIAL_BUF_SIZE;
+    for (;;) {
+        char *buf = kvmalloc(buf_size);
+        if (buf == NULL)
+            return ERR_PTR(-ENOMEM);
+
+        size_t pos = 0;
+        bool truncated = false;
+
+        vm_rlock(vm);
+        vma_t *vma;
+        uint64 index = 0;
+        mt_for_each(&vm->vm_mt, vma, index, (uint64)(-1ULL)) {
+            char r = (vma->flags & PROT_READ) ? 'r' : '-';
+            char w = (vma->flags & PROT_WRITE) ? 'w' : '-';
+            char x = (vma->flags & PROT_EXEC) ? 'x' : '-';
+            char s = (vma->flags & VMA_FLAG_SHARED) ? 's' : 'p';
+            unsigned long size_kb =
+                (unsigned long)((vma->end - vma->start) / 1024);
+            char entry[512];
+            int n = snprintf(entry, sizeof(entry),
+                             "%016llx-%016llx %c%c%c%c %08llx 00:00 0\n"
+                             "Size:           %8lu kB\n"
+                             "KernelPageSize: %8u kB\n"
+                             "MMUPageSize:    %8u kB\n"
+                             "Rss:            %8u kB\n"
+                             "Pss:            %8u kB\n"
+                             "Shared_Clean:   %8u kB\n"
+                             "Shared_Dirty:   %8u kB\n"
+                             "Private_Clean:  %8u kB\n"
+                             "Private_Dirty:  %8u kB\n"
+                             "Referenced:     %8u kB\n"
+                             "Anonymous:      %8u kB\n"
+                             "Swap:           %8u kB\n"
+                             "VmFlags: rd wr ex sh mr mw me ac\n",
+                             (unsigned long long)vma->start,
+                             (unsigned long long)vma->end,
+                             r, w, x, s,
+                             (unsigned long long)vma->pgoff,
+                             size_kb, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+            if (n < 0 || (size_t)n >= sizeof(entry) ||
+                pos + (size_t)n >= buf_size) {
+                truncated = true;
+                break;
+            }
+            memmove(buf + pos, entry, (size_t)n);
+            pos += (size_t)n;
+        }
+        vm_runlock(vm);
+
+        if (!truncated) {
+            buf[pos] = '\0';
+            return buf;
+        }
+
+        kvfree(buf);
+        if (buf_size >= PROCFS_MAPS_MAX_BUF_SIZE)
+            return ERR_PTR(-EOVERFLOW);
+        buf_size *= 2;
+        if (buf_size > PROCFS_MAPS_MAX_BUF_SIZE)
+            buf_size = PROCFS_MAPS_MAX_BUF_SIZE;
+    }
+}
+
 static char *procfs_gen_pid_stat(int tgid)
 {
     rcu_read_lock();
@@ -1612,6 +1749,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_MAPS:
         buf = procfs_gen_maps(pi->pid);
         break;
+    case PROC_PID_SMAPS:
+        buf = procfs_gen_smaps(pi->pid);
+        break;
     case PROC_MEMINFO:
         buf = procfs_gen_meminfo();
         break;
@@ -1644,6 +1784,19 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_MOUNTS:
         buf = procfs_gen_mounts();
+        break;
+    case PROC_PID_MOUNTS:
+        buf = procfs_gen_mounts();
+        break;
+    case PROC_PID_MOUNTINFO:
+        buf = procfs_gen_mountinfo();
+        break;
+    case PROC_PID_LIMITS:
+        buf = procfs_gen_limits();
+        break;
+    case PROC_PID_ENVIRON:
+    case PROC_PID_AUXV:
+        buf = procfs_gen_empty();
         break;
     case PROC_RESOURCES:
         buf = procfs_gen_resources(pi->pid);
