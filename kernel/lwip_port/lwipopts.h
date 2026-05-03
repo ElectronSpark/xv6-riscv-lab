@@ -70,9 +70,12 @@
 #define LWIP_IPV4                       1
 #define LWIP_IPV6                       0    /* IPv4 only for now */
 #define IP_FORWARD                      0
-#define IP_REASSEMBLY                   1
-#define IP_FRAG                         1
-#define IP_REASS_MAX_PBUFS              32
+/* xv6 NICs (e1000, virtio-net) support 1500-byte MTU and TCP MSS=1460,
+ * so we never originate fragments and we don't accept inbound fragments
+ * for our protocols.  Disabling reassembly + frag saves per-packet work. */
+#define IP_REASSEMBLY                   0
+#define IP_FRAG                         0
+#define IP_REASS_MAX_PBUFS              0
 #define IP_DEFAULT_TTL                  64
 
 /* --------------------------------------------------------------------------
@@ -164,6 +167,11 @@
 #define CHECKSUM_CHECK_UDP              1
 #define CHECKSUM_CHECK_TCP              1
 #define CHECKSUM_CHECK_ICMP             1
+
+/* lwIP ships several Internet checksum implementations; algorithm #3 is the
+ * unrolled 32-bit version that is fastest on a flat little-endian box like
+ * QEMU x86_64.  Default (#2) is the conservative byte-by-byte loop. */
+#define LWIP_CHKSUM_ALGORITHM           3
 
 /* --------------------------------------------------------------------------
  * Debugging (disabled by default, enable selectively)

@@ -38,7 +38,6 @@
 #include "lwip/ip4_addr.h"
 #include "lwip/dns.h"
 #include "netif/ethernet.h"
-
 #include "dev/netconf.h"
 #include "dev/cdev.h"
 #include "cmdline.h"
@@ -661,12 +660,51 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
                ip4_addr1_16(&gw), ip4_addr2_16(&gw),
                ip4_addr3_16(&gw), ip4_addr4_16(&gw));
     } else {
-        /* DHCP — start with 0.0.0.0, address assigned later */
-        IP4_ADDR(&ipaddr,  0, 0, 0, 0);
-        IP4_ADDR(&netmask, 0, 0, 0, 0);
-        IP4_ADDR(&gw,      0, 0, 0, 0);
-        use_dhcp = 1;
-        printf("lwip: using DHCP\n");
+        /* If the kernel cmdline supplies `ip=A.B.C.D/M.M.M.M/G.G.G.G`, skip
+         * DHCP and use the provided static address.  This shaves the ~20s
+         * DHCP wait off boot when running automated stress tests; if the
+         * option is absent we fall through to the original DHCP path. */
+        char ipopt[64];
+        if (cmdline_get_param("ip", ipopt, sizeof(ipopt)) == 0) {
+            unsigned vals[12] = {0};
+            int n = 0; unsigned cur = 0; int have_digit = 0;
+            for (char *q = ipopt; n < 12; q++) {
+                if (*q >= '0' && *q <= '9') {
+                    cur = cur * 10 + (unsigned)(*q - '0');
+                    have_digit = 1;
+                } else if (*q == '.' || *q == '/' || *q == 0) {
+                    if (have_digit) { vals[n++] = cur; cur = 0; have_digit = 0; }
+                    if (*q == 0) break;
+                } else {
+                    break;
+                }
+            }
+            if (n == 12) {
+                IP4_ADDR(&ipaddr,  vals[0], vals[1], vals[2], vals[3]);
+                IP4_ADDR(&netmask, vals[4], vals[5], vals[6], vals[7]);
+                IP4_ADDR(&gw,      vals[8], vals[9], vals[10], vals[11]);
+                use_dhcp = 0;
+                printf("lwip: static %d.%d.%d.%d/%d.%d.%d.%d gw %d.%d.%d.%d "
+                       "(from cmdline ip=)\n",
+                       vals[0], vals[1], vals[2], vals[3],
+                       vals[4], vals[5], vals[6], vals[7],
+                       vals[8], vals[9], vals[10], vals[11]);
+            } else {
+                printf("lwip: cmdline ip= malformed (%s), using DHCP\n", ipopt);
+                IP4_ADDR(&ipaddr,  0, 0, 0, 0);
+                IP4_ADDR(&netmask, 0, 0, 0, 0);
+                IP4_ADDR(&gw,      0, 0, 0, 0);
+                use_dhcp = 1;
+                printf("lwip: using DHCP\n");
+            }
+        } else {
+            /* DHCP — start with 0.0.0.0, address assigned later */
+            IP4_ADDR(&ipaddr,  0, 0, 0, 0);
+            IP4_ADDR(&netmask, 0, 0, 0, 0);
+            IP4_ADDR(&gw,      0, 0, 0, 0);
+            use_dhcp = 1;
+            printf("lwip: using DHCP\n");
+        }
     }
 
     netif_add(&xv6_netif,
