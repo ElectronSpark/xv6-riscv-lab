@@ -24,6 +24,7 @@
 #include "proc/thread.h"
 #include "dev/e1000_dev.h"
 #include "dev/net.h"
+#include "dev/virtio.h"  /* VIRTIO_NET_HDR_LEN */
 #include "dev/netdev.h"
 #include "dev/fdt.h"
 
@@ -84,12 +85,16 @@ xv6_netif_linkoutput(struct netif *netif, struct pbuf *p)
         return ERR_IF;
     }
 
-    if (p->tot_len > MBUF_SIZE) {
-        printf("lwip: packet too large (%d > %d)\n", p->tot_len, MBUF_SIZE);
+    if (p->tot_len > MBUF_SIZE - VIRTIO_NET_HDR_LEN) {
+        printf("lwip: packet too large (%d > %d)\n", p->tot_len,
+               MBUF_SIZE - VIRTIO_NET_HDR_LEN);
         return ERR_MEM;
     }
 
-    m = mbufalloc(0);
+    /* Reserve headroom so the virtio-net driver can mbufpush() its
+     * 12-byte virtio_net_hdr in place; e1000 ignores headroom and just
+     * transmits from m->head. */
+    m = mbufalloc(VIRTIO_NET_HDR_LEN);
     if (m == NULL) {
         LWIP_NET_DBG("TX: mbuf alloc failed\n");
         return ERR_MEM;

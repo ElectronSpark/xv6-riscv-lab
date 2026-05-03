@@ -63,9 +63,11 @@ static uint8 pci_find_virtio_cap(uint8 bus, uint8 dev, uint8 func,
 static struct virtio_pci_discovery virtio_pci_devs[N_VIRTIO_DISK];
 static struct virtio_pci_discovery virtio_gpu_pci_devs[N_VIRTIO_GPU];
 static struct virtio_pci_discovery virtio_input_pci_devs[N_VIRTIO_INPUT];
+static struct virtio_pci_discovery virtio_net_pci_devs[N_VIRTIO_NET];
 static int virtio_pci_count = 0;
 static int virtio_gpu_pci_count = 0;
 static int virtio_input_pci_count = 0;
+static int virtio_net_pci_count = 0;
 
 struct virtio_pci_discovery *pci_get_virtio_blk(int index)
 {
@@ -86,6 +88,13 @@ struct virtio_pci_discovery *pci_get_virtio_input(int index)
     if (index < 0 || index >= virtio_input_pci_count)
         return 0;
     return &virtio_input_pci_devs[index];
+}
+
+struct virtio_pci_discovery *pci_get_virtio_net(int index)
+{
+    if (index < 0 || index >= virtio_net_pci_count)
+        return 0;
+    return &virtio_net_pci_devs[index];
 }
 
 // ─── PIIX3 PIRQ routing ───────────────────────────────────────────────
@@ -278,6 +287,45 @@ static void pci_note_virtio_input(uint8 bus, uint8 dev, uint8 func)
            vd->notify_cfg_cap, vd->isr_cfg_cap, vd->device_cfg_cap);
 }
 
+static void pci_note_virtio_net(uint8 bus, uint8 dev, uint8 func)
+{
+    if (virtio_net_pci_count >= N_VIRTIO_NET) {
+        printf("PCI: too many virtio-net devices\n");
+        return;
+    }
+
+    uint16 cmd = pci_config_read16(bus, dev, func, 0x04);
+    cmd |= PCIE_CSCMD_MAE | PCIE_CSCMD_BME;
+    pci_config_write16(bus, dev, func, 0x04, cmd);
+
+    struct virtio_pci_discovery *vd =
+        &virtio_net_pci_devs[virtio_net_pci_count];
+    vd->found = 1;
+    vd->bus = bus;
+    vd->dev = dev;
+    vd->func = func;
+    vd->irq_line = piix3_compute_irq(dev, pci_config_read8(bus, dev, func,
+                                                            0x3D));
+
+    for (int i = 0; i < 6; i++)
+        vd->bar[i] = pci_read_bar(bus, dev, func, i);
+
+    vd->common_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                             VIRTIO_PCI_CAP_COMMON_CFG);
+    vd->notify_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                             VIRTIO_PCI_CAP_NOTIFY_CFG);
+    vd->isr_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                          VIRTIO_PCI_CAP_ISR_CFG);
+    vd->device_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                             VIRTIO_PCI_CAP_DEVICE_CFG);
+
+    virtio_net_pci_count++;
+    printf("PCI: virtio-net detected at %d:%d:%d\n", bus, dev, func);
+    printf("PCI: virtio-net IRQ=%d caps: common=%d notify=%d isr=%d dev=%d\n",
+           vd->irq_line, vd->common_cfg_cap, vd->notify_cfg_cap,
+           vd->isr_cfg_cap, vd->device_cfg_cap);
+}
+
 void pci_init(void)
 {
     piix3_init_irq_routing();
@@ -309,14 +357,19 @@ void pci_init(void)
                    (device == PCI_DEVICE_VIRTIO_INPUT_TRANSITIONAL ||
                     device == PCI_DEVICE_VIRTIO_INPUT_MODERN)) {
             pci_note_virtio_input(0, dev, 0);
+        } else if (vendor == PCI_VENDOR_VIRTIO &&
+                   (device == PCI_DEVICE_VIRTIO_NET_TRANSITIONAL ||
+                    device == PCI_DEVICE_VIRTIO_NET_MODERN)) {
+            pci_note_virtio_net(0, dev, 0);
         } else if (vendor == PCI_VENDOR_BOCHS &&
                    device == PCI_DEVICE_BOCHS_VGA) {
             fb_pci_init(0, dev, 0);
         }
     }
 
-    printf("PCI: scan complete, %d virtio-blk device(s), %d virtio-gpu device(s), %d virtio-input device(s) found\n",
-           virtio_pci_count, virtio_gpu_pci_count, virtio_input_pci_count);
+    printf("PCI: scan complete, %d virtio-blk device(s), %d virtio-gpu device(s), %d virtio-input device(s), %d virtio-net device(s) found\n",
+           virtio_pci_count, virtio_gpu_pci_count, virtio_input_pci_count,
+           virtio_net_pci_count);
 }
 
 #else /* RISC-V / ECAM path */

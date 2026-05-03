@@ -15,6 +15,7 @@
 #define N_VIRTIO_DISK 2 // number of virtio disks
 #define N_VIRTIO_GPU 1  // number of virtio GPU devices
 #define N_VIRTIO_INPUT 1 // number of virtio input devices
+#define N_VIRTIO_NET 1  // number of virtio NICs
 #define N_VIRTIO 3      // number of virtio devices
 extern uint64 __virtio_mmio_base[N_VIRTIO];
 extern uint64 __virtio_irqno[N_VIRTIO];
@@ -132,5 +133,51 @@ struct virtio_pci_state {
     uint32 notify_off_multiplier;          // from notify cap
     volatile uint8 *isr;                   // mapped ISR BAR region
 };
+
+// ─── virtio-net device ───────────────────────────────────────────────
+//
+// Feature bits (from spec §5.1.3).
+#define VIRTIO_NET_F_CSUM               0   /* Host handles partial checksum. */
+#define VIRTIO_NET_F_GUEST_CSUM         1   /* Guest handles partial checksum. */
+#define VIRTIO_NET_F_MAC                5   /* Host has given a MAC address. */
+#define VIRTIO_NET_F_GUEST_TSO4         7   /* Guest can receive TSOv4. */
+#define VIRTIO_NET_F_GUEST_TSO6         8   /* Guest can receive TSOv6. */
+#define VIRTIO_NET_F_GUEST_UFO          10  /* Guest can receive UFO. */
+#define VIRTIO_NET_F_HOST_TSO4          11  /* Host can handle TSOv4 from guest. */
+#define VIRTIO_NET_F_HOST_TSO6          12  /* Host can handle TSOv6 from guest. */
+#define VIRTIO_NET_F_HOST_UFO           14  /* Host can handle UFO from guest. */
+#define VIRTIO_NET_F_MRG_RXBUF          15  /* Driver can merge receive buffers. */
+#define VIRTIO_NET_F_STATUS             16  /* Configuration status field is available. */
+#define VIRTIO_NET_F_MQ                 22  /* Device supports multiqueue with auto-steering. */
+/* Reserved transport feature bit */
+#define VIRTIO_F_VERSION_1              32  /* v1.0 compliant. */
+
+/* virtio_net header.  Modern (VERSION_1) layout — always 12 bytes
+ * regardless of MRG_RXBUF, since num_buffers is always present. */
+struct virtio_net_hdr {
+    uint8  flags;
+#define VIRTIO_NET_HDR_F_NEEDS_CSUM     1
+#define VIRTIO_NET_HDR_F_DATA_VALID     2
+    uint8  gso_type;
+#define VIRTIO_NET_HDR_GSO_NONE         0
+#define VIRTIO_NET_HDR_GSO_TCPV4        1
+#define VIRTIO_NET_HDR_GSO_UDP          3
+#define VIRTIO_NET_HDR_GSO_TCPV6        4
+#define VIRTIO_NET_HDR_GSO_ECN          0x80
+    uint16 hdr_len;
+    uint16 gso_size;
+    uint16 csum_start;
+    uint16 csum_offset;
+    uint16 num_buffers;     /* present in VERSION_1; ignore unless MRG_RXBUF */
+};
+_Static_assert(sizeof(struct virtio_net_hdr) == 12,
+               "virtio_net_hdr must be 12 bytes (modern layout)");
+
+/* Reserve this much headroom in TX mbufs so the virtio-net driver can
+ * mbufpush() the header in place without copying.  Other NICs (e1000)
+ * are unaffected — they transmit from m->head/m->len. */
+#define VIRTIO_NET_HDR_LEN  12
+
+void virtio_net_init(void);
 
 #endif /* __KERNEL_VIRTIO_H */

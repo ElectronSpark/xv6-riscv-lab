@@ -208,6 +208,7 @@ void start_kernel_post_init(void) {
     virtio_disk_init(); // emulated hard disk (QEMU)
     virtio_gpu_init();  // optional virtio-gpu PCI device (Bochs fb remains fallback)
     virtio_input_init(); // optional virtio tablet/mouse routed to /dev/mouse
+    virtio_net_init();   // optional virtio-net PCI device (preferred over e1000)
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
     loop_init();        // Loopback block devices (/dev/loop0..7)
     sockinit();

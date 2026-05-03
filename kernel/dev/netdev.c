@@ -37,9 +37,18 @@ int netdev_register(struct netdev *dev) {
 }
 
 /**
- * Return the default (first-registered) network device.
+ * Return the default (first-registered) network device.  When a
+ * virtio-net device is registered alongside e1000 we prefer it because
+ * the virtqueue path is significantly faster than the legacy MMIO ring.
  */
 struct netdev *netdev_get_default(void) {
+    /* First pass: look for any device whose name starts with "virtio". */
+    for (struct netdev *d = netdev_list; d; d = d->next) {
+        if (d->name[0] == 'v' && d->name[1] == 'i' &&
+            d->name[2] == 'r' && d->name[3] == 't' &&
+            d->name[4] == 'i' && d->name[5] == 'o')
+            return d;
+    }
     /* Walk to the tail — the first registered is at the end of the list
      * because we prepend on registration. */
     struct netdev *d = netdev_list;

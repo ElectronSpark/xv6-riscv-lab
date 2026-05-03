@@ -35,6 +35,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/ramdisk.c
     ${KERNEL_DIR}/ksymbols.c
     ${KERNEL_DIR}/e1000.c
+    ${KERNEL_DIR}/virtio_net.c
     ${KERNEL_DIR}/net.c
     ${KERNEL_DIR}/pci.c
     ${KERNEL_DIR}/sysnet.c
