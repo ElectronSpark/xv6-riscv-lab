@@ -676,6 +676,20 @@ static char *procfs_gen_status(int tgid) {
             pos += n;
         }
     }
+    int ncpu = platform.ncpu;
+    if (ncpu < 1)
+        ncpu = 1;
+    if (ncpu > NCPU)
+        ncpu = NCPU;
+    unsigned cpu_mask = (ncpu >= (int)(sizeof(unsigned) * 8))
+        ? ~0U
+        : ((1U << ncpu) - 1U);
+    char cpu_list[24];
+    if (ncpu == 1)
+        snprintf(cpu_list, sizeof(cpu_list), "0");
+    else
+        snprintf(cpu_list, sizeof(cpu_list), "0-%d", ncpu - 1);
+
     if ((size_t)pos < PROCFS_BUF_SIZE) {
         snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
                  "\n"
@@ -717,8 +731,8 @@ static char *procfs_gen_status(int tgid) {
                  "NoNewPrivs:\t0\n"
                  "Seccomp:\t0\n"
                  "Seccomp_filters:\t0\n"
-                 "Cpus_allowed:\t1\n"
-                 "Cpus_allowed_list:\t0\n"
+                 "Cpus_allowed:\t%08x\n"
+                 "Cpus_allowed_list:\t%s\n"
                  "Mems_allowed:\t00000001\n"
                  "Mems_allowed_list:\t0\n"
                  "voluntary_ctxt_switches:\t0\n"
@@ -734,6 +748,7 @@ static char *procfs_gen_status(int tgid) {
                  (unsigned long long)shdpnd,
                  (unsigned long long)sigblk,
                  0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL, 0ULL,
+                 cpu_mask, cpu_list,
                  (unsigned long)cputime_raw,
                  (unsigned)util_avg,
                  (unsigned long)load_contrib);
@@ -984,11 +999,179 @@ static char *procfs_gen_cpuinfo(void) {
     char *buf = kvmalloc(PROCFS_BUF_SIZE);
     if (buf == NULL)
         return ERR_PTR(-ENOMEM);
+#ifdef __x86_64__
+    uint32 max_leaf, ebx, ecx, edx;
+    uint32 ebx_ext, ecx_ext, edx_ext;
+    uint32 max_ext;
+    char vendor[13];
+    char brand[49];
+    int pos = 0;
+    int ncpu = platform.ncpu;
+
+    if (ncpu < 1)
+        ncpu = 1;
+    if (ncpu > NCPU)
+        ncpu = NCPU;
+
+    asm volatile("cpuid"
+                 : "=a"(max_leaf), "=b"(ebx), "=c"(ecx), "=d"(edx)
+                 : "a"(0), "c"(0));
+    memmove(vendor + 0, &ebx, sizeof(ebx));
+    memmove(vendor + 4, &edx, sizeof(edx));
+    memmove(vendor + 8, &ecx, sizeof(ecx));
+    vendor[12] = '\0';
+
+    uint32 eax1 = 0, ebx1 = 0, ecx1 = 0, edx1 = 0;
+    if (max_leaf >= 1) {
+        asm volatile("cpuid"
+                     : "=a"(eax1), "=b"(ebx1), "=c"(ecx1), "=d"(edx1)
+                     : "a"(1), "c"(0));
+    }
+
+    uint32 eax7 = 0, ebx7 = 0, ecx7 = 0, edx7 = 0;
+    if (max_leaf >= 7) {
+        asm volatile("cpuid"
+                     : "=a"(eax7), "=b"(ebx7), "=c"(ecx7), "=d"(edx7)
+                     : "a"(7), "c"(0));
+    }
+
+    asm volatile("cpuid"
+                 : "=a"(max_ext), "=b"(ebx_ext), "=c"(ecx_ext), "=d"(edx_ext)
+                 : "a"(0x80000000U), "c"(0));
+    (void)ebx_ext;
+    (void)ecx_ext;
+    (void)edx_ext;
+    uint32 eax_ext1 = 0, ebx_ext1 = 0, ecx_ext1 = 0, edx_ext1 = 0;
+    if (max_ext >= 0x80000001U) {
+        asm volatile("cpuid"
+                     : "=a"(eax_ext1), "=b"(ebx_ext1), "=c"(ecx_ext1), "=d"(edx_ext1)
+                     : "a"(0x80000001U), "c"(0));
+    }
+    (void)eax_ext1;
+    (void)ebx_ext1;
+
+    memset(brand, 0, sizeof(brand));
+    if (max_ext >= 0x80000004U) {
+        uint32 *brand_words = (uint32 *)brand;
+        for (uint32 leaf = 0; leaf < 3; leaf++) {
+            asm volatile("cpuid"
+                         : "=a"(brand_words[leaf * 4 + 0]),
+                           "=b"(brand_words[leaf * 4 + 1]),
+                           "=c"(brand_words[leaf * 4 + 2]),
+                           "=d"(brand_words[leaf * 4 + 3])
+                         : "a"(0x80000002U + leaf), "c"(0));
+        }
+        brand[48] = '\0';
+    }
+    if (brand[0] == '\0')
+        snprintf(brand, sizeof(brand), "QEMU Virtual CPU version 2.5+");
+
+    uint32 family = (eax1 >> 8) & 0xf;
+    uint32 model = (eax1 >> 4) & 0xf;
+    uint32 stepping = eax1 & 0xf;
+    uint32 ext_family = (eax1 >> 20) & 0xff;
+    uint32 ext_model = (eax1 >> 16) & 0xf;
+    if (family == 0xf)
+        family += ext_family;
+    if (family == 0x6 || family == 0xf)
+        model += ext_model << 4;
+
+    for (int cpu = 0; cpu < ncpu && (size_t)pos < PROCFS_BUF_SIZE; cpu++) {
+        int n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
+                         "processor\t: %d\n"
+                         "vendor_id\t: %s\n"
+                         "cpu family\t: %u\n"
+                         "model\t\t: %u\n"
+                         "model name\t: %s\n"
+                         "stepping\t: %u\n"
+                         "microcode\t: 0x0\n"
+                         "cpu MHz\t\t: 0.000\n"
+                         "cache size\t: 0 KB\n"
+                         "physical id\t: 0\n"
+                         "siblings\t: %d\n"
+                         "core id\t\t: %d\n"
+                         "cpu cores\t: %d\n"
+                         "apicid\t\t: %d\n"
+                         "initial apicid\t: %d\n"
+                         "fpu\t\t: yes\n"
+                         "fpu_exception\t: yes\n"
+                         "cpuid level\t: %u\n"
+                         "wp\t\t: yes\n"
+                         "flags\t\t:",
+                         cpu, vendor, family, model, brand, stepping,
+                         ncpu, cpu, ncpu, cpu, cpu, max_leaf);
+        if (n < 0)
+            break;
+        pos += n;
+
+#define PROCFS_APPEND_FLAG(cond, name) do {                                      \
+            if ((cond) && (size_t)pos < PROCFS_BUF_SIZE) {                      \
+                int __n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,    \
+                                   " %s", (name));                             \
+                if (__n > 0)                                                    \
+                    pos += __n;                                                 \
+            }                                                                   \
+        } while (0)
+        PROCFS_APPEND_FLAG(edx1 & (1U << 0), "fpu");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 3), "pse");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 4), "tsc");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 5), "msr");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 6), "pae");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 8), "cx8");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 9), "apic");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 11), "sep");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 12), "mtrr");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 13), "pge");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 15), "cmov");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 23), "mmx");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 24), "fxsr");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 25), "sse");
+        PROCFS_APPEND_FLAG(edx1 & (1U << 26), "sse2");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 0), "pni");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 9), "ssse3");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 13), "cx16");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 19), "sse4_1");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 20), "sse4_2");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 22), "movbe");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 23), "popcnt");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 25), "aes");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 26), "xsave");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 27), "osxsave");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 28), "avx");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 31), "hypervisor");
+        PROCFS_APPEND_FLAG(edx_ext1 & (1U << 11), "syscall");
+        PROCFS_APPEND_FLAG(edx_ext1 & (1U << 20), "nx");
+        PROCFS_APPEND_FLAG(edx_ext1 & (1U << 29), "lm");
+        PROCFS_APPEND_FLAG(ecx_ext1 & (1U << 0), "lahf_lm");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 3), "bmi1");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 5), "avx2");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 8), "bmi2");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 19), "adx");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 29), "sha_ni");
+#undef PROCFS_APPEND_FLAG
+
+        n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
+                     "\n"
+                     "bugs\t\t:\n"
+                     "bogomips\t: 0.00\n"
+                     "clflush size\t: %u\n"
+                     "cache_alignment\t: %u\n"
+                     "address sizes\t: 40 bits physical, 48 bits virtual\n"
+                     "power management:\n"
+                     "\n",
+                     ((ebx1 >> 8) & 0xff) ? ((ebx1 >> 8) & 0xff) * 8 : 64,
+                     ((ebx1 >> 8) & 0xff) ? ((ebx1 >> 8) & 0xff) * 8 : 64);
+        if (n < 0)
+            break;
+        pos += n;
+    }
+#else
     snprintf(buf, PROCFS_BUF_SIZE,
              "processor\t: 0\n"
              "model name\t: RISC-V\n"
              "isa\t\t: rv64imafdc\n"
              "mmu\t\t: sv39\n");
+#endif
     return buf;
 }
 
