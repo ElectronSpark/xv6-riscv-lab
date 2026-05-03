@@ -79,7 +79,12 @@ bool rq_is_initialized(void) { return rq_global.percpu != NULL; }
 #define __rqpc(cpu_id) (&rq_global.percpu[cpu_id])
 #define __rqpc_current() (&rq_global.percpu[cpuid()])
 #define __get_rq_for_cpu(cls_id, cpu_id) (__rqpc(cpu_id)->rqs[cls_id])
-#define __rq_lock_held(cpu_id) spin_holding(&__rqpc(cpu_id)->rq_lock)
+static int __rq_lock_held_raw(int cpu_id) {
+    spinlock_t *lk = &__rqpc(cpu_id)->rq_lock;
+    return __atomic_load_n(&lk->cpu, __ATOMIC_ACQUIRE) == mycpu();
+}
+
+#define __rq_lock_held(cpu_id) __rq_lock_held_raw(cpu_id)
 
 void rq_set_ready(int cls_id, int cpu_id) {
     struct rq_percpu *rq_pc = __rqpc(cpu_id);
@@ -490,8 +495,7 @@ int rq_holding(int cpu_id) {
 }
 
 int rq_holding_current(void) {
-    int holding = spin_holding(&__rqpc_current()->rq_lock);
-    return holding;
+    return __rq_lock_held(cpuid());
 }
 
 /**
