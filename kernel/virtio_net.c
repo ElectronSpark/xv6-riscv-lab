@@ -534,10 +534,25 @@ static void vnet_init_pci(struct virtio_pci_discovery *vd)
     vnet.feat_tso6       = !!(feat0 & (1u << VIRTIO_NET_F_HOST_TSO6));
     int feat_version_1   = !!(feat1 & (1u << (VIRTIO_F_VERSION_1 - 32)));
 
-    /* For the MVP we accept ONLY MAC + STATUS + VERSION_1.  We deliberately
-     * don't ack CSUM/TSO yet — lwIP isn't doing partial checksums on TX
-     * and isn't prepared to receive coalesced segments.  When those are
-     * wired up, change the mask below. */
+    /* MVP feature negotiation: only MAC + STATUS + VERSION_1.
+     *
+     * Other bits the device may offer (and why we don't ack them yet):
+     *
+     *   F_CSUM (TX checksum offload)
+     *      Requires LWIP_CHECKSUM_CTRL_PER_NETIF + driver-side parsing
+     *      of the L4 header to populate csum_start/csum_offset, and
+     *      careful coordination with lwIP so it writes the pseudo-header
+     *      partial sum (vs leaving the field zero).
+     *
+     *   GUEST_CSUM
+     *      NOT free: acking this commits us to completing partial
+     *      checksums on RX (host may flag frames NEEDS_CSUM and hand us
+     *      pseudo-header-only sums).  lwIP will reject them as bad
+     *      checksums otherwise — observed on TAP.
+     *
+     *   GUEST_TSO4/6 + MRG_RXBUF
+     *      Requires multi-mbuf RX scatter; a coalesced segment can be up
+     *      to 64 KiB but our mbuf backing store is one 2 KiB page. */
     uint32 ack0 = 0;
     if (vnet.feat_mac)    ack0 |= (1u << VIRTIO_NET_F_MAC);
     if (vnet.feat_status) ack0 |= (1u << VIRTIO_NET_F_STATUS);
