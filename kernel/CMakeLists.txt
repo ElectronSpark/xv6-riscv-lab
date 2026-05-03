@@ -119,6 +119,7 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:vfs_xv6fs>
     $<TARGET_OBJECTS:vfs_devtmpfs>
     $<TARGET_OBJECTS:vfs_procfs>
+    $<TARGET_OBJECTS:vfs_sysfs>
     $<TARGET_OBJECTS:ipi>
     $<TARGET_OBJECTS:timer>
     $<TARGET_OBJECTS:tty>

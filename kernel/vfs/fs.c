@@ -471,6 +471,7 @@ void vfs_init(void) {
     ext4fs_init();
     devtmpfs_init();
     procfs_init();
+    sysfs_init();
 
     // Mount filesystems
     //

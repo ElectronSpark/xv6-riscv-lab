@@ -1,0 +1,448 @@
+/*
+ * sysfs/inode.c - Read-only sysfs inode operations.
+ */
+
+#include "types.h"
+#include "string.h"
+#include "riscv.h"
+#include "defs.h"
+#include "errno.h"
+#include "bits.h"
+#include "vfs/stat.h"
+#include "vfs/fs.h"
+#include "vfs/file.h"
+#include "../vfs_private.h"
+#include <mm/vm.h>
+#include "sysfs_private.h"
+
+int snprintf(char *buf, size_t size, const char *fmt, ...);
+
+#define SYSFS_CHILDREN_START 3
+
+struct sysfs_entry {
+    const char *name;
+    uint64 ino;
+};
+
+static const struct sysfs_entry root_entries[] = {
+    {"dev", SYSFS_INO_DEV},
+    {"bus", SYSFS_INO_BUS},
+    {"class", SYSFS_INO_CLASS},
+};
+
+static const struct sysfs_entry dev_entries[] = {
+    {"char", SYSFS_INO_DEV_CHAR},
+};
+
+static const struct sysfs_entry char_entries[] = {
+    {"226:0", SYSFS_INO_DRM_PRIMARY},
+    {"226:128", SYSFS_INO_DRM_RENDER},
+};
+
+static const struct sysfs_entry bus_entries[] = {
+    {"pci", SYSFS_INO_BUS_PCI},
+};
+
+static const struct sysfs_entry class_entries[] = {
+    {"drm", SYSFS_INO_CLASS_DRM},
+};
+
+static const struct sysfs_entry class_drm_entries[] = {
+    {"card0", SYSFS_INO_CLASS_DRM_CARD0},
+    {"renderD128", SYSFS_INO_CLASS_DRM_RENDER},
+};
+
+static const struct sysfs_entry device_entries[] = {
+    {"vendor", 0},
+    {"device", 0},
+    {"subsystem_vendor", 0},
+    {"subsystem_device", 0},
+    {"revision", 0},
+    {"uevent", 0},
+    {"subsystem", 0},
+};
+
+static const struct sysfs_entry class_node_entries[] = {
+    {"dev", 0},
+    {"device", 0},
+    {"subsystem", 0},
+    {"uevent", 0},
+};
+
+static int sysfs_lookup_static(const struct sysfs_entry *entries, int nentries,
+                               const char *name, size_t name_len, uint64 *ino)
+{
+    for (int i = 0; i < nentries; i++) {
+        size_t len = strlen(entries[i].name);
+        if (len == name_len && memcmp(entries[i].name, name, len) == 0) {
+            *ino = entries[i].ino;
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
+static uint64 device_attr_ino(enum sysfs_device_kind kind, int child_idx)
+{
+    uint64 base = kind == SYSFS_DEV_DRM_PRIMARY ?
+        SYSFS_INO_PRIMARY_ATTR_BASE : SYSFS_INO_RENDER_ATTR_BASE;
+
+    if (child_idx < 0 || child_idx >= NELEM(device_entries))
+        return 0;
+    return base + child_idx;
+}
+
+static uint64 class_attr_ino(enum sysfs_device_kind kind, int child_idx)
+{
+    uint64 base = kind == SYSFS_DEV_DRM_PRIMARY ?
+        SYSFS_INO_CLASS_CARD0_ATTR_BASE : SYSFS_INO_CLASS_RENDER_ATTR_BASE;
+
+    if (child_idx < 0 || child_idx >= NELEM(class_node_entries))
+        return 0;
+    return base + child_idx;
+}
+
+static int sysfs_emit(struct vfs_dir_iter *iter, struct vfs_dentry *ret,
+                      const char *name, uint64 ino)
+{
+    vfs_release_dentry(ret);
+    ret->name = strdup(name);
+    if (ret->name == NULL)
+        return -ENOMEM;
+    ret->name_len = (uint16)strlen(name);
+    ret->ino = ino;
+    ret->cookies = iter->index;
+    return 0;
+}
+
+static int sysfs_emit_static(struct vfs_dir_iter *iter, struct vfs_dentry *ret,
+                             const struct sysfs_entry *entries, int nentries,
+                             int child_idx)
+{
+    if (child_idx < 0 || child_idx >= nentries) {
+        vfs_release_dentry(ret);
+        ret->name = NULL;
+        return 0;
+    }
+    return sysfs_emit(iter, ret, entries[child_idx].name,
+                      entries[child_idx].ino);
+}
+
+static int sysfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
+                        const char *name, size_t name_len)
+{
+    struct sysfs_inode *si = sysfs_i(dir);
+    uint64 ino = 0;
+
+    dentry->sb = dir->sb;
+    dentry->parent = dir;
+    dentry->name = strndup(name, name_len);
+    if (dentry->name == NULL)
+        return -ENOMEM;
+    dentry->name_len = name_len;
+
+    switch (dir->ino) {
+    case SYSFS_INO_ROOT:
+        if (sysfs_lookup_static(root_entries, NELEM(root_entries), name,
+                                name_len, &ino) == 0)
+            break;
+        return -ENOENT;
+    case SYSFS_INO_DEV:
+        if (sysfs_lookup_static(dev_entries, NELEM(dev_entries), name,
+                                name_len, &ino) == 0)
+            break;
+        return -ENOENT;
+    case SYSFS_INO_DEV_CHAR:
+        if (sysfs_lookup_static(char_entries, NELEM(char_entries), name,
+                                name_len, &ino) == 0)
+            break;
+        return -ENOENT;
+    case SYSFS_INO_DRM_PRIMARY:
+        if (name_len == 6 && memcmp(name, "device", 6) == 0) {
+            ino = SYSFS_INO_DRM_PRIMARY_DEVICE;
+            break;
+        }
+        return -ENOENT;
+    case SYSFS_INO_DRM_RENDER:
+        if (name_len == 6 && memcmp(name, "device", 6) == 0) {
+            ino = SYSFS_INO_DRM_RENDER_DEVICE;
+            break;
+        }
+        return -ENOENT;
+    case SYSFS_INO_DRM_PRIMARY_DEVICE:
+    case SYSFS_INO_DRM_RENDER_DEVICE:
+        for (int i = 0; i < NELEM(device_entries); i++) {
+            if (strlen(device_entries[i].name) == name_len &&
+                memcmp(device_entries[i].name, name, name_len) == 0) {
+                ino = device_attr_ino(si->dev_kind, i);
+                break;
+            }
+        }
+        if (ino == 0)
+            return -ENOENT;
+        break;
+    case SYSFS_INO_BUS:
+        if (sysfs_lookup_static(bus_entries, NELEM(bus_entries), name,
+                                name_len, &ino) == 0)
+            break;
+        return -ENOENT;
+    case SYSFS_INO_CLASS:
+        if (sysfs_lookup_static(class_entries, NELEM(class_entries), name,
+                                name_len, &ino) == 0)
+            break;
+        return -ENOENT;
+    case SYSFS_INO_CLASS_DRM:
+        if (sysfs_lookup_static(class_drm_entries, NELEM(class_drm_entries),
+                                name, name_len, &ino) == 0)
+            break;
+        return -ENOENT;
+    case SYSFS_INO_CLASS_DRM_CARD0:
+    case SYSFS_INO_CLASS_DRM_RENDER:
+        for (int i = 0; i < NELEM(class_node_entries); i++) {
+            if (strlen(class_node_entries[i].name) == name_len &&
+                memcmp(class_node_entries[i].name, name, name_len) == 0) {
+                ino = class_attr_ino(si->dev_kind, i);
+                break;
+            }
+        }
+        if (ino == 0)
+            return -ENOENT;
+        break;
+    default:
+        return -ENOENT;
+    }
+
+    dentry->ino = ino;
+    return 0;
+}
+
+static int sysfs_parent_ino(uint64 ino, enum sysfs_device_kind kind)
+{
+    if (ino == SYSFS_INO_DEV)
+        return SYSFS_INO_ROOT;
+    if (ino == SYSFS_INO_DEV_CHAR)
+        return SYSFS_INO_DEV;
+    if (ino == SYSFS_INO_DRM_PRIMARY || ino == SYSFS_INO_DRM_RENDER)
+        return SYSFS_INO_DEV_CHAR;
+    if (ino == SYSFS_INO_DRM_PRIMARY_DEVICE)
+        return SYSFS_INO_DRM_PRIMARY;
+    if (ino == SYSFS_INO_DRM_RENDER_DEVICE)
+        return SYSFS_INO_DRM_RENDER;
+    if (ino == SYSFS_INO_BUS)
+        return SYSFS_INO_ROOT;
+    if (ino == SYSFS_INO_BUS_PCI)
+        return SYSFS_INO_BUS;
+    if (ino == SYSFS_INO_CLASS)
+        return SYSFS_INO_ROOT;
+    if (ino == SYSFS_INO_CLASS_DRM)
+        return SYSFS_INO_CLASS;
+    if (ino == SYSFS_INO_CLASS_DRM_CARD0 ||
+        ino == SYSFS_INO_CLASS_DRM_RENDER)
+        return SYSFS_INO_CLASS_DRM;
+    (void)kind;
+    return SYSFS_INO_ROOT;
+}
+
+static int sysfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
+                          struct vfs_dentry *ret)
+{
+    struct sysfs_inode *si = sysfs_i(dir);
+    int child_idx;
+
+    if (iter->index == 1) {
+        return sysfs_emit(iter, ret, "..",
+                          sysfs_parent_ino(dir->ino, si->dev_kind));
+    }
+
+    child_idx = (int)iter->index - SYSFS_CHILDREN_START;
+    switch (dir->ino) {
+    case SYSFS_INO_ROOT:
+        return sysfs_emit_static(iter, ret, root_entries,
+                                 NELEM(root_entries), child_idx);
+    case SYSFS_INO_DEV:
+        return sysfs_emit_static(iter, ret, dev_entries,
+                                 NELEM(dev_entries), child_idx);
+    case SYSFS_INO_DEV_CHAR:
+        return sysfs_emit_static(iter, ret, char_entries,
+                                 NELEM(char_entries), child_idx);
+    case SYSFS_INO_DRM_PRIMARY:
+        return child_idx == 0 ? sysfs_emit(iter, ret, "device",
+                                           SYSFS_INO_DRM_PRIMARY_DEVICE) :
+                                sysfs_emit_static(iter, ret, NULL, 0, 0);
+    case SYSFS_INO_DRM_RENDER:
+        return child_idx == 0 ? sysfs_emit(iter, ret, "device",
+                                           SYSFS_INO_DRM_RENDER_DEVICE) :
+                                sysfs_emit_static(iter, ret, NULL, 0, 0);
+    case SYSFS_INO_DRM_PRIMARY_DEVICE:
+    case SYSFS_INO_DRM_RENDER_DEVICE:
+        if (child_idx < 0 || child_idx >= NELEM(device_entries)) {
+            vfs_release_dentry(ret);
+            ret->name = NULL;
+            return 0;
+        }
+        return sysfs_emit(iter, ret, device_entries[child_idx].name,
+                          device_attr_ino(si->dev_kind, child_idx));
+    case SYSFS_INO_BUS:
+        return sysfs_emit_static(iter, ret, bus_entries,
+                                 NELEM(bus_entries), child_idx);
+    case SYSFS_INO_BUS_PCI:
+        vfs_release_dentry(ret);
+        ret->name = NULL;
+        return 0;
+    case SYSFS_INO_CLASS:
+        return sysfs_emit_static(iter, ret, class_entries,
+                                 NELEM(class_entries), child_idx);
+    case SYSFS_INO_CLASS_DRM:
+        return sysfs_emit_static(iter, ret, class_drm_entries,
+                                 NELEM(class_drm_entries), child_idx);
+    case SYSFS_INO_CLASS_DRM_CARD0:
+    case SYSFS_INO_CLASS_DRM_RENDER:
+        if (child_idx < 0 || child_idx >= NELEM(class_node_entries)) {
+            vfs_release_dentry(ret);
+            ret->name = NULL;
+            return 0;
+        }
+        return sysfs_emit(iter, ret, class_node_entries[child_idx].name,
+                          class_attr_ino(si->dev_kind, child_idx));
+    default:
+        return -ENOTDIR;
+    }
+}
+
+static const char *sysfs_dev_name(enum sysfs_device_kind kind)
+{
+    return kind == SYSFS_DEV_DRM_RENDER ? "renderD128" : "card0";
+}
+
+static const char *sysfs_dev_number(enum sysfs_device_kind kind)
+{
+    return kind == SYSFS_DEV_DRM_RENDER ? "226:128" : "226:0";
+}
+
+static ssize_t sysfs_readlink(struct vfs_inode *inode, char *buf,
+                              size_t buflen)
+{
+    struct sysfs_inode *si = sysfs_i(inode);
+    const char *target = NULL;
+    char local[96];
+
+    if (si->attr == SYSFS_ATTR_SUBSYSTEM) {
+        target = "/sys/bus/pci";
+    } else if (si->attr == SYSFS_ATTR_DEVICE_LINK) {
+        snprintf(local, sizeof(local), "/sys/dev/char/%s/device",
+                 sysfs_dev_number(si->dev_kind));
+        target = local;
+    } else {
+        return -EINVAL;
+    }
+
+    size_t len = strlen(target);
+    if (len + 1 > buflen)
+        return -ENAMETOOLONG;
+    memmove(buf, target, len + 1);
+    return (ssize_t)len;
+}
+
+static int sysfs_getattr(struct vfs_inode *inode, struct stat *st)
+{
+    memset(st, 0, sizeof(*st));
+    st->st_ino = inode->ino;
+    st->st_mode = inode->mode;
+    st->st_nlink = inode->n_links;
+    st->st_size = inode->size;
+    st->st_blksize = 4096;
+    return 0;
+}
+
+static char *sysfs_gen_file(struct sysfs_inode *si)
+{
+    char *buf = kvmalloc(512);
+    const char *node = sysfs_dev_name(si->dev_kind);
+    const char *devnum = sysfs_dev_number(si->dev_kind);
+    int n = 0;
+
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    switch (si->attr) {
+    case SYSFS_ATTR_VENDOR:
+        n = snprintf(buf, 512, "0x1af4\n");
+        break;
+    case SYSFS_ATTR_DEVICE:
+        n = snprintf(buf, 512, "0x1050\n");
+        break;
+    case SYSFS_ATTR_SUBSYSTEM_VENDOR:
+        n = snprintf(buf, 512, "0x1af4\n");
+        break;
+    case SYSFS_ATTR_SUBSYSTEM_DEVICE:
+        n = snprintf(buf, 512, "0x1100\n");
+        break;
+    case SYSFS_ATTR_REVISION:
+        n = snprintf(buf, 512, "0x01\n");
+        break;
+    case SYSFS_ATTR_DEV:
+        n = snprintf(buf, 512, "%s\n", devnum);
+        break;
+    case SYSFS_ATTR_UEVENT:
+        n = snprintf(buf, 512,
+                     "DRIVER=virtio-pci\n"
+                     "PCI_CLASS=30000\n"
+                     "PCI_ID=1AF4:1050\n"
+                     "PCI_SUBSYS_ID=1AF4:1100\n"
+                     "PCI_SLOT_NAME=0000:00:04.0\n"
+                     "MODALIAS=pci:v00001AF4d00001050sv00001AF4sd00001100bc03sc00i00\n"
+                     "DEVNAME=dri/%s\n"
+                     "MAJOR=226\n"
+                     "MINOR=%s\n",
+                     node,
+                     si->dev_kind == SYSFS_DEV_DRM_RENDER ? "128" : "0");
+        break;
+    default:
+        kvfree(buf);
+        return ERR_PTR(-EINVAL);
+    }
+
+    if (n < 0 || n >= 512) {
+        kvfree(buf);
+        return ERR_PTR(-EOVERFLOW);
+    }
+    return buf;
+}
+
+static int sysfs_open(struct vfs_inode *inode, struct vfs_file *file,
+                      int f_flags)
+{
+    struct sysfs_inode *si = sysfs_i(inode);
+    char *data;
+
+    (void)f_flags;
+    if (S_ISDIR(inode->mode)) {
+        file->ops = &sysfs_dir_file_ops;
+        return 0;
+    }
+    if (S_ISLNK(inode->mode))
+        return -EINVAL;
+
+    data = sysfs_gen_file(si);
+    if (IS_ERR(data))
+        return PTR_ERR(data);
+    file->private_data = data;
+    file->ops = &sysfs_reg_file_ops;
+    file->f_pos = 0;
+    return 0;
+}
+
+static void sysfs_destroy_inode(struct vfs_inode *inode)
+{
+    (void)inode;
+}
+
+struct vfs_inode_ops sysfs_inode_ops = {
+    .lookup = sysfs_lookup,
+    .dir_iter = sysfs_dir_iter,
+    .readlink = sysfs_readlink,
+    .getattr = sysfs_getattr,
+    .open = sysfs_open,
+    .destroy_inode = sysfs_destroy_inode,
+    .free_inode = sysfs_free_inode,
+};
