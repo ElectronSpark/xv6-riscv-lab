@@ -336,23 +336,26 @@ static int ptmx_fops_poll(struct vfs_file *file, short events) {
     short revents = 0;
 
     /* Master is readable when the slave's output pipe has data */
-    if (events & POLLIN) {
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP)) {
         struct pipe *outp = pair->slave->output_pipe;
         if (outp != NULL) {
             uint nw = smp_load_acquire(&outp->nwrite);
             uint nr = smp_load_acquire(&outp->nread);
             if ((nw - nr) > 0)
-                revents |= POLLIN;
+                revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
             /* Slave side hung up: report hangup so the master detects EOF */
             if (!PIPE_WRITABLE(outp)) {
-                revents |= (POLLIN | POLLHUP);
+                revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
+                revents |= POLLHUP;
+                if (events & POLLRDHUP)
+                    revents |= POLLRDHUP;
             }
         }
     }
 
     /* Master is always writable (slave input pipe has space) */
-    if (events & POLLOUT)
-        revents |= POLLOUT;
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND))
+        revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
 
     return revents;
 }

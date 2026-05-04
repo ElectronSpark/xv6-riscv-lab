@@ -38,6 +38,8 @@ struct vfs_file_ops;
 #define UNIX_BUF_DEFAULT_SIZE (64 * PAGE_SIZE)        /* initial ring size */
 #define UNIX_BUF_MAX_SIZE     (16 * 1024 * 1024)      /* maximum growable ring */
 #define UNIX_BUF_SIZE         UNIX_BUF_DEFAULT_SIZE   /* compatibility alias */
+#define UNIX_LOWAT_DEFAULT    1
+#define UNIX_IO_CHUNK         PAGE_SIZE
 
 /* Maximum number of pending connections for a listening socket */
 #define UNIX_BACKLOG_MAX 128
@@ -103,6 +105,10 @@ struct unix_sock {
     int        protocol;        /* always 0 for AF_UNIX */
     int        shutdown_flags;  /* UNIX_SHUT_RD | UNIX_SHUT_WR */
     int        so_error;        /* pending async socket error for SO_ERROR */
+    size_t     rcv_lowat;       /* SO_RCVLOWAT */
+    size_t     snd_lowat;       /* SO_SNDLOWAT */
+    size_t     rcv_buf;         /* SO_RCVBUF cap for peer writes */
+    size_t     snd_buf;         /* SO_SNDBUF cap for our writes */
 
     /* Bind address */
     char       bind_path[UNIX_PATH_MAX];

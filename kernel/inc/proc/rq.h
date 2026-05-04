@@ -127,6 +127,7 @@ void rq_task_dead(struct sched_entity *se);
 void rq_yield_task(void);
 
 bool rq_cpu_is_idle(int cpu_id);
+int rq_add_wake_list_locked(int cpu_id, struct sched_entity *se);
 int rq_add_wake_list(int cpu_id, struct sched_entity *se);
 struct sched_entity *rq_pop_all_wake_list(struct rq_percpu *rq_pc);
 void rq_flush_wake_list(int cpu_id);

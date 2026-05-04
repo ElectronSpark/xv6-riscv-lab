@@ -41,6 +41,7 @@
 #include "dev/cdev.h"
 #include "accounting.h"
 #include "timer/timer.h"
+#include "timer/goldfish_rtc.h"
 #include "signal.h"
 #include "dev/fdt.h"
 
@@ -1410,39 +1411,81 @@ static char *procfs_gen_cpuinfo(void) {
         PROCFS_APPEND_FLAG(edx1 & (1U << 25), "sse");
         PROCFS_APPEND_FLAG(edx1 & (1U << 26), "sse2");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 0), "pni");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 1), "pclmulqdq");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 3), "monitor");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 9), "ssse3");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 12), "fma");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 13), "cx16");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 19), "sse4_1");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 20), "sse4_2");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 21), "x2apic");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 22), "movbe");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 23), "popcnt");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 24), "tsc_deadline_timer");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 25), "aes");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 26), "xsave");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 27), "osxsave");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 28), "avx");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 29), "f16c");
+        PROCFS_APPEND_FLAG(ecx1 & (1U << 30), "rdrand");
         PROCFS_APPEND_FLAG(ecx1 & (1U << 31), "hypervisor");
         PROCFS_APPEND_FLAG(edx_ext1 & (1U << 11), "syscall");
         PROCFS_APPEND_FLAG(edx_ext1 & (1U << 20), "nx");
+        PROCFS_APPEND_FLAG(edx_ext1 & (1U << 27), "rdtscp");
         PROCFS_APPEND_FLAG(edx_ext1 & (1U << 29), "lm");
         PROCFS_APPEND_FLAG(ecx_ext1 & (1U << 0), "lahf_lm");
+        PROCFS_APPEND_FLAG(ecx_ext1 & (1U << 5), "abm");
         PROCFS_APPEND_FLAG(ebx7 & (1U << 3), "bmi1");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 4), "hle");
         PROCFS_APPEND_FLAG(ebx7 & (1U << 5), "avx2");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 7), "smep");
         PROCFS_APPEND_FLAG(ebx7 & (1U << 8), "bmi2");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 9), "erms");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 10), "invpcid");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 11), "rtm");
         PROCFS_APPEND_FLAG(ebx7 & (1U << 19), "adx");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 20), "smap");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 23), "clflushopt");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 24), "clwb");
         PROCFS_APPEND_FLAG(ebx7 & (1U << 29), "sha_ni");
+        PROCFS_APPEND_FLAG(ebx7 & (1U << 30), "avx512bw");
+        PROCFS_APPEND_FLAG(ecx7 & (1U << 2), "umip");
+        PROCFS_APPEND_FLAG(ecx7 & (1U << 3), "pku");
+        PROCFS_APPEND_FLAG(ecx7 & (1U << 4), "ospke");
+        PROCFS_APPEND_FLAG(ecx7 & (1U << 22), "rdpid");
 #undef PROCFS_APPEND_FLAG
+
+        uint32 cpu_mhz = __timebase_frequency / 1000000U;
+        uint32 phys_bits = 40;
+        uint32 virt_bits = 48;
+        if (max_ext >= 0x80000008U) {
+            uint32 eax_ext8 = 0, ebx_ext8 = 0, ecx_ext8 = 0, edx_ext8 = 0;
+            asm volatile("cpuid"
+                         : "=a"(eax_ext8), "=b"(ebx_ext8),
+                           "=c"(ecx_ext8), "=d"(edx_ext8)
+                         : "a"(0x80000008U), "c"(0));
+            (void)ebx_ext8;
+            (void)ecx_ext8;
+            (void)edx_ext8;
+            if ((eax_ext8 & 0xff) != 0)
+                phys_bits = eax_ext8 & 0xff;
+            if (((eax_ext8 >> 8) & 0xff) != 0)
+                virt_bits = (eax_ext8 >> 8) & 0xff;
+        }
 
         n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
                      "\n"
                      "bugs\t\t:\n"
-                     "bogomips\t: 0.00\n"
+                     "bogomips\t: %u.00\n"
                      "clflush size\t: %u\n"
                      "cache_alignment\t: %u\n"
-                     "address sizes\t: 40 bits physical, 48 bits virtual\n"
+                     "address sizes\t: %u bits physical, %u bits virtual\n"
                      "power management:\n"
                      "\n",
+                     cpu_mhz * 2,
                      ((ebx1 >> 8) & 0xff) ? ((ebx1 >> 8) & 0xff) * 8 : 64,
-                     ((ebx1 >> 8) & 0xff) ? ((ebx1 >> 8) & 0xff) * 8 : 64);
+                     ((ebx1 >> 8) & 0xff) ? ((ebx1 >> 8) & 0xff) * 8 : 64,
+                     phys_bits, virt_bits);
         if (n < 0)
             break;
         pos += n;
@@ -1500,6 +1543,8 @@ static char *procfs_gen_stat(void)
     if (buf == NULL)
         return ERR_PTR(-ENOMEM);
     uint64 j = get_jiffs();
+    uint64 now_sec = goldfish_rtc_read_ns() / NS_PER_SEC;
+    uint64 boot_sec = now_sec > (j / 1000) ? now_sec - (j / 1000) : 0;
     int ncpu = platform.ncpu;
     if (ncpu < 1)
         ncpu = 1;
@@ -1527,10 +1572,11 @@ static char *procfs_gen_stat(void)
         snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
                  "intr 0\n"
                  "ctxt 0\n"
-                 "btime 0\n"
+                 "btime %lu\n"
                  "processes 0\n"
                  "procs_running 1\n"
-                 "procs_blocked 0\n");
+                 "procs_blocked 0\n",
+                 (unsigned long)boot_sec);
     }
     return buf;
 }

@@ -341,6 +341,31 @@ uint64 sys_set_robust_list(void) {
     return 0;
 }
 
+uint64 sys_get_robust_list(void) {
+    int pid;
+    uint64 head_ptr;
+    uint64 len_ptr;
+
+    argint(0, &pid);
+    argaddr(1, &head_ptr);
+    argaddr(2, &len_ptr);
+
+    /*
+     * xv6 does not currently expose ptrace-style cross-task inspection here.
+     * Linux allows pid 0 to mean the calling thread, which is what libcs use.
+     */
+    if (pid != 0 && pid != current->pid)
+        return (uint64)-EPERM;
+
+    uint64 head = current->robust_list_head;
+    uint64 len = current->robust_list_len;
+    if (vm_copyout(current->vm, head_ptr, &head, sizeof(head)) < 0 ||
+        vm_copyout(current->vm, len_ptr, &len, sizeof(len)) < 0)
+        return (uint64)-EFAULT;
+
+    return 0;
+}
+
 /* ================================================================== */
 /*  clock_settime                                                     */
 /* ================================================================== */
@@ -620,17 +645,50 @@ uint64 sys_munlockall(void) {
 }
 
 /* ================================================================== */
-/*  membarrier — stub (returns 0 for CMD_QUERY, -ENOSYS otherwise)    */
+/*  membarrier                                                        */
 /* ================================================================== */
+
+#define MEMBARRIER_CMD_QUERY                     0
+#define MEMBARRIER_CMD_GLOBAL                    (1 << 0)
+#define MEMBARRIER_CMD_GLOBAL_EXPEDITED          (1 << 1)
+#define MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED (1 << 2)
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED         (1 << 3)
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED (1 << 4)
+#define MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE (1 << 5)
+#define MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE (1 << 6)
+
+#define MEMBARRIER_SUPPORTED                                             \
+    (MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED |           \
+     MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED |                          \
+     MEMBARRIER_CMD_PRIVATE_EXPEDITED |                                  \
+     MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED |                         \
+     MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE |                        \
+     MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE)
 
 uint64 sys_membarrier(void) {
     int cmd;
+    int flags;
     argint(0, &cmd);
+    argint(1, &flags);
 
-    /* CMD 0 = MEMBARRIER_CMD_QUERY: return bitmask of supported commands.
-     * We support nothing, so return 0. */
-    if (cmd == 0)
+    if (flags != 0)
+        return (uint64)-EINVAL;
+
+    if (cmd == MEMBARRIER_CMD_QUERY)
+        return MEMBARRIER_SUPPORTED;
+
+    if (cmd == MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED ||
+        cmd == MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED ||
+        cmd == MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE)
         return 0;
 
-    return (uint64)-ENOSYS;
+    if (cmd == MEMBARRIER_CMD_GLOBAL ||
+        cmd == MEMBARRIER_CMD_GLOBAL_EXPEDITED ||
+        cmd == MEMBARRIER_CMD_PRIVATE_EXPEDITED ||
+        cmd == MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE) {
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        return 0;
+    }
+
+    return (uint64)-EINVAL;
 }

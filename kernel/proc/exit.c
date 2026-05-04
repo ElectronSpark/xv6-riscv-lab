@@ -170,6 +170,10 @@ void exit(int status) {
     // and need to resume before we tear anything down
     vfork_done(p);
 
+    // Robust futexes: mark any userspace mutexes still owned by this thread
+    // as OWNER_DIED and wake waiters before the address space disappears.
+    futex_exit_robust_list(p);
+
     // CLONE_CHILD_CLEARTID: zero the TID word at the stored address and
     // issue a futex wake so pthread_join can detect thread exit.
     // Must be done while VM is still valid.

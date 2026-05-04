@@ -17,6 +17,7 @@
 #include "bits.h"
 #include "errno.h"
 #include "compiler.h"
+#include "smp/ipi.h"
 
 /** @brief Static per-CPU run queue data array (cache-line aligned). */
 static struct rq_percpu rq_percpu_data[NCPU] __ALIGNED_CACHELINE;
@@ -845,27 +846,38 @@ bool rq_cpu_is_idle(int cpu_id) {
     return false;
 }
 
-int rq_add_wake_list(int cpu_id, struct sched_entity *se) {
+int rq_add_wake_list_locked(int cpu_id, struct sched_entity *se)
+{
     if (se == NULL || se->thread == NULL) {
         return -EINVAL;
     }
+    if (cpu_id < 0 || cpu_id >= NCPU) {
+        return -EINVAL;
+    }
+    assert(__rq_lock_held(cpu_id),
+           "rq_add_wake_list_locked: rq lock not held");
     if (!THREAD_AWOKEN(se->thread)) {
         // threads need to be marked as awoken before adding to wake list
         return -EINVAL;
     }
+    if (smp_load_acquire(&se->on_rq)) {
+        // Already on a run queue, no need to add to wake list
+        return -EALREADY;
+    }
+
+    // Add to the front of the wake list
+    LLIST_PUSH(__rqpc(cpu_id)->wake_list_head, se, wake_next);
+    return 0;
+}
+
+int rq_add_wake_list(int cpu_id, struct sched_entity *se) {
     struct rq_percpu *rq_pc = rq_percpu_lock_get(cpu_id);
     if (rq_pc == NULL) {
         return -EINVAL;
     }
-    if (smp_load_acquire(&se->on_rq)) {
-        // Already on a run queue, no need to add to wake list
-        rq_percpu_put_unlock(rq_pc);
-        return -EALREADY;
-    }
-    // Add to the front of the wake list
-    LLIST_PUSH(rq_pc->wake_list_head, se, wake_next);
+    int ret = rq_add_wake_list_locked(cpu_id, se);
     rq_percpu_put_unlock(rq_pc);
-    return 0;
+    return ret;
 }
 
 struct sched_entity *rq_pop_all_wake_list(struct rq_percpu *rq_pc) {
@@ -976,6 +988,9 @@ void rq_flush_wake_list(int cpu_id) {
                     LLIST_PUSH(dst->wake_list_head, se, wake_next);
                     rq_percpu_put_unlock(dst);
                     forwarded = 1;
+                    if (c != cpuid()) {
+                        ipi_send_single(c, IPI_REASON_RESCHEDULE);
+                    }
                 }
                 break;
             }

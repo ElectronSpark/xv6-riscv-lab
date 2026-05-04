@@ -67,13 +67,6 @@ uint64 sys_sigaction(void) {
         return ret;
     }
 
-    /* Debug: log SIGSEGV handler changes */
-    if (signum == 11 && p_act) {
-        printf("pid %d %s: sigaction(SIGSEGV) handler=%p flags=0x%lx ret=%d\n",
-               current->pid, current->name, (void *)p_act->sa_handler,
-               p_act->sa_flags, ret);
-    }
-
     if (p_oldact != 0) {
         if (either_copyout(1, oldact_addr, p_oldact, sizeof(struct sigaction)) <
             0) {

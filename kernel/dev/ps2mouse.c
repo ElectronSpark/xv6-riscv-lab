@@ -20,6 +20,7 @@
 #include <lock/spinlock.h>
 #include <proc/sched.h>
 #include <mm/vm.h>
+#include <vfs/poll.h>
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -526,10 +527,10 @@ static int mouse_poll(cdev_t *cdev, short events)
 {
     (void)cdev;
     short revents = 0;
-    if (events & 0x01) {  /* POLLIN */
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND)) {
         spin_lock(&mouse_state.lock);
         if (!ring_empty())
-            revents |= 0x01;
+            revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
         spin_unlock(&mouse_state.lock);
     }
     return revents;

@@ -1107,6 +1107,38 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     return 0; // Success
 }
 
+int sigmask_swap(const sigset_t *set, sigset_t *oldset) {
+    struct thread *p = current;
+    assert(p != NULL, "sigmask_swap: current returned NULL");
+
+    sigacts_t *sa = p->sigacts;
+    assert(sa != NULL, "sigmask_swap: sigacts is NULL");
+
+    sigset_t pending_unmasked = 0;
+
+    sigacts_lock(sa);
+    if (oldset)
+        *oldset = p->signal.sig_mask;
+
+    if (set != NULL) {
+        p->signal.sig_mask = *set;
+        sigdelset(&p->signal.sig_mask, SIGKILL);
+        sigdelset(&p->signal.sig_mask, SIGSTOP);
+    }
+
+    recalc_sigpending_tsk(p);
+    pending_unmasked = p->signal.sig_pending_mask & ~p->signal.sig_mask;
+    sigacts_unlock(sa);
+
+    if (pending_unmasked != 0) {
+        tcb_lock(p);
+        (void)signal_notify(p);
+        tcb_unlock(p);
+    }
+
+    return 0;
+}
+
 int sigpending(struct thread *p, sigset_t *set) {
     if (!set) {
         return -EINVAL; // Invalid set pointer

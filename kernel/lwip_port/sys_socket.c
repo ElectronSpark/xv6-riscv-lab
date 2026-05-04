@@ -49,6 +49,8 @@
 #include "kqueue_types.h"
 #include "vfs/unix_socket.h"
 #include "netlink.h"
+#include "cmdline.h"
+#include "proc/sched.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -113,6 +115,9 @@ struct lwip_sock {
      * lwIP signals that more space is available.  Used by sock_poll_ready()
      * so EPOLLOUT is only reported when the socket is genuinely writable. */
     uint8          sendevent;
+    int            fd;
+    uint64         trace_rx_total;
+    uint64         trace_rx_next;
 };
 
 /* Socket type constants (matching POSIX) — also defined in vfs/unix_socket.h */
@@ -144,11 +149,13 @@ struct lwip_sock {
 
 /* Message flags */
 #define MSG_PEEK       0x02
+#define MSG_CTRUNC     0x08
 #define MSG_TRUNC      0x20
 #define MSG_DONTWAIT      0x40
 #define MSG_WAITALL       0x100
 #define MSG_CMSG_CLOEXEC  0x40000000
 #define MSG_NOSIGNAL      0x4000
+#define MSG_WAITFORONE    0x10000
 
 /* Socket option levels */
 #define SOL_SOCKET     1
@@ -201,6 +208,11 @@ struct ip_mreq {
     uint32 imr_interface;   /* local interface address (network order) */
 };
 
+struct sock_timespec {
+    int64 tv_sec;
+    int64 tv_nsec;
+};
+
 /* SO_LINGER structure */
 struct k_linger {
     int l_onoff;    /* linger active */
@@ -218,6 +230,156 @@ struct k_sockaddr_in {
 #define K_SOCKADDR_IN_SIZE  16
 
 static int sock_is_nonblock(int fd, int msg_flags);
+static ssize_t sock_tcp_send_common(struct lwip_sock *sk, int fd,
+                                    uint64 ubuf, const char *kbuf,
+                                    size_t count, int flags, int user);
+
+static int sock_timespec_to_ms(const struct sock_timespec *ts, uint64 *ms)
+{
+    if (ts == NULL || ms == NULL)
+        return -EINVAL;
+    if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= 1000000000LL)
+        return -EINVAL;
+
+    uint64 sec = (uint64)ts->tv_sec;
+    if (sec > ((uint64)-1) / 1000ULL)
+        return -EINVAL;
+    uint64 value = sec * 1000ULL;
+    uint64 nsec_ms = ((uint64)ts->tv_nsec + 999999ULL) / 1000000ULL;
+    if (value > ((uint64)-1) - nsec_ms)
+        return -EINVAL;
+    *ms = value + nsec_ms;
+    return 0;
+}
+
+static uint32 sock_timeout_remaining_ms(uint64 deadline_ms, int *expired)
+{
+    uint64 now = sched_timer_now_ms();
+    if (expired != NULL)
+        *expired = 0;
+    if (deadline_ms <= now) {
+        if (expired != NULL)
+            *expired = 1;
+        return 0;
+    }
+    uint64 remaining = deadline_ms - now;
+    if (remaining > (uint32)-1)
+        return (uint32)-1;
+    return (uint32)remaining;
+}
+
+static int webkit_sock_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_sock_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int sock_trace_process(void)
+{
+    return current != NULL &&
+        (strncmp(current->name, "MiniBrowser", 11) == 0 ||
+         strncmp(current->name, "WebKit", 6) == 0 ||
+         strncmp(current->name, "wlcomp", 6) == 0);
+}
+
+#define SOCK_TRACE(fmt, ...)                                                   \
+    do {                                                                       \
+        if (webkit_sock_trace_enabled() && sock_trace_process())               \
+            printf("webkit-sock: " fmt, ##__VA_ARGS__);                       \
+    } while (0)
+
+static int webkit_sock_send_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_sock_send_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+#define SOCK_SEND_TRACE(fmt, ...)                                              \
+    do {                                                                       \
+        if (webkit_sock_send_trace_enabled() && sock_trace_process())          \
+            printf("webkit-sock-send: " fmt, ##__VA_ARGS__);                  \
+    } while (0)
+
+static int webkit_sock_stall_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_sock_stall_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+#define SOCK_STALL_TRACE(fmt, ...)                                             \
+    do {                                                                       \
+        if (webkit_sock_stall_trace_enabled() && sock_trace_process())         \
+            printf("webkit-sock-stall: " fmt, ##__VA_ARGS__);                 \
+    } while (0)
+
+static int webkit_sock_progress_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_sock_progress_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+#define SOCK_PROGRESS_TRACE(fmt, ...)                                          \
+    do {                                                                       \
+        if (webkit_sock_progress_trace_enabled() && sock_trace_process())      \
+            printf("webkit-sock-progress: " fmt, ##__VA_ARGS__);              \
+    } while (0)
+
+static int webkit_unix_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_unix_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+#define UNIX_TRACE(fmt, ...)                                                   \
+    do {                                                                       \
+        if (webkit_unix_trace_enabled() && sock_trace_process())               \
+            printf("webkit-unix: " fmt, ##__VA_ARGS__);                       \
+    } while (0)
 
 /* ========================================================================== */
 /* Allocate / free lwip_sock                                                  */
@@ -238,6 +400,7 @@ static struct lwip_sock *lwip_sock_alloc(void)
      * after connect() completes anyway.
      */
     sk->sendevent = 1;
+    sk->fd = -1;
     return sk;
 }
 
@@ -315,7 +478,68 @@ static err_t sock_tcp_recv_pbuf(struct lwip_sock *sk, struct pbuf **p,
 
     if (nonblock)
         apiflags |= NETCONN_DONTBLOCK;
-    return netconn_recv_tcp_pbuf_flags(sk->conn, p, apiflags);
+    if (nonblock || current == NULL || !THREAD_USER_SPACE(current))
+        return netconn_recv_tcp_pbuf_flags(sk->conn, p, apiflags);
+
+    /*
+     * Keep blocking TCP receive semantics, but do not rely on one infinite
+     * mailbox sleep.  This makes the path robust against missed wakeups in
+     * the kernel wait/notify plumbing and lets WebKit-sized transfers keep
+     * checking signal state without changing the userspace ABI.
+     */
+    uint32 old_timeout = netconn_get_recvtimeout(sk->conn);
+    if (old_timeout != 0)
+        return netconn_recv_tcp_pbuf_flags(sk->conn, p, apiflags);
+
+    netconn_set_recvtimeout(sk->conn, 1000);
+    for (;;) {
+        uint64 start = sched_timer_now_ms();
+        err_t err = netconn_recv_tcp_pbuf_flags(sk->conn, p, apiflags);
+        uint64 elapsed = sched_timer_now_ms() - start;
+        if (err == ERR_TIMEOUT && !signal_pending(current)) {
+            SOCK_STALL_TRACE("recv-wait fd=%d elapsed=%lu avail=%d mbox=%d "
+                             "state=%d flags=0x%x pending=%d\n",
+                             sk->fd, elapsed, sock_tcp_recv_avail(sk->conn),
+                             sys_mbox_valid(&sk->conn->recvmbox)
+                                 ? sk->conn->recvmbox.count : -1,
+                             (int)sk->conn->state, (int)sk->conn->flags,
+                             (int)sk->conn->pending_err);
+            continue;
+        }
+        netconn_set_recvtimeout(sk->conn, old_timeout);
+        return err;
+    }
+}
+
+static err_t sock_tcp_recv_pbuf_timeout(struct lwip_sock *sk, struct pbuf **p,
+                                        int nonblock, uint32 timeout_ms)
+{
+    if (sk == NULL || sk->conn == NULL)
+        return ERR_ARG;
+    if (nonblock || timeout_ms == 0)
+        return sock_tcp_recv_pbuf(sk, p, nonblock);
+
+    uint32 old_timeout = netconn_get_recvtimeout(sk->conn);
+    netconn_set_recvtimeout(sk->conn, timeout_ms);
+    err_t err = sock_tcp_recv_pbuf(sk, p, 0);
+    netconn_set_recvtimeout(sk->conn, old_timeout);
+    return err;
+}
+
+static err_t sock_netconn_recv_timeout(struct lwip_sock *sk,
+                                       struct netbuf **nb,
+                                       uint32 timeout_ms)
+{
+    if (sk == NULL || sk->conn == NULL)
+        return ERR_ARG;
+    if (timeout_ms == 0)
+        return netconn_recv(sk->conn, nb);
+
+    uint32 old_timeout = netconn_get_recvtimeout(sk->conn);
+    netconn_set_recvtimeout(sk->conn, timeout_ms);
+    err_t err = netconn_recv(sk->conn, nb);
+    netconn_set_recvtimeout(sk->conn, old_timeout);
+    return err;
 }
 
 static void sock_tcp_recvd(struct lwip_sock *sk, size_t len)
@@ -324,6 +548,75 @@ static void sock_tcp_recvd(struct lwip_sock *sk, size_t len)
         return;
 
     (void)netconn_tcp_recvd(sk->conn, len);
+}
+
+static void sock_tcp_recvd_accum(struct lwip_sock *sk, size_t *accum,
+                                 size_t len, int force)
+{
+    if (accum == NULL)
+        return;
+    if (len > 0)
+        *accum += len;
+
+    /*
+     * With NETCONN_NOAUTORCVD, TCP receive-window credit is our
+     * responsibility.  Large HTTPS bodies can otherwise drain one full lwIP
+     * receive window into user space before the sender is allowed to continue.
+     * Keep the syscall batching benefit, but advertise credit at lwIP's
+     * normal window-update granularity.
+     */
+    if (*accum > 0 &&
+        (force || *accum >= TCP_WND_UPDATE_THRESHOLD)) {
+        sock_tcp_recvd(sk, *accum);
+        *accum = 0;
+    }
+}
+
+static void sock_tcp_save_remainder(struct lwip_sock *sk, struct pbuf *p,
+                                    uint16 consumed)
+{
+    if (sk == NULL)
+        return;
+
+    if (p == NULL) {
+        sk->lastpbuf = NULL;
+        sk->lastpbuf_off = 0;
+        return;
+    }
+
+    if (consumed < p->tot_len) {
+        sk->lastpbuf = pbuf_free_header(p, consumed);
+        sk->lastpbuf_off = 0;
+    } else {
+        pbuf_free(p);
+        sk->lastpbuf = NULL;
+        sk->lastpbuf_off = 0;
+    }
+}
+
+static void sock_tcp_trace_rx_progress(struct lwip_sock *sk, size_t copied,
+                                       ssize_t syscall_total, const char *path)
+{
+    if (sk == NULL || copied == 0 || sk->conn == NULL)
+        return;
+    sk->trace_rx_total += copied;
+    if (sk->trace_rx_next == 0)
+        sk->trace_rx_next = 256 * 1024;
+    if (sk->trace_rx_total < sk->trace_rx_next)
+        return;
+
+    SOCK_PROGRESS_TRACE("%s fd=%d rx_total=%lu syscall_total=%ld "
+                        "lastpbuf=%d lastoff=%u avail=%d mbox=%d "
+                        "state=%d flags=0x%x pending=%d\n",
+                        path, sk->fd, sk->trace_rx_total,
+                        (long)syscall_total, sk->lastpbuf != NULL,
+                        sk->lastpbuf_off, sock_tcp_recv_avail(sk->conn),
+                        sys_mbox_valid(&sk->conn->recvmbox)
+                            ? sk->conn->recvmbox.count : -1,
+                        (int)sk->conn->state, (int)sk->conn->flags,
+                        (int)sk->conn->pending_err);
+    while (sk->trace_rx_total >= sk->trace_rx_next)
+        sk->trace_rx_next += 256 * 1024;
 }
 
 static void sock_notify_if_still_readable(int fd, struct lwip_sock *sk)
@@ -380,24 +673,44 @@ static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
             p = sk->lastpbuf;
             poff = sk->lastpbuf_off;
             reused_lastpbuf = true;
+            SOCK_TRACE("recv fd=%d reuse off=%u tot=%u goal=%d total=%ld\n",
+                       fd, (uint)poff, (uint)p->tot_len, len, (long)total);
         } else {
             err_t err = sock_tcp_recv_pbuf(sk, &p,
                 nonblock || total > 0);
             if (err != ERR_OK) {
-                if (err == ERR_CLSD)
+                SOCK_TRACE("recv fd=%d err=%d total=%ld recvd_acc=%lu "
+                           "avail=%d mbox=%d nonblock=%d\n",
+                           fd, (int)err, (long)total, (uint64)recvd_acc,
+                           sock_tcp_recv_avail(sk->conn),
+                           sys_mbox_valid(&sk->conn->recvmbox)
+                               ? sk->conn->recvmbox.count : -1,
+                           nonblock);
+                if (err == ERR_CLSD) {
+                    sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
                     return total > 0 ? (int)total : 0;
-                if (err == ERR_TIMEOUT && signal_pending(current))
+                }
+                if (err == ERR_TIMEOUT && signal_pending(current)) {
+                    sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
                     return total > 0 ? (int)total : -EINTR;
+                }
                 if (total > 0 && (err == ERR_WOULDBLOCK || err == ERR_TIMEOUT)) {
                     if (sock_tcp_wait_for_more(sk, nonblock, total,
                                                (size_t)len, &wait_more))
                         continue;
                     break;
                 }
-                if (recvd_acc > 0)
-                    sock_tcp_recvd(sk, recvd_acc);
+                sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
                 return -lwip_err_to_errno(err);
             }
+            if (p != NULL)
+                SOCK_TRACE("recv fd=%d pbuf tot=%u goal=%d total=%ld "
+                           "avail=%d mbox=%d nonblock=%d\n",
+                           fd, (uint)p->tot_len, len, (long)total,
+                           sock_tcp_recv_avail(sk->conn),
+                           sys_mbox_valid(&sk->conn->recvmbox)
+                               ? sk->conn->recvmbox.count : -1,
+                           nonblock);
         }
 
         uint16 avail = p->tot_len - poff;
@@ -413,7 +726,9 @@ static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
             if (got == 0)
                 break;
             if (vm_copyout(current->vm, ubuf + total + copied, tmpbuf, got) < 0) {
-                if (!reused_lastpbuf)
+                if (copied > 0 || reused_lastpbuf)
+                    sock_tcp_save_remainder(sk, p, poff + copied);
+                else
                     pbuf_free(p);
                 if (recvd_acc > 0)
                     sock_tcp_recvd(sk, recvd_acc);
@@ -425,19 +740,15 @@ static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
         if (flags & MSG_PEEK) {
             sk->lastpbuf = p;
             sk->lastpbuf_off = poff;
-        } else if ((uint16)(poff + copied) < p->tot_len) {
-            sk->lastpbuf = p;
-            sk->lastpbuf_off = poff + copied;
         } else {
-            pbuf_free(p);
-            sk->lastpbuf = NULL;
-            sk->lastpbuf_off = 0;
+            sock_tcp_save_remainder(sk, p, poff + copied);
         }
 
         if (!(flags & MSG_PEEK))
-            recvd_acc += copied;
+            sock_tcp_recvd_accum(sk, &recvd_acc, copied, 0);
 
         total += copied;
+        sock_tcp_trace_rx_progress(sk, copied, total, "read");
         if (copied == 0 || (flags & MSG_PEEK))
             break;
     }
@@ -450,8 +761,13 @@ static int sock_tcp_recv_copyout(struct lwip_sock *sk, int fd,
      * packets that round-trip dominated end-to-end latency and capped
      * single-stream throughput well below link rate.
      */
-    if (recvd_acc > 0)
-        sock_tcp_recvd(sk, recvd_acc);
+    sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
+
+    SOCK_TRACE("recv fd=%d done total=%ld recvd_acc=%lu avail=%d mbox=%d\n",
+               fd, (long)total, (uint64)recvd_acc,
+               sock_tcp_recv_avail(sk->conn),
+               sys_mbox_valid(&sk->conn->recvmbox)
+                   ? sk->conn->recvmbox.count : -1);
 
     if (!(flags & MSG_PEEK) && total > 0) {
         sock_notify_if_still_readable(fd, sk);
@@ -479,17 +795,21 @@ static int sock_poll_ready(struct lwip_sock *sk, short events)
 
     short revents = 0;
 
-    if (events & POLLIN) {
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND)) {
         if (sock_has_rx_data(sk)) {
-            revents |= POLLIN;
+            revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
         }
         if (conn->pending_err != ERR_OK)
             revents |= POLLERR;
-        if (conn->flags & NETCONN_FLAG_MBOXCLOSED)
+        if (conn->flags & NETCONN_FLAG_MBOXCLOSED) {
+            revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
             revents |= POLLHUP;
+            if (events & POLLRDHUP)
+                revents |= POLLRDHUP;
+        }
     }
 
-    if (events & POLLOUT) {
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
         /*
          * EPOLLOUT must reflect actual TCP send-buffer availability, not be
          * unconditionally true.  Returning POLLOUT every wake makes GLib's
@@ -503,9 +823,9 @@ static int sock_poll_ready(struct lwip_sock *sk, short events)
          */
         if (conn->pending_err != ERR_OK ||
             (conn->flags & NETCONN_FLAG_MBOXCLOSED)) {
-            revents |= POLLOUT;
+            revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
         } else if (sk->sendevent) {
-            revents |= POLLOUT;
+            revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
         }
     }
 
@@ -575,14 +895,7 @@ static ssize_t sock_file_read(struct vfs_file *file, char *buf, size_t count,
                 copied += got;
             }
 
-            if ((uint16)(poff + copied) < p->tot_len) {
-                sk->lastpbuf = p;
-                sk->lastpbuf_off = poff + copied;
-            } else {
-                pbuf_free(p);
-                sk->lastpbuf = NULL;
-                sk->lastpbuf_off = 0;
-            }
+            sock_tcp_save_remainder(sk, p, poff + copied);
             sock_tcp_recvd(sk, copied);
             total += copied;
             if (copied == 0)
@@ -636,45 +949,8 @@ static ssize_t sock_file_write(struct vfs_file *file, const char *buf,
         return -EBADF;
 
     if (sk->type == SOCK_STREAM) {
-        /* TCP: use netconn_write_partly (non-blocking requires bytes_written) */
-        char tmpbuf[1500];
-        size_t written = 0;
-
-        while (written < count) {
-            size_t chunk = count - written;
-            if (chunk > sizeof(tmpbuf))
-                chunk = sizeof(tmpbuf);
-
-            if (user) {
-                if (vm_copyin(current->vm, tmpbuf,
-                              (uint64)(buf + written), chunk) < 0)
-                    return written > 0 ? (ssize_t)written : -EFAULT;
-            } else {
-                memmove(tmpbuf, buf + written, chunk);
-            }
-
-            size_t chunk_written = 0;
-            err_t err = netconn_write_partly(sk->conn, tmpbuf, chunk,
-                                             NETCONN_COPY, &chunk_written);
-            if (err != ERR_OK) {
-                sock_dbg("write TCP err=%d (errno=%d) chunk=%d written=%d nb=%d pending_err=%d\n",
-                         (int)err, lwip_err_to_errno(err), (int)chunk,
-                         (int)written, netconn_is_nonblocking(sk->conn),
-                         (int)sk->conn->pending_err);
-                if (err == ERR_WOULDBLOCK) {
-                    if (written > 0)
-                        return (ssize_t)written;
-                    return -EAGAIN;
-                }
-                if (written > 0)
-                    return (ssize_t)written;
-                return -lwip_err_to_errno(err);
-            }
-            written += chunk_written;
-            if (chunk_written < chunk)
-                break;  /* partial write — return what we have */
-        }
-        return (ssize_t)written;
+        return sock_tcp_send_common(sk, sk->fd, (uint64)buf, buf, count,
+                                    0, user ? 1 : 0);
 
     } else {
         /* Clamp to uint16 max to avoid truncation in netbuf_alloc */
@@ -728,6 +1004,21 @@ static int sock_file_release(struct vfs_inode *inode, struct vfs_file *file)
     return 0;
 }
 
+static int sock_file_set_flags(struct vfs_file *file, int old_flags,
+                               int new_flags)
+{
+    struct lwip_sock *sk = (struct lwip_sock *)file->private_data;
+    int old_nonblock = (old_flags & O_NONBLOCK) != 0;
+    int new_nonblock = (new_flags & O_NONBLOCK) != 0;
+
+    if (sk == NULL || sk->conn == NULL)
+        return -EBADF;
+
+    if (old_nonblock != new_nonblock)
+        netconn_set_nonblocking(sk->conn, new_nonblock);
+    return 0;
+}
+
 /*
  * sock_file_poll - check whether a lwIP socket is ready for I/O
  *
@@ -746,9 +1037,9 @@ static int sock_file_poll(struct vfs_file *file, short events)
 
     struct netconn *conn = sk->conn;
 
-    if (events & (POLLIN | POLLRDNORM)) {
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND)) {
         if (sock_has_rx_data(sk)) {
-            revents |= (events & (POLLIN | POLLRDNORM));
+            revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
         }
     }
 
@@ -757,16 +1048,24 @@ static int sock_file_poll(struct vfs_file *file, short events)
         revents |= POLLERR;
     }
     if (conn->flags & NETCONN_FLAG_MBOXCLOSED) {
+        revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
         revents |= POLLHUP;
+        if (events & POLLRDHUP)
+            revents |= POLLRDHUP;
     }
 
-    if (events & (POLLOUT | POLLWRNORM)) {
-        /* If a non-blocking TCP connect is in progress, don't report
-         * writable until the handshake completes (state leaves NETCONN_CONNECT). */
-        if (conn->state == NETCONN_CONNECT) {
-            /* Still connecting — not writable yet. */
-        } else {
-            revents |= (events & (POLLOUT | POLLWRNORM));
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
+        /*
+         * Report write readiness only when lwIP has send space available.
+         * This matches sock_poll_ready() and lwIP's own sockets layer, and
+         * avoids epoll/kqueue loops being flooded by permanently ready write
+         * knotes on TCP sockets that are registered for both directions.
+         */
+        if (conn->state != NETCONN_CONNECT &&
+            (conn->pending_err != ERR_OK ||
+             (conn->flags & NETCONN_FLAG_MBOXCLOSED) ||
+             sk->sendevent)) {
+            revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
         }
     }
 
@@ -1257,6 +1556,7 @@ static struct vfs_file_ops lwip_socket_file_ops = {
     .fflush  = NULL,
     .poll    = sock_file_poll,
     .ioctl   = sock_file_ioctl,
+    .set_flags = sock_file_set_flags,
     .fault   = NULL,
 };
 
@@ -1313,6 +1613,10 @@ static void sock_netconn_callback(struct netconn *conn,
 
     switch (evt) {
     case NETCONN_EVT_RCVPLUS:
+        if (webkit_sock_trace_enabled() && sk != NULL)
+            printf("webkit-sock: evt rcvplus fd=%d len=%u avail=%d mbox=%d\n",
+                   sk->fd, (uint)len, sock_tcp_recv_avail(conn),
+                   sys_mbox_valid(&conn->recvmbox) ? conn->recvmbox.count : -1);
         vfs_file_knote_notify(file, EVFILT_READ, (int64)len);
         break;
     case NETCONN_EVT_SENDPLUS:
@@ -1372,6 +1676,7 @@ static int sock_fd_alloc(struct netconn *conn, int type, int protocol,
         lwip_sock_free(sk);
         return fd;
     }
+    sk->fd = fd;
 
     /* Wire up kqueue push notification: store the vfs_file pointer
      * so sock_netconn_callback() can call vfs_file_knote_notify(). */
@@ -1441,6 +1746,92 @@ static int sock_is_nonblock(int fd, int msg_flags)
     if (f == NULL)
         return 0;
     return (f->f_flags & O_NONBLOCK) != 0;
+}
+
+static ssize_t sock_tcp_send_common(struct lwip_sock *sk, int fd,
+                                    uint64 ubuf, const char *kbuf,
+                                    size_t count, int flags, int user)
+{
+    char tmpbuf[1500];
+    size_t written = 0;
+    int nonblock;
+
+    if (sk == NULL || sk->conn == NULL)
+        return -EBADF;
+    if (count == 0)
+        return 0;
+
+    nonblock = sock_is_nonblock(fd, flags);
+
+    while (written < count) {
+        size_t chunk = count - written;
+        size_t chunk_written = 0;
+        err_t err;
+
+        if (chunk > sizeof(tmpbuf))
+            chunk = sizeof(tmpbuf);
+
+        if (user) {
+            if (vm_copyin(current->vm, tmpbuf, ubuf + written, chunk) < 0)
+                return written > 0 ? (ssize_t)written : -EFAULT;
+        } else {
+            memmove(tmpbuf, kbuf + written, chunk);
+        }
+
+        err = netconn_write_partly(sk->conn, tmpbuf, chunk, NETCONN_COPY,
+                                   &chunk_written);
+        if (err != ERR_OK) {
+            int posix = lwip_err_to_errno(err);
+
+            SOCK_SEND_TRACE("fd=%d err=%d errno=%d requested=%lu "
+                            "chunk=%lu wrote=%lu total=%lu nb=%d "
+                            "state=%d flags=0x%x pending=%d sendevent=%d\n",
+                            fd, (int)err, posix, (uint64)count,
+                            (uint64)chunk, (uint64)chunk_written,
+                            (uint64)written, nonblock, (int)sk->conn->state,
+                            (int)sk->conn->flags, (int)sk->conn->pending_err,
+                            (int)sk->sendevent);
+
+            if (err == ERR_WOULDBLOCK || err == ERR_TIMEOUT)
+                posix = EAGAIN;
+            if (written > 0)
+                return (ssize_t)written;
+            return -posix;
+        }
+
+        if (chunk_written == 0) {
+            SOCK_SEND_TRACE("fd=%d zero requested=%lu chunk=%lu total=%lu "
+                            "nb=%d state=%d flags=0x%x pending=%d "
+                            "sendevent=%d\n",
+                            fd, (uint64)count, (uint64)chunk,
+                            (uint64)written, nonblock, (int)sk->conn->state,
+                            (int)sk->conn->flags, (int)sk->conn->pending_err,
+                            (int)sk->sendevent);
+            if (written > 0)
+                return (ssize_t)written;
+            return nonblock ? -EAGAIN : -EPIPE;
+        }
+
+        written += chunk_written;
+
+        if (chunk_written < chunk) {
+            SOCK_SEND_TRACE("fd=%d partial requested=%lu chunk=%lu "
+                            "chunk_written=%lu total=%lu nb=%d state=%d "
+                            "flags=0x%x pending=%d sendevent=%d\n",
+                            fd, (uint64)count, (uint64)chunk,
+                            (uint64)chunk_written, (uint64)written,
+                            nonblock, (int)sk->conn->state,
+                            (int)sk->conn->flags, (int)sk->conn->pending_err,
+                            (int)sk->sendevent);
+            if (nonblock)
+                break;
+        }
+
+        if (signal_pending(current))
+            return written > 0 ? (ssize_t)written : -EINTR;
+    }
+
+    return (ssize_t)written;
 }
 
 static size_t unix_ring_peek(const struct unix_ring *r, uint start_off,
@@ -1799,44 +2190,35 @@ uint64 sys_sendto(void)
     if (len <= 0)
         return 0;
 
-    /* MSG_DONTWAIT / O_NONBLOCK: check send readiness */
-    if (sock_is_nonblock(fd, flags)) {
+    /*
+     * For TCP, attempt the write and let lwIP return ERR_WOULDBLOCK or a
+     * partial byte count.  The cached sendevent bit is for readiness
+     * notification, not an authority for rejecting real sends.
+     */
+    if (sk->type != SOCK_STREAM && sock_is_nonblock(fd, flags)) {
         int ready = sock_poll_ready(sk, POLLOUT);
         if (!(ready & POLLOUT))
             return (uint64)-EAGAIN;
     }
 
     if (sk->type == SOCK_STREAM) {
-        /* TCP: ignore dest_addr, use netconn_write_partly (NB-safe) */
-        char tmpbuf[1500];
-        size_t chunk = (size_t)len;
-        if (chunk > sizeof(tmpbuf))
-            chunk = sizeof(tmpbuf);
-
-        if (vm_copyin(current->vm, tmpbuf, ubuf, chunk) < 0)
-            return (uint64)-EFAULT;
-
-        size_t bytes_written = 0;
-        err_t err = netconn_write_partly(sk->conn, tmpbuf, chunk,
-                                         NETCONN_COPY, &bytes_written);
-        if (err != ERR_OK) {
-            sock_dbg("sendto fd=%d TCP write err=%d (errno=%d) len=%d nb=%d\n",
-                     fd, (int)err, lwip_err_to_errno(err), (int)chunk,
-                     netconn_is_nonblocking(sk->conn));
-            if (err == ERR_WOULDBLOCK)
-                return (uint64)-EAGAIN;
-            return (uint64)-lwip_err_to_errno(err);
-        }
-        ACCT_ADD(current->thread_group, net_bytes_sent, bytes_written);
-        return (uint64)bytes_written;
+        /* TCP: ignore dest_addr and use Linux-like blocking send semantics. */
+        ssize_t n = sock_tcp_send_common(sk, fd, ubuf, NULL, (size_t)len,
+                                         flags, 1);
+        if (n > 0)
+            ACCT_ADD(current->thread_group, net_bytes_sent, (uint64)n);
+        return (uint64)n;
 
     } else {
-        /* UDP/RAW: use netconn_sendto */
+        /* UDP/RAW: send one complete datagram. */
+        if (len > 65535)
+            return (uint64)-EMSGSIZE;
+
         struct netbuf *nb = netbuf_new();
         if (nb == NULL)
             return (uint64)-ENOMEM;
 
-        uint16 sendlen = (len > 1460) ? 1460 : (uint16)len;
+        uint16 sendlen = (uint16)len;
         void *data = netbuf_alloc(nb, sendlen);
         if (data == NULL) {
             netbuf_delete(nb);
@@ -1848,23 +2230,23 @@ uint64 sys_sendto(void)
             return (uint64)-EFAULT;
         }
 
-        /* Set destination if provided */
+        err_t err;
         if (uaddr != 0 && addrlen >= K_SOCKADDR_IN_SIZE) {
             struct k_sockaddr_in sa;
             if (vm_copyin(current->vm, &sa, uaddr, sizeof(sa)) < 0) {
                 netbuf_delete(nb);
                 return (uint64)-EFAULT;
             }
+            if (sa.sin_family != AF_INET) {
+                netbuf_delete(nb);
+                return (uint64)-EAFNOSUPPORT;
+            }
             ip_addr_t destip;
             ip_addr_set_ip4_u32(&destip, sa.sin_addr);
-            err_t err = netconn_connect(sk->conn, &destip, ntohs(sa.sin_port));
-            if (err != ERR_OK && err != ERR_ISCONN) {
-                netbuf_delete(nb);
-                return (uint64)-lwip_err_to_errno(err);
-            }
+            err = netconn_sendto(sk->conn, nb, &destip, ntohs(sa.sin_port));
+        } else {
+            err = netconn_send(sk->conn, nb);
         }
-
-        err_t err = netconn_send(sk->conn, nb);
         netbuf_delete(nb);
         if (err != ERR_OK)
             return (uint64)-lwip_err_to_errno(err);
@@ -1933,12 +2315,7 @@ uint64 sys_recvfrom(void)
                 return (uint64)-EFAULT;
 
             if (!(flags & MSG_PEEK)) {
-                sk->lastpbuf_off += clen;
-                if (sk->lastpbuf_off >= p->tot_len) {
-                    pbuf_free(p);
-                    sk->lastpbuf = NULL;
-                    sk->lastpbuf_off = 0;
-                }
+                sock_tcp_save_remainder(sk, p, sk->lastpbuf_off + clen);
                 sock_tcp_recvd(sk, clen);
             }
             ACCT_ADD(current->thread_group, net_bytes_recv, clen);
@@ -1968,12 +2345,8 @@ uint64 sys_recvfrom(void)
             /* Save pbuf for next recv call to consume */
             sk->lastpbuf = p;
             sk->lastpbuf_off = 0;
-        } else if (clen < p->tot_len) {
-            /* Save remainder for future reads — prevents TCP data loss */
-            sk->lastpbuf = p;
-            sk->lastpbuf_off = clen;
         } else {
-            pbuf_free(p);
+            sock_tcp_save_remainder(sk, p, clen);
         }
         if (!(flags & MSG_PEEK))
             sock_tcp_recvd(sk, clen);
@@ -2677,7 +3050,7 @@ static int unix_packet_enqueue_locked(struct unix_sock *sk, uint end_mark)
 {
     if (sk->type != SOCK_SEQPACKET)
         return 0;
-    if (unix_packet_count_locked(sk) >= UNIX_PACKET_QUEUE_MAX - 1)
+    if ((unsigned long)unix_packet_count_locked(sk) >= UNIX_PACKET_QUEUE_MAX - 1)
         return -EAGAIN;
     sk->packet_queue[sk->packet_tail] = end_mark;
     sk->packet_tail = (sk->packet_tail + 1) % UNIX_PACKET_QUEUE_MAX;
@@ -2687,7 +3060,7 @@ static int unix_packet_enqueue_locked(struct unix_sock *sk, uint end_mark)
 static int unix_packet_has_space_locked(struct unix_sock *sk)
 {
     return sk->type != SOCK_SEQPACKET ||
-        unix_packet_count_locked(sk) < UNIX_PACKET_QUEUE_MAX - 1;
+        (unsigned long)unix_packet_count_locked(sk) < UNIX_PACKET_QUEUE_MAX - 1;
 }
 
 static int unix_packet_next_len_locked(struct unix_sock *peer, size_t *len)
@@ -2719,8 +3092,8 @@ static size_t unix_dequeue_scm_rights(struct unix_sock *peer,
 
     spin_lock(&peer->lock);
     while (peer->scm_head != peer->scm_tail && count < max_files &&
-           (int)(peer->scm_queue[peer->scm_head].start_nread -
-                 peer->tx.nread) < 0) {
+           (int)(peer->scm_queue[peer->scm_head].end_nread -
+                 peer->tx.nread) <= 0) {
         files[count] = peer->scm_queue[peer->scm_head].file;
         peer->scm_queue[peer->scm_head].file = NULL;
         peer->scm_queue[peer->scm_head].start_nread = 0;
@@ -2732,6 +3105,17 @@ static size_t unix_dequeue_scm_rights(struct unix_sock *peer,
         tq_wakeup_all(&peer->wr_queue, 0, 0);
     spin_unlock(&peer->lock);
     return count;
+}
+
+static void unix_discard_scm_rights(struct vfs_file **files, size_t start,
+                                    size_t count)
+{
+    for (size_t i = start; i < count; i++) {
+        if (files[i] != NULL) {
+            vfs_fput(files[i]);
+            files[i] = NULL;
+        }
+    }
 }
 
 static int unix_next_scm_barrier_locked(struct unix_sock *peer, size_t *bytes)
@@ -2751,11 +3135,23 @@ static int unix_next_scm_barrier_locked(struct unix_sock *peer, size_t *bytes)
     return 1;
 }
 
+static size_t unix_tx_limit_locked(struct unix_sock *sk)
+{
+    size_t limit = sk->snd_buf ? sk->snd_buf : UNIX_BUF_MAX_SIZE;
+    struct unix_sock *peer = sk->peer;
+
+    if (peer != NULL && peer->rcv_buf != 0 && peer->rcv_buf < limit)
+        limit = peer->rcv_buf;
+    return limit;
+}
+
 static size_t unix_ring_write_locked(struct unix_ring *r, const char *buf,
-                                     size_t len)
+                                     size_t len, size_t max_capacity)
 {
     size_t readable = r->nwrite - r->nread;
-    size_t avail = r->capacity - readable;
+    size_t avail = readable < max_capacity ? max_capacity - readable : 0;
+    if (avail > r->capacity - readable)
+        avail = r->capacity - readable;
     size_t towrite = len < avail ? len : avail;
     uint idx = r->nwrite % r->capacity;
 
@@ -2791,15 +3187,16 @@ static size_t unix_ring_read_locked(struct unix_ring *r, char *buf, size_t len)
     return toread;
 }
 
-static int unix_ring_capacity_for(size_t needed, size_t *capacity)
+static int unix_ring_capacity_for(size_t needed, size_t max_capacity,
+                                  size_t *capacity)
 {
-    if (needed > UNIX_BUF_MAX_SIZE)
+    if (needed > max_capacity)
         return -EMSGSIZE;
 
     size_t new_capacity = UNIX_BUF_DEFAULT_SIZE;
     while (new_capacity < needed) {
-        if (new_capacity > UNIX_BUF_MAX_SIZE / 2) {
-            new_capacity = UNIX_BUF_MAX_SIZE;
+        if (new_capacity > max_capacity / 2) {
+            new_capacity = max_capacity;
             break;
         }
         new_capacity *= 2;
@@ -2849,6 +3246,12 @@ static char *unix_ring_install_storage_locked(struct unix_sock *sk,
     size_t readable = r->nwrite - r->nread;
     size_t copied = 0;
 
+    UNIX_TRACE("sendmsg-grow-install pid=%d comm=%s type=%d readable=%lu "
+               "cap=%lu->%lu nread=%u nwrite=%u\n",
+               current ? current->pid : -1, current ? current->name : "?",
+               sk->type, readable, old_capacity, new_capacity, r->nread,
+               r->nwrite);
+
     while (copied < readable) {
         uint idx = (r->nread + copied) % old_capacity;
         size_t chunk = old_capacity - idx;
@@ -2869,17 +3272,19 @@ static char *unix_ring_install_storage_locked(struct unix_sock *sk,
 static int unix_sendmsg_growth_needed_locked(struct unix_sock *sk, size_t len,
                                              size_t *capacity)
 {
-    if (len > UNIX_BUF_MAX_SIZE)
+    size_t max_capacity = unix_tx_limit_locked(sk);
+
+    if (len > max_capacity)
         return -EMSGSIZE;
 
-    size_t readable = sk->tx.nwrite - sk->tx.nread;
-    if (readable > UNIX_BUF_MAX_SIZE || len > UNIX_BUF_MAX_SIZE - readable)
+    size_t readable = (unsigned long)(sk->tx.nwrite - sk->tx.nread);
+    if (readable > max_capacity || len > max_capacity - readable)
         return -EAGAIN;
 
     size_t needed = readable + len;
     if (needed <= sk->tx.capacity)
         return 0;
-    return unix_ring_capacity_for(needed, capacity);
+    return unix_ring_capacity_for(needed, max_capacity, capacity);
 }
 
 static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
@@ -2893,8 +3298,11 @@ static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
         return -ENOTCONN;
     if (sk->peer == NULL)
         return -EPIPE;
-    size_t readable = sk->tx.nwrite - sk->tx.nread;
-    size_t writable = sk->tx.capacity - readable;
+    size_t readable = (unsigned long)(sk->tx.nwrite - sk->tx.nread);
+    size_t max_capacity = unix_tx_limit_locked(sk);
+    size_t writable = readable < max_capacity ? max_capacity - readable : 0;
+    if (writable > sk->tx.capacity - readable)
+        writable = sk->tx.capacity - readable;
     if (writable < len)
         return -EAGAIN;
 
@@ -2906,7 +3314,7 @@ static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
         return -EAGAIN;
 
     uint scm_start = sk->tx.nwrite;
-    size_t wrote = unix_ring_write_locked(&sk->tx, buf, len);
+    size_t wrote = unix_ring_write_locked(&sk->tx, buf, len, max_capacity);
     if (wrote != len)
         panic("unix_sendmsg_atomic_locked: short atomic write");
     uint mark = sk->tx.nwrite;
@@ -2951,14 +3359,13 @@ uint64 sys_sendmsg(void)
         if (vm_copyin(current->vm, &mh, umsg, sizeof(mh)) < 0)
             return (uint64)-EFAULT;
 
-        if (mh.msg_iovlen == 0)
-            return 0;
         if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
             return (uint64)-EMSGSIZE;
 
         struct k_iovec iovs[SENDMSG_MAX_IOV];
         uint64 iov_bytes = mh.msg_iovlen * sizeof(struct k_iovec);
-        if (vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
+        if (iov_bytes != 0 &&
+            vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
             return (uint64)-EFAULT;
 
         size_t total_len = 0;
@@ -3058,11 +3465,27 @@ uint64 sys_sendmsg(void)
                 continue;
             }
             if (ret < 0) {
+                UNIX_TRACE("sendmsg-blocked pid=%d comm=%s fd=%d type=%d "
+                           "ret=%d len=%lu readable=%lu cap=%lu snd=%lu "
+                           "peer_rcv=%lu scm=%lu packets=%lu nonblock=%d\n",
+                           current ? current->pid : -1,
+                           current ? current->name : "?", fd, sk->type, ret,
+                           total_len, (unsigned long)(sk->tx.nwrite - sk->tx.nread),
+                           sk->tx.capacity, sk->snd_buf,
+                           sk->peer ? sk->peer->rcv_buf : 0,
+                           unix_scm_count_locked(sk),
+                           (unsigned long)unix_packet_count_locked(sk), nonblock);
                 spin_unlock(&sk->lock);
                 break;
             }
 
             if (needed_capacity != 0) {
+                UNIX_TRACE("sendmsg-grow-need pid=%d comm=%s fd=%d type=%d "
+                           "len=%lu readable=%lu cap=%lu target=%lu\n",
+                           current ? current->pid : -1,
+                           current ? current->name : "?", fd, sk->type,
+                           total_len, (unsigned long)(sk->tx.nwrite - sk->tx.nread),
+                           sk->tx.capacity, needed_capacity);
                 spin_unlock(&sk->lock);
                 grow_data = kvmalloc(needed_capacity);
                 if (grow_data == NULL) {
@@ -3075,13 +3498,21 @@ uint64 sys_sendmsg(void)
 
             ret = unix_sendmsg_atomic_locked(sk, msg_buf, total_len,
                                              scm_files, scm_count);
+            struct unix_sock *notify_peer = NULL;
             if (ret == 0 && sk->peer != NULL) {
-                tq_wakeup_all(&sk->peer->rd_queue, 0, 0);
-                if (sk->peer->file != NULL)
-                    notify_file = vfs_fdup(sk->peer->file);
+                notify_peer = sk->peer;
+                unix_sock_get_ref(notify_peer);
             }
             if (ret == 0 || ret != -EAGAIN || nonblock) {
                 spin_unlock(&sk->lock);
+                if (notify_peer != NULL) {
+                    spin_lock(&notify_peer->lock);
+                    tq_wakeup_all(&notify_peer->rd_queue, 0, 0);
+                    if (notify_peer->file != NULL)
+                        notify_file = vfs_fdup(notify_peer->file);
+                    spin_unlock(&notify_peer->lock);
+                    unix_sock_put_ref(notify_peer);
+                }
                 break;
             }
             if (signal_pending(current)) {
@@ -3089,6 +3520,13 @@ uint64 sys_sendmsg(void)
                 spin_unlock(&sk->lock);
                 break;
             }
+            UNIX_TRACE("sendmsg-wait pid=%d comm=%s fd=%d type=%d len=%lu "
+                       "readable=%lu cap=%lu scm=%lu packets=%lu\n",
+                       current ? current->pid : -1,
+                       current ? current->name : "?", fd, sk->type,
+                       total_len, (unsigned long)(sk->tx.nwrite - sk->tx.nread),
+                       sk->tx.capacity, unix_scm_count_locked(sk),
+                       (unsigned long)unix_packet_count_locked(sk));
             tq_wait_in_state(&sk->wr_queue, &sk->lock, NULL,
                              THREAD_INTERRUPTIBLE);
             spin_unlock(&sk->lock);
@@ -3114,19 +3552,33 @@ uint64 sys_sendmsg(void)
             vfs_file_knote_notify(notify_file, EVFILT_READ, 0);
             vfs_fput(notify_file);
         }
+        struct unix_sock *trace_peer;
+        int trace_type;
+        size_t trace_packets;
+        size_t trace_readable;
+        size_t trace_capacity;
+
+        spin_lock(&sk->lock);
+        trace_peer = sk->peer;
+        trace_type = sk->type;
+        trace_packets = unix_packet_count_locked(sk);
+        trace_readable = sk->tx.nwrite - sk->tx.nread;
+        trace_capacity = sk->tx.capacity;
+        spin_unlock(&sk->lock);
+
+        UNIX_TRACE("sendmsg-ok pid=%d comm=%s fd=%d sk=%p peer=%p type=%d "
+                   "len=%lu scm=%lu packets=%lu readable=%lu cap=%lu\n",
+                   current ? current->pid : -1,
+                   current ? current->name : "?", fd, sk, trace_peer,
+                   trace_type, total_len, scm_count,
+                   (unsigned long)trace_packets,
+                   (unsigned long)trace_readable, trace_capacity);
         return (uint64)total_len;
     }
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
-
-    /* MSG_DONTWAIT / O_NONBLOCK: check send readiness */
-    if (sock_is_nonblock(fd, flags)) {
-        int ready = sock_poll_ready(sk, POLLOUT);
-        if (!(ready & POLLOUT))
-            return (uint64)-EAGAIN;
-    }
 
     /* Copy the msghdr from user space */
     struct k_msghdr mh;
@@ -3144,7 +3596,10 @@ uint64 sys_sendmsg(void)
     if (vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
         return (uint64)-EFAULT;
 
-    /* Set destination address if provided (UDP with msg_name) */
+    /* Destination address for datagram sendmsg(). */
+    ip_addr_t msg_destip;
+    u16_t msg_destport = 0;
+    int have_msg_dest = 0;
     if (mh.msg_name != 0 && mh.msg_namelen >= K_SOCKADDR_IN_SIZE &&
         sk->type != SOCK_STREAM) {
         struct k_sockaddr_in sa;
@@ -3153,46 +3608,38 @@ uint64 sys_sendmsg(void)
         if (sa.sin_family != AF_INET)
             return (uint64)-EAFNOSUPPORT;
 
-        ip_addr_t destip;
-        ip_addr_set_ip4_u32(&destip, sa.sin_addr);
-        err_t cerr = netconn_connect(sk->conn, &destip, ntohs(sa.sin_port));
-        if (cerr != ERR_OK && cerr != ERR_ISCONN)
-            return (uint64)-lwip_err_to_errno(cerr);
+        ip_addr_set_ip4_u32(&msg_destip, sa.sin_addr);
+        msg_destport = ntohs(sa.sin_port);
+        have_msg_dest = 1;
     }
 
     ssize_t total = 0;
 
     if (sk->type == SOCK_STREAM) {
-        /* TCP: write each iov sequentially via netconn_write_partly (NB-safe) */
-        char tmpbuf[1500];
         for (uint64 i = 0; i < mh.msg_iovlen; i++) {
             uint64 base = iovs[i].iov_base;
             size_t ilen = iovs[i].iov_len;
-            size_t sent = 0;
-            while (sent < ilen) {
-                size_t chunk = ilen - sent;
-                if (chunk > sizeof(tmpbuf))
-                    chunk = sizeof(tmpbuf);
-                if (vm_copyin(current->vm, tmpbuf, base + sent, chunk) < 0)
-                    return total > 0 ? (uint64)total : (uint64)-EFAULT;
-                size_t chunk_written = 0;
-                err_t err = netconn_write_partly(sk->conn, tmpbuf, chunk,
-                                                 NETCONN_COPY, &chunk_written);
-                if (err != ERR_OK) {
-                    if (err == ERR_WOULDBLOCK)
-                        return total > 0 ? (uint64)total : (uint64)-EAGAIN;
-                    return total > 0 ? (uint64)total
-                                     : (uint64)-lwip_err_to_errno(err);
-                }
-                sent += chunk_written;
-                total += (ssize_t)chunk_written;
-                if (chunk_written < chunk)
-                    goto sendmsg_done;  /* partial — return what we have */
-            }
+            ssize_t n;
+
+            if (ilen == 0)
+                continue;
+
+            n = sock_tcp_send_common(sk, fd, base, NULL, ilen, flags, 1);
+            if (n < 0)
+                return total > 0 ? (uint64)total : (uint64)n;
+            total += n;
+            if ((size_t)n < ilen)
+                goto sendmsg_done;
         }
 sendmsg_done:
         ;   /* partial write — fall through to return total */
     } else {
+        if (sock_is_nonblock(fd, flags)) {
+            int ready = sock_poll_ready(sk, POLLOUT);
+            if (!(ready & POLLOUT))
+                return (uint64)-EAGAIN;
+        }
+
         /* UDP: gather all iovecs into a single netbuf datagram */
         size_t total_len = 0;
         for (uint64 i = 0; i < mh.msg_iovlen; i++)
@@ -3221,7 +3668,11 @@ sendmsg_done:
             off += iovs[i].iov_len;
         }
 
-        err_t err = netconn_send(sk->conn, nb);
+        err_t err;
+        if (have_msg_dest)
+            err = netconn_sendto(sk->conn, nb, &msg_destip, msg_destport);
+        else
+            err = netconn_send(sk->conn, nb);
         netbuf_delete(nb);
         if (err != ERR_OK)
             return (uint64)-lwip_err_to_errno(err);
@@ -3262,14 +3713,13 @@ uint64 sys_recvmsg(void)
         if (vm_copyin(current->vm, &mh, umsg, sizeof(mh)) < 0)
             return (uint64)-EFAULT;
 
-        if (mh.msg_iovlen == 0)
-            return 0;
         if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
             return (uint64)-EINVAL;
 
         struct k_iovec iovs[SENDMSG_MAX_IOV];
         uint64 iov_bytes = mh.msg_iovlen * sizeof(struct k_iovec);
-        if (vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
+        if (iov_bytes != 0 &&
+            vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
             return (uint64)-EFAULT;
 
         /* Read data through the normal unix socket read path */
@@ -3284,6 +3734,12 @@ uint64 sys_recvmsg(void)
 
         ssize_t total = 0;
         int unix_out_flags = 0;
+        UNIX_TRACE("recvmsg-enter pid=%d comm=%s fd=%d sk=%p type=%d "
+                   "flags=0x%x iov=%ld control=%lu controllen=%lu\n",
+                   current ? current->pid : -1,
+                   current ? current->name : "?", fd, sk, sk->type, flags,
+                   (long)mh.msg_iovlen, mh.msg_control,
+                   (unsigned long)mh.msg_controllen);
         if (sk->type == SOCK_SEQPACKET) {
             struct unix_sock *peer = NULL;
             size_t packet_len = 0;
@@ -3308,6 +3764,15 @@ uint64 sys_recvmsg(void)
                 pkt_ret = unix_packet_next_len_locked(peer, &packet_len);
                 peer_write_shutdown =
                     (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
+                UNIX_TRACE("recvmsg-seq-check pid=%d comm=%s fd=%d sk=%p "
+                           "peer=%p pkt_ret=%d packet=%lu packets=%lu "
+                           "readable=%lu shutdown rd=%d peerwr=%d\n",
+                           current ? current->pid : -1,
+                           current ? current->name : "?", fd, sk, peer,
+                           pkt_ret, packet_len,
+                           (unsigned long)unix_packet_count_locked(peer),
+                           (unsigned long)(peer->tx.nwrite - peer->tx.nread),
+                           read_shutdown, peer_write_shutdown);
                 spin_unlock(&peer->lock);
                 if (pkt_ret == 0)
                     break;
@@ -3318,6 +3783,10 @@ uint64 sys_recvmsg(void)
                 }
 
                 if (saved_fflags & O_NONBLOCK) {
+                    UNIX_TRACE("recvmsg-seq-eagain pid=%d comm=%s fd=%d "
+                               "sk=%p peer=%p\n",
+                               current ? current->pid : -1,
+                               current ? current->name : "?", fd, sk, peer);
                     unix_sock_put_ref(peer);
                     f->f_flags = saved_fflags;
                     vfs_fput(f);
@@ -3332,6 +3801,9 @@ uint64 sys_recvmsg(void)
 
                 unix_sock_put_ref(peer);
                 peer = NULL;
+                UNIX_TRACE("recvmsg-seq-wait pid=%d comm=%s fd=%d sk=%p\n",
+                           current ? current->pid : -1,
+                           current ? current->name : "?", fd, sk);
                 spin_lock(&sk->lock);
                 tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
                                  THREAD_INTERRUPTIBLE);
@@ -3348,6 +3820,11 @@ uint64 sys_recvmsg(void)
             for (uint64 i = 0; i < mh.msg_iovlen; i++)
                 capacity += iovs[i].iov_len;
             size_t to_copy = packet_len < capacity ? packet_len : capacity;
+            UNIX_TRACE("recvmsg-seq-copy pid=%d comm=%s fd=%d sk=%p peer=%p "
+                       "packet=%lu capacity=%lu copy=%lu flags=0x%x\n",
+                       current ? current->pid : -1,
+                       current ? current->name : "?", fd, sk, peer,
+                       packet_len, capacity, to_copy, flags);
             if (packet_len > capacity) {
                 unix_out_flags |= MSG_TRUNC;
                 printf("unix_recvmsg: seqpacket trunc pid=%d fd=%d packet=%lu capacity=%lu\n",
@@ -3417,7 +3894,7 @@ uint64 sys_recvmsg(void)
             }
 
             size_t peek_off = 0;
-            char tmp[128];
+            char tmp[UNIX_IO_CHUNK];
 
             for (uint64 i = 0; i < mh.msg_iovlen; i++) {
                 size_t copied = 0;
@@ -3538,9 +4015,18 @@ uint64 sys_recvmsg(void)
                     ssize_t n = unix_socket_file_ops.read(
                         f, (char *)(iovs[i].iov_base + copied_iov), want, 1);
                     if (n < 0) {
+                        UNIX_TRACE("recvmsg-stream-read-ret pid=%d comm=%s "
+                                   "fd=%d sk=%p err=%ld total=%ld want=%lu "
+                                   "hit_scm=%d\n",
+                                   current ? current->pid : -1,
+                                   current ? current->name : "?", fd, sk,
+                                   (long)n, (long)total, want,
+                                   hit_scm_barrier);
+                        if (total > 0)
+                            goto unix_recvmsg_done;
                         f->f_flags = saved_fflags;
                         vfs_fput(f);
-                        return total > 0 ? (uint64)total : (uint64)n;
+                        return (uint64)n;
                     }
                     total += n;
                     copied_iov += (size_t)n;
@@ -3561,35 +4047,38 @@ unix_recvmsg_done:
         vfs_fput(f);
 
         /* Check for pending SCM_RIGHTS file from peer */
-        if (mh.msg_control != 0 &&
-            mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
-            if (flags & MSG_PEEK) {
-                uint32 zero = 0;
-                vm_copyout(current->vm,
-                           umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
-                           &zero, sizeof(zero));
-            } else {
+        if (flags & MSG_PEEK) {
+            uint32 zero = 0;
+            vm_copyout(current->vm,
+                       umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
+                       &zero, sizeof(zero));
+        } else {
             struct unix_sock *peer = NULL;
             spin_lock(&sk->lock);
             peer = sk->peer;
             unix_sock_get_ref(peer);
             spin_unlock(&sk->lock);
 
-            size_t max_fds = (mh.msg_controllen >= K_CMSG_SPACE(0))
-                ? (mh.msg_controllen - K_CMSG_SPACE(0)) / sizeof(int) : 0;
-            if (max_fds > UNIX_SCM_QUEUE_MAX)
-                max_fds = UNIX_SCM_QUEUE_MAX;
-
             struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
             memset(scm_files, 0, sizeof(scm_files));
-            size_t scm_count = unix_dequeue_scm_rights(peer, scm_files, max_fds);
+            size_t scm_count = unix_dequeue_scm_rights(peer, scm_files,
+                                                       UNIX_SCM_QUEUE_MAX);
             unix_sock_put_ref(peer);
 
             if (scm_count > 0) {
                 int newfds[UNIX_SCM_QUEUE_MAX];
+                size_t max_fds = 0;
+                if (mh.msg_control != 0 &&
+                    mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
+                    max_fds = (mh.msg_controllen >= K_CMSG_SPACE(0))
+                        ? (mh.msg_controllen - K_CMSG_SPACE(0)) / sizeof(int) : 0;
+                    if (max_fds > UNIX_SCM_QUEUE_MAX)
+                        max_fds = UNIX_SCM_QUEUE_MAX;
+                }
+                size_t to_install = scm_count < max_fds ? scm_count : max_fds;
                 size_t installed = 0;
 
-                for (; installed < scm_count; installed++) {
+                for (; installed < to_install; installed++) {
                     spin_lock(&current->fdtable->lock);
                     int newfd = vfs_fdtable_alloc_fd(current->fdtable,
                                                      scm_files[installed]);
@@ -3598,13 +4087,15 @@ unix_recvmsg_done:
                                                 FD_CLOEXEC);
                     spin_unlock(&current->fdtable->lock);
                     vfs_fput(scm_files[installed]);
+                    scm_files[installed] = NULL;
                     if (newfd < 0)
                         break;
                     newfds[installed] = newfd;
                 }
 
-                for (size_t i = installed + 1; i < scm_count; i++)
-                    vfs_fput(scm_files[i]);
+                unix_discard_scm_rights(scm_files, installed, scm_count);
+                if (installed < scm_count)
+                    unix_out_flags |= MSG_CTRUNC;
 
                 if (installed > 0) {
                     unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
@@ -3635,7 +4126,6 @@ unix_recvmsg_done:
                            umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
                            &zero, sizeof(zero));
             }
-            }
         }
 
         /* Clear msg_flags */
@@ -3643,6 +4133,11 @@ unix_recvmsg_done:
                    umsg + __builtin_offsetof(struct k_msghdr, msg_flags),
                    &unix_out_flags, sizeof(unix_out_flags));
 
+        UNIX_TRACE("recvmsg-done pid=%d comm=%s fd=%d sk=%p type=%d "
+                   "total=%ld flags=0x%x\n",
+                   current ? current->pid : -1,
+                   current ? current->name : "?", fd, sk, sk->type,
+                   (long)total, unix_out_flags);
         return (uint64)total;
     }
 
@@ -3693,6 +4188,7 @@ unix_recvmsg_done:
         int nonblock = sock_is_nonblock(fd, flags);
         int wait_more = 0;
         char tmpbuf[1500];
+        size_t recvd_acc = 0;
 
         while ((size_t)total < buf_total && iov_idx < mh.msg_iovlen) {
             struct pbuf *p = NULL;
@@ -3708,16 +4204,21 @@ unix_recvmsg_done:
             } else {
                 err_t err = sock_tcp_recv_pbuf(sk, &p, nonblock || total > 0);
                 if (err != ERR_OK) {
-                    if (err == ERR_CLSD)
+                    if (err == ERR_CLSD) {
+                        sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
                         return total > 0 ? (uint64)total : 0;
-                    if (err == ERR_TIMEOUT && signal_pending(current))
+                    }
+                    if (err == ERR_TIMEOUT && signal_pending(current)) {
+                        sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
                         return total > 0 ? (uint64)total : (uint64)-EINTR;
+                    }
                     if (total > 0 && (err == ERR_WOULDBLOCK || err == ERR_TIMEOUT)) {
                         if (sock_tcp_wait_for_more(sk, nonblock, total,
                                                    buf_total, &wait_more))
                             continue;
                         break;
                     }
+                    sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
                     return (uint64)-lwip_err_to_errno(err);
                 }
             }
@@ -3745,13 +4246,13 @@ unix_recvmsg_done:
                                iovs[iov_idx].iov_base + iov_off,
                                tmpbuf, got) < 0) {
                     if (!(flags & MSG_PEEK) && copied_from_pbuf > 0) {
-                        sk->lastpbuf = p;
-                        sk->lastpbuf_off = poff;
+                        sock_tcp_save_remainder(sk, p, poff);
                     } else if (!reused_lastpbuf) {
                         pbuf_free(p);
                     }
                     if (!(flags & MSG_PEEK) && copied_from_pbuf > 0)
-                        sock_tcp_recvd(sk, copied_from_pbuf);
+                        sock_tcp_recvd_accum(sk, &recvd_acc,
+                                             copied_from_pbuf, 1);
                     return total > 0 ? (uint64)total : (uint64)-EFAULT;
                 }
 
@@ -3759,33 +4260,37 @@ unix_recvmsg_done:
                 iov_off += got;
                 total += got;
                 copied_from_pbuf += got;
+                sock_tcp_trace_rx_progress(sk, got, total, "recvmsg");
             }
 
             if (flags & MSG_PEEK) {
                 sk->lastpbuf = p;
                 sk->lastpbuf_off = start_off;
                 break;
-            } else if (poff < p->tot_len) {
-                sk->lastpbuf = p;
-                sk->lastpbuf_off = poff;
             } else {
-                pbuf_free(p);
-                sk->lastpbuf = NULL;
-                sk->lastpbuf_off = 0;
+                sock_tcp_save_remainder(sk, p, poff);
             }
 
-            sock_tcp_recvd(sk, copied_from_pbuf);
+            if (!(flags & MSG_PEEK))
+                sock_tcp_recvd_accum(sk, &recvd_acc, copied_from_pbuf, 0);
             if (copied_from_pbuf == 0)
                 break;
         }
+
+        if (!(flags & MSG_PEEK))
+            sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
     } else {
         /* UDP/RAW: receive one datagram, scatter into iovecs */
         struct netbuf *nb = NULL;
-        err_t err = netconn_recv(sk->conn, &nb);
-        if (err != ERR_OK) {
-            if (err == ERR_TIMEOUT && signal_pending(current))
-                return (uint64)-EINTR;
-            return (uint64)-lwip_err_to_errno(err);
+        if (sk->lastbuf != NULL) {
+            nb = sk->lastbuf;
+        } else {
+            err_t err = netconn_recv(sk->conn, &nb);
+            if (err != ERR_OK) {
+                if (err == ERR_TIMEOUT && signal_pending(current))
+                    return (uint64)-EINTR;
+                return (uint64)-lwip_err_to_errno(err);
+            }
         }
 
         void *data;
@@ -3832,7 +4337,14 @@ unix_recvmsg_done:
                         &nlen, sizeof(nlen));
         }
 
-        netbuf_delete(nb);
+        if (flags & MSG_PEEK) {
+            sk->lastbuf = nb;
+            sk->lastoffset = 0;
+        } else {
+            sk->lastbuf = NULL;
+            sk->lastoffset = 0;
+            netbuf_delete(nb);
+        }
     }
 
     /* Write back msg_flags to user space */
@@ -4058,10 +4570,29 @@ uint64 sys_sendmmsg(void)
                     continue;
                 }
                 if (ret < 0) {
+                    UNIX_TRACE("sendmmsg-blocked pid=%d comm=%s fd=%d type=%d "
+                               "ret=%d len=%lu readable=%lu cap=%lu snd=%lu "
+                               "peer_rcv=%lu scm=%lu packets=%lu nonblock=%d\n",
+                               current ? current->pid : -1,
+                               current ? current->name : "?", sockfd,
+                               usk->type, ret, total,
+                               (unsigned long)(usk->tx.nwrite - usk->tx.nread),
+                               usk->tx.capacity, usk->snd_buf,
+                               usk->peer ? usk->peer->rcv_buf : 0,
+                               unix_scm_count_locked(usk),
+                               (unsigned long)unix_packet_count_locked(usk), nonblock);
                     spin_unlock(&usk->lock);
                     break;
                 }
                 if (needed_capacity != 0) {
+                    UNIX_TRACE("sendmmsg-grow-need pid=%d comm=%s fd=%d "
+                               "type=%d len=%lu readable=%lu cap=%lu "
+                               "target=%lu\n",
+                               current ? current->pid : -1,
+                               current ? current->name : "?", sockfd,
+                               usk->type, total,
+                               (unsigned long)(usk->tx.nwrite - usk->tx.nread),
+                               usk->tx.capacity, needed_capacity);
                     spin_unlock(&usk->lock);
                     grow_data = kvmalloc(needed_capacity);
                     if (grow_data == NULL) {
@@ -4088,6 +4619,13 @@ uint64 sys_sendmmsg(void)
                     spin_unlock(&usk->lock);
                     break;
                 }
+                UNIX_TRACE("sendmmsg-wait pid=%d comm=%s fd=%d type=%d "
+                           "len=%lu readable=%lu cap=%lu scm=%lu packets=%lu\n",
+                           current ? current->pid : -1,
+                           current ? current->name : "?", sockfd, usk->type,
+                           total, (unsigned long)(usk->tx.nwrite - usk->tx.nread),
+                           usk->tx.capacity, unix_scm_count_locked(usk),
+                           (unsigned long)unix_packet_count_locked(usk));
                 tq_wait_in_state(&usk->wr_queue, &usk->lock, NULL,
                                  THREAD_INTERRUPTIBLE);
                 spin_unlock(&usk->lock);
@@ -4131,38 +4669,8 @@ uint64 sys_sendmmsg(void)
             }
 
             if (sk->type == SOCK_STREAM) {
-                size_t written = 0;
-
-                if (sock_is_nonblock(sockfd, flags)) {
-                    int ready = sock_poll_ready(sk, POLLOUT);
-                    if (!(ready & POLLOUT))
-                        return sent > 0 ? (uint64)sent : (uint64)-EAGAIN;
-                }
-
-                while (written < total) {
-                    size_t chunk = total - written;
-                    size_t chunk_written = 0;
-                    err_t err;
-
-                    if (chunk > sizeof(tmpbuf))
-                        chunk = sizeof(tmpbuf);
-
-                    err = netconn_write_partly(sk->conn, tmpbuf + written, chunk,
-                                               NETCONN_COPY, &chunk_written);
-                    if (err != ERR_OK) {
-                        if (err == ERR_WOULDBLOCK)
-                            break;
-                        n = written > 0 ? (ssize_t)written
-                                        : -(ssize_t)lwip_err_to_errno(err);
-                        goto sendmmsg_message_done;
-                    }
-
-                    written += chunk_written;
-                    if (chunk_written < chunk)
-                        break;
-                }
-
-                n = (ssize_t)written;
+                n = sock_tcp_send_common(sk, sockfd, 0, tmpbuf, total,
+                                         flags, 0);
             } else {
                 struct netbuf nb;
                 memset(&nb, 0, sizeof(nb));
@@ -4176,8 +4684,6 @@ uint64 sys_sendmmsg(void)
                 n = (err == ERR_OK) ? (ssize_t)total : -(ssize_t)lwip_err_to_errno(err);
             }
         }
-
-sendmmsg_message_done:
 
         if (n < 0)
             return sent > 0 ? (uint64)sent : (uint64)n;
@@ -4203,17 +4709,37 @@ uint64 sys_recvmmsg(void)
 {
     int sockfd, vlen, flags;
     uint64 umsgvec;
-    /* uint64 utimeout; — ignored for now */
+    uint64 utimeout;
     argint(0, &sockfd);
     argaddr(1, &umsgvec);
     argint(2, &vlen);
     argint(3, &flags);
-    /* argaddr(4, &utimeout); */
+    argaddr(4, &utimeout);
 
     if (vlen <= 0)
         return (uint64)-EINVAL;
     if (vlen > 1024)
         vlen = 1024;
+
+    int has_timeout = 0;
+    int timeout_is_zero = 0;
+    uint64 timeout_ms = 0;
+    uint64 deadline_ms = 0;
+    if (utimeout != 0) {
+        struct sock_timespec ts;
+        if (vm_copyin(current->vm, &ts, utimeout, sizeof(ts)) < 0)
+            return (uint64)-EFAULT;
+        int ret = sock_timespec_to_ms(&ts, &timeout_ms);
+        if (ret != 0)
+            return (uint64)ret;
+        has_timeout = 1;
+        timeout_is_zero = timeout_ms == 0;
+        if (!timeout_is_zero) {
+            uint64 now = sched_timer_now_ms();
+            deadline_ms = ((uint64)-1) - now < timeout_ms
+                ? (uint64)-1 : now + timeout_ms;
+        }
+    }
 
     const uint64 mmsghdr_size = sizeof(struct k_msghdr) + 8;
     int received = 0;
@@ -4237,9 +4763,20 @@ uint64 sys_recvmmsg(void)
         /* Determine domain */
         int domain = sock_domain_from_fd(sockfd);
         int recv_flags = (i > 0) ? (flags | MSG_DONTWAIT) : flags;
+        if (timeout_is_zero)
+            recv_flags |= MSG_DONTWAIT;
+        if ((flags & MSG_WAITFORONE) && received > 0)
+            recv_flags |= MSG_DONTWAIT;
         ssize_t total = 0;
         int msg_flags = 0;
         int count_zero_message = 0;
+
+        if (has_timeout && !timeout_is_zero && received == 0) {
+            int expired = 0;
+            (void)sock_timeout_remaining_ms(deadline_ms, &expired);
+            if (expired)
+                return 0;
+        }
 
         if (domain == AF_UNIX) {
             struct unix_sock *usk = unix_sock_from_fd(sockfd);
@@ -4380,7 +4917,7 @@ uint64 sys_recvmmsg(void)
                 }
             } else if (recv_flags & MSG_PEEK) {
                 size_t peek_off = 0;
-                char tmp[128];
+                char tmp[UNIX_IO_CHUNK];
 
                 for (uint64 j = 0; j < mh.msg_iovlen; j++) {
                     size_t copied_iov = 0;
@@ -4478,30 +5015,39 @@ uint64 sys_recvmmsg(void)
             f->f_flags = saved_fflags;
             vfs_fput(f);
 
-            if (mh.msg_control != 0 &&
-                mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
+            if (recv_flags & MSG_PEEK) {
+                uint32 zero = 0;
+                vm_copyout(current->vm,
+                           entry_addr + __builtin_offsetof(struct k_msghdr,
+                                                           msg_controllen),
+                           &zero, sizeof(zero));
+            } else {
                 struct unix_sock *peer = NULL;
                 spin_lock(&usk->lock);
                 peer = usk->peer;
                 unix_sock_get_ref(peer);
                 spin_unlock(&usk->lock);
 
-                size_t max_fds = (mh.msg_controllen >= K_CMSG_SPACE(0))
-                    ? (mh.msg_controllen - K_CMSG_SPACE(0)) / sizeof(int) : 0;
-                if (max_fds > UNIX_SCM_QUEUE_MAX)
-                    max_fds = UNIX_SCM_QUEUE_MAX;
-
                 struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
                 memset(scm_files, 0, sizeof(scm_files));
                 size_t scm_count = unix_dequeue_scm_rights(peer, scm_files,
-                                                           max_fds);
+                                                           UNIX_SCM_QUEUE_MAX);
                 unix_sock_put_ref(peer);
 
                 if (scm_count > 0) {
                     int newfds[UNIX_SCM_QUEUE_MAX];
+                    size_t max_fds = 0;
+                    if (mh.msg_control != 0 &&
+                        mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
+                        max_fds = (mh.msg_controllen >= K_CMSG_SPACE(0))
+                            ? (mh.msg_controllen - K_CMSG_SPACE(0)) / sizeof(int) : 0;
+                        if (max_fds > UNIX_SCM_QUEUE_MAX)
+                            max_fds = UNIX_SCM_QUEUE_MAX;
+                    }
+                    size_t to_install = scm_count < max_fds ? scm_count : max_fds;
                     size_t installed = 0;
 
-                    for (; installed < scm_count; installed++) {
+                    for (; installed < to_install; installed++) {
                         spin_lock(&current->fdtable->lock);
                         int newfd = vfs_fdtable_alloc_fd(current->fdtable,
                                                          scm_files[installed]);
@@ -4510,13 +5056,15 @@ uint64 sys_recvmmsg(void)
                                                     FD_CLOEXEC);
                         spin_unlock(&current->fdtable->lock);
                         vfs_fput(scm_files[installed]);
+                        scm_files[installed] = NULL;
                         if (newfd < 0)
                             break;
                         newfds[installed] = newfd;
                     }
 
-                    for (size_t j = installed + 1; j < scm_count; j++)
-                        vfs_fput(scm_files[j]);
+                    unix_discard_scm_rights(scm_files, installed, scm_count);
+                    if (installed < scm_count)
+                        out_flags |= MSG_CTRUNC;
 
                     if (installed > 0) {
                         unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) *
@@ -4590,15 +5138,50 @@ uint64 sys_recvmmsg(void)
                         p = sk->lastpbuf;
                         poff = sk->lastpbuf_off;
                         reused_lastpbuf = true;
+                        SOCK_TRACE("recvmmsg fd=%d reuse off=%u tot=%u "
+                                   "entry=%d total=%ld goal=%lu\n",
+                                   sockfd, (uint)poff, (uint)p->tot_len,
+                                   i, (long)total, (uint64)buf_total);
                     } else {
-                        err_t err = sock_tcp_recv_pbuf(sk, &p,
-                            nonblock || total > 0);
-                        if (err != ERR_OK) {
-                            if (err == ERR_CLSD && received > 0)
-                                break;
-                            if (err == ERR_CLSD)
+                        uint32 recv_timeout_ms = 0;
+                        if (has_timeout && !timeout_is_zero && !nonblock &&
+                            total == 0 && received == 0) {
+                            int expired = 0;
+                            recv_timeout_ms =
+                                sock_timeout_remaining_ms(deadline_ms,
+                                                          &expired);
+                            if (expired)
                                 return 0;
+                            if (recv_timeout_ms == 0)
+                                recv_timeout_ms = 1;
+                        }
+                        err_t err = sock_tcp_recv_pbuf_timeout(sk, &p,
+                            nonblock || total > 0, recv_timeout_ms);
+                        if (err != ERR_OK) {
+                            SOCK_TRACE("recvmmsg fd=%d err=%d entry=%d "
+                                       "total=%ld recvd_acc=%lu avail=%d "
+                                       "mbox=%d nonblock=%d\n",
+                                       sockfd, (int)err, i, (long)total,
+                                       (uint64)recvd_acc,
+                                       sock_tcp_recv_avail(sk->conn),
+                                       sys_mbox_valid(&sk->conn->recvmbox)
+                                           ? sk->conn->recvmbox.count : -1,
+                                       nonblock);
+                            if (err == ERR_TIMEOUT && has_timeout &&
+                                received == 0 && total == 0) {
+                                sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
+                                return 0;
+                            }
+                            if (err == ERR_CLSD && received > 0) {
+                                sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
+                                break;
+                            }
+                            if (err == ERR_CLSD) {
+                                sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
+                                return 0;
+                            }
                             if (err == ERR_TIMEOUT && signal_pending(current)) {
+                                sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
                                 if (received > 0)
                                     break;
                                 return total > 0 ? (uint64)total : (uint64)-EINTR;
@@ -4610,12 +5193,21 @@ uint64 sys_recvmmsg(void)
                                     continue;
                                 break;
                             }
-                            if (recvd_acc > 0)
-                                sock_tcp_recvd(sk, recvd_acc);
+                            sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
                             if (received > 0)
                                 break;
                             return (uint64)-lwip_err_to_errno(err);
                         }
+                        if (p != NULL)
+                            SOCK_TRACE("recvmmsg fd=%d pbuf tot=%u entry=%d "
+                                       "total=%ld goal=%lu avail=%d mbox=%d "
+                                       "nonblock=%d\n",
+                                       sockfd, (uint)p->tot_len, i,
+                                       (long)total, (uint64)buf_total,
+                                       sock_tcp_recv_avail(sk->conn),
+                                       sys_mbox_valid(&sk->conn->recvmbox)
+                                           ? sk->conn->recvmbox.count : -1,
+                                       nonblock);
                     }
 
                     start_off = poff;
@@ -4641,15 +5233,13 @@ uint64 sys_recvmmsg(void)
                                        iovs[iov_idx].iov_base + iov_off,
                                        tmpbuf, got) < 0) {
                             if (!(recv_flags & MSG_PEEK) && copied_from_pbuf > 0) {
-                                sk->lastpbuf = p;
-                                sk->lastpbuf_off = poff;
+                                sock_tcp_save_remainder(sk, p, poff);
                             } else if (!reused_lastpbuf) {
                                 pbuf_free(p);
                             }
                             if (!(recv_flags & MSG_PEEK))
-                                recvd_acc += copied_from_pbuf;
-                            if (recvd_acc > 0)
-                                sock_tcp_recvd(sk, recvd_acc);
+                                sock_tcp_recvd_accum(sk, &recvd_acc,
+                                                     copied_from_pbuf, 1);
                             return received > 0 ? (uint64)received : (uint64)-EFAULT;
                         }
 
@@ -4657,40 +5247,67 @@ uint64 sys_recvmmsg(void)
                         iov_off += got;
                         total += got;
                         copied_from_pbuf += got;
+                        sock_tcp_trace_rx_progress(sk, got, total, "recvmmsg");
                     }
 
                     if (recv_flags & MSG_PEEK) {
                         sk->lastpbuf = p;
                         sk->lastpbuf_off = start_off;
                         break;
-                    } else if (poff < p->tot_len) {
-                        sk->lastpbuf = p;
-                        sk->lastpbuf_off = poff;
                     } else {
-                        pbuf_free(p);
-                        sk->lastpbuf = NULL;
-                        sk->lastpbuf_off = 0;
+                        sock_tcp_save_remainder(sk, p, poff);
                     }
 
                     if (!(recv_flags & MSG_PEEK))
-                        recvd_acc += copied_from_pbuf;
+                        sock_tcp_recvd_accum(sk, &recvd_acc,
+                                             copied_from_pbuf, 0);
                     if (copied_from_pbuf == 0)
                         break;
                 }
 
                 /* Single MSG_RECVD round-trip per recvmmsg() entry. */
-                if (!(recv_flags & MSG_PEEK) && recvd_acc > 0)
-                    sock_tcp_recvd(sk, recvd_acc);
+                if (!(recv_flags & MSG_PEEK))
+                    sock_tcp_recvd_accum(sk, &recvd_acc, 0, 1);
+
+                SOCK_TRACE("recvmmsg fd=%d entry=%d done total=%ld "
+                           "recvd_acc=%lu avail=%d mbox=%d received=%d\n",
+                           sockfd, i, (long)total, (uint64)recvd_acc,
+                           sock_tcp_recv_avail(sk->conn),
+                           sys_mbox_valid(&sk->conn->recvmbox)
+                               ? sk->conn->recvmbox.count : -1,
+                           received);
 
                 if (!(recv_flags & MSG_PEEK) && total > 0) {
                     sock_notify_if_still_readable(sockfd, sk);
                 }
             } else {
                 struct netbuf *nb = NULL;
-                err_t err = netconn_recv(sk->conn, &nb);
-                if (err != ERR_OK) {
-                    if (received > 0) break;
-                    return (uint64)-lwip_err_to_errno(err);
+                size_t buf_total = 0;
+                for (uint64 j = 0; j < mh.msg_iovlen; j++)
+                    buf_total += iovs[j].iov_len;
+
+                uint32 recv_timeout_ms = 0;
+                if (has_timeout && !timeout_is_zero &&
+                    !sock_is_nonblock(sockfd, recv_flags) && received == 0) {
+                    int expired = 0;
+                    recv_timeout_ms =
+                        sock_timeout_remaining_ms(deadline_ms, &expired);
+                    if (expired)
+                        return 0;
+                    if (recv_timeout_ms == 0)
+                        recv_timeout_ms = 1;
+                }
+                if (sk->lastbuf != NULL) {
+                    nb = sk->lastbuf;
+                } else {
+                    err_t err = sock_netconn_recv_timeout(sk, &nb,
+                                                          recv_timeout_ms);
+                    if (err != ERR_OK) {
+                        if (err == ERR_TIMEOUT && has_timeout && received == 0)
+                            return 0;
+                        if (received > 0) break;
+                        return (uint64)-lwip_err_to_errno(err);
+                    }
                 }
                 count_zero_message = 1;
                 void *data;
@@ -4707,10 +5324,38 @@ uint64 sys_recvmmsg(void)
                         netbuf_delete(nb);
                         return received > 0 ? (uint64)received : (uint64)-EFAULT;
                     }
-                    doff += (uint16)tocopy;
-                    total += (ssize_t)tocopy;
+	                    doff += (uint16)tocopy;
+	                    total += (ssize_t)tocopy;
+	                }
+
+                if ((size_t)dlen > buf_total)
+                    msg_flags |= MSG_TRUNC;
+
+                if (mh.msg_name != 0 && mh.msg_namelen >= K_SOCKADDR_IN_SIZE) {
+                    const ip_addr_t *fromaddr = netbuf_fromaddr(nb);
+                    u16_t fromport = netbuf_fromport(nb);
+                    struct k_sockaddr_in sa;
+                    memset(&sa, 0, sizeof(sa));
+                    sa.sin_family = AF_INET;
+                    sa.sin_port = htons(fromport);
+                    sa.sin_addr = ip_addr_get_ip4_u32(fromaddr);
+
+                    vm_copyout(current->vm, mh.msg_name, &sa, sizeof(sa));
+                    uint32 nlen = K_SOCKADDR_IN_SIZE;
+                    vm_copyout(current->vm,
+                               entry_addr + __builtin_offsetof(struct k_msghdr,
+                                                               msg_namelen),
+                               &nlen, sizeof(nlen));
                 }
-                netbuf_delete(nb);
+
+                if (recv_flags & MSG_PEEK) {
+                    sk->lastbuf = nb;
+                    sk->lastoffset = 0;
+                } else {
+                    sk->lastbuf = NULL;
+                    sk->lastoffset = 0;
+                    netbuf_delete(nb);
+                }
             }
         }
 

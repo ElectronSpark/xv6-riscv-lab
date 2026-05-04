@@ -45,12 +45,114 @@
 #include "kqueue.h"
 #include "kqueue_types.h"
 #include "kstats.h"
+#include "cmdline.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
 void argint64(int n, int64 *ip);
 void argaddr(int n, uint64 *ip);
 int argstr(int n, char *buf, int max);
+
+static int webkit_vfs_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_vfs_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int webkit_vfs_trace_process(void)
+{
+    return current != NULL &&
+        (strncmp(current->name, "MiniBrowser", 11) == 0 ||
+         strncmp(current->name, "WebKit", 6) == 0);
+}
+
+static int webkit_readlink_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_readlink_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int webkit_poll_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_poll_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int webkit_poll_summary_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_poll_summary", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int timespec_to_timeout_ms_ceil(int64 tv_sec, int64 tv_nsec,
+                                       int *timeout_ms)
+{
+    if (tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1000000000LL)
+        return -EINVAL;
+
+    if (tv_sec > 0x7fffffffLL / 1000) {
+        *timeout_ms = 0x7fffffff;
+        return 0;
+    }
+
+    int64 ms = tv_sec * 1000;
+    if (tv_nsec != 0)
+        ms += (tv_nsec + 999999LL) / 1000000LL;
+    if (ms > 0x7fffffffLL)
+        ms = 0x7fffffffLL;
+
+    *timeout_ms = (int)ms;
+    return 0;
+}
+
+#define WEBKIT_VFS_TRACE(fmt, ...)                                            \
+    do {                                                                      \
+        if (webkit_vfs_trace_enabled() && webkit_vfs_trace_process())         \
+            printf("webkit-vfs: " fmt, ##__VA_ARGS__);                       \
+    } while (0)
+
+#define WEBKIT_READLINK_TRACE(fmt, ...)                                       \
+    do {                                                                      \
+        if ((webkit_vfs_trace_enabled() || webkit_readlink_trace_enabled()) && \
+            webkit_vfs_trace_process())                                       \
+            printf("webkit-readlink: " fmt, ##__VA_ARGS__);                  \
+    } while (0)
 
 #define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
     uint64 __sys_start = r_time();                                          \
@@ -332,7 +434,68 @@ uint64 sys_vfs_read(void) {
         SYSCALL_PROFILE_RETURN(-EBADF, g_sys_read_ticks);
     }
 
+    loff_t pos_before = f->f_pos;
+    const char *kind = "custom";
+    uint32 mode = 0;
+    uint64 ino = 0;
+    uint32 cdev = 0;
+    const char *fs_name = "(none)";
+    struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+    if (inode != NULL) {
+        mode = inode->mode;
+        ino = inode->ino;
+        cdev = inode->cdev;
+        if (S_ISREG(mode))
+            kind = "reg";
+        else if (S_ISDIR(mode))
+            kind = "dir";
+        else if (S_ISCHR(mode))
+            kind = "chr";
+        else if (S_ISBLK(mode))
+            kind = "blk";
+        else if (S_ISLNK(mode))
+            kind = "lnk";
+        else if (S_ISSOCK(mode))
+            kind = "sock";
+        else if (S_ISFIFO(mode))
+            kind = "fifo";
+        if (inode->sb != NULL && inode->sb->fs_type != NULL &&
+            inode->sb->fs_type->name != NULL)
+            fs_name = inode->sb->fs_type->name;
+    }
+
+    if (webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
+        if (inode == NULL) {
+            printf("webkit-vfs: read-enter pid=%d name=%s fd=%d kind=%s "
+                   "count=%d state=%p ops=%p private=%p flags=0x%x\n",
+                   current->pid, current->name, fd, kind, n,
+                   (void *)f->f_pos, f->ops, f->private_data, f->f_flags);
+        } else {
+            printf("webkit-vfs: read-enter pid=%d name=%s fd=%d kind=%s "
+                   "count=%d pos=%lld mode=0x%x ino=%lu fs=%s cdev=%u:%u "
+                   "ops=%p private=%p flags=0x%x\n",
+                   current->pid, current->name, fd, kind, n, pos_before, mode,
+                   ino, fs_name, major(cdev), minor(cdev), f->ops,
+                   f->private_data, f->f_flags);
+        }
+    }
+
     ssize_t ret = vfs_fileread(f, (void *)p, n, true);
+    if (webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
+        if (inode == NULL) {
+            printf("webkit-vfs: read-exit pid=%d name=%s fd=%d kind=%s "
+                   "count=%d ret=%ld state=%p ops=%p private=%p flags=0x%x\n",
+                   current->pid, current->name, fd, kind, n, ret,
+                   (void *)f->f_pos, f->ops, f->private_data, f->f_flags);
+        } else {
+            printf("webkit-vfs: read-exit pid=%d name=%s fd=%d kind=%s "
+                   "count=%d ret=%ld pos=%lld->%lld mode=0x%x ino=%lu "
+                   "fs=%s cdev=%u:%u ops=%p private=%p flags=0x%x\n",
+                   current->pid, current->name, fd, kind, n, ret, pos_before,
+                   f->f_pos, mode, ino, fs_name, major(cdev), minor(cdev),
+                   f->ops, f->private_data, f->f_flags);
+        }
+    }
     vfs_fput(f);
     if (ret > 0)
         ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
@@ -499,6 +662,30 @@ uint64 sys_vfs_fcntl(void) {
         normalized_cmd = F_DUPFD_CLOEXEC;
     }
     switch (normalized_cmd) {
+    case F_ADD_SEALS:
+        if (!f->f_is_memfd) {
+            ret = -EINVAL;
+            break;
+        }
+        if (!f->f_allow_sealing || (f->f_seals & F_SEAL_SEAL)) {
+            ret = -EPERM;
+            break;
+        }
+        if (arg & ~(F_SEAL_SEAL | F_SEAL_SHRINK |
+                    F_SEAL_GROW | F_SEAL_WRITE)) {
+            ret = -EINVAL;
+            break;
+        }
+        f->f_seals |= (uint32)arg;
+        ret = 0;
+        break;
+    case F_GET_SEALS:
+        if (!f->f_is_memfd) {
+            ret = -EINVAL;
+            break;
+        }
+        ret = (int)f->f_seals;
+        break;
     case F_GETLK:
     case F_SETLK:
     case F_SETLKW: {
@@ -522,6 +709,7 @@ uint64 sys_vfs_fcntl(void) {
         ret = f->f_flags & ~O_CLOEXEC;
         break;
     case F_SETFL: {
+        int old_flags = f->f_flags;
         int new_flags = (f->f_flags & O_ACCMODE) | (arg & ~(O_ACCMODE | O_CLOEXEC));
         f->f_flags = new_flags;
         /* Propagate O_NONBLOCK to pipe internal flags.
@@ -544,6 +732,10 @@ uint64 sys_vfs_fcntl(void) {
             }
             pipe_set_flags(pi, pflags);
             spin_unlock(&pi->writer_lock);
+        }
+        if (f->ops != NULL && f->ops->set_flags != NULL) {
+            ret = f->ops->set_flags(f, old_flags, new_flags);
+            break;
         }
         ret = 0;
         break;
@@ -737,17 +929,24 @@ uint64 sys_vfs_readlink(void) {
     argint(2, &bufsz);
 
     if (n < 0) {
+        WEBKIT_READLINK_TRACE("readlink path=<fault> ret=%d\n", -EFAULT);
         return -EFAULT;
     }
     if (bufsz <= 0) {
+        WEBKIT_READLINK_TRACE("readlink path=%s bufsz=%d ret=%d\n", path,
+                              bufsz, -EINVAL);
         return -EINVAL;
     }
 
     struct vfs_inode *parent = vfs_nameiparent(path, n, name, MAXPATH);
     if (IS_ERR(parent)) {
-        return PTR_ERR(parent);
+        int err = PTR_ERR(parent);
+        WEBKIT_READLINK_TRACE("readlink path=%s parent ret=%d\n", path, err);
+        return err;
     }
     if (parent == NULL) {
+        WEBKIT_READLINK_TRACE("readlink path=%s parent ret=%d\n", path,
+                              -ENOENT);
         return -ENOENT;
     }
 
@@ -755,6 +954,8 @@ uint64 sys_vfs_readlink(void) {
     int ret = vfs_ilookup(parent, &dentry, name, strlen(name));
     if (ret != 0) {
         vfs_iput(parent);
+        WEBKIT_READLINK_TRACE("readlink path=%s lookup name=%s ret=%d\n",
+                              path, name, ret);
         return ret;
     }
 
@@ -762,15 +963,21 @@ uint64 sys_vfs_readlink(void) {
     vfs_release_dentry(&dentry);
     vfs_iput(parent);
     if (IS_ERR(inode)) {
-        return PTR_ERR(inode);
+        int err = PTR_ERR(inode);
+        WEBKIT_READLINK_TRACE("readlink path=%s inode ret=%d\n", path, err);
+        return err;
     }
     if (inode == NULL) {
+        WEBKIT_READLINK_TRACE("readlink path=%s inode ret=%d\n", path,
+                              -ENOENT);
         return -ENOENT;
     }
 
     char *kbuf = kvmalloc(bufsz);
     if (kbuf == NULL) {
         vfs_iput(inode);
+        WEBKIT_READLINK_TRACE("readlink path=%s bufsz=%d ret=%d\n", path,
+                              bufsz, -ENOMEM);
         return -ENOMEM;
     }
 
@@ -779,13 +986,23 @@ uint64 sys_vfs_readlink(void) {
 
     if (len < 0) {
         kvfree(kbuf);
+        WEBKIT_READLINK_TRACE("readlink path=%s bufsz=%d ret=%ld\n", path,
+                              bufsz, (long)len);
         return len;
     }
 
     if (either_copyout(1, buf_addr, kbuf, len) < 0) {
         kvfree(kbuf);
+        WEBKIT_READLINK_TRACE("readlink path=%s len=%ld ret=%d\n", path,
+                              (long)len, -EFAULT);
         return -EFAULT;
     }
+    if (len >= 0 && len < bufsz)
+        kbuf[len] = '\0';
+    else if (bufsz > 0)
+        kbuf[bufsz - 1] = '\0';
+    WEBKIT_READLINK_TRACE("readlink path=%s len=%ld target=%s\n", path,
+                          (long)len, kbuf);
     kvfree(kbuf);
     return len;
 }
@@ -982,6 +1199,21 @@ uint64 sys_vfs_open(void) {
         (void)vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
     }
     spin_unlock(&current->fdtable->lock);
+
+    if (fd >= 0 && webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
+        const char *fs_name = "(none)";
+        struct vfs_inode *opened_inode = vfs_inode_deref(&f->inode);
+        if (opened_inode != NULL && opened_inode->sb != NULL &&
+            opened_inode->sb->fs_type != NULL &&
+            opened_inode->sb->fs_type->name != NULL)
+            fs_name = opened_inode->sb->fs_type->name;
+        printf("webkit-vfs: open pid=%d name=%s fd=%d path=%s flags=0x%x "
+               "mode=0x%x ino=%lu fs=%s size=%lld\n",
+               current->pid, current->name, fd, path, omode,
+               opened_inode != NULL ? opened_inode->mode : 0,
+               opened_inode != NULL ? opened_inode->ino : 0, fs_name,
+               opened_inode != NULL ? opened_inode->size : 0);
+    }
 
     // When success, the refcount of f will be increased by fdtable, thus we do
     // not put f here. When failure, we need to put f anyway.
@@ -2555,6 +2787,52 @@ struct pollfd_k {
     short revents;
 };
 
+static void webkit_poll_trace_fd(const char *phase, const struct pollfd_k *pfd,
+                                 struct vfs_file *f)
+{
+    if (!webkit_poll_trace_enabled() || !webkit_vfs_trace_process())
+        return;
+
+    const char *kind = "none";
+    if (f == NULL) {
+        kind = "badfd";
+    } else if (f->ops != NULL && f->ops->poll != NULL) {
+        kind = "fileops-poll";
+    } else if (f->inode.inode == NULL && f->ops == NULL && f->sock != NULL) {
+        kind = "legacy-sock";
+    } else if (f->inode.inode == NULL) {
+        kind = "custom";
+    } else if (S_ISCHR(f->inode.inode->mode)) {
+        kind = "char";
+    } else {
+        kind = "regular";
+    }
+
+    printf("webkit-poll: %s pid=%d name=%s fd=%d events=0x%x "
+           "revents=0x%x kind=%s flags=0x%x ops=%p poll=%p inode=%p\n",
+           phase, current->pid, current->name, pfd->fd,
+           (uint)pfd->events, (uint)pfd->revents, kind,
+           f != NULL ? (uint)f->f_flags : 0,
+           f != NULL ? f->ops : NULL,
+           (f != NULL && f->ops != NULL) ? f->ops->poll : NULL,
+	           f != NULL ? f->inode.inode : NULL);
+}
+
+static const char *webkit_poll_fd_kind(struct vfs_file *f)
+{
+    if (f == NULL)
+        return "badfd";
+    if (f->ops != NULL && f->ops->poll != NULL)
+        return "fileops-poll";
+    if (f->inode.inode == NULL && f->ops == NULL && f->sock != NULL)
+        return "legacy-sock";
+    if (f->inode.inode == NULL)
+        return "custom";
+    if (S_ISCHR(f->inode.inode->mode))
+        return "char";
+    return "regular";
+}
+
 /*
  * __vfs_poll_always_ready - report requested events as ready based on
  * file access mode.  Used as fallback when no specific poll callback
@@ -2562,12 +2840,12 @@ struct pollfd_k {
  */
 static inline short __vfs_poll_always_ready(short events, int f_flags) {
     short revents = 0;
-    if ((events & (POLLIN | POLLRDNORM)) &&
+    if ((events & (POLLIN | POLLRDNORM | POLLRDBAND)) &&
         ((f_flags & O_ACCMODE) != O_WRONLY))
-        revents |= (events & (POLLIN | POLLRDNORM));
-    if ((events & (POLLOUT | POLLWRNORM)) &&
+        revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
+    if ((events & (POLLOUT | POLLWRNORM | POLLWRBAND)) &&
         ((f_flags & O_ACCMODE) != O_RDONLY))
-        revents |= (events & (POLLOUT | POLLWRNORM));
+        revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
     return revents;
 }
 
@@ -2601,6 +2879,7 @@ static int __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
         struct vfs_file *f = __vfs_argfd(pfd->fd);
         if (f == NULL) {
             pfd->revents |= POLLNVAL;
+            webkit_poll_trace_fd("scan", pfd, NULL);
             ready++;
             continue;
         }
@@ -2659,6 +2938,7 @@ static int __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
         }
 
 done:
+        webkit_poll_trace_fd("scan", pfd, f);
         vfs_fput(f);
 
         if (pfd->revents != 0)
@@ -2666,6 +2946,74 @@ done:
     }
 
     return ready;
+}
+
+static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
+                                int ready, struct pollfd_k *pfds)
+{
+    if (!webkit_poll_summary_enabled() || !webkit_vfs_trace_process())
+        return;
+
+    static _Atomic uint64 seq;
+    uint64 n = __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED);
+    if (n > 128 && (n & 0xff) != 0)
+        return;
+
+    int in = 0, out = 0, err = 0, zero = 0;
+    int sample_fd[6];
+    short sample_events[6];
+    short sample_revents[6];
+    const char *sample_kind[6];
+    void *sample_poll[6];
+    int nsample = 0;
+
+    for (int i = 0; i < nfds; i++) {
+        short r = pfds[i].revents;
+        int take_sample = 0;
+        if (r == 0) {
+            zero++;
+            take_sample = ready == 0 && nsample < (int)NELEM(sample_fd);
+        } else {
+            if (r & (POLLIN | POLLRDNORM | POLLRDBAND))
+                in++;
+            if (r & (POLLOUT | POLLWRNORM | POLLWRBAND))
+                out++;
+            if (r & (POLLERR | POLLHUP | POLLNVAL | POLLRDHUP))
+                err++;
+            take_sample = nsample < (int)NELEM(sample_fd);
+        }
+
+        if (take_sample) {
+            const char *kind = "neg";
+            void *poll = NULL;
+            struct vfs_file *f = NULL;
+            if (pfds[i].fd >= 0) {
+                f = __vfs_argfd(pfds[i].fd);
+                kind = webkit_poll_fd_kind(f);
+                if (f != NULL && f->ops != NULL)
+                    poll = f->ops->poll;
+            }
+            sample_fd[nsample] = pfds[i].fd;
+            sample_events[nsample] = pfds[i].events;
+            sample_revents[nsample] = r;
+            sample_kind[nsample] = kind;
+            sample_poll[nsample] = poll;
+            nsample++;
+            if (f != NULL)
+                vfs_fput(f);
+        }
+    }
+
+    printf("webkit-poll-summary: seq=%lu phase=%s pid=%d name=%s nfds=%d "
+           "timeout=%d ready=%d in=%d out=%d err=%d zero=%d",
+           n, phase, current->pid, current->name, nfds, timeout_ms, ready,
+           in, out, err, zero);
+    for (int i = 0; i < nsample; i++) {
+        printf(" sample%d=fd%d/e%x/r%x/%s/%p", i, sample_fd[i],
+               (uint)sample_events[i], (uint)sample_revents[i],
+               sample_kind[i], sample_poll[i]);
+    }
+    printf("\n");
 }
 
 /*
@@ -2680,25 +3028,6 @@ done:
  * spin-polling.  For non-blocking polls (timeout_ms=0), a direct scan
  * is performed without kqueue overhead.
  */
-
-/*
- * __vfs_close_fd_sync - Close a file descriptor synchronously
- *
- * Used for internal temporary fds (e.g. the kqueue in __vfs_poll_impl)
- * that are never shared with other threads.  Unlike __vfs_close_fd,
- * this does NOT defer the vfs_fput via call_rcu — the file (and all
- * associated resources such as kqueue knotes) is cleaned up immediately
- * before this function returns.
- */
-static void __vfs_close_fd_sync(int fd) {
-    spin_lock(&current->fdtable->lock);
-    struct vfs_file *f = __vfs_fdfree(fd);
-    spin_unlock(&current->fdtable->lock);
-    if (f != NULL) {
-        vfs_file_lock_release(f, current->tgid);
-        vfs_fput(f);
-    }
-}
 
 static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
 
@@ -2731,6 +3060,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
 
     /* --- Non-blocking fast path (timeout_ms == 0) --- */
     int ready = __vfs_poll_scan(pfds, nfds);
+    webkit_poll_summary("initial", nfds, timeout_ms, ready, pfds);
     if (timeout_ms == 0 || ready > 0)
         goto copyout;
 
@@ -2746,27 +3076,9 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
      */
     int has_unnotified_fds = 1;
 
-    int kqfd = kqueue_create();
-    if (kqfd < 0) {
-        /* If kqueue_create fails, fall back to a single scan */
-        goto copyout;
-    }
-
-    /* Resolve kqueue from fd.
-     *
-     * Keep a reference to kqfile for the entire polling loop.  The
-     * temporary kqueue fd lives in the process's shared fd table, so
-     * another thread (e.g. exit_group tearing down all fds) could close
-     * it while we are between kqueue_wait() calls (waiters == 0).
-     * Without our own ref the kqueue and all its knotes would be freed,
-     * leaving the local `kq` pointer dangling → use-after-free.
-     */
-    struct vfs_file *kqfile = __vfs_argfd(kqfd);
-    struct kqueue *kq = kqfile ? (struct kqueue *)kqfile->private_data : NULL;
+    struct kqueue *kq = kqueue_alloc_private();
     if (kq == NULL) {
-        if (kqfile)
-            vfs_fput(kqfile);
-        __vfs_close_fd_sync(kqfd);
+        /* If private kqueue allocation fails, fall back to a single scan */
         goto copyout;
     }
 
@@ -2779,8 +3091,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     int max_changes = nfds * 2; /* worst case: READ+WRITE per fd */
     struct kevent *changes = kvmalloc(max_changes * sizeof(struct kevent));
     if (changes == NULL) {
-        __vfs_close_fd_sync(kqfd);
-        vfs_fput(kqfile);
+        kqueue_close_private(kq);
         goto copyout;
     }
     int nchanges = 0;
@@ -2788,7 +3099,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     for (int i = 0; i < nfds; i++) {
         if (pfds[i].fd < 0)
             continue;
-        if (pfds[i].events & (POLLIN | POLLRDNORM)) {
+        if (pfds[i].events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP)) {
             changes[nchanges].ident = pfds[i].fd;
             changes[nchanges].filter = EVFILT_READ;
             changes[nchanges].flags = EV_ADD;
@@ -2797,7 +3108,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
             changes[nchanges].udata = (uint64)i;
             nchanges++;
         }
-        if (pfds[i].events & (POLLOUT | POLLWRNORM)) {
+        if (pfds[i].events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
             changes[nchanges].ident = pfds[i].fd;
             changes[nchanges].filter = EVFILT_WRITE;
             changes[nchanges].flags = EV_ADD;
@@ -2822,8 +3133,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     struct kevent *events = kvmalloc(nfds * sizeof(struct kevent));
     if (events == NULL) {
         kvfree(changes);
-        __vfs_close_fd_sync(kqfd);
-        vfs_fput(kqfile);
+        kqueue_close_private(kq);
         goto copyout;
     }
 
@@ -2863,6 +3173,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
         /* Always re-scan: catches chardev events and ensures
          * revents is correctly populated for copyout. */
         ready = __vfs_poll_scan(pfds, nfds);
+        webkit_poll_summary("wait", nfds, timeout_ms, ready, pfds);
         if (ready > 0)
             break;
 
@@ -2874,14 +3185,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
 
     #undef POLL_RESCAN_MS
 
-    /* Close the temporary kqueue fd synchronously (detaches all knotes
-     * immediately, avoiding stale knotes lingering on file knote_lists). */
-    __vfs_close_fd_sync(kqfd);
-    /* Drop the reference we kept across the polling loop.  If another
-     * thread already closed kqfd (exit_group), __vfs_close_fd_sync was
-     * a no-op and this vfs_fput is the 1→0 transition that triggers
-     * kqueue_file_release → kqueue_close → cleanup. */
-    vfs_fput(kqfile);
+    kqueue_close_private(kq);
     kvfree(changes);
     kvfree(events);
 
@@ -2891,6 +3195,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     }
 
 copyout:
+    webkit_poll_summary("copyout", nfds, timeout_ms, ready, pfds);
     if (either_copyout(1, fds_addr, pfds, bytes) < 0) {
         kvfree(pfds);
         return -EFAULT;
@@ -2923,18 +3228,20 @@ uint64 sys_vfs_poll(void) {
  *   a0 = pollfd*
  *   a1 = nfds
  *   a2 = struct timespec* (NULL = infinite wait)
- *   a3 = sigset_t*        (ignored for now)
- *   a4 = sigsetsize        (ignored for now)
+ *   a3 = sigset_t*
+ *   a4 = sigsetsize
  */
 uint64 sys_vfs_ppoll(void) {
     uint64 fds_addr;
     int nfds;
-    uint64 tmo_p;
+    uint64 tmo_p, sigmask_addr;
+    int sigsetsize;
 
     argaddr(0, &fds_addr);
     argint(1, &nfds);
     argaddr(2, &tmo_p);
-    /* a3 (sigmask) and a4 (sigsetsize) ignored */
+    argaddr(3, &sigmask_addr);
+    argint(4, &sigsetsize);
 
     int timeout_ms;
     if (tmo_p == 0) {
@@ -2944,16 +3251,27 @@ uint64 sys_vfs_ppoll(void) {
         struct { int64 tv_sec; int64 tv_nsec; } ts;
         if (either_copyin(&ts, 1, tmo_p, sizeof(ts)) < 0)
             return (uint64)-EFAULT;
-        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
-            return (uint64)-EINVAL;
-        int64 ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-        if (ms > (int64)0x7FFFFFFF)
-            timeout_ms = 0x7FFFFFFF;
-        else
-            timeout_ms = (int)ms;
+        int ret = timespec_to_timeout_ms_ceil(ts.tv_sec, ts.tv_nsec,
+                                              &timeout_ms);
+        if (ret < 0)
+            return (uint64)ret;
     }
 
-    return __vfs_poll_impl(fds_addr, nfds, timeout_ms);
+    sigset_t newmask, oldmask;
+    int use_mask = 0;
+    if (sigmask_addr != 0) {
+        if (sigsetsize < (int)sizeof(sigset_t))
+            return (uint64)-EINVAL;
+        if (either_copyin(&newmask, 1, sigmask_addr, sizeof(newmask)) < 0)
+            return (uint64)-EFAULT;
+        sigmask_swap(&newmask, &oldmask);
+        use_mask = 1;
+    }
+
+    uint64 ret = __vfs_poll_impl(fds_addr, nfds, timeout_ms);
+    if (use_mask)
+        sigmask_swap(&oldmask, NULL);
+    return ret;
 }
 
 /*
@@ -2970,7 +3288,6 @@ uint64 sys_vfs_ppoll(void) {
  *   a4 = timeout    (struct __kernel_timespec __user *, or NULL)
  *          { int64 tv_sec; int64 tv_nsec; }
  *   a5 = sig_data   (struct { sigset_t *ss; size_t ss_len; } __user *, or NULL)
- *          — signal mask argument (ignored — xv6 has limited signal support)
  *
  * Returns:
  *   >= 0  number of ready file descriptors
@@ -2991,32 +3308,63 @@ uint64 sys_pselect6(void) {
     if (nfds < 0 || nfds > NOFILE)
         return -EINVAL;
 
+    sigset_t newmask, oldmask;
+    int use_mask = 0;
+    if (sig_addr != 0) {
+        struct {
+            uint64 ss;
+            uint64 ss_len;
+        } sig_data;
+
+        if (either_copyin(&sig_data, 1, sig_addr, sizeof(sig_data)) < 0)
+            return (uint64)-EFAULT;
+        if (sig_data.ss != 0) {
+            if (sig_data.ss_len < sizeof(sigset_t))
+                return (uint64)-EINVAL;
+            if (either_copyin(&newmask, 1, sig_data.ss,
+                              sizeof(newmask)) < 0)
+                return (uint64)-EFAULT;
+            sigmask_swap(&newmask, &oldmask);
+            use_mask = 1;
+        }
+    }
+
     /* Parse timeout: NULL means block indefinitely */
     int timeout_ms = -1;
     if (timeout_addr != 0) {
         int64 ts[2]; /* { tv_sec, tv_nsec } */
-        if (either_copyin(ts, 1, timeout_addr, sizeof(ts)) < 0)
+        if (either_copyin(ts, 1, timeout_addr, sizeof(ts)) < 0) {
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
             return -EFAULT;
-        if (ts[0] < 0 || ts[1] < 0)
-            return -EINVAL;
-        /* Convert to milliseconds, clamping to INT_MAX */
-        int64 ms = ts[0] * 1000 + ts[1] / 1000000;
-        if (ms > 0x7fffffff)
-            ms = 0x7fffffff;
-        timeout_ms = (int)ms;
+        }
+        int ret = timespec_to_timeout_ms_ceil(ts[0], ts[1], &timeout_ms);
+        if (ret < 0) {
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
+            return ret;
+        }
     }
 
     /* No fds to watch — just sleep */
     if (nfds == 0) {
-        if (timeout_ms == 0)
+        if (timeout_ms == 0) {
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
             return 0;
+        }
         uint64 start = get_jiffs();
+        uint64 ret = 0;
         while (timeout_ms < 0 || (int)(get_jiffs() - start) < timeout_ms) {
             sleep_ms(1);
-            if (signal_pending(current))
-                return -EINTR;
+            if (signal_pending(current)) {
+                ret = (uint64)-EINTR;
+                break;
+            }
         }
-        return 0;
+        if (use_mask)
+            sigmask_swap(&oldmask, NULL);
+        return ret;
     }
 
     /*
@@ -3033,31 +3381,52 @@ uint64 sys_pselect6(void) {
 
     if (readfds_addr) {
         rfds = kvmalloc(alloc_bytes);
-        if (!rfds) return -ENOMEM;
+        if (!rfds) {
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
+            return -ENOMEM;
+        }
         memset(rfds, 0, alloc_bytes);
         if (either_copyin(rfds, 1, readfds_addr, set_bytes) < 0) {
             kvfree(rfds);
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
             return -EFAULT;
         }
     }
     if (writefds_addr) {
         wfds = kvmalloc(alloc_bytes);
-        if (!wfds) { if (rfds) kvfree(rfds); return -ENOMEM; }
+        if (!wfds) {
+            if (rfds) kvfree(rfds);
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
+            return -ENOMEM;
+        }
         memset(wfds, 0, alloc_bytes);
         if (either_copyin(wfds, 1, writefds_addr, set_bytes) < 0) {
             if (rfds) kvfree(rfds);
             kvfree(wfds);
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
             return -EFAULT;
         }
     }
     if (exceptfds_addr) {
         efds = kvmalloc(alloc_bytes);
-        if (!efds) { if (rfds) kvfree(rfds); if (wfds) kvfree(wfds); return -ENOMEM; }
+        if (!efds) {
+            if (rfds) kvfree(rfds);
+            if (wfds) kvfree(wfds);
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
+            return -ENOMEM;
+        }
         memset(efds, 0, alloc_bytes);
         if (either_copyin(efds, 1, exceptfds_addr, set_bytes) < 0) {
             if (rfds) kvfree(rfds);
             if (wfds) kvfree(wfds);
             kvfree(efds);
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
             return -EFAULT;
         }
     }
@@ -3072,6 +3441,8 @@ uint64 sys_pselect6(void) {
         if (rfds) kvfree(rfds);
         if (wfds) kvfree(wfds);
         if (efds) kvfree(efds);
+        if (use_mask)
+            sigmask_swap(&oldmask, NULL);
         return -ENOMEM;
     }
 
@@ -3084,6 +3455,8 @@ uint64 sys_pselect6(void) {
         if (rfds) kvfree(rfds);
         if (wfds) kvfree(wfds);
         if (efds) kvfree(efds);
+        if (use_mask)
+            sigmask_swap(&oldmask, NULL);
         return -ENOMEM;
     }
 
@@ -3188,6 +3561,8 @@ uint64 sys_pselect6(void) {
     if (rfds) kvfree(rfds);
     if (wfds) kvfree(wfds);
     if (efds) kvfree(efds);
+    if (use_mask)
+        sigmask_swap(&oldmask, NULL);
 
     return ready;
 }
@@ -3313,6 +3688,22 @@ uint64 sys_vfs_openat(void) {
         vfs_fdtable_set_fdflags(current->fdtable, n, FD_CLOEXEC);
     }
     spin_unlock(&current->fdtable->lock);
+
+    if (n >= 0 && webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
+        const char *fs_name = "(none)";
+        struct vfs_inode *opened_inode = vfs_inode_deref(&f->inode);
+        if (opened_inode != NULL && opened_inode->sb != NULL &&
+            opened_inode->sb->fs_type != NULL &&
+            opened_inode->sb->fs_type->name != NULL)
+            fs_name = opened_inode->sb->fs_type->name;
+        printf("webkit-vfs: openat pid=%d name=%s fd=%d dirfd=%d path=%s "
+               "flags=0x%x mode=0x%x ino=%lu fs=%s size=%lld\n",
+               current->pid, current->name, n, dirfd, path, omode,
+               opened_inode != NULL ? opened_inode->mode : 0,
+               opened_inode != NULL ? opened_inode->ino : 0, fs_name,
+               opened_inode != NULL ? opened_inode->size : 0);
+    }
+
     vfs_fput(f);
 
     if (n < 0)
@@ -4543,38 +4934,61 @@ uint64 sys_vfs_readlinkat(void) {
     argint(3, &bufsz);
     if (n < 0) {
         if (start_dir) vfs_iput(start_dir);
+        WEBKIT_READLINK_TRACE("readlinkat dirfd=%d path=<fault> ret=%d\n",
+                              dirfd, -EFAULT);
         SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_readlinkat_ticks);
     }
     if (bufsz <= 0) {
         if (start_dir) vfs_iput(start_dir);
+        WEBKIT_READLINK_TRACE("readlinkat dirfd=%d path=%s bufsz=%d ret=%d\n",
+                              dirfd, path, bufsz, -EINVAL);
         SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_readlinkat_ticks);
     }
 
     struct vfs_inode *parent = vfs_nameiparent_at(start_dir, path, n, name, MAXPATH);
     if (start_dir) vfs_iput(start_dir);
-    if (IS_ERR(parent))
-        SYSCALL_PROFILE_RETURN(PTR_ERR(parent), g_sys_readlinkat_ticks);
-    if (parent == NULL)
+    if (IS_ERR(parent)) {
+        int err = PTR_ERR(parent);
+        WEBKIT_READLINK_TRACE("readlinkat dirfd=%d path=%s parent ret=%d\n",
+                              dirfd, path, err);
+        SYSCALL_PROFILE_RETURN(err, g_sys_readlinkat_ticks);
+    }
+    if (parent == NULL) {
+        WEBKIT_READLINK_TRACE("readlinkat dirfd=%d path=%s parent ret=%d\n",
+                              dirfd, path, -ENOENT);
         SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_readlinkat_ticks);
+    }
 
     struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
     int ret = vfs_ilookup(parent, &dentry, name, strlen(name));
     if (ret != 0) {
         vfs_iput(parent);
+        WEBKIT_READLINK_TRACE(
+            "readlinkat dirfd=%d path=%s lookup name=%s ret=%d\n",
+            dirfd, path, name, ret);
         SYSCALL_PROFILE_RETURN(ret, g_sys_readlinkat_ticks);
     }
 
     struct vfs_inode *inode = vfs_get_dentry_inode(&dentry);
     vfs_release_dentry(&dentry);
     vfs_iput(parent);
-    if (IS_ERR(inode))
-        SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_readlinkat_ticks);
-    if (inode == NULL)
+    if (IS_ERR(inode)) {
+        int err = PTR_ERR(inode);
+        WEBKIT_READLINK_TRACE("readlinkat dirfd=%d path=%s inode ret=%d\n",
+                              dirfd, path, err);
+        SYSCALL_PROFILE_RETURN(err, g_sys_readlinkat_ticks);
+    }
+    if (inode == NULL) {
+        WEBKIT_READLINK_TRACE("readlinkat dirfd=%d path=%s inode ret=%d\n",
+                              dirfd, path, -ENOENT);
         SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_readlinkat_ticks);
+    }
 
     char *kbuf = kvmalloc(bufsz);
     if (kbuf == NULL) {
         vfs_iput(inode);
+        WEBKIT_READLINK_TRACE("readlinkat dirfd=%d path=%s bufsz=%d ret=%d\n",
+                              dirfd, path, bufsz, -ENOMEM);
         SYSCALL_PROFILE_RETURN(-ENOMEM, g_sys_readlinkat_ticks);
     }
 
@@ -4582,13 +4996,26 @@ uint64 sys_vfs_readlinkat(void) {
     vfs_iput(inode);
     if (len < 0) {
         kvfree(kbuf);
+        WEBKIT_READLINK_TRACE(
+            "readlinkat dirfd=%d path=%s bufsz=%d ret=%ld\n",
+            dirfd, path, bufsz, (long)len);
         SYSCALL_PROFILE_RETURN(len, g_sys_readlinkat_ticks);
     }
 
     if (either_copyout(1, buf_addr, kbuf, len) < 0) {
         kvfree(kbuf);
+        WEBKIT_READLINK_TRACE(
+            "readlinkat dirfd=%d path=%s len=%ld ret=%d\n",
+            dirfd, path, (long)len, -EFAULT);
         SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_readlinkat_ticks);
     }
+    if (len >= 0 && len < bufsz)
+        kbuf[len] = '\0';
+    else if (bufsz > 0)
+        kbuf[bufsz - 1] = '\0';
+    WEBKIT_READLINK_TRACE(
+        "readlinkat dirfd=%d path=%s len=%ld target=%s\n",
+        dirfd, path, (long)len, kbuf);
     kvfree(kbuf);
     SYSCALL_PROFILE_RETURN(len, g_sys_readlinkat_ticks);
 }
@@ -5343,6 +5770,11 @@ uint64 sys_memfd_create(void) {
 
     if (IS_ERR(file))
         return (uint64)PTR_ERR(file);
+
+    file->f_is_memfd = true;
+    file->f_allow_sealing = (flags & MFD_ALLOW_SEALING) != 0;
+    if (!file->f_allow_sealing)
+        file->f_seals = F_SEAL_SEAL;
 
     /* Install the open file into the fd table. */
     spin_lock(&current->fdtable->lock);

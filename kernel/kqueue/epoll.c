@@ -40,6 +40,7 @@
 #include "kqueue_types.h"
 #include <mm/vm.h>
 #include "signal.h"
+#include "cmdline.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -107,6 +108,37 @@ _Static_assert(sizeof(struct k_epoll_event) == 16,
 
 /* Max events per epoll_pwait / epoll_ctl */
 #define EPOLL_MAX_EVENTS 256
+#define EPOLL_TIMEOUT_MAX_MS 0x7fffffff
+
+#define NSEC_PER_SEC  1000000000ULL
+#define NSEC_PER_MSEC 1000000ULL
+
+struct epoll_timespec {
+    int64 tv_sec;
+    int64 tv_nsec;
+};
+
+static int webkit_epoll_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_epoll_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int webkit_epoll_trace_process(void)
+{
+    return current != NULL &&
+        (strncmp(current->name, "MiniBrowser", 11) == 0 ||
+         strncmp(current->name, "WebKit", 6) == 0);
+}
 
 /* ========================================================================== */
 /* Helper: resolve epfd → kqueue *                                            */
@@ -160,6 +192,17 @@ uint64 sys_epoll_create1(void)
     }
 
     return (uint64)fd;
+}
+
+uint64 sys_epoll_create(void)
+{
+    int size;
+    argint(0, &size);
+
+    if (size <= 0)
+        return (uint64)-EINVAL;
+
+    return (uint64)kqueue_create();
 }
 
 /* ========================================================================== */
@@ -328,17 +371,37 @@ uint64 sys_epoll_ctl(void)
  *
  * timeout: -1 = block, 0 = poll, >0 = milliseconds.
  */
-uint64 sys_epoll_pwait(void)
+static int epoll_timespec_to_timeout_ms(uint64 timeout_addr, int *timeout_ms)
 {
-    int epfd, maxevents, timeout;
-    uint64 uevents, usigmask;
+    if (timeout_addr == 0) {
+        *timeout_ms = -1;
+        return 0;
+    }
 
-    argint(0, &epfd);
-    argaddr(1, &uevents);
-    argint(2, &maxevents);
-    argint(3, &timeout);
-    argaddr(4, &usigmask);
+    struct epoll_timespec ts;
+    if (vm_copyin(current->vm, &ts, timeout_addr, sizeof(ts)) < 0)
+        return -EFAULT;
+    if (ts.tv_sec < 0 || ts.tv_nsec < 0 ||
+        ts.tv_nsec >= (int64)NSEC_PER_SEC)
+        return -EINVAL;
 
+    uint64 sec = (uint64)ts.tv_sec;
+    uint64 ms = sec > (uint64)EPOLL_TIMEOUT_MAX_MS / 1000ULL
+        ? (uint64)EPOLL_TIMEOUT_MAX_MS
+        : sec * 1000ULL;
+    uint64 extra = ((uint64)ts.tv_nsec + NSEC_PER_MSEC - 1) / NSEC_PER_MSEC;
+    if (ms > (uint64)EPOLL_TIMEOUT_MAX_MS - extra)
+        ms = (uint64)EPOLL_TIMEOUT_MAX_MS;
+    else
+        ms += extra;
+
+    *timeout_ms = (int)ms;
+    return 0;
+}
+
+static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
+                                 int timeout, uint64 usigmask)
+{
     if (maxevents <= 0 || maxevents > EPOLL_MAX_EVENTS)
         return (uint64)-EINVAL;
 
@@ -347,23 +410,32 @@ uint64 sys_epoll_pwait(void)
     if (kq == NULL)
         return (uint64)-EBADF;
 
-    /*
-     * Signal mask: temporarily replace the signal mask if provided.
-     * TODO: Full sigprocmask save/restore.  For now, ignore sigmask
-     * (matches common usage where sigmask is NULL).
-     */
-    (void)usigmask;
+    sigset_t newmask, oldmask;
+    int use_mask = 0;
+    if (usigmask != 0) {
+        if (vm_copyin(current->vm, &newmask, usigmask,
+                      sizeof(newmask)) < 0) {
+            vfs_fput(fp);
+            return (uint64)-EFAULT;
+        }
+        sigmask_swap(&newmask, &oldmask);
+        use_mask = 1;
+    }
 
-    /* Allocate kernel buffer for kevent results.
-     * Request up to 2x maxevents since each epoll fd can produce
-     * two kevents (read + write), but we cap at maxevents output. */
-    int kev_max = maxevents * 2;
-    if (kev_max > EPOLL_MAX_EVENTS)
-        kev_max = EPOLL_MAX_EVENTS;
+    /*
+     * Allocate a full internal kevent batch even when userspace asks for a
+     * small epoll result set.  A single epoll fd can produce separate read and
+     * write knotes, and connected TCP sockets are commonly write-ready all the
+     * time.  Looking at only 2 * maxevents lets writable filters crowd out
+     * readable filters before the Linux-style coalescing below can merge them.
+     */
+    int kev_max = EPOLL_MAX_EVENTS;
 
     size_t kev_bytes = (size_t)kev_max * sizeof(struct kevent);
     struct kevent *kevents = kvmalloc(kev_bytes);
     if (kevents == NULL) {
+        if (use_mask)
+            sigmask_swap(&oldmask, NULL);
         vfs_fput(fp);
         return (uint64)-ENOMEM;
     }
@@ -401,6 +473,8 @@ uint64 sys_epoll_pwait(void)
 
     if (nkev < 0) {
         kvfree(kevents);
+        if (use_mask)
+            sigmask_swap(&oldmask, NULL);
         vfs_fput(fp);
         return (uint64)nkev;
     }
@@ -417,6 +491,8 @@ uint64 sys_epoll_pwait(void)
         kvmalloc((size_t)maxevents * sizeof(struct k_epoll_event));
     if (out_events == NULL) {
         kvfree(kevents);
+        if (use_mask)
+            sigmask_swap(&oldmask, NULL);
         vfs_fput(fp);
         return (uint64)-ENOMEM;
     }
@@ -424,6 +500,8 @@ uint64 sys_epoll_pwait(void)
     if (out_ident == NULL) {
         kvfree(out_events);
         kvfree(kevents);
+        if (use_mask)
+            sigmask_swap(&oldmask, NULL);
         vfs_fput(fp);
         return (uint64)-ENOMEM;
     }
@@ -445,8 +523,11 @@ uint64 sys_epoll_pwait(void)
         }
 
         /* Map kqueue flags → epoll events */
-        if (kevents[i].flags & EV_EOF)
+        if (kevents[i].flags & EV_EOF) {
             mapped |= EPOLLHUP;
+            if (kevents[i].filter == EVFILT_READ)
+                mapped |= EPOLLRDHUP;
+        }
         if (kevents[i].flags & EV_ERROR)
             mapped |= EPOLLERR;
 
@@ -477,14 +558,90 @@ uint64 sys_epoll_pwait(void)
             kvfree(out_ident);
             kvfree(out_events);
             kvfree(kevents);
+            if (use_mask)
+                sigmask_swap(&oldmask, NULL);
             vfs_fput(fp);
             return (uint64)-EFAULT;
+        }
+    }
+
+    if (webkit_epoll_trace_enabled() && webkit_epoll_trace_process()) {
+        static _Atomic uint64 seq;
+        uint64 n = __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED);
+
+        if (n <= 64 || (n & 0x1ff) == 0) {
+            uint32 mask_or = 0;
+            int in_count = 0;
+            int out_count = 0;
+            int err_count = 0;
+
+            for (int i = 0; i < nout; i++) {
+                mask_or |= out_events[i].events;
+                if (out_events[i].events & (EPOLLIN | EPOLLRDNORM))
+                    in_count++;
+                if (out_events[i].events & (EPOLLOUT | EPOLLWRNORM))
+                    out_count++;
+                if (out_events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))
+                    err_count++;
+            }
+            printf("webkit-epoll: seq=%lu pid=%d name=%s epfd=%d "
+                   "timeout=%d nkev=%d nout=%d mask=0x%x in=%d out=%d "
+                   "err=%d\n",
+                   n, current->pid, current->name, epfd, timeout, nkev, nout,
+                   mask_or, in_count, out_count, err_count);
         }
     }
 
     kvfree(out_ident);
     kvfree(out_events);
     kvfree(kevents);
+    if (use_mask)
+        sigmask_swap(&oldmask, NULL);
     vfs_fput(fp);
     return (uint64)nout;
+}
+
+uint64 sys_epoll_pwait(void)
+{
+    int epfd, maxevents, timeout;
+    uint64 uevents, usigmask;
+
+    argint(0, &epfd);
+    argaddr(1, &uevents);
+    argint(2, &maxevents);
+    argint(3, &timeout);
+    argaddr(4, &usigmask);
+
+    return epoll_pwait_common(epfd, uevents, maxevents, timeout, usigmask);
+}
+
+uint64 sys_epoll_wait(void)
+{
+    int epfd, maxevents, timeout;
+    uint64 uevents;
+
+    argint(0, &epfd);
+    argaddr(1, &uevents);
+    argint(2, &maxevents);
+    argint(3, &timeout);
+
+    return epoll_pwait_common(epfd, uevents, maxevents, timeout, 0);
+}
+
+uint64 sys_epoll_pwait2(void)
+{
+    int epfd, maxevents, timeout;
+    uint64 uevents, timeout_addr, usigmask;
+
+    argint(0, &epfd);
+    argaddr(1, &uevents);
+    argint(2, &maxevents);
+    argaddr(3, &timeout_addr);
+    argaddr(4, &usigmask);
+
+    int ret = epoll_timespec_to_timeout_ms(timeout_addr, &timeout);
+    if (ret < 0)
+        return (uint64)ret;
+
+    return epoll_pwait_common(epfd, uevents, maxevents, timeout, usigmask);
 }

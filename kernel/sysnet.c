@@ -20,6 +20,7 @@
 #include "signal.h"
 #include "proc/sched.h"
 #include "errno.h"
+#include "vfs/poll.h"
 
 struct sock {
     struct sock *next; // the next socket in the list
@@ -130,14 +131,15 @@ int sockpoll(struct sock *si, short events) {
     short revents = 0;
 
     spin_lock(&si->lock);
-    if ((events & (0x0001 | 0x0040)) && !mbufq_empty(&si->rxq)) {
-        revents |= (events & (0x0001 | 0x0040)); /* POLLIN | POLLRDNORM */
+    if ((events & (POLLIN | POLLRDNORM | POLLRDBAND)) &&
+        !mbufq_empty(&si->rxq)) {
+        revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
     }
     spin_unlock(&si->lock);
 
     /* UDP write is always possible (fire and forget) */
-    if (events & (0x0004 | 0x0100)) {
-        revents |= (events & (0x0004 | 0x0100)); /* POLLOUT | POLLWRNORM */
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
+        revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
     }
 
     return revents;

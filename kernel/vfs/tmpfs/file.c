@@ -943,8 +943,27 @@ static void *__tmpfs_file_fault(struct vfs_file *file, struct vma *vma,
         return pa;
     }
 
-    /* ---- embedded data path (small files inline in the inode) ---- */
+    /*
+     * ---- embedded data path (small files inline in the inode) ----
+     *
+     * MAP_PRIVATE may fault a private anonymous copy of the inline bytes.
+     * MAP_SHARED must not: different processes mapping the same tmpfs/memfd
+     * object need to see the same physical page, and shared futexes key off
+     * that page identity.  Promote embedded regular files to the per-inode
+     * pcache before serving shared faults so all mappings converge on the
+     * same backing folio.
+     */
     if (ti->embedded) {
+        if (vma->flags & VMA_FLAG_SHARED) {
+            int ret = __tmpfs_migrate_to_allocated_blocks(ti);
+            if (ret != 0) {
+                vfs_iunlock(inode);
+                return NULL;
+            }
+            pc = &inode->i_data;
+            goto pcache_fault;
+        }
+
         uint64 bytes_to_read = PGSIZE;
         if (file_off + PGSIZE > (uint64)inode->size)
             bytes_to_read = (uint64)inode->size - file_off;
@@ -968,6 +987,7 @@ static void *__tmpfs_file_fault(struct vfs_file *file, struct vma *vma,
         return pa;
     }
 
+pcache_fault:
     /* ---- pcache path: zero-copy ---- */
     if (!pc->active) {
         vfs_iunlock(inode);

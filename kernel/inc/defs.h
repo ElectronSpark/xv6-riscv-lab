@@ -73,6 +73,7 @@ int exec(char *, char **, char **);
 typedef struct vm vm_t;
 void futex_init(void);
 int futex_wake_addr(vm_t *vm, uint64 uaddr, int val);
+void futex_exit_robust_list(struct thread *p);
 
 // timerfd.c
 void timerfd_init(void);
@@ -214,13 +215,20 @@ int virtio_gpu_has_virgl(void);
 void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
                                 uint32 x, uint32 y, uint32 w, uint32 h);
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
-                                   const char *name, uint32 *ctx_id);
+                                   uint32 capset_id, const char *name,
+                                   uint32 *ctx_id);
 int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
                                     uint32 ctx_id);
 int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 flags, const uint32 *cmds,
                            uint32 nr_dwords, uint64 *fence, uint64 *signaled);
 int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled);
+int virtio_gpu_user_capset_ids(uint64 *ids);
+int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
+                                 uint32 requested_capset_version,
+                                 void *buf, uint32 buf_size,
+                                 uint32 *capset_id, uint32 *capset_version,
+                                 uint32 *capset_size);
 int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
                              uint32 *capset_version, uint32 *capset_size);
 int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,

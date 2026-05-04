@@ -413,7 +413,16 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
     (*gregs)[UREG_ERR]     = tf->err;
     (*gregs)[UREG_TRAPNO]  = tf->trapno;
     (*gregs)[UREG_OLDMASK] = 0;
-    (*gregs)[UREG_CR2]     = 0;
+    /*
+     * Linux exposes the faulting linear address in both siginfo.si_addr and
+     * mcontext.gregs[REG_CR2] for synchronous SIGSEGV/SIGBUS delivery.  Some
+     * runtimes inspect the ucontext directly when implementing guarded-memory
+     * or JIT fault handlers, so preserve the address instead of zeroing it.
+     */
+    if (info != NULL && (signo == SIGSEGV || signo == SIGBUS))
+        (*gregs)[UREG_CR2] = (uint64)info->info.si_addr;
+    else
+        (*gregs)[UREG_CR2] = 0;
 
     /* ── Signal mask: kernel sigset_t (8 bytes) → user sigset_t (128 bytes) ── */
     uc.uc_sigmask.__bits[0] = p->signal.sig_mask;

@@ -41,7 +41,10 @@ static ssize_t sysfs_reg_read(struct vfs_file *file, char *buf, size_t count,
         memmove(buf, data + pos, chunk);
     }
 
-    file->f_pos += chunk;
+    /*
+     * vfs_fileread() owns regular-file offset advancement. Advancing here too
+     * would make sysfs attribute reads skip bytes.
+     */
     return (ssize_t)chunk;
 }
 

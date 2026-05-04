@@ -118,14 +118,13 @@ uint64 sys_msync(void) {
 
 // mincore(addr, length, vec)
 uint64 sys_mincore(void) {
-    uint64 addr, vec_uaddr;
-    int length;
+    uint64 addr, vec_uaddr, length;
 
     argaddr(0, &addr);
-    argint(1, &length);
+    argaddr(1, &length);
     argaddr(2, &vec_uaddr);
 
-    if (length <= 0)
+    if (length == 0)
         return -EINVAL;
 
     size_t sz = (size_t)length;
@@ -155,14 +154,14 @@ uint64 sys_mincore(void) {
 
 // madvise(addr, length, advice)
 uint64 sys_madvise(void) {
-    uint64 addr;
-    int length, advice;
+    uint64 addr, length;
+    int advice;
 
     argaddr(0, &addr);
-    argint(1, &length);
+    argaddr(1, &length);
     argint(2, &advice);
 
-    if (length <= 0)
+    if (length == 0)
         return -EINVAL;
 
     return (uint64)vm_madvise(current->vm, addr, (size_t)length, advice);

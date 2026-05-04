@@ -20,6 +20,7 @@
 #include "proc/pgroup.h"
 #include "tty/session.h"
 #include "timer/goldfish_rtc.h"
+#include "list.h"
 
 #define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
     uint64 __sys_start = r_time();                                          \
@@ -50,6 +51,125 @@ struct __k_utsname {
     char version[65];
     char machine[65];
 };
+
+#define CLOCK_REALTIME           0
+#define CLOCK_MONOTONIC          1
+#define CLOCK_PROCESS_CPUTIME_ID 2
+#define CLOCK_THREAD_CPUTIME_ID  3
+#define CLOCK_MONOTONIC_RAW      4
+#define CLOCK_REALTIME_COARSE    5
+#define CLOCK_MONOTONIC_COARSE   6
+#define CLOCK_BOOTTIME           7
+#define CLOCK_REALTIME_ALARM     8
+#define CLOCK_BOOTTIME_ALARM     9
+#define CLOCK_SGI_CYCLE         10
+#define CLOCK_TAI               11
+
+#define TIMER_ABSTIME 1
+
+/* Defined in kernel/daemons/sntpd.c — NTP−RTC offset in nanoseconds */
+extern volatile int64 sntp_offset_ns;
+extern volatile int   sntp_synced;
+
+static uint64 raw_ticks_to_ns(uint64 ticks)
+{
+    uint64 freq = __timebase_frequency;
+    if (freq == 0)
+        return ticks;
+    return (ticks / freq) * NS_PER_SEC +
+           ((ticks % freq) * NS_PER_SEC) / freq;
+}
+
+static uint64 sched_entity_runtime_ticks(struct sched_entity *se)
+{
+    if (se == NULL)
+        return 0;
+
+    uint64 runtime = __atomic_load_n(&se->sum_exec_runtime,
+                                     __ATOMIC_RELAXED);
+    if (__atomic_load_n(&se->on_cpu, __ATOMIC_ACQUIRE)) {
+        uint64 start = __atomic_load_n(&se->exec_start, __ATOMIC_RELAXED);
+        uint64 now = r_time();
+        if (now > start)
+            runtime += now - start;
+    }
+    return runtime;
+}
+
+static uint64 thread_group_runtime_ticks(struct thread_group *tg)
+{
+    if (tg == NULL)
+        return 0;
+
+    uint64 runtime = 0;
+    pid_rlock();
+    struct thread *t;
+    struct thread *tmp;
+    list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
+        runtime += sched_entity_runtime_ticks(t->sched_entity);
+    }
+    pid_runlock();
+    return runtime;
+}
+
+static void ns_to_timespec(uint64 ns, struct __k_timespec *ts)
+{
+    ts->tv_sec = (int64)(ns / NS_PER_SEC);
+    ts->tv_nsec = (int64)(ns % NS_PER_SEC);
+}
+
+static int timespec_to_ns(const struct __k_timespec *ts, uint64 *ns)
+{
+    if (ts->tv_sec < 0 || ts->tv_nsec < 0 || ts->tv_nsec >= NS_PER_SEC)
+        return -EINVAL;
+    if ((uint64)ts->tv_sec > UINT64_MAX / NS_PER_SEC)
+        return -EINVAL;
+    uint64 base = (uint64)ts->tv_sec * NS_PER_SEC;
+    if (base > UINT64_MAX - (uint64)ts->tv_nsec)
+        return -EINVAL;
+    *ns = base + (uint64)ts->tv_nsec;
+    return 0;
+}
+
+static int clock_get_ns(int clockid, uint64 *ns)
+{
+    switch (clockid) {
+    case CLOCK_REALTIME:
+    case CLOCK_REALTIME_COARSE:
+    case CLOCK_REALTIME_ALARM:
+    case CLOCK_TAI: {
+        uint64 rtc = goldfish_rtc_read_ns();
+        *ns = sntp_synced ? (uint64)((int64)rtc + sntp_offset_ns) : rtc;
+        return 0;
+    }
+    case CLOCK_MONOTONIC:
+    case CLOCK_MONOTONIC_RAW:
+    case CLOCK_MONOTONIC_COARSE:
+    case CLOCK_BOOTTIME:
+    case CLOCK_BOOTTIME_ALARM:
+        *ns = raw_ticks_to_ns(r_time());
+        return 0;
+    case CLOCK_PROCESS_CPUTIME_ID:
+        *ns = raw_ticks_to_ns(thread_group_runtime_ticks(current->thread_group));
+        return 0;
+    case CLOCK_THREAD_CPUTIME_ID:
+        *ns = raw_ticks_to_ns(
+            sched_entity_runtime_ticks(current->sched_entity));
+        return 0;
+    default:
+        return -EINVAL;
+    }
+}
+
+static bool clock_can_sleep(int clockid)
+{
+    return clockid == CLOCK_REALTIME ||
+           clockid == CLOCK_MONOTONIC ||
+           clockid == CLOCK_BOOTTIME ||
+           clockid == CLOCK_REALTIME_ALARM ||
+           clockid == CLOCK_BOOTTIME_ALARM ||
+           clockid == CLOCK_TAI;
+}
 
 static int trace_browser_exit(int status) {
     if (status == 0)
@@ -543,6 +663,63 @@ uint64 sys_nanosleep(void) {
     return 0;
 }
 
+uint64 sys_clock_nanosleep(void) {
+    int clockid, flags;
+    uint64 req_addr, rem_addr;
+    argint(0, &clockid);
+    argint(1, &flags);
+    argaddr(2, &req_addr);
+    argaddr(3, &rem_addr);
+
+    if (req_addr == 0)
+        return -EINVAL;
+    if (flags & ~TIMER_ABSTIME)
+        return -EINVAL;
+    if (!clock_can_sleep(clockid))
+        return -EINVAL;
+
+    struct __k_timespec req = {0};
+    if (either_copyin(&req, 1, req_addr, sizeof(req)) < 0)
+        return -EFAULT;
+
+    uint64 target_ns;
+    int ret = timespec_to_ns(&req, &target_ns);
+    if (ret != 0)
+        return ret;
+
+    uint64 sleep_ns = target_ns;
+    if (flags & TIMER_ABSTIME) {
+        uint64 now_ns;
+        ret = clock_get_ns(clockid, &now_ns);
+        if (ret != 0)
+            return ret;
+        if (target_ns <= now_ns)
+            return 0;
+        sleep_ns = target_ns - now_ns;
+    }
+
+    uint64 ms = (sleep_ns + NS_PER_MS - 1) / NS_PER_MS;
+    if (sleep_ns > 0 && ms == 0)
+        ms = 1;
+
+    uint64 remaining_ms = sleep_ms_interruptible(ms);
+    if (remaining_ms > 0 && signal_pending(current)) {
+        if (!(flags & TIMER_ABSTIME) && rem_addr != 0) {
+            struct __k_timespec rem;
+            ns_to_timespec(remaining_ms * NS_PER_MS, &rem);
+            either_copyout(1, rem_addr, &rem, sizeof(rem));
+        }
+        return -EINTR;
+    }
+
+    if (!(flags & TIMER_ABSTIME) && rem_addr != 0) {
+        struct __k_timespec rem = {0};
+        if (either_copyout(1, rem_addr, &rem, sizeof(rem)) < 0)
+            return -EFAULT;
+    }
+    return 0;
+}
+
 uint64 sys_uname(void) {
     uint64 addr;
     argaddr(0, &addr);
@@ -703,33 +880,13 @@ uint64 sys_clock_gettime(void) {
     if (tp_addr == 0)
         SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_clock_gettime_ticks);
 
-    struct __k_timespec ts = {0};
+    uint64 ns;
+    int ret = clock_get_ns(clockid, &ns);
+    if (ret != 0)
+        SYSCALL_PROFILE_RETURN(ret, g_sys_clock_gettime_ticks);
 
-    switch (clockid) {
-    case 0: // CLOCK_REALTIME
-    case 5: // CLOCK_REALTIME_COARSE
-    {
-        uint64 ns = goldfish_rtc_read_ns();
-        ts.tv_sec = ns / 1000000000ULL;
-        ts.tv_nsec = ns % 1000000000ULL;
-        break;
-    }
-    case 1: // CLOCK_MONOTONIC
-    case 4: // CLOCK_MONOTONIC_RAW
-    case 6: // CLOCK_MONOTONIC_COARSE
-    {
-        /* Use the calibrated TSC frequency (__timebase_frequency) for
-         * nanosecond precision, instead of jiffies which only have
-         * millisecond granularity. */
-        uint64 ticks = r_time();
-        uint64 freq  = __timebase_frequency;
-        ts.tv_sec  = ticks / freq;
-        ts.tv_nsec = (ticks % freq) * 1000000000ULL / freq;
-        break;
-    }
-    default:
-        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_clock_gettime_ticks);
-    }
+    struct __k_timespec ts = {0};
+    ns_to_timespec(ns, &ts);
 
     if (either_copyout(1, tp_addr, &ts, sizeof(ts)) < 0)
         SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_clock_gettime_ticks);
@@ -746,11 +903,25 @@ uint64 sys_clock_getres(void) {
     argint(0, &clockid);
     argaddr(1, &res_addr);
 
-    if (clockid != 0 && clockid != 1 && clockid != 4 && clockid != 5 && clockid != 6)
+    switch (clockid) {
+    case CLOCK_REALTIME:
+    case CLOCK_MONOTONIC:
+    case CLOCK_PROCESS_CPUTIME_ID:
+    case CLOCK_THREAD_CPUTIME_ID:
+    case CLOCK_MONOTONIC_RAW:
+    case CLOCK_REALTIME_COARSE:
+    case CLOCK_MONOTONIC_COARSE:
+    case CLOCK_BOOTTIME:
+    case CLOCK_REALTIME_ALARM:
+    case CLOCK_BOOTTIME_ALARM:
+    case CLOCK_TAI:
+        break;
+    default:
         return -EINVAL;
+    }
 
     if (res_addr != 0) {
-        struct __k_timespec res = {.tv_sec = 0, .tv_nsec = 1000}; // 1µs
+        struct __k_timespec res = {.tv_sec = 0, .tv_nsec = 1000};
         if (either_copyout(1, res_addr, &res, sizeof(res)) < 0)
             return -EFAULT;
     }

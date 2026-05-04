@@ -92,6 +92,7 @@ char *crash_log_generate(void);
 
 int sigaction(int signum, struct sigaction *act, struct sigaction *oldact);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+int sigmask_swap(const sigset_t *set, sigset_t *oldset);
 int sigpending(struct thread *p, sigset_t *set);
 int sigreturn(void);
 

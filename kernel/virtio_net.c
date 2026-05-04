@@ -91,8 +91,14 @@ static struct vnet_state {
     int feat_guest_csum;  /* device tells us when its checksum is good on RX */
     int feat_tso4;        /* host can do TSOv4 from us */
     int feat_tso6;
+    int feat_mrg_rxbuf;
     int feat_mac;
     int feat_status;
+    uint64 rx_bad_hdr;
+    uint64 rx_bad_len;
+    uint64 rx_need_csum;
+    uint64 rx_gso;
+    uint64 rx_merged;
 } vnet;
 
 static struct netdev vnet_ndev;
@@ -312,9 +318,54 @@ static void vnet_drain_rx(void)
             continue;
 
         if (total_len < VIRTIO_NET_HDR_LEN) {
+            vnet.rx_bad_len++;
+            if (vnet.rx_bad_len <= 8 || (vnet.rx_bad_len % 256) == 0)
+                printf("virtio-net: drop short rx len=%u total=%lu\n",
+                       total_len, vnet.rx_bad_len);
             mbuffree(m);
             continue;
         }
+
+        struct virtio_net_hdr *hdr = (struct virtio_net_hdr *)m->buf;
+        if (hdr->gso_type != VIRTIO_NET_HDR_GSO_NONE) {
+            vnet.rx_gso++;
+            if (vnet.rx_gso <= 8 || (vnet.rx_gso % 256) == 0)
+                printf("virtio-net: drop rx gso type=%u hdr_len=%u "
+                       "gso_size=%u total=%lu\n",
+                       hdr->gso_type, hdr->hdr_len, hdr->gso_size,
+                       vnet.rx_gso);
+            mbuffree(m);
+            continue;
+        }
+        if (hdr->flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) {
+            vnet.rx_need_csum++;
+            if (vnet.rx_need_csum <= 8 || (vnet.rx_need_csum % 256) == 0)
+                printf("virtio-net: drop rx needs-csum start=%u off=%u "
+                       "total=%lu\n",
+                       hdr->csum_start, hdr->csum_offset,
+                       vnet.rx_need_csum);
+            mbuffree(m);
+            continue;
+        }
+        if (vnet.feat_mrg_rxbuf && hdr->num_buffers != 0 &&
+            hdr->num_buffers != 1) {
+            vnet.rx_merged++;
+            if (vnet.rx_merged <= 8 || (vnet.rx_merged % 256) == 0)
+                printf("virtio-net: drop merged rx buffers=%u len=%u "
+                       "total=%lu\n",
+                       hdr->num_buffers, total_len, vnet.rx_merged);
+            mbuffree(m);
+            continue;
+        }
+        if (total_len > MBUF_SIZE) {
+            vnet.rx_bad_len++;
+            if (vnet.rx_bad_len <= 8 || (vnet.rx_bad_len % 256) == 0)
+                printf("virtio-net: drop oversized rx len=%u total=%lu\n",
+                       total_len, vnet.rx_bad_len);
+            mbuffree(m);
+            continue;
+        }
+
         m->head = m->buf + VIRTIO_NET_HDR_LEN;
         m->len  = total_len - VIRTIO_NET_HDR_LEN;
 
@@ -532,6 +583,7 @@ static void vnet_init_pci(struct virtio_pci_discovery *vd)
     vnet.feat_guest_csum = !!(feat0 & (1u << VIRTIO_NET_F_GUEST_CSUM));
     vnet.feat_tso4       = !!(feat0 & (1u << VIRTIO_NET_F_HOST_TSO4));
     vnet.feat_tso6       = !!(feat0 & (1u << VIRTIO_NET_F_HOST_TSO6));
+    vnet.feat_mrg_rxbuf  = !!(feat0 & (1u << VIRTIO_NET_F_MRG_RXBUF));
     int feat_version_1   = !!(feat1 & (1u << (VIRTIO_F_VERSION_1 - 32)));
 
     /* MVP feature negotiation: only MAC + STATUS + VERSION_1.
@@ -556,6 +608,7 @@ static void vnet_init_pci(struct virtio_pci_discovery *vd)
     uint32 ack0 = 0;
     if (vnet.feat_mac)    ack0 |= (1u << VIRTIO_NET_F_MAC);
     if (vnet.feat_status) ack0 |= (1u << VIRTIO_NET_F_STATUS);
+    if (vnet.feat_mrg_rxbuf) ack0 |= (1u << VIRTIO_NET_F_MRG_RXBUF);
     uint32 ack1 = 0;
     if (feat_version_1)   ack1 |= (1u << (VIRTIO_F_VERSION_1 - 32));
 
@@ -620,11 +673,12 @@ static void vnet_init_pci(struct virtio_pci_discovery *vd)
     vnet_ndev.priv = &vnet;
     netdev_register(&vnet_ndev);
 
-    printf("virtio-net: ready, MAC %x:%x:%x:%x:%x:%x irq=%d feats: csum=%d gcsum=%d tso4=%d tso6=%d ver1=%d\n",
+    printf("virtio-net: ready, MAC %x:%x:%x:%x:%x:%x irq=%d feats: csum=%d gcsum=%d tso4=%d tso6=%d mrg=%d ver1=%d\n",
            vnet.mac[0], vnet.mac[1], vnet.mac[2],
            vnet.mac[3], vnet.mac[4], vnet.mac[5], vd->irq_line,
            vnet.feat_csum, vnet.feat_guest_csum,
-           vnet.feat_tso4, vnet.feat_tso6, feat_version_1);
+           vnet.feat_tso4, vnet.feat_tso6, vnet.feat_mrg_rxbuf,
+           feat_version_1);
 }
 
 void virtio_net_init(void)

@@ -424,20 +424,23 @@ static int __pipe_file_poll(struct vfs_file *file, short events) {
     size_t readable = (size_t)(nwrite - nread);
     size_t writable = PIPESIZE - readable;
 
-    if (events & (POLLIN | POLLRDNORM)) {
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP)) {
         if (readable > 0 || !PIPE_WRITABLE(pi))
-            revents |= (events & (POLLIN | POLLRDNORM));
+            revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
     }
 
-    if (events & (POLLOUT | POLLWRNORM)) {
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
         if (writable > 0 && PIPE_READABLE(pi))
-            revents |= (events & (POLLOUT | POLLWRNORM));
+            revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
     }
 
     if (!PIPE_READABLE(pi))
         revents |= POLLERR;
-    if (!PIPE_WRITABLE(pi))
+    if (!PIPE_WRITABLE(pi)) {
         revents |= POLLHUP;
+        if (events & POLLRDHUP)
+            revents |= POLLRDHUP;
+    }
 
     return revents;
 }

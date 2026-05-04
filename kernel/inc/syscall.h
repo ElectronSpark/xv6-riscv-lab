@@ -242,6 +242,7 @@
 #define SYS_clock_settime   935
 #define SYS_fdatasync       915
 #define SYS_fsync           908
+#define SYS_get_robust_list 907
 #define SYS_set_robust_list 866
 #define SYS_sigaltstack     856
 #define SYS_prctl           950
@@ -296,6 +297,41 @@
 #define SYS_timerfd_create  983
 #define SYS_timerfd_settime 982
 #define SYS_timerfd_gettime 981
+
+// --- clock_nanosleep (match musl-xv6 syscall.h.in number) ---
+#define SYS_clock_nanosleep 956
+
+// --- Linux-native x86_64 time syscall ---
+#define SYS_clock_nanosleep_x86 230
+
+// --- Linux-native x86_64 event/futex syscalls ---
+// Some third-party libraries use Linux UAPI numbers directly instead of the
+// musl-xv6 high-number aliases.  Keep these as aliases to the real xv6
+// implementations so WebKit/GLib event loops do not silently lose kernel
+// services when code bypasses libc wrappers.
+#define SYS_futex_x86              202
+#define SYS_epoll_create_x86       213
+#define SYS_epoll_wait_x86         232
+#define SYS_epoll_ctl_x86          233
+#define SYS_pselect6_x86           270
+#define SYS_ppoll_x86              271
+#define SYS_set_robust_list_x86    273
+#define SYS_get_robust_list_x86    274
+#define SYS_epoll_pwait_x86        281
+#define SYS_timerfd_create_x86     283
+#define SYS_timerfd_settime_x86    286
+#define SYS_timerfd_gettime_x86    287
+#define SYS_eventfd2_x86           290
+#define SYS_epoll_create1_x86      291
+
+// --- Linux generic time64/event aliases with non-conflicting numbers ---
+#define SYS_clock_nanosleep_time64 407
+#define SYS_timerfd_gettime64      410
+#define SYS_timerfd_settime64      411
+#define SYS_pselect6_time64_generic 413
+#define SYS_ppoll_time64           414
+#define SYS_futex_time64           422
+#define SYS_epoll_pwait2           441
 
 // --- File locking (match musl-xv6 syscall.h.in number) ---
 #define SYS_flock           912

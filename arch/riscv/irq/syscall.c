@@ -170,6 +170,7 @@ static const char *syscall_name(int num) {
     case 974: return "socketpair";
     case 908: return "fsync";
     case 915: return "fdatasync";
+    case 907: return "get_robust_list";
     case 866: return "set_robust_list";
     case 856: return "sigaltstack";
     case 950: return "prctl";
@@ -440,8 +441,11 @@ extern uint64 sys_kevent_wait(void);
 
 // epoll syscalls (wrappers over kqueue)
 extern uint64 sys_epoll_create1(void);
+extern uint64 sys_epoll_create(void);
 extern uint64 sys_epoll_ctl(void);
+extern uint64 sys_epoll_wait(void);
 extern uint64 sys_epoll_pwait(void);
+extern uint64 sys_epoll_pwait2(void);
 extern uint64 sys_eventfd2(void);
 
 // resource limits (accounting.c)
@@ -462,6 +466,7 @@ extern uint64 sys_getrusage(void);
 extern uint64 sys_getpriority(void);
 extern uint64 sys_setpriority(void);
 extern uint64 sys_set_robust_list(void);
+extern uint64 sys_get_robust_list(void);
 extern uint64 sys_clock_settime(void);
 extern uint64 sys_sched_rr_get_interval(void);
 extern uint64 sys_rt_sigqueueinfo(void);
@@ -675,10 +680,21 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_recvmmsg_time64] sys_ni_enosys,
 #endif
     [SYS_pselect6_time64] sys_pselect6,
+    [SYS_pselect6_time64_generic] sys_pselect6,
+    [SYS_ppoll_time64] sys_vfs_ppoll,
+    [SYS_futex_time64] sys_futex,
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
     [SYS_eventfd2] sys_eventfd2,
+    [SYS_timerfd_create] sys_timerfd_create,
+    [SYS_timerfd_settime] sys_timerfd_settime,
+    [SYS_timerfd_settime64] sys_timerfd_settime,
+    [SYS_timerfd_gettime] sys_timerfd_gettime,
+    [SYS_timerfd_gettime64] sys_timerfd_gettime,
+    [SYS_clock_nanosleep] sys_clock_nanosleep,
+    [SYS_clock_nanosleep_time64] sys_clock_nanosleep,
     [SYS_epoll_pwait] sys_epoll_pwait,
+    [SYS_epoll_pwait2] sys_epoll_pwait2,
     [SYS_epoll_ctl] sys_epoll_ctl,
     [SYS_epoll_create1] sys_epoll_create1,
     [SYS_umask] sys_umask,
@@ -709,6 +725,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_clock_settime] sys_clock_settime,
     [SYS_fdatasync] sys_vfs_fdatasync,
     [SYS_fsync] sys_vfs_fsync,
+    [SYS_get_robust_list] sys_get_robust_list,
     [SYS_set_robust_list] sys_set_robust_list,
     [SYS_sigaltstack] sys_sigaltstack,
     [SYS_prctl] sys_prctl,

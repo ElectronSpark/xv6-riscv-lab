@@ -529,6 +529,86 @@ static int fb_cmdline_enabled(const char *key)
            strcmp(buf, "on") == 0;
 }
 
+static int fb_gpu_trace_enabled(void)
+{
+    return fb_cmdline_enabled("webkit_gpu_trace");
+}
+
+static int fb_gpu_trace_process(void)
+{
+    return current != NULL &&
+        (strncmp(current->name, "MiniBrowser", 11) == 0 ||
+         strncmp(current->name, "WebKit", 6) == 0 ||
+         strncmp(current->name, "wlcomp", 6) == 0);
+}
+
+static const char *fb_gpu_ioctl_name(uint64 cmd)
+{
+    switch (cmd) {
+    case FBIOGET_VSCREENINFO: return "FBIOGET_VSCREENINFO";
+    case FBIOGET_FSCREENINFO: return "FBIOGET_FSCREENINFO";
+    case FBIOPUT_VSCREENINFO: return "FBIOPUT_VSCREENINFO";
+    case FB_GPU_GET_STATS: return "FB_GPU_GET_STATS";
+    case FB_GPU_BO_CREATE: return "FB_GPU_BO_CREATE";
+    case FB_GPU_BO_DESTROY: return "FB_GPU_BO_DESTROY";
+    case FB_GPU_BO_IMPORT: return "FB_GPU_BO_IMPORT";
+    case FB_GPU_BO_EXPORT_FD: return "FB_GPU_BO_EXPORT_FD";
+    case FB_GPU_BO_IMPORT_FD: return "FB_GPU_BO_IMPORT_FD";
+    case FB_GPU_BO_FENCE: return "FB_GPU_BO_FENCE";
+    case FB_GPU_FENCE_EXPORT_FD: return "FB_GPU_FENCE_EXPORT_FD";
+    case FB_GPU_FENCE_QUERY: return "FB_GPU_FENCE_QUERY";
+    case FB_GPU_VIRGL_CTX_CREATE: return "FB_GPU_VIRGL_CTX_CREATE";
+    case FB_GPU_VIRGL_CTX_DESTROY: return "FB_GPU_VIRGL_CTX_DESTROY";
+    case FB_GPU_VIRGL_SUBMIT: return "FB_GPU_VIRGL_SUBMIT";
+    case FB_GPU_VIRGL_FENCE: return "FB_GPU_VIRGL_FENCE";
+    case FB_GPU_VIRGL_FENCE_EXPORT_FD: return "FB_GPU_VIRGL_FENCE_EXPORT_FD";
+    case FB_GPU_VIRGL_FENCE_QUERY_FD: return "FB_GPU_VIRGL_FENCE_QUERY_FD";
+    case FB_GPU_VIRGL_GET_CAPS: return "FB_GPU_VIRGL_GET_CAPS";
+    case FB_GPU_VIRGL_RESOURCE_CREATE: return "FB_GPU_VIRGL_RESOURCE_CREATE";
+    case FB_GPU_VIRGL_RESOURCE_DESTROY: return "FB_GPU_VIRGL_RESOURCE_DESTROY";
+    case FB_GPU_VIRGL_RESOURCE_EXPORT_FD: return "FB_GPU_VIRGL_RESOURCE_EXPORT_FD";
+    case FB_GPU_VIRGL_TRANSFER_TO_HOST: return "FB_GPU_VIRGL_TRANSFER_TO_HOST";
+    case FB_GPU_VIRGL_TRANSFER_FROM_HOST: return "FB_GPU_VIRGL_TRANSFER_FROM_HOST";
+    case DRM_IOCTL_VERSION: return "DRM_IOCTL_VERSION";
+    case DRM_IOCTL_GET_UNIQUE: return "DRM_IOCTL_GET_UNIQUE";
+    case DRM_IOCTL_GET_MAGIC: return "DRM_IOCTL_GET_MAGIC";
+    case DRM_IOCTL_GET_CLIENT: return "DRM_IOCTL_GET_CLIENT";
+    case DRM_IOCTL_GET_STATS: return "DRM_IOCTL_GET_STATS";
+    case DRM_IOCTL_SET_VERSION: return "DRM_IOCTL_SET_VERSION";
+    case DRM_IOCTL_GET_CAP: return "DRM_IOCTL_GET_CAP";
+    case DRM_IOCTL_SET_CLIENT_CAP: return "DRM_IOCTL_SET_CLIENT_CAP";
+    case DRM_IOCTL_AUTH_MAGIC: return "DRM_IOCTL_AUTH_MAGIC";
+    case DRM_IOCTL_SET_MASTER: return "DRM_IOCTL_SET_MASTER";
+    case DRM_IOCTL_DROP_MASTER: return "DRM_IOCTL_DROP_MASTER";
+    case DRM_IOCTL_GEM_CLOSE: return "DRM_IOCTL_GEM_CLOSE";
+    case DRM_IOCTL_PRIME_HANDLE_TO_FD: return "DRM_IOCTL_PRIME_HANDLE_TO_FD";
+    case DRM_IOCTL_PRIME_FD_TO_HANDLE: return "DRM_IOCTL_PRIME_FD_TO_HANDLE";
+    case DRM_IOCTL_WAIT_VBLANK: return "DRM_IOCTL_WAIT_VBLANK";
+    case DRM_IOCTL_MODE_GETRESOURCES: return "DRM_IOCTL_MODE_GETRESOURCES";
+    case DRM_IOCTL_MODE_GETCRTC: return "DRM_IOCTL_MODE_GETCRTC";
+    case DRM_IOCTL_MODE_GETENCODER: return "DRM_IOCTL_MODE_GETENCODER";
+    case DRM_IOCTL_MODE_GETCONNECTOR: return "DRM_IOCTL_MODE_GETCONNECTOR";
+    case DRM_IOCTL_MODE_GETPROPERTY: return "DRM_IOCTL_MODE_GETPROPERTY";
+    case DRM_IOCTL_MODE_GETPROPBLOB: return "DRM_IOCTL_MODE_GETPROPBLOB";
+    case DRM_IOCTL_MODE_CREATE_DUMB: return "DRM_IOCTL_MODE_CREATE_DUMB";
+    case DRM_IOCTL_MODE_MAP_DUMB: return "DRM_IOCTL_MODE_MAP_DUMB";
+    case DRM_IOCTL_MODE_DESTROY_DUMB: return "DRM_IOCTL_MODE_DESTROY_DUMB";
+    case DRM_IOCTL_MODE_GETPLANERESOURCES: return "DRM_IOCTL_MODE_GETPLANERESOURCES";
+    case DRM_IOCTL_VIRTGPU_MAP: return "DRM_IOCTL_VIRTGPU_MAP";
+    case DRM_IOCTL_VIRTGPU_EXECBUFFER: return "DRM_IOCTL_VIRTGPU_EXECBUFFER";
+    case DRM_IOCTL_VIRTGPU_GETPARAM: return "DRM_IOCTL_VIRTGPU_GETPARAM";
+    case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE: return "DRM_IOCTL_VIRTGPU_RESOURCE_CREATE";
+    case DRM_IOCTL_VIRTGPU_RESOURCE_INFO: return "DRM_IOCTL_VIRTGPU_RESOURCE_INFO";
+    case DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST: return "DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST";
+    case DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST: return "DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST";
+    case DRM_IOCTL_VIRTGPU_WAIT: return "DRM_IOCTL_VIRTGPU_WAIT";
+    case DRM_IOCTL_VIRTGPU_GET_CAPS: return "DRM_IOCTL_VIRTGPU_GET_CAPS";
+    case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB: return "DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB";
+    case DRM_IOCTL_VIRTGPU_CONTEXT_INIT: return "DRM_IOCTL_VIRTGPU_CONTEXT_INIT";
+    default: return "?";
+    }
+}
+
 static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
 {
     uint32 xres, yres;
@@ -998,9 +1078,9 @@ static int fb_fence_fops_poll(struct vfs_file *file, short events)
 
     spin_lock(&fb_state.lock);
     if (fence->bo->signaled_fence >= fence->fence)
-        revents |= (events & (POLLIN | POLLRDNORM));
+        revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
     fb_state.stats.fence_fd_polls++;
-    if (revents & (POLLIN | POLLRDNORM))
+    if (revents & (POLLIN | POLLRDNORM | POLLRDBAND))
         fb_state.stats.fence_fd_poll_ready++;
     spin_unlock(&fb_state.lock);
 
@@ -1045,8 +1125,8 @@ static int fb_virgl_fence_fops_poll(struct vfs_file *file, short events)
     spin_lock(&fb_state.lock);
     fb_state.stats.fence_fd_polls++;
     if (signaled >= fence->fence) {
-        revents |= (events & (POLLIN | POLLRDNORM));
-        if (revents & (POLLIN | POLLRDNORM))
+        revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
+        if (revents & (POLLIN | POLLRDNORM | POLLRDBAND))
             fb_state.stats.fence_fd_poll_ready++;
     }
     spin_unlock(&fb_state.lock);
@@ -2018,7 +2098,7 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         req.debug_name[sizeof(req.debug_name) - 1] = 0;
 
         ret = virtio_gpu_user_context_create(owner_id, owner_tgid,
-                                             req.debug_name, &req.ctx_id);
+                                             0, req.debug_name, &req.ctx_id);
         if (ret != 0)
             return ret;
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
@@ -2421,6 +2501,15 @@ static int fb_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
 
 static int gpu_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
 {
+    int trace = fb_gpu_trace_enabled() && fb_gpu_trace_process();
+    int ret;
+
+    if (trace)
+        printf("webkit-gpu: enter pid=%d name=%s dev=cdev cmd=0x%lx(%s)\n",
+               current ? current->pid : -1,
+               current ? current->name : "?", cmd,
+               fb_gpu_ioctl_name(cmd));
+
     switch (cmd) {
     case FB_GPU_GET_STATS:
     case FB_GPU_BO_CREATE:
@@ -2451,7 +2540,13 @@ static int gpu_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     spin_lock(&fb_state.lock);
     fb_state.stats.gpu_ioctls++;
     spin_unlock(&fb_state.lock);
-    return fb_ioctl(cdev, cmd, arg);
+    ret = fb_ioctl(cdev, cmd, arg);
+    if (trace)
+        printf("webkit-gpu: exit pid=%d name=%s dev=cdev cmd=0x%lx(%s) ret=%d\n",
+               current ? current->pid : -1,
+               current ? current->name : "?", cmd,
+               fb_gpu_ioctl_name(cmd), ret);
+    return ret;
 }
 
 static uint64 gpu_alloc_render_owner_id(void)
@@ -2639,13 +2734,15 @@ static int gpu_owner_create_context(struct fb_gpu_render_owner *owner,
         return ret;
     if (capset_id == 0)
         capset_id = current_capset;
-    if (capset_id != current_capset)
-        return -EINVAL;
+    ret = virtio_gpu_user_get_caps_for(capset_id, 0, NULL, 0, NULL, NULL,
+                                       NULL);
+    if (ret != 0)
+        return ret;
     if (owner->capset_id != 0 && owner->capset_id != capset_id)
         return -EINVAL;
     if (owner->default_ctx_id != 0)
         return 0;
-    ret = virtio_gpu_user_context_create(owner->id, owner->tgid,
+    ret = virtio_gpu_user_context_create(owner->id, owner->tgid, capset_id,
                                          name ? name : "xv6-drm",
                                          &owner->default_ctx_id);
     if (ret == 0)
@@ -3303,16 +3400,9 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
             value = virtio_gpu_has_virgl() ? 1 : 0;
             break;
         case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs:
-        {
-            uint32 capset_id = 0;
-            if (gpu_drm_current_capset(&capset_id) != 0)
-                value = 0;
-            else if (capset_id < 64)
-                value = 1ULL << capset_id;
-            else
+            if (virtio_gpu_user_capset_ids(&value) != 0)
                 value = 0;
             break;
-        }
         case VIRTGPU_PARAM_RESOURCE_BLOB:
         case VIRTGPU_PARAM_HOST_VISIBLE:
             value = 0;
@@ -3357,7 +3447,11 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
 
             switch (param.param) {
             case VIRTGPU_CONTEXT_PARAM_CAPSET_ID:
-                if (param.value == 0 || param.value != current_capset)
+                if (param.value == 0)
+                    return -EINVAL;
+                ret = virtio_gpu_user_get_caps_for((uint32)param.value, 0,
+                                                   NULL, 0, NULL, NULL, NULL);
+                if (ret != 0)
                     return -EINVAL;
                 capset_id = (uint32)param.value;
                 break;
@@ -3423,8 +3517,9 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
 
-        ret = virtio_gpu_user_get_caps(NULL, 0, &capset_id, &capset_ver,
-                                       &capset_size);
+        ret = virtio_gpu_user_get_caps_for(req.cap_set_id, req.cap_set_ver,
+                                           NULL, 0, &capset_id, &capset_ver,
+                                           &capset_size);
         if (ret == -ENODEV) {
             capset_id = 0;
             capset_ver = 0;
@@ -3433,20 +3528,15 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         }
         if (ret != 0)
             return ret;
-        if (req.cap_set_id != 0 && req.cap_set_id != capset_id)
-            return -EINVAL;
-        if (req.cap_set_ver != 0 && req.cap_set_ver > capset_ver)
-            return -EINVAL;
 
         if (req.addr != 0 && req.size != 0) {
-            if (req.size > PGSIZE)
-                return -EINVAL;
             caps = kalloc();
             if (caps == NULL)
                 return -ENOMEM;
         }
         if (caps != NULL)
-            ret = virtio_gpu_user_get_caps(caps, req.size, NULL, NULL, NULL);
+            ret = virtio_gpu_user_get_caps_for(capset_id, capset_ver, caps,
+                                               req.size, NULL, NULL, NULL);
         copy_size = capset_size;
         if (copy_size > req.size)
             copy_size = req.size;
@@ -3516,9 +3606,16 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
 {
     struct fb_gpu_render_owner *owner =
         file ? (struct fb_gpu_render_owner *)file->private_data : NULL;
+    int trace = fb_gpu_trace_enabled() && fb_gpu_trace_process();
+    int ret;
 
     if (owner == NULL)
         return -EBADF;
+    if (trace)
+        printf("webkit-gpu: enter pid=%d name=%s owner=%lu:%d cmd=0x%lx(%s)\n",
+               current ? current->pid : -1,
+               current ? current->name : "?", owner->id, owner->tgid, cmd,
+               fb_gpu_ioctl_name(cmd));
     switch (cmd) {
     case FB_GPU_GET_STATS:
     case FB_GPU_BO_CREATE:
@@ -3543,13 +3640,25 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case FB_GPU_VIRGL_TRANSFER_FROM_HOST:
         break;
     default:
-        return gpu_drm_ioctl(owner, cmd, (uint64)arg);
+        ret = gpu_drm_ioctl(owner, cmd, (uint64)arg);
+        if (trace)
+            printf("webkit-gpu: exit pid=%d name=%s owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
+                   current ? current->pid : -1,
+                   current ? current->name : "?", owner->id, owner->tgid, cmd,
+                   fb_gpu_ioctl_name(cmd), ret);
+        return ret;
     }
 
     spin_lock(&fb_state.lock);
     fb_state.stats.gpu_ioctls++;
     spin_unlock(&fb_state.lock);
-    return fb_ioctl_for_owner(&gpu_cdev, cmd, arg, owner->id, owner->tgid);
+    ret = fb_ioctl_for_owner(&gpu_cdev, cmd, arg, owner->id, owner->tgid);
+    if (trace)
+        printf("webkit-gpu: exit pid=%d name=%s owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
+               current ? current->pid : -1,
+               current ? current->name : "?", owner->id, owner->tgid, cmd,
+               fb_gpu_ioctl_name(cmd), ret);
+    return ret;
 }
 
 static void *gpu_fops_fault(struct vfs_file *file, struct vma *vma, uint64 va)

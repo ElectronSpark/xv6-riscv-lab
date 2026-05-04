@@ -619,6 +619,10 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
         __vfs_file_unlock(file);
         return -EBADF; // File not opened for writing
     }
+    if (file->f_is_memfd && (file->f_seals & F_SEAL_WRITE)) {
+        __vfs_file_unlock(file);
+        return -EPERM;
+    }
 
     ssize_t ret = 0;
 
@@ -890,6 +894,10 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
         __vfs_file_unlock(file);
         return -EBADF;
     }
+    if (file->f_is_memfd && (file->f_seals & F_SEAL_WRITE)) {
+        __vfs_file_unlock(file);
+        return -EPERM;
+    }
 
     ssize_t ret = 0;
 
@@ -977,6 +985,16 @@ int truncate(struct vfs_file *file, loff_t length) {
     }
 
     __vfs_file_lock(file);
+    if (file->f_is_memfd) {
+        if ((file->f_seals & F_SEAL_SHRINK) && length < inode->size) {
+            __vfs_file_unlock(file);
+            return -EPERM;
+        }
+        if ((file->f_seals & F_SEAL_GROW) && length > inode->size) {
+            __vfs_file_unlock(file);
+            return -EPERM;
+        }
+    }
     // ilock will be acquired in vfs_itruncate
     int ret = vfs_itruncate(inode, length);
     __vfs_file_unlock(file);

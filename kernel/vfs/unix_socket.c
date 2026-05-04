@@ -34,6 +34,7 @@
 #include "mm/slab.h"
 #include "proc/sched.h"
 #include "signal.h"
+#include "cmdline.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -59,6 +60,35 @@ struct unix_bind_entry {
 static slab_cache_t __unix_bind_cache = {0};
 static struct unix_bind_entry *bind_list_head = NULL;
 static spinlock_t bind_list_lock;
+
+static int webkit_unix_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_unix_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int unix_trace_process(void)
+{
+    return current != NULL &&
+        (strncmp(current->name, "MiniBrowser", 11) == 0 ||
+         strncmp(current->name, "WebKit", 6) == 0 ||
+         strncmp(current->name, "wlcomp", 6) == 0);
+}
+
+#define UNIX_TRACE(fmt, ...)                                                   \
+    do {                                                                       \
+        if (webkit_unix_trace_enabled() && unix_trace_process())               \
+            printf("webkit-unix: " fmt, ##__VA_ARGS__);                       \
+    } while (0)
 
 /* ========================================================================== */
 /* Forward declarations                                                       */
@@ -94,7 +124,8 @@ struct vfs_file_ops unix_socket_file_ops = {
 
 #define RING_READABLE(r) ((r)->nwrite - (r)->nread)
 #define RING_WRITABLE(r) ((r)->capacity - RING_READABLE(r))
-#define UNIX_WRITE_LOWAT PAGE_SIZE
+#define RING_WRITABLE_LIMIT(r, limit) \
+    ((RING_READABLE(r) < (limit)) ? ((limit) - RING_READABLE(r)) : 0)
 
 static inline bool unix_sock_connection_oriented(const struct unix_sock *sk)
 {
@@ -112,7 +143,7 @@ static int unix_packet_enqueue_locked(struct unix_sock *sk, uint end_mark)
 {
     if (sk->type != SOCK_SEQPACKET)
         return 0;
-    if (unix_packet_count_locked(sk) >= UNIX_PACKET_QUEUE_MAX - 1)
+    if ((unsigned long)unix_packet_count_locked(sk) >= UNIX_PACKET_QUEUE_MAX - 1)
         return -EAGAIN;
     sk->packet_queue[sk->packet_tail] = end_mark;
     sk->packet_tail = (sk->packet_tail + 1) % UNIX_PACKET_QUEUE_MAX;
@@ -122,7 +153,7 @@ static int unix_packet_enqueue_locked(struct unix_sock *sk, uint end_mark)
 static int unix_packet_has_space_locked(struct unix_sock *sk)
 {
     return sk->type != SOCK_SEQPACKET ||
-        unix_packet_count_locked(sk) < UNIX_PACKET_QUEUE_MAX - 1;
+        (unsigned long)unix_packet_count_locked(sk) < UNIX_PACKET_QUEUE_MAX - 1;
 }
 
 static int ring_alloc(struct unix_ring *r)
@@ -145,13 +176,84 @@ static void ring_free(struct unix_ring *r)
     r->capacity = 0;
 }
 
+static int ring_grow_locked(struct unix_ring *r, size_t need_writable,
+                            size_t max_capacity)
+{
+    size_t readable = RING_READABLE(r);
+    size_t writable = RING_WRITABLE_LIMIT(r, max_capacity);
+    if (writable >= need_writable)
+        return 0;
+    if (r->capacity >= max_capacity)
+        return -ENOBUFS;
+
+    size_t need_capacity = readable + need_writable;
+    size_t new_capacity = r->capacity;
+    while (new_capacity < need_capacity &&
+           new_capacity < max_capacity)
+        new_capacity *= 2;
+    if (new_capacity < need_capacity)
+        new_capacity = max_capacity;
+    if (new_capacity < need_capacity)
+        return -ENOBUFS;
+
+    char *new_data = kvmalloc(new_capacity);
+    if (new_data == NULL)
+        return -ENOMEM;
+
+    UNIX_TRACE("grow pid=%d comm=%s readable=%lu need=%lu cap=%lu->%lu "
+               "limit=%lu nread=%u nwrite=%u\n",
+               current ? current->pid : -1, current ? current->name : "?",
+               readable, need_writable, r->capacity, new_capacity,
+               max_capacity, r->nread, r->nwrite);
+
+    size_t old_capacity = r->capacity;
+    size_t old_idx = r->nread % old_capacity;
+    size_t new_idx = r->nread % new_capacity;
+    size_t first = readable;
+    if (first > old_capacity - old_idx)
+        first = old_capacity - old_idx;
+
+    if (first > 0) {
+        if (new_idx + first <= new_capacity) {
+            memmove(new_data + new_idx, r->data + old_idx, first);
+        } else {
+            size_t new_first = new_capacity - new_idx;
+            memmove(new_data + new_idx, r->data + old_idx, new_first);
+            memmove(new_data, r->data + old_idx + new_first,
+                    first - new_first);
+        }
+    }
+
+    size_t remaining = readable - first;
+    if (remaining > 0) {
+        size_t new_off = (new_idx + first) % new_capacity;
+        if (new_off + remaining <= new_capacity) {
+            memmove(new_data + new_off, r->data, remaining);
+        } else {
+            size_t new_first = new_capacity - new_off;
+            memmove(new_data + new_off, r->data, new_first);
+            memmove(new_data, r->data + new_first, remaining - new_first);
+        }
+    }
+
+    kvfree(r->data);
+    r->data = new_data;
+    r->capacity = new_capacity;
+    return 0;
+}
+
 /*
  * ring_write - copy data into a ring buffer (kernel-side)
  * Returns bytes written.
  */
-static size_t ring_write(struct unix_ring *r, const char *buf, size_t len)
+static size_t ring_write(struct unix_ring *r, const char *buf, size_t len,
+                         size_t max_capacity)
 {
-    size_t avail = RING_WRITABLE(r);
+    size_t avail = RING_WRITABLE_LIMIT(r, max_capacity);
+    if (avail < len) {
+        if (ring_grow_locked(r, len, max_capacity) == 0)
+            avail = RING_WRITABLE_LIMIT(r, max_capacity);
+    }
     if (avail == 0)
         return 0;
     size_t towrite = len < avail ? len : avail;
@@ -165,6 +267,16 @@ static size_t ring_write(struct unix_ring *r, const char *buf, size_t len)
     }
     smp_store_release(&r->nwrite, r->nwrite + towrite);
     return towrite;
+}
+
+static size_t unix_tx_limit_locked(struct unix_sock *sk)
+{
+    size_t limit = sk->snd_buf ? sk->snd_buf : UNIX_BUF_MAX_SIZE;
+    struct unix_sock *peer = sk->peer;
+
+    if (peer != NULL && peer->rcv_buf != 0 && peer->rcv_buf < limit)
+        limit = peer->rcv_buf;
+    return limit;
 }
 
 /*
@@ -220,6 +332,10 @@ static struct unix_sock *unix_sock_alloc(void)
     tq_init(&sk->rd_queue, "unix_rd", NULL);
     tq_init(&sk->wr_queue, "unix_wr", NULL);
     tq_init(&sk->conn_queue, "unix_conn", NULL);
+    sk->rcv_lowat = UNIX_LOWAT_DEFAULT;
+    sk->snd_lowat = UNIX_LOWAT_DEFAULT;
+    sk->rcv_buf = UNIX_BUF_MAX_SIZE;
+    sk->snd_buf = UNIX_BUF_MAX_SIZE;
     sk->state = UNIX_STATE_UNCONNECTED;
     return sk;
 }
@@ -498,7 +614,7 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
 
     bool nonblock = (file->f_flags & O_NONBLOCK) != 0;
     ssize_t total = 0;
-    char tmp[128];
+    char tmp[UNIX_IO_CHUNK];
 
     while ((size_t)total < count) {
         struct unix_sock *peer;
@@ -611,14 +727,46 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
 
     bool nonblock = (file->f_flags & O_NONBLOCK) != 0;
     ssize_t total = 0;
-    char tmp[128];
+    char tmp[UNIX_IO_CHUNK];
 
-    spin_lock(&sk->lock);
-    if (!unix_packet_has_space_locked(sk)) {
+    for (;;) {
+        spin_lock(&sk->lock);
+        if (unix_packet_has_space_locked(sk)) {
+            spin_unlock(&sk->lock);
+            break;
+        }
+        if (nonblock) {
+            UNIX_TRACE("packet-full pid=%d comm=%s type=%d count=%lu "
+                       "readable=%lu cap=%lu nonblock=%d\n",
+                       current ? current->pid : -1,
+                       current ? current->name : "?", sk->type,
+                       (unsigned long)unix_packet_count_locked(sk),
+                       (unsigned long)RING_READABLE(&sk->tx), sk->tx.capacity, nonblock);
+            spin_unlock(&sk->lock);
+            return -EAGAIN;
+        }
+        if (signal_pending(current)) {
+            UNIX_TRACE("packet-full pid=%d comm=%s type=%d count=%lu "
+                       "readable=%lu cap=%lu wait=1\n",
+                       current ? current->pid : -1,
+                       current ? current->name : "?", sk->type,
+                       (unsigned long)unix_packet_count_locked(sk),
+                       (unsigned long)RING_READABLE(&sk->tx), sk->tx.capacity);
+            spin_unlock(&sk->lock);
+            return -EINTR;
+        }
+        UNIX_TRACE("packet-wait pid=%d comm=%s type=%d count=%lu "
+                   "readable=%lu cap=%lu\n",
+                   current ? current->pid : -1,
+                   current ? current->name : "?", sk->type,
+                   (unsigned long)unix_packet_count_locked(sk),
+                   (unsigned long)RING_READABLE(&sk->tx), sk->tx.capacity);
+        tq_wait_in_state(&sk->wr_queue, &sk->lock, NULL,
+                         THREAD_INTERRUPTIBLE);
         spin_unlock(&sk->lock);
-        return nonblock ? -EAGAIN : -ENOBUFS;
+        if (signal_pending(current))
+            return -EINTR;
     }
-    spin_unlock(&sk->lock);
 
     while ((size_t)total < count) {
         /* Copy from user */
@@ -643,14 +791,15 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
                 return total > 0 ? total : -EPIPE;
             }
             unix_sock_get(peer);
-            size_t w = ring_write(&sk->tx, tmp + wrote, chunk - wrote);
-            if (w > 0)
-                tq_wakeup_all(&peer->rd_queue, 0, 0);
+            size_t tx_limit = unix_tx_limit_locked(sk);
+            size_t w = ring_write(&sk->tx, tmp + wrote, chunk - wrote,
+                                  tx_limit);
             spin_unlock(&sk->lock);
 
             if (w > 0) {
                 wrote += w;
                 spin_lock(&peer->lock);
+                tq_wakeup_all(&peer->rd_queue, 0, 0);
                 struct vfs_file *pf =
                     peer->file ? vfs_fdup(peer->file) : NULL;
                 spin_unlock(&peer->lock);
@@ -665,6 +814,14 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
                 /* Ring full, need to wait for peer to read */
                 if (nonblock) {
                     total += (ssize_t)wrote;
+                    spin_lock(&sk->lock);
+                    UNIX_TRACE("write-full pid=%d comm=%s count=%lu total=%ld "
+                               "wrote=%lu readable=%lu cap=%lu limit=%lu\n",
+                               current ? current->pid : -1,
+                               current ? current->name : "?", count, total,
+                               wrote, (unsigned long)RING_READABLE(&sk->tx), sk->tx.capacity,
+                               unix_tx_limit_locked(sk));
+                    spin_unlock(&sk->lock);
                     return total > 0 ? total : -EAGAIN;
                 }
                 if (signal_pending(current)) {
@@ -674,6 +831,12 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
 
                 /* Sleep waiting for space */
                 spin_lock(&sk->lock);
+                UNIX_TRACE("write-wait pid=%d comm=%s count=%lu total=%ld "
+                           "wrote=%lu readable=%lu cap=%lu limit=%lu\n",
+                           current ? current->pid : -1,
+                           current ? current->name : "?", count, total, wrote,
+                           (unsigned long)RING_READABLE(&sk->tx), sk->tx.capacity,
+                           unix_tx_limit_locked(sk));
                 tq_wait_in_state(&sk->wr_queue, &sk->lock, NULL,
                                  THREAD_INTERRUPTIBLE);
                 spin_unlock(&sk->lock);
@@ -687,11 +850,30 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
         total += (ssize_t)chunk;
     }
 
+    struct unix_sock *packet_peer = NULL;
+    struct vfs_file *packet_peer_file = NULL;
     spin_lock(&sk->lock);
     int pkt_ret = unix_packet_enqueue_locked(sk, sk->tx.nwrite);
+    if (pkt_ret == 0 && sk->type == SOCK_SEQPACKET && sk->peer != NULL) {
+        packet_peer = sk->peer;
+        unix_sock_get(packet_peer);
+    }
     spin_unlock(&sk->lock);
     if (pkt_ret < 0)
         return pkt_ret;
+
+    if (packet_peer != NULL) {
+        spin_lock(&packet_peer->lock);
+        tq_wakeup_all(&packet_peer->rd_queue, 0, 0);
+        if (packet_peer->file != NULL)
+            packet_peer_file = vfs_fdup(packet_peer->file);
+        spin_unlock(&packet_peer->lock);
+        if (packet_peer_file != NULL) {
+            vfs_file_knote_notify(packet_peer_file, EVFILT_READ, 0);
+            vfs_fput(packet_peer_file);
+        }
+        unix_sock_put(packet_peer);
+    }
 
     return total;
 }
@@ -843,7 +1025,10 @@ static int unix_file_poll(struct vfs_file *file, short events)
     int type;
     int shutdown_flags;
     int so_error;
+    size_t rcv_lowat;
+    size_t snd_lowat;
     size_t tx_writable = 0;
+    int packet_writable;
 
     spin_lock(&sk->lock);
 
@@ -859,57 +1044,96 @@ static int unix_file_poll(struct vfs_file *file, short events)
     type = sk->type;
     shutdown_flags = sk->shutdown_flags;
     so_error = sk->so_error;
+    rcv_lowat = sk->rcv_lowat ? sk->rcv_lowat : UNIX_LOWAT_DEFAULT;
+    snd_lowat = sk->snd_lowat ? sk->snd_lowat : UNIX_LOWAT_DEFAULT;
     peer = sk->peer;
     if (peer != NULL)
         unix_sock_get(peer);
-    tx_writable = RING_WRITABLE(&sk->tx);
+    tx_writable = unix_tx_limit_locked(sk);
+    if (tx_writable > (unsigned long)RING_READABLE(&sk->tx))
+        tx_writable -= (unsigned long)RING_READABLE(&sk->tx);
+    else
+        tx_writable = 0;
+    packet_writable = unix_packet_has_space_locked(sk);
     spin_unlock(&sk->lock);
 
-    /* Check readability: data in peer's tx ring (which we read) */
-    if (events & (POLLIN | POLLRDNORM)) {
+    /* Check readability: data in peer's tx ring (which we read), or EOF. */
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND)) {
         if (peer != NULL) {
             if (type == SOCK_SEQPACKET) {
                 spin_lock(&peer->lock);
                 bool packet_ready = unix_packet_count_locked(peer) > 0;
+                bool peer_wr_shutdown =
+                    (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
                 spin_unlock(&peer->lock);
-                if (packet_ready)
-                    revents |= (events & (POLLIN | POLLRDNORM));
+                if (packet_ready || peer_wr_shutdown)
+                    revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
             } else {
                 spin_lock(&peer->lock);
-                bool stream_ready = RING_READABLE(&peer->tx) > 0;
+                bool scm_ready =
+                    peer->scm_head != peer->scm_tail &&
+                    (int)(peer->scm_queue[peer->scm_head].end_nread -
+                          peer->tx.nread) <= 0;
+                bool peer_wr_shutdown =
+                    (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
+                bool stream_ready =
+                    RING_READABLE(&peer->tx) >= rcv_lowat || scm_ready ||
+                    peer_wr_shutdown;
                 spin_unlock(&peer->lock);
                 if (stream_ready)
-                    revents |= (events & (POLLIN | POLLRDNORM));
+                    revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
             }
         }
         else if (peer == NULL || (sk->shutdown_flags & UNIX_SHUT_RD)) {
             if (state != UNIX_STATE_CONNECTING)
-                revents |= (events & (POLLIN | POLLRDNORM)); /* EOF */
+                revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND)); /* EOF */
         }
     }
 
     /* Check writability: space in our tx ring */
-    if (events & (POLLOUT | POLLWRNORM)) {
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
         if (state == UNIX_STATE_CONNECTING) {
             if (peer != NULL)
-                revents |= (events & (POLLOUT | POLLWRNORM));
+                revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
         } else if (peer == NULL) {
             revents |= POLLERR;
-        } else if (tx_writable >= UNIX_WRITE_LOWAT) {
-            revents |= (events & (POLLOUT | POLLWRNORM));
+        } else if (packet_writable && tx_writable >= snd_lowat) {
+            revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
         }
     }
 
     /* Error/hangup conditions */
     if (so_error)
         revents |= POLLERR;
-    if (peer == NULL && state == UNIX_STATE_CONNECTED)
+    if (peer == NULL && state == UNIX_STATE_CONNECTED) {
         revents |= POLLHUP;
+        if (events & POLLRDHUP)
+            revents |= POLLRDHUP;
+    }
+    if (peer != NULL) {
+        spin_lock(&peer->lock);
+        if ((events & POLLRDHUP) &&
+            (peer->shutdown_flags & UNIX_SHUT_WR))
+            revents |= POLLRDHUP;
+        spin_unlock(&peer->lock);
+    }
     if (shutdown_flags & UNIX_SHUT_WR)
         revents |= POLLHUP;
 
+    struct unix_sock *trace_peer = peer;
     if (peer != NULL)
         unix_sock_put(peer);
+    if ((events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLOUT |
+                   POLLWRNORM | POLLWRBAND | POLLRDHUP)) &&
+        revents != 0) {
+        UNIX_TRACE("poll pid=%d comm=%s sk=%p peer=%p type=%d events=0x%x "
+                   "revents=0x%x state=%d rlow=%lu slow=%lu txw=%lu "
+                   "pktw=%d shutdown=0x%x\n",
+                   current ? current->pid : -1,
+                   current ? current->name : "?", sk, trace_peer, type, events,
+                   revents, state, rcv_lowat, snd_lowat, tx_writable,
+                   packet_writable, shutdown_flags);
+    }
     return revents;
 }
 
@@ -1519,25 +1743,66 @@ int unix_sock_socketpair(int type, int protocol, int file_flags, int sv[2])
 int unix_sock_setsockopt(int fd, int level, int optname, uint64 optval,
                          int optlen)
 {
-    (void)fd; (void)level; (void)optname; (void)optval; (void)optlen;
     /* AF_UNIX sockets have very few options; return success for common ones */
     if (level == 1 /* SOL_SOCKET */) {
         switch (optname) {
         case 2:  /* SO_REUSEADDR - no-op */
         case 5:  /* SO_DONTROUTE - no-op for UNIX sockets */
         case 6:  /* SO_BROADCAST - no-op */
-        case 7:  /* SO_SNDBUF */
-        case 8:  /* SO_RCVBUF */
         case 9:  /* SO_KEEPALIVE - no-op for UNIX sockets */
         case 10: /* SO_OOBINLINE - no-op */
         case 13: /* SO_LINGER - no-op */
         case 15: /* SO_REUSEPORT - no-op */
         case 16: /* SO_PASSCRED - credentials are always available */
-        case 18: /* SO_RCVLOWAT */
-        case 19: /* SO_SNDLOWAT */
         case 20: /* SO_RCVTIMEO_OLD */
         case 21: /* SO_SNDTIMEO_OLD */
             return 0;
+        case 7:  /* SO_SNDBUF */
+        case 8: { /* SO_RCVBUF */
+            int val;
+            struct unix_sock *sk;
+
+            if (optlen < (int)sizeof(val))
+                return -EINVAL;
+            if (vm_copyin(current->vm, &val, optval, sizeof(val)) < 0)
+                return -EFAULT;
+            if (val < 1)
+                return -EINVAL;
+            if ((size_t)val > UNIX_BUF_MAX_SIZE)
+                val = UNIX_BUF_MAX_SIZE;
+            sk = unix_sock_from_fd(fd);
+            if (sk == NULL)
+                return -EBADF;
+            spin_lock(&sk->lock);
+            if (optname == 7)
+                sk->snd_buf = (size_t)val;
+            else
+                sk->rcv_buf = (size_t)val;
+            spin_unlock(&sk->lock);
+            return 0;
+        }
+        case 18: /* SO_RCVLOWAT */
+        case 19: { /* SO_SNDLOWAT */
+            int val;
+            struct unix_sock *sk;
+
+            if (optlen < (int)sizeof(val))
+                return -EINVAL;
+            if (vm_copyin(current->vm, &val, optval, sizeof(val)) < 0)
+                return -EFAULT;
+            if (val < 1)
+                return -EINVAL;
+            sk = unix_sock_from_fd(fd);
+            if (sk == NULL)
+                return -EBADF;
+            spin_lock(&sk->lock);
+            if (optname == 18)
+                sk->rcv_lowat = (size_t)val;
+            else
+                sk->snd_lowat = (size_t)val;
+            spin_unlock(&sk->lock);
+            return 0;
+        }
         }
     }
     return -ENOPROTOOPT;
@@ -1588,13 +1853,25 @@ int unix_sock_getsockopt(int fd, int level, int optname, uint64 optval,
             val = 0;
             break;
         case 7:  /* SO_SNDBUF */
-        case 8:  /* SO_RCVBUF */
-            val = UNIX_BUF_MAX_SIZE;
+        case 8: { /* SO_RCVBUF */
+            struct unix_sock *sk = unix_sock_from_fd(fd);
+            if (sk == NULL)
+                return -EBADF;
+            spin_lock(&sk->lock);
+            val = (int)(optname == 7 ? sk->snd_buf : sk->rcv_buf);
+            spin_unlock(&sk->lock);
             break;
+        }
         case 18: /* SO_RCVLOWAT */
-        case 19: /* SO_SNDLOWAT */
-            val = 1;
+        case 19: { /* SO_SNDLOWAT */
+            struct unix_sock *sk = unix_sock_from_fd(fd);
+            if (sk == NULL)
+                return -EBADF;
+            spin_lock(&sk->lock);
+            val = (int)(optname == 18 ? sk->rcv_lowat : sk->snd_lowat);
+            spin_unlock(&sk->lock);
             break;
+        }
         case 20: /* SO_RCVTIMEO_OLD */
         case 21: /* SO_SNDTIMEO_OLD */
             val = 0;

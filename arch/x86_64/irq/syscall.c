@@ -258,14 +258,18 @@ extern uint64 sys_kqueue(void);
 extern uint64 sys_kevent_register(void);
 extern uint64 sys_kevent_wait(void);
 extern uint64 sys_epoll_create1(void);
+extern uint64 sys_epoll_create(void);
 extern uint64 sys_epoll_ctl(void);
+extern uint64 sys_epoll_wait(void);
 extern uint64 sys_epoll_pwait(void);
+extern uint64 sys_epoll_pwait2(void);
 extern uint64 sys_eventfd2(void);
 
 // timerfd (timerfd.c)
 extern uint64 sys_timerfd_create(void);
 extern uint64 sys_timerfd_settime(void);
 extern uint64 sys_timerfd_gettime(void);
+extern uint64 sys_clock_nanosleep(void);
 
 // resource limits (accounting.c)
 extern uint64 sys_prlimit64(void);
@@ -285,6 +289,7 @@ extern uint64 sys_getrusage(void);
 extern uint64 sys_getpriority(void);
 extern uint64 sys_setpriority(void);
 extern uint64 sys_set_robust_list(void);
+extern uint64 sys_get_robust_list(void);
 extern uint64 sys_clock_settime(void);
 extern uint64 sys_sched_rr_get_interval(void);
 extern uint64 sys_sched_getaffinity(void);
@@ -412,6 +417,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_madvise] sys_madvise,
     [SYS_brk] sys_brk,
     [SYS_futex] sys_futex,
+    [SYS_futex_x86] sys_futex,
     [SYS_memstat] sys_memstat,
     [SYS_dumpproc] sys_dumpproc,
     [SYS_dumpchan] sys_dumpchan,
@@ -525,15 +531,33 @@ static uint64 (*syscalls[])(void) = {
     [SYS_recvmmsg_time64] sys_ni_enosys,
 #endif
     [SYS_pselect6_time64] sys_pselect6,
+    [SYS_pselect6_time64_generic] sys_pselect6,
+    [SYS_ppoll_time64] sys_vfs_ppoll,
+    [SYS_futex_time64] sys_futex,
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
     [SYS_eventfd2] sys_eventfd2,
+    [SYS_eventfd2_x86] sys_eventfd2,
     [SYS_timerfd_create] sys_timerfd_create,
+    [SYS_timerfd_create_x86] sys_timerfd_create,
     [SYS_timerfd_settime] sys_timerfd_settime,
+    [SYS_timerfd_settime_x86] sys_timerfd_settime,
+    [SYS_timerfd_settime64] sys_timerfd_settime,
     [SYS_timerfd_gettime] sys_timerfd_gettime,
+    [SYS_timerfd_gettime_x86] sys_timerfd_gettime,
+    [SYS_timerfd_gettime64] sys_timerfd_gettime,
+    [SYS_clock_nanosleep] sys_clock_nanosleep,
+    [SYS_clock_nanosleep_x86] sys_clock_nanosleep,
+    [SYS_clock_nanosleep_time64] sys_clock_nanosleep,
     [SYS_epoll_pwait] sys_epoll_pwait,
+    [SYS_epoll_pwait_x86] sys_epoll_pwait,
+    [SYS_epoll_pwait2] sys_epoll_pwait2,
+    [SYS_epoll_wait_x86] sys_epoll_wait,
     [SYS_epoll_ctl] sys_epoll_ctl,
+    [SYS_epoll_ctl_x86] sys_epoll_ctl,
     [SYS_epoll_create1] sys_epoll_create1,
+    [SYS_epoll_create1_x86] sys_epoll_create1,
+    [SYS_epoll_create_x86] sys_epoll_create,
     [SYS_umask] sys_umask,
     [SYS_fchownat] sys_vfs_fchownat,
     [SYS_fchown] sys_vfs_fchown,
@@ -542,6 +566,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_getitimer] sys_getitimer,
     [SYS_setitimer] sys_setitimer,
     [SYS_ppoll] sys_vfs_ppoll,
+    [SYS_ppoll_x86] sys_vfs_ppoll,
     /* System V IPC */
     [SYS_semtimedop] sys_semtimedop,
     [SYS_shmget] sys_shmget,
@@ -562,7 +587,10 @@ static uint64 (*syscalls[])(void) = {
     [SYS_clock_settime] sys_clock_settime,
     [SYS_fdatasync] sys_vfs_fdatasync,
     [SYS_fsync] sys_vfs_fsync,
+    [SYS_get_robust_list] sys_get_robust_list,
+    [SYS_get_robust_list_x86] sys_get_robust_list,
     [SYS_set_robust_list] sys_set_robust_list,
+    [SYS_set_robust_list_x86] sys_set_robust_list,
     [SYS_sigaltstack] sys_sigaltstack,
     [SYS_prctl] sys_prctl,
     [SYS_sysinfo] sys_sysinfo,
@@ -608,7 +636,44 @@ static int webkit_sysret_trace_enabled(void)
     return enabled;
 }
 
+static int webkit_syswait_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_syswait_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int webkit_path_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_path_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
 static int is_webkit_process_name(const char *name)
+{
+    return strncmp(name, "MiniBrowser", 11) == 0 ||
+        strncmp(name, "WebKit", 6) == 0 ||
+        strncmp(name, "wlcomp", 6) == 0;
+}
+
+static int is_webkit_browser_process_name(const char *name)
 {
     return strncmp(name, "MiniBrowser", 11) == 0 ||
         strncmp(name, "WebKit", 6) == 0;
@@ -627,6 +692,130 @@ static int is_expected_transient_errno(int err)
     }
 }
 
+static const char *webkit_syscall_name(int num)
+{
+    switch (num) {
+    case SYS_open: return "open";
+    case SYS_close: return "close";
+    case SYS_read: return "read";
+    case SYS_write: return "write";
+    case SYS_fstat: return "fstat";
+    case SYS_getdents: return "getdents";
+    case SYS_lseek: return "lseek";
+    case SYS_access: return "access";
+    case SYS_readlink: return "readlink";
+    case SYS_stat: return "stat";
+    case SYS_lstat: return "lstat";
+    case SYS_poll: return "poll";
+    case SYS_mmap: return "mmap";
+    case SYS_munmap: return "munmap";
+    case SYS_mprotect: return "mprotect";
+    case SYS_mremap: return "mremap";
+    case SYS_msync: return "msync";
+    case SYS_madvise: return "madvise";
+    case SYS_nanosleep: return "nanosleep";
+    case SYS_futex: return "futex";
+    case SYS_futex_x86: return "futex";
+    case SYS_openat: return "openat";
+    case SYS_readv: return "readv";
+    case SYS_pread64: return "pread64";
+    case SYS_fstatat: return "fstatat";
+    case SYS_readlinkat: return "readlinkat";
+    case SYS_faccessat: return "faccessat";
+    case SYS_sendto: return "sendto";
+    case SYS_recvfrom: return "recvfrom";
+    case SYS_sendmsg: return "sendmsg";
+    case SYS_recvmsg: return "recvmsg";
+    case SYS_kevent_wait: return "kevent_wait";
+    case SYS_recvmmsg_time64: return "recvmmsg";
+    case SYS_pselect6_time64: return "pselect6";
+    case SYS_pselect6_time64_generic: return "pselect6";
+    case SYS_ppoll: return "ppoll";
+    case SYS_ppoll_x86: return "ppoll";
+    case SYS_ppoll_time64: return "ppoll";
+    case SYS_epoll_pwait: return "epoll_pwait";
+    case SYS_epoll_pwait_x86: return "epoll_pwait";
+    case SYS_epoll_pwait2: return "epoll_pwait2";
+    case SYS_epoll_wait_x86: return "epoll_wait";
+    case SYS_sendmmsg: return "sendmmsg";
+    case SYS_statx: return "statx";
+    default: return "?";
+    }
+}
+
+static int is_webkit_wait_trace_syscall(int num)
+{
+    switch (num) {
+    case SYS_open:
+    case SYS_close:
+    case SYS_read:
+    case SYS_write:
+    case SYS_fstat:
+    case SYS_getdents:
+    case SYS_lseek:
+    case SYS_access:
+    case SYS_readlink:
+    case SYS_stat:
+    case SYS_lstat:
+    case SYS_poll:
+    case SYS_mmap:
+    case SYS_munmap:
+    case SYS_mprotect:
+    case SYS_mremap:
+    case SYS_msync:
+    case SYS_madvise:
+    case SYS_nanosleep:
+    case SYS_futex:
+    case SYS_futex_x86:
+    case SYS_openat:
+    case SYS_readv:
+    case SYS_pread64:
+    case SYS_fstatat:
+    case SYS_readlinkat:
+    case SYS_faccessat:
+    case SYS_sendto:
+    case SYS_recvfrom:
+    case SYS_sendmsg:
+    case SYS_recvmsg:
+    case SYS_kevent_wait:
+    case SYS_recvmmsg_time64:
+    case SYS_pselect6_time64:
+    case SYS_pselect6_time64_generic:
+    case SYS_ppoll:
+    case SYS_ppoll_x86:
+    case SYS_ppoll_time64:
+    case SYS_epoll_pwait:
+    case SYS_epoll_pwait_x86:
+    case SYS_epoll_pwait2:
+    case SYS_epoll_wait_x86:
+    case SYS_sendmmsg:
+    case SYS_statx:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static uint64 webkit_path_arg(int num, uint64 a0, uint64 a1)
+{
+    switch (num) {
+    case SYS_open:
+    case SYS_access:
+    case SYS_readlink:
+    case SYS_stat:
+    case SYS_lstat:
+        return a0;
+    case SYS_openat:
+    case SYS_fstatat:
+    case SYS_readlinkat:
+    case SYS_faccessat:
+    case SYS_statx:
+        return a1;
+    default:
+        return 0;
+    }
+}
+
 /*
  * syscall — dispatch system call.
  *
@@ -640,7 +829,36 @@ void syscall(void) {
     uint64 a1 = p->trapframe->trapframe.rsi;
     uint64 a2 = p->trapframe->trapframe.rdx;
     uint64 a3 = p->trapframe->trapframe.r10;
+    uint64 a4 = p->trapframe->trapframe.r8;
+    uint64 a5 = p->trapframe->trapframe.r9;
     uint64 ret;
+    int trace_wait = webkit_syswait_trace_enabled() &&
+        is_webkit_process_name(p->name) && is_webkit_wait_trace_syscall(num);
+
+    if (trace_wait) {
+        printf("webkit-syswait: enter pid=%d tgid=%d name=%s sys=%d(%s) "
+               "args=%lx,%lx,%lx,%lx,%lx,%lx\n",
+               p->pid, p->tgid, p->name, num, webkit_syscall_name(num),
+               a0, a1, a2, a3, a4, a5);
+        if (webkit_path_trace_enabled() &&
+            is_webkit_browser_process_name(p->name)) {
+            uint64 path_arg = webkit_path_arg(num, a0, a1);
+            if (path_arg != 0) {
+                char path[160];
+                if (fetchstr(path_arg, path, sizeof(path)) >= 0) {
+                    printf("webkit-path: enter pid=%d name=%s sys=%d(%s) "
+                           "path=\"%s\"\n",
+                           p->pid, p->name, num, webkit_syscall_name(num),
+                           path);
+                } else {
+                    printf("webkit-path: enter pid=%d name=%s sys=%d(%s) "
+                           "path=<fault:%lx>\n",
+                           p->pid, p->name, num, webkit_syscall_name(num),
+                           path_arg);
+                }
+            }
+        }
+    }
 
     if (num > 0 && num < (int)NELEM(syscalls) && syscalls[num]) {
         p->trapframe->trapframe.rax = syscalls[num]();
@@ -650,6 +868,12 @@ void syscall(void) {
     }
 
     ret = p->trapframe->trapframe.rax;
+    if (trace_wait) {
+        printf("webkit-syswait: exit pid=%d tgid=%d name=%s sys=%d(%s) "
+               "ret=%ld\n",
+               p->pid, p->tgid, p->name, num, webkit_syscall_name(num),
+               (int64)ret);
+    }
     if (webkit_sysret_trace_enabled() && is_webkit_process_name(p->name) &&
         (int64)ret < 0 &&
         !is_expected_transient_errno((int)(-(int64)ret))) {

@@ -13,6 +13,9 @@
 #define POLLHUP     0x0010   /* Hang up (output only) */
 #define POLLNVAL    0x0020   /* Invalid fd (output only) */
 #define POLLRDNORM  0x0040   /* Normal data available for reading */
+#define POLLRDBAND  0x0080   /* Priority band data available */
 #define POLLWRNORM  0x0100   /* Writing normal data will not block */
+#define POLLWRBAND  0x0200   /* Priority band writing will not block */
+#define POLLRDHUP   0x2000   /* Stream peer closed or shut down writing */
 
 #endif /* __KERNEL_VFS_POLL_H */

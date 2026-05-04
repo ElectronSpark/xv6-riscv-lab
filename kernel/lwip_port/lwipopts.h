@@ -45,6 +45,7 @@
 #define MEMP_NUM_TCP_SEG                8192
 #define MEMP_NUM_NETBUF                 256
 #define MEMP_NUM_NETCONN                256
+#define MEMP_NUM_NETDB                  64
 #define MEMP_NUM_TCPIP_MSG_API          256
 #define MEMP_NUM_TCPIP_MSG_INPKT        4096
 #define MEMP_NUM_ARP_QUEUE              32
@@ -134,6 +135,9 @@
 #define LWIP_SOCKET                     0    /* No BSD socket API (we use
                                                 xv6's own socket layer) */
 #define LWIP_DNS                        1
+#define DNS_TABLE_SIZE                  64
+#define DNS_MAX_SERVERS                 4
+#define DNS_MAX_NAME_LENGTH             256
 #define LWIP_SO_RCVTIMEO                1
 #define LWIP_SO_SNDTIMEO                1
 #define LWIP_SO_RCVBUF                  1
@@ -223,7 +227,7 @@
 #define DEFAULT_THREAD_PRIO             0
 #define DEFAULT_ACCEPTMBOX_SIZE         8
 #define DEFAULT_RAW_RECVMBOX_SIZE       8
-#define DEFAULT_UDP_RECVMBOX_SIZE       8
+#define DEFAULT_UDP_RECVMBOX_SIZE       64
 #define DEFAULT_TCP_RECVMBOX_SIZE       SYS_MBOX_SIZE
 
 /* --------------------------------------------------------------------------

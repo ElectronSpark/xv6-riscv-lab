@@ -64,6 +64,7 @@
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
 #define VIRTIO_GPU_CAPSET_VIRGL          1
 #define VIRTIO_GPU_CAPSET_VIRGL2         2
+#define VIRTIO_GPU_CAPSET_DRM            6
 #define VIRTIO_GPU_SMOKE_WIDTH 32
 #define VIRTIO_GPU_SMOKE_HEIGHT 32
 #define VIRTIO_GPU_MAX_RESOURCES 4096
@@ -298,8 +299,57 @@ struct virtio_gpu_context {
     int in_use;
     int failed;
     uint32 id;
+    uint32 capset_id;
     uint64 owner_id;
     pid_t owner_tgid;
+};
+
+struct virtio_gpu_capset {
+    int valid;
+    uint32 id;
+    uint32 version;
+    uint32 size;
+};
+
+struct virtio_gpu_drm_capset {
+    uint32 wire_format_version;
+    uint32 version_major;
+    uint32 version_minor;
+    uint32 version_patchlevel;
+    uint32 context_type;
+    uint32 pad;
+    union {
+        struct {
+            uint32 has_cached_coherent;
+            uint32 priorities;
+            uint64 va_start;
+            uint64 va_size;
+            uint32 gpu_id;
+            uint32 gmem_size;
+            uint64 gmem_base;
+            uint64 chip_id;
+            uint32 max_freq;
+            uint32 highest_bank_bit;
+            uint64 ubwc_swizzle;
+            uint64 macrotile_mode;
+            uint32 has_raytracing;
+            uint32 has_preemption;
+            uint64 uche_trap_base;
+        } msm;
+        struct {
+            uint32 address32_hi;
+            uint32 has_vm_always_valid;
+            char marketing_name[128];
+        } amdgpu;
+        struct {
+            uint32 pci_bus;
+            uint32 pci_dev;
+            uint32 pci_func;
+            uint32 pci_revision_id;
+            uint32 pci_domain;
+            uint32 pci_device_id;
+        } intel;
+    } u;
 };
 
 struct virtio_gpu {
@@ -321,6 +371,7 @@ struct virtio_gpu {
     uint32 virgl_capset_id;
     uint32 virgl_capset_version;
     uint32 virgl_capset_size;
+    struct virtio_gpu_capset capsets[VIRTIO_GPU_MAX_CAPSETS];
     uint32 next_context_id;
     struct virtio_gpu_context contexts[VIRTIO_GPU_MAX_CONTEXTS];
     uint64 next_fence_id;
@@ -606,6 +657,54 @@ static struct virtio_gpu_context *virtio_gpu_lookup_context_locked(
             return &g->contexts[i];
     }
     return NULL;
+}
+
+static struct virtio_gpu_capset *virtio_gpu_lookup_capset_locked(
+    struct virtio_gpu *g, uint32 capset_id)
+{
+    if (capset_id == 0)
+        return NULL;
+    for (int i = 0; i < VIRTIO_GPU_MAX_CAPSETS; i++) {
+        if (g->capsets[i].valid && g->capsets[i].id == capset_id)
+            return &g->capsets[i];
+    }
+    return NULL;
+}
+
+static int virtio_gpu_capset_supported(uint32 capset_id)
+{
+    return capset_id == VIRTIO_GPU_CAPSET_VIRGL ||
+           capset_id == VIRTIO_GPU_CAPSET_VIRGL2;
+}
+
+static int virtio_gpu_user_get_drm_caps(uint32 requested_version, void *buf,
+                                        uint32 buf_size, uint32 *capset_id,
+                                        uint32 *capset_version,
+                                        uint32 *capset_size)
+{
+    struct virtio_gpu_drm_capset caps;
+    uint32 copy_size;
+
+    if (requested_version > 1)
+        return -EINVAL;
+
+    memset(&caps, 0, sizeof(caps));
+    caps.wire_format_version = 1;
+
+    if (capset_id)
+        *capset_id = VIRTIO_GPU_CAPSET_DRM;
+    if (capset_version)
+        *capset_version = 1;
+    if (capset_size)
+        *capset_size = sizeof(caps);
+    if (buf == NULL || buf_size == 0)
+        return 0;
+
+    copy_size = sizeof(caps);
+    if (copy_size > buf_size)
+        copy_size = buf_size;
+    memcpy(buf, &caps, copy_size);
+    return 0;
 }
 
 static void virtio_gpu_mark_context_failed_locked(struct virtio_gpu *g,
@@ -1171,22 +1270,26 @@ static void virtio_gpu_query_capsets(struct virtio_gpu *g)
                i, resp->capset_id, resp->capset_max_version,
                resp->capset_max_size);
 
-        if ((resp->capset_id == VIRTIO_GPU_CAPSET_VIRGL ||
-             resp->capset_id == VIRTIO_GPU_CAPSET_VIRGL2) &&
-            g->virgl_capset_id == 0) {
+        if (virtio_gpu_capset_supported(resp->capset_id)) {
             uint32 capset_id = resp->capset_id;
             uint32 capset_version = resp->capset_max_version;
             uint32 capset_size = resp->capset_max_size;
 
-            g->virgl_capset_id = capset_id;
-            g->virgl_capset_version = capset_version;
-            g->virgl_capset_size = capset_size;
             if (virtio_gpu_submit_capset(g, capset_id, capset_version,
                                          capset_size, NULL) == 0) {
                 spin_lock(&g->lock);
-                g->stats.virgl = capset_id;
-                g->stats.virgl_version = capset_version;
-                g->stats.virgl_size = capset_size;
+                g->capsets[i].valid = 1;
+                g->capsets[i].id = capset_id;
+                g->capsets[i].version = capset_version;
+                g->capsets[i].size = capset_size;
+                if (g->virgl_capset_id == 0) {
+                    g->virgl_capset_id = capset_id;
+                    g->virgl_capset_version = capset_version;
+                    g->virgl_capset_size = capset_size;
+                    g->stats.virgl = capset_id;
+                    g->stats.virgl_version = capset_version;
+                    g->stats.virgl_size = capset_size;
+                }
                 spin_unlock(&g->lock);
                 printf("virtio_gpu: virgl capset ready id=%u version=%u size=%u\n",
                        capset_id, capset_version, capset_size);
@@ -1202,7 +1305,7 @@ static void virtio_gpu_query_capsets(struct virtio_gpu *g)
 }
 
 static int virtio_gpu_create_context(struct virtio_gpu *g, uint32 ctx_id,
-                                     const char *name)
+                                     uint32 capset_id, const char *name)
 {
     struct virtio_gpu_ctx_create *cmd =
         (struct virtio_gpu_ctx_create *)g->cmd_page;
@@ -1214,7 +1317,7 @@ static int virtio_gpu_create_context(struct virtio_gpu *g, uint32 ctx_id,
     cmd->hdr.type = VIRTIO_GPU_CMD_CTX_CREATE;
     cmd->hdr.ctx_id = ctx_id;
     if (g->driver_features0 & (1u << VIRTIO_GPU_F_CONTEXT_INIT))
-        cmd->context_init = g->virgl_capset_id;
+        cmd->context_init = capset_id;
     while (name[name_len] && name_len < sizeof(cmd->debug_name))
         name_len++;
     memcpy(cmd->debug_name, name, name_len);
@@ -1316,7 +1419,8 @@ static void virtio_gpu_smoke_context(struct virtio_gpu *g)
         return;
     }
 
-    if (virtio_gpu_create_context(g, ctx_id, "xv6-virgl-smoke") != 0) {
+    if (virtio_gpu_create_context(g, ctx_id, g->virgl_capset_id,
+                                  "xv6-virgl-smoke") != 0) {
         printf("virtio_gpu: 3D context create failed\n");
         return;
     }
@@ -1372,10 +1476,12 @@ out:
 }
 
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
-                                   const char *name, uint32 *ctx_id)
+                                   uint32 capset_id, const char *name,
+                                   uint32 *ctx_id)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
+    struct virtio_gpu_capset *capset;
     uint32 id;
     int ret;
 
@@ -1387,6 +1493,14 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
 
     mutex_lock(&g->op_lock);
     spin_lock(&g->lock);
+    if (capset_id == 0)
+        capset_id = g->virgl_capset_id;
+    capset = virtio_gpu_lookup_capset_locked(g, capset_id);
+    if (capset == NULL) {
+        spin_unlock(&g->lock);
+        mutex_unlock(&g->op_lock);
+        return -EINVAL;
+    }
     ctx = virtio_gpu_alloc_context_slot_locked(g);
     if (ctx == NULL) {
         g->stats.failures++;
@@ -1400,11 +1514,13 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
     memset(ctx, 0, sizeof(*ctx));
     ctx->in_use = 1;
     ctx->id = id;
+    ctx->capset_id = capset_id;
     ctx->owner_id = owner_id;
     ctx->owner_tgid = owner_tgid;
     spin_unlock(&g->lock);
 
-    ret = virtio_gpu_create_context(g, id, name ? name : "xv6-virgl");
+    ret = virtio_gpu_create_context(g, id, capset_id,
+                                    name ? name : "xv6-virgl");
     if (ret != 0) {
         spin_lock(&g->lock);
         ctx = virtio_gpu_lookup_context_locked(g, id);
@@ -1547,24 +1663,47 @@ int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)
     return 0;
 }
 
-int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
-                             uint32 *capset_version, uint32 *capset_size)
+int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
+                                 uint32 requested_capset_version,
+                                 void *buf, uint32 buf_size,
+                                 uint32 *capset_id, uint32 *capset_version,
+                                 uint32 *capset_size)
 {
     struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_capset *capset;
     uint32 id;
     uint32 version;
     uint32 size;
+    uint32 transfer_size;
     int ret = 0;
 
     if (!g->initialized || !g->virgl_capset_id ||
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return -ENODEV;
 
+    if (requested_capset_id == VIRTIO_GPU_CAPSET_DRM)
+        return virtio_gpu_user_get_drm_caps(requested_capset_version, buf,
+                                           buf_size, capset_id,
+                                           capset_version, capset_size);
+
     spin_lock(&g->lock);
-    id = g->virgl_capset_id;
-    version = g->virgl_capset_version;
-    size = g->virgl_capset_size;
+    if (requested_capset_id == 0)
+        requested_capset_id = g->virgl_capset_id;
+    capset = virtio_gpu_lookup_capset_locked(g, requested_capset_id);
+    if (capset == NULL) {
+        spin_unlock(&g->lock);
+        return -EINVAL;
+    }
+    id = capset->id;
+    version = capset->version;
+    size = capset->size;
     spin_unlock(&g->lock);
+
+    if (requested_capset_version != 0) {
+        if (requested_capset_version > version)
+            return -EINVAL;
+        version = requested_capset_version;
+    }
 
     if (capset_id)
         *capset_id = id;
@@ -1574,13 +1713,46 @@ int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
         *capset_size = size;
     if (buf == NULL || buf_size == 0)
         return 0;
-    if (size == 0 || size > buf_size || size > PGSIZE)
+    if (size == 0)
         return -EINVAL;
+    transfer_size = size;
+    if (transfer_size > buf_size)
+        transfer_size = buf_size;
+    if (transfer_size > PGSIZE - sizeof(struct virtio_gpu_resp_capset))
+        transfer_size = PGSIZE - sizeof(struct virtio_gpu_resp_capset);
 
     mutex_lock(&g->op_lock);
-    ret = virtio_gpu_submit_capset(g, id, version, size, buf);
+    ret = virtio_gpu_submit_capset(g, id, version, transfer_size, buf);
     mutex_unlock(&g->op_lock);
     return ret == 0 ? 0 : -EIO;
+}
+
+int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
+                             uint32 *capset_version, uint32 *capset_size)
+{
+    return virtio_gpu_user_get_caps_for(0, 0, buf, buf_size, capset_id,
+                                        capset_version, capset_size);
+}
+
+int virtio_gpu_user_capset_ids(uint64 *ids)
+{
+    struct virtio_gpu *g = &gpu;
+    uint64 value = 0;
+
+    if (ids == NULL)
+        return -EINVAL;
+    if (!g->initialized || !g->virgl_capset_id ||
+        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+        return -ENODEV;
+
+    spin_lock(&g->lock);
+    for (int i = 0; i < VIRTIO_GPU_MAX_CAPSETS; i++) {
+        if (g->capsets[i].valid && g->capsets[i].id < 64)
+            value |= 1ULL << g->capsets[i].id;
+    }
+    spin_unlock(&g->lock);
+    *ids = value;
+    return 0;
 }
 
 int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
@@ -2430,10 +2602,12 @@ void virtio_gpu_init(void) {}
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats) { (void)stats; }
 int virtio_gpu_has_virgl(void) { return 0; }
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
-                                   const char *name, uint32 *ctx_id)
+                                   uint32 capset_id, const char *name,
+                                   uint32 *ctx_id)
 {
     (void)owner_id;
     (void)owner_tgid;
+    (void)capset_id;
     (void)name;
     (void)ctx_id;
     return -ENODEV;
@@ -2465,6 +2639,26 @@ int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)
     (void)wait_for;
     (void)wait;
     (void)signaled;
+    return -ENODEV;
+}
+int virtio_gpu_user_capset_ids(uint64 *ids)
+{
+    (void)ids;
+    return -ENODEV;
+}
+int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
+                                 uint32 requested_capset_version,
+                                 void *buf, uint32 buf_size,
+                                 uint32 *capset_id, uint32 *capset_version,
+                                 uint32 *capset_size)
+{
+    (void)requested_capset_id;
+    (void)requested_capset_version;
+    (void)buf;
+    (void)buf_size;
+    (void)capset_id;
+    (void)capset_version;
+    (void)capset_size;
     return -ENODEV;
 }
 int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,

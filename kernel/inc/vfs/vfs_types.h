@@ -415,6 +415,9 @@ struct vfs_file {
         struct pipe *pipe;            // FD_PIPE
         struct sock *sock;            // FD_SOCKET
     };
+    uint32 f_seals;
+    bool f_is_memfd;
+    bool f_allow_sealing;
 };
 
 struct iov_iter; /* forward declaration — full definition in vfs/uio.h */
@@ -450,6 +453,18 @@ struct vfs_file_ops {
      * use this to support TCGETS/TCSETS.
      */
     int (*ioctl)(struct vfs_file *file, uint64 cmd, void *arg);
+
+    /*
+     * set_flags - synchronize backend state after fcntl(F_SETFL)
+     * @file:      the open file
+     * @old_flags: previous f_flags value
+     * @new_flags: newly installed f_flags value
+     *
+     * Most file types only consult f_flags directly.  Some backends, notably
+     * lwIP netconns, also carry their own nonblocking state and need an
+     * explicit update when user space toggles O_NONBLOCK through fcntl().
+     */
+    int (*set_flags)(struct vfs_file *file, int old_flags, int new_flags);
 
     /*
      * fault - Demand-page a single page for a file-backed mapping

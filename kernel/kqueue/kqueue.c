@@ -55,6 +55,45 @@ static struct vfs_file_ops kqueue_file_ops = {
     .fault = NULL,
 };
 
+static int knote_is_file_filter(struct knote *kn)
+{
+    return kn->filter == EVFILT_READ || kn->filter == EVFILT_WRITE;
+}
+
+static int knote_is_clear_file_filter(struct knote *kn)
+{
+    return (kn->flags & EV_CLEAR) && knote_is_file_filter(kn);
+}
+
+static int knote_poll_active(struct knote *kn)
+{
+    return kn->ops != NULL && kn->ops->event != NULL &&
+           kn->ops->event(kn, 0);
+}
+
+static int knote_file_poll_revents(struct knote *kn)
+{
+    if (!knote_is_file_filter(kn) || kn->attached_file == NULL)
+        return 0;
+
+    struct vfs_file *f = kn->attached_file;
+    short events = kn->filter == EVFILT_READ
+        ? (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP)
+        : (POLLOUT | POLLWRNORM | POLLWRBAND);
+    int revents = 0;
+
+    if (f->ops && f->ops->poll) {
+        assert(f->ref_count > 0,
+               "knote_file_poll_revents: stale file %p (ref=%d, ops=%p, ident=%ld)",
+               f, f->ref_count, f->ops, kn->ident);
+        revents = f->ops->poll(f, events);
+    } else if (f->cdev != NULL && f->cdev->ops.poll != NULL) {
+        revents = f->cdev->ops.poll(f->cdev, events);
+    }
+
+    return revents;
+}
+
 static void kqueue_rescan_registered_locked(struct kqueue *kq) {
     struct knote *kn = NULL;
     struct knote *tmp = NULL;
@@ -64,13 +103,52 @@ static void kqueue_rescan_registered_locked(struct kqueue *kq) {
             kn->ops == NULL || kn->ops->event == NULL) {
             continue;
         }
-        if (!kn->ops->event(kn, 0))
+        /*
+         * EV_CLEAR backs Linux EPOLLET in the epoll shim.  A plain level
+         * rescan would repeatedly regenerate readiness for fds that userspace
+         * has not fully drained, while skipping rescans entirely can park an
+         * edge-triggered user forever if a driver or socket callback coalesces
+         * a wake.  Track whether the fd was already observed ready: rescans
+         * only synthesize the missing false -> true edge, and clear that state
+         * once the fd is observed not ready again.  Source notifications still
+         * enqueue independently in vfs_file_knote_notify().
+         */
+        if (knote_is_clear_file_filter(kn)) {
+            if (knote_file_poll_revents(kn) != 0) {
+                if (kn->status & KN_EDGE_ACTIVE)
+                    continue;
+                kn->status |= KN_EDGE_ACTIVE;
+            } else {
+                kn->status &= ~KN_EDGE_ACTIVE;
+                continue;
+            }
+        } else if (!knote_poll_active(kn)) {
             continue;
+        }
 
         kn->status |= KN_QUEUED;
         list_node_push(&kq->ready, kn, ready_entry);
         kq->nready++;
     }
+}
+
+static struct knote *kqueue_pick_ready_locked(struct kqueue *kq) {
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+
+    /*
+     * Prefer read-side readiness when both read and write filters are queued.
+     * Linux epoll users often monitor sockets for both directions, while
+     * POLLOUT is effectively level-ready for most connected TCP sockets.  If
+     * write knotes dominate a small event buffer, GLib/WebKit can churn on
+     * writable events and fail to make progress on readable network data.
+     */
+    list_foreach_node_safe(&kq->ready, kn, tmp, ready_entry) {
+        if (kn->filter == EVFILT_READ)
+            return kn;
+    }
+
+    return LIST_FIRST_NODE(&kq->ready, struct knote, ready_entry);
 }
 
 /*
@@ -106,6 +184,19 @@ static struct knote *knote_alloc(void) {
  */
 static void knote_free(struct knote *kn) {
     slab_free(kn);
+}
+
+struct kqueue *kqueue_alloc_private(void) {
+    struct kqueue *kq = slab_alloc(&__kqueue_cache);
+    if (kq == NULL)
+        return NULL;
+
+    memset(kq, 0, sizeof(*kq));
+    spin_init(&kq->lock, "kqueue");
+    tq_init(&kq->waitq, "kqueue_waitq", NULL);
+    list_entry_init(&kq->registered);
+    list_entry_init(&kq->ready);
+    return kq;
 }
 
 /*
@@ -145,6 +236,8 @@ void knote_enqueue(struct knote *kn) {
         spin_unlock(&kq->lock);
         return;
     }
+    if (knote_is_clear_file_filter(kn))
+        kn->status |= KN_EDGE_ACTIVE;
     kn->status |= KN_QUEUED;
     list_node_push(&kq->ready, kn, ready_entry);
     kq->nready++;
@@ -186,6 +279,8 @@ static struct vfs_file *__knote_enqueue_core(struct knote *kn, int64 data,
     }
     kn->data = data;
     kn->fflags |= fflags;
+    if (knote_is_clear_file_filter(kn))
+        kn->status |= KN_EDGE_ACTIVE;
     int newly_queued = 0;
     if (!(kn->status & KN_QUEUED)) {
         kn->status |= KN_QUEUED;
@@ -335,19 +430,9 @@ void kqueue_signal_notify(struct thread *p, int signo) {
  * kqueue_create - allocate a new kqueue and return its file descriptor
  */
 int kqueue_create(void) {
-    struct kqueue *kq = slab_alloc(&__kqueue_cache);
+    struct kqueue *kq = kqueue_alloc_private();
     if (kq == NULL)
         return -ENOMEM;
-
-    memset(kq, 0, sizeof(*kq));
-    spin_init(&kq->lock, "kqueue");
-    tq_init(&kq->waitq, "kqueue_waitq", NULL);
-    list_entry_init(&kq->registered);
-    list_entry_init(&kq->ready);
-    kq->nregistered = 0;
-    kq->nready = 0;
-    kq->closed = 0;
-    kq->waiters = 0;
 
     int fd = vfs_custom_fd_alloc(&kqueue_file_ops, kq, 0);
     if (fd < 0) {
@@ -630,8 +715,7 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
 
         /* Drain ready list */
         while (total < nevents && !LIST_IS_EMPTY(&kq->ready)) {
-            struct knote *kn = LIST_FIRST_NODE(&kq->ready, struct knote,
-                                               ready_entry);
+            struct knote *kn = kqueue_pick_ready_locked(kq);
             list_node_detach(kn, ready_entry);
             kq->nready--;
             kn->status &= ~KN_QUEUED;
@@ -643,11 +727,11 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
              * then a nonblocking connect moves the socket to EINPROGRESS).
              * Re-check before reporting level-triggered file readiness.
              */
-            if (!(kn->flags & EV_CLEAR) &&
-                (kn->filter == EVFILT_READ || kn->filter == EVFILT_WRITE) &&
-                kn->ops != NULL && kn->ops->event != NULL &&
-                !kn->ops->event(kn, 0)) {
-                continue;
+            int poll_revents = 0;
+            if (knote_is_file_filter(kn)) {
+                poll_revents = knote_file_poll_revents(kn);
+                if (!knote_is_clear_file_filter(kn) && poll_revents == 0)
+                    continue;
             }
 
             /* Fill in kevent for user */
@@ -655,6 +739,10 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             eventlist[total].filter = kn->filter;
             eventlist[total].flags = kn->flags & ~(EV_ADD | EV_DELETE |
                                                     EV_ENABLE | EV_DISABLE);
+            if (poll_revents & (POLLHUP | POLLRDHUP))
+                eventlist[total].flags |= EV_EOF;
+            if (poll_revents & (POLLERR | POLLNVAL))
+                eventlist[total].flags |= EV_ERROR;
             eventlist[total].fflags = kn->fflags;
             eventlist[total].data = kn->data;
             eventlist[total].udata = kn->udata;
@@ -669,6 +757,12 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             if (kn->flags & EV_CLEAR) {
                 kn->fflags = 0;
                 kn->data = 0;
+                if (knote_is_clear_file_filter(kn)) {
+                    if (knote_file_poll_revents(kn) != 0)
+                        kn->status |= KN_EDGE_ACTIVE;
+                    else
+                        kn->status &= ~KN_EDGE_ACTIVE;
+                }
             }
         }
 
@@ -764,6 +858,10 @@ static void kqueue_close(struct kqueue *kq) {
         slab_free(kq);
 }
 
+void kqueue_close_private(struct kqueue *kq) {
+    kqueue_close(kq);
+}
+
 static int kqueue_file_release(struct vfs_inode *inode, struct vfs_file *file) {
     (void)inode;
     struct kqueue *kq = (struct kqueue *)file->private_data;
@@ -779,10 +877,11 @@ static int kqueue_file_poll(struct vfs_file *file, short events) {
     if (kq == NULL)
         return POLLNVAL;
     spin_lock(&kq->lock);
-    if (events & (POLLIN | POLLRDNORM))
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP))
         kqueue_rescan_registered_locked(kq);
-    if ((events & (POLLIN | POLLRDNORM)) && kq->nready > 0)
-        revents |= (events & (POLLIN | POLLRDNORM));
+    if ((events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP)) &&
+        kq->nready > 0)
+        revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP));
     spin_unlock(&kq->lock);
     return revents;
 }

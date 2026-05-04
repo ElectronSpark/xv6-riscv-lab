@@ -47,6 +47,7 @@
 #include "proc/thread.h"
 #include "errno.h"
 #include "kstats.h"
+#include "cmdline.h"
 #include <vfs/file.h>
 #include <vfs/fs.h>
 #include <dev/bio.h>
@@ -54,6 +55,35 @@
 /* Fault-around is now controlled by USER_FAULT_AROUND_PAGES in
  * the arch trap handler.  The batch install uses va_end directly. */
 #define VM_MMAP_EAGER_PAGES 64
+
+static int webkit_mremap_trace_enabled(void)
+{
+    static int cached = -1;
+    char value[16];
+
+    if (cached < 0) {
+        cached = (cmdline_get_param("webkit_mremap_trace", value,
+                                    sizeof(value)) == 0 &&
+                  value[0] != '\0' && value[0] != '0');
+    }
+    return cached;
+}
+
+static int webkit_mremap_trace_process(void)
+{
+    const char *name = current != NULL ? current->name : "";
+
+    return strncmp(name, "WebKit", 6) == 0 ||
+           strncmp(name, "MiniBrowser", 11) == 0;
+}
+
+#define WEBKIT_MREMAP_TRACE(fmt, ...)                                         \
+    do {                                                                      \
+        if (trace_mremap)                                                     \
+            printf("[%lu] webkit-mremap: pid=%d name=%s " fmt "\n",          \
+                   r_time(), current != NULL ? current->pid : -1,             \
+                   current != NULL ? current->name : "?", ##__VA_ARGS__);     \
+    } while (0)
 
 /*
  * Default compound order for anonymous folio allocation during demand faults.
@@ -3316,34 +3346,151 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
                  int flags, uint64 new_addr)
 {
     uint64 ret = (uint64)-EINVAL;
+    uint64 trace_arg_old_addr = old_addr;
+    size_t trace_arg_old_size = old_size;
+    size_t trace_arg_new_size = new_size;
+    uint64 trace_arg_new_addr = new_addr;
+    int trace_arg_flags = flags;
+    int trace_mremap = webkit_mremap_trace_enabled() &&
+                       webkit_mremap_trace_process();
+    int source_split = 0;
     uint64 new_location = 0;
     uint64 new_location_end = 0;
     vma_t *new_vma = NULL;
     vm_wlock(vm);
 
-    if (vm == NULL || vm->pagetable == NULL)
-        goto out;
+    WEBKIT_MREMAP_TRACE("enter old=0x%lx old_size=0x%lx new_size=0x%lx "
+                        "flags=0x%x new_addr=0x%lx",
+                        trace_arg_old_addr, trace_arg_old_size,
+                        trace_arg_new_size, trace_arg_flags,
+                        trace_arg_new_addr);
 
-    if (vm_normalize_user_range(&old_addr, &old_size) != 0)
+    if (vm == NULL || vm->pagetable == NULL) {
+        WEBKIT_MREMAP_TRACE("fail stage=vm ret=%ld", (int64)ret);
         goto out;
+    }
+
+    if (vm_normalize_user_range(&old_addr, &old_size) != 0) {
+        WEBKIT_MREMAP_TRACE("fail stage=normalize old=0x%lx old_size=0x%lx "
+                            "ret=%ld",
+                            trace_arg_old_addr, trace_arg_old_size,
+                            (int64)ret);
+        goto out;
+    }
+    if (new_size > ((size_t)-1) - (PGSIZE - 1)) {
+        WEBKIT_MREMAP_TRACE("fail stage=new-size-overflow new_size=0x%lx "
+                            "ret=%ld",
+                            trace_arg_new_size, (int64)ret);
+        goto out;
+    }
     new_size = PGROUNDUP(new_size);
 
-    if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE))
+    if (flags & ~(MREMAP_MAYMOVE | MREMAP_FIXED)) {
+        WEBKIT_MREMAP_TRACE("fail stage=flags flags=0x%x ret=%ld",
+                            flags, (int64)ret);
         goto out;
-    if ((flags & MREMAP_FIXED) && (new_addr & (PGSIZE - 1)) != 0)
+    }
+    if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE)) {
+        WEBKIT_MREMAP_TRACE("fail stage=fixed-without-maymove flags=0x%x "
+                            "ret=%ld",
+                            flags, (int64)ret);
         goto out;
+    }
+    if ((flags & MREMAP_FIXED) && (new_addr & (PGSIZE - 1)) != 0) {
+        WEBKIT_MREMAP_TRACE("fail stage=fixed-unaligned new_addr=0x%lx "
+                            "ret=%ld",
+                            new_addr, (int64)ret);
+        goto out;
+    }
 
-    if (old_size > (vm->vm_top - vm->vm_bottom) || new_size > (vm->vm_top - vm->vm_bottom))
+    if (old_size > (vm->vm_top - vm->vm_bottom) ||
+        new_size > (vm->vm_top - vm->vm_bottom)) {
+        WEBKIT_MREMAP_TRACE("fail stage=size-bounds old_size=0x%lx "
+                            "new_size=0x%lx vm=[0x%lx-0x%lx] ret=%ld",
+                            old_size, new_size, vm->vm_bottom, vm->vm_top,
+                            (int64)ret);
         goto out;
-    if (old_addr + old_size < old_addr)
+    }
+    if (old_addr + old_size < old_addr) {
+        WEBKIT_MREMAP_TRACE("fail stage=old-overflow old=0x%lx "
+                            "old_size=0x%lx ret=%ld",
+                            old_addr, old_size, (int64)ret);
         goto out;
-    if (old_addr < vm->vm_bottom || (old_addr + old_size) > vm->vm_top)
+    }
+    if (old_addr < vm->vm_bottom || (old_addr + old_size) > vm->vm_top) {
+        WEBKIT_MREMAP_TRACE("fail stage=old-out-of-vm old=[0x%lx-0x%lx] "
+                            "vm=[0x%lx-0x%lx] ret=%ld",
+                            old_addr, old_addr + old_size, vm->vm_bottom,
+                            vm->vm_top, (int64)ret);
         goto out;
+    }
 
+    uint64 old_end = old_addr + old_size;
     vma_t *vma = vm_find_area(vm, old_addr);
-    if (vma == NULL || vma->start != old_addr ||
-        vma->end != old_addr + old_size)
+    if (vma == NULL || old_addr < vma->start || old_end > vma->end) {
+        WEBKIT_MREMAP_TRACE("fail stage=source old=[0x%lx-0x%lx] "
+                            "source=%p source_range=[0x%lx-0x%lx] "
+                            "source_flags=0x%lx ret=%ld",
+                            old_addr, old_end, vma,
+                            vma != NULL ? vma->start : 0,
+                            vma != NULL ? vma->end : 0,
+                            vma != NULL ? vma->flags : 0, (int64)ret);
         goto out;
+    }
+
+    if (new_size > old_size && !(flags & MREMAP_MAYMOVE) &&
+        !(flags & MREMAP_FIXED)) {
+        uint64 requested_end = old_addr + new_size;
+
+        if (requested_end < old_addr) {
+            WEBKIT_MREMAP_TRACE("fail stage=request-overflow old=0x%lx "
+                                "new_size=0x%lx ret=%ld",
+                                old_addr, new_size, (int64)ret);
+            goto out;
+        }
+
+        uint64 expand_start = old_end;
+        uint64 expand_size = requested_end - expand_start;
+        uint64 check = expand_start;
+        void *overlap =
+            mt_find(&vm->vm_mt, &check, expand_start + expand_size - 1);
+
+        if (overlap != NULL) {
+            ret = (uint64)-ENOMEM;
+            vma_t *blocker = (vma_t *)overlap;
+            WEBKIT_MREMAP_TRACE("fail stage=expand-blocked-preflight "
+                                "old=[0x%lx-0x%lx] want=[0x%lx-0x%lx] "
+                                "source=[0x%lx-0x%lx] source_flags=0x%lx "
+                                "blocker=%p blocker_range=[0x%lx-0x%lx] "
+                                "blocker_flags=0x%lx ret=%ld",
+                                old_addr, old_end, old_end, requested_end,
+                                vma->start,
+                                vma->end, vma->flags, blocker,
+                                blocker->start, blocker->end, blocker->flags,
+                                (int64)ret);
+            goto out;
+        }
+    }
+
+    if (old_addr > vma->start) {
+        vma = vma_split(vma, old_addr);
+        if (vma == NULL) {
+            ret = (uint64)-ENOMEM;
+            WEBKIT_MREMAP_TRACE("fail stage=split-start old=0x%lx ret=%ld",
+                                old_addr, (int64)ret);
+            goto out;
+        }
+        source_split = 1;
+    }
+    if (old_end < vma->end) {
+        if (vma_split(vma, old_end) == NULL) {
+            ret = (uint64)-ENOMEM;
+            WEBKIT_MREMAP_TRACE("fail stage=split-end old_end=0x%lx ret=%ld",
+                                old_end, (int64)ret);
+            goto out;
+        }
+        source_split = 1;
+    }
 
     if (new_size == 0) {
         if (vma_free(vm, vma) != 0)
@@ -3389,6 +3536,17 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
 
     if (!(flags & MREMAP_MAYMOVE)) {
         ret = (uint64)-ENOMEM;
+        vma_t *blocker = overlap != NULL ? (vma_t *)overlap : NULL;
+        WEBKIT_MREMAP_TRACE("fail stage=expand-blocked old=[0x%lx-0x%lx] "
+                            "want=[0x%lx-0x%lx] source_flags=0x%lx "
+                            "blocker=%p blocker_range=[0x%lx-0x%lx] "
+                            "blocker_flags=0x%lx ret=%ld",
+                            old_addr, old_addr + old_size, expand_start,
+                            expand_start + expand_size, vma->flags, blocker,
+                            blocker != NULL ? blocker->start : 0,
+                            blocker != NULL ? blocker->end : 0,
+                            blocker != NULL ? blocker->flags : 0,
+                            (int64)ret);
         goto out;
     }
 
@@ -3507,6 +3665,13 @@ err_new_vma:
     if (new_vma != NULL)
         vma_free(vm, new_vma);
 out:
+    if ((int64)ret < 0 && source_split && vma != NULL)
+        vma = __vma_try_merge_neighbors(vma);
+    WEBKIT_MREMAP_TRACE("return ret=%ld arg_old=0x%lx arg_old_size=0x%lx "
+                        "arg_new_size=0x%lx arg_flags=0x%x arg_new_addr=0x%lx",
+                        (int64)ret, trace_arg_old_addr, trace_arg_old_size,
+                        trace_arg_new_size, trace_arg_flags,
+                        trace_arg_new_addr);
     vm_wunlock(vm);
     return ret;
 }
@@ -3763,6 +3928,25 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
                size, search_bottom, search_top,
                stack_bottom, heap_end, reserve_end);
         return 0;
+    }
+
+    /*
+     * mmap(addr, ..., !MAP_FIXED) treats addr as a placement hint.  Several
+     * allocators and shared-memory users choose adjacent hints so a later
+     * mremap(..., flags=0) can grow in place.  Ignoring the hint entirely
+     * scatters mappings and turns those legal growth attempts into avoidable
+     * ENOMEM failures.
+     */
+    if (hint != 0 && hint <= (uint64)-1 - (PGSIZE - 1)) {
+        uint64 hstart = PGROUNDUP(hint);
+        uint64 hend = hstart + size;
+
+        if (hend > hstart && hstart >= search_bottom && hend <= search_top) {
+            uint64 idx = hstart;
+            void *conflict = mt_find(&vm->vm_mt, &idx, hend - 1);
+            if (conflict == NULL)
+                return hstart;
+        }
     }
 
     /* Use maple tree reverse gap search to find free space (high to low). */

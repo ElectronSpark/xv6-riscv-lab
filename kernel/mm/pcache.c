@@ -2682,7 +2682,18 @@ void pcache_put_pages(struct pcache *pcache, struct pcache_page_vec *pvec) {
  * per-page pcache_read_page calls hit the fast path (uptodate check).
  *****************************************************************************/
 
-#define PCACHE_RA_WINDOW 256  /* max folios per readahead batch */
+#define PCACHE_RA_WINDOW 16  /* max folios per readahead batch */
+#define PCACHE_RA_MAX_BYTES (1UL << 20)
+
+static inline loff_t pcache_readahead_window_end(loff_t start_pos,
+                                                 loff_t file_end)
+{
+    loff_t end = start_pos + (loff_t)PCACHE_RA_MAX_BYTES;
+
+    if (end < start_pos || end > file_end)
+        end = file_end;
+    return end;
+}
 
 loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
                        loff_t end_pos)
@@ -2804,13 +2815,18 @@ ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
     if (pos >= isize)
         return 0; /* EOF */
 
-    /* Readahead: use the persistent ra_pos to avoid re-reading pages
-     * that were pre-read in previous read() syscalls. */
+    /* Readahead: keep a bounded frontier.  Small probing reads are common
+     * during GUI/browser startup; reading to EOF on the first 1 KB access of
+     * every file turns metadata discovery into large, mostly unused I/O.
+     * A sliding window preserves sequential throughput while avoiding that
+     * startup amplification.
+     */
     bool do_readahead = !nowait && pcache->ops &&
                         pcache->ops->submit_readahead;
-    loff_t ra_end = isize;  /* readahead up to end-of-file */
-    if (do_readahead && pos >= pcache->ra_pos)
+    if (do_readahead && pos >= pcache->ra_pos) {
+        loff_t ra_end = pcache_readahead_window_end(pos, isize);
         pcache->ra_pos = pcache_readahead(pcache, pos, ra_end);
+    }
 
     pcache_page_vec_init(&pvec);
 
@@ -2831,9 +2847,12 @@ ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
             /* Sliding readahead: when current position reaches the
              * readahead frontier, submit the next batch. */
             if (do_readahead && pos >= pcache->ra_pos &&
-                pcache->ra_pos < ra_end)
+                pcache->ra_pos < isize) {
+                loff_t ra_end =
+                    pcache_readahead_window_end(pcache->ra_pos, isize);
                 pcache->ra_pos = pcache_readahead(
                     pcache, pcache->ra_pos, ra_end);
+            }
 
             uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;
 

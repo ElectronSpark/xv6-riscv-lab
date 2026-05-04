@@ -32,11 +32,22 @@
 #include "timer/timer.h"
 #include "proc/sched.h"
 #include "proc/workqueue.h"
+#include "timer/goldfish_rtc.h"
 
 /* Flags from <sys/timerfd.h> — match musl */
 #define TFD_NONBLOCK      O_NONBLOCK
 #define TFD_CLOEXEC       O_CLOEXEC
 #define TFD_TIMER_ABSTIME 1
+#define TFD_TIMER_CANCEL_ON_SET 2
+
+#define CLOCK_REALTIME       0
+#define CLOCK_MONOTONIC      1
+#define CLOCK_BOOTTIME       7
+#define CLOCK_REALTIME_ALARM 8
+#define CLOCK_BOOTTIME_ALARM 9
+
+#define NSEC_PER_SEC  1000000000ULL
+#define NSEC_PER_MSEC 1000000ULL
 
 /* Userspace-compatible itimerspec layout (matches musl struct itimerspec) */
 struct k_timespec {
@@ -56,31 +67,70 @@ struct timerfd_ctx {
     struct work_struct rearm_work; /* deferred re-arm for repeating timers */
     struct k_itimerspec setting; /* current timer setting */
     uint64          expirations; /* expiration counter */
-    uint64          arm_time;   /* r_time() when timer was armed */
+    uint64          next_expiration_ns; /* absolute time on ctx->clockid */
+    uint64          interval_ns;
     int             clockid;
     int             flags;      /* TFD_TIMER_ABSTIME etc */
     bool            armed;
     bool            cancelled;  /* set on release to prevent re-arm */
+    bool            rearm_pending;
     struct vfs_file *file;      /* back-pointer for kqueue notification */
 };
 
 static struct vfs_file_ops timerfd_file_ops;
 static struct workqueue *timerfd_wq;
 
-/* Convert k_timespec to milliseconds, clamping to avoid overflow */
-static uint64 ts_to_ms(const struct k_timespec *ts)
+static bool timerfd_clock_supported(int clockid)
 {
-    if (ts->tv_sec < 0 || ts->tv_nsec < 0)
-        return 0;
-    uint64 ms = (uint64)ts->tv_sec * 1000 + (uint64)ts->tv_nsec / 1000000;
-    return ms;
+    return clockid == CLOCK_REALTIME ||
+           clockid == CLOCK_MONOTONIC ||
+           clockid == CLOCK_BOOTTIME ||
+           clockid == CLOCK_REALTIME_ALARM ||
+           clockid == CLOCK_BOOTTIME_ALARM;
 }
 
-/* Convert milliseconds to k_timespec */
-static void ms_to_ts(uint64 ms, struct k_timespec *ts)
+static uint64 timerfd_now_ns(int clockid)
 {
-    ts->tv_sec  = (int64)(ms / 1000);
-    ts->tv_nsec = (int64)((ms % 1000) * 1000000);
+    if (clockid == CLOCK_REALTIME || clockid == CLOCK_REALTIME_ALARM)
+        return goldfish_rtc_read_ns();
+
+    uint64 freq = __timebase_frequency;
+    if (freq == 0)
+        return sched_timer_now_ms() * NSEC_PER_MSEC;
+
+    uint64 ticks = r_time();
+    return (ticks / freq) * NSEC_PER_SEC +
+        ((ticks % freq) * NSEC_PER_SEC) / freq;
+}
+
+static int ts_to_ns(const struct k_timespec *ts, uint64 *ns)
+{
+    if (ts->tv_sec < 0 || ts->tv_nsec < 0 ||
+        ts->tv_nsec >= (int64)NSEC_PER_SEC)
+        return -EINVAL;
+
+    uint64 sec = (uint64)ts->tv_sec;
+    if (sec > UINT64_MAX / NSEC_PER_SEC)
+        return -EINVAL;
+    uint64 base = sec * NSEC_PER_SEC;
+    uint64 nsec = (uint64)ts->tv_nsec;
+    if (base > UINT64_MAX - nsec)
+        return -EINVAL;
+    *ns = base + nsec;
+    return 0;
+}
+
+static uint64 ns_to_ms_ceil(uint64 ns)
+{
+    if (ns == 0)
+        return 0;
+    return (ns + NSEC_PER_MSEC - 1) / NSEC_PER_MSEC;
+}
+
+static void ns_to_ts(uint64 ns, struct k_timespec *ts)
+{
+    ts->tv_sec  = (int64)(ns / NSEC_PER_SEC);
+    ts->tv_nsec = (int64)(ns % NSEC_PER_SEC);
 }
 
 /* Check if a timespec is zero (disarm) */
@@ -98,21 +148,29 @@ static void timerfd_rearm_work(struct work_struct *work)
 
     spin_lock(&ctx->lock);
     if (ctx->cancelled || !ctx->armed) {
+        ctx->rearm_pending = false;
+        bool free_ctx = ctx->cancelled && ctx->file == NULL;
+        spin_unlock(&ctx->lock);
+        if (free_ctx)
+            kfree(ctx);
+        return;
+    }
+    if (ctx->interval_ns == 0) {
+        ctx->rearm_pending = false;
         spin_unlock(&ctx->lock);
         return;
     }
-    uint64 interval_ms = ts_to_ms(&ctx->setting.it_interval);
-    if (interval_ms == 0) {
-        spin_unlock(&ctx->lock);
-        return;
-    }
-    ctx->arm_time = r_time();
+    uint64 now_ns = timerfd_now_ns(ctx->clockid);
+    if (ctx->next_expiration_ns <= now_ns)
+        ctx->next_expiration_ns = now_ns + ctx->interval_ns;
+    uint64 delay_ms = ns_to_ms_ceil(ctx->next_expiration_ns - now_ns);
+    ctx->rearm_pending = false;
     spin_unlock(&ctx->lock);
 
     /* Remove the old timer node first (it may still be in the tree if
      * retry_limit > 1), then re-arm with a fresh node. */
     sched_timer_done(&ctx->timer);
-    sched_timer_set_cb(&ctx->timer, interval_ms,
+    sched_timer_set_cb(&ctx->timer, delay_ms ? delay_ms : 1,
                        timerfd_timer_callback, ctx);
 }
 
@@ -122,11 +180,21 @@ static void timerfd_timer_callback(struct timer_node *tn)
     struct timerfd_ctx *ctx = tn->data;
 
     spin_lock(&ctx->lock);
-    ctx->expirations++;
+    uint64 now_ns = timerfd_now_ns(ctx->clockid);
+    uint64 count = 1;
+    if (ctx->interval_ns != 0 && now_ns > ctx->next_expiration_ns)
+        count += (now_ns - ctx->next_expiration_ns) / ctx->interval_ns;
+    ctx->expirations += count;
+    if (ctx->interval_ns != 0)
+        ctx->next_expiration_ns += count * ctx->interval_ns;
 
-    bool need_rearm = !ts_is_zero(&ctx->setting.it_interval) && !ctx->cancelled;
-    if (!need_rearm)
+    bool need_rearm = ctx->interval_ns != 0 && !ctx->cancelled;
+    if (!need_rearm) {
         ctx->armed = false;
+        ctx->rearm_pending = false;
+    } else {
+        ctx->rearm_pending = true;
+    }
 
     /* Wake readers */
     tq_wakeup_all(&ctx->rq, 0, 0);
@@ -138,8 +206,14 @@ static void timerfd_timer_callback(struct timer_node *tn)
 
     /* Defer re-arm to workqueue (can't call sched_timer_set_cb here
      * because timer lock is already held) */
-    if (need_rearm && timerfd_wq)
-        queue_work(timerfd_wq, &ctx->rearm_work);
+    if (need_rearm && timerfd_wq) {
+        if (!queue_work(timerfd_wq, &ctx->rearm_work)) {
+            spin_lock(&ctx->lock);
+            ctx->rearm_pending = false;
+            ctx->armed = false;
+            spin_unlock(&ctx->lock);
+        }
+    }
 }
 
 /* ── read ─────────────────────────────────────────────────────────────── */
@@ -187,7 +261,7 @@ static int timerfd_poll(struct vfs_file *file, short events)
 
     spin_lock(&ctx->lock);
     if (ctx->expirations > 0)
-        revents |= (events & (POLLIN | POLLRDNORM));
+        revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
     spin_unlock(&ctx->lock);
 
     return revents;
@@ -200,15 +274,19 @@ static int timerfd_release(struct vfs_inode *ip, struct vfs_file *file)
     if (ctx) {
         spin_lock(&ctx->lock);
         ctx->cancelled = true;
+        ctx->file = NULL;
         if (ctx->armed) {
             ctx->armed = false;
             spin_unlock(&ctx->lock);
             sched_timer_done(&ctx->timer);
+            spin_lock(&ctx->lock);
         } else {
-            spin_unlock(&ctx->lock);
         }
         tq_wakeup_all(&ctx->rq, -1, 0);
-        kfree(ctx);
+        bool free_ctx = !ctx->rearm_pending;
+        spin_unlock(&ctx->lock);
+        if (free_ctx)
+            kfree(ctx);
         file->private_data = NULL;
     }
     return 0;
@@ -253,6 +331,11 @@ uint64 sys_timerfd_create(void)
     int clockid, flags;
     argint(0, &clockid);
     argint(1, &flags);
+
+    if (!timerfd_clock_supported(clockid))
+        return (uint64)-EINVAL;
+    if (flags & ~(TFD_NONBLOCK | TFD_CLOEXEC))
+        return (uint64)-EINVAL;
 
     struct timerfd_ctx *ctx = (struct timerfd_ctx *)kalloc();
     if (ctx == NULL)
@@ -304,6 +387,11 @@ uint64 sys_timerfd_settime(void)
     if (ctx == NULL)
         return (uint64)-EBADF;
 
+    if (flags & ~(TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET)) {
+        vfs_fput(fp);
+        return (uint64)-EINVAL;
+    }
+
     /* Copy in the new itimerspec from userspace */
     struct k_itimerspec new_val;
     if (either_copyin(&new_val, 1, new_addr, sizeof(new_val)) < 0) {
@@ -311,11 +399,16 @@ uint64 sys_timerfd_settime(void)
         return (uint64)-EFAULT;
     }
 
-    /* Validate timespec values */
-    if (new_val.it_value.tv_nsec < 0 || new_val.it_value.tv_nsec >= 1000000000LL ||
-        new_val.it_interval.tv_nsec < 0 || new_val.it_interval.tv_nsec >= 1000000000LL) {
+    uint64 value_ns, interval_ns;
+    int ret = ts_to_ns(&new_val.it_value, &value_ns);
+    if (ret != 0) {
         vfs_fput(fp);
-        return (uint64)-EINVAL;
+        return (uint64)ret;
+    }
+    ret = ts_to_ns(&new_val.it_interval, &interval_ns);
+    if (ret != 0) {
+        vfs_fput(fp);
+        return (uint64)ret;
     }
 
     spin_lock(&ctx->lock);
@@ -324,12 +417,10 @@ uint64 sys_timerfd_settime(void)
     if (old_addr != 0) {
         struct k_itimerspec old_val;
         if (ctx->armed) {
-            /* Compute remaining time */
-            uint64 now = r_time();
-            uint64 value_ms = ts_to_ms(&ctx->setting.it_value);
-            uint64 elapsed_ms = RAWTICKS_TO_MS(now - ctx->arm_time);
-            if (elapsed_ms < value_ms)
-                ms_to_ts(value_ms - elapsed_ms, &old_val.it_value);
+            uint64 now_ns = timerfd_now_ns(ctx->clockid);
+            if (ctx->next_expiration_ns > now_ns)
+                ns_to_ts(ctx->next_expiration_ns - now_ns,
+                         &old_val.it_value);
             else
                 memset(&old_val.it_value, 0, sizeof(old_val.it_value));
             old_val.it_interval = ctx->setting.it_interval;
@@ -357,24 +448,33 @@ uint64 sys_timerfd_settime(void)
     /* Reset expiration counter */
     ctx->expirations = 0;
     ctx->setting = new_val;
+    ctx->interval_ns = interval_ns;
 
     /* Arm new timer if it_value is non-zero */
     if (!ts_is_zero(&new_val.it_value)) {
-        uint64 delay_ms = ts_to_ms(&new_val.it_value);
+        uint64 now_ns = timerfd_now_ns(ctx->clockid);
+        uint64 delay_ns;
 
         if (flags & TFD_TIMER_ABSTIME) {
-            /* Absolute time: compute relative delay from now */
-            uint64 now_ms = RAWTICKS_TO_MS(r_time());
-            if (delay_ms > now_ms)
-                delay_ms = delay_ms - now_ms;
+            ctx->next_expiration_ns = value_ns;
+            if (value_ns > now_ns)
+                delay_ns = value_ns - now_ns;
             else
-                delay_ms = 0; /* already past */
+                delay_ns = 0;
+        } else {
+            if (UINT64_MAX - now_ns < value_ns) {
+                spin_unlock(&ctx->lock);
+                vfs_fput(fp);
+                return (uint64)-EINVAL;
+            }
+            ctx->next_expiration_ns = now_ns + value_ns;
+            delay_ns = value_ns;
         }
 
+        uint64 delay_ms = ns_to_ms_ceil(delay_ns);
         if (delay_ms == 0)
             delay_ms = 1; /* minimum 1ms to ensure timer fires */
 
-        ctx->arm_time = r_time();
         ctx->armed = true;
         spin_unlock(&ctx->lock);
         sched_timer_set_cb(&ctx->timer, delay_ms,
@@ -404,11 +504,9 @@ uint64 sys_timerfd_gettime(void)
     struct k_itimerspec curr;
     spin_lock(&ctx->lock);
     if (ctx->armed) {
-        uint64 now = r_time();
-        uint64 value_ms = ts_to_ms(&ctx->setting.it_value);
-        uint64 elapsed_ms = RAWTICKS_TO_MS(now - ctx->arm_time);
-        if (elapsed_ms < value_ms)
-            ms_to_ts(value_ms - elapsed_ms, &curr.it_value);
+        uint64 now_ns = timerfd_now_ns(ctx->clockid);
+        if (ctx->next_expiration_ns > now_ns)
+            ns_to_ts(ctx->next_expiration_ns - now_ns, &curr.it_value);
         else
             memset(&curr.it_value, 0, sizeof(curr.it_value));
         curr.it_interval = ctx->setting.it_interval;

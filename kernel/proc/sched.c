@@ -553,7 +553,7 @@ retry:
         // Use wake_list - the running CPU will enqueue after
         // context_switch_finish. Use origin_cpuid (already validated) rather
         // than re-reading cpu_id.
-        rq_add_wake_list(origin_cpuid, se);
+        rq_add_wake_list_locked(origin_cpuid, se);
         spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
         // Send IPI to origin CPU to process the wake list
@@ -563,8 +563,12 @@ retry:
 
     // on_rq=0 and on_cpu=0: task is fully off CPU, enqueue directly
     rq_enqueue_task(rq, se);
+    smp_store_release(&p->state, THREAD_RUNNING);
     spin_unlock(&se->pi_lock);
     rq_unlock_two(origin_cpuid, target_cpu);
+    if (target_cpu != cpuid()) {
+        ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
+    }
 }
 
 // unconditionally wake up a process from the sleep queue.

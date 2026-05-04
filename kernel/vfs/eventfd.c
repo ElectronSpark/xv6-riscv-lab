@@ -148,9 +148,9 @@ static int eventfd_poll(struct vfs_file *file, short events)
 
     spin_lock(&ctx->lock);
     if (ctx->count > 0)
-        revents |= (events & (POLLIN | POLLRDNORM));
+        revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
     if (ctx->count < EVENTFD_MAX)
-        revents |= (events & (POLLOUT | POLLWRNORM));
+        revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
     spin_unlock(&ctx->lock);
 
     return revents;
@@ -185,6 +185,9 @@ uint64 sys_eventfd2(void)
     int flags;
     argint(0, (int *)&initval);
     argint(1, &flags);
+
+    if (flags & ~(EFD_SEMAPHORE | EFD_CLOEXEC | EFD_NONBLOCK))
+        return (uint64)-EINVAL;
 
     struct eventfd_ctx *ctx = (struct eventfd_ctx *)kalloc();
     if (ctx == NULL)

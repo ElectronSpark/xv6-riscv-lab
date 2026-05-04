@@ -522,24 +522,24 @@ int tty_poll(struct tty *tty, short events) {
 
     spin_lock(&tty->lock);
 
-    if (events & (POLLIN | POLLRDNORM)) {
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND)) {
         if (L_CANON(tty)) {
             /* Canonical mode: data ready if input pipe has bytes */
             struct pipe *pi = tty->input_pipe;
             uint nwrite = smp_load_acquire(&pi->nwrite);
             uint nread = smp_load_acquire(&pi->nread);
             if ((nwrite - nread) > 0)
-                revents |= (events & (POLLIN | POLLRDNORM));
+                revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
         } else {
             /* Raw mode: data ready if ring buffer is non-empty */
             if (tty->raw_r != tty->raw_w)
-                revents |= (events & (POLLIN | POLLRDNORM));
+                revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
         }
     }
 
-    if (events & (POLLOUT | POLLWRNORM)) {
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
         /* Output to UART is always accepted */
-        revents |= (events & (POLLOUT | POLLWRNORM));
+        revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
     }
 
     spin_unlock(&tty->lock);

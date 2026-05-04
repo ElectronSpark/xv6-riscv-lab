@@ -22,6 +22,7 @@ struct knote;  /* forward declaration for knote_ops */
 #define KN_DISABLED     0x04    /* knote is disabled */
 #define KN_DETACHED     0x08    /* knote has been detached from source */
 #define KN_TIMER        0x10    /* knote has an active timer */
+#define KN_EDGE_ACTIVE  0x20    /* EV_CLEAR file filter is currently ready */
 
 /*
  * struct knote_ops - per-filter operation vtable
@@ -105,6 +106,8 @@ void kqueue_signal_notify(struct thread *p, int signo);
 
 /* Core kqueue API (used by syscall layer) */
 int kqueue_create(void);
+struct kqueue *kqueue_alloc_private(void);
+void kqueue_close_private(struct kqueue *kq);
 int kqueue_register(struct kqueue *kq, struct kevent *changelist, int nchanges);
 int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                 int timeout_ms);

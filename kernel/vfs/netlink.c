@@ -755,13 +755,13 @@ static int netlink_file_poll(struct vfs_file *file, short events)
 
     spin_lock(&sk->lock);
     /* Always writable (we handle requests synchronously) */
-    if (events & (POLLOUT | POLLWRNORM))
-        revents |= (events & (POLLOUT | POLLWRNORM));
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND))
+        revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
 
     /* Readable if there's response data */
-    if (events & (POLLIN | POLLRDNORM)) {
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND)) {
         if (sk->resp_len > sk->resp_off)
-            revents |= (events & (POLLIN | POLLRDNORM));
+            revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
     }
     spin_unlock(&sk->lock);
 
