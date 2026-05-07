@@ -10,6 +10,7 @@
 #include "printf.h"
 #include <mm/vm.h>
 #include "errno.h"
+#include "clone_flags.h"
 
 /* ============================================================
  * Syscall tracing — set STRACE_ENABLED to 1 to log every
@@ -429,6 +430,7 @@ extern uint64 sys_vfs_fchmodat(void);
 extern uint64 sys_vfs_fchown(void);
 extern uint64 sys_vfs_fchownat(void);
 extern uint64 sys_umask(void);
+extern uint64 sys_statx(void);
 
 // setitimer / getitimer
 extern uint64 sys_setitimer(void);
@@ -472,6 +474,7 @@ extern uint64 sys_sched_rr_get_interval(void);
 extern uint64 sys_rt_sigqueueinfo(void);
 extern uint64 sys_clone3(void);
 extern uint64 sys_mlock2(void);
+extern uint64 sys_mlock(void);
 extern uint64 sys_mlockall(void);
 extern uint64 sys_munlock(void);
 extern uint64 sys_munlockall(void);
@@ -558,6 +561,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_sigwait] sys_sigwait,
     [SYS_tkill] sys_tkill,
     [SYS_gettid] sys_gettid,
+    [SYS_gettid_generic] sys_gettid,
     [SYS_exit_group] sys_exit_group,
     [SYS_tgkill] sys_tgkill,
     [SYS_vfork] sys_vfork,
@@ -566,13 +570,21 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_setsid] sys_setsid,
     [SYS_getsid] sys_getsid,
     [SYS_getrandom] sys_getrandom,
+    [SYS_brk_generic] sys_brk,
     [SYS_mmap] sys_mmap,
+    [SYS_mmap_generic] sys_mmap,
     [SYS_munmap] sys_munmap,
+    [SYS_munmap_generic] sys_munmap,
     [SYS_mprotect] sys_mprotect,
+    [SYS_mprotect_generic] sys_mprotect,
     [SYS_mremap] sys_mremap,
+    [SYS_mremap_generic] sys_mremap,
     [SYS_msync] sys_msync,
+    [SYS_msync_generic] sys_msync,
     [SYS_mincore] sys_mincore,
+    [SYS_mincore_generic] sys_mincore,
     [SYS_madvise] sys_madvise,
+    [SYS_madvise_generic] sys_madvise,
     [SYS_brk] sys_brk,
     [SYS_futex] sys_futex,
     [SYS_memstat] sys_memstat,
@@ -605,6 +617,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_kevent_wait] sys_kevent_wait,
     [SYS_ftruncate] sys_vfs_ftruncate,
     [SYS_gettimeofday] sys_gettimeofday,
+    [SYS_gettimeofday_generic] sys_gettimeofday,
     [SYS_waitpid] sys_waitpid,
     [SYS_nanosleep] sys_nanosleep,
     [SYS_uname] sys_uname,
@@ -651,6 +664,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_getgroups] sys_getgroups,
     [SYS_setgroups] sys_setgroups,
     [SYS_prlimit64] sys_prlimit64,
+    [SYS_prlimit64_generic] sys_prlimit64,
     [SYS_kstats] sys_kstats,
 #ifdef USE_LWIP
     [SYS_netconf] sys_netconf,
@@ -686,6 +700,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
     [SYS_eventfd2] sys_eventfd2,
+    [SYS_eventfd2_legacy] sys_eventfd2,
     [SYS_timerfd_create] sys_timerfd_create,
     [SYS_timerfd_settime] sys_timerfd_settime,
     [SYS_timerfd_settime64] sys_timerfd_settime,
@@ -694,9 +709,12 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_clock_nanosleep] sys_clock_nanosleep,
     [SYS_clock_nanosleep_time64] sys_clock_nanosleep,
     [SYS_epoll_pwait] sys_epoll_pwait,
+    [SYS_epoll_pwait_legacy] sys_epoll_pwait,
     [SYS_epoll_pwait2] sys_epoll_pwait2,
     [SYS_epoll_ctl] sys_epoll_ctl,
+    [SYS_epoll_ctl_legacy] sys_epoll_ctl,
     [SYS_epoll_create1] sys_epoll_create1,
+    [SYS_epoll_create1_legacy] sys_epoll_create1,
     [SYS_umask] sys_umask,
     [SYS_fchownat] sys_vfs_fchownat,
     [SYS_fchown] sys_vfs_fchown,
@@ -729,32 +747,67 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_set_robust_list] sys_set_robust_list,
     [SYS_sigaltstack] sys_sigaltstack,
     [SYS_prctl] sys_prctl,
+    [SYS_prctl_generic] sys_prctl,
     [SYS_sysinfo] sys_sysinfo,
+    [SYS_sysinfo_generic] sys_sysinfo,
     [SYS_getrusage] sys_getrusage,
     [SYS_getpriority] sys_getpriority,
     [SYS_setpriority] sys_setpriority,
+    [SYS_munlockall_generic] sys_munlockall,
+    [SYS_munlock_generic] sys_munlock,
+    [SYS_mlockall_generic] sys_mlockall,
+    [SYS_mlock_generic] sys_mlock,
+    [SYS_mlock2_generic] sys_mlock2,
     [SYS_munlockall] sys_munlockall,
     [SYS_munlock] sys_munlock,
     [SYS_mlockall] sys_mlockall,
     [SYS_mlock2] sys_mlock2,
     [SYS_memfd_create] sys_memfd_create,
     [SYS_memfd_create_generic] sys_memfd_create,
+    [SYS_getrandom_generic] sys_getrandom,
     [SYS_membarrier] sys_membarrier,
+    [SYS_membarrier_generic] sys_membarrier,
     [SYS_fadvise64] sys_fadvise64,
     [SYS_fallocate] sys_fallocate,
+    [SYS_statx] sys_statx,
+    [SYS_statx_generic] sys_statx,
     [SYS_poweroff] sys_poweroff,
     [SYS_reboot] sys_reboot,
     /* Resource limit syscalls (musl high numbers) */
     [SYS_getrlimit] sys_getrlimit,
     [SYS_setrlimit] sys_setrlimit,
     [SYS_prlimit64_musl] sys_prlimit64,
+    [SYS_clone3_generic] sys_clone3,
+    [SYS_clock_gettime64_generic] sys_clock_gettime,
+    [SYS_clock_getres_time64_generic] sys_clock_getres,
 };
+
+static int looks_like_linux_munmap(uint64 addr, uint64 length)
+{
+    return addr >= UVMBOTTOM && addr < UVMTOP &&
+           (addr & (PGSIZE - 1)) == 0 &&
+           length != 0 && length < (UVMTOP - UVMBOTTOM);
+}
 
 void syscall(void) {
     int num;
     struct thread *p = current;
 
     num = p->trapframe->trapframe.a7;
+
+    /*
+     * Upstream musl's RISC-V __unmapself helper uses native Linux syscall
+     * numbers directly: munmap(215), then exit(93).  xv6 keeps its compact
+     * syscall table for libc wrappers, so route this self-teardown sequence
+     * before 93 is interpreted as the debug dumppcache syscall.
+     */
+    if (num == 215 &&
+        looks_like_linux_munmap(p->trapframe->trapframe.a0,
+                                p->trapframe->trapframe.a1)) {
+        num = SYS_munmap;
+    } else if (num == 93 && (p->clone_flags & CLONE_THREAD)) {
+        num = SYS_exit;
+    }
 
     if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
 #if STRACE_ENABLED

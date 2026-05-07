@@ -620,6 +620,16 @@ uint64 sys_mlock2(void) {
     return sys_mlock_range(addr, length, flags);
 }
 
+uint64 sys_mlock(void) {
+    uint64 addr;
+    uint64 length;
+
+    argaddr(0, &addr);
+    argaddr(1, &length);
+
+    return sys_mlock_range(addr, length, 0);
+}
+
 uint64 sys_mlockall(void) {
     int flags;
     argint(0, &flags);

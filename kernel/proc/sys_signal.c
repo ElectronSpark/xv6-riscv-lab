@@ -384,6 +384,48 @@ uint64 sys_setitimer(void) {
 }
 
 /**
+ * sys_alarm - Linux alarm(2)
+ * args: unsigned int seconds
+ *
+ * alarm(2) is the one-shot, second-granularity form of ITIMER_REAL.  It
+ * cancels any existing ITIMER_REAL interval timer and returns the remaining
+ * whole seconds from the previous alarm/timer, rounded up like Linux.
+ */
+uint64 sys_alarm(void) {
+    uint64 seconds = (uint32)argraw(0);
+
+    struct thread *p = current;
+    struct thread_group *tg = p->thread_group;
+    if (tg == NULL)
+        return -EINVAL;
+
+    uint64 old_remaining = 0;
+    uint64 now_ms = get_jiffs();
+    if (tg->itimer_expire_ms > now_ms) {
+        uint64 remain_ms = tg->itimer_expire_ms - now_ms;
+        old_remaining = (remain_ms + 999) / 1000;
+    }
+
+    tg->itimer_real_gen++;
+    tg->itimer_expire_ms = 0;
+    tg->itimer_interval_ms = 0;
+
+    if (seconds == 0)
+        return old_remaining;
+
+    uint64 value_ms = seconds * 1000;
+    tg->itimer_expire_ms = get_jiffs() + value_ms;
+
+    uint64 packed = ((uint64)tg->itimer_real_gen << 32) |
+                    (uint64)(uint32)tg->tgid;
+
+    int ret = sched_timer_add(__itimer_real_fire, (void *)packed, value_ms);
+    if (ret < 0)
+        return ret;
+    return old_remaining;
+}
+
+/**
  * sys_getitimer - POSIX getitimer(2)
  * args: int which, struct itimerval *curr_value
  */

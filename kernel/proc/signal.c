@@ -750,7 +750,8 @@ after_enqueue:
 
 int signal_send(int pid, ksiginfo_t *info) {
     struct thread *p = NULL;
-    if (pid < 0 || info == NULL || SIGBAD(info->signo)) {
+    if (pid < 0 || info == NULL ||
+        (SIGBAD(info->signo) && info->signo != 0)) {
         return -EINVAL; // Invalid PID or signal number
     }
     rcu_read_lock();
@@ -763,6 +764,11 @@ int signal_send(int pid, ksiginfo_t *info) {
         return -ESRCH; // No thread found
     }
     assert(p != NULL, "signal_send: thread is NULL");
+    enum thread_state pstate = __thread_state_get(p);
+    if (pstate == THREAD_UNUSED || pstate == THREAD_ZOMBIE) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
 
     /* POSIX signal permission check:
      * A process can send a signal to another process only if:
@@ -791,6 +797,11 @@ int signal_send(int pid, ksiginfo_t *info) {
                 return -EPERM;
             }
         }
+    }
+
+    if (info->signo == 0) {
+        rcu_read_unlock();
+        return 0;
     }
 
     int ret;
@@ -1587,7 +1598,7 @@ int kill_thread(struct thread *p, int signum) {
 // This is the POSIX tgkill(tgid, tid, sig) function.
 // Returns 0 on success, negative errno on failure.
 int tgkill(int tgid, int tid, int signum) {
-    if (tgid < 0 || tid < 0 || SIGBAD(signum)) {
+    if (tgid < 0 || tid < 0 || (SIGBAD(signum) && signum != 0)) {
         return -EINVAL;
     }
     struct thread *p = NULL;
@@ -1596,10 +1607,19 @@ int tgkill(int tgid, int tid, int signum) {
         rcu_read_unlock();
         return -ESRCH;
     }
+    enum thread_state pstate = __thread_state_get(p);
+    if (pstate == THREAD_UNUSED || pstate == THREAD_ZOMBIE) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
     // Verify the thread belongs to the specified thread group
     if (p->thread_group == NULL || p->thread_group->tgid != tgid) {
         rcu_read_unlock();
         return -ESRCH;
+    }
+    if (signum == 0) {
+        rcu_read_unlock();
+        return 0;
     }
     ksiginfo_t info = {0};
     info.signo = signum;
@@ -1614,7 +1634,7 @@ int tgkill(int tgid, int tid, int signum) {
 // Send a signal to a specific thread by TID (tkill).
 // This is the POSIX tkill(tid, sig) function.
 int tkill(int tid, int signum) {
-    if (tid < 0 || SIGBAD(signum)) {
+    if (tid < 0 || (SIGBAD(signum) && signum != 0)) {
         return -EINVAL;
     }
     struct thread *p = NULL;
@@ -1622,6 +1642,15 @@ int tkill(int tid, int signum) {
     if (get_pid_thread(tid, &p) != 0 || p == NULL) {
         rcu_read_unlock();
         return -ESRCH;
+    }
+    enum thread_state pstate = __thread_state_get(p);
+    if (pstate == THREAD_UNUSED || pstate == THREAD_ZOMBIE) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
+    if (signum == 0) {
+        rcu_read_unlock();
+        return 0;
     }
     ksiginfo_t info = {0};
     info.signo = signum;

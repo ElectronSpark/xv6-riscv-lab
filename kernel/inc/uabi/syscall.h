@@ -6,106 +6,103 @@
 /*
  * System call numbers — grouped by subsystem with gaps for future use.
  *
- *   1-19   Process management
- *  20-49   File system / VFS
- *  50-69   Memory management
- *  70-89   Signals
- *  90-99   Debug / introspection
+ * xv6-private syscalls live above Linux's native ABI ranges so raw Linux
+ * syscall numbers can be routed by the kernel without libc-side renumbering.
  */
 
 // --- Process management (1-19) ---
-#define SYS_clone 1
-#define SYS_vfork 2
-#define SYS_exit 3
-#define SYS_exit_group 4
-#define SYS_wait 5
-#define SYS_exec 6
-#define SYS_kill 7
-#define SYS_tgkill 8
-#define SYS_getpid 9
-#define SYS_gettid 10
-#define SYS_sleep 11
-#define SYS_pause 12
-#define SYS_uptime 13
-#define SYS_sbrk 14
-#define SYS_setpgid 15
-#define SYS_getpgid 16
-#define SYS_setsid 17
-#define SYS_getsid 18
-#define SYS_getrandom 19
+#define SYS_clone 1201
+#define SYS_vfork 1202
+#define SYS_exit 1203
+#define SYS_exit_group 1204
+#define SYS_wait 1205
+#define SYS_exec 1206
+#define SYS_kill 1207
+#define SYS_tgkill 1208
+#define SYS_getpid 1209
+#define SYS_gettid 1210
+#define SYS_sleep 1211
+#define SYS_pause 1212
+#define SYS_uptime 1213
+#define SYS_sbrk 1214
+#define SYS_setpgid 1215
+#define SYS_getpgid 1216
+#define SYS_setsid 1217
+#define SYS_getsid 1218
+#define SYS_getrandom 1219
 
 // --- File system / VFS (20-49) ---
-#define SYS_open 20
-#define SYS_close 21
-#define SYS_read 22
-#define SYS_write 23
-#define SYS_dup 24
-#define SYS_pipe 25
-#define SYS_fstat 26
-#define SYS_link 27
-#define SYS_unlink 28
-#define SYS_symlink 29
-#define SYS_mkdir 30
-#define SYS_mknod 31
-#define SYS_chdir 32
-#define SYS_chroot 33
-#define SYS_mount 34
-#define SYS_umount 35
-#define SYS_connect 36
-#define SYS_getdents 37
-#define SYS_getcwd 38
-#define SYS_sync 39
-#define SYS_ioctl 40
-#define SYS_tcgetattr 41
-#define SYS_tcsetattr 42
-#define SYS_lseek 43
-#define SYS_dup2 44
-#define SYS_fcntl 45
-#define SYS_access 46
-#define SYS_rename 47
-#define SYS_readlink 48
-#define SYS_stat 49
+#define SYS_open 1220
+#define SYS_close 1221
+#define SYS_read 1222
+#define SYS_write 1223
+#define SYS_dup 1224
+#define SYS_pipe 1225
+#define SYS_fstat 1226
+#define SYS_link 1227
+#define SYS_unlink 1228
+#define SYS_symlink 1229
+#define SYS_mkdir 1230
+#define SYS_mknod 1231
+#define SYS_chdir 1232
+#define SYS_chroot 1233
+#define SYS_mount 1234
+#define SYS_umount 1235
+#define SYS_connect 1236
+#define SYS_getdents 1237
+#define SYS_getcwd 1238
+#define SYS_sync 1239
+#define SYS_ioctl 1240
+#define SYS_tcgetattr 1241
+#define SYS_tcsetattr 1242
+#define SYS_lseek 1243
+#define SYS_dup2 1244
+#define SYS_fcntl 1245
+#define SYS_access 1246
+#define SYS_rename 1247
+#define SYS_readlink 1248
+#define SYS_stat 1249
 
 // --- Filesystem info ---
-#define SYS_statfs 65
+#define SYS_statfs 855
 
 // --- Memory management (50-69) ---
-#define SYS_mmap 50
-#define SYS_munmap 51
-#define SYS_mprotect 52
-#define SYS_mremap 53
-#define SYS_msync 54
-#define SYS_mincore 55
-#define SYS_madvise 56
-#define SYS_gettimeofday 57
-#define SYS_waitpid 58
-#define SYS_nanosleep 59
-#define SYS_ftruncate 60
-#define SYS_getppid 61
-#define SYS_uname 62
-#define SYS_lstat 63
-#define SYS_poll 64
+#define SYS_mmap 1250
+#define SYS_munmap 1251
+#define SYS_mprotect 1252
+#define SYS_mremap 1253
+#define SYS_msync 1254
+#define SYS_mincore 1255
+#define SYS_madvise 1256
+#define SYS_gettimeofday 1257
+#define SYS_waitpid 1258
+#define SYS_nanosleep 1259
+#define SYS_ftruncate 1260
+#define SYS_getppid 1261
+#define SYS_uname 1262
+#define SYS_lstat 1263
+#define SYS_poll 1264
 // 65-69 reserved
 
 // --- Signals (70-89) ---
-#define SYS_sigaction 70
-#define SYS_sigreturn 71
-#define SYS_sigpending 72
-#define SYS_sigprocmask 73
-#define SYS_sigalarm 74
-#define SYS_sigsuspend 75
-#define SYS_sigwait 76
-#define SYS_tkill 77
+#define SYS_sigaction 1270
+#define SYS_sigreturn 1271
+#define SYS_sigpending 1272
+#define SYS_sigprocmask 1273
+#define SYS_sigalarm 1274
+#define SYS_sigsuspend 1275
+#define SYS_sigwait 1276
+#define SYS_tkill 1277
 // 78-89 reserved
 
 // --- Debug / introspection (90-99) ---
-#define SYS_memstat 90
-#define SYS_dumpproc 91
-#define SYS_dumpchan 92
-#define SYS_dumppcache 93
-#define SYS_dumprq 94
-#define SYS_kernbase 95
-#define SYS_dumpinode 96
+#define SYS_memstat 1290
+#define SYS_dumpproc 1291
+#define SYS_dumpchan 1292
+#define SYS_dumppcache 1293
+#define SYS_dumprq 1294
+#define SYS_kernbase 1295
+#define SYS_dumpinode 1296
 // 97-99 reserved
 
 #endif /* __USER_ABI_SYSCALL_H */

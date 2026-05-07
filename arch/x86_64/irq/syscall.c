@@ -254,6 +254,7 @@ extern uint64 sys_statx(void);
 // setitimer / getitimer
 extern uint64 sys_setitimer(void);
 extern uint64 sys_getitimer(void);
+extern uint64 sys_alarm(void);
 
 extern uint64 sys_kqueue(void);
 extern uint64 sys_kevent_register(void);
@@ -317,6 +318,7 @@ extern uint64 sys_inotify_init1(void);
 extern uint64 sys_inotify_add_watch(void);
 extern uint64 sys_inotify_rm_watch(void);
 extern uint64 sys_mlock2(void);
+extern uint64 sys_mlock(void);
 extern uint64 sys_mlockall(void);
 extern uint64 sys_munlock(void);
 extern uint64 sys_munlockall(void);
@@ -369,39 +371,64 @@ extern uint64 sys_sendmmsg(void);
 /* ── Syscall routing table (same as RISC-V, shared syscall numbers) ── */
 static uint64 (*syscalls[])(void) = {
     [SYS_clone] sys_clone,
+    [SYS_clone_x86] sys_clone,
     [SYS_exit] sys_exit,
+    [SYS_exit_x86] sys_exit,
     [SYS_wait] sys_wait,
+    [SYS_wait4_x86] sys_waitpid,
     [SYS_pipe] sys_vfs_pipe,
+    [SYS_pipe_x86] sys_vfs_pipe,
     [SYS_read] sys_vfs_read,
+    [SYS_read_x86] sys_vfs_read,
     [SYS_kill] sys_kill,
+    [SYS_kill_x86] sys_kill,
+    [SYS_tkill_x86] sys_tkill,
+    [SYS_tgkill_x86] sys_tgkill,
     [SYS_exec] sys_exec,
+    [SYS_execve_x86] sys_exec,
     [SYS_fstat] sys_vfs_fstat,
+    [SYS_fstat_x86] sys_vfs_fstat,
     [SYS_chdir] sys_vfs_chdir,
+    [SYS_chdir_x86] sys_vfs_chdir,
     [SYS_dup] sys_vfs_dup,
+    [SYS_dup_x86] sys_vfs_dup,
     [SYS_getpid] sys_getpid,
+    [SYS_getpid_x86] sys_getpid,
+    [SYS_gettid_x86] sys_gettid,
     [SYS_getppid] sys_getppid,
     [SYS_sbrk] sys_sbrk,
     [SYS_sleep] sys_sleep,
     [SYS_uptime] sys_uptime,
     [SYS_open] sys_vfs_open,
+    [SYS_open_x86] sys_vfs_open,
     [SYS_write] sys_vfs_write,
+    [SYS_write_x86] sys_vfs_write,
     [SYS_mknod] sys_vfs_mknod,
     [SYS_unlink] sys_vfs_unlink,
+    [SYS_unlink_x86] sys_vfs_unlink,
     [SYS_link] sys_vfs_link,
+    [SYS_link_x86] sys_vfs_link,
     [SYS_mkdir] sys_vfs_mkdir,
+    [SYS_mkdir_x86] sys_vfs_mkdir,
     [SYS_close] sys_vfs_close,
+    [SYS_close_x86] sys_vfs_close,
     [SYS_connect] sys_sconnect,    // socket connect (musl sends SYS_connect=36)
     [SYS_symlink] sys_vfs_symlink,
+    [SYS_symlink_x86] sys_vfs_symlink,
     [SYS_sigaction] sys_sigaction,
+    [SYS_rt_sigaction_x86] sys_sigaction,
     [SYS_sigreturn] sys_sigreturn,
     [SYS_sigpending] sys_sigpending,
     [SYS_sigprocmask] sys_sigprocmask,
+    [SYS_rt_sigprocmask_x86] sys_sigprocmask,
     [SYS_pause] sys_pause,
+    [SYS_pause_x86] sys_pause,
     [SYS_sigsuspend] sys_sigsuspend,
     [SYS_sigwait] sys_sigwait,
     [SYS_tkill] sys_tkill,
     [SYS_gettid] sys_gettid,
     [SYS_exit_group] sys_exit_group,
+    [SYS_exit_group_x86] sys_exit_group,
     [SYS_tgkill] sys_tgkill,
     [SYS_vfork] sys_vfork,
     [SYS_setpgid] sys_setpgid,
@@ -410,13 +437,17 @@ static uint64 (*syscalls[])(void) = {
     [SYS_getsid] sys_getsid,
     [SYS_getrandom] sys_getrandom,
     [SYS_mmap] sys_mmap,
+    [SYS_mmap_x86] sys_mmap,
     [SYS_munmap] sys_munmap,
+    [SYS_munmap_x86] sys_munmap,
     [SYS_mprotect] sys_mprotect,
+    [SYS_mprotect_x86] sys_mprotect,
     [SYS_mremap] sys_mremap,
     [SYS_msync] sys_msync,
     [SYS_mincore] sys_mincore,
     [SYS_madvise] sys_madvise,
     [SYS_brk] sys_brk,
+    [SYS_brk_x86] sys_brk,
     [SYS_futex] sys_futex,
     [SYS_futex_x86] sys_futex,
     [SYS_memstat] sys_memstat,
@@ -430,41 +461,67 @@ static uint64 (*syscalls[])(void) = {
     [SYS_losetup] sys_losetup,
     [SYS_sync] sys_sync,
     [SYS_ioctl] sys_vfs_ioctl,
+    [SYS_ioctl_x86] sys_vfs_ioctl,
     [SYS_tcgetattr] sys_tcgetattr,
     [SYS_tcsetattr] sys_tcsetattr,
     [SYS_lseek] sys_vfs_lseek,
+    [SYS_lseek_x86] sys_vfs_lseek,
     [SYS_dup2] sys_vfs_dup2,
+    [SYS_dup2_x86] sys_vfs_dup2,
     [SYS_fcntl] sys_vfs_fcntl,
+    [SYS_fcntl_x86] sys_vfs_fcntl,
     [SYS_flock] sys_flock,
+    [SYS_flock_x86] sys_flock,
     [SYS_fstatfs] sys_fstatfs,
     [SYS_statfs] sys_statfs,
     [SYS_access] sys_vfs_access,
+    [SYS_access_x86] sys_vfs_access,
     [SYS_rename] sys_vfs_rename,
+    [SYS_rename_x86] sys_vfs_rename,
     [SYS_readlink] sys_vfs_readlink,
+    [SYS_readlink_x86] sys_vfs_readlink,
     [SYS_stat] sys_vfs_stat,
+    [SYS_stat_x86] sys_vfs_stat,
     [SYS_lstat] sys_vfs_lstat,
+    [SYS_lstat_x86] sys_vfs_lstat,
     [SYS_poll] sys_vfs_poll,
+    [SYS_poll_x86] sys_vfs_poll,
     [SYS_kqueue] sys_kqueue,
     [SYS_kevent_register] sys_kevent_register,
     [SYS_kevent_wait] sys_kevent_wait,
     [SYS_ftruncate] sys_vfs_ftruncate,
+    [SYS_ftruncate_x86] sys_vfs_ftruncate,
     [SYS_gettimeofday] sys_gettimeofday,
+    [SYS_gettimeofday_x86] sys_gettimeofday,
     [SYS_waitpid] sys_waitpid,
     [SYS_nanosleep] sys_nanosleep,
+    [SYS_nanosleep_x86] sys_nanosleep,
     [SYS_uname] sys_uname,
+    [SYS_uname_x86] sys_uname,
     [SYS_getdents] sys_getdents,
+    [SYS_getdents_x86] sys_getdents,
+    [SYS_getdents64_x86] sys_getdents,
     [SYS_chroot] sys_chroot,
     [SYS_mount] sys_mount,
     [SYS_umount] sys_umount,
     [SYS_getcwd] sys_getcwd,
+    [SYS_getcwd_x86] sys_getcwd,
     [SYS_openat] sys_vfs_openat,
     [SYS_writev] sys_vfs_writev,
+    [SYS_writev_x86] sys_vfs_writev,
     [SYS_readv] sys_vfs_readv,
+    [SYS_readv_x86] sys_vfs_readv,
     [SYS_set_tid_address] sys_set_tid_address,
+    [SYS_set_tid_address_x86] sys_set_tid_address,
     [SYS_clock_gettime] sys_clock_gettime,
     [SYS_clock_getres] sys_clock_getres,
+    [SYS_clock_settime_x86] sys_clock_settime,
+    [SYS_clock_gettime_x86] sys_clock_gettime,
+    [SYS_clock_getres_x86] sys_clock_getres,
     [SYS_pread64] sys_vfs_pread64,
+    [SYS_pread64_x86] sys_vfs_pread64,
     [SYS_pwrite64] sys_vfs_pwrite64,
+    [SYS_pwrite64_x86] sys_vfs_pwrite64,
     [SYS_preadv] sys_vfs_preadv,
     [SYS_pwritev] sys_vfs_pwritev,
     [SYS_preadv2] sys_vfs_preadv2,
@@ -496,31 +553,49 @@ static uint64 (*syscalls[])(void) = {
     [SYS_setgroups] sys_setgroups,
     [SYS_arch_prctl] sys_arch_prctl,
     [SYS_prlimit64] sys_prlimit64,
+    [SYS_prlimit64_x86] sys_prlimit64,
     [SYS_kstats] sys_kstats,
 #ifdef USE_LWIP
     [SYS_netconf] sys_netconf,
     [SYS_socket] sys_socket,
+    [SYS_socket_x86] sys_socket,
     [SYS_bind] sys_bind,
+    [SYS_bind_x86] sys_bind,
     [SYS_listen] sys_listen,
+    [SYS_listen_x86] sys_listen,
     [SYS_accept] sys_accept,
+    [SYS_accept_x86] sys_accept,
     [SYS_sconnect] sys_sconnect,
+    [SYS_connect_x86] sys_sconnect,
     [SYS_sendto] sys_sendto,
+    [SYS_sendto_x86] sys_sendto,
     [SYS_recvfrom] sys_recvfrom,
+    [SYS_recvfrom_x86] sys_recvfrom,
     [SYS_setsockopt] sys_setsockopt,
+    [SYS_setsockopt_x86] sys_setsockopt,
     [SYS_getsockopt] sys_getsockopt,
+    [SYS_getsockopt_x86] sys_getsockopt,
     [SYS_shutdown] sys_shutdown,
+    [SYS_shutdown_x86] sys_shutdown,
     [SYS_getpeername] sys_getpeername,
+    [SYS_getpeername_x86] sys_getpeername,
     [SYS_getsockname] sys_getsockname,
+    [SYS_getsockname_x86] sys_getsockname,
     [SYS_sendmsg] sys_sendmsg,
+    [SYS_sendmsg_x86] sys_sendmsg,
     [SYS_recvmsg] sys_recvmsg,
+    [SYS_recvmsg_x86] sys_recvmsg,
     [SYS_accept4] sys_accept4,
     [SYS_sendfile] sys_sendfile,
     [SYS_socketpair] sys_socketpair,
+    [SYS_socketpair_x86] sys_socketpair,
     [SYS_sendmmsg] sys_sendmmsg,
 #endif
     [SYS_sched_rr_get_interval_time64] sys_sched_rr_get_interval,
     [SYS_sched_getaffinity] sys_sched_getaffinity,
     [SYS_sched_setaffinity] sys_sched_setaffinity,
+    [SYS_sched_getaffinity_x86] sys_sched_getaffinity,
+    [SYS_sched_setaffinity_x86] sys_sched_setaffinity,
     [SYS_sched_yield] sys_sched_yield,
     [SYS_sched_getscheduler] sys_sched_getscheduler,
     [SYS_sched_setscheduler] sys_sched_setscheduler,
@@ -538,7 +613,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
     [SYS_eventfd2] sys_eventfd2,
-    [SYS_eventfd2_x86] sys_eventfd2,
+    [SYS_eventfd2_legacy] sys_eventfd2,
     [SYS_timerfd_create] sys_timerfd_create,
     [SYS_timerfd_create_x86] sys_timerfd_create,
     [SYS_timerfd_settime] sys_timerfd_settime,
@@ -551,21 +626,25 @@ static uint64 (*syscalls[])(void) = {
     [SYS_clock_nanosleep_x86] sys_clock_nanosleep,
     [SYS_clock_nanosleep_time64] sys_clock_nanosleep,
     [SYS_epoll_pwait] sys_epoll_pwait,
-    [SYS_epoll_pwait_x86] sys_epoll_pwait,
+    [SYS_epoll_pwait_legacy] sys_epoll_pwait,
     [SYS_epoll_pwait2] sys_epoll_pwait2,
-    [SYS_epoll_wait_x86] sys_epoll_wait,
+    [SYS_epoll_wait] sys_epoll_wait,
     [SYS_epoll_ctl] sys_epoll_ctl,
-    [SYS_epoll_ctl_x86] sys_epoll_ctl,
+    [SYS_epoll_ctl_legacy] sys_epoll_ctl,
     [SYS_epoll_create1] sys_epoll_create1,
-    [SYS_epoll_create1_x86] sys_epoll_create1,
-    [SYS_epoll_create_x86] sys_epoll_create,
+    [SYS_epoll_create1_legacy] sys_epoll_create1,
+    [SYS_epoll_create] sys_epoll_create,
     [SYS_umask] sys_umask,
+    [SYS_umask_x86] sys_umask,
     [SYS_fchownat] sys_vfs_fchownat,
     [SYS_fchown] sys_vfs_fchown,
     [SYS_fchmodat] sys_vfs_fchmodat,
     [SYS_fchmod] sys_vfs_fchmod,
     [SYS_getitimer] sys_getitimer,
+    [SYS_getitimer_x86] sys_getitimer,
+    [SYS_alarm_x86] sys_alarm,
     [SYS_setitimer] sys_setitimer,
+    [SYS_setitimer_x86] sys_setitimer,
     [SYS_ppoll] sys_vfs_ppoll,
     [SYS_ppoll_x86] sys_vfs_ppoll,
     /* System V IPC */
@@ -587,23 +666,34 @@ static uint64 (*syscalls[])(void) = {
     [SYS_rt_sigqueueinfo] sys_rt_sigqueueinfo,
     [SYS_clock_settime] sys_clock_settime,
     [SYS_fdatasync] sys_vfs_fdatasync,
+    [SYS_fdatasync_x86] sys_vfs_fdatasync,
     [SYS_fsync] sys_vfs_fsync,
+    [SYS_fsync_x86] sys_vfs_fsync,
     [SYS_get_robust_list] sys_get_robust_list,
     [SYS_get_robust_list_x86] sys_get_robust_list,
     [SYS_set_robust_list] sys_set_robust_list,
     [SYS_set_robust_list_x86] sys_set_robust_list,
     [SYS_sigaltstack] sys_sigaltstack,
     [SYS_prctl] sys_prctl,
+    [SYS_prctl_x86] sys_prctl,
     [SYS_sysinfo] sys_sysinfo,
+    [SYS_sysinfo_x86] sys_sysinfo,
     [SYS_getrusage] sys_getrusage,
+    [SYS_getrusage_x86] sys_getrusage,
     [SYS_getpriority] sys_getpriority,
     [SYS_setpriority] sys_setpriority,
+    [SYS_munlockall_x86] sys_munlockall,
+    [SYS_munlock_x86] sys_munlock,
+    [SYS_mlockall_x86] sys_mlockall,
+    [SYS_mlock_x86] sys_mlock,
     [SYS_munlockall] sys_munlockall,
     [SYS_munlock] sys_munlock,
     [SYS_mlockall] sys_mlockall,
     [SYS_mlock2] sys_mlock2,
+    [SYS_mlock2_x86] sys_mlock2,
     [SYS_memfd_create] sys_memfd_create,
     [SYS_statx] sys_statx,
+    [SYS_statx_x86] sys_statx,
     [SYS_inotify_init1] sys_ni_enosys,
     [SYS_inotify_add_watch] sys_ni_enosys,
     [SYS_inotify_rm_watch] sys_ni_enosys,
@@ -612,6 +702,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_memfd_create_x86] sys_memfd_create,
     [SYS_memfd_create_generic] sys_memfd_create,
     [SYS_membarrier] sys_membarrier,
+    [SYS_membarrier_x86] sys_membarrier,
     [SYS_fadvise64] sys_fadvise64,
     [SYS_fallocate] sys_fallocate,
     [SYS_poweroff] sys_poweroff,
@@ -621,6 +712,66 @@ static uint64 (*syscalls[])(void) = {
     [SYS_setrlimit] sys_setrlimit,
     [SYS_prlimit64_musl] sys_prlimit64,
 };
+
+static int legacy_xv6_syscall_alias(int num)
+{
+    switch (num) {
+    case 68: return SYS_brk;
+    case 69: return SYS_futex;
+    case 70: return SYS_sigaction;
+    case 71: return SYS_sigreturn;
+    case 72: return SYS_sigpending;
+    case 73: return SYS_sigprocmask;
+    case 75: return SYS_sigsuspend;
+    case 76: return SYS_sigwait;
+    case 100: return SYS_socket;
+    case 101: return SYS_bind;
+    case 102: return SYS_listen;
+    case 103: return SYS_accept;
+    case 104: return SYS_sconnect;
+    case 105: return SYS_sendto;
+    case 106: return SYS_recvfrom;
+    case 107: return SYS_setsockopt;
+    case 108: return SYS_getsockopt;
+    case 109: return SYS_shutdown;
+    case 110: return SYS_getpeername;
+    case 111: return SYS_getsockname;
+    case 112: return SYS_sendmsg;
+    case 113: return SYS_recvmsg;
+    case 114: return SYS_accept4;
+    case 115: return SYS_sendfile;
+    case 120: return SYS_openat;
+    case 121: return SYS_writev;
+    case 122: return SYS_readv;
+    case 123: return SYS_set_tid_address;
+    case 124: return SYS_clock_gettime;
+    case 125: return SYS_clock_getres;
+    case 126: return SYS_pread64;
+    case 127: return SYS_pwrite64;
+    case 128: return SYS_fstatat;
+    case 129: return SYS_pipe2;
+    case 130: return SYS_mkdirat;
+    case 131: return SYS_mknodat;
+    case 132: return SYS_unlinkat;
+    case 133: return SYS_linkat;
+    case 134: return SYS_symlinkat;
+    case 135: return SYS_readlinkat;
+    case 136: return SYS_renameat;
+    case 137: return SYS_faccessat;
+    case 138: return SYS_dup3;
+    case 139: return SYS_getuid;
+    case 140: return SYS_geteuid;
+    case 141: return SYS_getgid;
+    case 142: return SYS_getegid;
+    case 143: return SYS_setuid;
+    case 144: return SYS_setgid;
+    case 145: return SYS_setreuid;
+    case 146: return SYS_setregid;
+    case 147: return SYS_getgroups;
+    case 148: return SYS_setgroups;
+    default: return 0;
+    }
+}
 
 static int looks_like_linux_munmap(uint64 addr, uint64 length)
 {
@@ -657,7 +808,12 @@ void syscall(void) {
     if (num > 0 && num < (int)NELEM(syscalls) && syscalls[num]) {
         p->trapframe->trapframe.rax = syscalls[num]();
     } else {
-        printf("pid %d %s: unknown syscall %d\n", p->pid, p->name, num);
-        p->trapframe->trapframe.rax = (uint64)-ENOSYS;
+        int legacy = legacy_xv6_syscall_alias(num);
+        if (legacy > 0 && legacy < (int)NELEM(syscalls) && syscalls[legacy]) {
+            p->trapframe->trapframe.rax = syscalls[legacy]();
+        } else {
+            printf("pid %d %s: unknown syscall %d\n", p->pid, p->name, num);
+            p->trapframe->trapframe.rax = (uint64)-ENOSYS;
+        }
     }
 }
