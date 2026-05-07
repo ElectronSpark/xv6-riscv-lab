@@ -171,32 +171,9 @@ static bool clock_can_sleep(int clockid)
            clockid == CLOCK_TAI;
 }
 
-static int trace_browser_exit(int status) {
-    if (status == 0)
-        return 0;
-    const char *name = current->name;
-    return name != NULL &&
-           (strstr(name, "MiniBrowser") != NULL ||
-            strstr(name, "mb") != NULL ||
-            strstr(name, "WebKit") != NULL);
-}
-
 uint64 sys_exit(void) {
     int n;
     argint(0, &n);
-    if (trace_browser_exit(n)) {
-        struct trapframe *tf = &current->trapframe->trapframe;
-#ifdef __x86_64__
-        printf("exit: pid=%d name='%s' exit_code=%d rip=0x%lx rsp=0x%lx\n",
-               current->pid, current->name, n, tf->rip, tf->rsp);
-        print_user_backtrace(current->vm->pagetable,
-                             tf->rbp, tf->rip, tf->rsp, tf->rip, 16);
-#else
-        (void)tf;
-        printf("exit: pid=%d name='%s' exit_code=%d\n",
-               current->pid, current->name, n);
-#endif
-    }
     /*
      * Keep raw exit useful for pthread workers, but do not leave a GUI or
      * server process half-alive when its thread-group leader exits via the
@@ -461,19 +438,6 @@ uint64 sys_gettid(void) { return current->pid; }
 uint64 sys_exit_group(void) {
     int n;
     argint(0, &n);
-    if (trace_browser_exit(n)) {
-        struct trapframe *tf = &current->trapframe->trapframe;
-#ifdef __x86_64__
-        printf("exit_group: pid=%d name='%s' exit_code=%d rip=0x%lx rsp=0x%lx\n",
-               current->pid, current->name, n, tf->rip, tf->rsp);
-        print_user_backtrace(current->vm->pagetable,
-                             tf->rbp, tf->rip, tf->rsp, tf->rip, 16);
-#else
-        (void)tf;
-        printf("exit_group: pid=%d name='%s' exit_code=%d\n",
-               current->pid, current->name, n);
-#endif
-    }
     thread_group_exit(current, n);
     return 0; // not reached
 }
@@ -502,27 +466,35 @@ uint64 sys_clone(void) {
     argaddr(0, &uargs);
 
     struct clone_args args = {0};
-    if (uargs < 0x100000) {
-        // Linux-style clone(flags, stack, ...) where a0 is a flags bitmask.
-        // This covers:
-        //   - _Fork(): clone(SIGCHLD, 0)             — uargs = 17
-        //   - vfork(): clone(CLONE_VM|CLONE_VFORK|SIGCHLD, sp) — uargs = 0x4111
-        // Valid clone_args pointers are always > 0x100000 (user heap/stack).
-        uint64 stack;
+    uint64 linux_clone_mask =
+        0xffULL | CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+        CLONE_PIDFD | CLONE_PTRACE | CLONE_VFORK | CLONE_PARENT |
+        CLONE_THREAD | CLONE_NEWNS | CLONE_SYSVSEM | CLONE_SETTLS |
+        CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID | CLONE_DETACHED |
+        CLONE_UNTRACED | CLONE_CHILD_SETTID | CLONE_NEWCGROUP |
+        CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID |
+        CLONE_NEWNET | CLONE_IO | CLONE_CLEAR_SIGHAND |
+        CLONE_INTO_CGROUP | CLONE_PID | CLONE_SYSTEM | CLONE_SIGSTOPPED;
+
+    if ((uargs & ~linux_clone_mask) == 0) {
+        // Linux-style clone(flags, stack, ptid, ctid, tls).  musl's
+        // pthread_create uses CLONE_CHILD_CLEARTID and friends, so a numeric
+        // threshold is not a safe way to distinguish this ABI from the legacy
+        // xv6 clone_args pointer ABI.
+        uint64 stack, ptid, ctid, tls;
         argaddr(1, &stack);
+        argaddr(2, &ptid);
+        argaddr(3, &ctid);
+        argaddr(4, &tls);
 
         args.flags = uargs & ~0xFF;  // strip exit signal from flags
         args.esignal = uargs & 0xFF; // low 8 bits = exit signal
-        args.stack = 0;              // 0 = inherit parent's stack (fork)
+        args.stack = stack;
         args.stack_size = 0;
-
-        // If CLONE_VM is set (vfork), pass the stack pointer
-        if ((args.flags & CLONE_VM) && stack != 0) {
-            // For vfork, the child shares parent's VM and stack.
-            // Don't set args.stack — let child inherit parent's sp via
-            // trapframe copy. The kernel's CLONE_VFORK handling will
-            // block the parent until child execs/exits.
-        }
+        args.entry = 0;
+        args.ptid = ptid;
+        args.ctid = ctid;
+        args.tls = tls;
     } else {
         if (vm_copyin(current->vm, &args, uargs, sizeof(args)) < 0) {
             return -EFAULT;

@@ -396,10 +396,21 @@ struct vfs_dir_iter {
     int64 index;   // Number of entries successfully returned so far
 };
 
+typedef enum vfs_file_kind {
+    VFS_FILE_KIND_NONE = 0,
+    VFS_FILE_KIND_INODE,
+    VFS_FILE_KIND_CDEV,
+    VFS_FILE_KIND_BDEV,
+    VFS_FILE_KIND_PIPE,
+    VFS_FILE_KIND_LEGACY_SOCKET,
+    VFS_FILE_KIND_CUSTOM,
+} vfs_file_kind_t;
+
 struct vfs_file {
     list_node_t list_entry; // entry in global open file table
     struct vfs_inode_ref inode;
     int f_flags;   // file access mode
+    vfs_file_kind_t f_kind; // discriminator for the anonymous union below
     int ref_count; // reference count
     struct vfs_file_ops *ops;
     void *private_data; // filesystem-specific data

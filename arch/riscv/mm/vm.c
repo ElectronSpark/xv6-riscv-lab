@@ -64,6 +64,11 @@ void vm_remote_sfence(vm_t *vm)
     push_off();
     smp_mb();
 
+    if (vm_asid_max() > 0 && vm->asid != 0)
+        sfence_vma_asid(vm->asid);
+    else
+        sfence_vma();
+
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());
 
@@ -82,6 +87,11 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
     push_off();
     smp_mb();
 
+    if (vm_asid_max() > 0 && vm->asid != 0)
+        sfence_vma_page_asid(va, vm->asid);
+    else
+        sfence_vma_page(va);
+
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());
 
@@ -99,6 +109,11 @@ void vm_remote_sfence_range(vm_t *vm, uint64 start, uint64 size)
 {
     push_off();
     smp_mb();
+
+    if (vm_asid_max() > 0 && vm->asid != 0)
+        sfence_vma_asid(vm->asid);
+    else
+        sfence_vma();
 
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());

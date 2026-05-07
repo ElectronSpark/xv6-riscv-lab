@@ -434,7 +434,7 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
             asm volatile("clts");
             fpu_save_state(p->fpu_state);
         }
-        memmove(&uc.__fpregs_mem, p->fpu_state, sizeof(struct fpu_state));
+        memmove(&uc.__fpregs_mem, p->fpu_state, X86_FPU_LEGACY_SIZE);
         /* fpregs pointer → user-space address of __fpregs_mem area */
         uc.uc_mcontext.fpregs =
             (void *)(uc_addr + __builtin_offsetof(user_ucontext_t, __fpregs_mem));
@@ -520,7 +520,7 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
 
     /* ── Restore FP state from __fpregs_mem if it was saved ── */
     if (user_uc.uc_mcontext.fpregs != NULL && p->fpu_state != NULL) {
-        memmove(p->fpu_state, &user_uc.__fpregs_mem, sizeof(struct fpu_state));
+        memmove(p->fpu_state, &user_uc.__fpregs_mem, X86_FPU_LEGACY_SIZE);
         if (mycpu()->fpu_owner_tid == p->pid)
             mycpu()->fpu_owner_tid = 0;
     }

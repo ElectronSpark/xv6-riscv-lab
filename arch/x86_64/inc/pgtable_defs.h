@@ -98,8 +98,9 @@ static inline int pte_is_hugepage(pte_t *pte) {
  * @vma_flags: combination of PROT_READ, PROT_WRITE, PROT_EXEC, VMA_FLAG_USER
  *
  * On x86, PROT_READ maps to Present (always set for a valid PTE),
- * PROT_WRITE maps to R/W, and PROT_EXEC is a no-op (NX is not set
- * because this codebase doesn't use NX for user pages).
+ * PROT_WRITE maps to R/W, and PROT_EXEC clears NX.  Non-executable leaf
+ * mappings carry NX so mprotect(PROT_EXEC) and JIT mappings have real
+ * hardware-visible execute permission changes.
  */
 static inline pte_t mk_pte(uint64 pa, uint64 vma_flags) {
     pte_t pte = __PA2PTE(pa) | __PTE_V | __PTE_A | __PTE_D;
@@ -107,9 +108,10 @@ static inline pte_t mk_pte(uint64 pa, uint64 vma_flags) {
         pte |= __PTE_R; /* __PTE_R == __PTE_V, but harmless to OR again */
     if (vma_flags & PROT_WRITE)
         pte |= __PTE_W;
-    /* PROT_EXEC: on x86 __PTE_X == 0, so this is a no-op. */
     if (vma_flags & PROT_EXEC)
         pte |= __PTE_X;
+    else
+        pte |= __PTE_NX;
     if (vma_flags & VMA_FLAG_USER)
         pte |= __PTE_U;
     return pte;

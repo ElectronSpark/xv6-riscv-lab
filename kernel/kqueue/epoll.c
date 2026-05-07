@@ -166,6 +166,25 @@ static struct kqueue *epoll_get_kq(int epfd, struct vfs_file **fp_out)
     return kq;
 }
 
+static int epoll_mark_kqueue_fd(int fd)
+{
+    struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+    if (f == NULL)
+        return -EBADF;
+
+    struct kqueue *kq = (struct kqueue *)f->private_data;
+    if (kq == NULL) {
+        vfs_fput(f);
+        return -EBADF;
+    }
+
+    spin_lock(&kq->lock);
+    kq->flags |= KQ_EPOLL_COMPAT;
+    spin_unlock(&kq->lock);
+    vfs_fput(f);
+    return 0;
+}
+
 /* ========================================================================== */
 /* sys_epoll_create1                                                          */
 /* ========================================================================== */
@@ -184,6 +203,7 @@ uint64 sys_epoll_create1(void)
     int fd = kqueue_create();
     if (fd < 0)
         return (uint64)fd;
+    epoll_mark_kqueue_fd(fd);
 
     if (flags & EPOLL_CLOEXEC) {
         spin_lock(&current->fdtable->lock);
@@ -202,7 +222,11 @@ uint64 sys_epoll_create(void)
     if (size <= 0)
         return (uint64)-EINVAL;
 
-    return (uint64)kqueue_create();
+    int fd = kqueue_create();
+    if (fd < 0)
+        return (uint64)fd;
+    epoll_mark_kqueue_fd(fd);
+    return (uint64)fd;
 }
 
 /* ========================================================================== */
@@ -244,8 +268,10 @@ uint64 sys_epoll_ctl(void)
         }
     }
 
-    /* Build kevent change list — up to 2 entries (read + write) */
-    struct kevent changes[2];
+    /* Build kevent change list.  Up to 3 entries are needed for MOD to an
+     * empty mask: delete read/write filters, then install a disabled read
+     * sentinel so the epoll item still exists for Linux-visible DEL/MOD. */
+    struct kevent changes[3];
     int nchanges = 0;
 
     uint16 kev_flags = 0;
@@ -253,6 +279,16 @@ uint64 sys_epoll_ctl(void)
         kev_flags |= EV_CLEAR;
     if (ev.events & EPOLLONESHOT)
         kev_flags |= EV_ONESHOT;
+
+    int has_ident = kqueue_epoll_has_ident(kq, (uint64)fd);
+    if (op == EPOLL_CTL_ADD && has_ident) {
+        vfs_fput(fp);
+        return (uint64)-EEXIST;
+    }
+    if ((op == EPOLL_CTL_MOD || op == EPOLL_CTL_DEL) && !has_ident) {
+        vfs_fput(fp);
+        return (uint64)-ENOENT;
+    }
 
     switch (op) {
     case EPOLL_CTL_ADD:
@@ -299,14 +335,26 @@ uint64 sys_epoll_ctl(void)
         }
 
         if (nchanges == 0) {
-            /* No events to register — at least register read */
+            /* No events requested.  Linux keeps the epoll item present but
+             * disabled; represent that with a disabled read-filter sentinel. */
             changes[0].ident = (uint64)fd;
             changes[0].filter = EVFILT_READ;
-            changes[0].flags = EV_ADD | EV_ENABLE | kev_flags;
+            changes[0].flags = EV_ADD | EV_DISABLE | kev_flags;
             changes[0].fflags = 0;
             changes[0].data = 0;
             changes[0].udata = ev.data;
             nchanges = 1;
+        } else if (op == EPOLL_CTL_MOD &&
+                   !(ev.events & (EPOLLIN | EPOLLRDNORM | EPOLLRDBAND |
+                                  EPOLLPRI | EPOLLRDHUP |
+                                  EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND))) {
+            changes[nchanges].ident = (uint64)fd;
+            changes[nchanges].filter = EVFILT_READ;
+            changes[nchanges].flags = EV_ADD | EV_DISABLE | kev_flags;
+            changes[nchanges].fflags = 0;
+            changes[nchanges].data = 0;
+            changes[nchanges].udata = ev.data;
+            nchanges++;
         }
         break;
     }
@@ -341,12 +389,13 @@ uint64 sys_epoll_ctl(void)
         for (int i = 0; i < nchanges; i++) {
             if (changes[i].flags & EV_ERROR) {
                 int err = (int)(-changes[i].data);
-                /* Ignore ENOENT on delete (knote wasn't registered) */
+                /* Ignore missing filters inside an already-present epoll
+                 * item.  The item-level ENOENT checks above preserve Linux
+                 * epoll_ctl() semantics for missing fds. */
                 if (err == ENOENT && (op == EPOLL_CTL_DEL ||
                     (op == EPOLL_CTL_MOD &&
                      !(changes[i].flags & EV_ADD))))
                     continue;
-                /* On CTL_ADD: if error is EEXIST-like, ignore for MOD */
                 if (err != 0) {
                     vfs_fput(fp);
                     return (uint64)-err;

@@ -100,8 +100,8 @@ int rwsem_acquire_read(rwsem_t *lock) {
     while (__reader_should_wait(lock)) {
         ret = tq_wait(&lock->read_queue, &lock->lock, NULL);
         if (ret != 0) {
-            spin_unlock(&lock->lock);
-            return ret;
+            ret = 0;
+            continue;
         }
     }
     lock->readers++;
@@ -132,8 +132,8 @@ int rwsem_acquire_write(rwsem_t *lock) {
                "the write lock");
         ret = tq_wait(&lock->write_queue, &lock->lock, NULL);
         if (ret != 0) {
-            spin_unlock(&lock->lock);
-            return ret;
+            ret = 0;
+            continue;
         }
     }
     lock->holder_pid = self_pid;

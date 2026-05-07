@@ -493,8 +493,7 @@ static int __vma_copy(vma_t *dst, vma_t *src)
         return -EINVAL;
     if (VMA_SIZE(src) != VMA_SIZE(dst))
         return -EINVAL;
-    if ((src->flags & VMA_FLAG_PROT_MASK) !=
-        (dst->flags & VMA_FLAG_PROT_MASK))
+    if (src->flags != dst->flags)
         return -EINVAL;
 
     dst->flags = src->flags;
@@ -508,6 +507,7 @@ static int __vma_copy(vma_t *dst, vma_t *src)
     }
 
     int is_shared = (src->flags & VMA_FLAG_SHARED) != 0;
+    int wipe_on_fork = (src->flags & VMA_FLAG_WIPEONFORK) != 0;
     int src_tlb_flush_needed = 0;
 
     /* For non-shared (COW) VMAs, ensure the parent has an anon_vma before
@@ -525,6 +525,8 @@ static int __vma_copy(vma_t *dst, vma_t *src)
     {
         pagetable_t pgtb_src = src->vm->pagetable;
         pagetable_t pgtb_dst = dst->vm->pagetable;
+        if (wipe_on_fork)
+            goto skip_pte_copy;
         for (uint64 a = src->start; a < src->end; a += PGSIZE) {
             pte_t *src_pte = walk(pgtb_src, a, 0, NULL, NULL);
             if (src_pte == NULL || *src_pte == 0)
@@ -618,6 +620,8 @@ hugepage_skip:
         }
         if (src_tlb_flush_needed)
             vm_remote_sfence_range(src->vm, src->start, VMA_SIZE(src));
+skip_pte_copy:
+        ;
     }
 
     /* Set up anon_vma chain for the child VMA. */
@@ -1018,6 +1022,8 @@ vm_t *vm_copy(vm_t *src)
         if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC)
             continue;
         last_vma = vma;
+        if (vma->flags & VMA_FLAG_DONTFORK)
+            continue;
 
         vma_t *new_vma = vma_alloc(dst, vma->start, VMA_SIZE(vma), vma->flags);
         if (new_vma == NULL) {
@@ -1257,8 +1263,7 @@ vma_t *vma_merge(vma_t *vma1, vma_t *vma2)
         return NULL;
     if (!VMA_ADJACENT(vma1, vma2))
         return NULL;
-    if ((vma1->flags & VMA_FLAG_PROT_MASK) !=
-        (vma2->flags & VMA_FLAG_PROT_MASK))
+    if (vma1->flags != vma2->flags)
         return NULL;
     if (vma1->start > vma2->start) {
         vma_t *tmp = vma1;
@@ -1933,12 +1938,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
         return -EINVAL;
     if (flags & ~VMA_FLAG_PROT_MASK)
         return -EINVAL;
-    if ((flags & PROT_EXEC)) {
-        if ((flags & PROT_READ) == 0)
-            return -EINVAL;
-        if ((flags & PROT_WRITE) != 0 && (flags & VMA_FLAG_USER) != 0)
-            return -EACCES;
-    }
+    if ((flags & PROT_EXEC) && (flags & PROT_READ) == 0)
+        return -EINVAL;
 
     uint64 va_end = va + size;
     va = PGROUNDDOWN(va);
@@ -3333,7 +3334,7 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
     vma->flags = new_flags;
 
     uint64 prot_bits = PROT_READ | PROT_WRITE | PROT_EXEC;
-    if ((old_flags & prot_bits) & ~(new_flags & prot_bits))
+    if ((old_flags ^ new_flags) & prot_bits)
         vm_remote_sfence_range(vm, addr, size);
 
     ret = 0;
@@ -3805,50 +3806,87 @@ out:
     return ret;
 }
 
-int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
+static int __vm_madvise_update_flags(vm_t *vm, uint64 addr, size_t size,
+                                     uint64 set_flags, uint64 clear_flags)
 {
-    int ret = 0;
-    vm_wlock(vm);
+    uint64 end = addr + size;
+    uint64 cur = addr;
 
-    if (vm == NULL || vm->pagetable == NULL) {
-        ret = -EINVAL;
-        goto out;
+    while (cur < end) {
+        vma_t *vma = vm_find_area(vm, cur);
+        if (vma == NULL || cur < vma->start)
+            return -ENOMEM;
+        if (cur > vma->start) {
+            vma = vma_split(vma, cur);
+            if (vma == NULL)
+                return -ENOMEM;
+        }
+
+        uint64 seg_end = vma->end < end ? vma->end : end;
+        if (seg_end < vma->end && vma_split(vma, seg_end) == NULL)
+            return -ENOMEM;
+
+        vma->flags &= ~clear_flags;
+        vma->flags |= set_flags;
+        vma = __vma_try_merge_neighbors(vma);
+        cur = seg_end;
     }
 
-    if (vm_normalize_user_range(&addr, &size) != 0) {
-        ret = -EINVAL;
-        goto out;
+    return 0;
+}
+
+static int __vm_madvise_check_mapped(vm_t *vm, uint64 addr, size_t size)
+{
+    uint64 end = addr + size;
+    uint64 cur = addr;
+
+    while (cur < end) {
+        vma_t *vma = vm_find_area(vm, cur);
+        if (vma == NULL || cur < vma->start)
+            return -ENOMEM;
+        cur = vma->end < end ? vma->end : end;
     }
 
-    if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
-        ret = -ENOMEM;
-        goto out;
+    return 0;
+}
+
+static int __vm_madvise_populate(vm_t *vm, uint64 addr, size_t size,
+                                 uint64 access)
+{
+    uint64 end = addr + size;
+    uint64 cur = addr;
+
+    while (cur < end) {
+        vma_t *vma = vm_find_area(vm, cur);
+        if (vma == NULL || cur < vma->start)
+            return -ENOMEM;
+        uint64 seg_end = vma->end < end ? vma->end : end;
+        int ret = vma_validate(vma, cur, seg_end - cur,
+                               VMA_FLAG_USER | access);
+        if (ret != 0)
+            return ret;
+        cur = seg_end;
     }
 
-    vma_t *vma = vm_find_area(vm, addr);
-    if (vma == NULL) {
-        ret = -ENOMEM;
-        goto out;
-    }
-    if (addr < vma->start || (addr + size) > vma->end) {
-        ret = -ENOMEM;
-        goto out;
-    }
+    return 0;
+}
 
-    switch (advice) {
-    case MADV_NORMAL:
-    case MADV_RANDOM:
-    case MADV_SEQUENTIAL:
-    case MADV_WILLNEED:
-        ret = 0;
-        break;
+static int __vm_madvise_dontneed(vm_t *vm, uint64 addr, size_t size)
+{
+    uint64 end = addr + size;
+    uint64 cur = addr;
 
-    case MADV_DONTNEED: {
+    while (cur < end) {
+        vma_t *vma = vm_find_area(vm, cur);
+        if (vma == NULL || cur < vma->start)
+            return -ENOMEM;
+        uint64 seg_end = vma->end < end ? vma->end : end;
         int shared_file_wb =
             (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
             (vma->flags & VMA_FLAG_FILE);
+
         vm_pgtable_lock(vm);
-        for (uint64 va = addr; va < addr + size; va += PGSIZE) {
+        for (uint64 va = cur; va < seg_end; va += PGSIZE) {
             pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
             if (pte != NULL && pte_present(pte)) {
                 uint64 pa = pte_pa(pte);
@@ -3856,23 +3894,18 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
                     int was_dirty = pte_dirty(pte);
                     pte_clear(pte);
 
-                    /* Write dirty pages back for MAP_SHARED file mappings.
-                     * Must drop the pgtable spinlock because the
-                     * writepage callback may sleep (inode lock, I/O). */
                     if (shared_file_wb && was_dirty) {
                         vm_pgtable_unlock(vm);
                         __vma_writeback_dirty_page(vma, va, pa);
                         vm_pgtable_lock(vm);
                     }
 
-                    /* Release the page. */
                     page_t *pg = __pa_to_page(pa);
                     page_t *pc_head = page_pcache_head(pg);
                     if (pc_head != NULL) {
                         folio_t *folio = page_folio(pc_head);
                         pcache_put_folio(pc_head->pcache.pcache, folio);
                     } else {
-                        /* Only decrement rmap for HEAD pages. */
                         if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
                             page_remove_rmap(pg);
                         page_ref_dec((void *)pa);
@@ -3883,10 +3916,112 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
             }
         }
         vm_pgtable_unlock(vm);
-        vm_remote_sfence_range(vm, addr, size);
+        cur = seg_end;
+    }
+
+    vm_remote_sfence_range(vm, addr, size);
+    return 0;
+}
+
+int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
+{
+    int ret = 0;
+
+    if (vm == NULL || vm->pagetable == NULL) {
+        return -EINVAL;
+    }
+
+    vm_wlock(vm);
+
+    if (vm_normalize_user_range(&addr, &size) != 0) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
+        ret = -ENOMEM;
+        goto out;
+    }
+    ret = __vm_madvise_check_mapped(vm, addr, size);
+    if (ret != 0)
+        goto out;
+
+    switch (advice) {
+    case MADV_NORMAL:
+    case MADV_RANDOM:
+    case MADV_SEQUENTIAL:
+    case MADV_WILLNEED:
+    case MADV_COLD:
+    case MADV_COLLAPSE:
         ret = 0;
         break;
-    }
+
+    case MADV_DONTNEED:
+    case MADV_DONTNEED_LOCKED:
+    case MADV_PAGEOUT:
+        ret = __vm_madvise_dontneed(vm, addr, size);
+        break;
+
+    case MADV_FREE:
+        ret = __vm_madvise_dontneed(vm, addr, size);
+        break;
+
+    case MADV_DONTFORK:
+        ret = __vm_madvise_update_flags(vm, addr, size, VMA_FLAG_DONTFORK, 0);
+        break;
+
+    case MADV_DOFORK:
+        ret = __vm_madvise_update_flags(vm, addr, size, 0, VMA_FLAG_DONTFORK);
+        break;
+
+    case MADV_DONTDUMP:
+        ret = __vm_madvise_update_flags(vm, addr, size, VMA_FLAG_DONTDUMP, 0);
+        break;
+
+    case MADV_DODUMP:
+        ret = __vm_madvise_update_flags(vm, addr, size, 0, VMA_FLAG_DONTDUMP);
+        break;
+
+    case MADV_WIPEONFORK:
+        ret = __vm_madvise_update_flags(vm, addr, size,
+                                        VMA_FLAG_WIPEONFORK,
+                                        VMA_FLAG_DONTFORK);
+        break;
+
+    case MADV_KEEPONFORK:
+        ret = __vm_madvise_update_flags(vm, addr, size, 0,
+                                        VMA_FLAG_WIPEONFORK);
+        break;
+
+    case MADV_MERGEABLE:
+        ret = __vm_madvise_update_flags(vm, addr, size, VMA_FLAG_MERGEABLE, 0);
+        break;
+
+    case MADV_UNMERGEABLE:
+        ret = __vm_madvise_update_flags(vm, addr, size, 0, VMA_FLAG_MERGEABLE);
+        break;
+
+    case MADV_HUGEPAGE:
+        ret = __vm_madvise_update_flags(vm, addr, size, VMA_FLAG_HUGEPAGE,
+                                        VMA_FLAG_NOHUGEPAGE);
+        break;
+
+    case MADV_NOHUGEPAGE:
+        ret = __vm_madvise_update_flags(vm, addr, size, VMA_FLAG_NOHUGEPAGE,
+                                        VMA_FLAG_HUGEPAGE);
+        break;
+
+    case MADV_POPULATE_READ:
+        ret = __vm_madvise_populate(vm, addr, size, PROT_READ);
+        break;
+
+    case MADV_POPULATE_WRITE:
+        ret = __vm_madvise_populate(vm, addr, size, PROT_WRITE);
+        break;
+
+    case MADV_REMOVE:
+        ret = -ENOSYS;
+        break;
 
     default:
         ret = -EINVAL;
@@ -4133,6 +4268,8 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         return (uint64)-EINVAL;
     if ((flags & MAP_PRIVATE) && (flags & MAP_SHARED))
         return (uint64)-EINVAL;
+    if ((flags & MAP_FIXED) && (flags & MAP_FIXED_NOREPLACE))
+        return (uint64)-EINVAL;
 
     if (fd != -1) {
         if (flags & MAP_ANONYMOUS)
@@ -4164,7 +4301,30 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     vm_wlock(vm);
 
     uint64 map_addr;
-    if (addr == 0 || (flags & MAP_FIXED) == 0) {
+    if ((flags & MAP_FIXED_NOREPLACE) != 0) {
+        if (addr == 0 || (addr & (PGSIZE - 1))) {
+            vm_wunlock(vm);
+            if (file != NULL)
+                vfs_fput(file);
+            return (uint64)-EINVAL;
+        }
+        map_addr = addr;
+        uint64 map_end = map_addr + map_length;
+        if (map_end <= map_addr || map_addr < vm->vm_bottom ||
+            map_end > vm->vm_top) {
+            vm_wunlock(vm);
+            if (file != NULL)
+                vfs_fput(file);
+            return (uint64)-ENOMEM;
+        }
+        uint64 check = map_addr;
+        if (mt_find(&vm->vm_mt, &check, map_end - 1) != NULL) {
+            vm_wunlock(vm);
+            if (file != NULL)
+                vfs_fput(file);
+            return (uint64)-EEXIST;
+        }
+    } else if (addr == 0 || (flags & MAP_FIXED) == 0) {
         map_addr = vm_find_free_range(vm, map_length, addr);
         if (map_addr == 0) {
             vm_wunlock(vm);

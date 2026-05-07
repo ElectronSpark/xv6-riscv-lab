@@ -676,7 +676,8 @@ out_unlock:
  * cmpval before proceeding. For plain FUTEX_REQUEUE, cmpval is ignored
  * (pass -1 or any value with do_cmp=false).
  *
- * Returns total number of woken waiters on success, or negative errno.
+ * Returns the total number of waiters woken or requeued on success, matching
+ * the Linux futex ABI used by pthread condition-variable implementations.
  */
 static int futex_requeue(uint64 uaddr1, int nr_wake, uint64 uaddr2,
                          int nr_requeue, uint32 cmpval, int do_cmp,
@@ -762,7 +763,7 @@ static int futex_requeue(uint64 uaddr1, int nr_wake, uint64 uaddr2,
         spin_unlock(&b2->lock);
     spin_unlock(&b1->lock);
 
-    return woken;
+    return woken + requeued;
 }
 
 /*

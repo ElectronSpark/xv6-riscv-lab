@@ -87,7 +87,8 @@ static int knote_file_poll_revents(struct knote *kn)
                "knote_file_poll_revents: stale file %p (ref=%d, ops=%p, ident=%ld)",
                f, f->ref_count, f->ops, kn->ident);
         revents = f->ops->poll(f, events);
-    } else if (f->cdev != NULL && f->cdev->ops.poll != NULL) {
+    } else if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL &&
+               f->cdev->ops.poll != NULL) {
         revents = f->cdev->ops.poll(f->cdev, events);
     }
 
@@ -104,23 +105,27 @@ static void kqueue_rescan_registered_locked(struct kqueue *kq) {
             continue;
         }
         /*
-         * EV_CLEAR backs Linux EPOLLET in the epoll shim.  A plain level
-         * rescan would repeatedly regenerate readiness for fds that userspace
-         * has not fully drained, while skipping rescans entirely can park an
-         * edge-triggered user forever if a driver or socket callback coalesces
-         * a wake.  Track whether the fd was already observed ready: rescans
-         * only synthesize the missing false -> true edge, and clear that state
-         * once the fd is observed not ready again.  Source notifications still
-         * enqueue independently in vfs_file_knote_notify().
+         * EV_CLEAR backs Linux EPOLLET in the epoll shim.  Epoll-created
+         * queues keep Linux level-triggered behavior and redeliver unread
+         * pipes/sockets on each wait.  Raw kqueue coalesces synthetic level
+         * rescans after one delivery so a caller with a small event buffer can
+         * still observe edge-like timers, signals, process, and vnode events.
          */
-        if (knote_is_clear_file_filter(kn)) {
-            if (knote_file_poll_revents(kn) != 0) {
+        if (knote_is_file_filter(kn)) {
+            int revents = knote_file_poll_revents(kn);
+
+            if (revents == 0) {
+                kn->status &= ~KN_EDGE_ACTIVE;
+                continue;
+            }
+
+            if (knote_is_clear_file_filter(kn)) {
                 if (kn->status & KN_EDGE_ACTIVE)
                     continue;
                 kn->status |= KN_EDGE_ACTIVE;
-            } else {
-                kn->status &= ~KN_EDGE_ACTIVE;
-                continue;
+            } else if (!(kq->flags & KQ_EPOLL_COMPAT)) {
+                if (kn->status & KN_LEVEL_SEEN)
+                    continue;
             }
         } else if (!knote_poll_active(kn)) {
             continue;
@@ -135,6 +140,16 @@ static void kqueue_rescan_registered_locked(struct kqueue *kq) {
 static struct knote *kqueue_pick_ready_locked(struct kqueue *kq) {
     struct knote *kn = NULL;
     struct knote *tmp = NULL;
+
+    /*
+     * Timers, signals, process, and vnode notifications are edge-like.  Return
+     * them before level file readiness so an unread pipe/socket cannot starve
+     * a one-shot timer when the caller asks for a small result set.
+     */
+    list_foreach_node_safe(&kq->ready, kn, tmp, ready_entry) {
+        if (!knote_is_file_filter(kn))
+            return kn;
+    }
 
     /*
      * Prefer read-side readiness when both read and write filters are queued.
@@ -467,6 +482,47 @@ static struct knote *__kqueue_find_knote(struct kqueue *kq, uint64 ident,
     return NULL;
 }
 
+int kqueue_epoll_has_ident(struct kqueue *kq, uint64 ident)
+{
+    if (kq == NULL)
+        return 0;
+
+    int found = 0;
+    spin_lock(&kq->lock);
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+    list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry) {
+        if (kn->ident == ident &&
+            (kn->filter == EVFILT_READ || kn->filter == EVFILT_WRITE)) {
+            found = 1;
+            break;
+        }
+    }
+    spin_unlock(&kq->lock);
+    return found;
+}
+
+static void __kqueue_epoll_disable_oneshot_ident(struct kqueue *kq,
+                                                 uint64 ident)
+{
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+
+    list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry) {
+        if (kn->ident != ident ||
+            (kn->filter != EVFILT_READ && kn->filter != EVFILT_WRITE))
+            continue;
+
+        kn->status |= KN_DISABLED;
+        if (kn->status & KN_QUEUED) {
+            list_node_detach(kn, ready_entry);
+            kq->nready--;
+            kn->status &= ~KN_QUEUED;
+        }
+        kn->status &= ~(KN_EDGE_ACTIVE | KN_LEVEL_SEEN);
+    }
+}
+
 /*
  * __kqueue_detach_knote - detach a knote from source and remove from kqueue
  * Caller must hold kq->lock.
@@ -700,6 +756,8 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
         return -EINVAL;
 
     int total = 0;
+    uint64 epoll_oneshot_idents[nevents];
+    int epoll_oneshot_count = 0;
 
     spin_lock(&kq->lock);
     kq->waiters++;
@@ -730,8 +788,14 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             int poll_revents = 0;
             if (knote_is_file_filter(kn)) {
                 poll_revents = knote_file_poll_revents(kn);
-                if (!knote_is_clear_file_filter(kn) && poll_revents == 0)
-                    continue;
+                if (poll_revents == 0) {
+                    kn->status &= ~(KN_EDGE_ACTIVE | KN_LEVEL_SEEN);
+                    if (!knote_is_clear_file_filter(kn))
+                        continue;
+                } else if (!knote_is_clear_file_filter(kn) &&
+                           !(kq->flags & KQ_EPOLL_COMPAT)) {
+                    kn->status |= KN_LEVEL_SEEN;
+                }
             }
 
             /* Fill in kevent for user */
@@ -748,11 +812,6 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             eventlist[total].udata = kn->udata;
             total++;
 
-            /* Handle EV_ONESHOT: auto-delete after delivery */
-            if (kn->flags & EV_ONESHOT) {
-                __kqueue_detach_knote(kq, kn);
-            }
-
             /* Handle EV_CLEAR: reset fflags and data after delivery */
             if (kn->flags & EV_CLEAR) {
                 kn->fflags = 0;
@@ -762,6 +821,26 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                         kn->status |= KN_EDGE_ACTIVE;
                     else
                         kn->status &= ~KN_EDGE_ACTIVE;
+                }
+            }
+
+            /* Handle EV_ONESHOT.  BSD kqueue deletes one-shot knotes after
+             * delivery.  Linux epoll keeps EPOLLONESHOT registrations and
+             * disables the whole fd until epoll_ctl(MOD) rearms it. */
+            if (kn->flags & EV_ONESHOT) {
+                if (kq->flags & KQ_EPOLL_COMPAT) {
+                    int seen = 0;
+                    for (int i = 0; i < epoll_oneshot_count; i++) {
+                        if (epoll_oneshot_idents[i] == kn->ident) {
+                            seen = 1;
+                            break;
+                        }
+                    }
+                    if (!seen && epoll_oneshot_count < nevents)
+                        epoll_oneshot_idents[epoll_oneshot_count++] =
+                            kn->ident;
+                } else {
+                    __kqueue_detach_knote(kq, kn);
                 }
             }
         }
@@ -816,6 +895,11 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                 break;
             }
         }
+    }
+
+    if (epoll_oneshot_count > 0) {
+        for (int i = 0; i < epoll_oneshot_count; i++)
+            __kqueue_epoll_disable_oneshot_ident(kq, epoll_oneshot_idents[i]);
     }
 
     kq->waiters--;

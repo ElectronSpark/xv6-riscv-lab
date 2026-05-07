@@ -266,8 +266,9 @@ int exec(char *path, char **argv, char **envp) {
     // Look up the file using VFS
     struct vfs_inode *inode = vfs_namei(path, strlen(path));
     if (IS_ERR_OR_NULL(inode)) {
+        long err = IS_ERR(inode) ? PTR_ERR(inode) : -ENOENT;
         exec_dbg("  FAIL: vfs_namei(\"%s\") failed\n", path);
-        return -1;
+        return (int)err;
     }
 
     // Check execute permission
@@ -339,10 +340,14 @@ int exec(char *path, char **argv, char **envp) {
                 goto bad;
             }
             if (vfs_filelseek(file, ph.off, SEEK_SET) != (loff_t)ph.off)
+            {
                 goto bad;
+            }
             if (vfs_fileread(file, interp_path, ph.filesz, false) !=
                 (ssize_t)ph.filesz)
+            {
                 goto bad;
+            }
             interp_path[ph.filesz] = '\0';
             /* Strip trailing newline if any */
             if (interp_path[ph.filesz - 1] == '\n')
@@ -506,13 +511,19 @@ int exec(char *path, char **argv, char **envp) {
     // Push argument strings onto the stack.
     for (argc = 0; argv[argc]; argc++) {
         if (argc >= MAXARG)
+        {
             goto bad;
+        }
         sp -= strlen(argv[argc]) + 1;
         sp -= sp & 15; // riscv sp must be 16-byte aligned
         if (sp < stackbase)
+        {
             goto bad;
+        }
         if (vm_copyout(tmp_vm, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
+        {
             goto bad;
+        }
         ustack[argc] = sp;
     }
 
@@ -521,13 +532,19 @@ int exec(char *path, char **argv, char **envp) {
     if (envp) {
         for (envc = 0; envp[envc]; envc++) {
             if (envc >= MAXENV)
+            {
                 goto bad;
+            }
             sp -= strlen(envp[envc]) + 1;
             sp -= sp & 15;
             if (sp < stackbase)
+            {
                 goto bad;
+            }
             if (vm_copyout(tmp_vm, sp, envp[envc], strlen(envp[envc]) + 1) < 0)
+            {
                 goto bad;
+            }
             ustack[argc + 2 + envc] = sp;
         }
     }
@@ -595,9 +612,13 @@ int exec(char *path, char **argv, char **envp) {
     sp -= nslots * sizeof(uint64);
     sp -= sp & 15;
     if (sp < stackbase)
+    {
         goto bad;
+    }
     if (vm_copyout(tmp_vm, sp, (char *)ustack, nslots * sizeof(uint64)) < 0)
+    {
         goto bad;
+    }
 
     // Set up the user registers for main(argc, argv).
     // Architecture-specific: on RISC-V a0 doubles as both syscall return

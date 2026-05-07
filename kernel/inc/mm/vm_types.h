@@ -44,9 +44,17 @@ typedef struct vma {
 // Mapping flags (POSIX MAP_*)
 #define MAP_SHARED 0x01    // Share changes
 #define MAP_PRIVATE 0x02   // Changes are private
+#define MAP_SHARED_VALIDATE 0x03
+#define MAP_TYPE 0x0f
 #define MAP_FIXED 0x10     // Interpret addr exactly
 #define MAP_ANONYMOUS 0x20 // Don't use a file
 #define MAP_ANON MAP_ANONYMOUS
+#define MAP_NORESERVE 0x4000
+#define MAP_POPULATE 0x8000
+#define MAP_NONBLOCK 0x10000
+#define MAP_STACK 0x20000
+#define MAP_FIXED_NOREPLACE 0x100000
+#define MAP_FILE 0
 
 // VMA flags (stored in vma->flags, xv6-specific, high bits avoid PROT_*
 // conflict)
@@ -56,6 +64,16 @@ typedef struct vma {
 #define VMA_FLAG_FILE 0x400      // File-backed mapping
 #define VMA_FLAG_SHARED 0x800    // Shared mapping (MAP_SHARED)
 #define VMA_FLAG_KERNEL 0x1000   // Kernel-space mapping (no lazy alloc, no COW)
+#define VMA_FLAG_DONTFORK 0x2000 // Exclude mapping from forked children
+#define VMA_FLAG_DONTDUMP 0x4000 // Exclude mapping from core dumps
+#define VMA_FLAG_WIPEONFORK 0x8000 // Zero child pages after fork
+#define VMA_FLAG_MERGEABLE 0x10000 // KSM-compatible advisory
+#define VMA_FLAG_HUGEPAGE 0x20000  // Transparent hugepage advisory
+#define VMA_FLAG_NOHUGEPAGE 0x40000 // Disable transparent hugepage advisory
+
+#define VMA_FLAG_ADVICE_MASK                                                  \
+    (VMA_FLAG_DONTFORK | VMA_FLAG_DONTDUMP | VMA_FLAG_WIPEONFORK |            \
+     VMA_FLAG_MERGEABLE | VMA_FLAG_HUGEPAGE | VMA_FLAG_NOHUGEPAGE)
 
 // Combined mask of all bits that may appear in vma->flags
 #define VMA_FLAG_PROT_MASK                                                     \
@@ -81,6 +99,23 @@ typedef struct vma {
 #define MADV_WILLNEED 3   // Will need these pages soon
 #define MADV_DONTNEED 4   // Don't need these pages anymore
 #define MADV_FREE 8       // Pages can be freed (if not dirty)
+#define MADV_REMOVE 9
+#define MADV_DONTFORK 10
+#define MADV_DOFORK 11
+#define MADV_MERGEABLE 12
+#define MADV_UNMERGEABLE 13
+#define MADV_HUGEPAGE 14
+#define MADV_NOHUGEPAGE 15
+#define MADV_DONTDUMP 16
+#define MADV_DODUMP 17
+#define MADV_WIPEONFORK 18
+#define MADV_KEEPONFORK 19
+#define MADV_COLD 20
+#define MADV_PAGEOUT 21
+#define MADV_POPULATE_READ 22
+#define MADV_POPULATE_WRITE 23
+#define MADV_DONTNEED_LOCKED 24
+#define MADV_COLLAPSE 25
 
 // Virtual Memory Management structure
 typedef struct vm {

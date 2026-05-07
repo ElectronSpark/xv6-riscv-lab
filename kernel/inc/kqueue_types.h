@@ -23,6 +23,9 @@ struct knote;  /* forward declaration for knote_ops */
 #define KN_DETACHED     0x08    /* knote has been detached from source */
 #define KN_TIMER        0x10    /* knote has an active timer */
 #define KN_EDGE_ACTIVE  0x20    /* EV_CLEAR file filter is currently ready */
+#define KN_LEVEL_SEEN   0x40    /* raw kqueue level readiness delivered once */
+
+#define KQ_EPOLL_COMPAT 0x01    /* descriptor was created by epoll_create* */
 
 /*
  * struct knote_ops - per-filter operation vtable
@@ -93,6 +96,7 @@ struct kqueue {
     int nready;                    /* count of ready knotes */
     int closed;                    /* set when kqueue is being torn down */
     int waiters;                   /* threads currently inside kqueue_wait() */
+    uint32 flags;                  /* KQ_* compatibility flags */
     struct vfs_file *file;         /* back-pointer to owning vfs_file (for nested epoll) */
 };
 
@@ -108,6 +112,7 @@ void kqueue_signal_notify(struct thread *p, int signo);
 int kqueue_create(void);
 struct kqueue *kqueue_alloc_private(void);
 void kqueue_close_private(struct kqueue *kq);
+int kqueue_epoll_has_ident(struct kqueue *kq, uint64 ident);
 int kqueue_register(struct kqueue *kq, struct kevent *changelist, int nchanges);
 int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                 int timeout_ms);

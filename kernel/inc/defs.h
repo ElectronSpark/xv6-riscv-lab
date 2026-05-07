@@ -127,6 +127,7 @@ struct fpu_state;
 void fpu_save_state(struct fpu_state *state);
 void fpu_restore_state(struct fpu_state *state);
 void fpu_init_state(void);
+void fpu_cpu_init(void);
 
 // spinlock.c
 // Initialize a spinlock.
@@ -186,8 +187,8 @@ int uartgetc(void);
 // vm.c
 void arch_vm_init(void);
 void arch_vm_init_hart(void);
-void kvmmap(pagetable_t, uint64, uint64, uint64, int);
-int mappages(pagetable_t, uint64, uint64, uint64, int);
+void kvmmap(pagetable_t, uint64, uint64, uint64, uint64);
+int mappages(pagetable_t, uint64, uint64, uint64, uint64);
 void uvmunmap(pagetable_t, uint64, uint64, int);
 pte_t *walk(pagetable_t, uint64, int, pte_t **, pte_t **);
 uint64 walkaddr(pagetable_t, uint64);

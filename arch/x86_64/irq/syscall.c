@@ -10,6 +10,7 @@
 
 #include "types.h"
 #include "proc/thread.h"
+#include "memlayout.h"
 #include "mm/vm.h"
 #include "printf.h"
 #include "defs.h"
@@ -18,7 +19,7 @@
 #include "param.h"
 #include "string.h"
 #include "seg.h"    /* wrmsr, rdmsr, MSR_FS_BASE */
-#include "cmdline.h"
+#include "clone_flags.h"
 
 int fetchaddr(uint64 addr, uint64 *ip) {
     struct thread *p = current;
@@ -621,199 +622,11 @@ static uint64 (*syscalls[])(void) = {
     [SYS_prlimit64_musl] sys_prlimit64,
 };
 
-static int webkit_sysret_trace_enabled(void)
+static int looks_like_linux_munmap(uint64 addr, uint64 length)
 {
-    static int initialized;
-    static int enabled;
-    char value[8];
-
-    if (!initialized) {
-        enabled = cmdline_get_param("webkit_sysret_trace", value,
-                                    sizeof(value)) == 0 &&
-            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
-        initialized = 1;
-    }
-    return enabled;
-}
-
-static int webkit_syswait_trace_enabled(void)
-{
-    static int initialized;
-    static int enabled;
-    char value[8];
-
-    if (!initialized) {
-        enabled = cmdline_get_param("webkit_syswait_trace", value,
-                                    sizeof(value)) == 0 &&
-            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
-        initialized = 1;
-    }
-    return enabled;
-}
-
-static int webkit_path_trace_enabled(void)
-{
-    static int initialized;
-    static int enabled;
-    char value[8];
-
-    if (!initialized) {
-        enabled = cmdline_get_param("webkit_path_trace", value,
-                                    sizeof(value)) == 0 &&
-            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
-        initialized = 1;
-    }
-    return enabled;
-}
-
-static int is_webkit_process_name(const char *name)
-{
-    return strncmp(name, "MiniBrowser", 11) == 0 ||
-        strncmp(name, "WebKit", 6) == 0 ||
-        strncmp(name, "wlcomp", 6) == 0;
-}
-
-static int is_webkit_browser_process_name(const char *name)
-{
-    return strncmp(name, "MiniBrowser", 11) == 0 ||
-        strncmp(name, "WebKit", 6) == 0;
-}
-
-static int is_expected_transient_errno(int err)
-{
-    switch (err) {
-    case EAGAIN:
-    case EINTR:
-    case EINPROGRESS:
-    case ENOENT:
-        return 1;
-    default:
-        return 0;
-    }
-}
-
-static const char *webkit_syscall_name(int num)
-{
-    switch (num) {
-    case SYS_open: return "open";
-    case SYS_close: return "close";
-    case SYS_read: return "read";
-    case SYS_write: return "write";
-    case SYS_fstat: return "fstat";
-    case SYS_getdents: return "getdents";
-    case SYS_lseek: return "lseek";
-    case SYS_access: return "access";
-    case SYS_readlink: return "readlink";
-    case SYS_stat: return "stat";
-    case SYS_lstat: return "lstat";
-    case SYS_poll: return "poll";
-    case SYS_mmap: return "mmap";
-    case SYS_munmap: return "munmap";
-    case SYS_mprotect: return "mprotect";
-    case SYS_mremap: return "mremap";
-    case SYS_msync: return "msync";
-    case SYS_madvise: return "madvise";
-    case SYS_nanosleep: return "nanosleep";
-    case SYS_futex: return "futex";
-    case SYS_futex_x86: return "futex";
-    case SYS_openat: return "openat";
-    case SYS_readv: return "readv";
-    case SYS_pread64: return "pread64";
-    case SYS_fstatat: return "fstatat";
-    case SYS_readlinkat: return "readlinkat";
-    case SYS_faccessat: return "faccessat";
-    case SYS_sendto: return "sendto";
-    case SYS_recvfrom: return "recvfrom";
-    case SYS_sendmsg: return "sendmsg";
-    case SYS_recvmsg: return "recvmsg";
-    case SYS_kevent_wait: return "kevent_wait";
-    case SYS_recvmmsg_time64: return "recvmmsg";
-    case SYS_pselect6_time64: return "pselect6";
-    case SYS_pselect6_time64_generic: return "pselect6";
-    case SYS_ppoll: return "ppoll";
-    case SYS_ppoll_x86: return "ppoll";
-    case SYS_ppoll_time64: return "ppoll";
-    case SYS_epoll_pwait: return "epoll_pwait";
-    case SYS_epoll_pwait_x86: return "epoll_pwait";
-    case SYS_epoll_pwait2: return "epoll_pwait2";
-    case SYS_epoll_wait_x86: return "epoll_wait";
-    case SYS_sendmmsg: return "sendmmsg";
-    case SYS_statx: return "statx";
-    default: return "?";
-    }
-}
-
-static int is_webkit_wait_trace_syscall(int num)
-{
-    switch (num) {
-    case SYS_open:
-    case SYS_close:
-    case SYS_read:
-    case SYS_write:
-    case SYS_fstat:
-    case SYS_getdents:
-    case SYS_lseek:
-    case SYS_access:
-    case SYS_readlink:
-    case SYS_stat:
-    case SYS_lstat:
-    case SYS_poll:
-    case SYS_mmap:
-    case SYS_munmap:
-    case SYS_mprotect:
-    case SYS_mremap:
-    case SYS_msync:
-    case SYS_madvise:
-    case SYS_nanosleep:
-    case SYS_futex:
-    case SYS_futex_x86:
-    case SYS_openat:
-    case SYS_readv:
-    case SYS_pread64:
-    case SYS_fstatat:
-    case SYS_readlinkat:
-    case SYS_faccessat:
-    case SYS_sendto:
-    case SYS_recvfrom:
-    case SYS_sendmsg:
-    case SYS_recvmsg:
-    case SYS_kevent_wait:
-    case SYS_recvmmsg_time64:
-    case SYS_pselect6_time64:
-    case SYS_pselect6_time64_generic:
-    case SYS_ppoll:
-    case SYS_ppoll_x86:
-    case SYS_ppoll_time64:
-    case SYS_epoll_pwait:
-    case SYS_epoll_pwait_x86:
-    case SYS_epoll_pwait2:
-    case SYS_epoll_wait_x86:
-    case SYS_sendmmsg:
-    case SYS_statx:
-        return 1;
-    default:
-        return 0;
-    }
-}
-
-static uint64 webkit_path_arg(int num, uint64 a0, uint64 a1)
-{
-    switch (num) {
-    case SYS_open:
-    case SYS_access:
-    case SYS_readlink:
-    case SYS_stat:
-    case SYS_lstat:
-        return a0;
-    case SYS_openat:
-    case SYS_fstatat:
-    case SYS_readlinkat:
-    case SYS_faccessat:
-    case SYS_statx:
-        return a1;
-    default:
-        return 0;
-    }
+    return addr >= UVMBOTTOM && addr < UVMTOP &&
+           (addr & (PGSIZE - 1)) == 0 &&
+           length != 0 && length < (UVMTOP - UVMBOTTOM);
 }
 
 /*
@@ -827,37 +640,18 @@ void syscall(void) {
     int num = (int)p->trapframe->trapframe.rax;
     uint64 a0 = p->trapframe->trapframe.rdi;
     uint64 a1 = p->trapframe->trapframe.rsi;
-    uint64 a2 = p->trapframe->trapframe.rdx;
-    uint64 a3 = p->trapframe->trapframe.r10;
-    uint64 a4 = p->trapframe->trapframe.r8;
-    uint64 a5 = p->trapframe->trapframe.r9;
-    uint64 ret;
-    int trace_wait = webkit_syswait_trace_enabled() &&
-        is_webkit_process_name(p->name) && is_webkit_wait_trace_syscall(num);
 
-    if (trace_wait) {
-        printf("webkit-syswait: enter pid=%d tgid=%d name=%s sys=%d(%s) "
-               "args=%lx,%lx,%lx,%lx,%lx,%lx\n",
-               p->pid, p->tgid, p->name, num, webkit_syscall_name(num),
-               a0, a1, a2, a3, a4, a5);
-        if (webkit_path_trace_enabled() &&
-            is_webkit_browser_process_name(p->name)) {
-            uint64 path_arg = webkit_path_arg(num, a0, a1);
-            if (path_arg != 0) {
-                char path[160];
-                if (fetchstr(path_arg, path, sizeof(path)) >= 0) {
-                    printf("webkit-path: enter pid=%d name=%s sys=%d(%s) "
-                           "path=\"%s\"\n",
-                           p->pid, p->name, num, webkit_syscall_name(num),
-                           path);
-                } else {
-                    printf("webkit-path: enter pid=%d name=%s sys=%d(%s) "
-                           "path=<fault:%lx>\n",
-                           p->pid, p->name, num, webkit_syscall_name(num),
-                           path_arg);
-                }
-            }
-        }
+    /*
+     * Some musl x86_64 assembly helpers use native Linux syscall numbers
+     * directly.  Most libc entry points go through xv6's generated syscall
+     * numbers, but pthread self-teardown reaches __unmapself, which hardcodes
+     * Linux munmap(11) and exit(60).  Route those specific shapes before the
+     * compact xv6 table interprets them as sleep(11) or ftruncate(60).
+     */
+    if (num == 11 && looks_like_linux_munmap(a0, a1)) {
+        num = SYS_munmap;
+    } else if (num == 60 && (p->clone_flags & CLONE_THREAD)) {
+        num = SYS_exit;
     }
 
     if (num > 0 && num < (int)NELEM(syscalls) && syscalls[num]) {
@@ -865,20 +659,5 @@ void syscall(void) {
     } else {
         printf("pid %d %s: unknown syscall %d\n", p->pid, p->name, num);
         p->trapframe->trapframe.rax = (uint64)-ENOSYS;
-    }
-
-    ret = p->trapframe->trapframe.rax;
-    if (trace_wait) {
-        printf("webkit-syswait: exit pid=%d tgid=%d name=%s sys=%d(%s) "
-               "ret=%ld\n",
-               p->pid, p->tgid, p->name, num, webkit_syscall_name(num),
-               (int64)ret);
-    }
-    if (webkit_sysret_trace_enabled() && is_webkit_process_name(p->name) &&
-        (int64)ret < 0 &&
-        !is_expected_transient_errno((int)(-(int64)ret))) {
-        printf("webkit-sysret: pid=%d tgid=%d name=%s sys=%d ret=%ld "
-               "args=%lx,%lx,%lx,%lx\n",
-               p->pid, p->tgid, p->name, num, (int64)ret, a0, a1, a2, a3);
     }
 }

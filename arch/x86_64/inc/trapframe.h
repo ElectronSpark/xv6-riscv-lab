@@ -4,12 +4,21 @@
 #include "types.h"
 
 /**
- * FPU/SSE state save area for x86_64 (FXSAVE format).
- * Must be 16-byte aligned.
+ * FPU/SIMD state save area for x86_64.
+ *
+ * The first 512 bytes are the legacy FXSAVE layout used by signal and GDB
+ * paths.  When XSAVE is enabled, the trailing area stores XSAVE-managed
+ * extended state such as AVX YMM upper halves.
  */
+#define X86_FPU_LEGACY_SIZE 512
+#define X86_FPU_STATE_SIZE 4096
+
 struct fpu_state {
-    uint8 fxsave_area[512];
-} __ALIGNED(16);
+    union {
+        uint8 xstate_area[X86_FPU_STATE_SIZE];
+        uint8 fxsave_area[X86_FPU_STATE_SIZE];
+    };
+} __ALIGNED(64);
 
 /**
  * @brief x86_64 kernel-mode trap frame.

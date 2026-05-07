@@ -64,19 +64,24 @@ struct pipe *pipe_alloc(int flags) {
 
 void pipe_close(struct pipe *pi, int writable) {
     bool freed = false;
+    struct vfs_file *notify_file = NULL;
+    int notify_filter = 0;
+
     if (writable) {
         /*
          * Acquire writer_lock to synchronize with a concurrent close of
          * the read-end.  Both directions use writer_lock to protect the
-         * cross-reference pointers (read_file / write_file).  Holding the
-         * lock while calling vfs_file_knote_notify() ensures the other
-         * end's vfs_file is not freed while we are accessing it.
+         * cross-reference pointers (read_file / write_file).  Take a file
+         * reference under the lock, then notify after unlocking; kqueue
+         * notification can re-enter source poll/close paths.
          */
         spin_lock(&pi->writer_lock);
         struct vfs_file *rf = pi->read_file;
         pi->write_file = NULL;
-        if (rf)
-            vfs_file_knote_notify(rf, EVFILT_READ, 0);
+        if (rf != NULL) {
+            notify_file = vfs_fdup(rf);
+            notify_filter = EVFILT_READ;
+        }
         freed = PIPE_CLEAR_WRITABLE(pi);
         tq_wakeup_all(&pi->nread_queue, -1, 0);
         spin_unlock(&pi->writer_lock);
@@ -90,14 +95,20 @@ void pipe_close(struct pipe *pi, int writable) {
         spin_lock(&pi->writer_lock);
         struct vfs_file *wf = pi->write_file;
         pi->read_file = NULL;
-        if (wf)
-            vfs_file_knote_notify(wf, EVFILT_WRITE, 0);
+        if (wf != NULL) {
+            notify_file = vfs_fdup(wf);
+            notify_filter = EVFILT_WRITE;
+        }
         spin_unlock(&pi->writer_lock);
 
         spin_lock(&pi->reader_lock);
         freed = PIPE_CLEAR_READABLE(pi);
         tq_wakeup_all(&pi->nwrite_queue, -1, 0);
         spin_unlock(&pi->reader_lock);
+    }
+    if (notify_file != NULL) {
+        vfs_file_knote_notify(notify_file, notify_filter, 0);
+        vfs_fput(notify_file);
     }
     if (freed) {
         kvfree(pi->data);
@@ -369,13 +380,19 @@ static ssize_t __pipe_file_read(struct vfs_file *file, char *buf, size_t count,
     ssize_t ret = pipe_read(pi, buf, count, user);
     /* kqueue: after consuming data, notify the write-side that the pipe
      * is writable.  Hold writer_lock to serialise with pipe_close, which
-     * clears the cross-reference pointers under the same lock. */
+     * clears the cross-reference pointers under the same lock.  Notify
+     * outside the lock because kqueue can synchronously poll the source. */
     if (ret > 0) {
+        struct vfs_file *wf_ref = NULL;
         spin_lock(&pi->writer_lock);
         struct vfs_file *wf = pi->write_file;
         if (wf != NULL)
-            vfs_file_knote_notify(wf, EVFILT_WRITE, 0);
+            wf_ref = vfs_fdup(wf);
         spin_unlock(&pi->writer_lock);
+        if (wf_ref != NULL) {
+            vfs_file_knote_notify(wf_ref, EVFILT_WRITE, 0);
+            vfs_fput(wf_ref);
+        }
     }
     return ret;
 }
@@ -386,13 +403,19 @@ static ssize_t __pipe_file_write(struct vfs_file *file, const char *buf,
     ssize_t ret = pipe_write(pi, buf, count, user);
     /* kqueue: after producing data, notify the read-side that the pipe
      * is readable.  Hold writer_lock to serialise with pipe_close, which
-     * clears the cross-reference pointers under the same lock. */
+     * clears the cross-reference pointers under the same lock.  Notify
+     * outside the lock because kqueue can synchronously poll the source. */
     if (ret > 0) {
+        struct vfs_file *rf_ref = NULL;
         spin_lock(&pi->writer_lock);
         struct vfs_file *rf = pi->read_file;
         if (rf != NULL)
-            vfs_file_knote_notify(rf, EVFILT_READ, 0);
+            rf_ref = vfs_fdup(rf);
         spin_unlock(&pi->writer_lock);
+        if (rf_ref != NULL) {
+            vfs_file_knote_notify(rf_ref, EVFILT_READ, 0);
+            vfs_fput(rf_ref);
+        }
     }
     return ret;
 }
@@ -459,6 +482,7 @@ void pipe_open(struct vfs_file *file, struct pipe *pi, int f_flags) {
     file->f_flags = f_flags;
     file->pipe = pi;
     file->ops = &pipe_file_ops;
+    file->f_kind = VFS_FILE_KIND_PIPE;
     /* kqueue: record file endpoint for cross-notification */
     if ((f_flags & O_ACCMODE) == O_RDONLY)
         pi->read_file = file;

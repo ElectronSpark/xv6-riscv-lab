@@ -60,6 +60,8 @@ struct vfs_file; /* forward declaration for open_file callback */
 typedef struct cdev_ops {
     int (*read)(cdev_t *cdev, bool user, void *buf, size_t count);
     int (*write)(cdev_t *cdev, bool user, const void *buf, size_t count);
+    int (*write_file)(cdev_t *cdev, struct vfs_file *file, bool user,
+                      const void *buf, size_t count);
     int (*open)(cdev_t *cdev);
     int (*release)(cdev_t *cdev);
     int (*ioctl)(cdev_t *cdev, uint64 cmd, void *arg);

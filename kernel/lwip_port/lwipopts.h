@@ -39,7 +39,7 @@
  * If pbufs exhaust, ALL networking dies — even ping and ARP stop working.
  */
 #define MEMP_NUM_PBUF                   4096
-#define MEMP_NUM_UDP_PCB                16
+#define MEMP_NUM_UDP_PCB                128
 #define MEMP_NUM_TCP_PCB                128
 #define MEMP_NUM_TCP_PCB_LISTEN         16
 #define MEMP_NUM_TCP_SEG                8192

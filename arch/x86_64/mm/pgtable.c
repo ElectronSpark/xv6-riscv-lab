@@ -143,13 +143,13 @@ uint64 walkaddr(pagetable_t pagetable, uint64 va) {
 /*  Bulk mapping / unmapping */
 /* ========================================================================== */
 
-void kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm) {
+void kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, uint64 perm) {
     if (mappages(kpgtbl, va, sz, pa, perm) != 0)
         panic("kvmmap");
 }
 
 int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
-             int perm) {
+             uint64 perm) {
     uint64 a, last;
     pte_t *pte;
 
@@ -229,7 +229,7 @@ uint64 pte2vma_flags(pte_t *pte) {
         flags |= PROT_READ;
     if (pte_val & PTE_W)
         flags |= PROT_WRITE;
-    if (pte_val & PTE_X)
+    if ((pte_val & PTE_NX) == 0)
         flags |= PROT_EXEC;
     if (pte_val & PTE_U)
         flags |= VMA_FLAG_USER;

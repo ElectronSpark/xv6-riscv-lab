@@ -41,6 +41,7 @@
 #if !NO_SYS /* don't build if not configured for use in lwipopts.h */
 
 #include "lwip/priv/tcpip_priv.h"
+#include "lwip/priv/api_msg.h"
 #include "lwip/sys.h"
 #include "lwip/memp.h"
 #include "lwip/mem.h"
@@ -66,11 +67,6 @@ sys_mutex_t lock_tcpip_core;
 #endif /* LWIP_TCPIP_CORE_LOCKING */
 
 static void tcpip_thread_handle_msg(struct tcpip_msg *msg);
-
-/* xv6 patch: tcpip heartbeat — tracks msgs/timeouts per 10s window */
-static u32_t tcpip_hb_msgs;
-static u32_t tcpip_hb_timeouts;
-static u32_t tcpip_hb_next;  /* sys_now() of next print */
 
 #if !LWIP_TIMERS
 
@@ -109,7 +105,6 @@ again:
     LOCK_TCPIP_CORE();
     return;
   } else if (sleeptime == 0) {
-    tcpip_hb_timeouts++;
     sys_check_timeouts();
     /* We try again to fetch a message from the mbox. */
     goto again;
@@ -121,7 +116,6 @@ again:
   if (res == SYS_ARCH_TIMEOUT) {
     /* If a SYS_ARCH_TIMEOUT value is returned, a timeout occurred
        before a message could be fetched. */
-    tcpip_hb_timeouts++;
     sys_check_timeouts();
     /* We try again to fetch a message from the mbox. */
     goto again;
@@ -130,7 +124,6 @@ again:
    * the timeout.  This ensures TCP delayed-ACK timers fire promptly. */
   sleeptime = sys_timeouts_sleeptime();
   if (sleeptime == 0) {
-    tcpip_hb_timeouts++;
     sys_check_timeouts();
   }
 }
@@ -168,22 +161,7 @@ tcpip_thread(void *arg)
       /* xv6 patch: do not panic — just skip the NULL message */
       continue;
     }
-    tcpip_hb_msgs++;
     tcpip_thread_handle_msg(msg);
-
-    /* xv6 patch: heartbeat every 10s */
-    {
-      u32_t now = sys_now();
-      if (tcpip_hb_next == 0)
-        tcpip_hb_next = now + 10000;
-      if (now >= tcpip_hb_next) {
-        LWIP_PLATFORM_DIAG(("tcpip_thread: msgs=%"U32_F" timer_checks=%"U32_F" t=%"U32_F"ms\n",
-                            tcpip_hb_msgs, tcpip_hb_timeouts, now));
-        tcpip_hb_msgs = 0;
-        tcpip_hb_timeouts = 0;
-        tcpip_hb_next = now + 10000;
-      }
-    }
   }
 }
 

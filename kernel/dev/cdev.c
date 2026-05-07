@@ -133,3 +133,23 @@ int cdev_write(cdev_t *cdev, bool user, const void *buf, size_t count) {
     }
     return cdev->ops.write(cdev, user, buf, count);
 }
+
+int cdev_write_file(cdev_t *cdev, struct vfs_file *file, bool user,
+                    const void *buf, size_t count) {
+    if (cdev == NULL || buf == NULL || count == 0) {
+        return -EINVAL;
+    }
+    if (cdev->dev.type != DEV_TYPE_CHAR) {
+        return -ENODEV;
+    }
+    if (!cdev->writable) {
+        return -ENOSYS;
+    }
+    if (cdev->ops.write_file != NULL) {
+        return cdev->ops.write_file(cdev, file, user, buf, count);
+    }
+    if (cdev->ops.write == NULL) {
+        return -ENOSYS;
+    }
+    return cdev->ops.write(cdev, user, buf, count);
+}

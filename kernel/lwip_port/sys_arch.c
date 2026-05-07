@@ -30,6 +30,9 @@
 #include "lwip/opt.h"
 #include "lwip/sys.h"
 #include "lwip/err.h"
+#include "lwip/api.h"
+#include "lwip/tcp.h"
+#include "lwip/priv/api_msg.h"
 #include "arch/sys_arch.h"
 #include <mm/vm.h>
 
@@ -417,7 +420,15 @@ u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout)
         if (sem_wait_count <= 10 || (sem_wait_count % 1000) == 0)
             SYS_DBG("sem_wait(forever) #%lu\n", sem_wait_count);
 #endif
-        sem_wait(&sem->sem);
+        if (current != NULL && THREAD_USER_SPACE(current)) {
+            for (;;) {
+                int ret = sem_wait_timed(&sem->sem, 1000);
+                if (ret == 0)
+                    break;
+            }
+        } else {
+            sem_wait(&sem->sem);
+        }
         return (u32_t)(sys_now() - start_ms);
     }
 

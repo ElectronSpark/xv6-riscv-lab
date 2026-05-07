@@ -308,6 +308,8 @@ void arch_vm_init(void)
             vm_asid_init(0);        /* no PCID support */
         }
     }
+
+    fpu_cpu_init();
 }
 
 void arch_vm_init_hart(void)
@@ -333,6 +335,8 @@ void arch_vm_init_hart(void)
             cr4 |= (1ULL << 17);       /* CR4.PCIDE */
         asm volatile("movq %0, %%cr4" : : "r"(cr4) : "memory");
     }
+
+    fpu_cpu_init();
 
     kvm_load();
 }
@@ -374,6 +378,14 @@ void vm_remote_sfence(vm_t *vm)
     push_off();
     smp_mb();
 
+    /*
+     * Callers use this after changing PTEs in @vm, including fork COW
+     * write-protection of the current process.  Flush the local CPU too:
+     * otherwise the parent can keep a stale writable translation after
+     * fork and modify a page that should fault into COW.
+     */
+    sfence_vma_global();
+
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());
 
@@ -387,6 +399,8 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
 {
     push_off();
     smp_mb();
+
+    sfence_vma_page(va);
 
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());

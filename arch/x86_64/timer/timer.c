@@ -186,6 +186,16 @@ void timer_tick_advance(void) {
         sched_timer_tick();
         __do_timer_tick();
     }
+
+    /*
+     * Every local x86 timer interrupt is a scheduler tick for the CPU that
+     * received it.  Without this, a pure user-mode thread can return from the
+     * interrupt and continue indefinitely until some unrelated syscall or IPI
+     * happens to enter the scheduler.
+     */
+    if (!sched_holding()) {
+        SET_NEEDS_RESCHED();
+    }
 }
 
 /* Re-arm LAPIC timer for TSC-deadline mode (called from trap handler) */

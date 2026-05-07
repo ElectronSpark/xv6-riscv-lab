@@ -71,7 +71,8 @@ static int knote_read_event(struct knote *kn, long hint) {
     }
     /* Chardev files (e.g. /dev/console) have f->ops == NULL;
      * dispatch through the device's poll callback instead. */
-    if (f->cdev != NULL && f->cdev->ops.poll != NULL) {
+    if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL &&
+        f->cdev->ops.poll != NULL) {
         int revents = f->cdev->ops.poll(f->cdev, POLLIN | POLLRDNORM |
                                                  POLLRDBAND | POLLRDHUP);
         if (revents & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP |
@@ -130,7 +131,8 @@ static int knote_write_event(struct knote *kn, long hint) {
             return 1;
     }
     /* Chardev fallback */
-    if (f->cdev != NULL && f->cdev->ops.poll != NULL) {
+    if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL &&
+        f->cdev->ops.poll != NULL) {
         int revents = f->cdev->ops.poll(f->cdev, POLLOUT | POLLWRNORM |
                                                  POLLWRBAND);
         if (revents & (POLLOUT | POLLWRNORM | POLLWRBAND | POLLERR))

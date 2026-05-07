@@ -5,7 +5,12 @@
 #include <string.h>
 #include <dev/cdev.h>
 #include <mm/vm.h>
+#include <vfs/fcntl.h>
+#include <vfs/vfs_types.h>
+#include "lock/spinlock.h"
+#include "proc/sched.h"
 #include "printf.h"
+#include "uabi/poll.h"
 
 #define OSS_SOUND_MAJOR 14
 
@@ -84,6 +89,7 @@
 #define OSS_DEFAULT_CHANNELS 2
 #define OSS_BLOCK_SIZE 4096
 #define OSS_FRAGMENTS 16
+#define OSS_BUFFER_BYTES (OSS_BLOCK_SIZE * OSS_FRAGMENTS)
 
 #define PCM_CAP_DUPLEX   0x00000100
 #define PCM_CAP_TRIGGER  0x00001000
@@ -193,8 +199,11 @@ static int oss_rate = OSS_DEFAULT_RATE;
 static int oss_channels = OSS_DEFAULT_CHANNELS;
 static int oss_trigger = PCM_ENABLE_INPUT | PCM_ENABLE_OUTPUT;
 static int oss_volume = SOUND_MIXER_VALUE(100, 100);
-static uint oss_play_bytes;
+static uint64 oss_play_written_bytes;
+static uint64 oss_play_consumed_bytes;
+static uint64 oss_play_last_ms;
 static uint oss_rec_bytes;
+static spinlock_t oss_lock;
 
 static int oss_copyout(uint64 uaddr, const void *src, size_t len) {
     if (uaddr == 0)
@@ -226,9 +235,111 @@ static void oss_put_string(char *dst, size_t len, const char *src) {
 static int oss_normalize_format(int fmt) {
     if (fmt == 0)
         return oss_format;
-    if (fmt & OSS_FORMATS)
+    if (fmt == AFMT_U8 || fmt == AFMT_S16_LE || fmt == AFMT_S24_LE ||
+        fmt == AFMT_S32_LE)
         return fmt;
+    if (fmt & AFMT_S16_LE)
+        return AFMT_S16_LE;
+    if (fmt & AFMT_U8)
+        return AFMT_U8;
+    if (fmt & AFMT_S24_LE)
+        return AFMT_S24_LE;
+    if (fmt & AFMT_S32_LE)
+        return AFMT_S32_LE;
     return OSS_DEFAULT_FORMAT;
+}
+
+static uint64 oss_bytes_per_second_locked(void) {
+    uint64 bytes_per_sample;
+
+    switch (oss_format) {
+    case AFMT_U8:
+        bytes_per_sample = 1;
+        break;
+    case AFMT_S24_LE:
+        bytes_per_sample = 3;
+        break;
+    case AFMT_S32_LE:
+        bytes_per_sample = 4;
+        break;
+    case AFMT_S16_LE:
+    default:
+        bytes_per_sample = 2;
+        break;
+    }
+
+    return (uint64)oss_rate * (uint64)oss_channels * bytes_per_sample;
+}
+
+static void oss_playback_update_locked(void) {
+    uint64 now = sched_timer_now_ms();
+    if (oss_play_last_ms == 0) {
+        oss_play_last_ms = now;
+        return;
+    }
+
+    uint64 elapsed_ms = now - oss_play_last_ms;
+    if (elapsed_ms == 0)
+        return;
+    oss_play_last_ms = now;
+
+    uint64 pending = oss_play_written_bytes - oss_play_consumed_bytes;
+    if (pending == 0)
+        return;
+
+    uint64 bytes_per_sec = oss_bytes_per_second_locked();
+    uint64 consumed = (bytes_per_sec * elapsed_ms) / 1000;
+    if (consumed == 0)
+        consumed = 1;
+    if (consumed > pending)
+        consumed = pending;
+    oss_play_consumed_bytes += consumed;
+}
+
+static uint64 oss_pending_locked(void) {
+    oss_playback_update_locked();
+    return oss_play_written_bytes - oss_play_consumed_bytes;
+}
+
+static uint64 oss_free_locked(void) {
+    uint64 pending = oss_pending_locked();
+    if (pending >= OSS_BUFFER_BYTES)
+        return 0;
+    return OSS_BUFFER_BYTES - pending;
+}
+
+static void oss_reset_playback_locked(void) {
+    oss_play_written_bytes = 0;
+    oss_play_consumed_bytes = 0;
+    oss_play_last_ms = sched_timer_now_ms();
+}
+
+static int oss_is_pcm_device(cdev_t *cdev) {
+    if (cdev == NULL)
+        return 0;
+    int minor = cdev->dev.minor;
+    return minor == OSS_MINOR_DSP || minor == OSS_MINOR_DSP0 ||
+           minor == OSS_MINOR_AUDIO || minor == OSS_MINOR_AUDIO0;
+}
+
+static void oss_drain_playback(void) {
+    for (;;) {
+        spin_lock(&oss_lock);
+        uint64 pending = oss_pending_locked();
+        if (pending == 0) {
+            spin_unlock(&oss_lock);
+            return;
+        }
+
+        uint64 bytes_per_ms = oss_bytes_per_second_locked() / 1000;
+        if (bytes_per_ms == 0)
+            bytes_per_ms = 1;
+        uint64 sleep_for = (pending + bytes_per_ms - 1) / bytes_per_ms;
+        if (sleep_for > 20)
+            sleep_for = 20;
+        spin_unlock(&oss_lock);
+        sleep_ms(sleep_for ? sleep_for : 1);
+    }
 }
 
 static void oss_fill_bufinfo(audio_buf_info_t *info) {
@@ -309,13 +420,41 @@ static int oss_read(cdev_t *cdev, bool user, void *buf, size_t count) {
     return count;
 }
 
-static int oss_write(cdev_t *cdev, bool user, const void *buf, size_t count) {
-    (void)cdev;
+static int oss_write_file(cdev_t *cdev, struct vfs_file *file, bool user,
+                          const void *buf, size_t count) {
     (void)user;
     if (buf == NULL)
         return -EINVAL;
-    oss_play_bytes += count;
-    return count;
+    if (!oss_is_pcm_device(cdev))
+        return (int)count;
+
+    bool nonblock = file != NULL && (file->f_flags & O_NONBLOCK);
+    size_t done = 0;
+    while (done < count) {
+        spin_lock(&oss_lock);
+        uint64 free_bytes = oss_free_locked();
+        if (free_bytes == 0) {
+            spin_unlock(&oss_lock);
+            if (nonblock)
+                return done ? (int)done : -EAGAIN;
+            sleep_ms(1);
+            continue;
+        }
+
+        size_t chunk = count - done;
+        if ((uint64)chunk > free_bytes)
+            chunk = (size_t)free_bytes;
+        oss_play_written_bytes += chunk;
+        done += chunk;
+        spin_unlock(&oss_lock);
+        if (nonblock)
+            break;
+    }
+    return (int)done;
+}
+
+static int oss_write(cdev_t *cdev, bool user, const void *buf, size_t count) {
+    return oss_write_file(cdev, NULL, user, buf, count);
 }
 
 static int sndstat_read(cdev_t *cdev, bool user, void *buf, size_t count) {
@@ -371,13 +510,26 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
     }
 
     case SNDCTL_DSP_RESET:
+        spin_lock(&oss_lock);
+        oss_reset_playback_locked();
+        spin_unlock(&oss_lock);
+        return 0;
+
     case SNDCTL_DSP_SYNC:
+        oss_drain_playback();
+        return 0;
+
     case SNDCTL_DSP_POST:
     case SNDCTL_DSP_SETDUPLEX:
     case SNDCTL_DSP_SILENCE:
     case SNDCTL_DSP_SKIP:
     case SNDCTL_DSP_HALT_INPUT:
+        return 0;
+
     case SNDCTL_DSP_HALT_OUTPUT:
+        spin_lock(&oss_lock);
+        oss_reset_playback_locked();
+        spin_unlock(&oss_lock);
         return 0;
 
     case SNDCTL_DSP_GETFMTS:
@@ -386,8 +538,12 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
     case SNDCTL_DSP_SETFMT:
         if (oss_get_int(uarg, &value) < 0)
             return -EFAULT;
+        spin_lock(&oss_lock);
         oss_format = oss_normalize_format(value);
-        return oss_put_int(uarg, oss_format);
+        oss_reset_playback_locked();
+        value = oss_format;
+        spin_unlock(&oss_lock);
+        return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_SPEED:
         if (oss_get_int(uarg, &value) < 0)
@@ -396,25 +552,46 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
             value = 8000;
         if (value > 192000)
             value = 192000;
+        spin_lock(&oss_lock);
         oss_rate = value;
-        return oss_put_int(uarg, oss_rate);
+        oss_reset_playback_locked();
+        value = oss_rate;
+        spin_unlock(&oss_lock);
+        return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_CHANNELS:
         if (oss_get_int(uarg, &value) < 0)
             return -EFAULT;
+        spin_lock(&oss_lock);
         oss_channels = value <= 1 ? 1 : 2;
-        return oss_put_int(uarg, oss_channels);
+        oss_reset_playback_locked();
+        value = oss_channels;
+        spin_unlock(&oss_lock);
+        return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_STEREO:
         if (oss_get_int(uarg, &value) < 0)
             return -EFAULT;
+        spin_lock(&oss_lock);
         oss_channels = value ? 2 : 1;
-        return oss_put_int(uarg, oss_channels == 2);
+        oss_reset_playback_locked();
+        value = oss_channels == 2;
+        spin_unlock(&oss_lock);
+        return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_GETBLKSIZE:
         return oss_put_int(uarg, OSS_BLOCK_SIZE);
 
-    case SNDCTL_DSP_GETOSPACE:
+    case SNDCTL_DSP_GETOSPACE: {
+        audio_buf_info_t info;
+        oss_fill_bufinfo(&info);
+        spin_lock(&oss_lock);
+        info.bytes = (int)oss_free_locked();
+        info.fragments = info.bytes / info.fragsize;
+        spin_unlock(&oss_lock);
+        return oss_copyout(uarg, &info, sizeof(info));
+    }
+
     case SNDCTL_DSP_GETISPACE: {
         audio_buf_info_t info;
         oss_fill_bufinfo(&info);
@@ -443,14 +620,21 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
     }
 
     case SNDCTL_DSP_GETOPTR: {
-        count_info_t ci = { .bytes = oss_play_bytes,
-                            .blocks = (int)(oss_play_bytes / OSS_BLOCK_SIZE),
-                            .ptr = (int)(oss_play_bytes % OSS_BLOCK_SIZE) };
+        spin_lock(&oss_lock);
+        oss_pending_locked();
+        uint64 played = oss_play_consumed_bytes;
+        count_info_t ci = { .bytes = (uint)played,
+                            .blocks = (int)(played / OSS_BLOCK_SIZE),
+                            .ptr = (int)(played % OSS_BLOCK_SIZE) };
+        spin_unlock(&oss_lock);
         return oss_copyout(uarg, &ci, sizeof(ci));
     }
 
     case SNDCTL_DSP_GETODELAY:
-        return oss_put_int(uarg, 0);
+        spin_lock(&oss_lock);
+        value = (int)oss_pending_locked();
+        spin_unlock(&oss_lock);
+        return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_GETERROR: {
         audio_errinfo_t ei;
@@ -496,8 +680,18 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
 
     case SNDCTL_DSP_CURRENT_IPTR:
     case SNDCTL_DSP_CURRENT_OPTR: {
+        spin_lock(&oss_lock);
+        oss_pending_locked();
+        uint64 played = oss_play_consumed_bytes;
+        uint64 bytes_per_sample = oss_bytes_per_second_locked() /
+                                  ((uint64)oss_rate * (uint64)oss_channels);
+        if (bytes_per_sample == 0)
+            bytes_per_sample = 1;
         oss_count_t oc;
         memset(&oc, 0, sizeof(oc));
+        oc.samples = (int)(played / bytes_per_sample);
+        oc.fifo_samples = (int)(oss_pending_locked() / bytes_per_sample);
+        spin_unlock(&oss_lock);
         return oss_copyout(uarg, &oc, sizeof(oc));
     }
 
@@ -529,8 +723,25 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
 }
 
 static int oss_poll(cdev_t *cdev, short events) {
-    (void)cdev;
-    return events;
+    if (!oss_is_pcm_device(cdev))
+        return events;
+
+    short revents = 0;
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND))
+        revents |= events & (POLLIN | POLLRDNORM | POLLRDBAND);
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
+        /*
+         * The playback FIFO drains against monotonic time, not a hardware
+         * interrupt.  If a kqueue/epoll waiter sees a momentarily full virtual
+         * FIFO there is no later device edge to wake it, while oss_write()
+         * already performs the pacing needed by the virtual sink.
+         */
+        spin_lock(&oss_lock);
+        oss_playback_update_locked();
+        spin_unlock(&oss_lock);
+        revents |= events & (POLLOUT | POLLWRNORM | POLLWRBAND);
+    }
+    return revents;
 }
 
 #define OSS_CDEV(_name, _minor, _readable, _writable, _read, _write) \
@@ -546,6 +757,7 @@ static int oss_poll(cdev_t *cdev, short events) {
         .ops = { \
             .read = (_read), \
             .write = (_write), \
+            .write_file = oss_write_file, \
             .open = oss_open, \
             .release = oss_release, \
             .ioctl = oss_ioctl, \
@@ -569,6 +781,9 @@ static cdev_t sndstat_cdev =
     OSS_CDEV("sndstat", OSS_MINOR_SNDSTAT, 1, 0, sndstat_read, NULL);
 
 void ossaudiodevinit(void) {
+    spin_init(&oss_lock, "ossaudio");
+    oss_play_last_ms = sched_timer_now_ms();
+
     int ret = cdev_register(&mixer_cdev);
     assert(ret == 0, "ossaudio: failed to register /dev/mixer: %d", ret);
     ret = cdev_register(&mixer0_cdev);

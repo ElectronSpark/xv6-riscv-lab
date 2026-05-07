@@ -12,5 +12,7 @@ int cdev_unregister(cdev_t *dev);
 
 int cdev_read(cdev_t *cdev, bool user, void *buf, size_t count);
 int cdev_write(cdev_t *cdev, bool user, const void *buf, size_t count);
+int cdev_write_file(cdev_t *cdev, struct vfs_file *file, bool user,
+                    const void *buf, size_t count);
 
 #endif // __KERNEL_CHARACTER_DEVICE_H

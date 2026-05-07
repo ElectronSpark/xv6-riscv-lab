@@ -164,6 +164,7 @@ static int __vfs_open_cdev(struct vfs_inode *inode, struct vfs_file *file) {
         /* open_file must have set file->ops; if it didn't, fall
          * through to the normal cdev path. */
         if (file->ops != NULL) {
+            file->f_kind = VFS_FILE_KIND_CUSTOM;
             cdev_put(cdev); /* file no longer holds a cdev ref */
             return 0;
         }
@@ -171,6 +172,7 @@ static int __vfs_open_cdev(struct vfs_inode *inode, struct vfs_file *file) {
 
     file->cdev = cdev;
     file->ops = NULL; // Device files use direct device I/O
+    file->f_kind = VFS_FILE_KIND_CDEV;
 
     /* Invoke the cdev's open callback (e.g. /dev/tty returns -ENXIO
      * when the process has no controlling terminal). */
@@ -178,6 +180,7 @@ static int __vfs_open_cdev(struct vfs_inode *inode, struct vfs_file *file) {
         int ret = cdev->ops.open(cdev);
         if (ret != 0) {
             file->cdev = NULL;
+            file->f_kind = VFS_FILE_KIND_NONE;
             cdev_put(cdev);
             return ret;
         }
@@ -193,15 +196,18 @@ static int __vfs_open_blkdev(struct vfs_inode *inode, struct vfs_file *file) {
         // Device not found - allow open for stat but not I/O
         file->blkdev = NULL;
         file->ops = NULL;
+        file->f_kind = VFS_FILE_KIND_BDEV;
         return 0;
     }
     if (blkdev == NULL) {
         file->blkdev = NULL;
         file->ops = NULL;
+        file->f_kind = VFS_FILE_KIND_BDEV;
         return 0;
     }
     file->blkdev = blkdev;
     file->ops = NULL; // Device files use direct device I/O
+    file->f_kind = VFS_FILE_KIND_BDEV;
     return 0;
 }
 
@@ -288,6 +294,8 @@ struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags) {
     vfs_iunlock(inode);
     __vfs_ftable_attatch(file);
     file->f_flags = f_flags;
+    if (file->f_kind == VFS_FILE_KIND_NONE)
+        file->f_kind = VFS_FILE_KIND_INODE;
     file->f_pos = 0;
     return file;
 }
@@ -360,19 +368,20 @@ void vfs_fput(struct vfs_file *file) {
     // Note: anonymous pipe cleanup (pipe != NULL, inode == NULL) is now
     // handled by pipe_file_ops.release via __vfs_file_free below.
     if (inode != NULL) {
-        if (S_ISCHR(inode->mode) && file->cdev != NULL) {
+        if (file->f_kind == VFS_FILE_KIND_CDEV && file->cdev != NULL) {
             ret = cdev_put(file->cdev);
             file->cdev = NULL;
             if (ret != 0) {
                 printf("vfs_fput: cdev_put failed: %d\n", ret);
             }
-        } else if (S_ISBLK(inode->mode)) {
+        } else if (file->f_kind == VFS_FILE_KIND_BDEV &&
+                   file->blkdev != NULL) {
             ret = blkdev_put(file->blkdev);
             file->blkdev = NULL;
             if (ret != 0) {
                 printf("vfs_fput: blkdev_put failed: %d\n", ret);
             }
-        } else if (S_ISFIFO(inode->mode) && file->pipe != NULL) {
+        } else if (file->f_kind == VFS_FILE_KIND_PIPE && file->pipe != NULL) {
             pipe_close(file->pipe, (file->f_flags & O_ACCMODE) != O_RDONLY);
         }
         // Note: sockets are not opened via inodes, so no cleanup here
@@ -419,7 +428,9 @@ int vfs_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
         /* Prefer custom file ops (installed by cdev open_file, e.g. PTY master) */
         if (file->ops != NULL && file->ops->ioctl != NULL)
             return file->ops->ioctl(file, cmd, arg);
-        device_t *dev = (device_t *)file->cdev;
+        device_t *dev = file->f_kind == VFS_FILE_KIND_CDEV
+                            ? (device_t *)file->cdev
+                            : NULL;
         if (dev != NULL)
             return dev_ioctl(dev, cmd, arg);
         return -ENODEV;
@@ -473,9 +484,11 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
         if (file->ops != NULL && file->ops->read != NULL) {
             /* Custom file ops installed by cdev open_file (e.g. PTY master) */
             ret = file->ops->read(file, buf, n, user);
-        } else {
+        } else if (file->f_kind == VFS_FILE_KIND_CDEV) {
             struct cdev *cdev = file->cdev;
             ret = cdev_read(cdev, user, buf, n);
+        } else {
+            ret = -ENODEV;
         }
         return ret;
     }
@@ -607,9 +620,11 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
         if (file->ops != NULL && file->ops->write != NULL) {
             /* Custom file ops installed by cdev open_file (e.g. PTY master) */
             ret = file->ops->write(file, buf, n, user);
-        } else {
+        } else if (file->f_kind == VFS_FILE_KIND_CDEV) {
             struct cdev *cdev = file->cdev;
-            ret = cdev_write(cdev, user, buf, n);
+            ret = cdev_write_file(cdev, file, user, buf, n);
+        } else {
+            ret = -ENODEV;
         }
         return ret;
     }
@@ -738,7 +753,7 @@ ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user)
             ret = file->ops->readv(file, iter, user);
         } else if (file->ops != NULL && file->ops->read != NULL) {
             ret = __vfs_generic_readv_locked(file, iter, user, false);
-        } else {
+        } else if (file->f_kind == VFS_FILE_KIND_CDEV) {
             /* cdev read — fall back to per-segment cdev_read */
             ssize_t total = 0;
             struct cdev *cdev = file->cdev;
@@ -754,6 +769,8 @@ ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user)
                 if ((size_t)n < seg_len) break;
             }
             ret = total;
+        } else {
+            ret = -ENODEV;
         }
         return ret;
     }
@@ -865,7 +882,7 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
             ret = file->ops->writev(file, iter, user);
         } else if (file->ops != NULL && file->ops->write != NULL) {
             ret = __vfs_generic_writev_locked(file, iter, user, false);
-        } else {
+        } else if (file->f_kind == VFS_FILE_KIND_CDEV) {
             /* cdev write — per-segment cdev_write */
             ssize_t total = 0;
             struct cdev *cdev = file->cdev;
@@ -873,13 +890,16 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
                 size_t seg_len = iter->iov->iov_len - iter->iov_off;
                 if (seg_len == 0) { iov_iter_advance(iter, 0); continue; }
                 uint64 base = iter->iov->iov_base + iter->iov_off;
-                ssize_t n = cdev_write(cdev, user, (const char *)base, seg_len);
+                ssize_t n = cdev_write_file(cdev, file, user,
+                                            (const char *)base, seg_len);
                 if (n < 0) { if (total > 0) break; total = n; break; }
                 total += n;
                 iov_iter_advance(iter, (size_t)n);
                 if ((size_t)n < seg_len) break;
             }
             ret = total;
+        } else {
+            ret = -ENODEV;
         }
         if (ret > 0) {
             struct vfs_inode *ino = vfs_inode_deref(&file->inode);
@@ -1076,6 +1096,7 @@ int vfs_custom_fd_alloc(struct vfs_file_ops *ops, void *private_data,
     f->f_flags      = flags;
     f->ops          = ops;
     f->private_data = private_data;
+    f->f_kind       = VFS_FILE_KIND_CUSTOM;
     __vfs_ftable_attatch(f);
 
     spin_lock(&current->fdtable->lock);
@@ -1130,6 +1151,7 @@ int vfs_sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport,
     (*f)->f_flags = O_RDWR;
     (*f)->sock = si;
     (*f)->ops = NULL; // Sockets use direct socket I/O
+    (*f)->f_kind = VFS_FILE_KIND_LEGACY_SOCKET;
     __vfs_ftable_attatch(*f);
 
     // Add to list of sockets (check for duplicates)

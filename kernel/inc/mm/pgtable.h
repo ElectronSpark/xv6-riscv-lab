@@ -101,7 +101,7 @@ uint64 walkaddr(pagetable_t pagetable, uint64 va);
  *
  * @perm: raw PTE permission flags (arch-specific; callers are arch code).
  */
-void kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm);
+void kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, uint64 perm);
 
 /**
  * mappages - Create leaf PTEs mapping [@va, @va+@size) → [@pa, @pa+@size).
@@ -113,7 +113,7 @@ void kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm);
  * Returns 0 on success, negative errno on failure.
  */
 int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
-             int perm);
+             uint64 perm);
 
 /**
  * uvmunmap - Remove @npages of mappings starting from @va.

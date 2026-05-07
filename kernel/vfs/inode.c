@@ -1668,6 +1668,7 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
     struct vfs_inode *pos = NULL;
     struct vfs_inode *rooti = NULL;
     char *pathbuf = NULL;
+    size_t pathbuf_len = 0;
     struct vfs_inode *ret_inode = NULL;
     int symlink_depth = 0;
 
@@ -1675,8 +1676,12 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
         return ERR_PTR(-ENAMETOOLONG);
     }
 
-    /* Allocate a Linux PATH_MAX-sized working buffer for user pathnames. */
-    pathbuf = kvmalloc(VFS_USER_PATH_MAX);
+    /*
+     * Keep the common no-symlink path cheap.  A PATH_MAX allocation for every
+     * lookup makes small exec/open probes fail first under browser pressure.
+     */
+    pathbuf_len = path_len + 1;
+    pathbuf = kvmalloc(pathbuf_len);
     if (pathbuf == NULL)
         return ERR_PTR(-ENOMEM);
 
@@ -1828,6 +1833,21 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
             if (rest_len > 0)
                 memmove(saved_rest, rest, rest_len + 1);
 
+            if (new_len + 1 > pathbuf_len) {
+                char *new_pathbuf = kvmalloc(new_len + 1);
+                if (new_pathbuf == NULL) {
+                    kvfree(saved_rest);
+                    kvfree(target);
+                    vfs_iput(pos);
+                    pos = NULL;
+                    ret_inode = INIT_ERR_PTR(-ENOMEM);
+                    goto out;
+                }
+                kvfree(pathbuf);
+                pathbuf = new_pathbuf;
+                pathbuf_len = new_len + 1;
+            }
+
             /* Construct new path in pathbuf */
             memmove(pathbuf, target, (size_t)tlen);
             if (rest_len > 0) {
@@ -1972,11 +1992,11 @@ struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len, char *name,
         name_start--;
     }
 
-    // Extract the name component, truncating to fit buffer (xv6 compatibility)
+    // Extract the name component.  Silently truncating here changes which
+    // directory entry the caller operates on, so report the real path error.
     size_t final_name_len = end - name_start;
     if (final_name_len >= name_size) {
-        // Truncate to fit buffer (leaves room for null terminator)
-        final_name_len = name_size - 1;
+        return ERR_PTR(-ENAMETOOLONG);
     }
 
     memmove(name, path + name_start, final_name_len);
@@ -2037,7 +2057,7 @@ struct vfs_inode *vfs_nameiparent_at(struct vfs_inode *start_dir,
 
     size_t final_name_len = end - name_start;
     if (final_name_len >= name_size)
-        final_name_len = name_size - 1;
+        return ERR_PTR(-ENAMETOOLONG);
     memmove(name, path + name_start, final_name_len);
     name[final_name_len] = '\0';
 

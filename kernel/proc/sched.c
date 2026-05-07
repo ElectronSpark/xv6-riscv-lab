@@ -328,6 +328,13 @@ void scheduler_yield(void) {
             rq_task_tick(curr_se);
     }
 
+    /*
+     * Entering the scheduler consumes any pending reschedule request.  The
+     * tick/preemption checks above have already updated scheduler state; the
+     * pick below will act on it immediately.
+     */
+    CLEAR_NEEDS_RESCHED();
+
     // Pick the next thread to run
     struct thread *p = __sched_pick_next();
 
