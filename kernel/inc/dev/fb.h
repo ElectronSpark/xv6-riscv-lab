@@ -376,6 +376,7 @@ struct fb_gpu_stats {
 /* Kernel API */
 void fbdevinit(void);
 int  fb_gpu_register_virgl_render_node(void);
+int  fb_init_virtio_gpu_scanout(uint32 width, uint32 height);
 int  fb_detected(void);
 void fb_pci_init(uint8 bus, uint8 dev, uint8 func);
 void fb_get_resolution(uint32 *xres, uint32 *yres);

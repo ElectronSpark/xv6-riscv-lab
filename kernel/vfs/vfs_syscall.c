@@ -969,6 +969,32 @@ uint64 sys_vfs_lstat(void) {
         return ret;
     }
 
+    bool root_path = true;
+    for (int i = 0; i < n; i++) {
+        if (path[i] != '/') {
+            root_path = false;
+            break;
+        }
+    }
+    if (root_path) {
+        struct vfs_inode *inode = vfs_namei(path, n);
+        kvfree(path);
+        kvfree(name);
+        if (IS_ERR(inode))
+            return PTR_ERR(inode);
+        if (inode == NULL)
+            return -ENOENT;
+
+        struct stat kst;
+        ret = __vfs_inode_stat(inode, &kst);
+        vfs_iput(inode);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, st_addr, &kst, sizeof(kst)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
     struct vfs_inode *parent = vfs_nameiparent(path, n, name, VFS_USER_PATH_MAX);
     kvfree(path);
     if (IS_ERR(parent)) {
@@ -1913,13 +1939,22 @@ uint64 sys_vfs_connect(void) {
  * Directory Operations - getdents
  ******************************************************************************/
 
-// Linux-compatible dirent structure
+// Linux getdents64-compatible dirent structure.
 struct linux_dirent64 {
     uint64 d_ino;    // Inode number
     int64 d_off;     // Offset to next structure
     uint16 d_reclen; // Size of this dirent
     uint8 d_type;    // File type
     char d_name[];   // Filename (null-terminated)
+};
+
+// Legacy Linux getdents(2) record.  d_type is stored in the last byte of the
+// record, after the nul-terminated name and any alignment padding.
+struct linux_dirent_compat {
+    uint64 d_ino;
+    uint64 d_off;
+    uint16 d_reclen;
+    char d_name[];
 };
 
 // File type constants
@@ -1950,7 +1985,39 @@ static uint8 __mode_to_dtype(mode_t mode) {
     return DT_UNKNOWN;
 }
 
-uint64 sys_getdents(void) {
+static size_t linux_dirent_reclen(size_t name_len, bool compat)
+{
+    size_t base = compat ? sizeof(struct linux_dirent_compat) :
+                           sizeof(struct linux_dirent64);
+    size_t extra = compat ? 2 : 1; // nul + trailing d_type, or just nul
+    return (base + name_len + extra + 7) & ~7;
+}
+
+static void linux_dirent_fill(void *dst, uint64 ino, int64 off, uint16 reclen,
+                              uint8 dtype, const char *name, size_t name_len,
+                              bool compat)
+{
+    if (compat) {
+        struct linux_dirent_compat *de = dst;
+        de->d_ino = ino;
+        de->d_off = off;
+        de->d_reclen = reclen;
+        memmove(de->d_name, name, name_len);
+        de->d_name[name_len] = '\0';
+        ((uint8 *)dst)[reclen - 1] = dtype;
+        return;
+    }
+
+    struct linux_dirent64 *de = dst;
+    de->d_ino = ino;
+    de->d_off = off;
+    de->d_reclen = reclen;
+    de->d_type = dtype;
+    memmove(de->d_name, name, name_len);
+    de->d_name[name_len] = '\0';
+}
+
+static uint64 sys_getdents_common(bool compat) {
     SYSCALL_PROFILE_BEGIN(g_sys_getdents_calls);
     int fd;
     uint64 dirp;
@@ -1984,21 +2051,15 @@ uint64 sys_getdents(void) {
      * Fast path: use getdents_fill to let the driver fill the buffer
      * directly under a single lock, avoiding per-entry VFS overhead.
      */
-    if (inode->ops != NULL && inode->ops->getdents_fill != NULL) {
+    if (!compat && inode->ops != NULL && inode->ops->getdents_fill != NULL) {
         int ret;
 
         /* Synthesize "." if at start */
         if (f->dir_iter.index == VFS_DITER_INDEX_START) {
-            size_t reclen = (sizeof(struct linux_dirent64) + 1 + 1 + 7) & ~7;
+            size_t reclen = linux_dirent_reclen(1, false);
             if ((int)reclen <= count) {
-                struct linux_dirent64 *de =
-                    (struct linux_dirent64 *)kbuf;
-                de->d_ino = inode->ino;
-                de->d_off = 0;
-                de->d_reclen = reclen;
-                de->d_type = DT_DIR;
-                de->d_name[0] = '.';
-                de->d_name[1] = '\0';
+                linux_dirent_fill(kbuf, inode->ino, 0, (uint16)reclen,
+                                  DT_DIR, ".", 1, false);
                 bytes_written = reclen;
             }
             f->dir_iter.index = 1;
@@ -2067,8 +2128,7 @@ uint64 sys_getdents(void) {
 
         // Calculate record length (must be 8-byte aligned)
         size_t name_len = dentry.name_len;
-        size_t reclen = sizeof(struct linux_dirent64) + name_len + 1;
-        reclen = (reclen + 7) & ~7; // Align to 8 bytes
+        size_t reclen = linux_dirent_reclen(name_len, compat);
 
         if (bytes_written + (int)reclen > count) {
             // Not enough space, restore iterator state for next call
@@ -2105,15 +2165,9 @@ uint64 sys_getdents(void) {
             }
         }
 
-        // Fill dirent
-        struct linux_dirent64 *de =
-            (struct linux_dirent64 *)(kbuf + bytes_written);
-        de->d_ino = dentry.ino;
-        de->d_off = f->dir_iter.index;
-        de->d_reclen = reclen;
-        de->d_type = d_type;
-        memmove(de->d_name, dentry.name, name_len);
-        de->d_name[name_len] = '\0';
+        linux_dirent_fill(kbuf + bytes_written, dentry.ino, f->dir_iter.index,
+                          (uint16)reclen, d_type, dentry.name, name_len,
+                          compat);
 
         bytes_written += reclen;
         vfs_release_dentry(&dentry);
@@ -2132,6 +2186,14 @@ uint64 sys_getdents(void) {
     kvfree(kbuf);
     vfs_fput(f); // remove the reference from __vfs_argfd
     SYSCALL_PROFILE_RETURN(bytes_written, g_sys_getdents_ticks);
+}
+
+uint64 sys_getdents(void) {
+    return sys_getdents_common(false);
+}
+
+uint64 sys_getdents_compat(void) {
+    return sys_getdents_common(true);
 }
 
 /******************************************************************************
@@ -4473,9 +4535,17 @@ uint64 sys_vfs_pwritev2(void) {
 
 /*
  * fstatat(dirfd, path, statbuf, flags) — stat relative to directory fd.
- *
- * flags: AT_SYMLINK_NOFOLLOW (0x100) — use lstat instead of stat.
  */
+#ifndef AT_SYMLINK_NOFOLLOW
+#define AT_SYMLINK_NOFOLLOW 0x100
+#endif
+#ifndef AT_NO_AUTOMOUNT
+#define AT_NO_AUTOMOUNT 0x800
+#endif
+#ifndef AT_EMPTY_PATH
+#define AT_EMPTY_PATH 0x1000
+#endif
+
 uint64 sys_vfs_fstatat(void) {
     SYSCALL_PROFILE_BEGIN(g_sys_fstatat_calls);
     int dirfd, flags;
@@ -4490,6 +4560,32 @@ uint64 sys_vfs_fstatat(void) {
     argaddr(2, &stat_addr);
     argint(3, &flags);
 
+    const int allowed_flags = AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
+                              AT_EMPTY_PATH;
+    if (flags & ~allowed_flags) {
+        kvfree(path);
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_fstatat_ticks);
+    }
+
+    if ((flags & AT_EMPTY_PATH) && path_len == 0) {
+        struct vfs_file *f = __vfs_argfd(dirfd);
+        if (f == NULL) {
+            kvfree(path);
+            SYSCALL_PROFILE_RETURN(-EBADF, g_sys_fstatat_ticks);
+        }
+
+        struct stat st;
+        int ret = vfs_filestat(f, &st);
+        vfs_fput(f);
+        kvfree(path);
+        if (ret != 0)
+            SYSCALL_PROFILE_RETURN(ret, g_sys_fstatat_ticks);
+
+        if (either_copyout(1, stat_addr, &st, sizeof(st)) < 0)
+            SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstatat_ticks);
+        SYSCALL_PROFILE_RETURN(0, g_sys_fstatat_ticks);
+    }
+
     struct vfs_inode *start_dir = NULL;
     int err = __vfs_resolve_dirfd(dirfd, &start_dir);
     if (err) {
@@ -4499,7 +4595,7 @@ uint64 sys_vfs_fstatat(void) {
 
     struct vfs_inode *inode = NULL;
 
-    if (flags & 0x100) { // AT_SYMLINK_NOFOLLOW — don't follow symlinks
+    if (flags & AT_SYMLINK_NOFOLLOW) {
         char *name = __vfs_alloc_pathbuf();
         if (name == NULL) {
             if (start_dir) vfs_iput(start_dir);

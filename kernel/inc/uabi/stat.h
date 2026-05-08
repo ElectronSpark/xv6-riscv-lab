@@ -5,17 +5,54 @@
 #include "types.h"
 
 /*
- * POSIX-style stat structure
+ * Linux-compatible stat structure.
  *
- * This is the stat structure returned by fstat()/stat() syscalls.
- * Use S_ISDIR(), S_ISREG(), S_ISLNK(), etc. macros to check file type.
+ * Keep this in sync with kernel/inc/vfs/stat.h: stat/fstat/fstatat copy this
+ * structure directly to userspace.
  */
 struct stat {
-    int32 dev;    // File system's disk device
-    uint64 ino;   // Inode number
-    mode_t mode;  // Permission and type bits (use S_IS* macros)
-    uint32 nlink; // Number of links to file
-    uint64 size;  // Size of file in bytes
+#if defined(CONFIG_ARCH_X86_64) || defined(__x86_64__)
+    uint64 st_dev;
+    uint64 st_ino;
+    uint64 st_nlink;
+    uint32 st_mode;
+    uint32 st_uid;
+    uint32 st_gid;
+    uint32 __pad0;
+    uint64 st_rdev;
+    int64  st_size;
+    int64  st_blksize;
+    int64  st_blocks;
+    int64  st_atime_sec;
+    int64  st_atime_nsec;
+    int64  st_mtime_sec;
+    int64  st_mtime_nsec;
+    int64  st_ctime_sec;
+    int64  st_ctime_nsec;
+    int64  __unused[3];
+#elif defined(CONFIG_ARCH_RISCV) || defined(__riscv)
+    uint64 st_dev;
+    uint64 st_ino;
+    uint32 st_mode;
+    uint32 st_nlink;
+    uint32 st_uid;
+    uint32 st_gid;
+    uint64 st_rdev;
+    uint64 __pad;
+    int64  st_size;
+    int32  st_blksize;
+    int32  __pad2;
+    int64  st_blocks;
+    int64  st_atime_sec;
+    int64  st_atime_nsec;
+    int64  st_mtime_sec;
+    int64  st_mtime_nsec;
+    int64  st_ctime_sec;
+    int64  st_ctime_nsec;
+    uint32 __unused[2];
+#else
+#error "Unsupported architecture for struct stat"
+#endif
 };
 
 #ifndef S_IRUSR
@@ -35,14 +72,20 @@ struct stat {
 #define S_IXOTH 00001
 #endif
 
-#define S_IFMT 0170000   /* type of file */
-#define S_IFDIR 0040000  /* directory */
-#define S_IFCHR 0020000  /* character special */
-#define S_IFBLK 0060000  /* block special */
-#define S_IFREG 0100000  /* regular */
-#define S_IFLNK 0120000  /* symbolic link */
-#define S_IFSOCK 0140000 /* socket */
-#define S_IFIFO 0010000  /* fifo */
+#ifndef S_ISUID
+#define S_ISUID 04000
+#define S_ISGID 02000
+#define S_ISVTX 01000
+#endif
+
+#define S_IFMT 0170000
+#define S_IFDIR 0040000
+#define S_IFCHR 0020000
+#define S_IFBLK 0060000
+#define S_IFREG 0100000
+#define S_IFLNK 0120000
+#define S_IFSOCK 0140000
+#define S_IFIFO 0010000
 
 #define S_ISBLK(m) (((m) & S_IFMT) == S_IFBLK)
 #define S_ISCHR(m) (((m) & S_IFMT) == S_IFCHR)

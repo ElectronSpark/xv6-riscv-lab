@@ -442,14 +442,11 @@ uint64 sys_exit_group(void) {
     return 0; // not reached
 }
 
-// vfork() — implemented as fork + CLONE_VFORK (parent blocks until
-// child execs/exits).  We do NOT use CLONE_VM because musl/dash cannot
-// safely operate in a shared-VM child: musl's internal locks, dash's
-// longjmp-based error handling, and the shared stack all cause corruption.
-// POSIX explicitly allows vfork to behave identically to fork.
+// vfork() uses Linux semantics: the child shares the caller's VM and the
+// parent remains blocked until the child execs or exits.
 uint64 sys_vfork(void) {
     struct clone_args args = {
-        .flags = CLONE_VFORK,
+        .flags = CLONE_VM | CLONE_VFORK,
         .stack = 0,
         .stack_size = 0,
         .entry = 0,

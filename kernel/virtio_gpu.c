@@ -15,6 +15,7 @@
 #include "printf.h"
 #include "param.h"
 #include "trap.h"
+#include "cmdline.h"
 #include "lock/completion.h"
 #include <mm/memlayout.h>
 #include "lock/mutex.h"
@@ -2266,6 +2267,32 @@ static void virtio_gpu_fill_scanout_pattern(struct virtio_gpu_resource *res)
     }
 }
 
+static int virtio_gpu_cmdline_video(uint32 *width, uint32 *height)
+{
+    char vbuf[32];
+    uint32 w = 0;
+    uint32 h = 0;
+    const char *p;
+
+    if (cmdline_get_param("video", vbuf, sizeof(vbuf)) != 0)
+        return -1;
+
+    p = vbuf;
+    while (*p >= '0' && *p <= '9')
+        w = w * 10 + (uint32)(*p++ - '0');
+    if (*p != 'x' && *p != 'X')
+        return -1;
+    p++;
+    while (*p >= '0' && *p <= '9')
+        h = h * 10 + (uint32)(*p++ - '0');
+
+    if (w < 640 || w > 2560 || h < 400 || h > 1600)
+        return -1;
+    *width = w;
+    *height = h;
+    return 0;
+}
+
 static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
 {
     struct virtio_gpu_resource *res;
@@ -2274,6 +2301,7 @@ static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
     uint32 reported_width = g->scanout_width;
     uint32 reported_height = g->scanout_height;
     uint32 fb_w = 0, fb_h = 0;
+    uint32 video_w = 0, video_h = 0;
     int scanout_bound = 0;
 
     fb_get_resolution(&fb_w, &fb_h);
@@ -2284,6 +2312,15 @@ static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
         g->scanout_height = height;
         if (reported_width != width || reported_height != height) {
             printf("virtio_gpu: using fb0 mode %ux%u for scanout (device reported %ux%u)\n",
+                   width, height, reported_width, reported_height);
+        }
+    } else if (virtio_gpu_cmdline_video(&video_w, &video_h) == 0) {
+        width = video_w;
+        height = video_h;
+        g->scanout_width = width;
+        g->scanout_height = height;
+        if (reported_width != width || reported_height != height) {
+            printf("virtio_gpu: using cmdline video mode %ux%u for scanout (device reported %ux%u)\n",
                    width, height, reported_width, reported_height);
         }
     } else if (g->scanout_width == 0 || g->scanout_height == 0) {
@@ -2311,6 +2348,8 @@ static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
     g->scanout_resource = res;
     printf("virtio_gpu: persistent scanout resource=%u size=%ux%u bytes=%u alloc=%u\n",
            res->id, width, height, res->backing_len, res->alloc_len);
+    if (fb_init_virtio_gpu_scanout(width, height) != 0)
+        printf("virtio_gpu: warning: failed to expose scanout as /dev/fb0\n");
     return 0;
 
 fail:

@@ -42,6 +42,17 @@ uint64 sys_sigprocmask(void) {
     return 0; // Success
 }
 
+uint64 sys_rt_sigprocmask(void) {
+    int sigsetsize;
+
+    argint(3, &sigsetsize);
+    if (sigsetsize != (int)sizeof(sigset_t)) {
+        return -EINVAL;
+    }
+
+    return sys_sigprocmask();
+}
+
 uint64 sys_sigaction(void) {
     int signum;
     uint64 act_addr, oldact_addr;
@@ -77,6 +88,17 @@ uint64 sys_sigaction(void) {
     return 0; // Success
 }
 
+uint64 sys_rt_sigaction(void) {
+    int sigsetsize;
+
+    argint(3, &sigsetsize);
+    if (sigsetsize != (int)sizeof(sigset_t)) {
+        return -EINVAL;
+    }
+
+    return sys_sigaction();
+}
+
 uint64 sys_sigpending(void) {
     uint64 set_addr;
     sigset_t set;
@@ -91,6 +113,17 @@ uint64 sys_sigpending(void) {
         }
     }
     return 0; // Success
+}
+
+uint64 sys_rt_sigpending(void) {
+    int sigsetsize;
+
+    argint(1, &sigsetsize);
+    if (sigsetsize != (int)sizeof(sigset_t)) {
+        return -EINVAL;
+    }
+
+    return sys_sigpending();
 }
 
 uint64 sys_sigreturn(void) {
@@ -179,6 +212,17 @@ uint64 sys_sigsuspend(void) {
     return sigsuspend(&mask); // Usually -EINTR
 }
 
+uint64 sys_rt_sigsuspend(void) {
+    int sigsetsize;
+
+    argint(1, &sigsetsize);
+    if (sigsetsize != (int)sizeof(sigset_t)) {
+        return -EINVAL;
+    }
+
+    return sys_sigsuspend();
+}
+
 // sigwait() waits for a signal from a specified set.
 // Returns 0 on success with the signal number stored at *sig_addr.
 uint64 sys_sigwait(void) {
@@ -208,6 +252,68 @@ uint64 sys_sigwait(void) {
     }
 
     return 0;
+}
+
+uint64 sys_rt_sigtimedwait(void) {
+    uint64 set_addr, info_addr, timeout_addr;
+    int sigsetsize;
+    sigset_t set, pending;
+
+    argaddr(0, &set_addr);
+    argaddr(1, &info_addr);
+    argaddr(2, &timeout_addr);
+    argint(3, &sigsetsize);
+
+    if (sigsetsize != (int)sizeof(sigset_t)) {
+        return -EINVAL;
+    }
+    if (set_addr == 0) {
+        return -EFAULT;
+    }
+    if (either_copyin(&set, 1, set_addr, sizeof(set)) < 0) {
+        return -EFAULT;
+    }
+
+    if (timeout_addr != 0) {
+        struct {
+            int64 tv_sec;
+            int64 tv_nsec;
+        } timeout;
+
+        if (either_copyin(&timeout, 1, timeout_addr, sizeof(timeout)) < 0) {
+            return -EFAULT;
+        }
+        if (timeout.tv_sec < 0 || timeout.tv_nsec < 0 ||
+            timeout.tv_nsec >= 1000000000LL) {
+            return -EINVAL;
+        }
+
+        if (timeout.tv_sec == 0 && timeout.tv_nsec == 0) {
+            int ret = sigpending(current, &pending);
+            if (ret < 0) {
+                return ret;
+            }
+            if ((pending & set) == 0) {
+                return -EAGAIN;
+            }
+        }
+    }
+
+    int sig;
+    int ret = sigwait(&set, &sig);
+    if (ret < 0) {
+        return ret;
+    }
+
+    if (info_addr != 0) {
+        siginfo_t info = {0};
+        info.si_signo = sig;
+        if (either_copyout(1, info_addr, &info, sizeof(info)) < 0) {
+            return -EFAULT;
+        }
+    }
+
+    return sig;
 }
 
 /* ── sigaltstack ─────────────────────────────────────────────────────── */

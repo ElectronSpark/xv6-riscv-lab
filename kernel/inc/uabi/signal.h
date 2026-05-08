@@ -20,8 +20,14 @@ typedef struct sigaction {
         void (*sa_handler)(int);
         void (*sa_sigaction)(int, siginfo_t *, void *);
     };
+    unsigned long sa_flags;
+#if defined(CONFIG_ARCH_X86_64) || defined(__x86_64__)
+    void (*sa_restorer)(void);
+#endif
     sigset_t sa_mask;
-    int sa_flags;
+#if !(defined(CONFIG_ARCH_X86_64) || defined(__x86_64__))
+    void *_sa_unused;
+#endif
 } sigaction_t;
 
 typedef struct stack {
@@ -182,9 +188,9 @@ static inline int sigismember(const sigset_t *set, int signo) {
     return (*set & mask) != 0; // Return 1 if member, 0 otherwise
 }
 
-#define SIG_BLOCK 1
-#define SIG_UNBLOCK 2
-#define SIG_SETMASK 3
+#define SIG_BLOCK 0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
 
 #define MINSIGSTKSZ (1UL << PGSHIFT)
 #define SIGSTKSZ (1UL << (PGSHIFT + 2))

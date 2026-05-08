@@ -487,9 +487,10 @@ static uint16 bga_read_reg(uint16 index)
 /* ── Module state ─────────────────────────────────────────────────── */
 
 static struct {
-    int         detected;       /* non-zero if BGA found on PCI bus */
-    uint64      fb_phys;        /* physical address of LFB (BAR0) */
-    volatile uint8 *fb_virt;    /* kernel virtual address of LFB */
+    int         detected;       /* non-zero if a fbdev-compatible scanout exists */
+    int         virtio_backed;  /* shadow framebuffer presented via virtio-gpu */
+    uint64      fb_phys;        /* physical address of LFB (BAR0), if any */
+    volatile uint8 *fb_virt;    /* kernel virtual address of framebuffer */
     uint32      xres;
     uint32      yres;
     uint32      bpp;
@@ -1646,7 +1647,8 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         struct fb_fix_screeninfo info;
         memset(&info, 0, sizeof(info));
         spin_lock(&fb_state.lock);
-        strncpy(info.id, "BochsVGA", sizeof(info.id) - 1);
+        strncpy(info.id, fb_state.virtio_backed ? "VirtioGPU" : "BochsVGA",
+                sizeof(info.id) - 1);
         info.smem_start = fb_state.fb_phys;
         info.smem_len = fb_state.fb_size;
         info.line_length = fb_state.pitch;
@@ -2466,6 +2468,9 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         struct fb_var_screeninfo req;
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
+
+        if (fb_state.virtio_backed)
+            return -EOPNOTSUPP;
 
         /* Validate requested resolution */
         if (req.xres < 640 || req.xres > 2560 ||
@@ -3794,6 +3799,18 @@ static bool gpu_cdev_registered;
 static bool gpu_primary_cdev_registered;
 static bool gpu_render_cdev_registered;
 
+static int fb_register_cdev(void)
+{
+    int ret;
+
+    if (fb_cdev_registered)
+        return 0;
+    ret = cdev_register(&fb_cdev);
+    if (ret == 0)
+        fb_cdev_registered = true;
+    return ret;
+}
+
 static int gpu_register_base_devices(void)
 {
     int ret;
@@ -3814,6 +3831,60 @@ static int gpu_register_base_devices(void)
         printf("GPU: registered /dev/dri/card0 (DRM primary facade)\n");
     }
 
+    return 0;
+}
+
+int fb_init_virtio_gpu_scanout(uint32 width, uint32 height)
+{
+    uint64 size;
+    void *buf;
+    int ret;
+
+    if (width < 640 || width > 2560 || height < 400 || height > 1600)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    if (fb_state.detected) {
+        spin_unlock(&fb_state.lock);
+        return 0;
+    }
+    spin_unlock(&fb_state.lock);
+
+    size = (uint64)width * height * 4;
+    if (size == 0 || size > 64ULL * 1024 * 1024)
+        return -EINVAL;
+
+    buf = kvmalloc((size_t)size);
+    if (buf == NULL)
+        return -ENOMEM;
+    memset(buf, 0, (size_t)size);
+
+    spin_lock(&fb_state.lock);
+    if (fb_state.detected) {
+        spin_unlock(&fb_state.lock);
+        kvfree(buf);
+        return 0;
+    }
+    fb_state.virtio_backed = 1;
+    fb_state.fb_phys = 0;
+    fb_state.fb_virt = (volatile uint8 *)buf;
+    fb_state.xres = width;
+    fb_state.yres = height;
+    fb_state.bpp = 32;
+    fb_state.pitch = width * 4;
+    fb_state.fb_size = (uint32)size;
+    __sync_synchronize();
+    fb_state.detected = 1;
+    spin_unlock(&fb_state.lock);
+
+    ret = fb_register_cdev();
+    if (ret != 0)
+        return ret;
+
+    printf("FB: registered /dev/fb0 (virtio-gpu shadow %dx%dx32)\n",
+           width, height);
+    virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                               0, 0, width, height);
     return 0;
 }
 
@@ -3845,9 +3916,8 @@ void fbdevinit(void)
         printf("FB: no Bochs VGA detected, skipping /dev/fb0\n");
     } else {
         if (!fb_cdev_registered) {
-            int ret = cdev_register(&fb_cdev);
+            int ret = fb_register_cdev();
             assert(ret == 0, "fbdevinit: failed to register fb cdev: %d", ret);
-            fb_cdev_registered = true;
         }
 
         printf("FB: registered /dev/fb0 (%dx%dx%d)\n",
