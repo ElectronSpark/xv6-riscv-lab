@@ -35,6 +35,7 @@
 #include "string.h"
 #include "list.h"
 #include <mm/slab.h>
+#include <mm/vm.h>
 #include <smp/atomic.h>
 #include "proc/sched.h"
 #include "errno.h"
@@ -78,7 +79,104 @@ void thread_group_put(struct thread_group *tg) {
     }
     // refcount was 1 → 0: free the thread group
     tg_shared_pending_destroy(tg);
+    thread_group_exec_snapshot_clear(tg);
     slab_free(tg);
+}
+
+void thread_group_exec_snapshot_clear(struct thread_group *tg)
+{
+    if (tg == NULL)
+        return;
+
+    if (tg->exec_snapshot.cmdline != NULL) {
+        kvfree(tg->exec_snapshot.cmdline);
+        tg->exec_snapshot.cmdline = NULL;
+    }
+    tg->exec_snapshot.cmdline_len = 0;
+
+    if (tg->exec_snapshot.environ != NULL) {
+        kvfree(tg->exec_snapshot.environ);
+        tg->exec_snapshot.environ = NULL;
+    }
+    tg->exec_snapshot.environ_len = 0;
+
+    memset(tg->exec_snapshot.auxv, 0, sizeof(tg->exec_snapshot.auxv));
+    tg->exec_snapshot.auxv_len = 0;
+}
+
+void thread_group_exec_snapshot_set(struct thread_group *tg, char *cmdline,
+                                    size_t cmdline_len, char *environ,
+                                    size_t environ_len, const uint64 *auxv,
+                                    size_t auxv_len)
+{
+    if (tg == NULL) {
+        kvfree(cmdline);
+        kvfree(environ);
+        return;
+    }
+
+    if (cmdline_len > TG_EXEC_SNAPSHOT_MAX_BYTES)
+        cmdline_len = TG_EXEC_SNAPSHOT_MAX_BYTES;
+    if (environ_len > TG_EXEC_SNAPSHOT_MAX_BYTES)
+        environ_len = TG_EXEC_SNAPSHOT_MAX_BYTES;
+    if (auxv_len > sizeof(tg->exec_snapshot.auxv))
+        auxv_len = sizeof(tg->exec_snapshot.auxv);
+
+    pid_wlock();
+    char *old_cmdline = tg->exec_snapshot.cmdline;
+    char *old_environ = tg->exec_snapshot.environ;
+
+    tg->exec_snapshot.cmdline = cmdline;
+    tg->exec_snapshot.cmdline_len = cmdline_len;
+    tg->exec_snapshot.environ = environ;
+    tg->exec_snapshot.environ_len = environ_len;
+    memset(tg->exec_snapshot.auxv, 0, sizeof(tg->exec_snapshot.auxv));
+    if (auxv != NULL && auxv_len != 0)
+        memmove(tg->exec_snapshot.auxv, auxv, auxv_len);
+    tg->exec_snapshot.auxv_len = auxv_len;
+    pid_wunlock();
+
+    kvfree(old_cmdline);
+    kvfree(old_environ);
+}
+
+static char *tg_snapshot_memdup(const char *src, size_t len)
+{
+    if (src == NULL || len == 0)
+        return NULL;
+
+    char *dst = kvmalloc(len);
+    if (dst == NULL)
+        return NULL;
+    memmove(dst, src, len);
+    return dst;
+}
+
+int thread_group_exec_snapshot_clone_locked(struct thread_group *dst,
+                                            const struct thread_group *src)
+{
+    if (dst == NULL || src == NULL)
+        return -EINVAL;
+
+    const struct thread_group_exec_snapshot *ss = &src->exec_snapshot;
+    struct thread_group_exec_snapshot *ds = &dst->exec_snapshot;
+    char *cmdline = tg_snapshot_memdup(ss->cmdline, ss->cmdline_len);
+    char *environ = tg_snapshot_memdup(ss->environ, ss->environ_len);
+
+    if ((ss->cmdline_len != 0 && cmdline == NULL) ||
+        (ss->environ_len != 0 && environ == NULL)) {
+        kvfree(cmdline);
+        kvfree(environ);
+        return -ENOMEM;
+    }
+
+    ds->cmdline = cmdline;
+    ds->cmdline_len = ss->cmdline_len;
+    ds->environ = environ;
+    ds->environ_len = ss->environ_len;
+    memmove(ds->auxv, ss->auxv, sizeof(ds->auxv));
+    ds->auxv_len = ss->auxv_len;
+    return 0;
 }
 
 // ───── Shared pending signal helpers ─────

@@ -25,6 +25,7 @@
 #include "accounting.h"
 #include "timer/timer.h"
 #include "timer/goldfish_rtc.h"
+#include "proc/pgroup.h"
 
 /* Forward declarations for arg helpers */
 void argint(int n, int *ip);
@@ -176,6 +177,29 @@ struct k_rusage {
     int64 ru_nvcsw;               /* voluntary context switches */
     int64 ru_nivcsw;              /* involuntary context switches */
 };
+
+struct k_tms {
+    int64 tms_utime;
+    int64 tms_stime;
+    int64 tms_cutime;
+    int64 tms_cstime;
+};
+
+uint64 sys_times(void) {
+    uint64 uaddr;
+    argaddr(0, &uaddr);
+
+    if (uaddr != 0) {
+        struct k_tms tms;
+        memset(&tms, 0, sizeof(tms));
+        if (current->sched_entity != NULL)
+            tms.tms_utime = (int64)current->sched_entity->sum_exec_runtime;
+        if (either_copyout(1, uaddr, &tms, sizeof(tms)) < 0)
+            return (uint64)-EFAULT;
+    }
+
+    return get_jiffs();
+}
 
 uint64 sys_getrusage(void) {
     int who;
@@ -367,6 +391,324 @@ uint64 sys_get_robust_list(void) {
 }
 
 /* ================================================================== */
+/*  getcpu / rseq / capabilities                                      */
+/* ================================================================== */
+
+uint64 sys_getcpu(void) {
+    uint64 cpu_addr;
+    uint64 node_addr;
+    argaddr(0, &cpu_addr);
+    argaddr(1, &node_addr);
+
+    uint32 cpu = (uint32)cpuid();
+    uint32 node = 0;
+    if (cpu_addr != 0 &&
+        either_copyout(1, cpu_addr, &cpu, sizeof(cpu)) < 0)
+        return (uint64)-EFAULT;
+    if (node_addr != 0 &&
+        either_copyout(1, node_addr, &node, sizeof(node)) < 0)
+        return (uint64)-EFAULT;
+    return 0;
+}
+
+#define RSEQ_FLAG_UNREGISTER 1
+#define RSEQ_MIN_SIZE 32
+
+uint64 sys_rseq(void) {
+    uint64 rseq_addr;
+    uint32 rseq_len;
+    int flags;
+    uint32 signature;
+
+    argaddr(0, &rseq_addr);
+    argint(1, (int *)&rseq_len);
+    argint(2, &flags);
+    argint(3, (int *)&signature);
+
+    if (flags & ~RSEQ_FLAG_UNREGISTER)
+        return (uint64)-EINVAL;
+
+    if (flags & RSEQ_FLAG_UNREGISTER) {
+        if (current->rseq_addr == 0 || current->rseq_addr != rseq_addr)
+            return (uint64)-EINVAL;
+        current->rseq_addr = 0;
+        current->rseq_len = 0;
+        current->rseq_signature = 0;
+        return 0;
+    }
+
+    if (rseq_addr == 0 || rseq_len < RSEQ_MIN_SIZE)
+        return (uint64)-EINVAL;
+    if (current->rseq_addr != 0)
+        return (uint64)-EBUSY;
+
+    current->rseq_addr = rseq_addr;
+    current->rseq_len = rseq_len;
+    current->rseq_signature = signature;
+    return 0;
+}
+
+#define _LINUX_CAPABILITY_VERSION_1 0x19980330
+#define _LINUX_CAPABILITY_VERSION_2 0x20071026
+#define _LINUX_CAPABILITY_VERSION_3 0x20080522
+
+struct linux_cap_user_header {
+    uint32 version;
+    int pid;
+};
+
+struct linux_cap_user_data {
+    uint32 effective;
+    uint32 permitted;
+    uint32 inheritable;
+};
+
+static int cap_words_for_version(uint32 version)
+{
+    switch (version) {
+    case _LINUX_CAPABILITY_VERSION_1:
+        return 1;
+    case _LINUX_CAPABILITY_VERSION_2:
+    case _LINUX_CAPABILITY_VERSION_3:
+        return 2;
+    default:
+        return -EINVAL;
+    }
+}
+
+uint64 sys_capget(void) {
+    uint64 hdr_addr;
+    uint64 data_addr;
+    argaddr(0, &hdr_addr);
+    argaddr(1, &data_addr);
+
+    if (hdr_addr == 0)
+        return (uint64)-EFAULT;
+
+    struct linux_cap_user_header hdr;
+    if (either_copyin(&hdr, 1, hdr_addr, sizeof(hdr)) < 0)
+        return (uint64)-EFAULT;
+
+    int words = cap_words_for_version(hdr.version);
+    if (words < 0) {
+        hdr.version = _LINUX_CAPABILITY_VERSION_3;
+        either_copyout(1, hdr_addr, &hdr, sizeof(hdr));
+        return (uint64)-EINVAL;
+    }
+    if (hdr.pid < 0)
+        return (uint64)-EINVAL;
+    if (hdr.pid != 0 && hdr.pid != current->pid && hdr.pid != thread_tgid(current))
+        return (uint64)-ESRCH;
+    if (data_addr == 0)
+        return 0;
+
+    struct linux_cap_user_data data[2];
+    memset(data, 0, sizeof(data));
+    if (either_copyout(1, data_addr, data,
+                       (size_t)words * sizeof(data[0])) < 0)
+        return (uint64)-EFAULT;
+    return 0;
+}
+
+uint64 sys_capset(void) {
+    uint64 hdr_addr;
+    uint64 data_addr;
+    argaddr(0, &hdr_addr);
+    argaddr(1, &data_addr);
+
+    if (hdr_addr == 0 || data_addr == 0)
+        return (uint64)-EFAULT;
+
+    struct linux_cap_user_header hdr;
+    if (either_copyin(&hdr, 1, hdr_addr, sizeof(hdr)) < 0)
+        return (uint64)-EFAULT;
+    int words = cap_words_for_version(hdr.version);
+    if (words < 0)
+        return (uint64)-EINVAL;
+    if (hdr.pid < 0)
+        return (uint64)-EINVAL;
+    if (hdr.pid != 0 && hdr.pid != current->pid && hdr.pid != thread_tgid(current))
+        return (uint64)-ESRCH;
+
+    struct linux_cap_user_data data[2];
+    memset(data, 0, sizeof(data));
+    if (either_copyin(data, 1, data_addr,
+                      (size_t)words * sizeof(data[0])) < 0)
+        return (uint64)-EFAULT;
+    for (int i = 0; i < words; i++) {
+        if (data[i].effective || data[i].permitted || data[i].inheritable)
+            return (uint64)-EPERM;
+    }
+    return 0;
+}
+
+struct linux_sched_param {
+    int sched_priority;
+};
+
+#define SCHED_OTHER 0
+#define LINUX_SCHED_ATTR_SIZE_VER0 48
+#define LINUX_SCHED_ATTR_SIZE      56
+
+struct linux_sched_attr {
+    uint32 size;
+    uint32 sched_policy;
+    uint64 sched_flags;
+    int32 sched_nice;
+    uint32 sched_priority;
+    uint64 sched_runtime;
+    uint64 sched_deadline;
+    uint64 sched_period;
+    uint32 sched_util_min;
+    uint32 sched_util_max;
+};
+
+uint64 sys_sched_getparam(void) {
+    int pid;
+    uint64 param_addr;
+    argint(0, &pid);
+    argaddr(1, &param_addr);
+    if (param_addr == 0)
+        return (uint64)-EFAULT;
+    if (pid < 0)
+        return (uint64)-EINVAL;
+
+    struct linux_sched_param param = { .sched_priority = 0 };
+    if (either_copyout(1, param_addr, &param, sizeof(param)) < 0)
+        return (uint64)-EFAULT;
+    return 0;
+}
+
+uint64 sys_sched_setparam(void) {
+    int pid;
+    uint64 param_addr;
+    argint(0, &pid);
+    argaddr(1, &param_addr);
+    if (pid < 0)
+        return (uint64)-EINVAL;
+    if (param_addr == 0)
+        return (uint64)-EFAULT;
+
+    struct linux_sched_param param;
+    if (either_copyin(&param, 1, param_addr, sizeof(param)) < 0)
+        return (uint64)-EFAULT;
+    if (param.sched_priority != 0)
+        return (uint64)-EINVAL;
+    return 0;
+}
+
+uint64 sys_sched_getattr(void) {
+    int pid;
+    uint64 attr_addr;
+    int size;
+    uint flags;
+    argint(0, &pid);
+    argaddr(1, &attr_addr);
+    argint(2, &size);
+    argint(3, (int *)&flags);
+
+    if (pid < 0)
+        return (uint64)-EINVAL;
+    if (attr_addr == 0)
+        return (uint64)-EFAULT;
+    if (size < LINUX_SCHED_ATTR_SIZE_VER0)
+        return (uint64)-EINVAL;
+    if (flags != 0)
+        return (uint64)-EINVAL;
+
+    struct linux_sched_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.size = sizeof(attr);
+    attr.sched_policy = SCHED_OTHER;
+    attr.sched_nice = 0;
+    attr.sched_priority = 0;
+
+    size_t copy_size = (size_t)size;
+    if (copy_size > sizeof(attr))
+        copy_size = sizeof(attr);
+    if (either_copyout(1, attr_addr, &attr, copy_size) < 0)
+        return (uint64)-EFAULT;
+    return 0;
+}
+
+uint64 sys_sched_setattr(void) {
+    int pid;
+    uint64 attr_addr;
+    uint flags;
+    argint(0, &pid);
+    argaddr(1, &attr_addr);
+    argint(2, (int *)&flags);
+
+    if (pid < 0)
+        return (uint64)-EINVAL;
+    if (attr_addr == 0)
+        return (uint64)-EFAULT;
+    if (flags != 0)
+        return (uint64)-EINVAL;
+
+    uint32 user_size = 0;
+    if (either_copyin(&user_size, 1, attr_addr, sizeof(user_size)) < 0)
+        return (uint64)-EFAULT;
+    if (user_size < LINUX_SCHED_ATTR_SIZE_VER0)
+        return (uint64)-EINVAL;
+
+    struct linux_sched_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    size_t copy_size = user_size;
+    if (copy_size > sizeof(attr))
+        copy_size = sizeof(attr);
+    if (either_copyin(&attr, 1, attr_addr, copy_size) < 0)
+        return (uint64)-EFAULT;
+
+    if (attr.sched_policy != SCHED_OTHER || attr.sched_flags != 0 ||
+        attr.sched_nice != 0 || attr.sched_priority != 0 ||
+        attr.sched_runtime != 0 || attr.sched_deadline != 0 ||
+        attr.sched_period != 0)
+        return (uint64)-EINVAL;
+    return 0;
+}
+
+#define IOPRIO_WHO_PROCESS 1
+#define IOPRIO_WHO_PGRP    2
+#define IOPRIO_WHO_USER    3
+#define IOPRIO_CLASS_SHIFT 13
+#define IOPRIO_CLASS_MASK  0x7
+#define IOPRIO_PRIO_MASK   0xff
+
+uint64 sys_ioprio_get(void) {
+    int which;
+    int who;
+    argint(0, &which);
+    argint(1, &who);
+
+    if (which < IOPRIO_WHO_PROCESS || which > IOPRIO_WHO_USER)
+        return (uint64)-EINVAL;
+    if (who < 0)
+        return (uint64)-EINVAL;
+    return 0;
+}
+
+uint64 sys_ioprio_set(void) {
+    int which;
+    int who;
+    int ioprio;
+    argint(0, &which);
+    argint(1, &who);
+    argint(2, &ioprio);
+
+    if (which < IOPRIO_WHO_PROCESS || which > IOPRIO_WHO_USER)
+        return (uint64)-EINVAL;
+    if (who < 0)
+        return (uint64)-EINVAL;
+
+    int cls = (ioprio >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK;
+    int data = ioprio & IOPRIO_PRIO_MASK;
+    if (ioprio < 0 || cls > 3 || data > 7)
+        return (uint64)-EINVAL;
+    return 0;
+}
+
+/* ================================================================== */
 /*  clock_settime                                                     */
 /* ================================================================== */
 
@@ -463,8 +805,6 @@ uint64 sys_sched_yield(void) {
 /*  sched_getscheduler / sched_setscheduler                           */
 /* ================================================================== */
 
-#define SCHED_OTHER 0
-
 uint64 sys_sched_getscheduler(void) {
     return SCHED_OTHER;
 }
@@ -548,6 +888,13 @@ struct linux_clone_args {
 };
 
 uint64 sys_clone3(void) {
+    /*
+     * glibc probes clone3() before falling back to clone().  Returning EINVAL
+     * from a partial clone3 implementation makes pthread_create fail, while
+     * ENOSYS matches older Linux kernels and preserves the working clone ABI.
+     */
+    return (uint64)-ENOSYS;
+#if 0
     uint64 uargs_addr;
     uint64 size;
     argaddr(0, &uargs_addr);
@@ -580,6 +927,7 @@ uint64 sys_clone3(void) {
     };
 
     return (uint64)thread_clone(&args);
+#endif
 }
 
 #define MLOCK_ONFAULT 0x1
@@ -702,3 +1050,185 @@ uint64 sys_membarrier(void) {
 
     return (uint64)-EINVAL;
 }
+
+/* ================================================================== */
+/*  Linux optional/privileged compatibility syscalls                   */
+/* ================================================================== */
+
+#define LINUX_PERSONALITY_QUERY 0xffffffffUL
+
+uint64 sys_personality(void)
+{
+    uint64 persona;
+    argaddr(0, &persona);
+
+    /*
+     * Linux userland commonly probes the current personality with
+     * personality(0xffffffff).  xv6 exposes the default Linux personality and
+     * accepts setting that same value; unsupported emulation modes are rejected.
+     */
+    if (persona == LINUX_PERSONALITY_QUERY || persona == 0)
+        return 0;
+    return (uint64)-EINVAL;
+}
+
+static uint64 linux_name_setter_stub(void)
+{
+    uint64 name_addr;
+    int len;
+    argaddr(0, &name_addr);
+    argint(1, &len);
+
+    if (len < 0 || len > 64)
+        return (uint64)-EINVAL;
+    if (len > 0 && name_addr == 0)
+        return (uint64)-EFAULT;
+
+    char tmp[65];
+    if (len > 0 && either_copyin(tmp, 1, name_addr, (uint64)len) < 0)
+        return (uint64)-EFAULT;
+    return 0;
+}
+
+uint64 sys_sethostname(void) { return linux_name_setter_stub(); }
+uint64 sys_setdomainname(void) { return linux_name_setter_stub(); }
+
+uint64 sys_get_thread_area(void)
+{
+    return (uint64)-EINVAL;
+}
+
+uint64 sys_set_thread_area(void)
+{
+    return (uint64)-EINVAL;
+}
+
+uint64 sys_restart_syscall(void)
+{
+    return (uint64)-EINTR;
+}
+
+#define LINUX_PRIVILEGED_STUB(name) \
+    uint64 sys_##name(void) { return (uint64)-EPERM; }
+
+#define LINUX_INVALID_STUB(name) \
+    uint64 sys_##name(void) { return (uint64)-EINVAL; }
+
+#define LINUX_NODEV_STUB(name) \
+    uint64 sys_##name(void) { return (uint64)-ENODEV; }
+
+LINUX_PRIVILEGED_STUB(ptrace)
+LINUX_PRIVILEGED_STUB(syslog)
+LINUX_INVALID_STUB(uselib)
+LINUX_INVALID_STUB(ustat)
+LINUX_INVALID_STUB(sysfs)
+LINUX_PRIVILEGED_STUB(vhangup)
+LINUX_PRIVILEGED_STUB(modify_ldt)
+LINUX_PRIVILEGED_STUB(pivot_root)
+LINUX_INVALID_STUB(_sysctl)
+LINUX_PRIVILEGED_STUB(adjtimex)
+LINUX_PRIVILEGED_STUB(acct)
+LINUX_PRIVILEGED_STUB(settimeofday)
+LINUX_PRIVILEGED_STUB(swapon)
+LINUX_PRIVILEGED_STUB(swapoff)
+LINUX_PRIVILEGED_STUB(iopl)
+LINUX_PRIVILEGED_STUB(ioperm)
+LINUX_PRIVILEGED_STUB(create_module)
+LINUX_PRIVILEGED_STUB(init_module)
+LINUX_PRIVILEGED_STUB(delete_module)
+LINUX_INVALID_STUB(get_kernel_syms)
+LINUX_INVALID_STUB(query_module)
+LINUX_NODEV_STUB(quotactl)
+LINUX_INVALID_STUB(nfsservctl)
+LINUX_INVALID_STUB(getpmsg)
+LINUX_INVALID_STUB(putpmsg)
+LINUX_INVALID_STUB(afs_syscall)
+LINUX_INVALID_STUB(tuxcall)
+LINUX_INVALID_STUB(security)
+LINUX_INVALID_STUB(io_setup)
+LINUX_INVALID_STUB(io_destroy)
+LINUX_INVALID_STUB(io_getevents)
+LINUX_INVALID_STUB(io_submit)
+LINUX_INVALID_STUB(io_cancel)
+LINUX_INVALID_STUB(lookup_dcookie)
+LINUX_INVALID_STUB(epoll_ctl_old)
+LINUX_INVALID_STUB(epoll_wait_old)
+LINUX_INVALID_STUB(remap_file_pages)
+LINUX_INVALID_STUB(timer_create)
+LINUX_INVALID_STUB(timer_settime)
+LINUX_INVALID_STUB(timer_gettime)
+LINUX_INVALID_STUB(timer_getoverrun)
+LINUX_INVALID_STUB(timer_delete)
+LINUX_INVALID_STUB(vserver)
+LINUX_INVALID_STUB(mbind)
+LINUX_INVALID_STUB(set_mempolicy)
+LINUX_INVALID_STUB(get_mempolicy)
+LINUX_INVALID_STUB(mq_open)
+LINUX_INVALID_STUB(mq_unlink)
+LINUX_INVALID_STUB(mq_timedsend)
+LINUX_INVALID_STUB(mq_timedreceive)
+LINUX_INVALID_STUB(mq_notify)
+LINUX_INVALID_STUB(mq_getsetattr)
+LINUX_PRIVILEGED_STUB(kexec_load)
+LINUX_INVALID_STUB(add_key)
+LINUX_INVALID_STUB(request_key)
+LINUX_INVALID_STUB(keyctl)
+LINUX_INVALID_STUB(migrate_pages)
+LINUX_PRIVILEGED_STUB(unshare)
+LINUX_INVALID_STUB(splice)
+LINUX_INVALID_STUB(tee)
+LINUX_INVALID_STUB(vmsplice)
+LINUX_INVALID_STUB(move_pages)
+LINUX_INVALID_STUB(rt_tgsigqueueinfo)
+LINUX_PRIVILEGED_STUB(perf_event_open)
+LINUX_INVALID_STUB(fanotify_init)
+LINUX_INVALID_STUB(fanotify_mark)
+LINUX_INVALID_STUB(name_to_handle_at)
+LINUX_PRIVILEGED_STUB(open_by_handle_at)
+LINUX_PRIVILEGED_STUB(clock_adjtime)
+LINUX_PRIVILEGED_STUB(setns)
+LINUX_INVALID_STUB(process_vm_readv)
+LINUX_INVALID_STUB(process_vm_writev)
+LINUX_INVALID_STUB(kcmp)
+LINUX_PRIVILEGED_STUB(finit_module)
+LINUX_INVALID_STUB(seccomp)
+LINUX_PRIVILEGED_STUB(kexec_file_load)
+LINUX_PRIVILEGED_STUB(bpf)
+LINUX_INVALID_STUB(execveat)
+LINUX_INVALID_STUB(userfaultfd)
+LINUX_INVALID_STUB(pkey_mprotect)
+LINUX_INVALID_STUB(pkey_alloc)
+LINUX_INVALID_STUB(pkey_free)
+LINUX_INVALID_STUB(io_pgetevents)
+LINUX_INVALID_STUB(pidfd_send_signal)
+LINUX_INVALID_STUB(io_uring_setup)
+LINUX_INVALID_STUB(io_uring_enter)
+LINUX_INVALID_STUB(io_uring_register)
+LINUX_PRIVILEGED_STUB(open_tree)
+LINUX_PRIVILEGED_STUB(move_mount)
+LINUX_INVALID_STUB(fsopen)
+LINUX_INVALID_STUB(fsconfig)
+LINUX_INVALID_STUB(fsmount)
+LINUX_INVALID_STUB(fspick)
+LINUX_INVALID_STUB(pidfd_open)
+LINUX_INVALID_STUB(pidfd_getfd)
+LINUX_INVALID_STUB(process_madvise)
+LINUX_PRIVILEGED_STUB(mount_setattr)
+LINUX_NODEV_STUB(quotactl_fd)
+LINUX_INVALID_STUB(landlock_create_ruleset)
+LINUX_INVALID_STUB(landlock_add_rule)
+LINUX_INVALID_STUB(landlock_restrict_self)
+LINUX_INVALID_STUB(memfd_secret)
+LINUX_INVALID_STUB(process_mrelease)
+LINUX_INVALID_STUB(futex_waitv)
+LINUX_INVALID_STUB(set_mempolicy_home_node)
+LINUX_INVALID_STUB(cachestat)
+LINUX_INVALID_STUB(map_shadow_stack)
+LINUX_INVALID_STUB(futex_wake)
+LINUX_INVALID_STUB(futex_wait)
+LINUX_INVALID_STUB(futex_requeue)
+LINUX_INVALID_STUB(statmount)
+LINUX_INVALID_STUB(listmount)
+LINUX_INVALID_STUB(lsm_get_self_attr)
+LINUX_INVALID_STUB(lsm_set_self_attr)
+LINUX_INVALID_STUB(lsm_list_modules)

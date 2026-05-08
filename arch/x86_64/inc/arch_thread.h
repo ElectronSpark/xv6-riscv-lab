@@ -153,7 +153,7 @@ static inline uint64 arch_tf_get_ret(struct utrapframe *tf) {
     return tf->trapframe.rax;
 }
 
-/* ── Trapframe function-argument accessors (x86_64 System V ABI) ── */
+/* ── Trapframe Linux syscall-argument accessors (x86_64 syscall ABI) ── */
 
 static inline void arch_tf_set_arg0(struct utrapframe *tf, uint64 v) {
     tf->trapframe.rdi = v;
@@ -165,7 +165,7 @@ static inline void arch_tf_set_arg2(struct utrapframe *tf, uint64 v) {
     tf->trapframe.rdx = v;
 }
 static inline void arch_tf_set_arg3(struct utrapframe *tf, uint64 v) {
-    tf->trapframe.rcx = v;
+    tf->trapframe.r10 = v;
 }
 static inline void arch_tf_set_arg4(struct utrapframe *tf, uint64 v) {
     tf->trapframe.r8 = v;
@@ -204,6 +204,18 @@ static inline void arch_tf_set_exec_args(struct utrapframe *tf,
                                          uint64 argc, uint64 argv) {
     arch_tf_set_arg0(tf, argc);
     arch_tf_set_arg1(tf, argv);
+    /*
+     * AMD64 process entry uses RDX for the optional rtld_fini callback.
+     * A static executable has no dynamic loader to provide one, so it must
+     * start as NULL.  Leaving the execve syscall's envp argument here makes
+     * glibc call a bogus function pointer during exit/fini.
+     */
+    arch_tf_set_arg2(tf, 0);
+    tf->trapframe.rcx = 0;
+    tf->trapframe.r8 = 0;
+    tf->trapframe.r9 = 0;
+    tf->trapframe.r10 = 0;
+    tf->trapframe.r11 = 0;
 }
 
 #endif /* __KERNEL_X86_64_ARCH_THREAD_H */

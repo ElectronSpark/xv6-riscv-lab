@@ -197,6 +197,8 @@ uint64 sys_geteuid(void) { return current->thread_group->euid; }
 uint64 sys_getgid(void)  { return current->thread_group->gid;  }
 uint64 sys_getegid(void) { return current->thread_group->egid; }
 
+uint64 sys_getpgrp(void) { return pgroup_getpgid(0); }
+
 uint64 sys_setuid(void) {
     int id;
     argint(0, &id);
@@ -205,8 +207,10 @@ uint64 sys_setuid(void) {
     if (tg->euid == 0) {
         /* Privileged: set all three */
         tg->uid = tg->euid = tg->suid = (uint32)id;
+        tg->fsuid = (uint32)id;
     } else if ((uint32)id == tg->uid || (uint32)id == tg->suid) {
         tg->euid = (uint32)id;
+        tg->fsuid = (uint32)id;
     } else {
         return (uint64)-EPERM;
     }
@@ -220,8 +224,10 @@ uint64 sys_setgid(void) {
     struct thread_group *tg = current->thread_group;
     if (tg->euid == 0) {
         tg->gid = tg->egid = tg->sgid = (uint32)id;
+        tg->fsgid = (uint32)id;
     } else if ((uint32)id == tg->gid || (uint32)id == tg->sgid) {
         tg->egid = (uint32)id;
+        tg->fsgid = (uint32)id;
     } else {
         return (uint64)-EPERM;
     }
@@ -257,6 +263,7 @@ uint64 sys_setreuid(void) {
      * to the previous real UID, the saved UID is set to the new euid. */
     if (ruid != -1 || (euid != -1 && (uint32)euid != old_ruid))
         tg->suid = tg->euid;
+    tg->fsuid = tg->euid;
     return 0;
 }
 
@@ -286,6 +293,7 @@ uint64 sys_setregid(void) {
     }
     if (rgid != -1 || (egid != -1 && (uint32)egid != old_rgid))
         tg->sgid = tg->egid;
+    tg->fsgid = tg->egid;
     return 0;
 }
 
@@ -319,6 +327,8 @@ uint64 sys_setresuid(void) {
     if (ruid != -1) tg->uid  = (uint32)ruid;
     if (euid != -1) tg->euid = (uint32)euid;
     if (suid != -1) tg->suid = (uint32)suid;
+    if (tg->fsuid == 0 || tg->fsuid == tg->euid)
+        tg->fsuid = tg->euid;
     return 0;
 }
 
@@ -348,7 +358,41 @@ uint64 sys_setresgid(void) {
     if (rgid != -1) tg->gid  = (uint32)rgid;
     if (egid != -1) tg->egid = (uint32)egid;
     if (sgid != -1) tg->sgid = (uint32)sgid;
+    if (tg->fsgid == 0 || tg->fsgid == tg->egid)
+        tg->fsgid = tg->egid;
     return 0;
+}
+
+uint64 sys_setfsuid(void) {
+    int uid;
+    argint(0, &uid);
+    if (uid < 0)
+        return current->thread_group->fsuid;
+
+    struct thread_group *tg = current->thread_group;
+    uint32 old = tg->fsuid;
+    uint32 u = (uint32)uid;
+    if (tg->euid == 0 || u == tg->uid || u == tg->euid ||
+        u == tg->suid || u == tg->fsuid) {
+        tg->fsuid = u;
+    }
+    return old;
+}
+
+uint64 sys_setfsgid(void) {
+    int gid;
+    argint(0, &gid);
+    if (gid < 0)
+        return current->thread_group->fsgid;
+
+    struct thread_group *tg = current->thread_group;
+    uint32 old = tg->fsgid;
+    uint32 g = (uint32)gid;
+    if (tg->euid == 0 || g == tg->gid || g == tg->egid ||
+        g == tg->sgid || g == tg->fsgid) {
+        tg->fsgid = g;
+    }
+    return old;
 }
 
 uint64 sys_getresuid(void) {
@@ -447,6 +491,20 @@ uint64 sys_exit_group(void) {
 uint64 sys_vfork(void) {
     struct clone_args args = {
         .flags = CLONE_VM | CLONE_VFORK,
+        .stack = 0,
+        .stack_size = 0,
+        .entry = 0,
+        .esignal = SIGCHLD,
+        .tls = 0,
+        .ctid = 0,
+        .ptid = 0,
+    };
+    return thread_clone(&args);
+}
+
+uint64 sys_fork(void) {
+    struct clone_args args = {
+        .flags = 0,
         .stack = 0,
         .stack_size = 0,
         .entry = 0,
@@ -583,6 +641,17 @@ uint64 sys_gettimeofday(void) {
     SYSCALL_PROFILE_RETURN(0, g_sys_gettimeofday_ticks);
 }
 
+uint64 sys_time(void) {
+    uint64 tloc;
+    argaddr(0, &tloc);
+
+    uint64 rtc = goldfish_rtc_read_ns();
+    uint64 sec = rtc / NS_PER_SEC;
+    if (tloc != 0 && either_copyout(1, tloc, &sec, sizeof(sec)) < 0)
+        return (uint64)-EFAULT;
+    return sec;
+}
+
 uint64 sys_nanosleep(void) {
     uint64 req_addr, rem_addr;
     argaddr(0, &req_addr);
@@ -698,10 +767,10 @@ uint64 sys_uname(void) {
 
     struct __k_utsname u;
     memset(&u, 0, sizeof(u));
-    safestrcpy(u.sysname, "xv6", sizeof(u.sysname));
+    safestrcpy(u.sysname, "Linux", sizeof(u.sysname));
     safestrcpy(u.nodename, "xv6", sizeof(u.nodename));
-    safestrcpy(u.release, "0.1", sizeof(u.release));
-    safestrcpy(u.version, "xv6-tmp", sizeof(u.version));
+    safestrcpy(u.release, "6.6.0-xv6", sizeof(u.release));
+    safestrcpy(u.version, "xv6 Linux ABI", sizeof(u.version));
 #if defined(CONFIG_ARCH_X86_64) || defined(__x86_64__)
     safestrcpy(u.machine, "x86_64", sizeof(u.machine));
 #elif defined(CONFIG_ARCH_RISCV) || defined(__riscv)

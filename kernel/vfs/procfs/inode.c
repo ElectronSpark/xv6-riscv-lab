@@ -1654,15 +1654,6 @@ static char *procfs_gen_limits(void)
     return buf;
 }
 
-static char *procfs_gen_empty(void)
-{
-    char *buf = kvmalloc(1);
-    if (buf == NULL)
-        return ERR_PTR(-ENOMEM);
-    buf[0] = '\0';
-    return buf;
-}
-
 static char *procfs_gen_fdinfo(int pid, int fd)
 {
     char *buf = kvmalloc(256);
@@ -1826,24 +1817,69 @@ static char *procfs_gen_pid_stat(int tgid)
     return buf;
 }
 
-static char *procfs_gen_pid_cmdline(int tgid)
+static struct procfs_blob *procfs_blob_alloc(size_t len)
 {
-    rcu_read_lock();
+    struct procfs_blob *blob = kvmalloc(sizeof(*blob) + len + 1);
+    if (blob == NULL)
+        return ERR_PTR(-ENOMEM);
+    blob->len = len;
+    if (len != 0)
+        memset(blob->data, 0, len);
+    blob->data[len] = '\0';
+    return blob;
+}
+
+static struct procfs_blob *procfs_gen_pid_snapshot_blob(int tgid,
+                                                        enum procfs_entry_type type)
+{
+    struct procfs_blob *blob =
+        procfs_blob_alloc(TG_EXEC_SNAPSHOT_MAX_BYTES);
+    if (IS_ERR(blob))
+        return blob;
+
+    pid_rlock();
     struct thread *p = NULL;
     get_pid_thread(tgid, &p);
     if (p == NULL || p->thread_group == NULL) {
-        rcu_read_unlock();
+        pid_runlock();
+        kvfree(blob);
         return ERR_PTR(-ESRCH);
     }
-    char exec_path[128];
-    safestrcpy(exec_path, p->thread_group->exec_path, sizeof(exec_path));
-    rcu_read_unlock();
 
-    char *buf = kvmalloc(PROCFS_BUF_SIZE);
-    if (buf == NULL)
-        return ERR_PTR(-ENOMEM);
-    snprintf(buf, PROCFS_BUF_SIZE, "%s\n", exec_path[0] ? exec_path : "unknown");
-    return buf;
+    const struct thread_group_exec_snapshot *snap =
+        &p->thread_group->exec_snapshot;
+    const char *src = NULL;
+    size_t len = 0;
+
+    switch (type) {
+    case PROC_PID_CMDLINE:
+    case PROC_TASK_CMDLINE:
+        src = snap->cmdline;
+        len = snap->cmdline_len;
+        break;
+    case PROC_PID_ENVIRON:
+    case PROC_TASK_ENVIRON:
+        src = snap->environ;
+        len = snap->environ_len;
+        break;
+    case PROC_PID_AUXV:
+    case PROC_TASK_AUXV:
+        src = (const char *)snap->auxv;
+        len = snap->auxv_len;
+        break;
+    default:
+        pid_runlock();
+        kvfree(blob);
+        return ERR_PTR(-EINVAL);
+    }
+
+    if (len > TG_EXEC_SNAPSHOT_MAX_BYTES)
+        len = TG_EXEC_SNAPSHOT_MAX_BYTES;
+    if (src != NULL && len != 0)
+        memmove(blob->data, src, len);
+    blob->len = len;
+    pid_runlock();
+    return blob;
 }
 
 static char *procfs_gen_pid_comm(int tgid)
@@ -1981,6 +2017,7 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
 
     /* Regular file: generate content into a heap buffer */
     char *buf = NULL;
+    struct procfs_blob *blob = NULL;
 
     switch (pi->type) {
     case PROC_STATUS:
@@ -1997,7 +2034,7 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_PID_CMDLINE:
     case PROC_TASK_CMDLINE:
-        buf = procfs_gen_pid_cmdline(pi->pid);
+        blob = procfs_gen_pid_snapshot_blob(pi->pid, pi->type);
         break;
     case PROC_PID_COMM:
         buf = procfs_gen_pid_comm(pi->pid);
@@ -2069,7 +2106,7 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_PID_AUXV:
     case PROC_TASK_ENVIRON:
     case PROC_TASK_AUXV:
-        buf = procfs_gen_empty();
+        blob = procfs_gen_pid_snapshot_blob(pi->pid, pi->type);
         break;
     case PROC_FDINFO_ENTRY:
         buf = procfs_gen_fdinfo(pi->pid, pi->fd);
@@ -2103,6 +2140,14 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     default:
         return -EINVAL;
+    }
+
+    if (blob != NULL) {
+        if (IS_ERR(blob))
+            return (int)PTR_ERR(blob);
+        file->private_data = blob;
+        file->ops = &procfs_blob_file_ops;
+        return 0;
     }
 
     if (IS_ERR(buf))

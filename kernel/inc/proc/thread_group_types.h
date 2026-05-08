@@ -36,8 +36,19 @@
 #include <smp/atomic.h>
 
 #define NGROUPS_MAX 32  /* Maximum supplementary groups per process */
+#define TG_EXEC_SNAPSHOT_MAX_BYTES 4096
+#define TG_EXEC_AUXV_MAX_PAIRS 32
 
 struct pgroup;
+
+struct thread_group_exec_snapshot {
+    char *cmdline;                /* Linux /proc/<pid>/cmdline bytes */
+    size_t cmdline_len;
+    char *environ;                /* Linux /proc/<pid>/environ bytes */
+    size_t environ_len;
+    uint64 auxv[TG_EXEC_AUXV_MAX_PAIRS * 2];
+    size_t auxv_len;              /* bytes populated in auxv[] */
+};
 
 /**
  * @brief Shared signal state for a thread group (process-directed signals)
@@ -97,6 +108,7 @@ struct thread_group {
     uint64 interp_ld;            /* Loaded address of interpreter's .dynamic section */
     char   interp_path[128];     /* Path from PT_INTERP (e.g. /lib/ld-musl-riscv64.so.1) */
     char   exec_path[128];      /* Full path of the executable (e.g. /bin/python) */
+    struct thread_group_exec_snapshot exec_snapshot;
 
     /* ── Process credentials (POSIX user/group identity) ─────────────── */
     uint32 uid;                  /* Real user ID */
@@ -105,6 +117,8 @@ struct thread_group {
     uint32 egid;                 /* Effective group ID */
     uint32 suid;                 /* Saved set-user-ID */
     uint32 sgid;                 /* Saved set-group-ID */
+    uint32 fsuid;                /* Filesystem user ID */
+    uint32 fsgid;                /* Filesystem group ID */
     int    ngroups;              /* Number of supplementary groups */
     uint32 groups[NGROUPS_MAX];  /* Supplementary group list */
     mode_t umask;                /* File creation mask (default 022) */

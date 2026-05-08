@@ -220,3 +220,35 @@ uint64 sys_eventfd2(void)
 
     return (uint64)fd;
 }
+
+uint64 sys_eventfd(void)
+{
+    /*
+     * eventfd(initval) is the legacy two-argument-free ABI.  eventfd2's
+     * second argument lives in RSI on x86_64, so do not tail-call it.
+     */
+    uint initval;
+    argint(0, (int *)&initval);
+
+    struct eventfd_ctx *ctx = (struct eventfd_ctx *)kalloc();
+    if (ctx == NULL)
+        return (uint64)-ENOMEM;
+
+    memset(ctx, 0, sizeof(*ctx));
+    spin_init(&ctx->lock, "eventfd");
+    tq_init(&ctx->rq, "eventfd_rq", NULL);
+    tq_init(&ctx->wq, "eventfd_wq", NULL);
+    ctx->count = initval;
+    ctx->flags = 0;
+
+    int fd = vfs_custom_fd_alloc(&eventfd_file_ops, ctx, O_RDWR);
+    if (fd < 0) {
+        kfree(ctx);
+        return (uint64)fd;
+    }
+
+    spin_lock(&current->fdtable->lock);
+    ctx->file = current->fdtable->files[fd];
+    spin_unlock(&current->fdtable->lock);
+    return (uint64)fd;
+}

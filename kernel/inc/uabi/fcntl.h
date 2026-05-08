@@ -67,12 +67,26 @@ struct flock {
 #define F_OFD_SETLKW 38
 
 #define F_DUPFD_CLOEXEC 1030
+#define F_SETPIPE_SZ 1031
+#define F_GETPIPE_SZ 1032
+#define F_SETLEASE 1024
+#define F_GETLEASE 1025
+#define F_NOTIFY 1026
+#define F_CANCELLK 1029
 
 #define F_RDLCK 0
 #define F_WRLCK 1
 #define F_UNLCK 2
 
 #define FD_CLOEXEC 1
+
+#define DN_ACCESS 0x00000001
+#define DN_MODIFY 0x00000002
+#define DN_CREATE 0x00000004
+#define DN_DELETE 0x00000008
+#define DN_RENAME 0x00000010
+#define DN_ATTRIB 0x00000020
+#define DN_MULTISHOT 0x80000000
 
 #define AT_FDCWD (-100)
 #define AT_SYMLINK_NOFOLLOW 0x100
@@ -135,8 +149,6 @@ struct flock {
 #define F_GETLEASE 1025
 #define F_NOTIFY 1026
 #define F_CANCELLK 1029
-#define F_SETPIPE_SZ 1031
-#define F_GETPIPE_SZ 1032
 #define F_ADD_SEALS 1033
 #define F_GET_SEALS 1034
 
@@ -156,7 +168,6 @@ struct flock {
 int lockf(int, int, off_t);
 #endif
 
-#if defined(_GNU_SOURCE)
 #define F_OWNER_TID 0
 #define F_OWNER_PID 1
 #define F_OWNER_PGRP 2
@@ -165,6 +176,8 @@ struct f_owner_ex {
     int type;
     pid_t pid;
 };
+
+#if defined(_GNU_SOURCE)
 #define FALLOC_FL_KEEP_SIZE 1
 #define FALLOC_FL_PUNCH_HOLE 2
 #define SYNC_FILE_RANGE_WAIT_BEFORE 1

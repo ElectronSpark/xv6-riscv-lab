@@ -1242,6 +1242,8 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
     struct unix_sock *sk = unix_sock_from_fd(fd);
     if (sk == NULL)
         return -EBADF;
+    if (flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC))
+        return -EINVAL;
 
 
     spin_lock(&sk->lock);
@@ -1337,6 +1339,11 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
         spin_unlock(&client->lock);
         unix_sock_put(client);
         return newfd;
+    }
+    if (flags & SOCK_CLOEXEC) {
+        spin_lock(&current->fdtable->lock);
+        vfs_fdtable_set_fdflags(current->fdtable, newfd, FD_CLOEXEC);
+        spin_unlock(&current->fdtable->lock);
     }
 
     /* Cross-link client ↔ server (each takes a ref on the other) */

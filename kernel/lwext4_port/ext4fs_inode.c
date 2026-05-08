@@ -851,8 +851,10 @@ static int ext4fs_truncate(struct vfs_inode *inode, loff_t new_size)
 
     ext4fs_inode_map_cache_invalidate(inode);
 
-    if (inode->i_data.active)
+    if (inode->i_data.active && new_size < inode->size) {
+        inode->i_data.active = 0;
         pcache_teardown(&inode->i_data);
+    }
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
@@ -912,11 +914,9 @@ static ssize_t ext4fs_readlink(struct vfs_inode *inode, char *buf,
     }
 
     uint64_t link_len = ext4_inode_get_size(&fs->sb, ref.inode);
-    if (link_len + 1 > buflen) {
-        ext4_fs_put_inode_ref(&ref);
-        ext4fs_unlock(esb);
-        return -ENAMETOOLONG;
-    }
+    uint64_t copy_len = link_len;
+    if (copy_len > buflen)
+        copy_len = buflen;
 
     /*
      * Short symlinks store the target in the inode's block pointers area.
@@ -924,16 +924,16 @@ static ssize_t ext4fs_readlink(struct vfs_inode *inode, char *buf,
      */
     if (link_len < sizeof(ref.inode->blocks)) {
         /* Fast symlink — target is in the blocks area */
-        memcpy(buf, ref.inode->blocks, (uint)link_len);
+        memcpy(buf, ref.inode->blocks, (uint)copy_len);
     } else {
         /* Slow symlink — read from data blocks */
         uint64_t bytes_read = 0;
-        while (bytes_read < link_len) {
+        while (bytes_read < copy_len) {
             ext4_lblk_t iblock = (ext4_lblk_t)(bytes_read / block_size);
             uint off = (uint)(bytes_read % block_size);
             uint n = block_size - off;
-            if (n > link_len - bytes_read)
-                n = (uint)(link_len - bytes_read);
+            if (n > copy_len - bytes_read)
+                n = (uint)(copy_len - bytes_read);
 
             ext4_fsblk_t fblock;
             r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, true);
@@ -960,8 +960,9 @@ static ssize_t ext4fs_readlink(struct vfs_inode *inode, char *buf,
 
     ext4_fs_put_inode_ref(&ref);
     ext4fs_unlock(esb);
-    buf[link_len] = '\0';
-    return (ssize_t)link_len;
+    if (copy_len < buflen)
+        buf[copy_len] = '\0';
+    return (ssize_t)copy_len;
 }
 
 static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,

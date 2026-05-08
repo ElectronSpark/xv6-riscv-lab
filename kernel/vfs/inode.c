@@ -889,10 +889,8 @@ ssize_t vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
         goto out;
     }
     ret = inode->ops->readlink(inode, buf, buflen);
-    if (ret >= 0 && (size_t)ret >= buflen) {
-        ret = -ENAMETOOLONG;
-        goto out;
-    }
+    if (ret >= 0 && (size_t)ret > buflen)
+        ret = (ssize_t)buflen;
 out:
     vfs_iunlock(inode);
     return ret;
@@ -1459,6 +1457,10 @@ int vfs_itruncate(struct vfs_inode *inode, loff_t new_size) {
         ret = -ENOSYS; // Truncate operation not supported
         goto out;
     }
+    if (inode->size == new_size) {
+        ret = 0;
+        goto out;
+    }
     ret = inode->ops->truncate(inode, new_size);
 out:
     vfs_iunlock(inode);
@@ -1753,6 +1755,7 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
         const char *rest = comp_end;
         while (*rest == '/')
             rest++;
+        bool final_trailing_slash = *comp_end == '/' && *rest == '\0';
 
         /* Look up this component in the current directory */
         struct vfs_dentry dentry = {0};
@@ -1809,7 +1812,9 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
              * For an absolute target we restart from root.
              * For a relative target we continue from pos (the parent dir).
              */
-            size_t rest_len = strlen(rest);
+            const char dot_rest[] = ".";
+            const char *symlink_rest = final_trailing_slash ? dot_rest : rest;
+            size_t rest_len = strlen(symlink_rest);
             size_t new_len = (size_t)tlen + (rest_len ? 1 + rest_len : 0);
             if (new_len >= VFS_USER_PATH_MAX) {
                 kvfree(target);
@@ -1831,7 +1836,7 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
                 goto out;
             }
             if (rest_len > 0)
-                memmove(saved_rest, rest, rest_len + 1);
+                memmove(saved_rest, symlink_rest, rest_len + 1);
 
             if (new_len + 1 > pathbuf_len) {
                 char *new_pathbuf = kvmalloc(new_len + 1);
@@ -1872,6 +1877,14 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
             continue;
         }
         /* ── End symlink following ────────────────────────────── */
+
+        if (final_trailing_slash && !S_ISDIR(next->mode)) {
+            vfs_iput(next);
+            vfs_iput(pos);
+            pos = NULL;
+            ret_inode = INIT_ERR_PTR(-ENOTDIR);
+            goto out;
+        }
 
         vfs_iput(pos);
         pos = next;

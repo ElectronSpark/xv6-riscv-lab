@@ -261,6 +261,11 @@ struct procfs_pid_snap {
     int pids[0]; /* n tgids         */
 };
 
+struct procfs_blob {
+    size_t len;
+    char data[0];
+};
+
 /* ------------------------------------------------------------------ */
 /*  Module-internal symbols                                           */
 /* ------------------------------------------------------------------ */
@@ -274,6 +279,7 @@ extern struct vfs_inode_ops procfs_inode_ops;
 
 /* Exported by file.c */
 extern struct vfs_file_ops procfs_reg_file_ops;
+extern struct vfs_file_ops procfs_blob_file_ops;
 extern struct vfs_file_ops procfs_dir_file_ops;
 
 #endif /* KERNEL_VFS_PROCFS_PRIVATE_H */

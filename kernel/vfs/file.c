@@ -35,6 +35,7 @@
 #include "vfs/fs.h"
 #include "printf.h"
 #include "vfs/file.h"
+#include "vfs/file_lock.h"
 #include "vfs_private.h"
 #include "vfs/fcntl.h"
 #include "list.h"
@@ -52,6 +53,7 @@ static slab_cache_t __vfs_file_slab = {0};
 static spinlock_t __vfs_ftable_lock = {0};
 static list_node_t __vfs_ftable = {0};
 static int __vfs_open_file_count = 0;
+static int __vfs_next_ofd_lock_owner = -1;
 
 static void __vfs_file_lock(struct vfs_file *file) {
     mutex_lock(&file->lock);
@@ -85,6 +87,8 @@ static struct vfs_file *__vfs_file_alloc(void) {
     memset(file, 0, sizeof(*file));
     mutex_init(&file->lock, "vfs_file_lock");
     file->ref_count = 1;
+    file->f_ofd_lock_owner =
+        __atomic_fetch_sub(&__vfs_next_ofd_lock_owner, 1, __ATOMIC_RELAXED);
     spin_init(&file->knote_lock, "vfs_file_knote");
     list_entry_init(&file->knote_list);
     /* list_entry must be self-referencing (detached) after init */
@@ -107,6 +111,7 @@ static void __vfs_file_free(struct vfs_file *file) {
     if (file == NULL) {
         return;
     }
+    vfs_file_lock_release(file, file->f_ofd_lock_owner);
     if (file->ops != NULL && file->ops->release != NULL) {
         // Call file release operation
         int ret = file->ops->release(file->inode.inode, file);
@@ -421,6 +426,8 @@ int vfs_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
     if (file == NULL) {
         return -EBADF;
     }
+    if (file->f_flags & O_PATH)
+        return -EBADF;
 
     /* Fast path: character / block device files — dispatch to device layer */
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
@@ -445,6 +452,9 @@ int vfs_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
 
 ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
     if (file == NULL) {
+        return -EBADF;
+    }
+    if (file->f_flags & O_PATH) {
         return -EBADF;
     }
     if (buf == NULL) {
@@ -585,6 +595,9 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
     if (file == NULL) {
         return -EBADF;
     }
+    if (file->f_flags & O_PATH) {
+        return -EBADF;
+    }
     if (buf == NULL) {
         return -EFAULT;
     }
@@ -720,6 +733,8 @@ ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user)
 {
     if (file == NULL)
         return -EBADF;
+    if (file->f_flags & O_PATH)
+        return -EBADF;
     if (iter == NULL || iter->count == 0)
         return 0;
 
@@ -849,6 +864,8 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
 {
     if (file == NULL)
         return -EBADF;
+    if (file->f_flags & O_PATH)
+        return -EBADF;
     if (iter == NULL || iter->count == 0)
         return 0;
 
@@ -958,6 +975,9 @@ loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence) {
     if (file == NULL) {
         return -EBADF; // Invalid file descriptor
     }
+    if (file->f_flags & O_PATH) {
+        return -EBADF;
+    }
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     loff_t ret = 0;
     if (inode == NULL) {
@@ -990,6 +1010,9 @@ out:
 int truncate(struct vfs_file *file, loff_t length) {
     if (file == NULL) {
         return -EBADF; // Invalid file descriptor
+    }
+    if (file->f_flags & O_PATH) {
+        return -EBADF;
     }
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (inode == NULL) {

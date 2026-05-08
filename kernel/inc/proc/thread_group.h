@@ -90,6 +90,14 @@ void thread_group_put(struct thread_group *tg);
  */
 void thread_group_get(struct thread_group *tg);
 
+void thread_group_exec_snapshot_clear(struct thread_group *tg);
+void thread_group_exec_snapshot_set(struct thread_group *tg, char *cmdline,
+                                    size_t cmdline_len, char *environ,
+                                    size_t environ_len, const uint64 *auxv,
+                                    size_t auxv_len);
+int thread_group_exec_snapshot_clone_locked(struct thread_group *dst,
+                                            const struct thread_group *src);
+
 /**
  * @brief Initialize the thread group subsystem (slab cache).
  *        Called once during boot, before any processes exist.

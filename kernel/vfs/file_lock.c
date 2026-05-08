@@ -281,13 +281,16 @@ int vfs_file_lock_ctl(struct vfs_file *file, pid_t owner, int cmd,
         return ret;
     }
 
+    bool getlk = cmd == F_GETLK || cmd == F_OFD_GETLK;
+    bool setlkw = cmd == F_SETLKW || cmd == F_OFD_SETLKW;
+
     for (;;) {
         spin_lock(&inode->file_lock);
         struct vfs_file_lock_range *conflict =
             __vfs_file_lock_find_conflict(inode, owner, normalized.l_type,
                                           start, end);
 
-        if (cmd == F_GETLK) {
+        if (getlk) {
             if (conflict == NULL) {
                 fl->l_type = F_UNLCK;
                 fl->l_whence = SEEK_SET;
@@ -301,7 +304,7 @@ int vfs_file_lock_ctl(struct vfs_file *file, pid_t owner, int cmd,
                 fl->l_len = (conflict->end == VFS_FILE_LOCK_EOF)
                                 ? 0
                                 : (conflict->end - conflict->start + 1);
-                fl->l_pid = conflict->owner;
+                fl->l_pid = conflict->owner < 0 ? -1 : conflict->owner;
             }
             spin_unlock(&inode->file_lock);
             return 0;
@@ -317,7 +320,7 @@ int vfs_file_lock_ctl(struct vfs_file *file, pid_t owner, int cmd,
             return ret;
         }
 
-        if (cmd != F_SETLKW) {
+        if (!setlkw) {
             spin_unlock(&inode->file_lock);
             return -EAGAIN;
         }

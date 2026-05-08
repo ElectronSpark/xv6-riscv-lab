@@ -29,6 +29,9 @@
 #include "tty/tty.h"
 #include "proc/pgroup.h"
 
+void argint(int n, int *ip);
+void argaddr(int n, uint64 *ip);
+
 // Wake the vfork parent when child exits or execs.
 // The vfork parent is blocked in UNINTERRUPTIBLE state waiting for us.
 // After waking, clear the vfork_parent pointer so we don't wake twice.
@@ -623,4 +626,132 @@ ret_unlocked:
         }
     }
     return pid;
+}
+
+uint64 sys_waitid(void) {
+    const int P_ALL = 0;
+    const int P_PID = 1;
+    const int P_PGID = 2;
+    const int WNOHANG = 1;
+    const int WSTOPPED = 2;
+    const int WEXITED = 4;
+    const int WCONTINUED = 8;
+    const int WNOWAIT = 0x01000000;
+    const int CLD_EXITED = 1;
+    const int CLD_KILLED = 2;
+    const int CLD_STOPPED = 5;
+
+    int idtype;
+    int id;
+    uint64 infop_addr;
+    int options;
+    argint(0, &idtype);
+    argint(1, &id);
+    argaddr(2, &infop_addr);
+    argint(3, &options);
+
+    if (infop_addr == 0)
+        return (uint64)-EFAULT;
+    if (idtype != P_ALL && idtype != P_PID && idtype != P_PGID)
+        return (uint64)-EINVAL;
+    if ((options & ~(WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT)) != 0)
+        return (uint64)-EINVAL;
+    if ((options & (WEXITED | WSTOPPED | WCONTINUED)) == 0)
+        return (uint64)-EINVAL;
+
+    struct thread *p = current;
+    struct thread_group *tg = p->thread_group;
+    siginfo_t si;
+    memset(&si, 0, sizeof(si));
+
+    pid_rlock();
+    for (;;) {
+        bool has_match = false;
+        __thread_state_set(p, THREAD_INTERRUPTIBLE);
+
+        struct thread *thr, *thr_tmp;
+        list_foreach_node_safe(&tg->thread_list, thr, thr_tmp, tg_entry) {
+            struct thread *child, *tmp;
+            list_foreach_node_safe(&thr->children, child, tmp, siblings) {
+                if (idtype == P_PID && child->pid != id)
+                    continue;
+                if (idtype == P_PGID) {
+                    int pgid = id == 0 ? p->pgid : id;
+                    if (child->pgid != pgid)
+                        continue;
+                }
+                has_match = true;
+
+                if ((options & WSTOPPED) && THREAD_STOPPED(child)) {
+                    __thread_state_set(p, THREAD_RUNNING);
+                    si.si_signo = SIGCHLD;
+                    si.si_code = CLD_STOPPED;
+                    si.si_pid = child->pid;
+                    si.si_status = child->signal.stop_signal;
+                    goto copyout;
+                }
+
+                if ((options & WEXITED) && zombie_child_is_reapable(child)) {
+                    __thread_state_set(p, THREAD_RUNNING);
+                    int spin_count = 0;
+                    while (smp_load_acquire(&child->sched_entity->on_cpu)) {
+                        cpu_relax();
+                        spin_count++;
+                        if (spin_count > 1000) {
+                            pid_runlock();
+                            scheduler_yield();
+                            pid_rlock();
+                            spin_count = 0;
+                        }
+                    }
+
+                    si.si_signo = SIGCHLD;
+                    si.si_code = child->killed_signo > 0 ? CLD_KILLED : CLD_EXITED;
+                    si.si_pid = child->pid;
+                    si.si_status = child->killed_signo > 0 ?
+                                   child->killed_signo : (child->xstate & 0xff);
+
+                    if (!(options & WNOWAIT)) {
+                        if (!pid_try_lock_upgrade()) {
+                            pid_runlock();
+                            pid_wlock();
+                        }
+                        detach_child(child->parent, child);
+                        proctab_proc_remove(child);
+                        pid_wunlock();
+                        procfs_evict_pid(child->tgid);
+                        __free_pid();
+                        thread_destroy(child);
+                        goto copyout_unlocked;
+                    }
+                    goto copyout;
+                }
+            }
+        }
+
+        if (!has_match) {
+            __thread_state_set(p, THREAD_RUNNING);
+            pid_runlock();
+            return (uint64)-ECHILD;
+        }
+
+        if (options & WNOHANG) {
+            __thread_state_set(p, THREAD_RUNNING);
+            pid_runlock();
+            if (either_copyout(1, infop_addr, &si, sizeof(si)) < 0)
+                return (uint64)-EFAULT;
+            return 0;
+        }
+
+        pid_runlock();
+        scheduler_yield();
+        pid_rlock();
+    }
+
+copyout:
+    pid_runlock();
+copyout_unlocked:
+    if (either_copyout(1, infop_addr, &si, sizeof(si)) < 0)
+        return (uint64)-EFAULT;
+    return 0;
 }

@@ -116,6 +116,67 @@ struct vfs_file_ops procfs_reg_file_ops = {
     .release = procfs_reg_release,
 };
 
+static ssize_t procfs_blob_read(struct vfs_file *file, char *buf, size_t count,
+                                bool user)
+{
+    struct procfs_blob *blob = (struct procfs_blob *)file->private_data;
+    if (blob == NULL)
+        return 0;
+
+    loff_t pos = file->f_pos;
+    if (pos < 0 || (uint64)pos >= blob->len)
+        return 0;
+
+    size_t remaining = blob->len - (size_t)pos;
+    size_t chunk = (count < remaining) ? count : remaining;
+
+    if (user) {
+        int ret = either_copyout(1, (uint64)buf, blob->data + pos, chunk);
+        if (ret < 0)
+            return ret;
+    } else {
+        memmove(buf, blob->data + pos, chunk);
+    }
+
+    return (ssize_t)chunk;
+}
+
+static loff_t procfs_blob_llseek(struct vfs_file *file, loff_t offset,
+                                 int whence)
+{
+    struct procfs_blob *blob = (struct procfs_blob *)file->private_data;
+    loff_t size = (blob != NULL) ? (loff_t)blob->len : 0;
+    loff_t new_pos;
+
+    switch (whence) {
+    case SEEK_SET:
+        new_pos = offset;
+        break;
+    case SEEK_CUR:
+        new_pos = file->f_pos + offset;
+        break;
+    case SEEK_END:
+        new_pos = size + offset;
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    if (new_pos < 0)
+        new_pos = 0;
+    if (new_pos > size)
+        new_pos = size;
+
+    file->f_pos = new_pos;
+    return new_pos;
+}
+
+struct vfs_file_ops procfs_blob_file_ops = {
+    .read    = procfs_blob_read,
+    .llseek  = procfs_blob_llseek,
+    .release = procfs_reg_release,
+};
+
 /* ------------------------------------------------------------------ */
 /*  Directory file operations                                         */
 /* ------------------------------------------------------------------ */

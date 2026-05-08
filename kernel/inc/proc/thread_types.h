@@ -91,6 +91,9 @@ struct thread {
     uint64 clear_child_tid; // CLONE_CHILD_CLEARTID: address to zero + futex_wake on exit
     uint64 robust_list_head; // set_robust_list: user pointer to robust futex list head
     uint64 robust_list_len;  // set_robust_list: length expected by userspace
+    uint64 rseq_addr;      // rseq(2): registered user rseq area
+    uint32 rseq_len;       // rseq(2): user rseq area length
+    uint32 rseq_signature; // rseq(2): abort signature
     struct fs_struct *fs; // Filesystem state (slab allocated, may be shared)
     struct vfs_fdtable
         *fdtable; // File descriptor table (slab allocated, may be shared)

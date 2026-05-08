@@ -119,8 +119,10 @@ static uint64 sys_arch_prctl(void)
 
 /* ── Syscall handler prototypes ── */
 extern uint64 sys_clone(void);
+extern uint64 sys_fork(void);
 extern uint64 sys_exit(void);
 extern uint64 sys_wait(void);
+extern uint64 sys_waitid(void);
 extern uint64 sys_kill(void);
 extern uint64 sys_exec(void);
 extern uint64 sys_getpid(void);
@@ -139,10 +141,13 @@ extern uint64 sys_getresuid(void);
 extern uint64 sys_getresgid(void);
 extern uint64 sys_getgroups(void);
 extern uint64 sys_setgroups(void);
+extern uint64 sys_setfsuid(void);
+extern uint64 sys_setfsgid(void);
 extern uint64 sys_sbrk(void);
 extern uint64 sys_sleep(void);
 extern uint64 sys_uptime(void);
 extern uint64 sys_gettimeofday(void);
+extern uint64 sys_time(void);
 extern uint64 sys_waitpid(void);
 extern uint64 sys_nanosleep(void);
 extern uint64 sys_uname(void);
@@ -165,6 +170,7 @@ extern uint64 sys_rt_sigtimedwait(void);
 extern uint64 sys_vfork(void);
 extern uint64 sys_setpgid(void);
 extern uint64 sys_getpgid(void);
+extern uint64 sys_getpgrp(void);
 extern uint64 sys_setsid(void);
 extern uint64 sys_getsid(void);
 extern uint64 sys_getrandom(void);
@@ -225,6 +231,7 @@ extern uint64 sys_vfs_unlink(void);
 extern uint64 sys_vfs_link(void);
 extern uint64 sys_vfs_symlink(void);
 extern uint64 sys_vfs_chdir(void);
+extern uint64 sys_vfs_fchdir(void);
 extern uint64 sys_vfs_pipe(void);
 extern uint64 sys_vfs_connect(void);
 extern uint64 sys_getdents(void);
@@ -239,6 +246,7 @@ extern uint64 sys_tcsetattr(void);
 extern uint64 sys_vfs_poll(void);
 extern uint64 sys_vfs_ppoll(void);
 extern uint64 sys_pselect6(void);
+extern uint64 sys_select(void);
 extern uint64 sys_vfs_mkdirat(void);
 extern uint64 sys_vfs_mknodat(void);
 extern uint64 sys_vfs_unlinkat(void);
@@ -248,6 +256,16 @@ extern uint64 sys_vfs_readlinkat(void);
 extern uint64 sys_vfs_renameat(void);
 extern uint64 sys_vfs_faccessat(void);
 extern uint64 sys_vfs_dup3(void);
+extern uint64 sys_vfs_openat2(void);
+extern uint64 sys_vfs_close_range(void);
+extern uint64 sys_vfs_copy_file_range(void);
+extern uint64 sys_vfs_xattr_not_supported(void);
+extern uint64 sys_vfs_truncate(void);
+extern uint64 sys_vfs_creat(void);
+extern uint64 sys_vfs_rmdir(void);
+extern uint64 sys_vfs_chmod(void);
+extern uint64 sys_vfs_chown(void);
+extern uint64 sys_vfs_lchown(void);
 
 // File ownership and permission syscalls
 extern uint64 sys_vfs_fchmod(void);
@@ -272,6 +290,9 @@ extern uint64 sys_epoll_wait(void);
 extern uint64 sys_epoll_pwait(void);
 extern uint64 sys_epoll_pwait2(void);
 extern uint64 sys_eventfd2(void);
+extern uint64 sys_eventfd(void);
+extern uint64 sys_signalfd(void);
+extern uint64 sys_signalfd4(void);
 
 // timerfd (timerfd.c)
 extern uint64 sys_timerfd_create(void);
@@ -294,8 +315,13 @@ extern uint64 sys_netconf(void);
 extern uint64 sys_prctl(void);
 extern uint64 sys_sysinfo(void);
 extern uint64 sys_getrusage(void);
+extern uint64 sys_times(void);
 extern uint64 sys_getpriority(void);
 extern uint64 sys_setpriority(void);
+extern uint64 sys_getcpu(void);
+extern uint64 sys_rseq(void);
+extern uint64 sys_capget(void);
+extern uint64 sys_capset(void);
 extern uint64 sys_set_robust_list(void);
 extern uint64 sys_get_robust_list(void);
 extern uint64 sys_clock_settime(void);
@@ -305,10 +331,137 @@ extern uint64 sys_sched_setaffinity(void);
 extern uint64 sys_sched_yield(void);
 extern uint64 sys_sched_getscheduler(void);
 extern uint64 sys_sched_setscheduler(void);
+extern uint64 sys_sched_getparam(void);
+extern uint64 sys_sched_setparam(void);
+extern uint64 sys_sched_getattr(void);
+extern uint64 sys_sched_setattr(void);
+extern uint64 sys_ioprio_get(void);
+extern uint64 sys_ioprio_set(void);
 extern uint64 sys_sched_get_priority_max(void);
 extern uint64 sys_sched_get_priority_min(void);
 extern uint64 sys_rt_sigqueueinfo(void);
 extern uint64 sys_clone3(void);
+extern uint64 sys_ptrace(void);
+extern uint64 sys_syslog(void);
+extern uint64 sys_uselib(void);
+extern uint64 sys_personality(void);
+extern uint64 sys_ustat(void);
+extern uint64 sys_sysfs(void);
+extern uint64 sys_vhangup(void);
+extern uint64 sys_modify_ldt(void);
+extern uint64 sys_pivot_root(void);
+extern uint64 sys__sysctl(void);
+extern uint64 sys_adjtimex(void);
+extern uint64 sys_acct(void);
+extern uint64 sys_settimeofday(void);
+extern uint64 sys_swapon(void);
+extern uint64 sys_swapoff(void);
+extern uint64 sys_sethostname(void);
+extern uint64 sys_setdomainname(void);
+extern uint64 sys_iopl(void);
+extern uint64 sys_ioperm(void);
+extern uint64 sys_create_module(void);
+extern uint64 sys_init_module(void);
+extern uint64 sys_delete_module(void);
+extern uint64 sys_get_kernel_syms(void);
+extern uint64 sys_query_module(void);
+extern uint64 sys_quotactl(void);
+extern uint64 sys_nfsservctl(void);
+extern uint64 sys_getpmsg(void);
+extern uint64 sys_putpmsg(void);
+extern uint64 sys_afs_syscall(void);
+extern uint64 sys_tuxcall(void);
+extern uint64 sys_security(void);
+extern uint64 sys_set_thread_area(void);
+extern uint64 sys_io_setup(void);
+extern uint64 sys_io_destroy(void);
+extern uint64 sys_io_getevents(void);
+extern uint64 sys_io_submit(void);
+extern uint64 sys_io_cancel(void);
+extern uint64 sys_get_thread_area(void);
+extern uint64 sys_lookup_dcookie(void);
+extern uint64 sys_epoll_ctl_old(void);
+extern uint64 sys_epoll_wait_old(void);
+extern uint64 sys_remap_file_pages(void);
+extern uint64 sys_restart_syscall(void);
+extern uint64 sys_timer_create(void);
+extern uint64 sys_timer_settime(void);
+extern uint64 sys_timer_gettime(void);
+extern uint64 sys_timer_getoverrun(void);
+extern uint64 sys_timer_delete(void);
+extern uint64 sys_vserver(void);
+extern uint64 sys_mbind(void);
+extern uint64 sys_set_mempolicy(void);
+extern uint64 sys_get_mempolicy(void);
+extern uint64 sys_mq_open(void);
+extern uint64 sys_mq_unlink(void);
+extern uint64 sys_mq_timedsend(void);
+extern uint64 sys_mq_timedreceive(void);
+extern uint64 sys_mq_notify(void);
+extern uint64 sys_mq_getsetattr(void);
+extern uint64 sys_kexec_load(void);
+extern uint64 sys_add_key(void);
+extern uint64 sys_request_key(void);
+extern uint64 sys_keyctl(void);
+extern uint64 sys_migrate_pages(void);
+extern uint64 sys_unshare(void);
+extern uint64 sys_splice(void);
+extern uint64 sys_tee(void);
+extern uint64 sys_vmsplice(void);
+extern uint64 sys_move_pages(void);
+extern uint64 sys_rt_tgsigqueueinfo(void);
+extern uint64 sys_perf_event_open(void);
+extern uint64 sys_fanotify_init(void);
+extern uint64 sys_fanotify_mark(void);
+extern uint64 sys_name_to_handle_at(void);
+extern uint64 sys_open_by_handle_at(void);
+extern uint64 sys_clock_adjtime(void);
+extern uint64 sys_setns(void);
+extern uint64 sys_process_vm_readv(void);
+extern uint64 sys_process_vm_writev(void);
+extern uint64 sys_kcmp(void);
+extern uint64 sys_finit_module(void);
+extern uint64 sys_seccomp(void);
+extern uint64 sys_kexec_file_load(void);
+extern uint64 sys_bpf(void);
+extern uint64 sys_execveat(void);
+extern uint64 sys_userfaultfd(void);
+extern uint64 sys_pkey_mprotect(void);
+extern uint64 sys_pkey_alloc(void);
+extern uint64 sys_pkey_free(void);
+extern uint64 sys_io_pgetevents(void);
+extern uint64 sys_pidfd_send_signal(void);
+extern uint64 sys_io_uring_setup(void);
+extern uint64 sys_io_uring_enter(void);
+extern uint64 sys_io_uring_register(void);
+extern uint64 sys_open_tree(void);
+extern uint64 sys_move_mount(void);
+extern uint64 sys_fsopen(void);
+extern uint64 sys_fsconfig(void);
+extern uint64 sys_fsmount(void);
+extern uint64 sys_fspick(void);
+extern uint64 sys_pidfd_open(void);
+extern uint64 sys_pidfd_getfd(void);
+extern uint64 sys_process_madvise(void);
+extern uint64 sys_mount_setattr(void);
+extern uint64 sys_quotactl_fd(void);
+extern uint64 sys_landlock_create_ruleset(void);
+extern uint64 sys_landlock_add_rule(void);
+extern uint64 sys_landlock_restrict_self(void);
+extern uint64 sys_memfd_secret(void);
+extern uint64 sys_process_mrelease(void);
+extern uint64 sys_futex_waitv(void);
+extern uint64 sys_set_mempolicy_home_node(void);
+extern uint64 sys_cachestat(void);
+extern uint64 sys_map_shadow_stack(void);
+extern uint64 sys_futex_wake(void);
+extern uint64 sys_futex_wait(void);
+extern uint64 sys_futex_requeue(void);
+extern uint64 sys_statmount(void);
+extern uint64 sys_listmount(void);
+extern uint64 sys_lsm_get_self_attr(void);
+extern uint64 sys_lsm_set_self_attr(void);
+extern uint64 sys_lsm_list_modules(void);
 
 // Signal syscalls (proc/sys_signal.c)
 extern uint64 sys_sigaltstack(void);
@@ -317,10 +470,17 @@ extern uint64 sys_sigaltstack(void);
 extern uint64 sys_vfs_fsync(void);
 extern uint64 sys_vfs_fdatasync(void);
 extern uint64 sys_fadvise64(void);
+extern uint64 sys_vfs_readahead(void);
+extern uint64 sys_vfs_sync_file_range(void);
+extern uint64 sys_vfs_syncfs(void);
 extern uint64 sys_fallocate(void);
 extern uint64 sys_utimensat(void);
+extern uint64 sys_futimesat(void);
+extern uint64 sys_utime(void);
+extern uint64 sys_utimes(void);
 extern uint64 sys_memfd_create(void);
 extern uint64 sys_inotify_init1(void);
+extern uint64 sys_inotify_init(void);
 extern uint64 sys_inotify_add_watch(void);
 extern uint64 sys_inotify_rm_watch(void);
 extern uint64 sys_mlock2(void);
@@ -378,12 +538,15 @@ extern uint64 sys_sendmmsg(void);
 static uint64 (*syscalls[])(void) = {
     [SYS_clone] sys_clone,
     [SYS_clone_x86] sys_clone,
+    [SYS_fork_x86] sys_fork,
     [SYS_exit] sys_exit,
     [SYS_exit_x86] sys_exit,
     [SYS_wait] sys_wait,
     [SYS_wait4_x86] sys_waitpid,
+    [SYS_waitid_x86] sys_waitid,
     [SYS_pipe] sys_vfs_pipe,
     [SYS_pipe_x86] sys_vfs_pipe,
+    [SYS_select_x86] sys_select,
     [SYS_read] sys_vfs_read,
     [SYS_read_x86] sys_vfs_read,
     [SYS_kill] sys_kill,
@@ -396,6 +559,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_fstat_x86] sys_vfs_fstat,
     [SYS_chdir] sys_vfs_chdir,
     [SYS_chdir_x86] sys_vfs_chdir,
+    [SYS_fchdir_x86] sys_vfs_fchdir,
     [SYS_dup] sys_vfs_dup,
     [SYS_dup_x86] sys_vfs_dup,
     [SYS_getpid] sys_getpid,
@@ -414,6 +578,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_mknod_x86] sys_vfs_mknod,
     [SYS_unlink] sys_vfs_unlink,
     [SYS_unlink_x86] sys_vfs_unlink,
+    [SYS_rmdir_x86] sys_vfs_rmdir,
     [SYS_link] sys_vfs_link,
     [SYS_link_x86] sys_vfs_link,
     [SYS_mkdir] sys_vfs_mkdir,
@@ -448,6 +613,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_setpgid_x86] sys_setpgid,
     [SYS_getpgid] sys_getpgid,
     [SYS_getpgid_x86] sys_getpgid,
+    [SYS_getpgrp_x86] sys_getpgrp,
     [SYS_setsid] sys_setsid,
     [SYS_setsid_x86] sys_setsid,
     [SYS_getsid] sys_getsid,
@@ -515,8 +681,11 @@ static uint64 (*syscalls[])(void) = {
     [SYS_kevent_wait] sys_kevent_wait,
     [SYS_ftruncate] sys_vfs_ftruncate,
     [SYS_ftruncate_x86] sys_vfs_ftruncate,
+    [SYS_truncate_x86] sys_vfs_truncate,
+    [SYS_creat_x86] sys_vfs_creat,
     [SYS_gettimeofday] sys_gettimeofday,
     [SYS_gettimeofday_x86] sys_gettimeofday,
+    [SYS_time_x86] sys_time,
     [SYS_waitpid] sys_waitpid,
     [SYS_nanosleep] sys_nanosleep,
     [SYS_nanosleep_x86] sys_nanosleep,
@@ -535,6 +704,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_getcwd_x86] sys_getcwd,
     [SYS_openat] sys_vfs_openat,
     [SYS_openat_x86] sys_vfs_openat,
+    [SYS_openat2_x86] sys_vfs_openat2,
     [SYS_writev] sys_vfs_writev,
     [SYS_writev_x86] sys_vfs_writev,
     [SYS_readv] sys_vfs_readv,
@@ -582,6 +752,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_faccessat2_x86] sys_vfs_faccessat,
     [SYS_dup3] sys_vfs_dup3,
     [SYS_dup3_x86] sys_vfs_dup3,
+    [SYS_close_range_x86] sys_vfs_close_range,
     [SYS_getuid] sys_getuid,
     [SYS_getuid_x86] sys_getuid,
     [SYS_geteuid] sys_geteuid,
@@ -610,6 +781,10 @@ static uint64 (*syscalls[])(void) = {
     [SYS_getgroups_x86] sys_getgroups,
     [SYS_setgroups] sys_setgroups,
     [SYS_setgroups_x86] sys_setgroups,
+    [SYS_setfsuid_x86] sys_setfsuid,
+    [SYS_setfsgid_x86] sys_setfsgid,
+    [SYS_capget_x86] sys_capget,
+    [SYS_capset_x86] sys_capset,
     [SYS_arch_prctl] sys_arch_prctl,
     [SYS_prlimit64] sys_prlimit64,
     [SYS_prlimit64_x86] sys_prlimit64,
@@ -664,11 +839,17 @@ static uint64 (*syscalls[])(void) = {
     [SYS_sched_getscheduler_x86] sys_sched_getscheduler,
     [SYS_sched_setscheduler] sys_sched_setscheduler,
     [SYS_sched_setscheduler_x86] sys_sched_setscheduler,
+    [SYS_sched_getparam_x86] sys_sched_getparam,
+    [SYS_sched_setparam_x86] sys_sched_setparam,
+    [SYS_sched_getattr_x86] sys_sched_getattr,
+    [SYS_sched_setattr_x86] sys_sched_setattr,
     [SYS_sched_get_priority_max] sys_sched_get_priority_max,
     [SYS_sched_get_priority_max_x86] sys_sched_get_priority_max,
     [SYS_sched_get_priority_min] sys_sched_get_priority_min,
     [SYS_sched_get_priority_min_x86] sys_sched_get_priority_min,
     [SYS_sched_rr_get_interval_x86] sys_sched_rr_get_interval,
+    [SYS_ioprio_get_x86] sys_ioprio_get,
+    [SYS_ioprio_set_x86] sys_ioprio_set,
 #ifdef USE_LWIP
     [SYS_recvmmsg_time64] sys_recvmmsg,
     [SYS_recvmmsg_x86] sys_recvmmsg,
@@ -679,7 +860,10 @@ static uint64 (*syscalls[])(void) = {
     [SYS_pselect6_time64] sys_pselect6,
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
+    [SYS_signalfd] sys_signalfd,
+    [SYS_signalfd4] sys_signalfd4,
     [SYS_eventfd2] sys_eventfd2,
+    [SYS_eventfd_x86] sys_eventfd,
     [SYS_eventfd2_legacy] sys_eventfd2,
     [SYS_timerfd_create] sys_timerfd_create,
     [SYS_timerfd_create_x86] sys_timerfd_create,
@@ -702,10 +886,14 @@ static uint64 (*syscalls[])(void) = {
     [SYS_umask_x86] sys_umask,
     [SYS_fchownat] sys_vfs_fchownat,
     [SYS_fchownat_x86] sys_vfs_fchownat,
+    [SYS_chown_x86] sys_vfs_chown,
+    [SYS_lchown_x86] sys_vfs_lchown,
     [SYS_fchown] sys_vfs_fchown,
     [SYS_fchown_x86] sys_vfs_fchown,
     [SYS_fchmodat] sys_vfs_fchmodat,
     [SYS_fchmodat_x86] sys_vfs_fchmodat,
+    [SYS_fchmodat2_x86] sys_vfs_fchmodat,
+    [SYS_chmod_x86] sys_vfs_chmod,
     [SYS_fchmod] sys_vfs_fchmod,
     [SYS_fchmod_x86] sys_vfs_fchmod,
     [SYS_getitimer] sys_getitimer,
@@ -745,6 +933,8 @@ static uint64 (*syscalls[])(void) = {
     /* Process / VFS / signal syscalls */
     [SYS_utimensat] sys_utimensat,
     [SYS_utimensat_x86] sys_utimensat,
+    [SYS_utime_x86] sys_utime,
+    [SYS_utimes_x86] sys_utimes,
     [SYS_clone3] sys_clone3,
     [SYS_clone3_x86] sys_clone3,
     [SYS_rt_sigqueueinfo] sys_rt_sigqueueinfo,
@@ -754,6 +944,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_fdatasync_x86] sys_vfs_fdatasync,
     [SYS_fsync] sys_vfs_fsync,
     [SYS_fsync_x86] sys_vfs_fsync,
+    [SYS_readahead_x86] sys_vfs_readahead,
     [SYS_get_robust_list] sys_get_robust_list,
     [SYS_get_robust_list_x86] sys_get_robust_list,
     [SYS_set_robust_list] sys_set_robust_list,
@@ -766,6 +957,9 @@ static uint64 (*syscalls[])(void) = {
     [SYS_sysinfo_x86] sys_sysinfo,
     [SYS_getrusage] sys_getrusage,
     [SYS_getrusage_x86] sys_getrusage,
+    [SYS_times_x86] sys_times,
+    [SYS_getcpu_x86] sys_getcpu,
+    [SYS_rseq_x86] sys_rseq,
     [SYS_getpriority] sys_getpriority,
     [SYS_getpriority_x86] sys_getpriority,
     [SYS_setpriority] sys_setpriority,
@@ -782,9 +976,13 @@ static uint64 (*syscalls[])(void) = {
     [SYS_memfd_create] sys_memfd_create,
     [SYS_statx] sys_statx,
     [SYS_statx_x86] sys_statx,
-    [SYS_inotify_init1] sys_ni_enosys,
-    [SYS_inotify_add_watch] sys_ni_enosys,
-    [SYS_inotify_rm_watch] sys_ni_enosys,
+    [SYS_inotify_init_x86] sys_inotify_init,
+    [SYS_inotify_init1] sys_inotify_init1,
+    [SYS_inotify_init1_x86] sys_inotify_init1,
+    [SYS_inotify_add_watch] sys_inotify_add_watch,
+    [SYS_inotify_add_watch_x86] sys_inotify_add_watch,
+    [SYS_inotify_rm_watch] sys_inotify_rm_watch,
+    [SYS_inotify_rm_watch_x86] sys_inotify_rm_watch,
     /* Linux x86_64 native __NR_getrandom — OpenSSL direct call */
     [SYS_getrandom_x86] sys_getrandom,
     [SYS_memfd_create_x86] sys_memfd_create,
@@ -792,11 +990,149 @@ static uint64 (*syscalls[])(void) = {
     [SYS_membarrier_x86] sys_membarrier,
     [SYS_fadvise64] sys_fadvise64,
     [SYS_fadvise64_x86] sys_fadvise64,
+    [SYS_sync_file_range_x86] sys_vfs_sync_file_range,
+    [SYS_syncfs_x86] sys_vfs_syncfs,
     [SYS_fallocate] sys_fallocate,
     [SYS_fallocate_x86] sys_fallocate,
+    [SYS_futimesat_x86] sys_futimesat,
+    [SYS_copy_file_range_x86] sys_vfs_copy_file_range,
+    [SYS_setxattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_lsetxattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_fsetxattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_getxattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_lgetxattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_fgetxattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_listxattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_llistxattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_flistxattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_removexattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_lremovexattr_x86] sys_vfs_xattr_not_supported,
+    [SYS_fremovexattr_x86] sys_vfs_xattr_not_supported,
     [SYS_poweroff] sys_poweroff,
     [SYS_reboot] sys_reboot,
     [SYS_reboot_x86] sys_reboot,
+    /* Linux optional/privileged compatibility syscalls */
+    [SYS_ptrace_x86] sys_ptrace,
+    [SYS_syslog_x86] sys_syslog,
+    [SYS_uselib_x86] sys_uselib,
+    [SYS_personality_x86] sys_personality,
+    [SYS_ustat_x86] sys_ustat,
+    [SYS_sysfs_x86] sys_sysfs,
+    [SYS_vhangup_x86] sys_vhangup,
+    [SYS_modify_ldt_x86] sys_modify_ldt,
+    [SYS_pivot_root_x86] sys_pivot_root,
+    [SYS__sysctl_x86] sys__sysctl,
+    [SYS_adjtimex_x86] sys_adjtimex,
+    [SYS_acct_x86] sys_acct,
+    [SYS_settimeofday_x86] sys_settimeofday,
+    [SYS_swapon_x86] sys_swapon,
+    [SYS_swapoff_x86] sys_swapoff,
+    [SYS_sethostname_x86] sys_sethostname,
+    [SYS_setdomainname_x86] sys_setdomainname,
+    [SYS_iopl_x86] sys_iopl,
+    [SYS_ioperm_x86] sys_ioperm,
+    [SYS_create_module_x86] sys_create_module,
+    [SYS_init_module_x86] sys_init_module,
+    [SYS_delete_module_x86] sys_delete_module,
+    [SYS_get_kernel_syms_x86] sys_get_kernel_syms,
+    [SYS_query_module_x86] sys_query_module,
+    [SYS_quotactl_x86] sys_quotactl,
+    [SYS_nfsservctl_x86] sys_nfsservctl,
+    [SYS_getpmsg_x86] sys_getpmsg,
+    [SYS_putpmsg_x86] sys_putpmsg,
+    [SYS_afs_syscall_x86] sys_afs_syscall,
+    [SYS_tuxcall_x86] sys_tuxcall,
+    [SYS_security_x86] sys_security,
+    [SYS_set_thread_area_x86] sys_set_thread_area,
+    [SYS_io_setup_x86] sys_io_setup,
+    [SYS_io_destroy_x86] sys_io_destroy,
+    [SYS_io_getevents_x86] sys_io_getevents,
+    [SYS_io_submit_x86] sys_io_submit,
+    [SYS_io_cancel_x86] sys_io_cancel,
+    [SYS_get_thread_area_x86] sys_get_thread_area,
+    [SYS_lookup_dcookie_x86] sys_lookup_dcookie,
+    [SYS_epoll_ctl_old_x86] sys_epoll_ctl_old,
+    [SYS_epoll_wait_old_x86] sys_epoll_wait_old,
+    [SYS_remap_file_pages_x86] sys_remap_file_pages,
+    [SYS_restart_syscall_x86] sys_restart_syscall,
+    [SYS_timer_create_x86] sys_timer_create,
+    [SYS_timer_settime_x86] sys_timer_settime,
+    [SYS_timer_gettime_x86] sys_timer_gettime,
+    [SYS_timer_getoverrun_x86] sys_timer_getoverrun,
+    [SYS_timer_delete_x86] sys_timer_delete,
+    [SYS_vserver_x86] sys_vserver,
+    [SYS_mbind_x86] sys_mbind,
+    [SYS_set_mempolicy_x86] sys_set_mempolicy,
+    [SYS_get_mempolicy_x86] sys_get_mempolicy,
+    [SYS_mq_open_x86] sys_mq_open,
+    [SYS_mq_unlink_x86] sys_mq_unlink,
+    [SYS_mq_timedsend_x86] sys_mq_timedsend,
+    [SYS_mq_timedreceive_x86] sys_mq_timedreceive,
+    [SYS_mq_notify_x86] sys_mq_notify,
+    [SYS_mq_getsetattr_x86] sys_mq_getsetattr,
+    [SYS_kexec_load_x86] sys_kexec_load,
+    [SYS_add_key_x86] sys_add_key,
+    [SYS_request_key_x86] sys_request_key,
+    [SYS_keyctl_x86] sys_keyctl,
+    [SYS_migrate_pages_x86] sys_migrate_pages,
+    [SYS_unshare_x86] sys_unshare,
+    [SYS_splice_x86] sys_splice,
+    [SYS_tee_x86] sys_tee,
+    [SYS_vmsplice_x86] sys_vmsplice,
+    [SYS_move_pages_x86] sys_move_pages,
+    [SYS_rt_tgsigqueueinfo_x86] sys_rt_tgsigqueueinfo,
+    [SYS_perf_event_open_x86] sys_perf_event_open,
+    [SYS_fanotify_init_x86] sys_fanotify_init,
+    [SYS_fanotify_mark_x86] sys_fanotify_mark,
+    [SYS_name_to_handle_at_x86] sys_name_to_handle_at,
+    [SYS_open_by_handle_at_x86] sys_open_by_handle_at,
+    [SYS_clock_adjtime_x86] sys_clock_adjtime,
+    [SYS_setns_x86] sys_setns,
+    [SYS_process_vm_readv_x86] sys_process_vm_readv,
+    [SYS_process_vm_writev_x86] sys_process_vm_writev,
+    [SYS_kcmp_x86] sys_kcmp,
+    [SYS_finit_module_x86] sys_finit_module,
+    [SYS_seccomp_x86] sys_seccomp,
+    [SYS_kexec_file_load_x86] sys_kexec_file_load,
+    [SYS_bpf_x86] sys_bpf,
+    [SYS_execveat_x86] sys_execveat,
+    [SYS_userfaultfd_x86] sys_userfaultfd,
+    [SYS_pkey_mprotect_x86] sys_pkey_mprotect,
+    [SYS_pkey_alloc_x86] sys_pkey_alloc,
+    [SYS_pkey_free_x86] sys_pkey_free,
+    [SYS_io_pgetevents_x86] sys_io_pgetevents,
+    [SYS_pidfd_send_signal_x86] sys_pidfd_send_signal,
+    [SYS_io_uring_setup_x86] sys_io_uring_setup,
+    [SYS_io_uring_enter_x86] sys_io_uring_enter,
+    [SYS_io_uring_register_x86] sys_io_uring_register,
+    [SYS_open_tree_x86] sys_open_tree,
+    [SYS_move_mount_x86] sys_move_mount,
+    [SYS_fsopen_x86] sys_fsopen,
+    [SYS_fsconfig_x86] sys_fsconfig,
+    [SYS_fsmount_x86] sys_fsmount,
+    [SYS_fspick_x86] sys_fspick,
+    [SYS_pidfd_open_x86] sys_pidfd_open,
+    [SYS_pidfd_getfd_x86] sys_pidfd_getfd,
+    [SYS_process_madvise_x86] sys_process_madvise,
+    [SYS_mount_setattr_x86] sys_mount_setattr,
+    [SYS_quotactl_fd_x86] sys_quotactl_fd,
+    [SYS_landlock_create_ruleset_x86] sys_landlock_create_ruleset,
+    [SYS_landlock_add_rule_x86] sys_landlock_add_rule,
+    [SYS_landlock_restrict_self_x86] sys_landlock_restrict_self,
+    [SYS_memfd_secret_x86] sys_memfd_secret,
+    [SYS_process_mrelease_x86] sys_process_mrelease,
+    [SYS_futex_waitv_x86] sys_futex_waitv,
+    [SYS_set_mempolicy_home_node_x86] sys_set_mempolicy_home_node,
+    [SYS_cachestat_x86] sys_cachestat,
+    [SYS_map_shadow_stack_x86] sys_map_shadow_stack,
+    [SYS_futex_wake_x86] sys_futex_wake,
+    [SYS_futex_wait_x86] sys_futex_wait,
+    [SYS_futex_requeue_x86] sys_futex_requeue,
+    [SYS_statmount_x86] sys_statmount,
+    [SYS_listmount_x86] sys_listmount,
+    [SYS_lsm_get_self_attr_x86] sys_lsm_get_self_attr,
+    [SYS_lsm_set_self_attr_x86] sys_lsm_set_self_attr,
+    [SYS_lsm_list_modules_x86] sys_lsm_list_modules,
     /* Resource limit syscalls (musl high numbers → prlimit64) */
     [SYS_getrlimit] sys_getrlimit,
     [SYS_setrlimit] sys_setrlimit,

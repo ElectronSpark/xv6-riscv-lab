@@ -585,19 +585,18 @@ ssize_t xv6fs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
     struct xv6fs_superblock *xv6_sb =
         container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
     size_t link_len = inode->size;
-
-    if (link_len + 1 > buflen) {
-        return -ENAMETOOLONG;
-    }
+    size_t copy_len = link_len;
+    if (copy_len > buflen)
+        copy_len = buflen;
 
     // Read symlink target from data blocks
     size_t bytes_read = 0;
-    while (bytes_read < link_len) {
+    while (bytes_read < copy_len) {
         uint bn = bytes_read / BSIZE;
         uint off = bytes_read % BSIZE;
         uint n = BSIZE - off;
-        if (n > link_len - bytes_read) {
-            n = link_len - bytes_read;
+        if (n > copy_len - bytes_read) {
+            n = copy_len - bytes_read;
         }
 
         uint addr = xv6fs_bmap(ip, bn);
@@ -615,8 +614,9 @@ ssize_t xv6fs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
         bytes_read += n;
     }
 
-    buf[link_len] = '\0';
-    return (ssize_t)link_len;
+    if (copy_len < buflen)
+        buf[copy_len] = '\0';
+    return (ssize_t)copy_len;
 }
 
 struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,

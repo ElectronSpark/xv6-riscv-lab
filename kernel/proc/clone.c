@@ -266,6 +266,8 @@ int thread_clone(struct clone_args *args) {
         ret_ptr->thread_group->egid   = p->thread_group->egid;
         ret_ptr->thread_group->suid   = p->thread_group->suid;
         ret_ptr->thread_group->sgid   = p->thread_group->sgid;
+        ret_ptr->thread_group->fsuid  = p->thread_group->fsuid;
+        ret_ptr->thread_group->fsgid  = p->thread_group->fsgid;
         ret_ptr->thread_group->ngroups = p->thread_group->ngroups;
         memmove(ret_ptr->thread_group->groups, p->thread_group->groups,
                 sizeof(uint32) * p->thread_group->ngroups);
@@ -282,6 +284,8 @@ int thread_clone(struct clone_args *args) {
         safestrcpy(ret_ptr->thread_group->exec_path,
                    p->thread_group->exec_path,
                    sizeof(ret_ptr->thread_group->exec_path));
+        (void)thread_group_exec_snapshot_clone_locked(ret_ptr->thread_group,
+                                                      p->thread_group);
 
         // Account the fork on the parent's counters
         ACCT_INC(p->thread_group, sched_forks);

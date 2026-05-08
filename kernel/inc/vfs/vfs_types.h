@@ -426,6 +426,10 @@ struct vfs_file {
         struct pipe *pipe;            // FD_PIPE
         struct sock *sock;            // FD_SOCKET
     };
+    int f_owner;
+    int f_owner_type;
+    int f_owner_signal;
+    int f_ofd_lock_owner;
     uint32 f_seals;
     bool f_is_memfd;
     bool f_allow_sealing;

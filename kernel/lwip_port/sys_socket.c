@@ -133,8 +133,12 @@ struct lwip_sock {
 #ifndef SOCK_SEQPACKET
 #define SOCK_SEQPACKET 5
 #endif
+#ifndef SOCK_NONBLOCK
 #define SOCK_NONBLOCK  0x800
+#endif
+#ifndef SOCK_CLOEXEC
 #define SOCK_CLOEXEC   0x80000
+#endif
 #define SOCK_TYPE_MASK 0xF
 
 /* Address family constants */
@@ -2790,6 +2794,8 @@ uint64 sys_accept4(void)
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
+    if (flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC))
+        return (uint64)-EINVAL;
 
     /* O_NONBLOCK on listening socket: check if connections are pending */
     if (sock_is_nonblock(fd, 0)) {

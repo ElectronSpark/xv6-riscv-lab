@@ -35,6 +35,12 @@ struct vfs_file_ops;
 #ifndef SOCK_SEQPACKET
 #define SOCK_SEQPACKET 5
 #endif
+#ifndef SOCK_NONBLOCK
+#define SOCK_NONBLOCK  0x800
+#endif
+#ifndef SOCK_CLOEXEC
+#define SOCK_CLOEXEC   0x80000
+#endif
 #define UNIX_BUF_DEFAULT_SIZE (64 * PAGE_SIZE)        /* initial ring size */
 #define UNIX_BUF_MAX_SIZE     (16 * 1024 * 1024)      /* maximum growable ring */
 #define UNIX_BUF_SIZE         UNIX_BUF_DEFAULT_SIZE   /* compatibility alias */

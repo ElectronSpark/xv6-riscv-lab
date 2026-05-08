@@ -34,6 +34,7 @@
 #include "kqueue_types.h"
 #include "accounting.h"
 #include "kstats.h"
+#include "timer/timer.h"
 
 /* Enable verbose exec debugging — set to 1 to trace ELF loading steps */
 #define EXEC_DEBUG 0
@@ -231,6 +232,68 @@ static inline void push_auxv(uint64 *ustack, int *idx, uint64 type,
     ustack[(*idx)++] = val;
 }
 
+static const char *exec_platform_string(void)
+{
+#if defined(CONFIG_ARCH_X86_64)
+    return "x86_64";
+#else
+    return "riscv64";
+#endif
+}
+
+static uint64 exec_hwcap(void)
+{
+    return 0;
+}
+
+static uint64 exec_hwcap2(void)
+{
+    return 0;
+}
+
+static char *exec_flatten_strings(char **strings, uint64 count, size_t *out_len)
+{
+    size_t len = 0;
+
+    if (out_len != NULL)
+        *out_len = 0;
+    for (uint64 i = 0; i < count; i++) {
+        if (strings[i] == NULL)
+            break;
+        size_t slen = strlen(strings[i]) + 1;
+        if (len + slen < len)
+            return NULL;
+        len += slen;
+        if (len >= TG_EXEC_SNAPSHOT_MAX_BYTES) {
+            len = TG_EXEC_SNAPSHOT_MAX_BYTES;
+            break;
+        }
+    }
+    if (len == 0)
+        return NULL;
+
+    char *buf = kvmalloc(len);
+    if (buf == NULL)
+        return NULL;
+
+    size_t pos = 0;
+    for (uint64 i = 0; i < count && pos < len; i++) {
+        if (strings[i] == NULL)
+            break;
+        size_t slen = strlen(strings[i]) + 1;
+        size_t chunk = slen;
+        if (chunk > len - pos)
+            chunk = len - pos;
+        memmove(buf + pos, strings[i], chunk);
+        pos += chunk;
+    }
+    if (pos > 0 && buf[pos - 1] != '\0')
+        buf[pos - 1] = '\0';
+    if (out_len != NULL)
+        *out_len = pos;
+    return buf;
+}
+
 int exec(char *path, char **argv, char **envp) {
     uint64 exec_start = r_time();
     g_exec_calls += 1;
@@ -260,6 +323,10 @@ int exec(char *path, char **argv, char **envp) {
     int exec_setgid = 0;      /* set if S_ISGID bit on executable */
     uint32 exec_uid = 0;      /* uid to adopt if setuid */
     uint32 exec_gid = 0;      /* gid to adopt if setgid */
+    char *snapshot_cmdline = NULL;
+    size_t snapshot_cmdline_len = 0;
+    char *snapshot_environ = NULL;
+    size_t snapshot_environ_len = 0;
 
     exec_dbg("pid %d: exec(\"%s\")\n", current->pid, path);
 
@@ -549,6 +616,48 @@ int exec(char *path, char **argv, char **envp) {
         }
     }
 
+    uint8 random_bytes[16];
+    random_fill_bytes(random_bytes, sizeof(random_bytes));
+    sp -= sizeof(random_bytes);
+    sp -= sp & 15;
+    if (sp < stackbase)
+    {
+        goto bad;
+    }
+    uint64 random_addr = sp;
+    if (vm_copyout(tmp_vm, sp, (char *)random_bytes, sizeof(random_bytes)) < 0)
+    {
+        goto bad;
+    }
+
+    const char *platform = exec_platform_string();
+    sp -= strlen(platform) + 1;
+    sp -= sp & 15;
+    if (sp < stackbase)
+    {
+        goto bad;
+    }
+    uint64 platform_addr = sp;
+    if (vm_copyout(tmp_vm, sp, (char *)platform, strlen(platform) + 1) < 0)
+    {
+        goto bad;
+    }
+
+    sp -= strlen(path) + 1;
+    sp -= sp & 15;
+    if (sp < stackbase)
+    {
+        goto bad;
+    }
+    uint64 execfn_addr = sp;
+    if (vm_copyout(tmp_vm, sp, path, strlen(path) + 1) < 0)
+    {
+        goto bad;
+    }
+
+    snapshot_cmdline = exec_flatten_strings(argv, argc, &snapshot_cmdline_len);
+    snapshot_environ = exec_flatten_strings(envp, envc, &snapshot_environ_len);
+
     /*
      * Build the startup stack frame following the Linux ELF ABI convention
      * expected by musl/glibc crt1 and ld.so:
@@ -571,12 +680,19 @@ int exec(char *path, char **argv, char **envp) {
 
     /* Build auxiliary vector right after the envp NULL terminator */
     int aidx = (int)(argc + envc + 3); /* index into ustack[] */
+    int auxv_start_idx = aidx;
 
     push_auxv(ustack, &aidx, AT_PAGESZ, PGSIZE);
     push_auxv(ustack, &aidx, AT_PHENT, sizeof(struct proghdr));
     push_auxv(ustack, &aidx, AT_PHNUM, elf.phnum);
     push_auxv(ustack, &aidx, AT_ENTRY, elf.entry + load_bias);
     push_auxv(ustack, &aidx, AT_FLAGS, 0);
+    push_auxv(ustack, &aidx, AT_HWCAP, exec_hwcap());
+    push_auxv(ustack, &aidx, AT_HWCAP2, exec_hwcap2());
+    push_auxv(ustack, &aidx, AT_CLKTCK, HZ);
+    push_auxv(ustack, &aidx, AT_RANDOM, random_addr);
+    push_auxv(ustack, &aidx, AT_EXECFN, execfn_addr);
+    push_auxv(ustack, &aidx, AT_PLATFORM, platform_addr);
 
     if (phdr_addr != 0) {
         push_auxv(ustack, &aidx, AT_PHDR, phdr_addr);
@@ -607,6 +723,7 @@ int exec(char *path, char **argv, char **envp) {
 
     /* AT_NULL terminates the auxv */
     push_auxv(ustack, &aidx, AT_NULL, 0);
+    size_t auxv_len = (size_t)(aidx - auxv_start_idx) * sizeof(uint64);
 
     uint64 nslots = (uint64)aidx;
     sp -= nslots * sizeof(uint64);
@@ -656,6 +773,12 @@ int exec(char *path, char **argv, char **envp) {
     }
     safestrcpy(p->thread_group->exec_path, path,
                sizeof(p->thread_group->exec_path));
+    thread_group_exec_snapshot_set(p->thread_group, snapshot_cmdline,
+                                   snapshot_cmdline_len, snapshot_environ,
+                                   snapshot_environ_len,
+                                   &ustack[auxv_start_idx], auxv_len);
+    snapshot_cmdline = NULL;
+    snapshot_environ = NULL;
 
     /*
      * Entry point:
@@ -722,6 +845,8 @@ bad:
     if (file) {
         vfs_fput(file);
     }
+    kvfree(snapshot_cmdline);
+    kvfree(snapshot_environ);
     g_exec_ticks += r_time() - exec_start;
     return -1;
 }

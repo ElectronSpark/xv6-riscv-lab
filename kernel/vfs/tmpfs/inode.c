@@ -339,16 +339,17 @@ int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
 ssize_t __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
     struct tmpfs_inode *tmpfs_inode = (struct tmpfs_inode *)inode;
     size_t link_len = inode->size;
-    if (link_len + 1 > buflen) {
-        return -ENAMETOOLONG; // Buffer too small
-    }
+    size_t copy_len = link_len;
+    if (copy_len > buflen)
+        copy_len = buflen;
     if (link_len < TMPFS_INODE_EMBEDDED_DATA_LEN) {
-        memmove(buf, tmpfs_inode->sym.data, link_len);
+        memmove(buf, tmpfs_inode->sym.data, copy_len);
     } else {
-        memmove(buf, tmpfs_inode->sym.symlink_target, link_len);
+        memmove(buf, tmpfs_inode->sym.symlink_target, copy_len);
     }
-    buf[link_len] = '\0'; // Null-terminate the string
-    return (int)link_len;
+    if (copy_len < buflen)
+        buf[copy_len] = '\0';
+    return (int)copy_len;
 }
 
 struct vfs_inode *__tmpfs_create(struct vfs_inode *dir, mode_t mode,
