@@ -51,11 +51,31 @@ static inline void printf_emit(const char *buf, int len)
         panic_capture(buf, len);
 }
 
+#define PRINTF_OUTBUF_SIZE 512
+#define PRINTF_FLUSH_MARGIN 32
+
+static inline void printf_putc_buf(char *outbuf, int *outlen, char c)
+{
+    if (*outlen >= PRINTF_OUTBUF_SIZE) {
+        printf_emit(outbuf, *outlen);
+        *outlen = 0;
+    }
+    outbuf[(*outlen)++] = c;
+}
+
+static inline void printf_maybe_flush(char *outbuf, int *outlen)
+{
+    if (*outlen >= PRINTF_OUTBUF_SIZE - PRINTF_FLUSH_MARGIN) {
+        printf_emit(outbuf, *outlen);
+        *outlen = 0;
+    }
+}
+
 STATIC char digits[] = "0123456789abcdef";
 
 STATIC void printint(long long xx, int base, int sign, char *outbuf,
-                     int *outlen) {
-    char buf[16];
+	                     int *outlen) {
+    char buf[32];
     int i;
     unsigned long long x;
 
@@ -73,29 +93,30 @@ STATIC void printint(long long xx, int base, int sign, char *outbuf,
         buf[i++] = '-';
 
     while (--i >= 0)
-        outbuf[(*outlen)++] = buf[i];
+        printf_putc_buf(outbuf, outlen, buf[i]);
 }
 
 STATIC void printptr(uint64 x, char *outbuf, int *outlen) {
     int i;
-    outbuf[(*outlen)++] = '0';
-    outbuf[(*outlen)++] = 'x';
+    printf_putc_buf(outbuf, outlen, '0');
+    printf_putc_buf(outbuf, outlen, 'x');
     for (i = 0; i < (sizeof(uint64) * 2); i++, x <<= 4)
-        outbuf[(*outlen)++] = digits[x >> (sizeof(uint64) * 8 - 4)];
+        printf_putc_buf(outbuf, outlen,
+                        digits[x >> (sizeof(uint64) * 8 - 4)]);
 }
 
 STATIC void print_padding(int len, char *outbuf, int *outlen) {
     for (int i = 0; i < len; i++) {
-        outbuf[(*outlen)++] = ' ';
+        printf_putc_buf(outbuf, outlen, ' ');
     }
 }
 
 STATIC void print_timestamp(char *outbuf, int *outlen) {
     uint64 stime = r_time();
-    outbuf[(*outlen)++] = '[';
+    printf_putc_buf(outbuf, outlen, '[');
     printint(stime, 10, 0, outbuf, outlen);
-    outbuf[(*outlen)++] = ']';
-    outbuf[(*outlen)++] = ' ';
+    printf_putc_buf(outbuf, outlen, ']');
+    printf_putc_buf(outbuf, outlen, ' ');
 }
 
 // Print to the console.
@@ -104,7 +125,7 @@ int printf(char *fmt, ...) {
     int i, cx, c0, c1, c2, locking;
     char *s;
     static int nnewline = false;
-    char outbuf[512]; // Buffer for batched output
+    char outbuf[PRINTF_OUTBUF_SIZE]; // Buffer for batched output
     int outlen = 0;
 
     // Use atomic load to see if panic disabled locking
@@ -119,15 +140,11 @@ int printf(char *fmt, ...) {
     va_start(ap, fmt);
     for (i = 0; (cx = fmt[i] & 0xff) != 0; i++) {
         if (cx != '%') {
-            outbuf[outlen++] = cx;
+            printf_putc_buf(outbuf, &outlen, cx);
             if (cx == '\n') {
                 __atomic_clear(&nnewline, __ATOMIC_RELEASE);
             }
-            // Flush if buffer is nearly full
-            if (outlen >= 500) {
-                printf_emit(outbuf, outlen);
-                outlen = 0;
-            }
+            printf_maybe_flush(outbuf, &outlen);
             continue;
         }
         i++;
@@ -190,36 +207,28 @@ int printf(char *fmt, ...) {
             if ((s = va_arg(ap, char *)) == 0)
                 s = "(null)";
             for (; *s; s++) {
-                outbuf[outlen++] = *s;
-                // Flush if buffer is nearly full
-                if (outlen >= 500) {
-                    printf_emit(outbuf, outlen);
-                    outlen = 0;
-                }
+                printf_putc_buf(outbuf, &outlen, *s);
+                printf_maybe_flush(outbuf, &outlen);
             }
         } else if (c0 == '%') {
-            outbuf[outlen++] = '%';
+            printf_putc_buf(outbuf, &outlen, '%');
         } else if (c0 == 0) {
             break;
         } else {
             // Print unknown % sequence to draw attention.
-            outbuf[outlen++] = '%';
-            outbuf[outlen++] = c0;
+            printf_putc_buf(outbuf, &outlen, '%');
+            printf_putc_buf(outbuf, &outlen, c0);
         }
 
         // Apply left-aligned field width padding
         if (left_align && field_width > 0) {
             int written = outlen - start_pos;
             while (written < field_width) {
-                outbuf[outlen++] = ' ';
+                printf_putc_buf(outbuf, &outlen, ' ');
                 written++;
             }
         }
-        // Flush if buffer is nearly full
-        if (outlen >= 500) {
-            printf_emit(outbuf, outlen);
-            outlen = 0;
-        }
+        printf_maybe_flush(outbuf, &outlen);
     }
     va_end(ap);
 

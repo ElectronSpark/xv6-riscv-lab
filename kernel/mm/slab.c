@@ -984,9 +984,17 @@ void *slab_alloc(slab_cache_t *cache) {
     // PHASE 1: Try local CPU partial list (FAST PATH)
     __percpu_cache_lock_cpu(cache, cpu_id);
 
-    if (!LIST_IS_EMPTY(&pcpu_cache->partial_list)) {
+    while (!LIST_IS_EMPTY(&pcpu_cache->partial_list)) {
         slab = LIST_FIRST_NODE(&pcpu_cache->partial_list, slab_t, list_entry);
-        assert(slab != NULL && !__SLAB_FULL(slab), "partial list invariant");
+        assert(slab != NULL, "partial list invariant");
+        if (__SLAB_FULL(slab)) {
+            list_node_detach(slab, list_entry);
+            __atomic_fetch_sub(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
+            list_node_push_back(&pcpu_cache->full_list, slab, list_entry);
+            __atomic_fetch_add(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
+            slab->state = SLAB_STATE_FULL;
+            continue;
+        }
 
         obj = __slab_obj_get(slab);
 

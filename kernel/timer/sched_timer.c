@@ -7,6 +7,7 @@
 #include "defs.h"
 #include "printf.h"
 #include "proc/sched.h"
+#include "lock/rcu.h"
 #include <mm/slab.h>
 #include "errno.h"
 #include "timer/timer.h"
@@ -105,9 +106,16 @@ void __do_timer_tick(void) {
 static void __sched_timer_callback(struct timer_node *tn) {
     // Wake up threads with expired timers.
     struct thread *p = tn->data;
-    if (THREAD_SLEEPING(p)) {
+    if (p == NULL || p->pid <= 0)
+        return;
+
+    rcu_read_lock();
+    struct thread *live = NULL;
+    int valid = get_pid_thread(p->pid, &live) == 0 && live == p;
+    if (valid && THREAD_SLEEPING(p)) {
         wakeup(p);
     }
+    rcu_read_unlock();
 }
 
 int sched_timer_set(struct timer_node *tn, uint64 ms) {

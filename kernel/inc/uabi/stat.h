@@ -1,6 +1,10 @@
 #ifndef __USER_ABI_STAT_H
 #define __USER_ABI_STAT_H
 
+#ifdef HOST_LIBC_PROGRAM
+#include <sys/stat.h>
+#else
+
 #include "compiler.h"
 #include "types.h"
 
@@ -94,5 +98,7 @@ struct stat {
 #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
 #define S_ISLNK(m) (((m) & S_IFMT) == S_IFLNK)
 #define S_ISSOCK(m) (((m) & S_IFMT) == S_IFSOCK)
+
+#endif /* HOST_LIBC_PROGRAM */
 
 #endif // __USER_ABI_STAT_H

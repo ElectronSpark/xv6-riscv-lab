@@ -413,6 +413,25 @@ uint64 sys_getcpu(void) {
 
 #define RSEQ_FLAG_UNREGISTER 1
 #define RSEQ_MIN_SIZE 32
+#define RSEQ_ALIGNMENT 32
+#define RSEQ_CPU_ID_UNINITIALIZED 0xffffffffU
+
+struct linux_rseq_area {
+    uint32 cpu_id_start;
+    uint32 cpu_id;
+    uint64 rseq_cs;
+    uint32 flags;
+};
+
+static int rseq_write_state(uint64 rseq_addr, uint32 cpu_id)
+{
+    struct linux_rseq_area area;
+
+    memset(&area, 0, sizeof(area));
+    area.cpu_id_start = cpu_id;
+    area.cpu_id = cpu_id;
+    return either_copyout(1, rseq_addr, &area, sizeof(area));
+}
 
 uint64 sys_rseq(void) {
     uint64 rseq_addr;
@@ -429,18 +448,25 @@ uint64 sys_rseq(void) {
         return (uint64)-EINVAL;
 
     if (flags & RSEQ_FLAG_UNREGISTER) {
-        if (current->rseq_addr == 0 || current->rseq_addr != rseq_addr)
+        if (current->rseq_addr == 0 || current->rseq_addr != rseq_addr ||
+            current->rseq_len != rseq_len ||
+            current->rseq_signature != signature)
             return (uint64)-EINVAL;
+        if (rseq_write_state(rseq_addr, RSEQ_CPU_ID_UNINITIALIZED) < 0)
+            return (uint64)-EFAULT;
         current->rseq_addr = 0;
         current->rseq_len = 0;
         current->rseq_signature = 0;
         return 0;
     }
 
-    if (rseq_addr == 0 || rseq_len < RSEQ_MIN_SIZE)
+    if (rseq_addr == 0 || rseq_len != RSEQ_MIN_SIZE ||
+        (rseq_addr & (RSEQ_ALIGNMENT - 1)) != 0)
         return (uint64)-EINVAL;
     if (current->rseq_addr != 0)
         return (uint64)-EBUSY;
+    if (rseq_write_state(rseq_addr, (uint32)cpuid()) < 0)
+        return (uint64)-EFAULT;
 
     current->rseq_addr = rseq_addr;
     current->rseq_len = rseq_len;

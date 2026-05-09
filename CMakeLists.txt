@@ -5,7 +5,7 @@
 # belong in the umbrella, not the kernel sub-repo).
 #
 # This file owns:
-#   * toolchain detection (TOOLPREFIX or auto-discovery)
+#   * kernel compiler detection (TOOLPREFIX or auto-discovery)
 #   * ARCH / PLATFORM / OPT_LEVEL / LAB cache vars
 #   * shared CMAKE_C_FLAGS for kernel + bootloader
 #   * dispatch into kernel/ and arch/${ARCH}/boot/
@@ -14,8 +14,8 @@
 #   cmake -S . -B build -DARCH=riscv -DPLATFORM=qemu -DOPT_LEVEL=0
 #   cmake --build build -j --target kernel
 #
-# Umbrella usage: invoked by xv6-os/cmake/BuildKernel.cmake, which sets
-# CMAKE_C_COMPILER from the cross toolchain and forwards ARCH/PLATFORM.
+# Umbrella usage: invoked by xv6-os/cmake/BuildKernel.cmake, which forwards
+# ARCH/PLATFORM and uses the host x86_64 compiler for x86_64 builds.
 
 cmake_minimum_required(VERSION 3.10)
 
@@ -117,7 +117,7 @@ find_package(Perl REQUIRED)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
 # ==============================================================================
-# Toolchain detection — must happen BEFORE project()
+# Compiler detection — must happen BEFORE project()
 # ==============================================================================
 set(USE_ENV_TOOLPREFIX OFF)
 if(DEFINED ENV{TOOLPREFIX} AND NOT "$ENV{TOOLPREFIX}" STREQUAL "")
@@ -137,30 +137,16 @@ if(USE_ENV_TOOLPREFIX)
     set(CMAKE_OBJDUMP      $ENV{TOOLPREFIX}objdump)
     set(CMAKE_C_LINK_EXECUTABLE
         "$ENV{TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
-    if("$ENV{TOOLPREFIX}" MATCHES "xv6-linux-musl-$")
-        set(XV6_MUSL_TOOLCHAIN TRUE)
-    else()
-        set(XV6_MUSL_TOOLCHAIN FALSE)
-    endif()
 else()
     if(ARCH STREQUAL "riscv")
         message(STATUS "TOOLPREFIX not set, searching for RISC-V toolchain...")
-        find_program(RISCV_GCC riscv64-xv6-linux-musl-gcc)
-        if(NOT RISCV_GCC)
-            find_program(RISCV_GCC riscv64-unknown-elf-gcc PATHS /opt/riscv/bin PATH_SUFFIXES bin NO_DEFAULT_PATH)
-        endif()
+        find_program(RISCV_GCC riscv64-unknown-elf-gcc PATHS /opt/riscv/bin PATH_SUFFIXES bin NO_DEFAULT_PATH)
         if(NOT RISCV_GCC)
             find_program(RISCV_GCC riscv64-unknown-elf-gcc)
         endif()
         if(RISCV_GCC)
             get_filename_component(TOOLPREFIX ${RISCV_GCC} DIRECTORY)
-            if(RISCV_GCC MATCHES "riscv64-xv6-linux-musl-gcc$")
-                set(TOOLPREFIX "${TOOLPREFIX}/riscv64-xv6-linux-musl-")
-                set(XV6_MUSL_TOOLCHAIN TRUE)
-            else()
-                set(TOOLPREFIX "${TOOLPREFIX}/riscv64-unknown-elf-")
-                set(XV6_MUSL_TOOLCHAIN FALSE)
-            endif()
+            set(TOOLPREFIX "${TOOLPREFIX}/riscv64-unknown-elf-")
             set(CMAKE_C_COMPILER   ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
             set(CMAKE_ASM_COMPILER ${TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
             set(CMAKE_LINKER       ${TOOLPREFIX}ld  CACHE FILEPATH "Linker" FORCE)
@@ -172,41 +158,48 @@ else()
         else()
             message(FATAL_ERROR
                 "TOOLPREFIX not set and no RISC-V toolchain found.\n"
-                "  Searched: riscv64-xv6-linux-musl-gcc, riscv64-unknown-elf-gcc")
+                "  Searched: riscv64-unknown-elf-gcc")
         endif()
     elseif(ARCH STREQUAL "x86_64")
-        message(STATUS "Searching for x86_64 toolchain...")
-        find_program(X86_GCC x86_64-xv6-linux-musl-gcc)
+        message(STATUS "Searching for x86_64 compiler...")
+        find_program(X86_GCC x86_64-linux-gnu-gcc)
         if(NOT X86_GCC)
-            find_program(X86_GCC x86_64-elf-gcc)
+            find_program(X86_GCC gcc)
         endif()
         if(NOT X86_GCC)
-            find_program(X86_GCC x86_64-linux-gnu-gcc)
+            find_program(X86_GCC cc)
         endif()
         if(X86_GCC)
             get_filename_component(TOOLPREFIX ${X86_GCC} DIRECTORY)
             if(X86_GCC MATCHES "x86_64-xv6-linux-musl-gcc$")
-                set(TOOLPREFIX "${TOOLPREFIX}/x86_64-xv6-linux-musl-")
-                set(XV6_MUSL_TOOLCHAIN TRUE)
+                message(FATAL_ERROR
+                    "The repo-local x86_64-xv6-linux-musl compiler is no longer supported. "
+                    "Use the host x86_64 Linux compiler instead.")
             elseif(X86_GCC MATCHES "x86_64-linux-gnu-gcc$")
                 set(TOOLPREFIX "${TOOLPREFIX}/x86_64-linux-gnu-")
-                set(XV6_MUSL_TOOLCHAIN FALSE)
+                set(CMAKE_C_COMPILER   ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
+                set(CMAKE_ASM_COMPILER ${TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
+                set(CMAKE_LINKER       ${TOOLPREFIX}ld  CACHE FILEPATH "Linker" FORCE)
+                set(CMAKE_OBJCOPY      ${TOOLPREFIX}objcopy)
+                set(CMAKE_OBJDUMP      ${TOOLPREFIX}objdump)
             else()
-                set(TOOLPREFIX "${TOOLPREFIX}/x86_64-elf-")
-                set(XV6_MUSL_TOOLCHAIN FALSE)
+                set(TOOLPREFIX "")
+                set(CMAKE_C_COMPILER   ${X86_GCC} CACHE STRING "C compiler" FORCE)
+                set(CMAKE_ASM_COMPILER ${X86_GCC} CACHE STRING "ASM compiler" FORCE)
+                find_program(_x86_ld NAMES ld REQUIRED)
+                find_program(_x86_objcopy NAMES objcopy REQUIRED)
+                find_program(_x86_objdump NAMES objdump REQUIRED)
+                set(CMAKE_LINKER       ${_x86_ld} CACHE FILEPATH "Linker" FORCE)
+                set(CMAKE_OBJCOPY      ${_x86_objcopy})
+                set(CMAKE_OBJDUMP      ${_x86_objdump})
             endif()
-            set(CMAKE_C_COMPILER   ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
-            set(CMAKE_ASM_COMPILER ${TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
-            set(CMAKE_LINKER       ${TOOLPREFIX}ld  CACHE FILEPATH "Linker" FORCE)
-            set(CMAKE_OBJCOPY      ${TOOLPREFIX}objcopy)
-            set(CMAKE_OBJDUMP      ${TOOLPREFIX}objdump)
             set(CMAKE_C_LINK_EXECUTABLE
-                "${TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
-            message(STATUS "Found x86_64 toolchain: ${TOOLPREFIX}")
+                "${CMAKE_LINKER} <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
+            message(STATUS "Found x86_64 compiler: ${CMAKE_C_COMPILER}")
         else()
             message(FATAL_ERROR
-                "No x86_64 toolchain found.\n"
-                "  Searched: x86_64-xv6-linux-musl-gcc, x86_64-elf-gcc, x86_64-linux-gnu-gcc")
+                "No x86_64 compiler found.\n"
+                "  Searched: x86_64-linux-gnu-gcc, gcc, cc")
         endif()
     endif()
 endif()

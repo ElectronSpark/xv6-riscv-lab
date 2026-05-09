@@ -1,6 +1,17 @@
 #ifndef __SIGNO_H
 #define __SIGNO_H
 
+#ifdef HOST_LIBC_PROGRAM
+#include <signal.h>
+typedef struct sigaction sigaction_t;
+#ifndef SIGNONE
+#define SIGNONE 0
+#endif
+#ifndef SIGMASK
+#define SIGMASK(signo) (1UL << ((signo) - 1))
+#endif
+#else
+
 #define SIGNONE 0 // No signal
 
 /* The signal numbers and actions are defined according to the Linux MAN pages.
@@ -62,5 +73,7 @@
 #define SA_RESTART   0x10000000 // Restart system calls if interrupted by handler.
 #define SA_NODEFER   0x40000000 // Don't block the signal in the handler.
 #define SA_RESETHAND 0x80000000 // Reset the signal handler to SIG_DFL after the first delivery.
+
+#endif /* HOST_LIBC_PROGRAM */
 
 #endif /* __SIGNO_H */

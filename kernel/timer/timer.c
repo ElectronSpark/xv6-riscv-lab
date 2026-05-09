@@ -62,6 +62,14 @@ static void __timer_update_next_tick(struct timer_root *timer) {
     }
 }
 
+static bool __timer_node_before(struct timer_node *a, struct timer_node *b) {
+    if (a->expires < b->expires)
+        return true;
+    if (a->expires > b->expires)
+        return false;
+    return (uint64)a < (uint64)b;
+}
+
 static void clockintr(int irq, void *data, device_t *dev) {
     // ask for the next timer interrupt. this also clears
     // the interrupt request. 1000000 is about a tenth
@@ -125,6 +133,10 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
     if (node->callback == NULL) {
         return -EINVAL;
     }
+    if (node->timer != NULL || !rb_node_is_empty(&node->rb) ||
+        !LIST_ENTRY_IS_DETACHED(&node->list_entry)) {
+        return -EINVAL;
+    }
     spin_lock(&timer->lock);
     if (!timer->valid) {
         spin_unlock(&timer->lock);
@@ -135,33 +147,29 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
         spin_unlock(&timer->lock);
         return -EINVAL;
     }
-    struct rb_node *inserted = rb_insert_color(&timer->root, &node->rb);
-    if (inserted == NULL) {
-        spin_unlock(&timer->lock);
-        return -ETXTBSY;
+    bool inserted = false;
+    struct timer_node *pos, *tmp;
+    list_foreach_node_safe(&timer->list_head, pos, tmp, list_entry) {
+        if (__timer_node_before(node, pos)) {
+            list_entry_insert(LIST_PREV_ENTRY(&pos->list_entry),
+                              &node->list_entry);
+            inserted = true;
+            break;
+        }
     }
-    if (inserted != &node->rb) {
-        spin_unlock(&timer->lock);
-        return -EEXIST;
-    }
-    struct rb_node *prev = rb_prev_node(&node->rb);
-    if (prev == NULL) {
-        list_node_push_back(&timer->list_head, node, list_entry);
-        timer->next_tick = node->expires;
-    } else {
-        struct timer_node *prev_node =
-            container_of(prev, struct timer_node, rb);
-        list_node_insert(prev_node, node, list_entry);
-    }
+    if (!inserted)
+        list_node_push(&timer->list_head, node, list_entry);
     node->timer = timer;
+    __timer_update_next_tick(timer);
     spin_unlock(&timer->lock);
     return 0;
 }
 
 static void __timer_remove_unlocked(struct timer_root *timer,
                                     struct timer_node *node) {
-    rb_delete_node_color(&timer->root, &node->rb);
-    list_node_detach(node, list_entry);
+    if (!LIST_ENTRY_IS_DETACHED(&node->list_entry))
+        list_node_detach(node, list_entry);
+    rb_node_init(&node->rb);
     node->timer = NULL;
     __timer_update_next_tick(timer);
 }

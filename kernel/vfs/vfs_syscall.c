@@ -1590,17 +1590,20 @@ uint64 sys_vfs_open(void) {
 uint64 sys_vfs_mkdir(void) {
     char *path;
     char *name = __vfs_alloc_pathbuf();
+    int mode;
     int n;
 
     if (name == NULL)
         return -ENOMEM;
     int ret = __vfs_argpath(0, &path, &n);
+    argint(1, &mode);
     if (ret < 0) {
         kvfree(name);
         return ret;
     }
 
-    struct vfs_inode *parent = vfs_nameiparent(path, n, name, VFS_USER_PATH_MAX);
+    struct vfs_inode *parent =
+        vfs_nameiparent_at(NULL, path, n, name, VFS_USER_PATH_MAX);
     kvfree(path);
     if (IS_ERR(parent)) {
         kvfree(name);
@@ -1613,7 +1616,8 @@ uint64 sys_vfs_mkdir(void) {
 
     size_t name_len = strlen(name);
 
-    struct vfs_inode *dir = vfs_mkdir(parent, 0777 & ~current_umask(), name, name_len);
+    struct vfs_inode *dir =
+        vfs_mkdir(parent, (mode_t)mode & ~current_umask(), name, name_len);
     kvfree(name);
     vfs_iput(parent);
 
@@ -1879,13 +1883,17 @@ uint64 sys_getcwd(void) {
     int pathlen = 0;
 
     struct thread *p = current;
-    vfs_struct_lock(p->fs);
-    struct vfs_inode *cwd = vfs_inode_deref(&p->fs->cwd);
-    struct vfs_inode *root = vfs_inode_deref(&p->fs->rooti);
-    vfs_struct_unlock(p->fs);
-
+    struct vfs_inode *cwd = vfs_curdir();
+    if (IS_ERR(cwd)) {
+        return PTR_ERR(cwd);
+    }
     if (cwd == NULL) {
         return -ENOENT;
+    }
+    struct vfs_inode *root = vfs_curroot();
+    if (IS_ERR(root)) {
+        vfs_iput(cwd);
+        return PTR_ERR(root);
     }
 
     // Build path from cwd to root by collecting names
@@ -1928,6 +1936,8 @@ uint64 sys_getcwd(void) {
     for (int i = name_count - 1; i >= 0; i--) {
         int len = strlen(names[i]);
         if (pathlen + len + 1 >= MAXPATH) {
+            vfs_iput(root);
+            vfs_iput(cwd);
             return -ENAMETOOLONG;
         }
         memmove(path + pathlen, names[i], len);
@@ -1939,13 +1949,19 @@ uint64 sys_getcwd(void) {
     path[pathlen] = '\0';
 
     if (pathlen + 1 > size) {
+        vfs_iput(root);
+        vfs_iput(cwd);
         return -ERANGE;
     }
 
     if (vm_copyout(p->vm, buf_addr, path, pathlen + 1) < 0) {
+        vfs_iput(root);
+        vfs_iput(cwd);
         return -EFAULT;
     }
 
+    vfs_iput(root);
+    vfs_iput(cwd);
     return buf_addr;
 }
 
@@ -4282,9 +4298,14 @@ uint64 sys_vfs_openat2(void) {
     if ((how.flags & O_CREAT) == 0 && how.mode != 0)
         return (uint64)-EINVAL;
 
+    uint64 saved_rdx = current->trapframe->trapframe.rdx;
+    uint64 saved_r10 = current->trapframe->trapframe.r10;
     arch_tf_set_arg2(current->trapframe, how.flags);
     arch_tf_set_arg3(current->trapframe, how.mode);
-    return sys_vfs_openat();
+    uint64 ret = sys_vfs_openat();
+    current->trapframe->trapframe.rdx = saved_rdx;
+    current->trapframe->trapframe.r10 = saved_r10;
+    return ret;
 }
 
 uint64 sys_vfs_close_range(void) {
@@ -4316,11 +4337,20 @@ uint64 sys_vfs_creat(void) {
     argaddr(0, &path_addr);
     argint(1, &mode);
 
+    uint64 saved_rdi = current->trapframe->trapframe.rdi;
+    uint64 saved_rsi = current->trapframe->trapframe.rsi;
+    uint64 saved_rdx = current->trapframe->trapframe.rdx;
+    uint64 saved_r10 = current->trapframe->trapframe.r10;
     arch_tf_set_arg0(current->trapframe, AT_FDCWD);
     arch_tf_set_arg1(current->trapframe, path_addr);
     arch_tf_set_arg2(current->trapframe, O_CREAT | O_WRONLY | O_TRUNC);
     arch_tf_set_arg3(current->trapframe, mode);
-    return sys_vfs_openat();
+    uint64 ret = sys_vfs_openat();
+    current->trapframe->trapframe.rdi = saved_rdi;
+    current->trapframe->trapframe.rsi = saved_rsi;
+    current->trapframe->trapframe.rdx = saved_rdx;
+    current->trapframe->trapframe.r10 = saved_r10;
+    return ret;
 }
 
 uint64 sys_vfs_truncate(void) {
@@ -4352,10 +4382,17 @@ uint64 sys_vfs_rmdir(void) {
     uint64 path_addr;
     argaddr(0, &path_addr);
 
+    uint64 saved_rdi = current->trapframe->trapframe.rdi;
+    uint64 saved_rsi = current->trapframe->trapframe.rsi;
+    uint64 saved_rdx = current->trapframe->trapframe.rdx;
     arch_tf_set_arg0(current->trapframe, AT_FDCWD);
     arch_tf_set_arg1(current->trapframe, path_addr);
     arch_tf_set_arg2(current->trapframe, AT_REMOVEDIR);
-    return sys_vfs_unlinkat();
+    uint64 ret = sys_vfs_unlinkat();
+    current->trapframe->trapframe.rdi = saved_rdi;
+    current->trapframe->trapframe.rsi = saved_rsi;
+    current->trapframe->trapframe.rdx = saved_rdx;
+    return ret;
 }
 
 uint64 sys_vfs_fchdir(void) {
@@ -6906,10 +6943,17 @@ uint64 sys_utimes(void) {
     argaddr(0, &path_addr);
     argaddr(1, &times_addr);
 
+    uint64 saved_rdi = current->trapframe->trapframe.rdi;
+    uint64 saved_rsi = current->trapframe->trapframe.rsi;
+    uint64 saved_rdx = current->trapframe->trapframe.rdx;
     arch_tf_set_arg0(current->trapframe, AT_FDCWD);
     arch_tf_set_arg1(current->trapframe, path_addr);
     arch_tf_set_arg2(current->trapframe, times_addr);
-    return sys_futimesat();
+    uint64 ret = sys_futimesat();
+    current->trapframe->trapframe.rdi = saved_rdi;
+    current->trapframe->trapframe.rsi = saved_rsi;
+    current->trapframe->trapframe.rdx = saved_rdx;
+    return ret;
 }
 
 uint64 sys_utime(void) {

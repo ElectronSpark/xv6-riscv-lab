@@ -110,6 +110,30 @@ static int wait_status_from_child(struct thread *child) {
     return (child->xstate & 0xff) << 8;
 }
 
+struct linux_wait_siginfo {
+    int si_signo;
+    int si_errno;
+    int si_code;
+    int __pad0;
+    int si_pid;
+    unsigned int si_uid;
+    int si_status;
+    int __pad1;
+    uint64 si_utime;
+    uint64 si_stime;
+    char __pad[128 - 48];
+};
+
+static void linux_wait_siginfo_init(struct linux_wait_siginfo *lsi,
+                                    int signo, int code, int pid, int status) {
+    memset(lsi, 0, sizeof(*lsi));
+    lsi->si_signo = signo;
+    lsi->si_code = code;
+    lsi->si_pid = pid;
+    lsi->si_uid = 0;
+    lsi->si_status = status;
+}
+
 // Exit the current thread.  Does not return.
 // An exited thread remains in the zombie state
 // until its parent calls wait().
@@ -661,8 +685,8 @@ uint64 sys_waitid(void) {
 
     struct thread *p = current;
     struct thread_group *tg = p->thread_group;
-    siginfo_t si;
-    memset(&si, 0, sizeof(si));
+    struct linux_wait_siginfo si;
+    linux_wait_siginfo_init(&si, 0, 0, 0, 0);
 
     pid_rlock();
     for (;;) {
@@ -673,6 +697,8 @@ uint64 sys_waitid(void) {
         list_foreach_node_safe(&tg->thread_list, thr, thr_tmp, tg_entry) {
             struct thread *child, *tmp;
             list_foreach_node_safe(&thr->children, child, tmp, siblings) {
+                if (child->parent != thr)
+                    continue;
                 if (idtype == P_PID && child->pid != id)
                     continue;
                 if (idtype == P_PGID) {
@@ -684,10 +710,9 @@ uint64 sys_waitid(void) {
 
                 if ((options & WSTOPPED) && THREAD_STOPPED(child)) {
                     __thread_state_set(p, THREAD_RUNNING);
-                    si.si_signo = SIGCHLD;
-                    si.si_code = CLD_STOPPED;
-                    si.si_pid = child->pid;
-                    si.si_status = child->signal.stop_signal;
+                    linux_wait_siginfo_init(&si, SIGCHLD, CLD_STOPPED,
+                                            child->pid,
+                                            child->signal.stop_signal);
                     goto copyout;
                 }
 
@@ -705,11 +730,13 @@ uint64 sys_waitid(void) {
                         }
                     }
 
-                    si.si_signo = SIGCHLD;
-                    si.si_code = child->killed_signo > 0 ? CLD_KILLED : CLD_EXITED;
-                    si.si_pid = child->pid;
-                    si.si_status = child->killed_signo > 0 ?
-                                   child->killed_signo : (child->xstate & 0xff);
+                    linux_wait_siginfo_init(&si, SIGCHLD,
+                                            child->killed_signo > 0 ?
+                                            CLD_KILLED : CLD_EXITED,
+                                            child->pid,
+                                            child->killed_signo > 0 ?
+                                            child->killed_signo :
+                                            (child->xstate & 0xff));
 
                     if (!(options & WNOWAIT)) {
                         if (!pid_try_lock_upgrade()) {

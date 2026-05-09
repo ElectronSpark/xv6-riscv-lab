@@ -940,6 +940,23 @@ void x86_trap_handler(struct trapframe *tf) {
                        tf->rax, tf->rbx, tf->rcx, tf->rdx);
                 printf("        rdi=0x%lx rsi=0x%lx rbp=0x%lx rsp=0x%lx\n",
                        tf->rdi, tf->rsi, tf->rbp, tf->rsp);
+                printf("        r8 =0x%lx r9 =0x%lx r10=0x%lx r11=0x%lx\n",
+                       tf->r8, tf->r9, tf->r10, tf->r11);
+                printf("        r12=0x%lx r13=0x%lx r14=0x%lx r15=0x%lx\n",
+                       tf->r12, tf->r13, tf->r14, tf->r15);
+                {
+                    uint64 stack_words[8];
+                    if (vm_copyin(current->vm, stack_words, tf->rsp,
+                                  sizeof(stack_words)) == 0) {
+                        printf("  user stack @rsp:");
+                        for (size_t i = 0; i < sizeof(stack_words) /
+                                               sizeof(stack_words[0]); i++)
+                            printf(" 0x%lx", stack_words[i]);
+                        printf("\n");
+                    } else {
+                        printf("  user stack @rsp: <unreadable>\n");
+                    }
+                }
                 vm_rlock(current->vm);
                 print_fault_vma(current->vm, "fault-ip", tf->rip);
                 print_fault_vma(current->vm, "fault-va", cr2);

@@ -1619,25 +1619,41 @@ int vfs_chroot(struct vfs_inode *new_root) {
     return 0;
 }
 
+static struct vfs_inode *vfs_get_fs_ref_locked(struct vfs_inode_ref *ref) {
+    struct vfs_inode *inode = vfs_inode_deref(ref);
+    if (inode == NULL)
+        return NULL;
+    vfs_idup(inode);
+    return inode;
+}
+
 // Get current working directory inode of the current process
 // Caller needs to call vfs_iput on the returned inode when done
 struct vfs_inode *vfs_curdir(void) {
-    // Since only the current process can change its cwd,
-    // we don't need to lock the inode here
-    struct vfs_inode *cwd = vfs_inode_deref(&current->fs->cwd);
-    assert(cwd != NULL, "vfs_curdir: current working directory inode is NULL");
-    vfs_idup(cwd);
+    if (current == NULL || current->fs == NULL)
+        return ERR_PTR(-EINVAL);
+
+    vfs_struct_lock(current->fs);
+    struct vfs_inode *cwd = vfs_get_fs_ref_locked(&current->fs->cwd);
+    vfs_struct_unlock(current->fs);
+
+    if (cwd == NULL)
+        return ERR_PTR(-ENOENT);
     return cwd;
 }
 
 // Get current root directory inode of the current process
 // Caller needs to call vfs_iput on the returned inode when done
 struct vfs_inode *vfs_curroot(void) {
-    // Since only the current process can change its root,
-    // we don't need to lock the inode here
-    struct vfs_inode *rooti = vfs_inode_deref(&current->fs->rooti);
-    assert(rooti != NULL, "vfs_curroot: current root directory inode is NULL");
-    vfs_idup(rooti);
+    if (current == NULL || current->fs == NULL)
+        return ERR_PTR(-EINVAL);
+
+    vfs_struct_lock(current->fs);
+    struct vfs_inode *rooti = vfs_get_fs_ref_locked(&current->fs->rooti);
+    vfs_struct_unlock(current->fs);
+
+    if (rooti == NULL)
+        return ERR_PTR(-ENOENT);
     return rooti;
 }
 

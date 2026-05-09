@@ -214,6 +214,15 @@ static ssize_t core_write(struct vfs_file *f, const void *buf, size_t n)
  */
 static char zero_page[PGSIZE] __attribute__((aligned(PGSIZE)));
 
+static void *core_page_kva(uint64 pa)
+{
+#ifndef __riscv
+    if (pa >= PHYSTOP || pa + PGSIZE < pa || pa + PGSIZE > PHYSTOP)
+        return NULL;
+#endif
+    return PA2VA(pa);
+}
+
 /*
  * do_coredump — Generate an ELF core file for the current thread.
  *
@@ -463,13 +472,9 @@ void do_coredump(struct thread *t)
             for (uint64 va = vma->start; va < vma->end; va += PGSIZE) {
                 uint64 pa = walkaddr(vm->pagetable, va);
                 if (pa != 0) {
-#ifdef __riscv
-                    void *kva = (void *)PA2VA(pa);
-#else
-                    void *kva = (void *)pa;
-#endif
+                    void *kva = core_page_kva(pa);
                     vm_runlock(vm);
-                    ssize_t n = core_write(f, kva, PGSIZE);
+                    ssize_t n = core_write(f, kva ? kva : zero_page, PGSIZE);
                     vm_rlock(vm);
                     if (n != PGSIZE) {
                         printf("coredump: write error at VA 0x%lx\n", va);

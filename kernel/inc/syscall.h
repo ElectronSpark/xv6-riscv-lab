@@ -1,6 +1,10 @@
 #ifndef __KERNEL_SYSCALL_H
 #define __KERNEL_SYSCALL_H
 
+#ifdef HOST_LIBC_PROGRAM
+#include <sys/syscall.h>
+#else
+
 #include "compiler.h"
 
 /*
@@ -725,5 +729,7 @@
 // --- Filesystem info (match musl-xv6 syscall.h.in numbers) ---
 #define SYS_statfs          855
 #define SYS_fstatfs         909
+
+#endif /* HOST_LIBC_PROGRAM */
 
 #endif /* __KERNEL_SYSCALL_H */

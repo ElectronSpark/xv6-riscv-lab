@@ -104,9 +104,11 @@ struct dinode {
  */
 #define DIRSIZ 14
 
+#ifndef HOST_LIBC_PROGRAM
 struct dirent {
     ushort inum;
     char name[DIRSIZ];
 };
+#endif
 
 #endif /* KERNEL_VFS_XV6FS_ONDISK_H */

@@ -235,11 +235,20 @@ void pgroup_migrate_tg(struct thread_group *tg, struct pgroup *new_pg) {
  * The caller must hold pid_lock or be inside an rcu_read_lock().
  */
 struct pgroup *get_pgroup(pid_t pgid) {
-    struct thread *t = NULL;
-    int err = get_pid_thread(pgid, &t);
-    if (err < 0 || t == NULL)
-        return NULL;
-    return t->pgroup;
+    struct session *s = NULL;
+    struct session *s_tmp = NULL;
+
+    session_for_each(s, s_tmp) {
+        struct pgroup *pg = NULL;
+        struct pgroup *pg_tmp = NULL;
+
+        list_foreach_node_safe(&s->pgrps, pg, pg_tmp, list_entry) {
+            if (pg->pgid == pgid && !pg->exited)
+                return pg;
+        }
+    }
+
+    return NULL;
 }
 
 /* ------------------------------------------------------------------ */

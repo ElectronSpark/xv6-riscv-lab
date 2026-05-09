@@ -1220,7 +1220,6 @@ void syscall(void) {
     int num = (int)p->trapframe->trapframe.rax;
     uint64 a0 = p->trapframe->trapframe.rdi;
     uint64 a1 = p->trapframe->trapframe.rsi;
-
     /*
      * Some musl x86_64 assembly helpers use native Linux syscall numbers
      * directly.  Most libc entry points go through xv6's generated syscall
@@ -1233,7 +1232,6 @@ void syscall(void) {
     } else if (num == 60 && (p->clone_flags & CLONE_THREAD)) {
         num = SYS_exit;
     }
-
     if (num >= 0 && num < (int)NELEM(syscalls) && syscalls[num]) {
         p->trapframe->trapframe.rax = syscalls[num]();
     } else {

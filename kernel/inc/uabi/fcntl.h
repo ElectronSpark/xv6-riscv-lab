@@ -2,6 +2,12 @@
 #ifndef __USER_ABI_FCNTL_H
 #define __USER_ABI_FCNTL_H
 
+#ifdef HOST_LIBC_PROGRAM
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#else
+
 #include "types.h"
 
 #define O_CREAT 0100
@@ -210,5 +216,7 @@ ssize_t tee(int, int, size_t, unsigned);
 #define posix_fallocate64 posix_fallocate
 #define off64_t off_t
 #endif
+
+#endif /* HOST_LIBC_PROGRAM */
 
 #endif /* __USER_ABI_FCNTL_H */

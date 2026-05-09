@@ -168,11 +168,7 @@ static struct vfs_inode *__vfs_inode_hash_get(struct vfs_superblock *sb,
                                               uint64 ino) {
     struct vfs_inode key_inode = {0};
     key_inode.ino = ino;
-    hlist_entry_t *entry = hlist_get(&sb->inodes, &key_inode);
-    if (entry == NULL) {
-        return NULL;
-    }
-    return container_of(entry, struct vfs_inode, hash_entry);
+    return hlist_get(&sb->inodes, &key_inode);
 }
 
 static struct vfs_inode *__vfs_inode_hash_add(struct vfs_superblock *sb,
