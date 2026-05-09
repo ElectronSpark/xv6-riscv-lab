@@ -3888,6 +3888,50 @@ int fb_init_virtio_gpu_scanout(uint32 width, uint32 height)
     return 0;
 }
 
+int fb_init_virtio_gpu_scanout_backing(uint32 width, uint32 height,
+                                       void *backing, uint32 backing_size,
+                                       uint32 pitch)
+{
+    uint64 size;
+    int ret;
+
+    if (width < 640 || width > 2560 || height < 400 || height > 1600 ||
+        backing == NULL || pitch < width * 4 || (pitch & 3) != 0)
+        return -EINVAL;
+
+    size = (uint64)pitch * height;
+    if (size == 0 || size > backing_size || size > 64ULL * 1024 * 1024)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    if (fb_state.detected) {
+        spin_unlock(&fb_state.lock);
+        return 0;
+    }
+
+    fb_state.virtio_backed = 1;
+    fb_state.fb_phys = 0;
+    fb_state.fb_virt = (volatile uint8 *)backing;
+    fb_state.xres = width;
+    fb_state.yres = height;
+    fb_state.bpp = 32;
+    fb_state.pitch = pitch;
+    fb_state.fb_size = (uint32)size;
+    __sync_synchronize();
+    fb_state.detected = 1;
+    spin_unlock(&fb_state.lock);
+
+    ret = fb_register_cdev();
+    if (ret != 0)
+        return ret;
+
+    printf("FB: registered /dev/fb0 (virtio-gpu direct %dx%dx32 pitch=%u)\n",
+           width, height, pitch);
+    virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                               0, 0, width, height);
+    return 0;
+}
+
 int fb_gpu_register_virgl_render_node(void)
 {
     int ret;

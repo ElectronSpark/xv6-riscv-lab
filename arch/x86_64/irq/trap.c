@@ -39,6 +39,13 @@ static const char *fault_vma_file_name(vma_t *vma)
     return "(unnamed)";
 }
 
+static struct vfs_inode *fault_vma_inode(vma_t *vma)
+{
+    if (vma == NULL || vma->file == NULL)
+        return NULL;
+    return vma->file->inode.inode;
+}
+
 static void print_fault_vma(vm_t *vm, const char *label, uint64 addr)
 {
     vma_t *vma = vm_find_area(vm, addr);
@@ -48,12 +55,14 @@ static void print_fault_vma(vm_t *vm, const char *label, uint64 addr)
     }
 
     uint64 file_off = vma->pgoff + (addr - vma->start);
-    printf("  %s: addr=0x%lx map=[0x%lx-0x%lx) %c%c%c pgoff=0x%lx file_off=0x%lx file=%p name=%s\n",
+    struct vfs_inode *inode = fault_vma_inode(vma);
+    printf("  %s: addr=0x%lx map=[0x%lx-0x%lx) %c%c%c pgoff=0x%lx file_off=0x%lx file=%p ino=%lu size=%lld name=%s\n",
            label, addr, vma->start, vma->end,
            (vma->flags & PROT_READ) ? 'r' : '-',
            (vma->flags & PROT_WRITE) ? 'w' : '-',
            (vma->flags & PROT_EXEC) ? 'x' : '-',
            vma->pgoff, file_off, (void *)vma->file,
+           inode ? inode->ino : 0, inode ? inode->size : 0,
            fault_vma_file_name(vma));
 }
 
@@ -968,14 +977,18 @@ void x86_trap_handler(struct trapframe *tf) {
                     printf("  --- VMA map (exec+file) ---\n");
                     mt_for_each(&current->vm->vm_mt, mt_entry, mt_idx, MAPLE_MAX) {
                         vma_t *v = (vma_t *)mt_entry;
-                        if ((v->flags & PROT_EXEC) || v->file)
-                            printf("  [0x%lx-0x%lx) %c%c%c pgoff=0x%lx file=%p name=%s\n",
+                        if ((v->flags & PROT_EXEC) || v->file) {
+                            struct vfs_inode *inode = fault_vma_inode(v);
+                            printf("  [0x%lx-0x%lx) %c%c%c pgoff=0x%lx file=%p ino=%lu size=%lld name=%s\n",
                                    v->start, v->end,
                                    (v->flags & PROT_READ) ? 'r' : '-',
                                    (v->flags & PROT_WRITE) ? 'w' : '-',
                                    (v->flags & PROT_EXEC) ? 'x' : '-',
                                    v->pgoff, (void *)v->file,
+                                   inode ? inode->ino : 0,
+                                   inode ? inode->size : 0,
                                    fault_vma_file_name(v));
+                        }
                     }
                     printf("  --- end VMA map ---\n");
                 }

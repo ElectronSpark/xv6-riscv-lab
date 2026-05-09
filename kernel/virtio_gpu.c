@@ -1,10 +1,9 @@
 //
 // Minimal virtio-gpu PCI transport bring-up.
 //
-// This does not replace /dev/fb0 yet: Bochs BGA remains the active scanout
-// path. The driver initializes a modern virtio-gpu device, negotiates a basic
-// feature set, brings up queue 0, and issues GET_DISPLAY_INFO so later stages
-// can attach resource and transfer commands to a known-good transport.
+// Bochs BGA remains the fallback scanout path.  When QEMU boots with a
+// virtio-gpu primary display, /dev/fb0 can point directly at the persistent
+// virtio scanout resource backing so presents avoid a second shadow copy.
 //
 
 #include "types.h"
@@ -2348,7 +2347,9 @@ static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
     g->scanout_resource = res;
     printf("virtio_gpu: persistent scanout resource=%u size=%ux%u bytes=%u alloc=%u\n",
            res->id, width, height, res->backing_len, res->alloc_len);
-    if (fb_init_virtio_gpu_scanout(width, height) != 0)
+    if (fb_init_virtio_gpu_scanout_backing(width, height, res->backing,
+                                           res->backing_len,
+                                           res->width * sizeof(uint32)) != 0)
         printf("virtio_gpu: warning: failed to expose scanout as /dev/fb0\n");
     return 0;
 
@@ -2614,17 +2615,21 @@ void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
     if (w == 0 || h == 0)
         goto out;
 
-    uint8 *dst_base = (uint8 *)res->backing;
-    volatile uint8 *src_base = (volatile uint8 *)fb;
-    for (uint32 row = 0; row < h; row++) {
-        volatile uint32 *src =
-            (volatile uint32 *)(src_base + (uint64)(y + row) * src_pitch +
-                                (uint64)x * sizeof(uint32));
-        uint32 *dst =
-            (uint32 *)(dst_base + (uint64)(y + row) * res->width *
-                       sizeof(uint32) + (uint64)x * sizeof(uint32));
-        for (uint32 col = 0; col < w; col++)
-            dst[col] = src[col];
+    if ((void *)fb != res->backing ||
+        src_pitch != res->width * sizeof(uint32)) {
+        uint8 *dst_base = (uint8 *)res->backing;
+        volatile uint8 *src_base = (volatile uint8 *)fb;
+
+        for (uint32 row = 0; row < h; row++) {
+            volatile uint32 *src =
+                (volatile uint32 *)(src_base + (uint64)(y + row) * src_pitch +
+                                    (uint64)x * sizeof(uint32));
+            uint32 *dst =
+                (uint32 *)(dst_base + (uint64)(y + row) * res->width *
+                           sizeof(uint32) + (uint64)x * sizeof(uint32));
+            for (uint32 col = 0; col < w; col++)
+                dst[col] = src[col];
+        }
     }
 
     if (virtio_gpu_resource_transfer_2d(g, res, x, y, w, h) != 0)

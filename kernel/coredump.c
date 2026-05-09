@@ -20,6 +20,7 @@
 #include "lock/spinlock.h"
 #include "defs.h"
 #include "proc/thread.h"
+#include "resource.h"
 #include "trapframe.h"
 #include <mm/vm.h>
 #include <mm/vm_types.h>
@@ -236,6 +237,15 @@ void do_coredump(struct thread *t)
     char path[32];
     char name[32];
     struct vfs_file *f = NULL;
+    uint64 core_limit = RLIM_INFINITY;
+
+    if (t->thread_group)
+        core_limit = t->thread_group->rlim[RLIMIT_CORE].rlim_cur;
+    if (core_limit == 0) {
+        printf("coredump: RLIMIT_CORE=0 for pid %d (%s), skipping\n",
+               t->pid, t->name);
+        return;
+    }
 
     /* Build filename: /core.PID */
     int len = snprintf(path, sizeof(path), "/core.%d", t->pid);
