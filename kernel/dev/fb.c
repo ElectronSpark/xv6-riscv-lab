@@ -491,6 +491,7 @@ static struct {
     int         virtio_backed;  /* shadow framebuffer presented via virtio-gpu */
     uint64      fb_phys;        /* physical address of LFB (BAR0), if any */
     volatile uint8 *fb_virt;    /* kernel virtual address of framebuffer */
+    int         scanout_mappable; /* fb_virt is normal contiguous RAM */
     uint32      xres;
     uint32      yres;
     uint32      bpp;
@@ -839,6 +840,131 @@ reject:
     fb_state.stats.rejected_blits++;
     spin_unlock(&fb_state.lock);
     return -EINVAL;
+}
+
+static int fb_map_scanout_current(struct fb_gpu_scanout_map *req)
+{
+    vm_t *vm;
+    vma_t *vma;
+    uint64 addr;
+    uint64 flags;
+    uint64 pte_flags;
+    uint64 base_pa;
+    uint64 map_size;
+    uint32 xres, yres, pitch, fb_size;
+    int mappable;
+
+    if (req == NULL || current == NULL || current->vm == NULL)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    mappable = fb_state.detected && fb_state.virtio_backed &&
+               fb_state.scanout_mappable && fb_state.fb_virt != NULL;
+    base_pa = (uint64)(uintptr_t)fb_state.fb_virt;
+    xres = fb_state.xres;
+    yres = fb_state.yres;
+    pitch = fb_state.pitch;
+    fb_size = fb_state.fb_size;
+    spin_unlock(&fb_state.lock);
+
+    if (!mappable || fb_size == 0)
+        return -ENODEV;
+
+    map_size = PGROUNDUP((uint64)fb_size);
+    if (map_size == 0)
+        return -EINVAL;
+
+    vm = current->vm;
+    flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER;
+
+    vm_wlock(vm);
+    addr = vm_find_free_range(vm, (size_t)map_size, 0);
+    if (addr == 0) {
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+
+    vma = vma_alloc(vm, addr, map_size, flags);
+    if (vma == NULL) {
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+    if (anon_vma_prepare(vma) != 0) {
+        vma_free(vm, vma);
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+
+    pte_flags = vma2pte_flags(flags);
+    for (uint64 off = 0; off < map_size; off += PGSIZE) {
+        uint64 va = addr + off;
+        uint64 pa = base_pa + off;
+        page_t *page = __pa_to_page(pa);
+
+        if (page_ref_inc((void *)pa) <= 0) {
+            vma_free(vm, vma);
+            vm_wunlock(vm);
+            return -ENOMEM;
+        }
+        if (mappages(vm->pagetable, va, PGSIZE, pa, pte_flags) != 0) {
+            page_ref_dec((void *)pa);
+            vma_free(vm, vma);
+            vm_wunlock(vm);
+            return -ENOMEM;
+        }
+        page_add_anon_rmap(page, vma, va);
+    }
+    vm_wunlock(vm);
+
+    memset(req, 0, sizeof(*req));
+    req->width = xres;
+    req->height = yres;
+    req->pitch = pitch;
+    req->size = map_size;
+    req->addr = addr;
+    return 0;
+}
+
+static int fb_flush_scanout_rect(struct fb_gpu_scanout_flush req)
+{
+    uint32 xres, yres;
+    uint32 w, h;
+
+    spin_lock(&fb_state.lock);
+    if (!fb_state.detected || !fb_state.virtio_backed ||
+        fb_state.fb_virt == NULL) {
+        spin_unlock(&fb_state.lock);
+        return -ENODEV;
+    }
+    xres = fb_state.xres;
+    yres = fb_state.yres;
+    spin_unlock(&fb_state.lock);
+
+    if (req.w == 0 || req.h == 0)
+        return 0;
+    if (req.x >= xres || req.y >= yres)
+        return 0;
+
+    w = req.w;
+    h = req.h;
+    if ((uint64)req.x + w > xres)
+        w = xres - req.x;
+    if ((uint64)req.y + h > yres)
+        h = yres - req.y;
+    if (w == 0 || h == 0)
+        return 0;
+
+    spin_lock(&fb_state.lock);
+    if (req.x == 0 && req.y == 0 && w == xres && h == yres)
+        fb_state.stats.full_blits++;
+    else
+        fb_state.stats.partial_blits++;
+    fb_state.stats.blit_bytes += (uint64)w * h * 4;
+    spin_unlock(&fb_state.lock);
+
+    virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                               req.x, req.y, w, h);
+    return 0;
 }
 
 static struct fb_gpu_bo_entry *fb_bo_lookup_locked(uint32 handle)
@@ -1821,6 +1947,29 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
             either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
             return -EFAULT;
         return ret;
+    }
+
+    case FB_GPU_SCANOUT_MAP: {
+        struct fb_gpu_scanout_map req;
+        int ret;
+
+        memset(&req, 0, sizeof(req));
+        ret = fb_map_scanout_current(&req);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            (void)vm_munmap(current->vm, req.addr, (size_t)req.size);
+            return -EFAULT;
+        }
+        return 0;
+    }
+
+    case FB_GPU_SCANOUT_FLUSH: {
+        struct fb_gpu_scanout_flush req;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        return fb_flush_scanout_rect(req);
     }
 
     case FB_GPU_BO_DESTROY: {
@@ -3891,6 +4040,7 @@ int fb_init_virtio_gpu_scanout(uint32 width, uint32 height)
     fb_state.virtio_backed = 1;
     fb_state.fb_phys = 0;
     fb_state.fb_virt = (volatile uint8 *)buf;
+    fb_state.scanout_mappable = 0;
     fb_state.xres = width;
     fb_state.yres = height;
     fb_state.bpp = 32;
@@ -3935,6 +4085,7 @@ int fb_init_virtio_gpu_scanout_backing(uint32 width, uint32 height,
     fb_state.virtio_backed = 1;
     fb_state.fb_phys = 0;
     fb_state.fb_virt = (volatile uint8 *)backing;
+    fb_state.scanout_mappable = 1;
     fb_state.xres = width;
     fb_state.yres = height;
     fb_state.bpp = 32;

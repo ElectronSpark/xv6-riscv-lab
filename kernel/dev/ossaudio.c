@@ -90,6 +90,7 @@
 #define OSS_BLOCK_SIZE 4096
 #define OSS_FRAGMENTS 16
 #define OSS_BUFFER_BYTES (OSS_BLOCK_SIZE * OSS_FRAGMENTS)
+#define OSS_POLL_LOW_WATER (OSS_BLOCK_SIZE / 2)
 
 #define PCM_CAP_DUPLEX   0x00000100
 #define PCM_CAP_TRIGGER  0x00001000
@@ -306,6 +307,11 @@ static uint64 oss_free_locked(void) {
     if (pending >= OSS_BUFFER_BYTES)
         return 0;
     return OSS_BUFFER_BYTES - pending;
+}
+
+static int oss_playback_writable_locked(void) {
+    uint64 free_bytes = oss_free_locked();
+    return free_bytes >= OSS_POLL_LOW_WATER || free_bytes == OSS_BUFFER_BYTES;
 }
 
 static void oss_reset_playback_locked(void) {
@@ -732,14 +738,15 @@ static int oss_poll(cdev_t *cdev, short events) {
     if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
         /*
          * The playback FIFO drains against monotonic time, not a hardware
-         * interrupt.  If a kqueue/epoll waiter sees a momentarily full virtual
-         * FIFO there is no later device edge to wake it, while oss_write()
-         * already performs the pacing needed by the virtual sink.
+         * interrupt.  Report writable only after enough room has drained for
+         * a useful nonblocking write; epoll performs short internal rescans,
+         * so waiters do not need a synthetic always-writable edge here.
          */
         spin_lock(&oss_lock);
-        oss_playback_update_locked();
+        int writable = oss_playback_writable_locked();
         spin_unlock(&oss_lock);
-        revents |= events & (POLLOUT | POLLWRNORM | POLLWRBAND);
+        if (writable)
+            revents |= events & (POLLOUT | POLLWRNORM | POLLWRBAND);
     }
     return revents;
 }

@@ -41,6 +41,8 @@
 #define FB_GPU_VIRGL_FENCE_EXPORT_FD 0x4626 /* export a virgl fence as an fd */
 #define FB_GPU_VIRGL_FENCE_QUERY_FD  0x4627 /* query/wait a virgl fence fd */
 #define FB_GPU_VIRGL_RESOURCE_EXPORT_FD 0x4628 /* export a virgl resource as a BO fd */
+#define FB_GPU_SCANOUT_MAP 0x4629   /* map scanout backing into caller */
+#define FB_GPU_SCANOUT_FLUSH 0x462A /* flush a dirty scanout rectangle */
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
@@ -116,6 +118,22 @@ struct fb_gpu_bo_present {
     uint32   handle;         /* optional BO handle; overrides pixels/pitch */
     uint32   flags;          /* reserved, must be 0 */
     uint64   fence;          /* returned completed fence for handle presents */
+};
+
+struct fb_gpu_scanout_map {
+    uint32   width;          /* returned width in pixels */
+    uint32   height;         /* returned height in pixels */
+    uint32   pitch;          /* returned pitch in bytes */
+    uint32   reserved;
+    uint64   size;           /* returned mapping size in bytes */
+    uint64   addr;           /* returned user virtual address */
+};
+
+struct fb_gpu_scanout_flush {
+    uint32   x;
+    uint32   y;
+    uint32   w;
+    uint32   h;
 };
 
 struct fb_gpu_bo_destroy {

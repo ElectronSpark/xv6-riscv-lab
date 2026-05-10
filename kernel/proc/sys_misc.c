@@ -257,12 +257,27 @@ uint64 sys_getrusage(void) {
 #define PRIO_PGRP    1
 #define PRIO_USER    2
 
+static int nice_to_eevdf_priority(int nice)
+{
+    if (nice < -20)
+        nice = -20;
+    if (nice > 19)
+        nice = 19;
+    return EEVDF_PRIORITY_START + nice + 20;
+}
+
+static int priority_to_nice(int priority)
+{
+    if (!IS_EEVDF_PRIORITY(priority))
+        return 0;
+    return priority - EEVDF_PRIORITY_START - 20;
+}
+
 /*
  * Linux getpriority returns 20 - nice, so range [1, 40].
- * The kernel scheduler uses priority levels 0-63 where
- * DEFAULT_MAJOR_PRIORITY = 17.  We map nice ∈ [-20,19] to
- * priority ∈ [0,39] via: priority = nice + 20.
- * nice = priority - 20.
+ * Normal SCHED_OTHER tasks live in the EEVDF priority range:
+ * nice -20 maps to EEVDF_PRIORITY_START, nice 0 maps to
+ * DEFAULT_PRIORITY, and nice 19 maps to EEVDF_PRIORITY_LIMIT - 1.
  *
  * Linux convention: getpriority returns 20 - nice (always > 0 to
  * distinguish success from error).  Userspace must compute
@@ -294,10 +309,7 @@ uint64 sys_getpriority(void) {
 
     int nice = 0;
     if (target->sched_entity) {
-        int prio = target->sched_entity->priority;
-        nice = prio - 20;
-        if (nice < -20) nice = -20;
-        if (nice > 19)  nice = 19;
+        nice = priority_to_nice(target->sched_entity->priority);
     }
 
     return (uint64)(20 - nice);
@@ -339,7 +351,7 @@ uint64 sys_setpriority(void) {
     if (target->sched_entity) {
         struct sched_attr attr;
         sched_attr_init(&attr);
-        attr.priority = niceval + 20;
+        attr.priority = nice_to_eevdf_priority(niceval);
         sched_setattr(target->sched_entity, &attr);
     }
 
