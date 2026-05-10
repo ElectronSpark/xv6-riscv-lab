@@ -164,8 +164,12 @@
 #define smp_store_release(p, v) __smp_store_release((p), (v))
 #define smp_load_acquire(p) __smp_load_acquire((p))
 
-// Hint to the CPU that we're in a spin-wait loop
+// Hint to the CPU that we're in a spin-wait loop.
+#ifdef __x86_64__
+#define cpu_relax() asm volatile("pause" ::: "memory")
+#else
 #define cpu_relax() asm volatile("nop" ::: "memory")
+#endif
 
 #define smp_cond_load_acquire(ptr, cond)                                       \
     ({                                                                         \
