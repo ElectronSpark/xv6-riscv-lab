@@ -677,6 +677,22 @@ static int virtio_gpu_capset_supported(uint32 capset_id)
            capset_id == VIRTIO_GPU_CAPSET_VIRGL2;
 }
 
+static int virtio_gpu_capset_preferred(uint32 current_id, uint32 current_version,
+                                       uint32 candidate_id,
+                                       uint32 candidate_version)
+{
+    if (candidate_id == 0)
+        return 0;
+    if (current_id == 0)
+        return 1;
+    if (candidate_id == VIRTIO_GPU_CAPSET_VIRGL2 &&
+        current_id != VIRTIO_GPU_CAPSET_VIRGL2)
+        return 1;
+    if (candidate_id == current_id && candidate_version > current_version)
+        return 1;
+    return 0;
+}
+
 static int virtio_gpu_user_get_drm_caps(uint32 requested_version, void *buf,
                                         uint32 buf_size, uint32 *capset_id,
                                         uint32 *capset_version,
@@ -1282,7 +1298,9 @@ static void virtio_gpu_query_capsets(struct virtio_gpu *g)
                 g->capsets[i].id = capset_id;
                 g->capsets[i].version = capset_version;
                 g->capsets[i].size = capset_size;
-                if (g->virgl_capset_id == 0) {
+                if (virtio_gpu_capset_preferred(g->virgl_capset_id,
+                                                g->virgl_capset_version,
+                                                capset_id, capset_version)) {
                     g->virgl_capset_id = capset_id;
                     g->virgl_capset_version = capset_version;
                     g->virgl_capset_size = capset_size;

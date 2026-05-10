@@ -2267,14 +2267,16 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         struct fb_gpu_virgl_caps req;
         void *caps = NULL;
         uint32 capset_size = 0;
+        uint32 requested_size;
         int ret;
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
         if (req.flags != 0)
             return -EINVAL;
+        requested_size = req.size;
         if (req.data != 0) {
-            if (req.size == 0 || req.size > PGSIZE)
+            if (requested_size == 0 || requested_size > PGSIZE)
                 return -EINVAL;
             caps = kalloc();
             if (caps == NULL)
@@ -2286,9 +2288,14 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
                                        &req.capset_version,
                                        &capset_size);
         req.size = capset_size;
-        if (ret == 0 && req.data != 0 &&
-            either_copyout(1, req.data, (char *)caps, capset_size) < 0)
-            ret = -EFAULT;
+        if (ret == 0 && req.data != 0) {
+            uint32 copy_size = capset_size;
+            if (copy_size > requested_size)
+                copy_size = requested_size;
+            if (copy_size != 0 &&
+                either_copyout(1, req.data, (char *)caps, copy_size) < 0)
+                ret = -EFAULT;
+        }
         if (caps != NULL)
             kfree(caps);
         if (ret != 0)
