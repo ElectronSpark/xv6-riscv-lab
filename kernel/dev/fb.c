@@ -613,6 +613,8 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
 static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
 {
     uint32 xres, yres;
+    uint32 pitch;
+    bool virtio_backed;
     int clipped = 0;
 
     if (cmd.w == 0 || cmd.h == 0)
@@ -635,6 +637,8 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
     spin_lock(&fb_state.lock);
     xres = fb_state.xres;
     yres = fb_state.yres;
+    pitch = fb_state.pitch;
+    virtio_backed = fb_state.virtio_backed;
     spin_unlock(&fb_state.lock);
 
     if (cmd.x >= xres || cmd.y >= yres)
@@ -654,8 +658,7 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
 
     uint8 kbuf[4096];
     uint32 max_px = sizeof(kbuf) / 4;
-    volatile uint32 *fb = (volatile uint32 *)fb_state.fb_virt;
-    uint32 stride = xres;
+    volatile uint8 *fb = fb_state.fb_virt;
 
     spin_lock(&fb_state.lock);
     if (cmd.x == 0 && cmd.y == 0 && cw == xres && ch == yres)
@@ -671,7 +674,8 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
 
     for (uint32 row = 0; row < ch; row++) {
         uint64 src_addr = cmd.pixels + (uint64)row * cmd.src_pitch;
-        volatile uint32 *dst = fb + (cmd.y + row) * stride + cmd.x;
+        volatile uint8 *dst = fb + (uint64)(cmd.y + row) * pitch +
+                              (uint64)cmd.x * 4;
         uint32 remaining = cw;
         uint32 col = 0;
 
@@ -681,11 +685,17 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
                 chunk = max_px;
             if (either_copyin(kbuf, 1, src_addr + col * 4, chunk * 4) < 0)
                 return -EFAULT;
-            spin_lock(&fb_state.lock);
-            uint32 *src = (uint32 *)kbuf;
-            for (uint32 p = 0; p < chunk; p++)
-                dst[col + p] = src[p];
-            spin_unlock(&fb_state.lock);
+            if (virtio_backed) {
+                memcpy((void *)(dst + (uint64)col * 4), kbuf, chunk * 4);
+            } else {
+                spin_lock(&fb_state.lock);
+                volatile uint32 *dst32 =
+                    (volatile uint32 *)(dst + (uint64)col * 4);
+                uint32 *src32 = (uint32 *)kbuf;
+                for (uint32 p = 0; p < chunk; p++)
+                    dst32[p] = src32[p];
+                spin_unlock(&fb_state.lock);
+            }
             col += chunk;
             remaining -= chunk;
         }
@@ -712,6 +722,7 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
                            uint64 *fence_out)
 {
     uint32 xres, yres;
+    bool virtio_backed;
     uint32 cw, ch;
     uint64 offset;
     uint64 last;
@@ -736,6 +747,7 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
     spin_lock(&fb_state.lock);
     xres = fb_state.xres;
     yres = fb_state.yres;
+    virtio_backed = fb_state.virtio_backed;
     spin_unlock(&fb_state.lock);
 
     if (cmd.x >= xres || cmd.y >= yres)
@@ -787,22 +799,26 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
             pa = __page_to_pa(bo->pages[page_idx]);
             src = (uint8 *)PA2VA(pa) + page_off;
 
-            spin_lock(&fb_state.lock);
-            if ((((uint64)(uintptr_t)(dst + copied) | (uint64)(uintptr_t)src |
-                  chunk) & 3) == 0) {
+            if (virtio_backed) {
+                memcpy((void *)(dst + copied), src, chunk);
+            } else if ((((uint64)(uintptr_t)(dst + copied) |
+                         (uint64)(uintptr_t)src | chunk) & 3) == 0) {
+                spin_lock(&fb_state.lock);
                 volatile uint32 *d32 = (volatile uint32 *)(dst + copied);
                 uint32 *s32 = (uint32 *)src;
                 uint32 words = chunk / sizeof(uint32);
 
                 for (uint32 i = 0; i < words; i++)
                     d32[i] = s32[i];
+                spin_unlock(&fb_state.lock);
             } else {
+                spin_lock(&fb_state.lock);
                 volatile uint8 *d8 = dst + copied;
 
                 for (uint32 i = 0; i < chunk; i++)
                     d8[i] = src[i];
+                spin_unlock(&fb_state.lock);
             }
-            spin_unlock(&fb_state.lock);
 
             src_off += chunk;
             copied += chunk;
