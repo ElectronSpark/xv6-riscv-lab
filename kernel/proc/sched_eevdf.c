@@ -273,10 +273,17 @@ static void __place_entity(struct eevdf_rq *erq, struct sched_entity *se,
         }
     }
 
-    /* Don't let vruntime go backward compared to what entity already had
-     * unless this is a brand-new entity. */
     if (!initial && se->vruntime > vruntime) {
-        vruntime = se->vruntime;
+        /*
+         * A task that slept after a burst of CPU time can have a vruntime far
+         * ahead of the runqueue. Keeping that full lead makes interactive
+         * sleepers wait behind CPU-bound work after wakeup. Preserve short-term
+         * fairness, but cap the lead to one slice so UI/event-loop tasks remain
+         * eligible promptly after sleeping.
+         */
+        int64 max_ahead =
+            erq->min_vruntime + __calc_delta_vruntime(se->slice, &se->load);
+        vruntime = se->vruntime > max_ahead ? max_ahead : se->vruntime;
     }
 
     se->vruntime = vruntime;
