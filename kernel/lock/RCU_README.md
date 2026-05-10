@@ -40,7 +40,7 @@ This implementation includes **Linux-inspired performance enhancements** specifi
 ### Core Data Structures
 
 - **`rcu_state_t`**: Global RCU state tracking grace periods
-- **`rcu_cpu_data_t`**: Per-CPU data for tracking callbacks (cache-line aligned, declared separately as `rcu_cpu_data[NCPU]`)
+- **`rcu_cpu_data_t`**: Per-CPU data for tracking callbacks (cache-line aligned, allocated for `cpu_possible_count()` CPUs)
 - **`rcu_head_t`**: Callback structure for deferred reclamation (includes registration timestamp)
 - **`struct thread`**: Per-thread RCU nesting counter (`rcu_read_lock_nesting`) and RCU callback head (`rcu_head`)
 
@@ -846,8 +846,8 @@ printf("Expedited GPs completed: %ld\n",
        rcu_state.expedited_count);
 
 // Monitor per-CPU RCU data
-extern rcu_cpu_data_t rcu_cpu_data[NCPU];
-for (int i = 0; i < NCPU; i++) {
+extern rcu_cpu_data_t *rcu_cpu_data;
+for (int i = 0; i < cpu_possible_count(); i++) {
     rcu_cpu_data_t *rcp = &rcu_cpu_data[i];
     printf("CPU %d: pending=%p, cb_count=%ld, invoked=%ld\n",
            i, rcp->pending_head,
@@ -855,7 +855,7 @@ for (int i = 0; i < NCPU; i++) {
 }
 
 // Monitor per-CPU timestamps
-for (int i = 0; i < NCPU; i++) {
+for (int i = 0; i < cpu_possible_count(); i++) {
     printf("CPU %d timestamp: %ld\n", i, cpus[i].rcu_timestamp);
 }
 ```
@@ -957,7 +957,7 @@ Potential Linux RCU features that could be added:
 - **Automatic callback processing** across all CPUs
 - **Improved reliability**:
   - Prevents grace period stalls from offline CPUs
-  - Handles NCPU > actual online CPUs gracefully
+  - Handles MAX_CPUS > actual online CPUs gracefully
   - Better CPU utilization in mixed workloads
 
 ### v2.2 - Per-CPU Processing and RCU Data Structure Primitives

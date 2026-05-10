@@ -75,6 +75,20 @@ void platform_print_mem_summary(void);
 void platform_post_vm_init(void);
 
 /**
+ * Return the number of CPU slots this boot should prepare.
+ * This is a runtime value discovered from firmware/CPU topology where
+ * available, clamped to MAX_CPUS.  MAX_CPUS remains the compile-time upper
+ * bound.
+ */
+int platform_boot_cpu_limit(void);
+
+/**
+ * Let the platform move the current CPU from an early firmware/bootstrap stack
+ * to an allocator-backed kernel stack before idle_thread_init() records it.
+ */
+void platform_prepare_current_cpu_stack(void);
+
+/**
  * Start secondary CPUs.
  * RISC-V: uses SBI HSM to start other harts.
  * x86:    will use APIC INIT/SIPI (stub for now).

@@ -692,6 +692,7 @@ static int __mt_update_vma(vm_t *vm, vma_t *vma, uint64 old_start,
     /* Store VMA at its new range. */
     int ret = __mt_store_vma(vm, vma);
     if (ret != 0) {
+        __mt_erase_vma(vm, vma);
         /* Roll back: restore VMA fields and re-store old range. */
         vma->start = old_start;
         vma->end = old_end;
@@ -754,7 +755,7 @@ static void vm_count_orphan_leaf(uint64 va, uint64 size, pte_t pte, void *arg)
     uint64 check = va;
     void *entry;
 
-    if (va >= TRAPFRAME && va < TRAPFRAME + (NCPU * PGSIZE))
+    if (va >= TRAPFRAME && va < TRAPFRAME + (cpu_possible_count() * PGSIZE))
         return;
 
     acct->total_leafs++;
@@ -893,7 +894,6 @@ vm_t *vm_init(void)
         return NULL;
     memset(vm, 0, sizeof(vm_t));
     mt_init(&vm->vm_mt);
-    mt_set_in_rcu(&vm->vm_mt);
 
     vm->pagetable = uvmcreate();
     if (vm->pagetable == NULL) {
@@ -1246,6 +1246,7 @@ vma_t *vma_split(vma_t *vma, uint64 va)
     }
     if (__mt_store_vma(vma->vm, new_vma) != 0) {
         /* Restore old VMA range and re-store it. */
+        __mt_erase_vma(vma->vm, new_vma);
         vma->end = old_end;
         __mt_update_vma(vma->vm, vma, old_start, va); /* best-effort restore */
         if (new_vma->file != NULL)
@@ -1373,6 +1374,7 @@ vma_t *vma_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
 
     if (__mt_store_vma(vm, vma_new) != 0) {
         printf("vma_alloc: FAIL __mt_store_vma\n");
+        __mt_erase_vma(vm, vma_new);
         __vma_free(vma_new);
         return NULL;
     }
@@ -1496,17 +1498,6 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
         return NULL;
     }
 
-    /*
-     * Zero-copy path: if the page is fully covered by file data, map the
-     * pcache page directly into the user address space.  The pcache_get_folio
-     * ref (refcount >= 2) keeps the page pinned in the cache (off LRU).
-     * We do NOT call pcache_put_folio here — the user PTE now owns that ref.
-     * __vma_set_free / munmap will call pcache_put_folio when the mapping
-     * is torn down.
-     *
-     * Partial pages (last page of a file that doesn't fill PGSIZE) must
-     * still be copied so the tail is zero-filled.
-     */
     /* Compute the byte offset of the faulting page within the folio.
      * For multi-page folios the PTE must point to the correct sub-page,
      * not always the head. */
@@ -1927,6 +1918,18 @@ static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags, uint64 fault
     return 0;
 }
 
+static int vma_file_hugepage_collapse_enabled(void)
+{
+    /*
+     * The file-backed PMD collapse path frees and replaces L0 page-table pages.
+     * Under SMP WebKit/GStreamer workloads it has exposed stale upper-level PTEs
+     * during concurrent faults and process teardown. Keep the normal 4 KB
+     * pcache-backed mappings until the collapse path has full shootdown/refcount
+     * protection for page-table pages.
+     */
+    return 0;
+}
+
 int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 {
     uint64 validate_start = r_time();
@@ -1990,7 +1993,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
              * hp_skip_until prevents re-attempting a 2 MB region that
              * already failed in this validate pass.
              */
-            if (i >= hp_skip_until &&
+            if (vma_file_hugepage_collapse_enabled() &&
+                i >= hp_skip_until &&
                 __folio_order_for_vma(vma, i) >= HUGEPAGE_ORDER) {
                 uint64 hp_base = i & HUGEPAGE_MASK;
                 pte_t *pmd = walk_pmd(vma->vm->pagetable, hp_base, 1);
@@ -4429,7 +4433,6 @@ void kernel_vm_init(void)
     memset(vm, 0, sizeof(vm_t));
 
     mt_init(&vm->vm_mt);
-    mt_set_in_rcu(&vm->vm_mt);
 
     vm->pagetable = kernel_pagetable;
     vm->trapframe_pte = NULL;     /* no per-process trapframes */

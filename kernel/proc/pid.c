@@ -353,8 +353,10 @@ void procdump_bt_pid(int pid) {
     int pgid = p->pgid;
     int sid_val = p->sid;
 
-    printf("\n--- %d:%d:%d:%d [%s] %s ---\n", sid_val, pgid, tgid, pid,
-           thread_state_short(pstate), name);
+    printf("\n--- %d:%d:%d:%d [%s] %s chan=%p on_cpu=%d kstack=%p order=%d ---\n",
+           sid_val, pgid, tgid, pid, thread_state_short(pstate), name,
+           p->chan, smp_load_acquire(&p->sched_entity->on_cpu),
+           (void *)p->kstack, p->kstack_order);
 
     if (smp_load_acquire(&p->sched_entity->on_cpu)) {
         printf("Process is currently on a CPU, context not saved\n");

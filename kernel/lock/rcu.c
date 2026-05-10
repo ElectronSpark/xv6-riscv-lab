@@ -67,6 +67,8 @@
 #include "proc/rq.h"
 #include "timer/timer.h"
 #include "mm/slab.h"
+#include "mm/vm.h"
+#include "string.h"
 
 // Slab cache for rcu_head_t structures
 static slab_cache_t rcu_head_slab = {0};
@@ -74,8 +76,9 @@ static slab_cache_t rcu_head_slab = {0};
 // Global RCU state
 static rcu_state_t rcu_state;
 
-// Per-CPU RCU data - cache-line aligned to prevent false sharing
-rcu_cpu_data_t rcu_cpu_data[NCPU] __ALIGNED_CACHELINE;
+// Per-CPU RCU data, sized from runtime CPU topology.
+rcu_cpu_data_t *rcu_cpu_data;
+static _Atomic int rcu_initialized;
 
 // Lock protecting grace period state transitions
 static spinlock_t rcu_gp_lock = SPINLOCK_INITIALIZED("rcu_gp_lock");
@@ -85,10 +88,11 @@ static tq_t rcu_gp_waitq;
 static spinlock_t rcu_gp_waitq_lock = SPINLOCK_INITIALIZED("rcu_gp_waitq_lock");
 
 // Per-CPU RCU kthread state (forward declaration for rcu_barrier)
-static struct {
+struct rcu_kthread_state {
     struct thread *kthread;      // The kthread
     volatile int wakeup_pending; // Flag to signal wakeup
-} rcu_kthread[NCPU];
+};
+static struct rcu_kthread_state *rcu_kthread;
 
 // Flag indicating if RCU kthreads have been started
 static volatile int rcu_kthreads_started = 0;
@@ -127,7 +131,7 @@ static void rcu_check_timestamp_overflow(void);
 // be in RCU read-side critical sections.
 static uint64 rcu_get_min_other_cpu_timestamp(int exclude_cpu) {
     uint64 min_ts = RCU_UINT64_MAX;
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         if (i == exclude_cpu)
             continue; // Skip the excluded CPU
         struct cpu_local *cpu = &cpus[i];
@@ -184,7 +188,7 @@ static int rcu_gp_completed(void) {
     // A grace period completes when all CPUs have timestamps >= gp_start
     // This means they have all context switched at or after the GP began
 
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         struct cpu_local *cpu = &cpus[i];
         uint64 cpu_timestamp =
             __atomic_load_n(&cpu->rcu_timestamp, __ATOMIC_ACQUIRE);
@@ -241,16 +245,27 @@ void rcu_init(void) {
     __atomic_store_n(&rcu_state.expedited_seq, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.expedited_count, 0, __ATOMIC_RELEASE);
 
+    int ncpu = cpu_possible_count();
+    rcu_cpu_data = (rcu_cpu_data_t *)kvmalloc(sizeof(rcu_cpu_data_t) * ncpu);
+    rcu_kthread = (struct rcu_kthread_state *)
+        kvmalloc(sizeof(struct rcu_kthread_state) * ncpu);
+    assert(rcu_cpu_data != NULL && rcu_kthread != NULL,
+           "rcu_init: per-CPU allocation failed");
+    memset(rcu_cpu_data, 0, sizeof(rcu_cpu_data_t) * ncpu);
+    memset(rcu_kthread, 0, sizeof(struct rcu_kthread_state) * ncpu);
+
     // Initialize per-CPU data and timestamps
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < ncpu; i++) {
         rcu_cpu_init(i);
         // Initialize CPU timestamp
         cpus[i].rcu_timestamp = 0;
     }
+
+    __atomic_store_n(&rcu_initialized, 1, __ATOMIC_RELEASE);
 }
 
 void rcu_cpu_init(int cpu) {
-    if (cpu < 0 || cpu >= NCPU) {
+    if (cpu < 0 || cpu >= cpu_possible_count()) {
         return;
     }
 
@@ -447,6 +462,16 @@ void rcu_check_callbacks(void) {
 
 void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
     if (func == NULL) {
+        return;
+    }
+
+    if (!__atomic_load_n(&rcu_initialized, __ATOMIC_ACQUIRE)) {
+        /*
+         * Early boot uses RCU-tagged structures before per-CPU RCU storage and
+         * callback kthreads exist.  There is only one running CPU at that
+         * point, so there are no concurrent RCU readers to wait for.
+         */
+        func(data);
         return;
     }
 
@@ -671,7 +696,7 @@ void synchronize_rcu(void) {
         if (min_ts >= sync_timestamp) {
             // All CPUs have passed through a quiescent state
             // Wake up kthreads to process any ready callbacks
-            for (int i = 0; i < NCPU; i++) {
+            for (int i = 0; i < cpu_possible_count(); i++) {
                 if (rcu_kthread[i].kthread != NULL) {
                     wakeup_interruptible(rcu_kthread[i].kthread);
                 }
@@ -722,7 +747,7 @@ void rcu_barrier(void) {
 
     while (!all_done && wait_count < max_wait) {
         // Wake up all RCU kthreads to process callbacks
-        for (int i = 0; i < NCPU; i++) {
+        for (int i = 0; i < cpu_possible_count(); i++) {
             if (rcu_kthread[i].kthread != NULL) {
                 wakeup_interruptible(rcu_kthread[i].kthread);
             }
@@ -735,7 +760,7 @@ void rcu_barrier(void) {
         // We check each CPU's pending list for callbacks with timestamp <=
         // barrier_timestamp
         all_done = 1;
-        for (int i = 0; i < NCPU; i++) {
+        for (int i = 0; i < cpu_possible_count(); i++) {
             rcu_cpu_data_t *rcp = &rcu_cpu_data[i];
 
             // Quick check: if cb_count is 0, no callbacks pending
@@ -806,7 +831,7 @@ static void rcu_expedited_gp(void) {
     while (wait_count < max_wait) {
         int all_switched = 1;
 
-        for (int i = 0; i < NCPU; i++) {
+        for (int i = 0; i < cpu_possible_count(); i++) {
             struct cpu_local *cpu = &cpus[i];
             uint64 cpu_timestamp =
                 __atomic_load_n(&cpu->rcu_timestamp, __ATOMIC_ACQUIRE);
@@ -1030,14 +1055,14 @@ void rcu_kthread_wakeup(void) {
 }
 
 // Names for RCU kthreads - simple static strings
-static const char *rcu_names[NCPU] = {"rcu_cb/0", "rcu_cb/1", "rcu_cb/2",
-                                      "rcu_cb/3", "rcu_cb/4", "rcu_cb/5",
-                                      "rcu_cb/6", "rcu_cb/7"};
+static const char *rcu_names[] = {"rcu_cb/0", "rcu_cb/1", "rcu_cb/2",
+                                  "rcu_cb/3", "rcu_cb/4", "rcu_cb/5",
+                                  "rcu_cb/6", "rcu_cb/7"};
 
 // Start RCU callback processing thread for a specific CPU
 // Called from each CPU's init context (after rq_cpu_activate)
 void rcu_kthread_start_cpu(int cpu) {
-    if (cpu < 0 || cpu >= NCPU) {
+    if (cpu < 0 || cpu >= cpu_possible_count()) {
         return;
     }
 
@@ -1046,7 +1071,8 @@ void rcu_kthread_start_cpu(int cpu) {
     rcu_kthread[cpu].wakeup_pending = 0;
 
     struct thread *p = NULL;
-    const char *name = (cpu < 8) ? rcu_names[cpu] : "rcu_cb";
+    int name_count = sizeof(rcu_names) / sizeof(rcu_names[0]);
+    const char *name = (cpu < name_count) ? rcu_names[cpu] : "rcu_cb";
 
     p = kthread_create(name, rcu_cb_kthread, cpu, 0, KERNEL_STACK_ORDER);
     if (IS_ERR_OR_NULL(p)) {

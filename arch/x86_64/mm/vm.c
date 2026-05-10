@@ -12,7 +12,7 @@
  *   1. Static kernel symbols (BSS/data/text) are higher-half VAs.
  *      Use VA2PA() when storing them into page table entries or CR3.
  *      Example: kpml4, kpdpt, kpds[], vector0, trampoline, cpus,
- *               irq_stacks, sig_trampoline — all higher-half VAs.
+ *               sig_trampoline — all higher-half VAs.
  *
  *   2. page_alloc() / kalloc() return PHYSICAL ADDRESSES.
  *      These are usable as pointers thanks to the PML4[0] identity map.
@@ -40,7 +40,9 @@
 #include "printf.h"
 #include "memlayout.h"
 #include "seg.h"
+#include "platform.h"
 #include <mm/page.h>
+#include <smp/percpu.h>
 #include <smp/percpu_types.h>
 
 /* ── x86_64 page table entry bit definitions ── */
@@ -88,11 +90,11 @@ extern void vector0(void);
 extern void syscall_entry(void);
 extern char trampoline[];
 extern void sig_trampoline(void);
-extern struct cpu_local cpus[NCPU];
+extern struct cpu_local cpus[];
 extern pagetable_t kernel_pagetable;
 extern uint64 trampoline_ksatp;  /* defined in trapvec.S */
 
-static uint8 irq_stacks[NCPU][INTR_STACK_SIZE] __attribute__((aligned(PGSIZE)));
+static void **irq_stacks;
 
 /* ── debugcon helpers ── */
 static inline void vm_outb(uint16 port, uint8 val) {
@@ -247,7 +249,8 @@ void arch_vm_init(void)
             panic("arch_vm_init: sig trampoline map failed");
 
         uint64 cpus_base = PGROUNDDOWN((uint64)cpus);
-        if (PGROUNDUP((uint64)cpus + sizeof(cpus)) - cpus_base > PGSIZE)
+        size_t cpus_bytes = sizeof(cpus[0]) * cpu_possible_count();
+        if (PGROUNDUP((uint64)cpus + cpus_bytes) - cpus_base > PGSIZE)
             panic("arch_vm_init: cpus[] exceeds one page");
         if (mappages((pagetable_t)kpml4, TRAMPOLINE_CPULOCAL, PGSIZE,
                      VA2PA(cpus_base), PTE_R | PTE_W | PTE_G) != 0)
@@ -263,8 +266,19 @@ void arch_vm_init(void)
                 *pte |= PTE_NX;
         }
 
-        for (int i = 0; i < NCPU; i++) {
-            uint64 stack_pa = VA2PA((uint64)&irq_stacks[i][0]);
+        int cpu_limit = platform_boot_cpu_limit();
+        irq_stacks = page_alloc(0, PAGE_TYPE_ANON);
+        if (irq_stacks == NULL)
+            panic("arch_vm_init: irq stack table allocation failed");
+        __builtin_memset(irq_stacks, 0, PGSIZE);
+
+        for (int i = 0; i < cpu_limit; i++) {
+            irq_stacks[i] = page_alloc(INTR_STACK_ORDER, PAGE_TYPE_ANON);
+            if (irq_stacks[i] == NULL)
+                panic("arch_vm_init: irq stack allocation failed");
+            __builtin_memset(irq_stacks[i], 0, INTR_STACK_SIZE);
+
+            uint64 stack_pa = (uint64)irq_stacks[i];
             uint64 stack_va = KIRQSTACK(i);
             if (mappages((pagetable_t)kpml4, stack_va, INTR_STACK_SIZE,
                          stack_pa, PTE_R | PTE_W | PTE_G) != 0)
@@ -406,8 +420,8 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
     cpumask &= ~(1ULL << cpuid());
 
     if (cpumask) {
-        extern volatile uint64 tlb_flush_va[];
-        for (int i = 0; i < NCPU; i++) {
+        extern volatile uint64 *tlb_flush_va;
+        for (int i = 0; i < cpu_possible_count(); i++) {
             if (!(cpumask & (1ULL << i)))
                 continue;
             uint64 expected = 0;
@@ -681,7 +695,7 @@ void arch_vm_teardown_trampoline(vm_t *vm)
         return;
     /* Clear all trapframe PTEs (don't free phys pages — they belong
      * to kernel stacks, not to this VM). */
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         int pte_idx = PX(0, TRAPFRAME + (i * PGSIZE));
         vm->trapframe_pte[pte_idx] = 0;
     }

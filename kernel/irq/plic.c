@@ -48,7 +48,7 @@ void plic_complete(int irq) {
 // Enable a specific IRQ on PLIC for all harts
 void plic_enable_irq(int irq) {
     *PLIC_PRIORITY(irq) = 1;
-    for (int hart = 0; hart < NCPU; hart++) {
+    for (int hart = 0; hart < cpu_possible_count(); hart++) {
         PLIC_SET_SENABLE(hart, irq);
     }
 }

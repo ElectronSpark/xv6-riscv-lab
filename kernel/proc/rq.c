@@ -9,6 +9,7 @@
 #include "printf.h"
 #include "list.h"
 #include <mm/slab.h>
+#include "mm/vm.h"
 #include "proc/rq.h"
 #include "rbtree.h"
 #include "llist.h"
@@ -19,14 +20,14 @@
 #include "compiler.h"
 #include "smp/ipi.h"
 
-/** @brief Static per-CPU run queue data array (cache-line aligned). */
-static struct rq_percpu rq_percpu_data[NCPU] __ALIGNED_CACHELINE;
+/** @brief Runtime-sized per-CPU run queue data array. */
+static struct rq_percpu *rq_percpu_data;
 
 /**
  * @brief Global run queue structure.
  *
  * rqs structure (now organized per-CPU for cache efficiency):
- *   percpu[NCPU] (fixed size array, one per CPU, cache-line aligned)
+ *   percpu[cpu_possible_count()] (one entry per possible CPU)
  *       |
  *       v
  *   +------------------+------------------+------------------+
@@ -115,7 +116,7 @@ struct rq *get_rq_for_cpu(int cls_id, int cpu_id) {
     if (cls_id < 0 || cls_id >= PRIORITY_MAINLEVELS) {
         return ERR_PTR(-EINVAL);
     }
-    if (cpu_id < 0 || cpu_id >= NCPU) {
+    if (cpu_id < 0 || cpu_id >= cpu_possible_count()) {
         return ERR_PTR(-EINVAL);
     }
     return __get_rq_for_cpu(cls_id, cpu_id);
@@ -129,12 +130,12 @@ int rq_cpu_id(struct rq *rq) {
     int cpu_id = rq->cpu_id;
     int class_id = rq->class_id;
 
-    if (cpu_id >= 0 && cpu_id < NCPU && class_id >= 0 &&
+    if (cpu_id >= 0 && cpu_id < cpu_possible_count() && class_id >= 0 &&
         class_id < PRIORITY_MAINLEVELS && __get_rq_for_cpu(class_id, cpu_id) == rq) {
         return cpu_id;
     }
 
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         for (int cls = 0; cls < PRIORITY_MAINLEVELS; cls++) {
             if (__get_rq_for_cpu(cls, cpu) == rq) {
                 rq->class_id = cls;
@@ -152,7 +153,7 @@ int rq_identify_object(void *ptr, int *cpu_id, int *class_id) {
         return 0;
     }
 
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         for (int cls = 0; cls < PRIORITY_MAINLEVELS; cls++) {
             struct rq *rq = __get_rq_for_cpu(cls, cpu);
             if (rq == (struct rq *)ptr) {
@@ -208,11 +209,14 @@ struct rq *pick_next_rq(void) {
 }
 
 void rq_global_init(void) {
-    // Use statically allocated cache-line-aligned per-CPU array
+    size_t rq_percpu_size = sizeof(struct rq_percpu) * cpu_possible_count();
+    rq_percpu_data = (struct rq_percpu *)kvmalloc(rq_percpu_size);
+    assert(rq_percpu_data != NULL, "rq_global_init: percpu allocation failed");
+    memset(rq_percpu_data, 0, rq_percpu_size);
     rq_global.percpu = rq_percpu_data;
 
     // Initialize each per-CPU structure
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         struct rq_percpu *rq_pc = __rqpc(i);
         spin_init(&rq_pc->rq_lock, "rq_percpu_lock");
         rq_pc->ready_mask = 0;
@@ -244,7 +248,7 @@ void rq_register(struct rq *rq, int cls_id, int cpu_id) {
     assert(rq != NULL, "rq_register: rq is NULL");
     assert(cls_id >= 0 && cls_id < PRIORITY_MAINLEVELS,
            "rq_register: invalid cls_id %d", cls_id);
-    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_register: invalid cpu_id %d",
+    assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "rq_register: invalid cpu_id %d",
            cpu_id);
     struct rq_percpu *rq_pc = __rqpc(cpu_id);
     assert(rq_pc->rqs[cls_id] == NULL,
@@ -266,7 +270,7 @@ void sched_entity_init(struct sched_entity *se, struct thread *p) {
     se->on_rq = 0;
     se->on_cpu = 0;
     se->cpu_id = -1;
-    se->affinity_mask = (1ULL << NCPU) - 1; // all CPUs
+    se->affinity_mask = cpu_possible_mask(); // all CPUs
     se->start_time = 0;
     se->exec_start = 0;
     se->exec_end = 0;
@@ -304,7 +308,7 @@ void rq_lock(int cpu_id) __acquires(__rq_lock_context)
     (void)cpu_id;
     __acquire_context(__rq_lock_context);
 #else
-    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_lock: invalid cpu_id %d", cpu_id);
+    assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "rq_lock: invalid cpu_id %d", cpu_id);
     spin_lock(&__rqpc(cpu_id)->rq_lock);
 #endif
 }
@@ -312,7 +316,7 @@ void rq_lock(int cpu_id) __acquires(__rq_lock_context)
 // Try to acquire the rq lock without spinning.
 // Returns 1 if acquired, 0 if not.
 int rq_trylock(int cpu_id) {
-    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_trylock: invalid cpu_id %d",
+    assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "rq_trylock: invalid cpu_id %d",
            cpu_id);
     return spin_trylock(&__rqpc(cpu_id)->rq_lock);
 }
@@ -323,7 +327,7 @@ void rq_unlock(int cpu_id) __releases(__rq_lock_context)
     (void)cpu_id;
     __release_context(__rq_lock_context);
 #else
-    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d",
+    assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "rq_unlock: invalid cpu_id %d",
            cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d",
            cpu_id);
@@ -338,7 +342,7 @@ int rq_lock_irqsave(int cpu_id) __acquires(__rq_lock_context)
     __acquire_context(__rq_lock_context);
     return 0;
 #else
-    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_lock: invalid cpu_id %d", cpu_id);
+    assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "rq_lock: invalid cpu_id %d", cpu_id);
     return spin_lock_irqsave(&__rqpc(cpu_id)->rq_lock);
 #endif
 }
@@ -350,7 +354,7 @@ void rq_unlock_irqrestore(int cpu_id, int state) __releases(__rq_lock_context)
     (void)state;
     __release_context(__rq_lock_context);
 #else
-    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d",
+    assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "rq_unlock: invalid cpu_id %d",
            cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d",
            cpu_id);
@@ -391,9 +395,9 @@ void rq_lock_two(int cpu_id1, int cpu_id2) __acquires(__rq_lock_context)
     (void)cpu_id2;
     __acquire_context(__rq_lock_context);
 #else
-    assert(cpu_id1 >= 0 && cpu_id1 < NCPU, "rq_lock_two: invalid cpu_id1 %d",
+    assert(cpu_id1 >= 0 && cpu_id1 < cpu_possible_count(), "rq_lock_two: invalid cpu_id1 %d",
            cpu_id1);
-    assert(cpu_id2 >= 0 && cpu_id2 < NCPU, "rq_lock_two: invalid cpu_id2 %d",
+    assert(cpu_id2 >= 0 && cpu_id2 < cpu_possible_count(), "rq_lock_two: invalid cpu_id2 %d",
            cpu_id2);
     if (cpu_id1 < cpu_id2) {
         rq_lock(cpu_id1);
@@ -411,9 +415,9 @@ void rq_lock_two(int cpu_id1, int cpu_id2) __acquires(__rq_lock_context)
 // Uses consistent ordering (lower cpu_id first) to prevent deadlock.
 // Returns 1 if both acquired, 0 if not (releases any acquired lock).
 int rq_trylock_two(int cpu_id1, int cpu_id2) {
-    assert(cpu_id1 >= 0 && cpu_id1 < NCPU, "rq_trylock_two: invalid cpu_id1 %d",
+    assert(cpu_id1 >= 0 && cpu_id1 < cpu_possible_count(), "rq_trylock_two: invalid cpu_id1 %d",
            cpu_id1);
-    assert(cpu_id2 >= 0 && cpu_id2 < NCPU, "rq_trylock_two: invalid cpu_id2 %d",
+    assert(cpu_id2 >= 0 && cpu_id2 < cpu_possible_count(), "rq_trylock_two: invalid cpu_id2 %d",
            cpu_id2);
 
     int first, second;
@@ -451,9 +455,9 @@ void rq_unlock_two(int cpu_id1, int cpu_id2) __releases(__rq_lock_context)
     (void)cpu_id2;
     __release_context(__rq_lock_context);
 #else
-    assert(cpu_id1 >= 0 && cpu_id1 < NCPU, "rq_unlock_two: invalid cpu_id1 %d",
+    assert(cpu_id1 >= 0 && cpu_id1 < cpu_possible_count(), "rq_unlock_two: invalid cpu_id1 %d",
            cpu_id1);
-    assert(cpu_id2 >= 0 && cpu_id2 < NCPU, "rq_unlock_two: invalid cpu_id2 %d",
+    assert(cpu_id2 >= 0 && cpu_id2 < cpu_possible_count(), "rq_unlock_two: invalid cpu_id2 %d",
            cpu_id2);
     if (cpu_id1 < cpu_id2) {
         rq_unlock(cpu_id2);
@@ -489,7 +493,7 @@ void rq_unlock_current(void) __releases(__rq_lock_context)
 }
 
 int rq_holding(int cpu_id) {
-    if (cpu_id < 0 || cpu_id >= NCPU) {
+    if (cpu_id < 0 || cpu_id >= cpu_possible_count()) {
         return 0;
     }
     return __rq_lock_held(cpu_id);
@@ -513,7 +517,7 @@ struct rq_percpu *rq_percpu_lock_get(int cpu_id) __acquires(__rq_lock_context)
     __acquire_context(__rq_lock_context);
     return (struct rq_percpu *)1;
 #else
-    if (cpu_id < 0 || cpu_id >= NCPU) {
+    if (cpu_id < 0 || cpu_id >= cpu_possible_count()) {
         return NULL;
     }
     struct rq_percpu *rq_pc = __rqpc(cpu_id);
@@ -604,7 +608,7 @@ struct rq *rq_select_task_rq(struct sched_entity *se, cpumask_t cpumask) {
     }
 
     // Fallback: find any allowed CPU's rq
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         cpumask_t mask = (1ULL << cpu);
         if (effective_mask & mask) {
             struct rq *rq = get_rq_for_cpu(major_prio, cpu);
@@ -831,7 +835,7 @@ void rq_yield_task(void) {
 }
 
 bool rq_cpu_is_idle(int cpu_id) {
-    if (cpu_id < 0 || cpu_id >= NCPU) {
+    if (cpu_id < 0 || cpu_id >= cpu_possible_count()) {
         return false;
     }
     if (!(smp_load_acquire(&rq_global.active_cpu_mask) & (1ULL << cpu_id))) {
@@ -851,7 +855,7 @@ int rq_add_wake_list_locked(int cpu_id, struct sched_entity *se)
     if (se == NULL || se->thread == NULL) {
         return -EINVAL;
     }
-    if (cpu_id < 0 || cpu_id >= NCPU) {
+    if (cpu_id < 0 || cpu_id >= cpu_possible_count()) {
         return -EINVAL;
     }
     assert(__rq_lock_held(cpu_id),
@@ -896,7 +900,7 @@ struct sched_entity *rq_pop_all_wake_list(struct rq_percpu *rq_pc) {
  * The waker has already selected this CPU as the target.
  */
 void rq_flush_wake_list(int cpu_id) {
-    if (cpu_id < 0 || cpu_id >= NCPU) {
+    if (cpu_id < 0 || cpu_id >= cpu_possible_count()) {
         return;
     }
 
@@ -981,7 +985,7 @@ void rq_flush_wake_list(int cpu_id) {
 
         cpumask_t aff = se->affinity_mask;
         int forwarded = 0;
-        for (int c = 0; c < NCPU; c++) {
+        for (int c = 0; c < cpu_possible_count(); c++) {
             if (aff & (1ULL << c)) {
                 struct rq_percpu *dst = rq_percpu_lock_get(c);
                 if (dst != NULL) {
@@ -1015,7 +1019,7 @@ void sched_attr_init(struct sched_attr *attr) {
         return;
     }
     attr->size = sizeof(struct sched_attr);
-    attr->affinity_mask = (1ULL << NCPU) - 1; // All CPUs
+    attr->affinity_mask = cpu_possible_mask(); // All possible CPUs
     attr->time_slice = DEFAULT_TIME_SLICE; // Placeholder - not yet implemented
     attr->priority = DEFAULT_PRIORITY;
     attr->flags = 0;
@@ -1059,7 +1063,7 @@ int sched_setattr(struct sched_entity *se, const struct sched_attr *attr) {
     }
 
     // Validate affinity mask - must have at least one valid CPU
-    cpumask_t valid_mask = (1ULL << NCPU) - 1;
+    cpumask_t valid_mask = cpu_possible_mask();
     if ((attr->affinity_mask & valid_mask) == 0) {
         return -EINVAL;
     }
@@ -1086,7 +1090,7 @@ int sched_setattr(struct sched_entity *se, const struct sched_attr *attr) {
 // concurrently during boot; a plain |= is a non-atomic RMW that can
 // lose updates (one CPU's store overwrites another's).
 void rq_cpu_activate(int cpu) {
-    if (cpu >= 0 && cpu < NCPU) {
+    if (cpu >= 0 && cpu < cpu_possible_count()) {
         __atomic_fetch_or(&rq_global.active_cpu_mask, (1ULL << cpu),
                           __ATOMIC_RELEASE);
     }
@@ -1103,14 +1107,14 @@ void rq_dump(void) {
 
     // Print header
     printf("Priority    ");
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         printf("CPU%d        ", cpu);
     }
     printf("\n");
 
     // Print separator
     printf("--------    ");
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         printf("--------    ");
     }
     printf("\n");
@@ -1119,7 +1123,7 @@ void rq_dump(void) {
     for (int prio = 0; prio < PRIORITY_MAINLEVELS; prio++) {
         // Check if any CPU has tasks at this priority
         int has_tasks = 0;
-        for (int cpu = 0; cpu < NCPU; cpu++) {
+        for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
             struct rq *rq = get_rq_for_cpu(prio, cpu);
             if (!IS_ERR_OR_NULL(rq) && rq->task_count > 0) {
                 has_tasks = 1;
@@ -1139,7 +1143,7 @@ void rq_dump(void) {
         }
 
         // Print task count for each CPU
-        for (int cpu = 0; cpu < NCPU; cpu++) {
+        for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
             struct rq *rq = get_rq_for_cpu(prio, cpu);
             if (IS_ERR_OR_NULL(rq)) {
                 printf("-           ");
@@ -1160,13 +1164,13 @@ void rq_dump(void) {
     // Print ready masks
     printf("\nReady Masks:\n");
     printf("            ");
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         printf("CPU%d        ", cpu);
     }
     printf("\n");
 
     printf("Top (8b)    ");
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         struct rq_percpu *rq_pc = rq_percpu_lock_get(cpu);
         printf("0x%lx        ", rq_pc->ready_mask & 0xff);
         rq_percpu_put_unlock(rq_pc);
@@ -1174,7 +1178,7 @@ void rq_dump(void) {
     printf("\n");
 
     printf("Secondary   ");
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         struct rq_percpu *rq_pc = rq_percpu_lock_get(cpu);
         printf("0x%lx ", rq_pc->ready_mask_secondary);
         rq_percpu_put_unlock(rq_pc);
@@ -1196,7 +1200,7 @@ uint64 sys_dumprq(void) {
  */
 uint64 rq_count_nr_active(void) {
     uint64 nr = 0;
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         if (!(smp_load_acquire(&rq_global.active_cpu_mask) & (1ULL << cpu)))
             continue;
         for (int prio = 0; prio < PRIORITY_MAINLEVELS; prio++) {

@@ -811,7 +811,7 @@ static int __find_busiest_cpu(int this_cpu, int cls_id,
     int busiest_cpu = -1;
     uint64 busiest_load = 0;
 
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         if (cpu == this_cpu) continue;
         struct eevdf_rq *remote = &__eevdf_rqs[cls_id][cpu];
         /* Use PELT-based cpu_load (weighted utilization) as primary
@@ -996,7 +996,7 @@ static int __eevdf_idle_balance(struct eevdf_rq *this_erq, int this_cpu,
     } candidates[EEVDF_IDLE_MAX_TRYLOCK];
     int ncand = 0;
 
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         if (cpu == this_cpu) continue;
         struct eevdf_rq *remote = &__eevdf_rqs[cls_id][cpu];
         /* Use PELT cpu_load for idle balance candidate selection. */
@@ -1086,7 +1086,7 @@ static struct rq *__eevdf_select_task_rq(struct rq *prev_rq,
     int major = MAJOR_PRIORITY(se->priority);
 
     if (cpumask == 0) {
-        cpumask = (1ULL << NCPU) - 1;
+        cpumask = cpu_possible_mask();
     }
     if (__eevdf_rqs[major] == NULL) {
         return ERR_PTR(-EINVAL);
@@ -1100,7 +1100,7 @@ static struct rq *__eevdf_select_task_rq(struct rq *prev_rq,
 
     /* First pass: find idle CPUs and compute total load for averaging.
      * Uses PELT-based cpu_load for utilization-aware placement. */
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         if (!(cpumask & (1ULL << cpu))) continue;
         struct eevdf_rq *erq = &__eevdf_rqs[major][cpu];
         uint64 load = smp_load_acquire(&erq->cpu_load);
@@ -1137,7 +1137,7 @@ static struct rq *__eevdf_select_task_rq(struct rq *prev_rq,
     }
 
     /* Second pass: pick least-loaded CPU by PELT cpu_load. */
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         if (cpu == cur_cpu) continue;
         if (!(cpumask & (1ULL << cpu))) continue;
         struct eevdf_rq *erq = &__eevdf_rqs[major][cpu];
@@ -1205,13 +1205,13 @@ static void __eevdf_rq_init(struct eevdf_rq *erq, int cls_id, int cpu_id) {
 }
 
 static void __alloc_eevdf_rqs_for_cls(int cls_id) {
-    size_t sz = sizeof(struct eevdf_rq) * NCPU;
+    size_t sz = sizeof(struct eevdf_rq) * cpu_possible_count();
     __eevdf_rqs[cls_id] = (struct eevdf_rq *)kvmalloc(sz);
     if (!__eevdf_rqs[cls_id]) {
         panic("alloc_eevdf_rqs: failed to allocate for cls_id %d\n", cls_id);
     }
     memset(__eevdf_rqs[cls_id], 0, sz);
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         __eevdf_rq_init(&__eevdf_rqs[cls_id][i], cls_id, i);
         rq_register(&__eevdf_rqs[cls_id][i].rq, cls_id, i);
     }

@@ -233,6 +233,15 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
     struct thread *initproc = __proctab_get_initproc();
     assert(initproc != NULL, "kthread_create: initproc is NULL");
 
+    /*
+     * A stack_order of 0 is used by many callers as "default".  A single
+     * 4 KB page is too small for kernel threads that pass through TTY,
+     * scheduler, filesystem, or network code, and the thread/sched_entity live
+     * on the same allocation.  Give default kthreads the normal kernel stack.
+     */
+    if (stack_order <= 0)
+        stack_order = KERNEL_STACK_ORDER;
+
     // Reserve a PID slot (lock-free)
     if (__alloc_pid() < 0) {
         rcu_read_unlock();

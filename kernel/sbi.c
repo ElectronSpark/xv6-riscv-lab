@@ -326,7 +326,7 @@ void sbi_start_secondary_harts(unsigned long start_addr) {
     int boot_hart = cpuid();
 
     printf("Starting secondary harts...\n");
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         if (i == boot_hart)
             continue;
 

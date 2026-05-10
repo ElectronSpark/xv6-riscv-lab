@@ -14,15 +14,17 @@
 #include "proc/thread.h"
 #include "bits.h"
 #include "errno.h"
+#include "platform.h"
+#include "mm/vm.h"
 
 __attribute__((section("cpu_local_sec")))
-__attribute__((aligned(4096))) struct cpu_local cpus[NCPU] = {0};
+__attribute__((aligned(4096))) struct cpu_local cpus[MAX_CPUS] = {0};
 
 static cpumask_t cpu_active_mask = 0;
 uint64 __x86_tp = 0;
 
 /** @brief Per-CPU pending IPI bitmask (indexed by CPU id). */
-static volatile uint64 ipi_pending[NCPU];
+static volatile uint64 *ipi_pending;
 
 /**
  * Per-CPU TLB flush mailbox for IPI_REASON_TLB_FLUSH_PAGE.
@@ -31,7 +33,7 @@ static volatile uint64 ipi_pending[NCPU];
  * other        → virtual address of page to invlpg
  */
 #define TLB_FLUSH_ALL  ((uint64)-1)
-volatile uint64 tlb_flush_va[NCPU];
+volatile uint64 *tlb_flush_va;
 
 /* ── Internal: wait for LAPIC ICR idle ── */
 static inline void lapic_icr_wait(void) {
@@ -45,22 +47,6 @@ static void lapic_send_ipi_single(int dest_apicid) {
     lapic_write(LAPIC_ICR_HI, (uint32)dest_apicid << 24);
     lapic_write(LAPIC_ICR_LO,
                 LAPIC_ICR_FIXED | LAPIC_IPI_VEC | LAPIC_ICR_DEST_NONE);
-}
-
-/* ── Internal: broadcast IPI to all-except-self ── */
-static void lapic_send_ipi_allbutself(void) {
-    lapic_icr_wait();
-    lapic_write(LAPIC_ICR_HI, 0);
-    lapic_write(LAPIC_ICR_LO,
-                LAPIC_ICR_FIXED | LAPIC_IPI_VEC | LAPIC_ICR_DEST_ALLBUTSELF);
-}
-
-/* ── Internal: broadcast IPI to all (including self) ── */
-static void lapic_send_ipi_all(void) {
-    lapic_icr_wait();
-    lapic_write(LAPIC_ICR_HI, 0);
-    lapic_write(LAPIC_ICR_LO,
-                LAPIC_ICR_FIXED | LAPIC_IPI_VEC | LAPIC_ICR_DEST_ALL);
 }
 
 /* ========================================================================== */
@@ -154,14 +140,22 @@ void x86_ipi_handler(void) {
 /* ========================================================================== */
 
 void ipi_init(void) {
-    for (int i = 0; i < NCPU; i++)
+    int ncpu = cpu_possible_count();
+    ipi_pending = (volatile uint64 *)kvmalloc(sizeof(*ipi_pending) * ncpu);
+    tlb_flush_va = (volatile uint64 *)kvmalloc(sizeof(*tlb_flush_va) * ncpu);
+    if (ipi_pending == NULL || tlb_flush_va == NULL)
+        panic("ipi_init: per-CPU mailbox allocation failed");
+
+    memset((void *)ipi_pending, 0, sizeof(*ipi_pending) * ncpu);
+    memset((void *)tlb_flush_va, 0, sizeof(*tlb_flush_va) * ncpu);
+    for (int i = 0; i < ncpu; i++)
         __atomic_store_n(&ipi_pending[i], 0, __ATOMIC_RELEASE);
     printf("ipi_init: IPI subsystem initialized (vector 0x%x)\n",
            LAPIC_IPI_VEC);
 }
 
 int ipi_send_single(int hartid, int reason) {
-    if (hartid < 0 || hartid >= NCPU)
+    if (hartid < 0 || hartid >= cpu_possible_count())
         return -EINVAL;
     if (reason < 0 || reason >= NR_IPI_REASON)
         return -EINVAL;
@@ -181,19 +175,20 @@ int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base,
     if (reason < 0 || reason >= NR_IPI_REASON)
         return -EINVAL;
 
-    for (int i = 0; i < NCPU; i++) {
+    int ncpu = cpu_possible_count();
+    for (int i = 0; i < ncpu; i++) {
         if (hart_mask & (1UL << i)) {
             int cpu = i + (int)hart_mask_base;
-            if (cpu >= 0 && cpu < NCPU)
+            if (cpu >= 0 && cpu < ncpu)
                 __atomic_fetch_or(&ipi_pending[cpu], 1ULL << reason,
                                   __ATOMIC_RELEASE);
         }
     }
 
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < ncpu; i++) {
         if (hart_mask & (1UL << i)) {
             int cpu = i + (int)hart_mask_base;
-            if (cpu >= 0 && cpu < NCPU)
+            if (cpu >= 0 && cpu < ncpu)
                 lapic_send_ipi_single(cpu);
         }
     }
@@ -205,12 +200,13 @@ int ipi_send_all_but_self(int reason) {
         return -EINVAL;
 
     int self = cpuid();
-    for (int i = 0; i < NCPU; i++) {
-        if (i != self)
+    for (int i = 0; i < cpu_possible_count(); i++) {
+        if (i != self) {
             __atomic_fetch_or(&ipi_pending[i], 1ULL << reason,
                               __ATOMIC_RELEASE);
+            lapic_send_ipi_single(i);
+        }
     }
-    lapic_send_ipi_allbutself();
     return 0;
 }
 
@@ -218,16 +214,17 @@ int ipi_send_all(int reason) {
     if (reason < 0 || reason >= NR_IPI_REASON)
         return -EINVAL;
 
-    for (int i = 0; i < NCPU; i++)
+    for (int i = 0; i < cpu_possible_count(); i++) {
         __atomic_fetch_or(&ipi_pending[i], 1ULL << reason, __ATOMIC_RELEASE);
-    lapic_send_ipi_all();
+        lapic_send_ipi_single(i);
+    }
     return 0;
 }
 
 void cpus_init(void) { memset(cpus, 0, sizeof(cpus)); }
 
 void mycpu_init(uint64 hartid, bool trampoline) {
-    if (hartid >= NCPU) {
+    if (hartid >= (uint64)cpu_possible_count()) {
         hartid = 0;
     }
 
@@ -261,3 +258,21 @@ void mycpu_init(uint64 hartid, bool trampoline) {
 }
 
 cpumask_t get_cpu_active_mask(void) { return cpu_active_mask; }
+
+int cpu_possible_count(void)
+{
+    int ncpu = platform_boot_cpu_limit();
+    if (ncpu < 1)
+        ncpu = 1;
+    if (ncpu > MAX_CPUS)
+        ncpu = MAX_CPUS;
+    return ncpu;
+}
+
+cpumask_t cpu_possible_mask(void)
+{
+    int ncpu = cpu_possible_count();
+    if (ncpu >= (int)(sizeof(cpumask_t) * 8))
+        return (cpumask_t)~0ULL;
+    return ((cpumask_t)1 << ncpu) - 1;
+}

@@ -13,6 +13,8 @@
  * Calling convention:
  *   rdi = trapframe virtual address in shared TRAPFRAME window
  *   rsi = user pagetable (CR3 value)
+ *   rdx = user GS base
+ *   rcx = kernel GS base (per-CPU struct)
  */
 
 .align 4096
@@ -22,8 +24,10 @@ trampoline:
 .align 16
 .globl userret
 userret:
-    /* Preserve user CR3 across frame setup. rdi keeps trapframe VA. */
+    /* Preserve return state across frame setup. rdi keeps trapframe VA. */
     movq %rsi, %r13               /* r13 = user CR3 (with PCID + noflush bit) */
+    movq %rdx, %r14               /* r14 = user GS base */
+    movq %rcx, %r15               /* r15 = kernel GS base */
 
     /* Switch to user page table while still executing in trampoline page.
      * With PCID enabled, the noflush bit (63) in %r13 preserves TLB
@@ -44,6 +48,24 @@ userret:
     pushq TRAPFRAME_RFLAGS(%rdi)  /* tf->rflags */
     pushq $0x2b                   /* SEG_UCODE | DPL_USER */
     pushq TRAPFRAME_RIP(%rdi)     /* tf->rip */
+
+    /*
+     * Install GS bases as the last privileged work before restoring user GPRs.
+     * usertrapret() keeps GS_BASE pointing at per-CPU data while it runs C;
+     * doing the user GS switch here avoids kernel-mode traps seeing user GS.
+     * After this point, do not use %gs before iretq.
+     */
+    movl $0xC0000101, %ecx        /* MSR_GS_BASE */
+    movq %r14, %rax
+    movq %rax, %rdx
+    shrq $32, %rdx
+    wrmsr
+
+    movl $0xC0000102, %ecx        /* MSR_KERNEL_GS_BASE */
+    movq %r15, %rax
+    movq %rax, %rdx
+    shrq $32, %rdx
+    wrmsr
 
     /*
      * Restore GPRs from trapframe.
@@ -71,10 +93,4 @@ userret:
     movq TRAPFRAME_RAX(%rdi), %rax
     movq TRAPFRAME_RDI(%rdi), %rdi
 
-    /*
-     * No swapgs needed here: usertrapret already set both MSRs explicitly:
-     *   MSR_GS_BASE      = user's GS base  (already correct for user code)
-     *   MSR_KERNEL_GS_BASE = per-CPU addr  (ready for next SYSCALL/trap)
-     * (Linux strategy: manage GS MSRs directly, don't rely on swapgs chain)
-     */
     iretq

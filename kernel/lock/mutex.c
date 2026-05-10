@@ -129,14 +129,15 @@ void mutex_unlock(mutex_t *lk) {
            "mutex_unlock: thread does not hold the lock");
 
     /*
-     * Fast path: if no threads are waiting, just release the holder
-     * atomically.  This avoids the spinlock + tq_wakeup overhead in the
-     * common uncontended case.  The counter read is racy but safe: if a
-     * waiter arrives after we read 0, it will re-check the holder after
-     * acquiring the spinlock and find it released.
+     * Serialize the fast release with the slow acquire path.  A waiter holds
+     * lk->lk while transitioning from "observed a holder" to "queued and
+     * asleep"; clearing holder without synchronizing with that window can lose
+     * the only wakeup and leave the mutex permanently idle with sleepers.
      */
+    spin_lock(&lk->lk);
     if (__atomic_load_n(&lk->wait_queue.counter, __ATOMIC_RELAXED) == 0) {
         __mutex_set_holder(lk, -1);
+        spin_unlock(&lk->lk);
         return;
     }
 
@@ -144,7 +145,6 @@ void mutex_unlock(mutex_t *lk) {
     // so that we can detach them from the wait queue, and then wake them up.
     // This is to avoid deadlocks, as we cannot hold the lock while waking up
     // threads from the wait queue.
-    spin_lock(&lk->lk);
     struct thread *next = __do_wakeup(lk);
     assert(!IS_ERR(next), "mutex_unlock: failed to wake up threads");
     spin_unlock(&lk->lk);

@@ -675,8 +675,9 @@ if (effective_mask == 0) {
 }
 ```
 
-This is essential when `NCPU` (compile-time constant) exceeds the actual number of
-CPUs available at runtime (e.g., NCPU=8 but QEMU runs with 3 CPUs).
+This is essential when `MAX_CPUS` (compile-time capacity) exceeds the actual
+number of CPUs available at runtime (for example, an 8-CPU build running with
+3 CPUs in QEMU).
 
 ## Sleep Path
 

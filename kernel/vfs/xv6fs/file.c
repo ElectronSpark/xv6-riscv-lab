@@ -156,27 +156,58 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
         int n_io_folios = 0;
 
         for (int pi = 0; pi < n_pages; pi++) {
+            spin_lock(&pc->spinlock);
             struct pcache_node *pcn = pages[pi]->pcache.pcache_node;
-            if (pcn->uptodate)
+            if (pcn->uptodate) {
+                spin_unlock(&pc->spinlock);
                 continue;
+            }
             if (pcn->io_in_progress) {
                 /* Another reader is loading this folio; we'll wait in phase 3
                  * via pcache_read_page fallback. */
+                spin_unlock(&pc->spinlock);
                 continue;
             }
             /* Mark I/O in progress so concurrent readers wait */
             pcn->io_in_progress = 1;
+            spin_unlock(&pc->spinlock);
             did_io[pi] = 1;
             io_folios[n_io_folios++] = page_folio(pages[pi]);
         }
 
         /* Submit merged bios — contiguous folios share one bio with
          * scatter-gather, reducing virtio request count from N to ~1. */
+        int submit_ret = 0;
         if (n_io_folios > 0)
-            xv6fs_submit_merged_folio_reads(ip, xv6_sb,
-                                            io_folios, n_io_folios,
-                                            bios, XV6FS_READ_MAX_BIOS,
-                                            &n_bios);
+            submit_ret = xv6fs_submit_merged_folio_reads(ip, xv6_sb,
+                                                         io_folios, n_io_folios,
+                                                         bios,
+                                                         XV6FS_READ_MAX_BIOS,
+                                                         &n_bios);
+
+        if (submit_ret != 0) {
+            spin_lock(&pc->spinlock);
+            for (int pi = 0; pi < n_pages; pi++) {
+                if (!did_io[pi])
+                    continue;
+                struct pcache_node *pcn = pages[pi]->pcache.pcache_node;
+                if (pcn != NULL) {
+                    pcn->io_in_progress = 0;
+                    tq_wakeup_all(&pcn->io_waiters, submit_ret, 0);
+                }
+            }
+            spin_unlock(&pc->spinlock);
+
+            for (int i = 0; i < n_bios; i++) {
+                bio_await(bios[i]);
+                bio_release(bios[i]);
+            }
+            for (int pi = 0; pi < n_pages; pi++)
+                pcache_put_page(pc, pages[pi]);
+            if (bytes_read > 0)
+                return bytes_read;
+            return submit_ret;
+        }
 
         /* Kick the device once after all batch bios are queued */
         if (n_bios > 0)
@@ -193,10 +224,10 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
             if (!did_io[pi])
                 continue;
             struct pcache_node *pcn = pages[pi]->pcache.pcache_node;
+            spin_lock(&pc->spinlock);
             pcn->uptodate = 1;
             pcn->dirty = 0;
             pcn->io_in_progress = 0;
-            spin_lock(&pc->spinlock);
             tq_wakeup_all(&pcn->io_waiters, 0, 0);
             spin_unlock(&pc->spinlock);
         }

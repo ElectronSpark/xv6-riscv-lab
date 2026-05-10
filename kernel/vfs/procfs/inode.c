@@ -44,6 +44,7 @@
 #include "timer/goldfish_rtc.h"
 #include "signal.h"
 #include "dev/fdt.h"
+#include "smp/percpu.h"
 
 /* snprintf is provided by lwip_port/sys_arch.c – forward-declare it here */
 int snprintf(char *buf, size_t size, const char *fmt, ...);
@@ -959,11 +960,7 @@ static char *procfs_gen_status(int tgid) {
             pos += n;
         }
     }
-    int ncpu = platform.ncpu;
-    if (ncpu < 1)
-        ncpu = 1;
-    if (ncpu > NCPU)
-        ncpu = NCPU;
+    int ncpu = cpu_possible_count();
     unsigned cpu_mask = (ncpu >= (int)(sizeof(unsigned) * 8))
         ? ~0U
         : ((1U << ncpu) - 1U);
@@ -1289,12 +1286,7 @@ static char *procfs_gen_cpuinfo(void) {
     char vendor[13];
     char brand[49];
     int pos = 0;
-    int ncpu = platform.ncpu;
-
-    if (ncpu < 1)
-        ncpu = 1;
-    if (ncpu > NCPU)
-        ncpu = NCPU;
+    int ncpu = cpu_possible_count();
 
     asm volatile("cpuid"
                  : "=a"(max_leaf), "=b"(ebx), "=c"(ecx), "=d"(edx)
@@ -1545,11 +1537,7 @@ static char *procfs_gen_stat(void)
     uint64 j = get_jiffs();
     uint64 now_sec = goldfish_rtc_read_ns() / NS_PER_SEC;
     uint64 boot_sec = now_sec > (j / 1000) ? now_sec - (j / 1000) : 0;
-    int ncpu = platform.ncpu;
-    if (ncpu < 1)
-        ncpu = 1;
-    if (ncpu > NCPU)
-        ncpu = NCPU;
+    int ncpu = cpu_possible_count();
     uint64 user = j / 20;
     uint64 system = j / 20;
     uint64 idle = j > user + system ? j - user - system : 0;

@@ -19,6 +19,8 @@
 #include "timer/sched_timer_private.h"
 #include "timer/timer.h"
 #include "smp/ipi.h"
+#include "mm/vm.h"
+#include "string.h"
 
 /* ================================================================== */
 /*  Linux-style global load averages (1s / 5s / 16s)                  */
@@ -45,8 +47,8 @@
 
 static uint64 avenrun[3];            /* FSHIFT fixed-point load averages */
 static uint64 calc_load_counter;     /* tick counter for sampling        */
-static uint64 prev_busy[NCPU];       /* busy_ticks snapshot for 1s util  */
-static uint64 prev_total[NCPU];      /* total_ticks snapshot for 1s util */
+static uint64 *prev_busy;            /* busy_ticks snapshot for 1s util  */
+static uint64 *prev_total;           /* total_ticks snapshot for 1s util */
 uint64 load_epoch;                   /* global 1-second epoch counter    */
 
 /**
@@ -154,6 +156,13 @@ static inline void __sched_assert_unholding(void) {
 
 /* Scheduler functions */
 void scheduler_init(void) {
+    size_t cpu_count = cpu_possible_count();
+    prev_busy = (uint64 *)kvmalloc(sizeof(uint64) * cpu_count);
+    prev_total = (uint64 *)kvmalloc(sizeof(uint64) * cpu_count);
+    assert(prev_busy != NULL && prev_total != NULL,
+           "scheduler_init: per-CPU stats allocation failed");
+    memset(prev_busy, 0, sizeof(uint64) * cpu_count);
+    memset(prev_total, 0, sizeof(uint64) * cpu_count);
     chan_queue_init();
     rq_global_init();
 }
@@ -301,7 +310,7 @@ void scheduler_yield(void) {
         /* Per-CPU 1-second utilization: raw busy/total ratio over the
          * last LOAD_FREQ ticks.  No smoothing — reflects exactly the
          * most recent 1-second window. */
-        for (int c = 0; c < NCPU; c++) {
+        for (int c = 0; c < cpu_possible_count(); c++) {
             uint64 bt = cpus[c].busy_ticks;
             uint64 tt = cpus[c].total_ticks;
             uint64 db = bt - prev_busy[c];

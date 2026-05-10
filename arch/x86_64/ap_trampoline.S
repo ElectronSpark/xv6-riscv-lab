@@ -9,14 +9,15 @@
  *
  * Stack assignment is race-free: each AP atomically increments
  * ap_boot_next_cpu to obtain its unique hartid (1, 2, 3, ...).
- * The BSP pre-reserves stacks for all cores in a static array
- * (boot_stacks in entry.S, KERNEL_STACK_SIZE * NCPU, aligned).
+ * The BSP allocates stack pages at runtime and publishes their top
+ * addresses in ap_boot_stack_tops_base.
  *
  * The BSP patches the data area at the end before copying:
  *   ap_boot_cr3         -- physical address of kernel PML4
  *   ap_boot_cpus_base   -- &cpus[0] physical address
  *   ap_boot_cpu_stride  -- sizeof(struct cpu_local)
- *   ap_boot_stacks_base -- physical address of boot_stacks array
+ *   ap_boot_stack_tops_base -- address of uint64 stack-top table
+ *   ap_boot_cpu_limit   -- maximum CPU slots prepared by the BSP
  *   ap_boot_next_cpu    -- atomic counter, starts at 1 (BSP is 0)
  *   ap_boot_target      -- address of start_kernel()
  */
@@ -121,6 +122,11 @@ ap_entry64:
      */
     movl    $1, %eax
     lock xaddl %eax, AP_ADDR(ap_boot_next_cpu)  /* eax = old value = my hartid */
+    cmpl    AP_ADDR(ap_boot_cpu_limit), %eax
+    jb      2f
+1:  hlt
+    jmp     1b
+2:
     movl    %eax, %edi              /* hartid — first arg to start_kernel */
 
     /*
@@ -137,14 +143,16 @@ ap_entry64:
     movl    $0xC0000101, %ecx       /* MSR_GS_BASE */
     wrmsr
 
-    /* Load per-CPU kernel stack: sp = boot_stacks + (hartid+1) * 16384 - 4096
+    /* Load per-CPU kernel stack from the BSP-built stack-top table.
      * The -4096 reserves space at the top for the PCB (like RISC-V entry.S).
-     * boot_stacks is KERNEL_STACK_SIZE-aligned so idle_thread_init() works. */
-    movq    AP_ADDR(ap_boot_stacks_base), %rcx
-    movq    %rdi, %rax
-    addq    $1, %rax               /* hartid + 1 */
-    shlq    $14, %rax              /* * 16384 (KERNEL_STACK_SIZE) */
-    addq    %rcx, %rax
+     * Each stack base is KERNEL_STACK_SIZE-aligned so idle_thread_init() works. */
+    movq    AP_ADDR(ap_boot_stack_tops_base), %rcx
+    movq    (%rcx,%rdi,8), %rax
+    testq   %rax, %rax
+    jnz     3f
+1:  hlt
+    jmp     1b
+3:
     subq    $4096, %rax            /* room for PCB at top */
     movq    %rax, %rsp
 
@@ -190,9 +198,14 @@ ap_boot_cpu_stride:
     .long   0                       /* BSP writes sizeof(struct cpu_local) */
 
 .balign 8
-.globl ap_boot_stacks_base
-ap_boot_stacks_base:
-    .quad   0                       /* BSP writes &boot_stacks physical addr */
+.globl ap_boot_stack_tops_base
+ap_boot_stack_tops_base:
+    .quad   0                       /* BSP writes uint64 stack-top table */
+
+.balign 4
+.globl ap_boot_cpu_limit
+ap_boot_cpu_limit:
+    .long   1                       /* highest prepared CPU slot + 1 */
 
 .balign 4
 .globl ap_boot_next_cpu

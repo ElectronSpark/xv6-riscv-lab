@@ -296,16 +296,19 @@ static struct vfs_file *__knote_enqueue_core(struct knote *kn, int64 data,
     kn->fflags |= fflags;
     if (knote_is_clear_file_filter(kn))
         kn->status |= KN_EDGE_ACTIVE;
-    int newly_queued = 0;
     if (!(kn->status & KN_QUEUED)) {
         kn->status |= KN_QUEUED;
         list_node_push(&kq->ready, kn, ready_entry);
         kq->nready++;
-        newly_queued = 1;
     }
     tq_wakeup(&kq->waitq, 0, 0);
-    struct vfs_file *kq_file = (newly_queued && kq->file)
-                                   ? vfs_fdup(kq->file) : NULL;
+    /*
+     * Propagate readiness to an outer kqueue even when this knote was already
+     * queued.  Nested epoll users such as GLib can monitor an epoll fd through
+     * another poll source; if the inner queue is already readable, another
+     * source notification should still wake the outer waiter.
+     */
+    struct vfs_file *kq_file = kq->file ? vfs_fdup(kq->file) : NULL;
     spin_unlock(&kq->lock);
     return kq_file;
 }
@@ -756,8 +759,15 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
         return -EINVAL;
 
     int total = 0;
-    uint64 epoll_oneshot_idents[nevents];
+    uint64 *epoll_oneshot_idents = NULL;
     int epoll_oneshot_count = 0;
+
+    if (kq->flags & KQ_EPOLL_COMPAT) {
+        epoll_oneshot_idents = kvmalloc((size_t)nevents *
+                                        sizeof(*epoll_oneshot_idents));
+        if (epoll_oneshot_idents == NULL)
+            return -ENOMEM;
+    }
 
     spin_lock(&kq->lock);
     kq->waiters++;
@@ -907,6 +917,7 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
     spin_unlock(&kq->lock);
     if (should_free)
         slab_free(kq);
+    kvfree(epoll_oneshot_idents);
     return total;
 }
 

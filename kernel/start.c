@@ -14,7 +14,7 @@ void timerinit();
 // Must be aligned to KERNEL_STACK_SIZE so that idle_thread_init can find
 // the stack base by masking the current SP.
 __attribute__((
-    aligned(KERNEL_STACK_SIZE))) char stack0[KERNEL_STACK_SIZE * NCPU];
+    aligned(KERNEL_STACK_SIZE))) char stack0[KERNEL_STACK_SIZE * MAX_CPUS];
 
 // The hartid of the boot hart (set by the first hart to reach start())
 _Atomic int boot_hartid = -1;

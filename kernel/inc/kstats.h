@@ -16,8 +16,8 @@
 #include "types.h"
 #include "param.h"
 
-/* Maximum CPUs reported — matches NCPU from param.h */
-#define KSTATS_MAX_CPUS NCPU
+/* User ABI capacity for per-CPU statistics; runtime count is in kstats.ncpus. */
+#define KSTATS_MAX_CPUS 64
 
 /** Per-CPU scheduler snapshot (read-only to user-space). */
 struct cpu_stat {

@@ -129,7 +129,7 @@ typedef struct {
     spinlock_t lock; // Lock for orders > 0 (order 0 is lock-free via push_off)
 } pcpu_cache_t;
 
-STATIC pcpu_cache_t __pcpu_caches[NCPU][PCPU_CACHE_MAX_ORDER + 1];
+STATIC pcpu_cache_t (*__pcpu_caches)[PCPU_CACHE_MAX_ORDER + 1];
 
 // High memory zone descriptor.
 // Each non-first memory region gets its own zone with separate buddy pools
@@ -139,7 +139,7 @@ STATIC pcpu_cache_t __pcpu_caches[NCPU][PCPU_CACHE_MAX_ORDER + 1];
 
 typedef struct {
     buddy_pool_t pools[PAGE_BUDDY_MAX_ORDER + 1];
-    pcpu_cache_t pcpu_caches[NCPU][PCPU_CACHE_MAX_ORDER + 1];
+    pcpu_cache_t (*pcpu_caches)[PCPU_CACHE_MAX_ORDER + 1];
     uint64 base;  // Physical start address of this zone
     uint64 end;   // Physical end address (exclusive)
 } highmem_zone_t;
@@ -513,8 +513,22 @@ STATIC_INLINE void __buddy_pool_init() {
         }
     }
 
+    int ncpu = cpu_possible_count();
+    size_t pcpu_cache_bytes =
+        sizeof(pcpu_cache_t) * ncpu * (PCPU_CACHE_MAX_ORDER + 1);
+    __pcpu_caches = (pcpu_cache_t (*)[PCPU_CACHE_MAX_ORDER + 1])
+        early_alloc_align(pcpu_cache_bytes, CACHELINE_SIZE);
+    memset(__pcpu_caches, 0, pcpu_cache_bytes);
+
+    for (int z = 0; z < __num_highmem_zones; z++) {
+        __highmem_zones[z].pcpu_caches =
+            (pcpu_cache_t (*)[PCPU_CACHE_MAX_ORDER + 1])
+                early_alloc_align(pcpu_cache_bytes, CACHELINE_SIZE);
+        memset(__highmem_zones[z].pcpu_caches, 0, pcpu_cache_bytes);
+    }
+
     // Initialize lowmem per-CPU caches
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < ncpu; cpu++) {
         for (int order = 0; order <= PCPU_CACHE_MAX_ORDER; order++) {
             pcpu_cache_t *cache = &__pcpu_caches[cpu][order];
             list_entry_init(&cache->lru_head);
@@ -525,7 +539,7 @@ STATIC_INLINE void __buddy_pool_init() {
 
     // Initialize highmem zone per-CPU caches
     for (int z = 0; z < __num_highmem_zones; z++) {
-        for (int cpu = 0; cpu < NCPU; cpu++) {
+        for (int cpu = 0; cpu < ncpu; cpu++) {
             for (int order = 0; order <= PCPU_CACHE_MAX_ORDER; order++) {
                 pcpu_cache_t *cache =
                     &__highmem_zones[z].pcpu_caches[cpu][order];
@@ -1587,6 +1601,14 @@ int page_buddy_init(void) {
     }
 
     __buddy_pool_init();
+    uint64 early_alloc_after_pcpu = PGROUNDUP(VA2PA(early_alloc_end_ptr()));
+    if (early_alloc_after_pcpu > __managed_start) {
+        assert(__init_range_flags(__managed_start, early_alloc_after_pcpu,
+                                  PAGE_FLAG_LOCKED) == 0,
+               "page_buddy_init(): pcpu cache locked memory: 0x%lx to 0x%lx",
+               __managed_start, early_alloc_after_pcpu);
+        __managed_start = early_alloc_after_pcpu;
+    }
     X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after buddy_pool_init\n");
     X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: before second pass\n");
 
@@ -2094,7 +2116,7 @@ static void __buddy_stat_totals(uint64 *total_free_pages,
         // Add per-CPU cache stats for cacheable orders
         if (i <= PCPU_CACHE_MAX_ORDER) {
             uint64 cache_total = 0;
-            for (int cpu = 0; cpu < NCPU; cpu++) {
+            for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
                 // Use atomic load for lock-free read
                 cache_total += PCPU_CACHE_COUNT_LOAD(&__pcpu_caches[cpu][i]);
             }
@@ -2117,7 +2139,7 @@ static void __buddy_stat_totals(uint64 *total_free_pages,
         __pools_unlock_range(zone->pools, 0, PAGE_BUDDY_MAX_ORDER);
 
         for (int i = 0; i <= PCPU_CACHE_MAX_ORDER; i++) {
-            for (int cpu = 0; cpu < NCPU; cpu++) {
+            for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
                 uint32 cnt =
                     PCPU_CACHE_COUNT_LOAD(&zone->pcpu_caches[cpu][i]);
                 if (cnt > 0) {
@@ -2162,7 +2184,7 @@ void print_buddy_system_stat(int detailed) {
 
         if (i <= PCPU_CACHE_MAX_ORDER) {
             uint64 cache_total = 0;
-            for (int cpu = 0; cpu < NCPU; cpu++) {
+            for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
                 cache_total += PCPU_CACHE_COUNT_LOAD(&__pcpu_caches[cpu][i]);
             }
 
@@ -2206,7 +2228,7 @@ void print_buddy_system_stat(int detailed) {
         for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
             hm_free += (1UL << i) * hm_arr[i];
             if (i <= PCPU_CACHE_MAX_ORDER) {
-                for (int cpu = 0; cpu < NCPU; cpu++) {
+                for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
                     hm_cached += (1UL << i) *
                         PCPU_CACHE_COUNT_LOAD(
                             &zone->pcpu_caches[cpu][i]);

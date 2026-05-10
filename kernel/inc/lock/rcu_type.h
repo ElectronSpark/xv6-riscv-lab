@@ -72,8 +72,7 @@ typedef struct {
     _Atomic uint64 expedited_count; // Number of expedited GPs
 } rcu_state_t;
 
-// Per-CPU RCU data - declared separately to ensure cache-line alignment per CPU
-// Each CPU's data is in its own cache line to prevent false sharing
-extern rcu_cpu_data_t rcu_cpu_data[NCPU];
+// Per-CPU RCU data, allocated at boot for cpu_possible_count() CPUs.
+extern rcu_cpu_data_t *rcu_cpu_data;
 
 #endif /* __KERNEL_RCU_TYPE_H */

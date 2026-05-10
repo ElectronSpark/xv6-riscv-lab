@@ -46,6 +46,34 @@ static struct vfs_inode *fault_vma_inode(vma_t *vma)
     return vma->file->inode.inode;
 }
 
+static int fault_vma_entry_valid(vm_t *vm, vma_t *vma)
+{
+    uint64 ptr = (uint64)vma;
+    pte_t *pte;
+
+    if (vm == NULL || vma == NULL)
+        return 0;
+    if (kernel_vm != NULL && kernel_vm->pagetable != NULL) {
+        pte = walk(kernel_vm->pagetable, ptr, 0, NULL, NULL);
+        if (pte == NULL || !pte_present(pte))
+            return 0;
+        pte = walk(kernel_vm->pagetable, ptr + sizeof(vma_t) - 1,
+                   0, NULL, NULL);
+        if (pte == NULL || !pte_present(pte))
+            return 0;
+    } else if (!vm->is_kernel && ptr >= vm->vm_bottom && ptr < vm->vm_top) {
+        return 0;
+    }
+
+    if (vma->vm != vm)
+        return 0;
+    if ((vma->start & (PGSIZE - 1)) != 0 || vma->start >= vma->end)
+        return 0;
+    if (vma->start < vm->vm_bottom || vma->end > vm->vm_top)
+        return 0;
+    return 1;
+}
+
 static void print_fault_vma(vm_t *vm, const char *label, uint64 addr)
 {
     vma_t *vma = vm_find_area(vm, addr);
@@ -143,7 +171,8 @@ extern char trampoline[];
 extern void sig_trampoline(void); /* defined in sig_trampoline.S */
 
 extern char userret[];
-static void (*trampoline_userret)(uint64 tf, uint64 user_cr3) = NULL;
+static void (*trampoline_userret)(uint64 tf, uint64 user_cr3,
+                                  uint64 user_gs, uint64 kernel_gs) = NULL;
 
 /* ── Debugcon helpers (forward declarations for use in usertrapret) ── */
 static inline void dbg_outb(uint16 port, uint8 val);
@@ -154,9 +183,10 @@ static void dbg_hex(uint64 v);
  * usertrapret — return to user mode.
  *
  * Sets up kernel state in the utrapframe, maps the trapframe page,
- * restores the user GS base into KERNEL_GS_BASE (so userret's swapgs
- * loads it into GS_BASE for user code), stores the trapframe VA and
- * kernel stack in RIP-relative variables, and returns via iretq.
+ * prepares the trapframe and kernel stack metadata, then lets the final
+ * assembly trampoline install the user/kernel GS bases immediately before
+ * iretq.  Keeping GS_BASE as per-CPU throughout this C function avoids
+ * kernel-mode exception paths observing a user GS base.
  */
 void usertrapret(void) {
     struct thread *p = current;
@@ -187,25 +217,8 @@ void usertrapret(void) {
     /* Restore user FS base (TLS) for user-space threads. */
     wrmsr(MSR_FS_BASE, p->trapframe->tp);
 
-    /*
-     * Set up GS MSRs explicitly — Linux strategy:
-     *   MSR_GS_BASE      = user's GS base  (what user code sees after iretq)
-     *   MSR_KERNEL_GS_BASE = per-CPU addr  (what kernel sees after swapgs on
-     *                                       the next SYSCALL/trap entry)
-     *
-     * Setting both explicitly avoids relying on the swapgs chain being in
-     * exactly the right state on every possible entry path (e.g. the very
-     * first entry to user mode before any swapgs has ever run).
-     * userret no longer needs to execute swapgs; GS is already correct.
-     *
-     * IMPORTANT: Capture per-CPU pointer and CPU id BEFORE writing user GS
-     * to MSR_GS_BASE, because mycpu()/cpuid() read from MSR_GS_BASE.
-     */
     struct cpu_local *my_cpu = mycpu();
     int cpu = cpuid();
-
-    /* After MSR_GS_BASE is switched to the user value, helpers that depend on
-     * mycpu()/cpuid() are no longer safe until the next kernel entry. */
 
     /*
      * TSS.RSP0 = higher-half VA of the thread kstack.
@@ -214,9 +227,6 @@ void usertrapret(void) {
      * page tables (PML4[256+] shared higher-half).
      */
     x86_tss_set_rsp0_cpu(cpu, (uint64)PA2VA(p->ksp));
-
-    wrmsr(MSR_GS_BASE, p->trapframe->user_gs_base);
-    wrmsr(MSR_KERNEL_GS_BASE, (uint64)my_cpu);
 
     /* Store kernel state in utrapframe for next trap entry. */
     p->trapframe->kernel_sp = p->ksp;
@@ -237,8 +247,7 @@ void usertrapret(void) {
      * table.  The C handler performs the CR3 switch later for
      * identity-map access.
      *
-     * SMP-safe: stored in per-CPU struct via saved my_cpu pointer
-     * (GS_BASE already points to user value at this point).
+     * SMP-safe: stored in per-CPU struct via saved my_cpu pointer.
      */
     my_cpu->intr_kstack_top = (uint64)PA2VA(p->ksp);
 
@@ -326,7 +335,8 @@ void usertrapret(void) {
         user_cr3 = (uint64)p->vm->pagetable;
     }
 
-    trampoline_userret(trapframe_base, user_cr3);
+    trampoline_userret(trapframe_base, user_cr3,
+                        p->trapframe->user_gs_base, (uint64)my_cpu);
 
     __builtin_unreachable();
 }
@@ -841,11 +851,13 @@ void x86_trap_handler(struct trapframe *tf) {
      * utrapframe so that syscall arg fetching and other code that reads
      * p->trapframe->trapframe works correctly.
      *
-     * Also save the user GS base (now in KERNEL_GS_BASE after swapgs)
-     * into the utrapframe so it can be restored on return to user mode.
+     * Also save user FS/GS bases so TLS state survives scheduling and
+     * clone() can inherit the live parent FS base when CLONE_SETTLS is
+     * not supplied.
      */
     if (from_user && current && current->trapframe) {
         current->trapframe->trapframe = *tf;
+        current->trapframe->tp = rdmsr(MSR_FS_BASE);
         current->trapframe->user_gs_base = rdmsr(MSR_KERNEL_GS_BASE);
     }
 
@@ -977,6 +989,10 @@ void x86_trap_handler(struct trapframe *tf) {
                     printf("  --- VMA map (exec+file) ---\n");
                     mt_for_each(&current->vm->vm_mt, mt_entry, mt_idx, MAPLE_MAX) {
                         vma_t *v = (vma_t *)mt_entry;
+                        if (!fault_vma_entry_valid(current->vm, v)) {
+                            printf("  <invalid VMA entry %p>\n", v);
+                            continue;
+                        }
                         if ((v->flags & PROT_EXEC) || v->file) {
                             struct vfs_inode *inode = fault_vma_inode(v);
                             printf("  [0x%lx-0x%lx) %c%c%c pgoff=0x%lx file=%p ino=%lu size=%lld name=%s\n",
@@ -1402,7 +1418,8 @@ void usertrap_syscall(struct trapframe *tf) {
      */
     if (p && p->trapframe) {
         p->trapframe->trapframe = *tf;
-        /* Save user GS base (now in KERNEL_GS_BASE after swapgs) */
+        /* Save user FS/GS bases for TLS and arch_prctl state. */
+        p->trapframe->tp = rdmsr(MSR_FS_BASE);
         p->trapframe->user_gs_base = rdmsr(MSR_KERNEL_GS_BASE);
     }
 

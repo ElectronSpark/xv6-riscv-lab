@@ -2,6 +2,9 @@
 .code32
 .global _entry
 
+.equ KERNEL_STACK_SIZE_ASM, 32768
+.equ KERNEL_STACK_PCB_RESERVE_ASM, 4096
+
 .section .multiboot
 .align 4
     .long 0x1BADB002
@@ -216,10 +219,10 @@ _higher_half_entry:
     xorq %rax, %rax
     rep stosq
 
-    /* ---- Set up real stack ---- */
-    /* BSP (hartid 0): sp = boot_stacks + 1*KERNEL_STACK_SIZE - 4096 (PCB) */
-    leaq boot_stacks(%rip), %rsp
-    addq $(16384 - 4096), %rsp
+    /* ---- Set up bootstrap stack ---- */
+    /* BSP switches to an allocator-backed idle stack before idle_thread_init(). */
+    leaq boot_stack0(%rip), %rsp
+    addq $(KERNEL_STACK_SIZE_ASM - KERNEL_STACK_PCB_RESERVE_ASM), %rsp
     xorq %rbp, %rbp
 
     /*
@@ -314,16 +317,27 @@ debug_puts64:
 7:
     ret
 
+.global arch_relocate_stack_finish
+arch_relocate_stack_finish:
+    /*
+     * Finish an active-stack migration after C has copied frames and adjusted
+     * saved frame pointers.  RDI is the signed address delta to add to RSP/RBP.
+     */
+    popq %rax
+    addq %rdi, %rsp
+    addq %rdi, %rbp
+    pushq %rax
+    retq
+
 /*
- * Per-CPU boot stacks for ALL harts (BSP + APs), RISC-V style.
- * Must be aligned to KERNEL_STACK_SIZE (16KB) so idle_thread_init()
- * can find the stack base by masking SP.
+ * BSP-only bootstrap stack. Runtime idle stacks are allocated after the buddy
+ * allocator is online and are sized by the discovered CPU topology.
  */
 .section .bss
-.globl boot_stacks
-.align 16384                    /* KERNEL_STACK_SIZE alignment         */
-boot_stacks:
-    .space 16384 * 8            /* KERNEL_STACK_SIZE * NCPU */
+.globl boot_stack0
+.align KERNEL_STACK_SIZE_ASM     /* KERNEL_STACK_SIZE alignment         */
+boot_stack0:
+    .space KERNEL_STACK_SIZE_ASM /* KERNEL_STACK_SIZE */
 
 .section .rodata
 banner_msg:

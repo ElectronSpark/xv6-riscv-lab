@@ -56,8 +56,22 @@ static int __virtio_disk_flush(blkdev_t *blkdev);
 /// Partitions occupy minors base+1 .. base+15.
 #define GENDISK_MINOR_STRIDE 16
 
-/// Maximum number of virtqueues per disk (capped at NCPU).
-#define MAX_VIRTQUEUES NCPU
+static int virtio_disk_max_queues(void)
+{
+    /*
+     * The virtqueue state is runtime allocated now, but keep block I/O on one
+     * queue until the PCI multiqueue path is hardened independently.
+     */
+    return 1;
+}
+
+static uint64 virtio_dma_addr(const void *ptr)
+{
+    uint64 addr = (uint64)ptr;
+    if (addr >= (uint64)PA2VA(0))
+        return VA2PA(addr);
+    return addr;
+}
 
 /// Per-virtqueue state.  One instance per request queue.
 struct virtqueue {
@@ -95,6 +109,22 @@ struct virtqueue {
     uint16 queue_notify_off;
 };
 
+static struct virtqueue *virtio_alloc_queues(int num_queues)
+{
+    size_t bytes = sizeof(struct virtqueue) * num_queues;
+    uint64 order = 0;
+
+    while ((PGSIZE << order) < bytes)
+        order++;
+
+    struct virtqueue *vqs =
+        (struct virtqueue *)page_alloc(order, PAGE_TYPE_ANON);
+    if (vqs == NULL)
+        return NULL;
+    memset(vqs, 0, PGSIZE << order);
+    return vqs;
+}
+
 STATIC struct disk {
     // Number of active virtqueues (1 when MQ not negotiated)
     int num_queues;
@@ -105,7 +135,7 @@ STATIC struct disk {
     uint32 rr_qi;
 
     // Per-queue state (only vqs[0..num_queues-1] are initialized)
-    struct virtqueue vqs[MAX_VIRTQUEUES];
+    struct virtqueue *vqs;
 
     // PCI transport state (valid when pci_state.use_pci == 1)
     struct virtio_pci_state pci_state;
@@ -256,8 +286,12 @@ static void __virtio_blkdev_init(int diskno) {
 
 static void __virtio_disk_init_one(int diskno) {
     struct disk *disk = &disks[diskno];
-    struct virtqueue *vq = &disk->vqs[0];
     uint32 status = 0;
+
+    disk->vqs = virtio_alloc_queues(1);
+    if (disk->vqs == NULL)
+        panic("virtio disk %d virtqueue allocation failed", diskno);
+    struct virtqueue *vq = &disk->vqs[0];
 
     spin_init(&vq->vq_lock, "virtio_disk");
 
@@ -536,11 +570,11 @@ static void __virtio_disk_init_one_pci(int diskno) {
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     uint32 features = cfg->device_feature;
     disk->has_flush = !!(features & (1 << VIRTIO_BLK_F_FLUSH));
-    int has_mq = !!(features & (1 << VIRTIO_BLK_F_MQ));
+    int has_mq = 0;
     features &= ~(1 << VIRTIO_BLK_F_RO);
     features &= ~(1 << VIRTIO_BLK_F_SCSI);
     features &= ~(1 << VIRTIO_BLK_F_CONFIG_WCE);
-    // Keep VIRTIO_BLK_F_MQ if device supports it
+    features &= ~(1 << VIRTIO_BLK_F_MQ);
     features &= ~(1 << VIRTIO_F_ANY_LAYOUT);
     features &= ~(1 << VIRTIO_RING_F_EVENT_IDX);
     features &= ~(1 << VIRTIO_RING_F_INDIRECT_DESC);
@@ -565,8 +599,8 @@ static void __virtio_disk_init_one_pci(int diskno) {
         uint16 dev_num_queues = *(volatile uint16 *)(dev_cfg_ptr + 34);
         if (dev_num_queues > 1) {
             num_queues = dev_num_queues;
-            if (num_queues > MAX_VIRTQUEUES)
-                num_queues = MAX_VIRTQUEUES;
+            if (num_queues > virtio_disk_max_queues())
+                num_queues = virtio_disk_max_queues();
         }
         printf("virtio_disk_pci: disk %d MQ supported, device offers %d queues, using %d\n",
                diskno, dev_num_queues, num_queues);
@@ -575,6 +609,9 @@ static void __virtio_disk_init_one_pci(int diskno) {
                diskno);
     }
     disk->num_queues = num_queues;
+    disk->vqs = virtio_alloc_queues(num_queues);
+    if (disk->vqs == NULL)
+        panic("virtio disk pci %d virtqueue allocation failed", diskno);
 
     // Initialize each virtqueue
     for (int qi = 0; qi < num_queues; qi++) {
@@ -775,16 +812,14 @@ static int __virtio_disk_flush(blkdev_t *blkdev) {
     buf0->sector = 0;
 
     // Descriptor 0: header (device reads)
-    // buf0 = &vq->ops[] — static BSS, higher-half VA → needs VA2PA.
-    vq->desc[idx[0]].addr = VA2PA((uint64)buf0);
+    vq->desc[idx[0]].addr = virtio_dma_addr(buf0);
     vq->desc[idx[0]].len = sizeof(struct virtio_blk_req);
     vq->desc[idx[0]].flags = VRING_DESC_F_NEXT;
     vq->desc[idx[0]].next = idx[1];
 
     // Descriptor 1: status (device writes)
-    // &vq->info[].status — static BSS, higher-half VA → needs VA2PA.
     vq->info[idx[0]].status = 0xff;
-    vq->desc[idx[1]].addr = VA2PA((uint64)&vq->info[idx[0]].status);
+    vq->desc[idx[1]].addr = virtio_dma_addr(&vq->info[idx[0]].status);
     vq->desc[idx[1]].len = 1;
     vq->desc[idx[1]].flags = VRING_DESC_F_WRITE;
     vq->desc[idx[1]].next = 0;
@@ -864,11 +899,11 @@ static void virtio_disk_rw(int diskno, int qi, struct bio *bio, uint64 sector,
 
     /*
      * Descriptor DMA addresses:
-     *   buf0 = &vq->ops[idx] — static BSS, higher-half VA → needs VA2PA.
+     *   buf0 = &vq->ops[idx] — DMA-visible queue storage.
      *   buf  = from __page_to_pa() in submit_bio — already a PA, no VA2PA.
-     *   &vq->info[].status — static BSS, higher-half VA → needs VA2PA.
+     *   &vq->info[].status — DMA-visible queue storage.
      */
-    vq->desc[idx[0]].addr = VA2PA((uint64)buf0);
+    vq->desc[idx[0]].addr = virtio_dma_addr(buf0);
     vq->desc[idx[0]].len = sizeof(struct virtio_blk_req);
     vq->desc[idx[0]].flags = VRING_DESC_F_NEXT;
     vq->desc[idx[0]].next = idx[1];
@@ -883,7 +918,7 @@ static void virtio_disk_rw(int diskno, int qi, struct bio *bio, uint64 sector,
     vq->desc[idx[1]].next = idx[2];
 
     vq->info[idx[0]].status = 0xff; // device writes 0 on success
-    vq->desc[idx[2]].addr = VA2PA((uint64)&vq->info[idx[0]].status);
+    vq->desc[idx[2]].addr = virtio_dma_addr(&vq->info[idx[0]].status);
     vq->desc[idx[2]].len = 1;
     vq->desc[idx[2]].flags = VRING_DESC_F_WRITE; // device writes the status
     vq->desc[idx[2]].next = 0;
@@ -953,7 +988,7 @@ static void virtio_disk_rw_sg(int diskno, int qi, struct bio *bio,
     hdr->reserved = 0;
     hdr->sector = sector;
 
-    vq->desc[idx[0]].addr = VA2PA((uint64)hdr);
+    vq->desc[idx[0]].addr = virtio_dma_addr(hdr);
     vq->desc[idx[0]].len = sizeof(struct virtio_blk_req);
     vq->desc[idx[0]].flags = VRING_DESC_F_NEXT;
     vq->desc[idx[0]].next = idx[1];
@@ -979,7 +1014,7 @@ static void virtio_disk_rw_sg(int diskno, int qi, struct bio *bio,
     /* Descriptor [nsg+1]: status (device-writable). */
     int si = ndesc - 1;
     vq->info[idx[0]].status = 0xff;
-    vq->desc[idx[si]].addr = VA2PA((uint64)&vq->info[idx[0]].status);
+    vq->desc[idx[si]].addr = virtio_dma_addr(&vq->info[idx[0]].status);
     vq->desc[idx[si]].len = 1;
     vq->desc[idx[si]].flags = VRING_DESC_F_WRITE;
     vq->desc[idx[si]].next = 0;

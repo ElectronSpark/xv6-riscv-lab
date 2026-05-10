@@ -37,7 +37,7 @@
 #define SEG_TSS_CPU(n)  (SEG_TSS + (n) * 16)  /* TSS selector for CPU n */
 
 #define GDT_BASE_SEGS  6       /* non-TSS GDT entries          */
-#define NSEGS           (GDT_BASE_SEGS + 2 * NCPU) /* + 2 per CPU for TSS */
+#define NSEGS           (GDT_BASE_SEGS + 2 * MAX_CPUS) /* + 2 per CPU for TSS */
 
 /* RPL (Requested Privilege Level) helpers */
 #define SEG_RPL_MASK    0x03

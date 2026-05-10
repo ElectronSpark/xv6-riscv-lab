@@ -52,14 +52,14 @@ static struct sched_class __idle_sched_class = {
 };
 
 static void __alloc_idle_rqs(void) {
-    size_t idle_rq_size = sizeof(struct idle_rq) * NCPU;
+    size_t idle_rq_size = sizeof(struct idle_rq) * cpu_possible_count();
     __idle_rqs = (struct idle_rq *)kvmalloc(idle_rq_size);
     if (!__idle_rqs) {
         panic("alloc_idle_rqs: failed to allocate idle_rqs\n");
     }
     memset(__idle_rqs, 0, idle_rq_size);
 
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         rq_init(&__idle_rqs[i].rq);
         rq_register(&__idle_rqs[i].rq, IDLE_MAJOR_PRIORITY, i);
         rq_set_ready(IDLE_MAJOR_PRIORITY, i);

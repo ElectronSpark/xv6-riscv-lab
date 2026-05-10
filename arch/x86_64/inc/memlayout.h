@@ -61,8 +61,8 @@ extern uint64 __physical_total_pages;
 #define KIRQSTACK(hartid)                                                      \
 	(KIRQSTACKTOP - ((hartid) + 1) * (INTR_STACK_SIZE << 1))
 
-#if NCPU > 64
-#error "NCPU too large"
+#if MAX_CPUS > 64
+#error "MAX_CPUS too large"
 #endif
 
 /*

@@ -305,8 +305,13 @@ static int ext4fs_prefault_begin_page(struct pcache *pc, page_t *page,
 {
     int ret = 0;
 
+retry:
     spin_lock(&pc->spinlock);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        spin_unlock(&pc->spinlock);
+        cpu_relax();
+        goto retry;
+    }
 
     if (page->pcache.pcache != pc || page->pcache.pcache_node == NULL) {
         ret = -EINVAL;
@@ -336,8 +341,13 @@ out:
 static void ext4fs_prefault_end_page(struct pcache *pc, page_t *page,
                                      int uptodate)
 {
+retry:
     spin_lock(&pc->spinlock);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        spin_unlock(&pc->spinlock);
+        cpu_relax();
+        goto retry;
+    }
 
     if (page->pcache.pcache == pc && page->pcache.pcache_node != NULL) {
         struct pcache_node *pcn = page->pcache.pcache_node;

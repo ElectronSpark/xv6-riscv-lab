@@ -471,7 +471,13 @@ static void __pcache_flush_worker(struct work_struct *work) {
             __pcache_spin_lock(pcache);
             for (int i = 0; i < batch_count; i++) {
                 page_t *page = batch_pages[i];
-                page_lock_acquire(page);
+retry_flush_batch_page:
+                if (!spin_trylock(&page->lock)) {
+                    __pcache_spin_unlock(pcache);
+                    cpu_relax();
+                    __pcache_spin_lock(pcache);
+                    goto retry_flush_batch_page;
+                }
 
                 if (batch_bios[i] == NULL) {
                     /* submit failed — push back to dirty list */
@@ -535,8 +541,13 @@ static void __pcache_flush_worker(struct work_struct *work) {
             }
             ret = __pcache_write_end(pcache, page);
 
+retry_flush_serial_page:
             __pcache_spin_lock(pcache);
-            page_lock_acquire(page);
+            if (!spin_trylock(&page->lock)) {
+                __pcache_spin_unlock(pcache);
+                cpu_relax();
+                goto retry_flush_serial_page;
+            }
             if (ret != 0) {
                 pcache->flush_error = ret;
             }
@@ -560,7 +571,12 @@ static void __pcache_flush_worker(struct work_struct *work) {
 
         err_continue:
             __pcache_spin_assert_holding(pcache);
-            page_lock_acquire(page);
+            if (!spin_trylock(&page->lock)) {
+                __pcache_spin_unlock(pcache);
+                cpu_relax();
+                __pcache_spin_lock(pcache);
+                goto err_continue;
+            }
             ret = __pcache_node_io_end(pcache, page);
             assert(ret == 0,
                    "__pcache_flush_worker: failed to end IO on page");
@@ -782,8 +798,20 @@ static void __pcache_global_unlock(void) __releases(__pcache_global_spinlock)
  *****************************************************************************/
 static struct pcache_node *__pcache_find_key_node(struct pcache *pcache,
                                                   uint64 blkno) {
-    return (struct pcache_node *)xa_load(&pcache->page_map,
-                                        PCACHE_PAGE_INDEX(blkno));
+    struct pcache_node *node =
+        (struct pcache_node *)xa_load(&pcache->page_map,
+                                      PCACHE_PAGE_INDEX(blkno));
+    if (node != NULL && !xa_is_internal(node) && is_kvm_addr(node)) {
+        printf("pcache: ignoring invalid xarray node %p blk=%lu cache=%p\n",
+               node, blkno, pcache);
+        return NULL;
+    }
+    if (node != NULL && !xa_is_internal(node) && node->pcache != pcache) {
+        printf("pcache: ignoring stale xarray node %p blk=%lu cache=%p owner=%p\n",
+               node, blkno, pcache, node->pcache);
+        return NULL;
+    }
+    return node;
 }
 
 /**
@@ -804,13 +832,35 @@ static page_t *__pcache_find_and_pin_page(struct pcache *pcache,
     uint64 base_idx = PCACHE_PAGE_INDEX(blkno);
     page_t *page = NULL;
     struct pcache_node *node;
+    int page_busy = 0;
 
+retry:
+    page_busy = 0;
     __pcache_spin_lock(pcache);
     node = (struct pcache_node *)xa_load(&pcache->page_map, base_idx);
     if (node != NULL && !xa_is_internal(node)) {
+        if (is_kvm_addr(node)) {
+            printf("pcache: invalid xarray node %p idx=%lu cache=%p\n",
+                   node, base_idx, pcache);
+            goto out_unlock;
+        }
+        if (node->pcache != pcache) {
+            printf("pcache: stale xarray node %p idx=%lu cache=%p owner=%p\n",
+                   node, base_idx, pcache, node->pcache);
+            goto out_unlock;
+        }
         page = node->page;
         if (page != NULL) {
-            page_lock_acquire(page);
+            if (!spin_trylock(&page->lock)) {
+                /*
+                 * Do not spin on a page lock while holding the pcache lock.
+                 * I/O completion and put paths take pcache -> page too; holding
+                 * pcache here can block the owner from reaching unlock.
+                 */
+                page = NULL;
+                page_busy = 1;
+                goto out_unlock;
+            }
             if (node->page != page ||
                 !PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE) ||
                 page->pcache.pcache != pcache ||
@@ -826,7 +876,12 @@ static page_t *__pcache_find_and_pin_page(struct pcache *pcache,
             }
         }
     }
+out_unlock:
     __pcache_spin_unlock(pcache);
+    if (page_busy) {
+        cpu_relax();
+        goto retry;
+    }
     return page;
 }
 
@@ -1226,7 +1281,8 @@ retry:
 
     page_t *page = pcnode->page;
     assert(page != NULL, "__pcache_pop_lru: pcache_node has no page");
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock))
+        return NULL;
 
     if (LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
         page_lock_release(page);
@@ -1303,7 +1359,8 @@ retry:
     }
     page_t *page = pcnode->page;
     assert(page != NULL, "__pcache_pop_dirty: pcache_node has no page");
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock))
+        return NULL;
     if (pcnode->last_flushed > latest_flush_jiffs && latest_flush_jiffs != 0) {
         // This page was flushed too recently, skip it
         page_lock_release(page);
@@ -1618,8 +1675,13 @@ retry_lookup:
             goto retry_lookup;
         }
 
+revalidate_pinned_page:
         __pcache_spin_lock(pcache);
-        page_lock_acquire(page);
+        if (!spin_trylock(&page->lock)) {
+            __pcache_spin_unlock(pcache);
+            cpu_relax();
+            goto revalidate_pinned_page;
+        }
 
         if (!__pcache_page_valid(pcache, page)) {
             page_lock_release(page);
@@ -1708,7 +1770,6 @@ retry_lookup:
         return NULL;
     }
 
-    page_lock_acquire(new_page);
     pcnode = new_page->pcache.pcache_node;
     assert(pcnode != NULL, "pcache_get_page: new page has no pcache node");
     pcnode->blkno = folio_base_blkno;
@@ -1718,6 +1779,7 @@ retry_lookup:
     /* pcnode->size and pcnode->order were set by __pcache_folio_alloc */
 
     __pcache_spin_lock(pcache);
+    page_lock_acquire(new_page);
 
     if (pcache->max_pages > 0) {
         while (pcache->page_count >= pcache->max_pages) {
@@ -1823,8 +1885,13 @@ void pcache_put_page(struct pcache *pcache, page_t *page) {
         }
     }
 
+retry_locked:
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry_locked;
+    }
 
     if (!__pcache_page_valid(pcache, page)) {
         int detached_race = PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE) &&
@@ -1902,15 +1969,20 @@ unlock:
 }
 
 int pcache_mark_page_dirty(struct pcache *pcache, page_t *page) {
-    struct pcache_node *pcnode;
+    struct pcache_node *pcnode = NULL;
     int ret = 0;
 
     if (pcache == NULL || page == NULL) {
         return -EINVAL;
     }
 
+retry_mark_dirty:
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry_mark_dirty;
+    }
 
     if (!__pcache_page_valid(pcache, page)) {
         ret = -EINVAL;
@@ -2034,8 +2106,13 @@ int pcache_invalidate_page(struct pcache *pcache, page_t *page) {
         return -EINVAL;
     }
 
+retry_invalidate_page:
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry_invalidate_page;
+    }
 
     if (!__pcache_page_valid(pcache, page)) {
         ret = -EINVAL;
@@ -2085,6 +2162,7 @@ int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno) {
 
     base_blkno = PCACHE_ALIGN_BLKNO(blkno);
 
+retry_invalidate_blk:
     __pcache_spin_lock(pcache);
 
     page = __pcache_get_page(pcache, base_blkno, PGSIZE, NULL);
@@ -2093,7 +2171,11 @@ int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno) {
         return 0;
     }
 
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry_invalidate_blk;
+    }
 
     if (!__pcache_page_valid(pcache, page)) {
         page_lock_release(page);
@@ -2152,6 +2234,7 @@ int pcache_discard_blk(struct pcache *pcache, uint64 blkno) {
 
     base_blkno = PCACHE_ALIGN_BLKNO(blkno);
 
+retry_discard_blk:
     __pcache_spin_lock(pcache);
 
     page = __pcache_get_page(pcache, base_blkno, PGSIZE, NULL);
@@ -2160,7 +2243,11 @@ int pcache_discard_blk(struct pcache *pcache, uint64 blkno) {
         return 0; // Not cached, nothing to discard
     }
 
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry_discard_blk;
+    }
 
     if (!__pcache_page_valid(pcache, page)) {
         page_lock_release(page);
@@ -2278,9 +2365,13 @@ int pcache_read_page(struct pcache *pcache, page_t *page) {
         return 0;
     }
 
-retry_locked:
+retry_read_locked:
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry_read_locked;
+    }
 
     // Basic sanity: cache must be active and the page must belong to it.
     if (!__pcache_is_active(pcache)) {
@@ -2326,7 +2417,7 @@ retry_locked:
 
         if (!dirty && !uptodate) {
             __pcache_node_io_wait(pcache, page);
-            goto retry_locked;
+            goto retry_read_locked;
         }
 
         // TODO: plumb a richer status so callers can distinguish transient IO
@@ -2371,8 +2462,13 @@ retry_locked:
     }
 
     // Re-check state now that IO has completed.
+retry_post_io_locked:
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry_post_io_locked;
+    }
 
     if (!__pcache_page_valid(pcache, page)) {
         ret = -EINVAL;
@@ -2428,8 +2524,13 @@ int pcache_prepare_write_page(struct pcache *pcache, page_t *page) {
     if (pcnode && pcnode->uptodate)
         return 0;
 
+retry_prepare_write:
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry_prepare_write;
+    }
 
     if (!__pcache_is_active(pcache) || !__pcache_page_valid(pcache, page)) {
         page_lock_release(page);
@@ -2495,7 +2596,11 @@ int pcache_begin_full_page_write(struct pcache *pcache, page_t *page) {
 
 retry:
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry;
+    }
 
     if (!__pcache_is_active(pcache) || !__pcache_page_valid(pcache, page)) {
         page_lock_release(page);
@@ -2539,8 +2644,13 @@ void pcache_end_full_page_write(struct pcache *pcache, page_t *page,
                                 bool success) {
     struct pcache_node *pcnode;
 
+retry_end_full_write:
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        cpu_relax();
+        goto retry_end_full_write;
+    }
 
     pcnode = page->pcache.pcache_node;
     if (success)
@@ -2588,7 +2698,11 @@ page_t *pcache_get_page_nowait(struct pcache *pcache, uint64 blkno) {
 
     /* Validate under locks */
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        __page_ref_dec(page);
+        return NULL;
+    }
 
     if (!__pcache_page_valid(pcache, page)) {
         page_lock_release(page);
@@ -2634,7 +2748,10 @@ int pcache_read_page_nowait(struct pcache *pcache, page_t *page) {
         return -EINVAL;
 
     __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
+    if (!spin_trylock(&page->lock)) {
+        __pcache_spin_unlock(pcache);
+        return -EAGAIN;
+    }
 
     if (!__pcache_is_active(pcache) || !__pcache_page_valid(pcache, page)) {
         page_lock_release(page);
@@ -2717,21 +2834,29 @@ loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
 
         /* Already cached — skip */
         if (pcn->uptodate) {
+            loff_t next_pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
             pcache_put_page(pcache, page);
-            pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
+            pos = next_pos;
             continue;
         }
 
         /* Try to claim for I/O */
         __pcache_spin_lock(pcache);
-        page_lock_acquire(page);
+        if (!spin_trylock(&page->lock)) {
+            loff_t next_pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
+            __pcache_spin_unlock(pcache);
+            pcache_put_page(pcache, page);
+            pos = next_pos;
+            continue;
+        }
 
         if (pcn->io_in_progress || pcn->uptodate ||
             !__pcache_is_active(pcache) || !__pcache_page_valid(pcache, page)) {
+            loff_t next_pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
             page_lock_release(page);
             __pcache_spin_unlock(pcache);
             pcache_put_page(pcache, page);
-            pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
+            pos = next_pos;
             continue;
         }
 
@@ -2759,8 +2884,13 @@ loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
             bio_await(ra_bios[i]);
             bio_release(ra_bios[i]);
 
+retry_ra_complete:
             __pcache_spin_lock(pcache);
-            page_lock_acquire(ra_pages[i]);
+            if (!spin_trylock(&ra_pages[i]->lock)) {
+                __pcache_spin_unlock(pcache);
+                cpu_relax();
+                goto retry_ra_complete;
+            }
             struct pcache_node *pcn = ra_pages[i]->pcache.pcache_node;
             if (__pcache_page_valid(pcache, ra_pages[i])) {
                 if (!LIST_NODE_IS_DETACHED(pcn, lru_entry))

@@ -483,6 +483,55 @@ STATIC_INLINE int __slab_bitmap_test_and_clear(slab_t *slab, int idx) {
     return old_val;
 }
 
+STATIC_INLINE int __slab_bitmap_is_allocated(slab_t *slab, int idx) {
+    if (slab->bitmap == NULL) {
+        return -1;
+    }
+    if (idx < 0 || (slab->cache && idx >= slab->cache->slab_obj_num)) {
+        return -1;
+    }
+
+    int word_idx = idx >> 6;
+    int bit_idx = idx & 63;
+    uint64 mask = 1UL << bit_idx;
+    return !!(slab->bitmap[word_idx] & mask);
+}
+
+STATIC_INLINE int __slab_free_ptr_valid(slab_t *slab, void *ptr) {
+    int idx;
+
+    if (ptr == NULL) {
+        return 1;
+    }
+    idx = __slab_obj2idx(slab, ptr);
+    if (idx < 0) {
+        return 0;
+    }
+    if (slab->bitmap != NULL && __slab_bitmap_is_allocated(slab, idx) != 0) {
+        return 0;
+    }
+    return 1;
+}
+
+STATIC_INLINE void __slab_rebuild_free_list_from_bitmap(slab_t *slab) {
+    void *head = NULL;
+
+    if (slab == NULL || slab->bitmap == NULL || slab->cache == NULL) {
+        return;
+    }
+
+    for (int i = 0; i < slab->cache->slab_obj_num; i++) {
+        if (__slab_bitmap_is_allocated(slab, i) == 0) {
+            void *obj = __slab_idx2obj(slab, i);
+            if (obj != NULL) {
+                *(void **)obj = head;
+                head = obj;
+            }
+        }
+    }
+    slab->next = head;
+}
+
 // ============================================================================
 // SLAB Object Management
 // ============================================================================
@@ -497,6 +546,17 @@ STATIC_INLINE void *__slab_obj_get(slab_t *slab) {
     void *ret_ptr;
     ret_ptr = slab->next;
     if (ret_ptr != NULL) {
+        if (!__slab_free_ptr_valid(slab, ret_ptr)) {
+            printf("slab_alloc: repairing corrupt freelist cache='%s' slab=%p next=%p\n",
+                   slab->cache ? slab->cache->name : "<detached>", slab, ret_ptr);
+            __slab_rebuild_free_list_from_bitmap(slab);
+            ret_ptr = slab->next;
+            assert(__slab_free_ptr_valid(slab, ret_ptr),
+                   "__slab_obj_get(): corrupt freelist");
+            if (ret_ptr == NULL) {
+                return NULL;
+            }
+        }
         slab->next = *(void **)ret_ptr;
         slab->in_use++;
         // Update bitmap if tracking is enabled
@@ -576,6 +636,9 @@ STATIC_INLINE int __slab_obj2idx(slab_t *slab, void *ptr) {
         return -1;
     }
     base_offs = ptr - page_base;
+    if (base_offs % slab->cache->obj_size != 0) {
+        return -1;
+    }
     idx = base_offs / slab->cache->obj_size;
     if (idx >= slab->cache->slab_obj_num) {
         // object not in the range of the SLAB
@@ -640,13 +703,13 @@ STATIC_INLINE void __percpu_cache_unlock(slab_cache_t *cache) {
 
 // Acquire lock for a specific CPU's cache
 STATIC_INLINE void __percpu_cache_lock_cpu(slab_cache_t *cache, int cpu_id) {
-    assert(cpu_id >= 0 && cpu_id < NCPU, "invalid cpu_id");
+    assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "invalid cpu_id");
     spin_lock(&cache->percpu_caches[cpu_id].lock);
 }
 
 // Release lock for a specific CPU's cache
 STATIC_INLINE void __percpu_cache_unlock_cpu(slab_cache_t *cache, int cpu_id) {
-    assert(cpu_id >= 0 && cpu_id < NCPU, "invalid cpu_id");
+    assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "invalid cpu_id");
     spin_unlock(&cache->percpu_caches[cpu_id].lock);
 }
 
@@ -740,8 +803,19 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
     cache->bitmap_size = bitmap_size;
     cache->limits = limits;
 
+    size_t percpu_size = sizeof(percpu_slab_cache_t) * cpu_possible_count();
+    uint32 percpu_order = 0;
+    while ((PAGE_SIZE << percpu_order) < percpu_size)
+        percpu_order++;
+    cache->percpu_caches =
+        (percpu_slab_cache_t *)page_alloc(percpu_order, PAGE_TYPE_ANON);
+    assert(cache->percpu_caches != NULL,
+           "__slab_cache_init: per-CPU cache allocation failed");
+    memset(cache->percpu_caches, 0, PAGE_SIZE << percpu_order);
+    cache->percpu_caches_order = percpu_order;
+
     // Initialize per-CPU caches
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         list_entry_init(&cache->percpu_caches[i].partial_list);
         list_entry_init(&cache->percpu_caches[i].full_list);
         __atomic_store_n(&cache->percpu_caches[i].partial_count, 0,
@@ -830,7 +904,7 @@ int slab_cache_destroy(slab_cache_t *cache) {
     }
 
     // Check if any CPU has partial or full slabs
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         uint32 partial_count = __atomic_load_n(
             &cache->percpu_caches[i].partial_count, __ATOMIC_ACQUIRE);
         uint32 full_count = __atomic_load_n(&cache->percpu_caches[i].full_count,
@@ -861,6 +935,9 @@ int slab_cache_destroy(slab_cache_t *cache) {
         list_entry_detach(&cache->cache_list_entry);
     }
     spin_unlock(&__all_slab_caches_lock);
+
+    if (cache->percpu_caches != NULL)
+        page_free(cache->percpu_caches, cache->percpu_caches_order);
 
     slab_cache_t_free(cache);
     return 0;

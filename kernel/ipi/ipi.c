@@ -34,17 +34,19 @@
 #include "string.h"
 #include "bits.h"
 #include "lock/spinlock.h"
+#include "platform.h"
+#include "mm/vm.h"
 
 /** @brief Per-CPU state, placed in special linker section for trampoline access
  */
 __SECTION(cpu_local_sec)
 __ALIGNED_PAGE
-struct cpu_local cpus[NCPU] = {0};
+struct cpu_local cpus[MAX_CPUS] = {0};
 
 static cpumask_t cpu_active_mask = 0; /**< Bitmask of active CPUs */
 
 /** @brief Pending IPI bitmask per hart (indexed by hart ID) */
-uint64 ipi_pending[NCPU] = {0};
+uint64 *ipi_pending;
 
 /** @brief IRQ number for supervisor software interrupt */
 #define IRQ_S_SOFT 1
@@ -125,7 +127,12 @@ void ipi_init(void) {
         .dev = NULL,
     };
 
-    for (int i = 0; i < NCPU; i++) {
+    int ncpu = cpu_possible_count();
+    ipi_pending = (uint64 *)kvmalloc(sizeof(*ipi_pending) * ncpu);
+    assert(ipi_pending != NULL, "ipi_init: pending allocation failed");
+    memset(ipi_pending, 0, sizeof(*ipi_pending) * ncpu);
+
+    for (int i = 0; i < ncpu; i++) {
         smp_store_release(&ipi_pending[i], 0);
     }
 
@@ -136,12 +143,12 @@ void ipi_init(void) {
 
 /**
  * @brief Send an IPI to a specific hart.
- * @param hartid The target hart ID (0 to NCPU-1)
+ * @param hartid The target hart ID.
  * @param reason The IPI reason code (IPI_REASON_*)
  * @return 0 on success, -EINVAL for invalid parameters
  */
 int ipi_send_single(int hartid, int reason) {
-    if (hartid < 0 || hartid >= NCPU) {
+    if (hartid < 0 || hartid >= cpu_possible_count()) {
         return -EINVAL;
     }
     if (reason < 0 || reason >= NR_IPI_REASON) {
@@ -170,9 +177,12 @@ int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base,
     }
 
     // Set the pending IPI bits for target harts
-    for (int i = 0; i < NCPU; i++) {
+    int ncpu = cpu_possible_count();
+    for (int i = 0; i < ncpu; i++) {
         if (hart_mask & (1UL << i)) {
-            atomic_or(&ipi_pending[i + hart_mask_base], 1UL << reason);
+            int cpu = i + (int)hart_mask_base;
+            if (cpu >= 0 && cpu < ncpu)
+                atomic_or(&ipi_pending[cpu], 1UL << reason);
         }
     }
 
@@ -185,7 +195,7 @@ int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base,
  * @return 0 on success, negative error code on failure
  */
 int ipi_send_all_but_self(int reason) {
-    cpumask_t hart_mask = ((1UL << NCPU) - 1) & ~(1UL << cpuid());
+    cpumask_t hart_mask = cpu_possible_mask() & ~(1UL << cpuid());
     return ipi_send_mask(hart_mask, 0, reason);
 }
 
@@ -195,9 +205,9 @@ int ipi_send_all_but_self(int reason) {
  * @return 0 on success, negative error code on failure
  */
 int ipi_send_all(int reason) {
-    cpumask_t hart_mask = (1UL << NCPU) - 1;
+    cpumask_t hart_mask = cpu_possible_mask();
 
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         atomic_or(&ipi_pending[i], 1UL << reason);
     }
 
@@ -207,7 +217,8 @@ int ipi_send_all(int reason) {
 void cpus_init(void) { memset(cpus, 0, sizeof(cpus)); }
 
 void mycpu_init(uint64 hartid, bool trampoline) {
-    assert(hartid < NCPU, "mycpu_init: invalid hartid %ld", hartid);
+    assert(hartid < (uint64)cpu_possible_count(),
+           "mycpu_init: invalid hartid %ld", hartid);
     atomic_or(&cpu_active_mask, 1UL << hartid);
     if (trampoline) {
         // Convert physical address to virtual address in trampoline region
@@ -228,4 +239,22 @@ void mycpu_init(uint64 hartid, bool trampoline) {
 
 cpumask_t get_cpu_active_mask(void) {
     return smp_load_acquire(&cpu_active_mask);
+}
+
+int cpu_possible_count(void)
+{
+    int ncpu = platform_boot_cpu_limit();
+    if (ncpu < 1)
+        ncpu = 1;
+    if (ncpu > MAX_CPUS)
+        ncpu = MAX_CPUS;
+    return ncpu;
+}
+
+cpumask_t cpu_possible_mask(void)
+{
+    int ncpu = cpu_possible_count();
+    if (ncpu >= (int)(sizeof(cpumask_t) * 8))
+        return (cpumask_t)~0ULL;
+    return ((cpumask_t)1 << ncpu) - 1;
 }

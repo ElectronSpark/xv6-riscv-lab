@@ -7,6 +7,7 @@
  */
 
 #include "types.h"
+#include "param.h"
 #include "platform.h"
 #include "defs.h"
 #include "printf.h"
@@ -70,6 +71,22 @@ void platform_post_vm_init(void)
 {
     arch_vm_init_hart(); /* turn on paging */
     printf("paging enabled\n");
+}
+
+int platform_boot_cpu_limit(void)
+{
+    int ncpu = platform.ncpu;
+    if (ncpu < 1 || ncpu > NCPU)
+        ncpu = NCPU;
+    return ncpu;
+}
+
+void platform_prepare_current_cpu_stack(void)
+{
+    /*
+     * RISC-V harts enter through OpenSBI on stack0 before the allocator and
+     * FDT CPU topology are available.  Keep that early path unchanged here.
+     */
 }
 
 void platform_start_secondary_cpus(uint64 entry)

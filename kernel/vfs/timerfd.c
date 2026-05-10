@@ -73,7 +73,9 @@ struct timerfd_ctx {
     int             flags;      /* TFD_TIMER_ABSTIME etc */
     bool            armed;
     bool            cancelled;  /* set on release to prevent re-arm */
-    bool            rearm_pending;
+    bool            rearm_pending; /* deferred repeating timer re-arm requested */
+    bool            notify_pending;
+    bool            work_pending; /* deferred work is queued or running */
     struct vfs_file *file;      /* back-pointer for kqueue notification */
 };
 
@@ -146,32 +148,72 @@ static void timerfd_rearm_work(struct work_struct *work)
 {
     struct timerfd_ctx *ctx = (struct timerfd_ctx *)work->data;
 
-    spin_lock(&ctx->lock);
-    if (ctx->cancelled || !ctx->armed) {
-        ctx->rearm_pending = false;
-        bool free_ctx = ctx->cancelled && ctx->file == NULL;
-        spin_unlock(&ctx->lock);
-        if (free_ctx)
-            kfree(ctx);
-        return;
-    }
-    if (ctx->interval_ns == 0) {
-        ctx->rearm_pending = false;
-        spin_unlock(&ctx->lock);
-        return;
-    }
-    uint64 now_ns = timerfd_now_ns(ctx->clockid);
-    if (ctx->next_expiration_ns <= now_ns)
-        ctx->next_expiration_ns = now_ns + ctx->interval_ns;
-    uint64 delay_ms = ns_to_ms_ceil(ctx->next_expiration_ns - now_ns);
-    ctx->rearm_pending = false;
-    spin_unlock(&ctx->lock);
+    for (;;) {
+        struct vfs_file *notify_file = NULL;
+        bool do_rearm = false;
+        uint64 delay_ms = 0;
 
-    /* Remove the old timer node first (it may still be in the tree if
-     * retry_limit > 1), then re-arm with a fresh node. */
-    sched_timer_done(&ctx->timer);
-    sched_timer_set_cb(&ctx->timer, delay_ms ? delay_ms : 1,
-                       timerfd_timer_callback, ctx);
+        spin_lock(&ctx->lock);
+        if (ctx->cancelled) {
+            ctx->rearm_pending = false;
+            ctx->notify_pending = false;
+            ctx->work_pending = false;
+            bool free_ctx = ctx->file == NULL;
+            spin_unlock(&ctx->lock);
+            if (free_ctx)
+                kfree(ctx);
+            return;
+        }
+
+        if (ctx->notify_pending) {
+            ctx->notify_pending = false;
+            if (ctx->file)
+                notify_file = vfs_fdup(ctx->file);
+        }
+
+        if (ctx->rearm_pending) {
+            ctx->rearm_pending = false;
+            if (ctx->armed && ctx->interval_ns != 0) {
+                uint64 now_ns = timerfd_now_ns(ctx->clockid);
+                if (ctx->next_expiration_ns <= now_ns)
+                    ctx->next_expiration_ns = now_ns + ctx->interval_ns;
+                delay_ms = ns_to_ms_ceil(ctx->next_expiration_ns - now_ns);
+                do_rearm = true;
+            }
+        }
+
+        if (!notify_file && !do_rearm) {
+            ctx->work_pending = false;
+            spin_unlock(&ctx->lock);
+            return;
+        }
+
+        spin_unlock(&ctx->lock);
+
+        if (notify_file) {
+            vfs_file_knote_notify(notify_file, EVFILT_READ, 0);
+            vfs_fput(notify_file);
+        }
+
+        if (do_rearm) {
+            /* Remove the old timer node first (it may still be in the tree if
+             * retry_limit > 1), then re-arm with a fresh node. */
+            sched_timer_done(&ctx->timer);
+            sched_timer_set_cb(&ctx->timer, delay_ms ? delay_ms : 1,
+                               timerfd_timer_callback, ctx);
+        }
+
+        spin_lock(&ctx->lock);
+        if (!ctx->notify_pending && !ctx->rearm_pending) {
+            ctx->work_pending = false;
+            bool free_ctx = ctx->cancelled && ctx->file == NULL;
+            spin_unlock(&ctx->lock);
+            if (free_ctx)
+                kfree(ctx);
+            return;
+        }
+        spin_unlock(&ctx->lock);
+    }
 }
 
 /* ── timer callback (runs in timer-tick context with timer lock held) ─ */
@@ -189,28 +231,35 @@ static void timerfd_timer_callback(struct timer_node *tn)
         ctx->next_expiration_ns += count * ctx->interval_ns;
 
     bool need_rearm = ctx->interval_ns != 0 && !ctx->cancelled;
+    bool queue_deferred = false;
     if (!need_rearm) {
         ctx->armed = false;
-        ctx->rearm_pending = false;
     } else {
         ctx->rearm_pending = true;
+    }
+    if (!ctx->cancelled) {
+        ctx->notify_pending = true;
+        if (!ctx->work_pending) {
+            ctx->work_pending = true;
+            queue_deferred = true;
+        }
     }
 
     /* Wake readers */
     tq_wakeup_all(&ctx->rq, 0, 0);
     spin_unlock(&ctx->lock);
 
-    /* Notify epoll/kqueue */
-    if (ctx->file)
-        vfs_file_knote_notify(ctx->file, EVFILT_READ, 0);
-
-    /* Defer re-arm to workqueue (can't call sched_timer_set_cb here
-     * because timer lock is already held) */
-    if (need_rearm && timerfd_wq) {
+    /* Defer kqueue notification and repeating timer re-arm out of timer
+     * interrupt context.  kqueue locks may be held by the interrupted thread.
+     */
+    if (queue_deferred && timerfd_wq) {
         if (!queue_work(timerfd_wq, &ctx->rearm_work)) {
             spin_lock(&ctx->lock);
+            ctx->notify_pending = false;
             ctx->rearm_pending = false;
-            ctx->armed = false;
+            ctx->work_pending = false;
+            if (need_rearm)
+                ctx->armed = false;
             spin_unlock(&ctx->lock);
         }
     }
@@ -283,7 +332,7 @@ static int timerfd_release(struct vfs_inode *ip, struct vfs_file *file)
         } else {
         }
         tq_wakeup_all(&ctx->rq, -1, 0);
-        bool free_ctx = !ctx->rearm_pending;
+        bool free_ctx = !ctx->work_pending;
         spin_unlock(&ctx->lock);
         if (free_ctx)
             kfree(ctx);

@@ -123,7 +123,7 @@ static struct rq *__fifo_select_task_rq(struct rq *prev_rq,
     int minor_prio = MINOR_PRIORITY(se->priority);
 
     if (cpumask == 0) {
-        cpumask = (1ULL << NCPU) - 1; // All CPUs allowed
+        cpumask = cpu_possible_mask(); // All CPUs allowed
     }
 
     // If the FIFO rqs for this major priority are not allocated, return error
@@ -151,7 +151,7 @@ static struct rq *__fifo_select_task_rq(struct rq *prev_rq,
     }
 
     // Check all other allowed CPUs for a less loaded one
-    for (int cpu = 0; cpu < NCPU; cpu++) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
         if (cpu == cur_cpu) {
             continue; // Already checked
         }
@@ -209,14 +209,14 @@ static void __fifo_rq_init(struct fifo_rq *fifo_rq, int cls_id, int cpu_id) {
 
 // Allocate and register FIFO rqs for a single major priority level
 static void __alloc_fifo_rqs_for_cls(int cls_id) {
-    size_t fifo_rq_size = sizeof(struct fifo_rq) * NCPU;
+    size_t fifo_rq_size = sizeof(struct fifo_rq) * cpu_possible_count();
     __fifo_rqs[cls_id] = (struct fifo_rq *)kvmalloc(fifo_rq_size);
     if (!__fifo_rqs[cls_id]) {
         panic("alloc_fifo_rqs: failed to allocate fifo_rqs for cls_id %d\n",
               cls_id);
     }
     memset(__fifo_rqs[cls_id], 0, fifo_rq_size);
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         __fifo_rq_init(&__fifo_rqs[cls_id][i], cls_id, i);
         rq_register(&__fifo_rqs[cls_id][i].rq, cls_id, i);
     }

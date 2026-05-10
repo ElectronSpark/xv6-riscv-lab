@@ -103,8 +103,8 @@ void print_thread_backtrace(struct context *ctx, uint64 kstack,
 
     uint64 fp = ctx->rbp;      /* frame pointer on x86_64 */
     uint64 stack_size  = (1UL << (PAGE_SHIFT + kstack_order));
-    uint64 stack_start = kstack;
-    uint64 stack_end   = kstack + stack_size;
+    uint64 stack_start = (uint64)PA2VA(kstack);
+    uint64 stack_end   = stack_start + stack_size;
 
     printf("backtrace:\n");
 

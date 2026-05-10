@@ -28,7 +28,7 @@
  */
 static struct {
     uint64          gdt[NSEGS];
-    struct tss64    tss[NCPU];
+    struct tss64    tss[MAX_CPUS];
 } __attribute__((aligned(4096))) cpu_entry_gdt_page;
 
 #define gdt       (cpu_entry_gdt_page.gdt)
@@ -102,7 +102,7 @@ void x86_gdt_init(void)
     );
 
     /* TSS descriptors for all CPUs (each occupies 2 GDT slots) */
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         __builtin_memset(cpu_tss(i), 0, sizeof(struct tss64));
         cpu_tss(i)->iomap_base = sizeof(struct tss64);  /* no I/O bitmap */
         gdt_install_tss(tss_gdt_slot(i), cpu_tss(i));
@@ -150,7 +150,7 @@ void x86_gdt_init(void)
 void x86_gdt_remap(uint64 gdt_va)
 {
     /* Update ALL per-CPU TSS descriptors to point to high-canonical VA */
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         uint64 tss_offset = (uint64)cpu_tss(i) - (uint64)&gdt[0];
         uint64 tss_va = gdt_va + tss_offset;
 

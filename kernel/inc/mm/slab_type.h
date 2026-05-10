@@ -39,8 +39,9 @@ typedef struct slab_cache_struct {
     // free half of its SLABs.
     uint32 limits;
 
-    // Per-CPU caches (one per CPU)
-    percpu_slab_cache_t percpu_caches[NCPU];
+    // Per-CPU caches, allocated at runtime for cpu_possible_count() CPUs.
+    percpu_slab_cache_t *percpu_caches;
+    uint32 percpu_caches_order;
 
     // Global free list (shared across all CPUs)
     list_node_t global_free_list;

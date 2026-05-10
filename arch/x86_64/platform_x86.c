@@ -16,6 +16,7 @@
 #include "proc/sched.h"
 #include "lock/rcu.h"
 #include "lapic.h"
+#include "x86.h"
 #include "param.h"
 #include <mm/memlayout.h>
 #include "mm/page.h"
@@ -25,6 +26,12 @@
 
 /* Global platform info structure (RISC-V defines this in fdt.c) */
 struct platform_info platform;
+
+static int x86_boot_cpu_limit_cached;
+static void **x86_kernel_stacks;
+static uint64 *x86_ap_boot_stack_tops;
+
+extern void arch_relocate_stack_finish(uint64 delta);
 
 /* ------------------------------------------------------------------ */
 /*  Debugcon helpers (port 0xE9 — QEMU ISA debug console)             */
@@ -106,6 +113,112 @@ static void x86_debug_put_size(uint64 size)
         x86_debug_put_dec_u64(size);
         x86_debug_puts(" B");
     }
+}
+
+static void x86_cpuid(uint32 leaf, uint32 subleaf, uint32 *a, uint32 *b,
+                      uint32 *c, uint32 *d)
+{
+    asm volatile("cpuid"
+                 : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
+                 : "a"(leaf), "c"(subleaf));
+}
+
+static uint32 x86_cpuid_topology_count(uint32 leaf)
+{
+    uint32 count = 0;
+
+    for (uint32 subleaf = 0; subleaf < 8; subleaf++) {
+        uint32 a, b, c, d;
+        x86_cpuid(leaf, subleaf, &a, &b, &c, &d);
+        uint32 level_type = (c >> 8) & 0xff;
+        uint32 logical = b & 0xffff;
+        if (level_type == 0)
+            break;
+        if (logical > count)
+            count = logical;
+    }
+
+    return count;
+}
+
+static int x86_detect_boot_cpu_limit(void)
+{
+    uint32 a, b, c, d;
+    uint32 count = 0;
+
+    x86_cpuid(0, 0, &a, &b, &c, &d);
+    uint32 max_leaf = a;
+
+    if (max_leaf >= 0x1f)
+        count = x86_cpuid_topology_count(0x1f);
+    if (count == 0 && max_leaf >= 0x0b)
+        count = x86_cpuid_topology_count(0x0b);
+    if (count == 0 && max_leaf >= 1) {
+        x86_cpuid(1, 0, &a, &b, &c, &d);
+        count = (b >> 16) & 0xff;
+    }
+    if (count == 0)
+        count = 1;
+
+    if (count > MAX_CPUS) {
+        printf("[SMP] CPUID reports %d CPUs; clamping to MAX_CPUS=%d\n",
+               count, MAX_CPUS);
+        count = MAX_CPUS;
+    }
+
+    return (int)count;
+}
+
+static uint64 x86_kernel_stack_top(int cpu)
+{
+    if (cpu < 0 || cpu >= platform_boot_cpu_limit())
+        panic("x86_kernel_stack_top: invalid CPU %d", cpu);
+
+    if (x86_kernel_stacks == NULL) {
+        x86_kernel_stacks = page_alloc(0, PAGE_TYPE_ANON);
+        if (x86_kernel_stacks == NULL)
+            panic("x86_kernel_stack_top: stack table allocation failed");
+        memset(x86_kernel_stacks, 0, PAGE_SIZE);
+    }
+
+    if (x86_kernel_stacks[cpu] == NULL) {
+        void *stack = page_alloc(KERNEL_STACK_ORDER, PAGE_TYPE_ANON);
+        if (stack == NULL)
+            panic("x86_kernel_stack_top: kernel stack allocation failed");
+        memset(stack, 0, KERNEL_STACK_SIZE);
+        x86_kernel_stacks[cpu] = stack;
+    }
+
+    return (uint64)x86_kernel_stacks[cpu] + KERNEL_STACK_SIZE;
+}
+
+static void x86_relocate_current_stack(uint64 new_stack_top)
+{
+    uint64 old_sp = r_sp();
+    uint64 old_fp = r_fp();
+    uint64 old_base = old_sp & ~(KERNEL_STACK_SIZE - 1);
+    uint64 old_limit = old_base + KERNEL_STACK_SIZE - PAGE_SIZE;
+    uint64 new_base = new_stack_top - KERNEL_STACK_SIZE;
+    uint64 delta = new_base - old_base;
+
+    if (old_sp < old_base || old_sp >= old_limit)
+        panic("x86_relocate_current_stack: SP outside current kernel stack");
+
+    uint64 bytes = old_limit - old_sp;
+    memmove((void *)(old_sp + delta), (void *)old_sp, bytes);
+
+    for (uint64 fp = old_fp; fp >= old_sp && fp + sizeof(uint64) <= old_limit;) {
+        uint64 *new_fp = (uint64 *)(fp + delta);
+        uint64 next = *new_fp;
+        if (next < old_sp || next >= old_limit)
+            break;
+        *new_fp = next + delta;
+        if (next <= fp)
+            break;
+        fp = next;
+    }
+
+    arch_relocate_stack_finish(delta);
 }
 
 static void x86_debug_boot_mem_summary(void)
@@ -646,6 +759,30 @@ void platform_post_vm_init(void)
     }
 }
 
+int platform_boot_cpu_limit(void)
+{
+    if (x86_boot_cpu_limit_cached == 0)
+        x86_boot_cpu_limit_cached = x86_detect_boot_cpu_limit();
+    return x86_boot_cpu_limit_cached;
+}
+
+void platform_prepare_current_cpu_stack(void)
+{
+    int cpu = cpuid();
+    int limit = platform_boot_cpu_limit();
+
+    if (cpu < 0 || cpu >= limit)
+        panic("platform_prepare_current_cpu_stack: invalid CPU %d", cpu);
+
+    if (x86_kernel_stacks != NULL && x86_kernel_stacks[cpu] != NULL)
+        return;
+
+    uint64 stack_top = x86_kernel_stack_top(cpu);
+    printf("[SMP] CPU %d dynamic kernel stack: 0x%lx-0x%lx\n",
+           cpu, stack_top - KERNEL_STACK_SIZE, stack_top);
+    x86_relocate_current_stack(stack_top);
+}
+
 void platform_start_secondary_cpus(uint64 entry)
 {
     (void)entry;
@@ -656,10 +793,7 @@ void platform_start_secondary_cpus(uint64 entry)
      * The trampoline code (ap_trampoline.S) is linked into .rodata and
      * copied to AP_BOOT_PA.  Before copying we patch the data area with
      * the kernel CR3, per-CPU boot stack tops, and start_kernel address.
-     *
-     * Stacks are pre-reserved for ALL secondary cores before SIPI is sent.
-     * Each AP atomically increments ap_boot_next_cpu to claim a unique
-     * hartid, then uses that to index into ap_boot_stacks[].
+     * The stack table is allocator-backed and sized by platform_boot_cpu_limit().
      */
     #define AP_BOOT_PA  0x8000
 
@@ -669,13 +803,29 @@ void platform_start_secondary_cpus(uint64 entry)
     extern uint64 ap_boot_target;
     extern uint64 ap_boot_cpus_base;
     extern uint32 ap_boot_cpu_stride;
-    extern uint64 ap_boot_stacks_base;
+    extern uint64 ap_boot_stack_tops_base;
+    extern uint32 ap_boot_cpu_limit;
     extern uint32 ap_boot_next_cpu;
 
     extern void start_kernel(int, void *, bool);
     extern uint64 kernel_pagetable;
     extern struct cpu_local cpus[];
-    extern char boot_stacks[];          /* entry.S: KERNEL_STACK_SIZE * NCPU */
+
+    int cpu_limit = platform_boot_cpu_limit();
+    if (cpu_limit <= 1) {
+        platform.ncpu = 1;
+        printf("[SMP] CPU topology reports one CPU; skipping AP startup\n");
+        return;
+    }
+
+    if (x86_ap_boot_stack_tops == NULL) {
+        x86_ap_boot_stack_tops = page_alloc(0, PAGE_TYPE_ANON);
+        if (x86_ap_boot_stack_tops == NULL)
+            panic("platform_start_secondary_cpus: stack table allocation failed");
+    }
+    memset(x86_ap_boot_stack_tops, 0, PAGE_SIZE);
+    for (int cpu = 1; cpu < cpu_limit; cpu++)
+        x86_ap_boot_stack_tops[cpu] = x86_kernel_stack_top(cpu);
 
     uint64 tramp_size = (uint64)ap_trampoline_end - (uint64)ap_trampoline_start;
     if (tramp_size > 4096)
@@ -687,18 +837,15 @@ void platform_start_secondary_cpus(uint64 entry)
     ap_boot_target = (uint64)start_kernel;
     ap_boot_cpus_base = (uint64)&cpus[0];
     ap_boot_cpu_stride = (uint32)sizeof(struct cpu_local);
-    ap_boot_stacks_base = (uint64)boot_stacks; /* static array from entry.S */
+    ap_boot_stack_tops_base = (uint64)x86_ap_boot_stack_tops;
+    ap_boot_cpu_limit = (uint32)cpu_limit;
     ap_boot_next_cpu = 1;           /* BSP is 0; APs atomically claim 1,2,3... */
-
-    /* Stacks are pre-reserved in the static boot_stacks array (entry.S).
-     * Each AP computes its stack from boot_stacks + (hartid+1) * KERNEL_STACK_SIZE.
-     * No runtime allocation needed. */
 
     /* Copy trampoline to low memory */
     memmove((void *)(uint64)AP_BOOT_PA, ap_trampoline_start, tramp_size);
 
-    printf("[SMP] Starting secondary CPUs (trampoline at 0x%x, size %d)\n",
-           AP_BOOT_PA, (int)tramp_size);
+    printf("[SMP] Starting secondary CPUs (prepared=%d, trampoline at 0x%x, size %d)\n",
+           cpu_limit, AP_BOOT_PA, (int)tramp_size);
 
     /*
      * INIT-SIPI-SIPI sequence (broadcast to all APs):
@@ -754,10 +901,18 @@ void platform_start_secondary_cpus(uint64 entry)
 
     /* ap_boot_next_cpu started at 1 (BSP=0). After APs boot it equals
      * the total number of CPUs (BSP + APs). */
-    uint32 total_cpus =
+    uint32 claimed_cpus =
         __atomic_load_n(runtime_ap_boot_next_cpu, __ATOMIC_ACQUIRE);
-    platform.ncpu = total_cpus;
-    printf("[SMP] %d CPUs online (1 BSP + %d APs)\n", total_cpus, total_cpus - 1);
+    if (claimed_cpus > (uint32)cpu_limit) {
+        printf("[SMP] %d CPUs attempted startup; only %d slots prepared\n",
+               claimed_cpus, cpu_limit);
+        claimed_cpus = (uint32)cpu_limit;
+    }
+    if (claimed_cpus < 1)
+        claimed_cpus = 1;
+    platform.ncpu = claimed_cpus;
+    printf("[SMP] %d CPUs online (1 BSP + %d APs, prepared %d)\n",
+           claimed_cpus, claimed_cpus - 1, cpu_limit);
 }
 
 void platform_secondary_cpu_init(void)

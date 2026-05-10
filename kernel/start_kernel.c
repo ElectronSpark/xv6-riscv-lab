@@ -138,6 +138,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     // idle_thread_init must run before userinit because it calls
     // rq_cpu_activate() to mark this CPU active; otherwise scheduler_wakeup()
     // for init may fail to enqueue on any run queue.
+    platform_prepare_current_cpu_stack();
     idle_thread_init();
     vm_cpu_online(kernel_vm, cpuid(), current); // CPU starts in kernel mode
     // Legacy iinit() and fileinit() removed - VFS handles these
@@ -164,6 +165,7 @@ static void __start_kernel_secondary_hart(int hartid) {
     arch_vm_init_hart();
     // Now switch TP to trampoline virtual address (paging is now on)
     mycpu_init(hartid, true);
+    platform_prepare_current_cpu_stack();
     idle_thread_init();
     vm_cpu_online(kernel_vm, cpuid(), current); // CPU starts in kernel mode
     arch_trap_init_hart();                      // install kernel trap vector

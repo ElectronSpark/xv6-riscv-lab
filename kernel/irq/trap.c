@@ -34,7 +34,7 @@ void trapinit(void) {
 
     // Allocate and map interrupt stacks for each CPU hart
     pagetable_t kpgtbl = (void *)_data_ktlb;
-    for (int i = 0; i < NCPU; i++) {
+    for (int i = 0; i < cpu_possible_count(); i++) {
         void *intr_stacks = page_alloc(INTR_STACK_ORDER, 0);
         assert(intr_stacks != NULL,
                "trapinit: page_alloc for intr_stacks failed");

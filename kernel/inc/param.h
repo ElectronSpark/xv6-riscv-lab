@@ -26,7 +26,8 @@
 #define MAXPID 0x7FFFFFF0 // maximum process ID
 #define NR_THREAD 10000   // maximum number of threads
 // #define NR_THREAD       0xFFFFFFFFFFFFFFUL
-#define NCPU 8              // maximum number of CPUs
+#define MAX_CPUS 8          // compile-time CPU capacity
+#define NCPU MAX_CPUS       // legacy RISC-V/common compatibility alias
 #define NOFILE 2048         // open files per thread
 #define NFILE 2048          // open files per system
 #define NINODE 50           // maximum number of active i-nodes
@@ -77,7 +78,7 @@
 #endif /* PAGE_MASK */
 
 // Default kernel stack size
-#define KERNEL_STACK_ORDER 2 // kernel stack size is 16KB
+#define KERNEL_STACK_ORDER 3 // kernel stack size is 32KB
 #define KERNEL_STACK_SIZE                                                      \
     (1UL << (PAGE_SHIFT + KERNEL_STACK_ORDER)) // kernel stack size in bytes
 #define INTR_STACK_ORDER 2                     // interrupt stack size is 16KB

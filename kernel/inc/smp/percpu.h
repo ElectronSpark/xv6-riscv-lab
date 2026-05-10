@@ -7,7 +7,7 @@
 #include "printf.h"
 #include "bits.h"
 
-extern struct cpu_local cpus[NCPU];
+extern struct cpu_local cpus[];
 
 /** @defgroup cpu_flags CPU Flags
  * @brief Per-CPU status flags for scheduler and panic handling
@@ -169,14 +169,17 @@ struct thread *__current_thread(void);
 void cpus_init(void);
 void mycpu_init(uint64 hartid, bool trampoline);
 cpumask_t get_cpu_active_mask(void);
+int cpu_possible_count(void);
+cpumask_t cpu_possible_mask(void);
 
-#define PERCPU_NCPU_MASK ((1UL << NCPU) - 1)
+#define PERCPU_CPU_MASK cpu_possible_mask()
 
 #define cpu_for_each_in_mask(cpu, mask) bits_foreach_set_bit((mask), cpu)
 
 #define cpu_for_each_active(cpu)                                               \
     cpu_for_each_in_mask(cpu, get_cpu_active_mask())
 
-#define cpu_for_each_all(cpu) for (cpu = 0; cpu < NCPU; cpu++)
+#define cpu_for_each_possible(cpu) for (cpu = 0; cpu < cpu_possible_count(); cpu++)
+#define cpu_for_each_all(cpu) cpu_for_each_possible(cpu)
 
 #endif /* __KERNEL_PER_CPU_H */
