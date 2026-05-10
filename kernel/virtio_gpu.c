@@ -33,7 +33,9 @@
 
 #define VIRTIO_GPU_MAX_SCANOUTS 16
 #define VIRTIO_GPU_POLL_LIMIT 10000000
+#define VIRTIO_GPU_FAST_POLL_LIMIT 20000
 #define VIRTIO_GPU_IRQ_WAIT_MS 5000
+#define VIRTIO_GPU_IRQ_WAIT_SLICE_MS 1
 
 #define VIRTIO_GPU_F_VIRGL          0
 #define VIRTIO_GPU_F_CONTEXT_INIT   4
@@ -511,6 +513,58 @@ static int virtio_gpu_complete_pending_locked(struct virtio_gpu_queue *q)
     return 0;
 }
 
+static int virtio_gpu_used_advanced(struct virtio_gpu_queue *q)
+{
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return q->used->idx != q->used_idx;
+}
+
+static int virtio_gpu_wait_for_used(struct virtio_gpu *g,
+                                    struct virtio_gpu_queue *q,
+                                    completion_t *done)
+{
+    uint64 waited_ms = 0;
+    int poll_fallback_counted = 0;
+
+    /*
+     * QEMU often completes simple scanout and virgl control commands before
+     * the interrupt path has a chance to schedule the waiter.  Poll briefly
+     * first so compositor presents and WebKit submits do not sleep for a full
+     * timer tick on every frame.
+     */
+    for (int i = 0; i < VIRTIO_GPU_FAST_POLL_LIMIT; i++) {
+        if (virtio_gpu_used_advanced(q))
+            return 1;
+    }
+
+    /*
+     * Keep the historical five-second failure deadline, but poll the used ring
+     * between short sleeps.  A missed or coalesced interrupt should cost about
+     * a millisecond, not a multi-second UI freeze.
+     */
+    while (waited_ms < VIRTIO_GPU_IRQ_WAIT_MS) {
+        if (wait_for_completion_timeout(done,
+                                        VIRTIO_GPU_IRQ_WAIT_SLICE_MS) != 0)
+            return 1;
+        waited_ms += VIRTIO_GPU_IRQ_WAIT_SLICE_MS;
+        if (virtio_gpu_used_advanced(q)) {
+            if (!poll_fallback_counted) {
+                virtio_gpu_count_poll_fallback(g);
+                poll_fallback_counted = 1;
+            }
+            return 1;
+        }
+    }
+
+    if (!poll_fallback_counted)
+        virtio_gpu_count_poll_fallback(g);
+    for (int i = 0; i < VIRTIO_GPU_POLL_LIMIT; i++) {
+        if (virtio_gpu_used_advanced(q))
+            return 1;
+    }
+    return 0;
+}
+
 static void virtio_gpu_intr(int irq, void *data, device_t *dev)
 {
     struct virtio_gpu *g = (struct virtio_gpu *)data;
@@ -577,14 +631,7 @@ static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
     virtio_gpu_notify(g, 0);
     spin_unlock_irqrestore(&q->lock, intena);
 
-    if (wait_for_completion_timeout(&done, VIRTIO_GPU_IRQ_WAIT_MS) == 0) {
-        virtio_gpu_count_poll_fallback(g);
-        for (int i = 0; i < VIRTIO_GPU_POLL_LIMIT; i++) {
-            __atomic_thread_fence(__ATOMIC_SEQ_CST);
-            if (q->used->idx != q->used_idx)
-                break;
-        }
-    }
+    (void)virtio_gpu_wait_for_used(g, q, &done);
 
     intena = spin_lock_irqsave(&q->lock);
 
