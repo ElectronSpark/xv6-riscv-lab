@@ -1469,6 +1469,16 @@ static bool __pa_in_any_mem_region(uint64 pa) {
     return false;
 }
 
+static bool __page_region_is_highmem(int region_index, uint64 region_start)
+{
+#if defined(__x86_64__)
+    (void)region_index;
+    return region_start >= 0x100000000ULL;
+#else
+    return region_index > 0;
+#endif
+}
+
 // Initialize a single memory region's buddy pages
 // Handles gap detection and correct pool selection
 static void __page_buddy_init_region(uint64 region_start, uint64 region_end,
@@ -1496,20 +1506,25 @@ int page_buddy_init(void) {
     __managed_start = PGROUNDUP(VA2PA(early_alloc_end_ptr()));
     __managed_end = PHYSTOP;
     // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after managed range set\n");
+#ifndef __x86_64__
     printf("page_buddy_init(): page array at 0x%lx, size 0x%lx\n",
            (uint64)__pages, page_arr_size);
     printf("__managed_start: 0x%lx, __managed_end: 0x%lx\n", __managed_start,
            __managed_end);
-    assert(KERNBASE < __managed_start,
-           "page_buddy_init(): KERNBASE: 0x%lx not less than pa_start: 0x%lx",
-           KERNBASE, __managed_start);
-    assert(__managed_end <= PHYSTOP,
-           "page_buddy_init(): managed_end: 0x%lx higher than PHYSTOP: 0x%lx",
-           __managed_end, PHYSTOP);
-    assert(__managed_start < __managed_end,
-           "page_buddy_init(): managed_start: 0x%lx not less than managed_end: "
-           "0x%lx",
-           __managed_start, __managed_end);
+#endif
+    if (!(KERNBASE < __managed_start)) {
+        panic("page_buddy_init(): KERNBASE: 0x%lx not less than pa_start: 0x%lx",
+              KERNBASE, __managed_start);
+    }
+    if (!(__managed_end <= PHYSTOP)) {
+        panic("page_buddy_init(): managed_end: 0x%lx higher than PHYSTOP: 0x%lx",
+              __managed_end, PHYSTOP);
+    }
+    if (!(__managed_start < __managed_end)) {
+        panic("page_buddy_init(): managed_start: 0x%lx not less than managed_end: "
+              "0x%lx",
+              __managed_start, __managed_end);
+    }
 
     // Initialize kernel text/data pages as locked
     // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: before lower lock init\n");
@@ -1554,7 +1569,7 @@ int page_buddy_init(void) {
         }
 
         // Initialize this region's pages
-        bool is_highmem = (i > 0);
+        bool is_highmem = __page_region_is_highmem(i, region_start);
         uint64 init_flags = is_highmem ? PAGE_FLAG_HIGHMEM : 0;
         assert(__init_range_flags(region_start, region_end, init_flags) == 0,
                "page_buddy_init(): region %d range: 0x%lx to 0x%lx", i,
@@ -1578,7 +1593,9 @@ int page_buddy_init(void) {
     }
 
     // Register highmem zones before initializing pools.
-    // Each non-first memory region becomes a separate highmem zone.
+    // RISC-V keeps the historical non-first-region highmem behavior.  On x86,
+    // firmware E820 often fragments ordinary low RAM, so only regions above
+    // the 32-bit physical address space become highmem.
     __num_highmem_zones = 0;
     for (int i = 1; i < platform.mem_count; i++) {
         uint64 region_start = platform.mem[i].base;
@@ -1590,6 +1607,9 @@ int page_buddy_init(void) {
             region_end = __managed_end;
         }
         if (region_start >= region_end) {
+            continue;
+        }
+        if (!__page_region_is_highmem(i, region_start)) {
             continue;
         }
         if (__num_highmem_zones >= MAX_HIGHMEM_ZONES) {
@@ -1632,7 +1652,8 @@ int page_buddy_init(void) {
 
         buddy_pool_t *pools;
         const char *label;
-        if (i == 0) {
+        bool is_highmem = __page_region_is_highmem(i, region_start);
+        if (!is_highmem) {
             pools = __buddy_pools;
             label = "lowmem";
         } else {

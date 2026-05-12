@@ -126,6 +126,13 @@ void platform_late_device_init(void);
 void platform_boot_mark(const char *msg);
 
 /**
+ * Paint a simple full-screen boot checkpoint on any firmware framebuffer.
+ * Intended for display bring-up diagnostics; platforms without an early
+ * framebuffer may implement this as a no-op.
+ */
+void platform_visual_checkpoint(uint32 color);
+
+/**
  * Shut down the machine (power off).
  * RISC-V: SBI SRST shutdown.
  * x86:    ACPI PM1a control register.

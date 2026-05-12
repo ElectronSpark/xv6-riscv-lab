@@ -17,28 +17,56 @@ def put_u32(buf: bytearray, off: int, val: int) -> None:
     buf[off:off + 4] = struct.pack("<I", val & 0xFFFFFFFF)
 
 
+def put_u64(buf: bytearray, off: int, val: int) -> None:
+    buf[off:off + 8] = struct.pack("<Q", val & 0xFFFFFFFFFFFFFFFF)
+
+
 def build_setup_block(setup_sects: int, protocol_version: int, code32_start: int, cmdline_size: int, syssize_paras: int) -> bytearray:
     total_setup_bytes = (setup_sects + 1) * 512
     setup = bytearray(total_setup_bytes)
+    init_size = (total_setup_bytes + syssize_paras * 16 + 0xFFF) & ~0xFFF
 
     setup[0:2] = b"\xEB\x3C"
     setup[2:4] = b"\x90\x90"
     put_u8(setup, 0x1F1, setup_sects)
+    put_u16(setup, 0x1F2, 0)              # root_flags
     put_u32(setup, 0x1F4, syssize_paras)
+    put_u16(setup, 0x1FA, 0xFFFF)         # vid_mode: normal text mode
+    put_u16(setup, 0x1FC, 0)              # root_dev
     put_u16(setup, 0x1FE, 0xAA55)
 
-    setup[0x202:0x204] = b"\xEB\x00"
-    setup[0x206:0x20A] = b"HdrS"
-    put_u16(setup, 0x20A, protocol_version)
-    put_u8(setup, 0x210, 0xFF)
-    put_u8(setup, 0x211, 0x01)
+    setup[0x200:0x202] = b"\xEB\x58"
+    setup[0x202:0x206] = b"HdrS"
+    put_u16(setup, 0x206, protocol_version)
+    put_u16(setup, 0x208, 0)              # realmode_swtch
+    put_u16(setup, 0x20C, 0)              # start_sys_seg
+    put_u16(setup, 0x20E, 0)              # kernel_version
+    put_u8(setup, 0x210, 0xFF)            # type_of_loader: unknown
+    put_u8(setup, 0x211, 0x01)            # loadflags: LOADED_HIGH
+    put_u16(setup, 0x212, 0x8000)         # setup_move_size
     put_u32(setup, 0x214, code32_start)
-    put_u32(setup, 0x228, 0)
-    put_u32(setup, 0x230, 0x00200000)
-    put_u8(setup, 0x234, 1)
-    put_u8(setup, 0x235, 21)
-    put_u16(setup, 0x236, 0x0001)
+    put_u32(setup, 0x218, 0)              # ramdisk_image
+    put_u32(setup, 0x21C, 0)              # ramdisk_size
+    put_u32(setup, 0x220, 0)              # bootsect_kludge
+    put_u16(setup, 0x224, total_setup_bytes - 0x200)
+    put_u8(setup, 0x226, 0)               # ext_loader_ver
+    put_u8(setup, 0x227, 0)               # ext_loader_type
+    put_u32(setup, 0x228, 0)              # cmd_line_ptr, filled by loader
+    put_u32(setup, 0x22C, 0x7FFFFFFF)     # initrd_addr_max
+    put_u32(setup, 0x230, 0x00200000)     # kernel_alignment
+    put_u8(setup, 0x234, 0)               # fixed-address image
+    put_u8(setup, 0x235, 21)              # min_alignment: 2 MiB
+    put_u16(setup, 0x236, 0x0009)         # XLF_KERNEL_64 | XLF_EFI_HANDOVER_64
     put_u32(setup, 0x238, cmdline_size)
+    put_u32(setup, 0x23C, 0)              # hardware_subarch
+    put_u64(setup, 0x240, 0)              # hardware_subarch_data
+    put_u32(setup, 0x248, 0)              # payload_offset
+    put_u32(setup, 0x24C, 0)              # payload_length
+    put_u64(setup, 0x250, 0)              # setup_data
+    put_u64(setup, 0x258, code32_start)   # pref_address
+    put_u32(setup, 0x260, init_size)
+    put_u32(setup, 0x264, 0)              # handover_offset
+    put_u32(setup, 0x268, 0)              # kernel_info_offset
 
     return setup
 

@@ -6,7 +6,10 @@
 #include <dev/cdev.h>
 #include <mm/vm.h>
 #include <vfs/fcntl.h>
+#include <vfs/file.h>
 #include <vfs/vfs_types.h>
+#include "kqueue.h"
+#include "kqueue_types.h"
 #include "lock/spinlock.h"
 #include "proc/sched.h"
 #include "printf.h"
@@ -91,6 +94,8 @@
 #define OSS_FRAGMENTS 16
 #define OSS_BUFFER_BYTES (OSS_BLOCK_SIZE * OSS_FRAGMENTS)
 #define OSS_POLL_LOW_WATER (OSS_BLOCK_SIZE / 2)
+#define OSS_NOTIFY_INTERVAL_MS 5
+#define OSS_MAX_PCM_FILES 32
 
 #define PCM_CAP_DUPLEX   0x00000100
 #define PCM_CAP_TRIGGER  0x00001000
@@ -204,7 +209,13 @@ static uint64 oss_play_written_bytes;
 static uint64 oss_play_consumed_bytes;
 static uint64 oss_play_last_ms;
 static uint oss_rec_bytes;
+static struct vfs_file *oss_pcm_files[OSS_MAX_PCM_FILES];
+static int oss_notify_armed;
 static spinlock_t oss_lock;
+
+static struct vfs_file_ops oss_pcm_file_ops;
+static void oss_schedule_notify(void);
+static void oss_notify_writable_callback(void *arg);
 
 static int oss_copyout(uint64 uaddr, const void *src, size_t len) {
     if (uaddr == 0)
@@ -314,6 +325,77 @@ static int oss_playback_writable_locked(void) {
     return free_bytes >= OSS_POLL_LOW_WATER || free_bytes == OSS_BUFFER_BYTES;
 }
 
+static int oss_any_pcm_file_locked(void) {
+    for (int i = 0; i < OSS_MAX_PCM_FILES; i++) {
+        if (oss_pcm_files[i] != NULL)
+            return 1;
+    }
+    return 0;
+}
+
+static void oss_collect_pcm_files(struct vfs_file **files, int *count) {
+    int n = 0;
+
+    spin_lock(&oss_lock);
+    for (int i = 0; i < OSS_MAX_PCM_FILES; i++) {
+        struct vfs_file *file = oss_pcm_files[i];
+        if (file != NULL && n < OSS_MAX_PCM_FILES) {
+            file = vfs_fdup(file);
+            if (file != NULL)
+                files[n++] = file;
+        }
+    }
+    spin_unlock(&oss_lock);
+    *count = n;
+}
+
+static void oss_notify_pcm_writers(void) {
+    struct vfs_file *files[OSS_MAX_PCM_FILES];
+    int count = 0;
+
+    oss_collect_pcm_files(files, &count);
+    for (int i = 0; i < count; i++) {
+        vfs_file_knote_notify(files[i], EVFILT_WRITE, 0);
+        vfs_fput(files[i]);
+    }
+}
+
+static void oss_schedule_notify(void) {
+    int arm = 0;
+
+    spin_lock(&oss_lock);
+    if (!oss_notify_armed && oss_any_pcm_file_locked()) {
+        oss_notify_armed = 1;
+        arm = 1;
+    }
+    spin_unlock(&oss_lock);
+
+    if (arm && sched_timer_add(oss_notify_writable_callback, NULL,
+                               OSS_NOTIFY_INTERVAL_MS) != 0) {
+        spin_lock(&oss_lock);
+        oss_notify_armed = 0;
+        spin_unlock(&oss_lock);
+    }
+}
+
+static void oss_notify_writable_callback(void *arg) {
+    (void)arg;
+    int writable;
+    int should_rearm = 0;
+
+    spin_lock(&oss_lock);
+    oss_notify_armed = 0;
+    writable = oss_playback_writable_locked();
+    if (!writable && oss_any_pcm_file_locked())
+        should_rearm = 1;
+    spin_unlock(&oss_lock);
+
+    if (writable)
+        oss_notify_pcm_writers();
+    else if (should_rearm)
+        oss_schedule_notify();
+}
+
 static void oss_reset_playback_locked(void) {
     oss_play_written_bytes = 0;
     oss_play_consumed_bytes = 0;
@@ -392,12 +474,53 @@ static void oss_fill_audioinfo(oss_audioinfo_t *ai) {
 }
 
 static int oss_open(cdev_t *cdev) {
-    (void)cdev;
+    if (oss_is_pcm_device(cdev)) {
+        spin_lock(&oss_lock);
+        oss_reset_playback_locked();
+        spin_unlock(&oss_lock);
+    }
     return 0;
 }
 
 static int oss_release(cdev_t *cdev) {
     (void)cdev;
+    return 0;
+}
+
+static int oss_pcm_open_file(cdev_t *cdev, struct vfs_file *file) {
+    int slot = -1;
+
+    if (!oss_is_pcm_device(cdev))
+        return -EINVAL;
+    spin_lock(&oss_lock);
+    oss_reset_playback_locked();
+    for (int i = 0; i < OSS_MAX_PCM_FILES; i++) {
+        if (oss_pcm_files[i] == NULL) {
+            oss_pcm_files[i] = file;
+            slot = i;
+            break;
+        }
+    }
+    spin_unlock(&oss_lock);
+    if (slot < 0)
+        return -EMFILE;
+
+    file->ops = &oss_pcm_file_ops;
+    file->private_data = (void *)(uint64)(slot + 1);
+    return 0;
+}
+
+static int oss_pcm_file_release(struct vfs_inode *inode,
+                                struct vfs_file *file) {
+    (void)inode;
+    int slot = (int)(uint64)file->private_data - 1;
+
+    if (slot >= 0 && slot < OSS_MAX_PCM_FILES) {
+        spin_lock(&oss_lock);
+        if (oss_pcm_files[slot] == file)
+            oss_pcm_files[slot] = NULL;
+        spin_unlock(&oss_lock);
+    }
     return 0;
 }
 
@@ -426,13 +549,10 @@ static int oss_read(cdev_t *cdev, bool user, void *buf, size_t count) {
     return count;
 }
 
-static int oss_write_file(cdev_t *cdev, struct vfs_file *file, bool user,
-                          const void *buf, size_t count) {
-    (void)user;
+static int oss_pcm_write_data(struct vfs_file *file, const void *buf,
+                              size_t count) {
     if (buf == NULL)
         return -EINVAL;
-    if (!oss_is_pcm_device(cdev))
-        return (int)count;
 
     bool nonblock = file != NULL && (file->f_flags & O_NONBLOCK);
     size_t done = 0;
@@ -456,11 +576,34 @@ static int oss_write_file(cdev_t *cdev, struct vfs_file *file, bool user,
         if (nonblock)
             break;
     }
+    oss_schedule_notify();
     return (int)done;
 }
 
+static int oss_write_file(cdev_t *cdev, struct vfs_file *file, bool user,
+                          const void *buf, size_t count) {
+    (void)user;
+    if (!oss_is_pcm_device(cdev))
+        return (int)count;
+    return oss_pcm_write_data(file, buf, count);
+}
+
 static int oss_write(cdev_t *cdev, bool user, const void *buf, size_t count) {
+    if (oss_is_pcm_device(cdev))
+        return oss_pcm_write_data(NULL, buf, count);
     return oss_write_file(cdev, NULL, user, buf, count);
+}
+
+static ssize_t oss_pcm_file_read(struct vfs_file *file, char *buf,
+                                 size_t count, bool user) {
+    (void)file;
+    return oss_read(NULL, user, buf, count);
+}
+
+static ssize_t oss_pcm_file_write(struct vfs_file *file, const char *buf,
+                                  size_t count, bool user) {
+    (void)user;
+    return oss_pcm_write_data(file, buf, count);
 }
 
 static int sndstat_read(cdev_t *cdev, bool user, void *buf, size_t count) {
@@ -728,10 +871,7 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
     return -ENOTTY;
 }
 
-static int oss_poll(cdev_t *cdev, short events) {
-    if (!oss_is_pcm_device(cdev))
-        return events;
-
+static int oss_pcm_poll_events(short events) {
     short revents = 0;
     if (events & (POLLIN | POLLRDNORM | POLLRDBAND))
         revents |= events & (POLLIN | POLLRDNORM | POLLRDBAND);
@@ -747,11 +887,37 @@ static int oss_poll(cdev_t *cdev, short events) {
         spin_unlock(&oss_lock);
         if (writable)
             revents |= events & (POLLOUT | POLLWRNORM | POLLWRBAND);
+        else
+            oss_schedule_notify();
     }
     return revents;
 }
 
-#define OSS_CDEV(_name, _minor, _readable, _writable, _read, _write) \
+static int oss_poll(cdev_t *cdev, short events) {
+    if (!oss_is_pcm_device(cdev))
+        return events;
+    return oss_pcm_poll_events(events);
+}
+
+static int oss_pcm_file_poll(struct vfs_file *file, short events) {
+    (void)file;
+    return oss_pcm_poll_events(events);
+}
+
+static int oss_pcm_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
+    (void)file;
+    return oss_ioctl(NULL, cmd, arg);
+}
+
+static struct vfs_file_ops oss_pcm_file_ops = {
+    .read = oss_pcm_file_read,
+    .write = oss_pcm_file_write,
+    .release = oss_pcm_file_release,
+    .poll = oss_pcm_file_poll,
+    .ioctl = oss_pcm_file_ioctl,
+};
+
+#define OSS_CDEV(_name, _minor, _readable, _writable, _read, _write, _open_file) \
     { \
         .dev = { \
             .major = OSS_SOUND_MAJOR, \
@@ -769,23 +935,28 @@ static int oss_poll(cdev_t *cdev, short events) {
             .release = oss_release, \
             .ioctl = oss_ioctl, \
             .poll = oss_poll, \
+            .open_file = (_open_file), \
         }, \
     }
 
 static cdev_t mixer_cdev =
-    OSS_CDEV("mixer", OSS_MINOR_MIXER, 1, 1, oss_read, oss_write);
+    OSS_CDEV("mixer", OSS_MINOR_MIXER, 1, 1, oss_read, oss_write, NULL);
 static cdev_t mixer0_cdev =
-    OSS_CDEV("mixer0", OSS_MINOR_MIXER0, 1, 1, oss_read, oss_write);
+    OSS_CDEV("mixer0", OSS_MINOR_MIXER0, 1, 1, oss_read, oss_write, NULL);
 static cdev_t dsp_cdev =
-    OSS_CDEV("dsp", OSS_MINOR_DSP, 1, 1, oss_read, oss_write);
+    OSS_CDEV("dsp", OSS_MINOR_DSP, 1, 1, oss_read, oss_write,
+             oss_pcm_open_file);
 static cdev_t dsp0_cdev =
-    OSS_CDEV("dsp0", OSS_MINOR_DSP0, 1, 1, oss_read, oss_write);
+    OSS_CDEV("dsp0", OSS_MINOR_DSP0, 1, 1, oss_read, oss_write,
+             oss_pcm_open_file);
 static cdev_t audio_cdev =
-    OSS_CDEV("audio", OSS_MINOR_AUDIO, 1, 1, oss_read, oss_write);
+    OSS_CDEV("audio", OSS_MINOR_AUDIO, 1, 1, oss_read, oss_write,
+             oss_pcm_open_file);
 static cdev_t audio0_cdev =
-    OSS_CDEV("audio0", OSS_MINOR_AUDIO0, 1, 1, oss_read, oss_write);
+    OSS_CDEV("audio0", OSS_MINOR_AUDIO0, 1, 1, oss_read, oss_write,
+             oss_pcm_open_file);
 static cdev_t sndstat_cdev =
-    OSS_CDEV("sndstat", OSS_MINOR_SNDSTAT, 1, 0, sndstat_read, NULL);
+    OSS_CDEV("sndstat", OSS_MINOR_SNDSTAT, 1, 0, sndstat_read, NULL, NULL);
 
 void ossaudiodevinit(void) {
     spin_init(&oss_lock, "ossaudio");

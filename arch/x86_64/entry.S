@@ -5,12 +5,6 @@
 .equ KERNEL_STACK_SIZE_ASM, 32768
 .equ KERNEL_STACK_PCB_RESERVE_ASM, 4096
 
-.section .multiboot
-.align 4
-    .long 0x1BADB002
-    .long 0x00000003
-    .long -(0x1BADB002 + 0x00000003)
-
 .section .note.Xen,"a"
 .align 4
     .long 4
@@ -34,6 +28,12 @@
  */
 .section .text.entry
 _entry:
+    jmp 1f
+.align 4
+    .long 0x1BADB002
+    .long 0x00000003
+    .long -(0x1BADB002 + 0x00000003)
+1:
     cli
     cld
 
@@ -41,8 +41,17 @@ _entry:
     movw $0x00E9, %dx
     outb %al, %dx
 
-    /* Save multiboot info pointer */
+    /*
+     * Multiboot enters with EAX=magic and EBX=mbi.  Linux x86 boot protocol
+     * enters the 32-bit kernel with ESI=boot_params.
+     */
+    cmpl $0x2BADB002, %eax
+    jne 2f
     movl %ebx, boot_params_ptr
+    jmp 3f
+2:
+    movl %esi, boot_params_ptr
+3:
 
     /* Early boot stack (in .text.entry, physical VMA) */
     movl $early_boot_stack_top, %esp
@@ -75,13 +84,14 @@ _entry:
  *
  * PAGE_OFFSET = 0xFFFF800000000000 → PML4 index 256.
  *
- * Maps PA 0..1 GiB via pd_low_table and PA 2..3 GiB via pd_kernel_table,
- * using 2 MiB large pages.
+ * Maps PA 0..4 GiB via four page-directory tables using 2 MiB large pages.
+ * GRUB/UEFI may place the Linux boot_params page anywhere below 4 GiB, so
+ * the early map must cover more than just the kernel image.
  */
 setup_page_tables:
-    /* Zero all four page-table pages (warm-reboot safety) */
+    /* Zero all six page-table pages (warm-reboot safety) */
     movl $pml4_table, %edi
-    movl $(4 * 4096 / 4), %ecx
+    movl $(6 * 4096 / 4), %ecx
     xorl %eax, %eax
     rep stosl
 
@@ -94,17 +104,24 @@ setup_page_tables:
     /* Index 256 → byte offset 256 * 8 = 2048 */
     movl %eax, pml4_table + 2048
 
-    /* PDPT[0] → pd_low_table (covers PA 0..1 GiB) */
+    /* PDPT[0..3] cover PA 0..4 GiB. */
     movl $pd_low_table, %eax
     orl $0x3, %eax
     movl %eax, pdpt_table
 
-    /* PDPT[2] → pd_kernel_table (covers PA 2..3 GiB) */
-    movl $pd_kernel_table, %eax
+    movl $pd_low_table_1, %eax
+    orl $0x3, %eax
+    movl %eax, pdpt_table + 8
+
+    movl $pd_low_table_2, %eax
     orl $0x3, %eax
     movl %eax, pdpt_table + 16
 
-    /* Fill pd_low_table: 512 × 2 MiB pages, PA 0..1 GiB */
+    movl $pd_low_table_3, %eax
+    orl $0x3, %eax
+    movl %eax, pdpt_table + 24
+
+    /* Fill four contiguous PD tables: 2048 × 2 MiB pages, PA 0..4 GiB */
     xorl %ecx, %ecx
 1:
     movl %ecx, %eax
@@ -112,20 +129,8 @@ setup_page_tables:
     orl $0x83, %eax
     movl %eax, pd_low_table(,%ecx,8)
     incl %ecx
-    cmpl $512, %ecx
+    cmpl $2048, %ecx
     jne 1b
-
-    /* Fill pd_kernel_table: 512 × 2 MiB pages, PA 2..3 GiB */
-    xorl %ecx, %ecx
-2:
-    movl %ecx, %eax
-    shll $21, %eax
-    addl $0x80000000, %eax
-    orl $0x83, %eax
-    movl %eax, pd_kernel_table(,%ecx,8)
-    incl %ecx
-    cmpl $512, %ecx
-    jne 2b
 
     ret
 
@@ -164,6 +169,95 @@ long_mode_entry:
     movabsq $_higher_half_entry, %rax
     jmpq *%rax
 
+/*
+ * Linux x86 EFI handover entry.
+ *
+ * x86_64 EFI GRUB's linux loader calls startup_64 + handover_offset + 0x200
+ * with:
+ *   rcx = EFI image handle
+ *   rdx = EFI system table
+ *   r8  = struct boot_params *
+ *
+ * Some loaders use the SysV register order for this historical handover hook
+ * instead (rdi, rsi, rdx).  Pick the candidate that contains the Linux setup
+ * header signature so the C parser gets the real zero page.
+ *
+ * xv6 does not consume EFI services here; we only need the Linux boot_params
+ * pointer and our own low + higher-half page tables before entering the common
+ * 64-bit kernel path.
+ */
+.org _entry + 0x200, 0x90
+.global efi_handover_entry
+efi_handover_entry:
+    cli
+    cld
+    movq %r8, %r12
+    testq %r12, %r12
+    jz 1f
+    cmpl $0x53726448, 0x202(%r12) /* "HdrS" */
+    je 3f
+1:
+    movq %rdx, %r12
+    testq %r12, %r12
+    jz 2f
+    cmpl $0x53726448, 0x202(%r12)
+    je 3f
+2:
+    movq %rsi, %r12
+    testq %r12, %r12
+    jz 3f
+    cmpl $0x53726448, 0x202(%r12)
+    je 3f
+    xorq %r12, %r12
+3:
+
+    call setup_page_tables64
+
+    movq $pml4_table, %rax
+    movq %rax, %cr3
+
+    movabsq $_higher_half_entry, %rax
+    jmpq *%rax
+
+setup_page_tables64:
+    movq $pml4_table, %rdi
+    movq $(6 * 4096 / 8), %rcx
+    xorq %rax, %rax
+    rep stosq
+
+    movq $pdpt_table, %rax
+    orq $0x3, %rax
+    movq %rax, pml4_table
+    movq %rax, pml4_table + 2048
+
+    movq $pd_low_table, %rax
+    orq $0x3, %rax
+    movq %rax, pdpt_table
+
+    movq $pd_low_table_1, %rax
+    orq $0x3, %rax
+    movq %rax, pdpt_table + 8
+
+    movq $pd_low_table_2, %rax
+    orq $0x3, %rax
+    movq %rax, pdpt_table + 16
+
+    movq $pd_low_table_3, %rax
+    orq $0x3, %rax
+    movq %rax, pdpt_table + 24
+
+    xorq %rcx, %rcx
+4:
+    movq %rcx, %rax
+    shlq $21, %rax
+    orq $0x83, %rax
+    movq %rax, pd_low_table(,%rcx,8)
+    incq %rcx
+    cmpq $2048, %rcx
+    jne 4b
+
+    ret
+
 /* ---- Data and tables in .text.entry (physical VMA) ---- */
 .code32
 .align 8
@@ -192,7 +286,11 @@ pdpt_table:
     .space 4096
 pd_low_table:
     .space 4096
-pd_kernel_table:
+pd_low_table_1:
+    .space 4096
+pd_low_table_2:
+    .space 4096
+pd_low_table_3:
     .space 4096
 
 /* Temporary boot stack (used by 32-bit code before higher-half switch) */
@@ -243,8 +341,8 @@ _higher_half_entry:
     leaq banner_msg(%rip), %rsi
     call serial_puts64
 
-    /* Call start(boot_params_ptr) — r12d was saved in long_mode_entry */
-    movl %r12d, %edi
+    /* Call start(boot_params_ptr).  EFI handover may pass a 64-bit pointer. */
+    movq %r12, %rdi
     call start
 
 3:

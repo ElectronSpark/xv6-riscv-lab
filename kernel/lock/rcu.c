@@ -314,7 +314,7 @@ void rcu_read_unlock(void) {
     struct cpu_local *c = mycpu();
     c->rcu_read_lock_nesting--;
     if (c->rcu_read_lock_nesting < 0) {
-        panic("rcu_read_unlock: unbalanced CPU unlock on cpu %ld", cpuid());
+        panic("rcu_read_unlock: unbalanced CPU unlock on cpu %d", cpuid());
     }
 
     struct thread *t = current;

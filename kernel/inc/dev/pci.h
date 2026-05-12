@@ -107,6 +107,9 @@ struct pci_common_confspace_header {
 #define PCI_VENDOR_INTEL    0x8086
 #define PCI_DEVICE_E1000    0x100e
 #define PCI_VENDOR_VIRTIO   0x1AF4
+#define PCI_VENDOR_MICROSOFT 0x1414
+#define PCI_DEVICE_MS_VIRTUAL_RENDER 0x008e
+#define PCI_DEVICE_MS_COMPUTE_ACCELERATOR 0x008a
 #define PCI_DEVICE_VIRTIO_BLK_TRANSITIONAL 0x1001 // virtio block (transitional)
 #define PCI_DEVICE_VIRTIO_NET_TRANSITIONAL 0x1000 // virtio net (transitional)
 #define PCI_DEVICE_VIRTIO_GPU_TRANSITIONAL 0x1010 // virtio gpu (transitional)

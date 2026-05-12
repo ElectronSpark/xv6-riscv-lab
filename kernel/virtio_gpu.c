@@ -38,6 +38,7 @@
 #define VIRTIO_GPU_IRQ_WAIT_SLICE_MS 1
 
 #define VIRTIO_GPU_F_VIRGL          0
+#define VIRTIO_GPU_F_EDID           1
 #define VIRTIO_GPU_F_CONTEXT_INIT   4
 
 #define VIRTIO_GPU_CMD_GET_DISPLAY_INFO 0x0100
@@ -49,6 +50,7 @@
 #define VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING 0x0106
 #define VIRTIO_GPU_CMD_GET_CAPSET_INFO    0x0108
 #define VIRTIO_GPU_CMD_GET_CAPSET         0x0109
+#define VIRTIO_GPU_CMD_GET_EDID           0x010a
 #define VIRTIO_GPU_CMD_CTX_CREATE         0x0200
 #define VIRTIO_GPU_CMD_CTX_DESTROY        0x0201
 #define VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE 0x0202
@@ -61,6 +63,7 @@
 #define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x1101
 #define VIRTIO_GPU_RESP_OK_CAPSET_INFO  0x1102
 #define VIRTIO_GPU_RESP_OK_CAPSET       0x1103
+#define VIRTIO_GPU_RESP_OK_EDID         0x1104
 
 #define VIRTIO_GPU_FLAG_FENCE  (1 << 0)
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
@@ -220,6 +223,19 @@ struct virtio_gpu_resp_capset {
     uint8 capset_data[];
 };
 
+struct virtio_gpu_cmd_get_edid {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32 scanout;
+    uint32 padding;
+};
+
+struct virtio_gpu_resp_edid {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32 size;
+    uint32 padding;
+    uint8 edid[1024];
+};
+
 struct virtio_gpu_ctx_create {
     struct virtio_gpu_ctrl_hdr hdr;
     uint32 nlen;
@@ -370,6 +386,9 @@ struct virtio_gpu {
     uint32 num_capsets;
     uint32 features0;
     uint32 driver_features0;
+    uint32 edid_width;
+    uint32 edid_height;
+    uint32 edid_refresh_millihz;
     uint32 virgl_capset_id;
     uint32 virgl_capset_version;
     uint32 virgl_capset_size;
@@ -1245,12 +1264,15 @@ static int virtio_gpu_resource_unref(struct virtio_gpu *g,
     return 0;
 }
 
-static int virtio_gpu_submit_display_info(struct virtio_gpu *g)
+static int virtio_gpu_get_display_info(struct virtio_gpu *g,
+                                       uint32 *width, uint32 *height,
+                                       int log)
 {
     struct virtio_gpu_ctrl_hdr *cmd =
         (struct virtio_gpu_ctrl_hdr *)g->cmd_page;
     struct virtio_gpu_resp_display_info *resp =
         (struct virtio_gpu_resp_display_info *)g->resp_page;
+    uint32 first_w = 0, first_h = 0;
 
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
@@ -1260,19 +1282,127 @@ static int virtio_gpu_submit_display_info(struct virtio_gpu *g)
                           VIRTIO_GPU_RESP_OK_DISPLAY_INFO) != 0)
         return -1;
 
-    printf("virtio_gpu: display info ok");
+    if (log)
+        printf("virtio_gpu: display info ok");
     for (int i = 0; i < VIRTIO_GPU_MAX_SCANOUTS; i++) {
         if (!resp->pmodes[i].enabled)
             continue;
-        if (g->scanout_width == 0 || g->scanout_height == 0) {
-            g->scanout_width = resp->pmodes[i].r.width;
-            g->scanout_height = resp->pmodes[i].r.height;
+        if (first_w == 0 || first_h == 0) {
+            first_w = resp->pmodes[i].r.width;
+            first_h = resp->pmodes[i].r.height;
         }
-        printf(" scanout%d=%ux%u+%u+%u", i, resp->pmodes[i].r.width,
-               resp->pmodes[i].r.height, resp->pmodes[i].r.x,
-               resp->pmodes[i].r.y);
+        if (log)
+            printf(" scanout%d=%ux%u+%u+%u", i, resp->pmodes[i].r.width,
+                   resp->pmodes[i].r.height, resp->pmodes[i].r.x,
+                   resp->pmodes[i].r.y);
     }
-    printf("\n");
+    if (log)
+        printf("\n");
+    if (width != NULL)
+        *width = first_w;
+    if (height != NULL)
+        *height = first_h;
+    return 0;
+}
+
+static int virtio_gpu_submit_display_info(struct virtio_gpu *g)
+{
+    uint32 width = 0, height = 0;
+    int ret = virtio_gpu_get_display_info(g, &width, &height, 1);
+
+    if (ret == 0 && (g->scanout_width == 0 || g->scanout_height == 0)) {
+        g->scanout_width = width;
+        g->scanout_height = height;
+    }
+    return ret;
+}
+
+static int virtio_gpu_parse_edid_preferred(const uint8 *edid, uint32 size,
+                                           uint32 *width, uint32 *height,
+                                           uint32 *refresh_millihz)
+{
+    static const uint8 edid_header[8] =
+        {0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00};
+    uint8 sum = 0;
+
+    if (edid == NULL || size < 128 || memcmp(edid, edid_header, 8) != 0)
+        return -1;
+    for (uint32 i = 0; i < 128; i++)
+        sum = (uint8)(sum + edid[i]);
+    if (sum != 0)
+        return -1;
+
+    for (uint32 off = 54; off + 18 <= 126; off += 18) {
+        const uint8 *d = edid + off;
+        uint32 pixel_clock = (uint32)d[0] | ((uint32)d[1] << 8);
+        uint32 hactive;
+        uint32 hblank;
+        uint32 vactive;
+        uint32 vblank;
+        uint64 total;
+
+        if (pixel_clock == 0)
+            continue;
+        hactive = (uint32)d[2] | (((uint32)d[4] & 0xf0) << 4);
+        hblank = (uint32)d[3] | (((uint32)d[4] & 0x0f) << 8);
+        vactive = (uint32)d[5] | (((uint32)d[7] & 0xf0) << 4);
+        vblank = (uint32)d[6] | (((uint32)d[7] & 0x0f) << 8);
+        if (hactive < 320 || hactive > 8192 ||
+            vactive < 200 || vactive > 4320 ||
+            hblank == 0 || vblank == 0)
+            continue;
+        total = (uint64)(hactive + hblank) * (uint64)(vactive + vblank);
+        if (total == 0)
+            continue;
+        if (width != NULL)
+            *width = hactive;
+        if (height != NULL)
+            *height = vactive;
+        if (refresh_millihz != NULL)
+            *refresh_millihz = (uint32)(((uint64)pixel_clock * 10000000ULL +
+                                         total / 2) / total);
+        return 0;
+    }
+    return -1;
+}
+
+static int virtio_gpu_get_edid_mode(struct virtio_gpu *g, uint32 *width,
+                                    uint32 *height, uint32 *refresh_millihz,
+                                    int log)
+{
+    struct virtio_gpu_cmd_get_edid *cmd =
+        (struct virtio_gpu_cmd_get_edid *)g->cmd_page;
+    struct virtio_gpu_resp_edid *resp =
+        (struct virtio_gpu_resp_edid *)g->resp_page;
+    uint32 w = 0, h = 0, hz = 0;
+
+    if (!(g->driver_features0 & (1u << VIRTIO_GPU_F_EDID)))
+        return -1;
+
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->hdr.type = VIRTIO_GPU_CMD_GET_EDID;
+    cmd->scanout = 0;
+
+    if (virtio_gpu_submit(g, cmd, sizeof(*cmd), NULL, 0, false, resp,
+                          sizeof(*resp), VIRTIO_GPU_RESP_OK_EDID) != 0)
+        return -1;
+    if (resp->size > sizeof(resp->edid))
+        resp->size = sizeof(resp->edid);
+    if (virtio_gpu_parse_edid_preferred(resp->edid, resp->size,
+                                        &w, &h, &hz) != 0)
+        return -1;
+    if (width != NULL)
+        *width = w;
+    if (height != NULL)
+        *height = h;
+    if (refresh_millihz != NULL)
+        *refresh_millihz = hz;
+    g->edid_width = w;
+    g->edid_height = h;
+    g->edid_refresh_millihz = hz;
+    if (log)
+        printf("virtio_gpu: edid preferred %ux%u@%u.%03uHz\n",
+               w, h, hz / 1000, hz % 1000);
     return 0;
 }
 
@@ -2368,17 +2498,14 @@ static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
     uint32 video_w = 0, video_h = 0;
     int scanout_bound = 0;
 
-    fb_get_resolution(&fb_w, &fb_h);
-    if (fb_w >= 640 && fb_h >= 480) {
-        width = fb_w;
-        height = fb_h;
-        g->scanout_width = width;
-        g->scanout_height = height;
-        if (reported_width != width || reported_height != height) {
-            printf("virtio_gpu: using fb0 mode %ux%u for scanout (device reported %ux%u)\n",
-                   width, height, reported_width, reported_height);
-        }
-    } else if (virtio_gpu_cmdline_video(&video_w, &video_h) == 0) {
+    /*
+     * Prefer an explicit kernel video= mode, then the firmware mode requested
+     * by QEMU/OVMF, then the current virtio scanout size.  The reported
+     * scanout can start as QEMU's default window geometry under GTK/GL, which
+     * makes the desktop look tiny even though the boot framebuffer already
+     * describes the intended guest resolution.
+     */
+    if (virtio_gpu_cmdline_video(&video_w, &video_h) == 0) {
         width = video_w;
         height = video_h;
         g->scanout_width = width;
@@ -2387,7 +2514,24 @@ static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
             printf("virtio_gpu: using cmdline video mode %ux%u for scanout (device reported %ux%u)\n",
                    width, height, reported_width, reported_height);
         }
-    } else if (g->scanout_width == 0 || g->scanout_height == 0) {
+    } else {
+        fb_get_resolution(&fb_w, &fb_h);
+        if (fb_w >= 640 && fb_h >= 400) {
+            width = fb_w;
+            height = fb_h;
+            g->scanout_width = width;
+            g->scanout_height = height;
+            if (reported_width != width || reported_height != height) {
+                printf("virtio_gpu: using fb0 mode %ux%u for scanout (device reported %ux%u)\n",
+                       width, height, reported_width, reported_height);
+            }
+        } else if (reported_width >= 640 && reported_height >= 400) {
+            width = reported_width;
+            height = reported_height;
+        }
+    }
+
+    if (g->scanout_width == 0 || g->scanout_height == 0) {
         printf("virtio_gpu: using default mode %ux%u for scanout fallback\n",
                width, height);
     }
@@ -2558,6 +2702,8 @@ void virtio_gpu_init(void)
     uint32 driver_features0 = 0;
     if (features0 & (1u << VIRTIO_GPU_F_VIRGL))
         driver_features0 |= (1u << VIRTIO_GPU_F_VIRGL);
+    if (features0 & (1u << VIRTIO_GPU_F_EDID))
+        driver_features0 |= (1u << VIRTIO_GPU_F_EDID);
     if (features0 & (1u << VIRTIO_GPU_F_CONTEXT_INIT))
         driver_features0 |= (1u << VIRTIO_GPU_F_CONTEXT_INIT);
     g->features0 = features0;
@@ -2610,10 +2756,11 @@ void virtio_gpu_init(void)
     virtio_gpu_query_capsets(g);
     virtio_gpu_smoke_context(g);
     virtio_gpu_submit_display_info(g);
+    virtio_gpu_get_edid_mode(g, NULL, NULL, NULL, 1);
     virtio_gpu_smoke_resource(g);
     virtio_gpu_init_persistent_scanout(g);
     if (virtio_gpu_has_virgl())
-        fb_gpu_register_virgl_render_node();
+        fb_gpu_register_render_node();
 }
 
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
@@ -2656,6 +2803,122 @@ int virtio_gpu_has_virgl(void)
 
     return g->initialized && g->virgl_capset_id &&
         (g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL));
+}
+
+int virtio_gpu_probe_scanout(uint32 *width, uint32 *height)
+{
+    struct virtio_gpu *g = &gpu;
+    int ret;
+
+    if (width != NULL)
+        *width = 0;
+    if (height != NULL)
+        *height = 0;
+    if (!g->initialized)
+        return -ENODEV;
+
+    mutex_lock(&g->op_lock);
+    ret = virtio_gpu_get_display_info(g, width, height, 0);
+    mutex_unlock(&g->op_lock);
+    return ret == 0 ? 0 : -EIO;
+}
+
+int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
+                               uint32 *refresh_millihz)
+{
+    struct virtio_gpu *g = &gpu;
+    int ret;
+
+    if (width != NULL)
+        *width = 0;
+    if (height != NULL)
+        *height = 0;
+    if (refresh_millihz != NULL)
+        *refresh_millihz = 0;
+    if (!g->initialized)
+        return -ENODEV;
+
+    mutex_lock(&g->op_lock);
+    ret = virtio_gpu_get_edid_mode(g, width, height, refresh_millihz, 0);
+    if (ret != 0 && g->edid_width != 0 && g->edid_height != 0) {
+        if (width != NULL)
+            *width = g->edid_width;
+        if (height != NULL)
+            *height = g->edid_height;
+        if (refresh_millihz != NULL)
+            *refresh_millihz = g->edid_refresh_millihz;
+        ret = 0;
+    }
+    mutex_unlock(&g->op_lock);
+    return ret == 0 ? 0 : -EIO;
+}
+
+int virtio_gpu_resize_scanout(uint32 width, uint32 height)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *res;
+    struct virtio_gpu_resource *old;
+    int ret = -EIO;
+    int bound = 0;
+
+    if (width < 640 || width > 2560 || height < 400 || height > 1600)
+        return -EINVAL;
+    if (!g->initialized)
+        return -ENODEV;
+
+    mutex_lock(&g->op_lock);
+    old = g->scanout_resource;
+    if (old != NULL && old->width == width && old->height == height) {
+        ret = 0;
+        goto out;
+    }
+
+    if (virtio_gpu_resource_create_2d(g, width, height,
+                                      VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+                                      &res) != 0)
+        goto out;
+    memset(res->backing, 0, res->backing_len);
+
+    if (virtio_gpu_resource_attach_backing(g, res) != 0)
+        goto fail_new;
+    if (virtio_gpu_set_scanout(g, 0, res, 0, 0, width, height) != 0)
+        goto fail_new;
+    bound = 1;
+    if (virtio_gpu_resource_transfer_2d(g, res, 0, 0, width, height) != 0)
+        goto fail_new;
+    if (virtio_gpu_resource_flush(g, res, 0, 0, width, height) != 0)
+        goto fail_new;
+
+    g->scanout_resource = res;
+    g->scanout_width = width;
+    g->scanout_height = height;
+    ret = fb_replace_virtio_gpu_scanout_backing(width, height, res->backing,
+                                                res->backing_len,
+                                                res->width * sizeof(uint32));
+    if (ret != 0) {
+        g->scanout_resource = old;
+        goto fail_new;
+    }
+
+    /*
+     * Existing userspace may still have the old direct scanout mmap.  Keep the
+     * old resource alive instead of freeing pages that might still be mapped;
+     * the compositor remaps the current scanout after FBIOPUT succeeds.
+     */
+    ret = 0;
+    goto out;
+
+fail_new:
+    if (bound) {
+        if (old != NULL)
+            virtio_gpu_set_scanout(g, 0, old, 0, 0, old->width, old->height);
+        else
+            virtio_gpu_set_scanout(g, 0, NULL, 0, 0, 0, 0);
+    }
+    virtio_gpu_resource_unref(g, res);
+out:
+    mutex_unlock(&g->op_lock);
+    return ret;
 }
 
 void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
@@ -2710,6 +2973,31 @@ out:
 void virtio_gpu_init(void) {}
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats) { (void)stats; }
 int virtio_gpu_has_virgl(void) { return 0; }
+int virtio_gpu_probe_scanout(uint32 *width, uint32 *height)
+{
+    if (width != NULL)
+        *width = 0;
+    if (height != NULL)
+        *height = 0;
+    return -ENODEV;
+}
+int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
+                               uint32 *refresh_millihz)
+{
+    if (width != NULL)
+        *width = 0;
+    if (height != NULL)
+        *height = 0;
+    if (refresh_millihz != NULL)
+        *refresh_millihz = 0;
+    return -ENODEV;
+}
+int virtio_gpu_resize_scanout(uint32 width, uint32 height)
+{
+    (void)width;
+    (void)height;
+    return -ENODEV;
+}
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
                                    uint32 capset_id, const char *name,
                                    uint32 *ctx_id)

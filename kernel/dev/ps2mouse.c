@@ -38,6 +38,19 @@ static inline uint8 ps2_inb(uint16 port)
     return val;
 }
 
+static int ps2_controller_present(void)
+{
+    uint8 status = ps2_inb(PS2_STATUS_PORT);
+    uint8 data = ps2_inb(PS2_DATA_PORT);
+
+    /*
+     * Hyper-V Gen2 does not provide the legacy i8042.  The inactive I/O ports
+     * read back as 0xff, so probing the mouse command stream would only create
+     * bogus devices and leave later init code stuck on fake output-buffer bits.
+     */
+    return !(status == 0xff && data == 0xff);
+}
+
 /* ── VMware vmmouse (absolute pointer) ───────────────────────────── */
 
 #define VMWARE_MAGIC            0x564D5868u  /* "VMXh" */
@@ -188,10 +201,9 @@ static int vmmouse_read(struct mouse_event *ev)
      * — see ports/wayland/CMakeLists.txt for the zero-extend patch. */
     ev->dx      = (int16)(x & 0xFFFFu);
     ev->dy      = (int16)(y & 0xFFFFu);
-    /* Scroll wheel: QEMU vmmouse_mouse_event stores the host's signed
-     * dz directly into queue[3]. Treat as signed 8-bit (matches PS/2
-     * IntelliMouse convention) and propagate. */
-    ev->dz      = (int8)(z & 0xFFu);
+    /* QEMU vmmouse reports wheel deltas with the opposite sign from the
+     * PS/2/virtio convention used by /dev/mouse and wlcomp. */
+    ev->dz      = (int8)(-(int8)(z & 0xFFu));
     ev->pad[0]  = 0;
     return 1;
 }
@@ -565,6 +577,17 @@ void ps2mouse_init(void)
     mouse_state.packet_len = 3;  /* default: standard 3-byte PS/2 */
     intellimouse_enabled = 0;
 
+    /* Register /dev/mouse before touching hardware.  Hyper-V Gen2 does not
+     * expose i8042, but synthetic input drivers still need the shared mouse
+     * event queue as their userspace ABI. */
+    int ret = cdev_register(&mouse_cdev);
+    assert(ret == 0, "ps2mouse_init: cdev_register failed: %d", ret);
+
+    if (!ps2_controller_present()) {
+        printf("PS2 mouse: i8042 controller not present; /dev/mouse is synthetic-only\n");
+        return;
+    }
+
     /* Enable the auxiliary (mouse) port on the PS/2 controller */
     ps2_send_cmd(PS2_CMD_ENABLE_PORT2);
 
@@ -640,7 +663,7 @@ void ps2mouse_init(void)
         .dev = &mouse_cdev.dev,
     };
 
-    int ret = register_irq_handler(PLIC_IRQ(MOUSE_IRQ), &mouse_irq_desc);
+    ret = register_irq_handler(PLIC_IRQ(MOUSE_IRQ), &mouse_irq_desc);
     if (ret != 0) {
         printf("PS2 mouse: failed to register IRQ handler: %d\n", ret);
         return;
@@ -649,10 +672,6 @@ void ps2mouse_init(void)
     /* Enable IRQ 12 in the I/O APIC */
     extern void plic_enable_irq(int irq);
     plic_enable_irq(MOUSE_IRQ);
-
-    /* Register character device */
-    ret = cdev_register(&mouse_cdev);
-    assert(ret == 0, "ps2mouse_init: cdev_register failed: %d", ret);
 
     struct thread *poller = kthread_create("ps2mouse_poll",
                                            ps2mouse_poll_thread, 0, 0, 0);

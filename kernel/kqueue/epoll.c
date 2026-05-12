@@ -36,6 +36,7 @@
 #include "vfs/file.h"
 #include "vfs/vfs_types.h"
 #include "vfs/fcntl.h"
+#include "vfs/poll.h"
 #include "kqueue.h"
 #include "kqueue_types.h"
 #include <mm/vm.h>
@@ -99,6 +100,8 @@ _Static_assert(sizeof(struct k_epoll_event) == 16,
 #define EPOLLRDHUP     0x2000
 #define EPOLLONESHOT   (1U << 30)
 #define EPOLLET        (1U << 31)
+#define EPOLLEXCLUSIVE (1U << 28)
+#define EPOLLWAKEUP    (1U << 29)
 
 #define EPOLL_CTL_ADD  1
 #define EPOLL_CTL_DEL  2
@@ -144,26 +147,27 @@ static int webkit_epoll_trace_process(void)
 /* Helper: resolve epfd → kqueue *                                            */
 /* ========================================================================== */
 
-static struct kqueue *epoll_get_kq(int epfd, struct vfs_file **fp_out)
+static int epoll_get_kq(int epfd, struct kqueue **kq_out,
+                        struct vfs_file **fp_out)
 {
     struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, epfd);
     if (f == NULL)
-        return NULL;
+        return -EBADF;
 
-    /* Validate: the fd must be a kqueue fd (private_data points to kqueue).
-     * We rely on the file_ops matching the kqueue ops. */
-    struct kqueue *kq = (struct kqueue *)f->private_data;
-    if (kq == NULL) {
+    struct kqueue *kq = kqueue_from_file(f);
+    if (kq == NULL || !(kq->flags & KQ_EPOLL_COMPAT)) {
         vfs_fput(f);
-        return NULL;
+        return -EINVAL;
     }
 
+    if (kq_out)
+        *kq_out = kq;
     if (fp_out)
         *fp_out = f;
     else
         vfs_fput(f);
 
-    return kq;
+    return 0;
 }
 
 static int epoll_mark_kqueue_fd(int fd)
@@ -172,7 +176,7 @@ static int epoll_mark_kqueue_fd(int fd)
     if (f == NULL)
         return -EBADF;
 
-    struct kqueue *kq = (struct kqueue *)f->private_data;
+    struct kqueue *kq = kqueue_from_file(f);
     if (kq == NULL) {
         vfs_fput(f);
         return -EBADF;
@@ -199,6 +203,9 @@ uint64 sys_epoll_create1(void)
 {
     int flags;
     argint(0, &flags);
+
+    if (flags & ~EPOLL_CLOEXEC)
+        return (uint64)-EINVAL;
 
     int fd = kqueue_create();
     if (fd < 0)
@@ -249,9 +256,21 @@ uint64 sys_epoll_ctl(void)
     argaddr(3, &uevent);
 
     struct vfs_file *fp = NULL;
-    struct kqueue *kq = epoll_get_kq(epfd, &fp);
-    if (kq == NULL)
-        return (uint64)-EBADF;
+    struct kqueue *kq = NULL;
+    int get_ret = epoll_get_kq(epfd, &kq, &fp);
+    if (get_ret < 0)
+        return (uint64)get_ret;
+
+    if (op != EPOLL_CTL_ADD && op != EPOLL_CTL_MOD &&
+        op != EPOLL_CTL_DEL) {
+        vfs_fput(fp);
+        return (uint64)-EINVAL;
+    }
+
+    if (fd == epfd) {
+        vfs_fput(fp);
+        return (uint64)-EINVAL;
+    }
 
     /* Copy the epoll_event from user space (NULL for EPOLL_CTL_DEL) */
     struct k_epoll_event ev;
@@ -266,6 +285,41 @@ uint64 sys_epoll_ctl(void)
             vfs_fput(fp);
             return (uint64)-EFAULT;
         }
+    }
+
+    struct vfs_file *target = vfs_fdtable_get_file(current->fdtable, fd);
+    if (target == NULL) {
+        vfs_fput(fp);
+        return (uint64)-EBADF;
+    }
+    int target_is_epoll = kqueue_file_is_epoll(target);
+    if ((op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD) &&
+        !target_is_epoll &&
+        !((target->ops != NULL && target->ops->poll != NULL) ||
+          (target->f_kind == VFS_FILE_KIND_CDEV && target->cdev != NULL &&
+           target->cdev->ops.poll != NULL))) {
+        vfs_fput(target);
+        vfs_fput(fp);
+        return (uint64)-EPERM;
+    }
+    if (op == EPOLL_CTL_ADD && target_is_epoll) {
+        struct kqueue *target_kq = kqueue_from_file(target);
+        if (ev.events & EPOLLEXCLUSIVE) {
+            vfs_fput(target);
+            vfs_fput(fp);
+            return (uint64)-EINVAL;
+        }
+        if (kqueue_epoll_contains_kqueue(target_kq, kq, 5)) {
+            vfs_fput(target);
+            vfs_fput(fp);
+            return (uint64)-ELOOP;
+        }
+    }
+    vfs_fput(target);
+
+    if (op == EPOLL_CTL_MOD && (ev.events & EPOLLEXCLUSIVE)) {
+        vfs_fput(fp);
+        return (uint64)-EINVAL;
     }
 
     /* Build kevent change list.  Up to 3 entries are needed for MOD to an
@@ -300,7 +354,7 @@ uint64 sys_epoll_ctl(void)
             changes[nchanges].ident = (uint64)fd;
             changes[nchanges].filter = EVFILT_READ;
             changes[nchanges].flags = add_flags;
-            changes[nchanges].fflags = 0;
+            changes[nchanges].fflags = ev.events;
             changes[nchanges].data = 0;
             changes[nchanges].udata = ev.data;
             nchanges++;
@@ -319,7 +373,7 @@ uint64 sys_epoll_ctl(void)
             changes[nchanges].ident = (uint64)fd;
             changes[nchanges].filter = EVFILT_WRITE;
             changes[nchanges].flags = add_flags;
-            changes[nchanges].fflags = 0;
+            changes[nchanges].fflags = ev.events;
             changes[nchanges].data = 0;
             changes[nchanges].udata = ev.data;
             nchanges++;
@@ -336,11 +390,13 @@ uint64 sys_epoll_ctl(void)
 
         if (nchanges == 0) {
             /* No events requested.  Linux keeps the epoll item present but
-             * disabled; represent that with a disabled read-filter sentinel. */
+             * still reports EPOLLERR/EPOLLHUP.  Represent that with an
+             * enabled read-filter sentinel whose mask suppresses normal
+             * readiness in the kqueue rescan path. */
             changes[0].ident = (uint64)fd;
             changes[0].filter = EVFILT_READ;
-            changes[0].flags = EV_ADD | EV_DISABLE | kev_flags;
-            changes[0].fflags = 0;
+            changes[0].flags = EV_ADD | EV_ENABLE | kev_flags;
+            changes[0].fflags = ev.events;
             changes[0].data = 0;
             changes[0].udata = ev.data;
             nchanges = 1;
@@ -350,8 +406,8 @@ uint64 sys_epoll_ctl(void)
                                   EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND))) {
             changes[nchanges].ident = (uint64)fd;
             changes[nchanges].filter = EVFILT_READ;
-            changes[nchanges].flags = EV_ADD | EV_DISABLE | kev_flags;
-            changes[nchanges].fflags = 0;
+            changes[nchanges].flags = EV_ADD | EV_ENABLE | kev_flags;
+            changes[nchanges].fflags = ev.events;
             changes[nchanges].data = 0;
             changes[nchanges].udata = ev.data;
             nchanges++;
@@ -449,19 +505,27 @@ static int epoll_timespec_to_timeout_ms(uint64 timeout_addr, int *timeout_ms)
 }
 
 static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
-                                 int timeout, uint64 usigmask)
+                                 int timeout, uint64 usigmask,
+                                 uint64 sigsetsize, int check_sigsetsize)
 {
-    if (maxevents <= 0 || maxevents > EPOLL_MAX_EVENTS)
+    if (maxevents <= 0)
         return (uint64)-EINVAL;
+    if (uevents == 0)
+        return (uint64)-EFAULT;
 
     struct vfs_file *fp = NULL;
-    struct kqueue *kq = epoll_get_kq(epfd, &fp);
-    if (kq == NULL)
-        return (uint64)-EBADF;
+    struct kqueue *kq = NULL;
+    int get_ret = epoll_get_kq(epfd, &kq, &fp);
+    if (get_ret < 0)
+        return (uint64)get_ret;
 
     sigset_t newmask, oldmask;
     int use_mask = 0;
     if (usigmask != 0) {
+        if (check_sigsetsize && sigsetsize != sizeof(sigset_t)) {
+            vfs_fput(fp);
+            return (uint64)-EINVAL;
+        }
         if (vm_copyin(current->vm, &newmask, usigmask,
                       sizeof(newmask)) < 0) {
             vfs_fput(fp);
@@ -536,8 +600,9 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
      * on the writable side and starve the read progress that drives WebKit's
      * network process.
      */
+    int out_max = maxevents < kev_max ? maxevents : kev_max;
     struct k_epoll_event *out_events =
-        kvmalloc((size_t)maxevents * sizeof(struct k_epoll_event));
+        kvmalloc((size_t)out_max * sizeof(struct k_epoll_event));
     if (out_events == NULL) {
         kvfree(kevents);
         if (use_mask)
@@ -545,7 +610,7 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
         vfs_fput(fp);
         return (uint64)-ENOMEM;
     }
-    uint64 *out_ident = kvmalloc((size_t)maxevents * sizeof(uint64));
+    uint64 *out_ident = kvmalloc((size_t)out_max * sizeof(uint64));
     if (out_ident == NULL) {
         kvfree(out_events);
         kvfree(kevents);
@@ -558,27 +623,32 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
     int nout = 0;
     for (int i = 0; i < nkev; i++) {
         uint32 mapped = 0;
+        uint32 requested = kevents[i].fflags;
+        uint32 revents = (uint32)kevents[i].data;
 
         /* Map kqueue filter → epoll events */
         switch (kevents[i].filter) {
         case EVFILT_READ:
-            mapped = EPOLLIN | EPOLLRDNORM;
+            mapped |= revents & requested &
+                (EPOLLIN | EPOLLPRI | EPOLLRDNORM | EPOLLRDBAND |
+                 EPOLLRDHUP);
             break;
         case EVFILT_WRITE:
-            mapped = EPOLLOUT | EPOLLWRNORM;
+            mapped |= revents & requested &
+                (EPOLLOUT | EPOLLWRNORM | EPOLLWRBAND);
             break;
         default:
             continue; /* skip filters we don't map */
         }
 
         /* Map kqueue flags → epoll events */
-        if (kevents[i].flags & EV_EOF) {
+        if ((kevents[i].flags & EV_EOF) && (revents & POLLHUP))
             mapped |= EPOLLHUP;
-            if (kevents[i].filter == EVFILT_READ)
-                mapped |= EPOLLRDHUP;
-        }
         if (kevents[i].flags & EV_ERROR)
             mapped |= EPOLLERR;
+
+        if (mapped == 0)
+            continue;
 
         int slot = -1;
         for (int j = 0; j < nout; j++) {
@@ -590,7 +660,7 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
         }
 
         if (slot < 0) {
-            if (nout >= maxevents)
+            if (nout >= out_max)
                 break;
             slot = nout++;
             memset(&out_events[slot], 0, sizeof(out_events[slot]));
@@ -661,7 +731,11 @@ uint64 sys_epoll_pwait(void)
     argint(3, &timeout);
     argaddr(4, &usigmask);
 
-    return epoll_pwait_common(epfd, uevents, maxevents, timeout, usigmask);
+    uint64 sigsetsize;
+    argaddr(5, &sigsetsize);
+
+    return epoll_pwait_common(epfd, uevents, maxevents, timeout, usigmask,
+                              sigsetsize, 1);
 }
 
 uint64 sys_epoll_wait(void)
@@ -674,7 +748,7 @@ uint64 sys_epoll_wait(void)
     argint(2, &maxevents);
     argint(3, &timeout);
 
-    return epoll_pwait_common(epfd, uevents, maxevents, timeout, 0);
+    return epoll_pwait_common(epfd, uevents, maxevents, timeout, 0, 0, 0);
 }
 
 uint64 sys_epoll_pwait2(void)
@@ -692,5 +766,9 @@ uint64 sys_epoll_pwait2(void)
     if (ret < 0)
         return (uint64)ret;
 
-    return epoll_pwait_common(epfd, uevents, maxevents, timeout, usigmask);
+    uint64 sigsetsize;
+    argaddr(5, &sigsetsize);
+
+    return epoll_pwait_common(epfd, uevents, maxevents, timeout, usigmask,
+                              sigsetsize, 1);
 }

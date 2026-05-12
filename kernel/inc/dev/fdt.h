@@ -39,8 +39,8 @@ struct fdt_header {
     uint32 size_dt_struct;
 } __PACKED;
 
-#define MAX_MEM_REGIONS 8
-#define MAX_RESERVED_REGIONS 16
+#define MAX_MEM_REGIONS 64
+#define MAX_RESERVED_REGIONS 128
 
 // Memory region
 struct mem_region {
@@ -142,6 +142,18 @@ struct platform_info {
     uint64 ramdisk_base;
     uint64 ramdisk_size;
     int has_ramdisk;
+
+    // Linear framebuffer handed over by firmware/bootloader (x86 EFI GOP/VESA)
+    uint64 framebuffer_base;
+    uint64 framebuffer_size;
+    uint32 framebuffer_width;
+    uint32 framebuffer_height;
+    uint32 framebuffer_pitch;
+    uint32 framebuffer_bpp;
+    uint8 framebuffer_red_pos;
+    uint8 framebuffer_green_pos;
+    uint8 framebuffer_blue_pos;
+    int has_framebuffer;
 
     // Total memory (sum of all regions)
     uint64 total_mem;

@@ -264,7 +264,7 @@ void __panic_start() __acquires(__panic_msg_context)
     struct thread *p = current;
     if (p == NULL || p->kstack == 0) {
         // No thread context - use kernel memory bounds for backtrace
-        printf("[Core: %ld] No thread context, fp=%p\n", cpuid(), (void *)fp);
+        printf("[Core: %d] No thread context, fp=%p\n", cpuid(), (void *)fp);
         if (__bt_enabled) {
             // Use virtual addresses for stack bounds (fp is a higher-half VA)
             printf("backtrace:\n");
@@ -272,7 +272,7 @@ void __panic_start() __acquires(__panic_msg_context)
         }
         return;
     }
-    printf("[Core: %ld] In thread %d (%s) at %p\n", cpuid(), p->pid, p->name,
+    printf("[Core: %d] In thread %d (%s) at %p\n", cpuid(), p->pid, p->name,
            (void *)fp);
     if (__bt_enabled) {
         size_t kstack_size = (1UL << (PAGE_SHIFT + p->kstack_order));

@@ -70,6 +70,7 @@ typedef struct vma {
 #define VMA_FLAG_MERGEABLE 0x10000 // KSM-compatible advisory
 #define VMA_FLAG_HUGEPAGE 0x20000  // Transparent hugepage advisory
 #define VMA_FLAG_NOHUGEPAGE 0x40000 // Disable transparent hugepage advisory
+#define VMA_FLAG_PFNMAP 0x80000 // Raw PFN/MMIO mapping; no page ref/rmap
 
 #define VMA_FLAG_ADVICE_MASK                                                  \
     (VMA_FLAG_DONTFORK | VMA_FLAG_DONTDUMP | VMA_FLAG_WIPEONFORK |            \
@@ -78,7 +79,8 @@ typedef struct vma {
 // Combined mask of all bits that may appear in vma->flags
 #define VMA_FLAG_PROT_MASK                                                     \
     (PROT_READ | PROT_WRITE | PROT_EXEC | VMA_FLAG_USER | VMA_FLAG_GROWSDOWN | \
-     VMA_FLAG_GROWSUP | VMA_FLAG_FILE | VMA_FLAG_SHARED | VMA_FLAG_KERNEL)
+     VMA_FLAG_GROWSUP | VMA_FLAG_FILE | VMA_FLAG_SHARED | VMA_FLAG_KERNEL |    \
+     VMA_FLAG_PFNMAP)
 
 // mmap failure return value
 #define MAP_FAILED ((void *)(uint64) - 1)

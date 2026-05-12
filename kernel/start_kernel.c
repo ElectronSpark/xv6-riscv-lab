@@ -68,13 +68,24 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
         // memory map parsed
     }
 
+    uint64 kernel_end_pa = VA2PA(end);
+    if (mem_base + mem_size <= kernel_end_pa || mem_base + mem_size < mem_base) {
+        mem_base = platform_default_mem_base();
+        mem_size = 128 * 1024 * 1024;
+    }
+
 // Cap the first memory region at 4 GB for the early allocator.
 // If the FDT-reported region crosses the 4 GB boundary, limit it here
 // so the page array stays manageable.  fdt_apply_platform_config() will
 // later split any cross-boundary regions and expose the remainder as
 // highmem.
 #define EARLY_MEM_LIMIT 0x100000000ULL
-    if (mem_base + mem_size > EARLY_MEM_LIMIT) {
+    if (mem_base >= EARLY_MEM_LIMIT) {
+        mem_base = platform_default_mem_base();
+        mem_size = 128 * 1024 * 1024;
+    } else if (mem_base + mem_size < mem_base) {
+        mem_size = EARLY_MEM_LIMIT - mem_base;
+    } else if (mem_base + mem_size > EARLY_MEM_LIMIT) {
         mem_size = EARLY_MEM_LIMIT - mem_base;
     }
 #undef EARLY_MEM_LIMIT
@@ -87,7 +98,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
 
     // Early allocator uses memory after kernel end
     // `end` is a higher-half VA; convert to PA for the early allocator.
-    early_allocator_init((void *)VA2PA(end), (void *)(mem_base + mem_size));
+    early_allocator_init((void *)kernel_end_pa, (void *)(mem_base + mem_size));
     kobject_global_init();
     printfinit();
     diaginit();
@@ -204,13 +215,16 @@ void start_kernel_post_init(void) {
     fbdevinit();       // Register /dev/fb0 (framebuffer, if Bochs VGA detected)
     ps2mouse_init();   // Register /dev/mouse (PS/2 mouse)
     ps2kbd_init();     // Register /dev/kbd (PS/2 keyboard)
+    hyperv_input_init(); // optional Hyper-V synthetic HID mouse
     ttydevinit();      // Register /dev/tty (controlling terminal device)
     ptmxinit();        // Register /dev/ptmx (PTY multiplexer)
     gendisk_init();    // Generic disk layer (partition discovery)
+    hyperv_storvsc_init(); // Hyper-V synthetic disk (Hyper-V)
     virtio_disk_init(); // emulated hard disk (QEMU)
     virtio_gpu_init();  // optional virtio-gpu PCI device (Bochs fb remains fallback)
     virtio_input_init(); // optional virtio tablet/mouse routed to /dev/mouse
     virtio_net_init();   // optional virtio-net PCI device (preferred over e1000)
+    hyperv_netvsc_init(); // Hyper-V synthetic NIC (keeps virtio preferred)
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
     loop_init();        // Loopback block devices (/dev/loop0..7)
     sockinit();
@@ -248,5 +262,4 @@ void start_kernel_post_init(void) {
     printf("Releasing secondary CPUs...\n");
     __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
     platform_start_secondary_cpus((uint64)_entry);
-    sleep_ms(100); // Give secondary CPUs time to start
 }

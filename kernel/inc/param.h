@@ -26,7 +26,7 @@
 #define MAXPID 0x7FFFFFF0 // maximum process ID
 #define NR_THREAD 10000   // maximum number of threads
 // #define NR_THREAD       0xFFFFFFFFFFFFFFUL
-#define MAX_CPUS 8          // compile-time CPU capacity
+#define MAX_CPUS 64         // compile-time CPU capacity
 #define NCPU MAX_CPUS       // legacy RISC-V/common compatibility alias
 #define NOFILE 2048         // open files per thread
 #define NFILE 2048          // open files per system

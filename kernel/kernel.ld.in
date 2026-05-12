@@ -59,7 +59,7 @@ SECTIONS
     _cpulocal_start = .;
     *(cpu_local_sec)
     . = ALIGN(0x1000);
-    ASSERT(. - _cpulocal_start <= 0x1000, "error: cpu_local_sec larger than one page");
+    ASSERT(. - _cpulocal_start <= 0x10000, "error: cpu_local_sec larger than reserved x86 alias");
   }
 
   .trampoline.data : AT(ADDR(.trampoline.data) - @KERNEL_OFFSET@) {

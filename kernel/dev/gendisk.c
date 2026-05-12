@@ -54,31 +54,41 @@ static int __part_release(blkdev_t *bdev) {
 static int __part_submit_bio(blkdev_t *bdev, struct bio *bio) {
     struct gendisk_part *part =
         container_of(bdev, struct gendisk_part, blkdev);
+    blkdev_t *raw = part->parent->raw;
+    uint64 sectors_per_block = 1ULL << bdev->block_shift;
 
     /* Bounds-check: bio must not extend past partition end */
-    uint64 bio_sectors = ((uint64)bio->size + BLK_SIZE - 1) >> BLK_SIZE_SHIFT;
-    if (bio->blkno + bio_sectors > part->num_sectors) {
+    uint64 block_bytes = BLK_SIZE << bdev->block_shift;
+    uint64 bio_blocks = ((uint64)bio->size + block_bytes - 1) >>
+                        (BLK_SIZE_SHIFT + bdev->block_shift);
+    uint64 part_blocks = part->num_sectors >> bdev->block_shift;
+    if ((part->start_lba & (sectors_per_block - 1)) != 0 ||
+        bio->blkno + bio_blocks > part_blocks) {
         printf("gendisk: %s: bio out of bounds (blkno=%ld, sectors=%ld, "
                "part_sectors=%ld)\n",
-               part->devname, bio->blkno, bio_sectors, part->num_sectors);
-        bio->error = -EINVAL;
-        bio_complete(bio);
+               part->devname, bio->blkno, bio_blocks << bdev->block_shift,
+               part->num_sectors);
         return -EINVAL;
     }
 
-    /* Translate block number by partition start offset */
-    bio->blkno += part->start_lba;
-    bio->bdev = part->parent->raw;
+    bio->blkno = (part->start_lba >> bdev->block_shift) + bio->blkno;
+    bio->bdev = raw;
+    bio->block_shift = raw->block_shift;
 
-    /* Dispatch to parent's raw device — bypass blkdev_submit_bio
-     * validation because we've already translated blkno and bdev. */
-    return part->parent->raw->ops.submit_bio(part->parent->raw, bio);
+    return raw->ops.submit_bio(raw, bio);
+}
+
+static int __part_flush(blkdev_t *bdev) {
+    struct gendisk_part *part =
+        container_of(bdev, struct gendisk_part, blkdev);
+    return blkdev_flush(part->parent->raw);
 }
 
 static blkdev_ops_t __part_ops = {
     .open       = __part_open,
     .release    = __part_release,
     .submit_bio = __part_submit_bio,
+    .flush      = __part_flush,
 };
 
 /*****************************************************************************

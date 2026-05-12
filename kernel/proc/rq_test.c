@@ -651,7 +651,7 @@ static void test_affinity_change(void) {
 void rq_test_run(void) {
     printf("\n========================================\n");
     printf("Run Queue Priority Integration Tests\n");
-    printf("Running on CPU %ld\n", cpuid());
+    printf("Running on CPU %d\n", cpuid());
     printf("========================================\n\n");
 
     test_two_layer_mask();

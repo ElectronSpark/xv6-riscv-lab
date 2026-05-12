@@ -30,6 +30,10 @@ struct platform_info platform;
 static int x86_boot_cpu_limit_cached;
 static void **x86_kernel_stacks;
 static uint64 *x86_ap_boot_stack_tops;
+static const char *x86_mem_source = "fallback";
+static uint32 x86_cpu_apic_ids[MAX_CPUS];
+static int x86_cpu_apic_id_count;
+static int x86_acpi_cpu_ids_loaded;
 
 extern void arch_relocate_stack_finish(uint64 delta);
 
@@ -141,15 +145,228 @@ static uint32 x86_cpuid_topology_count(uint32 leaf)
     return count;
 }
 
+struct acpi_rsdp {
+    char  signature[8];
+    uint8 checksum;
+    char  oemid[6];
+    uint8 revision;
+    uint32 rsdt_address;
+    uint32 length;
+    uint64 xsdt_address;
+    uint8 extended_checksum;
+    uint8 reserved[3];
+} __attribute__((packed));
+
+struct acpi_sdt_header {
+    char  signature[4];
+    uint32 length;
+    uint8 revision;
+    uint8 checksum;
+    char  oemid[6];
+    char  oem_table_id[8];
+    uint32 oem_revision;
+    uint32 creator_id;
+    uint32 creator_revision;
+} __attribute__((packed));
+
+struct acpi_madt {
+    struct acpi_sdt_header header;
+    uint32 lapic_address;
+    uint32 flags;
+    uint8 entries[];
+} __attribute__((packed));
+
+static int x86_cpu_limit_capacity(void)
+{
+    int cap = MAX_CPUS;
+    if (cap > MAX_CPUS)
+        cap = MAX_CPUS;
+    if (cap < 1)
+        cap = 1;
+    return cap;
+}
+
+static uint64 x86_cmdline_u64(const char *key)
+{
+    size_t key_len = strlen(key);
+    const char *p = platform.cmdline;
+
+    while (p && *p) {
+        while (*p == ' ' || *p == '\t' || *p == '\n')
+            p++;
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=') {
+            uint64 value = 0;
+            p += key_len + 1;
+            if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X'))
+                p += 2;
+            while ((*p >= '0' && *p <= '9') ||
+                   (*p >= 'a' && *p <= 'f') ||
+                   (*p >= 'A' && *p <= 'F')) {
+                uint64 digit;
+                if (*p >= '0' && *p <= '9')
+                    digit = (uint64)(*p - '0');
+                else if (*p >= 'a' && *p <= 'f')
+                    digit = (uint64)(*p - 'a' + 10);
+                else
+                    digit = (uint64)(*p - 'A' + 10);
+                value = (value << 4) | digit;
+                p++;
+            }
+            return value;
+        }
+        while (*p && *p != ' ' && *p != '\t' && *p != '\n')
+            p++;
+    }
+
+    return 0;
+}
+
+static int x86_acpi_checksum_ok(const void *base, uint32 len)
+{
+    const uint8 *p = (const uint8 *)base;
+    uint8 sum = 0;
+
+    if (base == NULL || len == 0)
+        return 0;
+    for (uint32 i = 0; i < len; i++)
+        sum = (uint8)(sum + p[i]);
+    return sum == 0;
+}
+
+static int x86_acpi_sig_eq(const char got[4], const char want[4])
+{
+    return got[0] == want[0] && got[1] == want[1] &&
+           got[2] == want[2] && got[3] == want[3];
+}
+
+static int x86_count_madt_cpus(const struct acpi_madt *madt, uint32 *ids,
+                               int max_ids)
+{
+    uint32 off = sizeof(*madt);
+    int count = 0;
+
+    if (madt == NULL || madt->header.length < sizeof(*madt) ||
+        !x86_acpi_checksum_ok(madt, madt->header.length))
+        return 0;
+
+    while (off + 2 <= madt->header.length) {
+        const uint8 *entry = ((const uint8 *)madt) + off;
+        uint8 type = entry[0];
+        uint8 len = entry[1];
+
+        if (len < 2 || off + len > madt->header.length)
+            break;
+
+        if (type == 0 && len >= 8) {
+            uint8 apic_id = entry[3];
+            uint32 flags = *(const uint32 *)(entry + 4);
+            if (flags & 0x3) {
+                if (ids != NULL && count < max_ids)
+                    ids[count] = apic_id;
+                count++;
+            }
+        } else if (type == 9 && len >= 16) {
+            uint32 apic_id = *(const uint32 *)(entry + 4);
+            uint32 flags = *(const uint32 *)(entry + 12);
+            if (flags & 0x3) {
+                if (ids != NULL && count < max_ids)
+                    ids[count] = apic_id;
+                count++;
+            }
+        }
+
+        off += len;
+    }
+
+    return count;
+}
+
+static int x86_detect_acpi_cpu_count(void)
+{
+    x86_acpi_cpu_ids_loaded = 1;
+    x86_cpu_apic_id_count = 0;
+
+    uint64 rsdp_addr = x86_cmdline_u64("acpi_rsdp");
+    const struct acpi_rsdp *rsdp = (const struct acpi_rsdp *)rsdp_addr;
+    uint64 root_addr;
+    const struct acpi_sdt_header *root;
+    int use_xsdt;
+    uint32 entries;
+
+    if (rsdp_addr == 0 || rsdp_addr >= 0x100000000ULL ||
+        memcmp(rsdp->signature, "RSD PTR ", 8) != 0 ||
+        !x86_acpi_checksum_ok(rsdp, 20))
+        return 0;
+
+    use_xsdt = rsdp->revision >= 2 && rsdp->xsdt_address != 0 &&
+               rsdp->length >= sizeof(*rsdp) &&
+               x86_acpi_checksum_ok(rsdp, rsdp->length);
+    root_addr = use_xsdt ? rsdp->xsdt_address : (uint64)rsdp->rsdt_address;
+    if (root_addr == 0 || root_addr >= 0x100000000ULL)
+        return 0;
+    root = (const struct acpi_sdt_header *)root_addr;
+    if (root == NULL || root->length < sizeof(*root) ||
+        !x86_acpi_checksum_ok(root, root->length))
+        return 0;
+
+    if (use_xsdt) {
+        if (!x86_acpi_sig_eq(root->signature, "XSDT"))
+            return 0;
+        entries = (root->length - sizeof(*root)) / 8;
+        const uint64 *table = (const uint64 *)(root + 1);
+        for (uint32 i = 0; i < entries; i++) {
+            if (table[i] == 0 || table[i] >= 0x100000000ULL)
+                continue;
+            const struct acpi_sdt_header *hdr =
+                (const struct acpi_sdt_header *)table[i];
+            if (hdr && x86_acpi_sig_eq(hdr->signature, "APIC")) {
+                int count = x86_count_madt_cpus((const struct acpi_madt *)hdr,
+                                                x86_cpu_apic_ids, MAX_CPUS);
+                x86_cpu_apic_id_count = count > MAX_CPUS ? MAX_CPUS : count;
+                return count;
+            }
+        }
+    } else {
+        if (!x86_acpi_sig_eq(root->signature, "RSDT"))
+            return 0;
+        entries = (root->length - sizeof(*root)) / 4;
+        const uint32 *table = (const uint32 *)(root + 1);
+        for (uint32 i = 0; i < entries; i++) {
+            if (table[i] == 0 || table[i] >= 0x100000000ULL)
+                continue;
+            const struct acpi_sdt_header *hdr =
+                (const struct acpi_sdt_header *)(uint64)table[i];
+            if (hdr && x86_acpi_sig_eq(hdr->signature, "APIC")) {
+                int count = x86_count_madt_cpus((const struct acpi_madt *)hdr,
+                                                x86_cpu_apic_ids, MAX_CPUS);
+                x86_cpu_apic_id_count = count > MAX_CPUS ? MAX_CPUS : count;
+                return count;
+            }
+        }
+    }
+
+    return 0;
+}
+
 static int x86_detect_boot_cpu_limit(void)
 {
     uint32 a, b, c, d;
-    uint32 count = 0;
+    uint32 count = (uint32)x86_cmdline_u64("acpi_cpus");
+    int cap = x86_cpu_limit_capacity();
+    uint32 acpi_count = 0;
+
+    if (!x86_acpi_cpu_ids_loaded)
+        acpi_count = (uint32)x86_detect_acpi_cpu_count();
+    else
+        acpi_count = (uint32)x86_cpu_apic_id_count;
+
+    if (count == 0)
+        count = acpi_count;
 
     x86_cpuid(0, 0, &a, &b, &c, &d);
     uint32 max_leaf = a;
 
-    if (max_leaf >= 0x1f)
+    if (count == 0 && max_leaf >= 0x1f)
         count = x86_cpuid_topology_count(0x1f);
     if (count == 0 && max_leaf >= 0x0b)
         count = x86_cpuid_topology_count(0x0b);
@@ -160,13 +377,53 @@ static int x86_detect_boot_cpu_limit(void)
     if (count == 0)
         count = 1;
 
-    if (count > MAX_CPUS) {
-        printf("[SMP] CPUID reports %d CPUs; clamping to MAX_CPUS=%d\n",
-               count, MAX_CPUS);
-        count = MAX_CPUS;
+    if ((int)count > cap) {
+        printf("[SMP] CPU topology reports %d CPUs; clamping to capacity=%d\n",
+               count, cap);
+        count = (uint32)cap;
     }
 
     return (int)count;
+}
+
+int x86_cpu_apic_id(int cpu)
+{
+    if (cpu >= 0 && cpu < x86_cpu_apic_id_count)
+        return (int)x86_cpu_apic_ids[cpu];
+    return cpu;
+}
+
+static void x86_prepare_cpu_apic_ids(int cpu_limit)
+{
+    int bsp_apic = lapic_id();
+
+    if (!x86_acpi_cpu_ids_loaded)
+        (void)x86_detect_acpi_cpu_count();
+
+    if (x86_cpu_apic_id_count <= 0) {
+        for (int i = 0; i < cpu_limit && i < MAX_CPUS; i++)
+            x86_cpu_apic_ids[i] = (uint32)i;
+        x86_cpu_apic_id_count = cpu_limit;
+    }
+
+    for (int i = 0; i < x86_cpu_apic_id_count; i++) {
+        if ((int)x86_cpu_apic_ids[i] == bsp_apic) {
+            uint32 tmp = x86_cpu_apic_ids[0];
+            x86_cpu_apic_ids[0] = x86_cpu_apic_ids[i];
+            x86_cpu_apic_ids[i] = tmp;
+            break;
+        }
+    }
+
+    for (int i = x86_cpu_apic_id_count; i < cpu_limit && i < MAX_CPUS; i++)
+        x86_cpu_apic_ids[i] = (uint32)i;
+    if (x86_cpu_apic_id_count < cpu_limit)
+        x86_cpu_apic_id_count = cpu_limit;
+
+    printf("[SMP] LAPIC IDs:");
+    for (int i = 0; i < cpu_limit; i++)
+        printf(" cpu%d=%d", i, x86_cpu_apic_id(i));
+    printf("\n");
 }
 
 static uint64 x86_kernel_stack_top(int cpu)
@@ -345,11 +602,256 @@ struct x86_pvh_module {
     uint64 reserved;
 } __PACKED;
 
+struct x86_linux_e820_entry {
+    uint64 addr;
+    uint64 size;
+    uint32 type;
+} __PACKED;
+
+#define X86_EARLY_MEM_LIMIT 0x100000000ULL
+#define X86_MAX_PROBED_PA   (512ULL << 30)
+
 /* ------------------------------------------------------------------ */
 /*  Bootloader memory-map parsers                                     */
 /* ------------------------------------------------------------------ */
 
 static struct mem_region x86_reserved_regions[MAX_RESERVED_REGIONS];
+
+static void x86_normalize_mem_regions(void)
+{
+    int out = 0;
+
+    for (int i = 0; i < platform.mem_count; i++) {
+        uint64 base = platform.mem[i].base;
+        uint64 end = base + platform.mem[i].size;
+
+        if (platform.mem[i].size == 0 || end <= base ||
+            base >= X86_MAX_PROBED_PA)
+            continue;
+        if (end > X86_MAX_PROBED_PA)
+            end = X86_MAX_PROBED_PA;
+
+        platform.mem[out].base = base;
+        platform.mem[out].size = end - base;
+        out++;
+    }
+    platform.mem_count = out;
+
+    for (int i = 0; i < platform.mem_count; i++) {
+        for (int j = i + 1; j < platform.mem_count; j++) {
+            if (platform.mem[j].base < platform.mem[i].base) {
+                struct mem_region tmp = platform.mem[i];
+                platform.mem[i] = platform.mem[j];
+                platform.mem[j] = tmp;
+            }
+        }
+    }
+
+    out = 0;
+    platform.total_mem = 0;
+    for (int i = 0; i < platform.mem_count; i++) {
+        uint64 base = platform.mem[i].base;
+        uint64 end = base + platform.mem[i].size;
+
+        if (out > 0) {
+            uint64 prev_base = platform.mem[out - 1].base;
+            uint64 prev_end = prev_base + platform.mem[out - 1].size;
+            if (base <= prev_end) {
+                if (end > prev_end)
+                    platform.mem[out - 1].size = end - prev_base;
+                continue;
+            }
+        }
+
+        platform.mem[out].base = base;
+        platform.mem[out].size = end - base;
+        out++;
+    }
+    platform.mem_count = out;
+
+    for (int i = 0; i < platform.mem_count; i++)
+        platform.total_mem += platform.mem[i].size;
+}
+
+static uint8 x86_boot_u8(uint8 *base, uint32 off)
+{
+    return base[off];
+}
+
+static uint16 x86_boot_u16(uint8 *base, uint32 off)
+{
+    uint16 val;
+    memcpy(&val, base + off, sizeof(val));
+    return val;
+}
+
+static uint32 x86_boot_u32(uint8 *base, uint32 off)
+{
+    uint32 val;
+    memcpy(&val, base + off, sizeof(val));
+    return val;
+}
+
+static void x86_parse_linux_framebuffer(uint8 *params)
+{
+    enum {
+        VIDEO_TYPE_VLFB = 0x23,
+        VIDEO_TYPE_EFI  = 0x70,
+        VIDEO_CAPABILITY_64BIT_BASE = 1 << 1,
+    };
+
+    uint8 video_type = x86_boot_u8(params, 0x0f);
+    if (video_type != VIDEO_TYPE_VLFB && video_type != VIDEO_TYPE_EFI)
+        return;
+
+    uint32 width = x86_boot_u16(params, 0x12);
+    uint32 height = x86_boot_u16(params, 0x14);
+    uint32 bpp = x86_boot_u16(params, 0x16);
+    uint32 pitch = x86_boot_u16(params, 0x24);
+    uint64 base = x86_boot_u32(params, 0x18);
+    uint64 size = x86_boot_u32(params, 0x1c);
+    uint32 capabilities = x86_boot_u32(params, 0x36);
+
+    if (capabilities & VIDEO_CAPABILITY_64BIT_BASE)
+        base |= (uint64)x86_boot_u32(params, 0x3a) << 32;
+    if (video_type == VIDEO_TYPE_VLFB)
+        size <<= 16;
+
+    if (base == 0 || width < 320 || height < 200 || bpp != 32 ||
+        pitch < width * 4)
+        return;
+
+    uint64 min_size = (uint64)pitch * height;
+    if (size < min_size)
+        size = min_size;
+    if (base + size <= base || base + size > X86_MAX_PROBED_PA)
+        return;
+
+    platform.framebuffer_base = base;
+    platform.framebuffer_size = size;
+    platform.framebuffer_width = width;
+    platform.framebuffer_height = height;
+    platform.framebuffer_pitch = pitch;
+    platform.framebuffer_bpp = bpp;
+    platform.framebuffer_red_pos = x86_boot_u8(params, 0x27);
+    platform.framebuffer_green_pos = x86_boot_u8(params, 0x29);
+    platform.framebuffer_blue_pos = x86_boot_u8(params, 0x2b);
+    platform.has_framebuffer = 1;
+
+    if (platform.reserved_count < MAX_RESERVED_REGIONS) {
+        platform.reserved[platform.reserved_count].base = base;
+        platform.reserved[platform.reserved_count].size = size;
+        platform.reserved_count++;
+    }
+}
+
+static void x86_consider_early_mem_end(uint64 region_base, uint64 region_end,
+                                       uint64 *chosen_end)
+{
+    if (chosen_end == 0 || region_end <= 0x100000ULL ||
+        region_base >= X86_EARLY_MEM_LIMIT)
+        return;
+
+    if (region_end > X86_EARLY_MEM_LIMIT)
+        region_end = X86_EARLY_MEM_LIMIT;
+    if (region_end > *chosen_end)
+        *chosen_end = region_end;
+}
+
+static int x86_parse_linux_boot_params(void *boot_params, uint64 *base_out,
+                                       uint64 *size_out)
+{
+    uint8 *params = (uint8 *)boot_params;
+
+    if (params == 0 || x86_boot_u32(params, 0x202) != 0x53726448U)
+        return -1;
+
+    memset(&platform, 0, sizeof(platform));
+    platform.reserved = x86_reserved_regions;
+
+    uint8 entries = x86_boot_u8(params, 0x1e8);
+    if (entries == 0 || entries > 128)
+        return -1;
+
+    struct x86_linux_e820_entry *e820 =
+        (struct x86_linux_e820_entry *)(params + 0x2d0);
+    uint64 chosen_base = 0x100000ULL;
+    uint64 chosen_end = 0;
+
+    for (uint32 i = 0; i < entries; i++) {
+        uint64 region_base = e820[i].addr;
+        uint64 region_end  = region_base + e820[i].size;
+
+        if (e820[i].size == 0 || region_end < region_base ||
+            region_base >= X86_MAX_PROBED_PA || region_end > X86_MAX_PROBED_PA)
+            continue;
+
+        if (e820[i].type == 1) {
+            if (region_end > 0x100000ULL &&
+                platform.mem_count < MAX_MEM_REGIONS) {
+                if (region_base < 0x100000ULL)
+                    region_base = 0x100000ULL;
+                if (region_base < region_end) {
+                    platform.mem[platform.mem_count].base = region_base;
+                    platform.mem[platform.mem_count].size =
+                        region_end - region_base;
+                    platform.total_mem += region_end - region_base;
+                    x86_consider_early_mem_end(region_base, region_end,
+                                               &chosen_end);
+                    platform.mem_count++;
+                }
+            }
+        } else if (platform.reserved_count < MAX_RESERVED_REGIONS) {
+            platform.reserved[platform.reserved_count].base = region_base;
+            platform.reserved[platform.reserved_count].size =
+                region_end - region_base;
+            platform.reserved_count++;
+        }
+    }
+
+    uint64 cmdline_ptr = x86_boot_u32(params, 0x228);
+    if (x86_boot_u16(params, 0x206) >= 0x0202)
+        cmdline_ptr |= (uint64)x86_boot_u32(params, 0x0c8) << 32;
+    if (cmdline_ptr != 0 && cmdline_ptr < (4ULL << 30)) {
+        const char *cmdline = (const char *)cmdline_ptr;
+        size_t len = strnlen(cmdline, CMDLINE_MAX - 1);
+        if (len > 0) {
+            memcpy(platform.cmdline, cmdline, len);
+            platform.cmdline[len] = '\0';
+            platform.has_cmdline = 1;
+        }
+    }
+
+    uint64 ramdisk_base = x86_boot_u32(params, 0x218);
+    uint64 ramdisk_size = x86_boot_u32(params, 0x21c);
+    if (x86_boot_u16(params, 0x206) >= 0x0203) {
+        ramdisk_base |= (uint64)x86_boot_u32(params, 0x0c0) << 32;
+        ramdisk_size |= (uint64)x86_boot_u32(params, 0x0c4) << 32;
+    }
+    if (ramdisk_base != 0 && ramdisk_size != 0 &&
+        ramdisk_base + ramdisk_size > ramdisk_base &&
+        ramdisk_base + ramdisk_size <= X86_MAX_PROBED_PA) {
+        platform.ramdisk_base = ramdisk_base;
+        platform.ramdisk_size = ramdisk_size;
+        platform.has_ramdisk = 1;
+        if (platform.reserved_count < MAX_RESERVED_REGIONS) {
+            platform.reserved[platform.reserved_count].base = ramdisk_base;
+            platform.reserved[platform.reserved_count].size = ramdisk_size;
+            platform.reserved_count++;
+        }
+    }
+
+    x86_parse_linux_framebuffer(params);
+
+    if (platform.mem_count == 0 || chosen_end <= chosen_base)
+        return -1;
+
+    x86_mem_source = "linux-e820";
+    platform.ncpu = 1;
+    *base_out = chosen_base;
+    *size_out = chosen_end - chosen_base;
+    return 0;
+}
 
 static int x86_parse_pvh_memory(void *boot_params, uint64 *base_out,
                                 uint64 *size_out)
@@ -364,14 +866,15 @@ static int x86_parse_pvh_memory(void *boot_params, uint64 *base_out,
 
     struct x86_pvh_memmap_entry *entries =
         (struct x86_pvh_memmap_entry *)(uint64)si->memmap_paddr;
-    uint64 chosen_base = 0;
-    uint64 chosen_size = 0;
+    uint64 chosen_base = 0x100000ULL;
+    uint64 chosen_end = 0;
 
     for (uint32 i = 0; i < si->memmap_entries; i++) {
         uint64 region_base = entries[i].addr;
         uint64 region_end  = region_base + entries[i].size;
 
-        if (entries[i].size == 0)
+        if (entries[i].size == 0 || region_end < region_base ||
+            region_base >= X86_MAX_PROBED_PA || region_end > X86_MAX_PROBED_PA)
             continue;
 
         if (entries[i].type == 1) {
@@ -384,10 +887,8 @@ static int x86_parse_pvh_memory(void *boot_params, uint64 *base_out,
                     platform.mem[platform.mem_count].size =
                         region_end - region_base;
                     platform.total_mem += region_end - region_base;
-                    if (chosen_size == 0 || region_base < chosen_base) {
-                        chosen_base = region_base;
-                        chosen_size = region_end - region_base;
-                    }
+                    x86_consider_early_mem_end(region_base, region_end,
+                                               &chosen_end);
                     platform.mem_count++;
                 }
             }
@@ -434,12 +935,13 @@ static int x86_parse_pvh_memory(void *boot_params, uint64 *base_out,
         }
     }
 
-    if (platform.mem_count == 0 || chosen_size == 0)
+    if (platform.mem_count == 0 || chosen_end <= chosen_base)
         return -1;
 
+    x86_mem_source = "pvh";
     platform.ncpu = 1;
     *base_out = chosen_base;
-    *size_out = chosen_size;
+    *size_out = chosen_end - chosen_base;
     return 0;
 }
 
@@ -448,6 +950,9 @@ static int x86_parse_bootloader_memory(void *boot_params, uint64 *base_out,
 {
     if (boot_params == 0 || base_out == 0 || size_out == 0)
         return -1;
+
+    if (x86_parse_linux_boot_params(boot_params, base_out, size_out) == 0)
+        return 0;
 
     if (x86_parse_pvh_memory(boot_params, base_out, size_out) == 0)
         return 0;
@@ -462,8 +967,8 @@ static int x86_parse_bootloader_memory(void *boot_params, uint64 *base_out,
 
     uint8 *mmap_ptr = (uint8 *)(uint64)mbi->mmap_addr;
     uint8 *mmap_end = mmap_ptr + mbi->mmap_length;
-    uint64 chosen_base = 0;
-    uint64 chosen_size = 0;
+    uint64 chosen_base = 0x100000ULL;
+    uint64 chosen_end = 0;
 
     while (mmap_ptr < mmap_end) {
         struct x86_multiboot_mmap_entry *entry =
@@ -471,7 +976,8 @@ static int x86_parse_bootloader_memory(void *boot_params, uint64 *base_out,
         uint64 region_base = entry->addr;
         uint64 region_end  = region_base + entry->len;
 
-        if (entry->len != 0) {
+        if (entry->len != 0 && region_end >= region_base &&
+            region_base < X86_MAX_PROBED_PA && region_end <= X86_MAX_PROBED_PA) {
             if (entry->type == 1) {
                 if (region_end > 0x100000ULL &&
                     platform.mem_count < MAX_MEM_REGIONS) {
@@ -482,10 +988,8 @@ static int x86_parse_bootloader_memory(void *boot_params, uint64 *base_out,
                         platform.mem[platform.mem_count].size =
                             region_end - region_base;
                         platform.total_mem += region_end - region_base;
-                        if (chosen_size == 0 || region_base < chosen_base) {
-                            chosen_base = region_base;
-                            chosen_size = region_end - region_base;
-                        }
+                        x86_consider_early_mem_end(region_base, region_end,
+                                                   &chosen_end);
                         platform.mem_count++;
                     }
                 }
@@ -536,12 +1040,13 @@ static int x86_parse_bootloader_memory(void *boot_params, uint64 *base_out,
         }
     }
 
-    if (platform.mem_count == 0 || chosen_size == 0)
+    if (platform.mem_count == 0 || chosen_end <= chosen_base)
         return -1;
 
+    x86_mem_source = "multiboot";
     platform.ncpu = 1;
     *base_out = chosen_base;
-    *size_out = chosen_size;
+    *size_out = chosen_end - chosen_base;
     return 0;
 }
 
@@ -573,13 +1078,14 @@ int platform_init(void *boot_data)
         platform.mem_count   = 1;
         platform.total_mem   = platform.mem[0].size;
         platform.ncpu        = 1;
+        x86_mem_source       = "fallback";
     }
 
     uint64 first_base = platform.mem[0].base;
     uint64 first_end  = platform.mem[0].base + platform.mem[0].size;
-    printf("x86 boot memory: regions=%d reserved=%d total=%ld MB "
+    printf("x86 boot memory: source=%s regions=%d reserved=%d total=%ld MB "
            "first=[0x%lx-0x%lx)\n",
-           platform.mem_count, platform.reserved_count,
+           x86_mem_source, platform.mem_count, platform.reserved_count,
            platform.total_mem / (1024 * 1024), first_base, first_end);
         x86_print_region_list("mem", platform.mem, platform.mem_count);
         x86_print_region_list("reserved", platform.reserved,
@@ -590,6 +1096,16 @@ int platform_init(void *boot_data)
                platform.ramdisk_base,
                platform.ramdisk_base + platform.ramdisk_size,
                platform.ramdisk_size / 1024);
+    }
+
+    if (platform.has_framebuffer) {
+        printf("x86 framebuffer: 0x%lx - 0x%lx %ux%ux%u pitch=%u rgb=%u/%u/%u\n",
+               platform.framebuffer_base,
+               platform.framebuffer_base + platform.framebuffer_size,
+               platform.framebuffer_width, platform.framebuffer_height,
+               platform.framebuffer_bpp, platform.framebuffer_pitch,
+               platform.framebuffer_red_pos, platform.framebuffer_green_pos,
+               platform.framebuffer_blue_pos);
     }
 
     if (platform.has_cmdline) {
@@ -604,6 +1120,10 @@ void platform_apply_config(void)
     extern uint64 __physical_memory_start;
     extern uint64 __physical_memory_end;
     extern uint64 __physical_total_pages;
+
+    x86_normalize_mem_regions();
+    if (platform.mem_count == 0)
+        return;
 
     /*
      * Split any memory region that crosses the 4 GB physical boundary into
@@ -640,6 +1160,8 @@ void platform_apply_config(void)
      * the first region's base to the last region's end.  Gap pages are
      * marked LOCKED during buddy init.
      */
+    x86_normalize_mem_regions();
+
     if (platform.mem_count > 0 && platform.mem[0].size > 0) {
         __physical_memory_start = platform.mem[0].base;
 
@@ -649,6 +1171,17 @@ void platform_apply_config(void)
             if (region_end > highest_end)
                 highest_end = region_end;
         }
+        /*
+         * The boot-time x86 page tables only cover the low 4 GiB.  Hyper-V's
+         * EFI memory map can contain usable regions above that boundary before
+         * the final kernel page table exists; extending the early allocator to
+         * those addresses lets pre-VM init allocations land in unmapped memory.
+         * Keep the early physical span bounded to the aperture that is mapped
+         * now.  The individual highmem entries remain in platform.mem[] for
+         * later reservation/probing work.
+         */
+        if (highest_end > X86_EARLY_MEM_LIMIT)
+            highest_end = X86_EARLY_MEM_LIMIT;
         __physical_memory_end = highest_end;
         __physical_total_pages =
             (highest_end - __physical_memory_start) >> 12;
@@ -669,8 +1202,8 @@ void platform_print_mem_summary(void)
     if (platform.mem_count > 0) {
         uint64 first_base = platform.mem[0].base;
         uint64 first_end = platform.mem[0].base + platform.mem[0].size;
-        printf("x86 boot memory: regions=%d reserved=%d total=%ld MB first=[0x%lx-0x%lx)\n",
-               platform.mem_count, platform.reserved_count,
+        printf("x86 boot memory: source=%s regions=%d reserved=%d total=%ld MB first=[0x%lx-0x%lx)\n",
+               x86_mem_source, platform.mem_count, platform.reserved_count,
                platform.total_mem / (1024 * 1024), first_base, first_end);
     }
 
@@ -683,6 +1216,14 @@ void platform_print_mem_summary(void)
                platform.ramdisk_base,
                platform.ramdisk_base + platform.ramdisk_size,
                platform.ramdisk_size);
+    }
+
+    if (platform.has_framebuffer) {
+        printf("x86 framebuffer: [0x%lx-0x%lx) %ux%ux%u pitch=%u\n",
+               platform.framebuffer_base,
+               platform.framebuffer_base + platform.framebuffer_size,
+               platform.framebuffer_width, platform.framebuffer_height,
+               platform.framebuffer_bpp, platform.framebuffer_pitch);
     }
 
     if (platform.has_cmdline) {
@@ -817,6 +1358,7 @@ void platform_start_secondary_cpus(uint64 entry)
         printf("[SMP] CPU topology reports one CPU; skipping AP startup\n");
         return;
     }
+    x86_prepare_cpu_apic_ids(cpu_limit);
 
     if (x86_ap_boot_stack_tops == NULL) {
         x86_ap_boot_stack_tops = page_alloc(0, PAGE_TYPE_ANON);
@@ -843,66 +1385,86 @@ void platform_start_secondary_cpus(uint64 entry)
 
     /* Copy trampoline to low memory */
     memmove((void *)(uint64)AP_BOOT_PA, ap_trampoline_start, tramp_size);
-
-    printf("[SMP] Starting secondary CPUs (prepared=%d, trampoline at 0x%x, size %d)\n",
-           cpu_limit, AP_BOOT_PA, (int)tramp_size);
-
-    /*
-     * INIT-SIPI-SIPI sequence (broadcast to all APs):
-     *
-     * 1. Send INIT IPI to all-except-self
-     * 2. Wait 10 ms
-     * 3. Send STARTUP IPI (vector = AP_BOOT_PA >> 12) to all-except-self
-     * 4. Wait 200 us
-     * 5. Send second STARTUP IPI (for reliability)
-     * 6. Wait 200 us
-     */
-
-    /* Wait for LAPIC ICR to be idle */
-    while (lapic_read(LAPIC_ICR_LO) & LAPIC_ICR_STATUS)
-        ;
-
-    /* INIT IPI: all-except-self, level assert */
-    lapic_write(LAPIC_ICR_HI, 0);
-    lapic_write(LAPIC_ICR_LO,
-                LAPIC_ICR_INIT | LAPIC_ICR_LEVEL |
-                (3 << 18));  /* destination shorthand: all-excl-self */
-
-    /* Wait ~10 ms (busy-loop using port 0x80 delay, ~1us each) */
-    for (volatile int i = 0; i < 10000; i++)
-        asm volatile("outb %%al, $0x80" : : "a"(0));
-
-    /* Send STARTUP IPI twice */
-    for (int sipi = 0; sipi < 2; sipi++) {
-        while (lapic_read(LAPIC_ICR_LO) & LAPIC_ICR_STATUS)
-            ;
-
-        lapic_write(LAPIC_ICR_HI, 0);
-        lapic_write(LAPIC_ICR_LO,
-                    LAPIC_ICR_STARTUP |
-                    (AP_BOOT_PA >> 12) |       /* vector = page number */
-                    (3 << 18));                 /* all-excl-self */
-
-        /* Wait ~200 us */
-        for (volatile int i = 0; i < 200; i++)
-            asm volatile("outb %%al, $0x80" : : "a"(0));
-    }
-
-    /* Wait a bit for APs to increment ap_boot_next_cpu */
-    for (volatile int i = 0; i < 50000; i++)
-        asm volatile("outb %%al, $0x80" : : "a"(0));
-
-    /* ap_boot_next_cpu is consumed by the copied trampoline at AP_BOOT_PA,
-     * not by the original image symbol. Read back the runtime copy. */
+    uint32 *runtime_ap_boot_cpu_limit =
+        (uint32 *)(AP_BOOT_PA +
+                   ((uint64)&ap_boot_cpu_limit -
+                    (uint64)ap_trampoline_start));
     uint32 *runtime_ap_boot_next_cpu =
         (uint32 *)(AP_BOOT_PA +
                    ((uint64)&ap_boot_next_cpu -
                     (uint64)ap_trampoline_start));
 
+    printf("[SMP] Starting secondary CPUs (prepared=%d, trampoline at 0x%x, size %d)\n",
+           cpu_limit, AP_BOOT_PA, (int)tramp_size);
+
+    /*
+     * INIT-SIPI-SIPI sequence.  Start APs one at a time so the trampoline's
+     * claimed hartid matches x86_cpu_apic_ids[hartid].  Hyper-V commonly
+     * exposes sparse LAPIC IDs (for example 0,2,4,...), so CPU index and APIC
+     * destination cannot be treated as the same number.
+     */
+    uint32 claimed_cpus = 1;
+    for (int cpu = 1; cpu < cpu_limit; cpu++) {
+        int apicid = x86_cpu_apic_id(cpu);
+        if (apicid < 0 || apicid > 255) {
+            printf("[SMP] CPU %d LAPIC ID %d needs x2APIC startup; stopping at %d CPUs\n",
+                   cpu, apicid, claimed_cpus);
+            break;
+        }
+
+        __atomic_store_n(runtime_ap_boot_cpu_limit, (uint32)(cpu + 1),
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(runtime_ap_boot_next_cpu, (uint32)cpu,
+                         __ATOMIC_RELEASE);
+
+        while (lapic_read(LAPIC_ICR_LO) & LAPIC_ICR_STATUS)
+            ;
+        lapic_write(LAPIC_ICR_HI, (uint32)apicid << 24);
+        lapic_write(LAPIC_ICR_LO,
+                    LAPIC_ICR_INIT | LAPIC_ICR_LEVEL |
+                    LAPIC_ICR_DEST_NONE);
+
+        /* Wait ~10 ms (busy-loop using port 0x80 delay, ~1us each) */
+        for (volatile int i = 0; i < 10000; i++)
+            asm volatile("outb %%al, $0x80" : : "a"(0));
+
+        /* Send STARTUP IPI twice */
+        for (int sipi = 0; sipi < 2; sipi++) {
+            while (lapic_read(LAPIC_ICR_LO) & LAPIC_ICR_STATUS)
+                ;
+            lapic_write(LAPIC_ICR_HI, (uint32)apicid << 24);
+            lapic_write(LAPIC_ICR_LO,
+                        LAPIC_ICR_STARTUP |
+                        (AP_BOOT_PA >> 12) |
+                        LAPIC_ICR_DEST_NONE);
+
+            /* Wait ~200 us */
+            for (volatile int i = 0; i < 200; i++)
+                asm volatile("outb %%al, $0x80" : : "a"(0));
+        }
+
+        uint32 next = cpu;
+        for (volatile int i = 0; i < 500000; i++) {
+            next = __atomic_load_n(runtime_ap_boot_next_cpu,
+                                   __ATOMIC_ACQUIRE);
+            if (next > (uint32)cpu)
+                break;
+            asm volatile("pause");
+        }
+        if (next <= (uint32)cpu) {
+            printf("[SMP] CPU %d LAPIC ID %d did not start; stopping at %d CPUs\n",
+                   cpu, apicid, claimed_cpus);
+            break;
+        }
+        claimed_cpus = next;
+    }
+
     /* ap_boot_next_cpu started at 1 (BSP=0). After APs boot it equals
      * the total number of CPUs (BSP + APs). */
-    uint32 claimed_cpus =
+    uint32 final_claimed =
         __atomic_load_n(runtime_ap_boot_next_cpu, __ATOMIC_ACQUIRE);
+    if (final_claimed > claimed_cpus)
+        claimed_cpus = final_claimed;
     if (claimed_cpus > (uint32)cpu_limit) {
         printf("[SMP] %d CPUs attempted startup; only %d slots prepared\n",
                claimed_cpus, cpu_limit);
@@ -938,6 +1500,29 @@ void platform_late_device_init(void)
 void platform_boot_mark(const char *msg)
 {
     x86_debug_puts(msg);
+}
+
+void platform_visual_checkpoint(uint32 color)
+{
+    if (!platform.has_framebuffer ||
+        platform.framebuffer_bpp != 32 ||
+        platform.framebuffer_width == 0 ||
+        platform.framebuffer_height == 0 ||
+        platform.framebuffer_pitch < platform.framebuffer_width * 4)
+        return;
+
+    uint64 size = (uint64)platform.framebuffer_pitch *
+                  platform.framebuffer_height;
+    if (size == 0 || size > platform.framebuffer_size)
+        return;
+
+    volatile uint8 *fb = (volatile uint8 *)PA2VA(platform.framebuffer_base);
+    for (uint32 y = 0; y < platform.framebuffer_height; y++) {
+        volatile uint32 *row =
+            (volatile uint32 *)(fb + (uint64)y * platform.framebuffer_pitch);
+        for (uint32 x = 0; x < platform.framebuffer_width; x++)
+            row[x] = color;
+    }
 }
 
 /**

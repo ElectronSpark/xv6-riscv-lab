@@ -83,7 +83,9 @@ static const char *timer_source_names[] = {
 #define PIT_DIVISOR     (PIT_FREQ / PIT_HZ)
 
 #define PIT_CH0_DATA    0x40
+#define PIT_CH2_DATA    0x42
 #define PIT_CMD         0x43
+#define PIT_SPEAKER     0x61
 
 /* ══════════════════════════════════════════════════════════════
  *  HPET registers
@@ -112,6 +114,8 @@ static uint64 hpet_freq_hz;
  *  TSC
  * ══════════════════════════════════════════════════════════════ */
 #define MSR_TSC_DEADLINE    0x6E0
+#define HV_MSR_TSC_FREQUENCY  0x40000022
+#define HV_MSR_APIC_FREQUENCY 0x40000023
 
 static uint64 tsc_freq_hz;             /* measured TSC frequency */
 static int    have_tsc;
@@ -132,6 +136,7 @@ static uint32 lapic_periodic_icr;       /* initial count for periodic mode */
  *  Tick rate
  * ══════════════════════════════════════════════════════════════ */
 #define TIMER_HZ    1000    /* tick rate for LAPIC/HPET (matches kernel HZ) */
+#define CAL_MS      50      /* calibration window in milliseconds */
 static uint32 tick_hz = PIT_HZ;
 
 /* ══════════════════════════════════════════════════════════════
@@ -183,9 +188,16 @@ void timer_tick_advance(void) {
          * are pending. */
         extern void e1000_poll_rx(void);
         e1000_poll_rx();
-        sched_timer_tick();
-        __do_timer_tick();
     }
+
+    /*
+     * sched_timer uses a monotonic clock rather than a per-CPU tick count, so
+     * it is safe to scan from any CPU.  Timed waits may sleep on APs, and some
+     * hypervisors do not reliably make CPU 0 the only forward-progress source
+     * while the BSP is idle.
+     */
+    sched_timer_tick();
+    __do_timer_tick();
 
     /*
      * Every local x86 timer interrupt is a scheduler tick for the CPU that
@@ -243,6 +255,116 @@ static int cpu_has_invariant_tsc(void) {
     return (d >> 8) & 1;            /* CPUID.80000007H:EDX.InvTSC[bit 8] */
 }
 
+static uint64 cpuid_timer_frequency(uint64 *lapic_freq_out) {
+    uint32 a, b, c, d;
+    uint64 tsc_freq = 0;
+
+    if (lapic_freq_out)
+        *lapic_freq_out = 0;
+
+    /*
+     * Hyper-V publishes exact virtual TSC/APIC frequencies here.  Prefer this
+     * over HPET/PIT calibration because Gen2 Hyper-V guests often have no
+     * HPET, and legacy PIT IRQ delivery is a poor GUI timing source.
+     */
+    x86_cpuid(0x40000000, 0, &a, &b, &c, &d);
+    int is_hyperv = b == 0x7263694d && c == 0x666f736f && d == 0x76482074;
+    if (is_hyperv) {
+        uint64 hv_tsc = rdmsr(HV_MSR_TSC_FREQUENCY);
+        uint64 hv_apic = rdmsr(HV_MSR_APIC_FREQUENCY);
+        if (hv_tsc > 1000000ULL)
+            tsc_freq = hv_tsc;
+        if (lapic_freq_out && hv_apic > 1000000ULL)
+            *lapic_freq_out = hv_apic;
+    }
+
+    if (tsc_freq == 0 && a >= 0x40000010 && a < 0x40010000) {
+        uint32 hv_a, hv_b, hv_c, hv_d;
+        x86_cpuid(0x40000010, 0, &hv_a, &hv_b, &hv_c, &hv_d);
+        if (hv_a != 0)
+            tsc_freq = (uint64)hv_a * 1000ULL;
+        if (lapic_freq_out && hv_b != 0)
+            *lapic_freq_out = (uint64)hv_b * 1000ULL;
+    }
+
+    x86_cpuid(0, 0, &a, &b, &c, &d);
+    uint32 max_basic = a;
+
+    if (tsc_freq == 0 && max_basic >= 0x15) {
+        uint32 denom, numer, crystal, unused;
+        x86_cpuid(0x15, 0, &denom, &numer, &crystal, &unused);
+        if (denom != 0 && numer != 0 && crystal != 0)
+            tsc_freq = (uint64)crystal * (uint64)numer / (uint64)denom;
+    }
+
+    if (tsc_freq == 0 && max_basic >= 0x16) {
+        uint32 base_mhz, max_mhz, bus_mhz, unused;
+        x86_cpuid(0x16, 0, &base_mhz, &max_mhz, &bus_mhz, &unused);
+        if (base_mhz != 0)
+            tsc_freq = (uint64)base_mhz * 1000000ULL;
+        if (lapic_freq_out && *lapic_freq_out == 0 && bus_mhz != 0)
+            *lapic_freq_out = (uint64)bus_mhz * 1000000ULL;
+    }
+
+    return tsc_freq;
+}
+
+static uint64 calibrate_tsc_freq_pit(void) {
+    uint16 count = (uint16)((PIT_FREQ * CAL_MS) / 1000);
+    if (count == 0)
+        return 0;
+
+    uint8 speaker = inb(PIT_SPEAKER);
+
+    /* Channel 2 one-shot, speaker disabled.  This polls the PIT counter
+     * directly and does not depend on IRQ0 delivery. */
+    outb(PIT_SPEAKER, (speaker & (uint8)~0x03));
+    outb(PIT_CMD, 0xB0); /* channel 2, lobyte/hibyte, mode 0 */
+    outb(PIT_CH2_DATA, (uint8)(count & 0xff));
+    outb(PIT_CH2_DATA, (uint8)(count >> 8));
+    outb(PIT_SPEAKER, (speaker & (uint8)~0x02) | 0x01);
+
+    uint16 start_count = 0;
+    uint64 guard = 100000ULL;
+    while (guard-- > 0) {
+        outb(PIT_CMD, 0x80); /* latch channel 2 count */
+        uint8 lo = inb(PIT_CH2_DATA);
+        uint8 hi = inb(PIT_CH2_DATA);
+        start_count = ((uint16)hi << 8) | lo;
+        if (start_count != 0 && start_count < count - 100)
+            break;
+        cpu_relax();
+    }
+    if (guard == 0) {
+        outb(PIT_SPEAKER, speaker);
+        return 0;
+    }
+
+    uint16 target_count = start_count > count / 2
+        ? (uint16)(start_count - count / 2)
+        : 1;
+    uint64 start = rdtsc();
+    uint16 end_count = start_count;
+    guard = 1000000ULL;
+    while (guard-- > 0) {
+        outb(PIT_CMD, 0x80);
+        uint8 lo = inb(PIT_CH2_DATA);
+        uint8 hi = inb(PIT_CH2_DATA);
+        end_count = ((uint16)hi << 8) | lo;
+        if (end_count != 0 && end_count <= target_count)
+            break;
+        cpu_relax();
+    }
+    uint64 end = rdtsc();
+    outb(PIT_SPEAKER, speaker);
+
+    if (guard == 0 || end <= start || end_count >= start_count)
+        return 0;
+
+    uint64 elapsed_pit = (uint64)(start_count - end_count);
+    return (end - start) * PIT_FREQ / elapsed_pit;
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  HPET-based calibration.
  *
@@ -253,8 +375,6 @@ static int cpu_has_invariant_tsc(void) {
  *
  *  Calibration window: ~50 ms worth of HPET ticks.
  * ══════════════════════════════════════════════════════════════ */
-#define CAL_MS  50      /* calibration window in milliseconds */
-
 static inline uint64 hpet_read_counter(void) {
     return hpet_base_ptr[HPET_REG_COUNTER >> 3];
 }
@@ -484,10 +604,50 @@ void arch_timer_init(void) {
     printf("[x86] CPUID: TSC=%d  APIC=%d  TSC-deadline=%d  InvariantTSC=%d  HPET=%d\n",
            feat_tsc, feat_apic, feat_deadline, feat_inv_tsc, feat_hpet);
 
-    /* We need HPET to calibrate TSC and LAPIC.  If no HPET, fall back
-     * to PIT as tick source (no calibration needed for PIT). */
+    /*
+     * Hypervisors such as Hyper-V commonly omit HPET but provide exact timer
+     * frequencies through CPUID.  Use those frequencies to enable the local
+     * APIC timer instead of falling back to legacy PIT, whose IRQ0 delivery is
+     * too weak for compositor timed waits.
+     */
     if (!feat_hpet) {
-        dbg_puts("[TIMER] no HPET, falling back to PIT\n");
+        uint64 cpuid_lapic_freq = 0;
+        uint64 cpuid_tsc_freq = feat_tsc
+            ? cpuid_timer_frequency(&cpuid_lapic_freq)
+            : 0;
+        int tsc_from_pit = 0;
+        if (cpuid_tsc_freq == 0 && feat_tsc) {
+            cpuid_tsc_freq = calibrate_tsc_freq_pit();
+            tsc_from_pit = cpuid_tsc_freq != 0;
+        }
+
+        if (cpuid_tsc_freq != 0) {
+            have_tsc = 1;
+            tsc_freq_hz = cpuid_tsc_freq;
+            __timebase_frequency = tsc_freq_hz;
+            __jiff_ticks = tsc_freq_hz / HZ;
+            printf("[x86] TSC: %ld Hz from %s (%ld MHz)\n",
+                   tsc_freq_hz, tsc_from_pit ? "PIT calibration" : "CPUID",
+                   tsc_freq_hz / 1000000);
+
+            if (cpuid_lapic_freq != 0) {
+                lapic_bus_freq = cpuid_lapic_freq;
+                printf("[x86] LAPIC bus: %ld Hz from CPUID (%ld MHz)\n",
+                       lapic_bus_freq, lapic_bus_freq / 1000000);
+            }
+
+            if (feat_deadline && feat_apic) {
+                setup_lapic_tsc_deadline();
+                goto done;
+            }
+
+            if (feat_apic && lapic_bus_freq != 0) {
+                setup_lapic_periodic();
+                goto done;
+            }
+        }
+
+        dbg_puts("[TIMER] no HPET/CPUID timer frequency, falling back to PIT\n");
         setup_pit();
         goto done;
     }

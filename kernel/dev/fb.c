@@ -18,9 +18,11 @@
 #include <string.h>
 #include <dev/cdev.h>
 #include <dev/fb.h>
+#include <dev/fdt.h>
 #include <dev/pci.h>
 #include <mm/page.h>
 #include <mm/pgtable.h>
+#include <mm/memlayout.h>
 #include <mm/rmap.h>
 #include <mm/vm.h>
 #include <proc/thread.h>
@@ -489,9 +491,10 @@ static uint16 bga_read_reg(uint16 index)
 static struct {
     int         detected;       /* non-zero if a fbdev-compatible scanout exists */
     int         virtio_backed;  /* shadow framebuffer presented via virtio-gpu */
+    int         firmware_backed; /* bootloader/firmware linear framebuffer */
     uint64      fb_phys;        /* physical address of LFB (BAR0), if any */
     volatile uint8 *fb_virt;    /* kernel virtual address of framebuffer */
-    int         scanout_mappable; /* fb_virt is normal contiguous RAM */
+    int         scanout_mappable; /* scanout can be mapped into userspace */
     uint32      xres;
     uint32      yres;
     uint32      bpp;
@@ -509,6 +512,178 @@ static struct {
     .next_render_owner_id = 1,
     .lock = SPINLOCK_INITIALIZED("fb"),
 };
+
+static int fb_kernel_range_has_pages(uint64 base, uint64 size);
+static void gpu_backend_fill(struct fb_gpu_backend_info *info);
+static int gpu_backend_query(uint64 arg);
+
+static uint32 fb_pack_rgb(uint8 r, uint8 g, uint8 b)
+{
+    if (fb_state.firmware_backed && platform.has_framebuffer) {
+        return ((uint32)r << platform.framebuffer_red_pos) |
+               ((uint32)g << platform.framebuffer_green_pos) |
+               ((uint32)b << platform.framebuffer_blue_pos);
+    }
+
+    return ((uint32)r << 16) | ((uint32)g << 8) | b;
+}
+
+static void fb_fill_rect(uint32 x, uint32 y, uint32 w, uint32 h, uint32 color)
+{
+    if (fb_state.fb_virt == NULL || fb_state.bpp != 32 ||
+        x >= fb_state.xres || y >= fb_state.yres)
+        return;
+
+    if (x + w > fb_state.xres)
+        w = fb_state.xres - x;
+    if (y + h > fb_state.yres)
+        h = fb_state.yres - y;
+
+    for (uint32 row = 0; row < h; row++) {
+        volatile uint32 *dst = (volatile uint32 *)
+            (fb_state.fb_virt + (uint64)(y + row) * fb_state.pitch +
+             (uint64)x * sizeof(uint32));
+        for (uint32 col = 0; col < w; col++)
+            dst[col] = color;
+    }
+}
+
+static void fb_draw_boot_glyph(uint32 x, uint32 y, uint32 scale,
+                               const uint8 glyph[7], uint32 color)
+{
+    for (uint32 row = 0; row < 7; row++) {
+        for (uint32 col = 0; col < 5; col++) {
+            if (glyph[row] & (1U << (4 - col)))
+                fb_fill_rect(x + col * scale, y + row * scale,
+                             scale, scale, color);
+        }
+    }
+}
+
+static const uint8 *fb_boot_glyph_for(char ch)
+{
+    static const uint8 glyph_space[7] = {
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    static const uint8 glyph_6[7] = {
+        0x0f, 0x10, 0x10, 0x1e, 0x11, 0x11, 0x0e,
+    };
+    static const uint8 glyph_d[7] = {
+        0x1e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1e,
+    };
+    static const uint8 glyph_e[7] = {
+        0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x1f,
+    };
+    static const uint8 glyph_k[7] = {
+        0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11,
+    };
+    static const uint8 glyph_o[7] = {
+        0x0e, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0e,
+    };
+    static const uint8 glyph_p[7] = {
+        0x1e, 0x11, 0x11, 0x1e, 0x10, 0x10, 0x10,
+    };
+    static const uint8 glyph_s[7] = {
+        0x0f, 0x10, 0x10, 0x0e, 0x01, 0x01, 0x1e,
+    };
+    static const uint8 glyph_t[7] = {
+        0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04,
+    };
+    static const uint8 glyph_v[7] = {
+        0x11, 0x11, 0x11, 0x11, 0x11, 0x0a, 0x04,
+    };
+    static const uint8 glyph_x[7] = {
+        0x11, 0x11, 0x0a, 0x04, 0x0a, 0x11, 0x11,
+    };
+
+    switch (ch) {
+    case '6': return glyph_6;
+    case 'D':
+    case 'd': return glyph_d;
+    case 'E':
+    case 'e': return glyph_e;
+    case 'K':
+    case 'k': return glyph_k;
+    case 'O':
+    case 'o': return glyph_o;
+    case 'P':
+    case 'p': return glyph_p;
+    case 'S':
+    case 's': return glyph_s;
+    case 'T':
+    case 't': return glyph_t;
+    case 'V':
+    case 'v': return glyph_v;
+    case 'X':
+    case 'x': return glyph_x;
+    default: return glyph_space;
+    }
+}
+
+static uint32 fb_boot_text_width(const char *text, uint32 scale, uint32 gap)
+{
+    uint32 width = 0;
+
+    for (const char *p = text; *p; p++) {
+        if (p != text)
+            width += gap;
+        width += (*p == ' ') ? (3 * scale) : (5 * scale);
+    }
+
+    return width;
+}
+
+static void fb_draw_boot_text(uint32 x, uint32 y, uint32 scale,
+                              const char *text, uint32 color)
+{
+    uint32 gap = scale;
+
+    for (const char *p = text; *p; p++) {
+        if (*p == ' ') {
+            x += 3 * scale + gap;
+            continue;
+        }
+        fb_draw_boot_glyph(x, y, scale, fb_boot_glyph_for(*p), color);
+        x += 5 * scale + gap;
+    }
+}
+
+static void fb_paint_boot_logo(void)
+{
+    const char *title = "XV6 Desktop";
+
+    if (fb_state.fb_virt == NULL || fb_state.bpp != 32 ||
+        fb_state.xres == 0 || fb_state.yres == 0)
+        return;
+
+    uint32 bg = fb_pack_rgb(10, 22, 38);
+    for (uint32 y = 0; y < fb_state.yres; y++) {
+        volatile uint32 *row = (volatile uint32 *)
+            (fb_state.fb_virt + (uint64)y * fb_state.pitch);
+        for (uint32 x = 0; x < fb_state.xres; x++)
+            row[x] = bg;
+    }
+
+    uint32 scale = fb_state.xres / 80;
+    if (scale < 8)
+        scale = 8;
+    if (scale > 18)
+        scale = 18;
+
+    uint32 gap = scale;
+    uint32 logo_w = fb_boot_text_width(title, scale, gap);
+    uint32 logo_h = 7 * scale;
+    uint32 x = fb_state.xres > logo_w ? (fb_state.xres - logo_w) / 2 : 16;
+    uint32 y = fb_state.yres > logo_h ? (fb_state.yres - logo_h) / 2 : 16;
+
+    fb_fill_rect(x - scale, y - scale, logo_w + 2 * scale,
+                 logo_h + 2 * scale, fb_pack_rgb(15, 35, 58));
+    fb_draw_boot_text(x, y, scale, title, fb_pack_rgb(116, 198, 255));
+    fb_fill_rect(x - scale, y + logo_h + scale / 2,
+                 logo_w + 2 * scale, scale / 2 + 1,
+                 fb_pack_rgb(86, 230, 170));
+    __sync_synchronize();
+}
 
 static cdev_t gpu_cdev;
 
@@ -571,6 +746,10 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
     case FB_GPU_VIRGL_RESOURCE_EXPORT_FD: return "FB_GPU_VIRGL_RESOURCE_EXPORT_FD";
     case FB_GPU_VIRGL_TRANSFER_TO_HOST: return "FB_GPU_VIRGL_TRANSFER_TO_HOST";
     case FB_GPU_VIRGL_TRANSFER_FROM_HOST: return "FB_GPU_VIRGL_TRANSFER_FROM_HOST";
+    case FB_GPU_SCANOUT_MAP: return "FB_GPU_SCANOUT_MAP";
+    case FB_GPU_SCANOUT_FLUSH: return "FB_GPU_SCANOUT_FLUSH";
+    case FB_GPU_DISPLAY_PROBE: return "FB_GPU_DISPLAY_PROBE";
+    case FB_GPU_BACKEND_QUERY: return "FB_GPU_BACKEND_QUERY";
     case DRM_IOCTL_VERSION: return "DRM_IOCTL_VERSION";
     case DRM_IOCTL_GET_UNIQUE: return "DRM_IOCTL_GET_UNIQUE";
     case DRM_IOCTL_GET_MAGIC: return "DRM_IOCTL_GET_MAGIC";
@@ -657,9 +836,8 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
     if (cw == 0 || ch == 0)
         return 0;
 
-    uint8 kbuf[4096];
-    uint32 max_px = sizeof(kbuf) / 4;
     volatile uint8 *fb = fb_state.fb_virt;
+    uint64 row_bytes = (uint64)cw * 4;
 
     spin_lock(&fb_state.lock);
     if (cmd.x == 0 && cmd.y == 0 && cw == xres && ch == yres)
@@ -673,36 +851,27 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
         fb_state.stats.bo_presents++;
     spin_unlock(&fb_state.lock);
 
+    /*
+     * fb_virt is PA2VA-mapped (cached RAM, both Hyper-V synthvid and BGA),
+     * so no volatile/lock/bounce-buffer is required to write pixels.  Copy
+     * each row in a single either_copyin from user shadow buffer directly
+     * into the framebuffer row.  This eliminates the per-pixel volatile
+     * loop and per-chunk spin_lock that previously made non-virtio
+     * (Hyper-V) blits cost hundreds of ms per frame.
+     */
+    (void)virtio_backed;
     for (uint32 row = 0; row < ch; row++) {
         uint64 src_addr = cmd.pixels + (uint64)row * cmd.src_pitch;
-        volatile uint8 *dst = fb + (uint64)(cmd.y + row) * pitch +
-                              (uint64)cmd.x * 4;
-        uint32 remaining = cw;
-        uint32 col = 0;
+        void *dst = (void *)(fb + (uint64)(cmd.y + row) * pitch +
+                             (uint64)cmd.x * 4);
 
-        while (remaining > 0) {
-            uint32 chunk = remaining;
-            if (chunk > max_px)
-                chunk = max_px;
-            if (either_copyin(kbuf, 1, src_addr + col * 4, chunk * 4) < 0)
-                return -EFAULT;
-            if (virtio_backed) {
-                memcpy((void *)(dst + (uint64)col * 4), kbuf, chunk * 4);
-            } else {
-                spin_lock(&fb_state.lock);
-                volatile uint32 *dst32 =
-                    (volatile uint32 *)(dst + (uint64)col * 4);
-                uint32 *src32 = (uint32 *)kbuf;
-                for (uint32 p = 0; p < chunk; p++)
-                    dst32[p] = src32[p];
-                spin_unlock(&fb_state.lock);
-            }
-            col += chunk;
-            remaining -= chunk;
-        }
+        if (either_copyin(dst, 1, src_addr, row_bytes) < 0)
+            return -EFAULT;
     }
-    virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
-                               cmd.x, cmd.y, cw, ch);
+    if (virtio_backed)
+        virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                                   cmd.x, cmd.y, cw, ch);
+    hyperv_video_dirty(cmd.x, cmd.y, cw, ch);
     return 0;
 }
 
@@ -723,6 +892,7 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
                            uint64 *fence_out)
 {
     uint32 xres, yres;
+    uint32 pitch;
     bool virtio_backed;
     uint32 cw, ch;
     uint64 offset;
@@ -748,6 +918,7 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
     spin_lock(&fb_state.lock);
     xres = fb_state.xres;
     yres = fb_state.yres;
+    pitch = fb_state.pitch;
     virtio_backed = fb_state.virtio_backed;
     spin_unlock(&fb_state.lock);
 
@@ -781,7 +952,7 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
     for (uint32 row = 0; row < ch; row++) {
         uint64 src_off = offset + (uint64)row * bo->pitch;
         volatile uint8 *dst = fb_state.fb_virt +
-                              ((uint64)(cmd.y + row) * fb_state.pitch) +
+                              ((uint64)(cmd.y + row) * pitch) +
                               (uint64)cmd.x * 4;
         uint32 remaining = cw * 4;
         uint32 copied = 0;
@@ -802,23 +973,15 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
 
             if (virtio_backed) {
                 memcpy((void *)(dst + copied), src, chunk);
-            } else if ((((uint64)(uintptr_t)(dst + copied) |
-                         (uint64)(uintptr_t)src | chunk) & 3) == 0) {
-                spin_lock(&fb_state.lock);
-                volatile uint32 *d32 = (volatile uint32 *)(dst + copied);
-                uint32 *s32 = (uint32 *)src;
-                uint32 words = chunk / sizeof(uint32);
-
-                for (uint32 i = 0; i < words; i++)
-                    d32[i] = s32[i];
-                spin_unlock(&fb_state.lock);
             } else {
-                spin_lock(&fb_state.lock);
-                volatile uint8 *d8 = dst + copied;
-
-                for (uint32 i = 0; i < chunk; i++)
-                    d8[i] = src[i];
-                spin_unlock(&fb_state.lock);
+                /*
+                 * fb_virt is PA2VA-mapped cached RAM (Hyper-V synthvid and
+                 * BGA both).  No volatile/lock required — plain memcpy is
+                 * orders of magnitude faster than the per-pixel volatile
+                 * loop and per-chunk spin_lock that previously stalled the
+                 * Hyper-V compositor blit path.
+                 */
+                memcpy((void *)(dst + copied), src, chunk);
             }
 
             src_off += chunk;
@@ -827,8 +990,10 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
         }
     }
 
-    virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
-                               cmd.x, cmd.y, cw, ch);
+    if (virtio_backed)
+        virtio_gpu_present_fb_rect(fb_state.fb_virt, pitch,
+                                   cmd.x, cmd.y, cw, ch);
+    hyperv_video_dirty(cmd.x, cmd.y, cw, ch);
     spin_lock(&fb_state.lock);
     if (fence_out)
         *fence_out = fb_bo_signal_present_locked(bo);
@@ -849,18 +1014,21 @@ static int fb_map_scanout_current(struct fb_gpu_scanout_map *req)
     uint64 addr;
     uint64 flags;
     uint64 pte_flags;
-    uint64 base_pa;
+    uint64 fb_phys;
+    uint64 fb_virt;
     uint64 map_size;
     uint32 xres, yres, pitch, fb_size;
     int mappable;
+    int pfnmap;
 
     if (req == NULL || current == NULL || current->vm == NULL)
         return -EINVAL;
 
     spin_lock(&fb_state.lock);
-    mappable = fb_state.detected && fb_state.virtio_backed &&
-               fb_state.scanout_mappable && fb_state.fb_virt != NULL;
-    base_pa = (uint64)(uintptr_t)fb_state.fb_virt;
+    mappable = fb_state.detected && fb_state.scanout_mappable &&
+               fb_state.fb_virt != NULL;
+    fb_phys = fb_state.fb_phys;
+    fb_virt = (uint64)(uintptr_t)fb_state.fb_virt;
     xres = fb_state.xres;
     yres = fb_state.yres;
     pitch = fb_state.pitch;
@@ -875,44 +1043,108 @@ static int fb_map_scanout_current(struct fb_gpu_scanout_map *req)
         return -EINVAL;
 
     vm = current->vm;
-    flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER;
+    pfnmap = fb_phys != 0;
+    flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER |
+            VMA_FLAG_DONTFORK | VMA_FLAG_DONTDUMP |
+            (pfnmap ? VMA_FLAG_PFNMAP : 0);
 
     vm_wlock(vm);
     addr = vm_find_free_range(vm, (size_t)map_size, 0);
     if (addr == 0) {
+        printf("FB: scanout map failed no free user range size=0x%lx\n",
+               map_size);
         vm_wunlock(vm);
         return -ENOMEM;
     }
 
     vma = vma_alloc(vm, addr, map_size, flags);
     if (vma == NULL) {
+        printf("FB: scanout map vma_alloc failed addr=0x%lx size=0x%lx flags=0x%lx\n",
+               addr, map_size, flags);
         vm_wunlock(vm);
         return -ENOMEM;
     }
-    if (anon_vma_prepare(vma) != 0) {
+    if (!pfnmap && anon_vma_prepare(vma) != 0) {
+        printf("FB: scanout map anon_vma_prepare failed addr=0x%lx size=0x%lx\n",
+               addr, map_size);
         vma_free(vm, vma);
         vm_wunlock(vm);
         return -ENOMEM;
     }
 
     pte_flags = vma2pte_flags(flags);
+    /*
+     * Firmware framebuffers used by Hyper-V are MMIO-like PFN ranges.  The
+     * kernel's direct map marks that range uncached, but this user mapping is
+     * built by hand, so carry the same cache policy here.  Without this,
+     * wlcomp can write through a cached alias while Hyper-V keeps scanning out
+     * the old boot-logo contents.
+     */
+#ifdef PTE_PCD
+    if (pfnmap)
+        pte_flags |= PTE_PCD | PTE_PWT;
+#endif
     for (uint64 off = 0; off < map_size; off += PGSIZE) {
         uint64 va = addr + off;
-        uint64 pa = base_pa + off;
-        page_t *page = __pa_to_page(pa);
+        uint64 pa;
+        page_t *page;
 
-        if (page_ref_inc((void *)pa) <= 0) {
-            vma_free(vm, vma);
-            vm_wunlock(vm);
-            return -ENOMEM;
+        if (fb_phys != 0) {
+            pa = fb_phys + off;
+        } else {
+            uint64 kva = fb_virt + off;
+            pte_t *kpte = NULL;
+
+            if (kva >= (uint64)PA2VA(KERNBASE) &&
+                kva < (uint64)PA2VA(PHYSTOP)) {
+                pa = VA2PA(kva);
+            } else if (kernel_vm != NULL && kernel_vm->pagetable != NULL) {
+                kpte = walk(kernel_vm->pagetable, kva, 0, NULL, NULL);
+                if (kpte == NULL || !pte_present(kpte)) {
+                    printf("FB: scanout map kernel walk failed kva=0x%lx off=0x%lx\n",
+                           kva, off);
+                    vma_free(vm, vma);
+                    vm_wunlock(vm);
+                    return -ENODEV;
+                }
+                pa = pte_pa(kpte) + (kva & (PGSIZE - 1));
+            } else {
+                vma_free(vm, vma);
+                vm_wunlock(vm);
+                return -ENODEV;
+            }
+        }
+
+        if (!pfnmap) {
+            page = __pa_to_page(pa);
+            if (page == NULL) {
+                printf("FB: scanout map unmanaged pa=0x%lx off=0x%lx\n",
+                       pa, off);
+                vma_free(vm, vma);
+                vm_wunlock(vm);
+                return -ENODEV;
+            }
+            if (page_ref_inc((void *)pa) <= 0) {
+                printf("FB: scanout map page_ref_inc failed pa=0x%lx off=0x%lx\n",
+                       pa, off);
+                vma_free(vm, vma);
+                vm_wunlock(vm);
+                return -ENOMEM;
+            }
+        } else {
+            page = NULL;
         }
         if (mappages(vm->pagetable, va, PGSIZE, pa, pte_flags) != 0) {
-            page_ref_dec((void *)pa);
+            printf("FB: scanout map mappages failed va=0x%lx pa=0x%lx off=0x%lx pte_flags=0x%lx pfnmap=%d\n",
+                   va, pa, off, pte_flags, pfnmap);
+            if (!pfnmap)
+                page_ref_dec((void *)pa);
             vma_free(vm, vma);
             vm_wunlock(vm);
             return -ENOMEM;
         }
-        page_add_anon_rmap(page, vma, va);
+        if (!pfnmap)
+            page_add_anon_rmap(page, vma, va);
     }
     vm_wunlock(vm);
 
@@ -929,13 +1161,15 @@ static int fb_flush_scanout_rect(struct fb_gpu_scanout_flush req)
 {
     uint32 xres, yres;
     uint32 w, h;
+    int virtio_backed;
 
     spin_lock(&fb_state.lock);
-    if (!fb_state.detected || !fb_state.virtio_backed ||
+    if (!fb_state.detected || !fb_state.scanout_mappable ||
         fb_state.fb_virt == NULL) {
         spin_unlock(&fb_state.lock);
         return -ENODEV;
     }
+    virtio_backed = fb_state.virtio_backed;
     xres = fb_state.xres;
     yres = fb_state.yres;
     spin_unlock(&fb_state.lock);
@@ -962,8 +1196,10 @@ static int fb_flush_scanout_rect(struct fb_gpu_scanout_flush req)
     fb_state.stats.blit_bytes += (uint64)w * h * 4;
     spin_unlock(&fb_state.lock);
 
-    virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
-                               req.x, req.y, w, h);
+    if (virtio_backed)
+        virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
+                                   req.x, req.y, w, h);
+    hyperv_video_dirty(req.x, req.y, w, h);
     return 0;
 }
 
@@ -1567,10 +1803,7 @@ void fb_pci_init(uint8 bus, uint8 dev, uint8 func)
         printf("FB: LFB test pattern written, readback pixel[0]=0x%x (expect 0x000080FF)\n",
                readback);
     } else {
-        volatile uint32 *pixels = (volatile uint32 *)fb_state.fb_virt;
-        uint32 npx = fb_state.xres * fb_state.yres;
-        for (uint32 i = 0; i < npx; i++)
-            pixels[i] = 0x00000000;
+        fb_paint_boot_logo();
     }
 
     /* Publish as detected — must be last so readers see consistent state */
@@ -1710,6 +1943,7 @@ static int fb_write(cdev_t *cdev, bool user, const void *buf, size_t count)
         }
         virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
                                    0, 0, fb_state.xres, fb_state.yres);
+        hyperv_video_dirty(0, 0, fb_state.xres, fb_state.yres);
         return done;
     } else {
         spin_lock(&fb_state.lock);
@@ -1717,6 +1951,7 @@ static int fb_write(cdev_t *cdev, bool user, const void *buf, size_t count)
         spin_unlock(&fb_state.lock);
         virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
                                    0, 0, fb_state.xres, fb_state.yres);
+        hyperv_video_dirty(0, 0, fb_state.xres, fb_state.yres);
         return count;
     }
 }
@@ -1789,7 +2024,8 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         struct fb_fix_screeninfo info;
         memset(&info, 0, sizeof(info));
         spin_lock(&fb_state.lock);
-        strncpy(info.id, fb_state.virtio_backed ? "VirtioGPU" : "BochsVGA",
+        strncpy(info.id, fb_state.virtio_backed ? "VirtioGPU" :
+                (fb_state.firmware_backed ? "FirmwareFB" : "BochsVGA"),
                 sizeof(info.id) - 1);
         info.smem_start = fb_state.fb_phys;
         info.smem_len = fb_state.fb_size;
@@ -1830,6 +2066,7 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         spin_unlock(&fb_state.lock);
         virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
                                    cmd.x, cmd.y, cmd.w, cmd.h);
+        hyperv_video_dirty(cmd.x, cmd.y, cmd.w, cmd.h);
         return 0;
     }
 
@@ -1970,6 +2207,44 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
         return fb_flush_scanout_rect(req);
+    }
+
+    case FB_GPU_DISPLAY_PROBE: {
+        struct fb_gpu_display_probe req;
+        uint32 host_w = 0, host_h = 0;
+        uint32 edid_w = 0, edid_h = 0, edid_refresh = 0;
+
+        memset(&req, 0, sizeof(req));
+        spin_lock(&fb_state.lock);
+        req.current_width = fb_state.xres;
+        req.current_height = fb_state.yres;
+        req.current_pitch = fb_state.pitch;
+        spin_unlock(&fb_state.lock);
+        req.current_refresh_millihz = 60000;
+        req.host_refresh_millihz = 60000;
+        if (virtio_gpu_probe_scanout(&host_w, &host_h) == 0 &&
+            host_w != 0 && host_h != 0) {
+            req.host_width = host_w;
+            req.host_height = host_h;
+            req.flags |= FB_GPU_DISPLAY_F_HOST_SCANOUT;
+            if (host_w > 4096 || host_h > 4096 ||
+                (req.current_width != 0 && host_w >= req.current_width * 2) ||
+                (req.current_height != 0 && host_h >= req.current_height * 2))
+                req.flags |= FB_GPU_DISPLAY_F_HOST_SCALED;
+        }
+        if (virtio_gpu_probe_edid_mode(&edid_w, &edid_h, &edid_refresh) == 0 &&
+            edid_w != 0 && edid_h != 0) {
+            req.preferred_width = edid_w;
+            req.preferred_height = edid_h;
+            req.preferred_refresh_millihz = edid_refresh;
+            req.flags |= FB_GPU_DISPLAY_F_EDID;
+            if (edid_w == req.current_width && edid_h == req.current_height &&
+                edid_refresh != 0)
+                req.current_refresh_millihz = edid_refresh;
+        }
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
     }
 
     case FB_GPU_BO_DESTROY: {
@@ -2627,27 +2902,45 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
 
     case FB_GPU_GET_STATS: {
         struct fb_gpu_stats stats;
+        struct fb_gpu_backend_info backend;
+
         spin_lock(&fb_state.lock);
         stats = fb_state.stats;
         spin_unlock(&fb_state.lock);
         virtio_gpu_get_fb_stats(&stats);
+        gpu_backend_fill(&backend);
+        stats.gpu_backend = backend.backend;
+        stats.gpu_backend_flags = backend.flags;
+        stats.dxg_global_open = backend.dxg_global_open;
+        stats.dxg_vgpu_open = backend.dxg_vgpu_open;
+        stats.dxg_d3dkmt = backend.dxg_d3dkmt;
+        stats.dxg_global_rx = backend.dxg_global_rx;
+        stats.dxg_vgpu_rx = backend.dxg_vgpu_rx;
         if (either_copyout(1, (uint64)arg, (char *)&stats, sizeof(stats)) < 0)
             return -EFAULT;
         return 0;
     }
+
+    case FB_GPU_BACKEND_QUERY:
+        return gpu_backend_query((uint64)arg);
 
     case FBIOPUT_VSCREENINFO: {
         struct fb_var_screeninfo req;
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
 
-        if (fb_state.virtio_backed)
-            return -EOPNOTSUPP;
-
         /* Validate requested resolution */
         if (req.xres < 640 || req.xres > 2560 ||
             req.yres < 480 || req.yres > 1600)
             return -EINVAL;
+
+        if (fb_state.virtio_backed) {
+            int ret = virtio_gpu_resize_scanout(req.xres, req.yres);
+            if (ret == 0)
+                printf("FB: virtio resolution changed to %dx%d\n",
+                       req.xres, req.yres);
+            return ret;
+        }
 
         spin_lock(&fb_state.lock);
         bga_set_mode(req.xres, req.yres, FB_DEFAULT_BPP);
@@ -2709,6 +3002,8 @@ static int gpu_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     case FB_GPU_VIRGL_RESOURCE_EXPORT_FD:
     case FB_GPU_VIRGL_TRANSFER_TO_HOST:
     case FB_GPU_VIRGL_TRANSFER_FROM_HOST:
+    case FB_GPU_DISPLAY_PROBE:
+    case FB_GPU_BACKEND_QUERY:
         break;
     default:
         return -EINVAL;
@@ -2898,6 +3193,79 @@ static int gpu_drm_current_capset(uint32 *capset_id)
     return 0;
 }
 
+static void gpu_backend_copy_string(char *dst, size_t dst_size,
+                                    const char *src)
+{
+    size_t i;
+
+    if (dst == NULL || dst_size == 0)
+        return;
+    for (i = 0; i + 1 < dst_size && src != NULL && src[i] != 0; i++)
+        dst[i] = src[i];
+    dst[i] = 0;
+}
+
+static void gpu_backend_fill(struct fb_gpu_backend_info *info)
+{
+    struct hyperv_dxg_status dxg;
+
+    memset(info, 0, sizeof(*info));
+    info->backend = FB_GPU_BACKEND_DUMB;
+    info->flags = FB_GPU_BACKEND_F_RENDER_NODE | FB_GPU_BACKEND_F_DUMB_BO;
+    gpu_backend_copy_string(info->name, sizeof(info->name), "dumb");
+    gpu_backend_copy_string(info->renderer, sizeof(info->renderer),
+                            "xv6 software/dumb-buffer render node");
+
+    if (virtio_gpu_has_virgl()) {
+        uint32 capset_id = 0, capset_version = 0, capset_size = 0;
+
+        (void)virtio_gpu_user_get_caps(NULL, 0, &capset_id,
+                                       &capset_version, &capset_size);
+        info->backend = FB_GPU_BACKEND_VIRGL;
+        info->flags |= FB_GPU_BACKEND_F_VIRGL_OPENGL |
+                       FB_GPU_BACKEND_F_OPENGL_SUBMIT;
+        info->capset_id = capset_id;
+        info->capset_version = capset_version;
+        info->capset_size = capset_size;
+        gpu_backend_copy_string(info->name, sizeof(info->name), "virgl");
+        gpu_backend_copy_string(info->renderer, sizeof(info->renderer),
+                                "OpenGL via virtio-gpu virgl");
+        return;
+    }
+
+    if (hyperv_dxg_get_status(&dxg) == 0 &&
+        (dxg.global_present || dxg.vgpu_present)) {
+        info->backend = FB_GPU_BACKEND_HYPERV_DXG;
+        if (dxg.global_open_ok && dxg.vgpu_open_ok)
+            info->flags |= FB_GPU_BACKEND_F_DXG_TRANSPORT;
+        info->dxg_global_open = dxg.global_open_ok != 0;
+        info->dxg_vgpu_open = dxg.vgpu_open_ok != 0;
+        info->dxg_d3dkmt = hyperv_dxg_d3dkmt_ready() != 0;
+        if (info->dxg_d3dkmt)
+            info->flags |= FB_GPU_BACKEND_F_D3DKMT;
+        info->dxg_global_status = dxg.global_open_status;
+        info->dxg_vgpu_status = dxg.vgpu_open_status;
+        info->dxg_global_rx = dxg.global_rx_packets;
+        info->dxg_vgpu_rx = dxg.vgpu_rx_packets;
+        gpu_backend_copy_string(info->name, sizeof(info->name),
+                                "hyperv-dxg");
+        gpu_backend_copy_string(info->renderer, sizeof(info->renderer),
+                                info->dxg_d3dkmt ?
+                                "Hyper-V GPU-PV DXG/D3DKMT adapter bridge" :
+                                "Hyper-V GPU-PV DXG transport; D3DKMT pending");
+    }
+}
+
+static int gpu_backend_query(uint64 arg)
+{
+    struct fb_gpu_backend_info info;
+
+    gpu_backend_fill(&info);
+    if (either_copyout(1, arg, &info, sizeof(info)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
 static int gpu_owner_create_context(struct fb_gpu_render_owner *owner,
                                     const char *name, uint32 capset_id)
 {
@@ -2935,25 +3303,24 @@ static int gpu_owner_ensure_context(struct fb_gpu_render_owner *owner)
 static int gpu_drm_version(uint64 arg)
 {
     struct drm_version_compat req;
-    int has_virgl;
+    struct fb_gpu_backend_info backend;
     int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
-    has_virgl = virtio_gpu_has_virgl();
+    gpu_backend_fill(&backend);
     req.version_major = 0;
     req.version_minor = 1;
     req.version_patchlevel = 0;
     ret = gpu_copyout_string(req.name, &req.name_len,
-                             has_virgl ? "virtio_gpu" : "xv6_gpu");
+                             backend.backend == FB_GPU_BACKEND_VIRGL ?
+                                 "virtio_gpu" : "xv6_gpu");
     if (ret != 0)
         return ret;
     ret = gpu_copyout_string(req.date, &req.date_len, "20260502");
     if (ret != 0)
         return ret;
-    ret = gpu_copyout_string(req.desc, &req.desc_len,
-                             has_virgl ? "xv6 virtio-gpu virgl render node" :
-                                         "xv6 dumb-buffer render node");
+    ret = gpu_copyout_string(req.desc, &req.desc_len, backend.renderer);
     if (ret != 0)
         return ret;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
@@ -2964,11 +3331,14 @@ static int gpu_drm_version(uint64 arg)
 static int gpu_drm_get_unique(uint64 arg)
 {
     struct drm_unique_compat req;
+    struct fb_gpu_backend_info backend;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
+    gpu_backend_fill(&backend);
     if (gpu_copyout_string(req.unique, &req.unique_len,
-                           "pci:0000:00:04.0") != 0)
+                           backend.backend == FB_GPU_BACKEND_HYPERV_DXG ?
+                               "vmbus:hyperv-dxg" : "pci:0000:00:04.0") != 0)
         return -EFAULT;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
@@ -3815,6 +4185,8 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case FB_GPU_VIRGL_RESOURCE_EXPORT_FD:
     case FB_GPU_VIRGL_TRANSFER_TO_HOST:
     case FB_GPU_VIRGL_TRANSFER_FROM_HOST:
+    case FB_GPU_DISPLAY_PROBE:
+    case FB_GPU_BACKEND_QUERY:
         break;
     default:
         ret = gpu_drm_ioctl(owner, cmd, (uint64)arg);
@@ -4016,7 +4388,7 @@ int fb_init_virtio_gpu_scanout(uint32 width, uint32 height)
         return -EINVAL;
 
     spin_lock(&fb_state.lock);
-    if (fb_state.detected) {
+    if (fb_state.detected && !fb_state.firmware_backed) {
         spin_unlock(&fb_state.lock);
         return 0;
     }
@@ -4032,12 +4404,13 @@ int fb_init_virtio_gpu_scanout(uint32 width, uint32 height)
     memset(buf, 0, (size_t)size);
 
     spin_lock(&fb_state.lock);
-    if (fb_state.detected) {
+    if (fb_state.detected && !fb_state.firmware_backed) {
         spin_unlock(&fb_state.lock);
         kvfree(buf);
         return 0;
     }
     fb_state.virtio_backed = 1;
+    fb_state.firmware_backed = 0;
     fb_state.fb_phys = 0;
     fb_state.fb_virt = (volatile uint8 *)buf;
     fb_state.scanout_mappable = 0;
@@ -4077,15 +4450,17 @@ int fb_init_virtio_gpu_scanout_backing(uint32 width, uint32 height,
         return -EINVAL;
 
     spin_lock(&fb_state.lock);
-    if (fb_state.detected) {
+    if (fb_state.detected && !fb_state.firmware_backed) {
         spin_unlock(&fb_state.lock);
         return 0;
     }
 
     fb_state.virtio_backed = 1;
+    fb_state.firmware_backed = 0;
     fb_state.fb_phys = 0;
     fb_state.fb_virt = (volatile uint8 *)backing;
-    fb_state.scanout_mappable = 1;
+    fb_state.scanout_mappable =
+        fb_kernel_range_has_pages((uint64)(uintptr_t)backing, size);
     fb_state.xres = width;
     fb_state.yres = height;
     fb_state.bpp = 32;
@@ -4106,30 +4481,150 @@ int fb_init_virtio_gpu_scanout_backing(uint32 width, uint32 height,
     return 0;
 }
 
-int fb_gpu_register_virgl_render_node(void)
+int fb_replace_virtio_gpu_scanout_backing(uint32 width, uint32 height,
+                                          void *backing, uint32 backing_size,
+                                          uint32 pitch)
+{
+    uint64 size;
+
+    if (width < 640 || width > 2560 || height < 400 || height > 1600 ||
+        backing == NULL || pitch < width * 4 || (pitch & 3) != 0)
+        return -EINVAL;
+
+    size = (uint64)pitch * height;
+    if (size == 0 || size > backing_size || size > 64ULL * 1024 * 1024)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    if (!fb_state.detected || !fb_state.virtio_backed) {
+        spin_unlock(&fb_state.lock);
+        return -ENODEV;
+    }
+
+    fb_state.firmware_backed = 0;
+    fb_state.fb_phys = 0;
+    fb_state.fb_virt = (volatile uint8 *)backing;
+    fb_state.scanout_mappable =
+        fb_kernel_range_has_pages((uint64)(uintptr_t)backing, size);
+    fb_state.xres = width;
+    fb_state.yres = height;
+    fb_state.bpp = 32;
+    fb_state.pitch = pitch;
+    fb_state.fb_size = (uint32)size;
+    __sync_synchronize();
+    spin_unlock(&fb_state.lock);
+
+    printf("FB: updated /dev/fb0 (virtio-gpu direct %dx%dx32 pitch=%u)\n",
+           width, height, pitch);
+    return 0;
+}
+
+int fb_gpu_register_render_node(void)
 {
     int ret;
+    struct fb_gpu_backend_info backend;
 
     ret = gpu_register_base_devices();
     if (ret != 0)
         return ret;
-
-    if (!virtio_gpu_has_virgl())
-        return gpu_render_cdev_registered ? 0 : -ENODEV;
 
     if (!gpu_render_cdev_registered) {
         ret = cdev_register(&gpu_render_cdev);
         if (ret != 0)
             return ret;
         gpu_render_cdev_registered = true;
-        printf("GPU: registered /dev/dri/renderD128 (DRM render facade)\n");
+        gpu_backend_fill(&backend);
+        printf("GPU: registered /dev/dri/renderD128 (%s render node: %s)\n",
+               backend.name, backend.renderer);
     }
 
     return 0;
 }
 
+static int fb_kernel_range_has_pages(uint64 base, uint64 size)
+{
+    uint64 end;
+
+    if (size == 0)
+        return 0;
+    end = base + size;
+    if (end < base)
+        return 0;
+    for (uint64 addr = base; addr < end; addr += PGSIZE) {
+        uint64 pa;
+
+        if (addr >= (uint64)PA2VA(KERNBASE) &&
+            addr < (uint64)PA2VA(PHYSTOP)) {
+            pa = VA2PA(addr);
+        } else if (kernel_vm != NULL && kernel_vm->pagetable != NULL) {
+            pte_t *pte = walk(kernel_vm->pagetable, addr, 0, NULL, NULL);
+
+            if (pte == NULL || !pte_present(pte))
+                return 0;
+            pa = pte_pa(pte) + (addr & (PGSIZE - 1));
+        } else {
+            return 0;
+        }
+        if (__pa_to_page(pa) == NULL)
+            return 0;
+    }
+    return 1;
+}
+
+static int fb_init_firmware_framebuffer(void)
+{
+    uint64 size;
+
+    if (!platform.has_framebuffer)
+        return -ENODEV;
+    if (platform.framebuffer_bpp != 32 ||
+        platform.framebuffer_width < 320 ||
+        platform.framebuffer_height < 200 ||
+        platform.framebuffer_pitch < platform.framebuffer_width * 4)
+        return -EINVAL;
+
+    size = (uint64)platform.framebuffer_pitch * platform.framebuffer_height;
+    if (size == 0 || size > platform.framebuffer_size ||
+        size > 0xffffffffULL)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    if (fb_state.detected) {
+        spin_unlock(&fb_state.lock);
+        return 0;
+    }
+
+    fb_state.virtio_backed = 0;
+    fb_state.firmware_backed = 1;
+    fb_state.fb_phys = platform.framebuffer_base;
+    fb_state.fb_virt = (volatile uint8 *)PA2VA(platform.framebuffer_base);
+    /*
+     * Firmware framebuffers, including Hyper-V synthvid, are often MMIO-like
+     * PFN ranges outside the managed page allocator.  They can still be mapped
+     * as PFNMAP VMAs; requiring struct page coverage rejects the fast scanout
+     * path before the mapper can do the right thing.
+     */
+    fb_state.scanout_mappable = fb_state.fb_phys != 0;
+    fb_state.xres = platform.framebuffer_width;
+    fb_state.yres = platform.framebuffer_height;
+    fb_state.bpp = platform.framebuffer_bpp;
+    fb_state.pitch = platform.framebuffer_pitch;
+    fb_state.fb_size = (uint32)size;
+    fb_paint_boot_logo();
+    fb_state.detected = 1;
+    spin_unlock(&fb_state.lock);
+
+    printf("FB: registered firmware framebuffer 0x%lx %ux%ux%u pitch=%u mappable=%d\n",
+           fb_state.fb_phys, fb_state.xres, fb_state.yres,
+           fb_state.bpp, fb_state.pitch, fb_state.scanout_mappable);
+    return 0;
+}
+
 void fbdevinit(void)
 {
+    if (!fb_state.detected)
+        fb_init_firmware_framebuffer();
+
     if (!fb_state.detected) {
         printf("FB: no Bochs VGA detected, skipping /dev/fb0\n");
     } else {
@@ -4142,11 +4637,11 @@ void fbdevinit(void)
                fb_state.xres, fb_state.yres, fb_state.bpp);
     }
 
-    int ret = fb_gpu_register_virgl_render_node();
-    if (ret != 0 && ret != -ENODEV)
+    int ret = fb_gpu_register_render_node();
+    if (ret != 0)
         assert(ret == 0, "fbdevinit: failed to register gpu devices: %d", ret);
     if (!virtio_gpu_has_virgl())
-        printf("GPU: no virgl render node advertised\n");
+        printf("GPU: virgl unavailable; exposing dumb-buffer DRM only\n");
 }
 
 /* ── Panic screen: BSOD-style framebuffer overlay ─────────────────── */
@@ -4363,7 +4858,7 @@ void fb_get_resolution(uint32 *xres, uint32 *yres)
 
 void fbdevinit(void) {}
 
-int fb_gpu_register_virgl_render_node(void) { return -ENODEV; }
+int fb_gpu_register_render_node(void) { return -ENODEV; }
 
 void fb_panic_screen(const char *text) { (void)text; }
 

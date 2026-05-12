@@ -20,4 +20,5 @@ add_library(dev OBJECT
     fb.c
     ps2mouse.c
     ps2kbd.c
+    hyperv_input.c
 )

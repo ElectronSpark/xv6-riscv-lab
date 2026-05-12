@@ -37,7 +37,21 @@ extern uint64 __physical_total_pages;
 
 #define TRAMPOLINE (MAXVA & ~(PGSIZE - 1))
 #define TRAMPOLINE_DATA (TRAMPOLINE - PGSIZE)
-#define TRAMPOLINE_CPULOCAL (TRAMPOLINE - (PGSIZE * 2))
+
+/*
+ * Shared high alias for cpus[].
+ *
+ * x86 keeps GS.base pointing at mycpu(), and that address must remain valid
+ * while running on either the kernel page table or a user page table.  Older
+ * code reserved a single page here and therefore silently capped the usable
+ * CPU count to however many struct cpu_local entries fit in 4 KiB.  Reserve a
+ * bounded multi-page window so Hyper-V/KVM guests can bring up all MAX_CPUS.
+ */
+#define TRAMPOLINE_CPULOCAL_PAGES 16
+#define TRAMPOLINE_CPULOCAL_BYTES (TRAMPOLINE_CPULOCAL_PAGES * PGSIZE)
+#define TRAMPOLINE_CPULOCAL_TOP (TRAMPOLINE_DATA - PGSIZE)
+#define TRAMPOLINE_CPULOCAL                                                \
+	(TRAMPOLINE_CPULOCAL_TOP - TRAMPOLINE_CPULOCAL_BYTES + PGSIZE)
 
 /*
  * Signal trampoline: mapped at PML4[510] so it has its own shared

@@ -67,6 +67,8 @@
 #define PTE_W (1ULL << 1)           /* Writable (R/W bit) */
 #define PTE_X 0                     /* No explicit exec bit; use NX to deny */
 #define PTE_U (1ULL << 2)           /* User accessible (U/S bit) */
+#define PTE_PWT (1ULL << 3)         /* Write-through cache policy */
+#define PTE_PCD (1ULL << 4)         /* Cache disabled, for MMIO/PFNMAP */
 #define PTE_G (1ULL << 8)           /* Global */
 #define PTE_A (1ULL << 5)           /* Accessed */
 #define PTE_D (1ULL << 6)           /* Dirty */

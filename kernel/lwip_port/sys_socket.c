@@ -2015,6 +2015,16 @@ uint64 sys_sconnect(void)
 
     uint32 ip4 = ip_addr_get_ip4_u32(&ipaddr);
 
+    /*
+     * For non-blocking TCP connects, mark the socket non-writable before
+     * asking lwIP to start the handshake.  Loopback/Hyper-V paths can complete
+     * quickly enough for NETCONN_EVT_SENDPLUS to fire before netconn_connect()
+     * returns; clearing sendevent after ERR_INPROGRESS would lose that wake and
+     * leave epoll users waiting forever for POLLOUT.
+     */
+    if (is_nb && sk->type == SOCK_STREAM)
+        sk->sendevent = 0;
+
     err_t err = netconn_connect(sk->conn, &ipaddr, ntohs(sa.sin_port));
 
 
@@ -2026,10 +2036,13 @@ uint64 sys_sconnect(void)
          * when the connection completes or fails. lwIP reports that transition
          * through SENDPLUS/ERROR callbacks, which restore sendevent.
          */
-        sk->sendevent = 0;
+        if (sk->conn->state == NETCONN_NONE)
+            sk->sendevent = 1;
         ACCT_INC(current->thread_group, net_connects);
         return (uint64)-EINPROGRESS;
     }
+    if (err == ERR_OK)
+        sk->sendevent = 1;
     if (err != ERR_OK)
         return (uint64)-lwip_err_to_errno(err);
 
@@ -3040,7 +3053,7 @@ static size_t unix_dequeue_scm_rights(struct unix_sock *peer,
             (peer->scm_queue[peer->scm_head].start_nread !=
              peer->scm_queue[peer->scm_head].end_nread &&
              (int)(peer->tx.nread -
-                   peer->scm_queue[peer->scm_head].start_nread) > 0))) {
+                   peer->scm_queue[peer->scm_head].end_nread) >= 0))) {
         files[count] = peer->scm_queue[peer->scm_head].file;
         peer->scm_queue[peer->scm_head].file = NULL;
         peer->scm_queue[peer->scm_head].start_nread = 0;

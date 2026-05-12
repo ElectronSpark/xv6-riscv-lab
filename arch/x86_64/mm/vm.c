@@ -179,10 +179,19 @@ static void kvm_build(void)
      * I/O APIC at 0xFEC00000, LAPIC at 0xFEE00000, HPET at 0xFED00000.
      * PCI device BARs typically assigned in 0xFEB00000-0xFEBFFFFF range.
      * Bochs VGA framebuffer typically at 0xFD000000 (16 MB window).
+     * OVMF/GRUB UEFI boots commonly place QEMU PCI BARs near 0x80000000
+     * when the guest only reports low memory through EFI handover params.
      * Use uncacheable semantics (PCD + no PTE_G) for device MMIO so that
      * writes go straight to hardware instead of being absorbed by CPU cache. */
     uint64 flags_mmio = X86_PTE_P | X86_PTE_W | X86_PTE_PCD;
+    kvm_map_2m_range(0x80000000ULL, 0x90000000ULL, flags_mmio);
     kvm_map_2m_range(0xFD000000ULL, 0xFF000000ULL, flags_mmio);
+    if (platform.has_framebuffer) {
+        kvm_map_2m_range(platform.framebuffer_base,
+                         platform.framebuffer_base +
+                         platform.framebuffer_size,
+                         flags_mmio);
+    }
 }
 
 /* CR3 requires a physical address; kpml4 is a higher-half VA. */
@@ -250,18 +259,22 @@ void arch_vm_init(void)
 
         uint64 cpus_base = PGROUNDDOWN((uint64)cpus);
         size_t cpus_bytes = sizeof(cpus[0]) * cpu_possible_count();
-        if (PGROUNDUP((uint64)cpus + cpus_bytes) - cpus_base > PGSIZE)
-            panic("arch_vm_init: cpus[] exceeds one page");
-        if (mappages((pagetable_t)kpml4, TRAMPOLINE_CPULOCAL, PGSIZE,
-                     VA2PA(cpus_base), PTE_R | PTE_W | PTE_G) != 0)
-            panic("arch_vm_init: cpu-local map failed");
+        size_t cpus_span = PGROUNDUP((uint64)cpus + cpus_bytes) - cpus_base;
+        if (cpus_span > TRAMPOLINE_CPULOCAL_BYTES)
+            panic("arch_vm_init: cpus[] exceeds cpu-local alias");
+        for (uint64 off = 0; off < cpus_span; off += PGSIZE) {
+            if (mappages((pagetable_t)kpml4, TRAMPOLINE_CPULOCAL + off,
+                         PGSIZE, VA2PA(cpus_base + off),
+                         PTE_R | PTE_W | PTE_G) != 0)
+                panic("arch_vm_init: cpu-local map failed");
+        }
 
-        /* Mark per-CPU data page as non-executable (defense in depth).
+        /* Mark per-CPU data pages as non-executable (defense in depth).
          * Must set NX directly on the PTE since mappages uses int perm. */
-        {
+        for (uint64 off = 0; off < cpus_span; off += PGSIZE) {
             pte_t *l2, *l1;
-            pte_t *pte = walk((pagetable_t)kpml4, TRAMPOLINE_CPULOCAL, 0,
-                              &l2, &l1);
+            pte_t *pte = walk((pagetable_t)kpml4,
+                              TRAMPOLINE_CPULOCAL + off, 0, &l2, &l1);
             if (pte && (*pte & PTE_V))
                 *pte |= PTE_NX;
         }

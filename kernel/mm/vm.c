@@ -324,6 +324,7 @@ static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
         (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
         (vma->flags & VMA_FLAG_FILE);
     int is_anon_vma = (vma->file == NULL);
+    int is_pfnmap = (vma->flags & VMA_FLAG_PFNMAP) != 0;
     int tlb_needs_flush = 0;
     uint64 pages_freed = 0;
     uint64 anon_pages = 0;
@@ -453,6 +454,9 @@ static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
             /* Write dirty pages back for MAP_SHARED file mappings. */
             if (shared_file_wb && was_dirty)
                 __vma_writeback_dirty_page(vma, a, pa);
+
+            if (is_pfnmap)
+                continue;
 
             /* Collect page for deferred release. */
             defer[ndefer].pa = pa;

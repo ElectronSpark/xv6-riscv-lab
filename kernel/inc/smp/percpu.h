@@ -6,6 +6,9 @@
 #include <smp/percpu_types.h>
 #include "printf.h"
 #include "bits.h"
+#if defined(__x86_64__) && !defined(ON_HOST_OS)
+#include "memlayout.h"
+#endif
 
 extern struct cpu_local cpus[];
 
@@ -97,16 +100,36 @@ extern struct cpu_local cpus[];
         }                                                                      \
     } while (0)
 
+static inline int cpuid_from_tp(uint64 tp)
+{
+    uint64 base = (uint64)cpus;
+    uint64 limit = base + sizeof(struct cpu_local) * MAX_CPUS;
+
+    if (tp >= base && tp < limit)
+        return (int)(((struct cpu_local *)tp) - cpus);
+
+#if defined(__x86_64__)
+    if (tp >= TRAMPOLINE_CPULOCAL &&
+        tp < TRAMPOLINE_CPULOCAL + TRAMPOLINE_CPULOCAL_BYTES) {
+        uint64 translated = base + (tp - TRAMPOLINE_CPULOCAL);
+        if (translated >= base && translated < limit)
+            return (int)(((struct cpu_local *)translated) - cpus);
+    }
+#endif
+
+    /*
+     * RISC-V and very early x86 boot historically derived the CPU id from the
+     * offset inside the low page.  Keep that fallback for firmware paths that
+     * have not switched to the full cpus[] address yet.
+     */
+    struct cpu_local *offset = (void *)(tp & PAGE_MASK);
+    return (int)(offset - (struct cpu_local *)0);
+}
+
 // Must be called with interrupts disabled,
 // to prevent race with thread being moved
 // to a different CPU.
-#define cpuid()                                                                \
-    ({                                                                         \
-        /* Calculate cpuid from offset within page */                          \
-        /* works for both physical and virtual addresses */                    \
-        struct cpu_local *offset = (void *)(r_tp() & PAGE_MASK);               \
-        offset - (struct cpu_local *)0;                                        \
-    })
+#define cpuid() cpuid_from_tp(r_tp())
 
 // Return the current struct thread *, or zero if none.
 #define __current_thread()                                                     \

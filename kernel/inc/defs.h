@@ -26,6 +26,22 @@ struct sock;
 struct fb_gpu_stats;
 struct fb_gpu_virgl_resource_create;
 struct fb_gpu_virgl_transfer;
+struct hyperv_dxg_status {
+    int global_present;
+    int vgpu_present;
+    int global_gpadl_ok;
+    int vgpu_gpadl_ok;
+    int global_open_ok;
+    int vgpu_open_ok;
+    uint32 global_relid;
+    uint32 vgpu_relid;
+    uint32 global_gpadl_status;
+    uint32 vgpu_gpadl_status;
+    uint32 global_open_status;
+    uint32 vgpu_open_status;
+    uint32 global_rx_packets;
+    uint32 vgpu_rx_packets;
+};
 typedef struct page_struct page_t;
 
 // start_kernel.c
@@ -55,6 +71,14 @@ void fbdevinit(void);
 void fb_gpu_destroy_owner(pid_t owner_tgid);
 void fb_gpu_destroy_render_owner(uint64 owner_id);
 void ps2mouse_init(void);
+void hyperv_input_init(void);
+void hyperv_input_intr(void);
+void hyperv_storvsc_init(void);
+void hyperv_netvsc_init(void);
+void hyperv_video_dirty(uint32 x, uint32 y, uint32 w, uint32 h);
+int hyperv_dxg_transport_ready(void);
+int hyperv_dxg_d3dkmt_ready(void);
+int hyperv_dxg_get_status(struct hyperv_dxg_status *status);
 void ps2kbd_init(void);
 void consoleintr(int);
 void consputc(int);
@@ -213,6 +237,10 @@ void virtio_gpu_init(void);
 void virtio_input_init(void);
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);
 int virtio_gpu_has_virgl(void);
+int virtio_gpu_probe_scanout(uint32 *width, uint32 *height);
+int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
+                               uint32 *refresh_millihz);
+int virtio_gpu_resize_scanout(uint32 width, uint32 height);
 void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
                                 uint32 x, uint32 y, uint32 w, uint32 h);
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,

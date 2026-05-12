@@ -143,6 +143,16 @@ static bool ts_is_zero(const struct k_timespec *ts)
 
 static void timerfd_timer_callback(struct timer_node *tn);
 
+static void timerfd_queue_notification_locked(struct timerfd_ctx *ctx,
+                                              bool *queue_deferred)
+{
+    ctx->notify_pending = true;
+    if (!ctx->work_pending) {
+        ctx->work_pending = true;
+        *queue_deferred = true;
+    }
+}
+
 /* ── workqueue callback: re-arm repeating timer ─────────────────────── */
 static void timerfd_rearm_work(struct work_struct *work)
 {
@@ -199,8 +209,12 @@ static void timerfd_rearm_work(struct work_struct *work)
             /* Remove the old timer node first (it may still be in the tree if
              * retry_limit > 1), then re-arm with a fresh node. */
             sched_timer_done(&ctx->timer);
-            sched_timer_set_cb(&ctx->timer, delay_ms ? delay_ms : 1,
-                               timerfd_timer_callback, ctx);
+            if (sched_timer_set_cb(&ctx->timer, delay_ms ? delay_ms : 1,
+                                   timerfd_timer_callback, ctx) < 0) {
+                spin_lock(&ctx->lock);
+                ctx->armed = false;
+                spin_unlock(&ctx->lock);
+            }
         }
 
         spin_lock(&ctx->lock);
@@ -238,11 +252,7 @@ static void timerfd_timer_callback(struct timer_node *tn)
         ctx->rearm_pending = true;
     }
     if (!ctx->cancelled) {
-        ctx->notify_pending = true;
-        if (!ctx->work_pending) {
-            ctx->work_pending = true;
-            queue_deferred = true;
-        }
+        timerfd_queue_notification_locked(ctx, &queue_deferred);
     }
 
     /* Wake readers */
@@ -252,11 +262,9 @@ static void timerfd_timer_callback(struct timer_node *tn)
     /* Defer kqueue notification and repeating timer re-arm out of timer
      * interrupt context.  kqueue locks may be held by the interrupted thread.
      */
-    if (queue_deferred && timerfd_wq) {
-        if (!queue_work(timerfd_wq, &ctx->rearm_work)) {
+    if (queue_deferred) {
+        if (timerfd_wq == NULL || !queue_work(timerfd_wq, &ctx->rearm_work)) {
             spin_lock(&ctx->lock);
-            ctx->notify_pending = false;
-            ctx->rearm_pending = false;
             ctx->work_pending = false;
             if (need_rearm)
                 ctx->armed = false;
@@ -460,6 +468,9 @@ uint64 sys_timerfd_settime(void)
         return (uint64)ret;
     }
 
+    bool notify_now = false;
+    bool queue_deferred = false;
+
     spin_lock(&ctx->lock);
 
     /* Return old value if requested */
@@ -506,10 +517,19 @@ uint64 sys_timerfd_settime(void)
 
         if (flags & TFD_TIMER_ABSTIME) {
             ctx->next_expiration_ns = value_ns;
-            if (value_ns > now_ns)
+            if (value_ns > now_ns) {
                 delay_ns = value_ns - now_ns;
-            else
+            } else {
                 delay_ns = 0;
+                uint64 count = 1;
+                if (interval_ns != 0)
+                    count += (now_ns - value_ns) / interval_ns;
+                ctx->expirations = count;
+                notify_now = true;
+                tq_wakeup_all(&ctx->rq, 0, 0);
+                if (interval_ns != 0)
+                    ctx->next_expiration_ns = value_ns + count * interval_ns;
+            }
         } else {
             if (UINT64_MAX - now_ns < value_ns) {
                 spin_unlock(&ctx->lock);
@@ -520,18 +540,47 @@ uint64 sys_timerfd_settime(void)
             delay_ns = value_ns;
         }
 
-        uint64 delay_ms = ns_to_ms_ceil(delay_ns);
-        if (delay_ms == 0)
-            delay_ms = 1; /* minimum 1ms to ensure timer fires */
+        if (notify_now)
+            timerfd_queue_notification_locked(ctx, &queue_deferred);
 
-        ctx->armed = true;
-        spin_unlock(&ctx->lock);
-        sched_timer_set_cb(&ctx->timer, delay_ms,
-                           timerfd_timer_callback, ctx);
-        spin_lock(&ctx->lock);
+        if (delay_ns != 0 || interval_ns != 0) {
+            if (interval_ns != 0 && delay_ns == 0) {
+                if (ctx->next_expiration_ns > now_ns)
+                    delay_ns = ctx->next_expiration_ns - now_ns;
+                else
+                    delay_ns = interval_ns;
+            }
+
+            uint64 delay_ms = ns_to_ms_ceil(delay_ns);
+            if (delay_ms == 0)
+                delay_ms = 1; /* minimum 1ms to ensure timer fires */
+
+            ctx->armed = true;
+            spin_unlock(&ctx->lock);
+            int timer_ret = sched_timer_set_cb(&ctx->timer, delay_ms,
+                                               timerfd_timer_callback, ctx);
+            spin_lock(&ctx->lock);
+            if (timer_ret < 0) {
+                ctx->armed = false;
+                spin_unlock(&ctx->lock);
+                vfs_fput(fp);
+                return (uint64)timer_ret;
+            }
+        } else {
+            ctx->armed = false;
+        }
     }
 
     spin_unlock(&ctx->lock);
+    if (queue_deferred) {
+        if (timerfd_wq == NULL || !queue_work(timerfd_wq, &ctx->rearm_work)) {
+            vfs_file_knote_notify(fp, EVFILT_READ, 0);
+            spin_lock(&ctx->lock);
+            ctx->notify_pending = false;
+            ctx->work_pending = false;
+            spin_unlock(&ctx->lock);
+        }
+    }
     vfs_fput(fp);
     return 0;
 }

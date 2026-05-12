@@ -59,7 +59,7 @@ uint64 sys_kevent_register(void) {
     struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, kqfd);
     if (f == NULL)
         return (uint64)-EBADF;
-    struct kqueue *kq = (struct kqueue *)f->private_data;
+    struct kqueue *kq = kqueue_from_file(f);
     if (kq == NULL) {
         vfs_fput(f);
         return (uint64)-EBADF;
@@ -120,7 +120,7 @@ uint64 sys_kevent_wait(void) {
     struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, kqfd);
     if (f == NULL)
         return (uint64)-EBADF;
-    struct kqueue *kq = (struct kqueue *)f->private_data;
+    struct kqueue *kq = kqueue_from_file(f);
     if (kq == NULL) {
         vfs_fput(f);
         return (uint64)-EBADF;

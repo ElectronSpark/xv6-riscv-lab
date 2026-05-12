@@ -1376,6 +1376,12 @@ void x86_trap_handler(struct trapframe *tf) {
         printf("[x86] LAPIC error: ESR=0x%x\n", lapic_read(LAPIC_ESR));
         lapic_eoi();
 
+    } else if (vec == 0xF1) {
+        /* Hyper-V SynIC message interrupt.  The handler is a no-op unless the
+         * Hyper-V input backend initialized successfully. */
+        hyperv_input_intr();
+        lapic_eoi();
+
     } else if (vec == LAPIC_SPURIOUS_VEC) {
         /* Spurious interrupt — do NOT send EOI */
     }

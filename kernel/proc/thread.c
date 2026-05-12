@@ -354,7 +354,7 @@ void idle_thread_init(void) {
     // Idle process is currently on CPU
     smp_store_release(&p->sched_entity->on_cpu, 1);
 
-    printf("CPU %ld idle process initialized at kstack 0x%lx\n", cpuid(),
+    printf("CPU %d idle process initialized at kstack 0x%lx\n", cpuid(),
            (uint64)kstack);
 }
 

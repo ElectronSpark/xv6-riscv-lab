@@ -147,10 +147,10 @@ struct {
 // user write()s to the console go here.
 //
 // When the TTY is active, output post-processing (OPOST/ONLCR) is
-// controlled by the TTY's termios flags.  Bytes are sent directly to
-// the UART via interrupt-driven uartputc — the same approach Linux
-// uses (user writes go straight to the driver, only echo goes through
-// the TTY output pipe / drain thread).
+// controlled by the TTY's termios flags.  On x86, keep user writes on the
+// synchronous COM path used by kernel printf(): Hyper-V named-pipe serial is
+// reliable for polling output but may not deliver TX-empty interrupts, and a
+// blocked stderr write can stop init/desktop before the framebuffer repaints.
 //
 int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
     int i;
@@ -186,6 +186,15 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
             outbuf[olen++] = kbuf[i];
         }
 
+#ifdef __x86_64__
+        for (i = 0; i < olen; i++) {
+            if (!uart_initialized)
+                early_console_putchar((unsigned char)outbuf[i]);
+            else
+                uartputc_sync((unsigned char)outbuf[i]);
+        }
+        written += batch_size;
+#else
         // Submit output, waiting interruptibly when the TX buffer is full
         int sent = 0;
         while (sent < olen) {
@@ -202,6 +211,7 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
             }
         }
         written += batch_size;
+#endif
     }
 
     return written;

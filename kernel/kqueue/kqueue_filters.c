@@ -63,9 +63,9 @@ static int knote_read_event(struct knote *kn, long hint) {
         assert(f->ref_count > 0,
                "knote_read_event: stale file %p (ref=%d, ops=%p, ident=%ld)",
                f, f->ref_count, f->ops, kn->ident);
-        int revents = f->ops->poll(f, POLLIN | POLLRDNORM | POLLRDBAND |
-                                       POLLRDHUP);
-        if (revents & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP |
+        int revents = f->ops->poll(f, POLLIN | POLLPRI | POLLRDNORM |
+                                       POLLRDBAND | POLLRDHUP);
+        if (revents & (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND | POLLRDHUP |
                        POLLHUP | POLLERR))
             return 1;
     }
@@ -73,9 +73,10 @@ static int knote_read_event(struct knote *kn, long hint) {
      * dispatch through the device's poll callback instead. */
     if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL &&
         f->cdev->ops.poll != NULL) {
-        int revents = f->cdev->ops.poll(f->cdev, POLLIN | POLLRDNORM |
-                                                 POLLRDBAND | POLLRDHUP);
-        if (revents & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP |
+        int revents = f->cdev->ops.poll(f->cdev, POLLIN | POLLPRI |
+                                                 POLLRDNORM | POLLRDBAND |
+                                                 POLLRDHUP);
+        if (revents & (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND | POLLRDHUP |
                        POLLHUP | POLLERR))
             return 1;
     }

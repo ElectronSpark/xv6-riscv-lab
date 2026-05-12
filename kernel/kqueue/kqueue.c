@@ -78,7 +78,7 @@ static int knote_file_poll_revents(struct knote *kn)
 
     struct vfs_file *f = kn->attached_file;
     short events = kn->filter == EVFILT_READ
-        ? (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP)
+        ? (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND | POLLRDHUP)
         : (POLLOUT | POLLWRNORM | POLLWRBAND);
     int revents = 0;
 
@@ -90,6 +90,25 @@ static int knote_file_poll_revents(struct knote *kn)
     } else if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL &&
                f->cdev->ops.poll != NULL) {
         revents = f->cdev->ops.poll(f->cdev, events);
+    }
+
+    if (kn->kq != NULL && (kn->kq->flags & KQ_EPOLL_COMPAT)) {
+        int always = revents & (POLLERR | POLLHUP | POLLNVAL);
+
+        if (kn->filter == EVFILT_READ) {
+            int requested = 0;
+            if (kn->sfflags & (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND))
+                requested |= revents & (POLLIN | POLLPRI | POLLRDNORM |
+                                        POLLRDBAND);
+            if (kn->sfflags & POLLRDHUP)
+                requested |= revents & POLLRDHUP;
+            revents = requested | always;
+        } else {
+            int requested = 0;
+            if (kn->sfflags & (POLLOUT | POLLWRNORM | POLLWRBAND))
+                requested |= revents & (POLLOUT | POLLWRNORM | POLLWRBAND);
+            revents = requested | always;
+        }
     }
 
     return revents;
@@ -212,6 +231,69 @@ struct kqueue *kqueue_alloc_private(void) {
     list_entry_init(&kq->registered);
     list_entry_init(&kq->ready);
     return kq;
+}
+
+struct kqueue *kqueue_from_file(struct vfs_file *file)
+{
+    if (file == NULL || file->ops != &kqueue_file_ops)
+        return NULL;
+    return (struct kqueue *)file->private_data;
+}
+
+int kqueue_file_is_epoll(struct vfs_file *file)
+{
+    struct kqueue *kq = kqueue_from_file(file);
+    return kq != NULL && (kq->flags & KQ_EPOLL_COMPAT);
+}
+
+int kqueue_epoll_contains_kqueue(struct kqueue *root, struct kqueue *needle,
+                                 int depth_limit)
+{
+    if (root == NULL || needle == NULL || depth_limit < 0)
+        return 0;
+
+    if (root == needle)
+        return 1;
+
+    struct vfs_file *children[16];
+    int nchildren = 0;
+
+    spin_lock(&root->lock);
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+    list_foreach_node_safe(&root->registered, kn, tmp, kq_entry) {
+        if (!knote_is_file_filter(kn) || kn->attached_file == NULL)
+            continue;
+
+        struct kqueue *child = kqueue_from_file(kn->attached_file);
+        if (child == NULL || !(child->flags & KQ_EPOLL_COMPAT))
+            continue;
+
+        if (child == needle) {
+            spin_unlock(&root->lock);
+            for (int i = 0; i < nchildren; i++)
+                vfs_fput(children[i]);
+            return 1;
+        }
+
+        if (depth_limit > 0 && nchildren < (int)(sizeof(children) /
+                                                 sizeof(children[0])))
+            children[nchildren++] = vfs_fdup(kn->attached_file);
+    }
+    spin_unlock(&root->lock);
+
+    for (int i = 0; i < nchildren; i++) {
+        struct kqueue *child = kqueue_from_file(children[i]);
+        if (child != NULL &&
+            kqueue_epoll_contains_kqueue(child, needle, depth_limit - 1)) {
+            for (int j = i; j < nchildren; j++)
+                vfs_fput(children[j]);
+            return 1;
+        }
+        vfs_fput(children[i]);
+    }
+
+    return 0;
 }
 
 /*
@@ -817,8 +899,14 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                 eventlist[total].flags |= EV_EOF;
             if (poll_revents & (POLLERR | POLLNVAL))
                 eventlist[total].flags |= EV_ERROR;
-            eventlist[total].fflags = kn->fflags;
-            eventlist[total].data = kn->data;
+            eventlist[total].fflags =
+                ((kq->flags & KQ_EPOLL_COMPAT) && knote_is_file_filter(kn))
+                    ? kn->sfflags
+                    : kn->fflags;
+            eventlist[total].data =
+                ((kq->flags & KQ_EPOLL_COMPAT) && knote_is_file_filter(kn))
+                    ? poll_revents
+                    : kn->data;
             eventlist[total].udata = kn->udata;
             total++;
 

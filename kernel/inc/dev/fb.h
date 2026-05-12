@@ -43,6 +43,23 @@
 #define FB_GPU_VIRGL_RESOURCE_EXPORT_FD 0x4628 /* export a virgl resource as a BO fd */
 #define FB_GPU_SCANOUT_MAP 0x4629   /* map scanout backing into caller */
 #define FB_GPU_SCANOUT_FLUSH 0x462A /* flush a dirty scanout rectangle */
+#define FB_GPU_DISPLAY_PROBE 0x462B /* query current, host, and EDID modes */
+#define FB_GPU_BACKEND_QUERY 0x462C /* query active render backend */
+
+#define FB_GPU_DISPLAY_F_HOST_SCANOUT 0x1 /* host/raw virtio scanout is valid */
+#define FB_GPU_DISPLAY_F_EDID         0x2 /* preferred_* came from EDID */
+#define FB_GPU_DISPLAY_F_HOST_SCALED  0x4 /* host/raw scanout looks scaled */
+
+#define FB_GPU_BACKEND_DUMB       0
+#define FB_GPU_BACKEND_VIRGL      1
+#define FB_GPU_BACKEND_HYPERV_DXG 2
+
+#define FB_GPU_BACKEND_F_RENDER_NODE    0x0001
+#define FB_GPU_BACKEND_F_DUMB_BO        0x0002
+#define FB_GPU_BACKEND_F_VIRGL_OPENGL   0x0004
+#define FB_GPU_BACKEND_F_DXG_TRANSPORT  0x0008
+#define FB_GPU_BACKEND_F_D3DKMT         0x0010
+#define FB_GPU_BACKEND_F_OPENGL_SUBMIT  0x0020
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
@@ -134,6 +151,38 @@ struct fb_gpu_scanout_flush {
     uint32   y;
     uint32   w;
     uint32   h;
+};
+
+struct fb_gpu_display_probe {
+    uint32   current_width;
+    uint32   current_height;
+    uint32   current_pitch;
+    uint32   host_width;
+    uint32   host_height;
+    uint32   flags;
+    uint32   current_refresh_millihz;
+    uint32   host_refresh_millihz;
+    uint32   preferred_width;
+    uint32   preferred_height;
+    uint32   preferred_refresh_millihz;
+    uint32   reserved;
+};
+
+struct fb_gpu_backend_info {
+    uint32 backend;          /* FB_GPU_BACKEND_* */
+    uint32 flags;            /* FB_GPU_BACKEND_F_* */
+    uint32 capset_id;        /* virgl capset id, if any */
+    uint32 capset_version;   /* virgl capset version, if any */
+    uint32 capset_size;      /* virgl capset payload bytes, if any */
+    uint32 dxg_global_open;  /* Hyper-V DXG global channel open */
+    uint32 dxg_vgpu_open;    /* Hyper-V DXG vGPU channel open */
+    uint32 dxg_d3dkmt;       /* D3DKMT ioctl layer available */
+    uint32 dxg_global_status;
+    uint32 dxg_vgpu_status;
+    uint32 dxg_global_rx;
+    uint32 dxg_vgpu_rx;
+    char   name[32];
+    char   renderer[64];
 };
 
 struct fb_gpu_bo_destroy {
@@ -351,6 +400,13 @@ struct fb_gpu_stats {
     uint64 virtio_last_fence;  /* last completed virtio-gpu fence id */
     uint64 virtio_irq_completions; /* queue completions observed by IRQ */
     uint64 virtio_poll_fallbacks;  /* queue waits that fell back to polling */
+    uint64 gpu_backend;       /* FB_GPU_BACKEND_* currently selected */
+    uint64 gpu_backend_flags; /* FB_GPU_BACKEND_F_* currently selected */
+    uint64 dxg_global_open;   /* Hyper-V DXG global transport opened */
+    uint64 dxg_vgpu_open;     /* Hyper-V DXG vGPU transport opened */
+    uint64 dxg_d3dkmt;        /* nonzero when D3DKMT ioctls are implemented */
+    uint64 dxg_global_rx;     /* packets drained from global DXG channel */
+    uint64 dxg_vgpu_rx;       /* packets drained from vGPU DXG channel */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */
@@ -393,11 +449,14 @@ struct fb_gpu_stats {
 
 /* Kernel API */
 void fbdevinit(void);
-int  fb_gpu_register_virgl_render_node(void);
+int  fb_gpu_register_render_node(void);
 int  fb_init_virtio_gpu_scanout(uint32 width, uint32 height);
 int  fb_init_virtio_gpu_scanout_backing(uint32 width, uint32 height,
                                         void *backing, uint32 backing_size,
                                         uint32 pitch);
+int  fb_replace_virtio_gpu_scanout_backing(uint32 width, uint32 height,
+                                           void *backing, uint32 backing_size,
+                                           uint32 pitch);
 int  fb_detected(void);
 void fb_pci_init(uint8 bus, uint8 dev, uint8 func);
 void fb_get_resolution(uint32 *xres, uint32 *yres);

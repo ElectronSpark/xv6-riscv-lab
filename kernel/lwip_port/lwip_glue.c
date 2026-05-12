@@ -279,24 +279,12 @@ static void __netdev_link_change(struct netdev *dev, int link_up)
 static volatile int __netconf_ready = 0;     /* set to 1 when config arrives */
 static struct netconf_req __netconf_req;      /* filled by config path       */
 static volatile int __lwip_initialized = 0;   /* set after kthread setup     */
+static volatile int __lwip_unavailable = 0;   /* no supported NIC present    */
 
 /* Interval for polling __netconf_ready (ms) */
 #define NETCONF_POLL_INTERVAL_MS  100
 #define NETCONF_APPLY_TIMEOUT_MS  35000
-
-static int __netconf_wait_boot_ready(void)
-{
-    int elapsed = 0;
-
-    while (!__atomic_load_n(&__lwip_initialized, __ATOMIC_ACQUIRE)) {
-        if (elapsed >= NETCONF_APPLY_TIMEOUT_MS)
-            return -ETIMEDOUT;
-        sleep_ms(NETCONF_POLL_INTERVAL_MS);
-        elapsed += NETCONF_POLL_INTERVAL_MS;
-    }
-
-    return 0;
-}
+#define NETDEV_PROBE_GRACE_MS     2000
 
 static int __netconf_wait_runtime_ready(int dhcp)
 {
@@ -333,6 +321,9 @@ static int __apply_netconf(struct netconf_req *req)
     if (req->mode != NETCONF_MODE_DHCP && req->mode != NETCONF_MODE_STATIC)
         return -EINVAL;
     req->hostname[NETCONF_HOSTNAME_MAX - 1] = '\0';
+
+    if (__atomic_load_n(&__lwip_unavailable, __ATOMIC_ACQUIRE))
+        return -ENODEV;
 
     /* Runtime reconfiguration (after kthread has finished boot setup) */
     if (__atomic_load_n(&__lwip_initialized, __ATOMIC_ACQUIRE)) {
@@ -382,11 +373,16 @@ static int __apply_netconf(struct netconf_req *req)
         return 0;
     }
 
-    /* Boot-time: store and signal the lwIP kthread */
+    /*
+     * Boot-time: store and signal the lwIP kthread, but do not wait here.
+     * init writes /dev/netconf before it launches the desktop; blocking this
+     * cdev write can leave framebuffer-only hypervisors stuck on the boot
+     * logo when no supported NIC is present.
+     */
     __netconf_req = *req;
     __atomic_store_n(&__netconf_ready, 1, __ATOMIC_RELEASE);
 
-    return __netconf_wait_boot_ready();
+    return 0;
 }
 
 /* Syscall argument helpers (defined in arch/.../irq/syscall.c) */
@@ -426,6 +422,8 @@ static int netconf_cdev_release(cdev_t *cdev) { (void)cdev; return 0; }
  */
 static int __get_active_netconf(struct netconf_req *out)
 {
+    if (__atomic_load_n(&__lwip_unavailable, __ATOMIC_ACQUIRE))
+        return -ENODEV;
     if (!__atomic_load_n(&__lwip_initialized, __ATOMIC_ACQUIRE))
         return -EAGAIN;
 
@@ -638,8 +636,16 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
 
     /* ---- Wait for a NIC to be registered ---- */
     printf("lwip: waiting for network device...\n");
+    int netdev_wait_ms = 0;
     while (netdev_get_default() == NULL) {
+        if (netdev_wait_ms >= NETDEV_PROBE_GRACE_MS) {
+            printf("lwip: no supported network device; network disabled\n");
+            __atomic_store_n(&__lwip_unavailable, 1, __ATOMIC_RELEASE);
+            __atomic_store_n(&__lwip_initialized, 1, __ATOMIC_RELEASE);
+            return;
+        }
         sleep_ms(100);
+        netdev_wait_ms += 100;
     }
     printf("lwip: network device detected\n");
 

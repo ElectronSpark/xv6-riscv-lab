@@ -413,6 +413,26 @@ static struct vfs_file *__vfs_fdfree(int fd) {
     return vfs_fdtable_dealloc_fd(p->fdtable, fd);
 }
 
+static void __vfs_finish_close_file(struct vfs_file *f)
+{
+    if (f == NULL)
+        return;
+
+    /*
+     * Keep internal close paths in step with close(2): AF_UNIX peers need
+     * hangup/read-EOF publication before the descriptor disappears from
+     * Linux-style bulk close helpers such as close_range().
+     */
+    if (f->ops == &unix_socket_file_ops && f->ops->release != NULL &&
+        f->private_data != NULL &&
+        __atomic_load_n(&f->ref_count, __ATOMIC_ACQUIRE) == 1) {
+        f->ops->release(vfs_inode_deref(&f->inode), f);
+    }
+
+    vfs_file_lock_release(f, current->tgid);
+    __vfs_fput_call_rcu(f);
+}
+
 /**
  * __vfs_close_fd - Close a file descriptor internally (for kernel use)
  * @fd: The file descriptor to close
@@ -425,8 +445,7 @@ static void __attribute__((unused)) __vfs_close_fd(int fd) {
     struct vfs_file *f = __vfs_fdfree(fd);
     spin_unlock(&current->fdtable->lock);
     if (f != NULL) {
-        vfs_file_lock_release(f, current->tgid);
-        __vfs_fput_call_rcu(f);
+        __vfs_finish_close_file(f);
     }
 }
 
@@ -597,26 +616,7 @@ uint64 sys_vfs_close(void) {
     }
     spin_unlock(&current->fdtable->lock);
 
-    /*
-     * close(2) must publish AF_UNIX hangup/read-EOF semantics before it
-     * returns when this descriptor owns the final reference.  The final
-     * vfs_fput is RCU-deferred so concurrent fdtable readers cannot observe
-     * freed file memory; without this early release, socketpair peers can miss
-     * an immediate poll(POLLHUP/POLLIN) after close.
-     *
-     * Do not run release early while extra references exist, notably
-     * SCM_RIGHTS in-flight descriptors.  In that case close only drops this
-     * fd's reference and the socket must stay usable for the eventual
-     * receiver-installed descriptor.
-     */
-    if (f->ops == &unix_socket_file_ops && f->ops->release != NULL &&
-        f->private_data != NULL &&
-        __atomic_load_n(&f->ref_count, __ATOMIC_ACQUIRE) == 1) {
-        f->ops->release(vfs_inode_deref(&f->inode), f);
-    }
-
-    vfs_file_lock_release(f, current->tgid);
-    __vfs_fput_call_rcu(f);
+    __vfs_finish_close_file(f);
     ACCT_INC(current->thread_group, fs_closes);
     return 0;
 }
@@ -4317,7 +4317,10 @@ uint64 sys_vfs_close_range(void) {
     argint(1, (int *)&last);
     argint(2, &flags);
 
-    if (flags != 0)
+    const int CLOSE_RANGE_UNSHARE = 1 << 1;
+    const int CLOSE_RANGE_CLOEXEC = 1 << 2;
+
+    if (flags & ~(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC))
         return (uint64)-EINVAL;
     if (first > last)
         return (uint64)-EINVAL;
@@ -4325,6 +4328,24 @@ uint64 sys_vfs_close_range(void) {
         return 0;
     if (last >= NOFILE)
         last = NOFILE - 1;
+
+    if (flags & CLOSE_RANGE_UNSHARE) {
+        struct vfs_fdtable *old = current->fdtable;
+        struct vfs_fdtable *new = vfs_fdtable_clone(old, 0);
+        if (IS_ERR_OR_NULL(new))
+            return IS_ERR(new) ? (uint64)PTR_ERR(new) : (uint64)-ENOMEM;
+        current->fdtable = new;
+        vfs_fdtable_put(old);
+    }
+
+    if (flags & CLOSE_RANGE_CLOEXEC) {
+        spin_lock(&current->fdtable->lock);
+        for (uint fd = first; fd <= last; fd++)
+            (void)vfs_fdtable_set_fdflags(current->fdtable, (int)fd,
+                                          FD_CLOEXEC);
+        spin_unlock(&current->fdtable->lock);
+        return 0;
+    }
 
     for (uint fd = first; fd <= last; fd++)
         __vfs_close_fd((int)fd);

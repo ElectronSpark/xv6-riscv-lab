@@ -22,6 +22,7 @@ __attribute__((aligned(4096))) struct cpu_local cpus[MAX_CPUS] = {0};
 
 static cpumask_t cpu_active_mask = 0;
 uint64 __x86_tp = 0;
+extern int x86_cpu_apic_id(int cpu);
 
 /** @brief Per-CPU pending IPI bitmask (indexed by CPU id). */
 static volatile uint64 *ipi_pending;
@@ -43,6 +44,8 @@ static inline void lapic_icr_wait(void) {
 
 /* ── Internal: fire IPI to a single LAPIC ── */
 static void lapic_send_ipi_single(int dest_apicid) {
+    if (dest_apicid < 0 || dest_apicid > 255)
+        return;
     lapic_icr_wait();
     lapic_write(LAPIC_ICR_HI, (uint32)dest_apicid << 24);
     lapic_write(LAPIC_ICR_LO,
@@ -162,11 +165,7 @@ int ipi_send_single(int hartid, int reason) {
 
     __atomic_fetch_or(&ipi_pending[hartid], 1ULL << reason, __ATOMIC_RELEASE);
 
-    /*
-     * On QEMU with default -cpu qemu64, APIC IDs equal CPU indices.
-     * For real hardware a cpu-to-apicid table would be needed.
-     */
-    lapic_send_ipi_single(hartid);
+    lapic_send_ipi_single(x86_cpu_apic_id(hartid));
     return 0;
 }
 
@@ -189,7 +188,7 @@ int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base,
         if (hart_mask & (1UL << i)) {
             int cpu = i + (int)hart_mask_base;
             if (cpu >= 0 && cpu < ncpu)
-                lapic_send_ipi_single(cpu);
+                lapic_send_ipi_single(x86_cpu_apic_id(cpu));
         }
     }
     return 0;
@@ -204,7 +203,7 @@ int ipi_send_all_but_self(int reason) {
         if (i != self) {
             __atomic_fetch_or(&ipi_pending[i], 1ULL << reason,
                               __ATOMIC_RELEASE);
-            lapic_send_ipi_single(i);
+            lapic_send_ipi_single(x86_cpu_apic_id(i));
         }
     }
     return 0;
@@ -216,7 +215,7 @@ int ipi_send_all(int reason) {
 
     for (int i = 0; i < cpu_possible_count(); i++) {
         __atomic_fetch_or(&ipi_pending[i], 1ULL << reason, __ATOMIC_RELEASE);
-        lapic_send_ipi_single(i);
+        lapic_send_ipi_single(x86_cpu_apic_id(i));
     }
     return 0;
 }

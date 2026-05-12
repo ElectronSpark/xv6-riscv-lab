@@ -326,6 +326,29 @@ static void pci_note_virtio_net(uint8 bus, uint8 dev, uint8 func)
            vd->isr_cfg_cap, vd->device_cfg_cap);
 }
 
+    static void pci_note_hyperv_dxg(uint8 bus, uint8 dev, uint8 func,
+                        uint16 device)
+    {
+        uint16 cmd = pci_config_read16(bus, dev, func, 0x04);
+        cmd |= PCIE_CSCMD_MAE | PCIE_CSCMD_BME;
+        pci_config_write16(bus, dev, func, 0x04, cmd);
+
+        uint32 guid0 = pci_config_read32(bus, dev, func, 192);
+        uint32 guid1 = pci_config_read32(bus, dev, func, 196);
+        uint32 guid2 = pci_config_read32(bus, dev, func, 200);
+        uint32 guid3 = pci_config_read32(bus, dev, func, 204);
+        uint32 vmbus_version = pci_config_read32(bus, dev, func, 208);
+        uint32 luid0 = pci_config_read32(bus, dev, func, 212);
+        uint32 luid1 = pci_config_read32(bus, dev, func, 216);
+
+        printf("PCI: Hyper-V GPU-PV %s detected at %d:%d:%d\n",
+            device == PCI_DEVICE_MS_COMPUTE_ACCELERATOR ?
+            "compute accelerator" : "virtual render", bus, dev, func);
+        printf("PCI: Hyper-V GPU-PV channel-guid=%lx-%lx-%lx-%lx version=%u host-luid=%lx:%lx\n",
+            (uint64)guid0, (uint64)guid1, (uint64)guid2, (uint64)guid3,
+            vmbus_version, (uint64)luid0, (uint64)luid1);
+    }
+
 void pci_init(void)
 {
     piix3_init_irq_routing();
@@ -361,6 +384,10 @@ void pci_init(void)
                    (device == PCI_DEVICE_VIRTIO_NET_TRANSITIONAL ||
                     device == PCI_DEVICE_VIRTIO_NET_MODERN)) {
             pci_note_virtio_net(0, dev, 0);
+        } else if (vendor == PCI_VENDOR_MICROSOFT &&
+               (device == PCI_DEVICE_MS_VIRTUAL_RENDER ||
+                device == PCI_DEVICE_MS_COMPUTE_ACCELERATOR)) {
+            pci_note_hyperv_dxg(0, dev, 0, device);
         } else if (vendor == PCI_VENDOR_BOCHS &&
                    device == PCI_DEVICE_BOCHS_VGA) {
             fb_pci_init(0, dev, 0);

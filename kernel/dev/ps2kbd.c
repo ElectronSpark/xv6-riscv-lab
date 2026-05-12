@@ -38,6 +38,19 @@ static inline uint8 kbd_inb(uint16 port)
     return val;
 }
 
+static int ps2_controller_present(void)
+{
+    uint8 status = kbd_inb(PS2_STATUS_PORT);
+    uint8 data = kbd_inb(PS2_DATA_PORT);
+
+    /*
+     * Hyper-V Gen2 does not expose an i8042 controller.  Reads from the
+     * legacy PS/2 ports return 0xff, which would otherwise make the flush loop
+     * below spin forever because the output-buffer bit is permanently set.
+     */
+    return !(status == 0xff && data == 0xff);
+}
+
 /* ── Scan code set 1 → ASCII tables ─────────────────────────────── */
 
 /* Unshifted ASCII for scan codes 0x00–0x58 */
@@ -332,6 +345,14 @@ void ps2kbd_init(void)
     kbd_state.ctrl = kbd_state.alt = 0;
     kbd_state.extended = 0;
 
+    int ret = cdev_register(&kbd_cdev);
+    assert(ret == 0, "ps2kbd_init: cdev_register failed: %d", ret);
+
+    if (!ps2_controller_present()) {
+        printf("PS2 keyboard: i8042 controller not present; /dev/kbd is synthetic-only\n");
+        return;
+    }
+
     /* Enable keyboard port (port 1) — read config, set bit 0 for IRQ1 */
     kbd_outb(PS2_CMD_PORT, 0x20);  /* read config */
     for (int i = 0; i < 100000; i++)
@@ -347,7 +368,7 @@ void ps2kbd_init(void)
     kbd_outb(PS2_DATA_PORT, config);
 
     /* Flush any pending data */
-    while (kbd_inb(PS2_STATUS_PORT) & 0x01)
+    for (int i = 0; i < 256 && (kbd_inb(PS2_STATUS_PORT) & 0x01); i++)
         (void)kbd_inb(PS2_DATA_PORT);
 
     /* Set PS/2 typematic to slowest rate (1000 ms delay, 2 cps).
@@ -373,7 +394,7 @@ void ps2kbd_init(void)
         .dev = &kbd_cdev.dev,
     };
 
-    int ret = register_irq_handler(PLIC_IRQ(KBD_IRQ), &kbd_irq_desc);
+    ret = register_irq_handler(PLIC_IRQ(KBD_IRQ), &kbd_irq_desc);
     if (ret != 0) {
         printf("PS2 kbd: failed to register IRQ handler: %d\n", ret);
         return;
@@ -382,10 +403,6 @@ void ps2kbd_init(void)
     /* Enable IRQ 1 in the I/O APIC */
     extern void plic_enable_irq(int irq);
     plic_enable_irq(KBD_IRQ);
-
-    /* Register character device */
-    ret = cdev_register(&kbd_cdev);
-    assert(ret == 0, "ps2kbd_init: cdev_register failed: %d", ret);
 
     printf("PS2 keyboard: /dev/kbd registered (IRQ %d)\n", KBD_IRQ);
 }

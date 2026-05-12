@@ -121,6 +121,11 @@ void platform_boot_mark(const char *msg)
     (void)msg;
 }
 
+void platform_visual_checkpoint(uint32 color)
+{
+    (void)color;
+}
+
 /**
  * Attempt power-off via the SPM8821 PMIC over I2C (reg 0x7e bit 2).
  * Returns 0 on success (caller should WFI-loop), -1 if unavailable.

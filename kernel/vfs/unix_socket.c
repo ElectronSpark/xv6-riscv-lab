@@ -1029,7 +1029,7 @@ static int unix_file_poll(struct vfs_file *file, short events)
                     uint nread = peer->tx.nread;
                     scm_ready =
                         (start == end && (int)(nread - start) >= 0) ||
-                        (start != end && (int)(nread - start) >= 0);
+                        (start != end && (int)(nread - end) >= 0);
                 }
                 bool peer_wr_shutdown =
                     (peer->shutdown_flags & UNIX_SHUT_WR) != 0;

@@ -112,6 +112,10 @@ void kqueue_signal_notify(struct thread *p, int signo);
 int kqueue_create(void);
 struct kqueue *kqueue_alloc_private(void);
 void kqueue_close_private(struct kqueue *kq);
+struct kqueue *kqueue_from_file(struct vfs_file *file);
+int kqueue_file_is_epoll(struct vfs_file *file);
+int kqueue_epoll_contains_kqueue(struct kqueue *root, struct kqueue *needle,
+                                 int depth_limit);
 int kqueue_epoll_has_ident(struct kqueue *kq, uint64 ident);
 int kqueue_register(struct kqueue *kq, struct kevent *changelist, int nchanges);
 int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
