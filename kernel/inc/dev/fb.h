@@ -45,6 +45,7 @@
 #define FB_GPU_SCANOUT_FLUSH 0x462A /* flush a dirty scanout rectangle */
 #define FB_GPU_DISPLAY_PROBE 0x462B /* query current, host, and EDID modes */
 #define FB_GPU_BACKEND_QUERY 0x462C /* query active render backend */
+#define FB_GPU_DISPLAY_WAIT  0x462D /* query/wait display present completion */
 
 #define FB_GPU_DISPLAY_F_HOST_SCANOUT 0x1 /* host/raw virtio scanout is valid */
 #define FB_GPU_DISPLAY_F_EDID         0x2 /* preferred_* came from EDID */
@@ -65,7 +66,9 @@
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
 #define FB_GPU_FENCE_WAIT 0x1         /* wait for fence fd to signal */
 #define FB_GPU_VIRGL_FENCE_WAIT 0x1   /* wait_for must be signaled */
+#define FB_GPU_VIRGL_SUBMIT_ASYNC 0x1 /* return once the command is queued */
 #define FB_GPU_VIRGL_SUBMIT_FORCE_FAIL 0x80000000u /* test-only context fault */
+#define FB_GPU_DISPLAY_WAIT_F_WAIT 0x1 /* wait_for must be complete */
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -183,6 +186,14 @@ struct fb_gpu_backend_info {
     uint32 dxg_vgpu_rx;
     char   name[32];
     char   renderer[64];
+};
+
+struct fb_gpu_display_wait {
+    uint32   flags;          /* FB_GPU_DISPLAY_WAIT_F_* */
+    uint32   refresh_millihz; /* current display refresh estimate */
+    uint64   wait_for;       /* 0 means query only */
+    uint64   presented;      /* latest issued display-present sequence */
+    uint64   completed;      /* latest completed display-present sequence */
 };
 
 struct fb_gpu_bo_destroy {
@@ -407,6 +418,10 @@ struct fb_gpu_stats {
     uint64 dxg_d3dkmt;        /* nonzero when D3DKMT ioctls are implemented */
     uint64 dxg_global_rx;     /* packets drained from global DXG channel */
     uint64 dxg_vgpu_rx;       /* packets drained from vGPU DXG channel */
+    uint64 display_presents;  /* display present/flush operations issued */
+    uint64 display_completions; /* display present completions observed */
+    uint64 display_last_present; /* latest issued display-present sequence */
+    uint64 display_last_complete; /* latest completed display-present sequence */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

@@ -516,6 +516,7 @@ static struct {
 static int fb_kernel_range_has_pages(uint64 base, uint64 size);
 static void gpu_backend_fill(struct fb_gpu_backend_info *info);
 static int gpu_backend_query(uint64 arg);
+static uint64 fb_note_display_complete_locked(void);
 
 static uint32 fb_pack_rgb(uint8 r, uint8 g, uint8 b)
 {
@@ -750,6 +751,7 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
     case FB_GPU_SCANOUT_FLUSH: return "FB_GPU_SCANOUT_FLUSH";
     case FB_GPU_DISPLAY_PROBE: return "FB_GPU_DISPLAY_PROBE";
     case FB_GPU_BACKEND_QUERY: return "FB_GPU_BACKEND_QUERY";
+    case FB_GPU_DISPLAY_WAIT: return "FB_GPU_DISPLAY_WAIT";
     case DRM_IOCTL_VERSION: return "DRM_IOCTL_VERSION";
     case DRM_IOCTL_GET_UNIQUE: return "DRM_IOCTL_GET_UNIQUE";
     case DRM_IOCTL_GET_MAGIC: return "DRM_IOCTL_GET_MAGIC";
@@ -872,6 +874,9 @@ static int fb_blit_from_user(struct fb_gpu_blit cmd, int count_present)
         virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
                                    cmd.x, cmd.y, cw, ch);
     hyperv_video_dirty(cmd.x, cmd.y, cw, ch);
+    spin_lock(&fb_state.lock);
+    fb_note_display_complete_locked();
+    spin_unlock(&fb_state.lock);
     return 0;
 }
 
@@ -885,6 +890,18 @@ static uint64 fb_bo_signal_present_locked(struct fb_gpu_bo_entry *bo)
     bo->signaled_fence = fence;
     fb_state.stats.bo_fences++;
     return fence;
+}
+
+static uint64 fb_note_display_complete_locked(void)
+{
+    uint64 seq = ++fb_state.stats.display_last_present;
+
+    if (seq == 0)
+        seq = fb_state.stats.display_last_present = 1;
+    fb_state.stats.display_presents++;
+    fb_state.stats.display_last_complete = seq;
+    fb_state.stats.display_completions++;
+    return seq;
 }
 
 static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
@@ -995,6 +1012,7 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
                                    cmd.x, cmd.y, cw, ch);
     hyperv_video_dirty(cmd.x, cmd.y, cw, ch);
     spin_lock(&fb_state.lock);
+    fb_note_display_complete_locked();
     if (fence_out)
         *fence_out = fb_bo_signal_present_locked(bo);
     spin_unlock(&fb_state.lock);
@@ -1200,6 +1218,9 @@ static int fb_flush_scanout_rect(struct fb_gpu_scanout_flush req)
         virtio_gpu_present_fb_rect(fb_state.fb_virt, fb_state.pitch,
                                    req.x, req.y, w, h);
     hyperv_video_dirty(req.x, req.y, w, h);
+    spin_lock(&fb_state.lock);
+    fb_note_display_complete_locked();
+    spin_unlock(&fb_state.lock);
     return 0;
 }
 
@@ -2247,6 +2268,28 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         return 0;
     }
 
+    case FB_GPU_DISPLAY_WAIT: {
+        struct fb_gpu_display_wait req;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if ((req.flags & ~FB_GPU_DISPLAY_WAIT_F_WAIT) != 0)
+            return -EINVAL;
+
+        spin_lock(&fb_state.lock);
+        req.presented = fb_state.stats.display_last_present;
+        req.completed = fb_state.stats.display_last_complete;
+        spin_unlock(&fb_state.lock);
+        req.refresh_millihz = 60000;
+
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        if ((req.flags & FB_GPU_DISPLAY_WAIT_F_WAIT) &&
+            req.wait_for != 0 && req.completed < req.wait_for)
+            return -EAGAIN;
+        return 0;
+    }
+
     case FB_GPU_BO_DESTROY: {
         struct fb_gpu_bo_destroy req;
 
@@ -2571,7 +2614,8 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
-        if ((req.flags & ~FB_GPU_VIRGL_SUBMIT_FORCE_FAIL) != 0 ||
+        if ((req.flags & ~(FB_GPU_VIRGL_SUBMIT_ASYNC |
+                           FB_GPU_VIRGL_SUBMIT_FORCE_FAIL)) != 0 ||
             req.ctx_id == 0 || req.cmd == 0 ||
             req.cmd_size == 0 || req.cmd_size > PGSIZE * 64 ||
             (req.cmd_size & (sizeof(uint32) - 1)) != 0)

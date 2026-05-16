@@ -370,6 +370,22 @@ struct virtio_gpu_drm_capset {
     } u;
 };
 
+struct virtio_gpu_async_submit {
+    int pending;
+    uint32 ctx_id;
+    uint64 fence_id;
+    uint32 type;
+    uint32 expected;
+    uint32 data_order;
+    void *cmd;
+    uint32 cmd_len;
+    void *data;
+    uint32 data_len;
+    void *resp;
+    uint32 resp_len;
+    completion_t done;
+};
+
 struct virtio_gpu {
     int initialized;
     struct virtio_pci_state pci;
@@ -396,6 +412,7 @@ struct virtio_gpu {
     uint32 next_context_id;
     struct virtio_gpu_context contexts[VIRTIO_GPU_MAX_CONTEXTS];
     uint64 next_fence_id;
+    struct virtio_gpu_async_submit async_submit;
     void *cmd_page;
     void *resp_page;
     void *data_page;
@@ -522,6 +539,7 @@ static void virtio_gpu_count_command(struct virtio_gpu *g, uint32 type)
 }
 
 static void virtio_gpu_mark_all_contexts_failed_locked(struct virtio_gpu *g);
+static int virtio_gpu_drain_async_submit(struct virtio_gpu *g, int wait);
 
 static int virtio_gpu_complete_pending_locked(struct virtio_gpu_queue *q)
 {
@@ -615,6 +633,9 @@ static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
     uint32 type = ((struct virtio_gpu_ctrl_hdr *)cmd)->type;
     struct virtio_gpu_ctrl_hdr *resp_hdr = resp;
     completion_t done;
+
+    if (virtio_gpu_drain_async_submit(g, 1) != 0)
+        return -1;
 
     completion_init(&done);
     int intena = spin_lock_irqsave(&q->lock);
@@ -810,6 +831,91 @@ static void virtio_gpu_mark_all_contexts_failed_locked(struct virtio_gpu *g)
         g->stats.context_failed++;
         g->stats.context_failures++;
     }
+}
+
+static void virtio_gpu_async_submit_free(struct virtio_gpu_async_submit *a)
+{
+    if (a->cmd != NULL)
+        kfree(a->cmd);
+    if (a->resp != NULL)
+        kfree(a->resp);
+    if (a->data != NULL)
+        page_free(a->data, a->data_order);
+    memset(a, 0, sizeof(*a));
+}
+
+static int virtio_gpu_drain_async_submit(struct virtio_gpu *g, int wait)
+{
+    struct virtio_gpu_async_submit *a = &g->async_submit;
+    struct virtio_gpu_queue *q = &g->ctrlq;
+    struct virtio_gpu_ctrl_hdr *resp_hdr;
+    int intena;
+    int completed;
+
+    if (!a->pending)
+        return 0;
+
+    spin_lock(&q->lock);
+    completed = virtio_gpu_used_advanced(q);
+    spin_unlock(&q->lock);
+    if (!completed && !wait)
+        return 0;
+
+    if (!completed)
+        (void)virtio_gpu_wait_for_used(g, q, &a->done);
+
+    intena = spin_lock_irqsave(&q->lock);
+    if (q->used->idx == q->used_idx) {
+        q->pending_completion = NULL;
+        spin_unlock_irqrestore(&q->lock, intena);
+        virtio_gpu_count_timeout(g);
+        virtio_gpu_count_failure(g);
+        spin_lock(&g->lock);
+        virtio_gpu_mark_all_contexts_failed_locked(g);
+        spin_unlock(&g->lock);
+        printf("virtio_gpu: async command 0x%x timed out\n", a->type);
+        virtio_gpu_async_submit_free(a);
+        return -1;
+    }
+
+    q->used_idx = q->used->idx;
+    q->pending_completion = NULL;
+    spin_unlock_irqrestore(&q->lock, intena);
+
+    resp_hdr = (struct virtio_gpu_ctrl_hdr *)a->resp;
+    if (resp_hdr->type != a->expected) {
+        virtio_gpu_count_failure(g);
+        spin_lock(&g->lock);
+        virtio_gpu_mark_context_failed_locked(
+            g, virtio_gpu_lookup_context_locked(g, a->ctx_id));
+        spin_unlock(&g->lock);
+        printf("virtio_gpu: async command 0x%x response=0x%x expected=0x%x\n",
+               a->type, resp_hdr->type, a->expected);
+        virtio_gpu_async_submit_free(a);
+        return -1;
+    }
+
+    if (a->fence_id != 0) {
+        if (resp_hdr->fence_id != a->fence_id) {
+            virtio_gpu_count_failure(g);
+            spin_lock(&g->lock);
+            virtio_gpu_mark_context_failed_locked(
+                g, virtio_gpu_lookup_context_locked(g, a->ctx_id));
+            spin_unlock(&g->lock);
+            printf("virtio_gpu: async fence mismatch got=%lu expected=%lu\n",
+                   resp_hdr->fence_id, a->fence_id);
+            virtio_gpu_async_submit_free(a);
+            return -1;
+        }
+        spin_lock(&g->lock);
+        g->stats.fences++;
+        g->stats.last_fence = a->fence_id;
+        spin_unlock(&g->lock);
+    }
+
+    virtio_gpu_count_command(g, a->type);
+    virtio_gpu_async_submit_free(a);
+    return 0;
 }
 
 static int virtio_gpu_backing_order(uint64 bytes, uint32 *alloc_len)
@@ -1598,6 +1704,98 @@ static int virtio_gpu_submit_3d(struct virtio_gpu *g, uint32 ctx_id,
     return 0;
 }
 
+static int virtio_gpu_submit_3d_async(struct virtio_gpu *g, uint32 ctx_id,
+                                      const uint32 *cmds, uint32 nr_dwords,
+                                      uint64 fence_id)
+{
+    struct virtio_gpu_async_submit *a = &g->async_submit;
+    struct virtio_gpu_cmd_submit *cmd;
+    struct virtio_gpu_ctrl_hdr *resp;
+    struct virtio_gpu_queue *q = &g->ctrlq;
+    uint32 bytes = nr_dwords * sizeof(uint32);
+    uint32 order;
+    int intena;
+
+    if (nr_dwords == 0 || bytes > PGSIZE * 64) {
+        virtio_gpu_count_failure(g);
+        return -1;
+    }
+    if (virtio_gpu_drain_async_submit(g, 1) != 0)
+        return -1;
+    {
+        uint32 alloc_len;
+        int backing_order = virtio_gpu_backing_order(bytes, &alloc_len);
+        if (backing_order < 0)
+            return -1;
+        order = (uint32)backing_order;
+    }
+
+    cmd = kalloc();
+    resp = kalloc();
+    if (cmd == NULL || resp == NULL) {
+        if (cmd != NULL)
+            kfree(cmd);
+        if (resp != NULL)
+            kfree(resp);
+        return -ENOMEM;
+    }
+    void *data = page_alloc(order, PAGE_TYPE_ANON);
+    if (data == NULL) {
+        kfree(cmd);
+        kfree(resp);
+        return -ENOMEM;
+    }
+
+    memset(cmd, 0, sizeof(*cmd));
+    memset(resp, 0, sizeof(*resp));
+    memcpy(data, cmds, bytes);
+    cmd->hdr.type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    cmd->hdr.ctx_id = ctx_id;
+    if (fence_id != 0) {
+        cmd->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+        cmd->hdr.fence_id = fence_id;
+    }
+    cmd->size = bytes;
+
+    completion_init(&a->done);
+    a->pending = 1;
+    a->ctx_id = ctx_id;
+    a->fence_id = fence_id;
+    a->type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    a->expected = VIRTIO_GPU_RESP_OK_NODATA;
+    a->cmd = cmd;
+    a->cmd_len = sizeof(*cmd);
+    a->data = data;
+    a->data_len = bytes;
+    a->data_order = order;
+    a->resp = resp;
+    a->resp_len = sizeof(*resp);
+
+    intena = spin_lock_irqsave(&q->lock);
+    memset(q->desc, 0, 4 * sizeof(q->desc[0]));
+    q->desc[0].addr = (uint64)a->cmd;
+    q->desc[0].len = a->cmd_len;
+    q->desc[0].flags = VRING_DESC_F_NEXT;
+    q->desc[0].next = 1;
+    q->desc[1].addr = (uint64)a->data;
+    q->desc[1].len = a->data_len;
+    q->desc[1].flags = VRING_DESC_F_NEXT;
+    q->desc[1].next = 2;
+    q->desc[2].addr = (uint64)a->resp;
+    q->desc[2].len = a->resp_len;
+    q->desc[2].flags = VRING_DESC_F_WRITE;
+    q->desc[2].next = 0;
+
+    q->avail->ring[q->avail->idx % q->size] = 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    q->avail->idx++;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    q->pending_completion = &a->done;
+    virtio_gpu_notify(g, 0);
+    spin_unlock_irqrestore(&q->lock, intena);
+    return 0;
+}
+
 static void virtio_gpu_smoke_context(struct virtio_gpu *g)
 {
     uint32 ctx_id = 1;
@@ -1784,7 +1982,8 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     uint64 fence_id;
     int ret;
 
-    if ((flags & ~FB_GPU_VIRGL_SUBMIT_FORCE_FAIL) != 0 ||
+    if ((flags & ~(FB_GPU_VIRGL_SUBMIT_ASYNC |
+                   FB_GPU_VIRGL_SUBMIT_FORCE_FAIL)) != 0 ||
         ctx_id == 0 || cmds == NULL || nr_dwords == 0 ||
         nr_dwords > (PGSIZE * 64) / sizeof(uint32))
         return -EINVAL;
@@ -1819,7 +2018,11 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     spin_unlock(&g->lock);
 
     mutex_lock(&g->op_lock);
-    ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, fence_id);
+    if (flags & FB_GPU_VIRGL_SUBMIT_ASYNC)
+        ret = virtio_gpu_submit_3d_async(g, ctx_id, cmds, nr_dwords,
+                                         fence_id);
+    else
+        ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, fence_id);
     mutex_unlock(&g->op_lock);
     if (ret != 0) {
         spin_lock(&g->lock);
@@ -1842,14 +2045,28 @@ int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)
 {
     struct virtio_gpu *g = &gpu;
     uint64 done;
+    int ret = 0;
 
     if (!g->initialized || !g->virgl_capset_id ||
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return -ENODEV;
 
+    mutex_lock(&g->op_lock);
     spin_lock(&g->lock);
     done = g->stats.last_fence;
     spin_unlock(&g->lock);
+    if (g->async_submit.pending &&
+        (wait || wait_for == 0 || wait_for <= g->async_submit.fence_id)) {
+        ret = virtio_gpu_drain_async_submit(g, wait);
+        if (ret != 0) {
+            mutex_unlock(&g->op_lock);
+            return -EIO;
+        }
+    }
+    spin_lock(&g->lock);
+    done = g->stats.last_fence;
+    spin_unlock(&g->lock);
+    mutex_unlock(&g->op_lock);
 
     if (signaled)
         *signaled = done;

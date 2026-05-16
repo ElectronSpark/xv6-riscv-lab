@@ -23,6 +23,7 @@ struct stat;
 struct superblock;
 struct mbuf;
 struct sock;
+struct vfs_file;
 struct fb_gpu_stats;
 struct fb_gpu_virgl_resource_create;
 struct fb_gpu_virgl_transfer;
@@ -79,6 +80,9 @@ void hyperv_video_dirty(uint32 x, uint32 y, uint32 w, uint32 h);
 int hyperv_dxg_transport_ready(void);
 int hyperv_dxg_d3dkmt_ready(void);
 int hyperv_dxg_get_status(struct hyperv_dxg_status *status);
+void hyperv_dxg_note_pci(uint32 device, uint32 guid0, uint32 guid1,
+                         uint32 guid2, uint32 guid3, uint32 vmbus_version,
+                         uint32 luid_low, uint32 luid_high);
 void ps2kbd_init(void);
 void consoleintr(int);
 void consputc(int);
@@ -101,6 +105,8 @@ void futex_exit_robust_list(struct thread *p);
 
 // timerfd.c
 void timerfd_init(void);
+int eventfd_file_is_eventfd(struct vfs_file *file);
+int eventfd_signal_file(struct vfs_file *file, uint64 value);
 
 // Legacy file.c removed - now using VFS exclusively (vfs/file.c)
 

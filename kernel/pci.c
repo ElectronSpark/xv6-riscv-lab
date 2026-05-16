@@ -347,16 +347,20 @@ static void pci_note_virtio_net(uint8 bus, uint8 dev, uint8 func)
         printf("PCI: Hyper-V GPU-PV channel-guid=%lx-%lx-%lx-%lx version=%u host-luid=%lx:%lx\n",
             (uint64)guid0, (uint64)guid1, (uint64)guid2, (uint64)guid3,
             vmbus_version, (uint64)luid0, (uint64)luid1);
+        hyperv_dxg_note_pci(device, guid0, guid1, guid2, guid3,
+                            vmbus_version, luid0, luid1);
     }
 
 void pci_init(void)
 {
     piix3_init_irq_routing();
 
-    printf("PCI: scanning bus 0 (x86 I/O port method)\n");
+    printf("PCI: scanning buses 0-255 (x86 I/O port method)\n");
 
+    for (int bus = 0; bus < 256; bus++) {
     for (int dev = 0; dev < 32; dev++) {
-        uint32 id = pci_config_read32(0, dev, 0, 0);
+    for (int func = 0; func < 8; func++) {
+        uint32 id = pci_config_read32(bus, dev, func, 0);
         if (id == 0xFFFFFFFF || id == 0)
             continue;
 
@@ -364,34 +368,36 @@ void pci_init(void)
         uint16 device = (id >> 16) & 0xFFFF;
 
         printf("PCI %d:%d:%d vendor=0x%x device=0x%x\n",
-               0, dev, 0, vendor, device);
+               bus, dev, func, vendor, device);
 
         if (vendor == PCI_VENDOR_INTEL && device == PCI_DEVICE_E1000) {
-            pci_init_e1000(0, dev, 0);
+            pci_init_e1000(bus, dev, func);
         } else if (vendor == PCI_VENDOR_VIRTIO &&
                    (device == PCI_DEVICE_VIRTIO_BLK_TRANSITIONAL ||
                     device == PCI_DEVICE_VIRTIO_BLK_MODERN)) {
-            pci_init_virtio_blk(0, dev, 0);
+            pci_init_virtio_blk(bus, dev, func);
         } else if (vendor == PCI_VENDOR_VIRTIO &&
                    (device == PCI_DEVICE_VIRTIO_GPU_TRANSITIONAL ||
                     device == PCI_DEVICE_VIRTIO_GPU_MODERN)) {
-            pci_note_virtio_gpu(0, dev, 0);
+            pci_note_virtio_gpu(bus, dev, func);
         } else if (vendor == PCI_VENDOR_VIRTIO &&
                    (device == PCI_DEVICE_VIRTIO_INPUT_TRANSITIONAL ||
                     device == PCI_DEVICE_VIRTIO_INPUT_MODERN)) {
-            pci_note_virtio_input(0, dev, 0);
+            pci_note_virtio_input(bus, dev, func);
         } else if (vendor == PCI_VENDOR_VIRTIO &&
                    (device == PCI_DEVICE_VIRTIO_NET_TRANSITIONAL ||
                     device == PCI_DEVICE_VIRTIO_NET_MODERN)) {
-            pci_note_virtio_net(0, dev, 0);
+            pci_note_virtio_net(bus, dev, func);
         } else if (vendor == PCI_VENDOR_MICROSOFT &&
                (device == PCI_DEVICE_MS_VIRTUAL_RENDER ||
                 device == PCI_DEVICE_MS_COMPUTE_ACCELERATOR)) {
-            pci_note_hyperv_dxg(0, dev, 0, device);
+            pci_note_hyperv_dxg(bus, dev, func, device);
         } else if (vendor == PCI_VENDOR_BOCHS &&
                    device == PCI_DEVICE_BOCHS_VGA) {
-            fb_pci_init(0, dev, 0);
+            fb_pci_init(bus, dev, func);
         }
+    }
+    }
     }
 
     printf("PCI: scan complete, %d virtio-blk device(s), %d virtio-gpu device(s), %d virtio-input device(s), %d virtio-net device(s) found\n",

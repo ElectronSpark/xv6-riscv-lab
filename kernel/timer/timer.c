@@ -78,6 +78,7 @@ static void clockintr(int irq, void *data, device_t *dev) {
     if (IS_BOOT_HART()) {
         __atomic_fetch_add((uint64 *)data, 1, __ATOMIC_SEQ_CST);
         sched_timer_tick();
+        hyperv_input_intr();
     }
     if (!sched_holding()) {
         SET_NEEDS_RESCHED();

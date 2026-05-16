@@ -16,6 +16,7 @@
 #include "string.h"
 #include "errno.h"
 #include "proc/thread.h"
+#include "proc/sched.h"
 #include "vfs/vfs_types.h"
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
@@ -59,8 +60,10 @@ static ssize_t eventfd_read(struct vfs_file *file, char *buf, size_t count,
             spin_unlock(&ctx->lock);
             return -EAGAIN;
         }
-        tq_wait_in_state(&ctx->rq, &ctx->lock, NULL,
-                         THREAD_INTERRUPTIBLE);
+        spin_unlock(&ctx->lock);
+        hyperv_input_intr();
+        sleep_ms(1);
+        spin_lock(&ctx->lock);
         if (signal_pending(current) || killed(current)) {
             spin_unlock(&ctx->lock);
             return -EINTR;
@@ -146,6 +149,7 @@ static int eventfd_poll(struct vfs_file *file, short events)
     struct eventfd_ctx *ctx = file->private_data;
     short revents = 0;
 
+    hyperv_input_intr();
     spin_lock(&ctx->lock);
     if (ctx->count > 0)
         revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
@@ -177,6 +181,38 @@ static struct vfs_file_ops eventfd_file_ops = {
     .poll    = eventfd_poll,
     .release = eventfd_release,
 };
+
+int eventfd_file_is_eventfd(struct vfs_file *file)
+{
+    return file != NULL && file->ops == &eventfd_file_ops &&
+           file->private_data != NULL;
+}
+
+int eventfd_signal_file(struct vfs_file *file, uint64 value)
+{
+    struct eventfd_ctx *ctx;
+
+    if (!eventfd_file_is_eventfd(file))
+        return -EINVAL;
+    if (value == 0)
+        return 0;
+    if (value == (uint64)~0ULL)
+        return -EINVAL;
+
+    ctx = file->private_data;
+    spin_lock(&ctx->lock);
+    if (EVENTFD_MAX - ctx->count < value) {
+        spin_unlock(&ctx->lock);
+        return -EAGAIN;
+    }
+    ctx->count += value;
+    tq_wakeup_all(&ctx->rq, 0, 0);
+    spin_unlock(&ctx->lock);
+
+    if (ctx->file)
+        vfs_file_knote_notify(ctx->file, EVFILT_READ, 0);
+    return 0;
+}
 
 /* ── sys_eventfd2 ─────────────────────────────────────────────────────── */
 uint64 sys_eventfd2(void)

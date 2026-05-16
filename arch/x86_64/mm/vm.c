@@ -66,6 +66,37 @@
 #define PDPT_IDX(va) (((va) >> 30) & 0x1FF)
 #define PD_IDX(va)   (((va) >> 21) & 0x1FF)
 
+#define X86_MSR_IA32_PAT 0x00000277
+#define X86_PAT_WB       0x06ULL
+#define X86_PAT_WC       0x01ULL
+#define X86_PAT_UC_MINUS 0x07ULL
+#define X86_PAT_UC       0x00ULL
+
+static void x86_pat_init(void)
+{
+    uint32 a, b, c, d;
+    uint64 pat;
+
+    asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                 : "a"((uint32)1), "c"((uint32)0));
+    if ((d & (1U << 16)) == 0)
+        return;
+
+    /*
+     * PWT=1, PCD=0 selects PAT entry 1.  Make that entry WC so DXG
+     * CPU-visible allocations match Linux dxgkrnl's pgprot_writecombine().
+     */
+    pat = (X86_PAT_WB       << 0)  |
+          (X86_PAT_WC       << 8)  |
+          (X86_PAT_UC_MINUS << 16) |
+          (X86_PAT_UC       << 24) |
+          (X86_PAT_WB       << 32) |
+          (X86_PAT_WC       << 40) |
+          (X86_PAT_UC_MINUS << 48) |
+          (X86_PAT_UC       << 56);
+    wrmsr(X86_MSR_IA32_PAT, pat);
+}
+
 /* ── Static page table storage ──
  * One PD covers 1 GiB when populated with 2 MiB large pages.
  * Keep enough PDs to cover the full address range reachable through
@@ -202,6 +233,7 @@ static void kvm_load(void)
 
 void arch_vm_init(void)
 {
+    x86_pat_init();
     vm_slab_init();
     kvm_build();
     kernel_pagetable = (pagetable_t)kpml4;
@@ -341,6 +373,8 @@ void arch_vm_init(void)
 
 void arch_vm_init_hart(void)
 {
+    x86_pat_init();
+
     /*
      * Mirror the BSP's CR4 setup on every AP so that loading a user
      * CR3 with PCID + noflush bits does not raise #GP.  arch_vm_init

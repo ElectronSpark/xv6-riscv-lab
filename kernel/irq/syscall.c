@@ -254,16 +254,135 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_getcwd] sys_getcwd,
 };
 
+static int gpu_syscall_trace_process(struct thread *p)
+{
+    return p != NULL;
+}
+
+static const char *gpu_syscall_name(int num)
+{
+    switch (num) {
+    case SYS_open: return "open";
+    case SYS_close: return "close";
+    case SYS_fstat: return "fstat";
+    case SYS_ioctl: return "ioctl";
+    case SYS_fcntl: return "fcntl";
+    case SYS_stat: return "stat";
+    case SYS_mmap: return "mmap";
+    case SYS_munmap: return "munmap";
+    case SYS_mprotect: return "mprotect";
+    case SYS_mremap: return "mremap";
+    case SYS_msync: return "msync";
+    case SYS_madvise: return "madvise";
+    case SYS_ftruncate: return "ftruncate";
+    case SYS_lstat: return "lstat";
+    case SYS_openat: return "openat";
+    case SYS_fstatat: return "fstatat";
+    case SYS_memfd_create: return "memfd_create";
+    case SYS_statx: return "statx";
+    case SYS_fstatfs: return "fstatfs";
+    case SYS_open_x86: return "open_x86";
+    case SYS_close_x86: return "close_x86";
+    case SYS_fstat_x86: return "fstat_x86";
+    case SYS_ioctl_x86: return "ioctl_x86";
+    case SYS_fcntl_x86: return "fcntl_x86";
+    case SYS_stat_x86: return "stat_x86";
+    case SYS_mmap_x86: return "mmap_x86";
+    case SYS_munmap_x86: return "munmap_x86";
+    case SYS_mprotect_x86: return "mprotect_x86";
+    case SYS_mremap_x86: return "mremap_x86";
+    case SYS_msync_x86: return "msync_x86";
+    case SYS_madvise_x86: return "madvise_x86";
+    case SYS_ftruncate_x86: return "ftruncate_x86";
+    case SYS_openat_x86: return "openat_x86";
+    case SYS_newfstatat_x86: return "newfstatat_x86";
+    case SYS_memfd_create_x86: return "memfd_create_x86";
+    case SYS_statx_x86: return "statx_x86";
+    case SYS_fstatfs_x86: return "fstatfs_x86";
+    default: return "?";
+    }
+}
+
+static int gpu_syscall_trace_interesting(int num)
+{
+    switch (num) {
+    case SYS_open:
+    case SYS_close:
+    case SYS_fstat:
+    case SYS_ioctl:
+    case SYS_fcntl:
+    case SYS_stat:
+    case SYS_mmap:
+    case SYS_munmap:
+    case SYS_mprotect:
+    case SYS_mremap:
+    case SYS_msync:
+    case SYS_madvise:
+    case SYS_ftruncate:
+    case SYS_lstat:
+    case SYS_openat:
+    case SYS_fstatat:
+    case SYS_memfd_create:
+    case SYS_statx:
+    case SYS_fstatfs:
+    case SYS_open_x86:
+    case SYS_close_x86:
+    case SYS_fstat_x86:
+    case SYS_ioctl_x86:
+    case SYS_fcntl_x86:
+    case SYS_stat_x86:
+    case SYS_mmap_x86:
+    case SYS_munmap_x86:
+    case SYS_mprotect_x86:
+    case SYS_mremap_x86:
+    case SYS_msync_x86:
+    case SYS_madvise_x86:
+    case SYS_ftruncate_x86:
+    case SYS_openat_x86:
+    case SYS_newfstatat_x86:
+    case SYS_memfd_create_x86:
+    case SYS_statx_x86:
+    case SYS_fstatfs_x86:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 void syscall(void) {
     int num;
     struct thread *p = current;
+    uint64 a0, a1, a2, a3, a4, a5, ret;
+    int trace;
+    static int gpu_syscall_trace_count;
 
     num = p->trapframe->trapframe.a7;
+    a0 = p->trapframe->trapframe.a0;
+    a1 = p->trapframe->trapframe.a1;
+    a2 = p->trapframe->trapframe.a2;
+    a3 = p->trapframe->trapframe.a3;
+    a4 = p->trapframe->trapframe.a4;
+    a5 = p->trapframe->trapframe.a5;
+    trace = gpu_syscall_trace_process(p) &&
+            gpu_syscall_trace_interesting(num) &&
+            gpu_syscall_trace_count < 512;
 
     if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-        p->trapframe->trapframe.a0 = syscalls[num]();
+        ret = syscalls[num]();
+        p->trapframe->trapframe.a0 = ret;
     } else {
         printf("%d %s: unknown sys call %d\n", p->pid, p->name, num);
-        p->trapframe->trapframe.a0 = (uint64)-ENOSYS;
+        ret = (uint64)-ENOSYS;
+        p->trapframe->trapframe.a0 = ret;
+        trace = gpu_syscall_trace_process(p) &&
+                gpu_syscall_trace_count < 512;
+    }
+
+    if (trace) {
+        gpu_syscall_trace_count++;
+        printf("gpu-syscall: pid=%d name=%s num=%d(%s) a0=0x%lx a1=0x%lx "
+               "a2=0x%lx a3=0x%lx a4=0x%lx a5=0x%lx ret=0x%lx\n",
+               p->pid, p->name, num, gpu_syscall_name(num),
+               a0, a1, a2, a3, a4, a5, ret);
     }
 }

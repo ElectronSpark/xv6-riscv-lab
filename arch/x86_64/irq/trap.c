@@ -978,6 +978,61 @@ void x86_trap_handler(struct trapframe *tf) {
                         printf("  user stack @rsp: <unreadable>\n");
                     }
                 }
+                {
+                    struct fault_reg_dump {
+                        const char *name;
+                        uint64 addr;
+                    } dumps[] = {
+                        {"rbx", tf->rbx},
+                        {"r12", tf->r12},
+                        {"r12+0x100", tf->r12 + 0x100},
+                        {"r13", tf->r13},
+                        {"r14", tf->r14},
+                    };
+                    for (size_t d = 0; d < sizeof(dumps) / sizeof(dumps[0]);
+                         d++) {
+                        uint64 words[8];
+
+                        if (dumps[d].addr == 0)
+                            continue;
+                        if (vm_copyin(current->vm, words, dumps[d].addr,
+                                      sizeof(words)) != 0) {
+                            printf("  user mem %s @0x%lx: <unreadable>\n",
+                                   dumps[d].name, dumps[d].addr);
+                            continue;
+                        }
+                        printf("  user mem %s @0x%lx:",
+                               dumps[d].name, dumps[d].addr);
+                        for (size_t i = 0;
+                             i < sizeof(words) / sizeof(words[0]); i++)
+                            printf(" 0x%lx", words[i]);
+                        printf("\n");
+                        if (dumps[d].addr == tf->r12 + 0x100) {
+                            for (size_t pidx = 0; pidx < 2; pidx++) {
+                                uint64 pointed[8];
+
+                                if (words[pidx] == 0)
+                                    continue;
+                                if (vm_copyin(current->vm, pointed,
+                                              words[pidx],
+                                              sizeof(pointed)) != 0) {
+                                    printf("  user mem *(%s+0x%lx)=0x%lx: <unreadable>\n",
+                                           dumps[d].name, pidx * 8,
+                                           words[pidx]);
+                                    continue;
+                                }
+                                printf("  user mem *(%s+0x%lx)=0x%lx:",
+                                       dumps[d].name, pidx * 8,
+                                       words[pidx]);
+                                for (size_t i = 0;
+                                     i < sizeof(pointed) / sizeof(pointed[0]);
+                                     i++)
+                                    printf(" 0x%lx", pointed[i]);
+                                printf("\n");
+                            }
+                        }
+                    }
+                }
                 vm_rlock(current->vm);
                 print_fault_vma(current->vm, "fault-ip", tf->rip);
                 print_fault_vma(current->vm, "fault-va", cr2);

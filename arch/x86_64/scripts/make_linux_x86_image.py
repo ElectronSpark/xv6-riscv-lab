@@ -2,7 +2,10 @@
 
 import argparse
 import os
+import shutil
 import struct
+import subprocess
+import tempfile
 
 
 def put_u8(buf: bytearray, off: int, val: int) -> None:
@@ -21,13 +24,103 @@ def put_u64(buf: bytearray, off: int, val: int) -> None:
     buf[off:off + 8] = struct.pack("<Q", val & 0xFFFFFFFFFFFFFFFF)
 
 
+def put_e820(buf: bytearray, index: int, addr: int, size: int, typ: int) -> None:
+    off = 0x2D0 + index * 20
+    put_u64(buf, off + 0, addr)
+    put_u64(buf, off + 8, size)
+    put_u32(buf, off + 16, typ)
+
+
+def build_real_mode_trampoline(code32_start: int, trampoline_exec_off: int) -> bytes:
+    assembler = shutil.which("as")
+    objcopy = shutil.which("objcopy") or shutil.which("x86_64-linux-gnu-objcopy")
+    if assembler is None or objcopy is None:
+        raise SystemExit("building x86 setup trampoline requires as and objcopy")
+
+    source = f"""
+        .code16
+        .section .text
+        .org 0x{trampoline_exec_off:x}
+    setup_trampoline:
+        cli
+        cld
+        pushw %cs
+        popw %ds
+        pushw %cs
+        popw %ax
+        movzwl %ax, %eax
+        shll $4, %eax
+        movl %eax, %esi
+        subl $0x200, %esi
+
+        movw $(gdt_end - gdt - 1), gdt_desc
+        movl %eax, %ebx
+        addl $gdt, %ebx
+        movl %ebx, gdt_desc + 2
+        lgdtl gdt_desc
+        movl %cr0, %eax
+        orl $1, %eax
+        movl %eax, %cr0
+        ljmpl $0x08, $(0x10200 + pm32)
+
+        .code32
+    pm32:
+        movw $0x10, %ax
+        movw %ax, %ds
+        movw %ax, %es
+        movw %ax, %ss
+        movl $0x90000, %esp
+        movl $0x{code32_start:x}, %eax
+        jmp *%eax
+
+        .align 8
+    gdt:
+        .quad 0
+    gdt_code:
+        .word 0xffff
+        .word 0
+        .byte 0
+        .byte 0x9a
+        .byte 0xcf
+        .byte 0
+    gdt_data:
+        .word 0xffff
+        .word 0
+        .byte 0
+        .byte 0x92
+        .byte 0xcf
+        .byte 0
+    gdt_end:
+    gdt_desc:
+        .word 0
+        .long 0
+    """
+
+    with tempfile.TemporaryDirectory() as tmp:
+        asm_path = os.path.join(tmp, "setup.S")
+        obj_path = os.path.join(tmp, "setup.o")
+        bin_path = os.path.join(tmp, "setup.bin")
+        with open(asm_path, "w", encoding="utf-8") as f:
+            f.write(source)
+        subprocess.run([assembler, "--32", "-o", obj_path, asm_path],
+                       check=True)
+        subprocess.run([objcopy, "-O", "binary", obj_path, bin_path],
+                       check=True)
+        with open(bin_path, "rb") as f:
+            return f.read()
+
+
 def build_setup_block(setup_sects: int, protocol_version: int, code32_start: int, cmdline_size: int, syssize_paras: int) -> bytearray:
     total_setup_bytes = (setup_sects + 1) * 512
     setup = bytearray(total_setup_bytes)
     init_size = (total_setup_bytes + syssize_paras * 16 + 0xFFF) & ~0xFFF
+    trampoline_off = 0x270
+    trampoline_exec_off = trampoline_off - 0x200
 
     setup[0:2] = b"\xEB\x3C"
     setup[2:4] = b"\x90\x90"
+    put_u8(setup, 0x3E, 0xE9)
+    put_u16(setup, 0x3F, trampoline_off - (0x3E + 3))
     put_u8(setup, 0x1F1, setup_sects)
     put_u16(setup, 0x1F2, 0)              # root_flags
     put_u32(setup, 0x1F4, syssize_paras)
@@ -35,7 +128,8 @@ def build_setup_block(setup_sects: int, protocol_version: int, code32_start: int
     put_u16(setup, 0x1FC, 0)              # root_dev
     put_u16(setup, 0x1FE, 0xAA55)
 
-    setup[0x200:0x202] = b"\xEB\x58"
+    put_u8(setup, 0x200, 0xEB)
+    put_u8(setup, 0x201, trampoline_off - (0x200 + 2))
     setup[0x202:0x206] = b"HdrS"
     put_u16(setup, 0x206, protocol_version)
     put_u16(setup, 0x208, 0)              # realmode_swtch
@@ -67,6 +161,18 @@ def build_setup_block(setup_sects: int, protocol_version: int, code32_start: int
     put_u32(setup, 0x260, init_size)
     put_u32(setup, 0x264, 0)              # handover_offset
     put_u32(setup, 0x268, 0)              # kernel_info_offset
+
+    # QEMU's linuxboot loader executes our minimal setup stub, so provide the
+    # memory map that Linux setup code would normally discover through BIOS.
+    put_u8(setup, 0x1E8, 3)               # e820_entries
+    put_e820(setup, 0, 0x00000000, 0x0009FC00, 1)
+    put_e820(setup, 1, 0x0009FC00, 0x00060400, 2)
+    put_e820(setup, 2, 0x00100000, 0x3FF00000, 1)
+
+    trampoline = build_real_mode_trampoline(code32_start, trampoline_exec_off)
+    if len(trampoline) > total_setup_bytes:
+        raise SystemExit("x86 setup trampoline is larger than setup area")
+    setup[trampoline_off:trampoline_off + len(trampoline) - trampoline_exec_off] = trampoline[trampoline_exec_off:]
 
     return setup
 
