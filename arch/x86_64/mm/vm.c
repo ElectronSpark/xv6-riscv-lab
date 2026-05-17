@@ -215,13 +215,14 @@ static void kvm_build(void)
      * Use uncacheable semantics (PCD + no PTE_G) for device MMIO so that
      * writes go straight to hardware instead of being absorbed by CPU cache. */
     uint64 flags_mmio = X86_PTE_P | X86_PTE_W | X86_PTE_PCD;
+    uint64 flags_wc = X86_PTE_P | X86_PTE_W | X86_PTE_PWT;
     kvm_map_2m_range(0x80000000ULL, 0x90000000ULL, flags_mmio);
     kvm_map_2m_range(0xFD000000ULL, 0xFF000000ULL, flags_mmio);
     if (platform.has_framebuffer) {
         kvm_map_2m_range(platform.framebuffer_base,
                          platform.framebuffer_base +
                          platform.framebuffer_size,
-                         flags_mmio);
+                         flags_wc);
     }
 }
 

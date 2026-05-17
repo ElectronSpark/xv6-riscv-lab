@@ -20,6 +20,7 @@
 #include <dev/fb.h>
 #include <dev/fdt.h>
 #include <dev/pci.h>
+#include <timer/timer.h>
 #include <mm/page.h>
 #include <mm/pgtable.h>
 #include <mm/memlayout.h>
@@ -36,6 +37,8 @@
 #if defined(__x86_64__) || defined(__i386__)
 
 #define FB_GPU_MAX_BOS 128
+#define FB_GPU_D3D12_HEAP_ALIGN (64ULL * 1024ULL)
+#define FB_GPU_ALIGN_UP(x, a) ((((uint64)(x)) + ((uint64)(a) - 1)) & ~((uint64)(a) - 1))
 
 #define DRM_IOCTL_VERSION                      0xc0406400UL
 #define DRM_IOCTL_GET_UNIQUE                   0xc0106401UL
@@ -954,7 +957,6 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
     }
     if (cw == 0 || ch == 0)
         return 0;
-
     spin_lock(&fb_state.lock);
     if (cmd.x == 0 && cmd.y == 0 && cw == xres && ch == yres)
         fb_state.stats.full_blits++;
@@ -1006,7 +1008,6 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
             remaining -= chunk;
         }
     }
-
     if (virtio_backed)
         virtio_gpu_present_fb_rect(fb_state.fb_virt, pitch,
                                    cmd.x, cmd.y, cw, ch);
@@ -1098,9 +1099,9 @@ static int fb_map_scanout_current(struct fb_gpu_scanout_map *req)
      * wlcomp can write through a cached alias while Hyper-V keeps scanning out
      * the old boot-logo contents.
      */
-#ifdef PTE_PCD
+#ifdef PTE_PWT
     if (pfnmap)
-        pte_flags |= PTE_PCD | PTE_PWT;
+        pte_flags |= PTE_PWT;
 #endif
     for (uint64 off = 0; off < map_size; off += PGSIZE) {
         uint64 va = addr + off;
@@ -1554,11 +1555,12 @@ static int fb_bo_map_current(struct fb_gpu_bo_entry *bo, uint64 *addr_out)
     flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER;
 
     vm_wlock(vm);
-    addr = vm_find_free_range(vm, (size_t)bo->size, 0);
+    addr = vm_find_free_range(vm, (size_t)(bo->size + FB_GPU_D3D12_HEAP_ALIGN), 0);
     if (addr == 0) {
         vm_wunlock(vm);
         return -ENOMEM;
     }
+    addr = FB_GPU_ALIGN_UP(addr, FB_GPU_D3D12_HEAP_ALIGN);
 
     vma = vma_alloc(vm, addr, bo->size, flags);
     if (vma == NULL) {
@@ -2123,7 +2125,7 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         if (size == 0 || size > 64ULL * 1024 * 1024)
             return -EINVAL;
 
-        req.size = PGROUNDUP(size);
+        req.size = FB_GPU_ALIGN_UP(size, FB_GPU_D3D12_HEAP_ALIGN);
         npages = req.size / PGSIZE;
         ret = fb_bo_alloc_pages(npages, &pages);
         if (ret != 0)
@@ -3295,7 +3297,7 @@ static void gpu_backend_fill(struct fb_gpu_backend_info *info)
                                 "hyperv-dxg");
         gpu_backend_copy_string(info->renderer, sizeof(info->renderer),
                                 info->dxg_d3dkmt ?
-                                "Hyper-V GPU-PV DXG/D3DKMT adapter bridge" :
+                                "OpenGL via Hyper-V GPU-PV D3DKMT/DXCore" :
                                 "Hyper-V GPU-PV DXG transport; D3DKMT pending");
     }
 }

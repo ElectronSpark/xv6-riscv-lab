@@ -430,6 +430,38 @@ struct d3dkmt_destroycontext {
     struct d3dkmthandle context;
 };
 
+enum d3dkmdt_gdisurfacetype {
+    _D3DKMDT_GDISURFACE_INVALID = 0,
+    _D3DKMDT_GDISURFACE_TEXTURE = 1,
+    _D3DKMDT_GDISURFACE_STAGING_CPUVISIBLE = 2,
+    _D3DKMDT_GDISURFACE_STAGING = 3,
+    _D3DKMDT_GDISURFACE_LOOKUPTABLE = 4,
+    _D3DKMDT_GDISURFACE_EXISTINGSYSMEM = 5,
+    _D3DKMDT_GDISURFACE_TEXTURE_CPUVISIBLE = 6,
+    _D3DKMDT_GDISURFACE_TEXTURE_CROSSADAPTER = 7,
+    _D3DKMDT_GDISURFACE_TEXTURE_CPUVISIBLE_CROSSADAPTER = 8,
+};
+
+enum d3dddiformat {
+    _D3DDDIFMT_UNKNOWN = 0,
+};
+
+struct d3dkmdt_gdisurfacedata {
+    uint32 width;
+    uint32 height;
+    uint32 format;
+    enum d3dkmdt_gdisurfacetype type;
+    uint32 flags;
+    uint32 pitch;
+};
+
+enum d3dkmdt_standardallocationtype {
+    _D3DKMDT_STANDARDALLOCATION_SHAREDPRIMARYSURFACE = 1,
+    _D3DKMDT_STANDARDALLOCATION_SHADOWSURFACE = 2,
+    _D3DKMDT_STANDARDALLOCATION_STAGINGSURFACE = 3,
+    _D3DKMDT_STANDARDALLOCATION_GDISURFACE = 4,
+};
+
 enum d3dkmt_standardallocationtype {
     _D3DKMT_STANDARDALLOCATIONTYPE_EXISTINGHEAP = 1,
     _D3DKMT_STANDARDALLOCATIONTYPE_CROSSADAPTER = 2,
@@ -1248,6 +1280,14 @@ struct d3dkmt_opensyncobjectfromnthandle2 {
         } monitored_fence;
         uint64 reserved[8];
     };
+};
+
+struct d3dddi_openallocationinfo2 {
+    struct d3dkmthandle allocation;
+    uint64 priv_drv_data;
+    uint32 priv_drv_data_size;
+    uint64 gpu_va;
+    uint64 reserved[6];
 };
 
 struct d3dkmt_openresourcefromnthandle {
