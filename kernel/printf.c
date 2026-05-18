@@ -274,3 +274,15 @@ void printfinit(void) {
 void panic_msg_lock(void) { spin_lock(&__panic_bt_lock); }
 
 void panic_msg_unlock(void) { spin_unlock(&__panic_bt_lock); }
+
+void puts(const char *s) {
+  while (*s) {
+    consputc(*s);
+    s++;
+  }
+  consputc('\n');
+}
+
+void putchar(int c) {
+  consputc(c);
+}

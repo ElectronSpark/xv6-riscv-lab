@@ -1,12 +1,12 @@
 add_library(lock OBJECT
-    mutex.c
-    semaphore.c
+    # Lock primitives ported to Rust live alongside this CMakeLists in
+    # kernel/lock/*.rs and are linked into the kernel via the xv6_rust
+    # staticlib (see kernel/CMakeLists.txt). The C files here are the
+    # remaining bits that are still implemented in C.
     semaphore_test.c
-    rwsem.c
     rwsem_test.c
-    spinlock.c
-    completion.c
-    rcu.c
     rcu_test.c
-    rwlock.c
+    # Thin C trampoline for the inline atomic CAS primitives still defined
+    # in kernel/inc/lock/rwlock.h, consumed by kernel/lock/rwlock.rs.
+    rwlock_shim.c
 )

@@ -1,0 +1,31 @@
+[package]
+name = "xv6_rust"
+version = "0.1.0"
+edition = "2021"
+description = "Rust components linked into the xv6-riscv kernel"
+publish = false
+build = "build.rs"
+
+[lib]
+name = "xv6_rust"
+crate-type = ["staticlib"]
+path = "lib.rs"
+
+[build-dependencies]
+bindgen = "0.72"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+debug = false
+overflow-checks = false
+incremental = false
+
+[profile.dev]
+panic = "abort"
+opt-level = "z"
+debug = false
+overflow-checks = false
+incremental = false

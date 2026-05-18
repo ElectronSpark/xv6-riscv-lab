@@ -28,14 +28,17 @@ char *argv[] = {"sh", 0};
 int main(void) {
     int pid, wpid;
 
-    // Open console as stdin (fd 0), stdout (fd 1), stderr (fd 2)
+    // EARLY: write directly to fd that exec'd from kernel may have
+    // (which there isn't). Just try a syscall with no fds.
+    // We'll use the kernel console via a write to fd 1 which might not exist.
+    // Instead use mknod first then open, then write.
     if (open("/dev/console", O_RDWR) < 0) {
         mknod("/dev/console", S_IFCHR | 0666, CONSOLE_MAJOR, CONSOLE_MINOR);
         open("/dev/console", O_RDWR);
     }
     dup(0); // stdout (fd 1)
     dup(0); // stderr (fd 2)
-
+  
     // Ensure device nodes exist (devtmpfs may have created them already,
     // so mknod errors are ignored)
     mknod("/dev/null", S_IFCHR | 0666, NULL_MAJOR, NULL_MINOR);

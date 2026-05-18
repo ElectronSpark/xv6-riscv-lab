@@ -87,10 +87,10 @@ add_custom_target(valgrind-full
 
 
 # Kernel source files to do unit tests
+# NOTE: page.c and slab.c have been ported to Rust (kernel/rust/src/page.rs
+# and slab.rs). Host-side unit tests that previously linked these C sources
+# now rely on the mock implementations in src/wrappers/ instead.
 set(MOCK_TEST_KERNEL_SRC
-    # We're providing mock implementations for page.c
-    ${CMAKE_SOURCE_DIR}/../kernel/mm/page.c
-    ${CMAKE_SOURCE_DIR}/../kernel/mm/slab.c
 )
 
 # All wrapper source files

@@ -1,0 +1,20 @@
+# Crate-level Rust build configuration for the xv6-riscv kernel staticlib.
+#
+# The kernel C side is compiled with:
+#   * `-mcmodel=medany` so symbols anywhere in the upper-half virtual
+#     address space (kernel base 0x80200000) are reachable; the Rust
+#     equivalent is `-C code-model=medium`.
+#   * The default `riscv64-unknown-elf-gcc` ABI on this toolchain is `lp64d`
+#     (hard-float), so we target `riscv64gc-unknown-none-elf` to keep ABI
+#     compatibility, even though no FP instructions are emitted by this crate.
+#
+# Keep these flags in sync with `kernel/CMakeLists.txt`.
+
+[build]
+target = "riscv64gc-unknown-none-elf"
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    "-C", "code-model=medium",
+    "-C", "relocation-model=static",
+]
