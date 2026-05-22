@@ -26,6 +26,17 @@
 #include "lock/rwlock_types.h"
 
 #include "proc/tq.h"
+#include "proc/pgroup_types.h"
+#include "proc/thread_group_types.h"
+#include "proc/workqueue_types.h"
+#include "proc/workqueue.h"
+#include "proc/rq_types.h"
+#include "smp/percpu.h"
+#include "tty/session_types.h"
+#include "signal_types.h"
+#include "hlist_type.h"
+#include "hlist.h"
+#include "lock/rcu.h"
 /* proc/thread.h transitively includes thread_group.h whose inline
  * `__atomic_load_n` on `_Atomic int` is rejected by clang. We rely on
  * `proc/thread_types.h` (included below) for the `struct thread` layout. */

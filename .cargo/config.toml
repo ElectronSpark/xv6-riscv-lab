@@ -12,10 +12,6 @@
 
 [build]
 target = "riscv64gc-unknown-none-elf"
-# Redirect cargo output to the shared build directory so that direct `cargo`
-# invocations and CMake-driven builds both land in build/kernel/rust/ instead
-# of creating a kernel/target/ tree inside the source directory.
-target-dir = "../build/kernel/rust"
 
 [target.riscv64gc-unknown-none-elf]
 rustflags = [

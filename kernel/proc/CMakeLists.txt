@@ -1,20 +1,22 @@
 set(PROC_C_SRCS
-    thread.c
-    thread_group.c
-    thread_queue.c
-    sched.c
-    signal.c
-    sys_signal.c
-    sysproc.c
-    workqueue.c
-    clone.c
-    exit.c
-    pid.c
-    rq.c
-    sched_idle.c
-    sched_fifo.c
-    rq_test.c
-    pgroup.c
+    # thread.c -- ported to Rust (kernel/proc/thread.rs)
+    # thread_group.c -- ported to Rust (kernel/proc/thread_group.rs)
+    # thread_queue.c -- ported to Rust (kernel/proc/thread_queue.rs)
+    # sched.c -- ported to Rust (kernel/proc/sched.rs)
+    # signal.c       -- ported to Rust (kernel/proc/signal.rs)
+    # sys_signal.c   -- ported to Rust (kernel/proc/sys_signal.rs)
+    # sysproc.c      -- ported to Rust (kernel/proc/sysproc.rs)
+    # workqueue.c   -- ported to Rust (kernel/proc/workqueue.rs)
+    # clone.c        -- ported to Rust (kernel/proc/clone.rs)
+    # exit.c         -- ported to Rust (kernel/proc/exit.rs)
+    # pid.c          -- ported to Rust (kernel/proc/pid.rs)
+    # rq.c           -- ported to Rust (kernel/proc/rq.rs)
+    # sched_idle.c   -- ported to Rust (kernel/proc/sched_idle.rs)
+    # sched_fifo.c   -- ported to Rust (kernel/proc/sched_fifo.rs)
+    # rq_test.c      -- ported to Rust (kernel/proc/rq_test.rs)
+    # pgroup.c       -- ported to Rust (kernel/proc/pgroup.rs)
+    # proc_rust_shims.c -- fully replaced by Rust ports
+    proc_rust_bridge.c
 )
 
 set(PROC_S_SRCS

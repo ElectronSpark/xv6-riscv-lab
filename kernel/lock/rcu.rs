@@ -109,8 +109,8 @@ struct sched_attr {
 }
 
 unsafe extern "C" {
-    fn sched_attr_init(attr: *mut sched_attr);
-    fn sched_setattr(
+    safe fn sched_attr_init(attr: *mut sched_attr);
+    safe fn sched_setattr(
         se: *mut crate::bindings::sched_entity,
         attr: *const sched_attr,
     ) -> c_int;
@@ -992,12 +992,12 @@ fn kthread_start_cpu_impl(cpu: c_int) {
         priority: 0,
         flags: 0,
     };
-    // SAFETY: stack-local valid pointer; FFI initialises in place.
-    unsafe { sched_attr_init(&mut attr); }
+    sched_attr_init(&mut attr);
     attr.affinity_mask = 1u64 << cpu;
     // SAFETY: `p` is a freshly-created thread; `sched_entity` lives
     // for the thread's lifetime.
-    unsafe { sched_setattr((*p).sched_entity, &attr); }
+    let se = unsafe { (*p).sched_entity };
+    sched_setattr(se, &attr);
 
     slot.kthread.store(p, Ordering::Release);
     wakeup(p);

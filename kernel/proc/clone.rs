@@ -1,0 +1,389 @@
+//! Rust port of `kernel/proc/clone.c`.
+//!
+//! Implements `thread_clone` and the post-context-switch `forkret_entry`.
+//! All struct field access goes through C shims in `proc_rust_shims.c`.
+//!
+//! ## Centralized-unsafe convention (matches `pgroup.rs` / `pid.rs` / `exit.rs`)
+//!
+//! All FFI declarations live in the single `unsafe extern "C" { ... }`
+//! block below and are marked `pub safe fn`. That promise extends the
+//! safety contract for the entire module: every C entry point listed
+//! is callable from safe Rust *given* the precondition that any raw
+//! pointers passed in are live kernel objects whose lifetime is
+//! covered by an appropriate higher-level lock (`pid_lock`, `tcb_lock`,
+//! "I own this thread"). The same preconditions held in the original
+//! C and are not weakened here.
+//!
+//! Function bodies keep raw-pointer conversion at the ABI edge, then use
+//! the safe wrapper surface below.
+
+#![allow(non_camel_case_types, non_snake_case)]
+
+use core::ffi::{c_int, c_void};
+use core::ptr;
+
+// ---------------------------------------------------------------------------
+// Opaque pointer types
+// ---------------------------------------------------------------------------
+#[repr(C)] struct Thread       { _p: [u8; 0] }
+#[repr(C)] struct ThreadGroup  { _p: [u8; 0] }
+#[repr(C)] struct Pgroup       { _p: [u8; 0] }
+#[repr(C)] struct Session      { _p: [u8; 0] }
+#[repr(C)] struct SchedEntity  { _p: [u8; 0] }
+#[repr(C)] struct Context      { _p: [u8; 0] }
+#[repr(C)] struct VfsFdtable   { _p: [u8; 0] }
+#[repr(C)] struct FsStruct     { _p: [u8; 0] }
+#[repr(C)] struct Vm           { _p: [u8; 0] }
+#[repr(C)] struct Sigacts      { _p: [u8; 0] }
+#[repr(C)] struct ThreadSignal { _p: [u8; 0] }
+
+// ---------------------------------------------------------------------------
+// Errno + constants (mirrors of C headers)
+// ---------------------------------------------------------------------------
+const EINVAL: c_int = 22;
+const EAGAIN: c_int = 11;
+const ENOMEM: c_int = 12;
+
+// Clone flags (must match uabi/clone_flags.h)
+const CLONE_FILES:  u64 = 0x00100000;
+const CLONE_FS:     u64 = 0x00200000;
+const CLONE_PARENT: u64 = 0x80000000;
+const CLONE_SIGHAND:u64 = 0x0200000000;
+const CLONE_THREAD: u64 = 0x1000000000;
+const CLONE_VFORK:  u64 = 0x4000000000;
+const CLONE_VM:     u64 = 0x8000000000;
+
+// Thread state (matches enum thread_state)
+const THREAD_UNINTERRUPTIBLE: c_int = 6;
+
+const USERSTACK_MINSZ: u64 = 4096 * 4; // PAGE_SIZE << 2
+const PAGE_SIZE:       u64 = 4096;
+
+// clone_args layout (matches uabi/clone_flags.h)
+#[repr(C)]
+pub struct CloneArgs {
+    pub flags:      u64,
+    pub stack:      u64,
+    pub stack_size: u64,
+    pub entry:      u64,
+    pub esignal:    u64,
+    pub tls:        u64,
+    pub ctid:       u64,
+    pub ptid:       u64,
+}
+
+// ---------------------------------------------------------------------------
+// External C symbols — centralized unsafe boundary.
+// See module-level safety contract above.
+// ---------------------------------------------------------------------------
+unsafe extern "C" {
+    // Field accessors / shims
+    pub safe fn xv6_current_thread() -> *mut Thread;
+    pub safe fn xv6_is_err(p: *const c_void) -> c_int;
+    pub safe fn xv6_ptr_err(p: *const c_void) -> isize;
+    pub safe fn xv6_err_ptr(err: isize) -> *mut c_void;
+
+    pub safe fn xv6_t_kstack_order(t: *mut Thread) -> c_int;
+    pub safe fn xv6_t_vm(t: *mut Thread) -> *mut Vm;
+    pub safe fn xv6_t_set_vm(t: *mut Thread, v: *mut Vm);
+    pub safe fn xv6_t_fs(t: *mut Thread) -> *mut FsStruct;
+    pub safe fn xv6_t_set_fs(t: *mut Thread, f: *mut FsStruct);
+    pub safe fn xv6_t_fdtable(t: *mut Thread) -> *mut VfsFdtable;
+    pub safe fn xv6_t_set_fdtable(t: *mut Thread, f: *mut VfsFdtable);
+    pub safe fn xv6_t_sigacts(t: *mut Thread) -> *mut Sigacts;
+    pub safe fn xv6_t_set_sigacts(t: *mut Thread, s: *mut Sigacts);
+    pub safe fn xv6_t_signal_ptr(t: *mut Thread) -> *mut ThreadSignal;
+    pub safe fn xv6_t_sched_entity(t: *mut Thread) -> *mut SchedEntity;
+    pub safe fn xv6_t_set_clone_flags(t: *mut Thread, f: u64);
+    pub safe fn xv6_t_set_vfork_parent(t: *mut Thread, p: *mut Thread);
+    pub safe fn xv6_t_set_tgid(t: *mut Thread, tgid: c_int);
+    pub safe fn xv6_t_set_user_space(t: *mut Thread);
+    pub safe fn xv6_t_set_parent(t: *mut Thread, p: *mut Thread);
+    #[link_name = "t_parent"]       pub safe fn xv6_t_parent(t: *mut Thread) -> *mut Thread;
+    #[link_name = "t_thread_group"] pub safe fn xv6_t_thread_group(t: *mut Thread) -> *mut ThreadGroup;
+    #[link_name = "t_pgroup"]       pub safe fn xv6_t_pgroup(t: *mut Thread) -> *mut Pgroup;
+    #[link_name = "t_session"]      pub safe fn xv6_t_session(t: *mut Thread) -> *mut Session;
+    #[link_name = "t_tgid"]         pub safe fn xv6_t_tgid(t: *mut Thread) -> c_int;
+    #[link_name = "t_pid"]          pub safe fn xv6_t_pid(t: *mut Thread) -> c_int;
+    #[link_name = "t_user_space"]   pub safe fn xv6_t_user_space(t: *mut Thread) -> c_int;
+
+    pub safe fn xv6_t_copy_trapframe(dst: *mut Thread, src: *mut Thread);
+    pub safe fn xv6_t_trapframe_set_sepc(t: *mut Thread, v: u64);
+    pub safe fn xv6_t_trapframe_set_sp(t: *mut Thread, v: u64);
+    pub safe fn xv6_t_trapframe_set_a0(t: *mut Thread, v: u64);
+    pub safe fn xv6_t_copy_name(dst: *mut Thread, src: *mut Thread);
+
+    pub safe fn xv6_thread_state_set(t: *mut Thread, s: c_int);
+    pub safe fn xv6_tcb_lock(t: *mut Thread);
+    pub safe fn xv6_tcb_unlock(t: *mut Thread);
+
+    pub safe fn xv6_thread_from_context(ctx: *mut Context) -> *mut Thread;
+    pub safe fn xv6_mycpu_clear_noff();
+    pub safe fn xv6_intr_on();
+    pub safe fn xv6_smp_mb();
+    pub safe fn xv6_forkret_assert_user(p: *mut Thread);
+
+    // Panic — returns `!`, safe to call after building a NUL-terminated buf.
+    pub safe fn xv6_panic(msg: *const u8) -> !;
+
+    // Existing kernel C symbols
+    pub safe fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int) -> *mut Thread;
+    pub safe fn thread_destroy(t: *mut Thread);
+    pub safe fn vm_dup(vm: *mut Vm) -> *mut Vm;
+    pub safe fn vm_copy(vm: *mut Vm) -> *mut Vm;
+    pub safe fn vfs_struct_clone(old: *mut FsStruct, flags: u64) -> *mut FsStruct;
+    pub safe fn vfs_fdtable_clone(src: *mut VfsFdtable, flags: c_int) -> *mut VfsFdtable;
+    pub safe fn sigacts_dup(psa: *mut Sigacts, flags: u64) -> *mut Sigacts;
+    pub safe fn sigpending_clone(dst: *mut ThreadSignal, src: *mut ThreadSignal, flags: u64, esignal: u64);
+    pub safe fn rq_task_fork(se: *mut SchedEntity);
+    pub safe fn scheduler_wakeup(t: *mut Thread);
+    pub safe fn scheduler_yield();
+    pub safe fn attach_child(parent: *mut Thread, child: *mut Thread);
+    pub safe fn proctab_proc_add(t: *mut Thread);
+    pub safe fn thread_group_add(tg: *mut ThreadGroup, t: *mut Thread);
+    pub safe fn thread_group_alloc(t: *mut Thread) -> c_int;
+    pub safe fn pgroup_add_tg(pg: *mut Pgroup, tg: *mut ThreadGroup);
+    pub safe fn pgroup_add_thread(pg: *mut Pgroup, t: *mut Thread);
+    pub safe fn session_add_thread(s: *mut Session, t: *mut Thread);
+
+    pub safe fn xv6_pid_wlock();
+    pub safe fn xv6_pid_wunlock();
+
+    pub safe fn __alloc_pid() -> c_int;
+    pub safe fn __free_pid();
+
+    pub safe fn usertrapret();
+    pub safe fn context_switch_finish(prev: *mut Thread, next: *mut Thread, intr: c_int);
+    pub safe fn rcu_check_callbacks();
+}
+
+#[cold]
+fn panic_clone(msg: &str) -> ! {
+    let mut buf = [0u8; 96];
+    let n = msg.as_bytes().len().min(buf.len() - 1);
+    buf[..n].copy_from_slice(&msg.as_bytes()[..n]);
+    // xv6_panic only reads the buffer up to the first NUL; we
+    // zero-initialised `buf` and bounded the copy by `buf.len() - 1`,
+    // so the final byte is always 0.
+    xv6_panic(buf.as_ptr())
+}
+
+#[inline]
+fn clone_args_mut<'a>(args: *mut CloneArgs) -> Option<&'a mut CloneArgs> {
+    if args.is_null() { return None; }
+    unsafe { Some(&mut *args) }
+}
+
+// ---------------------------------------------------------------------------
+// forkret_entry — called from context switch via thread_create entry pointer.
+// ---------------------------------------------------------------------------
+#[no_mangle]
+pub extern "C" fn forkret_entry(prev: *mut Context) {
+    let cur = xv6_current_thread();
+    xv6_forkret_assert_user(cur);
+    if prev.is_null() {
+        panic_clone("forkret_entry: prev context is NULL");
+    }
+
+    context_switch_finish(xv6_thread_from_context(prev), cur, 0);
+    xv6_mycpu_clear_noff();
+    xv6_intr_on();
+    rcu_check_callbacks();
+    xv6_smp_mb();
+    usertrapret();
+}
+
+#[inline]
+fn check_ptr<T>(ptr: *mut T) -> Result<*mut T, c_int> {
+    if ptr.is_null() {
+        Err(-ENOMEM)
+    } else if xv6_is_err(ptr as *const c_void) != 0 {
+        Err(xv6_ptr_err(ptr as *const c_void) as c_int)
+    } else {
+        Ok(ptr)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// thread_clone — full port of C `thread_clone`.
+// ---------------------------------------------------------------------------
+#[no_mangle]
+pub extern "C" fn thread_clone(args: *mut CloneArgs) -> c_int {
+    let Some(args) = clone_args_mut(args) else { return -EINVAL };
+    let p = xv6_current_thread();
+
+    if xv6_t_user_space(p) == 0 {
+        return -EINVAL;
+    }
+
+    // CLONE_THREAD implies CLONE_PARENT + requires CLONE_VM | CLONE_SIGHAND
+    if args.flags & CLONE_THREAD != 0 {
+        if args.flags & (CLONE_VM | CLONE_SIGHAND) != (CLONE_VM | CLONE_SIGHAND) {
+            return -EINVAL;
+        }
+        args.flags |= CLONE_PARENT;
+    }
+
+    // CLONE_VM without CLONE_VFORK requires stack and entry
+    if args.flags & CLONE_VM != 0 && args.flags & CLONE_VFORK == 0
+        && (args.stack == 0 || args.entry == 0)
+    {
+        return -EINVAL;
+    }
+
+    // Stack alignment check
+    if args.stack != 0
+        && (args.stack_size < USERSTACK_MINSZ || (args.stack_size & (PAGE_SIZE - 1)) != 0)
+    {
+        return -EINVAL;
+    }
+
+    // Reserve a PID slot
+    if __alloc_pid() < 0 {
+        return -EAGAIN;
+    }
+
+    // Allocate child thread
+    let kstack_order = xv6_t_kstack_order(p);
+    let child = match check_ptr(thread_create(forkret_entry as *mut c_void, 0, 0, kstack_order)) {
+        Ok(c) => c,
+        Err(e) => {
+            __free_pid();
+            return e;
+        }
+    };
+
+    // VM: share or copy
+    let new_vm = if args.flags & CLONE_VM != 0 {
+        let v = xv6_t_vm(p);
+        vm_dup(v);
+        v
+    } else {
+        match check_ptr(vm_copy(xv6_t_vm(p))) {
+            Ok(v) => v,
+            Err(e) => {
+                thread_destroy(child);
+                __free_pid();
+                return e;
+            }
+        }
+    };
+    xv6_t_set_vm(child, new_vm);
+
+    // FS
+    let fs_clone = match check_ptr(vfs_struct_clone(xv6_t_fs(p), args.flags)) {
+        Ok(f) => f,
+        Err(e) => {
+            thread_destroy(child);
+            __free_pid();
+            return e;
+        }
+    };
+    xv6_t_set_fs(child, fs_clone);
+
+    // fdtable
+    let new_fdt = match check_ptr(vfs_fdtable_clone(xv6_t_fdtable(p), args.flags as c_int)) {
+        Ok(f) => f,
+        Err(e) => {
+            thread_destroy(child);
+            __free_pid();
+            return e;
+        }
+    };
+    xv6_t_set_fdtable(child, new_fdt);
+
+    // sigacts
+    let p_sigacts = xv6_t_sigacts(p);
+    if !p_sigacts.is_null() {
+        let dup = sigacts_dup(p_sigacts, args.flags);
+        if dup.is_null() {
+            thread_destroy(child);
+            __free_pid();
+            return -ENOMEM;
+        }
+        xv6_t_set_sigacts(child, dup);
+    }
+
+    // Per-thread signal mask
+    sigpending_clone(
+        xv6_t_signal_ptr(child),
+        xv6_t_signal_ptr(p),
+        args.flags,
+        args.esignal,
+    );
+    xv6_t_set_clone_flags(child, args.flags);
+
+    // Copy + adjust trapframe
+    xv6_t_copy_trapframe(child, p);
+    if args.entry != 0 {
+        xv6_t_trapframe_set_sepc(child, args.entry);
+    }
+    if args.stack != 0 {
+        let stack_top = (args.stack + args.stack_size) & !0xFu64;
+        xv6_t_trapframe_set_sp(child, stack_top);
+    }
+    xv6_t_trapframe_set_a0(child, 0);
+    xv6_t_copy_name(child, p);
+
+    xv6_tcb_lock(child);
+    xv6_t_set_user_space(child);
+    xv6_thread_state_set(child, THREAD_UNINTERRUPTIBLE);
+    rq_task_fork(xv6_t_sched_entity(child));
+    if args.flags & CLONE_VFORK != 0 {
+        xv6_t_set_vfork_parent(child, p);
+        xv6_thread_state_set(p, THREAD_UNINTERRUPTIBLE);
+    } else {
+        xv6_t_set_vfork_parent(child, ptr::null_mut());
+    }
+    xv6_tcb_unlock(child);
+
+    // Attach to parent + add to pid table
+    xv6_pid_wlock();
+    let real_parent = if args.flags & CLONE_PARENT != 0 {
+        xv6_t_parent(p)
+    } else {
+        p
+    };
+
+    if args.flags & CLONE_THREAD != 0 {
+        xv6_t_set_parent(child, real_parent);
+    } else {
+        attach_child(real_parent, child);
+    }
+    proctab_proc_add(child);
+
+    if args.flags & CLONE_THREAD != 0 {
+        let parent_tg = xv6_t_thread_group(p);
+        if parent_tg.is_null() {
+            panic_clone("clone: parent has no thread_group for CLONE_THREAD");
+        }
+        thread_group_add(parent_tg, child);
+        xv6_t_set_tgid(child, xv6_t_tgid(p));
+    } else {
+        let rc = thread_group_alloc(child);
+        if rc != 0 {
+            panic_clone("clone: thread_group_alloc failed");
+        }
+    }
+
+    let parent_pg = xv6_t_pgroup(p);
+    let parent_sess = xv6_t_session(p);
+    if !parent_pg.is_null() {
+        if args.flags & CLONE_THREAD == 0 {
+            pgroup_add_tg(parent_pg, xv6_t_thread_group(child));
+        }
+        pgroup_add_thread(parent_pg, child);
+    }
+    if !parent_sess.is_null() {
+        session_add_thread(parent_sess, child);
+    }
+    xv6_pid_wunlock();
+
+    scheduler_wakeup(child);
+
+    if args.flags & CLONE_VFORK != 0 {
+        scheduler_yield();
+    }
+
+    xv6_t_pid(child)
+}

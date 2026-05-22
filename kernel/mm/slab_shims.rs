@@ -2,12 +2,19 @@
 //!
 //! Provides the `xv6_*` C-ABI shim symbols the Rust slab allocator
 //! (`slab.rs`) expects via its `extern "C"` block. By exporting them as
-//! `#[no_mangle] pub unsafe extern "C" fn`, the staticlib linker resolves
+//! `#[no_mangle] pub extern "C" fn`, the staticlib linker resolves
 //! the symbols internally; `slab.rs` is unchanged. This file replaces the
 //! deleted `kernel/mm/slab_shims.c`.
 
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
+
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
 
 use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
@@ -126,7 +133,7 @@ const SSTATUS_SIE: u64 = 1 << 1;
 #[inline(always)]
 fn read_tp() -> u64 {
     let tp: u64;
-    unsafe {
+    u! {
         core::arch::asm!("mv {0}, tp", out(reg) tp,
             options(nomem, nostack, preserves_flags));
     }
@@ -135,7 +142,7 @@ fn read_tp() -> u64 {
 #[inline(always)]
 fn read_sstatus() -> u64 {
     let v: u64;
-    unsafe {
+    u! {
         core::arch::asm!("csrr {0}, sstatus", out(reg) v,
             options(nomem, nostack, preserves_flags));
     }
@@ -143,14 +150,14 @@ fn read_sstatus() -> u64 {
 }
 #[inline(always)]
 fn intr_off_raw() {
-    unsafe {
+    u! {
         core::arch::asm!("csrc sstatus, {0}", in(reg) SSTATUS_SIE,
             options(nomem, nostack, preserves_flags));
     }
 }
 #[inline(always)]
 fn intr_on_raw() {
-    unsafe {
+    u! {
         core::arch::asm!("csrs sstatus, {0}", in(reg) SSTATUS_SIE,
             options(nomem, nostack, preserves_flags));
     }
@@ -160,18 +167,24 @@ fn intr_get_raw() -> bool {
     (read_sstatus() & SSTATUS_SIE) != 0
 }
 #[inline(always)]
-unsafe fn mycpu_local() -> *mut crate::bindings::cpu_local {
+fn mycpu_local()-> *mut crate::bindings::cpu_local  { u! {
     read_tp() as *mut crate::bindings::cpu_local
-}
+}}
 #[no_mangle]
-pub unsafe extern "C" fn xv6_cpuid() -> c_int {
+pub extern "C" fn xv6_cpuid() -> c_int {
+    u! {
+
     let page_mask: u64 = PAGE_SIZE - 1;
     let off = read_tp() & page_mask;
     (off / core::mem::size_of::<crate::bindings::cpu_local>() as u64) as c_int
+
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_push_off() {
+pub extern "C" fn xv6_push_off() {
+    u! {
+
     let old = intr_get_raw();
     if old {
         intr_off_raw();
@@ -182,15 +195,21 @@ pub unsafe extern "C" fn xv6_push_off() {
         (*c).intena = if old { 1 } else { 0 };
     }
     (*c).noff = noff + 1;
+
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_pop_off() {
+pub extern "C" fn xv6_pop_off() {
+    u! {
+
     let c = mycpu_local();
     let n = (*c).noff - 1;
     (*c).noff = n;
     if n == 0 && (*c).intena != 0 {
         intr_on_raw();
+    }
+
     }
 }
 
@@ -198,65 +217,69 @@ pub unsafe extern "C" fn xv6_pop_off() {
 // Inline list helpers (replicate kernel/inc/list.h static-inlines).
 // ---------------------------------------------------------------------------
 #[inline]
-unsafe fn list_init(e: *mut list_node_t) {
+fn list_init(e: *mut list_node_t) { u! {
     (*e).next = e;
     (*e).prev = e;
-}
+}}
 #[inline]
-unsafe fn list_is_empty(h: *const list_node_t) -> bool {
+fn list_is_empty(h: *const list_node_t)-> bool  { u! {
     (*h).next == h as *mut list_node_t
-}
+}}
 #[inline]
-unsafe fn list_is_detached(e: *const list_node_t) -> bool {
+fn list_is_detached(e: *const list_node_t)-> bool  { u! {
     let p = (*e).prev;
     let n = (*e).next;
     (p == e as *mut list_node_t) && (n == e as *mut list_node_t)
-}
+}}
 #[inline]
-unsafe fn list_detach(e: *mut list_node_t) {
+fn list_detach(e: *mut list_node_t) { u! {
     let p = (*e).prev;
     let n = (*e).next;
     (*p).next = n;
     (*n).prev = p;
     list_init(e);
-}
+}}
 #[inline]
-unsafe fn list_insert_after(prev: *mut list_node_t, new: *mut list_node_t) {
+fn list_insert_after(prev: *mut list_node_t, new: *mut list_node_t) { u! {
     let nxt = (*prev).next;
     (*new).next = nxt;
     (*new).prev = prev;
     (*nxt).prev = new;
     (*prev).next = new;
-}
+}}
 #[inline]
-unsafe fn list_push_front(h: *mut list_node_t, e: *mut list_node_t) {
+fn list_push_front(h: *mut list_node_t, e: *mut list_node_t) { u! {
     list_insert_after(h, e);
-}
+}}
 #[inline]
-unsafe fn list_pop_front(h: *mut list_node_t) -> *mut list_node_t {
+fn list_push_back(h: *mut list_node_t, e: *mut list_node_t) { u! {
+    list_insert_after((*h).prev, e);
+}}
+#[inline]
+fn list_pop_front(h: *mut list_node_t)-> *mut list_node_t  { u! {
     if list_is_empty(h) {
         return core::ptr::null_mut();
     }
     let first = (*h).next;
     list_detach(first);
     first
-}
+}}
 #[inline]
-unsafe fn list_first(h: *const list_node_t) -> *mut list_node_t {
+fn list_first(h: *const list_node_t)-> *mut list_node_t  { u! {
     if list_is_empty(h) {
         core::ptr::null_mut()
     } else {
         (*h).next
     }
-}
+}}
 #[inline]
-unsafe fn list_last(h: *const list_node_t) -> *mut list_node_t {
+fn list_last(h: *const list_node_t)-> *mut list_node_t  { u! {
     if list_is_empty(h) {
         core::ptr::null_mut()
     } else {
         (*h).prev
     }
-}
+}}
 
 // ---------------------------------------------------------------------------
 // Static globals for the slab-cache registry. Initialised lazily on first
@@ -288,7 +311,7 @@ static ALL_CACHES_INIT_DONE: AtomicBool = AtomicBool::new(false);
 
 static ALL_CACHES_NAME: &[u8] = b"all_slab_caches\0";
 
-unsafe fn ensure_global_init() {
+fn ensure_global_init() { u! {
     if ALL_CACHES_INIT_DONE.load(Ordering::Acquire) {
         return;
     }
@@ -309,12 +332,14 @@ unsafe fn ensure_global_init() {
             core::hint::spin_loop();
         }
     }
-}
+}}
 // ---------------------------------------------------------------------------
 // Cache registry (replaces C versions in slab_shims.c).
 // ---------------------------------------------------------------------------
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_register_cache(cache: *mut slab_cache_t) {
+pub extern "C" fn xv6_slab_register_cache(cache: *mut slab_cache_t) {
+    u! {
+
     ensure_global_init();
     let entry = &raw mut (*cache).cache_list_entry;
     list_init(entry);
@@ -324,10 +349,14 @@ pub unsafe extern "C" fn xv6_slab_register_cache(cache: *mut slab_cache_t) {
     let tail = (*head).prev;
     list_insert_after(tail, entry);
     spin_unlock(__ALL_SLAB_CACHES_LOCK.0.get());
+
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_unregister_cache(cache: *mut slab_cache_t) {
+pub extern "C" fn xv6_slab_unregister_cache(cache: *mut slab_cache_t) {
+    u! {
+
     ensure_global_init();
     spin_lock(__ALL_SLAB_CACHES_LOCK.0.get());
     let entry = &raw mut (*cache).cache_list_entry;
@@ -335,17 +364,21 @@ pub unsafe extern "C" fn xv6_slab_unregister_cache(cache: *mut slab_cache_t) {
         list_detach(entry);
     }
     spin_unlock(__ALL_SLAB_CACHES_LOCK.0.get());
+
+    }
 }
 
 // ---------------------------------------------------------------------------
 // slab_shrink_all / slab_dump_all — iterate global registry.
 // ---------------------------------------------------------------------------
 #[inline]
-unsafe fn cache_from_entry(entry: *mut list_node_t) -> *mut slab_cache_t {
+fn cache_from_entry(entry: *mut list_node_t)-> *mut slab_cache_t  { u! {
     (entry as *mut u8).wrapping_sub(offset_of!(slab_cache_t, cache_list_entry)) as *mut slab_cache_t
-}
+}}
 #[no_mangle]
-pub unsafe extern "C" fn slab_shrink_all() {
+pub extern "C" fn slab_shrink_all() {
+    u! {
+
     ensure_global_init();
     let head = __ALL_SLAB_CACHES.0.get();
     spin_lock(__ALL_SLAB_CACHES_LOCK.0.get());
@@ -369,6 +402,8 @@ pub unsafe extern "C" fn slab_shrink_all() {
         cur = nxt;
     }
     spin_unlock(__ALL_SLAB_CACHES_LOCK.0.get());
+
+    }
 }
 
 // printf format strings for slab_dump_all
@@ -385,7 +420,9 @@ static DUMP_KB: &[u8] = b"%luKB\0";
 static DUMP_TAIL: &[u8] = b")\n\0";
 
 #[no_mangle]
-pub unsafe extern "C" fn slab_dump_all(detailed: c_int) -> u64 {
+pub extern "C" fn slab_dump_all(detailed: c_int) -> u64 {
+    u! {
+
     ensure_global_init();
     let head = __ALL_SLAB_CACHES.0.get();
     let mut total_pages: u64 = 0;
@@ -442,6 +479,8 @@ pub unsafe extern "C" fn slab_dump_all(detailed: c_int) -> u64 {
         }
     }
     total_bytes
+
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -449,59 +488,105 @@ pub unsafe extern "C" fn slab_dump_all(detailed: c_int) -> u64 {
 // for its per-cpu / per-slab free lists which have list_entry at offset 0).
 // ---------------------------------------------------------------------------
 #[no_mangle]
-pub unsafe extern "C" fn xv6_list_init(entry: *mut list_node_t) {
+pub extern "C" fn xv6_list_init(entry: *mut list_node_t) {
+    u! {
+
     list_init(entry)
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_list_is_empty(head: *const list_node_t) -> c_int {
+pub extern "C" fn xv6_list_is_empty(head: *const list_node_t) -> c_int {
+    u! {
+
     if list_is_empty(head) { 1 } else { 0 }
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_list_is_detached(entry: *const list_node_t) -> c_int {
+pub extern "C" fn xv6_list_is_detached(entry: *const list_node_t) -> c_int {
+    u! {
+
     if list_is_detached(entry) { 1 } else { 0 }
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_list_detach(entry: *mut list_node_t) {
+pub extern "C" fn xv6_list_detach(entry: *mut list_node_t) {
+    u! {
+
     list_detach(entry)
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_list_insert_after(prev: *mut list_node_t, entry: *mut list_node_t) {
+pub extern "C" fn xv6_list_insert_after(prev: *mut list_node_t, entry: *mut list_node_t) {
+    u! {
+
     list_insert_after(prev, entry)
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_list_push_front(head: *mut list_node_t, entry: *mut list_node_t) {
+pub extern "C" fn xv6_list_push_front(head: *mut list_node_t, entry: *mut list_node_t) {
+    u! {
+
     list_push_front(head, entry)
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_list_pop_front(head: *mut list_node_t) -> *mut list_node_t {
+pub extern "C" fn xv6_list_push_back(head: *mut list_node_t, entry: *mut list_node_t) {
+    u! {
+
+    list_push_back(head, entry)
+
+    }
+}
+#[no_mangle]
+pub extern "C" fn xv6_list_pop_front(head: *mut list_node_t) -> *mut list_node_t {
+    u! {
+
     list_pop_front(head)
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_list_first(head: *const list_node_t) -> *mut list_node_t {
+pub extern "C" fn xv6_list_first(head: *const list_node_t) -> *mut list_node_t {
+    u! {
+
     list_first(head)
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_list_last(head: *const list_node_t) -> *mut list_node_t {
+pub extern "C" fn xv6_list_last(head: *const list_node_t) -> *mut list_node_t {
+    u! {
+
     list_last(head)
+
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Page-union access for slab pages.
 // ---------------------------------------------------------------------------
 #[inline]
-unsafe fn page_flags_raw(page: *mut page_struct) -> u64 {
+fn page_flags_raw(page: *mut page_struct)-> u64  { u! {
     (*page).__bindgen_anon_1.flags
-}
+}}
 #[inline]
-unsafe fn page_is_type(page: *mut page_struct, ty: u64) -> bool {
+fn page_is_type(page: *mut page_struct, ty: u64)-> bool  { u! {
     (page_flags_raw(page) & PAGE_FLAG_TYPE_MASK) == (ty & PAGE_FLAG_TYPE_MASK)
-}
+}}
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_page_attach(
+pub extern "C" fn xv6_slab_page_attach(
     head: *mut page_struct,
     slab: *mut slab_t,
     order: u32,
 ) {
+    u! {
+
     // head[0].slab.slab = slab; head[0].slab.order = order;
     let slab_var = &raw mut (*head).__bindgen_anon_2.slab;
     (*slab_var).slab = slab;
@@ -514,16 +599,24 @@ pub unsafe extern "C" fn xv6_slab_page_attach(
         let tail_var = &raw mut (*p).__bindgen_anon_2.tail;
         (*tail_var).head_page = head;
     }
+
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_page_set_order(head: *mut page_struct, order: u32) {
+pub extern "C" fn xv6_slab_page_set_order(head: *mut page_struct, order: u32) {
+    u! {
+
     let slab_var = &raw mut (*head).__bindgen_anon_2.slab;
     (*slab_var).order = order;
+
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_find_obj_slab(ptr: *mut c_void) -> *mut slab_t {
+pub extern "C" fn xv6_slab_find_obj_slab(ptr: *mut c_void) -> *mut slab_t {
+    u! {
+
     if ptr.is_null() {
         return core::ptr::null_mut();
     }
@@ -549,11 +642,17 @@ pub unsafe extern "C" fn xv6_slab_find_obj_slab(ptr: *mut c_void) -> *mut slab_t
         return core::ptr::null_mut();
     }
     (*slab_var).slab
+
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_page_type_slab_value() -> u64 {
+pub extern "C" fn xv6_page_type_slab_value() -> u64 {
+    u! {
+
     PAGE_TYPE_SLAB
+
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -572,15 +671,25 @@ static LOG_FROM_FREE_3: &[u8] =
 static LOG_FROM_FREE_4: &[u8] = b"  cache->global_free_count=%ld\n\0";
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_log_free_null(fname: *const c_char) {
+pub extern "C" fn xv6_slab_log_free_null(fname: *const c_char) {
+    u! {
+
     printf(LOG_FREE_NULL.as_ptr() as *const c_char, fname);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_log_no_slab(fname: *const c_char, obj: *mut c_void) {
+pub extern "C" fn xv6_slab_log_no_slab(fname: *const c_char, obj: *mut c_void) {
+    u! {
+
     printf(LOG_NO_SLAB.as_ptr() as *const c_char, fname, obj);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_log_unattached(slab: *mut slab_t, obj: *mut c_void) {
+pub extern "C" fn xv6_slab_log_unattached(slab: *mut slab_t, obj: *mut c_void) {
+    u! {
+
     printf(LOG_UNATTACHED_1.as_ptr() as *const c_char, slab, obj);
     let cpu_id = AtomicI32::from_ptr(&raw mut (*slab).cpu_id).load(Ordering::Acquire);
     printf(
@@ -590,14 +699,18 @@ pub unsafe extern "C" fn xv6_slab_log_unattached(slab: *mut slab_t, obj: *mut c_
         (*slab).state as c_int,
         cpu_id,
     );
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_log_from_free(
+pub extern "C" fn xv6_slab_log_from_free(
     obj: *mut c_void,
     slab: *mut slab_t,
     cache: *mut slab_cache_t,
     cpu_id: c_int,
 ) {
+    u! {
+
     printf(LOG_FROM_FREE_1.as_ptr() as *const c_char);
     printf(LOG_FROM_FREE_2.as_ptr() as *const c_char, obj, slab, (*cache).name);
     printf(
@@ -608,22 +721,36 @@ pub unsafe extern "C" fn xv6_slab_log_from_free(
     );
     let gfc = AtomicI64::from_ptr(&raw mut (*cache).global_free_count).load(Ordering::Acquire);
     printf(LOG_FROM_FREE_4.as_ptr() as *const c_char, gfc);
+
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_panic(msg: *const c_char) -> ! {
+pub extern "C" fn xv6_slab_panic(msg: *const c_char) -> ! {
+    u! {
+
     static PANIC_FMT: &[u8] = b"%s\n\0";
     __panic_start();
     printf(PANIC_FMT.as_ptr() as *const c_char, msg);
     __panic_end()
+
+    }
 }
 
 // Page lock pass-throughs (some Rust modules declare these as extern).
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_page_lock_acquire(p: *mut page_struct) {
+pub extern "C" fn xv6_slab_page_lock_acquire(p: *mut page_struct) {
+    u! {
+
     page_lock_acquire(p)
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_slab_page_lock_release(p: *mut page_struct) {
+pub extern "C" fn xv6_slab_page_lock_release(p: *mut page_struct) {
+    u! {
+
     page_lock_release(p)
+
+    }
 }

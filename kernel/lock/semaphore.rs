@@ -2,6 +2,13 @@
 
 #![allow(non_camel_case_types, non_snake_case)]
 
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
+
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr::{addr_of_mut, null_mut};
 use core::sync::atomic::{AtomicI32, Ordering};
@@ -55,19 +62,19 @@ unsafe extern "C" {
 #[inline(always)]
 fn lk_ptr(s: *mut sem_t) -> *mut spinlock_t {
     // SAFETY: caller passes a structurally-valid semaphore.
-    unsafe { addr_of_mut!((*s).lk) }
+    u! { addr_of_mut!((*s).lk) }
 }
 #[inline(always)]
 fn wq_ptr(s: *mut sem_t) -> *mut tq_t {
     // SAFETY: see `lk_ptr`.
-    unsafe { addr_of_mut!((*s).wait_queue) }
+    u! { addr_of_mut!((*s).wait_queue) }
 }
 #[inline(always)]
 fn value_atomic<'a>(s: *mut sem_t) -> &'a AtomicI32 {
     // SAFETY: `value` is a `c_int` (4-byte aligned), and we model
     // it as an `AtomicI32` for SeqCst load/store/RMW. Caller asserts
     // pointer validity.
-    unsafe { &*(addr_of_mut!((*s).value) as *const AtomicI32) }
+    u! { &*(addr_of_mut!((*s).value) as *const AtomicI32) }
 }
 #[inline(always)]
 fn value_inc(s: *mut sem_t) -> c_int {
@@ -84,22 +91,22 @@ fn value_get(s: *mut sem_t) -> c_int {
 #[inline(always)]
 fn name_of(s: *mut sem_t) -> *const c_char {
     // SAFETY: structurally valid sem; `name` is a pointer field.
-    unsafe { (*s).name }
+    u! { (*s).name }
 }
 #[inline(always)]
 fn set_name_value(s: *mut sem_t, n: *const c_char, value: c_int) {
     // SAFETY: caller has exclusive access at init time.
-    unsafe { (*s).name = n; (*s).value = value; }
+    u! { (*s).name = n; (*s).value = value; }
 }
 
 /// Centralised variadic-printf wrapper for the one error message in
-/// `sem_wait` — the body is the only `unsafe { ... }` block needed
+/// `sem_wait` — the body is the only `u! { ... }` block needed
 /// in the public API path.
 #[inline(always)]
 fn printf_post_failed(name: *const c_char) {
     // SAFETY: format string is a static NUL-terminated literal;
     // `name` is a pointer field of a semaphore (always valid C string).
-    unsafe {
+    u! {
         printf(
             b"Failed to post semaphore '%s' when thread was interrupted\n\0"
                 .as_ptr() as *const c_char,
@@ -122,7 +129,7 @@ struct SemTimedCtx {
 impl SemTimedCtx {
     #[inline(always)]
     unsafe fn from_raw<'a>(data: *mut c_void) -> Option<&'a mut Self> {
-        if data.is_null() { None } else { Some(unsafe { &mut *(data as *mut Self) }) }
+        if data.is_null() { None } else { Some(u! { &mut *(data as *mut Self) }) }
     }
     #[inline(always)] fn sem_ptr(&self) -> *mut sem_t { self.sem }
     #[inline(always)] fn timer_node_ptr(&mut self) -> *mut timer_node { addr_of_mut!(self.timer) }
@@ -131,9 +138,9 @@ impl SemTimedCtx {
     #[inline(always)] fn set_armed(&mut self, v: bool) { self.timer_armed = v; }
 }
 
-unsafe extern "C" fn sem_timed_sleep_cb(data: *mut c_void) -> c_int {
+extern "C" fn sem_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
     // SAFETY: see `SemTimedCtx::from_raw`.
-    let ctx = match unsafe { SemTimedCtx::from_raw(data) } {
+    let ctx = match u! { SemTimedCtx::from_raw(data) } {
         Some(c) => c, None => return 0,
     };
     let sem = ctx.sem_ptr();
@@ -152,11 +159,11 @@ unsafe extern "C" fn sem_timed_sleep_cb(data: *mut c_void) -> c_int {
         spin_unlock(lk_ptr(sem));
     }
     status
-}
+}}
 
-unsafe extern "C" fn sem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) {
+extern "C" fn sem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! {
     // SAFETY: see `SemTimedCtx::from_raw`.
-    let ctx = match unsafe { SemTimedCtx::from_raw(data) } {
+    let ctx = match u! { SemTimedCtx::from_raw(data) } {
         Some(c) => c, None => return,
     };
     let sem = ctx.sem_ptr();
@@ -169,7 +176,7 @@ unsafe extern "C" fn sem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int
     if sleep_cb_status != 0 {
         spin_lock(lk_ptr(sem));
     }
-}
+}}
 
 // ---------------------------------------------------------------------------
 // Wake one waiter; mirrors C `__sem_do_post`. Caller holds `sem->lk`.
@@ -202,7 +209,7 @@ fn sem_do_post(s: *mut sem_t) -> c_int {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int) -> c_int {
+pub extern "C" fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     if value < 0 { return -(EINVAL as c_int); }
     let n = if name.is_null() {
@@ -216,10 +223,10 @@ pub unsafe extern "C" fn sem_init(s: *mut sem_t, name: *const c_char, value: c_i
             b"semaphore wait queue\0".as_ptr() as *const c_char,
             lk_ptr(s));
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn sem_trywait(s: *mut sem_t) -> c_int {
+pub extern "C" fn sem_trywait(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     if value_get(s) > 0 {
@@ -227,10 +234,10 @@ pub unsafe extern "C" fn sem_trywait(s: *mut sem_t) -> c_int {
         return 0;
     }
     -(EAGAIN as c_int)
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn sem_wait(s: *mut sem_t) -> c_int {
+pub extern "C" fn sem_wait(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
 
@@ -250,10 +257,10 @@ pub unsafe extern "C" fn sem_wait(s: *mut sem_t) -> c_int {
         }
     }
     ret
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn sem_wait_interruptible(s: *mut sem_t) -> c_int {
+pub extern "C" fn sem_wait_interruptible(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     loop {
@@ -263,10 +270,10 @@ pub unsafe extern "C" fn sem_wait_interruptible(s: *mut sem_t) -> c_int {
         if signal_pending(cur) != 0 { return -(EINTR as c_int); }
         sleep_ms(1);
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn sem_timedwait(s: *mut sem_t, timeout_ms: u64) -> c_int {
+pub extern "C" fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
 
@@ -287,7 +294,7 @@ pub unsafe extern "C" fn sem_timedwait(s: *mut sem_t, timeout_ms: u64) -> c_int 
     let mut ctx = SemTimedCtx {
         sem: s,
         // SAFETY: zero-init of `timer_node` matches C `.timer = {0}`.
-        timer: unsafe { core::mem::zeroed() },
+        timer: u! { core::mem::zeroed() },
         timeout_ms,
         timer_armed: false,
     };
@@ -305,7 +312,7 @@ pub unsafe extern "C" fn sem_timedwait(s: *mut sem_t, timeout_ms: u64) -> c_int 
         let wake_ret = sem_do_post(s);
         if wake_ret != 0 && wake_ret != -(ENOENT as c_int) {
             // SAFETY: variadic printf.
-            unsafe {
+            u! {
                 printf(
                     b"Failed to post semaphore '%s' after timed wait wakeup\n\0"
                         .as_ptr() as *const c_char,
@@ -318,26 +325,26 @@ pub unsafe extern "C" fn sem_timedwait(s: *mut sem_t, timeout_ms: u64) -> c_int 
         }
     }
     ret
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn sem_post(s: *mut sem_t) -> c_int {
+pub extern "C" fn sem_post(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     if value_get(s) == SEM_VALUE_MAX { return -(EOVERFLOW as c_int); }
     let ret = sem_do_post(s);
     if ret == -(ENOENT as c_int) { 0 } else { ret }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn sem_getvalue(s: *mut sem_t, value: *mut c_int) -> c_int {
+pub extern "C" fn sem_getvalue(s: *mut sem_t, value: *mut c_int)-> c_int  { u! {
     if s.is_null() || value.is_null() { return -(EINVAL as c_int); }
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     let v = value_get(s);
     // SAFETY: caller-supplied out-pointer.
-    unsafe { *value = v; }
+    u! { *value = v; }
     0
-}
+}}
 
 // ===========================================================================
 // Rust-native typed handle
@@ -389,7 +396,7 @@ impl KSemaphore {
     #[inline]
     pub fn init(self, name: *const c_char, value: c_int) -> Result<(), SemError> {
         // SAFETY: handle wraps live storage; `name` validity per caller.
-        let r = unsafe { sem_init(self.raw, name, value) };
+        let r = u! { sem_init(self.raw, name, value) };
         if r == 0 { Ok(()) } else { Err(map_sem_err(r)) }
     }
 
@@ -397,7 +404,7 @@ impl KSemaphore {
     #[inline]
     pub fn try_wait(self) -> Result<(), SemError> {
         // SAFETY: see `init`.
-        let r = unsafe { sem_trywait(self.raw) };
+        let r = u! { sem_trywait(self.raw) };
         if r == 0 { Ok(()) } else { Err(map_sem_err(r)) }
     }
 
@@ -405,7 +412,7 @@ impl KSemaphore {
     #[inline]
     pub fn wait(self) -> Result<(), SemError> {
         // SAFETY: see `init`.
-        let r = unsafe { sem_wait(self.raw) };
+        let r = u! { sem_wait(self.raw) };
         if r == 0 { Ok(()) } else { Err(map_sem_err(r)) }
     }
 
@@ -413,7 +420,7 @@ impl KSemaphore {
     #[inline]
     pub fn wait_interruptible(self) -> Result<(), SemError> {
         // SAFETY: see `init`.
-        let r = unsafe { sem_wait_interruptible(self.raw) };
+        let r = u! { sem_wait_interruptible(self.raw) };
         if r == 0 { Ok(()) } else { Err(map_sem_err(r)) }
     }
 
@@ -421,7 +428,7 @@ impl KSemaphore {
     #[inline]
     pub fn timed_wait(self, timeout_ms: u64) -> Result<(), SemError> {
         // SAFETY: see `init`.
-        let r = unsafe { sem_timedwait(self.raw, timeout_ms) };
+        let r = u! { sem_timedwait(self.raw, timeout_ms) };
         if r == 0 { Ok(()) } else { Err(map_sem_err(r)) }
     }
 
@@ -429,7 +436,7 @@ impl KSemaphore {
     #[inline]
     pub fn post(self) -> Result<(), SemError> {
         // SAFETY: see `init`.
-        let r = unsafe { sem_post(self.raw) };
+        let r = u! { sem_post(self.raw) };
         if r == 0 { Ok(()) } else { Err(map_sem_err(r)) }
     }
 
@@ -438,7 +445,7 @@ impl KSemaphore {
     pub fn value(self) -> Result<c_int, SemError> {
         let mut v: c_int = 0;
         // SAFETY: see `init`; `&mut v` is a valid out-pointer.
-        let r = unsafe { sem_getvalue(self.raw, &mut v) };
+        let r = u! { sem_getvalue(self.raw, &mut v) };
         if r == 0 { Ok(v) } else { Err(map_sem_err(r)) }
     }
 }

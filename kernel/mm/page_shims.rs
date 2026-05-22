@@ -13,6 +13,13 @@
 #![allow(non_snake_case)]
 #![allow(non_upper_case_globals)]
 
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
+
 use core::ffi::{c_char, c_int, c_void};
 use core::mem::{align_of, size_of};
 
@@ -81,34 +88,58 @@ use ffi::*;
 // (2) Platform info accessors used by Rust during init (page.rs).
 // ---------------------------------------------------------------------------
 #[no_mangle]
-pub unsafe extern "C" fn xv6_platform_has_ramdisk() -> c_int {
+pub extern "C" fn xv6_platform_has_ramdisk() -> c_int {
+    u! {
+
     platform.has_ramdisk
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_platform_ramdisk_base() -> u64 {
+pub extern "C" fn xv6_platform_ramdisk_base() -> u64 {
+    u! {
+
     platform.ramdisk_base
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_platform_ramdisk_size() -> u64 {
+pub extern "C" fn xv6_platform_ramdisk_size() -> u64 {
+    u! {
+
     platform.ramdisk_size
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_platform_reserved_count() -> c_int {
+pub extern "C" fn xv6_platform_reserved_count() -> c_int {
+    u! {
+
     platform.reserved_count
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_platform_reserved_base(i: c_int) -> u64 {
+pub extern "C" fn xv6_platform_reserved_base(i: c_int) -> u64 {
+    u! {
+
     if i < 0 || i >= platform.reserved_count {
         return 0;
     }
     (*platform.reserved.offset(i as isize)).base
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_platform_reserved_size(i: c_int) -> u64 {
+pub extern "C" fn xv6_platform_reserved_size(i: c_int) -> u64 {
+    u! {
+
     if i < 0 || i >= platform.reserved_count {
         return 0;
     }
     (*platform.reserved.offset(i as isize)).size
+
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -127,44 +158,84 @@ static FMT_MANAGED_RANGE: &[u8] = b"__managed_start: 0x%lx, __managed_end: 0x%lx
 static FMT_BUDDY_RANGE: &[u8] = b"buddy init range: 0x%lx - 0x%lx\n\0";
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_init_range(s: u64, e: u64, f: u64) {
+pub extern "C" fn xv6_buddy_log_init_range(s: u64, e: u64, f: u64) {
+    u! {
+
     printf(FMT_INIT_RANGE.as_ptr() as *const c_char, s, e, f);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_init_invalid_range(s: u64, e: u64) {
+pub extern "C" fn xv6_buddy_log_init_invalid_range(s: u64, e: u64) {
+    u! {
+
     printf(FMT_INVALID_RANGE.as_ptr() as *const c_char, s, e);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_init_invalid_base(s: u64, e: u64) {
+pub extern "C" fn xv6_buddy_log_init_invalid_base(s: u64, e: u64) {
+    u! {
+
     printf(FMT_INVALID_BASE.as_ptr() as *const c_char, s, e);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_init_invalid_flags(f: u64) {
+pub extern "C" fn xv6_buddy_log_init_invalid_flags(f: u64) {
+    u! {
+
     printf(FMT_INVALID_FLAGS.as_ptr() as *const c_char, f);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_init_get_page(pa: u64) {
+pub extern "C" fn xv6_buddy_log_init_get_page(pa: u64) {
+    u! {
+
     printf(FMT_GET_PAGE.as_ptr() as *const c_char, pa);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_reserved_out_of_range(s: u64, e: u64) {
+pub extern "C" fn xv6_buddy_log_reserved_out_of_range(s: u64, e: u64) {
+    u! {
+
     printf(FMT_RESERVED_OOR.as_ptr() as *const c_char, s, e);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_reserving(s: u64, e: u64) {
+pub extern "C" fn xv6_buddy_log_reserving(s: u64, e: u64) {
+    u! {
+
     printf(FMT_RESERVING.as_ptr() as *const c_char, s, e);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_init_summary(p: *mut c_void, sz: usize) {
+pub extern "C" fn xv6_buddy_log_init_summary(p: *mut c_void, sz: usize) {
+    u! {
+
     printf(FMT_INIT_SUMMARY.as_ptr() as *const c_char, p as u64, sz as u64);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_init_range_phys(s: u64, e: u64) {
+pub extern "C" fn xv6_buddy_log_init_range_phys(s: u64, e: u64) {
+    u! {
+
     printf(FMT_MANAGED_RANGE.as_ptr() as *const c_char, s, e);
+
+    }
 }
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_log_buddy_range(s: u64, e: u64) {
+pub extern "C" fn xv6_buddy_log_buddy_range(s: u64, e: u64) {
+    u! {
+
     printf(FMT_BUDDY_RANGE.as_ptr() as *const c_char, s, e);
+
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,16 +244,20 @@ pub unsafe extern "C" fn xv6_buddy_log_buddy_range(s: u64, e: u64) {
 static PANIC_FMT: &[u8] = b"%s\n\0";
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_panic(msg: *const c_char) -> ! {
+pub extern "C" fn xv6_buddy_panic(msg: *const c_char) -> ! {
+    u! {
+
     __panic_start();
     printf(PANIC_FMT.as_ptr() as *const c_char, msg);
     __panic_end()
+
+    }
 }
 
 // ---------------------------------------------------------------------------
 // (5) Statistics helpers.
 // ---------------------------------------------------------------------------
-unsafe fn print_size(bytes: u64) {
+fn print_size(bytes: u64) { u! {
     static F_G: &[u8] = b"%ld.%ldG\0";
     static F_M: &[u8] = b"%ld.%ldM\0";
     static F_K: &[u8] = b"%ldK\0";
@@ -201,7 +276,7 @@ unsafe fn print_size(bytes: u64) {
     } else {
         printf(F_B.as_ptr() as *const c_char, bytes);
     }
-}
+}}
 const ORDER_COUNT: usize = (PAGE_BUDDY_MAX_ORDER + 1) as usize;
 
 fn buddy_stat_totals(
@@ -235,7 +310,9 @@ fn buddy_stat_totals(
     }
 }
 #[no_mangle]
-pub unsafe extern "C" fn print_buddy_system_stat(detailed: c_int) {
+pub extern "C" fn print_buddy_system_stat(detailed: c_int) {
+    u! {
+
     static F_SUMMARY: &[u8] = b"Buddy: %ld free + %ld cached = %ld pages (\0";
     static F_HDR: &[u8] = b"Buddy System Statistics:\n\0";
     static F_BAR: &[u8] = b"========================\n\0";
@@ -306,6 +383,8 @@ pub unsafe extern "C" fn print_buddy_system_stat(detailed: c_int) {
     );
     print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
     printf(F_CLOSE.as_ptr() as *const c_char);
+
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -316,19 +395,21 @@ pub unsafe extern "C" fn print_buddy_system_stat(detailed: c_int) {
 static FMT_PREVNEXT: &[u8] = b"prev page: %p, next page: %p\n\0";
 static FMT_ENTRY: &[u8] = b"count = %d, buddy page: %p, order: %d, physical: 0x%lx\n\0";
 
-unsafe fn page_from_lru_entry(node: *mut list_node_t) -> *mut Page {
+fn page_from_lru_entry(node: *mut list_node_t)-> *mut Page  { u! {
     // The `lru_entry` lives at the start of Page::union_bytes, which sits
     // at byte offset 48 of `Page` (see page.rs L84-93).
     (node as *mut u8).wrapping_sub(48) as *mut Page
-}
-unsafe fn assert_msg(cond: bool, msg: &'static [u8]) {
+}}
+fn assert_msg(cond: bool, msg: &'static [u8]) { u! {
     if !cond {
         xv6_buddy_panic(msg.as_ptr() as *const c_char);
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn check_buddy_system_integrity() {
+pub extern "C" fn check_buddy_system_integrity() {
+    u! {
+
     let mut total_free_pages: u64 = 0;
     xv6_buddy_pool_lock_range_all();
     for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
@@ -397,6 +478,8 @@ pub unsafe extern "C" fn check_buddy_system_integrity() {
     }
     xv6_buddy_pool_unlock_range_all();
     let _ = total_free_pages;
+
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +491,9 @@ static FMT_USED_LABEL: &[u8] = b"Used: \0";
 static FMT_NEWLINE_ONLY: &[u8] = b"\n\0";
 
 #[no_mangle]
-pub unsafe extern "C" fn sys_memstat() -> u64 {
+pub extern "C" fn sys_memstat() -> u64 {
+    u! {
+
     let mut flags_arg: c_int = 0;
     argint(0, &mut flags_arg);
     let flags = flags_arg as u32;
@@ -468,4 +553,6 @@ pub unsafe extern "C" fn sys_memstat() -> u64 {
         ret += used_bytes;
     }
     ret
+
+    }
 }

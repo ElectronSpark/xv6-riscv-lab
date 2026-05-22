@@ -12,6 +12,13 @@
 //!   3. page lock
 //!   4. tree_lock (rwlock)
 
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
+
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
@@ -419,7 +426,7 @@ fn pcache_flusher_done() {
 // ---------------------------------------------------------------------------
 // Workqueue worker
 // ---------------------------------------------------------------------------
-unsafe extern "C" fn pcache_flush_worker(work: *mut WorkStruct) {
+extern "C" fn pcache_flush_worker(work: *mut WorkStruct) { u! {
     let p = xv6_pcache_work_data(work) as *mut Pcache;
     let start_jiffs = xv6_pcache_get_jiffs();
 
@@ -481,7 +488,7 @@ unsafe extern "C" fn pcache_flush_worker(work: *mut WorkStruct) {
     }
     pcache_flush_done(p);
     xv6_pcache_spin_unlock(p);
-}
+}}
 
 /// err_continue arm of the flush worker (assumes spinlock held).
 fn flush_err_continue(p: *mut Pcache, page: *mut Page) {
@@ -594,7 +601,7 @@ fn pcache_wait_for_pending_flushes() {
     }
 }
 
-unsafe extern "C" fn flusher_thread(_a1: u64, _a2: u64) {
+extern "C" fn flusher_thread(_a1: u64, _a2: u64) { u! {
     xv6_pcache_printf_flusher_started();
     loop {
         let round_start = xv6_pcache_get_jiffs();
@@ -615,7 +622,7 @@ unsafe extern "C" fn flusher_thread(_a1: u64, _a2: u64) {
         if sleep_ms_val == 0 { sleep_ms_val = 1; }
         xv6_pcache_sleep_ms(sleep_ms_val);
     }
-}
+}}
 
 fn create_flusher_thread() {
     let name = b"pcache_flusher\0".as_ptr() as *const c_char;
@@ -924,8 +931,8 @@ fn pcache_evict_lru(p: *mut Pcache) -> *mut Page {
 // ===========================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_global_init() {
-    extern "C" { fn xv6_pcache_globals_init(); }
+pub extern "C" fn pcache_global_init() { u! {
+    unsafe extern "C" { fn xv6_pcache_globals_init(); }
     xv6_pcache_globals_init();
     let ret = xv6_pcache_node_slab_init();
     assert_msg(ret == 0, b"Failed to initialize pcache node slab\0");
@@ -936,10 +943,10 @@ pub unsafe extern "C" fn pcache_global_init() {
     xv6_pcache_global_flusher_completion_init();
     xv6_pcache_global_flusher_complete_all();
     create_flusher_thread();
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_init(p: *mut Pcache) -> c_int {
+pub extern "C" fn pcache_init(p: *mut Pcache)-> c_int  { u! {
     let ret = pcache_init_validate(p);
     if ret != 0 { return ret; }
     xv6_pcache_list_entries_init(p);
@@ -972,10 +979,10 @@ pub unsafe extern "C" fn pcache_init(p: *mut Pcache) -> c_int {
     xv6_pcache_set_last_request(p, now);
     pcache_register(p);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_teardown(p: *mut Pcache) {
+pub extern "C" fn pcache_teardown(p: *mut Pcache) { u! {
     if p.is_null() { return; }
 
     // 1. unregister
@@ -1041,10 +1048,10 @@ pub unsafe extern "C" fn pcache_teardown(p: *mut Pcache) {
     xv6_pcache_set_dirty_count(p, 0);
     xv6_pcache_tree_wunlock(p);
     xv6_pcache_spin_unlock(p);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_get_page(p: *mut Pcache, blkno: u64) -> *mut Page {
+pub extern "C" fn pcache_get_page(p: *mut Pcache, blkno: u64)-> *mut Page  { u! {
     if p.is_null() || !pcache_is_active(p) { return ptr::null_mut(); }
     let base_blkno = xv6_pcache_align_blkno(blkno);
     let blk_count = xv6_pcache_blk_count(p);
@@ -1152,10 +1159,10 @@ pub unsafe extern "C" fn pcache_get_page(p: *mut Pcache, blkno: u64) -> *mut Pag
         xv6_pcache_spin_unlock(p);
         return new_page;
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_put_page(p: *mut Pcache, page: *mut Page) {
+pub extern "C" fn pcache_put_page(p: *mut Pcache, page: *mut Page) { u! {
     if p.is_null() || page.is_null() { return; }
 
     xv6_pcache_spin_lock(p);
@@ -1214,10 +1221,10 @@ pub unsafe extern "C" fn pcache_put_page(p: *mut Pcache, page: *mut Page) {
 
     xv6_pcache_page_lock_release(page);
     xv6_pcache_spin_unlock(p);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_mark_page_dirty(p: *mut Pcache, page: *mut Page) -> c_int {
+pub extern "C" fn pcache_mark_page_dirty(p: *mut Pcache, page: *mut Page)-> c_int  { u! {
     if p.is_null() || page.is_null() { return -xv6_einval(); }
     let mut ret: c_int = 0;
 
@@ -1248,10 +1255,10 @@ pub unsafe extern "C" fn pcache_mark_page_dirty(p: *mut Pcache, page: *mut Page)
     xv6_pcache_page_lock_release(page);
     xv6_pcache_spin_unlock(p);
     ret
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_invalidate_page(p: *mut Pcache, page: *mut Page) -> c_int {
+pub extern "C" fn pcache_invalidate_page(p: *mut Pcache, page: *mut Page)-> c_int  { u! {
     if p.is_null() || page.is_null() { return -xv6_einval(); }
     let mut ret: c_int = 0;
     xv6_pcache_spin_lock(p);
@@ -1275,10 +1282,10 @@ pub unsafe extern "C" fn pcache_invalidate_page(p: *mut Pcache, page: *mut Page)
     xv6_pcache_page_lock_release(page);
     xv6_pcache_spin_unlock(p);
     ret
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_invalidate_blk(p: *mut Pcache, blkno: u64) -> c_int {
+pub extern "C" fn pcache_invalidate_blk(p: *mut Pcache, blkno: u64)-> c_int  { u! {
     if p.is_null() || !pcache_is_active(p) { return -xv6_einval(); }
     let base_blkno = xv6_pcache_align_blkno(blkno);
 
@@ -1313,10 +1320,10 @@ pub unsafe extern "C" fn pcache_invalidate_blk(p: *mut Pcache, blkno: u64) -> c_
     xv6_pcache_page_lock_release(page);
     xv6_pcache_spin_unlock(p);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_discard_blk(p: *mut Pcache, blkno: u64) -> c_int {
+pub extern "C" fn pcache_discard_blk(p: *mut Pcache, blkno: u64)-> c_int  { u! {
     if p.is_null() || !pcache_is_active(p) { return -xv6_einval(); }
     let base_blkno = xv6_pcache_align_blkno(blkno);
 
@@ -1358,10 +1365,10 @@ pub unsafe extern "C" fn pcache_discard_blk(p: *mut Pcache, blkno: u64) -> c_int
     xv6_pcache_node_free(pcnode);
     pcache_page_put(page);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_flush(p: *mut Pcache) -> c_int {
+pub extern "C" fn pcache_flush(p: *mut Pcache)-> c_int  { u! {
     if p.is_null() { return -xv6_einval(); }
     xv6_pcache_spin_lock(p);
     if !pcache_is_active(p) {
@@ -1377,18 +1384,18 @@ pub unsafe extern "C" fn pcache_flush(p: *mut Pcache) -> c_int {
     }
     xv6_pcache_spin_unlock(p);
     pcache_wait_flush_complete(p)
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_sync() -> c_int {
+pub extern "C" fn pcache_sync()-> c_int  { u! {
     xv6_pcache_global_spin_lock();
     pcache_flusher_start();
     xv6_pcache_global_spin_unlock();
     pcache_wait_flusher()
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_read_page(p: *mut Pcache, page: *mut Page) -> c_int {
+pub extern "C" fn pcache_read_page(p: *mut Pcache, page: *mut Page)-> c_int  { u! {
     if p.is_null() || page.is_null() { return -xv6_einval(); }
 
     'retry_locked: loop {
@@ -1479,14 +1486,14 @@ pub unsafe extern "C" fn pcache_read_page(p: *mut Pcache, page: *mut Page) -> c_
         let _ = pcache_node_io_end(p, page);
         return ret_post;
     }
-}
+}}
 
 // ===========================================================================
 // Diagnostics and syscall handlers
 // ===========================================================================
 
 #[no_mangle]
-pub unsafe extern "C" fn dump_pcache_stats(p: *mut Pcache) {
+pub extern "C" fn dump_pcache_stats(p: *mut Pcache) { u! {
     if p.is_null() { return; }
     xv6_pcache_spin_lock(p);
     xv6_pcache_printf_stats_header(p);
@@ -1502,10 +1509,10 @@ pub unsafe extern "C" fn dump_pcache_stats(p: *mut Pcache) {
         xv6_pcache_flush_error(p),
     );
     xv6_pcache_spin_unlock(p);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn dump_all_pcache_stats() {
+pub extern "C" fn dump_all_pcache_stats() { u! {
     xv6_pcache_global_spin_lock();
     xv6_pcache_printf_dump_all_header(xv6_pcache_get_global_count());
     let mut cur = xv6_pcache_global_first();
@@ -1515,24 +1522,24 @@ pub unsafe extern "C" fn dump_all_pcache_stats() {
         cur = next;
     }
     xv6_pcache_global_spin_unlock();
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn pcache_shrink_caches() {
+pub extern "C" fn pcache_shrink_caches() { u! {
     xv6_pcache_node_slab_shrink_all();
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn sys_sync() -> u64 {
+pub extern "C" fn sys_sync()-> u64  { u! {
     let ret = pcache_sync();
     if ret != 0 {
         xv6_pcache_printf_sys_sync_failed(ret);
     }
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn sys_dumppcache() -> u64 {
+pub extern "C" fn sys_dumppcache()-> u64  { u! {
     dump_all_pcache_stats();
     0
-}
+}}

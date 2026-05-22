@@ -13,6 +13,13 @@
 #![allow(non_snake_case)]
 #![allow(clippy::missing_safety_doc)]
 
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
+
 use core::ffi::{c_char, c_int, c_uint, c_void};
 use core::mem::{offset_of, size_of, MaybeUninit};
 use core::ptr::{addr_of, addr_of_mut, null_mut};
@@ -178,15 +185,15 @@ static PCACHE_GLOBAL_FLUSHER_RUNNING: SyncCell<bool> = SyncCell::new(false);
 #[inline]
 fn global_list_head() -> *mut list_node_t { PCACHE_GLOBAL_LIST.get() }
 #[inline]
-fn global_spinlock() -> *mut spinlock_t { unsafe {
+fn global_spinlock() -> *mut spinlock_t { u! {
     (*PCACHE_GLOBAL_SPINLOCK.get()).as_mut_ptr()
 } }
 #[inline]
-fn global_completion() -> *mut completion_t { unsafe {
+fn global_completion() -> *mut completion_t { u! {
     (*PCACHE_GLOBAL_FLUSHER_COMPLETION.get()).as_mut_ptr()
 } }
 #[inline]
-fn node_slab() -> *mut slab_cache_t { unsafe {
+fn node_slab() -> *mut slab_cache_t { u! {
     (*PCACHE_NODE_SLAB.get()).as_mut_ptr()
 } }
 
@@ -201,18 +208,18 @@ static PCACHE_FLUSH_WQ_NAME: &[u8] = b"pcache_flush_wq\0";
 // list_node_t helpers (replicate the inline C versions in kernel/inc/list.h)
 // ---------------------------------------------------------------------------
 #[inline]
-fn list_init(e: *mut list_node_t) { unsafe {
+fn list_init(e: *mut list_node_t) { u! {
     (*e).prev = e;
     (*e).next = e;
 } }
 #[inline]
-fn list_detach(e: *mut list_node_t) { unsafe {
+fn list_detach(e: *mut list_node_t) { u! {
     (*(*e).prev).next = (*e).next;
     (*(*e).next).prev = (*e).prev;
     list_init(e);
 } }
 #[inline]
-fn list_insert(prev: *mut list_node_t, e: *mut list_node_t) { unsafe {
+fn list_insert(prev: *mut list_node_t, e: *mut list_node_t) { u! {
     let next = (*prev).next;
     (*e).prev = prev;
     (*e).next = next;
@@ -220,350 +227,784 @@ fn list_insert(prev: *mut list_node_t, e: *mut list_node_t) { unsafe {
     (*next).prev = e;
 } }
 #[inline]
-unsafe fn list_push_front(head: *mut list_node_t, e: *mut list_node_t) {
+fn list_push_front(head: *mut list_node_t, e: *mut list_node_t) { u! {
     list_insert(head, e);
-}
+}}
 #[inline]
-unsafe fn list_is_empty(head: *mut list_node_t) -> bool {
+fn list_is_empty(head: *mut list_node_t)-> bool  { u! {
     (*head).next == head
-}
+}}
 #[inline]
-unsafe fn list_entry_is_detached(e: *mut list_node_t) -> bool {
+fn list_entry_is_detached(e: *mut list_node_t)-> bool  { u! {
     (*e).next == e
-}
+}}
 
 // container_of-style helpers
 #[inline]
-unsafe fn pcache_from_list_entry(node: *mut list_node_t) -> *mut pcache {
+fn pcache_from_list_entry(node: *mut list_node_t)-> *mut pcache  { u! {
     (node as *mut u8).wrapping_sub(offset_of!(pcache, list_entry)) as *mut pcache
-}
+}}
 #[inline]
-unsafe fn node_from_lru_entry(node: *mut list_node_t) -> *mut pcache_node {
+fn node_from_lru_entry(node: *mut list_node_t)-> *mut pcache_node  { u! {
     (node as *mut u8).wrapping_sub(offset_of!(pcache_node, lru_entry)) as *mut pcache_node
-}
+}}
 #[inline]
-unsafe fn node_from_tree_entry(node: *mut rb_node) -> *mut pcache_node {
+fn node_from_tree_entry(node: *mut rb_node)-> *mut pcache_node  { u! {
     (node as *mut u8).wrapping_sub(offset_of!(pcache_node, tree_entry)) as *mut pcache_node
-}
+}}
 // ---------------------------------------------------------------------------
 // Panic helper
 // ---------------------------------------------------------------------------
 static PANIC_PCACHE_FMT: &[u8] = b"PANIC: %s\n\0";
 
 #[inline]
-unsafe fn pcache_assert(cond: bool, msg: &'static [u8]) {
+fn pcache_assert(cond: bool, msg: &'static [u8]) { u! {
     if !cond {
         do_pcache_panic(msg.as_ptr() as *const c_char);
     }
-}
+}}
 #[inline(never)]
-unsafe fn do_pcache_panic(msg: *const c_char) -> ! {
+fn do_pcache_panic(msg: *const c_char)-> !  { u! {
     __panic_start();
     printf(PANIC_PCACHE_FMT.as_ptr() as *const c_char, msg);
     __panic_end()
-}
+}}
 // ---------------------------------------------------------------------------
 // One-shot global initialization invoked from pcache_global_init.
 // ---------------------------------------------------------------------------
 #[no_mangle]
-pub unsafe extern "C" fn xv6_pcache_globals_init() {
+pub extern "C" fn xv6_pcache_globals_init() {
+    u! {
+
     list_init(global_list_head());
     spin_init(global_spinlock(), SPINLOCK_NAME.as_ptr() as *const c_char);
+
+    }
 }
 
 // ===========================================================================
 // Constants exported as functions
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_blks_per_page() -> usize {
+#[no_mangle] pub extern "C" fn xv6_pcache_blks_per_page() -> usize {
+    u! {
+
     PGSIZE >> BLK_SIZE_SHIFT
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_blk_mask() -> u64 {
+#[no_mangle] pub extern "C" fn xv6_pcache_blk_mask() -> u64 {
+    u! {
+
     (PGSIZE as u64 >> BLK_SIZE_SHIFT) - 1
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_align_blkno(blkno: u64) -> u64 {
+#[no_mangle] pub extern "C" fn xv6_pcache_align_blkno(blkno: u64) -> u64 {
+    u! {
+
     blkno & !((PGSIZE as u64 >> BLK_SIZE_SHIFT) - 1)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_pgsize() -> usize { PGSIZE }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_size() -> usize {
+#[no_mangle] pub extern "C" fn xv6_pcache_pgsize() -> usize {
+    u! {
+ PGSIZE 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_size() -> usize {
+    u! {
+
     size_of::<pcache_node>()
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flush_interval_jiffs() -> u64 {
+#[no_mangle] pub extern "C" fn xv6_pcache_flush_interval_jiffs() -> u64 {
+    u! {
+
     PCACHE_FLUSH_INTERVAL_JIFFS
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_default_dirty_rate() -> u8 {
+#[no_mangle] pub extern "C" fn xv6_pcache_default_dirty_rate() -> u8 {
+    u! {
+
     PCACHE_DEFAULT_DIRTY_RATE
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_default_max_pages() -> u64 {
+#[no_mangle] pub extern "C" fn xv6_pcache_default_max_pages() -> u64 {
+    u! {
+
     PCACHE_DEFAULT_MAX_PAGES
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_hz() -> u64 { HZ }
-#[no_mangle] pub unsafe extern "C" fn xv6_kernel_stack_order() -> c_int { KERNEL_STACK_ORDER }
-#[no_mangle] pub unsafe extern "C" fn xv6_workqueue_default_max_active() -> c_int {
+#[no_mangle] pub extern "C" fn xv6_hz() -> u64 {
+    u! {
+ HZ 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_kernel_stack_order() -> c_int {
+    u! {
+ KERNEL_STACK_ORDER 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_workqueue_default_max_active() -> c_int {
+    u! {
+
     WORKQUEUE_DEFAULT_MAX_ACTIVE
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_page_type_pcache_value() -> c_int { PAGE_TYPE_PCACHE }
-#[no_mangle] pub unsafe extern "C" fn xv6_einval() -> c_int { EINVAL as c_int }
-#[no_mangle] pub unsafe extern "C" fn xv6_ebusy() -> c_int { EBUSY as c_int }
-#[no_mangle] pub unsafe extern "C" fn xv6_eintr() -> c_int { EINTR as c_int }
-#[no_mangle] pub unsafe extern "C" fn xv6_eio() -> c_int { EIO as c_int }
-#[no_mangle] pub unsafe extern "C" fn xv6_eagain() -> c_int { EAGAIN as c_int }
-#[no_mangle] pub unsafe extern "C" fn xv6_enoent() -> c_int { ENOENT as c_int }
-#[no_mangle] pub unsafe extern "C" fn xv6_einprogress() -> c_int { EINPROGRESS as c_int }
-#[no_mangle] pub unsafe extern "C" fn xv6_ealready() -> c_int { EALREADY as c_int }
+#[no_mangle] pub extern "C" fn xv6_page_type_pcache_value() -> c_int {
+    u! {
+ PAGE_TYPE_PCACHE 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_einval() -> c_int {
+    u! {
+ EINVAL as c_int 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_ebusy() -> c_int {
+    u! {
+ EBUSY as c_int 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_eintr() -> c_int {
+    u! {
+ EINTR as c_int 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_eio() -> c_int {
+    u! {
+ EIO as c_int 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_eagain() -> c_int {
+    u! {
+ EAGAIN as c_int 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_enoent() -> c_int {
+    u! {
+ ENOENT as c_int 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_einprogress() -> c_int {
+    u! {
+ EINPROGRESS as c_int 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_ealready() -> c_int {
+    u! {
+ EALREADY as c_int 
+    }
+}
 
 // ===========================================================================
 // Globals accessors
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_list_head() -> *mut list_node_t {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_list_head() -> *mut list_node_t {
+    u! {
+
     global_list_head()
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_spinlock() -> *mut spinlock_t {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_spinlock() -> *mut spinlock_t {
+    u! {
+
     global_spinlock()
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_slab() -> *mut slab_cache_t {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_slab() -> *mut slab_cache_t {
+    u! {
+
     node_slab()
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_flusher_completion() -> *mut completion_t {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_flusher_completion() -> *mut completion_t {
+    u! {
+
     global_completion()
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_get_flusher_thread() -> *mut thread {
+#[no_mangle] pub extern "C" fn xv6_pcache_get_flusher_thread() -> *mut thread {
+    u! {
+
     *PCACHE_FLUSHER_THREAD_PCB.get()
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_flusher_thread(t: *mut thread) {
+#[no_mangle] pub extern "C" fn xv6_pcache_set_flusher_thread(t: *mut thread) {
+    u! {
+
     *PCACHE_FLUSHER_THREAD_PCB.get() = t;
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_get_flush_wq() -> *mut workqueue {
+#[no_mangle] pub extern "C" fn xv6_pcache_get_flush_wq() -> *mut workqueue {
+    u! {
+
     *PCACHE_GLOBAL_FLUSH_WQ.get()
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_flush_wq(wq: *mut workqueue) {
+#[no_mangle] pub extern "C" fn xv6_pcache_set_flush_wq(wq: *mut workqueue) {
+    u! {
+
     *PCACHE_GLOBAL_FLUSH_WQ.get() = wq;
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_get_global_count() -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_get_global_count() -> c_int {
+    u! {
+
     *PCACHE_GLOBAL_COUNT.get()
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_inc_global_count() {
+#[no_mangle] pub extern "C" fn xv6_pcache_inc_global_count() {
+    u! {
+
     *PCACHE_GLOBAL_COUNT.get() += 1;
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_dec_global_count() {
+#[no_mangle] pub extern "C" fn xv6_pcache_dec_global_count() {
+    u! {
+
     let c = PCACHE_GLOBAL_COUNT.get();
     if *c > 0 { *c -= 1; }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_get_flusher_running() -> bool {
+#[no_mangle] pub extern "C" fn xv6_pcache_get_flusher_running() -> bool {
+    u! {
+
     *PCACHE_GLOBAL_FLUSHER_RUNNING.get()
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_flusher_running(v: bool) {
+#[no_mangle] pub extern "C" fn xv6_pcache_set_flusher_running(v: bool) {
+    u! {
+
     *PCACHE_GLOBAL_FLUSHER_RUNNING.get() = v;
+
+    }
 }
 
 // ===========================================================================
 // pcache lock / list accessors
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_spinlock(p: *mut pcache) -> *mut spinlock_t {
+#[no_mangle] pub extern "C" fn xv6_pcache_spinlock(p: *mut pcache) -> *mut spinlock_t {
+    u! {
+
     addr_of_mut!((*p).spinlock)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_spin_init(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_spin_init(p: *mut pcache) {
+    u! {
+
     spin_init(addr_of_mut!((*p).spinlock), PCACHE_LOCK_NAME.as_ptr() as *const c_char);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_spin_lock(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_spin_lock(p: *mut pcache) {
+    u! {
+
     spin_lock(addr_of_mut!((*p).spinlock));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_spin_unlock(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_spin_unlock(p: *mut pcache) {
+    u! {
+
     spin_unlock(addr_of_mut!((*p).spinlock));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_spin_assert_holding(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_spin_assert_holding(p: *mut pcache) {
+    u! {
+
     pcache_assert(spin_holding(addr_of_mut!((*p).spinlock)) != 0,
         b"pcache_spin_assert_holding: pcache spinlock not held\0");
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_spin_lock() {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_spin_lock() {
+    u! {
+
     spin_lock(global_spinlock());
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_spin_unlock() {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_spin_unlock() {
+    u! {
+
     spin_unlock(global_spinlock());
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_spin_assert_holding() {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_spin_assert_holding() {
+    u! {
+
     pcache_assert(spin_holding(global_spinlock()) != 0,
         b"pcache_global_spin_assert_holding: not held\0");
+
+    }
 }
 
 // tree_lock (rwlock)
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_tree_lock(p: *mut pcache) -> *mut rwlock {
+#[no_mangle] pub extern "C" fn xv6_pcache_tree_lock(p: *mut pcache) -> *mut rwlock {
+    u! {
+
     addr_of_mut!((*p).tree_lock)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_tree_lock_init(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_tree_lock_init(p: *mut pcache) {
+    u! {
+
     rwlock_init(addr_of_mut!((*p).tree_lock), PCACHE_TREE_LOCK_NAME.as_ptr() as *const c_char);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_tree_rlock(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_tree_rlock(p: *mut pcache) {
+    u! {
+
     rwlock_rlock(addr_of_mut!((*p).tree_lock));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_tree_runlock(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_tree_runlock(p: *mut pcache) {
+    u! {
+
     rwlock_runlock(addr_of_mut!((*p).tree_lock));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_tree_wlock(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_tree_wlock(p: *mut pcache) {
+    u! {
+
     rwlock_wlock(addr_of_mut!((*p).tree_lock));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_tree_wunlock(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_tree_wunlock(p: *mut pcache) {
+    u! {
+
     rwlock_wunlock(addr_of_mut!((*p).tree_lock));
+
+    }
 }
 
 // List entries on the pcache
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_list_entries_init(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_list_entries_init(p: *mut pcache) {
+    u! {
+
     list_init(addr_of_mut!((*p).list_entry));
     list_init(addr_of_mut!((*p).lru));
     list_init(addr_of_mut!((*p).dirty_list));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_list_entry_is_detached(p: *mut pcache) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_list_entry_is_detached(p: *mut pcache) -> c_int {
+    u! {
+
     if list_entry_is_detached(addr_of_mut!((*p).list_entry)) { 1 } else { 0 }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_push_global(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_push_global(p: *mut pcache) {
+    u! {
+
     list_push_front(global_list_head(), addr_of_mut!((*p).list_entry));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_detach_global(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_detach_global(p: *mut pcache) {
+    u! {
+
     list_detach(addr_of_mut!((*p).list_entry));
+
+    }
 }
 
 // ===========================================================================
 // pcache scalar fields
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_blk_count(p: *mut pcache) -> u64 { (*p).blk_count }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_count(p: *mut pcache) -> i64 { (*p).page_count }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_page_count(p: *mut pcache, v: i64) { (*p).page_count = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_add_page_count(p: *mut pcache, d: i64) {
+#[no_mangle] pub extern "C" fn xv6_pcache_blk_count(p: *mut pcache) -> u64 {
+    u! {
+ (*p).blk_count 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_page_count(p: *mut pcache) -> i64 {
+    u! {
+ (*p).page_count 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_page_count(p: *mut pcache, v: i64) {
+    u! {
+ (*p).page_count = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_add_page_count(p: *mut pcache, d: i64) {
+    u! {
+
     (*p).page_count += d;
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_lru_count(p: *mut pcache) -> i64 { (*p).lru_count }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_lru_count(p: *mut pcache, v: i64) { (*p).lru_count = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_inc_lru_count(p: *mut pcache) { (*p).lru_count += 1; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_dec_lru_count(p: *mut pcache) { (*p).lru_count -= 1; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_dirty_count(p: *mut pcache) -> i64 { (*p).dirty_count }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_dirty_count(p: *mut pcache, v: i64) { (*p).dirty_count = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_inc_dirty_count(p: *mut pcache) { (*p).dirty_count += 1; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_dec_dirty_count(p: *mut pcache) { (*p).dirty_count -= 1; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_max_pages(p: *mut pcache) -> u64 { (*p).max_pages }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_max_pages(p: *mut pcache, v: u64) { (*p).max_pages = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_dirty_rate(p: *mut pcache) -> u8 { (*p).dirty_rate }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_dirty_rate(p: *mut pcache, v: u8) { (*p).dirty_rate = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_last_request(p: *mut pcache) -> u64 { (*p).last_request }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_last_request(p: *mut pcache, v: u64) { (*p).last_request = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_last_flushed(p: *mut pcache) -> u64 { (*p).last_flushed }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_last_flushed(p: *mut pcache, v: u64) { (*p).last_flushed = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flags(p: *mut pcache) -> u64 {
+#[no_mangle] pub extern "C" fn xv6_pcache_lru_count(p: *mut pcache) -> i64 {
+    u! {
+ (*p).lru_count 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_lru_count(p: *mut pcache, v: i64) {
+    u! {
+ (*p).lru_count = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_inc_lru_count(p: *mut pcache) {
+    u! {
+ (*p).lru_count += 1; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_dec_lru_count(p: *mut pcache) {
+    u! {
+ (*p).lru_count -= 1; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_dirty_count(p: *mut pcache) -> i64 {
+    u! {
+ (*p).dirty_count 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_dirty_count(p: *mut pcache, v: i64) {
+    u! {
+ (*p).dirty_count = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_inc_dirty_count(p: *mut pcache) {
+    u! {
+ (*p).dirty_count += 1; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_dec_dirty_count(p: *mut pcache) {
+    u! {
+ (*p).dirty_count -= 1; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_max_pages(p: *mut pcache) -> u64 {
+    u! {
+ (*p).max_pages 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_max_pages(p: *mut pcache, v: u64) {
+    u! {
+ (*p).max_pages = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_dirty_rate(p: *mut pcache) -> u8 {
+    u! {
+ (*p).dirty_rate 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_dirty_rate(p: *mut pcache, v: u8) {
+    u! {
+ (*p).dirty_rate = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_last_request(p: *mut pcache) -> u64 {
+    u! {
+ (*p).last_request 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_last_request(p: *mut pcache, v: u64) {
+    u! {
+ (*p).last_request = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_last_flushed(p: *mut pcache) -> u64 {
+    u! {
+ (*p).last_flushed 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_last_flushed(p: *mut pcache, v: u64) {
+    u! {
+ (*p).last_flushed = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_flags(p: *mut pcache) -> u64 {
+    u! {
+
     (*p).__bindgen_anon_1.flags
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_flags(p: *mut pcache, v: u64) {
+#[no_mangle] pub extern "C" fn xv6_pcache_set_flags(p: *mut pcache, v: u64) {
+    u! {
+
     (*p).__bindgen_anon_1.flags = v;
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_active(p: *mut pcache) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_active(p: *mut pcache) -> c_int {
+    u! {
+
     if (*p).__bindgen_anon_1.__bindgen_anon_1.active() != 0 { 1 } else { 0 }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_active(p: *mut pcache, v: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_set_active(p: *mut pcache, v: c_int) {
+    u! {
+
     (*p).__bindgen_anon_1.__bindgen_anon_1.set_active(if v != 0 { 1 } else { 0 });
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flush_requested(p: *mut pcache) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_flush_requested(p: *mut pcache) -> c_int {
+    u! {
+
     if (*p).__bindgen_anon_1.__bindgen_anon_1.flush_requested() != 0 { 1 } else { 0 }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_flush_requested(p: *mut pcache, v: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_set_flush_requested(p: *mut pcache, v: c_int) {
+    u! {
+
     (*p).__bindgen_anon_1.__bindgen_anon_1.set_flush_requested(if v != 0 { 1 } else { 0 });
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flush_error(p: *mut pcache) -> c_int { (*p).flush_error }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_flush_error(p: *mut pcache, v: c_int) { (*p).flush_error = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_wait_refcount(p: *mut pcache) -> u32 { (*p).wait_refcount }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_wait_refcount(p: *mut pcache, v: u32) { (*p).wait_refcount = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_inc_wait_refcount(p: *mut pcache) { (*p).wait_refcount += 1; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_dec_wait_refcount(p: *mut pcache) { (*p).wait_refcount -= 1; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_gfp_flags(p: *mut pcache) -> u64 { (*p).gfp_flags }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_gfp_flags(p: *mut pcache, v: u64) { (*p).gfp_flags = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_private_data(p: *mut pcache) -> *mut c_void { (*p).private_data }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_set_private_data(p: *mut pcache, v: *mut c_void) { (*p).private_data = v; }
+#[no_mangle] pub extern "C" fn xv6_pcache_flush_error(p: *mut pcache) -> c_int {
+    u! {
+ (*p).flush_error 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_flush_error(p: *mut pcache, v: c_int) {
+    u! {
+ (*p).flush_error = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_wait_refcount(p: *mut pcache) -> u32 {
+    u! {
+ (*p).wait_refcount 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_wait_refcount(p: *mut pcache, v: u32) {
+    u! {
+ (*p).wait_refcount = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_inc_wait_refcount(p: *mut pcache) {
+    u! {
+ (*p).wait_refcount += 1; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_dec_wait_refcount(p: *mut pcache) {
+    u! {
+ (*p).wait_refcount -= 1; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_gfp_flags(p: *mut pcache) -> u64 {
+    u! {
+ (*p).gfp_flags 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_gfp_flags(p: *mut pcache, v: u64) {
+    u! {
+ (*p).gfp_flags = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_private_data(p: *mut pcache) -> *mut c_void {
+    u! {
+ (*p).private_data 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_set_private_data(p: *mut pcache, v: *mut c_void) {
+    u! {
+ (*p).private_data = v; 
+    }
+}
 
 // ops vtable accessors
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_get_ops(p: *mut pcache) -> *mut pcache_ops { (*p).ops }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_ops_read_page_fn(p: *mut pcache) -> *mut c_void {
+#[no_mangle] pub extern "C" fn xv6_pcache_get_ops(p: *mut pcache) -> *mut pcache_ops {
+    u! {
+ (*p).ops 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_ops_read_page_fn(p: *mut pcache) -> *mut c_void {
+    u! {
+
     let ops = (*p).ops;
     if ops.is_null() { return null_mut(); }
     match (*ops).read_page {
         Some(f) => f as *mut c_void,
         None => null_mut(),
     }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_ops_write_page_fn(p: *mut pcache) -> *mut c_void {
+#[no_mangle] pub extern "C" fn xv6_pcache_ops_write_page_fn(p: *mut pcache) -> *mut c_void {
+    u! {
+
     let ops = (*p).ops;
     if ops.is_null() { return null_mut(); }
     match (*ops).write_page {
         Some(f) => f as *mut c_void,
         None => null_mut(),
     }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_ops_call_read_page(p: *mut pcache, page: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_ops_call_read_page(p: *mut pcache, page: *mut page_t) -> c_int {
+    u! {
+
     ((*(*p).ops).read_page.unwrap_unchecked())(p, page)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_ops_call_write_page(p: *mut pcache, page: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_ops_call_write_page(p: *mut pcache, page: *mut page_t) -> c_int {
+    u! {
+
     ((*(*p).ops).write_page.unwrap_unchecked())(p, page)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_ops_call_write_begin(p: *mut pcache, page: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_ops_call_write_begin(p: *mut pcache, page: *mut page_t) -> c_int {
+    u! {
+
     let ops = (*p).ops;
     if !ops.is_null() {
         if let Some(f) = (*ops).write_begin { return f(p, page); }
     }
     0
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_ops_call_write_end(p: *mut pcache, page: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_ops_call_write_end(p: *mut pcache, page: *mut page_t) -> c_int {
+    u! {
+
     let ops = (*p).ops;
     if !ops.is_null() {
         if let Some(f) = (*ops).write_end { return f(p, page); }
     }
     0
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_ops_call_mark_dirty(p: *mut pcache, page: *mut page_t) {
+#[no_mangle] pub extern "C" fn xv6_pcache_ops_call_mark_dirty(p: *mut pcache, page: *mut page_t) {
+    u! {
+
     let ops = (*p).ops;
     if !ops.is_null() {
         if let Some(f) = (*ops).mark_dirty { f(p, page); }
     }
+
+    }
 }
 
 // completion (flush_completion)
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flush_completion(p: *mut pcache) -> *mut completion_t {
+#[no_mangle] pub extern "C" fn xv6_pcache_flush_completion(p: *mut pcache) -> *mut completion_t {
+    u! {
+
     addr_of_mut!((*p).flush_completion)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flush_completion_init(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_flush_completion_init(p: *mut pcache) {
+    u! {
+
     completion_init(addr_of_mut!((*p).flush_completion));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flush_completion_reinit(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_flush_completion_reinit(p: *mut pcache) {
+    u! {
+
     completion_reinit(addr_of_mut!((*p).flush_completion));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flush_completion_complete_all(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_flush_completion_complete_all(p: *mut pcache) {
+    u! {
+
     complete_all(addr_of_mut!((*p).flush_completion));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flush_completion_wait(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_flush_completion_wait(p: *mut pcache) {
+    u! {
+
     wait_for_completion(addr_of_mut!((*p).flush_completion));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_flusher_completion_init() {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_flusher_completion_init() {
+    u! {
+
     completion_init(global_completion());
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_flusher_completion_reinit() {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_flusher_completion_reinit() {
+    u! {
+
     completion_reinit(global_completion());
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_flusher_complete_all() {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_flusher_complete_all() {
+    u! {
+
     complete_all(global_completion());
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_flusher_wait() {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_flusher_wait() {
+    u! {
+
     wait_for_completion(global_completion());
+
+    }
 }
 
 // rb tree
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_map(p: *mut pcache) -> *mut rb_root {
+#[no_mangle] pub extern "C" fn xv6_pcache_page_map(p: *mut pcache) -> *mut rb_root {
+    u! {
+
     addr_of_mut!((*p).page_map)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_map_is_empty(p: *mut pcache) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_page_map_is_empty(p: *mut pcache) -> c_int {
+    u! {
+
     if (*p).page_map.node.is_null() { 1 } else { 0 }
+
+    }
 }
 
 // flush_work
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_flush_work(p: *mut pcache) -> *mut work_struct {
+#[no_mangle] pub extern "C" fn xv6_pcache_flush_work(p: *mut pcache) -> *mut work_struct {
+    u! {
+
     addr_of_mut!((*p).flush_work)
+
+    }
 }
 
 // zero-init check
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_is_zero_inited(p: *mut pcache) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_is_zero_inited(p: *mut pcache) -> c_int {
+    u! {
+
     let rb_empty = (*p).page_map.node.is_null();
     let lru = &(*p).lru;
     let dl = &(*p).dirty_list;
@@ -576,15 +1017,23 @@ pub unsafe extern "C" fn xv6_pcache_globals_init() {
         && dl.next.is_null() && dl.prev.is_null()
         && le.next.is_null() && le.prev.is_null()
     { 1 } else { 0 }
+
+    }
 }
 
 // ===========================================================================
 // pcache_node accessors and helpers
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_zero(n: *mut pcache_node) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_zero(n: *mut pcache_node) {
+    u! {
+
     core::ptr::write_bytes(n as *mut u8, 0, size_of::<pcache_node>());
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_init(n: *mut pcache_node) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_init(n: *mut pcache_node) {
+    u! {
+
     core::ptr::write_bytes(n as *mut u8, 0, size_of::<pcache_node>());
     // rb_node_init: __parent_color = (unsigned long)node
     (*n).tree_entry.__parent_color = addr_of!((*n).tree_entry) as u64;
@@ -592,72 +1041,196 @@ pub unsafe extern "C" fn xv6_pcache_globals_init() {
     tq_init(addr_of_mut!((*n).io_waiters), PCACHE_IO_NAME.as_ptr() as *const c_char, null_mut());
     (*n).blkno = u64::MAX;
     (*n).page_count = 0;
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_pcache(n: *mut pcache_node) -> *mut pcache { (*n).pcache }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_pcache(n: *mut pcache_node, p: *mut pcache) { (*n).pcache = p; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_page(n: *mut pcache_node) -> *mut page_t { (*n).page }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_page(n: *mut pcache_node, page: *mut page_t) { (*n).page = page; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_data(n: *mut pcache_node) -> *mut c_void { (*n).data }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_data(n: *mut pcache_node, d: *mut c_void) { (*n).data = d; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_page_count(n: *mut pcache_node) -> i64 { (*n).page_count }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_page_count(n: *mut pcache_node, c: i64) { (*n).page_count = c; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_blkno(n: *mut pcache_node) -> u64 { (*n).blkno }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_blkno(n: *mut pcache_node, v: u64) { (*n).blkno = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_size_get(n: *mut pcache_node) -> usize { (*n).size }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_size(n: *mut pcache_node, v: usize) { (*n).size = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_last_request(n: *mut pcache_node) -> u64 { (*n).last_request }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_last_request(n: *mut pcache_node, v: u64) { (*n).last_request = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_last_flushed(n: *mut pcache_node) -> u64 { (*n).last_flushed }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_last_flushed(n: *mut pcache_node, v: u64) { (*n).last_flushed = v; }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_dirty(n: *mut pcache_node) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_pcache(n: *mut pcache_node) -> *mut pcache {
+    u! {
+ (*n).pcache 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_pcache(n: *mut pcache_node, p: *mut pcache) {
+    u! {
+ (*n).pcache = p; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_page(n: *mut pcache_node) -> *mut page_t {
+    u! {
+ (*n).page 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_page(n: *mut pcache_node, page: *mut page_t) {
+    u! {
+ (*n).page = page; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_data(n: *mut pcache_node) -> *mut c_void {
+    u! {
+ (*n).data 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_data(n: *mut pcache_node, d: *mut c_void) {
+    u! {
+ (*n).data = d; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_page_count(n: *mut pcache_node) -> i64 {
+    u! {
+ (*n).page_count 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_page_count(n: *mut pcache_node, c: i64) {
+    u! {
+ (*n).page_count = c; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_blkno(n: *mut pcache_node) -> u64 {
+    u! {
+ (*n).blkno 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_blkno(n: *mut pcache_node, v: u64) {
+    u! {
+ (*n).blkno = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_size_get(n: *mut pcache_node) -> usize {
+    u! {
+ (*n).size 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_size(n: *mut pcache_node, v: usize) {
+    u! {
+ (*n).size = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_last_request(n: *mut pcache_node) -> u64 {
+    u! {
+ (*n).last_request 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_last_request(n: *mut pcache_node, v: u64) {
+    u! {
+ (*n).last_request = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_last_flushed(n: *mut pcache_node) -> u64 {
+    u! {
+ (*n).last_flushed 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_last_flushed(n: *mut pcache_node, v: u64) {
+    u! {
+ (*n).last_flushed = v; 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_node_dirty(n: *mut pcache_node) -> c_int {
+    u! {
+
     if (*n).__bindgen_anon_1.dirty() != 0 { 1 } else { 0 }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_dirty(n: *mut pcache_node, v: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_dirty(n: *mut pcache_node, v: c_int) {
+    u! {
+
     (*n).__bindgen_anon_1.set_dirty(if v != 0 { 1 } else { 0 });
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_uptodate(n: *mut pcache_node) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_uptodate(n: *mut pcache_node) -> c_int {
+    u! {
+
     if (*n).__bindgen_anon_1.uptodate() != 0 { 1 } else { 0 }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_uptodate(n: *mut pcache_node, v: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_uptodate(n: *mut pcache_node, v: c_int) {
+    u! {
+
     (*n).__bindgen_anon_1.set_uptodate(if v != 0 { 1 } else { 0 });
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_io_in_progress(n: *mut pcache_node) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_io_in_progress(n: *mut pcache_node) -> c_int {
+    u! {
+
     if (*n).__bindgen_anon_1.io_in_progress() != 0 { 1 } else { 0 }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_set_io_in_progress(n: *mut pcache_node, v: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_set_io_in_progress(n: *mut pcache_node, v: c_int) {
+    u! {
+
     (*n).__bindgen_anon_1.set_io_in_progress(if v != 0 { 1 } else { 0 });
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_lru_detached(n: *mut pcache_node) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_lru_detached(n: *mut pcache_node) -> c_int {
+    u! {
+
     if list_entry_is_detached(addr_of_mut!((*n).lru_entry)) { 1 } else { 0 }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_push_lru(p: *mut pcache, n: *mut pcache_node) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_push_lru(p: *mut pcache, n: *mut pcache_node) {
+    u! {
+
     list_push_front(addr_of_mut!((*p).lru), addr_of_mut!((*n).lru_entry));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_push_dirty(p: *mut pcache, n: *mut pcache_node) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_push_dirty(p: *mut pcache, n: *mut pcache_node) {
+    u! {
+
     list_push_front(addr_of_mut!((*p).dirty_list), addr_of_mut!((*n).lru_entry));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_detach_lru(n: *mut pcache_node) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_detach_lru(n: *mut pcache_node) {
+    u! {
+
     list_detach(addr_of_mut!((*n).lru_entry));
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_lru_last(p: *mut pcache) -> *mut pcache_node {
+#[no_mangle] pub extern "C" fn xv6_pcache_lru_last(p: *mut pcache) -> *mut pcache_node {
+    u! {
+
     let head = addr_of_mut!((*p).lru);
     if list_is_empty(head) { return null_mut(); }
     node_from_lru_entry((*head).prev)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_dirty_last(p: *mut pcache) -> *mut pcache_node {
+#[no_mangle] pub extern "C" fn xv6_pcache_dirty_last(p: *mut pcache) -> *mut pcache_node {
+    u! {
+
     let head = addr_of_mut!((*p).dirty_list);
     if list_is_empty(head) { return null_mut(); }
     node_from_lru_entry((*head).prev)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_lru_is_empty(p: *mut pcache) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_lru_is_empty(p: *mut pcache) -> c_int {
+    u! {
+
     if list_is_empty(addr_of_mut!((*p).lru)) { 1 } else { 0 }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_dirty_is_empty(p: *mut pcache) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_dirty_is_empty(p: *mut pcache) -> c_int {
+    u! {
+
     if list_is_empty(addr_of_mut!((*p).dirty_list)) { 1 } else { 0 }
+
+    }
 }
 
 // IO waiters tq operations
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_io_wait(p: *mut pcache, n: *mut pcache_node) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_io_wait(p: *mut pcache, n: *mut pcache_node) -> c_int {
+    u! {
+
     let cur = current_thread_inline();
     if !cur.is_null() {
         // __thread_state_set(current, THREAD_UNINTERRUPTIBLE) using SEQ_CST atomic store
@@ -672,117 +1245,209 @@ pub unsafe extern "C" fn xv6_pcache_globals_init() {
         null_mut(),
     );
     0
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_io_wakeup_all(n: *mut pcache_node) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_io_wakeup_all(n: *mut pcache_node) {
+    u! {
+
     tq_wakeup_all(addr_of_mut!((*n).io_waiters), 0, 0);
+
+    }
 }
 
 // ===========================================================================
 // rb tree manipulation
 // ===========================================================================
-unsafe extern "C" fn pcache_rb_compare(k1: u64, k2: u64) -> c_int {
+extern "C" fn pcache_rb_compare(k1: u64, k2: u64)-> c_int  { u! {
     if k1 < k2 { -1 } else if k1 > k2 { 1 } else { 0 }
-}
-unsafe extern "C" fn pcache_rb_get_key(node: *mut rb_node) -> u64 {
+}}
+extern "C" fn pcache_rb_get_key(node: *mut rb_node)-> u64  { u! {
     let pcnode = node_from_tree_entry(node);
     (*pcnode).blkno
-}
+}}
 
 static PCACHE_RB_OPTS: SyncCell<rb_root_opts> = SyncCell::new(rb_root_opts {
     keys_cmp_fun: Some(pcache_rb_compare),
     get_key_fun: Some(pcache_rb_get_key),
 });
 
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_rb_init(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_rb_init(p: *mut pcache) {
+    u! {
+
     (*p).page_map.node = null_mut();
     (*p).page_map.opts = PCACHE_RB_OPTS.get();
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_rb_find(p: *mut pcache, blkno: u64) -> *mut pcache_node {
+#[no_mangle] pub extern "C" fn xv6_pcache_rb_find(p: *mut pcache, blkno: u64) -> *mut pcache_node {
+    u! {
+
     let node = rb_find_key(addr_of_mut!((*p).page_map), blkno);
     if node.is_null() { return null_mut(); }
     node_from_tree_entry(node)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_rb_insert(p: *mut pcache, pcnode: *mut pcache_node) -> *mut pcache_node {
+#[no_mangle] pub extern "C" fn xv6_pcache_rb_insert(p: *mut pcache, pcnode: *mut pcache_node) -> *mut pcache_node {
+    u! {
+
     let node = rb_insert_color(addr_of_mut!((*p).page_map), addr_of_mut!((*pcnode).tree_entry));
     if node.is_null() { return null_mut(); }
     node_from_tree_entry(node)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_rb_delete(p: *mut pcache, pcnode: *mut pcache_node) {
+#[no_mangle] pub extern "C" fn xv6_pcache_rb_delete(p: *mut pcache, pcnode: *mut pcache_node) {
+    u! {
+
     let removed = rb_delete_node_color(addr_of_mut!((*p).page_map), addr_of_mut!((*pcnode).tree_entry));
     pcache_assert(removed == addr_of_mut!((*pcnode).tree_entry),
         b"xv6_pcache_rb_delete: removed mismatch\0");
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_rb_first(p: *mut pcache) -> *mut pcache_node {
+#[no_mangle] pub extern "C" fn xv6_pcache_rb_first(p: *mut pcache) -> *mut pcache_node {
+    u! {
+
     let node = rb_first_node(addr_of_mut!((*p).page_map));
     if node.is_null() { return null_mut(); }
     node_from_tree_entry(node)
+
+    }
 }
 
 // ===========================================================================
 // page_t accessors for the pcache union member
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_page_pcache_get_pcache(page: *mut page_t) -> *mut pcache {
+#[no_mangle] pub extern "C" fn xv6_page_pcache_get_pcache(page: *mut page_t) -> *mut pcache {
+    u! {
+
     (*page).__bindgen_anon_2.pcache.pcache
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_page_pcache_set_pcache(page: *mut page_t, p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_page_pcache_set_pcache(page: *mut page_t, p: *mut pcache) {
+    u! {
+
     (*page).__bindgen_anon_2.pcache.pcache = p;
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_page_pcache_get_node(page: *mut page_t) -> *mut pcache_node {
+#[no_mangle] pub extern "C" fn xv6_page_pcache_get_node(page: *mut page_t) -> *mut pcache_node {
+    u! {
+
     (*page).__bindgen_anon_2.pcache.pcache_node
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_page_pcache_set_node(page: *mut page_t, n: *mut pcache_node) {
+#[no_mangle] pub extern "C" fn xv6_page_pcache_set_node(page: *mut page_t, n: *mut pcache_node) {
+    u! {
+
     (*page).__bindgen_anon_2.pcache.pcache_node = n;
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_page_ref_count_read(page: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_page_ref_count_read(page: *mut page_t) -> c_int {
+    u! {
+
     (*page).ref_count
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_page_is_pcache_type(page: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_page_is_pcache_type(page: *mut page_t) -> c_int {
+    u! {
+
     if page.is_null() { return 0; }
     let flags = (*page).__bindgen_anon_1.flags;
     if (flags & PAGE_FLAG_TYPE_MASK) == PAGE_TYPE_PCACHE as u64 { 1 } else { 0 }
+
+    }
 }
 
 // ===========================================================================
 // Workqueue helpers
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_init_flush_work(
+#[no_mangle] pub extern "C" fn xv6_pcache_init_flush_work(
     p: *mut pcache,
     func: unsafe extern "C" fn(*mut work_struct),
 ) {
+    u! {
+
     init_work_struct(addr_of_mut!((*p).flush_work), func, p as u64);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_queue_flush_work(p: *mut pcache) -> bool {
+#[no_mangle] pub extern "C" fn xv6_pcache_queue_flush_work(p: *mut pcache) -> bool {
+    u! {
+
     let wq = *PCACHE_GLOBAL_FLUSH_WQ.get();
     if wq.is_null() { return false; }
     queue_work(wq, addr_of_mut!((*p).flush_work))
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_work_data(w: *mut work_struct) -> u64 {
+#[no_mangle] pub extern "C" fn xv6_pcache_work_data(w: *mut work_struct) -> u64 {
+    u! {
+
     (*w).data
+
+    }
 }
 
 // ===========================================================================
 // Thread / scheduling shims
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_get_jiffs() -> u64 { get_jiffs() }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_sleep_ms(ms: u64) { sleep_ms(ms); }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_wakeup(t: *mut thread) { wakeup(t); }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_wakeup_on_chan(chan: *mut c_void) { wakeup_on_chan(chan); }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_sleep_on_chan(chan: *mut c_void, lock: *mut spinlock_t) {
+#[no_mangle] pub extern "C" fn xv6_pcache_get_jiffs() -> u64 {
+    u! {
+ get_jiffs() 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_sleep_ms(ms: u64) {
+    u! {
+ sleep_ms(ms); 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_wakeup(t: *mut thread) {
+    u! {
+ wakeup(t); 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_wakeup_on_chan(chan: *mut c_void) {
+    u! {
+ wakeup_on_chan(chan); 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_sleep_on_chan(chan: *mut c_void, lock: *mut spinlock_t) {
+    u! {
+
     sleep_on_chan(chan, lock);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_sleep_on_chan_interruptible(chan: *mut c_void, lock: *mut spinlock_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_sleep_on_chan_interruptible(chan: *mut c_void, lock: *mut spinlock_t) -> c_int {
+    u! {
+
     sleep_on_chan_interruptible(chan, lock)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_current_is_thread(t: *mut thread) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_current_is_thread(t: *mut thread) -> c_int {
+    u! {
+
     if current_thread_inline() == t { 1 } else { 0 }
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_kthread_create(
+#[no_mangle] pub extern "C" fn xv6_pcache_kthread_create(
     name: *const c_char,
     entry: unsafe extern "C" fn(u64, u64),
     a1: u64,
     a2: u64,
     stack_order: c_int,
 ) -> *mut thread {
+    u! {
+
     let np = kthread_create(name, entry as *mut c_void, a1, a2, stack_order);
     // IS_ERR_OR_NULL: pointer in error range (high bits set) or null -> NULL
     if np.is_null() { return null_mut(); }
@@ -790,134 +1455,262 @@ static PCACHE_RB_OPTS: SyncCell<rb_root_opts> = SyncCell::new(rb_root_opts {
     // ERR_PTR encodes errno as (unsigned long)(-errno); detect via high bit set
     if (raw as i64) < 0 && (raw as i64) >= -4095 { return null_mut(); }
     np
+
+    }
 }
 
 // ===========================================================================
 // Page-level helpers used by the Rust port
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_lock_acquire(p: *mut page_t) { page_lock_acquire(p); }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_lock_release(p: *mut page_t) { page_lock_release(p); }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_lock_assert_holding(p: *mut page_t) {
+#[no_mangle] pub extern "C" fn xv6_pcache_page_lock_acquire(p: *mut page_t) {
+    u! {
+ page_lock_acquire(p); 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_page_lock_release(p: *mut page_t) {
+    u! {
+ page_lock_release(p); 
+    }
+}
+#[no_mangle] pub extern "C" fn xv6_pcache_page_lock_assert_holding(p: *mut page_t) {
+    u! {
+
     page_lock_assert_holding(p);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_ref_inc_unlocked(p: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_page_ref_inc_unlocked(p: *mut page_t) -> c_int {
+    u! {
+
     page_ref_inc_unlocked(p)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_ref_dec_unlocked(p: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_page_ref_dec_unlocked(p: *mut page_t) -> c_int {
+    u! {
+
     page_ref_dec_unlocked(p)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_ref_count_fn(p: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_page_ref_count_fn(p: *mut page_t) -> c_int {
+    u! {
+
     page_ref_count(p)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_ref_dec(p: *mut page_t) -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_page_ref_dec(p: *mut page_t) -> c_int {
+    u! {
+
     __page_ref_dec(p)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_alloc_page() -> *mut page_t {
+#[no_mangle] pub extern "C" fn xv6_pcache_alloc_page() -> *mut page_t {
+    u! {
+
     __page_alloc(0, PAGE_TYPE_PCACHE as u64)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_page_to_pa_ptr(p: *mut page_t) -> *mut c_void {
+#[no_mangle] pub extern "C" fn xv6_pcache_page_to_pa_ptr(p: *mut page_t) -> *mut c_void {
+    u! {
+
     __page_to_pa(p) as *mut c_void
+
+    }
 }
 
 // ===========================================================================
 // Slab helpers
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_slab_init() -> c_int {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_slab_init() -> c_int {
+    u! {
+
     slab_cache_init(
         node_slab(),
         PCACHE_NODE_NAME.as_ptr() as *const c_char,
         size_of::<pcache_node>(),
         SLAB_FLAG_EMBEDDED,
     )
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_alloc() -> *mut c_void {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_alloc() -> *mut c_void {
+    u! {
+
     slab_alloc(node_slab())
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_free(p: *mut c_void) {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_free(p: *mut c_void) {
+    u! {
+
     slab_free(p);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_node_slab_shrink_all() {
+#[no_mangle] pub extern "C" fn xv6_pcache_node_slab_shrink_all() {
+    u! {
+
     slab_cache_shrink(node_slab(), 0x7fff_ffff);
+
+    }
 }
 
 // ===========================================================================
 // Workqueue creation
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_workqueue_create() -> *mut workqueue {
+#[no_mangle] pub extern "C" fn xv6_pcache_workqueue_create() -> *mut workqueue {
+    u! {
+
     workqueue_create(PCACHE_FLUSH_WQ_NAME.as_ptr() as *const c_char, WORKQUEUE_DEFAULT_MAX_ACTIVE)
+
+    }
 }
 
 // ===========================================================================
 // Iterate the global pcache list
 // ===========================================================================
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_first() -> *mut pcache {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_first() -> *mut pcache {
+    u! {
+
     let head = global_list_head();
     if list_is_empty(head) { return null_mut(); }
     pcache_from_list_entry((*head).next)
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_global_next(cur: *mut pcache) -> *mut pcache {
+#[no_mangle] pub extern "C" fn xv6_pcache_global_next(cur: *mut pcache) -> *mut pcache {
+    u! {
+
     let head = global_list_head();
     let next = (*cur).list_entry.next;
     if next == head { return null_mut(); }
     pcache_from_list_entry(next)
+
+    }
 }
 
 // ===========================================================================
 // Panic and printf shims
 // ===========================================================================
 #[no_mangle]
-pub unsafe extern "C" fn xv6_pcache_panic(msg: *const c_char) -> ! {
+pub extern "C" fn xv6_pcache_panic(msg: *const c_char) -> ! {
+    u! {
+
     do_pcache_panic(msg)
+
+    }
 }
 
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_register_warn() {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_register_warn() {
+    u! {
+
     printf(b"warning: __pcache_register: pcache already registered\0".as_ptr() as *const c_char);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_flush_worker_null() {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_flush_worker_null() {
+    u! {
+
     printf(b"__pcache_flush_worker: pcache is NULL\n\0".as_ptr() as *const c_char);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_flush_queue_warn(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_flush_queue_warn(p: *mut pcache) {
+    u! {
+
     printf(b"warning: flusher failed to queue work for pcache %p\n\0".as_ptr() as *const c_char, p);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_flush_wait_err(p: *mut pcache, ret: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_flush_wait_err(p: *mut pcache, ret: c_int) {
+    u! {
+
     printf(b"warning: __pcache_wait_for_pending_flushes: pcache %p flush error %d\n\0".as_ptr() as *const c_char, p, ret);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_default_page_invalid() {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_default_page_invalid() {
+    u! {
+
     printf(b"__pcache_get_page: default_page is not from the given pcache\n\0".as_ptr() as *const c_char);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_invalid_page(page: *mut page_t, p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_invalid_page(page: *mut page_t, p: *mut pcache) {
+    u! {
+
     printf(b"pcache_put_page(): invalid page %p for cache %p\n\0".as_ptr() as *const c_char, page, p);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_refcount_too_small(page: *mut page_t, refcount: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_refcount_too_small(page: *mut page_t, refcount: c_int) {
+    u! {
+
     printf(b"pcache_put_page(): page %p refcount %d is too small to drop\n\0".as_ptr() as *const c_char, page, refcount);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_read_refcount_too_small(page: *mut page_t, refcount: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_read_refcount_too_small(page: *mut page_t, refcount: c_int) {
+    u! {
+
     printf(b"pcache_read_page(): page %p refcount %d is too small to read\n\0".as_ptr() as *const c_char, page, refcount);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_read_invalid_meta(page: *mut page_t, blkno: u64, sz: usize) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_read_invalid_meta(page: *mut page_t, blkno: u64, sz: usize) {
+    u! {
+
     printf(b"pcache_read_page(): invalid metadata for page %p (blkno=%llu size=%zu)\n\0".as_ptr() as *const c_char,
         page, blkno, sz);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_io_unexpected(dirty: c_int, uptodate: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_io_unexpected(dirty: c_int, uptodate: c_int) {
+    u! {
+
     printf(b"pcache_read_page(): io in progress with unexpected state (dirty=%d uptodate=%d)\n\0".as_ptr() as *const c_char,
         dirty, uptodate);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_sys_sync_failed(ret: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_sys_sync_failed(ret: c_int) {
+    u! {
+
     printf(b"sys_sync: pcache_sync failed with error %d\n\0".as_ptr() as *const c_char, ret);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_subsystem_initialized() {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_subsystem_initialized() {
+    u! {
+
     printf(b"Page cache subsystem initialized\n\0".as_ptr() as *const c_char);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_flusher_started() {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_flusher_started() {
+    u! {
+
     printf(b"pcache flusher thread started\n\0".as_ptr() as *const c_char);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_stats_header(p: *mut pcache) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_stats_header(p: *mut pcache) {
+    u! {
+
     printf(b"Pcache %p stats:\n\0".as_ptr() as *const c_char, p);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_stats_body(
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_stats_body(
     active: c_int, blk_count: u64, dirty: i64, lru: i64, page: i64, max: i64,
     rate: c_int, requested: c_int, err: c_int,
 ) {
+    u! {
+
     printf(b"  Active: %d\n\0".as_ptr() as *const c_char, active);
     printf(b"  Block count: %llu\n\0".as_ptr() as *const c_char, blk_count);
     printf(b"  Dirty count: %ld\n\0".as_ptr() as *const c_char, dirty);
@@ -926,8 +1719,14 @@ pub unsafe extern "C" fn xv6_pcache_panic(msg: *const c_char) -> ! {
     printf(b"  Dirty rate: %d%%\n\0".as_ptr() as *const c_char, rate);
     printf(b"  Flush requested: %d\n\0".as_ptr() as *const c_char, requested);
     printf(b"  Flush error: %d\n\0".as_ptr() as *const c_char, err);
+
+    }
 }
-#[no_mangle] pub unsafe extern "C" fn xv6_pcache_printf_dump_all_header(total: c_int) {
+#[no_mangle] pub extern "C" fn xv6_pcache_printf_dump_all_header(total: c_int) {
+    u! {
+
     printf(b"Dumping all pcache stats:\n\0".as_ptr() as *const c_char);
     printf(b"Total pcaches: %d\n\0".as_ptr() as *const c_char, total);
+
+    }
 }

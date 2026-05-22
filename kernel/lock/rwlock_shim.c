@@ -17,6 +17,7 @@
 
 bool __rwl_try_rlock(struct rwlock *rw)            { return rwlock_try_rlock(rw); }
 bool __rwl_try_wlock(struct rwlock *rw, bool exp)  { return rwlock_try_wlock(rw, exp); }
+bool __rwl_try_update(struct rwlock *rw)           { return rwlock_try_update(rw); }
 
 uint64 __rwl_state(struct rwlock *rw)              { return RWLOCK_STATE(rw); }
 bool   __rwl_w_holding(struct rwlock *rw)          { return (bool)RWLOCK_W_HOLDING(rw); }

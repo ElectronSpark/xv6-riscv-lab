@@ -21,6 +21,13 @@
 
 #![allow(non_snake_case)]
 
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
+
 use crate::walk;
 use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
@@ -137,7 +144,7 @@ use ffi::*;
 //
 // The asm primitives and per-CPU helpers live in `crate::machine`, which is
 // the single module in the mm crate allowed to contain inline-asm
-// `unsafe { ... }` blocks. Importing them here keeps the rest of
+// `u! { ... }` blocks. Importing them here keeps the rest of
 // vm.rs free of low-level boilerplate.
 
 use crate::machine::{self, ThreadRef};
@@ -151,8 +158,8 @@ fn xv6_vm_mycpu() -> *mut crate::bindings::cpu_local {
 
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_cpuid() -> c_int {
-    machine::cpuid()
+pub extern "C" fn xv6_vm_cpuid() -> c_int {
+    u! { machine::cpuid() }
 }
 
 // --- SBI remote hfence ---------------------------------------------------
@@ -453,7 +460,7 @@ fn xv6_vm_assert_vm_write_held(vm_ptr: *mut vm, msg: *const c_char) {
 /// Returns 0 for equal, -1 if `a < b`, +1 otherwise — same contract as the
 /// original C implementation.
 #[no_mangle]
-pub unsafe extern "C" fn __vma_cmp(a: u64, b: u64) -> c_int {
+pub extern "C" fn __vma_cmp(a: u64, b: u64) -> c_int {
     if a == b {
         0
     } else if a < b {
@@ -470,80 +477,91 @@ pub unsafe extern "C" fn __vma_cmp(a: u64, b: u64) -> c_int {
 /// is guaranteed to match the C `vma_t` because both compilation units share
 /// the same header (`mm/vm_types.h`).
 #[no_mangle]
-pub unsafe extern "C" fn __cma_get_key(node: *mut rb_node) -> u64 {
+pub extern "C" fn __cma_get_key(node: *mut rb_node) -> u64 {
     if node.is_null() {
         return 0;
     }
     let offset = core::mem::offset_of!(vma, rb_entry);
-    let vma_ptr = (node as *mut u8).sub(offset) as *mut vma;
-    (*vma_ptr).start
+    u! {
+        let vma_ptr = (node as *mut u8).sub(offset) as *mut vma;
+        (*vma_ptr).start
+    }
 }
 
 /// Acquire-load of `vm->cpumask` (cpumask_t == u64).
 #[no_mangle]
-pub unsafe extern "C" fn vm_get_cpumask(vm_ptr: *mut vm) -> u64 {
+pub extern "C" fn vm_get_cpumask(vm_ptr: *mut vm) -> u64 {
     if vm_ptr.is_null() {
         return 0;
     }
-    let cpumask = &(*vm_ptr).cpumask as *const u64 as *const AtomicU64;
-    (*cpumask).load(Ordering::Acquire)
+    u! {
+        let cpumask = &(*vm_ptr).cpumask as *const u64 as *const AtomicU64;
+        (*cpumask).load(Ordering::Acquire)
+    }
 }
 
 /// Mark a CPU as using this VM. Updates the per-CPU trapframe PTE if a
 /// trapframe is currently registered for the calling thread. Returns the
 /// trapframe base virtual address for `cpu`.
 #[no_mangle]
-pub unsafe extern "C" fn vm_cpu_online(vm_ptr: *mut vm, cpu: c_int) -> u64 {
-    // Bindgen sees the C `#define TRAPFRAME_POFFSET` as either a const or
-    // a macro depending on the header. The value is the byte offset within
-    // a trapframe page (0 for a page-aligned trapframe). The fall-back
-    // default we use here matches the original C source: keep the offset
-    // of `p->trapframe` within its physical page.
-    let mut trapframe_poffset: u64 = 0;
-    let trapframe_pte = (*vm_ptr).trapframe_pte;
-    let trapframe_pa = xv6_vm_current_trapframe();
-    if !trapframe_pte.is_null() && trapframe_pa != 0 {
-        let pte_idx = xv6_vm_px0(TRAPFRAME as u64 + (cpu as u64) * (PGSIZE as u64)) as usize;
-        let trapframe_pa_aligned = trapframe_pa & !((PGSIZE as u64) - 1);
-        // PA2PTE(pa) = (pa >> 12) << 10
-        let pte_val: u64 = ((trapframe_pa_aligned >> 12) << 10)
-            | (PTE_R | PTE_W | PTE_V | PTE_A | PTE_D) as u64;
-        *trapframe_pte.add(pte_idx) = pte_val;
-        // Ensure PTE write is visible before page-table switch.
-        compiler_fence(Ordering::Release);
-        fence(Ordering::Release);
-        trapframe_poffset = trapframe_pa & ((PGSIZE as u64) - 1);
+#[no_mangle]
+pub extern "C" fn vm_cpu_online(vm_ptr: *mut vm, cpu: c_int) -> u64 {
+    u! {
+        // Bindgen sees the C `#define TRAPFRAME_POFFSET` as either a const or
+        // a macro depending on the header. The value is the byte offset within
+        // a trapframe page (0 for a page-aligned trapframe). The fall-back
+        // default we use here matches the original C source: keep the offset
+        // of `p->trapframe` within its physical page.
+        let mut trapframe_poffset: u64 = 0;
+        let trapframe_pte = (*vm_ptr).trapframe_pte;
+        let trapframe_pa = xv6_vm_current_trapframe();
+        if !trapframe_pte.is_null() && trapframe_pa != 0 {
+            let pte_idx = xv6_vm_px0(TRAPFRAME as u64 + (cpu as u64) * (PGSIZE as u64)) as usize;
+            let trapframe_pa_aligned = trapframe_pa & !((PGSIZE as u64) - 1);
+            // PA2PTE(pa) = (pa >> 12) << 10
+            let pte_val: u64 = ((trapframe_pa_aligned >> 12) << 10)
+                | (PTE_R | PTE_W | PTE_V | PTE_A | PTE_D) as u64;
+            *trapframe_pte.add(pte_idx) = pte_val;
+            // Ensure PTE write is visible before page-table switch.
+            compiler_fence(Ordering::Release);
+            fence(Ordering::Release);
+            trapframe_poffset = trapframe_pa & ((PGSIZE as u64) - 1);
+        }
+        let cpumask = &(*vm_ptr).cpumask as *const u64 as *const AtomicU64;
+        (*cpumask).fetch_or(1u64 << cpu, Ordering::SeqCst);
+        TRAPFRAME as u64 + (cpu as u64) * (PGSIZE as u64) + trapframe_poffset
     }
-    let cpumask = &(*vm_ptr).cpumask as *const u64 as *const AtomicU64;
-    (*cpumask).fetch_or(1u64 << cpu, Ordering::SeqCst);
-    TRAPFRAME as u64 + (cpu as u64) * (PGSIZE as u64) + trapframe_poffset
 }
 
 /// Clear the calling CPU from `vm->cpumask`.
 #[no_mangle]
-pub unsafe extern "C" fn vm_cpu_offline(vm_ptr: *mut vm, cpu: c_int) {
+pub extern "C" fn vm_cpu_offline(vm_ptr: *mut vm, cpu: c_int) {
     if vm_ptr.is_null() {
         return;
     }
-    let cpumask = &(*vm_ptr).cpumask as *const u64 as *const AtomicU64;
-    (*cpumask).fetch_and(!(1u64 << cpu), Ordering::SeqCst);
+    u! {
+        let cpumask = &(*vm_ptr).cpumask as *const u64 as *const AtomicU64;
+        (*cpumask).fetch_and(!(1u64 << cpu), Ordering::SeqCst);
+    }
 }
 
 /// Send remote `sfence.vma` to all CPUs currently using this VM (other than
 /// the calling CPU). Disables interrupts around the SBI call to keep the
 /// `cpuid()` read coherent with the cpumask read.
 #[no_mangle]
-pub unsafe extern "C" fn vm_remote_sfence(vm_ptr: *mut vm) {
+pub extern "C" fn vm_remote_sfence(vm_ptr: *mut vm) {
     if vm_ptr.is_null() {
         return;
     }
-    let _preempt = machine::PreemptGuard::new();
-    fence(Ordering::SeqCst);
-    let cpumask = &(*vm_ptr).cpumask as *const u64 as *const AtomicU64;
-    let mut mask = (*cpumask).load(Ordering::Acquire);
-    mask &= !(1u64 << xv6_vm_cpuid());
-    if mask != 0 {
-        xv6_vm_sbi_remote_hfence_vma(mask);
+    u! {
+        let _preempt = machine::PreemptGuard::new();
+        fence(Ordering::SeqCst);
+        let cpumask = &(*vm_ptr).cpumask as *const u64 as *const AtomicU64;
+        let mut mask = (*cpumask).load(Ordering::Acquire);
+        mask &= !(1u64 << xv6_vm_cpuid());
+        if mask != 0 {
+            xv6_vm_sbi_remote_hfence_vma(mask);
+        }
     }
 }
 
@@ -640,128 +658,140 @@ fn list_node_is_detached(entry: *const list_node_t) -> bool {
 
 /// Initialise the slab pool that backs `vma_t` objects.
 #[no_mangle]
-pub unsafe extern "C" fn __vma_pool_init() {
-    slab_cache_init(
-        vma_pool_ptr(),
-        b"vm area\0".as_ptr() as *mut c_char,
-        core::mem::size_of::<vma>(),
-        SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP,
-    );
+pub extern "C" fn __vma_pool_init() {
+    u! {
+        slab_cache_init(
+            vma_pool_ptr(),
+            b"vm area\0".as_ptr() as *mut c_char,
+            core::mem::size_of::<vma>(),
+            SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP,
+        );
+    }
 }
 
 /// Initialise the slab pool that backs `vm_t` objects.
 #[no_mangle]
-pub unsafe extern "C" fn __vm_pool_init() {
-    slab_cache_init(
-        vm_pool_ptr(),
-        b"vm\0".as_ptr() as *mut c_char,
-        core::mem::size_of::<vm>(),
-        SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP,
-    );
+pub extern "C" fn __vm_pool_init() {
+    u! {
+        slab_cache_init(
+            vm_pool_ptr(),
+            b"vm\0".as_ptr() as *mut c_char,
+            core::mem::size_of::<vm>(),
+            SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP,
+        );
+    }
 }
 
 /// Allocate and zero-initialise a fresh `vma_t`, linked into `vm`.
 /// Returns NULL on OOM. Mirrors the C `__vma_alloc`.
 #[no_mangle]
-pub unsafe extern "C" fn __vma_alloc(vm_ptr: *mut vm) -> *mut vma {
-    let vma_ptr = slab_alloc(vma_pool_ptr()) as *mut vma;
-    if vma_ptr.is_null() {
-        return core::ptr::null_mut();
+pub extern "C" fn __vma_alloc(vm_ptr: *mut vm) -> *mut vma {
+    u! {
+        let vma_ptr = slab_alloc(vma_pool_ptr()) as *mut vma;
+        if vma_ptr.is_null() {
+            return core::ptr::null_mut();
+        }
+        core::ptr::write_bytes(vma_ptr, 0, 1);
+        xv6_vm_rb_node_init(&raw mut (*vma_ptr).rb_entry);
+        xv6_vm_list_entry_init(&raw mut (*vma_ptr).list_entry);
+        xv6_vm_list_entry_init(&raw mut (*vma_ptr).free_list_entry);
+        (*vma_ptr).vm = vm_ptr;
+        vma_ptr
     }
-    core::ptr::write_bytes(vma_ptr, 0, 1);
-    xv6_vm_rb_node_init(&raw mut (*vma_ptr).rb_entry);
-    xv6_vm_list_entry_init(&raw mut (*vma_ptr).list_entry);
-    xv6_vm_list_entry_init(&raw mut (*vma_ptr).free_list_entry);
-    (*vma_ptr).vm = vm_ptr;
-    vma_ptr
 }
 
 /// Free a `vma_t` previously returned by `__vma_alloc`. Includes double-free
 /// detection via a magic value poison.
 #[no_mangle]
-pub unsafe extern "C" fn __vma_free(vma_ptr: *mut vma) {
+pub extern "C" fn __vma_free(vma_ptr: *mut vma) {
     if vma_ptr.is_null() {
         return;
     }
-    if (*vma_ptr).start == VMA_FREED_MAGIC && (*vma_ptr).end == VMA_FREED_MAGIC {
-        xv6_vm_warn_vma_double_free(vma_ptr as *mut c_void);
-        return;
+    u! {
+        if (*vma_ptr).start == VMA_FREED_MAGIC && (*vma_ptr).end == VMA_FREED_MAGIC {
+            xv6_vm_warn_vma_double_free(vma_ptr as *mut c_void);
+            return;
+        }
+        if (*vma_ptr).vm.is_null() {
+            xv6_vm_warn_vma_null_vm(vma_ptr as *mut c_void);
+            return;
+        }
+        // Poison so that a double-free can be detected on the next call.
+        (*vma_ptr).vm = core::ptr::null_mut();
+        (*vma_ptr).start = VMA_FREED_MAGIC;
+        (*vma_ptr).end = VMA_FREED_MAGIC;
+        slab_free(vma_ptr as *mut c_void);
     }
-    if (*vma_ptr).vm.is_null() {
-        xv6_vm_warn_vma_null_vm(vma_ptr as *mut c_void);
-        return;
-    }
-    // Poison so that a double-free can be detected on the next call.
-    (*vma_ptr).vm = core::ptr::null_mut();
-    (*vma_ptr).start = VMA_FREED_MAGIC;
-    (*vma_ptr).end = VMA_FREED_MAGIC;
-    slab_free(vma_ptr as *mut c_void);
 }
 
 /// Unmap every page covered by `vma`, drop its file reference, and mark it
 /// as `PROT_NONE`. Caller must hold the vm rwlock for write.
 #[no_mangle]
-pub unsafe extern "C" fn __vma_set_free(vma_ptr: *mut vma) {
-    if vma_ptr.is_null() || (*vma_ptr).vm.is_null() {
-        return;
-    }
-    if (*vma_ptr).flags == PROT_NONE as u64 {
-        return;
-    }
-    if ((*vma_ptr).start & ((PGSIZE as u64) - 1)) != 0 {
-        xv6_vm_panic(b"__vma_set_free: vma start not aligned\0".as_ptr() as *const c_char);
-    }
-
-    let pagetable = (*(*vma_ptr).vm).pagetable;
-    if !pagetable.is_null() {
-        let mut a = (*vma_ptr).start;
-        while a < (*vma_ptr).end {
-            let pte = crate::mm::vm_pgtab::walk(
-                pagetable as *mut u64,
-                a,
-                0,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            );
-            if !pte.is_null() {
-                let pte_val = *pte;
-                if pte_flags(pte_val) == PTE_V as u64 {
-                    xv6_vm_panic(b"__vma_set_free: not a leaf\0".as_ptr() as *const c_char);
-                }
-                if (pte_val & (PTE_V as u64)) != 0 {
-                    let pa = pte_to_pa(pte_val);
-                    *pte = 0;
-                    // Notify any remote core currently using this mapping.
-                    vm_remote_sfence((*vma_ptr).vm);
-                    page_ref_dec(pa as *mut c_void);
-                }
-            }
-            a = a.wrapping_add(PGSIZE as u64);
+pub extern "C" fn __vma_set_free(vma_ptr: *mut vma) {
+    u! {
+        if vma_ptr.is_null() || (*vma_ptr).vm.is_null() {
+            return;
         }
-    }
+        if (*vma_ptr).flags == PROT_NONE as u64 {
+            return;
+        }
+        if ((*vma_ptr).start & ((PGSIZE as u64) - 1)) != 0 {
+            xv6_vm_panic(b"__vma_set_free: vma start not aligned\0".as_ptr() as *const c_char);
+        }
 
-    (*vma_ptr).flags = PROT_NONE as u64;
-    if !(*vma_ptr).file.is_null() {
-        vfs_fput((*vma_ptr).file);
-    }
-    (*vma_ptr).file = core::ptr::null_mut();
-    (*vma_ptr).pgoff = 0;
-    if !list_node_is_detached(&raw const (*vma_ptr).free_list_entry) {
-        xv6_vm_panic(b"__vma_set_free: vma already in free list\0".as_ptr() as *const c_char);
+        let pagetable = (*(*vma_ptr).vm).pagetable;
+        if !pagetable.is_null() {
+            let mut a = (*vma_ptr).start;
+            while a < (*vma_ptr).end {
+                let pte = crate::mm::vm_pgtab::walk(
+                    pagetable as *mut u64,
+                    a,
+                    0,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                );
+                if !pte.is_null() {
+                    let pte_val = *pte;
+                    if pte_flags(pte_val) == PTE_V as u64 {
+                        xv6_vm_panic(b"__vma_set_free: not a leaf\0".as_ptr() as *const c_char);
+                    }
+                    if (pte_val & (PTE_V as u64)) != 0 {
+                        let pa = pte_to_pa(pte_val);
+                        *pte = 0;
+                        // Notify any remote core currently using this mapping.
+                        vm_remote_sfence((*vma_ptr).vm);
+                        page_ref_dec(pa as *mut c_void);
+                    }
+                }
+                a = a.wrapping_add(PGSIZE as u64);
+            }
+        }
+
+        (*vma_ptr).flags = PROT_NONE as u64;
+        if !(*vma_ptr).file.is_null() {
+            vfs_fput((*vma_ptr).file);
+        }
+        (*vma_ptr).file = core::ptr::null_mut();
+        (*vma_ptr).pgoff = 0;
+        if !list_node_is_detached(&raw const (*vma_ptr).free_list_entry) {
+            xv6_vm_panic(b"__vma_set_free: vma already in free list\0".as_ptr() as *const c_char);
+        }
     }
 }
 
 /// Tear down the per-CPU trapframe leaf PTEs without freeing the physical
 /// trapframe pages (those are owned by the kernel-stack allocator).
 #[no_mangle]
-pub unsafe extern "C" fn __vm_unmap_trapframe(vm_ptr: *mut vm) {
-    if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() || (*vm_ptr).trapframe_pte.is_null() {
-        return;
-    }
-    let leaf = (*vm_ptr).trapframe_pte as *mut u64;
-    for i in 0..(NCPU as u64) {
-        let pte_idx = xv6_vm_px0(TRAPFRAME as u64 + i * (PGSIZE as u64)) as usize;
-        *leaf.add(pte_idx) = 0;
+pub extern "C" fn __vm_unmap_trapframe(vm_ptr: *mut vm) {
+    u! {
+        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() || (*vm_ptr).trapframe_pte.is_null() {
+            return;
+        }
+        let leaf = (*vm_ptr).trapframe_pte as *mut u64;
+        for i in 0..(NCPU as u64) {
+            let pte_idx = xv6_vm_px0(TRAPFRAME as u64 + i * (PGSIZE as u64)) as usize;
+            *leaf.add(pte_idx) = 0;
+        }
     }
 }
 
@@ -769,22 +799,24 @@ pub unsafe extern "C" fn __vm_unmap_trapframe(vm_ptr: *mut vm) {
 /// any missing intermediate page-tables. Stores the leaf base pointer in
 /// `vm->trapframe_pte`. Returns 0 on success or `-ENOMEM` on OOM.
 #[no_mangle]
-pub unsafe extern "C" fn __vm_map_trampoline(vm_ptr: *mut vm) -> c_int {
-    if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-        return -(EINVAL as c_int);
+pub extern "C" fn __vm_map_trampoline(vm_ptr: *mut vm) -> c_int {
+    u! {
+        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+            return -(EINVAL as c_int);
+        }
+        let pte = crate::mm::vm_pgtab::walk(
+            (*vm_ptr).pagetable as *mut u64,
+            TRAPFRAME as u64,
+            1,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        if pte.is_null() {
+            return -(ENOMEM as c_int);
+        }
+        (*vm_ptr).trapframe_pte = pg_round_down(pte as u64) as *mut u64;
+        0
     }
-    let pte = crate::mm::vm_pgtab::walk(
-        (*vm_ptr).pagetable as *mut u64,
-        TRAPFRAME as u64,
-        1,
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
-    if pte.is_null() {
-        return -(ENOMEM as c_int);
-    }
-    (*vm_ptr).trapframe_pte = pg_round_down(pte as u64) as *mut u64;
-    0
 }
 
 /// Duplicate `src` into `dst`. For non-PROT_NONE source ranges, walks the
@@ -796,85 +828,87 @@ pub unsafe extern "C" fn __vm_map_trampoline(vm_ptr: *mut vm) -> c_int {
 /// be allocated (in which case `dst` is reset to PROT_NONE via
 /// `__vma_set_free`).
 #[no_mangle]
-pub unsafe extern "C" fn __vma_copy(dst: *mut vma, src: *mut vma) -> c_int {
-    if dst.is_null() || src.is_null() {
-        return -(EINVAL as c_int);
-    }
-    if (*src).vm.is_null() || (*dst).vm.is_null() {
-        return -(EINVAL as c_int);
-    }
-    let src_size = (*src).end.wrapping_sub((*src).start);
-    let dst_size = (*dst).end.wrapping_sub((*dst).start);
-    if src_size != dst_size {
-        return -(EINVAL as c_int);
-    }
-    let prot_mask = VMA_FLAG_PROT_MASK as u64;
-    if ((*src).flags & prot_mask) != ((*dst).flags & prot_mask) {
-        return -(EINVAL as c_int);
-    }
-
-    (*dst).flags = (*src).flags;
-    (*dst).pgoff = (*src).pgoff;
-    if !(*src).file.is_null() {
-        let dup = vfs_fdup((*src).file);
-        if dup.is_null() {
-            return -(EBADF as c_int);
+pub extern "C" fn __vma_copy(dst: *mut vma, src: *mut vma) -> c_int {
+    u! {
+        if dst.is_null() || src.is_null() {
+            return -(EINVAL as c_int);
         }
-        (*dst).file = dup;
-    } else {
-        (*dst).file = core::ptr::null_mut();
-    }
+        if (*src).vm.is_null() || (*dst).vm.is_null() {
+            return -(EINVAL as c_int);
+        }
+        let src_size = (*src).end.wrapping_sub((*src).start);
+        let dst_size = (*dst).end.wrapping_sub((*dst).start);
+        if src_size != dst_size {
+            return -(EINVAL as c_int);
+        }
+        let prot_mask = VMA_FLAG_PROT_MASK as u64;
+        if ((*src).flags & prot_mask) != ((*dst).flags & prot_mask) {
+            return -(EINVAL as c_int);
+        }
 
-    if (*src).flags != PROT_NONE as u64 {
-        let pgtb_src = (*(*src).vm).pagetable as *mut u64;
-        let pgtb_dst = (*(*dst).vm).pagetable as *mut u64;
-        let mut a = (*src).start;
-        while a < (*src).end {
-            let src_pte = crate::mm::vm_pgtab::walk(
-                pgtb_src,
-                a,
-                0,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            );
-            if !src_pte.is_null() && *src_pte != 0 {
-                let pte_val = *src_pte;
-                if pte_flags(pte_val) == PTE_V as u64 {
-                    xv6_vm_panic(b"__vma_copy: not a leaf\0".as_ptr() as *const c_char);
-                }
-                if (pte_flags(pte_val) & (PTE_V as u64)) != 0 {
-                    let new_pte = crate::mm::vm_pgtab::walk(
-                        pgtb_dst,
-                        a,
-                        1,
-                        core::ptr::null_mut(),
-                        core::ptr::null_mut(),
-                    );
-                    if new_pte.is_null() {
-                        __vma_set_free(dst);
-                        return -(ENOMEM as c_int);
-                    }
-                    // Set COW flag and clear writeable on the source PTE,
-                    // then copy the (now read-only) PTE into the destination.
-                    *src_pte |= PTE_RSW_w as u64;
-                    *src_pte &= !(PTE_W as u64);
-                    *new_pte = *src_pte;
-                    let pa = pte_to_pa(*src_pte);
-                    let refc = page_ref_inc(pa as *mut c_void);
-                    if refc <= 0 {
-                        xv6_vm_panic(
-                            b"__vma_copy: page refcnt should be greater than 0\0".as_ptr()
-                                as *const c_char,
-                        );
-                    }
-                }
+        (*dst).flags = (*src).flags;
+        (*dst).pgoff = (*src).pgoff;
+        if !(*src).file.is_null() {
+            let dup = vfs_fdup((*src).file);
+            if dup.is_null() {
+                return -(EBADF as c_int);
             }
-            a = a.wrapping_add(PGSIZE as u64);
+            (*dst).file = dup;
+        } else {
+            (*dst).file = core::ptr::null_mut();
         }
-        // Flush remote TLBs that may still cache the now-read-only mappings.
-        vm_remote_sfence((*src).vm);
+
+        if (*src).flags != PROT_NONE as u64 {
+            let pgtb_src = (*(*src).vm).pagetable as *mut u64;
+            let pgtb_dst = (*(*dst).vm).pagetable as *mut u64;
+            let mut a = (*src).start;
+            while a < (*src).end {
+                let src_pte = crate::mm::vm_pgtab::walk(
+                    pgtb_src,
+                    a,
+                    0,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                );
+                if !src_pte.is_null() && *src_pte != 0 {
+                    let pte_val = *src_pte;
+                    if pte_flags(pte_val) == PTE_V as u64 {
+                        xv6_vm_panic(b"__vma_copy: not a leaf\0".as_ptr() as *const c_char);
+                    }
+                    if (pte_flags(pte_val) & (PTE_V as u64)) != 0 {
+                        let new_pte = crate::mm::vm_pgtab::walk(
+                            pgtb_dst,
+                            a,
+                            1,
+                            core::ptr::null_mut(),
+                            core::ptr::null_mut(),
+                        );
+                        if new_pte.is_null() {
+                            __vma_set_free(dst);
+                            return -(ENOMEM as c_int);
+                        }
+                        // Set COW flag and clear writeable on the source PTE,
+                        // then copy the (now read-only) PTE into the destination.
+                        *src_pte |= PTE_RSW_w as u64;
+                        *src_pte &= !(PTE_W as u64);
+                        *new_pte = *src_pte;
+                        let pa = pte_to_pa(*src_pte);
+                        let refc = page_ref_inc(pa as *mut c_void);
+                        if refc <= 0 {
+                            xv6_vm_panic(
+                                b"__vma_copy: page refcnt should be greater than 0\0".as_ptr()
+                                    as *const c_char,
+                            );
+                        }
+                    }
+                }
+                a = a.wrapping_add(PGSIZE as u64);
+            }
+            // Flush remote TLBs that may still cache the now-read-only mappings.
+            vm_remote_sfence((*src).vm);
+        }
+        0
     }
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -925,13 +959,15 @@ pub extern "C" fn pte2vma_flags(pte_flags: u64) -> u64 {
 /// field that is updated through atomic GCC builtins; treating the
 /// storage as `AtomicI32` is layout-compatible.
 #[no_mangle]
-pub unsafe extern "C" fn vm_dup(vm_ptr: *mut vm) {
-    if vm_ptr.is_null() {
-        return;
+pub extern "C" fn vm_dup(vm_ptr: *mut vm) {
+    u! {
+        if vm_ptr.is_null() {
+            return;
+        }
+        let refcount =
+            &(*vm_ptr).refcount as *const c_int as *const core::sync::atomic::AtomicI32;
+        (*refcount).fetch_add(1, Ordering::SeqCst);
     }
-    let refcount =
-        &(*vm_ptr).refcount as *const c_int as *const core::sync::atomic::AtomicI32;
-    (*refcount).fetch_add(1, Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------
@@ -940,39 +976,51 @@ pub unsafe extern "C" fn vm_dup(vm_ptr: *mut vm) {
 
 /// Acquire VM read lock for VMA-tree traversal (rwsem, sleepable).
 #[no_mangle]
-pub unsafe extern "C" fn vm_rlock(vm_ptr: *mut vm) {
-    rwsem_acquire_read(&mut (*vm_ptr).rw_lock as *mut rwsem_t);
+pub extern "C" fn vm_rlock(vm_ptr: *mut vm) {
+    u! {
+        rwsem_acquire_read(&mut (*vm_ptr).rw_lock as *mut rwsem_t);
+    }
 }
 
 /// Release VM read lock.
 #[no_mangle]
-pub unsafe extern "C" fn vm_runlock(vm_ptr: *mut vm) {
-    rwsem_release(&mut (*vm_ptr).rw_lock as *mut rwsem_t);
+pub extern "C" fn vm_runlock(vm_ptr: *mut vm) {
+    u! {
+        rwsem_release(&mut (*vm_ptr).rw_lock as *mut rwsem_t);
+    }
 }
 
 /// Acquire VM write lock for VMA-tree modification (rwsem, sleepable).
 #[no_mangle]
-pub unsafe extern "C" fn vm_wlock(vm_ptr: *mut vm) {
-    rwsem_acquire_write(&mut (*vm_ptr).rw_lock as *mut rwsem_t);
+pub extern "C" fn vm_wlock(vm_ptr: *mut vm) {
+    u! {
+        rwsem_acquire_write(&mut (*vm_ptr).rw_lock as *mut rwsem_t);
+    }
 }
 
 /// Release VM write lock.
 #[no_mangle]
-pub unsafe extern "C" fn vm_wunlock(vm_ptr: *mut vm) {
-    rwsem_release(&mut (*vm_ptr).rw_lock as *mut rwsem_t);
+pub extern "C" fn vm_wunlock(vm_ptr: *mut vm) {
+    u! {
+        rwsem_release(&mut (*vm_ptr).rw_lock as *mut rwsem_t);
+    }
 }
 
 /// Acquire VM page-table spinlock for PTE modifications.
 /// Caller must not sleep while holding this.
 #[no_mangle]
-pub unsafe extern "C" fn vm_pgtable_lock(vm_ptr: *mut vm) {
-    spin_lock(&mut (*vm_ptr).spinlock as *mut spinlock_t);
+pub extern "C" fn vm_pgtable_lock(vm_ptr: *mut vm) {
+    u! {
+        spin_lock(&mut (*vm_ptr).spinlock as *mut spinlock_t);
+    }
 }
 
 /// Release VM page-table spinlock.
 #[no_mangle]
-pub unsafe extern "C" fn vm_pgtable_unlock(vm_ptr: *mut vm) {
-    spin_unlock(&mut (*vm_ptr).spinlock as *mut spinlock_t);
+pub extern "C" fn vm_pgtable_unlock(vm_ptr: *mut vm) {
+    u! {
+        spin_unlock(&mut (*vm_ptr).spinlock as *mut spinlock_t);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -987,58 +1035,60 @@ const VM_DESTROYED_MAGIC: u64 = 0xDEAD0BADu64;
 /// Direct port of the C `__vm_destroy` static helper; exported (no_mangle)
 /// because `vm_put` is the only caller and lives in the same staticlib.
 #[no_mangle]
-pub unsafe extern "C" fn __vm_destroy(vm_ptr: *mut vm) {
-    if vm_ptr.is_null() {
-        return;
-    }
-    // Double-destroy detection.
-    let poisoned = VM_DESTROYED_MAGIC as *mut u64;
-    if (*vm_ptr).pagetable == poisoned {
-        xv6_vm_warn_double_destroy(vm_ptr as *mut c_void);
-        return;
-    }
-
-    // Iterate vm->vm_list, freeing each vma. Use the safe-iteration shims
-    // (xv6_vm_first_vma / xv6_vm_next_vma) so we capture the next pointer
-    // before mutating the current entry.
-    let mut cur = xv6_vm_first_vma(vm_ptr);
-    while !cur.is_null() {
-        let next = xv6_vm_next_vma(vm_ptr, cur);
-
-        // Sanity: verify vma belongs to this vm.
-        if (*cur).vm != vm_ptr {
-            xv6_vm_warn_vma_vm_mismatch(
-                cur as *mut c_void,
-                (*cur).vm as *mut c_void,
-                vm_ptr as *mut c_void,
-            );
-            cur = next;
-            continue;
+pub extern "C" fn __vm_destroy(vm_ptr: *mut vm) {
+    u! {
+        if vm_ptr.is_null() {
+            return;
         }
-        if (*cur).start == VMA_FREED_MAGIC || (*cur).end == VMA_FREED_MAGIC {
-            xv6_vm_warn_vma_already_freed(cur as *mut c_void);
-            cur = next;
-            continue;
+        // Double-destroy detection.
+        let poisoned = VM_DESTROYED_MAGIC as *mut u64;
+        if (*vm_ptr).pagetable == poisoned {
+            xv6_vm_warn_double_destroy(vm_ptr as *mut c_void);
+            return;
         }
-        __vma_set_free(cur);
-        __vma_free(cur);
-        cur = next;
-    }
 
-    // Reset bookkeeping containers.
-    xv6_vm_list_entry_init(&mut (*vm_ptr).vm_list as *mut list_node_t);
-    xv6_vm_list_entry_init(&mut (*vm_ptr).vm_free_list as *mut list_node_t);
-    xv6_vm_rb_init_vm_tree(&mut (*vm_ptr).vm_tree as *mut crate::bindings::rb_root);
+        // Iterate vm->vm_list, freeing each vma. Use the safe-iteration shims
+        // (xv6_vm_first_vma / xv6_vm_next_vma) so we capture the next pointer
+        // before mutating the current entry.
+        let mut cur = xv6_vm_first_vma(vm_ptr);
+        while !cur.is_null() {
+            let next = xv6_vm_next_vma(vm_ptr, cur);
 
-    if !(*vm_ptr).trapframe_pte.is_null() {
-        __vm_unmap_trapframe(vm_ptr);
+            // Sanity: verify vma belongs to this vm.
+            if (*cur).vm != vm_ptr {
+                xv6_vm_warn_vma_vm_mismatch(
+                    cur as *mut c_void,
+                    (*cur).vm as *mut c_void,
+                    vm_ptr as *mut c_void,
+                );
+                cur = next;
+                continue;
+            }
+            if (*cur).start == VMA_FREED_MAGIC || (*cur).end == VMA_FREED_MAGIC {
+                xv6_vm_warn_vma_already_freed(cur as *mut c_void);
+                cur = next;
+                continue;
+            }
+            __vma_set_free(cur);
+            __vma_free(cur);
+            cur = next;
+        }
+
+        // Reset bookkeeping containers.
+        xv6_vm_list_entry_init(&mut (*vm_ptr).vm_list as *mut list_node_t);
+        xv6_vm_list_entry_init(&mut (*vm_ptr).vm_free_list as *mut list_node_t);
+        xv6_vm_rb_init_vm_tree(&mut (*vm_ptr).vm_tree as *mut crate::bindings::rb_root);
+
+        if !(*vm_ptr).trapframe_pte.is_null() {
+            __vm_unmap_trapframe(vm_ptr);
+        }
+        if !(*vm_ptr).pagetable.is_null() {
+            uvmfree((*vm_ptr).pagetable, 0);
+        }
+        // Poison before freeing.
+        (*vm_ptr).pagetable = poisoned;
+        slab_free(vm_ptr as *mut c_void);
     }
-    if !(*vm_ptr).pagetable.is_null() {
-        uvmfree((*vm_ptr).pagetable, 0);
-    }
-    // Poison before freeing.
-    (*vm_ptr).pagetable = poisoned;
-    slab_free(vm_ptr as *mut c_void);
 }
 
 /// Decrement the VM reference count; destroy when the last reference drops.
@@ -1047,24 +1097,26 @@ pub unsafe extern "C" fn __vm_destroy(vm_ptr: *mut vm) {
 /// successfully decremented (i.e. the value was != 1) and false otherwise.
 /// We model the same control flow with a CAS loop over `AtomicI32`.
 #[no_mangle]
-pub unsafe extern "C" fn vm_put(vm_ptr: *mut vm) {
-    if vm_ptr.is_null() {
-        return;
-    }
-    let refcount =
-        &(*vm_ptr).refcount as *const c_int as *const core::sync::atomic::AtomicI32;
-    let atomic = &*refcount;
-
-    let mut cur = atomic.load(Ordering::Relaxed);
-    loop {
-        if cur == 1 {
-            // Last reference: do not decrement, destroy instead.
-            __vm_destroy(vm_ptr);
+pub extern "C" fn vm_put(vm_ptr: *mut vm) {
+    u! {
+        if vm_ptr.is_null() {
             return;
         }
-        match atomic.compare_exchange_weak(cur, cur - 1, Ordering::AcqRel, Ordering::Relaxed) {
-            Ok(_) => return,
-            Err(observed) => cur = observed,
+        let refcount =
+            &(*vm_ptr).refcount as *const c_int as *const core::sync::atomic::AtomicI32;
+        let atomic = &*refcount;
+
+        let mut cur = atomic.load(Ordering::Relaxed);
+        loop {
+            if cur == 1 {
+                // Last reference: do not decrement, destroy instead.
+                __vm_destroy(vm_ptr);
+                return;
+            }
+            match atomic.compare_exchange_weak(cur, cur - 1, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(observed) => cur = observed,
+            }
         }
     }
 }
@@ -1083,58 +1135,60 @@ static VM_RW_LOCK_NAME: &[u8] = b"vm_rw_lock\0";
 /// On any failure the partially-constructed VM is torn down via
 /// `__vm_destroy` and the function returns `null`.
 #[no_mangle]
-pub unsafe extern "C" fn vm_init() -> *mut vm {
-    let raw = slab_alloc(vm_pool_ptr());
-    if raw.is_null() {
-        return core::ptr::null_mut();
+pub extern "C" fn vm_init() -> *mut vm {
+    u! {
+        let raw = slab_alloc(vm_pool_ptr());
+        if raw.is_null() {
+            return core::ptr::null_mut();
+        }
+        let vm_ptr = raw as *mut vm;
+
+        // memset(vm, 0, sizeof(vm_t))
+        core::ptr::write_bytes(raw as *mut u8, 0, core::mem::size_of::<vm>());
+
+        // rb_root_init(&vm->vm_tree, &__vm_tree_opts);
+        xv6_vm_rb_init_vm_tree(&mut (*vm_ptr).vm_tree as *mut crate::bindings::rb_root);
+        xv6_vm_list_entry_init(&mut (*vm_ptr).vm_list as *mut list_node_t);
+        xv6_vm_list_entry_init(&mut (*vm_ptr).vm_free_list as *mut list_node_t);
+
+        let vma_ptr = __vma_alloc(vm_ptr);
+        if vma_ptr.is_null() {
+            __vm_destroy(vm_ptr);
+            return core::ptr::null_mut();
+        }
+
+        // Set up the initial whole-user VMA so __vm_destroy can clean up on
+        // later error paths.
+        (*vma_ptr).start = UVMBOTTOM as u64;
+        (*vma_ptr).end = UVMTOP as u64;
+        rb_insert_color(
+            &mut (*vm_ptr).vm_tree as *mut crate::bindings::rb_root,
+            &mut (*vma_ptr).rb_entry as *mut rb_node,
+        );
+        xv6_vm_list_push_back_free_list_entry(vm_ptr, vma_ptr);
+        xv6_vm_list_push_back_list_entry(vm_ptr, vma_ptr);
+
+        (*vm_ptr).pagetable = uvmcreate();
+        if (*vm_ptr).pagetable.is_null() {
+            __vm_destroy(vm_ptr);
+            return core::ptr::null_mut();
+        }
+        if __vm_map_trampoline(vm_ptr) != 0 {
+            __vm_destroy(vm_ptr);
+            return core::ptr::null_mut();
+        }
+        spin_init(
+            &mut (*vm_ptr).spinlock as *mut spinlock_t,
+            VM_PGTABLE_LOCK_NAME.as_ptr() as *mut c_char,
+        );
+        rwsem_init(
+            &mut (*vm_ptr).rw_lock as *mut rwsem_t,
+            RWLOCK_PRIO_READ as u64,
+            VM_RW_LOCK_NAME.as_ptr() as *const c_char,
+        );
+        (*vm_ptr).refcount = 1;
+        vm_ptr
     }
-    let vm_ptr = raw as *mut vm;
-
-    // memset(vm, 0, sizeof(vm_t))
-    core::ptr::write_bytes(raw as *mut u8, 0, core::mem::size_of::<vm>());
-
-    // rb_root_init(&vm->vm_tree, &__vm_tree_opts);
-    xv6_vm_rb_init_vm_tree(&mut (*vm_ptr).vm_tree as *mut crate::bindings::rb_root);
-    xv6_vm_list_entry_init(&mut (*vm_ptr).vm_list as *mut list_node_t);
-    xv6_vm_list_entry_init(&mut (*vm_ptr).vm_free_list as *mut list_node_t);
-
-    let vma_ptr = __vma_alloc(vm_ptr);
-    if vma_ptr.is_null() {
-        __vm_destroy(vm_ptr);
-        return core::ptr::null_mut();
-    }
-
-    // Set up the initial whole-user VMA so __vm_destroy can clean up on
-    // later error paths.
-    (*vma_ptr).start = UVMBOTTOM as u64;
-    (*vma_ptr).end = UVMTOP as u64;
-    rb_insert_color(
-        &mut (*vm_ptr).vm_tree as *mut crate::bindings::rb_root,
-        &mut (*vma_ptr).rb_entry as *mut rb_node,
-    );
-    xv6_vm_list_push_back_free_list_entry(vm_ptr, vma_ptr);
-    xv6_vm_list_push_back_list_entry(vm_ptr, vma_ptr);
-
-    (*vm_ptr).pagetable = uvmcreate();
-    if (*vm_ptr).pagetable.is_null() {
-        __vm_destroy(vm_ptr);
-        return core::ptr::null_mut();
-    }
-    if __vm_map_trampoline(vm_ptr) != 0 {
-        __vm_destroy(vm_ptr);
-        return core::ptr::null_mut();
-    }
-    spin_init(
-        &mut (*vm_ptr).spinlock as *mut spinlock_t,
-        VM_PGTABLE_LOCK_NAME.as_ptr() as *mut c_char,
-    );
-    rwsem_init(
-        &mut (*vm_ptr).rw_lock as *mut rwsem_t,
-        RWLOCK_PRIO_READ as u64,
-        VM_RW_LOCK_NAME.as_ptr() as *const c_char,
-    );
-    (*vm_ptr).refcount = 1;
-    vm_ptr
 }
 
 // ---------------------------------------------------------------------------
@@ -1144,60 +1198,66 @@ pub unsafe extern "C" fn vm_init() -> *mut vm {
 /// Find the VMA containing virtual address `va` in `vm`'s rb-tree.
 /// Returns `null` if `va` is out of bounds or not mapped.
 #[no_mangle]
-pub unsafe extern "C" fn vm_find_area(vm_ptr: *mut vm, va: u64) -> *mut vma {
-    if vm_ptr.is_null() || va >= UVMTOP as u64 || va < UVMBOTTOM as u64 {
-        return core::ptr::null_mut();
+pub extern "C" fn vm_find_area(vm_ptr: *mut vm, va: u64) -> *mut vma {
+    u! {
+        if vm_ptr.is_null() || va >= UVMTOP as u64 || va < UVMBOTTOM as u64 {
+            return core::ptr::null_mut();
+        }
+        let node = rb_find_key_rdown(
+            &mut (*vm_ptr).vm_tree as *mut crate::bindings::rb_root,
+            va,
+        );
+        if node.is_null() {
+            return core::ptr::null_mut();
+        }
+        // container_of(node, vma_t, rb_entry)
+        let offset = core::mem::offset_of!(vma, rb_entry);
+        let vma_ptr = (node as *mut u8).sub(offset) as *mut vma;
+        if va < (*vma_ptr).start || va >= (*vma_ptr).end {
+            // Same defensive panic as the C assert.
+            xv6_vm_panic(b"vm_find_area: va not in range\0".as_ptr() as *const c_char);
+        }
+        vma_ptr
     }
-    let node = rb_find_key_rdown(
-        &mut (*vm_ptr).vm_tree as *mut crate::bindings::rb_root,
-        va,
-    );
-    if node.is_null() {
-        return core::ptr::null_mut();
-    }
-    // container_of(node, vma_t, rb_entry)
-    let offset = core::mem::offset_of!(vma, rb_entry);
-    let vma_ptr = (node as *mut u8).sub(offset) as *mut vma;
-    if va < (*vma_ptr).start || va >= (*vma_ptr).end {
-        // Same defensive panic as the C assert.
-        xv6_vm_panic(b"vm_find_area: va not in range\0".as_ptr() as *const c_char);
-    }
-    vma_ptr
 }
 
 /// Copy data to either a user or kernel destination, dispatched on
 /// `user_dst`. Mirrors the C `either_copyout`.
 #[no_mangle]
-pub unsafe extern "C" fn either_copyout(
+pub extern "C" fn either_copyout(
     user_dst: c_int,
     dst: u64,
     src: *mut c_void,
     len: u64,
 ) -> c_int {
-    if user_dst != 0 {
-        let cur_vm = xv6_vm_current_vm();
-        vm_copyout(cur_vm, dst, src as *const c_void, len)
-    } else {
-        memmove(dst as *mut c_void, src as *const c_void, len as usize);
-        0
+    u! {
+        if user_dst != 0 {
+            let cur_vm = xv6_vm_current_vm();
+            vm_copyout(cur_vm, dst, src as *const c_void, len)
+        } else {
+            memmove(dst as *mut c_void, src as *const c_void, len as usize);
+            0
+        }
     }
 }
 
 /// Copy data from either a user or kernel source, dispatched on `user_src`.
 /// Mirrors the C `either_copyin`.
 #[no_mangle]
-pub unsafe extern "C" fn either_copyin(
+pub extern "C" fn either_copyin(
     dst: *mut c_void,
     user_src: c_int,
     src: u64,
     len: u64,
 ) -> c_int {
-    if user_src != 0 {
-        let cur_vm = xv6_vm_current_vm();
-        vm_copyin(cur_vm, dst, src, len)
-    } else {
-        memmove(dst, src as *const c_void, len as usize);
-        0
+    u! {
+        if user_src != 0 {
+            let cur_vm = xv6_vm_current_vm();
+            vm_copyin(cur_vm, dst, src, len)
+        } else {
+            memmove(dst, src as *const c_void, len as usize);
+            0
+        }
     }
 }
 
@@ -1216,58 +1276,60 @@ fn pg_round_up(x: u64) -> u64 {
 /// allocating from the top of the first big-enough free area. Returns the
 /// chosen start address (page-aligned) or 0 if no fit.
 #[no_mangle]
-pub unsafe extern "C" fn vm_find_free_range(vm_ptr: *mut vm, size: usize, _hint: u64) -> u64 {
-    if vm_ptr.is_null() || size == 0 {
-        return 0;
-    }
-    let size = pg_round_up(size as u64);
+pub extern "C" fn vm_find_free_range(vm_ptr: *mut vm, size: usize, _hint: u64) -> u64 {
+    u! {
+        if vm_ptr.is_null() || size == 0 {
+            return 0;
+        }
+        let size = pg_round_up(size as u64);
 
-    let stack_bottom = if !(*vm_ptr).stack.is_null() {
-        (*(*vm_ptr).stack).start
-    } else {
-        (UVMTOP as u64).wrapping_sub(PGSIZE as u64)
-    };
-    let heap_end = if !(*vm_ptr).heap.is_null() {
-        (*(*vm_ptr).heap).start + (*vm_ptr).heap_size as u64
-    } else {
-        UVMBOTTOM as u64
-    };
+        let stack_bottom = if !(*vm_ptr).stack.is_null() {
+            (*(*vm_ptr).stack).start
+        } else {
+            (UVMTOP as u64).wrapping_sub(PGSIZE as u64)
+        };
+        let heap_end = if !(*vm_ptr).heap.is_null() {
+            (*(*vm_ptr).heap).start + (*vm_ptr).heap_size as u64
+        } else {
+            UVMBOTTOM as u64
+        };
 
-    let search_top = stack_bottom.wrapping_sub(16u64 * PGSIZE as u64);
-    let search_bottom = heap_end;
+        let search_top = stack_bottom.wrapping_sub(16u64 * PGSIZE as u64);
+        let search_bottom = heap_end;
 
-    if search_top <= search_bottom + size {
-        return 0;
-    }
-
-    // Walk vm->vm_free_list in reverse.
-    let mut cur = xv6_vm_last_free(vm_ptr);
-    while !cur.is_null() {
-        let prev = xv6_vm_prev_free(vm_ptr, cur);
-
-        if (*cur).flags != PROT_NONE as u64 {
-            cur = prev;
-            continue;
+        if search_top <= search_bottom + size {
+            return 0;
         }
 
-        let mut usable_start = (*cur).start;
-        let mut usable_end = (*cur).end;
-        if usable_start < search_bottom {
-            usable_start = search_bottom;
-        }
-        if usable_end > search_top {
-            usable_end = search_top;
-        }
+        // Walk vm->vm_free_list in reverse.
+        let mut cur = xv6_vm_last_free(vm_ptr);
+        while !cur.is_null() {
+            let prev = xv6_vm_prev_free(vm_ptr, cur);
 
-        if usable_end > usable_start && usable_end - usable_start >= size {
-            let result = pg_round_down(usable_end - size);
-            if result >= usable_start {
-                return result;
+            if (*cur).flags != PROT_NONE as u64 {
+                cur = prev;
+                continue;
             }
+
+            let mut usable_start = (*cur).start;
+            let mut usable_end = (*cur).end;
+            if usable_start < search_bottom {
+                usable_start = search_bottom;
+            }
+            if usable_end > search_top {
+                usable_end = search_top;
+            }
+
+            if usable_end > usable_start && usable_end - usable_start >= size {
+                let result = pg_round_down(usable_end - size);
+                if result >= usable_start {
+                    return result;
+                }
+            }
+            cur = prev;
         }
-        cur = prev;
+        0
     }
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1282,50 +1344,52 @@ pub unsafe extern "C" fn vm_find_free_range(vm_ptr: *mut vm, size: usize, _hint:
 /// the rb-tree and the per-vm list (and the free-list if the original
 /// flags == PROT_NONE).
 #[no_mangle]
-pub unsafe extern "C" fn vma_split(vma_ptr: *mut vma, va: u64) -> *mut vma {
-    if vma_ptr.is_null() || (*vma_ptr).vm.is_null() {
-        return core::ptr::null_mut();
-    }
-    if va < (*vma_ptr).start || va >= (*vma_ptr).end {
-        return core::ptr::null_mut();
-    }
-    if va == (*vma_ptr).start {
-        return vma_ptr;
-    }
+pub extern "C" fn vma_split(vma_ptr: *mut vma, va: u64) -> *mut vma {
+    u! {
+        if vma_ptr.is_null() || (*vma_ptr).vm.is_null() {
+            return core::ptr::null_mut();
+        }
+        if va < (*vma_ptr).start || va >= (*vma_ptr).end {
+            return core::ptr::null_mut();
+        }
+        if va == (*vma_ptr).start {
+            return vma_ptr;
+        }
 
-    let vm_ptr = (*vma_ptr).vm;
-    let new_vma = __vma_alloc(vm_ptr);
-    if new_vma.is_null() {
-        return core::ptr::null_mut();
+        let vm_ptr = (*vma_ptr).vm;
+        let new_vma = __vma_alloc(vm_ptr);
+        if new_vma.is_null() {
+            return core::ptr::null_mut();
+        }
+
+        (*new_vma).start = va;
+        let ins = rb_insert_color(
+            &mut (*vm_ptr).vm_tree as *mut _,
+            &mut (*new_vma).rb_entry as *mut _,
+        );
+        if ins != (&mut (*new_vma).rb_entry as *mut _) {
+            xv6_vm_panic(b"vma_split: rb_insert_color failed\0".as_ptr() as *const c_char);
+        }
+
+        (*new_vma).end = (*vma_ptr).end;
+        (*new_vma).flags = (*vma_ptr).flags;
+        if !(*vma_ptr).file.is_null() {
+            (*new_vma).file = vfs_fdup((*vma_ptr).file);
+            (*new_vma).pgoff = (*vma_ptr).pgoff + (va - (*vma_ptr).start);
+        } else {
+            (*new_vma).file = core::ptr::null_mut();
+            (*new_vma).pgoff = 0;
+        }
+
+        (*vma_ptr).end = va;
+
+        xv6_vm_list_insert_after_list_entry(vma_ptr, new_vma);
+        if (*vma_ptr).flags == PROT_NONE as u64 {
+            xv6_vm_list_insert_after_free_list_entry(vma_ptr, new_vma);
+        }
+
+        new_vma
     }
-
-    (*new_vma).start = va;
-    let ins = rb_insert_color(
-        &mut (*vm_ptr).vm_tree as *mut _,
-        &mut (*new_vma).rb_entry as *mut _,
-    );
-    if ins != (&mut (*new_vma).rb_entry as *mut _) {
-        xv6_vm_panic(b"vma_split: rb_insert_color failed\0".as_ptr() as *const c_char);
-    }
-
-    (*new_vma).end = (*vma_ptr).end;
-    (*new_vma).flags = (*vma_ptr).flags;
-    if !(*vma_ptr).file.is_null() {
-        (*new_vma).file = vfs_fdup((*vma_ptr).file);
-        (*new_vma).pgoff = (*vma_ptr).pgoff + (va - (*vma_ptr).start);
-    } else {
-        (*new_vma).file = core::ptr::null_mut();
-        (*new_vma).pgoff = 0;
-    }
-
-    (*vma_ptr).end = va;
-
-    xv6_vm_list_insert_after_list_entry(vma_ptr, new_vma);
-    if (*vma_ptr).flags == PROT_NONE as u64 {
-        xv6_vm_list_insert_after_free_list_entry(vma_ptr, new_vma);
-    }
-
-    new_vma
 }
 
 /// Merge two adjacent VMAs of identical protection (and matching file/pgoff
@@ -1333,48 +1397,50 @@ pub unsafe extern "C" fn vma_split(vma_ptr: *mut vma, va: u64) -> *mut vma {
 /// merge is illegal. The right-side VMA is unlinked from the rb-tree and
 /// both lists, its file reference released, and the descriptor freed.
 #[no_mangle]
-pub unsafe extern "C" fn vma_merge(mut vma1: *mut vma, mut vma2: *mut vma) -> *mut vma {
-    if vma1.is_null() || vma2.is_null() || (*vma1).vm != (*vma2).vm {
-        return core::ptr::null_mut();
-    }
-    // VMA_ADJACENT: end1 == start2 || end2 == start1
-    if !((*vma1).end == (*vma2).start || (*vma2).end == (*vma1).start) {
-        return core::ptr::null_mut();
-    }
-    let prot_mask = VMA_FLAG_PROT_MASK as u64;
-    if ((*vma1).flags & prot_mask) != ((*vma2).flags & prot_mask) {
-        return core::ptr::null_mut();
-    }
-    // Ensure vma1 is always the left one.
-    if (*vma1).start > (*vma2).start {
-        core::mem::swap(&mut vma1, &mut vma2);
-    }
-    if (*vma1).file != (*vma2).file {
-        return core::ptr::null_mut();
-    }
-    if !(*vma1).file.is_null()
-        && ((*vma2).pgoff - (*vma1).pgoff) != ((*vma2).start - (*vma1).start)
-    {
-        return core::ptr::null_mut();
-    }
+pub extern "C" fn vma_merge(mut vma1: *mut vma, mut vma2: *mut vma) -> *mut vma {
+    u! {
+        if vma1.is_null() || vma2.is_null() || (*vma1).vm != (*vma2).vm {
+            return core::ptr::null_mut();
+        }
+        // VMA_ADJACENT: end1 == start2 || end2 == start1
+        if !((*vma1).end == (*vma2).start || (*vma2).end == (*vma1).start) {
+            return core::ptr::null_mut();
+        }
+        let prot_mask = VMA_FLAG_PROT_MASK as u64;
+        if ((*vma1).flags & prot_mask) != ((*vma2).flags & prot_mask) {
+            return core::ptr::null_mut();
+        }
+        // Ensure vma1 is always the left one.
+        if (*vma1).start > (*vma2).start {
+            core::mem::swap(&mut vma1, &mut vma2);
+        }
+        if (*vma1).file != (*vma2).file {
+            return core::ptr::null_mut();
+        }
+        if !(*vma1).file.is_null()
+            && ((*vma2).pgoff - (*vma1).pgoff) != ((*vma2).start - (*vma1).start)
+        {
+            return core::ptr::null_mut();
+        }
 
-    (*vma1).end = (*vma2).end;
-    let del = rb_delete_node_color(
-        &mut (*(*vma2).vm).vm_tree as *mut _,
-        &mut (*vma2).rb_entry as *mut _,
-    );
-    if del != (&mut (*vma2).rb_entry as *mut _) {
-        xv6_vm_panic(b"vma_merge: rb_delete_node_color failed\0".as_ptr() as *const c_char);
-    }
-    xv6_vm_list_detach_list_entry(vma2);
-    xv6_vm_list_detach_free_list_entry(vma2);
-    if !(*vma2).file.is_null() {
-        vfs_fput((*vma2).file);
-        (*vma2).file = core::ptr::null_mut();
-    }
-    __vma_free(vma2);
+        (*vma1).end = (*vma2).end;
+        let del = rb_delete_node_color(
+            &mut (*(*vma2).vm).vm_tree as *mut _,
+            &mut (*vma2).rb_entry as *mut _,
+        );
+        if del != (&mut (*vma2).rb_entry as *mut _) {
+            xv6_vm_panic(b"vma_merge: rb_delete_node_color failed\0".as_ptr() as *const c_char);
+        }
+        xv6_vm_list_detach_list_entry(vma2);
+        xv6_vm_list_detach_free_list_entry(vma2);
+        if !(*vma2).file.is_null() {
+            vfs_fput((*vma2).file);
+            (*vma2).file = core::ptr::null_mut();
+        }
+        __vma_free(vma2);
 
-    vma1
+        vma1
+    }
 }
 // ---------------------------------------------------------------------------
 // V4 d/e/f: vma_alloc, vma_free, vma_validate
@@ -1382,131 +1448,135 @@ pub unsafe extern "C" fn vma_merge(mut vma1: *mut vma, mut vma2: *mut vma) -> *m
 
 #[inline]
 fn vma_size(v: *mut vma) -> u64 {
-    machine::vma_end(v) - machine::vma_start(v)
+    u! { machine::vma_end(v) - machine::vma_start(v) }
 }
 
 /// Allocate a VMA covering `[va, va+size)` with `flags`. If `va == 0`, the
 /// last free-list entry large enough is used. Returns the new (possibly
 /// split-out) VMA, or NULL on invalid input / OOM.
 #[no_mangle]
-pub unsafe extern "C" fn vma_alloc(vm_ptr: *mut vm, mut va: u64, size: u64, flags: u64) -> *mut vma {
-    xv6_vm_assert_vm_write_held(
-        vm_ptr,
-        b"vma_alloc: vm rwsem must be write-held\0".as_ptr() as *const c_char,
-    );
-    if vm_ptr.is_null() {
-        return core::ptr::null_mut();
-    }
-    if size == 0 || (size & (PGSIZE as u64 - 1)) != 0 {
-        return core::ptr::null_mut();
-    }
-    if (va & (PGSIZE as u64 - 1)) != 0 {
-        return core::ptr::null_mut();
-    }
-    if (flags & VMA_FLAG_PROT_MASK as u64) == 0 {
-        return core::ptr::null_mut();
-    }
+pub extern "C" fn vma_alloc(vm_ptr: *mut vm, mut va: u64, size: u64, flags: u64) -> *mut vma {
+    u! {
+        xv6_vm_assert_vm_write_held(
+            vm_ptr,
+            b"vma_alloc: vm rwsem must be write-held\0".as_ptr() as *const c_char,
+        );
+        if vm_ptr.is_null() {
+            return core::ptr::null_mut();
+        }
+        if size == 0 || (size & (PGSIZE as u64 - 1)) != 0 {
+            return core::ptr::null_mut();
+        }
+        if (va & (PGSIZE as u64 - 1)) != 0 {
+            return core::ptr::null_mut();
+        }
+        if (flags & VMA_FLAG_PROT_MASK as u64) == 0 {
+            return core::ptr::null_mut();
+        }
 
-    let mut free_area: *mut vma = core::ptr::null_mut();
-    if va == 0 {
-        // Find the last free area large enough (reverse walk).
-        let mut cur = xv6_vm_last_free(vm_ptr);
-        while !cur.is_null() {
-            let prev = xv6_vm_prev_free(vm_ptr, cur);
-            if vma_size(cur) >= size {
-                free_area = cur;
-                break;
+        let mut free_area: *mut vma = core::ptr::null_mut();
+        if va == 0 {
+            // Find the last free area large enough (reverse walk).
+            let mut cur = xv6_vm_last_free(vm_ptr);
+            while !cur.is_null() {
+                let prev = xv6_vm_prev_free(vm_ptr, cur);
+                if vma_size(cur) >= size {
+                    free_area = cur;
+                    break;
+                }
+                cur = prev;
             }
-            cur = prev;
+        } else {
+            free_area = vm_find_area(vm_ptr, va);
         }
-    } else {
-        free_area = vm_find_area(vm_ptr, va);
-    }
 
-    if free_area.is_null() {
-        return core::ptr::null_mut();
-    }
-    if (*free_area).flags != PROT_NONE as u64 {
-        return core::ptr::null_mut();
-    }
-
-    let va_end: u64;
-    if va == 0 {
-        if vma_size(free_area) < size {
+        if free_area.is_null() {
             return core::ptr::null_mut();
         }
-        va = (*free_area).start;
-    } else if (*free_area).end - va < size {
-        return core::ptr::null_mut();
-    }
-    va_end = va + size;
-
-    let vma2: *mut vma;
-    let mut original_left: *mut vma = core::ptr::null_mut();
-
-    if va > (*free_area).start {
-        original_left = free_area;
-        vma2 = vma_split(free_area, va);
-        if vma2.is_null() {
+        if (*free_area).flags != PROT_NONE as u64 {
             return core::ptr::null_mut();
         }
-    } else {
-        vma2 = free_area;
-    }
 
-    if va_end < (*vma2).end {
-        let vma3 = vma_split(vma2, va_end);
-        if vma3.is_null() {
-            if !original_left.is_null() {
-                vma_merge(original_left, vma2);
+        let va_end: u64;
+        if va == 0 {
+            if vma_size(free_area) < size {
+                return core::ptr::null_mut();
             }
+            va = (*free_area).start;
+        } else if (*free_area).end - va < size {
             return core::ptr::null_mut();
         }
-    }
+        va_end = va + size;
 
-    xv6_vm_list_detach_free_list_entry(vma2);
-    (*vma2).flags = flags;
-    vma2
+        let vma2: *mut vma;
+        let mut original_left: *mut vma = core::ptr::null_mut();
+
+        if va > (*free_area).start {
+            original_left = free_area;
+            vma2 = vma_split(free_area, va);
+            if vma2.is_null() {
+                return core::ptr::null_mut();
+            }
+        } else {
+            vma2 = free_area;
+        }
+
+        if va_end < (*vma2).end {
+            let vma3 = vma_split(vma2, va_end);
+            if vma3.is_null() {
+                if !original_left.is_null() {
+                    vma_merge(original_left, vma2);
+                }
+                return core::ptr::null_mut();
+            }
+        }
+
+        xv6_vm_list_detach_free_list_entry(vma2);
+        (*vma2).flags = flags;
+        vma2
+    }
 }
 
 /// Mark a VMA as free, link onto the free list, and merge with any
 /// adjacent free VMAs.
 #[no_mangle]
-pub unsafe extern "C" fn vma_free(vm_ptr: *mut vm, mut vma_ptr: *mut vma) -> c_int {
-    xv6_vm_assert_vm_write_held(
-        vm_ptr,
-        b"vma_free: vm rwsem must be write-held\0".as_ptr() as *const c_char,
-    );
-    if vma_ptr.is_null() || (*vma_ptr).vm != vm_ptr {
-        return -(EINVAL as c_int);
-    }
-    if (*vma_ptr).flags == PROT_NONE as u64 {
-        return -(EINVAL as c_int);
-    }
-
-    let left = xv6_vm_vma_left(vma_ptr);
-    let right = xv6_vm_vma_right(vma_ptr);
-    if left.is_null() && right.is_null() {
-        return -(EINVAL as c_int);
-    }
-
-    __vma_set_free(vma_ptr);
-    xv6_vm_list_push_front_free_list_entry(vm_ptr, vma_ptr);
-
-    if !left.is_null() && (*left).flags == PROT_NONE as u64 {
-        let merged = vma_merge(left, vma_ptr);
-        if merged != left {
-            xv6_vm_panic(b"vma_free: vma_merge failed with left VMA\0".as_ptr() as *const c_char);
+pub extern "C" fn vma_free(vm_ptr: *mut vm, mut vma_ptr: *mut vma) -> c_int {
+    u! {
+        xv6_vm_assert_vm_write_held(
+            vm_ptr,
+            b"vma_free: vm rwsem must be write-held\0".as_ptr() as *const c_char,
+        );
+        if vma_ptr.is_null() || (*vma_ptr).vm != vm_ptr {
+            return -(EINVAL as c_int);
         }
-        vma_ptr = left;
-    }
-    if !right.is_null() && (*right).flags == PROT_NONE as u64 {
-        let merged = vma_merge(vma_ptr, right);
-        if merged != vma_ptr {
-            xv6_vm_panic(b"vma_free: vma_merge failed with right VMA\0".as_ptr() as *const c_char);
+        if (*vma_ptr).flags == PROT_NONE as u64 {
+            return -(EINVAL as c_int);
         }
+
+        let left = xv6_vm_vma_left(vma_ptr);
+        let right = xv6_vm_vma_right(vma_ptr);
+        if left.is_null() && right.is_null() {
+            return -(EINVAL as c_int);
+        }
+
+        __vma_set_free(vma_ptr);
+        xv6_vm_list_push_front_free_list_entry(vm_ptr, vma_ptr);
+
+        if !left.is_null() && (*left).flags == PROT_NONE as u64 {
+            let merged = vma_merge(left, vma_ptr);
+            if merged != left {
+                xv6_vm_panic(b"vma_free: vma_merge failed with left VMA\0".as_ptr() as *const c_char);
+            }
+            vma_ptr = left;
+        }
+        if !right.is_null() && (*right).flags == PROT_NONE as u64 {
+            let merged = vma_merge(vma_ptr, right);
+            if merged != vma_ptr {
+                xv6_vm_panic(b"vma_free: vma_merge failed with right VMA\0".as_ptr() as *const c_char);
+            }
+        }
+        0
     }
-    0
 }
 
 /// Validate (and demand-fault as needed) the range `[va, va+size)` inside
@@ -1515,122 +1585,124 @@ pub unsafe extern "C" fn vma_free(vm_ptr: *mut vm, mut vma_ptr: *mut vma) -> c_i
 /// fault handler (sleeps allowed), then re-walks. For already-mapped pages
 /// delegates to `xv6_vm_validate_pte` (anonymous PTE / COW handling).
 #[no_mangle]
-pub unsafe extern "C" fn vma_validate(
+pub extern "C" fn vma_validate(
     vma_ptr: *mut vma,
     va_in: u64,
     size: u64,
     flags: u64,
 ) -> c_int {
-    if flags == PROT_NONE as u64 {
-        return -(EINVAL as c_int);
-    }
-    if vma_ptr.is_null()
-        || (*vma_ptr).vm.is_null()
-        || (*(*vma_ptr).vm).pagetable.is_null()
-    {
-        return -(EINVAL as c_int);
-    }
-    if (flags & !(VMA_FLAG_PROT_MASK as u64)) != 0 {
-        return -(EINVAL as c_int);
-    }
-    if (flags & PROT_EXEC as u64) != 0 {
-        if (flags & PROT_READ as u64) == 0 {
+    u! {
+        if flags == PROT_NONE as u64 {
             return -(EINVAL as c_int);
         }
-        if (flags & PROT_WRITE as u64) != 0 && (flags & VMA_FLAG_USER as u64) != 0 {
+        if vma_ptr.is_null()
+            || (*vma_ptr).vm.is_null()
+            || (*(*vma_ptr).vm).pagetable.is_null()
+        {
+            return -(EINVAL as c_int);
+        }
+        if (flags & !(VMA_FLAG_PROT_MASK as u64)) != 0 {
+            return -(EINVAL as c_int);
+        }
+        if (flags & PROT_EXEC as u64) != 0 {
+            if (flags & PROT_READ as u64) == 0 {
+                return -(EINVAL as c_int);
+            }
+            if (flags & PROT_WRITE as u64) != 0 && (flags & VMA_FLAG_USER as u64) != 0 {
+                return -(EACCES as c_int);
+            }
+        }
+
+        let mut va = pg_round_down(va_in);
+        let va_end: u64 = if size == 0 {
+            (*vma_ptr).end
+        } else {
+            pg_round_up(va_in + size)
+        };
+
+        if va < (*vma_ptr).start || va_end > (*vma_ptr).end {
+            return -(EFAULT as c_int);
+        }
+        if (flags & (*vma_ptr).flags) != flags {
             return -(EACCES as c_int);
         }
-    }
 
-    let mut va = pg_round_down(va_in);
-    let va_end: u64 = if size == 0 {
-        (*vma_ptr).end
-    } else {
-        pg_round_up(va_in + size)
-    };
+        let vm_ptr = (*vma_ptr).vm;
+        let pagetable = (*vm_ptr).pagetable;
+        vm_pgtable_lock(vm_ptr);
+        xv6_vm_smp_mb();
 
-    if va < (*vma_ptr).start || va_end > (*vma_ptr).end {
-        return -(EFAULT as c_int);
-    }
-    if (flags & (*vma_ptr).flags) != flags {
-        return -(EACCES as c_int);
-    }
+        while va < va_end {
+            if !(*vma_ptr).file.is_null() {
+                let pte = walk(pagetable as *mut u64, va, 1, core::ptr::null_mut(), core::ptr::null_mut());
+                if pte.is_null() {
+                    vm_pgtable_unlock(vm_ptr);
+                    return -(ENOMEM as c_int);
+                }
+                if *pte == 0 {
+                    // Drop lock, invoke fault handler (may sleep), re-walk.
+                    vm_pgtable_unlock(vm_ptr);
+                    let pa = xv6_vm_call_vma_fault((*vma_ptr).file, vma_ptr, va);
+                    if pa.is_null() {
+                        return -(ENOMEM as c_int);
+                    }
+                    vm_pgtable_lock(vm_ptr);
+                    let pte2 = walk(pagetable as *mut u64, va, 1, core::ptr::null_mut(), core::ptr::null_mut());
+                    if pte2.is_null() {
+                        vm_pgtable_unlock(vm_ptr);
+                        page_free(pa, 0);
+                        return -(ENOMEM as c_int);
+                    }
+                    if *pte2 != 0 {
+                        // Race: another core already mapped this page.
+                        page_free(pa, 0);
+                    } else {
+                        let vf = (*vma_ptr).flags;
+                        let mut pte_flags: u64 = 0;
+                        if (vf & PROT_READ as u64) != 0 {
+                            pte_flags |= PTE_R as u64;
+                        }
+                        if (vf & PROT_WRITE as u64) != 0 {
+                            pte_flags |= PTE_W as u64;
+                        }
+                        if (vf & PROT_EXEC as u64) != 0 {
+                            pte_flags |= PTE_X as u64;
+                        }
+                        if (vf & VMA_FLAG_USER as u64) != 0 {
+                            pte_flags |= PTE_U as u64;
+                        }
+                        pte_flags |= (PTE_V | PTE_A | PTE_D) as u64;
+                        let pa_pte = ((pa as u64) >> 12) << 10;
+                        *pte2 = pa_pte | pte_flags;
+                        xv6_vm_sfence_vma();
+                    }
+                    va += PGSIZE as u64;
+                    continue;
+                }
+                // Page already mapped — fall through to normal validation.
+                if xv6_vm_validate_pte(vma_ptr, pte, flags) != 0 {
+                    vm_pgtable_unlock(vm_ptr);
+                    return -(EFAULT as c_int);
+                }
+                va += PGSIZE as u64;
+                continue;
+            }
 
-    let vm_ptr = (*vma_ptr).vm;
-    let pagetable = (*vm_ptr).pagetable;
-    vm_pgtable_lock(vm_ptr);
-    xv6_vm_smp_mb();
-
-    while va < va_end {
-        if !(*vma_ptr).file.is_null() {
+            // Anonymous VMA path.
             let pte = walk(pagetable as *mut u64, va, 1, core::ptr::null_mut(), core::ptr::null_mut());
             if pte.is_null() {
                 vm_pgtable_unlock(vm_ptr);
                 return -(ENOMEM as c_int);
             }
-            if *pte == 0 {
-                // Drop lock, invoke fault handler (may sleep), re-walk.
-                vm_pgtable_unlock(vm_ptr);
-                let pa = xv6_vm_call_vma_fault((*vma_ptr).file, vma_ptr, va);
-                if pa.is_null() {
-                    return -(ENOMEM as c_int);
-                }
-                vm_pgtable_lock(vm_ptr);
-                let pte2 = walk(pagetable as *mut u64, va, 1, core::ptr::null_mut(), core::ptr::null_mut());
-                if pte2.is_null() {
-                    vm_pgtable_unlock(vm_ptr);
-                    page_free(pa, 0);
-                    return -(ENOMEM as c_int);
-                }
-                if *pte2 != 0 {
-                    // Race: another core already mapped this page.
-                    page_free(pa, 0);
-                } else {
-                    let vf = (*vma_ptr).flags;
-                    let mut pte_flags: u64 = 0;
-                    if (vf & PROT_READ as u64) != 0 {
-                        pte_flags |= PTE_R as u64;
-                    }
-                    if (vf & PROT_WRITE as u64) != 0 {
-                        pte_flags |= PTE_W as u64;
-                    }
-                    if (vf & PROT_EXEC as u64) != 0 {
-                        pte_flags |= PTE_X as u64;
-                    }
-                    if (vf & VMA_FLAG_USER as u64) != 0 {
-                        pte_flags |= PTE_U as u64;
-                    }
-                    pte_flags |= (PTE_V | PTE_A | PTE_D) as u64;
-                    let pa_pte = ((pa as u64) >> 12) << 10;
-                    *pte2 = pa_pte | pte_flags;
-                    xv6_vm_sfence_vma();
-                }
-                va += PGSIZE as u64;
-                continue;
-            }
-            // Page already mapped — fall through to normal validation.
             if xv6_vm_validate_pte(vma_ptr, pte, flags) != 0 {
                 vm_pgtable_unlock(vm_ptr);
                 return -(EFAULT as c_int);
             }
             va += PGSIZE as u64;
-            continue;
         }
-
-        // Anonymous VMA path.
-        let pte = walk(pagetable as *mut u64, va, 1, core::ptr::null_mut(), core::ptr::null_mut());
-        if pte.is_null() {
-            vm_pgtable_unlock(vm_ptr);
-            return -(ENOMEM as c_int);
-        }
-        if xv6_vm_validate_pte(vma_ptr, pte, flags) != 0 {
-            vm_pgtable_unlock(vm_ptr);
-            return -(EFAULT as c_int);
-        }
-        va += PGSIZE as u64;
+        vm_pgtable_unlock(vm_ptr);
+        0
     }
-    vm_pgtable_unlock(vm_ptr);
-    0
 }
 
 // ===========================================================================
@@ -1649,141 +1721,147 @@ fn vma_size_of(v: *mut vma) -> u64 {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_copyout(
+pub extern "C" fn vm_copyout(
     vm_ptr: *mut vm,
     mut dstva: u64,
     src_in: *const c_void,
     len_in: u64,
 ) -> c_int {
-    let mut len = len_in;
-    let mut src = src_in;
-    let mut ret: c_int = 0;
-    vm_rlock(vm_ptr);
-    while len > 0 {
-        let va0 = pg_round_down(dstva);
-        if va0 >= MAXVA as u64 {
-            ret = -(EFAULT as c_int);
-            break;
+    u! {
+        let mut len = len_in;
+        let mut src = src_in;
+        let mut ret: c_int = 0;
+        vm_rlock(vm_ptr);
+        while len > 0 {
+            let va0 = pg_round_down(dstva);
+            if va0 >= MAXVA as u64 {
+                ret = -(EFAULT as c_int);
+                break;
+            }
+            let vma = vm_find_area(vm_ptr, va0);
+            if vma.is_null()
+                || vma_validate(vma, va0, PGSIZE as u64, (VMA_FLAG_USER | PROT_WRITE) as u64) != 0
+            {
+                printf(b"vma_copyout: invalid vma for va %lx\n\0".as_ptr() as *const c_char, va0);
+                ret = -(EFAULT as c_int);
+                break;
+            }
+            let pte = walk((*vm_ptr).pagetable as *mut u64, va0, 0, core::ptr::null_mut(), core::ptr::null_mut());
+            if pte.is_null() {
+                xv6_vm_panic(b"vma_copyout: pte should not be null\0".as_ptr() as *const c_char);
+            }
+            let pa0 = ((*pte) >> 10) << 12;
+            let mut n = (PGSIZE as u64) - (dstva - va0);
+            if n > len {
+                n = len;
+            }
+            memmove(
+                (pa0 + (dstva - va0)) as *mut c_void,
+                src,
+                n as usize,
+            );
+            len -= n;
+            src = src.add(n as usize);
+            dstva = va0 + (PGSIZE as u64);
         }
-        let vma = vm_find_area(vm_ptr, va0);
-        if vma.is_null()
-            || vma_validate(vma, va0, PGSIZE as u64, (VMA_FLAG_USER | PROT_WRITE) as u64) != 0
-        {
-            printf(b"vma_copyout: invalid vma for va %lx\n\0".as_ptr() as *const c_char, va0);
-            ret = -(EFAULT as c_int);
-            break;
-        }
-        let pte = walk((*vm_ptr).pagetable as *mut u64, va0, 0, core::ptr::null_mut(), core::ptr::null_mut());
-        if pte.is_null() {
-            xv6_vm_panic(b"vma_copyout: pte should not be null\0".as_ptr() as *const c_char);
-        }
-        let pa0 = ((*pte) >> 10) << 12;
-        let mut n = (PGSIZE as u64) - (dstva - va0);
-        if n > len {
-            n = len;
-        }
-        memmove(
-            (pa0 + (dstva - va0)) as *mut c_void,
-            src,
-            n as usize,
-        );
-        len -= n;
-        src = src.add(n as usize);
-        dstva = va0 + (PGSIZE as u64);
+        vm_runlock(vm_ptr);
+        ret
     }
-    vm_runlock(vm_ptr);
-    ret
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_copyin(
+pub extern "C" fn vm_copyin(
     vm_ptr: *mut vm,
     dst_in: *mut c_void,
     mut srcva: u64,
     len_in: u64,
 ) -> c_int {
-    let mut len = len_in;
-    let mut dst = dst_in;
-    let mut ret: c_int = 0;
-    vm_rlock(vm_ptr);
-    while len > 0 {
-        let va0 = pg_round_down(srcva);
-        let vma = vm_find_area(vm_ptr, va0);
-        if vma.is_null()
-            || vma_validate(vma, va0, PGSIZE as u64, (VMA_FLAG_USER | PROT_READ) as u64) != 0
-        {
-            ret = -(EFAULT as c_int);
-            break;
+    u! {
+        let mut len = len_in;
+        let mut dst = dst_in;
+        let mut ret: c_int = 0;
+        vm_rlock(vm_ptr);
+        while len > 0 {
+            let va0 = pg_round_down(srcva);
+            let vma = vm_find_area(vm_ptr, va0);
+            if vma.is_null()
+                || vma_validate(vma, va0, PGSIZE as u64, (VMA_FLAG_USER | PROT_READ) as u64) != 0
+            {
+                ret = -(EFAULT as c_int);
+                break;
+            }
+            let pa0 = walkaddr((*vm_ptr).pagetable as *mut u64, va0);
+            if pa0 == 0 {
+                ret = -(EFAULT as c_int);
+                break;
+            }
+            let mut n = (PGSIZE as u64) - (srcva - va0);
+            if n > len {
+                n = len;
+            }
+            memmove(dst, (pa0 + (srcva - va0)) as *const c_void, n as usize);
+            len -= n;
+            dst = dst.add(n as usize);
+            srcva = va0 + (PGSIZE as u64);
         }
-        let pa0 = walkaddr((*vm_ptr).pagetable as *mut u64, va0);
-        if pa0 == 0 {
-            ret = -(EFAULT as c_int);
-            break;
-        }
-        let mut n = (PGSIZE as u64) - (srcva - va0);
-        if n > len {
-            n = len;
-        }
-        memmove(dst, (pa0 + (srcva - va0)) as *const c_void, n as usize);
-        len -= n;
-        dst = dst.add(n as usize);
-        srcva = va0 + (PGSIZE as u64);
+        vm_runlock(vm_ptr);
+        ret
     }
-    vm_runlock(vm_ptr);
-    ret
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_copyinstr(
+pub extern "C" fn vm_copyinstr(
     vm_ptr: *mut vm,
     dst_in: *mut c_char,
     mut srcva: u64,
     max_in: u64,
 ) -> c_int {
-    let mut dst = dst_in;
-    let mut max = max_in;
-    let mut got_null = false;
-    let mut ret: c_int = 0;
-    vm_rlock(vm_ptr);
-    while !got_null && max > 0 {
-        let va0 = pg_round_down(srcva);
-        let vma = vm_find_area(vm_ptr, va0);
-        if vma.is_null()
-            || vma_validate(vma, va0, PGSIZE as u64, (VMA_FLAG_USER | PROT_READ) as u64) != 0
-        {
-            ret = -(EFAULT as c_int);
-            break;
-        }
-        let pa0 = walkaddr((*vm_ptr).pagetable as *mut u64, va0);
-        if pa0 == 0 {
-            ret = -(EFAULT as c_int);
-            break;
-        }
-        let mut n = (PGSIZE as u64) - (srcva - va0);
-        if n > max {
-            n = max;
-        }
-        let mut p = (pa0 + (srcva - va0)) as *mut c_char;
-        while n > 0 {
-            if *p == 0 {
-                *dst = 0;
-                got_null = true;
+    u! {
+        let mut dst = dst_in;
+        let mut max = max_in;
+        let mut got_null = false;
+        let mut ret: c_int = 0;
+        vm_rlock(vm_ptr);
+        while !got_null && max > 0 {
+            let va0 = pg_round_down(srcva);
+            let vma = vm_find_area(vm_ptr, va0);
+            if vma.is_null()
+                || vma_validate(vma, va0, PGSIZE as u64, (VMA_FLAG_USER | PROT_READ) as u64) != 0
+            {
+                ret = -(EFAULT as c_int);
                 break;
-            } else {
-                *dst = *p;
             }
-            n -= 1;
-            max -= 1;
-            p = p.add(1);
-            dst = dst.add(1);
+            let pa0 = walkaddr((*vm_ptr).pagetable as *mut u64, va0);
+            if pa0 == 0 {
+                ret = -(EFAULT as c_int);
+                break;
+            }
+            let mut n = (PGSIZE as u64) - (srcva - va0);
+            if n > max {
+                n = max;
+            }
+            let mut p = (pa0 + (srcva - va0)) as *mut c_char;
+            while n > 0 {
+                if *p == 0 {
+                    *dst = 0;
+                    got_null = true;
+                    break;
+                } else {
+                    *dst = *p;
+                }
+                n -= 1;
+                max -= 1;
+                p = p.add(1);
+                dst = dst.add(1);
+            }
+            srcva = va0 + (PGSIZE as u64);
         }
-        srcva = va0 + (PGSIZE as u64);
+        if !got_null && ret == 0 {
+            ret = -(ENAMETOOLONG as c_int);
+        }
+        vm_runlock(vm_ptr);
+        ret
     }
-    if !got_null && ret == 0 {
-        ret = -(ENAMETOOLONG as c_int);
-    }
-    vm_runlock(vm_ptr);
-    ret
 }
 
 // ---------------------------------------------------------------------------
@@ -1791,51 +1869,55 @@ pub unsafe extern "C" fn vm_copyinstr(
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_createheap(vm_ptr: *mut vm, va: u64, size_in: u64) -> c_int {
-    xv6_vm_assert_vm_write_held(
-        vm_ptr,
-        b"vm_createheap: vm rwsem must be write-held\0".as_ptr() as *const c_char,
-    );
-    let size = pg_round_up(size_in);
-    if (va & (PGSIZE as u64 - 1)) != 0 {
-        return -(EINVAL as c_int);
+pub extern "C" fn vm_createheap(vm_ptr: *mut vm, va: u64, size_in: u64) -> c_int {
+    u! {
+        xv6_vm_assert_vm_write_held(
+            vm_ptr,
+            b"vm_createheap: vm rwsem must be write-held\0".as_ptr() as *const c_char,
+        );
+        let size = pg_round_up(size_in);
+        if (va & (PGSIZE as u64 - 1)) != 0 {
+            return -(EINVAL as c_int);
+        }
+        if va >= UVMTOP as u64 || va.wrapping_add(size) > UVMTOP as u64 {
+            return -(EINVAL as c_int);
+        }
+        let flags = (PROT_READ | PROT_WRITE | VMA_FLAG_USER) as u64
+            | crate::bindings::VMA_FLAG_GROWSUP as u64;
+        let vma_ptr = vma_alloc(vm_ptr, va, size, flags);
+        if vma_ptr.is_null() {
+            return -(ENOMEM as c_int);
+        }
+        (*vm_ptr).heap = vma_ptr;
+        (*vm_ptr).heap_size = size as usize;
+        0
     }
-    if va >= UVMTOP as u64 || va.wrapping_add(size) > UVMTOP as u64 {
-        return -(EINVAL as c_int);
-    }
-    let flags = (PROT_READ | PROT_WRITE | VMA_FLAG_USER) as u64
-        | crate::bindings::VMA_FLAG_GROWSUP as u64;
-    let vma_ptr = vma_alloc(vm_ptr, va, size, flags);
-    if vma_ptr.is_null() {
-        return -(ENOMEM as c_int);
-    }
-    (*vm_ptr).heap = vma_ptr;
-    (*vm_ptr).heap_size = size as usize;
-    0
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_createstack(vm_ptr: *mut vm, stack_top: u64, size_in: u64) -> c_int {
-    xv6_vm_assert_vm_write_held(
-        vm_ptr,
-        b"vm_createstack: vm rwsem must be write-held\0".as_ptr() as *const c_char,
-    );
-    let size = pg_round_up(size_in);
-    if (stack_top & (PGSIZE as u64 - 1)) != 0 {
-        return -(EINVAL as c_int);
+pub extern "C" fn vm_createstack(vm_ptr: *mut vm, stack_top: u64, size_in: u64) -> c_int {
+    u! {
+        xv6_vm_assert_vm_write_held(
+            vm_ptr,
+            b"vm_createstack: vm rwsem must be write-held\0".as_ptr() as *const c_char,
+        );
+        let size = pg_round_up(size_in);
+        if (stack_top & (PGSIZE as u64 - 1)) != 0 {
+            return -(EINVAL as c_int);
+        }
+        if stack_top < size || stack_top > UVMTOP as u64 {
+            return -(EINVAL as c_int);
+        }
+        let flags = (PROT_READ | PROT_WRITE | VMA_FLAG_USER) as u64
+            | crate::bindings::VMA_FLAG_GROWSDOWN as u64;
+        let vma_ptr = vma_alloc(vm_ptr, stack_top - size, size, flags);
+        if vma_ptr.is_null() {
+            return -(ENOMEM as c_int);
+        }
+        (*vm_ptr).stack = vma_ptr;
+        (*vm_ptr).stack_size = size as usize;
+        0
     }
-    if stack_top < size || stack_top > UVMTOP as u64 {
-        return -(EINVAL as c_int);
-    }
-    let flags = (PROT_READ | PROT_WRITE | VMA_FLAG_USER) as u64
-        | crate::bindings::VMA_FLAG_GROWSDOWN as u64;
-    let vma_ptr = vma_alloc(vm_ptr, stack_top - size, size, flags);
-    if vma_ptr.is_null() {
-        return -(ENOMEM as c_int);
-    }
-    (*vm_ptr).stack = vma_ptr;
-    (*vm_ptr).stack_size = size as usize;
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1843,176 +1925,182 @@ pub unsafe extern "C" fn vm_createstack(vm_ptr: *mut vm, stack_top: u64, size_in
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_growstack(vm_ptr: *mut vm, change_size: i64) -> c_int {
-    xv6_vm_assert_vm_write_held(
-        vm_ptr,
-        b"vm_growstack: vm rwsem must be write-held\0".as_ptr() as *const c_char,
-    );
-    if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-        return -(EINVAL as c_int);
-    }
-    if (*vm_ptr).stack.is_null() || (*vm_ptr).stack_size < PGSIZE as usize {
-        return -(EINVAL as c_int);
-    }
-    if ((*(*vm_ptr).stack).flags & crate::bindings::VMA_FLAG_GROWSDOWN as u64) == 0 {
-        return -(EINVAL as c_int);
-    }
-    if change_size == 0 {
-        return 0;
-    }
-    let stack_size_u = (*vm_ptr).stack_size as u64;
-    if change_size < 0 && (-change_size) as u64 > stack_size_u - (PGSIZE as u64) {
-        return -(EINVAL as c_int);
-    } else if change_size > 0
-        && (change_size as u64) > ((MAXUSTACK as u64) << PGSHIFT) - stack_size_u
-    {
-        return -(ENOMEM as c_int);
-    }
-    let new_size = (stack_size_u as i64 + change_size) as u64;
-    if new_size < PGSIZE as u64 || new_size > ((MAXUSTACK as u64) << PGSHIFT) {
-        return -(EINVAL as c_int);
-    }
-    let delta: i64 = pg_round_up(new_size) as i64 - pg_round_up(stack_size_u) as i64;
-    if delta == 0 {
-        (*vm_ptr).stack_size = new_size as usize;
-        return 0;
-    }
-    let left = xv6_vm_vma_left((*vm_ptr).stack);
-    let new_start = (*(*vm_ptr).stack).start.wrapping_sub(delta as u64);
-
-    if delta < 0 {
-        let splitted = (*vm_ptr).stack;
-        let right = vma_split((*vm_ptr).stack, new_start);
-        if right.is_null() {
-            return -(ENOMEM as c_int);
-        }
-        (*vm_ptr).stack = right;
-        __vma_set_free(splitted);
-        if !left.is_null() && (*left).flags == PROT_NONE as u64 {
-            vma_merge(splitted, left);
-        }
-    } else {
-        if left.is_null() || (*left).flags != PROT_NONE as u64 {
-            return -(ENOMEM as c_int);
-        }
-        if vma_size_of(left) < delta as u64 {
-            return -(ENOMEM as c_int);
-        }
-        let grows = vma_split(left, new_start);
-        if grows.is_null() {
-            return -(ENOMEM as c_int);
-        }
-        xv6_vm_list_detach_free_list_entry(grows);
-        (*grows).flags = (*(*vm_ptr).stack).flags;
-        let new_stack = vma_merge(grows, (*vm_ptr).stack);
-        (*vm_ptr).stack = new_stack;
-    }
-    (*vm_ptr).stack_size = new_size as usize;
-    0
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn vm_try_growstack(vm_ptr: *mut vm, va: u64) -> c_int {
-    let mut ret: c_int = 0;
-    vm_wlock(vm_ptr);
-    if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-        ret = -(EINVAL as c_int);
-    } else if va < USTACK_MAX_BOTTOM as u64 || va >= USTACKTOP as u64 {
-        ret = 0;
-    } else if (*vm_ptr).stack.is_null() {
-        ret = -(EINVAL as c_int);
-    } else if (*(*vm_ptr).stack).start <= va {
-        ret = 0;
-    } else {
-        let ustack_bottom_after = (*(*vm_ptr).stack)
-            .start
-            .wrapping_sub((USERSTACK_GROWTH as u64) << PAGE_SHIFT);
-        if ustack_bottom_after < USTACK_MAX_BOTTOM as u64 {
-            ret = -(ENOMEM as c_int);
-        } else if ustack_bottom_after > va {
-            ret = -(EFAULT as c_int);
-        } else {
-            ret = vm_growstack(vm_ptr, ((USERSTACK_GROWTH as i64) << PAGE_SHIFT) as i64);
-        }
-    }
-    vm_wunlock(vm_ptr);
-    ret
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn vm_growheap(vm_ptr: *mut vm, change_size: i64) -> c_int {
-    let mut ret: c_int = 0;
-    vm_wlock(vm_ptr);
-    'done: {
+pub extern "C" fn vm_growstack(vm_ptr: *mut vm, change_size: i64) -> c_int {
+    u! {
+        xv6_vm_assert_vm_write_held(
+            vm_ptr,
+            b"vm_growstack: vm rwsem must be write-held\0".as_ptr() as *const c_char,
+        );
         if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-            ret = -(EINVAL as c_int);
-            break 'done;
+            return -(EINVAL as c_int);
         }
-        if (*vm_ptr).heap.is_null() || (*vm_ptr).heap_size < PGSIZE as usize {
-            ret = -(EINVAL as c_int);
-            break 'done;
+        if (*vm_ptr).stack.is_null() || (*vm_ptr).stack_size < PGSIZE as usize {
+            return -(EINVAL as c_int);
         }
-        if ((*(*vm_ptr).heap).flags & crate::bindings::VMA_FLAG_GROWSUP as u64) == 0 {
-            ret = -(EINVAL as c_int);
-            break 'done;
+        if ((*(*vm_ptr).stack).flags & crate::bindings::VMA_FLAG_GROWSDOWN as u64) == 0 {
+            return -(EINVAL as c_int);
         }
         if change_size == 0 {
-            ret = 0;
-            break 'done;
+            return 0;
         }
-        let heap_size_u = (*vm_ptr).heap_size as u64;
-        if change_size < 0 {
-            if (-change_size) as u64 > heap_size_u - PGSIZE as u64 {
+        let stack_size_u = (*vm_ptr).stack_size as u64;
+        if change_size < 0 && (-change_size) as u64 > stack_size_u - (PGSIZE as u64) {
+            return -(EINVAL as c_int);
+        } else if change_size > 0
+            && (change_size as u64) > ((MAXUSTACK as u64) << PGSHIFT) - stack_size_u
+        {
+            return -(ENOMEM as c_int);
+        }
+        let new_size = (stack_size_u as i64 + change_size) as u64;
+        if new_size < PGSIZE as u64 || new_size > ((MAXUSTACK as u64) << PGSHIFT) {
+            return -(EINVAL as c_int);
+        }
+        let delta: i64 = pg_round_up(new_size) as i64 - pg_round_up(stack_size_u) as i64;
+        if delta == 0 {
+            (*vm_ptr).stack_size = new_size as usize;
+            return 0;
+        }
+        let left = xv6_vm_vma_left((*vm_ptr).stack);
+        let new_start = (*(*vm_ptr).stack).start.wrapping_sub(delta as u64);
+
+        if delta < 0 {
+            let splitted = (*vm_ptr).stack;
+            let right = vma_split((*vm_ptr).stack, new_start);
+            if right.is_null() {
+                return -(ENOMEM as c_int);
+            }
+            (*vm_ptr).stack = right;
+            __vma_set_free(splitted);
+            if !left.is_null() && (*left).flags == PROT_NONE as u64 {
+                vma_merge(splitted, left);
+            }
+        } else {
+            if left.is_null() || (*left).flags != PROT_NONE as u64 {
+                return -(ENOMEM as c_int);
+            }
+            if vma_size_of(left) < delta as u64 {
+                return -(ENOMEM as c_int);
+            }
+            let grows = vma_split(left, new_start);
+            if grows.is_null() {
+                return -(ENOMEM as c_int);
+            }
+            xv6_vm_list_detach_free_list_entry(grows);
+            (*grows).flags = (*(*vm_ptr).stack).flags;
+            let new_stack = vma_merge(grows, (*vm_ptr).stack);
+            (*vm_ptr).stack = new_stack;
+        }
+        (*vm_ptr).stack_size = new_size as usize;
+        0
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vm_try_growstack(vm_ptr: *mut vm, va: u64) -> c_int {
+    u! {
+        let mut ret: c_int = 0;
+        vm_wlock(vm_ptr);
+        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+            ret = -(EINVAL as c_int);
+        } else if va < USTACK_MAX_BOTTOM as u64 || va >= USTACKTOP as u64 {
+            ret = 0;
+        } else if (*vm_ptr).stack.is_null() {
+            ret = -(EINVAL as c_int);
+        } else if (*(*vm_ptr).stack).start <= va {
+            ret = 0;
+        } else {
+            let ustack_bottom_after = (*(*vm_ptr).stack)
+                .start
+                .wrapping_sub((USERSTACK_GROWTH as u64) << PAGE_SHIFT);
+            if ustack_bottom_after < USTACK_MAX_BOTTOM as u64 {
+                ret = -(ENOMEM as c_int);
+            } else if ustack_bottom_after > va {
+                ret = -(EFAULT as c_int);
+            } else {
+                ret = vm_growstack(vm_ptr, ((USERSTACK_GROWTH as i64) << PAGE_SHIFT) as i64);
+            }
+        }
+        vm_wunlock(vm_ptr);
+        ret
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn vm_growheap(vm_ptr: *mut vm, change_size: i64) -> c_int {
+    u! {
+        let mut ret: c_int = 0;
+        vm_wlock(vm_ptr);
+        'done: {
+            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
                 ret = -(EINVAL as c_int);
                 break 'done;
             }
-        } else if (change_size as u64) > (UHEAP_MAX_TOP as u64) - (*(*vm_ptr).heap).end {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        let new_size = (heap_size_u as i64 + change_size) as u64;
-        let delta: i64 = pg_round_up(new_size) as i64 - vma_size_of((*vm_ptr).heap) as i64;
-        if delta == 0 {
+            if (*vm_ptr).heap.is_null() || (*vm_ptr).heap_size < PGSIZE as usize {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            if ((*(*vm_ptr).heap).flags & crate::bindings::VMA_FLAG_GROWSUP as u64) == 0 {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            if change_size == 0 {
+                ret = 0;
+                break 'done;
+            }
+            let heap_size_u = (*vm_ptr).heap_size as u64;
+            if change_size < 0 {
+                if (-change_size) as u64 > heap_size_u - PGSIZE as u64 {
+                    ret = -(EINVAL as c_int);
+                    break 'done;
+                }
+            } else if (change_size as u64) > (UHEAP_MAX_TOP as u64) - (*(*vm_ptr).heap).end {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            let new_size = (heap_size_u as i64 + change_size) as u64;
+            let delta: i64 = pg_round_up(new_size) as i64 - vma_size_of((*vm_ptr).heap) as i64;
+            if delta == 0 {
+                (*vm_ptr).heap_size = new_size as usize;
+                ret = 0;
+                break 'done;
+            }
+            let new_end = (*(*vm_ptr).heap).end.wrapping_add(delta as u64);
+            let right = xv6_vm_vma_right((*vm_ptr).heap);
+
+            if delta < 0 {
+                let splitted = vma_split((*vm_ptr).heap, new_end);
+                if splitted.is_null() {
+                    ret = -(ENOMEM as c_int);
+                    break 'done;
+                }
+                __vma_set_free(splitted);
+                if !right.is_null() && (*right).flags == PROT_NONE as u64 {
+                    vma_merge(splitted, right);
+                }
+            } else {
+                if right.is_null() || (*right).flags != PROT_NONE as u64 {
+                    ret = -(ENOMEM as c_int);
+                    break 'done;
+                }
+                if vma_size_of(right) < delta as u64 {
+                    ret = -(ENOMEM as c_int);
+                    break 'done;
+                }
+                if vma_split(right, new_end).is_null() {
+                    ret = -(ENOMEM as c_int);
+                    break 'done;
+                }
+                xv6_vm_list_detach_free_list_entry(right);
+                (*right).flags = (*(*vm_ptr).heap).flags;
+                let new_heap = vma_merge(right, (*vm_ptr).heap);
+                (*vm_ptr).heap = new_heap;
+            }
             (*vm_ptr).heap_size = new_size as usize;
             ret = 0;
-            break 'done;
         }
-        let new_end = (*(*vm_ptr).heap).end.wrapping_add(delta as u64);
-        let right = xv6_vm_vma_right((*vm_ptr).heap);
-
-        if delta < 0 {
-            let splitted = vma_split((*vm_ptr).heap, new_end);
-            if splitted.is_null() {
-                ret = -(ENOMEM as c_int);
-                break 'done;
-            }
-            __vma_set_free(splitted);
-            if !right.is_null() && (*right).flags == PROT_NONE as u64 {
-                vma_merge(splitted, right);
-            }
-        } else {
-            if right.is_null() || (*right).flags != PROT_NONE as u64 {
-                ret = -(ENOMEM as c_int);
-                break 'done;
-            }
-            if vma_size_of(right) < delta as u64 {
-                ret = -(ENOMEM as c_int);
-                break 'done;
-            }
-            if vma_split(right, new_end).is_null() {
-                ret = -(ENOMEM as c_int);
-                break 'done;
-            }
-            xv6_vm_list_detach_free_list_entry(right);
-            (*right).flags = (*(*vm_ptr).heap).flags;
-            let new_heap = vma_merge(right, (*vm_ptr).heap);
-            (*vm_ptr).heap = new_heap;
-        }
-        (*vm_ptr).heap_size = new_size as usize;
-        ret = 0;
+        vm_wunlock(vm_ptr);
+        ret
     }
-    vm_wunlock(vm_ptr);
-    ret
 }
 
 // ---------------------------------------------------------------------------
@@ -2020,52 +2108,54 @@ pub unsafe extern "C" fn vm_growheap(vm_ptr: *mut vm, change_size: i64) -> c_int
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_copy(src: *mut vm) -> *mut vm {
-    if src.is_null() {
-        return ((-(EINVAL as isize)) as isize) as *mut vm;
-    }
-    let dst = vm_init();
-    if dst.is_null() {
-        return ((-(ENOMEM as isize)) as isize) as *mut vm;
-    }
-    vm_rlock(src);
-    vm_wlock(dst);
-
-    let mut vma_cur = xv6_vm_first_vma(src);
-    while !vma_cur.is_null() {
-        let next = xv6_vm_next_vma(src, vma_cur);
-        if (*vma_cur).flags != PROT_NONE as u64 {
-            let new_vma = vma_alloc(
-                dst,
-                (*vma_cur).start,
-                vma_size_of(vma_cur),
-                (*vma_cur).flags,
-            );
-            if new_vma.is_null() {
-                vm_runlock(src);
-                vm_wunlock(dst);
-                vm_put(dst);
-                return ((-(ENOMEM as isize)) as isize) as *mut vm;
-            }
-            if vma_cur == (*src).stack {
-                (*dst).stack = new_vma;
-                (*dst).stack_size = (*src).stack_size;
-            } else if vma_cur == (*src).heap {
-                (*dst).heap = new_vma;
-                (*dst).heap_size = (*src).heap_size;
-            }
-            if __vma_copy(new_vma, vma_cur) != 0 {
-                vm_runlock(src);
-                vm_wunlock(dst);
-                vm_put(dst);
-                return ((-(ENOMEM as isize)) as isize) as *mut vm;
-            }
+pub extern "C" fn vm_copy(src: *mut vm) -> *mut vm {
+    u! {
+        if src.is_null() {
+            return ((-(EINVAL as isize)) as isize) as *mut vm;
         }
-        vma_cur = next;
+        let dst = vm_init();
+        if dst.is_null() {
+            return ((-(ENOMEM as isize)) as isize) as *mut vm;
+        }
+        vm_rlock(src);
+        vm_wlock(dst);
+
+        let mut vma_cur = xv6_vm_first_vma(src);
+        while !vma_cur.is_null() {
+            let next = xv6_vm_next_vma(src, vma_cur);
+            if (*vma_cur).flags != PROT_NONE as u64 {
+                let new_vma = vma_alloc(
+                    dst,
+                    (*vma_cur).start,
+                    vma_size_of(vma_cur),
+                    (*vma_cur).flags,
+                );
+                if new_vma.is_null() {
+                    vm_runlock(src);
+                    vm_wunlock(dst);
+                    vm_put(dst);
+                    return ((-(ENOMEM as isize)) as isize) as *mut vm;
+                }
+                if vma_cur == (*src).stack {
+                    (*dst).stack = new_vma;
+                    (*dst).stack_size = (*src).stack_size;
+                } else if vma_cur == (*src).heap {
+                    (*dst).heap = new_vma;
+                    (*dst).heap_size = (*src).heap_size;
+                }
+                if __vma_copy(new_vma, vma_cur) != 0 {
+                    vm_runlock(src);
+                    vm_wunlock(dst);
+                    vm_put(dst);
+                    return ((-(ENOMEM as isize)) as isize) as *mut vm;
+                }
+            }
+            vma_cur = next;
+        }
+        vm_runlock(src);
+        vm_wunlock(dst);
+        dst
     }
-    vm_runlock(src);
-    vm_wunlock(dst);
-    dst
 }
 
 // ---------------------------------------------------------------------------
@@ -2073,7 +2163,7 @@ pub unsafe extern "C" fn vm_copy(src: *mut vm) -> *mut vm {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_mmap_region_locked(
+pub extern "C" fn vm_mmap_region_locked(
     vm_ptr: *mut vm,
     start_in: u64,
     size_in: usize,
@@ -2082,50 +2172,52 @@ pub unsafe extern "C" fn vm_mmap_region_locked(
     pgoff: u64,
     pa: *mut c_void,
 ) -> c_int {
-    if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-        return -(EINVAL as c_int);
-    }
-    let va_end = pg_round_up(start_in + size_in as u64);
-    let start = pg_round_down(start_in);
-    if va_end <= start || start < UVMBOTTOM as u64 || va_end > UVMTOP as u64 {
-        return -(EINVAL as c_int);
-    }
-    let size = va_end - start;
-    let vma_ptr = vma_alloc(vm_ptr, start, size, flags);
-    if vma_ptr.is_null() {
-        return -(ENOMEM as c_int);
-    }
-    if !file.is_null() {
-        (*vma_ptr).file = vfs_fdup(file);
-        if (*vma_ptr).file.is_null() {
-            vma_free(vm_ptr, vma_ptr);
-            return -(EBADF as c_int);
+    u! {
+        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+            return -(EINVAL as c_int);
         }
-        (*vma_ptr).pgoff = pgoff;
-    }
-    if !pa.is_null() {
-        let pte_flags = vma2pte_flags(flags);
-        if mappages(
-            (*vm_ptr).pagetable as *mut u64,
-            (*vma_ptr).start,
-            size,
-            pa as u64,
-            pte_flags as c_int,
-        ) != 0
-        {
-            if vma_free(vm_ptr, vma_ptr) != 0 {
-                xv6_vm_panic(
-                    b"vm_mmap_region_locked: failed to free vma\0".as_ptr() as *const c_char,
-                );
-            }
+        let va_end = pg_round_up(start_in + size_in as u64);
+        let start = pg_round_down(start_in);
+        if va_end <= start || start < UVMBOTTOM as u64 || va_end > UVMTOP as u64 {
+            return -(EINVAL as c_int);
+        }
+        let size = va_end - start;
+        let vma_ptr = vma_alloc(vm_ptr, start, size, flags);
+        if vma_ptr.is_null() {
             return -(ENOMEM as c_int);
         }
+        if !file.is_null() {
+            (*vma_ptr).file = vfs_fdup(file);
+            if (*vma_ptr).file.is_null() {
+                vma_free(vm_ptr, vma_ptr);
+                return -(EBADF as c_int);
+            }
+            (*vma_ptr).pgoff = pgoff;
+        }
+        if !pa.is_null() {
+            let pte_flags = vma2pte_flags(flags);
+            if mappages(
+                (*vm_ptr).pagetable as *mut u64,
+                (*vma_ptr).start,
+                size,
+                pa as u64,
+                pte_flags as c_int,
+            ) != 0
+            {
+                if vma_free(vm_ptr, vma_ptr) != 0 {
+                    xv6_vm_panic(
+                        b"vm_mmap_region_locked: failed to free vma\0".as_ptr() as *const c_char,
+                    );
+                }
+                return -(ENOMEM as c_int);
+            }
+        }
+        0
     }
-    0
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_mmap_region(
+pub extern "C" fn vm_mmap_region(
     vm_ptr: *mut vm,
     start: u64,
     size: usize,
@@ -2134,54 +2226,58 @@ pub unsafe extern "C" fn vm_mmap_region(
     pgoff: u64,
     pa: *mut c_void,
 ) -> c_int {
-    let has_current = xv6_vm_has_current() != 0;
-    if has_current {
-        vm_wlock(vm_ptr);
+    u! {
+        let has_current = xv6_vm_has_current() != 0;
+        if has_current {
+            vm_wlock(vm_ptr);
+        }
+        let ret = vm_mmap_region_locked(vm_ptr, start, size, flags, file, pgoff, pa);
+        if has_current {
+            vm_wunlock(vm_ptr);
+        }
+        ret
     }
-    let ret = vm_mmap_region_locked(vm_ptr, start, size, flags, file, pgoff, pa);
-    if has_current {
-        vm_wunlock(vm_ptr);
-    }
-    ret
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_munmap_region(vm_ptr: *mut vm, start: u64, size: usize) -> c_int {
-    let mut ret: c_int = 0;
-    vm_wlock(vm_ptr);
-    'done: {
-        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-            ret = -(EINVAL as c_int);
-            break 'done;
-        }
-        if start < UVMBOTTOM as u64 || start + size as u64 > UVMTOP as u64 {
-            ret = -(EINVAL as c_int);
-            break 'done;
-        }
-        if (size as u64 & (PGSIZE as u64 - 1)) != 0 || (start & (PGSIZE as u64 - 1)) != 0 {
-            ret = -(EINVAL as c_int);
-            break 'done;
-        }
-        if size == 0 {
+pub extern "C" fn vm_munmap_region(vm_ptr: *mut vm, start: u64, size: usize) -> c_int {
+    u! {
+        let mut ret: c_int = 0;
+        vm_wlock(vm_ptr);
+        'done: {
+            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            if start < UVMBOTTOM as u64 || start + size as u64 > UVMTOP as u64 {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            if (size as u64 & (PGSIZE as u64 - 1)) != 0 || (start & (PGSIZE as u64 - 1)) != 0 {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            if size == 0 {
+                ret = 0;
+                break 'done;
+            }
+            let vma_ptr = vm_find_area(vm_ptr, start);
+            if vma_ptr.is_null()
+                || (*vma_ptr).start != start
+                || (*vma_ptr).end < start + size as u64
+            {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            if vma_free(vm_ptr, vma_ptr) != 0 {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
             ret = 0;
-            break 'done;
         }
-        let vma_ptr = vm_find_area(vm_ptr, start);
-        if vma_ptr.is_null()
-            || (*vma_ptr).start != start
-            || (*vma_ptr).end < start + size as u64
-        {
-            ret = -(EINVAL as c_int);
-            break 'done;
-        }
-        if vma_free(vm_ptr, vma_ptr) != 0 {
-            ret = -(EINVAL as c_int);
-            break 'done;
-        }
-        ret = 0;
+        vm_wunlock(vm_ptr);
+        ret
     }
-    vm_wunlock(vm_ptr);
-    ret
 }
 
 // ---------------------------------------------------------------------------
@@ -2189,34 +2285,35 @@ pub unsafe extern "C" fn vm_munmap_region(vm_ptr: *mut vm, start: u64, size: usi
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_mprotect(
+pub extern "C" fn vm_mprotect(
     vm_ptr: *mut vm,
     addr_in: u64,
     size_in: usize,
     prot: c_int,
 ) -> c_int {
-    let mut ret: c_int = 0;
-    vm_wlock(vm_ptr);
-    'done: {
-        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-            ret = -(EINVAL as c_int);
-            break 'done;
-        }
-        let addr = pg_round_down(addr_in);
-        let size = pg_round_up(size_in as u64);
-        if addr < UVMBOTTOM as u64 || addr + size > UVMTOP as u64 {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        if size == 0 {
-            ret = 0;
-            break 'done;
-        }
-        let vma_ptr = vm_find_area(vm_ptr, addr);
-        if vma_ptr.is_null() {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
+    u! {
+        let mut ret: c_int = 0;
+        vm_wlock(vm_ptr);
+        'done: {
+            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            let addr = pg_round_down(addr_in);
+            let size = pg_round_up(size_in as u64);
+            if addr < UVMBOTTOM as u64 || addr + size > UVMTOP as u64 {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            if size == 0 {
+                ret = 0;
+                break 'done;
+            }
+            let vma_ptr = vm_find_area(vm_ptr, addr);
+            if vma_ptr.is_null() {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
         if addr < (*vma_ptr).start || addr + size > (*vma_ptr).end {
             ret = -(ENOMEM as c_int);
             break 'done;
@@ -2257,10 +2354,11 @@ pub unsafe extern "C" fn vm_mprotect(
     }
     vm_wunlock(vm_ptr);
     ret
+    }
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_mremap(
+pub extern "C" fn vm_mremap(
     vm_ptr: *mut vm,
     old_addr_in: u64,
     old_size_in: usize,
@@ -2268,103 +2366,105 @@ pub unsafe extern "C" fn vm_mremap(
     flags: c_int,
     _new_addr: u64,
 ) -> u64 {
-    let mut ret: u64 = u64::MAX;
-    vm_wlock(vm_ptr);
-    'done: {
-        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-            break 'done;
-        }
-        let old_addr = pg_round_down(old_addr_in);
-        let old_size = pg_round_up(old_size_in as u64);
-        let new_size = pg_round_up(new_size_in as u64);
-        if old_addr < UVMBOTTOM as u64 || old_addr + old_size > UVMTOP as u64 {
-            break 'done;
-        }
-        let vma_ptr = vm_find_area(vm_ptr, old_addr);
-        if vma_ptr.is_null()
-            || (*vma_ptr).start != old_addr
-            || (*vma_ptr).end != old_addr + old_size
-        {
-            break 'done;
-        }
-        if new_size == 0 {
-            if vma_free(vm_ptr, vma_ptr) != 0 {
+    u! {
+        let mut ret: u64 = u64::MAX;
+        vm_wlock(vm_ptr);
+        'done: {
+            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
                 break 'done;
             }
-            ret = old_addr;
-            break 'done;
-        }
-        if new_size == old_size && (flags & MREMAP_FIXED as c_int) == 0 {
-            ret = old_addr;
-            break 'done;
-        }
-        if new_size < old_size {
-            let shrink_start = old_addr + new_size;
-            let tail = vma_split(vma_ptr, shrink_start);
-            if tail.is_null() {
+            let old_addr = pg_round_down(old_addr_in);
+            let old_size = pg_round_up(old_size_in as u64);
+            let new_size = pg_round_up(new_size_in as u64);
+            if old_addr < UVMBOTTOM as u64 || old_addr + old_size > UVMTOP as u64 {
                 break 'done;
             }
-            if vma_free(vm_ptr, tail) != 0 {
+            let vma_ptr = vm_find_area(vm_ptr, old_addr);
+            if vma_ptr.is_null()
+                || (*vma_ptr).start != old_addr
+                || (*vma_ptr).end != old_addr + old_size
+            {
                 break 'done;
             }
-            vm_remote_sfence(vm_ptr);
-            ret = old_addr;
-            break 'done;
-        }
-        // Expanding
-        let expand_size = new_size - old_size;
-        let expand_start = old_addr + old_size;
-        let next_vma = vm_find_area(vm_ptr, expand_start);
-        if next_vma.is_null() || (*next_vma).start >= expand_start + expand_size {
-            (*vma_ptr).end = old_addr + new_size;
-            ret = old_addr;
-            break 'done;
-        }
-        if (flags & MREMAP_MAYMOVE as c_int) == 0 {
-            break 'done;
-        }
-        let new_location = vm_find_free_range(vm_ptr, new_size as usize, 0);
-        if new_location == 0 {
-            break 'done;
-        }
-        let new_vma = vma_alloc(vm_ptr, new_location, new_size, (*vma_ptr).flags);
-        if new_vma.is_null() {
-            break 'done;
-        }
-        let mut offset: u64 = 0;
-        while offset < old_size {
-            let old_pte = walk(
-                (*vm_ptr).pagetable as *mut u64,
-                old_addr + offset,
-                0,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            );
-            if !old_pte.is_null() && (*old_pte & PTE_V as u64) != 0 {
-                let pa = ((*old_pte) >> 10) << 12;
-                let pte_flags = *old_pte & ((PTE_R | PTE_W | PTE_X | PTE_U) as u64);
-                let new_pte = walk(
+            if new_size == 0 {
+                if vma_free(vm_ptr, vma_ptr) != 0 {
+                    break 'done;
+                }
+                ret = old_addr;
+                break 'done;
+            }
+            if new_size == old_size && (flags & MREMAP_FIXED as c_int) == 0 {
+                ret = old_addr;
+                break 'done;
+            }
+            if new_size < old_size {
+                let shrink_start = old_addr + new_size;
+                let tail = vma_split(vma_ptr, shrink_start);
+                if tail.is_null() {
+                    break 'done;
+                }
+                if vma_free(vm_ptr, tail) != 0 {
+                    break 'done;
+                }
+                vm_remote_sfence(vm_ptr);
+                ret = old_addr;
+                break 'done;
+            }
+            // Expanding
+            let expand_size = new_size - old_size;
+            let expand_start = old_addr + old_size;
+            let next_vma = vm_find_area(vm_ptr, expand_start);
+            if next_vma.is_null() || (*next_vma).start >= expand_start + expand_size {
+                (*vma_ptr).end = old_addr + new_size;
+                ret = old_addr;
+                break 'done;
+            }
+            if (flags & MREMAP_MAYMOVE as c_int) == 0 {
+                break 'done;
+            }
+            let new_location = vm_find_free_range(vm_ptr, new_size as usize, 0);
+            if new_location == 0 {
+                break 'done;
+            }
+            let new_vma = vma_alloc(vm_ptr, new_location, new_size, (*vma_ptr).flags);
+            if new_vma.is_null() {
+                break 'done;
+            }
+            let mut offset: u64 = 0;
+            while offset < old_size {
+                let old_pte = walk(
                     (*vm_ptr).pagetable as *mut u64,
-                    new_location + offset,
-                    1,
+                    old_addr + offset,
+                    0,
                     core::ptr::null_mut(),
                     core::ptr::null_mut(),
                 );
-                if new_pte.is_null() {
-                    break 'done;
+                if !old_pte.is_null() && (*old_pte & PTE_V as u64) != 0 {
+                    let pa = ((*old_pte) >> 10) << 12;
+                    let pte_flags = *old_pte & ((PTE_R | PTE_W | PTE_X | PTE_U) as u64);
+                    let new_pte = walk(
+                        (*vm_ptr).pagetable as *mut u64,
+                        new_location + offset,
+                        1,
+                        core::ptr::null_mut(),
+                        core::ptr::null_mut(),
+                    );
+                    if new_pte.is_null() {
+                        break 'done;
+                    }
+                    *new_pte = ((pa >> 12) << 10) | pte_flags | PTE_V as u64;
+                    page_ref_inc(pa as *mut c_void);
+                    *old_pte = 0;
                 }
-                *new_pte = ((pa >> 12) << 10) | pte_flags | PTE_V as u64;
-                page_ref_inc(pa as *mut c_void);
-                *old_pte = 0;
+                offset += PGSIZE as u64;
             }
-            offset += PGSIZE as u64;
+            vma_free(vm_ptr, vma_ptr);
+            vm_remote_sfence(vm_ptr);
+            ret = new_location;
         }
-        vma_free(vm_ptr, vma_ptr);
-        vm_remote_sfence(vm_ptr);
-        ret = new_location;
+        vm_wunlock(vm_ptr);
+        ret
     }
-    vm_wunlock(vm_ptr);
-    ret
 }
 
 // ---------------------------------------------------------------------------
@@ -2372,164 +2472,170 @@ pub unsafe extern "C" fn vm_mremap(
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_msync(
+pub extern "C" fn vm_msync(
     vm_ptr: *mut vm,
     addr_in: u64,
     size_in: usize,
     _flags: c_int,
 ) -> c_int {
-    let mut ret: c_int = 0;
-    vm_rlock(vm_ptr);
-    'done: {
-        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-            ret = -(EINVAL as c_int);
-            break 'done;
+    u! {
+        let mut ret: c_int = 0;
+        vm_rlock(vm_ptr);
+        'done: {
+            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            let addr = pg_round_down(addr_in);
+            let size = pg_round_up(size_in as u64);
+            if addr < UVMBOTTOM as u64 || addr + size > UVMTOP as u64 {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            let vma_ptr = vm_find_area(vm_ptr, addr);
+            if vma_ptr.is_null() {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            if addr < (*vma_ptr).start || addr + size > (*vma_ptr).end {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            if !(*vma_ptr).file.is_null() {
+                fence(Ordering::SeqCst);
+            }
+            ret = 0;
         }
-        let addr = pg_round_down(addr_in);
-        let size = pg_round_up(size_in as u64);
-        if addr < UVMBOTTOM as u64 || addr + size > UVMTOP as u64 {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        let vma_ptr = vm_find_area(vm_ptr, addr);
-        if vma_ptr.is_null() {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        if addr < (*vma_ptr).start || addr + size > (*vma_ptr).end {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        if !(*vma_ptr).file.is_null() {
-            fence(Ordering::SeqCst);
-        }
-        ret = 0;
+        vm_runlock(vm_ptr);
+        ret
     }
-    vm_runlock(vm_ptr);
-    ret
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_mincore(
+pub extern "C" fn vm_mincore(
     vm_ptr: *mut vm,
     addr_in: u64,
     size_in: usize,
     vec: *mut u8,
 ) -> c_int {
-    let mut ret: c_int = 0;
-    vm_rlock(vm_ptr);
-    'done: {
-        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() || vec.is_null() {
-            ret = -(EINVAL as c_int);
-            break 'done;
-        }
-        if (addr_in & (PGSIZE as u64 - 1)) != 0 {
-            ret = -(EINVAL as c_int);
-            break 'done;
-        }
-        let size = pg_round_up(size_in as u64);
-        if addr_in < UVMBOTTOM as u64 || addr_in + size > UVMTOP as u64 {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        let mut vma_ptr = vm_find_area(vm_ptr, addr_in);
-        if vma_ptr.is_null() {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        let num_pages = (size / PGSIZE as u64) as usize;
-        vm_pgtable_lock(vm_ptr);
-        for i in 0..num_pages {
-            let va = addr_in + (i as u64) * (PGSIZE as u64);
-            *vec.add(i) = 0;
-            if va < (*vma_ptr).start || va >= (*vma_ptr).end {
-                vma_ptr = vm_find_area(vm_ptr, va);
-                if vma_ptr.is_null() {
-                    continue;
+    u! {
+        let mut ret: c_int = 0;
+        vm_rlock(vm_ptr);
+        'done: {
+            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() || vec.is_null() {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            if (addr_in & (PGSIZE as u64 - 1)) != 0 {
+                ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            let size = pg_round_up(size_in as u64);
+            if addr_in < UVMBOTTOM as u64 || addr_in + size > UVMTOP as u64 {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            let mut vma_ptr = vm_find_area(vm_ptr, addr_in);
+            if vma_ptr.is_null() {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            let num_pages = (size / PGSIZE as u64) as usize;
+            vm_pgtable_lock(vm_ptr);
+            for i in 0..num_pages {
+                let va = addr_in + (i as u64) * (PGSIZE as u64);
+                *vec.add(i) = 0;
+                if va < (*vma_ptr).start || va >= (*vma_ptr).end {
+                    vma_ptr = vm_find_area(vm_ptr, va);
+                    if vma_ptr.is_null() {
+                        continue;
+                    }
+                }
+                let pte = walk(
+                    (*vm_ptr).pagetable as *mut u64,
+                    va,
+                    0,
+                    core::ptr::null_mut(),
+                    core::ptr::null_mut(),
+                );
+                if !pte.is_null() && (*pte & PTE_V as u64) != 0 {
+                    *vec.add(i) = 1;
                 }
             }
-            let pte = walk(
-                (*vm_ptr).pagetable as *mut u64,
-                va,
-                0,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            );
-            if !pte.is_null() && (*pte & PTE_V as u64) != 0 {
-                *vec.add(i) = 1;
-            }
+            vm_pgtable_unlock(vm_ptr);
+            ret = 0;
         }
-        vm_pgtable_unlock(vm_ptr);
-        ret = 0;
+        vm_runlock(vm_ptr);
+        ret
     }
-    vm_runlock(vm_ptr);
-    ret
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_madvise(
+pub extern "C" fn vm_madvise(
     vm_ptr: *mut vm,
     addr_in: u64,
     size_in: usize,
     advice: c_int,
 ) -> c_int {
-    let mut ret: c_int = 0;
-    vm_wlock(vm_ptr);
-    'done: {
-        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-            ret = -(EINVAL as c_int);
-            break 'done;
-        }
-        let addr = pg_round_down(addr_in);
-        let size = pg_round_up(size_in as u64);
-        if addr < UVMBOTTOM as u64 || addr + size > UVMTOP as u64 {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        let vma_ptr = vm_find_area(vm_ptr, addr);
-        if vma_ptr.is_null() {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        if addr < (*vma_ptr).start || addr + size > (*vma_ptr).end {
-            ret = -(ENOMEM as c_int);
-            break 'done;
-        }
-        match advice as u32 {
-            MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => {
-                ret = 0;
-            }
-            MADV_DONTNEED => {
-                vm_pgtable_lock(vm_ptr);
-                let mut va = addr;
-                while va < addr + size {
-                    let pte = walk(
-                        (*vm_ptr).pagetable as *mut u64,
-                        va,
-                        0,
-                        core::ptr::null_mut(),
-                        core::ptr::null_mut(),
-                    );
-                    if !pte.is_null() && (*pte & PTE_V as u64) != 0 {
-                        let pa = ((*pte) >> 10) << 12;
-                        if pa != 0 {
-                            page_ref_dec(pa as *mut c_void);
-                        }
-                        *pte = 0;
-                    }
-                    va += PGSIZE as u64;
-                }
-                vm_pgtable_unlock(vm_ptr);
-                vm_remote_sfence(vm_ptr);
-                ret = 0;
-            }
-            _ => {
+    u! {
+        let mut ret: c_int = 0;
+        vm_wlock(vm_ptr);
+        'done: {
+            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
                 ret = -(EINVAL as c_int);
+                break 'done;
+            }
+            let addr = pg_round_down(addr_in);
+            let size = pg_round_up(size_in as u64);
+            if addr < UVMBOTTOM as u64 || addr + size > UVMTOP as u64 {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            let vma_ptr = vm_find_area(vm_ptr, addr);
+            if vma_ptr.is_null() {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            if addr < (*vma_ptr).start || addr + size > (*vma_ptr).end {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            match advice as u32 {
+                MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED => {
+                    ret = 0;
+                }
+                MADV_DONTNEED => {
+                    vm_pgtable_lock(vm_ptr);
+                    let mut va = addr;
+                    while va < addr + size {
+                        let pte = walk(
+                            (*vm_ptr).pagetable as *mut u64,
+                            va,
+                            0,
+                            core::ptr::null_mut(),
+                            core::ptr::null_mut(),
+                        );
+                        if !pte.is_null() && (*pte & PTE_V as u64) != 0 {
+                            let pa = ((*pte) >> 10) << 12;
+                            if pa != 0 {
+                                page_ref_dec(pa as *mut c_void);
+                            }
+                            *pte = 0;
+                        }
+                        va += PGSIZE as u64;
+                    }
+                    vm_pgtable_unlock(vm_ptr);
+                    vm_remote_sfence(vm_ptr);
+                    ret = 0;
+                }
+                _ => {
+                    ret = -(EINVAL as c_int);
+                }
             }
         }
+        vm_wunlock(vm_ptr);
+        ret
     }
-    vm_wunlock(vm_ptr);
-    ret
 }
 
 // ---------------------------------------------------------------------------
@@ -2537,80 +2643,84 @@ pub unsafe extern "C" fn vm_madvise(
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_alloc_thread_stack(
+pub extern "C" fn vm_alloc_thread_stack(
     vm_ptr: *mut vm,
     stack_size_in: usize,
     stack_top_out: *mut u64,
 ) -> c_int {
-    if vm_ptr.is_null() || stack_top_out.is_null() {
-        return -(EINVAL as c_int);
-    }
-    let mut stack_size = stack_size_in;
-    if stack_size < (PGSIZE as usize) * 4 {
-        stack_size = (PGSIZE as usize) * 4;
-    }
-    stack_size = pg_round_up(stack_size as u64) as usize;
-    let total_size = stack_size + PGSIZE as usize;
+    u! {
+        if vm_ptr.is_null() || stack_top_out.is_null() {
+            return -(EINVAL as c_int);
+        }
+        let mut stack_size = stack_size_in;
+        if stack_size < (PGSIZE as usize) * 4 {
+            stack_size = (PGSIZE as usize) * 4;
+        }
+        stack_size = pg_round_up(stack_size as u64) as usize;
+        let total_size = stack_size + PGSIZE as usize;
 
-    vm_wlock(vm_ptr);
-    let stack_base = vm_find_free_range(vm_ptr, total_size, 0);
-    if stack_base == 0 {
+        vm_wlock(vm_ptr);
+        let stack_base = vm_find_free_range(vm_ptr, total_size, 0);
+        if stack_base == 0 {
+            vm_wunlock(vm_ptr);
+            return -(ENOMEM as c_int);
+        }
+        let guard_page = stack_base;
+        let guard_vma = vma_alloc(
+            vm_ptr,
+            guard_page,
+            PGSIZE as u64,
+            crate::bindings::VMA_FLAG_GROWSDOWN as u64,
+        );
+        if guard_vma.is_null() {
+            vm_wunlock(vm_ptr);
+            return -(ENOMEM as c_int);
+        }
+        let usable_stack_base = guard_page + PGSIZE as u64;
+        let flags = (VMA_FLAG_USER | PROT_READ | PROT_WRITE) as u64
+            | crate::bindings::VMA_FLAG_GROWSDOWN as u64;
+        let stack_vma = vma_alloc(vm_ptr, usable_stack_base, stack_size as u64, flags);
+        if stack_vma.is_null() {
+            vma_free(vm_ptr, guard_vma);
+            vm_wunlock(vm_ptr);
+            return -(ENOMEM as c_int);
+        }
+        let stack_top = usable_stack_base + stack_size as u64;
         vm_wunlock(vm_ptr);
-        return -(ENOMEM as c_int);
+        *stack_top_out = stack_top;
+        0
     }
-    let guard_page = stack_base;
-    let guard_vma = vma_alloc(
-        vm_ptr,
-        guard_page,
-        PGSIZE as u64,
-        crate::bindings::VMA_FLAG_GROWSDOWN as u64,
-    );
-    if guard_vma.is_null() {
-        vm_wunlock(vm_ptr);
-        return -(ENOMEM as c_int);
-    }
-    let usable_stack_base = guard_page + PGSIZE as u64;
-    let flags = (VMA_FLAG_USER | PROT_READ | PROT_WRITE) as u64
-        | crate::bindings::VMA_FLAG_GROWSDOWN as u64;
-    let stack_vma = vma_alloc(vm_ptr, usable_stack_base, stack_size as u64, flags);
-    if stack_vma.is_null() {
-        vma_free(vm_ptr, guard_vma);
-        vm_wunlock(vm_ptr);
-        return -(ENOMEM as c_int);
-    }
-    let stack_top = usable_stack_base + stack_size as u64;
-    vm_wunlock(vm_ptr);
-    *stack_top_out = stack_top;
-    0
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_free_thread_stack(
+pub extern "C" fn vm_free_thread_stack(
     vm_ptr: *mut vm,
     stack_top: u64,
     stack_size_in: usize,
 ) -> c_int {
-    if vm_ptr.is_null() || stack_top == 0 {
-        return -(EINVAL as c_int);
-    }
-    let mut stack_size = pg_round_up(stack_size_in as u64) as usize;
-    if stack_size < (PGSIZE as usize) * 4 {
-        stack_size = (PGSIZE as usize) * 4;
-    }
-    let usable_stack_base = stack_top - stack_size as u64;
-    let guard_page = usable_stack_base - PGSIZE as u64;
+    u! {
+        if vm_ptr.is_null() || stack_top == 0 {
+            return -(EINVAL as c_int);
+        }
+        let mut stack_size = pg_round_up(stack_size_in as u64) as usize;
+        if stack_size < (PGSIZE as usize) * 4 {
+            stack_size = (PGSIZE as usize) * 4;
+        }
+        let usable_stack_base = stack_top - stack_size as u64;
+        let guard_page = usable_stack_base - PGSIZE as u64;
 
-    vm_wlock(vm_ptr);
-    let stack_vma = vm_find_area(vm_ptr, usable_stack_base);
-    if !stack_vma.is_null() {
-        vma_free(vm_ptr, stack_vma);
+        vm_wlock(vm_ptr);
+        let stack_vma = vm_find_area(vm_ptr, usable_stack_base);
+        if !stack_vma.is_null() {
+            vma_free(vm_ptr, stack_vma);
+        }
+        let guard_vma = vm_find_area(vm_ptr, guard_page);
+        if !guard_vma.is_null() {
+            vma_free(vm_ptr, guard_vma);
+        }
+        vm_wunlock(vm_ptr);
+        0
     }
-    let guard_vma = vm_find_area(vm_ptr, guard_page);
-    if !guard_vma.is_null() {
-        vma_free(vm_ptr, guard_vma);
-    }
-    vm_wunlock(vm_ptr);
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -2618,7 +2728,7 @@ pub unsafe extern "C" fn vm_free_thread_stack(
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_mmap(
+pub extern "C" fn vm_mmap(
     vm_ptr: *mut vm,
     addr: u64,
     length_in: usize,
@@ -2627,85 +2737,87 @@ pub unsafe extern "C" fn vm_mmap(
     fd: c_int,
     offset: u64,
 ) -> u64 {
-    let mut file: *mut vfs_file = core::ptr::null_mut();
-    if vm_ptr.is_null() || length_in == 0 {
-        return u64::MAX;
-    }
-    if (flags & MAP_PRIVATE as c_int) == 0 && (flags & MAP_SHARED as c_int) == 0 {
-        return u64::MAX;
-    }
-    if (flags & MAP_PRIVATE as c_int) != 0 && (flags & MAP_SHARED as c_int) != 0 {
-        return u64::MAX;
-    }
-    if (flags & MAP_SHARED as c_int) != 0 {
-        return u64::MAX;
-    }
-    if fd != -1 {
-        if (flags & MAP_ANONYMOUS as c_int) != 0 {
+    u! {
+        let mut file: *mut vfs_file = core::ptr::null_mut();
+        if vm_ptr.is_null() || length_in == 0 {
             return u64::MAX;
         }
-        if (offset & (PGSIZE as u64 - 1)) != 0 {
+        if (flags & MAP_PRIVATE as c_int) == 0 && (flags & MAP_SHARED as c_int) == 0 {
             return u64::MAX;
         }
-        let fdtable = xv6_vm_current_fdtable();
-        if fdtable.is_null() {
+        if (flags & MAP_PRIVATE as c_int) != 0 && (flags & MAP_SHARED as c_int) != 0 {
             return u64::MAX;
         }
-        file = vfs_fdtable_get_file(fdtable, fd);
-        if file.is_null() {
+        if (flags & MAP_SHARED as c_int) != 0 {
             return u64::MAX;
         }
-        if xv6_vm_inode_is_reg(file) == 0 {
-            vfs_fput(file);
+        if fd != -1 {
+            if (flags & MAP_ANONYMOUS as c_int) != 0 {
+                return u64::MAX;
+            }
+            if (offset & (PGSIZE as u64 - 1)) != 0 {
+                return u64::MAX;
+            }
+            let fdtable = xv6_vm_current_fdtable();
+            if fdtable.is_null() {
+                return u64::MAX;
+            }
+            file = vfs_fdtable_get_file(fdtable, fd);
+            if file.is_null() {
+                return u64::MAX;
+            }
+            if xv6_vm_inode_is_reg(file) == 0 {
+                vfs_fput(file);
+                return u64::MAX;
+            }
+        } else if (flags & MAP_ANONYMOUS as c_int) == 0 {
             return u64::MAX;
         }
-    } else if (flags & MAP_ANONYMOUS as c_int) == 0 {
-        return u64::MAX;
-    }
 
-    let length = pg_round_up(length_in as u64);
-    let mut vm_flags = (VMA_FLAG_USER as u64)
-        | ((prot as u64) & ((PROT_READ | PROT_WRITE | PROT_EXEC) as u64));
-    if !file.is_null() {
-        vm_flags |= crate::bindings::VMA_FLAG_FILE as u64;
-    }
+        let length = pg_round_up(length_in as u64);
+        let mut vm_flags = (VMA_FLAG_USER as u64)
+            | ((prot as u64) & ((PROT_READ | PROT_WRITE | PROT_EXEC) as u64));
+        if !file.is_null() {
+            vm_flags |= crate::bindings::VMA_FLAG_FILE as u64;
+        }
 
-    vm_wlock(vm_ptr);
+        vm_wlock(vm_ptr);
 
-    let map_addr: u64;
-    if addr == 0 || (flags & MAP_FIXED as c_int) == 0 {
-        let m = vm_find_free_range(vm_ptr, length as usize, addr);
-        if m == 0 {
+        let map_addr: u64;
+        if addr == 0 || (flags & MAP_FIXED as c_int) == 0 {
+            let m = vm_find_free_range(vm_ptr, length as usize, addr);
+            if m == 0 {
+                vm_wunlock(vm_ptr);
+                if !file.is_null() {
+                    vfs_fput(file);
+                }
+                return u64::MAX;
+            }
+            map_addr = m;
+        } else {
+            map_addr = pg_round_down(addr);
+        }
+
+        let vma_ptr = vma_alloc(vm_ptr, map_addr, length, vm_flags);
+        if vma_ptr.is_null() {
             vm_wunlock(vm_ptr);
             if !file.is_null() {
                 vfs_fput(file);
             }
             return u64::MAX;
         }
-        map_addr = m;
-    } else {
-        map_addr = pg_round_down(addr);
-    }
-
-    let vma_ptr = vma_alloc(vm_ptr, map_addr, length, vm_flags);
-    if vma_ptr.is_null() {
-        vm_wunlock(vm_ptr);
         if !file.is_null() {
-            vfs_fput(file);
+            (*vma_ptr).file = file;
+            (*vma_ptr).pgoff = offset;
         }
-        return u64::MAX;
+        vm_wunlock(vm_ptr);
+        map_addr
     }
-    if !file.is_null() {
-        (*vma_ptr).file = file;
-        (*vma_ptr).pgoff = offset;
-    }
-    vm_wunlock(vm_ptr);
-    map_addr
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_munmap(vm_ptr: *mut vm, addr: u64, length: usize) -> c_int {
-    vm_munmap_region(vm_ptr, addr, length)
+pub extern "C" fn vm_munmap(vm_ptr: *mut vm, addr: u64, length: usize) -> c_int {
+    u! { vm_munmap_region(vm_ptr, addr, length) }
 }
 
 // ---------------------------------------------------------------------------
@@ -2731,43 +2843,47 @@ static __VM_TREE_OPTS: VmTreeOptsWrap = VmTreeOptsWrap(rb_root_opts {
 /// Inlines the body of `rb_root_init` (a `static inline` in bintree.h that
 /// merely validates and stores the opts pointer).
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_rb_init_vm_tree(root: *mut rb_root) {
+pub extern "C" fn xv6_vm_rb_init_vm_tree(root: *mut rb_root) {
     if root.is_null() {
         return;
     }
-    (*root).node = core::ptr::null_mut();
-    (*root).opts = &__VM_TREE_OPTS.0 as *const rb_root_opts as *mut rb_root_opts;
+    u! {
+        (*root).node = core::ptr::null_mut();
+        (*root).opts = &__VM_TREE_OPTS.0 as *const rb_root_opts as *mut rb_root_opts;
+    }
 }
 
 /// Debug helper — prints every VMA in `vm`. Mirrors the C `dump_vm`.
 #[no_mangle]
-pub unsafe extern "C" fn dump_vm(vm_ptr: *mut vm) {
+pub extern "C" fn dump_vm(vm_ptr: *mut vm) {
     if vm_ptr.is_null() {
         return;
     }
-    printf(b"VM dump:\n\0".as_ptr() as *const c_char);
-    printf(
-        b"Pagetable: %p\n\0".as_ptr() as *const c_char,
-        (*vm_ptr).pagetable,
-    );
-    printf(b"VMAs:\n\0".as_ptr() as *const c_char);
-    let mut vma_ptr = xv6_vm_first_vma(vm_ptr);
-    while !vma_ptr.is_null() {
-        let mut flags_buf: [c_char; 10] = [0; 10];
-        vm_dump_flags(
-            (*vma_ptr).flags,
-            flags_buf.as_mut_ptr(),
-            flags_buf.len(),
-        );
+    u! {
+        printf(b"VM dump:\n\0".as_ptr() as *const c_char);
         printf(
-            b"VMA: start=%lx, end=%lx, flags=%s, file=%p, pgoff=%lx\n\0".as_ptr() as *const c_char,
-            (*vma_ptr).start,
-            (*vma_ptr).end,
-            flags_buf.as_ptr(),
-            (*vma_ptr).file,
-            (*vma_ptr).pgoff,
+            b"Pagetable: %p\n\0".as_ptr() as *const c_char,
+            (*vm_ptr).pagetable,
         );
-        vma_ptr = xv6_vm_next_vma(vm_ptr, vma_ptr);
+        printf(b"VMAs:\n\0".as_ptr() as *const c_char);
+        let mut vma_ptr = xv6_vm_first_vma(vm_ptr);
+        while !vma_ptr.is_null() {
+            let mut flags_buf: [c_char; 10] = [0; 10];
+            vm_dump_flags(
+                (*vma_ptr).flags,
+                flags_buf.as_mut_ptr(),
+                flags_buf.len(),
+            );
+            printf(
+                b"VMA: start=%lx, end=%lx, flags=%s, file=%p, pgoff=%lx\n\0".as_ptr() as *const c_char,
+                (*vma_ptr).start,
+                (*vma_ptr).end,
+                flags_buf.as_ptr(),
+                (*vma_ptr).file,
+                (*vma_ptr).pgoff,
+            );
+            vma_ptr = xv6_vm_next_vma(vm_ptr, vma_ptr);
+        }
     }
 }
 
@@ -2949,8 +3065,8 @@ fn vma_validate_pte(vma_ptr: *mut vma, pte: *mut u64, flags: u64) -> c_int {
 /// C-ABI wrapper for `vma_validate_pte`. Was previously the C
 /// `xv6_vm_validate_pte` shim in vm.c.
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_validate_pte(vma_ptr: *mut vma, pte: *mut u64, flags: u64) -> c_int {
-    vma_validate_pte(vma_ptr, pte, flags)
+pub extern "C" fn xv6_vm_validate_pte(vma_ptr: *mut vma, pte: *mut u64, flags: u64) -> c_int {
+    u! { vma_validate_pte(vma_ptr, pte, flags) }
 }
 
 /// C-ABI wrapper for the file-fault dispatch. Was previously the C
@@ -2958,18 +3074,20 @@ pub unsafe extern "C" fn xv6_vm_validate_pte(vma_ptr: *mut vma, pte: *mut u64, f
 /// custom `.fault` op, dispatch there; otherwise fall back to the generic
 /// file-page loader.
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_call_vma_fault(
+pub extern "C" fn xv6_vm_call_vma_fault(
     file: *mut vfs_file,
     vma_ptr: *mut vma,
     va: u64,
 ) -> *mut c_void {
-    if !file.is_null() {
-        let ops = (*file).ops;
-        if !ops.is_null() {
-            if let Some(fault_fn) = (*ops).fault {
-                return fault_fn(file, vma_ptr, va);
+    u! {
+        if !file.is_null() {
+            let ops = (*file).ops;
+            if !ops.is_null() {
+                if let Some(fault_fn) = (*ops).fault {
+                    return fault_fn(file, vma_ptr, va);
+                }
             }
         }
+        vma_fault_file_page(vma_ptr, va)
     }
-    vma_fault_file_page(vma_ptr, va)
 }

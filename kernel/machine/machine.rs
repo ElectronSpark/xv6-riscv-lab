@@ -51,6 +51,19 @@ pub fn read_tp() -> u64 {
     tp
 }
 
+/// Read the `sp` (stack pointer) register.
+#[inline(always)]
+pub fn read_sp() -> u64 {
+    let sp: u64;
+    // SAFETY: `mv {0}, sp` reads a general-purpose register with no
+    // memory effects and cannot trap.
+    unsafe {
+        core::arch::asm!("mv {0}, sp", out(reg) sp,
+            options(nomem, nostack, preserves_flags));
+    }
+    sp
+}
+
 /// Read SSTATUS.
 #[inline(always)]
 pub fn read_sstatus() -> u64 {
@@ -256,6 +269,16 @@ pub fn cpu_relax() {
     // SAFETY: `nop` has no side effects beyond the instruction stream.
     unsafe {
         core::arch::asm!("nop", options(nostack, preserves_flags));
+    }
+}
+
+/// Full memory barrier, matching the kernel's `smp_mb()` macro.
+#[inline(always)]
+pub fn smp_mb() {
+    // SAFETY: `fence rw, rw` orders memory operations; it cannot violate
+    // Rust memory safety by itself.
+    unsafe {
+        core::arch::asm!("fence rw, rw", options(nostack, preserves_flags));
     }
 }
 
@@ -745,4 +768,76 @@ impl Drop for PreemptGuard {
     fn drop(&mut self) {
         pop_off();
     }
+}
+
+// ===========================================================================
+// Atomic and SMP operations
+// ===========================================================================
+
+#[inline(always)]
+pub fn atomic_load_acquire_i32(p: *const core::ffi::c_int) -> core::ffi::c_int {
+    unsafe { (*(p as *const core::sync::atomic::AtomicI32)).load(core::sync::atomic::Ordering::Acquire) }
+}
+
+#[inline(always)]
+pub fn atomic_store_release_i32(p: *mut core::ffi::c_int, v: core::ffi::c_int) {
+    unsafe { (*(p as *mut core::sync::atomic::AtomicI32)).store(v, core::sync::atomic::Ordering::Release) }
+}
+
+#[inline(always)]
+pub fn atomic_inc_i32(p: *mut core::ffi::c_int) {
+    unsafe { (*(p as *mut core::sync::atomic::AtomicI32)).fetch_add(1, core::sync::atomic::Ordering::AcqRel); }
+}
+
+#[inline]
+pub fn atomic_dec_unless_i32(p: *mut core::ffi::c_int, unless: core::ffi::c_int) -> bool {
+    let a = unsafe { &*(p as *mut core::sync::atomic::AtomicI32) };
+    let mut cur = a.load(core::sync::atomic::Ordering::Acquire);
+    loop {
+        if cur == unless { return false; }
+        match a.compare_exchange_weak(cur, cur - 1, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(v) => cur = v,
+        }
+    }
+}
+
+#[inline(always)]
+pub fn atomic_store_release_u64(p: *mut u64, v: u64) {
+    unsafe { (*(p as *mut core::sync::atomic::AtomicU64)).store(v, core::sync::atomic::Ordering::Release) }
+}
+
+#[inline(always)]
+pub fn smp_load_acquire_i32(p: *const core::ffi::c_int) -> core::ffi::c_int {
+    atomic_load_acquire_i32(p)
+}
+
+#[inline(always)]
+pub fn smp_store_release_i32(p: *mut core::ffi::c_int, v: core::ffi::c_int) {
+    atomic_store_release_i32(p, v)
+}
+
+#[inline(always)]
+pub fn smp_load_acquire_state(p: *const crate::bindings::thread_state) -> crate::bindings::thread_state {
+    atomic_load_acquire_i32(p as *const core::ffi::c_int) as crate::bindings::thread_state
+}
+
+#[inline(always)]
+pub fn smp_store_release_state(p: *mut crate::bindings::thread_state, v: crate::bindings::thread_state) {
+    atomic_store_release_i32(p as *mut core::ffi::c_int, v as core::ffi::c_int)
+}
+
+#[inline(always)]
+pub fn smp_store_release_u64(p: *mut u64, v: u64) {
+    atomic_store_release_u64(p, v)
+}
+
+#[inline(always)]
+pub fn smp_load_acquire_u64(p: *const u64) -> u64 {
+    unsafe { (*(p as *const core::sync::atomic::AtomicU64)).load(core::sync::atomic::Ordering::Acquire) }
+}
+
+#[inline(always)]
+pub fn smp_rmb() {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 }

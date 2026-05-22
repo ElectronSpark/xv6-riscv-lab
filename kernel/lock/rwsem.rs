@@ -2,6 +2,13 @@
 
 #![allow(non_camel_case_types, non_snake_case)]
 
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
+
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr::{addr_of_mut, null_mut};
 
@@ -44,47 +51,47 @@ unsafe extern "C" {
 #[inline(always)]
 fn lk_ptr(l: *mut rwsem_t) -> *mut spinlock_t {
     // SAFETY: structurally valid rwsem.
-    unsafe { addr_of_mut!((*l).lock) }
+    u! { addr_of_mut!((*l).lock) }
 }
 #[inline(always)]
 fn rq_ptr(l: *mut rwsem_t) -> *mut tq_t {
     // SAFETY: see `lk_ptr`.
-    unsafe { addr_of_mut!((*l).read_queue) }
+    u! { addr_of_mut!((*l).read_queue) }
 }
 #[inline(always)]
 fn wq_ptr(l: *mut rwsem_t) -> *mut tq_t {
     // SAFETY: see `lk_ptr`.
-    unsafe { addr_of_mut!((*l).write_queue) }
+    u! { addr_of_mut!((*l).write_queue) }
 }
 #[inline(always)]
 fn get_readers(l: *mut rwsem_t) -> c_int {
     // SAFETY: caller holds `l->lock`.
-    unsafe { (*l).readers }
+    u! { (*l).readers }
 }
 #[inline(always)]
 fn set_readers(l: *mut rwsem_t, v: c_int) {
     // SAFETY: caller holds `l->lock`.
-    unsafe { (*l).readers = v; }
+    u! { (*l).readers = v; }
 }
 #[inline(always)]
 fn get_holder(l: *mut rwsem_t) -> c_int {
     // SAFETY: caller holds `l->lock`.
-    unsafe { (*l).holder_pid }
+    u! { (*l).holder_pid }
 }
 #[inline(always)]
 fn set_holder(l: *mut rwsem_t, v: c_int) {
     // SAFETY: caller holds `l->lock`.
-    unsafe { (*l).holder_pid = v; }
+    u! { (*l).holder_pid = v; }
 }
 #[inline(always)]
 fn get_flags(l: *mut rwsem_t) -> u64 {
     // SAFETY: read-only of a constant-after-init field.
-    unsafe { (*l).flags }
+    u! { (*l).flags }
 }
 #[inline(always)]
 fn set_name_flags(l: *mut rwsem_t, name: *const c_char, flags: u64) {
     // SAFETY: caller has exclusive access at init time.
-    unsafe { (*l).name = name; (*l).flags = flags; }
+    u! { (*l).name = name; (*l).flags = flags; }
 }
 
 // ---------------------------------------------------------------------------
@@ -156,7 +163,7 @@ struct RwsemTimedCtx {
 impl RwsemTimedCtx {
     #[inline(always)]
     unsafe fn from_raw<'a>(data: *mut c_void) -> Option<&'a mut Self> {
-        if data.is_null() { None } else { Some(unsafe { &mut *(data as *mut Self) }) }
+        if data.is_null() { None } else { Some(u! { &mut *(data as *mut Self) }) }
     }
     #[inline(always)] fn lock_ptr(&self) -> *mut rwsem_t { self.lock }
     #[inline(always)] fn timer_node_ptr(&mut self) -> *mut timer_node { addr_of_mut!(self.timer) }
@@ -165,9 +172,9 @@ impl RwsemTimedCtx {
     #[inline(always)] fn set_armed(&mut self, v: bool) { self.timer_armed = v; }
 }
 
-unsafe extern "C" fn rwsem_timed_sleep_cb(data: *mut c_void) -> c_int {
+extern "C" fn rwsem_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
     // SAFETY: see `RwsemTimedCtx::from_raw`.
-    let ctx = match unsafe { RwsemTimedCtx::from_raw(data) } {
+    let ctx = match u! { RwsemTimedCtx::from_raw(data) } {
         Some(c) => c, None => return 0,
     };
     let l = ctx.lock_ptr();
@@ -184,11 +191,11 @@ unsafe extern "C" fn rwsem_timed_sleep_cb(data: *mut c_void) -> c_int {
     let status = spin_holding(lk_ptr(l));
     if status != 0 { spin_unlock(lk_ptr(l)); }
     status
-}
+}}
 
-unsafe extern "C" fn rwsem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) {
+extern "C" fn rwsem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! {
     // SAFETY: see `RwsemTimedCtx::from_raw`.
-    let ctx = match unsafe { RwsemTimedCtx::from_raw(data) } {
+    let ctx = match u! { RwsemTimedCtx::from_raw(data) } {
         Some(c) => c, None => return,
     };
     let l = ctx.lock_ptr();
@@ -199,14 +206,14 @@ unsafe extern "C" fn rwsem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_i
         ctx.set_armed(false);
     }
     if sleep_cb_status != 0 { spin_lock(lk_ptr(l)); }
-}
+}}
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char) -> c_int {
+pub extern "C" fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char)-> c_int  { u! {
     if l.is_null() || name.is_null() { return -1; }
     spin_init(lk_ptr(l), b"rwsem spinlock\0".as_ptr() as *const c_char);
     set_readers(l, 0);
@@ -215,10 +222,10 @@ pub unsafe extern "C" fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_
     set_name_flags(l, name, flags);
     set_holder(l, -1);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_acquire_read(l: *mut rwsem_t) -> c_int {
+pub extern "C" fn rwsem_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -1; }
     let cur = machine::current_thread_ptr();
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
@@ -229,10 +236,10 @@ pub unsafe extern "C" fn rwsem_acquire_read(l: *mut rwsem_t) -> c_int {
     }
     set_readers(l, get_readers(l) + 1);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_try_acquire_read(l: *mut rwsem_t) -> c_int {
+pub extern "C" fn rwsem_try_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     if !reader_should_wait(l) {
@@ -241,10 +248,10 @@ pub unsafe extern "C" fn rwsem_try_acquire_read(l: *mut rwsem_t) -> c_int {
     } else {
         -(EAGAIN as c_int)
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_acquire_read_interruptible(l: *mut rwsem_t) -> c_int {
+pub extern "C" fn rwsem_acquire_read_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
@@ -256,10 +263,10 @@ pub unsafe extern "C" fn rwsem_acquire_read_interruptible(l: *mut rwsem_t) -> c_
     }
     set_readers(l, get_readers(l) + 1);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_int {
+pub extern "C" fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     if timeout_ms == 0 {
         return if rwsem_try_acquire_read(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
@@ -279,7 +286,7 @@ pub unsafe extern "C" fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u
         let mut ctx = RwsemTimedCtx {
             lock: l,
             // SAFETY: zero-init timer_node mirrors C `.timer = {0}`.
-            timer: unsafe { core::mem::zeroed() },
+            timer: u! { core::mem::zeroed() },
             timeout_ms: remaining_ms,
             timer_armed: false,
         };
@@ -295,10 +302,10 @@ pub unsafe extern "C" fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u
     }
     set_readers(l, get_readers(l) + 1);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_acquire_write(l: *mut rwsem_t) -> c_int {
+pub extern "C" fn rwsem_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -1; }
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -310,10 +317,10 @@ pub unsafe extern "C" fn rwsem_acquire_write(l: *mut rwsem_t) -> c_int {
     }
     set_holder(l, pid);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_try_acquire_write(l: *mut rwsem_t) -> c_int {
+pub extern "C" fn rwsem_try_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -325,10 +332,10 @@ pub unsafe extern "C" fn rwsem_try_acquire_write(l: *mut rwsem_t) -> c_int {
     } else {
         -(EAGAIN as c_int)
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_acquire_write_interruptible(l: *mut rwsem_t) -> c_int {
+pub extern "C" fn rwsem_acquire_write_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -342,10 +349,10 @@ pub unsafe extern "C" fn rwsem_acquire_write_interruptible(l: *mut rwsem_t) -> c
     }
     set_holder(l, pid);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_int {
+pub extern "C" fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     if timeout_ms == 0 {
         return if rwsem_try_acquire_write(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
@@ -367,7 +374,7 @@ pub unsafe extern "C" fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: 
         let mut ctx = RwsemTimedCtx {
             lock: l,
             // SAFETY: zero-init timer_node.
-            timer: unsafe { core::mem::zeroed() },
+            timer: u! { core::mem::zeroed() },
             timeout_ms: remaining_ms,
             timer_armed: false,
         };
@@ -383,10 +390,10 @@ pub unsafe extern "C" fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: 
     }
     set_holder(l, pid);
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_release(l: *mut rwsem_t) {
+pub extern "C" fn rwsem_release(l: *mut rwsem_t) { u! {
     if l.is_null() { return; }
     let cur = machine::current_thread_ptr();
     let self_pid = machine::thread_pid(cur);
@@ -403,17 +410,17 @@ pub unsafe extern "C" fn rwsem_release(l: *mut rwsem_t) {
             }
         }
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn rwsem_is_write_holding(l: *mut rwsem_t) -> bool {
+pub extern "C" fn rwsem_is_write_holding(l: *mut rwsem_t)-> bool  { u! {
     if l.is_null() { return false; }
     let cur = machine::current_thread_ptr();
     if cur.is_null() { return false; }
     let pid = machine::thread_pid(cur);
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     get_holder(l) == pid
-}
+}}
 
 // ===========================================================================
 // Rust-native typed handle
@@ -459,7 +466,7 @@ impl KRwSem {
     #[inline]
     pub fn init(self, flags: u64, name: *const c_char) -> Result<(), RwSemError> {
         // SAFETY: handle wraps live storage.
-        let r = unsafe { rwsem_init(self.raw, flags, name) };
+        let r = u! { rwsem_init(self.raw, flags, name) };
         if r == 0 { Ok(()) } else { Err(map_rwsem_err(r)) }
     }
 
@@ -467,7 +474,7 @@ impl KRwSem {
     #[inline]
     pub fn read(self) -> Result<KRwSemReadGuard, RwSemError> {
         // SAFETY: see `init`.
-        let r = unsafe { rwsem_acquire_read(self.raw) };
+        let r = u! { rwsem_acquire_read(self.raw) };
         if r == 0 {
             Ok(KRwSemReadGuard { raw: self.raw, _ns: PhantomData })
         } else { Err(map_rwsem_err(r)) }
@@ -476,7 +483,7 @@ impl KRwSem {
     #[inline]
     pub fn try_read(self) -> Result<KRwSemReadGuard, RwSemError> {
         // SAFETY: see `init`.
-        let r = unsafe { rwsem_try_acquire_read(self.raw) };
+        let r = u! { rwsem_try_acquire_read(self.raw) };
         if r == 0 {
             Ok(KRwSemReadGuard { raw: self.raw, _ns: PhantomData })
         } else { Err(map_rwsem_err(r)) }
@@ -485,7 +492,7 @@ impl KRwSem {
     #[inline]
     pub fn read_interruptible(self) -> Result<KRwSemReadGuard, RwSemError> {
         // SAFETY: see `init`.
-        let r = unsafe { rwsem_acquire_read_interruptible(self.raw) };
+        let r = u! { rwsem_acquire_read_interruptible(self.raw) };
         if r == 0 {
             Ok(KRwSemReadGuard { raw: self.raw, _ns: PhantomData })
         } else { Err(map_rwsem_err(r)) }
@@ -494,7 +501,7 @@ impl KRwSem {
     #[inline]
     pub fn read_timed(self, timeout_ms: u64) -> Result<KRwSemReadGuard, RwSemError> {
         // SAFETY: see `init`.
-        let r = unsafe { rwsem_acquire_read_timed(self.raw, timeout_ms) };
+        let r = u! { rwsem_acquire_read_timed(self.raw, timeout_ms) };
         if r == 0 {
             Ok(KRwSemReadGuard { raw: self.raw, _ns: PhantomData })
         } else { Err(map_rwsem_err(r)) }
@@ -504,7 +511,7 @@ impl KRwSem {
     #[inline]
     pub fn write(self) -> Result<KRwSemWriteGuard, RwSemError> {
         // SAFETY: see `init`.
-        let r = unsafe { rwsem_acquire_write(self.raw) };
+        let r = u! { rwsem_acquire_write(self.raw) };
         if r == 0 {
             Ok(KRwSemWriteGuard { raw: self.raw, _ns: PhantomData })
         } else { Err(map_rwsem_err(r)) }
@@ -513,7 +520,7 @@ impl KRwSem {
     #[inline]
     pub fn try_write(self) -> Result<KRwSemWriteGuard, RwSemError> {
         // SAFETY: see `init`.
-        let r = unsafe { rwsem_try_acquire_write(self.raw) };
+        let r = u! { rwsem_try_acquire_write(self.raw) };
         if r == 0 {
             Ok(KRwSemWriteGuard { raw: self.raw, _ns: PhantomData })
         } else { Err(map_rwsem_err(r)) }
@@ -522,7 +529,7 @@ impl KRwSem {
     #[inline]
     pub fn write_interruptible(self) -> Result<KRwSemWriteGuard, RwSemError> {
         // SAFETY: see `init`.
-        let r = unsafe { rwsem_acquire_write_interruptible(self.raw) };
+        let r = u! { rwsem_acquire_write_interruptible(self.raw) };
         if r == 0 {
             Ok(KRwSemWriteGuard { raw: self.raw, _ns: PhantomData })
         } else { Err(map_rwsem_err(r)) }
@@ -531,7 +538,7 @@ impl KRwSem {
     #[inline]
     pub fn write_timed(self, timeout_ms: u64) -> Result<KRwSemWriteGuard, RwSemError> {
         // SAFETY: see `init`.
-        let r = unsafe { rwsem_acquire_write_timed(self.raw, timeout_ms) };
+        let r = u! { rwsem_acquire_write_timed(self.raw, timeout_ms) };
         if r == 0 {
             Ok(KRwSemWriteGuard { raw: self.raw, _ns: PhantomData })
         } else { Err(map_rwsem_err(r)) }
@@ -540,7 +547,7 @@ impl KRwSem {
     #[inline]
     pub fn is_write_holding(self) -> bool {
         // SAFETY: see `init`.
-        unsafe { rwsem_is_write_holding(self.raw) }
+        u! { rwsem_is_write_holding(self.raw) }
     }
 }
 
@@ -554,7 +561,7 @@ impl Drop for KRwSemReadGuard {
     #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: guard tracks a successful acquire.
-        unsafe { rwsem_release(self.raw); }
+        u! { rwsem_release(self.raw); }
     }
 }
 
@@ -568,6 +575,6 @@ impl Drop for KRwSemWriteGuard {
     #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: guard tracks a successful acquire.
-        unsafe { rwsem_release(self.raw); }
+        u! { rwsem_release(self.raw); }
     }
 }

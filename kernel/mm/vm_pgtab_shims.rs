@@ -8,6 +8,13 @@
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
 
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
+
 use core::ffi::{c_char, c_int, c_void};
 use core::sync::atomic::{compiler_fence, fence, Ordering};
 
@@ -104,7 +111,7 @@ use ffi::*;
 
 // Page struct flags-field accessor uses the bindgen-generated layout.
 // page_struct.__bindgen_anon_1.flags is the type+flags word.
-extern "C" {}
+unsafe extern "C" {}
 
 // =====================================================================
 // kernel_pagetable storage
@@ -113,14 +120,14 @@ extern "C" {}
 pub static mut kernel_pagetable: *mut u64 = core::ptr::null_mut();
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_kernel_pagetable_get() -> *mut u64 {
+pub extern "C" fn xv6_vm_kernel_pagetable_get()-> *mut u64  { u! {
     kernel_pagetable
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_kernel_pagetable_set(pt: *mut u64) {
+pub extern "C" fn xv6_vm_kernel_pagetable_set(pt: *mut u64) { u! {
     kernel_pagetable = pt;
-}
+}}
 
 // =====================================================================
 // SATP / trampoline_ksatp
@@ -132,35 +139,35 @@ fn make_satp(pt: *mut u64) -> u64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_make_satp(pt: *mut u64) -> u64 {
+pub extern "C" fn xv6_vm_make_satp(pt: *mut u64)-> u64  { u! {
     make_satp(pt)
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_set_trampoline_ksatp(v: u64) {
+pub extern "C" fn xv6_vm_set_trampoline_ksatp(v: u64) { u! {
     // smp_store_release + smp_mb equivalent.
     core::ptr::write_volatile(&raw mut trampoline_ksatp, v);
     compiler_fence(Ordering::Release);
     fence(Ordering::SeqCst);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_get_trampoline_ksatp() -> u64 {
+pub extern "C" fn xv6_vm_get_trampoline_ksatp()-> u64  { u! {
     core::ptr::read_volatile(&raw const trampoline_ksatp)
-}
+}}
 
 // =====================================================================
 // hart-control: w_satp / sfence_vma
 // =====================================================================
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_w_satp(v: u64) {
+pub extern "C" fn xv6_vm_w_satp(v: u64) { u! {
     core::arch::asm!("csrw satp, {0}", in(reg) v, options(nostack, preserves_flags));
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_sfence_vma() {
+pub extern "C" fn xv6_vm_sfence_vma() { u! {
     core::arch::asm!("sfence.vma zero, zero", options(nostack, preserves_flags));
-}
+}}
 
 // xv6_vm_cpuid is defined in vm.rs (kept there to avoid duplication).
 
@@ -168,36 +175,36 @@ pub unsafe extern "C" fn xv6_vm_sfence_vma() {
 // Pool init shims (delegate to Rust impls in vm.rs)
 // =====================================================================
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_vma_pool_init() { __vma_pool_init(); }
+pub extern "C" fn xv6_vm_vma_pool_init() { u! { __vma_pool_init(); }}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_vm_pool_init() { __vm_pool_init(); }
+pub extern "C" fn xv6_vm_vm_pool_init() { u! { __vm_pool_init(); }}
 
 // =====================================================================
 // Panic helpers
 // =====================================================================
-unsafe fn panic_msg(fmt: *const c_char) -> ! {
+fn panic_msg(fmt: *const c_char)-> !  { u! {
     __panic_start();
     printf(b"PANIC: %s\n\0".as_ptr() as *const c_char, fmt);
     __panic_end();
-}
+}}
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_panic(msg: *const c_char) -> ! {
+pub extern "C" fn xv6_vm_panic(msg: *const c_char)-> !  { u! {
     panic_msg(msg);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_panic_mappages_va(va: u64) -> ! {
+pub extern "C" fn xv6_vm_panic_mappages_va(va: u64)-> !  { u! {
     __panic_start();
     printf(
         b"mappages: va not aligned, va %p\n\0".as_ptr() as *const c_char,
         va as *const c_void,
     );
     __panic_end();
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_panic_mappages_size(va: u64, size: u64) -> ! {
+pub extern "C" fn xv6_vm_panic_mappages_size(va: u64, size: u64)-> !  { u! {
     __panic_start();
     printf(
         b"mappages: size not aligned, va %p, size %p\n\0".as_ptr() as *const c_char,
@@ -205,32 +212,32 @@ pub unsafe extern "C" fn xv6_vm_panic_mappages_size(va: u64, size: u64) -> ! {
         size as *const c_void,
     );
     __panic_end();
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_panic_mappages_zero(va: u64) -> ! {
+pub extern "C" fn xv6_vm_panic_mappages_zero(va: u64)-> !  { u! {
     __panic_start();
     printf(
         b"mappages: size zero, va %p\n\0".as_ptr() as *const c_char,
         va as *const c_void,
     );
     __panic_end();
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_panic_mappages_remap(a: u64) -> ! {
+pub extern "C" fn xv6_vm_panic_mappages_remap(a: u64)-> !  { u! {
     __panic_start();
     printf(
         b"mappages: remap, %p\n\0".as_ptr() as *const c_char,
         a as *const c_void,
     );
     __panic_end();
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_panic_uvmunmap_notmapped(
+pub extern "C" fn xv6_vm_panic_uvmunmap_notmapped(
     va: u64, pa: u64, flags: u64,
-) -> ! {
+)-> !  { u! {
     __panic_start();
     printf(
         b"uvmunmap: not mapped, va=%p, pa=%p, flags: %lx\n\0".as_ptr() as *const c_char,
@@ -239,35 +246,35 @@ pub unsafe extern "C" fn xv6_vm_panic_uvmunmap_notmapped(
         flags,
     );
     __panic_end();
-}
+}}
 
 // =====================================================================
 // printf helpers used by the Rust port
 // =====================================================================
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_printf_kvminithart(hart: u64, satp: u64) {
+pub extern "C" fn xv6_vm_printf_kvminithart(hart: u64, satp: u64) { u! {
     printf(
         b"hart %ld switched to kernel page table, satp: %lx\n\0".as_ptr() as *const c_char,
         hart, satp,
     );
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_printf_invalid_level(level: c_int) {
+pub extern "C" fn xv6_vm_printf_invalid_level(level: c_int) { u! {
     printf(
         b"Invalid level %d for pagetable dump\n\0".as_ptr() as *const c_char,
         level,
     );
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_printf_dump_pte_single(
+pub extern "C" fn xv6_vm_printf_dump_pte_single(
     indent: c_int, idx: c_int, pte_ptr: *mut c_void,
     flags_no_v: u64,
     sv: *const c_char, su: *const c_char, sw: *const c_char,
     sx: *const c_char, sr: *const c_char, src: *const c_char,
     va: u64, pa: u64,
-) {
+) { u! {
     printf(
         b"%*sPTE[%d](%p): %lx(%s%s%s%s%s%s), (va, pa): (%p, %p)\n\0".as_ptr() as *const c_char,
         indent, b"\0".as_ptr() as *const c_char,
@@ -275,17 +282,17 @@ pub unsafe extern "C" fn xv6_vm_printf_dump_pte_single(
         flags_no_v, sv, su, sw, sx, sr, src,
         va as *const c_void, pa as *const c_void,
     );
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_printf_dump_pte_range(
+pub extern "C" fn xv6_vm_printf_dump_pte_range(
     indent: c_int, start_idx: c_int, end_idx: c_int,
     flags_no_v: u64,
     sv: *const c_char, su: *const c_char, sw: *const c_char,
     sx: *const c_char, sr: *const c_char, src: *const c_char,
     va_start: u64, va_end: u64, pa_start: u64, pa_end: u64,
     count: c_int,
-) {
+) { u! {
     printf(
         b"%*sPTE[%d-%d]: %lx(%s%s%s%s%s%s), (va, pa): (%p-%p, %p-%p) [%d pages]\n\0"
             .as_ptr() as *const c_char,
@@ -296,16 +303,16 @@ pub unsafe extern "C" fn xv6_vm_printf_dump_pte_range(
         pa_start as *const c_void, pa_end as *const c_void,
         count,
     );
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_printf_dump_pte_inner(
+pub extern "C" fn xv6_vm_printf_dump_pte_inner(
     indent: c_int, idx: c_int, pte_ptr: *mut c_void,
     flags: u32,
     sv: *const c_char, su: *const c_char, sw: *const c_char,
     sx: *const c_char, sr: *const c_char, src: *const c_char,
     va: u64, pa: *mut c_void,
-) {
+) { u! {
     printf(
         b"%*sPTE[%d](%p): %x(%s%s%s%s%s%s), (va, pa): (%p, %p)\0".as_ptr() as *const c_char,
         indent, b"\0".as_ptr() as *const c_char,
@@ -313,67 +320,67 @@ pub unsafe extern "C" fn xv6_vm_printf_dump_pte_inner(
         flags, sv, su, sw, sx, sr, src,
         va as *const c_void, pa,
     );
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_printf_newline() {
+pub extern "C" fn xv6_vm_printf_newline() { u! {
     printf(b"\n\0".as_ptr() as *const c_char);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_printf_colon_newline() {
+pub extern "C" fn xv6_vm_printf_colon_newline() { u! {
     printf(b":\n\0".as_ptr() as *const c_char);
-}
+}}
 
 // =====================================================================
 // Constants
 // =====================================================================
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_kernbase() -> u64 { __physical_memory_start }
+pub extern "C" fn xv6_vm_kernbase()-> u64  { u! { __physical_memory_start }}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_physstop() -> u64 { __physical_memory_end }
+pub extern "C" fn xv6_vm_physstop()-> u64  { u! { __physical_memory_end }}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_maxva() -> u64 { MAXVA }
+pub extern "C" fn xv6_vm_maxva()-> u64  { u! { MAXVA }}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_einval() -> c_int { EINVAL as c_int }
+pub extern "C" fn xv6_vm_einval()-> c_int  { u! { EINVAL as c_int }}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_erange() -> c_int { ERANGE as c_int }
+pub extern "C" fn xv6_vm_erange()-> c_int  { u! { ERANGE as c_int }}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_enomem() -> c_int { ENOMEM as c_int }
+pub extern "C" fn xv6_vm_enomem()-> c_int  { u! { ENOMEM as c_int }}
 
 // =====================================================================
 // Page helpers
 // =====================================================================
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_page_type_pgtable() -> c_int { PAGE_TYPE_PGTABLE }
+pub extern "C" fn xv6_vm_page_type_pgtable()-> c_int  { u! { PAGE_TYPE_PGTABLE }}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_page_is_pgtable(p: *mut c_void) -> c_int {
+pub extern "C" fn xv6_vm_page_is_pgtable(p: *mut c_void)-> c_int  { u! {
     if p.is_null() { return 0; }
     let page = p as *const page_struct;
     let flags = (*page).__bindgen_anon_1.flags;
     if (flags & PAGE_FLAG_TYPE_MASK) as c_int == PAGE_TYPE_PGTABLE { 1 } else { 0 }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_page_lock_acquire(p: *mut c_void) {
+pub extern "C" fn xv6_vm_page_lock_acquire(p: *mut c_void) { u! {
     page_lock_acquire(p);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn xv6_vm_page_lock_release(p: *mut c_void) {
+pub extern "C" fn xv6_vm_page_lock_release(p: *mut c_void) { u! {
     page_lock_release(p);
-}
+}}
 
 // =====================================================================
 // kvmmap_safe + kvmmake (Rust port of the C originals)
 // =====================================================================
-fn kvmmap_safe(kpgtbl: *mut u64, va: u64, pa: u64, sz: u64, perm: c_int) { unsafe {
+fn kvmmap_safe(kpgtbl: *mut u64, va: u64, pa: u64, sz: u64, perm: c_int) { u! {
     let mut off: u64 = 0;
     while off < sz {
         let pte = walk(kpgtbl, va + off, 0, core::ptr::null_mut(), core::ptr::null_mut());
@@ -387,7 +394,7 @@ fn kvmmap_safe(kpgtbl: *mut u64, va: u64, pa: u64, sz: u64, perm: c_int) { unsaf
 } }
 
 #[no_mangle]
-pub unsafe extern "C" fn kvmmake() -> *mut u64 {
+pub extern "C" fn kvmmake()-> *mut u64  { u! {
     let kpgtbl = &raw const _data_ktlb as *mut u64;
 
     memset(kpgtbl as *mut c_void, 0, PGSIZE as usize);
@@ -575,7 +582,7 @@ pub unsafe extern "C" fn kvmmake() -> *mut u64 {
     }
 
     kpgtbl
-}
+}}
 
 // Silence dead-code lints on the unused mask constant when not referenced.
 #[allow(dead_code)]

@@ -2,6 +2,13 @@
 
 #![allow(non_camel_case_types, non_snake_case)]
 
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
+
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr::{addr_of_mut, null_mut};
 use core::sync::atomic::{AtomicI32, Ordering};
@@ -42,24 +49,24 @@ unsafe extern "C" {
 #[inline(always)]
 fn lk_ptr(m: *mut mutex_t) -> *mut spinlock_t {
     // SAFETY: structurally valid mutex.
-    unsafe { addr_of_mut!((*m).lk) }
+    u! { addr_of_mut!((*m).lk) }
 }
 #[inline(always)]
 fn wq_ptr(m: *mut mutex_t) -> *mut tq_t {
     // SAFETY: see `lk_ptr`.
-    unsafe { addr_of_mut!((*m).wait_queue) }
+    u! { addr_of_mut!((*m).wait_queue) }
 }
 #[inline(always)]
 fn holder_atomic<'a>(m: *mut mutex_t) -> &'a AtomicI32 {
     // SAFETY: `holder` is a 4-byte aligned `pid_t` (`c_int`). We model
     // it as `AtomicI32` to perform `smp_store_release` / `_load_acquire`
     // / `atomic_cas` matching the C macros.
-    unsafe { &*(addr_of_mut!((*m).holder) as *const AtomicI32) }
+    u! { &*(addr_of_mut!((*m).holder) as *const AtomicI32) }
 }
 #[inline(always)]
 fn set_name(m: *mut mutex_t, name: *mut c_char) {
     // SAFETY: caller has exclusive access at init time.
-    unsafe { (*m).name = name; }
+    u! { (*m).name = name; }
 }
 /// Mirror `__mutex_set_holder` (smp_store_release).
 #[inline(always)]
@@ -99,7 +106,7 @@ fn do_wakeup(m: *mut mutex_t) {
 // ---------------------------------------------------------------------------
 // Timed-wait context — every field access is encapsulated in a safe
 // method on `MutexTimedCtx`. Each callback contains exactly **one**
-// `unsafe { ... }` block (the reborrow from the C-supplied `*mut
+// `u! { ... }` block (the reborrow from the C-supplied `*mut
 // c_void` to `&mut MutexTimedCtx`); the rest of the callback body is
 // plain safe Rust.
 // ---------------------------------------------------------------------------
@@ -121,7 +128,7 @@ impl MutexTimedCtx {
     /// the sleep/wake callback pair.
     #[inline(always)]
     unsafe fn from_raw<'a>(data: *mut c_void) -> Option<&'a mut Self> {
-        if data.is_null() { None } else { Some(unsafe { &mut *(data as *mut Self) }) }
+        if data.is_null() { None } else { Some(u! { &mut *(data as *mut Self) }) }
     }
     #[inline(always)] fn lock_ptr(&self) -> *mut mutex_t { self.lock }
     #[inline(always)] fn timer_node_ptr(&mut self) -> *mut timer_node {
@@ -132,9 +139,9 @@ impl MutexTimedCtx {
     #[inline(always)] fn set_armed(&mut self, v: bool) { self.timer_armed = v; }
 }
 
-unsafe extern "C" fn mutex_timed_sleep_cb(data: *mut c_void) -> c_int {
+extern "C" fn mutex_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
     // SAFETY: see `MutexTimedCtx::from_raw`.
-    let ctx = match unsafe { MutexTimedCtx::from_raw(data) } {
+    let ctx = match u! { MutexTimedCtx::from_raw(data) } {
         Some(c) => c,
         None => return 0,
     };
@@ -152,11 +159,11 @@ unsafe extern "C" fn mutex_timed_sleep_cb(data: *mut c_void) -> c_int {
     let status = spin_holding(lk_ptr(m));
     if status != 0 { spin_unlock(lk_ptr(m)); }
     status
-}
+}}
 
-unsafe extern "C" fn mutex_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) {
+extern "C" fn mutex_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! {
     // SAFETY: see `MutexTimedCtx::from_raw`.
-    let ctx = match unsafe { MutexTimedCtx::from_raw(data) } {
+    let ctx = match u! { MutexTimedCtx::from_raw(data) } {
         Some(c) => c,
         None => return,
     };
@@ -168,24 +175,24 @@ unsafe extern "C" fn mutex_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_i
         ctx.set_armed(false);
     }
     if sleep_cb_status != 0 { spin_lock(lk_ptr(m)); }
-}
+}}
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn mutex_init(m: *mut mutex_t, name: *mut c_char) {
+pub extern "C" fn mutex_init(m: *mut mutex_t, name: *mut c_char) { u! {
     spin_init(lk_ptr(m), b"sleep lock\0".as_ptr() as *const c_char);
     tq_init(wq_ptr(m),
             b"sleep lock wait queue\0".as_ptr() as *const c_char,
             lk_ptr(m));
     set_name(m, name);
     set_holder(m, -1);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn mutex_lock(m: *mut mutex_t) {
+pub extern "C" fn mutex_lock(m: *mut mutex_t) { u! {
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
 
@@ -198,32 +205,32 @@ pub unsafe extern "C" fn mutex_lock(m: *mut mutex_t) {
         machine::thread_state_set(cur, thread_state_THREAD_UNINTERRUPTIBLE);
         let _ = tq_wait(wq_ptr(m), lk_ptr(m), null_mut());
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn mutex_unlock(m: *mut mutex_t) {
+pub extern "C" fn mutex_unlock(m: *mut mutex_t) { u! {
     let _g = KSpinlock::from_bindings(lk_ptr(m)).lock();
     do_wakeup(m);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn holding_mutex(m: *mut mutex_t) -> c_int {
+pub extern "C" fn holding_mutex(m: *mut mutex_t)-> c_int  { u! {
     let cur = machine::current_thread_ptr();
     if cur.is_null() { return 0; }
     // SeqCst load to match `__atomic_load_n(..., SEQ_CST)` in C.
     let h = holder_atomic(m).load(Ordering::SeqCst);
     if h == machine::thread_pid(cur) { 1 } else { 0 }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn mutex_trylock(m: *mut mutex_t) -> c_int {
+pub extern "C" fn mutex_trylock(m: *mut mutex_t)-> c_int  { u! {
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
     if try_set_holder(m, pid) { 1 } else { 0 }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn mutex_lock_interruptible(m: *mut mutex_t) -> c_int {
+pub extern "C" fn mutex_lock_interruptible(m: *mut mutex_t)-> c_int  { u! {
     if m.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -242,10 +249,10 @@ pub unsafe extern "C" fn mutex_lock_interruptible(m: *mut mutex_t) -> c_int {
         }
     }
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c_int {
+pub extern "C" fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64)-> c_int  { u! {
     if m.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -271,7 +278,7 @@ pub unsafe extern "C" fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c
         let mut ctx = MutexTimedCtx {
             lock: m,
             // SAFETY: zero-init of `timer_node` mirrors C `.timer = {0}`.
-            timer: unsafe { core::mem::zeroed() },
+            timer: u! { core::mem::zeroed() },
             timeout_ms: remaining_ms,
             timer_armed: false,
         };
@@ -288,7 +295,7 @@ pub unsafe extern "C" fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c
         }
     }
     0
-}
+}}
 
 // ===========================================================================
 // Rust-native typed handle
@@ -332,21 +339,21 @@ impl KMutex {
     #[inline]
     pub fn init(self, name: *mut c_char) {
         // SAFETY: handle wraps live storage.
-        unsafe { mutex_init(self.raw, name); }
+        u! { mutex_init(self.raw, name); }
     }
 
     /// `true` iff the current thread holds this mutex.
     #[inline]
     pub fn holding(self) -> bool {
         // SAFETY: see `init`.
-        unsafe { holding_mutex(self.raw) != 0 }
+        u! { holding_mutex(self.raw) != 0 }
     }
 
     /// Acquire (uninterruptible). Returns RAII guard.
     #[inline]
     pub fn lock(self) -> KMutexGuard {
         // SAFETY: see `init`.
-        unsafe { mutex_lock(self.raw); }
+        u! { mutex_lock(self.raw); }
         KMutexGuard { raw: self.raw, _ns: PhantomData }
     }
 
@@ -354,7 +361,7 @@ impl KMutex {
     #[inline]
     pub fn try_lock(self) -> Option<KMutexGuard> {
         // SAFETY: see `init`. Returns 1 on success.
-        let got = unsafe { mutex_trylock(self.raw) };
+        let got = u! { mutex_trylock(self.raw) };
         if got != 0 {
             Some(KMutexGuard { raw: self.raw, _ns: PhantomData })
         } else {
@@ -366,7 +373,7 @@ impl KMutex {
     #[inline]
     pub fn lock_interruptible(self) -> Result<KMutexGuard, MutexError> {
         // SAFETY: see `init`.
-        let r = unsafe { mutex_lock_interruptible(self.raw) };
+        let r = u! { mutex_lock_interruptible(self.raw) };
         if r == 0 {
             Ok(KMutexGuard { raw: self.raw, _ns: PhantomData })
         } else {
@@ -378,7 +385,7 @@ impl KMutex {
     #[inline]
     pub fn lock_timed(self, timeout_ms: u64) -> Result<KMutexGuard, MutexError> {
         // SAFETY: see `init`.
-        let r = unsafe { mutex_lock_timed(self.raw, timeout_ms) };
+        let r = u! { mutex_lock_timed(self.raw, timeout_ms) };
         if r == 0 {
             Ok(KMutexGuard { raw: self.raw, _ns: PhantomData })
         } else {
@@ -405,6 +412,6 @@ impl Drop for KMutexGuard {
     #[inline(always)]
     fn drop(&mut self) {
         // SAFETY: guard was constructed only after a successful acquire.
-        unsafe { mutex_unlock(self.raw); }
+        u! { mutex_unlock(self.raw); }
     }
 }

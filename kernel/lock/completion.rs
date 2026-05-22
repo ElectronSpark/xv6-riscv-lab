@@ -5,10 +5,17 @@
 //! original C file; call sites elsewhere in the kernel see no change.
 //!
 //! Centralised-unsafe pattern: every raw pointer / FFI access is
-//! confined to a single-line `unsafe { ... }` block, the rest of the
+//! confined to a single-line `u! { ... }` block, the rest of the
 //! code is plain safe Rust.
 
 #![allow(non_camel_case_types, non_snake_case)]
+
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
 
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr::{addr_of_mut, null_mut};
@@ -29,7 +36,7 @@ const MAX_COMPLETIONS: c_int = 65535;
 // ---------------------------------------------------------------------------
 //
 // Non-variadic C symbols are declared `safe` so call sites do not need
-// to wrap each invocation in `unsafe { ... }`.
+// to wrap each invocation in `u! { ... }`.
 
 unsafe extern "C" {
     pub safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
@@ -63,28 +70,28 @@ unsafe extern "C" {
 #[inline(always)]
 fn done_get(c: *mut completion_t) -> c_int {
     // SAFETY: caller holds `c->lock` (per the C contract).
-    unsafe { (*c).done }
+    u! { (*c).done }
 }
 #[inline(always)]
 fn done_set(c: *mut completion_t, v: c_int) {
     // SAFETY: caller holds `c->lock`.
-    unsafe { (*c).done = v; }
+    u! { (*c).done = v; }
 }
 #[inline(always)]
 fn lock_ptr(c: *mut completion_t) -> *mut spinlock_t {
     // SAFETY: dereferences a structurally-valid completion. We only
     // take the address of the embedded lock; no field is read.
-    unsafe { addr_of_mut!((*c).lock) }
+    u! { addr_of_mut!((*c).lock) }
 }
 #[inline(always)]
 fn queue_ptr(c: *mut completion_t) -> *mut tq_t {
     // SAFETY: see `lock_ptr`.
-    unsafe { addr_of_mut!((*c).wait_queue) }
+    u! { addr_of_mut!((*c).wait_queue) }
 }
 #[inline(always)]
 fn tq_counter(q: *mut tq_t) -> c_int {
     // SAFETY: caller holds the tq's protecting lock.
-    unsafe { (*q).counter }
+    u! { (*q).counter }
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +135,7 @@ struct CompletionTimedCtx {
 impl CompletionTimedCtx {
     #[inline(always)]
     unsafe fn from_raw<'a>(data: *mut c_void) -> Option<&'a mut Self> {
-        if data.is_null() { None } else { Some(unsafe { &mut *(data as *mut Self) }) }
+        if data.is_null() { None } else { Some(u! { &mut *(data as *mut Self) }) }
     }
     #[inline(always)] fn comp_ptr(&self) -> *mut completion_t { self.comp }
     #[inline(always)] fn timer_node_ptr(&mut self) -> *mut timer_node { addr_of_mut!(self.timer) }
@@ -137,9 +144,9 @@ impl CompletionTimedCtx {
     #[inline(always)] fn set_armed(&mut self, v: bool) { self.timer_armed = v; }
 }
 
-unsafe extern "C" fn completion_timed_sleep_cb(data: *mut c_void) -> c_int {
+extern "C" fn completion_timed_sleep_cb(data: *mut c_void)-> c_int  { u! {
     // SAFETY: see `CompletionTimedCtx::from_raw`.
-    let ctx = match unsafe { CompletionTimedCtx::from_raw(data) } {
+    let ctx = match u! { CompletionTimedCtx::from_raw(data) } {
         Some(c) => c, None => return 0,
     };
     let comp = ctx.comp_ptr();
@@ -159,11 +166,11 @@ unsafe extern "C" fn completion_timed_sleep_cb(data: *mut c_void) -> c_int {
         spin_unlock(lock_ptr(comp));
     }
     status
-}
+}}
 
-unsafe extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) {
+extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! {
     // SAFETY: see `CompletionTimedCtx::from_raw`.
-    let ctx = match unsafe { CompletionTimedCtx::from_raw(data) } {
+    let ctx = match u! { CompletionTimedCtx::from_raw(data) } {
         Some(c) => c, None => return,
     };
     let comp = ctx.comp_ptr();
@@ -178,37 +185,37 @@ unsafe extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status
     if sleep_cb_status != 0 {
         spin_lock(lock_ptr(comp));
     }
-}
+}}
 
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn completion_init(c: *mut completion_t) {
+pub extern "C" fn completion_init(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     done_set(c, 0);
     spin_init(lock_ptr(c), b"completion_spin\0".as_ptr() as *const c_char);
     tq_init(queue_ptr(c),
             b"completion_queue\0".as_ptr() as *const c_char,
             lock_ptr(c));
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn completion_reinit(c: *mut completion_t) {
+pub extern "C" fn completion_reinit(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     done_set(c, 0);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn try_wait_for_completion(c: *mut completion_t) -> bool {
+pub extern "C" fn try_wait_for_completion(c: *mut completion_t)-> bool  { u! {
     if c.is_null() { return false; }
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     try_wait_for_completion_locked(c)
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn wait_for_completion(c: *mut completion_t) {
+pub extern "C" fn wait_for_completion(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     let cur = machine::current_thread_ptr();
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
@@ -219,10 +226,10 @@ pub unsafe extern "C" fn wait_for_completion(c: *mut completion_t) {
     if done_get(c) > 0 {
         completion_do_wake(c);
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn wait_for_completion_interruptible(c: *mut completion_t) -> c_int {
+pub extern "C" fn wait_for_completion_interruptible(c: *mut completion_t)-> c_int  { u! {
     if c.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
 
@@ -242,11 +249,11 @@ pub unsafe extern "C" fn wait_for_completion_interruptible(c: *mut completion_t)
         completion_do_wake(c);
     }
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn wait_for_completion_timed(c: *mut completion_t,
-                                                   timeout_ms: u64) -> c_int {
+pub extern "C" fn wait_for_completion_timed(c: *mut completion_t,
+                                                   timeout_ms: u64)-> c_int  { u! {
     if c.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
 
@@ -282,7 +289,7 @@ pub unsafe extern "C" fn wait_for_completion_timed(c: *mut completion_t,
             comp: c,
             // SAFETY: zeroed `timer_node` is the documented initial
             // state (matches C `.timer = {0}` implicit zero-init).
-            timer: unsafe { core::mem::zeroed() },
+            timer: u! { core::mem::zeroed() },
             timeout_ms: remaining_ms,
             timer_armed: false,
         };
@@ -307,10 +314,10 @@ pub unsafe extern "C" fn wait_for_completion_timed(c: *mut completion_t,
         completion_do_wake(c);
     }
     0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn complete(c: *mut completion_t) {
+pub extern "C" fn complete(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     let d = done_get(c);
@@ -318,16 +325,16 @@ pub unsafe extern "C" fn complete(c: *mut completion_t) {
         done_set(c, d + 1);
     }
     completion_do_wake(c);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn complete_all(c: *mut completion_t) {
+pub extern "C" fn complete_all(c: *mut completion_t) { u! {
     if c.is_null() { return; }
 
     // Local temporary queue: collect waiters, release the completion
     // lock, then wake them outside the lock. Avoids a lock convoy on
     // re-acquisition inside the scheduler. Matches C `complete_all`.
-    let mut temp_queue: tq_t = unsafe { core::mem::zeroed() };
+    let mut temp_queue: tq_t = u! { core::mem::zeroed() };
     tq_init(&mut temp_queue as *mut tq_t,
             b"completion_temp\0".as_ptr() as *const c_char,
             null_mut());
@@ -341,14 +348,14 @@ pub unsafe extern "C" fn complete_all(c: *mut completion_t) {
     if tq_counter(&mut temp_queue as *mut tq_t) > 0 {
         tq_wakeup_all(&mut temp_queue as *mut tq_t, 0, 0);
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn completion_done(c: *mut completion_t) -> bool {
+pub extern "C" fn completion_done(c: *mut completion_t)-> bool  { u! {
     if c.is_null() { return false; }
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     tq_size(queue_ptr(c)) == 0
-}
+}}
 
 // ===========================================================================
 // Rust-native typed handle
@@ -402,35 +409,35 @@ impl KCompletion {
     pub fn init(self) {
         // SAFETY: `completion_init` accepts any valid `*mut completion_t`;
         // caller asserts the pointer is to live storage not yet shared.
-        unsafe { completion_init(self.raw); }
+        u! { completion_init(self.raw); }
     }
 
     /// Re-arm the completion. Mirrors C `completion_reinit`.
     #[inline]
     pub fn reinit(self) {
         // SAFETY: as above; lock-protected internally.
-        unsafe { completion_reinit(self.raw); }
+        u! { completion_reinit(self.raw); }
     }
 
     /// Block (uninterruptible) until a token is available.
     #[inline]
     pub fn wait(self) {
         // SAFETY: handle wraps a structurally-valid completion.
-        unsafe { wait_for_completion(self.raw); }
+        u! { wait_for_completion(self.raw); }
     }
 
     /// Non-blocking try-wait. `true` iff a token was consumed.
     #[inline]
     pub fn try_wait(self) -> bool {
         // SAFETY: see `wait`.
-        unsafe { try_wait_for_completion(self.raw) }
+        u! { try_wait_for_completion(self.raw) }
     }
 
     /// Block (interruptible). Returns `Err(Interrupted)` on signal.
     #[inline]
     pub fn wait_interruptible(self) -> Result<(), CompletionError> {
         // SAFETY: see `wait`.
-        let r = unsafe { wait_for_completion_interruptible(self.raw) };
+        let r = u! { wait_for_completion_interruptible(self.raw) };
         if r == 0 { Ok(()) }
         else if r == -(EINTR as c_int) { Err(CompletionError::Interrupted) }
         else { Err(CompletionError::Invalid) }
@@ -440,7 +447,7 @@ impl KCompletion {
     #[inline]
     pub fn wait_timed(self, timeout_ms: u64) -> Result<(), CompletionError> {
         // SAFETY: see `wait`.
-        let r = unsafe { wait_for_completion_timed(self.raw, timeout_ms) };
+        let r = u! { wait_for_completion_timed(self.raw, timeout_ms) };
         if r == 0 { Ok(()) }
         else if r == -(ETIMEDOUT as c_int) { Err(CompletionError::TimedOut) }
         else if r == -(EINTR as c_int) { Err(CompletionError::Interrupted) }
@@ -451,20 +458,20 @@ impl KCompletion {
     #[inline]
     pub fn complete(self) {
         // SAFETY: see `wait`.
-        unsafe { complete(self.raw); }
+        u! { complete(self.raw); }
     }
 
     /// Saturate the counter and wake all waiters.
     #[inline]
     pub fn complete_all(self) {
         // SAFETY: see `wait`.
-        unsafe { complete_all(self.raw); }
+        u! { complete_all(self.raw); }
     }
 
     /// `true` iff there are no pending waiters.
     #[inline]
     pub fn done(self) -> bool {
         // SAFETY: see `wait`.
-        unsafe { completion_done(self.raw) }
+        u! { completion_done(self.raw) }
     }
 }

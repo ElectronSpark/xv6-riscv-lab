@@ -5,6 +5,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
     message(FATAL_ERROR "In-source builds are not allowed. Please create a 'build' directory and run 'cmake ..' from there.")
 endif()
 
+# Keep a symlink at the source root so clangd and other IDE tooling find the
+# up-to-date compile_commands.json without any extra configuration.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+execute_process(
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        ${CMAKE_BINARY_DIR}/compile_commands.json
+        ${CMAKE_SOURCE_DIR}/compile_commands.json
+)
+
 # ==============================================================================
 # Platform Configuration
 # ==============================================================================

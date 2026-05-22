@@ -21,6 +21,10 @@ compile_commands.json
 .cache
 kernel/lwip
 build
+# Rust cargo output — redirected to build/kernel/rust/ via .cargo/config.toml,
+# but listed here as a safety net for any direct cargo invocations that predate
+# that setting or use a different working directory.
+kernel/target/
 *.dSYM
 packets.pcap
 .gdbinit.tmpl-riscv

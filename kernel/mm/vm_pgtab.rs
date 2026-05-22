@@ -10,6 +10,13 @@
 //! construction from raw addresses, and the `#[no_mangle] extern "C"`
 //! entry points.
 
+
+macro_rules! u {
+    ($($tokens:tt)*) => {
+        unsafe { $($tokens)* }
+    };
+}
+
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr::NonNull;
 use crate::machine;
@@ -147,25 +154,25 @@ struct PageTable(NonNull<u64>);
 
 impl PageTable {
     /// SAFETY: `ptr` must point to a PGSIZE-aligned page of 512 u64 entries.
-    unsafe fn from_raw(ptr: *mut u64) -> Self {
+    fn from_raw(ptr: *mut u64)-> Self  { u! {
         Self(NonNull::new_unchecked(ptr))
-    }
+    }}
     fn from_pa(pa: u64) -> Self {
-        unsafe { Self::from_raw(pa as *mut u64) }
+        u! { Self::from_raw(pa as *mut u64) }
     }
     fn as_ptr(self) -> *mut u64 { self.0.as_ptr() }
 
     fn entry(self, idx: usize) -> Pte {
         debug_assert!(idx < 512);
-        Pte(unsafe { *self.0.as_ptr().add(idx) })
+        Pte(u! { *self.0.as_ptr().add(idx) })
     }
     fn set_entry(self, idx: usize, v: u64) {
         debug_assert!(idx < 512);
-        unsafe { *self.0.as_ptr().add(idx) = v };
+        u! { *self.0.as_ptr().add(idx) = v };
     }
     fn entry_ptr(self, idx: usize) -> *mut u64 {
         debug_assert!(idx < 512);
-        unsafe { self.0.as_ptr().add(idx) }
+        u! { self.0.as_ptr().add(idx) }
     }
     fn zero(self) {
         ffi::memset(self.0.as_ptr() as *mut c_void, 0, PGSIZE as usize);
@@ -181,7 +188,7 @@ fn pgtab_alloc() -> Option<PageTable> {
         return None;
     }
     ffi::memset(pa, 0, PGSIZE as usize);
-    Some(unsafe { PageTable::from_raw(pa as *mut u64) })
+    Some(u! { PageTable::from_raw(pa as *mut u64) })
 }
 
 fn pgtab_free(pt: PageTable) {
@@ -322,13 +329,13 @@ fn freewalk_internal(pt: PageTable, skip_idx: Option<usize>) {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub unsafe extern "C" fn walk(
+pub extern "C" fn walk(
     pagetable: *mut u64,
     va: u64,
     alloc: c_int,
     retl2: *mut *mut u64,
     retl1: *mut *mut u64,
-) -> *mut u64 {
+)-> *mut u64  { u! {
     if pagetable.is_null() {
         panic_vm(b"walk: pagetable is null\0");
     }
@@ -338,10 +345,10 @@ pub unsafe extern "C" fn walk(
     if !retl2.is_null() { *retl2 = l2; }
     if !retl1.is_null() { *retl1 = l1; }
     l0
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn walkaddr(pagetable: *mut u64, va: u64) -> u64 {
+pub extern "C" fn walkaddr(pagetable: *mut u64, va: u64)-> u64  { u! {
     if va >= ffi::xv6_vm_maxva() {
         return 0;
     }
@@ -351,44 +358,44 @@ pub unsafe extern "C" fn walkaddr(pagetable: *mut u64, va: u64) -> u64 {
     let pte = Pte(*pte_ptr);
     if !pte.valid() || !pte.user() { return 0; }
     pte.pa()
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn kvmmap(
+pub extern "C" fn kvmmap(
     kpgtbl: *mut u64,
     va: u64,
     pa: u64,
     sz: u64,
     perm: c_int,
-) {
+) { u! {
     if map_pages(PageTable::from_raw(kpgtbl), va, sz, pa, perm) != 0 {
         panic_vm(b"kvmmap\0");
     }
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn mappages(
+pub extern "C" fn mappages(
     pagetable: *mut u64,
     va: u64,
     size: u64,
     pa: u64,
     perm: c_int,
-) -> c_int {
+)-> c_int  { u! {
     map_pages(PageTable::from_raw(pagetable), va, size, pa, perm)
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn uvmunmap(
+pub extern "C" fn uvmunmap(
     pagetable: *mut u64,
     va: u64,
     npages: u64,
     do_free: c_int,
-) {
+) { u! {
     unmap_pages(PageTable::from_raw(pagetable), va, npages, do_free != 0);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn uvmcreate() -> *mut u64 {
+pub extern "C" fn uvmcreate()-> *mut u64  { u! {
     let Some(pt) = pgtab_alloc() else { return core::ptr::null_mut() };
     pt.zero();
 
@@ -397,42 +404,42 @@ pub unsafe extern "C" fn uvmcreate() -> *mut u64 {
     let idx = trampoline_pte_idx();
     pt.set_entry(idx, kpt.entry(idx).raw());
     pt.as_ptr()
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn freewalk(pagetable: *mut u64) {
+pub extern "C" fn freewalk(pagetable: *mut u64) { u! {
     freewalk_internal(PageTable::from_raw(pagetable), Some(trampoline_pte_idx()));
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn uvmfree(pagetable: *mut u64, _sz: u64) {
+pub extern "C" fn uvmfree(pagetable: *mut u64, _sz: u64) { u! {
     freewalk(pagetable);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn kvminit() {
+pub extern "C" fn kvminit() { u! {
     ffi::xv6_vm_vma_pool_init();
     ffi::xv6_vm_vm_pool_init();
     let kpt = ffi::kvmmake();
     ffi::xv6_vm_kernel_pagetable_set(kpt);
     ffi::xv6_vm_set_trampoline_ksatp(ffi::xv6_vm_make_satp(kpt));
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn kvminithart() {
+pub extern "C" fn kvminithart() { u! {
     ffi::xv6_vm_sfence_vma();
     let satp = ffi::xv6_vm_get_trampoline_ksatp();
     ffi::xv6_vm_w_satp(satp);
     ffi::xv6_vm_sfence_vma();
     ffi::xv6_vm_printf_kvminithart(ffi::xv6_vm_cpuid() as u64, satp);
-}
+}}
 
 #[no_mangle]
-pub unsafe extern "C" fn vm_dump_flags(
+pub extern "C" fn vm_dump_flags(
     flags: u64,
     buf: *mut c_char,
     buf_size: usize,
-) -> c_int {
+)-> c_int  { u! {
     if buf.is_null() { return -ffi::xv6_vm_einval(); }
     if buf_size < 5 { return -ffi::xv6_vm_erange(); }
 
@@ -443,7 +450,7 @@ pub unsafe extern "C" fn vm_dump_flags(
     slice[3] = if flags & VMA_FLAG_USER != 0 { b'U' } else { b' ' };
     slice[4] = 0;
     4
-}
+}}
 
 // ---------------------------------------------------------------------------
 // dump_pagetable
@@ -453,14 +460,14 @@ fn flag_str(flag_set: bool, letter: &'static [u8]) -> *const c_char {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dump_pagetable(
+pub extern "C" fn dump_pagetable(
     pagetable: *mut u64,
     level: c_int,
     indent: c_int,
     va_base: u64,
     va_end: u64,
     omit_pa: bool,
-) {
+) { u! {
     if !(0..=2).contains(&level) {
         ffi::xv6_vm_printf_invalid_level(level);
         return;
@@ -575,4 +582,4 @@ pub unsafe extern "C" fn dump_pagetable(
             }
         }
     }
-}
+}}

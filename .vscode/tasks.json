@@ -18,6 +18,14 @@
             }
         },
         {
+            "label": "run cargo geiger",
+            "type": "shell",
+            "command": "cargo geiger --target=riscv64gc-unknown-none-elf",
+            "options": {
+                "cwd": "${workspaceFolder}/kernel"
+            }
+        },
+        {
             "label": "compile xv6 and run in debug mode",
             "type": "shell",
             "command": "make",

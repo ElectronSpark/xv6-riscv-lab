@@ -58,6 +58,9 @@ pub mod bindings {
 #[path = "machine/machine.rs"]
 mod machine;
 
+#[path = "list.rs"]
+pub mod list;
+
 #[path = "sync/sync.rs"]
 mod sync;
 
@@ -67,8 +70,12 @@ mod lock;
 #[path = "mm/mod.rs"]
 mod mm;
 
+#[path = "proc/mod.rs"]
+mod proc;
+
 // Re-export so the symbols end up in the staticlib's exported symbol table.
 pub use mm::*;
+pub use proc::*;
 pub use lock::spinlock::*;
 pub use lock::completion::*;
 pub use lock::semaphore::*;
