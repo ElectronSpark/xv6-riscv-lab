@@ -1169,6 +1169,39 @@ static void fb_gem_put(struct fb_gpu_gem_object *gem)
     fb_bo_release_pages(pages, npages);
 }
 
+static int fb_bo_apply_dmabuf_metadata_locked(
+    struct fb_gpu_bo_entry *bo, uint32 format, uint64 modifier,
+    uint32 plane_count, const uint32 offsets[4], const uint32 strides[4])
+{
+    struct fb_gpu_dmabuf_metadata *meta;
+
+    if (bo == NULL || bo->gem == NULL || format == 0)
+        return 0;
+    if (modifier != DRM_FORMAT_MOD_LINEAR || plane_count == 0 ||
+        plane_count > 4)
+        return -EINVAL;
+    if (format != DRM_FORMAT_XRGB8888 && format != DRM_FORMAT_ARGB8888 &&
+        format != DRM_FORMAT_NV12)
+        return -EINVAL;
+    if ((format == DRM_FORMAT_NV12 && plane_count != 2) ||
+        (format != DRM_FORMAT_NV12 && plane_count != 1))
+        return -EINVAL;
+    for (uint32 i = 0; i < plane_count; i++) {
+        if (strides[i] == 0)
+            return -EINVAL;
+        if (i == 0 && offsets[i] != 0)
+            return -EINVAL;
+    }
+
+    meta = &bo->gem->metadata;
+    meta->format = format;
+    meta->modifier = modifier;
+    meta->plane_count = plane_count;
+    memmove(meta->offsets, offsets, sizeof(meta->offsets));
+    memmove(meta->strides, strides, sizeof(meta->strides));
+    return 0;
+}
+
 static uint32 fb_ttm_mem_type_for_placement(uint32 placement)
 {
     if ((placement & FB_TTM_PL_VRAM) != 0)
@@ -3236,6 +3269,18 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
             vfs_fput(file);
             return -ENOENT;
         }
+        spin_lock(&fb_state.lock);
+        ret = fb_bo_apply_dmabuf_metadata_locked(bo, req.format,
+                                                 req.modifier,
+                                                 req.plane_count,
+                                                 req.offsets, req.strides);
+        spin_unlock(&fb_state.lock);
+        if (ret != 0) {
+            fb_bo_put(bo);
+            (void)fb_bo_destroy(handle);
+            vfs_fput(file);
+            return ret;
+        }
         ret = fb_bo_map_current(bo, &addr);
         if (ret != 0) {
             fb_bo_put(bo);
@@ -3250,6 +3295,17 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         req.handle = handle;
         req.size = bo->size;
         req.addr = addr;
+        if (bo->gem != NULL) {
+            req.format = bo->gem->metadata.format;
+            req.plane_count = bo->gem->metadata.plane_count;
+            req.modifier = bo->gem->metadata.modifier;
+            memmove(req.offsets, bo->gem->metadata.offsets,
+                    sizeof(req.offsets));
+            memmove(req.strides, bo->gem->metadata.strides,
+                    sizeof(req.strides));
+            req.implicit_fence = bo->gem->metadata.implicit_fence;
+            req.explicit_fence = bo->gem->metadata.explicit_fence;
+        }
         fb_bo_put(bo);
         vfs_fput(file);
 
@@ -3291,6 +3347,16 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         req.page_size = PGSIZE;
         req.reserved = 0;
         req.mmap_offset = GPU_DRM_MMAP_OFFSET(req.handle);
+        if (bo->gem != NULL) {
+            req.plane_count = bo->gem->metadata.plane_count;
+            req.metadata_flags = 0;
+            memmove(req.offsets, bo->gem->metadata.offsets,
+                    sizeof(req.offsets));
+            memmove(req.strides, bo->gem->metadata.strides,
+                    sizeof(req.strides));
+            req.implicit_fence = bo->gem->metadata.implicit_fence;
+            req.explicit_fence = bo->gem->metadata.explicit_fence;
+        }
         fb_bo_put(bo);
 
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)

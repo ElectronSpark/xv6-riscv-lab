@@ -131,6 +131,7 @@
 
 #define DRM_FORMAT_ARGB8888             0x34325241U
 #define DRM_FORMAT_XRGB8888             0x34325258U
+#define DRM_FORMAT_NV12                 0x3231564EU
 #define DRM_FORMAT_MOD_LINEAR           0ULL
 
 #define DRM_SYNCOBJ_CREATE_SIGNALED     (1 << 0)

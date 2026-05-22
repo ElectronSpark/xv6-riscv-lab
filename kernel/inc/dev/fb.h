@@ -140,6 +140,8 @@
 #define FB_GPU_DXG_PRESENT_F_WAIT_SYNC 0x1 /* wait for sync_object/fence_value */
 
 #define FB_GPU_BO_FORMAT_XRGB8888 0x34325258u /* DRM_FORMAT_XRGB8888 */
+#define FB_GPU_BO_FORMAT_ARGB8888 0x34325241u /* DRM_FORMAT_ARGB8888 */
+#define FB_GPU_BO_FORMAT_NV12     0x3231564eu /* DRM_FORMAT_NV12 */
 #define FB_GPU_BO_MOD_LINEAR      0ULL        /* DRM_FORMAT_MOD_LINEAR */
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
@@ -300,6 +302,13 @@ struct fb_gpu_bo_import_fd {
     uint32   handle;         /* returned caller-local imported BO handle */
     uint64   size;           /* returned mapping size */
     uint64   addr;           /* returned caller-local mapping */
+    uint32   format;         /* returned DRM fourcc */
+    uint32   plane_count;    /* returned dma-buf plane count */
+    uint64   modifier;       /* returned DRM format modifier */
+    uint32   offsets[4];     /* returned plane offsets */
+    uint32   strides[4];     /* returned plane strides */
+    uint64   implicit_fence; /* returned latest implicit fence */
+    uint64   explicit_fence; /* returned latest explicit fence */
 };
 
 struct fb_gpu_bo_info {
@@ -316,6 +325,12 @@ struct fb_gpu_bo_info {
     uint32   page_size;      /* backing page size */
     uint32   reserved;
     uint64   mmap_offset;    /* render-node mmap offset for this handle */
+    uint32   plane_count;    /* returned dma-buf plane count */
+    uint32   metadata_flags; /* reserved for metadata validity flags */
+    uint32   offsets[4];     /* returned plane offsets */
+    uint32   strides[4];     /* returned plane strides */
+    uint64   implicit_fence; /* returned latest implicit fence */
+    uint64   explicit_fence; /* returned latest explicit fence */
 };
 
 /*
