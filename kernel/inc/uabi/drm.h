@@ -115,6 +115,16 @@
     (DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_PAGE_FLIP_ASYNC | \
      DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_NONBLOCK | \
      DRM_MODE_ATOMIC_ALLOW_MODESET)
+#define DRM_MODE_PROP_PENDING           (1 << 0)
+#define DRM_MODE_PROP_RANGE             (1 << 1)
+#define DRM_MODE_PROP_IMMUTABLE         (1 << 2)
+#define DRM_MODE_PROP_ENUM              (1 << 3)
+#define DRM_MODE_PROP_BLOB              (1 << 4)
+#define DRM_MODE_PROP_BITMASK           (1 << 5)
+#define DRM_MODE_PROP_TYPE(n)           ((n) << 6)
+#define DRM_MODE_PROP_OBJECT            DRM_MODE_PROP_TYPE(1)
+#define DRM_MODE_PROP_SIGNED_RANGE      DRM_MODE_PROP_TYPE(2)
+#define DRM_MODE_PROP_ATOMIC            0x80000000U
 
 #define DRM_FORMAT_ARGB8888             0x34325241U
 #define DRM_FORMAT_XRGB8888             0x34325258U
@@ -337,6 +347,11 @@ struct drm_mode_get_property_compat {
     char name[32];
     uint32 count_values;
     uint32 count_enum_blobs;
+};
+
+struct drm_mode_property_enum_compat {
+    uint64 value;
+    char name[32];
 };
 
 struct drm_mode_get_blob_compat {

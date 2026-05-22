@@ -55,6 +55,9 @@
 #define GPU_DRM_ENCODER_ID                    2
 #define GPU_DRM_CONNECTOR_ID                  3
 #define GPU_DRM_PRIMARY_PLANE_ID              4
+#define GPU_DRM_MODE_BLOB_ID                  5
+#define GPU_DRM_PROP_CRTC_ID                  10
+#define GPU_DRM_PROP_MODE_ID                  11
 
 #define FB_TTM_PL_SYSTEM                      0x0001
 #define FB_TTM_PL_TT                          0x0002
@@ -4059,6 +4062,19 @@ static int gpu_drm_copyout_u32_array(uint64 ptr, uint32 capacity,
     return 0;
 }
 
+static int gpu_drm_copyout_u64_array(uint64 ptr, uint32 capacity,
+                                     const uint64 *values, uint32 count)
+{
+    uint32 n;
+
+    if (ptr == 0 || capacity == 0 || values == NULL || count == 0)
+        return 0;
+    n = capacity < count ? capacity : count;
+    if (either_copyout(1, ptr, (void *)values, (uint64)n * sizeof(uint64)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
 static int gpu_drm_copyout_mode_array(uint64 ptr, uint32 capacity,
                                       const struct drm_mode_modeinfo_compat *mode)
 {
@@ -4568,6 +4584,8 @@ static int gpu_drm_mode_getconnector(uint64 arg)
     struct drm_mode_get_connector_compat req;
     struct drm_mode_modeinfo_compat mode;
     uint32 encoder = GPU_DRM_ENCODER_ID;
+    uint32 props[2] = { GPU_DRM_PROP_CRTC_ID, GPU_DRM_PROP_MODE_ID };
+    uint64 prop_values[2] = { GPU_DRM_CRTC_ID, GPU_DRM_MODE_BLOB_ID };
     int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
@@ -4582,9 +4600,16 @@ static int gpu_drm_mode_getconnector(uint64 arg)
     ret = gpu_drm_copyout_mode_array(req.modes_ptr, req.count_modes, &mode);
     if (ret != 0)
         return ret;
+    ret = gpu_drm_copyout_u32_array(req.props_ptr, req.count_props, props, 2);
+    if (ret != 0)
+        return ret;
+    ret = gpu_drm_copyout_u64_array(req.prop_values_ptr, req.count_props,
+                                    prop_values, 2);
+    if (ret != 0)
+        return ret;
 
     req.count_modes = 1;
-    req.count_props = 0;
+    req.count_props = 2;
     req.count_encoders = 1;
     req.encoder_id = GPU_DRM_ENCODER_ID;
     req.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
@@ -4602,28 +4627,53 @@ static int gpu_drm_mode_getconnector(uint64 arg)
 static int gpu_drm_mode_getproperty(uint64 arg)
 {
     struct drm_mode_get_property_compat req;
+    const char *name;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
-    req.flags = 0;
+    switch (req.prop_id) {
+    case GPU_DRM_PROP_CRTC_ID:
+        req.flags = DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC;
+        name = "CRTC_ID";
+        break;
+    case GPU_DRM_PROP_MODE_ID:
+        req.flags = DRM_MODE_PROP_BLOB | DRM_MODE_PROP_ATOMIC;
+        name = "MODE_ID";
+        break;
+    default:
+        return -ENOENT;
+    }
+    memset(req.name, 0, sizeof(req.name));
+    memmove(req.name, name, strlen(name));
     req.count_values = 0;
     req.count_enum_blobs = 0;
-    memset(req.name, 0, sizeof(req.name));
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
-    return -EINVAL;
+    return 0;
 }
 
 static int gpu_drm_mode_getblob(uint64 arg)
 {
     struct drm_mode_get_blob_compat req;
+    struct drm_mode_modeinfo_compat mode;
+    uint32 capacity;
+    uint32 n;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
-    req.length = 0;
+    if (req.blob_id != GPU_DRM_MODE_BLOB_ID)
+        return -ENOENT;
+    gpu_drm_fill_mode(&mode);
+    capacity = req.length;
+    req.length = sizeof(mode);
+    if (req.data != 0 && capacity != 0) {
+        n = capacity < sizeof(mode) ? capacity : sizeof(mode);
+        if (either_copyout(1, req.data, &mode, n) < 0)
+            return -EFAULT;
+    }
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
-    return -EINVAL;
+    return 0;
 }
 
 static int gpu_drm_mode_getplaneresources(uint64 arg)
