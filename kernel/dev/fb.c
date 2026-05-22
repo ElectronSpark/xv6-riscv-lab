@@ -5880,6 +5880,13 @@ static int gpu_nouveau_pushbuf(struct fb_gpu_render_owner *owner, uint64 arg)
         return -EINVAL;
     if (req.channel != 0 || owner->nouveau_channel == 0)
         return -EINVAL;
+    if (req.nr_buffers == 0 && req.nr_relocs == 0 && req.nr_push == 0) {
+        req.vram_available = 0;
+        req.gart_available = 256ULL * 1024ULL * 1024ULL;
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
     return -EOPNOTSUPP;
 }
 
@@ -5899,11 +5906,17 @@ static int gpu_nouveau_bind_or_exec(struct fb_gpu_render_owner *owner,
             return -EFAULT;
         if (exec_req.channel != 0 || owner->nouveau_channel == 0)
             return -EINVAL;
+        if (exec_req.push_count == 0 && exec_req.wait_count == 0 &&
+            exec_req.sig_count == 0)
+            return 0;
     } else {
         if (either_copyin(&bind_req, 1, arg, sizeof(bind_req)) < 0)
             return -EFAULT;
         if (!owner->nouveau_vm_initialized)
             return -EINVAL;
+        if (bind_req.op_count == 0 && bind_req.wait_count == 0 &&
+            bind_req.sig_count == 0 && bind_req.flags == 0)
+            return 0;
     }
     return -EOPNOTSUPP;
 }
