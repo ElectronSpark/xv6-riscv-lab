@@ -461,6 +461,9 @@ struct fb_gpu_render_owner {
     uint32 capset_id;
     int nouveau_channel;
     int nouveau_vm_initialized;
+    int drm_event_pending;
+    uint64 drm_event_user_data;
+    uint64 drm_event_sequence;
 };
 
 static int fb_cmdline_enabled(const char *key)
@@ -4928,6 +4931,11 @@ static int gpu_drm_mode_page_flip(struct fb_gpu_render_owner *owner,
     if (ret == 0) {
         fb_state.current_kms_fb_id = req.fb_id;
         fb_state.stats.kms_page_flips++;
+        if ((req.flags & DRM_MODE_PAGE_FLIP_EVENT) != 0) {
+            owner->drm_event_pending = 1;
+            owner->drm_event_user_data = req.user_data;
+            owner->drm_event_sequence = fb_state.stats.kms_page_flips;
+        }
     }
     spin_unlock(&fb_state.lock);
     return ret;
@@ -6541,6 +6549,49 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     return ret;
 }
 
+static ssize_t gpu_fops_read(struct vfs_file *file, char *buf, size_t count,
+                             bool user)
+{
+    struct fb_gpu_render_owner *owner =
+        file ? (struct fb_gpu_render_owner *)file->private_data : NULL;
+    struct drm_event_vblank_compat ev;
+    uint64 ticks;
+
+    if (owner == NULL || buf == NULL)
+        return -EBADF;
+    if (count < sizeof(ev))
+        return -EINVAL;
+    if (!owner->drm_event_pending)
+        return -EAGAIN;
+
+    ticks = r_time();
+    memset(&ev, 0, sizeof(ev));
+    ev.base.type = DRM_EVENT_FLIP_COMPLETE;
+    ev.base.length = sizeof(ev);
+    ev.user_data = owner->drm_event_user_data;
+    ev.tv_sec = (uint32)(ticks / 10000000ULL);
+    ev.tv_usec = (uint32)((ticks % 10000000ULL) / 10ULL);
+    ev.sequence = (uint32)owner->drm_event_sequence;
+    ev.crtc_id = GPU_DRM_CRTC_ID;
+
+    owner->drm_event_pending = 0;
+    if (either_copyout(user ? 1 : 0, (uint64)buf, &ev, sizeof(ev)) < 0)
+        return -EFAULT;
+    return sizeof(ev);
+}
+
+static int gpu_fops_poll(struct vfs_file *file, short events)
+{
+    struct fb_gpu_render_owner *owner =
+        file ? (struct fb_gpu_render_owner *)file->private_data : NULL;
+
+    if (owner == NULL)
+        return POLLERR | POLLHUP;
+    if (owner->drm_event_pending)
+        return events & (POLLIN | POLLRDNORM | POLLRDBAND);
+    return 0;
+}
+
 static void *gpu_fops_fault(struct vfs_file *file, struct vma *vma, uint64 va)
 {
     struct fb_gpu_render_owner *owner =
@@ -6567,8 +6618,10 @@ static void *gpu_fops_fault(struct vfs_file *file, struct vma *vma, uint64 va)
 }
 
 static struct vfs_file_ops gpu_file_ops = {
+    .read    = gpu_fops_read,
     .release = gpu_fops_release,
     .ioctl   = gpu_fops_ioctl,
+    .poll    = gpu_fops_poll,
     .fault   = gpu_fops_fault,
 };
 

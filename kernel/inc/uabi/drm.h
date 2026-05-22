@@ -126,6 +126,9 @@
 #define DRM_MODE_PROP_SIGNED_RANGE      DRM_MODE_PROP_TYPE(2)
 #define DRM_MODE_PROP_ATOMIC            0x80000000U
 
+#define DRM_EVENT_VBLANK                0x01
+#define DRM_EVENT_FLIP_COMPLETE         0x02
+
 #define DRM_FORMAT_ARGB8888             0x34325241U
 #define DRM_FORMAT_XRGB8888             0x34325258U
 #define DRM_FORMAT_MOD_LINEAR           0ULL
@@ -413,6 +416,20 @@ struct drm_mode_crtc_page_flip_compat {
     uint32 flags;
     uint32 reserved;
     uint64 user_data;
+};
+
+struct drm_event_compat {
+    uint32 type;
+    uint32 length;
+};
+
+struct drm_event_vblank_compat {
+    struct drm_event_compat base;
+    uint64 user_data;
+    uint32 tv_sec;
+    uint32 tv_usec;
+    uint32 sequence;
+    uint32 crtc_id;
 };
 
 struct drm_mode_atomic_compat {
