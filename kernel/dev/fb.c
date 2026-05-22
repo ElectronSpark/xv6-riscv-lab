@@ -95,7 +95,11 @@ struct fb_gpu_bo_entry {
     uint32 ttm_mem_type;
     uint32 ttm_pin_count;
     uint32 ttm_reservation_seq;
+    uint32 ttm_tt_populated;
+    uint32 ttm_sg_nents;
     uint64 ttm_dma_addr_base;
+    uint64 ttm_lru_seq;
+    uint64 ttm_move_count;
     page_t **pages;
     struct fb_gpu_gem_object *gem;
 };
@@ -126,9 +130,22 @@ struct fb_gpu_gem_object {
     uint32 ttm_mem_type;
     uint32 ttm_pin_count;
     uint32 ttm_reservation_seq;
+    uint32 ttm_tt_populated;
+    uint32 ttm_sg_nents;
     uint64 ttm_dma_addr_base;
+    uint64 ttm_lru_seq;
+    uint64 ttm_move_count;
     struct fb_gpu_dmabuf_metadata metadata;
     page_t **pages;
+};
+
+struct fb_ttm_resource_manager {
+    uint32 mem_type;
+    uint64 limit;
+    uint64 used;
+    uint64 evictions;
+    uint64 moves;
+    uint64 lru_seq;
 };
 
 struct fb_gpu_kms_fb_entry {
@@ -256,8 +273,11 @@ static struct {
     uint32      next_dxg_present_source;
     uint64      next_bo_fence;
     uint64      next_render_owner_id;
+    uint64      ttm_lru_clock;
+    uint64      ttm_evictions;
     struct fb_gpu_bo_entry bos[FB_GPU_MAX_BOS];
     struct fb_gpu_gem_object gems[FB_GPU_MAX_BOS];
+    struct fb_ttm_resource_manager ttm_mgr[4];
     struct fb_gpu_kms_fb_entry kms_fbs[FB_GPU_MAX_KMS_FBS];
     struct fb_gpu_syncobj_entry syncobjs[FB_GPU_MAX_SYNCOBJS];
     struct fb_gpu_syncobj_state_entry syncobj_states[FB_GPU_MAX_SYNCOBJ_STATES];
@@ -515,6 +535,7 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
     case FB_GPU_BO_EXPORT_FD: return "FB_GPU_BO_EXPORT_FD";
     case FB_GPU_BO_IMPORT_FD: return "FB_GPU_BO_IMPORT_FD";
     case FB_GPU_BO_INFO: return "FB_GPU_BO_INFO";
+    case FB_GPU_TTM_VALIDATE: return "FB_GPU_TTM_VALIDATE";
     case FB_GPU_DXG_PRESENT_SOURCE_REGISTER: return "FB_GPU_DXG_PRESENT_SOURCE_REGISTER";
     case FB_GPU_DXG_PRESENT_SOURCE_COMMIT: return "FB_GPU_DXG_PRESENT_SOURCE_COMMIT";
     case FB_GPU_DXG_PRESENT_SOURCE_QUERY: return "FB_GPU_DXG_PRESENT_SOURCE_QUERY";
@@ -1097,7 +1118,11 @@ static void fb_gem_copy_to_bo_locked(struct fb_gpu_bo_entry *bo,
     bo->ttm_mem_type = gem->ttm_mem_type;
     bo->ttm_pin_count = gem->ttm_pin_count;
     bo->ttm_reservation_seq = gem->ttm_reservation_seq;
+    bo->ttm_tt_populated = gem->ttm_tt_populated;
+    bo->ttm_sg_nents = gem->ttm_sg_nents;
     bo->ttm_dma_addr_base = gem->ttm_dma_addr_base;
+    bo->ttm_lru_seq = gem->ttm_lru_seq;
+    bo->ttm_move_count = gem->ttm_move_count;
     bo->pages = gem->pages;
 }
 
@@ -1133,9 +1158,13 @@ fb_gem_alloc_locked(uint32 width, uint32 height, uint32 pitch, uint64 size,
     gem->ttm_placement = FB_TTM_PL_SYSTEM;
     gem->ttm_mem_type = FB_TTM_MEM_SYSTEM;
     gem->ttm_reservation_seq = 1;
+    gem->ttm_tt_populated = 0;
+    gem->ttm_sg_nents = npages;
     gem->ttm_dma_addr_base =
         pages != NULL && npages != 0 && pages[0] != NULL ?
             __page_to_pa(pages[0]) : 0;
+    gem->ttm_lru_seq = ++fb_state.ttm_lru_clock;
+    gem->ttm_move_count = 0;
     gem->metadata.format = FB_GPU_BO_FORMAT_XRGB8888;
     gem->metadata.modifier = FB_GPU_BO_MOD_LINEAR;
     gem->metadata.plane_count = 1;
@@ -1213,9 +1242,38 @@ static uint32 fb_ttm_mem_type_for_placement(uint32 placement)
     return FB_TTM_MEM_SYSTEM;
 }
 
+static struct fb_ttm_resource_manager *fb_ttm_manager_locked(uint32 mem_type)
+{
+    struct fb_ttm_resource_manager *mgr;
+
+    if (mem_type > FB_TTM_MEM_STOLEN)
+        mem_type = FB_TTM_MEM_SYSTEM;
+    mgr = &fb_state.ttm_mgr[mem_type];
+    if (mgr->limit == 0) {
+        mgr->mem_type = mem_type;
+        switch (mem_type) {
+        case FB_TTM_MEM_TT:
+            mgr->limit = 512ULL * 1024 * 1024;
+            break;
+        case FB_TTM_MEM_VRAM:
+            mgr->limit = 256ULL * 1024 * 1024;
+            break;
+        case FB_TTM_MEM_STOLEN:
+            mgr->limit = fb_state.fb_size != 0 ?
+                fb_state.fb_size : 64ULL * 1024 * 1024;
+            break;
+        default:
+            mgr->limit = (uint64)-1;
+            break;
+        }
+    }
+    return mgr;
+}
+
 static void fb_ttm_account_locked(uint32 mem_type, uint64 size, int add)
 {
     uint64 *counter;
+    struct fb_ttm_resource_manager *mgr = fb_ttm_manager_locked(mem_type);
 
     switch (mem_type) {
     case FB_TTM_MEM_TT:
@@ -1233,44 +1291,211 @@ static void fb_ttm_account_locked(uint32 mem_type, uint64 size, int add)
     }
     if (add) {
         *counter += size;
+        mgr->used += size;
     } else if (*counter >= size) {
         *counter -= size;
+        mgr->used = mgr->used >= size ? mgr->used - size : 0;
     } else {
         *counter = 0;
+        mgr->used = 0;
     }
+}
+
+static int fb_ttm_valid_placement(uint32 placement)
+{
+    return placement != 0 &&
+        (placement & ~(FB_TTM_PL_SYSTEM | FB_TTM_PL_TT |
+                       FB_TTM_PL_VRAM | FB_TTM_PL_STOLEN)) == 0;
+}
+
+static void fb_ttm_propagate_gem_locked(struct fb_gpu_bo_entry *bo)
+{
+    struct fb_gpu_gem_object *gem;
+
+    if (bo == NULL || bo->gem == NULL)
+        return;
+    gem = bo->gem;
+    gem->ttm_mem_type = bo->ttm_mem_type;
+    gem->ttm_placement = bo->ttm_placement;
+    gem->ttm_pin_count = bo->ttm_pin_count;
+    gem->ttm_reservation_seq = bo->ttm_reservation_seq;
+    gem->ttm_tt_populated = bo->ttm_tt_populated;
+    gem->ttm_sg_nents = bo->ttm_sg_nents;
+    gem->ttm_dma_addr_base = bo->ttm_dma_addr_base;
+    gem->ttm_lru_seq = bo->ttm_lru_seq;
+    gem->ttm_move_count = bo->ttm_move_count;
+
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        struct fb_gpu_bo_entry *peer = &fb_state.bos[i];
+
+        if (!peer->in_use || peer->gem != gem)
+            continue;
+        peer->ttm_mem_type = gem->ttm_mem_type;
+        peer->ttm_placement = gem->ttm_placement;
+        peer->ttm_pin_count = gem->ttm_pin_count;
+        peer->ttm_reservation_seq = gem->ttm_reservation_seq;
+        peer->ttm_tt_populated = gem->ttm_tt_populated;
+        peer->ttm_sg_nents = gem->ttm_sg_nents;
+        peer->ttm_dma_addr_base = gem->ttm_dma_addr_base;
+        peer->ttm_lru_seq = gem->ttm_lru_seq;
+        peer->ttm_move_count = gem->ttm_move_count;
+    }
+}
+
+static void fb_ttm_set_metadata_locked(struct fb_gpu_bo_entry *bo)
+{
+    if (bo == NULL)
+        return;
+    bo->ttm_tt_populated = bo->ttm_mem_type == FB_TTM_MEM_TT;
+    bo->ttm_sg_nents = bo->npages;
+    bo->ttm_dma_addr_base =
+        bo->pages != NULL && bo->pages[0] != NULL ?
+            __page_to_pa(bo->pages[0]) : 0;
+}
+
+static void fb_ttm_move_bo_locked(struct fb_gpu_bo_entry *bo,
+                                  uint32 placement, uint32 mem_type)
+{
+    struct fb_ttm_resource_manager *mgr;
+
+    if (bo == NULL)
+        return;
+    if (mem_type != bo->ttm_mem_type) {
+        if (bo->stats_accounted) {
+            fb_ttm_account_locked(bo->ttm_mem_type, bo->size, 0);
+            fb_ttm_account_locked(mem_type, bo->size, 1);
+        }
+        bo->ttm_mem_type = mem_type;
+        bo->ttm_move_count++;
+        mgr = fb_ttm_manager_locked(mem_type);
+        mgr->moves++;
+    }
+    bo->ttm_placement = placement;
+    bo->ttm_reservation_seq++;
+    bo->ttm_lru_seq = ++fb_state.ttm_lru_clock;
+    fb_ttm_set_metadata_locked(bo);
+    mgr = fb_ttm_manager_locked(bo->ttm_mem_type);
+    mgr->lru_seq = bo->ttm_lru_seq;
+    fb_ttm_propagate_gem_locked(bo);
+}
+
+static int fb_ttm_evict_one_locked(uint32 mem_type)
+{
+    struct fb_gpu_bo_entry *victim = NULL;
+    struct fb_ttm_resource_manager *mgr;
+
+    if (mem_type == FB_TTM_MEM_SYSTEM)
+        return 0;
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        struct fb_gpu_bo_entry *bo = &fb_state.bos[i];
+
+        if (!bo->in_use || bo->ttm_mem_type != mem_type ||
+            bo->ttm_pin_count != 0 || !bo->stats_accounted)
+            continue;
+        if (victim == NULL || bo->ttm_lru_seq < victim->ttm_lru_seq)
+            victim = bo;
+    }
+    if (victim == NULL) {
+        fb_state.stats.ttm_validate_failures++;
+        return -ENOENT;
+    }
+
+    fb_ttm_move_bo_locked(victim, FB_TTM_PL_SYSTEM, FB_TTM_MEM_SYSTEM);
+    mgr = fb_ttm_manager_locked(mem_type);
+    mgr->evictions++;
+    fb_state.ttm_evictions++;
+    return 0;
+}
+
+static int fb_ttm_make_room_locked(struct fb_gpu_bo_entry *bo, uint32 mem_type)
+{
+    struct fb_ttm_resource_manager *mgr = fb_ttm_manager_locked(mem_type);
+
+    if (bo == NULL || !bo->stats_accounted)
+        return 0;
+    if (mem_type == bo->ttm_mem_type || mgr->limit == (uint64)-1)
+        return 0;
+    for (int tries = 0; tries < FB_GPU_MAX_BOS &&
+         mgr->used + bo->size > mgr->limit; tries++) {
+        int ret = fb_ttm_evict_one_locked(mem_type);
+
+        if (ret != 0)
+            return ret;
+    }
+    if (mgr->used + bo->size > mgr->limit) {
+        fb_state.stats.ttm_validate_failures++;
+        return -ENOSPC;
+    }
+    return 0;
 }
 
 static int fb_ttm_validate_placement_locked(struct fb_gpu_bo_entry *bo,
                                             uint32 placement)
 {
     uint32 mem_type;
+    int ret;
 
-    if (bo == NULL || !bo->in_use ||
-        (placement & ~(FB_TTM_PL_SYSTEM | FB_TTM_PL_TT |
-                       FB_TTM_PL_VRAM | FB_TTM_PL_STOLEN)) != 0 ||
-        placement == 0) {
+    if (bo == NULL || !bo->in_use || !fb_ttm_valid_placement(placement)) {
         fb_state.stats.ttm_validate_failures++;
         return -EINVAL;
     }
-
     mem_type = fb_ttm_mem_type_for_placement(placement);
-    if (mem_type != bo->ttm_mem_type) {
-        fb_ttm_account_locked(bo->ttm_mem_type, bo->size, 0);
-        fb_ttm_account_locked(mem_type, bo->size, 1);
-        bo->ttm_mem_type = mem_type;
-    }
-    bo->ttm_placement = placement;
-    bo->ttm_reservation_seq++;
-    bo->ttm_dma_addr_base =
-        bo->pages != NULL && bo->pages[0] != NULL ?
-            __page_to_pa(bo->pages[0]) : 0;
-    if (bo->gem != NULL) {
-        bo->gem->ttm_mem_type = bo->ttm_mem_type;
-        bo->gem->ttm_placement = bo->ttm_placement;
-        bo->gem->ttm_reservation_seq = bo->ttm_reservation_seq;
-        bo->gem->ttm_dma_addr_base = bo->ttm_dma_addr_base;
-    }
+    ret = fb_ttm_make_room_locked(bo, mem_type);
+    if (ret != 0)
+        return ret;
+    fb_ttm_move_bo_locked(bo, placement, mem_type);
     return 0;
+}
+
+static int fb_ttm_pin_locked(struct fb_gpu_bo_entry *bo)
+{
+    if (bo == NULL || !bo->in_use)
+        return -EINVAL;
+    if (bo->ttm_pin_count == 0)
+        fb_state.stats.ttm_pinned_bytes += bo->size;
+    bo->ttm_pin_count++;
+    bo->ttm_reservation_seq++;
+    bo->ttm_lru_seq = ++fb_state.ttm_lru_clock;
+    fb_ttm_propagate_gem_locked(bo);
+    return 0;
+}
+
+static int fb_ttm_unpin_locked(struct fb_gpu_bo_entry *bo)
+{
+    if (bo == NULL || !bo->in_use || bo->ttm_pin_count == 0) {
+        fb_state.stats.ttm_validate_failures++;
+        return -EINVAL;
+    }
+    bo->ttm_pin_count--;
+    if (bo->ttm_pin_count == 0) {
+        if (fb_state.stats.ttm_pinned_bytes >= bo->size)
+            fb_state.stats.ttm_pinned_bytes -= bo->size;
+        else
+            fb_state.stats.ttm_pinned_bytes = 0;
+    }
+    bo->ttm_reservation_seq++;
+    bo->ttm_lru_seq = ++fb_state.ttm_lru_clock;
+    fb_ttm_propagate_gem_locked(bo);
+    return 0;
+}
+
+static void fb_ttm_fill_validate_locked(struct fb_gpu_ttm_validate *req,
+                                        const struct fb_gpu_bo_entry *bo)
+{
+    req->placement = bo->ttm_placement;
+    req->mem_type = bo->ttm_mem_type;
+    req->pin_count = bo->ttm_pin_count;
+    req->tt_populated = bo->ttm_tt_populated;
+    req->sg_nents = bo->ttm_sg_nents;
+    req->reserved = 0;
+    req->size = bo->size;
+    req->dma_addr_base = bo->ttm_dma_addr_base;
+    req->reservation_seq = bo->ttm_reservation_seq;
+    req->lru_seq = bo->ttm_lru_seq;
+    req->move_count = bo->ttm_move_count;
+    for (uint32 i = 0; i < 4; i++)
+        req->manager_bytes[i] = fb_ttm_manager_locked(i)->used;
+    req->evictions = fb_state.ttm_evictions;
 }
 
 static int fb_bo_set_ttm_placement(uint32 handle, uint64 owner_id,
@@ -3364,6 +3589,68 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         return 0;
     }
 
+    case FB_GPU_TTM_VALIDATE: {
+        struct fb_gpu_ttm_validate req;
+        struct fb_gpu_bo_entry *bo;
+        uint32 allowed = FB_GPU_TTM_F_SET_PLACEMENT |
+                         FB_GPU_TTM_F_PIN |
+                         FB_GPU_TTM_F_UNPIN |
+                         FB_GPU_TTM_F_FORCE_EVICT;
+        int ret = 0;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if ((req.flags & ~allowed) != 0 || req.handle == 0)
+            return -EINVAL;
+
+        spin_lock(&fb_state.lock);
+        bo = fb_bo_lookup_locked(req.handle);
+        if (bo == NULL) {
+            fb_state.stats.ttm_validate_failures++;
+            spin_unlock(&fb_state.lock);
+            return -ENOENT;
+        }
+        if (!fb_bo_owner_matches(bo, owner_id, owner_tgid)) {
+            fb_state.stats.ttm_validate_failures++;
+            spin_unlock(&fb_state.lock);
+            return -EPERM;
+        }
+        if ((req.flags & FB_GPU_TTM_F_FORCE_EVICT) != 0) {
+            uint32 evict_mem = req.placement != 0 ?
+                fb_ttm_mem_type_for_placement(req.placement) :
+                bo->ttm_mem_type;
+
+            if (req.placement != 0 && !fb_ttm_valid_placement(req.placement)) {
+                fb_state.stats.ttm_validate_failures++;
+                ret = -EINVAL;
+            } else {
+                ret = fb_ttm_evict_one_locked(evict_mem);
+            }
+        }
+        if (ret == 0 && (req.flags & FB_GPU_TTM_F_SET_PLACEMENT) != 0)
+            ret = fb_ttm_validate_placement_locked(bo, req.placement);
+        if (ret == 0 && (req.flags & FB_GPU_TTM_F_PIN) != 0)
+            ret = fb_ttm_pin_locked(bo);
+        if (ret == 0 && (req.flags & FB_GPU_TTM_F_UNPIN) != 0)
+            ret = fb_ttm_unpin_locked(bo);
+        if (ret == 0) {
+            bo = fb_bo_lookup_locked(req.handle);
+            if (bo == NULL)
+                ret = -ENOENT;
+            else
+                fb_ttm_fill_validate_locked(&req, bo);
+        }
+        if (ret != 0) {
+            spin_unlock(&fb_state.lock);
+            return ret;
+        }
+        spin_unlock(&fb_state.lock);
+
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
     case FB_GPU_DXG_PRESENT_SOURCE_REGISTER: {
         struct fb_gpu_dxg_present_source_register req;
         int ret;
@@ -4016,6 +4303,7 @@ static int gpu_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     case FB_GPU_BO_EXPORT_FD:
     case FB_GPU_BO_IMPORT_FD:
     case FB_GPU_BO_INFO:
+    case FB_GPU_TTM_VALIDATE:
     case FB_GPU_DXG_PRESENT_SOURCE_REGISTER:
     case FB_GPU_DXG_PRESENT_SOURCE_COMMIT:
     case FB_GPU_DXG_PRESENT_SOURCE_QUERY:
@@ -4859,15 +5147,7 @@ static void gpu_kms_unpin_bo_locked(uint32 handle, uint64 owner_id,
     if (bo == NULL || !fb_bo_owner_matches(bo, owner_id, owner_tgid) ||
         bo->ttm_pin_count == 0)
         return;
-    bo->ttm_pin_count--;
-    if (bo->gem != NULL && bo->gem->ttm_pin_count > 0)
-        bo->gem->ttm_pin_count--;
-    if (bo->ttm_pin_count == 0) {
-        if (fb_state.stats.ttm_pinned_bytes >= bo->size)
-            fb_state.stats.ttm_pinned_bytes -= bo->size;
-        else
-            fb_state.stats.ttm_pinned_bytes = 0;
-    }
+    (void)fb_ttm_unpin_locked(bo);
 }
 
 static void gpu_kms_destroy_owner_fbs(struct fb_gpu_render_owner *owner)
@@ -4954,11 +5234,8 @@ static int gpu_drm_mode_addfb2(struct fb_gpu_render_owner *owner, uint64 arg)
         fb->pixel_format = req.pixel_format;
         fb->modifier = (req.flags & DRM_MODE_FB_MODIFIERS) ?
             req.modifier[0] : DRM_FORMAT_MOD_LINEAR;
-        if (bo->ttm_pin_count == 0)
-            fb_state.stats.ttm_pinned_bytes += bo->size;
-        bo->ttm_pin_count++;
+        (void)fb_ttm_pin_locked(bo);
         if (bo->gem != NULL) {
-            bo->gem->ttm_pin_count = bo->ttm_pin_count;
             bo->gem->metadata.format = req.pixel_format;
             bo->gem->metadata.modifier =
                 (req.flags & DRM_MODE_FB_MODIFIERS) ?
@@ -6737,6 +7014,7 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case FB_GPU_BO_EXPORT_FD:
     case FB_GPU_BO_IMPORT_FD:
     case FB_GPU_BO_INFO:
+    case FB_GPU_TTM_VALIDATE:
     case FB_GPU_DXG_PRESENT_SOURCE_REGISTER:
     case FB_GPU_DXG_PRESENT_SOURCE_COMMIT:
     case FB_GPU_DXG_PRESENT_SOURCE_QUERY:

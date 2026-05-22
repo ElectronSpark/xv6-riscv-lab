@@ -50,6 +50,7 @@
 #define FB_GPU_DXG_PRESENT_SOURCE_REGISTER 0x462F /* declare opened DXG source */
 #define FB_GPU_DXG_PRESENT_SOURCE_COMMIT   0x4630 /* present registered DXG source */
 #define FB_GPU_DXG_PRESENT_SOURCE_QUERY    0x4631 /* query fail-closed DXG source */
+#define FB_GPU_TTM_VALIDATE  0x4632 /* test/validate TTM placement state */
 
 #define FB_GPU_DXG_DISPLAY_TARGET_NONE          0
 #define FB_GPU_DXG_PRESENT_MISSING_NONE         0
@@ -143,6 +144,16 @@
 #define FB_GPU_BO_FORMAT_ARGB8888 0x34325241u /* DRM_FORMAT_ARGB8888 */
 #define FB_GPU_BO_FORMAT_NV12     0x3231564eu /* DRM_FORMAT_NV12 */
 #define FB_GPU_BO_MOD_LINEAR      0ULL        /* DRM_FORMAT_MOD_LINEAR */
+
+#define FB_GPU_TTM_PL_SYSTEM 0x0001u
+#define FB_GPU_TTM_PL_TT     0x0002u
+#define FB_GPU_TTM_PL_VRAM   0x0004u
+#define FB_GPU_TTM_PL_STOLEN 0x0008u
+
+#define FB_GPU_TTM_F_SET_PLACEMENT 0x0001u
+#define FB_GPU_TTM_F_PIN           0x0002u
+#define FB_GPU_TTM_F_UNPIN         0x0004u
+#define FB_GPU_TTM_F_FORCE_EVICT   0x0008u
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -331,6 +342,24 @@ struct fb_gpu_bo_info {
     uint32   strides[4];     /* returned plane strides */
     uint64   implicit_fence; /* returned latest implicit fence */
     uint64   explicit_fence; /* returned latest explicit fence */
+};
+
+struct fb_gpu_ttm_validate {
+    uint32 handle;
+    uint32 flags;
+    uint32 placement;
+    uint32 mem_type;
+    uint32 pin_count;
+    uint32 tt_populated;
+    uint32 sg_nents;
+    uint32 reserved;
+    uint64 size;
+    uint64 dma_addr_base;
+    uint64 reservation_seq;
+    uint64 lru_seq;
+    uint64 move_count;
+    uint64 manager_bytes[4];
+    uint64 evictions;
 };
 
 /*
