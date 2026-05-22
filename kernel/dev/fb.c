@@ -80,6 +80,8 @@ struct fb_gpu_bo_entry {
     int dead;
     uint32 handle;
     uint32 refs;
+    uint32 gem_id;
+    int stats_accounted;
     uint64 owner_id;
     pid_t owner_tgid;
     uint32 width;
@@ -94,6 +96,38 @@ struct fb_gpu_bo_entry {
     uint32 ttm_pin_count;
     uint32 ttm_reservation_seq;
     uint64 ttm_dma_addr_base;
+    page_t **pages;
+    struct fb_gpu_gem_object *gem;
+};
+
+struct fb_gpu_dmabuf_metadata {
+    uint32 format;
+    uint64 modifier;
+    uint32 plane_count;
+    uint32 offsets[4];
+    uint32 strides[4];
+    uint64 implicit_fence;
+    uint64 explicit_fence;
+};
+
+struct fb_gpu_gem_object {
+    int in_use;
+    int dead;
+    uint32 id;
+    uint32 refs;
+    uint32 width;
+    uint32 height;
+    uint32 pitch;
+    uint32 npages;
+    uint64 size;
+    uint64 last_fence;
+    uint64 signaled_fence;
+    uint32 ttm_placement;
+    uint32 ttm_mem_type;
+    uint32 ttm_pin_count;
+    uint32 ttm_reservation_seq;
+    uint64 ttm_dma_addr_base;
+    struct fb_gpu_dmabuf_metadata metadata;
     page_t **pages;
 };
 
@@ -216,12 +250,14 @@ static struct {
     uint32      fb_size;        /* total framebuffer size in bytes */
     struct fb_gpu_stats stats;
     uint32      next_bo_handle;
+    uint32      next_gem_id;
     uint32      next_kms_fb_id;
     uint32      next_syncobj_handle;
     uint32      next_dxg_present_source;
     uint64      next_bo_fence;
     uint64      next_render_owner_id;
     struct fb_gpu_bo_entry bos[FB_GPU_MAX_BOS];
+    struct fb_gpu_gem_object gems[FB_GPU_MAX_BOS];
     struct fb_gpu_kms_fb_entry kms_fbs[FB_GPU_MAX_KMS_FBS];
     struct fb_gpu_syncobj_entry syncobjs[FB_GPU_MAX_SYNCOBJS];
     struct fb_gpu_syncobj_state_entry syncobj_states[FB_GPU_MAX_SYNCOBJ_STATES];
@@ -230,6 +266,7 @@ static struct {
     spinlock_t  lock;           /* serializes concurrent access */
 } fb_state = {
     .next_bo_handle = 1,
+    .next_gem_id = 1,
     .next_kms_fb_id = 100,
     .next_syncobj_handle = 1,
     .next_dxg_present_source = 1,
@@ -664,6 +701,12 @@ static uint64 fb_bo_signal_present_locked(struct fb_gpu_bo_entry *bo)
         fb_state.next_bo_fence = 1;
     bo->last_fence = fence;
     bo->signaled_fence = fence;
+    if (bo->gem != NULL) {
+        bo->gem->last_fence = fence;
+        bo->gem->signaled_fence = fence;
+        bo->gem->metadata.implicit_fence = fence;
+        bo->gem->metadata.explicit_fence = fence;
+    }
     fb_state.stats.bo_fences++;
     return fence;
 }
@@ -1036,6 +1079,96 @@ static void fb_bo_release_pages(page_t **pages, uint32 npages)
     kvfree(pages);
 }
 
+static void fb_gem_copy_to_bo_locked(struct fb_gpu_bo_entry *bo,
+                                     struct fb_gpu_gem_object *gem)
+{
+    if (bo == NULL || gem == NULL)
+        return;
+    bo->gem = gem;
+    bo->gem_id = gem->id;
+    bo->width = gem->width;
+    bo->height = gem->height;
+    bo->pitch = gem->pitch;
+    bo->npages = gem->npages;
+    bo->size = gem->size;
+    bo->last_fence = gem->last_fence;
+    bo->signaled_fence = gem->signaled_fence;
+    bo->ttm_placement = gem->ttm_placement;
+    bo->ttm_mem_type = gem->ttm_mem_type;
+    bo->ttm_pin_count = gem->ttm_pin_count;
+    bo->ttm_reservation_seq = gem->ttm_reservation_seq;
+    bo->ttm_dma_addr_base = gem->ttm_dma_addr_base;
+    bo->pages = gem->pages;
+}
+
+static struct fb_gpu_gem_object *
+fb_gem_alloc_locked(uint32 width, uint32 height, uint32 pitch, uint64 size,
+                    page_t **pages, uint32 npages)
+{
+    struct fb_gpu_gem_object *gem = NULL;
+    uint32 next;
+
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        if (!fb_state.gems[i].in_use) {
+            gem = &fb_state.gems[i];
+            break;
+        }
+    }
+    if (gem == NULL)
+        return NULL;
+
+    next = fb_state.next_gem_id++;
+    if (fb_state.next_gem_id == 0)
+        fb_state.next_gem_id = 1;
+    memset(gem, 0, sizeof(*gem));
+    gem->in_use = 1;
+    gem->id = next;
+    gem->refs = 1;
+    gem->width = width;
+    gem->height = height;
+    gem->pitch = pitch;
+    gem->npages = npages;
+    gem->size = size;
+    gem->pages = pages;
+    gem->ttm_placement = FB_TTM_PL_SYSTEM;
+    gem->ttm_mem_type = FB_TTM_MEM_SYSTEM;
+    gem->ttm_reservation_seq = 1;
+    gem->ttm_dma_addr_base =
+        pages != NULL && npages != 0 && pages[0] != NULL ?
+            __page_to_pa(pages[0]) : 0;
+    gem->metadata.format = FB_GPU_BO_FORMAT_XRGB8888;
+    gem->metadata.modifier = FB_GPU_BO_MOD_LINEAR;
+    gem->metadata.plane_count = 1;
+    gem->metadata.offsets[0] = 0;
+    gem->metadata.strides[0] = pitch;
+    return gem;
+}
+
+static void fb_gem_get_locked(struct fb_gpu_gem_object *gem)
+{
+    if (gem != NULL && gem->in_use)
+        gem->refs++;
+}
+
+static void fb_gem_put(struct fb_gpu_gem_object *gem)
+{
+    page_t **pages = NULL;
+    uint32 npages = 0;
+
+    if (gem == NULL)
+        return;
+    spin_lock(&fb_state.lock);
+    if (gem->refs > 0)
+        gem->refs--;
+    if (gem->refs == 0) {
+        pages = gem->pages;
+        npages = gem->npages;
+        memset(gem, 0, sizeof(*gem));
+    }
+    spin_unlock(&fb_state.lock);
+    fb_bo_release_pages(pages, npages);
+}
+
 static uint32 fb_ttm_mem_type_for_placement(uint32 placement)
 {
     if ((placement & FB_TTM_PL_VRAM) != 0)
@@ -1098,6 +1231,12 @@ static int fb_ttm_validate_placement_locked(struct fb_gpu_bo_entry *bo,
     bo->ttm_dma_addr_base =
         bo->pages != NULL && bo->pages[0] != NULL ?
             __page_to_pa(bo->pages[0]) : 0;
+    if (bo->gem != NULL) {
+        bo->gem->ttm_mem_type = bo->ttm_mem_type;
+        bo->gem->ttm_placement = bo->ttm_placement;
+        bo->gem->ttm_reservation_seq = bo->ttm_reservation_seq;
+        bo->gem->ttm_dma_addr_base = bo->ttm_dma_addr_base;
+    }
     return 0;
 }
 
@@ -1126,8 +1265,7 @@ static int fb_bo_set_ttm_placement(uint32 handle, uint64 owner_id,
 
 static void fb_bo_put(struct fb_gpu_bo_entry *bo)
 {
-    page_t **pages = NULL;
-    uint32 npages = 0;
+    struct fb_gpu_gem_object *gem = NULL;
 
     if (bo == NULL)
         return;
@@ -1136,13 +1274,12 @@ static void fb_bo_put(struct fb_gpu_bo_entry *bo)
     if (bo->refs > 0)
         bo->refs--;
     if (bo->dead && bo->refs == 0) {
-        pages = bo->pages;
-        npages = bo->npages;
+        gem = bo->gem;
         memset(bo, 0, sizeof(*bo));
     }
     spin_unlock(&fb_state.lock);
 
-    fb_bo_release_pages(pages, npages);
+    fb_gem_put(gem);
 }
 
 static struct fb_gpu_bo_entry *fb_bo_get_owned(uint32 handle, uint64 owner_id,
@@ -1207,49 +1344,13 @@ static int fb_bo_alloc_pages(uint32 npages, page_t ***pages_out)
     return 0;
 }
 
-static int fb_bo_clone_pages(struct fb_gpu_bo_entry *bo, page_t ***pages_out)
-{
-    page_t **pages;
-    uint32 i;
-
-    if (bo == NULL || bo->npages == 0 || bo->pages == NULL ||
-        pages_out == NULL)
-        return -EINVAL;
-
-    pages = kvmalloc((size_t)bo->npages * sizeof(*pages));
-    if (pages == NULL)
-        return -ENOMEM;
-    memset(pages, 0, (size_t)bo->npages * sizeof(*pages));
-
-    for (i = 0; i < bo->npages; i++) {
-        uint64 pa;
-
-        if (bo->pages[i] == NULL)
-            goto fail;
-        pa = __page_to_pa(bo->pages[i]);
-        if (page_ref_inc((void *)pa) <= 0)
-            goto fail;
-        pages[i] = bo->pages[i];
-    }
-
-    *pages_out = pages;
-    return 0;
-
-fail:
-    while (i > 0) {
-        i--;
-        if (pages[i] != NULL)
-            page_ref_dec((void *)__page_to_pa(pages[i]));
-    }
-    kvfree(pages);
-    return -ENOMEM;
-}
-
 static int fb_bo_register(uint64 owner_id, pid_t owner_tgid,
                           uint32 width, uint32 height, uint32 pitch,
                           uint64 size, page_t **pages, uint32 npages,
                           uint32 *handle)
 {
+    struct fb_gpu_gem_object *gem;
+
     spin_lock(&fb_state.lock);
     struct fb_gpu_bo_entry *bo = NULL;
     for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
@@ -1264,28 +1365,24 @@ static int fb_bo_register(uint64 owner_id, pid_t owner_tgid,
         return -ENOSPC;
     }
 
+    gem = fb_gem_alloc_locked(width, height, pitch, size, pages, npages);
+    if (gem == NULL) {
+        fb_state.stats.rejected_blits++;
+        spin_unlock(&fb_state.lock);
+        return -ENOSPC;
+    }
+
     uint32 next = fb_state.next_bo_handle++;
     if (fb_state.next_bo_handle == 0)
         fb_state.next_bo_handle = 1;
     memset(bo, 0, sizeof(*bo));
     bo->in_use = 1;
     bo->handle = next;
+    bo->stats_accounted = 1;
     bo->owner_id = owner_id;
     bo->owner_tgid = owner_tgid;
-    bo->width = width;
-    bo->height = height;
-    bo->pitch = pitch;
-    bo->npages = npages;
-    bo->size = size;
-    bo->pages = pages;
     bo->refs = 1;
-    bo->ttm_placement = FB_TTM_PL_SYSTEM;
-    bo->ttm_mem_type = FB_TTM_MEM_SYSTEM;
-    bo->ttm_pin_count = 0;
-    bo->ttm_reservation_seq = 1;
-    bo->ttm_dma_addr_base =
-        pages != NULL && npages != 0 && pages[0] != NULL ?
-            __page_to_pa(pages[0]) : 0;
+    fb_gem_copy_to_bo_locked(bo, gem);
     fb_state.stats.bo_handles++;
     fb_state.stats.bo_live_bytes += size;
     fb_ttm_account_locked(bo->ttm_mem_type, size, 1);
@@ -1293,6 +1390,52 @@ static int fb_bo_register(uint64 owner_id, pid_t owner_tgid,
         fb_state.stats.bo_peak_handles = fb_state.stats.bo_handles;
     if (fb_state.stats.bo_live_bytes > fb_state.stats.bo_peak_bytes)
         fb_state.stats.bo_peak_bytes = fb_state.stats.bo_live_bytes;
+    *handle = next;
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
+static int fb_bo_register_gem(uint64 owner_id, pid_t owner_tgid,
+                              struct fb_gpu_gem_object *gem,
+                              uint32 *handle)
+{
+    struct fb_gpu_bo_entry *bo = NULL;
+    uint32 next;
+
+    if (gem == NULL || handle == NULL)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    if (!gem->in_use || gem->dead) {
+        spin_unlock(&fb_state.lock);
+        return -ENOENT;
+    }
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        if (!fb_state.bos[i].in_use) {
+            bo = &fb_state.bos[i];
+            break;
+        }
+    }
+    if (bo == NULL) {
+        fb_state.stats.rejected_blits++;
+        spin_unlock(&fb_state.lock);
+        return -ENOSPC;
+    }
+
+    next = fb_state.next_bo_handle++;
+    if (fb_state.next_bo_handle == 0)
+        fb_state.next_bo_handle = 1;
+    fb_gem_get_locked(gem);
+    memset(bo, 0, sizeof(*bo));
+    bo->in_use = 1;
+    bo->handle = next;
+    bo->owner_id = owner_id;
+    bo->owner_tgid = owner_tgid;
+    bo->refs = 1;
+    fb_gem_copy_to_bo_locked(bo, gem);
+    fb_state.stats.bo_handles++;
+    if (fb_state.stats.bo_handles > fb_state.stats.bo_peak_handles)
+        fb_state.stats.bo_peak_handles = fb_state.stats.bo_handles;
     *handle = next;
     spin_unlock(&fb_state.lock);
     return 0;
@@ -2100,7 +2243,8 @@ static int fb_fence_fops_poll(struct vfs_file *file, short events)
         return POLLERR | POLLHUP;
 
     spin_lock(&fb_state.lock);
-    if (fence->bo->signaled_fence >= fence->fence)
+    if ((fence->bo->gem != NULL ? fence->bo->gem->signaled_fence :
+         fence->bo->signaled_fence) >= fence->fence)
         revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
     fb_state.stats.fence_fd_polls++;
     if (revents & (POLLIN | POLLRDNORM | POLLRDBAND))
@@ -2299,8 +2443,9 @@ static int fb_bo_destroy(uint32 handle)
     }
     bo->in_use = 0;
     bo->dead = 1;
-    fb_ttm_account_locked(bo->ttm_mem_type, bo->size, 0);
-    if (bo->ttm_pin_count != 0) {
+    if (bo->stats_accounted)
+        fb_ttm_account_locked(bo->ttm_mem_type, bo->size, 0);
+    if (bo->stats_accounted && bo->ttm_pin_count != 0) {
         if (fb_state.stats.ttm_pinned_bytes >= bo->size)
             fb_state.stats.ttm_pinned_bytes -= bo->size;
         else
@@ -2309,9 +2454,9 @@ static int fb_bo_destroy(uint32 handle)
     }
     if (fb_state.stats.bo_handles > 0)
         fb_state.stats.bo_handles--;
-    if (fb_state.stats.bo_live_bytes >= bo->size)
+    if (bo->stats_accounted && fb_state.stats.bo_live_bytes >= bo->size)
         fb_state.stats.bo_live_bytes -= bo->size;
-    else
+    else if (bo->stats_accounted)
         fb_state.stats.bo_live_bytes = 0;
     spin_unlock(&fb_state.lock);
 
@@ -3060,7 +3205,7 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         struct fb_gpu_bo_import_fd req;
         struct vfs_file *file;
         struct fb_gpu_bo_entry *bo;
-        page_t **pages;
+        struct fb_gpu_bo_entry *src_bo;
         uint32 handle;
         uint64 addr;
         int ret;
@@ -3077,17 +3222,10 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
             vfs_fput(file);
             return -EINVAL;
         }
-        bo = (struct fb_gpu_bo_entry *)file->private_data;
+        src_bo = (struct fb_gpu_bo_entry *)file->private_data;
 
-        ret = fb_bo_clone_pages(bo, &pages);
+        ret = fb_bo_register_gem(owner_id, owner_tgid, src_bo->gem, &handle);
         if (ret != 0) {
-            vfs_fput(file);
-            return ret;
-        }
-        ret = fb_bo_register(owner_id, owner_tgid, bo->width, bo->height,
-                             bo->pitch, bo->size, pages, bo->npages, &handle);
-        if (ret != 0) {
-            fb_bo_release_pages(pages, bo->npages);
             vfs_fput(file);
             return ret;
         }
@@ -3143,8 +3281,10 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         req.width = bo->width;
         req.height = bo->height;
         req.pitch = bo->pitch;
-        req.format = FB_GPU_BO_FORMAT_XRGB8888;
-        req.modifier = FB_GPU_BO_MOD_LINEAR;
+        req.format = bo->gem != NULL && bo->gem->metadata.format != 0 ?
+            bo->gem->metadata.format : FB_GPU_BO_FORMAT_XRGB8888;
+        req.modifier = bo->gem != NULL ?
+            bo->gem->metadata.modifier : FB_GPU_BO_MOD_LINEAR;
         req.size = bo->size;
         req.addr_align = FB_GPU_D3D12_HEAP_ALIGN;
         req.size_align = FB_GPU_D3D12_HEAP_ALIGN;
@@ -3242,9 +3382,12 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         }
 
         spin_lock(&fb_state.lock);
-        target = req.wait_for ? req.wait_for : bo->last_fence;
-        req.last_present = bo->last_fence;
-        req.signaled = bo->signaled_fence;
+        target = req.wait_for ? req.wait_for :
+            (bo->gem != NULL ? bo->gem->last_fence : bo->last_fence);
+        req.last_present = bo->gem != NULL ?
+            bo->gem->last_fence : bo->last_fence;
+        req.signaled = bo->gem != NULL ?
+            bo->gem->signaled_fence : bo->signaled_fence;
         fb_state.stats.bo_fence_waits++;
         spin_unlock(&fb_state.lock);
 
@@ -3273,9 +3416,11 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
             return -ENOENT;
 
         spin_lock(&fb_state.lock);
-        target = req.fence ? req.fence : bo->last_fence;
+        target = req.fence ? req.fence :
+            (bo->gem != NULL ? bo->gem->last_fence : bo->last_fence);
         req.fence = target;
-        req.signaled = bo->signaled_fence;
+        req.signaled = bo->gem != NULL ?
+            bo->gem->signaled_fence : bo->signaled_fence;
         spin_unlock(&fb_state.lock);
         if (target == 0) {
             fb_bo_put(bo);
@@ -3331,7 +3476,9 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         fence_file = (struct fb_gpu_fence_file *)file->private_data;
         spin_lock(&fb_state.lock);
         req.fence = fence_file->fence;
-        req.signaled = fence_file->bo->signaled_fence;
+        req.signaled = fence_file->bo->gem != NULL ?
+            fence_file->bo->gem->signaled_fence :
+            fence_file->bo->signaled_fence;
         fb_state.stats.fence_fd_queries++;
         spin_unlock(&fb_state.lock);
         vfs_fput(file);
@@ -4647,6 +4794,8 @@ static void gpu_kms_unpin_bo_locked(uint32 handle, uint64 owner_id,
         bo->ttm_pin_count == 0)
         return;
     bo->ttm_pin_count--;
+    if (bo->gem != NULL && bo->gem->ttm_pin_count > 0)
+        bo->gem->ttm_pin_count--;
     if (bo->ttm_pin_count == 0) {
         if (fb_state.stats.ttm_pinned_bytes >= bo->size)
             fb_state.stats.ttm_pinned_bytes -= bo->size;
@@ -4742,6 +4891,16 @@ static int gpu_drm_mode_addfb2(struct fb_gpu_render_owner *owner, uint64 arg)
         if (bo->ttm_pin_count == 0)
             fb_state.stats.ttm_pinned_bytes += bo->size;
         bo->ttm_pin_count++;
+        if (bo->gem != NULL) {
+            bo->gem->ttm_pin_count = bo->ttm_pin_count;
+            bo->gem->metadata.format = req.pixel_format;
+            bo->gem->metadata.modifier =
+                (req.flags & DRM_MODE_FB_MODIFIERS) ?
+                    req.modifier[0] : DRM_FORMAT_MOD_LINEAR;
+            bo->gem->metadata.plane_count = 1;
+            bo->gem->metadata.offsets[0] = req.offsets[0];
+            bo->gem->metadata.strides[0] = req.pitches[0];
+        }
         fb_state.stats.kms_framebuffers++;
         break;
     }
@@ -5428,8 +5587,7 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
 {
     struct drm_prime_handle_compat req;
     struct vfs_file *file;
-    struct fb_gpu_bo_entry *bo;
-    page_t **pages;
+    struct fb_gpu_bo_entry *src_bo;
     uint32 handle;
     int ret;
 
@@ -5442,16 +5600,9 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
         vfs_fput(file);
         return -EINVAL;
     }
-    bo = (struct fb_gpu_bo_entry *)file->private_data;
-    ret = fb_bo_clone_pages(bo, &pages);
+    src_bo = (struct fb_gpu_bo_entry *)file->private_data;
+    ret = fb_bo_register_gem(owner->id, owner->tgid, src_bo->gem, &handle);
     if (ret != 0) {
-        vfs_fput(file);
-        return ret;
-    }
-    ret = fb_bo_register(owner->id, owner->tgid, bo->width, bo->height,
-                         bo->pitch, bo->size, pages, bo->npages, &handle);
-    if (ret != 0) {
-        fb_bo_release_pages(pages, bo->npages);
         vfs_fput(file);
         return ret;
     }
