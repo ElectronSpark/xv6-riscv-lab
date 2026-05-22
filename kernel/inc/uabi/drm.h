@@ -33,6 +33,8 @@
 #define DRM_IOCTL_MODE_GETPLANERESOURCES       0xc01064b5UL
 #define DRM_IOCTL_MODE_GETPLANE                0xc02064b6UL
 #define DRM_IOCTL_MODE_ADDFB2                  0xc06864b8UL
+#define DRM_IOCTL_MODE_OBJ_GETPROPERTIES       0xc02064b9UL
+#define DRM_IOCTL_MODE_OBJ_SETPROPERTY         0xc01864baUL
 #define DRM_IOCTL_MODE_ATOMIC                  0xc03864bcUL
 #define DRM_IOCTL_SYNCOBJ_CREATE               0xc00864bfUL
 #define DRM_IOCTL_SYNCOBJ_DESTROY              0xc00864c0UL
@@ -125,6 +127,20 @@
 #define DRM_MODE_PROP_OBJECT            DRM_MODE_PROP_TYPE(1)
 #define DRM_MODE_PROP_SIGNED_RANGE      DRM_MODE_PROP_TYPE(2)
 #define DRM_MODE_PROP_ATOMIC            0x80000000U
+
+#define DRM_MODE_OBJECT_CRTC            0xccccccccU
+#define DRM_MODE_OBJECT_CONNECTOR       0xc0c0c0c0U
+#define DRM_MODE_OBJECT_ENCODER         0xe0e0e0e0U
+#define DRM_MODE_OBJECT_MODE            0xdedededeU
+#define DRM_MODE_OBJECT_PROPERTY        0xb0b0b0b0U
+#define DRM_MODE_OBJECT_FB              0xfbfbfbfbU
+#define DRM_MODE_OBJECT_BLOB            0xbbbbbbbbU
+#define DRM_MODE_OBJECT_PLANE           0xeeeeeeeeU
+#define DRM_MODE_OBJECT_ANY             0
+
+#define DRM_PLANE_TYPE_OVERLAY          0
+#define DRM_PLANE_TYPE_PRIMARY          1
+#define DRM_PLANE_TYPE_CURSOR           2
 
 #define DRM_EVENT_VBLANK                0x01
 #define DRM_EVENT_FLIP_COMPLETE         0x02
@@ -417,6 +433,21 @@ struct drm_mode_crtc_page_flip_compat {
     uint32 flags;
     uint32 reserved;
     uint64 user_data;
+};
+
+struct drm_mode_obj_get_properties_compat {
+    uint64 props_ptr;
+    uint64 prop_values_ptr;
+    uint32 count_props;
+    uint32 obj_id;
+    uint32 obj_type;
+};
+
+struct drm_mode_obj_set_property_compat {
+    uint64 value;
+    uint32 prop_id;
+    uint32 obj_id;
+    uint32 obj_type;
 };
 
 struct drm_event_compat {

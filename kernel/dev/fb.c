@@ -59,6 +59,19 @@
 #define GPU_DRM_MODE_BLOB_ID                  5
 #define GPU_DRM_PROP_CRTC_ID                  10
 #define GPU_DRM_PROP_MODE_ID                  11
+#define GPU_DRM_PROP_ACTIVE                   12
+#define GPU_DRM_PROP_PLANE_TYPE               13
+#define GPU_DRM_PROP_FB_ID                    14
+#define GPU_DRM_PROP_SRC_X                    15
+#define GPU_DRM_PROP_SRC_Y                    16
+#define GPU_DRM_PROP_SRC_W                    17
+#define GPU_DRM_PROP_SRC_H                    18
+#define GPU_DRM_PROP_CRTC_X                   19
+#define GPU_DRM_PROP_CRTC_Y                   20
+#define GPU_DRM_PROP_CRTC_W                   21
+#define GPU_DRM_PROP_CRTC_H                   22
+#define GPU_DRM_PROP_IN_FENCE_FD              23
+#define GPU_DRM_PROP_OUT_FENCE_PTR            24
 
 #define FB_TTM_PL_SYSTEM                      0x0001
 #define FB_TTM_PL_TT                          0x0002
@@ -589,6 +602,8 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
     case DRM_IOCTL_MODE_GETPLANERESOURCES: return "DRM_IOCTL_MODE_GETPLANERESOURCES";
     case DRM_IOCTL_MODE_GETPLANE: return "DRM_IOCTL_MODE_GETPLANE";
     case DRM_IOCTL_MODE_ADDFB2: return "DRM_IOCTL_MODE_ADDFB2";
+    case DRM_IOCTL_MODE_OBJ_GETPROPERTIES: return "DRM_IOCTL_MODE_OBJ_GETPROPERTIES";
+    case DRM_IOCTL_MODE_OBJ_SETPROPERTY: return "DRM_IOCTL_MODE_OBJ_SETPROPERTY";
     case DRM_IOCTL_MODE_ATOMIC: return "DRM_IOCTL_MODE_ATOMIC";
     case DRM_IOCTL_SYNCOBJ_CREATE: return "DRM_IOCTL_SYNCOBJ_CREATE";
     case DRM_IOCTL_SYNCOBJ_DESTROY: return "DRM_IOCTL_SYNCOBJ_DESTROY";
@@ -4535,6 +4550,119 @@ static int gpu_drm_copyout_mode_array(uint64 ptr, uint32 capacity,
     return 0;
 }
 
+static void gpu_drm_copy_prop_name(char dst[32], const char *src)
+{
+    memset(dst, 0, 32);
+    if (src != NULL)
+        memmove(dst, src, strlen(src) < 32 ? strlen(src) : 31);
+}
+
+static int gpu_drm_property_info(uint32 prop_id, const char **name,
+                                 uint32 *flags, uint64 values[2],
+                                 uint32 *count_values,
+                                 struct drm_mode_property_enum_compat *enums,
+                                 uint32 *count_enums)
+{
+    if (name == NULL || flags == NULL || values == NULL ||
+        count_values == NULL || enums == NULL || count_enums == NULL)
+        return -EINVAL;
+    *count_values = 0;
+    *count_enums = 0;
+    values[0] = 0;
+    values[1] = 0;
+    switch (prop_id) {
+    case GPU_DRM_PROP_CRTC_ID:
+        *name = "CRTC_ID";
+        *flags = DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC;
+        break;
+    case GPU_DRM_PROP_MODE_ID:
+        *name = "MODE_ID";
+        *flags = DRM_MODE_PROP_BLOB | DRM_MODE_PROP_ATOMIC;
+        break;
+    case GPU_DRM_PROP_ACTIVE:
+        *name = "ACTIVE";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = 1;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_PLANE_TYPE:
+        *name = "type";
+        *flags = DRM_MODE_PROP_ENUM | DRM_MODE_PROP_IMMUTABLE;
+        enums[0].value = DRM_PLANE_TYPE_PRIMARY;
+        gpu_drm_copy_prop_name(enums[0].name, "Primary");
+        *count_enums = 1;
+        break;
+    case GPU_DRM_PROP_FB_ID:
+        *name = "FB_ID";
+        *flags = DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC;
+        break;
+    case GPU_DRM_PROP_SRC_X:
+        *name = "SRC_X";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = 0xffffffffULL;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_SRC_Y:
+        *name = "SRC_Y";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = 0xffffffffULL;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_SRC_W:
+        *name = "SRC_W";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = 0xffffffffULL;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_SRC_H:
+        *name = "SRC_H";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = 0xffffffffULL;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_CRTC_X:
+        *name = "CRTC_X";
+        *flags = DRM_MODE_PROP_SIGNED_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = 8192;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_CRTC_Y:
+        *name = "CRTC_Y";
+        *flags = DRM_MODE_PROP_SIGNED_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = 8192;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_CRTC_W:
+        *name = "CRTC_W";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = 8192;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_CRTC_H:
+        *name = "CRTC_H";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = 8192;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_IN_FENCE_FD:
+        *name = "IN_FENCE_FD";
+        *flags = DRM_MODE_PROP_SIGNED_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[0] = (uint64)-1;
+        values[1] = 0x7fffffffULL;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_OUT_FENCE_PTR:
+        *name = "OUT_FENCE_PTR";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = (uint64)-1;
+        *count_values = 2;
+        break;
+    default:
+        return -ENOENT;
+    }
+    return 0;
+}
+
 static int gpu_drm_current_capset(uint32 *capset_id)
 {
     uint32 id = 0;
@@ -4906,16 +5034,40 @@ static int gpu_drm_wait_vblank(uint64 arg)
     return 0;
 }
 
-static int gpu_drm_mode_getresources(uint64 arg)
+static int gpu_kms_fb_owner_matches(const struct fb_gpu_kms_fb_entry *fb,
+                                    struct fb_gpu_render_owner *owner);
+
+static int gpu_drm_mode_getresources(struct fb_gpu_render_owner *owner,
+                                     uint64 arg)
 {
     struct drm_mode_card_res_compat req;
-    uint32 ids[1];
+    uint32 ids[FB_GPU_MAX_KMS_FBS > 1 ? FB_GPU_MAX_KMS_FBS : 1];
     uint32 w, h;
+    uint32 fb_count = 0;
     int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
-    gpu_drm_get_mode_size(&w, &h);
+    w = fb_state.xres;
+    h = fb_state.yres;
+    if (w < 640)
+        w = FB_DEFAULT_WIDTH;
+    if (h < 480)
+        h = FB_DEFAULT_HEIGHT;
+
+    spin_lock(&fb_state.lock);
+    for (uint32 i = 0; i < FB_GPU_MAX_KMS_FBS; i++) {
+        struct fb_gpu_kms_fb_entry *fb = &fb_state.kms_fbs[i];
+
+        if (!fb->in_use || !gpu_kms_fb_owner_matches(fb, owner))
+            continue;
+        ids[fb_count++] = fb->fb_id;
+    }
+    spin_unlock(&fb_state.lock);
+    ret = gpu_drm_copyout_u32_array(req.fb_id_ptr, req.count_fbs, ids,
+                                    fb_count);
+    if (ret != 0)
+        return ret;
 
     ids[0] = GPU_DRM_CRTC_ID;
     ret = gpu_drm_copyout_u32_array(req.crtc_id_ptr, req.count_crtcs, ids, 1);
@@ -4932,7 +5084,7 @@ static int gpu_drm_mode_getresources(uint64 arg)
     if (ret != 0)
         return ret;
 
-    req.count_fbs = 0;
+    req.count_fbs = fb_count;
     req.count_crtcs = 1;
     req.count_connectors = 1;
     req.count_encoders = 1;
@@ -4953,7 +5105,9 @@ static int gpu_drm_mode_getcrtc(uint64 arg)
         return -EFAULT;
     if (req.crtc_id != GPU_DRM_CRTC_ID)
         return -ENOENT;
-    req.fb_id = 0;
+    spin_lock(&fb_state.lock);
+    req.fb_id = fb_state.current_kms_fb_id;
+    spin_unlock(&fb_state.lock);
     req.x = 0;
     req.y = 0;
     req.gamma_size = 0;
@@ -5030,25 +5184,36 @@ static int gpu_drm_mode_getproperty(uint64 arg)
 {
     struct drm_mode_get_property_compat req;
     const char *name;
+    uint64 values[2];
+    struct drm_mode_property_enum_compat enums[3];
+    uint32 count_values;
+    uint32 count_enums;
+    int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
-    switch (req.prop_id) {
-    case GPU_DRM_PROP_CRTC_ID:
-        req.flags = DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC;
-        name = "CRTC_ID";
-        break;
-    case GPU_DRM_PROP_MODE_ID:
-        req.flags = DRM_MODE_PROP_BLOB | DRM_MODE_PROP_ATOMIC;
-        name = "MODE_ID";
-        break;
-    default:
-        return -ENOENT;
+    memset(values, 0, sizeof(values));
+    memset(enums, 0, sizeof(enums));
+    ret = gpu_drm_property_info(req.prop_id, &name, &req.flags, values,
+                                &count_values, enums, &count_enums);
+    if (ret != 0)
+        return ret;
+    ret = gpu_drm_copyout_u64_array(req.values_ptr, req.count_values,
+                                    values, count_values);
+    if (ret != 0)
+        return ret;
+    if (req.enum_blob_ptr != 0 && req.count_enum_blobs != 0 &&
+        count_enums != 0) {
+        uint32 n = req.count_enum_blobs < count_enums ?
+            req.count_enum_blobs : count_enums;
+
+        if (either_copyout(1, req.enum_blob_ptr, enums,
+                           (uint64)n * sizeof(enums[0])) < 0)
+            return -EFAULT;
     }
-    memset(req.name, 0, sizeof(req.name));
-    memmove(req.name, name, strlen(name));
-    req.count_values = 0;
-    req.count_enum_blobs = 0;
+    gpu_drm_copy_prop_name(req.name, name);
+    req.count_values = count_values;
+    req.count_enum_blobs = count_enums;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
@@ -5137,6 +5302,280 @@ static int gpu_kms_fb_owner_matches(const struct fb_gpu_kms_fb_entry *fb,
     if (fb == NULL || owner == NULL)
         return 0;
     return fb->owner_id == owner->id && fb->owner_tgid == owner->tgid;
+}
+
+static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
+{
+    struct fb_gpu_bo_entry *bo;
+    struct fb_gpu_bo_present present;
+    uint32 bo_handle = 0;
+    uint32 width = 0;
+    uint32 height = 0;
+    uint64 fence = 0;
+    int ret;
+
+    if (fb_id == 0)
+        return 0;
+    spin_lock(&fb_state.lock);
+    for (uint32 i = 0; i < FB_GPU_MAX_KMS_FBS; i++) {
+        struct fb_gpu_kms_fb_entry *fb = &fb_state.kms_fbs[i];
+
+        if (fb->fb_id != fb_id || !gpu_kms_fb_owner_matches(fb, owner))
+            continue;
+        bo_handle = fb->bo_handle;
+        width = fb->width;
+        height = fb->height;
+        break;
+    }
+    spin_unlock(&fb_state.lock);
+    if (bo_handle == 0)
+        return -ENOENT;
+
+    bo = fb_bo_get_owned(bo_handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
+    memset(&present, 0, sizeof(present));
+    present.w = width;
+    present.h = height;
+    ret = fb_blit_from_bo(bo, present, &fence);
+    fb_bo_put(bo);
+    return ret;
+}
+
+struct gpu_kms_obj_props {
+    uint32 props[12];
+    uint64 values[12];
+    uint32 count;
+};
+
+static int gpu_kms_object_exists_locked(uint32 obj_id, uint32 obj_type,
+                                        struct fb_gpu_render_owner *owner)
+{
+    if (obj_type == DRM_MODE_OBJECT_ANY) {
+        if (obj_id == GPU_DRM_CRTC_ID || obj_id == GPU_DRM_CONNECTOR_ID ||
+            obj_id == GPU_DRM_ENCODER_ID ||
+            obj_id == GPU_DRM_PRIMARY_PLANE_ID ||
+            obj_id == GPU_DRM_MODE_BLOB_ID)
+            return 1;
+        return gpu_kms_fb_owner_matches(gpu_kms_fb_lookup_locked(obj_id),
+                                        owner);
+    }
+    switch (obj_type) {
+    case DRM_MODE_OBJECT_CRTC:
+        return obj_id == GPU_DRM_CRTC_ID;
+    case DRM_MODE_OBJECT_CONNECTOR:
+        return obj_id == GPU_DRM_CONNECTOR_ID;
+    case DRM_MODE_OBJECT_ENCODER:
+        return obj_id == GPU_DRM_ENCODER_ID;
+    case DRM_MODE_OBJECT_PLANE:
+        return obj_id == GPU_DRM_PRIMARY_PLANE_ID;
+    case DRM_MODE_OBJECT_BLOB:
+    case DRM_MODE_OBJECT_MODE:
+        return obj_id == GPU_DRM_MODE_BLOB_ID;
+    case DRM_MODE_OBJECT_FB:
+        return gpu_kms_fb_owner_matches(gpu_kms_fb_lookup_locked(obj_id),
+                                        owner);
+    default:
+        return 0;
+    }
+}
+
+static void gpu_kms_push_prop(struct gpu_kms_obj_props *out, uint32 prop,
+                              uint64 value)
+{
+    if (out == NULL || out->count >=
+        sizeof(out->props) / sizeof(out->props[0]))
+        return;
+    out->props[out->count] = prop;
+    out->values[out->count] = value;
+    out->count++;
+}
+
+static int gpu_kms_collect_obj_props_locked(uint32 obj_id, uint32 obj_type,
+                                            struct fb_gpu_render_owner *owner,
+                                            struct gpu_kms_obj_props *out)
+{
+    uint32 w, h;
+    uint32 current_fb = fb_state.current_kms_fb_id;
+
+    if (out == NULL)
+        return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    if (!gpu_kms_object_exists_locked(obj_id, obj_type, owner))
+        return -ENOENT;
+    w = fb_state.xres;
+    h = fb_state.yres;
+    if (w < 640)
+        w = FB_DEFAULT_WIDTH;
+    if (h < 480)
+        h = FB_DEFAULT_HEIGHT;
+    if (obj_type == DRM_MODE_OBJECT_ANY) {
+        if (obj_id == GPU_DRM_CRTC_ID)
+            obj_type = DRM_MODE_OBJECT_CRTC;
+        else if (obj_id == GPU_DRM_CONNECTOR_ID)
+            obj_type = DRM_MODE_OBJECT_CONNECTOR;
+        else if (obj_id == GPU_DRM_PRIMARY_PLANE_ID)
+            obj_type = DRM_MODE_OBJECT_PLANE;
+        else if (obj_id == GPU_DRM_ENCODER_ID)
+            obj_type = DRM_MODE_OBJECT_ENCODER;
+        else if (obj_id == GPU_DRM_MODE_BLOB_ID)
+            obj_type = DRM_MODE_OBJECT_BLOB;
+        else
+            obj_type = DRM_MODE_OBJECT_FB;
+    }
+
+    switch (obj_type) {
+    case DRM_MODE_OBJECT_CRTC:
+        gpu_kms_push_prop(out, GPU_DRM_PROP_ACTIVE,
+                          current_fb != 0 ? 1 : 0);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_MODE_ID,
+                          GPU_DRM_MODE_BLOB_ID);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_OUT_FENCE_PTR, 0);
+        break;
+    case DRM_MODE_OBJECT_CONNECTOR:
+        gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_ID, GPU_DRM_CRTC_ID);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_MODE_ID,
+                          GPU_DRM_MODE_BLOB_ID);
+        break;
+    case DRM_MODE_OBJECT_PLANE:
+        gpu_kms_push_prop(out, GPU_DRM_PROP_PLANE_TYPE,
+                          DRM_PLANE_TYPE_PRIMARY);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_ID, GPU_DRM_CRTC_ID);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_FB_ID, current_fb);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_X, 0);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_Y, 0);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_W, (uint64)w << 16);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_SRC_H, (uint64)h << 16);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_X, 0);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_Y, 0);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_W, w);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_H, h);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_IN_FENCE_FD, (uint64)-1);
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
+static int gpu_drm_mode_obj_getproperties(struct fb_gpu_render_owner *owner,
+                                          uint64 arg)
+{
+    struct drm_mode_obj_get_properties_compat req;
+    struct gpu_kms_obj_props props;
+    int ret;
+
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    spin_lock(&fb_state.lock);
+    ret = gpu_kms_collect_obj_props_locked(req.obj_id, req.obj_type, owner,
+                                           &props);
+    spin_unlock(&fb_state.lock);
+    if (ret != 0)
+        return ret;
+    ret = gpu_drm_copyout_u32_array(req.props_ptr, req.count_props,
+                                    props.props, props.count);
+    if (ret != 0)
+        return ret;
+    ret = gpu_drm_copyout_u64_array(req.prop_values_ptr, req.count_props,
+                                    props.values, props.count);
+    if (ret != 0)
+        return ret;
+    req.count_props = props.count;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_kms_validate_prop_locked(struct fb_gpu_render_owner *owner,
+                                        uint32 obj_id, uint32 obj_type,
+                                        uint32 prop, uint64 value,
+                                        uint32 *new_fb_id, int *has_new_fb,
+                                        uint64 *out_fence_ptr)
+{
+    struct gpu_kms_obj_props props;
+    int found = 0;
+    int ret;
+
+    ret = gpu_kms_collect_obj_props_locked(obj_id, obj_type, owner, &props);
+    if (ret != 0)
+        return ret;
+    for (uint32 i = 0; i < props.count; i++) {
+        if (props.props[i] == prop) {
+            found = 1;
+            break;
+        }
+    }
+    if (!found)
+        return -EINVAL;
+
+    switch (prop) {
+    case GPU_DRM_PROP_CRTC_ID:
+        if (value != 0 && value != GPU_DRM_CRTC_ID)
+            return -EINVAL;
+        break;
+    case GPU_DRM_PROP_MODE_ID:
+        if (value != 0 && value != GPU_DRM_MODE_BLOB_ID)
+            return -EINVAL;
+        break;
+    case GPU_DRM_PROP_ACTIVE:
+        if (value > 1)
+            return -EINVAL;
+        if (value == 0 && new_fb_id != NULL && has_new_fb != NULL) {
+            *new_fb_id = 0;
+            *has_new_fb = 1;
+        }
+        break;
+    case GPU_DRM_PROP_PLANE_TYPE:
+        if (value != DRM_PLANE_TYPE_PRIMARY)
+            return -EINVAL;
+        break;
+    case GPU_DRM_PROP_FB_ID:
+        if (value != 0 &&
+            !gpu_kms_fb_owner_matches(gpu_kms_fb_lookup_locked((uint32)value),
+                                      owner))
+            return -ENOENT;
+        if (new_fb_id != NULL && has_new_fb != NULL) {
+            *new_fb_id = (uint32)value;
+            *has_new_fb = 1;
+        }
+        break;
+    case GPU_DRM_PROP_IN_FENCE_FD:
+        if (value != (uint64)-1)
+            return -EOPNOTSUPP;
+        break;
+    case GPU_DRM_PROP_OUT_FENCE_PTR:
+        if (out_fence_ptr != NULL)
+            *out_fence_ptr = value;
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
+static int gpu_drm_mode_obj_setproperty(struct fb_gpu_render_owner *owner,
+                                        uint64 arg)
+{
+    struct drm_mode_obj_set_property_compat req;
+    uint32 new_fb = 0;
+    int has_new_fb = 0;
+    int ret;
+
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    spin_lock(&fb_state.lock);
+    ret = gpu_kms_validate_prop_locked(owner, req.obj_id, req.obj_type,
+                                       req.prop_id, req.value, &new_fb,
+                                       &has_new_fb, NULL);
+    if (ret == 0 && has_new_fb)
+        fb_state.current_kms_fb_id = new_fb;
+    spin_unlock(&fb_state.lock);
+    return ret;
 }
 
 static void gpu_kms_unpin_bo_locked(uint32 handle, uint64 owner_id,
@@ -5305,6 +5744,8 @@ static int gpu_drm_mode_setcrtc(struct fb_gpu_render_owner *owner, uint64 arg)
         if (ret == 0)
             fb_state.current_kms_fb_id = req.fb_id;
         spin_unlock(&fb_state.lock);
+        if (ret == 0)
+            ret = gpu_kms_present_fb(owner, req.fb_id);
     }
     return ret;
 }
@@ -5338,12 +5779,23 @@ static int gpu_drm_mode_page_flip(struct fb_gpu_render_owner *owner,
         }
     }
     spin_unlock(&fb_state.lock);
+    if (ret == 0)
+        ret = gpu_kms_present_fb(owner, req.fb_id);
     return ret;
 }
 
 static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_mode_atomic_compat req;
+    uint32 obj_ids[8];
+    uint32 prop_counts[8];
+    uint32 atomic_props[64];
+    uint64 atomic_values[64];
+    uint32 new_fb = 0;
+    uint32 total_props = 0;
+    uint64 out_fence_ptr = 0;
+    int has_new_fb = 0;
+    int ret = 0;
 
     if (!gpu_drm_is_primary_like(owner))
         return -EOPNOTSUPP;
@@ -5351,11 +5803,74 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
         return -EFAULT;
     if ((req.flags & ~DRM_MODE_ATOMIC_FLAGS) != 0 || req.reserved != 0)
         return -EINVAL;
-    if (req.count_objs != 0)
+    if ((req.flags & DRM_MODE_ATOMIC_NONBLOCK) != 0 &&
+        (req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0)
         return -EOPNOTSUPP;
+    if (req.count_objs > sizeof(obj_ids) / sizeof(obj_ids[0]))
+        return -EINVAL;
+    if (req.count_objs != 0 &&
+        (req.objs_ptr == 0 || req.count_props_ptr == 0 ||
+         req.props_ptr == 0 || req.prop_values_ptr == 0))
+        return -EINVAL;
+    for (uint32 i = 0; i < req.count_objs; i++) {
+        if (either_copyin(&obj_ids[i], 1,
+                          req.objs_ptr + (uint64)i * sizeof(uint32),
+                          sizeof(uint32)) < 0 ||
+            either_copyin(&prop_counts[i], 1,
+                          req.count_props_ptr + (uint64)i * sizeof(uint32),
+                          sizeof(uint32)) < 0)
+            return -EFAULT;
+        if (prop_counts[i] > 16 || total_props + prop_counts[i] > 64)
+            return -EINVAL;
+        total_props += prop_counts[i];
+    }
+    for (uint32 i = 0; i < total_props; i++) {
+        if (either_copyin(&atomic_props[i], 1,
+                          req.props_ptr + (uint64)i * sizeof(uint32),
+                          sizeof(atomic_props[i])) < 0 ||
+            either_copyin(&atomic_values[i], 1,
+                          req.prop_values_ptr + (uint64)i * sizeof(uint64),
+                          sizeof(atomic_values[i])) < 0)
+            return -EFAULT;
+    }
+
     spin_lock(&fb_state.lock);
-    fb_state.stats.kms_atomic_commits++;
+    total_props = 0;
+    for (uint32 i = 0; i < req.count_objs && ret == 0; i++) {
+        for (uint32 j = 0; j < prop_counts[i]; j++) {
+            ret = gpu_kms_validate_prop_locked(owner, obj_ids[i],
+                                               DRM_MODE_OBJECT_ANY,
+                                               atomic_props[total_props + j],
+                                               atomic_values[total_props + j],
+                                               &new_fb, &has_new_fb,
+                                               &out_fence_ptr);
+            if (ret != 0)
+                break;
+        }
+        total_props += prop_counts[i];
+    }
+    if (ret == 0 && (req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0) {
+        if (has_new_fb)
+            fb_state.current_kms_fb_id = new_fb;
+        fb_state.stats.kms_atomic_commits++;
+    } else if (ret == 0) {
+        fb_state.stats.kms_atomic_commits++;
+    }
     spin_unlock(&fb_state.lock);
+    if (ret != 0)
+        return ret;
+    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 && has_new_fb) {
+        ret = gpu_kms_present_fb(owner, new_fb);
+        if (ret != 0)
+            return ret;
+    }
+    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 && out_fence_ptr != 0) {
+        int32 fence_fd = -1;
+
+        if (either_copyout(1, out_fence_ptr, &fence_fd,
+                           sizeof(fence_fd)) < 0)
+            return -EFAULT;
+    }
     return 0;
 }
 
@@ -6513,7 +7028,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_MODE_GETRESOURCES:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
-        return gpu_drm_mode_getresources(arg);
+        return gpu_drm_mode_getresources(owner, arg);
     case DRM_IOCTL_MODE_GETCRTC:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
@@ -6546,6 +7061,10 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         return gpu_drm_mode_getplane(arg);
     case DRM_IOCTL_MODE_ADDFB2:
         return gpu_drm_mode_addfb2(owner, arg);
+    case DRM_IOCTL_MODE_OBJ_GETPROPERTIES:
+        return gpu_drm_mode_obj_getproperties(owner, arg);
+    case DRM_IOCTL_MODE_OBJ_SETPROPERTY:
+        return gpu_drm_mode_obj_setproperty(owner, arg);
     case DRM_IOCTL_MODE_RMFB:
         return gpu_drm_mode_rmfb(owner, arg);
     case DRM_IOCTL_MODE_PAGE_FLIP:
@@ -6891,6 +7410,10 @@ static const struct drm_core_ioctl_desc gpu_drm_ioctls[] = {
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_GETPLANE,
                        DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_ADDFB2,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_OBJ_GETPROPERTIES,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_OBJ_SETPROPERTY,
                        DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_ATOMIC,
                        DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
