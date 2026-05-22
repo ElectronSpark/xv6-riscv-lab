@@ -185,6 +185,57 @@ int drm_core_drop_master(struct drm_core_file *file)
     return 0;
 }
 
+static uint32 drm_core_file_node_mask(const struct drm_core_file *file)
+{
+    if (file == NULL)
+        return 0;
+    switch (file->node_type) {
+    case DRM_CORE_NODE_PRIMARY:
+        return DRM_CORE_IOCTL_PRIMARY;
+    case DRM_CORE_NODE_RENDER:
+        return DRM_CORE_IOCTL_RENDER;
+    default:
+        return DRM_CORE_IOCTL_LEGACY;
+    }
+}
+
+int drm_core_dispatch_ioctl(struct drm_core_file *file, void *driver_file,
+                            uint64 cmd, uint64 arg,
+                            const struct drm_core_ioctl_desc *table,
+                            uint32 count, const char **name_out,
+                            int *known_out)
+{
+    uint32 mask;
+    uint32 i;
+
+    if (name_out != NULL)
+        *name_out = NULL;
+    if (known_out != NULL)
+        *known_out = 0;
+    if (file == NULL)
+        return -EBADF;
+    file->ioctl_count++;
+    mask = drm_core_file_node_mask(file);
+    for (i = 0; i < count; i++) {
+        const struct drm_core_ioctl_desc *desc = &table[i];
+        if (desc->cmd != cmd)
+            continue;
+        if (name_out != NULL)
+            *name_out = desc->name;
+        if (known_out != NULL)
+            *known_out = 1;
+        if ((desc->flags & mask) == 0) {
+            if (known_out != NULL)
+                *known_out = 2;
+            return -EOPNOTSUPP;
+        }
+        if (desc->fn == NULL)
+            return -EOPNOTSUPP;
+        return desc->fn(file, driver_file, cmd, arg);
+    }
+    return -EINVAL;
+}
+
 void drm_core_release_file(struct drm_core_file *file)
 {
     struct drm_core_device *dev;

@@ -37,6 +37,22 @@ struct drm_core_file {
     pid_t owner_tgid;
 };
 
+typedef int (*drm_core_ioctl_fn)(struct drm_core_file *file,
+                                 void *driver_file, uint64 cmd, uint64 arg);
+
+#define DRM_CORE_IOCTL_LEGACY  0x1U
+#define DRM_CORE_IOCTL_PRIMARY 0x2U
+#define DRM_CORE_IOCTL_RENDER  0x4U
+#define DRM_CORE_IOCTL_ANY \
+    (DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY | DRM_CORE_IOCTL_RENDER)
+
+struct drm_core_ioctl_desc {
+    uint64 cmd;
+    const char *name;
+    uint32 flags;
+    drm_core_ioctl_fn fn;
+};
+
 void drm_core_device_init(struct drm_core_device *dev,
                           const struct drm_core_driver *driver);
 void drm_core_file_init(struct drm_core_device *dev, struct drm_core_file *file,
@@ -50,6 +66,11 @@ int drm_core_get_client(struct drm_core_file *file, uint64 arg);
 int drm_core_set_client_cap(struct drm_core_file *file, uint64 arg);
 int drm_core_set_master(struct drm_core_file *file);
 int drm_core_drop_master(struct drm_core_file *file);
+int drm_core_dispatch_ioctl(struct drm_core_file *file, void *driver_file,
+                            uint64 cmd, uint64 arg,
+                            const struct drm_core_ioctl_desc *table,
+                            uint32 count, const char **name_out,
+                            int *known_out);
 void drm_core_release_file(struct drm_core_file *file);
 
 #endif

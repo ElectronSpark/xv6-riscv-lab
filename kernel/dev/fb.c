@@ -5965,20 +5965,15 @@ static int gpu_nouveau_bind_or_exec(struct fb_gpu_render_owner *owner,
     return -EOPNOTSUPP;
 }
 
-static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
-                         uint64 arg)
+static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
+                                void *driver_file, uint64 cmd, uint64 arg)
 {
+    struct fb_gpu_render_owner *owner =
+        (struct fb_gpu_render_owner *)driver_file;
+
+    (void)drm_file;
     if (owner == NULL)
         return -EBADF;
-
-    owner->drm.ioctl_count++;
-    if (owner->drm.node_type == DRM_CORE_NODE_PRIMARY ||
-        owner->drm.node_type == DRM_CORE_NODE_RENDER) {
-        spin_lock(&fb_state.lock);
-        fb_state.stats.drm_ioctls++;
-        spin_unlock(&fb_state.lock);
-    }
-
     switch (cmd) {
     case DRM_IOCTL_VERSION:
         return gpu_drm_version(arg);
@@ -6348,14 +6343,138 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
     case DRM_IOCTL_NOUVEAU_EXEC:
         return gpu_nouveau_bind_or_exec(owner, arg, 1);
     default:
+        return -EINVAL;
+    }
+}
+
+#define GPU_DRM_IOCTL_DESC(_cmd, _flags) \
+    { (_cmd), #_cmd, (_flags), gpu_drm_ioctl_handle }
+
+static const struct drm_core_ioctl_desc gpu_drm_ioctls[] = {
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VERSION, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_GET_UNIQUE, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_GET_MAGIC,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_GET_CLIENT, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_GET_STATS, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SET_VERSION, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_GET_CAP, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SET_CLIENT_CAP, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_AUTH_MAGIC,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SET_MASTER,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_DROP_MASTER,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_GEM_CLOSE, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_PRIME_HANDLE_TO_FD, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_PRIME_FD_TO_HANDLE, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_WAIT_VBLANK,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_GETRESOURCES,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_GETCRTC,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_SETCRTC,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_GETENCODER,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_GETCONNECTOR,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_GETPROPERTY,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_GETPROPBLOB,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_RMFB,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_PAGE_FLIP,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_CREATE_DUMB, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_MAP_DUMB, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_DESTROY_DUMB, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_GETPLANERESOURCES,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_GETPLANE,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_ADDFB2,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_MODE_ATOMIC,
+                       DRM_CORE_IOCTL_LEGACY | DRM_CORE_IOCTL_PRIMARY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_CREATE, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_DESTROY, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_WAIT, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_RESET, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_SIGNAL, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_QUERY, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, DRM_CORE_IOCTL_ANY),
+
+    /* Driver-private virtio-gpu commands. */
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_MAP, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_EXECBUFFER, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_GETPARAM, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_RESOURCE_CREATE,
+                       DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_RESOURCE_INFO, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST,
+                       DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST,
+                       DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_WAIT, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_GET_CAPS, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB,
+                       DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_VIRTGPU_CONTEXT_INIT, DRM_CORE_IOCTL_ANY),
+
+    /* Driver-private Nouveau commands. */
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GETPARAM, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_CHANNEL_FREE, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_VM_INIT, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_VM_BIND, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_EXEC, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GEM_NEW, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GEM_PUSHBUF, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GEM_CPU_PREP, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GEM_CPU_FINI, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GEM_INFO, DRM_CORE_IOCTL_ANY),
+};
+
+static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
+                         uint64 arg)
+{
+    const char *name = NULL;
+    int known = 0;
+    int ret;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (owner->drm.node_type == DRM_CORE_NODE_PRIMARY ||
+        owner->drm.node_type == DRM_CORE_NODE_RENDER) {
+        spin_lock(&fb_state.lock);
+        fb_state.stats.drm_ioctls++;
+        spin_unlock(&fb_state.lock);
+    }
+    ret = drm_core_dispatch_ioctl(&owner->drm, owner, cmd, arg,
+                                  gpu_drm_ioctls,
+                                  sizeof(gpu_drm_ioctls) /
+                                      sizeof(gpu_drm_ioctls[0]),
+                                  &name, &known);
+    if (!known) {
         spin_lock(&fb_state.lock);
         fb_state.stats.drm_unknown_ioctls++;
         spin_unlock(&fb_state.lock);
         printf("DRM: unknown ioctl node=%s owner=%lu tgid=%d cmd=0x%lx\n",
                drm_core_node_name(owner->drm.node_type),
                owner->id, owner->tgid, cmd);
-        return -EINVAL;
+    } else if (known == 2) {
+        printf("DRM: denied ioctl node=%s owner=%lu tgid=%d cmd=0x%lx(%s)\n",
+               drm_core_node_name(owner->drm.node_type),
+               owner->id, owner->tgid, cmd, name ? name : "?");
     }
+    return ret;
 }
 
 static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
@@ -6520,10 +6639,43 @@ static struct vfs_file_ops gpu_file_ops = {
     .fault   = gpu_fops_fault,
 };
 
-static int gpu_open_file(cdev_t *cdev, struct vfs_file *file)
+static int gpu_drm_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    struct fb_gpu_render_owner *owner =
+        file ? (struct fb_gpu_render_owner *)file->private_data : NULL;
+    int trace = fb_gpu_trace_enabled() && fb_gpu_trace_process();
+    int ret;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (trace)
+        printf("webkit-gpu: enter pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s)\n",
+               current ? current->pid : -1,
+               current ? current->name : "?", owner->id, owner->tgid, cmd,
+               fb_gpu_ioctl_name(cmd));
+    ret = gpu_drm_ioctl(owner, cmd, (uint64)arg);
+    if (trace)
+        printf("webkit-gpu: exit pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
+               current ? current->pid : -1,
+               current ? current->name : "?", owner->id, owner->tgid, cmd,
+               fb_gpu_ioctl_name(cmd), ret);
+    return ret;
+}
+
+static struct vfs_file_ops gpu_drm_file_ops = {
+    .read    = gpu_fops_read,
+    .release = gpu_fops_release,
+    .ioctl   = gpu_drm_fops_ioctl,
+    .poll    = gpu_fops_poll,
+    .fault   = gpu_fops_fault,
+};
+
+static int gpu_open_file_common(cdev_t *cdev, struct vfs_file *file,
+                                struct vfs_file_ops *ops)
 {
     struct fb_gpu_render_owner *owner;
     int ret = gpu_open(cdev);
+
     if (ret != 0)
         return ret;
     owner = kvmalloc(sizeof(*owner));
@@ -6537,12 +6689,22 @@ static int gpu_open_file(cdev_t *cdev, struct vfs_file *file)
     drm_core_file_init(&fb_drm_device, &owner->drm,
                        gpu_drm_node_from_cdev(cdev),
                        owner->id, owner->tgid);
-    file->ops = &gpu_file_ops;
+    file->ops = ops;
     file->private_data = owner;
     printf("DRM: open node=%s owner=%lu tgid=%d magic=%u\n",
            drm_core_node_name(owner->drm.node_type), owner->id, owner->tgid,
            owner->drm.magic);
     return 0;
+}
+
+static int gpu_open_file(cdev_t *cdev, struct vfs_file *file)
+{
+    return gpu_open_file_common(cdev, file, &gpu_file_ops);
+}
+
+static int gpu_drm_open_file(cdev_t *cdev, struct vfs_file *file)
+{
+    return gpu_open_file_common(cdev, file, &gpu_drm_file_ops);
 }
 
 static cdev_t fb_cdev = {
@@ -6600,7 +6762,7 @@ static cdev_t gpu_primary_cdev = {
         .release = gpu_release,
         .ioctl   = gpu_ioctl,
         .poll    = NULL,
-        .open_file = gpu_open_file,
+        .open_file = gpu_drm_open_file,
     },
 };
 
@@ -6620,7 +6782,7 @@ static cdev_t gpu_render_cdev = {
         .release = gpu_release,
         .ioctl   = gpu_ioctl,
         .poll    = NULL,
-        .open_file = gpu_open_file,
+        .open_file = gpu_drm_open_file,
     },
 };
 
