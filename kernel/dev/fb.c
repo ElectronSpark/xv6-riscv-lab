@@ -448,6 +448,7 @@ struct fb_gpu_render_owner;
 static enum fb_gpu_drm_node_type gpu_drm_node_from_cdev(cdev_t *cdev);
 static const char *gpu_drm_node_name(enum fb_gpu_drm_node_type type);
 static int gpu_drm_is_primary_like(struct fb_gpu_render_owner *owner);
+static struct pci_device_info *gpu_nouveau_device(void);
 
 struct fb_gpu_render_owner {
     uint64 id;
@@ -4194,25 +4195,33 @@ static int gpu_drm_version(uint64 arg)
 {
     struct drm_version_compat req;
     struct fb_gpu_backend_info backend;
+    const char *driver;
+    const char *desc;
     int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
     gpu_backend_fill(&backend);
+    if (backend.backend == FB_GPU_BACKEND_VIRGL) {
+        driver = "virtio_gpu";
+        desc = backend.renderer[0] ? backend.renderer : "virtio GPU";
+    } else if (gpu_nouveau_device() != NULL) {
+        driver = "nouveau";
+        desc = "xv6 native Nouveau DRM compatibility facade";
+    } else {
+        driver = fb_drm_device.driver_name;
+        desc = backend.renderer[0] ? backend.renderer : fb_drm_device.desc;
+    }
     req.version_major = (int)fb_drm_device.driver_major;
     req.version_minor = (int)fb_drm_device.driver_minor;
     req.version_patchlevel = (int)fb_drm_device.driver_patchlevel;
-    ret = gpu_copyout_string(req.name, &req.name_len,
-                             backend.backend == FB_GPU_BACKEND_VIRGL ?
-                                 "virtio_gpu" : fb_drm_device.driver_name);
+    ret = gpu_copyout_string(req.name, &req.name_len, driver);
     if (ret != 0)
         return ret;
     ret = gpu_copyout_string(req.date, &req.date_len, "20260502");
     if (ret != 0)
         return ret;
-    ret = gpu_copyout_string(req.desc, &req.desc_len,
-                             backend.renderer[0] ? backend.renderer :
-                                 fb_drm_device.desc);
+    ret = gpu_copyout_string(req.desc, &req.desc_len, desc);
     if (ret != 0)
         return ret;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
@@ -4224,10 +4233,37 @@ static int gpu_drm_get_unique(uint64 arg)
 {
     struct drm_unique_compat req;
     struct fb_gpu_backend_info backend;
+    struct pci_device_info *nvdev;
+    char pci_unique[32];
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
     gpu_backend_fill(&backend);
+    nvdev = gpu_nouveau_device();
+    if (nvdev != NULL) {
+        memset(pci_unique, 0, sizeof(pci_unique));
+        pci_unique[0] = 'p';
+        pci_unique[1] = 'c';
+        pci_unique[2] = 'i';
+        pci_unique[3] = ':';
+        pci_unique[4] = '0';
+        pci_unique[5] = '0';
+        pci_unique[6] = '0';
+        pci_unique[7] = '0';
+        pci_unique[8] = ':';
+        pci_unique[9] = "0123456789abcdef"[(nvdev->bus >> 4) & 0xf];
+        pci_unique[10] = "0123456789abcdef"[nvdev->bus & 0xf];
+        pci_unique[11] = ':';
+        pci_unique[12] = "0123456789abcdef"[(nvdev->dev >> 4) & 0xf];
+        pci_unique[13] = "0123456789abcdef"[nvdev->dev & 0xf];
+        pci_unique[14] = '.';
+        pci_unique[15] = '0' + (nvdev->func & 0x7);
+        if (gpu_copyout_string(req.unique, &req.unique_len, pci_unique) != 0)
+            return -EFAULT;
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
     if (gpu_copyout_string(req.unique, &req.unique_len,
                            backend.backend == FB_GPU_BACKEND_HYPERV_DXG ?
                                "vmbus:hyperv-dxg" : "pci:0000:00:04.0") != 0)
