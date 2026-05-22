@@ -608,6 +608,20 @@ struct fb_gpu_stats {
     uint64 drm_auths;          /* primary-node auth ioctls accepted */
     uint64 drm_master_sets;    /* primary-node SET_MASTER successes */
     uint64 drm_master_drops;   /* primary-node DROP_MASTER successes */
+    uint64 nouveau_ioctl_entries; /* Nouveau private ioctl calls entered */
+    uint64 nouveau_fail_closed; /* Nouveau ioctls rejected because absent */
+    uint64 nouveau_getparams;  /* Nouveau GETPARAM calls accepted */
+    uint64 nouveau_channel_allocs; /* Nouveau channel alloc successes */
+    uint64 nouveau_channel_frees; /* Nouveau channel free successes */
+    uint64 nouveau_gem_news;   /* Nouveau GEM_NEW successes */
+    uint64 nouveau_gem_infos;  /* Nouveau GEM_INFO successes */
+    uint64 nouveau_cpu_preps;  /* Nouveau GEM_CPU_PREP successes */
+    uint64 nouveau_cpu_finis;  /* Nouveau GEM_CPU_FINI successes */
+    uint64 nouveau_vm_inits;   /* Nouveau VM_INIT successes */
+    uint64 nouveau_vm_bind_noops; /* zero-op Nouveau VM_BIND successes */
+    uint64 nouveau_pushbuf_noops; /* zero-push Nouveau GEM_PUSHBUF successes */
+    uint64 nouveau_exec_noops; /* zero-push Nouveau EXEC successes */
+    uint64 nouveau_unsupported; /* recognized but not implemented Nouveau ops */
     uint64 kms_framebuffers;   /* currently registered KMS framebuffer IDs */
     uint64 kms_page_flips;     /* accepted KMS page flips */
     uint64 kms_atomic_commits; /* accepted/tested atomic commits */
