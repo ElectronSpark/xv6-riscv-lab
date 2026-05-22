@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <string.h>
 #include <dev/cdev.h>
+#include <dev/drm_core.h>
 #include <dev/fb.h>
 #include <dev/fdt.h>
 #include <dev/pci.h>
@@ -218,10 +219,8 @@ static struct {
     uint32      next_kms_fb_id;
     uint32      next_syncobj_handle;
     uint32      next_dxg_present_source;
-    uint32      next_drm_magic;
     uint64      next_bo_fence;
     uint64      next_render_owner_id;
-    uint64      drm_master_owner_id;
     struct fb_gpu_bo_entry bos[FB_GPU_MAX_BOS];
     struct fb_gpu_kms_fb_entry kms_fbs[FB_GPU_MAX_KMS_FBS];
     struct fb_gpu_syncobj_entry syncobjs[FB_GPU_MAX_SYNCOBJS];
@@ -234,7 +233,6 @@ static struct {
     .next_kms_fb_id = 100,
     .next_syncobj_handle = 1,
     .next_dxg_present_source = 1,
-    .next_drm_magic = 1,
     .next_bo_fence = 1,
     .next_render_owner_id = 1,
     .lock = SPINLOCK_INITIALIZED("fb"),
@@ -415,48 +413,24 @@ static void fb_paint_boot_logo(void)
 
 static cdev_t gpu_cdev;
 
-enum fb_gpu_drm_node_type {
-    FB_GPU_DRM_NODE_LEGACY = 0,
-    FB_GPU_DRM_NODE_PRIMARY,
-    FB_GPU_DRM_NODE_RENDER,
-};
-
-struct fb_gpu_drm_device {
-    const char *driver_name;
-    const char *desc;
-    uint32 driver_major;
-    uint32 driver_minor;
-    uint32 driver_patchlevel;
-};
-
-struct fb_gpu_drm_file {
-    struct fb_gpu_drm_device *dev;
-    enum fb_gpu_drm_node_type node_type;
-    uint32 magic;
-    uint64 client_caps;
-    uint64 ioctl_count;
-    int authenticated;
-    int is_master;
-};
-
-static struct fb_gpu_drm_device fb_drm_device = {
+static const struct drm_core_driver fb_drm_driver = {
     .driver_name = "xv6_gpu",
     .desc = "xv6 DRM compatibility GPU facade",
     .driver_major = 0,
     .driver_minor = 1,
     .driver_patchlevel = 0,
 };
+static struct drm_core_device fb_drm_device;
 
 struct fb_gpu_render_owner;
-static enum fb_gpu_drm_node_type gpu_drm_node_from_cdev(cdev_t *cdev);
-static const char *gpu_drm_node_name(enum fb_gpu_drm_node_type type);
+static enum drm_core_node_type gpu_drm_node_from_cdev(cdev_t *cdev);
 static int gpu_drm_is_primary_like(struct fb_gpu_render_owner *owner);
 static struct pci_device_info *gpu_nouveau_device(void);
 
 struct fb_gpu_render_owner {
     uint64 id;
     pid_t tgid;
-    struct fb_gpu_drm_file drm;
+    struct drm_core_file drm;
     uint32 default_ctx_id;
     uint32 capset_id;
     int nouveau_channel;
@@ -2592,15 +2566,15 @@ static int fb_release(cdev_t *cdev)
 
 static int gpu_open(cdev_t *cdev)
 {
-    enum fb_gpu_drm_node_type type = gpu_drm_node_from_cdev(cdev);
+    enum drm_core_node_type type = gpu_drm_node_from_cdev(cdev);
 
     spin_lock(&fb_state.lock);
     fb_state.stats.gpu_opens++;
     fb_state.stats.gpu_live_opens++;
-    if (type == FB_GPU_DRM_NODE_PRIMARY) {
+    if (type == DRM_CORE_NODE_PRIMARY) {
         fb_state.stats.drm_primary_opens++;
         fb_state.stats.drm_primary_live++;
-    } else if (type == FB_GPU_DRM_NODE_RENDER) {
+    } else if (type == DRM_CORE_NODE_RENDER) {
         fb_state.stats.drm_render_opens++;
         fb_state.stats.drm_render_live++;
     }
@@ -2608,15 +2582,15 @@ static int gpu_open(cdev_t *cdev)
     return 0;
 }
 
-static int gpu_release_node(enum fb_gpu_drm_node_type type)
+static int gpu_release_node(enum drm_core_node_type type)
 {
     spin_lock(&fb_state.lock);
     if (fb_state.stats.gpu_live_opens > 0)
         fb_state.stats.gpu_live_opens--;
-    if (type == FB_GPU_DRM_NODE_PRIMARY &&
+    if (type == DRM_CORE_NODE_PRIMARY &&
         fb_state.stats.drm_primary_live > 0) {
         fb_state.stats.drm_primary_live--;
-    } else if (type == FB_GPU_DRM_NODE_RENDER &&
+    } else if (type == DRM_CORE_NODE_RENDER &&
                fb_state.stats.drm_render_live > 0) {
         fb_state.stats.drm_render_live--;
     }
@@ -3878,56 +3852,28 @@ static uint64 gpu_alloc_render_owner_id(void)
     return id;
 }
 
-static uint32 gpu_alloc_drm_magic(void)
-{
-    uint32 magic;
-
-    spin_lock(&fb_state.lock);
-    magic = fb_state.next_drm_magic++;
-    if (fb_state.next_drm_magic == 0)
-        fb_state.next_drm_magic = 1;
-    if (magic == 0)
-        magic = 1;
-    spin_unlock(&fb_state.lock);
-    return magic;
-}
-
-static enum fb_gpu_drm_node_type gpu_drm_node_from_cdev(cdev_t *cdev)
+static enum drm_core_node_type gpu_drm_node_from_cdev(cdev_t *cdev)
 {
     if (cdev == NULL)
-        return FB_GPU_DRM_NODE_LEGACY;
+        return DRM_CORE_NODE_LEGACY;
     if (cdev->dev.devname != NULL) {
         if (strcmp(cdev->dev.devname, "dri/card0") == 0)
-            return FB_GPU_DRM_NODE_PRIMARY;
+            return DRM_CORE_NODE_PRIMARY;
         if (strcmp(cdev->dev.devname, "dri/renderD128") == 0)
-            return FB_GPU_DRM_NODE_RENDER;
+            return DRM_CORE_NODE_RENDER;
     }
     if (cdev->dev.major == DRM_PRIMARY_MAJOR &&
         cdev->dev.minor == DRM_PRIMARY_MINOR)
-        return FB_GPU_DRM_NODE_PRIMARY;
+        return DRM_CORE_NODE_PRIMARY;
     if (cdev->dev.major == DRM_RENDER_MAJOR &&
         cdev->dev.minor == DRM_RENDER_MINOR)
-        return FB_GPU_DRM_NODE_RENDER;
-    return FB_GPU_DRM_NODE_LEGACY;
-}
-
-static const char *gpu_drm_node_name(enum fb_gpu_drm_node_type type)
-{
-    switch (type) {
-    case FB_GPU_DRM_NODE_PRIMARY:
-        return "primary";
-    case FB_GPU_DRM_NODE_RENDER:
-        return "render";
-    default:
-        return "legacy";
-    }
+        return DRM_CORE_NODE_RENDER;
+    return DRM_CORE_NODE_LEGACY;
 }
 
 static int gpu_drm_is_primary_like(struct fb_gpu_render_owner *owner)
 {
-    return owner != NULL &&
-        (owner->drm.node_type == FB_GPU_DRM_NODE_PRIMARY ||
-         owner->drm.node_type == FB_GPU_DRM_NODE_LEGACY);
+    return owner != NULL && drm_core_is_primary_like(&owner->drm);
 }
 
 static cdev_t gpu_render_cdev;
@@ -4228,12 +4174,12 @@ static int gpu_drm_version(uint64 arg)
         driver = "nouveau";
         desc = "xv6 native Nouveau DRM compatibility facade";
     } else {
-        driver = fb_drm_device.driver_name;
-        desc = backend.renderer[0] ? backend.renderer : fb_drm_device.desc;
+        driver = fb_drm_driver.driver_name;
+        desc = backend.renderer[0] ? backend.renderer : fb_drm_driver.desc;
     }
-    req.version_major = (int)fb_drm_device.driver_major;
-    req.version_minor = (int)fb_drm_device.driver_minor;
-    req.version_patchlevel = (int)fb_drm_device.driver_patchlevel;
+    req.version_major = (int)fb_drm_driver.driver_major;
+    req.version_minor = (int)fb_drm_driver.driver_minor;
+    req.version_patchlevel = (int)fb_drm_driver.driver_patchlevel;
     ret = gpu_copyout_string(req.name, &req.name_len, driver);
     if (ret != 0)
         return ret;
@@ -4338,117 +4284,69 @@ static int gpu_drm_get_cap(uint64 arg)
 
 static int gpu_drm_get_magic(struct fb_gpu_render_owner *owner, uint64 arg)
 {
-    struct drm_auth_compat req;
-
-    if (!gpu_drm_is_primary_like(owner))
-        return -EOPNOTSUPP;
-    req.magic = owner->drm.magic;
-    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
-        return -EFAULT;
-    return 0;
+    if (owner == NULL)
+        return -EBADF;
+    return drm_core_get_magic(&owner->drm, arg);
 }
 
 static int gpu_drm_auth_magic(struct fb_gpu_render_owner *owner, uint64 arg)
 {
-    struct drm_auth_compat req;
+    int ret;
 
-    if (!gpu_drm_is_primary_like(owner))
-        return -EOPNOTSUPP;
-    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-        return -EFAULT;
-    if (req.magic == 0 || req.magic != owner->drm.magic)
-        return -EINVAL;
-    owner->drm.authenticated = 1;
-    spin_lock(&fb_state.lock);
-    fb_state.stats.drm_auths++;
-    spin_unlock(&fb_state.lock);
-    return 0;
+    if (owner == NULL)
+        return -EBADF;
+    ret = drm_core_auth_magic(&owner->drm, arg);
+    if (ret == 0) {
+        spin_lock(&fb_state.lock);
+        fb_state.stats.drm_auths++;
+        spin_unlock(&fb_state.lock);
+    }
+    return ret;
 }
 
 static int gpu_drm_get_client(struct fb_gpu_render_owner *owner, uint64 arg)
 {
-    struct drm_client_compat req;
-
-    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-        return -EFAULT;
-    if (req.idx != 0)
-        return -EINVAL;
-    req.auth = owner ? owner->drm.authenticated : 0;
-    req.pid = owner ? (uint64)owner->tgid : 0;
-    req.uid = 0;
-    req.magic = owner ? owner->drm.magic : 1;
-    spin_lock(&fb_state.lock);
-    req.iocs = owner ? owner->drm.ioctl_count : fb_state.stats.drm_ioctls;
-    spin_unlock(&fb_state.lock);
-    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
-        return -EFAULT;
-    return 0;
+    if (owner == NULL)
+        return -EBADF;
+    return drm_core_get_client(&owner->drm, arg);
 }
 
 static int gpu_drm_set_client_cap(struct fb_gpu_render_owner *owner,
                                   uint64 arg)
 {
-    struct drm_set_client_cap_compat req;
-    uint64 bit;
-
     if (owner == NULL)
         return -EBADF;
-    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-        return -EFAULT;
-    switch (req.capability) {
-    case DRM_CLIENT_CAP_STEREO_3D:
-    case DRM_CLIENT_CAP_UNIVERSAL_PLANES:
-    case DRM_CLIENT_CAP_ATOMIC:
-    case DRM_CLIENT_CAP_ASPECT_RATIO:
-    case DRM_CLIENT_CAP_WRITEBACK_CONNECTORS:
-        break;
-    default:
-        return -EINVAL;
-    }
-    if (req.value > 1)
-        return -EINVAL;
-    bit = 1ULL << req.capability;
-    if (req.value)
-        owner->drm.client_caps |= bit;
-    else
-        owner->drm.client_caps &= ~bit;
-    return 0;
+    return drm_core_set_client_cap(&owner->drm, arg);
 }
 
 static int gpu_drm_set_master(struct fb_gpu_render_owner *owner)
 {
-    if (!gpu_drm_is_primary_like(owner))
-        return -EOPNOTSUPP;
+    int ret;
 
-    spin_lock(&fb_state.lock);
-    if (fb_state.drm_master_owner_id != 0 &&
-        fb_state.drm_master_owner_id != owner->id) {
+    if (owner == NULL)
+        return -EBADF;
+    ret = drm_core_set_master(&owner->drm);
+    if (ret == 0) {
+        spin_lock(&fb_state.lock);
+        fb_state.stats.drm_master_sets++;
         spin_unlock(&fb_state.lock);
-        return -EBUSY;
     }
-    fb_state.drm_master_owner_id = owner->id;
-    fb_state.stats.drm_master_sets++;
-    owner->drm.is_master = 1;
-    owner->drm.authenticated = 1;
-    spin_unlock(&fb_state.lock);
-    return 0;
+    return ret;
 }
 
 static int gpu_drm_drop_master(struct fb_gpu_render_owner *owner)
 {
-    if (!gpu_drm_is_primary_like(owner))
-        return -EOPNOTSUPP;
+    int ret;
 
-    spin_lock(&fb_state.lock);
-    if (fb_state.drm_master_owner_id != owner->id || !owner->drm.is_master) {
+    if (owner == NULL)
+        return -EBADF;
+    ret = drm_core_drop_master(&owner->drm);
+    if (ret == 0) {
+        spin_lock(&fb_state.lock);
+        fb_state.stats.drm_master_drops++;
         spin_unlock(&fb_state.lock);
-        return -EINVAL;
     }
-    fb_state.drm_master_owner_id = 0;
-    fb_state.stats.drm_master_drops++;
-    owner->drm.is_master = 0;
-    spin_unlock(&fb_state.lock);
-    return 0;
+    return ret;
 }
 
 static int gpu_drm_get_stats(uint64 arg)
@@ -6074,8 +5972,8 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         return -EBADF;
 
     owner->drm.ioctl_count++;
-    if (owner->drm.node_type == FB_GPU_DRM_NODE_PRIMARY ||
-        owner->drm.node_type == FB_GPU_DRM_NODE_RENDER) {
+    if (owner->drm.node_type == DRM_CORE_NODE_PRIMARY ||
+        owner->drm.node_type == DRM_CORE_NODE_RENDER) {
         spin_lock(&fb_state.lock);
         fb_state.stats.drm_ioctls++;
         spin_unlock(&fb_state.lock);
@@ -6454,7 +6352,7 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         fb_state.stats.drm_unknown_ioctls++;
         spin_unlock(&fb_state.lock);
         printf("DRM: unknown ioctl node=%s owner=%lu tgid=%d cmd=0x%lx\n",
-               gpu_drm_node_name(owner->drm.node_type),
+               drm_core_node_name(owner->drm.node_type),
                owner->id, owner->tgid, cmd);
         return -EINVAL;
     }
@@ -6469,10 +6367,7 @@ static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
     if (file != NULL)
         file->private_data = NULL;
     if (owner != NULL) {
-        spin_lock(&fb_state.lock);
-        if (fb_state.drm_master_owner_id == owner->id)
-            fb_state.drm_master_owner_id = 0;
-        spin_unlock(&fb_state.lock);
+        drm_core_release_file(&owner->drm);
         gpu_kms_destroy_owner_fbs(owner);
         gpu_syncobj_destroy_owner(owner);
         fb_gpu_destroy_render_owner(owner->id);
@@ -6639,15 +6534,13 @@ static int gpu_open_file(cdev_t *cdev, struct vfs_file *file)
     memset(owner, 0, sizeof(*owner));
     owner->id = gpu_alloc_render_owner_id();
     owner->tgid = current ? current->tgid : 0;
-    owner->drm.dev = &fb_drm_device;
-    owner->drm.node_type = gpu_drm_node_from_cdev(cdev);
-    owner->drm.magic = gpu_alloc_drm_magic();
-    owner->drm.authenticated =
-        owner->drm.node_type != FB_GPU_DRM_NODE_PRIMARY;
+    drm_core_file_init(&fb_drm_device, &owner->drm,
+                       gpu_drm_node_from_cdev(cdev),
+                       owner->id, owner->tgid);
     file->ops = &gpu_file_ops;
     file->private_data = owner;
     printf("DRM: open node=%s owner=%lu tgid=%d magic=%u\n",
-           gpu_drm_node_name(owner->drm.node_type), owner->id, owner->tgid,
+           drm_core_node_name(owner->drm.node_type), owner->id, owner->tgid,
            owner->drm.magic);
     return 0;
 }
@@ -6735,6 +6628,7 @@ static bool fb_cdev_registered;
 static bool gpu_cdev_registered;
 static bool gpu_primary_cdev_registered;
 static bool gpu_render_cdev_registered;
+static bool fb_drm_device_initialized;
 
 static int fb_register_cdev(void)
 {
@@ -6751,6 +6645,11 @@ static int fb_register_cdev(void)
 static int gpu_register_base_devices(void)
 {
     int ret;
+
+    if (!fb_drm_device_initialized) {
+        drm_core_device_init(&fb_drm_device, &fb_drm_driver);
+        fb_drm_device_initialized = true;
+    }
 
     if (!gpu_cdev_registered) {
         ret = cdev_register(&gpu_cdev);

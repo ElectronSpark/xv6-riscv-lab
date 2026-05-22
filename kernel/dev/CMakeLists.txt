@@ -2,6 +2,7 @@ add_library(dev OBJECT
     dev.c
     dev_test.c
     cdev.c
+    drm_core.c
     blkdev.c
     iosched.c
     nullrand.c
