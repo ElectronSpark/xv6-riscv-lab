@@ -43,6 +43,21 @@ struct hyperv_dxg_status {
     uint32 global_rx_packets;
     uint32 vgpu_rx_packets;
 };
+struct hyperv_video_status {
+    int present;
+    int gpadl_ok;
+    int open_ok;
+    int initialized;
+    int dirt_needed;
+    uint32 child_relid;
+    uint32 gpadl_status;
+    uint32 open_status;
+    uint64 vram_gpa;
+    uint32 width;
+    uint32 height;
+    uint32 pitch;
+    uint32 bpp;
+};
 typedef struct page_struct page_t;
 
 // start_kernel.c
@@ -77,12 +92,17 @@ void hyperv_input_intr(void);
 void hyperv_storvsc_init(void);
 void hyperv_netvsc_init(void);
 void hyperv_video_dirty(uint32 x, uint32 y, uint32 w, uint32 h);
+int hyperv_video_get_status(struct hyperv_video_status *status);
 int hyperv_dxg_transport_ready(void);
 int hyperv_dxg_d3dkmt_ready(void);
 int hyperv_dxg_get_status(struct hyperv_dxg_status *status);
-void hyperv_dxg_note_pci(uint32 device, uint32 guid0, uint32 guid1,
-                         uint32 guid2, uint32 guid3, uint32 vmbus_version,
-                         uint32 luid_low, uint32 luid_high);
+void hyperv_dxg_note_pci(uint32 domain, uint32 bus, uint32 dev, uint32 func,
+                         uint32 vendor, uint32 device, uint32 class_code,
+                         uint32 guid0, uint32 guid1, uint32 guid2,
+                         uint32 guid3, uint32 vmbus_version,
+                         uint32 luid_low, uint32 luid_high,
+                         uint32 guestcaps_offset, uint32 guestcaps_value,
+                         uint32 guestcaps_readback, int guestcaps_ret);
 void ps2kbd_init(void);
 void consoleintr(int);
 void consputc(int);

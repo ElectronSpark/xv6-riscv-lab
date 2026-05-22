@@ -46,6 +46,71 @@
 #define FB_GPU_DISPLAY_PROBE 0x462B /* query current, host, and EDID modes */
 #define FB_GPU_BACKEND_QUERY 0x462C /* query active render backend */
 #define FB_GPU_DISPLAY_WAIT  0x462D /* query/wait display present completion */
+#define FB_GPU_BO_INFO       0x462E /* query read-only BO metadata */
+#define FB_GPU_DXG_PRESENT_SOURCE_REGISTER 0x462F /* declare opened DXG source */
+#define FB_GPU_DXG_PRESENT_SOURCE_COMMIT   0x4630 /* present registered DXG source */
+#define FB_GPU_DXG_PRESENT_SOURCE_QUERY    0x4631 /* query fail-closed DXG source */
+
+#define FB_GPU_DXG_DISPLAY_TARGET_NONE          0
+#define FB_GPU_DXG_PRESENT_MISSING_NONE         0
+#define FB_GPU_DXG_PRESENT_MISSING_SCANOUT_BIND 1
+
+#define FB_GPU_DXG_PRESENT_HOST_SYNTHVID        0x1
+#define FB_GPU_DXG_PRESENT_HOST_DXG             0x2
+#define FB_GPU_DXG_PRESENT_REJECT_SYNTHVID_GPA_ONLY 0x1
+#define FB_GPU_DXG_PRESENT_REJECT_DXG_NO_DISPLAY_BIND 0x2
+
+#define FB_GPU_DXG_PRESENT_LANE_NONE            0
+#define FB_GPU_DXG_PRESENT_LANE_HELPER_SCANOUT_BIND 1
+#define FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT   0x0001
+#define FB_GPU_DXG_PRESENT_BLOCK_SYNTHVID_GPA_ONLY 0x0002
+#define FB_GPU_DXG_PRESENT_BLOCK_DXG_NO_DISPLAY_BIND 0x0004
+#define FB_GPU_DXG_PRESENT_BLOCK_LUID_UNVERIFIED 0x0008
+#define FB_GPU_DXG_PRESENT_BLOCK_NO_REGISTERED_SOURCE 0x0010
+#define FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED 0x0020
+#define FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH 0x0040
+#define FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION 0x0080
+#define FB_GPU_DXG_PRESENT_BLOCK_ALL \
+    (FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT | \
+     FB_GPU_DXG_PRESENT_BLOCK_SYNTHVID_GPA_ONLY | \
+     FB_GPU_DXG_PRESENT_BLOCK_DXG_NO_DISPLAY_BIND | \
+     FB_GPU_DXG_PRESENT_BLOCK_LUID_UNVERIFIED | \
+     FB_GPU_DXG_PRESENT_BLOCK_NO_REGISTERED_SOURCE | \
+     FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED | \
+     FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH | \
+     FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION)
+
+#define FB_GPU_DXG_PRESENT_PROV_DXG_FD          0x0001
+#define FB_GPU_DXG_PRESENT_PROV_RESOURCE_FD     0x0002
+#define FB_GPU_DXG_PRESENT_PROV_D3DKMT_HANDLES  0x0004
+#define FB_GPU_DXG_PRESENT_PROV_DIMENSIONS      0x0008
+#define FB_GPU_DXG_PRESENT_PROV_ADAPTER_LUID    0x0010
+
+#define FB_GPU_DXG_PRESENT_ADAPTER_UNKNOWN      0
+#define FB_GPU_DXG_PRESENT_ADAPTER_UNVERIFIED   1
+#define FB_GPU_DXG_PRESENT_ADAPTER_MATCH        2
+#define FB_GPU_DXG_PRESENT_ADAPTER_MISMATCH     3
+
+#define FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_NONE   0
+#define FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_VMBUS  1
+#define FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_HVSOCK 2
+#define FB_GPU_DXG_PRESENT_HELPER_OP_SCANOUT_BIND  1
+
+#define FB_GPU_DXG_PRESENT_META_DEVICE       0x0001
+#define FB_GPU_DXG_PRESENT_META_RESOURCE     0x0002
+#define FB_GPU_DXG_PRESENT_META_ALLOCATION   0x0004
+#define FB_GPU_DXG_PRESENT_META_DIMENSIONS   0x0008
+#define FB_GPU_DXG_PRESENT_META_FORMAT       0x0010
+#define FB_GPU_DXG_PRESENT_META_MODIFIER     0x0020
+#define FB_GPU_DXG_PRESENT_META_SYNC_OBJECT  0x0040
+#define FB_GPU_DXG_PRESENT_META_FENCE_VALUE  0x0080
+#define FB_GPU_DXG_PRESENT_META_ADAPTER_LUID 0x0100
+
+#define FB_GPU_DXG_PRESENT_LIFE_SOURCE_REGISTERED 0x0001
+#define FB_GPU_DXG_PRESENT_LIFE_HANDLES_VALID     0x0002
+#define FB_GPU_DXG_PRESENT_LIFE_SYNC_VALID        0x0004
+#define FB_GPU_DXG_PRESENT_LIFE_HOST_COMPLETION   0x0008
+#define FB_GPU_DXG_PRESENT_LIFE_NO_CPU_READBACK   0x0010
 
 #define FB_GPU_DISPLAY_F_HOST_SCANOUT 0x1 /* host/raw virtio scanout is valid */
 #define FB_GPU_DISPLAY_F_EDID         0x2 /* preferred_* came from EDID */
@@ -61,6 +126,9 @@
 #define FB_GPU_BACKEND_F_DXG_TRANSPORT  0x0008
 #define FB_GPU_BACKEND_F_D3DKMT         0x0010
 #define FB_GPU_BACKEND_F_OPENGL_SUBMIT  0x0020
+#define FB_GPU_BACKEND_F_DXG_SHARED_RESOURCE 0x0040
+#define FB_GPU_BACKEND_F_DXG_SAME_ADAPTER    0x0080
+#define FB_GPU_BACKEND_F_DXG_NO_READBACK     0x0100
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
@@ -69,6 +137,10 @@
 #define FB_GPU_VIRGL_SUBMIT_ASYNC 0x1 /* return once the command is queued */
 #define FB_GPU_VIRGL_SUBMIT_FORCE_FAIL 0x80000000u /* test-only context fault */
 #define FB_GPU_DISPLAY_WAIT_F_WAIT 0x1 /* wait_for must be complete */
+#define FB_GPU_DXG_PRESENT_F_WAIT_SYNC 0x1 /* wait for sync_object/fence_value */
+
+#define FB_GPU_BO_FORMAT_XRGB8888 0x34325258u /* DRM_FORMAT_XRGB8888 */
+#define FB_GPU_BO_MOD_LINEAR      0ULL        /* DRM_FORMAT_MOD_LINEAR */
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -228,6 +300,142 @@ struct fb_gpu_bo_import_fd {
     uint32   handle;         /* returned caller-local imported BO handle */
     uint64   size;           /* returned mapping size */
     uint64   addr;           /* returned caller-local mapping */
+};
+
+struct fb_gpu_bo_info {
+    uint32   handle;         /* existing BO handle */
+    uint32   flags;          /* reserved, must be 0 */
+    uint32   width;          /* returned width in pixels */
+    uint32   height;         /* returned height in pixels */
+    uint32   pitch;          /* returned pitch in bytes */
+    uint32   format;         /* FB_GPU_BO_FORMAT_* */
+    uint64   modifier;       /* FB_GPU_BO_MOD_* */
+    uint64   size;           /* returned mapping size */
+    uint64   addr_align;     /* required CPU VA alignment for create/import */
+    uint64   size_align;     /* allocation size granularity */
+    uint32   page_size;      /* backing page size */
+    uint32   reserved;
+    uint64   mmap_offset;    /* render-node mmap offset for this handle */
+};
+
+/*
+ * Future Hyper-V DXG display handoff ABI.
+ *
+ * These structs describe an already-opened same-adapter D3DKMT resource and
+ * allocation.  They intentionally do not create a D3D12 object from an fb BO;
+ * userspace must first import/open the shared DXG resource through /dev/dxg.
+ */
+struct fb_gpu_dxg_present_source_register {
+    int32    dxg_fd;          /* /dev/dxg fd that owns the D3DKMT handles */
+    int32    resource_fd;     /* optional anon_inode:dxgresource provenance */
+    uint32   device;          /* opened D3DKMT device handle */
+    uint32   resource;        /* opened D3DKMT resource handle */
+    uint32   allocation;      /* allocation selected for display */
+    uint32   allocation_count; /* opened resource allocation count */
+    uint32   width;
+    uint32   height;
+    uint32   pitch;
+    uint32   format;         /* FB_GPU_BO_FORMAT_* / DRM fourcc */
+    uint64   modifier;       /* FB_GPU_BO_MOD_* */
+    uint64   reserved0;
+    uint32   flags;          /* reserved, must be 0 */
+    uint32   present_source;  /* returned display-local source handle */
+    /*
+     * Optional diagnostics tail.  Keep the stable register prefix above
+     * append-only so older fail-closed callers do not have their reserved
+     * flags/present_source fields reinterpreted as provenance metadata.
+     */
+    uint32   adapter_luid_low; /* optional DXG adapter LUID identity */
+    uint32   adapter_luid_high;
+    uint32   provenance_flags; /* optional FB_GPU_DXG_PRESENT_PROV_* hints */
+    uint32   reserved1;
+};
+
+struct fb_gpu_dxg_present_source_commit {
+    uint32   present_source;  /* handle returned by DXG_PRESENT_SOURCE_REGISTER */
+    uint32   flags;           /* FB_GPU_DXG_PRESENT_F_* */
+    uint32   sync_object;     /* optional opened D3DKMT sync object */
+    uint32   reserved;
+    uint64   fence_value;     /* wait target when WAIT_SYNC is set */
+    uint64   present_id;      /* returned display-present sequence */
+    uint64   completed;       /* returned completed display sequence */
+};
+
+struct fb_gpu_dxg_present_source_query {
+    uint32   present_source;  /* optional source handle to inspect */
+    uint32   flags;           /* reserved, must be 0 */
+    uint32   display_target_kind; /* FB_GPU_DXG_DISPLAY_TARGET_* */
+    uint32   source_live;     /* nonzero when present_source is registered */
+    uint64   present_id;      /* always 0 until host helper exists */
+    uint64   completed;       /* always 0 until host helper exists */
+    uint64   host_handoff_missing; /* commits blocked before host helper */
+    uint64   requires_host_protocol; /* nonzero while fail-closed */
+    uint64   missing_host_abi; /* FB_GPU_DXG_PRESENT_MISSING_* */
+    uint64   helper_contract_version;
+    uint64   helper_required_metadata;
+    uint64   helper_transport;
+    uint64   helper_transport_present;
+    uint64   helper_operation;
+    uint64   helper_lifetime;
+    uint64   helper_requires_completion;
+    uint32   device;
+    uint32   resource;
+    uint32   allocation;
+    uint32   allocation_count;
+    uint32   sync_object;
+    uint32   last_flags;
+    uint64   fence_value;
+    uint64   last_ret;
+    int32    dxg_fd;
+    int32    resource_fd;
+    uint32   provenance_flags;
+    uint32   selected_lane;
+    uint32   adapter_luid_low;
+    uint32   adapter_luid_high;
+    uint32   adapter_identity;
+    uint32   helper_block_reason;
+    uint64   host_candidates;
+    uint64   host_rejects;
+};
+
+/*
+ * Contract for a future host-display-helper resource scanout bind.
+ *
+ * This is intentionally not wired to an ioctl yet.  The current kernel has no
+ * discoverable Hyper-V socket service or VMBus offer for such a helper, and
+ * synthvid only accepts a guest physical VRAM address plus dirty rectangles.
+ * A real helper must consume the same-adapter D3DKMT handles below and return
+ * host-correlated present/completion sequence numbers before
+ * FB_GPU_DXG_PRESENT_SOURCE_COMMIT can report success.
+ */
+struct fb_gpu_dxg_present_host_bind_contract {
+    uint32 version;       /* set to 1 */
+    uint32 transport;     /* FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_* */
+    uint32 operation;     /* FB_GPU_DXG_PRESENT_HELPER_OP_* */
+    uint32 flags;         /* FB_GPU_DXG_PRESENT_F_* */
+    uint32 device;
+    uint32 resource;
+    uint32 allocation;
+    uint32 allocation_count;
+    uint32 sync_object;
+    uint32 width;
+    uint32 height;
+    uint32 pitch;
+    uint32 format;
+    uint32 adapter_luid_low;
+    uint32 adapter_luid_high;
+    uint32 reserved;
+    uint64 modifier;
+    uint64 fence_value;
+    uint64 present_id;
+    uint64 completed;
+    uint64 provenance_flags;
+    uint64 selected_lane;
+    uint64 helper_block_reason;
+    int32 dxg_fd;
+    int32 resource_fd;
+    uint32 adapter_identity;
+    uint32 reserved2;
 };
 
 struct fb_gpu_bo_fence {
@@ -391,6 +599,28 @@ struct fb_gpu_stats {
     uint64 gpu_opens;          /* /dev/gpu0 opens */
     uint64 gpu_live_opens;     /* currently open /dev/gpu0 handles */
     uint64 gpu_ioctls;         /* /dev/gpu0 render-device ioctl calls */
+    uint64 drm_primary_opens;  /* /dev/dri/card0 opens */
+    uint64 drm_render_opens;   /* /dev/dri/renderD128 opens */
+    uint64 drm_primary_live;   /* currently open primary DRM files */
+    uint64 drm_render_live;    /* currently open render DRM files */
+    uint64 drm_ioctls;         /* DRM ioctl calls through card/render nodes */
+    uint64 drm_unknown_ioctls; /* unknown DRM ioctl commands rejected */
+    uint64 drm_auths;          /* primary-node auth ioctls accepted */
+    uint64 drm_master_sets;    /* primary-node SET_MASTER successes */
+    uint64 drm_master_drops;   /* primary-node DROP_MASTER successes */
+    uint64 kms_framebuffers;   /* currently registered KMS framebuffer IDs */
+    uint64 kms_page_flips;     /* accepted KMS page flips */
+    uint64 kms_atomic_commits; /* accepted/tested atomic commits */
+    uint64 ttm_system_bytes;   /* BO bytes in system placement */
+    uint64 ttm_tt_bytes;       /* BO bytes in GART/TT placement */
+    uint64 ttm_vram_bytes;     /* BO bytes in VRAM placement */
+    uint64 ttm_stolen_bytes;   /* BO bytes in stolen/scanout placement */
+    uint64 ttm_pinned_bytes;   /* BO bytes with nonzero pin count */
+    uint64 ttm_validate_failures; /* rejected placement/validation requests */
+    uint64 syncobj_created;    /* DRM syncobjs created */
+    uint64 syncobj_live;       /* currently live DRM syncobjs */
+    uint64 syncobj_signals;    /* binary/timeline signal operations */
+    uint64 syncobj_waits;      /* binary/timeline wait operations */
     uint64 virtio_commands;    /* virtio-gpu control commands completed */
     uint64 virtio_failures;    /* virtio-gpu commands rejected or failed */
     uint64 virtio_timeouts;    /* virtio-gpu commands timed out */
@@ -418,6 +648,64 @@ struct fb_gpu_stats {
     uint64 dxg_d3dkmt;        /* nonzero when D3DKMT ioctls are implemented */
     uint64 dxg_global_rx;     /* packets drained from global DXG channel */
     uint64 dxg_vgpu_rx;       /* packets drained from vGPU DXG channel */
+    uint64 dxg_present_register_ioctl_entries; /* register ioctl entered */
+    uint64 dxg_present_commit_ioctl_entries; /* commit ioctl entered */
+    uint64 dxg_present_query_ioctl_entries; /* query ioctl entered */
+    uint64 dxg_present_register_copyin_failures; /* register copyin faults */
+    uint64 dxg_present_commit_copyin_failures; /* commit copyin faults */
+    uint64 dxg_present_query_copyin_failures; /* query copyin faults */
+    uint64 dxg_present_query_copyout_failures; /* query copyout faults */
+    uint64 dxg_present_register_attempts; /* DXG source register attempts */
+    uint64 dxg_present_register_successes; /* accepted inert DXG sources */
+    uint64 dxg_present_register_rejects; /* rejected DXG source registers */
+    uint64 dxg_present_commit_attempts; /* DXG source commit attempts */
+    uint64 dxg_present_commit_rejects; /* rejected DXG source commits */
+    uint64 dxg_present_query_attempts; /* DXG source query attempts */
+    uint64 dxg_present_query_rejects; /* fail-closed DXG source queries */
+    uint64 dxg_present_host_handoff_missing; /* commits blocked before host */
+    uint64 dxg_present_last_source; /* last registered/committed source */
+    uint64 dxg_present_last_ret;    /* last DXG present-source errno */
+    uint64 dxg_present_last_device; /* last D3DKMT device handle */
+    uint64 dxg_present_last_resource; /* last D3DKMT resource handle */
+    uint64 dxg_present_last_allocation; /* last D3DKMT allocation handle */
+    uint64 dxg_present_last_sync;   /* last D3DKMT sync object handle */
+    uint64 dxg_present_last_flags;  /* last register/commit flags */
+    uint64 dxg_present_last_fence_value; /* last requested wait fence */
+    uint64 dxg_present_last_width;  /* last source width */
+    uint64 dxg_present_last_height; /* last source height */
+    uint64 dxg_present_last_pitch;  /* last source pitch */
+    uint64 dxg_present_last_format; /* last source format */
+    uint64 dxg_present_last_allocation_count; /* source allocation count */
+    uint64 dxg_present_last_dxg_fd; /* registered /dev/dxg fd, or 0xffffffff */
+    uint64 dxg_present_last_resource_fd; /* dxgresource fd, or 0xffffffff */
+    uint64 dxg_present_last_provenance; /* FB_GPU_DXG_PRESENT_PROV_* */
+    uint64 dxg_present_last_adapter_luid_low; /* optional source LUID low */
+    uint64 dxg_present_last_adapter_luid_high; /* optional source LUID high */
+    uint64 dxg_present_last_adapter_identity; /* FB_GPU_DXG_PRESENT_ADAPTER_* */
+    uint64 dxg_present_selected_lane; /* FB_GPU_DXG_PRESENT_LANE_* */
+    uint64 dxg_present_helper_block_reason; /* FB_GPU_DXG_PRESENT_BLOCK_* */
+    uint64 dxg_present_display_target_kind; /* FB_GPU_DXG_DISPLAY_TARGET_* */
+    uint64 dxg_present_requires_host_protocol; /* no kernel/host bind ABI */
+    uint64 dxg_present_missing_host_abi; /* FB_GPU_DXG_PRESENT_MISSING_* */
+    uint64 dxg_present_host_candidates; /* FB_GPU_DXG_PRESENT_HOST_* */
+    uint64 dxg_present_host_rejects; /* FB_GPU_DXG_PRESENT_REJECT_* */
+    uint64 dxg_present_synthvid_state; /* present/open/init/dirt bitfield */
+    uint64 dxg_present_synthvid_vram_gpa; /* current synthvid VRAM GPA */
+    uint64 dxg_present_dxg_state; /* global/vgpu/d3dkmt readiness bitfield */
+    uint64 dxg_present_helper_contract_version; /* passive helper ABI version */
+    uint64 dxg_present_helper_required_metadata; /* FB_GPU_DXG_PRESENT_META_* */
+    uint64 dxg_present_helper_transport; /* FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_* */
+    uint64 dxg_present_helper_transport_present; /* nonzero once host service exists */
+    uint64 dxg_present_helper_operation; /* FB_GPU_DXG_PRESENT_HELPER_OP_* */
+    uint64 dxg_present_helper_lifetime; /* FB_GPU_DXG_PRESENT_LIFE_* */
+    uint64 dxg_present_helper_source_live; /* registered source still tracked */
+    uint64 dxg_present_helper_requires_completion; /* present_id/completed required */
+    uint64 dxg_present_commit_no_source; /* commits without live registered source */
+    uint64 dxg_present_commit_bad_flags; /* commits rejected by flags/sync contract */
+    uint64 dxg_present_commit_adapter_mismatch; /* source/target adapter mismatch */
+    uint64 dxg_present_commit_resource_fd_unverified; /* no verifiable dxgresource fd */
+    uint64 dxg_present_commit_no_transport; /* no host helper transport available */
+    uint64 dxg_present_commit_no_completion; /* no present completion source */
     uint64 display_presents;  /* display present/flush operations issued */
     uint64 display_completions; /* display present completions observed */
     uint64 display_last_present; /* latest issued display-present sequence */

@@ -108,6 +108,7 @@ struct pci_common_confspace_header {
 #define PCI_DEVICE_E1000    0x100e
 #define PCI_VENDOR_VIRTIO   0x1AF4
 #define PCI_VENDOR_MICROSOFT 0x1414
+#define PCI_VENDOR_NVIDIA   0x10DE
 #define PCI_DEVICE_MS_VIRTUAL_RENDER 0x008e
 #define PCI_DEVICE_MS_COMPUTE_ACCELERATOR 0x008a
 #define PCI_DEVICE_VIRTIO_BLK_TRANSITIONAL 0x1001 // virtio block (transitional)
@@ -167,77 +168,46 @@ struct virtio_pci_common_cfg {
     uint64 queue_device;           // 0x30 - RW (used)
 };
 
-// x86 PCI configuration space access via I/O ports 0xCF8/0xCFC
-#if defined(__x86_64__) || defined(__i386__)
+struct pci_config_backend_ops {
+    int (*read)(void *ctx, uint32 token, uint16 offset, uint8 size,
+                uint32 *value);
+    int (*write)(void *ctx, uint32 token, uint16 offset, uint8 size,
+                 uint32 value);
+};
 
-#define PCI_CONFIG_ADDR  0xCF8
-#define PCI_CONFIG_DATA  0xCFC
+struct pci_virtual_child {
+    uint32 backend_index;
+    uint32 backend_token;
+    uint16 vendor_id;
+    uint16 device_id;
+    uint32 class_code;
+    uint8 revision_id;
+    uint8 header_type;
+    uint16 subsystem_vendor_id;
+    uint16 subsystem_id;
+    uint8 irq_line;
+};
 
-static inline void pci_outl(uint16 port, uint32 val)
-{
-    asm volatile("outl %0, %1" : : "a"(val), "Nd"(port));
-}
+uint32 pci_config_read32(uint8 bus, uint8 dev, uint8 func, uint16 offset);
+uint16 pci_config_read16(uint8 bus, uint8 dev, uint8 func, uint16 offset);
+uint8 pci_config_read8(uint8 bus, uint8 dev, uint8 func, uint16 offset);
+int pci_config_try_write32(uint8 bus, uint8 dev, uint8 func, uint16 offset,
+                           uint32 val);
+void pci_config_write32(uint8 bus, uint8 dev, uint8 func, uint16 offset,
+                        uint32 val);
+void pci_config_write16(uint8 bus, uint8 dev, uint8 func, uint16 offset,
+                        uint16 val);
+void pci_config_write8(uint8 bus, uint8 dev, uint8 func, uint16 offset,
+                       uint8 val);
 
-static inline uint32 pci_inl(uint16 port)
-{
-    uint32 val;
-    asm volatile("inl %1, %0" : "=a"(val) : "Nd"(port));
-    return val;
-}
-
-static inline uint32 pci_config_read32(uint8 bus, uint8 dev, uint8 func,
-                                       uint8 offset)
-{
-    uint32 addr = (1U << 31) | ((uint32)bus << 16) | ((uint32)dev << 11) |
-                  ((uint32)func << 8) | (offset & 0xFC);
-    pci_outl(PCI_CONFIG_ADDR, addr);
-    return pci_inl(PCI_CONFIG_DATA);
-}
-
-static inline void pci_config_write32(uint8 bus, uint8 dev, uint8 func,
-                                      uint8 offset, uint32 val)
-{
-    uint32 addr = (1U << 31) | ((uint32)bus << 16) | ((uint32)dev << 11) |
-                  ((uint32)func << 8) | (offset & 0xFC);
-    pci_outl(PCI_CONFIG_ADDR, addr);
-    pci_outl(PCI_CONFIG_DATA, val);
-}
-
-static inline uint16 pci_config_read16(uint8 bus, uint8 dev, uint8 func,
-                                       uint8 offset)
-{
-    uint32 val = pci_config_read32(bus, dev, func, offset & 0xFC);
-    return (val >> ((offset & 2) * 8)) & 0xFFFF;
-}
-
-static inline uint8 pci_config_read8(uint8 bus, uint8 dev, uint8 func,
-                                     uint8 offset)
-{
-    uint32 val = pci_config_read32(bus, dev, func, offset & 0xFC);
-    return (val >> ((offset & 3) * 8)) & 0xFF;
-}
-
-static inline void pci_config_write16(uint8 bus, uint8 dev, uint8 func,
-                                      uint8 offset, uint16 newval)
-{
-    uint32 old = pci_config_read32(bus, dev, func, offset & 0xFC);
-    int shift = (offset & 2) * 8;
-    old &= ~(0xFFFFU << shift);
-    old |= ((uint32)newval << shift);
-    pci_config_write32(bus, dev, func, offset & 0xFC, old);
-}
-
-static inline void pci_config_write8(uint8 bus, uint8 dev, uint8 func,
-                                     uint8 offset, uint8 newval)
-{
-    uint32 old = pci_config_read32(bus, dev, func, offset & 0xFC);
-    int shift = (offset & 3) * 8;
-    old &= ~(0xFFU << shift);
-    old |= ((uint32)newval << shift);
-    pci_config_write32(bus, dev, func, offset & 0xFC, old);
-}
-
-#endif /* __x86_64__ || __i386__ */
+int pci_register_config_backend(const char *name,
+                                const struct pci_config_backend_ops *ops,
+                                void *ctx);
+int pci_register_virtual_child(const struct pci_virtual_child *child,
+                               uint8 *bus_out, uint8 *dev_out,
+                               uint8 *func_out);
+int pci_probe_virtual_bdf(uint8 bus, uint8 dev, uint8 func);
+void pci_probe_registered_virtual_children(void);
 
 // PCI device info passed to drivers during init
 struct pci_device_info {
@@ -268,6 +238,7 @@ struct virtio_pci_discovery *pci_get_virtio_blk(int index);
 struct virtio_pci_discovery *pci_get_virtio_gpu(int index);
 struct virtio_pci_discovery *pci_get_virtio_input(int index);
 struct virtio_pci_discovery *pci_get_virtio_net(int index);
+struct pci_device_info *pci_get_nvidia_gpu(int index);
 
 // Prototype
 void pci_init(void);

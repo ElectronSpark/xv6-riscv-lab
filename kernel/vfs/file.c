@@ -558,6 +558,8 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
          * isatty() works correctly.
          */
         if (file->ops != NULL) {
+            if (file->ops->stat != NULL)
+                return file->ops->stat(file, stat);
             memset(stat, 0, sizeof(*stat));
             stat->st_mode = S_IFCHR | 0666;
             stat->st_blksize = 4096;

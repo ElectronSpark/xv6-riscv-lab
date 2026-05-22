@@ -33,395 +33,43 @@
 #include <vfs/file.h>
 #include <vfs/poll.h>
 #include <vfs/vfs_types.h>
+#include <uabi/drm.h>
 
 #if defined(__x86_64__) || defined(__i386__)
 
 #define FB_GPU_MAX_BOS 128
+#define FB_GPU_MAX_KMS_FBS 32
+#define FB_GPU_MAX_SYNCOBJS 128
+#define FB_GPU_MAX_SYNCOBJ_STATES 128
+#define FB_GPU_MAX_DXG_PRESENT_SOURCES 32
+#define FB_GPU_DXG_MISSING_PRESENT_BIND "dxg-resource-scanout-bind"
+#define FB_GPU_DXG_MISSING_PRESENT_HELPER \
+    "host-display-helper/resource-scanout-bind"
+#define FB_GPU_DXG_WSL_PRESENTHISTORYTOKEN_CMD 34U
+#define FB_GPU_DXG_WSL_SETREDIRECTEDFLIPFENCEVALUE_CMD 35U
+#define FB_GPU_DXG_WSL_BLT_CMD 38U
 #define FB_GPU_D3D12_HEAP_ALIGN (64ULL * 1024ULL)
 #define FB_GPU_ALIGN_UP(x, a) ((((uint64)(x)) + ((uint64)(a) - 1)) & ~((uint64)(a) - 1))
 
-#define DRM_IOCTL_VERSION                      0xc0406400UL
-#define DRM_IOCTL_GET_UNIQUE                   0xc0106401UL
-#define DRM_IOCTL_GET_MAGIC                    0x80046402UL
-#define DRM_IOCTL_GET_CLIENT                   0xc0286405UL
-#define DRM_IOCTL_GET_STATS                    0x80f86406UL
-#define DRM_IOCTL_SET_VERSION                  0xc0106407UL
-#define DRM_IOCTL_GET_CAP                      0xc010640cUL
-#define DRM_IOCTL_SET_CLIENT_CAP               0x4010640dUL
-#define DRM_IOCTL_AUTH_MAGIC                   0x40046411UL
-#define DRM_IOCTL_SET_MASTER                   0x0000641eUL
-#define DRM_IOCTL_DROP_MASTER                  0x0000641fUL
-#define DRM_IOCTL_GEM_CLOSE                    0x40086409UL
-#define DRM_IOCTL_PRIME_HANDLE_TO_FD           0xc00c642dUL
-#define DRM_IOCTL_PRIME_FD_TO_HANDLE           0xc00c642eUL
-#define DRM_IOCTL_WAIT_VBLANK                  0xc018643aUL
-#define DRM_IOCTL_MODE_GETRESOURCES            0xc04064a0UL
-#define DRM_IOCTL_MODE_GETCRTC                 0xc06864a1UL
-#define DRM_IOCTL_MODE_GETENCODER              0xc01464a6UL
-#define DRM_IOCTL_MODE_GETCONNECTOR            0xc05064a7UL
-#define DRM_IOCTL_MODE_GETPROPERTY             0xc04064aaUL
-#define DRM_IOCTL_MODE_GETPROPBLOB             0xc01064acUL
-#define DRM_IOCTL_MODE_CREATE_DUMB             0xc02064b2UL
-#define DRM_IOCTL_MODE_MAP_DUMB                0xc01064b3UL
-#define DRM_IOCTL_MODE_DESTROY_DUMB            0xc00464b4UL
-#define DRM_IOCTL_MODE_GETPLANERESOURCES       0xc01064b5UL
-#define DRM_IOCTL_VIRTGPU_MAP                  0xc0106441UL
-#define DRM_IOCTL_VIRTGPU_EXECBUFFER           0xc0406442UL
-#define DRM_IOCTL_VIRTGPU_GETPARAM             0xc0106443UL
-#define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE      0xc0386444UL
-#define DRM_IOCTL_VIRTGPU_RESOURCE_INFO        0xc0106445UL
-#define DRM_IOCTL_VIRTGPU_TRANSFER_FROM_HOST   0xc02c6446UL
-#define DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST     0xc02c6447UL
-#define DRM_IOCTL_VIRTGPU_WAIT                 0xc0086448UL
-#define DRM_IOCTL_VIRTGPU_GET_CAPS             0xc0186449UL
-#define DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB 0xc030644aUL
-#define DRM_IOCTL_VIRTGPU_CONTEXT_INIT         0xc010644bUL
-
-#define DRM_CAP_DUMB_BUFFER           0x1
-#define DRM_CAP_VBLANK_HIGH_CRTC      0x2
-#define DRM_CAP_DUMB_PREFERRED_DEPTH  0x3
-#define DRM_CAP_DUMB_PREFER_SHADOW    0x4
-#define DRM_CAP_PRIME                 0x5
-#define DRM_PRIME_CAP_IMPORT          0x1
-#define DRM_PRIME_CAP_EXPORT          0x2
-#define DRM_CAP_TIMESTAMP_MONOTONIC   0x6
-#define DRM_CAP_ASYNC_PAGE_FLIP       0x7
-#define DRM_CAP_CURSOR_WIDTH          0x8
-#define DRM_CAP_CURSOR_HEIGHT         0x9
-#define DRM_CAP_ADDFB2_MODIFIERS      0x10
-#define DRM_CAP_PAGE_FLIP_TARGET      0x11
-#define DRM_CAP_CRTC_IN_VBLANK_EVENT  0x12
-#define DRM_CAP_SYNCOBJ               0x13
-#define DRM_CAP_SYNCOBJ_TIMELINE      0x14
-#define DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP 0x15
-
-#define VIRTGPU_PARAM_3D_FEATURES             1
-#define VIRTGPU_PARAM_CAPSET_QUERY_FIX        2
-#define VIRTGPU_PARAM_RESOURCE_BLOB           3
-#define VIRTGPU_PARAM_HOST_VISIBLE            4
-#define VIRTGPU_PARAM_CONTEXT_INIT            6
-#define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs    7
-#define VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME     8
-#define VIRTGPU_WAIT_NOWAIT                   1
-#define VIRTGPU_BLOB_MEM_GUEST                0x0001
-#define VIRTGPU_BLOB_MEM_HOST3D               0x0002
-#define VIRTGPU_BLOB_MEM_HOST3D_GUEST         0x0003
-#define VIRTGPU_BLOB_FLAG_USE_MAPPABLE        0x0001
-#define VIRTGPU_BLOB_FLAG_USE_SHAREABLE       0x0002
-#define VIRTGPU_CONTEXT_PARAM_CAPSET_ID       0x0001
-#define VIRTGPU_CONTEXT_PARAM_NUM_RINGS       0x0002
-#define VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK 0x0003
-#define VIRTGPU_CONTEXT_PARAM_DEBUG_NAME      0x0004
-
-#define DRM_MODE_TYPE_PREFERRED               (1 << 3)
-#define DRM_MODE_TYPE_DRIVER                  (1 << 6)
-#define DRM_MODE_FLAG_NHSYNC                  (1 << 1)
-#define DRM_MODE_FLAG_NVSYNC                  (1 << 3)
-#define DRM_MODE_ENCODER_VIRTUAL              5
-#define DRM_MODE_CONNECTOR_VIRTUAL            15
-#define DRM_MODE_CONNECTED                    1
-#define DRM_MODE_SUBPIXEL_UNKNOWN             1
 #define GPU_DRM_CRTC_ID                       1
 #define GPU_DRM_ENCODER_ID                    2
 #define GPU_DRM_CONNECTOR_ID                  3
+#define GPU_DRM_PRIMARY_PLANE_ID              4
+
+#define FB_TTM_PL_SYSTEM                      0x0001
+#define FB_TTM_PL_TT                          0x0002
+#define FB_TTM_PL_VRAM                        0x0004
+#define FB_TTM_PL_STOLEN                      0x0008
+#define FB_TTM_MEM_SYSTEM                     0
+#define FB_TTM_MEM_TT                         1
+#define FB_TTM_MEM_VRAM                       2
+#define FB_TTM_MEM_STOLEN                     3
 
 #define GPU_DRM_MMAP_HANDLE_SHIFT 32
 #define GPU_DRM_MMAP_OFFSET(handle) ((uint64)(handle) << GPU_DRM_MMAP_HANDLE_SHIFT)
 #define GPU_DRM_MMAP_HANDLE(offset) ((uint32)((offset) >> GPU_DRM_MMAP_HANDLE_SHIFT))
 #define GPU_DRM_MMAP_PAGE(offset) \
     (((offset) & ((1ULL << GPU_DRM_MMAP_HANDLE_SHIFT) - 1)) >> PGSHIFT)
-
-struct drm_version_compat {
-    int version_major;
-    int version_minor;
-    int version_patchlevel;
-    uint64 name_len;
-    uint64 name;
-    uint64 date_len;
-    uint64 date;
-    uint64 desc_len;
-    uint64 desc;
-};
-
-struct drm_unique_compat {
-    uint64 unique_len;
-    uint64 unique;
-};
-
-struct drm_auth_compat {
-    uint32 magic;
-};
-
-struct drm_client_compat {
-    int idx;
-    int auth;
-    uint64 pid;
-    uint64 uid;
-    uint64 magic;
-    uint64 iocs;
-};
-
-struct drm_stats_compat {
-    uint64 count;
-    struct {
-        uint64 value;
-        uint32 type;
-    } data[15];
-};
-
-struct drm_set_version_compat {
-    int drm_di_major;
-    int drm_di_minor;
-    int drm_dd_major;
-    int drm_dd_minor;
-};
-
-struct drm_get_cap_compat {
-    uint64 capability;
-    uint64 value;
-};
-
-struct drm_set_client_cap_compat {
-    uint64 capability;
-    uint64 value;
-};
-
-struct drm_gem_close_compat {
-    uint32 handle;
-    uint32 pad;
-};
-
-struct drm_prime_handle_compat {
-    uint32 handle;
-    uint32 flags;
-    int32 fd;
-};
-
-union drm_wait_vblank_compat {
-    struct {
-        uint32 type;
-        uint32 sequence;
-        uint64 signal;
-    } request;
-    struct {
-        uint32 type;
-        uint32 sequence;
-        int64 tval_sec;
-        int64 tval_usec;
-    } reply;
-};
-
-struct drm_mode_modeinfo_compat {
-    uint32 clock;
-    uint16 hdisplay;
-    uint16 hsync_start;
-    uint16 hsync_end;
-    uint16 htotal;
-    uint16 hskew;
-    uint16 vdisplay;
-    uint16 vsync_start;
-    uint16 vsync_end;
-    uint16 vtotal;
-    uint16 vscan;
-    uint32 vrefresh;
-    uint32 flags;
-    uint32 type;
-    char name[32];
-};
-
-struct drm_mode_card_res_compat {
-    uint64 fb_id_ptr;
-    uint64 crtc_id_ptr;
-    uint64 connector_id_ptr;
-    uint64 encoder_id_ptr;
-    uint32 count_fbs;
-    uint32 count_crtcs;
-    uint32 count_connectors;
-    uint32 count_encoders;
-    uint32 min_width;
-    uint32 max_width;
-    uint32 min_height;
-    uint32 max_height;
-};
-
-struct drm_mode_crtc_compat {
-    uint64 set_connectors_ptr;
-    uint32 count_connectors;
-    uint32 crtc_id;
-    uint32 fb_id;
-    uint32 x;
-    uint32 y;
-    uint32 gamma_size;
-    uint32 mode_valid;
-    struct drm_mode_modeinfo_compat mode;
-};
-
-struct drm_mode_get_encoder_compat {
-    uint32 encoder_id;
-    uint32 encoder_type;
-    uint32 crtc_id;
-    uint32 possible_crtcs;
-    uint32 possible_clones;
-};
-
-struct drm_mode_get_connector_compat {
-    uint64 encoders_ptr;
-    uint64 modes_ptr;
-    uint64 props_ptr;
-    uint64 prop_values_ptr;
-    uint32 count_modes;
-    uint32 count_props;
-    uint32 count_encoders;
-    uint32 encoder_id;
-    uint32 connector_id;
-    uint32 connector_type;
-    uint32 connector_type_id;
-    uint32 connection;
-    uint32 mm_width;
-    uint32 mm_height;
-    uint32 subpixel;
-    uint32 pad;
-};
-
-struct drm_mode_get_property_compat {
-    uint64 values_ptr;
-    uint64 enum_blob_ptr;
-    uint32 prop_id;
-    uint32 flags;
-    char name[32];
-    uint32 count_values;
-    uint32 count_enum_blobs;
-};
-
-struct drm_mode_get_blob_compat {
-    uint32 blob_id;
-    uint32 length;
-    uint64 data;
-};
-
-struct drm_mode_get_plane_res_compat {
-    uint64 plane_id_ptr;
-    uint32 count_planes;
-};
-
-struct drm_mode_create_dumb_compat {
-    uint32 height;
-    uint32 width;
-    uint32 bpp;
-    uint32 flags;
-    uint32 handle;
-    uint32 pitch;
-    uint64 size;
-};
-
-struct drm_mode_map_dumb_compat {
-    uint32 handle;
-    uint32 pad;
-    uint64 offset;
-};
-
-struct drm_mode_destroy_dumb_compat {
-    uint32 handle;
-};
-
-struct drm_virtgpu_map_compat {
-    uint64 offset;
-    uint32 handle;
-    uint32 pad;
-};
-
-struct drm_virtgpu_getparam_compat {
-    uint64 param;
-    uint64 value;
-};
-
-struct drm_virtgpu_resource_create_compat {
-    uint32 target;
-    uint32 format;
-    uint32 bind;
-    uint32 width;
-    uint32 height;
-    uint32 depth;
-    uint32 array_size;
-    uint32 last_level;
-    uint32 nr_samples;
-    uint32 flags;
-    uint32 bo_handle;
-    uint32 res_handle;
-    uint32 size;
-    uint32 stride;
-};
-
-struct drm_virtgpu_resource_info_compat {
-    uint32 bo_handle;
-    uint32 res_handle;
-    uint32 size;
-    uint32 blob_mem;
-};
-
-struct drm_virtgpu_3d_box_compat {
-    uint32 x, y, z, w, h, d;
-};
-
-struct drm_virtgpu_3d_transfer_compat {
-    uint32 bo_handle;
-    struct drm_virtgpu_3d_box_compat box;
-    uint32 level;
-    uint32 offset;
-    uint32 stride;
-    uint32 layer_stride;
-};
-
-struct drm_virtgpu_3d_wait_compat {
-    uint32 handle;
-    uint32 flags;
-};
-
-struct drm_virtgpu_get_caps_compat {
-    uint32 cap_set_id;
-    uint32 cap_set_ver;
-    uint64 addr;
-    uint32 size;
-    uint32 pad;
-};
-
-struct drm_virtgpu_resource_create_blob_compat {
-    uint32 blob_mem;
-    uint32 blob_flags;
-    uint32 bo_handle;
-    uint32 res_handle;
-    uint64 size;
-    uint32 pad;
-    uint32 cmd_size;
-    uint64 cmd;
-    uint64 blob_id;
-};
-
-struct drm_virtgpu_context_set_param_compat {
-    uint64 param;
-    uint64 value;
-};
-
-struct drm_virtgpu_context_init_compat {
-    uint32 num_params;
-    uint32 pad;
-    uint64 ctx_set_params;
-};
-
-struct drm_virtgpu_execbuffer_compat {
-    uint32 flags;
-    uint32 size;
-    uint64 command;
-    uint64 bo_handles;
-    uint32 num_bo_handles;
-    int32 fence_fd;
-    uint32 ring_idx;
-    uint32 syncobj_stride;
-    uint32 num_in_syncobjs;
-    uint32 num_out_syncobjs;
-    uint64 in_syncobjs;
-    uint64 out_syncobjs;
-};
 
 struct fb_gpu_bo_entry {
     int in_use;
@@ -437,7 +85,62 @@ struct fb_gpu_bo_entry {
     uint64 size;
     uint64 last_fence;
     uint64 signaled_fence;
+    uint32 ttm_placement;
+    uint32 ttm_mem_type;
+    uint32 ttm_pin_count;
+    uint32 ttm_reservation_seq;
+    uint64 ttm_dma_addr_base;
     page_t **pages;
+};
+
+struct fb_gpu_kms_fb_entry {
+    int in_use;
+    uint32 fb_id;
+    uint32 bo_handle;
+    uint64 owner_id;
+    pid_t owner_tgid;
+    uint32 width;
+    uint32 height;
+    uint32 pitch;
+    uint32 pixel_format;
+    uint64 modifier;
+};
+
+struct fb_gpu_syncobj_entry {
+    int in_use;
+    uint32 handle;
+    uint64 owner_id;
+    pid_t owner_tgid;
+    uint32 state_index;
+};
+
+struct fb_gpu_syncobj_state_entry {
+    int in_use;
+    uint32 refs;
+    int signaled;
+    uint64 timeline_value;
+};
+
+struct fb_gpu_dxg_present_source_entry {
+    int in_use;
+    uint32 handle;
+    uint64 owner_id;
+    pid_t owner_tgid;
+    int32 dxg_fd;
+    int32 resource_fd;
+    uint32 device;
+    uint32 resource;
+    uint32 allocation;
+    uint32 allocation_count;
+    uint32 width;
+    uint32 height;
+    uint32 pitch;
+    uint32 format;
+    uint64 modifier;
+    uint32 adapter_luid_low;
+    uint32 adapter_luid_high;
+    uint32 provenance_flags;
+    uint32 adapter_identity;
 };
 
 struct fb_gpu_fence_file {
@@ -447,6 +150,10 @@ struct fb_gpu_fence_file {
 
 struct fb_gpu_virgl_fence_file {
     uint64 fence;
+};
+
+struct fb_gpu_syncobj_file {
+    uint32 state_index;
 };
 
 /* ── I/O port helpers ────────────────────────────────────────────── */
@@ -505,12 +212,26 @@ static struct {
     uint32      fb_size;        /* total framebuffer size in bytes */
     struct fb_gpu_stats stats;
     uint32      next_bo_handle;
+    uint32      next_kms_fb_id;
+    uint32      next_syncobj_handle;
+    uint32      next_dxg_present_source;
+    uint32      next_drm_magic;
     uint64      next_bo_fence;
     uint64      next_render_owner_id;
+    uint64      drm_master_owner_id;
     struct fb_gpu_bo_entry bos[FB_GPU_MAX_BOS];
+    struct fb_gpu_kms_fb_entry kms_fbs[FB_GPU_MAX_KMS_FBS];
+    struct fb_gpu_syncobj_entry syncobjs[FB_GPU_MAX_SYNCOBJS];
+    struct fb_gpu_syncobj_state_entry syncobj_states[FB_GPU_MAX_SYNCOBJ_STATES];
+    uint32      current_kms_fb_id;
+    struct fb_gpu_dxg_present_source_entry dxg_present_sources[FB_GPU_MAX_DXG_PRESENT_SOURCES];
     spinlock_t  lock;           /* serializes concurrent access */
 } fb_state = {
     .next_bo_handle = 1,
+    .next_kms_fb_id = 100,
+    .next_syncobj_handle = 1,
+    .next_dxg_present_source = 1,
+    .next_drm_magic = 1,
     .next_bo_fence = 1,
     .next_render_owner_id = 1,
     .lock = SPINLOCK_INITIALIZED("fb"),
@@ -691,11 +412,51 @@ static void fb_paint_boot_logo(void)
 
 static cdev_t gpu_cdev;
 
+enum fb_gpu_drm_node_type {
+    FB_GPU_DRM_NODE_LEGACY = 0,
+    FB_GPU_DRM_NODE_PRIMARY,
+    FB_GPU_DRM_NODE_RENDER,
+};
+
+struct fb_gpu_drm_device {
+    const char *driver_name;
+    const char *desc;
+    uint32 driver_major;
+    uint32 driver_minor;
+    uint32 driver_patchlevel;
+};
+
+struct fb_gpu_drm_file {
+    struct fb_gpu_drm_device *dev;
+    enum fb_gpu_drm_node_type node_type;
+    uint32 magic;
+    uint64 client_caps;
+    uint64 ioctl_count;
+    int authenticated;
+    int is_master;
+};
+
+static struct fb_gpu_drm_device fb_drm_device = {
+    .driver_name = "xv6_gpu",
+    .desc = "xv6 DRM compatibility GPU facade",
+    .driver_major = 0,
+    .driver_minor = 1,
+    .driver_patchlevel = 0,
+};
+
+struct fb_gpu_render_owner;
+static enum fb_gpu_drm_node_type gpu_drm_node_from_cdev(cdev_t *cdev);
+static const char *gpu_drm_node_name(enum fb_gpu_drm_node_type type);
+static int gpu_drm_is_primary_like(struct fb_gpu_render_owner *owner);
+
 struct fb_gpu_render_owner {
     uint64 id;
     pid_t tgid;
+    struct fb_gpu_drm_file drm;
     uint32 default_ctx_id;
     uint32 capset_id;
+    int nouveau_channel;
+    int nouveau_vm_initialized;
 };
 
 static int fb_cmdline_enabled(const char *key)
@@ -735,6 +496,10 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
     case FB_GPU_BO_IMPORT: return "FB_GPU_BO_IMPORT";
     case FB_GPU_BO_EXPORT_FD: return "FB_GPU_BO_EXPORT_FD";
     case FB_GPU_BO_IMPORT_FD: return "FB_GPU_BO_IMPORT_FD";
+    case FB_GPU_BO_INFO: return "FB_GPU_BO_INFO";
+    case FB_GPU_DXG_PRESENT_SOURCE_REGISTER: return "FB_GPU_DXG_PRESENT_SOURCE_REGISTER";
+    case FB_GPU_DXG_PRESENT_SOURCE_COMMIT: return "FB_GPU_DXG_PRESENT_SOURCE_COMMIT";
+    case FB_GPU_DXG_PRESENT_SOURCE_QUERY: return "FB_GPU_DXG_PRESENT_SOURCE_QUERY";
     case FB_GPU_BO_FENCE: return "FB_GPU_BO_FENCE";
     case FB_GPU_FENCE_EXPORT_FD: return "FB_GPU_FENCE_EXPORT_FD";
     case FB_GPU_FENCE_QUERY: return "FB_GPU_FENCE_QUERY";
@@ -772,14 +537,30 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
     case DRM_IOCTL_WAIT_VBLANK: return "DRM_IOCTL_WAIT_VBLANK";
     case DRM_IOCTL_MODE_GETRESOURCES: return "DRM_IOCTL_MODE_GETRESOURCES";
     case DRM_IOCTL_MODE_GETCRTC: return "DRM_IOCTL_MODE_GETCRTC";
+    case DRM_IOCTL_MODE_SETCRTC: return "DRM_IOCTL_MODE_SETCRTC";
     case DRM_IOCTL_MODE_GETENCODER: return "DRM_IOCTL_MODE_GETENCODER";
     case DRM_IOCTL_MODE_GETCONNECTOR: return "DRM_IOCTL_MODE_GETCONNECTOR";
     case DRM_IOCTL_MODE_GETPROPERTY: return "DRM_IOCTL_MODE_GETPROPERTY";
     case DRM_IOCTL_MODE_GETPROPBLOB: return "DRM_IOCTL_MODE_GETPROPBLOB";
+    case DRM_IOCTL_MODE_RMFB: return "DRM_IOCTL_MODE_RMFB";
+    case DRM_IOCTL_MODE_PAGE_FLIP: return "DRM_IOCTL_MODE_PAGE_FLIP";
     case DRM_IOCTL_MODE_CREATE_DUMB: return "DRM_IOCTL_MODE_CREATE_DUMB";
     case DRM_IOCTL_MODE_MAP_DUMB: return "DRM_IOCTL_MODE_MAP_DUMB";
     case DRM_IOCTL_MODE_DESTROY_DUMB: return "DRM_IOCTL_MODE_DESTROY_DUMB";
     case DRM_IOCTL_MODE_GETPLANERESOURCES: return "DRM_IOCTL_MODE_GETPLANERESOURCES";
+    case DRM_IOCTL_MODE_GETPLANE: return "DRM_IOCTL_MODE_GETPLANE";
+    case DRM_IOCTL_MODE_ADDFB2: return "DRM_IOCTL_MODE_ADDFB2";
+    case DRM_IOCTL_MODE_ATOMIC: return "DRM_IOCTL_MODE_ATOMIC";
+    case DRM_IOCTL_SYNCOBJ_CREATE: return "DRM_IOCTL_SYNCOBJ_CREATE";
+    case DRM_IOCTL_SYNCOBJ_DESTROY: return "DRM_IOCTL_SYNCOBJ_DESTROY";
+    case DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD: return "DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD";
+    case DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE: return "DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE";
+    case DRM_IOCTL_SYNCOBJ_WAIT: return "DRM_IOCTL_SYNCOBJ_WAIT";
+    case DRM_IOCTL_SYNCOBJ_RESET: return "DRM_IOCTL_SYNCOBJ_RESET";
+    case DRM_IOCTL_SYNCOBJ_SIGNAL: return "DRM_IOCTL_SYNCOBJ_SIGNAL";
+    case DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT: return "DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT";
+    case DRM_IOCTL_SYNCOBJ_QUERY: return "DRM_IOCTL_SYNCOBJ_QUERY";
+    case DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL: return "DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL";
     case DRM_IOCTL_VIRTGPU_MAP: return "DRM_IOCTL_VIRTGPU_MAP";
     case DRM_IOCTL_VIRTGPU_EXECBUFFER: return "DRM_IOCTL_VIRTGPU_EXECBUFFER";
     case DRM_IOCTL_VIRTGPU_GETPARAM: return "DRM_IOCTL_VIRTGPU_GETPARAM";
@@ -791,6 +572,17 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
     case DRM_IOCTL_VIRTGPU_GET_CAPS: return "DRM_IOCTL_VIRTGPU_GET_CAPS";
     case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB: return "DRM_IOCTL_VIRTGPU_RESOURCE_CREATE_BLOB";
     case DRM_IOCTL_VIRTGPU_CONTEXT_INIT: return "DRM_IOCTL_VIRTGPU_CONTEXT_INIT";
+    case DRM_IOCTL_NOUVEAU_GETPARAM: return "DRM_IOCTL_NOUVEAU_GETPARAM";
+    case DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC: return "DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC";
+    case DRM_IOCTL_NOUVEAU_CHANNEL_FREE: return "DRM_IOCTL_NOUVEAU_CHANNEL_FREE";
+    case DRM_IOCTL_NOUVEAU_VM_INIT: return "DRM_IOCTL_NOUVEAU_VM_INIT";
+    case DRM_IOCTL_NOUVEAU_VM_BIND: return "DRM_IOCTL_NOUVEAU_VM_BIND";
+    case DRM_IOCTL_NOUVEAU_EXEC: return "DRM_IOCTL_NOUVEAU_EXEC";
+    case DRM_IOCTL_NOUVEAU_GEM_NEW: return "DRM_IOCTL_NOUVEAU_GEM_NEW";
+    case DRM_IOCTL_NOUVEAU_GEM_PUSHBUF: return "DRM_IOCTL_NOUVEAU_GEM_PUSHBUF";
+    case DRM_IOCTL_NOUVEAU_GEM_CPU_PREP: return "DRM_IOCTL_NOUVEAU_GEM_CPU_PREP";
+    case DRM_IOCTL_NOUVEAU_GEM_CPU_FINI: return "DRM_IOCTL_NOUVEAU_GEM_CPU_FINI";
+    case DRM_IOCTL_NOUVEAU_GEM_INFO: return "DRM_IOCTL_NOUVEAU_GEM_INFO";
     default: return "?";
     }
 }
@@ -1068,13 +860,16 @@ static int fb_map_scanout_current(struct fb_gpu_scanout_map *req)
             (pfnmap ? VMA_FLAG_PFNMAP : 0);
 
     vm_wlock(vm);
-    addr = vm_find_free_range(vm, (size_t)map_size, 0);
+    addr = vm_find_free_range(vm,
+                              (size_t)(map_size + FB_GPU_D3D12_HEAP_ALIGN),
+                              0);
     if (addr == 0) {
         printf("FB: scanout map failed no free user range size=0x%lx\n",
                map_size);
         vm_wunlock(vm);
         return -ENOMEM;
     }
+    addr = FB_GPU_ALIGN_UP(addr, FB_GPU_D3D12_HEAP_ALIGN);
 
     vma = vma_alloc(vm, addr, map_size, flags);
     if (vma == NULL) {
@@ -1260,6 +1055,94 @@ static void fb_bo_release_pages(page_t **pages, uint32 npages)
     kvfree(pages);
 }
 
+static uint32 fb_ttm_mem_type_for_placement(uint32 placement)
+{
+    if ((placement & FB_TTM_PL_VRAM) != 0)
+        return FB_TTM_MEM_VRAM;
+    if ((placement & FB_TTM_PL_TT) != 0)
+        return FB_TTM_MEM_TT;
+    if ((placement & FB_TTM_PL_STOLEN) != 0)
+        return FB_TTM_MEM_STOLEN;
+    return FB_TTM_MEM_SYSTEM;
+}
+
+static void fb_ttm_account_locked(uint32 mem_type, uint64 size, int add)
+{
+    uint64 *counter;
+
+    switch (mem_type) {
+    case FB_TTM_MEM_TT:
+        counter = &fb_state.stats.ttm_tt_bytes;
+        break;
+    case FB_TTM_MEM_VRAM:
+        counter = &fb_state.stats.ttm_vram_bytes;
+        break;
+    case FB_TTM_MEM_STOLEN:
+        counter = &fb_state.stats.ttm_stolen_bytes;
+        break;
+    default:
+        counter = &fb_state.stats.ttm_system_bytes;
+        break;
+    }
+    if (add) {
+        *counter += size;
+    } else if (*counter >= size) {
+        *counter -= size;
+    } else {
+        *counter = 0;
+    }
+}
+
+static int fb_ttm_validate_placement_locked(struct fb_gpu_bo_entry *bo,
+                                            uint32 placement)
+{
+    uint32 mem_type;
+
+    if (bo == NULL || !bo->in_use ||
+        (placement & ~(FB_TTM_PL_SYSTEM | FB_TTM_PL_TT |
+                       FB_TTM_PL_VRAM | FB_TTM_PL_STOLEN)) != 0 ||
+        placement == 0) {
+        fb_state.stats.ttm_validate_failures++;
+        return -EINVAL;
+    }
+
+    mem_type = fb_ttm_mem_type_for_placement(placement);
+    if (mem_type != bo->ttm_mem_type) {
+        fb_ttm_account_locked(bo->ttm_mem_type, bo->size, 0);
+        fb_ttm_account_locked(mem_type, bo->size, 1);
+        bo->ttm_mem_type = mem_type;
+    }
+    bo->ttm_placement = placement;
+    bo->ttm_reservation_seq++;
+    bo->ttm_dma_addr_base =
+        bo->pages != NULL && bo->pages[0] != NULL ?
+            __page_to_pa(bo->pages[0]) : 0;
+    return 0;
+}
+
+static int fb_bo_set_ttm_placement(uint32 handle, uint64 owner_id,
+                                   pid_t owner_tgid, uint32 placement)
+{
+    struct fb_gpu_bo_entry *bo;
+    int ret;
+
+    spin_lock(&fb_state.lock);
+    bo = fb_bo_lookup_locked(handle);
+    if (bo == NULL) {
+        fb_state.stats.ttm_validate_failures++;
+        spin_unlock(&fb_state.lock);
+        return -ENOENT;
+    }
+    if (!fb_bo_owner_matches(bo, owner_id, owner_tgid)) {
+        fb_state.stats.ttm_validate_failures++;
+        spin_unlock(&fb_state.lock);
+        return -EPERM;
+    }
+    ret = fb_ttm_validate_placement_locked(bo, placement);
+    spin_unlock(&fb_state.lock);
+    return ret;
+}
+
 static void fb_bo_put(struct fb_gpu_bo_entry *bo)
 {
     page_t **pages = NULL;
@@ -1415,8 +1298,16 @@ static int fb_bo_register(uint64 owner_id, pid_t owner_tgid,
     bo->size = size;
     bo->pages = pages;
     bo->refs = 1;
+    bo->ttm_placement = FB_TTM_PL_SYSTEM;
+    bo->ttm_mem_type = FB_TTM_MEM_SYSTEM;
+    bo->ttm_pin_count = 0;
+    bo->ttm_reservation_seq = 1;
+    bo->ttm_dma_addr_base =
+        pages != NULL && npages != 0 && pages[0] != NULL ?
+            __page_to_pa(pages[0]) : 0;
     fb_state.stats.bo_handles++;
     fb_state.stats.bo_live_bytes += size;
+    fb_ttm_account_locked(bo->ttm_mem_type, size, 1);
     if (fb_state.stats.bo_handles > fb_state.stats.bo_peak_handles)
         fb_state.stats.bo_peak_handles = fb_state.stats.bo_handles;
     if (fb_state.stats.bo_live_bytes > fb_state.stats.bo_peak_bytes)
@@ -1424,6 +1315,756 @@ static int fb_bo_register(uint64 owner_id, pid_t owner_tgid,
     *handle = next;
     spin_unlock(&fb_state.lock);
     return 0;
+}
+
+static int fb_dxg_present_source_owner_matches(
+    const struct fb_gpu_dxg_present_source_entry *source, uint64 owner_id,
+    pid_t owner_tgid)
+{
+    if (source == NULL)
+        return 0;
+    if (owner_id != 0)
+        return source->owner_id == owner_id;
+    if (owner_tgid > 0 && source->owner_id != 0)
+        return source->owner_tgid == owner_tgid;
+    return 1;
+}
+
+static struct fb_gpu_dxg_present_source_entry *
+fb_dxg_present_source_lookup_locked(uint32 handle)
+{
+    if (handle == 0)
+        return NULL;
+    for (int i = 0; i < FB_GPU_MAX_DXG_PRESENT_SOURCES; i++) {
+        if (fb_state.dxg_present_sources[i].in_use &&
+            fb_state.dxg_present_sources[i].handle == handle)
+            return &fb_state.dxg_present_sources[i];
+    }
+    return NULL;
+}
+
+static void
+fb_dxg_present_note_source_shape_locked(
+    const struct fb_gpu_dxg_present_source_entry *source)
+{
+    if (source == NULL)
+        return;
+    fb_state.stats.dxg_present_last_width = source->width;
+    fb_state.stats.dxg_present_last_height = source->height;
+    fb_state.stats.dxg_present_last_pitch = source->pitch;
+    fb_state.stats.dxg_present_last_format = source->format;
+    fb_state.stats.dxg_present_last_allocation_count =
+        source->allocation_count;
+    fb_state.stats.dxg_present_last_dxg_fd =
+        source->dxg_fd < 0 ? 0xffffffffULL : (uint64)(uint32)source->dxg_fd;
+    fb_state.stats.dxg_present_last_resource_fd =
+        source->resource_fd < 0 ?
+        0xffffffffULL : (uint64)(uint32)source->resource_fd;
+    fb_state.stats.dxg_present_last_provenance = source->provenance_flags;
+    fb_state.stats.dxg_present_last_adapter_luid_low =
+        source->adapter_luid_low;
+    fb_state.stats.dxg_present_last_adapter_luid_high =
+        source->adapter_luid_high;
+    fb_state.stats.dxg_present_last_adapter_identity =
+        source->adapter_identity;
+}
+
+static uint64 fb_dxg_present_required_metadata(uint32 flags)
+{
+    uint64 metadata = FB_GPU_DXG_PRESENT_META_DEVICE |
+                      FB_GPU_DXG_PRESENT_META_RESOURCE |
+                      FB_GPU_DXG_PRESENT_META_ALLOCATION |
+                      FB_GPU_DXG_PRESENT_META_DIMENSIONS |
+                      FB_GPU_DXG_PRESENT_META_FORMAT |
+                      FB_GPU_DXG_PRESENT_META_MODIFIER |
+                      FB_GPU_DXG_PRESENT_META_ADAPTER_LUID;
+
+    if ((flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) != 0)
+        metadata |= FB_GPU_DXG_PRESENT_META_SYNC_OBJECT |
+                    FB_GPU_DXG_PRESENT_META_FENCE_VALUE;
+    return metadata;
+}
+
+static uint64 fb_dxg_present_fd_diag(int32 fd)
+{
+    return fd < 0 ? 0xffffffffULL : (uint64)(uint32)fd;
+}
+
+static void fb_dxg_present_hex32(char out[9], uint32 value)
+{
+    static const char hex[] = "0123456789abcdef";
+
+    for (int i = 7; i >= 0; i--) {
+        out[i] = hex[value & 0xfU];
+        value >>= 4;
+    }
+    out[8] = '\0';
+}
+
+static uint32 fb_dxg_present_adapter_identity(uint32 luid_low,
+                                              uint32 luid_high)
+{
+    if (luid_low == 0 && luid_high == 0)
+        return FB_GPU_DXG_PRESENT_ADAPTER_UNKNOWN;
+    return FB_GPU_DXG_PRESENT_ADAPTER_UNVERIFIED;
+}
+
+static uint32 fb_dxg_present_provenance_mask(void)
+{
+    return FB_GPU_DXG_PRESENT_PROV_DXG_FD |
+           FB_GPU_DXG_PRESENT_PROV_RESOURCE_FD |
+           FB_GPU_DXG_PRESENT_PROV_D3DKMT_HANDLES |
+           FB_GPU_DXG_PRESENT_PROV_DIMENSIONS |
+           FB_GPU_DXG_PRESENT_PROV_ADAPTER_LUID;
+}
+
+static void fb_dxg_present_sanitize_register_tail(
+    struct fb_gpu_dxg_present_source_register *req)
+{
+    uint32 mask = fb_dxg_present_provenance_mask();
+
+    if (req == NULL)
+        return;
+    /*
+     * The fields after present_source are passive diagnostics.  If an older
+     * caller uses the stable register prefix, the extra copyin bytes can be
+     * unrelated stack data.  Treat unknown provenance bits or reserved tail
+     * bytes as absent optional metadata, while keeping flags strictly checked
+     * at their stable prefix offset.
+     */
+    if (req->reserved1 != 0 || (req->provenance_flags & ~mask) != 0) {
+        req->adapter_luid_low = 0;
+        req->adapter_luid_high = 0;
+        req->provenance_flags = 0;
+        req->reserved1 = 0;
+    } else {
+        req->provenance_flags &= mask;
+    }
+}
+
+static uint32 fb_dxg_present_source_provenance(
+    const struct fb_gpu_dxg_present_source_register *req)
+{
+    uint32 provenance = 0;
+
+    if (req == NULL)
+        return 0;
+    if (req->dxg_fd >= 0)
+        provenance |= FB_GPU_DXG_PRESENT_PROV_DXG_FD;
+    if (req->resource_fd >= 0)
+        provenance |= FB_GPU_DXG_PRESENT_PROV_RESOURCE_FD;
+    if (req->device != 0 && req->resource != 0 && req->allocation != 0)
+        provenance |= FB_GPU_DXG_PRESENT_PROV_D3DKMT_HANDLES;
+    if (req->width != 0 && req->height != 0 && req->pitch != 0 &&
+        req->format != 0)
+        provenance |= FB_GPU_DXG_PRESENT_PROV_DIMENSIONS;
+    if (req->adapter_luid_low != 0 || req->adapter_luid_high != 0)
+        provenance |= FB_GPU_DXG_PRESENT_PROV_ADAPTER_LUID;
+    provenance |= req->provenance_flags & fb_dxg_present_provenance_mask();
+    return provenance;
+}
+
+static uint64 fb_dxg_present_helper_block_reason_locked(void)
+{
+    uint64 reason = FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT;
+
+    if ((fb_state.stats.dxg_present_host_rejects &
+         FB_GPU_DXG_PRESENT_REJECT_SYNTHVID_GPA_ONLY) != 0)
+        reason |= FB_GPU_DXG_PRESENT_BLOCK_SYNTHVID_GPA_ONLY;
+    if ((fb_state.stats.dxg_present_host_rejects &
+         FB_GPU_DXG_PRESENT_REJECT_DXG_NO_DISPLAY_BIND) != 0)
+        reason |= FB_GPU_DXG_PRESENT_BLOCK_DXG_NO_DISPLAY_BIND;
+    if (fb_state.stats.dxg_present_last_adapter_identity !=
+        FB_GPU_DXG_PRESENT_ADAPTER_MATCH)
+        reason |= FB_GPU_DXG_PRESENT_BLOCK_LUID_UNVERIFIED;
+    if (fb_state.stats.dxg_present_last_adapter_identity ==
+        FB_GPU_DXG_PRESENT_ADAPTER_MISMATCH)
+        reason |= FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH;
+    if (fb_state.stats.dxg_present_helper_transport_present == 0)
+        reason |= FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT;
+    if (fb_state.stats.dxg_present_helper_requires_completion != 0)
+        reason |= FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION;
+    return reason;
+}
+
+static void fb_dxg_present_note_helper_contract_locked(
+    const struct fb_gpu_dxg_present_source_entry *source, uint32 flags)
+{
+    uint64 lifetime = FB_GPU_DXG_PRESENT_LIFE_HANDLES_VALID |
+                      FB_GPU_DXG_PRESENT_LIFE_HOST_COMPLETION |
+                      FB_GPU_DXG_PRESENT_LIFE_NO_CPU_READBACK;
+
+    if (source != NULL && source->in_use)
+        lifetime |= FB_GPU_DXG_PRESENT_LIFE_SOURCE_REGISTERED;
+    if ((flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) != 0)
+        lifetime |= FB_GPU_DXG_PRESENT_LIFE_SYNC_VALID;
+
+    fb_state.stats.dxg_present_helper_contract_version = 1;
+    fb_state.stats.dxg_present_helper_required_metadata =
+        fb_dxg_present_required_metadata(flags);
+    fb_state.stats.dxg_present_helper_transport =
+        FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_NONE;
+    fb_state.stats.dxg_present_helper_transport_present = 0;
+    fb_state.stats.dxg_present_helper_operation =
+        FB_GPU_DXG_PRESENT_HELPER_OP_SCANOUT_BIND;
+    fb_state.stats.dxg_present_helper_lifetime = lifetime;
+    fb_state.stats.dxg_present_helper_source_live =
+        source != NULL && source->in_use ? 1 : 0;
+    fb_state.stats.dxg_present_helper_requires_completion = 1;
+    fb_state.stats.dxg_present_selected_lane =
+        FB_GPU_DXG_PRESENT_LANE_HELPER_SCANOUT_BIND;
+    fb_state.stats.dxg_present_helper_block_reason =
+        fb_dxg_present_helper_block_reason_locked();
+}
+
+static void
+fb_dxg_present_note_host_lanes_locked(void)
+{
+    struct hyperv_video_status video;
+    struct hyperv_dxg_status dxg;
+    uint64 candidates = 0;
+    uint64 rejects = 0;
+    uint64 synthvid_state = 0;
+    uint64 dxg_state = 0;
+
+    /*
+     * Linux hyperv_drm/hyperv_fb present through SYNTHVID_VRAM_LOCATION
+     * followed by SYNTHVID_DIRT: the host consumes a guest physical VRAM
+     * address, not a D3DKMT resource or allocation handle.  WSL dxgkrnl also
+     * clears display_supported/indirect_display_device for QAI adapter type,
+     * and exposes no D3DKMT display-bind ioctl.  A real native handoff needs a
+     * new host ABI that binds {device, resource, allocation, sync/fence} to
+     * scanout, or a documented DXG command with equivalent semantics.  The WSL
+     * VMBus command enum names present-history, redirected-flip-fence, and BLT
+     * commands, but this kernel has no source-backed packet/result contract
+     * that converts a runtime D3D12 resource into synthvid scanout.
+     */
+    if (hyperv_video_get_status(&video) == 0 && video.present) {
+        candidates |= FB_GPU_DXG_PRESENT_HOST_SYNTHVID;
+        if (video.present)
+            synthvid_state |= 0x1;
+        if (video.gpadl_ok)
+            synthvid_state |= 0x2;
+        if (video.open_ok)
+            synthvid_state |= 0x4;
+        if (video.initialized)
+            synthvid_state |= 0x8;
+        if (video.dirt_needed)
+            synthvid_state |= 0x10;
+        fb_state.stats.dxg_present_synthvid_vram_gpa = video.vram_gpa;
+        rejects |= FB_GPU_DXG_PRESENT_REJECT_SYNTHVID_GPA_ONLY;
+    }
+    if (hyperv_dxg_get_status(&dxg) == 0 &&
+        (dxg.global_present || dxg.vgpu_present)) {
+        candidates |= FB_GPU_DXG_PRESENT_HOST_DXG;
+        if (dxg.global_present)
+            dxg_state |= 0x1;
+        if (dxg.global_open_ok)
+            dxg_state |= 0x2;
+        if (dxg.vgpu_present)
+            dxg_state |= 0x4;
+        if (dxg.vgpu_open_ok)
+            dxg_state |= 0x8;
+        if (hyperv_dxg_d3dkmt_ready())
+            dxg_state |= 0x10;
+        rejects |= FB_GPU_DXG_PRESENT_REJECT_DXG_NO_DISPLAY_BIND;
+    }
+    fb_state.stats.dxg_present_host_candidates = candidates;
+    fb_state.stats.dxg_present_host_rejects = rejects;
+    fb_state.stats.dxg_present_synthvid_state = synthvid_state;
+    fb_state.stats.dxg_present_dxg_state = dxg_state;
+    fb_state.stats.dxg_present_helper_block_reason =
+        fb_dxg_present_helper_block_reason_locked();
+}
+
+static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
+                                   struct fb_gpu_dxg_present_source_register *req)
+{
+    struct fb_gpu_dxg_present_source_entry *source = NULL;
+    int print_flags_reject = 0;
+    uint32 print_flags = 0;
+    uint32 print_device = 0;
+    uint32 print_resource = 0;
+    uint32 print_allocation = 0;
+    uint32 print_width = 0;
+    uint32 print_height = 0;
+    uint32 print_pitch = 0;
+    uint32 print_format = 0;
+    uint64 print_dxg_fd = 0xffffffffULL;
+    uint64 print_resource_fd = 0xffffffffULL;
+    uint64 print_rejects = 0;
+    int ret = 0;
+
+    if (req == NULL)
+        return -EINVAL;
+    fb_dxg_present_sanitize_register_tail(req);
+    spin_lock(&fb_state.lock);
+    fb_state.stats.dxg_present_register_attempts++;
+    fb_state.stats.dxg_present_last_ret = 0;
+    fb_state.stats.dxg_present_last_device = req->device;
+    fb_state.stats.dxg_present_last_resource = req->resource;
+    fb_state.stats.dxg_present_last_allocation = req->allocation;
+    fb_state.stats.dxg_present_last_sync = 0;
+    fb_state.stats.dxg_present_last_flags = req->flags;
+    fb_state.stats.dxg_present_last_fence_value = 0;
+    fb_state.stats.dxg_present_last_width = req->width;
+    fb_state.stats.dxg_present_last_height = req->height;
+    fb_state.stats.dxg_present_last_pitch = req->pitch;
+    fb_state.stats.dxg_present_last_format = req->format;
+    fb_state.stats.dxg_present_last_allocation_count = req->allocation_count;
+    fb_state.stats.dxg_present_last_dxg_fd =
+        fb_dxg_present_fd_diag(req->dxg_fd);
+    fb_state.stats.dxg_present_last_resource_fd =
+        fb_dxg_present_fd_diag(req->resource_fd);
+    fb_state.stats.dxg_present_last_provenance =
+        fb_dxg_present_source_provenance(req);
+    fb_state.stats.dxg_present_last_adapter_luid_low =
+        req->adapter_luid_low;
+    fb_state.stats.dxg_present_last_adapter_luid_high =
+        req->adapter_luid_high;
+    fb_state.stats.dxg_present_last_adapter_identity =
+        fb_dxg_present_adapter_identity(req->adapter_luid_low,
+                                        req->adapter_luid_high);
+    fb_state.stats.dxg_present_selected_lane =
+        FB_GPU_DXG_PRESENT_LANE_HELPER_SCANOUT_BIND;
+    fb_state.stats.dxg_present_display_target_kind =
+        FB_GPU_DXG_DISPLAY_TARGET_NONE;
+    fb_state.stats.dxg_present_requires_host_protocol = 0;
+    fb_state.stats.dxg_present_missing_host_abi =
+        FB_GPU_DXG_PRESENT_MISSING_NONE;
+    fb_state.stats.dxg_present_host_candidates = 0;
+    fb_state.stats.dxg_present_host_rejects = 0;
+    fb_state.stats.dxg_present_synthvid_state = 0;
+    fb_state.stats.dxg_present_synthvid_vram_gpa = 0;
+    fb_state.stats.dxg_present_dxg_state = 0;
+    fb_state.stats.dxg_present_helper_block_reason =
+        FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT |
+        FB_GPU_DXG_PRESENT_BLOCK_LUID_UNVERIFIED;
+    fb_dxg_present_note_helper_contract_locked(NULL, 0);
+
+    if (req->flags != 0 || req->dxg_fd < 0 || req->resource_fd < -1 ||
+        req->device == 0 || req->resource == 0 || req->allocation == 0 ||
+        req->allocation_count == 0 || req->allocation_count > 1024 ||
+        req->width == 0 || req->height == 0 ||
+        req->width > 16384 || req->height > 16384 ||
+        req->width > 0xffffffffU / 4U ||
+        req->format == 0 || req->pitch == 0 ||
+        req->pitch < req->width * 4U) {
+        if (req->flags != 0) {
+            print_flags_reject = 1;
+            print_flags = req->flags;
+            print_device = req->device;
+            print_resource = req->resource;
+            print_allocation = req->allocation;
+            print_width = req->width;
+            print_height = req->height;
+            print_pitch = req->pitch;
+            print_format = req->format;
+            print_dxg_fd = fb_dxg_present_fd_diag(req->dxg_fd);
+            print_resource_fd = fb_dxg_present_fd_diag(req->resource_fd);
+        }
+        ret = -EINVAL;
+        goto out;
+    }
+
+    for (int i = 0; i < FB_GPU_MAX_DXG_PRESENT_SOURCES; i++) {
+        if (!fb_state.dxg_present_sources[i].in_use) {
+            source = &fb_state.dxg_present_sources[i];
+            break;
+        }
+    }
+    if (source == NULL) {
+        ret = -ENOSPC;
+        goto out;
+    }
+
+    req->present_source = fb_state.next_dxg_present_source++;
+    if (fb_state.next_dxg_present_source == 0)
+        fb_state.next_dxg_present_source = 1;
+    memset(source, 0, sizeof(*source));
+    source->in_use = 1;
+    source->handle = req->present_source;
+    source->owner_id = owner_id;
+    source->owner_tgid = owner_tgid;
+    source->dxg_fd = req->dxg_fd;
+    source->resource_fd = req->resource_fd;
+    source->device = req->device;
+    source->resource = req->resource;
+    source->allocation = req->allocation;
+    source->allocation_count = req->allocation_count;
+    source->width = req->width;
+    source->height = req->height;
+    source->pitch = req->pitch;
+    source->format = req->format;
+    source->modifier = req->modifier;
+    source->adapter_luid_low = req->adapter_luid_low;
+    source->adapter_luid_high = req->adapter_luid_high;
+    source->provenance_flags = fb_dxg_present_source_provenance(req);
+    source->adapter_identity =
+        fb_dxg_present_adapter_identity(req->adapter_luid_low,
+                                        req->adapter_luid_high);
+    fb_state.stats.dxg_present_register_successes++;
+    fb_state.stats.dxg_present_last_source = req->present_source;
+    fb_dxg_present_note_source_shape_locked(source);
+    fb_dxg_present_note_helper_contract_locked(source, 0);
+
+out:
+    if (ret != 0) {
+        fb_state.stats.dxg_present_register_rejects++;
+        fb_state.stats.dxg_present_last_ret = (uint64)(-ret);
+        print_rejects = fb_state.stats.dxg_present_register_rejects;
+    }
+    spin_unlock(&fb_state.lock);
+    if (print_flags_reject && print_rejects <= 8) {
+        printf("fb: dxg present-source register rejected: "
+               "reserved flags nonzero flags:0x%x errno:%d "
+               "dxg_fd:0x%lx resource_fd:0x%lx dev:0x%x res:0x%x "
+               "alloc:0x%x %ux%u pitch:%u fmt:0x%x "
+               "abi_hint:register-prefix-append-only\n",
+               print_flags, EINVAL, print_dxg_fd, print_resource_fd,
+               print_device, print_resource, print_allocation, print_width,
+               print_height, print_pitch, print_format);
+    }
+    return ret;
+}
+
+static void fb_dxg_present_source_unregister(uint32 handle)
+{
+    spin_lock(&fb_state.lock);
+    struct fb_gpu_dxg_present_source_entry *source =
+        fb_dxg_present_source_lookup_locked(handle);
+    if (source != NULL)
+        memset(source, 0, sizeof(*source));
+    spin_unlock(&fb_state.lock);
+}
+
+static int fb_dxg_present_commit(uint64 owner_id, pid_t owner_tgid,
+                                 const struct fb_gpu_dxg_present_source_commit *req)
+{
+    struct fb_gpu_dxg_present_source_entry *source;
+    int print_missing = 0;
+    uint32 print_source = 0;
+    uint32 print_device = 0;
+    uint32 print_resource = 0;
+    uint32 print_allocation = 0;
+    uint32 print_allocation_count = 0;
+    uint32 print_sync = 0;
+    uint64 print_fence = 0;
+    uint32 print_width = 0;
+    uint32 print_height = 0;
+    uint32 print_pitch = 0;
+    uint32 print_format = 0;
+    uint64 print_candidates = 0;
+    uint64 print_rejects = 0;
+    uint64 print_synthvid_state = 0;
+    uint64 print_synthvid_vram = 0;
+    uint64 print_dxg_state = 0;
+    uint64 print_helper_meta = 0;
+    uint64 print_helper_lifetime = 0;
+    uint64 print_helper_block = 0;
+    uint64 print_provenance = 0;
+    uint64 print_no_source = 0;
+    uint64 print_bad_flags = 0;
+    uint64 print_no_transport = 0;
+    uint64 print_no_completion = 0;
+    uint64 print_resource_fd_unverified = 0;
+    uint64 print_adapter_mismatch = 0;
+    uint64 print_commit_rejects = 0;
+    uint32 print_lane = 0;
+    uint32 print_adapter_identity = 0;
+    uint64 print_luid_low = 0;
+    uint64 print_luid_high = 0;
+    char print_luid_low_hex[9];
+    char print_luid_high_hex[9];
+    uint64 print_dxg_fd = 0xffffffffULL;
+    uint64 print_resource_fd = 0xffffffffULL;
+    int ret = -EOPNOTSUPP;
+
+    if (req == NULL)
+        return -EINVAL;
+    fb_dxg_present_hex32(print_luid_low_hex, 0);
+    fb_dxg_present_hex32(print_luid_high_hex, 0);
+    spin_lock(&fb_state.lock);
+    fb_state.stats.dxg_present_commit_attempts++;
+    fb_state.stats.dxg_present_last_source = req->present_source;
+    fb_state.stats.dxg_present_last_sync = req->sync_object;
+    fb_state.stats.dxg_present_last_flags = req->flags;
+    fb_state.stats.dxg_present_last_fence_value = req->fence_value;
+    fb_dxg_present_note_helper_contract_locked(NULL, req->flags);
+
+    source = fb_dxg_present_source_lookup_locked(req->present_source);
+    if (source == NULL ||
+        !fb_dxg_present_source_owner_matches(source, owner_id, owner_tgid)) {
+        fb_state.stats.dxg_present_commit_no_source++;
+        fb_state.stats.dxg_present_helper_block_reason |=
+            FB_GPU_DXG_PRESENT_BLOCK_NO_REGISTERED_SOURCE;
+        ret = -ENOENT;
+        goto out;
+    }
+    fb_state.stats.dxg_present_last_device = source->device;
+    fb_state.stats.dxg_present_last_resource = source->resource;
+    fb_state.stats.dxg_present_last_allocation = source->allocation;
+    fb_dxg_present_note_source_shape_locked(source);
+    fb_dxg_present_note_helper_contract_locked(source, req->flags);
+
+    if ((req->flags & ~FB_GPU_DXG_PRESENT_F_WAIT_SYNC) != 0 ||
+        ((req->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) != 0 &&
+         req->sync_object == 0) ||
+        ((req->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) == 0 &&
+         req->sync_object != 0)) {
+        fb_state.stats.dxg_present_commit_bad_flags++;
+        ret = -EINVAL;
+        goto out;
+    }
+
+    fb_state.stats.dxg_present_host_handoff_missing++;
+    fb_state.stats.dxg_present_display_target_kind =
+        FB_GPU_DXG_DISPLAY_TARGET_NONE;
+    fb_state.stats.dxg_present_requires_host_protocol = 1;
+    fb_state.stats.dxg_present_missing_host_abi =
+        FB_GPU_DXG_PRESENT_MISSING_SCANOUT_BIND;
+    fb_dxg_present_note_host_lanes_locked();
+    if (source->resource_fd < 0) {
+        fb_state.stats.dxg_present_commit_resource_fd_unverified++;
+        fb_state.stats.dxg_present_helper_block_reason |=
+            FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED;
+    }
+    if (source->adapter_identity == FB_GPU_DXG_PRESENT_ADAPTER_MISMATCH) {
+        fb_state.stats.dxg_present_commit_adapter_mismatch++;
+        fb_state.stats.dxg_present_helper_block_reason |=
+            FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH;
+    }
+    if (fb_state.stats.dxg_present_helper_transport_present == 0)
+        fb_state.stats.dxg_present_commit_no_transport++;
+    if (fb_state.stats.dxg_present_helper_requires_completion != 0)
+        fb_state.stats.dxg_present_commit_no_completion++;
+    if (fb_state.stats.dxg_present_host_handoff_missing <= 8) {
+        print_missing = 1;
+        print_source = source->handle;
+        print_device = source->device;
+        print_resource = source->resource;
+        print_allocation = source->allocation;
+        print_allocation_count = source->allocation_count;
+        print_sync = req->sync_object;
+        print_fence = req->fence_value;
+        print_width = source->width;
+        print_height = source->height;
+        print_pitch = source->pitch;
+        print_format = source->format;
+        print_candidates = fb_state.stats.dxg_present_host_candidates;
+        print_rejects = fb_state.stats.dxg_present_host_rejects;
+        print_synthvid_state = fb_state.stats.dxg_present_synthvid_state;
+        print_synthvid_vram = fb_state.stats.dxg_present_synthvid_vram_gpa;
+        print_dxg_state = fb_state.stats.dxg_present_dxg_state;
+        print_helper_meta =
+            fb_state.stats.dxg_present_helper_required_metadata;
+        print_helper_lifetime =
+            fb_state.stats.dxg_present_helper_lifetime;
+        print_helper_block =
+            fb_state.stats.dxg_present_helper_block_reason;
+        print_provenance = source->provenance_flags;
+        print_no_source = fb_state.stats.dxg_present_commit_no_source;
+        print_bad_flags = fb_state.stats.dxg_present_commit_bad_flags;
+        print_no_transport =
+            fb_state.stats.dxg_present_commit_no_transport;
+        print_no_completion =
+            fb_state.stats.dxg_present_commit_no_completion;
+        print_resource_fd_unverified =
+            fb_state.stats.dxg_present_commit_resource_fd_unverified;
+        print_adapter_mismatch =
+            fb_state.stats.dxg_present_commit_adapter_mismatch;
+        print_lane = (uint32)fb_state.stats.dxg_present_selected_lane;
+        print_adapter_identity = source->adapter_identity;
+        print_luid_low = (uint64)source->adapter_luid_low;
+        print_luid_high = (uint64)source->adapter_luid_high;
+        print_dxg_fd = fb_dxg_present_fd_diag(source->dxg_fd);
+        print_resource_fd = fb_dxg_present_fd_diag(source->resource_fd);
+    }
+
+out:
+    fb_state.stats.dxg_present_commit_rejects++;
+    fb_state.stats.dxg_present_last_ret = (uint64)(-ret);
+    print_commit_rejects = fb_state.stats.dxg_present_commit_rejects;
+    print_helper_block = fb_state.stats.dxg_present_helper_block_reason;
+    print_no_source = fb_state.stats.dxg_present_commit_no_source;
+    print_bad_flags = fb_state.stats.dxg_present_commit_bad_flags;
+    spin_unlock(&fb_state.lock);
+    fb_dxg_present_hex32(print_luid_high_hex,
+                         (uint32)(print_luid_high & 0xffffffffULL));
+    fb_dxg_present_hex32(print_luid_low_hex,
+                         (uint32)(print_luid_low & 0xffffffffULL));
+    if (!print_missing && print_commit_rejects <= 8) {
+        printf("fb: dxg present-source commit rejected: "
+               "source:%u flags:0x%x sync:0x%x fence:%lu errno:%d "
+               "block_reason:0x%lx no_source:%lu bad_flags:%lu "
+               "helper_transport_present:0 no_completion:1 "
+               "present_id:0 completed:0\n",
+               req->present_source, req->flags, req->sync_object,
+               req->fence_value, -ret, print_helper_block,
+               print_no_source, print_bad_flags);
+    }
+    if (print_missing) {
+        printf("fb: dxg present-source commit blocked: missing "
+               "host ABI=%s helper=%s source:%u "
+               "dev:0x%x res:0x%x alloc:0x%x allocs:%u "
+               "sync:0x%x fence:%lu %ux%u pitch:%u fmt:0x%x "
+               "candidates:0x%lx rejects:0x%lx synthvid:0x%lx "
+               "vram:0x%lx dxg:0x%lx "
+               "dependency:bind-runtime-d3d12-resource-to-host-display "
+               "helper_contract:v1 helper_transport:%u "
+               "helper_op:%u vmbus_offer:0 hvsock_service:0 "
+               "required_meta:0x%lx lifetime:0x%lx "
+               "block_reason:0x%lx lane:%u provenance:0x%lx "
+               "block_bits:no_transport=%u,synthvid_gpa=%u,dxg_no_bind=%u,"
+               "luid_unverified=%u,no_source=%u,resource_fd_unverified=%u,"
+               "adapter_mismatch=%u,no_completion=%u "
+               "counters:no_source=%lu,bad_flags=%lu,no_transport=%lu,"
+               "no_completion=%lu,resource_fd_unverified=%lu,"
+               "adapter_mismatch=%lu "
+               "dxg_fd:0x%lx resource_fd:0x%lx luid:%s:%s "
+               "adapter_identity:%u "
+               "synthvid:gpa-dirty-only dxg_display_bind:0 "
+               "candidate_cmds:presenthistory=%u,redirected_flip_fence=%u,blt=%u "
+               "present_id:0 completed:0\n",
+               FB_GPU_DXG_MISSING_PRESENT_BIND,
+               FB_GPU_DXG_MISSING_PRESENT_HELPER,
+               print_source, print_device, print_resource,
+               print_allocation, print_allocation_count, print_sync,
+               print_fence, print_width, print_height, print_pitch,
+               print_format, print_candidates, print_rejects,
+               print_synthvid_state, print_synthvid_vram, print_dxg_state,
+               FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_NONE,
+               FB_GPU_DXG_PRESENT_HELPER_OP_SCANOUT_BIND,
+               print_helper_meta, print_helper_lifetime,
+               print_helper_block, print_lane, print_provenance,
+               (print_helper_block &
+                FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT) != 0,
+               (print_helper_block &
+                FB_GPU_DXG_PRESENT_BLOCK_SYNTHVID_GPA_ONLY) != 0,
+               (print_helper_block &
+                FB_GPU_DXG_PRESENT_BLOCK_DXG_NO_DISPLAY_BIND) != 0,
+               (print_helper_block &
+                FB_GPU_DXG_PRESENT_BLOCK_LUID_UNVERIFIED) != 0,
+               (print_helper_block &
+                FB_GPU_DXG_PRESENT_BLOCK_NO_REGISTERED_SOURCE) != 0,
+               (print_helper_block &
+                FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED) != 0,
+               (print_helper_block &
+                FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH) != 0,
+               (print_helper_block &
+                FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION) != 0,
+               print_no_source, print_bad_flags, print_no_transport,
+               print_no_completion, print_resource_fd_unverified,
+               print_adapter_mismatch,
+               print_dxg_fd, print_resource_fd, print_luid_high_hex,
+               print_luid_low_hex, print_adapter_identity,
+               FB_GPU_DXG_WSL_PRESENTHISTORYTOKEN_CMD,
+               FB_GPU_DXG_WSL_SETREDIRECTEDFLIPFENCEVALUE_CMD,
+               FB_GPU_DXG_WSL_BLT_CMD);
+    }
+    return ret;
+}
+
+static int fb_dxg_present_query(uint64 owner_id, pid_t owner_tgid,
+                                struct fb_gpu_dxg_present_source_query *req)
+{
+    struct fb_gpu_dxg_present_source_entry *source;
+    uint32 source_handle;
+    uint64 helper_meta;
+    uint64 helper_lifetime;
+
+    if (req == NULL)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    fb_state.stats.dxg_present_query_attempts++;
+    fb_state.stats.dxg_present_query_rejects++;
+    fb_state.stats.dxg_present_last_ret = EOPNOTSUPP;
+
+    source_handle = req->present_source != 0 ?
+        req->present_source : (uint32)fb_state.stats.dxg_present_last_source;
+    source = fb_dxg_present_source_lookup_locked(source_handle);
+    if (source != NULL &&
+        !fb_dxg_present_source_owner_matches(source, owner_id, owner_tgid))
+        source = NULL;
+
+    if (source != NULL) {
+        fb_state.stats.dxg_present_last_source = source->handle;
+        fb_state.stats.dxg_present_last_device = source->device;
+        fb_state.stats.dxg_present_last_resource = source->resource;
+        fb_state.stats.dxg_present_last_allocation = source->allocation;
+        fb_dxg_present_note_source_shape_locked(source);
+    }
+    fb_dxg_present_note_helper_contract_locked(
+        source, (uint32)fb_state.stats.dxg_present_last_flags);
+    helper_meta = fb_state.stats.dxg_present_helper_required_metadata;
+    helper_lifetime = fb_state.stats.dxg_present_helper_lifetime;
+
+    memset(req, 0, sizeof(*req));
+    req->present_source = source_handle;
+    req->display_target_kind =
+        (uint32)fb_state.stats.dxg_present_display_target_kind;
+    req->source_live = source != NULL ? 1 : 0;
+    req->present_id = 0;
+    req->completed = 0;
+    req->host_handoff_missing =
+        fb_state.stats.dxg_present_host_handoff_missing;
+    req->requires_host_protocol = 1;
+    req->missing_host_abi = FB_GPU_DXG_PRESENT_MISSING_SCANOUT_BIND;
+    req->helper_contract_version =
+        fb_state.stats.dxg_present_helper_contract_version;
+    req->helper_required_metadata = helper_meta;
+    req->helper_transport = fb_state.stats.dxg_present_helper_transport;
+    req->helper_transport_present =
+        fb_state.stats.dxg_present_helper_transport_present;
+    req->helper_operation = fb_state.stats.dxg_present_helper_operation;
+    req->helper_lifetime = helper_lifetime;
+    req->helper_requires_completion =
+        fb_state.stats.dxg_present_helper_requires_completion;
+    if (source != NULL) {
+        req->device = source->device;
+        req->resource = source->resource;
+        req->allocation = source->allocation;
+        req->allocation_count = source->allocation_count;
+    } else {
+        req->device = (uint32)fb_state.stats.dxg_present_last_device;
+        req->resource = (uint32)fb_state.stats.dxg_present_last_resource;
+        req->allocation = (uint32)fb_state.stats.dxg_present_last_allocation;
+        req->allocation_count =
+            (uint32)fb_state.stats.dxg_present_last_allocation_count;
+    }
+    req->sync_object = (uint32)fb_state.stats.dxg_present_last_sync;
+    req->last_flags = (uint32)fb_state.stats.dxg_present_last_flags;
+    req->fence_value = fb_state.stats.dxg_present_last_fence_value;
+    req->last_ret = EOPNOTSUPP;
+    if (source != NULL) {
+        req->dxg_fd = source->dxg_fd;
+        req->resource_fd = source->resource_fd;
+        req->provenance_flags = source->provenance_flags;
+        req->adapter_luid_low = source->adapter_luid_low;
+        req->adapter_luid_high = source->adapter_luid_high;
+        req->adapter_identity = source->adapter_identity;
+    } else {
+        req->dxg_fd = (int32)fb_state.stats.dxg_present_last_dxg_fd;
+        req->resource_fd =
+            (int32)fb_state.stats.dxg_present_last_resource_fd;
+        req->provenance_flags =
+            (uint32)fb_state.stats.dxg_present_last_provenance;
+        req->adapter_luid_low =
+            (uint32)fb_state.stats.dxg_present_last_adapter_luid_low;
+        req->adapter_luid_high =
+            (uint32)fb_state.stats.dxg_present_last_adapter_luid_high;
+        req->adapter_identity =
+            (uint32)fb_state.stats.dxg_present_last_adapter_identity;
+    }
+    req->selected_lane = (uint32)fb_state.stats.dxg_present_selected_lane;
+    req->helper_block_reason =
+        (uint32)fb_state.stats.dxg_present_helper_block_reason;
+    req->host_candidates = fb_state.stats.dxg_present_host_candidates;
+    req->host_rejects = fb_state.stats.dxg_present_host_rejects;
+    spin_unlock(&fb_state.lock);
+
+    return -EOPNOTSUPP;
 }
 
 static int fb_bo_destroy(uint32 handle);
@@ -1537,6 +2178,30 @@ static int fb_virgl_fence_fops_poll(struct vfs_file *file, short events)
 static struct vfs_file_ops fb_virgl_fence_file_ops = {
     .poll = fb_virgl_fence_fops_poll,
     .release = fb_virgl_fence_fops_release,
+};
+
+static void gpu_syncobj_state_put_locked(uint32 state_index);
+
+static int fb_syncobj_fops_release(struct vfs_inode *inode,
+                                   struct vfs_file *file)
+{
+    struct fb_gpu_syncobj_file *sync_file =
+        file ? (struct fb_gpu_syncobj_file *)file->private_data : NULL;
+
+    (void)inode;
+    if (file != NULL)
+        file->private_data = NULL;
+    if (sync_file != NULL) {
+        spin_lock(&fb_state.lock);
+        gpu_syncobj_state_put_locked(sync_file->state_index);
+        spin_unlock(&fb_state.lock);
+        kvfree(sync_file);
+    }
+    return 0;
+}
+
+static struct vfs_file_ops fb_syncobj_file_ops = {
+    .release = fb_syncobj_fops_release,
 };
 
 static int fb_bo_map_current(struct fb_gpu_bo_entry *bo, uint64 *addr_out)
@@ -1653,6 +2318,14 @@ static int fb_bo_destroy(uint32 handle)
     }
     bo->in_use = 0;
     bo->dead = 1;
+    fb_ttm_account_locked(bo->ttm_mem_type, bo->size, 0);
+    if (bo->ttm_pin_count != 0) {
+        if (fb_state.stats.ttm_pinned_bytes >= bo->size)
+            fb_state.stats.ttm_pinned_bytes -= bo->size;
+        else
+            fb_state.stats.ttm_pinned_bytes = 0;
+        bo->ttm_pin_count = 0;
+    }
     if (fb_state.stats.bo_handles > 0)
         fb_state.stats.bo_handles--;
     if (fb_state.stats.bo_live_bytes >= bo->size)
@@ -1912,22 +2585,41 @@ static int fb_release(cdev_t *cdev)
 
 static int gpu_open(cdev_t *cdev)
 {
-    (void)cdev;
+    enum fb_gpu_drm_node_type type = gpu_drm_node_from_cdev(cdev);
+
     spin_lock(&fb_state.lock);
     fb_state.stats.gpu_opens++;
     fb_state.stats.gpu_live_opens++;
+    if (type == FB_GPU_DRM_NODE_PRIMARY) {
+        fb_state.stats.drm_primary_opens++;
+        fb_state.stats.drm_primary_live++;
+    } else if (type == FB_GPU_DRM_NODE_RENDER) {
+        fb_state.stats.drm_render_opens++;
+        fb_state.stats.drm_render_live++;
+    }
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
+static int gpu_release_node(enum fb_gpu_drm_node_type type)
+{
+    spin_lock(&fb_state.lock);
+    if (fb_state.stats.gpu_live_opens > 0)
+        fb_state.stats.gpu_live_opens--;
+    if (type == FB_GPU_DRM_NODE_PRIMARY &&
+        fb_state.stats.drm_primary_live > 0) {
+        fb_state.stats.drm_primary_live--;
+    } else if (type == FB_GPU_DRM_NODE_RENDER &&
+               fb_state.stats.drm_render_live > 0) {
+        fb_state.stats.drm_render_live--;
+    }
     spin_unlock(&fb_state.lock);
     return 0;
 }
 
 static int gpu_release(cdev_t *cdev)
 {
-    (void)cdev;
-    spin_lock(&fb_state.lock);
-    if (fb_state.stats.gpu_live_opens > 0)
-        fb_state.stats.gpu_live_opens--;
-    spin_unlock(&fb_state.lock);
-    return 0;
+    return gpu_release_node(gpu_drm_node_from_cdev(cdev));
 }
 
 static int fb_write(cdev_t *cdev, bool user, const void *buf, size_t count)
@@ -2452,6 +3144,102 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         fb_state.stats.bo_fd_imports++;
         spin_unlock(&fb_state.lock);
         return 0;
+    }
+
+    case FB_GPU_BO_INFO: {
+        struct fb_gpu_bo_info req;
+        struct fb_gpu_bo_entry *bo;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.handle == 0)
+            return -EINVAL;
+
+        bo = fb_bo_get_owned(req.handle, owner_id, owner_tgid);
+        if (bo == NULL)
+            return -ENOENT;
+
+        req.width = bo->width;
+        req.height = bo->height;
+        req.pitch = bo->pitch;
+        req.format = FB_GPU_BO_FORMAT_XRGB8888;
+        req.modifier = FB_GPU_BO_MOD_LINEAR;
+        req.size = bo->size;
+        req.addr_align = FB_GPU_D3D12_HEAP_ALIGN;
+        req.size_align = FB_GPU_D3D12_HEAP_ALIGN;
+        req.page_size = PGSIZE;
+        req.reserved = 0;
+        req.mmap_offset = GPU_DRM_MMAP_OFFSET(req.handle);
+        fb_bo_put(bo);
+
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    case FB_GPU_DXG_PRESENT_SOURCE_REGISTER: {
+        struct fb_gpu_dxg_present_source_register req;
+        int ret;
+
+        spin_lock(&fb_state.lock);
+        fb_state.stats.dxg_present_register_ioctl_entries++;
+        spin_unlock(&fb_state.lock);
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.dxg_present_register_copyin_failures++;
+            fb_state.stats.dxg_present_last_ret = EFAULT;
+            spin_unlock(&fb_state.lock);
+            return -EFAULT;
+        }
+        ret = fb_dxg_present_register(owner_id, owner_tgid, &req);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            fb_dxg_present_source_unregister(req.present_source);
+            return -EFAULT;
+        }
+        return 0;
+    }
+
+    case FB_GPU_DXG_PRESENT_SOURCE_COMMIT: {
+        struct fb_gpu_dxg_present_source_commit req;
+
+        spin_lock(&fb_state.lock);
+        fb_state.stats.dxg_present_commit_ioctl_entries++;
+        spin_unlock(&fb_state.lock);
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.dxg_present_commit_copyin_failures++;
+            fb_state.stats.dxg_present_last_ret = EFAULT;
+            spin_unlock(&fb_state.lock);
+            return -EFAULT;
+        }
+        return fb_dxg_present_commit(owner_id, owner_tgid, &req);
+    }
+
+    case FB_GPU_DXG_PRESENT_SOURCE_QUERY: {
+        struct fb_gpu_dxg_present_source_query req;
+        int ret;
+
+        spin_lock(&fb_state.lock);
+        fb_state.stats.dxg_present_query_ioctl_entries++;
+        spin_unlock(&fb_state.lock);
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.dxg_present_query_copyin_failures++;
+            fb_state.stats.dxg_present_last_ret = EFAULT;
+            spin_unlock(&fb_state.lock);
+            return -EFAULT;
+        }
+        ret = fb_dxg_present_query(owner_id, owner_tgid, &req);
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.dxg_present_query_copyout_failures++;
+            fb_state.stats.dxg_present_last_ret = EFAULT;
+            spin_unlock(&fb_state.lock);
+            return -EFAULT;
+        }
+        return ret;
     }
 
     case FB_GPU_BO_FENCE: {
@@ -3033,6 +3821,10 @@ static int gpu_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     case FB_GPU_BO_IMPORT:
     case FB_GPU_BO_EXPORT_FD:
     case FB_GPU_BO_IMPORT_FD:
+    case FB_GPU_BO_INFO:
+    case FB_GPU_DXG_PRESENT_SOURCE_REGISTER:
+    case FB_GPU_DXG_PRESENT_SOURCE_COMMIT:
+    case FB_GPU_DXG_PRESENT_SOURCE_QUERY:
     case FB_GPU_BO_FENCE:
     case FB_GPU_FENCE_EXPORT_FD:
     case FB_GPU_FENCE_QUERY:
@@ -3077,6 +3869,58 @@ static uint64 gpu_alloc_render_owner_id(void)
         fb_state.next_render_owner_id = 1;
     spin_unlock(&fb_state.lock);
     return id;
+}
+
+static uint32 gpu_alloc_drm_magic(void)
+{
+    uint32 magic;
+
+    spin_lock(&fb_state.lock);
+    magic = fb_state.next_drm_magic++;
+    if (fb_state.next_drm_magic == 0)
+        fb_state.next_drm_magic = 1;
+    if (magic == 0)
+        magic = 1;
+    spin_unlock(&fb_state.lock);
+    return magic;
+}
+
+static enum fb_gpu_drm_node_type gpu_drm_node_from_cdev(cdev_t *cdev)
+{
+    if (cdev == NULL)
+        return FB_GPU_DRM_NODE_LEGACY;
+    if (cdev->dev.devname != NULL) {
+        if (strcmp(cdev->dev.devname, "dri/card0") == 0)
+            return FB_GPU_DRM_NODE_PRIMARY;
+        if (strcmp(cdev->dev.devname, "dri/renderD128") == 0)
+            return FB_GPU_DRM_NODE_RENDER;
+    }
+    if (cdev->dev.major == DRM_PRIMARY_MAJOR &&
+        cdev->dev.minor == DRM_PRIMARY_MINOR)
+        return FB_GPU_DRM_NODE_PRIMARY;
+    if (cdev->dev.major == DRM_RENDER_MAJOR &&
+        cdev->dev.minor == DRM_RENDER_MINOR)
+        return FB_GPU_DRM_NODE_RENDER;
+    return FB_GPU_DRM_NODE_LEGACY;
+}
+
+static const char *gpu_drm_node_name(enum fb_gpu_drm_node_type type)
+{
+    switch (type) {
+    case FB_GPU_DRM_NODE_PRIMARY:
+        return "primary";
+    case FB_GPU_DRM_NODE_RENDER:
+        return "render";
+    default:
+        return "legacy";
+    }
+}
+
+static int gpu_drm_is_primary_like(struct fb_gpu_render_owner *owner)
+{
+    return owner != NULL &&
+        (owner->drm.node_type == FB_GPU_DRM_NODE_PRIMARY ||
+         owner->drm.node_type == FB_GPU_DRM_NODE_LEGACY);
 }
 
 static cdev_t gpu_render_cdev;
@@ -3297,7 +4141,7 @@ static void gpu_backend_fill(struct fb_gpu_backend_info *info)
                                 "hyperv-dxg");
         gpu_backend_copy_string(info->renderer, sizeof(info->renderer),
                                 info->dxg_d3dkmt ?
-                                "OpenGL via Hyper-V GPU-PV D3DKMT/DXCore" :
+                                "Hyper-V GPU-PV D3DKMT/DXCore; OpenGL-submit gated" :
                                 "Hyper-V GPU-PV DXG transport; D3DKMT pending");
     }
 }
@@ -3355,18 +4199,20 @@ static int gpu_drm_version(uint64 arg)
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
     gpu_backend_fill(&backend);
-    req.version_major = 0;
-    req.version_minor = 1;
-    req.version_patchlevel = 0;
+    req.version_major = (int)fb_drm_device.driver_major;
+    req.version_minor = (int)fb_drm_device.driver_minor;
+    req.version_patchlevel = (int)fb_drm_device.driver_patchlevel;
     ret = gpu_copyout_string(req.name, &req.name_len,
                              backend.backend == FB_GPU_BACKEND_VIRGL ?
-                                 "virtio_gpu" : "xv6_gpu");
+                                 "virtio_gpu" : fb_drm_device.driver_name);
     if (ret != 0)
         return ret;
     ret = gpu_copyout_string(req.date, &req.date_len, "20260502");
     if (ret != 0)
         return ret;
-    ret = gpu_copyout_string(req.desc, &req.desc_len, backend.renderer);
+    ret = gpu_copyout_string(req.desc, &req.desc_len,
+                             backend.renderer[0] ? backend.renderer :
+                                 fb_drm_device.desc);
     if (ret != 0)
         return ret;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
@@ -3421,9 +4267,11 @@ static int gpu_drm_get_cap(uint64 arg)
     case DRM_CAP_PAGE_FLIP_TARGET:
     case DRM_CAP_CRTC_IN_VBLANK_EVENT:
     case DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP:
+        req.value = 0;
+        break;
     case DRM_CAP_SYNCOBJ:
     case DRM_CAP_SYNCOBJ_TIMELINE:
-        req.value = 0;
+        req.value = 1;
         break;
     default:
         return -EINVAL;
@@ -3437,21 +4285,28 @@ static int gpu_drm_get_magic(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_auth_compat req;
 
-    req.magic = owner && owner->id ? (uint32)owner->id : 1;
-    if (req.magic == 0)
-        req.magic = 1;
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+    req.magic = owner->drm.magic;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
 }
 
-static int gpu_drm_auth_magic(uint64 arg)
+static int gpu_drm_auth_magic(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_auth_compat req;
 
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
-    (void)req;
+    if (req.magic == 0 || req.magic != owner->drm.magic)
+        return -EINVAL;
+    owner->drm.authenticated = 1;
+    spin_lock(&fb_state.lock);
+    fb_state.stats.drm_auths++;
+    spin_unlock(&fb_state.lock);
     return 0;
 }
 
@@ -3463,15 +4318,81 @@ static int gpu_drm_get_client(struct fb_gpu_render_owner *owner, uint64 arg)
         return -EFAULT;
     if (req.idx != 0)
         return -EINVAL;
-    req.auth = 1;
+    req.auth = owner ? owner->drm.authenticated : 0;
     req.pid = owner ? (uint64)owner->tgid : 0;
     req.uid = 0;
-    req.magic = owner ? owner->id : 1;
+    req.magic = owner ? owner->drm.magic : 1;
     spin_lock(&fb_state.lock);
-    req.iocs = fb_state.stats.gpu_ioctls;
+    req.iocs = owner ? owner->drm.ioctl_count : fb_state.stats.drm_ioctls;
     spin_unlock(&fb_state.lock);
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_set_client_cap(struct fb_gpu_render_owner *owner,
+                                  uint64 arg)
+{
+    struct drm_set_client_cap_compat req;
+    uint64 bit;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    switch (req.capability) {
+    case DRM_CLIENT_CAP_STEREO_3D:
+    case DRM_CLIENT_CAP_UNIVERSAL_PLANES:
+    case DRM_CLIENT_CAP_ATOMIC:
+    case DRM_CLIENT_CAP_ASPECT_RATIO:
+    case DRM_CLIENT_CAP_WRITEBACK_CONNECTORS:
+        break;
+    default:
+        return -EINVAL;
+    }
+    if (req.value > 1)
+        return -EINVAL;
+    bit = 1ULL << req.capability;
+    if (req.value)
+        owner->drm.client_caps |= bit;
+    else
+        owner->drm.client_caps &= ~bit;
+    return 0;
+}
+
+static int gpu_drm_set_master(struct fb_gpu_render_owner *owner)
+{
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+
+    spin_lock(&fb_state.lock);
+    if (fb_state.drm_master_owner_id != 0 &&
+        fb_state.drm_master_owner_id != owner->id) {
+        spin_unlock(&fb_state.lock);
+        return -EBUSY;
+    }
+    fb_state.drm_master_owner_id = owner->id;
+    fb_state.stats.drm_master_sets++;
+    owner->drm.is_master = 1;
+    owner->drm.authenticated = 1;
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
+static int gpu_drm_drop_master(struct fb_gpu_render_owner *owner)
+{
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+
+    spin_lock(&fb_state.lock);
+    if (fb_state.drm_master_owner_id != owner->id || !owner->drm.is_master) {
+        spin_unlock(&fb_state.lock);
+        return -EINVAL;
+    }
+    fb_state.drm_master_owner_id = 0;
+    fb_state.stats.drm_master_drops++;
+    owner->drm.is_master = 0;
+    spin_unlock(&fb_state.lock);
     return 0;
 }
 
@@ -3480,17 +4401,21 @@ static int gpu_drm_get_stats(uint64 arg)
     struct drm_stats_compat req;
 
     memset(&req, 0, sizeof(req));
-    req.count = 4;
+    req.count = 6;
     spin_lock(&fb_state.lock);
-    req.data[0].value = fb_state.stats.gpu_ioctls;
+    req.data[0].value = fb_state.stats.drm_ioctls;
     req.data[1].value = fb_state.stats.bo_allocs;
     req.data[2].value = fb_state.stats.bo_bytes / 1024;
     req.data[3].value = fb_state.stats.fence_fd_polls;
+    req.data[4].value = fb_state.stats.drm_unknown_ioctls;
+    req.data[5].value = fb_state.stats.drm_master_sets;
     spin_unlock(&fb_state.lock);
     req.data[0].type = 3; /* _DRM_STAT_IOCTLS */
     req.data[1].type = 8; /* _DRM_STAT_COUNT */
     req.data[2].type = 7; /* _DRM_STAT_BYTE */
     req.data[3].type = 8; /* _DRM_STAT_COUNT */
+    req.data[4].type = 8; /* _DRM_STAT_COUNT */
+    req.data[5].type = 8; /* _DRM_STAT_COUNT */
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
@@ -3668,13 +4593,765 @@ static int gpu_drm_mode_getblob(uint64 arg)
 static int gpu_drm_mode_getplaneresources(uint64 arg)
 {
     struct drm_mode_get_plane_res_compat req;
+    uint32 plane_id = GPU_DRM_PRIMARY_PLANE_ID;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
-    req.count_planes = 0;
+    if (req.plane_id_ptr != 0 && req.count_planes != 0 &&
+        either_copyout(1, req.plane_id_ptr, &plane_id,
+                       sizeof(plane_id)) < 0)
+        return -EFAULT;
+    req.count_planes = 1;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
+}
+
+static int gpu_drm_mode_getplane(uint64 arg)
+{
+    struct drm_mode_get_plane_compat req;
+    uint32 formats[2] = { DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888 };
+    uint32 copy_count;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.plane_id != GPU_DRM_PRIMARY_PLANE_ID)
+        return -ENOENT;
+    copy_count = req.count_format_types;
+    if (copy_count > 2)
+        copy_count = 2;
+    if (req.format_type_ptr != 0 && copy_count != 0 &&
+        either_copyout(1, req.format_type_ptr, formats,
+                       copy_count * sizeof(formats[0])) < 0)
+        return -EFAULT;
+    req.crtc_id = GPU_DRM_CRTC_ID;
+    req.fb_id = fb_state.current_kms_fb_id;
+    req.possible_crtcs = 1;
+    req.gamma_size = 0;
+    req.count_format_types = 2;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static struct fb_gpu_kms_fb_entry *gpu_kms_fb_lookup_locked(uint32 fb_id)
+{
+    for (uint32 i = 0; i < FB_GPU_MAX_KMS_FBS; i++) {
+        if (fb_state.kms_fbs[i].in_use && fb_state.kms_fbs[i].fb_id == fb_id)
+            return &fb_state.kms_fbs[i];
+    }
+    return NULL;
+}
+
+static int gpu_kms_fb_owner_matches(const struct fb_gpu_kms_fb_entry *fb,
+                                    struct fb_gpu_render_owner *owner)
+{
+    if (fb == NULL || owner == NULL)
+        return 0;
+    return fb->owner_id == owner->id && fb->owner_tgid == owner->tgid;
+}
+
+static void gpu_kms_unpin_bo_locked(uint32 handle, uint64 owner_id,
+                                    pid_t owner_tgid)
+{
+    struct fb_gpu_bo_entry *bo = fb_bo_lookup_locked(handle);
+
+    if (bo == NULL || !fb_bo_owner_matches(bo, owner_id, owner_tgid) ||
+        bo->ttm_pin_count == 0)
+        return;
+    bo->ttm_pin_count--;
+    if (bo->ttm_pin_count == 0) {
+        if (fb_state.stats.ttm_pinned_bytes >= bo->size)
+            fb_state.stats.ttm_pinned_bytes -= bo->size;
+        else
+            fb_state.stats.ttm_pinned_bytes = 0;
+    }
+}
+
+static void gpu_kms_destroy_owner_fbs(struct fb_gpu_render_owner *owner)
+{
+    if (owner == NULL)
+        return;
+
+    spin_lock(&fb_state.lock);
+    for (uint32 i = 0; i < FB_GPU_MAX_KMS_FBS; i++) {
+        struct fb_gpu_kms_fb_entry *fb = &fb_state.kms_fbs[i];
+
+        if (!gpu_kms_fb_owner_matches(fb, owner))
+            continue;
+        if (fb_state.current_kms_fb_id == fb->fb_id)
+            fb_state.current_kms_fb_id = 0;
+        gpu_kms_unpin_bo_locked(fb->bo_handle, owner->id, owner->tgid);
+        memset(fb, 0, sizeof(*fb));
+        if (fb_state.stats.kms_framebuffers > 0)
+            fb_state.stats.kms_framebuffers--;
+    }
+    spin_unlock(&fb_state.lock);
+}
+
+static int gpu_drm_mode_addfb2(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_mode_fb_cmd2_compat req;
+    struct fb_gpu_bo_entry *bo;
+    uint64 min_size;
+    uint32 fb_id = 0;
+    int ret = 0;
+
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.width == 0 || req.height == 0 || req.handles[0] == 0 ||
+        req.pitches[0] == 0)
+        return -EINVAL;
+    if ((req.flags & ~(DRM_MODE_FB_MODIFIERS)) != 0)
+        return -EINVAL;
+    if (req.pixel_format != DRM_FORMAT_XRGB8888 &&
+        req.pixel_format != DRM_FORMAT_ARGB8888)
+        return -EINVAL;
+    for (uint32 i = 1; i < 4; i++) {
+        if (req.handles[i] != 0 || req.pitches[i] != 0 ||
+            req.offsets[i] != 0 || req.modifier[i] != 0)
+            return -EINVAL;
+    }
+    if ((req.flags & DRM_MODE_FB_MODIFIERS) &&
+        req.modifier[0] != DRM_FORMAT_MOD_LINEAR)
+        return -EINVAL;
+    if (req.pitches[0] < req.width * 4)
+        return -EINVAL;
+    min_size = (uint64)req.pitches[0] * req.height + req.offsets[0];
+    if (min_size < req.offsets[0])
+        return -EINVAL;
+
+    bo = fb_bo_get_owned(req.handles[0], owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
+    if (bo->size < min_size) {
+        fb_bo_put(bo);
+        return -EINVAL;
+    }
+
+    spin_lock(&fb_state.lock);
+    for (uint32 i = 0; i < FB_GPU_MAX_KMS_FBS; i++) {
+        struct fb_gpu_kms_fb_entry *fb = &fb_state.kms_fbs[i];
+
+        if (fb->in_use)
+            continue;
+        fb_id = fb_state.next_kms_fb_id++;
+        if (fb_state.next_kms_fb_id == 0)
+            fb_state.next_kms_fb_id = 100;
+        memset(fb, 0, sizeof(*fb));
+        fb->in_use = 1;
+        fb->fb_id = fb_id;
+        fb->bo_handle = req.handles[0];
+        fb->owner_id = owner->id;
+        fb->owner_tgid = owner->tgid;
+        fb->width = req.width;
+        fb->height = req.height;
+        fb->pitch = req.pitches[0];
+        fb->pixel_format = req.pixel_format;
+        fb->modifier = (req.flags & DRM_MODE_FB_MODIFIERS) ?
+            req.modifier[0] : DRM_FORMAT_MOD_LINEAR;
+        if (bo->ttm_pin_count == 0)
+            fb_state.stats.ttm_pinned_bytes += bo->size;
+        bo->ttm_pin_count++;
+        fb_state.stats.kms_framebuffers++;
+        break;
+    }
+    spin_unlock(&fb_state.lock);
+    fb_bo_put(bo);
+    if (fb_id == 0)
+        return -ENOSPC;
+
+    req.fb_id = fb_id;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        ret = -EFAULT;
+    return ret;
+}
+
+static int gpu_drm_mode_rmfb(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    uint32 fb_id;
+    int ret = -ENOENT;
+
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+    if (either_copyin(&fb_id, 1, arg, sizeof(fb_id)) < 0)
+        return -EFAULT;
+
+    spin_lock(&fb_state.lock);
+    for (uint32 i = 0; i < FB_GPU_MAX_KMS_FBS; i++) {
+        struct fb_gpu_kms_fb_entry *fb = &fb_state.kms_fbs[i];
+
+        if (fb->fb_id != fb_id || !gpu_kms_fb_owner_matches(fb, owner))
+            continue;
+        if (fb_state.current_kms_fb_id == fb_id)
+            fb_state.current_kms_fb_id = 0;
+        gpu_kms_unpin_bo_locked(fb->bo_handle, owner->id, owner->tgid);
+        memset(fb, 0, sizeof(*fb));
+        if (fb_state.stats.kms_framebuffers > 0)
+            fb_state.stats.kms_framebuffers--;
+        ret = 0;
+        break;
+    }
+    spin_unlock(&fb_state.lock);
+    return ret;
+}
+
+static int gpu_drm_mode_setcrtc(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_mode_crtc_compat req;
+    int ret = 0;
+
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.crtc_id != GPU_DRM_CRTC_ID)
+        return -ENOENT;
+    if (req.fb_id != 0) {
+        spin_lock(&fb_state.lock);
+        ret = gpu_kms_fb_owner_matches(
+            gpu_kms_fb_lookup_locked(req.fb_id), owner) ? 0 : -ENOENT;
+        if (ret == 0)
+            fb_state.current_kms_fb_id = req.fb_id;
+        spin_unlock(&fb_state.lock);
+    }
+    return ret;
+}
+
+static int gpu_drm_mode_page_flip(struct fb_gpu_render_owner *owner,
+                                  uint64 arg)
+{
+    struct drm_mode_crtc_page_flip_compat req;
+    int ret;
+
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.crtc_id != GPU_DRM_CRTC_ID || req.reserved != 0 ||
+        (req.flags & ~DRM_MODE_PAGE_FLIP_FLAGS) != 0 ||
+        ((req.flags & DRM_MODE_PAGE_FLIP_TARGET_ABSOLUTE) &&
+         (req.flags & DRM_MODE_PAGE_FLIP_TARGET_RELATIVE)))
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    ret = gpu_kms_fb_owner_matches(
+        gpu_kms_fb_lookup_locked(req.fb_id), owner) ? 0 : -ENOENT;
+    if (ret == 0) {
+        fb_state.current_kms_fb_id = req.fb_id;
+        fb_state.stats.kms_page_flips++;
+    }
+    spin_unlock(&fb_state.lock);
+    return ret;
+}
+
+static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_mode_atomic_compat req;
+
+    if (!gpu_drm_is_primary_like(owner))
+        return -EOPNOTSUPP;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if ((req.flags & ~DRM_MODE_ATOMIC_FLAGS) != 0 || req.reserved != 0)
+        return -EINVAL;
+    if (req.count_objs != 0)
+        return -EOPNOTSUPP;
+    spin_lock(&fb_state.lock);
+    fb_state.stats.kms_atomic_commits++;
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
+static struct fb_gpu_syncobj_entry *
+gpu_syncobj_lookup_locked(uint32 handle, struct fb_gpu_render_owner *owner)
+{
+    if (handle == 0 || owner == NULL)
+        return NULL;
+    for (uint32 i = 0; i < FB_GPU_MAX_SYNCOBJS; i++) {
+        struct fb_gpu_syncobj_entry *obj = &fb_state.syncobjs[i];
+
+        if (obj->in_use && obj->handle == handle &&
+            obj->owner_id == owner->id && obj->owner_tgid == owner->tgid)
+            return obj;
+    }
+    return NULL;
+}
+
+static struct fb_gpu_syncobj_state_entry *
+gpu_syncobj_state_locked(uint32 state_index)
+{
+    if (state_index == 0 || state_index > FB_GPU_MAX_SYNCOBJ_STATES)
+        return NULL;
+    if (!fb_state.syncobj_states[state_index - 1].in_use)
+        return NULL;
+    return &fb_state.syncobj_states[state_index - 1];
+}
+
+static void gpu_syncobj_state_put_locked(uint32 state_index)
+{
+    struct fb_gpu_syncobj_state_entry *state =
+        gpu_syncobj_state_locked(state_index);
+
+    if (state == NULL)
+        return;
+    if (state->refs > 0)
+        state->refs--;
+    if (state->refs == 0)
+        memset(state, 0, sizeof(*state));
+}
+
+static int gpu_syncobj_state_get_locked(uint32 state_index)
+{
+    struct fb_gpu_syncobj_state_entry *state =
+        gpu_syncobj_state_locked(state_index);
+
+    if (state == NULL)
+        return -ENOENT;
+    state->refs++;
+    return 0;
+}
+
+static int gpu_syncobj_alloc_state_locked(int signaled,
+                                          uint32 *state_index)
+{
+    if (state_index == NULL)
+        return -EINVAL;
+    for (uint32 i = 0; i < FB_GPU_MAX_SYNCOBJ_STATES; i++) {
+        struct fb_gpu_syncobj_state_entry *state =
+            &fb_state.syncobj_states[i];
+
+        if (state->in_use)
+            continue;
+        memset(state, 0, sizeof(*state));
+        state->in_use = 1;
+        state->signaled = signaled;
+        state->timeline_value = signaled ? 1 : 0;
+        *state_index = i + 1;
+        return 0;
+    }
+    return -ENOSPC;
+}
+
+static int gpu_syncobj_alloc_handle_locked(struct fb_gpu_render_owner *owner,
+                                           uint32 state_index,
+                                           uint32 *handle_out)
+{
+    struct fb_gpu_syncobj_state_entry *state;
+
+    if (owner == NULL || handle_out == NULL)
+        return -EINVAL;
+    state = gpu_syncobj_state_locked(state_index);
+    if (state == NULL)
+        return -ENOENT;
+
+    for (uint32 i = 0; i < FB_GPU_MAX_SYNCOBJS; i++) {
+        struct fb_gpu_syncobj_entry *obj = &fb_state.syncobjs[i];
+        uint32 handle;
+
+        if (obj->in_use)
+            continue;
+        handle = fb_state.next_syncobj_handle++;
+        if (fb_state.next_syncobj_handle == 0)
+            fb_state.next_syncobj_handle = 1;
+        memset(obj, 0, sizeof(*obj));
+        obj->in_use = 1;
+        obj->handle = handle;
+        obj->owner_id = owner->id;
+        obj->owner_tgid = owner->tgid;
+        obj->state_index = state_index;
+        state->refs++;
+        fb_state.stats.syncobj_created++;
+        fb_state.stats.syncobj_live++;
+        *handle_out = handle;
+        return 0;
+    }
+    return -ENOSPC;
+}
+
+static void gpu_syncobj_destroy_handle_locked(struct fb_gpu_syncobj_entry *obj)
+{
+    uint32 state_index;
+
+    if (obj == NULL || !obj->in_use)
+        return;
+    state_index = obj->state_index;
+    memset(obj, 0, sizeof(*obj));
+    if (fb_state.stats.syncobj_live > 0)
+        fb_state.stats.syncobj_live--;
+    gpu_syncobj_state_put_locked(state_index);
+}
+
+static int gpu_syncobj_copy_handle(uint64 base, uint32 index, uint32 *handle)
+{
+    if (base == 0 || handle == NULL)
+        return -EINVAL;
+    if (either_copyin(handle, 1, base + (uint64)index * sizeof(uint32),
+                      sizeof(*handle)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_syncobj_copy_point(uint64 base, uint32 index, uint64 *point)
+{
+    if (base == 0 || point == NULL)
+        return -EINVAL;
+    if (either_copyin(point, 1, base + (uint64)index * sizeof(uint64),
+                      sizeof(*point)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_syncobj_write_point(uint64 base, uint32 index, uint64 point)
+{
+    if (base == 0)
+        return -EINVAL;
+    if (either_copyout(1, base + (uint64)index * sizeof(uint64),
+                       &point, sizeof(point)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_syncobj_create(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_syncobj_create_compat req;
+    uint32 handle = 0;
+    uint32 state_index = 0;
+    int ret;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if ((req.flags & ~DRM_SYNCOBJ_CREATE_SIGNALED) != 0)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    ret = gpu_syncobj_alloc_state_locked(
+        (req.flags & DRM_SYNCOBJ_CREATE_SIGNALED) != 0, &state_index);
+    if (ret == 0)
+        ret = gpu_syncobj_alloc_handle_locked(owner, state_index, &handle);
+    if (ret != 0 && state_index != 0)
+        gpu_syncobj_state_put_locked(state_index);
+    spin_unlock(&fb_state.lock);
+    if (ret != 0)
+        return ret;
+    req.handle = handle;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_syncobj_destroy(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_syncobj_destroy_compat req;
+    struct fb_gpu_syncobj_entry *obj;
+    int ret = -ENOENT;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+
+    spin_lock(&fb_state.lock);
+    obj = gpu_syncobj_lookup_locked(req.handle, owner);
+    if (obj != NULL) {
+        gpu_syncobj_destroy_handle_locked(obj);
+        ret = 0;
+    }
+    spin_unlock(&fb_state.lock);
+    return ret;
+}
+
+static int gpu_syncobj_handle_to_fd(struct fb_gpu_render_owner *owner,
+                                    uint64 arg)
+{
+    struct drm_syncobj_handle_compat req;
+    struct fb_gpu_syncobj_file *sync_file;
+    struct fb_gpu_syncobj_entry *obj;
+    int fd;
+    int ret;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.flags != 0 || req.pad != 0)
+        return -EINVAL;
+
+    sync_file = kvmalloc(sizeof(*sync_file));
+    if (sync_file == NULL)
+        return -ENOMEM;
+    memset(sync_file, 0, sizeof(*sync_file));
+
+    spin_lock(&fb_state.lock);
+    obj = gpu_syncobj_lookup_locked(req.handle, owner);
+    if (obj == NULL) {
+        spin_unlock(&fb_state.lock);
+        kvfree(sync_file);
+        return -ENOENT;
+    }
+    ret = gpu_syncobj_state_get_locked(obj->state_index);
+    if (ret == 0)
+        sync_file->state_index = obj->state_index;
+    spin_unlock(&fb_state.lock);
+    if (ret != 0) {
+        kvfree(sync_file);
+        return ret;
+    }
+
+    fd = vfs_custom_fd_alloc(&fb_syncobj_file_ops, sync_file, 0);
+    if (fd < 0) {
+        spin_lock(&fb_state.lock);
+        gpu_syncobj_state_put_locked(sync_file->state_index);
+        spin_unlock(&fb_state.lock);
+        kvfree(sync_file);
+        return fd;
+    }
+    req.fd = fd;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_syncobj_fd_to_handle(struct fb_gpu_render_owner *owner,
+                                    uint64 arg)
+{
+    struct drm_syncobj_handle_compat req;
+    struct fb_gpu_syncobj_file *sync_file;
+    struct vfs_file *file;
+    uint32 handle = 0;
+    int ret;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.flags != 0 || req.pad != 0 || req.fd < 0)
+        return -EINVAL;
+
+    file = vfs_fdtable_get_file(current->fdtable, req.fd);
+    if (file == NULL)
+        return -EBADF;
+    if (file->ops != &fb_syncobj_file_ops || file->private_data == NULL) {
+        vfs_fput(file);
+        return -EINVAL;
+    }
+    sync_file = (struct fb_gpu_syncobj_file *)file->private_data;
+
+    spin_lock(&fb_state.lock);
+    ret = gpu_syncobj_alloc_handle_locked(owner, sync_file->state_index,
+                                          &handle);
+    spin_unlock(&fb_state.lock);
+    vfs_fput(file);
+    if (ret != 0)
+        return ret;
+
+    req.handle = handle;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_syncobj_array_signal_reset(struct fb_gpu_render_owner *owner,
+                                          uint64 arg, int signal,
+                                          int timeline)
+{
+    struct drm_syncobj_array_compat arr;
+    struct drm_syncobj_timeline_array_compat tl;
+    uint32 count;
+    uint64 handles_ptr;
+    uint64 points_ptr = 0;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (timeline) {
+        if (either_copyin(&tl, 1, arg, sizeof(tl)) < 0)
+            return -EFAULT;
+        if (tl.flags != 0)
+            return -EINVAL;
+        count = tl.count_handles;
+        handles_ptr = tl.handles;
+        points_ptr = tl.points;
+    } else {
+        if (either_copyin(&arr, 1, arg, sizeof(arr)) < 0)
+            return -EFAULT;
+        if (arr.pad != 0)
+            return -EINVAL;
+        count = arr.count_handles;
+        handles_ptr = arr.handles;
+    }
+    if (count == 0 || count > 64)
+        return -EINVAL;
+
+    for (uint32 i = 0; i < count; i++) {
+        uint32 handle;
+        uint64 point = 1;
+        int ret = gpu_syncobj_copy_handle(handles_ptr, i, &handle);
+        if (ret != 0)
+            return ret;
+        if (timeline) {
+            ret = gpu_syncobj_copy_point(points_ptr, i, &point);
+            if (ret != 0)
+                return ret;
+        }
+        struct fb_gpu_syncobj_entry *obj;
+        struct fb_gpu_syncobj_state_entry *state;
+
+        spin_lock(&fb_state.lock);
+        obj = gpu_syncobj_lookup_locked(handle, owner);
+        state = obj != NULL ? gpu_syncobj_state_locked(obj->state_index) :
+            NULL;
+        if (obj == NULL || state == NULL) {
+            spin_unlock(&fb_state.lock);
+            return -ENOENT;
+        }
+        if (signal) {
+            state->signaled = 1;
+            if (state->timeline_value < point)
+                state->timeline_value = point;
+            fb_state.stats.syncobj_signals++;
+        } else {
+            state->signaled = 0;
+        }
+        spin_unlock(&fb_state.lock);
+    }
+    return 0;
+}
+
+static int gpu_syncobj_wait_common(struct fb_gpu_render_owner *owner,
+                                   uint64 arg, int timeline)
+{
+    struct drm_syncobj_wait_compat wait;
+    struct drm_syncobj_timeline_wait_compat twait;
+    uint32 count;
+    uint64 handles_ptr;
+    uint64 points_ptr = 0;
+    int first = -1;
+    uint32 flags;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (timeline) {
+        if (either_copyin(&twait, 1, arg, sizeof(twait)) < 0)
+            return -EFAULT;
+        count = twait.count_handles;
+        handles_ptr = twait.handles;
+        points_ptr = twait.points;
+        flags = twait.flags;
+    } else {
+        if (either_copyin(&wait, 1, arg, sizeof(wait)) < 0)
+            return -EFAULT;
+        count = wait.count_handles;
+        handles_ptr = wait.handles;
+        flags = wait.flags;
+    }
+    if (count == 0 || count > 64 ||
+        (flags & ~(DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL |
+                   DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT |
+                   DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE |
+                   DRM_SYNCOBJ_WAIT_FLAGS_WAIT_DEADLINE)) != 0)
+        return -EINVAL;
+
+    for (uint32 i = 0; i < count; i++) {
+        uint32 handle;
+        uint64 point = 1;
+        int ready;
+        int ret = gpu_syncobj_copy_handle(handles_ptr, i, &handle);
+        if (ret != 0)
+            return ret;
+        if (timeline) {
+            ret = gpu_syncobj_copy_point(points_ptr, i, &point);
+            if (ret != 0)
+                return ret;
+        }
+        struct fb_gpu_syncobj_entry *obj;
+        struct fb_gpu_syncobj_state_entry *state;
+
+        spin_lock(&fb_state.lock);
+        obj = gpu_syncobj_lookup_locked(handle, owner);
+        state = obj != NULL ? gpu_syncobj_state_locked(obj->state_index) :
+            NULL;
+        if (obj == NULL || state == NULL) {
+            spin_unlock(&fb_state.lock);
+            return -ENOENT;
+        }
+        ready = state->signaled && state->timeline_value >= point;
+        spin_unlock(&fb_state.lock);
+        if (ready && first < 0)
+            first = (int)i;
+        if (!ready && (flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL))
+            return -ETIME;
+    }
+    if (first < 0)
+        return -ETIME;
+    spin_lock(&fb_state.lock);
+    fb_state.stats.syncobj_waits++;
+    spin_unlock(&fb_state.lock);
+    if (timeline) {
+        twait.first_signaled = (uint32)first;
+        if (either_copyout(1, arg, &twait, sizeof(twait)) < 0)
+            return -EFAULT;
+    } else {
+        wait.first_signaled = (uint32)first;
+        if (either_copyout(1, arg, &wait, sizeof(wait)) < 0)
+            return -EFAULT;
+    }
+    return 0;
+}
+
+static int gpu_syncobj_query(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_syncobj_timeline_array_compat req;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.count_handles == 0 || req.count_handles > 64 ||
+        (req.flags & ~DRM_SYNCOBJ_QUERY_FLAGS_LAST_SUBMITTED) != 0)
+        return -EINVAL;
+    for (uint32 i = 0; i < req.count_handles; i++) {
+        uint32 handle;
+        uint64 point;
+        int ret = gpu_syncobj_copy_handle(req.handles, i, &handle);
+        if (ret != 0)
+            return ret;
+        struct fb_gpu_syncobj_entry *obj;
+        struct fb_gpu_syncobj_state_entry *state;
+
+        spin_lock(&fb_state.lock);
+        obj = gpu_syncobj_lookup_locked(handle, owner);
+        state = obj != NULL ? gpu_syncobj_state_locked(obj->state_index) :
+            NULL;
+        if (obj == NULL || state == NULL) {
+            spin_unlock(&fb_state.lock);
+            return -ENOENT;
+        }
+        point = state->timeline_value;
+        spin_unlock(&fb_state.lock);
+        ret = gpu_syncobj_write_point(req.points, i, point);
+        if (ret != 0)
+            return ret;
+    }
+    return 0;
+}
+
+static void gpu_syncobj_destroy_owner(struct fb_gpu_render_owner *owner)
+{
+    if (owner == NULL)
+        return;
+    spin_lock(&fb_state.lock);
+    for (uint32 i = 0; i < FB_GPU_MAX_SYNCOBJS; i++) {
+        struct fb_gpu_syncobj_entry *obj = &fb_state.syncobjs[i];
+        if (!obj->in_use || obj->owner_id != owner->id ||
+            obj->owner_tgid != owner->tgid)
+            continue;
+        gpu_syncobj_destroy_handle_locked(obj);
+    }
+    spin_unlock(&fb_state.lock);
 }
 
 static int gpu_drm_create_dumb(struct fb_gpu_render_owner *owner, uint64 arg)
@@ -3894,11 +5571,356 @@ static int gpu_drm_virtgpu_transfer(struct fb_gpu_render_owner *owner,
                                     from_host);
 }
 
+static struct pci_device_info *gpu_nouveau_device(void)
+{
+    struct hyperv_dxg_status dxg;
+
+    if (hyperv_dxg_get_status(&dxg) == 0 &&
+        (dxg.global_present || dxg.vgpu_present))
+        return NULL;
+    return pci_get_nvidia_gpu(0);
+}
+
+static int gpu_nouveau_require_device(void)
+{
+    return gpu_nouveau_device() != NULL ? 0 : -ENODEV;
+}
+
+static uint64 gpu_nouveau_bar_size(uint32 bar)
+{
+    if (bar == 0)
+        return 0;
+    if ((bar & 0x1) != 0)
+        return 0;
+    return 256ULL * 1024ULL * 1024ULL;
+}
+
+static int gpu_nouveau_getparam(uint64 arg)
+{
+    struct drm_nouveau_getparam_compat req;
+    struct pci_device_info *dev = gpu_nouveau_device();
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (dev == NULL)
+        return -ENODEV;
+
+    switch (req.param) {
+    case NOUVEAU_GETPARAM_PCI_VENDOR:
+        req.value = dev->vendor_id;
+        break;
+    case NOUVEAU_GETPARAM_PCI_DEVICE:
+        req.value = dev->device_id;
+        break;
+    case NOUVEAU_GETPARAM_BUS_TYPE:
+        req.value = 2;
+        break;
+    case NOUVEAU_GETPARAM_FB_SIZE:
+    case NOUVEAU_GETPARAM_VRAM_BAR_SIZE:
+        req.value = gpu_nouveau_bar_size(dev->bar[1]);
+        break;
+    case NOUVEAU_GETPARAM_AGP_SIZE:
+        req.value = 0;
+        break;
+    case NOUVEAU_GETPARAM_CHIPSET_ID:
+        req.value = dev->device_id & 0xff;
+        break;
+    case NOUVEAU_GETPARAM_VM_VRAM_BASE:
+        req.value = 0;
+        break;
+    case NOUVEAU_GETPARAM_GRAPH_UNITS:
+        req.value = 1;
+        break;
+    case NOUVEAU_GETPARAM_PTIMER_TIME:
+        req.value = get_jiffs() * 1000000ULL;
+        break;
+    case NOUVEAU_GETPARAM_HAS_BO_USAGE:
+        req.value = 1;
+        break;
+    case NOUVEAU_GETPARAM_HAS_PAGEFLIP:
+        req.value = 0;
+        break;
+    case NOUVEAU_GETPARAM_EXEC_PUSH_MAX:
+        req.value = 0;
+        break;
+    case NOUVEAU_GETPARAM_VRAM_USED:
+        req.value = 0;
+        break;
+    case NOUVEAU_GETPARAM_HAS_VMA_TILEMODE:
+        req.value = 0;
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_nouveau_channel_alloc(struct fb_gpu_render_owner *owner,
+                                     uint64 arg)
+{
+    struct drm_nouveau_channel_alloc_compat req;
+    int ret = gpu_nouveau_require_device();
+
+    if (ret != 0)
+        return ret;
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (owner->nouveau_channel != 0)
+        return -EBUSY;
+    if (req.nr_subchan > 8)
+        return -EINVAL;
+
+    owner->nouveau_channel = 1;
+    req.channel = 0;
+    req.pushbuf_domains = NOUVEAU_GEM_DOMAIN_GART |
+                          NOUVEAU_GEM_DOMAIN_MAPPABLE |
+                          NOUVEAU_GEM_DOMAIN_COHERENT;
+    req.notifier_handle = 0;
+    req.nr_subchan = 0;
+    memset(req.subchan, 0, sizeof(req.subchan));
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_nouveau_channel_free(struct fb_gpu_render_owner *owner,
+                                    uint64 arg)
+{
+    struct drm_nouveau_channel_free_compat req;
+    int ret = gpu_nouveau_require_device();
+
+    if (ret != 0)
+        return ret;
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.channel != 0 || owner->nouveau_channel == 0)
+        return -EINVAL;
+    owner->nouveau_channel = 0;
+    return 0;
+}
+
+static int gpu_nouveau_gem_new(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_nouveau_gem_new_compat req;
+    uint64 size;
+    uint32 npages;
+    uint32 handle;
+    page_t **pages;
+    int ret = gpu_nouveau_require_device();
+
+    if (ret != 0)
+        return ret;
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.info.handle != 0 || req.info.size == 0 ||
+        req.info.size > 64ULL * 1024ULL * 1024ULL ||
+        (req.info.domain & ~NOUVEAU_GEM_VALID_DOMAINS) != 0)
+        return -EINVAL;
+    if (req.align != 0 && (req.align & (req.align - 1)) != 0)
+        return -EINVAL;
+
+    size = FB_GPU_ALIGN_UP(req.info.size, PGSIZE);
+    npages = size / PGSIZE;
+    ret = fb_bo_alloc_pages(npages, &pages);
+    if (ret != 0)
+        return ret;
+    ret = fb_bo_register(owner->id, owner->tgid, (uint32)(size / 4), 1,
+                         (uint32)size, size, pages, npages, &handle);
+    if (ret != 0) {
+        fb_bo_release_pages(pages, npages);
+        return ret;
+    }
+
+    req.info.handle = handle;
+    if (req.info.domain == 0)
+        req.info.domain = NOUVEAU_GEM_DOMAIN_GART |
+                          NOUVEAU_GEM_DOMAIN_MAPPABLE |
+                          NOUVEAU_GEM_DOMAIN_COHERENT;
+    if ((req.info.domain & NOUVEAU_GEM_DOMAIN_VRAM) != 0) {
+        ret = fb_bo_set_ttm_placement(handle, owner->id, owner->tgid,
+                                      FB_TTM_PL_VRAM);
+    } else if ((req.info.domain & NOUVEAU_GEM_DOMAIN_GART) != 0) {
+        ret = fb_bo_set_ttm_placement(handle, owner->id, owner->tgid,
+                                      FB_TTM_PL_TT);
+    } else {
+        ret = fb_bo_set_ttm_placement(handle, owner->id, owner->tgid,
+                                      FB_TTM_PL_SYSTEM);
+    }
+    if (ret != 0) {
+        (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
+        return ret;
+    }
+    req.info.size = size;
+    req.info.offset = 0;
+    req.info.map_handle = GPU_DRM_MMAP_OFFSET(handle);
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
+        (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
+        return -EFAULT;
+    }
+    return 0;
+}
+
+static int gpu_nouveau_gem_info(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_nouveau_gem_info_compat req;
+    struct fb_gpu_bo_entry *bo;
+    int ret = gpu_nouveau_require_device();
+
+    if (ret != 0)
+        return ret;
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    bo = fb_bo_get_owned(req.handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
+    if (bo->ttm_mem_type == FB_TTM_MEM_VRAM)
+        req.domain = NOUVEAU_GEM_DOMAIN_VRAM;
+    else if (bo->ttm_mem_type == FB_TTM_MEM_TT)
+        req.domain = NOUVEAU_GEM_DOMAIN_GART;
+    else
+        req.domain = NOUVEAU_GEM_DOMAIN_CPU;
+    req.domain |= NOUVEAU_GEM_DOMAIN_MAPPABLE |
+                  NOUVEAU_GEM_DOMAIN_COHERENT;
+    req.size = bo->size;
+    req.offset = 0;
+    req.map_handle = GPU_DRM_MMAP_OFFSET(req.handle);
+    req.tile_mode = 0;
+    req.tile_flags = 0;
+    fb_bo_put(bo);
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_nouveau_cpu_prep(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_nouveau_gem_cpu_prep_compat req;
+    struct fb_gpu_bo_entry *bo;
+    int ret = gpu_nouveau_require_device();
+
+    if (ret != 0)
+        return ret;
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if ((req.flags & ~(NOUVEAU_GEM_CPU_PREP_NOWAIT |
+                       NOUVEAU_GEM_CPU_PREP_WRITE)) != 0)
+        return -EINVAL;
+    bo = fb_bo_get_owned(req.handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
+    fb_bo_put(bo);
+    return 0;
+}
+
+static int gpu_nouveau_cpu_fini(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_nouveau_gem_cpu_fini_compat req;
+    struct fb_gpu_bo_entry *bo;
+    int ret = gpu_nouveau_require_device();
+
+    if (ret != 0)
+        return ret;
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    bo = fb_bo_get_owned(req.handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
+    fb_bo_put(bo);
+    return 0;
+}
+
+static int gpu_nouveau_vm_init(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_nouveau_vm_init_compat req;
+    int ret = gpu_nouveau_require_device();
+
+    if (ret != 0)
+        return ret;
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (owner->nouveau_channel != 0)
+        return -ENOSYS;
+    owner->nouveau_vm_initialized = 1;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_nouveau_pushbuf(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_nouveau_gem_pushbuf_compat req;
+    int ret = gpu_nouveau_require_device();
+
+    if (ret != 0)
+        return ret;
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.nr_buffers > NOUVEAU_GEM_MAX_BUFFERS ||
+        req.nr_relocs > NOUVEAU_GEM_MAX_RELOCS ||
+        req.nr_push > NOUVEAU_GEM_MAX_PUSH)
+        return -EINVAL;
+    if (req.channel != 0 || owner->nouveau_channel == 0)
+        return -EINVAL;
+    return -EOPNOTSUPP;
+}
+
+static int gpu_nouveau_bind_or_exec(struct fb_gpu_render_owner *owner,
+                                    uint64 arg, int exec)
+{
+    struct drm_nouveau_vm_bind_compat bind_req;
+    struct drm_nouveau_exec_compat exec_req;
+    int ret = gpu_nouveau_require_device();
+
+    if (ret != 0)
+        return ret;
+    if (owner == NULL)
+        return -EBADF;
+    if (exec) {
+        if (either_copyin(&exec_req, 1, arg, sizeof(exec_req)) < 0)
+            return -EFAULT;
+        if (exec_req.channel != 0 || owner->nouveau_channel == 0)
+            return -EINVAL;
+    } else {
+        if (either_copyin(&bind_req, 1, arg, sizeof(bind_req)) < 0)
+            return -EFAULT;
+        if (!owner->nouveau_vm_initialized)
+            return -EINVAL;
+    }
+    return -EOPNOTSUPP;
+}
+
 static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
                          uint64 arg)
 {
     if (owner == NULL)
         return -EBADF;
+
+    owner->drm.ioctl_count++;
+    if (owner->drm.node_type == FB_GPU_DRM_NODE_PRIMARY ||
+        owner->drm.node_type == FB_GPU_DRM_NODE_RENDER) {
+        spin_lock(&fb_state.lock);
+        fb_state.stats.drm_ioctls++;
+        spin_unlock(&fb_state.lock);
+    }
 
     switch (cmd) {
     case DRM_IOCTL_VERSION:
@@ -3908,7 +5930,7 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
     case DRM_IOCTL_GET_MAGIC:
         return gpu_drm_get_magic(owner, arg);
     case DRM_IOCTL_AUTH_MAGIC:
-        return gpu_drm_auth_magic(arg);
+        return gpu_drm_auth_magic(owner, arg);
     case DRM_IOCTL_GET_CLIENT:
         return gpu_drm_get_client(owner, arg);
     case DRM_IOCTL_GET_STATS:
@@ -3918,10 +5940,11 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
     case DRM_IOCTL_GET_CAP:
         return gpu_drm_get_cap(arg);
     case DRM_IOCTL_SET_CLIENT_CAP:
-        return 0;
+        return gpu_drm_set_client_cap(owner, arg);
     case DRM_IOCTL_SET_MASTER:
+        return gpu_drm_set_master(owner);
     case DRM_IOCTL_DROP_MASTER:
-        return 0;
+        return gpu_drm_drop_master(owner);
     case DRM_IOCTL_GEM_CLOSE: {
         struct drm_gem_close_compat req;
         int ret;
@@ -3938,37 +5961,108 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
     case DRM_IOCTL_PRIME_FD_TO_HANDLE:
         return gpu_drm_prime_fd_to_handle(owner, arg);
     case DRM_IOCTL_WAIT_VBLANK:
+        if (!gpu_drm_is_primary_like(owner))
+            return -EOPNOTSUPP;
         return gpu_drm_wait_vblank(arg);
     case DRM_IOCTL_MODE_GETRESOURCES:
+        if (!gpu_drm_is_primary_like(owner))
+            return -EOPNOTSUPP;
         return gpu_drm_mode_getresources(arg);
     case DRM_IOCTL_MODE_GETCRTC:
+        if (!gpu_drm_is_primary_like(owner))
+            return -EOPNOTSUPP;
         return gpu_drm_mode_getcrtc(arg);
+    case DRM_IOCTL_MODE_SETCRTC:
+        return gpu_drm_mode_setcrtc(owner, arg);
     case DRM_IOCTL_MODE_GETENCODER:
+        if (!gpu_drm_is_primary_like(owner))
+            return -EOPNOTSUPP;
         return gpu_drm_mode_getencoder(arg);
     case DRM_IOCTL_MODE_GETCONNECTOR:
+        if (!gpu_drm_is_primary_like(owner))
+            return -EOPNOTSUPP;
         return gpu_drm_mode_getconnector(arg);
     case DRM_IOCTL_MODE_GETPROPERTY:
+        if (!gpu_drm_is_primary_like(owner))
+            return -EOPNOTSUPP;
         return gpu_drm_mode_getproperty(arg);
     case DRM_IOCTL_MODE_GETPROPBLOB:
+        if (!gpu_drm_is_primary_like(owner))
+            return -EOPNOTSUPP;
         return gpu_drm_mode_getblob(arg);
     case DRM_IOCTL_MODE_GETPLANERESOURCES:
+        if (!gpu_drm_is_primary_like(owner))
+            return -EOPNOTSUPP;
         return gpu_drm_mode_getplaneresources(arg);
+    case DRM_IOCTL_MODE_GETPLANE:
+        if (!gpu_drm_is_primary_like(owner))
+            return -EOPNOTSUPP;
+        return gpu_drm_mode_getplane(arg);
+    case DRM_IOCTL_MODE_ADDFB2:
+        return gpu_drm_mode_addfb2(owner, arg);
+    case DRM_IOCTL_MODE_RMFB:
+        return gpu_drm_mode_rmfb(owner, arg);
+    case DRM_IOCTL_MODE_PAGE_FLIP:
+        return gpu_drm_mode_page_flip(owner, arg);
+    case DRM_IOCTL_MODE_ATOMIC:
+        return gpu_drm_mode_atomic(owner, arg);
+    case DRM_IOCTL_SYNCOBJ_CREATE:
+        return gpu_syncobj_create(owner, arg);
+    case DRM_IOCTL_SYNCOBJ_DESTROY:
+        return gpu_syncobj_destroy(owner, arg);
+    case DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD:
+        return gpu_syncobj_handle_to_fd(owner, arg);
+    case DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE:
+        return gpu_syncobj_fd_to_handle(owner, arg);
+    case DRM_IOCTL_SYNCOBJ_WAIT:
+        return gpu_syncobj_wait_common(owner, arg, 0);
+    case DRM_IOCTL_SYNCOBJ_RESET:
+        return gpu_syncobj_array_signal_reset(owner, arg, 0, 0);
+    case DRM_IOCTL_SYNCOBJ_SIGNAL:
+        return gpu_syncobj_array_signal_reset(owner, arg, 1, 0);
+    case DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT:
+        return gpu_syncobj_wait_common(owner, arg, 1);
+    case DRM_IOCTL_SYNCOBJ_QUERY:
+        return gpu_syncobj_query(owner, arg);
+    case DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL:
+        return gpu_syncobj_array_signal_reset(owner, arg, 1, 1);
     case DRM_IOCTL_MODE_CREATE_DUMB:
         return gpu_drm_create_dumb(owner, arg);
     case DRM_IOCTL_MODE_MAP_DUMB:
     {
         struct drm_mode_map_dumb_compat req;
+        struct fb_gpu_bo_entry *bo;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
+        if (req.handle == 0)
+            return -EINVAL;
+        bo = fb_bo_get_owned(req.handle, owner->id, owner->tgid);
+        if (bo == NULL)
+            return -ENOENT;
         req.offset = GPU_DRM_MMAP_OFFSET(req.handle);
+        fb_bo_put(bo);
         if (either_copyout(1, arg, &req, sizeof(req)) < 0)
             return -EFAULT;
         return 0;
     }
     case DRM_IOCTL_VIRTGPU_MAP: {
         struct drm_virtgpu_map_compat req;
+        uint64 size = 0;
+        int ret;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
+        if (req.handle == 0)
+            return -EINVAL;
+        ret = virtio_gpu_user_resource_info(owner->id, owner->tgid,
+                                            req.handle, NULL, NULL, NULL,
+                                            &size);
+        if (ret != 0) {
+            struct fb_gpu_bo_entry *bo =
+                fb_bo_get_owned(req.handle, owner->id, owner->tgid);
+            if (bo == NULL)
+                return ret;
+            fb_bo_put(bo);
+        }
         req.offset = GPU_DRM_MMAP_OFFSET(req.handle);
         if (either_copyout(1, arg, &req, sizeof(req)) < 0)
             return -EFAULT;
@@ -4174,7 +6268,35 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
         kvfree(cmds);
         return ret;
     }
+    case DRM_IOCTL_NOUVEAU_GETPARAM:
+        return gpu_nouveau_getparam(arg);
+    case DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC:
+        return gpu_nouveau_channel_alloc(owner, arg);
+    case DRM_IOCTL_NOUVEAU_CHANNEL_FREE:
+        return gpu_nouveau_channel_free(owner, arg);
+    case DRM_IOCTL_NOUVEAU_GEM_NEW:
+        return gpu_nouveau_gem_new(owner, arg);
+    case DRM_IOCTL_NOUVEAU_GEM_INFO:
+        return gpu_nouveau_gem_info(owner, arg);
+    case DRM_IOCTL_NOUVEAU_GEM_CPU_PREP:
+        return gpu_nouveau_cpu_prep(owner, arg);
+    case DRM_IOCTL_NOUVEAU_GEM_CPU_FINI:
+        return gpu_nouveau_cpu_fini(owner, arg);
+    case DRM_IOCTL_NOUVEAU_GEM_PUSHBUF:
+        return gpu_nouveau_pushbuf(owner, arg);
+    case DRM_IOCTL_NOUVEAU_VM_INIT:
+        return gpu_nouveau_vm_init(owner, arg);
+    case DRM_IOCTL_NOUVEAU_VM_BIND:
+        return gpu_nouveau_bind_or_exec(owner, arg, 0);
+    case DRM_IOCTL_NOUVEAU_EXEC:
+        return gpu_nouveau_bind_or_exec(owner, arg, 1);
     default:
+        spin_lock(&fb_state.lock);
+        fb_state.stats.drm_unknown_ioctls++;
+        spin_unlock(&fb_state.lock);
+        printf("DRM: unknown ioctl node=%s owner=%lu tgid=%d cmd=0x%lx\n",
+               gpu_drm_node_name(owner->drm.node_type),
+               owner->id, owner->tgid, cmd);
         return -EINVAL;
     }
 }
@@ -4188,9 +6310,17 @@ static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
     if (file != NULL)
         file->private_data = NULL;
     if (owner != NULL) {
+        spin_lock(&fb_state.lock);
+        if (fb_state.drm_master_owner_id == owner->id)
+            fb_state.drm_master_owner_id = 0;
+        spin_unlock(&fb_state.lock);
+        gpu_kms_destroy_owner_fbs(owner);
+        gpu_syncobj_destroy_owner(owner);
         fb_gpu_destroy_render_owner(owner->id);
         virtio_gpu_user_destroy_render_owner(owner->id);
+        (void)gpu_release_node(owner->drm.node_type);
         kvfree(owner);
+        return 0;
     }
     return gpu_release(&gpu_cdev);
 }
@@ -4216,6 +6346,10 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case FB_GPU_BO_IMPORT:
     case FB_GPU_BO_EXPORT_FD:
     case FB_GPU_BO_IMPORT_FD:
+    case FB_GPU_BO_INFO:
+    case FB_GPU_DXG_PRESENT_SOURCE_REGISTER:
+    case FB_GPU_DXG_PRESENT_SOURCE_COMMIT:
+    case FB_GPU_DXG_PRESENT_SOURCE_QUERY:
     case FB_GPU_BO_FENCE:
     case FB_GPU_FENCE_EXPORT_FD:
     case FB_GPU_FENCE_QUERY:
@@ -4298,10 +6432,19 @@ static int gpu_open_file(cdev_t *cdev, struct vfs_file *file)
         (void)gpu_release(cdev);
         return -ENOMEM;
     }
+    memset(owner, 0, sizeof(*owner));
     owner->id = gpu_alloc_render_owner_id();
     owner->tgid = current ? current->tgid : 0;
+    owner->drm.dev = &fb_drm_device;
+    owner->drm.node_type = gpu_drm_node_from_cdev(cdev);
+    owner->drm.magic = gpu_alloc_drm_magic();
+    owner->drm.authenticated =
+        owner->drm.node_type != FB_GPU_DRM_NODE_PRIMARY;
     file->ops = &gpu_file_ops;
     file->private_data = owner;
+    printf("DRM: open node=%s owner=%lu tgid=%d magic=%u\n",
+           gpu_drm_node_name(owner->drm.node_type), owner->id, owner->tgid,
+           owner->drm.magic);
     return 0;
 }
 

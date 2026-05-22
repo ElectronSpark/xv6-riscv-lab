@@ -713,6 +713,7 @@ static ssize_t procfs_readlink(struct vfs_inode *inode, char *buf,
     }
 
     case PROC_FD_ENTRY: {
+        struct vfs_file *custom_file = NULL;
         rcu_read_lock();
         struct thread *p = NULL;
         get_pid_thread(pi->pid, &p);
@@ -729,6 +730,8 @@ static ssize_t procfs_readlink(struct vfs_inode *inode, char *buf,
             rcu_read_unlock();
             return -EBADF;
         }
+        if (f->ops != NULL && f->ops->readlink != NULL)
+            custom_file = vfs_fdup(f);
         /* Read the inode pointer from the file reference under RCU */
         struct vfs_inode *fi = f->inode.inode;
         mode_t fmode = (fi != NULL) ? fi->mode : 0;
@@ -738,7 +741,10 @@ static ssize_t procfs_readlink(struct vfs_inode *inode, char *buf,
             fdev = fi->cdev;
         rcu_read_unlock();
 
-        if (S_ISFIFO(fmode))
+        if (custom_file != NULL) {
+            n = custom_file->ops->readlink(custom_file, buf, buflen);
+            vfs_fput(custom_file);
+        } else if (S_ISFIFO(fmode))
             n = snprintf(buf, buflen, "pipe:[%llu]",
                          (unsigned long long)fino);
         else if (S_ISSOCK(fmode))
@@ -1671,11 +1677,21 @@ static char *procfs_gen_fdinfo(int pid, int fd)
     if (bits_test_bit64(&ft->cloexec_bitmap[fd >> 6], fd & 63))
         fdflags |= O_CLOEXEC;
     int flags = f->f_flags | fdflags;
+    struct vfs_file *stat_file =
+        (f->ops != NULL && f->ops->stat != NULL) ? vfs_fdup(f) : NULL;
     struct vfs_inode *fi = f->inode.inode;
     loff_t pos = (fi != NULL && S_ISREG(fi->mode)) ? f->f_pos : 0;
     uint64 ino = fi != NULL ? fi->ino : 0;
     spin_unlock(&ft->lock);
     rcu_read_unlock();
+
+    if (stat_file != NULL) {
+        struct stat st;
+
+        if (vfs_filestat(stat_file, &st) == 0)
+            ino = st.st_ino;
+        vfs_fput(stat_file);
+    }
 
     char flagbuf[11];
     flagbuf[sizeof(flagbuf) - 1] = '\0';

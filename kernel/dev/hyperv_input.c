@@ -15,6 +15,7 @@
 #include <dev/net.h>
 #include <dev/netdev.h>
 #include <dev/cdev.h>
+#include <dev/pci.h>
 #include <uabi/d3dkmthk.h>
 #include <vfs/file.h>
 #include <vfs/fcntl.h>
@@ -140,6 +141,7 @@ extern pagetable_t kernel_pagetable;
 #define HV_VIDEO_GPADL_HANDLE 0xE1E14
 #define HV_DXG_GLOBAL_GPADL_HANDLE 0xE1E15
 #define HV_DXG_VGPU_GPADL_HANDLE 0xE1E16
+#define HV_PCI_GPADL_HANDLE 0xE1E17
 #define HV_NET_RECV_GPADL_HANDLE 0x21
 #define HV_NET_SEND_GPADL_HANDLE 0x22
 #define HV_WAIT_LOOPS 500
@@ -153,6 +155,7 @@ extern pagetable_t kernel_pagetable;
 
 #define HV_DXG_VM_BUS_PACKET_MAX (128U * 1024U)
 #define HV_DXG_WAIT_MS 5000
+#define HV_DXG_SEND_EAGAIN_RETRIES 50
 #define HV_DXG_RESULT_BYTES HV_DXG_VM_BUS_PACKET_MAX
 #define HV_DXG_PACKET_BYTES (HV_DXG_VM_BUS_PACKET_MAX + 256U)
 #define HV_DXG_PREFIX_BYTES 64
@@ -192,11 +195,13 @@ extern pagetable_t kernel_pagetable;
 #define HV_DXGK_VMBCOMMAND_CREATECONTEXTVIRTUAL 6U
 #define HV_DXGK_VMBCOMMAND_DESTROYCONTEXT 7U
 #define HV_DXGK_VMBCOMMAND_GETDEVICESTATE 28U
+#define HV_DXGK_VMBCOMMAND_MARKDEVICEASERROR 29U
 #define HV_DXGK_VMBCOMMAND_DDIGETSTANDARDALLOCATIONDRIVERDATA 39U
 #define HV_DXGK_VMBCOMMAND_OPENRESOURCE 32U
 #define HV_DXGK_VMBCOMMAND_SETCONTEXTSCHEDULINGPRIORITY 33U
 #define HV_DXGK_VMBCOMMAND_FLUSHHEAPTRANSITIONS 37U
 #define HV_DXGK_VMBCOMMAND_QUERYALLOCATIONRESIDENCY 41U
+#define HV_DXGK_VMBCOMMAND_FLUSHDEVICE 42U
 #define HV_DXGK_VMBCOMMAND_SETEXISTINGSYSMEMSTORE 45U
 #define HV_DXGK_VMBCOMMAND_QUERYSTATISTICS 48U
 #define HV_DXGK_VMBCOMMAND_CHANGEVIDEOMEMORYRESERVATION 49U
@@ -225,6 +230,10 @@ extern pagetable_t kernel_pagetable;
 #define HV_DXGKVMB_VM_TO_HOST 1U
 #define HV_DXGKVMB_VGPU_TO_HOST 0U
 #define HV_DXG_PROCESS_NAME_LENGTH 260U
+#define HV_DXG_FLUSHSCHEDULER_DEVICE_TERMINATE 4U
+#define HV_DXG_PCI_VMBUS_VERSION_OFFSET 208U
+#define HV_DXG_PCI_GUESTCAPS_OFFSET 212U
+#define HV_DXG_PCI_GUESTCAPS_WSL2 1U
 #define HV_DXG_IOCTL_PRIVATE_MAX 1024U
 #define HV_DXG_ALLOCATION_MAX 8U
 #define HV_DXG_RESOURCE_TRACKED_MAX 64U
@@ -233,19 +242,86 @@ extern pagetable_t kernel_pagetable;
 #define HV_DXG_GPUVA_UPDATE_MAX 16U
 #define HV_DXG_HISTORY_BUFFER_MAX 64U
 #define HV_DXG_OPEN_TRACKED_MAX 512U
+#define HV_DXG_OBJECT_TABLE_MAX 8192U
+#define HV_DXG_PROCESS_TABLE_MAX 64U
 #define HV_DXG_HOST_EVENT_MAX 64U
 #define HV_DXG_HOST_EVENT_TIMEOUT_MS 65000U
-#define HV_DXG_STATUS_BUF_SIZE (32U * 1024U)
+#define HV_DXG_SHARE_RESIDENCY_WAIT_MS 10000U
+#define HV_DXG_STATUS_BUF_SIZE (64U * 1024U)
 #define HV_DXG_QUERY_HISTORY_MAX 16U
 #define HV_DXG_IOCTL_HISTORY_MAX 16U
 #define HV_DXG_IOCTL_NR_MAX 256U
 #define HV_DXG_IOCTL_TIME_TOP 4U
 #define HV_DXG_RESOURCE_HISTORY_MAX 8U
+#define HV_DXG_STATUS_PENDING 0x00000103U
+#define HV_DXG_SHARED_ALLOC_HEAD_MAX 1024U
+#define HV_DXG_CONTEXT_PRIV_HEAD_MAX 4096U
+#define HV_DXG_HWQUEUE_PRIV_HEAD_MAX 1024U
+#define HV_DXG_HWQUEUE_SUBMIT_PRIV_HEAD_MAX 512U
+#define HV_DXG_NTSHARED_ATTEMPT_MAX 5U
+#define HV_DXG_NTSHARED_RAW_BYTES 48U
+#define HV_DXG_NTSHARED_CACHE_MAX 64U
+#define HV_DXG_NTSHARED_LABEL_WSL_EXT24_ZERO_LUID 1U
+#define HV_DXG_NTSHARED_LABEL_WSL_NOEXT24 2U
+#define HV_DXG_NTSHARED_LABEL_EXT24_ZERO_LUID 3U
+#define HV_DXG_NTSHARED_LABEL_EXT24_HOST_LUID 4U
+#define HV_DXG_NTSHARED_LABEL_NOEXT28 5U
+#define HV_DXG_NTSHARED_LABEL_NOEXT24 6U
+#define HV_DXG_NTSHARED_LABEL_NOEXT32_FALLBACK 7U
+#define HV_DXG_NTSHARED_LABEL_GLOBAL_NOEXT32 8U
+#define HV_DXG_NTSHARED_LABEL_GLOBAL_EXT32_ZERO_LUID 9U
+#define HV_DXG_NTSHARED_LABEL_LEGACY_EXT32_ZERO_LUID 10U
+#define HV_DXG_NTSHARED_LABEL_WSL_NOEXT32_NATURAL 11U
+#define HV_DXG_NTSHARED_LABEL_WSL_EXT32_ZERO_LUID_NATURAL 12U
+#define HV_DXG_DESTROY_ALLOC_CTX_HELPER 1U
+#define HV_DXG_DESTROY_ALLOC_CTX_DEVICE_RESOURCE 2U
+#define HV_DXG_DESTROY_ALLOC_CTX_DEVICE_STANDALONE 3U
+#define HV_DXG_DESTROY_ALLOC_CTX_FILE_CLEANUP 4U
+#define HV_DXG_DESTROY_ALLOC_CTX_CREATE_UNWIND 5U
+#define HV_DXG_DESTROY_ALLOC_CTX_IOCTL 6U
 #define HV_DXG_ALLOCATION_FLAG_CACHED (1U << 19)
 #define HV_DXG_SYNC_SPIN_POLLS 4096U
+#define HV_DXG_QAITYPE_SELECTED_ADAPTER 0U
 #define HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID 31U
+#define HV_DXG_QAITYPE_CHECKDRIVERUPDATESTATUS_RENDER 55U
+#define HV_DXG_USER_LUID_SOURCE_NONE 0U
+#define HV_DXG_USER_LUID_SOURCE_ADAPTER 1U
+#define HV_DXG_USER_LUID_SOURCE_HOST_VGPU 2U
+#define HV_DXG_USER_LUID_SOURCE_PCI_HOST_VGPU 3U
+#define HV_DXG_USER_LUID_SOURCE_GUID 4U
+#define HV_DXG_OAFLUID_REJECT_NONE 0U
+#define HV_DXG_OAFLUID_REJECT_ZERO 1U
+#define HV_DXG_OAFLUID_REJECT_MISMATCH 2U
+#define HV_DXG_QUERYADAPTERINFO_WSL_NATURAL_BASE 33U
+#define HV_DXG_QUERYADAPTER_EXT_SNAPSHOT_BYTES 16U
+#define HV_DXG_QUERYADAPTER_CMDHDR_SNAPSHOT_BYTES 24U
+#define HV_DXG_QUERYADAPTER_PRIV_SNAPSHOT_BYTES 32U
+#define HV_DXG_QUERYADAPTER_TYPE0_SNAPSHOT_BYTES 32U
+#define HV_DXG_QUERYADAPTER_PAYLOAD_HEAD_BYTES 32U
+#define HV_DXG_QAI_ADMISSION_HISTORY_MAX 8U
+#define HV_DXG_QUERYADAPTER_ALIAS_CACHE_TYPES 5U
+#define HV_DXG_QUERYADAPTER_ALIAS_CACHE_MAX 512U
+#define HV_DXG_QUERYADAPTER_TYPE0_CACHE_MAX 65536U
+#define HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE (7U * sizeof(uint32))
+#define HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER 0x1U
+#define HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU    0x2U
+#define HV_DXG_CHANNEL_NONE   0U
+#define HV_DXG_CHANNEL_GLOBAL 1U
+#define HV_DXG_CHANNEL_VGPU   2U
+#define HV_DXG_QAI_ADMISSION_KIND_QAI 1U
+#define HV_DXG_QAI_ADMISSION_KIND_CREATEDEVICE 2U
+#define HV_DXG_QAITYPE_CREATEDEVICE_MARKER 0xffffffffU
+#define HV_DXG_QAITYPE_PHASE1_TYPE27 27U
 #define HV_DXG_VENDOR_INTEL 0x8086U
 #define HV_DXG_VENDOR_NVIDIA 0x10deU
+/*
+ * libd3d12core maps WSL NVIDIA DriverStore names to
+ * /usr/lib/wsl/drivers/<FileRepository-dir>/libnvwgf2umx.so. This default
+ * matches the xv6 Mesa staging layout when kernel-side dynamic detection is
+ * unavailable.
+ */
+#define HV_DXG_NVIDIA_UMD_DRIVERSTORE_PATH \
+    "C:\\WINDOWS\\System32\\DriverStore\\FileRepository\\nvmi.inf_amd64_9a9d1548c06ce277\\libnvwgf2umx.so"
 #define HV_DXG_IOSPACE_ALIGN 0x10000ULL
 #define HV_DXG_IOSPACE_SEARCH_START 0x100000000ULL
 #define HV_DXG_IOSPACE_SEARCH_END   0x8000000000ULL
@@ -383,6 +459,11 @@ static const struct hv_guid hv_dxg_global_guid = {
 static const struct hv_guid hv_dxg_vgpu_guid = {
     0x6e382d18, 0x3336, 0x4f4b,
     { 0xac, 0xc4, 0x2b, 0x77, 0x03, 0xd4, 0xdf, 0x4a }
+};
+
+static const struct hv_guid hv_pci_guid = {
+    0x44c4f61d, 0x4444, 0x4400,
+    { 0x9d, 0x52, 0x80, 0x2e, 0x27, 0xed, 0xe1, 0x9f }
 };
 
 struct hv_message_header {
@@ -558,6 +639,63 @@ struct vmpacket_descriptor {
     uint64 trans_id;
 } __PACKED;
 
+#define HVPCI_MAKE_VERSION(maj, min) ((((uint32)(maj)) << 16) | (min))
+#define HVPCI_PROTOCOL_VERSION_1_1 HVPCI_MAKE_VERSION(1, 1)
+#define HVPCI_PROTOCOL_VERSION_1_2 HVPCI_MAKE_VERSION(1, 2)
+#define HVPCI_PROTOCOL_VERSION_1_3 HVPCI_MAKE_VERSION(1, 3)
+#define HVPCI_PROTOCOL_VERSION_1_4 HVPCI_MAKE_VERSION(1, 4)
+#define HVPCI_MESSAGE_BASE 0x42490000U
+#define HVPCI_BUS_RELATIONS (HVPCI_MESSAGE_BASE + 0U)
+#define HVPCI_QUERY_BUS_RELATIONS (HVPCI_MESSAGE_BASE + 1U)
+#define HVPCI_BUS_D0ENTRY (HVPCI_MESSAGE_BASE + 7U)
+#define HVPCI_QUERY_PROTOCOL_VERSION (HVPCI_MESSAGE_BASE + 0x13U)
+#define HVPCI_BUS_RELATIONS2 (HVPCI_MESSAGE_BASE + 0x19U)
+#define HVPCI_STATUS_REVISION_MISMATCH 0xC0000059U
+#define HVPCI_CHILD_MAX 16U
+#define HVPCI_CONFIG_MMIO_LENGTH 0x2000U
+#define HVPCI_CONFIG_PAGE_OFFSET 0x1000U
+#define HVPCI_STATIC_MMIO_BASE 0xFE000000ULL
+#define HVPCI_STATIC_MMIO_END  0xFEC00000ULL
+
+struct hvpci_version_request {
+    uint32 type;
+    uint32 protocol_version;
+} __PACKED;
+
+struct hvpci_message {
+    uint32 type;
+} __PACKED;
+
+struct hvpci_bus_d0_entry {
+    struct hvpci_message message_type;
+    uint32 reserved;
+    uint64 mmio_base;
+} __PACKED;
+
+struct hvpci_function_description {
+    uint16 vendor_id;
+    uint16 device_id;
+    uint8 revision_id;
+    uint8 prog_intf;
+    uint8 subclass;
+    uint8 base_class;
+    uint32 subsystem_id;
+    uint32 win_slot;
+    uint32 serial;
+} __PACKED;
+
+struct hvpci_function_description2 {
+    struct hvpci_function_description base;
+    uint32 flags;
+    uint16 virtual_numa_node;
+    uint16 reserved;
+} __PACKED;
+
+struct hvpci_response {
+    struct vmpacket_descriptor hdr;
+    int32 status;
+} __PACKED;
+
 struct vmtransfer_page_range {
     uint32 byte_count;
     uint32 byte_offset;
@@ -618,6 +756,14 @@ struct hvdxg_command_vgpu_to_host {
     uint32 alignment_padding;
 } __PACKED;
 
+struct hvdxg_command_vgpu_to_host_wsl {
+    uint64 command_id;
+    struct hvdxg_d3dkmthandle process;
+    uint32 channel_type;
+    uint32 command_type;
+    uint32 alignment_padding;
+} __PACKED;
+
 struct hvdxg_command_vm_to_host {
     uint64 command_id;
     struct hvdxg_d3dkmthandle process;
@@ -654,12 +800,27 @@ struct hvdxg_command_createprocess {
     uint8 reserved[5];
 } __PACKED;
 
+struct hvdxg_command_createprocess_wsl {
+    struct hvdxg_command_vm_to_host hdr;
+    uint32 hdr_tail_padding;
+    uint64 process;
+    uint64 process_id;
+    uint16 process_name[HV_DXG_PROCESS_NAME_LENGTH + 1];
+    uint8 flags;
+    uint8 reserved[5];
+} __PACKED;
+
 struct hvdxg_command_createprocess_return {
     struct hvdxg_d3dkmthandle hprocess;
 } __PACKED;
 
 struct hvdxg_command_destroyprocess {
     struct hvdxg_command_vm_to_host hdr;
+} __PACKED;
+
+struct hvdxg_command_destroyprocess_wsl {
+    struct hvdxg_command_vm_to_host hdr;
+    uint32 hdr_tail_padding;
 } __PACKED;
 
 struct hvdxg_command_setiospaceregion {
@@ -717,6 +878,14 @@ struct hvdxg_command_queryadapterinfo {
     uint8 private_data[1];
 } __PACKED;
 
+struct hvdxg_command_queryadapterinfo_wsl {
+    struct hvdxg_command_vgpu_to_host_wsl hdr;
+    uint32 query_type;
+    uint32 private_data_size;
+    uint8 private_data[1];
+    uint8 alignment_padding[7];
+} __PACKED;
+
 struct hvdxg_command_setallocationpriority {
     struct hvdxg_command_vgpu_to_host hdr;
     struct hvdxg_d3dkmthandle device;
@@ -762,7 +931,6 @@ struct hvdxg_command_escape {
 
 struct hvdxg_command_shareobjectwithhost {
     struct hvdxg_command_vm_to_host hdr;
-    uint32 alignment_padding;
     struct hvdxg_d3dkmthandle device_handle;
     struct hvdxg_d3dkmthandle object_handle;
     uint64 reserved;
@@ -776,14 +944,32 @@ struct hvdxg_command_shareobjectwithhost_return {
 
 struct hvdxg_command_createntsharedobject {
     struct hvdxg_command_vm_to_host hdr;
-    uint32 alignment_padding;
     struct hvdxg_d3dkmthandle object;
+} __PACKED;
+
+struct hvdxg_command_createntsharedobject_28 {
+    struct hvdxg_command_vm_to_host hdr;
+    uint32 hdr_tail_padding;
+    struct hvdxg_d3dkmthandle object;
+} __PACKED;
+
+struct hvdxg_command_createntsharedobject_wsl24 {
+    struct hvdxg_command_vm_to_host hdr;
+    struct hvdxg_d3dkmthandle object;
+} __PACKED;
+
+struct hvdxg_command_createntsharedobject_32 {
+    struct hvdxg_command_vm_to_host hdr;
+    uint32 hdr_tail_padding;
+    struct hvdxg_d3dkmthandle object;
+    uint32 command_tail_padding;
 } __PACKED;
 
 struct hvdxg_command_destroyntsharedobject {
     struct hvdxg_command_vm_to_host hdr;
-    uint32 alignment_padding;
+    uint32 hdr_tail_padding;
     struct hvdxg_d3dkmthandle shared_handle;
+    uint32 command_tail_padding;
 } __PACKED;
 
 struct hvdxg_command_querystatistics {
@@ -927,6 +1113,12 @@ struct hvdxg_command_destroydevice {
     struct hvdxg_d3dkmthandle device;
 } __PACKED;
 
+struct hvdxg_command_flushdevice {
+    struct hvdxg_command_vgpu_to_host hdr;
+    struct hvdxg_d3dkmthandle device;
+    uint32 reason;
+} __PACKED;
+
 struct hvdxg_command_createallocation_allocinfo {
     uint32 flags;
     uint32 priv_drv_data_size;
@@ -970,7 +1162,7 @@ struct hvdxg_command_createallocation {
     struct d3dkmt_createallocationflags flags;
     uint64 private_runtime_resource_handle;
     uint8 make_resident;
-    uint8 reserved[7];
+    uint8 command_tail_padding[7];
 } __PACKED;
 
 struct hvdxg_command_createallocation_return {
@@ -989,6 +1181,7 @@ struct hvdxg_command_openresource {
     struct hvdxg_d3dkmthandle global_share;
     uint32 allocation_count;
     uint32 total_priv_drv_data_size;
+    uint32 command_tail_padding;
 } __PACKED;
 
 struct hvdxg_command_openresource_return {
@@ -1014,6 +1207,11 @@ struct hvdxg_command_getdevicestate {
 struct hvdxg_command_getdevicestate_return {
     struct d3dkmt_getdevicestate args;
     struct hvdxg_ntstatus status;
+} __PACKED;
+
+struct hvdxg_command_markdeviceaserror {
+    struct hvdxg_command_vgpu_to_host hdr;
+    struct d3dkmt_markdeviceaserror args;
 } __PACKED;
 
 struct hvdxg_command_getstandardallocprivdata {
@@ -1104,6 +1302,7 @@ struct hvdxg_command_makeresident_return {
     uint64 paging_fence_value;
     uint64 num_bytes_to_trim;
     struct hvdxg_ntstatus status;
+    uint32 alignment_padding;
 } __PACKED;
 
 struct hvdxg_command_evict {
@@ -1185,6 +1384,7 @@ struct hvdxg_command_updategpuvirtualaddress {
     struct hvdxg_d3dkmthandle fence_object;
     uint32 num_operations;
     uint32 flags;
+    uint32 operations_padding;
     struct d3dddi_updategpuvirtualaddress_operation operations[1];
 } __PACKED;
 
@@ -1204,7 +1404,7 @@ struct hvdxg_command_createsyncobject_return {
 
 struct hvdxg_command_opensyncobject {
     struct hvdxg_command_vm_to_host hdr;
-    uint32 alignment_padding;
+    uint32 hdr_tail_padding;
     struct hvdxg_d3dkmthandle device;
     struct hvdxg_d3dkmthandle global_sync_object;
     uint32 engine_affinity;
@@ -1220,8 +1420,9 @@ struct hvdxg_command_opensyncobject_return {
 
 struct hvdxg_command_destroysyncobject {
     struct hvdxg_command_vm_to_host hdr;
-    uint32 alignment_padding;
+    uint32 hdr_tail_padding;
     struct hvdxg_d3dkmthandle sync_object;
+    uint32 command_tail_padding;
 } __PACKED;
 
 struct hvdxg_command_signalsyncobject {
@@ -1280,6 +1481,9 @@ struct hvdxg_tracked_allocation {
     uint32 device;
     uint32 resource;
     uint32 allocation;
+    uint32 owner_process;
+    uint32 owner_generation;
+    uint32 owner_refs;
     uint32 flags;
     uint32 lock_refcount;
     uint32 sysmem_page_count;
@@ -1289,21 +1493,57 @@ struct hvdxg_tracked_allocation {
     uint64 sysmem;
     uint64 *sysmem_pages;
     void *cpu_vm;
+    uint32 map_paging_queue;
+    uint32 map_sync_object;
+    int32 map_ret;
+    int32 map_status;
+    uint64 map_gpu_va;
+    uint64 map_pages;
+    uint64 map_fence_value;
+    uint32 resident_paging_queue;
+    uint32 resident_sync_object;
+    uint64 resident_fence_value;
+    uint32 resident_wait_result;
+    int32 resident_wait_ret;
+    uint64 resident_wait_current;
 };
 
 struct hvdxg_tracked_resource {
     uint32 device;
     uint32 resource;
     uint32 global_share;
+    uint32 owner_process;
+    uint32 owner_generation;
+    uint32 owner_refs;
     uint32 allocation_count;
+    uint32 create_flags_value;
+    uint32 host_create_flags_value;
+    uint32 runtime_d3d12_flags;
     uint8 create_shared;
     uint8 nt_security_sharing;
+    uint8 sealed;
+    uint8 opened_from_shared;
+    uint8 shared_metadata_created;
+    uint32 host_shared_handle_nt;
+    uint32 host_shared_process;
+    uint32 host_shared_object;
+    uint32 host_shared_refs;
+    uint32 host_shared_sealed;
+    uint32 sealed_generation;
+    uint32 open_count;
     uint32 private_runtime_data_size;
     uint32 resource_priv_drv_data_size;
     uint32 total_priv_drv_data_size;
+    uint8 total_priv_from_host;
+    uint8 existing_sysmem;
+    uint8 existing_sysmem_vram;
+    uint32 existing_sysmem_pfnmap_pages;
+    uint64 existing_sysmem_va;
+    uint64 existing_sysmem_size;
     uint8 *private_runtime_data;
     uint8 *resource_priv_drv_data;
     uint8 *total_priv_drv_data;
+    uint32 allocation_handles[HV_DXG_ALLOCATION_MAX];
     uint32 alloc_priv_sizes[HV_DXG_ALLOCATION_MAX];
     uint64 allocation_sizes[HV_DXG_ALLOCATION_MAX];
     uint32 allocation_flags[HV_DXG_ALLOCATION_MAX];
@@ -1322,15 +1562,75 @@ enum hvdxg_shared_object_kind {
     HV_DXG_SHARED_OBJECT_RESOURCE = 2,
 };
 
+enum hvdxg_shared_object_fops_kind {
+    HV_DXG_SHARED_FOPS_NONE = 0,
+    HV_DXG_SHARED_FOPS_SYNC = 1,
+    HV_DXG_SHARED_FOPS_RESOURCE = 2,
+};
+
 struct hvdxg_shared_object {
     uint32 kind;
     uint32 device;
     uint32 object;
     uint32 global_share;
     uint32 host_nt_handle;
+    uint32 cache_process;
+    uint32 cache_object;
     uint64 nt_handle;
     uint32 sync_type;
+    uint32 sync_flags;
+    uint32 sync_owner_process;
+    uint32 sync_owner_generation;
+    uint32 sync_owner_refs;
     struct hvdxg_tracked_resource resource;
+};
+
+struct hvdxg_sync_file_object {
+    uint32 device;
+    uint32 sync_object;
+    uint32 global_share;
+    uint32 host_nt_handle;
+    uint32 cache_process;
+    uint32 cache_object;
+    uint32 sync_type;
+    uint32 sync_flags;
+    uint64 fence_value;
+    uint64 event_id;
+};
+
+struct hvdxg_ntshared_cache_entry {
+    uint32 kind;
+    uint32 process;
+    uint32 object;
+    uint32 host_nt_handle;
+    uint32 refs;
+};
+
+struct hvdxg_queryadapter_alias_cache_entry {
+    uint32 valid;
+    uint32 type;
+    uint32 size;
+    uint32 host_adapter;
+    uint32 raw_hash;
+    uint8 payload[HV_DXG_QUERYADAPTER_ALIAS_CACHE_MAX];
+};
+
+struct hvdxg_global_send_diag {
+    uint64 command_id;
+    uint32 command;
+    uint32 cmd_len;
+    uint32 wire_len;
+    uint32 result_len;
+    uint32 ext;
+    uint32 ext_offset;
+    uint32 process;
+    uint32 channel;
+    uint32 relid;
+    uint32 conn_id;
+    uint32 monitor_allocated;
+    uint32 monitorid;
+    uint32 dedicated;
+    struct hvdxg_winluid luid;
 };
 
 struct hvdxg_tracked_gpuva {
@@ -1343,6 +1643,8 @@ struct hvdxg_tracked_gpuva {
 
 struct hvdxg_tracked_hwqueue {
     uint32 queue;
+    uint32 context;
+    uint32 device;
     uint32 sync_object;
 };
 
@@ -1357,10 +1659,81 @@ struct hvdxg_tracked_sync {
     uint32 sync;
     uint32 type;
     uint32 device;
+    uint32 owner_process;
+    uint32 owner_generation;
+    uint32 owner_refs;
     uint32 flags;
     uint32 global_shared;
+    uint32 monitor_fence_handle;
     uint64 fence_cpu_va;
     uint64 fence_kva;
+};
+
+enum hvdxg_object_type {
+    HV_DXG_OBJECT_NONE = 0,
+    HV_DXG_OBJECT_ADAPTER,
+    HV_DXG_OBJECT_DEVICE,
+    HV_DXG_OBJECT_CONTEXT,
+    HV_DXG_OBJECT_HWQUEUE,
+    HV_DXG_OBJECT_PAGINGQUEUE,
+    HV_DXG_OBJECT_SYNC,
+    HV_DXG_OBJECT_ALLOCATION,
+    HV_DXG_OBJECT_RESOURCE,
+    HV_DXG_OBJECT_GPUVA,
+};
+
+struct hvdxg_object_entry {
+    uint64 handle;
+    uint64 host_handle;
+    uint64 parent;
+    uint32 type;
+    uint32 device;
+    uint32 refs;
+    uint32 generation;
+    uint32 index;
+    uint32 unique;
+    uint32 instance;
+    uint32 destroyed;
+};
+
+struct hvdxg_process_adapter {
+    uint32 host_adapter_handle;
+    struct hvdxg_winluid adapter_luid;
+    struct hvdxg_winluid host_adapter_luid;
+    struct hvdxg_winluid host_vgpu_luid;
+    uint32 refs;
+    uint32 local_handle_count;
+    uint32 generation;
+    uint32 destroyed;
+};
+
+struct hvdxg_local_adapter_entry {
+    uint32 handle;
+    uint32 adapter_index;
+    uint32 generation;
+    uint32 destroyed;
+};
+
+struct hvdxg_process_state {
+    uint64 tgid;
+    uint64 pid;
+    uint64 guest_process;
+    struct hvdxg_d3dkmthandle host_process;
+    struct hvdxg_object_entry *objects;
+    struct hvdxg_process_adapter *adapters;
+    struct hvdxg_local_adapter_entry *local_adapters;
+    uint32 host_process_created;
+    uint32 refs;
+    uint32 generation;
+    uint32 object_count;
+    uint32 object_capacity;
+    uint32 next_object_generation;
+    uint32 adapter_count;
+    uint32 adapter_capacity;
+    uint32 local_adapter_count;
+    uint32 local_adapter_capacity;
+    uint32 next_adapter_generation;
+    uint32 next_local_adapter_generation;
 };
 
 struct hvdxg_open_state {
@@ -1369,7 +1742,11 @@ struct hvdxg_open_state {
     char *read_status;
     size_t read_status_len;
     struct hvdxg_d3dkmthandle dxg_process;
+    uint64 dxg_process_guest;
+    uint64 dxg_process_pid;
     uint32 dxg_process_created;
+    struct hvdxg_process_state *process_state;
+    struct hvdxg_object_entry *objects;
     uint32 *devices;
     uint32 *contexts;
     struct hvdxg_tracked_hwqueue *hwqueues;
@@ -1378,6 +1755,9 @@ struct hvdxg_open_state {
     struct hvdxg_tracked_allocation *allocations;
     struct hvdxg_tracked_resource *resources;
     struct hvdxg_tracked_gpuva *gpuvas;
+    uint32 object_count;
+    uint32 object_capacity;
+    uint32 next_generation;
     uint32 device_count;
     uint32 device_capacity;
     uint32 context_count;
@@ -1406,6 +1786,17 @@ struct hvdxg_internal_adapter_info_return {
     uint16 device_instance_id[260];
     struct hvdxg_winluid host_vgpu_luid;
 } __PACKED;
+
+enum hvdxg_probe_v40_reject_reason {
+    HV_DXG_PROBE_V40_REJECT_NONE = 0,
+    HV_DXG_PROBE_V40_REJECT_NOT_ATTEMPTED = 1,
+    HV_DXG_PROBE_V40_REJECT_OPEN_SEND = 2,
+    HV_DXG_PROBE_V40_REJECT_OPEN_SHORT = 3,
+    HV_DXG_PROBE_V40_REJECT_OPEN_STATUS = 4,
+    HV_DXG_PROBE_V40_REJECT_OPEN_ZERO_HANDLE = 5,
+    HV_DXG_PROBE_V40_REJECT_GETINTERNAL_SEND = 6,
+    HV_DXG_PROBE_V40_REJECT_GETINTERNAL_SHORT = 7,
+};
 
 struct vmscsi_request {
     uint16 length;
@@ -1980,6 +2371,433 @@ static struct {
 } hvvideo;
 
 static struct {
+    int present;
+    int gpadl_ok;
+    int open_ok;
+    int protocol_ok;
+    int config_window_ok;
+    int backend_index;
+    int backend_registered;
+    int monitor_allocated;
+    int dedicated;
+    uint32 child_relid;
+    uint32 signal_conn_id;
+    uint8 monitorid;
+    uint32 offer_count;
+    uint32 offer_flags;
+    uint32 offer_mmio_megabytes;
+    uint32 offer_user_def[4];
+    struct hv_guid offer_instance;
+    uint32 gpadl_status;
+    uint32 open_status;
+    uint64 ring_pa;
+    uint8 *ring;
+    struct hv_ring_buffer *out_ring;
+    struct hv_ring_buffer *in_ring;
+    uint32 protocol_attempts;
+    uint32 protocol_selected_version;
+    uint32 protocol_last_version;
+    int32 protocol_last_status;
+    int32 protocol_last_ret;
+    uint16 protocol_last_packet_type;
+    uint32 protocol_last_len;
+    uint64 protocol_last_trans_id;
+    uint8 protocol_last_prefix[8];
+    volatile int protocol_pending;
+    uint64 config_window_pa;
+    uint64 config_window_va;
+    uint32 config_window_size;
+    int32 config_window_ret;
+    uint32 d0_attempts;
+    uint32 d0_sent;
+    int32 d0_status;
+    int32 d0_ret;
+    uint16 d0_packet_type;
+    uint32 d0_len;
+    uint64 d0_trans_id;
+    uint8 d0_prefix[8];
+    volatile int d0_pending;
+    uint32 query_attempts;
+    uint32 query_sent;
+    int32 query_ret;
+    uint16 query_packet_type;
+    uint32 query_len;
+    uint64 query_trans_id;
+    uint8 query_prefix[8];
+    uint32 relations_seen;
+    uint32 relations_len;
+    uint32 relations_count;
+    uint32 relations_parse_ok;
+    uint32 relations_desc_size;
+    uint32 relations_count_offset;
+    uint32 relations_desc_offset;
+    uint8 relations_prefix[8];
+    uint32 child_count;
+    uint32 registered_count;
+    uint32 register_last_ret;
+    uint32 config_read_count;
+    uint32 config_write_count;
+    uint32 config_last_token;
+    uint32 config_last_offset;
+    uint32 config_last_size;
+    uint32 config_last_value;
+    uint32 config_reject_count;
+    int32 config_last_ret;
+    uint32 config_window_source;
+    uint32 config_window_rejects;
+    uint64 config_window_candidate;
+    uint64 config_window_limit;
+    spinlock_t config_lock;
+    struct {
+        uint32 win_slot;
+        uint16 vendor_id;
+        uint16 device_id;
+        uint32 class_code;
+        uint8 revision_id;
+        uint16 subsystem_vendor_id;
+        uint16 subsystem_id;
+        uint8 bus;
+        uint8 dev;
+        uint8 func;
+        int registered;
+    } child[HVPCI_CHILD_MAX];
+} hvpci;
+
+static void hvpci_copy_prefix(uint8 dst[8], const void *src, uint32 len)
+{
+    uint32 n = len < 8 ? len : 8;
+
+    memset(dst, 0, 8);
+    if (src != NULL && n != 0)
+        memcpy(dst, src, n);
+}
+
+static int hvpci_range_overlaps(uint64 start, uint64 size, uint64 other_start,
+                                uint64 other_size)
+{
+    uint64 end;
+    uint64 other_end;
+
+    if (size == 0 || other_size == 0)
+        return 0;
+    end = start + size;
+    other_end = other_start + other_size;
+    if (end < start || other_end < other_start)
+        return 1;
+    return start < other_end && other_start < end;
+}
+
+static int hvpci_mmio_candidate_usable(uint64 start, uint32 size)
+{
+    if (start < HVPCI_STATIC_MMIO_BASE ||
+        start + size > HVPCI_STATIC_MMIO_END)
+        return 0;
+    for (int i = 0; i < platform.mem_count; i++) {
+        if (hvpci_range_overlaps(start, size, platform.mem[i].base,
+                                 platform.mem[i].size))
+            return 0;
+    }
+    for (int i = 0; i < platform.reserved_count; i++) {
+        if (hvpci_range_overlaps(start, size, platform.reserved[i].base,
+                                 platform.reserved[i].size))
+            return 0;
+    }
+    if (platform.has_framebuffer &&
+        hvpci_range_overlaps(start, size, platform.framebuffer_base,
+                             platform.framebuffer_size))
+        return 0;
+    return 1;
+}
+
+static int hvpci_config_window_init(void)
+{
+    uint64 size = HVPCI_CONFIG_MMIO_LENGTH;
+
+    hvpci.config_window_ok = 0;
+    hvpci.config_window_source = 0;
+    hvpci.config_window_pa = 0;
+    hvpci.config_window_va = 0;
+    hvpci.config_window_size = 0;
+    hvpci.config_window_ret = -ENODEV;
+    hvpci.config_window_candidate = HVPCI_STATIC_MMIO_BASE;
+    hvpci.config_window_limit = HVPCI_STATIC_MMIO_END;
+
+    for (uint64 base = HVPCI_STATIC_MMIO_BASE;
+         base + size <= HVPCI_STATIC_MMIO_END; base += size) {
+        hvpci.config_window_candidate = base;
+        if (!hvpci_mmio_candidate_usable(base, (uint32)size)) {
+            hvpci.config_window_rejects++;
+            continue;
+        }
+        /*
+         * x86 maps this static device-MMIO aperture uncached during early
+         * paging setup. The config protocol uses page 0 as the Windows slot
+         * selector and page 1 as the selected function's config page.
+         */
+        hvpci.config_window_ok = 1;
+        hvpci.config_window_source = 1;
+        hvpci.config_window_pa = base;
+        hvpci.config_window_va = base;
+        hvpci.config_window_size = (uint32)size;
+        hvpci.config_window_ret = 0;
+        return 0;
+    }
+    return hvpci.config_window_ret;
+}
+
+static int hvpci_config_read(void *ctx, uint32 token, uint16 offset,
+                             uint8 size, uint32 *value)
+{
+    volatile uint32 *slot_select;
+    volatile uint8 *cfg8;
+    uint32 raw;
+    int ret = 0;
+    (void)ctx;
+
+    hvpci.config_read_count++;
+    hvpci.config_last_token = token;
+    hvpci.config_last_offset = offset;
+    hvpci.config_last_size = size;
+    hvpci.config_last_ret = 0;
+    if (value == NULL) {
+        hvpci.config_reject_count++;
+        hvpci.config_last_ret = -EINVAL;
+        return -EINVAL;
+    }
+    *value = 0xffffffffU;
+    if (!hvpci.config_window_ok || hvpci.config_window_va == 0 ||
+        offset + size > HVPCI_CONFIG_PAGE_OFFSET ||
+        (size != 1 && size != 2 && size != 4) ||
+        (size == 2 && (offset & 1U)) ||
+        (size == 4 && (offset & 3U))) {
+        hvpci.config_reject_count++;
+        hvpci.config_last_ret = -ENOTSUP;
+        return -ENOTSUP;
+    }
+
+    slot_select = (volatile uint32 *)hvpci.config_window_va;
+    cfg8 = (volatile uint8 *)(hvpci.config_window_va +
+                              HVPCI_CONFIG_PAGE_OFFSET);
+    spin_lock(&hvpci.config_lock);
+    *slot_select = token;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    if (size == 1)
+        raw = *(volatile uint8 *)(cfg8 + offset);
+    else if (size == 2)
+        raw = *(volatile uint16 *)(cfg8 + offset);
+    else
+        raw = *(volatile uint32 *)(cfg8 + offset);
+    spin_unlock(&hvpci.config_lock);
+    if (size == 1)
+        raw &= 0xffU;
+    else if (size == 2)
+        raw &= 0xffffU;
+    *value = raw;
+    hvpci.config_last_value = raw;
+    hvpci.config_last_ret = ret;
+    return ret;
+}
+
+static int hvpci_config_write(void *ctx, uint32 token, uint16 offset,
+                              uint8 size, uint32 value)
+{
+    volatile uint32 *slot_select;
+    volatile uint8 *cfg8;
+    (void)ctx;
+
+    hvpci.config_write_count++;
+    hvpci.config_last_token = token;
+    hvpci.config_last_offset = offset;
+    hvpci.config_last_size = size;
+    hvpci.config_last_value = value;
+    hvpci.config_last_ret = 0;
+    if (!hvpci.config_window_ok || hvpci.config_window_va == 0 ||
+        offset + size > HVPCI_CONFIG_PAGE_OFFSET ||
+        (size != 1 && size != 2 && size != 4) ||
+        (size == 2 && (offset & 1U)) ||
+        (size == 4 && (offset & 3U))) {
+        hvpci.config_reject_count++;
+        hvpci.config_last_ret = -ENOTSUP;
+        return -ENOTSUP;
+    }
+
+    slot_select = (volatile uint32 *)hvpci.config_window_va;
+    cfg8 = (volatile uint8 *)(hvpci.config_window_va +
+                              HVPCI_CONFIG_PAGE_OFFSET);
+    spin_lock(&hvpci.config_lock);
+    *slot_select = token;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    if (size == 1)
+        *(volatile uint8 *)(cfg8 + offset) = (uint8)value;
+    else if (size == 2)
+        *(volatile uint16 *)(cfg8 + offset) = (uint16)value;
+    else
+        *(volatile uint32 *)(cfg8 + offset) = value;
+    spin_unlock(&hvpci.config_lock);
+    return 0;
+}
+
+static const struct pci_config_backend_ops hvpci_config_ops = {
+    .read = hvpci_config_read,
+    .write = hvpci_config_write,
+};
+
+static int hvpci_register_backend(void)
+{
+    int ret;
+
+    if (hvpci.backend_registered)
+        return hvpci.backend_index;
+
+    ret = pci_register_config_backend("hyperv-vpci", &hvpci_config_ops,
+                                      &hvpci);
+    hvpci.backend_index = ret;
+    hvpci.backend_registered = ret >= 0;
+    return ret;
+}
+
+static void hvpci_record_child(uint32 index, const void *desc,
+                               uint32 desc_size)
+{
+    const struct hvpci_function_description *d = desc;
+    uint32 class_code;
+    uint16 subsystem_vendor_id;
+    uint16 subsystem_id;
+
+    if (index >= HVPCI_CHILD_MAX || desc == NULL ||
+        desc_size < sizeof(struct hvpci_function_description))
+        return;
+
+    subsystem_vendor_id = (uint16)(d->subsystem_id & 0xffffU);
+    subsystem_id = (uint16)(d->subsystem_id >> 16);
+    class_code = ((uint32)d->base_class << 16) |
+                 ((uint32)d->subclass << 8) | d->prog_intf;
+    hvpci.child[index].win_slot = d->win_slot;
+    hvpci.child[index].vendor_id = d->vendor_id;
+    hvpci.child[index].device_id = d->device_id;
+    hvpci.child[index].class_code = class_code;
+    hvpci.child[index].revision_id = d->revision_id;
+    hvpci.child[index].subsystem_vendor_id = subsystem_vendor_id;
+    hvpci.child[index].subsystem_id = subsystem_id;
+    hvpci.child[index].registered = 0;
+}
+
+static void hvpci_register_children(void)
+{
+    uint32 limit;
+
+    if (!hvpci.backend_registered)
+        return;
+
+    limit = hvpci.child_count < HVPCI_CHILD_MAX ?
+            hvpci.child_count : HVPCI_CHILD_MAX;
+    for (uint32 i = 0; i < limit; i++) {
+        struct pci_virtual_child child;
+        int ret;
+
+        if (hvpci.child[i].registered)
+            continue;
+        memset(&child, 0, sizeof(child));
+        child.backend_index = (uint32)hvpci.backend_index;
+        child.backend_token = hvpci.child[i].win_slot;
+        child.vendor_id = hvpci.child[i].vendor_id;
+        child.device_id = hvpci.child[i].device_id;
+        child.class_code = hvpci.child[i].class_code;
+        child.revision_id = hvpci.child[i].revision_id;
+        child.header_type = 0;
+        child.subsystem_vendor_id = hvpci.child[i].subsystem_vendor_id;
+        child.subsystem_id = hvpci.child[i].subsystem_id;
+        child.irq_line = 0xff;
+
+        ret = pci_register_virtual_child(&child, &hvpci.child[i].bus,
+                                         &hvpci.child[i].dev,
+                                         &hvpci.child[i].func);
+        hvpci.register_last_ret = ret < 0 ? (uint32)(-ret) : 0;
+        if (ret == 0) {
+            hvpci.child[i].registered = 1;
+            hvpci.registered_count++;
+        }
+    }
+}
+
+static int hvpci_parse_relations_desc(const uint8 *buf, uint32 len,
+                                      uint32 count_offset,
+                                      uint32 desc_offset, uint32 desc_size)
+{
+    uint32 count;
+    uint32 max_count;
+    uint32 parsed;
+
+    if (buf == NULL || len < count_offset + sizeof(uint32) ||
+        desc_size < sizeof(struct hvpci_function_description))
+        return -EINVAL;
+
+    memcpy(&count, buf + count_offset, sizeof(count));
+    if (count > 1024)
+        return -EOVERFLOW;
+    if (count != 0 &&
+        (len < desc_offset || (len - desc_offset) / desc_size < count))
+        return -EOVERFLOW;
+
+    hvpci.relations_seen++;
+    hvpci.relations_len = len;
+    hvpci.relations_count = count;
+    hvpci.relations_desc_size = desc_size;
+    hvpci.relations_count_offset = count_offset;
+    hvpci.relations_desc_offset = desc_offset;
+    hvpci.child_count = count < HVPCI_CHILD_MAX ? count : HVPCI_CHILD_MAX;
+    hvpci.relations_parse_ok = 1;
+
+    max_count = hvpci.child_count;
+    parsed = 0;
+    for (uint32 i = 0; i < max_count; i++) {
+        const uint8 *desc = buf + desc_offset + i * desc_size;
+
+        hvpci_record_child(i, desc, desc_size);
+        parsed++;
+    }
+    hvpci.child_count = parsed;
+    hvpci_register_children();
+    return 0;
+}
+
+static int hvpci_parse_bus_relations(const uint8 *buf, uint32 len)
+{
+    uint32 msg_type;
+    int ret;
+
+    hvpci.relations_parse_ok = 0;
+    hvpci.relations_len = len;
+    hvpci_copy_prefix(hvpci.relations_prefix, buf, len);
+
+    if (buf == NULL || len < sizeof(struct vmpacket_descriptor) +
+        sizeof(uint32))
+        return -EINVAL;
+    memcpy(&msg_type, buf + sizeof(struct vmpacket_descriptor),
+           sizeof(msg_type));
+    if (msg_type != HVPCI_BUS_RELATIONS &&
+        msg_type != HVPCI_BUS_RELATIONS2)
+        return -EINVAL;
+
+    if (msg_type == HVPCI_BUS_RELATIONS2) {
+        ret = hvpci_parse_relations_desc(
+            buf, len, sizeof(struct vmpacket_descriptor) + sizeof(uint32),
+            sizeof(struct vmpacket_descriptor) + sizeof(uint32) +
+                sizeof(uint32),
+            sizeof(struct hvpci_function_description2));
+        if (ret == 0)
+            return 0;
+    }
+
+    return hvpci_parse_relations_desc(
+        buf, len, sizeof(struct vmpacket_descriptor) + sizeof(uint32),
+        sizeof(struct vmpacket_descriptor) + sizeof(uint32) + sizeof(uint32),
+        sizeof(struct hvpci_function_description));
+}
+
+static struct {
     int global_present;
     int vgpu_present;
     int vgpu_count;
@@ -1998,26 +2816,77 @@ static struct {
     uint32 global_conn_id;
     uint32 vgpu_relid;
     uint32 vgpu_conn_id;
+    uint32 global_offer_user_def[4];
+    uint32 vgpu_offer_user_def[4];
     uint32 global_gpadl_status;
     uint32 vgpu_gpadl_status;
     uint32 global_open_status;
     uint32 vgpu_open_status;
     uint32 global_mmio_megabytes;
+    uint32 hyperv_pci_offer_present;
+    uint32 hyperv_pci_offer_count;
+    uint32 hyperv_pci_offer_relid;
+    uint32 hyperv_pci_offer_conn_id;
+    uint32 hyperv_pci_offer_monitorid;
+    uint32 hyperv_pci_offer_monitor_allocated;
+    uint32 hyperv_pci_offer_dedicated;
+    uint32 hyperv_pci_offer_flags;
+    uint32 hyperv_pci_offer_mmio_megabytes;
+    uint32 hyperv_pci_offer_user_def[4];
+    struct hv_guid hyperv_pci_offer_instance;
     int32 iospace_last_ret;
     uint32 iospace_last_len;
     int iospace_set;
     uint64 iospace_base;
     uint64 iospace_size;
+    uint32 fence_map_last_source;
+    uint32 fence_map_last_mode;
+    uint32 fence_map_failures;
+    uint64 fence_map_last_raw_pa;
+    uint64 fence_map_last_canonical_pa;
+    uint64 fence_map_last_offset;
+    uint64 fence_map_last_offset_candidate_pa;
+    uint64 fence_map_last_offset_candidate_current;
+    uint64 fence_map_last_size;
+    uint64 fence_map_last_user_va;
+    uint64 fence_map_last_kva;
+    uint32 fence_map_max_source;
+    uint32 fence_map_max_mode;
+    uint64 fence_map_max_raw_pa;
+    uint64 fence_map_max_canonical_pa;
+    uint64 fence_map_max_offset_candidate_pa;
+    uint64 fence_map_max_offset_candidate_current;
+    uint32 fence_value_max_seen;
+    uint64 fence_value_last_kva;
+    uint64 fence_value_last_current;
+    uint64 fence_value_last_target;
     uint32 global_rx_packets;
     uint32 vgpu_rx_packets;
     uint8 global_monitorid;
     uint8 vgpu_monitorid;
     uint64 next_trans_id;
     uint64 waiting_trans_id;
+    uint32 waiting_channel;
+    uint32 waiting_relid;
     uint64 completion_trans_id;
     volatile int completion_pending;
     uint16 completion_type;
     uint32 completion_len;
+    uint16 completion_desc_type;
+    uint16 completion_desc_flags;
+    uint32 completion_desc_len8;
+    uint32 completion_desc_offset8;
+    uint32 completion_packet_len;
+    uint32 completion_packet_offset;
+    uint32 completion_payload_len;
+    uint64 completion_desc_trans_id;
+    uint64 completion_waiting_trans_id;
+    uint32 completion_source_channel;
+    uint32 completion_source_relid;
+    uint32 completion_waiting_channel;
+    uint32 completion_waiting_relid;
+    uint32 completion_waiting_match;
+    uint32 completion_waiting_channel_match;
     uint8 completion_buf[HV_DXG_RESULT_BYTES];
     uint8 rx_buf[HV_DXG_PACKET_BYTES];
     volatile int pump_active;
@@ -2025,6 +2894,59 @@ static struct {
     volatile int sync_active;
     uint32 sync_waits;
     uint32 sync_timeouts;
+    mutex_t process_lock;
+    struct hvdxg_process_state *processes[HV_DXG_PROCESS_TABLE_MAX];
+    uint64 process_guest_next;
+    uint32 process_generation;
+    uint32 process_live;
+    uint32 process_live_max;
+    uint32 process_creates;
+    uint32 process_reuses;
+    uint32 process_releases;
+    uint32 process_destroy_attempts;
+    uint32 process_destroy_successes;
+    uint32 process_destroy_failures;
+    uint32 process_destroy_suppressed;
+    uint32 process_destroy_active_total;
+    uint32 process_destroy_active_device;
+    uint32 process_destroy_active_context;
+    uint32 process_destroy_active_hwqueue;
+    uint32 process_destroy_active_pagingqueue;
+    uint32 process_destroy_active_sync;
+    uint32 process_destroy_active_allocation;
+    uint32 process_destroy_active_resource;
+    uint32 process_destroy_active_gpuva;
+    uint32 process_destroy_deferred;
+    uint32 process_shared_reuses;
+    uint32 process_isolated_reuses;
+    uint64 process_isolated_last_tgid;
+    uint32 process_isolated_last_handle;
+    uint32 process_isolated_last_generation;
+    uint32 process_isolated_source_generation;
+    uint32 process_isolated_copied_objects;
+    uint32 process_isolated_source_objects;
+    uint32 process_retained_reuse_avoided;
+    uint64 process_retained_avoided_tgid;
+    uint64 process_retained_avoided_source_tgid;
+    uint32 process_retained_avoided_handle;
+    uint32 process_retained_avoided_generation;
+    uint32 process_retained_avoided_source_generation;
+    uint64 process_namespace_last_tgid;
+    uint32 process_namespace_last_handle;
+    uint32 process_namespace_source_generation;
+    uint32 process_namespace_new_generation;
+    uint32 process_namespace_objects_before;
+    uint32 process_namespace_objects_after;
+    uint32 process_namespace_adapters_before;
+    uint32 process_namespace_adapters_after;
+    uint32 process_namespace_locals_before;
+    uint32 process_namespace_locals_after;
+    uint32 process_namespace_fresh;
+    uint32 process_retained_handle;
+    uint32 process_retained_generation;
+    uint64 process_retained_tgid;
+    uint32 process_retained_refs;
+    uint32 process_table_full;
     uint64 host_event_next_id;
     uint64 host_event_ids[HV_DXG_HOST_EVENT_MAX];
     struct vfs_file *host_event_files[HV_DXG_HOST_EVENT_MAX];
@@ -2040,12 +2962,94 @@ static struct {
     int32 probe_last_ret;
     int32 probe_open_status;
     uint32 probe_open_handle;
+    uint32 probe_open_requested_version;
     uint32 probe_open_host_version;
     uint32 probe_open_host_compat;
     uint32 probe_info_len;
     uint32 probe_info_flags;
     uint32 probe_async_msg_enabled;
+    int32 probe_v40_open_send_ret;
+    uint32 probe_v40_open_actual_len;
+    int32 probe_v40_open_status;
+    uint32 probe_v40_open_handle;
+    uint32 probe_v40_open_host_version;
+    uint32 probe_v40_open_host_compat;
+    uint32 probe_v40_open_guest_luid_low;
+    uint32 probe_v40_open_guest_luid_high;
+    int32 probe_v40_getinternal_send_ret;
+    uint32 probe_v40_getinternal_actual_len;
+    uint32 probe_v40_getinternal_flags;
+    uint32 probe_v40_reject_reason;
     int d3dkmt_ready;
+    uint64 dxg_process_guest;
+    uint64 dxg_process_pid;
+    uint64 dxg_process_tgid;
+    uint32 dxg_process_generation;
+    uint32 createprocess_last_len;
+    uint32 createprocess_last_cmd_len;
+    int32 createprocess_last_ret;
+    uint64 createprocess_last_guest;
+    uint64 createprocess_last_pid;
+    uint64 createprocess_last_tgid;
+    uint32 createprocess_last_handle;
+    uint32 createprocess_last_layout;
+    uint32 createprocess_last_generation;
+    uint32 createprocess_success_len;
+    uint32 createprocess_success_cmd_len;
+    int32 createprocess_success_ret;
+    uint64 createprocess_success_guest;
+    uint64 createprocess_success_pid;
+    uint64 createprocess_success_tgid;
+    uint32 createprocess_success_handle;
+    uint32 createprocess_success_layout;
+    uint32 createprocess_success_generation;
+    uint32 open_createprocess_attempts;
+    uint32 open_createprocess_successes;
+    uint32 open_createprocess_failures;
+    uint32 open_createprocess_ignored_failures;
+    int32 open_createprocess_last_ret;
+    uint64 open_createprocess_last_guest;
+    uint64 open_createprocess_last_pid;
+    uint64 open_createprocess_last_tgid;
+    uint32 open_createprocess_last_handle;
+    uint32 open_createprocess_last_created;
+    uint32 open_createprocess_last_generation;
+    uint32 open_createprocess_last_refs;
+    uint32 early_bind_attempts;
+    uint32 early_bind_successes;
+    uint32 early_bind_failures;
+    uint32 early_bind_last_source;
+    uint32 early_bind_last_cmd;
+    int32 early_bind_last_ret;
+    uint32 early_bind_last_handle;
+    uint32 early_bind_last_created;
+    uint32 early_bind_last_generation;
+    uint32 early_bind_last_refs;
+    uint32 destroyprocess_last_len;
+    int32 destroyprocess_last_ret;
+    uint32 destroyprocess_last_handle;
+    uint32 host_cmd_destroyallocation;
+    uint32 host_cmd_destroycontext;
+    uint32 host_cmd_destroyhwqueue;
+    uint32 host_cmd_destroypagingqueue;
+    uint32 host_cmd_destroydevice;
+    uint32 host_cmd_destroysync;
+    uint32 host_cmd_destroyprocess;
+    uint32 host_cmd_freegpuva;
+    uint32 host_cmd_lock2;
+    uint32 host_cmd_unlock2;
+    uint32 closeadapter_ioctl_count;
+    uint32 closeadapter_local_count;
+    uint32 closeadapter_host_count;
+    uint32 closeadapter_invalid_count;
+    uint32 closeadapter_last_len;
+    int32 closeadapter_last_ret;
+    int32 closeadapter_last_status;
+    uint32 cleanup_order_seq;
+    uint32 cleanup_last_destroy_order;
+    uint32 cleanup_destroyprocess_order;
+    uint32 closeadapter_last_order;
+    uint32 closeadapter_after_destroy_count;
     uint32 device_state_counter;
     uint32 ioctl_count;
     uint32 ioctl_successes;
@@ -2068,6 +3072,14 @@ static struct {
     uint32 cleanup_failed_op;
     uint32 cleanup_failed_handle;
     uint32 cleanup_had_tracked;
+    uint32 cleanup_resource_host_destroys;
+    uint32 cleanup_resource_child_locals;
+    uint32 cleanup_standalone_alloc_destroys;
+    uint32 cleanup_resource_alloc_skips;
+    uint32 object_table_max;
+    uint32 object_table_drops;
+    uint32 object_table_denied;
+    uint32 object_table_generation;
     uint32 track_allocation_max;
     uint32 track_allocation_drops;
     uint32 track_gpuva_max;
@@ -2088,19 +3100,41 @@ static struct {
     uint64 gpuva_reserve_last_fence;
     uint32 gpuva_free_last_len;
     int32 gpuva_free_last_ret;
+    uint32 gpuva_free_last_adapter;
+    uint64 gpuva_free_last_base;
+    uint64 gpuva_free_last_size;
+    uint64 gpuva_free_last_wire_size;
     uint32 syncobject_last_len;
     int32 syncobject_last_ret;
     uint32 syncobject_last_handle;
+    uint32 syncobject_last_type;
+    uint32 syncobject_last_flags;
+    uint32 syncobject_last_global;
+    uint32 syncobject_last_process;
+    uint32 syncobject_last_owner_process;
+    uint32 syncobject_last_owner_generation;
     uint64 syncobject_last_fence_cpu;
     uint64 syncobject_last_fence_gpu;
     uint64 syncobject_last_fence_pa;
     uint64 syncobject_last_fence_off;
+    uint32 syncobject_mapped_count;
+    uint32 syncobject_mapped_len;
+    uint32 syncobject_mapped_type;
+    uint32 syncobject_mapped_flags;
+    uint64 syncobject_mapped_fence_cpu;
+    uint64 syncobject_mapped_fence_gpu;
     uint32 syncsignal_last_len;
     int32 syncsignal_last_ret;
     int32 syncsignal_last_status;
     uint32 syncwait_last_len;
     int32 syncwait_last_ret;
     int32 syncwait_last_status;
+    uint64 syncwait_last_event;
+    uint32 syncwait_last_async;
+    uint32 syncwait_last_object;
+    uint64 syncwait_last_fence;
+    uint64 syncwait_last_current;
+    uint32 syncwait_last_result;
     uint32 syncgpu_signal_last_len;
     int32 syncgpu_signal_last_ret;
     int32 syncgpu_signal_last_status;
@@ -2114,6 +3148,24 @@ static struct {
     uint32 syncgpu_wait_last_legacy;
     uint64 syncgpu_wait_last_fence;
     uint32 syncgpu_wait_last_cmd_len;
+    uint32 createdevice_last_adapter;
+    uint32 createdevice_last_host_adapter;
+    uint32 createdevice_last_device;
+    uint32 createdevice_adapter_equals_device;
+    uint32 createdevice_host_adapter_equals_device;
+    int32 createdevice_last_ret;
+    uint32 createdevice_last_process;
+    uint32 createdevice_last_owner_process;
+    uint32 createdevice_last_owner_generation;
+    uint32 createdevice_last_owner_refs;
+    uint32 createdevice_object_found;
+    uint32 createdevice_object_type;
+    uint32 createdevice_object_local;
+    uint32 createdevice_object_host;
+    uint32 createdevice_object_parent;
+    uint32 createdevice_object_device;
+    uint32 createdevice_object_generation;
+    uint32 createdevice_object_destroyed;
     uint32 last_device_handle;
     uint32 last_resource_handle;
     uint32 last_allocation_handle;
@@ -2122,6 +3174,35 @@ static struct {
     uint32 allocation_last_len;
     int32 allocation_last_ret;
     uint32 allocation_last_count;
+    uint32 allocation_last_cmd_len;
+    uint32 allocation_last_hdr_size;
+    uint32 allocation_last_prr_offset;
+    uint32 allocation_last_make_resident_offset;
+    uint32 allocation_last_allocinfo_offset;
+    uint32 allocation_last_private_offset;
+    uint32 allocation_last_result_min_len;
+    uint32 allocation_last_result_len;
+    uint32 allocation_last_result_flags_offset;
+    uint32 allocation_last_result_resource_offset;
+    uint32 allocation_last_result_global_offset;
+    uint32 allocation_last_result_vgpu_offset;
+    uint32 allocation_last_result_allocinfo_offset;
+    uint32 allocation_last_result_allocinfo_size;
+    uint32 allocation_last_result_head_len;
+    uint8 allocation_last_result_head[64];
+    uint32 allocation_last_wire_len;
+    uint32 allocation_last_ext;
+    uint32 allocation_last_ext_offset;
+    uint32 allocation_last_route_global;
+    int32 allocation_last_send_ret;
+    uint32 allocation_last_process;
+    uint32 allocation_last_owner_process;
+    uint32 allocation_last_owner_generation;
+    uint32 allocation_last_device;
+    uint32 allocation_last_device_known;
+    uint32 allocation_last_device_from_create;
+    uint32 allocation_last_runtime_size;
+    uint32 allocation_last_resource_priv_size;
     uint32 allocation_last_priv_size;
     uint32 allocation_last_flags;
     uint64 allocation_last_sysmem;
@@ -2132,6 +3213,40 @@ static struct {
     uint32 existing_sysmem_pin_successes;
     uint32 existing_sysmem_set_successes;
     uint64 existing_sysmem_total_pages;
+    uint32 existing_sysmem_attempts;
+    uint32 existing_sysmem_last_path;
+    uint32 existing_sysmem_last_standard;
+    uint32 existing_sysmem_last_writable;
+    uint32 existing_sysmem_last_device;
+    uint32 existing_sysmem_last_allocation;
+    uint64 existing_sysmem_last_va;
+    uint64 existing_sysmem_last_size;
+    uint64 existing_sysmem_last_first_pfn;
+    uint64 existing_sysmem_last_last_pfn;
+    uint32 existing_sysmem_last_pfnmap_pages;
+    uint32 existing_sysmem_pfnmap_successes;
+    uint32 existing_sysmem_last_vram;
+    uint64 existing_sysmem_last_vram_gpa;
+    uint64 existing_sysmem_last_vram_size;
+    uint32 existing_sysmem_share_stage;
+    uint32 existing_sysmem_share_resource;
+    uint32 existing_sysmem_share_global;
+    uint32 existing_sysmem_share_flags;
+    uint32 existing_sysmem_share_host_flags;
+    uint32 existing_sysmem_share_metadata;
+    uint32 existing_sysmem_share_sealed;
+    uint32 existing_sysmem_share_nt;
+    uint32 existing_sysmem_share_shareable;
+    uint32 existing_sysmem_share_reason;
+    uint32 existing_sysmem_share_alloc_count;
+    uint32 existing_sysmem_share_runtime_priv;
+    uint32 existing_sysmem_share_resource_priv;
+    uint32 existing_sysmem_share_alloc_priv;
+    uint32 existing_sysmem_share_total_priv;
+    uint32 existing_sysmem_share_pfnmap_pages;
+    uint32 existing_sysmem_share_vram;
+    uint64 existing_sysmem_share_va;
+    uint64 existing_sysmem_share_size;
     uint32 allocation_last_in_priv_head_len;
     uint8 allocation_last_in_priv_head[64];
     uint32 allocation_last_out_priv_head_len;
@@ -2145,8 +3260,149 @@ static struct {
     uint64 allocation_history_size[HV_DXG_RESOURCE_HISTORY_MAX];
     uint32 allocation_history_count[HV_DXG_RESOURCE_HISTORY_MAX];
     uint32 allocation_history_priv[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint32 allocation_history_global_share[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint32 allocation_history_create_flags[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint64 d3d12_shared_event_seq;
+    uint64 d3d12_shared_create_seq;
+    uint64 d3d12_shared_first_nt_seq;
+    uint32 d3d12_shared_alloc_seen;
+    uint32 d3d12_shared_alloc_len;
+    int32 d3d12_shared_alloc_ret;
+    uint32 d3d12_shared_alloc_device;
+    uint32 d3d12_shared_alloc_resource_in;
+    uint32 d3d12_shared_alloc_resource_out;
+    uint32 d3d12_shared_alloc_allocation;
+    uint32 d3d12_shared_alloc_count;
+    uint32 d3d12_shared_alloc_flags;
+    uint32 d3d12_shared_runtime_d3d12_flags;
+    uint32 d3d12_shared_alloc_global_share;
+    uint32 d3d12_shared_allocinfo_offset;
+    uint32 d3d12_shared_runtime_offset;
+    uint32 d3d12_shared_resource_priv_offset;
+    uint32 d3d12_shared_alloc_priv_offset;
+    uint32 d3d12_shared_wire_flags;
+    uint32 d3d12_shared_wire_make_resident;
+    uint64 d3d12_shared_wire_rt_resource;
+    uint32 d3d12_shared_result_flags;
+    uint32 d3d12_shared_result_global_share;
+    uint32 d3d12_shared_result_vgpu_flags;
+    uint32 d3d12_shared_result_alloc_flags;
+    uint32 d3d12_shared_result_min_len;
+    uint32 d3d12_shared_result_len;
+    uint32 d3d12_shared_result_flags_offset;
+    uint32 d3d12_shared_result_resource_offset;
+    uint32 d3d12_shared_result_global_offset;
+    uint32 d3d12_shared_result_vgpu_offset;
+    uint32 d3d12_shared_result_allocinfo_offset;
+    uint32 d3d12_shared_result_allocinfo_size;
+    uint32 d3d12_shared_result_head_len;
+    uint32 d3d12_shared_result_flag_norm;
+    uint32 d3d12_shared_result_flag_norm_reason;
+    uint32 d3d12_shared_result_flag_candidate;
+    uint32 d3d12_shared_result_flag_delta;
+    uint32 d3d12_shared_track_shared;
+    uint32 d3d12_shared_track_nt;
+    uint32 d3d12_shared_track_metadata;
+    uint32 d3d12_shared_track_sent_bytes;
+    uint32 d3d12_shared_track_alloc_from_host;
+    uint64 d3d12_shared_alloc_process;
+    uint64 d3d12_shared_alloc_size;
+    uint64 d3d12_shared_alloc_rt_resource;
+    uint32 d3d12_shared_runtime_size;
+    uint32 d3d12_shared_resource_priv_size;
+    uint32 d3d12_shared_alloc_priv_size;
+    uint32 d3d12_shared_alloc_out_priv_size;
+    int32 d3d12_shared_runtime_user_copy_ret;
+    uint32 d3d12_shared_runtime_user_mismatch;
+    uint32 d3d12_shared_runtime_user_head_len;
+    uint32 d3d12_shared_norm_seen;
+    uint32 d3d12_shared_norm_applied;
+    uint32 d3d12_shared_norm_reason;
+    uint32 d3d12_shared_norm_magic0;
+    uint32 d3d12_shared_norm_magic3;
+    uint32 d3d12_shared_norm_pre_w4;
+    uint32 d3d12_shared_norm_post_w4;
+    uint32 d3d12_shared_norm_pre_w8;
+    uint32 d3d12_shared_norm_post_w8;
+    uint32 d3d12_shared_norm_runtime_applied;
+    uint32 d3d12_shared_norm_width;
+    uint32 d3d12_shared_norm_height;
+    uint64 d3d12_shared_norm_pre_rt8;
+    uint64 d3d12_shared_norm_post_rt8;
+    uint64 d3d12_shared_norm_pre_rt10;
+    uint64 d3d12_shared_norm_post_rt10;
+    uint64 d3d12_shared_norm_pre_rt38;
+    uint64 d3d12_shared_norm_post_rt38;
+    uint64 d3d12_shared_norm_pre_rt50;
+    uint64 d3d12_shared_norm_post_rt50;
+    uint64 d3d12_shared_norm_pre_rt58;
+    uint64 d3d12_shared_norm_post_rt58;
+    uint32 d3d12_shared_runtime_head_len;
+    uint32 d3d12_shared_resource_priv_head_len;
+    uint32 d3d12_shared_alloc_priv_head_len;
+    uint32 d3d12_shared_alloc_out_priv_head_len;
+    uint8 d3d12_shared_runtime_user_head[HV_DXG_SHARED_ALLOC_HEAD_MAX];
+    uint8 d3d12_shared_runtime_head[HV_DXG_SHARED_ALLOC_HEAD_MAX];
+    uint8 d3d12_shared_resource_priv_head[HV_DXG_SHARED_ALLOC_HEAD_MAX];
+    uint8 d3d12_shared_alloc_priv_head[HV_DXG_SHARED_ALLOC_HEAD_MAX];
+    uint8 d3d12_shared_alloc_out_priv_head[HV_DXG_SHARED_ALLOC_HEAD_MAX];
+    uint8 d3d12_shared_result_head[HV_DXG_SHARED_ALLOC_HEAD_MAX];
     uint32 destroyalloc_last_len;
     int32 destroyalloc_last_ret;
+    int32 destroyalloc_last_status;
+    uint32 destroyalloc_last_device;
+    uint32 destroyalloc_last_resource;
+    uint32 destroyalloc_last_allocation;
+    uint32 destroyalloc_last_process;
+    uint32 destroyalloc_last_context;
+    uint32 destroyalloc_last_count;
+    uint32 destroyalloc_d3d12_match_count;
+    uint32 destroyalloc_d3d12_pending_match_count;
+    uint32 destroyalloc_d3d12_last_match;
+    uint64 destroyalloc_d3d12_last_seq;
+    uint64 destroyalloc_d3d12_first_seq;
+    uint32 destroyalloc_d3d12_first_context;
+    uint32 destroyalloc_d3d12_first_match;
+    uint32 destroyalloc_d3d12_first_pending;
+    uint32 destroyalloc_d3d12_first_before_nt;
+    uint32 destroyalloc_d3d12_last_before_nt;
+    uint32 destroyalloc_d3d12_context_mask;
+    uint32 destroydevice_last_len;
+    int32 destroydevice_last_ret;
+    int32 destroydevice_last_status;
+    uint32 destroycontext_last_len;
+    int32 destroycontext_last_ret;
+    int32 destroycontext_last_status;
+    uint32 destroypaging_last_len;
+    int32 destroypaging_last_ret;
+    int32 destroypaging_last_status;
+    uint32 destroysync_last_len;
+    int32 destroysync_last_ret;
+    int32 destroysync_last_status;
+    uint32 destroysync_last_handle;
+    uint32 destroysync_last_device;
+    uint32 destroysync_last_type;
+    uint32 destroysync_last_flags;
+    uint32 destroysync_last_global;
+    uint32 destroysync_last_monitor_fence;
+    uint32 destroysync_last_cmd_len;
+    uint32 destroysync_last_wire_len;
+    uint32 destroysync_last_ext;
+    uint32 destroysync_last_ext_offset;
+    uint32 syncobject_last_cmd_len;
+    uint32 syncobject_last_result_len;
+    uint32 syncobject_last_result_sync_offset;
+    uint32 syncobject_last_result_global_offset;
+    uint32 syncobject_last_result_fence_gpu_offset;
+    uint32 syncobject_last_result_fence_pa_offset;
+    uint32 syncobject_last_result_fence_off_offset;
+    uint32 syncobject_last_result_head_len;
+    uint8 syncobject_last_result_head[64];
+    uint32 syncobject_last_args_offset;
+    uint32 syncobject_last_client_hint_offset;
+    uint32 syncobject_last_client_hint;
+    uint32 syncobject_last_input_shared;
+    uint32 sync_diag_prints;
     uint32 createalloc_unwind_attempts;
     uint32 createalloc_unwind_successes;
     int32 createalloc_unwind_last_ret;
@@ -2154,6 +3410,32 @@ static struct {
     int32 makeresident_last_ret;
     uint64 makeresident_last_fence;
     uint64 makeresident_last_trim;
+    int32 makeresident_last_status;
+    uint32 makeresident_last_device;
+    uint32 makeresident_last_paging_queue;
+    uint32 makeresident_last_flags;
+    uint32 makeresident_last_count;
+    uint32 makeresident_last_sorted;
+    uint32 makeresident_last_cmd_len;
+    uint32 makeresident_last_wsl_cmd_len;
+    uint32 makeresident_last_result_len;
+    uint32 makeresident_last_actual_len;
+    int32 makeresident_last_host_ret;
+    int32 makeresident_last_user_ret;
+    uint32 makeresident_last_pending_ok;
+    uint32 makeresident_last_in_alloc[4];
+    uint32 makeresident_last_wire_alloc[4];
+    uint32 makeresident_last_owner_ok_count;
+    uint32 makeresident_last_tracked_count;
+    uint32 makeresident_last_order_matches;
+    uint32 makeresident_last_owner_dev[2];
+    uint32 makeresident_last_owner_res[2];
+    uint32 makeresident_last_owner_proc[2];
+    uint32 makeresident_last_owner_gen[2];
+    uint32 makeresident_last_owner_refs[2];
+    uint32 makeresident_last_sync;
+    uint64 makeresident_last_fence_current;
+    uint32 makeresident_diag_prints;
     uint32 evict_last_len;
     int32 evict_last_ret;
     uint64 evict_last_trim;
@@ -2170,6 +3452,8 @@ static struct {
     uint64 mapgpuva_last_driver_protection;
     uint64 mapgpuva_last_va;
     uint64 mapgpuva_last_fence;
+    uint32 mapgpuva_last_sync;
+    uint64 mapgpuva_last_fence_current;
     uint32 mapgpuva_history_index;
     uint32 mapgpuva_history_len[HV_DXG_RESOURCE_HISTORY_MAX];
     int32 mapgpuva_history_ret[HV_DXG_RESOURCE_HISTORY_MAX];
@@ -2177,21 +3461,267 @@ static struct {
     uint32 mapgpuva_history_paging_queue[HV_DXG_RESOURCE_HISTORY_MAX];
     uint32 mapgpuva_history_allocation[HV_DXG_RESOURCE_HISTORY_MAX];
     uint64 mapgpuva_history_pages[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint64 mapgpuva_history_protection[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint64 mapgpuva_history_driver_protection[HV_DXG_RESOURCE_HISTORY_MAX];
     uint64 mapgpuva_history_va[HV_DXG_RESOURCE_HISTORY_MAX];
     uint64 mapgpuva_history_fence[HV_DXG_RESOURCE_HISTORY_MAX];
     uint32 queryadapter_last_type;
     uint32 queryadapter_last_size;
     uint32 queryadapter_last_len;
+    uint32 queryadapter_last_user_len;
     int32 queryadapter_last_ret;
     int32 queryadapter_last_status;
+    uint32 queryadapter_last_layout;
+    uint32 queryadapter_last_cmd_len;
+    uint32 queryadapter_last_type_offset;
+    uint32 queryadapter_last_size_offset;
+    uint32 queryadapter_last_data_offset;
+    uint32 queryadapter_last_adapter;
+    uint32 queryadapter_last_host_adapter;
+    uint32 queryadapter_last_resolve_source;
+    uint32 queryadapter_last_owner_process;
+    uint32 queryadapter_last_owner_generation;
+    uint32 queryadapter_last_owner_refs;
+    uint32 queryadapter_last_result_len;
+    uint32 queryadapter_last_expected_wsl_len;
+    uint32 queryadapter_last_process_source;
+    uint32 queryadapter_last_adapter_object;
+    uint32 queryadapter_last_adapter_object_host;
+    uint32 queryadapter_last_adapter_object_owner;
+    uint32 queryadapter_last_adapter_object_owner_generation;
+    uint32 queryadapter_last_adapter_object_generation;
+    uint32 queryadapter_local_namespace;
+    uint32 queryadapter_process_adapter_refs;
+    uint32 queryadapter_process_adapter_locals;
+    uint32 queryadapter_process_adapter_generation;
+    int32 queryadapter_type15_fail_ret;
+    int32 queryadapter_type15_fail_status;
+    uint32 queryadapter_type15_fail_process;
+    uint32 queryadapter_type15_fail_route;
+    uint32 queryadapter_type15_fail_ext_luid_low;
+    uint32 queryadapter_type15_fail_ext_luid_high;
+    uint32 queryadapter_adaptertype_rewrite_count;
+    uint32 queryadapter_adaptertype_rewrite_type;
+    uint32 queryadapter_adaptertype_rewrite_source;
+    uint32 queryadapter_adaptertype_raw_value;
+    uint32 queryadapter_adaptertype_wsl_value;
+    uint32 queryadapter_adaptertype_cleared_bits;
+    uint32 queryadapter_adaptertype_forced_bits;
+    uint32 queryadapter_adaptertype_compute_only;
+    uint32 queryadapter_zero_success_type;
+    uint32 queryadapter_zero_success_size;
+    uint32 queryadapter_zero_success_count;
+    uint32 queryadapter_zero_success_host_type;
+    uint32 queryadapter_zero_success_host_len;
+    int32 queryadapter_zero_success_host_ret;
+    int32 queryadapter_zero_success_host_status;
+    int32 queryadapter_zero_success_user_ret;
+    uint32 queryadapter_packet_type;
+    uint32 queryadapter_packet_size;
+    uint32 queryadapter_packet_cmd_len;
+    uint32 queryadapter_packet_wire_len;
+    uint32 queryadapter_packet_ext;
+    uint32 queryadapter_packet_ext_offset;
+    uint32 queryadapter_packet_type_offset;
+    uint32 queryadapter_packet_size_offset;
+    uint32 queryadapter_packet_data_offset;
+    uint32 queryadapter_packet_desc_size;
+    uint32 queryadapter_packet_len;
+    uint32 queryadapter_packet_aligned;
+    uint32 queryadapter_packet_pad;
+    uint32 queryadapter_packet_desc_off8;
+    uint32 queryadapter_packet_desc_len8;
+    uint32 queryadapter_packet_ring_total;
+    uint32 queryadapter_packet_ext_len;
+    uint8 queryadapter_packet_ext_bytes[HV_DXG_QUERYADAPTER_EXT_SNAPSHOT_BYTES];
+    uint32 queryadapter_packet_cmdhdr_len;
+    uint8 queryadapter_packet_cmdhdr[HV_DXG_QUERYADAPTER_CMDHDR_SNAPSHOT_BYTES];
+    uint32 queryadapter_packet_priv_head_len;
+    uint8 queryadapter_packet_priv_head[HV_DXG_QUERYADAPTER_PRIV_SNAPSHOT_BYTES];
+    uint32 queryadapter_send_route;
+    uint32 queryadapter_send_ext_luid_low;
+    uint32 queryadapter_send_ext_luid_high;
+    uint32 queryadapter_completion_desc_type;
+    uint32 queryadapter_completion_desc_flags;
+    uint32 queryadapter_completion_desc_len8;
+    uint32 queryadapter_completion_desc_offset8;
+    uint32 queryadapter_completion_packet_len;
+    uint32 queryadapter_completion_packet_offset;
+    uint32 queryadapter_completion_payload_len;
+    uint64 queryadapter_completion_trans_id;
+    uint64 queryadapter_completion_waiting_trans_id;
+    uint32 queryadapter_completion_source_channel;
+    uint32 queryadapter_completion_source_relid;
+    uint32 queryadapter_completion_waiting_channel;
+    uint32 queryadapter_completion_waiting_relid;
+    uint32 queryadapter_completion_waiting_match;
+    uint32 queryadapter_completion_waiting_channel_match;
+    uint32 queryadapter_completion_type;
+    uint32 queryadapter_completion_len;
+    uint8 queryadapter_completion_prefix[8];
+    uint32 queryadapter_type0_private_size;
+    uint32 queryadapter_type0_private_hash;
+    uint32 queryadapter_type0_private_head_len;
+    uint8 queryadapter_type0_private_head[HV_DXG_QUERYADAPTER_TYPE0_SNAPSHOT_BYTES];
+    uint32 queryadapter_type0_private_tail_len;
+    uint8 queryadapter_type0_private_tail[HV_DXG_QUERYADAPTER_TYPE0_SNAPSHOT_BYTES];
+    uint32 queryadapter_type0_primary_len;
+    int32 queryadapter_type0_primary_ret;
+    int32 queryadapter_type0_primary_status;
+    uint32 queryadapter_type0_fallback_attempted;
+    uint32 queryadapter_type0_fallback_used;
+    uint32 queryadapter_type0_fallback_len;
+    int32 queryadapter_type0_fallback_ret;
+    int32 queryadapter_type0_fallback_status;
+    uint32 queryadapter_type0_result_route;
+    uint32 queryadapter_type0_fallback_reason;
+    uint32 queryadapter_type0_fallback_route;
+    uint32 queryadapter_umd_rewrite_attempted;
+    uint32 queryadapter_umd_rewrite_rewritten;
+    uint32 queryadapter_umd_rewrite_path;
+    uint32 queryadapter_umd_rewrite_vendor;
+    uint32 queryadapter_umd_rewrite_original_hash;
+    uint32 queryadapter_umd_rewrite_original0;
+    uint32 queryadapter_umd_rewrite_original1;
+    uint32 queryadapter_umd_rewrite_host_status;
+    int32 queryadapter_umd_rewrite_ret;
     uint32 adapter_vendor_id;
     uint32 adapter_device_id;
+    uint32 adapter_hardware_raw[7];
+    uint32 adapter_hardware_raw_size;
+    uint32 adapter_hardware_normalized;
+    uint32 adapter_hardware_fallback;
+    uint32 adapter_hardware_fallback_count;
+    uint32 adapter_hardware_fallback_source;
+    uint32 adapter_hardware_synthetic_rejected;
+    uint32 adapter_hardware_v40_short_zero;
+    uint32 adapter_hardware_v40_short_len;
+    int32 adapter_hardware_v40_short_ret;
+    int32 adapter_hardware_v40_short_status;
+    uint32 adapter_hardware_cache_available;
+    uint32 adapter_hardware_payload_len;
+    uint32 adapter_hardware_temp_v27_attempts;
+    uint32 adapter_hardware_temp_v27_successes;
+    uint32 adapter_hardware_temp_v27_failures;
+    int32 adapter_hardware_temp_v27_last_ret;
+    int32 adapter_hardware_temp_v27_last_status;
+    uint32 adapter_hardware_temp_v27_open_len;
+    uint32 adapter_hardware_temp_v27_query_len;
+    uint32 adapter_hardware_temp_v27_close_len;
+    int32 adapter_hardware_temp_v27_close_ret;
+    int32 adapter_hardware_temp_v27_close_status;
+    uint32 adapter_hardware_temp_v27_handle;
+    uint32 adapter_hardware_temp_v27_restored_version;
+    uint32 adapter_hardware_temp_v27_restored_ext;
+    uint32 enumadapters_last_cmd;
+    uint32 enumadapters_last_in_count;
+    uint32 enumadapters_last_out_count;
+    uint64 enumadapters_last_buffer;
+    uint32 enumadapters_last_handle;
+    uint32 enumadapters_last_luid_low;
+    uint32 enumadapters_last_luid_high;
+    uint32 enumadapters_last_luid_source;
+    int32 enumadapters_last_ret;
+    uint32 enumadapters_last_stage;
+    int32 enumadapters_last_ensure_ret;
+    int32 enumadapters_last_bind_ret;
+    int32 enumadapters_last_local_ret;
+    int32 enumadapters_last_copyout_ret;
+    uint32 enumadapters_last_global_open;
+    uint32 enumadapters_last_vgpu_open;
+    uint32 enumadapters_last_global_relid;
+    uint32 enumadapters_last_vgpu_relid;
+    uint32 enumadapters_last_global_conn;
+    uint32 enumadapters_last_vgpu_conn;
+    uint32 enumadapters_last_host_adapter;
+    uint32 enumadapters_last_probe_successes;
+    int32 enumadapters_last_probe_ret;
+    int32 enumadapters_last_probe_status;
+    uint32 enumadapters_last_probe_handle;
+    uint32 enumadapters_last_ready;
+    uint32 enumadapters_last_process;
+    uint32 enumadapters_last_process_created;
+    uint32 enumadapters_last_process_generation;
+    uint32 enumadapters_last_process_refs;
+    uint32 enumadapters_last_process_adapters;
+    uint32 enumadapters_last_process_locals;
+    uint32 enumadapters_last_process_objects;
+    uint32 openadapter_luid_last_input_low;
+    uint32 openadapter_luid_last_input_high;
+    uint32 openadapter_luid_last_um_low;
+    uint32 openadapter_luid_last_um_high;
+    uint32 openadapter_luid_last_host_low;
+    uint32 openadapter_luid_last_host_high;
+    uint32 openadapter_luid_last_host_basis;
+    uint32 openadapter_luid_last_match;
+    uint32 openadapter_luid_last_reject;
+    uint32 openadapter_luid_last_handle;
+    int32 openadapter_luid_last_ret;
+    int32 openadapter_luid_last_status;
+    uint32 local_adapter_namespace_hits;
+    uint32 local_adapter_namespace_misses;
+    uint32 local_adapter_last_result;
+    uint32 local_adapter_last_handle;
+    uint32 local_adapter_last_host;
+    uint32 local_adapter_last_refs;
+    uint32 local_adapter_last_locals;
+    uint32 local_adapter_last_generation;
     uint32 queryadapter_history_index;
     uint32 queryadapter_history_type[HV_DXG_QUERY_HISTORY_MAX];
     uint32 queryadapter_history_size[HV_DXG_QUERY_HISTORY_MAX];
     uint32 queryadapter_history_len[HV_DXG_QUERY_HISTORY_MAX];
     int32 queryadapter_history_ret[HV_DXG_QUERY_HISTORY_MAX];
     uint32 queryadapter_history_status[HV_DXG_QUERY_HISTORY_MAX];
+    uint32 queryadapter_history_route[HV_DXG_QUERY_HISTORY_MAX];
+    uint32 queryadapter_history_adapter[HV_DXG_QUERY_HISTORY_MAX];
+    uint32 queryadapter_history_host_adapter[HV_DXG_QUERY_HISTORY_MAX];
+    uint32 queryadapter_history_head_len[HV_DXG_QUERY_HISTORY_MAX];
+    uint8 queryadapter_history_head[HV_DXG_QUERY_HISTORY_MAX]
+                                  [HV_DXG_QUERYADAPTER_PAYLOAD_HEAD_BYTES];
+    uint32 queryadapter_admission_history_index;
+    uint32 queryadapter_admission_kind[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_admission_type[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_admission_size[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_admission_len[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    int32 queryadapter_admission_ret[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_admission_status[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_admission_route[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_admission_source[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_admission_adapter[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_admission_host[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_admission_head_hash[HV_DXG_QAI_ADMISSION_HISTORY_MAX];
+    uint32 queryadapter_return_head_len;
+    uint8 queryadapter_return_head[HV_DXG_QUERYADAPTER_PAYLOAD_HEAD_BYTES];
+    struct hvdxg_queryadapter_alias_cache_entry queryadapter_alias_cache
+        [HV_DXG_QUERYADAPTER_ALIAS_CACHE_TYPES];
+    uint32 queryadapter_source_last;
+    uint32 queryadapter_source_real_host;
+    uint32 queryadapter_source_alias_cache;
+    uint32 queryadapter_source_fallback;
+    uint32 queryadapter_source_staged;
+    uint32 queryadapter_alias_cache_hits;
+    uint32 queryadapter_alias_cache_misses;
+    uint32 queryadapter_alias_cache_stores;
+    uint32 queryadapter_alias_cache_full;
+    uint32 queryadapter_alias_cache_last_type;
+    uint32 queryadapter_alias_cache_last_size;
+    uint32 queryadapter_alias_cache_last_len;
+    uint32 queryadapter_alias_cache_last_alias;
+    uint32 queryadapter_alias_cache_last_host;
+    uint32 queryadapter_alias_cache_last_hash;
+    uint32 queryadapter_alias_cache_last_result;
+    uint32 queryadapter_type0_cache_valid;
+    uint32 queryadapter_type0_cache_size;
+    uint32 queryadapter_type0_cache_host;
+    uint32 queryadapter_type0_cache_input_hash;
+    uint32 queryadapter_type0_cache_hash;
+    uint8 *queryadapter_type0_cache_payload;
+    uint32 queryadapter_alias_staged_type;
+    uint32 queryadapter_alias_staged_size;
+    uint32 queryadapter_alias_staged_alias;
+    uint32 queryadapter_alias_staged_host;
+    uint32 queryadapter_alias_staged_path;
+    int32 queryadapter_alias_staged_ret;
     uint32 queryregistry_last_query_type;
     uint32 queryregistry_last_flags;
     uint32 queryregistry_last_value_type;
@@ -2246,30 +3776,558 @@ static struct {
     uint32 escape_last_flags;
     uint32 escape_last_size;
     uint32 shareobject_last_len;
+    uint32 shareobject_last_cmd_len;
+    uint32 shareobject_last_wire_len;
+    uint32 shareobject_last_ext;
+    uint32 shareobject_last_ext_offset;
+    uint32 shareobject_last_device_offset;
+    uint32 shareobject_last_object_offset;
+    uint32 shareobject_last_result_len;
+    uint32 shareobject_last_head_len;
+    uint8 shareobject_last_head[HV_DXG_NTSHARED_RAW_BYTES];
+    uint16 shareobject_last_completion_type;
+    uint32 shareobject_last_completion_len;
+    uint8 shareobject_last_completion_prefix[8];
     int32 shareobject_last_ret;
     int32 shareobject_last_status;
+    uint32 shareobject_last_process;
     uint32 shareobject_last_device;
     uint32 shareobject_last_object;
+    uint64 shareobject_last_reserved;
     uint64 shareobject_last_nt_handle;
+    uint32 shareobject_diag_attempted;
+    uint32 shareobject_diag_valid_nt;
+    uint32 shareobject_diag_kind;
+    uint32 shareobject_diag_reason;
+    uint32 vgpu_send_last_command;
+    uint32 vgpu_send_last_cmd_len;
+    uint32 vgpu_send_last_wire_len;
+    uint32 vgpu_send_last_ext;
+    uint32 vgpu_send_last_ext_offset;
+    uint32 vgpu_send_last_process;
+    uint32 vgpu_send_last_channel;
+    uint32 vgpu_send_last_route_global;
+    uint32 vgpu_send_last_retries;
+    int32 vgpu_send_last_ret;
+    struct hvdxg_winluid vgpu_send_last_luid;
+    uint32 global_send_last_command;
+    uint32 global_send_last_cmd_len;
+    uint32 global_send_last_wire_len;
+    uint32 global_send_last_ext;
+    uint32 global_send_last_ext_offset;
+    uint32 global_send_last_process;
+    uint32 global_send_last_channel;
+    uint32 global_send_last_retries;
+    int32 global_send_last_ret;
+    struct hvdxg_winluid global_send_last_luid;
+    struct hvdxg_global_send_diag global_send_ntshared;
+    struct hvdxg_global_send_diag global_send_ntshared_ext;
+    struct hvdxg_global_send_diag global_send_shareobject;
+    struct hvdxg_global_send_diag global_send_destroynt;
+    struct hvdxg_global_send_diag global_send_destroysync;
     uint32 ntshared_last_create_len;
+    uint32 ntshared_last_create_cmd_len;
+    uint32 ntshared_last_create_object_offset;
+    uint32 ntshared_last_create_result_len;
+    uint16 ntshared_last_create_completion_type;
+    uint32 ntshared_last_create_completion_len;
+    uint8 ntshared_last_create_completion_prefix[8];
     int32 ntshared_last_create_ret;
+    uint32 ntshared_last_create_process;
+    uint32 ntshared_last_create_type;
+    uint32 ntshared_last_create_channel;
     uint32 ntshared_last_create_object;
     uint32 ntshared_last_create_handle;
     uint32 ntshared_last_create_raw0;
+    uint32 ntshared_last_create_zero_len;
+    uint32 ntshared_last_create_side_effect;
+    uint32 ntshared_last_create_share_fallback;
+    uint32 ntshared_last_create_share_valid;
+    uint32 ntshared_create_attempts;
+    uint32 ntshared_create_attempt_len[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_result_len[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint64 ntshared_create_attempt_cmdid[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_command[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_cmd_len[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_wire_len[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_ext[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_ext_offset[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_object_offset[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    int32 ntshared_create_attempt_ret[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_raw0[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_status[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_process[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_object[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_label[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_channel[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_monitor[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_monitorid[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_dedicated[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint32 ntshared_create_attempt_head_len[HV_DXG_NTSHARED_ATTEMPT_MAX];
+    uint8 ntshared_create_attempt_head[HV_DXG_NTSHARED_ATTEMPT_MAX]
+                                       [HV_DXG_NTSHARED_RAW_BYTES];
+    uint32 ntshared_obj_found;
+    uint32 ntshared_obj_exact;
+    uint32 ntshared_obj_local;
+    uint32 ntshared_obj_host;
+    uint32 ntshared_obj_type;
+    uint32 ntshared_obj_parent;
+    uint32 ntshared_obj_device;
+    uint32 ntshared_obj_owner_process;
+    uint32 ntshared_obj_owner_generation;
+    uint32 ntshared_obj_generation;
+    uint32 ntshared_obj_stale;
+    uint32 ntshared_obj_destroyed;
+    uint32 ntshared_runtime_seen;
+    uint32 ntshared_runtime_user_object;
+    uint32 ntshared_runtime_user_device;
+    uint32 ntshared_runtime_kind;
+    uint32 ntshared_runtime_host_object;
+    uint32 ntshared_runtime_host_device;
+    uint32 ntshared_runtime_entry_found;
+    uint32 ntshared_runtime_entry_exact;
+    uint32 ntshared_runtime_entry_type;
+    uint32 ntshared_runtime_entry_local;
+    uint32 ntshared_runtime_entry_host;
+    uint32 ntshared_runtime_entry_parent;
+    uint32 ntshared_runtime_entry_device;
+    uint32 ntshared_runtime_entry_generation;
+    uint32 ntshared_runtime_entry_destroyed;
+    uint32 ntshared_runtime_owner_process;
+    uint32 ntshared_runtime_owner_generation;
+    uint32 ntshared_runtime_owner_refs;
+    uint32 ntshared_runtime_resource;
+    uint32 ntshared_runtime_resource_host;
+    uint32 ntshared_runtime_resource_flags;
+    uint32 ntshared_runtime_alloc;
+    uint32 ntshared_runtime_alloc_host;
+    uint32 ntshared_runtime_alloc_flags;
+    uint64 ntshared_runtime_alloc_size;
+    uint32 ntshared_runtime_alloc_owner_process;
+    uint32 ntshared_runtime_alloc_owner_generation;
+    uint32 ntshared_runtime_alloc_owner_refs;
+    uint32 ntshared_runtime_meta_created;
+    uint32 ntshared_runtime_sealed_before;
+    uint32 ntshared_runtime_sealed_after;
+    uint32 ntshared_runtime_host_sealed_before;
+    uint32 ntshared_runtime_host_sealed_after;
+    uint32 ntshared_runtime_cmd_len;
+    uint32 ntshared_runtime_wire_len;
+    uint32 ntshared_runtime_ext;
+    uint32 ntshared_runtime_ext_offset;
+    uint32 ntshared_runtime_object_offset;
+    uint32 ntshared_runtime_result_len;
+    uint32 ntshared_runtime_return_len;
+    int32 ntshared_runtime_return_ret;
+    uint32 ntshared_runtime_return_raw;
+    uint32 ntshared_runtime_return_handle;
     uint32 ntshared_last_destroy_len;
     int32 ntshared_last_destroy_ret;
+    uint32 ntshared_last_destroy_status;
     uint32 ntshared_last_destroy_handle;
+    struct hvdxg_ntshared_cache_entry ntshared_cache[HV_DXG_NTSHARED_CACHE_MAX];
+    uint32 ntshared_cache_hits;
+    uint32 ntshared_cache_misses;
+    uint32 ntshared_cache_inserts;
+    uint32 ntshared_cache_releases;
+    uint32 ntshared_cache_destroys;
+    uint32 ntshared_cache_full;
+    uint32 ntshared_cache_last_kind;
+    uint32 ntshared_cache_last_process;
+    uint32 ntshared_cache_last_object;
+    uint32 ntshared_cache_last_handle;
+    uint32 ntshared_cache_last_refs;
     uint32 sharedhandle_last_cmd;
     int32 sharedhandle_last_ret;
     uint32 sharedhandle_last_device;
     uint32 sharedhandle_last_object;
     uint64 sharedhandle_last_nt_handle;
     uint32 sharedhandle_last_count;
+    uint32 sharedhandle_last_global_share;
+    uint32 sharedhandle_last_runtime_d3d12_flags;
+    uint32 sharedhandle_last_kind;
+    uint32 sharedhandle_last_fops_kind;
+    uint32 sharedhandle_last_raw_device;
+    uint32 sharedhandle_last_raw_object;
+    uint32 sharedhandle_last_host_device;
+    uint32 sharedhandle_last_host_device_found;
+    uint32 sharedhandle_last_host_object;
+    uint32 sharedhandle_last_object_found;
+    uint32 sharedhandle_last_raw_resource_found;
+    uint32 sharedhandle_last_raw_allocation_found;
+    uint32 sharedhandle_last_raw_sync_found;
+    uint64 sharedhandle_last_parent;
+    uint32 sharedhandle_last_current_process;
+    uint32 sharedhandle_last_current_generation;
+    uint32 sharedhandle_last_creator_process;
+    uint32 sharedhandle_last_creator_generation;
+    uint32 sharedhandle_last_owner_process;
+    uint32 sharedhandle_last_owner_generation;
+    uint32 sharedhandle_last_owner_refs;
+    uint32 sharedhandle_last_owner_used;
+    uint32 sharedhandle_last_object_type;
+    uint32 sharedhandle_last_object_device;
+    uint32 sharedhandle_last_allocation;
+    uint32 sharedhandle_last_allocation_found;
+    uint32 sharedhandle_last_allocation_owner_process;
+    uint32 sharedhandle_last_allocation_owner_generation;
+    uint32 sharedhandle_last_allocation_owner_refs;
+    uint64 sharedhandle_last_map_va;
+    uint64 sharedhandle_last_map_pages;
+    uint64 sharedhandle_last_map_fence;
+    int32 sharedhandle_last_map_ret;
+    uint32 sharedhandle_last_map_status;
+    uint32 sharedhandle_last_resident_paging_queue;
+    uint32 sharedhandle_last_resident_sync;
+    uint64 sharedhandle_last_resident_fence;
+    uint64 sharedhandle_last_resident_current;
+    uint32 sharedhandle_last_resident_wait_result;
+    int32 sharedhandle_last_resident_wait_ret;
+    uint32 sharedhandle_last_resident_missing;
+    uint32 sharedhandle_last_resident_enforced;
+    uint32 sharedhandle_last_create_flags;
+    uint32 sharedhandle_last_alloc_count;
+    uint32 sharedhandle_last_sealed;
+    uint32 sharedhandle_last_sync_type;
+    uint32 sharedhandle_last_sync_flags;
+    uint32 sharedhandle_last_sync_global;
+    uint32 sharedhandle_last_sync_monitor_fence;
+    uint64 sharedhandle_last_sync_fence_cpu;
+    uint64 sharedhandle_last_sync_fence_kva;
+    uint32 sharedsync_export_fd;
+    int32 sharedsync_export_ret;
+    uint32 sharedsync_export_cloexec;
+    uint32 sharedsync_export_fops_kind;
+    uint32 sharedsync_export_fd_kind;
+    uint32 sharedsync_export_device;
+    uint32 sharedsync_export_host_device;
+    uint32 sharedsync_export_object;
+    uint32 sharedsync_export_host_object;
+    uint32 sharedsync_export_sync_type;
+    uint32 sharedsync_export_sync_flags;
+    uint32 sharedsync_export_monitor_fence;
+    uint32 sharedsync_export_global_share;
+    uint32 sharedsync_export_global_zero;
+    uint32 sharedsync_export_host_shared_handle;
+    uint32 sharedsync_export_host_nt_handle;
+    uint32 sharedsync_export_nt_refs;
+    uint32 sharedsync_export_shared_owner_object;
+    uint32 sharedsync_export_cache_process;
+    uint32 sharedsync_export_owner_process;
+    uint32 sharedsync_export_owner_generation;
+    uint32 sharedsync_export_owner_refs;
+    uint32 shareobjects_last_desired_access;
+    uint64 shareobjects_last_object_attr;
+    uint32 shareobjects_last_attr_len;
+    int32 shareobjects_last_attr_ret;
+    uint8 shareobjects_last_attr_head[8];
+    uint32 sharedresource_seals;
+    uint32 sharedresource_seal_reuses;
+    uint32 sharedresource_seal_denied;
+    uint32 sharedresource_created;
+    uint32 sharedresource_seal_allocs;
+    uint32 sharedresource_seal_private;
+    uint32 sharedresource_open_tracked;
+    uint32 sharedresource_owner_exists;
+    uint32 sharedresource_owner_cached;
+    uint32 sharedresource_owner_reused;
+    uint32 sharedresource_owner_nt;
+    uint32 sharedresource_owner_refs;
+    uint32 sharedresource_owner_sealed;
+    uint32 sharedresource_owner_object;
+    uint32 sharedresource_owner_process;
+    uint32 sharedresource_open_global;
+    uint32 sharedresource_pre_nt_sealable;
+    int32 sharedresource_pre_nt_seal_ret;
+    uint32 sharedresource_meta_track_host;
+    uint32 sharedresource_meta_runtime_len;
+    uint32 sharedresource_meta_resource_len;
+    uint32 sharedresource_meta_total_len;
+    uint32 sharedresource_meta_alloc0_priv;
+    uint32 sharedresource_meta_runtime_hash;
+    uint32 sharedresource_meta_resource_hash;
+    uint32 sharedresource_meta_total_hash;
+    uint32 sharedresource_meta_match_in;
+    uint32 sharedresource_meta_match_out;
+    uint32 sharedresource_meta_total_w4;
+    uint32 sharedresource_meta_total_w8;
+    uint32 sharedresource_meta_logical_flags;
+    uint32 sharedresource_meta_host_result_flags;
+    uint32 sharedresource_meta_host_flags_ignored;
+    uint32 sharedresource_pre_nt_seal_applied;
+    uint32 sharedresource_pre_nt_seal_before;
+    uint32 sharedresource_pre_nt_seal_after;
+    int32 sharedresource_pre_nt_seal_actual_ret;
+    uint32 sharedresource_nt_resource_host;
+    uint32 sharedresource_nt_alloc_host;
+    uint32 sharedresource_nt_resource_flags;
+    uint32 sharedresource_nt_alloc_flags;
+    uint32 sharedresource_nt_alloc_in_hash;
+    uint32 sharedresource_nt_alloc_out_hash;
+    uint64 sharedresource_nt_alloc_size;
+    uint32 sharedresource_nt_meta_before;
+    uint32 sharedresource_nt_meta_after;
+    uint32 sharedresource_nt_seal_before;
+    uint32 sharedresource_nt_seal_after;
+    uint32 sharedresource_nt_host_seal_before;
+    uint32 sharedresource_nt_host_seal_after;
+    uint32 sharedresource_seal_tracked_allocs;
+    uint32 sharedresource_seal_expected_private;
+    uint32 sharedresource_seal_actual_private;
+    int32 sharedresource_seal_verify_ret;
+    uint32 sharedresource_seal_missing_alloc;
+    uint32 sharedresource_seal_extra_alloc;
+    uint32 sharedresource_seal_append_rejects;
+    uint32 sharedresource_seal_last_resource;
+    uint32 sharedresource_seal_last_generation;
+    uint32 sharedresource_record_valid;
+    uint32 sharedresource_record_stage;
+    uint32 sharedresource_record_key_kind;
+    uint32 sharedresource_record_key_process;
+    uint32 sharedresource_record_key_object;
+    uint32 sharedresource_record_key_global;
+    uint32 sharedresource_record_key_nt;
+    uint32 sharedresource_record_source_process;
+    uint64 sharedresource_record_source_tgid;
+    uint32 sharedresource_record_source_generation;
+    uint32 sharedresource_record_device;
+    uint32 sharedresource_record_resource;
+    uint32 sharedresource_record_allocation;
+    uint32 sharedresource_record_adapter_low;
+    uint32 sharedresource_record_adapter_high;
+    uint32 sharedresource_record_host_adapter_low;
+    uint32 sharedresource_record_host_adapter_high;
+    uint32 sharedresource_record_sealed_generation;
+    uint32 sharedresource_record_sealed;
+    uint32 sharedresource_record_seal_before_fd;
+    uint32 sharedresource_record_alloc_count;
+    uint32 sharedresource_record_runtime_size;
+    uint32 sharedresource_record_resource_size;
+    uint32 sharedresource_record_total_size;
+    uint32 sharedresource_record_alloc0_priv;
+    uint32 sharedresource_record_runtime_hash;
+    uint32 sharedresource_record_resource_hash;
+    uint32 sharedresource_record_total_hash;
+    uint32 sharedresource_record_alloc0_hash;
+    uint32 sharedresource_record_nt_refs;
+    uint32 sharedresource_record_query_count;
+    uint32 sharedresource_record_open_count;
+    uint32 sharedresource_record_fd_publish_count;
+    int32 sharedresource_record_local_admit_ret;
+    uint32 sharedresource_record_local_exact;
+    uint32 sharedresource_record_mutation_after_seal;
+    uint32 openresource_last_cmd_len;
+    uint32 openresource_last_wire_len;
+    uint32 openresource_last_ext;
+    uint32 openresource_last_ext_offset;
+    uint32 openresource_last_result_len;
+    uint32 openresource_last_actual_len;
+    int32 openresource_last_ret;
+    int32 openresource_last_status;
+    uint32 openresource_last_process;
+    uint32 openresource_last_device;
+    uint32 openresource_last_global;
+    uint32 openresource_last_alloc_count;
+    uint32 openresource_last_total_priv;
+    uint32 openresource_last_result_resource;
+    uint32 openresource_last_result_alloc0;
+    uint32 openresource_last_seal_before;
+    uint32 openresource_last_seal_after;
+    uint32 openresource_last_fd_kind;
+    uint32 openresource_last_fd_refs;
+    uint32 openresource_last_route_global;
+    uint32 openresource_last_fops_kind;
+    uint32 queryresource_last_seen;
+    int32 queryresource_last_ret;
+    uint32 queryresource_last_device;
+    uint64 queryresource_last_nt;
+    uint32 queryresource_last_fd_kind;
+    uint32 queryresource_last_fops_kind;
+    uint32 queryresource_last_sync_probe;
+    uint32 queryresource_last_global;
+    uint32 queryresource_last_host_nt;
+    uint32 queryresource_last_refs;
+    uint32 queryresource_last_object;
+    uint32 queryresource_last_cache_object;
+    uint32 queryresource_last_alloc_count;
+    uint32 queryresource_last_runtime_size;
+    uint32 queryresource_last_resource_size;
+    uint32 queryresource_last_total_size;
+    uint32 opensync_last_cmd_len;
+    uint32 opensync_last_wire_len;
+    uint32 opensync_last_ext;
+    uint32 opensync_last_ext_offset;
+    uint32 opensync_last_result_len;
+    uint32 opensync_last_actual_len;
+    int32 opensync_last_ret;
+    int32 opensync_last_status;
+    uint32 opensync_last_process;
+    uint32 opensync_last_device;
+    uint32 opensync_last_device_host;
+    uint32 opensync_last_device_owner;
+    uint32 opensync_last_device_owner_generation;
+    uint32 opensync_last_device_generation;
+    uint32 opensync_last_global;
+    uint64 opensync_last_input_nt;
+    uint32 opensync_last_host_nt;
+    uint32 opensync_last_object;
+    uint32 opensync_last_cache_object;
+    uint32 opensync_last_source_device;
+    uint32 opensync_last_source_device_host;
+    uint32 opensync_last_source_owner;
+    uint32 opensync_last_source_owner_generation;
+    uint32 opensync_last_source_flags;
+    uint32 opensync_last_same_device;
+    uint32 opensync_last_adapter_match;
+    uint32 opensync_last_adapter_low;
+    uint32 opensync_last_adapter_high;
+    uint32 opensync_last_host_adapter_low;
+    uint32 opensync_last_host_adapter_high;
+    uint32 opensync_last_flags;
+    uint32 opensync_last_wire_flags;
+    uint32 opensync_last_forced_flags;
+    uint32 opensync_last_fops_kind;
+    uint32 opensync_last_sync_type;
+    uint32 opensync_last_result_sync;
+    uint64 opensync_last_gpu_va;
+    uint64 opensync_last_cpu_pa;
+    uint32 opensync_last_fd_kind;
+    uint32 opensync_last_fd_refs;
+    uint32 opensync_ioctl_count;
+    uint32 opensync_last_gate;
+    uint64 opensync_last_current_tgid;
+    uint64 opensync_last_owner_tgid;
+    uint32 opensync_last_owner_generation;
+    uint32 opensync_last_namespace_mismatch;
+    uint32 opensync_last_namespace_rejects;
+    uint32 sharedclose_last_kind;
+    uint32 sharedclose_last_process;
+    uint32 sharedclose_last_object;
+    uint32 sharedclose_last_nt_handle;
+    uint32 sharedclose_last_global;
+    uint32 sharedclose_last_refs_before;
+    uint32 sharedclose_last_refs_after;
+    uint32 sharedclose_last_fops_kind;
+    uint32 sharedclose_last_cache_object;
+    uint32 sharedclose_last_host_shared_handle;
+    uint32 sharedclose_last_destroy_status;
+    uint32 sharedclose_last_destroy_actual_len;
+    uint32 sharedclose_last_destroy_handle_offset;
+    uint32 sharedclose_last_destroy_handle;
+    int32 sharedclose_last_destroy_ret;
+    uint32 sharedclose_last_destroy_cmd_len;
+    uint32 sharedclose_last_destroy_wire_len;
+    uint32 sharedclose_last_destroy_ext;
+    uint32 sharedclose_last_destroy_ext_offset;
+    uint32 sharedclose_last_destroy_result_len;
+    uint32 ntshared_pre_resource_type;
+    uint32 ntshared_pre_resource_local;
+    uint32 ntshared_pre_resource_host;
+    uint32 ntshared_pre_resource_generation;
+    uint32 ntshared_pre_resource_destroyed;
+    uint32 ntshared_pre_resource_refs;
+    uint32 ntshared_pre_resource_index;
+    uint32 ntshared_pre_resource_unique;
+    uint32 ntshared_pre_resource_instance;
+    uint32 ntshared_pre_resource_sealed;
+    uint32 ntshared_pre_resource_open_count;
+    uint32 ntshared_pre_alloc_type;
+    uint32 ntshared_pre_alloc_local;
+    uint32 ntshared_pre_alloc_host;
+    uint32 ntshared_pre_alloc_generation;
+    uint32 ntshared_pre_alloc_destroyed;
+    uint32 ntshared_pre_alloc_refs;
+    uint32 ntshared_pre_alloc_index;
+    uint32 ntshared_pre_alloc_unique;
+    uint32 ntshared_pre_alloc_instance;
+    uint32 ntshared_pre_device_type;
+    uint32 ntshared_pre_device_local;
+    uint32 ntshared_pre_device_host;
+    uint32 ntshared_pre_device_generation;
+    uint32 ntshared_pre_device_destroyed;
+    uint32 ntshared_pre_device_refs;
+    uint32 ntshared_pre_device_index;
+    uint32 ntshared_pre_device_unique;
+    uint32 ntshared_pre_device_instance;
+    uint32 ntshared_pre_shared_owner_found;
+    uint32 ntshared_pre_shared_owner_type;
+    uint32 ntshared_pre_shared_owner_local;
+    uint32 ntshared_pre_shared_owner_host;
+    uint32 ntshared_pre_shared_owner_generation;
+    uint32 ntshared_pre_shared_owner_destroyed;
+    uint32 ntshared_pre_shared_owner_index;
+    uint32 ntshared_pre_shared_owner_unique;
+    uint32 ntshared_pre_shared_owner_instance;
+    uint32 ntshared_pre_shared_owner_object;
+    uint32 ntshared_pre_shared_owner_process;
+    uint32 ntshared_pre_shared_owner_refs;
+    uint32 ntshared_pre_shared_owner_nt;
+    uint32 ntshared_pre_shared_owner_sealed;
+    uint32 ntshared_pre_runtime_size;
+    uint32 ntshared_pre_runtime_hash;
+    uint32 ntshared_pre_runtime_w[4];
+    uint32 ntshared_pre_resource_priv_size;
+    uint32 ntshared_pre_resource_priv_hash;
+    uint32 ntshared_pre_resource_priv_w[4];
+    uint32 ntshared_pre_total_priv_size;
+    uint32 ntshared_pre_total_priv_hash;
+    uint32 ntshared_pre_total_priv_w[4];
+    uint32 ntshared_pre_alloc_out_size;
+    uint32 ntshared_pre_alloc_out_hash;
+    uint32 ntshared_pre_alloc_out_w[4];
+    uint64 ntshared_pre_create_seq;
+    uint64 ntshared_pre_first_nt_seq;
+    uint64 ntshared_pre_event_seq;
+    uint32 ntshared_model_process_state;
+    uint32 ntshared_model_open_process;
+    uint32 ntshared_model_open_generation;
+    uint32 ntshared_model_open_refs;
+    uint32 ntshared_model_global_process;
+    uint32 ntshared_model_command_process;
+    uint32 ntshared_model_resource_owner;
+    uint32 ntshared_model_resource_generation;
+    uint32 ntshared_model_alloc_owner;
+    uint32 ntshared_model_alloc_generation;
+    uint32 ntshared_model_cmd_eq_open;
+    uint32 ntshared_model_cmd_eq_global;
+    uint32 ntshared_model_cmd_eq_resource;
+    uint32 ntshared_model_cmd_eq_alloc;
+    uint32 ntshared_model_open_objects;
+    uint32 ntshared_model_process_objects;
+    uint32 ntshared_model_resources;
+    uint32 ntshared_model_allocations;
+    uint32 ntshared_model_devices;
+    uint32 ntshared_model_contexts;
+    uint32 ntshared_model_process_live;
+    uint32 ntshared_model_process_generation;
+    uint32 ntshared_cleanup_ret;
+    uint32 ntshared_cleanup_cached_before;
+    uint32 ntshared_cleanup_cached_after;
+    uint32 ntshared_cleanup_refs_before;
+    uint32 ntshared_cleanup_refs_after;
+    uint32 ntshared_cleanup_object_before;
+    uint32 ntshared_cleanup_object_after;
+    uint32 ntshared_cleanup_nt_before;
+    uint32 ntshared_cleanup_nt_after;
+    uint32 ntshared_cleanup_sealed_before;
+    uint32 ntshared_cleanup_sealed_after;
+    uint32 ntshared_cleanup_cache_inserts_before;
+    uint32 ntshared_cleanup_cache_inserts_after;
     uint32 unsupported_last_cmd;
     int32 unsupported_last_ret;
     uint32 unsupported_last_device;
     uint32 unsupported_last_handle;
     uint32 unsupported_last_count;
+    uint32 unsupported_last_nr;
+    uint32 unsupported_last_size;
+    uint32 unsupported_last_name;
+    uint32 markdevice_last_len;
+    int32 markdevice_last_ret;
+    int32 markdevice_last_status;
+    uint32 markdevice_last_device;
+    uint32 markdevice_last_reason;
+    uint32 markdevice_last_process;
+    uint32 markdevice_last_cmd_len;
     uint32 syncfile_last_cmd;
     int32 syncfile_last_ret;
     uint32 syncfile_last_device;
@@ -2277,6 +4335,15 @@ static struct {
     uint32 syncfile_last_context;
     uint64 syncfile_last_handle;
     uint64 syncfile_last_fence;
+    uint32 syncfile_last_global;
+    uint32 syncfile_last_host_nt;
+    uint32 syncfile_last_source_flags;
+    uint32 syncfile_last_open_flags;
+    uint32 syncfile_last_len;
+    int32 syncfile_last_status;
+    uint32 syncfile_last_out_sync;
+    uint64 syncfile_last_cpu_va;
+    uint64 syncfile_last_gpu_va;
     uint32 updateallocproperty_last_len;
     int32 updateallocproperty_last_ret;
     int32 updateallocproperty_last_status;
@@ -2298,6 +4365,23 @@ static struct {
     int32 updategpuva_last_status;
     uint32 updategpuva_last_ops;
     uint64 updategpuva_last_fence;
+    uint32 updategpuva_last_device;
+    uint32 updategpuva_last_context;
+    uint32 updategpuva_last_fence_object;
+    uint32 updategpuva_last_flags;
+    uint32 updategpuva_last_cmd_len;
+    uint32 updategpuva_last_op_offset;
+    uint32 updategpuva_last_op_size;
+    uint32 updategpuva_last_op0_type;
+    uint64 updategpuva_last_op0_base;
+    uint64 updategpuva_last_op0_size;
+    uint32 updategpuva_last_op0_allocation;
+    uint64 updategpuva_last_op0_alloc_offset;
+    uint64 updategpuva_last_op0_alloc_size;
+    uint64 updategpuva_last_op0_source;
+    uint64 updategpuva_last_op0_dest;
+    uint64 updategpuva_last_op0_protection;
+    uint64 updategpuva_last_op0_driver_protection;
     uint32 cacheops_last_len;
     int32 cacheops_last_ret;
     int32 cacheops_last_status;
@@ -2317,6 +4401,12 @@ static struct {
     uint32 lock2_last_allocation;
     uint64 lock2_last_offset;
     uint64 lock2_last_user_va;
+    uint32 lock2_ioctl_count;
+    uint32 lock2_host_forward_count;
+    uint32 lock2_cached_ref_count;
+    uint32 lock2_sysmem_count;
+    uint32 lock2_map_fail_count;
+    uint32 lock2_diag_prints;
     uint32 lock2_history_index;
     uint32 lock2_history_len[HV_DXG_RESOURCE_HISTORY_MAX];
     int32 lock2_history_ret[HV_DXG_RESOURCE_HISTORY_MAX];
@@ -2330,6 +4420,11 @@ static struct {
     int32 unlock2_last_ret;
     int32 unlock2_last_status;
     uint32 unlock2_last_allocation;
+    uint32 unlock2_ioctl_count;
+    uint32 unlock2_host_forward_count;
+    uint32 unlock2_missing_tracking_count;
+    uint32 unlock2_cached_ref_count;
+    uint32 unlock2_diag_prints;
     uint32 createcontext_last_len;
     int32 createcontext_last_ret;
     uint32 createcontext_last_handle;
@@ -2340,10 +4435,15 @@ static struct {
     uint32 createcontext_last_hint;
     uint32 createcontext_last_priv_size;
     uint32 createcontext_last_priv_head_len;
-    uint8 createcontext_last_priv_head[64];
+    uint8 createcontext_last_priv_head[HV_DXG_CONTEXT_PRIV_HEAD_MAX];
     uint32 createcontext_fail_len;
     int32 createcontext_fail_ret;
     int32 createcontext_fail_status;
+    uint32 flushdevice_last_len;
+    int32 flushdevice_last_ret;
+    int32 flushdevice_last_status;
+    uint32 flushdevice_last_device;
+    uint32 flushdevice_last_reason;
     uint32 createhwqueue_last_len;
     int32 createhwqueue_last_ret;
     int32 createhwqueue_last_status;
@@ -2351,7 +4451,7 @@ static struct {
     uint32 createhwqueue_last_flags;
     uint32 createhwqueue_last_priv_size;
     uint32 createhwqueue_last_priv_head_len;
-    uint8 createhwqueue_last_priv_head[64];
+    uint8 createhwqueue_last_priv_head[HV_DXG_HWQUEUE_PRIV_HEAD_MAX];
     uint32 createhwqueue_last_queue;
     uint32 createhwqueue_last_fence;
     uint64 createhwqueue_last_fence_cpu;
@@ -2363,7 +4463,15 @@ static struct {
     uint32 submithwqueue_last_command_length;
     uint32 submithwqueue_last_priv_size;
     uint32 submithwqueue_last_priv_head_len;
-    uint8 submithwqueue_last_priv_head[32];
+    uint8 submithwqueue_last_priv_head[HV_DXG_HWQUEUE_SUBMIT_PRIV_HEAD_MAX];
+    uint32 submithwqueue_history_index;
+    uint32 submithwqueue_history_len[HV_DXG_RESOURCE_HISTORY_MAX];
+    int32 submithwqueue_history_ret[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint32 submithwqueue_history_queue[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint32 submithwqueue_history_command_length[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint32 submithwqueue_history_priv_size[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint32 submithwqueue_history_priv_head_len[HV_DXG_RESOURCE_HISTORY_MAX];
+    uint8 submithwqueue_history_priv_head[HV_DXG_RESOURCE_HISTORY_MAX][8];
     uint32 destroyhwqueue_last_len;
     int32 destroyhwqueue_last_ret;
     struct hvdxg_d3dkmthandle dxg_process;
@@ -2373,10 +4481,43 @@ static struct {
     struct hvdxg_winluid host_adapter_luid;
     struct hvdxg_winluid host_vgpu_luid;
     uint32 use_ext_header;
+    uint32 active_vmbus_version;
+    uint32 active_vmbus_last_compat;
+    uint32 active_vmbus_source;
+    uint32 active_vmbus_fallbacks;
+    uint32 pci_domain;
+    uint32 pci_bus;
+    uint32 pci_dev;
+    uint32 pci_func;
+    uint32 pci_vendor;
     uint32 pci_dxg_device;
+    uint32 pci_class;
     uint32 pci_dxg_vmbus_version;
+    uint32 pci_dxg_vmbus_negotiated_version;
+    uint32 pci_dxg_vmbus_write_attempted;
+    uint32 pci_dxg_vmbus_writes;
+    uint32 pci_dxg_vmbus_write_value;
+    uint32 pci_dxg_vmbus_write_readback;
+    int32 pci_dxg_vmbus_write_ret;
+    uint32 pci_dxg_vmbus_write_config_supported;
+    int32 pci_dxg_vmbus_write_config_ret;
+    int32 pci_dxg_vmbus_write_verify_ret;
     uint32 pci_dxg_guid[4];
     struct hvdxg_winluid pci_host_vgpu_luid;
+    uint32 pci_guestcaps_attempts;
+    uint32 pci_guestcaps_writes;
+    uint32 pci_guestcaps_found;
+    uint32 pci_guestcaps_scan_done;
+    uint32 pci_guestcaps_write_attempted;
+    uint32 pci_guestcaps_write_verified;
+    uint32 pci_guestcaps_offset;
+    uint32 pci_guestcaps_value;
+    uint32 pci_guestcaps_readback;
+    int32 pci_guestcaps_ret;
+    uint32 pci_guestcaps_before_probe;
+    uint32 pci_guestcaps_busdevfn;
+    uint32 pci_guestcaps_source;
+    uint32 pci_guestcaps_token;
     uint16 probe_last_type;
     uint32 probe_last_len;
     uint8 probe_last_prefix[HV_DXG_PREFIX_BYTES];
@@ -2395,6 +4536,8 @@ static struct {
 static cdev_t hvdxg_cdev;
 
 static void hvdxg_process_channel_packets(struct hv_ring_buffer *in_ring,
+                                          uint32 source_channel,
+                                          uint32 source_relid,
                                           uint32 *counter);
 static void hvdxg_pump_channels(void);
 static void hvdxg_command_vgpu_init(struct hvdxg_command_vgpu_to_host *hdr,
@@ -2405,55 +4548,61 @@ static void hvdxg_command_vgpu_init_process(
 static inline void hvdxg_wc_store_fence(void);
 static void hvdxg_command_vm_init(struct hvdxg_command_vm_to_host *hdr,
                                   uint32 command_type);
+static int hvdxg_d3dkmt_ensure_adapter(void);
 static int hvdxg_d3dkmt_ensure(void);
 static int hvdxg_luid_equal(struct hvdxg_winluid a, struct hvdxg_winluid b);
+static int hvdxg_luid_nonzero(struct hvdxg_winluid luid);
+static struct hvdxg_winluid hvdxg_user_adapter_luid(uint32 *source_out);
+static struct hvdxg_winluid hvdxg_ext_adapter_luid(
+    const struct hvdxg_winluid *process_luid);
+static uint32 hvdxg_clamp_vmbus_version(uint32 version);
+static void hvdxg_set_active_vmbus_version(uint32 version, uint32 source,
+                                           uint32 last_compat);
+static int hvdxg_write_pci_vmbus_version(uint32 version);
 static struct hvdxg_winluid hvdxg_luid_from_guid(const struct hv_guid *guid);
+static void hvdxg_capture_queryadapter_completion(void);
+static int hvdxg_ntstatus_plausible(struct hvdxg_ntstatus status);
 static int hvdxg_ntstatus_to_errno(struct hvdxg_ntstatus status);
+static uint32 hvdxg_sync_type_is_monitored(uint32 type);
 static int hvdxg_send_sync_vgpu(const void *cmd, uint32 cmd_len,
                                 void *result, uint32 result_len,
                                 uint32 *actual_len);
+static int hvdxg_send_sync_vgpu_flags(const void *cmd, uint32 cmd_len,
+                                      void *result, uint32 result_len,
+                                      uint32 *actual_len, uint32 flags);
+static int hvdxg_send_sync_vgpu_flags_luid(
+    const void *cmd, uint32 cmd_len, void *result, uint32 result_len,
+    uint32 *actual_len, uint32 flags,
+    const struct hvdxg_winluid *ext_luid);
 static int hvdxg_send_sync_global(const void *cmd, uint32 cmd_len,
                                   void *result, uint32 result_len,
                                   uint32 *actual_len);
+static int hvdxg_send_sync_global_ex(const void *cmd, uint32 cmd_len,
+                                     void *result, uint32 result_len,
+                                     uint32 *actual_len,
+                                     int force_ext_header,
+                                     int ext_host_vgpu_luid,
+                                     int suppress_ext_header);
 static int hvdxg_probe_transport(void);
 static uint64 hvdxg_alloc_host_event(void);
 static uint64 hvdxg_alloc_host_event_file(struct vfs_file *file,
                                           int remove_after_signal);
 static void hvdxg_remove_host_event(uint64 id);
 static void hvdxg_pump_events_ms(uint64 timeout_ms);
-static int hvdxg_wait_host_event(uint64 event_id, uint64 timeout_ms);
+static void hvdxg_note_cpu_wait_state(
+    struct hvdxg_open_state *owner,
+    const struct hvdxg_d3dkmthandle *objects,
+    const uint64 *fence_values, uint32 object_count, uint64 event_id,
+    uint32 async_event, uint32 result);
+static int hvdxg_wait_host_event_or_cpu_fence(
+    struct hvdxg_open_state *owner,
+    const struct hvdxg_d3dkmthandle *objects,
+    const uint64 *fence_values, uint32 object_count, int wait_any,
+    uint64 event_id, uint64 timeout_ms);
 static int hvdxg_send_waitsyncobjectfromcpu(
     struct d3dkmt_waitforsynchronizationobjectfromcpu *req,
     const void *objects, const void *fence_values, uint64 event_id,
     uint32 object_size, uint32 fence_size, uint32 *actual_len);
-
-static int hvdxg_utf16_ascii_equals(const uint16 *value, const char *ascii)
-{
-    uint32 i = 0;
-
-    while (ascii[i] != '\0') {
-        if (value[i] != (uint16)ascii[i])
-            return 0;
-        i++;
-    }
-    return value[i] == 0;
-}
-
-static void hvdxg_utf16_to_ascii(char *dst, uint32 dst_size,
-                                 const uint16 *value)
-{
-    uint32 i = 0;
-
-    if (dst_size == 0)
-        return;
-    while (i + 1 < dst_size && value[i] != 0) {
-        uint16 ch = value[i];
-
-        dst[i] = (ch >= 0x20 && ch <= 0x7e) ? (char)ch : '?';
-        i++;
-    }
-    dst[i] = 0;
-}
 
 static uint32 hvdxg_parse_hex32(const char *s, const char **end)
 {
@@ -2500,11 +4649,107 @@ static void hvdxg_apply_cmdline_host_luid(void)
     hvdxg.host_vgpu_luid.b = high;
 }
 
-void hyperv_dxg_note_pci(uint32 device, uint32 guid0, uint32 guid1,
-                         uint32 guid2, uint32 guid3, uint32 vmbus_version,
-                         uint32 luid_low, uint32 luid_high)
+static void hvdxg_note_missing_pci_guestcaps_once(void);
+static const char *hvdxg_pci_guestcaps_source_name(void);
+
+static uint32 hvdxg_clamp_vmbus_version(uint32 version)
 {
+    return version >= HV_DXG_VMBUS_INTERFACE_VERSION ?
+           HV_DXG_VMBUS_INTERFACE_VERSION :
+           HV_DXG_VMBUS_INTERFACE_VERSION_OLD;
+}
+
+static int hvdxg_host_v40_signal(void)
+{
+    return hvdxg.pci_dxg_vmbus_version >= HV_DXG_VMBUS_INTERFACE_VERSION;
+}
+
+static void hvdxg_set_active_vmbus_version(uint32 version, uint32 source,
+                                           uint32 last_compat)
+{
+    hvdxg.active_vmbus_version = version;
+    hvdxg.active_vmbus_source = source;
+    hvdxg.active_vmbus_last_compat = last_compat;
+    hvdxg.use_ext_header =
+        version >= HV_DXG_VMBUS_INTERFACE_VERSION ? 1 : 0;
+}
+
+static int hvdxg_write_pci_vmbus_version(uint32 version)
+{
+    int ret = -ENODEV;
+    uint32 readback = 0;
+
+    hvdxg.pci_dxg_vmbus_write_attempted = 1;
+    hvdxg.pci_dxg_vmbus_write_value = version;
+    hvdxg.pci_dxg_vmbus_write_readback = 0;
+    hvdxg.pci_dxg_vmbus_write_config_supported = 0;
+    hvdxg.pci_dxg_vmbus_write_config_ret = -ENODEV;
+    hvdxg.pci_dxg_vmbus_write_verify_ret = 0;
+
+    if (hvdxg.pci_guestcaps_source == 2) {
+        hvdxg.pci_dxg_vmbus_write_config_supported =
+            hvpci.backend_registered && hvpci.config_window_ok ? 1 : 0;
+        ret = hvpci_config_write(&hvpci, hvdxg.pci_guestcaps_token,
+                                 HV_DXG_PCI_VMBUS_VERSION_OFFSET, 4,
+                                 version);
+        hvdxg.pci_dxg_vmbus_write_config_ret = ret;
+        if (ret == 0) {
+            hvdxg.pci_dxg_vmbus_writes++;
+            hvdxg.pci_dxg_vmbus_write_verify_ret =
+                hvpci_config_read(&hvpci, hvdxg.pci_guestcaps_token,
+                                  HV_DXG_PCI_VMBUS_VERSION_OFFSET, 4,
+                                  &readback);
+        }
+    } else if (hvdxg.pci_guestcaps_source == 1) {
+        hvdxg.pci_dxg_vmbus_write_config_supported = 1;
+        ret = pci_config_try_write32((uint8)hvdxg.pci_bus,
+                                     (uint8)hvdxg.pci_dev,
+                                     (uint8)hvdxg.pci_func,
+                                     HV_DXG_PCI_VMBUS_VERSION_OFFSET,
+                                     version);
+        hvdxg.pci_dxg_vmbus_write_config_ret = ret;
+        if (ret == 0) {
+            hvdxg.pci_dxg_vmbus_writes++;
+            readback = pci_config_read32((uint8)hvdxg.pci_bus,
+                                         (uint8)hvdxg.pci_dev,
+                                         (uint8)hvdxg.pci_func,
+                                         HV_DXG_PCI_VMBUS_VERSION_OFFSET);
+        }
+    }
+
+    hvdxg.pci_dxg_vmbus_write_readback = readback;
+    hvdxg.pci_dxg_vmbus_write_ret = ret;
+    return hvdxg.pci_dxg_vmbus_write_ret;
+}
+
+static void hvdxg_note_pci_vmbus_version(uint32 source)
+{
+    uint32 negotiated;
+
+    hvdxg.pci_guestcaps_source = source;
+    negotiated = hvdxg_clamp_vmbus_version(hvdxg.pci_dxg_vmbus_version);
+    hvdxg.pci_dxg_vmbus_negotiated_version = negotiated;
+    if (hvdxg.pci_dxg_vmbus_version >= HV_DXG_VMBUS_INTERFACE_VERSION)
+        (void)hvdxg_write_pci_vmbus_version(negotiated);
+    hvdxg_set_active_vmbus_version(negotiated, source,
+                                   HV_DXG_VMBUS_LAST_COMPATIBLE_INTERFACE_VERSION);
+}
+
+void hyperv_dxg_note_pci(uint32 domain, uint32 bus, uint32 dev, uint32 func,
+                         uint32 vendor, uint32 device, uint32 class_code,
+                         uint32 guid0, uint32 guid1, uint32 guid2,
+                         uint32 guid3, uint32 vmbus_version,
+                         uint32 luid_low, uint32 luid_high,
+                         uint32 guestcaps_offset, uint32 guestcaps_value,
+                         uint32 guestcaps_readback, int guestcaps_ret)
+{
+    hvdxg.pci_domain = domain;
+    hvdxg.pci_bus = bus;
+    hvdxg.pci_dev = dev;
+    hvdxg.pci_func = func;
+    hvdxg.pci_vendor = vendor;
     hvdxg.pci_dxg_device = device;
+    hvdxg.pci_class = class_code;
     hvdxg.pci_dxg_vmbus_version = vmbus_version;
     hvdxg.pci_dxg_guid[0] = guid0;
     hvdxg.pci_dxg_guid[1] = guid1;
@@ -2514,37 +4759,265 @@ void hyperv_dxg_note_pci(uint32 device, uint32 guid0, uint32 guid1,
     hvdxg.pci_host_vgpu_luid.b = luid_high;
     if (luid_low != 0 || luid_high != 0)
         hvdxg.host_vgpu_luid = hvdxg.pci_host_vgpu_luid;
+    hvdxg.pci_guestcaps_found = 1;
+    hvdxg.pci_guestcaps_scan_done = 1;
+    hvdxg.pci_guestcaps_write_attempted = 1;
+    hvdxg.pci_guestcaps_write_verified =
+        guestcaps_readback == guestcaps_value ? 1 : 0;
+    hvdxg.pci_guestcaps_attempts = 1;
+    hvdxg.pci_guestcaps_writes = 1;
+    hvdxg.pci_guestcaps_offset = guestcaps_offset;
+    hvdxg.pci_guestcaps_value = guestcaps_value;
+    hvdxg.pci_guestcaps_readback = guestcaps_readback;
+    hvdxg.pci_guestcaps_ret =
+        guestcaps_ret == 0 && guestcaps_readback != guestcaps_value ?
+        -EIO : guestcaps_ret;
+    hvdxg.pci_guestcaps_before_probe =
+        hvdxg.probe_attempts == 0 && !hvdxg.d3dkmt_ready ? 1 : 0;
+    hvdxg.pci_guestcaps_busdevfn = (bus << 16) | (dev << 8) | func;
+    hvdxg.pci_guestcaps_token = hvdxg.pci_guestcaps_busdevfn;
+    hvdxg_note_pci_vmbus_version(1);
 }
 
-static uint32 hvdxg_utf16_multisz_size(const char *const *strings,
-                                       uint32 count)
+static int hvdxg_hvpci_child_is_dxg(uint32 i)
 {
-    uint32 chars = 1;
+    uint32 class_code;
 
-    for (uint32 i = 0; i < count; i++) {
-        const char *s = strings[i];
-
-        while (*s++ != '\0')
-            chars++;
-        chars++;
-    }
-    return chars * sizeof(uint16);
+    if (i >= hvpci.child_count || i >= HVPCI_CHILD_MAX)
+        return 0;
+    if (!hvpci.child[i].registered)
+        return 0;
+    if (hvpci.child[i].vendor_id != PCI_VENDOR_MICROSOFT)
+        return 0;
+    class_code = hvpci.child[i].class_code;
+    if (hvpci.child[i].device_id == PCI_DEVICE_MS_VIRTUAL_RENDER ||
+        hvpci.child[i].device_id == PCI_DEVICE_MS_COMPUTE_ACCELERATOR)
+        return 1;
+    return (class_code >> 16) == 0x03;
 }
 
-static void hvdxg_write_utf16_multisz(uint8 *dst,
-                                      const char *const *strings,
-                                      uint32 count)
+static int hvdxg_try_hvpci_guestcaps(void)
 {
-    uint16 *out = (uint16 *)dst;
+    uint32 readback = 0;
+    uint32 class_rev = 0;
+    uint32 guid0 = 0;
+    uint32 guid1 = 0;
+    uint32 guid2 = 0;
+    uint32 guid3 = 0;
+    uint32 vmbus_version = 0;
+    uint32 luid0 = 0;
+    uint32 luid1 = 0;
+    uint32 token;
+    uint32 bus;
+    uint32 dev;
+    uint32 func;
+    struct hvdxg_winluid pci_luid;
+    int luid_equiv;
+    int ret;
 
-    for (uint32 i = 0; i < count; i++) {
-        const char *s = strings[i];
+    if (!hvpci.backend_registered || !hvpci.config_window_ok)
+        return -ENODEV;
 
-        while (*s != '\0')
-            *out++ = (uint16)*s++;
-        *out++ = 0;
+    for (uint32 i = 0; i < hvpci.child_count && i < HVPCI_CHILD_MAX; i++) {
+        if (!hvdxg_hvpci_child_is_dxg(i))
+            continue;
+
+        token = hvpci.child[i].win_slot;
+        bus = hvpci.child[i].bus;
+        dev = hvpci.child[i].dev;
+        func = hvpci.child[i].func;
+
+        hvdxg.pci_guestcaps_attempts++;
+        hvdxg.pci_guestcaps_found = 1;
+        hvdxg.pci_guestcaps_scan_done = 1;
+        hvdxg.pci_guestcaps_write_attempted = 1;
+        hvdxg.pci_guestcaps_token = token;
+        hvdxg.pci_guestcaps_offset = HV_DXG_PCI_GUESTCAPS_OFFSET;
+        hvdxg.pci_guestcaps_value = HV_DXG_PCI_GUESTCAPS_WSL2;
+        hvdxg.pci_guestcaps_before_probe =
+            hvdxg.probe_attempts == 0 && !hvdxg.d3dkmt_ready ? 1 : 0;
+        hvdxg.pci_guestcaps_busdevfn = (bus << 16) | (dev << 8) | func;
+
+        ret = hvpci_config_write(&hvpci, token,
+                                 HV_DXG_PCI_GUESTCAPS_OFFSET, 4,
+                                 HV_DXG_PCI_GUESTCAPS_WSL2);
+        if (ret == 0) {
+            hvdxg.pci_guestcaps_writes++;
+            ret = hvpci_config_read(&hvpci, token,
+                                    HV_DXG_PCI_GUESTCAPS_OFFSET, 4,
+                                    &readback);
+        }
+        hvdxg.pci_guestcaps_readback = readback;
+
+        (void)hvpci_config_read(&hvpci, token, 0x08, 4, &class_rev);
+        (void)hvpci_config_read(&hvpci, token, 192, 4, &guid0);
+        (void)hvpci_config_read(&hvpci, token, 196, 4, &guid1);
+        (void)hvpci_config_read(&hvpci, token, 200, 4, &guid2);
+        (void)hvpci_config_read(&hvpci, token, 204, 4, &guid3);
+        (void)hvpci_config_read(&hvpci, token, 208, 4, &vmbus_version);
+        (void)hvpci_config_read(&hvpci, token, 212, 4, &luid0);
+        (void)hvpci_config_read(&hvpci, token, 216, 4, &luid1);
+        pci_luid.a = luid0;
+        pci_luid.b = luid1;
+        /*
+         * On the Hyper-V vPCI path, offset 212 is write-only guest caps from
+         * the guest's perspective but reads back as the host vGPU LUID low
+         * dword. Treat the guestcaps write as accepted when the config write
+         * succeeded and the PCI LUID is valid/equivalent; keep raw readback
+         * visible for diagnostics.
+         */
+        luid_equiv = hvdxg_luid_nonzero(pci_luid) &&
+            (!hvdxg_luid_nonzero(hvdxg.host_vgpu_luid) ||
+             hvdxg_luid_equal(pci_luid, hvdxg.host_vgpu_luid));
+        hvdxg.pci_guestcaps_write_verified =
+            ret == 0 && luid_equiv ? 1 : 0;
+        hvdxg.pci_guestcaps_ret =
+            ret == 0 && !luid_equiv ? -EIO : ret;
+        hvdxg.pci_domain = 0;
+        hvdxg.pci_bus = bus;
+        hvdxg.pci_dev = dev;
+        hvdxg.pci_func = func;
+        hvdxg.pci_vendor = hvpci.child[i].vendor_id;
+        hvdxg.pci_dxg_device = hvpci.child[i].device_id;
+        hvdxg.pci_class = class_rev != 0xffffffffU && class_rev != 0 ?
+                          class_rev >> 8 : hvpci.child[i].class_code;
+        hvdxg.pci_dxg_vmbus_version = vmbus_version;
+        hvdxg.pci_dxg_guid[0] = guid0;
+        hvdxg.pci_dxg_guid[1] = guid1;
+        hvdxg.pci_dxg_guid[2] = guid2;
+        hvdxg.pci_dxg_guid[3] = guid3;
+        hvdxg.pci_host_vgpu_luid = pci_luid;
+        if (hvdxg_luid_nonzero(pci_luid))
+            hvdxg.host_vgpu_luid = hvdxg.pci_host_vgpu_luid;
+        hvdxg_note_pci_vmbus_version(2);
+        return hvdxg.pci_guestcaps_ret;
     }
-    *out++ = 0;
+    return -ENODEV;
+}
+
+static int hvdxg_try_pci_guestcaps_scan(void)
+{
+    int ret;
+
+    if (hvdxg.pci_guestcaps_write_verified)
+        return 0;
+    if (hvdxg.pci_guestcaps_scan_done)
+        return hvdxg.pci_guestcaps_ret;
+
+    ret = hvdxg_try_hvpci_guestcaps();
+    if (ret != -ENODEV)
+        return ret;
+
+    hvdxg.pci_guestcaps_scan_done = 1;
+    for (uint32 bus = 0; bus < 256; bus++) {
+        for (uint32 dev = 0; dev < 32; dev++) {
+            for (uint32 func = 0; func < 8; func++) {
+                uint32 id = pci_config_read32((uint8)bus, (uint8)dev,
+                                              (uint8)func, 0);
+                uint32 vendor = id & 0xffffU;
+                uint32 device = (id >> 16) & 0xffffU;
+                uint32 class_rev;
+                uint32 class_code;
+                uint32 guid0;
+                uint32 guid1;
+                uint32 guid2;
+                uint32 guid3;
+                uint32 vmbus_version;
+                uint32 luid0;
+                uint32 luid1;
+                uint32 readback;
+                uint16 command;
+                int write_ret;
+
+                if (vendor == 0xffffU || vendor == 0)
+                    continue;
+                if (vendor != PCI_VENDOR_MICROSOFT ||
+                    (device != PCI_DEVICE_MS_VIRTUAL_RENDER &&
+                     device != PCI_DEVICE_MS_COMPUTE_ACCELERATOR))
+                    continue;
+
+                class_rev = pci_config_read32((uint8)bus, (uint8)dev,
+                                              (uint8)func, 0x08);
+                class_code = class_rev >> 8;
+                guid0 = pci_config_read32((uint8)bus, (uint8)dev,
+                                          (uint8)func, 192);
+                guid1 = pci_config_read32((uint8)bus, (uint8)dev,
+                                          (uint8)func, 196);
+                guid2 = pci_config_read32((uint8)bus, (uint8)dev,
+                                          (uint8)func, 200);
+                guid3 = pci_config_read32((uint8)bus, (uint8)dev,
+                                          (uint8)func, 204);
+                command = pci_config_read16((uint8)bus, (uint8)dev,
+                                            (uint8)func, 0x04);
+                command |= PCIE_CSCMD_MAE | PCIE_CSCMD_BME;
+                pci_config_write16((uint8)bus, (uint8)dev, (uint8)func,
+                                   0x04, command);
+                hvdxg.pci_guestcaps_attempts++;
+                hvdxg.pci_guestcaps_write_attempted = 1;
+                hvdxg.pci_guestcaps_source = 1;
+                pci_config_write32((uint8)bus, (uint8)dev, (uint8)func,
+                                   HV_DXG_PCI_GUESTCAPS_OFFSET,
+                                   HV_DXG_PCI_GUESTCAPS_WSL2);
+                readback = pci_config_read32((uint8)bus, (uint8)dev,
+                                             (uint8)func,
+                                             HV_DXG_PCI_GUESTCAPS_OFFSET);
+                write_ret = readback == HV_DXG_PCI_GUESTCAPS_WSL2 ?
+                            0 : -EIO;
+                vmbus_version = pci_config_read32((uint8)bus, (uint8)dev,
+                                                  (uint8)func, 208);
+                luid0 = pci_config_read32((uint8)bus, (uint8)dev,
+                                          (uint8)func, 212);
+                luid1 = pci_config_read32((uint8)bus, (uint8)dev,
+                                          (uint8)func, 216);
+                hyperv_dxg_note_pci(0, bus, dev, func, vendor, device,
+                                    class_code, guid0, guid1, guid2, guid3,
+                                    vmbus_version, luid0, luid1,
+                                    HV_DXG_PCI_GUESTCAPS_OFFSET,
+                                    HV_DXG_PCI_GUESTCAPS_WSL2, readback,
+                                    write_ret);
+                return write_ret;
+            }
+        }
+    }
+
+    return -ENODEV;
+}
+
+static void hvdxg_note_missing_pci_guestcaps_once(void)
+{
+    if (hvdxg.pci_guestcaps_attempts != 0)
+        return;
+
+    hvdxg.pci_guestcaps_attempts++;
+    hvdxg.pci_guestcaps_scan_done = 1;
+    hvdxg.pci_guestcaps_found = 0;
+    hvdxg.pci_guestcaps_write_attempted = 0;
+    hvdxg.pci_guestcaps_write_verified = 0;
+    hvdxg.pci_guestcaps_offset = HV_DXG_PCI_GUESTCAPS_OFFSET;
+    hvdxg.pci_guestcaps_value = HV_DXG_PCI_GUESTCAPS_WSL2;
+    hvdxg.pci_guestcaps_readback = 0;
+    hvdxg.pci_guestcaps_ret = -ENODEV;
+    hvdxg.pci_guestcaps_before_probe =
+        hvdxg.probe_attempts == 0 && !hvdxg.d3dkmt_ready ? 1 : 0;
+    hvdxg.pci_guestcaps_busdevfn = 0;
+    hvdxg.pci_guestcaps_source = 0;
+    hvdxg.pci_guestcaps_token = 0;
+    hvdxg.pci_dxg_vmbus_negotiated_version =
+        HV_DXG_VMBUS_INTERFACE_VERSION_OLD;
+    hvdxg_set_active_vmbus_version(HV_DXG_VMBUS_INTERFACE_VERSION_OLD, 0,
+                                   HV_DXG_VMBUS_LAST_COMPATIBLE_INTERFACE_VERSION);
+}
+
+static const char *hvdxg_pci_guestcaps_source_name(void)
+{
+    switch (hvdxg.pci_guestcaps_source) {
+    case 1:
+        return "legacy-cf8";
+    case 2:
+        return "hyperv-vpci";
+    default:
+        return "none/legacy-scan";
+    }
 }
 
 static void hvdxg_write_utf16_string(uint8 *dst, uint32 dst_size,
@@ -2563,18 +5036,106 @@ static void hvdxg_write_utf16_string(uint8 *dst, uint32 dst_size,
     out[i] = 0;
 }
 
+static int hvdxg_queryadapter_admission_type(uint32 type);
+static void hvdxg_note_queryadapter_admission(uint32 kind, uint32 type,
+                                              uint32 size, uint32 out_len,
+                                              int32 ret, uint32 status,
+                                              uint32 route, uint32 source,
+                                              uint32 adapter,
+                                              uint32 host_adapter,
+                                              uint32 head_hash);
+
 static void hvdxg_note_queryadapter_history(uint32 type, uint32 size,
                                             int32 ret, uint32 status)
 {
     uint32 slot = hvdxg.queryadapter_history_index %
                   HV_DXG_QUERY_HISTORY_MAX;
+    uint32 head_word = 0;
 
     hvdxg.queryadapter_history_type[slot] = type;
     hvdxg.queryadapter_history_size[slot] = size;
     hvdxg.queryadapter_history_len[slot] = hvdxg.queryadapter_last_len;
     hvdxg.queryadapter_history_ret[slot] = ret;
     hvdxg.queryadapter_history_status[slot] = status;
+    hvdxg.queryadapter_history_route[slot] = hvdxg.queryadapter_send_route;
+    hvdxg.queryadapter_history_adapter[slot] =
+        hvdxg.queryadapter_last_adapter;
+    hvdxg.queryadapter_history_host_adapter[slot] =
+        hvdxg.queryadapter_last_host_adapter;
+    hvdxg.queryadapter_history_head_len[slot] =
+        hvdxg.queryadapter_return_head_len;
+    memset(hvdxg.queryadapter_history_head[slot], 0,
+           sizeof(hvdxg.queryadapter_history_head[slot]));
+    if (hvdxg.queryadapter_return_head_len != 0)
+        memcpy(hvdxg.queryadapter_history_head[slot],
+               hvdxg.queryadapter_return_head,
+               hvdxg.queryadapter_return_head_len);
     hvdxg.queryadapter_history_index++;
+    for (uint32 i = 0; i < hvdxg.queryadapter_return_head_len && i < 4; i++)
+        head_word |= (uint32)hvdxg.queryadapter_return_head[i] << (i * 8);
+    if (hvdxg_queryadapter_admission_type(type))
+        hvdxg_note_queryadapter_admission(
+            HV_DXG_QAI_ADMISSION_KIND_QAI, type, size,
+            hvdxg.queryadapter_last_len, ret, status,
+            hvdxg.queryadapter_send_route, hvdxg.queryadapter_source_last,
+            hvdxg.queryadapter_last_adapter,
+            hvdxg.queryadapter_last_host_adapter, head_word);
+}
+
+static void hvdxg_reset_queryadapter_return_head(void)
+{
+    hvdxg.queryadapter_return_head_len = 0;
+    memset(hvdxg.queryadapter_return_head, 0,
+           sizeof(hvdxg.queryadapter_return_head));
+}
+
+static void hvdxg_note_queryadapter_return_head(const void *payload,
+                                                uint32 payload_len)
+{
+    uint32 head_len = payload_len;
+
+    if (head_len > sizeof(hvdxg.queryadapter_return_head))
+        head_len = sizeof(hvdxg.queryadapter_return_head);
+    hvdxg_reset_queryadapter_return_head();
+    hvdxg.queryadapter_return_head_len = head_len;
+    if (payload != NULL && head_len != 0)
+        memcpy(hvdxg.queryadapter_return_head, payload, head_len);
+}
+
+static int hvdxg_queryadapter_admission_type(uint32 type)
+{
+    return type == HV_DXG_QAITYPE_SELECTED_ADAPTER ||
+           type == HV_DXG_QAITYPE_PHASE1_TYPE27 ||
+           type == _KMTQAITYPE_ADAPTERTYPE ||
+           type == _KMTQAITYPE_PHYSICALADAPTERCOUNT ||
+           type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID ||
+           type == HV_DXG_QAITYPE_CHECKDRIVERUPDATESTATUS_RENDER ||
+           type == _KMTQAITYPE_ADAPTERTYPE_RENDER;
+}
+
+static void hvdxg_note_queryadapter_admission(uint32 kind, uint32 type,
+                                              uint32 size, uint32 out_len,
+                                              int32 ret, uint32 status,
+                                              uint32 route, uint32 source,
+                                              uint32 adapter,
+                                              uint32 host_adapter,
+                                              uint32 head_hash)
+{
+    uint32 slot = hvdxg.queryadapter_admission_history_index %
+                  HV_DXG_QAI_ADMISSION_HISTORY_MAX;
+
+    hvdxg.queryadapter_admission_kind[slot] = kind;
+    hvdxg.queryadapter_admission_type[slot] = type;
+    hvdxg.queryadapter_admission_size[slot] = size;
+    hvdxg.queryadapter_admission_len[slot] = out_len;
+    hvdxg.queryadapter_admission_ret[slot] = ret;
+    hvdxg.queryadapter_admission_status[slot] = status;
+    hvdxg.queryadapter_admission_route[slot] = route;
+    hvdxg.queryadapter_admission_source[slot] = source;
+    hvdxg.queryadapter_admission_adapter[slot] = adapter;
+    hvdxg.queryadapter_admission_host[slot] = host_adapter;
+    hvdxg.queryadapter_admission_head_hash[slot] = head_hash;
+    hvdxg.queryadapter_admission_history_index++;
 }
 
 static uint32 hvdxg_read_u32(const void *ptr)
@@ -2585,20 +5146,790 @@ static uint32 hvdxg_read_u32(const void *ptr)
     return value;
 }
 
-static void hvdxg_note_adapter_hardware_id(const uint8 *private_data,
-                                           uint32 private_data_size)
+static int hvdxg_known_display_vendor(uint32 vendor)
 {
-    if (private_data_size < 12 || private_data == NULL)
-        return;
+    return vendor == HV_DXG_VENDOR_INTEL ||
+           vendor == HV_DXG_VENDOR_NVIDIA ||
+           vendor == 0x1002U;
+}
 
-    hvdxg.adapter_vendor_id = hvdxg_read_u32(private_data + 4);
-    hvdxg.adapter_device_id = hvdxg_read_u32(private_data + 8);
+static int hvdxg_sane_adapter_hardware_id(uint32 vendor, uint32 device)
+{
+    return vendor != 0 && vendor <= 0xffffU && device != 0;
+}
+
+static int hvdxg_synthetic_adapter_hardware_id(uint32 vendor, uint32 device)
+{
+    return vendor == PCI_VENDOR_MICROSOFT &&
+           device == PCI_DEVICE_MS_VIRTUAL_RENDER;
+}
+
+static int hvdxg_real_adapter_hardware_id(uint32 vendor, uint32 device)
+{
+    return hvdxg_sane_adapter_hardware_id(vendor, device) &&
+           !hvdxg_synthetic_adapter_hardware_id(vendor, device);
+}
+
+static int hvdxg_type31_active_v40_ext(void)
+{
+    return hvdxg.use_ext_header &&
+           hvdxg.active_vmbus_version >= HV_DXG_VMBUS_INTERFACE_VERSION;
+}
+
+static int hvdxg_have_cached_adapter_hardware_id(void)
+{
+    return hvdxg.adapter_hardware_raw_size ==
+               HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE &&
+           hvdxg_real_adapter_hardware_id(hvdxg.adapter_vendor_id,
+                                          hvdxg.adapter_device_id);
+}
+
+static void hvdxg_note_adapter_hardware_v40_short(uint32 actual_len,
+                                                  int ret, int32 status)
+{
+    hvdxg.adapter_hardware_v40_short_zero++;
+    hvdxg.adapter_hardware_v40_short_len = actual_len;
+    hvdxg.adapter_hardware_v40_short_ret = ret;
+    hvdxg.adapter_hardware_v40_short_status = status;
+    hvdxg.adapter_hardware_cache_available =
+        hvdxg_have_cached_adapter_hardware_id() ? 1 : 0;
+    if (hvdxg_synthetic_adapter_hardware_id(hvdxg.pci_vendor,
+                                            hvdxg.pci_dxg_device))
+        hvdxg.adapter_hardware_synthetic_rejected = 1;
+}
+
+static const char *hvdxg_adapter_hardware_source_name(void)
+{
+    if (hvdxg.adapter_hardware_fallback_source == 1)
+        return "cached-real";
+    if (hvdxg.adapter_hardware_fallback_source == 2)
+        return "legacy-noext-vgpu-query";
+    if (hvdxg.adapter_hardware_fallback_source == 3)
+        return "temp-v27-openadapter";
+    if (!hvdxg.adapter_hardware_fallback &&
+        hvdxg_real_adapter_hardware_id(hvdxg.adapter_vendor_id,
+                                       hvdxg.adapter_device_id)) {
+        if (hvdxg_type31_active_v40_ext())
+            return "host-v40-type31";
+        return "host-real";
+    }
+    if (hvdxg.adapter_hardware_synthetic_rejected)
+        return "rejected-synthetic-pci";
+    return "none";
+}
+
+static int hvdxg_normalize_adapter_hardware_id(uint8 *private_data,
+                                               uint32 private_data_size)
+{
+    uint32 words[7];
+    uint32 count;
+    uint32 vendor;
+    uint32 device;
+
+    hvdxg.adapter_hardware_raw_size = private_data_size;
+    hvdxg.adapter_hardware_payload_len = private_data_size;
+    hvdxg.adapter_hardware_cache_available =
+        hvdxg_have_cached_adapter_hardware_id() ? 1 : 0;
+    hvdxg.adapter_hardware_normalized = 0;
+    hvdxg.adapter_hardware_fallback = 0;
+    hvdxg.adapter_hardware_fallback_source = 0;
+    if (private_data_size < 12 || private_data == NULL)
+        return 0;
+
+    count = private_data_size / sizeof(uint32);
+    if (count > sizeof(words) / sizeof(words[0]))
+        count = sizeof(words) / sizeof(words[0]);
+    memset(words, 0, sizeof(words));
+    for (uint32 i = 0; i < count; i++)
+        words[i] = hvdxg_read_u32(private_data + i * sizeof(uint32));
+
+    /*
+     * Type-31 PHYSICALADAPTERDEVICEIDS is an indexed payload on WSL:
+     * word 0 is the physical-adapter index, word 1 is VendorID, and word 2
+     * is DeviceID.  Keep the host bytes unchanged for user mode; diagnostics
+     * keep normalized vendor/device separately.
+     */
+    if (!hvdxg_known_display_vendor(words[0]) &&
+        hvdxg_known_display_vendor(words[1])) {
+        hvdxg.adapter_hardware_normalized = 1;
+        vendor = words[1];
+        device = words[2];
+    } else {
+        vendor = words[0];
+        device = words[1];
+    }
+
+    if (!hvdxg_real_adapter_hardware_id(vendor, device)) {
+        if (hvdxg_synthetic_adapter_hardware_id(vendor, device))
+            hvdxg.adapter_hardware_synthetic_rejected = 1;
+        return 0;
+    }
+
+    memset(hvdxg.adapter_hardware_raw, 0,
+           sizeof(hvdxg.adapter_hardware_raw));
+    for (uint32 i = 0; i < count; i++)
+        hvdxg.adapter_hardware_raw[i] = words[i];
+    hvdxg.adapter_vendor_id = vendor;
+    hvdxg.adapter_device_id = device;
+    hvdxg.adapter_hardware_cache_available = 1;
+    return 1;
+}
+
+static int hvdxg_accept_legacy_adapter_hardware_id(uint8 *result_buf,
+                                                   uint32 actual_len,
+                                                   uint32 private_data_size)
+{
+    struct hvdxg_ntstatus *status;
+    uint8 *payload;
+    int status_ret;
+
+    if (result_buf == NULL ||
+        private_data_size != HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE)
+        return 0;
+
+    if (actual_len >= private_data_size + sizeof(*status) &&
+        hvdxg_ntstatus_plausible(*(struct hvdxg_ntstatus *)result_buf)) {
+        status = (struct hvdxg_ntstatus *)result_buf;
+        status_ret = hvdxg_ntstatus_to_errno(*status);
+        if (status_ret != 0)
+            return 0;
+        payload = result_buf + sizeof(*status);
+    } else if (actual_len >= private_data_size) {
+        payload = result_buf;
+    } else {
+        return 0;
+    }
+
+    if (!hvdxg_normalize_adapter_hardware_id(payload, private_data_size))
+        return 0;
+    if (payload != result_buf)
+        memmove(result_buf, payload, private_data_size);
+    hvdxg.adapter_hardware_fallback = 1;
+    hvdxg.adapter_hardware_fallback_count++;
+    hvdxg.adapter_hardware_fallback_source = 2;
+    return 1;
+}
+
+static int hvdxg_adapter_hardware_primary_too_short(uint8 *result_buf,
+                                                    uint32 actual_len,
+                                                    uint32 private_data_size)
+{
+    if (private_data_size != HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE)
+        return 0;
+    if (actual_len < private_data_size)
+        return 1;
+    if (actual_len > private_data_size &&
+        actual_len < private_data_size + sizeof(struct hvdxg_ntstatus) &&
+        actual_len >= sizeof(struct hvdxg_ntstatus) &&
+        hvdxg_ntstatus_plausible(*(struct hvdxg_ntstatus *)result_buf))
+        return 1;
+    return 0;
+}
+
+static int hvdxg_queryadapter_type55_zero_completion(uint32 type, uint32 size,
+                                                     uint32 actual_len,
+                                                     int ret)
+{
+    (void)size;
+    return type == HV_DXG_QAITYPE_CHECKDRIVERUPDATESTATUS_RENDER &&
+           actual_len == 0 && ret == 0;
+}
+
+static void hvdxg_note_queryadapter_zero_success(uint32 type, uint32 size,
+                                                 uint32 host_len,
+                                                 int host_ret,
+                                                 int32 host_status,
+                                                 int user_ret)
+{
+    hvdxg.queryadapter_zero_success_type = type;
+    hvdxg.queryadapter_zero_success_size = size;
+    hvdxg.queryadapter_zero_success_count++;
+    hvdxg.queryadapter_zero_success_host_type = type;
+    hvdxg.queryadapter_zero_success_host_len = host_len;
+    hvdxg.queryadapter_zero_success_host_ret = host_ret;
+    hvdxg.queryadapter_zero_success_host_status = host_status;
+    hvdxg.queryadapter_zero_success_user_ret = user_ret;
+}
+
+static int hvdxg_queryadapter_adaptertype_zero_completion(uint32 type,
+                                                          uint32 size,
+                                                          uint32 actual_len,
+                                                          int ret)
+{
+    return (type == _KMTQAITYPE_ADAPTERTYPE ||
+            type == _KMTQAITYPE_ADAPTERTYPE_RENDER) &&
+           size >= sizeof(struct d3dkmt_adaptertype) &&
+           actual_len == 0 && ret == 0;
+}
+
+static int hvdxg_queryadapter_physicalcount_fallback(uint32 type,
+                                                     uint32 size,
+                                                     uint32 actual_len,
+                                                     int ret)
+{
+    return type == _KMTQAITYPE_PHYSICALADAPTERCOUNT &&
+           size >= sizeof(uint32) && actual_len == 0 && ret == -EOVERFLOW;
+}
+
+static int hvdxg_try_fallback_adapter_hardware_id(uint8 *private_data,
+                                                  uint32 private_data_size)
+{
+    uint32 words[7];
+    uint32 vendor;
+    uint32 device;
+    uint32 count;
+
+    if (private_data == NULL ||
+        private_data_size != HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE)
+        return 0;
+    if (hvdxg_synthetic_adapter_hardware_id(hvdxg.pci_vendor,
+                                            hvdxg.pci_dxg_device))
+        hvdxg.adapter_hardware_synthetic_rejected = 1;
+    hvdxg.adapter_hardware_cache_available =
+        hvdxg_have_cached_adapter_hardware_id() ? 1 : 0;
+    if (!hvdxg.adapter_hardware_cache_available)
+        return 0;
+
+    vendor = hvdxg.adapter_vendor_id;
+    device = hvdxg.adapter_device_id;
+
+    memset(words, 0, sizeof(words));
+    count = sizeof(hvdxg.adapter_hardware_raw) /
+            sizeof(hvdxg.adapter_hardware_raw[0]);
+    for (uint32 i = 0; i < count; i++)
+        words[i] = hvdxg.adapter_hardware_raw[i];
+    if (hvdxg_known_display_vendor(words[0])) {
+        words[6] = words[5];
+        words[5] = words[4];
+        words[4] = words[3];
+        words[3] = words[2];
+        words[2] = device;
+        words[1] = vendor;
+        words[0] = 0;
+    }
+    memcpy(private_data, words, sizeof(words));
+
+    memset(hvdxg.adapter_hardware_raw, 0,
+           sizeof(hvdxg.adapter_hardware_raw));
+    for (uint32 i = 0; i < count; i++)
+        hvdxg.adapter_hardware_raw[i] = words[i];
+    hvdxg.adapter_hardware_raw_size = private_data_size;
+    hvdxg.adapter_hardware_payload_len = private_data_size;
+    hvdxg.adapter_hardware_normalized = 2;
+    hvdxg.adapter_hardware_fallback = 1;
+    hvdxg.adapter_hardware_fallback_count++;
+    hvdxg.adapter_hardware_fallback_source = 1;
+    hvdxg.adapter_vendor_id = vendor;
+    hvdxg.adapter_device_id = device;
+    return 1;
+}
+
+#if 0
+static int hvdxg_cache_v27_adapter_hardware_id_before_v40(void)
+{
+    enum {
+        pre_cache_command_len =
+            HV_DXG_QUERYADAPTERINFO_WSL_NATURAL_BASE +
+            HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE - 1U,
+        pre_cache_result_len =
+            sizeof(struct hvdxg_ntstatus) +
+            HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE,
+    };
+    struct hvdxg_command_openadapter open;
+    struct hvdxg_command_openadapter_return open_ret;
+    struct hvdxg_command_closeadapter close;
+    struct hvdxg_ntstatus close_status;
+    uint8 command_buf[pre_cache_command_len];
+    uint8 result_buf[pre_cache_result_len];
+    struct hvdxg_command_queryadapterinfo_wsl *query =
+        (struct hvdxg_command_queryadapterinfo_wsl *)command_buf;
+    uint32 saved_host_adapter_handle = hvdxg.host_adapter_handle;
+    struct hvdxg_winluid saved_adapter_luid = hvdxg.adapter_luid;
+    struct hvdxg_winluid saved_host_adapter_luid = hvdxg.host_adapter_luid;
+    struct hvdxg_winluid saved_host_vgpu_luid = hvdxg.host_vgpu_luid;
+    uint32 saved_active_version = hvdxg.active_vmbus_version;
+    uint32 saved_active_source = hvdxg.active_vmbus_source;
+    uint32 saved_active_compat = hvdxg.active_vmbus_last_compat;
+    uint32 saved_adapter_vendor_id = hvdxg.adapter_vendor_id;
+    uint32 saved_adapter_device_id = hvdxg.adapter_device_id;
+    uint32 saved_hardware_raw[7];
+    uint32 saved_hardware_raw_size = hvdxg.adapter_hardware_raw_size;
+    uint32 saved_hardware_normalized = hvdxg.adapter_hardware_normalized;
+    uint32 saved_hardware_fallback = hvdxg.adapter_hardware_fallback;
+    uint32 saved_hardware_fallback_count =
+        hvdxg.adapter_hardware_fallback_count;
+    uint32 saved_hardware_fallback_source =
+        hvdxg.adapter_hardware_fallback_source;
+    uint32 saved_hardware_synthetic_rejected =
+        hvdxg.adapter_hardware_synthetic_rejected;
+    uint32 saved_hardware_cache_available =
+        hvdxg.adapter_hardware_cache_available;
+    uint32 saved_hardware_payload_len =
+        hvdxg.adapter_hardware_payload_len;
+    uint32 temp_handle = 0;
+    uint32 actual_len = 0;
+    uint32 close_actual = 0;
+    uint32 words[7];
+    uint8 *payload = NULL;
+    int success = 0;
+    int ret = -EIO;
+
+    hvdxg.adapter_hardware_temp_v27_attempts++;
+    hvdxg.adapter_hardware_temp_v27_last_ret = 0;
+    hvdxg.adapter_hardware_temp_v27_last_status = 0;
+    hvdxg.adapter_hardware_temp_v27_open_len = 0;
+    hvdxg.adapter_hardware_temp_v27_query_len = 0;
+    hvdxg.adapter_hardware_temp_v27_close_len = 0;
+    hvdxg.adapter_hardware_temp_v27_close_ret = 0;
+    hvdxg.adapter_hardware_temp_v27_close_status = 0;
+    hvdxg.adapter_hardware_temp_v27_handle = 0;
+    hvdxg.adapter_hardware_temp_v27_restored_version = 0;
+    hvdxg.adapter_hardware_temp_v27_restored_ext = 0;
+
+    if (!hvdxg_host_v40_signal()) {
+        ret = -ENODEV;
+        goto finish;
+    }
+    if (hvdxg.adapter_hardware_fallback_source == 4 &&
+        hvdxg.adapter_hardware_raw_size ==
+            HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE &&
+        hvdxg_real_adapter_hardware_id(hvdxg.adapter_vendor_id,
+                                       hvdxg.adapter_device_id)) {
+        success = 1;
+        ret = 0;
+        goto finish;
+    }
+    if (!hvdxg.vgpu_open_ok || hvdxg.vgpu_out_ring == NULL) {
+        ret = -ENODEV;
+        goto finish;
+    }
+
+    memcpy(saved_hardware_raw, hvdxg.adapter_hardware_raw,
+           sizeof(saved_hardware_raw));
+    hvdxg_set_active_vmbus_version(HV_DXG_VMBUS_INTERFACE_VERSION_OLD,
+                                   5,
+                                   HV_DXG_VMBUS_LAST_COMPATIBLE_INTERFACE_VERSION);
+
+    memset(&open, 0, sizeof(open));
+    hvdxg_command_vgpu_init(&open.hdr, HV_DXGK_VMBCOMMAND_OPENADAPTER);
+    open.vmbus_interface_version = HV_DXG_VMBUS_INTERFACE_VERSION_OLD;
+    open.vmbus_last_compatible_interface_version =
+        HV_DXG_VMBUS_LAST_COMPATIBLE_INTERFACE_VERSION;
+    if (hvdxg_luid_nonzero(saved_adapter_luid))
+        open.guest_adapter_luid = saved_adapter_luid;
+    else
+        open.guest_adapter_luid = hvdxg_luid_from_guid(&hvdxg.vgpu_instance);
+
+    memset(&open_ret, 0, sizeof(open_ret));
+    ret = hvdxg_send_sync_vgpu_flags(
+        &open, sizeof(open), &open_ret, sizeof(open_ret), &actual_len,
+        HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER |
+        HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU);
+    hvdxg.adapter_hardware_temp_v27_open_len = actual_len;
+    if (ret != 0)
+        goto restore;
+    if (actual_len < sizeof(open_ret)) {
+        ret = -EOVERFLOW;
+        goto restore;
+    }
+    hvdxg.adapter_hardware_temp_v27_last_status = open_ret.status.v;
+    if (open_ret.status.v < 0) {
+        ret = hvdxg_ntstatus_to_errno(open_ret.status);
+        goto restore;
+    }
+    temp_handle = open_ret.host_adapter_handle.v;
+    hvdxg.adapter_hardware_temp_v27_handle = temp_handle;
+    if (temp_handle == 0) {
+        ret = -ENODEV;
+        goto restore;
+    }
+
+    memset(command_buf, 0, sizeof(command_buf));
+    query->hdr.process = hvdxg.dxg_process;
+    query->hdr.channel_type = HV_DXGKVMB_VGPU_TO_HOST;
+    query->hdr.command_type = HV_DXGK_VMBCOMMAND_QUERYADAPTERINFO;
+    query->query_type = HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID;
+    query->private_data_size = HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE;
+
+    memset(result_buf, 0, sizeof(result_buf));
+    actual_len = 0;
+    ret = hvdxg_send_sync_vgpu_flags(
+        query, pre_cache_command_len, result_buf, sizeof(result_buf),
+        &actual_len,
+        HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER |
+        HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU);
+    hvdxg.adapter_hardware_temp_v27_query_len = actual_len;
+    if (actual_len >= sizeof(struct hvdxg_ntstatus) &&
+        hvdxg_ntstatus_plausible(*(struct hvdxg_ntstatus *)result_buf))
+        hvdxg.adapter_hardware_temp_v27_last_status =
+            ((struct hvdxg_ntstatus *)result_buf)->v;
+    if (ret != 0)
+        goto close_temp;
+
+    if (actual_len == HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE) {
+        payload = result_buf;
+    } else if (actual_len == pre_cache_result_len &&
+               hvdxg_ntstatus_plausible(
+                   *(struct hvdxg_ntstatus *)result_buf)) {
+        struct hvdxg_ntstatus *status =
+            (struct hvdxg_ntstatus *)result_buf;
+
+        ret = hvdxg_ntstatus_to_errno(*status);
+        if (ret != 0)
+            goto close_temp;
+        payload = result_buf + sizeof(*status);
+    } else {
+        ret = actual_len < HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE ?
+              -EOVERFLOW : -EINVAL;
+        goto close_temp;
+    }
+
+    memset(words, 0, sizeof(words));
+    for (uint32 i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+        words[i] = hvdxg_read_u32(payload + i * sizeof(uint32));
+    if (hvdxg_known_display_vendor(words[0])) {
+        uint32 vendor = words[0];
+        uint32 device = words[1];
+
+        words[6] = words[5];
+        words[5] = words[4];
+        words[4] = words[3];
+        words[3] = words[2];
+        words[2] = device;
+        words[1] = vendor;
+        words[0] = 0;
+    }
+    if (!hvdxg_normalize_adapter_hardware_id((uint8 *)words,
+                                             sizeof(words))) {
+        ret = -EINVAL;
+        goto close_temp;
+    }
+    hvdxg.adapter_hardware_fallback = 0;
+    hvdxg.adapter_hardware_fallback_count =
+        saved_hardware_fallback_count;
+    hvdxg.adapter_hardware_fallback_source = 4;
+    success = 1;
+
+close_temp:
+    if (temp_handle != 0 && temp_handle != saved_host_adapter_handle) {
+        memset(&close, 0, sizeof(close));
+        memset(&close_status, 0, sizeof(close_status));
+        hvdxg_command_vgpu_init(&close.hdr,
+                                HV_DXGK_VMBCOMMAND_CLOSEADAPTER);
+        close.host_handle.v = temp_handle;
+        hvdxg.adapter_hardware_temp_v27_close_ret =
+            hvdxg_send_sync_vgpu_flags(
+                &close, sizeof(close), &close_status,
+                sizeof(close_status), &close_actual,
+                HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER |
+                HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU);
+        hvdxg.adapter_hardware_temp_v27_close_len = close_actual;
+        if (close_actual >= sizeof(close_status))
+            hvdxg.adapter_hardware_temp_v27_close_status =
+                close_status.v;
+    }
+
+restore:
+    hvdxg.host_adapter_handle = saved_host_adapter_handle;
+    hvdxg.adapter_luid = saved_adapter_luid;
+    hvdxg.host_adapter_luid = saved_host_adapter_luid;
+    hvdxg.host_vgpu_luid = saved_host_vgpu_luid;
+    hvdxg_set_active_vmbus_version(saved_active_version,
+                                   saved_active_source,
+                                   saved_active_compat);
+    if (!success) {
+        hvdxg.adapter_vendor_id = saved_adapter_vendor_id;
+        hvdxg.adapter_device_id = saved_adapter_device_id;
+        memcpy(hvdxg.adapter_hardware_raw, saved_hardware_raw,
+               sizeof(hvdxg.adapter_hardware_raw));
+        hvdxg.adapter_hardware_raw_size = saved_hardware_raw_size;
+        hvdxg.adapter_hardware_normalized = saved_hardware_normalized;
+        hvdxg.adapter_hardware_fallback = saved_hardware_fallback;
+        hvdxg.adapter_hardware_fallback_count =
+            saved_hardware_fallback_count;
+        hvdxg.adapter_hardware_fallback_source =
+            saved_hardware_fallback_source;
+        hvdxg.adapter_hardware_synthetic_rejected =
+            saved_hardware_synthetic_rejected;
+        hvdxg.adapter_hardware_cache_available =
+            saved_hardware_cache_available;
+        hvdxg.adapter_hardware_payload_len =
+            saved_hardware_payload_len;
+    }
+finish:
+    hvdxg.adapter_hardware_temp_v27_restored_version =
+        hvdxg.active_vmbus_version;
+    hvdxg.adapter_hardware_temp_v27_restored_ext = hvdxg.use_ext_header;
+    hvdxg.adapter_hardware_temp_v27_last_ret = success ? 0 : ret;
+    if (success)
+        hvdxg.adapter_hardware_temp_v27_successes++;
+    else
+        hvdxg.adapter_hardware_temp_v27_failures++;
+    return success ? 1 : ret;
+}
+#endif
+
+static int hvdxg_try_v27_openadapter_hardware_id(
+    struct hvdxg_open_state *owner,
+    struct hvdxg_command_queryadapterinfo_wsl *query, uint32 command_len,
+    uint8 *result_buf, uint32 result_len, uint32 private_data_size,
+    uint32 *actual_len)
+{
+    struct hvdxg_command_openadapter open;
+    struct hvdxg_command_openadapter_return open_ret;
+    struct hvdxg_command_closeadapter close;
+    struct hvdxg_ntstatus close_status;
+    uint8 temp_result[sizeof(struct hvdxg_ntstatus) +
+                      HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE];
+    uint32 saved_host_adapter_handle = hvdxg.host_adapter_handle;
+    struct hvdxg_winluid saved_adapter_luid = hvdxg.adapter_luid;
+    struct hvdxg_winluid saved_host_adapter_luid = hvdxg.host_adapter_luid;
+    struct hvdxg_winluid saved_host_vgpu_luid = hvdxg.host_vgpu_luid;
+    uint32 saved_adapter_vendor_id = hvdxg.adapter_vendor_id;
+    uint32 saved_adapter_device_id = hvdxg.adapter_device_id;
+    uint32 saved_hardware_raw[7];
+    uint32 saved_hardware_raw_size = hvdxg.adapter_hardware_raw_size;
+    uint32 saved_hardware_normalized = hvdxg.adapter_hardware_normalized;
+    uint32 saved_hardware_fallback = hvdxg.adapter_hardware_fallback;
+    uint32 saved_hardware_fallback_count =
+        hvdxg.adapter_hardware_fallback_count;
+    uint32 saved_hardware_fallback_source =
+        hvdxg.adapter_hardware_fallback_source;
+    uint32 saved_hardware_synthetic_rejected =
+        hvdxg.adapter_hardware_synthetic_rejected;
+    uint32 saved_hardware_cache_available =
+        hvdxg.adapter_hardware_cache_available;
+    uint32 saved_hardware_payload_len =
+        hvdxg.adapter_hardware_payload_len;
+    uint32 temp_handle = 0;
+    uint32 open_actual = 0;
+    uint32 query_actual = 0;
+    uint32 close_actual = 0;
+    uint32 words[7];
+    uint8 *payload = NULL;
+    int success = 0;
+    int ret = -EINVAL;
+
+    memcpy(saved_hardware_raw, hvdxg.adapter_hardware_raw,
+           sizeof(saved_hardware_raw));
+    hvdxg.adapter_hardware_temp_v27_attempts++;
+    hvdxg.adapter_hardware_temp_v27_last_ret = 0;
+    hvdxg.adapter_hardware_temp_v27_last_status = 0;
+    hvdxg.adapter_hardware_temp_v27_open_len = 0;
+    hvdxg.adapter_hardware_temp_v27_query_len = 0;
+    hvdxg.adapter_hardware_temp_v27_close_len = 0;
+    hvdxg.adapter_hardware_temp_v27_close_ret = 0;
+    hvdxg.adapter_hardware_temp_v27_close_status = 0;
+    hvdxg.adapter_hardware_temp_v27_handle = 0;
+    hvdxg.adapter_hardware_temp_v27_restored_version = 0;
+    hvdxg.adapter_hardware_temp_v27_restored_ext = 0;
+
+    if (query == NULL || result_buf == NULL || actual_len == NULL ||
+        private_data_size != HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE ||
+        result_len < private_data_size + sizeof(struct hvdxg_ntstatus)) {
+        ret = -EINVAL;
+        goto restore;
+    }
+    if (!hvdxg.vgpu_open_ok || hvdxg.vgpu_out_ring == NULL ||
+        hvdxg.dxg_process.v == 0) {
+        ret = -ENODEV;
+        goto restore;
+    }
+    if (owner != NULL &&
+        (owner->device_count != 0 || owner->context_count != 0 ||
+         owner->hwqueue_count != 0 || owner->allocation_count != 0)) {
+        ret = -EBUSY;
+        goto restore;
+    }
+
+    memset(&open, 0, sizeof(open));
+    hvdxg_command_vgpu_init(&open.hdr, HV_DXGK_VMBCOMMAND_OPENADAPTER);
+    open.vmbus_interface_version = HV_DXG_VMBUS_INTERFACE_VERSION_OLD;
+    open.vmbus_last_compatible_interface_version =
+        HV_DXG_VMBUS_LAST_COMPATIBLE_INTERFACE_VERSION;
+    if (hvdxg_luid_nonzero(saved_adapter_luid))
+        open.guest_adapter_luid = saved_adapter_luid;
+    else
+        open.guest_adapter_luid = hvdxg_luid_from_guid(&hvdxg.vgpu_instance);
+
+    memset(&open_ret, 0, sizeof(open_ret));
+    ret = hvdxg_send_sync_vgpu_flags(
+        &open, sizeof(open), &open_ret, sizeof(open_ret), &open_actual,
+        HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER |
+        HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU);
+    hvdxg.adapter_hardware_temp_v27_open_len = open_actual;
+    if (ret != 0)
+        goto restore;
+    if (open_actual < sizeof(open_ret)) {
+        ret = -EOVERFLOW;
+        goto restore;
+    }
+    hvdxg.adapter_hardware_temp_v27_last_status = open_ret.status.v;
+    if (open_ret.status.v < 0) {
+        ret = hvdxg_ntstatus_to_errno(open_ret.status);
+        goto close_temp;
+    }
+    temp_handle = open_ret.host_adapter_handle.v;
+    hvdxg.adapter_hardware_temp_v27_handle = temp_handle;
+    if (temp_handle == 0) {
+        ret = -ENODEV;
+        goto close_temp;
+    }
+
+    memset(temp_result, 0, sizeof(temp_result));
+    ret = hvdxg_send_sync_vgpu_flags(
+        query, command_len, temp_result, sizeof(temp_result), &query_actual,
+        HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER |
+        HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU);
+    hvdxg.adapter_hardware_temp_v27_query_len = query_actual;
+    if (actual_len != NULL)
+        *actual_len = query_actual;
+    if (query_actual >= sizeof(struct hvdxg_ntstatus) &&
+        hvdxg_ntstatus_plausible(*(struct hvdxg_ntstatus *)temp_result))
+        hvdxg.adapter_hardware_temp_v27_last_status =
+            ((struct hvdxg_ntstatus *)temp_result)->v;
+    if (ret != 0)
+        goto close_temp;
+
+    if (query_actual == private_data_size) {
+        payload = temp_result;
+    } else if (query_actual == private_data_size +
+                            sizeof(struct hvdxg_ntstatus) &&
+               hvdxg_ntstatus_plausible(
+                   *(struct hvdxg_ntstatus *)temp_result)) {
+        struct hvdxg_ntstatus *status =
+            (struct hvdxg_ntstatus *)temp_result;
+
+        ret = hvdxg_ntstatus_to_errno(*status);
+        if (ret != 0)
+            goto close_temp;
+        payload = temp_result + sizeof(*status);
+    } else {
+        ret = query_actual < private_data_size ? -EOVERFLOW : -EINVAL;
+        goto close_temp;
+    }
+
+    memset(words, 0, sizeof(words));
+    for (uint32 i = 0; i < sizeof(words) / sizeof(words[0]); i++)
+        words[i] = hvdxg_read_u32(payload + i * sizeof(uint32));
+    if (hvdxg_known_display_vendor(words[0])) {
+        uint32 vendor = words[0];
+        uint32 device = words[1];
+
+        words[6] = words[5];
+        words[5] = words[4];
+        words[4] = words[3];
+        words[3] = words[2];
+        words[2] = device;
+        words[1] = vendor;
+        words[0] = 0;
+    }
+    memcpy(result_buf, words, sizeof(words));
+    if (!hvdxg_normalize_adapter_hardware_id(result_buf,
+                                             private_data_size)) {
+        ret = -EINVAL;
+        goto close_temp;
+    }
+    success = 1;
+    ret = 0;
+
+close_temp:
+    if (temp_handle != 0 && temp_handle != saved_host_adapter_handle) {
+        memset(&close, 0, sizeof(close));
+        memset(&close_status, 0, sizeof(close_status));
+        hvdxg_command_vgpu_init(&close.hdr,
+                                HV_DXGK_VMBCOMMAND_CLOSEADAPTER);
+        close.host_handle.v = temp_handle;
+        hvdxg.adapter_hardware_temp_v27_close_ret =
+            hvdxg_send_sync_vgpu_flags(
+                &close, sizeof(close), &close_status, sizeof(close_status),
+                &close_actual,
+                HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER |
+                HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU);
+        hvdxg.adapter_hardware_temp_v27_close_len = close_actual;
+        if (close_actual >= sizeof(close_status))
+            hvdxg.adapter_hardware_temp_v27_close_status =
+                close_status.v;
+    }
+
+restore:
+    hvdxg.host_adapter_handle = saved_host_adapter_handle;
+    hvdxg.adapter_luid = saved_adapter_luid;
+    hvdxg.host_adapter_luid = saved_host_adapter_luid;
+    hvdxg.host_vgpu_luid = saved_host_vgpu_luid;
+    hvdxg.adapter_vendor_id = saved_adapter_vendor_id;
+    hvdxg.adapter_device_id = saved_adapter_device_id;
+    memcpy(hvdxg.adapter_hardware_raw, saved_hardware_raw,
+           sizeof(hvdxg.adapter_hardware_raw));
+    hvdxg.adapter_hardware_raw_size = saved_hardware_raw_size;
+    hvdxg.adapter_hardware_normalized = saved_hardware_normalized;
+    hvdxg.adapter_hardware_fallback = saved_hardware_fallback;
+    hvdxg.adapter_hardware_fallback_count =
+        saved_hardware_fallback_count;
+    hvdxg.adapter_hardware_fallback_source =
+        saved_hardware_fallback_source;
+    hvdxg.adapter_hardware_synthetic_rejected =
+        saved_hardware_synthetic_rejected;
+    hvdxg.adapter_hardware_cache_available =
+        saved_hardware_cache_available;
+    hvdxg.adapter_hardware_payload_len =
+        saved_hardware_payload_len;
+    hvdxg.adapter_hardware_temp_v27_restored_version =
+        hvdxg.active_vmbus_version;
+    hvdxg.adapter_hardware_temp_v27_restored_ext =
+        hvdxg.use_ext_header;
+
+    if (success) {
+        if (!hvdxg_normalize_adapter_hardware_id(result_buf,
+                                                 private_data_size)) {
+            ret = -EINVAL;
+            success = 0;
+        } else {
+            hvdxg.adapter_hardware_fallback = 1;
+            hvdxg.adapter_hardware_fallback_count =
+                saved_hardware_fallback_count + 1;
+            hvdxg.adapter_hardware_fallback_source = 3;
+        }
+    }
+    hvdxg.adapter_hardware_temp_v27_last_ret = ret;
+    if (success)
+        hvdxg.adapter_hardware_temp_v27_successes++;
+    else
+        hvdxg.adapter_hardware_temp_v27_failures++;
+    return success;
+}
+
+static int hvdxg_try_adapter_hardware_failure_fallbacks(
+    struct hvdxg_open_state *owner,
+    struct hvdxg_command_queryadapterinfo_wsl *query, uint32 command_len,
+    uint8 *result_buf, uint32 result_len, uint32 private_data_size,
+    uint32 *actual_len, int allow_cached, int allow_temp_v27)
+{
+    uint32 temp_actual = 0;
+
+    if (allow_cached &&
+        hvdxg_try_fallback_adapter_hardware_id(result_buf,
+                                               private_data_size)) {
+        if (actual_len != NULL)
+            *actual_len = private_data_size;
+        return 1;
+    }
+    if (allow_temp_v27 &&
+        hvdxg_try_v27_openadapter_hardware_id(owner, query, command_len,
+            result_buf, result_len, private_data_size, &temp_actual)) {
+        if (actual_len != NULL)
+            *actual_len = private_data_size;
+        return 1;
+    }
+    return 0;
 }
 
 static void hvdxg_note_allocation_history(uint32 len, int32 ret,
                                           uint32 device, uint32 resource,
                                           uint32 allocation, uint64 size,
-                                          uint32 count, uint32 priv_size)
+                                          uint32 count, uint32 priv_size,
+                                          uint32 global_share,
+                                          uint32 create_flags)
 {
     uint32 slot = hvdxg.allocation_history_index %
                   HV_DXG_RESOURCE_HISTORY_MAX;
@@ -2611,12 +5942,16 @@ static void hvdxg_note_allocation_history(uint32 len, int32 ret,
     hvdxg.allocation_history_size[slot] = size;
     hvdxg.allocation_history_count[slot] = count;
     hvdxg.allocation_history_priv[slot] = priv_size;
+    hvdxg.allocation_history_global_share[slot] = global_share;
+    hvdxg.allocation_history_create_flags[slot] = create_flags;
     hvdxg.allocation_history_index++;
 }
 
 static void hvdxg_note_mapgpuva_history(uint32 len, int32 ret, uint32 status,
                                         uint32 paging_queue,
                                         uint32 allocation, uint64 pages,
+                                        uint64 protection,
+                                        uint64 driver_protection,
                                         uint64 va, uint64 fence)
 {
     uint32 slot = hvdxg.mapgpuva_history_index %
@@ -2628,9 +5963,36 @@ static void hvdxg_note_mapgpuva_history(uint32 len, int32 ret, uint32 status,
     hvdxg.mapgpuva_history_paging_queue[slot] = paging_queue;
     hvdxg.mapgpuva_history_allocation[slot] = allocation;
     hvdxg.mapgpuva_history_pages[slot] = pages;
+    hvdxg.mapgpuva_history_protection[slot] = protection;
+    hvdxg.mapgpuva_history_driver_protection[slot] = driver_protection;
     hvdxg.mapgpuva_history_va[slot] = va;
     hvdxg.mapgpuva_history_fence[slot] = fence;
     hvdxg.mapgpuva_history_index++;
+}
+
+static void hvdxg_note_submithwqueue_history(uint32 len, int32 ret,
+                                             uint32 queue,
+                                             uint32 command_length,
+                                             uint32 priv_size,
+                                             const uint8 *priv_head,
+                                             uint32 priv_head_len)
+{
+    uint32 slot = hvdxg.submithwqueue_history_index %
+                  HV_DXG_RESOURCE_HISTORY_MAX;
+    uint32 head_len = priv_head_len < 8 ? priv_head_len : 8;
+
+    hvdxg.submithwqueue_history_len[slot] = len;
+    hvdxg.submithwqueue_history_ret[slot] = ret;
+    hvdxg.submithwqueue_history_queue[slot] = queue;
+    hvdxg.submithwqueue_history_command_length[slot] = command_length;
+    hvdxg.submithwqueue_history_priv_size[slot] = priv_size;
+    hvdxg.submithwqueue_history_priv_head_len[slot] = head_len;
+    memset(hvdxg.submithwqueue_history_priv_head[slot], 0,
+           sizeof(hvdxg.submithwqueue_history_priv_head[slot]));
+    if (head_len != 0 && priv_head != NULL)
+        memcpy(hvdxg.submithwqueue_history_priv_head[slot], priv_head,
+               head_len);
+    hvdxg.submithwqueue_history_index++;
 }
 
 static void hvdxg_note_lock2_history(uint32 len, int32 ret, uint32 status,
@@ -2658,6 +6020,19 @@ static void hvdxg_note_lock2_history(uint32 len, int32 ret, uint32 status,
     hvdxg.queryadapter_history_len[(i)], \
     hvdxg.queryadapter_history_ret[(i)], \
     hvdxg.queryadapter_history_status[(i)]
+
+#define HV_DXG_QAI_ADMISSION_ARGS(i) \
+    hvdxg.queryadapter_admission_kind[(i)], \
+    hvdxg.queryadapter_admission_type[(i)], \
+    hvdxg.queryadapter_admission_size[(i)], \
+    hvdxg.queryadapter_admission_len[(i)], \
+    hvdxg.queryadapter_admission_ret[(i)], \
+    hvdxg.queryadapter_admission_status[(i)], \
+    hvdxg.queryadapter_admission_route[(i)], \
+    hvdxg.queryadapter_admission_source[(i)], \
+    hvdxg.queryadapter_admission_adapter[(i)], \
+    hvdxg.queryadapter_admission_host[(i)], \
+    hvdxg.queryadapter_admission_head_hash[(i)]
 
 #define HV_DXG_AH_ARGS(i) \
     hvdxg.allocation_history_device[(i)], \
@@ -2689,6 +6064,22 @@ static void hvdxg_note_lock2_history(uint32 len, int32 ret, uint32 status,
     hvdxg.lock2_history_ret[(i)], \
     hvdxg.lock2_history_status[(i)]
 
+#define HV_DXG_SH_ARGS(i) \
+    hvdxg.submithwqueue_history_len[(i)], \
+    hvdxg.submithwqueue_history_ret[(i)], \
+    hvdxg.submithwqueue_history_queue[(i)], \
+    hvdxg.submithwqueue_history_command_length[(i)], \
+    hvdxg.submithwqueue_history_priv_size[(i)], \
+    hvdxg.submithwqueue_history_priv_head_len[(i)], \
+    hvdxg.submithwqueue_history_priv_head[(i)][0], \
+    hvdxg.submithwqueue_history_priv_head[(i)][1], \
+    hvdxg.submithwqueue_history_priv_head[(i)][2], \
+    hvdxg.submithwqueue_history_priv_head[(i)][3], \
+    hvdxg.submithwqueue_history_priv_head[(i)][4], \
+    hvdxg.submithwqueue_history_priv_head[(i)][5], \
+    hvdxg.submithwqueue_history_priv_head[(i)][6], \
+    hvdxg.submithwqueue_history_priv_head[(i)][7]
+
 static void hvdxg_note_ioctl_history(uint64 cmd, int ret)
 {
     uint32 slot = hvdxg.ioctl_history_index %
@@ -2719,6 +6110,70 @@ static void hvdxg_note_ioctl_timing(uint64 cmd, uint64 ticks)
     hvdxg.ioctl_nr_last_ticks[nr] = ticks;
     if (ticks > hvdxg.ioctl_nr_max_ticks[nr])
         hvdxg.ioctl_nr_max_ticks[nr] = ticks;
+}
+
+static void hvdxg_note_host_command(uint32 command_type)
+{
+    uint32 order = 0;
+
+    switch (command_type) {
+    case HV_DXGK_VMBCOMMAND_DESTROYALLOCATION:
+        hvdxg.host_cmd_destroyallocation++;
+        order = ++hvdxg.cleanup_order_seq;
+        hvdxg.cleanup_last_destroy_order = order;
+        break;
+    case HV_DXGK_VMBCOMMAND_DESTROYCONTEXT:
+        hvdxg.host_cmd_destroycontext++;
+        order = ++hvdxg.cleanup_order_seq;
+        hvdxg.cleanup_last_destroy_order = order;
+        break;
+    case HV_DXGK_VMBCOMMAND_DESTROYHWQUEUE:
+        hvdxg.host_cmd_destroyhwqueue++;
+        order = ++hvdxg.cleanup_order_seq;
+        hvdxg.cleanup_last_destroy_order = order;
+        break;
+    case HV_DXGK_VMBCOMMAND_DESTROYPAGINGQUEUE:
+        hvdxg.host_cmd_destroypagingqueue++;
+        order = ++hvdxg.cleanup_order_seq;
+        hvdxg.cleanup_last_destroy_order = order;
+        break;
+    case HV_DXGK_VMBCOMMAND_DESTROYDEVICE:
+        hvdxg.host_cmd_destroydevice++;
+        order = ++hvdxg.cleanup_order_seq;
+        hvdxg.cleanup_last_destroy_order = order;
+        break;
+    case HV_DXGK_VMBCOMMAND_DESTROYSYNCOBJECT:
+        hvdxg.host_cmd_destroysync++;
+        order = ++hvdxg.cleanup_order_seq;
+        hvdxg.cleanup_last_destroy_order = order;
+        break;
+    case HV_DXGK_VMBCOMMAND_DESTROYPROCESS:
+        hvdxg.host_cmd_destroyprocess++;
+        order = ++hvdxg.cleanup_order_seq;
+        hvdxg.cleanup_destroyprocess_order = order;
+        break;
+    case HV_DXGK_VMBCOMMAND_FREEGPUVIRTUALADDRESS:
+        hvdxg.host_cmd_freegpuva++;
+        order = ++hvdxg.cleanup_order_seq;
+        hvdxg.cleanup_last_destroy_order = order;
+        break;
+    case HV_DXGK_VMBCOMMAND_CLOSEADAPTER:
+        hvdxg.closeadapter_host_count++;
+        order = ++hvdxg.cleanup_order_seq;
+        hvdxg.closeadapter_last_order = order;
+        if (hvdxg.cleanup_last_destroy_order != 0 &&
+            order > hvdxg.cleanup_last_destroy_order)
+            hvdxg.closeadapter_after_destroy_count++;
+        break;
+    case HV_DXGK_VMBCOMMAND_LOCK2:
+        hvdxg.host_cmd_lock2++;
+        break;
+    case HV_DXGK_VMBCOMMAND_UNLOCK2:
+        hvdxg.host_cmd_unlock2++;
+        break;
+    default:
+        break;
+    }
 }
 
 static void hvdxg_ioctl_timing_top(uint32 *top_nr)
@@ -2757,11 +6212,1000 @@ static void hvdxg_save_priv_head(uint8 *dst, uint32 dst_cap, uint32 *dst_len,
         memcpy(dst, src, len);
 }
 
+static uint32 hvdxg_runtime_d3d12_resource_flags(const uint8 *runtime,
+                                                 uint32 runtime_size)
+{
+    uint32 flags = 0;
+
+    /*
+     * The observed WSL/NVIDIA D3D12 runtime blob carries the
+     * D3D12_RESOURCE_DESC flags at this offset.  The raw blob is still exposed
+     * in /dev/dxg; this extracted value lets the NT-export guard distinguish a
+     * render target from a copied shared texture.
+     */
+    if (runtime != NULL && runtime_size >= 0xf0)
+        memcpy(&flags, runtime + 0xec, sizeof(flags));
+    return flags;
+}
+
+static uint16 hvdxg_read_u16_at(const uint8 *data, uint32 size, uint32 off)
+{
+    uint16 value = 0;
+
+    if (data != NULL && off <= size && size - off >= sizeof(value))
+        memcpy(&value, data + off, sizeof(value));
+    return value;
+}
+
+static uint32 hvdxg_read_u32_at(const uint8 *data, uint32 size, uint32 off)
+{
+    uint32 value = 0;
+
+    if (data != NULL && off <= size && size - off >= sizeof(value))
+        memcpy(&value, data + off, sizeof(value));
+    return value;
+}
+
+static uint64 hvdxg_read_u64_at(const uint8 *data, uint32 size, uint32 off)
+{
+    uint64 value = 0;
+
+    if (data != NULL && off <= size && size - off >= sizeof(value))
+        memcpy(&value, data + off, sizeof(value));
+    return value;
+}
+
+static void hvdxg_write_u32_at(uint8 *data, uint32 size, uint32 off,
+                               uint32 value)
+{
+    if (data != NULL && off <= size && size - off >= sizeof(value))
+        memcpy(data + off, &value, sizeof(value));
+}
+
+static void hvdxg_write_u64_at(uint8 *data, uint32 size, uint32 off,
+                               uint64 value)
+{
+    if (data != NULL && off <= size && size - off >= sizeof(value))
+        memcpy(data + off, &value, sizeof(value));
+}
+
+static uint32 hvdxg_hash_bytes(const uint8 *data, uint32 size)
+{
+    uint32 hash = 2166136261U;
+
+    if (data == NULL)
+        return 0;
+    for (uint32 i = 0; i < size; i++) {
+        hash ^= data[i];
+        hash *= 16777619U;
+    }
+    return hash;
+}
+
+static int hvdxg_queryadapter_alias_cache_type(uint32 type)
+{
+    return type == _KMTQAITYPE_UMDRIVERNAME ||
+           type == _KMTQAITYPE_ADAPTERTYPE ||
+           type == _KMTQAITYPE_PHYSICALADAPTERCOUNT ||
+           type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID ||
+           type == _KMTQAITYPE_ADAPTERTYPE_RENDER;
+}
+
+static struct hvdxg_queryadapter_alias_cache_entry *
+hvdxg_queryadapter_alias_cache_find(uint32 type, uint32 host_adapter)
+{
+    if (!hvdxg_queryadapter_alias_cache_type(type) || host_adapter == 0)
+        return NULL;
+    for (uint32 i = 0; i < HV_DXG_QUERYADAPTER_ALIAS_CACHE_TYPES; i++) {
+        struct hvdxg_queryadapter_alias_cache_entry *entry =
+            &hvdxg.queryadapter_alias_cache[i];
+
+        if (entry->valid && entry->type == type &&
+            entry->host_adapter == host_adapter)
+            return entry;
+    }
+    return NULL;
+}
+
+static int hvdxg_queryadapter_type0_cache_load(uint32 requested_size,
+                                               uint32 alias_adapter,
+                                               uint32 host_adapter,
+                                               uint8 *out)
+{
+    hvdxg.queryadapter_alias_cache_last_type =
+        HV_DXG_QAITYPE_SELECTED_ADAPTER;
+    hvdxg.queryadapter_alias_cache_last_size = requested_size;
+    hvdxg.queryadapter_alias_cache_last_len = 0;
+    hvdxg.queryadapter_alias_cache_last_alias = alias_adapter;
+    hvdxg.queryadapter_alias_cache_last_host = host_adapter;
+    hvdxg.queryadapter_alias_cache_last_hash = 0;
+    hvdxg.queryadapter_alias_cache_last_result = 0;
+
+    if (!hvdxg.queryadapter_type0_cache_valid ||
+        hvdxg.queryadapter_type0_cache_payload == NULL ||
+        hvdxg.queryadapter_type0_cache_host != host_adapter ||
+        hvdxg.queryadapter_type0_cache_input_hash !=
+            hvdxg.queryadapter_type0_private_hash ||
+        hvdxg.queryadapter_type0_cache_size < requested_size ||
+        out == NULL) {
+        hvdxg.queryadapter_alias_cache_misses++;
+        hvdxg.queryadapter_alias_cache_last_result = 2;
+        return -ENOENT;
+    }
+
+    memcpy(out, hvdxg.queryadapter_type0_cache_payload, requested_size);
+    hvdxg.queryadapter_alias_cache_hits++;
+    hvdxg.queryadapter_alias_cache_last_len = requested_size;
+    hvdxg.queryadapter_alias_cache_last_hash =
+        hvdxg.queryadapter_type0_cache_hash;
+    hvdxg.queryadapter_alias_cache_last_result = 1;
+    hvdxg_note_queryadapter_return_head(out, requested_size);
+    return 0;
+}
+
+static void hvdxg_queryadapter_type0_cache_store(uint32 size,
+                                                 uint32 host_adapter,
+                                                 const uint8 *payload)
+{
+    uint8 *copy;
+
+    if (host_adapter == 0 || payload == NULL || size == 0 ||
+        size > HV_DXG_QUERYADAPTER_TYPE0_CACHE_MAX)
+        return;
+
+    copy = kvmalloc(size);
+    if (copy == NULL) {
+        hvdxg.queryadapter_alias_cache_full++;
+        hvdxg.queryadapter_alias_cache_last_type =
+            HV_DXG_QAITYPE_SELECTED_ADAPTER;
+        hvdxg.queryadapter_alias_cache_last_size = size;
+        hvdxg.queryadapter_alias_cache_last_len = 0;
+        hvdxg.queryadapter_alias_cache_last_alias = 0;
+        hvdxg.queryadapter_alias_cache_last_host = host_adapter;
+        hvdxg.queryadapter_alias_cache_last_hash = 0;
+        hvdxg.queryadapter_alias_cache_last_result = 5;
+        return;
+    }
+    memcpy(copy, payload, size);
+    if (hvdxg.queryadapter_type0_cache_payload != NULL)
+        kvfree(hvdxg.queryadapter_type0_cache_payload);
+    hvdxg.queryadapter_type0_cache_payload = copy;
+    hvdxg.queryadapter_type0_cache_valid = 1;
+    hvdxg.queryadapter_type0_cache_size = size;
+    hvdxg.queryadapter_type0_cache_host = host_adapter;
+    hvdxg.queryadapter_type0_cache_input_hash =
+        hvdxg.queryadapter_type0_private_hash;
+    hvdxg.queryadapter_type0_cache_hash = hvdxg_hash_bytes(payload, size);
+    hvdxg.queryadapter_alias_cache_stores++;
+    hvdxg.queryadapter_alias_cache_last_type =
+        HV_DXG_QAITYPE_SELECTED_ADAPTER;
+    hvdxg.queryadapter_alias_cache_last_size = size;
+    hvdxg.queryadapter_alias_cache_last_len = size;
+    hvdxg.queryadapter_alias_cache_last_alias = 0;
+    hvdxg.queryadapter_alias_cache_last_host = host_adapter;
+    hvdxg.queryadapter_alias_cache_last_hash =
+        hvdxg.queryadapter_type0_cache_hash;
+    hvdxg.queryadapter_alias_cache_last_result = 3;
+}
+
+static int hvdxg_queryadapter_alias_cache_load(uint32 type,
+                                               uint32 requested_size,
+                                               uint32 alias_adapter,
+                                               uint32 host_adapter,
+                                               uint8 *out)
+{
+    struct hvdxg_queryadapter_alias_cache_entry *entry;
+
+    if (type == HV_DXG_QAITYPE_SELECTED_ADAPTER)
+        return hvdxg_queryadapter_type0_cache_load(requested_size,
+            alias_adapter, host_adapter, out);
+
+    hvdxg.queryadapter_alias_cache_last_type = type;
+    hvdxg.queryadapter_alias_cache_last_size = requested_size;
+    hvdxg.queryadapter_alias_cache_last_len = 0;
+    hvdxg.queryadapter_alias_cache_last_alias = alias_adapter;
+    hvdxg.queryadapter_alias_cache_last_host = host_adapter;
+    hvdxg.queryadapter_alias_cache_last_hash = 0;
+    hvdxg.queryadapter_alias_cache_last_result = 0;
+
+    entry = hvdxg_queryadapter_alias_cache_find(type, host_adapter);
+    if (entry == NULL || entry->size < requested_size ||
+        out == NULL || requested_size > HV_DXG_QUERYADAPTER_ALIAS_CACHE_MAX) {
+        hvdxg.queryadapter_alias_cache_misses++;
+        hvdxg.queryadapter_alias_cache_last_result = 2;
+        return -ENOENT;
+    }
+
+    memcpy(out, entry->payload, requested_size);
+    hvdxg.queryadapter_alias_cache_hits++;
+    hvdxg.queryadapter_alias_cache_last_len = requested_size;
+    hvdxg.queryadapter_alias_cache_last_hash =
+        hvdxg_hash_bytes(entry->payload, entry->size);
+    hvdxg.queryadapter_alias_cache_last_result = 1;
+    hvdxg_note_queryadapter_return_head(entry->payload, requested_size);
+    return 0;
+}
+
+static void hvdxg_queryadapter_alias_cache_store(uint32 type,
+                                                 uint32 size,
+                                                 uint32 host_adapter,
+                                                 const uint8 *payload)
+{
+    struct hvdxg_queryadapter_alias_cache_entry *entry = NULL;
+
+    if (type == HV_DXG_QAITYPE_SELECTED_ADAPTER) {
+        hvdxg_queryadapter_type0_cache_store(size, host_adapter, payload);
+        return;
+    }
+
+    if (!hvdxg_queryadapter_alias_cache_type(type) ||
+        host_adapter == 0 || payload == NULL ||
+        size == 0 || size > HV_DXG_QUERYADAPTER_ALIAS_CACHE_MAX)
+        return;
+
+    entry = hvdxg_queryadapter_alias_cache_find(type, host_adapter);
+    if (entry == NULL) {
+        for (uint32 i = 0; i < HV_DXG_QUERYADAPTER_ALIAS_CACHE_TYPES; i++) {
+            if (!hvdxg.queryadapter_alias_cache[i].valid) {
+                entry = &hvdxg.queryadapter_alias_cache[i];
+                break;
+            }
+        }
+    }
+    if (entry == NULL) {
+        hvdxg.queryadapter_alias_cache_full++;
+        return;
+    }
+
+    memset(entry, 0, sizeof(*entry));
+    entry->valid = 1;
+    entry->type = type;
+    entry->size = size;
+    entry->host_adapter = host_adapter;
+    memcpy(entry->payload, payload, size);
+    entry->raw_hash = hvdxg_hash_bytes(payload, size);
+    hvdxg.queryadapter_alias_cache_stores++;
+    hvdxg.queryadapter_alias_cache_last_type = type;
+    hvdxg.queryadapter_alias_cache_last_size = size;
+    hvdxg.queryadapter_alias_cache_last_len = size;
+    hvdxg.queryadapter_alias_cache_last_alias = 0;
+    hvdxg.queryadapter_alias_cache_last_host = host_adapter;
+    hvdxg.queryadapter_alias_cache_last_hash = entry->raw_hash;
+    hvdxg.queryadapter_alias_cache_last_result = 3;
+}
+
+static int hvdxg_queryadapter_stage_umd_payload(uint32 type, uint32 size,
+                                                uint32 alias_adapter,
+                                                uint32 host_adapter,
+                                                uint8 *out)
+{
+    uint32 need;
+
+    hvdxg.queryadapter_alias_staged_type = type;
+    hvdxg.queryadapter_alias_staged_size = size;
+    hvdxg.queryadapter_alias_staged_alias = alias_adapter;
+    hvdxg.queryadapter_alias_staged_host = host_adapter;
+    hvdxg.queryadapter_alias_staged_path = 0;
+    hvdxg.queryadapter_alias_staged_ret = 0;
+
+    if (type != _KMTQAITYPE_UMDRIVERNAME || out == NULL ||
+        hvdxg.adapter_vendor_id != HV_DXG_VENDOR_NVIDIA) {
+        hvdxg.queryadapter_alias_staged_ret = -ENOENT;
+        return -ENOENT;
+    }
+    need = ((uint32)strlen(HV_DXG_NVIDIA_UMD_DRIVERSTORE_PATH) + 1U) *
+           sizeof(uint16);
+    if (size < need) {
+        hvdxg.queryadapter_alias_staged_ret = -EOVERFLOW;
+        return -EOVERFLOW;
+    }
+
+    memset(out, 0, size);
+    hvdxg_write_utf16_string(out, size, HV_DXG_NVIDIA_UMD_DRIVERSTORE_PATH);
+    hvdxg.queryadapter_alias_staged_path = 1;
+    hvdxg_note_queryadapter_return_head(out, size);
+    return 0;
+}
+
+static int hvdxg_rewrite_umd_driver_path(uint8 *data, uint32 size,
+                                         uint32 host_status)
+{
+    const char *path = NULL;
+    uint32 path_id = 0;
+    uint32 need;
+
+    hvdxg.queryadapter_umd_rewrite_attempted = 1;
+    hvdxg.queryadapter_umd_rewrite_rewritten = 0;
+    hvdxg.queryadapter_umd_rewrite_path = 0;
+    hvdxg.queryadapter_umd_rewrite_vendor = hvdxg.adapter_vendor_id;
+    hvdxg.queryadapter_umd_rewrite_original_hash =
+        hvdxg_hash_bytes(data, size);
+    hvdxg.queryadapter_umd_rewrite_original0 =
+        size >= sizeof(uint32) ? hvdxg_read_u32(data) : 0;
+    hvdxg.queryadapter_umd_rewrite_original1 =
+        size >= 2 * sizeof(uint32) ?
+        hvdxg_read_u32(data + sizeof(uint32)) : 0;
+    hvdxg.queryadapter_umd_rewrite_host_status = host_status;
+    hvdxg.queryadapter_umd_rewrite_ret = 0;
+
+    if (hvdxg.adapter_vendor_id == HV_DXG_VENDOR_NVIDIA) {
+        path = HV_DXG_NVIDIA_UMD_DRIVERSTORE_PATH;
+        path_id = 1;
+    } else if (hvdxg.adapter_vendor_id == HV_DXG_VENDOR_INTEL) {
+        path = "/lib/libigd12umd64.so";
+        path_id = 2;
+    } else if (data != NULL) {
+        uint32 chars = size / sizeof(uint16);
+        uint16 *words = (uint16 *)data;
+
+        for (uint32 i = 0; i + 1 < chars && path == NULL; i++) {
+            uint16 c0 = words[i] >= 'A' && words[i] <= 'Z' ?
+                        words[i] + ('a' - 'A') : words[i];
+            uint16 c1 = words[i + 1] >= 'A' && words[i + 1] <= 'Z' ?
+                        words[i + 1] + ('a' - 'A') : words[i + 1];
+
+            if (c0 == 'n' && c1 == 'v') {
+                path = HV_DXG_NVIDIA_UMD_DRIVERSTORE_PATH;
+                path_id = 1;
+                hvdxg.queryadapter_umd_rewrite_vendor =
+                    HV_DXG_VENDOR_NVIDIA;
+            } else if (i + 2 < chars && c0 == 'i' && c1 == 'g') {
+                uint16 c2 = words[i + 2] >= 'A' &&
+                            words[i + 2] <= 'Z' ?
+                            words[i + 2] + ('a' - 'A') : words[i + 2];
+                if (c2 == 'd') {
+                    path = "/lib/libigd12umd64.so";
+                    path_id = 2;
+                    hvdxg.queryadapter_umd_rewrite_vendor =
+                        HV_DXG_VENDOR_INTEL;
+                }
+            }
+        }
+    }
+    if (path == NULL) {
+        hvdxg.queryadapter_umd_rewrite_ret = -ENOTSUP;
+        return 0;
+    }
+
+    need = ((uint32)strlen(path) + 1U) * sizeof(uint16);
+    hvdxg.queryadapter_umd_rewrite_path = path_id;
+    if (size < need) {
+        hvdxg.queryadapter_umd_rewrite_ret = -EOVERFLOW;
+        return -EOVERFLOW;
+    }
+    memset(data, 0, size);
+    hvdxg_write_utf16_string(data, size, path);
+    hvdxg.queryadapter_umd_rewrite_rewritten = 1;
+    return 0;
+}
+
+static void hvdxg_note_queryadapter_type0_input(const uint8 *data,
+                                                uint32 size)
+{
+    uint32 head_len = size < HV_DXG_QUERYADAPTER_TYPE0_SNAPSHOT_BYTES ?
+                      size : HV_DXG_QUERYADAPTER_TYPE0_SNAPSHOT_BYTES;
+    uint32 tail_len = head_len;
+
+    hvdxg.queryadapter_type0_private_size = size;
+    hvdxg.queryadapter_type0_private_hash = hvdxg_hash_bytes(data, size);
+    hvdxg.queryadapter_type0_private_head_len = head_len;
+    hvdxg.queryadapter_type0_private_tail_len = tail_len;
+    memset(hvdxg.queryadapter_type0_private_head, 0,
+           sizeof(hvdxg.queryadapter_type0_private_head));
+    memset(hvdxg.queryadapter_type0_private_tail, 0,
+           sizeof(hvdxg.queryadapter_type0_private_tail));
+    if (data != NULL && head_len != 0)
+        memcpy(hvdxg.queryadapter_type0_private_head, data, head_len);
+    if (data != NULL && tail_len != 0)
+        memcpy(hvdxg.queryadapter_type0_private_tail,
+               data + size - tail_len, tail_len);
+
+    hvdxg.queryadapter_type0_primary_len = 0;
+    hvdxg.queryadapter_type0_primary_ret = 0;
+    hvdxg.queryadapter_type0_primary_status = 0;
+    hvdxg.queryadapter_type0_fallback_attempted = 0;
+    hvdxg.queryadapter_type0_fallback_used = 0;
+    hvdxg.queryadapter_type0_fallback_len = 0;
+    hvdxg.queryadapter_type0_fallback_ret = 0;
+    hvdxg.queryadapter_type0_fallback_status = 0;
+    hvdxg.queryadapter_type0_result_route = 0;
+    hvdxg.queryadapter_type0_fallback_reason = 0;
+    hvdxg.queryadapter_type0_fallback_route = 0;
+    hvdxg.queryadapter_umd_rewrite_attempted = 0;
+    hvdxg.queryadapter_umd_rewrite_rewritten = 0;
+    hvdxg.queryadapter_umd_rewrite_path = 0;
+    hvdxg.queryadapter_umd_rewrite_vendor = 0;
+    hvdxg.queryadapter_umd_rewrite_original_hash = 0;
+    hvdxg.queryadapter_umd_rewrite_original0 = 0;
+    hvdxg.queryadapter_umd_rewrite_original1 = 0;
+    hvdxg.queryadapter_umd_rewrite_host_status = 0;
+    hvdxg.queryadapter_umd_rewrite_ret = 0;
+}
+
+static void hvdxg_note_queryadapter_type15_failure(uint32 type, int ret,
+                                                   int32 status,
+                                                   uint32 process)
+{
+    if (type != 15U || ret == 0)
+        return;
+    hvdxg.queryadapter_type15_fail_ret = ret;
+    hvdxg.queryadapter_type15_fail_status = status;
+    hvdxg.queryadapter_type15_fail_process = process;
+    hvdxg.queryadapter_type15_fail_route = hvdxg.queryadapter_send_route;
+    hvdxg.queryadapter_type15_fail_ext_luid_low =
+        hvdxg.queryadapter_send_ext_luid_low;
+    hvdxg.queryadapter_type15_fail_ext_luid_high =
+        hvdxg.queryadapter_send_ext_luid_high;
+}
+
+static void hvdxg_note_shared_resource_metadata(
+    const struct hvdxg_tracked_resource *resource)
+{
+    if (resource == NULL) {
+        hvdxg.sharedresource_meta_track_host = 0;
+        hvdxg.sharedresource_meta_runtime_len = 0;
+        hvdxg.sharedresource_meta_resource_len = 0;
+        hvdxg.sharedresource_meta_total_len = 0;
+        hvdxg.sharedresource_meta_alloc0_priv = 0;
+        hvdxg.sharedresource_meta_runtime_hash = 0;
+        hvdxg.sharedresource_meta_resource_hash = 0;
+        hvdxg.sharedresource_meta_total_hash = 0;
+        hvdxg.sharedresource_meta_match_in = 0;
+        hvdxg.sharedresource_meta_match_out = 0;
+        hvdxg.sharedresource_meta_total_w4 = 0;
+        hvdxg.sharedresource_meta_total_w8 = 0;
+        hvdxg.sharedresource_meta_logical_flags = 0;
+        hvdxg.sharedresource_meta_host_result_flags = 0;
+        hvdxg.sharedresource_meta_host_flags_ignored = 0;
+        return;
+    }
+    hvdxg.sharedresource_meta_track_host = resource->total_priv_from_host;
+    hvdxg.sharedresource_meta_runtime_len =
+        resource->private_runtime_data_size;
+    hvdxg.sharedresource_meta_resource_len =
+        resource->resource_priv_drv_data_size;
+    hvdxg.sharedresource_meta_total_len =
+        resource->total_priv_drv_data_size;
+    hvdxg.sharedresource_meta_alloc0_priv =
+        resource->allocation_count != 0 ? resource->alloc_priv_sizes[0] : 0;
+    hvdxg.sharedresource_meta_runtime_hash =
+        hvdxg_hash_bytes(resource->private_runtime_data,
+                         resource->private_runtime_data_size);
+    hvdxg.sharedresource_meta_resource_hash =
+        hvdxg_hash_bytes(resource->resource_priv_drv_data,
+                         resource->resource_priv_drv_data_size);
+    hvdxg.sharedresource_meta_total_hash =
+        hvdxg_hash_bytes(resource->total_priv_drv_data,
+                         resource->total_priv_drv_data_size);
+    hvdxg.sharedresource_meta_total_w4 =
+        hvdxg_read_u32_at(resource->total_priv_drv_data,
+                          resource->total_priv_drv_data_size, 0x10);
+    hvdxg.sharedresource_meta_total_w8 =
+        hvdxg_read_u32_at(resource->total_priv_drv_data,
+                          resource->total_priv_drv_data_size, 0x20);
+    hvdxg.sharedresource_meta_logical_flags = resource->create_flags_value;
+    hvdxg.sharedresource_meta_host_result_flags =
+        resource->host_create_flags_value;
+    hvdxg.sharedresource_meta_host_flags_ignored =
+        resource->host_create_flags_value != 0 &&
+        resource->host_create_flags_value != resource->create_flags_value ?
+        1 : 0;
+    hvdxg.sharedresource_meta_match_in =
+        resource->total_priv_drv_data_size ==
+            hvdxg.d3d12_shared_alloc_priv_head_len &&
+        resource->total_priv_drv_data_size != 0 &&
+        memcmp(resource->total_priv_drv_data,
+               hvdxg.d3d12_shared_alloc_priv_head,
+               resource->total_priv_drv_data_size) == 0 ? 1 : 0;
+    hvdxg.sharedresource_meta_match_out =
+        resource->total_priv_drv_data_size ==
+            hvdxg.d3d12_shared_alloc_out_priv_head_len &&
+        resource->total_priv_drv_data_size != 0 &&
+        memcmp(resource->total_priv_drv_data,
+               hvdxg.d3d12_shared_alloc_out_priv_head,
+               resource->total_priv_drv_data_size) == 0 ? 1 : 0;
+}
+
+static uint32 hvdxg_shared_resource_alloc0_hash(
+    const struct hvdxg_tracked_resource *resource)
+{
+    if (resource == NULL || resource->allocation_count == 0 ||
+        resource->alloc_priv_sizes[0] == 0 ||
+        resource->total_priv_drv_data == NULL)
+        return 0;
+    if (resource->alloc_priv_sizes[0] > resource->total_priv_drv_data_size)
+        return 0;
+    return hvdxg_hash_bytes(resource->total_priv_drv_data,
+                            resource->alloc_priv_sizes[0]);
+}
+
+static uint32 hvdxg_ntshared_cache_refs(uint32 kind, uint32 process,
+                                        uint32 object,
+                                        uint32 host_nt_handle);
+
+static void hvdxg_reset_shared_resource_record(void)
+{
+    hvdxg.sharedresource_record_valid = 0;
+    hvdxg.sharedresource_record_stage = 0;
+    hvdxg.sharedresource_record_key_kind = 0;
+    hvdxg.sharedresource_record_key_process = 0;
+    hvdxg.sharedresource_record_key_object = 0;
+    hvdxg.sharedresource_record_key_global = 0;
+    hvdxg.sharedresource_record_key_nt = 0;
+    hvdxg.sharedresource_record_source_process = 0;
+    hvdxg.sharedresource_record_source_tgid = 0;
+    hvdxg.sharedresource_record_source_generation = 0;
+    hvdxg.sharedresource_record_device = 0;
+    hvdxg.sharedresource_record_resource = 0;
+    hvdxg.sharedresource_record_allocation = 0;
+    hvdxg.sharedresource_record_adapter_low = 0;
+    hvdxg.sharedresource_record_adapter_high = 0;
+    hvdxg.sharedresource_record_host_adapter_low = 0;
+    hvdxg.sharedresource_record_host_adapter_high = 0;
+    hvdxg.sharedresource_record_sealed_generation = 0;
+    hvdxg.sharedresource_record_sealed = 0;
+    hvdxg.sharedresource_record_seal_before_fd = 0;
+    hvdxg.sharedresource_record_alloc_count = 0;
+    hvdxg.sharedresource_record_runtime_size = 0;
+    hvdxg.sharedresource_record_resource_size = 0;
+    hvdxg.sharedresource_record_total_size = 0;
+    hvdxg.sharedresource_record_alloc0_priv = 0;
+    hvdxg.sharedresource_record_runtime_hash = 0;
+    hvdxg.sharedresource_record_resource_hash = 0;
+    hvdxg.sharedresource_record_total_hash = 0;
+    hvdxg.sharedresource_record_alloc0_hash = 0;
+    hvdxg.sharedresource_record_nt_refs = 0;
+    hvdxg.sharedresource_record_query_count = 0;
+    hvdxg.sharedresource_record_open_count = 0;
+    hvdxg.sharedresource_record_fd_publish_count = 0;
+    hvdxg.sharedresource_record_local_admit_ret = 0;
+    hvdxg.sharedresource_record_local_exact = 0;
+    hvdxg.sharedresource_record_mutation_after_seal = 0;
+}
+
+static void hvdxg_note_shared_resource_record(
+    const char *stage_name, uint32 stage,
+    const struct hvdxg_tracked_resource *resource,
+    uint32 kind, uint32 process, uint32 cache_object, uint32 global_share,
+    uint32 host_nt_handle, int32 local_admit_ret, uint32 local_exact)
+{
+    uint32 runtime_hash = 0;
+    uint32 resource_hash = 0;
+    uint32 total_hash = 0;
+    uint32 alloc0_hash = 0;
+    uint64 source_tgid = current != NULL ? (uint64)thread_tgid(current) : 0;
+    uint32 mutation = 0;
+
+    (void)stage_name;
+    if (resource == NULL)
+        return;
+
+    runtime_hash = hvdxg_hash_bytes(resource->private_runtime_data,
+                                    resource->private_runtime_data_size);
+    resource_hash = hvdxg_hash_bytes(resource->resource_priv_drv_data,
+                                     resource->resource_priv_drv_data_size);
+    total_hash = hvdxg_hash_bytes(resource->total_priv_drv_data,
+                                  resource->total_priv_drv_data_size);
+    alloc0_hash = hvdxg_shared_resource_alloc0_hash(resource);
+    if (hvdxg.sharedresource_record_valid &&
+        hvdxg.sharedresource_record_sealed &&
+        hvdxg.sharedresource_record_key_process == process &&
+        hvdxg.sharedresource_record_key_object == cache_object &&
+        (hvdxg.sharedresource_record_runtime_hash != runtime_hash ||
+         hvdxg.sharedresource_record_resource_hash != resource_hash ||
+         hvdxg.sharedresource_record_total_hash != total_hash ||
+         hvdxg.sharedresource_record_alloc0_hash != alloc0_hash))
+        mutation = 1;
+    if (hvdxg.sharedresource_record_valid &&
+        hvdxg.sharedresource_record_key_process == process &&
+        hvdxg.sharedresource_record_key_object == cache_object &&
+        hvdxg.sharedresource_record_source_tgid != 0)
+        source_tgid = hvdxg.sharedresource_record_source_tgid;
+
+    hvdxg.sharedresource_record_valid = 1;
+    hvdxg.sharedresource_record_stage = stage;
+    hvdxg.sharedresource_record_key_kind = kind;
+    hvdxg.sharedresource_record_key_process = process;
+    hvdxg.sharedresource_record_key_object = cache_object;
+    hvdxg.sharedresource_record_key_global = global_share;
+    hvdxg.sharedresource_record_key_nt = host_nt_handle;
+    hvdxg.sharedresource_record_source_process = resource->owner_process;
+    hvdxg.sharedresource_record_source_tgid = source_tgid;
+    hvdxg.sharedresource_record_source_generation =
+        resource->owner_generation;
+    hvdxg.sharedresource_record_device = resource->device;
+    hvdxg.sharedresource_record_resource = resource->resource;
+    hvdxg.sharedresource_record_allocation =
+        resource->allocation_count != 0 ? resource->allocation_handles[0] : 0;
+    hvdxg.sharedresource_record_adapter_low = hvdxg.adapter_luid.a;
+    hvdxg.sharedresource_record_adapter_high = hvdxg.adapter_luid.b;
+    hvdxg.sharedresource_record_host_adapter_low = hvdxg.host_adapter_luid.a;
+    hvdxg.sharedresource_record_host_adapter_high = hvdxg.host_adapter_luid.b;
+    hvdxg.sharedresource_record_sealed_generation =
+        resource->sealed_generation;
+    hvdxg.sharedresource_record_sealed = resource->sealed;
+    hvdxg.sharedresource_record_alloc_count = resource->allocation_count;
+    hvdxg.sharedresource_record_runtime_size =
+        resource->private_runtime_data_size;
+    hvdxg.sharedresource_record_resource_size =
+        resource->resource_priv_drv_data_size;
+    hvdxg.sharedresource_record_total_size =
+        resource->total_priv_drv_data_size;
+    hvdxg.sharedresource_record_alloc0_priv =
+        resource->allocation_count != 0 ? resource->alloc_priv_sizes[0] : 0;
+    hvdxg.sharedresource_record_runtime_hash = runtime_hash;
+    hvdxg.sharedresource_record_resource_hash = resource_hash;
+    hvdxg.sharedresource_record_total_hash = total_hash;
+    hvdxg.sharedresource_record_alloc0_hash = alloc0_hash;
+    hvdxg.sharedresource_record_nt_refs =
+        hvdxg_ntshared_cache_refs(kind, process, cache_object,
+                                  host_nt_handle);
+    if (hvdxg.sharedresource_record_nt_refs == 0)
+        hvdxg.sharedresource_record_nt_refs = resource->host_shared_refs;
+    hvdxg.sharedresource_record_local_admit_ret = local_admit_ret;
+    hvdxg.sharedresource_record_local_exact = local_exact;
+    if (mutation)
+        hvdxg.sharedresource_record_mutation_after_seal = 1;
+}
+
+static int hv_cmdline_enabled(const char *key);
+
+static void hvdxg_normalize_d3d12_shared_alloc_priv(
+    const struct d3dkmt_createallocation *req,
+    const struct d3dddi_allocationinfo2 *alloc_info, uint8 *private_base)
+{
+    uint8 *runtime;
+    uint8 *alloc_priv;
+    uint32 alloc_size;
+    uint32 w4;
+    uint32 w8;
+    uint32 width;
+    uint32 height;
+    uint64 rt8;
+    uint64 rt10;
+
+    hvdxg.d3d12_shared_norm_seen = 0;
+    hvdxg.d3d12_shared_norm_applied = 0;
+    hvdxg.d3d12_shared_norm_reason = 0;
+    hvdxg.d3d12_shared_norm_magic0 = 0;
+    hvdxg.d3d12_shared_norm_magic3 = 0;
+    hvdxg.d3d12_shared_norm_pre_w4 = 0;
+    hvdxg.d3d12_shared_norm_post_w4 = 0;
+    hvdxg.d3d12_shared_norm_pre_w8 = 0;
+    hvdxg.d3d12_shared_norm_post_w8 = 0;
+    hvdxg.d3d12_shared_norm_runtime_applied = 0;
+    hvdxg.d3d12_shared_norm_width = 0;
+    hvdxg.d3d12_shared_norm_height = 0;
+    hvdxg.d3d12_shared_norm_pre_rt8 = 0;
+    hvdxg.d3d12_shared_norm_post_rt8 = 0;
+    hvdxg.d3d12_shared_norm_pre_rt10 = 0;
+    hvdxg.d3d12_shared_norm_post_rt10 = 0;
+    hvdxg.d3d12_shared_norm_pre_rt38 = 0;
+    hvdxg.d3d12_shared_norm_post_rt38 = 0;
+    hvdxg.d3d12_shared_norm_pre_rt50 = 0;
+    hvdxg.d3d12_shared_norm_post_rt50 = 0;
+    hvdxg.d3d12_shared_norm_pre_rt58 = 0;
+    hvdxg.d3d12_shared_norm_post_rt58 = 0;
+
+    if (req == NULL || alloc_info == NULL || private_base == NULL)
+        return;
+    if (req->flags.value != 0x47)
+        return;
+    hvdxg.d3d12_shared_norm_seen = 1;
+    if (req->alloc_count != 1 || req->private_runtime_data_size != 264 ||
+        req->priv_drv_data_size != 0 ||
+        alloc_info[0].priv_drv_data_size != 594) {
+        hvdxg.d3d12_shared_norm_reason = 1;
+        return;
+    }
+
+    alloc_size = alloc_info[0].priv_drv_data_size;
+    runtime = private_base;
+    alloc_priv = private_base + req->private_runtime_data_size +
+                 req->priv_drv_data_size;
+    hvdxg.d3d12_shared_norm_magic0 =
+        hvdxg_read_u32_at(alloc_priv, alloc_size, 0);
+    hvdxg.d3d12_shared_norm_magic3 =
+        hvdxg_read_u32_at(alloc_priv, alloc_size, 12);
+    if (hvdxg.d3d12_shared_norm_magic0 != 0x4e564441U ||
+        hvdxg.d3d12_shared_norm_magic3 != 0x4e564458U) {
+        hvdxg.d3d12_shared_norm_reason = 2;
+        return;
+    }
+
+    w4 = hvdxg_read_u32_at(alloc_priv, alloc_size, 0x10);
+    w8 = hvdxg_read_u32_at(alloc_priv, alloc_size, 0x20);
+    width = hvdxg_read_u32_at(alloc_priv, alloc_size, 0x30);
+    height = hvdxg_read_u32_at(alloc_priv, alloc_size, 0x34);
+    hvdxg.d3d12_shared_norm_pre_w4 = w4;
+    hvdxg.d3d12_shared_norm_pre_w8 = w8;
+    hvdxg.d3d12_shared_norm_width = width;
+    hvdxg.d3d12_shared_norm_height = height;
+    hvdxg.d3d12_shared_norm_pre_rt8 =
+        hvdxg_read_u64_at(runtime, req->private_runtime_data_size, 0x8);
+    hvdxg.d3d12_shared_norm_pre_rt10 =
+        hvdxg_read_u64_at(runtime, req->private_runtime_data_size, 0x10);
+    hvdxg.d3d12_shared_norm_pre_rt38 =
+        hvdxg_read_u64_at(runtime, req->private_runtime_data_size, 0x38);
+    hvdxg.d3d12_shared_norm_pre_rt50 =
+        hvdxg_read_u64_at(runtime, req->private_runtime_data_size, 0x50);
+    hvdxg.d3d12_shared_norm_pre_rt58 =
+        hvdxg_read_u64_at(runtime, req->private_runtime_data_size, 0x58);
+    if (!hv_cmdline_enabled("dxg_d3d12_private_normalize")) {
+        hvdxg.d3d12_shared_norm_post_w4 = w4;
+        hvdxg.d3d12_shared_norm_post_w8 = w8;
+        hvdxg.d3d12_shared_norm_post_rt8 =
+            hvdxg.d3d12_shared_norm_pre_rt8;
+        hvdxg.d3d12_shared_norm_post_rt10 =
+            hvdxg.d3d12_shared_norm_pre_rt10;
+        hvdxg.d3d12_shared_norm_post_rt38 =
+            hvdxg.d3d12_shared_norm_pre_rt38;
+        hvdxg.d3d12_shared_norm_post_rt50 =
+            hvdxg.d3d12_shared_norm_pre_rt50;
+        hvdxg.d3d12_shared_norm_post_rt58 =
+            hvdxg.d3d12_shared_norm_pre_rt58;
+        hvdxg.d3d12_shared_norm_reason = 4;
+        return;
+    }
+    /*
+     * Preserve the NVIDIA runtime/private blobs and overlay only the scalar
+     * fields under an explicit diagnostic boot flag.  The WSL parity path
+     * forwards private bytes verbatim.
+     */
+    w4 |= 0x8U;
+    w8 |= 0x1U;
+    rt8 = ((uint64)height << 32) | width;
+    rt10 = ((uint64)1U << 32) | 0x57U;
+    hvdxg_write_u32_at(alloc_priv, alloc_size, 0x10, w4);
+    hvdxg_write_u32_at(alloc_priv, alloc_size, 0x20, w8);
+    hvdxg_write_u64_at(runtime, req->private_runtime_data_size, 0x8, rt8);
+    hvdxg_write_u64_at(runtime, req->private_runtime_data_size, 0x10, rt10);
+    hvdxg.d3d12_shared_norm_post_w4 = w4;
+    hvdxg.d3d12_shared_norm_post_w8 = w8;
+    hvdxg.d3d12_shared_norm_post_rt8 = rt8;
+    hvdxg.d3d12_shared_norm_post_rt10 = rt10;
+    hvdxg.d3d12_shared_norm_post_rt38 =
+        hvdxg_read_u64_at(runtime, req->private_runtime_data_size, 0x38);
+    hvdxg.d3d12_shared_norm_post_rt50 =
+        hvdxg_read_u64_at(runtime, req->private_runtime_data_size, 0x50);
+    hvdxg.d3d12_shared_norm_post_rt58 =
+        hvdxg_read_u64_at(runtime, req->private_runtime_data_size, 0x58);
+    hvdxg.d3d12_shared_norm_runtime_applied = 1;
+    hvdxg.d3d12_shared_norm_applied = 1;
+    hvdxg.d3d12_shared_norm_reason = 3;
+}
+
+static void hvdxg_capture_d3d12_runtime_user(
+    const struct d3dkmt_createallocation *req)
+{
+    uint32 copy_len;
+
+    hvdxg.d3d12_shared_runtime_user_copy_ret = 0;
+    hvdxg.d3d12_shared_runtime_user_mismatch = 0;
+    hvdxg.d3d12_shared_runtime_user_head_len = 0;
+    memset(hvdxg.d3d12_shared_runtime_user_head, 0,
+           sizeof(hvdxg.d3d12_shared_runtime_user_head));
+
+    if (req == NULL || req->flags.value != 0x47)
+        return;
+    copy_len = req->private_runtime_data_size;
+    if (copy_len > sizeof(hvdxg.d3d12_shared_runtime_user_head))
+        copy_len = sizeof(hvdxg.d3d12_shared_runtime_user_head);
+    if (copy_len == 0)
+        return;
+    if (req->private_runtime_data == 0) {
+        hvdxg.d3d12_shared_runtime_user_copy_ret = -EINVAL;
+        return;
+    }
+    if (either_copyin(hvdxg.d3d12_shared_runtime_user_head, 1,
+                      req->private_runtime_data, copy_len) < 0) {
+        hvdxg.d3d12_shared_runtime_user_copy_ret = -EFAULT;
+        return;
+    }
+    hvdxg.d3d12_shared_runtime_user_head_len = copy_len;
+}
+
+static void hvdxg_note_d3d12_shared_createallocation_request(
+    const struct d3dkmt_createallocation *req,
+    const struct d3dddi_allocationinfo2 *alloc_info,
+    const uint8 *private_base, uint64 dxg_process)
+{
+    const uint8 *runtime;
+    const uint8 *resource_priv;
+    const uint8 *alloc_priv;
+
+    if (req == NULL || alloc_info == NULL || private_base == NULL ||
+        req->flags.value != 0x47)
+        return;
+
+    runtime = private_base;
+    resource_priv = runtime + req->private_runtime_data_size;
+    alloc_priv = resource_priv + req->priv_drv_data_size;
+
+    hvdxg.d3d12_shared_create_seq = ++hvdxg.d3d12_shared_event_seq;
+    hvdxg.d3d12_shared_first_nt_seq = 0;
+    hvdxg.destroyalloc_d3d12_match_count = 0;
+    hvdxg.destroyalloc_d3d12_pending_match_count = 0;
+    hvdxg.destroyalloc_d3d12_last_match = 0;
+    hvdxg.destroyalloc_d3d12_last_seq = 0;
+    hvdxg.destroyalloc_d3d12_first_seq = 0;
+    hvdxg.destroyalloc_d3d12_first_context = 0;
+    hvdxg.destroyalloc_d3d12_first_match = 0;
+    hvdxg.destroyalloc_d3d12_first_pending = 0;
+    hvdxg.destroyalloc_d3d12_first_before_nt = 0;
+    hvdxg.destroyalloc_d3d12_last_before_nt = 0;
+    hvdxg.destroyalloc_d3d12_context_mask = 0;
+    hvdxg.d3d12_shared_alloc_seen++;
+    hvdxg.d3d12_shared_alloc_len = 0;
+    hvdxg.d3d12_shared_alloc_ret = 0;
+    hvdxg.d3d12_shared_alloc_device = req->device.v;
+    hvdxg.d3d12_shared_alloc_resource_in = req->resource.v;
+    hvdxg.d3d12_shared_alloc_resource_out = 0;
+    hvdxg.d3d12_shared_alloc_allocation = 0;
+    hvdxg.d3d12_shared_alloc_count = req->alloc_count;
+    hvdxg.d3d12_shared_alloc_flags = req->flags.value;
+    hvdxg.d3d12_shared_runtime_d3d12_flags =
+        hvdxg_runtime_d3d12_resource_flags(runtime,
+                                           req->private_runtime_data_size);
+    hvdxg.d3d12_shared_alloc_global_share = req->global_share.v;
+    hvdxg.d3d12_shared_allocinfo_offset =
+        hvdxg.allocation_last_allocinfo_offset;
+    hvdxg.d3d12_shared_runtime_offset =
+        hvdxg.allocation_last_private_offset;
+    hvdxg.d3d12_shared_resource_priv_offset =
+        hvdxg.d3d12_shared_runtime_offset +
+        req->private_runtime_data_size;
+    hvdxg.d3d12_shared_alloc_priv_offset =
+        hvdxg.d3d12_shared_resource_priv_offset + req->priv_drv_data_size;
+    hvdxg.d3d12_shared_wire_flags = req->flags.value;
+    hvdxg.d3d12_shared_wire_make_resident = 0;
+    hvdxg.d3d12_shared_wire_rt_resource =
+        req->private_runtime_resource_handle;
+    hvdxg.d3d12_shared_result_flags = 0;
+    hvdxg.d3d12_shared_result_global_share = 0;
+    hvdxg.d3d12_shared_result_vgpu_flags = 0;
+    hvdxg.d3d12_shared_result_alloc_flags = 0;
+    hvdxg.d3d12_shared_result_min_len = 0;
+    hvdxg.d3d12_shared_result_len = 0;
+    hvdxg.d3d12_shared_result_flags_offset =
+        hvdxg.allocation_last_result_flags_offset;
+    hvdxg.d3d12_shared_result_resource_offset =
+        hvdxg.allocation_last_result_resource_offset;
+    hvdxg.d3d12_shared_result_global_offset =
+        hvdxg.allocation_last_result_global_offset;
+    hvdxg.d3d12_shared_result_vgpu_offset =
+        hvdxg.allocation_last_result_vgpu_offset;
+    hvdxg.d3d12_shared_result_allocinfo_offset =
+        hvdxg.allocation_last_result_allocinfo_offset;
+    hvdxg.d3d12_shared_result_allocinfo_size =
+        hvdxg.allocation_last_result_allocinfo_size;
+    hvdxg.d3d12_shared_result_head_len = 0;
+    hvdxg.d3d12_shared_result_flag_norm = 0;
+    hvdxg.d3d12_shared_result_flag_norm_reason = 0;
+    hvdxg.d3d12_shared_result_flag_candidate = 0;
+    hvdxg.d3d12_shared_result_flag_delta = 0;
+    hvdxg.d3d12_shared_track_shared = req->flags.create_shared;
+    hvdxg.d3d12_shared_track_nt = req->flags.nt_security_sharing;
+    hvdxg.d3d12_shared_track_metadata =
+        req->flags.create_shared && req->flags.nt_security_sharing ? 1 : 0;
+    hvdxg.d3d12_shared_track_sent_bytes = 0;
+    hvdxg.d3d12_shared_track_alloc_from_host = 0;
+    hvdxg.d3d12_shared_alloc_process = dxg_process;
+    hvdxg.d3d12_shared_alloc_size = 0;
+    hvdxg.d3d12_shared_alloc_rt_resource =
+        req->private_runtime_resource_handle;
+    hvdxg.d3d12_shared_runtime_size = req->private_runtime_data_size;
+    hvdxg.d3d12_shared_resource_priv_size = req->priv_drv_data_size;
+    hvdxg.d3d12_shared_alloc_priv_size = alloc_info[0].priv_drv_data_size;
+    hvdxg.d3d12_shared_alloc_out_priv_size = 0;
+    hvdxg.d3d12_shared_runtime_head_len = 0;
+    hvdxg.d3d12_shared_resource_priv_head_len = 0;
+    hvdxg.d3d12_shared_alloc_priv_head_len = 0;
+    hvdxg.d3d12_shared_alloc_out_priv_head_len = 0;
+    hvdxg_save_priv_head(hvdxg.d3d12_shared_runtime_head,
+                         sizeof(hvdxg.d3d12_shared_runtime_head),
+                         &hvdxg.d3d12_shared_runtime_head_len,
+                         runtime, req->private_runtime_data_size);
+    if (hvdxg.d3d12_shared_runtime_user_copy_ret == 0) {
+        uint32 compare_len = hvdxg.d3d12_shared_runtime_head_len;
+
+        if (compare_len > hvdxg.d3d12_shared_runtime_user_head_len)
+            compare_len = hvdxg.d3d12_shared_runtime_user_head_len;
+        if (hvdxg.d3d12_shared_runtime_user_head_len !=
+                hvdxg.d3d12_shared_runtime_head_len ||
+            (compare_len != 0 &&
+             memcmp(hvdxg.d3d12_shared_runtime_user_head,
+                    hvdxg.d3d12_shared_runtime_head, compare_len) != 0))
+            hvdxg.d3d12_shared_runtime_user_mismatch = 1;
+    }
+    hvdxg_save_priv_head(hvdxg.d3d12_shared_resource_priv_head,
+                         sizeof(hvdxg.d3d12_shared_resource_priv_head),
+                         &hvdxg.d3d12_shared_resource_priv_head_len,
+                         resource_priv, req->priv_drv_data_size);
+    hvdxg_save_priv_head(hvdxg.d3d12_shared_alloc_priv_head,
+                         sizeof(hvdxg.d3d12_shared_alloc_priv_head),
+                         &hvdxg.d3d12_shared_alloc_priv_head_len,
+                         alloc_priv, alloc_info[0].priv_drv_data_size);
+    memset(hvdxg.d3d12_shared_alloc_out_priv_head, 0,
+           sizeof(hvdxg.d3d12_shared_alloc_out_priv_head));
+    memset(hvdxg.d3d12_shared_result_head, 0,
+           sizeof(hvdxg.d3d12_shared_result_head));
+}
+
+static void hvdxg_note_d3d12_shared_createallocation_result(
+    uint32 len, int32 ret, const struct d3dkmt_createallocation *req,
+    uint32 requested_flags,
+    const struct d3dddi_allocationinfo2 *alloc_info,
+    const struct hvdxg_command_createallocation_return *result,
+    const uint8 *alloc_private_data)
+{
+    uint32 out_size = 0;
+
+    if (req == NULL || requested_flags != 0x47)
+        return;
+
+    hvdxg.d3d12_shared_alloc_len = len;
+    hvdxg.d3d12_shared_alloc_ret = ret;
+    hvdxg.d3d12_shared_alloc_resource_out = req->resource.v;
+    hvdxg.d3d12_shared_alloc_global_share = req->global_share.v;
+    if (alloc_info != NULL)
+        hvdxg.d3d12_shared_alloc_allocation = alloc_info[0].allocation.v;
+    if (result != NULL) {
+        hvdxg.d3d12_shared_result_min_len =
+            hvdxg.allocation_last_result_min_len;
+        hvdxg.d3d12_shared_result_len = hvdxg.allocation_last_result_len;
+        hvdxg.d3d12_shared_result_flags_offset =
+            hvdxg.allocation_last_result_flags_offset;
+        hvdxg.d3d12_shared_result_resource_offset =
+            hvdxg.allocation_last_result_resource_offset;
+        hvdxg.d3d12_shared_result_global_offset =
+            hvdxg.allocation_last_result_global_offset;
+        hvdxg.d3d12_shared_result_vgpu_offset =
+            hvdxg.allocation_last_result_vgpu_offset;
+        hvdxg.d3d12_shared_result_allocinfo_offset =
+            hvdxg.allocation_last_result_allocinfo_offset;
+        hvdxg.d3d12_shared_result_allocinfo_size =
+            hvdxg.allocation_last_result_allocinfo_size;
+        hvdxg_save_priv_head(hvdxg.d3d12_shared_result_head,
+                             sizeof(hvdxg.d3d12_shared_result_head),
+                             &hvdxg.d3d12_shared_result_head_len,
+                             (const uint8 *)result, len);
+        hvdxg.d3d12_shared_alloc_size =
+            result->allocation_info[0].allocation_size;
+        hvdxg.d3d12_shared_result_flags = result->flags.value;
+        hvdxg.d3d12_shared_result_global_share = result->global_share.v;
+        hvdxg.d3d12_shared_result_vgpu_flags = result->vgpu_flags;
+        hvdxg.d3d12_shared_result_alloc_flags =
+            result->allocation_info[0].allocation_flags;
+        hvdxg.d3d12_shared_result_flag_delta =
+            result->flags.value ^ requested_flags;
+        /*
+         * Keep host-returned flags byte-for-byte.  WSL traces give us a
+         * candidate mask to compare, but no local rule here proves 0x4000 is
+         * safe to strip before user copyout or later tracking.
+         */
+        hvdxg.d3d12_shared_result_flag_norm = 0;
+        hvdxg.d3d12_shared_result_flag_norm_reason =
+            (result->flags.value & 0x4000U) != 0 ? 1 : 0;
+        hvdxg.d3d12_shared_result_flag_candidate =
+            result->flags.value & ~0x4000U;
+        out_size = result->allocation_info[0].priv_drv_data_size;
+    }
+    if (alloc_private_data != NULL && out_size != 0) {
+        hvdxg.d3d12_shared_alloc_out_priv_size = out_size;
+        hvdxg_save_priv_head(hvdxg.d3d12_shared_alloc_out_priv_head,
+                             sizeof(hvdxg.d3d12_shared_alloc_out_priv_head),
+                             &hvdxg.d3d12_shared_alloc_out_priv_head_len,
+                             alloc_private_data, out_size);
+    }
+}
+
 static void hvdxg_status_append_hex(char *status, size_t status_size,
                                     int *len, const char *prefix,
                                     const uint8 *data, uint32 data_len)
 {
-    uint32 shown = data_len < 64 ? data_len : 64;
+    uint32 shown = data_len < HV_DXG_SHARED_ALLOC_HEAD_MAX ?
+                   data_len : HV_DXG_SHARED_ALLOC_HEAD_MAX;
 
     if (*len < 0 || (size_t)*len >= status_size)
         return;
@@ -2774,6 +7218,87 @@ static void hvdxg_status_append_hex(char *status, size_t status_size,
     }
     if ((size_t)*len < status_size)
         *len += snprintf(status + *len, status_size - (size_t)*len, "\n");
+}
+
+static void hvdxg_status_append_hex_inline(char *status, size_t status_size,
+                                           int *len, const uint8 *data,
+                                           uint32 data_len)
+{
+    if (*len < 0 || (size_t)*len >= status_size)
+        return;
+    for (uint32 i = 0; i < data_len && (size_t)*len < status_size; i++) {
+        *len += snprintf(status + *len, status_size - (size_t)*len,
+                         "%02x", data[i]);
+    }
+}
+
+static void hvdxg_status_append_queryadapter_payloads(char *status,
+                                                      size_t status_size,
+                                                      int *len)
+{
+    if (*len < 0 || (size_t)*len >= status_size)
+        return;
+	    *len += snprintf(status + *len, status_size - (size_t)*len,
+	        "dxg_queryadapter_source=last:%u real_host:%u alias_cache:%u "
+	        "fallback:%u staged:%u cache_hits:%u cache_misses:%u stores:%u full:%u "
+	        "last:type:%u size:%u len:%u alias:0x%x host:0x%x hash:%08x "
+	        "result:%u staged_last:type:%u size:%u alias:0x%x host:0x%x "
+	        "path:%u ret:%d type0_cache:%u/%u/0x%x/%08x/%08x\n",
+        hvdxg.queryadapter_source_last,
+        hvdxg.queryadapter_source_real_host,
+        hvdxg.queryadapter_source_alias_cache,
+        hvdxg.queryadapter_source_fallback,
+        hvdxg.queryadapter_source_staged,
+        hvdxg.queryadapter_alias_cache_hits,
+        hvdxg.queryadapter_alias_cache_misses,
+        hvdxg.queryadapter_alias_cache_stores,
+        hvdxg.queryadapter_alias_cache_full,
+        hvdxg.queryadapter_alias_cache_last_type,
+        hvdxg.queryadapter_alias_cache_last_size,
+        hvdxg.queryadapter_alias_cache_last_len,
+        hvdxg.queryadapter_alias_cache_last_alias,
+        hvdxg.queryadapter_alias_cache_last_host,
+        hvdxg.queryadapter_alias_cache_last_hash,
+        hvdxg.queryadapter_alias_cache_last_result,
+        hvdxg.queryadapter_alias_staged_type,
+        hvdxg.queryadapter_alias_staged_size,
+	        hvdxg.queryadapter_alias_staged_alias,
+	        hvdxg.queryadapter_alias_staged_host,
+	        hvdxg.queryadapter_alias_staged_path,
+	        hvdxg.queryadapter_alias_staged_ret,
+	        hvdxg.queryadapter_type0_cache_valid,
+	        hvdxg.queryadapter_type0_cache_size,
+	        hvdxg.queryadapter_type0_cache_host,
+	        hvdxg.queryadapter_type0_cache_input_hash,
+	        hvdxg.queryadapter_type0_cache_hash);
+    if (*len < 0 || (size_t)*len >= status_size)
+        return;
+    *len += snprintf(status + *len, status_size - (size_t)*len,
+        "dxg_queryadapter_payload_history=index:%u "
+        "route:0=none,1=vgpu,2=global\n",
+        hvdxg.queryadapter_history_index);
+    for (uint32 i = 0; i < HV_DXG_QUERY_HISTORY_MAX &&
+         *len >= 0 && (size_t)*len < status_size; i++) {
+        *len += snprintf(status + *len, status_size - (size_t)*len,
+            "dxg_queryadapter_payload_h%u=type:%u size:%u len:%u "
+            "ret:%d status:0x%x route:%u adapter:0x%x host:0x%x "
+            "head_len:%u head:",
+            i, hvdxg.queryadapter_history_type[i],
+            hvdxg.queryadapter_history_size[i],
+            hvdxg.queryadapter_history_len[i],
+            hvdxg.queryadapter_history_ret[i],
+            hvdxg.queryadapter_history_status[i],
+            hvdxg.queryadapter_history_route[i],
+            hvdxg.queryadapter_history_adapter[i],
+            hvdxg.queryadapter_history_host_adapter[i],
+            hvdxg.queryadapter_history_head_len[i]);
+        hvdxg_status_append_hex_inline(status, status_size, len,
+            hvdxg.queryadapter_history_head[i],
+            hvdxg.queryadapter_history_head_len[i]);
+        if (*len >= 0 && (size_t)*len < status_size)
+            *len += snprintf(status + *len,
+                             status_size - (size_t)*len, "\n");
+    }
 }
 
 static void hvdxg_status_append_ioctl_timing(char *status, size_t status_size,
@@ -2832,6 +7357,20 @@ static int hvdxg_release(cdev_t *cdev)
     return 0;
 }
 
+static const char *hvdxg_early_bind_source_name(uint32 source);
+
+static const char *hvdxg_channel_name(uint32 channel)
+{
+    switch (channel) {
+    case HV_DXG_CHANNEL_GLOBAL:
+        return "global";
+    case HV_DXG_CHANNEL_VGPU:
+        return "vgpu";
+    default:
+        return "none";
+    }
+}
+
 static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
                              size_t count, size_t *read_offset,
                              int *read_emitted, char **read_status,
@@ -2842,7 +7381,25 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
     size_t status_size = HV_DXG_STATUS_BUF_SIZE;
     int cached = 0;
     int len = 0;
+    uint32 host_luid_equiv_basis;
+    struct hvdxg_winluid user_luid;
     uint32 ioctl_top_nr[HV_DXG_IOCTL_TIME_TOP];
+    uint32 existing_sysmem_diag_attempts;
+    uint32 existing_sysmem_diag_path;
+    uint32 existing_sysmem_diag_standard;
+    uint32 existing_sysmem_diag_writable;
+    uint32 existing_sysmem_diag_device;
+    uint32 existing_sysmem_diag_allocation;
+    uint32 existing_sysmem_diag_pages;
+    int32 existing_sysmem_diag_pin_ret;
+    int32 existing_sysmem_diag_set_ret;
+    uint32 existing_sysmem_diag_pin_ok;
+    uint32 existing_sysmem_diag_set_ok;
+    uint64 existing_sysmem_diag_va;
+    uint64 existing_sysmem_diag_size;
+    uint64 existing_sysmem_diag_first_pfn;
+    uint64 existing_sysmem_diag_last_pfn;
+    uint64 existing_sysmem_diag_total_pages;
 
     if (hvdxg.vgpu_open_ok && hvdxg.probe_attempts == 0)
         (void)hvdxg_probe_transport();
@@ -2860,37 +7417,104 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
     if (status == NULL)
         return -ENOMEM;
     hvdxg_ioctl_timing_top(ioctl_top_nr);
+    user_luid = hvdxg_user_adapter_luid(&host_luid_equiv_basis);
+    existing_sysmem_diag_attempts = hvdxg.existing_sysmem_attempts;
+    existing_sysmem_diag_path = hvdxg.existing_sysmem_last_path;
+    existing_sysmem_diag_standard = hvdxg.existing_sysmem_last_standard;
+    existing_sysmem_diag_writable = hvdxg.existing_sysmem_last_writable;
+    existing_sysmem_diag_device = hvdxg.existing_sysmem_last_device;
+    existing_sysmem_diag_allocation =
+        hvdxg.existing_sysmem_last_allocation;
+    existing_sysmem_diag_va = hvdxg.existing_sysmem_last_va;
+    existing_sysmem_diag_size = hvdxg.existing_sysmem_last_size;
+    existing_sysmem_diag_first_pfn =
+        hvdxg.existing_sysmem_last_first_pfn;
+    existing_sysmem_diag_last_pfn = hvdxg.existing_sysmem_last_last_pfn;
+    existing_sysmem_diag_pages = hvdxg.existing_sysmem_last_pages;
+    existing_sysmem_diag_pin_ret = hvdxg.existing_sysmem_last_pin_ret;
+    existing_sysmem_diag_set_ret = hvdxg.existing_sysmem_last_set_ret;
+    existing_sysmem_diag_pin_ok = hvdxg.existing_sysmem_pin_successes;
+    existing_sysmem_diag_set_ok = hvdxg.existing_sysmem_set_successes;
+    existing_sysmem_diag_total_pages = hvdxg.existing_sysmem_total_pages;
+    if (existing_sysmem_diag_attempts == 0 &&
+        (existing_sysmem_diag_pages != 0 ||
+         existing_sysmem_diag_pin_ok != 0 ||
+         existing_sysmem_diag_set_ok != 0)) {
+        existing_sysmem_diag_attempts =
+            existing_sysmem_diag_pin_ok != 0 ?
+            existing_sysmem_diag_pin_ok : 1;
+    }
+    if (existing_sysmem_diag_path == 0 &&
+        (hvdxg.allocation_last_sysmem != 0 ||
+         existing_sysmem_diag_pages != 0))
+        existing_sysmem_diag_path = 1;
+    if (existing_sysmem_diag_device == 0)
+        existing_sysmem_diag_device = hvdxg.allocation_last_device;
+    if (existing_sysmem_diag_allocation == 0)
+        existing_sysmem_diag_allocation = hvdxg.last_allocation_handle;
+    if (existing_sysmem_diag_va == 0)
+        existing_sysmem_diag_va = hvdxg.allocation_last_sysmem;
+    if (existing_sysmem_diag_size == 0)
+        existing_sysmem_diag_size = hvdxg.last_allocation_size;
 
     len = snprintf(status, status_size,
         "hyperv_dxg_global=%d relid=%u conn=%u monitor=%u\n"
         "hyperv_dxg_global_transport=gpadl:%d status:%u open:%d status:%u rx:%u\n"
         "dxg_iospace=offer_mb:%u set:%d ret:%d len:%u base:0x%lx size:0x%lx\n"
+        "dxg_fence_map=source:%u mode:%u raw:0x%lx canonical:0x%lx off:0x%lx off_candidate:0x%lx off_cur:%lu size:%lu user:0x%lx kva:0x%lx failures:%u max_seen:%u max_source:%u max_mode:%u max_raw:0x%lx max_canonical:0x%lx max_off_candidate:0x%lx max_off_cur:%lu max_kva:0x%lx max_cur:%lu max_target:%lu\n"
         "hyperv_dxg_vgpu=%d count=%d relid=%u conn=%u monitor=%u\n"
         "hyperv_dxg_vgpu_transport=gpadl:%d status:%u open:%d status:%u rx:%u\n"
         "dxg_status=size:%u truncated:%d snapshot:%d\n"
         "dxg_host_events=next:%lu last:%lu signals:%u wait_ok:%u wait_timeout:%u wait_fail:%u\n"
         "dxg_channel_pump=active:%d skips:%u sync_active:%d sync_waits:%u sync_timeouts:%u\n"
+        "dxg_completion_last=type:%u flags:0x%x desc_len8:%u desc_off8:%u pkt_len:%u pkt_off:%u payload:%u trans:%lu waiting:%lu source:%s/%u wait_source:%s/%u match:%u channel_match:%u captured_type:%u captured_len:%u prefix:%02x%02x%02x%02x%02x%02x%02x%02x\n"
+        "dxg_object_table=max:%u drops:%u denied:%u generation:%u\n"
         "dxg_track_limits=limit:%u alloc_max:%u alloc_drop:%u gpuva_max:%u gpuva_drop:%u hwqueue_max:%u hwqueue_drop:%u pagingqueue_max:%u pagingqueue_drop:%u\n"
         "dxg_pagingqueue_last=len:%u ret:%d queue:0x%x sync:0x%x fence_pa:0x%lx fence_off:0x%lx\n"
-        "dxg_gpuva_last=reserve_len:%u reserve_ret:%d va:0x%lx fence:%lu free_len:%u free_ret:%d\n"
-        "dxg_syncobject_last=len:%u ret:%d handle:0x%x fence_cpu:0x%lx fence_gpu:0x%lx fence_pa:0x%lx fence_off:0x%lx signal_len:%u signal_ret:%d signal_status:0x%x wait_len:%u wait_ret:%d wait_status:0x%x gpu_signal_len:%u gpu_signal_ret:%d gpu_signal_status:0x%x gpu_wait_len:%u gpu_wait_ret:%d gpu_wait_status:0x%x\n"
+        "dxg_gpuva_last=reserve_len:%u reserve_ret:%d va:0x%lx fence:%lu free_len:%u free_ret:%d free_adapter:0x%x free_base:0x%lx free_size:%lu free_wire_size:%lu\n"
+        "dxg_syncobject_last=len:%u ret:%d handle:0x%x type:%u flags:0x%x global:0x%x fence_cpu:0x%lx fence_gpu:0x%lx fence_pa:0x%lx fence_off:0x%lx signal_len:%u signal_ret:%d signal_status:0x%x wait_len:%u wait_ret:%d wait_status:0x%x gpu_signal_len:%u gpu_signal_ret:%d gpu_signal_status:0x%x gpu_wait_len:%u gpu_wait_ret:%d gpu_wait_status:0x%x\n"
+        "dxg_syncobject_wire=cmd_len:%u result_len:%u res_sync_off:%u res_global_off:%u res_fgpu_off:%u res_fpa_off:%u res_foff_off:%u head:%u args_off:%u hint_off:%u hint:%u in_shared:0x%x proc:0x%x owner:0x%x/%u\n"
+        "dxg_syncwait_detail=event:%lu async:%u object:0x%x fence:%lu current:%lu result:%u\n"
         "dxg_syncgpu_wait_detail=context:0x%x object:0x%x count:%u type:%u legacy:%u fence:%lu cmd_len:%u\n"
         "dxg_allocation_last=len:%u ret:%d count:%u resource:0x%x allocation:0x%x size:%lu destroy_len:%u destroy_ret:%d unwind_attempts:%u unwind_successes:%u unwind_ret:%d\n"
-        "dxg_allocation_priv=size:%u flags:0x%x sysmem:0x%lx pri:0x%lx existing_pages:%u pin_ret:%d set_ret:%d pin_ok:%u set_ok:%u total_pages:%lu in_len:%u in:%02x%02x%02x%02x%02x%02x%02x%02x out_len:%u out:%02x%02x%02x%02x%02x%02x%02x%02x\n"
-        "dxg_residency_last=make_len:%u make_ret:%d fence:%lu trim:%lu evict_len:%u evict_ret:%d evict_trim:%lu\n"
-        "dxg_mapgpuva_last=len:%u ret:%d status:0x%x pq:0x%x alloc:0x%x base:0x%lx min:0x%lx max:0x%lx pages:%lu prot:0x%lx dprot:0x%lx va:0x%lx fence:%lu\n"
+        "dxg_destroyallocation_last=dev:0x%x res:0x%x alloc:0x%x proc:0x%x ctx:%u count:%u len:%u ret:%d status:0x%x d3d12_match:%u pending:%u last:%u seq:%lu create_seq:%lu first_nt_seq:%lu first_match_seq:%lu first_ctx:%u first_match:%u first_pending:%u first_before_nt:%u last_before_nt:%u ctx_mask:0x%x\n"
+        "dxg_createallocation_wire=cmd_len:%u hdr:%u prr_off:%u make_off:%u allocinfo_off:%u private_off:%u result_min:%u result_len:%u wire:%u ext:%u eoff:%u route_global:%u send_ret:%d proc:0x%x\n"
+        "dxg_createallocation_result=flags_off:%u res_off:%u global_off:%u vgpu_off:%u allocinfo_off:%u allocinfo_size:%u head:%u\n"
+        "dxg_allocation_priv=runtime:%u resource_priv:%u size:%u flags:0x%x sysmem:0x%lx pri:0x%lx existing_pages:%u pin_ret:%d set_ret:%d pin_ok:%u set_ok:%u total_pages:%lu in_len:%u in:%02x%02x%02x%02x%02x%02x%02x%02x out_len:%u out:%02x%02x%02x%02x%02x%02x%02x%02x\n"
+        "dxg_existing_sysmem=attempts:%u path:%u standard:%u writable:%u dev:0x%x alloc:0x%x va:0x%lx size:%lu pages:%u first_pfn:0x%lx last_pfn:0x%lx pin_ret:%d set_ret:%d pin_ok:%u set_ok:%u total_pages:%lu\n"
+        "dxg_residency_last=make_len:%u make_ret:%d make_host_ret:%d make_user_ret:%d make_status:0x%x pending_ok:%u fence:%lu cur:%lu sync:0x%x trim:%lu device:0x%x pq:0x%x flags:0x%x count:%u sorted:%u in:%x,%x,%x,%x wire:%x,%x,%x,%x evict_len:%u evict_ret:%d evict_trim:%lu\n"
+        "dxg_makeresident_shape=cmd:%u wsl_cmd:%u result:%u actual:%u owner_ok:%u tracked:%u order:%u a0:alloc:0x%x/dev:0x%x/res:0x%x/owner:0x%x/%u/%u a1:alloc:0x%x/dev:0x%x/res:0x%x/owner:0x%x/%u/%u\n"
+        "dxg_mapgpuva_last=len:%u ret:%d status:0x%x pq:0x%x alloc:0x%x base:0x%lx min:0x%lx max:0x%lx pages:%lu prot:0x%lx dprot:0x%lx va:0x%lx fence:%lu cur:%lu sync:0x%x\n"
         "dxg_submit_last=submit_len:%u submit_ret:%d submit_status:0x%x cmd:0x%lx cmd_len:%u flags:0x%x priv:%u contexts:%u ctx0:0x%x\n"
         "dxg_lock2_last=len:%u ret:%d status:0x%x allocation:0x%x offset:0x%lx user_va:0x%lx unlock_len:%u unlock_ret:%d unlock_status:0x%x unlock_allocation:0x%x\n"
         "dxg_allocation_history=index:%u h0:dev:0x%x/res:0x%x/alloc:0x%x/size:%lu/len:%u/ret:%d/count:%u/priv:%u h1:dev:0x%x/res:0x%x/alloc:0x%x/size:%lu/len:%u/ret:%d/count:%u/priv:%u h2:dev:0x%x/res:0x%x/alloc:0x%x/size:%lu/len:%u/ret:%d/count:%u/priv:%u h3:dev:0x%x/res:0x%x/alloc:0x%x/size:%lu/len:%u/ret:%d/count:%u/priv:%u\n"
         "dxg_allocation_history2=h4:dev:0x%x/res:0x%x/alloc:0x%x/size:%lu/len:%u/ret:%d/count:%u/priv:%u h5:dev:0x%x/res:0x%x/alloc:0x%x/size:%lu/len:%u/ret:%d/count:%u/priv:%u h6:dev:0x%x/res:0x%x/alloc:0x%x/size:%lu/len:%u/ret:%d/count:%u/priv:%u h7:dev:0x%x/res:0x%x/alloc:0x%x/size:%lu/len:%u/ret:%d/count:%u/priv:%u\n"
+        "dxg_allocation_history_meta=h0:global:0x%x/flags:0x%x h1:global:0x%x/flags:0x%x h2:global:0x%x/flags:0x%x h3:global:0x%x/flags:0x%x h4:global:0x%x/flags:0x%x h5:global:0x%x/flags:0x%x h6:global:0x%x/flags:0x%x h7:global:0x%x/flags:0x%x\n"
         "dxg_mapgpuva_history=index:%u h0:alloc:0x%x/va:0x%lx/pages:%lu/fence:%lu/len:%u/ret:%d/status:0x%x/pq:0x%x h1:alloc:0x%x/va:0x%lx/pages:%lu/fence:%lu/len:%u/ret:%d/status:0x%x/pq:0x%x h2:alloc:0x%x/va:0x%lx/pages:%lu/fence:%lu/len:%u/ret:%d/status:0x%x/pq:0x%x h3:alloc:0x%x/va:0x%lx/pages:%lu/fence:%lu/len:%u/ret:%d/status:0x%x/pq:0x%x\n"
         "dxg_mapgpuva_history2=h4:alloc:0x%x/va:0x%lx/pages:%lu/fence:%lu/len:%u/ret:%d/status:0x%x/pq:0x%x h5:alloc:0x%x/va:0x%lx/pages:%lu/fence:%lu/len:%u/ret:%d/status:0x%x/pq:0x%x h6:alloc:0x%x/va:0x%lx/pages:%lu/fence:%lu/len:%u/ret:%d/status:0x%x/pq:0x%x h7:alloc:0x%x/va:0x%lx/pages:%lu/fence:%lu/len:%u/ret:%d/status:0x%x/pq:0x%x\n"
         "dxg_lock2_history=index:%u h0:dev:0x%x/alloc:0x%x/off:0x%lx/user:0x%lx/size:%lu/len:%u/ret:%d/status:0x%x h1:dev:0x%x/alloc:0x%x/off:0x%lx/user:0x%lx/size:%lu/len:%u/ret:%d/status:0x%x h2:dev:0x%x/alloc:0x%x/off:0x%lx/user:0x%lx/size:%lu/len:%u/ret:%d/status:0x%x h3:dev:0x%x/alloc:0x%x/off:0x%lx/user:0x%lx/size:%lu/len:%u/ret:%d/status:0x%x\n"
         "dxg_lock2_history2=h4:dev:0x%x/alloc:0x%x/off:0x%lx/user:0x%lx/size:%lu/len:%u/ret:%d/status:0x%x h5:dev:0x%x/alloc:0x%x/off:0x%lx/user:0x%lx/size:%lu/len:%u/ret:%d/status:0x%x h6:dev:0x%x/alloc:0x%x/off:0x%lx/user:0x%lx/size:%lu/len:%u/ret:%d/status:0x%x h7:dev:0x%x/alloc:0x%x/off:0x%lx/user:0x%lx/size:%lu/len:%u/ret:%d/status:0x%x\n"
-        "dxg_queryadapter_last=type:%u size:%u len:%u ret:%d status:0x%x\n"
-        "dxg_adapter_hardware=vendor:0x%x device:0x%x\n"
+	        "dxg_queryadapter_last=type:%u size:%u len:%u user_len:%u ret:%d status:0x%x layout:%u\n"
+        "dxg_queryadapter_wire=cmd_len:%u type_off:%u size_off:%u data_off:%u adapter:0x%x host:0x%x source:%u owner:0x%x/%u refs:%u result_req:%u expected_wsl:%u proc_src:%u\n"
+        "dxg_queryadapter_adapter_object=handle:0x%x host:0x%x owner:0x%x/%u generation:%u\n"
+        "dxg_queryadapter_process_adapter=local_ns:%u refs:%u locals:%u generation:%u type15_fail:ret:%d status:0x%x proc:0x%x route:%u ext_luid:%x:%x\n"
+        "dxg_queryadapter_send=route:%u ext_luid:%x:%x\n"
+        "dxg_queryadapter_completion=desc_type:%u flags:0x%x desc_len8:%u desc_off8:%u pkt_len:%u pkt_off:%u payload:%u trans:%lu waiting:%lu source:%s/%u wait_source:%s/%u match:%u channel_match:%u captured:%u/%u prefix:%02x%02x%02x%02x%02x%02x%02x%02x\n"
+	        "dxg_queryadapter_zero_success=type:%u size:%u count:%u "
+	        "host:type:%u/len:%u/ret:%d/status:0x%x user_ret:%d\n"
+        "dxg_queryadapter_type0=priv_size:%u hash:%08x primary_len:%u primary_ret:%d primary_status:0x%x fallback_attempted:%u fallback_used:%u fallback_len:%u fallback_ret:%d fallback_status:0x%x result_route:%u fallback_reason:%u fallback_route:%u\n"
+        "dxg_queryadapter_umd_rewrite=attempted:%u rewritten:%u path:%u vendor:0x%x orig_hash:%08x orig:%x,%x host_status:0x%x ret:%d\n"
+        "dxg_queryadapter_type0_input=head_len:%u head:%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x tail_len:%u tail:%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n"
+        "dxg_adapter_hardware=vendor:0x%x device:0x%x raw:%x,%x,%x,%x,%x,%x,%x size:%u norm:%u fallback:%u count:%u source:%u source_name:%s rejected_synthetic:%u cache_available:%u payload_len:%u\n"
+        "dxg_adapter_hardware_v40=short_zero:%u len:%u ret:%d status:0x%x cached_real:%u source_name:%s rejected_synthetic_pci:%u\n"
+        "dxg_adapter_hardware_temp_v27=attempts:%u successes:%u failures:%u ret:%d status:0x%x open_len:%u query_len:%u close_len:%u close_ret:%d close_status:0x%x handle:0x%x restored:%u/%u\n"
+        "dxg_enumadapters_last=cmd:0x%x in_count:%u out_count:%u buffer:0x%lx handle:0x%x luid:%x:%x source:%u ret:%d\n"
+        "dxg_enumadapters_diag=stage:%u ensure:%d bind:%d local:%d copy:%d global:%u/%u/%u vgpu:%u/%u/%u host:0x%x probe:%u/%d/0x%x/0x%x ready:%u process:0x%x/%u gen:%u refs:%u adapters:%u locals:%u objects:%u\n"
+        "dxg_local_adapter_namespace=hits:%u misses:%u last:result:%u handle:0x%x host:0x%x refs:%u locals:%u generation:%u\n"
         "dxg_queryadapter_history=index:%u h0:%u/%u/%u/%d/0x%x h1:%u/%u/%u/%d/0x%x h2:%u/%u/%u/%d/0x%x h3:%u/%u/%u/%d/0x%x h4:%u/%u/%u/%d/0x%x h5:%u/%u/%u/%d/0x%x h6:%u/%u/%u/%d/0x%x h7:%u/%u/%u/%d/0x%x\n"
         "dxg_queryadapter_history2=h8:%u/%u/%u/%d/0x%x h9:%u/%u/%u/%d/0x%x h10:%u/%u/%u/%d/0x%x h11:%u/%u/%u/%d/0x%x h12:%u/%u/%u/%d/0x%x h13:%u/%u/%u/%d/0x%x h14:%u/%u/%u/%d/0x%x h15:%u/%u/%u/%d/0x%x\n"
+        "dxg_qai_admission=index:%u a0:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x a1:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x a2:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x a3:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x\n"
+        "dxg_qai_admission2=a4:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x a5:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x a6:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x a7:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x\n"
         "dxg_queryregistry_last=query:%u flags:0x%x value_type:%u phys:%u output_size:%u status:%u name:%s name0:0x%x name1:0x%x\n"
         "dxg_feature_last=id:%u len:%u ret:%d status:0x%x result:0x%x\n"
         "dxg_priority_last=sched_len:%u sched_ret:%d sched_status:0x%x context:0x%x priority:%d alloc_len:%u alloc_ret:%d alloc_status:0x%x count:%u residency_len:%u residency_ret:%d residency_status:0x%x residency_count:%u residency_value:%u\n"
@@ -2898,29 +7522,78 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_clockcalibration_last=len:%u ret:%d status:0x%x node:%u gpu_freq:%lu gpu_counter:%lu cpu_counter:%lu\n"
         "dxg_stdalloc_last=len:%u ret:%d status:0x%x alloc_priv:%u res_priv:%u\n"
         "dxg_escape_last=len:%u ret:%d type:%u flags:0x%x size:%u\n"
-        "dxg_shareobject_last=len:%u ret:%d status:0x%x device:0x%x object:0x%x nt:0x%lx\n"
-        "dxg_ntshared_last=create_len:%u create_ret:%d object:0x%x handle:0x%x raw0:0x%x destroy_len:%u destroy_ret:%d destroy_handle:0x%x\n"
-        "dxg_sharedhandle_last=cmd:0x%x ret:%d device:0x%x object:0x%x nt:0x%lx count:%u\n"
-        "dxg_unsupported_last=cmd:0x%x ret:%d device:0x%x handle:0x%x count:%u\n"
-        "dxg_syncfile_last=cmd:0x%x ret:%d device:0x%x object:0x%x context:0x%x handle:0x%lx fence:%lu\n"
+        "dxg_shareobject_last=len:%u cmd_len:%u dev_off:%u obj_off:%u wire:%u ext:%u eoff:%u result_len:%u head:%u comp:%u/%u/%02x%02x%02x%02x%02x%02x%02x%02x ret:%d status:0x%x proc:0x%x device:0x%x object:0x%x reserved:0x%lx nt:0x%lx\n"
+        "dxg_shareobject_diag=attempted:%u valid_nt:%u kind:%u reason:%u\n"
+        "dxg_vgpu_send_last=cmd:%u cmd_len:%u wire_len:%u ext:%u off:%u proc:0x%x channel:%u luid:%x:%x route_global:%u retries:%u ret:%d\n"
+        "dxg_global_send_last=cmd:%u cmd_len:%u wire_len:%u ext:%u off:%u proc:0x%x channel:%u luid:%x:%x retries:%u ret:%d\n"
+        "dxg_global_send_share=nt:%u/%u/%u/0x%x share:%u/%u/%u/0x%x destroynt:%u/%u/%u/0x%x destroysync:%u/%u/%u/0x%x\n"
+        "dxg_global_send_ntwire=cmdid:%lu cmd:%u channel:%u proc:0x%x cmd_len:%u wire_len:%u result_len:%u ext:%u off:%u relid:%u conn:%u monitor:%u/%u dedicated:%u luid:%x:%x\n"
+        "dxg_global_send_ntext=cmdid:%lu cmd:%u channel:%u proc:0x%x cmd_len:%u wire_len:%u result_len:%u ext:%u off:%u relid:%u conn:%u monitor:%u/%u dedicated:%u luid:%x:%x\n"
+        "dxg_global_send_sharewire=cmdid:%lu cmd:%u channel:%u proc:0x%x cmd_len:%u wire_len:%u result_len:%u ext:%u off:%u relid:%u conn:%u monitor:%u/%u dedicated:%u\n"
+        "dxg_ntshared_last=create_len:%u create_cmd_len:%u obj_off:%u result_len:%u comp:%u/%u/%02x%02x%02x%02x%02x%02x%02x%02x create_ret:%d proc:0x%x type:%u channel:%u object:0x%x handle:0x%x raw0:0x%x zero_len:%u create_nt_zero_len:%u hard_fail:%u side_effect:%u share_fallback:%u share_valid:%u destroy_len:%u destroy_ret:%d destroy_handle:0x%x\n"
+        "dxg_process_match=alloc_proc:0x%x alloc_owner:0x%x/%u sync_proc:0x%x sync_owner:0x%x/%u nt_proc:0x%x nt_obj:0x%x alloc_dev:0x%x known:%u from_create:%u adapter:0x%x\n"
+        "dxg_ntshared_cache=hits:%u misses:%u inserts:%u releases:%u destroys:%u full:%u last:kind:%u/proc:0x%x/obj:0x%x/nt:0x%x/refs:%u\n"
+        "dxg_sharedhandle_last=cmd:0x%x ret:%d device:0x%x object:0x%x nt:0x%lx count:%u global:0x%x d3d_flags:0x%x fops:%u\n"
+        "dxg_sharedhandle_invariant=mode:wsl_raw current:0x%x/%u creator:0x%x/%u owner:0x%x/%u used:%u raw:0x%x/0x%x host_diag:0x%x/0x%x dev_found:%u obj_found:%u kind:%u type:%u flags:0x%x allocs:%u\n"
+        "dxg_sharedhandle_lookup=raw_obj:0x%x resource:%u allocation:%u sync:%u chosen_kind:%u chosen_type:%u chosen_obj:0x%x\n"
+        "dxg_sharedhandle_detail=kind:%u host_object:0x%x found:%u parent:0x%lx current:0x%x/%u owner:0x%x/%u/%u used:%u type:%u obj_dev:0x%x alloc0:0x%x alloc_found:%u alloc_owner:0x%x/%u/%u flags:0x%x allocs:%u sealed:%u\n"
+        "dxg_shared_sync_detail=sync_type:%u sync_flags:0x%x sync_global:0x%x monitor:%u fence_cpu:0x%lx fence_kva:0x%lx\n"
+        "dxg_sharedsync_export=fd:%u ret:%d cloexec:%u fops:%u kind:%u type:%u flags:0x%x monitor:%u global:0x%x zero:%u host_shared_handle:0x%x host_nt:0x%x refs:%u owner_obj:0x%x device:0x%x host_device:0x%x object:0x%x host_object:0x%x cache_proc:0x%x owner:0x%x/%u/%u\n"
+        "dxg_sharedfd_shape=sync_fops:%u resource_fops:%u last_fops:%u last_kind:%u generic_custom_fd:%u vfs_name:%u anon_inode:%u wider_vfs:%u stat_mode:0x%x sync_ino:0x%x resource_ino:0x%x\n"
+        "dxg_shareobjects_input=desired:0x%x attr:0x%lx attr_len:%u attr_ret:%d attr_head:%02x%02x%02x%02x%02x%02x%02x%02x\n"
+        "dxg_sharedhandle_prereq=map:va:0x%lx/pages:%lu/fence:%lu/ret:%d/status:0x%x resident:pq:0x%x/sync:0x%x/fence:%lu/current:%lu wait:%u/%d missing:%u enforced:%u\n"
+        "dxg_sharedresource_lifetime=created:%u seals:%u reuses:%u denied:%u seal_allocs:%u seal_priv:%u open_tracked:%u\n"
+        "dxg_sharedresource_owner=exists:%u cached:%u reused:%u nt:0x%x refs:%u sealed:%u object:0x%x proc:0x%x open_global:0x%x pre_sealable:%u pre_ret:%d\n"
+        "dxg_sharedresource_metadata=track_host:%u runtime:%u/%08x resource:%u/%08x total:%u/%08x alloc0:%u match_in:%u match_out:%u w4:%08x w8:%08x logical_flags:0x%x host_result_flags:0x%x host_flags_ignored:%u\n"
+        "dxg_sharedresource_preseal=mode:deferred applied:%u before:%u after:%u ret:%d\n"
+        "dxg_sharedresource_record=valid:%u stage:%u key:k%u/p0x%x/o0x%x/g0x%x/nt0x%x source:proc0x%x/tgid%lu/gen%u dev:0x%x res:0x%x alloc0:0x%x adapter:%x:%x host_adapter:%x:%x sealed:%u gen:%u before_fd:%u allocs:%u sizes:%u/%u/%u/%u hashes:%08x/%08x/%08x/%08x refs:%u query:%u open:%u fd:%u admit:%d exact:%u mutated:%u\n"
+        "dxg_queryresource_nt=seen:%u ret:%d device:0x%x nt:0x%lx kind:%u fops:%u sync_probe:%u global:0x%x host_nt:0x%x refs:%u object:0x%x cache_obj:0x%x allocs:%u runtime:%u resource:%u total:%u\n"
+        "dxg_openresource_envelope=route:vgpu global_route:%u cmd:%u wire:%u ext:%u eoff:%u result:%u actual:%u ret:%d status:0x%x proc:0x%x device:0x%x global:0x%x allocs:%u total_priv:%u out_res:0x%x out_alloc0:0x%x seal:%u->%u fd_kind:%u fd_fops:%u fd_refs:%u\n"
+        "dxg_opensync_envelope=route:global cmd:%u wire:%u ext:%u eoff:%u result:%u actual:%u ret:%d status:0x%x proc:0x%x device:0x%x global:0x%x flags:0x%x out_sync:0x%x gpu_va:0x%lx cpu_pa:0x%lx fd_kind:%u fd_refs:%u\n"
+        "dxg_opensync_shape=fops:%u expected_fops:%u type:%u user_flags:0x%x wire_flags:0x%x forced:%u sync_fd_fops:%u resource_fd_fops:%u generic_custom_fd:%u vfs_name:%u off_dev:%u off_global:%u off_flags:%u\n"
+        "dxg_opensync_target=target:0x%x/host:0x%x owner:0x%x/%u gen:%u source_dev:0x%x/host:0x%x source_owner:0x%x/%u same:%u adapter_match:%u adapter:%x:%x host_adapter:%x:%x source_flags:0x%x source_type:%u monitor:%u global:0x%x nt:0x%x status:0x%x\n"
+        "dxg_opensync_handle_source=input_nt:0x%lx host_nt:0x%x host_shared:0x%x object:0x%x cache_obj:0x%x fd_kind:%u fops:%u refs:%u uses_global:%u nt_diff:%u\n"
+        "dxg_opensync_gate=count:%u gate:%u last_cmd:0x%x last_nr:%u input_nt:0x%lx host_nt:0x%x kind:%u global:0x%x object:0x%x cache_obj:0x%x ret:%d\n"
+        "dxg_sharedfd_close=kind:%u fops:%u proc:0x%x obj:0x%x cache_obj:0x%x nt:0x%x host_shared:0x%x global:0x%x refs:%u->%u destroyed:0x%x destroy_ret:%d status:0x%x actual:%u cmd:%u wire:%u ext:%u eoff:%u result_ntstatus:%u handle_off:%u\n"
+        "dxg_unsupported_last=cmd:0x%x ret:%d device:0x%x handle:0x%x count:%u nr:%u size:%u name:%u\n"
+        "dxg_markdeviceaserror_last=len:%u ret:%d status:0x%x device:0x%x reason:0x%x process:0x%x cmd_len:%u\n"
+        "dxg_syncfile_last=cmd:0x%x ret:%d device:0x%x object:0x%x context:0x%x handle:0x%lx fence:%lu global:0x%x host_nt:0x%x source_flags:0x%x open_flags:0x%x len:%u status:0x%x out_sync:0x%x cpu:0x%lx gpu:0x%lx\n"
         "dxg_updateallocproperty_last=len:%u ret:%d status:0x%x allocation:0x%x fence:%lu\n"
         "dxg_vidmem_reservation_last=len:%u ret:%d status:0x%x group:%u reservation:%lu\n"
         "dxg_offer_reclaim_last=offer_len:%u offer_ret:%d offer_status:0x%x offer_count:%u reclaim_len:%u reclaim_ret:%d reclaim_status:0x%x reclaim_count:%u reclaim_result0:%u reclaim_fence:%lu\n"
-        "dxg_updategpuva_last=len:%u ret:%d status:0x%x ops:%u fence:%lu\n"
+        "dxg_updategpuva_last=len:%u ret:%d status:0x%x ops:%u fence:%lu device:0x%x context:0x%x fence_obj:0x%x flags:0x%x cmd_len:%u op_off:%u op_size:%u op0:type:%u/base:0x%lx/size:%lu/alloc:0x%x/aoff:%lu/asize:%lu/src:0x%lx/dst:0x%lx/prot:0x%lx/dprot:0x%lx\n"
         "dxg_cacheops_last=len:%u ret:%d status:0x%x allocation:0x%x\n"
         "dxg_context_last=len:%u ret:%d handle:0x%x device:0x%x node:%u engine:%u flags:0x%x hint:%u priv:%u fail_len:%u fail_ret:%d fail_status:0x%x\n"
         "dxg_context_priv_head=len:%u bytes:%02x%02x%02x%02x%02x%02x%02x%02x\n"
+        "dxg_destroy_last=device_len:%u device_ret:%d device_status:0x%x context_len:%u context_ret:%d context_status:0x%x paging_len:%u paging_ret:%d paging_status:0x%x sync_len:%u sync_ret:%d sync_status:0x%x sync_handle:0x%x sync_device:0x%x sync_type:%u sync_flags:0x%x sync_global:0x%x sync_monitor_fence:%u sync_cmd_len:%u sync_wire:%u sync_ext:%u sync_eoff:%u\n"
+        "dxg_flushdevice_last=len:%u ret:%d status:0x%x device:0x%x reason:%u\n"
         "dxg_hwqueue_last=create_len:%u create_ret:%d create_status:0x%x context:0x%x flags:0x%x priv:%u queue:0x%x fence:0x%x fence_cpu:0x%lx fence_gpu:0x%lx submit_len:%u submit_ret:%d destroy_len:%u destroy_ret:%d\n"
         "dxg_hwqueue_priv_head=create_len:%u create:%02x%02x%02x%02x%02x%02x%02x%02x submit_queue:0x%x submit_fence:%lu submit_cmd_len:%u submit_priv:%u submit_len:%u submit:%02x%02x%02x%02x%02x%02x%02x%02x\n"
         "dxg_probe_attempts=%u successes=%u last_ret=%d\n"
         "dxg_probe_open_status=%d handle=0x%x host_version=%u host_compat=%u\n"
         "dxg_probe_info_len=%u flags=0x%x async_msg=%u ext_header=%u host_vgpu_luid=%x:%x\n"
-        "dxg_pci=device:0x%x version:%u guid:%x-%x-%x-%x host_luid:%x:%x\n"
+        "dxg_probe_v40=open_ret:%d open_len:%u open_status:0x%x open:0x%x/%u/%u guest_luid:%x:%x getinternal_ret:%d getinternal_len:%u getinternal_flags:0x%x reject:%u\n"
+        "dxg_identity=pci_source:%s guestcaps:%d/%u/%u bdf:%x global:%u/%u/%u/%u/%u vgpu:%u/%u/%u/%u/%u gdef:%08x:%08x:%08x:%08x vdef:%08x:%08x:%08x:%08x openver:%u/%u/%u flags:0x%x async:%u ext:%u luid_src:%u host_luid:%x:%x pci_luid:%x:%x mmio_mb:%u\n"
+        "dxg_transport_policy=normal-v40-ext/wsl-open-zero-luid active:v%u host_v40:%s pci_host:%u pci_neg:%u ext:%u type31:v40-first/cached-real-or-fail\n"
+        "dxg_negotiation=active:%u compat:%u source:%u fallbacks:%u pci_host:%u pci_neg:%u pci_write:%u/%u/0x%x/0x%x/%d open:%u/%u/%u ext:%u info_len:%u\n"
+        "dxg_pci_vmbus_write=attempted:%u writes:%u supported:%u cfg_ret:%d verify_ret:%d value:0x%x readback:0x%x ret:%d source:%u token:0x%x\n"
+        "hyperv_pci_offer=present:%u count:%u relid:%u conn:%u monitor:%u alloc:%u dedicated:%u flags:0x%x mmio_mb:%u inst:%08x:%04x:%04x:%02x%02x user:%08x:%08x:%08x:%08x\n"
+        "hyperv_pci_channel=present:%u relid:%u conn:%u gpadl:%d/%u open:%d/%u protocol:%d version:0x%x attempts:%u last:0x%x status:%d ret:%d pkt:%u len:%u trans:%lu prefix:%02x%02x%02x%02x%02x%02x%02x%02x\n"
+        "hyperv_pci_bus=cfg:%d src:%u ret:%d pa:0x%lx va:0x%lx size:%u cand:0x%lx lim:0x%lx reject:%u backend:%d/%d d0:%u/%u/%d/%d query:%u/%u/%d rel:%u/%u/%u/%u/%u child:%u reg:%u/%u first:%04x:%04x class:0x%x wslot:0x%x bdf:%u:%u:%u cfgio:%u/%u rej:%u last:%d token:0x%x off:%u size:%u val:0x%x pkt:%u/%u prefix:%02x%02x%02x%02x%02x%02x%02x%02x\n"
+        "dxg_pci=domain:%u bdf:%x bus:%u dev:%u func:%u vendor:0x%x device:0x%x class:0x%x version:%u guid:%x-%x-%x-%x host_luid:%x:%x\n"
+        "dxg_pci_guestcaps=attempts:%u writes:%u found:%u scan:%u attempted:%u verified:%u source:%u token:0x%x off:%u value:0x%x readback:0x%x ret:%d before_probe:%u bdf:%x\n"
         "dxg_probe_last_packet=type:%u len:%u prefix:%02x%02x%02x%02x%02x%02x%02x%02x\n"
+        "dxg_createprocess_last=len:%u cmd_len:%u ret:%d guest:0x%lx pid:%lu tgid:%lu handle:0x%x layout:%u gen:%u destroy_len:%u destroy_ret:%d destroy_handle:0x%x\n"
         "d3dkmt_ioctls=%u successes=%u ready=%d last_ret=%d process=0x%x\n"
         "d3dkmt_ioctl_history=index:%u h0:0x%x/%u/%d h1:0x%x/%u/%d h2:0x%x/%u/%d h3:0x%x/%u/%d h4:0x%x/%u/%d h5:0x%x/%u/%d h6:0x%x/%u/%d h7:0x%x/%u/%d\n"
         "d3dkmt_ioctl_history2=h8:0x%x/%u/%d h9:0x%x/%u/%d h10:0x%x/%u/%d h11:0x%x/%u/%d h12:0x%x/%u/%d h13:0x%x/%u/%d h14:0x%x/%u/%d h15:0x%x/%u/%d\n"
+        "d3dkmt_ioctl_counts=destroyalloc:%u destroycontext:%u destroyhwqueue:%u destroypaging:%u destroydevice:%u destroysync:%u freegpuva:%u closeadapter:%u\n"
         "d3dkmt_open_files=opens:%u live:%u cleanup_attempts:%u cleanup_successes:%u cleanup_last_ret:%d cleanup_last_op:%u cleanup_last_handle:0x%x cleanup_failed_op:%u cleanup_failed_handle:0x%x cleanup_had_tracked:%u\n"
+        "d3dkmt_cleanup_detail=resource_host:%u resource_child_local:%u standalone_alloc_host:%u resource_alloc_skips:%u\n"
+        "d3dkmt_processes=live:%u max:%u creates:%u reuses:%u releases:%u destroy_attempts:%u destroy_successes:%u destroy_failures:%u destroy_suppressed:%u destroy_deferred:%u shared_reuses:%u isolated_reuses:%u full:%u generation:%u retained:0x%x retained_gen:%u retained_refs:%u\n"
+        "d3dkmt_process_destroy_active=total:%u device:%u context:%u hwqueue:%u paging:%u sync:%u allocation:%u resource:%u gpuva:%u\n"
+        "d3dkmt_process_binding=new_host_created:%u same_tgid_reused:%u retained_reuse_avoided:%u avoided_tgid:%lu avoided_src_tgid:%lu avoided_handle:0x%x avoided_gen:%u avoided_src_gen:%u\n"
+        "d3dkmt_process_reuse=last_tgid:%lu handle:0x%x local_gen:%u source_gen:%u copied_objects:%u source_objects:%u\n"
         "note=Hyper-V GPU-PV D3DKMT adapter ioctls are available; "
         "device/context/sync/paging/allocation residency/map/submit ioctls are wired; higher-level OpenGL/D3D runtime validation is still pending.\n",
         hvdxg.global_present, hvdxg.global_relid, hvdxg.global_conn_id,
@@ -2930,6 +7603,20 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.global_mmio_megabytes, hvdxg.iospace_set,
         hvdxg.iospace_last_ret, hvdxg.iospace_last_len,
         hvdxg.iospace_base, hvdxg.iospace_size,
+        hvdxg.fence_map_last_source, hvdxg.fence_map_last_mode,
+        hvdxg.fence_map_last_raw_pa, hvdxg.fence_map_last_canonical_pa,
+        hvdxg.fence_map_last_offset,
+        hvdxg.fence_map_last_offset_candidate_pa,
+        hvdxg.fence_map_last_offset_candidate_current,
+        hvdxg.fence_map_last_size, hvdxg.fence_map_last_user_va,
+        hvdxg.fence_map_last_kva, hvdxg.fence_map_failures,
+        hvdxg.fence_value_max_seen, hvdxg.fence_map_max_source,
+        hvdxg.fence_map_max_mode, hvdxg.fence_map_max_raw_pa,
+        hvdxg.fence_map_max_canonical_pa,
+        hvdxg.fence_map_max_offset_candidate_pa,
+        hvdxg.fence_map_max_offset_candidate_current,
+        hvdxg.fence_value_last_kva,
+        hvdxg.fence_value_last_current, hvdxg.fence_value_last_target,
         hvdxg.vgpu_present, hvdxg.vgpu_count, hvdxg.vgpu_relid,
         hvdxg.vgpu_conn_id, hvdxg.vgpu_monitorid, hvdxg.vgpu_gpadl_ok,
         hvdxg.vgpu_gpadl_status, hvdxg.vgpu_open_ok,
@@ -2940,6 +7627,25 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.host_event_wait_timeouts, hvdxg.host_event_wait_failures,
         hvdxg.pump_active, hvdxg.pump_skips, hvdxg.sync_active,
         hvdxg.sync_waits, hvdxg.sync_timeouts,
+        hvdxg.completion_desc_type, hvdxg.completion_desc_flags,
+        hvdxg.completion_desc_len8, hvdxg.completion_desc_offset8,
+        hvdxg.completion_packet_len, hvdxg.completion_packet_offset,
+        hvdxg.completion_payload_len,
+        hvdxg.completion_desc_trans_id,
+        hvdxg.completion_waiting_trans_id,
+        hvdxg_channel_name(hvdxg.completion_source_channel),
+        hvdxg.completion_source_relid,
+        hvdxg_channel_name(hvdxg.completion_waiting_channel),
+        hvdxg.completion_waiting_relid,
+        hvdxg.completion_waiting_match,
+        hvdxg.completion_waiting_channel_match,
+        hvdxg.completion_type, hvdxg.completion_len,
+        hvdxg.completion_buf[0], hvdxg.completion_buf[1],
+        hvdxg.completion_buf[2], hvdxg.completion_buf[3],
+        hvdxg.completion_buf[4], hvdxg.completion_buf[5],
+        hvdxg.completion_buf[6], hvdxg.completion_buf[7],
+        hvdxg.object_table_max, hvdxg.object_table_drops,
+        hvdxg.object_table_denied, hvdxg.object_table_generation,
         (uint32)HV_DXG_OPEN_TRACKED_MAX, hvdxg.track_allocation_max,
         hvdxg.track_allocation_drops, hvdxg.track_gpuva_max,
         hvdxg.track_gpuva_drops, hvdxg.track_hwqueue_max,
@@ -2951,13 +7657,20 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.gpuva_reserve_last_len, hvdxg.gpuva_reserve_last_ret,
         hvdxg.gpuva_reserve_last_va, hvdxg.gpuva_reserve_last_fence,
         hvdxg.gpuva_free_last_len, hvdxg.gpuva_free_last_ret,
+        hvdxg.gpuva_free_last_adapter, hvdxg.gpuva_free_last_base,
+        hvdxg.gpuva_free_last_size, hvdxg.gpuva_free_last_wire_size,
         hvdxg.syncobject_last_len, hvdxg.syncobject_last_ret,
-        hvdxg.syncobject_last_handle, hvdxg.syncobject_last_fence_cpu,
+        hvdxg.syncobject_last_handle, hvdxg.syncobject_last_type,
+        hvdxg.syncobject_last_flags, hvdxg.syncobject_last_global,
+        hvdxg.syncobject_last_fence_cpu,
         hvdxg.syncobject_last_fence_gpu, hvdxg.syncobject_last_fence_pa,
         hvdxg.syncobject_last_fence_off, hvdxg.syncsignal_last_len,
         hvdxg.syncsignal_last_ret, (uint32)hvdxg.syncsignal_last_status,
         hvdxg.syncwait_last_len, hvdxg.syncwait_last_ret,
         (uint32)hvdxg.syncwait_last_status,
+        hvdxg.syncwait_last_event, hvdxg.syncwait_last_async,
+        hvdxg.syncwait_last_object, hvdxg.syncwait_last_fence,
+        hvdxg.syncwait_last_current, hvdxg.syncwait_last_result,
         hvdxg.syncgpu_signal_last_len, hvdxg.syncgpu_signal_last_ret,
         (uint32)hvdxg.syncgpu_signal_last_status,
         hvdxg.syncgpu_wait_last_len, hvdxg.syncgpu_wait_last_ret,
@@ -2969,6 +7682,21 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.syncgpu_wait_last_legacy,
         hvdxg.syncgpu_wait_last_fence,
         hvdxg.syncgpu_wait_last_cmd_len,
+        hvdxg.syncobject_last_cmd_len,
+        hvdxg.syncobject_last_result_len,
+        hvdxg.syncobject_last_result_sync_offset,
+        hvdxg.syncobject_last_result_global_offset,
+        hvdxg.syncobject_last_result_fence_gpu_offset,
+        hvdxg.syncobject_last_result_fence_pa_offset,
+        hvdxg.syncobject_last_result_fence_off_offset,
+        hvdxg.syncobject_last_result_head_len,
+        hvdxg.syncobject_last_args_offset,
+        hvdxg.syncobject_last_client_hint_offset,
+        hvdxg.syncobject_last_client_hint,
+        hvdxg.syncobject_last_input_shared,
+        hvdxg.syncobject_last_process,
+        hvdxg.syncobject_last_owner_process,
+        hvdxg.syncobject_last_owner_generation,
         hvdxg.allocation_last_len, hvdxg.allocation_last_ret,
         hvdxg.allocation_last_count, hvdxg.last_resource_handle,
         hvdxg.last_allocation_handle, hvdxg.last_allocation_size,
@@ -2976,6 +7704,51 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.createalloc_unwind_attempts,
         hvdxg.createalloc_unwind_successes,
         hvdxg.createalloc_unwind_last_ret,
+        hvdxg.destroyalloc_last_device,
+        hvdxg.destroyalloc_last_resource,
+        hvdxg.destroyalloc_last_allocation,
+        hvdxg.destroyalloc_last_process,
+        hvdxg.destroyalloc_last_context,
+        hvdxg.destroyalloc_last_count,
+        hvdxg.destroyalloc_last_len,
+        hvdxg.destroyalloc_last_ret,
+        (uint32)hvdxg.destroyalloc_last_status,
+        hvdxg.destroyalloc_d3d12_match_count,
+        hvdxg.destroyalloc_d3d12_pending_match_count,
+        hvdxg.destroyalloc_d3d12_last_match,
+        hvdxg.destroyalloc_d3d12_last_seq,
+        hvdxg.d3d12_shared_create_seq,
+        hvdxg.d3d12_shared_first_nt_seq,
+        hvdxg.destroyalloc_d3d12_first_seq,
+        hvdxg.destroyalloc_d3d12_first_context,
+        hvdxg.destroyalloc_d3d12_first_match,
+        hvdxg.destroyalloc_d3d12_first_pending,
+        hvdxg.destroyalloc_d3d12_first_before_nt,
+        hvdxg.destroyalloc_d3d12_last_before_nt,
+        hvdxg.destroyalloc_d3d12_context_mask,
+        hvdxg.allocation_last_cmd_len,
+        hvdxg.allocation_last_hdr_size,
+        hvdxg.allocation_last_prr_offset,
+        hvdxg.allocation_last_make_resident_offset,
+        hvdxg.allocation_last_allocinfo_offset,
+        hvdxg.allocation_last_private_offset,
+        hvdxg.allocation_last_result_min_len,
+        hvdxg.allocation_last_result_len,
+        hvdxg.allocation_last_wire_len,
+        hvdxg.allocation_last_ext,
+        hvdxg.allocation_last_ext_offset,
+        hvdxg.allocation_last_route_global,
+        hvdxg.allocation_last_send_ret,
+        hvdxg.allocation_last_process,
+        hvdxg.allocation_last_result_flags_offset,
+        hvdxg.allocation_last_result_resource_offset,
+        hvdxg.allocation_last_result_global_offset,
+        hvdxg.allocation_last_result_vgpu_offset,
+        hvdxg.allocation_last_result_allocinfo_offset,
+        hvdxg.allocation_last_result_allocinfo_size,
+        hvdxg.allocation_last_result_head_len,
+        hvdxg.allocation_last_runtime_size,
+        hvdxg.allocation_last_resource_priv_size,
         hvdxg.allocation_last_priv_size, hvdxg.allocation_last_flags,
         hvdxg.allocation_last_sysmem, hvdxg.allocation_last_priority,
         hvdxg.existing_sysmem_last_pages,
@@ -3002,17 +7775,73 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.allocation_last_out_priv_head[5],
         hvdxg.allocation_last_out_priv_head[6],
         hvdxg.allocation_last_out_priv_head[7],
+        existing_sysmem_diag_attempts,
+        existing_sysmem_diag_path,
+        existing_sysmem_diag_standard,
+        existing_sysmem_diag_writable,
+        existing_sysmem_diag_device,
+        existing_sysmem_diag_allocation,
+        existing_sysmem_diag_va,
+        existing_sysmem_diag_size,
+        existing_sysmem_diag_pages,
+        existing_sysmem_diag_first_pfn,
+        existing_sysmem_diag_last_pfn,
+        existing_sysmem_diag_pin_ret,
+        existing_sysmem_diag_set_ret,
+        existing_sysmem_diag_pin_ok,
+        existing_sysmem_diag_set_ok,
+        existing_sysmem_diag_total_pages,
         hvdxg.makeresident_last_len, hvdxg.makeresident_last_ret,
-        hvdxg.makeresident_last_fence, hvdxg.makeresident_last_trim,
+        hvdxg.makeresident_last_host_ret,
+        hvdxg.makeresident_last_user_ret,
+        (uint32)hvdxg.makeresident_last_status,
+        hvdxg.makeresident_last_pending_ok,
+        hvdxg.makeresident_last_fence,
+        hvdxg.makeresident_last_fence_current,
+        hvdxg.makeresident_last_sync, hvdxg.makeresident_last_trim,
+        hvdxg.makeresident_last_device,
+        hvdxg.makeresident_last_paging_queue,
+        hvdxg.makeresident_last_flags,
+        hvdxg.makeresident_last_count,
+        hvdxg.makeresident_last_sorted,
+        hvdxg.makeresident_last_in_alloc[0],
+        hvdxg.makeresident_last_in_alloc[1],
+        hvdxg.makeresident_last_in_alloc[2],
+        hvdxg.makeresident_last_in_alloc[3],
+        hvdxg.makeresident_last_wire_alloc[0],
+        hvdxg.makeresident_last_wire_alloc[1],
+        hvdxg.makeresident_last_wire_alloc[2],
+        hvdxg.makeresident_last_wire_alloc[3],
         hvdxg.evict_last_len, hvdxg.evict_last_ret,
-        hvdxg.evict_last_trim, hvdxg.mapgpuva_last_len,
+        hvdxg.evict_last_trim,
+        hvdxg.makeresident_last_cmd_len,
+        hvdxg.makeresident_last_wsl_cmd_len,
+        hvdxg.makeresident_last_result_len,
+        hvdxg.makeresident_last_actual_len,
+        hvdxg.makeresident_last_owner_ok_count,
+        hvdxg.makeresident_last_tracked_count,
+        hvdxg.makeresident_last_order_matches,
+        hvdxg.makeresident_last_in_alloc[0],
+        hvdxg.makeresident_last_owner_dev[0],
+        hvdxg.makeresident_last_owner_res[0],
+        hvdxg.makeresident_last_owner_proc[0],
+        hvdxg.makeresident_last_owner_gen[0],
+        hvdxg.makeresident_last_owner_refs[0],
+        hvdxg.makeresident_last_in_alloc[1],
+        hvdxg.makeresident_last_owner_dev[1],
+        hvdxg.makeresident_last_owner_res[1],
+        hvdxg.makeresident_last_owner_proc[1],
+        hvdxg.makeresident_last_owner_gen[1],
+        hvdxg.makeresident_last_owner_refs[1],
+        hvdxg.mapgpuva_last_len,
         hvdxg.mapgpuva_last_ret, (uint32)hvdxg.mapgpuva_last_status,
         hvdxg.mapgpuva_last_paging_queue, hvdxg.mapgpuva_last_allocation,
         hvdxg.mapgpuva_last_base, hvdxg.mapgpuva_last_min,
         hvdxg.mapgpuva_last_max, hvdxg.mapgpuva_last_size_pages,
         hvdxg.mapgpuva_last_protection,
         hvdxg.mapgpuva_last_driver_protection, hvdxg.mapgpuva_last_va,
-        hvdxg.mapgpuva_last_fence, hvdxg.submit_last_len,
+        hvdxg.mapgpuva_last_fence, hvdxg.mapgpuva_last_fence_current,
+        hvdxg.mapgpuva_last_sync, hvdxg.submit_last_len,
         hvdxg.submit_last_ret, (uint32)hvdxg.submit_last_status,
         hvdxg.submit_last_command_buffer,
         hvdxg.submit_last_command_length, hvdxg.submit_last_flags,
@@ -3029,6 +7858,22 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         HV_DXG_AH_ARGS(2), HV_DXG_AH_ARGS(3),
         HV_DXG_AH_ARGS(4), HV_DXG_AH_ARGS(5),
         HV_DXG_AH_ARGS(6), HV_DXG_AH_ARGS(7),
+        hvdxg.allocation_history_global_share[0],
+        hvdxg.allocation_history_create_flags[0],
+        hvdxg.allocation_history_global_share[1],
+        hvdxg.allocation_history_create_flags[1],
+        hvdxg.allocation_history_global_share[2],
+        hvdxg.allocation_history_create_flags[2],
+        hvdxg.allocation_history_global_share[3],
+        hvdxg.allocation_history_create_flags[3],
+        hvdxg.allocation_history_global_share[4],
+        hvdxg.allocation_history_create_flags[4],
+        hvdxg.allocation_history_global_share[5],
+        hvdxg.allocation_history_create_flags[5],
+        hvdxg.allocation_history_global_share[6],
+        hvdxg.allocation_history_create_flags[6],
+        hvdxg.allocation_history_global_share[7],
+        hvdxg.allocation_history_create_flags[7],
         hvdxg.mapgpuva_history_index,
         HV_DXG_MH_ARGS(0), HV_DXG_MH_ARGS(1),
         HV_DXG_MH_ARGS(2), HV_DXG_MH_ARGS(3),
@@ -3039,10 +7884,235 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         HV_DXG_LH_ARGS(2), HV_DXG_LH_ARGS(3),
         HV_DXG_LH_ARGS(4), HV_DXG_LH_ARGS(5),
         HV_DXG_LH_ARGS(6), HV_DXG_LH_ARGS(7),
-        hvdxg.queryadapter_last_type, hvdxg.queryadapter_last_size,
-        hvdxg.queryadapter_last_len, hvdxg.queryadapter_last_ret,
+	        hvdxg.queryadapter_last_type, hvdxg.queryadapter_last_size,
+	        hvdxg.queryadapter_last_len, hvdxg.queryadapter_last_user_len,
+	        hvdxg.queryadapter_last_ret,
         (uint32)hvdxg.queryadapter_last_status,
+        hvdxg.queryadapter_last_layout,
+        hvdxg.queryadapter_last_cmd_len,
+        hvdxg.queryadapter_last_type_offset,
+        hvdxg.queryadapter_last_size_offset,
+        hvdxg.queryadapter_last_data_offset,
+        hvdxg.queryadapter_last_adapter,
+        hvdxg.queryadapter_last_host_adapter,
+        hvdxg.queryadapter_last_resolve_source,
+        hvdxg.queryadapter_last_owner_process,
+        hvdxg.queryadapter_last_owner_generation,
+        hvdxg.queryadapter_last_owner_refs,
+        hvdxg.queryadapter_last_result_len,
+        hvdxg.queryadapter_last_expected_wsl_len,
+        hvdxg.queryadapter_last_process_source,
+        hvdxg.queryadapter_last_adapter_object,
+        hvdxg.queryadapter_last_adapter_object_host,
+        hvdxg.queryadapter_last_adapter_object_owner,
+        hvdxg.queryadapter_last_adapter_object_owner_generation,
+        hvdxg.queryadapter_last_adapter_object_generation,
+        hvdxg.queryadapter_local_namespace,
+        hvdxg.queryadapter_process_adapter_refs,
+        hvdxg.queryadapter_process_adapter_locals,
+        hvdxg.queryadapter_process_adapter_generation,
+        hvdxg.queryadapter_type15_fail_ret,
+        (uint32)hvdxg.queryadapter_type15_fail_status,
+        hvdxg.queryadapter_type15_fail_process,
+        hvdxg.queryadapter_type15_fail_route,
+        hvdxg.queryadapter_type15_fail_ext_luid_low,
+        hvdxg.queryadapter_type15_fail_ext_luid_high,
+        hvdxg.queryadapter_send_route,
+        hvdxg.queryadapter_send_ext_luid_low,
+        hvdxg.queryadapter_send_ext_luid_high,
+        hvdxg.queryadapter_completion_desc_type,
+        hvdxg.queryadapter_completion_desc_flags,
+        hvdxg.queryadapter_completion_desc_len8,
+        hvdxg.queryadapter_completion_desc_offset8,
+        hvdxg.queryadapter_completion_packet_len,
+        hvdxg.queryadapter_completion_packet_offset,
+        hvdxg.queryadapter_completion_payload_len,
+        hvdxg.queryadapter_completion_trans_id,
+        hvdxg.queryadapter_completion_waiting_trans_id,
+        hvdxg_channel_name(hvdxg.queryadapter_completion_source_channel),
+        hvdxg.queryadapter_completion_source_relid,
+        hvdxg_channel_name(hvdxg.queryadapter_completion_waiting_channel),
+        hvdxg.queryadapter_completion_waiting_relid,
+        hvdxg.queryadapter_completion_waiting_match,
+        hvdxg.queryadapter_completion_waiting_channel_match,
+        hvdxg.queryadapter_completion_type,
+        hvdxg.queryadapter_completion_len,
+        hvdxg.queryadapter_completion_prefix[0],
+        hvdxg.queryadapter_completion_prefix[1],
+        hvdxg.queryadapter_completion_prefix[2],
+        hvdxg.queryadapter_completion_prefix[3],
+        hvdxg.queryadapter_completion_prefix[4],
+        hvdxg.queryadapter_completion_prefix[5],
+        hvdxg.queryadapter_completion_prefix[6],
+        hvdxg.queryadapter_completion_prefix[7],
+	        hvdxg.queryadapter_zero_success_type,
+	        hvdxg.queryadapter_zero_success_size,
+	        hvdxg.queryadapter_zero_success_count,
+	        hvdxg.queryadapter_zero_success_host_type,
+	        hvdxg.queryadapter_zero_success_host_len,
+	        hvdxg.queryadapter_zero_success_host_ret,
+	        (uint32)hvdxg.queryadapter_zero_success_host_status,
+	        hvdxg.queryadapter_zero_success_user_ret,
+	        hvdxg.queryadapter_type0_private_size,
+        hvdxg.queryadapter_type0_private_hash,
+        hvdxg.queryadapter_type0_primary_len,
+        hvdxg.queryadapter_type0_primary_ret,
+        (uint32)hvdxg.queryadapter_type0_primary_status,
+        hvdxg.queryadapter_type0_fallback_attempted,
+        hvdxg.queryadapter_type0_fallback_used,
+        hvdxg.queryadapter_type0_fallback_len,
+        hvdxg.queryadapter_type0_fallback_ret,
+        (uint32)hvdxg.queryadapter_type0_fallback_status,
+        hvdxg.queryadapter_type0_result_route,
+        hvdxg.queryadapter_type0_fallback_reason,
+        hvdxg.queryadapter_type0_fallback_route,
+        hvdxg.queryadapter_umd_rewrite_attempted,
+        hvdxg.queryadapter_umd_rewrite_rewritten,
+        hvdxg.queryadapter_umd_rewrite_path,
+        hvdxg.queryadapter_umd_rewrite_vendor,
+        hvdxg.queryadapter_umd_rewrite_original_hash,
+        hvdxg.queryadapter_umd_rewrite_original0,
+        hvdxg.queryadapter_umd_rewrite_original1,
+        hvdxg.queryadapter_umd_rewrite_host_status,
+        hvdxg.queryadapter_umd_rewrite_ret,
+        hvdxg.queryadapter_type0_private_head_len,
+        hvdxg.queryadapter_type0_private_head[0],
+        hvdxg.queryadapter_type0_private_head[1],
+        hvdxg.queryadapter_type0_private_head[2],
+        hvdxg.queryadapter_type0_private_head[3],
+        hvdxg.queryadapter_type0_private_head[4],
+        hvdxg.queryadapter_type0_private_head[5],
+        hvdxg.queryadapter_type0_private_head[6],
+        hvdxg.queryadapter_type0_private_head[7],
+        hvdxg.queryadapter_type0_private_head[8],
+        hvdxg.queryadapter_type0_private_head[9],
+        hvdxg.queryadapter_type0_private_head[10],
+        hvdxg.queryadapter_type0_private_head[11],
+        hvdxg.queryadapter_type0_private_head[12],
+        hvdxg.queryadapter_type0_private_head[13],
+        hvdxg.queryadapter_type0_private_head[14],
+        hvdxg.queryadapter_type0_private_head[15],
+        hvdxg.queryadapter_type0_private_head[16],
+        hvdxg.queryadapter_type0_private_head[17],
+        hvdxg.queryadapter_type0_private_head[18],
+        hvdxg.queryadapter_type0_private_head[19],
+        hvdxg.queryadapter_type0_private_head[20],
+        hvdxg.queryadapter_type0_private_head[21],
+        hvdxg.queryadapter_type0_private_head[22],
+        hvdxg.queryadapter_type0_private_head[23],
+        hvdxg.queryadapter_type0_private_head[24],
+        hvdxg.queryadapter_type0_private_head[25],
+        hvdxg.queryadapter_type0_private_head[26],
+        hvdxg.queryadapter_type0_private_head[27],
+        hvdxg.queryadapter_type0_private_head[28],
+        hvdxg.queryadapter_type0_private_head[29],
+        hvdxg.queryadapter_type0_private_head[30],
+        hvdxg.queryadapter_type0_private_head[31],
+        hvdxg.queryadapter_type0_private_tail_len,
+        hvdxg.queryadapter_type0_private_tail[0],
+        hvdxg.queryadapter_type0_private_tail[1],
+        hvdxg.queryadapter_type0_private_tail[2],
+        hvdxg.queryadapter_type0_private_tail[3],
+        hvdxg.queryadapter_type0_private_tail[4],
+        hvdxg.queryadapter_type0_private_tail[5],
+        hvdxg.queryadapter_type0_private_tail[6],
+        hvdxg.queryadapter_type0_private_tail[7],
+        hvdxg.queryadapter_type0_private_tail[8],
+        hvdxg.queryadapter_type0_private_tail[9],
+        hvdxg.queryadapter_type0_private_tail[10],
+        hvdxg.queryadapter_type0_private_tail[11],
+        hvdxg.queryadapter_type0_private_tail[12],
+        hvdxg.queryadapter_type0_private_tail[13],
+        hvdxg.queryadapter_type0_private_tail[14],
+        hvdxg.queryadapter_type0_private_tail[15],
+        hvdxg.queryadapter_type0_private_tail[16],
+        hvdxg.queryadapter_type0_private_tail[17],
+        hvdxg.queryadapter_type0_private_tail[18],
+        hvdxg.queryadapter_type0_private_tail[19],
+        hvdxg.queryadapter_type0_private_tail[20],
+        hvdxg.queryadapter_type0_private_tail[21],
+        hvdxg.queryadapter_type0_private_tail[22],
+        hvdxg.queryadapter_type0_private_tail[23],
+        hvdxg.queryadapter_type0_private_tail[24],
+        hvdxg.queryadapter_type0_private_tail[25],
+        hvdxg.queryadapter_type0_private_tail[26],
+        hvdxg.queryadapter_type0_private_tail[27],
+        hvdxg.queryadapter_type0_private_tail[28],
+        hvdxg.queryadapter_type0_private_tail[29],
+        hvdxg.queryadapter_type0_private_tail[30],
+        hvdxg.queryadapter_type0_private_tail[31],
         hvdxg.adapter_vendor_id, hvdxg.adapter_device_id,
+        hvdxg.adapter_hardware_raw[0], hvdxg.adapter_hardware_raw[1],
+        hvdxg.adapter_hardware_raw[2], hvdxg.adapter_hardware_raw[3],
+        hvdxg.adapter_hardware_raw[4], hvdxg.adapter_hardware_raw[5],
+        hvdxg.adapter_hardware_raw[6],
+        hvdxg.adapter_hardware_raw_size, hvdxg.adapter_hardware_normalized,
+        hvdxg.adapter_hardware_fallback,
+        hvdxg.adapter_hardware_fallback_count,
+        hvdxg.adapter_hardware_fallback_source,
+        hvdxg_adapter_hardware_source_name(),
+        hvdxg.adapter_hardware_synthetic_rejected,
+        hvdxg.adapter_hardware_cache_available,
+        hvdxg.adapter_hardware_payload_len,
+        hvdxg.adapter_hardware_v40_short_zero,
+        hvdxg.adapter_hardware_v40_short_len,
+        hvdxg.adapter_hardware_v40_short_ret,
+        (uint32)hvdxg.adapter_hardware_v40_short_status,
+        hvdxg.adapter_hardware_cache_available,
+        hvdxg_adapter_hardware_source_name(),
+        hvdxg.adapter_hardware_synthetic_rejected,
+        hvdxg.adapter_hardware_temp_v27_attempts,
+        hvdxg.adapter_hardware_temp_v27_successes,
+        hvdxg.adapter_hardware_temp_v27_failures,
+        hvdxg.adapter_hardware_temp_v27_last_ret,
+        (uint32)hvdxg.adapter_hardware_temp_v27_last_status,
+        hvdxg.adapter_hardware_temp_v27_open_len,
+        hvdxg.adapter_hardware_temp_v27_query_len,
+        hvdxg.adapter_hardware_temp_v27_close_len,
+        hvdxg.adapter_hardware_temp_v27_close_ret,
+        (uint32)hvdxg.adapter_hardware_temp_v27_close_status,
+        hvdxg.adapter_hardware_temp_v27_handle,
+        hvdxg.adapter_hardware_temp_v27_restored_version,
+        hvdxg.adapter_hardware_temp_v27_restored_ext,
+        hvdxg.enumadapters_last_cmd, hvdxg.enumadapters_last_in_count,
+        hvdxg.enumadapters_last_out_count, hvdxg.enumadapters_last_buffer,
+        hvdxg.enumadapters_last_handle,
+        hvdxg.enumadapters_last_luid_high,
+        hvdxg.enumadapters_last_luid_low,
+        hvdxg.enumadapters_last_luid_source,
+        hvdxg.enumadapters_last_ret,
+        hvdxg.enumadapters_last_stage,
+        hvdxg.enumadapters_last_ensure_ret,
+        hvdxg.enumadapters_last_bind_ret,
+        hvdxg.enumadapters_last_local_ret,
+        hvdxg.enumadapters_last_copyout_ret,
+        hvdxg.enumadapters_last_global_open,
+        hvdxg.enumadapters_last_global_relid,
+        hvdxg.enumadapters_last_global_conn,
+        hvdxg.enumadapters_last_vgpu_open,
+        hvdxg.enumadapters_last_vgpu_relid,
+        hvdxg.enumadapters_last_vgpu_conn,
+        hvdxg.enumadapters_last_host_adapter,
+        hvdxg.enumadapters_last_probe_successes,
+        hvdxg.enumadapters_last_probe_ret,
+        (uint32)hvdxg.enumadapters_last_probe_status,
+        hvdxg.enumadapters_last_probe_handle,
+        hvdxg.enumadapters_last_ready,
+        hvdxg.enumadapters_last_process,
+        hvdxg.enumadapters_last_process_created,
+        hvdxg.enumadapters_last_process_generation,
+        hvdxg.enumadapters_last_process_refs,
+        hvdxg.enumadapters_last_process_adapters,
+        hvdxg.enumadapters_last_process_locals,
+        hvdxg.enumadapters_last_process_objects,
+        hvdxg.local_adapter_namespace_hits,
+        hvdxg.local_adapter_namespace_misses,
+        hvdxg.local_adapter_last_result,
+        hvdxg.local_adapter_last_handle,
+        hvdxg.local_adapter_last_host,
+        hvdxg.local_adapter_last_refs,
+        hvdxg.local_adapter_last_locals,
+        hvdxg.local_adapter_last_generation,
         hvdxg.queryadapter_history_index,
         HV_DXG_QH_ARGS(0), HV_DXG_QH_ARGS(1),
         HV_DXG_QH_ARGS(2), HV_DXG_QH_ARGS(3),
@@ -3052,6 +8122,15 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         HV_DXG_QH_ARGS(10), HV_DXG_QH_ARGS(11),
         HV_DXG_QH_ARGS(12), HV_DXG_QH_ARGS(13),
         HV_DXG_QH_ARGS(14), HV_DXG_QH_ARGS(15),
+        hvdxg.queryadapter_admission_history_index,
+        HV_DXG_QAI_ADMISSION_ARGS(0),
+        HV_DXG_QAI_ADMISSION_ARGS(1),
+        HV_DXG_QAI_ADMISSION_ARGS(2),
+        HV_DXG_QAI_ADMISSION_ARGS(3),
+        HV_DXG_QAI_ADMISSION_ARGS(4),
+        HV_DXG_QAI_ADMISSION_ARGS(5),
+        HV_DXG_QAI_ADMISSION_ARGS(6),
+        HV_DXG_QAI_ADMISSION_ARGS(7),
         hvdxg.queryregistry_last_query_type,
         hvdxg.queryregistry_last_flags,
         hvdxg.queryregistry_last_value_type,
@@ -3088,26 +8167,514 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.escape_last_len, hvdxg.escape_last_ret,
         hvdxg.escape_last_type, hvdxg.escape_last_flags,
         hvdxg.escape_last_size,
-        hvdxg.shareobject_last_len, hvdxg.shareobject_last_ret,
+        hvdxg.shareobject_last_len, hvdxg.shareobject_last_cmd_len,
+        hvdxg.shareobject_last_device_offset,
+        hvdxg.shareobject_last_object_offset,
+        hvdxg.shareobject_last_wire_len,
+        hvdxg.shareobject_last_ext,
+        hvdxg.shareobject_last_ext_offset,
+        hvdxg.shareobject_last_result_len,
+        hvdxg.shareobject_last_head_len,
+        hvdxg.shareobject_last_completion_type,
+        hvdxg.shareobject_last_completion_len,
+        hvdxg.shareobject_last_completion_prefix[0],
+        hvdxg.shareobject_last_completion_prefix[1],
+        hvdxg.shareobject_last_completion_prefix[2],
+        hvdxg.shareobject_last_completion_prefix[3],
+        hvdxg.shareobject_last_completion_prefix[4],
+        hvdxg.shareobject_last_completion_prefix[5],
+        hvdxg.shareobject_last_completion_prefix[6],
+        hvdxg.shareobject_last_completion_prefix[7],
+        hvdxg.shareobject_last_ret,
         (uint32)hvdxg.shareobject_last_status,
+        hvdxg.shareobject_last_process,
         hvdxg.shareobject_last_device, hvdxg.shareobject_last_object,
+        hvdxg.shareobject_last_reserved,
         hvdxg.shareobject_last_nt_handle,
-        hvdxg.ntshared_last_create_len, hvdxg.ntshared_last_create_ret,
+        hvdxg.shareobject_diag_attempted,
+        hvdxg.shareobject_diag_valid_nt,
+        hvdxg.shareobject_diag_kind,
+        hvdxg.shareobject_diag_reason,
+        hvdxg.vgpu_send_last_command,
+        hvdxg.vgpu_send_last_cmd_len,
+        hvdxg.vgpu_send_last_wire_len,
+        hvdxg.vgpu_send_last_ext,
+        hvdxg.vgpu_send_last_ext_offset,
+        hvdxg.vgpu_send_last_process,
+        hvdxg.vgpu_send_last_channel,
+        hvdxg.vgpu_send_last_luid.b,
+        hvdxg.vgpu_send_last_luid.a,
+        hvdxg.vgpu_send_last_route_global,
+        hvdxg.vgpu_send_last_retries,
+        hvdxg.vgpu_send_last_ret,
+        hvdxg.global_send_last_command,
+        hvdxg.global_send_last_cmd_len,
+        hvdxg.global_send_last_wire_len,
+        hvdxg.global_send_last_ext,
+        hvdxg.global_send_last_ext_offset,
+        hvdxg.global_send_last_process,
+        hvdxg.global_send_last_channel,
+        hvdxg.global_send_last_luid.b,
+        hvdxg.global_send_last_luid.a,
+        hvdxg.global_send_last_retries,
+        hvdxg.global_send_last_ret,
+        hvdxg.global_send_ntshared.cmd_len,
+        hvdxg.global_send_ntshared.wire_len,
+        hvdxg.global_send_ntshared.ext_offset,
+        hvdxg.global_send_ntshared.process,
+        hvdxg.global_send_shareobject.cmd_len,
+        hvdxg.global_send_shareobject.wire_len,
+        hvdxg.global_send_shareobject.ext_offset,
+        hvdxg.global_send_shareobject.process,
+        hvdxg.global_send_destroynt.cmd_len,
+        hvdxg.global_send_destroynt.wire_len,
+        hvdxg.global_send_destroynt.ext_offset,
+        hvdxg.global_send_destroynt.process,
+        hvdxg.global_send_destroysync.cmd_len,
+        hvdxg.global_send_destroysync.wire_len,
+        hvdxg.global_send_destroysync.ext_offset,
+        hvdxg.global_send_destroysync.process,
+        hvdxg.global_send_ntshared.command_id,
+        hvdxg.global_send_ntshared.command,
+        hvdxg.global_send_ntshared.channel,
+        hvdxg.global_send_ntshared.process,
+        hvdxg.global_send_ntshared.cmd_len,
+        hvdxg.global_send_ntshared.wire_len,
+        hvdxg.global_send_ntshared.result_len,
+        hvdxg.global_send_ntshared.ext,
+        hvdxg.global_send_ntshared.ext_offset,
+        hvdxg.global_send_ntshared.relid,
+        hvdxg.global_send_ntshared.conn_id,
+        hvdxg.global_send_ntshared.monitor_allocated,
+        hvdxg.global_send_ntshared.monitorid,
+        hvdxg.global_send_ntshared.dedicated,
+        hvdxg.global_send_ntshared.luid.b,
+        hvdxg.global_send_ntshared.luid.a,
+        hvdxg.global_send_ntshared_ext.command_id,
+        hvdxg.global_send_ntshared_ext.command,
+        hvdxg.global_send_ntshared_ext.channel,
+        hvdxg.global_send_ntshared_ext.process,
+        hvdxg.global_send_ntshared_ext.cmd_len,
+        hvdxg.global_send_ntshared_ext.wire_len,
+        hvdxg.global_send_ntshared_ext.result_len,
+        hvdxg.global_send_ntshared_ext.ext,
+        hvdxg.global_send_ntshared_ext.ext_offset,
+        hvdxg.global_send_ntshared_ext.relid,
+        hvdxg.global_send_ntshared_ext.conn_id,
+        hvdxg.global_send_ntshared_ext.monitor_allocated,
+        hvdxg.global_send_ntshared_ext.monitorid,
+        hvdxg.global_send_ntshared_ext.dedicated,
+        hvdxg.global_send_ntshared_ext.luid.b,
+        hvdxg.global_send_ntshared_ext.luid.a,
+        hvdxg.global_send_shareobject.command_id,
+        hvdxg.global_send_shareobject.command,
+        hvdxg.global_send_shareobject.channel,
+        hvdxg.global_send_shareobject.process,
+        hvdxg.global_send_shareobject.cmd_len,
+        hvdxg.global_send_shareobject.wire_len,
+        hvdxg.global_send_shareobject.result_len,
+        hvdxg.global_send_shareobject.ext,
+        hvdxg.global_send_shareobject.ext_offset,
+        hvdxg.global_send_shareobject.relid,
+        hvdxg.global_send_shareobject.conn_id,
+        hvdxg.global_send_shareobject.monitor_allocated,
+        hvdxg.global_send_shareobject.monitorid,
+        hvdxg.global_send_shareobject.dedicated,
+        hvdxg.ntshared_last_create_len, hvdxg.ntshared_last_create_cmd_len,
+        hvdxg.ntshared_last_create_object_offset,
+        hvdxg.ntshared_last_create_result_len,
+        hvdxg.ntshared_last_create_completion_type,
+        hvdxg.ntshared_last_create_completion_len,
+        hvdxg.ntshared_last_create_completion_prefix[0],
+        hvdxg.ntshared_last_create_completion_prefix[1],
+        hvdxg.ntshared_last_create_completion_prefix[2],
+        hvdxg.ntshared_last_create_completion_prefix[3],
+        hvdxg.ntshared_last_create_completion_prefix[4],
+        hvdxg.ntshared_last_create_completion_prefix[5],
+        hvdxg.ntshared_last_create_completion_prefix[6],
+        hvdxg.ntshared_last_create_completion_prefix[7],
+        hvdxg.ntshared_last_create_ret,
+        hvdxg.ntshared_last_create_process,
+        hvdxg.ntshared_last_create_type,
+        hvdxg.ntshared_last_create_channel,
         hvdxg.ntshared_last_create_object,
         hvdxg.ntshared_last_create_handle,
         hvdxg.ntshared_last_create_raw0,
+        hvdxg.ntshared_last_create_zero_len,
+        hvdxg.ntshared_last_create_zero_len,
+        (uint32)(hvdxg.ntshared_last_create_zero_len &&
+                 hvdxg.ntshared_last_create_ret != 0 &&
+                 hvdxg.ntshared_last_create_share_fallback == 0 ? 1 : 0),
+        hvdxg.ntshared_last_create_side_effect,
+        hvdxg.ntshared_last_create_share_fallback,
+        hvdxg.ntshared_last_create_share_valid,
         hvdxg.ntshared_last_destroy_len, hvdxg.ntshared_last_destroy_ret,
         hvdxg.ntshared_last_destroy_handle,
+        hvdxg.allocation_last_process,
+        hvdxg.sharedhandle_last_allocation_owner_process != 0 ?
+            hvdxg.sharedhandle_last_allocation_owner_process :
+            hvdxg.allocation_last_owner_process,
+        hvdxg.sharedhandle_last_allocation_owner_generation != 0 ?
+            hvdxg.sharedhandle_last_allocation_owner_generation :
+            hvdxg.allocation_last_owner_generation,
+        hvdxg.syncobject_last_process,
+        hvdxg.syncobject_last_owner_process,
+        hvdxg.syncobject_last_owner_generation,
+        hvdxg.ntshared_last_create_process,
+        hvdxg.ntshared_last_create_object,
+        hvdxg.allocation_last_device,
+        hvdxg.allocation_last_device_known,
+        hvdxg.allocation_last_device_from_create,
+        hvdxg.host_adapter_handle,
+        hvdxg.ntshared_cache_hits, hvdxg.ntshared_cache_misses,
+        hvdxg.ntshared_cache_inserts, hvdxg.ntshared_cache_releases,
+        hvdxg.ntshared_cache_destroys, hvdxg.ntshared_cache_full,
+        hvdxg.ntshared_cache_last_kind,
+        hvdxg.ntshared_cache_last_process,
+        hvdxg.ntshared_cache_last_object,
+        hvdxg.ntshared_cache_last_handle,
+        hvdxg.ntshared_cache_last_refs,
         hvdxg.sharedhandle_last_cmd, hvdxg.sharedhandle_last_ret,
         hvdxg.sharedhandle_last_device, hvdxg.sharedhandle_last_object,
         hvdxg.sharedhandle_last_nt_handle, hvdxg.sharedhandle_last_count,
+        hvdxg.sharedhandle_last_global_share,
+        hvdxg.sharedhandle_last_runtime_d3d12_flags,
+        hvdxg.sharedhandle_last_fops_kind,
+        hvdxg.sharedhandle_last_current_process,
+        hvdxg.sharedhandle_last_current_generation,
+        hvdxg.sharedhandle_last_creator_process,
+        hvdxg.sharedhandle_last_creator_generation,
+        hvdxg.sharedhandle_last_owner_process,
+        hvdxg.sharedhandle_last_owner_generation,
+        hvdxg.sharedhandle_last_owner_used,
+        hvdxg.sharedhandle_last_raw_device,
+        hvdxg.sharedhandle_last_raw_object,
+        hvdxg.sharedhandle_last_host_device,
+        hvdxg.sharedhandle_last_host_object,
+        hvdxg.sharedhandle_last_host_device_found,
+        hvdxg.sharedhandle_last_object_found,
+        hvdxg.sharedhandle_last_kind,
+        hvdxg.sharedhandle_last_object_type,
+        hvdxg.sharedhandle_last_create_flags,
+        hvdxg.sharedhandle_last_alloc_count,
+        hvdxg.sharedhandle_last_raw_object,
+        hvdxg.sharedhandle_last_raw_resource_found,
+        hvdxg.sharedhandle_last_raw_allocation_found,
+        hvdxg.sharedhandle_last_raw_sync_found,
+        hvdxg.sharedhandle_last_kind,
+        hvdxg.sharedhandle_last_object_type,
+        hvdxg.sharedhandle_last_object,
+        hvdxg.sharedhandle_last_kind, hvdxg.sharedhandle_last_host_object,
+        hvdxg.sharedhandle_last_object_found, hvdxg.sharedhandle_last_parent,
+        hvdxg.sharedhandle_last_current_process,
+        hvdxg.sharedhandle_last_current_generation,
+        hvdxg.sharedhandle_last_owner_process,
+        hvdxg.sharedhandle_last_owner_generation,
+        hvdxg.sharedhandle_last_owner_refs,
+        hvdxg.sharedhandle_last_owner_used,
+        hvdxg.sharedhandle_last_object_type,
+        hvdxg.sharedhandle_last_object_device,
+        hvdxg.sharedhandle_last_allocation,
+        hvdxg.sharedhandle_last_allocation_found,
+        hvdxg.sharedhandle_last_allocation_owner_process,
+        hvdxg.sharedhandle_last_allocation_owner_generation,
+        hvdxg.sharedhandle_last_allocation_owner_refs,
+        hvdxg.sharedhandle_last_create_flags,
+        hvdxg.sharedhandle_last_alloc_count,
+        hvdxg.sharedhandle_last_sealed,
+        hvdxg.sharedhandle_last_sync_type,
+        hvdxg.sharedhandle_last_sync_flags,
+        hvdxg.sharedhandle_last_sync_global,
+        hvdxg.sharedhandle_last_sync_monitor_fence,
+        hvdxg.sharedhandle_last_sync_fence_cpu,
+        hvdxg.sharedhandle_last_sync_fence_kva,
+        hvdxg.sharedsync_export_fd,
+        hvdxg.sharedsync_export_ret,
+        hvdxg.sharedsync_export_cloexec,
+        hvdxg.sharedsync_export_fops_kind,
+        hvdxg.sharedsync_export_fd_kind,
+        hvdxg.sharedsync_export_sync_type,
+        hvdxg.sharedsync_export_sync_flags,
+        hvdxg.sharedsync_export_monitor_fence,
+        hvdxg.sharedsync_export_global_share,
+        hvdxg.sharedsync_export_global_zero,
+        hvdxg.sharedsync_export_host_shared_handle,
+        hvdxg.sharedsync_export_host_nt_handle,
+        hvdxg.sharedsync_export_nt_refs,
+        hvdxg.sharedsync_export_shared_owner_object,
+        hvdxg.sharedsync_export_device,
+        hvdxg.sharedsync_export_host_device,
+        hvdxg.sharedsync_export_object,
+        hvdxg.sharedsync_export_host_object,
+        hvdxg.sharedsync_export_cache_process,
+        hvdxg.sharedsync_export_owner_process,
+        hvdxg.sharedsync_export_owner_generation,
+        hvdxg.sharedsync_export_owner_refs,
+        HV_DXG_SHARED_FOPS_SYNC,
+        HV_DXG_SHARED_FOPS_RESOURCE,
+        hvdxg.sharedsync_export_fops_kind,
+        hvdxg.sharedsync_export_fd_kind,
+        0U,
+        1U,
+        1U,
+        0U,
+        S_IFREG | 0600,
+        0x64786701U,
+        0x64786702U,
+        hvdxg.shareobjects_last_desired_access,
+        hvdxg.shareobjects_last_object_attr,
+        hvdxg.shareobjects_last_attr_len,
+        hvdxg.shareobjects_last_attr_ret,
+        hvdxg.shareobjects_last_attr_head[0],
+        hvdxg.shareobjects_last_attr_head[1],
+        hvdxg.shareobjects_last_attr_head[2],
+        hvdxg.shareobjects_last_attr_head[3],
+        hvdxg.shareobjects_last_attr_head[4],
+        hvdxg.shareobjects_last_attr_head[5],
+        hvdxg.shareobjects_last_attr_head[6],
+        hvdxg.shareobjects_last_attr_head[7],
+        hvdxg.sharedhandle_last_map_va,
+        hvdxg.sharedhandle_last_map_pages,
+        hvdxg.sharedhandle_last_map_fence,
+        hvdxg.sharedhandle_last_map_ret,
+        hvdxg.sharedhandle_last_map_status,
+        hvdxg.sharedhandle_last_resident_paging_queue,
+        hvdxg.sharedhandle_last_resident_sync,
+        hvdxg.sharedhandle_last_resident_fence,
+        hvdxg.sharedhandle_last_resident_current,
+        hvdxg.sharedhandle_last_resident_wait_result,
+        hvdxg.sharedhandle_last_resident_wait_ret,
+        hvdxg.sharedhandle_last_resident_missing,
+        hvdxg.sharedhandle_last_resident_enforced,
+        hvdxg.sharedresource_created,
+        hvdxg.sharedresource_seals, hvdxg.sharedresource_seal_reuses,
+        hvdxg.sharedresource_seal_denied,
+        hvdxg.sharedresource_seal_allocs,
+        hvdxg.sharedresource_seal_private,
+        hvdxg.sharedresource_open_tracked,
+        hvdxg.sharedresource_owner_exists,
+        hvdxg.sharedresource_owner_cached,
+        hvdxg.sharedresource_owner_reused,
+        hvdxg.sharedresource_owner_nt,
+        hvdxg.sharedresource_owner_refs,
+        hvdxg.sharedresource_owner_sealed,
+        hvdxg.sharedresource_owner_object,
+        hvdxg.sharedresource_owner_process,
+        hvdxg.sharedresource_open_global,
+        hvdxg.sharedresource_pre_nt_sealable,
+        hvdxg.sharedresource_pre_nt_seal_ret,
+        hvdxg.sharedresource_meta_track_host,
+        hvdxg.sharedresource_meta_runtime_len,
+        hvdxg.sharedresource_meta_runtime_hash,
+        hvdxg.sharedresource_meta_resource_len,
+        hvdxg.sharedresource_meta_resource_hash,
+        hvdxg.sharedresource_meta_total_len,
+        hvdxg.sharedresource_meta_total_hash,
+        hvdxg.sharedresource_meta_alloc0_priv,
+        hvdxg.sharedresource_meta_match_in,
+        hvdxg.sharedresource_meta_match_out,
+        hvdxg.sharedresource_meta_total_w4,
+        hvdxg.sharedresource_meta_total_w8,
+        hvdxg.sharedresource_meta_logical_flags,
+        hvdxg.sharedresource_meta_host_result_flags,
+        hvdxg.sharedresource_meta_host_flags_ignored,
+        hvdxg.sharedresource_pre_nt_seal_applied,
+        hvdxg.sharedresource_pre_nt_seal_before,
+        hvdxg.sharedresource_pre_nt_seal_after,
+        hvdxg.sharedresource_pre_nt_seal_actual_ret,
+        hvdxg.sharedresource_record_valid,
+        hvdxg.sharedresource_record_stage,
+        hvdxg.sharedresource_record_key_kind,
+        hvdxg.sharedresource_record_key_process,
+        hvdxg.sharedresource_record_key_object,
+        hvdxg.sharedresource_record_key_global,
+        hvdxg.sharedresource_record_key_nt,
+        hvdxg.sharedresource_record_source_process,
+        hvdxg.sharedresource_record_source_tgid,
+        hvdxg.sharedresource_record_source_generation,
+        hvdxg.sharedresource_record_device,
+        hvdxg.sharedresource_record_resource,
+        hvdxg.sharedresource_record_allocation,
+        hvdxg.sharedresource_record_adapter_high,
+        hvdxg.sharedresource_record_adapter_low,
+        hvdxg.sharedresource_record_host_adapter_high,
+        hvdxg.sharedresource_record_host_adapter_low,
+        hvdxg.sharedresource_record_sealed,
+        hvdxg.sharedresource_record_sealed_generation,
+        hvdxg.sharedresource_record_seal_before_fd,
+        hvdxg.sharedresource_record_alloc_count,
+        hvdxg.sharedresource_record_runtime_size,
+        hvdxg.sharedresource_record_resource_size,
+        hvdxg.sharedresource_record_total_size,
+        hvdxg.sharedresource_record_alloc0_priv,
+        hvdxg.sharedresource_record_runtime_hash,
+        hvdxg.sharedresource_record_resource_hash,
+        hvdxg.sharedresource_record_total_hash,
+        hvdxg.sharedresource_record_alloc0_hash,
+        hvdxg.sharedresource_record_nt_refs,
+        hvdxg.sharedresource_record_query_count,
+        hvdxg.sharedresource_record_open_count,
+        hvdxg.sharedresource_record_fd_publish_count,
+        hvdxg.sharedresource_record_local_admit_ret,
+        hvdxg.sharedresource_record_local_exact,
+        hvdxg.sharedresource_record_mutation_after_seal,
+        hvdxg.queryresource_last_seen,
+        hvdxg.queryresource_last_ret,
+        hvdxg.queryresource_last_device,
+        hvdxg.queryresource_last_nt,
+        hvdxg.queryresource_last_fd_kind,
+        hvdxg.queryresource_last_fops_kind,
+        hvdxg.queryresource_last_sync_probe,
+        hvdxg.queryresource_last_global,
+        hvdxg.queryresource_last_host_nt,
+        hvdxg.queryresource_last_refs,
+        hvdxg.queryresource_last_object,
+        hvdxg.queryresource_last_cache_object,
+        hvdxg.queryresource_last_alloc_count,
+        hvdxg.queryresource_last_runtime_size,
+        hvdxg.queryresource_last_resource_size,
+        hvdxg.queryresource_last_total_size,
+        hvdxg.openresource_last_route_global,
+        hvdxg.openresource_last_cmd_len,
+        hvdxg.openresource_last_wire_len,
+        hvdxg.openresource_last_ext,
+        hvdxg.openresource_last_ext_offset,
+        hvdxg.openresource_last_result_len,
+        hvdxg.openresource_last_actual_len,
+        hvdxg.openresource_last_ret,
+        (uint32)hvdxg.openresource_last_status,
+        hvdxg.openresource_last_process,
+        hvdxg.openresource_last_device,
+        hvdxg.openresource_last_global,
+        hvdxg.openresource_last_alloc_count,
+        hvdxg.openresource_last_total_priv,
+        hvdxg.openresource_last_result_resource,
+        hvdxg.openresource_last_result_alloc0,
+        hvdxg.openresource_last_seal_before,
+        hvdxg.openresource_last_seal_after,
+        hvdxg.openresource_last_fd_kind,
+        hvdxg.openresource_last_fops_kind,
+        hvdxg.openresource_last_fd_refs,
+        hvdxg.opensync_last_cmd_len,
+        hvdxg.opensync_last_wire_len,
+        hvdxg.opensync_last_ext,
+        hvdxg.opensync_last_ext_offset,
+        hvdxg.opensync_last_result_len,
+        hvdxg.opensync_last_actual_len,
+        hvdxg.opensync_last_ret,
+        (uint32)hvdxg.opensync_last_status,
+        hvdxg.opensync_last_process,
+        hvdxg.opensync_last_device,
+        hvdxg.opensync_last_global,
+        hvdxg.opensync_last_flags,
+        hvdxg.opensync_last_result_sync,
+        hvdxg.opensync_last_gpu_va,
+        hvdxg.opensync_last_cpu_pa,
+        hvdxg.opensync_last_fd_kind,
+        hvdxg.opensync_last_fd_refs,
+        hvdxg.opensync_last_fops_kind,
+        HV_DXG_SHARED_FOPS_SYNC,
+        hvdxg.opensync_last_sync_type,
+        hvdxg.opensync_last_flags,
+        hvdxg.opensync_last_wire_flags,
+        hvdxg.opensync_last_forced_flags,
+        HV_DXG_SHARED_FOPS_SYNC,
+        HV_DXG_SHARED_FOPS_RESOURCE,
+        0U,
+        1U,
+        (uint32)offsetof(struct hvdxg_command_opensyncobject, device),
+        (uint32)offsetof(struct hvdxg_command_opensyncobject,
+                         global_sync_object),
+        (uint32)offsetof(struct hvdxg_command_opensyncobject, flags),
+        hvdxg.opensync_last_device,
+        hvdxg.opensync_last_device_host,
+        hvdxg.opensync_last_device_owner,
+        hvdxg.opensync_last_device_owner_generation,
+        hvdxg.opensync_last_device_generation,
+        hvdxg.opensync_last_source_device,
+        hvdxg.opensync_last_source_device_host,
+        hvdxg.opensync_last_source_owner,
+        hvdxg.opensync_last_source_owner_generation,
+        hvdxg.opensync_last_same_device,
+        hvdxg.opensync_last_adapter_match,
+        hvdxg.opensync_last_adapter_high,
+        hvdxg.opensync_last_adapter_low,
+        hvdxg.opensync_last_host_adapter_high,
+        hvdxg.opensync_last_host_adapter_low,
+        hvdxg.opensync_last_source_flags,
+        hvdxg.opensync_last_sync_type,
+        hvdxg_sync_type_is_monitored(hvdxg.opensync_last_sync_type),
+        hvdxg.opensync_last_global,
+        hvdxg.opensync_last_host_nt,
+        (uint32)hvdxg.opensync_last_status,
+        hvdxg.opensync_last_input_nt,
+        hvdxg.opensync_last_host_nt,
+        hvdxg.opensync_last_global,
+        hvdxg.opensync_last_object,
+        hvdxg.opensync_last_cache_object,
+        hvdxg.opensync_last_fd_kind,
+        hvdxg.opensync_last_fops_kind,
+        hvdxg.opensync_last_fd_refs,
+        hvdxg.opensync_last_global != 0 ? 1U : 0U,
+        hvdxg.opensync_last_host_nt != 0 &&
+            hvdxg.opensync_last_global != hvdxg.opensync_last_host_nt,
+        hvdxg.opensync_ioctl_count,
+        hvdxg.opensync_last_gate,
+        hvdxg.sharedhandle_last_cmd,
+        hvdxg.sharedhandle_last_cmd & 0xffU,
+        hvdxg.opensync_last_input_nt,
+        hvdxg.opensync_last_host_nt,
+        hvdxg.opensync_last_fd_kind,
+        hvdxg.opensync_last_global,
+        hvdxg.opensync_last_object,
+        hvdxg.opensync_last_cache_object,
+        hvdxg.opensync_last_ret,
+        hvdxg.sharedclose_last_kind,
+        hvdxg.sharedclose_last_fops_kind,
+        hvdxg.sharedclose_last_process,
+        hvdxg.sharedclose_last_object,
+        hvdxg.sharedclose_last_cache_object,
+        hvdxg.sharedclose_last_nt_handle,
+        hvdxg.sharedclose_last_host_shared_handle,
+        hvdxg.sharedclose_last_global,
+        hvdxg.sharedclose_last_refs_before,
+        hvdxg.sharedclose_last_refs_after,
+        hvdxg.sharedclose_last_destroy_handle,
+        hvdxg.sharedclose_last_destroy_ret,
+        hvdxg.sharedclose_last_destroy_status,
+        hvdxg.sharedclose_last_destroy_actual_len,
+        hvdxg.sharedclose_last_destroy_cmd_len,
+        hvdxg.sharedclose_last_destroy_wire_len,
+        hvdxg.sharedclose_last_destroy_ext,
+        hvdxg.sharedclose_last_destroy_ext_offset,
+        hvdxg.sharedclose_last_destroy_result_len,
+        hvdxg.sharedclose_last_destroy_handle_offset,
         hvdxg.unsupported_last_cmd, hvdxg.unsupported_last_ret,
         hvdxg.unsupported_last_device, hvdxg.unsupported_last_handle,
         hvdxg.unsupported_last_count,
+        hvdxg.unsupported_last_nr,
+        hvdxg.unsupported_last_size,
+        hvdxg.unsupported_last_name,
+        hvdxg.markdevice_last_len,
+        hvdxg.markdevice_last_ret,
+        (uint32)hvdxg.markdevice_last_status,
+        hvdxg.markdevice_last_device,
+        hvdxg.markdevice_last_reason,
+        hvdxg.markdevice_last_process,
+        hvdxg.markdevice_last_cmd_len,
         hvdxg.syncfile_last_cmd, hvdxg.syncfile_last_ret,
         hvdxg.syncfile_last_device, hvdxg.syncfile_last_object,
         hvdxg.syncfile_last_context, hvdxg.syncfile_last_handle,
         hvdxg.syncfile_last_fence,
+        hvdxg.syncfile_last_global,
+        hvdxg.syncfile_last_host_nt,
+        hvdxg.syncfile_last_source_flags,
+        hvdxg.syncfile_last_open_flags,
+        hvdxg.syncfile_last_len,
+        (uint32)hvdxg.syncfile_last_status,
+        hvdxg.syncfile_last_out_sync,
+        hvdxg.syncfile_last_cpu_va,
+        hvdxg.syncfile_last_gpu_va,
         hvdxg.updateallocproperty_last_len,
         hvdxg.updateallocproperty_last_ret,
         (uint32)hvdxg.updateallocproperty_last_status,
@@ -3126,6 +8693,23 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.updategpuva_last_len, hvdxg.updategpuva_last_ret,
         (uint32)hvdxg.updategpuva_last_status,
         hvdxg.updategpuva_last_ops, hvdxg.updategpuva_last_fence,
+        hvdxg.updategpuva_last_device,
+        hvdxg.updategpuva_last_context,
+        hvdxg.updategpuva_last_fence_object,
+        hvdxg.updategpuva_last_flags,
+        hvdxg.updategpuva_last_cmd_len,
+        hvdxg.updategpuva_last_op_offset,
+        hvdxg.updategpuva_last_op_size,
+        hvdxg.updategpuva_last_op0_type,
+        hvdxg.updategpuva_last_op0_base,
+        hvdxg.updategpuva_last_op0_size,
+        hvdxg.updategpuva_last_op0_allocation,
+        hvdxg.updategpuva_last_op0_alloc_offset,
+        hvdxg.updategpuva_last_op0_alloc_size,
+        hvdxg.updategpuva_last_op0_source,
+        hvdxg.updategpuva_last_op0_dest,
+        hvdxg.updategpuva_last_op0_protection,
+        hvdxg.updategpuva_last_op0_driver_protection,
         hvdxg.cacheops_last_len, hvdxg.cacheops_last_ret,
         (uint32)hvdxg.cacheops_last_status,
         hvdxg.cacheops_last_allocation,
@@ -3145,6 +8729,25 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.createcontext_last_priv_head[5],
         hvdxg.createcontext_last_priv_head[6],
         hvdxg.createcontext_last_priv_head[7],
+        hvdxg.destroydevice_last_len, hvdxg.destroydevice_last_ret,
+        (uint32)hvdxg.destroydevice_last_status,
+        hvdxg.destroycontext_last_len, hvdxg.destroycontext_last_ret,
+        (uint32)hvdxg.destroycontext_last_status,
+        hvdxg.destroypaging_last_len, hvdxg.destroypaging_last_ret,
+        (uint32)hvdxg.destroypaging_last_status,
+        hvdxg.destroysync_last_len, hvdxg.destroysync_last_ret,
+        (uint32)hvdxg.destroysync_last_status,
+        hvdxg.destroysync_last_handle, hvdxg.destroysync_last_device,
+        hvdxg.destroysync_last_type, hvdxg.destroysync_last_flags,
+        hvdxg.destroysync_last_global,
+        hvdxg.destroysync_last_monitor_fence,
+        hvdxg.destroysync_last_cmd_len,
+        hvdxg.destroysync_last_wire_len,
+        hvdxg.destroysync_last_ext,
+        hvdxg.destroysync_last_ext_offset,
+        hvdxg.flushdevice_last_len, hvdxg.flushdevice_last_ret,
+        (uint32)hvdxg.flushdevice_last_status,
+        hvdxg.flushdevice_last_device, hvdxg.flushdevice_last_reason,
         hvdxg.createhwqueue_last_len, hvdxg.createhwqueue_last_ret,
         (uint32)hvdxg.createhwqueue_last_status,
         hvdxg.createhwqueue_last_context, hvdxg.createhwqueue_last_flags,
@@ -3183,15 +8786,156 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.probe_info_flags, hvdxg.probe_async_msg_enabled,
         hvdxg.use_ext_header, hvdxg.host_vgpu_luid.b,
         hvdxg.host_vgpu_luid.a,
-        hvdxg.pci_dxg_device, hvdxg.pci_dxg_vmbus_version,
+        hvdxg.probe_v40_open_send_ret,
+        hvdxg.probe_v40_open_actual_len,
+        (uint32)hvdxg.probe_v40_open_status,
+        hvdxg.probe_v40_open_handle,
+        hvdxg.probe_v40_open_host_version,
+        hvdxg.probe_v40_open_host_compat,
+        hvdxg.probe_v40_open_guest_luid_high,
+        hvdxg.probe_v40_open_guest_luid_low,
+        hvdxg.probe_v40_getinternal_send_ret,
+        hvdxg.probe_v40_getinternal_actual_len,
+        hvdxg.probe_v40_getinternal_flags,
+        hvdxg.probe_v40_reject_reason,
+        hvdxg_pci_guestcaps_source_name(),
+        hvdxg.pci_guestcaps_ret,
+        hvdxg.pci_guestcaps_found,
+        hvdxg.pci_guestcaps_write_verified,
+        hvdxg.pci_guestcaps_busdevfn,
+        hvdxg.global_relid, hvdxg.global_conn_id,
+        hvdxg.global_monitorid, hvdxg.global_monitor_allocated,
+        hvdxg.global_dedicated,
+        hvdxg.vgpu_relid, hvdxg.vgpu_conn_id,
+        hvdxg.vgpu_monitorid, hvdxg.vgpu_monitor_allocated,
+        hvdxg.vgpu_dedicated,
+        hvdxg.global_offer_user_def[0],
+        hvdxg.global_offer_user_def[1],
+        hvdxg.global_offer_user_def[2],
+        hvdxg.global_offer_user_def[3],
+        hvdxg.vgpu_offer_user_def[0],
+        hvdxg.vgpu_offer_user_def[1],
+        hvdxg.vgpu_offer_user_def[2],
+        hvdxg.vgpu_offer_user_def[3],
+        hvdxg.probe_open_requested_version,
+        hvdxg.probe_open_host_version,
+        hvdxg.probe_open_host_compat,
+        hvdxg.probe_info_flags, hvdxg.probe_async_msg_enabled,
+        hvdxg.use_ext_header, host_luid_equiv_basis,
+        hvdxg.host_vgpu_luid.b, hvdxg.host_vgpu_luid.a,
+        hvdxg.pci_host_vgpu_luid.b, hvdxg.pci_host_vgpu_luid.a,
+        hvdxg.global_mmio_megabytes,
+        hvdxg.active_vmbus_version,
+        hvdxg.pci_dxg_vmbus_version >= HV_DXG_VMBUS_INTERFACE_VERSION ?
+            "true" : "false",
+        hvdxg.pci_dxg_vmbus_version,
+        hvdxg.pci_dxg_vmbus_negotiated_version,
+        hvdxg.use_ext_header,
+        hvdxg.active_vmbus_version,
+        hvdxg.active_vmbus_last_compat,
+        hvdxg.active_vmbus_source,
+        hvdxg.active_vmbus_fallbacks,
+        hvdxg.pci_dxg_vmbus_version,
+        hvdxg.pci_dxg_vmbus_negotiated_version,
+        hvdxg.pci_dxg_vmbus_write_attempted,
+        hvdxg.pci_dxg_vmbus_writes,
+        hvdxg.pci_dxg_vmbus_write_value,
+        hvdxg.pci_dxg_vmbus_write_readback,
+        hvdxg.pci_dxg_vmbus_write_ret,
+        hvdxg.probe_open_requested_version,
+        hvdxg.probe_open_host_version,
+        hvdxg.probe_open_host_compat,
+        hvdxg.use_ext_header,
+        hvdxg.probe_info_len,
+        hvdxg.pci_dxg_vmbus_write_attempted,
+        hvdxg.pci_dxg_vmbus_writes,
+        hvdxg.pci_dxg_vmbus_write_config_supported,
+        hvdxg.pci_dxg_vmbus_write_config_ret,
+        hvdxg.pci_dxg_vmbus_write_verify_ret,
+        hvdxg.pci_dxg_vmbus_write_value,
+        hvdxg.pci_dxg_vmbus_write_readback,
+        hvdxg.pci_dxg_vmbus_write_ret,
+        hvdxg.pci_guestcaps_source,
+        hvdxg.pci_guestcaps_token,
+        hvdxg.hyperv_pci_offer_present, hvdxg.hyperv_pci_offer_count,
+        hvdxg.hyperv_pci_offer_relid, hvdxg.hyperv_pci_offer_conn_id,
+        hvdxg.hyperv_pci_offer_monitorid,
+        hvdxg.hyperv_pci_offer_monitor_allocated,
+        hvdxg.hyperv_pci_offer_dedicated, hvdxg.hyperv_pci_offer_flags,
+        hvdxg.hyperv_pci_offer_mmio_megabytes,
+        hvdxg.hyperv_pci_offer_instance.a,
+        hvdxg.hyperv_pci_offer_instance.b,
+        hvdxg.hyperv_pci_offer_instance.c,
+        hvdxg.hyperv_pci_offer_instance.d[0],
+        hvdxg.hyperv_pci_offer_instance.d[1],
+        hvdxg.hyperv_pci_offer_user_def[0],
+        hvdxg.hyperv_pci_offer_user_def[1],
+        hvdxg.hyperv_pci_offer_user_def[2],
+        hvdxg.hyperv_pci_offer_user_def[3],
+        hvpci.present, hvpci.child_relid, hvpci.signal_conn_id,
+        hvpci.gpadl_ok, hvpci.gpadl_status,
+        hvpci.open_ok, hvpci.open_status, hvpci.protocol_ok,
+        hvpci.protocol_selected_version, hvpci.protocol_attempts,
+        hvpci.protocol_last_version, hvpci.protocol_last_status,
+        hvpci.protocol_last_ret, hvpci.protocol_last_packet_type,
+        hvpci.protocol_last_len, hvpci.protocol_last_trans_id,
+        hvpci.protocol_last_prefix[0], hvpci.protocol_last_prefix[1],
+        hvpci.protocol_last_prefix[2], hvpci.protocol_last_prefix[3],
+        hvpci.protocol_last_prefix[4], hvpci.protocol_last_prefix[5],
+        hvpci.protocol_last_prefix[6], hvpci.protocol_last_prefix[7],
+        hvpci.config_window_ok, hvpci.config_window_source,
+        hvpci.config_window_ret,
+        hvpci.config_window_pa, hvpci.config_window_va,
+        hvpci.config_window_size, hvpci.config_window_candidate,
+        hvpci.config_window_limit, hvpci.config_window_rejects,
+        hvpci.backend_registered,
+        hvpci.backend_index, hvpci.d0_attempts, hvpci.d0_sent,
+        hvpci.d0_status, hvpci.d0_ret, hvpci.query_attempts,
+        hvpci.query_sent, hvpci.query_ret, hvpci.relations_seen,
+        hvpci.relations_len, hvpci.relations_count,
+        hvpci.relations_desc_size, hvpci.relations_parse_ok,
+        hvpci.child_count, hvpci.registered_count,
+        hvpci.register_last_ret, hvpci.child[0].vendor_id,
+        hvpci.child[0].device_id, hvpci.child[0].class_code,
+        hvpci.child[0].win_slot, hvpci.child[0].bus,
+        hvpci.child[0].dev, hvpci.child[0].func,
+        hvpci.config_read_count, hvpci.config_write_count,
+        hvpci.config_reject_count, hvpci.config_last_ret,
+        hvpci.config_last_token, hvpci.config_last_offset,
+        hvpci.config_last_size, hvpci.config_last_value,
+        hvpci.query_packet_type, hvpci.query_len,
+        hvpci.query_prefix[0], hvpci.query_prefix[1],
+        hvpci.query_prefix[2], hvpci.query_prefix[3],
+        hvpci.query_prefix[4], hvpci.query_prefix[5],
+        hvpci.query_prefix[6], hvpci.query_prefix[7],
+        hvdxg.pci_domain, hvdxg.pci_guestcaps_busdevfn,
+        hvdxg.pci_bus, hvdxg.pci_dev, hvdxg.pci_func,
+        hvdxg.pci_vendor, hvdxg.pci_dxg_device, hvdxg.pci_class,
+        hvdxg.pci_dxg_vmbus_version,
         hvdxg.pci_dxg_guid[0], hvdxg.pci_dxg_guid[1],
         hvdxg.pci_dxg_guid[2], hvdxg.pci_dxg_guid[3],
         hvdxg.pci_host_vgpu_luid.b, hvdxg.pci_host_vgpu_luid.a,
+        hvdxg.pci_guestcaps_attempts, hvdxg.pci_guestcaps_writes,
+        hvdxg.pci_guestcaps_found, hvdxg.pci_guestcaps_scan_done,
+        hvdxg.pci_guestcaps_write_attempted,
+        hvdxg.pci_guestcaps_write_verified,
+        hvdxg.pci_guestcaps_source,
+        hvdxg.pci_guestcaps_token,
+        hvdxg.pci_guestcaps_offset, hvdxg.pci_guestcaps_value,
+        hvdxg.pci_guestcaps_readback, hvdxg.pci_guestcaps_ret,
+        hvdxg.pci_guestcaps_before_probe, hvdxg.pci_guestcaps_busdevfn,
         hvdxg.probe_last_type, hvdxg.probe_last_len,
         hvdxg.probe_last_prefix[0], hvdxg.probe_last_prefix[1],
         hvdxg.probe_last_prefix[2], hvdxg.probe_last_prefix[3],
         hvdxg.probe_last_prefix[4], hvdxg.probe_last_prefix[5],
         hvdxg.probe_last_prefix[6], hvdxg.probe_last_prefix[7],
+        hvdxg.createprocess_last_len, hvdxg.createprocess_last_cmd_len,
+        hvdxg.createprocess_last_ret, hvdxg.createprocess_last_guest,
+        hvdxg.createprocess_last_pid, hvdxg.createprocess_last_tgid,
+        hvdxg.createprocess_last_handle,
+        hvdxg.createprocess_last_layout, hvdxg.createprocess_last_generation,
+        hvdxg.destroyprocess_last_len,
+        hvdxg.destroyprocess_last_ret, hvdxg.destroyprocess_last_handle,
         hvdxg.ioctl_count, hvdxg.ioctl_successes, hvdxg.d3dkmt_ready,
         hvdxg.ioctl_last_ret, hvdxg.dxg_process.v,
         hvdxg.ioctl_history_index,
@@ -3203,17 +8947,1493 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         HV_DXG_IOCTL_H_ARGS(10), HV_DXG_IOCTL_H_ARGS(11),
         HV_DXG_IOCTL_H_ARGS(12), HV_DXG_IOCTL_H_ARGS(13),
         HV_DXG_IOCTL_H_ARGS(14), HV_DXG_IOCTL_H_ARGS(15),
+        hvdxg.ioctl_nr_count[0x13], hvdxg.ioctl_nr_count[0x05],
+        hvdxg.ioctl_nr_count[0x1b], hvdxg.ioctl_nr_count[0x1c],
+        hvdxg.ioctl_nr_count[0x19], hvdxg.ioctl_nr_count[0x1d],
+        hvdxg.ioctl_nr_count[0x20], hvdxg.ioctl_nr_count[0x15],
         hvdxg.open_count, hvdxg.live_open_count, hvdxg.cleanup_attempts,
         hvdxg.cleanup_successes, hvdxg.cleanup_last_ret,
         hvdxg.cleanup_last_op, hvdxg.cleanup_last_handle,
         hvdxg.cleanup_failed_op, hvdxg.cleanup_failed_handle,
-        hvdxg.cleanup_had_tracked);
+        hvdxg.cleanup_had_tracked,
+        hvdxg.cleanup_resource_host_destroys,
+        hvdxg.cleanup_resource_child_locals,
+        hvdxg.cleanup_standalone_alloc_destroys,
+        hvdxg.cleanup_resource_alloc_skips,
+        hvdxg.process_live, hvdxg.process_live_max, hvdxg.process_creates,
+        hvdxg.process_reuses, hvdxg.process_releases,
+        hvdxg.process_destroy_attempts, hvdxg.process_destroy_successes,
+        hvdxg.process_destroy_failures,
+        hvdxg.process_destroy_suppressed,
+        hvdxg.process_destroy_deferred, hvdxg.process_shared_reuses,
+        hvdxg.process_isolated_reuses, hvdxg.process_table_full,
+        hvdxg.process_generation,
+        hvdxg.process_retained_handle, hvdxg.process_retained_generation,
+        hvdxg.process_retained_refs,
+        hvdxg.process_destroy_active_total,
+        hvdxg.process_destroy_active_device,
+        hvdxg.process_destroy_active_context,
+        hvdxg.process_destroy_active_hwqueue,
+        hvdxg.process_destroy_active_pagingqueue,
+        hvdxg.process_destroy_active_sync,
+        hvdxg.process_destroy_active_allocation,
+        hvdxg.process_destroy_active_resource,
+        hvdxg.process_destroy_active_gpuva,
+        hvdxg.open_createprocess_successes,
+        hvdxg.process_shared_reuses,
+        hvdxg.process_retained_reuse_avoided,
+        hvdxg.process_retained_avoided_tgid,
+        hvdxg.process_retained_avoided_source_tgid,
+        hvdxg.process_retained_avoided_handle,
+        hvdxg.process_retained_avoided_generation,
+        hvdxg.process_retained_avoided_source_generation,
+        hvdxg.process_isolated_last_tgid,
+        hvdxg.process_isolated_last_handle,
+        hvdxg.process_isolated_last_generation,
+        hvdxg.process_isolated_source_generation,
+        hvdxg.process_isolated_copied_objects,
+        hvdxg.process_isolated_source_objects);
     if (len < 0) {
         kvfree(status);
         return -EIO;
     }
+    if ((size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_adapter_luids=adapter:%x:%x host_adapter:%x:%x "
+            "host_vgpu:%x:%x pci:%x:%x\n"
+            "dxg_luid_equivalence=user_luid:%x:%x "
+            "host_adapter:%x:%x host_vgpu:%x:%x "
+            "user_luid_known:%u user_luid_source:%u "
+            "scope:per_vm_vmbus_synthetic\n"
+            "dxg_openadapterfromluid=input:%x:%x user_luid:%x:%x "
+            "ext_luid:%x:%x user_source:%u match:%u reject:%u ret:%d "
+            "status:0x%x handle:0x%x host_handle:0x%x\n"
+            "dxg_createdevice_last=adapter:0x%x host_adapter:0x%x "
+            "device:0x%x eq_local:%u eq_host:%u ret:%d\n"
+            "dxg_createdevice_object=proc:0x%x owner:0x%x/%u/%u "
+            "found:%u type:%u local:0x%x host:0x%x parent:0x%x "
+            "entry_dev:0x%x gen:%u destroyed:%u\n"
+            "dxg_createprocess_success=len:%u cmd_len:%u ret:%d "
+            "guest:0x%lx pid:%lu tgid:%lu handle:0x%x layout:%u gen:%u\n"
+            "dxg_open_createprocess=attempts:%u successes:%u failures:%u "
+            "ignored:%u last_ret:%d guest:0x%lx pid:%lu tgid:%lu "
+            "handle:0x%x created:%u gen:%u refs:%u\n"
+            "dxg_early_bind=attempts:%u successes:%u failures:%u "
+            "source:%u source_name:%s cmd:0x%x ret:%d handle:0x%x "
+            "created:%u gen:%u refs:%u\n"
+            "dxg_host_cmd_counts=destroyalloc:%u destroycontext:%u "
+            "destroyhwqueue:%u destroypaging:%u destroydevice:%u "
+            "destroysync:%u destroyprocess:%u freegpuva:%u lock:%u "
+            "unlock:%u closeadapter_ioctl:%u closeadapter_local:%u "
+            "closeadapter_host:%u closeadapter_invalid:%u "
+            "closeadapter_len:%u closeadapter_ret:%d closeadapter_status:0x%x\n"
+            "dxg_closeadapter_order=seq:%u close:%u last_destroy:%u "
+            "destroyprocess:%u after_destroy:%u\n"
+            "dxg_syncobject_mapped=count:%u len:%u type:%u flags:0x%x "
+            "fence_cpu:0x%lx fence_gpu:0x%lx\n",
+            hvdxg.adapter_luid.b, hvdxg.adapter_luid.a,
+            hvdxg.host_adapter_luid.b, hvdxg.host_adapter_luid.a,
+            hvdxg.host_vgpu_luid.b, hvdxg.host_vgpu_luid.a,
+            hvdxg.pci_host_vgpu_luid.b, hvdxg.pci_host_vgpu_luid.a,
+            user_luid.b, user_luid.a,
+            hvdxg.host_adapter_luid.b, hvdxg.host_adapter_luid.a,
+            hvdxg.host_vgpu_luid.b, hvdxg.host_vgpu_luid.a,
+            host_luid_equiv_basis != 0 ? 1U : 0U,
+            host_luid_equiv_basis,
+            hvdxg.openadapter_luid_last_input_high,
+            hvdxg.openadapter_luid_last_input_low,
+            hvdxg.openadapter_luid_last_um_high,
+            hvdxg.openadapter_luid_last_um_low,
+            hvdxg.openadapter_luid_last_host_high,
+            hvdxg.openadapter_luid_last_host_low,
+            hvdxg.openadapter_luid_last_host_basis,
+            hvdxg.openadapter_luid_last_match,
+            hvdxg.openadapter_luid_last_reject,
+            hvdxg.openadapter_luid_last_ret,
+            (uint32)hvdxg.openadapter_luid_last_status,
+            hvdxg.openadapter_luid_last_handle,
+            hvdxg.host_adapter_handle,
+            hvdxg.createdevice_last_adapter,
+            hvdxg.createdevice_last_host_adapter,
+            hvdxg.createdevice_last_device,
+            hvdxg.createdevice_adapter_equals_device,
+            hvdxg.createdevice_host_adapter_equals_device,
+            hvdxg.createdevice_last_ret,
+            hvdxg.createdevice_last_process,
+            hvdxg.createdevice_last_owner_process,
+            hvdxg.createdevice_last_owner_generation,
+            hvdxg.createdevice_last_owner_refs,
+            hvdxg.createdevice_object_found,
+            hvdxg.createdevice_object_type,
+            hvdxg.createdevice_object_local,
+            hvdxg.createdevice_object_host,
+            hvdxg.createdevice_object_parent,
+            hvdxg.createdevice_object_device,
+            hvdxg.createdevice_object_generation,
+            hvdxg.createdevice_object_destroyed,
+            hvdxg.createprocess_success_len,
+            hvdxg.createprocess_success_cmd_len,
+            hvdxg.createprocess_success_ret,
+            hvdxg.createprocess_success_guest,
+            hvdxg.createprocess_success_pid,
+            hvdxg.createprocess_success_tgid,
+            hvdxg.createprocess_success_handle,
+            hvdxg.createprocess_success_layout,
+            hvdxg.createprocess_success_generation,
+            hvdxg.open_createprocess_attempts,
+            hvdxg.open_createprocess_successes,
+            hvdxg.open_createprocess_failures,
+            hvdxg.open_createprocess_ignored_failures,
+            hvdxg.open_createprocess_last_ret,
+            hvdxg.open_createprocess_last_guest,
+            hvdxg.open_createprocess_last_pid,
+            hvdxg.open_createprocess_last_tgid,
+            hvdxg.open_createprocess_last_handle,
+            hvdxg.open_createprocess_last_created,
+            hvdxg.open_createprocess_last_generation,
+            hvdxg.open_createprocess_last_refs,
+            hvdxg.early_bind_attempts,
+            hvdxg.early_bind_successes,
+            hvdxg.early_bind_failures,
+            hvdxg.early_bind_last_source,
+            hvdxg_early_bind_source_name(hvdxg.early_bind_last_source),
+            hvdxg.early_bind_last_cmd,
+            hvdxg.early_bind_last_ret,
+            hvdxg.early_bind_last_handle,
+            hvdxg.early_bind_last_created,
+            hvdxg.early_bind_last_generation,
+            hvdxg.early_bind_last_refs,
+            hvdxg.host_cmd_destroyallocation,
+            hvdxg.host_cmd_destroycontext,
+            hvdxg.host_cmd_destroyhwqueue,
+            hvdxg.host_cmd_destroypagingqueue,
+            hvdxg.host_cmd_destroydevice,
+            hvdxg.host_cmd_destroysync,
+            hvdxg.host_cmd_destroyprocess,
+            hvdxg.host_cmd_freegpuva,
+            hvdxg.host_cmd_lock2,
+            hvdxg.host_cmd_unlock2,
+            hvdxg.closeadapter_ioctl_count,
+            hvdxg.closeadapter_local_count,
+            hvdxg.closeadapter_host_count,
+            hvdxg.closeadapter_invalid_count,
+            hvdxg.closeadapter_last_len,
+            hvdxg.closeadapter_last_ret,
+            (uint32)hvdxg.closeadapter_last_status,
+            hvdxg.cleanup_order_seq,
+            hvdxg.closeadapter_last_order,
+            hvdxg.cleanup_last_destroy_order,
+            hvdxg.cleanup_destroyprocess_order,
+            hvdxg.closeadapter_after_destroy_count,
+            hvdxg.syncobject_mapped_count,
+            hvdxg.syncobject_mapped_len,
+            hvdxg.syncobject_mapped_type,
+            hvdxg.syncobject_mapped_flags,
+            hvdxg.syncobject_mapped_fence_cpu,
+            hvdxg.syncobject_mapped_fence_gpu);
+    }
+    if ((size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_mapgpuva_layout_history=index:%u "
+            "h0:pages:%lu/prot:0x%lx/dprot:0x%lx "
+            "h1:pages:%lu/prot:0x%lx/dprot:0x%lx "
+            "h2:pages:%lu/prot:0x%lx/dprot:0x%lx "
+            "h3:pages:%lu/prot:0x%lx/dprot:0x%lx "
+            "h4:pages:%lu/prot:0x%lx/dprot:0x%lx "
+            "h5:pages:%lu/prot:0x%lx/dprot:0x%lx "
+            "h6:pages:%lu/prot:0x%lx/dprot:0x%lx "
+            "h7:pages:%lu/prot:0x%lx/dprot:0x%lx\n"
+            "dxg_hwqueue_submit_history=index:%u "
+            "h0:len:%u/ret:%d/queue:0x%x/cmd_len:%u/priv:%u/head_len:%u/head:%02x%02x%02x%02x%02x%02x%02x%02x "
+            "h1:len:%u/ret:%d/queue:0x%x/cmd_len:%u/priv:%u/head_len:%u/head:%02x%02x%02x%02x%02x%02x%02x%02x "
+            "h2:len:%u/ret:%d/queue:0x%x/cmd_len:%u/priv:%u/head_len:%u/head:%02x%02x%02x%02x%02x%02x%02x%02x "
+            "h3:len:%u/ret:%d/queue:0x%x/cmd_len:%u/priv:%u/head_len:%u/head:%02x%02x%02x%02x%02x%02x%02x%02x "
+            "h4:len:%u/ret:%d/queue:0x%x/cmd_len:%u/priv:%u/head_len:%u/head:%02x%02x%02x%02x%02x%02x%02x%02x "
+            "h5:len:%u/ret:%d/queue:0x%x/cmd_len:%u/priv:%u/head_len:%u/head:%02x%02x%02x%02x%02x%02x%02x%02x "
+            "h6:len:%u/ret:%d/queue:0x%x/cmd_len:%u/priv:%u/head_len:%u/head:%02x%02x%02x%02x%02x%02x%02x%02x "
+            "h7:len:%u/ret:%d/queue:0x%x/cmd_len:%u/priv:%u/head_len:%u/head:%02x%02x%02x%02x%02x%02x%02x%02x\n"
+            "dxg_lock2_detail=ioctls:%u forwarded:%u cached_refs:%u "
+            "sysmem:%u map_fail:%u diag:%u last_len:%u last_ret:%d "
+            "last_status:0x%x last_user:0x%lx\n"
+            "dxg_unlock2_detail=ioctls:%u forwarded:%u missing_tracking:%u "
+            "cached_refs:%u diag:%u last_len:%u last_ret:%d "
+            "last_status:0x%x\n",
+            hvdxg.mapgpuva_history_index,
+            hvdxg.mapgpuva_history_pages[0],
+            hvdxg.mapgpuva_history_protection[0],
+            hvdxg.mapgpuva_history_driver_protection[0],
+            hvdxg.mapgpuva_history_pages[1],
+            hvdxg.mapgpuva_history_protection[1],
+            hvdxg.mapgpuva_history_driver_protection[1],
+            hvdxg.mapgpuva_history_pages[2],
+            hvdxg.mapgpuva_history_protection[2],
+            hvdxg.mapgpuva_history_driver_protection[2],
+            hvdxg.mapgpuva_history_pages[3],
+            hvdxg.mapgpuva_history_protection[3],
+            hvdxg.mapgpuva_history_driver_protection[3],
+            hvdxg.mapgpuva_history_pages[4],
+            hvdxg.mapgpuva_history_protection[4],
+            hvdxg.mapgpuva_history_driver_protection[4],
+            hvdxg.mapgpuva_history_pages[5],
+            hvdxg.mapgpuva_history_protection[5],
+            hvdxg.mapgpuva_history_driver_protection[5],
+            hvdxg.mapgpuva_history_pages[6],
+            hvdxg.mapgpuva_history_protection[6],
+            hvdxg.mapgpuva_history_driver_protection[6],
+            hvdxg.mapgpuva_history_pages[7],
+            hvdxg.mapgpuva_history_protection[7],
+            hvdxg.mapgpuva_history_driver_protection[7],
+            hvdxg.submithwqueue_history_index,
+            HV_DXG_SH_ARGS(0), HV_DXG_SH_ARGS(1),
+            HV_DXG_SH_ARGS(2), HV_DXG_SH_ARGS(3),
+            HV_DXG_SH_ARGS(4), HV_DXG_SH_ARGS(5),
+            HV_DXG_SH_ARGS(6), HV_DXG_SH_ARGS(7),
+            hvdxg.lock2_ioctl_count,
+            hvdxg.lock2_host_forward_count,
+            hvdxg.lock2_cached_ref_count,
+            hvdxg.lock2_sysmem_count,
+            hvdxg.lock2_map_fail_count,
+            hvdxg.lock2_diag_prints,
+            hvdxg.lock2_last_len,
+            hvdxg.lock2_last_ret,
+            (uint32)hvdxg.lock2_last_status,
+            hvdxg.lock2_last_user_va,
+            hvdxg.unlock2_ioctl_count,
+            hvdxg.unlock2_host_forward_count,
+            hvdxg.unlock2_missing_tracking_count,
+            hvdxg.unlock2_cached_ref_count,
+            hvdxg.unlock2_diag_prints,
+            hvdxg.unlock2_last_len,
+            hvdxg.unlock2_last_ret,
+            (uint32)hvdxg.unlock2_last_status);
+    }
+    if ((size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_create_attempts=count:%u "
+            "a0:cmd:%u/off:%u/wire:%u/ext:%u/eoff:%u/len:%u/ret:%d/raw:0x%x/status:0x%x/proc:0x%x/obj:0x%x "
+            "a1:cmd:%u/off:%u/wire:%u/ext:%u/eoff:%u/len:%u/ret:%d/raw:0x%x/status:0x%x/proc:0x%x/obj:0x%x "
+            "a2:cmd:%u/off:%u/wire:%u/ext:%u/eoff:%u/len:%u/ret:%d/raw:0x%x/status:0x%x/proc:0x%x/obj:0x%x "
+            "a3:cmd:%u/off:%u/wire:%u/ext:%u/eoff:%u/len:%u/ret:%d/raw:0x%x/status:0x%x/proc:0x%x/obj:0x%x "
+            "a4:cmd:%u/off:%u/wire:%u/ext:%u/eoff:%u/len:%u/ret:%d/raw:0x%x/status:0x%x/proc:0x%x/obj:0x%x\n",
+            hvdxg.ntshared_create_attempts,
+            hvdxg.ntshared_create_attempt_cmd_len[0],
+            hvdxg.ntshared_create_attempt_object_offset[0],
+            hvdxg.ntshared_create_attempt_wire_len[0],
+            hvdxg.ntshared_create_attempt_ext[0],
+            hvdxg.ntshared_create_attempt_ext_offset[0],
+            hvdxg.ntshared_create_attempt_len[0],
+            hvdxg.ntshared_create_attempt_ret[0],
+            hvdxg.ntshared_create_attempt_raw0[0],
+            hvdxg.ntshared_create_attempt_status[0],
+            hvdxg.ntshared_create_attempt_process[0],
+            hvdxg.ntshared_create_attempt_object[0],
+            hvdxg.ntshared_create_attempt_cmd_len[1],
+            hvdxg.ntshared_create_attempt_object_offset[1],
+            hvdxg.ntshared_create_attempt_wire_len[1],
+            hvdxg.ntshared_create_attempt_ext[1],
+            hvdxg.ntshared_create_attempt_ext_offset[1],
+            hvdxg.ntshared_create_attempt_len[1],
+            hvdxg.ntshared_create_attempt_ret[1],
+            hvdxg.ntshared_create_attempt_raw0[1],
+            hvdxg.ntshared_create_attempt_status[1],
+            hvdxg.ntshared_create_attempt_process[1],
+            hvdxg.ntshared_create_attempt_object[1],
+            hvdxg.ntshared_create_attempt_cmd_len[2],
+            hvdxg.ntshared_create_attempt_object_offset[2],
+            hvdxg.ntshared_create_attempt_wire_len[2],
+            hvdxg.ntshared_create_attempt_ext[2],
+            hvdxg.ntshared_create_attempt_ext_offset[2],
+            hvdxg.ntshared_create_attempt_len[2],
+            hvdxg.ntshared_create_attempt_ret[2],
+            hvdxg.ntshared_create_attempt_raw0[2],
+            hvdxg.ntshared_create_attempt_status[2],
+            hvdxg.ntshared_create_attempt_process[2],
+            hvdxg.ntshared_create_attempt_object[2],
+            hvdxg.ntshared_create_attempt_cmd_len[3],
+            hvdxg.ntshared_create_attempt_object_offset[3],
+            hvdxg.ntshared_create_attempt_wire_len[3],
+            hvdxg.ntshared_create_attempt_ext[3],
+            hvdxg.ntshared_create_attempt_ext_offset[3],
+            hvdxg.ntshared_create_attempt_len[3],
+            hvdxg.ntshared_create_attempt_ret[3],
+            hvdxg.ntshared_create_attempt_raw0[3],
+            hvdxg.ntshared_create_attempt_status[3],
+            hvdxg.ntshared_create_attempt_process[3],
+            hvdxg.ntshared_create_attempt_object[3],
+            hvdxg.ntshared_create_attempt_cmd_len[4],
+            hvdxg.ntshared_create_attempt_object_offset[4],
+            hvdxg.ntshared_create_attempt_wire_len[4],
+            hvdxg.ntshared_create_attempt_ext[4],
+            hvdxg.ntshared_create_attempt_ext_offset[4],
+            hvdxg.ntshared_create_attempt_len[4],
+            hvdxg.ntshared_create_attempt_ret[4],
+            hvdxg.ntshared_create_attempt_raw0[4],
+            hvdxg.ntshared_create_attempt_status[4],
+            hvdxg.ntshared_create_attempt_process[4],
+            hvdxg.ntshared_create_attempt_object[4]);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_queryadapter_packet=type:%u size:%u cmd_len:%u "
+            "wire_len:%u ext:%u ext_off:%u type_off:%u size_off:%u "
+            "data_off:%u desc_size:%u pkt_len:%u pkt_aligned:%u "
+            "pkt_pad:%u desc_off8:%u desc_len8:%u ring_total:%u "
+            "actual:%u ret:%d status:0x%x\n",
+            hvdxg.queryadapter_packet_type,
+            hvdxg.queryadapter_packet_size,
+            hvdxg.queryadapter_packet_cmd_len,
+            hvdxg.queryadapter_packet_wire_len,
+            hvdxg.queryadapter_packet_ext,
+            hvdxg.queryadapter_packet_ext_offset,
+            hvdxg.queryadapter_packet_type_offset,
+            hvdxg.queryadapter_packet_size_offset,
+            hvdxg.queryadapter_packet_data_offset,
+            hvdxg.queryadapter_packet_desc_size,
+            hvdxg.queryadapter_packet_len,
+            hvdxg.queryadapter_packet_aligned,
+            hvdxg.queryadapter_packet_pad,
+            hvdxg.queryadapter_packet_desc_off8,
+            hvdxg.queryadapter_packet_desc_len8,
+            hvdxg.queryadapter_packet_ring_total,
+            hvdxg.queryadapter_last_len,
+            hvdxg.queryadapter_last_ret,
+            (uint32)hvdxg.queryadapter_last_status);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+                        "dxg_queryadapter_bytes=ext_len:%u ext:",
+                        hvdxg.queryadapter_packet_ext_len);
+        hvdxg_status_append_hex_inline(status, status_size, &len,
+            hvdxg.queryadapter_packet_ext_bytes,
+            hvdxg.queryadapter_packet_ext_len);
+        if (len >= 0 && (size_t)len < status_size)
+            len += snprintf(status + len, status_size - (size_t)len,
+                            " cmdhdr_len:%u cmdhdr:",
+                            hvdxg.queryadapter_packet_cmdhdr_len);
+        hvdxg_status_append_hex_inline(status, status_size, &len,
+            hvdxg.queryadapter_packet_cmdhdr,
+            hvdxg.queryadapter_packet_cmdhdr_len);
+        if (len >= 0 && (size_t)len < status_size)
+            len += snprintf(status + len, status_size - (size_t)len,
+                            " priv_head_len:%u priv_head:",
+                            hvdxg.queryadapter_packet_priv_head_len);
+        hvdxg_status_append_hex_inline(status, status_size, &len,
+            hvdxg.queryadapter_packet_priv_head,
+            hvdxg.queryadapter_packet_priv_head_len);
+        if (len >= 0 && (size_t)len < status_size)
+            len += snprintf(status + len, status_size - (size_t)len,
+                            "\n");
+    }
+    hvdxg_status_append_queryadapter_payloads(status, status_size, &len);
+    if ((size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_attempt_meta="
+            "a0:label:%u/id:%lu/type:%u/rlen:%u/head:%u "
+            "a1:label:%u/id:%lu/type:%u/rlen:%u/head:%u "
+            "a2:label:%u/id:%lu/type:%u/rlen:%u/head:%u "
+            "a3:label:%u/id:%lu/type:%u/rlen:%u/head:%u "
+            "a4:label:%u/id:%lu/type:%u/rlen:%u/head:%u "
+            "labels:1=wsl_ext24_zero_luid,2=wsl_noext24,3=ext24_zero_luid,4=ext24_host_luid,5=noext28,6=noext24,7=noext32_fallback,8=global_noext32,9=global_ext32_zero_luid,10=legacy_ext32_zero_luid,11=wsl_noext32_natural,12=wsl_ext32_zero_luid_natural\n",
+            hvdxg.ntshared_create_attempt_label[0],
+            hvdxg.ntshared_create_attempt_cmdid[0],
+            hvdxg.ntshared_create_attempt_command[0],
+            hvdxg.ntshared_create_attempt_result_len[0],
+            hvdxg.ntshared_create_attempt_head_len[0],
+            hvdxg.ntshared_create_attempt_label[1],
+            hvdxg.ntshared_create_attempt_cmdid[1],
+            hvdxg.ntshared_create_attempt_command[1],
+            hvdxg.ntshared_create_attempt_result_len[1],
+            hvdxg.ntshared_create_attempt_head_len[1],
+            hvdxg.ntshared_create_attempt_label[2],
+            hvdxg.ntshared_create_attempt_cmdid[2],
+            hvdxg.ntshared_create_attempt_command[2],
+            hvdxg.ntshared_create_attempt_result_len[2],
+            hvdxg.ntshared_create_attempt_head_len[2],
+            hvdxg.ntshared_create_attempt_label[3],
+            hvdxg.ntshared_create_attempt_cmdid[3],
+            hvdxg.ntshared_create_attempt_command[3],
+            hvdxg.ntshared_create_attempt_result_len[3],
+            hvdxg.ntshared_create_attempt_head_len[3],
+            hvdxg.ntshared_create_attempt_label[4],
+            hvdxg.ntshared_create_attempt_cmdid[4],
+            hvdxg.ntshared_create_attempt_command[4],
+            hvdxg.ntshared_create_attempt_result_len[4],
+            hvdxg.ntshared_create_attempt_head_len[4]);
+    }
+    if ((size_t)len < status_size) {
+        uint32 ext24_zero_luid = 0;
+        uint32 ext32_zero_luid_natural = 0;
+        uint32 noext24 = 0;
+        uint32 noext32_natural = 0;
+        uint32 ext24_attempt = 0xffffffffU;
+        uint32 ext32_attempt = 0xffffffffU;
+        uint32 noext24_attempt = 0xffffffffU;
+        uint32 noext32_natural_attempt = 0xffffffffU;
+
+        for (uint32 i = 0; i < HV_DXG_NTSHARED_ATTEMPT_MAX; i++) {
+            if ((hvdxg.ntshared_create_attempt_label[i] ==
+                    HV_DXG_NTSHARED_LABEL_WSL_EXT24_ZERO_LUID ||
+                 hvdxg.ntshared_create_attempt_label[i] ==
+                    HV_DXG_NTSHARED_LABEL_EXT24_ZERO_LUID) &&
+                hvdxg.ntshared_create_attempt_cmdid[i] == 0 &&
+                hvdxg.ntshared_create_attempt_command[i] ==
+                    HV_DXGK_VMBCOMMAND_CREATENTSHAREDOBJECT &&
+                hvdxg.ntshared_create_attempt_cmd_len[i] == 24 &&
+                hvdxg.ntshared_create_attempt_wire_len[i] == 40 &&
+                hvdxg.ntshared_create_attempt_ext[i] == 1 &&
+                hvdxg.ntshared_create_attempt_ext_offset[i] == 16 &&
+                hvdxg.ntshared_create_attempt_object_offset[i] == 20 &&
+                hvdxg.ntshared_create_attempt_result_len[i] == 4 &&
+                hvdxg.ntshared_create_attempt_head_len[i] >= 40 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  0) == 16 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  8) == 0 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  12) == 0 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  36) ==
+                    hvdxg.ntshared_create_attempt_object[i]) {
+                ext24_zero_luid = 1;
+                ext24_attempt = i;
+            }
+            if (hvdxg.ntshared_create_attempt_label[i] ==
+                    HV_DXG_NTSHARED_LABEL_WSL_EXT32_ZERO_LUID_NATURAL &&
+                hvdxg.ntshared_create_attempt_cmdid[i] == 0 &&
+                hvdxg.ntshared_create_attempt_command[i] ==
+                    HV_DXGK_VMBCOMMAND_CREATENTSHAREDOBJECT &&
+                hvdxg.ntshared_create_attempt_cmd_len[i] == 32 &&
+                hvdxg.ntshared_create_attempt_wire_len[i] == 48 &&
+                hvdxg.ntshared_create_attempt_ext[i] == 1 &&
+                hvdxg.ntshared_create_attempt_ext_offset[i] == 16 &&
+                hvdxg.ntshared_create_attempt_object_offset[i] == 24 &&
+                hvdxg.ntshared_create_attempt_result_len[i] == 4 &&
+                hvdxg.ntshared_create_attempt_head_len[i] >= 48 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  0) == 16 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  8) == 0 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  12) == 0 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  40) ==
+                    hvdxg.ntshared_create_attempt_object[i]) {
+                ext32_zero_luid_natural = 1;
+                ext32_attempt = i;
+            }
+            if (hvdxg.ntshared_create_attempt_label[i] ==
+                    HV_DXG_NTSHARED_LABEL_WSL_NOEXT32_NATURAL &&
+                hvdxg.ntshared_create_attempt_cmdid[i] == 0 &&
+                hvdxg.ntshared_create_attempt_command[i] ==
+                    HV_DXGK_VMBCOMMAND_CREATENTSHAREDOBJECT &&
+                hvdxg.ntshared_create_attempt_cmd_len[i] == 32 &&
+                hvdxg.ntshared_create_attempt_wire_len[i] == 32 &&
+                hvdxg.ntshared_create_attempt_ext[i] == 0 &&
+                hvdxg.ntshared_create_attempt_ext_offset[i] == 0 &&
+                hvdxg.ntshared_create_attempt_object_offset[i] == 24 &&
+                hvdxg.ntshared_create_attempt_result_len[i] == 4 &&
+                hvdxg.ntshared_create_attempt_head_len[i] >= 32 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  24) ==
+                    hvdxg.ntshared_create_attempt_object[i]) {
+                noext32_natural = 1;
+                noext32_natural_attempt = i;
+            }
+            if (hvdxg.ntshared_create_attempt_label[i] ==
+                    HV_DXG_NTSHARED_LABEL_WSL_NOEXT24 &&
+                hvdxg.ntshared_create_attempt_cmdid[i] == 0 &&
+                hvdxg.ntshared_create_attempt_command[i] ==
+                    HV_DXGK_VMBCOMMAND_CREATENTSHAREDOBJECT &&
+                hvdxg.ntshared_create_attempt_cmd_len[i] == 24 &&
+                hvdxg.ntshared_create_attempt_wire_len[i] == 24 &&
+                hvdxg.ntshared_create_attempt_ext[i] == 0 &&
+                hvdxg.ntshared_create_attempt_ext_offset[i] == 0 &&
+                hvdxg.ntshared_create_attempt_object_offset[i] == 20 &&
+                hvdxg.ntshared_create_attempt_result_len[i] == 4 &&
+                hvdxg.ntshared_create_attempt_head_len[i] >= 24 &&
+                hvdxg_read_u32_at(hvdxg.ntshared_create_attempt_head[i],
+                                  hvdxg.ntshared_create_attempt_head_len[i],
+                                  20) ==
+                    hvdxg.ntshared_create_attempt_object[i]) {
+                noext24 = 1;
+                noext24_attempt = i;
+            }
+        }
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_wsl_exact=ext32_zero_luid_natural:%u/a%u ext24_zero_luid:%u/a%u noext32_natural:%u/a%u noext24:%u/a%u first_label:%u verdict:%s ext_verdict:%s\n",
+            ext32_zero_luid_natural,
+            ext32_attempt == 0xffffffffU ? 99U : ext32_attempt,
+            ext24_zero_luid,
+            ext24_attempt == 0xffffffffU ? 99U : ext24_attempt,
+            noext32_natural,
+            noext32_natural_attempt == 0xffffffffU ? 99U :
+                noext32_natural_attempt,
+            noext24,
+            noext24_attempt == 0xffffffffU ? 99U : noext24_attempt,
+            hvdxg.ntshared_create_attempt_label[0],
+            (ext32_zero_luid_natural || noext32_natural) ?
+                "sent" : "missing",
+            ext32_zero_luid_natural ? "sent" : "missing");
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        uint32 retry_attempted = hvdxg.ntshared_create_attempts > 1 ? 1 : 0;
+        uint32 first_is_wsl_natural =
+            hvdxg.ntshared_create_attempt_label[0] ==
+                HV_DXG_NTSHARED_LABEL_WSL_NOEXT32_NATURAL ||
+            hvdxg.ntshared_create_attempt_label[0] ==
+                HV_DXG_NTSHARED_LABEL_WSL_EXT32_ZERO_LUID_NATURAL;
+        uint32 retry_is_old_ext =
+            hvdxg.ntshared_create_attempt_label[1] ==
+            HV_DXG_NTSHARED_LABEL_WSL_EXT24_ZERO_LUID;
+
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_envelope="
+            "wsl_src:global_vm_to_host/natural32/process_host/object/result4 "
+            "expected:payload:32/obj_off:24/result:4/wire:32_or_ext48 "
+            "first:path:%u/wsl:%u/route:%s/ch:%u/type:%u/payload:%u/"
+            "wire:%u/ext:%u/eoff:%u/obj_off:%u/result:%u/proc:0x%x/"
+            "obj:0x%x/actual:%u/ret:%d/status:0x%x/raw:0x%x "
+            "retry:attempted:%u/path:%u/old_ext24:%u/route:%s/ch:%u/"
+            "type:%u/payload:%u/wire:%u/ext:%u/eoff:%u/obj_off:%u/"
+            "result:%u/proc:0x%x/obj:0x%x/actual:%u/ret:%d/"
+            "status:0x%x/raw:0x%x alt_policy:no_layout_retry\n",
+            hvdxg.ntshared_create_attempt_label[0],
+            first_is_wsl_natural,
+            hvdxg_channel_name(HV_DXG_CHANNEL_GLOBAL),
+            hvdxg.ntshared_create_attempt_channel[0],
+            hvdxg.ntshared_create_attempt_command[0],
+            hvdxg.ntshared_create_attempt_cmd_len[0],
+            hvdxg.ntshared_create_attempt_wire_len[0],
+            hvdxg.ntshared_create_attempt_ext[0],
+            hvdxg.ntshared_create_attempt_ext_offset[0],
+            hvdxg.ntshared_create_attempt_object_offset[0],
+            hvdxg.ntshared_create_attempt_result_len[0],
+            hvdxg.ntshared_create_attempt_process[0],
+            hvdxg.ntshared_create_attempt_object[0],
+            hvdxg.ntshared_create_attempt_len[0],
+            hvdxg.ntshared_create_attempt_ret[0],
+            hvdxg.ntshared_create_attempt_status[0],
+            hvdxg.ntshared_create_attempt_raw0[0],
+            retry_attempted,
+            hvdxg.ntshared_create_attempt_label[1],
+            retry_is_old_ext,
+            hvdxg_channel_name(HV_DXG_CHANNEL_GLOBAL),
+            hvdxg.ntshared_create_attempt_channel[1],
+            hvdxg.ntshared_create_attempt_command[1],
+            hvdxg.ntshared_create_attempt_cmd_len[1],
+            hvdxg.ntshared_create_attempt_wire_len[1],
+            hvdxg.ntshared_create_attempt_ext[1],
+            hvdxg.ntshared_create_attempt_ext_offset[1],
+            hvdxg.ntshared_create_attempt_object_offset[1],
+            hvdxg.ntshared_create_attempt_result_len[1],
+            hvdxg.ntshared_create_attempt_process[1],
+            hvdxg.ntshared_create_attempt_object[1],
+            hvdxg.ntshared_create_attempt_len[1],
+            hvdxg.ntshared_create_attempt_ret[1],
+            hvdxg.ntshared_create_attempt_status[1],
+            hvdxg.ntshared_create_attempt_raw0[1]);
+    }
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_ntshared_wire_a0",
+                            hvdxg.ntshared_create_attempt_head[0],
+                            hvdxg.ntshared_create_attempt_head_len[0]);
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_ntshared_wire_a1",
+                            hvdxg.ntshared_create_attempt_head[1],
+                            hvdxg.ntshared_create_attempt_head_len[1]);
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_ntshared_wire_a2",
+                            hvdxg.ntshared_create_attempt_head[2],
+                            hvdxg.ntshared_create_attempt_head_len[2]);
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_ntshared_wire_a3",
+                            hvdxg.ntshared_create_attempt_head[3],
+                            hvdxg.ntshared_create_attempt_head_len[3]);
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_ntshared_wire_a4",
+                            hvdxg.ntshared_create_attempt_head[4],
+                            hvdxg.ntshared_create_attempt_head_len[4]);
+	    hvdxg_status_append_hex(status, status_size, &len,
+	                            "dxg_shareobject_wire",
+	                            hvdxg.shareobject_last_head,
+	                            hvdxg.shareobject_last_head_len);
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_queryadapter_adaptertype_rewrite=count:%u type:%u "
+            "source:%u raw:0x%x wsl:0x%x cleared:0x%x forced:0x%x "
+            "compute_only:%u\n",
+            hvdxg.queryadapter_adaptertype_rewrite_count,
+            hvdxg.queryadapter_adaptertype_rewrite_type,
+            hvdxg.queryadapter_adaptertype_rewrite_source,
+            hvdxg.queryadapter_adaptertype_raw_value,
+            hvdxg.queryadapter_adaptertype_wsl_value,
+            hvdxg.queryadapter_adaptertype_cleared_bits,
+            hvdxg.queryadapter_adaptertype_forced_bits,
+            hvdxg.queryadapter_adaptertype_compute_only);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_queryadapter_type27_route=last_type:%u route:%u "
+            "packet_type:%u cmd_type:%u channel_type:%u proc:0x%x "
+            "cmd_len:%u wire_len:%u ext:%u eoff:%u data_off:%u "
+            "priv:%u result_req:%u expected:%u actual:%u ret:%d status:0x%x "
+            "completion_payload:%u source:%s/%u wait:%s/%u match:%u/%u\n",
+            hvdxg.queryadapter_last_type,
+            hvdxg.queryadapter_send_route,
+            hvdxg.queryadapter_packet_type,
+            hvdxg_read_u32_at(hvdxg.queryadapter_packet_cmdhdr,
+                              hvdxg.queryadapter_packet_cmdhdr_len, 16),
+            hvdxg_read_u32_at(hvdxg.queryadapter_packet_cmdhdr,
+                              hvdxg.queryadapter_packet_cmdhdr_len, 12),
+            hvdxg_read_u32_at(hvdxg.queryadapter_packet_cmdhdr,
+                              hvdxg.queryadapter_packet_cmdhdr_len, 8),
+            hvdxg.queryadapter_packet_cmd_len,
+            hvdxg.queryadapter_packet_wire_len,
+            hvdxg.queryadapter_packet_ext,
+            hvdxg.queryadapter_packet_ext_offset,
+            hvdxg.queryadapter_packet_data_offset,
+            hvdxg.queryadapter_packet_size,
+            hvdxg.queryadapter_last_result_len,
+            hvdxg.queryadapter_last_expected_wsl_len,
+            hvdxg.queryadapter_last_len,
+            hvdxg.queryadapter_last_ret,
+            (uint32)hvdxg.queryadapter_last_status,
+            hvdxg.queryadapter_completion_payload_len,
+            hvdxg_channel_name(hvdxg.queryadapter_completion_source_channel),
+            hvdxg.queryadapter_completion_source_relid,
+            hvdxg_channel_name(hvdxg.queryadapter_completion_waiting_channel),
+            hvdxg.queryadapter_completion_waiting_relid,
+            hvdxg.queryadapter_completion_waiting_match,
+            hvdxg.queryadapter_completion_waiting_channel_match);
+    }
+	    if (len >= 0 && (size_t)len < status_size) {
+	        len += snprintf(status + len, status_size - (size_t)len,
+	            "dxg_ntshared_entry=found:%u exact:%u local:0x%x host:0x%x "
+            "type:%u parent:0x%x device:0x%x owner:0x%x/%u gen:%u "
+            "stale:%u destroyed:%u\n",
+            hvdxg.ntshared_obj_found,
+            hvdxg.ntshared_obj_exact,
+            hvdxg.ntshared_obj_local,
+            hvdxg.ntshared_obj_host,
+            hvdxg.ntshared_obj_type,
+            hvdxg.ntshared_obj_parent,
+            hvdxg.ntshared_obj_device,
+            hvdxg.ntshared_obj_owner_process,
+            hvdxg.ntshared_obj_owner_generation,
+            hvdxg.ntshared_obj_generation,
+            hvdxg.ntshared_obj_stale,
+            hvdxg.ntshared_obj_destroyed);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_runtime_object=seen:%u user_obj:0x%x "
+            "user_dev:0x%x kind:%u host_obj:0x%x host_dev:0x%x "
+            "entry:%u/%u type:%u local:0x%x host:0x%x parent:0x%x "
+            "entry_dev:0x%x entry_gen:%u destroyed:%u owner:0x%x/%u/%u\n",
+            hvdxg.ntshared_runtime_seen,
+            hvdxg.ntshared_runtime_user_object,
+            hvdxg.ntshared_runtime_user_device,
+            hvdxg.ntshared_runtime_kind,
+            hvdxg.ntshared_runtime_host_object,
+            hvdxg.ntshared_runtime_host_device,
+            hvdxg.ntshared_runtime_entry_found,
+            hvdxg.ntshared_runtime_entry_exact,
+            hvdxg.ntshared_runtime_entry_type,
+            hvdxg.ntshared_runtime_entry_local,
+            hvdxg.ntshared_runtime_entry_host,
+            hvdxg.ntshared_runtime_entry_parent,
+            hvdxg.ntshared_runtime_entry_device,
+            hvdxg.ntshared_runtime_entry_generation,
+            hvdxg.ntshared_runtime_entry_destroyed,
+            hvdxg.ntshared_runtime_owner_process,
+            hvdxg.ntshared_runtime_owner_generation,
+            hvdxg.ntshared_runtime_owner_refs);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_runtime_resource=res:0x%x res_host:0x%x "
+            "res_flags:0x%x alloc:0x%x alloc_host:0x%x "
+            "alloc_flags:0x%x alloc_size:%lu alloc_owner:0x%x/%u/%u "
+            "meta:%u seal:%u->%u host_seal:%u->%u\n",
+            hvdxg.ntshared_runtime_resource,
+            hvdxg.ntshared_runtime_resource_host,
+            hvdxg.ntshared_runtime_resource_flags,
+            hvdxg.ntshared_runtime_alloc,
+            hvdxg.ntshared_runtime_alloc_host,
+            hvdxg.ntshared_runtime_alloc_flags,
+            hvdxg.ntshared_runtime_alloc_size,
+            hvdxg.ntshared_runtime_alloc_owner_process,
+            hvdxg.ntshared_runtime_alloc_owner_generation,
+            hvdxg.ntshared_runtime_alloc_owner_refs,
+            hvdxg.ntshared_runtime_meta_created,
+            hvdxg.ntshared_runtime_sealed_before,
+            hvdxg.ntshared_runtime_sealed_after,
+            hvdxg.ntshared_runtime_host_sealed_before,
+            hvdxg.ntshared_runtime_host_sealed_after);
+    }
+	    if (len >= 0 && (size_t)len < status_size) {
+	        len += snprintf(status + len, status_size - (size_t)len,
+	            "dxg_ntshared_runtime_layout=cmd_len:%u wire:%u ext:%u "
+	            "eoff:%u obj_off:%u result_req:%u return_len:%u ret:%d "
+	            "raw:0x%x handle:0x%x\n",
+            hvdxg.ntshared_runtime_cmd_len,
+            hvdxg.ntshared_runtime_wire_len,
+            hvdxg.ntshared_runtime_ext,
+            hvdxg.ntshared_runtime_ext_offset,
+            hvdxg.ntshared_runtime_object_offset,
+            hvdxg.ntshared_runtime_result_len,
+            hvdxg.ntshared_runtime_return_len,
+            hvdxg.ntshared_runtime_return_ret,
+	            hvdxg.ntshared_runtime_return_raw,
+	            hvdxg.ntshared_runtime_return_handle);
+	    }
+	    if (len >= 0 && (size_t)len < status_size) {
+	        len += snprintf(status + len, status_size - (size_t)len,
+	            "dxg_ntshared_wsl_object=passed:0x%x resource:0x%x "
+	            "res_host:0x%x shared_owner_obj:0x%x cached_nt:0x%x "
+	            "pass_is_resource:%u pass_is_shared_owner:%u\n",
+	            hvdxg.ntshared_runtime_host_object,
+	            hvdxg.ntshared_runtime_resource,
+	            hvdxg.ntshared_runtime_resource_host,
+	            hvdxg.sharedresource_owner_object,
+	            hvdxg.sharedresource_owner_nt,
+	            hvdxg.ntshared_runtime_host_object != 0 &&
+	            hvdxg.ntshared_runtime_host_object ==
+	                hvdxg.ntshared_runtime_resource_host ? 1U : 0U,
+	            hvdxg.ntshared_runtime_host_object != 0 &&
+	            hvdxg.ntshared_runtime_host_object ==
+	                hvdxg.sharedresource_owner_object ? 1U : 0U);
+	    }
+	    if (len >= 0 && (size_t)len < status_size) {
+	        len += snprintf(status + len, status_size - (size_t)len,
+	            "dxg_ntshared_runtime_process=current:0x%x/%u "
+            "resource_owner:0x%x/%u/%u alloc_owner:0x%x/%u/%u "
+            "attempt_proc:0x%x global_proc:0x%x "
+            "match_cur_res:%u match_cur_global:%u match_res_global:%u\n",
+            hvdxg.sharedhandle_last_current_process,
+            hvdxg.sharedhandle_last_current_generation,
+            hvdxg.ntshared_runtime_owner_process,
+            hvdxg.ntshared_runtime_owner_generation,
+            hvdxg.ntshared_runtime_owner_refs,
+            hvdxg.ntshared_runtime_alloc_owner_process,
+            hvdxg.ntshared_runtime_alloc_owner_generation,
+            hvdxg.ntshared_runtime_alloc_owner_refs,
+            hvdxg.ntshared_create_attempt_process[0],
+            hvdxg.global_send_ntshared.process,
+            hvdxg.sharedhandle_last_current_process != 0 &&
+            hvdxg.sharedhandle_last_current_process ==
+                hvdxg.ntshared_runtime_owner_process ? 1U : 0U,
+            hvdxg.sharedhandle_last_current_process != 0 &&
+            hvdxg.sharedhandle_last_current_process ==
+                hvdxg.global_send_ntshared.process ? 1U : 0U,
+	            hvdxg.ntshared_runtime_owner_process != 0 &&
+	            hvdxg.ntshared_runtime_owner_process ==
+	                hvdxg.global_send_ntshared.process ? 1U : 0U);
+	    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_pre_classes="
+            "res:type:%u/local:0x%x/host:0x%x/gen:%u/destroyed:%u/refs:%u/sealed:%u/open:%u "
+            "alloc:type:%u/local:0x%x/host:0x%x/gen:%u/destroyed:%u/refs:%u "
+            "dev:type:%u/local:0x%x/host:0x%x/gen:%u/destroyed:%u/refs:%u "
+            "shared_owner:found:%u/type:%u/local:0x%x/host:0x%x/gen:%u/destroyed:%u/obj:0x%x/proc:0x%x/refs:%u/nt:0x%x/sealed:%u\n",
+            hvdxg.ntshared_pre_resource_type,
+            hvdxg.ntshared_pre_resource_local,
+            hvdxg.ntshared_pre_resource_host,
+            hvdxg.ntshared_pre_resource_generation,
+            hvdxg.ntshared_pre_resource_destroyed,
+            hvdxg.ntshared_pre_resource_refs,
+            hvdxg.ntshared_pre_resource_sealed,
+            hvdxg.ntshared_pre_resource_open_count,
+            hvdxg.ntshared_pre_alloc_type,
+            hvdxg.ntshared_pre_alloc_local,
+            hvdxg.ntshared_pre_alloc_host,
+            hvdxg.ntshared_pre_alloc_generation,
+            hvdxg.ntshared_pre_alloc_destroyed,
+            hvdxg.ntshared_pre_alloc_refs,
+            hvdxg.ntshared_pre_device_type,
+            hvdxg.ntshared_pre_device_local,
+            hvdxg.ntshared_pre_device_host,
+            hvdxg.ntshared_pre_device_generation,
+            hvdxg.ntshared_pre_device_destroyed,
+            hvdxg.ntshared_pre_device_refs,
+            hvdxg.ntshared_pre_shared_owner_found,
+            hvdxg.ntshared_pre_shared_owner_type,
+            hvdxg.ntshared_pre_shared_owner_local,
+            hvdxg.ntshared_pre_shared_owner_host,
+            hvdxg.ntshared_pre_shared_owner_generation,
+            hvdxg.ntshared_pre_shared_owner_destroyed,
+            hvdxg.ntshared_pre_shared_owner_object,
+            hvdxg.ntshared_pre_shared_owner_process,
+            hvdxg.ntshared_pre_shared_owner_refs,
+            hvdxg.ntshared_pre_shared_owner_nt,
+            hvdxg.ntshared_pre_shared_owner_sealed);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_handle_fields="
+            "res:index:%u/unique:%u/instance:%u "
+            "alloc:index:%u/unique:%u/instance:%u "
+            "dev:index:%u/unique:%u/instance:%u "
+            "shared_owner:index:%u/unique:%u/instance:%u\n",
+            hvdxg.ntshared_pre_resource_index,
+            hvdxg.ntshared_pre_resource_unique,
+            hvdxg.ntshared_pre_resource_instance,
+            hvdxg.ntshared_pre_alloc_index,
+            hvdxg.ntshared_pre_alloc_unique,
+            hvdxg.ntshared_pre_alloc_instance,
+            hvdxg.ntshared_pre_device_index,
+            hvdxg.ntshared_pre_device_unique,
+            hvdxg.ntshared_pre_device_instance,
+            hvdxg.ntshared_pre_shared_owner_index,
+            hvdxg.ntshared_pre_shared_owner_unique,
+            hvdxg.ntshared_pre_shared_owner_instance);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_pre_private="
+            "runtime:%u/%08x/%08x,%08x,%08x,%08x "
+            "resource:%u/%08x/%08x,%08x,%08x,%08x "
+            "total:%u/%08x/%08x,%08x,%08x,%08x "
+            "alloc_out:%u/%08x/%08x,%08x,%08x,%08x\n",
+            hvdxg.ntshared_pre_runtime_size,
+            hvdxg.ntshared_pre_runtime_hash,
+            hvdxg.ntshared_pre_runtime_w[0],
+            hvdxg.ntshared_pre_runtime_w[1],
+            hvdxg.ntshared_pre_runtime_w[2],
+            hvdxg.ntshared_pre_runtime_w[3],
+            hvdxg.ntshared_pre_resource_priv_size,
+            hvdxg.ntshared_pre_resource_priv_hash,
+            hvdxg.ntshared_pre_resource_priv_w[0],
+            hvdxg.ntshared_pre_resource_priv_w[1],
+            hvdxg.ntshared_pre_resource_priv_w[2],
+            hvdxg.ntshared_pre_resource_priv_w[3],
+            hvdxg.ntshared_pre_total_priv_size,
+            hvdxg.ntshared_pre_total_priv_hash,
+            hvdxg.ntshared_pre_total_priv_w[0],
+            hvdxg.ntshared_pre_total_priv_w[1],
+            hvdxg.ntshared_pre_total_priv_w[2],
+            hvdxg.ntshared_pre_total_priv_w[3],
+            hvdxg.ntshared_pre_alloc_out_size,
+            hvdxg.ntshared_pre_alloc_out_hash,
+            hvdxg.ntshared_pre_alloc_out_w[0],
+            hvdxg.ntshared_pre_alloc_out_w[1],
+            hvdxg.ntshared_pre_alloc_out_w[2],
+            hvdxg.ntshared_pre_alloc_out_w[3]);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_pre_order=create_seq:%lu first_nt_before:%lu "
+            "event_before:%lu expected_nt_seq:%lu attempts:%u first_label:%u "
+            "make:len:%u/ret:%d/host:%d/user:%d/status:0x%x/count:%u/sync:0x%x/fence:%lu/current:%lu "
+            "resident:enforced:%u/missing:%u/wait:%u/%d\n",
+            hvdxg.ntshared_pre_create_seq,
+            hvdxg.ntshared_pre_first_nt_seq,
+            hvdxg.ntshared_pre_event_seq,
+            hvdxg.ntshared_pre_event_seq + 1,
+            hvdxg.ntshared_create_attempts,
+            hvdxg.ntshared_create_attempt_label[0],
+            hvdxg.makeresident_last_len,
+            hvdxg.makeresident_last_ret,
+            hvdxg.makeresident_last_host_ret,
+            hvdxg.makeresident_last_user_ret,
+            (uint32)hvdxg.makeresident_last_status,
+            hvdxg.makeresident_last_count,
+            hvdxg.makeresident_last_sync,
+            hvdxg.makeresident_last_fence,
+            hvdxg.makeresident_last_fence_current,
+            hvdxg.sharedhandle_last_resident_enforced,
+            hvdxg.sharedhandle_last_resident_missing,
+            hvdxg.sharedhandle_last_resident_wait_result,
+            hvdxg.sharedhandle_last_resident_wait_ret);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_wsl_model=proc_state:%u open_proc:0x%x/%u/%u "
+            "cmd_proc:0x%x global_proc:0x%x res_owner:0x%x/%u "
+            "alloc_owner:0x%x/%u match:open:%u/global:%u/res:%u/alloc:%u "
+            "counts:open_obj:%u/proc_obj:%u/dev:%u/ctx:%u/res:%u/alloc:%u "
+            "proc_live:%u proc_gen:%u\n",
+            hvdxg.ntshared_model_process_state,
+            hvdxg.ntshared_model_open_process,
+            hvdxg.ntshared_model_open_generation,
+            hvdxg.ntshared_model_open_refs,
+            hvdxg.ntshared_model_command_process,
+            hvdxg.ntshared_model_global_process,
+            hvdxg.ntshared_model_resource_owner,
+            hvdxg.ntshared_model_resource_generation,
+            hvdxg.ntshared_model_alloc_owner,
+            hvdxg.ntshared_model_alloc_generation,
+            hvdxg.ntshared_model_cmd_eq_open,
+            hvdxg.ntshared_model_cmd_eq_global,
+            hvdxg.ntshared_model_cmd_eq_resource,
+            hvdxg.ntshared_model_cmd_eq_alloc,
+            hvdxg.ntshared_model_open_objects,
+            hvdxg.ntshared_model_process_objects,
+            hvdxg.ntshared_model_devices,
+            hvdxg.ntshared_model_contexts,
+            hvdxg.ntshared_model_resources,
+            hvdxg.ntshared_model_allocations,
+            hvdxg.ntshared_model_process_live,
+            hvdxg.ntshared_model_process_generation);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_failed_cleanup=ret:%d cached:%u->%u "
+            "refs:%u->%u object:0x%x->0x%x nt:0x%x->0x%x "
+            "sealed:%u->%u cache_inserts:%u->%u "
+            "wsl_fd_before_host:0 xv6_fd_before_host:0 "
+            "wsl_seal_after_host:1 xv6_seal_after_host:1\n",
+            (int32)hvdxg.ntshared_cleanup_ret,
+            hvdxg.ntshared_cleanup_cached_before,
+            hvdxg.ntshared_cleanup_cached_after,
+            hvdxg.ntshared_cleanup_refs_before,
+            hvdxg.ntshared_cleanup_refs_after,
+            hvdxg.ntshared_cleanup_object_before,
+            hvdxg.ntshared_cleanup_object_after,
+            hvdxg.ntshared_cleanup_nt_before,
+            hvdxg.ntshared_cleanup_nt_after,
+            hvdxg.ntshared_cleanup_sealed_before,
+            hvdxg.ntshared_cleanup_sealed_after,
+            hvdxg.ntshared_cleanup_cache_inserts_before,
+            hvdxg.ntshared_cleanup_cache_inserts_after);
+    }
+	    if (len >= 0 && (size_t)len < status_size) {
+	        len += snprintf(status + len, status_size - (size_t)len,
+	            "dxg_ntshared_env=a0:l%u/id%lu/t%u/ch%u/p0x%x/o0x%x/off%u/cl%u/wl%u/rl%u/m%u.%u/d%u "
+            "a1:l%u/id%lu/t%u/ch%u/p0x%x/o0x%x/off%u/cl%u/wl%u/rl%u/m%u.%u/d%u "
+            "a2:l%u/id%lu/t%u/ch%u/p0x%x/o0x%x/off%u/cl%u/wl%u/rl%u/m%u.%u/d%u\n",
+            hvdxg.ntshared_create_attempt_label[0],
+            hvdxg.ntshared_create_attempt_cmdid[0],
+            hvdxg.ntshared_create_attempt_command[0],
+            hvdxg.ntshared_create_attempt_channel[0],
+            hvdxg.ntshared_create_attempt_process[0],
+            hvdxg.ntshared_create_attempt_object[0],
+            hvdxg.ntshared_create_attempt_object_offset[0],
+            hvdxg.ntshared_create_attempt_cmd_len[0],
+            hvdxg.ntshared_create_attempt_wire_len[0],
+            hvdxg.ntshared_create_attempt_result_len[0],
+            hvdxg.ntshared_create_attempt_monitor[0],
+            hvdxg.ntshared_create_attempt_monitorid[0],
+            hvdxg.ntshared_create_attempt_dedicated[0],
+            hvdxg.ntshared_create_attempt_label[1],
+            hvdxg.ntshared_create_attempt_cmdid[1],
+            hvdxg.ntshared_create_attempt_command[1],
+            hvdxg.ntshared_create_attempt_channel[1],
+            hvdxg.ntshared_create_attempt_process[1],
+            hvdxg.ntshared_create_attempt_object[1],
+            hvdxg.ntshared_create_attempt_object_offset[1],
+            hvdxg.ntshared_create_attempt_cmd_len[1],
+            hvdxg.ntshared_create_attempt_wire_len[1],
+            hvdxg.ntshared_create_attempt_result_len[1],
+            hvdxg.ntshared_create_attempt_monitor[1],
+            hvdxg.ntshared_create_attempt_monitorid[1],
+            hvdxg.ntshared_create_attempt_dedicated[1],
+            hvdxg.ntshared_create_attempt_label[2],
+            hvdxg.ntshared_create_attempt_cmdid[2],
+            hvdxg.ntshared_create_attempt_command[2],
+            hvdxg.ntshared_create_attempt_channel[2],
+            hvdxg.ntshared_create_attempt_process[2],
+            hvdxg.ntshared_create_attempt_object[2],
+            hvdxg.ntshared_create_attempt_object_offset[2],
+            hvdxg.ntshared_create_attempt_cmd_len[2],
+            hvdxg.ntshared_create_attempt_wire_len[2],
+            hvdxg.ntshared_create_attempt_result_len[2],
+            hvdxg.ntshared_create_attempt_monitor[2],
+            hvdxg.ntshared_create_attempt_monitorid[2],
+            hvdxg.ntshared_create_attempt_dedicated[2]);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ntshared_env2=a3:l%u/id%lu/t%u/ch%u/p0x%x/o0x%x/off%u/cl%u/wl%u/rl%u/m%u.%u/d%u "
+            "a4:l%u/id%lu/t%u/ch%u/p0x%x/o0x%x/off%u/cl%u/wl%u/rl%u/m%u.%u/d%u\n",
+            hvdxg.ntshared_create_attempt_label[3],
+            hvdxg.ntshared_create_attempt_cmdid[3],
+            hvdxg.ntshared_create_attempt_command[3],
+            hvdxg.ntshared_create_attempt_channel[3],
+            hvdxg.ntshared_create_attempt_process[3],
+            hvdxg.ntshared_create_attempt_object[3],
+            hvdxg.ntshared_create_attempt_object_offset[3],
+            hvdxg.ntshared_create_attempt_cmd_len[3],
+            hvdxg.ntshared_create_attempt_wire_len[3],
+            hvdxg.ntshared_create_attempt_result_len[3],
+            hvdxg.ntshared_create_attempt_monitor[3],
+            hvdxg.ntshared_create_attempt_monitorid[3],
+            hvdxg.ntshared_create_attempt_dedicated[3],
+            hvdxg.ntshared_create_attempt_label[4],
+            hvdxg.ntshared_create_attempt_cmdid[4],
+            hvdxg.ntshared_create_attempt_command[4],
+            hvdxg.ntshared_create_attempt_channel[4],
+            hvdxg.ntshared_create_attempt_process[4],
+            hvdxg.ntshared_create_attempt_object[4],
+            hvdxg.ntshared_create_attempt_object_offset[4],
+            hvdxg.ntshared_create_attempt_cmd_len[4],
+            hvdxg.ntshared_create_attempt_wire_len[4],
+            hvdxg.ntshared_create_attempt_result_len[4],
+            hvdxg.ntshared_create_attempt_monitor[4],
+            hvdxg.ntshared_create_attempt_monitorid[4],
+            hvdxg.ntshared_create_attempt_dedicated[4]);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_sharedresource_ntdiag=res_host:0x%x alloc_host:0x%x "
+            "res_flags:0x%x alloc_flags:0x%x alloc_hash:%08x/%08x "
+            "alloc_size:%lu meta:%u->%u seal:%u->%u host_seal:%u->%u\n",
+            hvdxg.sharedresource_nt_resource_host,
+            hvdxg.sharedresource_nt_alloc_host,
+            hvdxg.sharedresource_nt_resource_flags,
+            hvdxg.sharedresource_nt_alloc_flags,
+            hvdxg.sharedresource_nt_alloc_in_hash,
+            hvdxg.sharedresource_nt_alloc_out_hash,
+            hvdxg.sharedresource_nt_alloc_size,
+            hvdxg.sharedresource_nt_meta_before,
+            hvdxg.sharedresource_nt_meta_after,
+            hvdxg.sharedresource_nt_seal_before,
+            hvdxg.sharedresource_nt_seal_after,
+            hvdxg.sharedresource_nt_host_seal_before,
+            hvdxg.sharedresource_nt_host_seal_after);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_existing_sysmem_target=pfnmap_pages:%u pfnmap_ok:%u "
+            "vram:%u vram_gpa:0x%lx vram_size:%lu fb:0x%lx/%lu "
+            "meaning:pfnmap_allows_synthvid_vram_existing_sysmem_test\n",
+            hvdxg.existing_sysmem_last_pfnmap_pages,
+            hvdxg.existing_sysmem_pfnmap_successes,
+            hvdxg.existing_sysmem_last_vram,
+            hvdxg.existing_sysmem_last_vram_gpa,
+            hvdxg.existing_sysmem_last_vram_size,
+            platform.has_framebuffer ? platform.framebuffer_base : 0,
+            platform.has_framebuffer ? platform.framebuffer_size : 0);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_existing_sysmem_ntbridge=stage:%u resource:0x%x "
+            "global:0x%x flags:0x%x host_flags:0x%x metadata:%u "
+            "sealed:%u nt:0x%x shareable:%u reason:%u allocs:%u "
+            "runtime:%u resource_priv:%u alloc_priv:%u total:%u "
+            "pfnmap:%u vram:%u va:0x%lx size:%lu\n",
+            hvdxg.existing_sysmem_share_stage,
+            hvdxg.existing_sysmem_share_resource,
+            hvdxg.existing_sysmem_share_global,
+            hvdxg.existing_sysmem_share_flags,
+            hvdxg.existing_sysmem_share_host_flags,
+            hvdxg.existing_sysmem_share_metadata,
+            hvdxg.existing_sysmem_share_sealed,
+            hvdxg.existing_sysmem_share_nt,
+            hvdxg.existing_sysmem_share_shareable,
+            hvdxg.existing_sysmem_share_reason,
+            hvdxg.existing_sysmem_share_alloc_count,
+            hvdxg.existing_sysmem_share_runtime_priv,
+            hvdxg.existing_sysmem_share_resource_priv,
+            hvdxg.existing_sysmem_share_alloc_priv,
+            hvdxg.existing_sysmem_share_total_priv,
+            hvdxg.existing_sysmem_share_pfnmap_pages,
+            hvdxg.existing_sysmem_share_vram,
+            hvdxg.existing_sysmem_share_va,
+            hvdxg.existing_sysmem_share_size);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_sharedresource_seal_verify=tracked:%u allocs:%u "
+            "expected_priv:%u actual_priv:%u ret:%d missing:0x%x "
+            "extra:0x%x append_rejects:%u resource:0x%x generation:%u\n",
+            hvdxg.sharedresource_seal_tracked_allocs,
+            hvdxg.sharedresource_seal_allocs,
+            hvdxg.sharedresource_seal_expected_private,
+            hvdxg.sharedresource_seal_actual_private,
+            hvdxg.sharedresource_seal_verify_ret,
+            hvdxg.sharedresource_seal_missing_alloc,
+            hvdxg.sharedresource_seal_extra_alloc,
+            hvdxg.sharedresource_seal_append_rejects,
+            hvdxg.sharedresource_seal_last_resource,
+            hvdxg.sharedresource_seal_last_generation);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "d3dkmt_process_namespace=tgid:%lu handle:0x%x "
+            "source_gen:%u new_gen:%u objects:%u->%u "
+            "adapters:%u->%u locals:%u->%u fresh:%u\n",
+            hvdxg.process_namespace_last_tgid,
+            hvdxg.process_namespace_last_handle,
+            hvdxg.process_namespace_source_generation,
+            hvdxg.process_namespace_new_generation,
+            hvdxg.process_namespace_objects_before,
+            hvdxg.process_namespace_objects_after,
+            hvdxg.process_namespace_adapters_before,
+            hvdxg.process_namespace_adapters_after,
+            hvdxg.process_namespace_locals_before,
+            hvdxg.process_namespace_locals_after,
+            hvdxg.process_namespace_fresh);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_opensync_namespace=current_tgid:%lu owner_tgid:%lu "
+            "owner_gen:%u mismatch:%u rejects:%u gate:%u ret:%d "
+            "device:0x%x source_dev:0x%x global:0x%x\n",
+            hvdxg.opensync_last_current_tgid,
+            hvdxg.opensync_last_owner_tgid,
+            hvdxg.opensync_last_owner_generation,
+            hvdxg.opensync_last_namespace_mismatch,
+            hvdxg.opensync_last_namespace_rejects,
+            hvdxg.opensync_last_gate,
+            hvdxg.opensync_last_ret,
+            hvdxg.opensync_last_device,
+            hvdxg.opensync_last_source_device,
+            hvdxg.opensync_last_global);
+    }
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_createallocation_result_raw",
+                            hvdxg.allocation_last_result_head,
+                            hvdxg.allocation_last_result_head_len);
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_d3d12_shared_result_raw",
+                            hvdxg.d3d12_shared_result_head,
+                            hvdxg.d3d12_shared_result_head_len);
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_syncobject_result_raw",
+                            hvdxg.syncobject_last_result_head,
+                            hvdxg.syncobject_last_result_head_len);
     hvdxg_status_append_ioctl_timing(status, status_size, &len,
                                      ioctl_top_nr);
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_shared_alloc=seen:%u len:%u ret:%d "
+            "dev:0x%x res_in:0x%x res_out:0x%x alloc:0x%x "
+            "count:%u flags:0x%x d3d_flags:0x%x global:0x%x process:0x%lx "
+            "size:%lu rt_resource:0x%lx runtime:%u res_priv:%u "
+            "alloc_priv:%u out_priv:%u\n",
+            hvdxg.d3d12_shared_alloc_seen,
+            hvdxg.d3d12_shared_alloc_len,
+            hvdxg.d3d12_shared_alloc_ret,
+            hvdxg.d3d12_shared_alloc_device,
+            hvdxg.d3d12_shared_alloc_resource_in,
+            hvdxg.d3d12_shared_alloc_resource_out,
+            hvdxg.d3d12_shared_alloc_allocation,
+            hvdxg.d3d12_shared_alloc_count,
+            hvdxg.d3d12_shared_alloc_flags,
+            hvdxg.d3d12_shared_runtime_d3d12_flags,
+            hvdxg.d3d12_shared_alloc_global_share,
+            hvdxg.d3d12_shared_alloc_process,
+            hvdxg.d3d12_shared_alloc_size,
+            hvdxg.d3d12_shared_alloc_rt_resource,
+            hvdxg.d3d12_shared_runtime_size,
+            hvdxg.d3d12_shared_resource_priv_size,
+            hvdxg.d3d12_shared_alloc_priv_size,
+            hvdxg.d3d12_shared_alloc_out_priv_size);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_shared_create=wire_flags:0x%x "
+            "create:%u shared:%u nt:%u nonsec:%u std:%u "
+            "wire_make:%u wire_rt:0x%lx host_result_flags:0x%x "
+            "result_global:0x%x result_vgpu:0x%x result_alloc_flags:0x%x "
+            "result_min:%u result_len:%u result_flags_off:%u "
+            "result_res_off:%u result_global_off:%u result_vgpu_off:%u "
+            "result_allocinfo_off:%u result_allocinfo_size:%u "
+            "result_head:%u "
+            "result_norm:%u norm_reason:%u candidate:0x%x delta:0x%x "
+            "track_shared:%u track_nt:%u track_meta:%u track_sent:%u\n",
+            hvdxg.d3d12_shared_wire_flags,
+            (hvdxg.d3d12_shared_wire_flags & 0x1U) != 0 ? 1 : 0,
+            (hvdxg.d3d12_shared_wire_flags & 0x2U) != 0 ? 1 : 0,
+            (hvdxg.d3d12_shared_wire_flags & 0x40U) != 0 ? 1 : 0,
+            (hvdxg.d3d12_shared_wire_flags & 0x4U) != 0 ? 1 : 0,
+            (hvdxg.d3d12_shared_wire_flags & 0x10000U) != 0 ? 1 : 0,
+            hvdxg.d3d12_shared_wire_make_resident,
+            hvdxg.d3d12_shared_wire_rt_resource,
+            hvdxg.d3d12_shared_result_flags,
+            hvdxg.d3d12_shared_result_global_share,
+            hvdxg.d3d12_shared_result_vgpu_flags,
+            hvdxg.d3d12_shared_result_alloc_flags,
+            hvdxg.d3d12_shared_result_min_len,
+            hvdxg.d3d12_shared_result_len,
+            hvdxg.d3d12_shared_result_flags_offset,
+            hvdxg.d3d12_shared_result_resource_offset,
+            hvdxg.d3d12_shared_result_global_offset,
+            hvdxg.d3d12_shared_result_vgpu_offset,
+            hvdxg.d3d12_shared_result_allocinfo_offset,
+            hvdxg.d3d12_shared_result_allocinfo_size,
+            hvdxg.d3d12_shared_result_head_len,
+            hvdxg.d3d12_shared_result_flag_norm,
+            hvdxg.d3d12_shared_result_flag_norm_reason,
+            hvdxg.d3d12_shared_result_flag_candidate,
+            hvdxg.d3d12_shared_result_flag_delta,
+            hvdxg.d3d12_shared_track_shared,
+            hvdxg.d3d12_shared_track_nt,
+            hvdxg.d3d12_shared_track_metadata,
+            hvdxg.d3d12_shared_track_sent_bytes);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_private_layout=allocinfo_off:%u private_off:%u "
+            "runtime_off:%u resource_off:%u alloc0_off:%u "
+            "runtime:%u resource:%u alloc0:%u hashes:%08x/%08x/%08x\n",
+            hvdxg.d3d12_shared_allocinfo_offset,
+            hvdxg.allocation_last_private_offset,
+            hvdxg.d3d12_shared_runtime_offset,
+            hvdxg.d3d12_shared_resource_priv_offset,
+            hvdxg.d3d12_shared_alloc_priv_offset,
+            hvdxg.d3d12_shared_runtime_size,
+            hvdxg.d3d12_shared_resource_priv_size,
+            hvdxg.d3d12_shared_alloc_priv_size,
+            hvdxg_hash_bytes(hvdxg.d3d12_shared_runtime_head,
+                             hvdxg.d3d12_shared_runtime_head_len),
+            hvdxg_hash_bytes(hvdxg.d3d12_shared_resource_priv_head,
+                             hvdxg.d3d12_shared_resource_priv_head_len),
+            hvdxg_hash_bytes(hvdxg.d3d12_shared_alloc_priv_head,
+                             hvdxg.d3d12_shared_alloc_priv_head_len));
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_runtime_copy=user_ret:%d mismatch:%u "
+            "user_len:%u sent_len:%u user_hash:%08x sent_hash:%08x "
+            "user_q08:%lx user_q10:%lx user_q38:%lx user_q50:%lx user_q58:%lx user_d3c:%08x "
+            "sent_q08:%lx sent_q10:%lx sent_q38:%lx sent_q50:%lx sent_q58:%lx sent_d3c:%08x\n",
+            hvdxg.d3d12_shared_runtime_user_copy_ret,
+            hvdxg.d3d12_shared_runtime_user_mismatch,
+            hvdxg.d3d12_shared_runtime_user_head_len,
+            hvdxg.d3d12_shared_runtime_head_len,
+            hvdxg_hash_bytes(hvdxg.d3d12_shared_runtime_user_head,
+                             hvdxg.d3d12_shared_runtime_user_head_len),
+            hvdxg_hash_bytes(hvdxg.d3d12_shared_runtime_head,
+                             hvdxg.d3d12_shared_runtime_head_len),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_user_head,
+                              hvdxg.d3d12_shared_runtime_user_head_len, 0x8),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_user_head,
+                              hvdxg.d3d12_shared_runtime_user_head_len, 0x10),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_user_head,
+                              hvdxg.d3d12_shared_runtime_user_head_len, 0x38),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_user_head,
+                              hvdxg.d3d12_shared_runtime_user_head_len, 0x50),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_user_head,
+                              hvdxg.d3d12_shared_runtime_user_head_len, 0x58),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_user_head,
+                              hvdxg.d3d12_shared_runtime_user_head_len, 0x3c),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x8),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x10),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x38),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x50),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x58),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x3c));
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        uint64 q38 = hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                                       hvdxg.d3d12_shared_runtime_head_len,
+                                       0x38);
+        uint32 d3c = hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                                       hvdxg.d3d12_shared_runtime_head_len,
+                                       0x3c);
+        uint32 rt_hi = (uint32)(hvdxg.d3d12_shared_wire_rt_resource >> 32);
+        uint32 q38_hi = (uint32)(q38 >> 32);
+
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_runtime_pointer=rt_handle:0x%lx rt_hi:0x%x "
+            "q38:0x%lx q38_hi:0x%x d3c:0x%x hi_match:%u q38_zero:%u\n",
+            hvdxg.d3d12_shared_wire_rt_resource,
+            rt_hi,
+            q38,
+            q38_hi,
+            d3c,
+            rt_hi != 0 && rt_hi == q38_hi ? 1 : 0,
+            q38 == 0 ? 1 : 0);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_runtime_desc=base:0xbc dim:%u align:%lu "
+            "width:%lu height:%u depth:%u mips:%u fmt:%u sample:%u/%u "
+            "layout:%u flags:0x%x raw_b8:%08x raw_bc:%08x raw_ec:%08x "
+            "trusted:%u\n",
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xbc),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xc4),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xcc),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xd4),
+            hvdxg_read_u16_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xd8),
+            hvdxg_read_u16_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xda),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xdc),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xe0),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xe4),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xe8),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xec),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xb8),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xbc),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xec),
+            0);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_runtime_candidates=q08:%lx q10:%lx "
+            "q20:%lx q28:%lx q38:%lx q40:%lx q48:%lx q50:%lx q58:%lx "
+            "d20:%08x d28:%08x d38:%08x d3c:%08x d40:%08x d48:%08x d50:%08x d58:%08x "
+            "legacy_b8:%08x legacy_bc:%08x legacy_ec:%08x\n",
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x8),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x10),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x20),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x28),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x38),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x40),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x48),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x50),
+            hvdxg_read_u64_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x58),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x20),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x28),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x38),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x3c),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x40),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x48),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x50),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0x58),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xb8),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xbc),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_runtime_head,
+                              hvdxg.d3d12_shared_runtime_head_len, 0xec));
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_alloc_priv_words=w0:%08x w1:%08x w2:%08x "
+            "w3:%08x w4:%08x w5:%08x w6:%08x w7:%08x "
+            "w16:%08x w32:%08x w64:%08x w128:%08x\n",
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 0),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 4),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 8),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 12),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 16),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 20),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 24),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 28),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 64),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 128),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 256),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 512));
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_private_normalize=seen:%u applied:%u reason:%u "
+            "magic:%08x/%08x w4:%08x->%08x w8:%08x->%08x "
+            "runtime_patch:%u wh:%u/%u rt8:%lx->%lx rt10:%lx->%lx "
+            "rt38:%lx->%lx rt50:%lx->%lx rt58:%lx->%lx "
+            "runtime_reason:bgra8_guarded optin:dxg_d3d12_private_normalize\n",
+            hvdxg.d3d12_shared_norm_seen,
+            hvdxg.d3d12_shared_norm_applied,
+            hvdxg.d3d12_shared_norm_reason,
+            hvdxg.d3d12_shared_norm_magic0,
+            hvdxg.d3d12_shared_norm_magic3,
+            hvdxg.d3d12_shared_norm_pre_w4,
+            hvdxg.d3d12_shared_norm_post_w4,
+            hvdxg.d3d12_shared_norm_pre_w8,
+            hvdxg.d3d12_shared_norm_post_w8,
+            hvdxg.d3d12_shared_norm_runtime_applied,
+            hvdxg.d3d12_shared_norm_width,
+            hvdxg.d3d12_shared_norm_height,
+            hvdxg.d3d12_shared_norm_pre_rt8,
+            hvdxg.d3d12_shared_norm_post_rt8,
+            hvdxg.d3d12_shared_norm_pre_rt10,
+            hvdxg.d3d12_shared_norm_post_rt10,
+            hvdxg.d3d12_shared_norm_pre_rt38,
+            hvdxg.d3d12_shared_norm_post_rt38,
+            hvdxg.d3d12_shared_norm_pre_rt50,
+            hvdxg.d3d12_shared_norm_post_rt50,
+            hvdxg.d3d12_shared_norm_pre_rt58,
+            hvdxg.d3d12_shared_norm_post_rt58);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_d3d12_alloc_priv_io=in_hash:%08x out_hash:%08x "
+            "in_w4:%08x in_w8:%08x out_w4:%08x out_w8:%08x "
+            "out_len:%u track_host:%u\n",
+            hvdxg_hash_bytes(hvdxg.d3d12_shared_alloc_priv_head,
+                             hvdxg.d3d12_shared_alloc_priv_head_len),
+            hvdxg_hash_bytes(hvdxg.d3d12_shared_alloc_out_priv_head,
+                             hvdxg.d3d12_shared_alloc_out_priv_head_len),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 0x10),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_priv_head,
+                              hvdxg.d3d12_shared_alloc_priv_head_len, 0x20),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_out_priv_head,
+                              hvdxg.d3d12_shared_alloc_out_priv_head_len,
+                              0x10),
+            hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_out_priv_head,
+                              hvdxg.d3d12_shared_alloc_out_priv_head_len,
+                              0x20),
+            hvdxg.d3d12_shared_alloc_out_priv_head_len,
+            hvdxg.d3d12_shared_track_alloc_from_host);
+    }
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_d3d12_shared_runtime",
+                            hvdxg.d3d12_shared_runtime_head,
+                            hvdxg.d3d12_shared_runtime_head_len);
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_d3d12_shared_resource_priv",
+                            hvdxg.d3d12_shared_resource_priv_head,
+                            hvdxg.d3d12_shared_resource_priv_head_len);
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_d3d12_shared_alloc_priv",
+                            hvdxg.d3d12_shared_alloc_priv_head,
+                            hvdxg.d3d12_shared_alloc_priv_head_len);
+    hvdxg_status_append_hex(status, status_size, &len,
+                            "dxg_d3d12_shared_alloc_out_priv",
+                            hvdxg.d3d12_shared_alloc_out_priv_head,
+                            hvdxg.d3d12_shared_alloc_out_priv_head_len);
     hvdxg_status_append_hex(status, status_size, &len, "dxg_alloc_priv_in",
                             hvdxg.allocation_last_in_priv_head,
                             hvdxg.allocation_last_in_priv_head_len);
@@ -3386,16 +10606,106 @@ static int hvdxg_iospace_contains(uint64 pa, uint64 size)
            end <= hvdxg.iospace_base + hvdxg.iospace_size;
 }
 
+enum {
+    HV_DXG_FENCE_MAP_NONE = 0,
+    HV_DXG_FENCE_MAP_ABSOLUTE = 1,
+    HV_DXG_FENCE_MAP_OFFSET = 2,
+};
+
+enum {
+    HV_DXG_FENCE_SOURCE_PAGINGQUEUE = 1,
+    HV_DXG_FENCE_SOURCE_SYNCOBJECT = 2,
+    HV_DXG_FENCE_SOURCE_HWQUEUE = 3,
+    HV_DXG_FENCE_SOURCE_OPEN_SYNC = 4,
+    HV_DXG_FENCE_SOURCE_LOCK2 = 5,
+};
+
+static uint64 hvdxg_map_iospace_user(uint64 pa, uint64 size,
+                                     uint64 extra_pte_flags);
+static uint64 hvdxg_map_iospace_kernel(uint64 pa, uint64 size);
+
+static uint64 hvdxg_canonical_iospace_pa(uint64 raw_pa, uint64 size,
+                                         int allow_offset, uint32 *mode)
+{
+    uint64 pa;
+
+    if (mode != NULL)
+        *mode = HV_DXG_FENCE_MAP_NONE;
+    if (size == 0 || !hvdxg.iospace_set)
+        return 0;
+    if (hvdxg_iospace_contains(raw_pa, size)) {
+        if (mode != NULL)
+            *mode = HV_DXG_FENCE_MAP_ABSOLUTE;
+        return raw_pa;
+    }
+    if (!allow_offset || raw_pa >= hvdxg.iospace_size)
+        return 0;
+    pa = hvdxg.iospace_base + raw_pa;
+    if (pa < hvdxg.iospace_base || !hvdxg_iospace_contains(pa, size))
+        return 0;
+    if (mode != NULL)
+        *mode = HV_DXG_FENCE_MAP_OFFSET;
+    return pa;
+}
+
+static uint64 hvdxg_map_iospace_user_canonical(uint32 source, uint64 raw_pa,
+                                               uint64 size,
+                                               uint64 extra_pte_flags,
+                                               uint64 *canonical_pa,
+                                               uint32 *mode,
+                                               int allow_offset)
+{
+    uint64 pa;
+    uint64 user_va = 0;
+    uint32 map_mode = HV_DXG_FENCE_MAP_NONE;
+
+    pa = hvdxg_canonical_iospace_pa(raw_pa, size, allow_offset, &map_mode);
+    if (canonical_pa != NULL)
+        *canonical_pa = pa;
+    if (mode != NULL)
+        *mode = map_mode;
+    if (source != HV_DXG_FENCE_SOURCE_LOCK2) {
+        hvdxg.fence_map_last_source = source;
+        hvdxg.fence_map_last_mode = map_mode;
+        hvdxg.fence_map_last_raw_pa = raw_pa;
+        hvdxg.fence_map_last_canonical_pa = pa;
+        hvdxg.fence_map_last_offset = 0;
+        hvdxg.fence_map_last_offset_candidate_pa = 0;
+        hvdxg.fence_map_last_offset_candidate_current = 0;
+        hvdxg.fence_map_last_size = size;
+        hvdxg.fence_map_last_user_va = 0;
+        hvdxg.fence_map_last_kva = 0;
+    }
+    if (pa != 0)
+        user_va = hvdxg_map_iospace_user(pa, size, extra_pte_flags);
+    if (source != HV_DXG_FENCE_SOURCE_LOCK2)
+        hvdxg.fence_map_last_user_va = user_va;
+    if (source != HV_DXG_FENCE_SOURCE_LOCK2 && user_va == 0)
+        hvdxg.fence_map_failures++;
+    return user_va;
+}
+
+static uint64 hvdxg_map_iospace_kernel_canonical(uint32 source, uint64 raw_pa,
+                                                 uint64 size,
+                                                 uint64 canonical_pa,
+                                                 int allow_offset)
+{
+    uint64 pa = canonical_pa;
+    uint64 kva = 0;
+
+    if (pa == 0)
+        pa = hvdxg_canonical_iospace_pa(raw_pa, size, allow_offset, NULL);
+    if (pa != 0)
+        kva = hvdxg_map_iospace_kernel(pa, size);
+    if (source != HV_DXG_FENCE_SOURCE_LOCK2)
+        hvdxg.fence_map_last_kva = kva;
+    return kva;
+}
+
 #ifdef PTE_PWT
 #define HV_DXG_PTE_WRITE_THROUGH PTE_PWT
 #else
 #define HV_DXG_PTE_WRITE_THROUGH 0
-#endif
-
-#ifdef PTE_PCD
-#define HV_DXG_PTE_UNCACHED (PTE_PCD | HV_DXG_PTE_WRITE_THROUGH)
-#else
-#define HV_DXG_PTE_UNCACHED HV_DXG_PTE_WRITE_THROUGH
 #endif
 
 static uint64 hvdxg_map_iospace_user(uint64 pa, uint64 size,
@@ -3473,11 +10783,38 @@ static uint64 hvdxg_map_iospace_kernel(uint64 pa, uint64 size)
 
     for (uint64 off = 0; off < map_size; off += PGSIZE) {
         if (arch_vm_map(kernel_pagetable, map_base + off, PGSIZE,
-                        page_pa + off, PTE_R | PTE_W) != 0)
+                        page_pa + off,
+                        PTE_R | PTE_W) != 0)
             return 0;
     }
     arch_tlb_flush();
     return map_base + page_off;
+}
+
+static void hvdxg_note_fence_offset_candidate(uint32 source, uint64 direct_pa,
+                                              uint64 offset, uint64 size)
+{
+    uint64 candidate;
+    uint64 candidate_kva;
+
+    if (source == HV_DXG_FENCE_SOURCE_LOCK2 ||
+        source != hvdxg.fence_map_last_source)
+        return;
+    hvdxg.fence_map_last_offset = offset;
+    hvdxg.fence_map_last_offset_candidate_pa = 0;
+    hvdxg.fence_map_last_offset_candidate_current = 0;
+    if (offset == 0)
+        return;
+    candidate = direct_pa + offset;
+    if (candidate < direct_pa)
+        return;
+    hvdxg.fence_map_last_offset_candidate_pa = candidate;
+    candidate_kva = hvdxg_map_iospace_kernel(candidate, size);
+    if (candidate_kva != 0) {
+        volatile uint64 *candidate_value = (volatile uint64 *)candidate_kva;
+
+        hvdxg.fence_map_last_offset_candidate_current = *candidate_value;
+    }
 }
 
 static void hvdxg_unpin_existing_sysmem_pages(uint64 *pages,
@@ -3486,7 +10823,7 @@ static void hvdxg_unpin_existing_sysmem_pages(uint64 *pages,
     if (pages == NULL)
         return;
     for (uint32 i = 0; i < page_count; i++) {
-        if (pages[i] != 0)
+        if (pages[i] != 0 && __pa_to_page(pages[i]) != NULL)
             (void)page_ref_dec((void *)pages[i]);
     }
     kvfree(pages);
@@ -3505,16 +10842,19 @@ static void hvdxg_unpin_tracked_allocation(
 }
 
 static int hvdxg_pin_user_page(vm_t *vm, uint64 uva, int writable,
-                               uint64 *out_pa)
+                               uint64 *out_pa, uint32 *pfnmap_out)
 {
     uint8 touch = 0;
     uint64 va = PGROUNDDOWN(uva);
     uint64 pa;
     vma_t *vma;
+    int pfnmap = 0;
     int ret = 0;
 
     if (vm == NULL || out_pa == NULL || va >= UVMTOP)
         return -EFAULT;
+    if (pfnmap_out != NULL)
+        *pfnmap_out = 0;
     if (vm_copyin(vm, &touch, va, sizeof(touch)) < 0)
         return -EFAULT;
     if (writable && vm_copyout(vm, va, &touch, sizeof(touch)) < 0)
@@ -3529,12 +10869,19 @@ static int hvdxg_pin_user_page(vm_t *vm, uint64 uva, int writable,
         ret = -EFAULT;
         goto out;
     }
+    pfnmap = (vma->flags & VMA_FLAG_PFNMAP) != 0;
     pa = walkaddr(vm->pagetable, va);
     if (pa == 0) {
         ret = -EFAULT;
         goto out;
     }
     pa = PGROUNDDOWN(pa);
+    if (pfnmap) {
+        *out_pa = pa;
+        if (pfnmap_out != NULL)
+            *pfnmap_out = 1;
+        goto out;
+    }
     if (page_ref_inc((void *)pa) <= 0) {
         ret = -EFAULT;
         goto out;
@@ -3547,11 +10894,13 @@ out:
 
 static int hvdxg_pin_existing_sysmem(uint64 sysmem, uint64 alloc_size,
                                      int writable, uint64 **pages_out,
-                                     uint32 *page_count_out)
+                                     uint32 *page_count_out,
+                                     uint32 *pfnmap_pages_out)
 {
     uint64 page_count64;
     uint64 *pages = NULL;
     uint32 page_count;
+    uint32 pfnmap_pages = 0;
 
     if (pages_out == NULL || page_count_out == NULL || current == NULL ||
         current->vm == NULL || sysmem == 0 || alloc_size == 0 ||
@@ -3560,6 +10909,8 @@ static int hvdxg_pin_existing_sysmem(uint64 sysmem, uint64 alloc_size,
         return -EINVAL;
     *pages_out = NULL;
     *page_count_out = 0;
+    if (pfnmap_pages_out != NULL)
+        *pfnmap_pages_out = 0;
     page_count64 = alloc_size >> PGSHIFT;
     if (page_count64 == 0 || page_count64 > 0xffffffffULL)
         return -EINVAL;
@@ -3569,17 +10920,22 @@ static int hvdxg_pin_existing_sysmem(uint64 sysmem, uint64 alloc_size,
         return -ENOMEM;
     memset(pages, 0, (size_t)page_count * sizeof(pages[0]));
     for (uint32 i = 0; i < page_count; i++) {
+        uint32 pfnmap = 0;
         int ret = hvdxg_pin_user_page(current->vm,
                                       sysmem + (uint64)i * PGSIZE,
-                                      writable, &pages[i]);
+                                      writable, &pages[i], &pfnmap);
 
         if (ret != 0) {
             hvdxg_unpin_existing_sysmem_pages(pages, i);
             return ret;
         }
+        if (pfnmap)
+            pfnmap_pages++;
     }
     *pages_out = pages;
     *page_count_out = page_count;
+    if (pfnmap_pages_out != NULL)
+        *pfnmap_pages_out = pfnmap_pages;
     return 0;
 }
 
@@ -3650,17 +11006,6 @@ static void hvdxg_untrack_u32(uint32 *items, uint32 *count, uint32 value)
     }
 }
 
-static int hvdxg_has_u32(const uint32 *items, uint32 count, uint32 value)
-{
-    if (value == 0 || items == NULL)
-        return 0;
-    for (uint32 i = 0; i < count; i++) {
-        if (items[i] == value)
-            return 1;
-    }
-    return 0;
-}
-
 static int hvdxg_grow_table(void **items, uint32 *capacity, uint32 need,
                             size_t item_size, uint32 initial_capacity)
 {
@@ -3718,19 +11063,934 @@ static int hvdxg_track_u32_grow(uint32 **items, uint32 *count,
     return 0;
 }
 
+#define HV_DXG_HMGR_INSTANCE_BITS 6U
+#define HV_DXG_HMGR_INDEX_BITS 24U
+#define HV_DXG_HMGR_UNIQUE_BITS 2U
+#define HV_DXG_HMGR_INSTANCE_SHIFT 0U
+#define HV_DXG_HMGR_INDEX_SHIFT \
+    (HV_DXG_HMGR_INSTANCE_SHIFT + HV_DXG_HMGR_INSTANCE_BITS)
+#define HV_DXG_HMGR_UNIQUE_SHIFT \
+    (HV_DXG_HMGR_INDEX_SHIFT + HV_DXG_HMGR_INDEX_BITS)
+#define HV_DXG_HMGR_INSTANCE_MASK \
+    (((1U << HV_DXG_HMGR_INSTANCE_BITS) - 1U) << \
+     HV_DXG_HMGR_INSTANCE_SHIFT)
+#define HV_DXG_HMGR_INDEX_MASK \
+    (((1U << HV_DXG_HMGR_INDEX_BITS) - 1U) << \
+     HV_DXG_HMGR_INDEX_SHIFT)
+#define HV_DXG_HMGR_UNIQUE_MASK \
+    (((1U << HV_DXG_HMGR_UNIQUE_BITS) - 1U) << \
+     HV_DXG_HMGR_UNIQUE_SHIFT)
+
+static uint32 hvdxg_hmgr_index(uint64 handle)
+{
+    return (uint32)((handle & HV_DXG_HMGR_INDEX_MASK) >>
+                    HV_DXG_HMGR_INDEX_SHIFT);
+}
+
+static uint32 hvdxg_hmgr_unique(uint64 handle)
+{
+    return (uint32)((handle & HV_DXG_HMGR_UNIQUE_MASK) >>
+                    HV_DXG_HMGR_UNIQUE_SHIFT);
+}
+
+static uint32 hvdxg_hmgr_instance(uint64 handle)
+{
+    return (uint32)((handle & HV_DXG_HMGR_INSTANCE_MASK) >>
+                    HV_DXG_HMGR_INSTANCE_SHIFT);
+}
+
+static uint32 hvdxg_make_local_adapter_handle(uint32 index)
+{
+    return (1U << HV_DXG_HMGR_UNIQUE_SHIFT) |
+           (index << HV_DXG_HMGR_INDEX_SHIFT);
+}
+
+static uint32 hvdxg_process_adapter_index(
+    struct hvdxg_process_state *process,
+    const struct hvdxg_process_adapter *adapter)
+{
+    if (process == NULL || process->adapters == NULL || adapter == NULL)
+        return 0xffffffffU;
+    return (uint32)(adapter - process->adapters);
+}
+
+static struct hvdxg_process_adapter *
+hvdxg_process_find_adapter(struct hvdxg_process_state *process,
+                           uint32 host_adapter)
+{
+    if (process == NULL || process->adapters == NULL || host_adapter == 0)
+        return NULL;
+    for (uint32 i = 0; i < process->adapter_count; i++) {
+        if (process->adapters[i].destroyed == 0 &&
+            process->adapters[i].host_adapter_handle == host_adapter)
+            return &process->adapters[i];
+    }
+    return NULL;
+}
+
+static struct hvdxg_process_adapter *
+hvdxg_process_get_adapter(struct hvdxg_process_state *process,
+                          uint32 host_adapter, int *created_out)
+{
+    struct hvdxg_process_adapter *adapter;
+    int ret;
+
+    if (created_out != NULL)
+        *created_out = 0;
+    if (process == NULL || host_adapter == 0)
+        return NULL;
+    adapter = hvdxg_process_find_adapter(process, host_adapter);
+    if (adapter != NULL) {
+        adapter->refs++;
+        return adapter;
+    }
+    ret = hvdxg_grow_table((void **)&process->adapters,
+                           &process->adapter_capacity,
+                           process->adapter_count + 1,
+                           sizeof(process->adapters[0]),
+                           HV_DXG_OPEN_TRACKED_MAX);
+    if (ret != 0)
+        return NULL;
+    adapter = &process->adapters[process->adapter_count++];
+    memset(adapter, 0, sizeof(*adapter));
+    adapter->host_adapter_handle = host_adapter;
+    adapter->adapter_luid = hvdxg_user_adapter_luid(NULL);
+    adapter->host_adapter_luid = hvdxg.host_adapter_luid;
+    adapter->host_vgpu_luid = hvdxg_ext_adapter_luid(NULL);
+    adapter->refs = 1;
+    if (process->next_adapter_generation == 0)
+        process->next_adapter_generation = 1;
+    adapter->generation = process->next_adapter_generation++;
+    if (created_out != NULL)
+        *created_out = 1;
+    return adapter;
+}
+
+static struct hvdxg_local_adapter_entry *
+hvdxg_process_find_local_adapter(struct hvdxg_process_state *process,
+                                 uint32 handle, int include_destroyed)
+{
+    if (process == NULL || process->local_adapters == NULL || handle == 0)
+        return NULL;
+    for (uint32 i = 0; i < process->local_adapter_count; i++) {
+        if (process->local_adapters[i].handle == handle &&
+            (include_destroyed ||
+             process->local_adapters[i].destroyed == 0))
+            return &process->local_adapters[i];
+    }
+    return NULL;
+}
+
+static struct hvdxg_process_adapter *
+hvdxg_process_adapter_by_local_handle(struct hvdxg_process_state *process,
+                                      uint32 handle,
+                                      struct hvdxg_local_adapter_entry **le_out)
+{
+    struct hvdxg_local_adapter_entry *local;
+
+    if (le_out != NULL)
+        *le_out = NULL;
+    local = hvdxg_process_find_local_adapter(process, handle, 0);
+    if (local == NULL)
+        return NULL;
+    if (le_out != NULL)
+        *le_out = local;
+    if (process == NULL || process->adapters == NULL ||
+        local->adapter_index >= process->adapter_count)
+        return NULL;
+    if (process->adapters[local->adapter_index].destroyed != 0)
+        return NULL;
+    return &process->adapters[local->adapter_index];
+}
+
+static uint32 hvdxg_alloc_process_local_adapter_handle(
+    struct hvdxg_process_state *process, uint32 adapter_index)
+{
+    uint32 index_limit = (1U << HV_DXG_HMGR_INDEX_BITS);
+    struct hvdxg_local_adapter_entry *slot = NULL;
+    uint32 handle = 0;
+    int ret;
+
+    if (process == NULL || adapter_index >= process->adapter_count)
+        return 0;
+    for (uint32 index = 0; index < index_limit; index++) {
+        handle = hvdxg_make_local_adapter_handle(index);
+
+        if (handle == 0)
+            continue;
+        slot = hvdxg_process_find_local_adapter(process, handle, 1);
+        if (slot == NULL || slot->destroyed != 0)
+            break;
+        slot = NULL;
+    }
+    if (slot == NULL) {
+        ret = hvdxg_grow_table((void **)&process->local_adapters,
+                               &process->local_adapter_capacity,
+                               process->local_adapter_count + 1,
+                               sizeof(process->local_adapters[0]),
+                               HV_DXG_OPEN_TRACKED_MAX);
+        if (ret != 0)
+            return 0;
+        slot = &process->local_adapters[process->local_adapter_count++];
+    }
+    memset(slot, 0, sizeof(*slot));
+    slot->handle = handle;
+    slot->adapter_index = adapter_index;
+    if (process->next_local_adapter_generation == 0)
+        process->next_local_adapter_generation = 1;
+    slot->generation = process->next_local_adapter_generation++;
+    return handle;
+}
+
+static struct hvdxg_object_entry **hvdxg_owner_object_table(
+    struct hvdxg_open_state *owner)
+{
+    if (owner == NULL)
+        return NULL;
+    if (owner->process_state != NULL)
+        return &owner->process_state->objects;
+    return &owner->objects;
+}
+
+static uint32 *hvdxg_owner_object_count(struct hvdxg_open_state *owner)
+{
+    if (owner == NULL)
+        return NULL;
+    if (owner->process_state != NULL)
+        return &owner->process_state->object_count;
+    return &owner->object_count;
+}
+
+static uint32 *hvdxg_owner_object_capacity(struct hvdxg_open_state *owner)
+{
+    if (owner == NULL)
+        return NULL;
+    if (owner->process_state != NULL)
+        return &owner->process_state->object_capacity;
+    return &owner->object_capacity;
+}
+
+static uint32 hvdxg_open_host_process(struct hvdxg_open_state *owner);
+static uint32 hvdxg_open_process_generation(struct hvdxg_open_state *owner);
+static const char *hvdxg_early_bind_source_name(uint32 source);
+
+static uint32 *hvdxg_owner_object_generation(struct hvdxg_open_state *owner)
+{
+    if (owner == NULL)
+        return NULL;
+    if (owner->process_state != NULL)
+        return &owner->process_state->next_object_generation;
+    return &owner->next_generation;
+}
+
+static struct hvdxg_object_entry *
+hvdxg_owner_find_object(struct hvdxg_open_state *owner, uint32 type,
+                        uint64 handle)
+{
+    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
+    uint32 *count = hvdxg_owner_object_count(owner);
+
+    if (owner == NULL || handle == 0 || type == HV_DXG_OBJECT_NONE)
+        return NULL;
+    if (objects == NULL || *objects == NULL || count == NULL)
+        return NULL;
+    for (uint32 i = 0; i < *count; i++) {
+        if ((*objects)[i].type == type &&
+            (*objects)[i].handle == handle &&
+            (*objects)[i].destroyed == 0)
+            return &(*objects)[i];
+    }
+    return NULL;
+}
+
+static struct hvdxg_object_entry *
+hvdxg_owner_find_object_slot(struct hvdxg_open_state *owner, uint64 handle)
+{
+    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
+    uint32 *count = hvdxg_owner_object_count(owner);
+    uint32 index;
+    uint32 unique;
+    uint32 instance;
+
+    if (owner == NULL || handle == 0)
+        return NULL;
+    if (objects == NULL || *objects == NULL || count == NULL)
+        return NULL;
+    index = hvdxg_hmgr_index(handle);
+    unique = hvdxg_hmgr_unique(handle);
+    instance = hvdxg_hmgr_instance(handle);
+    for (uint32 i = 0; i < *count; i++) {
+        if ((*objects)[i].index == index &&
+            (*objects)[i].unique == unique &&
+            (*objects)[i].instance == instance)
+            return &(*objects)[i];
+    }
+    return NULL;
+}
+
+static struct hvdxg_object_entry *
+hvdxg_owner_find_object_any(struct hvdxg_open_state *owner, uint64 handle,
+                            int include_destroyed)
+{
+    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
+    uint32 *count = hvdxg_owner_object_count(owner);
+
+    if (owner == NULL || handle == 0)
+        return NULL;
+    if (objects == NULL || *objects == NULL || count == NULL)
+        return NULL;
+    for (uint32 i = 0; i < *count; i++) {
+        if ((*objects)[i].handle == handle &&
+            (include_destroyed || (*objects)[i].destroyed == 0))
+            return &(*objects)[i];
+    }
+    for (uint32 i = 0; i < *count; i++) {
+        if ((*objects)[i].host_handle == handle &&
+            (include_destroyed || (*objects)[i].destroyed == 0))
+            return &(*objects)[i];
+    }
+    return NULL;
+}
+
+static void hvdxg_note_ntshared_object_entry(
+    struct hvdxg_open_state *owner, uint32 process, uint32 object)
+{
+    struct hvdxg_object_entry *entry;
+
+    hvdxg.ntshared_obj_found = 0;
+    hvdxg.ntshared_obj_exact = 0;
+    hvdxg.ntshared_obj_local = 0;
+    hvdxg.ntshared_obj_host = 0;
+    hvdxg.ntshared_obj_type = HV_DXG_OBJECT_NONE;
+    hvdxg.ntshared_obj_parent = 0;
+    hvdxg.ntshared_obj_device = 0;
+    hvdxg.ntshared_obj_owner_process = process;
+    hvdxg.ntshared_obj_owner_generation =
+        hvdxg_open_process_generation(owner);
+    hvdxg.ntshared_obj_generation = 0;
+    hvdxg.ntshared_obj_stale = 0;
+    hvdxg.ntshared_obj_destroyed = 0;
+
+    entry = hvdxg_owner_find_object_any(owner, object, 1);
+    if (entry == NULL)
+        return;
+    hvdxg.ntshared_obj_found = 1;
+    hvdxg.ntshared_obj_exact = entry->handle == object ? 1 : 0;
+    hvdxg.ntshared_obj_local = (uint32)entry->handle;
+    hvdxg.ntshared_obj_host = (uint32)entry->host_handle;
+    hvdxg.ntshared_obj_type = entry->type;
+    hvdxg.ntshared_obj_parent = (uint32)entry->parent;
+    hvdxg.ntshared_obj_device = entry->device;
+    hvdxg.ntshared_obj_generation = entry->generation;
+    hvdxg.ntshared_obj_destroyed = entry->destroyed;
+    hvdxg.ntshared_obj_stale =
+        entry->destroyed != 0 || entry->generation == 0 ? 1 : 0;
+}
+
+static void hvdxg_note_createdevice_object(struct hvdxg_open_state *owner,
+                                           uint32 device)
+{
+    struct hvdxg_object_entry *entry;
+
+    hvdxg.createdevice_object_found = 0;
+    hvdxg.createdevice_object_type = HV_DXG_OBJECT_NONE;
+    hvdxg.createdevice_object_local = 0;
+    hvdxg.createdevice_object_host = 0;
+    hvdxg.createdevice_object_parent = 0;
+    hvdxg.createdevice_object_device = 0;
+    hvdxg.createdevice_object_generation = 0;
+    hvdxg.createdevice_object_destroyed = 0;
+    entry = hvdxg_owner_find_object_any(owner, device, 1);
+    if (entry == NULL)
+        return;
+    hvdxg.createdevice_object_found = 1;
+    hvdxg.createdevice_object_type = entry->type;
+    hvdxg.createdevice_object_local = (uint32)entry->handle;
+    hvdxg.createdevice_object_host = (uint32)entry->host_handle;
+    hvdxg.createdevice_object_parent = (uint32)entry->parent;
+    hvdxg.createdevice_object_device = entry->device;
+    hvdxg.createdevice_object_generation = entry->generation;
+    hvdxg.createdevice_object_destroyed = entry->destroyed;
+}
+
+static struct hvdxg_object_entry *
+hvdxg_owner_find_reusable_object_slot(struct hvdxg_open_state *owner,
+                                      uint64 handle)
+{
+    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
+    uint32 *count = hvdxg_owner_object_count(owner);
+    uint32 index;
+
+    if (owner == NULL || handle == 0)
+        return NULL;
+    if (objects == NULL || *objects == NULL || count == NULL)
+        return NULL;
+    index = hvdxg_hmgr_index(handle);
+    for (uint32 i = 0; i < *count; i++) {
+        if ((*objects)[i].index == index &&
+            (*objects)[i].destroyed != 0)
+            return &(*objects)[i];
+    }
+    return NULL;
+}
+
+static int hvdxg_owner_has_object(struct hvdxg_open_state *owner,
+                                  uint32 type, uint64 handle)
+{
+    if (owner == NULL || handle == 0)
+        return 0;
+    if (hvdxg_owner_find_object(owner, type, handle) != NULL)
+        return 1;
+    hvdxg.object_table_denied++;
+    return 0;
+}
+
+static int hvdxg_track_object(struct hvdxg_open_state *owner, uint32 type,
+                              uint64 handle, uint64 parent, uint32 device)
+{
+    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
+    uint32 *count = hvdxg_owner_object_count(owner);
+    uint32 *capacity = hvdxg_owner_object_capacity(owner);
+    uint32 *next_generation = hvdxg_owner_object_generation(owner);
+    struct hvdxg_object_entry *slot;
+    int ret;
+
+    if (owner == NULL || handle == 0 || type == HV_DXG_OBJECT_NONE)
+        return 0;
+    if (objects == NULL || count == NULL || capacity == NULL ||
+        next_generation == NULL)
+        return -EINVAL;
+    slot = hvdxg_owner_find_object(owner, type, handle);
+    if (slot != NULL) {
+        slot->host_handle = handle;
+        slot->parent = parent;
+        slot->device = device;
+        if (slot->refs == 0)
+            slot->refs = 1;
+        return 0;
+    }
+    slot = hvdxg_owner_find_object_slot(owner, handle);
+    if (slot != NULL && slot->destroyed != 0) {
+        memset(slot, 0, sizeof(*slot));
+    } else if (slot != NULL && slot->type != type) {
+        slot = NULL;
+    } else if (slot == NULL) {
+        slot = hvdxg_owner_find_reusable_object_slot(owner, handle);
+        if (slot != NULL)
+            memset(slot, 0, sizeof(*slot));
+    }
+    if (slot == NULL) {
+        ret = hvdxg_grow_table((void **)objects,
+                               capacity,
+                               *count + 1,
+                               sizeof(owner->objects[0]),
+                               HV_DXG_OBJECT_TABLE_MAX);
+        if (ret != 0) {
+            hvdxg.object_table_drops++;
+            return ret;
+        }
+        slot = &(*objects)[(*count)++];
+    }
+    memset(slot, 0, sizeof(*slot));
+    slot->type = type;
+    slot->handle = handle;
+    slot->host_handle = handle;
+    slot->parent = parent;
+    slot->device = device;
+    slot->refs = 1;
+    slot->index = hvdxg_hmgr_index(handle);
+    slot->unique = hvdxg_hmgr_unique(handle);
+    slot->instance = hvdxg_hmgr_instance(handle);
+    if (*next_generation == 0)
+        *next_generation = 1;
+    slot->generation = (*next_generation)++;
+    hvdxg.object_table_generation = slot->generation;
+    if (*count > hvdxg.object_table_max)
+        hvdxg.object_table_max = *count;
+    return 0;
+}
+
+static int hvdxg_get_local_adapter_handle(struct hvdxg_open_state *owner,
+                                          uint32 *adapter_out)
+{
+    struct hvdxg_process_adapter *adapter;
+    struct hvdxg_process_state *process;
+    uint32 adapter_index;
+    uint32 local;
+    int created = 0;
+
+    if (adapter_out == NULL || hvdxg.host_adapter_handle == 0)
+        return -EINVAL;
+    if (owner == NULL)
+        return -EINVAL;
+    process = owner->process_state;
+    if (process == NULL)
+        return -EINVAL;
+    adapter = hvdxg_process_get_adapter(process, hvdxg.host_adapter_handle,
+                                        &created);
+    if (adapter == NULL)
+        return -ENOMEM;
+    adapter_index = hvdxg_process_adapter_index(process, adapter);
+    local = hvdxg_alloc_process_local_adapter_handle(process, adapter_index);
+    if (local == 0) {
+        if (adapter->refs > 0)
+            adapter->refs--;
+        if (adapter->refs == 0)
+            adapter->destroyed = 1;
+        return -ENOMEM;
+    }
+    adapter->local_handle_count++;
+    hvdxg.local_adapter_last_result = created ? 2 : 1;
+    hvdxg.local_adapter_last_handle = local;
+    hvdxg.local_adapter_last_host = adapter->host_adapter_handle;
+    hvdxg.local_adapter_last_refs = adapter->refs;
+    hvdxg.local_adapter_last_locals = adapter->local_handle_count;
+    hvdxg.local_adapter_last_generation = adapter->generation;
+    *adapter_out = local;
+    return 0;
+}
+
+static int hvdxg_resolve_adapter_handle(struct hvdxg_open_state *owner,
+                                        uint32 adapter, uint32 *host_out)
+{
+    struct hvdxg_object_entry *entry;
+    struct hvdxg_process_adapter *process_adapter;
+
+    if (host_out != NULL)
+        *host_out = 0;
+    if (adapter == 0 || hvdxg.host_adapter_handle == 0)
+        return -EINVAL;
+    if (owner != NULL && owner->process_state != NULL) {
+        process_adapter = hvdxg_process_adapter_by_local_handle(
+            owner->process_state, adapter, NULL);
+        if (process_adapter != NULL) {
+            hvdxg.local_adapter_namespace_hits++;
+            hvdxg.local_adapter_last_result = 3;
+            hvdxg.local_adapter_last_handle = adapter;
+            hvdxg.local_adapter_last_host =
+                process_adapter->host_adapter_handle;
+            hvdxg.local_adapter_last_refs = process_adapter->refs;
+            hvdxg.local_adapter_last_locals =
+                process_adapter->local_handle_count;
+            hvdxg.local_adapter_last_generation =
+                process_adapter->generation;
+            if (host_out != NULL)
+                *host_out = process_adapter->host_adapter_handle;
+            return 0;
+        }
+        hvdxg.local_adapter_namespace_misses++;
+        hvdxg.local_adapter_last_result = 4;
+        hvdxg.local_adapter_last_handle = adapter;
+        hvdxg.local_adapter_last_host = 0;
+        hvdxg.local_adapter_last_refs = 0;
+        hvdxg.local_adapter_last_locals = 0;
+        hvdxg.local_adapter_last_generation = 0;
+    }
+    if (adapter == hvdxg.host_adapter_handle) {
+        if (host_out != NULL)
+            *host_out = hvdxg.host_adapter_handle;
+        return 0;
+    }
+    entry = hvdxg_owner_find_object(owner, HV_DXG_OBJECT_ADAPTER, adapter);
+    if (entry == NULL || entry->host_handle != hvdxg.host_adapter_handle)
+        return -EINVAL;
+    if (host_out != NULL)
+        *host_out = (uint32)entry->host_handle;
+    return 0;
+}
+
+static int hvdxg_close_local_adapter_handle(struct hvdxg_open_state *owner,
+                                            uint32 adapter,
+                                            uint32 *host_out)
+{
+    struct hvdxg_local_adapter_entry *local = NULL;
+    struct hvdxg_process_adapter *process_adapter;
+
+    if (host_out != NULL)
+        *host_out = 0;
+    if (adapter == 0 || hvdxg.host_adapter_handle == 0)
+        return -EINVAL;
+    if (owner == NULL) {
+        if (adapter != hvdxg.host_adapter_handle)
+            return -EINVAL;
+        if (host_out != NULL)
+            *host_out = hvdxg.host_adapter_handle;
+        return 0;
+    }
+    if (owner->process_state == NULL)
+        return hvdxg_resolve_adapter_handle(owner, adapter, host_out);
+    process_adapter = hvdxg_process_adapter_by_local_handle(
+        owner->process_state, adapter, &local);
+    if (process_adapter == NULL || local == NULL) {
+        hvdxg.local_adapter_namespace_misses++;
+        hvdxg.local_adapter_last_result = 4;
+        hvdxg.local_adapter_last_handle = adapter;
+        hvdxg.local_adapter_last_host = 0;
+        hvdxg.local_adapter_last_refs = 0;
+        hvdxg.local_adapter_last_locals = 0;
+        hvdxg.local_adapter_last_generation = 0;
+        return -EINVAL;
+    }
+    local->destroyed = 1;
+    if (process_adapter->local_handle_count > 0)
+        process_adapter->local_handle_count--;
+    if (process_adapter->refs > 0)
+        process_adapter->refs--;
+    if (process_adapter->refs == 0)
+        process_adapter->destroyed = 1;
+    hvdxg.local_adapter_namespace_hits++;
+    hvdxg.local_adapter_last_result = 5;
+    hvdxg.local_adapter_last_handle = adapter;
+    hvdxg.local_adapter_last_host = process_adapter->host_adapter_handle;
+    hvdxg.local_adapter_last_refs = process_adapter->refs;
+    hvdxg.local_adapter_last_locals = process_adapter->local_handle_count;
+    hvdxg.local_adapter_last_generation = process_adapter->generation;
+    if (host_out != NULL)
+        *host_out = process_adapter->host_adapter_handle;
+    return 0;
+}
+
+struct hvdxg_queryadapter_context {
+    struct hvdxg_process_state *process;
+    struct hvdxg_process_adapter *process_adapter;
+    uint32 host_adapter;
+    uint32 resolve_source;
+    uint32 local_namespace;
+};
+
+static int hvdxg_resolve_queryadapter_context(
+    struct hvdxg_open_state *owner, uint32 adapter, uint32 *host_out,
+    uint32 *source_out, struct hvdxg_queryadapter_context *context)
+{
+    struct hvdxg_process_adapter *process_adapter;
+
+    if (host_out != NULL)
+        *host_out = 0;
+    if (source_out != NULL)
+        *source_out = 0;
+    if (context != NULL)
+        memset(context, 0, sizeof(*context));
+    if (adapter == 0 || hvdxg.host_adapter_handle == 0)
+        return -EINVAL;
+    if (owner == NULL) {
+        if (adapter != hvdxg.host_adapter_handle)
+            return -EINVAL;
+        if (host_out != NULL)
+            *host_out = hvdxg.host_adapter_handle;
+        if (source_out != NULL)
+            *source_out = 1;
+        if (context != NULL) {
+            context->host_adapter = hvdxg.host_adapter_handle;
+            context->resolve_source = 1;
+            context->local_namespace = 1;
+        }
+        return 0;
+    }
+    if (owner->process_state == NULL)
+        return -EINVAL;
+    process_adapter = hvdxg_process_adapter_by_local_handle(
+        owner->process_state, adapter, NULL);
+    if (process_adapter == NULL) {
+        hvdxg.local_adapter_namespace_misses++;
+        hvdxg.local_adapter_last_result = 4;
+        hvdxg.local_adapter_last_handle = adapter;
+        hvdxg.local_adapter_last_host = 0;
+        hvdxg.local_adapter_last_refs = 0;
+        hvdxg.local_adapter_last_locals = 0;
+        hvdxg.local_adapter_last_generation = 0;
+        if (context != NULL) {
+            context->process = owner->process_state;
+            context->local_namespace = 3;
+        }
+        return -EINVAL;
+    }
+    hvdxg.local_adapter_namespace_hits++;
+    hvdxg.local_adapter_last_result = 3;
+    hvdxg.local_adapter_last_handle = adapter;
+    hvdxg.local_adapter_last_host = process_adapter->host_adapter_handle;
+    hvdxg.local_adapter_last_refs = process_adapter->refs;
+    hvdxg.local_adapter_last_locals = process_adapter->local_handle_count;
+    hvdxg.local_adapter_last_generation = process_adapter->generation;
+    if (host_out != NULL)
+        *host_out = process_adapter->host_adapter_handle;
+    if (source_out != NULL)
+        *source_out = 4;
+    if (context != NULL) {
+        context->process = owner->process_state;
+        context->process_adapter = process_adapter;
+        context->host_adapter = process_adapter->host_adapter_handle;
+        context->resolve_source = 4;
+        context->local_namespace = 2;
+    }
+    return 0;
+}
+
+static void hvdxg_note_queryadapter_adapter_object(
+    struct hvdxg_open_state *owner, uint32 adapter,
+    struct hvdxg_queryadapter_context *context)
+{
+    struct hvdxg_object_entry *entry = NULL;
+
+    hvdxg.queryadapter_last_adapter_object = 0;
+    hvdxg.queryadapter_last_adapter_object_host = 0;
+    hvdxg.queryadapter_last_adapter_object_owner = 0;
+    hvdxg.queryadapter_last_adapter_object_owner_generation = 0;
+    hvdxg.queryadapter_last_adapter_object_generation = 0;
+
+    if (context != NULL && context->process_adapter != NULL) {
+        hvdxg.queryadapter_last_adapter_object = adapter;
+        hvdxg.queryadapter_last_adapter_object_host =
+            context->process_adapter->host_adapter_handle;
+        hvdxg.queryadapter_last_adapter_object_owner =
+            context->process != NULL ? context->process->host_process.v : 0;
+        hvdxg.queryadapter_last_adapter_object_owner_generation =
+            context->process != NULL ? context->process->generation : 0;
+        hvdxg.queryadapter_last_adapter_object_generation =
+            context->process_adapter->generation;
+        return;
+    }
+    if (owner != NULL)
+        entry = hvdxg_owner_find_object(owner, HV_DXG_OBJECT_ADAPTER,
+                                        adapter);
+    if (entry == NULL)
+        return;
+
+    hvdxg.queryadapter_last_adapter_object = (uint32)entry->handle;
+    hvdxg.queryadapter_last_adapter_object_host =
+        (uint32)entry->host_handle;
+    hvdxg.queryadapter_last_adapter_object_owner =
+        hvdxg_open_host_process(owner);
+    hvdxg.queryadapter_last_adapter_object_owner_generation =
+        hvdxg_open_process_generation(owner);
+    hvdxg.queryadapter_last_adapter_object_generation = entry->generation;
+}
+
+static int hvdxg_untrack_object(struct hvdxg_open_state *owner, uint32 type,
+                                uint64 handle)
+{
+    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
+    uint32 *count = hvdxg_owner_object_count(owner);
+
+    if (owner == NULL || handle == 0 || type == HV_DXG_OBJECT_NONE)
+        return 0;
+    if (objects == NULL || *objects == NULL || count == NULL)
+        return 0;
+    for (uint32 i = 0; i < *count; i++) {
+        if ((*objects)[i].type == type &&
+            (*objects)[i].handle == handle &&
+            (*objects)[i].destroyed == 0) {
+            (*objects)[i].destroyed = 1;
+            (*objects)[i].refs = 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+enum {
+    HV_DXG_CLEANUP_NONE = 0,
+    HV_DXG_CLEANUP_HWQUEUE = 1,
+    HV_DXG_CLEANUP_SYNC = 2,
+    HV_DXG_CLEANUP_CONTEXT = 3,
+    HV_DXG_CLEANUP_GPUVA = 4,
+    HV_DXG_CLEANUP_ALLOCATION = 5,
+    HV_DXG_CLEANUP_PAGINGQUEUE = 6,
+    HV_DXG_CLEANUP_DEVICE = 7,
+    HV_DXG_CLEANUP_RESOURCE = 8,
+};
+
+static int hvdxg_destroy_device_host(uint32 device);
+static int hvdxg_destroy_allocation_host(uint32 device, uint32 resource,
+                                         uint32 allocation, uint32 context);
+static int hvdxg_destroy_context_host(uint32 context);
+static int hvdxg_flush_device_host(uint32 device);
+static void hvdxg_cleanup_note_ret(int *cleanup_ret, int op_ret,
+                                   uint32 op, uint32 handle);
+
+static int hvdxg_owner_has_active_process_objects(struct hvdxg_open_state *owner)
+{
+    struct hvdxg_object_entry *objects;
+    uint32 count;
+
+    if (owner == NULL || owner->process_state == NULL)
+        return 0;
+    objects = owner->process_state->objects;
+    count = owner->process_state->object_count;
+    if (objects == NULL)
+        return 0;
+    for (uint32 i = 0; i < count; i++) {
+        if (objects[i].type != HV_DXG_OBJECT_NONE &&
+            objects[i].destroyed == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static void hvdxg_cleanup_process_object_type(struct hvdxg_open_state *owner,
+                                              uint32 type, int *ret)
+{
+    struct hvdxg_object_entry *objects;
+    uint32 count;
+
+    if (owner == NULL || owner->process_state == NULL)
+        return;
+    objects = owner->process_state->objects;
+    count = owner->process_state->object_count;
+    if (objects == NULL)
+        return;
+
+    for (uint32 i = count; i > 0; i--) {
+        struct hvdxg_object_entry *entry = &objects[i - 1];
+        int op_ret = 0;
+        uint32 op = HV_DXG_CLEANUP_NONE;
+
+        if (entry->destroyed != 0 || entry->type != type ||
+            entry->handle == 0)
+            continue;
+        entry->destroyed = 1;
+        entry->refs = 0;
+        switch (type) {
+        case HV_DXG_OBJECT_ADAPTER:
+            /* Adapter wrappers are process-local aliases for the host adapter. */
+            break;
+        case HV_DXG_OBJECT_HWQUEUE:
+            /*
+             * WSL's process teardown drops HW queue handles locally and
+             * leaves final host cleanup to DESTROYDEVICE/DESTROYPROCESS.
+             */
+            break;
+        case HV_DXG_OBJECT_GPUVA:
+            /* GPU VA reservations are not explicitly freed on WSL process exit. */
+            break;
+        case HV_DXG_OBJECT_CONTEXT:
+            /* Context host handles are released by device/process teardown. */
+            break;
+        case HV_DXG_OBJECT_ALLOCATION:
+            op = HV_DXG_CLEANUP_ALLOCATION;
+            /*
+             * WSL's process teardown destroys resource-owned allocations
+             * through the resource handle, then frees child allocation handles
+             * locally.  Only standalone allocations get their own host destroy.
+             */
+            if (entry->parent != 0) {
+                hvdxg.cleanup_resource_alloc_skips++;
+                op_ret = 0;
+            } else {
+                hvdxg.cleanup_standalone_alloc_destroys++;
+                op_ret = hvdxg_destroy_allocation_host(
+                    entry->device, 0, (uint32)entry->handle,
+                    HV_DXG_DESTROY_ALLOC_CTX_FILE_CLEANUP);
+            }
+            break;
+        case HV_DXG_OBJECT_RESOURCE:
+            op = HV_DXG_CLEANUP_RESOURCE;
+            hvdxg.cleanup_resource_host_destroys++;
+            op_ret = hvdxg_destroy_allocation_host(
+                entry->device, (uint32)entry->handle, 0,
+                HV_DXG_DESTROY_ALLOC_CTX_FILE_CLEANUP);
+            for (uint32 j = 0; j < count; j++) {
+                struct hvdxg_object_entry *child = &objects[j];
+
+                if (child->destroyed == 0 &&
+                    child->type == HV_DXG_OBJECT_ALLOCATION &&
+                    child->parent == entry->handle) {
+                    child->destroyed = 1;
+                    child->refs = 0;
+                    hvdxg.cleanup_resource_child_locals++;
+                }
+            }
+            break;
+        case HV_DXG_OBJECT_PAGINGQUEUE:
+            /* Paging queues are local-only during WSL process teardown. */
+            break;
+        case HV_DXG_OBJECT_SYNC:
+            /* Sync objects are local-only unless explicitly destroyed by ioctl. */
+            break;
+        case HV_DXG_OBJECT_DEVICE:
+            op = HV_DXG_CLEANUP_DEVICE;
+            (void)hvdxg_flush_device_host((uint32)entry->handle);
+            op_ret = hvdxg_destroy_device_host((uint32)entry->handle);
+            break;
+        default:
+            break;
+        }
+        if (op != HV_DXG_CLEANUP_NONE)
+            hvdxg_cleanup_note_ret(ret, op_ret, op, (uint32)entry->handle);
+    }
+}
+
+static void hvdxg_cleanup_process_objects(struct hvdxg_open_state *owner,
+                                          int *ret)
+{
+    if (owner == NULL || owner->process_state == NULL)
+        return;
+
+    hvdxg_cleanup_process_object_type(owner, HV_DXG_OBJECT_HWQUEUE, ret);
+    hvdxg_cleanup_process_object_type(owner, HV_DXG_OBJECT_GPUVA, ret);
+    hvdxg_cleanup_process_object_type(owner, HV_DXG_OBJECT_CONTEXT, ret);
+    hvdxg_cleanup_process_object_type(owner, HV_DXG_OBJECT_RESOURCE, ret);
+    hvdxg_cleanup_process_object_type(owner, HV_DXG_OBJECT_ALLOCATION, ret);
+    hvdxg_cleanup_process_object_type(owner, HV_DXG_OBJECT_PAGINGQUEUE, ret);
+    hvdxg_cleanup_process_object_type(owner, HV_DXG_OBJECT_SYNC, ret);
+    hvdxg_cleanup_process_object_type(owner, HV_DXG_OBJECT_DEVICE, ret);
+    hvdxg_cleanup_process_object_type(owner, HV_DXG_OBJECT_ADAPTER, ret);
+}
+
+static uint32 hvdxg_open_host_process(struct hvdxg_open_state *owner)
+{
+    if (owner != NULL && owner->dxg_process.v != 0)
+        return owner->dxg_process.v;
+    return hvdxg.dxg_process.v;
+}
+
+static struct hvdxg_d3dkmthandle
+hvdxg_owner_bound_process_handle(struct hvdxg_open_state *owner)
+{
+    if (owner != NULL && owner->process_state != NULL &&
+        owner->process_state->host_process.v != 0)
+        return owner->process_state->host_process;
+    if (owner != NULL && owner->dxg_process.v != 0)
+        return owner->dxg_process;
+    return hvdxg.dxg_process;
+}
+
+static uint32 hvdxg_open_process_generation(struct hvdxg_open_state *owner)
+{
+    if (owner != NULL && owner->process_state != NULL)
+        return owner->process_state->generation;
+    return hvdxg.dxg_process_generation;
+}
+
+static uint32 hvdxg_open_process_refs(struct hvdxg_open_state *owner)
+{
+    if (owner != NULL && owner->process_state != NULL)
+        return owner->process_state->refs;
+    return 0;
+}
+
 static void hvdxg_track_sync(struct hvdxg_open_state *owner,
                              uint32 device, uint32 sync, uint32 type,
                              uint32 flags, uint32 global_shared,
-                             uint64 fence_cpu_va, uint64 fence_kva)
+                             uint64 fence_cpu_va, uint64 fence_kva,
+                             uint32 monitor_fence_handle)
 {
     if (owner == NULL || sync == 0)
         return;
+    (void)hvdxg_track_object(owner, HV_DXG_OBJECT_SYNC, sync, device, device);
     for (uint32 i = 0; i < owner->sync_object_count; i++) {
         if (owner->sync_objects[i].sync == sync) {
             owner->sync_objects[i].type = type;
             owner->sync_objects[i].device = device;
+            owner->sync_objects[i].owner_process =
+                hvdxg_open_host_process(owner);
+            owner->sync_objects[i].owner_generation =
+                hvdxg_open_process_generation(owner);
+            owner->sync_objects[i].owner_refs =
+                hvdxg_open_process_refs(owner);
             owner->sync_objects[i].flags = flags;
             owner->sync_objects[i].global_shared = global_shared;
+            owner->sync_objects[i].monitor_fence_handle =
+                monitor_fence_handle ? 1 : 0;
             owner->sync_objects[i].fence_cpu_va = fence_cpu_va;
             owner->sync_objects[i].fence_kva = fence_kva;
             return;
@@ -3746,8 +12006,16 @@ static void hvdxg_track_sync(struct hvdxg_open_state *owner,
         owner->sync_objects[i].sync = sync;
         owner->sync_objects[i].type = type;
         owner->sync_objects[i].device = device;
+        owner->sync_objects[i].owner_process =
+            hvdxg_open_host_process(owner);
+        owner->sync_objects[i].owner_generation =
+            hvdxg_open_process_generation(owner);
+        owner->sync_objects[i].owner_refs =
+            hvdxg_open_process_refs(owner);
         owner->sync_objects[i].flags = flags;
         owner->sync_objects[i].global_shared = global_shared;
+        owner->sync_objects[i].monitor_fence_handle =
+            monitor_fence_handle ? 1 : 0;
         owner->sync_objects[i].fence_cpu_va = fence_cpu_va;
         owner->sync_objects[i].fence_kva = fence_kva;
     }
@@ -3757,6 +12025,7 @@ static void hvdxg_untrack_sync(struct hvdxg_open_state *owner, uint32 sync)
 {
     if (owner == NULL || sync == 0)
         return;
+    hvdxg_untrack_object(owner, HV_DXG_OBJECT_SYNC, sync);
     for (uint32 i = 0; i < owner->sync_object_count; i++) {
         if (owner->sync_objects[i].sync == sync) {
             uint32 last = owner->sync_object_count - 1;
@@ -3818,6 +12087,42 @@ static uint32 hvdxg_owner_sync_global_shared(struct hvdxg_open_state *owner,
     return 0;
 }
 
+static uint32 hvdxg_owner_sync_owner_process(struct hvdxg_open_state *owner,
+                                             uint32 sync)
+{
+    if (owner == NULL || sync == 0)
+        return 0;
+    for (uint32 i = 0; i < owner->sync_object_count; i++) {
+        if (owner->sync_objects[i].sync == sync)
+            return owner->sync_objects[i].owner_process;
+    }
+    return 0;
+}
+
+static uint32 hvdxg_owner_sync_owner_generation(struct hvdxg_open_state *owner,
+                                                uint32 sync)
+{
+    if (owner == NULL || sync == 0)
+        return 0;
+    for (uint32 i = 0; i < owner->sync_object_count; i++) {
+        if (owner->sync_objects[i].sync == sync)
+            return owner->sync_objects[i].owner_generation;
+    }
+    return 0;
+}
+
+static uint32 hvdxg_owner_sync_owner_refs(struct hvdxg_open_state *owner,
+                                          uint32 sync)
+{
+    if (owner == NULL || sync == 0)
+        return 0;
+    for (uint32 i = 0; i < owner->sync_object_count; i++) {
+        if (owner->sync_objects[i].sync == sync)
+            return owner->sync_objects[i].owner_refs;
+    }
+    return 0;
+}
+
 static uint64 hvdxg_owner_sync_fence_kva(struct hvdxg_open_state *owner,
                                          uint32 sync)
 {
@@ -3830,15 +12135,84 @@ static uint64 hvdxg_owner_sync_fence_kva(struct hvdxg_open_state *owner,
     return 0;
 }
 
-static int hvdxg_sync_cpu_fence_satisfied(uint64 fence_kva,
-                                          uint64 fence_value)
+static uint64 hvdxg_owner_sync_fence_cpu_va(struct hvdxg_open_state *owner,
+                                            uint32 sync)
+{
+    if (owner == NULL || sync == 0)
+        return 0;
+    for (uint32 i = 0; i < owner->sync_object_count; i++) {
+        if (owner->sync_objects[i].sync == sync)
+            return owner->sync_objects[i].fence_cpu_va;
+    }
+    return 0;
+}
+
+static uint64 hvdxg_sync_cpu_fence_value(uint64 fence_kva)
 {
     volatile uint64 *current_value;
+    uint64 value;
 
     if (fence_kva == 0)
         return 0;
     current_value = (volatile uint64 *)fence_kva;
-    return *current_value >= fence_value;
+    value = *current_value;
+    if (value == 0xffffffffffffffffULL) {
+        hvdxg.fence_value_max_seen++;
+        hvdxg.fence_value_last_kva = fence_kva;
+        hvdxg.fence_value_last_current = value;
+        if (hvdxg.fence_map_last_kva == fence_kva) {
+            hvdxg.fence_map_max_source = hvdxg.fence_map_last_source;
+            hvdxg.fence_map_max_mode = hvdxg.fence_map_last_mode;
+            hvdxg.fence_map_max_raw_pa = hvdxg.fence_map_last_raw_pa;
+            hvdxg.fence_map_max_canonical_pa =
+                hvdxg.fence_map_last_canonical_pa;
+            hvdxg.fence_map_max_offset_candidate_pa =
+                hvdxg.fence_map_last_offset_candidate_pa;
+            hvdxg.fence_map_max_offset_candidate_current =
+                hvdxg.fence_map_last_offset_candidate_current;
+        }
+    }
+    return value;
+}
+
+static uint64 hvdxg_owner_sync_fence_value(struct hvdxg_open_state *owner,
+                                           uint32 sync)
+{
+    return hvdxg_sync_cpu_fence_value(
+        hvdxg_owner_sync_fence_kva(owner, sync));
+}
+
+static uint32 hvdxg_owner_sync_is_monitor_fence_handle(
+    struct hvdxg_open_state *owner, uint32 sync)
+{
+    if (owner == NULL || sync == 0)
+        return 0;
+    for (uint32 i = 0; i < owner->sync_object_count; i++) {
+        if (owner->sync_objects[i].sync == sync)
+            return owner->sync_objects[i].monitor_fence_handle;
+    }
+    return 0;
+}
+
+static uint32 hvdxg_sync_type_is_monitored(uint32 type)
+{
+    return type == _D3DDDI_MONITORED_FENCE ||
+           type == _D3DDDI_PERIODIC_MONITORED_FENCE;
+}
+
+static int hvdxg_sync_cpu_fence_satisfied(uint64 fence_kva,
+                                          uint64 fence_value)
+{
+    uint64 fence_current;
+
+    if (fence_kva == 0)
+        return 0;
+    fence_current = hvdxg_sync_cpu_fence_value(fence_kva);
+    if (fence_current == 0xffffffffffffffffULL) {
+        hvdxg.fence_value_last_target = fence_value;
+        return 0;
+    }
+    return fence_current >= fence_value;
 }
 
 static int hvdxg_wait_cpu_fences_already_satisfied(
@@ -3872,12 +12246,17 @@ static int hvdxg_owner_sync_is_monitored(struct hvdxg_open_state *owner,
 }
 
 static void hvdxg_track_hwqueue(struct hvdxg_open_state *owner,
+                                uint32 context, uint32 device,
                                 uint32 queue, uint32 sync_object)
 {
     if (owner == NULL || queue == 0)
         return;
+    (void)hvdxg_track_object(owner, HV_DXG_OBJECT_HWQUEUE, queue,
+                             context, device);
     for (uint32 i = 0; i < owner->hwqueue_count; i++) {
         if (owner->hwqueues[i].queue == queue) {
+            owner->hwqueues[i].context = context;
+            owner->hwqueues[i].device = device;
             owner->hwqueues[i].sync_object = sync_object;
             return;
         }
@@ -3889,6 +12268,8 @@ static void hvdxg_track_hwqueue(struct hvdxg_open_state *owner,
                          HV_DXG_OPEN_TRACKED_MAX) == 0) {
         uint32 i = owner->hwqueue_count++;
         owner->hwqueues[i].queue = queue;
+        owner->hwqueues[i].context = context;
+        owner->hwqueues[i].device = device;
         owner->hwqueues[i].sync_object = sync_object;
         if (owner->hwqueue_count > hvdxg.track_hwqueue_max)
             hvdxg.track_hwqueue_max = owner->hwqueue_count;
@@ -3902,6 +12283,7 @@ static uint32 hvdxg_untrack_hwqueue(struct hvdxg_open_state *owner,
 {
     if (owner == NULL || queue == 0)
         return 0;
+    hvdxg_untrack_object(owner, HV_DXG_OBJECT_HWQUEUE, queue);
     for (uint32 i = 0; i < owner->hwqueue_count; i++) {
         if (owner->hwqueues[i].queue == queue) {
             uint32 sync = owner->hwqueues[i].sync_object;
@@ -3923,6 +12305,8 @@ static void hvdxg_track_pagingqueue(struct hvdxg_open_state *owner,
 {
     if (owner == NULL || queue == 0)
         return;
+    (void)hvdxg_track_object(owner, HV_DXG_OBJECT_PAGINGQUEUE, queue,
+                             sync_object, device);
     for (uint32 i = 0; i < owner->paging_queue_count; i++) {
         if (owner->paging_queues[i].queue == queue) {
             owner->paging_queues[i].device = device;
@@ -3953,6 +12337,7 @@ static uint32 hvdxg_untrack_pagingqueue(struct hvdxg_open_state *owner,
 {
     if (owner == NULL || queue == 0)
         return 0;
+    hvdxg_untrack_object(owner, HV_DXG_OBJECT_PAGINGQUEUE, queue);
     for (uint32 i = 0; i < owner->paging_queue_count; i++) {
         if (owner->paging_queues[i].queue == queue) {
             uint32 sync = owner->paging_queues[i].sync_object;
@@ -3980,53 +12365,57 @@ static uint64 hvdxg_owner_pagingqueue_fence_pa(struct hvdxg_open_state *owner,
     return 0;
 }
 
+static uint32 hvdxg_owner_pagingqueue_sync(struct hvdxg_open_state *owner,
+                                           uint32 queue)
+{
+    if (owner == NULL || queue == 0)
+        return 0;
+    for (uint32 i = 0; i < owner->paging_queue_count; i++) {
+        if (owner->paging_queues[i].queue == queue)
+            return owner->paging_queues[i].sync_object;
+    }
+    return 0;
+}
+
 static int hvdxg_owner_has_device(struct hvdxg_open_state *owner,
                                   uint32 device)
 {
-    return owner != NULL &&
-           hvdxg_has_u32(owner->devices, owner->device_count, device);
+    return hvdxg_owner_has_object(owner, HV_DXG_OBJECT_DEVICE, device);
 }
 
 static int hvdxg_owner_has_pagingqueue(struct hvdxg_open_state *owner,
                                        uint32 paging_queue)
 {
-    if (owner == NULL || paging_queue == 0)
-        return 0;
-    for (uint32 i = 0; i < owner->paging_queue_count; i++) {
-        if (owner->paging_queues[i].queue == paging_queue)
-            return 1;
-    }
-    return 0;
+    return hvdxg_owner_has_object(owner, HV_DXG_OBJECT_PAGINGQUEUE,
+                                  paging_queue);
 }
 
 static int hvdxg_owner_has_sync(struct hvdxg_open_state *owner, uint32 sync)
 {
-    if (owner == NULL || sync == 0)
-        return 0;
-    for (uint32 i = 0; i < owner->sync_object_count; i++) {
-        if (owner->sync_objects[i].sync == sync)
-            return 1;
-    }
-    return 0;
+    return hvdxg_owner_has_object(owner, HV_DXG_OBJECT_SYNC, sync);
 }
 
 static int hvdxg_owner_has_context(struct hvdxg_open_state *owner,
                                    uint32 context)
 {
-    return owner != NULL &&
-           hvdxg_has_u32(owner->contexts, owner->context_count, context);
+    return hvdxg_owner_has_object(owner, HV_DXG_OBJECT_CONTEXT, context);
 }
 
 static int hvdxg_owner_has_hwqueue(struct hvdxg_open_state *owner,
                                    uint32 hwqueue)
 {
-    if (owner == NULL || hwqueue == 0)
+    return hvdxg_owner_has_object(owner, HV_DXG_OBJECT_HWQUEUE, hwqueue);
+}
+
+static uint32 hvdxg_owner_object_device(struct hvdxg_open_state *owner,
+                                        uint32 type, uint64 handle)
+{
+    struct hvdxg_object_entry *entry;
+
+    if (owner == NULL || handle == 0)
         return 0;
-    for (uint32 i = 0; i < owner->hwqueue_count; i++) {
-        if (owner->hwqueues[i].queue == hwqueue)
-            return 1;
-    }
-    return 0;
+    entry = hvdxg_owner_find_object(owner, type, handle);
+    return entry != NULL ? entry->device : 0;
 }
 
 static void hvdxg_track_allocation(struct hvdxg_open_state *owner,
@@ -4039,17 +12428,38 @@ static void hvdxg_track_allocation(struct hvdxg_open_state *owner,
     if (owner == NULL || device == 0 ||
         (resource == 0 && allocation == 0))
         return;
+    if (allocation != 0)
+        (void)hvdxg_track_object(owner, HV_DXG_OBJECT_ALLOCATION,
+                                 allocation, resource, device);
     for (uint32 i = 0; i < owner->allocation_count; i++) {
         if (owner->allocations[i].device == device &&
             owner->allocations[i].resource == resource &&
             owner->allocations[i].allocation == allocation) {
             if (owner->allocations[i].sysmem_pages != sysmem_pages)
                 hvdxg_unpin_tracked_allocation(&owner->allocations[i]);
+            owner->allocations[i].owner_process =
+                hvdxg_open_host_process(owner);
+            owner->allocations[i].owner_generation =
+                hvdxg_open_process_generation(owner);
+            owner->allocations[i].owner_refs =
+                hvdxg_open_process_refs(owner);
+            hvdxg.allocation_last_owner_process =
+                owner->allocations[i].owner_process;
+            hvdxg.allocation_last_owner_generation =
+                owner->allocations[i].owner_generation;
             owner->allocations[i].size = size;
             owner->allocations[i].flags = flags;
             owner->allocations[i].sysmem = sysmem;
             owner->allocations[i].sysmem_pages = sysmem_pages;
             owner->allocations[i].sysmem_page_count = sysmem_page_count;
+            if (sysmem != 0) {
+                owner->allocations[i].cpu_va = sysmem;
+                owner->allocations[i].map_size = 0;
+                owner->allocations[i].cpu_vm = current ? current->vm : NULL;
+            } else if (owner->allocations[i].map_size == 0) {
+                owner->allocations[i].cpu_va = 0;
+                owner->allocations[i].cpu_vm = NULL;
+            }
             return;
         }
     }
@@ -4065,11 +12475,20 @@ static void hvdxg_track_allocation(struct hvdxg_open_state *owner,
         slot->device = device;
         slot->resource = resource;
         slot->allocation = allocation;
+        slot->owner_process = hvdxg_open_host_process(owner);
+        slot->owner_generation = hvdxg_open_process_generation(owner);
+        slot->owner_refs = hvdxg_open_process_refs(owner);
+        hvdxg.allocation_last_owner_process = slot->owner_process;
+        hvdxg.allocation_last_owner_generation = slot->owner_generation;
         slot->size = size;
         slot->flags = flags;
         slot->sysmem = sysmem;
         slot->sysmem_pages = sysmem_pages;
         slot->sysmem_page_count = sysmem_page_count;
+        if (sysmem != 0) {
+            slot->cpu_va = sysmem;
+            slot->cpu_vm = current ? current->vm : NULL;
+        }
         if (owner->allocation_count > hvdxg.track_allocation_max)
             hvdxg.track_allocation_max = owner->allocation_count;
     } else {
@@ -4078,11 +12497,13 @@ static void hvdxg_track_allocation(struct hvdxg_open_state *owner,
     }
 }
 
-static int hv_cmdline_enabled(const char *key);
+static struct hvdxg_tracked_resource *
+hvdxg_owner_find_resource(struct hvdxg_open_state *owner, uint32 device,
+                          uint32 resource);
 
 static struct hvdxg_tracked_allocation *
 hvdxg_owner_find_allocation(struct hvdxg_open_state *owner, uint32 device,
-                            uint32 resource, uint32 allocation)
+	                            uint32 resource, uint32 allocation)
 {
     if (owner == NULL || (resource == 0 && allocation == 0))
         return NULL;
@@ -4096,12 +12517,68 @@ hvdxg_owner_find_allocation(struct hvdxg_open_state *owner, uint32 device,
     return NULL;
 }
 
-static int hvdxg_owner_has_allocation(struct hvdxg_open_state *owner,
-                                      uint32 device, uint32 resource,
-                                      uint32 allocation)
+static void hvdxg_link_resource_allocation(struct hvdxg_open_state *owner,
+                                           uint32 device, uint32 resource,
+                                           uint32 allocation, uint64 size,
+                                           uint32 flags)
 {
+    struct hvdxg_tracked_resource *r;
+    struct hvdxg_tracked_allocation *a;
+    uint32 slot = HV_DXG_ALLOCATION_MAX;
+
+    if (owner == NULL || device == 0 || resource == 0 || allocation == 0)
+        return;
+    r = hvdxg_owner_find_resource(owner, device, resource);
+    if (r == NULL)
+        return;
+    if (r->allocation_count > HV_DXG_ALLOCATION_MAX)
+        return;
+    if (r->owner_process == 0) {
+        r->owner_process = hvdxg_open_host_process(owner);
+        r->owner_generation = hvdxg_open_process_generation(owner);
+        r->owner_refs = hvdxg_open_process_refs(owner);
+    }
+    for (uint32 i = 0; i < r->allocation_count; i++) {
+        if (r->allocation_handles[i] == allocation) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == HV_DXG_ALLOCATION_MAX) {
+        if (r->allocation_count >= HV_DXG_ALLOCATION_MAX)
+            return;
+        slot = r->allocation_count++;
+    }
+    r->allocation_handles[slot] = allocation;
+    r->allocation_sizes[slot] = size;
+    r->allocation_flags[slot] = flags;
+
+    a = hvdxg_owner_find_allocation(owner, device, resource, allocation);
+    if (a != NULL && a->owner_process == 0) {
+        a->owner_process = r->owner_process;
+        a->owner_generation = r->owner_generation;
+        a->owner_refs = r->owner_refs;
+    }
+}
+
+static int hvdxg_owner_has_allocation(struct hvdxg_open_state *owner,
+	                                      uint32 device, uint32 resource,
+	                                      uint32 allocation)
+{
+    struct hvdxg_object_entry *obj;
+
     if (owner == NULL || (resource == 0 && allocation == 0))
         return 0;
+    if (allocation != 0) {
+        obj = hvdxg_owner_find_object(owner, HV_DXG_OBJECT_ALLOCATION,
+                                      allocation);
+        if (obj == NULL) {
+            hvdxg.object_table_denied++;
+            return 0;
+        }
+        return (device == 0 || obj->device == device) &&
+               (resource == 0 || obj->parent == resource);
+    }
     for (uint32 i = 0; i < owner->allocation_count; i++) {
         if ((device == 0 || owner->allocations[i].device == device) &&
             (resource == 0 || owner->allocations[i].resource == resource) &&
@@ -4109,6 +12586,7 @@ static int hvdxg_owner_has_allocation(struct hvdxg_open_state *owner,
              owner->allocations[i].allocation == allocation))
             return 1;
     }
+    hvdxg.object_table_denied++;
     return 0;
 }
 
@@ -4120,6 +12598,166 @@ static uint64 hvdxg_owner_allocation_size(struct hvdxg_open_state *owner,
         hvdxg_owner_find_allocation(owner, device, resource, allocation);
 
     return a != NULL ? a->size : 0;
+}
+
+static void hvdxg_note_allocation_resident(struct hvdxg_open_state *owner,
+                                           uint32 allocation,
+                                           uint32 paging_queue,
+                                           uint64 fence_value)
+{
+    struct hvdxg_tracked_allocation *a;
+
+    if (owner == NULL || allocation == 0 || paging_queue == 0 ||
+        fence_value == 0)
+        return;
+    a = hvdxg_owner_find_allocation(owner, 0, 0, allocation);
+    if (a == NULL)
+        return;
+    a->resident_paging_queue = paging_queue;
+    a->resident_sync_object =
+        hvdxg_owner_pagingqueue_sync(owner, paging_queue);
+    a->resident_fence_value = fence_value;
+    a->resident_wait_result = 0;
+    a->resident_wait_ret = 0;
+    a->resident_wait_current =
+        hvdxg_owner_sync_fence_value(owner, a->resident_sync_object);
+}
+
+static void hvdxg_note_allocation_mapgpuva(struct hvdxg_open_state *owner,
+                                           uint32 allocation,
+                                           uint32 paging_queue,
+                                           uint64 gpu_va, uint64 pages,
+                                           uint64 fence_value, int ret,
+                                           uint32 status)
+{
+    struct hvdxg_tracked_allocation *a;
+
+    if (owner == NULL || allocation == 0)
+        return;
+    a = hvdxg_owner_find_allocation(owner, 0, 0, allocation);
+    if (a == NULL)
+        return;
+    a->map_paging_queue = paging_queue;
+    a->map_sync_object = hvdxg_owner_pagingqueue_sync(owner, paging_queue);
+    a->map_ret = ret;
+    a->map_status = (int32)status;
+    a->map_gpu_va = gpu_va;
+    a->map_pages = pages;
+    a->map_fence_value = fence_value;
+}
+
+static void hvdxg_note_allocation_wait(struct hvdxg_open_state *owner,
+                                       uint32 sync_object,
+                                       uint64 fence_value, int ret,
+                                       uint32 result)
+{
+    if (owner == NULL || sync_object == 0 || fence_value == 0)
+        return;
+    for (uint32 i = 0; i < owner->allocation_count; i++) {
+        struct hvdxg_tracked_allocation *a = &owner->allocations[i];
+
+        if (a->resident_sync_object != sync_object ||
+            a->resident_fence_value == 0 ||
+            a->resident_fence_value > fence_value)
+            continue;
+        a->resident_wait_result = result;
+        a->resident_wait_ret = ret;
+        a->resident_wait_current =
+            hvdxg_owner_sync_fence_value(owner, sync_object);
+    }
+}
+
+static int hvdxg_prepare_allocation_for_share(
+    struct hvdxg_open_state *owner, struct hvdxg_tracked_resource *resource,
+    struct hvdxg_tracked_allocation *a)
+{
+    struct d3dkmt_waitforsynchronizationobjectfromcpu wait_req;
+    struct hvdxg_d3dkmthandle object;
+    uint64 fence_value;
+    uint64 event_id;
+    uint32 actual_len = 0;
+    int ret;
+
+    hvdxg.sharedhandle_last_map_va = 0;
+    hvdxg.sharedhandle_last_map_pages = 0;
+    hvdxg.sharedhandle_last_map_fence = 0;
+    hvdxg.sharedhandle_last_map_ret = 0;
+    hvdxg.sharedhandle_last_map_status = 0;
+    hvdxg.sharedhandle_last_resident_paging_queue = 0;
+    hvdxg.sharedhandle_last_resident_sync = 0;
+    hvdxg.sharedhandle_last_resident_fence = 0;
+    hvdxg.sharedhandle_last_resident_current = 0;
+    hvdxg.sharedhandle_last_resident_wait_result = 0;
+    hvdxg.sharedhandle_last_resident_wait_ret = 0;
+    hvdxg.sharedhandle_last_resident_missing = 0;
+    hvdxg.sharedhandle_last_resident_enforced = 0;
+
+    if (owner == NULL || resource == NULL || a == NULL)
+        return 0;
+
+    hvdxg.sharedhandle_last_map_va = a->map_gpu_va;
+    hvdxg.sharedhandle_last_map_pages = a->map_pages;
+    hvdxg.sharedhandle_last_map_fence = a->map_fence_value;
+    hvdxg.sharedhandle_last_map_ret = a->map_ret;
+    hvdxg.sharedhandle_last_map_status = (uint32)a->map_status;
+    hvdxg.sharedhandle_last_resident_paging_queue =
+        a->resident_paging_queue;
+    hvdxg.sharedhandle_last_resident_sync = a->resident_sync_object;
+    hvdxg.sharedhandle_last_resident_fence = a->resident_fence_value;
+    hvdxg.sharedhandle_last_resident_wait_result =
+        a->resident_wait_result;
+    hvdxg.sharedhandle_last_resident_wait_ret = a->resident_wait_ret;
+    hvdxg.sharedhandle_last_resident_current =
+        hvdxg_owner_sync_fence_value(owner, a->resident_sync_object);
+    a->resident_wait_current =
+        hvdxg.sharedhandle_last_resident_current;
+
+    if (resource->create_flags_value != 0x47)
+        return 0;
+    if (a->map_gpu_va == 0 || a->resident_sync_object == 0 ||
+        a->resident_fence_value == 0) {
+        hvdxg.sharedhandle_last_resident_missing = 1;
+        return -EAGAIN;
+    }
+    if (hvdxg.sharedhandle_last_resident_current !=
+            0xffffffffffffffffULL &&
+        hvdxg.sharedhandle_last_resident_current >=
+            a->resident_fence_value)
+        return 0;
+    if (a->resident_wait_result != 0 && a->resident_wait_ret == 0)
+        return 0;
+
+    event_id = hvdxg_alloc_host_event();
+    if (event_id == 0)
+        return -ENOMEM;
+    memset(&wait_req, 0, sizeof(wait_req));
+    wait_req.device.v = resource->device;
+    wait_req.object_count = 1;
+    object.v = a->resident_sync_object;
+    fence_value = a->resident_fence_value;
+    ret = hvdxg_send_waitsyncobjectfromcpu(&wait_req, &object,
+                                           &fence_value, event_id,
+                                           sizeof(object),
+                                           sizeof(fence_value),
+                                           &actual_len);
+    if (ret == 0 || ret == HV_DXG_STATUS_PENDING) {
+        ret = hvdxg_wait_host_event_or_cpu_fence(
+            owner, &object, &fence_value, 1, 0, event_id,
+            HV_DXG_SHARE_RESIDENCY_WAIT_MS);
+    }
+    hvdxg_remove_host_event(event_id);
+    hvdxg.sharedhandle_last_resident_enforced = 1;
+    hvdxg.sharedhandle_last_resident_wait_ret = ret;
+    hvdxg.sharedhandle_last_resident_current =
+        hvdxg_owner_sync_fence_value(owner, a->resident_sync_object);
+    if (ret == 0) {
+        hvdxg_note_allocation_wait(owner, a->resident_sync_object,
+                                   a->resident_fence_value, ret, 1);
+        hvdxg.sharedhandle_last_resident_wait_result = 1;
+        return 0;
+    }
+    hvdxg.sharedhandle_last_resident_missing = 2;
+    return ret;
 }
 
 static int hvdxg_unmap_tracked_allocation(
@@ -4154,6 +12792,9 @@ static void hvdxg_untrack_allocation(struct hvdxg_open_state *owner,
             (resource == 0 || owner->allocations[i].resource == resource) &&
             (allocation == 0 ||
              owner->allocations[i].allocation == allocation)) {
+            if (owner->allocations[i].allocation != 0)
+                hvdxg_untrack_object(owner, HV_DXG_OBJECT_ALLOCATION,
+                                     owner->allocations[i].allocation);
             (void)hvdxg_unmap_tracked_allocation(&owner->allocations[i]);
             hvdxg_unpin_tracked_allocation(&owner->allocations[i]);
             owner->allocations[i] =
@@ -4184,6 +12825,7 @@ static void hvdxg_untrack_resource(struct hvdxg_open_state *owner,
 {
     if (owner == NULL || resource == 0)
         return;
+    hvdxg_untrack_object(owner, HV_DXG_OBJECT_RESOURCE, resource);
     for (uint32 i = 0; i < owner->resource_count; i++) {
         if ((device == 0 || owner->resources[i].device == device) &&
             owner->resources[i].resource == resource) {
@@ -4211,6 +12853,723 @@ hvdxg_owner_find_resource(struct hvdxg_open_state *owner, uint32 device,
             return &owner->resources[i];
     }
     return NULL;
+}
+
+static uint32 hvdxg_owner_first_allocation(struct hvdxg_open_state *owner,
+                                           uint32 device, uint32 resource,
+                                           uint32 *found)
+{
+    if (found != NULL)
+        *found = 0;
+    if (owner == NULL || resource == 0)
+        return 0;
+    for (uint32 i = 0; i < owner->allocation_count; i++) {
+        if ((device == 0 || owner->allocations[i].device == device) &&
+            owner->allocations[i].resource == resource &&
+            owner->allocations[i].allocation != 0) {
+            if (found != NULL)
+                *found = 1;
+            return owner->allocations[i].allocation;
+        }
+    }
+    return 0;
+}
+
+static int hvdxg_refresh_resource_allocations(
+    struct hvdxg_open_state *owner, struct hvdxg_tracked_resource *resource)
+{
+    uint32 count = 0;
+    uint32 tracked_count = 0;
+    uint32 expected_private = 0;
+
+    if (owner == NULL || resource == NULL || resource->resource == 0)
+        return -EINVAL;
+    hvdxg.sharedresource_seal_last_resource = resource->resource;
+    hvdxg.sharedresource_seal_last_generation = resource->sealed_generation;
+    hvdxg.sharedresource_seal_missing_alloc = 0;
+    hvdxg.sharedresource_seal_extra_alloc = 0;
+    hvdxg.sharedresource_seal_tracked_allocs = 0;
+    hvdxg.sharedresource_seal_expected_private = 0;
+    hvdxg.sharedresource_seal_actual_private =
+        resource->total_priv_drv_data_size;
+    hvdxg.sharedresource_seal_verify_ret = 0;
+    for (uint32 i = 0; i < owner->allocation_count; i++) {
+        struct hvdxg_tracked_allocation *a = &owner->allocations[i];
+        int listed = 0;
+
+        if (a->device != resource->device ||
+            a->resource != resource->resource ||
+            a->allocation == 0)
+            continue;
+        tracked_count++;
+        for (uint32 j = 0; j < resource->allocation_count &&
+             j < HV_DXG_ALLOCATION_MAX; j++) {
+            if (resource->allocation_handles[j] == a->allocation) {
+                listed = 1;
+                break;
+            }
+        }
+        if (!listed)
+            hvdxg.sharedresource_seal_extra_alloc = a->allocation;
+    }
+    hvdxg.sharedresource_seal_tracked_allocs = tracked_count;
+    if (resource->allocation_count == 0 ||
+        resource->allocation_count > HV_DXG_ALLOCATION_MAX) {
+        hvdxg.sharedresource_seal_verify_ret = -EINVAL;
+        return -EINVAL;
+    }
+    for (uint32 i = 0; i < resource->allocation_count; i++) {
+        struct hvdxg_tracked_allocation *a;
+
+        if (resource->allocation_handles[i] == 0) {
+            hvdxg.sharedresource_seal_missing_alloc = i + 1;
+            hvdxg.sharedresource_seal_verify_ret = -ENOENT;
+            return -ENOENT;
+        }
+        a = hvdxg_owner_find_allocation(owner, resource->device,
+                                        resource->resource,
+                                        resource->allocation_handles[i]);
+        if (a == NULL) {
+            hvdxg.sharedresource_seal_missing_alloc =
+                resource->allocation_handles[i];
+            hvdxg.sharedresource_seal_verify_ret = -ENOENT;
+            return -ENOENT;
+        }
+        if (a->owner_process == 0) {
+            a->owner_process = resource->owner_process;
+            a->owner_generation = resource->owner_generation;
+            a->owner_refs = resource->owner_refs;
+        }
+        if (resource->owner_process == 0) {
+            resource->owner_process = a->owner_process;
+            resource->owner_generation = a->owner_generation;
+            resource->owner_refs = a->owner_refs;
+        }
+        resource->allocation_sizes[i] = a->size;
+        resource->allocation_flags[i] = a->flags;
+        expected_private += resource->alloc_priv_sizes[i];
+        if (i == 0) {
+            hvdxg.allocation_last_owner_process = a->owner_process;
+            hvdxg.allocation_last_owner_generation =
+                a->owner_generation;
+        }
+        count++;
+    }
+    hvdxg.sharedresource_seal_expected_private = expected_private;
+    if (tracked_count != resource->allocation_count &&
+        hvdxg.sharedresource_seal_extra_alloc == 0)
+        hvdxg.sharedresource_seal_extra_alloc = tracked_count;
+    if (count != resource->allocation_count) {
+        hvdxg.sharedresource_seal_verify_ret = -ENOENT;
+        return -ENOENT;
+    }
+    if (tracked_count != resource->allocation_count) {
+        hvdxg.sharedresource_seal_verify_ret = -EINVAL;
+        return -EINVAL;
+    }
+    if (expected_private != resource->total_priv_drv_data_size) {
+        hvdxg.sharedresource_seal_verify_ret = -EINVAL;
+        return -EINVAL;
+    }
+    hvdxg.sharedresource_seal_allocs = count;
+    hvdxg.sharedresource_seal_private =
+        resource->total_priv_drv_data_size;
+    hvdxg.sharedresource_seal_verify_ret = 0;
+    return 0;
+}
+
+static int hvdxg_prepare_resource_nt_metadata(
+    struct hvdxg_open_state *owner, struct hvdxg_tracked_resource *resource)
+{
+    struct hvdxg_tracked_allocation *alloc = NULL;
+    uint32 allocation;
+    uint32 found = 0;
+
+    if (owner == NULL || resource == NULL || resource->resource == 0)
+        return -EINVAL;
+    if (resource->owner_process == 0) {
+        resource->owner_process = hvdxg_open_host_process(owner);
+        resource->owner_generation = hvdxg_open_process_generation(owner);
+        resource->owner_refs = hvdxg_open_process_refs(owner);
+    }
+    if (resource->create_shared && resource->nt_security_sharing &&
+        !resource->shared_metadata_created) {
+        resource->shared_metadata_created = 1;
+        resource->host_shared_process = resource->owner_process;
+        resource->host_shared_object = resource->resource;
+        resource->host_shared_refs = 1;
+        hvdxg.sharedresource_created++;
+    }
+    allocation = resource->allocation_count != 0 ?
+                 resource->allocation_handles[0] : 0;
+    if (allocation != 0)
+        alloc = hvdxg_owner_find_allocation(owner, resource->device,
+                                            resource->resource, allocation);
+    if (alloc == NULL) {
+        allocation = hvdxg_owner_first_allocation(
+            owner, resource->device, resource->resource, &found);
+        if (allocation != 0)
+            alloc = hvdxg_owner_find_allocation(owner, resource->device,
+                                                resource->resource,
+                                                allocation);
+    }
+    if (alloc == NULL)
+        return 0;
+    if (resource->allocation_count == 0) {
+        resource->allocation_count = 1;
+        resource->allocation_handles[0] = allocation;
+    }
+    if (resource->allocation_handles[0] == 0)
+        resource->allocation_handles[0] = allocation;
+    resource->allocation_sizes[0] = alloc->size;
+    resource->allocation_flags[0] = alloc->flags;
+    if (alloc->owner_process == 0) {
+        alloc->owner_process = resource->owner_process;
+        alloc->owner_generation = resource->owner_generation;
+        alloc->owner_refs = resource->owner_refs;
+    }
+    if (resource->owner_process == 0) {
+        resource->owner_process = alloc->owner_process;
+        resource->owner_generation = alloc->owner_generation;
+        resource->owner_refs = alloc->owner_refs;
+    }
+    hvdxg.allocation_last_owner_process = alloc->owner_process;
+    hvdxg.allocation_last_owner_generation = alloc->owner_generation;
+    hvdxg.sharedhandle_last_allocation = allocation;
+    hvdxg.sharedhandle_last_allocation_found = 1;
+    hvdxg.sharedhandle_last_allocation_owner_process = alloc->owner_process;
+    hvdxg.sharedhandle_last_allocation_owner_generation =
+        alloc->owner_generation;
+    hvdxg.sharedhandle_last_allocation_owner_refs = alloc->owner_refs;
+    return 0;
+}
+
+static uint32 hvdxg_existing_sysmem_share_reason(
+    const struct hvdxg_tracked_resource *resource)
+{
+    if (resource == NULL)
+        return 1;
+    if (!resource->existing_sysmem)
+        return 2;
+    if (resource->resource == 0)
+        return 3;
+    if (!resource->create_shared)
+        return 4;
+    if (!resource->nt_security_sharing)
+        return 5;
+    if (!resource->shared_metadata_created)
+        return 6;
+    if (resource->allocation_count == 0)
+        return 7;
+    if (resource->total_priv_drv_data_size == 0)
+        return 8;
+    return 0;
+}
+
+static void hvdxg_note_existing_sysmem_share(
+    const struct hvdxg_tracked_resource *resource, uint32 stage)
+{
+    uint32 reason;
+
+    hvdxg.existing_sysmem_share_stage = stage;
+    hvdxg.existing_sysmem_share_resource =
+        resource != NULL ? resource->resource : 0;
+    hvdxg.existing_sysmem_share_global =
+        resource != NULL ? resource->global_share : 0;
+    hvdxg.existing_sysmem_share_flags =
+        resource != NULL ? resource->create_flags_value : 0;
+    hvdxg.existing_sysmem_share_host_flags =
+        resource != NULL ? resource->host_create_flags_value : 0;
+    hvdxg.existing_sysmem_share_metadata =
+        resource != NULL ? resource->shared_metadata_created : 0;
+    hvdxg.existing_sysmem_share_sealed =
+        resource != NULL ? resource->sealed : 0;
+    hvdxg.existing_sysmem_share_nt =
+        resource != NULL ? resource->host_shared_handle_nt : 0;
+    hvdxg.existing_sysmem_share_alloc_count =
+        resource != NULL ? resource->allocation_count : 0;
+    hvdxg.existing_sysmem_share_runtime_priv =
+        resource != NULL ? resource->private_runtime_data_size : 0;
+    hvdxg.existing_sysmem_share_resource_priv =
+        resource != NULL ? resource->resource_priv_drv_data_size : 0;
+    hvdxg.existing_sysmem_share_total_priv =
+        resource != NULL ? resource->total_priv_drv_data_size : 0;
+    hvdxg.existing_sysmem_share_alloc_priv =
+        resource != NULL && resource->allocation_count != 0 ?
+        resource->alloc_priv_sizes[0] : 0;
+    hvdxg.existing_sysmem_share_pfnmap_pages =
+        resource != NULL ? resource->existing_sysmem_pfnmap_pages : 0;
+    hvdxg.existing_sysmem_share_vram =
+        resource != NULL ? resource->existing_sysmem_vram : 0;
+    hvdxg.existing_sysmem_share_va =
+        resource != NULL ? resource->existing_sysmem_va : 0;
+    hvdxg.existing_sysmem_share_size =
+        resource != NULL ? resource->existing_sysmem_size : 0;
+    reason = hvdxg_existing_sysmem_share_reason(resource);
+    hvdxg.existing_sysmem_share_reason = reason;
+    hvdxg.existing_sysmem_share_shareable = reason == 0 ? 1 : 0;
+}
+
+static void hvdxg_reset_ntshared_runtime_diag(void)
+{
+    hvdxg.ntshared_runtime_seen = 0;
+    hvdxg.ntshared_runtime_user_object = 0;
+    hvdxg.ntshared_runtime_user_device = 0;
+    hvdxg.ntshared_runtime_kind = 0;
+    hvdxg.ntshared_runtime_host_object = 0;
+    hvdxg.ntshared_runtime_host_device = 0;
+    hvdxg.ntshared_runtime_entry_found = 0;
+    hvdxg.ntshared_runtime_entry_exact = 0;
+    hvdxg.ntshared_runtime_entry_type = HV_DXG_OBJECT_NONE;
+    hvdxg.ntshared_runtime_entry_local = 0;
+    hvdxg.ntshared_runtime_entry_host = 0;
+    hvdxg.ntshared_runtime_entry_parent = 0;
+    hvdxg.ntshared_runtime_entry_device = 0;
+    hvdxg.ntshared_runtime_entry_generation = 0;
+    hvdxg.ntshared_runtime_entry_destroyed = 0;
+    hvdxg.ntshared_runtime_owner_process = 0;
+    hvdxg.ntshared_runtime_owner_generation = 0;
+    hvdxg.ntshared_runtime_owner_refs = 0;
+    hvdxg.ntshared_runtime_resource = 0;
+    hvdxg.ntshared_runtime_resource_host = 0;
+    hvdxg.ntshared_runtime_resource_flags = 0;
+    hvdxg.ntshared_runtime_alloc = 0;
+    hvdxg.ntshared_runtime_alloc_host = 0;
+    hvdxg.ntshared_runtime_alloc_flags = 0;
+    hvdxg.ntshared_runtime_alloc_size = 0;
+    hvdxg.ntshared_runtime_alloc_owner_process = 0;
+    hvdxg.ntshared_runtime_alloc_owner_generation = 0;
+    hvdxg.ntshared_runtime_alloc_owner_refs = 0;
+    hvdxg.ntshared_runtime_meta_created = 0;
+    hvdxg.ntshared_runtime_sealed_before = 0;
+    hvdxg.ntshared_runtime_sealed_after = 0;
+    hvdxg.ntshared_runtime_host_sealed_before = 0;
+    hvdxg.ntshared_runtime_host_sealed_after = 0;
+    hvdxg.ntshared_runtime_cmd_len = 0;
+    hvdxg.ntshared_runtime_wire_len = 0;
+    hvdxg.ntshared_runtime_ext = 0;
+    hvdxg.ntshared_runtime_ext_offset = 0;
+    hvdxg.ntshared_runtime_object_offset = 0;
+    hvdxg.ntshared_runtime_result_len = 0;
+    hvdxg.ntshared_runtime_return_len = 0;
+    hvdxg.ntshared_runtime_return_ret = 0;
+    hvdxg.ntshared_runtime_return_raw = 0;
+    hvdxg.ntshared_runtime_return_handle = 0;
+    hvdxg.ntshared_pre_resource_type = HV_DXG_OBJECT_NONE;
+    hvdxg.ntshared_pre_resource_local = 0;
+    hvdxg.ntshared_pre_resource_host = 0;
+    hvdxg.ntshared_pre_resource_generation = 0;
+    hvdxg.ntshared_pre_resource_destroyed = 0;
+    hvdxg.ntshared_pre_resource_refs = 0;
+    hvdxg.ntshared_pre_resource_index = 0;
+    hvdxg.ntshared_pre_resource_unique = 0;
+    hvdxg.ntshared_pre_resource_instance = 0;
+    hvdxg.ntshared_pre_resource_sealed = 0;
+    hvdxg.ntshared_pre_resource_open_count = 0;
+    hvdxg.ntshared_pre_alloc_type = HV_DXG_OBJECT_NONE;
+    hvdxg.ntshared_pre_alloc_local = 0;
+    hvdxg.ntshared_pre_alloc_host = 0;
+    hvdxg.ntshared_pre_alloc_generation = 0;
+    hvdxg.ntshared_pre_alloc_destroyed = 0;
+    hvdxg.ntshared_pre_alloc_refs = 0;
+    hvdxg.ntshared_pre_alloc_index = 0;
+    hvdxg.ntshared_pre_alloc_unique = 0;
+    hvdxg.ntshared_pre_alloc_instance = 0;
+    hvdxg.ntshared_pre_device_type = HV_DXG_OBJECT_NONE;
+    hvdxg.ntshared_pre_device_local = 0;
+    hvdxg.ntshared_pre_device_host = 0;
+    hvdxg.ntshared_pre_device_generation = 0;
+    hvdxg.ntshared_pre_device_destroyed = 0;
+    hvdxg.ntshared_pre_device_refs = 0;
+    hvdxg.ntshared_pre_device_index = 0;
+    hvdxg.ntshared_pre_device_unique = 0;
+    hvdxg.ntshared_pre_device_instance = 0;
+    hvdxg.ntshared_pre_shared_owner_found = 0;
+    hvdxg.ntshared_pre_shared_owner_type = HV_DXG_OBJECT_NONE;
+    hvdxg.ntshared_pre_shared_owner_local = 0;
+    hvdxg.ntshared_pre_shared_owner_host = 0;
+    hvdxg.ntshared_pre_shared_owner_generation = 0;
+    hvdxg.ntshared_pre_shared_owner_destroyed = 0;
+    hvdxg.ntshared_pre_shared_owner_index = 0;
+    hvdxg.ntshared_pre_shared_owner_unique = 0;
+    hvdxg.ntshared_pre_shared_owner_instance = 0;
+    hvdxg.ntshared_pre_shared_owner_object = 0;
+    hvdxg.ntshared_pre_shared_owner_process = 0;
+    hvdxg.ntshared_pre_shared_owner_refs = 0;
+    hvdxg.ntshared_pre_shared_owner_nt = 0;
+    hvdxg.ntshared_pre_shared_owner_sealed = 0;
+    hvdxg.ntshared_pre_runtime_size = 0;
+    hvdxg.ntshared_pre_runtime_hash = 0;
+    memset(hvdxg.ntshared_pre_runtime_w, 0,
+           sizeof(hvdxg.ntshared_pre_runtime_w));
+    hvdxg.ntshared_pre_resource_priv_size = 0;
+    hvdxg.ntshared_pre_resource_priv_hash = 0;
+    memset(hvdxg.ntshared_pre_resource_priv_w, 0,
+           sizeof(hvdxg.ntshared_pre_resource_priv_w));
+    hvdxg.ntshared_pre_total_priv_size = 0;
+    hvdxg.ntshared_pre_total_priv_hash = 0;
+    memset(hvdxg.ntshared_pre_total_priv_w, 0,
+           sizeof(hvdxg.ntshared_pre_total_priv_w));
+    hvdxg.ntshared_pre_alloc_out_size = 0;
+    hvdxg.ntshared_pre_alloc_out_hash = 0;
+    memset(hvdxg.ntshared_pre_alloc_out_w, 0,
+           sizeof(hvdxg.ntshared_pre_alloc_out_w));
+    hvdxg.ntshared_pre_create_seq = 0;
+    hvdxg.ntshared_pre_first_nt_seq = 0;
+    hvdxg.ntshared_pre_event_seq = 0;
+    hvdxg.ntshared_model_process_state = 0;
+    hvdxg.ntshared_model_open_process = 0;
+    hvdxg.ntshared_model_open_generation = 0;
+    hvdxg.ntshared_model_open_refs = 0;
+    hvdxg.ntshared_model_global_process = 0;
+    hvdxg.ntshared_model_command_process = 0;
+    hvdxg.ntshared_model_resource_owner = 0;
+    hvdxg.ntshared_model_resource_generation = 0;
+    hvdxg.ntshared_model_alloc_owner = 0;
+    hvdxg.ntshared_model_alloc_generation = 0;
+    hvdxg.ntshared_model_cmd_eq_open = 0;
+    hvdxg.ntshared_model_cmd_eq_global = 0;
+    hvdxg.ntshared_model_cmd_eq_resource = 0;
+    hvdxg.ntshared_model_cmd_eq_alloc = 0;
+    hvdxg.ntshared_model_open_objects = 0;
+    hvdxg.ntshared_model_process_objects = 0;
+    hvdxg.ntshared_model_resources = 0;
+    hvdxg.ntshared_model_allocations = 0;
+    hvdxg.ntshared_model_devices = 0;
+    hvdxg.ntshared_model_contexts = 0;
+    hvdxg.ntshared_model_process_live = 0;
+    hvdxg.ntshared_model_process_generation = 0;
+    hvdxg.ntshared_cleanup_ret = 0;
+    hvdxg.ntshared_cleanup_cached_before = 0;
+    hvdxg.ntshared_cleanup_cached_after = 0;
+    hvdxg.ntshared_cleanup_refs_before = 0;
+    hvdxg.ntshared_cleanup_refs_after = 0;
+    hvdxg.ntshared_cleanup_object_before = 0;
+    hvdxg.ntshared_cleanup_object_after = 0;
+    hvdxg.ntshared_cleanup_nt_before = 0;
+    hvdxg.ntshared_cleanup_nt_after = 0;
+    hvdxg.ntshared_cleanup_sealed_before = 0;
+    hvdxg.ntshared_cleanup_sealed_after = 0;
+    hvdxg.ntshared_cleanup_cache_inserts_before = 0;
+    hvdxg.ntshared_cleanup_cache_inserts_after = 0;
+}
+
+static void hvdxg_note_ntshared_runtime_resource(
+    struct hvdxg_open_state *owner, uint32 user_object, uint32 process,
+    uint32 host_object, struct hvdxg_tracked_resource *resource,
+    struct hvdxg_tracked_allocation *allocation,
+    struct hvdxg_object_entry *resource_entry,
+    struct hvdxg_object_entry *allocation_entry)
+{
+    struct hvdxg_object_entry *entry;
+    struct hvdxg_object_entry *device_entry = NULL;
+    struct hvdxg_object_entry *shared_owner_entry = NULL;
+
+    hvdxg.ntshared_runtime_seen = 1;
+    hvdxg.ntshared_runtime_user_object = user_object;
+    hvdxg.ntshared_runtime_kind = HV_DXG_SHARED_OBJECT_RESOURCE;
+    hvdxg.ntshared_runtime_host_object = host_object;
+    hvdxg.ntshared_runtime_owner_process = process;
+    if (resource != NULL) {
+        hvdxg.ntshared_runtime_user_device = resource->device;
+        hvdxg.ntshared_runtime_host_device =
+            hvdxg.sharedhandle_last_host_device;
+        hvdxg.ntshared_runtime_owner_process = resource->owner_process;
+        hvdxg.ntshared_runtime_owner_generation =
+            resource->owner_generation;
+        hvdxg.ntshared_runtime_owner_refs = resource->owner_refs;
+        hvdxg.ntshared_runtime_resource = resource->resource;
+        hvdxg.ntshared_runtime_resource_host =
+            resource_entry != NULL ?
+            (uint32)resource_entry->host_handle : host_object;
+        hvdxg.ntshared_runtime_resource_flags =
+            resource->host_create_flags_value != 0 ?
+            resource->host_create_flags_value : resource->create_flags_value;
+        hvdxg.ntshared_runtime_alloc =
+            hvdxg.sharedhandle_last_allocation;
+        hvdxg.ntshared_runtime_alloc_flags =
+            allocation != NULL ? allocation->flags :
+            (resource->allocation_count != 0 ?
+             resource->allocation_flags[0] : 0);
+        hvdxg.ntshared_runtime_alloc_size =
+            allocation != NULL ? allocation->size :
+            (resource->allocation_count != 0 ?
+             resource->allocation_sizes[0] : 0);
+        hvdxg.ntshared_runtime_alloc_owner_process =
+            allocation != NULL ? allocation->owner_process : 0;
+        hvdxg.ntshared_runtime_alloc_owner_generation =
+            allocation != NULL ? allocation->owner_generation : 0;
+        hvdxg.ntshared_runtime_alloc_owner_refs =
+            allocation != NULL ? allocation->owner_refs : 0;
+        hvdxg.ntshared_runtime_meta_created =
+            resource->shared_metadata_created;
+        hvdxg.ntshared_runtime_sealed_before = resource->sealed;
+        hvdxg.ntshared_runtime_sealed_after = resource->sealed;
+        hvdxg.ntshared_runtime_host_sealed_before =
+            resource->host_shared_sealed;
+        hvdxg.ntshared_runtime_host_sealed_after =
+            resource->host_shared_sealed;
+        hvdxg.ntshared_pre_resource_type =
+            resource_entry != NULL ? resource_entry->type :
+            HV_DXG_OBJECT_NONE;
+        hvdxg.ntshared_pre_resource_local =
+            resource_entry != NULL ? (uint32)resource_entry->handle :
+            resource->resource;
+        hvdxg.ntshared_pre_resource_host =
+            resource_entry != NULL ? (uint32)resource_entry->host_handle :
+            host_object;
+        hvdxg.ntshared_pre_resource_generation =
+            resource_entry != NULL ? resource_entry->generation : 0;
+        hvdxg.ntshared_pre_resource_destroyed =
+            resource_entry != NULL ? resource_entry->destroyed : 0;
+        hvdxg.ntshared_pre_resource_refs =
+            resource_entry != NULL ? resource_entry->refs : 0;
+        hvdxg.ntshared_pre_resource_index =
+            resource_entry != NULL ? resource_entry->index : 0;
+        hvdxg.ntshared_pre_resource_unique =
+            resource_entry != NULL ? resource_entry->unique : 0;
+        hvdxg.ntshared_pre_resource_instance =
+            resource_entry != NULL ? resource_entry->instance : 0;
+        hvdxg.ntshared_pre_resource_sealed = resource->sealed;
+        hvdxg.ntshared_pre_resource_open_count = resource->open_count;
+        hvdxg.ntshared_pre_alloc_type =
+            allocation_entry != NULL ? allocation_entry->type :
+            HV_DXG_OBJECT_NONE;
+        hvdxg.ntshared_pre_alloc_local =
+            allocation_entry != NULL ? (uint32)allocation_entry->handle :
+            hvdxg.ntshared_runtime_alloc;
+        hvdxg.ntshared_pre_alloc_host =
+            allocation_entry != NULL ? (uint32)allocation_entry->host_handle :
+            hvdxg.ntshared_runtime_alloc;
+        hvdxg.ntshared_pre_alloc_generation =
+            allocation_entry != NULL ? allocation_entry->generation : 0;
+        hvdxg.ntshared_pre_alloc_destroyed =
+            allocation_entry != NULL ? allocation_entry->destroyed : 0;
+        hvdxg.ntshared_pre_alloc_refs =
+            allocation_entry != NULL ? allocation_entry->refs : 0;
+        hvdxg.ntshared_pre_alloc_index =
+            allocation_entry != NULL ? allocation_entry->index : 0;
+        hvdxg.ntshared_pre_alloc_unique =
+            allocation_entry != NULL ? allocation_entry->unique : 0;
+        hvdxg.ntshared_pre_alloc_instance =
+            allocation_entry != NULL ? allocation_entry->instance : 0;
+        device_entry = hvdxg_owner_find_object(
+            owner, HV_DXG_OBJECT_DEVICE, resource->device);
+        hvdxg.ntshared_pre_device_type =
+            device_entry != NULL ? device_entry->type : HV_DXG_OBJECT_NONE;
+        hvdxg.ntshared_pre_device_local =
+            device_entry != NULL ? (uint32)device_entry->handle :
+            resource->device;
+        hvdxg.ntshared_pre_device_host =
+            device_entry != NULL ? (uint32)device_entry->host_handle :
+            hvdxg.sharedhandle_last_host_device;
+        hvdxg.ntshared_pre_device_generation =
+            device_entry != NULL ? device_entry->generation : 0;
+        hvdxg.ntshared_pre_device_destroyed =
+            device_entry != NULL ? device_entry->destroyed : 0;
+        hvdxg.ntshared_pre_device_refs =
+            device_entry != NULL ? device_entry->refs : 0;
+        hvdxg.ntshared_pre_device_index =
+            device_entry != NULL ? device_entry->index : 0;
+        hvdxg.ntshared_pre_device_unique =
+            device_entry != NULL ? device_entry->unique : 0;
+        hvdxg.ntshared_pre_device_instance =
+            device_entry != NULL ? device_entry->instance : 0;
+        hvdxg.ntshared_pre_shared_owner_object =
+            resource->host_shared_object;
+        hvdxg.ntshared_pre_shared_owner_process =
+            resource->host_shared_process;
+        hvdxg.ntshared_pre_shared_owner_refs = resource->host_shared_refs;
+        hvdxg.ntshared_pre_shared_owner_nt =
+            resource->host_shared_handle_nt;
+        hvdxg.ntshared_pre_shared_owner_sealed =
+            resource->host_shared_sealed;
+        shared_owner_entry = hvdxg_owner_find_object_any(
+            owner, resource->host_shared_object, 1);
+        if (shared_owner_entry != NULL) {
+            hvdxg.ntshared_pre_shared_owner_found = 1;
+            hvdxg.ntshared_pre_shared_owner_type =
+                shared_owner_entry->type;
+            hvdxg.ntshared_pre_shared_owner_local =
+                (uint32)shared_owner_entry->handle;
+            hvdxg.ntshared_pre_shared_owner_host =
+                (uint32)shared_owner_entry->host_handle;
+            hvdxg.ntshared_pre_shared_owner_generation =
+                shared_owner_entry->generation;
+            hvdxg.ntshared_pre_shared_owner_destroyed =
+                shared_owner_entry->destroyed;
+            hvdxg.ntshared_pre_shared_owner_index =
+                shared_owner_entry->index;
+            hvdxg.ntshared_pre_shared_owner_unique =
+                shared_owner_entry->unique;
+            hvdxg.ntshared_pre_shared_owner_instance =
+                shared_owner_entry->instance;
+        }
+        hvdxg.ntshared_pre_runtime_size =
+            resource->private_runtime_data_size;
+        hvdxg.ntshared_pre_runtime_hash =
+            hvdxg_hash_bytes(resource->private_runtime_data,
+                             resource->private_runtime_data_size);
+        hvdxg.ntshared_pre_resource_priv_size =
+            resource->resource_priv_drv_data_size;
+        hvdxg.ntshared_pre_resource_priv_hash =
+            hvdxg_hash_bytes(resource->resource_priv_drv_data,
+                             resource->resource_priv_drv_data_size);
+        hvdxg.ntshared_pre_total_priv_size =
+            resource->total_priv_drv_data_size;
+        hvdxg.ntshared_pre_total_priv_hash =
+            hvdxg_hash_bytes(resource->total_priv_drv_data,
+                             resource->total_priv_drv_data_size);
+        hvdxg.ntshared_pre_alloc_out_size =
+            hvdxg.d3d12_shared_alloc_out_priv_head_len;
+        hvdxg.ntshared_pre_alloc_out_hash =
+            hvdxg_hash_bytes(hvdxg.d3d12_shared_alloc_out_priv_head,
+                             hvdxg.d3d12_shared_alloc_out_priv_head_len);
+        for (uint32 i = 0; i < 4; i++) {
+            uint32 off = i * sizeof(uint32);
+
+            hvdxg.ntshared_pre_runtime_w[i] =
+                hvdxg_read_u32_at(resource->private_runtime_data,
+                                  resource->private_runtime_data_size, off);
+            hvdxg.ntshared_pre_resource_priv_w[i] =
+                hvdxg_read_u32_at(resource->resource_priv_drv_data,
+                                  resource->resource_priv_drv_data_size, off);
+            hvdxg.ntshared_pre_total_priv_w[i] =
+                hvdxg_read_u32_at(resource->total_priv_drv_data,
+                                  resource->total_priv_drv_data_size, off);
+            hvdxg.ntshared_pre_alloc_out_w[i] =
+                hvdxg_read_u32_at(hvdxg.d3d12_shared_alloc_out_priv_head,
+                                  hvdxg.d3d12_shared_alloc_out_priv_head_len,
+                                  off);
+        }
+        hvdxg.ntshared_pre_create_seq = hvdxg.d3d12_shared_create_seq;
+        hvdxg.ntshared_pre_first_nt_seq = hvdxg.d3d12_shared_first_nt_seq;
+        hvdxg.ntshared_pre_event_seq = hvdxg.d3d12_shared_event_seq;
+        hvdxg.ntshared_model_process_state =
+            owner != NULL && owner->process_state != NULL ? 1U : 0U;
+        hvdxg.ntshared_model_open_process =
+            hvdxg_open_host_process(owner);
+        hvdxg.ntshared_model_open_generation =
+            hvdxg_open_process_generation(owner);
+        hvdxg.ntshared_model_open_refs = hvdxg_open_process_refs(owner);
+        hvdxg.ntshared_model_global_process = hvdxg.dxg_process.v;
+        hvdxg.ntshared_model_command_process = process;
+        hvdxg.ntshared_model_resource_owner = resource->owner_process;
+        hvdxg.ntshared_model_resource_generation =
+            resource->owner_generation;
+        hvdxg.ntshared_model_alloc_owner =
+            allocation != NULL ? allocation->owner_process : 0;
+        hvdxg.ntshared_model_alloc_generation =
+            allocation != NULL ? allocation->owner_generation : 0;
+        hvdxg.ntshared_model_cmd_eq_open =
+            process != 0 && process == hvdxg.ntshared_model_open_process;
+        hvdxg.ntshared_model_cmd_eq_global =
+            process != 0 && process == hvdxg.dxg_process.v;
+        hvdxg.ntshared_model_cmd_eq_resource =
+            process != 0 && process == resource->owner_process;
+        hvdxg.ntshared_model_cmd_eq_alloc =
+            allocation != NULL && process != 0 &&
+            process == allocation->owner_process;
+        hvdxg.ntshared_model_open_objects =
+            owner != NULL ? owner->object_count : 0;
+        hvdxg.ntshared_model_process_objects =
+            owner != NULL && owner->process_state != NULL ?
+            owner->process_state->object_count : 0;
+        hvdxg.ntshared_model_resources =
+            owner != NULL ? owner->resource_count : 0;
+        hvdxg.ntshared_model_allocations =
+            owner != NULL ? owner->allocation_count : 0;
+        hvdxg.ntshared_model_devices =
+            owner != NULL ? owner->device_count : 0;
+        hvdxg.ntshared_model_contexts =
+            owner != NULL ? owner->context_count : 0;
+        hvdxg.ntshared_model_process_live = hvdxg.process_live;
+        hvdxg.ntshared_model_process_generation = hvdxg.process_generation;
+    }
+    hvdxg.ntshared_runtime_alloc_host =
+        allocation_entry != NULL ? (uint32)allocation_entry->host_handle :
+        hvdxg.ntshared_runtime_alloc;
+
+    entry = hvdxg_owner_find_object_any(owner, user_object, 1);
+    if (entry == NULL)
+        return;
+    hvdxg.ntshared_runtime_entry_found = 1;
+    hvdxg.ntshared_runtime_entry_exact =
+        entry->handle == user_object ? 1 : 0;
+    hvdxg.ntshared_runtime_entry_type = entry->type;
+    hvdxg.ntshared_runtime_entry_local = (uint32)entry->handle;
+    hvdxg.ntshared_runtime_entry_host = (uint32)entry->host_handle;
+    hvdxg.ntshared_runtime_entry_parent = (uint32)entry->parent;
+    hvdxg.ntshared_runtime_entry_device = entry->device;
+    hvdxg.ntshared_runtime_entry_generation = entry->generation;
+    hvdxg.ntshared_runtime_entry_destroyed = entry->destroyed;
+}
+
+static void hvdxg_note_ntshared_runtime_return(
+    struct hvdxg_tracked_resource *resource, int ret, uint32 handle)
+{
+    hvdxg.ntshared_runtime_cmd_len =
+        hvdxg.ntshared_last_create_cmd_len;
+    hvdxg.ntshared_runtime_wire_len =
+        hvdxg.ntshared_create_attempt_wire_len[0];
+    hvdxg.ntshared_runtime_ext = hvdxg.ntshared_create_attempt_ext[0];
+    hvdxg.ntshared_runtime_ext_offset =
+        hvdxg.ntshared_create_attempt_ext_offset[0];
+    hvdxg.ntshared_runtime_object_offset =
+        hvdxg.ntshared_last_create_object_offset;
+    hvdxg.ntshared_runtime_result_len =
+        hvdxg.ntshared_last_create_result_len;
+    hvdxg.ntshared_runtime_return_len = hvdxg.ntshared_last_create_len;
+    hvdxg.ntshared_runtime_return_ret = ret;
+    hvdxg.ntshared_runtime_return_raw = hvdxg.ntshared_last_create_raw0;
+    hvdxg.ntshared_runtime_return_handle = handle;
+    if (resource != NULL) {
+        hvdxg.ntshared_runtime_meta_created =
+            resource->shared_metadata_created;
+        hvdxg.ntshared_runtime_sealed_after = resource->sealed;
+        hvdxg.ntshared_runtime_host_sealed_after =
+            resource->host_shared_sealed;
+    }
+}
+
+static int hvdxg_seal_resource(struct hvdxg_tracked_resource *resource)
+{
+    if (resource == NULL)
+        return -EINVAL;
+    if (resource->sealed) {
+        hvdxg.sharedresource_seal_reuses++;
+        return 0;
+    }
+    if (!resource->create_shared || !resource->nt_security_sharing ||
+        !resource->shared_metadata_created ||
+        resource->allocation_count == 0 ||
+        resource->allocation_count > HV_DXG_ALLOCATION_MAX ||
+        resource->total_priv_drv_data_size == 0) {
+        hvdxg.sharedresource_seal_denied++;
+        return -EINVAL;
+    }
+    resource->sealed = 1;
+    resource->sealed_generation = ++hvdxg.sharedresource_seals;
+    if (resource->open_count == 0)
+        resource->open_count = 1;
+    return 0;
+}
+
+static int hvdxg_seal_resource_from_owner(struct hvdxg_open_state *owner,
+                                          struct hvdxg_tracked_resource *resource)
+{
+    int ret;
+
+    if (resource == NULL)
+        return -EINVAL;
+    if (!resource->sealed) {
+        ret = hvdxg_refresh_resource_allocations(owner, resource);
+        if (ret != 0) {
+            hvdxg.sharedresource_seal_denied++;
+            return ret;
+        }
+    }
+    return hvdxg_seal_resource(resource);
 }
 
 static int hvdxg_copy_user_bytes(uint8 **dst, uint64 src, uint32 size)
@@ -4382,7 +13741,10 @@ static void hvdxg_track_resource(struct hvdxg_open_state *owner,
                                  struct d3dddi_allocationinfo2 *alloc_info,
                                  struct hvdxg_command_createallocation_return *result,
                                  const uint8 *alloc_private_data,
+                                 const uint32 *alloc_private_sizes,
                                  uint32 total_alloc_private,
+                                 uint32 alloc_private_from_host,
+                                 const uint8 *runtime_private_data,
                                  const uint8 *resource_priv_data,
                                  uint32 resource_priv_data_size)
 {
@@ -4401,28 +13763,76 @@ static void hvdxg_track_resource(struct hvdxg_open_state *owner,
     tmp.resource = req->resource.v;
     tmp.global_share = req->global_share.v != 0 ?
                        req->global_share.v : result->global_share.v;
+    tmp.owner_process = hvdxg_open_host_process(owner);
+    tmp.owner_generation = hvdxg_open_process_generation(owner);
+    tmp.owner_refs = hvdxg_open_process_refs(owner);
     tmp.allocation_count = req->alloc_count;
+    tmp.create_flags_value = requested_flags.value;
+    tmp.host_create_flags_value = result->flags.value;
     tmp.create_shared = requested_flags.create_shared;
     tmp.nt_security_sharing = requested_flags.nt_security_sharing;
+    tmp.shared_metadata_created =
+        tmp.create_shared && tmp.nt_security_sharing ? 1 : 0;
+    if (tmp.shared_metadata_created) {
+        tmp.host_shared_process = tmp.owner_process;
+        tmp.host_shared_object = tmp.resource;
+        tmp.host_shared_refs = 1;
+        tmp.host_shared_sealed = 0;
+    }
+    if (requested_flags.value == 0x47) {
+        hvdxg.d3d12_shared_track_shared = tmp.create_shared;
+        hvdxg.d3d12_shared_track_nt = tmp.nt_security_sharing;
+        hvdxg.d3d12_shared_track_metadata = tmp.shared_metadata_created;
+        hvdxg.d3d12_shared_track_sent_bytes =
+            runtime_private_data != NULL ? 1 : 0;
+        hvdxg.d3d12_shared_track_alloc_from_host =
+            alloc_private_from_host;
+    }
+    tmp.open_count = 1;
     tmp.private_runtime_data_size = req->private_runtime_data_size;
     tmp.resource_priv_drv_data_size = resource_priv_data_size;
     tmp.total_priv_drv_data_size = total_alloc_private;
+    tmp.total_priv_from_host = alloc_private_from_host ? 1 : 0;
     for (uint32 i = 0; i < req->alloc_count; i++) {
-        tmp.alloc_priv_sizes[i] = alloc_info[i].priv_drv_data_size;
+        tmp.allocation_handles[i] = alloc_info[i].allocation.v;
+        tmp.alloc_priv_sizes[i] = alloc_private_sizes != NULL ?
+                                  alloc_private_sizes[i] :
+                                  alloc_info[i].priv_drv_data_size;
         tmp.allocation_sizes[i] =
             result->allocation_info[i].allocation_size;
         tmp.allocation_flags[i] =
             result->allocation_info[i].allocation_flags;
+        if (alloc_info[i].sysmem != 0) {
+            tmp.existing_sysmem = 1;
+            tmp.existing_sysmem_va = alloc_info[i].sysmem;
+            tmp.existing_sysmem_size =
+                result->allocation_info[i].allocation_size;
+            if (alloc_info[i].allocation.v ==
+                    hvdxg.existing_sysmem_last_allocation) {
+                tmp.existing_sysmem_pfnmap_pages =
+                    hvdxg.existing_sysmem_last_pfnmap_pages;
+                tmp.existing_sysmem_vram =
+                    hvdxg.existing_sysmem_last_vram;
+            }
+        }
     }
     if (req->flags.standard_allocation && req->alloc_count == 1 &&
         total_alloc_private != 0)
         tmp.alloc_priv_sizes[0] = total_alloc_private;
 
-    ret = hvdxg_copy_user_bytes(&tmp.private_runtime_data,
-                                req->private_runtime_data,
-                                tmp.private_runtime_data_size);
+    if (runtime_private_data != NULL) {
+        ret = hvdxg_copy_kernel_bytes(&tmp.private_runtime_data,
+                                      runtime_private_data,
+                                      tmp.private_runtime_data_size);
+    } else {
+        ret = hvdxg_copy_user_bytes(&tmp.private_runtime_data,
+                                    req->private_runtime_data,
+                                    tmp.private_runtime_data_size);
+    }
     if (ret != 0)
         goto fail;
+    tmp.runtime_d3d12_flags = hvdxg_runtime_d3d12_resource_flags(
+        tmp.private_runtime_data, tmp.private_runtime_data_size);
     ret = hvdxg_copy_kernel_bytes(&tmp.resource_priv_drv_data,
                                   resource_priv_data,
                                   tmp.resource_priv_drv_data_size);
@@ -4447,6 +13857,14 @@ static void hvdxg_track_resource(struct hvdxg_open_state *owner,
         hvdxg_free_tracked_resource(slot);
     }
     *slot = tmp;
+    if (tmp.shared_metadata_created)
+        hvdxg.sharedresource_created++;
+    if (slot->existing_sysmem)
+        hvdxg_note_existing_sysmem_share(slot, 1);
+    hvdxg.allocation_last_owner_process = slot->owner_process;
+    hvdxg.allocation_last_owner_generation = slot->owner_generation;
+    (void)hvdxg_track_object(owner, HV_DXG_OBJECT_RESOURCE,
+                             tmp.resource, tmp.device, tmp.device);
     return;
 
 fail:
@@ -4485,41 +13903,443 @@ fail:
     return ret;
 }
 
-static int hvdxg_create_nt_shared_object(uint32 object, uint32 *shared_handle)
+static void hvdxg_ntshared_cache_note(uint32 kind, uint32 process,
+                                      uint32 object, uint32 handle,
+                                      uint32 refs)
 {
-    struct hvdxg_command_createntsharedobject create;
-    struct hvdxg_d3dkmthandle result;
-    uint32 actual_len = 0;
+    hvdxg.ntshared_cache_last_kind = kind;
+    hvdxg.ntshared_cache_last_process = process;
+    hvdxg.ntshared_cache_last_object = object;
+    hvdxg.ntshared_cache_last_handle = handle;
+    hvdxg.ntshared_cache_last_refs = refs;
+}
+
+static int hvdxg_ntshared_cache_get(uint32 kind, uint32 process,
+                                    uint32 object, uint32 *handle_out)
+{
+    if (handle_out != NULL)
+        *handle_out = 0;
+    if (kind == 0 || process == 0 || object == 0 || handle_out == NULL)
+        return 0;
+    for (uint32 i = 0; i < HV_DXG_NTSHARED_CACHE_MAX; i++) {
+        struct hvdxg_ntshared_cache_entry *entry =
+            &hvdxg.ntshared_cache[i];
+
+        if (entry->kind == kind && entry->process == process &&
+            entry->object == object && entry->host_nt_handle != 0) {
+            entry->refs++;
+            *handle_out = entry->host_nt_handle;
+            hvdxg.ntshared_cache_hits++;
+            hvdxg_ntshared_cache_note(kind, process, object,
+                                      entry->host_nt_handle, entry->refs);
+            return 1;
+        }
+    }
+    hvdxg.ntshared_cache_misses++;
+    hvdxg_ntshared_cache_note(kind, process, object, 0, 0);
+    return 0;
+}
+
+static void hvdxg_ntshared_cache_insert(uint32 kind, uint32 process,
+                                        uint32 object, uint32 handle)
+{
+    if (kind == 0 || process == 0 || object == 0 || handle == 0)
+        return;
+    for (uint32 i = 0; i < HV_DXG_NTSHARED_CACHE_MAX; i++) {
+        struct hvdxg_ntshared_cache_entry *entry =
+            &hvdxg.ntshared_cache[i];
+
+        if (entry->kind == 0 || (entry->kind == kind &&
+            entry->process == process && entry->object == object)) {
+            entry->kind = kind;
+            entry->process = process;
+            entry->object = object;
+            entry->host_nt_handle = handle;
+            entry->refs = 1;
+            hvdxg.ntshared_cache_inserts++;
+            hvdxg_ntshared_cache_note(kind, process, object, handle, 1);
+            return;
+        }
+    }
+    hvdxg.ntshared_cache_full++;
+    hvdxg_ntshared_cache_note(kind, process, object, handle, 0);
+}
+
+static uint32 hvdxg_ntshared_cache_put(uint32 kind, uint32 process,
+                                       uint32 object, uint32 handle)
+{
+    if (kind == 0 || process == 0 || object == 0 || handle == 0)
+        return handle;
+    for (uint32 i = 0; i < HV_DXG_NTSHARED_CACHE_MAX; i++) {
+        struct hvdxg_ntshared_cache_entry *entry =
+            &hvdxg.ntshared_cache[i];
+
+        if (entry->kind == kind && entry->process == process &&
+            entry->object == object && entry->host_nt_handle == handle) {
+            if (entry->refs > 1) {
+                entry->refs--;
+                hvdxg.ntshared_cache_releases++;
+                hvdxg_ntshared_cache_note(kind, process, object, handle,
+                                          entry->refs);
+                return 0;
+            }
+            memset(entry, 0, sizeof(*entry));
+            hvdxg.ntshared_cache_releases++;
+            hvdxg.ntshared_cache_destroys++;
+            hvdxg_ntshared_cache_note(kind, process, object, handle, 0);
+            return handle;
+        }
+    }
+    hvdxg_ntshared_cache_note(kind, process, object, handle, 0);
+    return handle;
+}
+
+static uint32 hvdxg_ntshared_cache_refs(uint32 kind, uint32 process,
+                                        uint32 object, uint32 handle)
+{
+    if (kind == 0 || process == 0 || object == 0 || handle == 0)
+        return 0;
+    for (uint32 i = 0; i < HV_DXG_NTSHARED_CACHE_MAX; i++) {
+        struct hvdxg_ntshared_cache_entry *entry =
+            &hvdxg.ntshared_cache[i];
+
+        if (entry->kind == kind && entry->process == process &&
+            entry->object == object && entry->host_nt_handle == handle)
+            return entry->refs;
+    }
+    return 0;
+}
+
+static void hvdxg_snapshot_last_completion(uint16 *type_out, uint32 *len_out,
+                                           uint8 prefix[8]);
+
+static void hvdxg_note_ntshared_create_wire(uint32 attempt,
+                                            const void *command,
+                                            uint32 cmd_len,
+                                            uint32 result_len,
+                                            uint32 ext,
+                                            int ext_host_vgpu_luid)
+{
+    uint8 wire[HV_DXG_NTSHARED_RAW_BYTES];
+    uint32 copied = 0;
+    uint32 n;
+
+    if (attempt >= HV_DXG_NTSHARED_ATTEMPT_MAX || command == NULL)
+        return;
+    memset(hvdxg.ntshared_create_attempt_head[attempt], 0,
+           sizeof(hvdxg.ntshared_create_attempt_head[attempt]));
+    hvdxg.ntshared_create_attempt_head_len[attempt] = 0;
+    hvdxg.ntshared_create_attempt_result_len[attempt] = result_len;
+    hvdxg.ntshared_create_attempt_cmdid[attempt] =
+        ((const struct hvdxg_command_vm_to_host *)command)->command_id;
+    hvdxg.ntshared_create_attempt_command[attempt] =
+        ((const struct hvdxg_command_vm_to_host *)command)->command_type;
+
+    memset(wire, 0, sizeof(wire));
+    if (ext != 0) {
+        struct hvdxg_ext_header hdr;
+
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.command_offset = sizeof(hdr);
+        if (ext_host_vgpu_luid)
+            hdr.vgpu_luid = hvdxg_ext_adapter_luid(NULL);
+        n = sizeof(hdr) < sizeof(wire) ? sizeof(hdr) : sizeof(wire);
+        memcpy(wire, &hdr, n);
+        copied = n;
+    }
+    if (copied < sizeof(wire)) {
+        n = cmd_len < sizeof(wire) - copied ?
+            cmd_len : sizeof(wire) - copied;
+        memcpy(wire + copied, command, n);
+        copied += n;
+    }
+    memcpy(hvdxg.ntshared_create_attempt_head[attempt], wire, copied);
+    hvdxg.ntshared_create_attempt_head_len[attempt] = copied;
+}
+
+static void hvdxg_note_shareobject_wire(const void *command, uint32 cmd_len,
+                                        uint32 result_len)
+{
+    uint8 wire[HV_DXG_NTSHARED_RAW_BYTES];
+    uint32 copied = 0;
+    uint32 n;
+    uint32 ext = hvdxg.use_ext_header ? 1 : 0;
+    uint32 ext_offset = ext != 0 ? sizeof(struct hvdxg_ext_header) : 0;
+
+    hvdxg.shareobject_last_wire_len = cmd_len + ext_offset;
+    hvdxg.shareobject_last_ext = ext;
+    hvdxg.shareobject_last_ext_offset = ext_offset;
+    hvdxg.shareobject_last_result_len = result_len;
+    hvdxg.shareobject_last_head_len = 0;
+    memset(hvdxg.shareobject_last_head, 0,
+           sizeof(hvdxg.shareobject_last_head));
+
+    memset(wire, 0, sizeof(wire));
+    if (ext != 0) {
+        struct hvdxg_ext_header hdr;
+
+        memset(&hdr, 0, sizeof(hdr));
+        hdr.command_offset = sizeof(hdr);
+        n = sizeof(hdr) < sizeof(wire) ? sizeof(hdr) : sizeof(wire);
+        memcpy(wire, &hdr, n);
+        copied = n;
+    }
+    if (copied < sizeof(wire)) {
+        n = cmd_len < sizeof(wire) - copied ?
+            cmd_len : sizeof(wire) - copied;
+        memcpy(wire + copied, command, n);
+        copied += n;
+    }
+    memcpy(hvdxg.shareobject_last_head, wire, copied);
+    hvdxg.shareobject_last_head_len = copied;
+}
+
+static void hvdxg_note_ntshared_create_attempt(uint32 attempt, uint32 cmd_len,
+                                               uint32 wire_len, uint32 ext,
+                                               uint32 ext_offset,
+                                               uint32 object_offset,
+                                               uint32 actual_len, int ret,
+                                               uint32 raw0,
+                                               uint32 status, uint32 process,
+                                               uint32 object)
+{
+    if (attempt >= HV_DXG_NTSHARED_ATTEMPT_MAX)
+        return;
+    if (hvdxg.ntshared_create_attempts < attempt + 1)
+        hvdxg.ntshared_create_attempts = attempt + 1;
+    hvdxg.ntshared_create_attempt_cmd_len[attempt] = cmd_len;
+    hvdxg.ntshared_create_attempt_wire_len[attempt] = wire_len;
+    hvdxg.ntshared_create_attempt_ext[attempt] = ext;
+    hvdxg.ntshared_create_attempt_ext_offset[attempt] = ext_offset;
+    hvdxg.ntshared_create_attempt_object_offset[attempt] = object_offset;
+    hvdxg.ntshared_create_attempt_len[attempt] = actual_len;
+    hvdxg.ntshared_create_attempt_ret[attempt] = ret;
+    hvdxg.ntshared_create_attempt_raw0[attempt] = raw0;
+    hvdxg.ntshared_create_attempt_status[attempt] = status;
+    hvdxg.ntshared_create_attempt_process[attempt] = process;
+    hvdxg.ntshared_create_attempt_object[attempt] = object;
+    if (hvdxg.d3d12_shared_first_nt_seq == 0 && object != 0 &&
+        (object == hvdxg.d3d12_shared_alloc_resource_out ||
+         object == hvdxg.d3d12_shared_alloc_allocation))
+        hvdxg.d3d12_shared_first_nt_seq =
+            ++hvdxg.d3d12_shared_event_seq;
+}
+
+static int hvdxg_send_create_nt_shared_object_attempt(
+    uint32 attempt, const void *command, uint32 cmd_len, uint32 object_offset,
+    uint32 process, uint32 object, struct hvdxg_d3dkmthandle *result,
+    uint32 *actual_len, int force_ext_header, int ext_host_vgpu_luid,
+    int suppress_ext_header, uint32 label)
+{
     int ret;
+    uint32 ext = !suppress_ext_header &&
+                 (hvdxg.use_ext_header || force_ext_header) ? 1 : 0;
+    uint32 ext_offset = ext != 0 ? sizeof(struct hvdxg_ext_header) : 0;
+    uint32 wire_len = cmd_len + ext_offset;
+
+    if (result == NULL || actual_len == NULL)
+        return -EINVAL;
+    result->v = 0;
+    *actual_len = 0;
+    hvdxg_note_ntshared_create_wire(attempt, command, cmd_len,
+                                    sizeof(*result), ext,
+                                    ext_host_vgpu_luid);
+    if (attempt < HV_DXG_NTSHARED_ATTEMPT_MAX)
+        hvdxg.ntshared_create_attempt_label[attempt] = label;
+    ret = hvdxg_send_sync_global_ex(command, cmd_len, result,
+                                    sizeof(*result), actual_len,
+                                    force_ext_header,
+                                    ext_host_vgpu_luid,
+                                    suppress_ext_header);
+    if (attempt < HV_DXG_NTSHARED_ATTEMPT_MAX) {
+        hvdxg.ntshared_create_attempt_channel[attempt] =
+            hvdxg.global_send_ntshared.channel;
+        hvdxg.ntshared_create_attempt_monitor[attempt] =
+            hvdxg.global_send_ntshared.monitor_allocated;
+        hvdxg.ntshared_create_attempt_monitorid[attempt] =
+            hvdxg.global_send_ntshared.monitorid;
+        hvdxg.ntshared_create_attempt_dedicated[attempt] =
+            hvdxg.global_send_ntshared.dedicated;
+    }
+    hvdxg.ntshared_last_create_cmd_len = cmd_len;
+    hvdxg.ntshared_last_create_object_offset = object_offset;
+    hvdxg.ntshared_last_create_len = *actual_len;
+    hvdxg.ntshared_last_create_object = object;
+    hvdxg.ntshared_last_create_raw0 = result->v;
+    hvdxg_snapshot_last_completion(
+        &hvdxg.ntshared_last_create_completion_type,
+        &hvdxg.ntshared_last_create_completion_len,
+        hvdxg.ntshared_last_create_completion_prefix);
+    if (ret == 0 && *actual_len == 0) {
+        hvdxg.ntshared_last_create_zero_len = 1;
+        ret = -EOVERFLOW;
+    } else if (ret == 0 && *actual_len < sizeof(*result)) {
+        ret = -EOVERFLOW;
+    } else if (ret == 0 && result->v == 0) {
+        ret = -EIO;
+    }
+    hvdxg_note_ntshared_create_attempt(
+        attempt, cmd_len, wire_len, ext, ext_offset, object_offset,
+        *actual_len, ret, result->v, result->v, process, object);
+    return ret;
+}
+
+static uint32 hvdxg_owner_host_object_handle(struct hvdxg_open_state *owner,
+                                             uint32 type, uint32 handle,
+                                             uint64 *parent_out)
+{
+    struct hvdxg_object_entry *entry;
+
+    if (parent_out != NULL)
+        *parent_out = 0;
+    entry = hvdxg_owner_find_object(owner, type, handle);
+    if (entry == NULL)
+        return 0;
+    if (parent_out != NULL)
+        *parent_out = entry->parent;
+    return (uint32)(entry->host_handle != 0 ? entry->host_handle :
+                    entry->handle);
+}
+
+static void hvdxg_snapshot_last_completion(uint16 *type_out, uint32 *len_out,
+                                           uint8 prefix[8])
+{
+    uint32 prefix_len;
+
+    if (type_out != NULL)
+        *type_out = hvdxg.completion_type;
+    if (len_out != NULL)
+        *len_out = hvdxg.completion_len;
+    if (prefix == NULL)
+        return;
+    memset(prefix, 0, 8);
+    prefix_len = hvdxg.completion_len < 8 ? hvdxg.completion_len : 8;
+    if (prefix_len != 0)
+        memcpy(prefix, hvdxg.completion_buf, prefix_len);
+}
+
+static int hvdxg_ntshared_default_ext_header(void)
+{
+    return hvdxg.use_ext_header ||
+           hvdxg.active_vmbus_version >= HV_DXG_VMBUS_INTERFACE_VERSION;
+}
+
+static int hvdxg_create_nt_shared_object(uint32 process, uint32 object,
+                                         uint32 fallback_object,
+                                         uint32 *used_object,
+                                         uint32 *shared_handle,
+                                         int prefer_wsl_layout)
+{
+    struct hvdxg_command_createntsharedobject_32 create;
+    struct hvdxg_d3dkmthandle result;
+    uint32 cmd_len = 0;
+    uint32 object_offset = 0;
+    uint32 actual_len = 0;
+    int use_ext_header;
+    int ret = -EIO;
 
     if (shared_handle != NULL)
         *shared_handle = 0;
-    if (object == 0 || shared_handle == NULL)
+    if (used_object != NULL)
+        *used_object = 0;
+    if (process == 0 || object == 0 || shared_handle == NULL)
         return -EINVAL;
 
-    memset(&create, 0, sizeof(create));
     memset(&result, 0, sizeof(result));
     hvdxg.ntshared_last_create_len = 0;
+    hvdxg.ntshared_last_create_cmd_len = sizeof(create);
+    hvdxg.ntshared_last_create_object_offset =
+        offsetof(struct hvdxg_command_createntsharedobject_32, object);
+    hvdxg.ntshared_last_create_result_len = sizeof(result);
+    hvdxg.ntshared_last_create_completion_type = 0;
+    hvdxg.ntshared_last_create_completion_len = 0;
+    memset(hvdxg.ntshared_last_create_completion_prefix, 0,
+           sizeof(hvdxg.ntshared_last_create_completion_prefix));
     hvdxg.ntshared_last_create_ret = 0;
+    hvdxg.ntshared_last_create_process = process;
+    hvdxg.ntshared_last_create_type =
+        HV_DXGK_VMBCOMMAND_CREATENTSHAREDOBJECT;
+    hvdxg.ntshared_last_create_channel = HV_DXGKVMB_VM_TO_HOST;
     hvdxg.ntshared_last_create_object = object;
     hvdxg.ntshared_last_create_handle = 0;
     hvdxg.ntshared_last_create_raw0 = 0;
+    hvdxg.ntshared_last_create_zero_len = 0;
+    hvdxg.ntshared_last_create_side_effect = 0;
+    hvdxg.ntshared_last_create_share_fallback = 0;
+    hvdxg.ntshared_last_create_share_valid = 0;
+    memset(&hvdxg.global_send_ntshared_ext, 0,
+           sizeof(hvdxg.global_send_ntshared_ext));
+    hvdxg.ntshared_create_attempts = 0;
+    memset(hvdxg.ntshared_create_attempt_len, 0,
+           sizeof(hvdxg.ntshared_create_attempt_len));
+    memset(hvdxg.ntshared_create_attempt_result_len, 0,
+           sizeof(hvdxg.ntshared_create_attempt_result_len));
+    memset(hvdxg.ntshared_create_attempt_cmdid, 0,
+           sizeof(hvdxg.ntshared_create_attempt_cmdid));
+    memset(hvdxg.ntshared_create_attempt_command, 0,
+           sizeof(hvdxg.ntshared_create_attempt_command));
+    memset(hvdxg.ntshared_create_attempt_cmd_len, 0,
+           sizeof(hvdxg.ntshared_create_attempt_cmd_len));
+    memset(hvdxg.ntshared_create_attempt_wire_len, 0,
+           sizeof(hvdxg.ntshared_create_attempt_wire_len));
+    memset(hvdxg.ntshared_create_attempt_ext, 0,
+           sizeof(hvdxg.ntshared_create_attempt_ext));
+    memset(hvdxg.ntshared_create_attempt_ext_offset, 0,
+           sizeof(hvdxg.ntshared_create_attempt_ext_offset));
+    memset(hvdxg.ntshared_create_attempt_object_offset, 0,
+           sizeof(hvdxg.ntshared_create_attempt_object_offset));
+    memset(hvdxg.ntshared_create_attempt_ret, 0,
+           sizeof(hvdxg.ntshared_create_attempt_ret));
+    memset(hvdxg.ntshared_create_attempt_raw0, 0,
+           sizeof(hvdxg.ntshared_create_attempt_raw0));
+    memset(hvdxg.ntshared_create_attempt_status, 0,
+           sizeof(hvdxg.ntshared_create_attempt_status));
+    memset(hvdxg.ntshared_create_attempt_process, 0,
+           sizeof(hvdxg.ntshared_create_attempt_process));
+    memset(hvdxg.ntshared_create_attempt_object, 0,
+           sizeof(hvdxg.ntshared_create_attempt_object));
+    memset(hvdxg.ntshared_create_attempt_label, 0,
+           sizeof(hvdxg.ntshared_create_attempt_label));
+    memset(hvdxg.ntshared_create_attempt_channel, 0,
+           sizeof(hvdxg.ntshared_create_attempt_channel));
+    memset(hvdxg.ntshared_create_attempt_monitor, 0,
+           sizeof(hvdxg.ntshared_create_attempt_monitor));
+    memset(hvdxg.ntshared_create_attempt_monitorid, 0,
+           sizeof(hvdxg.ntshared_create_attempt_monitorid));
+    memset(hvdxg.ntshared_create_attempt_dedicated, 0,
+           sizeof(hvdxg.ntshared_create_attempt_dedicated));
+    memset(hvdxg.ntshared_create_attempt_head_len, 0,
+           sizeof(hvdxg.ntshared_create_attempt_head_len));
+    memset(hvdxg.ntshared_create_attempt_head, 0,
+           sizeof(hvdxg.ntshared_create_attempt_head));
+
+    (void)fallback_object;
+    (void)prefer_wsl_layout;
+    use_ext_header = hvdxg_ntshared_default_ext_header();
+
+    memset(&create, 0, sizeof(create));
     hvdxg_command_vm_init(&create.hdr,
                           HV_DXGK_VMBCOMMAND_CREATENTSHAREDOBJECT);
-    create.hdr.process = hvdxg.dxg_process;
+    create.hdr.process.v = process;
     create.object.v = object;
-
-    ret = hvdxg_send_sync_global(&create, sizeof(create), &result,
-                                 sizeof(result), &actual_len);
-    hvdxg.ntshared_last_create_len = actual_len;
-    hvdxg.ntshared_last_create_raw0 = result.v;
-    if (ret == 0 && actual_len < sizeof(result))
-        ret = -EOVERFLOW;
-    if (ret == 0 && result.v == 0)
-        ret = -EIO;
+    cmd_len = sizeof(create);
+    object_offset =
+        offsetof(struct hvdxg_command_createntsharedobject_32, object);
+    hvdxg.ntshared_last_create_cmd_len = cmd_len;
+    hvdxg.ntshared_last_create_object_offset = object_offset;
+    ret = hvdxg_send_create_nt_shared_object_attempt(
+        0, &create, cmd_len, object_offset, process, object,
+        &result, &actual_len, use_ext_header, 0, !use_ext_header,
+        use_ext_header ?
+            HV_DXG_NTSHARED_LABEL_WSL_EXT32_ZERO_LUID_NATURAL :
+            HV_DXG_NTSHARED_LABEL_WSL_NOEXT32_NATURAL);
     if (ret == 0) {
         *shared_handle = result.v;
+        if (used_object != NULL)
+            *used_object = object;
         hvdxg.ntshared_last_create_handle = result.v;
+        hvdxg.ntshared_last_create_ret = 0;
+        return 0;
     }
     hvdxg.ntshared_last_create_ret = ret;
     return ret;
@@ -4539,6 +14359,7 @@ static int hvdxg_destroy_nt_shared_object(uint32 shared_handle)
     memset(&status, 0, sizeof(status));
     hvdxg.ntshared_last_destroy_len = 0;
     hvdxg.ntshared_last_destroy_ret = 0;
+    hvdxg.ntshared_last_destroy_status = 0;
     hvdxg.ntshared_last_destroy_handle = shared_handle;
     hvdxg_command_vm_init(&destroy.hdr,
                           HV_DXGK_VMBCOMMAND_DESTROYNTSHAREDOBJECT);
@@ -4547,11 +14368,37 @@ static int hvdxg_destroy_nt_shared_object(uint32 shared_handle)
     ret = hvdxg_send_sync_global(&destroy, sizeof(destroy), &status,
                                  sizeof(status), &actual_len);
     hvdxg.ntshared_last_destroy_len = actual_len;
-    if (ret == 0 && actual_len >= sizeof(status))
+    hvdxg.ntshared_last_destroy_status = status.v;
+    if (ret == 0 && actual_len < sizeof(status))
+        ret = -EOVERFLOW;
+    else if (ret == 0)
         ret = hvdxg_ntstatus_to_errno(status);
     hvdxg.ntshared_last_destroy_ret = ret;
     return ret;
 }
+
+static void hvdxg_clear_resource_nt_shared_handle(
+    struct hvdxg_tracked_resource *resource, uint32 handle)
+{
+    if (resource == NULL)
+        return;
+    if (handle != 0 && resource->host_shared_handle_nt != handle)
+        return;
+    resource->host_shared_handle_nt = 0;
+}
+
+static uint32 hvdxg_release_nt_shared_object_ref(uint32 kind, uint32 process,
+                                                 uint32 object, uint32 handle)
+{
+    uint32 destroy_handle;
+
+    destroy_handle = hvdxg_ntshared_cache_put(kind, process, object, handle);
+    if (destroy_handle != 0)
+        (void)hvdxg_destroy_nt_shared_object(destroy_handle);
+    return destroy_handle;
+}
+
+static uint32 hvdxg_shared_object_fops_kind(struct vfs_file *file);
 
 static int hvdxg_shared_object_release(struct vfs_inode *ip,
                                        struct vfs_file *file)
@@ -4561,8 +14408,75 @@ static int hvdxg_shared_object_release(struct vfs_inode *ip,
 
     (void)ip;
     if (shared != NULL) {
-        if (shared->host_nt_handle != 0)
-            (void)hvdxg_destroy_nt_shared_object(shared->host_nt_handle);
+        uint32 refs_before = 0;
+        uint32 destroy_handle = 0;
+
+        refs_before = hvdxg_ntshared_cache_refs(
+            shared->kind, shared->cache_process,
+            shared->cache_object != 0 ? shared->cache_object :
+            shared->object,
+            shared->host_nt_handle);
+        if (refs_before == 0 &&
+            shared->kind == HV_DXG_SHARED_OBJECT_RESOURCE)
+            refs_before = shared->resource.host_shared_refs;
+        hvdxg.sharedclose_last_kind = shared->kind;
+        hvdxg.sharedclose_last_process = shared->cache_process;
+        hvdxg.sharedclose_last_object =
+            shared->cache_object != 0 ? shared->cache_object :
+            shared->object;
+        hvdxg.sharedclose_last_cache_object = shared->cache_object;
+        hvdxg.sharedclose_last_nt_handle = shared->host_nt_handle;
+        hvdxg.sharedclose_last_global = shared->global_share;
+        hvdxg.sharedclose_last_refs_before = refs_before;
+        hvdxg.sharedclose_last_refs_after = refs_before;
+        hvdxg.sharedclose_last_fops_kind =
+            hvdxg_shared_object_fops_kind(file);
+        hvdxg.sharedclose_last_host_shared_handle =
+            shared->global_share;
+        hvdxg.sharedclose_last_destroy_handle = 0;
+        hvdxg.sharedclose_last_destroy_ret = 0;
+        hvdxg.sharedclose_last_destroy_status = 0;
+        hvdxg.sharedclose_last_destroy_actual_len = 0;
+        hvdxg.sharedclose_last_destroy_handle_offset =
+            offsetof(struct hvdxg_command_destroyntsharedobject,
+                     shared_handle);
+        hvdxg.sharedclose_last_destroy_cmd_len = 0;
+        hvdxg.sharedclose_last_destroy_wire_len = 0;
+        hvdxg.sharedclose_last_destroy_ext = 0;
+        hvdxg.sharedclose_last_destroy_ext_offset = 0;
+        hvdxg.sharedclose_last_destroy_result_len = 0;
+        if (shared->host_nt_handle != 0) {
+            destroy_handle = hvdxg_release_nt_shared_object_ref(
+                shared->kind, shared->cache_process,
+                shared->cache_object != 0 ? shared->cache_object :
+                shared->object,
+                shared->host_nt_handle);
+            hvdxg.sharedclose_last_refs_after =
+                hvdxg_ntshared_cache_refs(
+                    shared->kind, shared->cache_process,
+                    shared->cache_object != 0 ? shared->cache_object :
+                    shared->object, shared->host_nt_handle);
+            hvdxg.sharedclose_last_destroy_handle = destroy_handle;
+            hvdxg.sharedclose_last_destroy_ret =
+                destroy_handle != 0 ? hvdxg.ntshared_last_destroy_ret : 0;
+            hvdxg.sharedclose_last_destroy_status =
+                destroy_handle != 0 ?
+                hvdxg.ntshared_last_destroy_status : 0;
+            hvdxg.sharedclose_last_destroy_actual_len =
+                destroy_handle != 0 ? hvdxg.ntshared_last_destroy_len : 0;
+            if (destroy_handle != 0) {
+                hvdxg.sharedclose_last_destroy_cmd_len =
+                    hvdxg.global_send_destroynt.cmd_len;
+                hvdxg.sharedclose_last_destroy_wire_len =
+                    hvdxg.global_send_destroynt.wire_len;
+                hvdxg.sharedclose_last_destroy_ext =
+                    hvdxg.global_send_destroynt.ext;
+                hvdxg.sharedclose_last_destroy_ext_offset =
+                    hvdxg.global_send_destroynt.ext_offset;
+                hvdxg.sharedclose_last_destroy_result_len =
+                    hvdxg.global_send_destroynt.result_len;
+            }
+        }
         if (shared->kind == HV_DXG_SHARED_OBJECT_RESOURCE)
             hvdxg_free_tracked_resource(&shared->resource);
         kvfree(shared);
@@ -4571,9 +14485,64 @@ static int hvdxg_shared_object_release(struct vfs_inode *ip,
     return 0;
 }
 
-static struct vfs_file_ops hvdxg_shared_object_file_ops = {
+static int hvdxg_shared_object_stat(struct vfs_file *file, struct stat *st)
+{
+    struct hvdxg_shared_object *shared;
+
+    if (file == NULL || st == NULL)
+        return -EINVAL;
+    shared = (struct hvdxg_shared_object *)file->private_data;
+    if (shared == NULL)
+        return -EINVAL;
+
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFREG | 0600;
+    st->st_nlink = 1;
+    st->st_ino = shared->kind == HV_DXG_SHARED_OBJECT_SYNC ?
+        0x64786701ULL : 0x64786702ULL;
+    st->st_blksize = 4096;
+    return 0;
+}
+
+static ssize_t hvdxg_shared_object_readlink(struct vfs_file *file, char *buf,
+                                            size_t buflen)
+{
+    struct hvdxg_shared_object *shared;
+    const char *name;
+
+    if (file == NULL || buf == NULL)
+        return -EINVAL;
+    shared = (struct hvdxg_shared_object *)file->private_data;
+    if (shared == NULL)
+        return -EINVAL;
+
+    name = shared->kind == HV_DXG_SHARED_OBJECT_SYNC ?
+        "anon_inode:dxgsyncobj" : "anon_inode:dxgresource";
+    return snprintf(buf, buflen, "%s", name);
+}
+
+static struct vfs_file_ops hvdxg_shared_sync_file_ops = {
+    .stat = hvdxg_shared_object_stat,
+    .readlink = hvdxg_shared_object_readlink,
     .release = hvdxg_shared_object_release,
 };
+
+static struct vfs_file_ops hvdxg_shared_resource_file_ops = {
+    .stat = hvdxg_shared_object_stat,
+    .readlink = hvdxg_shared_object_readlink,
+    .release = hvdxg_shared_object_release,
+};
+
+static uint32 hvdxg_shared_object_fops_kind(struct vfs_file *file)
+{
+    if (file == NULL)
+        return HV_DXG_SHARED_FOPS_NONE;
+    if (file->ops == &hvdxg_shared_sync_file_ops)
+        return HV_DXG_SHARED_FOPS_SYNC;
+    if (file->ops == &hvdxg_shared_resource_file_ops)
+        return HV_DXG_SHARED_FOPS_RESOURCE;
+    return HV_DXG_SHARED_FOPS_NONE;
+}
 
 static struct hvdxg_shared_object *hvdxg_shared_object_from_fd(
     int fd, uint32 kind, struct vfs_file **file_out)
@@ -4588,7 +14557,8 @@ static struct hvdxg_shared_object *hvdxg_shared_object_from_fd(
     f = vfs_fdtable_get_file(current->fdtable, fd);
     if (f == NULL)
         return NULL;
-    if (f->ops != &hvdxg_shared_object_file_ops ||
+    if ((f->ops != &hvdxg_shared_sync_file_ops &&
+         f->ops != &hvdxg_shared_resource_file_ops) ||
         f->private_data == NULL) {
         vfs_fput(f);
         return NULL;
@@ -4605,8 +14575,229 @@ static struct hvdxg_shared_object *hvdxg_shared_object_from_fd(
     return shared;
 }
 
-static int hvdxg_share_object_with_host(uint32 device, uint32 object,
-                                        uint64 reserved, uint64 *nt_handle,
+static int hvdxg_sync_file_release(struct vfs_inode *ip,
+                                   struct vfs_file *file)
+{
+    struct hvdxg_sync_file_object *sync_file =
+        file != NULL ?
+        (struct hvdxg_sync_file_object *)file->private_data : NULL;
+
+    (void)ip;
+    if (sync_file != NULL) {
+        if (sync_file->event_id != 0)
+            hvdxg_remove_host_event(sync_file->event_id);
+        if (sync_file->host_nt_handle != 0)
+            (void)hvdxg_release_nt_shared_object_ref(
+                HV_DXG_SHARED_OBJECT_SYNC, sync_file->cache_process,
+                sync_file->cache_object != 0 ? sync_file->cache_object :
+                sync_file->sync_object,
+                sync_file->host_nt_handle);
+        kvfree(sync_file);
+        file->private_data = NULL;
+    }
+    return 0;
+}
+
+static int hvdxg_sync_file_stat(struct vfs_file *file, struct stat *st)
+{
+    if (file == NULL || file->private_data == NULL || st == NULL)
+        return -EINVAL;
+    memset(st, 0, sizeof(*st));
+    st->st_mode = S_IFREG | 0600;
+    st->st_nlink = 1;
+    st->st_ino = 0x64786703ULL;
+    st->st_blksize = 4096;
+    return 0;
+}
+
+static ssize_t hvdxg_sync_file_readlink(struct vfs_file *file, char *buf,
+                                        size_t buflen)
+{
+    if (file == NULL || file->private_data == NULL || buf == NULL)
+        return -EINVAL;
+    return snprintf(buf, buflen, "anon_inode:sync_file");
+}
+
+static struct vfs_file_ops hvdxg_sync_file_ops = {
+    .stat = hvdxg_sync_file_stat,
+    .readlink = hvdxg_sync_file_readlink,
+    .release = hvdxg_sync_file_release,
+};
+
+static struct hvdxg_sync_file_object *hvdxg_sync_file_from_fd(
+    int fd, struct vfs_file **file_out)
+{
+    struct vfs_file *f;
+
+    if (file_out != NULL)
+        *file_out = NULL;
+    if (fd < 0 || current == NULL || current->fdtable == NULL)
+        return NULL;
+    f = vfs_fdtable_get_file(current->fdtable, fd);
+    if (f == NULL)
+        return NULL;
+    if (f->ops != &hvdxg_sync_file_ops || f->private_data == NULL) {
+        vfs_fput(f);
+        return NULL;
+    }
+    if (file_out != NULL)
+        *file_out = f;
+    else
+        vfs_fput(f);
+    return (struct hvdxg_sync_file_object *)f->private_data;
+}
+
+static int hvdxg_open_sync_file_on_device(
+    struct hvdxg_open_state *owner, uint32 device,
+    struct hvdxg_sync_file_object *sync_file,
+    struct d3dddi_synchronizationobject_flags flags, uint32 engine_affinity,
+    int map_fence_va, struct hvdxg_d3dkmthandle *sync_out, uint64 *cpu_va_out,
+    uint64 *gpu_va_out, uint64 *kva_out)
+{
+    struct hvdxg_command_opensyncobject open;
+    struct hvdxg_command_opensyncobject_return result;
+    struct hvdxg_d3dkmthandle open_process;
+    uint32 actual_len = 0;
+    uint64 fence_pa = 0;
+    uint64 fence_kva = 0;
+    int ret;
+
+    if (sync_out != NULL)
+        sync_out->v = 0;
+    if (cpu_va_out != NULL)
+        *cpu_va_out = 0;
+    if (gpu_va_out != NULL)
+        *gpu_va_out = 0;
+    if (kva_out != NULL)
+        *kva_out = 0;
+    if (owner == NULL || sync_file == NULL || device == 0 ||
+        sync_file->global_share == 0 || !hvdxg_owner_has_device(owner, device))
+        return -EINVAL;
+
+    memset(&open, 0, sizeof(open));
+    memset(&result, 0, sizeof(result));
+    open_process = hvdxg_owner_bound_process_handle(owner);
+    hvdxg_command_vm_init(&open.hdr, HV_DXGK_VMBCOMMAND_OPENSYNCOBJECT);
+    open.hdr.process = open_process;
+    open.device.v = device;
+    open.global_sync_object.v = sync_file->global_share;
+    open.flags = flags;
+    open.engine_affinity = engine_affinity;
+
+    hvdxg.opensync_ioctl_count++;
+    hvdxg.opensync_last_cmd_len = 0;
+    hvdxg.opensync_last_wire_len = 0;
+    hvdxg.opensync_last_ext = 0;
+    hvdxg.opensync_last_ext_offset = 0;
+    hvdxg.opensync_last_result_len = sizeof(result);
+    hvdxg.opensync_last_actual_len = 0;
+    hvdxg.opensync_last_ret = -ENOTSUP;
+    hvdxg.opensync_last_status = 0;
+    hvdxg.opensync_last_process = open_process.v;
+    hvdxg.opensync_last_device = device;
+    hvdxg.opensync_last_device_host =
+        hvdxg_owner_host_object_handle(owner, HV_DXG_OBJECT_DEVICE,
+                                       device, NULL);
+    hvdxg.opensync_last_device_owner = hvdxg_open_host_process(owner);
+    hvdxg.opensync_last_device_owner_generation =
+        hvdxg_open_process_generation(owner);
+    hvdxg.opensync_last_device_generation = 0;
+    hvdxg.opensync_last_global = sync_file->global_share;
+    hvdxg.opensync_last_input_nt = 0;
+    hvdxg.opensync_last_host_nt = sync_file->host_nt_handle;
+    hvdxg.opensync_last_object = sync_file->sync_object;
+    hvdxg.opensync_last_cache_object = sync_file->cache_object;
+    hvdxg.opensync_last_source_device = sync_file->device;
+    hvdxg.opensync_last_source_device_host =
+        hvdxg_owner_host_object_handle(owner, HV_DXG_OBJECT_DEVICE,
+                                       sync_file->device, NULL);
+    hvdxg.opensync_last_source_owner = sync_file->cache_process;
+    hvdxg.opensync_last_source_owner_generation = 0;
+    hvdxg.opensync_last_source_flags = sync_file->sync_flags;
+    hvdxg.opensync_last_same_device =
+        device != 0 && sync_file->device == device;
+    hvdxg.opensync_last_adapter_match =
+        hvdxg_luid_nonzero(hvdxg.adapter_luid) &&
+        hvdxg_luid_nonzero(hvdxg.host_adapter_luid) ? 1 : 0;
+    hvdxg.opensync_last_adapter_low = hvdxg.adapter_luid.a;
+    hvdxg.opensync_last_adapter_high = hvdxg.adapter_luid.b;
+    hvdxg.opensync_last_host_adapter_low = hvdxg.host_adapter_luid.a;
+    hvdxg.opensync_last_host_adapter_high = hvdxg.host_adapter_luid.b;
+    hvdxg.opensync_last_flags = flags.value;
+    hvdxg.opensync_last_wire_flags = flags.value;
+    hvdxg.opensync_last_forced_flags = 0;
+    hvdxg.opensync_last_fops_kind = 0;
+    hvdxg.opensync_last_sync_type = sync_file->sync_type;
+    hvdxg.opensync_last_result_sync = 0;
+    hvdxg.opensync_last_gpu_va = 0;
+    hvdxg.opensync_last_cpu_pa = 0;
+    hvdxg.opensync_last_fd_kind = HV_DXG_SHARED_OBJECT_SYNC;
+    hvdxg.opensync_last_fd_refs = hvdxg_ntshared_cache_refs(
+        HV_DXG_SHARED_OBJECT_SYNC, sync_file->cache_process,
+        sync_file->cache_object != 0 ? sync_file->cache_object :
+        sync_file->sync_object,
+        sync_file->host_nt_handle);
+    hvdxg.opensync_last_gate = 3;
+    hvdxg.opensync_last_current_tgid =
+        current != NULL ? (uint64)thread_tgid(current) : 0;
+    hvdxg.opensync_last_owner_tgid =
+        owner != NULL && owner->process_state != NULL ?
+        owner->process_state->tgid : 0;
+    hvdxg.opensync_last_owner_generation =
+        owner != NULL && owner->process_state != NULL ?
+        owner->process_state->generation : 0;
+    hvdxg.opensync_last_namespace_mismatch =
+        hvdxg.opensync_last_owner_tgid != 0 &&
+        hvdxg.opensync_last_current_tgid != 0 &&
+        hvdxg.opensync_last_owner_tgid != hvdxg.opensync_last_current_tgid;
+
+    ret = hvdxg_send_sync_global(&open, sizeof(open), &result,
+                                 sizeof(result), &actual_len);
+    hvdxg.opensync_last_cmd_len = hvdxg.global_send_last_cmd_len;
+    hvdxg.opensync_last_wire_len = hvdxg.global_send_last_wire_len;
+    hvdxg.opensync_last_ext = hvdxg.global_send_last_ext;
+    hvdxg.opensync_last_ext_offset = hvdxg.global_send_last_ext_offset;
+    hvdxg.opensync_last_actual_len = actual_len;
+    hvdxg.opensync_last_status = result.status.v;
+    hvdxg.opensync_last_result_sync = result.sync_object.v;
+    hvdxg.opensync_last_gpu_va = result.gpu_virtual_address;
+    hvdxg.opensync_last_cpu_pa = result.guest_cpu_physical_address;
+    if (ret == 0 && actual_len < sizeof(result))
+        ret = -EOVERFLOW;
+    if (ret == 0)
+        ret = hvdxg_ntstatus_to_errno(result.status);
+    if (ret == 0 && map_fence_va &&
+        sync_file->sync_type == _D3DDDI_MONITORED_FENCE) {
+        uint64 cpu_va;
+
+        cpu_va = hvdxg_map_iospace_user_canonical(
+            HV_DXG_FENCE_SOURCE_OPEN_SYNC,
+            result.guest_cpu_physical_address, PGSIZE,
+            0, &fence_pa, NULL, 1);
+        fence_kva = hvdxg_map_iospace_kernel_canonical(
+            HV_DXG_FENCE_SOURCE_OPEN_SYNC,
+            result.guest_cpu_physical_address, PGSIZE, fence_pa, 1);
+        if (cpu_va == 0)
+            ret = -ENOMEM;
+        if (cpu_va_out != NULL)
+            *cpu_va_out = cpu_va;
+    }
+    if (ret == 0) {
+        if (sync_out != NULL)
+            *sync_out = result.sync_object;
+        if (gpu_va_out != NULL)
+            *gpu_va_out = result.gpu_virtual_address;
+        if (kva_out != NULL)
+            *kva_out = fence_kva;
+    }
+    hvdxg.opensync_last_ret = ret;
+    hvdxg.opensync_last_gate = ret == 0 ? 5 : 4;
+    return ret;
+}
+
+static int hvdxg_share_object_with_host(uint32 process, uint32 device,
+                                        uint32 object, uint64 reserved,
+                                        uint64 *nt_handle,
                                         uint32 *actual_len_out,
                                         int32 *status_out)
 {
@@ -4621,18 +14812,43 @@ static int hvdxg_share_object_with_host(uint32 device, uint32 object,
         *actual_len_out = 0;
     if (status_out != NULL)
         *status_out = 0;
-    if (device == 0 || object == 0)
+    if (process == 0 || device == 0 || object == 0)
         return -EINVAL;
+    hvdxg.shareobject_last_cmd_len = sizeof(share);
+    hvdxg.shareobject_last_wire_len = 0;
+    hvdxg.shareobject_last_ext = 0;
+    hvdxg.shareobject_last_ext_offset = 0;
+    hvdxg.shareobject_last_device_offset =
+        offsetof(struct hvdxg_command_shareobjectwithhost, device_handle);
+    hvdxg.shareobject_last_object_offset =
+        offsetof(struct hvdxg_command_shareobjectwithhost, object_handle);
+    hvdxg.shareobject_last_result_len = sizeof(result);
+    hvdxg.shareobject_last_head_len = 0;
+    memset(hvdxg.shareobject_last_head, 0,
+           sizeof(hvdxg.shareobject_last_head));
+    hvdxg.shareobject_last_completion_type = 0;
+    hvdxg.shareobject_last_completion_len = 0;
+    memset(hvdxg.shareobject_last_completion_prefix, 0,
+           sizeof(hvdxg.shareobject_last_completion_prefix));
+    hvdxg.shareobject_last_process = process;
+    hvdxg.shareobject_last_device = device;
+    hvdxg.shareobject_last_object = object;
+    hvdxg.shareobject_last_reserved = 0;
     memset(&share, 0, sizeof(share));
     memset(&result, 0, sizeof(result));
     hvdxg_command_vm_init(&share.hdr,
                           HV_DXGK_VMBCOMMAND_SHAREOBJECTWITHHOST);
-    share.hdr.process = hvdxg.dxg_process;
+    share.hdr.process.v = process;
     share.device_handle.v = device;
     share.object_handle.v = object;
-    share.reserved = reserved;
+    (void)reserved;
+    share.reserved = 0;
+    hvdxg_note_shareobject_wire(&share, sizeof(share), sizeof(result));
     ret = hvdxg_send_sync_global(&share, sizeof(share), &result,
                                  sizeof(result), &actual_len);
+    hvdxg_snapshot_last_completion(&hvdxg.shareobject_last_completion_type,
+                                   &hvdxg.shareobject_last_completion_len,
+                                   hvdxg.shareobject_last_completion_prefix);
     if (actual_len_out != NULL)
         *actual_len_out = actual_len;
     if (actual_len >= sizeof(result) && status_out != NULL)
@@ -4646,30 +14862,49 @@ static int hvdxg_share_object_with_host(uint32 device, uint32 object,
     return ret;
 }
 
+static void hvdxg_share_object_with_host_diagnostic(uint32 process,
+                                                   uint32 device,
+                                                   uint32 object,
+                                                   uint32 kind,
+                                                   uint32 reason)
+{
+    uint64 nt_handle = 0;
+    uint32 actual_len = 0;
+    int32 status = 0;
+    int ret;
+
+    hvdxg.shareobject_diag_attempted = 0;
+    hvdxg.shareobject_diag_valid_nt = 0;
+    hvdxg.shareobject_diag_kind = kind;
+    hvdxg.shareobject_diag_reason = reason;
+    if (process == 0 || device == 0 || object == 0)
+        return;
+    hvdxg.shareobject_diag_attempted = 1;
+    ret = hvdxg_share_object_with_host(process, device, object, 0,
+                                       &nt_handle, &actual_len, &status);
+    hvdxg.shareobject_last_len = actual_len;
+    hvdxg.shareobject_last_ret = ret;
+    hvdxg.shareobject_last_status = status;
+    hvdxg.shareobject_last_nt_handle = nt_handle;
+    hvdxg.shareobject_diag_valid_nt =
+        ret == 0 && actual_len >=
+        sizeof(struct hvdxg_command_shareobjectwithhost_return) &&
+        nt_handle != 0 ? 1 : 0;
+}
+
 static int hvdxg_owner_has_gpuva(struct hvdxg_open_state *owner,
                                  uint32 adapter, uint64 base)
 {
-    if (owner == NULL || base == 0)
-        return 0;
-    for (uint32 i = 0; i < owner->gpuva_count; i++) {
-        if ((adapter == 0 || owner->gpuvas[i].adapter == adapter) &&
-            owner->gpuvas[i].base == base)
-            return 1;
-    }
-    return 0;
-}
+    struct hvdxg_object_entry *obj;
 
-static uint64 hvdxg_owner_gpuva_size(struct hvdxg_open_state *owner,
-                                     uint32 adapter, uint64 base)
-{
     if (owner == NULL || base == 0)
         return 0;
-    for (uint32 i = 0; i < owner->gpuva_count; i++) {
-        if ((adapter == 0 || owner->gpuvas[i].adapter == adapter) &&
-            owner->gpuvas[i].base == base)
-            return owner->gpuvas[i].size;
+    obj = hvdxg_owner_find_object(owner, HV_DXG_OBJECT_GPUVA, base);
+    if (obj == NULL) {
+        hvdxg.object_table_denied++;
+        return 0;
     }
-    return 0;
+    return adapter == 0 || obj->device == adapter;
 }
 
 static int hvdxg_owner_gpuva_contains(struct hvdxg_open_state *owner,
@@ -4702,6 +14937,8 @@ static void hvdxg_track_gpuva(struct hvdxg_open_state *owner, uint32 adapter,
 {
     if (owner == NULL || adapter == 0 || base == 0 || size == 0)
         return;
+    (void)hvdxg_track_object(owner, HV_DXG_OBJECT_GPUVA, base, size,
+                             adapter);
     for (uint32 i = 0; i < owner->gpuva_count; i++) {
         if (owner->gpuvas[i].adapter == adapter &&
             owner->gpuvas[i].base == base) {
@@ -4737,6 +14974,7 @@ static void hvdxg_untrack_gpuva(struct hvdxg_open_state *owner,
 {
     if (owner == NULL || base == 0)
         return;
+    hvdxg_untrack_object(owner, HV_DXG_OBJECT_GPUVA, base);
     for (uint32 i = 0; i < owner->gpuva_count; i++) {
         if (owner->gpuvas[i].base == base) {
             owner->gpuvas[i] = owner->gpuvas[owner->gpuva_count - 1];
@@ -4755,23 +14993,112 @@ static int hvdxg_destroy_device_host(uint32 device)
     uint32 actual_len = 0;
     int ret;
 
-    if (device == 0 || device == hvdxg.host_adapter_handle)
+    if (device == 0)
         return 0;
     memset(&destroy, 0, sizeof(destroy));
     memset(&status, 0, sizeof(status));
+    actual_len = 0;
     hvdxg_command_vgpu_init_process(&destroy.hdr,
                                     HV_DXGK_VMBCOMMAND_DESTROYDEVICE,
                                     hvdxg.dxg_process);
     destroy.device.v = device;
     ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                sizeof(status), &actual_len);
+    if (actual_len >= sizeof(status))
+        hvdxg.destroydevice_last_status = status.v;
+    if (ret == 0 && actual_len < sizeof(status))
+        ret = -EOVERFLOW;
     if (ret == 0 && actual_len >= sizeof(status))
         ret = hvdxg_ntstatus_to_errno(status);
+    hvdxg.destroydevice_last_len = actual_len;
+    hvdxg.destroydevice_last_ret = ret;
     return ret;
 }
 
+static int hvdxg_flush_device_host(uint32 device)
+{
+    struct hvdxg_command_flushdevice flush;
+    struct hvdxg_ntstatus status;
+    uint32 actual_len = 0;
+    int ret;
+
+    if (device == 0)
+        return 0;
+    memset(&flush, 0, sizeof(flush));
+    memset(&status, 0, sizeof(status));
+    hvdxg_command_vgpu_init_process(&flush.hdr,
+                                    HV_DXGK_VMBCOMMAND_FLUSHDEVICE,
+                                    hvdxg.dxg_process);
+    flush.device.v = device;
+    flush.reason = HV_DXG_FLUSHSCHEDULER_DEVICE_TERMINATE;
+    ret = hvdxg_send_sync_vgpu(&flush, sizeof(flush), &status,
+                               sizeof(status), &actual_len);
+    if (ret == 0 && actual_len < sizeof(status))
+        ret = -EOVERFLOW;
+    if (ret == 0)
+        ret = hvdxg_ntstatus_to_errno(status);
+    hvdxg.flushdevice_last_len = actual_len;
+    hvdxg.flushdevice_last_ret = ret;
+    hvdxg.flushdevice_last_status = status.v;
+    hvdxg.flushdevice_last_device = device;
+    hvdxg.flushdevice_last_reason = HV_DXG_FLUSHSCHEDULER_DEVICE_TERMINATE;
+    return ret;
+}
+
+static void hvdxg_note_destroyallocation(uint32 device, uint32 resource,
+                                         uint32 allocation, uint32 process,
+                                         uint32 context, uint32 count,
+                                         uint32 actual_len, int ret,
+                                         struct hvdxg_ntstatus status)
+{
+    uint32 match = 0;
+    uint32 pending = 0;
+    uint32 before_nt = 0;
+
+    hvdxg.destroyalloc_last_device = device;
+    hvdxg.destroyalloc_last_resource = resource;
+    hvdxg.destroyalloc_last_allocation = allocation;
+    hvdxg.destroyalloc_last_process = process;
+    hvdxg.destroyalloc_last_context = context;
+    hvdxg.destroyalloc_last_count = count;
+    hvdxg.destroyalloc_last_len = actual_len;
+    hvdxg.destroyalloc_last_ret = ret;
+    hvdxg.destroyalloc_last_status = status.v;
+
+    if (resource != 0 &&
+        resource == hvdxg.d3d12_shared_alloc_resource_out)
+        match |= 1U;
+    if (allocation != 0 &&
+        allocation == hvdxg.d3d12_shared_alloc_allocation)
+        match |= 2U;
+    if (match != 0) {
+        uint64 seq = ++hvdxg.d3d12_shared_event_seq;
+
+        hvdxg.destroyalloc_d3d12_last_seq = seq;
+        hvdxg.destroyalloc_d3d12_match_count++;
+        if (context < 32)
+            hvdxg.destroyalloc_d3d12_context_mask |= 1U << context;
+        if (hvdxg.sharedresource_owner_nt == 0 &&
+            hvdxg.sharedresource_owner_sealed == 0) {
+            pending = 1;
+            hvdxg.destroyalloc_d3d12_pending_match_count++;
+        }
+        before_nt = hvdxg.d3d12_shared_first_nt_seq == 0 ||
+                    seq < hvdxg.d3d12_shared_first_nt_seq;
+        hvdxg.destroyalloc_d3d12_last_before_nt = before_nt;
+        if (hvdxg.destroyalloc_d3d12_first_seq == 0) {
+            hvdxg.destroyalloc_d3d12_first_seq = seq;
+            hvdxg.destroyalloc_d3d12_first_context = context;
+            hvdxg.destroyalloc_d3d12_first_match = match;
+            hvdxg.destroyalloc_d3d12_first_pending = pending;
+            hvdxg.destroyalloc_d3d12_first_before_nt = before_nt;
+        }
+    }
+    hvdxg.destroyalloc_d3d12_last_match = match | (pending ? 4U : 0U);
+}
+
 static int hvdxg_destroy_allocation_host(uint32 device, uint32 resource,
-                                         uint32 allocation)
+                                         uint32 allocation, uint32 context)
 {
     uint8 command_buf[sizeof(struct hvdxg_command_destroyallocation) +
                       sizeof(struct hvdxg_d3dkmthandle)];
@@ -4800,10 +15127,192 @@ static int hvdxg_destroy_allocation_host(uint32 device, uint32 resource,
                   destroy->alloc_count * sizeof(destroy->allocations[0]);
     ret = hvdxg_send_sync_vgpu(destroy, command_len, &status,
                                sizeof(status), &actual_len);
+    if (ret == 0 && actual_len < sizeof(status))
+        ret = -EOVERFLOW;
     if (ret == 0 && actual_len >= sizeof(status))
         ret = hvdxg_ntstatus_to_errno(status);
-    hvdxg.destroyalloc_last_len = actual_len;
-    hvdxg.destroyalloc_last_ret = ret;
+    hvdxg_note_destroyallocation(device, resource, allocation,
+                                 destroy->hdr.process.v, context,
+                                 destroy->alloc_count, actual_len, ret,
+                                 status);
+    return ret;
+}
+
+static int hvdxg_destroy_device_owned_objects(struct hvdxg_open_state *owner,
+                                              uint32 device)
+{
+    int ret = 0;
+
+    if (owner == NULL || device == 0)
+        return 0;
+
+    for (;;) {
+        int found = 0;
+
+        for (uint32 i = 0; i < owner->hwqueue_count; i++) {
+            uint32 sync = 0;
+
+            if (owner->hwqueues[i].device != device)
+                continue;
+            sync = hvdxg_untrack_hwqueue(owner, owner->hwqueues[i].queue);
+            if (sync != 0)
+                hvdxg_untrack_sync(owner, sync);
+            /*
+             * WSL dxgcontext_destroy() only frees HW queue/progress-fence
+             * handles locally during device teardown; the host observes the
+             * enclosing DESTROYDEVICE/DESTROYPROCESS sequence.
+             */
+            found = 1;
+            break;
+        }
+        if (!found)
+            break;
+    }
+
+    for (;;) {
+        int found = 0;
+
+        for (uint32 i = 0; i < owner->sync_object_count; i++) {
+            if (owner->sync_objects[i].device != device)
+                continue;
+            /*
+             * WSL dxgdevice_destroy() calls dxgsyncobject_destroy() here,
+             * which drops the handle and event mappings locally without a
+             * DESTROYSYNCOBJECT VM-bus packet.
+             */
+            hvdxg_untrack_sync(owner, owner->sync_objects[i].sync);
+            found = 1;
+            break;
+        }
+        if (!found)
+            break;
+    }
+
+    for (;;) {
+        uint32 resource = 0;
+        int found = 0;
+
+        for (uint32 i = 0; i < owner->resource_count; i++) {
+            resource = owner->resources[i].resource;
+            if (owner->resources[i].device == device && resource != 0) {
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
+            break;
+
+        for (;;) {
+            int removed = 0;
+
+            for (uint32 i = 0; i < owner->allocation_count; i++) {
+                struct hvdxg_tracked_allocation a = owner->allocations[i];
+
+                if (a.device != device || a.resource != resource)
+                    continue;
+                hvdxg_untrack_allocation(owner, device, resource,
+                                         a.allocation);
+                (void)hvdxg_unmap_tracked_allocation(&a);
+                hvdxg_unpin_tracked_allocation(&a);
+                removed = 1;
+                break;
+            }
+            if (!removed)
+                break;
+        }
+        hvdxg_cleanup_note_ret(
+            &ret,
+            hvdxg_destroy_allocation_host(
+                device, resource, 0,
+                HV_DXG_DESTROY_ALLOC_CTX_DEVICE_RESOURCE),
+            HV_DXG_CLEANUP_RESOURCE, resource);
+        hvdxg_untrack_resource(owner, device, resource);
+    }
+
+    for (;;) {
+        struct hvdxg_tracked_allocation a;
+        int found = 0;
+
+        for (uint32 i = 0; i < owner->allocation_count; i++) {
+            a = owner->allocations[i];
+            if (a.device != device || a.resource != 0 || a.allocation == 0)
+                continue;
+            hvdxg_untrack_allocation(owner, device, 0, a.allocation);
+            (void)hvdxg_unmap_tracked_allocation(&a);
+            hvdxg_unpin_tracked_allocation(&a);
+            hvdxg_cleanup_note_ret(
+                &ret,
+                hvdxg_destroy_allocation_host(
+                    device, 0, a.allocation,
+                    HV_DXG_DESTROY_ALLOC_CTX_DEVICE_STANDALONE),
+                HV_DXG_CLEANUP_ALLOCATION, a.allocation);
+            found = 1;
+            break;
+        }
+        if (!found)
+            break;
+    }
+
+    for (;;) {
+        int found = 0;
+
+        for (uint32 i = 0; i < owner->context_count; i++) {
+            uint32 context = owner->contexts[i];
+
+            if (hvdxg_owner_object_device(owner, HV_DXG_OBJECT_CONTEXT,
+                                          context) != device)
+                continue;
+            /*
+             * WSL dxgdevice_destroy() releases context handles locally; it
+             * does not send DESTROYCONTEXT during process/device teardown.
+             */
+            hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT, context);
+            hvdxg_untrack_u32(owner->contexts, &owner->context_count,
+                              context);
+            found = 1;
+            break;
+        }
+        if (!found)
+            break;
+    }
+
+    for (;;) {
+        int found = 0;
+
+        for (uint32 i = 0; i < owner->paging_queue_count; i++) {
+            uint32 sync;
+
+            if (owner->paging_queues[i].device != device)
+                continue;
+            sync = hvdxg_untrack_pagingqueue(owner,
+                                             owner->paging_queues[i].queue);
+            if (sync != 0)
+                hvdxg_untrack_sync(owner, sync);
+            /*
+             * Paging queue and monitored-fence handles are dropped locally
+             * during WSL device teardown.
+             */
+            found = 1;
+            break;
+        }
+        if (!found)
+            break;
+    }
+
+    for (;;) {
+        int found = 0;
+
+        for (uint32 i = 0; i < owner->sync_object_count; i++) {
+            if (owner->sync_objects[i].device != device)
+                continue;
+            hvdxg_untrack_sync(owner, owner->sync_objects[i].sync);
+            found = 1;
+            break;
+        }
+        if (!found)
+            break;
+    }
+
     return ret;
 }
 
@@ -4840,58 +15349,19 @@ static int hvdxg_destroy_createallocation_result(
                   alloc_count * sizeof(destroy->allocations[0]);
     ret = hvdxg_send_sync_vgpu(destroy, command_len, &status,
                                sizeof(status), &actual_len);
+    if (ret == 0 && actual_len < sizeof(status))
+        ret = -EOVERFLOW;
     if (ret == 0 && actual_len >= sizeof(status))
         ret = hvdxg_ntstatus_to_errno(status);
-    hvdxg.destroyalloc_last_len = actual_len;
-    hvdxg.destroyalloc_last_ret = ret;
+    hvdxg_note_destroyallocation(
+        device, resource,
+        alloc_count != 0 ? result->allocation_info[0].allocation.v : 0,
+        destroy->hdr.process.v, HV_DXG_DESTROY_ALLOC_CTX_CREATE_UNWIND,
+        alloc_count, actual_len, ret, status);
     hvdxg.createalloc_unwind_attempts++;
     hvdxg.createalloc_unwind_last_ret = ret;
     if (ret == 0)
         hvdxg.createalloc_unwind_successes++;
-    return ret;
-}
-
-static int hvdxg_destroy_pagingqueue_host(uint32 paging_queue)
-{
-    struct hvdxg_command_destroypagingqueue destroy;
-    struct hvdxg_ntstatus status;
-    uint32 actual_len = 0;
-    int ret;
-
-    if (paging_queue == 0)
-        return 0;
-    memset(&destroy, 0, sizeof(destroy));
-    memset(&status, 0, sizeof(status));
-    hvdxg_command_vgpu_init_process(&destroy.hdr,
-                                    HV_DXGK_VMBCOMMAND_DESTROYPAGINGQUEUE,
-                                    hvdxg.dxg_process);
-    destroy.paging_queue.v = paging_queue;
-    ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
-                               sizeof(status), &actual_len);
-    if (ret == 0 && actual_len >= sizeof(status))
-        ret = hvdxg_ntstatus_to_errno(status);
-    return ret;
-}
-
-static int hvdxg_destroy_sync_host(uint32 sync_object)
-{
-    struct hvdxg_command_destroysyncobject destroy;
-    struct hvdxg_ntstatus status;
-    uint32 actual_len = 0;
-    int ret;
-
-    if (sync_object == 0)
-        return 0;
-    memset(&destroy, 0, sizeof(destroy));
-    memset(&status, 0, sizeof(status));
-    hvdxg_command_vm_init(&destroy.hdr,
-                          HV_DXGK_VMBCOMMAND_DESTROYSYNCOBJECT);
-    destroy.hdr.process = hvdxg.dxg_process;
-    destroy.sync_object.v = sync_object;
-    ret = hvdxg_send_sync_global(&destroy, sizeof(destroy), &status,
-                                 sizeof(status), &actual_len);
-    if (ret == 0 && actual_len >= sizeof(status))
-        ret = hvdxg_ntstatus_to_errno(status);
     return ret;
 }
 
@@ -4912,58 +15382,14 @@ static int hvdxg_destroy_context_host(uint32 context)
     destroy.context.v = context;
     ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                sizeof(status), &actual_len);
+    if (actual_len >= sizeof(status))
+        hvdxg.destroycontext_last_status = status.v;
+    if (ret == 0 && actual_len < sizeof(status))
+        ret = -EOVERFLOW;
     if (ret == 0 && actual_len >= sizeof(status))
         ret = hvdxg_ntstatus_to_errno(status);
-    return ret;
-}
-
-static int hvdxg_destroy_hwqueue_host(uint32 hwqueue)
-{
-    struct hvdxg_command_destroyhwqueue destroy;
-    struct hvdxg_ntstatus status;
-    uint32 actual_len = 0;
-    int ret;
-
-    if (hwqueue == 0)
-        return 0;
-    memset(&destroy, 0, sizeof(destroy));
-    memset(&status, 0, sizeof(status));
-    hvdxg_command_vgpu_init_process(&destroy.hdr,
-                                    HV_DXGK_VMBCOMMAND_DESTROYHWQUEUE,
-                                    hvdxg.dxg_process);
-    destroy.hwqueue.v = hwqueue;
-    ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
-                               sizeof(status), &actual_len);
-    if (ret == 0 && actual_len >= sizeof(status))
-        ret = hvdxg_ntstatus_to_errno(status);
-    hvdxg.destroyhwqueue_last_len = actual_len;
-    hvdxg.destroyhwqueue_last_ret = ret;
-    return ret;
-}
-
-static int hvdxg_free_gpuva_host(uint32 adapter, uint64 base, uint64 size)
-{
-    struct hvdxg_command_freegpuvirtualaddress freeva;
-    struct hvdxg_ntstatus status;
-    uint32 actual_len = 0;
-    int ret;
-
-    if (adapter == 0 || base == 0 || size == 0)
-        return 0;
-    memset(&freeva, 0, sizeof(freeva));
-    memset(&status, 0, sizeof(status));
-    hvdxg_command_vgpu_init_process(&freeva.hdr,
-                                    HV_DXGK_VMBCOMMAND_FREEGPUVIRTUALADDRESS,
-                                    hvdxg.dxg_process);
-    freeva.args.adapter.v = adapter;
-    freeva.args.base_address = base;
-    freeva.args.size = size;
-    ret = hvdxg_send_sync_vgpu(&freeva, sizeof(freeva), &status,
-                               sizeof(status), &actual_len);
-    if (ret == 0 && actual_len >= sizeof(status))
-        ret = hvdxg_ntstatus_to_errno(status);
-    hvdxg.gpuva_free_last_len = actual_len;
-    hvdxg.gpuva_free_last_ret = ret;
+    hvdxg.destroycontext_last_len = actual_len;
+    hvdxg.destroycontext_last_ret = ret;
     return ret;
 }
 
@@ -4979,17 +15405,6 @@ static void hvdxg_wait_gpuva_fence(const struct hvdxg_tracked_gpuva *gpuva)
     sleep_ms(20);
 }
 
-enum {
-    HV_DXG_CLEANUP_NONE = 0,
-    HV_DXG_CLEANUP_HWQUEUE = 1,
-    HV_DXG_CLEANUP_SYNC = 2,
-    HV_DXG_CLEANUP_CONTEXT = 3,
-    HV_DXG_CLEANUP_GPUVA = 4,
-    HV_DXG_CLEANUP_ALLOCATION = 5,
-    HV_DXG_CLEANUP_PAGINGQUEUE = 6,
-    HV_DXG_CLEANUP_DEVICE = 7,
-};
-
 static void hvdxg_cleanup_note_ret(int *cleanup_ret, int op_ret,
                                    uint32 op, uint32 handle)
 {
@@ -5002,18 +15417,498 @@ static void hvdxg_cleanup_note_ret(int *cleanup_ret, int op_ret,
     }
 }
 
+static void hvdxg_process_forget_local_objects(
+    struct hvdxg_process_state *process);
+
+static struct hvdxg_process_state *hvdxg_process_get_current(void)
+{
+    struct hvdxg_process_state *candidate;
+    struct hvdxg_process_state *process = NULL;
+    struct hvdxg_process_state *retained = NULL;
+    uint64 tgid = current ? (uint64)thread_tgid(current) : 1;
+    int empty = -1;
+
+    candidate = kvmalloc(sizeof(*candidate));
+    if (candidate == NULL)
+        return NULL;
+    memset(candidate, 0, sizeof(*candidate));
+    candidate->tgid = tgid;
+    /*
+     * WSL keys dxgprocess reuse by TGID, but the CREATEPROCESS packet carries
+     * the creator thread pid.  Mesa can open /dev/dxg from worker threads, and
+     * hosts may reject a CREATEPROCESS whose process_id does not match that
+     * Linux thread identity.
+     */
+    candidate->pid = current ? (uint64)current->pid : tgid;
+    candidate->refs = 1;
+
+    mutex_lock(&hvdxg.process_lock);
+    for (uint32 i = 0; i < HV_DXG_PROCESS_TABLE_MAX; i++) {
+        struct hvdxg_process_state *entry = hvdxg.processes[i];
+
+        if (entry == NULL) {
+            if (empty < 0)
+                empty = (int)i;
+            continue;
+        }
+        if (retained == NULL && entry->refs == 0 &&
+            entry->host_process_created && entry->host_process.v != 0)
+            retained = entry;
+        if (entry->tgid == tgid &&
+            (entry->refs != 0 ||
+             (entry->host_process_created && entry->host_process.v != 0))) {
+            int same_tgid_retained = entry->refs == 0;
+            uint32 source_generation = entry->generation;
+            uint32 source_objects = entry->object_count;
+
+            if (same_tgid_retained) {
+                hvdxg_process_forget_local_objects(entry);
+                entry->guest_process = (uint64)entry;
+                entry->generation = ++hvdxg.process_generation;
+                if (entry->generation == 0)
+                    entry->generation = ++hvdxg.process_generation;
+                hvdxg.process_namespace_new_generation =
+                    entry->generation;
+                if (hvdxg.process_live < 0xffffffffU)
+                    hvdxg.process_live++;
+                hvdxg.process_isolated_last_tgid = entry->tgid;
+                hvdxg.process_isolated_last_handle =
+                    entry->host_process.v;
+                hvdxg.process_isolated_last_generation =
+                    entry->generation;
+                hvdxg.process_isolated_source_generation =
+                    source_generation;
+                hvdxg.process_isolated_copied_objects = 0;
+                hvdxg.process_isolated_source_objects = source_objects;
+            }
+            entry->refs++;
+            entry->pid = current ? (uint64)current->pid : tgid;
+            if (same_tgid_retained) {
+                hvdxg.process_retained_handle = entry->host_process.v;
+                hvdxg.process_retained_generation = entry->generation;
+                hvdxg.process_retained_tgid = entry->tgid;
+                hvdxg.process_retained_refs = entry->refs;
+            }
+            hvdxg.process_reuses++;
+            hvdxg.process_shared_reuses++;
+            process = entry;
+            break;
+        }
+    }
+    if (process == NULL && retained != NULL) {
+        uint32 source_generation = retained->generation;
+        uint32 source_objects = retained->object_count;
+
+        /*
+         * This host rejects fragile repeated CREATEPROCESS attempts after a
+         * retained dxgprocess has already survived final close.  Keep WSL's
+         * open-time reuse model: reuse the live host process handle, but start
+         * a fresh local namespace so handles do not cross TGIDs.
+         */
+        hvdxg_process_forget_local_objects(retained);
+        retained->tgid = tgid;
+        retained->pid = current ? (uint64)current->pid : tgid;
+        retained->guest_process = (uint64)retained;
+        retained->refs = 1;
+        retained->generation = ++hvdxg.process_generation;
+        if (retained->generation == 0)
+            retained->generation = ++hvdxg.process_generation;
+        hvdxg.process_namespace_new_generation = retained->generation;
+        hvdxg.process_live++;
+        if (hvdxg.process_live > hvdxg.process_live_max)
+            hvdxg.process_live_max = hvdxg.process_live;
+        hvdxg.process_reuses++;
+        hvdxg.process_isolated_reuses++;
+        hvdxg.process_isolated_last_tgid = retained->tgid;
+        hvdxg.process_isolated_last_handle = retained->host_process.v;
+        hvdxg.process_isolated_last_generation = retained->generation;
+        hvdxg.process_isolated_source_generation = source_generation;
+        hvdxg.process_isolated_copied_objects = 0;
+        hvdxg.process_isolated_source_objects = source_objects;
+        hvdxg.process_retained_handle = retained->host_process.v;
+        hvdxg.process_retained_generation = retained->generation;
+        hvdxg.process_retained_tgid = retained->tgid;
+        hvdxg.process_retained_refs = retained->refs;
+        process = retained;
+    }
+    if (process == NULL && empty >= 0) {
+        uint32 retained_handle;
+        uint32 retained_generation;
+        uint64 retained_tgid;
+
+        process = candidate;
+        process->generation = ++hvdxg.process_generation;
+        if (process->generation == 0)
+            process->generation = ++hvdxg.process_generation;
+        process->guest_process = (uint64)process;
+        if (hvdxg.dxg_process_created && hvdxg.dxg_process.v != 0) {
+            retained_handle = hvdxg.dxg_process.v;
+            retained_tgid = hvdxg.dxg_process_tgid;
+            retained_generation = hvdxg.dxg_process_generation;
+        } else {
+            retained_handle = hvdxg.process_retained_handle;
+            retained_tgid = hvdxg.process_retained_tgid;
+            retained_generation = hvdxg.process_retained_generation;
+        }
+        if (retained_handle != 0 &&
+            (retained_tgid == 0 || retained_tgid != process->tgid ||
+             retained_generation != process->generation)) {
+            hvdxg.process_retained_reuse_avoided++;
+            hvdxg.process_retained_avoided_tgid = process->tgid;
+            hvdxg.process_retained_avoided_source_tgid =
+                retained_tgid;
+            hvdxg.process_retained_avoided_handle = retained_handle;
+            hvdxg.process_retained_avoided_generation =
+                process->generation;
+            hvdxg.process_retained_avoided_source_generation =
+                retained_generation;
+        }
+        hvdxg.process_isolated_last_handle = 0;
+        hvdxg.processes[empty] = process;
+        hvdxg.process_live++;
+        hvdxg.process_creates++;
+        hvdxg.process_isolated_last_tgid = process->tgid;
+        hvdxg.process_isolated_last_generation = process->generation;
+        hvdxg.process_isolated_source_generation = 0;
+        hvdxg.process_isolated_copied_objects = 0;
+        hvdxg.process_isolated_source_objects = 0;
+        if (hvdxg.process_live > hvdxg.process_live_max)
+            hvdxg.process_live_max = hvdxg.process_live;
+        candidate = NULL;
+    } else if (process == NULL) {
+        hvdxg.process_table_full++;
+    }
+    mutex_unlock(&hvdxg.process_lock);
+
+    if (candidate != NULL)
+        kvfree(candidate);
+    return process;
+}
+
+static void hvdxg_process_forget_local_objects(
+    struct hvdxg_process_state *process)
+{
+    if (process == NULL)
+        return;
+    hvdxg.process_namespace_last_tgid = process->tgid;
+    hvdxg.process_namespace_last_handle = process->host_process.v;
+    hvdxg.process_namespace_source_generation = process->generation;
+    hvdxg.process_namespace_new_generation = 0;
+    hvdxg.process_namespace_objects_before = process->object_count;
+    hvdxg.process_namespace_adapters_before = process->adapter_count;
+    hvdxg.process_namespace_locals_before = process->local_adapter_count;
+    process->object_count = 0;
+    process->next_object_generation = 0;
+    process->adapter_count = 0;
+    process->local_adapter_count = 0;
+    process->next_adapter_generation = 0;
+    process->next_local_adapter_generation = 0;
+    hvdxg.process_namespace_objects_after = process->object_count;
+    hvdxg.process_namespace_adapters_after = process->adapter_count;
+    hvdxg.process_namespace_locals_after = process->local_adapter_count;
+    hvdxg.process_namespace_fresh =
+        hvdxg.process_namespace_objects_after == 0 &&
+        hvdxg.process_namespace_adapters_after == 0 &&
+        hvdxg.process_namespace_locals_after == 0;
+}
+
+static int hvdxg_process_put(struct hvdxg_process_state *process)
+{
+    int remove_process = 0;
+
+    if (process == NULL)
+        return 0;
+
+    mutex_lock(&hvdxg.process_lock);
+    if (process->refs > 0)
+        process->refs--;
+    if (process->refs == 0) {
+        hvdxg.process_releases++;
+        if (process->host_process_created && process->host_process.v != 0) {
+            hvdxg.process_destroy_active_total = 0;
+            hvdxg.process_destroy_active_device = 0;
+            hvdxg.process_destroy_active_context = 0;
+            hvdxg.process_destroy_active_hwqueue = 0;
+            hvdxg.process_destroy_active_pagingqueue = 0;
+            hvdxg.process_destroy_active_sync = 0;
+            hvdxg.process_destroy_active_allocation = 0;
+            hvdxg.process_destroy_active_resource = 0;
+            hvdxg.process_destroy_active_gpuva = 0;
+            for (uint32 i = 0; i < process->object_count; i++) {
+                if (process->objects == NULL ||
+                    process->objects[i].type == HV_DXG_OBJECT_NONE ||
+                    process->objects[i].destroyed != 0)
+                    continue;
+                hvdxg.process_destroy_active_total++;
+                switch (process->objects[i].type) {
+                case HV_DXG_OBJECT_ADAPTER:
+                    break;
+                case HV_DXG_OBJECT_DEVICE:
+                    hvdxg.process_destroy_active_device++;
+                    break;
+                case HV_DXG_OBJECT_CONTEXT:
+                    hvdxg.process_destroy_active_context++;
+                    break;
+                case HV_DXG_OBJECT_HWQUEUE:
+                    hvdxg.process_destroy_active_hwqueue++;
+                    break;
+                case HV_DXG_OBJECT_PAGINGQUEUE:
+                    hvdxg.process_destroy_active_pagingqueue++;
+                    break;
+                case HV_DXG_OBJECT_SYNC:
+                    hvdxg.process_destroy_active_sync++;
+                    break;
+                case HV_DXG_OBJECT_ALLOCATION:
+                    hvdxg.process_destroy_active_allocation++;
+                    break;
+                case HV_DXG_OBJECT_RESOURCE:
+                    hvdxg.process_destroy_active_resource++;
+                    break;
+                case HV_DXG_OBJECT_GPUVA:
+                    hvdxg.process_destroy_active_gpuva++;
+                    break;
+                default:
+                    break;
+                }
+            }
+            hvdxg.process_retained_handle = process->host_process.v;
+            hvdxg.process_retained_generation = process->generation;
+            hvdxg.process_retained_tgid = process->tgid;
+            hvdxg.process_retained_refs = process->refs;
+            hvdxg.process_destroy_deferred++;
+            hvdxg.process_destroy_suppressed++;
+            hvdxg.destroyprocess_last_len = 0;
+            hvdxg.destroyprocess_last_ret = 0;
+            hvdxg.destroyprocess_last_handle = process->host_process.v;
+            hvdxg.dxg_process = process->host_process;
+            hvdxg.dxg_process_created = 1;
+            hvdxg.dxg_process_guest = process->guest_process;
+            hvdxg.dxg_process_pid = process->pid;
+            hvdxg.dxg_process_tgid = process->tgid;
+            hvdxg.dxg_process_generation = process->generation;
+            hvdxg.d3dkmt_ready = 1;
+            hvdxg_process_forget_local_objects(process);
+            if (hvdxg.process_live > 0)
+                hvdxg.process_live--;
+        } else {
+            remove_process = 1;
+        }
+    }
+    mutex_unlock(&hvdxg.process_lock);
+
+    if (remove_process) {
+        mutex_lock(&hvdxg.process_lock);
+        for (uint32 i = 0; i < HV_DXG_PROCESS_TABLE_MAX; i++) {
+            if (hvdxg.processes[i] == process) {
+                hvdxg.processes[i] = NULL;
+                break;
+            }
+        }
+        if (hvdxg.process_live > 0)
+            hvdxg.process_live--;
+        mutex_unlock(&hvdxg.process_lock);
+        if (process->objects != NULL)
+            kvfree(process->objects);
+        if (process->adapters != NULL)
+            kvfree(process->adapters);
+        if (process->local_adapters != NULL)
+            kvfree(process->local_adapters);
+        kvfree(process);
+    }
+    return 0;
+}
+
+static uint32 hvdxg_process_refs(struct hvdxg_process_state *process)
+{
+    uint32 refs = 0;
+
+    if (process == NULL)
+        return 0;
+    mutex_lock(&hvdxg.process_lock);
+    refs = process->refs;
+    mutex_unlock(&hvdxg.process_lock);
+    return refs;
+}
+
+#define HV_DXG_BIND_SOURCE_ENUMADAPTERS2       1U
+#define HV_DXG_BIND_SOURCE_ENUMADAPTERS3       2U
+#define HV_DXG_BIND_SOURCE_OPENADAPTERFROMLUID 3U
+
+static const char *hvdxg_early_bind_source_name(uint32 source)
+{
+    switch (source) {
+    case HV_DXG_BIND_SOURCE_ENUMADAPTERS2:
+        return "enumadapters2";
+    case HV_DXG_BIND_SOURCE_ENUMADAPTERS3:
+        return "enumadapters3";
+    case HV_DXG_BIND_SOURCE_OPENADAPTERFROMLUID:
+        return "openadapterfromluid";
+    default:
+        return "none";
+    }
+}
+
+static void hvdxg_note_open_createprocess(struct hvdxg_open_state *owner,
+                                          int ret)
+{
+    if (owner == NULL)
+        return;
+    hvdxg.open_createprocess_attempts++;
+    hvdxg.open_createprocess_last_ret = ret;
+    hvdxg.open_createprocess_last_guest = owner->dxg_process_guest;
+    hvdxg.open_createprocess_last_pid = owner->dxg_process_pid;
+    hvdxg.open_createprocess_last_tgid =
+        owner->process_state != NULL ? owner->process_state->tgid :
+        owner->dxg_process_pid;
+    hvdxg.open_createprocess_last_handle = owner->dxg_process.v;
+    hvdxg.open_createprocess_last_created = owner->dxg_process_created;
+    hvdxg.open_createprocess_last_generation =
+        owner->process_state != NULL ? owner->process_state->generation : 0;
+    hvdxg.open_createprocess_last_refs =
+        owner->process_state != NULL ? owner->process_state->refs : 0;
+    if (ret == 0)
+        hvdxg.open_createprocess_successes++;
+    else
+        hvdxg.open_createprocess_failures++;
+}
+
 static int hvdxg_bind_open_process(struct hvdxg_open_state *owner)
 {
+    struct hvdxg_process_state *process;
     int ret;
+    int create_attempt;
 
     if (owner == NULL)
         return 0;
+    process = owner->process_state;
+    if (process != NULL) {
+        create_attempt = !process->host_process_created ||
+                         process->host_process.v == 0;
+        hvdxg.dxg_process = process->host_process;
+        hvdxg.dxg_process_created = process->host_process_created;
+        hvdxg.dxg_process_guest = process->guest_process;
+        hvdxg.dxg_process_pid = process->pid;
+        hvdxg.dxg_process_tgid = process->tgid;
+        hvdxg.dxg_process_generation = process->generation;
+        if (create_attempt)
+            hvdxg.d3dkmt_ready = 0;
+        ret = hvdxg_d3dkmt_ensure();
+        if (ret != 0) {
+            if (create_attempt) {
+                process->host_process.v = 0;
+                process->host_process_created = 0;
+                owner->dxg_process.v = 0;
+                owner->dxg_process_created = 0;
+                hvdxg.dxg_process.v = 0;
+                hvdxg.dxg_process_created = 0;
+                hvdxg.d3dkmt_ready = 0;
+                hvdxg_note_open_createprocess(owner, ret);
+            }
+            return ret;
+        }
+        process->host_process = hvdxg.dxg_process;
+        process->host_process_created = hvdxg.dxg_process_created;
+        owner->dxg_process = process->host_process;
+        owner->dxg_process_guest = process->guest_process;
+        owner->dxg_process_pid = process->pid;
+        owner->dxg_process_created = process->host_process_created;
+        hvdxg.dxg_process_tgid = process->tgid;
+        hvdxg.dxg_process_generation = process->generation;
+        if (create_attempt)
+            hvdxg_note_open_createprocess(owner, ret);
+        return 0;
+    }
+    if (!owner->dxg_process_created || owner->dxg_process.v == 0) {
+        create_attempt = 1;
+        hvdxg.dxg_process.v = 0;
+        hvdxg.dxg_process_created = 0;
+        hvdxg.dxg_process_guest = owner->dxg_process_guest;
+        hvdxg.dxg_process_pid = owner->dxg_process_pid;
+        hvdxg.dxg_process_tgid = owner->dxg_process_pid;
+        hvdxg.dxg_process_generation = 0;
+        hvdxg.d3dkmt_ready = 0;
+        ret = hvdxg_d3dkmt_ensure();
+        if (ret != 0) {
+            owner->dxg_process.v = 0;
+            owner->dxg_process_created = 0;
+            hvdxg.dxg_process.v = 0;
+            hvdxg.dxg_process_created = 0;
+            hvdxg.d3dkmt_ready = 0;
+            hvdxg_note_open_createprocess(owner, ret);
+            return ret;
+        }
+        owner->dxg_process = hvdxg.dxg_process;
+        owner->dxg_process_guest = hvdxg.dxg_process_guest;
+        owner->dxg_process_pid = hvdxg.dxg_process_pid;
+        owner->dxg_process_created = hvdxg.dxg_process_created;
+        if (create_attempt)
+            hvdxg_note_open_createprocess(owner, ret);
+        return 0;
+    }
+    hvdxg.dxg_process = owner->dxg_process;
+    hvdxg.dxg_process_guest = owner->dxg_process_guest;
+    hvdxg.dxg_process_pid = owner->dxg_process_pid;
+    hvdxg.dxg_process_tgid = owner->dxg_process_pid;
+    hvdxg.dxg_process_generation = 0;
+    hvdxg.dxg_process_created = owner->dxg_process_created;
+    if (!hvdxg.dxg_process_created || hvdxg.dxg_process.v == 0)
+        hvdxg.d3dkmt_ready = 0;
     ret = hvdxg_d3dkmt_ensure();
-    if (ret != 0)
+    if (ret != 0) {
+        if (!hvdxg.dxg_process_created || hvdxg.dxg_process.v == 0)
+            hvdxg.d3dkmt_ready = 0;
         return ret;
-    owner->dxg_process = hvdxg.dxg_process;
-    owner->dxg_process_created = hvdxg.dxg_process_created;
+    }
     return 0;
+}
+
+static int hvdxg_should_defer_open_create(
+    struct hvdxg_process_state *process)
+{
+    if (process == NULL)
+        return 0;
+    if (process->host_process_created && process->host_process.v != 0)
+        return 0;
+    return hvdxg.process_retained_handle != 0;
+}
+
+static int hvdxg_bind_open_process_early(struct hvdxg_open_state *owner,
+                                         uint32 source, uint32 cmd)
+{
+    int ret;
+
+    hvdxg.early_bind_attempts++;
+    hvdxg.early_bind_last_source = source;
+    hvdxg.early_bind_last_cmd = cmd;
+    hvdxg.early_bind_last_handle = 0;
+    hvdxg.early_bind_last_created = 0;
+    hvdxg.early_bind_last_generation = 0;
+    hvdxg.early_bind_last_refs = 0;
+
+    if (owner != NULL) {
+        mutex_lock(&hvdxg.process_lock);
+        ret = hvdxg_bind_open_process(owner);
+        hvdxg.early_bind_last_handle = owner->dxg_process.v;
+        hvdxg.early_bind_last_created = owner->dxg_process_created;
+        if (owner->process_state != NULL) {
+            hvdxg.early_bind_last_generation =
+                owner->process_state->generation;
+            hvdxg.early_bind_last_refs = owner->process_state->refs;
+        }
+        mutex_unlock(&hvdxg.process_lock);
+    } else {
+        ret = hvdxg_d3dkmt_ensure();
+        hvdxg.early_bind_last_handle = hvdxg.dxg_process.v;
+        hvdxg.early_bind_last_created = hvdxg.dxg_process_created;
+        hvdxg.early_bind_last_generation = hvdxg.dxg_process_generation;
+    }
+
+    hvdxg.early_bind_last_ret = ret;
+    if (ret == 0)
+        hvdxg.early_bind_successes++;
+    else
+        hvdxg.early_bind_failures++;
+    return ret;
 }
 
 static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
@@ -5026,19 +15921,104 @@ static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
     if (owner->dxg_process_created && owner->dxg_process.v != 0) {
         hvdxg.dxg_process = owner->dxg_process;
         hvdxg.dxg_process_created = 1;
+        hvdxg.dxg_process_guest = owner->dxg_process_guest;
+        hvdxg.dxg_process_pid = owner->dxg_process_pid;
+        if (owner->process_state != NULL) {
+            hvdxg.dxg_process_tgid = owner->process_state->tgid;
+            hvdxg.dxg_process_generation = owner->process_state->generation;
+        }
         hvdxg.d3dkmt_ready = 1;
-    } else if (!hvdxg.d3dkmt_ready) {
+    } else if (owner->process_state == NULL && !hvdxg.d3dkmt_ready) {
         return;
     }
     had_tracked = owner->device_count != 0 || owner->allocation_count != 0 ||
                   owner->gpuva_count != 0 || owner->sync_object_count != 0 ||
                   owner->paging_queue_count != 0 ||
-                  owner->context_count != 0 || owner->hwqueue_count != 0;
+                  owner->context_count != 0 || owner->hwqueue_count != 0 ||
+                  hvdxg_owner_has_active_process_objects(owner) ||
+                  (owner->process_state != NULL &&
+                   owner->process_state->local_adapter_count != 0);
     hvdxg.cleanup_last_op = HV_DXG_CLEANUP_NONE;
     hvdxg.cleanup_last_handle = 0;
     hvdxg.cleanup_failed_op = HV_DXG_CLEANUP_NONE;
     hvdxg.cleanup_failed_handle = 0;
     hvdxg.cleanup_had_tracked = had_tracked ? 1 : 0;
+
+    /*
+     * WSL binds all /dev/dxg opens in one TGID to one dxgprocess.  A non-final
+     * file close only drops the process reference so a secondary fd can keep
+     * using handles created before another fd closes.  The final close tears
+     * down the local object graph, but this host poisons later CREATEPROCESS
+     * attempts after DESTROYPROCESS, so keep the one host dxgprocess retained
+     * while preventing cross-TGID local object-table reuse.
+     */
+    if (owner->process_state != NULL &&
+        hvdxg_process_refs(owner->process_state) > 1) {
+        uint32 handle = owner->dxg_process.v;
+
+        hvdxg_cleanup_note_ret(
+            &ret, hvdxg_process_put(owner->process_state),
+            HV_DXG_CLEANUP_NONE, handle);
+        owner->process_state = NULL;
+        owner->dxg_process.v = 0;
+        owner->dxg_process_created = 0;
+        hvdxg.cleanup_attempts++;
+        hvdxg.cleanup_last_ret = ret;
+        if (ret == 0)
+            hvdxg.cleanup_successes++;
+        return;
+    }
+
+    if (owner->gpuvas == NULL)
+        owner->gpuva_count = 0;
+    while (owner->gpuva_count > 0) {
+        struct hvdxg_tracked_gpuva g =
+            owner->gpuvas[--owner->gpuva_count];
+        int gpuva_ret;
+        int active;
+
+        active = hvdxg_untrack_object(owner, HV_DXG_OBJECT_GPUVA, g.base);
+        hvdxg_wait_gpuva_fence(&g);
+        /*
+         * WSL does not send FREEGPUVIRTUALADDRESS for live reservations from
+         * process teardown.  Only explicit D3DKMT free ioctls reach the host.
+         */
+        gpuva_ret = active ? 0 : 0;
+        hvdxg_cleanup_note_ret(&ret, gpuva_ret,
+                               HV_DXG_CLEANUP_GPUVA, (uint32)g.base);
+    }
+    if (owner->hwqueues == NULL)
+        owner->hwqueue_count = 0;
+    if (owner->sync_objects == NULL)
+        owner->sync_object_count = 0;
+    if (owner->contexts == NULL)
+        owner->context_count = 0;
+    if (owner->allocations == NULL)
+        owner->allocation_count = 0;
+    if (owner->resources == NULL)
+        owner->resource_count = 0;
+    if (owner->paging_queues == NULL)
+        owner->paging_queue_count = 0;
+    if (owner->devices == NULL)
+        owner->device_count = 0;
+    while (owner->device_count > 0) {
+        uint32 handle = owner->devices[--owner->device_count];
+
+        if (hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE, handle)) {
+            hvdxg_cleanup_note_ret(
+                &ret,
+                hvdxg_flush_device_host(handle),
+                HV_DXG_CLEANUP_DEVICE, handle);
+            hvdxg_cleanup_note_ret(
+                &ret,
+                hvdxg_destroy_device_owned_objects(owner, handle),
+                HV_DXG_CLEANUP_DEVICE, handle);
+            hvdxg_cleanup_note_ret(
+                &ret,
+                hvdxg_destroy_device_host(handle),
+                HV_DXG_CLEANUP_DEVICE, handle);
+        }
+    }
     if (owner->hwqueues == NULL)
         owner->hwqueue_count = 0;
     while (owner->hwqueue_count > 0) {
@@ -5047,56 +16027,44 @@ static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
 
         if (sync != 0)
             hvdxg_untrack_sync(owner, sync);
-        hvdxg_cleanup_note_ret(
-            &ret,
-            hvdxg_destroy_hwqueue_host(handle),
-            HV_DXG_CLEANUP_HWQUEUE, handle);
-    }
-    if (owner->gpuvas == NULL)
-        owner->gpuva_count = 0;
-    while (owner->gpuva_count > 0) {
-        struct hvdxg_tracked_gpuva g =
-            owner->gpuvas[--owner->gpuva_count];
-        int gpuva_ret;
-
-        hvdxg_wait_gpuva_fence(&g);
-        gpuva_ret = hvdxg_free_gpuva_host(g.adapter, g.base, g.size);
-        /*
-         * Some D3D12 failure paths appear to invalidate the VA mapping before
-         * the process close path runs. Explicit FREEGPUVA still reports that
-         * error; cleanup treats it as already released and continues.
-         */
-        if (gpuva_ret == -EINVAL)
-            gpuva_ret = 0;
-        hvdxg_cleanup_note_ret(&ret, gpuva_ret,
-                               HV_DXG_CLEANUP_GPUVA, (uint32)g.base);
+        hvdxg_cleanup_note_ret(&ret, 0, HV_DXG_CLEANUP_HWQUEUE, handle);
     }
     if (owner->contexts == NULL)
         owner->context_count = 0;
     while (owner->context_count > 0) {
         uint32 handle = owner->contexts[--owner->context_count];
-        hvdxg_cleanup_note_ret(
-            &ret,
-            hvdxg_destroy_context_host(handle),
-            HV_DXG_CLEANUP_CONTEXT, handle);
+        if (hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT, handle))
+            hvdxg_cleanup_note_ret(&ret, 0, HV_DXG_CLEANUP_CONTEXT, handle);
     }
     if (owner->allocations == NULL)
         owner->allocation_count = 0;
     while (owner->allocation_count > 0) {
         struct hvdxg_tracked_allocation a =
             owner->allocations[--owner->allocation_count];
+        int active = 0;
+        if (a.allocation != 0)
+            active = hvdxg_untrack_object(owner, HV_DXG_OBJECT_ALLOCATION,
+                                          a.allocation);
         (void)hvdxg_unmap_tracked_allocation(&a);
         hvdxg_unpin_tracked_allocation(&a);
-        hvdxg_cleanup_note_ret(
-            &ret,
-            hvdxg_destroy_allocation_host(a.device, a.resource, a.allocation),
-            HV_DXG_CLEANUP_ALLOCATION,
-            a.allocation != 0 ? a.allocation : a.resource);
+        if (active)
+            hvdxg_cleanup_note_ret(
+                &ret,
+                hvdxg_destroy_allocation_host(a.device, a.resource,
+                                             a.allocation,
+                                             HV_DXG_DESTROY_ALLOC_CTX_FILE_CLEANUP),
+                HV_DXG_CLEANUP_ALLOCATION,
+                a.allocation != 0 ? a.allocation : a.resource);
     }
     if (owner->resources == NULL)
         owner->resource_count = 0;
-    while (owner->resource_count > 0)
-        hvdxg_free_tracked_resource(&owner->resources[--owner->resource_count]);
+    while (owner->resource_count > 0) {
+        struct hvdxg_tracked_resource *r =
+            &owner->resources[--owner->resource_count];
+
+        hvdxg_untrack_object(owner, HV_DXG_OBJECT_RESOURCE, r->resource);
+        hvdxg_free_tracked_resource(r);
+    }
     if (owner->paging_queues == NULL)
         owner->paging_queue_count = 0;
     while (owner->paging_queue_count > 0) {
@@ -5106,37 +16074,45 @@ static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
 
         if (sync != 0)
             hvdxg_untrack_sync(owner, sync);
-        hvdxg_cleanup_note_ret(
-            &ret,
-            hvdxg_destroy_pagingqueue_host(handle),
-            HV_DXG_CLEANUP_PAGINGQUEUE, handle);
+        hvdxg_cleanup_note_ret(&ret, 0, HV_DXG_CLEANUP_PAGINGQUEUE, handle);
     }
     if (owner->sync_objects == NULL)
         owner->sync_object_count = 0;
     while (owner->sync_object_count > 0) {
         uint32 handle =
             owner->sync_objects[owner->sync_object_count - 1].sync;
+        uint32 monitor_fence =
+            owner->sync_objects[owner->sync_object_count - 1].
+                monitor_fence_handle;
 
         hvdxg_untrack_sync(owner, handle);
-        hvdxg_cleanup_note_ret(
-            &ret,
-            hvdxg_destroy_sync_host(handle),
-            HV_DXG_CLEANUP_SYNC, handle);
+        if (monitor_fence) {
+            hvdxg_cleanup_note_ret(&ret, 0, HV_DXG_CLEANUP_SYNC, handle);
+            continue;
+        }
+        hvdxg_cleanup_note_ret(&ret, 0, HV_DXG_CLEANUP_SYNC, handle);
     }
-    if (owner->devices == NULL)
-        owner->device_count = 0;
-    while (owner->device_count > 0) {
-        uint32 handle = owner->devices[--owner->device_count];
+    hvdxg_cleanup_process_objects(owner, &ret);
+    if (owner->process_state != NULL) {
+        uint32 handle = owner->dxg_process.v;
+
         hvdxg_cleanup_note_ret(
-            &ret,
-            hvdxg_destroy_device_host(handle),
-            HV_DXG_CLEANUP_DEVICE, handle);
+            &ret, hvdxg_process_put(owner->process_state),
+            HV_DXG_CLEANUP_NONE, handle);
+        owner->process_state = NULL;
+        owner->dxg_process.v = 0;
+        owner->dxg_process_created = 0;
+    } else if (owner->dxg_process_created && owner->dxg_process.v != 0) {
+        hvdxg.process_destroy_deferred++;
+        hvdxg.process_destroy_suppressed++;
+        hvdxg.process_retained_handle = owner->dxg_process.v;
+        hvdxg.process_retained_refs = 0;
+        hvdxg_cleanup_note_ret(
+            &ret, 0,
+            HV_DXG_CLEANUP_NONE, owner->dxg_process.v);
+        owner->dxg_process.v = 0;
+        owner->dxg_process_created = 0;
     }
-    /*
-     * Child handles are owned by the open file and are torn down above.
-     * Keep the host process handle live for now: issuing DESTROYPROCESS here
-     * makes later opens fail adapter enumeration on Hyper-V GPU-PV hosts.
-     */
     hvdxg.cleanup_attempts++;
     hvdxg.cleanup_last_ret = ret;
     if (ret == 0)
@@ -5162,6 +16138,7 @@ static void hvdxg_free_open_state(struct hvdxg_open_state *owner)
     while (owner->resource_count > 0)
         hvdxg_free_tracked_resource(&owner->resources[--owner->resource_count]);
     owner->gpuva_count = 0;
+    owner->object_count = 0;
     if (owner->read_status != NULL)
         kvfree(owner->read_status);
     if (owner->allocations != NULL)
@@ -5174,6 +16151,8 @@ static void hvdxg_free_open_state(struct hvdxg_open_state *owner)
         kvfree(owner->devices);
     if (owner->contexts != NULL)
         kvfree(owner->contexts);
+    if (owner->objects != NULL)
+        kvfree(owner->objects);
     if (owner->hwqueues != NULL)
         kvfree(owner->hwqueues);
     if (owner->paging_queues != NULL)
@@ -5191,44 +16170,174 @@ static void hvdxg_note_unsupported_ioctl(uint32 cmd, uint32 device,
     hvdxg.unsupported_last_device = device;
     hvdxg.unsupported_last_handle = handle;
     hvdxg.unsupported_last_count = count;
+    hvdxg.unsupported_last_nr = cmd & 0xffU;
+    hvdxg.unsupported_last_size = (cmd >> _IOC_SIZESHIFT) &
+                                  ((1U << _IOC_SIZEBITS) - 1U);
+    hvdxg.unsupported_last_name =
+        cmd == LX_DXMARKDEVICEASERROR ? 1U : 0U;
+}
+
+static uint32 hvdxg_queryadapter_wsl_command_len(uint32 private_data_size)
+{
+    return __builtin_offsetof(struct hvdxg_command_queryadapterinfo_wsl,
+                              private_data) + private_data_size;
 }
 
 static uint32 hvdxg_queryadapter_private_max(void)
 {
     uint32 command_max = HV_DXG_VM_BUS_PACKET_MAX -
-                         sizeof(struct hvdxg_command_queryadapterinfo) + 1;
+                         (HV_DXG_QUERYADAPTERINFO_WSL_NATURAL_BASE - 1U);
     uint32 result_max = HV_DXG_VM_BUS_PACKET_MAX -
                         sizeof(struct hvdxg_ntstatus);
 
     return command_max < result_max ? command_max : result_max;
 }
 
-static int hvdxg_ioctl_queryadapterinfo(uint64 arg)
+static void hvdxg_fill_render_adapter_type(struct d3dkmt_adaptertype *type)
+{
+    /*
+     * WSL patches adapter type replies after the host QAI completion:
+     * force GPU-PV/paravirtualized shape and hide display/post/indirect/ACG
+     * timing capabilities from Linux userspace.
+     */
+    uint32 raw;
+
+    if (type == NULL)
+        return;
+    raw = type->value;
+    type->render_supported = 1;
+    type->paravirtualized = 1;
+    type->display_supported = 0;
+    type->post_device = 0;
+    type->indirect_display_device = 0;
+    type->acg_supported = 0;
+    type->support_set_timings_from_vidpn = 0;
+    hvdxg.queryadapter_adaptertype_raw_value = raw;
+    hvdxg.queryadapter_adaptertype_wsl_value = type->value;
+    hvdxg.queryadapter_adaptertype_cleared_bits = raw & ~type->value;
+    hvdxg.queryadapter_adaptertype_forced_bits = type->value & ~raw;
+    hvdxg.queryadapter_adaptertype_compute_only = type->compute_only;
+}
+
+static int hvdxg_ioctl_queryadapterinfo(uint64 arg,
+                                        struct hvdxg_open_state *owner)
 {
     struct d3dkmt_queryadapterinfo req;
     uint8 *command_buf = NULL;
     uint8 *result_buf = NULL;
-    struct hvdxg_command_queryadapterinfo *query;
+    struct hvdxg_command_queryadapterinfo_wsl *query;
     uint32 command_len;
     uint32 result_len;
     uint32 actual_len = 0;
     uint32 private_max = hvdxg_queryadapter_private_max();
     uint8 *private_data;
+    uint32 primary_len = 0;
+    uint32 host_adapter = 0;
+    uint32 resolve_source = 0;
+    uint32 query_source = 0;
+    int alias_adapter = 0;
+    int primary_ret = 0;
+    int32 primary_status = 0;
+    int process_locked = 0;
+    struct hvdxg_d3dkmthandle query_process;
+    struct hvdxg_queryadapter_context query_context;
+    const struct hvdxg_winluid *query_ext_luid = NULL;
     int ret;
 
-    ret = hvdxg_d3dkmt_ensure();
-    if (ret != 0)
-        return ret;
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
+    ret = hvdxg_d3dkmt_ensure_adapter();
+    if (ret != 0)
+        return ret;
 
     hvdxg.queryadapter_last_type = (uint32)req.type;
-    hvdxg.queryadapter_last_size = req.private_data_size;
-    hvdxg.queryadapter_last_len = 0;
-    hvdxg.queryadapter_last_ret = 0;
+	    hvdxg.queryadapter_last_size = req.private_data_size;
+	    hvdxg.queryadapter_last_len = 0;
+	    hvdxg.queryadapter_last_user_len = 0;
+	    hvdxg.queryadapter_last_ret = 0;
     hvdxg.queryadapter_last_status = 0;
-    if (req.adapter.v != hvdxg.host_adapter_handle ||
-        req.private_data == 0 || req.private_data_size == 0 ||
+    hvdxg.queryadapter_last_layout = 0;
+    hvdxg.queryadapter_last_cmd_len = 0;
+    hvdxg.queryadapter_last_type_offset = 0;
+    hvdxg.queryadapter_last_size_offset = 0;
+    hvdxg.queryadapter_last_data_offset = 0;
+    hvdxg.queryadapter_last_adapter = req.adapter.v;
+    hvdxg.queryadapter_last_host_adapter = 0;
+    hvdxg.queryadapter_last_resolve_source = 0;
+    hvdxg.queryadapter_last_owner_process =
+        owner != NULL ? owner->dxg_process.v : 0;
+    hvdxg.queryadapter_last_owner_generation =
+        hvdxg_open_process_generation(owner);
+    hvdxg.queryadapter_last_owner_refs = hvdxg_open_process_refs(owner);
+    hvdxg.queryadapter_last_result_len = 0;
+    hvdxg.queryadapter_last_expected_wsl_len =
+        req.private_data_size + sizeof(struct hvdxg_ntstatus);
+    hvdxg.queryadapter_last_process_source = 0;
+    hvdxg.queryadapter_last_adapter_object = 0;
+    hvdxg.queryadapter_last_adapter_object_host = 0;
+    hvdxg.queryadapter_last_adapter_object_owner = 0;
+    hvdxg.queryadapter_last_adapter_object_owner_generation = 0;
+    hvdxg.queryadapter_last_adapter_object_generation = 0;
+    hvdxg.queryadapter_local_namespace = 0;
+    hvdxg.queryadapter_process_adapter_refs = 0;
+    hvdxg.queryadapter_process_adapter_locals = 0;
+    hvdxg.queryadapter_process_adapter_generation = 0;
+	    hvdxg.queryadapter_type15_fail_ret = 0;
+	    hvdxg.queryadapter_type15_fail_status = 0;
+	    hvdxg.queryadapter_type15_fail_process = 0;
+	    hvdxg.queryadapter_type15_fail_route = 0;
+	    hvdxg.queryadapter_type15_fail_ext_luid_low = 0;
+	    hvdxg.queryadapter_type15_fail_ext_luid_high = 0;
+    hvdxg.queryadapter_adaptertype_rewrite_type = 0;
+    hvdxg.queryadapter_adaptertype_rewrite_source = 0;
+    hvdxg.queryadapter_adaptertype_raw_value = 0;
+    hvdxg.queryadapter_adaptertype_wsl_value = 0;
+    hvdxg.queryadapter_adaptertype_cleared_bits = 0;
+    hvdxg.queryadapter_adaptertype_forced_bits = 0;
+    hvdxg.queryadapter_adaptertype_compute_only = 0;
+	    hvdxg.queryadapter_zero_success_host_type = 0;
+	    hvdxg.queryadapter_zero_success_host_len = 0;
+	    hvdxg.queryadapter_zero_success_host_ret = 0;
+	    hvdxg.queryadapter_zero_success_host_status = 0;
+	    hvdxg.queryadapter_zero_success_user_ret = 0;
+	    hvdxg.queryadapter_source_last = 0;
+    hvdxg.queryadapter_alias_cache_last_type = 0;
+    hvdxg.queryadapter_alias_cache_last_size = 0;
+    hvdxg.queryadapter_alias_cache_last_len = 0;
+    hvdxg.queryadapter_alias_cache_last_alias = 0;
+    hvdxg.queryadapter_alias_cache_last_host = 0;
+    hvdxg.queryadapter_alias_cache_last_hash = 0;
+    hvdxg.queryadapter_alias_cache_last_result = 0;
+    hvdxg.queryadapter_alias_staged_type = 0;
+    hvdxg.queryadapter_alias_staged_size = 0;
+    hvdxg.queryadapter_alias_staged_alias = 0;
+    hvdxg.queryadapter_alias_staged_host = 0;
+    hvdxg.queryadapter_alias_staged_path = 0;
+    hvdxg.queryadapter_alias_staged_ret = 0;
+    hvdxg.queryadapter_send_route = 0;
+    hvdxg.queryadapter_send_ext_luid_low = 0;
+    hvdxg.queryadapter_send_ext_luid_high = 0;
+    hvdxg.queryadapter_completion_desc_type = 0;
+    hvdxg.queryadapter_completion_desc_flags = 0;
+    hvdxg.queryadapter_completion_desc_len8 = 0;
+    hvdxg.queryadapter_completion_desc_offset8 = 0;
+    hvdxg.queryadapter_completion_packet_len = 0;
+    hvdxg.queryadapter_completion_packet_offset = 0;
+    hvdxg.queryadapter_completion_payload_len = 0;
+    hvdxg.queryadapter_completion_trans_id = 0;
+    hvdxg.queryadapter_completion_waiting_trans_id = 0;
+    hvdxg.queryadapter_completion_source_channel = HV_DXG_CHANNEL_NONE;
+    hvdxg.queryadapter_completion_source_relid = 0;
+    hvdxg.queryadapter_completion_waiting_channel = HV_DXG_CHANNEL_NONE;
+    hvdxg.queryadapter_completion_waiting_relid = 0;
+    hvdxg.queryadapter_completion_waiting_match = 0;
+    hvdxg.queryadapter_completion_waiting_channel_match = 0;
+    hvdxg.queryadapter_completion_type = 0;
+    hvdxg.queryadapter_completion_len = 0;
+    memset(hvdxg.queryadapter_completion_prefix, 0,
+           sizeof(hvdxg.queryadapter_completion_prefix));
+    hvdxg_reset_queryadapter_return_head();
+    if (req.private_data == 0 || req.private_data_size == 0 ||
         req.private_data_size > private_max) {
         ret = -EINVAL;
         hvdxg.queryadapter_last_ret = ret;
@@ -5237,193 +16346,64 @@ static int hvdxg_ioctl_queryadapterinfo(uint64 arg)
         return ret;
     }
 
-    if (req.type == _KMTQAITYPE_UMDRIVERNAME) {
-        uint32 version = 0;
-        const char *umd_path = "/lib/libnvwgf2umx.so";
-
-        if (hvdxg.adapter_vendor_id == HV_DXG_VENDOR_INTEL)
-            umd_path = "/lib/libigd12umd64.so";
-        else if (hvdxg.adapter_vendor_id == HV_DXG_VENDOR_NVIDIA)
-            umd_path = "/lib/libnvwgf2umx.so";
-
-        command_buf = kvmalloc(req.private_data_size);
-        if (command_buf == NULL) {
-            ret = -ENOMEM;
+    if (owner != NULL) {
+        mutex_lock(&hvdxg.process_lock);
+        process_locked = 1;
+        ret = hvdxg_bind_open_process(owner);
+        hvdxg.queryadapter_last_owner_process = owner->dxg_process.v;
+        hvdxg.queryadapter_last_owner_generation =
+            hvdxg_open_process_generation(owner);
+        hvdxg.queryadapter_last_owner_refs = hvdxg_open_process_refs(owner);
+        if (ret != 0) {
             hvdxg.queryadapter_last_ret = ret;
             hvdxg_note_queryadapter_history((uint32)req.type,
                 req.private_data_size, ret, 0);
-            return ret;
+            goto cleanup;
         }
-        memset(command_buf, 0, req.private_data_size);
-        if (req.private_data_size >= sizeof(version) &&
-            either_copyin(&version, 1, req.private_data,
-                          sizeof(version)) == 0) {
-            version = 3;
-            memcpy(command_buf, &version, sizeof(version));
-            if (req.private_data_size > sizeof(version)) {
-                hvdxg_write_utf16_string(command_buf + sizeof(version),
-                    req.private_data_size - sizeof(version),
-                    umd_path);
-            }
-        }
-        ret = either_copyout(1, req.private_data, command_buf,
-                             req.private_data_size) < 0 ? -EFAULT : 0;
-        hvdxg.queryadapter_last_len = req.private_data_size;
-        hvdxg.queryadapter_last_status = 0;
-        hvdxg.queryadapter_last_ret = ret;
-        hvdxg_note_queryadapter_history((uint32)req.type,
-            req.private_data_size, ret, version);
-        goto cleanup;
     }
-
-    if (req.type == _KMTQAITYPE_DRIVER_DESCRIPTION ||
-        req.type == _KMTQAITYPE_DRIVER_DESCRIPTION_RENDER) {
-        command_buf = kvmalloc(req.private_data_size);
-        if (command_buf == NULL) {
-            ret = -ENOMEM;
-            hvdxg.queryadapter_last_ret = ret;
-            hvdxg_note_queryadapter_history((uint32)req.type,
-                req.private_data_size, ret, 0);
-            return ret;
-        }
-        memset(command_buf, 0, req.private_data_size);
-        hvdxg_write_utf16_string(command_buf, req.private_data_size,
-                                 "Microsoft Hyper-V GPU-PV Render Driver");
-        ret = either_copyout(1, req.private_data, command_buf,
-                             req.private_data_size) < 0 ? -EFAULT : 0;
-        hvdxg.queryadapter_last_len = req.private_data_size;
-        hvdxg.queryadapter_last_status = 0;
+    memset(&query_context, 0, sizeof(query_context));
+    ret = hvdxg_resolve_queryadapter_context(owner, req.adapter.v,
+                                             &host_adapter,
+                                             &resolve_source,
+                                             &query_context);
+    hvdxg.queryadapter_last_host_adapter = host_adapter;
+    hvdxg.queryadapter_last_resolve_source = resolve_source;
+    hvdxg.queryadapter_local_namespace = query_context.local_namespace;
+    alias_adapter = query_context.process_adapter != NULL &&
+                    host_adapter == hvdxg.host_adapter_handle &&
+                    req.adapter.v != host_adapter;
+    if (query_context.process_adapter != NULL) {
+        hvdxg.queryadapter_process_adapter_refs =
+            query_context.process_adapter->refs;
+        hvdxg.queryadapter_process_adapter_locals =
+            query_context.process_adapter->local_handle_count;
+        hvdxg.queryadapter_process_adapter_generation =
+            query_context.process_adapter->generation;
+        query_ext_luid = &query_context.process_adapter->host_vgpu_luid;
+    }
+    hvdxg_note_queryadapter_adapter_object(owner, req.adapter.v,
+                                           &query_context);
+    if (ret != 0) {
         hvdxg.queryadapter_last_ret = ret;
         hvdxg_note_queryadapter_history((uint32)req.type,
             req.private_data_size, ret, 0);
         goto cleanup;
     }
 
-    if (req.type == _KMTQAITYPE_PHYSICALADAPTERCOUNT) {
-        uint32 count = 1;
-
-        if (req.private_data_size < sizeof(count)) {
-            ret = -EINVAL;
-            hvdxg.queryadapter_last_ret = ret;
-            hvdxg_note_queryadapter_history((uint32)req.type,
-                req.private_data_size, ret, 0);
-            return ret;
-        }
-        ret = either_copyout(1, req.private_data, &count, sizeof(count)) < 0 ?
-              -EFAULT : 0;
-        hvdxg.queryadapter_last_len = sizeof(count);
-        hvdxg.queryadapter_last_status = 0;
-        hvdxg.queryadapter_last_ret = ret;
-        hvdxg_note_queryadapter_history((uint32)req.type,
-            req.private_data_size, ret, count);
-        goto cleanup;
-    }
-
-    if (req.type == _KMTQAITYPE_QUERYREGISTRY) {
-        static const char *const dxcore_attrs[] = {
-            "{B69EB219-3DED-4464-979F-A00BD4687006}",
-            "{0C9ECE4D-2F6E-4F01-8C96-E89E331B47B1}",
-            "{8C47866B-7583-450D-F0F0-6BADA895AF4B}",
-            "{248E2800-A793-4724-ABAA-23A6DE1BE090}",
-            "{B71B0D41-1088-422F-A27C-0250B7D3A988}",
-            "{8EB2C848-82F6-4B49-AA87-AECFCF0174C6}",
-        };
-        struct d3dddi_queryregistry_info *info;
-        uint32 output_off = D3DDDI_QUERYREGISTRY_OUTPUT_OFFSET;
-        uint32 output_cap;
-        uint32 output_size = 0;
-        int known_value = 0;
-
-        command_buf = kvmalloc(req.private_data_size);
-        if (command_buf == NULL) {
-            ret = -ENOMEM;
-            hvdxg.queryadapter_last_ret = ret;
-            hvdxg_note_queryadapter_history((uint32)req.type,
-                req.private_data_size, ret, 0);
-            return ret;
-        }
-        if (req.private_data_size < output_off) {
-            ret = -EINVAL;
+    if (owner == NULL) {
+        ret = hvdxg_d3dkmt_ensure();
+        if (ret != 0) {
             hvdxg.queryadapter_last_ret = ret;
             hvdxg_note_queryadapter_history((uint32)req.type,
                 req.private_data_size, ret, 0);
             goto cleanup;
         }
-        if (either_copyin(command_buf, 1, req.private_data,
-                          req.private_data_size) < 0) {
-            ret = -EFAULT;
-            hvdxg.queryadapter_last_ret = ret;
-            hvdxg_note_queryadapter_history((uint32)req.type,
-                req.private_data_size, ret, 0);
-            goto cleanup;
-        }
-        info = (struct d3dddi_queryregistry_info *)command_buf;
-        output_cap = req.private_data_size - output_off;
-        hvdxg.queryregistry_last_query_type = (uint32)info->query_type;
-        hvdxg.queryregistry_last_flags = info->query_flags.value;
-        hvdxg.queryregistry_last_value_type = info->value_type;
-        hvdxg.queryregistry_last_phys = info->physical_adapter_index;
-        hvdxg.queryregistry_last_output_size = info->output_value_size;
-        hvdxg.queryregistry_last_status =
-            D3DDDI_QUERYREGISTRY_STATUS_FAIL;
-        hvdxg.queryregistry_last_name0 =
-            ((uint32)info->value_name[1] << 16) | info->value_name[0];
-        hvdxg.queryregistry_last_name1 =
-            ((uint32)info->value_name[3] << 16) | info->value_name[2];
-        hvdxg_utf16_to_ascii(hvdxg.queryregistry_last_name,
-                              sizeof(hvdxg.queryregistry_last_name),
-                              info->value_name);
-
-        if (info->query_type == D3DDDI_QUERYREGISTRY_ADAPTERKEY &&
-            info->value_type == 7 &&
-            (hvdxg_utf16_ascii_equals(info->value_name,
-                                      "DXCoreAttributes") ||
-             (info->value_name[0] == 'D' &&
-              info->value_name[1] == 'X' &&
-              info->value_name[2] == 'C' &&
-              info->value_name[3] == 'o'))) {
-            known_value = 1;
-            output_size = hvdxg_utf16_multisz_size(dxcore_attrs,
-                sizeof(dxcore_attrs) / sizeof(dxcore_attrs[0]));
-        } else if (info->query_type == D3DDDI_QUERYREGISTRY_SERVICEKEY &&
-                   info->value_type == 4 &&
-                   hvdxg_utf16_ascii_equals(info->value_name,
-                                            "EnableVGPUIndicator")) {
-            known_value = 2;
-            output_size = sizeof(uint32);
-        }
-
-        if (known_value && output_cap >= output_size) {
-            if (known_value == 1) {
-                hvdxg_write_utf16_multisz(command_buf + output_off,
-                    dxcore_attrs,
-                    sizeof(dxcore_attrs) / sizeof(dxcore_attrs[0]));
-            } else {
-                *(uint32 *)(command_buf + output_off) = 1;
-            }
-            info->output_value_size = output_size;
-            info->status = D3DDDI_QUERYREGISTRY_STATUS_SUCCESS;
-        } else if (known_value) {
-            info->output_value_size = output_size;
-            info->status = D3DDDI_QUERYREGISTRY_STATUS_BUFFER_OVERFLOW;
-        } else {
-            info->output_value_size = 0;
-            info->status = D3DDDI_QUERYREGISTRY_STATUS_FAIL;
-        }
-        hvdxg.queryregistry_last_output_size = info->output_value_size;
-        hvdxg.queryregistry_last_status = info->status;
-        ret = either_copyout(1, req.private_data, command_buf,
-                             req.private_data_size) < 0 ? -EFAULT : 0;
-        hvdxg.queryadapter_last_len = req.private_data_size;
-        hvdxg.queryadapter_last_status = 0;
-        hvdxg.queryadapter_last_ret = ret;
-        hvdxg_note_queryadapter_history((uint32)req.type,
-            req.private_data_size, ret, info->status);
-        goto cleanup;
     }
 
-    command_len = sizeof(*query) + req.private_data_size - 1;
+    command_len = hvdxg_queryadapter_wsl_command_len(req.private_data_size);
     result_len = req.private_data_size + sizeof(struct hvdxg_ntstatus);
+    hvdxg.queryadapter_last_result_len = result_len;
+    hvdxg.queryadapter_last_expected_wsl_len = result_len;
     command_buf = kvmalloc(command_len);
     result_buf = kvmalloc(result_len);
     if (command_buf == NULL || result_buf == NULL) {
@@ -5434,12 +16414,42 @@ static int hvdxg_ioctl_queryadapterinfo(uint64 arg)
         goto cleanup;
     }
     memset(command_buf, 0, command_len);
-    query = (struct hvdxg_command_queryadapterinfo *)command_buf;
-    hvdxg_command_vgpu_init_process(&query->hdr,
-                                    HV_DXGK_VMBCOMMAND_QUERYADAPTERINFO,
-                                    hvdxg.dxg_process);
+    query = (struct hvdxg_command_queryadapterinfo_wsl *)command_buf;
+    if (query_context.process != NULL)
+        query_process = query_context.process->host_process;
+    else if (owner != NULL && owner->dxg_process.v != 0)
+        query_process = owner->dxg_process;
+    else
+        query_process = hvdxg.dxg_process;
+    if (owner != NULL && owner->process_state != NULL &&
+        query_process.v == 0) {
+        ret = -EINVAL;
+        hvdxg.queryadapter_last_ret = ret;
+        hvdxg_note_queryadapter_history((uint32)req.type,
+            req.private_data_size, ret, 0);
+        goto cleanup;
+    }
+    query->hdr.process = query_process;
+    hvdxg.queryadapter_last_owner_process = query_process.v;
+    hvdxg.queryadapter_last_process_source =
+        query_context.process_adapter != NULL ? 4 :
+        (owner != NULL && owner->process_state != NULL &&
+         owner->process_state->host_process.v != 0) ? 1 :
+        (owner != NULL && owner->dxg_process.v != 0) ? 2 : 3;
+    query->hdr.channel_type = HV_DXGKVMB_VGPU_TO_HOST;
+    query->hdr.command_type = HV_DXGK_VMBCOMMAND_QUERYADAPTERINFO;
     query->query_type = (uint32)req.type;
     query->private_data_size = req.private_data_size;
+    hvdxg.queryadapter_last_cmd_len = command_len;
+    hvdxg.queryadapter_last_type_offset =
+        __builtin_offsetof(struct hvdxg_command_queryadapterinfo_wsl,
+                           query_type);
+    hvdxg.queryadapter_last_size_offset =
+        __builtin_offsetof(struct hvdxg_command_queryadapterinfo_wsl,
+                           private_data_size);
+    hvdxg.queryadapter_last_data_offset =
+        __builtin_offsetof(struct hvdxg_command_queryadapterinfo_wsl,
+                           private_data);
     if (either_copyin(query->private_data, 1, req.private_data,
                       req.private_data_size) < 0) {
         ret = -EFAULT;
@@ -5448,43 +16458,447 @@ static int hvdxg_ioctl_queryadapterinfo(uint64 arg)
             req.private_data_size, ret, 0);
         goto cleanup;
     }
+    if ((uint32)req.type == HV_DXG_QAITYPE_SELECTED_ADAPTER)
+        hvdxg_note_queryadapter_type0_input(query->private_data,
+                                            req.private_data_size);
+    if (command_len > hvdxg.queryadapter_last_data_offset +
+                      req.private_data_size) {
+        memset(command_buf + hvdxg.queryadapter_last_data_offset +
+               req.private_data_size, 0,
+               command_len - hvdxg.queryadapter_last_data_offset -
+               req.private_data_size);
+    }
     memset(result_buf, 0, result_len);
-    ret = hvdxg_send_sync_vgpu(query, command_len, result_buf, result_len,
-                               &actual_len);
+    if ((uint32)req.type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID) {
+        if (req.private_data_size !=
+                HV_DXG_PHYSICAL_ADAPTER_DEVICE_IDS_SIZE) {
+            ret = -EINVAL;
+            hvdxg.queryadapter_last_ret = ret;
+            hvdxg_note_queryadapter_history((uint32)req.type,
+                req.private_data_size, ret, 0);
+            goto cleanup;
+        }
+        if (!hvdxg_type31_active_v40_ext() &&
+            hvdxg_try_fallback_adapter_hardware_id(
+                result_buf, req.private_data_size)) {
+            private_data = result_buf;
+            actual_len = req.private_data_size;
+            query_source = 3;
+            hvdxg.queryadapter_last_len = actual_len;
+            hvdxg.queryadapter_last_status = 0;
+            hvdxg.queryadapter_last_ret = 0;
+            hvdxg.queryadapter_last_layout = 3;
+            goto queryadapter_copyout;
+        }
+    }
+	    if (alias_adapter &&
+	        ((uint32)req.type == HV_DXG_QAITYPE_SELECTED_ADAPTER ||
+	         hvdxg_queryadapter_alias_cache_type((uint32)req.type)) &&
+	        hvdxg_queryadapter_alias_cache_load((uint32)req.type,
+	            req.private_data_size, req.adapter.v, host_adapter,
+	            result_buf) == 0) {
+        private_data = result_buf;
+        actual_len = req.private_data_size;
+        query_source = 2;
+        hvdxg.queryadapter_last_len = actual_len;
+        hvdxg.queryadapter_last_status = 0;
+        hvdxg.queryadapter_last_ret = 0;
+        hvdxg.queryadapter_last_layout = 5;
+        goto queryadapter_copyout;
+    }
+    if (alias_adapter && (uint32)req.type == _KMTQAITYPE_UMDRIVERNAME &&
+        hvdxg_queryadapter_stage_umd_payload((uint32)req.type,
+            req.private_data_size, req.adapter.v, host_adapter,
+            result_buf) == 0) {
+        private_data = result_buf;
+        actual_len = req.private_data_size;
+        query_source = 4;
+        hvdxg.queryadapter_last_len = actual_len;
+        hvdxg.queryadapter_last_status = 0;
+        hvdxg.queryadapter_last_ret = 0;
+        hvdxg.queryadapter_last_layout = 6;
+        goto queryadapter_copyout;
+    }
+    ret = hvdxg_send_sync_vgpu_flags_luid(query, command_len, result_buf,
+                                          result_len, &actual_len, 0,
+                                          query_ext_luid);
+    hvdxg_capture_queryadapter_completion();
+    hvdxg_note_queryadapter_return_head(result_buf, actual_len);
+    primary_len = actual_len;
+    primary_ret = ret;
+    if (actual_len >= sizeof(struct hvdxg_ntstatus))
+        primary_status = ((struct hvdxg_ntstatus *)result_buf)->v;
+    else
+        primary_status = 0;
     hvdxg.queryadapter_last_len = actual_len;
     hvdxg.queryadapter_last_ret = ret;
-    if (ret != 0) {
+    hvdxg.queryadapter_last_status = primary_status;
+    if ((uint32)req.type == HV_DXG_QAITYPE_SELECTED_ADAPTER) {
+        hvdxg.queryadapter_type0_primary_len = primary_len;
+        hvdxg.queryadapter_type0_primary_ret = primary_ret;
+        hvdxg.queryadapter_type0_primary_status = primary_status;
+        hvdxg.queryadapter_type0_result_route = 1;
+        if (ret == 0 && actual_len < result_len) {
+            ret = -EOVERFLOW;
+            primary_ret = ret;
+            hvdxg.queryadapter_type0_primary_ret = primary_ret;
+            hvdxg.queryadapter_last_ret = ret;
+        }
+    }
+	    if ((uint32)req.type == HV_DXG_QAITYPE_SELECTED_ADAPTER &&
+	        ret != 0 && actual_len == 0) {
+	        hvdxg.queryadapter_type0_fallback_attempted = 1;
+	        hvdxg.queryadapter_type0_fallback_reason = 1;
+        hvdxg.queryadapter_type0_fallback_route = 1;
+        memset(result_buf, 0, result_len);
+        actual_len = 0;
+        ret = hvdxg_send_sync_vgpu_flags_luid(query, command_len,
+            result_buf, result_len, &actual_len,
+            HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER |
+            HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU, query_ext_luid);
+        hvdxg_capture_queryadapter_completion();
+        hvdxg_note_queryadapter_return_head(result_buf, actual_len);
+        hvdxg.queryadapter_type0_fallback_len = actual_len;
+	        hvdxg.queryadapter_type0_fallback_ret = ret;
+	        if (actual_len >= sizeof(struct hvdxg_ntstatus))
+	            hvdxg.queryadapter_type0_fallback_status =
+	                ((struct hvdxg_ntstatus *)result_buf)->v;
+	        else
+	            hvdxg.queryadapter_type0_fallback_status = 0;
+	        hvdxg.queryadapter_last_len = actual_len;
+	        hvdxg.queryadapter_last_ret = ret;
+	        hvdxg.queryadapter_last_status =
+	            hvdxg.queryadapter_type0_fallback_status;
+	        if (ret == 0 && actual_len < result_len) {
+	            ret = -EOVERFLOW;
+	            hvdxg.queryadapter_type0_fallback_ret = ret;
+	            hvdxg.queryadapter_last_ret = ret;
+	        }
+	        if (ret == 0 && actual_len >= result_len) {
+	            hvdxg.queryadapter_type0_fallback_used = 1;
+	            hvdxg.queryadapter_type0_result_route = 2;
+	        }
+	    }
+	    if (ret != 0) {
+	        hvdxg_note_queryadapter_type15_failure((uint32)req.type, ret,
+	            hvdxg.queryadapter_last_status, query_process.v);
+	        if (hvdxg_queryadapter_type55_zero_completion((uint32)req.type,
+	                req.private_data_size, actual_len, ret)) {
+	            memset(result_buf, 0, req.private_data_size);
+	            private_data = result_buf;
+	            ret = 0;
+	            hvdxg.queryadapter_last_ret = 0;
+	            hvdxg.queryadapter_last_status = 0;
+	            hvdxg.queryadapter_last_layout = 4;
+	            hvdxg_note_queryadapter_zero_success((uint32)req.type,
+	                req.private_data_size, actual_len, ret,
+	                hvdxg.queryadapter_last_status, 0);
+	            goto queryadapter_copyout;
+	        }
+	        if (hvdxg_queryadapter_physicalcount_fallback((uint32)req.type,
+	                req.private_data_size, actual_len, ret)) {
+	            memset(result_buf, 0, req.private_data_size);
+	            *(uint32 *)result_buf = 1;
+	            private_data = result_buf;
+	            ret = 0;
+	            hvdxg.queryadapter_last_ret = 0;
+	            hvdxg.queryadapter_last_status = 0;
+	            hvdxg.queryadapter_last_layout = 4;
+	            hvdxg_note_queryadapter_zero_success((uint32)req.type,
+	                req.private_data_size, actual_len, ret,
+	                hvdxg.queryadapter_last_status, 0);
+	            goto queryadapter_copyout;
+	        }
+        if ((uint32)req.type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID &&
+            hvdxg_type31_active_v40_ext() &&
+            hvdxg_adapter_hardware_primary_too_short(result_buf,
+                actual_len, req.private_data_size))
+            hvdxg_note_adapter_hardware_v40_short(actual_len, ret,
+                hvdxg.queryadapter_last_status);
+        if ((uint32)req.type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID &&
+            hvdxg_try_adapter_hardware_failure_fallbacks(
+                owner, query, command_len, result_buf, result_len,
+                req.private_data_size, &actual_len,
+                !hvdxg_type31_active_v40_ext() ||
+                    hvdxg_adapter_hardware_primary_too_short(result_buf,
+                        actual_len, req.private_data_size),
+                !hvdxg_type31_active_v40_ext())) {
+            private_data = result_buf;
+            hvdxg.queryadapter_last_len = actual_len;
+            hvdxg.queryadapter_last_status = 0;
+            hvdxg.queryadapter_last_ret = 0;
+            hvdxg.queryadapter_last_layout = 3;
+            goto queryadapter_copyout;
+        }
         hvdxg_note_queryadapter_history((uint32)req.type,
             req.private_data_size, ret,
             (uint32)hvdxg.queryadapter_last_status);
         goto cleanup;
     }
-    if (actual_len >= req.private_data_size) {
-        hvdxg.queryadapter_last_status = 0;
-        private_data = result_buf;
-    } else if (actual_len >= req.private_data_size +
-                            sizeof(struct hvdxg_ntstatus)) {
+	    if (actual_len >= sizeof(struct hvdxg_ntstatus))
+	        hvdxg.queryadapter_last_status =
+	            ((struct hvdxg_ntstatus *)result_buf)->v;
+	    else
+	        hvdxg.queryadapter_last_status = 0;
+	    if (hvdxg_queryadapter_type55_zero_completion((uint32)req.type,
+	            req.private_data_size, actual_len, ret)) {
+	        memset(result_buf, 0, req.private_data_size);
+	        private_data = result_buf;
+	        hvdxg.queryadapter_last_ret = 0;
+	        hvdxg.queryadapter_last_layout = 4;
+	        hvdxg_note_queryadapter_zero_success((uint32)req.type,
+	            req.private_data_size, actual_len, ret,
+	            hvdxg.queryadapter_last_status, 0);
+	        goto queryadapter_copyout;
+	    }
+	    if (hvdxg_queryadapter_adaptertype_zero_completion((uint32)req.type,
+	            req.private_data_size, actual_len, ret)) {
+	        memset(result_buf, 0, req.private_data_size);
+	        private_data = result_buf;
+	        hvdxg.queryadapter_last_ret = 0;
+	        hvdxg.queryadapter_last_status = 0;
+	        hvdxg.queryadapter_last_layout = 4;
+	        hvdxg_note_queryadapter_zero_success((uint32)req.type,
+	            req.private_data_size, actual_len, ret,
+	            hvdxg.queryadapter_last_status, 0);
+	        goto queryadapter_copyout;
+	    }
+    if ((uint32)req.type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID &&
+        hvdxg_adapter_hardware_primary_too_short(result_buf, actual_len,
+                                                 req.private_data_size)) {
+        ret = -EOVERFLOW;
+        hvdxg.queryadapter_last_ret = ret;
+        hvdxg_note_queryadapter_history((uint32)req.type,
+            req.private_data_size, ret,
+            (uint32)hvdxg.queryadapter_last_status);
+        if (hvdxg_type31_active_v40_ext()) {
+            hvdxg_note_adapter_hardware_v40_short(actual_len, ret,
+                hvdxg.queryadapter_last_status);
+            if (hvdxg_try_adapter_hardware_failure_fallbacks(
+                    owner, query, command_len, result_buf, result_len,
+                    req.private_data_size, &actual_len, 1, 0)) {
+                private_data = result_buf;
+                hvdxg.queryadapter_last_len = actual_len;
+                hvdxg.queryadapter_last_status = 0;
+                hvdxg.queryadapter_last_ret = 0;
+                hvdxg.queryadapter_last_layout = 3;
+                goto queryadapter_copyout;
+            }
+            goto cleanup;
+        }
+
+        memset(result_buf, 0, result_len);
+        actual_len = 0;
+        ret = hvdxg_send_sync_vgpu_flags_luid(query, command_len,
+            result_buf, result_len, &actual_len,
+            HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER |
+            HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU, query_ext_luid);
+        hvdxg_capture_queryadapter_completion();
+        hvdxg_note_queryadapter_return_head(result_buf, actual_len);
+        hvdxg.queryadapter_last_len = actual_len;
+        hvdxg.queryadapter_last_ret = ret;
+        if (actual_len >= sizeof(struct hvdxg_ntstatus))
+            hvdxg.queryadapter_last_status =
+                ((struct hvdxg_ntstatus *)result_buf)->v;
+        else
+            hvdxg.queryadapter_last_status = 0;
+        if (ret != 0) {
+            hvdxg_note_queryadapter_history((uint32)req.type,
+                req.private_data_size, ret,
+                (uint32)hvdxg.queryadapter_last_status);
+            if (hvdxg_try_adapter_hardware_failure_fallbacks(
+                    owner, query, command_len, result_buf, result_len,
+                    req.private_data_size, &actual_len,
+                    1,
+                    !hvdxg_type31_active_v40_ext())) {
+                private_data = result_buf;
+                hvdxg.queryadapter_last_len = actual_len;
+                hvdxg.queryadapter_last_status = 0;
+                hvdxg.queryadapter_last_ret = 0;
+                hvdxg.queryadapter_last_layout = 3;
+                goto queryadapter_copyout;
+            }
+            goto cleanup;
+        }
+        if (hvdxg_accept_legacy_adapter_hardware_id(result_buf, actual_len,
+                                                    req.private_data_size)) {
+            private_data = result_buf;
+            hvdxg.queryadapter_last_layout = 3;
+            goto queryadapter_copyout;
+        }
+        hvdxg_note_queryadapter_history((uint32)req.type,
+            req.private_data_size,
+            actual_len < req.private_data_size ? -EOVERFLOW : -EINVAL,
+            (uint32)hvdxg.queryadapter_last_status);
+        if (hvdxg_try_adapter_hardware_failure_fallbacks(
+                owner, query, command_len, result_buf, result_len,
+                req.private_data_size, &actual_len,
+                1,
+                !hvdxg_type31_active_v40_ext())) {
+            private_data = result_buf;
+            hvdxg.queryadapter_last_len = actual_len;
+            hvdxg.queryadapter_last_status = 0;
+            hvdxg.queryadapter_last_ret = 0;
+            hvdxg.queryadapter_last_layout = 3;
+            goto queryadapter_copyout;
+        }
+        if (actual_len >= sizeof(struct hvdxg_ntstatus) &&
+            hvdxg_ntstatus_plausible(
+                *(struct hvdxg_ntstatus *)result_buf)) {
+            struct hvdxg_ntstatus *status =
+                (struct hvdxg_ntstatus *)result_buf;
+
+            ret = hvdxg_ntstatus_to_errno(*status);
+            if (ret >= 0)
+                ret = -EOVERFLOW;
+        } else {
+            ret = actual_len < req.private_data_size ?
+                  -EOVERFLOW : -EINVAL;
+        }
+        hvdxg.queryadapter_last_ret = ret;
+        hvdxg_note_queryadapter_history((uint32)req.type,
+            req.private_data_size, ret,
+            (uint32)hvdxg.queryadapter_last_status);
+        goto cleanup;
+    }
+    if (actual_len >= req.private_data_size +
+                      sizeof(struct hvdxg_ntstatus) &&
+        hvdxg_ntstatus_plausible(
+            *(struct hvdxg_ntstatus *)result_buf)) {
         struct hvdxg_ntstatus *status =
             (struct hvdxg_ntstatus *)result_buf;
-        hvdxg.queryadapter_last_status = status->v;
+        hvdxg.queryadapter_last_layout = 2;
         ret = hvdxg_ntstatus_to_errno(*status);
         hvdxg.queryadapter_last_ret = ret;
         if (ret < 0) {
+            hvdxg_note_queryadapter_type15_failure((uint32)req.type, ret,
+                status->v, query_process.v);
+            if ((uint32)req.type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID &&
+                hvdxg_try_adapter_hardware_failure_fallbacks(
+                    owner, query, command_len, result_buf, result_len,
+                    req.private_data_size, &actual_len,
+                    !hvdxg_type31_active_v40_ext() ||
+                        hvdxg_adapter_hardware_primary_too_short(
+                            result_buf, actual_len,
+                            req.private_data_size),
+                    !hvdxg_type31_active_v40_ext())) {
+                private_data = result_buf;
+                hvdxg.queryadapter_last_len = actual_len;
+                hvdxg.queryadapter_last_status = 0;
+                hvdxg.queryadapter_last_ret = 0;
+                hvdxg.queryadapter_last_layout = 3;
+                goto queryadapter_copyout;
+            }
             hvdxg_note_queryadapter_history((uint32)req.type,
                 req.private_data_size, ret, (uint32)status->v);
             goto cleanup;
         }
         private_data = result_buf + sizeof(struct hvdxg_ntstatus);
+    } else if (actual_len >= req.private_data_size) {
+        private_data = result_buf;
+        hvdxg.queryadapter_last_layout = 1;
+    } else if (actual_len >= sizeof(struct hvdxg_ntstatus) &&
+               hvdxg_ntstatus_plausible(
+                   *(struct hvdxg_ntstatus *)result_buf)) {
+        struct hvdxg_ntstatus *status =
+            (struct hvdxg_ntstatus *)result_buf;
+        hvdxg.queryadapter_last_layout = 2;
+        ret = hvdxg_ntstatus_to_errno(*status);
+        if (ret >= 0)
+            ret = -EOVERFLOW;
+        if ((uint32)req.type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID &&
+            hvdxg_try_adapter_hardware_failure_fallbacks(
+                owner, query, command_len, result_buf, result_len,
+                req.private_data_size, &actual_len,
+                !hvdxg_type31_active_v40_ext() ||
+                    hvdxg_adapter_hardware_primary_too_short(result_buf,
+                        actual_len, req.private_data_size),
+                !hvdxg_type31_active_v40_ext())) {
+            private_data = result_buf;
+            hvdxg.queryadapter_last_len = actual_len;
+            hvdxg.queryadapter_last_status = 0;
+            hvdxg.queryadapter_last_ret = 0;
+            hvdxg.queryadapter_last_layout = 3;
+            goto queryadapter_copyout;
+        }
+        hvdxg.queryadapter_last_ret = ret;
+        hvdxg_note_queryadapter_history((uint32)req.type,
+            req.private_data_size, ret, (uint32)status->v);
+        goto cleanup;
     } else {
         ret = -EOVERFLOW;
+        if (hvdxg_queryadapter_physicalcount_fallback((uint32)req.type,
+                req.private_data_size, actual_len, ret)) {
+            memset(result_buf, 0, req.private_data_size);
+            *(uint32 *)result_buf = 1;
+            private_data = result_buf;
+            ret = 0;
+	            hvdxg.queryadapter_last_ret = 0;
+	            hvdxg.queryadapter_last_status = 0;
+	            hvdxg.queryadapter_last_layout = 4;
+	            hvdxg_note_queryadapter_zero_success((uint32)req.type,
+	                req.private_data_size, actual_len, ret,
+	                hvdxg.queryadapter_last_status, 0);
+	            goto queryadapter_copyout;
+	        }
+        if ((uint32)req.type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID &&
+            hvdxg_try_adapter_hardware_failure_fallbacks(
+                owner, query, command_len, result_buf, result_len,
+                req.private_data_size, &actual_len,
+                !hvdxg_type31_active_v40_ext() ||
+                    hvdxg_adapter_hardware_primary_too_short(result_buf,
+                        actual_len, req.private_data_size),
+                !hvdxg_type31_active_v40_ext())) {
+            private_data = result_buf;
+            hvdxg.queryadapter_last_len = actual_len;
+            hvdxg.queryadapter_last_status = 0;
+            hvdxg.queryadapter_last_ret = 0;
+            hvdxg.queryadapter_last_layout = 3;
+            goto queryadapter_copyout;
+        }
         hvdxg.queryadapter_last_ret = ret;
-        if (actual_len >= sizeof(struct hvdxg_ntstatus))
-            hvdxg.queryadapter_last_status =
-                ((struct hvdxg_ntstatus *)result_buf)->v;
         hvdxg_note_queryadapter_history((uint32)req.type,
             req.private_data_size, ret,
             (uint32)hvdxg.queryadapter_last_status);
         goto cleanup;
+    }
+queryadapter_copyout:
+    if (query_source == 0)
+        query_source = (hvdxg.queryadapter_last_layout == 1 ||
+                        hvdxg.queryadapter_last_layout == 2) ? 1 : 3;
+    hvdxg.queryadapter_source_last = query_source;
+    if (query_source == 1) {
+        hvdxg.queryadapter_source_real_host++;
+        hvdxg_queryadapter_alias_cache_store((uint32)req.type,
+            req.private_data_size, host_adapter, private_data);
+    } else if (query_source == 2) {
+        hvdxg.queryadapter_source_alias_cache++;
+    } else if (query_source == 4) {
+        hvdxg.queryadapter_source_staged++;
+        hvdxg_queryadapter_alias_cache_store((uint32)req.type,
+            req.private_data_size, host_adapter, private_data);
+    } else {
+        hvdxg.queryadapter_source_fallback++;
+        hvdxg.queryadapter_alias_cache_last_type = (uint32)req.type;
+        hvdxg.queryadapter_alias_cache_last_size = req.private_data_size;
+        hvdxg.queryadapter_alias_cache_last_len = actual_len;
+        hvdxg.queryadapter_alias_cache_last_alias = req.adapter.v;
+        hvdxg.queryadapter_alias_cache_last_host = host_adapter;
+        hvdxg.queryadapter_alias_cache_last_hash =
+            hvdxg_hash_bytes(private_data, req.private_data_size);
+        hvdxg.queryadapter_alias_cache_last_result = 4;
+    }
+    if (req.type == _KMTQAITYPE_UMDRIVERNAME) {
+        ret = hvdxg_rewrite_umd_driver_path(
+            private_data, req.private_data_size,
+            (uint32)hvdxg.queryadapter_last_status);
+        if (ret != 0) {
+            hvdxg.queryadapter_last_ret = ret;
+            hvdxg_note_queryadapter_history((uint32)req.type,
+                req.private_data_size, ret,
+                (uint32)hvdxg.queryadapter_last_status);
+            goto cleanup;
+        }
     }
     if ((req.type == _KMTQAITYPE_ADAPTERTYPE ||
          req.type == _KMTQAITYPE_ADAPTERTYPE_RENDER) &&
@@ -5499,24 +16913,45 @@ static int hvdxg_ioctl_queryadapterinfo(uint64 arg)
          * paravirtualized adapter here while fb.c continues to gate real
          * OpenGL submit on validated context/submit success.
          */
-        adapter_type->render_supported = 1;
-        adapter_type->paravirtualized = 1;
-        adapter_type->display_supported = 0;
-        adapter_type->post_device = 0;
-        adapter_type->indirect_display_device = 0;
-        adapter_type->acg_supported = 0;
-        adapter_type->support_set_timings_from_vidpn = 0;
+        hvdxg_fill_render_adapter_type(adapter_type);
+        hvdxg.queryadapter_adaptertype_rewrite_count++;
+        hvdxg.queryadapter_adaptertype_rewrite_type = (uint32)req.type;
+        hvdxg.queryadapter_adaptertype_rewrite_source = query_source;
     }
-    if ((uint32)req.type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID)
-        hvdxg_note_adapter_hardware_id(private_data, req.private_data_size);
-    ret = either_copyout(1, req.private_data, private_data,
-                         req.private_data_size) < 0 ? -EFAULT : 0;
+	    if ((uint32)req.type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID &&
+	        hvdxg.queryadapter_last_layout != 3 &&
+	        !hvdxg_normalize_adapter_hardware_id(private_data,
+	                                             req.private_data_size)) {
+        if (hvdxg_try_adapter_hardware_failure_fallbacks(
+                owner, query, command_len, result_buf, result_len,
+                req.private_data_size, &actual_len,
+                !hvdxg_type31_active_v40_ext(),
+                !hvdxg_type31_active_v40_ext())) {
+            private_data = result_buf;
+            hvdxg.queryadapter_last_len = actual_len;
+            hvdxg.queryadapter_last_status = 0;
+            hvdxg.queryadapter_last_ret = 0;
+            hvdxg.queryadapter_last_layout = 3;
+        } else {
+            ret = -EINVAL;
+            hvdxg.queryadapter_last_ret = ret;
+            hvdxg_note_queryadapter_history((uint32)req.type,
+                req.private_data_size, ret,
+                (uint32)hvdxg.queryadapter_last_status);
+            goto cleanup;
+	        }
+	    }
+	    hvdxg.queryadapter_last_user_len = req.private_data_size;
+	    ret = either_copyout(1, req.private_data, private_data,
+	                         req.private_data_size) < 0 ? -EFAULT : 0;
     hvdxg.queryadapter_last_ret = ret;
     hvdxg_note_queryadapter_history((uint32)req.type,
         req.private_data_size, ret,
         (uint32)hvdxg.queryadapter_last_status);
 
 cleanup:
+    if (process_locked)
+        mutex_unlock(&hvdxg.process_lock);
     if (command_buf)
         kvfree(command_buf);
     if (result_buf)
@@ -5524,110 +16959,393 @@ cleanup:
     return ret;
 }
 
+static int hvdxg_ioctl_requires_process(uint32 cmd)
+{
+    switch (cmd) {
+    case LX_DXENUMADAPTERS2:
+    case LX_DXENUMADAPTERS3:
+        /*
+         * WSL creates the host dxgprocess before returning local adapter
+         * aliases.  These discovery ioctls bind explicitly after user args
+         * are copied, immediately before the local handle can be returned.
+         */
+        return 0;
+    case LX_DXOPENADAPTERFROMLUID:
+        return 0;
+    case LX_DXQUERYADAPTERINFO:
+        /*
+         * QueryAdapterInfo does its own WSL-order bind and adapter handle
+         * resolution after copying the user args, while still allowing
+         * ownerless internal probes to use the raw host adapter handle.
+         */
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+#define HV_DXG_ENUM_STAGE_START      1U
+#define HV_DXG_ENUM_STAGE_ENSURE     2U
+#define HV_DXG_ENUM_STAGE_BIND       3U
+#define HV_DXG_ENUM_STAGE_COUNT      4U
+#define HV_DXG_ENUM_STAGE_LOCAL      5U
+#define HV_DXG_ENUM_STAGE_COPYOUT    6U
+#define HV_DXG_ENUM_STAGE_DONE       7U
+
+static void hvdxg_note_enumadapters_state(struct hvdxg_open_state *owner,
+                                          uint32 stage)
+{
+    struct hvdxg_process_state *process =
+        owner != NULL ? owner->process_state : NULL;
+
+    hvdxg.enumadapters_last_stage = stage;
+    hvdxg.enumadapters_last_global_open = hvdxg.global_open_ok ? 1 : 0;
+    hvdxg.enumadapters_last_vgpu_open = hvdxg.vgpu_open_ok ? 1 : 0;
+    hvdxg.enumadapters_last_global_relid = hvdxg.global_relid;
+    hvdxg.enumadapters_last_vgpu_relid = hvdxg.vgpu_relid;
+    hvdxg.enumadapters_last_global_conn = hvdxg.global_conn_id;
+    hvdxg.enumadapters_last_vgpu_conn = hvdxg.vgpu_conn_id;
+    hvdxg.enumadapters_last_host_adapter = hvdxg.host_adapter_handle;
+    hvdxg.enumadapters_last_probe_successes = hvdxg.probe_successes;
+    hvdxg.enumadapters_last_probe_ret = hvdxg.probe_last_ret;
+    hvdxg.enumadapters_last_probe_status = hvdxg.probe_open_status;
+    hvdxg.enumadapters_last_probe_handle = hvdxg.probe_open_handle;
+    hvdxg.enumadapters_last_ready = hvdxg.d3dkmt_ready ? 1 : 0;
+    hvdxg.enumadapters_last_process =
+        hvdxg_owner_bound_process_handle(owner).v;
+    hvdxg.enumadapters_last_process_created =
+        owner != NULL && owner->dxg_process_created ? 1 : 0;
+    hvdxg.enumadapters_last_process_generation =
+        process != NULL ? process->generation : 0;
+    hvdxg.enumadapters_last_process_refs =
+        process != NULL ? process->refs : 0;
+    hvdxg.enumadapters_last_process_adapters =
+        process != NULL ? process->adapter_count : 0;
+    hvdxg.enumadapters_last_process_locals =
+        process != NULL ? process->local_adapter_count : 0;
+    hvdxg.enumadapters_last_process_objects =
+        process != NULL ? process->object_count : 0;
+}
+
 static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                               struct hvdxg_open_state *owner)
 {
     (void)cdev;
     int ret = -EINVAL;
+    int process_locked = 0;
+    int process_required = hvdxg_ioctl_requires_process((uint32)cmd);
     uint64 start_ticks = r_time();
 
     hvdxg.ioctl_count++;
-    ret = hvdxg_bind_open_process(owner);
-    if (ret != 0) {
-        hvdxg.ioctl_last_ret = ret;
-        hvdxg_note_ioctl_timing(cmd, r_time() - start_ticks);
-        return ret;
+    if (owner != NULL && process_required) {
+        mutex_lock(&hvdxg.process_lock);
+        process_locked = 1;
+    }
+    if (process_required) {
+        ret = hvdxg_bind_open_process(owner);
+        if (ret != 0) {
+            hvdxg.ioctl_last_ret = ret;
+            hvdxg_note_ioctl_timing(cmd, r_time() - start_ticks);
+            if (process_locked)
+                mutex_unlock(&hvdxg.process_lock);
+            return ret;
+        }
     }
 
     switch ((uint32)cmd) {
     case LX_DXENUMADAPTERS2: {
         struct d3dkmt_enumadapters2 req;
         struct d3dkmt_adapterinfo info;
+        struct hvdxg_winluid user_luid;
+        uint32 luid_source;
+        uint32 local_adapter;
 
-        ret = hvdxg_d3dkmt_ensure();
-        if (ret != 0)
-            break;
-        if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
-            ret = -EFAULT;
+        hvdxg.enumadapters_last_cmd = (uint32)cmd;
+        hvdxg.enumadapters_last_in_count = 0;
+        hvdxg.enumadapters_last_out_count = 0;
+        hvdxg.enumadapters_last_buffer = 0;
+        hvdxg.enumadapters_last_handle = 0;
+        hvdxg.enumadapters_last_luid_low = 0;
+        hvdxg.enumadapters_last_luid_high = 0;
+        hvdxg.enumadapters_last_luid_source = 0;
+        hvdxg.enumadapters_last_ret = 0;
+        hvdxg.enumadapters_last_ensure_ret = 0;
+        hvdxg.enumadapters_last_bind_ret = 0;
+        hvdxg.enumadapters_last_local_ret = 0;
+        hvdxg.enumadapters_last_copyout_ret = 0;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_START);
+        ret = hvdxg_d3dkmt_ensure_adapter();
+        hvdxg.enumadapters_last_ensure_ret = ret;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_ENSURE);
+        if (ret != 0) {
+            hvdxg.enumadapters_last_ret = ret;
             break;
         }
-        if (req.adapters == 0 || req.num_adapters == 0) {
+        if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
+            ret = -EFAULT;
+            hvdxg.enumadapters_last_ret = ret;
+            break;
+        }
+        hvdxg.enumadapters_last_cmd = (uint32)cmd;
+        hvdxg.enumadapters_last_in_count = req.num_adapters;
+        hvdxg.enumadapters_last_out_count = 0;
+        hvdxg.enumadapters_last_buffer = req.adapters;
+        hvdxg.enumadapters_last_handle = 0;
+        hvdxg.enumadapters_last_luid_low = 0;
+        hvdxg.enumadapters_last_luid_high = 0;
+        hvdxg.enumadapters_last_luid_source = 0;
+        hvdxg.enumadapters_last_ret = 0;
+        user_luid = hvdxg_user_adapter_luid(&luid_source);
+        hvdxg.enumadapters_last_luid_low = user_luid.a;
+        hvdxg.enumadapters_last_luid_high = user_luid.b;
+        hvdxg.enumadapters_last_luid_source = luid_source;
+        if (owner == NULL) {
+            ret = -EINVAL;
+            hvdxg.enumadapters_last_ret = ret;
+            break;
+        }
+        ret = hvdxg_bind_open_process_early(owner,
+            HV_DXG_BIND_SOURCE_ENUMADAPTERS2, (uint32)cmd);
+        hvdxg.enumadapters_last_bind_ret = ret;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_BIND);
+        if (ret != 0) {
+            hvdxg.enumadapters_last_ret = ret;
+            break;
+        }
+        if (req.adapters == 0) {
             req.num_adapters = 1;
+            hvdxg.enumadapters_last_out_count = req.num_adapters;
             ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
                   -EFAULT : 0;
+            hvdxg.enumadapters_last_copyout_ret = ret;
+            hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_COUNT);
+            hvdxg.enumadapters_last_ret = ret;
+            break;
+        }
+        if (req.num_adapters == 0) {
+            req.num_adapters = 1;
+            hvdxg.enumadapters_last_out_count = req.num_adapters;
+            (void)either_copyout(1, (uint64)arg, &req, sizeof(req));
+            ret = -EOVERFLOW;
+            hvdxg.enumadapters_last_copyout_ret = ret;
+            hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_COUNT);
+            hvdxg.enumadapters_last_ret = ret;
             break;
         }
         if (req.num_adapters > D3DKMT_ADAPTERS_MAX) {
             ret = -EINVAL;
+            hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_COUNT);
+            hvdxg.enumadapters_last_ret = ret;
+            break;
+        }
+        if (owner != NULL)
+            mutex_lock(&hvdxg.process_lock);
+        ret = hvdxg_get_local_adapter_handle(owner, &local_adapter);
+        if (owner != NULL)
+            mutex_unlock(&hvdxg.process_lock);
+        hvdxg.enumadapters_last_local_ret = ret;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_LOCAL);
+        if (ret != 0) {
+            hvdxg.enumadapters_last_ret = ret;
             break;
         }
         memset(&info, 0, sizeof(info));
-        info.adapter_handle.v = hvdxg.host_adapter_handle;
-        info.adapter_luid.a = hvdxg.adapter_luid.a;
-        info.adapter_luid.b = hvdxg.adapter_luid.b;
+        info.adapter_handle.v = local_adapter;
+        info.adapter_luid.a = user_luid.a;
+        info.adapter_luid.b = user_luid.b;
         req.num_adapters = 1;
         if (either_copyout(1, req.adapters, &info, sizeof(info)) < 0 ||
             either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0)
             ret = -EFAULT;
         else
             ret = 0;
+        hvdxg.enumadapters_last_copyout_ret = ret;
+        hvdxg.enumadapters_last_out_count = req.num_adapters;
+        hvdxg.enumadapters_last_handle = info.adapter_handle.v;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_COPYOUT);
+        hvdxg.enumadapters_last_ret = ret;
         break;
     }
 
     case LX_DXENUMADAPTERS3: {
         struct d3dkmt_enumadapters3 req;
         struct d3dkmt_adapterinfo info;
+        struct hvdxg_winluid user_luid;
+        uint32 luid_source;
+        uint32 local_adapter;
 
-        ret = hvdxg_d3dkmt_ensure();
-        if (ret != 0)
+        hvdxg.enumadapters_last_cmd = (uint32)cmd;
+        hvdxg.enumadapters_last_in_count = 0;
+        hvdxg.enumadapters_last_out_count = 0;
+        hvdxg.enumadapters_last_buffer = 0;
+        hvdxg.enumadapters_last_handle = 0;
+        hvdxg.enumadapters_last_luid_low = 0;
+        hvdxg.enumadapters_last_luid_high = 0;
+        hvdxg.enumadapters_last_luid_source = 0;
+        hvdxg.enumadapters_last_ret = 0;
+        hvdxg.enumadapters_last_ensure_ret = 0;
+        hvdxg.enumadapters_last_bind_ret = 0;
+        hvdxg.enumadapters_last_local_ret = 0;
+        hvdxg.enumadapters_last_copyout_ret = 0;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_START);
+        ret = hvdxg_d3dkmt_ensure_adapter();
+        hvdxg.enumadapters_last_ensure_ret = ret;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_ENSURE);
+        if (ret != 0) {
+            hvdxg.enumadapters_last_ret = ret;
             break;
+        }
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
+            hvdxg.enumadapters_last_ret = ret;
+            break;
+        }
+        hvdxg.enumadapters_last_cmd = (uint32)cmd;
+        hvdxg.enumadapters_last_in_count = req.adapter_count;
+        hvdxg.enumadapters_last_out_count = 0;
+        hvdxg.enumadapters_last_buffer = req.adapters;
+        hvdxg.enumadapters_last_handle = 0;
+        hvdxg.enumadapters_last_luid_low = 0;
+        hvdxg.enumadapters_last_luid_high = 0;
+        hvdxg.enumadapters_last_luid_source = 0;
+        hvdxg.enumadapters_last_ret = 0;
+        user_luid = hvdxg_user_adapter_luid(&luid_source);
+        hvdxg.enumadapters_last_luid_low = user_luid.a;
+        hvdxg.enumadapters_last_luid_high = user_luid.b;
+        hvdxg.enumadapters_last_luid_source = luid_source;
+        if (owner == NULL) {
+            ret = -EINVAL;
+            hvdxg.enumadapters_last_ret = ret;
+            break;
+        }
+        ret = hvdxg_bind_open_process_early(owner,
+            HV_DXG_BIND_SOURCE_ENUMADAPTERS3, (uint32)cmd);
+        hvdxg.enumadapters_last_bind_ret = ret;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_BIND);
+        if (ret != 0) {
+            hvdxg.enumadapters_last_ret = ret;
             break;
         }
         if (req.adapters == 0 || req.adapter_count == 0) {
             req.adapter_count = 1;
+            hvdxg.enumadapters_last_out_count = req.adapter_count;
             ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
                   -EFAULT : 0;
+            hvdxg.enumadapters_last_copyout_ret = ret;
+            hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_COUNT);
+            hvdxg.enumadapters_last_ret = ret;
             break;
         }
         if (req.adapter_count > D3DKMT_ADAPTERS_MAX) {
             ret = -EINVAL;
+            hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_COUNT);
+            hvdxg.enumadapters_last_ret = ret;
+            break;
+        }
+        if (owner != NULL)
+            mutex_lock(&hvdxg.process_lock);
+        ret = hvdxg_get_local_adapter_handle(owner, &local_adapter);
+        if (owner != NULL)
+            mutex_unlock(&hvdxg.process_lock);
+        hvdxg.enumadapters_last_local_ret = ret;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_LOCAL);
+        if (ret != 0) {
+            hvdxg.enumadapters_last_ret = ret;
             break;
         }
         memset(&info, 0, sizeof(info));
-        info.adapter_handle.v = hvdxg.host_adapter_handle;
-        info.adapter_luid.a = hvdxg.adapter_luid.a;
-        info.adapter_luid.b = hvdxg.adapter_luid.b;
+        info.adapter_handle.v = local_adapter;
+        info.adapter_luid.a = user_luid.a;
+        info.adapter_luid.b = user_luid.b;
         req.adapter_count = 1;
         if (either_copyout(1, req.adapters, &info, sizeof(info)) < 0 ||
             either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0)
             ret = -EFAULT;
         else
             ret = 0;
+        hvdxg.enumadapters_last_copyout_ret = ret;
+        hvdxg.enumadapters_last_out_count = req.adapter_count;
+        hvdxg.enumadapters_last_handle = info.adapter_handle.v;
+        hvdxg_note_enumadapters_state(owner, HV_DXG_ENUM_STAGE_COPYOUT);
+        hvdxg.enumadapters_last_ret = ret;
         break;
     }
 
     case LX_DXOPENADAPTERFROMLUID: {
         struct d3dkmt_openadapterfromluid req;
         struct hvdxg_winluid luid;
+        struct hvdxg_winluid user_luid;
+        struct hvdxg_winluid ext_luid;
+        uint32 luid_source;
+        uint32 local_adapter;
 
-        ret = hvdxg_d3dkmt_ensure();
-        if (ret != 0)
+        ret = hvdxg_d3dkmt_ensure_adapter();
+        if (ret != 0) {
+            hvdxg.openadapter_luid_last_ret = ret;
+            hvdxg.openadapter_luid_last_status = hvdxg.probe_open_status;
             break;
+        }
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
+            hvdxg.openadapter_luid_last_ret = ret;
+            hvdxg.openadapter_luid_last_status = hvdxg.probe_open_status;
             break;
         }
         luid.a = req.adapter_luid.a;
         luid.b = req.adapter_luid.b;
-        if (!hvdxg_luid_equal(luid, hvdxg.adapter_luid)) {
+        user_luid = hvdxg_user_adapter_luid(&luid_source);
+        ext_luid = hvdxg_ext_adapter_luid(NULL);
+        hvdxg.openadapter_luid_last_input_low = luid.a;
+        hvdxg.openadapter_luid_last_input_high = luid.b;
+        hvdxg.openadapter_luid_last_um_low = user_luid.a;
+        hvdxg.openadapter_luid_last_um_high = user_luid.b;
+        hvdxg.openadapter_luid_last_host_low = ext_luid.a;
+        hvdxg.openadapter_luid_last_host_high = ext_luid.b;
+        hvdxg.openadapter_luid_last_host_basis = luid_source;
+        hvdxg.openadapter_luid_last_match = 0;
+        hvdxg.openadapter_luid_last_reject = HV_DXG_OAFLUID_REJECT_NONE;
+        hvdxg.openadapter_luid_last_handle = 0;
+        hvdxg.openadapter_luid_last_status = hvdxg.probe_open_status;
+        if (!hvdxg_luid_nonzero(luid)) {
             ret = -EINVAL;
+            hvdxg.openadapter_luid_last_reject =
+                HV_DXG_OAFLUID_REJECT_ZERO;
+            hvdxg.openadapter_luid_last_ret = ret;
             break;
         }
-        req.adapter_handle.v = hvdxg.host_adapter_handle;
+        if (!hvdxg_luid_equal(luid, user_luid)) {
+            ret = -EINVAL;
+            hvdxg.openadapter_luid_last_reject =
+                HV_DXG_OAFLUID_REJECT_MISMATCH;
+            hvdxg.openadapter_luid_last_ret = ret;
+            break;
+        }
+        hvdxg.openadapter_luid_last_match = 1;
+        if (owner == NULL) {
+            ret = -EINVAL;
+            hvdxg.openadapter_luid_last_ret = ret;
+            break;
+        }
+        ret = hvdxg_bind_open_process_early(owner,
+            HV_DXG_BIND_SOURCE_OPENADAPTERFROMLUID, (uint32)cmd);
+        if (ret != 0) {
+            hvdxg.openadapter_luid_last_ret = ret;
+            break;
+        }
+        if (owner != NULL)
+            mutex_lock(&hvdxg.process_lock);
+        ret = hvdxg_get_local_adapter_handle(owner, &local_adapter);
+        if (owner != NULL)
+            mutex_unlock(&hvdxg.process_lock);
+        if (ret != 0) {
+            hvdxg.openadapter_luid_last_ret = ret;
+            break;
+        }
+        req.adapter_handle.v = local_adapter;
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
+        hvdxg.openadapter_luid_last_handle = req.adapter_handle.v;
+        hvdxg.openadapter_luid_last_ret = ret;
         break;
     }
 
@@ -5636,6 +17354,9 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         struct hvdxg_command_createdevice create;
         struct hvdxg_command_createdevice_return result;
         uint32 actual_len = 0;
+        uint32 local_adapter;
+        uint32 host_adapter;
+        struct hvdxg_d3dkmthandle create_process;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -5644,44 +17365,85 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
             ret = -EFAULT;
             break;
         }
-        if (req.adapter.v != hvdxg.host_adapter_handle) {
+        local_adapter = req.adapter.v;
+        hvdxg.createdevice_last_adapter = local_adapter;
+        hvdxg.createdevice_last_host_adapter = 0;
+        hvdxg.createdevice_last_device = 0;
+        hvdxg.createdevice_adapter_equals_device = 0;
+        hvdxg.createdevice_host_adapter_equals_device = 0;
+        hvdxg.createdevice_last_ret = 0;
+        hvdxg.createdevice_last_process = 0;
+        hvdxg.createdevice_last_owner_process =
+            hvdxg_open_host_process(owner);
+        hvdxg.createdevice_last_owner_generation =
+            hvdxg_open_process_generation(owner);
+        hvdxg.createdevice_last_owner_refs =
+            hvdxg_open_process_refs(owner);
+        hvdxg_note_createdevice_object(owner, 0);
+        if (hvdxg_resolve_adapter_handle(owner, local_adapter,
+                                         &host_adapter) != 0) {
             ret = -EINVAL;
+            hvdxg.createdevice_last_ret = ret;
             break;
         }
+        hvdxg.createdevice_last_host_adapter = host_adapter;
         memset(&create, 0, sizeof(create));
         memset(&result, 0, sizeof(result));
+        create_process = hvdxg_owner_bound_process_handle(owner);
+        hvdxg.createdevice_last_process = create_process.v;
         hvdxg_command_vgpu_init_process(&create.hdr,
                                         HV_DXGK_VMBCOMMAND_CREATEDEVICE,
-                                        hvdxg.dxg_process);
+                                        create_process);
         create.flags = req.flags;
         create.cdd_device = req.flags.gdi_device ? 1 : 0;
         create.error_code = (uint64)&hvdxg.device_state_counter;
         ret = hvdxg_send_sync_vgpu(&create, sizeof(create), &result,
                                    sizeof(result), &actual_len);
-        if (ret != 0)
+        if (ret != 0) {
+            hvdxg.createdevice_last_ret = ret;
             break;
+        }
         if (actual_len < sizeof(result) || result.device.v == 0) {
             ret = -EIO;
+            hvdxg.createdevice_last_ret = ret;
             break;
         }
         req.device.v = result.device.v;
+        hvdxg.createdevice_last_device = req.device.v;
+        hvdxg.createdevice_adapter_equals_device =
+            local_adapter == req.device.v ? 1 : 0;
+        hvdxg.createdevice_host_adapter_equals_device =
+            host_adapter == req.device.v ? 1 : 0;
         hvdxg.last_device_handle = req.device.v;
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
         if (ret == 0 && owner != NULL) {
-            if (hvdxg_track_u32_grow(&owner->devices,
+            if (hvdxg_track_object(owner, HV_DXG_OBJECT_DEVICE,
+                                   req.device.v, local_adapter,
+                                   req.device.v) != 0 ||
+                hvdxg_track_u32_grow(&owner->devices,
                                       &owner->device_count,
                                       &owner->device_capacity,
                                       req.device.v) != 0) {
+                hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE,
+                                     req.device.v);
                 (void)hvdxg_destroy_device_host(req.device.v);
                 ret = -ENOMEM;
             }
         }
+        hvdxg_note_createdevice_object(owner, req.device.v);
+        hvdxg.createdevice_last_ret = ret;
+        hvdxg_note_queryadapter_admission(
+            HV_DXG_QAI_ADMISSION_KIND_CREATEDEVICE,
+            HV_DXG_QAITYPE_CREATEDEVICE_MARKER, 0, req.device.v, ret, 0,
+            hvdxg.vgpu_send_last_route_global ? HV_DXG_CHANNEL_GLOBAL :
+            HV_DXG_CHANNEL_VGPU, 0, local_adapter, host_adapter, 0);
         break;
     }
 
     case LX_DXDESTROYDEVICE: {
         struct d3dkmt_destroydevice req;
+        int child_ret;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -5698,12 +17460,19 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
             ret = -EPERM;
             break;
         }
+        (void)hvdxg_flush_device_host(req.device.v);
+        child_ret = hvdxg_destroy_device_owned_objects(owner, req.device.v);
         ret = hvdxg_destroy_device_host(req.device.v);
+        if (ret == 0)
+            ret = child_ret;
         if (ret == 0 && hvdxg.last_device_handle == req.device.v)
             hvdxg.last_device_handle = 0;
-        if (ret == 0 && owner != NULL)
+        if (ret == 0 && owner != NULL) {
+            hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE,
+                                 req.device.v);
             hvdxg_untrack_u32(owner->devices, &owner->device_count,
                               req.device.v);
+        }
         break;
     }
 
@@ -5719,12 +17488,15 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         uint8 *result_buf = NULL;
         struct hvdxg_command_createallocation *create =
             NULL;
+        struct hvdxg_d3dkmthandle create_process;
         struct hvdxg_command_createallocation_allocinfo *wire_alloc;
         struct hvdxg_command_createallocation_return *result =
             NULL;
         uint8 *private_data;
+        uint8 *command_private_base;
         uint8 *alloc_private_data;
         uint8 *alloc_private_data_base = NULL;
+        uint8 *input_alloc_private_data_base = NULL;
         uint8 *standard_alloc_priv_data = NULL;
         uint8 *standard_res_priv_data = NULL;
         uint8 *resource_priv_data = NULL;
@@ -5733,12 +17505,15 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         uint32 total_alloc_private = 0;
         uint32 tracked_alloc_private = 0;
         uint32 tracked_resource_private_size = 0;
+        uint32 host_total_alloc_private = 0;
         uint32 total_private;
         uint32 command_len;
         uint32 result_min_len;
         uint32 result_len;
         uint32 actual_len = 0;
         uint32 requested_resource = 0;
+        uint32 device_known = 0;
+        int track_alloc_input_private = 0;
         int host_allocation_created = 0;
 
         ret = hvdxg_d3dkmt_ensure();
@@ -5756,9 +17531,36 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
             ret = -EINVAL;
             break;
         }
-        if (!hvdxg_owner_has_device(owner, req.device.v)) {
+        device_known = hvdxg_owner_has_device(owner, req.device.v);
+        hvdxg.allocation_last_device = req.device.v;
+        hvdxg.allocation_last_device_known = device_known;
+        hvdxg.allocation_last_device_from_create = device_known ? 1 : 0;
+        if (!device_known) {
             ret = -EPERM;
             break;
+        }
+        if (requested_flags.create_shared &&
+            (!requested_flags.create_resource ||
+             !requested_flags.nt_security_sharing)) {
+            hvdxg.sharedresource_seal_denied++;
+            ret = -EINVAL;
+            break;
+        }
+        if (req.resource.v != 0) {
+            struct hvdxg_tracked_resource *existing =
+                hvdxg_owner_find_resource(owner, req.device.v,
+                                          req.resource.v);
+
+            if (existing != NULL && existing->sealed) {
+                hvdxg.sharedresource_seal_denied++;
+                hvdxg.sharedresource_seal_append_rejects++;
+                hvdxg.sharedresource_seal_last_resource =
+                    existing->resource;
+                hvdxg.sharedresource_seal_last_generation =
+                    existing->sealed_generation;
+                ret = -EINVAL;
+                break;
+            }
         }
         if (req.flags.standard_allocation) {
             if (req.standard_allocation == 0 || req.priv_drv_data_size != 0 ||
@@ -5807,14 +17609,36 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
             break;
         }
         hvdxg.allocation_last_priv_size = alloc_info[0].priv_drv_data_size;
+        hvdxg.allocation_last_runtime_size = req.private_runtime_data_size;
+        hvdxg.allocation_last_resource_priv_size = req.priv_drv_data_size;
         hvdxg.allocation_last_flags = alloc_info[0].flags.value;
         hvdxg.allocation_last_sysmem = alloc_info[0].sysmem;
         hvdxg.allocation_last_priority = alloc_info[0].unused;
         hvdxg.existing_sysmem_last_pages = 0;
         hvdxg.existing_sysmem_last_pin_ret = 0;
         hvdxg.existing_sysmem_last_set_ret = 0;
+        hvdxg.existing_sysmem_last_path = req.flags.existing_sysmem ? 1 : 0;
+        hvdxg.existing_sysmem_last_standard =
+            req.flags.standard_allocation ? 1 : 0;
+        hvdxg.existing_sysmem_last_writable = req.flags.read_only ? 0 : 1;
+        hvdxg.existing_sysmem_last_device = req.device.v;
+        hvdxg.existing_sysmem_last_allocation = 0;
+        hvdxg.existing_sysmem_last_va = alloc_info[0].sysmem;
+        hvdxg.existing_sysmem_last_size = 0;
+        hvdxg.existing_sysmem_last_first_pfn = 0;
+        hvdxg.existing_sysmem_last_last_pfn = 0;
+        hvdxg.existing_sysmem_last_pfnmap_pages = 0;
+        hvdxg.existing_sysmem_last_vram = 0;
+        hvdxg.existing_sysmem_last_vram_gpa = 0;
+        hvdxg.existing_sysmem_last_vram_size = 0;
         hvdxg.allocation_last_in_priv_head_len = 0;
         hvdxg.allocation_last_out_priv_head_len = 0;
+        hvdxg.allocation_last_process = 0;
+        hvdxg.allocation_last_owner_process = 0;
+        hvdxg.allocation_last_owner_generation = 0;
+        hvdxg.allocation_last_device = req.device.v;
+        hvdxg.allocation_last_device_known = device_known;
+        hvdxg.allocation_last_device_from_create = device_known ? 1 : 0;
         memset(hvdxg.allocation_last_in_priv_head, 0,
                sizeof(hvdxg.allocation_last_in_priv_head));
         memset(hvdxg.allocation_last_out_priv_head, 0,
@@ -5884,6 +17708,43 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                          (req.alloc_count - 1) *
                              sizeof(struct hvdxg_command_allocinfo_return);
         result_len = result_min_len + total_alloc_private;
+        hvdxg.allocation_last_cmd_len = command_len;
+        hvdxg.allocation_last_hdr_size =
+            sizeof(struct hvdxg_command_vgpu_to_host);
+        hvdxg.allocation_last_prr_offset =
+            offsetof(struct hvdxg_command_createallocation,
+                     private_runtime_resource_handle);
+        hvdxg.allocation_last_make_resident_offset =
+            offsetof(struct hvdxg_command_createallocation,
+                     make_resident);
+        hvdxg.allocation_last_allocinfo_offset = sizeof(*create);
+        hvdxg.allocation_last_private_offset =
+            sizeof(*create) + req.alloc_count * sizeof(*wire_alloc);
+        hvdxg.allocation_last_result_min_len = result_min_len;
+        hvdxg.allocation_last_result_len = result_len;
+        hvdxg.allocation_last_result_flags_offset =
+            offsetof(struct hvdxg_command_createallocation_return, flags);
+        hvdxg.allocation_last_result_resource_offset =
+            offsetof(struct hvdxg_command_createallocation_return, resource);
+        hvdxg.allocation_last_result_global_offset =
+            offsetof(struct hvdxg_command_createallocation_return,
+                     global_share);
+        hvdxg.allocation_last_result_vgpu_offset =
+            offsetof(struct hvdxg_command_createallocation_return,
+                     vgpu_flags);
+        hvdxg.allocation_last_result_allocinfo_offset =
+            offsetof(struct hvdxg_command_createallocation_return,
+                     allocation_info);
+        hvdxg.allocation_last_result_allocinfo_size =
+            sizeof(struct hvdxg_command_allocinfo_return);
+        hvdxg.allocation_last_result_head_len = 0;
+        hvdxg.allocation_last_wire_len = 0;
+        hvdxg.allocation_last_ext = 0;
+        hvdxg.allocation_last_ext_offset = 0;
+        hvdxg.allocation_last_route_global = 0;
+        hvdxg.allocation_last_send_ret = 0;
+        memset(hvdxg.allocation_last_result_head, 0,
+               sizeof(hvdxg.allocation_last_result_head));
         if (command_len > HV_DXG_VM_BUS_PACKET_MAX ||
             result_len > HV_DXG_VM_BUS_PACKET_MAX) {
             ret = -EOVERFLOW;
@@ -5899,9 +17760,11 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         memset(result_buf, 0, result_len);
         create = (struct hvdxg_command_createallocation *)command_buf;
         result = (struct hvdxg_command_createallocation_return *)result_buf;
+        create_process = hvdxg_owner_bound_process_handle(owner);
+        hvdxg.allocation_last_process = create_process.v;
         hvdxg_command_vgpu_init_process(&create->hdr,
                                         HV_DXGK_VMBCOMMAND_CREATEALLOCATION,
-                                        hvdxg.dxg_process);
+                                        create_process);
         create->device.v = req.device.v;
         create->resource.v = req.resource.v;
         create->private_runtime_data_size = req.private_runtime_data_size;
@@ -5915,8 +17778,11 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
             create->flags.existing_sysmem = 1;
 
         wire_alloc = (struct hvdxg_command_createallocation_allocinfo *)&create[1];
-        private_data = (uint8 *)wire_alloc +
-                       req.alloc_count * sizeof(wire_alloc[0]);
+        command_private_base = (uint8 *)wire_alloc +
+                               req.alloc_count * sizeof(wire_alloc[0]);
+        private_data = command_private_base;
+        if (req.flags.value == 0x47)
+            hvdxg_capture_d3d12_runtime_user(&req);
         if (req.private_runtime_data_size != 0) {
             if (either_copyin(private_data, 1, req.private_runtime_data,
                               req.private_runtime_data_size) < 0) {
@@ -5936,6 +17802,7 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
             }
             private_data += req.priv_drv_data_size;
         }
+        input_alloc_private_data_base = private_data;
         for (uint32 i = 0; i < req.alloc_count; i++) {
             wire_alloc[i].flags = alloc_info[i].flags.value;
             wire_alloc[i].priv_drv_data_size = alloc_info[i].priv_drv_data_size;
@@ -5958,15 +17825,34 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         if (ret != 0)
             goto createallocation_done;
 
+        hvdxg_normalize_d3d12_shared_alloc_priv(
+            &req, alloc_info, command_private_base);
+        hvdxg_note_d3d12_shared_createallocation_request(
+            &req, alloc_info, command_private_base, create_process.v);
         ret = hvdxg_send_sync_vgpu(create, command_len, result,
                                    result_len, &actual_len);
+        hvdxg.allocation_last_wire_len = hvdxg.vgpu_send_last_wire_len;
+        hvdxg.allocation_last_ext = hvdxg.vgpu_send_last_ext;
+        hvdxg.allocation_last_ext_offset = hvdxg.vgpu_send_last_ext_offset;
+        hvdxg.allocation_last_route_global =
+            hvdxg.vgpu_send_last_route_global;
+        hvdxg.allocation_last_send_ret = hvdxg.vgpu_send_last_ret;
+        hvdxg_save_priv_head(hvdxg.allocation_last_result_head,
+                             sizeof(hvdxg.allocation_last_result_head),
+                             &hvdxg.allocation_last_result_head_len,
+                             result_buf,
+                             actual_len < result_len ?
+                                 actual_len : result_len);
         hvdxg.allocation_last_len = actual_len;
         hvdxg.allocation_last_ret = ret;
         hvdxg.allocation_last_count = req.alloc_count;
+        hvdxg_note_d3d12_shared_createallocation_result(
+            actual_len, ret, &req, requested_flags.value, alloc_info,
+            NULL, NULL);
         if (ret != 0) {
             hvdxg_note_allocation_history(actual_len, ret, req.device.v,
                                           req.resource.v, 0, 0,
-                                          req.alloc_count, total_private);
+                                          req.alloc_count, total_private, req.global_share.v, requested_flags.value);
             goto createallocation_done;
         }
         if (actual_len < result_min_len ||
@@ -5975,11 +17861,10 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
             hvdxg.allocation_last_ret = ret;
             hvdxg_note_allocation_history(actual_len, ret, req.device.v,
                                           req.resource.v, 0, 0,
-                                          req.alloc_count, total_private);
+                                          req.alloc_count, total_private, req.global_share.v, requested_flags.value);
             goto createallocation_done;
         }
         host_allocation_created = 1;
-        req.flags = result->flags;
         req.resource.v = result->resource.v;
         req.global_share.v = result->global_share.v;
         alloc_private_data = result_buf + result_min_len;
@@ -6010,38 +17895,91 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                                          &hvdxg.allocation_last_out_priv_head_len,
                                          alloc_private_data,
                                          host_private_size);
+                if (i == 0)
+                    hvdxg_note_d3d12_shared_createallocation_result(
+                        actual_len, ret, &req, requested_flags.value,
+                        alloc_info, result, alloc_private_data);
+                host_total_alloc_private += host_private_size;
                 alloc_private_data += host_private_size;
             }
         }
+        hvdxg_note_d3d12_shared_createallocation_result(
+            actual_len, ret, &req, requested_flags.value, alloc_info, result,
+            alloc_private_data_base);
         if (ret != 0) {
             hvdxg.allocation_last_ret = ret;
             hvdxg_note_allocation_history(actual_len, ret, req.device.v,
                                           req.resource.v,
                                           alloc_info[0].allocation.v,
                                           result->allocation_info[0].allocation_size,
-                                          req.alloc_count, total_private);
+                                          req.alloc_count, total_private, req.global_share.v, requested_flags.value);
             goto createallocation_done;
         }
         for (uint32 i = 0; i < req.alloc_count; i++) {
             if (alloc_info[i].sysmem != 0) {
+                hvdxg.existing_sysmem_attempts++;
+                hvdxg.existing_sysmem_last_path =
+                    req.flags.existing_sysmem ? 1 : 0;
+                hvdxg.existing_sysmem_last_standard =
+                    req.flags.standard_allocation ? 1 : 0;
+                hvdxg.existing_sysmem_last_writable =
+                    req.flags.read_only ? 0 : 1;
+                hvdxg.existing_sysmem_last_device = req.device.v;
+                hvdxg.existing_sysmem_last_allocation =
+                    alloc_info[i].allocation.v;
+                hvdxg.existing_sysmem_last_va = alloc_info[i].sysmem;
+                hvdxg.existing_sysmem_last_size =
+                    result->allocation_info[i].allocation_size;
+                hvdxg.existing_sysmem_last_first_pfn = 0;
+                hvdxg.existing_sysmem_last_last_pfn = 0;
+                hvdxg.existing_sysmem_last_pfnmap_pages = 0;
+                hvdxg.existing_sysmem_last_vram = 0;
+                hvdxg.existing_sysmem_last_vram_gpa = 0;
+                hvdxg.existing_sysmem_last_vram_size = 0;
                 ret = hvdxg_pin_existing_sysmem(
                     alloc_info[i].sysmem,
                     result->allocation_info[i].allocation_size,
                     !req.flags.read_only,
                     &sysmem_pages[i],
-                    &sysmem_page_count[i]);
+                    &sysmem_page_count[i],
+                    &hvdxg.existing_sysmem_last_pfnmap_pages);
                 hvdxg.existing_sysmem_last_pages = sysmem_page_count[i];
                 hvdxg.existing_sysmem_last_pin_ret = ret;
+                if (ret == 0 && sysmem_page_count[i] != 0) {
+                    hvdxg.existing_sysmem_last_first_pfn =
+                        sysmem_pages[i][0] >> PGSHIFT;
+                    hvdxg.existing_sysmem_last_last_pfn =
+                        sysmem_pages[i][sysmem_page_count[i] - 1] >>
+                        PGSHIFT;
+                    if (platform.has_framebuffer) {
+                        uint64 first_pa = sysmem_pages[i][0];
+                        uint64 last_pa =
+                            sysmem_pages[i][sysmem_page_count[i] - 1];
+                        uint64 fb_base = platform.framebuffer_base;
+                        uint64 fb_size = platform.framebuffer_size;
+                        uint64 fb_end = fb_base + fb_size;
+                        uint64 alloc_end = last_pa + PGSIZE;
+
+                        if (fb_size != 0 && fb_end > fb_base &&
+                            first_pa < fb_end && fb_base < alloc_end) {
+                            hvdxg.existing_sysmem_last_vram = 1;
+                            hvdxg.existing_sysmem_last_vram_gpa = fb_base;
+                            hvdxg.existing_sysmem_last_vram_size = fb_size;
+                        }
+                    }
+                }
                 if (ret != 0) {
                     hvdxg.allocation_last_ret = ret;
                     hvdxg_note_allocation_history(
                         actual_len, ret, req.device.v, req.resource.v,
                         alloc_info[i].allocation.v,
                         result->allocation_info[i].allocation_size,
-                        req.alloc_count, total_private);
+                        req.alloc_count, total_private, req.global_share.v, requested_flags.value);
                     goto createallocation_done;
                 }
                 hvdxg.existing_sysmem_pin_successes++;
+                if (hvdxg.existing_sysmem_last_pfnmap_pages != 0)
+                    hvdxg.existing_sysmem_pfnmap_successes++;
                 hvdxg.existing_sysmem_total_pages += sysmem_page_count[i];
                 ret = hvdxg_set_existing_sysmem_pages(
                     req.device.v, alloc_info[i].allocation.v,
@@ -6053,7 +17991,7 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                         actual_len, ret, req.device.v, req.resource.v,
                         alloc_info[i].allocation.v,
                         result->allocation_info[i].allocation_size,
-                        req.alloc_count, total_private);
+                        req.alloc_count, total_private, req.global_share.v, requested_flags.value);
                     goto createallocation_done;
                 }
                 hvdxg.existing_sysmem_set_successes++;
@@ -6093,7 +18031,7 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                                           req.resource.v,
                                           alloc_info[0].allocation.v,
                                           result->allocation_info[0].allocation_size,
-                                          req.alloc_count, total_private);
+                                          req.alloc_count, total_private, req.global_share.v, requested_flags.value);
             goto createallocation_done;
         }
         hvdxg.last_device_handle = req.device.v;
@@ -6102,15 +18040,32 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         hvdxg.last_allocation_device = req.device.v;
         hvdxg.last_allocation_size = result->allocation_info[0].allocation_size;
         if (owner != NULL) {
+            track_alloc_input_private =
+                req.flags.create_resource &&
+                requested_flags.create_shared &&
+                requested_flags.nt_security_sharing;
             tracked_alloc_private = req.flags.standard_allocation ?
                                     standard_alloc_priv_data_size :
-                                    total_alloc_private;
+                                    (track_alloc_input_private ?
+                                         total_alloc_private :
+                                         host_total_alloc_private);
             hvdxg_track_resource(owner, &req, requested_flags, alloc_info, result,
                                  req.flags.standard_allocation ?
                                      standard_alloc_priv_data :
-                                     alloc_private_data_base,
+                                     (track_alloc_input_private ?
+                                          input_alloc_private_data_base :
+                                          alloc_private_data_base),
+                                 track_alloc_input_private ?
+                                     alloc_priv_capacity : NULL,
                                  tracked_alloc_private,
-                                 resource_priv_data,
+                                 track_alloc_input_private ? 0 :
+                                     (req.flags.standard_allocation ? 0 : 1),
+                                 req.private_runtime_data_size != 0 ?
+                                     command_private_base : NULL,
+                                 req.flags.standard_allocation ?
+                                     resource_priv_data :
+                                     command_private_base +
+                                         req.private_runtime_data_size,
                                  tracked_resource_private_size);
             for (uint32 i = 0; i < req.alloc_count; i++) {
                 hvdxg_track_allocation(owner, req.device.v, req.resource.v,
@@ -6120,13 +18075,18 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                                        alloc_info[i].sysmem,
                                        sysmem_pages[i],
                                        sysmem_page_count[i]);
+                hvdxg_link_resource_allocation(
+                    owner, req.device.v, req.resource.v,
+                    alloc_info[i].allocation.v,
+                    result->allocation_info[i].allocation_size,
+                    result->allocation_info[i].allocation_flags);
                 sysmem_pages[i] = NULL;
                 sysmem_page_count[i] = 0;
                 hvdxg_note_allocation_history(
                     actual_len, ret, req.device.v, req.resource.v,
                     alloc_info[i].allocation.v,
                     result->allocation_info[i].allocation_size,
-                    req.alloc_count, total_private);
+                    req.alloc_count, total_private, req.global_share.v, requested_flags.value);
             }
         }
 createallocation_done:
@@ -6215,10 +18175,15 @@ createallocation_done:
                       req.alloc_count * sizeof(destroy->allocations[0]);
         ret = hvdxg_send_sync_vgpu(destroy, command_len, &status,
                                    sizeof(status), &actual_len);
+        if (ret == 0 && actual_len < sizeof(status))
+            ret = -EOVERFLOW;
         if (ret == 0 && actual_len >= sizeof(status))
             ret = hvdxg_ntstatus_to_errno(status);
-        hvdxg.destroyalloc_last_len = actual_len;
-        hvdxg.destroyalloc_last_ret = ret;
+        hvdxg_note_destroyallocation(
+            req.device.v, req.resource.v,
+            req.alloc_count != 0 ? destroy->allocations[0].v : 0,
+            destroy->hdr.process.v, HV_DXG_DESTROY_ALLOC_CTX_IOCTL,
+            req.alloc_count, actual_len, ret, status);
         if (ret == 0 && owner != NULL) {
             if (req.alloc_count == 0) {
                 hvdxg_untrack_resource(owner, req.device.v, req.resource.v);
@@ -6288,6 +18253,8 @@ createallocation_done:
         struct hvdxg_command_createpagingqueue_return result;
         uint32 actual_len = 0;
         uint64 fence_kva = 0;
+        uint64 fence_pa = 0;
+        uint64 raw_fence_pa = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -6329,10 +18296,17 @@ createallocation_done:
         }
         req.paging_queue.v = result.paging_queue.v;
         req.sync_object.v = result.sync_object.v;
-        req.fence_cpu_virtual_address = hvdxg_map_iospace_user(
-            result.fence_storage_physical_address, PGSIZE, 0);
-        fence_kva = hvdxg_map_iospace_kernel(
-            result.fence_storage_physical_address, PGSIZE);
+        raw_fence_pa = result.fence_storage_physical_address;
+        req.fence_cpu_virtual_address = hvdxg_map_iospace_user_canonical(
+            HV_DXG_FENCE_SOURCE_PAGINGQUEUE, raw_fence_pa, sizeof(uint64),
+            0, &fence_pa, NULL, 0);
+        fence_kva = hvdxg_map_iospace_kernel_canonical(
+            HV_DXG_FENCE_SOURCE_PAGINGQUEUE, raw_fence_pa, sizeof(uint64),
+            fence_pa, 0);
+        hvdxg_note_fence_offset_candidate(HV_DXG_FENCE_SOURCE_PAGINGQUEUE,
+                                          raw_fence_pa,
+                                          result.fence_storage_offset,
+                                          sizeof(uint64));
         if (req.fence_cpu_virtual_address == 0) {
             ret = -ENOMEM;
             break;
@@ -6341,12 +18315,11 @@ createallocation_done:
               -EFAULT : 0;
         if (ret == 0 && owner != NULL) {
             hvdxg_track_pagingqueue(owner, req.device.v, req.paging_queue.v,
-                                    req.sync_object.v,
-                                    result.fence_storage_physical_address);
+                                    req.sync_object.v, fence_pa);
             hvdxg_track_sync(owner, req.device.v, req.sync_object.v,
                              _D3DDDI_MONITORED_FENCE,
                              0, result.sync_object.v,
-                             req.fence_cpu_virtual_address, fence_kva);
+                             req.fence_cpu_virtual_address, fence_kva, 1);
         }
         break;
     }
@@ -6380,8 +18353,14 @@ createallocation_done:
         destroy.paging_queue.v = req.paging_queue.v;
         ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                    sizeof(status), &actual_len);
+        if (actual_len >= sizeof(status))
+            hvdxg.destroypaging_last_status = status.v;
+        if (ret == 0 && actual_len < sizeof(status))
+            ret = -EOVERFLOW;
         if (ret == 0 && actual_len >= sizeof(status))
             ret = hvdxg_ntstatus_to_errno(status);
+        hvdxg.destroypaging_last_len = actual_len;
+        hvdxg.destroypaging_last_ret = ret;
         if (ret == 0 && owner != NULL) {
             uint32 sync = hvdxg_untrack_pagingqueue(owner,
                                                     req.paging_queue.v);
@@ -6397,6 +18376,8 @@ createallocation_done:
         struct hvdxg_command_makeresident_return result;
         uint32 actual_len = 0;
         uint32 command_len;
+        uint32 paging_sync = 0;
+        int host_ret = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -6411,8 +18392,14 @@ createallocation_done:
             ret = -EINVAL;
             break;
         }
+        /*
+         * WSL's dxgkvmb_command_makeresident is naturally 8-byte aligned.
+         * The allocation array starts at the same offset in our packed wire
+         * struct, but the host also expects the trailing alignment dword.
+         */
         command_len = sizeof(*make) +
-                      (req.alloc_count - 1) * sizeof(make->allocations[0]);
+                      (req.alloc_count - 1) * sizeof(make->allocations[0]) +
+                      sizeof(uint32);
         if (command_len > HV_DXG_VM_BUS_PACKET_MAX) {
             ret = -EOVERFLOW;
             break;
@@ -6435,13 +18422,90 @@ createallocation_done:
             ret = -EFAULT;
             goto makeresident_done;
         }
+        hvdxg.makeresident_last_device = 0;
+        hvdxg.makeresident_last_paging_queue = req.paging_queue.v;
+        hvdxg.makeresident_last_flags = req.flags.value;
+        hvdxg.makeresident_last_count = req.alloc_count;
+        hvdxg.makeresident_last_sorted = 0;
+        hvdxg.makeresident_last_cmd_len = command_len;
+        hvdxg.makeresident_last_wsl_cmd_len =
+            sizeof(*make) +
+            (req.alloc_count - 1) * sizeof(make->allocations[0]) +
+            sizeof(uint32);
+        hvdxg.makeresident_last_result_len = sizeof(result);
+        hvdxg.makeresident_last_actual_len = 0;
+        hvdxg.makeresident_last_host_ret = 0;
+        hvdxg.makeresident_last_user_ret = 0;
+        hvdxg.makeresident_last_pending_ok = 0;
+        hvdxg.makeresident_last_status = 0;
+        hvdxg.makeresident_last_sync = 0;
+        hvdxg.makeresident_last_fence_current = 0;
+        hvdxg.makeresident_last_owner_ok_count = 0;
+        hvdxg.makeresident_last_tracked_count = 0;
+        hvdxg.makeresident_last_order_matches = 1;
+        memset(hvdxg.makeresident_last_in_alloc, 0,
+               sizeof(hvdxg.makeresident_last_in_alloc));
+        memset(hvdxg.makeresident_last_wire_alloc, 0,
+               sizeof(hvdxg.makeresident_last_wire_alloc));
+        memset(hvdxg.makeresident_last_owner_dev, 0,
+               sizeof(hvdxg.makeresident_last_owner_dev));
+        memset(hvdxg.makeresident_last_owner_res, 0,
+               sizeof(hvdxg.makeresident_last_owner_res));
+        memset(hvdxg.makeresident_last_owner_proc, 0,
+               sizeof(hvdxg.makeresident_last_owner_proc));
+        memset(hvdxg.makeresident_last_owner_gen, 0,
+               sizeof(hvdxg.makeresident_last_owner_gen));
+        memset(hvdxg.makeresident_last_owner_refs, 0,
+               sizeof(hvdxg.makeresident_last_owner_refs));
+        for (uint32 i = 0; i < req.alloc_count && i < 4; i++)
+            hvdxg.makeresident_last_in_alloc[i] = make->allocations[i].v;
         if (!hvdxg_owner_has_pagingqueue(owner, req.paging_queue.v)) {
             ret = -EPERM;
             goto makeresident_done;
         }
+        paging_sync = hvdxg_owner_pagingqueue_sync(owner,
+                                                   req.paging_queue.v);
+        hvdxg.makeresident_last_sync = paging_sync;
         for (uint32 i = 0; i < req.alloc_count; i++) {
-            if (!hvdxg_owner_has_allocation(owner, 0, 0,
-                                            make->allocations[i].v)) {
+            struct hvdxg_tracked_allocation *tracked;
+            struct hvdxg_object_entry *object;
+            int owner_ok;
+
+            tracked = hvdxg_owner_find_allocation(
+                owner, 0, 0, make->allocations[i].v);
+            object = hvdxg_owner_find_object(
+                owner, HV_DXG_OBJECT_ALLOCATION,
+                make->allocations[i].v);
+            owner_ok = hvdxg_owner_has_allocation(
+                owner, 0, 0, make->allocations[i].v);
+            if (i < 2 && tracked != NULL) {
+                hvdxg.makeresident_last_owner_dev[i] =
+                    tracked->device;
+                hvdxg.makeresident_last_owner_res[i] =
+                    tracked->resource;
+                hvdxg.makeresident_last_owner_proc[i] =
+                    tracked->owner_process;
+                hvdxg.makeresident_last_owner_gen[i] =
+                    tracked->owner_generation;
+                hvdxg.makeresident_last_owner_refs[i] =
+                    tracked->owner_refs;
+            } else if (i < 2 && object != NULL) {
+                hvdxg.makeresident_last_owner_dev[i] =
+                    object->device;
+                hvdxg.makeresident_last_owner_res[i] =
+                    (uint32)object->parent;
+                hvdxg.makeresident_last_owner_proc[i] =
+                    hvdxg_open_host_process(owner);
+                hvdxg.makeresident_last_owner_gen[i] =
+                    hvdxg_open_process_generation(owner);
+                hvdxg.makeresident_last_owner_refs[i] =
+                    hvdxg_open_process_refs(owner);
+            }
+            if (tracked != NULL)
+                hvdxg.makeresident_last_tracked_count++;
+            if (owner_ok)
+                hvdxg.makeresident_last_owner_ok_count++;
+            if (!owner_ok) {
                 ret = -EPERM;
                 break;
             }
@@ -6449,49 +18513,89 @@ createallocation_done:
         if (ret != 0)
             goto makeresident_done;
         /*
-         * The NVIDIA D3D12 UMD under WSL emits the second-FBO residency
-         * batch in ascending host-handle order.  Mesa on xv6 can hand us the
-         * same color/depth pair in the opposite order, and the host rejects
-         * that packet with STATUS_INVALID_PARAMETER.  Normalize the wire
-         * packet so the host sees the WSL-observed order.
-         */
-        for (uint32 i = 1; i < req.alloc_count; i++) {
-            struct hvdxg_d3dkmthandle key = make->allocations[i];
-            uint32 j = i;
-
-            while (j > 0 && make->allocations[j - 1].v > key.v) {
-                make->allocations[j] = make->allocations[j - 1];
-                j--;
-            }
-            make->allocations[j] = key;
-        }
-        /*
          * WSL leaves the VM-bus device field zero for MAKERESIDENT even
-         * though the wire struct carries it.  Some hosts return a different
-         * residency/fence path when a device is supplied here.
+         * though the wire struct carries it.
          */
         make->device.v = 0;
-        ret = hvdxg_send_sync_vgpu(make, command_len, &result,
-                                   sizeof(result), &actual_len);
-        if (ret == 0 && actual_len >= sizeof(result))
+        hvdxg.makeresident_last_device = make->device.v;
+        for (uint32 i = 0; i < req.alloc_count && i < 4; i++) {
+            hvdxg.makeresident_last_wire_alloc[i] = make->allocations[i].v;
+            if (hvdxg.makeresident_last_wire_alloc[i] !=
+                hvdxg.makeresident_last_in_alloc[i])
+                hvdxg.makeresident_last_order_matches = 0;
+        }
+        host_ret = hvdxg_send_sync_vgpu(make, command_len, &result,
+                                        sizeof(result), &actual_len);
+        hvdxg.makeresident_last_actual_len = actual_len;
+        hvdxg.makeresident_last_host_ret = host_ret;
+        ret = host_ret;
+        if (ret == 0 && actual_len < sizeof(result)) {
+            ret = -EOVERFLOW;
+        } else if (ret == 0) {
+            hvdxg.makeresident_last_status = result.status.v;
             ret = hvdxg_ntstatus_to_errno(result.status);
+        }
         /*
          * Match WSL's make-resident contract: STATUS_PENDING is a
          * positive success code returned to user mode, and the paging
          * fence/trim outputs must still be copied back.  Mesa waits on
          * that fence before locking/touching the allocation.
          */
-        if (ret == 0 || ret == 259) {
+        if (ret == 0 || ret == HV_DXG_STATUS_PENDING) {
             int copy_ret = ret;
 
             req.paging_fence_value = result.paging_fence_value;
             req.num_bytes_to_trim = result.num_bytes_to_trim;
+            hvdxg.makeresident_last_pending_ok =
+                copy_ret == HV_DXG_STATUS_PENDING &&
+                result.status.v == HV_DXG_STATUS_PENDING;
+            if (owner != NULL && result.paging_fence_value != 0) {
+                for (uint32 i = 0; i < req.alloc_count; i++) {
+                    hvdxg_note_allocation_resident(
+                        owner, make->allocations[i].v, req.paging_queue.v,
+                        result.paging_fence_value);
+                }
+            }
+            hvdxg.makeresident_last_fence_current =
+                hvdxg_owner_sync_fence_value(owner, paging_sync);
             ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
                   -EFAULT : copy_ret;
         }
+        if ((req.alloc_count > 1 ||
+             (ret != 0 && ret != HV_DXG_STATUS_PENDING)) &&
+            hvdxg.makeresident_diag_prints < 32) {
+            printf("hyperv-dxg: makeresident wire device=0x%x pq=0x%x "
+                   "flags=0x%x count=%u sorted=%u status=0x%x ret=%d "
+                   "host_ret=%d pending_ok=%u "
+                   "fence=%lu cur=%lu sync=0x%x trim=%lu "
+                   "in=%x,%x,%x,%x wire=%x,%x,%x,%x\n",
+                   hvdxg.makeresident_last_device,
+                   hvdxg.makeresident_last_paging_queue,
+                   hvdxg.makeresident_last_flags,
+                   hvdxg.makeresident_last_count,
+                   hvdxg.makeresident_last_sorted,
+                   (uint32)hvdxg.makeresident_last_status,
+                   ret, hvdxg.makeresident_last_host_ret,
+                   hvdxg.makeresident_last_pending_ok,
+                   result.paging_fence_value,
+                   hvdxg.makeresident_last_fence_current,
+                   hvdxg.makeresident_last_sync,
+                   result.num_bytes_to_trim,
+                   hvdxg.makeresident_last_in_alloc[0],
+                   hvdxg.makeresident_last_in_alloc[1],
+                   hvdxg.makeresident_last_in_alloc[2],
+                   hvdxg.makeresident_last_in_alloc[3],
+                   hvdxg.makeresident_last_wire_alloc[0],
+                   hvdxg.makeresident_last_wire_alloc[1],
+                   hvdxg.makeresident_last_wire_alloc[2],
+                   hvdxg.makeresident_last_wire_alloc[3]);
+            hvdxg.makeresident_diag_prints++;
+        }
 makeresident_done:
         hvdxg.makeresident_last_len = actual_len;
+        hvdxg.makeresident_last_actual_len = actual_len;
         hvdxg.makeresident_last_ret = ret;
+        hvdxg.makeresident_last_user_ret = ret;
         hvdxg.makeresident_last_fence = req.paging_fence_value;
         hvdxg.makeresident_last_trim = req.num_bytes_to_trim;
         if (make != NULL)
@@ -6580,6 +18684,7 @@ evict_done:
         uint64 allocation_pages = 0;
         uint64 mapped_pages = 0;
         int map_ok = 0;
+        uint32 paging_sync = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -6596,6 +18701,8 @@ evict_done:
             ret = -EPERM;
             break;
         }
+        paging_sync = hvdxg_owner_pagingqueue_sync(owner,
+                                                   req.paging_queue.v);
         if (req.allocation.v != 0) {
             if (!hvdxg_owner_has_allocation(owner, 0, 0,
                                             req.allocation.v)) {
@@ -6626,6 +18733,8 @@ evict_done:
         hvdxg.mapgpuva_last_size_pages = req.size_in_pages;
         hvdxg.mapgpuva_last_protection = req.protection.value;
         hvdxg.mapgpuva_last_driver_protection = req.driver_protection;
+        hvdxg.mapgpuva_last_sync = paging_sync;
+        hvdxg.mapgpuva_last_fence_current = 0;
         hvdxg_command_vgpu_init_process(&map.hdr,
                                         HV_DXGK_VMBCOMMAND_MAPGPUVIRTUALADDRESS,
                                         hvdxg.dxg_process);
@@ -6634,9 +18743,11 @@ evict_done:
         mapped_pages = req.size_in_pages;
         ret = hvdxg_send_sync_vgpu(&map, sizeof(map), &result,
                                    sizeof(result), &actual_len);
-        if (actual_len >= sizeof(result.status))
+        if (actual_len >= sizeof(result))
             hvdxg.mapgpuva_last_status = result.status.v;
-        if (ret == 0 && actual_len >= sizeof(result))
+        if (ret == 0 && actual_len < sizeof(result))
+            ret = -EOVERFLOW;
+        else if (ret == 0)
             ret = hvdxg_ntstatus_to_errno(result.status);
         if (ret != 0 &&
             (uint32)hvdxg.mapgpuva_last_status == 0xC0000001U &&
@@ -6663,13 +18774,15 @@ evict_done:
                 mapped_pages = allocation_pages;
                 ret = hvdxg_send_sync_vgpu(&map, sizeof(map), &result,
                                            sizeof(result), &actual_len);
-                if (actual_len >= sizeof(result.status))
+                if (actual_len >= sizeof(result))
                     hvdxg.mapgpuva_last_status = result.status.v;
-                if (ret == 0 && actual_len >= sizeof(result))
+                if (ret == 0 && actual_len < sizeof(result))
+                    ret = -EOVERFLOW;
+                else if (ret == 0)
                     ret = hvdxg_ntstatus_to_errno(result.status);
             }
         }
-        if (ret == 0 || ret == 259) {
+        if (ret == 0 || ret == HV_DXG_STATUS_PENDING) {
             int copy_ret = ret;
 
             req.virtual_address = result.virtual_address;
@@ -6680,6 +18793,8 @@ evict_done:
                 ret = -EFAULT;
             else {
                 map_ok = req.virtual_address != 0;
+                hvdxg.mapgpuva_last_fence_current =
+                    hvdxg_owner_sync_fence_value(owner, paging_sync);
                 ret = copy_ret;
             }
         }
@@ -6690,8 +18805,15 @@ evict_done:
         hvdxg_note_mapgpuva_history(actual_len, ret,
                                     (uint32)hvdxg.mapgpuva_last_status,
                                     req.paging_queue.v, req.allocation.v,
-                                    mapped_pages, req.virtual_address,
+                                    mapped_pages, req.protection.value,
+                                    req.driver_protection,
+                                    req.virtual_address,
                                     req.paging_fence_value);
+        if (owner != NULL && req.allocation.v != 0)
+            hvdxg_note_allocation_mapgpuva(
+                owner, req.allocation.v, req.paging_queue.v,
+                req.virtual_address, mapped_pages, req.paging_fence_value,
+                ret, (uint32)hvdxg.mapgpuva_last_status);
         if (map_ok && owner != NULL)
             hvdxg_track_gpuva(owner, hvdxg.host_adapter_handle,
                               req.virtual_address, mapped_pages << 12,
@@ -6870,6 +18992,14 @@ submitcommand_done:
         hvdxg.submithwqueue_last_len = actual_len;
         hvdxg.submithwqueue_last_ret = ret;
 submithwqueue_done:
+        hvdxg_note_submithwqueue_history(
+            hvdxg.submithwqueue_last_len,
+            hvdxg.submithwqueue_last_ret,
+            hvdxg.submithwqueue_last_queue,
+            hvdxg.submithwqueue_last_command_length,
+            hvdxg.submithwqueue_last_priv_size,
+            hvdxg.submithwqueue_last_priv_head,
+            hvdxg.submithwqueue_last_priv_head_len);
         if (submit != NULL)
             kvfree(submit);
         break;
@@ -6877,9 +19007,12 @@ submithwqueue_done:
 
     case LX_DXRESERVEGPUVIRTUALADDRESS: {
         struct d3dddi_reservegpuvirtualaddress req;
+        struct d3dddi_reservegpuvirtualaddress wire_req;
         struct hvdxg_command_reservegpuvirtualaddress reserve;
         struct hvdxg_command_reservegpuvirtualaddress_return result;
         uint32 actual_len = 0;
+        uint32 host_adapter = 0;
+        int adapter_handle;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -6888,18 +19021,24 @@ submithwqueue_done:
             ret = -EFAULT;
             break;
         }
-        if ((req.adapter.v != hvdxg.host_adapter_handle &&
+        adapter_handle =
+            hvdxg_resolve_adapter_handle(owner, req.adapter.v,
+                                         &host_adapter) == 0;
+        if ((!adapter_handle &&
              !hvdxg_owner_has_pagingqueue(owner, req.adapter.v)) ||
             req.size == 0) {
             ret = -EINVAL;
             break;
         }
+        wire_req = req;
+        if (adapter_handle)
+            wire_req.adapter.v = host_adapter;
         memset(&reserve, 0, sizeof(reserve));
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(
             &reserve.hdr, HV_DXGK_VMBCOMMAND_RESERVEGPUVIRTUALADDRESS,
             hvdxg.dxg_process);
-        reserve.args = req;
+        reserve.args = wire_req;
         ret = hvdxg_send_sync_vgpu(&reserve, sizeof(reserve), &result,
                                    sizeof(result), &actual_len);
         hvdxg.gpuva_reserve_last_len = actual_len;
@@ -6928,7 +19067,8 @@ submithwqueue_done:
         struct hvdxg_command_freegpuvirtualaddress free_gpuva;
         struct hvdxg_ntstatus status;
         uint32 actual_len = 0;
-        uint64 tracked_size;
+        uint32 host_adapter = 0;
+        int adapter_handle;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -6937,7 +19077,10 @@ submithwqueue_done:
             ret = -EFAULT;
             break;
         }
-        if ((req.adapter.v != hvdxg.host_adapter_handle &&
+        adapter_handle =
+            hvdxg_resolve_adapter_handle(owner, req.adapter.v,
+                                         &host_adapter) == 0;
+        if ((!adapter_handle &&
              !hvdxg_owner_has_gpuva(owner, req.adapter.v,
                                      req.base_address)) ||
             req.base_address == 0 || req.size == 0) {
@@ -6949,20 +19092,19 @@ submithwqueue_done:
             ret = -EPERM;
             break;
         }
-        wire_req = req;
-        tracked_size = hvdxg_owner_gpuva_size(owner, req.adapter.v,
-                                              req.base_address);
-        if (tracked_size == 0)
-            tracked_size = hvdxg_owner_gpuva_size(owner, 0,
-                                                  req.base_address);
-        if (tracked_size != 0 && tracked_size != req.size)
-            wire_req.size = tracked_size;
         memset(&free_gpuva, 0, sizeof(free_gpuva));
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(
             &free_gpuva.hdr, HV_DXGK_VMBCOMMAND_FREEGPUVIRTUALADDRESS,
             hvdxg.dxg_process);
+        wire_req = req;
+        if (adapter_handle)
+            wire_req.adapter.v = host_adapter;
         free_gpuva.args = wire_req;
+        hvdxg.gpuva_free_last_adapter = req.adapter.v;
+        hvdxg.gpuva_free_last_base = req.base_address;
+        hvdxg.gpuva_free_last_size = req.size;
+        hvdxg.gpuva_free_last_wire_size = free_gpuva.args.size;
         ret = hvdxg_send_sync_vgpu(&free_gpuva, sizeof(free_gpuva), &status,
                                    sizeof(status), &actual_len);
         if (ret == 0 && actual_len >= sizeof(status))
@@ -6979,6 +19121,7 @@ submithwqueue_done:
         struct hvdxg_command_flushheaptransitions flush;
         struct hvdxg_ntstatus status;
         uint32 actual_len = 0;
+        uint32 host_adapter;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -6987,7 +19130,8 @@ submithwqueue_done:
             ret = -EFAULT;
             break;
         }
-        if (req.adapter.v != hvdxg.host_adapter_handle) {
+        if (hvdxg_resolve_adapter_handle(owner, req.adapter.v,
+                                         &host_adapter) != 0) {
             ret = -EINVAL;
             break;
         }
@@ -7678,11 +19822,85 @@ submithwqueue_done:
         update->fence_object.v = req.fence_object.v;
         update->num_operations = req.num_operations;
         update->flags = req.flags.value;
+        hvdxg.updategpuva_last_len = 0;
+        hvdxg.updategpuva_last_ret = 0;
+        hvdxg.updategpuva_last_status = 0;
+        hvdxg.updategpuva_last_ops = req.num_operations;
+        hvdxg.updategpuva_last_fence = req.fence_value;
+        hvdxg.updategpuva_last_device = req.device.v;
+        hvdxg.updategpuva_last_context = req.context.v;
+        hvdxg.updategpuva_last_fence_object = req.fence_object.v;
+        hvdxg.updategpuva_last_flags = req.flags.value;
+        hvdxg.updategpuva_last_cmd_len = command_len;
+        hvdxg.updategpuva_last_op_offset =
+            offsetof(struct hvdxg_command_updategpuvirtualaddress,
+                     operations);
+        hvdxg.updategpuva_last_op_size =
+            sizeof(struct d3dddi_updategpuvirtualaddress_operation);
+        hvdxg.updategpuva_last_op0_type = 0;
+        hvdxg.updategpuva_last_op0_base = 0;
+        hvdxg.updategpuva_last_op0_size = 0;
+        hvdxg.updategpuva_last_op0_allocation = 0;
+        hvdxg.updategpuva_last_op0_alloc_offset = 0;
+        hvdxg.updategpuva_last_op0_alloc_size = 0;
+        hvdxg.updategpuva_last_op0_source = 0;
+        hvdxg.updategpuva_last_op0_dest = 0;
+        hvdxg.updategpuva_last_op0_protection = 0;
+        hvdxg.updategpuva_last_op0_driver_protection = 0;
         if (either_copyin(update->operations, 1, req.operations,
                           op_size) < 0) {
             ret = -EFAULT;
             kvfree(update);
             update = NULL;
+            break;
+        }
+        hvdxg.updategpuva_last_op0_type = update->operations[0].operation;
+        switch (update->operations[0].operation) {
+        case _D3DDDI_UPDATEGPUVIRTUALADDRESS_MAP:
+            hvdxg.updategpuva_last_op0_base =
+                update->operations[0].map.base_address;
+            hvdxg.updategpuva_last_op0_size =
+                update->operations[0].map.size;
+            hvdxg.updategpuva_last_op0_allocation =
+                update->operations[0].map.allocation.v;
+            hvdxg.updategpuva_last_op0_alloc_offset =
+                update->operations[0].map.allocation_offset;
+            hvdxg.updategpuva_last_op0_alloc_size =
+                update->operations[0].map.allocation_size;
+            break;
+        case _D3DDDI_UPDATEGPUVIRTUALADDRESS_MAP_PROTECT:
+            hvdxg.updategpuva_last_op0_base =
+                update->operations[0].map_protect.base_address;
+            hvdxg.updategpuva_last_op0_size =
+                update->operations[0].map_protect.size;
+            hvdxg.updategpuva_last_op0_allocation =
+                update->operations[0].map_protect.allocation.v;
+            hvdxg.updategpuva_last_op0_alloc_offset =
+                update->operations[0].map_protect.allocation_offset;
+            hvdxg.updategpuva_last_op0_alloc_size =
+                update->operations[0].map_protect.allocation_size;
+            hvdxg.updategpuva_last_op0_protection =
+                update->operations[0].map_protect.protection.value;
+            hvdxg.updategpuva_last_op0_driver_protection =
+                update->operations[0].map_protect.driver_protection;
+            break;
+        case _D3DDDI_UPDATEGPUVIRTUALADDRESS_UNMAP:
+            hvdxg.updategpuva_last_op0_base =
+                update->operations[0].unmap.base_address;
+            hvdxg.updategpuva_last_op0_size =
+                update->operations[0].unmap.size;
+            hvdxg.updategpuva_last_op0_protection =
+                update->operations[0].unmap.protection.value;
+            break;
+        case _D3DDDI_UPDATEGPUVIRTUALADDRESS_COPY:
+            hvdxg.updategpuva_last_op0_source =
+                update->operations[0].copy.source_address;
+            hvdxg.updategpuva_last_op0_size =
+                update->operations[0].copy.size;
+            hvdxg.updategpuva_last_op0_dest =
+                update->operations[0].copy.dest_address;
+            break;
+        default:
             break;
         }
         ret = hvdxg_send_sync_vgpu(update, command_len, &status,
@@ -7709,6 +19927,7 @@ submithwqueue_done:
         uint64 map_size = 0;
         uint64 mapped_size;
         uint64 map_pa;
+        uint64 canonical_pa = 0;
         uint64 map_extra_flags;
 
         ret = hvdxg_d3dkmt_ensure();
@@ -7718,6 +19937,7 @@ submithwqueue_done:
             ret = -EFAULT;
             break;
         }
+        hvdxg.lock2_ioctl_count++;
         hvdxg.lock2_last_allocation = req.allocation.v;
         hvdxg.lock2_last_status = 0;
         hvdxg.lock2_last_offset = 0;
@@ -7741,6 +19961,34 @@ submithwqueue_done:
             ret = -EBUSY;
             break;
         }
+        if (tracked != NULL && tracked->cpu_va != 0) {
+            req.data = tracked->cpu_va;
+            tracked->lock_refcount++;
+            ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
+                  -EFAULT : 0;
+            if (ret != 0 && tracked->lock_refcount != 0)
+                tracked->lock_refcount--;
+            hvdxg.lock2_last_len = 0;
+            hvdxg.lock2_last_ret = ret;
+            hvdxg.lock2_last_user_va = req.data;
+            if (tracked->map_size == 0)
+                hvdxg.lock2_sysmem_count++;
+            else
+                hvdxg.lock2_cached_ref_count++;
+            hvdxg_note_lock2_history(0, ret, 0, req.device.v,
+                                     req.allocation.v, 0, req.data,
+                                     tracked->map_size);
+            if (hvdxg.lock2_diag_prints < 32) {
+                printf("hyperv-dxg: lock2 cached device=0x%x "
+                       "allocation=0x%x sysmem=%u user=0x%lx "
+                       "map_size=%lu ref=%u ret=%d\n",
+                       req.device.v, req.allocation.v,
+                       tracked->map_size == 0 ? 1 : 0, req.data,
+                       tracked->map_size, tracked->lock_refcount, ret);
+                hvdxg.lock2_diag_prints++;
+            }
+            break;
+        }
         memset(&lock, 0, sizeof(lock));
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(&lock.hdr,
@@ -7750,6 +19998,7 @@ submithwqueue_done:
         lock.args.data = 0;
         ret = hvdxg_send_sync_vgpu(&lock, sizeof(lock), &result,
                                    sizeof(result), &actual_len);
+        hvdxg.lock2_host_forward_count++;
         hvdxg.lock2_last_len = actual_len;
         hvdxg.lock2_last_ret = ret;
         if (actual_len >= sizeof(result.status))
@@ -7760,6 +20009,14 @@ submithwqueue_done:
             hvdxg_note_lock2_history(actual_len, ret,
                                      (uint32)hvdxg.lock2_last_status,
                                      req.device.v, req.allocation.v, 0, 0, 0);
+            if (hvdxg.lock2_diag_prints < 32) {
+                printf("hyperv-dxg: lock2 host_fail device=0x%x "
+                       "allocation=0x%x flags=0x%x status=0x%x "
+                       "ret=%d len=%u\n",
+                       req.device.v, req.allocation.v, req.flags.value,
+                       (uint32)hvdxg.lock2_last_status, ret, actual_len);
+                hvdxg.lock2_diag_prints++;
+            }
             break;
         }
         if (actual_len < sizeof(result)) {
@@ -7768,6 +20025,14 @@ submithwqueue_done:
             hvdxg_note_lock2_history(actual_len, ret,
                                      (uint32)hvdxg.lock2_last_status,
                                      req.device.v, req.allocation.v, 0, 0, 0);
+            if (hvdxg.lock2_diag_prints < 32) {
+                printf("hyperv-dxg: lock2 short_return device=0x%x "
+                       "allocation=0x%x status=0x%x len=%u need=%lu\n",
+                       req.device.v, req.allocation.v,
+                       (uint32)hvdxg.lock2_last_status, actual_len,
+                       (uint64)sizeof(result));
+                hvdxg.lock2_diag_prints++;
+            }
             break;
         }
         hvdxg.lock2_last_offset = result.cpu_visible_buffer_offset;
@@ -7787,14 +20052,10 @@ submithwqueue_done:
                 (tracked != NULL &&
                  (tracked->flags & HV_DXG_ALLOCATION_FLAG_CACHED)) ?
                 0 : HV_DXG_PTE_WRITE_THROUGH;
-            req.data = hvdxg_map_iospace_user(map_pa, map_size,
-                                              map_extra_flags);
-            if (req.data == 0 && hvdxg.iospace_set &&
-                result.cpu_visible_buffer_offset < hvdxg.iospace_size) {
-                map_pa = hvdxg.iospace_base + result.cpu_visible_buffer_offset;
-                req.data = hvdxg_map_iospace_user(map_pa, map_size,
-                                                  map_extra_flags);
-            }
+            req.data = hvdxg_map_iospace_user_canonical(
+                HV_DXG_FENCE_SOURCE_LOCK2, map_pa, map_size,
+                map_extra_flags, &canonical_pa, NULL, 1);
+            map_pa = canonical_pa;
             if (tracked != NULL && req.data != 0) {
                 mapped_size = PGROUNDUP((map_pa & (PGSIZE - 1)) +
                                         map_size);
@@ -7808,10 +20069,20 @@ submithwqueue_done:
         if (req.data == 0) {
             ret = -ENOMEM;
             hvdxg.lock2_last_ret = ret;
+            hvdxg.lock2_map_fail_count++;
             hvdxg_note_lock2_history(actual_len, ret,
                                      (uint32)hvdxg.lock2_last_status,
                                      req.device.v, req.allocation.v,
                                      hvdxg.lock2_last_offset, 0, map_size);
+            if (hvdxg.lock2_diag_prints < 32) {
+                printf("hyperv-dxg: lock2 map_fail device=0x%x "
+                       "allocation=0x%x status=0x%x offset=0x%lx "
+                       "map_pa=0x%lx map_size=%lu ret=%d\n",
+                       req.device.v, req.allocation.v,
+                       (uint32)hvdxg.lock2_last_status,
+                       hvdxg.lock2_last_offset, map_pa, map_size, ret);
+                hvdxg.lock2_diag_prints++;
+            }
             break;
         }
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
@@ -7822,6 +20093,17 @@ submithwqueue_done:
                                  req.device.v, req.allocation.v,
                                  hvdxg.lock2_last_offset,
                                  hvdxg.lock2_last_user_va, map_size);
+        if (hvdxg.lock2_diag_prints < 32) {
+            printf("hyperv-dxg: lock2 host device=0x%x allocation=0x%x "
+                   "flags=0x%x status=0x%x ret=%d len=%u offset=0x%lx "
+                   "map_pa=0x%lx map_size=%lu user=0x%lx ref=%u\n",
+                   req.device.v, req.allocation.v, req.flags.value,
+                   (uint32)hvdxg.lock2_last_status, ret, actual_len,
+                   hvdxg.lock2_last_offset, map_pa, map_size,
+                   hvdxg.lock2_last_user_va,
+                   tracked != NULL ? tracked->lock_refcount : 0);
+            hvdxg.lock2_diag_prints++;
+        }
         break;
     }
 
@@ -7840,6 +20122,7 @@ submithwqueue_done:
             ret = -EFAULT;
             break;
         }
+        hvdxg.unlock2_ioctl_count++;
         hvdxg.unlock2_last_allocation = req.allocation.v;
         hvdxg.unlock2_last_status = 0;
         if (req.device.v == 0 || req.allocation.v == 0) {
@@ -7854,20 +20137,24 @@ submithwqueue_done:
         }
         tracked = hvdxg_owner_find_allocation(owner, req.device.v, 0,
                                               req.allocation.v);
-        if (tracked == NULL || tracked->cpu_va == 0) {
-            ret = -EINVAL;
-            break;
-        }
-        if (tracked->lock_refcount > 0) {
+        if (tracked == NULL || tracked->cpu_va == 0)
+            hvdxg.unlock2_missing_tracking_count++;
+        if (tracked != NULL && tracked->lock_refcount > 0) {
             tracked->lock_refcount--;
             if (tracked->lock_refcount != 0)
                 skip_host_unlock = 1;
             else
                 (void)hvdxg_unmap_tracked_allocation(tracked);
         } else {
-            skip_host_unlock = 1;
+            /*
+             * WSL forwards LX_DXUNLOCK2 to the host even when userspace has
+             * already dropped the CPU mapping bookkeeping.  Keep local mmap
+             * cleanup best-effort, but do not hide the host-visible packet.
+             */
+            skip_host_unlock = 0;
         }
         if (skip_host_unlock) {
+            hvdxg.unlock2_cached_ref_count++;
             hvdxg.unlock2_last_len = 0;
             hvdxg.unlock2_last_ret = 0;
             break;
@@ -7880,6 +20167,7 @@ submithwqueue_done:
         unlock.args = req;
         ret = hvdxg_send_sync_vgpu(&unlock, sizeof(unlock), &status,
                                    sizeof(status), &actual_len);
+        hvdxg.unlock2_host_forward_count++;
         hvdxg.unlock2_last_len = actual_len;
         hvdxg.unlock2_last_ret = ret;
         if (actual_len >= sizeof(status))
@@ -7887,6 +20175,14 @@ submithwqueue_done:
         if (ret == 0 && actual_len >= sizeof(status))
             ret = hvdxg_ntstatus_to_errno(status);
         hvdxg.unlock2_last_ret = ret;
+        if (hvdxg.unlock2_diag_prints < 32) {
+            printf("hyperv-dxg: unlock2 host device=0x%x allocation=0x%x "
+                   "len=%u status=0x%x ret=%d forwarded=%u\n",
+                   req.device.v, req.allocation.v, actual_len,
+                   (uint32)hvdxg.unlock2_last_status, ret,
+                   hvdxg.unlock2_host_forward_count);
+            hvdxg.unlock2_diag_prints++;
+        }
         break;
     }
 
@@ -7894,8 +20190,11 @@ submithwqueue_done:
         struct d3dkmt_createsynchronizationobject2 req;
         struct hvdxg_command_createsyncobject create;
         struct hvdxg_command_createsyncobject_return result;
+        struct hvdxg_d3dkmthandle create_process;
         uint32 actual_len = 0;
         uint64 fence_kva = 0;
+        uint64 fence_pa = 0;
+        uint64 raw_fence_pa = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -7914,17 +20213,57 @@ submithwqueue_done:
         }
         memset(&create, 0, sizeof(create));
         memset(&result, 0, sizeof(result));
+        create_process = hvdxg_owner_bound_process_handle(owner);
+        hvdxg.syncobject_last_process = create_process.v;
+        hvdxg.syncobject_last_owner_process = 0;
+        hvdxg.syncobject_last_owner_generation = 0;
+        hvdxg.syncobject_last_cmd_len = sizeof(create);
+        hvdxg.syncobject_last_result_len = sizeof(result);
+        hvdxg.syncobject_last_result_sync_offset =
+            offsetof(struct hvdxg_command_createsyncobject_return,
+                     sync_object);
+        hvdxg.syncobject_last_result_global_offset =
+            offsetof(struct hvdxg_command_createsyncobject_return,
+                     global_sync_object);
+        hvdxg.syncobject_last_result_fence_gpu_offset =
+            offsetof(struct hvdxg_command_createsyncobject_return,
+                     fence_gpu_va);
+        hvdxg.syncobject_last_result_fence_pa_offset =
+            offsetof(struct hvdxg_command_createsyncobject_return,
+                     fence_storage_address);
+        hvdxg.syncobject_last_result_fence_off_offset =
+            offsetof(struct hvdxg_command_createsyncobject_return,
+                     fence_storage_offset);
+        hvdxg.syncobject_last_result_head_len = 0;
+        memset(hvdxg.syncobject_last_result_head, 0,
+               sizeof(hvdxg.syncobject_last_result_head));
+        hvdxg.syncobject_last_args_offset =
+            offsetof(struct hvdxg_command_createsyncobject, args);
+        hvdxg.syncobject_last_client_hint_offset =
+            offsetof(struct hvdxg_command_createsyncobject, client_hint);
+        hvdxg.syncobject_last_client_hint = 0;
+        hvdxg.syncobject_last_input_shared = req.info.shared_handle.v;
         hvdxg_command_vgpu_init_process(&create.hdr,
                                         HV_DXGK_VMBCOMMAND_CREATESYNCOBJECT,
-                                        hvdxg.dxg_process);
+                                        create_process);
         create.args = req;
         create.args.sync_object.v = 0;
         create.client_hint = 1;
+        hvdxg.syncobject_last_client_hint = create.client_hint;
         ret = hvdxg_send_sync_vgpu(&create, sizeof(create), &result,
                                    sizeof(result), &actual_len);
+        hvdxg_save_priv_head(hvdxg.syncobject_last_result_head,
+                             sizeof(hvdxg.syncobject_last_result_head),
+                             &hvdxg.syncobject_last_result_head_len,
+                             (const uint8 *)&result,
+                             actual_len < sizeof(result) ?
+                                 actual_len : sizeof(result));
         hvdxg.syncobject_last_len = actual_len;
         hvdxg.syncobject_last_ret = ret;
         hvdxg.syncobject_last_handle = result.sync_object.v;
+        hvdxg.syncobject_last_type = (uint32)req.info.type;
+        hvdxg.syncobject_last_flags = req.info.flags.value;
+        hvdxg.syncobject_last_global = result.global_sync_object.v;
         hvdxg.syncobject_last_fence_cpu = 0;
         hvdxg.syncobject_last_fence_gpu = result.fence_gpu_va;
         hvdxg.syncobject_last_fence_pa = result.fence_storage_address;
@@ -7939,11 +20278,18 @@ submithwqueue_done:
         if (req.info.flags.shared)
             req.info.shared_handle.v = result.global_sync_object.v;
         if (req.info.type == _D3DDDI_MONITORED_FENCE) {
+            raw_fence_pa = result.fence_storage_address;
             req.info.monitored_fence.fence_cpu_virtual_address =
-                hvdxg_map_iospace_user(result.fence_storage_address,
-                                       PGSIZE, 0);
-            fence_kva = hvdxg_map_iospace_kernel(result.fence_storage_address,
-                                                 PGSIZE);
+                hvdxg_map_iospace_user_canonical(
+                    HV_DXG_FENCE_SOURCE_SYNCOBJECT, raw_fence_pa,
+                    sizeof(uint64), 0, &fence_pa, NULL, 0);
+            fence_kva = hvdxg_map_iospace_kernel_canonical(
+                HV_DXG_FENCE_SOURCE_SYNCOBJECT, raw_fence_pa,
+                sizeof(uint64), fence_pa, 0);
+            hvdxg_note_fence_offset_candidate(HV_DXG_FENCE_SOURCE_SYNCOBJECT,
+                                              raw_fence_pa,
+                                              result.fence_storage_offset,
+                                              sizeof(uint64));
             hvdxg.syncobject_last_fence_cpu =
                 req.info.monitored_fence.fence_cpu_virtual_address;
             if (req.info.monitored_fence.fence_cpu_virtual_address == 0) {
@@ -7953,11 +20299,18 @@ submithwqueue_done:
             req.info.monitored_fence.fence_gpu_virtual_address =
                 result.fence_gpu_va;
         } else if (req.info.type == _D3DDDI_PERIODIC_MONITORED_FENCE) {
+            raw_fence_pa = result.fence_storage_address;
             req.info.periodic_monitored_fence.fence_cpu_virtual_address =
-                hvdxg_map_iospace_user(result.fence_storage_address,
-                                       PGSIZE, 0);
-            fence_kva = hvdxg_map_iospace_kernel(result.fence_storage_address,
-                                                 PGSIZE);
+                hvdxg_map_iospace_user_canonical(
+                    HV_DXG_FENCE_SOURCE_SYNCOBJECT, raw_fence_pa,
+                    sizeof(uint64), 0, &fence_pa, NULL, 0);
+            fence_kva = hvdxg_map_iospace_kernel_canonical(
+                HV_DXG_FENCE_SOURCE_SYNCOBJECT, raw_fence_pa,
+                sizeof(uint64), fence_pa, 0);
+            hvdxg_note_fence_offset_candidate(HV_DXG_FENCE_SOURCE_SYNCOBJECT,
+                                              raw_fence_pa,
+                                              result.fence_storage_offset,
+                                              sizeof(uint64));
             hvdxg.syncobject_last_fence_cpu =
                 req.info.periodic_monitored_fence.fence_cpu_virtual_address;
             if (req.info.periodic_monitored_fence.fence_cpu_virtual_address ==
@@ -7970,11 +20323,35 @@ submithwqueue_done:
         }
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
-        if (ret == 0 && owner != NULL)
+        if (ret == 0 && hvdxg.syncobject_last_fence_cpu != 0 &&
+            hvdxg.syncobject_last_fence_gpu != 0) {
+            hvdxg.syncobject_mapped_count++;
+            hvdxg.syncobject_mapped_len = actual_len;
+            hvdxg.syncobject_mapped_type = (uint32)req.info.type;
+            hvdxg.syncobject_mapped_flags = req.info.flags.value;
+            hvdxg.syncobject_mapped_fence_cpu =
+                hvdxg.syncobject_last_fence_cpu;
+            hvdxg.syncobject_mapped_fence_gpu =
+                hvdxg.syncobject_last_fence_gpu;
+        }
+        if (ret == 0 && owner != NULL) {
             hvdxg_track_sync(owner, req.device.v, req.sync_object.v,
                              req.info.type, req.info.flags.value,
                              result.global_sync_object.v,
-                             hvdxg.syncobject_last_fence_cpu, fence_kva);
+                             hvdxg.syncobject_last_fence_cpu, fence_kva, 0);
+            hvdxg.syncobject_last_owner_process =
+                hvdxg_owner_sync_owner_process(owner, req.sync_object.v);
+            hvdxg.syncobject_last_owner_generation =
+                hvdxg_owner_sync_owner_generation(owner, req.sync_object.v);
+        }
+        if (ret == 0 && hvdxg.sync_diag_prints < 64) {
+            printf("hyperv-dxg: create sync handle=0x%x device=0x%x "
+                   "type=%u flags=0x%x global=0x%x monitor=%u\n",
+                   req.sync_object.v, req.device.v, (uint32)req.info.type,
+                   req.info.flags.value, result.global_sync_object.v,
+                   hvdxg_sync_type_is_monitored(req.info.type));
+            hvdxg.sync_diag_prints++;
+        }
         break;
     }
 
@@ -8438,12 +20815,18 @@ submithwqueue_done:
         }
         if (ret != 0)
             break;
+        hvdxg_note_cpu_wait_state(owner, objects, fence_values,
+                                  req.object_count, 0,
+                                  req.async_event != 0, 0);
         if (hvdxg_wait_cpu_fences_already_satisfied(
                 owner, objects, fence_values, req.object_count,
                 req.flags.wait_any)) {
             hvdxg.syncwait_last_len = 0;
             hvdxg.syncwait_last_ret = 0;
             hvdxg.syncwait_last_status = 0;
+            hvdxg_note_cpu_wait_state(owner, objects, fence_values,
+                                      req.object_count, 0,
+                                      req.async_event != 0, 2);
             ret = 0;
             break;
         }
@@ -8469,17 +20852,31 @@ submithwqueue_done:
             ret = -ENOMEM;
             break;
         }
+        hvdxg_note_cpu_wait_state(owner, objects, fence_values,
+                                  req.object_count, event_id,
+                                  req.async_event != 0, 0);
         ret = hvdxg_send_waitsyncobjectfromcpu(&req, objects, fence_values,
                                                event_id, object_size,
                                                fence_size, &actual_len);
-        if (ret == 0 && req.async_event != 0)
+        if ((ret == 0 || ret == HV_DXG_STATUS_PENDING) &&
+            req.async_event != 0) {
             hvdxg_pump_events_ms(20);
-        if (ret == 0 && req.async_event == 0) {
-            ret = hvdxg_wait_host_event(event_id,
-                                        HV_DXG_HOST_EVENT_TIMEOUT_MS);
-            hvdxg.syncwait_last_ret = ret;
+            hvdxg_note_cpu_wait_state(owner, objects, fence_values,
+                                      req.object_count, event_id, 1, 5);
         }
-        if (ret != 0 || req.async_event == 0)
+        if ((ret == 0 || ret == HV_DXG_STATUS_PENDING) &&
+            req.async_event == 0) {
+            ret = hvdxg_wait_host_event_or_cpu_fence(
+                owner, objects, fence_values, req.object_count,
+                req.flags.wait_any, event_id, HV_DXG_HOST_EVENT_TIMEOUT_MS);
+            hvdxg.syncwait_last_ret = ret;
+        } else if (ret != 0 && ret != HV_DXG_STATUS_PENDING) {
+            hvdxg_note_cpu_wait_state(owner, objects, fence_values,
+                                      req.object_count, event_id,
+                                      req.async_event != 0, 4);
+        }
+        if ((ret != 0 && ret != HV_DXG_STATUS_PENDING) ||
+            req.async_event == 0)
             hvdxg_remove_host_event(event_id);
         break;
     }
@@ -8605,22 +21002,79 @@ submithwqueue_done:
             ret = -EINVAL;
             break;
         }
+        hvdxg.destroysync_last_handle = req.sync_object.v;
+        hvdxg.destroysync_last_device =
+            hvdxg_owner_sync_device(owner, req.sync_object.v);
+        hvdxg.destroysync_last_type =
+            hvdxg_owner_sync_type(owner, req.sync_object.v);
+        hvdxg.destroysync_last_flags =
+            hvdxg_owner_sync_flags(owner, req.sync_object.v);
+        hvdxg.destroysync_last_global =
+            hvdxg_owner_sync_global_shared(owner, req.sync_object.v);
+        hvdxg.destroysync_last_monitor_fence =
+            hvdxg_owner_sync_is_monitor_fence_handle(owner, req.sync_object.v);
+        hvdxg.destroysync_last_cmd_len = 0;
+        hvdxg.destroysync_last_wire_len = 0;
+        hvdxg.destroysync_last_ext = 0;
+        hvdxg.destroysync_last_ext_offset = 0;
         if (!hvdxg_owner_has_sync(owner, req.sync_object.v)) {
-            ret = -EPERM;
+            ret = -EINVAL;
+            hvdxg.destroysync_last_ret = ret;
+            hvdxg.destroysync_last_len = 0;
+            break;
+        }
+        if (hvdxg.destroysync_last_monitor_fence) {
+            /*
+             * WSL stores paging/hwqueue progress fences as
+             * HMGRENTRY_TYPE_MONITOREDFENCE, not DXGSYNCOBJECT.  The
+             * destroy-sync ioctl therefore rejects them locally and never
+             * sends DXGK_VMBCOMMAND_DESTROYSYNCOBJECT to the host.
+             */
+            ret = -EINVAL;
+            hvdxg.destroysync_last_ret = ret;
+            hvdxg.destroysync_last_len = 0;
             break;
         }
         memset(&destroy, 0, sizeof(destroy));
         memset(&status, 0, sizeof(status));
+        hvdxg.destroysync_last_cmd_len = sizeof(destroy);
         hvdxg_command_vm_init(&destroy.hdr,
                               HV_DXGK_VMBCOMMAND_DESTROYSYNCOBJECT);
-        destroy.hdr.process = hvdxg.dxg_process;
+        destroy.hdr.process = hvdxg_owner_bound_process_handle(owner);
         destroy.sync_object.v = req.sync_object.v;
+        if (hvdxg.sync_diag_prints < 64) {
+            printf("hyperv-dxg: destroy sync handle=0x%x process=0x%x "
+                   "device=0x%x type=%u flags=0x%x global=0x%x "
+                   "monitor=%u cmd_len=%u\n",
+                   req.sync_object.v, destroy.hdr.process.v,
+                   hvdxg.destroysync_last_device,
+                   hvdxg.destroysync_last_type,
+                   hvdxg.destroysync_last_flags,
+                   hvdxg.destroysync_last_global,
+                   hvdxg.destroysync_last_monitor_fence,
+                   hvdxg.destroysync_last_cmd_len);
+            hvdxg.sync_diag_prints++;
+        }
+        if (owner != NULL)
+            hvdxg_untrack_sync(owner, req.sync_object.v);
         ret = hvdxg_send_sync_global(&destroy, sizeof(destroy), &status,
                                      sizeof(status), &actual_len);
-        if (ret == 0 && actual_len >= sizeof(status))
+        hvdxg.destroysync_last_cmd_len = hvdxg.global_send_last_cmd_len;
+        hvdxg.destroysync_last_wire_len = hvdxg.global_send_last_wire_len;
+        hvdxg.destroysync_last_ext = hvdxg.global_send_last_ext;
+        hvdxg.destroysync_last_ext_offset =
+            hvdxg.global_send_last_ext_offset;
+        if (actual_len >= sizeof(status))
+            hvdxg.destroysync_last_status = status.v;
+        if (ret == 0 && actual_len == 0) {
+            ret = 0;
+        } else if (ret == 0 && actual_len < sizeof(status)) {
+            ret = -EOVERFLOW;
+        } else if (ret == 0 && actual_len >= sizeof(status)) {
             ret = hvdxg_ntstatus_to_errno(status);
-        if (ret == 0 && owner != NULL)
-            hvdxg_untrack_sync(owner, req.sync_object.v);
+        }
+        hvdxg.destroysync_last_len = actual_len;
+        hvdxg.destroysync_last_ret = ret;
         break;
     }
 
@@ -8634,6 +21088,7 @@ submithwqueue_done:
                              sizeof(struct hvdxg_command_createcontextvirtual) +
                              1;
         struct hvdxg_ntstatus short_status;
+        struct hvdxg_d3dkmthandle create_process;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -8662,9 +21117,10 @@ submithwqueue_done:
         }
         memset(command_buf, 0, command_len);
         create = (struct hvdxg_command_createcontextvirtual *)command_buf;
+        create_process = hvdxg_owner_bound_process_handle(owner);
         hvdxg_command_vgpu_init_process(&create->hdr,
                                         HV_DXGK_VMBCOMMAND_CREATECONTEXTVIRTUAL,
-                                        hvdxg.dxg_process);
+                                        create_process);
         create->device.v = req.device.v;
         create->node_ordinal = req.node_ordinal;
         create->engine_affinity = req.engine_affinity;
@@ -8738,10 +21194,15 @@ submithwqueue_done:
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
         if (ret == 0 && owner != NULL) {
-            if (hvdxg_track_u32_grow(&owner->contexts,
+            if (hvdxg_track_object(owner, HV_DXG_OBJECT_CONTEXT,
+                                   req.context.v, req.device.v,
+                                   req.device.v) != 0 ||
+                hvdxg_track_u32_grow(&owner->contexts,
                                       &owner->context_count,
                                       &owner->context_capacity,
                                       req.context.v) != 0) {
+                hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT,
+                                     req.context.v);
                 (void)hvdxg_destroy_context_host(req.context.v);
                 ret = -ENOMEM;
             }
@@ -8761,6 +21222,8 @@ createcontext_done:
         uint32 private_max = HV_DXG_VM_BUS_PACKET_MAX -
                              sizeof(struct hvdxg_command_createhwqueue) + 1;
         uint64 fence_kva = 0;
+        uint64 fence_pa = 0;
+        struct hvdxg_d3dkmthandle create_process;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -8789,9 +21252,10 @@ createcontext_done:
         }
         memset(command_buf, 0, command_len);
         create = (struct hvdxg_command_createhwqueue *)command_buf;
+        create_process = hvdxg_owner_bound_process_handle(owner);
         hvdxg_command_vgpu_init_process(&create->hdr,
                                         HV_DXGK_VMBCOMMAND_CREATEHWQUEUE,
-                                        hvdxg.dxg_process);
+                                        create_process);
         create->context.v = req.context.v;
         create->flags = req.flags;
         create->priv_drv_data_size = req.priv_drv_data_size;
@@ -8836,11 +21300,14 @@ createcontext_done:
             create->hwqueue_progress_fence_gpuva;
         req.queue_progress_fence_cpu_va =
             create->hwqueue_progress_fence_cpuva != 0 ?
-            hvdxg_map_iospace_user(create->hwqueue_progress_fence_cpuva,
-                                   PGSIZE, 0) : 0;
+            hvdxg_map_iospace_user_canonical(
+                HV_DXG_FENCE_SOURCE_HWQUEUE,
+                create->hwqueue_progress_fence_cpuva, PGSIZE,
+                0, &fence_pa, NULL, 1) : 0;
         if (create->hwqueue_progress_fence_cpuva != 0)
-            fence_kva = hvdxg_map_iospace_kernel(
-                create->hwqueue_progress_fence_cpuva, PGSIZE);
+            fence_kva = hvdxg_map_iospace_kernel_canonical(
+                HV_DXG_FENCE_SOURCE_HWQUEUE,
+                create->hwqueue_progress_fence_cpuva, PGSIZE, fence_pa, 1);
         hvdxg.createhwqueue_last_queue = req.queue.v;
         hvdxg.createhwqueue_last_fence = req.queue_progress_fence.v;
         hvdxg.createhwqueue_last_fence_cpu = req.queue_progress_fence_cpu_va;
@@ -8869,12 +21336,15 @@ createcontext_done:
               -EFAULT : 0;
         hvdxg.createhwqueue_last_ret = ret;
         if (ret == 0 && owner != NULL) {
-            hvdxg_track_hwqueue(owner, req.queue.v,
+            uint32 device = hvdxg_owner_object_device(
+                owner, HV_DXG_OBJECT_CONTEXT, req.context.v);
+
+            hvdxg_track_hwqueue(owner, req.context.v, device, req.queue.v,
                                 req.queue_progress_fence.v);
-            hvdxg_track_sync(owner, 0, req.queue_progress_fence.v,
+            hvdxg_track_sync(owner, device, req.queue_progress_fence.v,
                              _D3DDDI_MONITORED_FENCE,
                              0, req.queue_progress_fence.v,
-                             req.queue_progress_fence_cpu_va, fence_kva);
+                             req.queue_progress_fence_cpu_va, fence_kva, 1);
         }
 createhwqueue_done:
         if (command_buf)
@@ -8911,6 +21381,8 @@ createhwqueue_done:
         destroy.hwqueue.v = req.queue.v;
         ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                    sizeof(status), &actual_len);
+        if (ret == 0 && actual_len < sizeof(status))
+            ret = -EOVERFLOW;
         if (ret == 0 && actual_len >= sizeof(status))
             ret = hvdxg_ntstatus_to_errno(status);
         hvdxg.destroyhwqueue_last_len = actual_len;
@@ -8952,11 +21424,20 @@ createhwqueue_done:
         destroy.context.v = req.context.v;
         ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                    sizeof(status), &actual_len);
+        if (actual_len >= sizeof(status))
+            hvdxg.destroycontext_last_status = status.v;
+        if (ret == 0 && actual_len < sizeof(status))
+            ret = -EOVERFLOW;
         if (ret == 0 && actual_len >= sizeof(status))
             ret = hvdxg_ntstatus_to_errno(status);
-        if (ret == 0 && owner != NULL)
+        hvdxg.destroycontext_last_len = actual_len;
+        hvdxg.destroycontext_last_ret = ret;
+        if (ret == 0 && owner != NULL) {
+            hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT,
+                                 req.context.v);
             hvdxg_untrack_u32(owner->contexts, &owner->context_count,
                               req.context.v);
+        }
         break;
     }
 
@@ -8969,6 +21450,7 @@ createhwqueue_done:
             (struct hvdxg_command_escape *)command_buf;
         uint32 command_len;
         uint32 actual_len = 0;
+        uint32 host_adapter;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -8982,7 +21464,8 @@ createhwqueue_done:
         hvdxg.escape_last_type = (uint32)req.type;
         hvdxg.escape_last_flags = req.flags.value;
         hvdxg.escape_last_size = req.priv_drv_data_size;
-        if (req.adapter.v != hvdxg.host_adapter_handle ||
+        if (hvdxg_resolve_adapter_handle(owner, req.adapter.v,
+                                         &host_adapter) != 0 ||
             req.priv_drv_data_size > HV_DXG_IOCTL_PRIVATE_MAX ||
             (req.priv_drv_data_size != 0 && req.priv_drv_data == 0)) {
             ret = -EINVAL;
@@ -8993,7 +21476,7 @@ createhwqueue_done:
         memset(result_buf, 0, sizeof(result_buf));
         hvdxg_command_vgpu_init_process(
             &escape->hdr, HV_DXGK_VMBCOMMAND_ESCAPE, hvdxg.dxg_process);
-        escape->adapter.v = req.adapter.v;
+        escape->adapter.v = host_adapter;
         escape->device.v = req.device.v;
         escape->type = req.type;
         escape->flags = req.flags;
@@ -9028,11 +21511,20 @@ createhwqueue_done:
         uint32 host_nt_handle = 0;
         uint32 device = 0;
         uint32 kind = 0;
+        uint32 current_process = 0;
+        uint32 current_generation = 0;
+        uint32 process = 0;
+        uint32 host_object = 0;
+        uint32 fallback_object = 0;
+        uint32 used_host_object = 0;
         int fd = -1;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
             break;
+        current_process = hvdxg_owner_bound_process_handle(owner).v;
+        current_generation = hvdxg_open_process_generation(owner);
+        process = current_process;
         memset(&req, 0, sizeof(req));
         memset(&object, 0, sizeof(object));
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
@@ -9044,6 +21536,162 @@ createhwqueue_done:
         hvdxg.sharedhandle_last_object = 0;
         hvdxg.sharedhandle_last_nt_handle = 0;
         hvdxg.sharedhandle_last_count = req.object_count;
+        hvdxg.sharedhandle_last_global_share = 0;
+        hvdxg.sharedhandle_last_runtime_d3d12_flags = 0;
+        hvdxg.sharedhandle_last_kind = 0;
+        hvdxg.sharedhandle_last_fops_kind = 0;
+        hvdxg.sharedhandle_last_raw_device = 0;
+        hvdxg.sharedhandle_last_raw_object = 0;
+        hvdxg.sharedhandle_last_host_device = 0;
+        hvdxg.sharedhandle_last_host_device_found = 0;
+        hvdxg.sharedhandle_last_host_object = 0;
+        hvdxg.sharedhandle_last_object_found = 0;
+        hvdxg.sharedhandle_last_raw_resource_found = 0;
+        hvdxg.sharedhandle_last_raw_allocation_found = 0;
+        hvdxg.sharedhandle_last_raw_sync_found = 0;
+        hvdxg.sharedhandle_last_parent = 0;
+        hvdxg.sharedhandle_last_current_process = current_process;
+        hvdxg.sharedhandle_last_current_generation = current_generation;
+        hvdxg.sharedhandle_last_creator_process = 0;
+        hvdxg.sharedhandle_last_creator_generation = 0;
+        hvdxg.sharedhandle_last_owner_process = 0;
+        hvdxg.sharedhandle_last_owner_generation = 0;
+        hvdxg.sharedhandle_last_owner_refs = 0;
+        hvdxg.sharedhandle_last_owner_used = 0;
+        hvdxg.sharedhandle_last_object_type = HV_DXG_OBJECT_NONE;
+        hvdxg.sharedhandle_last_object_device = 0;
+        hvdxg.sharedhandle_last_allocation = 0;
+        hvdxg.sharedhandle_last_allocation_found = 0;
+        hvdxg.sharedhandle_last_allocation_owner_process = 0;
+        hvdxg.sharedhandle_last_allocation_owner_generation = 0;
+        hvdxg.sharedhandle_last_allocation_owner_refs = 0;
+        hvdxg.sharedhandle_last_map_va = 0;
+        hvdxg.sharedhandle_last_map_pages = 0;
+        hvdxg.sharedhandle_last_map_fence = 0;
+        hvdxg.sharedhandle_last_map_ret = 0;
+        hvdxg.sharedhandle_last_map_status = 0;
+        hvdxg.sharedhandle_last_resident_paging_queue = 0;
+        hvdxg.sharedhandle_last_resident_sync = 0;
+        hvdxg.sharedhandle_last_resident_fence = 0;
+        hvdxg.sharedhandle_last_resident_current = 0;
+        hvdxg.sharedhandle_last_resident_wait_result = 0;
+        hvdxg.sharedhandle_last_resident_wait_ret = 0;
+        hvdxg.sharedhandle_last_resident_missing = 0;
+        hvdxg.sharedhandle_last_resident_enforced = 0;
+        hvdxg.sharedhandle_last_create_flags = 0;
+        hvdxg.sharedhandle_last_alloc_count = 0;
+        hvdxg.sharedhandle_last_sealed = 0;
+        hvdxg.sharedhandle_last_sync_type = 0;
+        hvdxg.sharedhandle_last_sync_flags = 0;
+        hvdxg.sharedhandle_last_sync_global = 0;
+        hvdxg.sharedhandle_last_sync_monitor_fence = 0;
+        hvdxg.sharedhandle_last_sync_fence_cpu = 0;
+        hvdxg.sharedhandle_last_sync_fence_kva = 0;
+        hvdxg.sharedsync_export_fd = 0;
+        hvdxg.sharedsync_export_ret = 0;
+        hvdxg.sharedsync_export_cloexec = 0;
+        hvdxg.sharedsync_export_fops_kind = 0;
+        hvdxg.sharedsync_export_fd_kind = 0;
+        hvdxg.sharedsync_export_device = 0;
+        hvdxg.sharedsync_export_host_device = 0;
+        hvdxg.sharedsync_export_object = 0;
+        hvdxg.sharedsync_export_host_object = 0;
+        hvdxg.sharedsync_export_sync_type = 0;
+        hvdxg.sharedsync_export_sync_flags = 0;
+        hvdxg.sharedsync_export_monitor_fence = 0;
+        hvdxg.sharedsync_export_global_share = 0;
+        hvdxg.sharedsync_export_global_zero = 0;
+        hvdxg.sharedsync_export_host_shared_handle = 0;
+        hvdxg.sharedsync_export_host_nt_handle = 0;
+        hvdxg.sharedsync_export_nt_refs = 0;
+        hvdxg.sharedsync_export_shared_owner_object = 0;
+        hvdxg.sharedsync_export_cache_process = 0;
+        hvdxg.sharedsync_export_owner_process = 0;
+        hvdxg.sharedsync_export_owner_generation = 0;
+        hvdxg.sharedsync_export_owner_refs = 0;
+        hvdxg.shareobjects_last_desired_access = req.desired_access;
+        hvdxg.shareobjects_last_object_attr = req.object_attr;
+        hvdxg.shareobjects_last_attr_len = 0;
+        hvdxg.shareobjects_last_attr_ret = 0;
+        memset(hvdxg.shareobjects_last_attr_head, 0,
+               sizeof(hvdxg.shareobjects_last_attr_head));
+        if (req.object_attr != 0) {
+            hvdxg.shareobjects_last_attr_len =
+                sizeof(hvdxg.shareobjects_last_attr_head);
+            if (either_copyin(hvdxg.shareobjects_last_attr_head, 1,
+                              req.object_attr,
+                              sizeof(hvdxg.shareobjects_last_attr_head)) < 0)
+                hvdxg.shareobjects_last_attr_ret = -EFAULT;
+        }
+        hvdxg.sharedresource_owner_exists = 0;
+        hvdxg.sharedresource_owner_cached = 0;
+        hvdxg.sharedresource_owner_reused = 0;
+        hvdxg.sharedresource_owner_nt = 0;
+        hvdxg.sharedresource_owner_refs = 0;
+        hvdxg.sharedresource_owner_sealed = 0;
+        hvdxg.sharedresource_owner_object = 0;
+        hvdxg.sharedresource_owner_process = 0;
+        hvdxg.sharedresource_open_global = 0;
+        hvdxg.sharedresource_pre_nt_sealable = 0;
+        hvdxg.sharedresource_pre_nt_seal_ret = 0;
+        hvdxg.sharedresource_pre_nt_seal_applied = 0;
+        hvdxg.sharedresource_pre_nt_seal_before = 0;
+        hvdxg.sharedresource_pre_nt_seal_after = 0;
+        hvdxg.sharedresource_pre_nt_seal_actual_ret = 0;
+        hvdxg.sharedresource_nt_resource_host = 0;
+        hvdxg.sharedresource_nt_alloc_host = 0;
+        hvdxg.sharedresource_nt_resource_flags = 0;
+        hvdxg.sharedresource_nt_alloc_flags = 0;
+        hvdxg.sharedresource_nt_alloc_in_hash = 0;
+        hvdxg.sharedresource_nt_alloc_out_hash = 0;
+        hvdxg.sharedresource_nt_alloc_size = 0;
+        hvdxg.sharedresource_nt_meta_before = 0;
+        hvdxg.sharedresource_nt_meta_after = 0;
+        hvdxg.sharedresource_nt_seal_before = 0;
+        hvdxg.sharedresource_nt_seal_after = 0;
+        hvdxg.sharedresource_nt_host_seal_before = 0;
+        hvdxg.sharedresource_nt_host_seal_after = 0;
+        hvdxg_note_shared_resource_metadata(NULL);
+        hvdxg_reset_shared_resource_record();
+        hvdxg.shareobject_last_len = 0;
+        hvdxg.shareobject_last_cmd_len = 0;
+        hvdxg.shareobject_last_wire_len = 0;
+        hvdxg.shareobject_last_ext = 0;
+        hvdxg.shareobject_last_ext_offset = 0;
+        hvdxg.shareobject_last_device_offset = 0;
+        hvdxg.shareobject_last_object_offset = 0;
+        hvdxg.shareobject_last_result_len = 0;
+        hvdxg.shareobject_last_head_len = 0;
+        memset(hvdxg.shareobject_last_head, 0,
+               sizeof(hvdxg.shareobject_last_head));
+        hvdxg.shareobject_last_completion_type = 0;
+        hvdxg.shareobject_last_completion_len = 0;
+        memset(hvdxg.shareobject_last_completion_prefix, 0,
+               sizeof(hvdxg.shareobject_last_completion_prefix));
+        hvdxg.shareobject_last_ret = 0;
+        hvdxg.shareobject_last_status = 0;
+        hvdxg.shareobject_last_process = process;
+        hvdxg.shareobject_last_device = 0;
+        hvdxg.shareobject_last_object = 0;
+        hvdxg.shareobject_last_reserved = 0;
+        hvdxg.shareobject_last_nt_handle = 0;
+        hvdxg.shareobject_diag_attempted = 0;
+        hvdxg.shareobject_diag_valid_nt = 0;
+        hvdxg.shareobject_diag_kind = 0;
+        hvdxg.shareobject_diag_reason = 0;
+        hvdxg.ntshared_obj_found = 0;
+        hvdxg.ntshared_obj_exact = 0;
+        hvdxg.ntshared_obj_local = 0;
+        hvdxg.ntshared_obj_host = 0;
+        hvdxg.ntshared_obj_type = HV_DXG_OBJECT_NONE;
+        hvdxg.ntshared_obj_parent = 0;
+        hvdxg.ntshared_obj_device = 0;
+        hvdxg.ntshared_obj_owner_process = 0;
+        hvdxg.ntshared_obj_owner_generation = 0;
+        hvdxg.ntshared_obj_generation = 0;
+        hvdxg.ntshared_obj_stale = 0;
+        hvdxg.ntshared_obj_destroyed = 0;
+        hvdxg_reset_ntshared_runtime_diag();
         if (req.object_count != 1 || req.objects == 0 ||
             req.shared_handle == 0) {
             ret = -EINVAL;
@@ -9056,6 +21704,16 @@ createhwqueue_done:
             break;
         }
         hvdxg.sharedhandle_last_object = object.v;
+        hvdxg.sharedhandle_last_raw_object = object.v;
+        hvdxg.sharedhandle_last_raw_resource_found =
+            hvdxg_owner_find_object(owner, HV_DXG_OBJECT_RESOURCE,
+                                    object.v) != NULL ? 1 : 0;
+        hvdxg.sharedhandle_last_raw_allocation_found =
+            hvdxg_owner_find_object(owner, HV_DXG_OBJECT_ALLOCATION,
+                                    object.v) != NULL ? 1 : 0;
+        hvdxg.sharedhandle_last_raw_sync_found =
+            hvdxg_owner_find_object(owner, HV_DXG_OBJECT_SYNC,
+                                    object.v) != NULL ? 1 : 0;
         if (object.v == 0) {
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
@@ -9063,63 +21721,471 @@ createhwqueue_done:
         }
         resource = hvdxg_owner_find_resource(owner, 0, object.v);
         if (resource != NULL) {
-            if (!resource->create_shared ||
-                !resource->nt_security_sharing) {
+            hvdxg.sharedhandle_last_host_object =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_RESOURCE, object.v,
+                    &hvdxg.sharedhandle_last_parent);
+            hvdxg.sharedhandle_last_object_found =
+                hvdxg.sharedhandle_last_host_object != 0 ? 1 : 0;
+            hvdxg.sharedhandle_last_object_type =
+                HV_DXG_OBJECT_RESOURCE;
+            hvdxg.sharedhandle_last_object_device =
+                hvdxg_owner_object_device(owner, HV_DXG_OBJECT_RESOURCE,
+                                          object.v);
+            if (hvdxg.sharedhandle_last_host_object == 0) {
                 ret = -EINVAL;
+                hvdxg.sharedhandle_last_ret = ret;
+                break;
+            }
+            ret = hvdxg_prepare_resource_nt_metadata(owner, resource);
+            if (ret != 0) {
                 hvdxg.sharedhandle_last_ret = ret;
                 break;
             }
             kind = HV_DXG_SHARED_OBJECT_RESOURCE;
             device = resource->device;
+            hvdxg.sharedhandle_last_host_device =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_DEVICE, resource->device, NULL);
+            hvdxg.sharedhandle_last_host_device_found =
+                hvdxg.sharedhandle_last_host_device != 0 ? 1 : 0;
+            if (hvdxg.sharedhandle_last_host_device == 0)
+                hvdxg.sharedhandle_last_host_device = resource->device;
+            hvdxg.sharedhandle_last_device = device;
+            hvdxg.sharedhandle_last_global_share = resource->global_share;
+            hvdxg.sharedresource_owner_exists =
+                resource->shared_metadata_created;
+            hvdxg.sharedresource_owner_cached =
+                resource->host_shared_handle_nt != 0 ? 1 : 0;
+            hvdxg.sharedresource_owner_nt =
+                resource->host_shared_handle_nt;
+            hvdxg.sharedresource_owner_refs = resource->host_shared_refs;
+            hvdxg.sharedresource_owner_sealed =
+                resource->host_shared_sealed;
+            hvdxg.sharedresource_owner_object =
+                resource->host_shared_object;
+            hvdxg.sharedresource_owner_process =
+                resource->host_shared_process;
+            hvdxg_note_shared_resource_metadata(resource);
+            hvdxg.sharedhandle_last_runtime_d3d12_flags =
+                resource->runtime_d3d12_flags;
+            hvdxg.sharedhandle_last_create_flags =
+                resource->create_flags_value;
+            hvdxg.sharedhandle_last_alloc_count =
+                resource->allocation_count;
+            if (resource->allocation_count != 0)
+                hvdxg.sharedhandle_last_allocation =
+                    resource->allocation_handles[0];
+            {
+                struct hvdxg_tracked_allocation *a = NULL;
+
+                if (hvdxg.sharedhandle_last_allocation != 0)
+                    a = hvdxg_owner_find_allocation(
+                        owner, resource->device, resource->resource,
+                        hvdxg.sharedhandle_last_allocation);
+                if (a == NULL) {
+                    hvdxg.sharedhandle_last_allocation =
+                        hvdxg_owner_first_allocation(
+                            owner, resource->device, resource->resource,
+                            &hvdxg.sharedhandle_last_allocation_found);
+                    if (hvdxg.sharedhandle_last_allocation != 0)
+                        a = hvdxg_owner_find_allocation(
+                            owner, resource->device, resource->resource,
+                            hvdxg.sharedhandle_last_allocation);
+                }
+
+                if (a != NULL) {
+                    hvdxg.sharedhandle_last_allocation_found = 1;
+                    if (a->owner_process == 0) {
+                        a->owner_process = resource->owner_process;
+                        a->owner_generation =
+                            resource->owner_generation;
+                        a->owner_refs = resource->owner_refs;
+                    }
+                    hvdxg.sharedhandle_last_allocation_owner_process =
+                        a->owner_process;
+                    hvdxg.sharedhandle_last_allocation_owner_generation =
+                        a->owner_generation;
+                    hvdxg.sharedhandle_last_allocation_owner_refs =
+                        a->owner_refs;
+                    hvdxg.allocation_last_owner_process =
+                        a->owner_process;
+                    hvdxg.allocation_last_owner_generation =
+                        a->owner_generation;
+                    ret = hvdxg_prepare_allocation_for_share(
+                        owner, resource, a);
+                    if (ret != 0)
+                        hvdxg.sharedhandle_last_ret = ret;
+                }
+            }
+            hvdxg.sharedresource_pre_nt_seal_ret =
+                resource->shared_metadata_created &&
+                hvdxg.sharedhandle_last_host_object != 0 ? 0 : -EINVAL;
+            hvdxg.sharedresource_pre_nt_sealable =
+                hvdxg.sharedresource_pre_nt_seal_ret == 0 ? 1 : 0;
+            if (ret != 0)
+                break;
+            hvdxg.sharedresource_pre_nt_seal_before = resource->sealed;
+            hvdxg.sharedresource_pre_nt_seal_applied = 0;
+            hvdxg.sharedresource_pre_nt_seal_actual_ret = 0;
+            hvdxg.sharedresource_pre_nt_seal_actual_ret =
+                hvdxg.sharedresource_pre_nt_seal_ret;
+            hvdxg.sharedresource_pre_nt_seal_after = resource->sealed;
+            if (resource->existing_sysmem)
+                hvdxg_note_existing_sysmem_share(resource, 2);
+            hvdxg.sharedhandle_last_owner_process =
+                resource->owner_process;
+            hvdxg.sharedhandle_last_owner_generation =
+                resource->owner_generation;
+            hvdxg.sharedhandle_last_owner_refs = resource->owner_refs;
+            hvdxg.sharedhandle_last_creator_process =
+                resource->owner_process;
+            hvdxg.sharedhandle_last_creator_generation =
+                resource->owner_generation;
+            hvdxg.sharedhandle_last_sealed = resource->sealed;
         } else if (hvdxg_owner_has_sync(owner, object.v)) {
             uint32 sync_flags = hvdxg_owner_sync_flags(owner, object.v);
 
-            if ((sync_flags & 0x3U) != 0x3U) {
+            hvdxg.sharedhandle_last_sync_type =
+                hvdxg_owner_sync_type(owner, object.v);
+            hvdxg.sharedhandle_last_sync_flags = sync_flags;
+            hvdxg.sharedhandle_last_sync_global =
+                hvdxg_owner_sync_global_shared(owner, object.v);
+            hvdxg.sharedhandle_last_sync_monitor_fence =
+                hvdxg_owner_sync_is_monitor_fence_handle(owner, object.v);
+            hvdxg.sharedhandle_last_sync_fence_cpu =
+                hvdxg_owner_sync_fence_cpu_va(owner, object.v);
+            hvdxg.sharedhandle_last_sync_fence_kva =
+                hvdxg_owner_sync_fence_kva(owner, object.v);
+            hvdxg.sharedhandle_last_host_object =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_SYNC, object.v,
+                    &hvdxg.sharedhandle_last_parent);
+            hvdxg.sharedhandle_last_object_found =
+                hvdxg.sharedhandle_last_host_object != 0 ? 1 : 0;
+            hvdxg.sharedhandle_last_object_type = HV_DXG_OBJECT_SYNC;
+            hvdxg.sharedhandle_last_object_device =
+                hvdxg_owner_object_device(owner, HV_DXG_OBJECT_SYNC,
+                                          object.v);
+            if ((sync_flags & 0x1U) == 0) {
                 ret = -EINVAL;
                 hvdxg.sharedhandle_last_ret = ret;
                 break;
             }
             kind = HV_DXG_SHARED_OBJECT_SYNC;
             device = hvdxg_owner_sync_device(owner, object.v);
+            hvdxg.sharedhandle_last_host_device =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_DEVICE, device, NULL);
+            hvdxg.sharedhandle_last_host_device_found =
+                hvdxg.sharedhandle_last_host_device != 0 ? 1 : 0;
+            if (hvdxg.sharedhandle_last_host_device == 0)
+                hvdxg.sharedhandle_last_host_device = device;
+            hvdxg.sharedhandle_last_device = device;
+            hvdxg.sharedhandle_last_global_share =
+                hvdxg_owner_sync_global_shared(owner, object.v);
+            fallback_object = hvdxg.sharedhandle_last_global_share;
+            hvdxg.sharedhandle_last_owner_process =
+                hvdxg_owner_sync_owner_process(owner, object.v);
+            hvdxg.sharedhandle_last_owner_generation =
+                hvdxg_owner_sync_owner_generation(owner, object.v);
+            hvdxg.sharedhandle_last_owner_refs =
+                hvdxg_owner_sync_owner_refs(owner, object.v);
+            hvdxg.sharedhandle_last_creator_process =
+                hvdxg.sharedhandle_last_owner_process;
+            hvdxg.sharedhandle_last_creator_generation =
+                hvdxg.sharedhandle_last_owner_generation;
+            hvdxg.sharedsync_export_ret = -EINPROGRESS;
+            hvdxg.sharedsync_export_fd_kind = HV_DXG_SHARED_OBJECT_SYNC;
+            hvdxg.sharedsync_export_device = device;
+            hvdxg.sharedsync_export_host_device =
+                hvdxg.sharedhandle_last_host_device;
+            hvdxg.sharedsync_export_object = object.v;
+            hvdxg.sharedsync_export_host_object =
+                hvdxg.sharedhandle_last_host_object;
+            hvdxg.sharedsync_export_sync_type =
+                hvdxg.sharedhandle_last_sync_type;
+            hvdxg.sharedsync_export_sync_flags = sync_flags;
+            hvdxg.sharedsync_export_monitor_fence =
+                hvdxg.sharedhandle_last_sync_monitor_fence;
+            hvdxg.sharedsync_export_global_share =
+                hvdxg.sharedhandle_last_sync_global;
+            hvdxg.sharedsync_export_global_zero =
+                hvdxg.sharedhandle_last_sync_global == 0 ? 1 : 0;
+            hvdxg.sharedsync_export_host_shared_handle =
+                hvdxg.sharedhandle_last_sync_global;
+            hvdxg.sharedsync_export_shared_owner_object =
+                hvdxg.sharedhandle_last_host_object;
+            hvdxg.sharedsync_export_owner_process =
+                hvdxg.sharedhandle_last_owner_process;
+            hvdxg.sharedsync_export_owner_generation =
+                hvdxg.sharedhandle_last_owner_generation;
+            hvdxg.sharedsync_export_owner_refs =
+                hvdxg.sharedhandle_last_owner_refs;
         } else {
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
             break;
         }
+        hvdxg.sharedhandle_last_kind = kind;
         if (device == 0) {
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
             break;
         }
-        ret = hvdxg_create_nt_shared_object(object.v, &host_nt_handle);
-        if (ret != 0 && kind == HV_DXG_SHARED_OBJECT_RESOURCE) {
-            uint64 vail_nt_handle = 0;
-            uint32 share_len = 0;
-            int32 share_status = 0;
+        process = current_process;
+        hvdxg.sharedhandle_last_owner_used = 0;
+        host_object = hvdxg.sharedhandle_last_host_object != 0 ?
+                      hvdxg.sharedhandle_last_host_object : object.v;
+        hvdxg.sharedhandle_last_device = device;
+        hvdxg.sharedhandle_last_object = host_object;
+        if (resource != NULL) {
+            uint32 cache_object =
+                resource->host_shared_handle_nt != 0 &&
+                resource->host_shared_object != 0 ?
+                resource->host_shared_object : host_object;
 
-            ret = hvdxg_share_object_with_host(device, object.v, 0,
-                                               &vail_nt_handle, &share_len,
-                                               &share_status);
-            hvdxg.shareobject_last_len = share_len;
-            hvdxg.shareobject_last_ret = ret;
-            hvdxg.shareobject_last_status = share_status;
-            hvdxg.shareobject_last_device = device;
-            hvdxg.shareobject_last_object = object.v;
-            hvdxg.shareobject_last_nt_handle = vail_nt_handle;
-            if (ret == 0 && vail_nt_handle != 0 &&
-                vail_nt_handle <= 0xffffffffULL) {
-                host_nt_handle = (uint32)vail_nt_handle;
-            } else if (ret == 0) {
-                ret = -EOVERFLOW;
+            resource->host_shared_process = process;
+            resource->host_shared_object = cache_object;
+            if (resource->host_shared_refs == 0)
+                resource->host_shared_refs = 1;
+            if (resource->sealed)
+                resource->host_shared_sealed = resource->sealed;
+            if (hvdxg_ntshared_cache_get(kind, process, cache_object,
+                                         &host_nt_handle)) {
+                host_object = cache_object;
+                resource->host_shared_handle_nt = host_nt_handle;
+                resource->host_shared_process = process;
+                resource->host_shared_object = host_object;
+                resource->host_shared_refs = hvdxg.ntshared_cache_last_refs;
+                hvdxg.sharedresource_owner_cached = 1;
+                hvdxg.sharedresource_owner_reused = 1;
+                ret = 0;
+            } else {
+                struct hvdxg_tracked_allocation *a = NULL;
+                struct hvdxg_object_entry *res_entry;
+                struct hvdxg_object_entry *alloc_entry = NULL;
+
+                resource->host_shared_process = process;
+                resource->host_shared_object = host_object;
+                if (resource->host_shared_refs == 0)
+                    resource->host_shared_refs = 1;
+                resource->host_shared_sealed = resource->sealed;
+                if (hvdxg.sharedhandle_last_allocation != 0)
+                    a = hvdxg_owner_find_allocation(
+                        owner, resource->device, resource->resource,
+                        hvdxg.sharedhandle_last_allocation);
+                res_entry = hvdxg_owner_find_object(
+                    owner, HV_DXG_OBJECT_RESOURCE, resource->resource);
+                if (hvdxg.sharedhandle_last_allocation != 0)
+                    alloc_entry = hvdxg_owner_find_object(
+                        owner, HV_DXG_OBJECT_ALLOCATION,
+                        hvdxg.sharedhandle_last_allocation);
+
+                hvdxg_note_ntshared_object_entry(owner, process, host_object);
+                hvdxg.ntshared_obj_owner_process =
+                    resource->owner_process;
+                hvdxg.ntshared_obj_owner_generation =
+                    resource->owner_generation;
+                hvdxg.sharedresource_nt_resource_host =
+                    res_entry != NULL ?
+                    (uint32)res_entry->host_handle : host_object;
+                hvdxg.sharedresource_nt_alloc_host =
+                    alloc_entry != NULL ?
+                    (uint32)alloc_entry->host_handle :
+                    hvdxg.sharedhandle_last_allocation;
+                hvdxg.sharedresource_nt_resource_flags =
+                    resource->host_create_flags_value != 0 ?
+                    resource->host_create_flags_value :
+                    resource->create_flags_value;
+                hvdxg.sharedresource_nt_alloc_flags =
+                    a != NULL ? a->flags :
+                    (resource->allocation_count != 0 ?
+                     resource->allocation_flags[0] : 0);
+                hvdxg.sharedresource_nt_alloc_in_hash =
+                    hvdxg_hash_bytes(hvdxg.d3d12_shared_alloc_priv_head,
+                                     hvdxg.d3d12_shared_alloc_priv_head_len);
+                hvdxg.sharedresource_nt_alloc_out_hash =
+                    hvdxg_hash_bytes(hvdxg.d3d12_shared_alloc_out_priv_head,
+                                     hvdxg.d3d12_shared_alloc_out_priv_head_len);
+                hvdxg.sharedresource_nt_alloc_size =
+                    a != NULL ? a->size :
+                    (resource->allocation_count != 0 ?
+                     resource->allocation_sizes[0] : 0);
+                hvdxg.sharedresource_nt_meta_before =
+                    resource->shared_metadata_created;
+                hvdxg.sharedresource_nt_seal_before = resource->sealed;
+                hvdxg.sharedresource_nt_host_seal_before =
+                    resource->host_shared_sealed;
+                hvdxg.ntshared_cleanup_cached_before =
+                    resource->host_shared_handle_nt != 0 ? 1 : 0;
+                hvdxg.ntshared_cleanup_refs_before =
+                    resource->host_shared_refs;
+                hvdxg.ntshared_cleanup_object_before =
+                    resource->host_shared_object;
+                hvdxg.ntshared_cleanup_nt_before =
+                    resource->host_shared_handle_nt;
+                hvdxg.ntshared_cleanup_sealed_before =
+                    resource->host_shared_sealed;
+                hvdxg.ntshared_cleanup_cache_inserts_before =
+                    hvdxg.ntshared_cache_inserts;
+                if (resource->host_shared_handle_nt != 0)
+                    hvdxg_clear_resource_nt_shared_handle(resource, 0);
+                hvdxg_note_ntshared_runtime_resource(
+                    owner, object.v, process, host_object, resource, a,
+                    res_entry, alloc_entry);
+                ret = hvdxg_create_nt_shared_object(
+                    process, host_object, fallback_object,
+                    &used_host_object, &host_nt_handle,
+                    resource->create_flags_value == 0x47);
+                hvdxg_note_ntshared_runtime_return(resource, ret,
+                                                   host_nt_handle);
+                hvdxg.sharedresource_nt_meta_after =
+                    resource->shared_metadata_created;
+                hvdxg.sharedresource_nt_seal_after = resource->sealed;
+                hvdxg.sharedresource_nt_host_seal_after =
+                    resource->host_shared_sealed;
+                if (resource->existing_sysmem)
+                    hvdxg_note_existing_sysmem_share(resource, 3);
+                hvdxg.ntshared_cleanup_ret = (uint32)ret;
+                hvdxg.ntshared_cleanup_cached_after =
+                    resource->host_shared_handle_nt != 0 ? 1 : 0;
+                hvdxg.ntshared_cleanup_refs_after =
+                    resource->host_shared_refs;
+                hvdxg.ntshared_cleanup_object_after =
+                    resource->host_shared_object;
+                hvdxg.ntshared_cleanup_nt_after =
+                    resource->host_shared_handle_nt;
+                hvdxg.ntshared_cleanup_sealed_after =
+                    resource->host_shared_sealed;
+                hvdxg.ntshared_cleanup_cache_inserts_after =
+                    hvdxg.ntshared_cache_inserts;
+                if (ret == 0) {
+                    if (used_host_object != 0)
+                        host_object = used_host_object;
+                    resource->host_shared_handle_nt = host_nt_handle;
+                    resource->host_shared_process = process;
+                    resource->host_shared_object = host_object;
+                    resource->host_shared_refs = 1;
+                    hvdxg_ntshared_cache_insert(kind, process, host_object,
+                                                host_nt_handle);
+                }
             }
+        } else if (!hvdxg_ntshared_cache_get(kind, process, host_object,
+                                             &host_nt_handle)) {
+            if (fallback_object != 0 &&
+                hvdxg_ntshared_cache_get(kind, process, fallback_object,
+                                         &host_nt_handle)) {
+                host_object = fallback_object;
+                ret = 0;
+            } else {
+                hvdxg_note_ntshared_object_entry(owner, process, host_object);
+                hvdxg.ntshared_obj_owner_process =
+                    hvdxg_owner_sync_owner_process(owner, object.v);
+                hvdxg.ntshared_obj_owner_generation =
+                    hvdxg_owner_sync_owner_generation(owner, object.v);
+                ret = hvdxg_create_nt_shared_object(
+                    process, host_object, fallback_object,
+                    &used_host_object, &host_nt_handle, 0);
+                if (ret == 0 && used_host_object != 0)
+                    host_object = used_host_object;
+            }
+            if (ret == 0)
+                hvdxg_ntshared_cache_insert(kind, process, host_object,
+                                            host_nt_handle);
+        } else {
+            ret = 0;
+        }
+        if (kind == HV_DXG_SHARED_OBJECT_SYNC) {
+            hvdxg.sharedsync_export_host_object = host_object;
+            hvdxg.sharedsync_export_host_nt_handle = host_nt_handle;
+            hvdxg.sharedsync_export_shared_owner_object = host_object;
+            hvdxg.sharedsync_export_cache_process = process;
+            hvdxg.sharedsync_export_nt_refs =
+                hvdxg_ntshared_cache_refs(kind, process, host_object,
+                                          host_nt_handle);
+            hvdxg.sharedsync_export_ret = ret;
+        }
+        hvdxg.sharedhandle_last_object = host_object;
+        if (resource != NULL) {
+            hvdxg.sharedresource_owner_exists =
+                resource->shared_metadata_created;
+            hvdxg.sharedresource_owner_cached =
+                resource->host_shared_handle_nt != 0 ? 1 : 0;
+            hvdxg.sharedresource_owner_nt =
+                resource->host_shared_handle_nt;
+            hvdxg.sharedresource_owner_refs = resource->host_shared_refs;
+            hvdxg.sharedresource_owner_sealed =
+                resource->host_shared_sealed;
+            hvdxg.sharedresource_owner_object =
+                resource->host_shared_object;
+            hvdxg.sharedresource_owner_process =
+                resource->host_shared_process;
         }
         if (ret != 0) {
+            if (hv_cmdline_enabled("dxg_shareobject_diagnostic")) {
+                hvdxg_share_object_with_host_diagnostic(
+                    process,
+                    hvdxg.sharedhandle_last_host_device != 0 ?
+                        hvdxg.sharedhandle_last_host_device : device,
+                    host_object, kind, 1);
+            } else {
+                hvdxg.shareobject_diag_attempted = 0;
+                hvdxg.shareobject_diag_kind = kind;
+                hvdxg.shareobject_diag_reason = 2;
+            }
             hvdxg.sharedhandle_last_ret = ret;
             break;
         }
+        if (resource != NULL) {
+            hvdxg_note_shared_resource_record(
+                "nt-success-preseal", 1, resource, kind, process,
+                host_object, host_nt_handle, host_nt_handle, 0,
+                object.v == resource->resource ? 1 : 0);
+            ret = resource->sealed ? 0 :
+                  hvdxg_seal_resource_from_owner(owner, resource);
+            hvdxg.sharedhandle_last_sealed = resource->sealed;
+            if (ret == 0) {
+                resource->host_shared_sealed = resource->sealed;
+                hvdxg.sharedresource_owner_sealed =
+                    resource->host_shared_sealed;
+                hvdxg.sharedresource_nt_seal_after = resource->sealed;
+                hvdxg.sharedresource_nt_host_seal_after =
+                    resource->host_shared_sealed;
+            }
+            hvdxg.ntshared_runtime_sealed_after = resource->sealed;
+            hvdxg.ntshared_runtime_host_sealed_after =
+                resource->host_shared_sealed;
+            if (ret == 0) {
+                hvdxg.sharedresource_record_seal_before_fd =
+                    resource->sealed;
+                hvdxg_note_shared_resource_record(
+                    "sealed-before-fd", 2, resource, kind, process,
+                    host_object, host_nt_handle, host_nt_handle, 0,
+                    object.v == resource->resource ? 1 : 0);
+            }
+            if (resource->existing_sysmem)
+                hvdxg_note_existing_sysmem_share(resource, 4);
+            if (ret != 0) {
+                uint32 destroy_handle = 0;
+
+                destroy_handle = hvdxg_release_nt_shared_object_ref(
+                    kind, process, host_object, host_nt_handle);
+                if (resource != NULL && destroy_handle != 0)
+                    hvdxg_clear_resource_nt_shared_handle(resource,
+                                                          destroy_handle);
+                hvdxg.sharedhandle_last_ret = ret;
+                break;
+            }
+        }
         shared = kvmalloc(sizeof(*shared));
         if (shared == NULL) {
-            (void)hvdxg_destroy_nt_shared_object(host_nt_handle);
+            uint32 destroy_handle = 0;
+
+            destroy_handle = hvdxg_release_nt_shared_object_ref(
+                kind, process, host_object, host_nt_handle);
+            if (resource != NULL && destroy_handle != 0)
+                hvdxg_clear_resource_nt_shared_handle(resource, destroy_handle);
             ret = -ENOMEM;
             hvdxg.sharedhandle_last_ret = ret;
             break;
@@ -9128,6 +22194,8 @@ createhwqueue_done:
         shared->kind = kind;
         shared->device = device;
         shared->object = object.v;
+        shared->cache_process = process;
+        shared->cache_object = host_object;
         if (kind == HV_DXG_SHARED_OBJECT_SYNC)
             shared->global_share =
                 hvdxg_owner_sync_global_shared(owner, object.v);
@@ -9135,28 +22203,88 @@ createhwqueue_done:
             shared->global_share = host_nt_handle;
         shared->host_nt_handle = host_nt_handle;
         shared->nt_handle = host_nt_handle;
+        hvdxg.sharedresource_open_global =
+            kind == HV_DXG_SHARED_OBJECT_RESOURCE ? shared->global_share : 0;
         if (kind == HV_DXG_SHARED_OBJECT_SYNC) {
             if (shared->global_share == 0) {
-                (void)hvdxg_destroy_nt_shared_object(host_nt_handle);
+                hvdxg.sharedsync_export_global_zero = 1;
+                hvdxg.sharedsync_export_ret = -EINVAL;
+                (void)hvdxg_release_nt_shared_object_ref(
+                    kind, process, host_object, host_nt_handle);
                 kvfree(shared);
                 ret = -EINVAL;
                 hvdxg.sharedhandle_last_ret = ret;
                 break;
             }
             shared->sync_type = hvdxg_owner_sync_type(owner, object.v);
+            shared->sync_flags = hvdxg_owner_sync_flags(owner, object.v);
+            shared->sync_owner_process =
+                hvdxg_owner_sync_owner_process(owner, object.v);
+            shared->sync_owner_generation =
+                hvdxg_owner_sync_owner_generation(owner, object.v);
+            shared->sync_owner_refs =
+                hvdxg_owner_sync_owner_refs(owner, object.v);
+            hvdxg.sharedsync_export_fd_kind = shared->kind;
+            hvdxg.sharedsync_export_fops_kind = HV_DXG_SHARED_FOPS_SYNC;
+            hvdxg.sharedsync_export_sync_type = shared->sync_type;
+            hvdxg.sharedsync_export_global_share = shared->global_share;
+            hvdxg.sharedsync_export_global_zero =
+                shared->global_share == 0 ? 1 : 0;
+            hvdxg.sharedsync_export_host_shared_handle =
+                shared->global_share;
+            hvdxg.sharedsync_export_host_nt_handle =
+                shared->host_nt_handle;
+            hvdxg.sharedsync_export_cache_process =
+                shared->cache_process;
+            hvdxg.sharedsync_export_shared_owner_object =
+                shared->cache_object;
         } else {
             ret = hvdxg_clone_resource(&shared->resource, resource);
             if (ret != 0) {
-                (void)hvdxg_destroy_nt_shared_object(host_nt_handle);
+                uint32 destroy_handle = 0;
+
+                destroy_handle = hvdxg_release_nt_shared_object_ref(
+                    kind, process, host_object, host_nt_handle);
+                if (resource != NULL && destroy_handle != 0)
+                    hvdxg_clear_resource_nt_shared_handle(resource,
+                                                          destroy_handle);
                 kvfree(shared);
                 hvdxg.sharedhandle_last_ret = ret;
                 break;
             }
         }
-        fd = vfs_custom_fd_alloc(&hvdxg_shared_object_file_ops, shared,
-                                 O_RDWR);
+        fd = vfs_custom_fd_alloc(
+            kind == HV_DXG_SHARED_OBJECT_SYNC ?
+                &hvdxg_shared_sync_file_ops :
+                &hvdxg_shared_resource_file_ops,
+            shared, O_RDWR);
+        hvdxg.sharedhandle_last_fops_kind =
+            kind == HV_DXG_SHARED_OBJECT_SYNC ?
+                HV_DXG_SHARED_FOPS_SYNC :
+                HV_DXG_SHARED_FOPS_RESOURCE;
+        if (kind == HV_DXG_SHARED_OBJECT_SYNC) {
+            hvdxg.sharedsync_export_fd = fd < 0 ? 0 : (uint32)fd;
+            hvdxg.sharedsync_export_ret = fd < 0 ? fd : 0;
+            hvdxg.sharedsync_export_nt_refs =
+                hvdxg_ntshared_cache_refs(shared->kind,
+                                          shared->cache_process,
+                                          shared->cache_object,
+                                          shared->host_nt_handle);
+            if (fd >= 0 && current != NULL && current->fdtable != NULL) {
+                spin_lock(&current->fdtable->lock);
+                if (vfs_fdtable_set_fdflags(current->fdtable, fd,
+                                            FD_CLOEXEC) == 0)
+                    hvdxg.sharedsync_export_cloexec = 1;
+                spin_unlock(&current->fdtable->lock);
+            }
+        }
         if (fd < 0) {
-            (void)hvdxg_destroy_nt_shared_object(host_nt_handle);
+            uint32 destroy_handle = 0;
+
+            destroy_handle = hvdxg_release_nt_shared_object_ref(
+                kind, process, host_object, host_nt_handle);
+            if (resource != NULL && destroy_handle != 0)
+                hvdxg_clear_resource_nt_shared_handle(resource, destroy_handle);
             if (kind == HV_DXG_SHARED_OBJECT_RESOURCE)
                 hvdxg_free_tracked_resource(&shared->resource);
             kvfree(shared);
@@ -9173,6 +22301,8 @@ createhwqueue_done:
         if (ret != 0) {
             struct vfs_file *f;
 
+            if (kind == HV_DXG_SHARED_OBJECT_SYNC)
+                hvdxg.sharedsync_export_ret = ret;
             spin_lock(&current->fdtable->lock);
             f = vfs_fdtable_dealloc_fd(current->fdtable, fd);
             spin_unlock(&current->fdtable->lock);
@@ -9183,6 +22313,24 @@ createhwqueue_done:
         }
         hvdxg.sharedhandle_last_device = device;
         hvdxg.sharedhandle_last_nt_handle = host_nt_handle;
+        hvdxg.sharedhandle_last_global_share = shared->global_share;
+        if (kind == HV_DXG_SHARED_OBJECT_RESOURCE) {
+            hvdxg.sharedresource_record_fd_publish_count++;
+            hvdxg_note_shared_resource_record(
+                "fd-published", 3, &shared->resource, kind,
+                shared->cache_process, shared->cache_object,
+                shared->global_share, shared->host_nt_handle, 0,
+                object.v == shared->resource.resource ? 1 : 0);
+        }
+        if (kind == HV_DXG_SHARED_OBJECT_SYNC) {
+            hvdxg.sharedsync_export_ret = ret;
+            hvdxg.sharedsync_export_fd = (uint32)fd;
+            hvdxg.sharedsync_export_nt_refs =
+                hvdxg_ntshared_cache_refs(shared->kind,
+                                          shared->cache_process,
+                                          shared->cache_object,
+                                          shared->host_nt_handle);
+        }
         hvdxg.sharedhandle_last_ret = ret;
         break;
     }
@@ -9195,51 +22343,190 @@ createhwqueue_done:
         struct hvdxg_command_opensyncobject_return result;
         uint32 actual_len = 0;
         uint64 fence_kva = 0;
+        uint64 fence_pa = 0;
+        struct hvdxg_d3dkmthandle open_process;
 
         ret = hvdxg_d3dkmt_ensure();
-        if (ret != 0)
-            break;
-        if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
-            ret = -EFAULT;
+        if (ret != 0) {
+            hvdxg.opensync_last_gate = 7;
+            hvdxg.opensync_last_ret = ret;
             break;
         }
+        if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
+            ret = -EFAULT;
+            hvdxg.opensync_last_gate = 6;
+            hvdxg.opensync_last_ret = ret;
+            break;
+        }
+        hvdxg.opensync_ioctl_count++;
         hvdxg.sharedhandle_last_cmd = (uint32)cmd;
         hvdxg.sharedhandle_last_ret = -ENOTSUP;
         hvdxg.sharedhandle_last_device = req.device.v;
         hvdxg.sharedhandle_last_object = req.sync_object.v;
         hvdxg.sharedhandle_last_nt_handle = req.nt_handle;
         hvdxg.sharedhandle_last_count = 1;
+        hvdxg.opensync_last_cmd_len = 0;
+        hvdxg.opensync_last_wire_len = 0;
+        hvdxg.opensync_last_ext = 0;
+        hvdxg.opensync_last_ext_offset = 0;
+        hvdxg.opensync_last_result_len = sizeof(result);
+        hvdxg.opensync_last_actual_len = 0;
+        hvdxg.opensync_last_ret = -ENOTSUP;
+        hvdxg.opensync_last_status = 0;
+        hvdxg.opensync_last_process = 0;
+        hvdxg.opensync_last_device = req.device.v;
+        hvdxg.opensync_last_device_host = 0;
+        hvdxg.opensync_last_device_owner = 0;
+        hvdxg.opensync_last_device_owner_generation = 0;
+        hvdxg.opensync_last_device_generation = 0;
+        hvdxg.opensync_last_global = 0;
+        hvdxg.opensync_last_input_nt = req.nt_handle;
+        hvdxg.opensync_last_host_nt = 0;
+        hvdxg.opensync_last_object = req.sync_object.v;
+        hvdxg.opensync_last_cache_object = 0;
+        hvdxg.opensync_last_source_device = 0;
+        hvdxg.opensync_last_source_device_host = 0;
+        hvdxg.opensync_last_source_owner = 0;
+        hvdxg.opensync_last_source_owner_generation = 0;
+        hvdxg.opensync_last_source_flags = 0;
+        hvdxg.opensync_last_same_device = 0;
+        hvdxg.opensync_last_adapter_match = 0;
+        hvdxg.opensync_last_adapter_low = hvdxg.adapter_luid.a;
+        hvdxg.opensync_last_adapter_high = hvdxg.adapter_luid.b;
+        hvdxg.opensync_last_host_adapter_low = hvdxg.host_adapter_luid.a;
+        hvdxg.opensync_last_host_adapter_high = hvdxg.host_adapter_luid.b;
+        hvdxg.opensync_last_flags = req.flags.value;
+        hvdxg.opensync_last_wire_flags = 0;
+        hvdxg.opensync_last_forced_flags = 0;
+        hvdxg.opensync_last_fops_kind = 0;
+        hvdxg.opensync_last_sync_type = 0;
+        hvdxg.opensync_last_result_sync = 0;
+        hvdxg.opensync_last_gpu_va = 0;
+        hvdxg.opensync_last_cpu_pa = 0;
+        hvdxg.opensync_last_fd_kind = 0;
+        hvdxg.opensync_last_fd_refs = 0;
+        hvdxg.opensync_last_gate = 1;
+        hvdxg.opensync_last_current_tgid =
+            current != NULL ? (uint64)thread_tgid(current) : 0;
+        hvdxg.opensync_last_owner_tgid =
+            owner != NULL && owner->process_state != NULL ?
+            owner->process_state->tgid : 0;
+        hvdxg.opensync_last_owner_generation =
+            owner != NULL && owner->process_state != NULL ?
+            owner->process_state->generation : 0;
+        hvdxg.opensync_last_namespace_mismatch =
+            hvdxg.opensync_last_owner_tgid != 0 &&
+            hvdxg.opensync_last_current_tgid != 0 &&
+            hvdxg.opensync_last_owner_tgid !=
+                hvdxg.opensync_last_current_tgid;
+        if (hvdxg.opensync_last_namespace_mismatch) {
+            ret = -EINVAL;
+            hvdxg.opensync_last_namespace_rejects++;
+            hvdxg.sharedhandle_last_ret = ret;
+            hvdxg.opensync_last_ret = ret;
+            hvdxg.opensync_last_gate = 8;
+            break;
+        }
         if (req.device.v == 0 || !hvdxg_owner_has_device(owner, req.device.v)) {
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
+            hvdxg.opensync_last_ret = ret;
             break;
         }
-        shared = hvdxg_shared_object_from_fd((int)req.nt_handle,
-                                             HV_DXG_SHARED_OBJECT_SYNC,
+        {
+            struct hvdxg_object_entry *target_entry =
+                hvdxg_owner_find_object(owner, HV_DXG_OBJECT_DEVICE,
+                                        req.device.v);
+
+            hvdxg.opensync_last_device_host =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_DEVICE, req.device.v, NULL);
+            hvdxg.opensync_last_device_owner =
+                hvdxg_open_host_process(owner);
+            hvdxg.opensync_last_device_owner_generation =
+                hvdxg_open_process_generation(owner);
+            hvdxg.opensync_last_device_generation =
+                target_entry != NULL ? target_entry->generation : 0;
+        }
+        shared = hvdxg_shared_object_from_fd((int)req.nt_handle, 0,
                                              &shared_file);
-        if (shared == NULL || shared->global_share == 0) {
+        if (shared != NULL) {
+            hvdxg.opensync_last_global = shared->global_share;
+            hvdxg.opensync_last_host_nt = shared->host_nt_handle;
+            hvdxg.opensync_last_object = shared->object;
+            hvdxg.opensync_last_cache_object = shared->cache_object;
+            hvdxg.opensync_last_source_device = shared->device;
+            hvdxg.opensync_last_source_device_host =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_DEVICE, shared->device, NULL);
+            hvdxg.opensync_last_source_owner =
+                shared->sync_owner_process != 0 ?
+                shared->sync_owner_process :
+                hvdxg_owner_sync_owner_process(owner, shared->object);
+            hvdxg.opensync_last_source_owner_generation =
+                shared->sync_owner_generation != 0 ?
+                shared->sync_owner_generation :
+                hvdxg_owner_sync_owner_generation(owner, shared->object);
+            hvdxg.opensync_last_source_flags =
+                shared->sync_flags != 0 ? shared->sync_flags :
+                hvdxg_owner_sync_flags(owner, shared->object);
+            hvdxg.opensync_last_same_device =
+                req.device.v != 0 && shared->device == req.device.v;
+            hvdxg.opensync_last_adapter_match =
+                hvdxg_luid_nonzero(hvdxg.adapter_luid) &&
+                hvdxg_luid_nonzero(hvdxg.host_adapter_luid) ? 1 : 0;
+            hvdxg.opensync_last_fd_kind = shared->kind;
+            hvdxg.opensync_last_fops_kind =
+                hvdxg_shared_object_fops_kind(shared_file);
+            hvdxg.opensync_last_sync_type = shared->sync_type != 0 ?
+                shared->sync_type : hvdxg_owner_sync_type(owner,
+                                                          shared->object);
+            hvdxg.opensync_last_fd_refs = hvdxg_ntshared_cache_refs(
+                shared->kind, shared->cache_process,
+                shared->cache_object != 0 ? shared->cache_object :
+                shared->object,
+                shared->host_nt_handle);
+        }
+        if (shared == NULL || shared->kind != HV_DXG_SHARED_OBJECT_SYNC ||
+            shared->global_share == 0) {
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
+            hvdxg.opensync_last_ret = ret;
+            hvdxg.opensync_last_gate = 2;
             goto opensync_done;
         }
+        hvdxg.opensync_last_gate = 3;
         memset(&open, 0, sizeof(open));
         memset(&result, 0, sizeof(result));
+        open_process = hvdxg_owner_bound_process_handle(owner);
         hvdxg_command_vm_init(&open.hdr,
                               HV_DXGK_VMBCOMMAND_OPENSYNCOBJECT);
-        open.hdr.process = hvdxg.dxg_process;
+        open.hdr.process = open_process;
         open.device.v = req.device.v;
         open.global_sync_object.v = shared->global_share;
         open.flags = req.flags;
-        open.flags.shared = 1;
-        open.flags.nt_security_sharing = 1;
+        hvdxg.opensync_last_wire_flags = open.flags.value;
         if (shared->sync_type == _D3DDDI_MONITORED_FENCE)
             open.engine_affinity = req.monitored_fence.engine_affinity;
         ret = hvdxg_send_sync_global(&open, sizeof(open), &result,
                                      sizeof(result), &actual_len);
+        hvdxg.opensync_last_cmd_len = hvdxg.global_send_last_cmd_len;
+        hvdxg.opensync_last_wire_len = hvdxg.global_send_last_wire_len;
+        hvdxg.opensync_last_ext = hvdxg.global_send_last_ext;
+        hvdxg.opensync_last_ext_offset = hvdxg.global_send_last_ext_offset;
+        hvdxg.opensync_last_result_len = sizeof(result);
+        hvdxg.opensync_last_actual_len = actual_len;
+        hvdxg.opensync_last_process = open_process.v;
+        hvdxg.opensync_last_status = result.status.v;
+        hvdxg.opensync_last_result_sync = result.sync_object.v;
+        hvdxg.opensync_last_gpu_va = result.gpu_virtual_address;
+        hvdxg.opensync_last_cpu_pa = result.guest_cpu_physical_address;
         if (ret == 0 && actual_len < sizeof(result))
             ret = -EOVERFLOW;
         if (ret == 0)
             ret = hvdxg_ntstatus_to_errno(result.status);
+        hvdxg.opensync_last_ret = ret;
+        hvdxg.opensync_last_gate = ret == 0 ? 5 : 4;
         if (ret != 0) {
             hvdxg.sharedhandle_last_ret = ret;
             goto opensync_done;
@@ -9247,11 +22534,13 @@ createhwqueue_done:
         req.sync_object.v = result.sync_object.v;
         if (shared->sync_type == _D3DDDI_MONITORED_FENCE) {
             req.monitored_fence.fence_value_cpu_va =
-                hvdxg_map_iospace_user(result.guest_cpu_physical_address,
-                                       PGSIZE, 0);
-            fence_kva =
-                hvdxg_map_iospace_kernel(result.guest_cpu_physical_address,
-                                         PGSIZE);
+                hvdxg_map_iospace_user_canonical(
+                    HV_DXG_FENCE_SOURCE_OPEN_SYNC,
+                    result.guest_cpu_physical_address, PGSIZE,
+                    0, &fence_pa, NULL, 1);
+            fence_kva = hvdxg_map_iospace_kernel_canonical(
+                HV_DXG_FENCE_SOURCE_OPEN_SYNC,
+                result.guest_cpu_physical_address, PGSIZE, fence_pa, 1);
             if (req.monitored_fence.fence_value_cpu_va == 0) {
                 ret = -ENOMEM;
                 hvdxg.sharedhandle_last_ret = ret;
@@ -9267,9 +22556,10 @@ createhwqueue_done:
                              shared->sync_type, req.flags.value,
                              shared->global_share,
                              req.monitored_fence.fence_value_cpu_va,
-                             fence_kva);
+                             fence_kva, 0);
         hvdxg.sharedhandle_last_object = req.sync_object.v;
         hvdxg.sharedhandle_last_ret = ret;
+        hvdxg.opensync_last_ret = ret;
 opensync_done:
         if (shared_file != NULL)
             vfs_fput(shared_file);
@@ -9294,19 +22584,78 @@ opensync_done:
         hvdxg.sharedhandle_last_object = 0;
         hvdxg.sharedhandle_last_nt_handle = req.nt_handle;
         hvdxg.sharedhandle_last_count = req.allocation_count;
+        hvdxg.queryresource_last_seen++;
+        hvdxg.queryresource_last_ret = -ENOTSUP;
+        hvdxg.queryresource_last_device = req.device.v;
+        hvdxg.queryresource_last_nt = req.nt_handle;
+        hvdxg.queryresource_last_fd_kind = 0;
+        hvdxg.queryresource_last_fops_kind = 0;
+        hvdxg.queryresource_last_sync_probe = 0;
+        hvdxg.queryresource_last_global = 0;
+        hvdxg.queryresource_last_host_nt = 0;
+        hvdxg.queryresource_last_refs = 0;
+        hvdxg.queryresource_last_object = 0;
+        hvdxg.queryresource_last_cache_object = 0;
+        hvdxg.queryresource_last_alloc_count = req.allocation_count;
+        hvdxg.queryresource_last_runtime_size =
+            req.private_runtime_data_size;
+        hvdxg.queryresource_last_resource_size =
+            req.resource_priv_drv_data_size;
+        hvdxg.queryresource_last_total_size =
+            req.total_priv_drv_data_size;
         if (req.device.v == 0 || !hvdxg_owner_has_device(owner, req.device.v)) {
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
+            hvdxg.queryresource_last_ret = ret;
             break;
         }
-        shared = hvdxg_shared_object_from_fd((int)req.nt_handle,
-                                             HV_DXG_SHARED_OBJECT_RESOURCE,
+        shared = hvdxg_shared_object_from_fd((int)req.nt_handle, 0,
                                              &shared_file);
-        if (shared == NULL) {
+        if (shared != NULL) {
+            hvdxg.sharedhandle_last_kind = shared->kind;
+            hvdxg.queryresource_last_fd_kind = shared->kind;
+            hvdxg.queryresource_last_fops_kind =
+                hvdxg_shared_object_fops_kind(shared_file);
+            hvdxg.queryresource_last_sync_probe =
+                shared->kind == HV_DXG_SHARED_OBJECT_SYNC ? 1 : 0;
+            hvdxg.queryresource_last_global = shared->global_share;
+            hvdxg.queryresource_last_host_nt = shared->host_nt_handle;
+            hvdxg.queryresource_last_object = shared->object;
+            hvdxg.queryresource_last_cache_object = shared->cache_object;
+            hvdxg.queryresource_last_refs =
+                hvdxg_ntshared_cache_refs(
+                    shared->kind, shared->cache_process,
+                    shared->cache_object != 0 ? shared->cache_object :
+                    shared->object, shared->host_nt_handle);
+        }
+        if (shared == NULL ||
+            shared->kind != HV_DXG_SHARED_OBJECT_RESOURCE) {
+            /*
+             * WSL's dxgkio_query_resource_info_nt rejects dxgsyncobj fds
+             * here.  Keep the same errno, but record the actual fd kind so
+             * the runtime's resource-before-sync probe is visible.
+             */
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
-            break;
+            hvdxg.queryresource_last_ret = ret;
+            goto queryresource_done;
         }
+        if (shared->resource.existing_sysmem)
+            hvdxg_note_existing_sysmem_share(&shared->resource, 5);
+        ret = hvdxg_seal_resource(&shared->resource);
+        if (ret != 0) {
+            hvdxg.sharedhandle_last_ret = ret;
+            hvdxg.queryresource_last_ret = ret;
+            goto queryresource_done;
+        }
+        if (shared->resource.existing_sysmem)
+            hvdxg_note_existing_sysmem_share(&shared->resource, 6);
+        hvdxg.sharedresource_record_query_count++;
+        hvdxg_note_shared_resource_record(
+            "queryresource", 4, &shared->resource, shared->kind,
+            shared->cache_process, shared->cache_object,
+            shared->global_share, shared->host_nt_handle, 0,
+            shared->object == shared->resource.resource ? 1 : 0);
         req.private_runtime_data_size =
             shared->resource.private_runtime_data_size;
         req.resource_priv_drv_data_size =
@@ -9319,6 +22668,15 @@ opensync_done:
         hvdxg.sharedhandle_last_count = req.allocation_count;
         hvdxg.sharedhandle_last_object = shared->object;
         hvdxg.sharedhandle_last_ret = ret;
+        hvdxg.queryresource_last_ret = ret;
+        hvdxg.queryresource_last_alloc_count = req.allocation_count;
+        hvdxg.queryresource_last_runtime_size =
+            req.private_runtime_data_size;
+        hvdxg.queryresource_last_resource_size =
+            req.resource_priv_drv_data_size;
+        hvdxg.queryresource_last_total_size =
+            req.total_priv_drv_data_size;
+queryresource_done:
         if (shared_file != NULL)
             vfs_fput(shared_file);
         break;
@@ -9333,7 +22691,10 @@ opensync_done:
         struct vfs_file *shared_file = NULL;
         uint32 result_len;
         uint32 actual_len = 0;
+        uint32 alloc_private_offset = 0;
         struct hvdxg_tracked_resource opened;
+        int host_resource_opened = 0;
+        struct hvdxg_d3dkmthandle open_process;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -9348,17 +22709,41 @@ opensync_done:
         hvdxg.sharedhandle_last_object = req.resource.v;
         hvdxg.sharedhandle_last_nt_handle = req.nt_handle;
         hvdxg.sharedhandle_last_count = req.allocation_count;
+        hvdxg.openresource_last_cmd_len = 0;
+        hvdxg.openresource_last_wire_len = 0;
+        hvdxg.openresource_last_ext = 0;
+        hvdxg.openresource_last_ext_offset = 0;
+        hvdxg.openresource_last_result_len = 0;
+        hvdxg.openresource_last_actual_len = 0;
+        hvdxg.openresource_last_ret = -ENOTSUP;
+        hvdxg.openresource_last_status = 0;
+        hvdxg.openresource_last_process = 0;
+        hvdxg.openresource_last_device = req.device.v;
+        hvdxg.openresource_last_global = 0;
+        hvdxg.openresource_last_alloc_count = req.allocation_count;
+        hvdxg.openresource_last_total_priv = req.total_priv_drv_data_size;
+        hvdxg.openresource_last_result_resource = req.resource.v;
+        hvdxg.openresource_last_result_alloc0 = 0;
+        hvdxg.openresource_last_seal_before = 0;
+        hvdxg.openresource_last_seal_after = 0;
+        hvdxg.openresource_last_fd_kind = 0;
+        hvdxg.openresource_last_fd_refs = 0;
+        hvdxg.openresource_last_route_global = 0;
+        hvdxg.openresource_last_fops_kind = 0;
         if (req.device.v == 0 || !hvdxg_owner_has_device(owner, req.device.v) ||
             req.allocation_count == 0 ||
             req.allocation_count > HV_DXG_ALLOCATION_MAX ||
             req.open_alloc_info == 0) {
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
+            hvdxg.openresource_last_ret = ret;
             break;
         }
         shared = hvdxg_shared_object_from_fd((int)req.nt_handle,
                                              HV_DXG_SHARED_OBJECT_RESOURCE,
                                              &shared_file);
+        if (shared != NULL && shared->resource.existing_sysmem)
+            hvdxg_note_existing_sysmem_share(&shared->resource, 7);
         if (shared == NULL || shared->global_share == 0 ||
             req.allocation_count != shared->resource.allocation_count ||
             req.private_runtime_data_size <
@@ -9369,8 +22754,39 @@ opensync_done:
                 shared->resource.total_priv_drv_data_size) {
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
-            break;
+            hvdxg.openresource_last_ret = ret;
+            goto openresource_done;
         }
+        hvdxg.openresource_last_global = shared->global_share;
+        hvdxg.openresource_last_total_priv =
+            shared->resource.total_priv_drv_data_size;
+        hvdxg.openresource_last_fd_kind = shared->kind;
+        hvdxg.openresource_last_fops_kind =
+            hvdxg_shared_object_fops_kind(shared_file);
+        hvdxg.openresource_last_fd_refs = hvdxg_ntshared_cache_refs(
+            shared->kind, shared->cache_process,
+            shared->cache_object != 0 ? shared->cache_object :
+            shared->object,
+            shared->host_nt_handle);
+        if (hvdxg.openresource_last_fd_refs == 0)
+            hvdxg.openresource_last_fd_refs =
+                shared->resource.host_shared_refs;
+        hvdxg.openresource_last_seal_before = shared->resource.sealed;
+        ret = hvdxg_seal_resource(&shared->resource);
+        hvdxg.openresource_last_seal_after = shared->resource.sealed;
+        if (shared->resource.existing_sysmem)
+            hvdxg_note_existing_sysmem_share(&shared->resource, 8);
+        if (ret != 0) {
+            hvdxg.sharedhandle_last_ret = ret;
+            hvdxg.openresource_last_ret = ret;
+            goto openresource_done;
+        }
+        hvdxg.sharedresource_record_open_count++;
+        hvdxg_note_shared_resource_record(
+            "openresource-prehost", 5, &shared->resource, shared->kind,
+            shared->cache_process, shared->cache_object,
+            shared->global_share, shared->host_nt_handle, 0,
+            shared->object == shared->resource.resource ? 1 : 0);
         result_len = sizeof(*result) +
                      (req.allocation_count - 1) *
                          sizeof(result->allocations[0]);
@@ -9378,32 +22794,73 @@ opensync_done:
         if (result == NULL) {
             ret = -ENOMEM;
             hvdxg.sharedhandle_last_ret = ret;
-            break;
+            hvdxg.openresource_last_ret = ret;
+            goto openresource_done;
         }
         memset(&open, 0, sizeof(open));
         memset(result, 0, result_len);
+        open_process = hvdxg_owner_bound_process_handle(owner);
         hvdxg_command_vgpu_init_process(&open.hdr,
                                         HV_DXGK_VMBCOMMAND_OPENRESOURCE,
-                                        hvdxg.dxg_process);
+                                        open_process);
         open.device.v = req.device.v;
         open.nt_security_sharing = 1;
         open.global_share.v = shared->global_share;
+        hvdxg.sharedresource_open_global = shared->global_share;
         open.allocation_count = req.allocation_count;
         open.total_priv_drv_data_size =
             shared->resource.total_priv_drv_data_size;
         ret = hvdxg_send_sync_vgpu(&open, sizeof(open), result,
                                    result_len, &actual_len);
+        hvdxg.openresource_last_cmd_len = hvdxg.vgpu_send_last_cmd_len;
+        hvdxg.openresource_last_wire_len = hvdxg.vgpu_send_last_wire_len;
+        hvdxg.openresource_last_ext = hvdxg.vgpu_send_last_ext;
+        hvdxg.openresource_last_ext_offset =
+            hvdxg.vgpu_send_last_ext_offset;
+        hvdxg.openresource_last_route_global =
+            hvdxg.vgpu_send_last_route_global;
+        hvdxg.openresource_last_result_len = result_len;
+        hvdxg.openresource_last_actual_len = actual_len;
+        hvdxg.openresource_last_process = open_process.v;
+        hvdxg.openresource_last_status = result->status.v;
+        hvdxg.openresource_last_result_resource = result->resource.v;
+        hvdxg.openresource_last_result_alloc0 =
+            req.allocation_count != 0 ? result->allocations[0].v : 0;
         if (ret == 0 && actual_len < result_len)
             ret = -EOVERFLOW;
         if (ret == 0)
             ret = hvdxg_ntstatus_to_errno(result->status);
+        hvdxg.openresource_last_ret = ret;
         if (ret != 0)
             goto openresource_done;
+        hvdxg_note_shared_resource_record(
+            "openresource-host-ok", 6, &shared->resource, shared->kind,
+            shared->cache_process, shared->cache_object,
+            shared->global_share, shared->host_nt_handle, 0,
+            shared->object == shared->resource.resource ? 1 : 0);
+        host_resource_opened = result->resource.v != 0;
         memset(open_alloc, 0, sizeof(open_alloc));
+        alloc_private_offset = 0;
         for (uint32 i = 0; i < req.allocation_count; i++) {
+            uint32 private_size = shared->resource.alloc_priv_sizes[i];
+
+            if (alloc_private_offset > shared->resource.total_priv_drv_data_size ||
+                private_size >
+                    shared->resource.total_priv_drv_data_size -
+                        alloc_private_offset) {
+                ret = -EOVERFLOW;
+                goto openresource_done;
+            }
             open_alloc[i].allocation.v = result->allocations[i].v;
-            open_alloc[i].priv_drv_data_size =
-                shared->resource.alloc_priv_sizes[i];
+            open_alloc[i].priv_drv_data_size = private_size;
+            if (req.total_priv_drv_data != 0)
+                open_alloc[i].priv_drv_data =
+                    req.total_priv_drv_data + alloc_private_offset;
+            alloc_private_offset += private_size;
+        }
+        if (alloc_private_offset != shared->resource.total_priv_drv_data_size) {
+            ret = -EOVERFLOW;
+            goto openresource_done;
         }
         if (shared->resource.private_runtime_data_size != 0 &&
             either_copyout(1, req.private_runtime_data,
@@ -9419,12 +22876,19 @@ opensync_done:
             ret = -EFAULT;
             goto openresource_done;
         }
-        if (shared->resource.total_priv_drv_data_size != 0 &&
-            either_copyout(1, req.total_priv_drv_data,
-                           shared->resource.total_priv_drv_data,
-                           shared->resource.total_priv_drv_data_size) < 0) {
-            ret = -EFAULT;
-            goto openresource_done;
+        alloc_private_offset = 0;
+        for (uint32 i = 0; i < req.allocation_count; i++) {
+            uint32 private_size = shared->resource.alloc_priv_sizes[i];
+
+            if (private_size != 0 &&
+                either_copyout(1, req.total_priv_drv_data + alloc_private_offset,
+                               shared->resource.total_priv_drv_data +
+                                   alloc_private_offset,
+                               private_size) < 0) {
+                ret = -EFAULT;
+                goto openresource_done;
+            }
+            alloc_private_offset += private_size;
         }
         if (either_copyout(1, req.open_alloc_info, open_alloc,
                            req.allocation_count * sizeof(open_alloc[0])) < 0) {
@@ -9442,6 +22906,17 @@ opensync_done:
 
                 opened.device = req.device.v;
                 opened.resource = req.resource.v;
+                opened.global_share = shared->global_share;
+                opened.owner_process = hvdxg_open_host_process(owner);
+                opened.owner_generation =
+                    hvdxg_open_process_generation(owner);
+                opened.owner_refs = hvdxg_open_process_refs(owner);
+                opened.sealed = 1;
+                opened.opened_from_shared = 1;
+                opened.open_count = 1;
+                for (uint32 i = 0; i < req.allocation_count; i++)
+                    opened.allocation_handles[i] =
+                        result->allocations[i].v;
                 slot = hvdxg_owner_find_resource(owner, opened.device,
                                                  opened.resource);
                 if (slot == NULL &&
@@ -9454,29 +22929,58 @@ opensync_done:
                 if (slot != NULL) {
                     hvdxg_free_tracked_resource(slot);
                     *slot = opened;
+                    if (hvdxg_track_object(owner, HV_DXG_OBJECT_RESOURCE,
+                                           opened.resource,
+                                           opened.device,
+                                           opened.device) == 0)
+                        hvdxg.sharedresource_open_tracked++;
+                    else
+                        ret = -ENOMEM;
                 } else {
                     hvdxg_free_tracked_resource(&opened);
+                    ret = -ENOMEM;
                 }
+            } else {
+                ret = -ENOMEM;
             }
-            for (uint32 i = 0; i < req.allocation_count; i++)
-                hvdxg_track_allocation(owner, req.device.v, req.resource.v,
-                                       result->allocations[i].v,
-                                       shared->resource.allocation_sizes[i],
-                                       shared->resource.allocation_flags[i],
-                                       0, NULL, 0);
+            if (ret == 0) {
+                for (uint32 i = 0; i < req.allocation_count; i++)
+                    hvdxg_track_allocation(
+                        owner, req.device.v, req.resource.v,
+                        result->allocations[i].v,
+                        shared->resource.allocation_sizes[i],
+                        shared->resource.allocation_flags[i],
+                        0, NULL, 0);
+            }
         }
 openresource_done:
+        if (ret != 0 && owner != NULL && req.resource.v != 0) {
+            hvdxg_untrack_allocation(owner, req.device.v, req.resource.v, 0);
+            hvdxg_untrack_resource(owner, req.device.v, req.resource.v);
+        }
+        if (ret != 0 && host_resource_opened && req.device.v != 0 &&
+            req.resource.v != 0)
+            (void)hvdxg_destroy_allocation_host(req.device.v,
+                                                req.resource.v, 0,
+                                                HV_DXG_DESTROY_ALLOC_CTX_HELPER);
         if (shared_file != NULL)
             vfs_fput(shared_file);
         if (result != NULL)
             kvfree(result);
         hvdxg.sharedhandle_last_object = req.resource.v;
         hvdxg.sharedhandle_last_ret = ret;
+        hvdxg.openresource_last_ret = ret;
         break;
     }
 
     case LX_DXSHAREOBJECTWITHHOST: {
         struct d3dkmt_shareobjectwithhost req;
+        struct hvdxg_tracked_resource *resource = NULL;
+        uint32 current_process;
+        uint32 current_generation;
+        uint32 process;
+        uint32 host_device;
+        uint32 host_object;
         uint32 actual_len = 0;
         int32 status = 0;
 
@@ -9487,19 +22991,256 @@ openresource_done:
             ret = -EFAULT;
             break;
         }
+        current_process = hvdxg_owner_bound_process_handle(owner).v;
+        current_generation = hvdxg_open_process_generation(owner);
+        process = current_process;
         hvdxg.shareobject_last_len = 0;
+        hvdxg.shareobject_last_cmd_len = 0;
+        hvdxg.shareobject_last_wire_len = 0;
+        hvdxg.shareobject_last_ext = 0;
+        hvdxg.shareobject_last_ext_offset = 0;
+        hvdxg.shareobject_last_device_offset = 0;
+        hvdxg.shareobject_last_object_offset = 0;
+        hvdxg.shareobject_last_result_len = 0;
+        hvdxg.shareobject_last_head_len = 0;
+        memset(hvdxg.shareobject_last_head, 0,
+               sizeof(hvdxg.shareobject_last_head));
+        hvdxg.shareobject_last_completion_type = 0;
+        hvdxg.shareobject_last_completion_len = 0;
+        memset(hvdxg.shareobject_last_completion_prefix, 0,
+               sizeof(hvdxg.shareobject_last_completion_prefix));
         hvdxg.shareobject_last_ret = 0;
         hvdxg.shareobject_last_status = 0;
+        hvdxg.shareobject_last_process = process;
         hvdxg.shareobject_last_device = req.device_handle.v;
         hvdxg.shareobject_last_object = req.object_handle.v;
+        hvdxg.shareobject_last_reserved = 0;
         hvdxg.shareobject_last_nt_handle = 0;
+        hvdxg.shareobject_diag_attempted = 0;
+        hvdxg.shareobject_diag_valid_nt = 0;
+        hvdxg.shareobject_diag_kind = 0;
+        hvdxg.shareobject_diag_reason = 0;
+        hvdxg.sharedhandle_last_cmd = (uint32)cmd;
+        hvdxg.sharedhandle_last_ret = 0;
+        hvdxg.sharedhandle_last_device = req.device_handle.v;
+        hvdxg.sharedhandle_last_object = req.object_handle.v;
+        hvdxg.sharedhandle_last_nt_handle = 0;
+        hvdxg.sharedhandle_last_count = 1;
+        hvdxg.sharedhandle_last_global_share = 0;
+        hvdxg.sharedhandle_last_runtime_d3d12_flags = 0;
+        hvdxg.sharedhandle_last_kind = 0;
+        hvdxg.sharedhandle_last_fops_kind = 0;
+        hvdxg.sharedhandle_last_raw_device = req.device_handle.v;
+        hvdxg.sharedhandle_last_raw_object = req.object_handle.v;
+        hvdxg.sharedhandle_last_host_device = 0;
+        hvdxg.sharedhandle_last_host_device_found = 0;
+        hvdxg.sharedhandle_last_host_object = 0;
+        hvdxg.sharedhandle_last_object_found = 0;
+        hvdxg.sharedhandle_last_raw_resource_found = 0;
+        hvdxg.sharedhandle_last_raw_allocation_found = 0;
+        hvdxg.sharedhandle_last_raw_sync_found = 0;
+        hvdxg.sharedhandle_last_parent = 0;
+        hvdxg.sharedhandle_last_current_process = current_process;
+        hvdxg.sharedhandle_last_current_generation = current_generation;
+        hvdxg.sharedhandle_last_creator_process = 0;
+        hvdxg.sharedhandle_last_creator_generation = 0;
+        hvdxg.sharedhandle_last_owner_process = 0;
+        hvdxg.sharedhandle_last_owner_generation = 0;
+        hvdxg.sharedhandle_last_owner_refs = 0;
+        hvdxg.sharedhandle_last_owner_used = 0;
+        hvdxg.sharedhandle_last_object_type = HV_DXG_OBJECT_NONE;
+        hvdxg.sharedhandle_last_object_device = 0;
+        hvdxg.sharedhandle_last_allocation = 0;
+        hvdxg.sharedhandle_last_allocation_found = 0;
+        hvdxg.sharedhandle_last_allocation_owner_process = 0;
+        hvdxg.sharedhandle_last_allocation_owner_generation = 0;
+        hvdxg.sharedhandle_last_allocation_owner_refs = 0;
+        hvdxg.sharedhandle_last_map_va = 0;
+        hvdxg.sharedhandle_last_map_pages = 0;
+        hvdxg.sharedhandle_last_map_fence = 0;
+        hvdxg.sharedhandle_last_map_ret = 0;
+        hvdxg.sharedhandle_last_map_status = 0;
+        hvdxg.sharedhandle_last_resident_paging_queue = 0;
+        hvdxg.sharedhandle_last_resident_sync = 0;
+        hvdxg.sharedhandle_last_resident_fence = 0;
+        hvdxg.sharedhandle_last_resident_current = 0;
+        hvdxg.sharedhandle_last_resident_wait_result = 0;
+        hvdxg.sharedhandle_last_resident_wait_ret = 0;
+        hvdxg.sharedhandle_last_resident_missing = 0;
+        hvdxg.sharedhandle_last_resident_enforced = 0;
+        hvdxg.sharedhandle_last_create_flags = 0;
+        hvdxg.sharedhandle_last_alloc_count = 0;
+        hvdxg.sharedhandle_last_sealed = 0;
+        hvdxg.sharedhandle_last_sync_type = 0;
+        hvdxg.sharedhandle_last_sync_flags = 0;
+        hvdxg.sharedhandle_last_sync_global = 0;
+        hvdxg.sharedhandle_last_sync_monitor_fence = 0;
+        hvdxg.sharedhandle_last_sync_fence_cpu = 0;
+        hvdxg.sharedhandle_last_sync_fence_kva = 0;
+        hvdxg.shareobjects_last_desired_access = 0;
+        hvdxg.shareobjects_last_object_attr = 0;
+        hvdxg.shareobjects_last_attr_len = 0;
+        hvdxg.shareobjects_last_attr_ret = 0;
+        memset(hvdxg.shareobjects_last_attr_head, 0,
+               sizeof(hvdxg.shareobjects_last_attr_head));
         if (req.device_handle.v == 0 || req.object_handle.v == 0) {
             ret = -EINVAL;
             hvdxg.shareobject_last_ret = ret;
             break;
         }
-        ret = hvdxg_share_object_with_host(req.device_handle.v,
-                                           req.object_handle.v,
+        hvdxg.sharedhandle_last_raw_resource_found =
+            hvdxg_owner_find_object(owner, HV_DXG_OBJECT_RESOURCE,
+                                    req.object_handle.v) != NULL ? 1 : 0;
+        hvdxg.sharedhandle_last_raw_allocation_found =
+            hvdxg_owner_find_object(owner, HV_DXG_OBJECT_ALLOCATION,
+                                    req.object_handle.v) != NULL ? 1 : 0;
+        hvdxg.sharedhandle_last_raw_sync_found =
+            hvdxg_owner_find_object(owner, HV_DXG_OBJECT_SYNC,
+                                    req.object_handle.v) != NULL ? 1 : 0;
+        resource = hvdxg_owner_find_resource(owner, 0, req.object_handle.v);
+        if (resource != NULL) {
+            hvdxg.sharedhandle_last_kind =
+                HV_DXG_SHARED_OBJECT_RESOURCE;
+            hvdxg.sharedhandle_last_host_device =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_DEVICE, resource->device, NULL);
+            hvdxg.sharedhandle_last_host_device_found =
+                hvdxg.sharedhandle_last_host_device != 0 ? 1 : 0;
+            if (hvdxg.sharedhandle_last_host_device == 0)
+                hvdxg.sharedhandle_last_host_device = resource->device;
+            hvdxg.sharedhandle_last_host_object =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_RESOURCE, req.object_handle.v,
+                    &hvdxg.sharedhandle_last_parent);
+            hvdxg.sharedhandle_last_object_found =
+                hvdxg.sharedhandle_last_host_object != 0 ? 1 : 0;
+            hvdxg.sharedhandle_last_object_type =
+                HV_DXG_OBJECT_RESOURCE;
+            hvdxg.sharedhandle_last_object_device =
+                hvdxg_owner_object_device(owner, HV_DXG_OBJECT_RESOURCE,
+                                          req.object_handle.v);
+            if (hvdxg.sharedhandle_last_host_object == 0) {
+                ret = -EINVAL;
+                hvdxg.shareobject_last_ret = ret;
+                break;
+            }
+            ret = hvdxg_prepare_resource_nt_metadata(owner, resource);
+            if (ret != 0) {
+                hvdxg.shareobject_last_ret = ret;
+                break;
+            }
+            hvdxg.sharedhandle_last_owner_process =
+                resource->owner_process;
+            hvdxg.sharedhandle_last_owner_generation =
+                resource->owner_generation;
+            hvdxg.sharedhandle_last_owner_refs = resource->owner_refs;
+            hvdxg.sharedhandle_last_creator_process =
+                resource->owner_process;
+            hvdxg.sharedhandle_last_creator_generation =
+                resource->owner_generation;
+            hvdxg.sharedhandle_last_global_share =
+                resource->global_share;
+            hvdxg.sharedhandle_last_runtime_d3d12_flags =
+                resource->runtime_d3d12_flags;
+            hvdxg.sharedhandle_last_create_flags =
+                resource->create_flags_value;
+            hvdxg.sharedhandle_last_alloc_count =
+                resource->allocation_count;
+            if (resource->allocation_count != 0)
+                hvdxg.sharedhandle_last_allocation =
+                    resource->allocation_handles[0];
+            {
+                struct hvdxg_tracked_allocation *a = NULL;
+
+                if (hvdxg.sharedhandle_last_allocation != 0)
+                    a = hvdxg_owner_find_allocation(
+                        owner, resource->device, resource->resource,
+                        hvdxg.sharedhandle_last_allocation);
+                if (a == NULL) {
+                    hvdxg.sharedhandle_last_allocation =
+                        hvdxg_owner_first_allocation(
+                            owner, resource->device, resource->resource,
+                            &hvdxg.sharedhandle_last_allocation_found);
+                    if (hvdxg.sharedhandle_last_allocation != 0)
+                        a = hvdxg_owner_find_allocation(
+                            owner, resource->device, resource->resource,
+                            hvdxg.sharedhandle_last_allocation);
+                }
+                if (a != NULL) {
+                    hvdxg.sharedhandle_last_allocation_found = 1;
+                    hvdxg.sharedhandle_last_allocation_owner_process =
+                        a->owner_process;
+                    hvdxg.sharedhandle_last_allocation_owner_generation =
+                        a->owner_generation;
+                    hvdxg.sharedhandle_last_allocation_owner_refs =
+                        a->owner_refs;
+                }
+            }
+            hvdxg.sharedhandle_last_sealed = resource->sealed;
+        } else if (hvdxg_owner_has_sync(owner, req.object_handle.v)) {
+            hvdxg.sharedhandle_last_kind = HV_DXG_SHARED_OBJECT_SYNC;
+            hvdxg.sharedhandle_last_sync_type =
+                hvdxg_owner_sync_type(owner, req.object_handle.v);
+            hvdxg.sharedhandle_last_sync_flags =
+                hvdxg_owner_sync_flags(owner, req.object_handle.v);
+            hvdxg.sharedhandle_last_sync_global =
+                hvdxg_owner_sync_global_shared(owner, req.object_handle.v);
+            hvdxg.sharedhandle_last_sync_monitor_fence =
+                hvdxg_owner_sync_is_monitor_fence_handle(
+                    owner, req.object_handle.v);
+            hvdxg.sharedhandle_last_sync_fence_cpu =
+                hvdxg_owner_sync_fence_cpu_va(owner, req.object_handle.v);
+            hvdxg.sharedhandle_last_sync_fence_kva =
+                hvdxg_owner_sync_fence_kva(owner, req.object_handle.v);
+            hvdxg.sharedhandle_last_host_device =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_DEVICE,
+                    hvdxg_owner_sync_device(owner, req.object_handle.v),
+                    NULL);
+            hvdxg.sharedhandle_last_host_device_found =
+                hvdxg.sharedhandle_last_host_device != 0 ? 1 : 0;
+            if (hvdxg.sharedhandle_last_host_device == 0)
+                hvdxg.sharedhandle_last_host_device =
+                    hvdxg_owner_sync_device(owner, req.object_handle.v);
+            hvdxg.sharedhandle_last_host_object =
+                hvdxg_owner_host_object_handle(
+                    owner, HV_DXG_OBJECT_SYNC, req.object_handle.v,
+                    &hvdxg.sharedhandle_last_parent);
+            hvdxg.sharedhandle_last_object_found =
+                hvdxg.sharedhandle_last_host_object != 0 ? 1 : 0;
+            hvdxg.sharedhandle_last_object_type = HV_DXG_OBJECT_SYNC;
+            hvdxg.sharedhandle_last_object_device =
+                hvdxg_owner_object_device(owner, HV_DXG_OBJECT_SYNC,
+                                          req.object_handle.v);
+            hvdxg.sharedhandle_last_owner_process =
+                hvdxg_owner_sync_owner_process(owner, req.object_handle.v);
+            hvdxg.sharedhandle_last_owner_generation =
+                hvdxg_owner_sync_owner_generation(owner,
+                                                  req.object_handle.v);
+            hvdxg.sharedhandle_last_owner_refs =
+                hvdxg_owner_sync_owner_refs(owner, req.object_handle.v);
+            hvdxg.sharedhandle_last_creator_process =
+                hvdxg.sharedhandle_last_owner_process;
+            hvdxg.sharedhandle_last_creator_generation =
+                hvdxg.sharedhandle_last_owner_generation;
+            hvdxg.sharedhandle_last_global_share =
+                hvdxg_owner_sync_global_shared(owner,
+                                               req.object_handle.v);
+        }
+        process = current_process;
+        hvdxg.sharedhandle_last_owner_used = 0;
+        host_device = hvdxg.sharedhandle_last_host_device != 0 ?
+                      hvdxg.sharedhandle_last_host_device :
+                      req.device_handle.v;
+        host_object = hvdxg.sharedhandle_last_host_object != 0 ?
+                      hvdxg.sharedhandle_last_host_object :
+                      req.object_handle.v;
+        hvdxg.shareobject_last_process = process;
+        hvdxg.shareobject_last_device = host_device;
+        hvdxg.shareobject_last_object = host_object;
+        hvdxg.sharedhandle_last_device = host_device;
+        hvdxg.sharedhandle_last_object = host_object;
+        ret = hvdxg_share_object_with_host(process, host_device, host_object,
                                            req.reserved,
                                            &req.object_vail_nt_handle,
                                            &actual_len, &status);
@@ -9512,6 +23253,8 @@ openresource_done:
                 ret = -EFAULT;
         }
         hvdxg.shareobject_last_ret = ret;
+        hvdxg.sharedhandle_last_nt_handle = req.object_vail_nt_handle;
+        hvdxg.sharedhandle_last_ret = ret;
         break;
     }
 
@@ -9520,6 +23263,7 @@ openresource_done:
         struct hvdxg_command_queryvideomemoryinfo query;
         struct hvdxg_command_queryvideomemoryinfo_return result;
         uint32 actual_len = 0;
+        uint32 host_adapter;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -9528,7 +23272,9 @@ openresource_done:
             ret = -EFAULT;
             break;
         }
-        if (req.process != 0 || req.adapter.v != hvdxg.host_adapter_handle) {
+        if (req.process != 0 ||
+            hvdxg_resolve_adapter_handle(owner, req.adapter.v,
+                                         &host_adapter) != 0) {
             ret = -EINVAL;
             break;
         }
@@ -9537,7 +23283,7 @@ openresource_done:
         hvdxg_command_vgpu_init_process(&query.hdr,
                                         HV_DXGK_VMBCOMMAND_QUERYVIDEOMEMORYINFO,
                                         hvdxg.dxg_process);
-        query.adapter.v = req.adapter.v;
+        query.adapter.v = host_adapter;
         query.memory_segment_group = (uint32)req.memory_segment_group;
         query.physical_adapter_index = req.physical_adapter_index;
         ret = hvdxg_send_sync_vgpu(&query, sizeof(query), &result,
@@ -9608,7 +23354,20 @@ openresource_done:
 
     case LX_DXCREATESYNCFILE: {
         struct d3dkmt_createsyncfile req;
+        struct hvdxg_sync_file_object *sync_file = NULL;
+        struct d3dkmt_waitforsynchronizationobjectfromcpu wait_req;
+        struct hvdxg_d3dkmthandle wait_object;
+        uint32 host_nt_handle = 0;
+        uint32 host_object = 0;
+        uint32 used_host_object = 0;
+        uint32 process = 0;
+        uint32 actual_len = 0;
+        uint64 event_id = 0;
+        int fd = -1;
 
+        ret = hvdxg_d3dkmt_ensure();
+        if (ret != 0)
+            break;
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
             break;
@@ -9619,14 +23378,159 @@ openresource_done:
         hvdxg.syncfile_last_context = 0;
         hvdxg.syncfile_last_handle = req.sync_file_handle;
         hvdxg.syncfile_last_fence = req.fence_value;
-        ret = -ENOTSUP;
+        hvdxg.syncfile_last_global = 0;
+        hvdxg.syncfile_last_host_nt = 0;
+        hvdxg.syncfile_last_source_flags = 0;
+        hvdxg.syncfile_last_open_flags = 0;
+        hvdxg.syncfile_last_len = 0;
+        hvdxg.syncfile_last_status = 0;
+        hvdxg.syncfile_last_out_sync = 0;
+        hvdxg.syncfile_last_cpu_va = 0;
+        hvdxg.syncfile_last_gpu_va = 0;
+        if (req.device.v == 0 || req.monitored_fence.v == 0 ||
+            !hvdxg_owner_has_device(owner, req.device.v) ||
+            !hvdxg_owner_has_sync(owner, req.monitored_fence.v)) {
+            ret = -EINVAL;
+            hvdxg.syncfile_last_ret = ret;
+            break;
+        }
+        if (!hvdxg_owner_sync_is_monitored(owner, req.monitored_fence.v) ||
+            hvdxg_owner_sync_global_shared(owner, req.monitored_fence.v) == 0) {
+            ret = -EINVAL;
+            hvdxg.syncfile_last_ret = ret;
+            break;
+        }
+        host_object = hvdxg_owner_host_object_handle(
+            owner, HV_DXG_OBJECT_SYNC, req.monitored_fence.v, NULL);
+        if (host_object == 0)
+            host_object = req.monitored_fence.v;
+        process = hvdxg_owner_bound_process_handle(owner).v;
+        if (!hvdxg_ntshared_cache_get(HV_DXG_SHARED_OBJECT_SYNC, process,
+                                      host_object, &host_nt_handle)) {
+            ret = hvdxg_create_nt_shared_object(
+                process, host_object,
+                hvdxg_owner_sync_global_shared(owner,
+                                               req.monitored_fence.v),
+                &used_host_object, &host_nt_handle, 0);
+            if (ret == 0) {
+                if (used_host_object != 0)
+                    host_object = used_host_object;
+                hvdxg_ntshared_cache_insert(HV_DXG_SHARED_OBJECT_SYNC,
+                                            process, host_object,
+                                            host_nt_handle);
+            }
+        }
+        if (ret != 0) {
+            hvdxg.syncfile_last_ret = ret;
+            break;
+        }
+        event_id = hvdxg_alloc_host_event();
+        if (event_id == 0) {
+            ret = -ENOMEM;
+            hvdxg_release_nt_shared_object_ref(HV_DXG_SHARED_OBJECT_SYNC,
+                                               process, host_object,
+                                               host_nt_handle);
+            hvdxg.syncfile_last_ret = ret;
+            break;
+        }
+        memset(&wait_req, 0, sizeof(wait_req));
+        memset(&wait_object, 0, sizeof(wait_object));
+        wait_object.v = req.monitored_fence.v;
+        wait_req.device = req.device;
+        wait_req.object_count = 1;
+        ret = hvdxg_send_waitsyncobjectfromcpu(
+            &wait_req, &wait_object, &req.fence_value, event_id,
+            sizeof(wait_object), sizeof(req.fence_value), &actual_len);
+        hvdxg.syncfile_last_len = actual_len;
+        hvdxg.syncfile_last_status = hvdxg.syncwait_last_status;
+        if (ret != 0 && ret != HV_DXG_STATUS_PENDING) {
+            hvdxg_remove_host_event(event_id);
+            hvdxg_release_nt_shared_object_ref(HV_DXG_SHARED_OBJECT_SYNC,
+                                               process, host_object,
+                                               host_nt_handle);
+            hvdxg.syncfile_last_ret = ret;
+            break;
+        }
+        sync_file = kvmalloc(sizeof(*sync_file));
+        if (sync_file == NULL) {
+            hvdxg_remove_host_event(event_id);
+            hvdxg_release_nt_shared_object_ref(HV_DXG_SHARED_OBJECT_SYNC,
+                                               process, host_object,
+                                               host_nt_handle);
+            ret = -ENOMEM;
+            hvdxg.syncfile_last_ret = ret;
+            break;
+        }
+        memset(sync_file, 0, sizeof(*sync_file));
+        sync_file->device = req.device.v;
+        sync_file->sync_object = req.monitored_fence.v;
+        sync_file->global_share =
+            hvdxg_owner_sync_global_shared(owner, req.monitored_fence.v);
+        sync_file->host_nt_handle = host_nt_handle;
+        sync_file->cache_process = process;
+        sync_file->cache_object = host_object;
+        sync_file->sync_type =
+            hvdxg_owner_sync_type(owner, req.monitored_fence.v);
+        sync_file->sync_flags =
+            hvdxg_owner_sync_flags(owner, req.monitored_fence.v);
+        sync_file->fence_value = req.fence_value;
+        sync_file->event_id = event_id;
+        fd = vfs_custom_fd_alloc(&hvdxg_sync_file_ops, sync_file, O_RDWR);
+        if (fd < 0) {
+            hvdxg_remove_host_event(event_id);
+            hvdxg_release_nt_shared_object_ref(HV_DXG_SHARED_OBJECT_SYNC,
+                                               process, host_object,
+                                               host_nt_handle);
+            kvfree(sync_file);
+            ret = fd;
+            hvdxg.syncfile_last_ret = ret;
+            break;
+        }
+        if (current != NULL && current->fdtable != NULL) {
+            spin_lock(&current->fdtable->lock);
+            (void)vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
+            spin_unlock(&current->fdtable->lock);
+        }
+        req.sync_file_handle = (uint64)fd;
+        hvdxg.syncfile_last_handle = req.sync_file_handle;
+        hvdxg.syncfile_last_global = sync_file->global_share;
+        hvdxg.syncfile_last_host_nt = sync_file->host_nt_handle;
+        hvdxg.syncfile_last_source_flags = sync_file->sync_flags;
+        ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
+              -EFAULT : 0;
+        if (ret != 0) {
+            struct vfs_file *f;
+
+            spin_lock(&current->fdtable->lock);
+            f = vfs_fdtable_dealloc_fd(current->fdtable, fd);
+            spin_unlock(&current->fdtable->lock);
+            if (f != NULL)
+                vfs_fput(f);
+        }
         hvdxg.syncfile_last_ret = ret;
         break;
     }
 
     case LX_DXWAITSYNCFILE: {
         struct d3dkmt_waitsyncfile req;
+        struct hvdxg_sync_file_object *sync_file;
+        struct vfs_file *sync_file_vfs = NULL;
+        struct hvdxg_d3dkmthandle opened;
+        struct hvdxg_command_waitsyncobjectfromgpu *wait;
+        uint8 command_buf[sizeof(struct hvdxg_command_waitsyncobjectfromgpu) +
+                          sizeof(uint64) +
+                          sizeof(struct hvdxg_d3dkmthandle)];
+        struct hvdxg_ntstatus status;
+        uint32 actual_len = 0;
+        uint32 device;
+        uint64 cpu_va = 0;
+        uint64 gpu_va = 0;
+        uint8 *pos;
+        struct d3dddi_synchronizationobject_flags open_flags;
 
+        ret = hvdxg_d3dkmt_ensure();
+        if (ret != 0)
+            break;
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
             break;
@@ -9637,14 +23541,134 @@ openresource_done:
         hvdxg.syncfile_last_context = req.context.v;
         hvdxg.syncfile_last_handle = req.sync_file_handle;
         hvdxg.syncfile_last_fence = 0;
-        ret = -ENOTSUP;
+        hvdxg.syncfile_last_global = 0;
+        hvdxg.syncfile_last_host_nt = 0;
+        hvdxg.syncfile_last_source_flags = 0;
+        hvdxg.syncfile_last_open_flags = 0;
+        hvdxg.syncfile_last_len = 0;
+        hvdxg.syncfile_last_status = 0;
+        hvdxg.syncfile_last_out_sync = 0;
+        hvdxg.syncfile_last_cpu_va = 0;
+        hvdxg.syncfile_last_gpu_va = 0;
+        if (req.context.v == 0 ||
+            !hvdxg_owner_has_context(owner, req.context.v)) {
+            ret = -EINVAL;
+            hvdxg.syncfile_last_ret = ret;
+            break;
+        }
+        sync_file = hvdxg_sync_file_from_fd((int)req.sync_file_handle,
+                                            &sync_file_vfs);
+        if (sync_file == NULL || sync_file->global_share == 0) {
+            ret = -EINVAL;
+            hvdxg.syncfile_last_ret = ret;
+            if (sync_file_vfs != NULL)
+                vfs_fput(sync_file_vfs);
+            break;
+        }
+        device = hvdxg_owner_object_device(owner, HV_DXG_OBJECT_CONTEXT,
+                                           req.context.v);
+        if (device == 0) {
+            ret = -EINVAL;
+            hvdxg.syncfile_last_ret = ret;
+            vfs_fput(sync_file_vfs);
+            break;
+        }
+        memset(&open_flags, 0, sizeof(open_flags));
+        open_flags.shared = 1;
+        open_flags.nt_security_sharing = 1;
+        open_flags.no_signal = 1;
+        ret = hvdxg_open_sync_file_on_device(
+            owner, device, sync_file, open_flags, 0, 0, &opened,
+            NULL, NULL, NULL);
+        hvdxg.syncfile_last_device = device;
+        hvdxg.syncfile_last_object = opened.v;
+        hvdxg.syncfile_last_fence = sync_file->fence_value;
+        hvdxg.syncfile_last_global = sync_file->global_share;
+        hvdxg.syncfile_last_host_nt = sync_file->host_nt_handle;
+        hvdxg.syncfile_last_source_flags = sync_file->sync_flags;
+        hvdxg.syncfile_last_open_flags = open_flags.value;
+        hvdxg.syncfile_last_len = hvdxg.opensync_last_actual_len;
+        hvdxg.syncfile_last_status = hvdxg.opensync_last_status;
+        hvdxg.syncfile_last_out_sync = opened.v;
+        hvdxg.syncfile_last_cpu_va = cpu_va;
+        hvdxg.syncfile_last_gpu_va = gpu_va;
+        if (ret != 0) {
+            hvdxg.syncfile_last_ret = ret;
+            vfs_fput(sync_file_vfs);
+            break;
+        }
+        memset(command_buf, 0, sizeof(command_buf));
+        memset(&status, 0, sizeof(status));
+        wait = (struct hvdxg_command_waitsyncobjectfromgpu *)command_buf;
+        hvdxg_command_vgpu_init_process(
+            &wait->hdr, HV_DXGK_VMBCOMMAND_WAITFORSYNCOBJECTFROMGPU,
+            hvdxg.dxg_process);
+        wait->context.v = req.context.v;
+        wait->object_count = 1;
+        wait->legacy_fence_object = 0;
+        pos = (uint8 *)wait->fence_values;
+        memcpy(pos, &sync_file->fence_value, sizeof(sync_file->fence_value));
+        pos += sizeof(sync_file->fence_value);
+        memcpy(pos, &opened, sizeof(opened));
+        ret = hvdxg_send_sync_vgpu(
+            wait, sizeof(*wait) - sizeof(uint64) +
+                      sizeof(sync_file->fence_value) + sizeof(opened),
+            &status, sizeof(status), &actual_len);
+        if (actual_len >= sizeof(status))
+            hvdxg.syncfile_last_status = status.v;
+        if (ret == 0 && actual_len >= sizeof(status))
+            ret = hvdxg_ntstatus_to_errno(status);
+        hvdxg.syncfile_last_len = actual_len;
+        if (opened.v != 0) {
+            struct hvdxg_command_destroysyncobject destroy;
+            struct hvdxg_ntstatus destroy_status;
+            uint32 destroy_len = 0;
+            int destroy_ret;
+
+            memset(&destroy, 0, sizeof(destroy));
+            memset(&destroy_status, 0, sizeof(destroy_status));
+            hvdxg_command_vm_init(&destroy.hdr,
+                                  HV_DXGK_VMBCOMMAND_DESTROYSYNCOBJECT);
+            destroy.hdr.process = hvdxg_owner_bound_process_handle(owner);
+            destroy.sync_object = opened;
+            destroy_ret = hvdxg_send_sync_global(
+                &destroy, sizeof(destroy), &destroy_status,
+                sizeof(destroy_status), &destroy_len);
+            if (destroy_ret == 0 && destroy_len >= sizeof(destroy_status))
+                destroy_ret = hvdxg_ntstatus_to_errno(destroy_status);
+            hvdxg.destroysync_last_handle = opened.v;
+            hvdxg.destroysync_last_device = device;
+            hvdxg.destroysync_last_type = sync_file->sync_type;
+            hvdxg.destroysync_last_flags = open_flags.value;
+            hvdxg.destroysync_last_global = sync_file->global_share;
+            hvdxg.destroysync_last_monitor_fence = 0;
+            hvdxg.destroysync_last_cmd_len = hvdxg.global_send_last_cmd_len;
+            hvdxg.destroysync_last_wire_len = hvdxg.global_send_last_wire_len;
+            hvdxg.destroysync_last_ext = hvdxg.global_send_last_ext;
+            hvdxg.destroysync_last_ext_offset =
+                hvdxg.global_send_last_ext_offset;
+            hvdxg.destroysync_last_len = destroy_len;
+            hvdxg.destroysync_last_status = destroy_status.v;
+            hvdxg.destroysync_last_ret = destroy_ret;
+        }
+        vfs_fput(sync_file_vfs);
         hvdxg.syncfile_last_ret = ret;
         break;
     }
 
     case LX_DXOPENSYNCOBJECTFROMSYNCFILE: {
         struct d3dkmt_opensyncobjectfromsyncfile req;
+        struct hvdxg_sync_file_object *sync_file;
+        struct vfs_file *sync_file_vfs = NULL;
+        struct hvdxg_d3dkmthandle opened;
+        uint64 cpu_va = 0;
+        uint64 gpu_va = 0;
+        uint64 fence_kva = 0;
+        struct d3dddi_synchronizationobject_flags open_flags;
 
+        ret = hvdxg_d3dkmt_ensure();
+        if (ret != 0)
+            break;
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
             break;
@@ -9655,7 +23679,61 @@ openresource_done:
         hvdxg.syncfile_last_context = 0;
         hvdxg.syncfile_last_handle = req.sync_file_handle;
         hvdxg.syncfile_last_fence = req.fence_value;
-        ret = -ENOTSUP;
+        hvdxg.syncfile_last_global = 0;
+        hvdxg.syncfile_last_host_nt = 0;
+        hvdxg.syncfile_last_source_flags = 0;
+        hvdxg.syncfile_last_open_flags = 0;
+        hvdxg.syncfile_last_len = 0;
+        hvdxg.syncfile_last_status = 0;
+        hvdxg.syncfile_last_out_sync = 0;
+        hvdxg.syncfile_last_cpu_va = 0;
+        hvdxg.syncfile_last_gpu_va = 0;
+        if (req.device.v == 0 ||
+            !hvdxg_owner_has_device(owner, req.device.v)) {
+            ret = -EINVAL;
+            hvdxg.syncfile_last_ret = ret;
+            break;
+        }
+        sync_file = hvdxg_sync_file_from_fd((int)req.sync_file_handle,
+                                            &sync_file_vfs);
+        if (sync_file == NULL || sync_file->global_share == 0) {
+            ret = -EINVAL;
+            hvdxg.syncfile_last_ret = ret;
+            if (sync_file_vfs != NULL)
+                vfs_fput(sync_file_vfs);
+            break;
+        }
+        memset(&open_flags, 0, sizeof(open_flags));
+        open_flags.shared = 1;
+        open_flags.nt_security_sharing = 1;
+        open_flags.no_signal = 1;
+        ret = hvdxg_open_sync_file_on_device(
+            owner, req.device.v, sync_file, open_flags, 0, 1, &opened,
+            &cpu_va, &gpu_va, &fence_kva);
+        hvdxg.syncfile_last_global = sync_file->global_share;
+        hvdxg.syncfile_last_host_nt = sync_file->host_nt_handle;
+        hvdxg.syncfile_last_source_flags = sync_file->sync_flags;
+        hvdxg.syncfile_last_open_flags = open_flags.value;
+        hvdxg.syncfile_last_len = hvdxg.opensync_last_actual_len;
+        hvdxg.syncfile_last_status = hvdxg.opensync_last_status;
+        hvdxg.syncfile_last_out_sync = opened.v;
+        hvdxg.syncfile_last_cpu_va = cpu_va;
+        hvdxg.syncfile_last_gpu_va = gpu_va;
+        if (ret == 0) {
+            req.syncobj.v = opened.v;
+            req.fence_value = sync_file->fence_value;
+            req.fence_value_cpu_va = cpu_va;
+            req.fence_value_gpu_va = gpu_va;
+            ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
+                  -EFAULT : 0;
+        }
+        if (ret == 0 && owner != NULL)
+            hvdxg_track_sync(owner, req.device.v, req.syncobj.v,
+                             sync_file->sync_type, open_flags.value,
+                             sync_file->global_share, cpu_va, fence_kva, 0);
+        vfs_fput(sync_file_vfs);
+        hvdxg.syncfile_last_object = req.syncobj.v;
+        hvdxg.syncfile_last_fence = req.fence_value;
         hvdxg.syncfile_last_ret = ret;
         break;
     }
@@ -9666,6 +23744,7 @@ openresource_done:
         struct hvdxg_command_changevideomemoryreservation change;
         struct hvdxg_ntstatus status;
         uint32 actual_len = 0;
+        uint32 host_adapter;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -9674,7 +23753,9 @@ openresource_done:
             ret = -EFAULT;
             break;
         }
-        if (req.process != 0 || req.adapter.v != hvdxg.host_adapter_handle) {
+        if (req.process != 0 ||
+            hvdxg_resolve_adapter_handle(owner, req.adapter.v,
+                                         &host_adapter) != 0) {
             ret = -EINVAL;
             break;
         }
@@ -9702,14 +23783,49 @@ openresource_done:
 
     case LX_DXMARKDEVICEASERROR: {
         struct d3dkmt_markdeviceaserror req;
+        struct hvdxg_command_markdeviceaserror mark;
+        struct hvdxg_ntstatus status;
+        struct hvdxg_d3dkmthandle process;
+        uint32 actual_len = 0;
 
+        ret = hvdxg_d3dkmt_ensure();
+        if (ret != 0)
+            break;
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
             break;
         }
-        hvdxg_note_unsupported_ioctl((uint32)cmd, req.device.v, 0,
-                                     (uint32)req.reason);
-        ret = -ENOTSUP;
+        hvdxg.markdevice_last_len = 0;
+        hvdxg.markdevice_last_ret = 0;
+        hvdxg.markdevice_last_status = 0;
+        hvdxg.markdevice_last_device = req.device.v;
+        hvdxg.markdevice_last_reason = (uint32)req.reason;
+        hvdxg.markdevice_last_cmd_len = sizeof(mark);
+        process.v = hvdxg_open_host_process(owner);
+        if (process.v == 0)
+            process = hvdxg.dxg_process;
+        hvdxg.markdevice_last_process = process.v;
+        if (req.device.v == 0 ||
+            !hvdxg_owner_has_device(owner, req.device.v)) {
+            ret = -EINVAL;
+            hvdxg.markdevice_last_ret = ret;
+            break;
+        }
+        memset(&mark, 0, sizeof(mark));
+        memset(&status, 0, sizeof(status));
+        hvdxg_command_vgpu_init_process(
+            &mark.hdr, HV_DXGK_VMBCOMMAND_MARKDEVICEASERROR, process);
+        mark.args = req;
+        ret = hvdxg_send_sync_vgpu(&mark, sizeof(mark), &status,
+                                   sizeof(status), &actual_len);
+        if (actual_len >= sizeof(status))
+            hvdxg.markdevice_last_status = status.v;
+        if (ret == 0 && actual_len < sizeof(status))
+            ret = -EOVERFLOW;
+        if (ret == 0 && actual_len >= sizeof(status))
+            ret = hvdxg_ntstatus_to_errno(status);
+        hvdxg.markdevice_last_len = actual_len;
+        hvdxg.markdevice_last_ret = ret;
         break;
     }
 
@@ -9920,7 +24036,8 @@ openresource_done:
         hvdxg.updateallocproperty_last_len = actual_len;
         hvdxg.updateallocproperty_last_ret = ret;
         hvdxg.updateallocproperty_last_allocation = req.allocation.v;
-        if ((ret == 0 || ret == 259) && actual_len >= sizeof(result)) {
+        if ((ret == 0 || ret == HV_DXG_STATUS_PENDING) &&
+            actual_len >= sizeof(result)) {
             req.paging_fence_value = result.paging_fence_value;
             if (either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0)
                 ret = -EFAULT;
@@ -9934,6 +24051,7 @@ openresource_done:
         struct hvdxg_command_queryclockcalibration query;
         struct hvdxg_command_queryclockcalibration_return result;
         uint32 actual_len = 0;
+        uint32 host_adapter;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -9942,12 +24060,13 @@ openresource_done:
             ret = -EFAULT;
             break;
         }
-        if (req.adapter.v != hvdxg.host_adapter_handle) {
+        if (hvdxg_resolve_adapter_handle(owner, req.adapter.v,
+                                         &host_adapter) != 0) {
             ret = -EINVAL;
             break;
         }
         wire_req = req;
-        wire_req.adapter.v = hvdxg.host_adapter_handle;
+        wire_req.adapter.v = host_adapter;
         memset(&query, 0, sizeof(query));
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(
@@ -9992,27 +24111,43 @@ openresource_done:
 
     case LX_DXCLOSEADAPTER: {
         struct d3dkmt_closeadapter req;
+        uint32 host_adapter;
 
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
             break;
         }
-        ret = (req.adapter_handle.v == hvdxg.host_adapter_handle) ? 0 :
-              -EINVAL;
+        hvdxg.closeadapter_ioctl_count++;
+        ret = hvdxg_close_local_adapter_handle(owner, req.adapter_handle.v,
+                                               &host_adapter);
+        hvdxg.closeadapter_last_len = 0;
+        hvdxg.closeadapter_last_ret = ret;
+        hvdxg.closeadapter_last_status = 0;
+        if (ret == 0) {
+            uint32 order = ++hvdxg.cleanup_order_seq;
+
+            hvdxg.closeadapter_local_count++;
+            hvdxg.closeadapter_last_order = order;
+            if (hvdxg.cleanup_last_destroy_order != 0 &&
+                order > hvdxg.cleanup_last_destroy_order)
+                hvdxg.closeadapter_after_destroy_count++;
+        } else {
+            hvdxg.closeadapter_invalid_count++;
+        }
         break;
     }
 
     case LX_DXQUERYADAPTERINFO: {
-        ret = hvdxg_ioctl_queryadapterinfo((uint64)arg);
+        ret = hvdxg_ioctl_queryadapterinfo((uint64)arg, owner);
         break;
     }
 
     case LX_ISFEATUREENABLED: {
         struct d3dkmt_isfeatureenabled req;
         struct hvdxg_command_isfeatureenabled feature;
-        struct hvdxg_command_isfeatureenabled_global global_feature;
         struct hvdxg_command_isfeatureenabled_return result;
         uint32 actual_len = 0;
+        uint32 host_adapter;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -10025,29 +24160,20 @@ openresource_done:
         hvdxg.feature_last_result = 0;
         hvdxg.feature_last_status = 0;
         memset(&result, 0, sizeof(result));
-        if (req.adapter.v == hvdxg.host_adapter_handle) {
-            memset(&feature, 0, sizeof(feature));
-            hvdxg_command_vgpu_init_process(
-                &feature.hdr, HV_DXGK_VMBCOMMAND_ISFEATUREENABLED,
-                hvdxg.dxg_process);
-            feature.feature_id = req.feature_id;
-            ret = hvdxg_send_sync_vgpu(&feature, sizeof(feature), &result,
-                                       sizeof(result), &actual_len);
-        } else if (req.adapter.v == 0) {
-            memset(&global_feature, 0, sizeof(global_feature));
-            hvdxg_command_vm_init(
-                &global_feature.hdr,
-                HV_DXGK_VMBCOMMAND_ISFEATUREENABLED_GLOBAL);
-            global_feature.hdr.process = hvdxg.dxg_process;
-            global_feature.feature_id = req.feature_id;
-            ret = hvdxg_send_sync_global(&global_feature,
-                                         sizeof(global_feature), &result,
-                                         sizeof(result), &actual_len);
-        } else {
+        if (hvdxg_resolve_adapter_handle(owner, req.adapter.v,
+                                         &host_adapter) != 0) {
             ret = -EINVAL;
+            hvdxg.feature_last_len = 0;
             hvdxg.feature_last_ret = ret;
             break;
         }
+        memset(&feature, 0, sizeof(feature));
+        hvdxg_command_vgpu_init_process(
+            &feature.hdr, HV_DXGK_VMBCOMMAND_ISFEATUREENABLED,
+            hvdxg.dxg_process);
+        feature.feature_id = req.feature_id;
+        ret = hvdxg_send_sync_vgpu(&feature, sizeof(feature), &result,
+                                   sizeof(result), &actual_len);
         if (actual_len >= sizeof(result.status))
             hvdxg.feature_last_status = result.status.v;
         if (ret == 0 && actual_len >= sizeof(result.status))
@@ -10073,6 +24199,8 @@ openresource_done:
     hvdxg_note_ioctl_timing(cmd, r_time() - start_ticks);
     if (ret >= 0)
         hvdxg.ioctl_successes++;
+    if (process_locked)
+        mutex_unlock(&hvdxg.process_lock);
     return ret;
 }
 
@@ -10128,16 +24256,50 @@ static struct vfs_file_ops hvdxg_file_ops = {
 static int hvdxg_open_file(cdev_t *cdev, struct vfs_file *file)
 {
     struct hvdxg_open_state *owner;
+    struct hvdxg_process_state *process;
     int ret = hvdxg_open(cdev);
 
     if (ret != 0)
         return ret;
+    process = hvdxg_process_get_current();
+    if (process == NULL) {
+        (void)hvdxg_release(cdev);
+        return -ENOMEM;
+    }
     owner = kvmalloc(sizeof(*owner));
     if (owner == NULL) {
+        (void)hvdxg_process_put(process);
         (void)hvdxg_release(cdev);
         return -ENOMEM;
     }
     memset(owner, 0, sizeof(*owner));
+    owner->process_state = process;
+    owner->dxg_process = process->host_process;
+    owner->dxg_process_guest = process->guest_process;
+    owner->dxg_process_pid = process->pid;
+    owner->dxg_process_created = process->host_process_created;
+    mutex_lock(&hvdxg.process_lock);
+    if (hvdxg_should_defer_open_create(process))
+        ret = 0;
+    else
+        ret = hvdxg_bind_open_process(owner);
+    mutex_unlock(&hvdxg.process_lock);
+    if (ret != 0) {
+        /*
+         * WSL creates the host dxgprocess before open returns. Keep that
+         * eager attempt for parity, but do not make diagnostics depend on it:
+         * /dev/dxg reads are how users can see why CREATEPROCESS failed.
+         * Real D3DKMT ioctls call hvdxg_bind_open_process() again before
+         * forwarding host commands, so a deferred fd either retries there or
+         * fails the ioctl with the recorded create-process diagnostics.
+         */
+        hvdxg.open_createprocess_ignored_failures++;
+        process->host_process.v = 0;
+        process->host_process_created = 0;
+        owner->dxg_process.v = 0;
+        owner->dxg_process_created = 0;
+        hvdxg.d3dkmt_ready = 0;
+    }
     file->ops = &hvdxg_file_ops;
     file->private_data = owner;
     return 0;
@@ -10384,18 +24546,11 @@ static void hv_signal_channel(uint32 child_relid, uint32 signal_conn_id,
                               int dedicated)
 {
     static uint32 debug_signal_count;
-    uint64 status = 0;
 
     if (monitor_allocated) {
-        hv_clear_channel_signal(child_relid, monitor_allocated, monitorid);
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
         hv_send_interrupt(child_relid);
         hv_set_monitor_event(monitor_allocated, monitorid);
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        uint32 event_conn = signal_conn_id;
-        if (event_conn != 0)
-            status = hv_do_fast_hypercall8(HVCALL_SIGNAL_EVENT,
-                                           event_conn);
         if (hv_debug_enabled() && debug_signal_count < 8) {
             volatile uint64 *bits = (volatile uint64 *)hv.send_int_page;
             struct hv_monitor_page *page =
@@ -10403,9 +24558,8 @@ static void hv_signal_channel(uint32 child_relid, uint32 signal_conn_id,
             uint32 group = monitorid / 32;
             uint32 pending = (page && group < 4) ?
                 page->trigger_group[group].pending : 0;
-            printf("hyperv-vmbus: signal relid=%u conn=%u monitor=%d monid=%u status=0x%lx intword=0x%lx pending=0x%x\n",
-                   child_relid, event_conn, monitor_allocated,
-                   monitorid, status & 0xffff,
+            printf("hyperv-vmbus: signal relid=%u conn=%u monitor=%d monid=%u intword=0x%lx pending=0x%x\n",
+                   child_relid, signal_conn_id, monitor_allocated, monitorid,
                    bits ? bits[child_relid / 64] : 0, pending);
             debug_signal_count++;
         }
@@ -10415,6 +24569,16 @@ static void hv_signal_channel(uint32 child_relid, uint32 signal_conn_id,
         hv_send_interrupt(child_relid);
     if (signal_conn_id != 0)
         hv_do_fast_hypercall8(HVCALL_SIGNAL_EVENT, signal_conn_id);
+}
+
+static int hv_ring_should_signal(struct hv_ring_buffer *out_ring,
+                                 uint32 old_write)
+{
+    if (__atomic_load_n(&out_ring->interrupt_mask, __ATOMIC_ACQUIRE) != 0)
+        return 0;
+
+    uint32 read = __atomic_load_n(&out_ring->read_index, __ATOMIC_ACQUIRE);
+    return read == old_write;
 }
 
 static int guid_eq(const struct hv_guid *a, const struct hv_guid *b)
@@ -10523,6 +24687,8 @@ static void hv_handle_channel_msg(const void *payload)
             hvdxg.global_monitor_allocated = offer->monitor_allocated != 0;
             hvdxg.global_dedicated = offer->dedicated != 0;
             hvdxg.global_mmio_megabytes = offer->offer.mmio_megabytes;
+            memcpy(hvdxg.global_offer_user_def, offer->offer.user_def,
+                   sizeof(hvdxg.global_offer_user_def));
             hvdxg.global_instance = offer->offer.if_instance;
             hv_log_offer("gpu-pv-dxg-global", offer);
         } else if (offer->offer.sub_channel_index == 0 &&
@@ -10535,9 +24701,43 @@ static void hv_handle_channel_msg(const void *payload)
                 hvdxg.vgpu_monitorid = offer->monitorid;
                 hvdxg.vgpu_monitor_allocated = offer->monitor_allocated != 0;
                 hvdxg.vgpu_dedicated = offer->dedicated != 0;
+                memcpy(hvdxg.vgpu_offer_user_def, offer->offer.user_def,
+                       sizeof(hvdxg.vgpu_offer_user_def));
                 hvdxg.vgpu_instance = offer->offer.if_instance;
             }
             hv_log_offer("gpu-pv-dxg-vgpu", offer);
+        } else if (guid_eq(&offer->offer.if_type, &hv_pci_guid)) {
+            hvpci.offer_count++;
+            hvdxg.hyperv_pci_offer_count++;
+            if (!hvpci.present) {
+                hvpci.present = 1;
+                hvpci.child_relid = offer->child_relid;
+                hvpci.signal_conn_id = offer->connection_id;
+                hvpci.monitorid = offer->monitorid;
+                hvpci.monitor_allocated = offer->monitor_allocated != 0;
+                hvpci.dedicated = offer->dedicated != 0;
+                hvpci.offer_flags = offer->offer.flags;
+                hvpci.offer_mmio_megabytes = offer->offer.mmio_megabytes;
+                memcpy(hvpci.offer_user_def, offer->offer.user_def,
+                       sizeof(hvpci.offer_user_def));
+                hvpci.offer_instance = offer->offer.if_instance;
+
+                hvdxg.hyperv_pci_offer_present = 1;
+                hvdxg.hyperv_pci_offer_relid = offer->child_relid;
+                hvdxg.hyperv_pci_offer_conn_id = offer->connection_id;
+                hvdxg.hyperv_pci_offer_monitorid = offer->monitorid;
+                hvdxg.hyperv_pci_offer_monitor_allocated =
+                    offer->monitor_allocated != 0;
+                hvdxg.hyperv_pci_offer_dedicated = offer->dedicated != 0;
+                hvdxg.hyperv_pci_offer_flags = offer->offer.flags;
+                hvdxg.hyperv_pci_offer_mmio_megabytes =
+                    offer->offer.mmio_megabytes;
+                memcpy(hvdxg.hyperv_pci_offer_user_def,
+                       offer->offer.user_def,
+                       sizeof(hvdxg.hyperv_pci_offer_user_def));
+                hvdxg.hyperv_pci_offer_instance = offer->offer.if_instance;
+            }
+            hv_log_offer("hyperv-pci", offer);
         } else if (offer->offer.sub_channel_index == 0 &&
                    hv_unknown_offer_count < 32) {
             hv_unknown_offer_count++;
@@ -10581,6 +24781,10 @@ static void hv_handle_channel_msg(const void *payload)
                    g->gpadl == HV_VIDEO_GPADL_HANDLE) {
             hvvideo.gpadl_status = g->status;
             hvvideo.gpadl_ok = (g->status == 0);
+        } else if (g->child_relid == hvpci.child_relid &&
+                   g->gpadl == HV_PCI_GPADL_HANDLE) {
+            hvpci.gpadl_status = g->status;
+            hvpci.gpadl_ok = (g->status == 0);
         }
         break;
     }
@@ -10601,6 +24805,9 @@ static void hv_handle_channel_msg(const void *payload)
         } else if (r->child_relid == hvvideo.child_relid) {
             hvvideo.open_status = r->status;
             hvvideo.open_ok = (r->status == 0);
+        } else if (r->child_relid == hvpci.child_relid) {
+            hvpci.open_status = r->status;
+            hvpci.open_ok = (r->status == 0);
         } else if (r->child_relid == hvdxg.global_relid) {
             hvdxg.global_open_status = r->status;
             hvdxg.global_open_ok = (r->status == 0);
@@ -10633,6 +24840,7 @@ static void hv_process_channel_packets(void);
 static void hvkbd_process_channel_packets(void);
 static void hvstor_process_channel_packets(void);
 static void hvnet_process_channel_packets(void);
+static void hvpci_process_channel_packets(void);
 static void hv_process_events(void);
 static int hv_recv_raw_on(struct hv_ring_buffer *in_ring, void *buf,
                           uint32 buflen, uint32 *out_len, uint16 *out_type);
@@ -10712,6 +24920,36 @@ static void hvdxg_sync_release(void)
     __atomic_store_n(&hvdxg.sync_active, 0, __ATOMIC_RELEASE);
 }
 
+static int hvdxg_send_packet_with_retry(struct hv_ring_buffer *out_ring,
+                                        uint32 child_relid,
+                                        uint32 signal_conn_id,
+                                        int monitor_allocated,
+                                        uint8 monitorid, int dedicated,
+                                        const void *payload,
+                                        uint32 payload_len,
+                                        uint64 trans_id, uint32 flags,
+                                        uint32 *retry_count,
+                                        int32 *last_ret)
+{
+    uint32 retries = 0;
+    int ret;
+
+    for (;;) {
+        ret = hv_send_packet_on(out_ring, child_relid, signal_conn_id,
+                                monitor_allocated, monitorid, dedicated,
+                                payload, payload_len, trans_id, flags);
+        if (ret != -EAGAIN || retries >= HV_DXG_SEND_EAGAIN_RETRIES)
+            break;
+        retries++;
+        sleep_ms(1);
+    }
+    if (retry_count != NULL)
+        *retry_count = retries;
+    if (last_ret != NULL)
+        *last_ret = ret;
+    return ret;
+}
+
 static void hvdxg_command_vm_init(struct hvdxg_command_vm_to_host *hdr,
                                   uint32 command_type)
 {
@@ -10723,6 +24961,83 @@ static void hvdxg_command_vm_init(struct hvdxg_command_vm_to_host *hdr,
 static int hvdxg_luid_equal(struct hvdxg_winluid a, struct hvdxg_winluid b)
 {
     return a.a == b.a && a.b == b.b;
+}
+
+static int hvdxg_luid_nonzero(struct hvdxg_winluid luid)
+{
+    return luid.a != 0 || luid.b != 0;
+}
+
+static struct hvdxg_winluid hvdxg_user_adapter_luid(uint32 *source_out)
+{
+    struct hvdxg_winluid luid;
+
+    if (source_out != NULL)
+        *source_out = HV_DXG_USER_LUID_SOURCE_NONE;
+    if (hvdxg_luid_nonzero(hvdxg.adapter_luid) &&
+        (!hvdxg_luid_nonzero(hvdxg.host_adapter_luid) ||
+         !hvdxg_luid_equal(hvdxg.adapter_luid,
+                           hvdxg.host_adapter_luid))) {
+        if (source_out != NULL)
+            *source_out = HV_DXG_USER_LUID_SOURCE_ADAPTER;
+        return hvdxg.adapter_luid;
+    }
+    if (hvdxg_luid_nonzero(hvdxg.host_vgpu_luid)) {
+        if (source_out != NULL)
+            *source_out = HV_DXG_USER_LUID_SOURCE_HOST_VGPU;
+        return hvdxg.host_vgpu_luid;
+    }
+    if (hvdxg_luid_nonzero(hvdxg.pci_host_vgpu_luid)) {
+        if (source_out != NULL)
+            *source_out = HV_DXG_USER_LUID_SOURCE_PCI_HOST_VGPU;
+        return hvdxg.pci_host_vgpu_luid;
+    }
+    luid = hvdxg_luid_from_guid(&hvdxg.vgpu_instance);
+    if (hvdxg_luid_nonzero(luid)) {
+        if (source_out != NULL)
+            *source_out = HV_DXG_USER_LUID_SOURCE_GUID;
+        return luid;
+    }
+    return luid;
+}
+
+static struct hvdxg_winluid hvdxg_ext_adapter_luid(
+    const struct hvdxg_winluid *process_luid)
+{
+    struct hvdxg_winluid zero;
+
+    if (process_luid != NULL && hvdxg_luid_nonzero(*process_luid))
+        return *process_luid;
+    if (hvdxg_luid_nonzero(hvdxg.host_vgpu_luid))
+        return hvdxg.host_vgpu_luid;
+    if (hvdxg_luid_nonzero(hvdxg.pci_host_vgpu_luid))
+        return hvdxg.pci_host_vgpu_luid;
+    memset(&zero, 0, sizeof(zero));
+    return zero;
+}
+
+static int hvdxg_ntstatus_plausible(struct hvdxg_ntstatus status)
+{
+    uint32 v = (uint32)status.v;
+
+    switch (v) {
+    case 0x00000000U:
+    case HV_DXG_STATUS_PENDING:
+    case 0x80000005U:
+    case 0x80000006U:
+    case 0xC0000001U:
+    case 0xC0000008U:
+    case 0xC000000DU:
+    case 0xC0000017U:
+    case 0xC0000022U:
+    case 0xC0000023U:
+    case 0xC00002B6U:
+        return 1;
+    default:
+        break;
+    }
+
+    return (v & 0xC0000000U) == 0xC0000000U;
 }
 
 static int hvdxg_ntstatus_to_errno(struct hvdxg_ntstatus status)
@@ -10756,11 +25071,32 @@ static struct hvdxg_winluid hvdxg_luid_from_guid(const struct hv_guid *guid)
     return luid;
 }
 
+static void hvdxg_set_waiting(uint64 trans_id, uint32 channel, uint32 relid)
+{
+    __atomic_store_n(&hvdxg.waiting_channel, channel, __ATOMIC_RELEASE);
+    __atomic_store_n(&hvdxg.waiting_relid, relid, __ATOMIC_RELEASE);
+    __atomic_store_n(&hvdxg.waiting_trans_id, trans_id, __ATOMIC_RELEASE);
+}
+
+static void hvdxg_clear_waiting(void)
+{
+    __atomic_store_n(&hvdxg.waiting_trans_id, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&hvdxg.waiting_relid, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&hvdxg.waiting_channel, HV_DXG_CHANNEL_NONE,
+                     __ATOMIC_RELEASE);
+}
+
 static void hvdxg_capture_completion(const uint8 *payload, uint32 payload_len,
-                                     uint16 type, uint64 trans_id)
+                                     uint16 type, uint64 trans_id,
+                                     uint32 source_channel,
+                                     uint32 source_relid)
 {
     uint64 waiting = __atomic_load_n(&hvdxg.waiting_trans_id,
                                      __ATOMIC_ACQUIRE);
+    uint32 waiting_channel =
+        __atomic_load_n(&hvdxg.waiting_channel, __ATOMIC_ACQUIRE);
+    uint32 waiting_relid =
+        __atomic_load_n(&hvdxg.waiting_relid, __ATOMIC_ACQUIRE);
     uint32 copy_len = payload_len > HV_DXG_RESULT_BYTES ?
                       HV_DXG_RESULT_BYTES : payload_len;
     uint32 prefix_len = payload_len > HV_DXG_PREFIX_BYTES ?
@@ -10772,7 +25108,8 @@ static void hvdxg_capture_completion(const uint8 *payload, uint32 payload_len,
     if (prefix_len != 0)
         memcpy(hvdxg.probe_last_prefix, payload, prefix_len);
 
-    if (waiting == 0 || trans_id != waiting)
+    if (waiting == 0 || trans_id != waiting ||
+        waiting_channel != source_channel || waiting_relid != source_relid)
         return;
 
     memset(hvdxg.completion_buf, 0, sizeof(hvdxg.completion_buf));
@@ -10920,6 +25257,8 @@ static int hvdxg_process_host_to_vm_packet(const uint8 *payload,
 }
 
 static void hvdxg_process_channel_packets(struct hv_ring_buffer *in_ring,
+                                          uint32 source_channel,
+                                          uint32 source_relid,
                                           uint32 *counter)
 {
     uint8 *pkt = hvdxg.rx_buf;
@@ -10944,9 +25283,40 @@ static void hvdxg_process_channel_packets(struct hv_ring_buffer *in_ring,
         if (type == VM_PKT_DATA_INBAND && in_ring == hvdxg.global_in_ring &&
             hvdxg_process_host_to_vm_packet(payload, payload_len))
             continue;
-        if (type == VM_PKT_COMP || type == VM_PKT_DATA_INBAND)
-            hvdxg_capture_completion(payload, payload_len, type,
-                                     desc->trans_id);
+        if (type == VM_PKT_COMP || type == VM_PKT_DATA_INBAND) {
+            uint64 waiting =
+                __atomic_load_n(&hvdxg.waiting_trans_id,
+                                __ATOMIC_ACQUIRE);
+            uint32 waiting_channel =
+                __atomic_load_n(&hvdxg.waiting_channel, __ATOMIC_ACQUIRE);
+            uint32 waiting_relid =
+                __atomic_load_n(&hvdxg.waiting_relid, __ATOMIC_ACQUIRE);
+            uint32 waiting_match =
+                waiting != 0 && desc->trans_id == waiting ? 1 : 0;
+            uint32 channel_match =
+                waiting_match && waiting_channel == source_channel &&
+                waiting_relid == source_relid ? 1 : 0;
+
+            hvdxg.completion_desc_type = desc->type;
+            hvdxg.completion_desc_flags = desc->flags;
+            hvdxg.completion_desc_len8 = desc->len8;
+            hvdxg.completion_desc_offset8 = desc->offset8;
+            hvdxg.completion_packet_len = plen;
+            hvdxg.completion_packet_offset = off;
+            hvdxg.completion_payload_len = payload_len;
+            hvdxg.completion_desc_trans_id = desc->trans_id;
+            hvdxg.completion_waiting_trans_id = waiting;
+            hvdxg.completion_source_channel = source_channel;
+            hvdxg.completion_source_relid = source_relid;
+            hvdxg.completion_waiting_channel = waiting_channel;
+            hvdxg.completion_waiting_relid = waiting_relid;
+            hvdxg.completion_waiting_match = waiting_match;
+            hvdxg.completion_waiting_channel_match = channel_match;
+            if (type == VM_PKT_COMP)
+                hvdxg_capture_completion(payload, payload_len, type,
+                                         desc->trans_id, source_channel,
+                                         source_relid);
+        }
     }
 }
 
@@ -10958,24 +25328,66 @@ static void hvdxg_pump_channels(void)
     }
     if (hvdxg.global_open_ok)
         hvdxg_process_channel_packets(hvdxg.global_in_ring,
+                                      HV_DXG_CHANNEL_GLOBAL,
+                                      hvdxg.global_relid,
                                       &hvdxg.global_rx_packets);
     if (hvdxg.vgpu_open_ok)
         hvdxg_process_channel_packets(hvdxg.vgpu_in_ring,
+                                      HV_DXG_CHANNEL_VGPU,
+                                      hvdxg.vgpu_relid,
                                       &hvdxg.vgpu_rx_packets);
     __atomic_store_n(&hvdxg.pump_active, 0, __ATOMIC_RELEASE);
 }
 
-static int hvdxg_wait_host_event(uint64 event_id, uint64 timeout_ms)
+static void hvdxg_note_cpu_wait_state(struct hvdxg_open_state *owner,
+                                      const struct hvdxg_d3dkmthandle *objects,
+                                      const uint64 *fence_values,
+                                      uint32 object_count, uint64 event_id,
+                                      uint32 async_event, uint32 result)
+{
+    uint32 object = object_count != 0 && objects != NULL ?
+                    objects[0].v : 0;
+
+    hvdxg.syncwait_last_event = event_id;
+    hvdxg.syncwait_last_async = async_event;
+    hvdxg.syncwait_last_object = object;
+    hvdxg.syncwait_last_fence =
+        object_count != 0 && fence_values != NULL ? fence_values[0] : 0;
+    hvdxg.syncwait_last_current =
+        hvdxg_owner_sync_fence_value(owner, object);
+    hvdxg.syncwait_last_result = result;
+    if ((result == 1 || result == 2) && object_count != 0 &&
+        objects != NULL && fence_values != NULL)
+        hvdxg_note_allocation_wait(owner, object, fence_values[0], 0,
+                                   result);
+}
+
+static int hvdxg_wait_host_event_or_cpu_fence(
+    struct hvdxg_open_state *owner,
+    const struct hvdxg_d3dkmthandle *objects,
+    const uint64 *fence_values, uint32 object_count, int wait_any,
+    uint64 event_id, uint64 timeout_ms)
 {
     for (uint64 i = 0; i < timeout_ms; i++) {
         hvdxg_pump_events_ms(1);
         if (hvdxg_host_event_is_signaled(event_id)) {
             hvdxg.host_event_wait_successes++;
+            hvdxg_note_cpu_wait_state(owner, objects, fence_values,
+                                      object_count, event_id, 0, 1);
+            return 0;
+        }
+        if (hvdxg_wait_cpu_fences_already_satisfied(
+                owner, objects, fence_values, object_count, wait_any)) {
+            hvdxg.host_event_wait_successes++;
+            hvdxg_note_cpu_wait_state(owner, objects, fence_values,
+                                      object_count, event_id, 0, 2);
             return 0;
         }
         sleep_ms(1);
     }
     hvdxg.host_event_wait_timeouts++;
+    hvdxg_note_cpu_wait_state(owner, objects, fence_values, object_count,
+                              event_id, 0, 3);
     return -ETIMEDOUT;
 }
 
@@ -11038,8 +25450,7 @@ static int hvdxg_wait_completion(uint64 trans_id, void *out,
                 *actual_len = hvdxg.completion_len;
             __atomic_store_n(&hvdxg.completion_pending, 0,
                              __ATOMIC_RELEASE);
-            __atomic_store_n(&hvdxg.waiting_trans_id, 0,
-                             __ATOMIC_RELEASE);
+            hvdxg_clear_waiting();
             return 0;
         }
 #if defined(__x86_64__) || defined(__i386__)
@@ -11061,41 +25472,390 @@ static int hvdxg_wait_completion(uint64 trans_id, void *out,
                 *actual_len = hvdxg.completion_len;
             __atomic_store_n(&hvdxg.completion_pending, 0,
                              __ATOMIC_RELEASE);
-            __atomic_store_n(&hvdxg.waiting_trans_id, 0,
-                             __ATOMIC_RELEASE);
+            hvdxg_clear_waiting();
             return 0;
         }
         sleep_ms(1);
     }
-    __atomic_store_n(&hvdxg.waiting_trans_id, 0, __ATOMIC_RELEASE);
+    hvdxg_clear_waiting();
     if (actual_len != NULL)
         *actual_len = 0;
     return -ETIMEDOUT;
 }
 
-static int hvdxg_send_sync_vgpu(const void *cmd, uint32 cmd_len,
-                                void *result, uint32 result_len,
-                                uint32 *actual_len)
+static void hvdxg_capture_queryadapter_send(
+    const void *cmd, uint32 cmd_len, const void *send_cmd, uint32 wire_len,
+    const struct hvdxg_ext_header *ext, int route_global)
+{
+    const uint8 *wire = (const uint8 *)send_cmd;
+    uint32 cmd_off = ext != NULL ? ext->command_offset : 0;
+    uint32 type_off;
+    uint32 size_off;
+    uint32 data_off;
+
+    memset(hvdxg.queryadapter_packet_ext_bytes, 0,
+           sizeof(hvdxg.queryadapter_packet_ext_bytes));
+    memset(hvdxg.queryadapter_packet_cmdhdr, 0,
+           sizeof(hvdxg.queryadapter_packet_cmdhdr));
+    memset(hvdxg.queryadapter_packet_priv_head, 0,
+           sizeof(hvdxg.queryadapter_packet_priv_head));
+
+    hvdxg.queryadapter_packet_type = 0;
+    hvdxg.queryadapter_packet_size = 0;
+    hvdxg.queryadapter_packet_cmd_len = cmd_len;
+    hvdxg.queryadapter_packet_wire_len = wire_len;
+    hvdxg.queryadapter_packet_ext = ext != NULL ? 1 : 0;
+    hvdxg.queryadapter_packet_ext_offset = cmd_off;
+    hvdxg.queryadapter_send_route = route_global ? 2 : 1;
+    hvdxg.queryadapter_send_ext_luid_low =
+        ext != NULL ? ext->vgpu_luid.a : 0;
+    hvdxg.queryadapter_send_ext_luid_high =
+        ext != NULL ? ext->vgpu_luid.b : 0;
+    hvdxg.queryadapter_packet_desc_size = sizeof(struct vmpacket_descriptor);
+    hvdxg.queryadapter_packet_len =
+        hvdxg.queryadapter_packet_desc_size + wire_len;
+    hvdxg.queryadapter_packet_aligned =
+        (hvdxg.queryadapter_packet_len + 7U) & ~7U;
+    hvdxg.queryadapter_packet_pad =
+        hvdxg.queryadapter_packet_aligned - hvdxg.queryadapter_packet_len;
+    hvdxg.queryadapter_packet_desc_off8 =
+        hvdxg.queryadapter_packet_desc_size >> 3;
+    hvdxg.queryadapter_packet_desc_len8 =
+        hvdxg.queryadapter_packet_aligned >> 3;
+    hvdxg.queryadapter_packet_ring_total =
+        hvdxg.queryadapter_packet_aligned + sizeof(uint64);
+
+    hvdxg.queryadapter_packet_type_offset = 0;
+    hvdxg.queryadapter_packet_size_offset = 0;
+    hvdxg.queryadapter_packet_data_offset = 0;
+    hvdxg.queryadapter_packet_ext_len = 0;
+    hvdxg.queryadapter_packet_cmdhdr_len = 0;
+    hvdxg.queryadapter_packet_priv_head_len = 0;
+
+    if (wire == NULL || cmd == NULL || cmd_off > wire_len)
+        return;
+
+    if (ext != NULL) {
+        uint32 ext_len = sizeof(*ext);
+
+        if (ext_len > wire_len)
+            ext_len = wire_len;
+        hvdxg.queryadapter_packet_ext_len = ext_len;
+        if (ext_len > sizeof(hvdxg.queryadapter_packet_ext_bytes))
+            ext_len = sizeof(hvdxg.queryadapter_packet_ext_bytes);
+        memcpy(hvdxg.queryadapter_packet_ext_bytes, wire, ext_len);
+    }
+
+    type_off = cmd_off +
+        __builtin_offsetof(struct hvdxg_command_queryadapterinfo_wsl,
+                           query_type);
+    size_off = cmd_off +
+        __builtin_offsetof(struct hvdxg_command_queryadapterinfo_wsl,
+                           private_data_size);
+    data_off = cmd_off +
+        __builtin_offsetof(struct hvdxg_command_queryadapterinfo_wsl,
+                           private_data);
+    hvdxg.queryadapter_packet_type_offset = type_off;
+    hvdxg.queryadapter_packet_size_offset = size_off;
+    hvdxg.queryadapter_packet_data_offset = data_off;
+
+    if (cmd_off < wire_len) {
+        uint32 cmdhdr_len = wire_len - cmd_off;
+
+        if (cmdhdr_len > sizeof(hvdxg.queryadapter_packet_cmdhdr))
+            cmdhdr_len = sizeof(hvdxg.queryadapter_packet_cmdhdr);
+        hvdxg.queryadapter_packet_cmdhdr_len = cmdhdr_len;
+        memcpy(hvdxg.queryadapter_packet_cmdhdr, wire + cmd_off, cmdhdr_len);
+    }
+    if (type_off + sizeof(uint32) <= wire_len)
+        memcpy(&hvdxg.queryadapter_packet_type, wire + type_off,
+               sizeof(uint32));
+    if (size_off + sizeof(uint32) <= wire_len)
+        memcpy(&hvdxg.queryadapter_packet_size, wire + size_off,
+               sizeof(uint32));
+    if (data_off < wire_len) {
+        uint32 priv_len = wire_len - data_off;
+
+        if (priv_len > sizeof(hvdxg.queryadapter_packet_priv_head))
+            priv_len = sizeof(hvdxg.queryadapter_packet_priv_head);
+        hvdxg.queryadapter_packet_priv_head_len = priv_len;
+        memcpy(hvdxg.queryadapter_packet_priv_head, wire + data_off,
+               priv_len);
+    }
+}
+
+static void hvdxg_capture_queryadapter_completion(void)
+{
+    uint32 prefix_len = hvdxg.completion_len < 8 ?
+                        hvdxg.completion_len : 8;
+
+    hvdxg.queryadapter_completion_desc_type = hvdxg.completion_desc_type;
+    hvdxg.queryadapter_completion_desc_flags = hvdxg.completion_desc_flags;
+    hvdxg.queryadapter_completion_desc_len8 = hvdxg.completion_desc_len8;
+    hvdxg.queryadapter_completion_desc_offset8 =
+        hvdxg.completion_desc_offset8;
+    hvdxg.queryadapter_completion_packet_len = hvdxg.completion_packet_len;
+    hvdxg.queryadapter_completion_packet_offset =
+        hvdxg.completion_packet_offset;
+    hvdxg.queryadapter_completion_payload_len =
+        hvdxg.completion_payload_len;
+    hvdxg.queryadapter_completion_trans_id = hvdxg.completion_desc_trans_id;
+    hvdxg.queryadapter_completion_waiting_trans_id =
+        hvdxg.completion_waiting_trans_id;
+    hvdxg.queryadapter_completion_source_channel =
+        hvdxg.completion_source_channel;
+    hvdxg.queryadapter_completion_source_relid =
+        hvdxg.completion_source_relid;
+    hvdxg.queryadapter_completion_waiting_channel =
+        hvdxg.completion_waiting_channel;
+    hvdxg.queryadapter_completion_waiting_relid =
+        hvdxg.completion_waiting_relid;
+    hvdxg.queryadapter_completion_waiting_match =
+        hvdxg.completion_waiting_match;
+    hvdxg.queryadapter_completion_waiting_channel_match =
+        hvdxg.completion_waiting_channel_match;
+    hvdxg.queryadapter_completion_type = hvdxg.completion_type;
+    hvdxg.queryadapter_completion_len = hvdxg.completion_len;
+    memset(hvdxg.queryadapter_completion_prefix, 0,
+           sizeof(hvdxg.queryadapter_completion_prefix));
+    if (prefix_len != 0)
+        memcpy(hvdxg.queryadapter_completion_prefix,
+               hvdxg.completion_buf, prefix_len);
+}
+
+static int hvdxg_should_capture_queryadapter_send(const void *cmd,
+                                                  uint32 flags)
+{
+    const struct hvdxg_command_queryadapterinfo_wsl *query = cmd;
+
+    if (cmd == NULL)
+        return 1;
+    if (query->query_type == HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID &&
+        (flags & HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER) &&
+        hvdxg.queryadapter_packet_type ==
+            HV_DXG_QAITYPE_ADAPTER_HARDWARE_ID &&
+        hvdxg.queryadapter_packet_ext)
+        return 0;
+    if (query->query_type == HV_DXG_QAITYPE_SELECTED_ADAPTER &&
+        (flags & HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU) &&
+        hvdxg.queryadapter_packet_type == HV_DXG_QAITYPE_SELECTED_ADAPTER)
+        return 0;
+    return 1;
+}
+
+static int hvdxg_send_sync_vgpu_flags_luid(
+    const void *cmd, uint32 cmd_len, void *result, uint32 result_len,
+    uint32 *actual_len, uint32 flags,
+    const struct hvdxg_winluid *ext_luid)
 {
     struct hvdxg_ext_header *ext = NULL;
     uint32 send_len = cmd_len;
     const void *send_cmd = cmd;
     uint64 trans_id;
+    int route_global = 0;
     int ret;
 
     if (!hvdxg.vgpu_open_ok || hvdxg.vgpu_out_ring == NULL)
         return -ENODEV;
+    if (!(flags & HV_DXG_SEND_SYNC_VGPU_F_FORCE_VGPU) &&
+        hvdxg.probe_async_msg_enabled &&
+        hvdxg.global_open_ok && hvdxg.global_out_ring != NULL)
+        route_global = 1;
 
-    if (hvdxg.use_ext_header) {
+    if (hvdxg.use_ext_header &&
+        !(flags & HV_DXG_SEND_SYNC_VGPU_F_NO_EXT_HEADER)) {
         send_len = cmd_len + sizeof(*ext);
         ext = kvmalloc(send_len);
         if (ext == NULL)
             return -ENOMEM;
         memset(ext, 0, sizeof(*ext));
         ext->command_offset = sizeof(*ext);
-        ext->vgpu_luid = hvdxg.host_vgpu_luid;
+        ext->vgpu_luid = hvdxg_ext_adapter_luid(ext_luid);
         memcpy((uint8 *)ext + sizeof(*ext), cmd, cmd_len);
         send_cmd = ext;
+    }
+    hvdxg.vgpu_send_last_command =
+        ((const struct hvdxg_command_vgpu_to_host *)cmd)->command_type;
+    hvdxg.vgpu_send_last_cmd_len = cmd_len;
+    hvdxg.vgpu_send_last_wire_len = send_len;
+    hvdxg.vgpu_send_last_ext = ext != NULL ? 1 : 0;
+    hvdxg.vgpu_send_last_ext_offset =
+        ext != NULL ? ext->command_offset : 0;
+    hvdxg.vgpu_send_last_process =
+        ((const struct hvdxg_command_vgpu_to_host *)cmd)->process.v;
+    hvdxg.vgpu_send_last_channel =
+        ((const struct hvdxg_command_vgpu_to_host *)cmd)->channel_type;
+    hvdxg.vgpu_send_last_route_global = route_global;
+    hvdxg.vgpu_send_last_retries = 0;
+    hvdxg.vgpu_send_last_ret = 0;
+    if (ext != NULL)
+        hvdxg.vgpu_send_last_luid = ext->vgpu_luid;
+    else
+        memset(&hvdxg.vgpu_send_last_luid, 0,
+               sizeof(hvdxg.vgpu_send_last_luid));
+
+    ret = hvdxg_sync_acquire();
+    if (ret != 0) {
+        if (ext != NULL)
+            kvfree(ext);
+        return ret;
+    }
+    trans_id = hvdxg_next_trans_id();
+    __atomic_store_n(&hvdxg.completion_pending, 0, __ATOMIC_RELEASE);
+    hvdxg_set_waiting(trans_id,
+                      route_global ? HV_DXG_CHANNEL_GLOBAL :
+                      HV_DXG_CHANNEL_VGPU,
+                      route_global ? hvdxg.global_relid :
+                      hvdxg.vgpu_relid);
+    if (((const struct hvdxg_command_vgpu_to_host *)cmd)->command_type ==
+        HV_DXGK_VMBCOMMAND_QUERYADAPTERINFO &&
+        hvdxg_should_capture_queryadapter_send(cmd, flags)) {
+        hvdxg_capture_queryadapter_send(cmd, cmd_len, send_cmd, send_len,
+                                        ext, route_global);
+    }
+    if (route_global) {
+        ret = hvdxg_send_packet_with_retry(
+            hvdxg.global_out_ring, hvdxg.global_relid, hvdxg.global_conn_id,
+            hvdxg.global_monitor_allocated, hvdxg.global_monitorid,
+            hvdxg.global_dedicated, send_cmd, send_len, trans_id,
+            VM_PKT_COMPLETION_REQUESTED, &hvdxg.vgpu_send_last_retries,
+            &hvdxg.vgpu_send_last_ret);
+    } else {
+        ret = hvdxg_send_packet_with_retry(
+            hvdxg.vgpu_out_ring, hvdxg.vgpu_relid, hvdxg.vgpu_conn_id,
+            hvdxg.vgpu_monitor_allocated, hvdxg.vgpu_monitorid,
+            hvdxg.vgpu_dedicated, send_cmd, send_len, trans_id,
+            VM_PKT_COMPLETION_REQUESTED, &hvdxg.vgpu_send_last_retries,
+            &hvdxg.vgpu_send_last_ret);
+    }
+    if (ret != 0) {
+        hvdxg_clear_waiting();
+        hvdxg_sync_release();
+        if (ext != NULL)
+            kvfree(ext);
+        return ret;
+    }
+    hvdxg_note_host_command(
+        ((const struct hvdxg_command_vgpu_to_host *)cmd)->command_type);
+    ret = hvdxg_wait_completion(trans_id, result, result_len, actual_len,
+                                HV_DXG_WAIT_MS);
+    hvdxg_sync_release();
+    if (ext != NULL)
+        kvfree(ext);
+    return ret;
+}
+
+static int hvdxg_send_sync_vgpu_flags(const void *cmd, uint32 cmd_len,
+                                      void *result, uint32 result_len,
+                                      uint32 *actual_len, uint32 flags)
+{
+    return hvdxg_send_sync_vgpu_flags_luid(cmd, cmd_len, result,
+                                           result_len, actual_len, flags,
+                                           NULL);
+}
+
+static int hvdxg_send_sync_vgpu(const void *cmd, uint32 cmd_len,
+                                void *result, uint32 result_len,
+                                uint32 *actual_len)
+{
+    return hvdxg_send_sync_vgpu_flags(cmd, cmd_len, result, result_len,
+                                      actual_len, 0);
+}
+
+static void hvdxg_record_global_send_diag(
+    struct hvdxg_global_send_diag *diag,
+    const struct hvdxg_command_vm_to_host *vmcmd, uint32 cmd_len,
+    uint32 wire_len, uint32 result_len, const struct hvdxg_ext_header *ext)
+{
+    diag->command_id = vmcmd->command_id;
+    diag->command = vmcmd->command_type;
+    diag->cmd_len = cmd_len;
+    diag->wire_len = wire_len;
+    diag->result_len = result_len;
+    diag->ext = ext != NULL ? 1 : 0;
+    diag->ext_offset = ext != NULL ? ext->command_offset : 0;
+    diag->process = vmcmd->process.v;
+    diag->channel = vmcmd->channel_type;
+    diag->relid = hvdxg.global_relid;
+    diag->conn_id = hvdxg.global_conn_id;
+    diag->monitor_allocated = hvdxg.global_monitor_allocated;
+    diag->monitorid = hvdxg.global_monitorid;
+    diag->dedicated = hvdxg.global_dedicated;
+    diag->luid = hvdxg.global_send_last_luid;
+}
+
+static int hvdxg_send_sync_global_ex(const void *cmd, uint32 cmd_len,
+                                     void *result, uint32 result_len,
+                                     uint32 *actual_len, int force_ext_header,
+                                     int ext_host_vgpu_luid,
+                                     int suppress_ext_header)
+{
+    struct hvdxg_ext_header *ext = NULL;
+    const struct hvdxg_command_vm_to_host *vmcmd =
+        (const struct hvdxg_command_vm_to_host *)cmd;
+    uint32 send_len = cmd_len;
+    const void *send_cmd = cmd;
+    uint64 trans_id;
+    int ret;
+
+    if (!hvdxg.global_open_ok || hvdxg.global_out_ring == NULL)
+        return -ENODEV;
+
+    if (!suppress_ext_header &&
+        (hvdxg.use_ext_header || force_ext_header)) {
+        send_len = cmd_len + sizeof(*ext);
+        ext = kvmalloc(send_len);
+        if (ext == NULL)
+            return -ENOMEM;
+        memset(ext, 0, sizeof(*ext));
+        ext->command_offset = sizeof(*ext);
+        if (ext_host_vgpu_luid)
+            ext->vgpu_luid = hvdxg_ext_adapter_luid(NULL);
+        memcpy((uint8 *)ext + sizeof(*ext), cmd, cmd_len);
+        send_cmd = ext;
+    }
+    hvdxg.global_send_last_command = vmcmd->command_type;
+    hvdxg.global_send_last_cmd_len = cmd_len;
+    hvdxg.global_send_last_wire_len = send_len;
+    hvdxg.global_send_last_ext = ext != NULL ? 1 : 0;
+    hvdxg.global_send_last_ext_offset =
+        ext != NULL ? ext->command_offset : 0;
+    hvdxg.global_send_last_process = vmcmd->process.v;
+    hvdxg.global_send_last_channel = vmcmd->channel_type;
+    hvdxg.global_send_last_retries = 0;
+    hvdxg.global_send_last_ret = 0;
+    if (ext != NULL)
+        hvdxg.global_send_last_luid = ext->vgpu_luid;
+    else
+        memset(&hvdxg.global_send_last_luid, 0,
+               sizeof(hvdxg.global_send_last_luid));
+    switch (vmcmd->command_type) {
+    case HV_DXGK_VMBCOMMAND_CREATENTSHAREDOBJECT:
+        hvdxg_record_global_send_diag(&hvdxg.global_send_ntshared,
+                                      vmcmd, cmd_len, send_len,
+                                      result_len, ext);
+        if (ext != NULL)
+            hvdxg_record_global_send_diag(
+                &hvdxg.global_send_ntshared_ext, vmcmd, cmd_len,
+                send_len, result_len, ext);
+        break;
+    case HV_DXGK_VMBCOMMAND_SHAREOBJECTWITHHOST:
+        hvdxg_record_global_send_diag(&hvdxg.global_send_shareobject,
+                                      vmcmd, cmd_len, send_len,
+                                      result_len, ext);
+        break;
+    case HV_DXGK_VMBCOMMAND_DESTROYNTSHAREDOBJECT:
+        hvdxg_record_global_send_diag(&hvdxg.global_send_destroynt,
+                                      vmcmd, cmd_len, send_len,
+                                      result_len, ext);
+        break;
+    case HV_DXGK_VMBCOMMAND_DESTROYSYNCOBJECT:
+        hvdxg_record_global_send_diag(&hvdxg.global_send_destroysync,
+                                      vmcmd, cmd_len, send_len,
+                                      result_len, ext);
+        break;
+    default:
+        break;
     }
 
     ret = hvdxg_sync_acquire();
@@ -11106,20 +25866,22 @@ static int hvdxg_send_sync_vgpu(const void *cmd, uint32 cmd_len,
     }
     trans_id = hvdxg_next_trans_id();
     __atomic_store_n(&hvdxg.completion_pending, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&hvdxg.waiting_trans_id, trans_id, __ATOMIC_RELEASE);
-    ret = hv_send_packet_on(hvdxg.vgpu_out_ring, hvdxg.vgpu_relid,
-                            hvdxg.vgpu_conn_id,
-                            hvdxg.vgpu_monitor_allocated,
-                            hvdxg.vgpu_monitorid, hvdxg.vgpu_dedicated,
-                            send_cmd, send_len, trans_id,
-                            VM_PKT_COMPLETION_REQUESTED);
+    hvdxg_set_waiting(trans_id, HV_DXG_CHANNEL_GLOBAL, hvdxg.global_relid);
+    ret = hvdxg_send_packet_with_retry(
+        hvdxg.global_out_ring, hvdxg.global_relid, hvdxg.global_conn_id,
+        hvdxg.global_monitor_allocated, hvdxg.global_monitorid,
+        hvdxg.global_dedicated, send_cmd, send_len, trans_id,
+        VM_PKT_COMPLETION_REQUESTED, &hvdxg.global_send_last_retries,
+        &hvdxg.global_send_last_ret);
     if (ret != 0) {
-        __atomic_store_n(&hvdxg.waiting_trans_id, 0, __ATOMIC_RELEASE);
+        hvdxg_clear_waiting();
         hvdxg_sync_release();
         if (ext != NULL)
             kvfree(ext);
         return ret;
     }
+    hvdxg_note_host_command(
+        ((const struct hvdxg_command_vm_to_host *)cmd)->command_type);
     ret = hvdxg_wait_completion(trans_id, result, result_len, actual_len,
                                 HV_DXG_WAIT_MS);
     hvdxg_sync_release();
@@ -11132,67 +25894,90 @@ static int hvdxg_send_sync_global(const void *cmd, uint32 cmd_len,
                                   void *result, uint32 result_len,
                                   uint32 *actual_len)
 {
-    uint64 trans_id;
-    int ret;
-
-    if (!hvdxg.global_open_ok || hvdxg.global_out_ring == NULL)
-        return -ENODEV;
-
-    ret = hvdxg_sync_acquire();
-    if (ret != 0)
-        return ret;
-    trans_id = hvdxg_next_trans_id();
-    __atomic_store_n(&hvdxg.completion_pending, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&hvdxg.waiting_trans_id, trans_id, __ATOMIC_RELEASE);
-    ret = hv_send_packet_on(hvdxg.global_out_ring, hvdxg.global_relid,
-                            hvdxg.global_conn_id,
-                            hvdxg.global_monitor_allocated,
-                            hvdxg.global_monitorid, hvdxg.global_dedicated,
-                            cmd, cmd_len, trans_id,
-                            VM_PKT_COMPLETION_REQUESTED);
-    if (ret != 0) {
-        __atomic_store_n(&hvdxg.waiting_trans_id, 0, __ATOMIC_RELEASE);
-        hvdxg_sync_release();
-        return ret;
-    }
-    ret = hvdxg_wait_completion(trans_id, result, result_len, actual_len,
-                                HV_DXG_WAIT_MS);
-    hvdxg_sync_release();
-    return ret;
+    return hvdxg_send_sync_global_ex(cmd, cmd_len, result, result_len,
+                                     actual_len, 0, 0, 0);
 }
 
 static int hvdxg_create_process(void)
 {
-    struct hvdxg_command_createprocess cmd;
+    struct hvdxg_command_createprocess_wsl cmd_wsl;
     struct hvdxg_command_createprocess_return result;
     uint32 actual_len = 0;
     const char *name = current ? current->name : "xv6-dxg";
+    uint64 current_pid = current ? (uint64)current->pid : 1;
+    uint64 current_tgid = current ? (uint64)thread_tgid(current) :
+                          current_pid;
+    uint64 guest_process = hvdxg.dxg_process_guest != 0 ?
+                           hvdxg.dxg_process_guest :
+                           (current ? (uint64)current : 1);
+    uint64 process_id = hvdxg.dxg_process_pid != 0 ?
+                        hvdxg.dxg_process_pid :
+                        current_pid;
+    uint64 process_tgid = hvdxg.dxg_process_tgid != 0 ?
+                          hvdxg.dxg_process_tgid : current_tgid;
     int ret;
 
     if (hvdxg.dxg_process_created && hvdxg.dxg_process.v != 0)
         return 0;
 
-    memset(&cmd, 0, sizeof(cmd));
-    hvdxg_command_vm_init(&cmd.hdr, HV_DXGK_VMBCOMMAND_CREATEPROCESS);
-    cmd.process = current ? (uint64)current : 1;
-    cmd.process_id = current ? (uint64)current->tgid : 1;
+    hvdxg.createprocess_last_len = 0;
+    hvdxg.createprocess_last_cmd_len = sizeof(cmd_wsl);
+    hvdxg.createprocess_last_ret = 0;
+    hvdxg.createprocess_last_guest = guest_process;
+    hvdxg.createprocess_last_pid = process_id;
+    hvdxg.createprocess_last_tgid = process_tgid;
+    hvdxg.createprocess_last_handle = 0;
+    hvdxg.createprocess_last_layout = 1;
+    hvdxg.createprocess_last_generation = hvdxg.dxg_process_generation;
+
+    memset(&cmd_wsl, 0, sizeof(cmd_wsl));
+    hvdxg_command_vm_init(&cmd_wsl.hdr, HV_DXGK_VMBCOMMAND_CREATEPROCESS);
+    cmd_wsl.process = guest_process;
+    cmd_wsl.process_id = process_id;
     for (uint32 i = 0; i < HV_DXG_PROCESS_NAME_LENGTH && name[i] != 0; i++)
-        cmd.process_name[i] = (uint16)name[i];
-    cmd.flags = 0x8;
+        cmd_wsl.process_name[i] = (uint16)name[i];
+    cmd_wsl.flags = 0x8;
 
     memset(&result, 0, sizeof(result));
-    ret = hvdxg_send_sync_global(&cmd, sizeof(cmd), &result,
+    actual_len = 0;
+    ret = hvdxg_send_sync_global(&cmd_wsl, sizeof(cmd_wsl), &result,
                                  sizeof(result), &actual_len);
-    if (ret != 0)
+    hvdxg.createprocess_last_len = actual_len;
+    hvdxg.createprocess_last_cmd_len = sizeof(cmd_wsl);
+    hvdxg.createprocess_last_ret = ret;
+    hvdxg.createprocess_last_handle = result.hprocess.v;
+    hvdxg.createprocess_last_layout = 1;
+    if (ret != 0) {
+        hvdxg.dxg_process.v = 0;
+        hvdxg.dxg_process_created = 0;
+        hvdxg.d3dkmt_ready = 0;
         return ret;
-    if (actual_len < sizeof(result) || result.hprocess.v == 0)
+    }
+    if (actual_len < sizeof(result) || result.hprocess.v == 0) {
+        hvdxg.createprocess_last_ret = -EIO;
+        hvdxg.dxg_process.v = 0;
+        hvdxg.dxg_process_created = 0;
+        hvdxg.d3dkmt_ready = 0;
         return -EIO;
+    }
     hvdxg.dxg_process = result.hprocess;
     hvdxg.dxg_process_created = 1;
+    hvdxg.dxg_process_guest = guest_process;
+    hvdxg.dxg_process_pid = process_id;
+    hvdxg.dxg_process_tgid = process_tgid;
+    hvdxg.createprocess_success_len = actual_len;
+    hvdxg.createprocess_success_cmd_len = sizeof(cmd_wsl);
+    hvdxg.createprocess_success_ret = ret;
+    hvdxg.createprocess_success_guest = guest_process;
+    hvdxg.createprocess_success_pid = process_id;
+    hvdxg.createprocess_success_tgid = process_tgid;
+    hvdxg.createprocess_success_handle = result.hprocess.v;
+    hvdxg.createprocess_success_layout = 1;
+    hvdxg.createprocess_success_generation = hvdxg.dxg_process_generation;
     return 0;
 }
 
-static int hvdxg_d3dkmt_ensure(void)
+static int hvdxg_d3dkmt_ensure_adapter(void)
 {
     int ret;
 
@@ -11207,6 +25992,16 @@ static int hvdxg_d3dkmt_ensure(void)
         hvdxg.host_adapter_handle = hvdxg.probe_open_handle;
     if (hvdxg.adapter_luid.a == 0 && hvdxg.adapter_luid.b == 0)
         hvdxg.adapter_luid = hvdxg_luid_from_guid(&hvdxg.vgpu_instance);
+    return 0;
+}
+
+static int hvdxg_d3dkmt_ensure(void)
+{
+    int ret;
+
+    ret = hvdxg_d3dkmt_ensure_adapter();
+    if (ret != 0)
+        return ret;
     ret = hvdxg_create_process();
     if (ret != 0)
         return ret;
@@ -11224,45 +26019,116 @@ static int hvdxg_probe_transport(void)
     struct hvdxg_internal_adapter_info_return info_ret;
     uint32 actual_len = 0;
     uint32 info_result_len;
-    uint32 versions[2] = {
-        HV_DXG_VMBUS_INTERFACE_VERSION_OLD,
-        HV_DXG_VMBUS_INTERFACE_VERSION,
-    };
+    uint32 versions[2];
+    uint32 version_count = 0;
     int ret;
 
+    if (hvdxg_try_pci_guestcaps_scan() == -ENODEV)
+        hvdxg_note_missing_pci_guestcaps_once();
     if (!hvdxg.vgpu_open_ok)
         return -ENODEV;
+    if (!hvdxg.global_open_ok)
+        return -ENODEV;
+
+    if (hvdxg.active_vmbus_version == 0) {
+        uint32 initial_version = hvdxg_host_v40_signal() ?
+            HV_DXG_VMBUS_INTERFACE_VERSION :
+            HV_DXG_VMBUS_INTERFACE_VERSION_OLD;
+
+        hvdxg_set_active_vmbus_version(
+            initial_version, 0,
+            HV_DXG_VMBUS_LAST_COMPATIBLE_INTERFACE_VERSION);
+    }
+    if (hvdxg_host_v40_signal())
+        versions[version_count++] = HV_DXG_VMBUS_INTERFACE_VERSION;
+    versions[version_count++] = HV_DXG_VMBUS_INTERFACE_VERSION_OLD;
 
     hvdxg.probe_attempts++;
     hvdxg.probe_last_ret = -EIO;
     hvdxg.probe_open_status = 0;
     hvdxg.probe_open_handle = 0;
+    hvdxg.probe_open_requested_version = 0;
     hvdxg.probe_open_host_version = 0;
     hvdxg.probe_open_host_compat = 0;
     hvdxg.probe_info_len = 0;
     hvdxg.probe_info_flags = 0;
     hvdxg.probe_async_msg_enabled = 0;
+    hvdxg.probe_v40_open_send_ret = 0;
+    hvdxg.probe_v40_open_actual_len = 0;
+    hvdxg.probe_v40_open_status = 0;
+    hvdxg.probe_v40_open_handle = 0;
+    hvdxg.probe_v40_open_host_version = 0;
+    hvdxg.probe_v40_open_host_compat = 0;
+    hvdxg.probe_v40_open_guest_luid_low = 0;
+    hvdxg.probe_v40_open_guest_luid_high = 0;
+    hvdxg.probe_v40_getinternal_send_ret = 0;
+    hvdxg.probe_v40_getinternal_actual_len = 0;
+    hvdxg.probe_v40_getinternal_flags = 0;
+    hvdxg.probe_v40_reject_reason =
+        HV_DXG_PROBE_V40_REJECT_NOT_ATTEMPTED;
     hvdxg.use_ext_header = 0;
     hvdxg_apply_cmdline_host_luid();
 
-    for (uint32 i = 0; i < sizeof(versions) / sizeof(versions[0]); i++) {
+    ret = hvdxg_set_iospace_region();
+    hvdxg.probe_last_ret = ret;
+    if (ret != 0)
+        return ret;
+    for (uint32 i = 0; i < version_count; i++) {
+        uint32 requested_version = versions[i];
+        uint32 source = requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION ?
+                        3 : 4;
+
+        hvdxg.probe_async_msg_enabled = 0;
+        hvdxg_set_active_vmbus_version(
+            requested_version, source,
+            HV_DXG_VMBUS_LAST_COMPATIBLE_INTERFACE_VERSION);
         memset(&open, 0, sizeof(open));
         hvdxg_command_vgpu_init(&open.hdr, HV_DXGK_VMBCOMMAND_OPENADAPTER);
-        open.vmbus_interface_version = versions[i];
+        open.vmbus_interface_version = requested_version;
+        hvdxg.probe_open_requested_version = requested_version;
         open.vmbus_last_compatible_interface_version =
             HV_DXG_VMBUS_LAST_COMPATIBLE_INTERFACE_VERSION;
-        open.guest_adapter_luid = hvdxg_luid_from_guid(&hvdxg.vgpu_instance);
+        if (requested_version < HV_DXG_VMBUS_INTERFACE_VERSION)
+            open.guest_adapter_luid =
+                hvdxg_luid_from_guid(&hvdxg.vgpu_instance);
+        if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION) {
+            hvdxg.probe_v40_open_guest_luid_low =
+                open.guest_adapter_luid.a;
+            hvdxg.probe_v40_open_guest_luid_high =
+                open.guest_adapter_luid.b;
+        }
 
         memset(&open_ret, 0, sizeof(open_ret));
         actual_len = 0;
         ret = hvdxg_send_sync_vgpu(&open, sizeof(open), &open_ret,
                                    sizeof(open_ret), &actual_len);
         hvdxg.probe_last_ret = ret;
-        if (ret != 0)
+        if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION) {
+            hvdxg.probe_v40_open_send_ret = ret;
+            hvdxg.probe_v40_open_actual_len = actual_len;
+            hvdxg.probe_v40_open_status = open_ret.status.v;
+            hvdxg.probe_v40_open_handle =
+                open_ret.host_adapter_handle.v;
+            hvdxg.probe_v40_open_host_version =
+                open_ret.vmbus_interface_version;
+            hvdxg.probe_v40_open_host_compat =
+                open_ret.vmbus_last_compatible_interface_version;
+            hvdxg.probe_v40_reject_reason =
+                HV_DXG_PROBE_V40_REJECT_OPEN_SEND;
+        }
+        if (ret != 0) {
+            if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION)
+                hvdxg.active_vmbus_fallbacks++;
             continue;
+        }
         if (actual_len < sizeof(open_ret)) {
             hvdxg.probe_last_ret = -EOVERFLOW;
             ret = -EOVERFLOW;
+            if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION) {
+                hvdxg.probe_v40_reject_reason =
+                    HV_DXG_PROBE_V40_REJECT_OPEN_SHORT;
+                hvdxg.active_vmbus_fallbacks++;
+            }
             continue;
         }
 
@@ -11271,56 +26137,113 @@ static int hvdxg_probe_transport(void)
         hvdxg.probe_open_host_version = open_ret.vmbus_interface_version;
         hvdxg.probe_open_host_compat =
             open_ret.vmbus_last_compatible_interface_version;
-        hvdxg.adapter_luid = open.guest_adapter_luid;
+        if (hvdxg_luid_nonzero(open.guest_adapter_luid))
+            hvdxg.adapter_luid = open.guest_adapter_luid;
+        else
+            hvdxg.adapter_luid =
+                hvdxg_luid_from_guid(&hvdxg.vgpu_instance);
         hvdxg.host_adapter_handle = open_ret.host_adapter_handle.v;
         if (open_ret.status.v < 0) {
             hvdxg.probe_last_ret = open_ret.status.v;
             ret = -EIO;
+            if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION) {
+                hvdxg.probe_v40_reject_reason =
+                    HV_DXG_PROBE_V40_REJECT_OPEN_STATUS;
+                hvdxg.active_vmbus_fallbacks++;
+            }
             continue;
         }
         if (open_ret.host_adapter_handle.v == 0) {
             hvdxg.probe_last_ret = -EIO;
             ret = -EIO;
+            if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION) {
+                hvdxg.probe_v40_reject_reason =
+                    HV_DXG_PROBE_V40_REJECT_OPEN_ZERO_HANDLE;
+                hvdxg.active_vmbus_fallbacks++;
+            }
             continue;
         }
-        ret = 0;
-        break;
-    }
-    if (ret != 0)
-        return ret;
 
-    hvdxg.probe_successes++;
+        memset(&info, 0, sizeof(info));
+        hvdxg_command_vgpu_init(&info.hdr,
+                                HV_DXGK_VMBCOMMAND_GETINTERNALADAPTERINFO);
+        memset(&info_ret, 0, sizeof(info_ret));
+        actual_len = 0;
+        info_result_len = sizeof(info_ret);
+        if (requested_version < HV_DXG_VMBUS_INTERFACE_VERSION)
+            info_result_len -= sizeof(struct hvdxg_winluid);
+        ret = hvdxg_send_sync_vgpu(&info, sizeof(info), &info_ret,
+                                   info_result_len, &actual_len);
+        hvdxg.probe_last_ret = ret;
+        if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION) {
+            hvdxg.probe_v40_getinternal_send_ret = ret;
+            hvdxg.probe_v40_getinternal_actual_len = actual_len;
+            hvdxg.probe_v40_getinternal_flags =
+                actual_len >= sizeof(uint32) * 4 ? info_ret.flags : 0;
+            hvdxg.probe_v40_reject_reason =
+                HV_DXG_PROBE_V40_REJECT_GETINTERNAL_SEND;
+        }
+        if (ret != 0) {
+            hvdxg.use_ext_header = 0;
+            if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION)
+                hvdxg.active_vmbus_fallbacks++;
+            continue;
+        }
+        if (actual_len <
+                offsetof(struct hvdxg_internal_adapter_info_return,
+                         device_description)) {
+            hvdxg.probe_last_ret = -EOVERFLOW;
+            ret = -EOVERFLOW;
+            hvdxg.use_ext_header = 0;
+            if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION) {
+                hvdxg.probe_v40_reject_reason =
+                    HV_DXG_PROBE_V40_REJECT_GETINTERNAL_SHORT;
+                hvdxg.active_vmbus_fallbacks++;
+            }
+            continue;
+        }
+        if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION &&
+            actual_len <
+                offsetof(struct hvdxg_internal_adapter_info_return,
+                         device_instance_id)) {
+            hvdxg.probe_last_ret = -EOVERFLOW;
+            ret = -EOVERFLOW;
+            hvdxg.use_ext_header = 0;
+            hvdxg.probe_v40_reject_reason =
+                HV_DXG_PROBE_V40_REJECT_GETINTERNAL_SHORT;
+            hvdxg.active_vmbus_fallbacks++;
+            continue;
+        }
 
-    memset(&info, 0, sizeof(info));
-    hvdxg_command_vgpu_init(&info.hdr,
-                            HV_DXGK_VMBCOMMAND_GETINTERNALADAPTERINFO);
-    memset(&info_ret, 0, sizeof(info_ret));
-    actual_len = 0;
-    info_result_len = sizeof(info_ret);
-    if (hvdxg.probe_open_host_version < HV_DXG_VMBUS_INTERFACE_VERSION)
-        info_result_len -= sizeof(struct hvdxg_winluid);
-    ret = hvdxg_send_sync_vgpu(&info, sizeof(info), &info_ret,
-                               info_result_len, &actual_len);
-    hvdxg.probe_last_ret = ret;
-    if (ret != 0)
-        return 0;
-    hvdxg.probe_info_len = actual_len;
-    if (actual_len >= sizeof(uint32) * 4) {
+        hvdxg.probe_info_len = actual_len;
         hvdxg.probe_info_flags = info_ret.flags;
         hvdxg.probe_async_msg_enabled = (info_ret.flags >> 6) & 1U;
         hvdxg.host_adapter_luid = info_ret.host_adapter_luid;
-        if (actual_len >= sizeof(info_ret) &&
-            (info_ret.host_vgpu_luid.a != 0 ||
-             info_ret.host_vgpu_luid.b != 0))
+        if (actual_len >=
+                offsetof(struct hvdxg_internal_adapter_info_return,
+                         host_vgpu_luid) +
+                    sizeof(info_ret.host_vgpu_luid) &&
+            hvdxg_luid_nonzero(info_ret.host_vgpu_luid))
             hvdxg.host_vgpu_luid = info_ret.host_vgpu_luid;
-        else if (hvdxg.pci_host_vgpu_luid.a != 0 ||
-                 hvdxg.pci_host_vgpu_luid.b != 0)
+        else if (hvdxg_luid_nonzero(hvdxg.pci_host_vgpu_luid))
             hvdxg.host_vgpu_luid = hvdxg.pci_host_vgpu_luid;
-        if (hvdxg.probe_open_host_version >=
-                HV_DXG_VMBUS_INTERFACE_VERSION &&
-            (hvdxg.host_vgpu_luid.a != 0 || hvdxg.host_vgpu_luid.b != 0))
-            hvdxg.use_ext_header = 1;
+        hvdxg_set_active_vmbus_version(
+            requested_version, source,
+            open_ret.vmbus_last_compatible_interface_version);
+        if (requested_version >= HV_DXG_VMBUS_INTERFACE_VERSION)
+            hvdxg.probe_v40_reject_reason =
+                HV_DXG_PROBE_V40_REJECT_NONE;
+        ret = 0;
+        break;
     }
+    if (ret != 0) {
+        hvdxg_set_active_vmbus_version(HV_DXG_VMBUS_INTERFACE_VERSION_OLD,
+                                       4,
+                                       HV_DXG_VMBUS_LAST_COMPATIBLE_INTERFACE_VERSION);
+        return ret;
+    }
+
+    hvdxg.probe_successes++;
     return 0;
 }
 
@@ -11340,6 +26263,9 @@ static void hv_process_events(void)
     if (hvvideo.open_ok && hvvideo.child_relid != 0 &&
         hv_test_and_clear_event(hvvideo.child_relid))
         hvvideo_process_channel_packets();
+    if (hvpci.open_ok && hvpci.child_relid != 0 &&
+        hv_test_and_clear_event(hvpci.child_relid))
+        hvpci_process_channel_packets();
     if (hvdxg.global_open_ok && hvdxg.global_relid != 0 &&
         hv_test_and_clear_event(hvdxg.global_relid))
         hvdxg_pump_channels();
@@ -11369,6 +26295,8 @@ static int hv_wait_flag(volatile int *flag)
             hvnet_process_channel_packets();
         if (hvvideo.open_ok)
             hvvideo_process_channel_packets();
+        if (hvpci.open_ok)
+            hvpci_process_channel_packets();
         if (*flag)
             return 0;
         sleep_ms(10);
@@ -11427,6 +26355,17 @@ static void hvvideo_ring_init(void)
     memset(hvvideo.ring, 0, HV_RING_PAGES * PGSIZE);
     hvvideo.out_ring->feature_bits = 1;
     hvvideo.in_ring->feature_bits = 1;
+}
+
+static void hvpci_ring_init(void)
+{
+    hvpci.out_ring = (struct hv_ring_buffer *)hvpci.ring;
+    hvpci.in_ring =
+        (struct hv_ring_buffer *)(hvpci.ring + HV_SEND_PAGES * PGSIZE);
+
+    memset(hvpci.ring, 0, HV_RING_PAGES * PGSIZE);
+    hvpci.out_ring->feature_bits = 1;
+    hvpci.in_ring->feature_bits = 1;
 }
 
 static uint32 hv_ring_datasize(struct hv_ring_buffer *ring, uint32 pages)
@@ -11509,7 +26448,7 @@ static int hv_send_packet_type_on(struct hv_ring_buffer *out_ring,
     out_ring->write_index = write;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-    if (monitor_allocated || old_write == read)
+    if (hv_ring_should_signal(out_ring, old_write))
         hv_signal_channel(child_relid, signal_conn_id, monitor_allocated,
                           monitorid, dedicated);
     return 0;
@@ -11585,7 +26524,7 @@ static int hv_send_packet_mpb_on(struct hv_ring_buffer *out_ring,
     out_ring->write_index = write;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-    if (monitor_allocated || old_write == read)
+    if (hv_ring_should_signal(out_ring, old_write))
         hv_signal_channel(child_relid, signal_conn_id, monitor_allocated,
                           monitorid, dedicated);
     return 0;
@@ -11636,6 +26575,253 @@ static int hv_recv_raw(void *buf, uint32 buflen, uint32 *out_len,
                        uint16 *out_type)
 {
     return hv_recv_raw_on(hv.in_ring, buf, buflen, out_len, out_type);
+}
+
+static void hvpci_process_channel_packets(void)
+{
+    uint8 buf[2048];
+    uint32 len;
+    uint16 type;
+    int ret;
+
+    if (hvpci.in_ring == NULL)
+        return;
+
+    for (;;) {
+        memset(buf, 0, sizeof(buf));
+        ret = hv_recv_raw_on(hvpci.in_ring, buf, sizeof(buf), &len, &type);
+        if (ret != 0 || len == 0)
+            break;
+
+        hvpci.protocol_last_packet_type = type;
+        hvpci.protocol_last_len = len;
+        hvpci_copy_prefix(hvpci.protocol_last_prefix, buf, len);
+
+        if (type == VM_PKT_COMP && len >= sizeof(struct hvpci_response)) {
+            struct hvpci_response *rsp = (struct hvpci_response *)buf;
+            if (hvpci.protocol_pending &&
+                rsp->hdr.trans_id == hvpci.protocol_last_trans_id) {
+                hvpci.protocol_last_status = rsp->status;
+                __atomic_store_n(&hvpci.protocol_pending, 0,
+                                 __ATOMIC_RELEASE);
+            }
+            if (hvpci.d0_pending &&
+                rsp->hdr.trans_id == hvpci.d0_trans_id) {
+                hvpci.d0_status = rsp->status;
+                hvpci.d0_packet_type = type;
+                hvpci.d0_len = len;
+                hvpci_copy_prefix(hvpci.d0_prefix, buf, len);
+                __atomic_store_n(&hvpci.d0_pending, 0,
+                                 __ATOMIC_RELEASE);
+            }
+        } else if (type == VM_PKT_DATA_INBAND) {
+            uint32 msg_type = 0;
+
+            if (len >= sizeof(struct vmpacket_descriptor) +
+                sizeof(msg_type))
+                memcpy(&msg_type, buf + sizeof(struct vmpacket_descriptor),
+                       sizeof(msg_type));
+            if (msg_type == HVPCI_BUS_RELATIONS ||
+                msg_type == HVPCI_BUS_RELATIONS2) {
+                hvpci.query_packet_type = type;
+                hvpci.query_len = len;
+                hvpci.query_trans_id =
+                    ((struct vmpacket_descriptor *)buf)->trans_id;
+                hvpci_copy_prefix(hvpci.query_prefix, buf, len);
+                (void)hvpci_parse_bus_relations(buf, len);
+            }
+        }
+    }
+}
+
+static int hvpci_wait_protocol_response(void)
+{
+    for (int i = 0; i < HV_WAIT_LOOPS; i++) {
+        hv_process_messages();
+        if (hvpci.open_ok && hvpci.child_relid != 0 &&
+            hv_test_and_clear_event(hvpci.child_relid))
+            hvpci_process_channel_packets();
+        hvpci_process_channel_packets();
+        if (!__atomic_load_n(&hvpci.protocol_pending, __ATOMIC_ACQUIRE))
+            return 0;
+        sleep_ms(10);
+    }
+    return -ETIMEDOUT;
+}
+
+static int hvpci_negotiate_protocol(void)
+{
+    static const uint32 versions[] = {
+        HVPCI_PROTOCOL_VERSION_1_4,
+        HVPCI_PROTOCOL_VERSION_1_3,
+        HVPCI_PROTOCOL_VERSION_1_2,
+        HVPCI_PROTOCOL_VERSION_1_1,
+    };
+    struct hvpci_version_request req;
+    int ret = -EIO;
+
+    if (!hvpci.open_ok || hvpci.out_ring == NULL)
+        return -ENODEV;
+
+    hvpci.protocol_ok = 0;
+    hvpci.protocol_selected_version = 0;
+    hvpci.protocol_last_status = 0;
+    hvpci.protocol_last_ret = 0;
+
+    for (uint32 i = 0; i < sizeof(versions) / sizeof(versions[0]); i++) {
+        memset(&req, 0, sizeof(req));
+        req.type = HVPCI_QUERY_PROTOCOL_VERSION;
+        req.protocol_version = versions[i];
+
+        hvpci.protocol_attempts++;
+        hvpci.protocol_last_version = versions[i];
+        hvpci.protocol_last_status = (int32)0x80000000U;
+        hvpci.protocol_last_trans_id =
+            ((uint64)hvpci.protocol_attempts << 32) | versions[i];
+        __atomic_store_n(&hvpci.protocol_pending, 1, __ATOMIC_RELEASE);
+
+        ret = hv_send_packet_on(hvpci.out_ring, hvpci.child_relid,
+                                hvpci.signal_conn_id,
+                                hvpci.monitor_allocated, hvpci.monitorid,
+                                hvpci.dedicated, &req, sizeof(req),
+                                hvpci.protocol_last_trans_id,
+                                VM_PKT_COMPLETION_REQUESTED);
+        hvpci.protocol_last_ret = ret;
+        if (ret != 0) {
+            __atomic_store_n(&hvpci.protocol_pending, 0, __ATOMIC_RELEASE);
+            return ret;
+        }
+
+        ret = hvpci_wait_protocol_response();
+        hvpci.protocol_last_ret = ret;
+        if (ret != 0) {
+            __atomic_store_n(&hvpci.protocol_pending, 0, __ATOMIC_RELEASE);
+            return ret;
+        }
+
+        if (hvpci.protocol_last_status >= 0) {
+            hvpci.protocol_selected_version = versions[i];
+            hvpci.protocol_ok = 1;
+            hvpci.protocol_last_ret = 0;
+            return 0;
+        }
+        if ((uint32)hvpci.protocol_last_status !=
+                HVPCI_STATUS_REVISION_MISMATCH) {
+            hvpci.protocol_last_ret = -EIO;
+            return -EIO;
+        }
+    }
+
+    hvpci.protocol_last_ret = -EIO;
+    return -EIO;
+}
+
+static int hvpci_wait_d0_response(void)
+{
+    for (int i = 0; i < HV_WAIT_LOOPS; i++) {
+        hv_process_messages();
+        if (hvpci.open_ok && hvpci.child_relid != 0 &&
+            hv_test_and_clear_event(hvpci.child_relid))
+            hvpci_process_channel_packets();
+        hvpci_process_channel_packets();
+        if (!__atomic_load_n(&hvpci.d0_pending, __ATOMIC_ACQUIRE))
+            return 0;
+        sleep_ms(10);
+    }
+    return -ETIMEDOUT;
+}
+
+static int hvpci_enter_d0(void)
+{
+    struct hvpci_bus_d0_entry req;
+    int ret;
+
+    hvpci.d0_attempts++;
+    hvpci.d0_status = (int32)0x80000000U;
+    hvpci.d0_ret = 0;
+    hvpci.d0_sent = 0;
+
+    if (!hvpci.open_ok || hvpci.out_ring == NULL)
+        return hvpci.d0_ret = -ENODEV;
+    if (!hvpci.config_window_ok)
+        return hvpci.d0_ret = hvpci.config_window_ret ?
+            hvpci.config_window_ret : -ENODEV;
+
+    memset(&req, 0, sizeof(req));
+    req.message_type.type = HVPCI_BUS_D0ENTRY;
+    req.mmio_base = hvpci.config_window_pa;
+
+    hvpci.d0_trans_id =
+        ((uint64)hvpci.d0_attempts << 32) | HVPCI_BUS_D0ENTRY;
+    __atomic_store_n(&hvpci.d0_pending, 1, __ATOMIC_RELEASE);
+    ret = hv_send_packet_on(hvpci.out_ring, hvpci.child_relid,
+                            hvpci.signal_conn_id, hvpci.monitor_allocated,
+                            hvpci.monitorid, hvpci.dedicated, &req,
+                            sizeof(req), hvpci.d0_trans_id,
+                            VM_PKT_COMPLETION_REQUESTED);
+    hvpci.d0_ret = ret;
+    if (ret != 0) {
+        __atomic_store_n(&hvpci.d0_pending, 0, __ATOMIC_RELEASE);
+        return ret;
+    }
+    hvpci.d0_sent++;
+
+    ret = hvpci_wait_d0_response();
+    hvpci.d0_ret = ret;
+    if (ret != 0) {
+        __atomic_store_n(&hvpci.d0_pending, 0, __ATOMIC_RELEASE);
+        return ret;
+    }
+    if (hvpci.d0_status < 0) {
+        hvpci.d0_ret = -EIO;
+        return -EIO;
+    }
+    hvpci.d0_ret = 0;
+    return 0;
+}
+
+static int hvpci_wait_bus_relations(uint32 seen_before)
+{
+    for (int i = 0; i < HV_WAIT_LOOPS; i++) {
+        hv_process_messages();
+        if (hvpci.open_ok && hvpci.child_relid != 0 &&
+            hv_test_and_clear_event(hvpci.child_relid))
+            hvpci_process_channel_packets();
+        hvpci_process_channel_packets();
+        if (hvpci.relations_seen != seen_before)
+            return 0;
+        sleep_ms(10);
+    }
+    return -ETIMEDOUT;
+}
+
+static int hvpci_query_bus_relations(void)
+{
+    struct hvpci_message req;
+    uint32 seen_before;
+    int ret;
+
+    if (!hvpci.open_ok || hvpci.out_ring == NULL)
+        return hvpci.query_ret = -ENODEV;
+
+    memset(&req, 0, sizeof(req));
+    req.type = HVPCI_QUERY_BUS_RELATIONS;
+    hvpci.query_attempts++;
+    hvpci.query_trans_id =
+        ((uint64)hvpci.query_attempts << 32) | HVPCI_QUERY_BUS_RELATIONS;
+    seen_before = hvpci.relations_seen;
+    ret = hv_send_packet_on(hvpci.out_ring, hvpci.child_relid,
+                            hvpci.signal_conn_id, hvpci.monitor_allocated,
+                            hvpci.monitorid, hvpci.dedicated, &req,
+                            sizeof(req), hvpci.query_trans_id, 0);
+    hvpci.query_ret = ret;
+    if (ret != 0)
+        return ret;
+    hvpci.query_sent++;
+
+    ret = hvpci_wait_bus_relations(seen_before);
+    hvpci.query_ret = ret;
+    return ret;
 }
 
 static int hv_establish_gpadl_large(uint32 child_relid, uint32 gpadl,
@@ -13332,6 +28518,14 @@ static int hvvideo_establish_gpadl(void)
                                     &hvvideo.gpadl_status);
 }
 
+static int hvpci_establish_gpadl(void)
+{
+    return hv_establish_gpadl_large(hvpci.child_relid, HV_PCI_GPADL_HANDLE,
+                                    hvpci.ring_pa, HV_RING_PAGES * PGSIZE,
+                                    &hvpci.gpadl_ok,
+                                    &hvpci.gpadl_status);
+}
+
 static int hvdxg_global_establish_gpadl(void)
 {
     return hv_establish_gpadl_large(hvdxg.global_relid,
@@ -13857,6 +29051,8 @@ void hyperv_input_init(void)
         return;
 
     hv.present = 1;
+    mutex_init(&hvdxg.process_lock, "hvdxg_proc");
+    spin_init(&hvpci.config_lock, "hvpci_cfg");
     printf("hyperv-input: probing VMBus synthetic input\n");
 
     if (hv_setup_synic() != 0) {
@@ -13965,6 +29161,43 @@ void hyperv_input_init(void)
         printf("hyperv-video: synthetic video offer not found\n");
     }
 
+    if (hvpci.present) {
+        hvpci.ring_pa = (uint64)page_alloc(HV_RING_ORDER, PAGE_TYPE_ANON);
+        if (hvpci.ring_pa == 0) {
+            hvpci.protocol_last_ret = -ENOMEM;
+            printf("hyperv-pci: ring allocation failed\n");
+        } else {
+            hvpci.ring = (uint8 *)hvpci.ring_pa;
+            hvpci_ring_init();
+            if (hvpci_establish_gpadl() != 0) {
+                hvpci.protocol_last_ret = -EIO;
+                printf("hyperv-pci: GPADL failed status=%u\n",
+                       hvpci.gpadl_status);
+            } else if (hvdxg_open_channel(hvpci.child_relid,
+                                          HV_PCI_GPADL_HANDLE,
+                                          &hvpci.open_ok) != 0) {
+                hvpci.protocol_last_ret = -EIO;
+                printf("hyperv-pci: open failed status=%u\n",
+                       hvpci.open_status);
+            } else if (hvpci_negotiate_protocol() != 0) {
+                printf("hyperv-pci: protocol negotiation failed version=0x%x status=%d ret=%d\n",
+                       hvpci.protocol_last_version,
+                       hvpci.protocol_last_status,
+                       hvpci.protocol_last_ret);
+            } else {
+                (void)hvpci_register_backend();
+                (void)hvpci_config_window_init();
+                (void)hvpci_enter_d0();
+                (void)hvpci_query_bus_relations();
+                printf("hyperv-pci: channel open relid=%u version=0x%x\n",
+                       hvpci.child_relid,
+                       hvpci.protocol_selected_version);
+            }
+        }
+    } else {
+        printf("hyperv-pci: offer not found\n");
+    }
+
     if (hvdxg.global_present) {
         hvdxg.global_ring_pa = (uint64)page_alloc(HV_RING_ORDER,
                                                   PAGE_TYPE_ANON);
@@ -13985,6 +29218,9 @@ void hyperv_input_init(void)
             } else {
                 printf("hyperv-dxg: global transport open relid=%u\n",
                        hvdxg.global_relid);
+                if (hvdxg_try_pci_guestcaps_scan() == -ENODEV)
+                    hvdxg_note_missing_pci_guestcaps_once();
+                (void)hvdxg_set_iospace_region();
             }
         }
     }
@@ -14228,6 +29464,29 @@ void hyperv_video_dirty(uint32 x, uint32 y, uint32 w, uint32 h)
     hvvideo_flush_dirty(0);
 }
 
+int hyperv_video_get_status(struct hyperv_video_status *status)
+{
+    if (status == NULL)
+        return -EINVAL;
+    memset(status, 0, sizeof(*status));
+    status->present = hvvideo.present;
+    status->gpadl_ok = hvvideo.gpadl_ok;
+    status->open_ok = hvvideo.open_ok;
+    status->initialized = hvvideo.initialized;
+    status->dirt_needed = hvvideo.dirt_needed;
+    status->child_relid = hvvideo.child_relid;
+    status->gpadl_status = hvvideo.gpadl_status;
+    status->open_status = hvvideo.open_status;
+    if (platform.has_framebuffer) {
+        status->vram_gpa = platform.framebuffer_base;
+        status->width = platform.framebuffer_width;
+        status->height = platform.framebuffer_height;
+        status->pitch = platform.framebuffer_pitch;
+        status->bpp = platform.framebuffer_bpp;
+    }
+    return 0;
+}
+
 #else
 
 void hyperv_input_init(void) {}
@@ -14240,6 +29499,14 @@ void hyperv_video_dirty(uint32 x, uint32 y, uint32 w, uint32 h)
     (void)y;
     (void)w;
     (void)h;
+}
+
+int hyperv_video_get_status(struct hyperv_video_status *status)
+{
+    if (status == NULL)
+        return -EINVAL;
+    memset(status, 0, sizeof(*status));
+    return -ENODEV;
 }
 
 #endif

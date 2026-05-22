@@ -56,6 +56,13 @@
 /* Maximum number of auxiliary vector entries */
 #define AT_VECTOR_SIZE 20
 
+/*
+ * Keep the initial exec stack payload away from the bottom edge of the stack
+ * VMA. Some dynamic loaders probe one byte before argv/env strings; if exec
+ * places a string at the exact low edge, that benign probe becomes SEGV_MAPERR.
+ */
+#define EXEC_STACK_BOTTOM_SLACK 16UL
+
 int flags2vmperm(int flags) {
     int perm = 0;
     if (flags & 0x1)
@@ -251,6 +258,20 @@ static uint64 exec_hwcap2(void)
     return 0;
 }
 
+static int exec_stack_push(uint64 *sp, size_t len, uint64 floor)
+{
+    uint64 nsp;
+
+    if (sp == NULL || len > *sp)
+        return -1;
+    nsp = *sp - len;
+    nsp -= nsp & 15;
+    if (nsp < floor)
+        return -1;
+    *sp = nsp;
+    return 0;
+}
+
 static char *exec_flatten_strings(char **strings, uint64 count, size_t *out_len)
 {
     size_t len = 0;
@@ -307,6 +328,7 @@ int exec(char *path, char **argv, char **envp) {
     uint64 argc, envc, sp;
     uint64 ustack[MAXARG + MAXENV + AT_VECTOR_SIZE * 2 + 8];
     uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
+    uint64 stackfloor = stackbase + EXEC_STACK_BOTTOM_SLACK;
     struct elfhdr elf;
     struct vfs_file *file = NULL;
     struct proghdr ph;
@@ -581,13 +603,12 @@ int exec(char *path, char **argv, char **envp) {
         {
             goto bad;
         }
-        sp -= strlen(argv[argc]) + 1;
-        sp -= sp & 15; // riscv sp must be 16-byte aligned
-        if (sp < stackbase)
+        size_t len = strlen(argv[argc]) + 1;
+        if (exec_stack_push(&sp, len, stackfloor) != 0)
         {
             goto bad;
         }
-        if (vm_copyout(tmp_vm, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
+        if (vm_copyout(tmp_vm, sp, argv[argc], len) < 0)
         {
             goto bad;
         }
@@ -602,13 +623,12 @@ int exec(char *path, char **argv, char **envp) {
             {
                 goto bad;
             }
-            sp -= strlen(envp[envc]) + 1;
-            sp -= sp & 15;
-            if (sp < stackbase)
+            size_t len = strlen(envp[envc]) + 1;
+            if (exec_stack_push(&sp, len, stackfloor) != 0)
             {
                 goto bad;
             }
-            if (vm_copyout(tmp_vm, sp, envp[envc], strlen(envp[envc]) + 1) < 0)
+            if (vm_copyout(tmp_vm, sp, envp[envc], len) < 0)
             {
                 goto bad;
             }
@@ -618,9 +638,7 @@ int exec(char *path, char **argv, char **envp) {
 
     uint8 random_bytes[16];
     random_fill_bytes(random_bytes, sizeof(random_bytes));
-    sp -= sizeof(random_bytes);
-    sp -= sp & 15;
-    if (sp < stackbase)
+    if (exec_stack_push(&sp, sizeof(random_bytes), stackfloor) != 0)
     {
         goto bad;
     }
@@ -631,26 +649,24 @@ int exec(char *path, char **argv, char **envp) {
     }
 
     const char *platform = exec_platform_string();
-    sp -= strlen(platform) + 1;
-    sp -= sp & 15;
-    if (sp < stackbase)
+    size_t platform_len = strlen(platform) + 1;
+    if (exec_stack_push(&sp, platform_len, stackfloor) != 0)
     {
         goto bad;
     }
     uint64 platform_addr = sp;
-    if (vm_copyout(tmp_vm, sp, (char *)platform, strlen(platform) + 1) < 0)
+    if (vm_copyout(tmp_vm, sp, (char *)platform, platform_len) < 0)
     {
         goto bad;
     }
 
-    sp -= strlen(path) + 1;
-    sp -= sp & 15;
-    if (sp < stackbase)
+    size_t execfn_len = strlen(path) + 1;
+    if (exec_stack_push(&sp, execfn_len, stackfloor) != 0)
     {
         goto bad;
     }
     uint64 execfn_addr = sp;
-    if (vm_copyout(tmp_vm, sp, path, strlen(path) + 1) < 0)
+    if (vm_copyout(tmp_vm, sp, path, execfn_len) < 0)
     {
         goto bad;
     }
@@ -726,9 +742,7 @@ int exec(char *path, char **argv, char **envp) {
     size_t auxv_len = (size_t)(aidx - auxv_start_idx) * sizeof(uint64);
 
     uint64 nslots = (uint64)aidx;
-    sp -= nslots * sizeof(uint64);
-    sp -= sp & 15;
-    if (sp < stackbase)
+    if (exec_stack_push(&sp, nslots * sizeof(uint64), stackfloor) != 0)
     {
         goto bad;
     }

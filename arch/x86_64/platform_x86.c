@@ -34,6 +34,7 @@ static const char *x86_mem_source = "fallback";
 static uint32 x86_cpu_apic_ids[MAX_CPUS];
 static int x86_cpu_apic_id_count;
 static int x86_acpi_cpu_ids_loaded;
+static int x86_acpi_pci_diag_logged;
 
 extern void arch_relocate_stack_finish(uint64 delta);
 
@@ -239,6 +240,208 @@ static int x86_acpi_sig_eq(const char got[4], const char want[4])
            got[2] == want[2] && got[3] == want[3];
 }
 
+static uint16 x86_acpi_read_u16(const void *base, uint32 off)
+{
+    uint16 val;
+    memcpy(&val, ((const uint8 *)base) + off, sizeof(val));
+    return val;
+}
+
+static uint32 x86_acpi_read_u32(const void *base, uint32 off)
+{
+    uint32 val;
+    memcpy(&val, ((const uint8 *)base) + off, sizeof(val));
+    return val;
+}
+
+static uint64 x86_acpi_read_u64(const void *base, uint32 off)
+{
+    uint64 val;
+    memcpy(&val, ((const uint8 *)base) + off, sizeof(val));
+    return val;
+}
+
+static int x86_acpi_table_ok(const struct acpi_sdt_header *hdr)
+{
+    return hdr != NULL && hdr->length >= sizeof(*hdr) &&
+           x86_acpi_checksum_ok(hdr, hdr->length);
+}
+
+static int x86_acpi_blob_has_ascii(const uint8 *base, uint32 len,
+                                   const char *needle)
+{
+    size_t needle_len = strlen(needle);
+
+    if (base == NULL || needle_len == 0 || len < needle_len)
+        return 0;
+    for (uint32 i = 0; i <= len - needle_len; i++) {
+        if (memcmp(base + i, needle, needle_len) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int x86_acpi_blob_has_u32(const uint8 *base, uint32 len, uint32 needle)
+{
+    if (base == NULL || len < sizeof(uint32))
+        return 0;
+    for (uint32 i = 0; i <= len - sizeof(uint32); i++) {
+        if (x86_acpi_read_u32(base, i) == needle)
+            return 1;
+    }
+    return 0;
+}
+
+static void x86_acpi_print_sig(const char sig[4])
+{
+    printf("%c%c%c%c", sig[0], sig[1], sig[2], sig[3]);
+}
+
+static void x86_acpi_scan_pci_root_hids(const struct acpi_sdt_header *hdr,
+                                        int *pnp0a03, int *pnp0a08)
+{
+    int has_pnp0a03;
+    int has_pnp0a08;
+
+    if (!x86_acpi_table_ok(hdr))
+        return;
+
+    has_pnp0a03 = x86_acpi_blob_has_ascii((const uint8 *)hdr, hdr->length,
+                                          "PNP0A03") ||
+                  x86_acpi_blob_has_u32((const uint8 *)hdr, hdr->length,
+                                        0x030AD041);
+    has_pnp0a08 = x86_acpi_blob_has_ascii((const uint8 *)hdr, hdr->length,
+                                          "PNP0A08") ||
+                  x86_acpi_blob_has_u32((const uint8 *)hdr, hdr->length,
+                                        0x080AD041);
+    if (has_pnp0a03) {
+        (*pnp0a03)++;
+        printf("ACPI: PCI root HID PNP0A03 present in ");
+        x86_acpi_print_sig(hdr->signature);
+        printf("\n");
+    }
+    if (has_pnp0a08) {
+        (*pnp0a08)++;
+        printf("ACPI: PCI root HID PNP0A08 present in ");
+        x86_acpi_print_sig(hdr->signature);
+        printf("\n");
+    }
+}
+
+static void x86_acpi_scan_facp_dsdt(const struct acpi_sdt_header *facp,
+                                    int *pnp0a03, int *pnp0a08)
+{
+    uint64 dsdt_addr = 0;
+    const struct acpi_sdt_header *dsdt;
+
+    if (!x86_acpi_table_ok(facp))
+        return;
+
+    if (facp->length >= 148)
+        dsdt_addr = x86_acpi_read_u64(facp, 140);
+    if (dsdt_addr == 0 && facp->length >= 44)
+        dsdt_addr = x86_acpi_read_u32(facp, 40);
+    if (dsdt_addr == 0 || dsdt_addr >= 0x100000000ULL) {
+        printf("ACPI: FACP DSDT pointer unavailable for PCI root HID scan\n");
+        return;
+    }
+
+    dsdt = (const struct acpi_sdt_header *)dsdt_addr;
+    if (dsdt == NULL || !x86_acpi_sig_eq(dsdt->signature, "DSDT")) {
+        printf("ACPI: FACP DSDT pointer did not reference DSDT\n");
+        return;
+    }
+    x86_acpi_scan_pci_root_hids(dsdt, pnp0a03, pnp0a08);
+}
+
+static int x86_acpi_log_mcfg(const struct acpi_sdt_header *mcfg)
+{
+    enum {
+        MCFG_RESERVED_OFFSET = sizeof(struct acpi_sdt_header),
+        MCFG_ALLOCATION_OFFSET = sizeof(struct acpi_sdt_header) + 8,
+        MCFG_ALLOCATION_SIZE = 16,
+    };
+    uint32 off = MCFG_ALLOCATION_OFFSET;
+    int entries = 0;
+
+    if (!x86_acpi_table_ok(mcfg) || mcfg->length < MCFG_ALLOCATION_OFFSET) {
+        printf("ACPI: MCFG present but invalid\n");
+        return 1;
+    }
+
+    while (off + MCFG_ALLOCATION_SIZE <= mcfg->length) {
+        uint64 ecam_base = x86_acpi_read_u64(mcfg, off);
+        uint16 segment = x86_acpi_read_u16(mcfg, off + 8);
+        uint8 start_bus = ((const uint8 *)mcfg)[off + 10];
+        uint8 end_bus = ((const uint8 *)mcfg)[off + 11];
+
+        printf("ACPI: MCFG entry %d ecam=0x%lx segment=%d bus=%d-%d\n",
+               entries, ecam_base, segment, start_bus, end_bus);
+        entries++;
+        off += MCFG_ALLOCATION_SIZE;
+    }
+
+    printf("ACPI: MCFG present entries=%d reserved=0x%lx\n", entries,
+           x86_acpi_read_u64(mcfg, MCFG_RESERVED_OFFSET));
+    return 1;
+}
+
+static void x86_acpi_log_pci_diagnostics(const struct acpi_sdt_header *root,
+                                         int use_xsdt)
+{
+    uint32 entries;
+    int mcfg_count = 0;
+    int facp_count = 0;
+    int ssdt_count = 0;
+    int skipped_high = 0;
+    int pnp0a03 = 0;
+    int pnp0a08 = 0;
+
+    if (x86_acpi_pci_diag_logged)
+        return;
+    x86_acpi_pci_diag_logged = 1;
+
+    entries = (root->length - sizeof(*root)) / (use_xsdt ? 8 : 4);
+    printf("ACPI: PCI diagnostics root=%s entries=%d\n",
+           use_xsdt ? "XSDT" : "RSDT", entries);
+
+    for (uint32 i = 0; i < entries; i++) {
+        uint64 addr;
+        const struct acpi_sdt_header *hdr;
+
+        if (use_xsdt)
+            addr = ((const uint64 *)(root + 1))[i];
+        else
+            addr = ((const uint32 *)(root + 1))[i];
+        if (addr == 0)
+            continue;
+        if (addr >= 0x100000000ULL) {
+            skipped_high++;
+            continue;
+        }
+
+        hdr = (const struct acpi_sdt_header *)addr;
+        if (hdr == NULL || hdr->length < sizeof(*hdr))
+            continue;
+
+        if (x86_acpi_sig_eq(hdr->signature, "MCFG"))
+            mcfg_count += x86_acpi_log_mcfg(hdr);
+        else if (x86_acpi_sig_eq(hdr->signature, "FACP")) {
+            facp_count++;
+            x86_acpi_scan_facp_dsdt(hdr, &pnp0a03, &pnp0a08);
+        } else if (x86_acpi_sig_eq(hdr->signature, "SSDT")) {
+            ssdt_count++;
+            x86_acpi_scan_pci_root_hids(hdr, &pnp0a03, &pnp0a08);
+        }
+    }
+
+    if (mcfg_count == 0)
+        printf("ACPI: MCFG absent from root table\n");
+    printf("ACPI: PCI diagnostics summary MCFG=%d FACP=%d SSDT=%d skipped_hi=%d PNP0A03=%d PNP0A08=%d\n",
+           mcfg_count, facp_count, ssdt_count, skipped_high, pnp0a03,
+           pnp0a08);
+}
+
 static int x86_count_madt_cpus(const struct acpi_madt *madt, uint32 *ids,
                                int max_ids)
 {
@@ -312,6 +515,7 @@ static int x86_detect_acpi_cpu_count(void)
     if (use_xsdt) {
         if (!x86_acpi_sig_eq(root->signature, "XSDT"))
             return 0;
+        x86_acpi_log_pci_diagnostics(root, use_xsdt);
         entries = (root->length - sizeof(*root)) / 8;
         const uint64 *table = (const uint64 *)(root + 1);
         for (uint32 i = 0; i < entries; i++) {
@@ -329,6 +533,7 @@ static int x86_detect_acpi_cpu_count(void)
     } else {
         if (!x86_acpi_sig_eq(root->signature, "RSDT"))
             return 0;
+        x86_acpi_log_pci_diagnostics(root, use_xsdt);
         entries = (root->length - sizeof(*root)) / 4;
         const uint32 *table = (const uint32 *)(root + 1);
         for (uint32 i = 0; i < entries; i++) {
