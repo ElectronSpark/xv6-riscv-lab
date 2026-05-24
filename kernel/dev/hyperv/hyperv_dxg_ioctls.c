@@ -1307,7 +1307,12 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         hvdxg.last_device_handle = req.device.v;
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
-        if (ret == 0 && owner != NULL) {
+        if (ret != 0) {
+            int destroy_ret = hvdxg_destroy_device_host_process(
+                create_process.v, req.device.v);
+            hvdxg_note_createdevice_unwind(create_process.v, req.device.v,
+                                           destroy_ret);
+        } else if (owner != NULL) {
             if (hvdxg_track_object(owner, HV_DXG_OBJECT_DEVICE,
                                    req.device.v, local_adapter,
                                    req.device.v) != 0 ||
@@ -1323,7 +1328,10 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                                   req.device.v);
                 hvdxg_process_adapter_remove_device(owner->process_state,
                                                     req.device.v);
-                (void)hvdxg_destroy_device_host(req.device.v);
+                int destroy_ret = hvdxg_destroy_device_host_process(
+                    create_process.v, req.device.v);
+                hvdxg_note_createdevice_unwind(create_process.v,
+                                               req.device.v, destroy_ret);
                 ret = -ENOMEM;
             }
         }
@@ -5115,11 +5123,23 @@ submithwqueue_done:
             actual_len >= sizeof(*create) + req.priv_drv_data_size - 1 &&
             either_copyout(1, req.priv_drv_data, create->priv_drv_data,
                            req.priv_drv_data_size) < 0) {
+            int destroy_ret;
             ret = -EFAULT;
+            destroy_ret = hvdxg_destroy_context_host_process(
+                create_process.v, create->context.v);
+            hvdxg_note_createcontext_unwind(create_process.v,
+                                            create->context.v, destroy_ret);
             goto createcontext_done;
         }
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
+        if (ret != 0) {
+            int destroy_ret = hvdxg_destroy_context_host_process(
+                create_process.v, req.context.v);
+            hvdxg_note_createcontext_unwind(create_process.v,
+                                            req.context.v, destroy_ret);
+            goto createcontext_done;
+        }
         if (ret == 0 && owner != NULL) {
             if (hvdxg_track_object(owner, HV_DXG_OBJECT_CONTEXT,
                                    req.context.v, req.device.v,
@@ -5130,7 +5150,13 @@ submithwqueue_done:
                                       req.context.v) != 0) {
                 hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT,
                                      req.context.v);
-                (void)hvdxg_destroy_context_host(req.context.v);
+                {
+                    int destroy_ret = hvdxg_destroy_context_host_process(
+                        create_process.v, req.context.v);
+                    hvdxg_note_createcontext_unwind(create_process.v,
+                                                    req.context.v,
+                                                    destroy_ret);
+                }
                 ret = -ENOMEM;
             }
         }
@@ -5241,8 +5267,14 @@ createcontext_done:
         hvdxg.createhwqueue_last_fence_gpu = req.queue_progress_fence_gpu_va;
         if (create->hwqueue_progress_fence_cpuva != 0 &&
             req.queue_progress_fence_cpu_va == 0) {
+            int destroy_ret;
             ret = -ENOMEM;
             hvdxg.createhwqueue_last_ret = ret;
+            destroy_ret = hvdxg_destroy_hwqueue_host_process(
+                create_process.v, req.queue.v);
+            hvdxg_note_createhwqueue_unwind(create_process.v, req.queue.v,
+                                            req.queue_progress_fence.v,
+                                            destroy_ret);
             goto createhwqueue_done;
         }
         if (req.priv_drv_data_size != 0 &&
@@ -5256,12 +5288,26 @@ createcontext_done:
             actual_len >= sizeof(*create) + req.priv_drv_data_size - 1 &&
             either_copyout(1, req.priv_drv_data, create->priv_drv_data,
                            req.priv_drv_data_size) < 0) {
+            int destroy_ret;
             ret = -EFAULT;
+            destroy_ret = hvdxg_destroy_hwqueue_host_process(
+                create_process.v, req.queue.v);
+            hvdxg_note_createhwqueue_unwind(create_process.v, req.queue.v,
+                                            req.queue_progress_fence.v,
+                                            destroy_ret);
             goto createhwqueue_done;
         }
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
         hvdxg.createhwqueue_last_ret = ret;
+        if (ret != 0) {
+            int destroy_ret = hvdxg_destroy_hwqueue_host_process(
+                create_process.v, req.queue.v);
+            hvdxg_note_createhwqueue_unwind(create_process.v, req.queue.v,
+                                            req.queue_progress_fence.v,
+                                            destroy_ret);
+            goto createhwqueue_done;
+        }
         if (ret == 0 && owner != NULL) {
             uint32 device = hvdxg_owner_object_device(
                 owner, HV_DXG_OBJECT_CONTEXT, req.context.v);

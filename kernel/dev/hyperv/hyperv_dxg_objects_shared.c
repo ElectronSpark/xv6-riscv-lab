@@ -1166,6 +1166,40 @@ static void hvdxg_note_createdevice_object(struct hvdxg_open_state *owner,
     hvdxg.createdevice_object_destroyed = entry->destroyed;
 }
 
+static void hvdxg_note_createdevice_unwind(uint32 process, uint32 device,
+                                           int ret)
+{
+    hvdxg.createdevice_unwind_attempts++;
+    hvdxg.createdevice_unwind_process = process;
+    hvdxg.createdevice_unwind_device = device;
+    hvdxg.createdevice_unwind_ret = ret;
+    if (ret == 0)
+        hvdxg.createdevice_unwind_successes++;
+}
+
+static void hvdxg_note_createcontext_unwind(uint32 process, uint32 context,
+                                            int ret)
+{
+    hvdxg.createcontext_unwind_attempts++;
+    hvdxg.createcontext_unwind_process = process;
+    hvdxg.createcontext_unwind_context = context;
+    hvdxg.createcontext_unwind_ret = ret;
+    if (ret == 0)
+        hvdxg.createcontext_unwind_successes++;
+}
+
+static void hvdxg_note_createhwqueue_unwind(uint32 process, uint32 queue,
+                                            uint32 fence, int ret)
+{
+    hvdxg.createhwqueue_unwind_attempts++;
+    hvdxg.createhwqueue_unwind_process = process;
+    hvdxg.createhwqueue_unwind_queue = queue;
+    hvdxg.createhwqueue_unwind_fence = fence;
+    hvdxg.createhwqueue_unwind_ret = ret;
+    if (ret == 0)
+        hvdxg.createhwqueue_unwind_successes++;
+}
+
 static int hvdxg_owner_has_object(struct hvdxg_open_state *owner,
                                   uint32 type, uint64 handle)
 {
@@ -1622,12 +1656,14 @@ enum {
 };
 
 static int hvdxg_destroy_device_host(uint32 device);
+static int hvdxg_destroy_device_host_process(uint32 process, uint32 device);
 static int hvdxg_destroy_allocation_host(uint32 device, uint32 resource,
                                          uint32 allocation, uint32 context);
 static int hvdxg_destroy_allocation_host_process(
     uint32 process, uint32 device, uint32 resource,
     uint32 allocation, uint32 context);
-static int hvdxg_destroy_context_host(uint32 context);
+static int hvdxg_destroy_context_host_process(uint32 process, uint32 context);
+static int hvdxg_destroy_hwqueue_host_process(uint32 process, uint32 hwqueue);
 static int hvdxg_flush_device_host(uint32 device);
 static void hvdxg_sync_shared_resource_records(
     struct hvdxg_tracked_resource *resource);
@@ -5063,10 +5099,11 @@ static void hvdxg_untrack_gpuva(struct hvdxg_open_state *owner,
     }
 }
 
-static int hvdxg_destroy_device_host(uint32 device)
+static int hvdxg_destroy_device_host_process(uint32 process, uint32 device)
 {
     struct hvdxg_command_destroydevice destroy;
     struct hvdxg_ntstatus status;
+    struct hvdxg_d3dkmthandle process_handle;
     uint32 actual_len = 0;
     int ret;
 
@@ -5075,9 +5112,12 @@ static int hvdxg_destroy_device_host(uint32 device)
     memset(&destroy, 0, sizeof(destroy));
     memset(&status, 0, sizeof(status));
     actual_len = 0;
+    process_handle.v = process;
+    if (process_handle.v == 0)
+        process_handle = hvdxg.dxg_process;
     hvdxg_command_vgpu_init_process(&destroy.hdr,
                                     HV_DXGK_VMBCOMMAND_DESTROYDEVICE,
-                                    hvdxg.dxg_process);
+                                    process_handle);
     destroy.device.v = device;
     ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                sizeof(status), &actual_len);
@@ -5090,6 +5130,11 @@ static int hvdxg_destroy_device_host(uint32 device)
     hvdxg.destroydevice_last_len = actual_len;
     hvdxg.destroydevice_last_ret = ret;
     return ret;
+}
+
+static int hvdxg_destroy_device_host(uint32 device)
+{
+    return hvdxg_destroy_device_host_process(hvdxg.dxg_process.v, device);
 }
 
 static int hvdxg_flush_device_host(uint32 device)
@@ -5534,10 +5579,11 @@ static int hvdxg_destroy_createallocation_result(
     return ret;
 }
 
-static int hvdxg_destroy_context_host(uint32 context)
+static int hvdxg_destroy_context_host_process(uint32 process, uint32 context)
 {
     struct hvdxg_command_destroycontext destroy;
     struct hvdxg_ntstatus status;
+    struct hvdxg_d3dkmthandle process_handle;
     uint32 actual_len = 0;
     int ret;
 
@@ -5545,9 +5591,12 @@ static int hvdxg_destroy_context_host(uint32 context)
         return 0;
     memset(&destroy, 0, sizeof(destroy));
     memset(&status, 0, sizeof(status));
+    process_handle.v = process;
+    if (process_handle.v == 0)
+        process_handle = hvdxg.dxg_process;
     hvdxg_command_vgpu_init_process(&destroy.hdr,
                                     HV_DXGK_VMBCOMMAND_DESTROYCONTEXT,
-                                    hvdxg.dxg_process);
+                                    process_handle);
     destroy.context.v = context;
     ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                sizeof(status), &actual_len);
@@ -5559,6 +5608,36 @@ static int hvdxg_destroy_context_host(uint32 context)
         ret = hvdxg_ntstatus_to_errno(status);
     hvdxg.destroycontext_last_len = actual_len;
     hvdxg.destroycontext_last_ret = ret;
+    return ret;
+}
+
+static int hvdxg_destroy_hwqueue_host_process(uint32 process, uint32 hwqueue)
+{
+    struct hvdxg_command_destroyhwqueue destroy;
+    struct hvdxg_ntstatus status;
+    struct hvdxg_d3dkmthandle process_handle;
+    uint32 actual_len = 0;
+    int ret;
+
+    if (hwqueue == 0)
+        return 0;
+    memset(&destroy, 0, sizeof(destroy));
+    memset(&status, 0, sizeof(status));
+    process_handle.v = process;
+    if (process_handle.v == 0)
+        process_handle = hvdxg.dxg_process;
+    hvdxg_command_vgpu_init_process(&destroy.hdr,
+                                    HV_DXGK_VMBCOMMAND_DESTROYHWQUEUE,
+                                    process_handle);
+    destroy.hwqueue.v = hwqueue;
+    ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
+                               sizeof(status), &actual_len);
+    if (ret == 0 && actual_len < sizeof(status))
+        ret = -EOVERFLOW;
+    if (ret == 0 && actual_len >= sizeof(status))
+        ret = hvdxg_ntstatus_to_errno(status);
+    hvdxg.destroyhwqueue_last_len = actual_len;
+    hvdxg.destroyhwqueue_last_ret = ret;
     return ret;
 }
 

@@ -413,6 +413,11 @@ static struct {
     uint32 createdevice_object_device;
     uint32 createdevice_object_generation;
     uint32 createdevice_object_destroyed;
+    uint32 createdevice_unwind_attempts;
+    uint32 createdevice_unwind_successes;
+    int32 createdevice_unwind_ret;
+    uint32 createdevice_unwind_process;
+    uint32 createdevice_unwind_device;
     uint32 last_device_handle;
     uint32 last_resource_handle;
     uint32 last_allocation_handle;
@@ -1741,6 +1746,11 @@ static struct {
     uint32 createcontext_fail_len;
     int32 createcontext_fail_ret;
     int32 createcontext_fail_status;
+    uint32 createcontext_unwind_attempts;
+    uint32 createcontext_unwind_successes;
+    int32 createcontext_unwind_ret;
+    uint32 createcontext_unwind_process;
+    uint32 createcontext_unwind_context;
     uint32 flushdevice_last_len;
     int32 flushdevice_last_ret;
     int32 flushdevice_last_status;
@@ -1758,6 +1768,12 @@ static struct {
     uint32 createhwqueue_last_fence;
     uint64 createhwqueue_last_fence_cpu;
     uint64 createhwqueue_last_fence_gpu;
+    uint32 createhwqueue_unwind_attempts;
+    uint32 createhwqueue_unwind_successes;
+    int32 createhwqueue_unwind_ret;
+    uint32 createhwqueue_unwind_process;
+    uint32 createhwqueue_unwind_queue;
+    uint32 createhwqueue_unwind_fence;
     uint32 submithwqueue_last_len;
     int32 submithwqueue_last_ret;
     uint32 submithwqueue_last_queue;
