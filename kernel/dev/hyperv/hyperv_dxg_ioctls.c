@@ -1281,7 +1281,11 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                                         HV_DXGK_VMBCOMMAND_CREATEDEVICE,
                                         create_process);
         create.flags = req.flags;
-        create.cdd_device = req.flags.gdi_device ? 1 : 0;
+        /*
+         * WSL zero-initializes cdd_device and only forwards args->flags.
+         * Keep this byte zero unless a same-adapter trace proves otherwise.
+         */
+        create.cdd_device = 0;
         create.error_code = (uint64)&hvdxg.device_state_counter;
         ret = hvdxg_send_sync_vgpu(&create, sizeof(create), &result,
                                    sizeof(result), &actual_len);
@@ -2161,7 +2165,7 @@ createallocation_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(&getstate.hdr,
                                         HV_DXGK_VMBCOMMAND_GETDEVICESTATE,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         getstate.args = req;
         ret = hvdxg_send_sync_vgpu(&getstate, sizeof(getstate), &result,
                                    sizeof(result), &actual_len);
@@ -2208,7 +2212,7 @@ createallocation_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(&create.hdr,
                                         HV_DXGK_VMBCOMMAND_CREATEPAGINGQUEUE,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         create.args = req;
         create.args.paging_queue.v = 0;
         create.args.sync_object.v = 0;
@@ -2282,7 +2286,7 @@ createallocation_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(&destroy.hdr,
                                         HV_DXGK_VMBCOMMAND_DESTROYPAGINGQUEUE,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         destroy.paging_queue.v = req.paging_queue.v;
         if (owner != NULL) {
             uint32 sync = hvdxg_untrack_pagingqueue(owner,
@@ -2326,13 +2330,12 @@ createallocation_done:
             break;
         }
         /*
-         * WSL's dxgkvmb_command_makeresident is naturally 8-byte aligned.
-         * The allocation array starts at the same offset in our packed wire
-         * struct, but the host also expects the trailing alignment dword.
+         * Match WSL's dxgkvmb_command_makeresident size exactly: base
+         * command plus the extra allocation handles.  Do not append local
+         * alignment padding to the VM-bus payload.
          */
         command_len = sizeof(*make) +
-                      (req.alloc_count - 1) * sizeof(make->allocations[0]) +
-                      sizeof(uint32);
+                      (req.alloc_count - 1) * sizeof(make->allocations[0]);
         if (command_len > HV_DXG_VM_BUS_PACKET_MAX) {
             ret = -EOVERFLOW;
             break;
@@ -2346,7 +2349,7 @@ createallocation_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(&make->hdr,
                                         HV_DXGK_VMBCOMMAND_MAKERESIDENT,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         make->paging_queue.v = req.paging_queue.v;
         make->flags = req.flags;
         make->alloc_count = req.alloc_count;
@@ -2363,8 +2366,7 @@ createallocation_done:
         hvdxg.makeresident_last_cmd_len = command_len;
         hvdxg.makeresident_last_wsl_cmd_len =
             sizeof(*make) +
-            (req.alloc_count - 1) * sizeof(make->allocations[0]) +
-            sizeof(uint32);
+            (req.alloc_count - 1) * sizeof(make->allocations[0]);
         hvdxg.makeresident_last_result_len = sizeof(result);
         hvdxg.makeresident_last_actual_len = 0;
         hvdxg.makeresident_last_host_ret = 0;
@@ -2571,7 +2573,7 @@ makeresident_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(&evict->hdr,
                                         HV_DXGK_VMBCOMMAND_EVICT,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         evict->device.v = req.device.v;
         evict->flags = req.flags;
         evict->alloc_count = req.alloc_count;
@@ -2670,7 +2672,7 @@ evict_done:
         hvdxg.mapgpuva_last_fence_current = 0;
         hvdxg_command_vgpu_init_process(&map.hdr,
                                         HV_DXGK_VMBCOMMAND_MAPGPUVIRTUALADDRESS,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         map.args = req;
         map.device.v = 0;
         mapped_pages = req.size_in_pages;
@@ -2700,7 +2702,7 @@ evict_done:
                 memset(&result, 0, sizeof(result));
                 hvdxg_command_vgpu_init_process(
                     &map.hdr, HV_DXGK_VMBCOMMAND_MAPGPUVIRTUALADDRESS,
-                    hvdxg.dxg_process);
+                    hvdxg_owner_bound_process_handle(owner));
                 map.args = retry_args;
                 map.device.v = 0;
                 actual_len = 0;
@@ -2814,7 +2816,7 @@ evict_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(&submit->hdr,
                                         HV_DXGK_VMBCOMMAND_SUBMITCOMMAND,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         submit->args = req;
         if (history_size != 0 &&
             either_copyin(&submit[1], 1, req.history_buffer_array,
@@ -2896,7 +2898,7 @@ submitcommand_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(
             &submit->hdr, HV_DXGK_VMBCOMMAND_SUBMITCOMMANDTOHWQUEUE,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         submit->args = req;
         if (primaries_size != 0 &&
             either_copyin(&submit[1], 1, req.written_primaries,
@@ -2970,7 +2972,7 @@ submithwqueue_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(
             &reserve.hdr, HV_DXGK_VMBCOMMAND_RESERVEGPUVIRTUALADDRESS,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         reserve.args = wire_req;
         ret = hvdxg_send_sync_vgpu(&reserve, sizeof(reserve), &result,
                                    sizeof(result), &actual_len);
@@ -3029,7 +3031,7 @@ submithwqueue_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(
             &free_gpuva.hdr, HV_DXGK_VMBCOMMAND_FREEGPUVIRTUALADDRESS,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         wire_req = req;
         if (adapter_handle)
             wire_req.adapter.v = host_adapter;
@@ -3097,7 +3099,7 @@ submithwqueue_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(
             &invalidate.hdr, HV_DXGK_VMBCOMMAND_INVALIDATECACHE,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         invalidate.device.v = req.device.v;
         invalidate.allocation.v = req.allocation.v;
         invalidate.offset = req.offset;
@@ -3140,7 +3142,7 @@ submithwqueue_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(
             &set.hdr, HV_DXGK_VMBCOMMAND_SETCONTEXTSCHEDULINGPRIORITY,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         set.context.v = req.context.v;
         set.priority = req.priority;
         set.in_process =
@@ -3184,7 +3186,7 @@ submithwqueue_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(
             &get.hdr, HV_DXGK_VMBCOMMAND_GETCONTEXTSCHEDULINGPRIORITY,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         get.context.v = req.context.v;
         get.in_process =
             ((uint32)cmd == LX_DXGETCONTEXTINPROCESSSCHEDULINGPRIORITY);
@@ -3257,7 +3259,7 @@ submithwqueue_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(
             &set->hdr, HV_DXGK_VMBCOMMAND_SETALLOCATIONPRIORITY,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         set->device.v = req.device.v;
         set->resource.v = req.resource.v;
         set->allocation_count = req.allocation_count;
@@ -3356,7 +3358,7 @@ submithwqueue_done:
         memset(result_buf, 0, sizeof(result_buf));
         hvdxg_command_vgpu_init_process(
             &get->hdr, HV_DXGK_VMBCOMMAND_GETALLOCATIONPRIORITY,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         get->device.v = req.device.v;
         get->resource.v = req.resource.v;
         get->allocation_count = req.allocation_count;
@@ -3453,7 +3455,7 @@ submithwqueue_done:
         memset(result_buf, 0, sizeof(result_buf));
         hvdxg_command_vgpu_init_process(
             &query->hdr, HV_DXGK_VMBCOMMAND_QUERYALLOCATIONRESIDENCY,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         query->args = req;
         if (alloc_size != 0 &&
             either_copyin(query->allocations, 1, req.allocations,
@@ -3533,7 +3535,7 @@ submithwqueue_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(
             &offer->hdr, HV_DXGK_VMBCOMMAND_OFFERALLOCATIONS,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         offer->device.v = req.device.v;
         offer->allocation_count = req.allocation_count;
         offer->priority = req.priority;
@@ -3619,7 +3621,7 @@ submithwqueue_done:
         memset(result_buf, 0, sizeof(result_buf));
         hvdxg_command_vgpu_init_process(
             &reclaim->hdr, HV_DXGK_VMBCOMMAND_RECLAIMALLOCATIONS,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         reclaim->paging_queue.v = req.paging_queue.v;
         reclaim->allocation_count = req.allocation_count;
         reclaim->resources = req.resources != 0 ? 1 : 0;
@@ -3733,7 +3735,7 @@ submithwqueue_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(
             &update->hdr, HV_DXGK_VMBCOMMAND_UPDATEGPUVIRTUALADDRESS,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         update->fence_value = req.fence_value;
         update->device.v = req.device.v;
         update->context.v = req.context.v;
@@ -3911,7 +3913,7 @@ submithwqueue_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(&lock.hdr,
                                         HV_DXGK_VMBCOMMAND_LOCK2,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         lock.args = req;
         lock.args.data = 0;
         ret = hvdxg_send_sync_vgpu(&lock, sizeof(lock), &result,
@@ -4081,7 +4083,7 @@ submithwqueue_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(&unlock.hdr,
                                         HV_DXGK_VMBCOMMAND_UNLOCK2,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         unlock.args = req;
         ret = hvdxg_send_sync_vgpu(&unlock, sizeof(unlock), &status,
                                    sizeof(status), &actual_len);
@@ -4333,7 +4335,7 @@ submithwqueue_done:
         hvdxg.syncgpu_signal_last_status = 0;
         hvdxg_command_vgpu_init_process(&signal->hdr,
                                         HV_DXGK_VMBCOMMAND_SIGNALSYNCOBJECT,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         signal->object_count = req.object_count;
         signal->flags = req.flags;
         signal->context_count = req.context_count + 1;
@@ -4385,6 +4387,12 @@ submithwqueue_done:
             ret = -EINVAL;
             break;
         }
+        if (req.object_count != 1) {
+            hvdxg.syncgpu_wait_last_object_count = req.object_count;
+            hvdxg.syncgpu_wait_last_legacy = 1;
+            ret = -EINVAL;
+            break;
+        }
         if (!hvdxg_owner_has_context(owner, req.context.v)) {
             ret = -EPERM;
             break;
@@ -4406,7 +4414,7 @@ submithwqueue_done:
         hvdxg.syncgpu_wait_last_status = 0;
         hvdxg_command_vgpu_init_process(
             &wait->hdr, HV_DXGK_VMBCOMMAND_WAITFORSYNCOBJECTFROMGPU,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         wait->context.v = req.context.v;
         wait->object_count = req.object_count;
         wait->legacy_fence_object = 1;
@@ -4465,7 +4473,7 @@ submithwqueue_done:
         hvdxg.syncsignal_last_status = 0;
         hvdxg_command_vgpu_init_process(&signal->hdr,
                                         HV_DXGK_VMBCOMMAND_SIGNALSYNCOBJECT,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         signal->object_count = req.object_count;
         signal->flags = req.flags;
         signal->context_count = 0;
@@ -4541,7 +4549,7 @@ submithwqueue_done:
         hvdxg.syncgpu_signal_last_status = 0;
         hvdxg_command_vgpu_init_process(&signal->hdr,
                                         HV_DXGK_VMBCOMMAND_SIGNALSYNCOBJECT,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         signal->object_count = req.object_count;
         signal->context_count = 1;
         pos = (uint8 *)&signal[1];
@@ -4630,7 +4638,7 @@ submithwqueue_done:
         hvdxg.syncgpu_signal_last_status = 0;
         hvdxg_command_vgpu_init_process(&signal->hdr,
                                         HV_DXGK_VMBCOMMAND_SIGNALSYNCOBJECT,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         signal->object_count = req.object_count;
         signal->flags = req.flags;
         signal->context_count = req.context_count;
@@ -4773,9 +4781,10 @@ submithwqueue_done:
         hvdxg_note_cpu_wait_state(owner, objects, fence_values,
                                   req.object_count, event_id,
                                   req.async_event != 0, 0);
-        ret = hvdxg_send_waitsyncobjectfromcpu(&req, objects, fence_values,
-                                               event_id, object_size,
-                                               fence_size, &actual_len);
+        ret = hvdxg_send_waitsyncobjectfromcpu(owner, &req, objects,
+                                               fence_values, event_id,
+                                               object_size, fence_size,
+                                               &actual_len);
         if ((ret == 0 || ret == HV_DXG_STATUS_PENDING) &&
             req.async_event != 0) {
             hvdxg_pump_events_ms(20);
@@ -4873,7 +4882,7 @@ submithwqueue_done:
         hvdxg.syncgpu_wait_last_status = 0;
         hvdxg_command_vgpu_init_process(
             &wait->hdr, HV_DXGK_VMBCOMMAND_WAITFORSYNCOBJECTFROMGPU,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         wait->context.v = req.context.v;
         wait->object_count = req.object_count;
         wait->legacy_fence_object = monitored_fence ? 0 : 1;
@@ -5295,7 +5304,7 @@ createhwqueue_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(&destroy.hdr,
                                         HV_DXGK_VMBCOMMAND_DESTROYHWQUEUE,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         destroy.hwqueue.v = req.queue.v;
         if (owner != NULL) {
             uint32 sync = hvdxg_untrack_hwqueue(owner, req.queue.v);
@@ -5338,7 +5347,7 @@ createhwqueue_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(&destroy.hdr,
                                         HV_DXGK_VMBCOMMAND_DESTROYCONTEXT,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         destroy.context.v = req.context.v;
         ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                    sizeof(status), &actual_len);
@@ -5393,7 +5402,8 @@ createhwqueue_done:
         memset(command_buf, 0, sizeof(command_buf));
         memset(result_buf, 0, sizeof(result_buf));
         hvdxg_command_vgpu_init_process(
-            &escape->hdr, HV_DXGK_VMBCOMMAND_ESCAPE, hvdxg.dxg_process);
+            &escape->hdr, HV_DXGK_VMBCOMMAND_ESCAPE,
+            hvdxg_owner_bound_process_handle(owner));
         escape->adapter.v = host_adapter;
         escape->device.v = req.device.v;
         escape->type = req.type;
@@ -7231,7 +7241,7 @@ openresource_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(&query.hdr,
                                         HV_DXGK_VMBCOMMAND_QUERYVIDEOMEMORYINFO,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         query.adapter.v = host_adapter;
         query.memory_segment_group = (uint32)req.memory_segment_group;
         query.physical_adapter_index = req.physical_adapter_index;
@@ -7281,7 +7291,7 @@ openresource_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(&query.hdr,
                                         HV_DXGK_VMBCOMMAND_QUERYSTATISTICS,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         query.args = req;
         query.args.adapter_luid.a = hvdxg.host_adapter_luid.a;
         query.args.adapter_luid.b = hvdxg.host_adapter_luid.b;
@@ -7388,7 +7398,7 @@ openresource_done:
         wait_req.device = req.device;
         wait_req.object_count = 1;
         ret = hvdxg_send_waitsyncobjectfromcpu(
-            &wait_req, &wait_object, &req.fence_value, event_id,
+            owner, &wait_req, &wait_object, &req.fence_value, event_id,
             sizeof(wait_object), sizeof(req.fence_value), &actual_len);
         hvdxg.syncfile_last_len = actual_len;
         hvdxg.syncfile_last_status = hvdxg.syncwait_last_status;
@@ -7557,7 +7567,7 @@ openresource_done:
         wait = (struct hvdxg_command_waitsyncobjectfromgpu *)command_buf;
         hvdxg_command_vgpu_init_process(
             &wait->hdr, HV_DXGK_VMBCOMMAND_WAITFORSYNCOBJECTFROMGPU,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         wait->context.v = req.context.v;
         wait->object_count = 1;
         wait->legacy_fence_object = 0;
@@ -7733,7 +7743,7 @@ openresource_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(
             &change.hdr, HV_DXGK_VMBCOMMAND_CHANGEVIDEOMEMORYRESERVATION,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         change.args = wire_req;
         ret = hvdxg_send_sync_vgpu(&change, sizeof(change), &status,
                                    sizeof(status), &actual_len);
@@ -7861,7 +7871,7 @@ openresource_done:
         hvdxg.syncgpu_signal_last_status = 0;
         hvdxg_command_vgpu_init_process(&signal->hdr,
                                         HV_DXGK_VMBCOMMAND_SIGNALSYNCOBJECT,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         signal->object_count = req.object_count;
         signal->flags = req.flags;
         signal->context_count = req.hwqueue_count;
@@ -7939,7 +7949,7 @@ openresource_done:
         hvdxg.syncgpu_wait_last_status = 0;
         hvdxg_command_vgpu_init_process(
             &wait->hdr, HV_DXGK_VMBCOMMAND_WAITFORSYNCOBJECTFROMGPU,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         wait->context.v = req.hwqueue.v;
         wait->object_count = req.object_count;
         wait->legacy_fence_object = 0;
@@ -7986,7 +7996,7 @@ openresource_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(
             &update.hdr, HV_DXGK_VMBCOMMAND_UPDATEALLOCATIONPROPERTY,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         update.args = req;
         ret = hvdxg_send_sync_vgpu(&update, sizeof(update), &result,
                                    sizeof(result), &actual_len);
@@ -8038,7 +8048,7 @@ openresource_done:
         memset(&result, 0, sizeof(result));
         hvdxg_command_vgpu_init_process(
             &query.hdr, HV_DXGK_VMBCOMMAND_QUERYCLOCKCALIBRATION,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         query.args = wire_req;
         ret = hvdxg_send_sync_vgpu(&query, sizeof(query), &result,
                                    sizeof(result), &actual_len);
@@ -8146,7 +8156,7 @@ openresource_done:
         memset(&feature, 0, sizeof(feature));
         hvdxg_command_vgpu_init_process(
             &feature.hdr, HV_DXGK_VMBCOMMAND_ISFEATUREENABLED,
-            hvdxg.dxg_process);
+            hvdxg_owner_bound_process_handle(owner));
         feature.feature_id = req.feature_id;
         ret = hvdxg_send_sync_vgpu(&feature, sizeof(feature), &result,
                                    sizeof(result), &actual_len);

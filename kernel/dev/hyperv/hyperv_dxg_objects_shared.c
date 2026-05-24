@@ -2572,7 +2572,7 @@ static int hvdxg_prepare_allocation_for_share(
     wait_req.object_count = 1;
     object.v = a->resident_sync_object;
     fence_value = a->resident_fence_value;
-    ret = hvdxg_send_waitsyncobjectfromcpu(&wait_req, &object,
+    ret = hvdxg_send_waitsyncobjectfromcpu(owner, &wait_req, &object,
                                            &fence_value, event_id,
                                            sizeof(object),
                                            sizeof(fence_value),

@@ -1031,6 +1031,7 @@ static int hvdxg_wait_host_event_or_cpu_fence(
 }
 
 static int hvdxg_send_waitsyncobjectfromcpu(
+    struct hvdxg_open_state *owner,
     struct d3dkmt_waitforsynchronizationobjectfromcpu *req,
     const void *objects, const void *fence_values, uint64 event_id,
     uint32 object_size, uint32 fence_size, uint32 *actual_len)
@@ -1050,7 +1051,7 @@ static int hvdxg_send_waitsyncobjectfromcpu(
     hvdxg.syncwait_last_status = 0;
     hvdxg_command_vgpu_init_process(
         &wait->hdr, HV_DXGK_VMBCOMMAND_WAITFORSYNCOBJECTFROMCPU,
-        hvdxg.dxg_process);
+        hvdxg_owner_bound_process_handle(owner));
     wait->device.v = req->device.v;
     wait->object_count = req->object_count;
     wait->flags = req->flags;

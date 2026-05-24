@@ -1903,6 +1903,7 @@ static int hvdxg_wait_host_event_or_cpu_fence(
     const uint64 *fence_values, uint32 object_count, int wait_any,
     uint64 event_id, uint64 timeout_ms);
 static int hvdxg_send_waitsyncobjectfromcpu(
+    struct hvdxg_open_state *owner,
     struct d3dkmt_waitforsynchronizationobjectfromcpu *req,
     const void *objects, const void *fence_values, uint64 event_id,
     uint32 object_size, uint32 fence_size, uint32 *actual_len);
