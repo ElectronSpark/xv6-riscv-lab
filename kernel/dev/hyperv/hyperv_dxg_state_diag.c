@@ -296,6 +296,9 @@ static struct {
     uint32 object_table_reuse_delayed;
     uint32 object_table_reuse_allowed;
     uint32 object_table_min_free_entries;
+    uint32 object_table_free_count;
+    uint32 object_table_free_head;
+    uint32 object_table_free_tail;
     uint32 track_allocation_max;
     uint32 track_allocation_drops;
     uint32 track_gpuva_max;

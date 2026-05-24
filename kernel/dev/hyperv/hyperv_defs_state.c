@@ -1673,6 +1673,9 @@ struct hvdxg_object_entry {
     uint32 instance;
     uint32 destroyed;
     uint32 destroyed_serial;
+    uint32 free_prev;
+    uint32 free_next;
+    uint8 on_free_list;
 };
 
 struct hvdxg_process_adapter {
@@ -1708,6 +1711,9 @@ struct hvdxg_process_state {
     uint32 generation;
     uint32 object_count;
     uint32 object_capacity;
+    uint32 object_free_count;
+    uint32 object_free_head;
+    uint32 object_free_tail;
     uint32 next_object_generation;
     uint32 object_alloc_serial;
     uint32 object_destroy_serial;
@@ -1742,6 +1748,9 @@ struct hvdxg_open_state {
     struct hvdxg_tracked_gpuva *gpuvas;
     uint32 object_count;
     uint32 object_capacity;
+    uint32 object_free_count;
+    uint32 object_free_head;
+    uint32 object_free_tail;
     uint32 next_generation;
     uint32 object_alloc_serial;
     uint32 object_destroy_serial;

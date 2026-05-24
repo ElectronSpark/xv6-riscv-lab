@@ -816,6 +816,35 @@ static uint32 *hvdxg_owner_object_capacity(struct hvdxg_open_state *owner)
     return &owner->object_capacity;
 }
 
+#define HV_DXG_HMGR_FREE_NONE 0xffffffffU
+
+static uint32 *hvdxg_owner_object_free_count(struct hvdxg_open_state *owner)
+{
+    if (owner == NULL)
+        return NULL;
+    if (owner->process_state != NULL)
+        return &owner->process_state->object_free_count;
+    return &owner->object_free_count;
+}
+
+static uint32 *hvdxg_owner_object_free_head(struct hvdxg_open_state *owner)
+{
+    if (owner == NULL)
+        return NULL;
+    if (owner->process_state != NULL)
+        return &owner->process_state->object_free_head;
+    return &owner->object_free_head;
+}
+
+static uint32 *hvdxg_owner_object_free_tail(struct hvdxg_open_state *owner)
+{
+    if (owner == NULL)
+        return NULL;
+    if (owner->process_state != NULL)
+        return &owner->process_state->object_free_tail;
+    return &owner->object_free_tail;
+}
+
 static uint32 hvdxg_open_host_process(struct hvdxg_open_state *owner);
 static uint32 hvdxg_open_process_generation(struct hvdxg_open_state *owner);
 static const char *hvdxg_early_bind_source_name(uint32 source);
@@ -858,6 +887,140 @@ static int hvdxg_hmgr_reuse_ready(uint32 alloc_serial,
            HV_DXG_HMGR_MIN_FREE_ENTRIES;
 }
 
+static void hvdxg_hmgr_init_free_entry(struct hvdxg_object_entry *entry,
+                                       uint32 index)
+{
+    memset(entry, 0, sizeof(*entry));
+    entry->index = index;
+    entry->free_prev = HV_DXG_HMGR_FREE_NONE;
+    entry->free_next = HV_DXG_HMGR_FREE_NONE;
+}
+
+static int hvdxg_hmgr_append_free_index(struct hvdxg_open_state *owner,
+                                        uint32 index)
+{
+    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
+    uint32 *count = hvdxg_owner_object_count(owner);
+    uint32 *free_count = hvdxg_owner_object_free_count(owner);
+    uint32 *free_head = hvdxg_owner_object_free_head(owner);
+    uint32 *free_tail = hvdxg_owner_object_free_tail(owner);
+    struct hvdxg_object_entry *entry;
+
+    if (objects == NULL || *objects == NULL || count == NULL ||
+        free_count == NULL || free_head == NULL || free_tail == NULL ||
+        index >= *count)
+        return -EINVAL;
+    entry = &(*objects)[index];
+    if (entry->on_free_list)
+        return 0;
+    entry->free_prev = *free_tail;
+    entry->free_next = HV_DXG_HMGR_FREE_NONE;
+    entry->on_free_list = 1;
+    if (*free_tail != HV_DXG_HMGR_FREE_NONE)
+        (*objects)[*free_tail].free_next = index;
+    else
+        *free_head = index;
+    *free_tail = index;
+    (*free_count)++;
+    return 0;
+}
+
+static int hvdxg_hmgr_remove_free_index(struct hvdxg_open_state *owner,
+                                        uint32 index)
+{
+    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
+    uint32 *count = hvdxg_owner_object_count(owner);
+    uint32 *free_count = hvdxg_owner_object_free_count(owner);
+    uint32 *free_head = hvdxg_owner_object_free_head(owner);
+    uint32 *free_tail = hvdxg_owner_object_free_tail(owner);
+    struct hvdxg_object_entry *entry;
+
+    if (objects == NULL || *objects == NULL || count == NULL ||
+        free_count == NULL || free_head == NULL || free_tail == NULL ||
+        index >= *count)
+        return -EINVAL;
+    entry = &(*objects)[index];
+    if (!entry->on_free_list)
+        return 0;
+    if (entry->free_prev != HV_DXG_HMGR_FREE_NONE)
+        (*objects)[entry->free_prev].free_next = entry->free_next;
+    else
+        *free_head = entry->free_next;
+    if (entry->free_next != HV_DXG_HMGR_FREE_NONE)
+        (*objects)[entry->free_next].free_prev = entry->free_prev;
+    else
+        *free_tail = entry->free_prev;
+    entry->free_prev = HV_DXG_HMGR_FREE_NONE;
+    entry->free_next = HV_DXG_HMGR_FREE_NONE;
+    entry->on_free_list = 0;
+    if (*free_count != 0)
+        (*free_count)--;
+    return 0;
+}
+
+static int hvdxg_hmgr_expand_object_table(struct hvdxg_open_state *owner,
+                                          uint32 needed)
+{
+    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
+    uint32 *count = hvdxg_owner_object_count(owner);
+    uint32 *capacity = hvdxg_owner_object_capacity(owner);
+    uint32 old_count;
+    uint32 target;
+    int ret;
+
+    if (objects == NULL || count == NULL || capacity == NULL)
+        return -EINVAL;
+    if (needed > HV_DXG_OBJECT_TABLE_MAX)
+        return -EOVERFLOW;
+    old_count = *count;
+    if (old_count == 0) {
+        uint32 *free_count = hvdxg_owner_object_free_count(owner);
+        uint32 *free_head = hvdxg_owner_object_free_head(owner);
+        uint32 *free_tail = hvdxg_owner_object_free_tail(owner);
+
+        if (free_count != NULL && *free_count == 0) {
+            if (free_head != NULL)
+                *free_head = HV_DXG_HMGR_FREE_NONE;
+            if (free_tail != NULL)
+                *free_tail = HV_DXG_HMGR_FREE_NONE;
+        }
+    }
+    target = needed;
+    if (target < old_count + HV_DXG_HMGR_MIN_FREE_ENTRIES + 1 &&
+        old_count < HV_DXG_OBJECT_TABLE_MAX) {
+        target = old_count + HV_DXG_HMGR_MIN_FREE_ENTRIES + 1;
+        if (target > HV_DXG_OBJECT_TABLE_MAX)
+            target = HV_DXG_OBJECT_TABLE_MAX;
+    }
+    ret = hvdxg_grow_table((void **)objects, capacity, target,
+                           sizeof((*objects)[0]),
+                           HV_DXG_OBJECT_TABLE_MAX);
+    if (ret != 0)
+        return ret;
+    for (uint32 i = old_count; i < target; i++) {
+        hvdxg_hmgr_init_free_entry(&(*objects)[i], i);
+        (*count)++;
+        ret = hvdxg_hmgr_append_free_index(owner, i);
+        if (ret != 0)
+            return ret;
+    }
+    return 0;
+}
+
+static void hvdxg_note_object_free_list(struct hvdxg_open_state *owner)
+{
+    uint32 *free_count = hvdxg_owner_object_free_count(owner);
+    uint32 *free_head = hvdxg_owner_object_free_head(owner);
+    uint32 *free_tail = hvdxg_owner_object_free_tail(owner);
+
+    hvdxg.object_table_free_count =
+        free_count != NULL ? *free_count : 0;
+    hvdxg.object_table_free_head =
+        free_head != NULL ? *free_head : HV_DXG_HMGR_FREE_NONE;
+    hvdxg.object_table_free_tail =
+        free_tail != NULL ? *free_tail : HV_DXG_HMGR_FREE_NONE;
+}
+
 static struct hvdxg_object_entry *
 hvdxg_owner_find_object(struct hvdxg_open_state *owner, uint32 type,
                         uint64 handle)
@@ -884,31 +1047,6 @@ hvdxg_owner_find_object(struct hvdxg_open_state *owner, uint32 type,
         entry->unique != unique || entry->instance != instance)
         return NULL;
     return entry;
-}
-
-static struct hvdxg_object_entry *
-hvdxg_owner_find_object_slot(struct hvdxg_open_state *owner, uint64 handle)
-{
-    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
-    uint32 *count = hvdxg_owner_object_count(owner);
-    uint32 index;
-    uint32 unique;
-    uint32 instance;
-
-    if (owner == NULL || handle == 0)
-        return NULL;
-    if (objects == NULL || *objects == NULL || count == NULL)
-        return NULL;
-    index = hvdxg_hmgr_index(handle);
-    if (index >= *count)
-        return NULL;
-    unique = hvdxg_hmgr_unique(handle);
-    instance = hvdxg_hmgr_instance(handle);
-    if ((*objects)[index].index != index ||
-        (*objects)[index].unique != unique ||
-        (*objects)[index].instance != instance)
-        return NULL;
-    return &(*objects)[index];
 }
 
 static struct hvdxg_object_entry *
@@ -999,37 +1137,6 @@ static void hvdxg_note_createdevice_object(struct hvdxg_open_state *owner,
     hvdxg.createdevice_object_destroyed = entry->destroyed;
 }
 
-static struct hvdxg_object_entry *
-hvdxg_owner_find_reusable_object_slot(struct hvdxg_open_state *owner,
-                                      uint64 handle)
-{
-    struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
-    uint32 *count = hvdxg_owner_object_count(owner);
-    uint32 *alloc_serial = hvdxg_owner_object_alloc_serial(owner);
-    struct hvdxg_object_entry *entry;
-    uint32 index;
-    uint32 serial;
-
-    if (owner == NULL || handle == 0)
-        return NULL;
-    if (objects == NULL || *objects == NULL || count == NULL ||
-        alloc_serial == NULL)
-        return NULL;
-    index = hvdxg_hmgr_index(handle);
-    if (index >= *count)
-        return NULL;
-    serial = *alloc_serial;
-    entry = &(*objects)[index];
-    if (entry->destroyed != 0 &&
-        hvdxg_hmgr_reuse_ready(serial, entry->destroyed_serial)) {
-        hvdxg.object_table_reuse_allowed++;
-        return entry;
-    }
-    if (entry->destroyed != 0)
-        hvdxg.object_table_reuse_delayed++;
-    return NULL;
-}
-
 static int hvdxg_owner_has_object(struct hvdxg_open_state *owner,
                                   uint32 type, uint64 handle)
 {
@@ -1046,17 +1153,17 @@ static int hvdxg_track_object(struct hvdxg_open_state *owner, uint32 type,
 {
     struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
     uint32 *count = hvdxg_owner_object_count(owner);
-    uint32 *capacity = hvdxg_owner_object_capacity(owner);
     uint32 *next_generation = hvdxg_owner_object_generation(owner);
     uint32 *alloc_serial = hvdxg_owner_object_alloc_serial(owner);
+    uint32 *free_count = hvdxg_owner_object_free_count(owner);
     struct hvdxg_object_entry *slot;
     uint32 index;
     int ret;
 
     if (owner == NULL || handle == 0 || type == HV_DXG_OBJECT_NONE)
         return 0;
-    if (objects == NULL || count == NULL || capacity == NULL ||
-        next_generation == NULL || alloc_serial == NULL)
+    if (objects == NULL || count == NULL || next_generation == NULL ||
+        alloc_serial == NULL || free_count == NULL)
         return -EINVAL;
     hvdxg_note_hmgr_min_free();
     (*alloc_serial)++;
@@ -1074,44 +1181,38 @@ static int hvdxg_track_object(struct hvdxg_open_state *owner, uint32 type,
             slot->refs = 1;
         return 0;
     }
-    slot = hvdxg_owner_find_object_slot(owner, handle);
-    if (slot != NULL && slot->destroyed != 0) {
-        if (hvdxg_hmgr_reuse_ready(*alloc_serial,
-                                   slot->destroyed_serial)) {
-            hvdxg.object_table_reuse_allowed++;
-            memset(slot, 0, sizeof(*slot));
-        } else {
+    ret = hvdxg_hmgr_expand_object_table(owner, index + 1);
+    if (ret != 0) {
+        hvdxg.object_table_drops++;
+        return ret;
+    }
+    slot = &(*objects)[index];
+    if (slot->type != HV_DXG_OBJECT_NONE && slot->destroyed == 0) {
+        hvdxg.object_table_denied++;
+        return -EEXIST;
+    }
+    if (slot->destroyed != 0) {
+        if (slot->handle == handle) {
             hvdxg.object_table_reuse_delayed++;
             return -EAGAIN;
         }
-    } else if (slot != NULL && slot->type != type) {
-        slot = NULL;
-    } else if (slot == NULL) {
-        slot = hvdxg_owner_find_reusable_object_slot(owner, handle);
-        if (slot != NULL)
-            memset(slot, 0, sizeof(*slot));
+        if (*free_count <= HV_DXG_HMGR_MIN_FREE_ENTRIES) {
+            ret = hvdxg_hmgr_expand_object_table(
+                owner, *count + HV_DXG_HMGR_MIN_FREE_ENTRIES + 1);
+            if (ret != 0) {
+                hvdxg.object_table_reuse_delayed++;
+                return ret;
+            }
+            slot = &(*objects)[index];
+        }
+        hvdxg.object_table_reuse_allowed++;
     }
-    if (slot == NULL) {
-        ret = hvdxg_grow_table((void **)objects,
-                               capacity,
-                               index + 1,
-                               sizeof(owner->objects[0]),
-                               HV_DXG_OBJECT_TABLE_MAX);
+    if (slot->on_free_list) {
+        ret = hvdxg_hmgr_remove_free_index(owner, index);
         if (ret != 0) {
             hvdxg.object_table_drops++;
             return ret;
         }
-        if (*count <= index)
-            *count = index + 1;
-        slot = &(*objects)[index];
-        if (slot->type != HV_DXG_OBJECT_NONE &&
-            slot->destroyed == 0) {
-            hvdxg.object_table_denied++;
-            return -EEXIST;
-        }
-        if (slot->destroyed != 0 &&
-            hvdxg_owner_find_reusable_object_slot(owner, handle) == NULL)
-            return -EAGAIN;
     }
     memset(slot, 0, sizeof(*slot));
     slot->type = type;
@@ -1124,12 +1225,15 @@ static int hvdxg_track_object(struct hvdxg_open_state *owner, uint32 type,
     slot->unique = hvdxg_hmgr_unique(handle);
     slot->instance = hvdxg_hmgr_instance(handle);
     slot->destroyed_serial = 0;
+    slot->free_prev = HV_DXG_HMGR_FREE_NONE;
+    slot->free_next = HV_DXG_HMGR_FREE_NONE;
     if (*next_generation == 0)
         *next_generation = 1;
     slot->generation = (*next_generation)++;
     hvdxg.object_table_generation = slot->generation;
     if (*count > hvdxg.object_table_max)
         hvdxg.object_table_max = *count;
+    hvdxg_note_object_free_list(owner);
     return 0;
 }
 
@@ -1400,26 +1504,33 @@ static int hvdxg_untrack_object(struct hvdxg_open_state *owner, uint32 type,
     uint32 *count = hvdxg_owner_object_count(owner);
     uint32 *alloc_serial = hvdxg_owner_object_alloc_serial(owner);
     uint32 *destroy_serial = hvdxg_owner_object_destroy_serial(owner);
+    struct hvdxg_object_entry *entry;
+    uint32 index;
 
     if (owner == NULL || handle == 0 || type == HV_DXG_OBJECT_NONE)
         return 0;
     if (objects == NULL || *objects == NULL || count == NULL ||
         alloc_serial == NULL || destroy_serial == NULL)
         return 0;
-    for (uint32 i = 0; i < *count; i++) {
-        if ((*objects)[i].type == type &&
-            (*objects)[i].handle == handle &&
-            (*objects)[i].destroyed == 0) {
-            (*objects)[i].destroyed = 1;
-            (*objects)[i].refs = 0;
-            (*destroy_serial)++;
-            if (*destroy_serial == 0)
-                (*destroy_serial)++;
-            (*objects)[i].destroyed_serial = *alloc_serial;
-            return 1;
-        }
-    }
-    return 0;
+    index = hvdxg_hmgr_index(handle);
+    if (index >= *count)
+        return 0;
+    entry = &(*objects)[index];
+    if (entry->type != type || entry->handle != handle ||
+        entry->destroyed != 0)
+        return 0;
+    entry->destroyed = 1;
+    entry->refs = 0;
+    (*destroy_serial)++;
+    if (*destroy_serial == 0)
+        (*destroy_serial)++;
+    entry->destroyed_serial = *alloc_serial;
+    entry->unique = (entry->unique + 1) & HV_DXG_HMGR_UNIQUE_MASK;
+    if (entry->unique == 0)
+        entry->unique = 1;
+    (void)hvdxg_hmgr_append_free_index(owner, index);
+    hvdxg_note_object_free_list(owner);
+    return 1;
 }
 
 enum {
@@ -5406,6 +5517,9 @@ static void hvdxg_process_forget_local_objects(
     hvdxg.process_namespace_adapters_before = process->adapter_count;
     hvdxg.process_namespace_locals_before = process->local_adapter_count;
     process->object_count = 0;
+    process->object_free_count = 0;
+    process->object_free_head = HV_DXG_HMGR_FREE_NONE;
+    process->object_free_tail = HV_DXG_HMGR_FREE_NONE;
     process->next_object_generation = 0;
     process->object_alloc_serial = 0;
     process->object_destroy_serial = 0;
@@ -5949,6 +6063,9 @@ static void hvdxg_free_open_state(struct hvdxg_open_state *owner)
         hvdxg_free_tracked_resource(&owner->resources[--owner->resource_count]);
     owner->gpuva_count = 0;
     owner->object_count = 0;
+    owner->object_free_count = 0;
+    owner->object_free_head = HV_DXG_HMGR_FREE_NONE;
+    owner->object_free_tail = HV_DXG_HMGR_FREE_NONE;
     if (owner->read_status != NULL)
         kvfree(owner->read_status);
     if (owner->allocations != NULL)

@@ -137,7 +137,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_host_events=next:%lu last:%lu signals:%u wait_ok:%u wait_timeout:%u wait_fail:%u\n"
         "dxg_channel_pump=active:%d skips:%u sync_active:%d sync_waits:%u sync_timeouts:%u\n"
         "dxg_completion_last=type:%u flags:0x%x desc_len8:%u desc_off8:%u pkt_len:%u pkt_off:%u payload:%u trans:%lu waiting:%lu source:%s/%u wait_source:%s/%u match:%u channel_match:%u captured_type:%u captured_len:%u prefix:%02x%02x%02x%02x%02x%02x%02x%02x\n"
-        "dxg_object_table=max:%u drops:%u denied:%u generation:%u reuse_delayed:%u reuse_allowed:%u min_free:%u\n"
+        "dxg_object_table=max:%u drops:%u denied:%u generation:%u reuse_delayed:%u reuse_allowed:%u min_free:%u free_count:%u free_head:%u free_tail:%u\n"
         "dxg_track_limits=limit:%u alloc_max:%u alloc_drop:%u gpuva_max:%u gpuva_drop:%u hwqueue_max:%u hwqueue_drop:%u pagingqueue_max:%u pagingqueue_drop:%u\n"
         "dxg_pagingqueue_last=len:%u ret:%d queue:0x%x sync:0x%x fence_pa:0x%lx fence_off:0x%lx\n"
         "dxg_gpuva_last=reserve_len:%u reserve_ret:%d va:0x%lx fence:%lu free_len:%u free_ret:%d free_adapter:0x%x free_base:0x%lx free_size:%lu free_wire_size:%lu\n"
@@ -319,6 +319,9 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.object_table_reuse_delayed,
         hvdxg.object_table_reuse_allowed,
         hvdxg.object_table_min_free_entries,
+        hvdxg.object_table_free_count,
+        hvdxg.object_table_free_head,
+        hvdxg.object_table_free_tail,
         (uint32)HV_DXG_OPEN_TRACKED_MAX, hvdxg.track_allocation_max,
         hvdxg.track_allocation_drops, hvdxg.track_gpuva_max,
         hvdxg.track_gpuva_drops, hvdxg.track_hwqueue_max,
