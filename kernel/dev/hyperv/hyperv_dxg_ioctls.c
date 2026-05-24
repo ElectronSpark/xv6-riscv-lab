@@ -1202,7 +1202,7 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         uint32 actual_len = 0;
         uint32 local_adapter;
         uint32 host_adapter;
-        struct hvdxg_d3dkmthandle create_process;
+        struct hvdxg_d3dkmthandle create_process = { 0 };
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -1334,7 +1334,7 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         uint8 *result_buf = NULL;
         struct hvdxg_command_createallocation *create =
             NULL;
-        struct hvdxg_d3dkmthandle create_process;
+        struct hvdxg_d3dkmthandle create_process = { 0 };
         struct hvdxg_command_createallocation_allocinfo *wire_alloc;
         struct hvdxg_command_createallocation_return *result =
             NULL;
@@ -1895,32 +1895,37 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                                     (track_alloc_input_private ?
                                          total_alloc_private :
                                          host_total_alloc_private);
-            hvdxg_track_resource(owner, &req, requested_flags, alloc_info, result,
-                                 req.flags.standard_allocation ?
-                                     standard_alloc_priv_data :
-                                     (track_alloc_input_private ?
-                                          input_alloc_private_data_base :
-                                          alloc_private_data_base),
-                                 track_alloc_input_private ?
-                                     alloc_priv_capacity : NULL,
-                                 tracked_alloc_private,
-                                 track_alloc_input_private ? 0 :
-                                     (req.flags.standard_allocation ? 0 : 1),
-                                 req.private_runtime_data_size != 0 ?
-                                     command_private_base : NULL,
-                                 req.flags.standard_allocation ?
-                                     resource_priv_data :
-                                     command_private_base +
-                                         req.private_runtime_data_size,
-                                 tracked_resource_private_size);
+            ret = hvdxg_track_resource(owner, &req, requested_flags,
+                                        alloc_info, result,
+                                        req.flags.standard_allocation ?
+                                            standard_alloc_priv_data :
+                                            (track_alloc_input_private ?
+                                                 input_alloc_private_data_base :
+                                                 alloc_private_data_base),
+                                        track_alloc_input_private ?
+                                            alloc_priv_capacity : NULL,
+                                        tracked_alloc_private,
+                                        track_alloc_input_private ? 0 :
+                                            (req.flags.standard_allocation ? 0 : 1),
+                                        req.private_runtime_data_size != 0 ?
+                                            command_private_base : NULL,
+                                        req.flags.standard_allocation ?
+                                            resource_priv_data :
+                                            command_private_base +
+                                                req.private_runtime_data_size,
+                                        tracked_resource_private_size);
+            if (ret != 0)
+                goto createallocation_done;
             for (uint32 i = 0; i < req.alloc_count; i++) {
-                hvdxg_track_allocation(owner, req.device.v, req.resource.v,
-                                       alloc_info[i].allocation.v,
-                                       result->allocation_info[i].allocation_size,
-                                       result->allocation_info[i].allocation_flags,
-                                       alloc_info[i].sysmem,
-                                       sysmem_pages[i],
-                                       sysmem_page_count[i]);
+                ret = hvdxg_track_allocation(
+                    owner, req.device.v, req.resource.v,
+                    alloc_info[i].allocation.v,
+                    result->allocation_info[i].allocation_size,
+                    result->allocation_info[i].allocation_flags,
+                    alloc_info[i].sysmem, sysmem_pages[i],
+                    sysmem_page_count[i]);
+                if (ret != 0)
+                    goto createallocation_done;
                 hvdxg_link_resource_allocation(
                     owner, req.device.v, req.resource.v,
                     alloc_info[i].allocation.v,
@@ -1936,10 +1941,25 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
             }
         }
 createallocation_done:
+        if (ret != 0 && owner != NULL && req.device.v != 0) {
+            if (req.resource.v != 0) {
+                hvdxg_untrack_allocation(owner, req.device.v,
+                                         req.resource.v, 0);
+                hvdxg_untrack_resource(owner, req.device.v,
+                                       req.resource.v);
+            }
+            for (uint32 i = 0; i < req.alloc_count &&
+                                i < HV_DXG_ALLOCATION_MAX; i++) {
+                if (alloc_info[i].allocation.v != 0)
+                    hvdxg_untrack_allocation(
+                        owner, req.device.v, req.resource.v,
+                        alloc_info[i].allocation.v);
+            }
+        }
         if (ret != 0 && host_allocation_created) {
             int unwind_ret =
                 hvdxg_destroy_createallocation_result(
-                    req.device.v, requested_resource, result,
+                    create_process.v, req.device.v, requested_resource, result,
                     req.alloc_count);
 
             if (unwind_ret != 0 && hvdxg.allocation_last_ret == ret)
@@ -6798,13 +6818,16 @@ queryresource_done:
                 ret = -ENOMEM;
             }
             if (ret == 0) {
-                for (uint32 i = 0; i < req.allocation_count; i++)
-                    hvdxg_track_allocation(
+                for (uint32 i = 0; i < req.allocation_count; i++) {
+                    ret = hvdxg_track_allocation(
                         owner, req.device.v, req.resource.v,
                         result->allocations[i].v,
                         shared->resource.allocation_sizes[i],
                         shared->resource.allocation_flags[i],
                         0, NULL, 0);
+                    if (ret != 0)
+                        break;
+                }
             }
         }
 openresource_done:
@@ -6814,9 +6837,9 @@ openresource_done:
         }
         if (ret != 0 && host_resource_opened && req.device.v != 0 &&
             req.resource.v != 0)
-            (void)hvdxg_destroy_allocation_host(req.device.v,
-                                                req.resource.v, 0,
-                                                HV_DXG_DESTROY_ALLOC_CTX_HELPER);
+            (void)hvdxg_destroy_allocation_host_process(
+                open_process.v, req.device.v, req.resource.v, 0,
+                HV_DXG_DESTROY_ALLOC_CTX_HELPER);
         if (shared_file != NULL)
             vfs_fput(shared_file);
         if (result != NULL)
@@ -8059,4 +8082,3 @@ openresource_done:
         mutex_unlock(&hvdxg.process_lock);
     return ret;
 }
-

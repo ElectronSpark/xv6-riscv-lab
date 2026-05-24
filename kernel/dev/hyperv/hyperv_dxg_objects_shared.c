@@ -2056,19 +2056,24 @@ static uint32 hvdxg_owner_object_device(struct hvdxg_open_state *owner,
     return entry != NULL ? entry->device : 0;
 }
 
-static void hvdxg_track_allocation(struct hvdxg_open_state *owner,
-                                   uint32 device, uint32 resource,
-                                   uint32 allocation, uint64 size,
-                                   uint32 flags, uint64 sysmem,
-                                   uint64 *sysmem_pages,
-                                   uint32 sysmem_page_count)
+static int hvdxg_track_allocation(struct hvdxg_open_state *owner,
+                                  uint32 device, uint32 resource,
+                                  uint32 allocation, uint64 size,
+                                  uint32 flags, uint64 sysmem,
+                                  uint64 *sysmem_pages,
+                                  uint32 sysmem_page_count)
 {
+    int track_ret;
+
     if (owner == NULL || device == 0 ||
         (resource == 0 && allocation == 0))
-        return;
-    if (allocation != 0)
-        (void)hvdxg_track_object(owner, HV_DXG_OBJECT_ALLOCATION,
-                                 allocation, resource, device);
+        return -EINVAL;
+    if (allocation != 0) {
+        track_ret = hvdxg_track_object(owner, HV_DXG_OBJECT_ALLOCATION,
+                                       allocation, resource, device);
+        if (track_ret != 0)
+            return track_ret;
+    }
     for (uint32 i = 0; i < owner->allocation_count; i++) {
         if (owner->allocations[i].device == device &&
             owner->allocations[i].resource == resource &&
@@ -2098,7 +2103,7 @@ static void hvdxg_track_allocation(struct hvdxg_open_state *owner,
                 owner->allocations[i].cpu_va = 0;
                 owner->allocations[i].cpu_vm = NULL;
             }
-            return;
+            return 0;
         }
     }
     if (hvdxg_grow_table((void **)&owner->allocations,
@@ -2129,9 +2134,10 @@ static void hvdxg_track_allocation(struct hvdxg_open_state *owner,
         }
         if (owner->allocation_count > hvdxg.track_allocation_max)
             hvdxg.track_allocation_max = owner->allocation_count;
+        return 0;
     } else {
-        hvdxg_unpin_existing_sysmem_pages(sysmem_pages, sysmem_page_count);
         hvdxg.track_allocation_drops++;
+        return -ENOMEM;
     }
 }
 
@@ -3373,18 +3379,18 @@ done:
     return ret;
 }
 
-static void hvdxg_track_resource(struct hvdxg_open_state *owner,
-                                 struct d3dkmt_createallocation *req,
-                                 struct d3dkmt_createallocationflags requested_flags,
-                                 struct d3dddi_allocationinfo2 *alloc_info,
-                                 struct hvdxg_command_createallocation_return *result,
-                                 const uint8 *alloc_private_data,
-                                 const uint32 *alloc_private_sizes,
-                                 uint32 total_alloc_private,
-                                 uint32 alloc_private_from_host,
-                                 const uint8 *runtime_private_data,
-                                 const uint8 *resource_priv_data,
-                                 uint32 resource_priv_data_size)
+static int hvdxg_track_resource(struct hvdxg_open_state *owner,
+                                struct d3dkmt_createallocation *req,
+                                struct d3dkmt_createallocationflags requested_flags,
+                                struct d3dddi_allocationinfo2 *alloc_info,
+                                struct hvdxg_command_createallocation_return *result,
+                                const uint8 *alloc_private_data,
+                                const uint32 *alloc_private_sizes,
+                                uint32 total_alloc_private,
+                                uint32 alloc_private_from_host,
+                                const uint8 *runtime_private_data,
+                                const uint8 *resource_priv_data,
+                                uint32 resource_priv_data_size)
 {
     struct hvdxg_tracked_resource tmp;
     struct hvdxg_tracked_resource *slot;
@@ -3392,9 +3398,9 @@ static void hvdxg_track_resource(struct hvdxg_open_state *owner,
 
     if (owner == NULL || req == NULL || result == NULL ||
         req->resource.v == 0 || !req->flags.create_resource)
-        return;
+        return 0;
     if (req->alloc_count == 0 || req->alloc_count > HV_DXG_ALLOCATION_MAX)
-        return;
+        return -EINVAL;
 
     memset(&tmp, 0, sizeof(tmp));
     tmp.device = req->device.v;
@@ -3501,12 +3507,19 @@ static void hvdxg_track_resource(struct hvdxg_open_state *owner,
         hvdxg_note_existing_sysmem_share(slot, 1);
     hvdxg.allocation_last_owner_process = slot->owner_process;
     hvdxg.allocation_last_owner_generation = slot->owner_generation;
-    (void)hvdxg_track_object(owner, HV_DXG_OBJECT_RESOURCE,
+    ret = hvdxg_track_object(owner, HV_DXG_OBJECT_RESOURCE,
                              tmp.resource, tmp.device, tmp.device);
-    return;
+    if (ret != 0)
+        goto fail_slot;
+    return 0;
 
 fail:
     hvdxg_free_tracked_resource(&tmp);
+    return ret != 0 ? ret : -ENOMEM;
+
+fail_slot:
+    hvdxg_untrack_resource(owner, tmp.device, tmp.resource);
+    return ret;
 }
 
 static int hvdxg_clone_resource(struct hvdxg_tracked_resource *dst,
@@ -5110,7 +5123,7 @@ static int hvdxg_destroy_device_owned_objects(struct hvdxg_open_state *owner,
 }
 
 static int hvdxg_destroy_createallocation_result(
-    uint32 device, uint32 resource,
+    uint32 process, uint32 device, uint32 resource,
     const struct hvdxg_command_createallocation_return *result,
     uint32 alloc_count)
 {
@@ -5120,18 +5133,20 @@ static int hvdxg_destroy_createallocation_result(
     struct hvdxg_command_destroyallocation *destroy =
         (struct hvdxg_command_destroyallocation *)command_buf;
     struct hvdxg_ntstatus status;
+    struct hvdxg_d3dkmthandle process_handle;
     uint32 actual_len = 0;
     uint32 command_len;
     int ret;
 
-    if (device == 0 || result == NULL || alloc_count == 0 ||
+    if (process == 0 || device == 0 || result == NULL || alloc_count == 0 ||
         alloc_count > HV_DXG_ALLOCATION_MAX)
         return 0;
     memset(command_buf, 0, sizeof(command_buf));
     memset(&status, 0, sizeof(status));
+    process_handle.v = process;
     hvdxg_command_vgpu_init_process(&destroy->hdr,
                                     HV_DXGK_VMBCOMMAND_DESTROYALLOCATION,
-                                    hvdxg.dxg_process);
+                                    process_handle);
     destroy->device.v = device;
     destroy->resource.v = resource;
     destroy->alloc_count = alloc_count;
