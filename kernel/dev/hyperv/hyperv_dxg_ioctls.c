@@ -1354,12 +1354,7 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         }
         (void)hvdxg_flush_device_host(req.device.v);
         child_ret = hvdxg_destroy_device_owned_objects(owner, req.device.v);
-        ret = hvdxg_destroy_device_host(req.device.v);
-        if (ret == 0)
-            ret = child_ret;
-        if (ret == 0 && hvdxg.last_device_handle == req.device.v)
-            hvdxg.last_device_handle = 0;
-        if (ret == 0 && owner != NULL) {
+        if (owner != NULL) {
             hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE,
                                  req.device.v);
             hvdxg_untrack_u32(owner->devices, &owner->device_count,
@@ -1367,6 +1362,11 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
             hvdxg_process_adapter_remove_device(owner->process_state,
                                                 req.device.v);
         }
+        ret = hvdxg_destroy_device_host(req.device.v);
+        if (ret == 0)
+            ret = child_ret;
+        if (ret == 0 && hvdxg.last_device_handle == req.device.v)
+            hvdxg.last_device_handle = 0;
         break;
     }
 
@@ -2040,6 +2040,9 @@ createallocation_done:
         struct hvdxg_tracked_resource *resource = NULL;
         uint32 actual_len = 0;
         uint32 command_len;
+        uint32 shared_process = 0;
+        uint32 shared_object = 0;
+        uint32 shared_nt = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -2057,7 +2060,7 @@ createallocation_done:
         memset(&status, 0, sizeof(status));
         hvdxg_command_vgpu_init_process(&destroy->hdr,
                                         HV_DXGK_VMBCOMMAND_DESTROYALLOCATION,
-                                        hvdxg.dxg_process);
+                                        hvdxg_owner_bound_process_handle(owner));
         destroy->device.v = req.device.v;
         destroy->resource.v = req.resource.v;
         destroy->alloc_count = req.alloc_count;
@@ -2090,6 +2093,27 @@ createallocation_done:
         }
         command_len = sizeof(*destroy) +
                       req.alloc_count * sizeof(destroy->allocations[0]);
+        if (resource != NULL) {
+            shared_nt = resource->host_shared_handle_nt;
+            shared_process = resource->host_shared_process;
+            shared_object = resource->host_shared_object;
+        }
+        if (owner != NULL) {
+            if (req.alloc_count == 0) {
+                hvdxg_untrack_resource(owner, req.device.v, req.resource.v);
+                hvdxg_untrack_allocation(owner, req.device.v,
+                                         req.resource.v, 0);
+            } else {
+                for (uint32 i = 0; i < req.alloc_count; i++)
+                    hvdxg_untrack_allocation(owner, req.device.v,
+                                             req.resource.v,
+                                             destroy->allocations[i].v);
+                if (!hvdxg_owner_has_allocation(owner, req.device.v,
+                                                req.resource.v, 0))
+                    hvdxg_untrack_resource(owner, req.device.v,
+                                           req.resource.v);
+            }
+        }
         ret = hvdxg_send_sync_vgpu(destroy, command_len, &status,
                                    sizeof(status), &actual_len);
         if (ret == 0 && actual_len < sizeof(status))
@@ -2101,33 +2125,13 @@ createallocation_done:
             req.alloc_count != 0 ? destroy->allocations[0].v : 0,
             destroy->hdr.process.v, HV_DXG_DESTROY_ALLOC_CTX_IOCTL,
             req.alloc_count, actual_len, ret, status);
-        if (ret == -EINVAL && req.alloc_count == 0 && resource != NULL &&
-            resource->host_shared_handle_nt != 0 &&
-            resource->host_shared_process != 0 &&
-            resource->host_shared_object != 0) {
+        if (ret == -EINVAL && req.alloc_count == 0 && shared_nt != 0 &&
+            shared_process != 0 && shared_object != 0) {
             int defer_ret = hvdxg_defer_shared_resource_destroy(
-                resource->host_shared_process,
-                resource->host_shared_object,
-                resource->host_shared_handle_nt,
+                shared_process, shared_object, shared_nt,
                 req.device.v, req.resource.v);
             if (defer_ret == 0)
                 ret = 0;
-        }
-        if (ret == 0 && owner != NULL) {
-            if (req.alloc_count == 0) {
-                hvdxg_untrack_resource(owner, req.device.v, req.resource.v);
-                hvdxg_untrack_allocation(owner, req.device.v, req.resource.v,
-                                         0);
-            } else {
-                for (uint32 i = 0; i < req.alloc_count; i++)
-                    hvdxg_untrack_allocation(owner, req.device.v,
-                                             req.resource.v,
-                                             destroy->allocations[i].v);
-                if (!hvdxg_owner_has_allocation(owner, req.device.v,
-                                                req.resource.v, 0))
-                    hvdxg_untrack_resource(owner, req.device.v,
-                                           req.resource.v);
-            }
         }
         break;
     }
@@ -2280,6 +2284,12 @@ createallocation_done:
                                         HV_DXGK_VMBCOMMAND_DESTROYPAGINGQUEUE,
                                         hvdxg.dxg_process);
         destroy.paging_queue.v = req.paging_queue.v;
+        if (owner != NULL) {
+            uint32 sync = hvdxg_untrack_pagingqueue(owner,
+                                                    req.paging_queue.v);
+            if (sync != 0)
+                hvdxg_untrack_sync(owner, sync);
+        }
         ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                    sizeof(status), &actual_len);
         if (actual_len >= sizeof(status))
@@ -2290,12 +2300,6 @@ createallocation_done:
             ret = hvdxg_ntstatus_to_errno(status);
         hvdxg.destroypaging_last_len = actual_len;
         hvdxg.destroypaging_last_ret = ret;
-        if (ret == 0 && owner != NULL) {
-            uint32 sync = hvdxg_untrack_pagingqueue(owner,
-                                                    req.paging_queue.v);
-            if (sync != 0)
-                hvdxg_untrack_sync(owner, sync);
-        }
         break;
     }
 
@@ -5293,6 +5297,11 @@ createhwqueue_done:
                                         HV_DXGK_VMBCOMMAND_DESTROYHWQUEUE,
                                         hvdxg.dxg_process);
         destroy.hwqueue.v = req.queue.v;
+        if (owner != NULL) {
+            uint32 sync = hvdxg_untrack_hwqueue(owner, req.queue.v);
+            if (sync != 0)
+                hvdxg_untrack_sync(owner, sync);
+        }
         ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
                                    sizeof(status), &actual_len);
         if (ret == 0 && actual_len < sizeof(status))
@@ -5301,11 +5310,6 @@ createhwqueue_done:
             ret = hvdxg_ntstatus_to_errno(status);
         hvdxg.destroyhwqueue_last_len = actual_len;
         hvdxg.destroyhwqueue_last_ret = ret;
-        if (ret == 0 && owner != NULL) {
-            uint32 sync = hvdxg_untrack_hwqueue(owner, req.queue.v);
-            if (sync != 0)
-                hvdxg_untrack_sync(owner, sync);
-        }
         break;
     }
 
@@ -8075,9 +8079,12 @@ openresource_done:
         if (ret == 0) {
             uint32 order = ++hvdxg.cleanup_order_seq;
 
-            if (final_close)
+            if (final_close) {
+                hvdxg_cleanup_reset_wsl_order();
                 ret = hvdxg_destroy_process_adapter_devices(owner,
                                                             host_adapter);
+                hvdxg_cleanup_finalize_wsl_order();
+            }
             hvdxg.closeadapter_last_ret = ret;
             hvdxg.closeadapter_local_count++;
             hvdxg.closeadapter_last_order = order;

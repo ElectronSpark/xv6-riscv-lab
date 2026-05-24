@@ -261,6 +261,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "d3dkmt_ioctl_counts=destroyalloc:%u destroycontext:%u destroyhwqueue:%u destroypaging:%u destroydevice:%u destroysync:%u freegpuva:%u closeadapter:%u\n"
         "d3dkmt_open_files=opens:%u live:%u cleanup_attempts:%u cleanup_successes:%u cleanup_last_ret:%d cleanup_last_op:%u cleanup_last_handle:0x%x cleanup_failed_op:%u cleanup_failed_handle:0x%x cleanup_had_tracked:%u\n"
         "d3dkmt_cleanup_detail=resource_host:%u resource_child_local:%u standalone_alloc_host:%u resource_alloc_skips:%u\n"
+        "d3dkmt_cleanup_wsl_order=seq:%u sync:%u allocation:%u resource:%u context:%u hwqueue:%u paging:%u gpuva:%u device:%u process:%u valid:%u\n"
         "d3dkmt_processes=live:%u max:%u creates:%u reuses:%u releases:%u destroy_attempts:%u destroy_successes:%u destroy_failures:%u destroy_suppressed:%u destroy_deferred:%u shared_reuses:%u isolated_reuses:%u full:%u generation:%u retained:0x%x retained_gen:%u retained_refs:%u\n"
         "d3dkmt_process_destroy_active=total:%u device:%u context:%u hwqueue:%u paging:%u sync:%u allocation:%u resource:%u gpuva:%u\n"
         "d3dkmt_process_binding=new_host_created:%u same_tgid_reused:%u retained_reuse_avoided:%u avoided_tgid:%lu avoided_src_tgid:%lu avoided_handle:0x%x avoided_gen:%u avoided_src_gen:%u\n"
@@ -1682,6 +1683,17 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.cleanup_resource_child_locals,
         hvdxg.cleanup_standalone_alloc_destroys,
         hvdxg.cleanup_resource_alloc_skips,
+        hvdxg.cleanup_wsl_order_seq,
+        hvdxg.cleanup_wsl_order_sync,
+        hvdxg.cleanup_wsl_order_allocation,
+        hvdxg.cleanup_wsl_order_resource,
+        hvdxg.cleanup_wsl_order_context,
+        hvdxg.cleanup_wsl_order_hwqueue,
+        hvdxg.cleanup_wsl_order_pagingqueue,
+        hvdxg.cleanup_wsl_order_gpuva,
+        hvdxg.cleanup_wsl_order_device,
+        hvdxg.cleanup_wsl_order_process,
+        hvdxg.cleanup_wsl_order_valid,
         hvdxg.process_live, hvdxg.process_live_max, hvdxg.process_creates,
         hvdxg.process_reuses, hvdxg.process_releases,
         hvdxg.process_destroy_attempts, hvdxg.process_destroy_successes,

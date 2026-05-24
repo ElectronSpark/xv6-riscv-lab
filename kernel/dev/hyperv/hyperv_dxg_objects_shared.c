@@ -1633,6 +1633,9 @@ static void hvdxg_sync_shared_resource_records(
     struct hvdxg_tracked_resource *resource);
 static void hvdxg_cleanup_note_ret(int *cleanup_ret, int op_ret,
                                    uint32 op, uint32 handle);
+static void hvdxg_cleanup_reset_wsl_order(void);
+static void hvdxg_cleanup_mark_wsl_order(uint32 op);
+static void hvdxg_cleanup_finalize_wsl_order(void);
 
 static int hvdxg_owner_has_active_process_objects(struct hvdxg_open_state *owner)
 {
@@ -5189,29 +5192,6 @@ static int hvdxg_destroy_device_owned_objects(struct hvdxg_open_state *owner,
     for (;;) {
         int found = 0;
 
-        for (uint32 i = 0; i < owner->hwqueue_count; i++) {
-            uint32 sync = 0;
-
-            if (owner->hwqueues[i].device != device)
-                continue;
-            sync = hvdxg_untrack_hwqueue(owner, owner->hwqueues[i].queue);
-            if (sync != 0)
-                hvdxg_untrack_sync(owner, sync);
-            /*
-             * WSL dxgcontext_destroy() only frees HW queue/progress-fence
-             * handles locally during device teardown; the host observes the
-             * enclosing DESTROYDEVICE/DESTROYPROCESS sequence.
-             */
-            found = 1;
-            break;
-        }
-        if (!found)
-            break;
-    }
-
-    for (;;) {
-        int found = 0;
-
         for (uint32 i = 0; i < owner->sync_object_count; i++) {
             if (owner->sync_objects[i].device != device)
                 continue;
@@ -5220,7 +5200,33 @@ static int hvdxg_destroy_device_owned_objects(struct hvdxg_open_state *owner,
              * which drops the handle and event mappings locally without a
              * DESTROYSYNCOBJECT VM-bus packet.
              */
+            hvdxg_cleanup_note_ret(&ret, 0, HV_DXG_CLEANUP_SYNC,
+                                   owner->sync_objects[i].sync);
             hvdxg_untrack_sync(owner, owner->sync_objects[i].sync);
+            found = 1;
+            break;
+        }
+        if (!found)
+            break;
+    }
+
+    for (;;) {
+        struct hvdxg_tracked_allocation a;
+        int found = 0;
+
+        for (uint32 i = 0; i < owner->allocation_count; i++) {
+            a = owner->allocations[i];
+            if (a.device != device || a.resource != 0 || a.allocation == 0)
+                continue;
+            hvdxg_untrack_allocation(owner, device, 0, a.allocation);
+            (void)hvdxg_unmap_tracked_allocation(&a);
+            hvdxg_unpin_tracked_allocation(&a);
+            hvdxg_cleanup_note_ret(
+                &ret,
+                hvdxg_destroy_allocation_host(
+                    device, 0, a.allocation,
+                    HV_DXG_DESTROY_ALLOC_CTX_DEVICE_STANDALONE),
+                HV_DXG_CLEANUP_ALLOCATION, a.allocation);
             found = 1;
             break;
         }
@@ -5254,6 +5260,9 @@ static int hvdxg_destroy_device_owned_objects(struct hvdxg_open_state *owner,
                                          a.allocation);
                 (void)hvdxg_unmap_tracked_allocation(&a);
                 hvdxg_unpin_tracked_allocation(&a);
+                hvdxg_cleanup_note_ret(&ret, 0,
+                                       HV_DXG_CLEANUP_ALLOCATION,
+                                       a.allocation);
                 removed = 1;
                 break;
             }
@@ -5270,22 +5279,45 @@ static int hvdxg_destroy_device_owned_objects(struct hvdxg_open_state *owner,
     }
 
     for (;;) {
-        struct hvdxg_tracked_allocation a;
         int found = 0;
 
-        for (uint32 i = 0; i < owner->allocation_count; i++) {
-            a = owner->allocations[i];
-            if (a.device != device || a.resource != 0 || a.allocation == 0)
+        for (uint32 i = 0; i < owner->context_count; i++) {
+            uint32 context = owner->contexts[i];
+            uint32 sync = 0;
+
+            if (hvdxg_owner_object_device(owner, HV_DXG_OBJECT_CONTEXT,
+                                          context) != device)
                 continue;
-            hvdxg_untrack_allocation(owner, device, 0, a.allocation);
-            (void)hvdxg_unmap_tracked_allocation(&a);
-            hvdxg_unpin_tracked_allocation(&a);
-            hvdxg_cleanup_note_ret(
-                &ret,
-                hvdxg_destroy_allocation_host(
-                    device, 0, a.allocation,
-                    HV_DXG_DESTROY_ALLOC_CTX_DEVICE_STANDALONE),
-                HV_DXG_CLEANUP_ALLOCATION, a.allocation);
+            /*
+             * WSL dxgdevice_destroy() releases context handles locally; it
+             * does not send DESTROYCONTEXT during process/device teardown.
+             */
+            hvdxg_cleanup_note_ret(&ret, 0, HV_DXG_CLEANUP_CONTEXT,
+                                   context);
+            hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT, context);
+            hvdxg_untrack_u32(owner->contexts, &owner->context_count,
+                              context);
+            for (;;) {
+                int removed_hwqueue = 0;
+
+                for (uint32 j = 0; j < owner->hwqueue_count; j++) {
+                    uint32 queue;
+
+                    if (owner->hwqueues[j].device != device ||
+                        owner->hwqueues[j].context != context)
+                        continue;
+                    queue = owner->hwqueues[j].queue;
+                    sync = hvdxg_untrack_hwqueue(owner, queue);
+                    hvdxg_cleanup_note_ret(
+                        &ret, 0, HV_DXG_CLEANUP_HWQUEUE, queue);
+                    if (sync != 0)
+                        hvdxg_untrack_sync(owner, sync);
+                    removed_hwqueue = 1;
+                    break;
+                }
+                if (!removed_hwqueue)
+                    break;
+            }
             found = 1;
             break;
         }
@@ -5296,19 +5328,22 @@ static int hvdxg_destroy_device_owned_objects(struct hvdxg_open_state *owner,
     for (;;) {
         int found = 0;
 
-        for (uint32 i = 0; i < owner->context_count; i++) {
-            uint32 context = owner->contexts[i];
+        /*
+         * If a context was never tracked successfully, still drop orphaned
+         * HW-queue handles locally before paging queues, matching WSL's
+         * "children before final device/process" cleanup intent.
+         */
+        for (uint32 i = 0; i < owner->hwqueue_count; i++) {
+            uint32 queue = owner->hwqueues[i].queue;
+            uint32 sync;
 
-            if (hvdxg_owner_object_device(owner, HV_DXG_OBJECT_CONTEXT,
-                                          context) != device)
+            if (owner->hwqueues[i].device != device)
                 continue;
-            /*
-             * WSL dxgdevice_destroy() releases context handles locally; it
-             * does not send DESTROYCONTEXT during process/device teardown.
-             */
-            hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT, context);
-            hvdxg_untrack_u32(owner->contexts, &owner->context_count,
-                              context);
+            sync = hvdxg_untrack_hwqueue(owner, queue);
+            hvdxg_cleanup_note_ret(&ret, 0, HV_DXG_CLEANUP_HWQUEUE,
+                                   queue);
+            if (sync != 0)
+                hvdxg_untrack_sync(owner, sync);
             found = 1;
             break;
         }
@@ -5321,17 +5356,20 @@ static int hvdxg_destroy_device_owned_objects(struct hvdxg_open_state *owner,
 
         for (uint32 i = 0; i < owner->paging_queue_count; i++) {
             uint32 sync;
+            uint32 queue = owner->paging_queues[i].queue;
 
             if (owner->paging_queues[i].device != device)
                 continue;
             sync = hvdxg_untrack_pagingqueue(owner,
-                                             owner->paging_queues[i].queue);
+                                             queue);
             if (sync != 0)
                 hvdxg_untrack_sync(owner, sync);
             /*
              * Paging queue and monitored-fence handles are dropped locally
              * during WSL device teardown.
              */
+            hvdxg_cleanup_note_ret(&ret, 0, HV_DXG_CLEANUP_PAGINGQUEUE,
+                                   queue);
             found = 1;
             break;
         }
@@ -5382,9 +5420,13 @@ static int hvdxg_destroy_process_adapter_devices(
                               device);
             if (hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE,
                                      device)) {
-                hvdxg_cleanup_note_ret(
-                    &ret, hvdxg_flush_device_host(device),
-                    HV_DXG_CLEANUP_DEVICE, device);
+                int flush_ret = hvdxg_flush_device_host(device);
+
+                if (ret == 0 && flush_ret != 0) {
+                    ret = flush_ret;
+                    hvdxg.cleanup_failed_op = HV_DXG_CLEANUP_DEVICE;
+                    hvdxg.cleanup_failed_handle = device;
+                }
                 hvdxg_cleanup_note_ret(
                     &ret, hvdxg_destroy_device_owned_objects(owner, device),
                     HV_DXG_CLEANUP_DEVICE, device);
@@ -5491,6 +5533,7 @@ static void hvdxg_wait_gpuva_fence(const struct hvdxg_tracked_gpuva *gpuva)
 static void hvdxg_cleanup_note_ret(int *cleanup_ret, int op_ret,
                                    uint32 op, uint32 handle)
 {
+    hvdxg_cleanup_mark_wsl_order(op);
     hvdxg.cleanup_last_op = op;
     hvdxg.cleanup_last_handle = handle;
     if (*cleanup_ret == 0 && op_ret != 0) {
@@ -5498,6 +5541,98 @@ static void hvdxg_cleanup_note_ret(int *cleanup_ret, int op_ret,
         hvdxg.cleanup_failed_op = op;
         hvdxg.cleanup_failed_handle = handle;
     }
+}
+
+static int hvdxg_cleanup_order_before(uint32 a, uint32 b)
+{
+    return a == 0 || b == 0 || a <= b;
+}
+
+static void hvdxg_cleanup_reset_wsl_order(void)
+{
+    hvdxg.cleanup_wsl_order_seq = 0;
+    hvdxg.cleanup_wsl_order_sync = 0;
+    hvdxg.cleanup_wsl_order_allocation = 0;
+    hvdxg.cleanup_wsl_order_resource = 0;
+    hvdxg.cleanup_wsl_order_context = 0;
+    hvdxg.cleanup_wsl_order_hwqueue = 0;
+    hvdxg.cleanup_wsl_order_pagingqueue = 0;
+    hvdxg.cleanup_wsl_order_gpuva = 0;
+    hvdxg.cleanup_wsl_order_device = 0;
+    hvdxg.cleanup_wsl_order_process = 0;
+    hvdxg.cleanup_wsl_order_valid = 0;
+}
+
+static void hvdxg_cleanup_mark_wsl_order(uint32 op)
+{
+    uint32 order;
+    uint32 *slot = NULL;
+
+    switch (op) {
+    case HV_DXG_CLEANUP_SYNC:
+        slot = &hvdxg.cleanup_wsl_order_sync;
+        break;
+    case HV_DXG_CLEANUP_ALLOCATION:
+        slot = &hvdxg.cleanup_wsl_order_allocation;
+        break;
+    case HV_DXG_CLEANUP_RESOURCE:
+        slot = &hvdxg.cleanup_wsl_order_resource;
+        break;
+    case HV_DXG_CLEANUP_CONTEXT:
+        slot = &hvdxg.cleanup_wsl_order_context;
+        break;
+    case HV_DXG_CLEANUP_HWQUEUE:
+        slot = &hvdxg.cleanup_wsl_order_hwqueue;
+        break;
+    case HV_DXG_CLEANUP_PAGINGQUEUE:
+        slot = &hvdxg.cleanup_wsl_order_pagingqueue;
+        break;
+    case HV_DXG_CLEANUP_GPUVA:
+        slot = &hvdxg.cleanup_wsl_order_gpuva;
+        break;
+    case HV_DXG_CLEANUP_DEVICE:
+        slot = &hvdxg.cleanup_wsl_order_device;
+        break;
+    case HV_DXG_CLEANUP_NONE:
+        slot = &hvdxg.cleanup_wsl_order_process;
+        break;
+    default:
+        return;
+    }
+    if (slot == NULL || *slot != 0)
+        return;
+    order = ++hvdxg.cleanup_wsl_order_seq;
+    if (order == 0)
+        order = ++hvdxg.cleanup_wsl_order_seq;
+    *slot = order;
+}
+
+static void hvdxg_cleanup_finalize_wsl_order(void)
+{
+    int valid = 1;
+
+    valid = valid && hvdxg_cleanup_order_before(
+        hvdxg.cleanup_wsl_order_sync,
+        hvdxg.cleanup_wsl_order_allocation);
+    valid = valid && hvdxg_cleanup_order_before(
+        hvdxg.cleanup_wsl_order_allocation,
+        hvdxg.cleanup_wsl_order_resource);
+    valid = valid && hvdxg_cleanup_order_before(
+        hvdxg.cleanup_wsl_order_resource,
+        hvdxg.cleanup_wsl_order_context);
+    valid = valid && hvdxg_cleanup_order_before(
+        hvdxg.cleanup_wsl_order_context,
+        hvdxg.cleanup_wsl_order_hwqueue);
+    valid = valid && hvdxg_cleanup_order_before(
+        hvdxg.cleanup_wsl_order_hwqueue,
+        hvdxg.cleanup_wsl_order_pagingqueue);
+    valid = valid && hvdxg_cleanup_order_before(
+        hvdxg.cleanup_wsl_order_pagingqueue,
+        hvdxg.cleanup_wsl_order_device);
+    valid = valid && hvdxg_cleanup_order_before(
+        hvdxg.cleanup_wsl_order_device,
+        hvdxg.cleanup_wsl_order_process);
+    hvdxg.cleanup_wsl_order_valid = valid ? 1 : 0;
 }
 
 static struct hvdxg_process_state *hvdxg_process_get_current(void)
@@ -5968,6 +6103,7 @@ static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
     hvdxg.cleanup_failed_op = HV_DXG_CLEANUP_NONE;
     hvdxg.cleanup_failed_handle = 0;
     hvdxg.cleanup_had_tracked = had_tracked ? 1 : 0;
+    hvdxg_cleanup_reset_wsl_order();
 
     /*
      * WSL binds all /dev/dxg opens in one TGID to one dxgprocess.  A non-final
@@ -5988,6 +6124,7 @@ static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
         owner->dxg_process_created = 0;
         hvdxg.cleanup_attempts++;
         hvdxg.cleanup_last_ret = ret;
+        hvdxg_cleanup_finalize_wsl_order();
         if (ret == 0)
             hvdxg.cleanup_successes++;
         return;
@@ -6029,10 +6166,13 @@ static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
         uint32 handle = owner->devices[--owner->device_count];
 
         if (hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE, handle)) {
-            hvdxg_cleanup_note_ret(
-                &ret,
-                hvdxg_flush_device_host(handle),
-                HV_DXG_CLEANUP_DEVICE, handle);
+            int flush_ret = hvdxg_flush_device_host(handle);
+
+            if (ret == 0 && flush_ret != 0) {
+                ret = flush_ret;
+                hvdxg.cleanup_failed_op = HV_DXG_CLEANUP_DEVICE;
+                hvdxg.cleanup_failed_handle = handle;
+            }
             hvdxg_cleanup_note_ret(
                 &ret,
                 hvdxg_destroy_device_owned_objects(owner, handle),
@@ -6120,6 +6260,7 @@ static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
     if (owner->process_state != NULL) {
         uint32 handle = owner->dxg_process.v;
 
+        hvdxg_cleanup_mark_wsl_order(HV_DXG_CLEANUP_NONE);
         hvdxg_cleanup_note_ret(
             &ret, hvdxg_process_put(owner->process_state),
             HV_DXG_CLEANUP_NONE, handle);
@@ -6129,12 +6270,14 @@ static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
     } else if (owner->dxg_process_created && owner->dxg_process.v != 0) {
         uint32 handle = owner->dxg_process.v;
 
+        hvdxg_cleanup_mark_wsl_order(HV_DXG_CLEANUP_NONE);
         hvdxg_cleanup_note_ret(
             &ret, hvdxg_destroy_process_host(owner->dxg_process),
             HV_DXG_CLEANUP_NONE, handle);
         owner->dxg_process.v = 0;
         owner->dxg_process_created = 0;
     }
+    hvdxg_cleanup_finalize_wsl_order();
     hvdxg.cleanup_attempts++;
     hvdxg.cleanup_last_ret = ret;
     if (ret == 0)

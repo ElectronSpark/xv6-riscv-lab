@@ -302,6 +302,17 @@ static struct {
     uint32 cleanup_resource_child_locals;
     uint32 cleanup_standalone_alloc_destroys;
     uint32 cleanup_resource_alloc_skips;
+    uint32 cleanup_wsl_order_seq;
+    uint32 cleanup_wsl_order_sync;
+    uint32 cleanup_wsl_order_allocation;
+    uint32 cleanup_wsl_order_resource;
+    uint32 cleanup_wsl_order_context;
+    uint32 cleanup_wsl_order_hwqueue;
+    uint32 cleanup_wsl_order_pagingqueue;
+    uint32 cleanup_wsl_order_gpuva;
+    uint32 cleanup_wsl_order_device;
+    uint32 cleanup_wsl_order_process;
+    uint32 cleanup_wsl_order_valid;
     uint32 object_table_max;
     uint32 object_table_drops;
     uint32 object_table_denied;
