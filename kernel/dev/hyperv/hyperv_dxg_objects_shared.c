@@ -5343,7 +5343,6 @@ static struct hvdxg_process_state *hvdxg_process_get_current(void)
 {
     struct hvdxg_process_state *candidate;
     struct hvdxg_process_state *process = NULL;
-    struct hvdxg_process_state *retained = NULL;
     uint64 tgid = current ? (uint64)thread_tgid(current) : 1;
     int empty = -1;
 
@@ -5370,9 +5369,6 @@ static struct hvdxg_process_state *hvdxg_process_get_current(void)
                 empty = (int)i;
             continue;
         }
-        if (retained == NULL && entry->refs == 0 &&
-            entry->host_process_created && entry->host_process.v != 0)
-            retained = entry;
         if (entry->tgid == tgid &&
             (entry->refs != 0 ||
              (entry->host_process_created && entry->host_process.v != 0))) {
@@ -5413,42 +5409,6 @@ static struct hvdxg_process_state *hvdxg_process_get_current(void)
             process = entry;
             break;
         }
-    }
-    if (process == NULL && retained != NULL) {
-        uint32 source_generation = retained->generation;
-        uint32 source_objects = retained->object_count;
-
-        /*
-         * This host rejects fragile repeated CREATEPROCESS attempts after a
-         * retained dxgprocess has already survived final close.  Keep WSL's
-         * open-time reuse model: reuse the live host process handle, but start
-         * a fresh local namespace so handles do not cross TGIDs.
-         */
-        hvdxg_process_forget_local_objects(retained);
-        retained->tgid = tgid;
-        retained->pid = current ? (uint64)current->pid : tgid;
-        retained->guest_process = (uint64)retained;
-        retained->refs = 1;
-        retained->generation = ++hvdxg.process_generation;
-        if (retained->generation == 0)
-            retained->generation = ++hvdxg.process_generation;
-        hvdxg.process_namespace_new_generation = retained->generation;
-        hvdxg.process_live++;
-        if (hvdxg.process_live > hvdxg.process_live_max)
-            hvdxg.process_live_max = hvdxg.process_live;
-        hvdxg.process_reuses++;
-        hvdxg.process_isolated_reuses++;
-        hvdxg.process_isolated_last_tgid = retained->tgid;
-        hvdxg.process_isolated_last_handle = retained->host_process.v;
-        hvdxg.process_isolated_last_generation = retained->generation;
-        hvdxg.process_isolated_source_generation = source_generation;
-        hvdxg.process_isolated_copied_objects = 0;
-        hvdxg.process_isolated_source_objects = source_objects;
-        hvdxg.process_retained_handle = retained->host_process.v;
-        hvdxg.process_retained_generation = retained->generation;
-        hvdxg.process_retained_tgid = retained->tgid;
-        hvdxg.process_retained_refs = retained->refs;
-        process = retained;
     }
     if (process == NULL && empty >= 0) {
         uint32 retained_handle;
