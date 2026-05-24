@@ -884,6 +884,9 @@ struct fb_gpu_stats {
     uint64 nouveau_vm_bind_noops; /* zero-op Nouveau VM_BIND successes */
     uint64 nouveau_pushbuf_noops; /* zero-push Nouveau GEM_PUSHBUF successes */
     uint64 nouveau_exec_noops; /* zero-push Nouveau EXEC successes */
+    uint64 nouveau_nonempty_pushbuf_rejects; /* non-empty pushbuf fail-closed */
+    uint64 nouveau_nonempty_exec_rejects; /* non-empty EXEC fail-closed */
+    uint64 nouveau_nonempty_vm_bind_rejects; /* non-empty VM_BIND fail-closed */
     uint64 nouveau_unsupported; /* recognized but not implemented Nouveau ops */
     uint64 nouveau_pci_registered; /* Nouveau PCI driver registrations */
     uint64 nouveau_pci_probes; /* Nouveau PCI probe attempts */

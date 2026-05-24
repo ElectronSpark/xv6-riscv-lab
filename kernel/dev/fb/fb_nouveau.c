@@ -1188,6 +1188,7 @@ static int gpu_nouveau_pushbuf(struct fb_gpu_render_owner *owner, uint64 arg)
         return 0;
     }
     kvfree(buffers);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_nonempty_pushbuf_rejects);
     gpu_nouveau_stat_inc(&fb_state.stats.nouveau_unsupported);
     return -EOPNOTSUPP;
 }
@@ -1388,6 +1389,7 @@ static int gpu_nouveau_bind_or_exec(struct fb_gpu_render_owner *owner,
         ret = gpu_nouveau_validate_exec_pushes(&exec_req);
         if (ret != 0)
             return ret;
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_nonempty_exec_rejects);
     } else {
         if (either_copyin(&bind_req, 1, arg, sizeof(bind_req)) < 0)
             return -EFAULT;
@@ -1410,6 +1412,7 @@ static int gpu_nouveau_bind_or_exec(struct fb_gpu_render_owner *owner,
         ret = gpu_nouveau_validate_vm_bind_ops(owner, &bind_req);
         if (ret != 0)
             return ret;
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_nonempty_vm_bind_rejects);
     }
     gpu_nouveau_stat_inc(&fb_state.stats.nouveau_unsupported);
     return -EOPNOTSUPP;
