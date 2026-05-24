@@ -2101,7 +2101,7 @@ createallocation_done:
                 }
             }
             if (ret != 0)
-                break;
+                goto gpu2_cpu_event_cleanup;
         }
         command_len = sizeof(*destroy) +
                       req.alloc_count * sizeof(destroy->allocations[0]);
@@ -4296,6 +4296,9 @@ submithwqueue_done:
         uint32 actual_len = 0;
         uint32 object_size;
         uint32 context_size;
+        uint32 command_len;
+        uint64 event_id = 0;
+        struct vfs_file *event_file = NULL;
         uint8 *pos;
 
         ret = hvdxg_d3dkmt_ensure();
@@ -4305,13 +4308,12 @@ submithwqueue_done:
             ret = -EFAULT;
             break;
         }
-        if (req.flags.enqueue_cpu_event) {
-            hvdxg_note_unsupported_ioctl(
-                cmd, 0, (uint32)req.cpu_event_handle, req.object_count);
-            ret = -ENOTSUP;
+        if (req.flags.enqueue_cpu_event && req.cpu_event_handle == 0) {
+            ret = -EINVAL;
             break;
         }
-        if (req.context.v == 0 || req.object_count == 0 ||
+        if (req.context.v == 0 ||
+            (!req.flags.enqueue_cpu_event && req.object_count == 0) ||
             req.object_count > D3DDDI_MAX_OBJECT_SIGNALED ||
             req.context_count >= D3DDDI_MAX_BROADCAST_CONTEXT) {
             ret = -EINVAL;
@@ -4338,6 +4340,35 @@ submithwqueue_done:
         object_size = req.object_count * sizeof(struct hvdxg_d3dkmthandle);
         context_size = req.context_count *
                        sizeof(struct hvdxg_d3dkmthandle);
+        command_len = sizeof(*signal) + object_size +
+                      sizeof(req.context) + context_size;
+        if (req.flags.enqueue_cpu_event) {
+            event_file = vfs_fdtable_get_file(current->fdtable,
+                                              (int)req.cpu_event_handle);
+            if (event_file == NULL) {
+                ret = -EINVAL;
+                break;
+            }
+            if (!eventfd_file_is_eventfd(event_file)) {
+                vfs_fput(event_file);
+                ret = -EINVAL;
+                break;
+            }
+            event_id = hvdxg_alloc_host_event_file(event_file, 1);
+            if (event_id == 0) {
+                vfs_fput(event_file);
+                ret = -ENOMEM;
+                break;
+            }
+            hvdxg.synccpuevent_signal_attempts++;
+            hvdxg.synccpuevent_signal_cmd = (uint32)cmd;
+            hvdxg.synccpuevent_signal_flags = req.flags.value;
+            hvdxg.synccpuevent_signal_objects = req.object_count;
+            hvdxg.synccpuevent_signal_contexts = req.context_count + 1;
+            hvdxg.synccpuevent_signal_user_fd = req.cpu_event_handle;
+            hvdxg.synccpuevent_signal_event_id = event_id;
+            hvdxg.synccpuevent_signal_len = command_len;
+        }
         memset(command_buf, 0, sizeof(command_buf));
         memset(&status, 0, sizeof(status));
         hvdxg.syncgpu_signal_last_status = 0;
@@ -4348,16 +4379,17 @@ submithwqueue_done:
         signal->flags = req.flags;
         signal->context_count = req.context_count + 1;
         signal->fence_value = req.fence.fence_value;
-        signal->u.device.v = 0;
+        if (req.flags.enqueue_cpu_event)
+            signal->u.cpu_event_handle = event_id;
+        else
+            signal->u.device.v = 0;
         pos = (uint8 *)&signal[1];
         memcpy(pos, req.object_array, object_size);
         pos += object_size;
         memcpy(pos, &req.context, sizeof(req.context));
         pos += sizeof(req.context);
         memcpy(pos, req.contexts, context_size);
-        ret = hvdxg_send_sync_vgpu(signal,
-                                   sizeof(*signal) + object_size +
-                                       sizeof(req.context) + context_size,
+        ret = hvdxg_send_sync_vgpu(signal, command_len,
                                    &status, sizeof(status), &actual_len);
         if (actual_len >= sizeof(status))
             hvdxg.syncgpu_signal_last_status = status.v;
@@ -4365,6 +4397,13 @@ submithwqueue_done:
             ret = hvdxg_ntstatus_to_errno(status);
         hvdxg.syncgpu_signal_last_len = actual_len;
         hvdxg.syncgpu_signal_last_ret = ret;
+        if (req.flags.enqueue_cpu_event) {
+            hvdxg.synccpuevent_signal_ret = ret;
+            if (ret == 0)
+                hvdxg.synccpuevent_signal_successes++;
+            else if (hvdxg.synccpuevent_signal_event_id != 0)
+                hvdxg_remove_host_event(hvdxg.synccpuevent_signal_event_id);
+        }
         break;
     }
 
@@ -4462,6 +4501,10 @@ submithwqueue_done:
             break;
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
+            break;
+        }
+        if (req.flags.enqueue_cpu_event) {
+            ret = -EINVAL;
             break;
         }
         if (req.device.v == 0 || req.object_count == 0 ||
@@ -4613,6 +4656,9 @@ submithwqueue_done:
         uint32 object_size;
         uint32 context_size;
         uint32 fence_size;
+        uint32 command_len;
+        uint64 event_id = 0;
+        struct vfs_file *event_file = NULL;
         uint8 *pos;
 
         ret = hvdxg_d3dkmt_ensure();
@@ -4622,25 +4668,55 @@ submithwqueue_done:
             ret = -EFAULT;
             break;
         }
-        if (req.flags.enqueue_cpu_event) {
-            hvdxg_note_unsupported_ioctl(
-                cmd, 0, (uint32)req.cpu_event_handle, req.object_count);
-            ret = -ENOTSUP;
+        if (req.flags.enqueue_cpu_event &&
+            (req.object_count != 0 || req.cpu_event_handle == 0)) {
+            ret = -EINVAL;
             break;
         }
-        if (req.object_count == 0 ||
+        if ((!req.flags.enqueue_cpu_event && req.object_count == 0) ||
             req.object_count > D3DDDI_MAX_OBJECT_SIGNALED ||
             req.context_count == 0 ||
             req.context_count > D3DDDI_MAX_BROADCAST_CONTEXT ||
-            req.objects == 0 || req.contexts == 0 ||
-            req.monitored_fence_values == 0) {
+            req.contexts == 0 ||
+            (!req.flags.enqueue_cpu_event &&
+             (req.objects == 0 || req.monitored_fence_values == 0))) {
             ret = -EINVAL;
             break;
         }
         object_size = req.object_count * sizeof(struct hvdxg_d3dkmthandle);
         context_size = req.context_count *
                        sizeof(struct hvdxg_d3dkmthandle);
-        fence_size = req.object_count * sizeof(uint64);
+        fence_size = req.flags.enqueue_cpu_event ? 0 :
+                     req.object_count * sizeof(uint64);
+        command_len = sizeof(*signal) + object_size + context_size +
+                      fence_size;
+        if (req.flags.enqueue_cpu_event) {
+            event_file = vfs_fdtable_get_file(current->fdtable,
+                                              (int)req.cpu_event_handle);
+            if (event_file == NULL) {
+                ret = -EINVAL;
+                break;
+            }
+            if (!eventfd_file_is_eventfd(event_file)) {
+                vfs_fput(event_file);
+                ret = -EINVAL;
+                break;
+            }
+            event_id = hvdxg_alloc_host_event_file(event_file, 1);
+            if (event_id == 0) {
+                vfs_fput(event_file);
+                ret = -ENOMEM;
+                break;
+            }
+            hvdxg.synccpuevent_signal_attempts++;
+            hvdxg.synccpuevent_signal_cmd = (uint32)cmd;
+            hvdxg.synccpuevent_signal_flags = req.flags.value;
+            hvdxg.synccpuevent_signal_objects = req.object_count;
+            hvdxg.synccpuevent_signal_contexts = req.context_count;
+            hvdxg.synccpuevent_signal_user_fd = req.cpu_event_handle;
+            hvdxg.synccpuevent_signal_event_id = event_id;
+            hvdxg.synccpuevent_signal_len = command_len;
+        }
         memset(command_buf, 0, sizeof(command_buf));
         memset(&status, 0, sizeof(status));
         hvdxg.syncgpu_signal_last_status = 0;
@@ -4651,11 +4727,15 @@ submithwqueue_done:
         signal->flags = req.flags;
         signal->context_count = req.context_count;
         signal->fence_value = 0;
-        signal->u.device.v = 0;
+        if (req.flags.enqueue_cpu_event)
+            signal->u.cpu_event_handle = event_id;
+        else
+            signal->u.device.v = 0;
         pos = (uint8 *)&signal[1];
-        if (either_copyin(pos, 1, req.objects, object_size) < 0) {
+        if (object_size != 0 &&
+            either_copyin(pos, 1, req.objects, object_size) < 0) {
             ret = -EFAULT;
-            break;
+            goto gpu2_cpu_event_cleanup;
         }
         {
             struct hvdxg_d3dkmthandle *objects =
@@ -4672,7 +4752,7 @@ submithwqueue_done:
         pos += object_size;
         if (either_copyin(pos, 1, req.contexts, context_size) < 0) {
             ret = -EFAULT;
-            break;
+            goto gpu2_cpu_event_cleanup;
         }
         {
             struct hvdxg_d3dkmthandle *contexts =
@@ -4684,17 +4764,16 @@ submithwqueue_done:
                 }
             }
             if (ret != 0)
-                break;
+                goto gpu2_cpu_event_cleanup;
         }
         pos += context_size;
-        if (either_copyin(pos, 1, req.monitored_fence_values,
+        if (fence_size != 0 &&
+            either_copyin(pos, 1, req.monitored_fence_values,
                           fence_size) < 0) {
             ret = -EFAULT;
-            break;
+            goto gpu2_cpu_event_cleanup;
         }
-        ret = hvdxg_send_sync_vgpu(signal,
-                                   sizeof(*signal) + object_size +
-                                       context_size + fence_size,
+        ret = hvdxg_send_sync_vgpu(signal, command_len,
                                    &status, sizeof(status), &actual_len);
         if (actual_len >= sizeof(status))
             hvdxg.syncgpu_signal_last_status = status.v;
@@ -4702,6 +4781,14 @@ submithwqueue_done:
             ret = hvdxg_ntstatus_to_errno(status);
         hvdxg.syncgpu_signal_last_len = actual_len;
         hvdxg.syncgpu_signal_last_ret = ret;
+gpu2_cpu_event_cleanup:
+        if (req.flags.enqueue_cpu_event) {
+            hvdxg.synccpuevent_signal_ret = ret;
+            if (ret == 0)
+                hvdxg.synccpuevent_signal_successes++;
+            else if (hvdxg.synccpuevent_signal_event_id != 0)
+                hvdxg_remove_host_event(hvdxg.synccpuevent_signal_event_id);
+        }
         break;
     }
 
@@ -7877,6 +7964,10 @@ openresource_done:
             break;
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
+            break;
+        }
+        if (req.flags.enqueue_cpu_event) {
+            ret = -EINVAL;
             break;
         }
         if (req.hwqueue_count == 0 ||

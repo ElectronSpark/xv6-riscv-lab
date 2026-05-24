@@ -385,6 +385,16 @@ static struct {
     uint32 syncgpu_signal_last_len;
     int32 syncgpu_signal_last_ret;
     int32 syncgpu_signal_last_status;
+    uint32 synccpuevent_signal_attempts;
+    uint32 synccpuevent_signal_successes;
+    int32 synccpuevent_signal_ret;
+    uint32 synccpuevent_signal_cmd;
+    uint32 synccpuevent_signal_flags;
+    uint32 synccpuevent_signal_objects;
+    uint32 synccpuevent_signal_contexts;
+    uint64 synccpuevent_signal_user_fd;
+    uint64 synccpuevent_signal_event_id;
+    uint32 synccpuevent_signal_len;
     uint32 syncgpu_wait_last_len;
     int32 syncgpu_wait_last_ret;
     int32 syncgpu_wait_last_status;

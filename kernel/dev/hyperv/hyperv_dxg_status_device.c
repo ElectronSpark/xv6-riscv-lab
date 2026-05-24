@@ -145,6 +145,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_syncobject_wire=cmd_len:%u result_len:%u res_sync_off:%u res_global_off:%u res_fgpu_off:%u res_fpa_off:%u res_foff_off:%u head:%u args_off:%u hint_off:%u hint:%u in_shared:0x%x proc:0x%x owner:0x%x/%u\n"
         "dxg_syncwait_detail=event:%lu async:%u object:0x%x fence:%lu current:%lu result:%u\n"
         "dxg_syncgpu_wait_detail=context:0x%x object:0x%x count:%u type:%u legacy:%u fence:%lu cmd_len:%u\n"
+        "dxg_synccpuevent_signal=attempts:%u successes:%u ret:%d cmd:0x%x flags:0x%x objects:%u contexts:%u user_fd:%lu event:%lu len:%u active:%u allocs:%u removes:%u\n"
         "dxg_allocation_last=len:%u ret:%d count:%u resource:0x%x allocation:0x%x size:%lu destroy_len:%u destroy_ret:%d unwind_attempts:%u unwind_successes:%u unwind_ret:%d\n"
         "dxg_destroyallocation_last=dev:0x%x res:0x%x alloc:0x%x proc:0x%x ctx:%u count:%u len:%u ret:%d status:0x%x d3d12_match:%u pending:%u last:%u seq:%lu create_seq:%lu first_nt_seq:%lu first_match_seq:%lu first_ctx:%u first_match:%u first_pending:%u first_before_nt:%u last_before_nt:%u ctx_mask:0x%x\n"
         "dxg_createallocation_wire=cmd_len:%u hdr:%u prr_off:%u make_off:%u allocinfo_off:%u private_off:%u result_min:%u result_len:%u wire:%u ext:%u eoff:%u route_global:%u send_ret:%d proc:0x%x\n"
@@ -364,6 +365,19 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.syncgpu_wait_last_legacy,
         hvdxg.syncgpu_wait_last_fence,
         hvdxg.syncgpu_wait_last_cmd_len,
+        hvdxg.synccpuevent_signal_attempts,
+        hvdxg.synccpuevent_signal_successes,
+        hvdxg.synccpuevent_signal_ret,
+        hvdxg.synccpuevent_signal_cmd,
+        hvdxg.synccpuevent_signal_flags,
+        hvdxg.synccpuevent_signal_objects,
+        hvdxg.synccpuevent_signal_contexts,
+        hvdxg.synccpuevent_signal_user_fd,
+        hvdxg.synccpuevent_signal_event_id,
+        hvdxg.synccpuevent_signal_len,
+        hvdxg.host_event_active_count,
+        hvdxg.host_event_alloc_count,
+        hvdxg.host_event_remove_count,
         hvdxg.syncobject_last_cmd_len,
         hvdxg.syncobject_last_result_len,
         hvdxg.syncobject_last_result_sync_offset,
