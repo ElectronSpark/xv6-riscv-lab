@@ -2782,6 +2782,21 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
     }
     if (len >= 0 && (size_t)len < status_size) {
         len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_ioctl_tgid_gate=checks:%u passes:%u denied:%u "
+            "cmd:0x%x current_tgid:%lu owner_tgid:%lu owner_gen:%u "
+            "ret:%d process_required:%u\n",
+            hvdxg.ioctl_tgid_gate_checks,
+            hvdxg.ioctl_tgid_gate_passes,
+            hvdxg.ioctl_tgid_gate_denied,
+            hvdxg.ioctl_tgid_gate_last_cmd,
+            hvdxg.ioctl_tgid_gate_current_tgid,
+            hvdxg.ioctl_tgid_gate_owner_tgid,
+            hvdxg.ioctl_tgid_gate_owner_generation,
+            hvdxg.ioctl_tgid_gate_last_ret,
+            hvdxg.ioctl_tgid_gate_process_required);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
             "dxg_opensync_namespace=current_tgid:%lu owner_tgid:%lu "
             "owner_gen:%u mismatch:%u rejects:%u gate:%u ret:%d "
             "device:0x%x source_dev:0x%x global:0x%x\n",

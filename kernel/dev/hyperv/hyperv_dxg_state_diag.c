@@ -267,6 +267,15 @@ static struct {
     uint32 ioctl_count;
     uint32 ioctl_successes;
     int32 ioctl_last_ret;
+    uint32 ioctl_tgid_gate_checks;
+    uint32 ioctl_tgid_gate_passes;
+    uint32 ioctl_tgid_gate_denied;
+    uint32 ioctl_tgid_gate_last_cmd;
+    uint64 ioctl_tgid_gate_current_tgid;
+    uint64 ioctl_tgid_gate_owner_tgid;
+    uint32 ioctl_tgid_gate_owner_generation;
+    int32 ioctl_tgid_gate_last_ret;
+    uint32 ioctl_tgid_gate_process_required;
     uint32 ioctl_history_index;
     uint32 ioctl_history_cmd[HV_DXG_IOCTL_HISTORY_MAX];
     uint32 ioctl_history_nr[HV_DXG_IOCTL_HISTORY_MAX];

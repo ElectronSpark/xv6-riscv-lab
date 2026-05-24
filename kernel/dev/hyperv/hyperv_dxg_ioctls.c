@@ -824,6 +824,38 @@ static int hvdxg_ioctl_requires_process(uint32 cmd)
     }
 }
 
+static int hvdxg_ioctl_tgid_gate(struct hvdxg_open_state *owner,
+                                 uint32 cmd, int process_required)
+{
+    uint64 current_tgid = current != NULL ?
+                          (uint64)thread_tgid(current) : 0;
+    uint64 owner_tgid = owner != NULL && owner->process_state != NULL ?
+                        owner->process_state->tgid : 0;
+    uint32 owner_generation =
+        owner != NULL && owner->process_state != NULL ?
+        owner->process_state->generation : 0;
+
+    hvdxg.ioctl_tgid_gate_checks++;
+    hvdxg.ioctl_tgid_gate_last_cmd = cmd;
+    hvdxg.ioctl_tgid_gate_current_tgid = current_tgid;
+    hvdxg.ioctl_tgid_gate_owner_tgid = owner_tgid;
+    hvdxg.ioctl_tgid_gate_owner_generation = owner_generation;
+    hvdxg.ioctl_tgid_gate_process_required =
+        process_required ? 1U : 0U;
+
+    if (owner != NULL && owner->process_state != NULL &&
+        current_tgid != 0 && owner_tgid != 0 &&
+        current_tgid != owner_tgid) {
+        hvdxg.ioctl_tgid_gate_denied++;
+        hvdxg.ioctl_tgid_gate_last_ret = -ENOTTY;
+        return -ENOTTY;
+    }
+
+    hvdxg.ioctl_tgid_gate_passes++;
+    hvdxg.ioctl_tgid_gate_last_ret = 0;
+    return 0;
+}
+
 #define HV_DXG_ENUM_STAGE_START      1U
 #define HV_DXG_ENUM_STAGE_ENSURE     2U
 #define HV_DXG_ENUM_STAGE_BIND       3U
@@ -877,6 +909,12 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
     uint64 start_ticks = r_time();
 
     hvdxg.ioctl_count++;
+    ret = hvdxg_ioctl_tgid_gate(owner, (uint32)cmd, process_required);
+    if (ret != 0) {
+        hvdxg.ioctl_last_ret = ret;
+        hvdxg_note_ioctl_timing(cmd, r_time() - start_ticks);
+        return ret;
+    }
     if (owner != NULL && process_required) {
         mutex_lock(&hvdxg.process_lock);
         process_locked = 1;
