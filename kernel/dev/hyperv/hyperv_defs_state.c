@@ -1474,6 +1474,27 @@ struct hvdxg_tracked_allocation {
     uint64 resident_wait_current;
 };
 
+struct hvdxg_shared_resource_record {
+    uint32 create_flags_value;
+    uint32 host_create_flags_value;
+    uint32 private_runtime_data_size;
+    uint32 resource_priv_drv_data_size;
+    uint32 total_priv_drv_data_size;
+    uint32 sealed_generation;
+    uint8 create_shared;
+    uint8 nt_security_sharing;
+    uint8 sealed;
+    uint8 opened_from_shared;
+    uint8 total_priv_from_host;
+};
+
+struct hvdxg_shared_allocation_record {
+    uint32 allocation;
+    uint32 priv_drv_data_size;
+    uint64 size;
+    uint32 flags;
+};
+
 struct hvdxg_tracked_resource {
     uint32 device;
     uint32 resource;
@@ -1513,6 +1534,10 @@ struct hvdxg_tracked_resource {
     uint32 alloc_priv_sizes[HV_DXG_ALLOCATION_MAX];
     uint64 allocation_sizes[HV_DXG_ALLOCATION_MAX];
     uint32 allocation_flags[HV_DXG_ALLOCATION_MAX];
+    uint8 shared_records_valid;
+    struct hvdxg_shared_resource_record shared_resource_record;
+    struct hvdxg_shared_allocation_record
+        shared_allocation_records[HV_DXG_ALLOCATION_MAX];
 };
 
 struct hvdxg_openallocationinfo2 {

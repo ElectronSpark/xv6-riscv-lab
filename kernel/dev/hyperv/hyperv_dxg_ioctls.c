@@ -6852,6 +6852,7 @@ queryresource_done:
                 for (uint32 i = 0; i < req.allocation_count; i++)
                     opened.allocation_handles[i] =
                         result->allocations[i].v;
+                hvdxg_sync_shared_resource_records(&opened);
                 slot = hvdxg_owner_find_resource(owner, opened.device,
                                                  opened.resource);
                 if (slot == NULL &&
@@ -6892,14 +6893,20 @@ queryresource_done:
             }
         }
 openresource_done:
-        if (ret != 0 && owner != NULL && req.resource.v != 0) {
-            hvdxg_untrack_allocation(owner, req.device.v, req.resource.v, 0);
-            hvdxg_untrack_resource(owner, req.device.v, req.resource.v);
+        if (ret != 0 && owner != NULL &&
+            (req.resource.v != 0 ||
+             (result != NULL && result->resource.v != 0))) {
+            uint32 cleanup_resource = req.resource.v != 0 ?
+                                      req.resource.v :
+                                      result->resource.v;
+
+            hvdxg_untrack_allocation(owner, req.device.v, cleanup_resource, 0);
+            hvdxg_untrack_resource(owner, req.device.v, cleanup_resource);
         }
         if (ret != 0 && host_resource_opened && req.device.v != 0 &&
-            req.resource.v != 0)
+            result != NULL && result->resource.v != 0)
             (void)hvdxg_destroy_allocation_host_process(
-                open_process.v, req.device.v, req.resource.v, 0,
+                open_process.v, req.device.v, result->resource.v, 0,
                 HV_DXG_DESTROY_ALLOC_CTX_HELPER);
         if (shared_file != NULL)
             vfs_fput(shared_file);

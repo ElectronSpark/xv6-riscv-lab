@@ -150,7 +150,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_createallocation_wire=cmd_len:%u hdr:%u prr_off:%u make_off:%u allocinfo_off:%u private_off:%u result_min:%u result_len:%u wire:%u ext:%u eoff:%u route_global:%u send_ret:%d proc:0x%x\n"
         "dxg_createallocation_result=flags_off:%u res_off:%u global_off:%u vgpu_off:%u allocinfo_off:%u allocinfo_size:%u head:%u\n"
         "dxg_allocation_priv=runtime:%u resource_priv:%u size:%u flags:0x%x sysmem:0x%lx pri:0x%lx existing_pages:%u pin_ret:%d set_ret:%d pin_ok:%u set_ok:%u total_pages:%lu in_len:%u in:%02x%02x%02x%02x%02x%02x%02x%02x out_len:%u out:%02x%02x%02x%02x%02x%02x%02x%02x\n"
-        "dxg_existing_sysmem=attempts:%u path:%u standard:%u writable:%u dev:0x%x alloc:0x%x va:0x%lx size:%lu pages:%u first_pfn:0x%lx last_pfn:0x%lx pin_ret:%d set_ret:%d pin_ok:%u set_ok:%u total_pages:%lu\n"
+        "dxg_existing_sysmem=attempts:%u path:%u standard:%u writable:%u dev:0x%x alloc:0x%x va:0x%lx size:%lu pages:%u first_pfn:0x%lx last_pfn:0x%lx pin_ret:%d set_ret:%d pin_ok:%u set_ok:%u total_pages:%lu active_pages:%lu pin_events:%lu unpin_events:%lu\n"
         "dxg_residency_last=make_len:%u make_ret:%d make_host_ret:%d make_user_ret:%d make_status:0x%x pending_ok:%u fence:%lu cur:%lu sync:0x%x trim:%lu device:0x%x pq:0x%x flags:0x%x count:%u sorted:%u in:%x,%x,%x,%x wire:%x,%x,%x,%x evict_len:%u evict_ret:%d evict_trim:%lu\n"
         "dxg_makeresident_shape=cmd:%u wsl_cmd:%u result:%u actual:%u owner_ok:%u tracked:%u order:%u a0:alloc:0x%x/dev:0x%x/res:0x%x/owner:0x%x/%u/%u a1:alloc:0x%x/dev:0x%x/res:0x%x/owner:0x%x/%u/%u\n"
         "dxg_mapgpuva_last=len:%u ret:%d status:0x%x pq:0x%x alloc:0x%x base:0x%lx min:0x%lx max:0x%lx pages:%lu prot:0x%lx dprot:0x%lx va:0x%lx fence:%lu cur:%lu sync:0x%x\n"
@@ -216,6 +216,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_sharedresource_metadata=track_host:%u runtime:%u/%08x resource:%u/%08x total:%u/%08x alloc0:%u match_in:%u match_out:%u w4:%08x w8:%08x logical_flags:0x%x host_result_flags:0x%x host_flags_ignored:%u\n"
         "dxg_sharedresource_preseal=mode:deferred applied:%u before:%u after:%u ret:%d\n"
         "dxg_sharedresource_record=valid:%u stage:%u key:k%u/p0x%x/o0x%x/g0x%x/nt0x%x source:proc0x%x/tgid%lu/gen%u dev:0x%x res:0x%x alloc0:0x%x adapter:%x:%x host_adapter:%x:%x sealed:%u gen:%u before_fd:%u allocs:%u sizes:%u/%u/%u/%u hashes:%08x/%08x/%08x/%08x refs:%u query:%u open:%u fd:%u admit:%d exact:%u mutated:%u\n"
+        "dxg_sharedresource_model=valid:%u flat_match:%u allocs:%u alloc0:0x%x priv0:%u size0:%lu flags0:0x%x sizes:%u/%u/%u sealed:%u gen:%u\n"
         "dxg_queryresource_nt=seen:%u ret:%d device:0x%x nt:0x%lx kind:%u fops:%u sync_probe:%u global:0x%x host_nt:0x%x refs:%u object:0x%x cache_obj:0x%x allocs:%u runtime:%u resource:%u total:%u\n"
         "dxg_openresource_envelope=route:vgpu global_route:%u cmd:%u wire:%u ext:%u eoff:%u result:%u actual:%u ret:%d status:0x%x proc:0x%x device:0x%x global:0x%x allocs:%u total_priv:%u out_res:0x%x out_alloc0:0x%x seal:%u->%u fd_kind:%u fd_fops:%u fd_refs:%u\n"
         "dxg_opensync_envelope=route:global cmd:%u wire:%u ext:%u eoff:%u result:%u actual:%u ret:%d status:0x%x proc:0x%x device:0x%x global:0x%x flags:0x%x out_sync:0x%x gpu_va:0x%lx cpu_pa:0x%lx fd_kind:%u fd_refs:%u\n"
@@ -434,6 +435,9 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.existing_sysmem_pin_successes,
         hvdxg.existing_sysmem_set_successes,
         hvdxg.existing_sysmem_total_pages,
+        hvdxg.existing_sysmem_active_pages,
+        hvdxg.existing_sysmem_pin_events,
+        hvdxg.existing_sysmem_unpin_events,
         hvdxg.allocation_last_in_priv_head_len,
         hvdxg.allocation_last_in_priv_head[0],
         hvdxg.allocation_last_in_priv_head[1],
@@ -1200,6 +1204,18 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.sharedresource_record_local_admit_ret,
         hvdxg.sharedresource_record_local_exact,
         hvdxg.sharedresource_record_mutation_after_seal,
+        hvdxg.sharedresource_model_valid,
+        hvdxg.sharedresource_model_flat_match,
+        hvdxg.sharedresource_model_alloc_count,
+        hvdxg.sharedresource_model_alloc0,
+        hvdxg.sharedresource_model_alloc0_priv,
+        hvdxg.sharedresource_model_alloc0_size,
+        hvdxg.sharedresource_model_alloc0_flags,
+        hvdxg.sharedresource_model_runtime_size,
+        hvdxg.sharedresource_model_resource_size,
+        hvdxg.sharedresource_model_total_size,
+        hvdxg.sharedresource_model_sealed,
+        hvdxg.sharedresource_model_generation,
         hvdxg.queryresource_last_seen,
         hvdxg.queryresource_last_ret,
         hvdxg.queryresource_last_device,

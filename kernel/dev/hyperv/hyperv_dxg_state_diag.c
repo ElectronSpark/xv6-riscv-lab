@@ -445,6 +445,9 @@ static struct {
     uint32 existing_sysmem_pin_successes;
     uint32 existing_sysmem_set_successes;
     uint64 existing_sysmem_total_pages;
+    uint64 existing_sysmem_active_pages;
+    uint64 existing_sysmem_pin_events;
+    uint64 existing_sysmem_unpin_events;
     uint32 existing_sysmem_attempts;
     uint32 existing_sysmem_last_path;
     uint32 existing_sysmem_last_standard;
@@ -1365,6 +1368,18 @@ static struct {
     int32 sharedresource_record_local_admit_ret;
     uint32 sharedresource_record_local_exact;
     uint32 sharedresource_record_mutation_after_seal;
+    uint32 sharedresource_model_valid;
+    uint32 sharedresource_model_flat_match;
+    uint32 sharedresource_model_alloc_count;
+    uint32 sharedresource_model_alloc0;
+    uint32 sharedresource_model_alloc0_priv;
+    uint64 sharedresource_model_alloc0_size;
+    uint32 sharedresource_model_alloc0_flags;
+    uint32 sharedresource_model_runtime_size;
+    uint32 sharedresource_model_resource_size;
+    uint32 sharedresource_model_total_size;
+    uint32 sharedresource_model_sealed;
+    uint32 sharedresource_model_generation;
     uint32 openresource_last_cmd_len;
     uint32 openresource_last_wire_len;
     uint32 openresource_last_ext;
@@ -4023,6 +4038,18 @@ static void hvdxg_reset_shared_resource_record(void)
     hvdxg.sharedresource_record_local_admit_ret = 0;
     hvdxg.sharedresource_record_local_exact = 0;
     hvdxg.sharedresource_record_mutation_after_seal = 0;
+    hvdxg.sharedresource_model_valid = 0;
+    hvdxg.sharedresource_model_flat_match = 0;
+    hvdxg.sharedresource_model_alloc_count = 0;
+    hvdxg.sharedresource_model_alloc0 = 0;
+    hvdxg.sharedresource_model_alloc0_priv = 0;
+    hvdxg.sharedresource_model_alloc0_size = 0;
+    hvdxg.sharedresource_model_alloc0_flags = 0;
+    hvdxg.sharedresource_model_runtime_size = 0;
+    hvdxg.sharedresource_model_resource_size = 0;
+    hvdxg.sharedresource_model_total_size = 0;
+    hvdxg.sharedresource_model_sealed = 0;
+    hvdxg.sharedresource_model_generation = 0;
 }
 
 static void hvdxg_note_shared_resource_record(
@@ -4106,6 +4133,50 @@ static void hvdxg_note_shared_resource_record(
         hvdxg.sharedresource_record_nt_refs = resource->host_shared_refs;
     hvdxg.sharedresource_record_local_admit_ret = local_admit_ret;
     hvdxg.sharedresource_record_local_exact = local_exact;
+    hvdxg.sharedresource_model_valid = resource->shared_records_valid;
+    hvdxg.sharedresource_model_flat_match =
+        resource->shared_records_valid &&
+        resource->shared_resource_record.private_runtime_data_size ==
+            resource->private_runtime_data_size &&
+        resource->shared_resource_record.resource_priv_drv_data_size ==
+            resource->resource_priv_drv_data_size &&
+        resource->shared_resource_record.total_priv_drv_data_size ==
+            resource->total_priv_drv_data_size &&
+        resource->shared_resource_record.sealed == resource->sealed &&
+        resource->shared_resource_record.sealed_generation ==
+            resource->sealed_generation &&
+        (resource->allocation_count == 0 ||
+         (resource->shared_allocation_records[0].allocation ==
+              resource->allocation_handles[0] &&
+          resource->shared_allocation_records[0].priv_drv_data_size ==
+              resource->alloc_priv_sizes[0] &&
+          resource->shared_allocation_records[0].size ==
+              resource->allocation_sizes[0] &&
+          resource->shared_allocation_records[0].flags ==
+              resource->allocation_flags[0]));
+    hvdxg.sharedresource_model_alloc_count = resource->allocation_count;
+    hvdxg.sharedresource_model_alloc0 =
+        resource->allocation_count != 0 ?
+        resource->shared_allocation_records[0].allocation : 0;
+    hvdxg.sharedresource_model_alloc0_priv =
+        resource->allocation_count != 0 ?
+        resource->shared_allocation_records[0].priv_drv_data_size : 0;
+    hvdxg.sharedresource_model_alloc0_size =
+        resource->allocation_count != 0 ?
+        resource->shared_allocation_records[0].size : 0;
+    hvdxg.sharedresource_model_alloc0_flags =
+        resource->allocation_count != 0 ?
+        resource->shared_allocation_records[0].flags : 0;
+    hvdxg.sharedresource_model_runtime_size =
+        resource->shared_resource_record.private_runtime_data_size;
+    hvdxg.sharedresource_model_resource_size =
+        resource->shared_resource_record.resource_priv_drv_data_size;
+    hvdxg.sharedresource_model_total_size =
+        resource->shared_resource_record.total_priv_drv_data_size;
+    hvdxg.sharedresource_model_sealed =
+        resource->shared_resource_record.sealed;
+    hvdxg.sharedresource_model_generation =
+        resource->shared_resource_record.sealed_generation;
     if (mutation)
         hvdxg.sharedresource_record_mutation_after_seal = 1;
 }

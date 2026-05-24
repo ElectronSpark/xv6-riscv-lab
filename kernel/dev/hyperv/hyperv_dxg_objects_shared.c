@@ -338,8 +338,12 @@ static void hvdxg_unpin_existing_sysmem_pages(uint64 *pages,
     if (pages == NULL)
         return;
     for (uint32 i = 0; i < page_count; i++) {
-        if (pages[i] != 0 && __pa_to_page(pages[i]) != NULL)
+        if (pages[i] != 0 && __pa_to_page(pages[i]) != NULL) {
             (void)page_ref_dec((void *)pages[i]);
+            if (hvdxg.existing_sysmem_active_pages != 0)
+                hvdxg.existing_sysmem_active_pages--;
+            hvdxg.existing_sysmem_unpin_events++;
+        }
     }
     kvfree(pages);
 }
@@ -446,6 +450,10 @@ static int hvdxg_pin_existing_sysmem(uint64 sysmem, uint64 alloc_size,
         }
         if (pfnmap)
             pfnmap_pages++;
+        else if (__pa_to_page(pages[i]) != NULL) {
+            hvdxg.existing_sysmem_active_pages++;
+            hvdxg.existing_sysmem_pin_events++;
+        }
     }
     *pages_out = pages;
     *page_count_out = page_count;
@@ -1621,6 +1629,8 @@ static int hvdxg_destroy_allocation_host_process(
     uint32 allocation, uint32 context);
 static int hvdxg_destroy_context_host(uint32 context);
 static int hvdxg_flush_device_host(uint32 device);
+static void hvdxg_sync_shared_resource_records(
+    struct hvdxg_tracked_resource *resource);
 static void hvdxg_cleanup_note_ret(int *cleanup_ret, int op_ret,
                                    uint32 op, uint32 handle);
 
@@ -2375,6 +2385,7 @@ static void hvdxg_link_resource_allocation(struct hvdxg_open_state *owner,
     r->allocation_handles[slot] = allocation;
     r->allocation_sizes[slot] = size;
     r->allocation_flags[slot] = flags;
+    hvdxg_sync_shared_resource_records(r);
 
     a = hvdxg_owner_find_allocation(owner, device, resource, allocation);
     if (a != NULL && a->owner_process == 0) {
@@ -2678,6 +2689,45 @@ hvdxg_owner_find_resource(struct hvdxg_open_state *owner, uint32 device,
     return NULL;
 }
 
+static void hvdxg_sync_shared_resource_records(
+    struct hvdxg_tracked_resource *resource)
+{
+    if (resource == NULL)
+        return;
+    resource->shared_records_valid = 1;
+    resource->shared_resource_record.create_flags_value =
+        resource->create_flags_value;
+    resource->shared_resource_record.host_create_flags_value =
+        resource->host_create_flags_value;
+    resource->shared_resource_record.private_runtime_data_size =
+        resource->private_runtime_data_size;
+    resource->shared_resource_record.resource_priv_drv_data_size =
+        resource->resource_priv_drv_data_size;
+    resource->shared_resource_record.total_priv_drv_data_size =
+        resource->total_priv_drv_data_size;
+    resource->shared_resource_record.sealed_generation =
+        resource->sealed_generation;
+    resource->shared_resource_record.create_shared =
+        resource->create_shared;
+    resource->shared_resource_record.nt_security_sharing =
+        resource->nt_security_sharing;
+    resource->shared_resource_record.sealed = resource->sealed;
+    resource->shared_resource_record.opened_from_shared =
+        resource->opened_from_shared;
+    resource->shared_resource_record.total_priv_from_host =
+        resource->total_priv_from_host;
+    for (uint32 i = 0; i < HV_DXG_ALLOCATION_MAX; i++) {
+        resource->shared_allocation_records[i].allocation =
+            resource->allocation_handles[i];
+        resource->shared_allocation_records[i].priv_drv_data_size =
+            resource->alloc_priv_sizes[i];
+        resource->shared_allocation_records[i].size =
+            resource->allocation_sizes[i];
+        resource->shared_allocation_records[i].flags =
+            resource->allocation_flags[i];
+    }
+}
+
 static uint32 hvdxg_owner_first_allocation(struct hvdxg_open_state *owner,
                                            uint32 device, uint32 resource,
                                            uint32 *found)
@@ -2798,6 +2848,7 @@ static int hvdxg_refresh_resource_allocations(
     hvdxg.sharedresource_seal_private =
         resource->total_priv_drv_data_size;
     hvdxg.sharedresource_seal_verify_ret = 0;
+    hvdxg_sync_shared_resource_records(resource);
     return 0;
 }
 
@@ -2846,6 +2897,7 @@ static int hvdxg_prepare_resource_nt_metadata(
         resource->allocation_handles[0] = allocation;
     resource->allocation_sizes[0] = alloc->size;
     resource->allocation_flags[0] = alloc->flags;
+    hvdxg_sync_shared_resource_records(resource);
     if (alloc->owner_process == 0) {
         alloc->owner_process = resource->owner_process;
         alloc->owner_generation = resource->owner_generation;
@@ -3375,6 +3427,7 @@ static int hvdxg_seal_resource(struct hvdxg_tracked_resource *resource)
     resource->sealed_generation = ++hvdxg.sharedresource_seals;
     if (resource->open_count == 0)
         resource->open_count = 1;
+    hvdxg_sync_shared_resource_records(resource);
     return 0;
 }
 
@@ -3666,6 +3719,7 @@ static int hvdxg_track_resource(struct hvdxg_open_state *owner,
                                   tmp.total_priv_drv_data_size);
     if (ret != 0)
         goto fail;
+    hvdxg_sync_shared_resource_records(&tmp);
 
     slot = hvdxg_owner_find_resource(owner, tmp.device, tmp.resource);
     if (slot == NULL) {
@@ -3726,6 +3780,7 @@ static int hvdxg_clone_resource(struct hvdxg_tracked_resource *dst,
                                   src->total_priv_drv_data_size);
     if (ret != 0)
         goto fail;
+    hvdxg_sync_shared_resource_records(dst);
     return 0;
 
 fail:
