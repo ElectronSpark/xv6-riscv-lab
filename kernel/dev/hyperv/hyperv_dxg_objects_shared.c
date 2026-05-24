@@ -595,6 +595,7 @@ static int hvdxg_track_u32_grow(uint32 **items, uint32 *count,
 #define HV_DXG_HMGR_UNIQUE_MASK \
     (((1U << HV_DXG_HMGR_UNIQUE_BITS) - 1U) << \
      HV_DXG_HMGR_UNIQUE_SHIFT)
+#define HV_DXG_HMGR_MIN_FREE_ENTRIES 128U
 
 static uint32 hvdxg_hmgr_index(uint64 handle)
 {
@@ -614,11 +615,20 @@ static uint32 hvdxg_hmgr_instance(uint64 handle)
                     HV_DXG_HMGR_INSTANCE_SHIFT);
 }
 
-static uint32 hvdxg_make_local_adapter_handle(uint32 index)
+static uint32 hvdxg_make_local_adapter_handle(uint32 index, uint32 unique)
 {
-    return (1U << HV_DXG_HMGR_UNIQUE_SHIFT) |
+    return (unique << HV_DXG_HMGR_UNIQUE_SHIFT) |
            (index << HV_DXG_HMGR_INDEX_SHIFT);
 }
+
+static void hvdxg_note_hmgr_min_free(void)
+{
+    hvdxg.object_table_min_free_entries = HV_DXG_HMGR_MIN_FREE_ENTRIES;
+    hvdxg.local_adapter_min_free_entries = HV_DXG_HMGR_MIN_FREE_ENTRIES;
+}
+
+static int hvdxg_hmgr_reuse_ready(uint32 alloc_serial,
+                                  uint32 destroyed_serial);
 
 static uint32 hvdxg_process_adapter_index(
     struct hvdxg_process_state *process,
@@ -721,24 +731,35 @@ hvdxg_process_adapter_by_local_handle(struct hvdxg_process_state *process,
 static uint32 hvdxg_alloc_process_local_adapter_handle(
     struct hvdxg_process_state *process, uint32 adapter_index)
 {
-    uint32 index_limit = (1U << HV_DXG_HMGR_INDEX_BITS);
     struct hvdxg_local_adapter_entry *slot = NULL;
+    uint32 index = 0;
+    uint32 serial;
     uint32 handle = 0;
     int ret;
 
     if (process == NULL || adapter_index >= process->adapter_count)
         return 0;
-    for (uint32 index = 0; index < index_limit; index++) {
-        handle = hvdxg_make_local_adapter_handle(index);
-
-        if (handle == 0)
+    hvdxg_note_hmgr_min_free();
+    process->local_adapter_alloc_serial++;
+    if (process->local_adapter_alloc_serial == 0)
+        process->local_adapter_alloc_serial++;
+    serial = process->local_adapter_alloc_serial;
+    for (uint32 i = 0; i < process->local_adapter_count; i++) {
+        if (process->local_adapters[i].destroyed == 0)
             continue;
-        slot = hvdxg_process_find_local_adapter(process, handle, 1);
-        if (slot == NULL || slot->destroyed != 0)
-            break;
-        slot = NULL;
+        if (!hvdxg_hmgr_reuse_ready(
+                serial, process->local_adapters[i].destroyed_serial)) {
+            hvdxg.local_adapter_reuse_delayed++;
+            continue;
+        }
+        slot = &process->local_adapters[i];
+        hvdxg.local_adapter_reuse_allowed++;
+        break;
     }
     if (slot == NULL) {
+        if (process->local_adapter_count >=
+            (1U << HV_DXG_HMGR_INDEX_BITS))
+            return 0;
         ret = hvdxg_grow_table((void **)&process->local_adapters,
                                &process->local_adapter_capacity,
                                process->local_adapter_count + 1,
@@ -746,9 +767,19 @@ static uint32 hvdxg_alloc_process_local_adapter_handle(
                                HV_DXG_OPEN_TRACKED_MAX);
         if (ret != 0)
             return 0;
-        slot = &process->local_adapters[process->local_adapter_count++];
+        index = process->local_adapter_count++;
+        slot = &process->local_adapters[index];
+        slot->unique = 1;
+    } else {
+        index = (uint32)(slot - process->local_adapters);
+        if (slot->unique >= ((1U << HV_DXG_HMGR_UNIQUE_BITS) - 1U))
+            slot->unique = 1;
+        else
+            slot->unique++;
     }
+    handle = hvdxg_make_local_adapter_handle(index, slot->unique);
     memset(slot, 0, sizeof(*slot));
+    slot->unique = hvdxg_hmgr_unique(handle);
     slot->handle = handle;
     slot->adapter_index = adapter_index;
     if (process->next_local_adapter_generation == 0)
@@ -796,6 +827,35 @@ static uint32 *hvdxg_owner_object_generation(struct hvdxg_open_state *owner)
     if (owner->process_state != NULL)
         return &owner->process_state->next_object_generation;
     return &owner->next_generation;
+}
+
+static uint32 *hvdxg_owner_object_alloc_serial(
+    struct hvdxg_open_state *owner)
+{
+    if (owner == NULL)
+        return NULL;
+    if (owner->process_state != NULL)
+        return &owner->process_state->object_alloc_serial;
+    return &owner->object_alloc_serial;
+}
+
+static uint32 *hvdxg_owner_object_destroy_serial(
+    struct hvdxg_open_state *owner)
+{
+    if (owner == NULL)
+        return NULL;
+    if (owner->process_state != NULL)
+        return &owner->process_state->object_destroy_serial;
+    return &owner->object_destroy_serial;
+}
+
+static int hvdxg_hmgr_reuse_ready(uint32 alloc_serial,
+                                  uint32 destroyed_serial)
+{
+    if (destroyed_serial == 0)
+        return 0;
+    return alloc_serial - destroyed_serial >=
+           HV_DXG_HMGR_MIN_FREE_ENTRIES;
 }
 
 static struct hvdxg_object_entry *
@@ -934,17 +994,28 @@ hvdxg_owner_find_reusable_object_slot(struct hvdxg_open_state *owner,
 {
     struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
     uint32 *count = hvdxg_owner_object_count(owner);
+    uint32 *alloc_serial = hvdxg_owner_object_alloc_serial(owner);
     uint32 index;
+    uint32 serial;
 
     if (owner == NULL || handle == 0)
         return NULL;
-    if (objects == NULL || *objects == NULL || count == NULL)
+    if (objects == NULL || *objects == NULL || count == NULL ||
+        alloc_serial == NULL)
         return NULL;
     index = hvdxg_hmgr_index(handle);
+    serial = *alloc_serial;
     for (uint32 i = 0; i < *count; i++) {
         if ((*objects)[i].index == index &&
-            (*objects)[i].destroyed != 0)
+            (*objects)[i].destroyed != 0 &&
+            hvdxg_hmgr_reuse_ready(serial,
+                                   (*objects)[i].destroyed_serial)) {
+            hvdxg.object_table_reuse_allowed++;
             return &(*objects)[i];
+        }
+        if ((*objects)[i].index == index &&
+            (*objects)[i].destroyed != 0)
+            hvdxg.object_table_reuse_delayed++;
     }
     return NULL;
 }
@@ -967,14 +1038,17 @@ static int hvdxg_track_object(struct hvdxg_open_state *owner, uint32 type,
     uint32 *count = hvdxg_owner_object_count(owner);
     uint32 *capacity = hvdxg_owner_object_capacity(owner);
     uint32 *next_generation = hvdxg_owner_object_generation(owner);
+    uint32 *alloc_serial = hvdxg_owner_object_alloc_serial(owner);
     struct hvdxg_object_entry *slot;
     int ret;
 
     if (owner == NULL || handle == 0 || type == HV_DXG_OBJECT_NONE)
         return 0;
     if (objects == NULL || count == NULL || capacity == NULL ||
-        next_generation == NULL)
+        next_generation == NULL || alloc_serial == NULL)
         return -EINVAL;
+    hvdxg_note_hmgr_min_free();
+    (*alloc_serial)++;
     slot = hvdxg_owner_find_object(owner, type, handle);
     if (slot != NULL) {
         slot->host_handle = handle;
@@ -1016,6 +1090,7 @@ static int hvdxg_track_object(struct hvdxg_open_state *owner, uint32 type,
     slot->index = hvdxg_hmgr_index(handle);
     slot->unique = hvdxg_hmgr_unique(handle);
     slot->instance = hvdxg_hmgr_instance(handle);
+    slot->destroyed_serial = 0;
     if (*next_generation == 0)
         *next_generation = 1;
     slot->generation = (*next_generation)++;
@@ -1147,6 +1222,11 @@ static int hvdxg_close_local_adapter_handle(struct hvdxg_open_state *owner,
         return -EINVAL;
     }
     local->destroyed = 1;
+    owner->process_state->local_adapter_destroy_serial++;
+    if (owner->process_state->local_adapter_destroy_serial == 0)
+        owner->process_state->local_adapter_destroy_serial++;
+    local->destroyed_serial =
+        owner->process_state->local_adapter_alloc_serial;
     if (process_adapter->local_handle_count > 0)
         process_adapter->local_handle_count--;
     if (process_adapter->refs > 0)
@@ -1285,10 +1365,13 @@ static int hvdxg_untrack_object(struct hvdxg_open_state *owner, uint32 type,
 {
     struct hvdxg_object_entry **objects = hvdxg_owner_object_table(owner);
     uint32 *count = hvdxg_owner_object_count(owner);
+    uint32 *alloc_serial = hvdxg_owner_object_alloc_serial(owner);
+    uint32 *destroy_serial = hvdxg_owner_object_destroy_serial(owner);
 
     if (owner == NULL || handle == 0 || type == HV_DXG_OBJECT_NONE)
         return 0;
-    if (objects == NULL || *objects == NULL || count == NULL)
+    if (objects == NULL || *objects == NULL || count == NULL ||
+        alloc_serial == NULL || destroy_serial == NULL)
         return 0;
     for (uint32 i = 0; i < *count; i++) {
         if ((*objects)[i].type == type &&
@@ -1296,6 +1379,10 @@ static int hvdxg_untrack_object(struct hvdxg_open_state *owner, uint32 type,
             (*objects)[i].destroyed == 0) {
             (*objects)[i].destroyed = 1;
             (*objects)[i].refs = 0;
+            (*destroy_serial)++;
+            if (*destroy_serial == 0)
+                (*destroy_serial)++;
+            (*objects)[i].destroyed_serial = *alloc_serial;
             return 1;
         }
     }
@@ -5272,10 +5359,14 @@ static void hvdxg_process_forget_local_objects(
     hvdxg.process_namespace_locals_before = process->local_adapter_count;
     process->object_count = 0;
     process->next_object_generation = 0;
+    process->object_alloc_serial = 0;
+    process->object_destroy_serial = 0;
     process->adapter_count = 0;
     process->local_adapter_count = 0;
     process->next_adapter_generation = 0;
     process->next_local_adapter_generation = 0;
+    process->local_adapter_alloc_serial = 0;
+    process->local_adapter_destroy_serial = 0;
     hvdxg.process_namespace_objects_after = process->object_count;
     hvdxg.process_namespace_adapters_after = process->adapter_count;
     hvdxg.process_namespace_locals_after = process->local_adapter_count;
@@ -5832,4 +5923,3 @@ static void hvdxg_free_open_state(struct hvdxg_open_state *owner)
         kvfree(owner->sync_objects);
     kvfree(owner);
 }
-

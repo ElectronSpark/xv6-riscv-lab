@@ -137,7 +137,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_host_events=next:%lu last:%lu signals:%u wait_ok:%u wait_timeout:%u wait_fail:%u\n"
         "dxg_channel_pump=active:%d skips:%u sync_active:%d sync_waits:%u sync_timeouts:%u\n"
         "dxg_completion_last=type:%u flags:0x%x desc_len8:%u desc_off8:%u pkt_len:%u pkt_off:%u payload:%u trans:%lu waiting:%lu source:%s/%u wait_source:%s/%u match:%u channel_match:%u captured_type:%u captured_len:%u prefix:%02x%02x%02x%02x%02x%02x%02x%02x\n"
-        "dxg_object_table=max:%u drops:%u denied:%u generation:%u\n"
+        "dxg_object_table=max:%u drops:%u denied:%u generation:%u reuse_delayed:%u reuse_allowed:%u min_free:%u\n"
         "dxg_track_limits=limit:%u alloc_max:%u alloc_drop:%u gpuva_max:%u gpuva_drop:%u hwqueue_max:%u hwqueue_drop:%u pagingqueue_max:%u pagingqueue_drop:%u\n"
         "dxg_pagingqueue_last=len:%u ret:%d queue:0x%x sync:0x%x fence_pa:0x%lx fence_off:0x%lx\n"
         "dxg_gpuva_last=reserve_len:%u reserve_ret:%d va:0x%lx fence:%lu free_len:%u free_ret:%d free_adapter:0x%x free_base:0x%lx free_size:%lu free_wire_size:%lu\n"
@@ -179,7 +179,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_adapter_hardware_temp_v27=attempts:%u successes:%u failures:%u ret:%d status:0x%x open_len:%u query_len:%u close_len:%u close_ret:%d close_status:0x%x handle:0x%x restored:%u/%u\n"
         "dxg_enumadapters_last=cmd:0x%x in_count:%u out_count:%u num_sources:%u buffer:0x%lx handle:0x%x luid:%x:%x source:%u ret:%d\n"
         "dxg_enumadapters_diag=stage:%u ensure:%d bind:%d local:%d copy:%d global:%u/%u/%u vgpu:%u/%u/%u host:0x%x probe:%u/%d/0x%x/0x%x ready:%u process:0x%x/%u gen:%u refs:%u adapters:%u locals:%u objects:%u\n"
-        "dxg_local_adapter_namespace=hits:%u misses:%u last:result:%u handle:0x%x host:0x%x refs:%u locals:%u generation:%u\n"
+        "dxg_local_adapter_namespace=hits:%u misses:%u last:result:%u handle:0x%x host:0x%x refs:%u locals:%u generation:%u reuse_delayed:%u reuse_allowed:%u min_free:%u\n"
         "dxg_queryadapter_history=index:%u h0:%u/%u/%u/%d/0x%x h1:%u/%u/%u/%d/0x%x h2:%u/%u/%u/%d/0x%x h3:%u/%u/%u/%d/0x%x h4:%u/%u/%u/%d/0x%x h5:%u/%u/%u/%d/0x%x h6:%u/%u/%u/%d/0x%x h7:%u/%u/%u/%d/0x%x\n"
         "dxg_queryadapter_history2=h8:%u/%u/%u/%d/0x%x h9:%u/%u/%u/%d/0x%x h10:%u/%u/%u/%d/0x%x h11:%u/%u/%u/%d/0x%x h12:%u/%u/%u/%d/0x%x h13:%u/%u/%u/%d/0x%x h14:%u/%u/%u/%d/0x%x h15:%u/%u/%u/%d/0x%x\n"
         "dxg_qai_admission=index:%u a0:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x a1:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x a2:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x a3:k%u/t%u/sz%u/len%u/ret%d/st0x%x/r%u/src%u/a0x%x/h0x%x/head0x%x\n"
@@ -316,6 +316,9 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.completion_buf[6], hvdxg.completion_buf[7],
         hvdxg.object_table_max, hvdxg.object_table_drops,
         hvdxg.object_table_denied, hvdxg.object_table_generation,
+        hvdxg.object_table_reuse_delayed,
+        hvdxg.object_table_reuse_allowed,
+        hvdxg.object_table_min_free_entries,
         (uint32)HV_DXG_OPEN_TRACKED_MAX, hvdxg.track_allocation_max,
         hvdxg.track_allocation_drops, hvdxg.track_gpuva_max,
         hvdxg.track_gpuva_drops, hvdxg.track_hwqueue_max,
@@ -785,6 +788,9 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.local_adapter_last_refs,
         hvdxg.local_adapter_last_locals,
         hvdxg.local_adapter_last_generation,
+        hvdxg.local_adapter_reuse_delayed,
+        hvdxg.local_adapter_reuse_allowed,
+        hvdxg.local_adapter_min_free_entries,
         hvdxg.queryadapter_history_index,
         HV_DXG_QH_ARGS(0), HV_DXG_QH_ARGS(1),
         HV_DXG_QH_ARGS(2), HV_DXG_QH_ARGS(3),
@@ -3178,4 +3184,3 @@ copy_cached:
         kvfree(status);
     return (int)out;
 }
-

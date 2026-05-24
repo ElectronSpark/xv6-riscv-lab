@@ -1672,6 +1672,7 @@ struct hvdxg_object_entry {
     uint32 unique;
     uint32 instance;
     uint32 destroyed;
+    uint32 destroyed_serial;
 };
 
 struct hvdxg_process_adapter {
@@ -1688,8 +1689,10 @@ struct hvdxg_process_adapter {
 struct hvdxg_local_adapter_entry {
     uint32 handle;
     uint32 adapter_index;
+    uint32 unique;
     uint32 generation;
     uint32 destroyed;
+    uint32 destroyed_serial;
 };
 
 struct hvdxg_process_state {
@@ -1706,12 +1709,16 @@ struct hvdxg_process_state {
     uint32 object_count;
     uint32 object_capacity;
     uint32 next_object_generation;
+    uint32 object_alloc_serial;
+    uint32 object_destroy_serial;
     uint32 adapter_count;
     uint32 adapter_capacity;
     uint32 local_adapter_count;
     uint32 local_adapter_capacity;
     uint32 next_adapter_generation;
     uint32 next_local_adapter_generation;
+    uint32 local_adapter_alloc_serial;
+    uint32 local_adapter_destroy_serial;
 };
 
 struct hvdxg_open_state {
@@ -1736,6 +1743,8 @@ struct hvdxg_open_state {
     uint32 object_count;
     uint32 object_capacity;
     uint32 next_generation;
+    uint32 object_alloc_serial;
+    uint32 object_destroy_serial;
     uint32 device_count;
     uint32 device_capacity;
     uint32 context_count;
@@ -2440,4 +2449,3 @@ static struct {
         int registered;
     } child[HVPCI_CHILD_MAX];
 } hvpci;
-
