@@ -1173,6 +1173,15 @@ static struct {
     uint32 ntshared_cache_last_object;
     uint32 ntshared_cache_last_handle;
     uint32 ntshared_cache_last_refs;
+    uint32 sharedhandle_copyout_failures;
+    uint32 sharedhandle_copyout_last_kind;
+    uint32 sharedhandle_copyout_last_process;
+    uint32 sharedhandle_copyout_last_object;
+    uint32 sharedhandle_copyout_last_nt;
+    uint32 sharedhandle_copyout_last_fd;
+    uint32 sharedhandle_copyout_last_reclaimed;
+    uint32 sharedhandle_copyout_last_refs_after;
+    int32 sharedhandle_copyout_last_ret;
     uint32 sharedhandle_last_cmd;
     int32 sharedhandle_last_ret;
     uint32 sharedhandle_last_device;

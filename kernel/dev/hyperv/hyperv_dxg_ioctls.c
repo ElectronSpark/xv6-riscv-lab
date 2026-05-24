@@ -6212,15 +6212,27 @@ createhwqueue_done:
         if (ret != 0) {
             struct vfs_file *f;
 
+            hvdxg.sharedhandle_copyout_failures++;
+            hvdxg.sharedhandle_copyout_last_kind = kind;
+            hvdxg.sharedhandle_copyout_last_process = process;
+            hvdxg.sharedhandle_copyout_last_object = host_object;
+            hvdxg.sharedhandle_copyout_last_nt = host_nt_handle;
+            hvdxg.sharedhandle_copyout_last_fd = (uint32)fd;
+            hvdxg.sharedhandle_copyout_last_reclaimed = 0;
+            hvdxg.sharedhandle_copyout_last_ret = ret;
             if (kind == HV_DXG_SHARED_OBJECT_SYNC)
                 hvdxg.sharedsync_export_ret = ret;
             spin_lock(&current->fdtable->lock);
             f = vfs_fdtable_dealloc_fd(current->fdtable, fd);
             spin_unlock(&current->fdtable->lock);
             if (f != NULL) {
+                hvdxg.sharedhandle_copyout_last_reclaimed = 1;
                 vfs_file_maybe_last_fd_close(f);
                 vfs_fput(f);
             }
+            hvdxg.sharedhandle_copyout_last_refs_after =
+                hvdxg_ntshared_cache_refs(kind, process, host_object,
+                                          host_nt_handle);
             hvdxg.sharedhandle_last_ret = ret;
             break;
         }

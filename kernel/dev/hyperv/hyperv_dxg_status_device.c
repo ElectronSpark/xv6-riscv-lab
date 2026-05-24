@@ -2797,6 +2797,21 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
     }
     if (len >= 0 && (size_t)len < status_size) {
         len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_sharedhandle_copyout=failures:%u kind:%u proc:0x%x "
+            "object:0x%x nt:0x%x fd:%u reclaimed:%u refs_after:%u "
+            "ret:%d\n",
+            hvdxg.sharedhandle_copyout_failures,
+            hvdxg.sharedhandle_copyout_last_kind,
+            hvdxg.sharedhandle_copyout_last_process,
+            hvdxg.sharedhandle_copyout_last_object,
+            hvdxg.sharedhandle_copyout_last_nt,
+            hvdxg.sharedhandle_copyout_last_fd,
+            hvdxg.sharedhandle_copyout_last_reclaimed,
+            hvdxg.sharedhandle_copyout_last_refs_after,
+            hvdxg.sharedhandle_copyout_last_ret);
+    }
+    if (len >= 0 && (size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
             "dxg_opensync_namespace=current_tgid:%lu owner_tgid:%lu "
             "owner_gen:%u mismatch:%u rejects:%u gate:%u ret:%d "
             "device:0x%x source_dev:0x%x global:0x%x\n",
