@@ -706,6 +706,77 @@ static int gpu_nouveau_gpuobj_free(struct fb_gpu_render_owner *owner,
     return 0;
 }
 
+static int gpu_nouveau_nvif(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct nvif_ioctl_v0_compat hdr;
+    int ret = gpu_nouveau_require_device();
+
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_ioctl_entries);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_nvif_ioctls);
+    if (ret != 0) {
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_fail_closed);
+        return ret;
+    }
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&hdr, 1, arg, sizeof(hdr)) < 0)
+        return -EFAULT;
+    if (hdr.version != 0)
+        return -EINVAL;
+
+    switch (hdr.type) {
+    case NVIF_IOCTL_V0_NOP:
+        return 0;
+    case NVIF_IOCTL_V0_SCLASS: {
+        struct nvif_ioctl_sclass_v0_compat sclass;
+        uint64 sclass_arg = arg + sizeof(hdr);
+
+        if (either_copyin(&sclass, 1, sclass_arg, sizeof(sclass)) < 0)
+            return -EFAULT;
+        if (sclass.version != 0)
+            return -EINVAL;
+        /*
+         * xv6 does not yet expose a real NVIF class hierarchy.  Return an
+         * empty class list instead of advertising fabricated engines.
+         */
+        sclass.count = 0;
+        if (either_copyout(1, sclass_arg, &sclass, sizeof(sclass)) < 0)
+            return -EFAULT;
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_nvif_sclass_queries);
+        gpu_nouveau_stat_set(&fb_state.stats.nouveau_nvif_sclass_count, 0);
+        return 0;
+    }
+    case NVIF_IOCTL_V0_NEW: {
+        struct nvif_ioctl_new_v0_compat n;
+
+        if (either_copyin(&n, 1, arg + sizeof(hdr), sizeof(n)) < 0)
+            return -EFAULT;
+        if (n.version != 0)
+            return -EINVAL;
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_nvif_new_rejects);
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_object_rejects);
+        return -ENODEV;
+    }
+    case NVIF_IOCTL_V0_DEL:
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_nvif_del_rejects);
+        return -ENOENT;
+    case NVIF_IOCTL_V0_MTHD:
+    case NVIF_IOCTL_V0_RD:
+    case NVIF_IOCTL_V0_WR:
+    case NVIF_IOCTL_V0_MAP:
+    case NVIF_IOCTL_V0_UNMAP:
+    case NVIF_IOCTL_V0_NTFY_NEW:
+    case NVIF_IOCTL_V0_NTFY_DEL:
+    case NVIF_IOCTL_V0_NTFY_GET:
+    case NVIF_IOCTL_V0_NTFY_PUT:
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_nvif_unsupported);
+        return -EOPNOTSUPP;
+    default:
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_nvif_unsupported);
+        return -EINVAL;
+    }
+}
+
 static uint32 gpu_nouveau_destroy_owner(struct fb_gpu_render_owner *owner)
 {
     uint32 objects = gpu_nouveau_object_count(owner);

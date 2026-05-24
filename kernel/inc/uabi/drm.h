@@ -119,6 +119,7 @@
 #define DRM_IOCTL_NOUVEAU_GROBJ_ALLOC          0xc0106444UL
 #define DRM_IOCTL_NOUVEAU_NOTIFIEROBJ_ALLOC    0xc0106445UL
 #define DRM_IOCTL_NOUVEAU_GPUOBJ_FREE          0x40086446UL
+#define DRM_IOCTL_NOUVEAU_NVIF                 0xc0186447UL
 #define DRM_IOCTL_NOUVEAU_VM_INIT              0xc0106450UL
 #define DRM_IOCTL_NOUVEAU_VM_BIND              0xc0286451UL
 #define DRM_IOCTL_NOUVEAU_EXEC                 0xc0286452UL
@@ -1020,6 +1021,55 @@ struct drm_nouveau_notifierobj_alloc_compat {
 struct drm_nouveau_gpuobj_free_compat {
     int32 channel;
     uint32 handle;
+};
+
+struct nvif_ioctl_v0_compat {
+    uchar version;
+    uchar type;
+    uchar pad02[4];
+    uchar owner;
+    uchar route;
+    uint64 token;
+    uint64 object;
+};
+
+#define NVIF_IOCTL_V0_NOP      0x00
+#define NVIF_IOCTL_V0_SCLASS   0x01
+#define NVIF_IOCTL_V0_NEW      0x02
+#define NVIF_IOCTL_V0_DEL      0x03
+#define NVIF_IOCTL_V0_MTHD     0x04
+#define NVIF_IOCTL_V0_RD       0x05
+#define NVIF_IOCTL_V0_WR       0x06
+#define NVIF_IOCTL_V0_MAP      0x07
+#define NVIF_IOCTL_V0_UNMAP    0x08
+#define NVIF_IOCTL_V0_NTFY_NEW 0x09
+#define NVIF_IOCTL_V0_NTFY_DEL 0x0a
+#define NVIF_IOCTL_V0_NTFY_GET 0x0b
+#define NVIF_IOCTL_V0_NTFY_PUT 0x0c
+#define NVIF_IOCTL_V0_OWNER_ANY 0xff
+#define NVIF_IOCTL_V0_ROUTE_NVIF 0x00
+#define NVIF_IOCTL_V0_ROUTE_HIDDEN 0xff
+
+struct nvif_ioctl_sclass_v0_compat {
+    uchar version;
+    uchar count;
+    uchar pad02[6];
+};
+
+struct nvif_ioctl_sclass_oclass_v0_compat {
+    int32 oclass;
+    int16 minver;
+    int16 maxver;
+};
+
+struct nvif_ioctl_new_v0_compat {
+    uchar version;
+    uchar pad01[6];
+    uchar route;
+    uint64 token;
+    uint64 object;
+    uint32 handle;
+    int32 oclass;
 };
 
 struct drm_nouveau_gem_info_compat {

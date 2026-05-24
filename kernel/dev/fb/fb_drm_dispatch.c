@@ -542,6 +542,8 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         return gpu_nouveau_grobj_alloc(owner, arg);
     case DRM_IOCTL_NOUVEAU_GPUOBJ_FREE:
         return gpu_nouveau_gpuobj_free(owner, arg);
+    case DRM_IOCTL_NOUVEAU_NVIF:
+        return gpu_nouveau_nvif(owner, arg);
     case DRM_IOCTL_NOUVEAU_GEM_NEW:
         return gpu_nouveau_gem_new(owner, arg);
     case DRM_IOCTL_NOUVEAU_GEM_INFO:
@@ -761,6 +763,7 @@ static const struct drm_core_ioctl_desc gpu_drm_ioctls[] = {
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_CHANNEL_FREE, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GROBJ_ALLOC, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GPUOBJ_FREE, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_NVIF, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_VM_INIT, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_VM_BIND, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_EXEC, DRM_CORE_IOCTL_ANY),

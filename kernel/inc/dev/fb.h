@@ -870,6 +870,12 @@ struct fb_gpu_stats {
     uint64 nouveau_gpuobj_frees; /* legacy notifier/GROBJ object frees */
     uint64 nouveau_object_rejects; /* invalid/unsupported object requests */
     uint64 nouveau_close_object_reclaims; /* objects reclaimed at fd close */
+    uint64 nouveau_nvif_ioctls; /* NVIF ioctl attempts */
+    uint64 nouveau_nvif_sclass_queries; /* NVIF SCLASS queries */
+    uint64 nouveau_nvif_sclass_count; /* last advertised NVIF class count */
+    uint64 nouveau_nvif_new_rejects; /* NVIF NEW class rejects */
+    uint64 nouveau_nvif_del_rejects; /* NVIF DEL rejects */
+    uint64 nouveau_nvif_unsupported; /* unsupported NVIF operations */
     uint64 nouveau_gem_news;   /* Nouveau GEM_NEW successes */
     uint64 nouveau_gem_infos;  /* Nouveau GEM_INFO successes */
     uint64 nouveau_cpu_preps;  /* Nouveau GEM_CPU_PREP successes */
