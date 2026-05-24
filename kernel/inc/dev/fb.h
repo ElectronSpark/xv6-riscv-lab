@@ -931,6 +931,7 @@ struct fb_gpu_stats {
     uint64 kms_atomic_out_fence_test_only_placeholders; /* TEST_ONLY wrote -1 */
     uint64 kms_atomic_out_fence_fd_exports; /* atomic OUT_FENCE_PTR fd exports */
     uint64 kms_atomic_out_fence_display_correlated; /* native/display fences */
+    uint64 kms_atomic_out_fence_software_scanout_correlated; /* sw scanout */
     uint64 kms_atomic_nonblock_rejects; /* nonblocking atomic commits rejected */
     uint64 ttm_system_bytes;   /* BO bytes in system placement */
     uint64 ttm_tt_bytes;       /* BO bytes in GART/TT placement */
@@ -985,6 +986,8 @@ struct fb_gpu_stats {
     uint64 syncobj_wait_callbacks_fired; /* wait callbacks fired by signal */
     uint64 syncobj_wait_callbacks_cancelled; /* timed/interrupted wait cancels */
     uint64 syncobj_wait_callback_late_fires; /* inconsistent wait callback */
+    uint64 syncobj_pending_transfers; /* transfer copied an unsignaled point */
+    uint64 syncobj_pending_transfer_wakeups; /* pending transfer became ready */
     uint64 syncobj_timeout_waits; /* waits using finite timeout wakeups */
     uint64 syncobj_stale_wait_rejects; /* waits rejected as stale/unsubmitted */
     uint64 sync_file_pending_exports; /* pending sync_file fd exports */

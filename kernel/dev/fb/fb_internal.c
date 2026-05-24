@@ -223,6 +223,7 @@ struct fb_gpu_syncobj_state_entry {
     uint64 reservation_fence;
     uint32 proxy_source_index;
     uint64 proxy_point;
+    uint32 proxy_kind;
     uint32 pending_sync_file_callbacks;
     uint64 sync_file_callback_generation;
     uint64 sync_file_callback_fired_generation;

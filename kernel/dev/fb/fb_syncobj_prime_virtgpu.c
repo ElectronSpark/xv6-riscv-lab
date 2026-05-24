@@ -33,6 +33,23 @@ static int gpu_syncobj_state_get_locked(uint32 state_index)
     return 0;
 }
 
+#define FB_GPU_SYNCOBJ_PROXY_SYNC_FILE 1U
+#define FB_GPU_SYNCOBJ_PROXY_TRANSFER  2U
+
+static void gpu_syncobj_clear_proxy_locked(
+    struct fb_gpu_syncobj_state_entry *state)
+{
+    uint32 old_proxy;
+
+    if (state == NULL || state->proxy_source_index == 0)
+        return;
+    old_proxy = state->proxy_source_index;
+    state->proxy_source_index = 0;
+    state->proxy_point = 0;
+    state->proxy_kind = 0;
+    gpu_syncobj_state_put_locked(old_proxy);
+}
+
 static int gpu_syncobj_alloc_state_locked(int signaled,
                                           uint32 *state_index)
 {
@@ -55,6 +72,27 @@ static int gpu_syncobj_alloc_state_locked(int signaled,
     return -ENOSPC;
 }
 
+static void gpu_syncobj_fire_state_callbacks_locked(
+    struct fb_gpu_syncobj_state_entry *state)
+{
+    if (state == NULL)
+        return;
+    if (state->pending_sync_file_callbacks != 0) {
+        fb_state.stats.sync_file_pending_callbacks_fired +=
+            state->pending_sync_file_callbacks;
+        state->pending_sync_file_callbacks = 0;
+        state->sync_file_callback_fired_generation =
+            state->sync_file_callback_generation;
+    }
+    if (state->pending_wait_callbacks != 0) {
+        fb_state.stats.syncobj_wait_callbacks_fired +=
+            state->pending_wait_callbacks;
+        state->pending_wait_callbacks = 0;
+        state->wait_callback_fired_generation =
+            state->wait_callback_generation;
+    }
+}
+
 static int gpu_syncobj_state_ready_locked(
     struct fb_gpu_syncobj_state_entry *state, uint64 point)
 {
@@ -69,11 +107,19 @@ static int gpu_syncobj_state_ready_locked(
 
         if (source != NULL && source->signaled &&
             source->timeline_value >= proxy_point) {
+            uint64 ready_point = state->timeline_value != 0 ?
+                state->timeline_value : proxy_point;
+
             state->signaled = 1;
-            state->timeline_value = proxy_point;
+            state->timeline_value = ready_point;
             state->reservation_seq++;
             state->reservation_fence = source->reservation_fence;
-            fb_state.stats.sync_file_pending_wakeups++;
+            if (state->proxy_kind == FB_GPU_SYNCOBJ_PROXY_TRANSFER)
+                fb_state.stats.syncobj_pending_transfer_wakeups++;
+            else
+                fb_state.stats.sync_file_pending_wakeups++;
+            gpu_syncobj_fire_state_callbacks_locked(state);
+            gpu_syncobj_clear_proxy_locked(state);
         }
     }
     return state->signaled && state->timeline_value >= point;
@@ -188,20 +234,8 @@ static void gpu_syncobj_signal_state_locked(
     state->reservation_seq++;
     state->reservation_fence = state->timeline_value;
     fb_state.stats.syncobj_signals++;
-    if (state->pending_sync_file_callbacks != 0) {
-        fb_state.stats.sync_file_pending_callbacks_fired +=
-            state->pending_sync_file_callbacks;
-        state->pending_sync_file_callbacks = 0;
-        state->sync_file_callback_fired_generation =
-            state->sync_file_callback_generation;
-    }
-    if (state->pending_wait_callbacks != 0) {
-        fb_state.stats.syncobj_wait_callbacks_fired +=
-            state->pending_wait_callbacks;
-        state->pending_wait_callbacks = 0;
-        state->wait_callback_fired_generation =
-            state->wait_callback_generation;
-    }
+    gpu_syncobj_clear_proxy_locked(state);
+    gpu_syncobj_fire_state_callbacks_locked(state);
     gpu_syncobj_wakeup_locked();
 }
 
@@ -213,6 +247,7 @@ static void gpu_syncobj_reset_state_locked(
     state->signaled = 0;
     state->reservation_seq++;
     state->reservation_fence = 0;
+    gpu_syncobj_clear_proxy_locked(state);
     gpu_syncobj_wakeup_locked();
 }
 
@@ -602,6 +637,8 @@ static int gpu_syncobj_fd_to_handle(struct fb_gpu_render_owner *owner,
                                 sync_file->state_index;
                             state->proxy_point =
                                 sync_file->snapshot_timeline_value;
+                            state->proxy_kind =
+                                FB_GPU_SYNCOBJ_PROXY_SYNC_FILE;
                             fb_state.stats.sync_file_pending_imports++;
                         }
                     }
@@ -957,14 +994,34 @@ static int gpu_syncobj_transfer(struct fb_gpu_render_owner *owner, uint64 arg)
     if (src == NULL || dst == NULL || src_state == NULL ||
         dst_state == NULL) {
         ret = -ENOENT;
-    } else if (!src_state->signaled ||
-               src_state->timeline_value < req.src_point) {
-        ret = -ETIME;
+    } else if (src_state == dst_state) {
+        if (gpu_syncobj_state_ready_locked(src_state, req.src_point))
+            gpu_syncobj_signal_state_locked(dst_state, req.dst_point);
     } else {
-        gpu_syncobj_signal_state_locked(dst_state, req.dst_point);
-        dst_state->reservation_fence = src_state->reservation_fence;
-        gpu_syncobj_attach_owner_resv_locked(
-            owner, FB_GPU_RESV_ATTACH_SYNCOBJ_SIGNAL);
+        int source_ready = gpu_syncobj_state_ready_locked(src_state,
+                                                         req.src_point);
+
+        if (source_ready) {
+            gpu_syncobj_clear_proxy_locked(dst_state);
+            gpu_syncobj_signal_state_locked(dst_state, req.dst_point);
+            dst_state->reservation_fence = src_state->reservation_fence;
+        } else {
+            gpu_syncobj_clear_proxy_locked(dst_state);
+            ret = gpu_syncobj_state_get_locked(src->state_index);
+            if (ret == 0) {
+                dst_state->signaled = 0;
+                dst_state->timeline_value = req.dst_point;
+                dst_state->reservation_seq++;
+                dst_state->reservation_fence = src_state->reservation_fence;
+                dst_state->proxy_source_index = src->state_index;
+                dst_state->proxy_point = req.src_point;
+                dst_state->proxy_kind = FB_GPU_SYNCOBJ_PROXY_TRANSFER;
+                fb_state.stats.syncobj_pending_transfers++;
+            }
+        }
+        if (ret == 0)
+            gpu_syncobj_attach_owner_resv_locked(
+                owner, FB_GPU_RESV_ATTACH_SYNCOBJ_SIGNAL);
     }
     spin_unlock(&fb_state.lock);
     return ret;

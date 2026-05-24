@@ -508,8 +508,10 @@ static int gpu_drm_get_cap(uint64 arg)
     case DRM_CAP_CURSOR_HEIGHT:
         req.value = 64;
         break;
-    case DRM_CAP_ASYNC_PAGE_FLIP:
     case DRM_CAP_ADDFB2_MODIFIERS:
+        req.value = 1;
+        break;
+    case DRM_CAP_ASYNC_PAGE_FLIP:
     case DRM_CAP_PAGE_FLIP_TARGET:
     case DRM_CAP_CRTC_IN_VBLANK_EVENT:
     case DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP:
@@ -2055,7 +2057,8 @@ static void gpu_kms_complete_prepared_out_fence(
     if (out->display_correlated) {
         out->fence_obj->seqno = fb_state.stats.display_last_complete != 0 ?
             fb_state.stats.display_last_complete : out->target_sequence;
-        fb_state.stats.kms_atomic_out_fence_display_correlated++;
+        fb_state.stats.
+            kms_atomic_out_fence_software_scanout_correlated++;
     }
     (void)fb_gpu_fence_signal_locked(out->fence_obj, 0);
     spin_unlock(&fb_state.lock);
