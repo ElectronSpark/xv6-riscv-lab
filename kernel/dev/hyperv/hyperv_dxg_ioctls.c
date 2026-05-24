@@ -6142,13 +6142,14 @@ createhwqueue_done:
                                           shared->cache_process,
                                           shared->cache_object,
                                           shared->host_nt_handle);
-            if (fd >= 0 && current != NULL && current->fdtable != NULL) {
-                spin_lock(&current->fdtable->lock);
-                if (vfs_fdtable_set_fdflags(current->fdtable, fd,
-                                            FD_CLOEXEC) == 0)
-                    hvdxg.sharedsync_export_cloexec = 1;
-                spin_unlock(&current->fdtable->lock);
-            }
+        }
+        if (fd >= 0 && current != NULL && current->fdtable != NULL) {
+            spin_lock(&current->fdtable->lock);
+            if (vfs_fdtable_set_fdflags(current->fdtable, fd,
+                                        FD_CLOEXEC) == 0 &&
+                kind == HV_DXG_SHARED_OBJECT_SYNC)
+                hvdxg.sharedsync_export_cloexec = 1;
+            spin_unlock(&current->fdtable->lock);
         }
         if (fd < 0) {
             uint32 destroy_handle = 0;
