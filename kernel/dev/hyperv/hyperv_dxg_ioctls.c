@@ -890,7 +890,7 @@ static void hvdxg_note_enumadapters_state(struct hvdxg_open_state *owner,
     hvdxg.enumadapters_last_process_generation =
         process != NULL ? process->generation : 0;
     hvdxg.enumadapters_last_process_refs =
-        process != NULL ? process->refs : 0;
+        process != NULL ? process->process_refs : 0;
     hvdxg.enumadapters_last_process_adapters =
         process != NULL ? process->adapter_count : 0;
     hvdxg.enumadapters_last_process_locals =

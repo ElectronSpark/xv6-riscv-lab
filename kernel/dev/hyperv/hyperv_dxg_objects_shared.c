@@ -1713,7 +1713,7 @@ static uint32 hvdxg_open_process_generation(struct hvdxg_open_state *owner)
 static uint32 hvdxg_open_process_refs(struct hvdxg_open_state *owner)
 {
     if (owner != NULL && owner->process_state != NULL)
-        return owner->process_state->refs;
+        return owner->process_state->process_refs;
     return 0;
 }
 
@@ -5336,9 +5336,6 @@ static void hvdxg_cleanup_note_ret(int *cleanup_ret, int op_ret,
     }
 }
 
-static void hvdxg_process_forget_local_objects(
-    struct hvdxg_process_state *process);
-
 static struct hvdxg_process_state *hvdxg_process_get_current(void)
 {
     struct hvdxg_process_state *candidate;
@@ -5358,7 +5355,8 @@ static struct hvdxg_process_state *hvdxg_process_get_current(void)
      * Linux thread identity.
      */
     candidate->pid = current ? (uint64)current->pid : tgid;
-    candidate->refs = 1;
+    candidate->process_refs = 1;
+    candidate->process_mem_refs = 1;
 
     mutex_lock(&hvdxg.process_lock);
     for (uint32 i = 0; i < HV_DXG_PROCESS_TABLE_MAX; i++) {
@@ -5369,41 +5367,16 @@ static struct hvdxg_process_state *hvdxg_process_get_current(void)
                 empty = (int)i;
             continue;
         }
-        if (entry->tgid == tgid &&
-            (entry->refs != 0 ||
-             (entry->host_process_created && entry->host_process.v != 0))) {
-            int same_tgid_retained = entry->refs == 0;
-            uint32 source_generation = entry->generation;
-            uint32 source_objects = entry->object_count;
-
-            if (same_tgid_retained) {
-                hvdxg_process_forget_local_objects(entry);
-                entry->guest_process = (uint64)entry;
-                entry->generation = ++hvdxg.process_generation;
-                if (entry->generation == 0)
-                    entry->generation = ++hvdxg.process_generation;
-                hvdxg.process_namespace_new_generation =
-                    entry->generation;
-                if (hvdxg.process_live < 0xffffffffU)
-                    hvdxg.process_live++;
-                hvdxg.process_isolated_last_tgid = entry->tgid;
-                hvdxg.process_isolated_last_handle =
-                    entry->host_process.v;
-                hvdxg.process_isolated_last_generation =
-                    entry->generation;
-                hvdxg.process_isolated_source_generation =
-                    source_generation;
-                hvdxg.process_isolated_copied_objects = 0;
-                hvdxg.process_isolated_source_objects = source_objects;
-            }
-            entry->refs++;
+        if (entry->tgid == tgid && entry->process_refs != 0) {
+            entry->process_refs++;
+            entry->process_mem_refs++;
             entry->pid = current ? (uint64)current->pid : tgid;
-            if (same_tgid_retained) {
-                hvdxg.process_retained_handle = entry->host_process.v;
-                hvdxg.process_retained_generation = entry->generation;
-                hvdxg.process_retained_tgid = entry->tgid;
-                hvdxg.process_retained_refs = entry->refs;
-            }
+            hvdxg.process_retained_handle = entry->host_process.v;
+            hvdxg.process_retained_generation = entry->generation;
+            hvdxg.process_retained_tgid = entry->tgid;
+            hvdxg.process_retained_refs = entry->process_refs;
+            hvdxg.process_object_refs_last = entry->process_refs;
+            hvdxg.process_mem_refs_last = entry->process_mem_refs;
             hvdxg.process_reuses++;
             hvdxg.process_shared_reuses++;
             process = entry;
@@ -5453,6 +5426,8 @@ static struct hvdxg_process_state *hvdxg_process_get_current(void)
         hvdxg.process_isolated_source_objects = 0;
         if (hvdxg.process_live > hvdxg.process_live_max)
             hvdxg.process_live_max = hvdxg.process_live;
+        hvdxg.process_object_refs_last = process->process_refs;
+        hvdxg.process_mem_refs_last = process->process_mem_refs;
         candidate = NULL;
     } else if (process == NULL) {
         hvdxg.process_table_full++;
@@ -5464,38 +5439,34 @@ static struct hvdxg_process_state *hvdxg_process_get_current(void)
     return process;
 }
 
-static void hvdxg_process_forget_local_objects(
-    struct hvdxg_process_state *process)
+static void hvdxg_process_memory_put(struct hvdxg_process_state *process)
 {
+    int free_process = 0;
+
     if (process == NULL)
         return;
-    hvdxg.process_namespace_last_tgid = process->tgid;
-    hvdxg.process_namespace_last_handle = process->host_process.v;
-    hvdxg.process_namespace_source_generation = process->generation;
-    hvdxg.process_namespace_new_generation = 0;
-    hvdxg.process_namespace_objects_before = process->object_count;
-    hvdxg.process_namespace_adapters_before = process->adapter_count;
-    hvdxg.process_namespace_locals_before = process->local_adapter_count;
-    process->object_count = 0;
-    process->object_free_count = 0;
-    process->object_free_head = HV_DXG_HMGR_FREE_NONE;
-    process->object_free_tail = HV_DXG_HMGR_FREE_NONE;
-    process->next_object_generation = 0;
-    process->object_alloc_serial = 0;
-    process->object_destroy_serial = 0;
-    process->adapter_count = 0;
-    process->local_adapter_count = 0;
-    process->next_adapter_generation = 0;
-    process->next_local_adapter_generation = 0;
-    process->local_adapter_alloc_serial = 0;
-    process->local_adapter_destroy_serial = 0;
-    hvdxg.process_namespace_objects_after = process->object_count;
-    hvdxg.process_namespace_adapters_after = process->adapter_count;
-    hvdxg.process_namespace_locals_after = process->local_adapter_count;
-    hvdxg.process_namespace_fresh =
-        hvdxg.process_namespace_objects_after == 0 &&
-        hvdxg.process_namespace_adapters_after == 0 &&
-        hvdxg.process_namespace_locals_after == 0;
+
+    mutex_lock(&hvdxg.process_lock);
+    if (process->process_mem_refs > 0)
+        process->process_mem_refs--;
+    hvdxg.process_mem_releases++;
+    hvdxg.process_object_refs_last = process->process_refs;
+    hvdxg.process_mem_refs_last = process->process_mem_refs;
+    if (process->process_mem_refs == 0) {
+        free_process = 1;
+        hvdxg.process_mem_frees++;
+    }
+    mutex_unlock(&hvdxg.process_lock);
+
+    if (free_process) {
+        if (process->objects != NULL)
+            kvfree(process->objects);
+        if (process->adapters != NULL)
+            kvfree(process->adapters);
+        if (process->local_adapters != NULL)
+            kvfree(process->local_adapters);
+        kvfree(process);
+    }
 }
 
 static int hvdxg_process_put(struct hvdxg_process_state *process)
@@ -5510,9 +5481,11 @@ static int hvdxg_process_put(struct hvdxg_process_state *process)
     memset(&host_process, 0, sizeof(host_process));
 
     mutex_lock(&hvdxg.process_lock);
-    if (process->refs > 0)
-        process->refs--;
-    if (process->refs == 0) {
+    if (process->process_refs > 0)
+        process->process_refs--;
+    hvdxg.process_object_refs_last = process->process_refs;
+    hvdxg.process_mem_refs_last = process->process_mem_refs;
+    if (process->process_refs == 0) {
         hvdxg.process_releases++;
         if (process->host_process_created && process->host_process.v != 0) {
             hvdxg.process_destroy_active_total = 0;
@@ -5594,14 +5567,8 @@ static int hvdxg_process_put(struct hvdxg_process_state *process)
         if (hvdxg.process_live > 0)
             hvdxg.process_live--;
         mutex_unlock(&hvdxg.process_lock);
-        if (process->objects != NULL)
-            kvfree(process->objects);
-        if (process->adapters != NULL)
-            kvfree(process->adapters);
-        if (process->local_adapters != NULL)
-            kvfree(process->local_adapters);
-        kvfree(process);
     }
+    hvdxg_process_memory_put(process);
     return ret;
 }
 
@@ -5612,7 +5579,7 @@ static uint32 hvdxg_process_refs(struct hvdxg_process_state *process)
     if (process == NULL)
         return 0;
     mutex_lock(&hvdxg.process_lock);
-    refs = process->refs;
+    refs = process->process_refs;
     mutex_unlock(&hvdxg.process_lock);
     return refs;
 }
@@ -5652,7 +5619,8 @@ static void hvdxg_note_open_createprocess(struct hvdxg_open_state *owner,
     hvdxg.open_createprocess_last_generation =
         owner->process_state != NULL ? owner->process_state->generation : 0;
     hvdxg.open_createprocess_last_refs =
-        owner->process_state != NULL ? owner->process_state->refs : 0;
+        owner->process_state != NULL ?
+            owner->process_state->process_refs : 0;
     if (ret == 0)
         hvdxg.open_createprocess_successes++;
     else
@@ -5780,7 +5748,8 @@ static int hvdxg_bind_open_process_early(struct hvdxg_open_state *owner,
         if (owner->process_state != NULL) {
             hvdxg.early_bind_last_generation =
                 owner->process_state->generation;
-            hvdxg.early_bind_last_refs = owner->process_state->refs;
+            hvdxg.early_bind_last_refs =
+                owner->process_state->process_refs;
         }
         mutex_unlock(&hvdxg.process_lock);
     } else {

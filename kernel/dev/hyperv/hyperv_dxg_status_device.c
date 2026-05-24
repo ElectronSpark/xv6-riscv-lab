@@ -264,6 +264,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "d3dkmt_process_destroy_active=total:%u device:%u context:%u hwqueue:%u paging:%u sync:%u allocation:%u resource:%u gpuva:%u\n"
         "d3dkmt_process_binding=new_host_created:%u same_tgid_reused:%u retained_reuse_avoided:%u avoided_tgid:%lu avoided_src_tgid:%lu avoided_handle:0x%x avoided_gen:%u avoided_src_gen:%u\n"
         "d3dkmt_process_reuse=last_tgid:%lu handle:0x%x local_gen:%u source_gen:%u copied_objects:%u source_objects:%u\n"
+        "d3dkmt_process_lifetime=object_refs_last:%u mem_refs_last:%u object_releases:%u mem_releases:%u mem_frees:%u\n"
         "note=Hyper-V GPU-PV D3DKMT adapter ioctls are available; "
         "device/context/sync/paging/allocation residency/map/submit ioctls are wired; higher-level OpenGL/D3D runtime validation is still pending.\n",
         hvdxg.global_present, hvdxg.global_relid, hvdxg.global_conn_id,
@@ -1697,7 +1698,12 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.process_isolated_last_generation,
         hvdxg.process_isolated_source_generation,
         hvdxg.process_isolated_copied_objects,
-        hvdxg.process_isolated_source_objects);
+        hvdxg.process_isolated_source_objects,
+        hvdxg.process_object_refs_last,
+        hvdxg.process_mem_refs_last,
+        hvdxg.process_releases,
+        hvdxg.process_mem_releases,
+        hvdxg.process_mem_frees);
     if (len < 0) {
         kvfree(status);
         return -EIO;

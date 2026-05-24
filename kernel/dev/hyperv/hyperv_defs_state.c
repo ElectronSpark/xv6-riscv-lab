@@ -1707,7 +1707,8 @@ struct hvdxg_process_state {
     struct hvdxg_process_adapter *adapters;
     struct hvdxg_local_adapter_entry *local_adapters;
     uint32 host_process_created;
-    uint32 refs;
+    uint32 process_refs;
+    uint32 process_mem_refs;
     uint32 generation;
     uint32 object_count;
     uint32 object_capacity;

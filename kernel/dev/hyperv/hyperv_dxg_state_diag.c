@@ -105,6 +105,10 @@ static struct {
     uint32 process_creates;
     uint32 process_reuses;
     uint32 process_releases;
+    uint32 process_mem_releases;
+    uint32 process_mem_frees;
+    uint32 process_object_refs_last;
+    uint32 process_mem_refs_last;
     uint32 process_destroy_attempts;
     uint32 process_destroy_successes;
     uint32 process_destroy_failures;
