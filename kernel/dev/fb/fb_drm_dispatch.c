@@ -430,6 +430,9 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         struct drm_virtgpu_resource_info_compat req;
         uint64 size = 0;
         int ret;
+        if (owner != NULL && owner->nouveau_channel != 0 &&
+            gpu_nouveau_device() != NULL)
+            return gpu_nouveau_notifier_alloc(owner, arg);
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         ret = virtio_gpu_user_resource_info(owner->id, owner->tgid,
@@ -535,6 +538,10 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         return gpu_nouveau_channel_alloc(owner, arg);
     case DRM_IOCTL_NOUVEAU_CHANNEL_FREE:
         return gpu_nouveau_channel_free(owner, arg);
+    case DRM_IOCTL_NOUVEAU_GROBJ_ALLOC:
+        return gpu_nouveau_grobj_alloc(owner, arg);
+    case DRM_IOCTL_NOUVEAU_GPUOBJ_FREE:
+        return gpu_nouveau_gpuobj_free(owner, arg);
     case DRM_IOCTL_NOUVEAU_GEM_NEW:
         return gpu_nouveau_gem_new(owner, arg);
     case DRM_IOCTL_NOUVEAU_GEM_INFO:
@@ -752,6 +759,8 @@ static const struct drm_core_ioctl_desc gpu_drm_ioctls[] = {
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GETPARAM, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_CHANNEL_FREE, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GROBJ_ALLOC, DRM_CORE_IOCTL_ANY),
+    GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_GPUOBJ_FREE, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_VM_INIT, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_VM_BIND, DRM_CORE_IOCTL_ANY),
     GPU_DRM_IOCTL_DESC(DRM_IOCTL_NOUVEAU_EXEC, DRM_CORE_IOCTL_ANY),
@@ -817,6 +826,7 @@ static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
         spin_unlock(&fb_state.lock);
         drm_core_release_file(&owner->drm);
         fb_dxg_present_release_owner_sources(owner->id, owner->tgid);
+        (void)gpu_nouveau_destroy_owner(owner);
         stale_kms_fbs = gpu_kms_destroy_owner_fbs(owner);
         stale_syncobjs = gpu_syncobj_destroy_owner(owner);
         stale_gem_handles = fb_gpu_count_render_owner_bos(owner->id);

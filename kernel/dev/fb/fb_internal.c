@@ -851,7 +851,17 @@ struct fb_gpu_render_owner {
     uint32 default_ctx_id;
     uint32 capset_id;
     int nouveau_channel;
+    uint32 nouveau_channel_handle;
+    uint32 nouveau_pushbuf_domains;
+    uint32 nouveau_next_notifier_offset;
     int nouveau_vm_initialized;
+    struct {
+        uint32 handle;
+        uint32 class_id;
+        uint32 kind;
+        uint32 size;
+        uint32 offset;
+    } nouveau_objects[16];
     struct drm_event_vblank_compat drm_events[FB_GPU_DRM_EVENT_QUEUE_CAPACITY];
     uint32 drm_event_head;
     uint32 drm_event_tail;

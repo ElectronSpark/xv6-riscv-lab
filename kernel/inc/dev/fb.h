@@ -173,6 +173,7 @@
 #define FB_GPU_NOUVEAU_GETPARAM_SOURCE_NONE      0
 #define FB_GPU_NOUVEAU_GETPARAM_SOURCE_DDA_PCI   1
 #define FB_GPU_NOUVEAU_GETPARAM_SOURCE_SYNTHETIC 2
+#define FB_GPU_NOUVEAU_GETPARAM_SOURCE_DRIVER_CAP 3
 
 #define FB_GPU_RESV_SHARED_SLOTS 8
 #define FB_GPU_RESV_ATTACH_NONE          0
@@ -858,10 +859,17 @@ struct fb_gpu_stats {
     uint64 nouveau_getparams;  /* Nouveau GETPARAM calls accepted */
     uint64 nouveau_getparam_dda_facts; /* GETPARAM facts sourced from DDA PCI */
     uint64 nouveau_getparam_synthetic_facts; /* synthetic/non-DDA GETPARAM facts */
+    uint64 nouveau_getparam_driver_caps; /* local driver capability answers */
     uint64 nouveau_getparam_fail_closed; /* GETPARAM rejected because absent */
     uint64 nouveau_getparam_last_source; /* FB_GPU_NOUVEAU_GETPARAM_SOURCE_* */
     uint64 nouveau_channel_allocs; /* Nouveau channel alloc successes */
     uint64 nouveau_channel_frees; /* Nouveau channel free successes */
+    uint64 nouveau_channel_active; /* currently active Nouveau channels */
+    uint64 nouveau_notifier_allocs; /* legacy notifier objects allocated */
+    uint64 nouveau_grobj_allocs; /* legacy graphics objects allocated */
+    uint64 nouveau_gpuobj_frees; /* legacy notifier/GROBJ object frees */
+    uint64 nouveau_object_rejects; /* invalid/unsupported object requests */
+    uint64 nouveau_close_object_reclaims; /* objects reclaimed at fd close */
     uint64 nouveau_gem_news;   /* Nouveau GEM_NEW successes */
     uint64 nouveau_gem_infos;  /* Nouveau GEM_INFO successes */
     uint64 nouveau_cpu_preps;  /* Nouveau GEM_CPU_PREP successes */

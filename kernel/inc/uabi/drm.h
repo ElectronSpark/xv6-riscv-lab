@@ -116,6 +116,9 @@
 #define DRM_IOCTL_NOUVEAU_GETPARAM             0xc0106440UL
 #define DRM_IOCTL_NOUVEAU_CHANNEL_ALLOC        0xc0586442UL
 #define DRM_IOCTL_NOUVEAU_CHANNEL_FREE         0x40046443UL
+#define DRM_IOCTL_NOUVEAU_GROBJ_ALLOC          0xc0106444UL
+#define DRM_IOCTL_NOUVEAU_NOTIFIEROBJ_ALLOC    0xc0106445UL
+#define DRM_IOCTL_NOUVEAU_GPUOBJ_FREE          0x40086446UL
 #define DRM_IOCTL_NOUVEAU_VM_INIT              0xc0106450UL
 #define DRM_IOCTL_NOUVEAU_VM_BIND              0xc0286451UL
 #define DRM_IOCTL_NOUVEAU_EXEC                 0xc0286452UL
@@ -999,6 +1002,24 @@ struct drm_nouveau_channel_alloc_compat {
 
 struct drm_nouveau_channel_free_compat {
     int32 channel;
+};
+
+struct drm_nouveau_grobj_alloc_compat {
+    int32 channel;
+    uint32 handle;
+    int32 class;
+};
+
+struct drm_nouveau_notifierobj_alloc_compat {
+    uint32 channel;
+    uint32 handle;
+    uint32 size;
+    uint32 offset;
+};
+
+struct drm_nouveau_gpuobj_free_compat {
+    int32 channel;
+    uint32 handle;
 };
 
 struct drm_nouveau_gem_info_compat {
