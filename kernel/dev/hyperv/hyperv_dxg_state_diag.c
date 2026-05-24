@@ -170,6 +170,10 @@ static struct {
     uint8 host_event_signaled[HV_DXG_HOST_EVENT_MAX];
     uint8 host_event_remove_after_signal[HV_DXG_HOST_EVENT_MAX];
     uint64 host_event_last_id;
+    uint64 host_event_last_removed_id;
+    uint32 host_event_active_count;
+    uint32 host_event_alloc_count;
+    uint32 host_event_remove_count;
     uint32 host_event_signal_count;
     uint32 host_event_wait_successes;
     uint32 host_event_wait_timeouts;
@@ -1631,6 +1635,17 @@ static struct {
     uint32 syncfile_last_out_sync;
     uint64 syncfile_last_cpu_va;
     uint64 syncfile_last_gpu_va;
+    uint32 syncfile_live_count;
+    uint32 syncfile_create_count;
+    uint32 syncfile_release_count;
+    uint32 syncfile_release_event_removed;
+    uint32 syncfile_release_nt_released;
+    uint32 syncfile_create_copyout_failures;
+    uint32 syncfile_create_copyout_fd_reclaimed;
+    uint32 syncfile_open_copyout_failures;
+    uint32 syncfile_open_unwind_destroy_attempts;
+    uint32 syncfile_open_unwind_destroy_successes;
+    int32 syncfile_open_unwind_destroy_ret;
     uint32 updateallocproperty_last_len;
     int32 updateallocproperty_last_ret;
     int32 updateallocproperty_last_status;

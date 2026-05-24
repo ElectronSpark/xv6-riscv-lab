@@ -4617,14 +4617,21 @@ static int hvdxg_sync_file_release(struct vfs_inode *ip,
 
     (void)ip;
     if (sync_file != NULL) {
-        if (sync_file->event_id != 0)
+        hvdxg.syncfile_release_count++;
+        if (hvdxg.syncfile_live_count != 0)
+            hvdxg.syncfile_live_count--;
+        if (sync_file->event_id != 0) {
             hvdxg_remove_host_event(sync_file->event_id);
-        if (sync_file->host_nt_handle != 0)
+            hvdxg.syncfile_release_event_removed++;
+        }
+        if (sync_file->host_nt_handle != 0) {
             (void)hvdxg_release_nt_shared_object_ref(
                 HV_DXG_SHARED_OBJECT_SYNC, sync_file->cache_process,
                 sync_file->cache_object != 0 ? sync_file->cache_object :
                 sync_file->sync_object,
                 sync_file->host_nt_handle);
+            hvdxg.syncfile_release_nt_released++;
+        }
         kvfree(sync_file);
         file->private_data = NULL;
     }
@@ -4825,6 +4832,43 @@ static int hvdxg_open_sync_file_on_device(
     }
     hvdxg.opensync_last_ret = ret;
     hvdxg.opensync_last_gate = ret == 0 ? 5 : 4;
+    return ret;
+}
+
+static int hvdxg_destroy_syncobject_host_for_syncfile(
+    struct hvdxg_open_state *owner, uint32 device, uint32 sync,
+    uint32 type, uint32 flags, uint32 global_shared)
+{
+    struct hvdxg_command_destroysyncobject destroy;
+    struct hvdxg_ntstatus status;
+    uint32 actual_len = 0;
+    int ret;
+
+    if (sync == 0)
+        return 0;
+    memset(&destroy, 0, sizeof(destroy));
+    memset(&status, 0, sizeof(status));
+    hvdxg_command_vm_init(&destroy.hdr,
+                          HV_DXGK_VMBCOMMAND_DESTROYSYNCOBJECT);
+    destroy.hdr.process = hvdxg_owner_bound_process_handle(owner);
+    destroy.sync_object.v = sync;
+    ret = hvdxg_send_sync_global(&destroy, sizeof(destroy), &status,
+                                 sizeof(status), &actual_len);
+    if (ret == 0 && actual_len >= sizeof(status))
+        ret = hvdxg_ntstatus_to_errno(status);
+    hvdxg.destroysync_last_handle = sync;
+    hvdxg.destroysync_last_device = device;
+    hvdxg.destroysync_last_type = type;
+    hvdxg.destroysync_last_flags = flags;
+    hvdxg.destroysync_last_global = global_shared;
+    hvdxg.destroysync_last_monitor_fence = 0;
+    hvdxg.destroysync_last_cmd_len = hvdxg.global_send_last_cmd_len;
+    hvdxg.destroysync_last_wire_len = hvdxg.global_send_last_wire_len;
+    hvdxg.destroysync_last_ext = hvdxg.global_send_last_ext;
+    hvdxg.destroysync_last_ext_offset = hvdxg.global_send_last_ext_offset;
+    hvdxg.destroysync_last_len = actual_len;
+    hvdxg.destroysync_last_status = status.v;
+    hvdxg.destroysync_last_ret = ret;
     return ret;
 }
 

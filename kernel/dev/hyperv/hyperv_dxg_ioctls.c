@@ -7435,6 +7435,8 @@ openresource_done:
             hvdxg.syncfile_last_ret = ret;
             break;
         }
+        hvdxg.syncfile_create_count++;
+        hvdxg.syncfile_live_count++;
         if (current != NULL && current->fdtable != NULL) {
             spin_lock(&current->fdtable->lock);
             (void)vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
@@ -7450,10 +7452,12 @@ openresource_done:
         if (ret != 0) {
             struct vfs_file *f;
 
+            hvdxg.syncfile_create_copyout_failures++;
             spin_lock(&current->fdtable->lock);
             f = vfs_fdtable_dealloc_fd(current->fdtable, fd);
             spin_unlock(&current->fdtable->lock);
             if (f != NULL) {
+                hvdxg.syncfile_create_copyout_fd_reclaimed++;
                 vfs_file_maybe_last_fd_close(f);
                 vfs_fput(f);
             }
@@ -7678,10 +7682,22 @@ openresource_done:
             ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
                   -EFAULT : 0;
         }
-        if (ret == 0 && owner != NULL)
+        if (ret == 0 && owner != NULL) {
             hvdxg_track_sync(owner, req.device.v, req.syncobj.v,
                              sync_file->sync_type, open_flags.value,
                              sync_file->global_share, cpu_va, fence_kva, 0);
+        } else if (ret != 0 && opened.v != 0) {
+            int destroy_ret;
+
+            hvdxg.syncfile_open_copyout_failures++;
+            hvdxg.syncfile_open_unwind_destroy_attempts++;
+            destroy_ret = hvdxg_destroy_syncobject_host_for_syncfile(
+                owner, req.device.v, opened.v, sync_file->sync_type,
+                open_flags.value, sync_file->global_share);
+            hvdxg.syncfile_open_unwind_destroy_ret = destroy_ret;
+            if (destroy_ret == 0)
+                hvdxg.syncfile_open_unwind_destroy_successes++;
+        }
         vfs_fput(sync_file_vfs);
         hvdxg.syncfile_last_object = req.syncobj.v;
         hvdxg.syncfile_last_fence = req.fence_value;

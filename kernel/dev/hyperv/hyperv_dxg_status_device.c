@@ -229,6 +229,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_unsupported_last=cmd:0x%x ret:%d device:0x%x handle:0x%x count:%u nr:%u size:%u name:%u\n"
         "dxg_markdeviceaserror_last=len:%u ret:%d status:0x%x device:0x%x reason:0x%x process:0x%x cmd_len:%u\n"
         "dxg_syncfile_last=cmd:0x%x ret:%d device:0x%x object:0x%x context:0x%x handle:0x%lx fence:%lu global:0x%x host_nt:0x%x source_flags:0x%x open_flags:0x%x len:%u status:0x%x out_sync:0x%x cpu:0x%lx gpu:0x%lx\n"
+        "dxg_syncfile_lifetime=live:%u creates:%u releases:%u event_removed:%u nt_released:%u create_faults:%u fd_reclaimed:%u open_faults:%u open_destroy:%u/%u/%d host_events:%u/%u/%u last_event:%lu removed:%lu\n"
         "dxg_updateallocproperty_last=len:%u ret:%d status:0x%x allocation:0x%x fence:%lu\n"
         "dxg_vidmem_reservation_last=len:%u ret:%d status:0x%x group:%u reservation:%lu\n"
         "dxg_offer_reclaim_last=offer_len:%u offer_ret:%d offer_status:0x%x offer_count:%u reclaim_len:%u reclaim_ret:%d reclaim_status:0x%x reclaim_count:%u reclaim_result0:%u reclaim_fence:%lu\n"
@@ -1398,6 +1399,22 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.syncfile_last_out_sync,
         hvdxg.syncfile_last_cpu_va,
         hvdxg.syncfile_last_gpu_va,
+        hvdxg.syncfile_live_count,
+        hvdxg.syncfile_create_count,
+        hvdxg.syncfile_release_count,
+        hvdxg.syncfile_release_event_removed,
+        hvdxg.syncfile_release_nt_released,
+        hvdxg.syncfile_create_copyout_failures,
+        hvdxg.syncfile_create_copyout_fd_reclaimed,
+        hvdxg.syncfile_open_copyout_failures,
+        hvdxg.syncfile_open_unwind_destroy_attempts,
+        hvdxg.syncfile_open_unwind_destroy_successes,
+        hvdxg.syncfile_open_unwind_destroy_ret,
+        hvdxg.host_event_active_count,
+        hvdxg.host_event_alloc_count,
+        hvdxg.host_event_remove_count,
+        hvdxg.host_event_last_id,
+        hvdxg.host_event_last_removed_id,
         hvdxg.updateallocproperty_last_len,
         hvdxg.updateallocproperty_last_ret,
         (uint32)hvdxg.updateallocproperty_last_status,

@@ -769,6 +769,10 @@ static uint64 hvdxg_alloc_host_event_file(struct vfs_file *file,
             __atomic_store_n(&hvdxg.host_event_remove_after_signal[i],
                              remove_after_signal ? 1 : 0,
                              __ATOMIC_RELEASE);
+            __atomic_add_fetch(&hvdxg.host_event_active_count, 1,
+                               __ATOMIC_RELAXED);
+            __atomic_add_fetch(&hvdxg.host_event_alloc_count, 1,
+                               __ATOMIC_RELAXED);
             return id;
         }
     }
@@ -798,6 +802,14 @@ static void hvdxg_remove_host_event(uint64 id)
                              __ATOMIC_RELEASE);
             __atomic_store_n(&hvdxg.host_event_remove_after_signal[i], 0,
                              __ATOMIC_RELEASE);
+            __atomic_store_n(&hvdxg.host_event_last_removed_id, id,
+                             __ATOMIC_RELEASE);
+            __atomic_add_fetch(&hvdxg.host_event_remove_count, 1,
+                               __ATOMIC_RELAXED);
+            if (__atomic_load_n(&hvdxg.host_event_active_count,
+                                __ATOMIC_RELAXED) != 0)
+                __atomic_sub_fetch(&hvdxg.host_event_active_count, 1,
+                                   __ATOMIC_RELAXED);
             if (file != NULL)
                 vfs_fput(file);
             return;
@@ -1927,4 +1939,3 @@ static void hv_process_events(void)
         hv_test_and_clear_event(hvdxg.vgpu_relid))
         hvdxg_pump_channels();
 }
-
