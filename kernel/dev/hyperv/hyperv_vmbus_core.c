@@ -1402,6 +1402,83 @@ static int hvdxg_send_sync_vgpu(const void *cmd, uint32 cmd_len,
                                       actual_len, 0);
 }
 
+static int hvdxg_send_async_vgpu(void *cmd, uint32 cmd_len)
+{
+    struct hvdxg_command_vgpu_to_host *hdr =
+        (struct hvdxg_command_vgpu_to_host *)cmd;
+    struct hvdxg_ext_header *ext = NULL;
+    uint32 send_len = cmd_len;
+    void *send_cmd = cmd;
+    int route_global = 0;
+    int ret;
+
+    if (cmd == NULL || cmd_len < sizeof(*hdr))
+        return -EINVAL;
+    if (!hvdxg.vgpu_open_ok || hvdxg.vgpu_out_ring == NULL)
+        return -ENODEV;
+    if (!hvdxg.probe_async_msg_enabled) {
+        hvdxg.async_send_sync_fallbacks++;
+        return -EOPNOTSUPP;
+    }
+    if (hvdxg.global_open_ok && hvdxg.global_out_ring != NULL)
+        route_global = 1;
+    if (!route_global)
+        return -ENODEV;
+
+    hdr->async_msg = 1;
+    if (hvdxg.use_ext_header) {
+        send_len = cmd_len + sizeof(*ext);
+        ext = kvmalloc(send_len);
+        if (ext == NULL)
+            return -ENOMEM;
+        memset(ext, 0, sizeof(*ext));
+        ext->command_offset = sizeof(*ext);
+        ext->vgpu_luid = hvdxg_ext_adapter_luid(NULL);
+        memcpy((uint8 *)ext + sizeof(*ext), cmd, cmd_len);
+        send_cmd = ext;
+    }
+
+    hvdxg.async_send_attempts++;
+    hvdxg.async_send_last_command = hdr->command_type;
+    hvdxg.async_send_last_cmd_len = cmd_len;
+    hvdxg.async_send_last_wire_len = send_len;
+    hvdxg.async_send_last_async_bit = hdr->async_msg;
+    hvdxg.async_send_last_route_global = route_global;
+    hvdxg.async_send_last_packet_type = VM_PKT_DATA_INBAND;
+    hvdxg.async_send_last_retries = 0;
+    hvdxg.async_send_last_ret = 0;
+
+    ret = hvdxg_send_packet_with_retry(
+        hvdxg.global_out_ring, hvdxg.global_relid, hvdxg.global_conn_id,
+        hvdxg.global_monitor_allocated, hvdxg.global_monitorid,
+        hvdxg.global_dedicated, send_cmd, send_len, 0,
+        VM_PKT_DATA_INBAND, &hvdxg.async_send_last_retries,
+        &hvdxg.async_send_last_ret);
+    if (ret == 0) {
+        hvdxg.async_send_successes++;
+        switch (hdr->command_type) {
+        case HV_DXGK_VMBCOMMAND_SUBMITCOMMAND:
+            hvdxg.async_send_submit_successes++;
+            break;
+        case HV_DXGK_VMBCOMMAND_SIGNALSYNCOBJECT:
+            hvdxg.async_send_signal_successes++;
+            break;
+        case HV_DXGK_VMBCOMMAND_WAITFORSYNCOBJECTFROMGPU:
+            hvdxg.async_send_waitgpu_successes++;
+            break;
+        case HV_DXGK_VMBCOMMAND_SUBMITCOMMANDTOHWQUEUE:
+            hvdxg.async_send_submithwqueue_successes++;
+            break;
+        default:
+            break;
+        }
+        hvdxg_note_host_command(hdr->command_type);
+    }
+    if (ext != NULL)
+        kvfree(ext);
+    return ret;
+}
+
 static void hvdxg_record_global_send_diag(
     struct hvdxg_global_send_diag *diag,
     const struct hvdxg_command_vm_to_host *vmcmd, uint32 cmd_len,

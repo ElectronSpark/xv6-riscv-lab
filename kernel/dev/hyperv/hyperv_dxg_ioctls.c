@@ -2840,8 +2840,13 @@ evict_done:
             goto submitcommand_done;
         }
         hvdxg_wc_store_fence();
-        ret = hvdxg_send_sync_vgpu(submit, command_len, &status,
-                                   sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(submit, command_len);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(submit, command_len, &status,
+                                       sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.submit_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
@@ -2928,8 +2933,13 @@ submitcommand_done:
                                  (uint8 *)&submit[1] + primaries_size,
                                  req.priv_drv_data_size);
         hvdxg_wc_store_fence();
-        ret = hvdxg_send_sync_vgpu(submit, command_len, &status,
-                                   sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(submit, command_len);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(submit, command_len, &status,
+                                       sizeof(status), &actual_len);
+        }
         if (ret == 0 && actual_len >= sizeof(status))
             ret = hvdxg_ntstatus_to_errno(status);
         hvdxg.submithwqueue_last_len = actual_len;
@@ -4389,8 +4399,13 @@ submithwqueue_done:
         memcpy(pos, &req.context, sizeof(req.context));
         pos += sizeof(req.context);
         memcpy(pos, req.contexts, context_size);
-        ret = hvdxg_send_sync_vgpu(signal, command_len,
-                                   &status, sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(signal, command_len);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(signal, command_len,
+                                       &status, sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.syncgpu_signal_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
@@ -4469,10 +4484,17 @@ submithwqueue_done:
         memcpy(pos, fence_values, fence_size);
         pos += fence_size;
         memcpy(pos, req.object_array, object_size);
-        ret = hvdxg_send_sync_vgpu(wait,
-                                   sizeof(*wait) - sizeof(uint64) +
-                                       fence_size + object_size,
-                                   &status, sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(
+                wait, sizeof(*wait) - sizeof(uint64) + fence_size +
+                          object_size);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(wait,
+                                       sizeof(*wait) - sizeof(uint64) +
+                                           fence_size + object_size,
+                                       &status, sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.syncgpu_wait_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
@@ -4549,9 +4571,16 @@ submithwqueue_done:
             if (ret != 0)
                 break;
         }
-        ret = hvdxg_send_sync_vgpu(signal,
-                                   sizeof(*signal) + object_size + fence_size,
-                                   &status, sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(
+                signal, sizeof(*signal) + object_size + fence_size);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(signal,
+                                       sizeof(*signal) + object_size +
+                                           fence_size,
+                                       &status, sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.syncsignal_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
@@ -4628,10 +4657,17 @@ submithwqueue_done:
             ret = -EFAULT;
             break;
         }
-        ret = hvdxg_send_sync_vgpu(signal,
-                                   sizeof(*signal) + object_size +
-                                       sizeof(req.context) + fence_size,
-                                   &status, sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(
+                signal, sizeof(*signal) + object_size +
+                            sizeof(req.context) + fence_size);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(signal,
+                                       sizeof(*signal) + object_size +
+                                           sizeof(req.context) + fence_size,
+                                       &status, sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.syncgpu_signal_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
@@ -4773,8 +4809,13 @@ submithwqueue_done:
             ret = -EFAULT;
             goto gpu2_cpu_event_cleanup;
         }
-        ret = hvdxg_send_sync_vgpu(signal, command_len,
-                                   &status, sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(signal, command_len);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(signal, command_len,
+                                       &status, sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.syncgpu_signal_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
@@ -4994,10 +5035,17 @@ gpu2_cpu_event_cleanup:
         hvdxg.syncgpu_wait_last_fence = fences[0];
         hvdxg.syncgpu_wait_last_cmd_len =
             sizeof(*wait) - sizeof(uint64) + fence_size + object_size;
-        ret = hvdxg_send_sync_vgpu(wait,
-                                   sizeof(*wait) - sizeof(uint64) +
-                                       fence_size + object_size,
-                                   &status, sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(
+                wait, sizeof(*wait) - sizeof(uint64) + fence_size +
+                          object_size);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(wait,
+                                       sizeof(*wait) - sizeof(uint64) +
+                                           fence_size + object_size,
+                                       &status, sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.syncgpu_wait_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
@@ -7708,10 +7756,17 @@ openresource_done:
         memcpy(pos, &sync_file->fence_value, sizeof(sync_file->fence_value));
         pos += sizeof(sync_file->fence_value);
         memcpy(pos, &opened, sizeof(opened));
-        ret = hvdxg_send_sync_vgpu(
-            wait, sizeof(*wait) - sizeof(uint64) +
-                      sizeof(sync_file->fence_value) + sizeof(opened),
-            &status, sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(
+                wait, sizeof(*wait) - sizeof(uint64) +
+                          sizeof(sync_file->fence_value) + sizeof(opened));
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(
+                wait, sizeof(*wait) - sizeof(uint64) +
+                          sizeof(sync_file->fence_value) + sizeof(opened),
+                &status, sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.syncfile_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
@@ -8020,10 +8075,17 @@ openresource_done:
         memcpy(pos, hwqueues, hwqueue_size);
         pos += hwqueue_size;
         memcpy(pos, fences, fence_size);
-        ret = hvdxg_send_sync_vgpu(signal,
-                                   sizeof(*signal) + object_size +
-                                       hwqueue_size + fence_size,
-                                   &status, sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(
+                signal, sizeof(*signal) + object_size + hwqueue_size +
+                            fence_size);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(signal,
+                                       sizeof(*signal) + object_size +
+                                           hwqueue_size + fence_size,
+                                       &status, sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.syncgpu_signal_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
@@ -8094,10 +8156,17 @@ openresource_done:
         memcpy(pos, fences, fence_size);
         pos += fence_size;
         memcpy(pos, objects, object_size);
-        ret = hvdxg_send_sync_vgpu(wait,
-                                   sizeof(*wait) - sizeof(uint64) +
-                                       fence_size + object_size,
-                                   &status, sizeof(status), &actual_len);
+        if (hvdxg.probe_async_msg_enabled) {
+            ret = hvdxg_send_async_vgpu(
+                wait, sizeof(*wait) - sizeof(uint64) + fence_size +
+                          object_size);
+        } else {
+            hvdxg.async_send_sync_fallbacks++;
+            ret = hvdxg_send_sync_vgpu(wait,
+                                       sizeof(*wait) - sizeof(uint64) +
+                                           fence_size + object_size,
+                                       &status, sizeof(status), &actual_len);
+        }
         if (actual_len >= sizeof(status))
             hvdxg.syncgpu_wait_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))

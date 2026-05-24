@@ -195,6 +195,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_shareobject_last=len:%u cmd_len:%u dev_off:%u obj_off:%u wire:%u ext:%u eoff:%u result_len:%u head:%u comp:%u/%u/%02x%02x%02x%02x%02x%02x%02x%02x ret:%d status:0x%x proc:0x%x device:0x%x object:0x%x reserved:0x%lx nt:0x%lx\n"
         "dxg_shareobject_diag=attempted:%u valid_nt:%u kind:%u reason:%u\n"
         "dxg_vgpu_send_last=cmd:%u cmd_len:%u wire_len:%u ext:%u off:%u proc:0x%x channel:%u luid:%x:%x route_global:%u retries:%u ret:%d\n"
+        "dxg_async_send_last=enabled:%u attempts:%u successes:%u fallback_sync:%u cmd:%u cmd_len:%u wire_len:%u async_bit:%u route_global:%u retries:%u packet_type:%u ret:%d submit:%u signal:%u waitgpu:%u submithwqueue:%u\n"
         "dxg_global_send_last=cmd:%u cmd_len:%u wire_len:%u ext:%u off:%u proc:0x%x channel:%u luid:%x:%x retries:%u ret:%d\n"
         "dxg_global_send_share=nt:%u/%u/%u/0x%x share:%u/%u/%u/0x%x destroynt:%u/%u/%u/0x%x destroysync:%u/%u/%u/0x%x\n"
         "dxg_global_send_ntwire=cmdid:%lu cmd:%u channel:%u proc:0x%x cmd_len:%u wire_len:%u result_len:%u ext:%u off:%u relid:%u conn:%u monitor:%u/%u dedicated:%u luid:%x:%x\n"
@@ -911,6 +912,22 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.vgpu_send_last_route_global,
         hvdxg.vgpu_send_last_retries,
         hvdxg.vgpu_send_last_ret,
+        hvdxg.probe_async_msg_enabled,
+        hvdxg.async_send_attempts,
+        hvdxg.async_send_successes,
+        hvdxg.async_send_sync_fallbacks,
+        hvdxg.async_send_last_command,
+        hvdxg.async_send_last_cmd_len,
+        hvdxg.async_send_last_wire_len,
+        hvdxg.async_send_last_async_bit,
+        hvdxg.async_send_last_route_global,
+        hvdxg.async_send_last_retries,
+        hvdxg.async_send_last_packet_type,
+        hvdxg.async_send_last_ret,
+        hvdxg.async_send_submit_successes,
+        hvdxg.async_send_signal_successes,
+        hvdxg.async_send_waitgpu_successes,
+        hvdxg.async_send_submithwqueue_successes,
         hvdxg.global_send_last_command,
         hvdxg.global_send_last_cmd_len,
         hvdxg.global_send_last_wire_len,

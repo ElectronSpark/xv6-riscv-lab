@@ -1083,6 +1083,21 @@ static struct {
     uint32 vgpu_send_last_retries;
     int32 vgpu_send_last_ret;
     struct hvdxg_winluid vgpu_send_last_luid;
+    uint32 async_send_attempts;
+    uint32 async_send_successes;
+    uint32 async_send_sync_fallbacks;
+    uint32 async_send_last_command;
+    uint32 async_send_last_cmd_len;
+    uint32 async_send_last_wire_len;
+    uint32 async_send_last_async_bit;
+    uint32 async_send_last_route_global;
+    uint32 async_send_last_retries;
+    uint32 async_send_last_packet_type;
+    int32 async_send_last_ret;
+    uint32 async_send_submit_successes;
+    uint32 async_send_signal_successes;
+    uint32 async_send_waitgpu_successes;
+    uint32 async_send_submithwqueue_successes;
     uint32 global_send_last_command;
     uint32 global_send_last_cmd_len;
     uint32 global_send_last_wire_len;
@@ -1896,6 +1911,7 @@ static uint32 hvdxg_sync_type_is_monitored(uint32 type);
 static int hvdxg_send_sync_vgpu(const void *cmd, uint32 cmd_len,
                                 void *result, uint32 result_len,
                                 uint32 *actual_len);
+static int hvdxg_send_async_vgpu(void *cmd, uint32 cmd_len);
 static int hvdxg_send_sync_vgpu_flags(const void *cmd, uint32 cmd_len,
                                       void *result, uint32 result_len,
                                       uint32 *actual_len, uint32 flags);
