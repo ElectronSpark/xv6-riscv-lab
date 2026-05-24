@@ -1240,6 +1240,7 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         uint32 actual_len = 0;
         uint32 local_adapter;
         uint32 host_adapter;
+        struct hvdxg_process_adapter *process_adapter = NULL;
         struct hvdxg_d3dkmthandle create_process = { 0 };
 
         ret = hvdxg_d3dkmt_ensure();
@@ -1264,8 +1265,9 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         hvdxg.createdevice_last_owner_refs =
             hvdxg_open_process_refs(owner);
         hvdxg_note_createdevice_object(owner, 0);
-        if (hvdxg_resolve_adapter_handle(owner, local_adapter,
-                                         &host_adapter) != 0) {
+        if (hvdxg_resolve_local_adapter_handle(owner, local_adapter,
+                                               &host_adapter,
+                                               &process_adapter) != 0) {
             ret = -EINVAL;
             hvdxg.createdevice_last_ret = ret;
             break;
@@ -1308,9 +1310,15 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                 hvdxg_track_u32_grow(&owner->devices,
                                       &owner->device_count,
                                       &owner->device_capacity,
-                                      req.device.v) != 0) {
+                                      req.device.v) != 0 ||
+                hvdxg_process_adapter_add_device(process_adapter,
+                                                 req.device.v) != 0) {
                 hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE,
                                      req.device.v);
+                hvdxg_untrack_u32(owner->devices, &owner->device_count,
+                                  req.device.v);
+                hvdxg_process_adapter_remove_device(owner->process_state,
+                                                    req.device.v);
                 (void)hvdxg_destroy_device_host(req.device.v);
                 ret = -ENOMEM;
             }
@@ -1356,6 +1364,8 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                                  req.device.v);
             hvdxg_untrack_u32(owner->devices, &owner->device_count,
                               req.device.v);
+            hvdxg_process_adapter_remove_device(owner->process_state,
+                                                req.device.v);
         }
         break;
     }
@@ -8042,6 +8052,7 @@ openresource_done:
     case LX_DXCLOSEADAPTER: {
         struct d3dkmt_closeadapter req;
         uint32 host_adapter;
+        uint32 final_close;
 
         if (either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0) {
             ret = -EFAULT;
@@ -8049,13 +8060,18 @@ openresource_done:
         }
         hvdxg.closeadapter_ioctl_count++;
         ret = hvdxg_close_local_adapter_handle(owner, req.adapter_handle.v,
-                                               &host_adapter);
+                                               &host_adapter,
+                                               &final_close);
         hvdxg.closeadapter_last_len = 0;
         hvdxg.closeadapter_last_ret = ret;
         hvdxg.closeadapter_last_status = 0;
         if (ret == 0) {
             uint32 order = ++hvdxg.cleanup_order_seq;
 
+            if (final_close)
+                ret = hvdxg_destroy_process_adapter_devices(owner,
+                                                            host_adapter);
+            hvdxg.closeadapter_last_ret = ret;
             hvdxg.closeadapter_local_count++;
             hvdxg.closeadapter_last_order = order;
             if (hvdxg.cleanup_last_destroy_order != 0 &&

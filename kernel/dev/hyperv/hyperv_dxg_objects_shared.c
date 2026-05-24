@@ -691,6 +691,27 @@ hvdxg_process_get_adapter(struct hvdxg_process_state *process,
     return adapter;
 }
 
+static int hvdxg_process_adapter_add_device(
+    struct hvdxg_process_adapter *adapter, uint32 device)
+{
+    if (adapter == NULL || device == 0)
+        return 0;
+    return hvdxg_track_u32_grow(&adapter->devices,
+                                &adapter->device_count,
+                                &adapter->device_capacity,
+                                device);
+}
+
+static void hvdxg_process_adapter_remove_device(
+    struct hvdxg_process_state *process, uint32 device)
+{
+    if (process == NULL || process->adapters == NULL || device == 0)
+        return;
+    for (uint32 i = 0; i < process->adapter_count; i++)
+        hvdxg_untrack_u32(process->adapters[i].devices,
+                          &process->adapters[i].device_count, device);
+}
+
 static struct hvdxg_local_adapter_entry *
 hvdxg_process_find_local_adapter(struct hvdxg_process_state *process,
                                  uint32 handle, int include_destroyed)
@@ -1326,15 +1347,57 @@ static int hvdxg_resolve_adapter_handle(struct hvdxg_open_state *owner,
     return 0;
 }
 
+static int hvdxg_resolve_local_adapter_handle(
+    struct hvdxg_open_state *owner, uint32 adapter, uint32 *host_out,
+    struct hvdxg_process_adapter **adapter_out)
+{
+    struct hvdxg_process_adapter *process_adapter;
+
+    if (host_out != NULL)
+        *host_out = 0;
+    if (adapter_out != NULL)
+        *adapter_out = NULL;
+    if (adapter == 0 || hvdxg.host_adapter_handle == 0 ||
+        owner == NULL || owner->process_state == NULL)
+        return -EINVAL;
+    process_adapter = hvdxg_process_adapter_by_local_handle(
+        owner->process_state, adapter, NULL);
+    if (process_adapter == NULL) {
+        hvdxg.local_adapter_namespace_misses++;
+        hvdxg.local_adapter_last_result = 4;
+        hvdxg.local_adapter_last_handle = adapter;
+        hvdxg.local_adapter_last_host = 0;
+        hvdxg.local_adapter_last_refs = 0;
+        hvdxg.local_adapter_last_locals = 0;
+        hvdxg.local_adapter_last_generation = 0;
+        return -EINVAL;
+    }
+    hvdxg.local_adapter_namespace_hits++;
+    hvdxg.local_adapter_last_result = 3;
+    hvdxg.local_adapter_last_handle = adapter;
+    hvdxg.local_adapter_last_host = process_adapter->host_adapter_handle;
+    hvdxg.local_adapter_last_refs = process_adapter->refs;
+    hvdxg.local_adapter_last_locals = process_adapter->local_handle_count;
+    hvdxg.local_adapter_last_generation = process_adapter->generation;
+    if (host_out != NULL)
+        *host_out = process_adapter->host_adapter_handle;
+    if (adapter_out != NULL)
+        *adapter_out = process_adapter;
+    return 0;
+}
+
 static int hvdxg_close_local_adapter_handle(struct hvdxg_open_state *owner,
                                             uint32 adapter,
-                                            uint32 *host_out)
+                                            uint32 *host_out,
+                                            uint32 *final_close_out)
 {
     struct hvdxg_local_adapter_entry *local = NULL;
     struct hvdxg_process_adapter *process_adapter;
 
     if (host_out != NULL)
         *host_out = 0;
+    if (final_close_out != NULL)
+        *final_close_out = 0;
     if (adapter == 0 || hvdxg.host_adapter_handle == 0)
         return -EINVAL;
     if (owner == NULL) {
@@ -1342,6 +1405,8 @@ static int hvdxg_close_local_adapter_handle(struct hvdxg_open_state *owner,
             return -EINVAL;
         if (host_out != NULL)
             *host_out = hvdxg.host_adapter_handle;
+        if (final_close_out != NULL)
+            *final_close_out = 1;
         return 0;
     }
     if (owner->process_state == NULL)
@@ -1368,8 +1433,11 @@ static int hvdxg_close_local_adapter_handle(struct hvdxg_open_state *owner,
         process_adapter->local_handle_count--;
     if (process_adapter->refs > 0)
         process_adapter->refs--;
-    if (process_adapter->refs == 0)
+    if (process_adapter->refs == 0) {
         process_adapter->destroyed = 1;
+        if (final_close_out != NULL)
+            *final_close_out = 1;
+    }
     hvdxg.local_adapter_namespace_hits++;
     hvdxg.local_adapter_last_result = 5;
     hvdxg.local_adapter_last_handle = adapter;
@@ -5233,6 +5301,47 @@ static int hvdxg_destroy_device_owned_objects(struct hvdxg_open_state *owner,
     return ret;
 }
 
+static int hvdxg_destroy_process_adapter_devices(
+    struct hvdxg_open_state *owner, uint32 host_adapter)
+{
+    int ret = 0;
+
+    if (owner == NULL || owner->process_state == NULL ||
+        owner->process_state->adapters == NULL || host_adapter == 0)
+        return 0;
+
+    for (uint32 i = 0; i < owner->process_state->adapter_count; i++) {
+        struct hvdxg_process_adapter *adapter =
+            &owner->process_state->adapters[i];
+
+        if (adapter->host_adapter_handle != host_adapter ||
+            adapter->refs != 0)
+            continue;
+        while (adapter->device_count > 0) {
+            uint32 device = adapter->devices[--adapter->device_count];
+
+            adapter->devices[adapter->device_count] = 0;
+            if (device == 0)
+                continue;
+            hvdxg_untrack_u32(owner->devices, &owner->device_count,
+                              device);
+            if (hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE,
+                                     device)) {
+                hvdxg_cleanup_note_ret(
+                    &ret, hvdxg_flush_device_host(device),
+                    HV_DXG_CLEANUP_DEVICE, device);
+                hvdxg_cleanup_note_ret(
+                    &ret, hvdxg_destroy_device_owned_objects(owner, device),
+                    HV_DXG_CLEANUP_DEVICE, device);
+                hvdxg_cleanup_note_ret(
+                    &ret, hvdxg_destroy_device_host(device),
+                    HV_DXG_CLEANUP_DEVICE, device);
+            }
+        }
+    }
+    return ret;
+}
+
 static int hvdxg_destroy_createallocation_result(
     uint32 process, uint32 device, uint32 resource,
     const struct hvdxg_command_createallocation_return *result,
@@ -5461,8 +5570,13 @@ static void hvdxg_process_memory_put(struct hvdxg_process_state *process)
     if (free_process) {
         if (process->objects != NULL)
             kvfree(process->objects);
-        if (process->adapters != NULL)
+        if (process->adapters != NULL) {
+            for (uint32 i = 0; i < process->adapter_count; i++) {
+                if (process->adapters[i].devices != NULL)
+                    kvfree(process->adapters[i].devices);
+            }
             kvfree(process->adapters);
+        }
         if (process->local_adapters != NULL)
             kvfree(process->local_adapters);
         kvfree(process);

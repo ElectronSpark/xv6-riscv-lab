@@ -1687,6 +1687,9 @@ struct hvdxg_process_adapter {
     uint32 local_handle_count;
     uint32 generation;
     uint32 destroyed;
+    uint32 *devices;
+    uint32 device_count;
+    uint32 device_capacity;
 };
 
 struct hvdxg_local_adapter_entry {
