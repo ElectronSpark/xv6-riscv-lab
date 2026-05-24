@@ -871,7 +871,7 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     if (owner == NULL)
         return -EBADF;
     if (trace)
-        printf("webkit-gpu: enter pid=%d name=%s owner=%lu:%d cmd=0x%lx(%s)\n",
+        printf("fb-gpu-trace: enter pid=%d name=%s owner=%lu:%d cmd=0x%lx(%s)\n",
                current ? current->pid : -1,
                current ? current->name : "?", owner->id, owner->tgid, cmd,
                fb_gpu_ioctl_name(cmd));
@@ -910,7 +910,7 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     default:
         ret = gpu_drm_ioctl(owner, cmd, (uint64)arg);
         if (trace)
-            printf("webkit-gpu: exit pid=%d name=%s owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
+            printf("fb-gpu-trace: exit pid=%d name=%s owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
                    current ? current->pid : -1,
                    current ? current->name : "?", owner->id, owner->tgid, cmd,
                    fb_gpu_ioctl_name(cmd), ret);
@@ -922,7 +922,7 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     spin_unlock(&fb_state.lock);
     ret = fb_ioctl_for_owner(&gpu_cdev, cmd, arg, owner->id, owner->tgid);
     if (trace)
-        printf("webkit-gpu: exit pid=%d name=%s owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
+        printf("fb-gpu-trace: exit pid=%d name=%s owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
                current ? current->pid : -1,
                current ? current->name : "?", owner->id, owner->tgid, cmd,
                fb_gpu_ioctl_name(cmd), ret);
@@ -1058,7 +1058,7 @@ static int gpu_drm_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     if (owner == NULL)
         return -EBADF;
     if (trace)
-        printf("webkit-gpu: enter pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s)\n",
+        printf("fb-gpu-trace: enter pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s)\n",
                current ? current->pid : -1,
                current ? current->name : "?", owner->id, owner->tgid, cmd,
                fb_gpu_ioctl_name(cmd));
@@ -1077,7 +1077,7 @@ static int gpu_drm_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
         ret = fb_ioctl_for_owner(&gpu_cdev, cmd, arg, owner->id,
                                  owner->tgid);
         if (trace)
-            printf("webkit-gpu: exit pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
+            printf("fb-gpu-trace: exit pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
                    current ? current->pid : -1,
                    current ? current->name : "?", owner->id, owner->tgid, cmd,
                    fb_gpu_ioctl_name(cmd), ret);
@@ -1086,7 +1086,7 @@ static int gpu_drm_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
 
     ret = gpu_drm_ioctl(owner, cmd, (uint64)arg);
     if (trace)
-        printf("webkit-gpu: exit pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
+        printf("fb-gpu-trace: exit pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
                current ? current->pid : -1,
                current ? current->name : "?", owner->id, owner->tgid, cmd,
                fb_gpu_ioctl_name(cmd), ret);
