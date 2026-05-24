@@ -18,8 +18,8 @@ add_library(dev OBJECT
     mbr.c
     gpt.c
     loop.c
-    fb.c
+    fb/module.c
     ps2mouse.c
     ps2kbd.c
-    hyperv_input.c
+    hyperv/module.c
 )

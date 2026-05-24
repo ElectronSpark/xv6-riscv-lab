@@ -42,6 +42,21 @@ struct hyperv_dxg_status {
     uint32 vgpu_open_status;
     uint32 global_rx_packets;
     uint32 vgpu_rx_packets;
+    uint32 adapter_type_rewrites;
+    uint32 adapter_type_raw_value;
+    uint32 adapter_type_wsl_value;
+    uint32 adapter_render_supported;
+    uint32 adapter_display_supported;
+    uint32 adapter_paravirtualized;
+    uint32 adapter_compute_only;
+    uint32 adapter_source_count;
+    uint32 adapter_sources_known;
+    uint32 enum_adapter_count;
+    uint32 enum_adapter_handle;
+    uint32 enum_adapter_luid_low;
+    uint32 enum_adapter_luid_high;
+    uint32 user_adapter_luid_low;
+    uint32 user_adapter_luid_high;
 };
 struct hyperv_video_status {
     int present;

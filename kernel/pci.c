@@ -26,6 +26,8 @@ void e1000_init(uint32 *xregs);
 #define PCI_CONFIG_BACKEND_MAX 8
 #define PCI_VIRTUAL_CHILD_MAX 64
 #define PCI_VIRTUAL_BUS 0xff
+#define PCI_DEVICE_RECORD_MAX 128
+#define PCI_DRIVER_RECORD_MAX 32
 
 struct pci_config_backend {
     int used;
@@ -51,8 +53,592 @@ static uint32 pci_virtual_children_probed;
 static uint32 pci_virtual_children_probe_failed;
 static int pci_init_done;
 static int pci_legacy_scan_active;
+static struct pci_device_info pci_devices[PCI_DEVICE_RECORD_MAX];
+static uint32 pci_device_count;
+static struct pci_driver *pci_drivers[PCI_DRIVER_RECORD_MAX];
+static uint32 pci_driver_count;
 
 static void pci_probe_function(uint8 bus, uint8 dev, uint8 func);
+
+static uint64 pci_bar_start(uint32 bar, uint32 bar_hi)
+{
+    if (bar == 0)
+        return 0;
+    if ((bar & 0x1) != 0)
+        return bar & ~0x3ULL;
+    if ((bar & 0x6) == 0x4)
+        return ((uint64)bar_hi << 32) | (uint64)(bar & ~0xfULL);
+    return bar & ~0xfULL;
+}
+
+static uint32 pci_bar_flags(uint32 bar)
+{
+    uint32 flags;
+
+    if (bar == 0)
+        return 0;
+    if ((bar & 0x1) != 0)
+        return PCI_RESOURCE_IO;
+    flags = PCI_RESOURCE_MEM;
+    if ((bar & 0x8) != 0)
+        flags |= PCI_RESOURCE_PREFETCH;
+    if ((bar & 0x6) == 0x4)
+        flags |= PCI_RESOURCE_MEM_64;
+    return flags;
+}
+
+static uint64 pci_probe_bar_len(uint8 bus, uint8 dev, uint8 func, int bar_idx,
+                                uint32 bar, uint32 bar_hi)
+{
+    uint16 off;
+    uint16 off_hi;
+    uint32 mask;
+    uint32 size;
+    uint32 flags;
+
+    if (bar_idx < 0 || bar_idx >= 6 || bar == 0)
+        return 0;
+    off = (uint16)(0x10 + bar_idx * 4);
+    flags = pci_bar_flags(bar);
+    if ((flags & PCI_RESOURCE_MEM_64) != 0) {
+        uint32 size_hi;
+        uint64 mask64;
+
+        if (bar_idx >= 5)
+            return 0;
+        off_hi = (uint16)(off + 4);
+        if (pci_config_try_write32(bus, dev, func, off, 0xffffffffU) != 0)
+            return 0;
+        if (pci_config_try_write32(bus, dev, func, off_hi,
+                                   0xffffffffU) != 0) {
+            (void)pci_config_try_write32(bus, dev, func, off, bar);
+            return 0;
+        }
+        size = pci_config_read32(bus, dev, func, off);
+        size_hi = pci_config_read32(bus, dev, func, off_hi);
+        (void)pci_config_try_write32(bus, dev, func, off_hi, bar_hi);
+        (void)pci_config_try_write32(bus, dev, func, off, bar);
+        if ((size == 0 && size_hi == 0) ||
+            (size == 0xffffffffU && size_hi == 0xffffffffU))
+            return 0;
+        mask64 = ((uint64)size_hi << 32) | (uint64)(size & ~0xfU);
+        if (mask64 == 0)
+            return 0;
+        return (~mask64) + 1ULL;
+    }
+
+    if (pci_config_try_write32(bus, dev, func, off, 0xffffffffU) != 0)
+        return 0;
+    size = pci_config_read32(bus, dev, func, off);
+    (void)pci_config_try_write32(bus, dev, func, off, bar);
+    if (size == 0 || size == 0xffffffffU)
+        return 0;
+    mask = (flags & PCI_RESOURCE_IO) ? (size & ~0x3U) : (size & ~0xfU);
+    if (mask == 0)
+        return 0;
+    return (uint64)((~mask) + 1U);
+}
+
+static uint8 pci_find_capability_bdf(uint8 bus, uint8 dev, uint8 func,
+                                     uint8 cap_id)
+{
+    uint16 status = pci_config_read16(bus, dev, func, 0x06);
+    uint8 pos;
+
+    if ((status & PCIE_STATUS_CAPL) == 0)
+        return 0;
+
+    pos = pci_config_read8(bus, dev, func, 0x34) & 0xFC;
+    for (uint32 guard = 0; pos != 0 && guard < 64; guard++) {
+        uint8 id;
+        uint8 next;
+
+        if (pos == 0xFF || pos < 0x40)
+            return 0;
+        id = pci_config_read8(bus, dev, func, pos);
+        next = pci_config_read8(bus, dev, func, pos + 1) & 0xFC;
+        if (id == cap_id)
+            return pos;
+        pos = next;
+    }
+    return 0;
+}
+
+static void pci_fill_device_info(struct pci_device_info *info, uint8 bus,
+                                 uint8 dev, uint8 func)
+{
+    uint32 id = pci_config_read32(bus, dev, func, 0);
+    uint32 class_rev = pci_config_read32(bus, dev, func, 0x08);
+    uint32 subsystem = pci_config_read32(bus, dev, func, 0x2c);
+
+    memset(info, 0, sizeof(*info));
+    info->vendor_id = id & 0xffffU;
+    info->device_id = (id >> 16) & 0xffffU;
+    info->bus = bus;
+    info->dev = dev;
+    info->func = func;
+    info->revision_id = class_rev & 0xffU;
+    info->class_code = class_rev >> 8;
+    info->subsystem_vendor_id = subsystem & 0xffffU;
+    info->subsystem_id = (subsystem >> 16) & 0xffffU;
+    info->header_type = pci_config_read8(bus, dev, func, 0x0e);
+    info->irq_line = pci_config_read8(bus, dev, func, 0x3c);
+    info->irq_pin = pci_config_read8(bus, dev, func, 0x3d);
+    info->capabilities =
+        (pci_config_read16(bus, dev, func, 0x06) & PCIE_STATUS_CAPL) != 0;
+    info->msi_cap = pci_find_capability_bdf(bus, dev, func, PCI_CAP_ID_MSI);
+    info->msix_cap =
+        pci_find_capability_bdf(bus, dev, func, PCI_CAP_ID_MSIX);
+    for (int i = 0; i < 6; i++) {
+        uint32 bar = pci_config_read32(bus, dev, func,
+                                       (uint16)(0x10 + i * 4));
+        uint32 bar_hi = 0;
+
+        if (i < 5 && (pci_bar_flags(bar) & PCI_RESOURCE_MEM_64) != 0)
+            bar_hi = pci_config_read32(bus, dev, func,
+                                       (uint16)(0x10 + (i + 1) * 4));
+        info->bar[i] = bar;
+        info->resource_start[i] = pci_bar_start(bar, bar_hi);
+        info->resource_flags[i] = pci_bar_flags(bar);
+        info->resource_len[i] =
+            pci_probe_bar_len(bus, dev, func, i, bar, bar_hi);
+        if ((info->resource_flags[i] & PCI_RESOURCE_MEM_64) != 0) {
+            if (i < 5)
+                info->bar[i + 1] = bar_hi;
+            i++;
+        }
+    }
+}
+
+static struct pci_device_info *pci_find_device(uint8 bus, uint8 dev,
+                                               uint8 func)
+{
+    for (uint32 i = 0; i < pci_device_count; i++) {
+        struct pci_device_info *pdev = &pci_devices[i];
+
+        if (pdev->bus == bus && pdev->dev == dev && pdev->func == func)
+            return pdev;
+    }
+    return NULL;
+}
+
+static struct pci_device_info *pci_record_device(uint8 bus, uint8 dev,
+                                                 uint8 func)
+{
+    struct pci_device_info *pdev = pci_find_device(bus, dev, func);
+
+    if (pdev != NULL)
+        return pdev;
+    if (pci_device_count >= PCI_DEVICE_RECORD_MAX) {
+        printf("PCI: device table full, ignoring %d:%d:%d\n", bus, dev,
+               func);
+        return NULL;
+    }
+    pdev = &pci_devices[pci_device_count++];
+    pci_fill_device_info(pdev, bus, dev, func);
+    return pdev;
+}
+
+const struct pci_device_id *pci_match_id(const struct pci_device_id *ids,
+                                         const struct pci_device_info *pdev)
+{
+    if (ids == NULL || pdev == NULL)
+        return NULL;
+    for (uint32 i = 0;; i++) {
+        const struct pci_device_id *id = &ids[i];
+
+        if (id->vendor == 0 && id->device == 0 && id->subvendor == 0 &&
+            id->subdevice == 0 && id->class == 0 && id->class_mask == 0)
+            return NULL;
+        if (id->vendor != PCI_ANY_ID && id->vendor != pdev->vendor_id)
+            continue;
+        if (id->device != PCI_ANY_ID && id->device != pdev->device_id)
+            continue;
+        if (id->subvendor != PCI_ANY_ID &&
+            id->subvendor != pdev->subsystem_vendor_id)
+            continue;
+        if (id->subdevice != PCI_ANY_ID &&
+            id->subdevice != pdev->subsystem_id)
+            continue;
+        if (id->class_mask != 0 &&
+            ((pdev->class_code ^ id->class) & id->class_mask) != 0)
+            continue;
+        return id;
+    }
+}
+
+static int pci_probe_driver(struct pci_driver *driver,
+                            struct pci_device_info *pdev)
+{
+    const struct pci_device_id *id;
+    int ret;
+
+    if (driver == NULL || pdev == NULL || pdev->driver != NULL ||
+        driver->probe == NULL)
+        return 0;
+    id = pci_match_id(driver->id_table, pdev);
+    if (id == NULL)
+        return 0;
+    ret = driver->probe(pdev, id);
+    if (ret == 0) {
+        pdev->driver = driver;
+        pdev->driver_name = driver->name;
+        driver->bound_devices++;
+        printf("PCI: driver %s bound %02x:%02x.%u vendor=0x%x device=0x%x class=0x%lx\n",
+               driver->name ? driver->name : "?", pdev->bus, pdev->dev,
+               pdev->func, pdev->vendor_id, pdev->device_id,
+               (uint64)pdev->class_code);
+    } else {
+        printf("PCI: driver %s declined %02x:%02x.%u ret=%d\n",
+               driver->name ? driver->name : "?", pdev->bus, pdev->dev,
+               pdev->func, ret);
+    }
+    return ret;
+}
+
+static void pci_probe_registered_drivers(struct pci_device_info *pdev)
+{
+    for (uint32 i = 0; i < pci_driver_count; i++) {
+        if (pdev->driver != NULL)
+            return;
+        (void)pci_probe_driver(pci_drivers[i], pdev);
+    }
+}
+
+static void pci_detach_driver(struct pci_device_info *pdev)
+{
+    struct pci_driver *driver;
+
+    if (pdev == NULL || pdev->driver == NULL)
+        return;
+    driver = pdev->driver;
+    if (driver->remove != NULL)
+        driver->remove(pdev);
+    pdev->driver = NULL;
+    pdev->driver_name = NULL;
+    pdev->driver_data = NULL;
+    if (driver->bound_devices > 0)
+        driver->bound_devices--;
+}
+
+int pci_register_driver(struct pci_driver *driver)
+{
+    if (driver == NULL || driver->name == NULL ||
+        driver->id_table == NULL || driver->probe == NULL)
+        return -EINVAL;
+    for (uint32 i = 0; i < pci_driver_count; i++) {
+        if (pci_drivers[i] == driver)
+            return 0;
+    }
+    if (pci_driver_count >= PCI_DRIVER_RECORD_MAX)
+        return -ENOSPC;
+    pci_drivers[pci_driver_count++] = driver;
+    printf("PCI: driver registered %s\n", driver->name);
+    for (uint32 i = 0; i < pci_device_count; i++)
+        (void)pci_probe_driver(driver, &pci_devices[i]);
+    return 0;
+}
+
+void pci_unregister_driver(struct pci_driver *driver)
+{
+    if (driver == NULL)
+        return;
+    for (uint32 i = 0; i < pci_device_count; i++) {
+        struct pci_device_info *pdev = &pci_devices[i];
+
+        if (pdev->driver == driver)
+            pci_detach_driver(pdev);
+    }
+    for (uint32 i = 0; i < pci_driver_count; i++) {
+        if (pci_drivers[i] != driver)
+            continue;
+        for (uint32 j = i + 1; j < pci_driver_count; j++)
+            pci_drivers[j - 1] = pci_drivers[j];
+        pci_driver_count--;
+        break;
+    }
+}
+
+void pci_set_drvdata(struct pci_device_info *pdev, void *data)
+{
+    if (pdev != NULL)
+        pdev->driver_data = data;
+}
+
+void *pci_get_drvdata(const struct pci_device_info *pdev)
+{
+    return pdev ? pdev->driver_data : NULL;
+}
+
+uint64 pci_resource_start(const struct pci_device_info *pdev, int bar)
+{
+    if (pdev == NULL || bar < 0 || bar >= 6)
+        return 0;
+    return pdev->resource_start[bar];
+}
+
+uint64 pci_resource_len(const struct pci_device_info *pdev, int bar)
+{
+    if (pdev == NULL || bar < 0 || bar >= 6)
+        return 0;
+    return pdev->resource_len[bar];
+}
+
+uint32 pci_resource_flags(const struct pci_device_info *pdev, int bar)
+{
+    if (pdev == NULL || bar < 0 || bar >= 6)
+        return 0;
+    return pdev->resource_flags[bar];
+}
+
+int pci_request_region(struct pci_device_info *pdev, int bar,
+                       const char *name)
+{
+    if (pdev == NULL || bar < 0 || bar >= 6)
+        return -EINVAL;
+    if (pdev->resource_len[bar] == 0 ||
+        (pdev->resource_flags[bar] & (PCI_RESOURCE_MEM | PCI_RESOURCE_IO)) == 0)
+        return -ENODEV;
+    if (pdev->resource_claimed[bar])
+        return -EBUSY;
+    pdev->resource_claimed[bar] = 1;
+    pdev->resource_owner[bar] = name;
+    return 0;
+}
+
+void pci_release_region(struct pci_device_info *pdev, int bar)
+{
+    if (pdev == NULL || bar < 0 || bar >= 6)
+        return;
+    pdev->resource_claimed[bar] = 0;
+    pdev->resource_owner[bar] = NULL;
+}
+
+uint8 pci_find_capability(const struct pci_device_info *pdev, uint8 cap_id)
+{
+    if (pdev == NULL || !pdev->capabilities)
+        return 0;
+    if (cap_id == PCI_CAP_ID_MSI)
+        return pdev->msi_cap;
+    if (cap_id == PCI_CAP_ID_MSIX)
+        return pdev->msix_cap;
+    return pci_find_capability_bdf(pdev->bus, pdev->dev, pdev->func, cap_id);
+}
+
+int pci_has_capability(const struct pci_device_info *pdev, uint8 cap_id)
+{
+    return pci_find_capability(pdev, cap_id) != 0;
+}
+
+void *pci_iomap(struct pci_device_info *pdev, int bar, uint64 maxlen)
+{
+    uint64 start = pci_resource_start(pdev, bar);
+    uint64 len = pci_resource_len(pdev, bar);
+
+    if (start == 0 || (pci_resource_flags(pdev, bar) & PCI_RESOURCE_MEM) == 0)
+        return NULL;
+    if (maxlen != 0 && len != 0 && maxlen > len)
+        return NULL;
+    return (void *)PA2VA(start);
+}
+
+void pci_iounmap(struct pci_device_info *pdev, void *addr)
+{
+    (void)pdev;
+    (void)addr;
+}
+
+int pci_enable_device(struct pci_device_info *pdev)
+{
+    uint16 cmd;
+
+    if (pdev == NULL)
+        return -ENODEV;
+    if (pdev->enable_count++ > 0) {
+        pdev->enabled = 1;
+        return 0;
+    }
+    cmd = pci_config_read16(pdev->bus, pdev->dev, pdev->func, 0x04);
+    cmd |= PCIE_CSCMD_MAE;
+    pci_config_write16(pdev->bus, pdev->dev, pdev->func, 0x04, cmd);
+    pdev->enabled = 1;
+    return 0;
+}
+
+void pci_disable_device(struct pci_device_info *pdev)
+{
+    uint16 cmd;
+
+    if (pdev == NULL)
+        return;
+    if (pdev->enable_count > 1) {
+        pdev->enable_count--;
+        return;
+    }
+    pdev->enable_count = 0;
+    cmd = pci_config_read16(pdev->bus, pdev->dev, pdev->func, 0x04);
+    cmd &= ~(uint16)(PCIE_CSCMD_IAE | PCIE_CSCMD_MAE | PCIE_CSCMD_BME);
+    pci_config_write16(pdev->bus, pdev->dev, pdev->func, 0x04, cmd);
+    pdev->enabled = 0;
+    pdev->master_enabled = 0;
+}
+
+void pci_set_master(struct pci_device_info *pdev)
+{
+    uint16 cmd;
+
+    if (pdev == NULL)
+        return;
+    cmd = pci_config_read16(pdev->bus, pdev->dev, pdev->func, 0x04);
+    cmd |= PCIE_CSCMD_BME;
+    pci_config_write16(pdev->bus, pdev->dev, pdev->func, 0x04, cmd);
+    pdev->master_enabled = 1;
+}
+
+void pci_clear_master(struct pci_device_info *pdev)
+{
+    uint16 cmd;
+
+    if (pdev == NULL)
+        return;
+    cmd = pci_config_read16(pdev->bus, pdev->dev, pdev->func, 0x04);
+    cmd &= ~(uint16)PCIE_CSCMD_BME;
+    pci_config_write16(pdev->bus, pdev->dev, pdev->func, 0x04, cmd);
+    pdev->master_enabled = 0;
+}
+
+int pci_alloc_irq_vectors(struct pci_device_info *pdev, int min_vecs,
+                          int max_vecs, uint32 flags)
+{
+    if (pdev == NULL || min_vecs < 0 || max_vecs < min_vecs)
+        return -EINVAL;
+    if (pdev->irq_vectors_allocated)
+        return pdev->irq_vector_count;
+    if (max_vecs == 0)
+        return -ENOSPC;
+    if ((flags & (PCI_IRQ_MSI | PCI_IRQ_MSIX)) != 0 &&
+        (flags & PCI_IRQ_LEGACY) == 0) {
+        /*
+         * We discover MSI/MSI-X so drivers can make an honest decision, but
+         * xv6 does not program message address/data or MSI-X tables yet.
+         */
+        return -ENOTSUP;
+    }
+    if (pdev->irq_pin == PCIE_INTR_PIN_NONE || pdev->irq_line == 0 ||
+        pdev->irq_line == 0xff || min_vecs > 1)
+        return -ENOSPC;
+    pdev->irq_vectors_allocated = 1;
+    pdev->irq_vector_count = 1;
+    pdev->irq_flags = PCI_IRQ_LEGACY;
+    return 1;
+}
+
+int pci_irq_vector(struct pci_device_info *pdev, uint32 nr)
+{
+    if (pdev == NULL || nr != 0 || !pdev->irq_vectors_allocated ||
+        pdev->irq_pin == PCIE_INTR_PIN_NONE ||
+        pdev->irq_line == 0 || pdev->irq_line == 0xff)
+        return -EINVAL;
+    return pdev->irq_line;
+}
+
+void pci_free_irq_vectors(struct pci_device_info *pdev)
+{
+    if (pdev == NULL)
+        return;
+    pdev->irq_vectors_allocated = 0;
+    pdev->irq_vector_count = 0;
+    pdev->irq_flags = 0;
+}
+
+static int pci_dma_mask_bits(uint64 mask)
+{
+    int bits = 0;
+
+    if (mask == 0)
+        return 0;
+    while (mask != 0) {
+        bits++;
+        mask >>= 1;
+    }
+    return bits;
+}
+
+int pci_set_dma_mask(struct pci_device_info *pdev, uint64 mask)
+{
+    int bits;
+
+    if (pdev == NULL)
+        return -ENODEV;
+    bits = pci_dma_mask_bits(mask);
+    if (bits == 0 || bits > 64)
+        return -EINVAL;
+    pdev->dma_mask_bits = (uint8)bits;
+    pdev->dma_mask_configured = 1;
+    return 0;
+}
+
+int pci_set_consistent_dma_mask(struct pci_device_info *pdev, uint64 mask)
+{
+    int bits;
+
+    if (pdev == NULL)
+        return -ENODEV;
+    bits = pci_dma_mask_bits(mask);
+    if (bits == 0 || bits > 64)
+        return -EINVAL;
+    pdev->coherent_dma_mask_bits = (uint8)bits;
+    pdev->coherent_dma_mask_configured = 1;
+    return 0;
+}
+
+int pci_pm_suspend_device(struct pci_device_info *pdev)
+{
+    int ret = 0;
+
+    if (pdev == NULL)
+        return -ENODEV;
+    if (pdev->runtime_suspended)
+        return 0;
+    if (pdev->driver != NULL && pdev->driver->suspend != NULL) {
+        ret = pdev->driver->suspend(pdev);
+        if (ret != 0)
+            return ret;
+    }
+    pdev->runtime_suspended = 1;
+    pdev->suspend_count++;
+    return 0;
+}
+
+int pci_pm_resume_device(struct pci_device_info *pdev)
+{
+    int ret = 0;
+
+    if (pdev == NULL)
+        return -ENODEV;
+    if (!pdev->runtime_suspended)
+        return 0;
+    if (pdev->driver != NULL && pdev->driver->resume != NULL) {
+        ret = pdev->driver->resume(pdev);
+        if (ret != 0)
+            return ret;
+    }
+    pdev->runtime_suspended = 0;
+    pdev->resume_count++;
+    return 0;
+}
+
+void pci_pm_suspend_all(void)
+{
+    for (uint32 i = 0; i < pci_device_count; i++)
+        (void)pci_pm_suspend_device(&pci_devices[i]);
+}
+
+void pci_pm_resume_all(void)
+{
+    for (uint32 i = pci_device_count; i > 0; i--)
+        (void)pci_pm_resume_device(&pci_devices[i - 1]);
+}
 
 static struct pci_virtual_child_entry *pci_find_virtual_child(uint8 bus,
                                                               uint8 dev,
@@ -378,27 +964,30 @@ static uint32 pci_read_bar(uint8 bus, uint8 dev, uint8 func, int bar_idx)
     return pci_config_read32(bus, dev, func, offset);
 }
 
-// Find a virtio PCI capability of a given type.
-// Returns config space offset, or 0 if not found.
 static uint8 pci_find_virtio_cap(uint8 bus, uint8 dev, uint8 func,
                                  uint8 cfg_type)
 {
     uint16 status = pci_config_read16(bus, dev, func, 0x06);
-    if (!(status & PCIE_STATUS_CAPL))
+    uint8 pos;
+
+    if ((status & PCIE_STATUS_CAPL) == 0)
         return 0;
 
-    uint8 pos = pci_config_read8(bus, dev, func, 0x34) & 0xFC;
-    while (pos) {
-        uint8 id = pci_config_read8(bus, dev, func, pos);
-        if (id == PCI_CAP_ID_VENDOR) {
-            // Check the cfg_type field at offset +3
-            uint8 type = pci_config_read8(bus, dev, func, pos + 3);
-            if (type == cfg_type)
-                return pos;
-        }
-        pos = pci_config_read8(bus, dev, func, pos + 1) & 0xFC;
-        if (pos == 0xFF)
+    pos = pci_config_read8(bus, dev, func, 0x34) & 0xFC;
+    for (uint32 guard = 0; pos != 0 && guard < 64; guard++) {
+        uint8 id;
+        uint8 next;
+
+        if (pos == 0xFF || pos < 0x40)
+            return 0;
+        id = pci_config_read8(bus, dev, func, pos);
+        next = pci_config_read8(bus, dev, func, pos + 1) & 0xFC;
+        if (id == PCI_CAP_ID_VENDOR &&
+            pci_config_read8(bus, dev, func, pos + 3) == cfg_type)
+            return pos;
+        if (next == pos)
             break;
+        pos = next;
     }
     return 0;
 }
@@ -710,10 +1299,6 @@ static void pci_note_virtio_net(uint8 bus, uint8 dev, uint8 func)
 static void pci_diag_note_candidate(uint8 bus, uint8 dev, uint8 func,
                                     uint16 vendor, uint16 device)
 {
-    enum {
-        PCI_CLASS_DISPLAY = 0x03,
-        PCI_CLASS_PROCESSING_ACCELERATOR = 0x12,
-    };
     uint32 class_rev = pci_config_read32(bus, dev, func, 0x08);
     uint32 class_code = class_rev >> 8;
     uint8 base_class = (uint8)((class_code >> 16) & 0xff);
@@ -827,6 +1412,9 @@ static void pci_note_hyperv_dxg(uint8 bus, uint8 dev, uint8 func,
 static void pci_note_nvidia_gpu(uint8 bus, uint8 dev, uint8 func,
                                 uint16 vendor, uint16 device)
 {
+    struct pci_device_info *record = pci_find_device(bus, dev, func);
+    struct pci_device_info *info;
+
     if (nvidia_gpu_pci_count >= (int)(sizeof(nvidia_gpu_pci_devs) /
                                       sizeof(nvidia_gpu_pci_devs[0]))) {
         printf("PCI: too many NVIDIA GPU devices, ignoring %d:%d:%d\n",
@@ -834,25 +1422,46 @@ static void pci_note_nvidia_gpu(uint8 bus, uint8 dev, uint8 func,
         return;
     }
 
-    uint16 cmd = pci_config_read16(bus, dev, func, 0x04);
-    cmd |= PCIE_CSCMD_MAE | PCIE_CSCMD_BME;
-    pci_config_write16(bus, dev, func, 0x04, cmd);
-
-    struct pci_device_info *info = &nvidia_gpu_pci_devs[nvidia_gpu_pci_count];
-    memset(info, 0, sizeof(*info));
+    info = &nvidia_gpu_pci_devs[nvidia_gpu_pci_count];
+    if (record != NULL) {
+        *info = *record;
+    } else {
+        pci_fill_device_info(info, bus, dev, func);
+    }
     info->vendor_id = vendor;
     info->device_id = device;
-    info->bus = bus;
-    info->dev = dev;
-    info->func = func;
-    info->irq_line = pci_config_read8(bus, dev, func, 0x3D);
-    for (int i = 0; i < 6; i++)
+    info->irq_line = pci_config_read8(bus, dev, func, 0x3c);
+    info->irq_pin = pci_config_read8(bus, dev, func, 0x3d);
+    info->capabilities =
+        (pci_config_read16(bus, dev, func, 0x06) & PCIE_STATUS_CAPL) != 0;
+    info->msi_cap = pci_find_capability_bdf(bus, dev, func, PCI_CAP_ID_MSI);
+    info->msix_cap =
+        pci_find_capability_bdf(bus, dev, func, PCI_CAP_ID_MSIX);
+    for (int i = 0; i < 6; i++) {
+        uint32 bar_hi = 0;
+
         info->bar[i] = pci_read_bar(bus, dev, func, i);
+        if (i < 5 &&
+            (pci_bar_flags(info->bar[i]) & PCI_RESOURCE_MEM_64) != 0)
+            bar_hi = pci_read_bar(bus, dev, func, i + 1);
+        info->resource_start[i] = pci_bar_start(info->bar[i], bar_hi);
+        info->resource_flags[i] = pci_bar_flags(info->bar[i]);
+        info->resource_len[i] =
+            pci_probe_bar_len(bus, dev, func, i, info->bar[i], bar_hi);
+        if ((info->resource_flags[i] & PCI_RESOURCE_MEM_64) != 0) {
+            if (i < 5)
+                info->bar[i + 1] = bar_hi;
+            i++;
+        }
+    }
     nvidia_gpu_pci_count++;
 
-    printf("PCI: NVIDIA GPU candidate at %d:%d:%d device=0x%x irq=%d bar0=0x%lx bar1=0x%lx\n",
-           bus, dev, func, device, info->irq_line,
-           (uint64)info->bar[0], (uint64)info->bar[1]);
+    printf("PCI: NVIDIA GPU candidate at %d:%d:%d device=0x%x class=0x%lx irq=%d pin=%d msi=0x%x msix=0x%x bar0=0x%lx/0x%lx bar1=0x%lx/0x%lx\n",
+           bus, dev, func, device, (uint64)info->class_code,
+           info->irq_line, info->irq_pin, info->msi_cap, info->msix_cap,
+           (uint64)info->bar[0],
+           (uint64)info->resource_len[0], (uint64)info->bar[1],
+           (uint64)info->resource_len[1]);
 }
 
 static void pci_probe_function(uint8 bus, uint8 dev, uint8 func)
@@ -862,6 +1471,7 @@ static void pci_probe_function(uint8 bus, uint8 dev, uint8 func)
     uint16 device;
     uint32 class_code;
     uint32 base_class;
+    struct pci_device_info *pdev;
 
     if (id == 0xFFFFFFFF || id == 0)
         return;
@@ -873,6 +1483,7 @@ static void pci_probe_function(uint8 bus, uint8 dev, uint8 func)
 
     printf("PCI %d:%d:%d vendor=0x%x device=0x%x\n",
            bus, dev, func, vendor, device);
+    pdev = pci_record_device(bus, dev, func);
     pci_diag_note_candidate(bus, dev, func, vendor, device);
 
     if (vendor == PCI_VENDOR_INTEL && device == PCI_DEVICE_E1000) {
@@ -903,6 +1514,8 @@ static void pci_probe_function(uint8 bus, uint8 dev, uint8 func)
                device == PCI_DEVICE_BOCHS_VGA) {
         fb_pci_init(bus, dev, func);
     }
+    if (pdev != NULL)
+        pci_probe_registered_drivers(pdev);
 }
 
 void pci_init(void)

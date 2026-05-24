@@ -121,7 +121,9 @@ struct pci_common_confspace_header {
 #define PCI_DEVICE_VIRTIO_INPUT_MODERN     0x1052 // virtio input (modern only)
 
 // PCI Capability IDs
+#define PCI_CAP_ID_MSI      0x05   // Message Signaled Interrupts
 #define PCI_CAP_ID_VENDOR   0x09   // Vendor-specific capability (used by virtio)
+#define PCI_CAP_ID_MSIX     0x11   // MSI-X
 
 // Virtio PCI capability types (within vendor cap)
 #define VIRTIO_PCI_CAP_COMMON_CFG  1
@@ -188,6 +190,88 @@ struct pci_virtual_child {
     uint8 irq_line;
 };
 
+#define PCI_ANY_ID      0xffffffffU
+#define PCI_ANY_CLASS   0xffffffffU
+
+#define PCI_CLASS_DISPLAY               0x03
+#define PCI_CLASS_DISPLAY_VGA           0x030000
+#define PCI_CLASS_PROCESSING_ACCELERATOR 0x12
+
+#define PCI_RESOURCE_IO         0x0001
+#define PCI_RESOURCE_MEM        0x0002
+#define PCI_RESOURCE_PREFETCH   0x0004
+#define PCI_RESOURCE_MEM_64     0x0008
+
+#define PCI_IRQ_LEGACY 0x1
+#define PCI_IRQ_MSI    0x2
+#define PCI_IRQ_MSIX   0x4
+
+struct pci_device_id {
+    uint32 vendor;
+    uint32 device;
+    uint32 subvendor;
+    uint32 subdevice;
+    uint32 class;
+    uint32 class_mask;
+    uint64 driver_data;
+};
+
+struct pci_driver;
+
+// PCI device info passed to drivers during init
+struct pci_device_info {
+    uint16 vendor_id;
+    uint16 device_id;
+    uint16 subsystem_vendor_id;
+    uint16 subsystem_id;
+    uint8  bus;
+    uint8  dev;
+    uint8  func;
+    uint8  revision_id;
+    uint8  irq_line;  // interrupt line from PCI config
+    uint8  irq_pin;
+    uint8  header_type;
+    uint8  enabled;
+    uint8  master_enabled;
+    uint8  runtime_suspended;
+    uint8  irq_vectors_allocated;
+    uint8  irq_vector_count;
+    uint8  irq_flags;
+    uint8  dma_mask_bits;
+    uint8  coherent_dma_mask_bits;
+    uint8  dma_mask_configured;
+    uint8  coherent_dma_mask_configured;
+    uint8  capabilities;
+    uint8  msi_cap;
+    uint8  msix_cap;
+    uint32 class_code;
+    uint32 enable_count;
+    uint32 suspend_count;
+    uint32 resume_count;
+    uint32 bar[6];    // base address registers
+    uint64 resource_start[6];
+    uint64 resource_len[6];
+    uint32 resource_flags[6];
+    uint8 resource_claimed[6];
+    const char *resource_owner[6];
+    void *driver_data;
+    const char *driver_name;
+    struct pci_driver *driver;
+};
+
+#define pci_dev pci_device_info
+
+struct pci_driver {
+    const char *name;
+    const struct pci_device_id *id_table;
+    int (*probe)(struct pci_device_info *pdev,
+                 const struct pci_device_id *id);
+    void (*remove)(struct pci_device_info *pdev);
+    int (*suspend)(struct pci_device_info *pdev);
+    int (*resume)(struct pci_device_info *pdev);
+    uint32 bound_devices;
+};
+
 uint32 pci_config_read32(uint8 bus, uint8 dev, uint8 func, uint16 offset);
 uint16 pci_config_read16(uint8 bus, uint8 dev, uint8 func, uint16 offset);
 uint8 pci_config_read8(uint8 bus, uint8 dev, uint8 func, uint16 offset);
@@ -209,16 +293,36 @@ int pci_register_virtual_child(const struct pci_virtual_child *child,
 int pci_probe_virtual_bdf(uint8 bus, uint8 dev, uint8 func);
 void pci_probe_registered_virtual_children(void);
 
-// PCI device info passed to drivers during init
-struct pci_device_info {
-    uint16 vendor_id;
-    uint16 device_id;
-    uint8  bus;
-    uint8  dev;
-    uint8  func;
-    uint8  irq_line;  // interrupt line from PCI config
-    uint32 bar[6];    // base address registers
-};
+int pci_register_driver(struct pci_driver *driver);
+void pci_unregister_driver(struct pci_driver *driver);
+const struct pci_device_id *pci_match_id(const struct pci_device_id *ids,
+                                         const struct pci_device_info *pdev);
+void pci_set_drvdata(struct pci_device_info *pdev, void *data);
+void *pci_get_drvdata(const struct pci_device_info *pdev);
+uint64 pci_resource_start(const struct pci_device_info *pdev, int bar);
+uint64 pci_resource_len(const struct pci_device_info *pdev, int bar);
+uint32 pci_resource_flags(const struct pci_device_info *pdev, int bar);
+int pci_request_region(struct pci_device_info *pdev, int bar,
+                       const char *name);
+void pci_release_region(struct pci_device_info *pdev, int bar);
+uint8 pci_find_capability(const struct pci_device_info *pdev, uint8 cap_id);
+int pci_has_capability(const struct pci_device_info *pdev, uint8 cap_id);
+void *pci_iomap(struct pci_device_info *pdev, int bar, uint64 maxlen);
+void pci_iounmap(struct pci_device_info *pdev, void *addr);
+int pci_enable_device(struct pci_device_info *pdev);
+void pci_disable_device(struct pci_device_info *pdev);
+void pci_set_master(struct pci_device_info *pdev);
+void pci_clear_master(struct pci_device_info *pdev);
+int pci_alloc_irq_vectors(struct pci_device_info *pdev, int min_vecs,
+                          int max_vecs, uint32 flags);
+int pci_irq_vector(struct pci_device_info *pdev, uint32 nr);
+void pci_free_irq_vectors(struct pci_device_info *pdev);
+int pci_set_dma_mask(struct pci_device_info *pdev, uint64 mask);
+int pci_set_consistent_dma_mask(struct pci_device_info *pdev, uint64 mask);
+int pci_pm_suspend_device(struct pci_device_info *pdev);
+int pci_pm_resume_device(struct pci_device_info *pdev);
+void pci_pm_suspend_all(void);
+void pci_pm_resume_all(void);
 
 // Stored info about discovered virtio PCI device
 struct virtio_pci_discovery {

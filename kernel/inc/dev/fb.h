@@ -51,18 +51,42 @@
 #define FB_GPU_DXG_PRESENT_SOURCE_COMMIT   0x4630 /* present registered DXG source */
 #define FB_GPU_DXG_PRESENT_SOURCE_QUERY    0x4631 /* query fail-closed DXG source */
 #define FB_GPU_TTM_VALIDATE  0x4632 /* test/validate TTM placement state */
+#define FB_GPU_DXG_PRESENT_BIND_CONTRACT_QUERY 0x4633 /* query future DXG display bind */
 
 #define FB_GPU_DXG_DISPLAY_TARGET_NONE          0
+/*
+ * Display targets reported by FB_GPU_DXG_PRESENT_SOURCE_QUERY.
+ * NONE means no native display handoff has completed.  The nonzero values are
+ * reserved for built-in GPU-P/DDA lanes only; they must not be reported for
+ * CPU/readback, DRI software, or external host-helper paths.
+ */
+#define FB_GPU_DXG_DISPLAY_TARGET_SYNTHVID_VRAM_D3D12_EXISTING_SYSMEM 1
+#define FB_GPU_DXG_DISPLAY_TARGET_RUNTIME_D3D12_RESOURCE              2
+#define FB_GPU_DXG_DISPLAY_TARGET_DDA_NOUVEAU_SCANOUT                 3
 #define FB_GPU_DXG_PRESENT_MISSING_NONE         0
 #define FB_GPU_DXG_PRESENT_MISSING_SCANOUT_BIND 1
 
 #define FB_GPU_DXG_PRESENT_HOST_SYNTHVID        0x1
 #define FB_GPU_DXG_PRESENT_HOST_DXG             0x2
+#define FB_GPU_DXG_PRESENT_HOST_DDA_NOUVEAU     0x4
+#define FB_GPU_DXG_STATE_GLOBAL_PRESENT         0x01
+#define FB_GPU_DXG_STATE_GLOBAL_OPEN            0x02
+#define FB_GPU_DXG_STATE_VGPU_PRESENT           0x04
+#define FB_GPU_DXG_STATE_VGPU_OPEN              0x08
+#define FB_GPU_DXG_STATE_D3DKMT_READY           0x10
+#define FB_GPU_DXG_STATE_PARAVIRTUALIZED        0x20
+#define FB_GPU_DXG_STATE_NO_DISPLAY             0x40
+#define FB_GPU_DXG_STATE_NO_SOURCES             0x80
 #define FB_GPU_DXG_PRESENT_REJECT_SYNTHVID_GPA_ONLY 0x1
 #define FB_GPU_DXG_PRESENT_REJECT_DXG_NO_DISPLAY_BIND 0x2
+#define FB_GPU_DXG_PRESENT_REJECT_DDA_ABSENT    0x4
+#define FB_GPU_DXG_PRESENT_REJECT_DDA_NO_IMPORT_PATH 0x8
 
 #define FB_GPU_DXG_PRESENT_LANE_NONE            0
-#define FB_GPU_DXG_PRESENT_LANE_HELPER_SCANOUT_BIND 1
+#define FB_GPU_DXG_PRESENT_LANE_GPUP_DXG_SCANOUT_BIND 1
+#define FB_GPU_DXG_PRESENT_LANE_HELPER_SCANOUT_BIND \
+    FB_GPU_DXG_PRESENT_LANE_GPUP_DXG_SCANOUT_BIND
+#define FB_GPU_DXG_PRESENT_LANE_DDA_NOUVEAU     2
 #define FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT   0x0001
 #define FB_GPU_DXG_PRESENT_BLOCK_SYNTHVID_GPA_ONLY 0x0002
 #define FB_GPU_DXG_PRESENT_BLOCK_DXG_NO_DISPLAY_BIND 0x0004
@@ -71,6 +95,7 @@
 #define FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED 0x0020
 #define FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH 0x0040
 #define FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION 0x0080
+#define FB_GPU_DXG_PRESENT_BLOCK_DDA_NO_IMPORT_PATH 0x0100
 #define FB_GPU_DXG_PRESENT_BLOCK_ALL \
     (FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT | \
      FB_GPU_DXG_PRESENT_BLOCK_SYNTHVID_GPA_ONLY | \
@@ -79,7 +104,8 @@
      FB_GPU_DXG_PRESENT_BLOCK_NO_REGISTERED_SOURCE | \
      FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED | \
      FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH | \
-     FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION)
+     FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION | \
+     FB_GPU_DXG_PRESENT_BLOCK_DDA_NO_IMPORT_PATH)
 
 #define FB_GPU_DXG_PRESENT_PROV_DXG_FD          0x0001
 #define FB_GPU_DXG_PRESENT_PROV_RESOURCE_FD     0x0002
@@ -92,10 +118,22 @@
 #define FB_GPU_DXG_PRESENT_ADAPTER_MATCH        2
 #define FB_GPU_DXG_PRESENT_ADAPTER_MISMATCH     3
 
-#define FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_NONE   0
-#define FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_VMBUS  1
-#define FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_HVSOCK 2
-#define FB_GPU_DXG_PRESENT_HELPER_OP_SCANOUT_BIND  1
+#define FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE   0
+#define FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_VMBUS  1
+#define FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_HVSOCK 2
+#define FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND  1
+#define FB_GPU_DXG_PRESENT_COMPLETION_NONE           0
+#define FB_GPU_DXG_PRESENT_COMPLETION_DXG_SYNC_FILE  1
+#define FB_GPU_DXG_PRESENT_COMPLETION_DXG_FENCE      2
+#define FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY        3
+#define FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_NONE \
+    FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE
+#define FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_VMBUS \
+    FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_VMBUS
+#define FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_HVSOCK \
+    FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_HVSOCK
+#define FB_GPU_DXG_PRESENT_HELPER_OP_SCANOUT_BIND \
+    FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND
 
 #define FB_GPU_DXG_PRESENT_META_DEVICE       0x0001
 #define FB_GPU_DXG_PRESENT_META_RESOURCE     0x0002
@@ -130,6 +168,24 @@
 #define FB_GPU_BACKEND_F_DXG_SHARED_RESOURCE 0x0040
 #define FB_GPU_BACKEND_F_DXG_SAME_ADAPTER    0x0080
 #define FB_GPU_BACKEND_F_DXG_NO_READBACK     0x0100
+#define FB_GPU_BACKEND_F_DDA_NOUVEAU         0x0200
+
+#define FB_GPU_NOUVEAU_GETPARAM_SOURCE_NONE      0
+#define FB_GPU_NOUVEAU_GETPARAM_SOURCE_DDA_PCI   1
+#define FB_GPU_NOUVEAU_GETPARAM_SOURCE_SYNTHETIC 2
+
+#define FB_GPU_RESV_SHARED_SLOTS 8
+#define FB_GPU_RESV_ATTACH_NONE          0
+#define FB_GPU_RESV_ATTACH_DMABUF_EXPORT 1
+#define FB_GPU_RESV_ATTACH_DMABUF_IMPORT 2
+#define FB_GPU_RESV_ATTACH_PRIME_EXPORT  3
+#define FB_GPU_RESV_ATTACH_PRIME_IMPORT  4
+#define FB_GPU_RESV_ATTACH_KMS_PIN       5
+#define FB_GPU_RESV_ATTACH_KMS_UNPIN     6
+#define FB_GPU_RESV_ATTACH_SYNCOBJ_SIGNAL 7
+#define FB_GPU_RESV_ATTACH_SYNCOBJ_WAIT   8
+#define FB_GPU_RESV_ATTACH_SYNC_FILE_EXPORT 9
+#define FB_GPU_RESV_ATTACH_SYNC_FILE_IMPORT 10
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
@@ -145,6 +201,16 @@
 #define FB_GPU_BO_FORMAT_NV12     0x3231564eu /* DRM_FORMAT_NV12 */
 #define FB_GPU_BO_MOD_LINEAR      0ULL        /* DRM_FORMAT_MOD_LINEAR */
 
+#define FB_GPU_DMABUF_TAG_NONE      0u
+#define FB_GPU_DMABUF_TAG_FB_BO     1u
+#define FB_GPU_DMABUF_TAG_DRM_PRIME 2u
+
+#define FB_GPU_DMABUF_POLL_WAKE_UNKNOWN           0u
+#define FB_GPU_DMABUF_POLL_WAKE_SHARED_ATTACH     1u
+#define FB_GPU_DMABUF_POLL_WAKE_EXCLUSIVE_RELEASE 2u
+#define FB_GPU_DMABUF_POLL_WAKE_PRESENT_SIGNAL    3u
+#define FB_GPU_DMABUF_POLL_WAKE_EXCLUSIVE_ACQUIRE 4u
+
 #define FB_GPU_TTM_PL_SYSTEM 0x0001u
 #define FB_GPU_TTM_PL_TT     0x0002u
 #define FB_GPU_TTM_PL_VRAM   0x0004u
@@ -154,6 +220,8 @@
 #define FB_GPU_TTM_F_PIN           0x0002u
 #define FB_GPU_TTM_F_UNPIN         0x0004u
 #define FB_GPU_TTM_F_FORCE_EVICT   0x0008u
+#define FB_GPU_TTM_F_RESERVE       0x0010u
+#define FB_GPU_TTM_F_UNRESERVE     0x0020u
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -360,6 +428,35 @@ struct fb_gpu_ttm_validate {
     uint64 move_count;
     uint64 manager_bytes[4];
     uint64 evictions;
+    uint64 metadata_only_moves;
+    uint64 real_copy_moves;
+    uint64 move_bytes;
+    uint64 native_accel_credit;
+    uint64 manager_moves[4];
+    uint64 cpu_copy_fallback_moves[4];
+    uint64 metadata_noop_moves[4];
+    uint64 unsupported_hw_copy_moves[4];
+    uint64 real_copy_moves_by_domain[4];
+    uint64 resv_count;
+    uint64 resv_seq;
+    uint64 resv_exclusive_fence;
+    uint64 resv_waits;
+    uint64 resv_conflicts;
+    uint64 resv_shared_slots;
+    uint64 resv_shared_count;
+    uint64 resv_latest_shared_fence;
+    uint64 resv_wait_wakeups;
+    uint64 resv_stale_fence_rejects;
+    uint64 resv_attach_syncobj_signal;
+    uint64 resv_attach_syncobj_wait;
+    uint64 resv_attach_sync_file_export;
+    uint64 resv_attach_sync_file_import;
+    uint64 resv_evict_pinned_rejects;
+    uint64 resv_evict_busy_rejects;
+    uint64 syncobj_wait_queued;
+    uint64 syncobj_wait_wakeups;
+    uint64 syncobj_timeout_waits;
+    uint64 syncobj_stale_wait_rejects;
 };
 
 /*
@@ -410,18 +507,18 @@ struct fb_gpu_dxg_present_source_query {
     uint32   flags;           /* reserved, must be 0 */
     uint32   display_target_kind; /* FB_GPU_DXG_DISPLAY_TARGET_* */
     uint32   source_live;     /* nonzero when present_source is registered */
-    uint64   present_id;      /* always 0 until host helper exists */
-    uint64   completed;       /* always 0 until host helper exists */
-    uint64   host_handoff_missing; /* commits blocked before host helper */
+    uint64   present_id;      /* 0 until GPU-P/DDA display completion exists */
+    uint64   completed;       /* 0 until GPU-P/DDA display completion exists */
+    uint64   host_handoff_missing; /* commits blocked before GPU-P/DDA bind */
     uint64   requires_host_protocol; /* nonzero while fail-closed */
     uint64   missing_host_abi; /* FB_GPU_DXG_PRESENT_MISSING_* */
-    uint64   helper_contract_version;
-    uint64   helper_required_metadata;
-    uint64   helper_transport;
-    uint64   helper_transport_present;
-    uint64   helper_operation;
-    uint64   helper_lifetime;
-    uint64   helper_requires_completion;
+    uint64   helper_contract_version; /* legacy name: GPU-P/DDA contract */
+    uint64   helper_required_metadata; /* legacy name: required metadata */
+    uint64   helper_transport; /* legacy name: GPU-P/DDA transport */
+    uint64   helper_transport_present; /* legacy name: transport exists */
+    uint64   helper_operation; /* legacy name: GPU-P/DDA operation */
+    uint64   helper_lifetime; /* legacy name: GPU-P/DDA lifetime */
+    uint64   helper_requires_completion; /* present_id/completed required */
     uint32   device;
     uint32   resource;
     uint32   allocation;
@@ -437,26 +534,30 @@ struct fb_gpu_dxg_present_source_query {
     uint32   adapter_luid_low;
     uint32   adapter_luid_high;
     uint32   adapter_identity;
-    uint32   helper_block_reason;
+    uint32   helper_block_reason; /* legacy name: GPU-P/DDA block reason */
     uint64   host_candidates;
     uint64   host_rejects;
 };
 
 /*
- * Contract for a future host-display-helper resource scanout bind.
+ * Contract for a future GPU-P/DDA resource scanout bind.
  *
- * This is intentionally not wired to an ioctl yet.  The current kernel has no
- * discoverable Hyper-V socket service or VMBus offer for such a helper, and
+ * FB_GPU_DXG_PRESENT_BIND_CONTRACT_QUERY fills this structure and returns
+ * -EOPNOTSUPP until a real GPU-P/DDA display lane exists.  The current kernel
+ * has no documented GPU-P present packet that binds a D3DKMT resource to the
+ * Windows display path, DDA/Nouveau is a separate native PCI path, and
  * synthvid only accepts a guest physical VRAM address plus dirty rectangles.
- * A real helper must consume the same-adapter D3DKMT handles below and return
- * host-correlated present/completion sequence numbers before
+ * A real GPU-P or DDA lane must consume the same-adapter handles below and
+ * return display-correlated present/completion sequence numbers before
  * FB_GPU_DXG_PRESENT_SOURCE_COMMIT can report success.
  */
 struct fb_gpu_dxg_present_host_bind_contract {
     uint32 version;       /* set to 1 */
-    uint32 transport;     /* FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_* */
-    uint32 operation;     /* FB_GPU_DXG_PRESENT_HELPER_OP_* */
+    uint32 transport;     /* FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_* */
+    uint32 operation;     /* FB_GPU_DXG_PRESENT_GPUP_DDA_OP_* */
     uint32 flags;         /* FB_GPU_DXG_PRESENT_F_* */
+    uint32 present_source; /* optional registered source to bind */
+    uint32 source_live;    /* returned: source still belongs to this open */
     uint32 device;
     uint32 resource;
     uint32 allocation;
@@ -475,7 +576,14 @@ struct fb_gpu_dxg_present_host_bind_contract {
     uint64 completed;
     uint64 provenance_flags;
     uint64 selected_lane;
-    uint64 helper_block_reason;
+    uint64 helper_block_reason; /* legacy name: GPU-P/DDA block reason */
+    uint64 required_metadata; /* FB_GPU_DXG_PRESENT_META_* */
+    uint64 lifetime;      /* FB_GPU_DXG_PRESENT_LIFE_* */
+    uint64 host_candidates; /* FB_GPU_DXG_PRESENT_HOST_* */
+    uint64 host_rejects;  /* FB_GPU_DXG_PRESENT_REJECT_* */
+    uint64 source_generation; /* stable token for this source registration */
+    uint64 resource_generation; /* stable token for resource metadata */
+    uint64 completion_source; /* FB_GPU_DXG_PRESENT_COMPLETION_* */
     int32 dxg_fd;
     int32 resource_fd;
     uint32 adapter_identity;
@@ -632,6 +740,44 @@ struct fb_gpu_stats {
     uint64 bo_fd_imports;      /* graphics buffer fd capability imports */
     uint64 bo_fd_live;         /* currently open BO capability fds */
     uint64 bo_fd_peak;         /* high-water mark of open BO fds */
+    uint64 dmabuf_exports;     /* dma-buf-shaped BO/PRIME fd exports */
+    uint64 dmabuf_imports;     /* dma-buf-shaped BO/PRIME fd imports */
+    uint64 dmabuf_attachments; /* importer attachments created */
+    uint64 dmabuf_live_attachments; /* imported BO handles still attached */
+    uint64 dmabuf_peak_attachments; /* high-water mark of live attachments */
+    uint64 dmabuf_live;        /* currently open dma-buf-shaped fds */
+    uint64 dmabuf_peak;        /* high-water mark of open dma-buf fds */
+    uint64 dmabuf_releases;    /* dma-buf-shaped fd releases */
+    uint64 dmabuf_bad_fd_rejects; /* invalid/closed fd import rejects */
+    uint64 dmabuf_foreign_fd_rejects; /* non-dma-buf fd import rejects */
+    uint64 dmabuf_resv_snapshots; /* exported/imported reservation snapshots */
+    uint64 dmabuf_last_exporter_tag; /* FB_GPU_DMABUF_TAG_* */
+    uint64 dmabuf_last_importer_tag; /* FB_GPU_DMABUF_TAG_* */
+    uint64 dmabuf_last_ttm_resv_seq; /* last copied GEM reservation seq */
+    uint64 dmabuf_last_ttm_resv_exclusive_fence; /* last exclusive fence */
+    uint64 dmabuf_poll_semantics; /* nonzero when dma-buf fds implement poll */
+    uint64 dmabuf_poll_attempts; /* dma-buf fd poll readiness checks */
+    uint64 dmabuf_poll_ready; /* poll checks that reported ready fences */
+    uint64 dmabuf_poll_not_ready; /* poll checks blocked by pending fences */
+    uint64 dmabuf_poll_errors; /* poll checks rejected bad dma-buf state */
+    uint64 dmabuf_poll_last_target_fence; /* last dma-buf poll fence target */
+    uint64 dmabuf_poll_last_signaled_fence; /* last dma-buf poll signaled fence */
+    uint64 dmabuf_poll_read_ready; /* read-side poll readiness successes */
+    uint64 dmabuf_poll_write_ready; /* write-side poll readiness successes */
+    uint64 dmabuf_poll_pending; /* requested poll events blocked by fences */
+    uint64 dmabuf_poll_last_read_fence; /* last exclusive/write fence */
+    uint64 dmabuf_poll_last_write_fence; /* last all-fences write target */
+    uint64 dmabuf_poll_real_fence_ready; /* nonzero fence satisfied by poll */
+    uint64 dmabuf_poll_callbacks_armed; /* pending poll callback diagnostics */
+    uint64 dmabuf_poll_callbacks_fired; /* reservation wakeups that hit polls */
+    uint64 dmabuf_poll_pending_to_ready; /* armed pending poll later readied */
+    uint64 dmabuf_poll_last_callback_source; /* FB_GPU_DMABUF_POLL_WAKE_* */
+    uint64 dmabuf_poll_last_callback_target_fence; /* target armed at wake */
+    uint64 dmabuf_poll_last_callback_wakeup_seq; /* reservation wake seq */
+    uint64 dmabuf_shared_fence_semantics; /* shared-fence slot capacity */
+    uint64 dmabuf_wait_queue_semantics; /* nonzero when waits use wakeups */
+    uint64 dmabuf_last_ttm_resv_shared_fence; /* last shared fence copied */
+    uint64 dmabuf_last_ttm_resv_shared_count; /* shared slots used */
     uint64 bo_fences;          /* completed graphics buffer present fences */
     uint64 bo_fence_waits;     /* graphics buffer fence wait/query requests */
     uint64 fence_fd_exports;   /* BO fence fd capability exports */
@@ -652,9 +798,68 @@ struct fb_gpu_stats {
     uint64 drm_auths;          /* primary-node auth ioctls accepted */
     uint64 drm_master_sets;    /* primary-node SET_MASTER successes */
     uint64 drm_master_drops;   /* primary-node DROP_MASTER successes */
+    uint64 drm_events_queued;  /* KMS events queued on DRM files */
+    uint64 drm_events_read;    /* KMS events delivered by DRM read() */
+    uint64 drm_event_queue_depth; /* current queued KMS events across files */
+    uint64 drm_event_queue_high_water; /* aggregate queue depth high-water */
+    uint64 drm_event_file_high_water; /* max depth reached by one DRM file */
+    uint64 drm_event_queue_overflows; /* event queue full rejections */
+    uint64 drm_event_queue_dropped; /* events not queued because FIFO was full */
+    uint64 drm_event_close_stale; /* unread events discarded on file close */
+    uint64 kms_vblank_sequence; /* synthetic/display CRTC vblank sequence */
+    uint64 kms_vblank_timestamp_ns; /* timestamp for last vblank sample */
+    uint64 kms_vblank_last_tick; /* internal 100ns clock sample */
+    uint64 kms_vblank_samples; /* vblank samples returned to DRM callers */
+    uint64 kms_vblank_page_flip_events; /* page-flip events using vblank source */
+    uint64 kms_vblank_synthetic; /* current vblank source is synthetic */
+    uint64 kms_vblank_display_correlated; /* source is display-correlated */
+    uint64 kms_page_flip_target_rejects; /* target flips rejected until real */
+    uint64 kms_page_flip_async_rejects; /* async flips rejected until real */
+    uint64 kms_page_flip_invalid_noevent_rejects; /* invalid flips no-event */
+    uint64 kms_crtc_queue_sequence_rejects; /* queue-sequence unsupported */
+    uint64 kms_crtc_queue_sequence_bad_flags; /* invalid sequence flags */
+    uint64 kms_crtc_queue_sequence_noevent_rejects; /* rejected before event */
+    uint64 drm_file_legacy_opens; /* DRM-core file opens via /dev/gpu0 */
+    uint64 drm_file_primary_opens; /* DRM-core file opens via /dev/dri/card0 */
+    uint64 drm_file_render_opens; /* DRM-core file opens via renderD128 */
+    uint64 drm_file_legacy_closes; /* DRM-core file closes via /dev/gpu0 */
+    uint64 drm_file_primary_closes; /* DRM-core file closes via card0 */
+    uint64 drm_file_render_closes; /* DRM-core file closes via renderD128 */
+    uint64 drm_file_legacy_live; /* live DRM-core legacy files */
+    uint64 drm_file_primary_live; /* live DRM-core primary files */
+    uint64 drm_file_render_live; /* live DRM-core render files */
+    uint64 drm_file_close_generation; /* increments once per DRM file close */
+    uint64 drm_file_stale_gem_handles; /* GEM/BO handles reaped on close */
+    uint64 drm_file_stale_kms_fbs; /* KMS FB IDs reaped on close */
+    uint64 drm_file_stale_syncobjs; /* syncobjs reaped on close */
+    uint64 drm_file_stale_events; /* unread DRM events reaped on close */
+    uint64 drm_minor_model_version; /* Linux-shaped minor diag version */
+    uint64 drm_minor_primary_index; /* primary minor index, card0 => 0 */
+    uint64 drm_minor_render_index; /* render minor index, renderD128 => 128 */
+    uint64 drm_minor_control_index; /* control minor index, if present */
+    uint64 drm_minor_primary_registered; /* primary node exists */
+    uint64 drm_minor_render_registered; /* render node exists */
+    uint64 drm_minor_control_registered; /* control node exists */
+    uint64 drm_minor_static_nodes; /* statically registered DRM nodes */
+    uint64 drm_minor_dynamic_nodes; /* dynamically allocated DRM nodes */
+    uint64 drm_minor_generation; /* increments when DRM minor model changes */
+    uint64 drm_lease_ioctl_attempts; /* recognized DRM lease ioctl attempts */
+    uint64 drm_lease_create_rejects; /* CREATE_LEASE fail-closed rejects */
+    uint64 drm_lease_create_object_rejects; /* object-list lease rejects */
+    uint64 drm_lease_create_empty_rejects; /* empty-object lease rejects */
+    uint64 drm_lease_list_rejects; /* LIST_LESSEES fail-closed rejects */
+    uint64 drm_lease_get_rejects; /* GET_LEASE fail-closed rejects */
+    uint64 drm_lease_revoke_rejects; /* REVOKE_LEASE fail-closed rejects */
+    uint64 drm_lease_render_rejects; /* lease ioctls rejected on render node */
+    uint64 drm_lease_fds_created; /* lease fd creations, should stay zero */
+    uint64 drm_lease_active; /* active leases, should stay zero */
     uint64 nouveau_ioctl_entries; /* Nouveau private ioctl calls entered */
     uint64 nouveau_fail_closed; /* Nouveau ioctls rejected because absent */
     uint64 nouveau_getparams;  /* Nouveau GETPARAM calls accepted */
+    uint64 nouveau_getparam_dda_facts; /* GETPARAM facts sourced from DDA PCI */
+    uint64 nouveau_getparam_synthetic_facts; /* synthetic/non-DDA GETPARAM facts */
+    uint64 nouveau_getparam_fail_closed; /* GETPARAM rejected because absent */
+    uint64 nouveau_getparam_last_source; /* FB_GPU_NOUVEAU_GETPARAM_SOURCE_* */
     uint64 nouveau_channel_allocs; /* Nouveau channel alloc successes */
     uint64 nouveau_channel_frees; /* Nouveau channel free successes */
     uint64 nouveau_gem_news;   /* Nouveau GEM_NEW successes */
@@ -666,19 +871,132 @@ struct fb_gpu_stats {
     uint64 nouveau_pushbuf_noops; /* zero-push Nouveau GEM_PUSHBUF successes */
     uint64 nouveau_exec_noops; /* zero-push Nouveau EXEC successes */
     uint64 nouveau_unsupported; /* recognized but not implemented Nouveau ops */
+    uint64 nouveau_pci_registered; /* Nouveau PCI driver registrations */
+    uint64 nouveau_pci_probes; /* Nouveau PCI probe attempts */
+    uint64 nouveau_pci_probe_failures; /* Nouveau PCI probe failures */
+    uint64 nouveau_pci_probe_reject_dxg_present; /* GPU-P/DXG-only device */
+    uint64 nouveau_pci_probe_reject_class; /* candidate was not display class */
+    uint64 nouveau_pci_probe_reject_no_bars; /* no usable DDA BAR aperture */
+    uint64 nouveau_pci_probe_enable_failures; /* pci_enable_device failures */
+    uint64 nouveau_pci_probe_accepts; /* accepted DDA/Nouveau PCI functions */
+    uint64 nouveau_pci_removes; /* clean Nouveau PCI remove callbacks */
+    uint64 nouveau_pci_suspends; /* Nouveau PCI suspend callbacks */
+    uint64 nouveau_pci_resumes; /* Nouveau PCI resume callbacks */
+    uint64 nouveau_pci_enable_count; /* PCI core enable refcount */
+    uint64 nouveau_pci_master_enabled; /* PCI bus mastering state */
+    uint64 nouveau_pci_irq_vectors; /* allocated PCI IRQ vector count */
+    uint64 nouveau_pci_runtime_suspended; /* PCI runtime suspend state */
+    uint64 nouveau_pci_suspend_count; /* PCI core runtime suspend count */
+    uint64 nouveau_pci_resume_count; /* PCI core runtime resume count */
+    uint64 nouveau_pci_runtime_pm_balanced; /* not suspended with equal counts */
+    uint64 nouveau_pci_remove_runtime_suspended; /* remove while suspended */
+    uint64 nouveau_pci_bar0_len; /* BAR0 aperture length from PCI core */
+    uint64 nouveau_pci_bar1_len; /* BAR1 aperture length from PCI core */
+    uint64 nouveau_pci_irq; /* selected legacy IRQ vector, if any */
+    uint64 nouveau_pci_irq_pin; /* PCI interrupt pin, if any */
+    uint64 nouveau_pci_msi_cap; /* PCI MSI capability offset, if present */
+    uint64 nouveau_pci_msix_cap; /* PCI MSI-X capability offset, if present */
+    uint64 nouveau_pci_dma_mask_configured; /* streaming DMA mask set */
+    uint64 nouveau_pci_dma_mask_bits; /* streaming DMA address bits */
+    uint64 nouveau_pci_coherent_dma_mask_configured; /* coherent mask set */
+    uint64 nouveau_pci_coherent_dma_mask_bits; /* coherent DMA bits */
+    uint64 nouveau_pci_bar0_claimed; /* BAR0 region claim state */
+    uint64 nouveau_pci_bar1_claimed; /* BAR1 region claim state */
+    uint64 nouveau_pci_bar_claim_failures; /* BAR claim failures */
+    uint64 nouveau_pci_bar_releases; /* BAR regions released */
+    uint64 nouveau_pci_irq_request_failures; /* IRQ vector request failures */
+    uint64 nouveau_pci_irq_mode; /* PCI_IRQ_* granted by PCI core */
+    uint64 nouveau_pci_msi_requested; /* MSI/MSI-X requested when present */
+    uint64 nouveau_pci_msi_fail_closed; /* MSI/MSI-X unsupported path hit */
+    uint64 nouveau_pci_irq_vector_valid; /* selected vector is usable */
+    uint64 nouveau_pci_irq_handler_registered; /* driver installed handler */
+    uint64 nouveau_pci_irq_delivery_enabled; /* interrupts can be delivered */
+    uint64 nouveau_pci_irq_delivery_claimed; /* driver claims live delivery */
+    uint64 nouveau_pci_legacy_irq_fallback; /* legacy vector fallback used */
+    uint64 nouveau_pci_native_present_credit; /* native scanout credit */
     uint64 kms_framebuffers;   /* currently registered KMS framebuffer IDs */
     uint64 kms_page_flips;     /* accepted KMS page flips */
     uint64 kms_atomic_commits; /* accepted/tested atomic commits */
+    uint64 kms_atomic_in_fence_accepted; /* accepted atomic IN_FENCE_FD fds */
+    uint64 kms_atomic_in_fence_rejected; /* rejected atomic IN_FENCE_FD fds */
+    uint64 kms_atomic_in_fence_fd_refs; /* prepared stable fd references */
+    uint64 kms_atomic_in_fence_fd_ref_puts; /* released prepared references */
+    uint64 kms_atomic_in_fence_duplicate_rejects; /* duplicate prop rejects */
+    uint64 kms_atomic_in_fence_test_only_validated; /* TEST_ONLY validated */
+    uint64 kms_atomic_in_fence_test_only_waits; /* TEST_ONLY wait regressions */
+    uint64 kms_atomic_in_fence_sync_file_pending_waits; /* live sync_file */
+    uint64 kms_atomic_in_fence_sync_file_pending_wakeups; /* pending became ready */
+    uint64 kms_atomic_out_fence_prepared; /* real commits prepared fd */
+    uint64 kms_atomic_out_fence_cleanup_closes; /* prepared fd cleanup closes */
+    uint64 kms_atomic_out_fence_test_only_placeholders; /* TEST_ONLY wrote -1 */
+    uint64 kms_atomic_out_fence_fd_exports; /* atomic OUT_FENCE_PTR fd exports */
+    uint64 kms_atomic_out_fence_display_correlated; /* native/display fences */
+    uint64 kms_atomic_nonblock_rejects; /* nonblocking atomic commits rejected */
     uint64 ttm_system_bytes;   /* BO bytes in system placement */
     uint64 ttm_tt_bytes;       /* BO bytes in GART/TT placement */
     uint64 ttm_vram_bytes;     /* BO bytes in VRAM placement */
     uint64 ttm_stolen_bytes;   /* BO bytes in stolen/scanout placement */
     uint64 ttm_pinned_bytes;   /* BO bytes with nonzero pin count */
     uint64 ttm_validate_failures; /* rejected placement/validation requests */
+    uint64 ttm_metadata_only_moves; /* placement moves without backing copy */
+    uint64 ttm_real_copy_moves; /* placement moves with copied backing pages */
+    uint64 ttm_move_bytes;     /* bytes covered by placement moves */
+    uint64 ttm_native_accel_credit; /* native accel credit granted by TTM */
+    uint64 ttm_cpu_copy_fallback_moves[4]; /* dst-domain CPU-copy fallback */
+    uint64 ttm_metadata_noop_moves[4]; /* dst-domain same-placement no-ops */
+    uint64 ttm_unsupported_hw_copy_moves[4]; /* dst-domain HW-copy gaps */
+    uint64 ttm_real_copy_moves_by_domain[4]; /* dst-domain copied moves */
+    uint64 ttm_resv_acquires;  /* dma_resv-like exclusive reservations */
+    uint64 ttm_resv_releases;  /* reservation drops */
+    uint64 ttm_resv_waits;     /* waits/conflict probes observed */
+    uint64 ttm_resv_conflicts; /* conflicting reservation attempts */
+    uint64 ttm_resv_exclusive_fences; /* reservation fence generations */
+    uint64 ttm_resv_shared_slots; /* fixed dma_resv-like shared slots per BO */
+    uint64 ttm_resv_shared_used; /* last observed shared slot count */
+    uint64 ttm_resv_shared_fences; /* shared reservation fences attached */
+    uint64 ttm_resv_shared_replaced; /* ring slots overwritten */
+    uint64 ttm_resv_wait_queued; /* reservation waits that slept on a channel */
+    uint64 ttm_resv_wait_wakeups; /* waiters woken by reservation/fence change */
+    uint64 ttm_resv_stale_fence_rejects; /* stale snapshots not trusted */
+    uint64 ttm_resv_attach_prime_export; /* PRIME export fence attachments */
+    uint64 ttm_resv_attach_prime_import; /* PRIME import fence attachments */
+    uint64 ttm_resv_attach_dmabuf_export; /* fb BO fd export attachments */
+    uint64 ttm_resv_attach_dmabuf_import; /* fb BO fd import attachments */
+    uint64 ttm_resv_attach_kms_pin; /* KMS framebuffer pin attachments */
+    uint64 ttm_resv_attach_kms_unpin; /* KMS framebuffer unpin attachments */
+    uint64 ttm_resv_attach_syncobj_signal; /* syncobj signal attachments */
+    uint64 ttm_resv_attach_syncobj_wait; /* syncobj wait reservation probes */
+    uint64 ttm_resv_attach_sync_file_export; /* sync-file export attachments */
+    uint64 ttm_resv_attach_sync_file_import; /* sync-file import attachments */
+    uint64 ttm_resv_last_attach_point; /* FB_GPU_RESV_ATTACH_* */
+    uint64 ttm_resv_last_shared_fence; /* last shared reservation fence */
+    uint64 ttm_resv_evict_pinned_rejects; /* pinned BO eviction rejects */
+    uint64 ttm_resv_evict_busy_rejects; /* busy reservation eviction rejects */
     uint64 syncobj_created;    /* DRM syncobjs created */
     uint64 syncobj_live;       /* currently live DRM syncobjs */
     uint64 syncobj_signals;    /* binary/timeline signal operations */
     uint64 syncobj_waits;      /* binary/timeline wait operations */
+    uint64 syncobj_resv_attach; /* syncobj/sync-file reservation attaches */
+    uint64 syncobj_sync_file_exports; /* syncobj handle-to-fd exports */
+    uint64 syncobj_sync_file_imports; /* syncobj fd-to-handle imports */
+    uint64 syncobj_wait_queued; /* syncobj waits that slept on a channel */
+    uint64 syncobj_wait_wakeups; /* waiters woken by syncobj signal/reset */
+    uint64 syncobj_wait_callbacks_armed; /* wait callbacks armed */
+    uint64 syncobj_wait_callbacks_fired; /* wait callbacks fired by signal */
+    uint64 syncobj_wait_callbacks_cancelled; /* timed/interrupted wait cancels */
+    uint64 syncobj_wait_callback_late_fires; /* inconsistent wait callback */
+    uint64 syncobj_timeout_waits; /* waits using finite timeout wakeups */
+    uint64 syncobj_stale_wait_rejects; /* waits rejected as stale/unsubmitted */
+    uint64 sync_file_pending_exports; /* pending sync_file fd exports */
+    uint64 sync_file_pending_imports; /* pending sync_file imports */
+    uint64 sync_file_pending_poll_not_ready; /* pending poll miss */
+    uint64 sync_file_pending_poll_ready; /* pending poll became ready */
+    uint64 sync_file_pending_wakeups; /* proxy fence completions observed */
+    uint64 sync_file_pending_import_rejects; /* invalid pending imports */
+    uint64 sync_file_pending_callbacks_armed; /* pending poll callback armed */
+    uint64 sync_file_pending_callbacks_fired; /* source signal fired callback */
+    uint64 sync_file_pending_callbacks_cancelled; /* close cancelled callback */
+    uint64 sync_file_pending_callback_late_fires; /* fired after cancellation */
     uint64 virtio_commands;    /* virtio-gpu control commands completed */
     uint64 virtio_failures;    /* virtio-gpu commands rejected or failed */
     uint64 virtio_timeouts;    /* virtio-gpu commands timed out */
@@ -741,7 +1059,7 @@ struct fb_gpu_stats {
     uint64 dxg_present_last_adapter_luid_high; /* optional source LUID high */
     uint64 dxg_present_last_adapter_identity; /* FB_GPU_DXG_PRESENT_ADAPTER_* */
     uint64 dxg_present_selected_lane; /* FB_GPU_DXG_PRESENT_LANE_* */
-    uint64 dxg_present_helper_block_reason; /* FB_GPU_DXG_PRESENT_BLOCK_* */
+    uint64 dxg_present_helper_block_reason; /* legacy name: GPU-P/DDA block reason */
     uint64 dxg_present_display_target_kind; /* FB_GPU_DXG_DISPLAY_TARGET_* */
     uint64 dxg_present_requires_host_protocol; /* no kernel/host bind ABI */
     uint64 dxg_present_missing_host_abi; /* FB_GPU_DXG_PRESENT_MISSING_* */
@@ -750,10 +1068,28 @@ struct fb_gpu_stats {
     uint64 dxg_present_synthvid_state; /* present/open/init/dirt bitfield */
     uint64 dxg_present_synthvid_vram_gpa; /* current synthvid VRAM GPA */
     uint64 dxg_present_dxg_state; /* global/vgpu/d3dkmt readiness bitfield */
-    uint64 dxg_present_helper_contract_version; /* passive helper ABI version */
+    uint64 dxg_present_dxg_adapter_type_raw; /* host QAI adapter type */
+    uint64 dxg_present_dxg_adapter_type_wsl; /* WSL-shaped adapter type */
+    uint64 dxg_present_dxg_adapter_type_rewrites; /* QAI rewrites observed */
+    uint64 dxg_present_dxg_adapter_sources; /* adapter source count */
+    uint64 dxg_present_dxg_adapter_render_supported; /* WSL adapter render bit */
+    uint64 dxg_present_dxg_adapter_display_supported; /* WSL adapter display bit */
+    uint64 dxg_present_dxg_adapter_paravirtualized; /* WSL adapter GPU-PV bit */
+    uint64 dxg_present_dxg_adapter_compute_only; /* WSL adapter compute-only bit */
+    uint64 dxg_present_dxg_adapter_sources_known; /* enum adapter source count valid */
+    uint64 dxg_present_dxg_enum_adapter_count; /* enum adapters returned */
+    uint64 dxg_present_dxg_enum_adapter_handle; /* last local enum adapter */
+    uint64 dxg_present_dxg_enum_adapter_luid_low; /* enum adapter LUID low */
+    uint64 dxg_present_dxg_enum_adapter_luid_high; /* enum adapter LUID high */
+    uint64 dxg_present_dxg_user_luid_low; /* current DXG user LUID low */
+    uint64 dxg_present_dxg_user_luid_high; /* current DXG user LUID high */
+    uint64 dxg_present_dda_nouveau_present; /* DDA/Nouveau PCI candidate seen */
+    uint64 dxg_present_dda_nouveau_import_path_present; /* D3D12 import lane exists */
+    uint64 dxg_present_dda_nouveau_scanout_bind_present; /* scanout bind lane exists */
+    uint64 dxg_present_helper_contract_version; /* legacy name: GPU-P/DDA contract */
     uint64 dxg_present_helper_required_metadata; /* FB_GPU_DXG_PRESENT_META_* */
-    uint64 dxg_present_helper_transport; /* FB_GPU_DXG_PRESENT_HELPER_TRANSPORT_* */
-    uint64 dxg_present_helper_transport_present; /* nonzero once host service exists */
+    uint64 dxg_present_helper_transport; /* legacy name: GPU-P/DDA transport */
+    uint64 dxg_present_helper_transport_present; /* nonzero once GPU-P/DDA lane exists */
     uint64 dxg_present_helper_operation; /* FB_GPU_DXG_PRESENT_HELPER_OP_* */
     uint64 dxg_present_helper_lifetime; /* FB_GPU_DXG_PRESENT_LIFE_* */
     uint64 dxg_present_helper_source_live; /* registered source still tracked */
@@ -762,12 +1098,30 @@ struct fb_gpu_stats {
     uint64 dxg_present_commit_bad_flags; /* commits rejected by flags/sync contract */
     uint64 dxg_present_commit_adapter_mismatch; /* source/target adapter mismatch */
     uint64 dxg_present_commit_resource_fd_unverified; /* no verifiable dxgresource fd */
-    uint64 dxg_present_commit_no_transport; /* no host helper transport available */
+    uint64 dxg_present_commit_no_transport; /* no GPU-P/DDA display lane */
     uint64 dxg_present_commit_no_completion; /* no present completion source */
+    uint64 dxg_present_release_sources; /* sources cleaned on render fd close */
+    uint64 dxg_present_bind_contract_queries; /* future bind contract queries */
+    uint64 dxg_present_bind_contract_rejects; /* bind queries fail-closed */
+    uint64 dxg_present_bind_contract_successes; /* native bind query accepts */
     uint64 display_presents;  /* display present/flush operations issued */
     uint64 display_completions; /* display present completions observed */
     uint64 display_last_present; /* latest issued display-present sequence */
     uint64 display_last_complete; /* latest completed display-present sequence */
+    uint64 fence_objects_created; /* internal fb_gpu_fence objects created */
+    uint64 fence_objects_live; /* currently live fb_gpu_fence objects */
+    uint64 fence_objects_peak; /* high-water mark of live fence objects */
+    uint64 fence_objects_signaled; /* fence objects signaled */
+    uint64 fence_objects_errors; /* fence objects completed with an error */
+    uint64 fence_objects_waits; /* waits issued against fence objects */
+    uint64 fence_objects_wait_queued; /* fence object waits that slept */
+    uint64 fence_objects_wakeups; /* waiters woken by fence signal */
+    uint64 fence_objects_ref_puts; /* fence object reference drops */
+    uint64 fence_objects_callbacks_added; /* callback records armed */
+    uint64 fence_objects_callbacks_removed; /* armed callbacks cancelled */
+    uint64 fence_objects_callbacks_fired; /* callbacks fired by signal */
+    uint64 fence_objects_callbacks_late; /* add after signaled */
+    uint64 fence_objects_callback_errors; /* inconsistent callback state */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

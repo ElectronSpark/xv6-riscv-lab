@@ -80,6 +80,21 @@ static int __vfs_fdtable_alloc_order(void) {
     return order;
 }
 
+static int vfs_file_note_fd_open(struct vfs_file *file)
+{
+    if (__atomic_fetch_add(&file->visible_fd_refs, 1,
+                           __ATOMIC_ACQ_REL) != 0)
+        return 0;
+    __atomic_store_n(&file->last_fd_close_notified, 0, __ATOMIC_RELEASE);
+    return 1;
+}
+
+static void vfs_file_maybe_first_fd_open(struct vfs_file *file, int first)
+{
+    if (first && file->ops != NULL && file->ops->first_fd_open != NULL)
+        file->ops->first_fd_open(file);
+}
+
 /**
  * __vfs_fdtable_global_init - Validate fdtable allocator constraints
  *
@@ -185,11 +200,13 @@ int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable,
     if (vfs_fdup(file) == NULL) {
         return -ENOMEM; // Failed to duplicate file reference
     }
+    int first_visible = vfs_file_note_fd_open(file);
 
     bits_test_and_set_bit64(&fdtable->files_bitmap[fd >> 6], fd & 63);
     bits_test_and_clear_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63);
     rcu_assign_pointer(fdtable->files[fd], file);
     atomic_inc(&fdtable->fd_count);
+    vfs_file_maybe_first_fd_open(file, first_visible);
     return fd;
 }
 
@@ -273,6 +290,7 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src,
         if (IS_FD(src_file)) {
             struct vfs_file *dst_file = vfs_fdup(src_file);
             if (!IS_ERR_OR_NULL(dst_file)) {
+                int first_visible = vfs_file_note_fd_open(dst_file);
                 dest->files[i] = dst_file;
                 dest->fd_count++;
                 bits_test_and_set_bit64(&dest->files_bitmap[i >> 6], i & 63);
@@ -280,6 +298,7 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src,
                     bits_test_and_set_bit64(&dest->cloexec_bitmap[i >> 6],
                                             i & 63);
                 }
+                vfs_file_maybe_first_fd_open(dst_file, first_visible);
             } else {
                 dest->files[i] = NULL;
             }
@@ -318,6 +337,9 @@ void vfs_fdtable_put(struct vfs_fdtable *fdtable) {
             if (current != NULL) {
                 vfs_file_lock_release(file, current->tgid);
             }
+            __atomic_fetch_sub(&file->visible_fd_refs, 1,
+                               __ATOMIC_ACQ_REL);
+            vfs_file_maybe_last_fd_close(file);
             vfs_fput(file);
             fdtable->files[i] = NULL;
             fdtable->fd_count--;
@@ -386,6 +408,7 @@ struct vfs_file *vfs_fdtable_dealloc_fd(struct vfs_fdtable *fdtable, int fd) {
     bits_test_and_clear_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63);
 
     atomic_dec(&fdtable->fd_count);
+    __atomic_fetch_sub(&file->visible_fd_refs, 1, __ATOMIC_ACQ_REL);
     return file;
 }
 
@@ -461,6 +484,7 @@ void vfs_fdtable_close_on_exec(struct vfs_fdtable *fdtable) {
             if (current != NULL) {
                 vfs_file_lock_release(to_close[i], current->tgid);
             }
+            vfs_file_maybe_last_fd_close(to_close[i]);
             vfs_fput(to_close[i]);
         }
     }

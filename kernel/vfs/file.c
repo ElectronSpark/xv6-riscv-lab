@@ -129,6 +129,19 @@ static void __vfs_file_free(struct vfs_file *file) {
     call_rcu(NULL, __vfs_file_slab_free_rcu, file);
 }
 
+void vfs_file_maybe_last_fd_close(struct vfs_file *file)
+{
+    if (file == NULL || file->ops == NULL ||
+        file->ops->last_fd_close == NULL)
+        return;
+    if (__atomic_load_n(&file->visible_fd_refs, __ATOMIC_ACQUIRE) != 0)
+        return;
+    if (__atomic_exchange_n(&file->last_fd_close_notified, 1,
+                            __ATOMIC_ACQ_REL) != 0)
+        return;
+    file->ops->last_fd_close(file);
+}
+
 void __vfs_file_init(void) {
     int ret = slab_cache_init(&__vfs_file_slab, "vfs_file_cache",
                               sizeof(struct vfs_file),

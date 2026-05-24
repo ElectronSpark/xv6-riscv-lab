@@ -418,12 +418,16 @@ static void __vfs_finish_close_file(struct vfs_file *f)
     if (f == NULL)
         return;
 
+    vfs_file_maybe_last_fd_close(f);
+
     /*
      * Keep internal close paths in step with close(2): AF_UNIX peers need
      * hangup/read-EOF publication before the descriptor disappears from
      * Linux-style bulk close helpers such as close_range().
      */
-    if (f->ops == &unix_socket_file_ops && f->ops->release != NULL &&
+    if ((f->ops == &unix_socket_file_ops ||
+         (f->ops != NULL && f->ops->early_release_on_close)) &&
+        f->ops->release != NULL &&
         f->private_data != NULL &&
         __atomic_load_n(&f->ref_count, __ATOMIC_ACQUIRE) == 1) {
         f->ops->release(vfs_inode_deref(&f->inode), f);
@@ -496,6 +500,7 @@ uint64 sys_vfs_dup2(void) {
 
     if (old_newfd) {
         vfs_file_lock_release(old_newfd, current->tgid);
+        vfs_file_maybe_last_fd_close(old_newfd);
         __vfs_fput_call_rcu(old_newfd);
     }
     vfs_fput(f);
@@ -6014,8 +6019,10 @@ uint64 sys_vfs_dup3(void) {
         vfs_fdtable_set_fdflags(current->fdtable, ret, FD_CLOEXEC);
     spin_unlock(&current->fdtable->lock);
 
-    if (old_newfd)
+    if (old_newfd) {
+        vfs_file_maybe_last_fd_close(old_newfd);
         __vfs_fput_call_rcu(old_newfd);
+    }
     vfs_fput(f);
 
     return ret;

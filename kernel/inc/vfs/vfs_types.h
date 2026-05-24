@@ -433,6 +433,12 @@ struct vfs_file {
     uint32 f_seals;
     bool f_is_memfd;
     bool f_allow_sealing;
+    /*
+     * Descriptor-visible references.  This is distinct from ref_count, which
+     * also covers transient lookups and RCU-deferred close references.
+     */
+    int visible_fd_refs;
+    int last_fd_close_notified;
 };
 
 struct iov_iter; /* forward declaration — full definition in vfs/uio.h */
@@ -569,6 +575,28 @@ struct vfs_file_ops {
      * Returns total bytes written or negative errno.
      */
     ssize_t (*writev)(struct vfs_file *file, struct iov_iter *iter, bool user);
+
+    /*
+     * Observe a file becoming visible in an fdtable after it previously had no
+     * fdtable slots.  This can happen after hidden references such as
+     * SCM_RIGHTS are installed by a receiver.  Drivers use this only for
+     * fd-visible accounting; object lifetime still belongs to release().
+     */
+    void (*first_fd_open)(struct vfs_file *file);
+
+    /*
+     * Observe the last fdtable slot closing without freeing private_data.
+     * close(2) can defer release through RCU, so drivers use this only for
+     * fd-visible accounting.  Implementations must be idempotent.
+     */
+    void (*last_fd_close)(struct vfs_file *file);
+
+    /*
+     * If set, close(2) runs release as soon as the descriptor is removed
+     * and the file has no other references, before the deferred RCU fput.
+     * Release callbacks using this must be idempotent and clear private_data.
+     */
+    int early_release_on_close;
 };
 
 struct vfs_fdtable {

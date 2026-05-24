@@ -98,5 +98,6 @@ struct vfs_file *vfs_fdtable_dealloc_fd(struct vfs_fdtable *fdtable, int fd);
 int vfs_fdtable_get_fdflags(struct vfs_fdtable *fdtable, int fd);
 int vfs_fdtable_set_fdflags(struct vfs_fdtable *fdtable, int fd, int flags);
 void vfs_fdtable_close_on_exec(struct vfs_fdtable *fdtable);
+void vfs_file_maybe_last_fd_close(struct vfs_file *file);
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_FILE_H
