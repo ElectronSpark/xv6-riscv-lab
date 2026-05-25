@@ -5379,6 +5379,11 @@ int hyperv_dxg_display_bind_submit_failclosed(
     result->completion_source = FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY;
     result->present_id = 0;
     result->completed_id = 0;
+    result->source_generation = 0;
+    result->resource_generation = 0;
+    result->host_abi_present = 0;
+    result->sender_present = 0;
+    result->completion_present = 0;
     result->no_host_abi = 1;
     result->no_sender = 1;
     result->no_completion = 1;

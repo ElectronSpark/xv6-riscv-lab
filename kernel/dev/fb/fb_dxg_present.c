@@ -48,7 +48,12 @@ struct fb_dxg_display_bind_result {
     uint32 completion_source;
     uint64 present_id;
     uint64 completed_id;
+    uint64 source_generation;
+    uint64 resource_generation;
     uint64 block_reason;
+    uint32 host_abi_present;
+    uint32 sender_present;
+    uint32 completion_present;
     uint32 pin_revalidated;
     uint32 no_host_abi;
     uint32 no_sender;
@@ -192,12 +197,44 @@ fb_dxg_present_provider_submit_display_bind(
     result->completion_source = hv_result.completion_source;
     result->present_id = hv_result.present_id;
     result->completed_id = hv_result.completed_id;
+    result->source_generation = hv_result.source_generation;
+    result->resource_generation = hv_result.resource_generation;
     result->block_reason = hv_result.block_reason;
+    result->host_abi_present = hv_result.host_abi_present;
+    result->sender_present = hv_result.sender_present;
+    result->completion_present = hv_result.completion_present;
     result->pin_revalidated = hv_result.pin_revalidated;
     result->no_host_abi = hv_result.no_host_abi;
     result->no_sender = hv_result.no_sender;
     result->no_completion = hv_result.no_completion;
     return ret;
+}
+
+static int
+fb_dxg_present_display_bind_result_accepts(
+    const struct fb_dxg_display_bind_request *bind,
+    const struct fb_dxg_display_bind_result *result,
+    int submit_ret)
+{
+    if (bind == NULL || result == NULL)
+        return 0;
+    return submit_ret == 0 &&
+           result->status == 0 &&
+           result->transport != FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE &&
+           result->operation == FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND &&
+           result->host_abi_present != 0 &&
+           result->sender_present != 0 &&
+           result->completion_present != 0 &&
+           result->pin_revalidated != 0 &&
+           result->no_host_abi == 0 &&
+           result->no_sender == 0 &&
+           result->no_completion == 0 &&
+           result->block_reason == 0 &&
+           result->source_generation == bind->source_generation &&
+           result->resource_generation == bind->resource_generation &&
+           result->present_id != 0 &&
+           result->completed_id >= result->present_id &&
+           result->completion_source == FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY;
 }
 
 static void fb_dxg_present_hex32(char out[9], uint32 value)
@@ -535,7 +572,7 @@ fb_dxg_present_sync_display_bind_state_locked(
 static int
 fb_dxg_present_scanout_bind_locked(
     struct fb_gpu_dxg_present_source_entry **sourcep,
-    const struct fb_gpu_dxg_present_source_commit *req)
+    struct fb_gpu_dxg_present_source_commit *req)
 {
     struct fb_gpu_dxg_present_source_entry *source =
         sourcep != NULL ? *sourcep : NULL;
@@ -547,6 +584,8 @@ fb_dxg_present_scanout_bind_locked(
         source != NULL ? source->adapter_identity :
         FB_GPU_DXG_PRESENT_ADAPTER_UNKNOWN;
     int source_index = -1;
+    int submit_ret;
+    int accept;
 
     memset(&bind, 0, sizeof(bind));
     memset(&result, 0, sizeof(result));
@@ -622,7 +661,7 @@ fb_dxg_present_scanout_bind_locked(
     fb_state.stats.dxg_display_bind_provider_submits++;
     fb_state.stats.dxg_display_bind_lock_dropped_submits++;
     spin_unlock(&fb_state.lock);
-    fb_dxg_present_provider_submit_display_bind(&bind, &result);
+    submit_ret = fb_dxg_present_provider_submit_display_bind(&bind, &result);
     spin_lock(&fb_state.lock);
 
     fb_state.stats.dxg_display_bind_revalidate_attempts++;
@@ -668,16 +707,25 @@ fb_dxg_present_scanout_bind_locked(
         result.no_sender;
     fb_state.stats.dxg_display_bind_provider_no_completion =
         result.no_completion;
+    fb_state.stats.dxg_scanout_bind_candidate_sender_contracts =
+        result.sender_present != 0;
+    fb_state.stats.dxg_scanout_bind_candidate_completion_contracts =
+        result.completion_present != 0;
 
-    if (req == NULL || source == NULL)
+    accept = source != NULL && req != NULL &&
+             fb_dxg_present_display_bind_result_accepts(
+                 &bind, &result, submit_ret);
+
+    if (req == NULL || source == NULL || !accept)
         weak_evidence = 1;
-    if (fb_state.stats.dxg_present_helper_transport_present == 0 ||
+    if (!accept &&
+        (fb_state.stats.dxg_present_helper_transport_present == 0 ||
         fb_state.stats.dxg_present_display_target_kind ==
             FB_GPU_DXG_DISPLAY_TARGET_NONE ||
         fb_state.stats.dxg_present_missing_host_abi ==
             FB_GPU_DXG_PRESENT_MISSING_SCANOUT_BIND ||
         result.present_id == 0 ||
-        result.completed_id == 0)
+        result.completed_id == 0))
         weak_evidence = 1;
     if (weak_evidence) {
         fb_state.stats.dxg_scanout_bind_weak_evidence_rejects++;
@@ -716,6 +764,23 @@ fb_dxg_present_scanout_bind_locked(
         source->display_bind_block_reason = result.block_reason;
         source->display_bind_completion_source =
             result.completion_source;
+    }
+    if (accept) {
+        req->present_id = result.present_id;
+        req->completed = result.completed_id;
+        fb_state.stats.dxg_present_display_target_kind =
+            FB_GPU_DXG_DISPLAY_TARGET_RUNTIME_D3D12_RESOURCE;
+        fb_state.stats.dxg_present_requires_host_protocol = 0;
+        fb_state.stats.dxg_present_missing_host_abi =
+            FB_GPU_DXG_PRESENT_MISSING_NONE;
+        fb_state.stats.dxg_present_helper_transport = result.transport;
+        fb_state.stats.dxg_present_helper_transport_present = 1;
+        fb_state.stats.dxg_present_helper_operation = result.operation;
+        fb_state.stats.dxg_present_helper_block_reason = 0;
+        fb_state.stats.dxg_scanout_bind_successes++;
+        fb_state.stats.dxg_scanout_bind_completion_successes++;
+        fb_dxg_present_sync_display_bind_state_locked(source);
+        return 0;
     }
     fb_state.stats.dxg_scanout_bind_rejects++;
     fb_dxg_present_sync_display_bind_state_locked(source);
@@ -1012,7 +1077,7 @@ static void fb_dxg_present_release_owner_sources(uint64 owner_id,
 }
 
 static int fb_dxg_present_commit(uint64 owner_id, pid_t owner_tgid,
-                                 const struct fb_gpu_dxg_present_source_commit *req)
+                                 struct fb_gpu_dxg_present_source_commit *req)
 {
     struct fb_gpu_dxg_present_source_entry *source;
     int print_missing = 0;
@@ -1093,7 +1158,6 @@ static int fb_dxg_present_commit(uint64 owner_id, pid_t owner_tgid,
         goto out;
     }
 
-    fb_state.stats.dxg_present_host_handoff_missing++;
     fb_state.stats.dxg_present_display_target_kind =
         FB_GPU_DXG_DISPLAY_TARGET_NONE;
     fb_state.stats.dxg_present_requires_host_protocol = 1;
@@ -1110,12 +1174,15 @@ static int fb_dxg_present_commit(uint64 owner_id, pid_t owner_tgid,
         fb_state.stats.dxg_present_helper_block_reason |=
             FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH;
     }
-    if (fb_state.stats.dxg_present_helper_transport_present == 0)
-        fb_state.stats.dxg_present_commit_no_transport++;
-    if (fb_state.stats.dxg_present_helper_requires_completion != 0)
-        fb_state.stats.dxg_present_commit_no_completion++;
     ret = fb_dxg_present_scanout_bind_locked(&source, req);
-    if (source != NULL &&
+    if (ret != 0) {
+        fb_state.stats.dxg_present_host_handoff_missing++;
+        if (fb_state.stats.dxg_present_helper_transport_present == 0)
+            fb_state.stats.dxg_present_commit_no_transport++;
+        if (fb_state.stats.dxg_present_helper_requires_completion != 0)
+            fb_state.stats.dxg_present_commit_no_completion++;
+    }
+    if (ret != 0 && source != NULL &&
         fb_state.stats.dxg_present_host_handoff_missing <= 8) {
         print_missing = 1;
         print_source = source->handle;
@@ -1162,9 +1229,11 @@ static int fb_dxg_present_commit(uint64 owner_id, pid_t owner_tgid,
     }
 
 out:
-    fb_state.stats.dxg_present_commit_rejects++;
-    fb_state.stats.dxg_present_last_ret = (uint64)(-ret);
-    fb_state.stats.dxg_scanout_bind_last_status = (uint64)(-ret);
+    if (ret != 0)
+        fb_state.stats.dxg_present_commit_rejects++;
+    fb_state.stats.dxg_present_last_ret = ret < 0 ? (uint64)(-ret) : 0;
+    fb_state.stats.dxg_scanout_bind_last_status =
+        ret < 0 ? (uint64)(-ret) : 0;
     fb_dxg_present_sync_display_bind_state_locked(source);
     print_commit_rejects = fb_state.stats.dxg_present_commit_rejects;
     print_helper_block = fb_state.stats.dxg_present_helper_block_reason;
@@ -1175,7 +1244,7 @@ out:
                          (uint32)(print_luid_high & 0xffffffffULL));
     fb_dxg_present_hex32(print_luid_low_hex,
                          (uint32)(print_luid_low & 0xffffffffULL));
-    if (!print_missing && print_commit_rejects <= 8) {
+    if (ret != 0 && !print_missing && print_commit_rejects <= 8) {
         printf("fb: dxg present-source commit rejected: "
                "source:%u flags:0x%x sync:0x%x fence:%lu errno:%d "
                "block_reason:0x%lx no_source:%lu bad_flags:%lu "

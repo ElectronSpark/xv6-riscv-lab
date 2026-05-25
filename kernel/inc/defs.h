@@ -183,7 +183,12 @@ struct hyperv_dxg_display_bind_result {
     uint32 completion_source;
     uint64 present_id;
     uint64 completed_id;
+    uint64 source_generation;
+    uint64 resource_generation;
     uint64 block_reason;
+    uint32 host_abi_present;
+    uint32 sender_present;
+    uint32 completion_present;
     uint32 pin_revalidated;
     uint32 no_host_abi;
     uint32 no_sender;
