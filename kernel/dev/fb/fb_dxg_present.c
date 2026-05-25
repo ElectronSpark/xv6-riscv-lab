@@ -541,6 +541,18 @@ fb_dxg_present_scanout_bind_locked(
     fb_state.stats.dxg_scanout_bind_last_dirty_rects = 0;
     fb_dxg_present_sync_display_bind_state_locked(source);
 
+    if (source != NULL && source->display_bind_pin_active) {
+        fb_state.stats.dxg_display_bind_pinned_dxg_file =
+            source->display_bind_pin.dxg_file_pinned;
+        fb_state.stats.dxg_display_bind_pinned_resource_file =
+            source->display_bind_pin.resource_file_pinned;
+        fb_state.stats.dxg_display_bind_pinned_resource_generation =
+            source->display_bind_pin.generation;
+        fb_state.stats.dxg_display_bind_pinned_process_generation =
+            source->display_bind_pin.process_generation;
+        fb_state.stats.dxg_display_bind_pinned_process_refs =
+            source->display_bind_pin.process_refs;
+    }
     fb_state.stats.dxg_display_bind_provider_submits++;
     fb_state.stats.dxg_display_bind_lock_dropped_submits++;
     spin_unlock(&fb_state.lock);
@@ -641,6 +653,7 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
 {
     struct fb_gpu_dxg_present_source_entry *source = NULL;
     struct hyperv_dxg_shared_resource_snapshot resource_snapshot;
+    struct hyperv_dxg_display_bind_pin_snapshot pin_snapshot;
     int print_flags_reject = 0;
     uint32 print_flags = 0;
     uint32 print_device = 0;
@@ -654,12 +667,17 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
     uint64 print_resource_fd = 0xffffffffULL;
     uint64 print_rejects = 0;
     int resource_snapshot_valid = 0;
+    int register_shape_valid = 0;
+    int display_bind_pin_required = 0;
+    int pin_ret = -EINVAL;
+    int pin_owned = 0;
     int ret = 0;
 
     if (req == NULL)
         return -EINVAL;
     fb_dxg_present_sanitize_register_tail(req);
     memset(&resource_snapshot, 0, sizeof(resource_snapshot));
+    memset(&pin_snapshot, 0, sizeof(pin_snapshot));
     if (req->resource_fd >= 0) {
         ret = hyperv_dxg_shared_resource_snapshot_from_opened_resource(
             req->dxg_fd, req->resource_fd, req->device, req->resource,
@@ -675,6 +693,22 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
             resource_snapshot_valid = 1;
         else
             ret = -EINVAL;
+    }
+    if (ret == 0 && req->flags == 0 && req->dxg_fd >= 0 &&
+        req->resource_fd >= -1 && req->device != 0 && req->resource != 0 &&
+        req->allocation != 0 && req->allocation_count != 0 &&
+        req->allocation_count <= 1024 && req->width != 0 &&
+        req->height != 0 && req->width <= 16384 && req->height <= 16384 &&
+        req->width <= 0xffffffffU / 4U && req->format != 0 &&
+        req->pitch != 0 && req->pitch >= req->width * 4U)
+        register_shape_valid = 1;
+    display_bind_pin_required = register_shape_valid && req->resource_fd >= 0;
+    if (display_bind_pin_required) {
+        pin_ret = hyperv_dxg_display_bind_pin_from_fds(
+            req->dxg_fd, req->resource_fd, req->device, req->resource,
+            req->allocation, req->allocation_count, &pin_snapshot);
+        if (pin_ret == 0)
+            pin_owned = 1;
     }
     spin_lock(&fb_state.lock);
     fb_state.stats.dxg_present_register_attempts++;
@@ -721,7 +755,7 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
     fb_dxg_present_note_transport_contract_locked(NULL, 0);
     fb_dxg_present_sync_display_bind_state_locked(NULL);
 
-    if (ret != 0 ||
+    if (!register_shape_valid || (display_bind_pin_required && pin_ret != 0) ||
         req->flags != 0 || req->dxg_fd < 0 || req->resource_fd < -1 ||
         req->device == 0 || req->resource == 0 || req->allocation == 0 ||
         req->allocation_count == 0 || req->allocation_count > 1024 ||
@@ -746,6 +780,20 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
         ret = -EINVAL;
         goto out;
     }
+    if (display_bind_pin_required) {
+        fb_state.stats.dxg_display_bind_pin_attempts++;
+        fb_state.stats.dxg_display_bind_pin_successes++;
+        fb_state.stats.dxg_display_bind_pinned_dxg_file =
+            pin_snapshot.dxg_file_pinned;
+        fb_state.stats.dxg_display_bind_pinned_resource_file =
+            pin_snapshot.resource_file_pinned;
+        fb_state.stats.dxg_display_bind_pinned_resource_generation =
+            pin_snapshot.generation;
+        fb_state.stats.dxg_display_bind_pinned_process_generation =
+            pin_snapshot.process_generation;
+        fb_state.stats.dxg_display_bind_pinned_process_refs =
+            pin_snapshot.process_refs;
+    }
 
     for (int i = 0; i < FB_GPU_MAX_DXG_PRESENT_SOURCES; i++) {
         if (!fb_state.dxg_present_sources[i].in_use) {
@@ -769,6 +817,11 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
     source->owner_tgid = owner_tgid;
     source->dxg_fd = req->dxg_fd;
     source->resource_fd = req->resource_fd;
+    if (display_bind_pin_required) {
+        source->display_bind_pin = pin_snapshot;
+        source->display_bind_pin_active = 1;
+        pin_owned = 0;
+    }
     if (resource_snapshot_valid) {
         source->resource_fd_kind = resource_snapshot.kind;
         source->resource_fd_sealed = resource_snapshot.sealed;
@@ -800,11 +853,17 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
 
 out:
     if (ret != 0) {
+        if (display_bind_pin_required) {
+            fb_state.stats.dxg_display_bind_pin_attempts++;
+            fb_state.stats.dxg_display_bind_pin_failures++;
+        }
         fb_state.stats.dxg_present_register_rejects++;
         fb_state.stats.dxg_present_last_ret = (uint64)(-ret);
         print_rejects = fb_state.stats.dxg_present_register_rejects;
     }
     spin_unlock(&fb_state.lock);
+    if (pin_owned)
+        hyperv_dxg_display_bind_unpin(&pin_snapshot);
     if (print_flags_reject && print_rejects <= 8) {
         printf("fb: dxg present-source register rejected: "
                "reserved flags nonzero flags:0x%x errno:%d "
@@ -820,17 +879,34 @@ out:
 
 static void fb_dxg_present_source_unregister(uint32 handle)
 {
+    struct hyperv_dxg_display_bind_pin_snapshot pin_snapshot;
+    int pin_active = 0;
+
+    memset(&pin_snapshot, 0, sizeof(pin_snapshot));
     spin_lock(&fb_state.lock);
     struct fb_gpu_dxg_present_source_entry *source =
         fb_dxg_present_source_lookup_locked(handle);
-    if (source != NULL)
+    if (source != NULL) {
+        if (source->display_bind_pin_active) {
+            pin_snapshot = source->display_bind_pin;
+            source->display_bind_pin_active = 0;
+            fb_state.stats.dxg_display_bind_unpins++;
+            pin_active = 1;
+        }
         memset(source, 0, sizeof(*source));
+    }
     spin_unlock(&fb_state.lock);
+    if (pin_active)
+        hyperv_dxg_display_bind_unpin(&pin_snapshot);
 }
 
 static void fb_dxg_present_release_owner_sources(uint64 owner_id,
                                                  pid_t owner_tgid)
 {
+    struct hyperv_dxg_display_bind_pin_snapshot pins[FB_GPU_MAX_DXG_PRESENT_SOURCES];
+    int pin_count = 0;
+
+    memset(pins, 0, sizeof(pins));
     spin_lock(&fb_state.lock);
     for (int i = 0; i < FB_GPU_MAX_DXG_PRESENT_SOURCES; i++) {
         struct fb_gpu_dxg_present_source_entry *source =
@@ -841,10 +917,18 @@ static void fb_dxg_present_release_owner_sources(uint64 owner_id,
         if (!fb_dxg_present_source_owner_matches(source, owner_id,
                                                 owner_tgid))
             continue;
+        if (source->display_bind_pin_active &&
+            pin_count < FB_GPU_MAX_DXG_PRESENT_SOURCES) {
+            pins[pin_count++] = source->display_bind_pin;
+            source->display_bind_pin_active = 0;
+            fb_state.stats.dxg_display_bind_unpins++;
+        }
         memset(source, 0, sizeof(*source));
         fb_state.stats.dxg_present_release_sources++;
     }
     spin_unlock(&fb_state.lock);
+    for (int i = 0; i < pin_count; i++)
+        hyperv_dxg_display_bind_unpin(&pins[i]);
 }
 
 static int fb_dxg_present_commit(uint64 owner_id, pid_t owner_tgid,

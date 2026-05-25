@@ -1307,6 +1307,15 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_revalidate_attempts; /* post-submit rechecks */
     uint64 dxg_display_bind_revalidate_successes; /* source still current */
     uint64 dxg_display_bind_revalidate_failures; /* stale source/resource */
+    uint64 dxg_display_bind_pin_attempts; /* WSL-style fd pin attempts */
+    uint64 dxg_display_bind_pin_successes; /* dxg/resource fds retained */
+    uint64 dxg_display_bind_pin_failures; /* pin/admission failed */
+    uint64 dxg_display_bind_unpins; /* retained fds released after submit */
+    uint64 dxg_display_bind_pinned_dxg_file; /* last dxg file retained */
+    uint64 dxg_display_bind_pinned_resource_file; /* last resource fd retained */
+    uint64 dxg_display_bind_pinned_resource_generation; /* sealed generation */
+    uint64 dxg_display_bind_pinned_process_generation; /* dxgprocess generation */
+    uint64 dxg_display_bind_pinned_process_refs; /* dxgprocess refs while pinned */
     uint64 display_presents;  /* display present/flush operations issued */
     uint64 display_completions; /* display present completions observed */
     uint64 display_last_present; /* latest issued display-present sequence */

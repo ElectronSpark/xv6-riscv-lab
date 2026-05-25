@@ -278,6 +278,8 @@ struct fb_gpu_dxg_present_source_entry {
     uint64 display_bind_status;
     uint64 display_bind_block_reason;
     uint32 display_bind_completion_source;
+    uint32 display_bind_pin_active;
+    struct hyperv_dxg_display_bind_pin_snapshot display_bind_pin;
 };
 
 struct fb_gpu_fence {

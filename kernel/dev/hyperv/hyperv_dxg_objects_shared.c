@@ -4753,6 +4753,111 @@ out:
     return ret;
 }
 
+int hyperv_dxg_display_bind_pin_from_fds(
+    int dxg_fd, int resource_fd, uint32 device, uint32 resource,
+    uint32 allocation, uint32 allocation_count,
+    struct hyperv_dxg_display_bind_pin_snapshot *snapshot)
+{
+    struct hvdxg_shared_object *shared;
+    struct hvdxg_tracked_resource *opened;
+    struct hvdxg_tracked_resource *pinned_resource = NULL;
+    struct vfs_file *shared_file = NULL;
+    struct vfs_file *dxg_file = NULL;
+    struct hvdxg_open_state *owner;
+    uint32 fops_kind;
+    int ret = -EINVAL;
+
+    if (snapshot == NULL)
+        return -EINVAL;
+    memset(snapshot, 0, sizeof(*snapshot));
+    if (dxg_fd < 0 || resource_fd < 0 || device == 0 || resource == 0 ||
+        allocation == 0 || allocation_count == 0)
+        return -EINVAL;
+    if (current == NULL || current->fdtable == NULL)
+        return -EINVAL;
+
+    shared = hvdxg_shared_object_from_fd(resource_fd,
+                                         HV_DXG_SHARED_OBJECT_RESOURCE,
+                                         &shared_file);
+    if (shared == NULL)
+        return -EINVAL;
+    fops_kind = hvdxg_shared_object_fops_kind(shared_file);
+    if (fops_kind != HV_DXG_SHARED_FOPS_RESOURCE ||
+        shared->global_share == 0 || shared->resource.sealed == 0 ||
+        shared->resource.shared_records_valid == 0 ||
+        shared->resource.sealed_generation == 0)
+        goto out;
+
+    dxg_file = vfs_fdtable_get_file(current->fdtable, dxg_fd);
+    if (dxg_file == NULL || dxg_file->ops != &hvdxg_file_ops ||
+        dxg_file->private_data == NULL)
+        goto out;
+
+    owner = (struct hvdxg_open_state *)dxg_file->private_data;
+    opened = hvdxg_owner_find_resource(owner, device, resource);
+    if (opened != NULL && opened->allocation_count == allocation_count &&
+        opened->allocation_count != 0 &&
+        opened->allocation_count <= HV_DXG_ALLOCATION_MAX &&
+        opened->allocation_handles[0] == allocation &&
+        opened->global_share == shared->global_share) {
+        pinned_resource = opened;
+    } else if (shared->resource.device == device &&
+               shared->resource.resource == resource &&
+               shared->resource.allocation_count == allocation_count &&
+               shared->resource.allocation_count != 0 &&
+               shared->resource.allocation_count <= HV_DXG_ALLOCATION_MAX &&
+               shared->resource.allocation_handles[0] == allocation) {
+        pinned_resource = &shared->resource;
+    } else {
+        goto out;
+    }
+
+    snapshot->dxg_file_cookie = dxg_file;
+    snapshot->resource_file_cookie = shared_file;
+    snapshot->dxg_file_pinned = 1;
+    snapshot->resource_file_pinned = 1;
+    snapshot->kind = shared->kind;
+    snapshot->fops_kind = fops_kind;
+    snapshot->device = pinned_resource->device;
+    snapshot->resource = pinned_resource->resource;
+    snapshot->allocation_count = pinned_resource->allocation_count;
+    snapshot->first_allocation = pinned_resource->allocation_handles[0];
+    snapshot->sealed = shared->resource.sealed;
+    snapshot->shared_records_valid = shared->resource.shared_records_valid;
+    snapshot->generation = shared->resource.sealed_generation;
+    snapshot->host_shared_refs = shared->resource.host_shared_refs;
+    snapshot->process = hvdxg_open_host_process(owner);
+    snapshot->process_generation = hvdxg_open_process_generation(owner);
+    snapshot->process_refs = hvdxg_open_process_refs(owner);
+    ret = 0;
+
+out:
+    if (ret != 0) {
+        if (dxg_file != NULL)
+            vfs_fput(dxg_file);
+        if (shared_file != NULL)
+            vfs_fput(shared_file);
+    }
+    return ret;
+}
+
+void hyperv_dxg_display_bind_unpin(
+    struct hyperv_dxg_display_bind_pin_snapshot *snapshot)
+{
+    if (snapshot == NULL)
+        return;
+    if (snapshot->dxg_file_cookie != NULL) {
+        vfs_fput((struct vfs_file *)snapshot->dxg_file_cookie);
+        snapshot->dxg_file_cookie = NULL;
+        snapshot->dxg_file_pinned = 0;
+    }
+    if (snapshot->resource_file_cookie != NULL) {
+        vfs_fput((struct vfs_file *)snapshot->resource_file_cookie);
+        snapshot->resource_file_cookie = NULL;
+        snapshot->resource_file_pinned = 0;
+    }
+}
+
 static int hvdxg_sync_file_release(struct vfs_inode *ip,
                                    struct vfs_file *file)
 {
