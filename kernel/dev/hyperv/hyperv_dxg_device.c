@@ -197,4 +197,3 @@ int hyperv_dxg_get_status(struct hyperv_dxg_status *status)
     status->user_adapter_luid_high = user_luid.b;
     return (hvdxg.global_present || hvdxg.vgpu_present) ? 0 : -ENODEV;
 }
-

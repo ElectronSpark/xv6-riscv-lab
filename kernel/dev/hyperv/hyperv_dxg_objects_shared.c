@@ -4602,6 +4602,8 @@ static struct vfs_file_ops hvdxg_shared_resource_file_ops = {
     .release = hvdxg_shared_object_release,
 };
 
+static struct vfs_file_ops hvdxg_file_ops;
+
 static uint32 hvdxg_shared_object_fops_kind(struct vfs_file *file)
 {
     if (file == NULL)
@@ -4682,6 +4684,73 @@ int hyperv_dxg_shared_resource_snapshot_from_fd(
            snapshot->sealed != 0 &&
            snapshot->shared_records_valid != 0 &&
            snapshot->generation != 0 ? 0 : -EINVAL;
+}
+
+int hyperv_dxg_shared_resource_snapshot_from_opened_resource(
+    int dxg_fd, int resource_fd, uint32 device, uint32 resource,
+    uint32 allocation, uint32 allocation_count,
+    struct hyperv_dxg_shared_resource_snapshot *snapshot)
+{
+    struct hvdxg_shared_object *shared;
+    struct hvdxg_tracked_resource *opened;
+    struct vfs_file *shared_file = NULL;
+    struct vfs_file *dxg_file = NULL;
+    struct hvdxg_open_state *owner;
+    uint32 fops_kind;
+    int ret = -EINVAL;
+
+    if (snapshot == NULL)
+        return -EINVAL;
+    memset(snapshot, 0, sizeof(*snapshot));
+    if (dxg_fd < 0 || resource_fd < 0 || device == 0 || resource == 0 ||
+        allocation == 0 || allocation_count == 0)
+        return -EINVAL;
+    if (current == NULL || current->fdtable == NULL)
+        return -EINVAL;
+
+    shared = hvdxg_shared_object_from_fd(resource_fd,
+                                         HV_DXG_SHARED_OBJECT_RESOURCE,
+                                         &shared_file);
+    if (shared == NULL)
+        return -EINVAL;
+    fops_kind = hvdxg_shared_object_fops_kind(shared_file);
+    if (fops_kind != HV_DXG_SHARED_FOPS_RESOURCE ||
+        shared->global_share == 0 || shared->resource.sealed == 0 ||
+        shared->resource.shared_records_valid == 0 ||
+        shared->resource.sealed_generation == 0)
+        goto out;
+
+    dxg_file = vfs_fdtable_get_file(current->fdtable, dxg_fd);
+    if (dxg_file == NULL || dxg_file->ops != &hvdxg_file_ops ||
+        dxg_file->private_data == NULL)
+        goto out;
+    owner = (struct hvdxg_open_state *)dxg_file->private_data;
+    opened = hvdxg_owner_find_resource(owner, device, resource);
+    if (opened == NULL || opened->allocation_count != allocation_count ||
+        opened->allocation_count == 0 ||
+        opened->allocation_count > HV_DXG_ALLOCATION_MAX ||
+        opened->allocation_handles[0] != allocation ||
+        opened->global_share != shared->global_share)
+        goto out;
+
+    snapshot->kind = shared->kind;
+    snapshot->fops_kind = fops_kind;
+    snapshot->device = opened->device;
+    snapshot->resource = opened->resource;
+    snapshot->allocation_count = opened->allocation_count;
+    snapshot->first_allocation = opened->allocation_handles[0];
+    snapshot->sealed = shared->resource.sealed;
+    snapshot->shared_records_valid = shared->resource.shared_records_valid;
+    snapshot->generation = shared->resource.sealed_generation;
+    snapshot->host_shared_refs = shared->resource.host_shared_refs;
+    ret = 0;
+
+out:
+    if (dxg_file != NULL)
+        vfs_fput(dxg_file);
+    if (shared_file != NULL)
+        vfs_fput(shared_file);
+    return ret;
 }
 
 static int hvdxg_sync_file_release(struct vfs_inode *ip,

@@ -125,6 +125,10 @@ struct hyperv_dxg_shared_resource_snapshot {
 };
 int hyperv_dxg_shared_resource_snapshot_from_fd(
     int fd, struct hyperv_dxg_shared_resource_snapshot *snapshot);
+int hyperv_dxg_shared_resource_snapshot_from_opened_resource(
+    int dxg_fd, int resource_fd, uint32 device, uint32 resource,
+    uint32 allocation, uint32 allocation_count,
+    struct hyperv_dxg_shared_resource_snapshot *snapshot);
 void hyperv_dxg_note_pci(uint32 domain, uint32 bus, uint32 dev, uint32 func,
                          uint32 vendor, uint32 device, uint32 class_code,
                          uint32 guid0, uint32 guid1, uint32 guid2,

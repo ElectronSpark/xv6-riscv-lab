@@ -346,8 +346,12 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
     fb_dxg_present_sanitize_register_tail(req);
     memset(&resource_snapshot, 0, sizeof(resource_snapshot));
     if (req->resource_fd >= 0) {
-        ret = hyperv_dxg_shared_resource_snapshot_from_fd(
-            req->resource_fd, &resource_snapshot);
+        ret = hyperv_dxg_shared_resource_snapshot_from_opened_resource(
+            req->dxg_fd, req->resource_fd, req->device, req->resource,
+            req->allocation, req->allocation_count, &resource_snapshot);
+        if (ret != 0)
+            ret = hyperv_dxg_shared_resource_snapshot_from_fd(
+                req->resource_fd, &resource_snapshot);
         if (ret == 0 &&
             resource_snapshot.device == req->device &&
             resource_snapshot.resource == req->resource &&
