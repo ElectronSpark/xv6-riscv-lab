@@ -71,6 +71,15 @@ static uint64 gpu_nouveau_gart_aperture_len(struct pci_device_info *dev)
     return gpu_nouveau_resource_len(dev, 1);
 }
 
+static void gpu_nouveau_pci_irq_handler(int irq, void *data, device_t *dev)
+{
+    (void)irq;
+    (void)data;
+    (void)dev;
+    gpu_nouveau_stat_inc(
+        &fb_state.stats.nouveau_pci_irq_delivery_claimed);
+}
+
 static void gpu_nouveau_pci_publish_core_state(struct pci_device_info *pdev)
 {
     if (pdev == NULL)
@@ -106,24 +115,84 @@ static void gpu_nouveau_pci_publish_core_state(struct pci_device_info *pdev)
                          pdev->resource_claimed[0]);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_bar1_claimed,
                          pdev->resource_claimed[1]);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_resource_claims,
+                         pdev->resource_claim_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_resource_releases,
+                         pdev->resource_release_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_resource_iomaps,
+                         pdev->resource_iomap_count);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_resource_owner_mismatches,
+        pdev->resource_owner_mismatch_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_unclaimed_iomaps,
+                         pdev->resource_unclaimed_iomap_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_unclaimed_releases,
+                         pdev->resource_unclaimed_release_count);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_mode,
                          pdev->irq_flags);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_vector_valid,
                          pdev->irq_vectors_allocated &&
                              pdev->irq_vector_count > 0);
-    /*
-     * xv6 can discover and reserve a PCI IRQ vector here, but Nouveau has no
-     * interrupt handler or delivery path yet.  Keep these zero until that
-     * path exists so the diagnostics cannot imply Linux-equivalent IRQs.
-     */
     gpu_nouveau_stat_set(
-        &fb_state.stats.nouveau_pci_irq_handler_registered, 0);
+        &fb_state.stats.nouveau_pci_irq_handler_registered,
+        gpu_nouveau_pci.irq_registered);
     gpu_nouveau_stat_set(
-        &fb_state.stats.nouveau_pci_irq_delivery_enabled, 0);
-    gpu_nouveau_stat_set(
-        &fb_state.stats.nouveau_pci_irq_delivery_claimed, 0);
+        &fb_state.stats.nouveau_pci_irq_delivery_enabled,
+        gpu_nouveau_pci.irq_registered &&
+            gpu_nouveau_pci.irq_number >= 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_legacy_irq_fallback,
                          pdev->irq_flags == PCI_IRQ_LEGACY);
+}
+
+static int gpu_nouveau_pci_register_irq(struct pci_device_info *pdev)
+{
+    static struct irq_desc nouveau_irq_desc;
+    int irq;
+    int ret;
+
+    if (pdev == NULL || !pdev->irq_vectors_allocated ||
+        pdev->irq_flags != PCI_IRQ_LEGACY)
+        return 0;
+    irq = pci_irq_vector(pdev, 0);
+    if (irq < 0)
+        return irq;
+    memset(&nouveau_irq_desc, 0, sizeof(nouveau_irq_desc));
+    nouveau_irq_desc.handler = gpu_nouveau_pci_irq_handler;
+    nouveau_irq_desc.data = pdev;
+    ret = register_irq_handler(PLIC_IRQ(irq), &nouveau_irq_desc);
+    if (ret != 0)
+        return ret;
+    gpu_nouveau_pci.irq_registered = 1;
+    gpu_nouveau_pci.irq_number = PLIC_IRQ(irq);
+    return 0;
+}
+
+static void gpu_nouveau_pci_unregister_irq(void)
+{
+    if (!gpu_nouveau_pci.irq_registered)
+        return;
+    unregister_irq_handler(gpu_nouveau_pci.irq_number);
+    gpu_nouveau_pci.irq_registered = 0;
+    gpu_nouveau_pci.irq_number = 0;
+}
+
+static void gpu_nouveau_pci_unwind_probe_resources(
+    struct pci_device_info *pdev)
+{
+    gpu_nouveau_pci_unregister_irq();
+    pci_free_irq_vectors(pdev);
+    pci_clear_master(pdev);
+    if (gpu_nouveau_pci.bar1_claimed) {
+        pci_release_region(pdev, 1);
+        gpu_nouveau_pci.bar1_claimed = 0;
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_bar_releases);
+    }
+    if (gpu_nouveau_pci.bar0_claimed) {
+        pci_release_region(pdev, 0);
+        gpu_nouveau_pci.bar0_claimed = 0;
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_bar_releases);
+    }
+    pci_disable_device(pdev);
 }
 
 static int gpu_nouveau_pci_probe(struct pci_device_info *pdev,
@@ -239,10 +308,22 @@ static int gpu_nouveau_pci_probe(struct pci_device_info *pdev,
                 &fb_state.stats.nouveau_pci_msi_fail_closed);
     }
     irq = pci_alloc_irq_vectors(pdev, 0, 1, PCI_IRQ_LEGACY);
-    if (irq < 0)
+    if (irq < 0) {
         gpu_nouveau_stat_inc(
             &fb_state.stats.nouveau_pci_irq_request_failures);
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_probe_failures);
+        gpu_nouveau_pci_unwind_probe_resources(pdev);
+        return irq;
+    }
     gpu_nouveau_pci.irq_vector = irq > 0 ? pci_irq_vector(pdev, 0) : 0;
+    ret = gpu_nouveau_pci_register_irq(pdev);
+    if (ret != 0) {
+        gpu_nouveau_stat_inc(
+            &fb_state.stats.nouveau_pci_irq_request_failures);
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_probe_failures);
+        gpu_nouveau_pci_unwind_probe_resources(pdev);
+        return ret;
+    }
     gpu_nouveau_pci.pdev = pdev;
     gpu_nouveau_pci.probed = 1;
     pci_set_drvdata(pdev, &gpu_nouveau_pci);
@@ -288,6 +369,7 @@ static void gpu_nouveau_pci_remove(struct pci_device_info *pdev)
             &fb_state.stats.nouveau_pci_remove_runtime_suspended);
     pci_iounmap(pdev, gpu_nouveau_pci.bar0);
     pci_iounmap(pdev, gpu_nouveau_pci.bar1);
+    gpu_nouveau_pci_unregister_irq();
     pci_free_irq_vectors(pdev);
     pci_clear_master(pdev);
     pci_disable_device(pdev);
@@ -312,6 +394,7 @@ static void gpu_nouveau_pci_remove(struct pci_device_info *pdev)
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_msix_cap, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_bar0_claimed, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_bar1_claimed, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_resource_iomaps, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_mode, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_vector_valid, 0);
     gpu_nouveau_stat_set(

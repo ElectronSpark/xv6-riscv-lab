@@ -22,6 +22,7 @@
 #include <dev/fdt.h>
 #include <dev/pci.h>
 #include <timer/timer.h>
+#include <trap.h>
 #include <mm/page.h>
 #include <mm/pgtable.h>
 #include <mm/memlayout.h>
@@ -36,4 +37,3 @@
 #include <vfs/poll.h>
 #include <vfs/vfs_types.h>
 #include <uabi/drm.h>
-

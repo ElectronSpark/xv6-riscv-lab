@@ -254,6 +254,12 @@ struct pci_device_info {
     uint32 resource_flags[6];
     uint8 resource_claimed[6];
     const char *resource_owner[6];
+    uint32 resource_claim_count;
+    uint32 resource_release_count;
+    uint32 resource_iomap_count;
+    uint32 resource_owner_mismatch_count;
+    uint32 resource_unclaimed_iomap_count;
+    uint32 resource_unclaimed_release_count;
     void *driver_data;
     const char *driver_name;
     struct pci_driver *driver;

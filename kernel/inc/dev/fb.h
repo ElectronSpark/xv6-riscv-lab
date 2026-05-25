@@ -932,6 +932,12 @@ struct fb_gpu_stats {
     uint64 nouveau_pci_bar1_claimed; /* BAR1 region claim state */
     uint64 nouveau_pci_bar_claim_failures; /* BAR claim failures */
     uint64 nouveau_pci_bar_releases; /* BAR regions released */
+    uint64 nouveau_pci_resource_claims; /* PCI resource claims */
+    uint64 nouveau_pci_resource_releases; /* PCI resource releases */
+    uint64 nouveau_pci_resource_iomaps; /* claimed BAR iomaps */
+    uint64 nouveau_pci_resource_owner_mismatches; /* busy owner mismatch */
+    uint64 nouveau_pci_unclaimed_iomaps; /* rejected iomap-before-claim */
+    uint64 nouveau_pci_unclaimed_releases; /* rejected release-before-claim */
     uint64 nouveau_pci_irq_request_failures; /* IRQ vector request failures */
     uint64 nouveau_pci_irq_mode; /* PCI_IRQ_* granted by PCI core */
     uint64 nouveau_pci_msi_requested; /* MSI/MSI-X requested when present */

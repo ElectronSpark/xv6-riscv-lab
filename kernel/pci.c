@@ -399,10 +399,14 @@ int pci_request_region(struct pci_device_info *pdev, int bar,
     if (pdev->resource_len[bar] == 0 ||
         (pdev->resource_flags[bar] & (PCI_RESOURCE_MEM | PCI_RESOURCE_IO)) == 0)
         return -ENODEV;
-    if (pdev->resource_claimed[bar])
+    if (pdev->resource_claimed[bar]) {
+        if (pdev->resource_owner[bar] != name)
+            pdev->resource_owner_mismatch_count++;
         return -EBUSY;
+    }
     pdev->resource_claimed[bar] = 1;
     pdev->resource_owner[bar] = name;
+    pdev->resource_claim_count++;
     return 0;
 }
 
@@ -410,8 +414,13 @@ void pci_release_region(struct pci_device_info *pdev, int bar)
 {
     if (pdev == NULL || bar < 0 || bar >= 6)
         return;
+    if (!pdev->resource_claimed[bar]) {
+        pdev->resource_unclaimed_release_count++;
+        return;
+    }
     pdev->resource_claimed[bar] = 0;
     pdev->resource_owner[bar] = NULL;
+    pdev->resource_release_count++;
 }
 
 uint8 pci_find_capability(const struct pci_device_info *pdev, uint8 cap_id)
@@ -432,13 +441,22 @@ int pci_has_capability(const struct pci_device_info *pdev, uint8 cap_id)
 
 void *pci_iomap(struct pci_device_info *pdev, int bar, uint64 maxlen)
 {
-    uint64 start = pci_resource_start(pdev, bar);
-    uint64 len = pci_resource_len(pdev, bar);
+    uint64 start;
+    uint64 len;
 
+    if (pdev == NULL || bar < 0 || bar >= 6)
+        return NULL;
+    if (!pdev->resource_claimed[bar]) {
+        pdev->resource_unclaimed_iomap_count++;
+        return NULL;
+    }
+    start = pci_resource_start(pdev, bar);
+    len = pci_resource_len(pdev, bar);
     if (start == 0 || (pci_resource_flags(pdev, bar) & PCI_RESOURCE_MEM) == 0)
         return NULL;
     if (maxlen != 0 && len != 0 && maxlen > len)
         return NULL;
+    pdev->resource_iomap_count++;
     return (void *)PA2VA(start);
 }
 

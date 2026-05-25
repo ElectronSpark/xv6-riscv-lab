@@ -827,6 +827,8 @@ struct gpu_nouveau_pci_state {
     int registered;
     int probed;
     int irq_vector;
+    int irq_registered;
+    int irq_number;
     struct pci_device_info *pdev;
     void *bar0;
     void *bar1;
