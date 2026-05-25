@@ -322,6 +322,9 @@ fb_dxg_present_note_host_lanes_locked(void)
     fb_state.stats.dxg_present_host_rejects = rejects;
     fb_state.stats.dxg_present_synthvid_state = synthvid_state;
     fb_state.stats.dxg_present_dxg_state = dxg_state;
+    fb_state.stats.dxg_scanout_bind_candidate_cmds_known = 3;
+    fb_state.stats.dxg_scanout_bind_candidate_sender_contracts = 0;
+    fb_state.stats.dxg_scanout_bind_candidate_completion_contracts = 0;
     fb_state.stats.dxg_present_helper_block_reason =
         fb_dxg_present_transport_block_reason_locked();
 }
@@ -346,8 +349,12 @@ fb_dxg_present_scanout_bind_locked(
     const struct fb_gpu_dxg_present_source_commit *req)
 {
     uint64 weak_evidence = 0;
+    uint32 source_provenance = source != NULL ? source->provenance_flags : 0;
 
     fb_state.stats.dxg_scanout_bind_attempts++;
+    fb_state.stats.dxg_scanout_bind_candidate_cmds_known = 3;
+    fb_state.stats.dxg_scanout_bind_candidate_sender_contracts = 0;
+    fb_state.stats.dxg_scanout_bind_candidate_completion_contracts = 0;
     fb_state.stats.dxg_scanout_bind_last_transport =
         fb_state.stats.dxg_present_helper_transport;
     fb_state.stats.dxg_scanout_bind_last_status = EOPNOTSUPP;
@@ -370,8 +377,32 @@ fb_dxg_present_scanout_bind_locked(
         fb_state.stats.dxg_scanout_bind_last_present_id == 0 ||
         fb_state.stats.dxg_scanout_bind_last_completed == 0)
         weak_evidence = 1;
-    if (weak_evidence)
+    if (weak_evidence) {
         fb_state.stats.dxg_scanout_bind_weak_evidence_rejects++;
+        fb_state.stats.dxg_scanout_bind_candidate_rejects++;
+    }
+    if ((fb_state.stats.dxg_present_host_candidates &
+         FB_GPU_DXG_PRESENT_HOST_DXG) != 0 &&
+        fb_state.stats.dxg_present_helper_transport_present == 0)
+        fb_state.stats.dxg_scanout_bind_weak_dxg_ready_only++;
+    if ((source_provenance &
+         FB_GPU_DXG_PRESENT_PROV_D3DKMT_HANDLES) != 0)
+        fb_state.stats.dxg_scanout_bind_weak_d3dkmt_handles_only++;
+    if ((source_provenance &
+         FB_GPU_DXG_PRESENT_PROV_RESOURCE_FD) != 0 &&
+        source != NULL &&
+        source->adapter_identity == FB_GPU_DXG_PRESENT_ADAPTER_MATCH)
+        fb_state.stats.dxg_scanout_bind_weak_same_adapter_resource_only++;
+    if (req != NULL &&
+        (req->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) != 0 &&
+        req->sync_object != 0)
+        fb_state.stats.dxg_scanout_bind_weak_syncfile_only++;
+    if ((fb_state.stats.dxg_present_host_rejects &
+         FB_GPU_DXG_PRESENT_REJECT_SYNTHVID_GPA_ONLY) != 0)
+        fb_state.stats.dxg_scanout_bind_weak_synthvid_gpa_dirty_only++;
+    if (fb_state.stats.dxg_present_display_target_kind ==
+        FB_GPU_DXG_DISPLAY_TARGET_NONE)
+        fb_state.stats.dxg_scanout_bind_weak_software_or_readback_path++;
     fb_state.stats.dxg_scanout_bind_rejects++;
     return -EOPNOTSUPP;
 }

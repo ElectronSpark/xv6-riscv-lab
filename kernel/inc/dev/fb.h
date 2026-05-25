@@ -1196,6 +1196,16 @@ struct fb_gpu_stats {
     uint64 dxg_scanout_bind_completion_successes; /* completed native polls */
     uint64 dxg_scanout_bind_completion_pending; /* no native completion yet */
     uint64 dxg_scanout_bind_weak_evidence_rejects; /* no loose credit */
+    uint64 dxg_scanout_bind_candidate_cmds_known; /* WSL enum candidates seen */
+    uint64 dxg_scanout_bind_candidate_sender_contracts; /* usable senders */
+    uint64 dxg_scanout_bind_candidate_completion_contracts; /* usable completions */
+    uint64 dxg_scanout_bind_candidate_rejects; /* known cmds but no ABI */
+    uint64 dxg_scanout_bind_weak_dxg_ready_only; /* DXG ready only */
+    uint64 dxg_scanout_bind_weak_d3dkmt_handles_only; /* D3DKMT handles only */
+    uint64 dxg_scanout_bind_weak_same_adapter_resource_only; /* same LUID only */
+    uint64 dxg_scanout_bind_weak_syncfile_only; /* sync-file acquire only */
+    uint64 dxg_scanout_bind_weak_synthvid_gpa_dirty_only; /* GPA dirty only */
+    uint64 dxg_scanout_bind_weak_software_or_readback_path; /* software path */
     uint64 dxg_scanout_bind_last_transport; /* helper transport snapshot */
     uint64 dxg_scanout_bind_last_status; /* last errno/status */
     uint64 dxg_scanout_bind_last_present_id; /* last native present id */
