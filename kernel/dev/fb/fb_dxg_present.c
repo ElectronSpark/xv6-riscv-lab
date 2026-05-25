@@ -132,9 +132,13 @@ static void fb_dxg_present_note_wsl_candidate_namespace_locked(void)
         FB_GPU_DXG_WSL_PROPAGATE_PRESENTHISTORYTOKEN_CMD;
     fb_state.stats.dxg_scanout_bind_candidate_cmds_known = 4;
     fb_state.stats.dxg_scanout_bind_candidate_vmbus_enum_known = 1;
+    fb_state.stats.dxg_scanout_bind_wsl_ioctl_namespace_checked = 1;
+    fb_state.stats.dxg_scanout_bind_wsl_display_bind_ioctl_absent = 1;
     fb_state.stats.dxg_scanout_bind_candidate_linux_ioctl_contracts = 0;
     fb_state.stats.dxg_scanout_bind_candidate_resource_bind_contracts = 0;
     fb_state.stats.dxg_scanout_bind_candidate_display_completion_contracts = 0;
+    fb_state.stats.dxg_scanout_bind_standard_alloc_private_data = 1;
+    fb_state.stats.dxg_scanout_bind_standard_alloc_display_bind_absent = 1;
     fb_state.stats.dxg_scanout_bind_candidate_reject_reasons |=
         FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_ALL;
 }
@@ -351,6 +355,8 @@ fb_dxg_present_note_host_lanes_locked(void)
     uint64 synthvid_state = 0;
     uint64 dxg_state = 0;
 
+    fb_state.stats.dxg_scanout_bind_synthvid_resource_bind_absent = 1;
+
     /*
      * Linux hyperv_drm/hyperv_fb present through SYNTHVID_VRAM_LOCATION
      * followed by SYNTHVID_DIRT: the host consumes a guest physical VRAM
@@ -367,6 +373,8 @@ fb_dxg_present_note_host_lanes_locked(void)
      */
     if (hyperv_video_get_status(&video) == 0 && video.present) {
         candidates |= FB_GPU_DXG_PRESENT_HOST_SYNTHVID;
+        fb_state.stats.dxg_scanout_bind_synthvid_gpa_dirty_present = 1;
+        fb_state.stats.dxg_scanout_bind_synthvid_resource_bind_absent = 1;
         if (video.present)
             synthvid_state |= 0x1;
         if (video.gpadl_ok)
@@ -444,6 +452,13 @@ fb_dxg_present_note_host_lanes_locked(void)
         fb_state.stats.dxg_present_dda_nouveau_scanout_bind_present = 0;
         rejects |= FB_GPU_DXG_PRESENT_REJECT_DDA_ABSENT;
     }
+    fb_state.stats.dxg_scanout_bind_dda_pci_display_present =
+        fb_state.stats.dxg_present_dda_nouveau_present;
+    fb_state.stats.dxg_scanout_bind_dda_resource_import_absent =
+        fb_state.stats.dxg_present_dda_nouveau_import_path_present == 0;
+    fb_state.stats.dxg_scanout_bind_dda_scanout_bind_absent =
+        fb_state.stats.dxg_present_dda_nouveau_scanout_bind_present == 0;
+    fb_state.stats.dxg_scanout_bind_dda_hw_flip_completion_absent = 1;
     fb_state.stats.dxg_present_host_candidates = candidates;
     fb_state.stats.dxg_present_host_rejects = rejects;
     fb_state.stats.dxg_present_synthvid_state = synthvid_state;

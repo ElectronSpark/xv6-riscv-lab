@@ -788,6 +788,7 @@ static int gpu_nouveau_channel_alloc(struct fb_gpu_render_owner *owner,
                                      uint64 arg)
 {
     struct drm_nouveau_channel_alloc_compat req;
+    uint32 pushbuf_domains;
     int ret = gpu_nouveau_require_device();
 
     gpu_nouveau_stat_inc(&fb_state.stats.nouveau_ioctl_entries);
@@ -804,16 +805,12 @@ static int gpu_nouveau_channel_alloc(struct fb_gpu_render_owner *owner,
     if (req.nr_subchan > 8)
         return -EINVAL;
 
-    memset(owner->nouveau_objects, 0, sizeof(owner->nouveau_objects));
-    owner->nouveau_channel = 1;
-    owner->nouveau_channel_handle = 0;
-    owner->nouveau_pushbuf_domains =
+    pushbuf_domains =
         NOUVEAU_GEM_DOMAIN_GART |
         NOUVEAU_GEM_DOMAIN_MAPPABLE |
         NOUVEAU_GEM_DOMAIN_COHERENT;
-    owner->nouveau_next_notifier_offset = PGSIZE;
     req.channel = 0;
-    req.pushbuf_domains = owner->nouveau_pushbuf_domains;
+    req.pushbuf_domains = pushbuf_domains;
     req.notifier_handle = 0;
     for (uint32 i = 0; i < req.nr_subchan; i++) {
         if (req.subchan[i].handle == 0 || req.subchan[i].grclass == 0)
@@ -821,6 +818,11 @@ static int gpu_nouveau_channel_alloc(struct fb_gpu_render_owner *owner,
     }
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
+    memset(owner->nouveau_objects, 0, sizeof(owner->nouveau_objects));
+    owner->nouveau_channel = 1;
+    owner->nouveau_channel_handle = 0;
+    owner->nouveau_pushbuf_domains = pushbuf_domains;
+    owner->nouveau_next_notifier_offset = PGSIZE;
     gpu_nouveau_stat_inc(&fb_state.stats.nouveau_channel_allocs);
     gpu_nouveau_stat_inc(&fb_state.stats.nouveau_channel_active);
     return 0;
@@ -1316,9 +1318,9 @@ static int gpu_nouveau_vm_init(struct fb_gpu_render_owner *owner, uint64 arg)
         return -EFAULT;
     if (owner->nouveau_channel != 0)
         return -ENOSYS;
-    owner->nouveau_vm_initialized = 1;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
+    owner->nouveau_vm_initialized = 1;
     gpu_nouveau_stat_inc(&fb_state.stats.nouveau_vm_inits);
     return 0;
 }

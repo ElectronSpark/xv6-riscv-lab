@@ -1275,9 +1275,19 @@ struct fb_gpu_stats {
     uint64 dxg_scanout_bind_candidate_blt_cmd; /* VMBus enum ID */
     uint64 dxg_scanout_bind_candidate_propagate_presenthistory_cmd; /* host-to-VM enum ID */
     uint64 dxg_scanout_bind_candidate_vmbus_enum_known; /* enum namespace known */
+    uint64 dxg_scanout_bind_wsl_ioctl_namespace_checked; /* WSL ioctl audit */
+    uint64 dxg_scanout_bind_wsl_display_bind_ioctl_absent; /* no ioctl ABI */
     uint64 dxg_scanout_bind_candidate_linux_ioctl_contracts; /* ioctl send ABI */
     uint64 dxg_scanout_bind_candidate_resource_bind_contracts; /* resource bind ABI */
     uint64 dxg_scanout_bind_candidate_display_completion_contracts; /* display done ABI */
+    uint64 dxg_scanout_bind_standard_alloc_private_data; /* WSL stdalloc role */
+    uint64 dxg_scanout_bind_standard_alloc_display_bind_absent; /* no bind ABI */
+    uint64 dxg_scanout_bind_synthvid_gpa_dirty_present; /* synthvid dirty path */
+    uint64 dxg_scanout_bind_synthvid_resource_bind_absent; /* no D3D12 bind */
+    uint64 dxg_scanout_bind_dda_pci_display_present; /* DDA display split */
+    uint64 dxg_scanout_bind_dda_resource_import_absent; /* no DXG import */
+    uint64 dxg_scanout_bind_dda_scanout_bind_absent; /* no D3D12 scanout bind */
+    uint64 dxg_scanout_bind_dda_hw_flip_completion_absent; /* no D3D12 complete */
     uint64 dxg_scanout_bind_candidate_reject_reasons; /* FB_GPU_DXG_SCANOUT_* */
     uint64 dxg_scanout_bind_weak_dxg_ready_only; /* DXG ready only */
     uint64 dxg_scanout_bind_weak_d3dkmt_handles_only; /* D3DKMT handles only */
