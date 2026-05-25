@@ -1114,6 +1114,7 @@ struct fb_gpu_stats {
     uint64 dxg_present_query_ioctl_entries; /* query ioctl entered */
     uint64 dxg_present_register_copyin_failures; /* register copyin faults */
     uint64 dxg_present_commit_copyin_failures; /* commit copyin faults */
+    uint64 dxg_present_commit_copyout_failures; /* commit copyout faults */
     uint64 dxg_present_query_copyin_failures; /* query copyin faults */
     uint64 dxg_present_query_copyout_failures; /* query copyout faults */
     uint64 dxg_present_register_attempts; /* DXG source register attempts */

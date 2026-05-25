@@ -1187,6 +1187,7 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
 
     case FB_GPU_DXG_PRESENT_SOURCE_COMMIT: {
         struct fb_gpu_dxg_present_source_commit req;
+        int ret;
 
         spin_lock(&fb_state.lock);
         fb_state.stats.dxg_present_commit_ioctl_entries++;
@@ -1198,7 +1199,17 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
             spin_unlock(&fb_state.lock);
             return -EFAULT;
         }
-        return fb_dxg_present_commit(owner_id, owner_tgid, &req);
+        ret = fb_dxg_present_commit(owner_id, owner_tgid, &req);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            spin_lock(&fb_state.lock);
+            fb_state.stats.dxg_present_commit_copyout_failures++;
+            fb_state.stats.dxg_present_last_ret = EFAULT;
+            spin_unlock(&fb_state.lock);
+            return -EFAULT;
+        }
+        return 0;
     }
 
     case FB_GPU_DXG_PRESENT_SOURCE_QUERY: {
