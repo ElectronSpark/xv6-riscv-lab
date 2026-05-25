@@ -77,6 +77,23 @@ static uint64 fb_dxg_present_fd_diag(int32 fd)
     return fd < 0 ? 0xffffffffULL : (uint64)(uint32)fd;
 }
 
+static void fb_dxg_present_note_wsl_candidate_namespace_locked(void)
+{
+    fb_state.stats.dxg_scanout_bind_candidate_presenthistory_cmd =
+        FB_GPU_DXG_WSL_PRESENTHISTORYTOKEN_CMD;
+    fb_state.stats.dxg_scanout_bind_candidate_redirected_flip_fence_cmd =
+        FB_GPU_DXG_WSL_SETREDIRECTEDFLIPFENCEVALUE_CMD;
+    fb_state.stats.dxg_scanout_bind_candidate_blt_cmd =
+        FB_GPU_DXG_WSL_BLT_CMD;
+    fb_state.stats.dxg_scanout_bind_candidate_cmds_known = 3;
+    fb_state.stats.dxg_scanout_bind_candidate_vmbus_enum_known = 1;
+    fb_state.stats.dxg_scanout_bind_candidate_linux_ioctl_contracts = 0;
+    fb_state.stats.dxg_scanout_bind_candidate_resource_bind_contracts = 0;
+    fb_state.stats.dxg_scanout_bind_candidate_display_completion_contracts = 0;
+    fb_state.stats.dxg_scanout_bind_candidate_reject_reasons |=
+        FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_ALL;
+}
+
 static void fb_dxg_present_hex32(char out[9], uint32 value)
 {
     static const char hex[] = "0123456789abcdef";
@@ -173,6 +190,11 @@ static uint64 fb_dxg_present_transport_block_reason_locked(void)
     if ((fb_state.stats.dxg_present_host_rejects &
          FB_GPU_DXG_PRESENT_REJECT_DDA_NO_IMPORT_PATH) != 0)
         reason |= FB_GPU_DXG_PRESENT_BLOCK_DDA_NO_IMPORT_PATH;
+    if ((fb_state.stats.dxg_present_host_rejects &
+         FB_GPU_DXG_PRESENT_REJECT_WSL_ENUM_ONLY) != 0 ||
+        (fb_state.stats.dxg_scanout_bind_candidate_reject_reasons &
+         FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_ENUM_ONLY) != 0)
+        reason |= FB_GPU_DXG_PRESENT_BLOCK_WSL_ENUM_ONLY;
     if (fb_state.stats.dxg_present_last_adapter_identity !=
         FB_GPU_DXG_PRESENT_ADAPTER_MATCH)
         reason |= FB_GPU_DXG_PRESENT_BLOCK_LUID_UNVERIFIED;
@@ -212,6 +234,7 @@ static void fb_dxg_present_note_transport_contract_locked(
     fb_state.stats.dxg_present_helper_requires_completion = 1;
     fb_state.stats.dxg_present_selected_lane =
         FB_GPU_DXG_PRESENT_LANE_HELPER_SCANOUT_BIND;
+    fb_dxg_present_note_wsl_candidate_namespace_locked();
     fb_state.stats.dxg_present_helper_block_reason =
         fb_dxg_present_transport_block_reason_locked();
 }
@@ -305,6 +328,7 @@ fb_dxg_present_note_host_lanes_locked(void)
         fb_state.stats.dxg_present_dxg_user_luid_high =
             dxg.user_adapter_luid_high;
         rejects |= FB_GPU_DXG_PRESENT_REJECT_DXG_NO_DISPLAY_BIND;
+        rejects |= FB_GPU_DXG_PRESENT_REJECT_WSL_ENUM_ONLY;
     }
     if (gpu_nouveau_pci.probed) {
         candidates |= FB_GPU_DXG_PRESENT_HOST_DDA_NOUVEAU;
@@ -322,7 +346,7 @@ fb_dxg_present_note_host_lanes_locked(void)
     fb_state.stats.dxg_present_host_rejects = rejects;
     fb_state.stats.dxg_present_synthvid_state = synthvid_state;
     fb_state.stats.dxg_present_dxg_state = dxg_state;
-    fb_state.stats.dxg_scanout_bind_candidate_cmds_known = 3;
+    fb_dxg_present_note_wsl_candidate_namespace_locked();
     fb_state.stats.dxg_scanout_bind_candidate_sender_contracts = 0;
     fb_state.stats.dxg_scanout_bind_candidate_completion_contracts = 0;
     fb_state.stats.dxg_present_helper_block_reason =
@@ -352,7 +376,7 @@ fb_dxg_present_scanout_bind_locked(
     uint32 source_provenance = source != NULL ? source->provenance_flags : 0;
 
     fb_state.stats.dxg_scanout_bind_attempts++;
-    fb_state.stats.dxg_scanout_bind_candidate_cmds_known = 3;
+    fb_dxg_present_note_wsl_candidate_namespace_locked();
     fb_state.stats.dxg_scanout_bind_candidate_sender_contracts = 0;
     fb_state.stats.dxg_scanout_bind_candidate_completion_contracts = 0;
     fb_state.stats.dxg_scanout_bind_last_transport =
@@ -640,6 +664,7 @@ static int fb_dxg_present_commit(uint64 owner_id, pid_t owner_tgid,
     uint64 print_helper_meta = 0;
     uint64 print_helper_lifetime = 0;
     uint64 print_helper_block = 0;
+    uint64 print_candidate_reject_reasons = 0;
     uint64 print_provenance = 0;
     uint64 print_no_source = 0;
     uint64 print_bad_flags = 0;
@@ -741,6 +766,8 @@ static int fb_dxg_present_commit(uint64 owner_id, pid_t owner_tgid,
             fb_state.stats.dxg_present_helper_lifetime;
         print_helper_block =
             fb_state.stats.dxg_present_helper_block_reason;
+        print_candidate_reject_reasons =
+            fb_state.stats.dxg_scanout_bind_candidate_reject_reasons;
         print_provenance = source->provenance_flags;
         print_no_source = fb_state.stats.dxg_present_commit_no_source;
         print_bad_flags = fb_state.stats.dxg_present_commit_bad_flags;
@@ -796,7 +823,8 @@ out:
                "block_reason:0x%lx lane:%u provenance:0x%lx "
                "block_bits:no_transport=%u,synthvid_gpa=%u,dxg_no_bind=%u,"
                "luid_unverified=%u,no_source=%u,resource_fd_unverified=%u,"
-               "adapter_mismatch=%u,no_completion=%u,dda_no_import_path=%u "
+               "adapter_mismatch=%u,no_completion=%u,dda_no_import_path=%u,"
+               "wsl_enum_only=%u "
                "counters:no_source=%lu,bad_flags=%lu,no_transport=%lu,"
                "no_completion=%lu,resource_fd_unverified=%lu,"
                "adapter_mismatch=%lu "
@@ -804,6 +832,8 @@ out:
                "adapter_identity:%u "
                "synthvid:gpa-dirty-only dxg_display_bind:0 dda_nouveau:%u "
                "candidate_cmds:presenthistory=%u,redirected_flip_fence=%u,blt=%u "
+               "candidate_contracts:linux_ioctl=0,resource_bind=0,"
+               "display_completion=0,reject_reasons=0x%lx "
                "present_id:0 completed:0\n",
                FB_GPU_DXG_MISSING_PRESENT_BIND,
                FB_GPU_DXG_MISSING_PRESENT_HELPER,
@@ -834,6 +864,8 @@ out:
                 FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION) != 0,
                (print_helper_block &
                 FB_GPU_DXG_PRESENT_BLOCK_DDA_NO_IMPORT_PATH) != 0,
+               (print_helper_block &
+                FB_GPU_DXG_PRESENT_BLOCK_WSL_ENUM_ONLY) != 0,
                print_no_source, print_bad_flags, print_no_transport,
                print_no_completion, print_resource_fd_unverified,
                print_adapter_mismatch,
@@ -842,7 +874,8 @@ out:
                (print_candidates & FB_GPU_DXG_PRESENT_HOST_DDA_NOUVEAU) != 0,
                FB_GPU_DXG_WSL_PRESENTHISTORYTOKEN_CMD,
                FB_GPU_DXG_WSL_SETREDIRECTEDFLIPFENCEVALUE_CMD,
-               FB_GPU_DXG_WSL_BLT_CMD);
+               FB_GPU_DXG_WSL_BLT_CMD,
+               print_candidate_reject_reasons);
     }
     return ret;
 }

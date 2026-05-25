@@ -81,6 +81,7 @@
 #define FB_GPU_DXG_PRESENT_REJECT_DXG_NO_DISPLAY_BIND 0x2
 #define FB_GPU_DXG_PRESENT_REJECT_DDA_ABSENT    0x4
 #define FB_GPU_DXG_PRESENT_REJECT_DDA_NO_IMPORT_PATH 0x8
+#define FB_GPU_DXG_PRESENT_REJECT_WSL_ENUM_ONLY 0x10
 
 #define FB_GPU_DXG_PRESENT_LANE_NONE            0
 #define FB_GPU_DXG_PRESENT_LANE_GPUP_DXG_SCANOUT_BIND 1
@@ -96,6 +97,7 @@
 #define FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH 0x0040
 #define FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION 0x0080
 #define FB_GPU_DXG_PRESENT_BLOCK_DDA_NO_IMPORT_PATH 0x0100
+#define FB_GPU_DXG_PRESENT_BLOCK_WSL_ENUM_ONLY 0x0200
 #define FB_GPU_DXG_PRESENT_BLOCK_ALL \
     (FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT | \
      FB_GPU_DXG_PRESENT_BLOCK_SYNTHVID_GPA_ONLY | \
@@ -105,7 +107,24 @@
      FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED | \
      FB_GPU_DXG_PRESENT_BLOCK_ADAPTER_MISMATCH | \
      FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION | \
-     FB_GPU_DXG_PRESENT_BLOCK_DDA_NO_IMPORT_PATH)
+     FB_GPU_DXG_PRESENT_BLOCK_DDA_NO_IMPORT_PATH | \
+     FB_GPU_DXG_PRESENT_BLOCK_WSL_ENUM_ONLY)
+
+#define FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_ENUM_ONLY        0x01
+#define FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_LINUX_IOCTL   0x02
+#define FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_PACKET_SENDER 0x04
+#define FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_RESOURCE_BIND 0x08
+#define FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_COMPLETION    0x10
+#define FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_PRESENT_ID    0x20
+#define FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_COMPLETED_ID  0x40
+#define FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_ALL \
+    (FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_ENUM_ONLY | \
+     FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_LINUX_IOCTL | \
+     FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_PACKET_SENDER | \
+     FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_RESOURCE_BIND | \
+     FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_COMPLETION | \
+     FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_PRESENT_ID | \
+     FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_NO_COMPLETED_ID)
 
 #define FB_GPU_DXG_PRESENT_PROV_DXG_FD          0x0001
 #define FB_GPU_DXG_PRESENT_PROV_RESOURCE_FD     0x0002
@@ -1201,6 +1220,14 @@ struct fb_gpu_stats {
     uint64 dxg_scanout_bind_candidate_sender_contracts; /* usable senders */
     uint64 dxg_scanout_bind_candidate_completion_contracts; /* usable completions */
     uint64 dxg_scanout_bind_candidate_rejects; /* known cmds but no ABI */
+    uint64 dxg_scanout_bind_candidate_presenthistory_cmd; /* VMBus enum ID */
+    uint64 dxg_scanout_bind_candidate_redirected_flip_fence_cmd; /* VMBus enum ID */
+    uint64 dxg_scanout_bind_candidate_blt_cmd; /* VMBus enum ID */
+    uint64 dxg_scanout_bind_candidate_vmbus_enum_known; /* enum namespace known */
+    uint64 dxg_scanout_bind_candidate_linux_ioctl_contracts; /* ioctl send ABI */
+    uint64 dxg_scanout_bind_candidate_resource_bind_contracts; /* resource bind ABI */
+    uint64 dxg_scanout_bind_candidate_display_completion_contracts; /* display done ABI */
+    uint64 dxg_scanout_bind_candidate_reject_reasons; /* FB_GPU_DXG_SCANOUT_* */
     uint64 dxg_scanout_bind_weak_dxg_ready_only; /* DXG ready only */
     uint64 dxg_scanout_bind_weak_d3dkmt_handles_only; /* D3DKMT handles only */
     uint64 dxg_scanout_bind_weak_same_adapter_resource_only; /* same LUID only */

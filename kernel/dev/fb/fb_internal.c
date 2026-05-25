@@ -398,6 +398,15 @@ static struct {
     .next_fence_context = 1,
     .next_render_owner_id = 1,
     .next_ww_acquire_stamp = 1,
+    .stats.dxg_scanout_bind_candidate_cmds_known = 3,
+    .stats.dxg_scanout_bind_candidate_presenthistory_cmd =
+        FB_GPU_DXG_WSL_PRESENTHISTORYTOKEN_CMD,
+    .stats.dxg_scanout_bind_candidate_redirected_flip_fence_cmd =
+        FB_GPU_DXG_WSL_SETREDIRECTEDFLIPFENCEVALUE_CMD,
+    .stats.dxg_scanout_bind_candidate_blt_cmd = FB_GPU_DXG_WSL_BLT_CMD,
+    .stats.dxg_scanout_bind_candidate_vmbus_enum_known = 1,
+    .stats.dxg_scanout_bind_candidate_reject_reasons =
+        FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_ALL,
     .lock = SPINLOCK_INITIALIZED("fb"),
 };
 
