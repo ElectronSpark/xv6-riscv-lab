@@ -20,6 +20,8 @@ static int gpu_drm_mode_addfb2(struct fb_gpu_render_owner *owner, uint64 arg)
         return -EINVAL;
     if (req.pixel_format != DRM_FORMAT_XRGB8888 &&
         req.pixel_format != DRM_FORMAT_ARGB8888 &&
+        req.pixel_format != DRM_FORMAT_XBGR8888 &&
+        req.pixel_format != DRM_FORMAT_ABGR8888 &&
         req.pixel_format != DRM_FORMAT_NV12)
         return -EINVAL;
     if (req.pixel_format == DRM_FORMAT_NV12) {

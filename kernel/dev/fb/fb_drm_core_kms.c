@@ -171,25 +171,50 @@ static void gpu_drm_copy_prop_name(char dst[32], const char *src)
 
 struct gpu_drm_in_formats_blob {
     struct drm_format_modifier_blob_compat header;
-    uint32 formats[2];
+    uint32 formats[4];
     struct drm_format_modifier_compat modifiers[1];
+};
+
+static const uint32 gpu_kms_primary_scanout_formats[] = {
+    DRM_FORMAT_XRGB8888,
+    DRM_FORMAT_ARGB8888,
+    DRM_FORMAT_XBGR8888,
+    DRM_FORMAT_ABGR8888,
 };
 
 static void gpu_drm_fill_in_formats_blob(struct gpu_drm_in_formats_blob *blob)
 {
     memset(blob, 0, sizeof(*blob));
     blob->header.version = 1;
-    blob->header.count_formats = 2;
+    blob->header.count_formats =
+        sizeof(gpu_kms_primary_scanout_formats) /
+        sizeof(gpu_kms_primary_scanout_formats[0]);
     blob->header.formats_offset =
         (uint32)((char *)&blob->formats[0] - (char *)blob);
     blob->header.count_modifiers = 1;
     blob->header.modifiers_offset =
         (uint32)((char *)&blob->modifiers[0] - (char *)blob);
-    blob->formats[0] = DRM_FORMAT_XRGB8888;
-    blob->formats[1] = DRM_FORMAT_ARGB8888;
-    blob->modifiers[0].formats = 0x3;
+    memmove(blob->formats, gpu_kms_primary_scanout_formats,
+            sizeof(gpu_kms_primary_scanout_formats));
+    blob->modifiers[0].formats =
+        (1ULL << blob->header.count_formats) - 1;
     blob->modifiers[0].offset = 0;
     blob->modifiers[0].modifier = DRM_FORMAT_MOD_LINEAR;
+}
+
+static int gpu_kms_primary_scanout_format_supported(uint32 pixel_format,
+                                                    uint64 modifier)
+{
+    if (modifier != DRM_FORMAT_MOD_LINEAR)
+        return 0;
+    for (uint32 i = 0;
+         i < sizeof(gpu_kms_primary_scanout_formats) /
+                 sizeof(gpu_kms_primary_scanout_formats[0]);
+         i++) {
+        if (gpu_kms_primary_scanout_formats[i] == pixel_format)
+            return 1;
+    }
+    return 0;
 }
 
 static int gpu_drm_property_info(uint32 prop_id, const char **name,
@@ -1302,28 +1327,29 @@ static int gpu_drm_mode_getplaneresources(uint64 arg)
 static int gpu_drm_mode_getplane(uint64 arg)
 {
     struct drm_mode_get_plane_compat req;
-    uint32 formats[2] = {
-        DRM_FORMAT_XRGB8888,
-        DRM_FORMAT_ARGB8888,
-    };
     uint32 copy_count;
+    uint32 format_count =
+        sizeof(gpu_kms_primary_scanout_formats) /
+        sizeof(gpu_kms_primary_scanout_formats[0]);
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
     if (req.plane_id != GPU_DRM_PRIMARY_PLANE_ID)
         return -ENOENT;
     copy_count = req.count_format_types;
-    if (copy_count > sizeof(formats) / sizeof(formats[0]))
-        copy_count = sizeof(formats) / sizeof(formats[0]);
+    if (copy_count > format_count)
+        copy_count = format_count;
     if (req.format_type_ptr != 0 && copy_count != 0 &&
-        either_copyout(1, req.format_type_ptr, formats,
-                       copy_count * sizeof(formats[0])) < 0)
+        either_copyout(1, req.format_type_ptr,
+                       (void *)gpu_kms_primary_scanout_formats,
+                       copy_count *
+                           sizeof(gpu_kms_primary_scanout_formats[0])) < 0)
         return -EFAULT;
     req.crtc_id = GPU_DRM_CRTC_ID;
     req.fb_id = fb_state.current_kms_fb_id;
     req.possible_crtcs = 1;
     req.gamma_size = 0;
-    req.count_format_types = sizeof(formats) / sizeof(formats[0]);
+    req.count_format_types = format_count;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
@@ -1405,6 +1431,7 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
     uint32 width = 0;
     uint32 height = 0;
     uint32 pixel_format = 0;
+    uint64 modifier = DRM_FORMAT_MOD_LINEAR;
     uint64 fence = 0;
     int ret;
 
@@ -1420,6 +1447,7 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
         width = fb->width;
         height = fb->height;
         pixel_format = fb->pixel_format;
+        modifier = fb->modifier;
         break;
     }
     spin_unlock(&fb_state.lock);
@@ -1427,8 +1455,7 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
         return -ENOENT;
     if (width == 0 || height == 0)
         return -EINVAL;
-    if (pixel_format != DRM_FORMAT_XRGB8888 &&
-        pixel_format != DRM_FORMAT_ARGB8888)
+    if (!gpu_kms_primary_scanout_format_supported(pixel_format, modifier))
         return -EOPNOTSUPP;
 
     bo = fb_bo_get_owned(bo_handle, owner->id, owner->tgid);
@@ -1437,7 +1464,8 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
     memset(&present, 0, sizeof(present));
     present.w = width;
     present.h = height;
-    ret = fb_blit_from_bo(bo, present, &fence);
+    ret = fb_blit_from_bo_format(bo, present, pixel_format, modifier,
+                                 &fence);
     fb_bo_put(bo);
     return ret;
 }
@@ -1455,8 +1483,8 @@ static int gpu_kms_fb_presentable_for_owner(struct fb_gpu_render_owner *owner,
         return ret;
     if (fb.width == 0 || fb.height == 0)
         return -EINVAL;
-    if (fb.pixel_format != DRM_FORMAT_XRGB8888 &&
-        fb.pixel_format != DRM_FORMAT_ARGB8888)
+    if (!gpu_kms_primary_scanout_format_supported(fb.pixel_format,
+                                                  fb.modifier))
         return -EOPNOTSUPP;
     return 0;
 }
@@ -1478,7 +1506,8 @@ static int gpu_drm_mode_getfb(struct fb_gpu_render_owner *owner, uint64 arg)
     req.height = fb.height;
     req.pitch = fb.pitch;
     req.bpp = 32;
-    req.depth = fb.pixel_format == DRM_FORMAT_XRGB8888 ? 24 : 32;
+    req.depth = (fb.pixel_format == DRM_FORMAT_XRGB8888 ||
+                 fb.pixel_format == DRM_FORMAT_XBGR8888) ? 24 : 32;
     req.handle = fb.bo_handle;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
@@ -1793,10 +1822,13 @@ static int gpu_kms_validate_prop_locked(struct fb_gpu_render_owner *owner,
             return -EINVAL;
         break;
     case GPU_DRM_PROP_FB_ID:
-        if (value != 0 &&
-            !gpu_kms_fb_owner_matches(gpu_kms_fb_lookup_locked((uint32)value),
-                                      owner))
-            return -ENOENT;
+        if (value != 0) {
+            struct fb_gpu_kms_fb_entry *fb =
+                gpu_kms_fb_lookup_locked((uint32)value);
+
+            if (!gpu_kms_fb_owner_matches(fb, owner))
+                return -ENOENT;
+        }
         if (new_fb_id != NULL && has_new_fb != NULL) {
             *new_fb_id = (uint32)value;
             *has_new_fb = 1;
@@ -1839,8 +1871,17 @@ static int gpu_drm_mode_obj_setproperty(struct fb_gpu_render_owner *owner,
     ret = gpu_kms_validate_prop_locked(owner, req.obj_id, req.obj_type,
                                        req.prop_id, req.value, &new_fb,
                                        &has_new_fb, NULL, NULL, NULL, 0);
-    if (ret == 0 && has_new_fb)
-        fb_state.current_kms_fb_id = new_fb;
+    if (ret == 0 && has_new_fb) {
+        struct fb_gpu_kms_fb_entry *fb =
+            new_fb == 0 ? NULL : gpu_kms_fb_lookup_locked(new_fb);
+
+        if (new_fb != 0 &&
+            !gpu_kms_primary_scanout_format_supported(fb->pixel_format,
+                                                      fb->modifier))
+            ret = -EOPNOTSUPP;
+        else
+            fb_state.current_kms_fb_id = new_fb;
+    }
     spin_unlock(&fb_state.lock);
     return ret;
 }

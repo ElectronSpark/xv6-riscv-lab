@@ -308,9 +308,41 @@ static uint64 fb_note_display_complete_locked(void)
     return seq;
 }
 
-static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
-                           struct fb_gpu_bo_present cmd,
-                           uint64 *fence_out)
+static int fb_scanout_format_needs_rb_swap(uint32 pixel_format)
+{
+    return pixel_format == DRM_FORMAT_XBGR8888 ||
+           pixel_format == DRM_FORMAT_ABGR8888;
+}
+
+static int fb_scanout_format_supported(uint32 pixel_format, uint64 modifier)
+{
+    if (modifier != DRM_FORMAT_MOD_LINEAR)
+        return 0;
+    return pixel_format == DRM_FORMAT_XRGB8888 ||
+           pixel_format == DRM_FORMAT_ARGB8888 ||
+           pixel_format == DRM_FORMAT_XBGR8888 ||
+           pixel_format == DRM_FORMAT_ABGR8888;
+}
+
+static void fb_copy_scanout_chunk(volatile uint8 *dst, uint8 *src,
+                                  uint32 chunk, int swap_rb)
+{
+    if (!swap_rb) {
+        memcpy((void *)dst, src, chunk);
+        return;
+    }
+    for (uint32 i = 0; i < chunk; i += 4) {
+        dst[i + 0] = src[i + 2];
+        dst[i + 1] = src[i + 1];
+        dst[i + 2] = src[i + 0];
+        dst[i + 3] = src[i + 3];
+    }
+}
+
+static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
+                                  struct fb_gpu_bo_present cmd,
+                                  uint32 pixel_format, uint64 modifier,
+                                  uint64 *fence_out)
 {
     uint32 xres, yres;
     uint32 pitch;
@@ -319,9 +351,12 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
     uint64 offset;
     uint64 last;
     int clipped = 0;
+    int swap_rb;
 
     if (bo == NULL)
         return -EINVAL;
+    if (!fb_scanout_format_supported(pixel_format, modifier))
+        return -EOPNOTSUPP;
     if (cmd.w == 0)
         cmd.w = bo->width;
     if (cmd.h == 0)
@@ -358,6 +393,7 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
     }
     if (cw == 0 || ch == 0)
         return 0;
+    swap_rb = fb_scanout_format_needs_rb_swap(pixel_format);
     spin_lock(&fb_state.lock);
     if (cmd.x == 0 && cmd.y == 0 && cw == xres && ch == yres)
         fb_state.stats.full_blits++;
@@ -391,18 +427,13 @@ static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
             pa = __page_to_pa(bo->pages[page_idx]);
             src = (uint8 *)PA2VA(pa) + page_off;
 
-            if (virtio_backed) {
-                memcpy((void *)(dst + copied), src, chunk);
-            } else {
-                /*
-                 * fb_virt is PA2VA-mapped cached RAM (Hyper-V synthvid and
-                 * BGA both).  No volatile/lock required — plain memcpy is
-                 * orders of magnitude faster than the per-pixel volatile
-                 * loop and per-chunk spin_lock that previously stalled the
-                 * Hyper-V compositor blit path.
-                 */
-                memcpy((void *)(dst + copied), src, chunk);
-            }
+            /*
+             * fb_virt is PA2VA-mapped cached RAM for Hyper-V synthvid and
+             * BGA.  Plain memcpy is the fast path; XBGR/ABGR use an explicit
+             * R/B swap so the advertised primary formats are real scanout
+             * formats, not just accepted metadata.
+             */
+            fb_copy_scanout_chunk(dst + copied, src, chunk, swap_rb);
 
             src_off += chunk;
             copied += chunk;
@@ -425,6 +456,14 @@ reject:
     fb_state.stats.rejected_blits++;
     spin_unlock(&fb_state.lock);
     return -EINVAL;
+}
+
+static int fb_blit_from_bo(struct fb_gpu_bo_entry *bo,
+                           struct fb_gpu_bo_present cmd,
+                           uint64 *fence_out)
+{
+    return fb_blit_from_bo_format(bo, cmd, DRM_FORMAT_XRGB8888,
+                                  DRM_FORMAT_MOD_LINEAR, fence_out);
 }
 
 static int fb_map_scanout_current(struct fb_gpu_scanout_map *req)
