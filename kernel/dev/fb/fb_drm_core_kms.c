@@ -2057,6 +2057,8 @@ static void gpu_kms_complete_prepared_out_fence(
     if (out->display_correlated) {
         out->fence_obj->seqno = fb_state.stats.display_last_complete != 0 ?
             fb_state.stats.display_last_complete : out->target_sequence;
+        fb_state.stats.kms_atomic_out_fence_display_correlated++;
+    } else {
         fb_state.stats.
             kms_atomic_out_fence_software_scanout_correlated++;
     }
