@@ -6456,18 +6456,56 @@ createhwqueue_done:
         shared->host_nt_handle = host_nt_handle;
         shared->nt_handle = host_nt_handle;
         if (kind == HV_DXG_SHARED_OBJECT_RESOURCE) {
-            shared->parent_id = hvdxg_alloc_shared_parent_id();
-            shared->parent_refs = 1;
-            shared->fd_refs = 1;
-            shared->opened_child_count = 1;
-            shared->opened_child_last_device = resource->device;
-            shared->opened_child_last_resource = resource->resource;
-            shared->creator_child_resource = resource->resource;
+            shared->resource_parent = hvdxg_shared_parent_create(
+                resource, process, host_object, shared->global_share,
+                host_nt_handle);
+            if (shared->resource_parent == NULL) {
+                uint32 destroy_handle = 0;
+
+                destroy_handle = hvdxg_release_nt_shared_object_ref(
+                    kind, process, host_object, host_nt_handle);
+                if (resource != NULL && destroy_handle != 0)
+                    hvdxg_clear_resource_nt_shared_handle(resource,
+                                                          destroy_handle);
+                kvfree(shared);
+                ret = -ENOMEM;
+                hvdxg.sharedhandle_last_ret = ret;
+                break;
+            }
+            ret = hvdxg_shared_parent_add_resource(
+                shared->resource_parent, resource);
+            if (ret != 0) {
+                uint32 destroy_handle = 0;
+
+                destroy_handle = hvdxg_release_nt_shared_object_ref(
+                    kind, process, host_object, host_nt_handle);
+                if (resource != NULL && destroy_handle != 0)
+                    hvdxg_clear_resource_nt_shared_handle(resource,
+                                                          destroy_handle);
+                if (shared->resource_parent->fd_refs != 0)
+                    shared->resource_parent->fd_refs--;
+                if (shared->resource_parent->refs != 0)
+                    shared->resource_parent->refs--;
+                hvdxg_shared_parent_put(shared->resource_parent);
+                kvfree(shared);
+                hvdxg.sharedhandle_last_ret = ret;
+                break;
+            }
+            shared->parent_id = shared->resource_parent->id;
+            shared->parent_refs = shared->resource_parent->refs;
+            shared->fd_refs = shared->resource_parent->fd_refs;
+            shared->opened_child_count =
+                shared->resource_parent->child_count;
+            shared->opened_child_last_device =
+                shared->resource_parent->last_child_device;
+            shared->opened_child_last_resource =
+                shared->resource_parent->last_child_resource;
+            shared->creator_child_resource =
+                shared->resource_parent->creator_child_resource;
             shared->parent_sealed_generation =
-                resource->sealed_generation;
+                shared->resource_parent->sealed_generation;
             shared->parent_allocation_count =
-                resource->allocation_count;
-            hvdxg.sharedresource_parent_publish_count++;
+                shared->resource_parent->allocation_count;
         }
         hvdxg.sharedresource_open_global =
             kind == HV_DXG_SHARED_OBJECT_RESOURCE ? shared->global_share : 0;
@@ -6505,22 +6543,6 @@ createhwqueue_done:
             hvdxg.sharedsync_export_shared_owner_object =
                 shared->cache_object;
         } else {
-            ret = hvdxg_clone_resource(&shared->resource, resource);
-            if (ret != 0) {
-                uint32 destroy_handle = 0;
-
-                destroy_handle = hvdxg_release_nt_shared_object_ref(
-                    kind, process, host_object, host_nt_handle);
-                if (resource != NULL && destroy_handle != 0)
-                    hvdxg_clear_resource_nt_shared_handle(resource,
-                                                          destroy_handle);
-                kvfree(shared);
-                hvdxg.sharedhandle_last_ret = ret;
-                break;
-            }
-            shared->resource.shared_parent_id = shared->parent_id;
-            shared->resource.shared_parent_refs_snapshot =
-                shared->parent_refs;
             hvdxg_note_shared_parent(shared);
         }
         fd = vfs_custom_fd_alloc(
@@ -6556,8 +6578,16 @@ createhwqueue_done:
                 kind, process, host_object, host_nt_handle);
             if (resource != NULL && destroy_handle != 0)
                 hvdxg_clear_resource_nt_shared_handle(resource, destroy_handle);
-            if (kind == HV_DXG_SHARED_OBJECT_RESOURCE)
-                hvdxg_free_tracked_resource(&shared->resource);
+            if (kind == HV_DXG_SHARED_OBJECT_RESOURCE &&
+                shared->resource_parent != NULL) {
+                if (resource != NULL)
+                    hvdxg_shared_parent_remove_resource(resource);
+                if (shared->resource_parent->fd_refs != 0)
+                    shared->resource_parent->fd_refs--;
+                if (shared->resource_parent->refs != 0)
+                    shared->resource_parent->refs--;
+                hvdxg_shared_parent_put(shared->resource_parent);
+            }
             kvfree(shared);
             ret = fd;
             hvdxg.sharedhandle_last_ret = ret;
@@ -6590,6 +6620,15 @@ createhwqueue_done:
                 vfs_file_maybe_last_fd_close(f);
                 vfs_fput(f);
             }
+            if (kind == HV_DXG_SHARED_OBJECT_RESOURCE && resource != NULL)
+                hvdxg_shared_parent_remove_resource(resource);
+            if (kind == HV_DXG_SHARED_OBJECT_RESOURCE &&
+                resource != NULL && resource->host_shared_handle_nt ==
+                    host_nt_handle &&
+                hvdxg_ntshared_cache_refs(kind, process, host_object,
+                                          host_nt_handle) == 0)
+                hvdxg_clear_resource_nt_shared_handle(resource,
+                                                      host_nt_handle);
             hvdxg.sharedhandle_copyout_last_refs_after =
                 hvdxg_ntshared_cache_refs(kind, process, host_object,
                                           host_nt_handle);
@@ -6603,10 +6642,12 @@ createhwqueue_done:
             hvdxg.sharedresource_record_fd_publish_count++;
             hvdxg_note_shared_parent(shared);
             hvdxg_note_shared_resource_record(
-                "fd-published", 3, &shared->resource, kind,
+                "fd-published", 3, hvdxg_shared_parent_resource(shared),
+                kind,
                 shared->cache_process, shared->cache_object,
                 shared->global_share, shared->host_nt_handle, 0,
-                object.v == shared->resource.resource ? 1 : 0);
+                object.v == hvdxg_shared_parent_resource(shared)->resource ?
+                1 : 0);
         }
         if (kind == HV_DXG_SHARED_OBJECT_SYNC) {
             hvdxg.sharedsync_export_ret = ret;
@@ -6893,6 +6934,7 @@ opensync_done:
     case LX_DXQUERYRESOURCEINFOFROMNTHANDLE: {
         struct d3dkmt_queryresourceinfofromnthandle req;
         struct hvdxg_shared_object *shared;
+        struct hvdxg_tracked_resource *parent_resource = NULL;
         struct vfs_file *shared_file = NULL;
 
         ret = hvdxg_d3dkmt_ensure();
@@ -6964,34 +7006,47 @@ opensync_done:
             hvdxg.queryresource_last_ret = ret;
             goto queryresource_done;
         }
-        if (shared->resource.existing_sysmem)
-            hvdxg_note_existing_sysmem_share(&shared->resource, 5);
-        ret = hvdxg_seal_resource(&shared->resource);
+        parent_resource = hvdxg_shared_parent_resource(shared);
+        if (parent_resource == NULL) {
+            ret = -EINVAL;
+            hvdxg.sharedhandle_last_ret = ret;
+            hvdxg.queryresource_last_ret = ret;
+            goto queryresource_done;
+        }
+        if (parent_resource->existing_sysmem)
+            hvdxg_note_existing_sysmem_share(parent_resource, 5);
+        ret = hvdxg_seal_resource(parent_resource);
         shared->parent_sealed_generation =
-            shared->resource.sealed_generation;
+            parent_resource->sealed_generation;
         shared->parent_allocation_count =
-            shared->resource.allocation_count;
+            parent_resource->allocation_count;
+        if (shared->resource_parent != NULL) {
+            shared->resource_parent->sealed_generation =
+                parent_resource->sealed_generation;
+            shared->resource_parent->allocation_count =
+                parent_resource->allocation_count;
+        }
         hvdxg_note_shared_parent(shared);
         if (ret != 0) {
             hvdxg.sharedhandle_last_ret = ret;
             hvdxg.queryresource_last_ret = ret;
             goto queryresource_done;
         }
-        if (shared->resource.existing_sysmem)
-            hvdxg_note_existing_sysmem_share(&shared->resource, 6);
+        if (parent_resource->existing_sysmem)
+            hvdxg_note_existing_sysmem_share(parent_resource, 6);
         hvdxg.sharedresource_record_query_count++;
         hvdxg_note_shared_resource_record(
-            "queryresource", 4, &shared->resource, shared->kind,
+            "queryresource", 4, parent_resource, shared->kind,
             shared->cache_process, shared->cache_object,
             shared->global_share, shared->host_nt_handle, 0,
-            shared->object == shared->resource.resource ? 1 : 0);
+            shared->object == parent_resource->resource ? 1 : 0);
         req.private_runtime_data_size =
-            shared->resource.private_runtime_data_size;
+            parent_resource->private_runtime_data_size;
         req.resource_priv_drv_data_size =
-            shared->resource.resource_priv_drv_data_size;
+            parent_resource->resource_priv_drv_data_size;
         req.total_priv_drv_data_size =
-            shared->resource.total_priv_drv_data_size;
-        req.allocation_count = shared->resource.allocation_count;
+            parent_resource->total_priv_drv_data_size;
+        req.allocation_count = parent_resource->allocation_count;
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
         hvdxg.sharedhandle_last_count = req.allocation_count;
@@ -7014,6 +7069,7 @@ queryresource_done:
     case LX_DXOPENRESOURCEFROMNTHANDLE: {
         struct d3dkmt_openresourcefromnthandle req;
         struct hvdxg_shared_object *shared;
+        struct hvdxg_tracked_resource *parent_resource = NULL;
         struct hvdxg_command_openresource open;
         struct hvdxg_command_openresource_return *result = NULL;
         struct d3dddi_openallocationinfo2 open_alloc[HV_DXG_ALLOCATION_MAX];
@@ -7023,7 +7079,6 @@ queryresource_done:
         uint32 alloc_private_offset = 0;
         struct hvdxg_tracked_resource opened;
         int host_resource_opened = 0;
-        int parent_ref_acquired = 0;
         struct hvdxg_d3dkmthandle open_process;
 
         ret = hvdxg_d3dkmt_ensure();
@@ -7072,16 +7127,19 @@ queryresource_done:
         shared = hvdxg_shared_object_from_fd((int)req.nt_handle,
                                              HV_DXG_SHARED_OBJECT_RESOURCE,
                                              &shared_file);
-        if (shared != NULL && shared->resource.existing_sysmem)
-            hvdxg_note_existing_sysmem_share(&shared->resource, 7);
+        if (shared != NULL)
+            parent_resource = hvdxg_shared_parent_resource(shared);
+        if (parent_resource != NULL && parent_resource->existing_sysmem)
+            hvdxg_note_existing_sysmem_share(parent_resource, 7);
         if (shared == NULL || shared->global_share == 0 ||
-            req.allocation_count != shared->resource.allocation_count ||
+            parent_resource == NULL ||
+            req.allocation_count != parent_resource->allocation_count ||
             req.private_runtime_data_size <
-                (int32)shared->resource.private_runtime_data_size ||
+                (int32)parent_resource->private_runtime_data_size ||
             req.resource_priv_drv_data_size <
-                shared->resource.resource_priv_drv_data_size ||
+                parent_resource->resource_priv_drv_data_size ||
             req.total_priv_drv_data_size <
-                shared->resource.total_priv_drv_data_size) {
+                parent_resource->total_priv_drv_data_size) {
             ret = -EINVAL;
             hvdxg.sharedhandle_last_ret = ret;
             hvdxg.openresource_last_ret = ret;
@@ -7089,7 +7147,7 @@ queryresource_done:
         }
         hvdxg.openresource_last_global = shared->global_share;
         hvdxg.openresource_last_total_priv =
-            shared->resource.total_priv_drv_data_size;
+            parent_resource->total_priv_drv_data_size;
         hvdxg.openresource_last_fd_kind = shared->kind;
         hvdxg.openresource_last_fops_kind =
             hvdxg_shared_object_fops_kind(shared_file);
@@ -7100,17 +7158,23 @@ queryresource_done:
             shared->host_nt_handle);
         if (hvdxg.openresource_last_fd_refs == 0)
             hvdxg.openresource_last_fd_refs =
-                shared->resource.host_shared_refs;
-        hvdxg.openresource_last_seal_before = shared->resource.sealed;
-        ret = hvdxg_seal_resource(&shared->resource);
-        hvdxg.openresource_last_seal_after = shared->resource.sealed;
+                parent_resource->host_shared_refs;
+        hvdxg.openresource_last_seal_before = parent_resource->sealed;
+        ret = hvdxg_seal_resource(parent_resource);
+        hvdxg.openresource_last_seal_after = parent_resource->sealed;
         shared->parent_sealed_generation =
-            shared->resource.sealed_generation;
+            parent_resource->sealed_generation;
         shared->parent_allocation_count =
-            shared->resource.allocation_count;
+            parent_resource->allocation_count;
+        if (shared->resource_parent != NULL) {
+            shared->resource_parent->sealed_generation =
+                parent_resource->sealed_generation;
+            shared->resource_parent->allocation_count =
+                parent_resource->allocation_count;
+        }
         hvdxg_note_shared_parent(shared);
-        if (shared->resource.existing_sysmem)
-            hvdxg_note_existing_sysmem_share(&shared->resource, 8);
+        if (parent_resource->existing_sysmem)
+            hvdxg_note_existing_sysmem_share(parent_resource, 8);
         if (ret != 0) {
             hvdxg.sharedhandle_last_ret = ret;
             hvdxg.openresource_last_ret = ret;
@@ -7118,10 +7182,10 @@ queryresource_done:
         }
         hvdxg.sharedresource_record_open_count++;
         hvdxg_note_shared_resource_record(
-            "openresource-prehost", 5, &shared->resource, shared->kind,
+            "openresource-prehost", 5, parent_resource, shared->kind,
             shared->cache_process, shared->cache_object,
             shared->global_share, shared->host_nt_handle, 0,
-            shared->object == shared->resource.resource ? 1 : 0);
+            shared->object == parent_resource->resource ? 1 : 0);
         result_len = sizeof(*result) +
                      (req.allocation_count - 1) *
                          sizeof(result->allocations[0]);
@@ -7144,7 +7208,7 @@ queryresource_done:
         hvdxg.sharedresource_open_global = shared->global_share;
         open.allocation_count = req.allocation_count;
         open.total_priv_drv_data_size =
-            shared->resource.total_priv_drv_data_size;
+            parent_resource->total_priv_drv_data_size;
         ret = hvdxg_send_sync_vgpu(&open, sizeof(open), result,
                                    result_len, &actual_len);
         hvdxg.openresource_last_cmd_len = hvdxg.vgpu_send_last_cmd_len;
@@ -7169,19 +7233,19 @@ queryresource_done:
         if (ret != 0)
             goto openresource_done;
         hvdxg_note_shared_resource_record(
-            "openresource-host-ok", 6, &shared->resource, shared->kind,
+            "openresource-host-ok", 6, parent_resource, shared->kind,
             shared->cache_process, shared->cache_object,
             shared->global_share, shared->host_nt_handle, 0,
-            shared->object == shared->resource.resource ? 1 : 0);
+            shared->object == parent_resource->resource ? 1 : 0);
         host_resource_opened = result->resource.v != 0;
         memset(open_alloc, 0, sizeof(open_alloc));
         alloc_private_offset = 0;
         for (uint32 i = 0; i < req.allocation_count; i++) {
-            uint32 private_size = shared->resource.alloc_priv_sizes[i];
+            uint32 private_size = parent_resource->alloc_priv_sizes[i];
 
-            if (alloc_private_offset > shared->resource.total_priv_drv_data_size ||
+            if (alloc_private_offset > parent_resource->total_priv_drv_data_size ||
                 private_size >
-                    shared->resource.total_priv_drv_data_size -
+                    parent_resource->total_priv_drv_data_size -
                         alloc_private_offset) {
                 ret = -EOVERFLOW;
                 goto openresource_done;
@@ -7193,18 +7257,18 @@ queryresource_done:
                     req.total_priv_drv_data + alloc_private_offset;
             alloc_private_offset += private_size;
         }
-        if (alloc_private_offset != shared->resource.total_priv_drv_data_size) {
+        if (alloc_private_offset != parent_resource->total_priv_drv_data_size) {
             ret = -EOVERFLOW;
             goto openresource_done;
         }
         req.resource.v = result->resource.v;
         req.total_priv_drv_data_size =
-            shared->resource.total_priv_drv_data_size;
+            parent_resource->total_priv_drv_data_size;
         if (owner == NULL) {
             ret = -EINVAL;
             goto openresource_done;
         }
-        if (hvdxg_clone_resource(&opened, &shared->resource) == 0) {
+        if (hvdxg_clone_resource(&opened, parent_resource) == 0) {
             struct hvdxg_tracked_resource *slot;
 
             opened.device = req.device.v;
@@ -7216,8 +7280,6 @@ queryresource_done:
             opened.sealed = 1;
             opened.opened_from_shared = 1;
             opened.open_count = 1;
-            opened.shared_parent_id = shared->parent_id;
-            opened.shared_parent_refs_snapshot = shared->parent_refs;
             for (uint32 i = 0; i < req.allocation_count; i++)
                 opened.allocation_handles[i] = result->allocations[i].v;
             hvdxg_sync_shared_resource_records(&opened);
@@ -7231,9 +7293,13 @@ queryresource_done:
                                  HV_DXG_RESOURCE_TRACKED_MAX) == 0)
                 slot = &owner->resources[owner->resource_count++];
             if (slot != NULL) {
+                hvdxg_shared_parent_remove_resource(slot);
                 hvdxg_free_tracked_resource(slot);
                 *slot = opened;
-                if (hvdxg_track_object(owner, HV_DXG_OBJECT_RESOURCE,
+                ret = hvdxg_shared_parent_add_resource(
+                    shared->resource_parent, slot);
+                if (ret == 0 &&
+                    hvdxg_track_object(owner, HV_DXG_OBJECT_RESOURCE,
                                        opened.resource, opened.device,
                                        opened.device) == 0)
                     hvdxg.sharedresource_open_tracked++;
@@ -7248,42 +7314,37 @@ queryresource_done:
         }
         if (ret != 0)
             goto openresource_done;
-        shared->parent_refs++;
-        shared->opened_child_count++;
-        shared->opened_child_last_device = req.device.v;
-        shared->opened_child_last_resource = req.resource.v;
-        parent_ref_acquired = 1;
         hvdxg.sharedresource_parent_open_count++;
         hvdxg_note_shared_parent(shared);
         for (uint32 i = 0; i < req.allocation_count; i++) {
             ret = hvdxg_track_allocation(
                 owner, req.device.v, req.resource.v, result->allocations[i].v,
-                shared->resource.allocation_sizes[i],
-                shared->resource.allocation_flags[i], 0, NULL, 0);
+                parent_resource->allocation_sizes[i],
+                parent_resource->allocation_flags[i], 0, NULL, 0);
             if (ret != 0)
                 goto openresource_done;
         }
-        if (shared->resource.private_runtime_data_size != 0 &&
+        if (parent_resource->private_runtime_data_size != 0 &&
             either_copyout(1, req.private_runtime_data,
-                           shared->resource.private_runtime_data,
-                           shared->resource.private_runtime_data_size) < 0) {
+                           parent_resource->private_runtime_data,
+                           parent_resource->private_runtime_data_size) < 0) {
             ret = -EFAULT;
             goto openresource_done;
         }
-        if (shared->resource.resource_priv_drv_data_size != 0 &&
+        if (parent_resource->resource_priv_drv_data_size != 0 &&
             either_copyout(1, req.resource_priv_drv_data,
-                           shared->resource.resource_priv_drv_data,
-                           shared->resource.resource_priv_drv_data_size) < 0) {
+                           parent_resource->resource_priv_drv_data,
+                           parent_resource->resource_priv_drv_data_size) < 0) {
             ret = -EFAULT;
             goto openresource_done;
         }
         alloc_private_offset = 0;
         for (uint32 i = 0; i < req.allocation_count; i++) {
-            uint32 private_size = shared->resource.alloc_priv_sizes[i];
+            uint32 private_size = parent_resource->alloc_priv_sizes[i];
 
             if (private_size != 0 &&
                 either_copyout(1, req.total_priv_drv_data + alloc_private_offset,
-                               shared->resource.total_priv_drv_data +
+                               parent_resource->total_priv_drv_data +
                                    alloc_private_offset,
                                private_size) < 0) {
                 ret = -EFAULT;
@@ -7308,13 +7369,6 @@ openresource_done:
 
             hvdxg_untrack_allocation(owner, req.device.v, cleanup_resource, 0);
             hvdxg_untrack_resource(owner, req.device.v, cleanup_resource);
-        }
-        if (ret != 0 && parent_ref_acquired) {
-            if (shared->parent_refs != 0)
-                shared->parent_refs--;
-            if (shared->opened_child_count > 1)
-                shared->opened_child_count--;
-            hvdxg_note_shared_parent(shared);
         }
         if (ret != 0 && host_resource_opened && req.device.v != 0 &&
             result != NULL && result->resource.v != 0)

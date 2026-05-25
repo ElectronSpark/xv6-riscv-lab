@@ -2804,6 +2804,158 @@ static void hvdxg_free_tracked_resource(struct hvdxg_tracked_resource *r)
     memset(r, 0, sizeof(*r));
 }
 
+static int hvdxg_clone_resource(struct hvdxg_tracked_resource *dst,
+                                const struct hvdxg_tracked_resource *src);
+static uint32 hvdxg_alloc_shared_parent_id(void);
+static void hvdxg_note_shared_parent(struct hvdxg_shared_object *shared);
+
+static struct hvdxg_tracked_resource *
+hvdxg_shared_parent_resource(struct hvdxg_shared_object *shared)
+{
+    if (shared != NULL && shared->resource_parent != NULL)
+        return &shared->resource_parent->resource;
+    return shared != NULL ? &shared->resource : NULL;
+}
+
+static void hvdxg_note_shared_resource_parent(
+    struct hvdxg_shared_resource_parent *parent)
+{
+    if (parent == NULL)
+        return;
+    hvdxg.sharedresource_parent_last_id = parent->id;
+    hvdxg.sharedresource_parent_last_refs = parent->refs;
+    hvdxg.sharedresource_parent_last_fd_refs = parent->fd_refs;
+    hvdxg.sharedresource_parent_last_children = parent->child_count;
+    hvdxg.sharedresource_parent_last_child = parent->last_child_resource;
+    hvdxg.sharedresource_parent_last_sealed_gen =
+        parent->sealed_generation;
+}
+
+static void hvdxg_shared_parent_put(
+    struct hvdxg_shared_resource_parent *parent)
+{
+    if (parent == NULL)
+        return;
+    hvdxg_note_shared_resource_parent(parent);
+    if (parent->refs != 0)
+        return;
+    hvdxg_free_tracked_resource(&parent->resource);
+    kvfree(parent);
+}
+
+static struct hvdxg_shared_resource_parent *
+hvdxg_shared_parent_create(struct hvdxg_tracked_resource *resource,
+                           uint32 cache_process, uint32 cache_object,
+                           uint32 global_share, uint32 host_nt_handle)
+{
+    struct hvdxg_shared_resource_parent *parent;
+    int ret;
+
+    if (resource == NULL)
+        return NULL;
+    parent = kvmalloc(sizeof(*parent));
+    if (parent == NULL)
+        return NULL;
+    memset(parent, 0, sizeof(*parent));
+    ret = hvdxg_clone_resource(&parent->resource, resource);
+    if (ret != 0) {
+        kvfree(parent);
+        return NULL;
+    }
+    parent->id = hvdxg_alloc_shared_parent_id();
+    parent->refs = 1;
+    parent->fd_refs = 1;
+    parent->host_nt_refs = 1;
+    parent->cache_process = cache_process;
+    parent->cache_object = cache_object;
+    parent->global_share = global_share;
+    parent->host_nt_handle = host_nt_handle;
+    parent->creator_child_resource = resource->resource;
+    parent->sealed_generation = parent->resource.sealed_generation;
+    parent->allocation_count = parent->resource.allocation_count;
+    parent->resource.shared_parent_id = parent->id;
+    parent->resource.shared_parent_refs_snapshot = parent->refs;
+    hvdxg.sharedresource_parent_publish_count++;
+    hvdxg_note_shared_resource_parent(parent);
+    return parent;
+}
+
+static int hvdxg_shared_parent_add_resource(
+    struct hvdxg_shared_resource_parent *parent,
+    struct hvdxg_tracked_resource *resource)
+{
+    struct hvdxg_shared_parent_child *slot = NULL;
+
+    if (parent == NULL || resource == NULL || resource->resource == 0)
+        return -EINVAL;
+    if (resource->shared_parent == parent)
+        return 0;
+    if (resource->shared_parent != NULL)
+        return -EINVAL;
+    for (uint32 i = 0; i < HV_DXG_SHARED_PARENT_CHILD_MAX; i++) {
+        struct hvdxg_shared_parent_child *child = &parent->children[i];
+
+        if (child->resource == resource->resource &&
+            child->device == resource->device)
+            return 0;
+        if (slot == NULL && child->resource == 0)
+            slot = child;
+    }
+    if (slot == NULL)
+        return -ENOSPC;
+    slot->device = resource->device;
+    slot->resource = resource->resource;
+    slot->owner_process = resource->owner_process;
+    slot->owner_generation = resource->owner_generation;
+    parent->refs++;
+    parent->child_refs++;
+    parent->child_count++;
+    parent->last_child_device = resource->device;
+    parent->last_child_resource = resource->resource;
+    parent->sealed_generation = parent->resource.sealed_generation;
+    parent->allocation_count = parent->resource.allocation_count;
+    resource->shared_parent = parent;
+    resource->shared_parent_id = parent->id;
+    resource->shared_parent_refs_snapshot = parent->refs;
+    hvdxg_note_shared_resource_parent(parent);
+    return 0;
+}
+
+static void hvdxg_shared_parent_remove_resource(
+    struct hvdxg_tracked_resource *resource)
+{
+    struct hvdxg_shared_resource_parent *parent;
+    int removed = 0;
+
+    if (resource == NULL || resource->shared_parent == NULL)
+        return;
+    parent = resource->shared_parent;
+    for (uint32 i = 0; i < HV_DXG_SHARED_PARENT_CHILD_MAX; i++) {
+        struct hvdxg_shared_parent_child *child = &parent->children[i];
+
+        if (child->resource == resource->resource &&
+            child->device == resource->device) {
+            memset(child, 0, sizeof(*child));
+            removed = 1;
+            break;
+        }
+    }
+    resource->shared_parent = NULL;
+    resource->shared_parent_id = 0;
+    resource->shared_parent_refs_snapshot = 0;
+    if (removed) {
+        if (parent->child_count != 0)
+            parent->child_count--;
+        if (parent->child_refs != 0)
+            parent->child_refs--;
+        if (parent->refs != 0)
+            parent->refs--;
+        hvdxg.sharedresource_parent_release_count++;
+    }
+    hvdxg_note_shared_resource_parent(parent);
+    hvdxg_shared_parent_put(parent);
+}
+
 static void hvdxg_untrack_resource(struct hvdxg_open_state *owner,
                                    uint32 device, uint32 resource)
 {
@@ -2815,6 +2967,7 @@ static void hvdxg_untrack_resource(struct hvdxg_open_state *owner,
             owner->resources[i].resource == resource) {
             uint32 last = owner->resource_count - 1;
 
+            hvdxg_shared_parent_remove_resource(&owner->resources[i]);
             hvdxg_free_tracked_resource(&owner->resources[i]);
             if (i != last)
                 owner->resources[i] = owner->resources[last];
@@ -3898,6 +4051,7 @@ static int hvdxg_track_resource(struct hvdxg_open_state *owner,
             goto fail;
         slot = &owner->resources[owner->resource_count++];
     } else {
+        hvdxg_shared_parent_remove_resource(slot);
         hvdxg_free_tracked_resource(slot);
     }
     *slot = tmp;
@@ -4479,6 +4633,10 @@ static void hvdxg_note_shared_parent(struct hvdxg_shared_object *shared)
 {
     if (shared == NULL || shared->kind != HV_DXG_SHARED_OBJECT_RESOURCE)
         return;
+    if (shared->resource_parent != NULL) {
+        hvdxg_note_shared_resource_parent(shared->resource_parent);
+        return;
+    }
     hvdxg.sharedresource_parent_last_id = shared->parent_id;
     hvdxg.sharedresource_parent_last_refs = shared->parent_refs;
     hvdxg.sharedresource_parent_last_fd_refs = shared->fd_refs;
@@ -4600,8 +4758,13 @@ static int hvdxg_shared_object_release(struct vfs_inode *ip,
             shared->object,
             shared->host_nt_handle);
         if (refs_before == 0 &&
-            shared->kind == HV_DXG_SHARED_OBJECT_RESOURCE)
-            refs_before = shared->resource.host_shared_refs;
+            shared->kind == HV_DXG_SHARED_OBJECT_RESOURCE) {
+            struct hvdxg_tracked_resource *resource =
+                hvdxg_shared_parent_resource(shared);
+
+            refs_before = resource != NULL ?
+                resource->host_shared_refs : 0;
+        }
         hvdxg.sharedclose_last_kind = shared->kind;
         hvdxg.sharedclose_last_process = shared->cache_process;
         hvdxg.sharedclose_last_object =
@@ -4669,12 +4832,28 @@ static int hvdxg_shared_object_release(struct vfs_inode *ip,
             }
         }
         if (shared->kind == HV_DXG_SHARED_OBJECT_RESOURCE) {
-            if (shared->fd_refs != 0)
-                shared->fd_refs--;
-            if (shared->parent_refs != 0)
-                shared->parent_refs--;
+            if (shared->resource_parent != NULL) {
+                if (destroy_handle != 0)
+                    hvdxg_clear_resource_nt_shared_handle(
+                        &shared->resource_parent->resource,
+                        destroy_handle);
+                if (shared->resource_parent->fd_refs != 0)
+                    shared->resource_parent->fd_refs--;
+                if (shared->resource_parent->host_nt_refs != 0)
+                    shared->resource_parent->host_nt_refs--;
+                if (shared->resource_parent->refs != 0)
+                    shared->resource_parent->refs--;
+                hvdxg_note_shared_resource_parent(shared->resource_parent);
+                hvdxg_shared_parent_put(shared->resource_parent);
+                shared->resource_parent = NULL;
+            } else {
+                if (shared->fd_refs != 0)
+                    shared->fd_refs--;
+                if (shared->parent_refs != 0)
+                    shared->parent_refs--;
+                hvdxg_note_shared_parent(shared);
+            }
             hvdxg.sharedresource_parent_release_count++;
-            hvdxg_note_shared_parent(shared);
         }
         if (shared->kind > 0 &&
             shared->kind < HV_DXG_SHARED_OBJECT_KIND_MAX) {
@@ -4704,7 +4883,8 @@ static int hvdxg_shared_object_release(struct vfs_inode *ip,
             hvdxg.sharedclose_kind_destroy_result_len[kind] =
                 hvdxg.sharedclose_last_destroy_result_len;
         }
-        if (shared->kind == HV_DXG_SHARED_OBJECT_RESOURCE)
+        if (shared->kind == HV_DXG_SHARED_OBJECT_RESOURCE &&
+            shared->resource_parent == NULL)
             hvdxg_free_tracked_resource(&shared->resource);
         kvfree(shared);
         file->private_data = NULL;
@@ -4826,7 +5006,11 @@ int hyperv_dxg_shared_resource_snapshot_from_fd(
         return -EINVAL;
     }
 
-    resource = &shared->resource;
+    resource = hvdxg_shared_parent_resource(shared);
+    if (resource == NULL) {
+        vfs_fput(file);
+        return -EINVAL;
+    }
     snapshot->device = resource->device;
     snapshot->resource = resource->resource;
     snapshot->allocation_count = resource->allocation_count;
@@ -4836,9 +5020,15 @@ int hyperv_dxg_shared_resource_snapshot_from_fd(
     snapshot->shared_records_valid = resource->shared_records_valid;
     snapshot->generation = resource->sealed_generation;
     snapshot->host_shared_refs = resource->host_shared_refs;
-    snapshot->shared_parent_id = shared->parent_id;
-    snapshot->shared_parent_refs = shared->parent_refs;
-    snapshot->shared_parent_children = shared->opened_child_count;
+    if (shared->resource_parent != NULL) {
+        snapshot->shared_parent_id = shared->resource_parent->id;
+        snapshot->shared_parent_refs = shared->resource_parent->refs;
+        snapshot->shared_parent_children = shared->resource_parent->child_count;
+    } else {
+        snapshot->shared_parent_id = shared->parent_id;
+        snapshot->shared_parent_refs = shared->parent_refs;
+        snapshot->shared_parent_children = shared->opened_child_count;
+    }
     vfs_fput(file);
     return snapshot->kind == HV_DXG_SHARED_OBJECT_RESOURCE &&
            snapshot->fops_kind == HV_DXG_SHARED_FOPS_RESOURCE &&
@@ -4854,6 +5044,7 @@ int hyperv_dxg_shared_resource_snapshot_from_opened_resource(
 {
     struct hvdxg_shared_object *shared;
     struct hvdxg_tracked_resource *opened;
+    struct hvdxg_tracked_resource *parent_resource;
     struct vfs_file *shared_file = NULL;
     struct vfs_file *dxg_file = NULL;
     struct hvdxg_open_state *owner;
@@ -4876,9 +5067,12 @@ int hyperv_dxg_shared_resource_snapshot_from_opened_resource(
         return -EINVAL;
     fops_kind = hvdxg_shared_object_fops_kind(shared_file);
     if (fops_kind != HV_DXG_SHARED_FOPS_RESOURCE ||
-        shared->global_share == 0 || shared->resource.sealed == 0 ||
-        shared->resource.shared_records_valid == 0 ||
-        shared->resource.sealed_generation == 0)
+        shared->global_share == 0)
+        goto out;
+    parent_resource = hvdxg_shared_parent_resource(shared);
+    if (parent_resource == NULL || parent_resource->sealed == 0 ||
+        parent_resource->shared_records_valid == 0 ||
+        parent_resource->sealed_generation == 0)
         goto out;
 
     dxg_file = vfs_fdtable_get_file(current->fdtable, dxg_fd);
@@ -4900,13 +5094,19 @@ int hyperv_dxg_shared_resource_snapshot_from_opened_resource(
     snapshot->resource = opened->resource;
     snapshot->allocation_count = opened->allocation_count;
     snapshot->first_allocation = opened->allocation_handles[0];
-    snapshot->sealed = shared->resource.sealed;
-    snapshot->shared_records_valid = shared->resource.shared_records_valid;
-    snapshot->generation = shared->resource.sealed_generation;
-    snapshot->host_shared_refs = shared->resource.host_shared_refs;
-    snapshot->shared_parent_id = shared->parent_id;
-    snapshot->shared_parent_refs = shared->parent_refs;
-    snapshot->shared_parent_children = shared->opened_child_count;
+    snapshot->sealed = parent_resource->sealed;
+    snapshot->shared_records_valid = parent_resource->shared_records_valid;
+    snapshot->generation = parent_resource->sealed_generation;
+    snapshot->host_shared_refs = parent_resource->host_shared_refs;
+    if (shared->resource_parent != NULL) {
+        snapshot->shared_parent_id = shared->resource_parent->id;
+        snapshot->shared_parent_refs = shared->resource_parent->refs;
+        snapshot->shared_parent_children = shared->resource_parent->child_count;
+    } else {
+        snapshot->shared_parent_id = shared->parent_id;
+        snapshot->shared_parent_refs = shared->parent_refs;
+        snapshot->shared_parent_children = shared->opened_child_count;
+    }
     ret = 0;
 
 out:
@@ -4925,6 +5125,7 @@ int hyperv_dxg_display_bind_pin_from_fds(
     struct hvdxg_shared_object *shared;
     struct hvdxg_tracked_resource *opened;
     struct hvdxg_tracked_resource *pinned_resource = NULL;
+    struct hvdxg_tracked_resource *parent_resource;
     struct vfs_file *shared_file = NULL;
     struct vfs_file *dxg_file = NULL;
     struct hvdxg_open_state *owner;
@@ -4947,9 +5148,12 @@ int hyperv_dxg_display_bind_pin_from_fds(
         return -EINVAL;
     fops_kind = hvdxg_shared_object_fops_kind(shared_file);
     if (fops_kind != HV_DXG_SHARED_FOPS_RESOURCE ||
-        shared->global_share == 0 || shared->resource.sealed == 0 ||
-        shared->resource.shared_records_valid == 0 ||
-        shared->resource.sealed_generation == 0)
+        shared->global_share == 0)
+        goto out;
+    parent_resource = hvdxg_shared_parent_resource(shared);
+    if (parent_resource == NULL || parent_resource->sealed == 0 ||
+        parent_resource->shared_records_valid == 0 ||
+        parent_resource->sealed_generation == 0)
         goto out;
 
     dxg_file = vfs_fdtable_get_file(current->fdtable, dxg_fd);
@@ -4963,15 +5167,11 @@ int hyperv_dxg_display_bind_pin_from_fds(
         opened->allocation_count != 0 &&
         opened->allocation_count <= HV_DXG_ALLOCATION_MAX &&
         opened->allocation_handles[0] == allocation &&
-        opened->global_share == shared->global_share) {
+        opened->global_share == shared->global_share &&
+        opened->shared_parent_id ==
+            (shared->resource_parent != NULL ?
+             shared->resource_parent->id : shared->parent_id)) {
         pinned_resource = opened;
-    } else if (shared->resource.device == device &&
-               shared->resource.resource == resource &&
-               shared->resource.allocation_count == allocation_count &&
-               shared->resource.allocation_count != 0 &&
-               shared->resource.allocation_count <= HV_DXG_ALLOCATION_MAX &&
-               shared->resource.allocation_handles[0] == allocation) {
-        pinned_resource = &shared->resource;
     } else {
         goto out;
     }
@@ -4986,13 +5186,19 @@ int hyperv_dxg_display_bind_pin_from_fds(
     snapshot->resource = pinned_resource->resource;
     snapshot->allocation_count = pinned_resource->allocation_count;
     snapshot->first_allocation = pinned_resource->allocation_handles[0];
-    snapshot->sealed = shared->resource.sealed;
-    snapshot->shared_records_valid = shared->resource.shared_records_valid;
-    snapshot->generation = shared->resource.sealed_generation;
-    snapshot->host_shared_refs = shared->resource.host_shared_refs;
-    snapshot->shared_parent_id = shared->parent_id;
-    snapshot->shared_parent_refs = shared->parent_refs;
-    snapshot->shared_parent_children = shared->opened_child_count;
+    snapshot->sealed = parent_resource->sealed;
+    snapshot->shared_records_valid = parent_resource->shared_records_valid;
+    snapshot->generation = parent_resource->sealed_generation;
+    snapshot->host_shared_refs = parent_resource->host_shared_refs;
+    if (shared->resource_parent != NULL) {
+        snapshot->shared_parent_id = shared->resource_parent->id;
+        snapshot->shared_parent_refs = shared->resource_parent->refs;
+        snapshot->shared_parent_children = shared->resource_parent->child_count;
+    } else {
+        snapshot->shared_parent_id = shared->parent_id;
+        snapshot->shared_parent_refs = shared->parent_refs;
+        snapshot->shared_parent_children = shared->opened_child_count;
+    }
     snapshot->process = hvdxg_open_host_process(owner);
     snapshot->process_generation = hvdxg_open_process_generation(owner);
     snapshot->process_refs = hvdxg_open_process_refs(owner);
@@ -6829,6 +7035,7 @@ static void hvdxg_cleanup_open_state(struct hvdxg_open_state *owner)
             &owner->resources[--owner->resource_count];
 
         hvdxg_untrack_object(owner, HV_DXG_OBJECT_RESOURCE, r->resource);
+        hvdxg_shared_parent_remove_resource(r);
         hvdxg_free_tracked_resource(r);
     }
     if (owner->paging_queues == NULL)
@@ -6902,8 +7109,13 @@ static void hvdxg_free_open_state(struct hvdxg_open_state *owner)
     }
     if (owner->resources == NULL)
         owner->resource_count = 0;
-    while (owner->resource_count > 0)
-        hvdxg_free_tracked_resource(&owner->resources[--owner->resource_count]);
+    while (owner->resource_count > 0) {
+        struct hvdxg_tracked_resource *r =
+            &owner->resources[--owner->resource_count];
+
+        hvdxg_shared_parent_remove_resource(r);
+        hvdxg_free_tracked_resource(r);
+    }
     owner->gpuva_count = 0;
     owner->object_count = 0;
     owner->object_free_count = 0;
