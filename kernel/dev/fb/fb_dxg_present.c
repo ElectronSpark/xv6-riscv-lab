@@ -325,6 +325,7 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
                                    struct fb_gpu_dxg_present_source_register *req)
 {
     struct fb_gpu_dxg_present_source_entry *source = NULL;
+    struct hyperv_dxg_shared_resource_snapshot resource_snapshot;
     int print_flags_reject = 0;
     uint32 print_flags = 0;
     uint32 print_device = 0;
@@ -337,11 +338,25 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
     uint64 print_dxg_fd = 0xffffffffULL;
     uint64 print_resource_fd = 0xffffffffULL;
     uint64 print_rejects = 0;
+    int resource_snapshot_valid = 0;
     int ret = 0;
 
     if (req == NULL)
         return -EINVAL;
     fb_dxg_present_sanitize_register_tail(req);
+    memset(&resource_snapshot, 0, sizeof(resource_snapshot));
+    if (req->resource_fd >= 0) {
+        ret = hyperv_dxg_shared_resource_snapshot_from_fd(
+            req->resource_fd, &resource_snapshot);
+        if (ret == 0 &&
+            resource_snapshot.device == req->device &&
+            resource_snapshot.resource == req->resource &&
+            resource_snapshot.allocation_count == req->allocation_count &&
+            resource_snapshot.first_allocation == req->allocation)
+            resource_snapshot_valid = 1;
+        else
+            ret = -EINVAL;
+    }
     spin_lock(&fb_state.lock);
     fb_state.stats.dxg_present_register_attempts++;
     fb_state.stats.dxg_present_last_ret = 0;
@@ -386,7 +401,8 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
         FB_GPU_DXG_PRESENT_BLOCK_LUID_UNVERIFIED;
     fb_dxg_present_note_transport_contract_locked(NULL, 0);
 
-    if (req->flags != 0 || req->dxg_fd < 0 || req->resource_fd < -1 ||
+    if (ret != 0 ||
+        req->flags != 0 || req->dxg_fd < 0 || req->resource_fd < -1 ||
         req->device == 0 || req->resource == 0 || req->allocation == 0 ||
         req->allocation_count == 0 || req->allocation_count > 1024 ||
         req->width == 0 || req->height == 0 ||
@@ -433,6 +449,14 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
     source->owner_tgid = owner_tgid;
     source->dxg_fd = req->dxg_fd;
     source->resource_fd = req->resource_fd;
+    if (resource_snapshot_valid) {
+        source->resource_fd_kind = resource_snapshot.kind;
+        source->resource_fd_sealed = resource_snapshot.sealed;
+        source->resource_fd_shared_records_valid =
+            resource_snapshot.shared_records_valid;
+        source->resource_fd_matches_handles = 1;
+        source->resource_fd_generation = resource_snapshot.generation;
+    }
     source->device = req->device;
     source->resource = req->resource;
     source->allocation = req->allocation;
@@ -811,6 +835,13 @@ static int fb_dxg_present_query(uint64 owner_id, pid_t owner_tgid,
         req->adapter_luid_low = source->adapter_luid_low;
         req->adapter_luid_high = source->adapter_luid_high;
         req->adapter_identity = source->adapter_identity;
+        req->resource_fd_kind = source->resource_fd_kind;
+        req->resource_fd_sealed = source->resource_fd_sealed;
+        req->resource_fd_matches_handles =
+            source->resource_fd_matches_handles;
+        req->resource_fd_shared_records_valid =
+            source->resource_fd_shared_records_valid;
+        req->resource_fd_generation = source->resource_fd_generation;
     } else {
         req->dxg_fd = (int32)fb_state.stats.dxg_present_last_dxg_fd;
         req->resource_fd =
@@ -915,14 +946,24 @@ static int fb_dxg_present_bind_contract_query(
             req->adapter_luid_low = source->adapter_luid_low;
             req->adapter_luid_high = source->adapter_luid_high;
             req->provenance_flags = source->provenance_flags;
+            req->resource_fd_kind = source->resource_fd_kind;
+            req->resource_fd_sealed = source->resource_fd_sealed;
+            req->resource_fd_matches_handles =
+                source->resource_fd_matches_handles;
+            req->resource_fd_shared_records_valid =
+                source->resource_fd_shared_records_valid;
+            req->resource_fd_generation = source->resource_fd_generation;
         }
     }
     flags = req->flags;
     adapter_identity = fb_dxg_present_adapter_identity(
         req->adapter_luid_low, req->adapter_luid_high);
     provenance = fb_dxg_present_bind_contract_provenance(req);
-    resource_generation = fb_dxg_present_resource_generation(
-        req->device, req->resource, req->allocation, req->allocation_count);
+    resource_generation = req->resource_fd_generation != 0 ?
+        req->resource_fd_generation :
+        fb_dxg_present_resource_generation(
+            req->device, req->resource, req->allocation,
+            req->allocation_count);
 
     if ((req->version != 0 && req->version != 1) ||
         (flags & ~FB_GPU_DXG_PRESENT_F_WAIT_SYNC) != 0 ||
@@ -977,6 +1018,12 @@ static int fb_dxg_present_bind_contract_query(
         fb_state.stats.dxg_present_helper_block_reason |=
             FB_GPU_DXG_PRESENT_BLOCK_NO_REGISTERED_SOURCE;
     if (req->resource_fd < 0)
+        fb_state.stats.dxg_present_helper_block_reason |=
+            FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED;
+    if (req->resource_fd >= 0 &&
+        (req->resource_fd_kind != 2 || req->resource_fd_sealed == 0 ||
+         req->resource_fd_matches_handles == 0 ||
+         req->resource_fd_shared_records_valid == 0))
         fb_state.stats.dxg_present_helper_block_reason |=
             FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED;
     if (adapter_identity == FB_GPU_DXG_PRESENT_ADAPTER_MISMATCH)

@@ -4644,6 +4644,46 @@ static struct hvdxg_shared_object *hvdxg_shared_object_from_fd(
     return shared;
 }
 
+int hyperv_dxg_shared_resource_snapshot_from_fd(
+    int fd, struct hyperv_dxg_shared_resource_snapshot *snapshot)
+{
+    struct hvdxg_shared_object *shared;
+    struct vfs_file *file = NULL;
+    struct hvdxg_tracked_resource *resource;
+
+    if (snapshot == NULL)
+        return -EINVAL;
+    memset(snapshot, 0, sizeof(*snapshot));
+
+    shared = hvdxg_shared_object_from_fd(fd, 0, &file);
+    if (shared == NULL)
+        return -EINVAL;
+
+    snapshot->kind = shared->kind;
+    snapshot->fops_kind = hvdxg_shared_object_fops_kind(file);
+    if (shared->kind != HV_DXG_SHARED_OBJECT_RESOURCE) {
+        vfs_fput(file);
+        return -EINVAL;
+    }
+
+    resource = &shared->resource;
+    snapshot->device = resource->device;
+    snapshot->resource = resource->resource;
+    snapshot->allocation_count = resource->allocation_count;
+    snapshot->first_allocation = resource->allocation_count != 0 ?
+        resource->allocation_handles[0] : 0;
+    snapshot->sealed = resource->sealed;
+    snapshot->shared_records_valid = resource->shared_records_valid;
+    snapshot->generation = resource->sealed_generation;
+    snapshot->host_shared_refs = resource->host_shared_refs;
+    vfs_fput(file);
+    return snapshot->kind == HV_DXG_SHARED_OBJECT_RESOURCE &&
+           snapshot->fops_kind == HV_DXG_SHARED_FOPS_RESOURCE &&
+           snapshot->sealed != 0 &&
+           snapshot->shared_records_valid != 0 &&
+           snapshot->generation != 0 ? 0 : -EINVAL;
+}
+
 static int hvdxg_sync_file_release(struct vfs_inode *ip,
                                    struct vfs_file *file)
 {

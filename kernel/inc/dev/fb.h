@@ -539,6 +539,11 @@ struct fb_gpu_dxg_present_source_query {
     uint32   helper_block_reason; /* legacy name: GPU-P/DDA block reason */
     uint64   host_candidates;
     uint64   host_rejects;
+    uint32   resource_fd_kind; /* 2 means WSL-style dxgresource fd */
+    uint32   resource_fd_sealed; /* sealed metadata was visible at admission */
+    uint32   resource_fd_matches_handles; /* fd metadata matches D3DKMT handles */
+    uint32   resource_fd_shared_records_valid;
+    uint64   resource_fd_generation; /* sealed shared-resource generation */
 };
 
 /*
@@ -589,7 +594,12 @@ struct fb_gpu_dxg_present_host_bind_contract {
     int32 dxg_fd;
     int32 resource_fd;
     uint32 adapter_identity;
+    uint32 resource_fd_kind;
+    uint32 resource_fd_sealed;
+    uint32 resource_fd_matches_handles;
+    uint32 resource_fd_shared_records_valid;
     uint32 reserved2;
+    uint64 resource_fd_generation;
 };
 
 struct fb_gpu_bo_fence {

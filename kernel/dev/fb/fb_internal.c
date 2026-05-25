@@ -251,6 +251,11 @@ struct fb_gpu_dxg_present_source_entry {
     pid_t owner_tgid;
     int32 dxg_fd;
     int32 resource_fd;
+    uint32 resource_fd_kind;
+    uint32 resource_fd_sealed;
+    uint32 resource_fd_shared_records_valid;
+    uint32 resource_fd_matches_handles;
+    uint64 resource_fd_generation;
     uint32 device;
     uint32 resource;
     uint32 allocation;

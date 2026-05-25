@@ -111,6 +111,20 @@ int hyperv_video_get_status(struct hyperv_video_status *status);
 int hyperv_dxg_transport_ready(void);
 int hyperv_dxg_d3dkmt_ready(void);
 int hyperv_dxg_get_status(struct hyperv_dxg_status *status);
+struct hyperv_dxg_shared_resource_snapshot {
+    uint32 kind;
+    uint32 fops_kind;
+    uint32 device;
+    uint32 resource;
+    uint32 allocation_count;
+    uint32 first_allocation;
+    uint32 sealed;
+    uint32 shared_records_valid;
+    uint32 generation;
+    uint32 host_shared_refs;
+};
+int hyperv_dxg_shared_resource_snapshot_from_fd(
+    int fd, struct hyperv_dxg_shared_resource_snapshot *snapshot);
 void hyperv_dxg_note_pci(uint32 domain, uint32 bus, uint32 dev, uint32 func,
                          uint32 vendor, uint32 device, uint32 class_code,
                          uint32 guid0, uint32 guid1, uint32 guid2,
