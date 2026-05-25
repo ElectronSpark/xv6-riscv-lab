@@ -925,9 +925,15 @@ struct fb_gpu_stats {
     uint64 nouveau_pci_msi_cap; /* PCI MSI capability offset, if present */
     uint64 nouveau_pci_msix_cap; /* PCI MSI-X capability offset, if present */
     uint64 nouveau_pci_dma_mask_configured; /* streaming DMA mask set */
+    uint64 nouveau_pci_dma_mask_requested_bits; /* requested streaming bits */
     uint64 nouveau_pci_dma_mask_bits; /* streaming DMA address bits */
+    uint64 nouveau_pci_dma_mask_effective_bits; /* effective streaming bits */
+    uint64 nouveau_pci_dma_mask_fallback_32; /* 64-bit streaming fallback */
     uint64 nouveau_pci_coherent_dma_mask_configured; /* coherent mask set */
+    uint64 nouveau_pci_coherent_dma_mask_requested_bits; /* requested coherent */
     uint64 nouveau_pci_coherent_dma_mask_bits; /* coherent DMA bits */
+    uint64 nouveau_pci_coherent_dma_mask_effective_bits; /* effective coherent */
+    uint64 nouveau_pci_coherent_dma_mask_fallback_32; /* 64-bit coherent fallback */
     uint64 nouveau_pci_bar0_claimed; /* BAR0 region claim state */
     uint64 nouveau_pci_bar1_claimed; /* BAR1 region claim state */
     uint64 nouveau_pci_bar_claim_failures; /* BAR claim failures */
@@ -947,6 +953,14 @@ struct fb_gpu_stats {
     uint64 nouveau_pci_irq_delivery_enabled; /* interrupts can be delivered */
     uint64 nouveau_pci_irq_delivery_claimed; /* driver claims live delivery */
     uint64 nouveau_pci_legacy_irq_fallback; /* legacy vector fallback used */
+    uint64 nouveau_pci_dma_map_api_present; /* PCI DMA map API available */
+    uint64 nouveau_pci_dma_map_attempts; /* Nouveau DMA map attempts */
+    uint64 nouveau_pci_dma_map_successes; /* Nouveau DMA map successes */
+    uint64 nouveau_pci_dma_map_failures; /* Nouveau DMA map failures */
+    uint64 nouveau_pci_dma_unmaps; /* Nouveau DMA unmap calls */
+    uint64 nouveau_pci_dma_map_last_size; /* last DMA mapping size */
+    uint64 nouveau_pci_dma_map_last_addr; /* last DMA bus address */
+    uint64 nouveau_pci_dma_map_last_ret; /* last DMA map errno */
     uint64 nouveau_pci_native_present_credit; /* native scanout credit */
     uint64 kms_framebuffers;   /* currently registered KMS framebuffer IDs */
     uint64 kms_page_flips;     /* accepted KMS page flips */

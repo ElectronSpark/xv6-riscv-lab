@@ -206,6 +206,10 @@ struct pci_virtual_child {
 #define PCI_IRQ_MSI    0x2
 #define PCI_IRQ_MSIX   0x4
 
+#define PCI_DMA_BIDIRECTIONAL 0
+#define PCI_DMA_TO_DEVICE     1
+#define PCI_DMA_FROM_DEVICE   2
+
 struct pci_device_id {
     uint32 vendor;
     uint32 device;
@@ -237,6 +241,8 @@ struct pci_device_info {
     uint8  irq_vectors_allocated;
     uint8  irq_vector_count;
     uint8  irq_flags;
+    uint8  dma_mask_requested_bits;
+    uint8  coherent_dma_mask_requested_bits;
     uint8  dma_mask_bits;
     uint8  coherent_dma_mask_bits;
     uint8  dma_mask_configured;
@@ -260,6 +266,16 @@ struct pci_device_info {
     uint32 resource_owner_mismatch_count;
     uint32 resource_unclaimed_iomap_count;
     uint32 resource_unclaimed_release_count;
+    uint32 dma_mask_fallback_32_count;
+    uint32 coherent_dma_mask_fallback_32_count;
+    uint32 dma_map_count;
+    uint32 dma_unmap_count;
+    uint32 dma_map_fail_count;
+    uint64 dma_map_last_va;
+    uint64 dma_map_last_dma;
+    uint64 dma_map_last_size;
+    uint32 dma_map_last_direction;
+    int32 dma_map_last_ret;
     void *driver_data;
     const char *driver_name;
     struct pci_driver *driver;
@@ -325,6 +341,10 @@ int pci_irq_vector(struct pci_device_info *pdev, uint32 nr);
 void pci_free_irq_vectors(struct pci_device_info *pdev);
 int pci_set_dma_mask(struct pci_device_info *pdev, uint64 mask);
 int pci_set_consistent_dma_mask(struct pci_device_info *pdev, uint64 mask);
+int pci_dma_map_single(struct pci_device_info *pdev, void *cpu_addr,
+                       uint64 size, uint32 direction, uint64 *dma_addr);
+void pci_dma_unmap_single(struct pci_device_info *pdev, uint64 dma_addr,
+                          uint64 size, uint32 direction);
 int pci_pm_suspend_device(struct pci_device_info *pdev);
 int pci_pm_resume_device(struct pci_device_info *pdev);
 void pci_pm_suspend_all(void);

@@ -589,6 +589,8 @@ int pci_set_dma_mask(struct pci_device_info *pdev, uint64 mask)
     if (pdev == NULL)
         return -ENODEV;
     bits = pci_dma_mask_bits(mask);
+    if (bits > pdev->dma_mask_requested_bits)
+        pdev->dma_mask_requested_bits = (uint8)bits;
     if (bits == 0 || bits > 64)
         return -EINVAL;
     pdev->dma_mask_bits = (uint8)bits;
@@ -603,11 +605,84 @@ int pci_set_consistent_dma_mask(struct pci_device_info *pdev, uint64 mask)
     if (pdev == NULL)
         return -ENODEV;
     bits = pci_dma_mask_bits(mask);
+    if (bits > pdev->coherent_dma_mask_requested_bits)
+        pdev->coherent_dma_mask_requested_bits = (uint8)bits;
     if (bits == 0 || bits > 64)
         return -EINVAL;
     pdev->coherent_dma_mask_bits = (uint8)bits;
     pdev->coherent_dma_mask_configured = 1;
     return 0;
+}
+
+static uint64 pci_dma_mask_from_bits(uint8 bits)
+{
+    if (bits >= 64)
+        return ~0ULL;
+    if (bits == 0)
+        return 0;
+    return (1ULL << bits) - 1;
+}
+
+int pci_dma_map_single(struct pci_device_info *pdev, void *cpu_addr,
+                       uint64 size, uint32 direction, uint64 *dma_addr)
+{
+    uint64 va;
+    uint64 pa;
+    uint64 end;
+    uint64 mask;
+    int ret = 0;
+
+    if (dma_addr != NULL)
+        *dma_addr = 0;
+    if (pdev == NULL)
+        return -ENODEV;
+    pdev->dma_map_last_va = (uint64)cpu_addr;
+    pdev->dma_map_last_dma = 0;
+    pdev->dma_map_last_size = size;
+    pdev->dma_map_last_direction = direction;
+    pdev->dma_map_last_ret = 0;
+    if (cpu_addr == NULL || size == 0 || dma_addr == NULL ||
+        direction > PCI_DMA_FROM_DEVICE) {
+        ret = -EINVAL;
+        goto fail;
+    }
+    if (!pdev->enabled || !pdev->master_enabled ||
+        !pdev->dma_mask_configured) {
+        ret = -EOPNOTSUPP;
+        goto fail;
+    }
+    va = (uint64)cpu_addr;
+    pa = va >= (uint64)PA2VA(0) ? VA2PA(va) : va;
+    end = pa + size - 1;
+    if (end < pa) {
+        ret = -EOVERFLOW;
+        goto fail;
+    }
+    mask = pci_dma_mask_from_bits(pdev->dma_mask_bits);
+    if (mask == 0 || end > mask) {
+        ret = -EOVERFLOW;
+        goto fail;
+    }
+    pdev->dma_map_count++;
+    pdev->dma_map_last_dma = pa;
+    *dma_addr = pa;
+    return 0;
+
+fail:
+    pdev->dma_map_fail_count++;
+    pdev->dma_map_last_ret = ret;
+    return ret;
+}
+
+void pci_dma_unmap_single(struct pci_device_info *pdev, uint64 dma_addr,
+                          uint64 size, uint32 direction)
+{
+    if (pdev == NULL)
+        return;
+    (void)dma_addr;
+    (void)size;
+    (void)direction;
+    pdev->dma_unmap_count++;
 }
 
 int pci_pm_suspend_device(struct pci_device_info *pdev)

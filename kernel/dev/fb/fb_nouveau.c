@@ -52,6 +52,9 @@ static void gpu_nouveau_stat_set(uint64 *counter, uint64 value)
     spin_unlock(&fb_state.lock);
 }
 
+static unsigned char gpu_nouveau_dma_probe_page[4096]
+    __attribute__((aligned(4096)));
+
 static uint64 gpu_nouveau_resource_len(struct pci_device_info *dev, int bar)
 {
     if (dev == NULL)
@@ -103,14 +106,32 @@ static void gpu_nouveau_pci_publish_core_state(struct pci_device_info *pdev)
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_dma_mask_configured,
         pdev->dma_mask_configured);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_mask_requested_bits,
+        pdev->dma_mask_requested_bits);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_mask_bits,
                          pdev->dma_mask_bits);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_mask_effective_bits,
+        pdev->dma_mask_bits);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_mask_fallback_32,
+        pdev->dma_mask_fallback_32_count);
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_coherent_dma_mask_configured,
         pdev->coherent_dma_mask_configured);
     gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_coherent_dma_mask_requested_bits,
+        pdev->coherent_dma_mask_requested_bits);
+    gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_coherent_dma_mask_bits,
         pdev->coherent_dma_mask_bits);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_coherent_dma_mask_effective_bits,
+        pdev->coherent_dma_mask_bits);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_coherent_dma_mask_fallback_32,
+        pdev->coherent_dma_mask_fallback_32_count);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_bar0_claimed,
                          pdev->resource_claimed[0]);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_bar1_claimed,
@@ -142,6 +163,46 @@ static void gpu_nouveau_pci_publish_core_state(struct pci_device_info *pdev)
             gpu_nouveau_pci.irq_number >= 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_legacy_irq_fallback,
                          pdev->irq_flags == PCI_IRQ_LEGACY);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_map_api_present, 1);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_map_attempts,
+                         pdev->dma_map_count + pdev->dma_map_fail_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_map_successes,
+                         pdev->dma_map_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_map_failures,
+                         pdev->dma_map_fail_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_unmaps,
+                         pdev->dma_unmap_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_map_last_size,
+                         pdev->dma_map_last_size);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_map_last_addr,
+                         pdev->dma_map_last_dma);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_map_last_ret,
+        pdev->dma_map_last_ret < 0 ? (uint64)(-pdev->dma_map_last_ret) :
+                                     (uint64)pdev->dma_map_last_ret);
+}
+
+static int gpu_nouveau_pci_configure_dma_masks(struct pci_device_info *pdev)
+{
+    int ret;
+
+    ret = pci_set_dma_mask(pdev, ~0ULL);
+    if (ret != 0) {
+        if (pdev != NULL)
+            pdev->dma_mask_fallback_32_count++;
+        ret = pci_set_dma_mask(pdev, 0xffffffffULL);
+    }
+    if (ret != 0)
+        return ret;
+
+    ret = pci_set_consistent_dma_mask(pdev, ~0ULL);
+    if (ret != 0) {
+        if (pdev != NULL)
+            pdev->coherent_dma_mask_fallback_32_count++;
+        ret = pci_set_consistent_dma_mask(pdev, 0xffffffffULL);
+    }
+    return ret;
 }
 
 static int gpu_nouveau_pci_register_irq(struct pci_device_info *pdev)
@@ -174,6 +235,38 @@ static void gpu_nouveau_pci_unregister_irq(void)
     unregister_irq_handler(gpu_nouveau_pci.irq_number);
     gpu_nouveau_pci.irq_registered = 0;
     gpu_nouveau_pci.irq_number = 0;
+}
+
+static int gpu_nouveau_pci_probe_dma_mapping(struct pci_device_info *pdev)
+{
+    uint64 dma_addr = 0;
+    int ret;
+
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_map_api_present, 1);
+    ret = pci_dma_map_single(pdev, gpu_nouveau_dma_probe_page,
+                             sizeof(gpu_nouveau_dma_probe_page),
+                             PCI_DMA_BIDIRECTIONAL, &dma_addr);
+    if (ret != 0) {
+        gpu_nouveau_stat_inc(
+            &fb_state.stats.nouveau_pci_dma_map_failures);
+        gpu_nouveau_stat_set(
+            &fb_state.stats.nouveau_pci_dma_map_last_ret,
+            ret < 0 ? (uint64)(-ret) : (uint64)ret);
+        gpu_nouveau_pci_publish_core_state(pdev);
+        return ret;
+    }
+    gpu_nouveau_stat_inc(
+        &fb_state.stats.nouveau_pci_dma_map_successes);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_map_last_addr,
+                         dma_addr);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_map_last_size,
+                         sizeof(gpu_nouveau_dma_probe_page));
+    pci_dma_unmap_single(pdev, dma_addr, sizeof(gpu_nouveau_dma_probe_page),
+                         PCI_DMA_BIDIRECTIONAL);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_dma_unmaps);
+    gpu_nouveau_pci_publish_core_state(pdev);
+    return 0;
 }
 
 static void gpu_nouveau_pci_unwind_probe_resources(
@@ -245,9 +338,7 @@ static int gpu_nouveau_pci_probe(struct pci_device_info *pdev,
         return ret;
     }
 
-    ret = pci_set_dma_mask(pdev, ~0ULL);
-    if (ret == 0)
-        ret = pci_set_consistent_dma_mask(pdev, ~0ULL);
+    ret = gpu_nouveau_pci_configure_dma_masks(pdev);
     if (ret != 0) {
         gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_probe_failures);
         pci_disable_device(pdev);
@@ -285,6 +376,13 @@ static int gpu_nouveau_pci_probe(struct pci_device_info *pdev,
         gpu_nouveau_pci.bar1_claimed = 1;
     }
     pci_set_master(pdev);
+
+    ret = gpu_nouveau_pci_probe_dma_mapping(pdev);
+    if (ret != 0) {
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_probe_failures);
+        gpu_nouveau_pci_unwind_probe_resources(pdev);
+        return ret;
+    }
 
     gpu_nouveau_pci.bar0_len = bar0_len;
     gpu_nouveau_pci.bar1_len = bar1_len;
@@ -404,6 +502,31 @@ static void gpu_nouveau_pci_remove(struct pci_device_info *pdev)
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_irq_delivery_claimed, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_legacy_irq_fallback, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_mask_requested_bits, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_mask_effective_bits, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_mask_fallback_32, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_coherent_dma_mask_requested_bits, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_coherent_dma_mask_effective_bits, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_coherent_dma_mask_fallback_32, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_map_attempts, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_map_successes, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_map_failures, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_dma_unmaps, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_map_last_size, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_map_last_addr, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_dma_map_last_ret, 0);
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_native_present_credit, 0);
 }
