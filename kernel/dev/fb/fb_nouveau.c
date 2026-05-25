@@ -82,8 +82,6 @@ static void gpu_nouveau_pci_irq_handler(int irq, void *data, device_t *dev)
     gpu_nouveau_stat_inc(
         &fb_state.stats.nouveau_pci_irq_handler_invocations);
     gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_spurious);
-    gpu_nouveau_stat_inc(
-        &fb_state.stats.nouveau_pci_irq_delivery_claimed);
 }
 
 static void gpu_nouveau_pci_publish_core_state(struct pci_device_info *pdev)
@@ -106,6 +104,24 @@ static void gpu_nouveau_pci_publish_core_state(struct pci_device_info *pdev)
         &fb_state.stats.nouveau_pci_runtime_pm_balanced,
         pdev->runtime_suspended == 0 &&
             pdev->suspend_count == pdev->resume_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_remove_calls,
+                         pdev->remove_call_count);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_remove_runtime_resume_attempts,
+        pdev->remove_runtime_resume_attempt_count);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_remove_runtime_resume_successes,
+        pdev->remove_runtime_resume_success_count);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_remove_runtime_barriers,
+        pdev->remove_runtime_barrier_count);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_remove_active_before_callback,
+        pdev->runtime_suspended == 0 && pdev->remove_call_count != 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_hot_remove_events,
+                         pdev->hot_remove_event_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_removed,
+                         pdev->removed);
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_dma_mask_configured,
         pdev->dma_mask_configured);
@@ -256,6 +272,7 @@ static void gpu_nouveau_pci_unregister_irq(void)
     unregister_irq_handler(gpu_nouveau_pci.irq_number);
     gpu_nouveau_pci.irq_registered = 0;
     gpu_nouveau_pci.irq_number = 0;
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_unregisters);
 }
 
 static int gpu_nouveau_pci_probe_dma_mapping(struct pci_device_info *pdev)
@@ -407,8 +424,10 @@ static int gpu_nouveau_pci_probe(struct pci_device_info *pdev,
 
     gpu_nouveau_pci.bar0_len = bar0_len;
     gpu_nouveau_pci.bar1_len = bar1_len;
-    gpu_nouveau_pci.bar0 = pci_iomap(pdev, 0, 0);
-    gpu_nouveau_pci.bar1 = pci_iomap(pdev, 1, 0);
+    if (gpu_nouveau_pci.bar0_claimed)
+        gpu_nouveau_pci.bar0 = pci_iomap(pdev, 0, 0);
+    if (gpu_nouveau_pci.bar1_claimed)
+        gpu_nouveau_pci.bar1 = pci_iomap(pdev, 1, 0);
     gpu_nouveau_pci.irq_pin = pdev->irq_pin;
     gpu_nouveau_pci.msi_cap = pdev->msi_cap;
     gpu_nouveau_pci.msix_cap = pdev->msix_cap;
@@ -486,12 +505,21 @@ static void gpu_nouveau_pci_remove(struct pci_device_info *pdev)
     if (pdev->runtime_suspended)
         gpu_nouveau_stat_inc(
             &fb_state.stats.nouveau_pci_remove_runtime_suspended);
-    pci_iounmap(pdev, gpu_nouveau_pci.bar0);
-    pci_iounmap(pdev, gpu_nouveau_pci.bar1);
+    if (gpu_nouveau_pci.bar0 != NULL) {
+        pci_iounmap(pdev, gpu_nouveau_pci.bar0);
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_bar_iounmaps);
+    }
+    if (gpu_nouveau_pci.bar1 != NULL) {
+        pci_iounmap(pdev, gpu_nouveau_pci.bar1);
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_bar_iounmaps);
+    }
     gpu_nouveau_pci_unregister_irq();
     pci_free_irq_vectors(pdev);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_vectors_freed);
     pci_clear_master(pdev);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_bus_master_clears);
     pci_disable_device(pdev);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_device_disables);
     if (gpu_nouveau_pci.bar0_claimed) {
         pci_release_region(pdev, 0);
         gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_bar_releases);
@@ -502,6 +530,8 @@ static void gpu_nouveau_pci_remove(struct pci_device_info *pdev)
     }
     gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_removes);
     gpu_nouveau_pci_publish_core_state(pdev);
+    pci_set_drvdata(pdev, NULL);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_drvdata_cleared);
     registered = gpu_nouveau_pci.registered;
     memset(&gpu_nouveau_pci, 0, sizeof(gpu_nouveau_pci));
     gpu_nouveau_pci.registered = registered;

@@ -276,6 +276,12 @@ struct pci_device_info {
     uint32 irq_msix_unsupported_count;
     uint32 irq_legacy_request_count;
     uint32 irq_legacy_grant_count;
+    uint32 remove_call_count;
+    uint32 remove_runtime_resume_attempt_count;
+    uint32 remove_runtime_resume_success_count;
+    uint32 remove_runtime_barrier_count;
+    uint32 hot_remove_event_count;
+    uint8 removed;
     uint32 dma_map_count;
     uint32 dma_unmap_count;
     uint32 dma_map_fail_count;
@@ -325,6 +331,7 @@ void pci_probe_registered_virtual_children(void);
 
 int pci_register_driver(struct pci_driver *driver);
 void pci_unregister_driver(struct pci_driver *driver);
+int pci_hot_remove_device(struct pci_device_info *pdev);
 const struct pci_device_id *pci_match_id(const struct pci_device_id *ids,
                                          const struct pci_device_info *pdev);
 void pci_set_drvdata(struct pci_device_info *pdev, void *data);

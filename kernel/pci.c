@@ -274,6 +274,7 @@ static int pci_probe_driver(struct pci_driver *driver,
     int ret;
 
     if (driver == NULL || pdev == NULL || pdev->driver != NULL ||
+        pdev->removed ||
         driver->probe == NULL)
         return 0;
     id = pci_match_id(driver->id_table, pdev);
@@ -312,6 +313,13 @@ static void pci_detach_driver(struct pci_device_info *pdev)
     if (pdev == NULL || pdev->driver == NULL)
         return;
     driver = pdev->driver;
+    if (pdev->runtime_suspended) {
+        pdev->remove_runtime_resume_attempt_count++;
+        pdev->remove_runtime_barrier_count++;
+        if (pci_pm_resume_device(pdev) == 0)
+            pdev->remove_runtime_resume_success_count++;
+    }
+    pdev->remove_call_count++;
     if (driver->remove != NULL)
         driver->remove(pdev);
     pdev->driver = NULL;
@@ -319,6 +327,16 @@ static void pci_detach_driver(struct pci_device_info *pdev)
     pdev->driver_data = NULL;
     if (driver->bound_devices > 0)
         driver->bound_devices--;
+}
+
+int pci_hot_remove_device(struct pci_device_info *pdev)
+{
+    if (pdev == NULL)
+        return -ENODEV;
+    pdev->hot_remove_event_count++;
+    pci_detach_driver(pdev);
+    pdev->removed = 1;
+    return 0;
 }
 
 int pci_register_driver(struct pci_driver *driver)

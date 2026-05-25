@@ -918,6 +918,19 @@ struct fb_gpu_stats {
     uint64 nouveau_pci_resume_count; /* PCI core runtime resume count */
     uint64 nouveau_pci_runtime_pm_balanced; /* not suspended with equal counts */
     uint64 nouveau_pci_remove_runtime_suspended; /* remove while suspended */
+    uint64 nouveau_pci_remove_calls; /* PCI core remove callbacks entered */
+    uint64 nouveau_pci_remove_runtime_resume_attempts; /* resume-before-remove */
+    uint64 nouveau_pci_remove_runtime_resume_successes; /* resumed before remove */
+    uint64 nouveau_pci_remove_runtime_barriers; /* remove PM barriers */
+    uint64 nouveau_pci_remove_active_before_callback; /* remove saw active dev */
+    uint64 nouveau_pci_hot_remove_events; /* PCI hot-remove events */
+    uint64 nouveau_pci_removed; /* PCI device marked removed */
+    uint64 nouveau_pci_bar_iounmaps; /* BAR mappings torn down */
+    uint64 nouveau_pci_irq_unregisters; /* IRQ handler unregisters */
+    uint64 nouveau_pci_irq_vectors_freed; /* IRQ vectors freed */
+    uint64 nouveau_pci_bus_master_clears; /* bus master cleared on teardown */
+    uint64 nouveau_pci_device_disables; /* PCI device disables on teardown */
+    uint64 nouveau_pci_drvdata_cleared; /* drvdata cleared on teardown */
     uint64 nouveau_pci_bar0_len; /* BAR0 aperture length from PCI core */
     uint64 nouveau_pci_bar1_len; /* BAR1 aperture length from PCI core */
     uint64 nouveau_pci_irq; /* selected legacy IRQ vector, if any */
