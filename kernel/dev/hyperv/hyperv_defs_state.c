@@ -1676,6 +1676,8 @@ struct hvdxg_tracked_sync {
     uint32 monitor_fence_handle;
     uint64 fence_cpu_va;
     uint64 fence_kva;
+    uint64 fence_map_size;
+    void *fence_cpu_vm;
 };
 
 enum hvdxg_object_type {

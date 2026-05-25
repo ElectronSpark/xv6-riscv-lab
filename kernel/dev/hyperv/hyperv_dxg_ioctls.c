@@ -1305,34 +1305,46 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
         hvdxg.createdevice_host_adapter_equals_device =
             host_adapter == req.device.v ? 1 : 0;
         hvdxg.last_device_handle = req.device.v;
-        ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
-              -EFAULT : 0;
-        if (ret != 0) {
-            int destroy_ret = hvdxg_destroy_device_host_process(
-                create_process.v, req.device.v);
-            hvdxg_note_createdevice_unwind(create_process.v, req.device.v,
-                                           destroy_ret);
-        } else if (owner != NULL) {
-            if (hvdxg_track_object(owner, HV_DXG_OBJECT_DEVICE,
-                                   req.device.v, local_adapter,
-                                   req.device.v) != 0 ||
-                hvdxg_track_u32_grow(&owner->devices,
-                                      &owner->device_count,
-                                      &owner->device_capacity,
-                                      req.device.v) != 0 ||
-                hvdxg_process_adapter_add_device(process_adapter,
-                                                 req.device.v) != 0) {
+        if (owner == NULL ||
+            hvdxg_track_object(owner, HV_DXG_OBJECT_DEVICE,
+                               req.device.v, local_adapter,
+                               req.device.v) != 0 ||
+            hvdxg_track_u32_grow(&owner->devices, &owner->device_count,
+                                  &owner->device_capacity,
+                                  req.device.v) != 0 ||
+            hvdxg_process_adapter_add_device(process_adapter,
+                                             req.device.v) != 0) {
+            int destroy_ret;
+
+            if (owner != NULL) {
                 hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE,
                                      req.device.v);
                 hvdxg_untrack_u32(owner->devices, &owner->device_count,
                                   req.device.v);
                 hvdxg_process_adapter_remove_device(owner->process_state,
                                                     req.device.v);
-                int destroy_ret = hvdxg_destroy_device_host_process(
+            }
+            ret = -ENOMEM;
+            destroy_ret = hvdxg_destroy_device_host_process(
+                create_process.v, req.device.v);
+            hvdxg_note_createdevice_unwind(create_process.v,
+                                           req.device.v, destroy_ret);
+        } else {
+            ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
+                  -EFAULT : 0;
+            if (ret != 0) {
+                int destroy_ret;
+
+                hvdxg_untrack_object(owner, HV_DXG_OBJECT_DEVICE,
+                                     req.device.v);
+                hvdxg_untrack_u32(owner->devices, &owner->device_count,
+                                  req.device.v);
+                hvdxg_process_adapter_remove_device(owner->process_state,
+                                                    req.device.v);
+                destroy_ret = hvdxg_destroy_device_host_process(
                     create_process.v, req.device.v);
                 hvdxg_note_createdevice_unwind(create_process.v,
                                                req.device.v, destroy_ret);
-                ret = -ENOMEM;
             }
         }
         hvdxg_note_createdevice_object(owner, req.device.v);
@@ -1903,48 +1915,6 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                 hvdxg.existing_sysmem_set_successes++;
             }
         }
-        for (uint32 i = 0; i < req.alloc_count; i++) {
-            uint64 user_alloc_handle =
-                req.allocation_info +
-                (uint64)i * sizeof(struct d3dddi_allocationinfo2) +
-                offsetof(struct d3dddi_allocationinfo2, allocation);
-            if (either_copyout(1, user_alloc_handle,
-                               &alloc_info[i].allocation,
-                               sizeof(alloc_info[i].allocation)) < 0) {
-                ret = -EFAULT;
-                break;
-            }
-        }
-        if (ret == 0 && req.flags.create_resource &&
-            either_copyout(1,
-                           (uint64)arg +
-                               offsetof(struct d3dkmt_createallocation,
-                                        resource),
-                           &req.resource, sizeof(req.resource)) < 0) {
-            ret = -EFAULT;
-        }
-        if (ret == 0 &&
-            either_copyout(1,
-                           (uint64)arg +
-                               offsetof(struct d3dkmt_createallocation,
-                                        global_share),
-                           &req.global_share, sizeof(req.global_share)) < 0) {
-            ret = -EFAULT;
-        }
-        if (ret != 0) {
-            hvdxg.allocation_last_ret = ret;
-            hvdxg_note_allocation_history(actual_len, ret, req.device.v,
-                                          req.resource.v,
-                                          alloc_info[0].allocation.v,
-                                          result->allocation_info[0].allocation_size,
-                                          req.alloc_count, total_private, req.global_share.v, requested_flags.value);
-            goto createallocation_done;
-        }
-        hvdxg.last_device_handle = req.device.v;
-        hvdxg.last_resource_handle = req.resource.v;
-        hvdxg.last_allocation_handle = alloc_info[0].allocation.v;
-        hvdxg.last_allocation_device = req.device.v;
-        hvdxg.last_allocation_size = result->allocation_info[0].allocation_size;
         if (owner != NULL) {
             track_alloc_input_private =
                 req.flags.create_resource &&
@@ -2000,6 +1970,50 @@ static int hvdxg_ioctl_common(cdev_t *cdev, uint64 cmd, void *arg,
                     req.alloc_count, total_private, req.global_share.v, requested_flags.value);
             }
         }
+        if (ret != 0)
+            goto createallocation_done;
+        for (uint32 i = 0; i < req.alloc_count; i++) {
+            uint64 user_alloc_handle =
+                req.allocation_info +
+                (uint64)i * sizeof(struct d3dddi_allocationinfo2) +
+                offsetof(struct d3dddi_allocationinfo2, allocation);
+            if (either_copyout(1, user_alloc_handle,
+                               &alloc_info[i].allocation,
+                               sizeof(alloc_info[i].allocation)) < 0) {
+                ret = -EFAULT;
+                break;
+            }
+        }
+        if (ret == 0 && req.flags.create_resource &&
+            either_copyout(1,
+                           (uint64)arg +
+                               offsetof(struct d3dkmt_createallocation,
+                                        resource),
+                           &req.resource, sizeof(req.resource)) < 0) {
+            ret = -EFAULT;
+        }
+        if (ret == 0 &&
+            either_copyout(1,
+                           (uint64)arg +
+                               offsetof(struct d3dkmt_createallocation,
+                                        global_share),
+                           &req.global_share, sizeof(req.global_share)) < 0) {
+            ret = -EFAULT;
+        }
+        if (ret != 0) {
+            hvdxg.allocation_last_ret = ret;
+            hvdxg_note_allocation_history(actual_len, ret, req.device.v,
+                                          req.resource.v,
+                                          alloc_info[0].allocation.v,
+                                          result->allocation_info[0].allocation_size,
+                                          req.alloc_count, total_private, req.global_share.v, requested_flags.value);
+            goto createallocation_done;
+        }
+        hvdxg.last_device_handle = req.device.v;
+        hvdxg.last_resource_handle = req.resource.v;
+        hvdxg.last_allocation_handle = alloc_info[0].allocation.v;
+        hvdxg.last_allocation_device = req.device.v;
+        hvdxg.last_allocation_size = result->allocation_info[0].allocation_size;
 createallocation_done:
         if (ret != 0 && owner != NULL && req.device.v != 0) {
             if (req.resource.v != 0) {
@@ -2200,6 +2214,8 @@ createallocation_done:
         uint64 fence_kva = 0;
         uint64 fence_pa = 0;
         uint64 raw_fence_pa = 0;
+        int paging_tracked = 0;
+        int sync_tracked = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -2243,10 +2259,10 @@ createallocation_done:
         req.sync_object.v = result.sync_object.v;
         raw_fence_pa = result.fence_storage_physical_address;
         req.fence_cpu_virtual_address = hvdxg_map_iospace_user_canonical(
-            HV_DXG_FENCE_SOURCE_PAGINGQUEUE, raw_fence_pa, sizeof(uint64),
+            HV_DXG_FENCE_SOURCE_PAGINGQUEUE, raw_fence_pa, PGSIZE,
             0, &fence_pa, NULL, 0);
         fence_kva = hvdxg_map_iospace_kernel_canonical(
-            HV_DXG_FENCE_SOURCE_PAGINGQUEUE, raw_fence_pa, sizeof(uint64),
+            HV_DXG_FENCE_SOURCE_PAGINGQUEUE, raw_fence_pa, PGSIZE,
             fence_pa, 0);
         hvdxg_note_fence_offset_candidate(HV_DXG_FENCE_SOURCE_PAGINGQUEUE,
                                           raw_fence_pa,
@@ -2254,17 +2270,51 @@ createallocation_done:
                                           sizeof(uint64));
         if (req.fence_cpu_virtual_address == 0) {
             ret = -ENOMEM;
+            (void)hvdxg_destroy_pagingqueue_host_process(
+                hvdxg_owner_bound_process_handle(owner).v,
+                req.paging_queue.v);
             break;
         }
-        ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
-              -EFAULT : 0;
-        if (ret == 0 && owner != NULL) {
-            hvdxg_track_pagingqueue(owner, req.device.v, req.paging_queue.v,
-                                    req.sync_object.v, fence_pa);
-            hvdxg_track_sync(owner, req.device.v, req.sync_object.v,
-                             _D3DDDI_MONITORED_FENCE,
-                             0, result.sync_object.v,
-                             req.fence_cpu_virtual_address, fence_kva, 1);
+        ret = owner != NULL ?
+              hvdxg_track_pagingqueue(owner, req.device.v,
+                                      req.paging_queue.v,
+                                      req.sync_object.v, fence_pa) :
+              -EINVAL;
+        if (ret == 0)
+            paging_tracked = 1;
+        if (ret == 0) {
+            ret = hvdxg_track_sync(owner, req.device.v, req.sync_object.v,
+                                   _D3DDDI_MONITORED_FENCE,
+                                   0, result.sync_object.v,
+                                   req.fence_cpu_virtual_address,
+                                   fence_kva,
+                                   hvdxg_iospace_user_map_size(
+                                       req.fence_cpu_virtual_address,
+                                       PGSIZE),
+                                   1);
+            if (ret == 0)
+                sync_tracked = 1;
+        }
+        if (ret == 0)
+            ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
+                  -EFAULT : 0;
+        if (ret != 0) {
+            if (owner != NULL) {
+                if (paging_tracked)
+                    (void)hvdxg_untrack_pagingqueue(owner,
+                                                    req.paging_queue.v);
+                if (sync_tracked)
+                    hvdxg_untrack_sync(owner, req.sync_object.v);
+            }
+            if (!sync_tracked)
+                hvdxg_unmap_sync_mapping_raw(
+                    req.fence_cpu_virtual_address, fence_kva,
+                    hvdxg_iospace_user_map_size(
+                        req.fence_cpu_virtual_address, PGSIZE),
+                    current != NULL ? current->vm : NULL);
+            (void)hvdxg_destroy_pagingqueue_host_process(
+                hvdxg_owner_bound_process_handle(owner).v,
+                req.paging_queue.v);
         }
         break;
     }
@@ -4142,6 +4192,7 @@ submithwqueue_done:
         uint64 fence_kva = 0;
         uint64 fence_pa = 0;
         uint64 raw_fence_pa = 0;
+        int sync_tracked = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -4229,10 +4280,10 @@ submithwqueue_done:
             req.info.monitored_fence.fence_cpu_virtual_address =
                 hvdxg_map_iospace_user_canonical(
                     HV_DXG_FENCE_SOURCE_SYNCOBJECT, raw_fence_pa,
-                    sizeof(uint64), 0, &fence_pa, NULL, 0);
+                    PGSIZE, 0, &fence_pa, NULL, 0);
             fence_kva = hvdxg_map_iospace_kernel_canonical(
                 HV_DXG_FENCE_SOURCE_SYNCOBJECT, raw_fence_pa,
-                sizeof(uint64), fence_pa, 0);
+                PGSIZE, fence_pa, 0);
             hvdxg_note_fence_offset_candidate(HV_DXG_FENCE_SOURCE_SYNCOBJECT,
                                               raw_fence_pa,
                                               result.fence_storage_offset,
@@ -4241,6 +4292,9 @@ submithwqueue_done:
                 req.info.monitored_fence.fence_cpu_virtual_address;
             if (req.info.monitored_fence.fence_cpu_virtual_address == 0) {
                 ret = -ENOMEM;
+                (void)hvdxg_destroy_syncobject_host_for_syncfile(
+                    owner, req.device.v, req.sync_object.v, req.info.type,
+                    req.info.flags.value, result.global_sync_object.v);
                 break;
             }
             req.info.monitored_fence.fence_gpu_virtual_address =
@@ -4250,10 +4304,10 @@ submithwqueue_done:
             req.info.periodic_monitored_fence.fence_cpu_virtual_address =
                 hvdxg_map_iospace_user_canonical(
                     HV_DXG_FENCE_SOURCE_SYNCOBJECT, raw_fence_pa,
-                    sizeof(uint64), 0, &fence_pa, NULL, 0);
+                    PGSIZE, 0, &fence_pa, NULL, 0);
             fence_kva = hvdxg_map_iospace_kernel_canonical(
                 HV_DXG_FENCE_SOURCE_SYNCOBJECT, raw_fence_pa,
-                sizeof(uint64), fence_pa, 0);
+                PGSIZE, fence_pa, 0);
             hvdxg_note_fence_offset_candidate(HV_DXG_FENCE_SOURCE_SYNCOBJECT,
                                               raw_fence_pa,
                                               result.fence_storage_offset,
@@ -4263,14 +4317,59 @@ submithwqueue_done:
             if (req.info.periodic_monitored_fence.fence_cpu_virtual_address ==
                 0) {
                 ret = -ENOMEM;
+                (void)hvdxg_destroy_syncobject_host_for_syncfile(
+                    owner, req.device.v, req.sync_object.v, req.info.type,
+                    req.info.flags.value, result.global_sync_object.v);
                 break;
             }
             req.info.periodic_monitored_fence.fence_gpu_virtual_address =
                 result.fence_gpu_va;
         }
+        ret = owner != NULL ?
+              hvdxg_track_sync(owner, req.device.v, req.sync_object.v,
+                               req.info.type, req.info.flags.value,
+                               result.global_sync_object.v,
+                               hvdxg.syncobject_last_fence_cpu,
+                               fence_kva,
+                               hvdxg_iospace_user_map_size(
+                                   hvdxg.syncobject_last_fence_cpu,
+                                   PGSIZE),
+                               0) :
+              -EINVAL;
+        if (ret == 0) {
+            sync_tracked = 1;
+            hvdxg.syncobject_last_owner_process =
+                hvdxg_owner_sync_owner_process(owner, req.sync_object.v);
+            hvdxg.syncobject_last_owner_generation =
+                hvdxg_owner_sync_owner_generation(owner, req.sync_object.v);
+        } else {
+            hvdxg_unmap_sync_mapping_raw(
+                hvdxg.syncobject_last_fence_cpu, fence_kva,
+                hvdxg_iospace_user_map_size(
+                    hvdxg.syncobject_last_fence_cpu, PGSIZE),
+                current != NULL ? current->vm : NULL);
+            (void)hvdxg_destroy_syncobject_host_for_syncfile(
+                owner, req.device.v, req.sync_object.v, req.info.type,
+                req.info.flags.value, result.global_sync_object.v);
+            break;
+        }
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
-        if (ret == 0 && hvdxg.syncobject_last_fence_cpu != 0 &&
+        if (ret != 0) {
+            if (sync_tracked)
+                hvdxg_untrack_sync(owner, req.sync_object.v);
+            else
+                hvdxg_unmap_sync_mapping_raw(
+                    hvdxg.syncobject_last_fence_cpu, fence_kva,
+                    hvdxg_iospace_user_map_size(
+                        hvdxg.syncobject_last_fence_cpu, PGSIZE),
+                    current != NULL ? current->vm : NULL);
+            (void)hvdxg_destroy_syncobject_host_for_syncfile(
+                owner, req.device.v, req.sync_object.v, req.info.type,
+                req.info.flags.value, result.global_sync_object.v);
+            break;
+        }
+        if (hvdxg.syncobject_last_fence_cpu != 0 &&
             hvdxg.syncobject_last_fence_gpu != 0) {
             hvdxg.syncobject_mapped_count++;
             hvdxg.syncobject_mapped_len = actual_len;
@@ -4281,17 +4380,7 @@ submithwqueue_done:
             hvdxg.syncobject_mapped_fence_gpu =
                 hvdxg.syncobject_last_fence_gpu;
         }
-        if (ret == 0 && owner != NULL) {
-            hvdxg_track_sync(owner, req.device.v, req.sync_object.v,
-                             req.info.type, req.info.flags.value,
-                             result.global_sync_object.v,
-                             hvdxg.syncobject_last_fence_cpu, fence_kva, 0);
-            hvdxg.syncobject_last_owner_process =
-                hvdxg_owner_sync_owner_process(owner, req.sync_object.v);
-            hvdxg.syncobject_last_owner_generation =
-                hvdxg_owner_sync_owner_generation(owner, req.sync_object.v);
-        }
-        if (ret == 0 && hvdxg.sync_diag_prints < 64) {
+        if (hvdxg.sync_diag_prints < 64) {
             printf("hyperv-dxg: create sync handle=0x%x device=0x%x "
                    "type=%u flags=0x%x global=0x%x monitor=%u\n",
                    req.sync_object.v, req.device.v, (uint32)req.info.type,
@@ -5275,34 +5364,40 @@ gpu2_cpu_event_cleanup:
                                             create->context.v, destroy_ret);
             goto createcontext_done;
         }
-        ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
-              -EFAULT : 0;
-        if (ret != 0) {
-            int destroy_ret = hvdxg_destroy_context_host_process(
+        if (owner == NULL ||
+            hvdxg_track_object(owner, HV_DXG_OBJECT_CONTEXT,
+                               req.context.v, req.device.v,
+                               req.device.v) != 0 ||
+            hvdxg_track_u32_grow(&owner->contexts,
+                                  &owner->context_count,
+                                  &owner->context_capacity,
+                                  req.context.v) != 0) {
+            int destroy_ret;
+
+            if (owner != NULL)
+                hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT,
+                                     req.context.v);
+            ret = -ENOMEM;
+            destroy_ret = hvdxg_destroy_context_host_process(
                 create_process.v, req.context.v);
             hvdxg_note_createcontext_unwind(create_process.v,
                                             req.context.v, destroy_ret);
             goto createcontext_done;
         }
-        if (ret == 0 && owner != NULL) {
-            if (hvdxg_track_object(owner, HV_DXG_OBJECT_CONTEXT,
-                                   req.context.v, req.device.v,
-                                   req.device.v) != 0 ||
-                hvdxg_track_u32_grow(&owner->contexts,
-                                      &owner->context_count,
-                                      &owner->context_capacity,
-                                      req.context.v) != 0) {
-                hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT,
-                                     req.context.v);
-                {
-                    int destroy_ret = hvdxg_destroy_context_host_process(
-                        create_process.v, req.context.v);
-                    hvdxg_note_createcontext_unwind(create_process.v,
-                                                    req.context.v,
-                                                    destroy_ret);
-                }
-                ret = -ENOMEM;
-            }
+        ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
+              -EFAULT : 0;
+        if (ret != 0) {
+            int destroy_ret;
+
+            hvdxg_untrack_object(owner, HV_DXG_OBJECT_CONTEXT,
+                                 req.context.v);
+            hvdxg_untrack_u32(owner->contexts, &owner->context_count,
+                              req.context.v);
+            destroy_ret = hvdxg_destroy_context_host_process(
+                create_process.v, req.context.v);
+            hvdxg_note_createcontext_unwind(create_process.v,
+                                            req.context.v, destroy_ret);
+            goto createcontext_done;
         }
 createcontext_done:
         if (command_buf)
@@ -5321,6 +5416,8 @@ createcontext_done:
         uint64 fence_kva = 0;
         uint64 fence_pa = 0;
         struct hvdxg_d3dkmthandle create_process;
+        int hwqueue_tracked = 0;
+        int sync_tracked = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -5441,27 +5538,58 @@ createcontext_done:
                                             destroy_ret);
             goto createhwqueue_done;
         }
-        ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
-              -EFAULT : 0;
+        if (owner != NULL) {
+            uint32 device = hvdxg_owner_object_device(
+                owner, HV_DXG_OBJECT_CONTEXT, req.context.v);
+
+            ret = hvdxg_track_hwqueue(owner, req.context.v, device,
+                                      req.queue.v,
+                                      req.queue_progress_fence.v);
+            if (ret == 0)
+                hwqueue_tracked = 1;
+            if (ret == 0)
+                ret = hvdxg_track_sync(owner, device,
+                                       req.queue_progress_fence.v,
+                                       _D3DDDI_MONITORED_FENCE,
+                                       0, req.queue_progress_fence.v,
+                                       req.queue_progress_fence_cpu_va,
+                                       fence_kva,
+                                       hvdxg_iospace_user_map_size(
+                                           req.queue_progress_fence_cpu_va,
+                                           PGSIZE),
+                                       1);
+            if (ret == 0)
+                sync_tracked = 1;
+        } else {
+            ret = -EINVAL;
+        }
+        hvdxg.createhwqueue_last_ret = ret;
+        if (ret == 0)
+            ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
+                  -EFAULT : 0;
         hvdxg.createhwqueue_last_ret = ret;
         if (ret != 0) {
-            int destroy_ret = hvdxg_destroy_hwqueue_host_process(
+            int destroy_ret;
+
+            if (owner != NULL) {
+                if (hwqueue_tracked)
+                    (void)hvdxg_untrack_hwqueue(owner, req.queue.v);
+                if (sync_tracked)
+                    hvdxg_untrack_sync(owner,
+                                       req.queue_progress_fence.v);
+            }
+            if (!sync_tracked)
+                hvdxg_unmap_sync_mapping_raw(
+                    req.queue_progress_fence_cpu_va, fence_kva,
+                    hvdxg_iospace_user_map_size(
+                        req.queue_progress_fence_cpu_va, PGSIZE),
+                    current != NULL ? current->vm : NULL);
+            destroy_ret = hvdxg_destroy_hwqueue_host_process(
                 create_process.v, req.queue.v);
             hvdxg_note_createhwqueue_unwind(create_process.v, req.queue.v,
                                             req.queue_progress_fence.v,
                                             destroy_ret);
             goto createhwqueue_done;
-        }
-        if (ret == 0 && owner != NULL) {
-            uint32 device = hvdxg_owner_object_device(
-                owner, HV_DXG_OBJECT_CONTEXT, req.context.v);
-
-            hvdxg_track_hwqueue(owner, req.context.v, device, req.queue.v,
-                                req.queue_progress_fence.v);
-            hvdxg_track_sync(owner, device, req.queue_progress_fence.v,
-                             _D3DDDI_MONITORED_FENCE,
-                             0, req.queue_progress_fence.v,
-                             req.queue_progress_fence_cpu_va, fence_kva, 1);
         }
 createhwqueue_done:
         if (command_buf)
@@ -6484,6 +6612,7 @@ createhwqueue_done:
         uint64 fence_kva = 0;
         uint64 fence_pa = 0;
         struct hvdxg_d3dkmthandle open_process;
+        int sync_tracked = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0) {
@@ -6682,6 +6811,10 @@ createhwqueue_done:
                 result.guest_cpu_physical_address, PGSIZE, fence_pa, 1);
             if (req.monitored_fence.fence_value_cpu_va == 0) {
                 ret = -ENOMEM;
+                (void)hvdxg_destroy_syncobject_host_for_syncfile(
+                    owner, req.device.v, req.sync_object.v,
+                    shared->sync_type, req.flags.value,
+                    shared->global_share);
                 hvdxg.sharedhandle_last_ret = ret;
                 goto opensync_done;
             }
@@ -6693,9 +6826,20 @@ createhwqueue_done:
                                shared->sync_type, req.flags.value,
                                shared->global_share,
                                req.monitored_fence.fence_value_cpu_va,
-                               fence_kva, 0) :
+                               fence_kva,
+                               hvdxg_iospace_user_map_size(
+                                   req.monitored_fence.fence_value_cpu_va,
+                                   PGSIZE),
+                               0) :
               -EINVAL;
+        if (ret == 0)
+            sync_tracked = 1;
         if (ret != 0) {
+            hvdxg_unmap_sync_mapping_raw(
+                req.monitored_fence.fence_value_cpu_va, fence_kva,
+                hvdxg_iospace_user_map_size(
+                    req.monitored_fence.fence_value_cpu_va, PGSIZE),
+                current != NULL ? current->vm : NULL);
             (void)hvdxg_destroy_syncobject_host_for_syncfile(
                 owner, req.device.v, req.sync_object.v, shared->sync_type,
                 req.flags.value, shared->global_share);
@@ -6706,7 +6850,14 @@ createhwqueue_done:
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
         if (ret != 0) {
-            hvdxg_untrack_sync(owner, req.sync_object.v);
+            if (sync_tracked)
+                hvdxg_untrack_sync(owner, req.sync_object.v);
+            else
+                hvdxg_unmap_sync_mapping_raw(
+                    req.monitored_fence.fence_value_cpu_va, fence_kva,
+                    hvdxg_iospace_user_map_size(
+                        req.monitored_fence.fence_value_cpu_va, PGSIZE),
+                    current != NULL ? current->vm : NULL);
             (void)hvdxg_destroy_syncobject_host_for_syncfile(
                 owner, req.device.v, req.sync_object.v, shared->sync_type,
                 req.flags.value, shared->global_share);
@@ -7839,6 +7990,7 @@ openresource_done:
         uint64 gpu_va = 0;
         uint64 fence_kva = 0;
         struct d3dddi_synchronizationobject_flags open_flags;
+        int sync_tracked = 0;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -7902,8 +8054,13 @@ openresource_done:
                   hvdxg_track_sync(owner, req.device.v, req.syncobj.v,
                                    sync_file->sync_type, open_flags.value,
                                    sync_file->global_share, cpu_va,
-                                   fence_kva, 0) :
+                                   fence_kva,
+                                   hvdxg_iospace_user_map_size(cpu_va,
+                                                               PGSIZE),
+                                   0) :
                   -EINVAL;
+            if (ret == 0)
+                sync_tracked = 1;
         }
         if (ret == 0) {
             ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
@@ -7912,8 +8069,13 @@ openresource_done:
         if (ret != 0 && opened.v != 0) {
             int destroy_ret;
 
-            if (owner != NULL)
+            if (owner != NULL && sync_tracked)
                 hvdxg_untrack_sync(owner, opened.v);
+            else
+                hvdxg_unmap_sync_mapping_raw(
+                    cpu_va, fence_kva,
+                    hvdxg_iospace_user_map_size(cpu_va, PGSIZE),
+                    current != NULL ? current->vm : NULL);
             hvdxg.syncfile_open_copyout_failures++;
             hvdxg.syncfile_open_unwind_destroy_attempts++;
             destroy_ret = hvdxg_destroy_syncobject_host_for_syncfile(

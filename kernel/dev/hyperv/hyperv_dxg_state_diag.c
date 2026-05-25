@@ -52,6 +52,14 @@ static struct {
     uint64 fence_map_last_size;
     uint64 fence_map_last_user_va;
     uint64 fence_map_last_kva;
+    uint32 fence_unmap_attempts;
+    uint32 fence_unmap_successes;
+    uint32 fence_unmap_failures;
+    int32 fence_unmap_last_user_ret;
+    int32 fence_unmap_last_kernel_ret;
+    uint64 fence_unmap_last_user_va;
+    uint64 fence_unmap_last_kva;
+    uint64 fence_unmap_last_size;
     uint32 fence_map_max_source;
     uint32 fence_map_max_mode;
     uint64 fence_map_max_raw_pa;

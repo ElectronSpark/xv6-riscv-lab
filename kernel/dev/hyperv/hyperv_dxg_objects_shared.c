@@ -138,6 +138,14 @@ enum {
 static uint64 hvdxg_map_iospace_user(uint64 pa, uint64 size,
                                      uint64 extra_pte_flags);
 static uint64 hvdxg_map_iospace_kernel(uint64 pa, uint64 size);
+static uint64 hvdxg_iospace_user_map_size(uint64 user_va, uint64 size)
+{
+    uint64 page_off = user_va & (PGSIZE - 1);
+
+    if (user_va == 0 || size == 0)
+        return 0;
+    return PGROUNDUP(page_off + size);
+}
 
 static uint64 hvdxg_canonical_iospace_pa(uint64 raw_pa, uint64 size,
                                          int allow_offset, uint32 *mode)
@@ -291,7 +299,8 @@ static uint64 hvdxg_map_iospace_kernel(uint64 pa, uint64 size)
         return 0;
     }
     vma = vma_alloc(kernel_vm, map_base, map_size,
-                    PROT_READ | PROT_WRITE | VMA_FLAG_KERNEL);
+                    PROT_READ | PROT_WRITE | VMA_FLAG_KERNEL |
+                    VMA_FLAG_PFNMAP);
     vm_wunlock(kernel_vm);
     if (vma == NULL)
         return 0;
@@ -1663,6 +1672,8 @@ static int hvdxg_destroy_allocation_host_process(
     uint32 process, uint32 device, uint32 resource,
     uint32 allocation, uint32 context);
 static int hvdxg_destroy_context_host_process(uint32 process, uint32 context);
+static int hvdxg_destroy_pagingqueue_host_process(uint32 process,
+                                                  uint32 paging_queue);
 static int hvdxg_destroy_hwqueue_host_process(uint32 process, uint32 hwqueue);
 static int hvdxg_flush_device_host(uint32 device);
 static void hvdxg_sync_shared_resource_records(
@@ -1834,10 +1845,13 @@ static uint32 hvdxg_open_process_refs(struct hvdxg_open_state *owner)
     return 0;
 }
 
+static void hvdxg_stop_sync_mapping(struct hvdxg_tracked_sync *sync);
+
 static int hvdxg_track_sync(struct hvdxg_open_state *owner,
                             uint32 device, uint32 sync, uint32 type,
                             uint32 flags, uint32 global_shared,
                             uint64 fence_cpu_va, uint64 fence_kva,
+                            uint64 fence_map_size,
                             uint32 monitor_fence_handle)
 {
     int ret;
@@ -1849,6 +1863,11 @@ static int hvdxg_track_sync(struct hvdxg_open_state *owner,
         return ret;
     for (uint32 i = 0; i < owner->sync_object_count; i++) {
         if (owner->sync_objects[i].sync == sync) {
+            if ((owner->sync_objects[i].fence_cpu_va != 0 &&
+                 owner->sync_objects[i].fence_cpu_va != fence_cpu_va) ||
+                (owner->sync_objects[i].fence_kva != 0 &&
+                 owner->sync_objects[i].fence_kva != fence_kva))
+                hvdxg_stop_sync_mapping(&owner->sync_objects[i]);
             owner->sync_objects[i].type = type;
             owner->sync_objects[i].device = device;
             owner->sync_objects[i].owner_process =
@@ -1863,6 +1882,9 @@ static int hvdxg_track_sync(struct hvdxg_open_state *owner,
                 monitor_fence_handle ? 1 : 0;
             owner->sync_objects[i].fence_cpu_va = fence_cpu_va;
             owner->sync_objects[i].fence_kva = fence_kva;
+            owner->sync_objects[i].fence_map_size = fence_map_size;
+            owner->sync_objects[i].fence_cpu_vm =
+                fence_cpu_va != 0 && current != NULL ? current->vm : NULL;
             return 0;
         }
     }
@@ -1892,7 +1914,63 @@ static int hvdxg_track_sync(struct hvdxg_open_state *owner,
         monitor_fence_handle ? 1 : 0;
     owner->sync_objects[i].fence_cpu_va = fence_cpu_va;
     owner->sync_objects[i].fence_kva = fence_kva;
+    owner->sync_objects[i].fence_map_size = fence_map_size;
+    owner->sync_objects[i].fence_cpu_vm =
+        fence_cpu_va != 0 && current != NULL ? current->vm : NULL;
     return 0;
+}
+
+static void hvdxg_unmap_sync_mapping_raw(uint64 fence_cpu_va,
+                                         uint64 fence_kva,
+                                         uint64 map_size,
+                                         void *fence_cpu_vm)
+{
+    int user_ret = 0;
+    int kernel_ret = 0;
+
+    if (fence_cpu_va == 0 && fence_kva == 0)
+        return;
+    if (map_size == 0)
+        map_size = PGSIZE;
+    hvdxg.fence_unmap_attempts++;
+    hvdxg.fence_unmap_last_user_va = fence_cpu_va;
+    hvdxg.fence_unmap_last_kva = fence_kva;
+    hvdxg.fence_unmap_last_size = map_size;
+    if (fence_cpu_va != 0) {
+        uint64 map_base = PGROUNDDOWN(fence_cpu_va);
+        vm_t *vm = (vm_t *)fence_cpu_vm;
+
+        user_ret = vm != NULL ? vm_munmap_region(vm, map_base,
+                                                 (size_t)map_size) :
+                   -EINVAL;
+    }
+    if (fence_kva != 0) {
+        uint64 map_base = PGROUNDDOWN(fence_kva);
+
+        kernel_ret = kernel_vm != NULL ?
+                     vm_munmap_region(kernel_vm, map_base,
+                                      (size_t)map_size) :
+                     -EINVAL;
+    }
+    hvdxg.fence_unmap_last_user_ret = user_ret;
+    hvdxg.fence_unmap_last_kernel_ret = kernel_ret;
+    if (user_ret == 0 && kernel_ret == 0)
+        hvdxg.fence_unmap_successes++;
+    else
+        hvdxg.fence_unmap_failures++;
+}
+
+static void hvdxg_stop_sync_mapping(struct hvdxg_tracked_sync *sync)
+{
+    if (sync == NULL)
+        return;
+    hvdxg_unmap_sync_mapping_raw(sync->fence_cpu_va, sync->fence_kva,
+                                 sync->fence_map_size,
+                                 sync->fence_cpu_vm);
+    sync->fence_cpu_va = 0;
+    sync->fence_kva = 0;
+    sync->fence_map_size = 0;
+    sync->fence_cpu_vm = NULL;
 }
 
 static void hvdxg_untrack_sync(struct hvdxg_open_state *owner, uint32 sync)
@@ -1904,6 +1982,7 @@ static void hvdxg_untrack_sync(struct hvdxg_open_state *owner, uint32 sync)
         if (owner->sync_objects[i].sync == sync) {
             uint32 last = owner->sync_object_count - 1;
 
+            hvdxg_stop_sync_mapping(&owner->sync_objects[i]);
             owner->sync_objects[i] = owner->sync_objects[last];
             memset(&owner->sync_objects[last], 0,
                    sizeof(owner->sync_objects[0]));
@@ -2119,37 +2198,44 @@ static int hvdxg_owner_sync_is_monitored(struct hvdxg_open_state *owner,
            type == _D3DDDI_PERIODIC_MONITORED_FENCE;
 }
 
-static void hvdxg_track_hwqueue(struct hvdxg_open_state *owner,
-                                uint32 context, uint32 device,
-                                uint32 queue, uint32 sync_object)
+static int hvdxg_track_hwqueue(struct hvdxg_open_state *owner,
+                               uint32 context, uint32 device,
+                               uint32 queue, uint32 sync_object)
 {
+    int ret;
+
     if (owner == NULL || queue == 0)
-        return;
-    (void)hvdxg_track_object(owner, HV_DXG_OBJECT_HWQUEUE, queue,
+        return -EINVAL;
+    ret = hvdxg_track_object(owner, HV_DXG_OBJECT_HWQUEUE, queue,
                              context, device);
+    if (ret != 0)
+        return ret;
     for (uint32 i = 0; i < owner->hwqueue_count; i++) {
         if (owner->hwqueues[i].queue == queue) {
             owner->hwqueues[i].context = context;
             owner->hwqueues[i].device = device;
             owner->hwqueues[i].sync_object = sync_object;
-            return;
+            return 0;
         }
     }
-    if (hvdxg_grow_table((void **)&owner->hwqueues,
-                         &owner->hwqueue_capacity,
-                         owner->hwqueue_count + 1,
-                         sizeof(owner->hwqueues[0]),
-                         HV_DXG_OPEN_TRACKED_MAX) == 0) {
-        uint32 i = owner->hwqueue_count++;
-        owner->hwqueues[i].queue = queue;
-        owner->hwqueues[i].context = context;
-        owner->hwqueues[i].device = device;
-        owner->hwqueues[i].sync_object = sync_object;
-        if (owner->hwqueue_count > hvdxg.track_hwqueue_max)
-            hvdxg.track_hwqueue_max = owner->hwqueue_count;
-    } else {
+    ret = hvdxg_grow_table((void **)&owner->hwqueues,
+                           &owner->hwqueue_capacity,
+                           owner->hwqueue_count + 1,
+                           sizeof(owner->hwqueues[0]),
+                           HV_DXG_OPEN_TRACKED_MAX);
+    if (ret != 0) {
+        hvdxg_untrack_object(owner, HV_DXG_OBJECT_HWQUEUE, queue);
         hvdxg.track_hwqueue_drops++;
+        return ret;
     }
+    uint32 i = owner->hwqueue_count++;
+    owner->hwqueues[i].queue = queue;
+    owner->hwqueues[i].context = context;
+    owner->hwqueues[i].device = device;
+    owner->hwqueues[i].sync_object = sync_object;
+    if (owner->hwqueue_count > hvdxg.track_hwqueue_max)
+        hvdxg.track_hwqueue_max = owner->hwqueue_count;
+    return 0;
 }
 
 static uint32 hvdxg_untrack_hwqueue(struct hvdxg_open_state *owner,
@@ -2173,37 +2259,44 @@ static uint32 hvdxg_untrack_hwqueue(struct hvdxg_open_state *owner,
     return 0;
 }
 
-static void hvdxg_track_pagingqueue(struct hvdxg_open_state *owner,
-                                    uint32 device, uint32 queue,
-                                    uint32 sync_object, uint64 fence_pa)
+static int hvdxg_track_pagingqueue(struct hvdxg_open_state *owner,
+                                   uint32 device, uint32 queue,
+                                   uint32 sync_object, uint64 fence_pa)
 {
+    int ret;
+
     if (owner == NULL || queue == 0)
-        return;
-    (void)hvdxg_track_object(owner, HV_DXG_OBJECT_PAGINGQUEUE, queue,
+        return -EINVAL;
+    ret = hvdxg_track_object(owner, HV_DXG_OBJECT_PAGINGQUEUE, queue,
                              sync_object, device);
+    if (ret != 0)
+        return ret;
     for (uint32 i = 0; i < owner->paging_queue_count; i++) {
         if (owner->paging_queues[i].queue == queue) {
             owner->paging_queues[i].device = device;
             owner->paging_queues[i].sync_object = sync_object;
             owner->paging_queues[i].fence_pa = fence_pa;
-            return;
+            return 0;
         }
     }
-    if (hvdxg_grow_table((void **)&owner->paging_queues,
-                         &owner->paging_queue_capacity,
-                         owner->paging_queue_count + 1,
-                         sizeof(owner->paging_queues[0]),
-                         HV_DXG_OPEN_TRACKED_MAX) == 0) {
-        uint32 i = owner->paging_queue_count++;
-        owner->paging_queues[i].queue = queue;
-        owner->paging_queues[i].device = device;
-        owner->paging_queues[i].sync_object = sync_object;
-        owner->paging_queues[i].fence_pa = fence_pa;
-        if (owner->paging_queue_count > hvdxg.track_pagingqueue_max)
-            hvdxg.track_pagingqueue_max = owner->paging_queue_count;
-    } else {
+    ret = hvdxg_grow_table((void **)&owner->paging_queues,
+                           &owner->paging_queue_capacity,
+                           owner->paging_queue_count + 1,
+                           sizeof(owner->paging_queues[0]),
+                           HV_DXG_OPEN_TRACKED_MAX);
+    if (ret != 0) {
+        hvdxg_untrack_object(owner, HV_DXG_OBJECT_PAGINGQUEUE, queue);
         hvdxg.track_pagingqueue_drops++;
+        return ret;
     }
+    uint32 i = owner->paging_queue_count++;
+    owner->paging_queues[i].queue = queue;
+    owner->paging_queues[i].device = device;
+    owner->paging_queues[i].sync_object = sync_object;
+    owner->paging_queues[i].fence_pa = fence_pa;
+    if (owner->paging_queue_count > hvdxg.track_pagingqueue_max)
+        hvdxg.track_pagingqueue_max = owner->paging_queue_count;
+    return 0;
 }
 
 static uint32 hvdxg_untrack_pagingqueue(struct hvdxg_open_state *owner,
@@ -5900,6 +5993,31 @@ static int hvdxg_destroy_context_host_process(uint32 process, uint32 context)
         ret = hvdxg_ntstatus_to_errno(status);
     hvdxg.destroycontext_last_len = actual_len;
     hvdxg.destroycontext_last_ret = ret;
+    return ret;
+}
+
+static int hvdxg_destroy_pagingqueue_host_process(uint32 process,
+                                                  uint32 paging_queue)
+{
+    struct hvdxg_command_destroypagingqueue destroy;
+    struct hvdxg_ntstatus status;
+    uint32 actual_len = 0;
+    int ret;
+
+    if (paging_queue == 0)
+        return 0;
+    memset(&destroy, 0, sizeof(destroy));
+    memset(&status, 0, sizeof(status));
+    hvdxg_command_vgpu_init_process(&destroy.hdr,
+                                    HV_DXGK_VMBCOMMAND_DESTROYPAGINGQUEUE,
+                                    (struct hvdxg_d3dkmthandle){ .v = process });
+    destroy.paging_queue.v = paging_queue;
+    ret = hvdxg_send_sync_vgpu(&destroy, sizeof(destroy), &status,
+                               sizeof(status), &actual_len);
+    if (ret == 0 && actual_len < sizeof(status))
+        ret = -EOVERFLOW;
+    if (ret == 0 && actual_len >= sizeof(status))
+        ret = hvdxg_ntstatus_to_errno(status);
     return ret;
 }
 

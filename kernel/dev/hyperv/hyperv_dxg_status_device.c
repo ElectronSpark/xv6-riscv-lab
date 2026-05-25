@@ -130,7 +130,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "hyperv_dxg_global=%d relid=%u conn=%u monitor=%u\n"
         "hyperv_dxg_global_transport=gpadl:%d status:%u open:%d status:%u rx:%u\n"
         "dxg_iospace=offer_mb:%u set:%d ret:%d len:%u base:0x%lx size:0x%lx\n"
-        "dxg_fence_map=source:%u mode:%u raw:0x%lx canonical:0x%lx off:0x%lx off_candidate:0x%lx off_cur:%lu size:%lu user:0x%lx kva:0x%lx failures:%u max_seen:%u max_source:%u max_mode:%u max_raw:0x%lx max_canonical:0x%lx max_off_candidate:0x%lx max_off_cur:%lu max_kva:0x%lx max_cur:%lu max_target:%lu\n"
+        "dxg_fence_map=source:%u mode:%u raw:0x%lx canonical:0x%lx off:0x%lx off_candidate:0x%lx off_cur:%lu size:%lu user:0x%lx kva:0x%lx failures:%u unmap_attempts:%u unmap_ok:%u unmap_fail:%u unmap_user_ret:%d unmap_kernel_ret:%d unmap_user:0x%lx unmap_kva:0x%lx unmap_size:%lu max_seen:%u max_source:%u max_mode:%u max_raw:0x%lx max_canonical:0x%lx max_off_candidate:0x%lx max_off_cur:%lu max_kva:0x%lx max_cur:%lu max_target:%lu\n"
         "hyperv_dxg_vgpu=%d count=%d relid=%u conn=%u monitor=%u\n"
         "hyperv_dxg_vgpu_transport=gpadl:%d status:%u open:%d status:%u rx:%u\n"
         "dxg_status=size:%u truncated:%d snapshot:%d\n"
@@ -288,6 +288,11 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.fence_map_last_offset_candidate_current,
         hvdxg.fence_map_last_size, hvdxg.fence_map_last_user_va,
         hvdxg.fence_map_last_kva, hvdxg.fence_map_failures,
+        hvdxg.fence_unmap_attempts, hvdxg.fence_unmap_successes,
+        hvdxg.fence_unmap_failures, hvdxg.fence_unmap_last_user_ret,
+        hvdxg.fence_unmap_last_kernel_ret,
+        hvdxg.fence_unmap_last_user_va, hvdxg.fence_unmap_last_kva,
+        hvdxg.fence_unmap_last_size,
         hvdxg.fence_value_max_seen, hvdxg.fence_map_max_source,
         hvdxg.fence_map_max_mode, hvdxg.fence_map_max_raw_pa,
         hvdxg.fence_map_max_canonical_pa,
