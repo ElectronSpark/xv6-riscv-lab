@@ -142,6 +142,47 @@ struct hyperv_dxg_display_bind_pin_snapshot {
     uint32 process_generation;
     uint32 process_refs;
 };
+struct hyperv_dxg_display_bind_request {
+    uint32 present_source;
+    uint64 source_generation;
+    uint64 resource_generation;
+    uint32 flags;
+    uint32 sync_object;
+    uint64 fence_value;
+    int32 dxg_fd;
+    int32 resource_fd;
+    uint32 device;
+    uint32 resource;
+    uint32 allocation;
+    uint32 allocation_count;
+    uint32 width;
+    uint32 height;
+    uint32 pitch;
+    uint32 format;
+    uint64 modifier;
+    uint32 adapter_luid_low;
+    uint32 adapter_luid_high;
+    uint32 adapter_identity;
+    uint32 provenance_flags;
+    uint64 required_metadata;
+    uint64 lifetime;
+    uint64 block_reason;
+    uint32 pin_valid;
+    struct hyperv_dxg_display_bind_pin_snapshot pin;
+};
+struct hyperv_dxg_display_bind_result {
+    int status;
+    uint32 transport;
+    uint32 operation;
+    uint32 completion_source;
+    uint64 present_id;
+    uint64 completed_id;
+    uint64 block_reason;
+    uint32 pin_revalidated;
+    uint32 no_host_abi;
+    uint32 no_sender;
+    uint32 no_completion;
+};
 int hyperv_dxg_shared_resource_snapshot_from_fd(
     int fd, struct hyperv_dxg_shared_resource_snapshot *snapshot);
 int hyperv_dxg_shared_resource_snapshot_from_opened_resource(
@@ -154,6 +195,9 @@ int hyperv_dxg_display_bind_pin_from_fds(
     struct hyperv_dxg_display_bind_pin_snapshot *snapshot);
 void hyperv_dxg_display_bind_unpin(
     struct hyperv_dxg_display_bind_pin_snapshot *snapshot);
+int hyperv_dxg_display_bind_submit_failclosed(
+    const struct hyperv_dxg_display_bind_request *bind,
+    struct hyperv_dxg_display_bind_result *result);
 void hyperv_dxg_note_pci(uint32 domain, uint32 bus, uint32 dev, uint32 func,
                          uint32 vendor, uint32 device, uint32 class_code,
                          uint32 guid0, uint32 guid1, uint32 guid2,

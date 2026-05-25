@@ -15,6 +15,7 @@
 #include <dev/net.h>
 #include <dev/netdev.h>
 #include <dev/cdev.h>
+#include <dev/fb.h>
 #include <dev/pci.h>
 #include <uabi/d3dkmthk.h>
 #include <vfs/file.h>
@@ -30,4 +31,3 @@
 #include <proc/thread.h>
 #include <proc/sched.h>
 #include <cmdline.h>
-

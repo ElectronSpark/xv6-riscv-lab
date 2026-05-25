@@ -37,6 +37,8 @@ struct fb_dxg_display_bind_request {
     uint64 required_metadata;
     uint64 lifetime;
     uint64 block_reason;
+    uint32 pin_valid;
+    struct hyperv_dxg_display_bind_pin_snapshot pin;
 };
 
 struct fb_dxg_display_bind_result {
@@ -47,6 +49,10 @@ struct fb_dxg_display_bind_result {
     uint64 present_id;
     uint64 completed_id;
     uint64 block_reason;
+    uint32 pin_revalidated;
+    uint32 no_host_abi;
+    uint32 no_sender;
+    uint32 no_completion;
 };
 
 static uint64 fb_dxg_present_resource_generation(uint32 device,
@@ -138,19 +144,56 @@ fb_dxg_present_provider_submit_display_bind(
     const struct fb_dxg_display_bind_request *bind,
     struct fb_dxg_display_bind_result *result)
 {
+    struct hyperv_dxg_display_bind_request hv_bind;
+    struct hyperv_dxg_display_bind_result hv_result;
+    int ret;
+
     if (bind == NULL || result == NULL)
         return -EINVAL;
     memset(result, 0, sizeof(*result));
-    result->status = EOPNOTSUPP;
-    result->transport = FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE;
-    result->operation = FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND;
-    result->completion_source = FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY;
-    result->present_id = 0;
-    result->completed_id = 0;
-    result->block_reason = bind->block_reason |
-                           FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT |
-                           FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION;
-    return -EOPNOTSUPP;
+    memset(&hv_bind, 0, sizeof(hv_bind));
+    memset(&hv_result, 0, sizeof(hv_result));
+
+    hv_bind.present_source = bind->present_source;
+    hv_bind.source_generation = bind->source_generation;
+    hv_bind.resource_generation = bind->resource_generation;
+    hv_bind.flags = bind->flags;
+    hv_bind.sync_object = bind->sync_object;
+    hv_bind.fence_value = bind->fence_value;
+    hv_bind.dxg_fd = bind->dxg_fd;
+    hv_bind.resource_fd = bind->resource_fd;
+    hv_bind.device = bind->device;
+    hv_bind.resource = bind->resource;
+    hv_bind.allocation = bind->allocation;
+    hv_bind.allocation_count = bind->allocation_count;
+    hv_bind.width = bind->width;
+    hv_bind.height = bind->height;
+    hv_bind.pitch = bind->pitch;
+    hv_bind.format = bind->format;
+    hv_bind.modifier = bind->modifier;
+    hv_bind.adapter_luid_low = bind->adapter_luid_low;
+    hv_bind.adapter_luid_high = bind->adapter_luid_high;
+    hv_bind.adapter_identity = bind->adapter_identity;
+    hv_bind.provenance_flags = bind->provenance_flags;
+    hv_bind.required_metadata = bind->required_metadata;
+    hv_bind.lifetime = bind->lifetime;
+    hv_bind.block_reason = bind->block_reason;
+    hv_bind.pin_valid = bind->pin_valid;
+    hv_bind.pin = bind->pin;
+
+    ret = hyperv_dxg_display_bind_submit_failclosed(&hv_bind, &hv_result);
+    result->status = hv_result.status;
+    result->transport = hv_result.transport;
+    result->operation = hv_result.operation;
+    result->completion_source = hv_result.completion_source;
+    result->present_id = hv_result.present_id;
+    result->completed_id = hv_result.completed_id;
+    result->block_reason = hv_result.block_reason;
+    result->pin_revalidated = hv_result.pin_revalidated;
+    result->no_host_abi = hv_result.no_host_abi;
+    result->no_sender = hv_result.no_sender;
+    result->no_completion = hv_result.no_completion;
+    return ret;
 }
 
 static void fb_dxg_present_hex32(char out[9], uint32 value)
@@ -542,6 +585,8 @@ fb_dxg_present_scanout_bind_locked(
     fb_dxg_present_sync_display_bind_state_locked(source);
 
     if (source != NULL && source->display_bind_pin_active) {
+        bind.pin_valid = 1;
+        bind.pin = source->display_bind_pin;
         fb_state.stats.dxg_display_bind_pinned_dxg_file =
             source->display_bind_pin.dxg_file_pinned;
         fb_state.stats.dxg_display_bind_pinned_resource_file =

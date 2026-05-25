@@ -4858,6 +4858,53 @@ void hyperv_dxg_display_bind_unpin(
     }
 }
 
+int hyperv_dxg_display_bind_submit_failclosed(
+    const struct hyperv_dxg_display_bind_request *bind,
+    struct hyperv_dxg_display_bind_result *result)
+{
+    uint64 block_reason;
+    int pin_valid;
+
+    if (bind == NULL || result == NULL)
+        return -EINVAL;
+
+    memset(result, 0, sizeof(*result));
+    block_reason = bind->block_reason |
+                   FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT |
+                   FB_GPU_DXG_PRESENT_BLOCK_DXG_NO_DISPLAY_BIND |
+                   FB_GPU_DXG_PRESENT_BLOCK_WSL_ENUM_ONLY |
+                   FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION;
+    result->transport = FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE;
+    result->operation = FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND;
+    result->completion_source = FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY;
+    result->present_id = 0;
+    result->completed_id = 0;
+    result->no_host_abi = 1;
+    result->no_sender = 1;
+    result->no_completion = 1;
+
+    pin_valid = bind->pin_valid &&
+                bind->pin.dxg_file_pinned != 0 &&
+                bind->pin.resource_file_pinned != 0 &&
+                bind->pin.sealed != 0 &&
+                bind->pin.shared_records_valid != 0 &&
+                bind->pin.generation != 0 &&
+                bind->pin.device == bind->device &&
+                bind->pin.resource == bind->resource &&
+                bind->pin.first_allocation == bind->allocation &&
+                bind->pin.allocation_count == bind->allocation_count &&
+                bind->pin.process != 0 &&
+                bind->pin.process_generation != 0;
+    if (pin_valid)
+        result->pin_revalidated = 1;
+    else
+        block_reason |= FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED;
+
+    result->block_reason = block_reason;
+    result->status = EOPNOTSUPP;
+    return -EOPNOTSUPP;
+}
+
 static int hvdxg_sync_file_release(struct vfs_inode *ip,
                                    struct vfs_file *file)
 {
