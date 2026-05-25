@@ -865,6 +865,11 @@ struct fb_gpu_stats {
     uint64 kms_vblank_page_flip_events; /* page-flip events using vblank source */
     uint64 kms_vblank_synthetic; /* current vblank source is synthetic */
     uint64 kms_vblank_display_correlated; /* source is display-correlated */
+    uint64 kms_vblank_source_synthetic; /* last source was synthetic timer */
+    uint64 kms_vblank_source_software_display; /* last source was fb completion */
+    uint64 kms_vblank_source_nouveau_hw; /* last source was Nouveau HW */
+    uint64 kms_page_flip_events_software_blit; /* event after software present */
+    uint64 kms_page_flip_events_native_hw; /* event after native HW present */
     uint64 kms_page_flip_target_rejects; /* target flips rejected until real */
     uint64 kms_page_flip_async_rejects; /* async flips rejected until real */
     uint64 kms_page_flip_invalid_noevent_rejects; /* invalid flips no-event */

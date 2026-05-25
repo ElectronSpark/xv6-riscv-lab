@@ -990,6 +990,9 @@ static void gpu_kms_sample_vblank_locked(uint64 min_sequence,
         fb_state.stats.kms_vblank_samples++;
         fb_state.stats.kms_vblank_synthetic = 0;
         fb_state.stats.kms_vblank_display_correlated = 1;
+        fb_state.stats.kms_vblank_source_synthetic = 0;
+        fb_state.stats.kms_vblank_source_software_display = 1;
+        fb_state.stats.kms_vblank_source_nouveau_hw = 0;
         if (sequence_out != NULL)
             *sequence_out = display_seq;
         if (timestamp_ns_out != NULL)
@@ -1021,6 +1024,9 @@ static void gpu_kms_sample_vblank_locked(uint64 min_sequence,
     fb_state.stats.kms_vblank_samples++;
     fb_state.stats.kms_vblank_synthetic = 1;
     fb_state.stats.kms_vblank_display_correlated = 0;
+    fb_state.stats.kms_vblank_source_synthetic = 1;
+    fb_state.stats.kms_vblank_source_software_display = 0;
+    fb_state.stats.kms_vblank_source_nouveau_hw = 0;
     if (sequence_out != NULL)
         *sequence_out = seq;
     if (timestamp_ns_out != NULL)

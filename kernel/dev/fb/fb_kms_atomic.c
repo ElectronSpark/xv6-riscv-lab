@@ -353,6 +353,11 @@ static int gpu_drm_mode_page_flip(struct fb_gpu_render_owner *owner,
 
         gpu_kms_sample_vblank_locked(0, &sequence, &timestamp_ns);
         fb_state.stats.kms_vblank_page_flip_events++;
+        if (fb_state.stats.kms_present_last_lane ==
+            FB_GPU_KMS_PRESENT_LANE_NOUVEAU_HW)
+            fb_state.stats.kms_page_flip_events_native_hw++;
+        else
+            fb_state.stats.kms_page_flip_events_software_blit++;
 
         if ((req.flags & DRM_MODE_PAGE_FLIP_EVENT) != 0)
             ret = gpu_drm_event_queue_locked(owner,

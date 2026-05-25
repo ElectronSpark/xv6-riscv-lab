@@ -447,6 +447,11 @@ static struct {
     .stats.kms_present_reject_no_connectors = 0,
     .stats.kms_present_reject_no_vblank = 0,
     .stats.kms_present_reject_no_hw_completion = 0,
+    .stats.kms_vblank_source_synthetic = 1,
+    .stats.kms_vblank_source_software_display = 0,
+    .stats.kms_vblank_source_nouveau_hw = 0,
+    .stats.kms_page_flip_events_software_blit = 0,
+    .stats.kms_page_flip_events_native_hw = 0,
     .lock = SPINLOCK_INITIALIZED("fb"),
 };
 
