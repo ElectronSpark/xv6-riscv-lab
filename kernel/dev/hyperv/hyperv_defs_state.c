@@ -1498,7 +1498,9 @@ struct hvdxg_shared_allocation_record {
     uint32 allocation;
     uint32 priv_drv_data_size;
     uint64 size;
+    uint64 num_pages;
     uint32 flags;
+    uint32 cached;
 };
 
 struct hvdxg_tracked_resource {
@@ -1528,6 +1530,8 @@ struct hvdxg_tracked_resource {
     uint32 resource_priv_drv_data_size;
     uint32 total_priv_drv_data_size;
     uint8 total_priv_from_host;
+    uint32 shared_parent_id;
+    uint32 shared_parent_refs_snapshot;
     uint8 existing_sysmem;
     uint8 existing_sysmem_vram;
     uint32 existing_sysmem_pfnmap_pages;
@@ -1539,7 +1543,9 @@ struct hvdxg_tracked_resource {
     uint32 allocation_handles[HV_DXG_ALLOCATION_MAX];
     uint32 alloc_priv_sizes[HV_DXG_ALLOCATION_MAX];
     uint64 allocation_sizes[HV_DXG_ALLOCATION_MAX];
+    uint64 allocation_num_pages[HV_DXG_ALLOCATION_MAX];
     uint32 allocation_flags[HV_DXG_ALLOCATION_MAX];
+    uint32 allocation_cached[HV_DXG_ALLOCATION_MAX];
     uint8 shared_records_valid;
     struct hvdxg_shared_resource_record shared_resource_record;
     struct hvdxg_shared_allocation_record
@@ -1568,6 +1574,15 @@ enum hvdxg_shared_object_fops_kind {
 
 struct hvdxg_shared_object {
     uint32 kind;
+    uint32 parent_id;
+    uint32 parent_refs;
+    uint32 fd_refs;
+    uint32 opened_child_count;
+    uint32 opened_child_last_device;
+    uint32 opened_child_last_resource;
+    uint32 creator_child_resource;
+    uint32 parent_sealed_generation;
+    uint32 parent_allocation_count;
     uint32 device;
     uint32 object;
     uint32 global_share;

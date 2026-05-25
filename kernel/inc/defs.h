@@ -122,6 +122,9 @@ struct hyperv_dxg_shared_resource_snapshot {
     uint32 shared_records_valid;
     uint32 generation;
     uint32 host_shared_refs;
+    uint32 shared_parent_id;
+    uint32 shared_parent_refs;
+    uint32 shared_parent_children;
 };
 struct hyperv_dxg_display_bind_pin_snapshot {
     void *dxg_file_cookie;
@@ -141,6 +144,9 @@ struct hyperv_dxg_display_bind_pin_snapshot {
     uint32 process;
     uint32 process_generation;
     uint32 process_refs;
+    uint32 shared_parent_id;
+    uint32 shared_parent_refs;
+    uint32 shared_parent_children;
 };
 struct hyperv_dxg_display_bind_request {
     uint32 present_source;

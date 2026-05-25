@@ -215,10 +215,11 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_sharedhandle_prereq=map:va:0x%lx/pages:%lu/fence:%lu/ret:%d/status:0x%x resident:pq:0x%x/sync:0x%x/fence:%lu/current:%lu wait:%u/%d missing:%u enforced:%u\n"
         "dxg_sharedresource_lifetime=created:%u seals:%u reuses:%u denied:%u seal_allocs:%u seal_priv:%u open_tracked:%u\n"
         "dxg_sharedresource_owner=exists:%u cached:%u reused:%u nt:0x%x refs:%u sealed:%u object:0x%x proc:0x%x open_global:0x%x pre_sealable:%u pre_ret:%d\n"
+        "dxg_sharedresource_parent=next:%u last:%u refs:%u fd_refs:%u children:%u last_child:0x%x sealed_gen:%u publish:%u open:%u release:%u\n"
         "dxg_sharedresource_metadata=track_host:%u runtime:%u/%08x resource:%u/%08x total:%u/%08x alloc0:%u match_in:%u match_out:%u w4:%08x w8:%08x logical_flags:0x%x host_result_flags:0x%x host_flags_ignored:%u\n"
         "dxg_sharedresource_preseal=mode:deferred applied:%u before:%u after:%u ret:%d\n"
         "dxg_sharedresource_record=valid:%u stage:%u key:k%u/p0x%x/o0x%x/g0x%x/nt0x%x source:proc0x%x/tgid%lu/gen%u dev:0x%x res:0x%x alloc0:0x%x adapter:%x:%x host_adapter:%x:%x sealed:%u gen:%u before_fd:%u allocs:%u sizes:%u/%u/%u/%u hashes:%08x/%08x/%08x/%08x refs:%u query:%u open:%u fd:%u admit:%d exact:%u mutated:%u\n"
-        "dxg_sharedresource_model=valid:%u flat_match:%u allocs:%u alloc0:0x%x priv0:%u size0:%lu flags0:0x%x sizes:%u/%u/%u sealed:%u gen:%u\n"
+        "dxg_sharedresource_model=valid:%u flat_match:%u allocs:%u alloc0:0x%x priv0:%u size0:%lu pages0:%lu flags0:0x%x cached0:%u sizes:%u/%u/%u sealed:%u gen:%u\n"
         "dxg_queryresource_nt=seen:%u ret:%d device:0x%x nt:0x%lx kind:%u fops:%u sync_probe:%u global:0x%x host_nt:0x%x refs:%u object:0x%x cache_obj:0x%x allocs:%u runtime:%u resource:%u total:%u\n"
         "dxg_openresource_envelope=route:vgpu global_route:%u cmd:%u wire:%u ext:%u eoff:%u result:%u actual:%u ret:%d status:0x%x proc:0x%x device:0x%x global:0x%x allocs:%u total_priv:%u out_res:0x%x out_alloc0:0x%x seal:%u->%u fd_kind:%u fd_fops:%u fd_refs:%u\n"
         "dxg_opensync_envelope=route:global cmd:%u wire:%u ext:%u eoff:%u result:%u actual:%u ret:%d status:0x%x proc:0x%x device:0x%x global:0x%x flags:0x%x out_sync:0x%x gpu_va:0x%lx cpu_pa:0x%lx fd_kind:%u fd_refs:%u\n"
@@ -1189,6 +1190,16 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.sharedresource_open_global,
         hvdxg.sharedresource_pre_nt_sealable,
         hvdxg.sharedresource_pre_nt_seal_ret,
+        hvdxg.sharedresource_parent_next_id,
+        hvdxg.sharedresource_parent_last_id,
+        hvdxg.sharedresource_parent_last_refs,
+        hvdxg.sharedresource_parent_last_fd_refs,
+        hvdxg.sharedresource_parent_last_children,
+        hvdxg.sharedresource_parent_last_child,
+        hvdxg.sharedresource_parent_last_sealed_gen,
+        hvdxg.sharedresource_parent_publish_count,
+        hvdxg.sharedresource_parent_open_count,
+        hvdxg.sharedresource_parent_release_count,
         hvdxg.sharedresource_meta_track_host,
         hvdxg.sharedresource_meta_runtime_len,
         hvdxg.sharedresource_meta_runtime_hash,
@@ -1250,7 +1261,9 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.sharedresource_model_alloc0,
         hvdxg.sharedresource_model_alloc0_priv,
         hvdxg.sharedresource_model_alloc0_size,
+        hvdxg.sharedresource_model_alloc0_pages,
         hvdxg.sharedresource_model_alloc0_flags,
+        hvdxg.sharedresource_model_alloc0_cached,
         hvdxg.sharedresource_model_runtime_size,
         hvdxg.sharedresource_model_resource_size,
         hvdxg.sharedresource_model_total_size,

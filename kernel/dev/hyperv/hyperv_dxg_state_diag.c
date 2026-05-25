@@ -1341,6 +1341,16 @@ static struct {
     uint32 sharedresource_owner_sealed;
     uint32 sharedresource_owner_object;
     uint32 sharedresource_owner_process;
+    uint32 sharedresource_parent_next_id;
+    uint32 sharedresource_parent_last_id;
+    uint32 sharedresource_parent_last_refs;
+    uint32 sharedresource_parent_last_fd_refs;
+    uint32 sharedresource_parent_last_children;
+    uint32 sharedresource_parent_last_child;
+    uint32 sharedresource_parent_last_sealed_gen;
+    uint32 sharedresource_parent_publish_count;
+    uint32 sharedresource_parent_open_count;
+    uint32 sharedresource_parent_release_count;
     uint32 sharedresource_open_global;
     uint32 sharedresource_pre_nt_sealable;
     int32 sharedresource_pre_nt_seal_ret;
@@ -1427,7 +1437,9 @@ static struct {
     uint32 sharedresource_model_alloc0;
     uint32 sharedresource_model_alloc0_priv;
     uint64 sharedresource_model_alloc0_size;
+    uint64 sharedresource_model_alloc0_pages;
     uint32 sharedresource_model_alloc0_flags;
+    uint32 sharedresource_model_alloc0_cached;
     uint32 sharedresource_model_runtime_size;
     uint32 sharedresource_model_resource_size;
     uint32 sharedresource_model_total_size;
@@ -4121,7 +4133,9 @@ static void hvdxg_reset_shared_resource_record(void)
     hvdxg.sharedresource_model_alloc0 = 0;
     hvdxg.sharedresource_model_alloc0_priv = 0;
     hvdxg.sharedresource_model_alloc0_size = 0;
+    hvdxg.sharedresource_model_alloc0_pages = 0;
     hvdxg.sharedresource_model_alloc0_flags = 0;
+    hvdxg.sharedresource_model_alloc0_cached = 0;
     hvdxg.sharedresource_model_runtime_size = 0;
     hvdxg.sharedresource_model_resource_size = 0;
     hvdxg.sharedresource_model_total_size = 0;
@@ -4229,8 +4243,12 @@ static void hvdxg_note_shared_resource_record(
               resource->alloc_priv_sizes[0] &&
           resource->shared_allocation_records[0].size ==
               resource->allocation_sizes[0] &&
+          resource->shared_allocation_records[0].num_pages ==
+              resource->allocation_num_pages[0] &&
           resource->shared_allocation_records[0].flags ==
-              resource->allocation_flags[0]));
+              resource->allocation_flags[0] &&
+          resource->shared_allocation_records[0].cached ==
+              resource->allocation_cached[0]));
     hvdxg.sharedresource_model_alloc_count = resource->allocation_count;
     hvdxg.sharedresource_model_alloc0 =
         resource->allocation_count != 0 ?
@@ -4241,9 +4259,15 @@ static void hvdxg_note_shared_resource_record(
     hvdxg.sharedresource_model_alloc0_size =
         resource->allocation_count != 0 ?
         resource->shared_allocation_records[0].size : 0;
+    hvdxg.sharedresource_model_alloc0_pages =
+        resource->allocation_count != 0 ?
+        resource->shared_allocation_records[0].num_pages : 0;
     hvdxg.sharedresource_model_alloc0_flags =
         resource->allocation_count != 0 ?
         resource->shared_allocation_records[0].flags : 0;
+    hvdxg.sharedresource_model_alloc0_cached =
+        resource->allocation_count != 0 ?
+        resource->shared_allocation_records[0].cached : 0;
     hvdxg.sharedresource_model_runtime_size =
         resource->shared_resource_record.private_runtime_data_size;
     hvdxg.sharedresource_model_resource_size =

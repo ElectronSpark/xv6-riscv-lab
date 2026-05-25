@@ -6455,6 +6455,20 @@ createhwqueue_done:
             shared->global_share = host_nt_handle;
         shared->host_nt_handle = host_nt_handle;
         shared->nt_handle = host_nt_handle;
+        if (kind == HV_DXG_SHARED_OBJECT_RESOURCE) {
+            shared->parent_id = hvdxg_alloc_shared_parent_id();
+            shared->parent_refs = 1;
+            shared->fd_refs = 1;
+            shared->opened_child_count = 1;
+            shared->opened_child_last_device = resource->device;
+            shared->opened_child_last_resource = resource->resource;
+            shared->creator_child_resource = resource->resource;
+            shared->parent_sealed_generation =
+                resource->sealed_generation;
+            shared->parent_allocation_count =
+                resource->allocation_count;
+            hvdxg.sharedresource_parent_publish_count++;
+        }
         hvdxg.sharedresource_open_global =
             kind == HV_DXG_SHARED_OBJECT_RESOURCE ? shared->global_share : 0;
         if (kind == HV_DXG_SHARED_OBJECT_SYNC) {
@@ -6504,6 +6518,10 @@ createhwqueue_done:
                 hvdxg.sharedhandle_last_ret = ret;
                 break;
             }
+            shared->resource.shared_parent_id = shared->parent_id;
+            shared->resource.shared_parent_refs_snapshot =
+                shared->parent_refs;
+            hvdxg_note_shared_parent(shared);
         }
         fd = vfs_custom_fd_alloc(
             kind == HV_DXG_SHARED_OBJECT_SYNC ?
@@ -6583,6 +6601,7 @@ createhwqueue_done:
         hvdxg.sharedhandle_last_global_share = shared->global_share;
         if (kind == HV_DXG_SHARED_OBJECT_RESOURCE) {
             hvdxg.sharedresource_record_fd_publish_count++;
+            hvdxg_note_shared_parent(shared);
             hvdxg_note_shared_resource_record(
                 "fd-published", 3, &shared->resource, kind,
                 shared->cache_process, shared->cache_object,
@@ -6948,6 +6967,11 @@ opensync_done:
         if (shared->resource.existing_sysmem)
             hvdxg_note_existing_sysmem_share(&shared->resource, 5);
         ret = hvdxg_seal_resource(&shared->resource);
+        shared->parent_sealed_generation =
+            shared->resource.sealed_generation;
+        shared->parent_allocation_count =
+            shared->resource.allocation_count;
+        hvdxg_note_shared_parent(shared);
         if (ret != 0) {
             hvdxg.sharedhandle_last_ret = ret;
             hvdxg.queryresource_last_ret = ret;
@@ -6999,6 +7023,7 @@ queryresource_done:
         uint32 alloc_private_offset = 0;
         struct hvdxg_tracked_resource opened;
         int host_resource_opened = 0;
+        int parent_ref_acquired = 0;
         struct hvdxg_d3dkmthandle open_process;
 
         ret = hvdxg_d3dkmt_ensure();
@@ -7079,6 +7104,11 @@ queryresource_done:
         hvdxg.openresource_last_seal_before = shared->resource.sealed;
         ret = hvdxg_seal_resource(&shared->resource);
         hvdxg.openresource_last_seal_after = shared->resource.sealed;
+        shared->parent_sealed_generation =
+            shared->resource.sealed_generation;
+        shared->parent_allocation_count =
+            shared->resource.allocation_count;
+        hvdxg_note_shared_parent(shared);
         if (shared->resource.existing_sysmem)
             hvdxg_note_existing_sysmem_share(&shared->resource, 8);
         if (ret != 0) {
@@ -7186,6 +7216,8 @@ queryresource_done:
             opened.sealed = 1;
             opened.opened_from_shared = 1;
             opened.open_count = 1;
+            opened.shared_parent_id = shared->parent_id;
+            opened.shared_parent_refs_snapshot = shared->parent_refs;
             for (uint32 i = 0; i < req.allocation_count; i++)
                 opened.allocation_handles[i] = result->allocations[i].v;
             hvdxg_sync_shared_resource_records(&opened);
@@ -7216,6 +7248,13 @@ queryresource_done:
         }
         if (ret != 0)
             goto openresource_done;
+        shared->parent_refs++;
+        shared->opened_child_count++;
+        shared->opened_child_last_device = req.device.v;
+        shared->opened_child_last_resource = req.resource.v;
+        parent_ref_acquired = 1;
+        hvdxg.sharedresource_parent_open_count++;
+        hvdxg_note_shared_parent(shared);
         for (uint32 i = 0; i < req.allocation_count; i++) {
             ret = hvdxg_track_allocation(
                 owner, req.device.v, req.resource.v, result->allocations[i].v,
@@ -7269,6 +7308,13 @@ openresource_done:
 
             hvdxg_untrack_allocation(owner, req.device.v, cleanup_resource, 0);
             hvdxg_untrack_resource(owner, req.device.v, cleanup_resource);
+        }
+        if (ret != 0 && parent_ref_acquired) {
+            if (shared->parent_refs != 0)
+                shared->parent_refs--;
+            if (shared->opened_child_count > 1)
+                shared->opened_child_count--;
+            hvdxg_note_shared_parent(shared);
         }
         if (ret != 0 && host_resource_opened && req.device.v != 0 &&
             result != NULL && result->resource.v != 0)

@@ -1316,6 +1316,9 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_pinned_resource_generation; /* sealed generation */
     uint64 dxg_display_bind_pinned_process_generation; /* dxgprocess generation */
     uint64 dxg_display_bind_pinned_process_refs; /* dxgprocess refs while pinned */
+    uint64 dxg_display_bind_pinned_shared_parent; /* WSL-style parent id */
+    uint64 dxg_display_bind_pinned_parent_refs; /* parent refs while pinned */
+    uint64 dxg_display_bind_pinned_parent_children; /* opened children */
     uint64 display_presents;  /* display present/flush operations issued */
     uint64 display_completions; /* display present completions observed */
     uint64 display_last_present; /* latest issued display-present sequence */

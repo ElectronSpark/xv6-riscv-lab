@@ -597,6 +597,12 @@ fb_dxg_present_scanout_bind_locked(
             source->display_bind_pin.process_generation;
         fb_state.stats.dxg_display_bind_pinned_process_refs =
             source->display_bind_pin.process_refs;
+        fb_state.stats.dxg_display_bind_pinned_shared_parent =
+            source->display_bind_pin.shared_parent_id;
+        fb_state.stats.dxg_display_bind_pinned_parent_refs =
+            source->display_bind_pin.shared_parent_refs;
+        fb_state.stats.dxg_display_bind_pinned_parent_children =
+            source->display_bind_pin.shared_parent_children;
     }
     fb_state.stats.dxg_display_bind_provider_submits++;
     fb_state.stats.dxg_display_bind_lock_dropped_submits++;
@@ -838,6 +844,12 @@ static int fb_dxg_present_register(uint64 owner_id, pid_t owner_tgid,
             pin_snapshot.process_generation;
         fb_state.stats.dxg_display_bind_pinned_process_refs =
             pin_snapshot.process_refs;
+        fb_state.stats.dxg_display_bind_pinned_shared_parent =
+            pin_snapshot.shared_parent_id;
+        fb_state.stats.dxg_display_bind_pinned_parent_refs =
+            pin_snapshot.shared_parent_refs;
+        fb_state.stats.dxg_display_bind_pinned_parent_children =
+            pin_snapshot.shared_parent_children;
     }
 
     for (int i = 0; i < FB_GPU_MAX_DXG_PRESENT_SOURCES; i++) {

@@ -147,6 +147,13 @@ static uint64 hvdxg_iospace_user_map_size(uint64 user_va, uint64 size)
     return PGROUNDUP(page_off + size);
 }
 
+static uint64 hvdxg_allocation_num_pages(uint64 size)
+{
+    if (size == 0)
+        return 0;
+    return PGROUNDUP(size) >> PGSHIFT;
+}
+
 static uint64 hvdxg_canonical_iospace_pa(uint64 raw_pa, uint64 size,
                                          int allow_offset, uint32 *mode)
 {
@@ -2524,7 +2531,10 @@ static void hvdxg_link_resource_allocation(struct hvdxg_open_state *owner,
     }
     r->allocation_handles[slot] = allocation;
     r->allocation_sizes[slot] = size;
+    r->allocation_num_pages[slot] = hvdxg_allocation_num_pages(size);
     r->allocation_flags[slot] = flags;
+    r->allocation_cached[slot] =
+        (r->create_flags_value & (1U << 9)) != 0 ? 1 : 0;
     hvdxg_sync_shared_resource_records(r);
 
     a = hvdxg_owner_find_allocation(owner, device, resource, allocation);
@@ -2863,8 +2873,12 @@ static void hvdxg_sync_shared_resource_records(
             resource->alloc_priv_sizes[i];
         resource->shared_allocation_records[i].size =
             resource->allocation_sizes[i];
+        resource->shared_allocation_records[i].num_pages =
+            resource->allocation_num_pages[i];
         resource->shared_allocation_records[i].flags =
             resource->allocation_flags[i];
+        resource->shared_allocation_records[i].cached =
+            resource->allocation_cached[i];
     }
 }
 
@@ -2959,7 +2973,11 @@ static int hvdxg_refresh_resource_allocations(
             resource->owner_refs = a->owner_refs;
         }
         resource->allocation_sizes[i] = a->size;
+        resource->allocation_num_pages[i] =
+            hvdxg_allocation_num_pages(a->size);
         resource->allocation_flags[i] = a->flags;
+        resource->allocation_cached[i] =
+            (resource->create_flags_value & (1U << 9)) != 0 ? 1 : 0;
         expected_private += resource->alloc_priv_sizes[i];
         if (i == 0) {
             hvdxg.allocation_last_owner_process = a->owner_process;
@@ -3036,7 +3054,11 @@ static int hvdxg_prepare_resource_nt_metadata(
     if (resource->allocation_handles[0] == 0)
         resource->allocation_handles[0] = allocation;
     resource->allocation_sizes[0] = alloc->size;
+    resource->allocation_num_pages[0] =
+        hvdxg_allocation_num_pages(alloc->size);
     resource->allocation_flags[0] = alloc->flags;
+    resource->allocation_cached[0] =
+        (resource->create_flags_value & (1U << 9)) != 0 ? 1 : 0;
     hvdxg_sync_shared_resource_records(resource);
     if (alloc->owner_process == 0) {
         alloc->owner_process = resource->owner_process;
@@ -3816,8 +3838,13 @@ static int hvdxg_track_resource(struct hvdxg_open_state *owner,
                                   alloc_info[i].priv_drv_data_size;
         tmp.allocation_sizes[i] =
             result->allocation_info[i].allocation_size;
+        tmp.allocation_num_pages[i] =
+            hvdxg_allocation_num_pages(
+                result->allocation_info[i].allocation_size);
         tmp.allocation_flags[i] =
             result->allocation_info[i].allocation_flags;
+        tmp.allocation_cached[i] =
+            requested_flags.create_cached ? 1 : 0;
         if (alloc_info[i].sysmem != 0) {
             tmp.existing_sysmem = 1;
             tmp.existing_sysmem_va = alloc_info[i].sysmem;
@@ -4441,6 +4468,28 @@ static void hvdxg_clear_resource_nt_shared_handle(
     resource->host_shared_handle_nt = 0;
 }
 
+static uint32 hvdxg_alloc_shared_parent_id(void)
+{
+    if (hvdxg.sharedresource_parent_next_id == 0)
+        hvdxg.sharedresource_parent_next_id = 1;
+    return hvdxg.sharedresource_parent_next_id++;
+}
+
+static void hvdxg_note_shared_parent(struct hvdxg_shared_object *shared)
+{
+    if (shared == NULL || shared->kind != HV_DXG_SHARED_OBJECT_RESOURCE)
+        return;
+    hvdxg.sharedresource_parent_last_id = shared->parent_id;
+    hvdxg.sharedresource_parent_last_refs = shared->parent_refs;
+    hvdxg.sharedresource_parent_last_fd_refs = shared->fd_refs;
+    hvdxg.sharedresource_parent_last_children =
+        shared->opened_child_count;
+    hvdxg.sharedresource_parent_last_child =
+        shared->opened_child_last_resource;
+    hvdxg.sharedresource_parent_last_sealed_gen =
+        shared->parent_sealed_generation;
+}
+
 static uint32 hvdxg_release_nt_shared_object_ref(uint32 kind, uint32 process,
                                                  uint32 object, uint32 handle)
 {
@@ -4619,6 +4668,14 @@ static int hvdxg_shared_object_release(struct vfs_inode *ip,
                     hvdxg.global_send_destroynt.result_len;
             }
         }
+        if (shared->kind == HV_DXG_SHARED_OBJECT_RESOURCE) {
+            if (shared->fd_refs != 0)
+                shared->fd_refs--;
+            if (shared->parent_refs != 0)
+                shared->parent_refs--;
+            hvdxg.sharedresource_parent_release_count++;
+            hvdxg_note_shared_parent(shared);
+        }
         if (shared->kind > 0 &&
             shared->kind < HV_DXG_SHARED_OBJECT_KIND_MAX) {
             uint32 kind = shared->kind;
@@ -4779,6 +4836,9 @@ int hyperv_dxg_shared_resource_snapshot_from_fd(
     snapshot->shared_records_valid = resource->shared_records_valid;
     snapshot->generation = resource->sealed_generation;
     snapshot->host_shared_refs = resource->host_shared_refs;
+    snapshot->shared_parent_id = shared->parent_id;
+    snapshot->shared_parent_refs = shared->parent_refs;
+    snapshot->shared_parent_children = shared->opened_child_count;
     vfs_fput(file);
     return snapshot->kind == HV_DXG_SHARED_OBJECT_RESOURCE &&
            snapshot->fops_kind == HV_DXG_SHARED_FOPS_RESOURCE &&
@@ -4844,6 +4904,9 @@ int hyperv_dxg_shared_resource_snapshot_from_opened_resource(
     snapshot->shared_records_valid = shared->resource.shared_records_valid;
     snapshot->generation = shared->resource.sealed_generation;
     snapshot->host_shared_refs = shared->resource.host_shared_refs;
+    snapshot->shared_parent_id = shared->parent_id;
+    snapshot->shared_parent_refs = shared->parent_refs;
+    snapshot->shared_parent_children = shared->opened_child_count;
     ret = 0;
 
 out:
@@ -4927,6 +4990,9 @@ int hyperv_dxg_display_bind_pin_from_fds(
     snapshot->shared_records_valid = shared->resource.shared_records_valid;
     snapshot->generation = shared->resource.sealed_generation;
     snapshot->host_shared_refs = shared->resource.host_shared_refs;
+    snapshot->shared_parent_id = shared->parent_id;
+    snapshot->shared_parent_refs = shared->parent_refs;
+    snapshot->shared_parent_children = shared->opened_child_count;
     snapshot->process = hvdxg_open_host_process(owner);
     snapshot->process_generation = hvdxg_open_process_generation(owner);
     snapshot->process_refs = hvdxg_open_process_refs(owner);
@@ -4995,7 +5061,10 @@ int hyperv_dxg_display_bind_submit_failclosed(
                 bind->pin.first_allocation == bind->allocation &&
                 bind->pin.allocation_count == bind->allocation_count &&
                 bind->pin.process != 0 &&
-                bind->pin.process_generation != 0;
+                bind->pin.process_generation != 0 &&
+                bind->pin.shared_parent_id != 0 &&
+                bind->pin.shared_parent_refs != 0 &&
+                bind->pin.shared_parent_children != 0;
     if (pin_valid)
         result->pin_revalidated = 1;
     else
