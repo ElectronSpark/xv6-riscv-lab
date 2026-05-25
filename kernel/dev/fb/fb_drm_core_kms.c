@@ -1423,6 +1423,56 @@ static int gpu_kms_copy_fb_for_owner(struct fb_gpu_render_owner *owner,
     return ret;
 }
 
+static uint64 gpu_kms_native_present_reject_reasons_locked(void)
+{
+    uint64 reasons = 0;
+
+    if (fb_state.stats.nouveau_native_display_ready == 0)
+        reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_NATIVE_DISPLAY;
+    if (fb_state.stats.nouveau_dda_native_display_present == 0)
+        reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_NOUVEAU_DISPLAY;
+    if (fb_state.stats.nouveau_display_create_successes == 0)
+        reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_DISPLAY_CREATE;
+    if (fb_state.stats.nouveau_display_heads == 0)
+        reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_HEADS;
+    if (fb_state.stats.nouveau_display_connectors == 0)
+        reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_CONNECTORS;
+    if (fb_state.stats.nouveau_display_vblank_supported == 0)
+        reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_VBLANK;
+    if (fb_state.stats.nouveau_display_page_flip_completions == 0)
+        reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION;
+    if (reasons == 0)
+        reasons = FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION;
+    return reasons;
+}
+
+static int gpu_kms_try_native_present_fb_locked(uint32 fb_id)
+{
+    uint64 reasons;
+
+    if (fb_id == 0)
+        return 0;
+    reasons = gpu_kms_native_present_reject_reasons_locked();
+    fb_state.stats.kms_present_last_lane = FB_GPU_KMS_PRESENT_LANE_NONE;
+    fb_state.stats.kms_present_rejects++;
+    fb_state.stats.kms_present_reject_reasons |= reasons;
+    if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_NATIVE_DISPLAY) != 0)
+        fb_state.stats.kms_present_reject_no_native_display++;
+    if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_NOUVEAU_DISPLAY) != 0)
+        fb_state.stats.kms_present_reject_no_nouveau_display++;
+    if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_DISPLAY_CREATE) != 0)
+        fb_state.stats.kms_present_reject_no_display_create++;
+    if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_HEADS) != 0)
+        fb_state.stats.kms_present_reject_no_heads++;
+    if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_CONNECTORS) != 0)
+        fb_state.stats.kms_present_reject_no_connectors++;
+    if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_VBLANK) != 0)
+        fb_state.stats.kms_present_reject_no_vblank++;
+    if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION) != 0)
+        fb_state.stats.kms_present_reject_no_hw_completion++;
+    return -EOPNOTSUPP;
+}
+
 static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
 {
     struct fb_gpu_bo_entry *bo;
@@ -1457,6 +1507,10 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
         return -EINVAL;
     if (!gpu_kms_primary_scanout_format_supported(pixel_format, modifier))
         return -EOPNOTSUPP;
+
+    spin_lock(&fb_state.lock);
+    (void)gpu_kms_try_native_present_fb_locked(fb_id);
+    spin_unlock(&fb_state.lock);
 
     bo = fb_bo_get_owned(bo_handle, owner->id, owner->tgid);
     if (bo == NULL)

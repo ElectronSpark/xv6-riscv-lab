@@ -892,6 +892,7 @@ static uint32 *hvdxg_owner_object_free_tail(struct hvdxg_open_state *owner)
 
 static uint32 hvdxg_open_host_process(struct hvdxg_open_state *owner);
 static uint32 hvdxg_open_process_generation(struct hvdxg_open_state *owner);
+static uint32 hvdxg_open_process_refs(struct hvdxg_open_state *owner);
 static const char *hvdxg_early_bind_source_name(uint32 source);
 
 static uint32 *hvdxg_owner_object_generation(struct hvdxg_open_state *owner)
@@ -2871,6 +2872,13 @@ hvdxg_shared_parent_create(struct hvdxg_tracked_resource *resource,
     parent->global_share = global_share;
     parent->host_nt_handle = host_nt_handle;
     parent->creator_child_resource = resource->resource;
+    parent->resource.global_share = global_share;
+    parent->resource.host_shared_handle_nt = host_nt_handle;
+    parent->resource.host_shared_process = cache_process;
+    parent->resource.host_shared_object = cache_object;
+    if (parent->resource.host_shared_refs == 0)
+        parent->resource.host_shared_refs = 1;
+    parent->resource.host_shared_sealed = parent->resource.sealed;
     parent->sealed_generation = parent->resource.sealed_generation;
     parent->allocation_count = parent->resource.allocation_count;
     parent->resource.shared_parent_id = parent->id;
@@ -2914,6 +2922,16 @@ static int hvdxg_shared_parent_add_resource(
     parent->last_child_resource = resource->resource;
     parent->sealed_generation = parent->resource.sealed_generation;
     parent->allocation_count = parent->resource.allocation_count;
+    if (parent->global_share != 0)
+        resource->global_share = parent->global_share;
+    if (parent->host_nt_handle != 0) {
+        resource->host_shared_handle_nt = parent->host_nt_handle;
+        resource->host_shared_process = parent->cache_process;
+        resource->host_shared_object = parent->cache_object;
+        if (resource->host_shared_refs == 0)
+            resource->host_shared_refs = 1;
+        resource->host_shared_sealed = resource->sealed;
+    }
     resource->shared_parent = parent;
     resource->shared_parent_id = parent->id;
     resource->shared_parent_refs_snapshot = parent->refs;
@@ -4953,6 +4971,81 @@ static uint32 hvdxg_shared_object_fops_kind(struct vfs_file *file)
     return HV_DXG_SHARED_FOPS_NONE;
 }
 
+enum {
+    HV_DXG_BIND_PIN_REASON_OK = 0,
+    HV_DXG_BIND_PIN_REASON_BAD_ARGS = 1,
+    HV_DXG_BIND_PIN_REASON_NO_FDTABLE = 2,
+    HV_DXG_BIND_PIN_REASON_NO_SHARED_FD = 3,
+    HV_DXG_BIND_PIN_REASON_BAD_SHARED_FD = 4,
+    HV_DXG_BIND_PIN_REASON_BAD_PARENT = 5,
+    HV_DXG_BIND_PIN_REASON_BAD_DXG_FD = 6,
+    HV_DXG_BIND_PIN_REASON_NO_MATCHING_RESOURCE = 7,
+};
+
+static void hvdxg_note_display_bind_pin_diag(
+    int ret, uint32 reason, int dxg_fd, int resource_fd, uint32 device,
+    uint32 resource, uint32 allocation, uint32 allocation_count,
+    struct hvdxg_shared_object *shared, uint32 fops_kind,
+    struct hvdxg_tracked_resource *parent_resource,
+    struct hvdxg_open_state *owner, struct hvdxg_tracked_resource *opened,
+    uint32 selected)
+{
+    hvdxg.display_bind_pin_last_ret = ret;
+    hvdxg.display_bind_pin_last_reason = reason;
+    hvdxg.display_bind_pin_last_dxg_fd = dxg_fd;
+    hvdxg.display_bind_pin_last_resource_fd = resource_fd;
+    hvdxg.display_bind_pin_last_device = device;
+    hvdxg.display_bind_pin_last_resource = resource;
+    hvdxg.display_bind_pin_last_allocation = allocation;
+    hvdxg.display_bind_pin_last_allocation_count = allocation_count;
+    hvdxg.display_bind_pin_last_shared_kind = shared != NULL ?
+        shared->kind : 0;
+    hvdxg.display_bind_pin_last_fops_kind = fops_kind;
+    hvdxg.display_bind_pin_last_shared_global = shared != NULL ?
+        shared->global_share : 0;
+    hvdxg.display_bind_pin_last_parent_present =
+        parent_resource != NULL;
+    hvdxg.display_bind_pin_last_parent_device =
+        parent_resource != NULL ? parent_resource->device : 0;
+    hvdxg.display_bind_pin_last_parent_resource =
+        parent_resource != NULL ? parent_resource->resource : 0;
+    hvdxg.display_bind_pin_last_parent_allocation =
+        parent_resource != NULL &&
+        parent_resource->allocation_count != 0 ?
+        parent_resource->allocation_handles[0] : 0;
+    hvdxg.display_bind_pin_last_parent_allocation_count =
+        parent_resource != NULL ? parent_resource->allocation_count : 0;
+    hvdxg.display_bind_pin_last_parent_global =
+        parent_resource != NULL ? parent_resource->global_share : 0;
+    hvdxg.display_bind_pin_last_parent_sealed =
+        parent_resource != NULL ? parent_resource->sealed : 0;
+    hvdxg.display_bind_pin_last_parent_records =
+        parent_resource != NULL ?
+        parent_resource->shared_records_valid : 0;
+    hvdxg.display_bind_pin_last_parent_generation =
+        parent_resource != NULL ? parent_resource->sealed_generation : 0;
+    hvdxg.display_bind_pin_last_dxg_file_ok = owner != NULL;
+    hvdxg.display_bind_pin_last_owner_process =
+        owner != NULL ? hvdxg_open_host_process(owner) : 0;
+    hvdxg.display_bind_pin_last_owner_generation =
+        owner != NULL ? hvdxg_open_process_generation(owner) : 0;
+    hvdxg.display_bind_pin_last_owner_refs =
+        owner != NULL ? hvdxg_open_process_refs(owner) : 0;
+    hvdxg.display_bind_pin_last_opened_present = opened != NULL;
+    hvdxg.display_bind_pin_last_opened_device =
+        opened != NULL ? opened->device : 0;
+    hvdxg.display_bind_pin_last_opened_resource =
+        opened != NULL ? opened->resource : 0;
+    hvdxg.display_bind_pin_last_opened_allocation =
+        opened != NULL && opened->allocation_count != 0 ?
+        opened->allocation_handles[0] : 0;
+    hvdxg.display_bind_pin_last_opened_allocation_count =
+        opened != NULL ? opened->allocation_count : 0;
+    hvdxg.display_bind_pin_last_opened_global =
+        opened != NULL ? opened->global_share : 0;
+    hvdxg.display_bind_pin_last_selected = selected;
+}
+
 static struct hvdxg_shared_object *hvdxg_shared_object_from_fd(
     int fd, uint32 kind, struct vfs_file **file_out)
 {
@@ -5123,43 +5216,63 @@ int hyperv_dxg_display_bind_pin_from_fds(
     struct hyperv_dxg_display_bind_pin_snapshot *snapshot)
 {
     struct hvdxg_shared_object *shared;
-    struct hvdxg_tracked_resource *opened;
+    struct hvdxg_tracked_resource *opened = NULL;
     struct hvdxg_tracked_resource *pinned_resource = NULL;
-    struct hvdxg_tracked_resource *parent_resource;
+    struct hvdxg_tracked_resource *parent_resource = NULL;
     struct vfs_file *shared_file = NULL;
     struct vfs_file *dxg_file = NULL;
-    struct hvdxg_open_state *owner;
-    uint32 fops_kind;
+    struct hvdxg_open_state *owner = NULL;
+    uint32 fops_kind = HV_DXG_SHARED_FOPS_NONE;
+    uint32 reason = HV_DXG_BIND_PIN_REASON_OK;
+    uint32 selected = 0;
     int ret = -EINVAL;
 
     if (snapshot == NULL)
         return -EINVAL;
     memset(snapshot, 0, sizeof(*snapshot));
     if (dxg_fd < 0 || resource_fd < 0 || device == 0 || resource == 0 ||
-        allocation == 0 || allocation_count == 0)
+        allocation == 0 || allocation_count == 0) {
+        hvdxg_note_display_bind_pin_diag(
+            -EINVAL, HV_DXG_BIND_PIN_REASON_BAD_ARGS, dxg_fd,
+            resource_fd, device, resource, allocation, allocation_count,
+            NULL, HV_DXG_SHARED_FOPS_NONE, NULL, NULL, NULL, 0);
         return -EINVAL;
-    if (current == NULL || current->fdtable == NULL)
+    }
+    if (current == NULL || current->fdtable == NULL) {
+        hvdxg_note_display_bind_pin_diag(
+            -EINVAL, HV_DXG_BIND_PIN_REASON_NO_FDTABLE, dxg_fd,
+            resource_fd, device, resource, allocation, allocation_count,
+            NULL, HV_DXG_SHARED_FOPS_NONE, NULL, NULL, NULL, 0);
         return -EINVAL;
+    }
 
     shared = hvdxg_shared_object_from_fd(resource_fd,
                                          HV_DXG_SHARED_OBJECT_RESOURCE,
                                          &shared_file);
-    if (shared == NULL)
+    if (shared == NULL) {
+        reason = HV_DXG_BIND_PIN_REASON_NO_SHARED_FD;
         return -EINVAL;
+    }
     fops_kind = hvdxg_shared_object_fops_kind(shared_file);
     if (fops_kind != HV_DXG_SHARED_FOPS_RESOURCE ||
-        shared->global_share == 0)
+        shared->global_share == 0) {
+        reason = HV_DXG_BIND_PIN_REASON_BAD_SHARED_FD;
         goto out;
+    }
     parent_resource = hvdxg_shared_parent_resource(shared);
     if (parent_resource == NULL || parent_resource->sealed == 0 ||
         parent_resource->shared_records_valid == 0 ||
-        parent_resource->sealed_generation == 0)
+        parent_resource->sealed_generation == 0) {
+        reason = HV_DXG_BIND_PIN_REASON_BAD_PARENT;
         goto out;
+    }
 
     dxg_file = vfs_fdtable_get_file(current->fdtable, dxg_fd);
     if (dxg_file == NULL || dxg_file->ops != &hvdxg_file_ops ||
-        dxg_file->private_data == NULL)
+        dxg_file->private_data == NULL) {
+        reason = HV_DXG_BIND_PIN_REASON_BAD_DXG_FD;
         goto out;
+    }
 
     owner = (struct hvdxg_open_state *)dxg_file->private_data;
     opened = hvdxg_owner_find_resource(owner, device, resource);
@@ -5167,12 +5280,21 @@ int hyperv_dxg_display_bind_pin_from_fds(
         opened->allocation_count != 0 &&
         opened->allocation_count <= HV_DXG_ALLOCATION_MAX &&
         opened->allocation_handles[0] == allocation &&
-        opened->global_share == shared->global_share &&
-        opened->shared_parent_id ==
-            (shared->resource_parent != NULL ?
-             shared->resource_parent->id : shared->parent_id)) {
+        opened->global_share == shared->global_share) {
         pinned_resource = opened;
+        selected = 1;
+    } else if (parent_resource->device == device &&
+               parent_resource->resource == resource &&
+               parent_resource->allocation_count == allocation_count &&
+               parent_resource->allocation_count != 0 &&
+               parent_resource->allocation_count <=
+                   HV_DXG_ALLOCATION_MAX &&
+               parent_resource->allocation_handles[0] == allocation &&
+               parent_resource->global_share == shared->global_share) {
+        pinned_resource = parent_resource;
+        selected = 2;
     } else {
+        reason = HV_DXG_BIND_PIN_REASON_NO_MATCHING_RESOURCE;
         goto out;
     }
 
@@ -5203,8 +5325,13 @@ int hyperv_dxg_display_bind_pin_from_fds(
     snapshot->process_generation = hvdxg_open_process_generation(owner);
     snapshot->process_refs = hvdxg_open_process_refs(owner);
     ret = 0;
+    reason = HV_DXG_BIND_PIN_REASON_OK;
 
 out:
+    hvdxg_note_display_bind_pin_diag(
+        ret, reason, dxg_fd, resource_fd, device, resource, allocation,
+        allocation_count, shared, fops_kind, parent_resource, owner, opened,
+        selected);
     if (ret != 0) {
         if (dxg_file != NULL)
             vfs_fput(dxg_file);

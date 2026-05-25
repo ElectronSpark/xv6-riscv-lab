@@ -356,6 +356,29 @@ static void gpu_nouveau_pci_unwind_probe_resources(
     pci_disable_device(pdev);
 }
 
+static void gpu_nouveau_display_create_failclosed(void)
+{
+    uint64 reasons = FB_GPU_KMS_PRESENT_REJECT_NO_NATIVE_DISPLAY |
+                     FB_GPU_KMS_PRESENT_REJECT_NO_DISPLAY_CREATE |
+                     FB_GPU_KMS_PRESENT_REJECT_NO_HEADS |
+                     FB_GPU_KMS_PRESENT_REJECT_NO_CONNECTORS |
+                     FB_GPU_KMS_PRESENT_REJECT_NO_VBLANK |
+                     FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION;
+
+    gpu_nouveau_stat_inc(
+        &fb_state.stats.nouveau_display_create_attempts);
+    gpu_nouveau_stat_inc(
+        &fb_state.stats.nouveau_display_create_fail_closed);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_native_display_reject_reasons,
+        reasons);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_native_display_ready, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_dda_native_display_present, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_native_present_credit, 0);
+}
+
 static int gpu_nouveau_pci_probe(struct pci_device_info *pdev,
                                  const struct pci_device_id *id)
 {
@@ -513,6 +536,7 @@ static int gpu_nouveau_pci_probe(struct pci_device_info *pdev,
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_msix_cap,
                          gpu_nouveau_pci.msix_cap);
     gpu_nouveau_pci_publish_core_state(pdev);
+    gpu_nouveau_display_create_failclosed();
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_native_present_credit, 0);
     printf("Nouveau: PCI probe accepted %02x:%02x.%u device=0x%x class=0x%lx bar0=0x%lx len=0x%lx claimed=%d bar1=0x%lx len=0x%lx claimed=%d irq=%d pin=%u irqmode=0x%x irq_handler=0 irq_delivery=0 dma=%u/%u coherent=%u/%u msi=0x%x msix=0x%x\n",
