@@ -407,6 +407,33 @@ static struct {
     .stats.dxg_scanout_bind_candidate_vmbus_enum_known = 1,
     .stats.dxg_scanout_bind_candidate_reject_reasons =
         FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_ALL,
+    .stats.nouveau_pci_native_present_credit = 0,
+    .stats.nouveau_native_display_ready = 0,
+    .stats.nouveau_dda_native_display_present = 0,
+    .stats.nouveau_display_create_attempts = 0,
+    .stats.nouveau_display_create_successes = 0,
+    .stats.nouveau_display_create_fail_closed = 0,
+    .stats.nouveau_display_heads = 0,
+    .stats.nouveau_display_connectors = 0,
+    .stats.nouveau_display_vblank_supported = 0,
+    .stats.nouveau_display_vblank_irqs = 0,
+    .stats.nouveau_display_page_flip_completions = 0,
+    .stats.nouveau_native_display_reject_reasons =
+        FB_GPU_KMS_PRESENT_REJECT_ALL,
+    .stats.kms_present_last_lane = FB_GPU_KMS_PRESENT_LANE_NONE,
+    .stats.kms_present_dumb = 0,
+    .stats.kms_present_synthvid = 0,
+    .stats.kms_present_nouveau_hw = 0,
+    .stats.kms_present_rejects = 0,
+    .stats.kms_present_reject_reasons =
+        FB_GPU_KMS_PRESENT_REJECT_ALL,
+    .stats.kms_present_reject_no_native_display = 0,
+    .stats.kms_present_reject_no_nouveau_display = 0,
+    .stats.kms_present_reject_no_display_create = 0,
+    .stats.kms_present_reject_no_heads = 0,
+    .stats.kms_present_reject_no_connectors = 0,
+    .stats.kms_present_reject_no_vblank = 0,
+    .stats.kms_present_reject_no_hw_completion = 0,
     .lock = SPINLOCK_INITIALIZED("fb"),
 };
 
