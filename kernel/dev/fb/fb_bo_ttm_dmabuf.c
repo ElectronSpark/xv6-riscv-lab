@@ -262,6 +262,10 @@ static int fb_ttm_valid_placement(uint32 placement)
 }
 
 static void fb_ttm_propagate_gem_locked(struct fb_gpu_bo_entry *bo);
+static int fb_ttm_reserve_locked(struct fb_gpu_bo_entry *bo,
+                                 uint64 owner_id, pid_t owner_tgid);
+static int fb_ttm_unreserve_locked(struct fb_gpu_bo_entry *bo,
+                                   uint64 owner_id, pid_t owner_tgid);
 
 static int fb_ttm_cpu_copy_fallback_path(uint32 old_mem_type,
                                          uint32 new_mem_type)
@@ -496,6 +500,107 @@ static int fb_ttm_resv_wait_owner_locked(struct fb_gpu_gem_object *gem,
         return -EBUSY;
     }
     return 0;
+}
+
+static uint64 fb_ttm_resv_ww_next_stamp_locked(void)
+{
+    uint64 stamp = fb_state.next_ww_acquire_stamp++;
+
+    if (fb_state.next_ww_acquire_stamp == 0)
+        fb_state.next_ww_acquire_stamp = 1;
+    if (stamp == 0)
+        stamp = fb_state.next_ww_acquire_stamp++;
+    return stamp;
+}
+
+static void fb_ttm_resv_ww_ctx_init_locked(
+    struct fb_gpu_ww_acquire_ctx *ctx, uint64 owner_id, pid_t owner_tgid)
+{
+    memset(ctx, 0, sizeof(*ctx));
+    ctx->stamp = fb_ttm_resv_ww_next_stamp_locked();
+    ctx->owner_id = owner_id;
+    ctx->owner_tgid = owner_tgid;
+    fb_ttm_resv_note_enabled_locked();
+    fb_state.stats.ttm_resv_ww_contexts++;
+}
+
+static int fb_ttm_resv_ww_acquire_one_locked(
+    struct fb_gpu_ww_acquire_ctx *ctx, struct fb_gpu_bo_entry *bo)
+{
+    int ret;
+
+    if (ctx == NULL || bo == NULL || bo->gem == NULL)
+        return -EINVAL;
+    ret = fb_ttm_reserve_locked(bo, ctx->owner_id, ctx->owner_tgid);
+    if (ret != 0) {
+        ctx->contended++;
+        return ret;
+    }
+    ctx->acquired++;
+    fb_state.stats.ttm_resv_ww_ordered_acquires++;
+    if (ctx->acquired > fb_state.stats.ttm_resv_ww_max_acquired)
+        fb_state.stats.ttm_resv_ww_max_acquired = ctx->acquired;
+    return 0;
+}
+
+static void fb_ttm_resv_ww_release_one_locked(
+    struct fb_gpu_ww_acquire_ctx *ctx, struct fb_gpu_bo_entry *bo)
+{
+    if (ctx == NULL || bo == NULL || bo->gem == NULL)
+        return;
+    if (fb_ttm_unreserve_locked(bo, ctx->owner_id, ctx->owner_tgid) == 0) {
+        if (ctx->acquired > 0)
+            ctx->acquired--;
+        fb_state.stats.ttm_resv_ww_release_balance++;
+    }
+}
+
+static int fb_ttm_resv_ww_validate_pair_locked(
+    struct fb_gpu_bo_entry *bo, struct fb_gpu_bo_entry *peer,
+    uint64 owner_id, pid_t owner_tgid)
+{
+    struct fb_gpu_ww_acquire_ctx ctx;
+    struct fb_gpu_bo_entry *first;
+    struct fb_gpu_bo_entry *second;
+    int reversed;
+    int ret;
+
+    if (bo == NULL || peer == NULL || bo == peer ||
+        bo->gem == NULL || peer->gem == NULL) {
+        fb_state.stats.ttm_resv_ww_validate_failures++;
+        fb_state.stats.ttm_validate_failures++;
+        return -EINVAL;
+    }
+
+    fb_ttm_resv_ww_ctx_init_locked(&ctx, owner_id, owner_tgid);
+    reversed = bo->gem->id > peer->gem->id;
+    first = reversed ? peer : bo;
+    second = reversed ? bo : peer;
+
+    if (reversed) {
+        fb_state.stats.ttm_resv_ww_deadlock_retries++;
+        fb_state.stats.ttm_resv_ww_wound_backoffs++;
+        ctx.retries++;
+    }
+
+    ret = fb_ttm_resv_ww_acquire_one_locked(&ctx, first);
+    if (ret != 0)
+        goto fail;
+    ret = fb_ttm_resv_ww_acquire_one_locked(&ctx, second);
+    if (ret != 0) {
+        fb_ttm_resv_ww_release_one_locked(&ctx, first);
+        goto fail;
+    }
+
+    fb_state.stats.ttm_resv_ww_multi_object++;
+    fb_ttm_resv_ww_release_one_locked(&ctx, second);
+    fb_ttm_resv_ww_release_one_locked(&ctx, first);
+    return 0;
+
+fail:
+    fb_state.stats.ttm_resv_ww_validate_failures++;
+    fb_state.stats.ttm_validate_failures++;
+    return ret;
 }
 
 static void fb_ttm_resv_record_shared_locked(struct fb_gpu_bo_entry *bo,
@@ -898,7 +1003,7 @@ static void fb_ttm_fill_validate_locked(struct fb_gpu_ttm_validate *req,
     req->pin_count = bo->ttm_pin_count;
     req->tt_populated = bo->ttm_tt_populated;
     req->sg_nents = bo->ttm_sg_nents;
-    req->reserved = 0;
+    req->peer_handle = 0;
     req->size = bo->size;
     req->dma_addr_base = bo->ttm_dma_addr_base;
     req->reservation_seq = bo->ttm_reservation_seq;

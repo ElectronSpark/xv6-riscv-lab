@@ -1077,12 +1077,20 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
                          FB_GPU_TTM_F_UNPIN |
                          FB_GPU_TTM_F_FORCE_EVICT |
                          FB_GPU_TTM_F_RESERVE |
-                         FB_GPU_TTM_F_UNRESERVE;
+                         FB_GPU_TTM_F_UNRESERVE |
+                         FB_GPU_TTM_F_WW_VALIDATE;
         int ret = 0;
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
         if ((req.flags & ~allowed) != 0 || req.handle == 0)
+            return -EINVAL;
+        if ((req.flags & FB_GPU_TTM_F_WW_VALIDATE) != 0 &&
+            ((req.flags & ~FB_GPU_TTM_F_WW_VALIDATE) != 0 ||
+             req.peer_handle == 0))
+            return -EINVAL;
+        if ((req.flags & FB_GPU_TTM_F_WW_VALIDATE) == 0 &&
+            req.peer_handle != 0)
             return -EINVAL;
 
         spin_lock(&fb_state.lock);
@@ -1098,6 +1106,21 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
             return -EPERM;
         }
         bo->refs++;
+        if ((req.flags & FB_GPU_TTM_F_WW_VALIDATE) != 0) {
+            struct fb_gpu_bo_entry *peer = fb_bo_lookup_locked(req.peer_handle);
+
+            if (peer == NULL || !fb_bo_owner_matches(peer, owner_id,
+                                                     owner_tgid)) {
+                fb_state.stats.ttm_resv_ww_validate_failures++;
+                fb_state.stats.ttm_validate_failures++;
+                ret = peer == NULL ? -ENOENT : -EPERM;
+            } else {
+                peer->refs++;
+                ret = fb_ttm_resv_ww_validate_pair_locked(
+                    bo, peer, owner_id, owner_tgid);
+                peer->refs--;
+            }
+        }
         if ((req.flags & FB_GPU_TTM_F_RESERVE) != 0)
             ret = fb_ttm_reserve_locked(bo, owner_id, owner_tgid);
         if (ret == 0 && (req.flags & FB_GPU_TTM_F_FORCE_EVICT) != 0) {

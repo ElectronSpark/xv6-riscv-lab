@@ -223,6 +223,7 @@
 #define FB_GPU_TTM_F_FORCE_EVICT   0x0008u
 #define FB_GPU_TTM_F_RESERVE       0x0010u
 #define FB_GPU_TTM_F_UNRESERVE     0x0020u
+#define FB_GPU_TTM_F_WW_VALIDATE   0x0040u
 
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
@@ -421,7 +422,7 @@ struct fb_gpu_ttm_validate {
     uint32 pin_count;
     uint32 tt_populated;
     uint32 sg_nents;
-    uint32 reserved;
+    uint32 peer_handle;     /* optional second BO for ww-acquire validation */
     uint64 size;
     uint64 dma_addr_base;
     uint64 reservation_seq;
@@ -990,6 +991,14 @@ struct fb_gpu_stats {
     uint64 ttm_resv_last_shared_fence; /* last shared reservation fence */
     uint64 ttm_resv_evict_pinned_rejects; /* pinned BO eviction rejects */
     uint64 ttm_resv_evict_busy_rejects; /* busy reservation eviction rejects */
+    uint64 ttm_resv_ww_contexts; /* ww_acquire_ctx-shaped reservations */
+    uint64 ttm_resv_ww_ordered_acquires; /* ordered object acquisitions */
+    uint64 ttm_resv_ww_deadlock_retries; /* reversed order backoffs */
+    uint64 ttm_resv_ww_wound_backoffs; /* wound/wait retry decisions */
+    uint64 ttm_resv_ww_multi_object; /* validated multi-object sequences */
+    uint64 ttm_resv_ww_release_balance; /* paired release sequences */
+    uint64 ttm_resv_ww_max_acquired; /* max objects held by one ctx */
+    uint64 ttm_resv_ww_validate_failures; /* malformed ww validation */
     uint64 syncobj_created;    /* DRM syncobjs created */
     uint64 syncobj_live;       /* currently live DRM syncobjs */
     uint64 syncobj_signals;    /* binary/timeline signal operations */

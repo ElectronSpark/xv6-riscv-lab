@@ -60,6 +60,15 @@ struct fb_gpu_resv_shared_fence {
     uint32 exporter_tag;
 };
 
+struct fb_gpu_ww_acquire_ctx {
+    uint64 stamp;
+    uint64 owner_id;
+    pid_t owner_tgid;
+    uint32 acquired;
+    uint32 contended;
+    uint32 retries;
+};
+
 struct fb_gpu_bo_entry {
     int in_use;
     int dead;
@@ -358,6 +367,7 @@ static struct {
     uint64      next_bo_fence;
     uint64      next_fence_context;
     uint64      next_render_owner_id;
+    uint64      next_ww_acquire_stamp;
     uint64      ttm_lru_clock;
     uint64      ttm_evictions;
     struct fb_gpu_bo_entry bos[FB_GPU_MAX_BOS];
@@ -380,6 +390,7 @@ static struct {
     .next_bo_fence = 1,
     .next_fence_context = 1,
     .next_render_owner_id = 1,
+    .next_ww_acquire_stamp = 1,
     .lock = SPINLOCK_INITIALIZED("fb"),
 };
 
