@@ -5129,6 +5129,17 @@ static int hvdxg_owner_has_gpuva(struct hvdxg_open_state *owner,
     return adapter == 0 || obj->device == adapter;
 }
 
+static int hvdxg_owner_has_gpuva_alias(struct hvdxg_open_state *owner,
+                                       uint32 adapter, uint32 host_adapter,
+                                       uint64 base)
+{
+    if (hvdxg_owner_has_gpuva(owner, adapter, base))
+        return 1;
+    if (host_adapter != 0 && host_adapter != adapter)
+        return hvdxg_owner_has_gpuva(owner, host_adapter, base);
+    return 0;
+}
+
 static int hvdxg_owner_gpuva_contains(struct hvdxg_open_state *owner,
                                       uint32 adapter, uint64 base,
                                       uint64 size)
@@ -5150,6 +5161,18 @@ static int hvdxg_owner_gpuva_contains(struct hvdxg_open_state *owner,
             base >= va_base && end <= va_end)
             return 1;
     }
+    return 0;
+}
+
+static int hvdxg_owner_gpuva_contains_alias(struct hvdxg_open_state *owner,
+                                           uint32 adapter,
+                                           uint32 host_adapter, uint64 base,
+                                           uint64 size)
+{
+    if (hvdxg_owner_gpuva_contains(owner, adapter, base, size))
+        return 1;
+    if (host_adapter != 0 && host_adapter != adapter)
+        return hvdxg_owner_gpuva_contains(owner, host_adapter, base, size);
     return 0;
 }
 

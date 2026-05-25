@@ -3022,6 +3022,7 @@ submithwqueue_done:
         uint32 actual_len = 0;
         uint32 host_adapter = 0;
         int adapter_handle;
+        int gpuva_known;
 
         ret = hvdxg_d3dkmt_ensure();
         if (ret != 0)
@@ -3033,15 +3034,21 @@ submithwqueue_done:
         adapter_handle =
             hvdxg_resolve_adapter_handle(owner, req.adapter.v,
                                          &host_adapter) == 0;
-        if ((!adapter_handle &&
-             !hvdxg_owner_has_gpuva(owner, req.adapter.v,
-                                     req.base_address)) ||
-            req.base_address == 0 || req.size == 0) {
+        gpuva_known =
+            hvdxg_owner_has_gpuva_alias(owner, req.adapter.v, host_adapter,
+                                        req.base_address) ||
+            hvdxg_owner_has_gpuva(owner, 0, req.base_address) ||
+            hvdxg_owner_gpuva_contains_alias(owner, req.adapter.v,
+                                             host_adapter, req.base_address,
+                                             req.size) ||
+            hvdxg_owner_gpuva_contains(owner, 0, req.base_address,
+                                       req.size);
+        if (req.base_address == 0 || req.size == 0 ||
+            (!adapter_handle && !gpuva_known)) {
             ret = -EINVAL;
             break;
         }
-        if (!hvdxg_owner_has_gpuva(owner, req.adapter.v, req.base_address) &&
-            !hvdxg_owner_has_gpuva(owner, 0, req.base_address)) {
+        if (!gpuva_known) {
             ret = -EPERM;
             break;
         }
@@ -3053,6 +3060,8 @@ submithwqueue_done:
         wire_req = req;
         if (adapter_handle)
             wire_req.adapter.v = host_adapter;
+        else if (hvdxg.host_adapter_handle != 0)
+            wire_req.adapter.v = hvdxg.host_adapter_handle;
         free_gpuva.args = wire_req;
         hvdxg.gpuva_free_last_adapter = req.adapter.v;
         hvdxg.gpuva_free_last_base = req.base_address;
