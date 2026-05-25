@@ -1287,6 +1287,20 @@ struct fb_gpu_stats {
     uint64 dxg_scanout_bind_last_resource_generation; /* resource generation */
     uint64 dxg_scanout_bind_last_dirty_sequence; /* display dirty seq */
     uint64 dxg_scanout_bind_last_dirty_rects; /* display dirty rect count */
+    uint64 dxg_display_bind_contract_version; /* canonical bind ABI version */
+    uint64 dxg_display_bind_backend; /* FB_GPU_DXG_PRESENT_LANE_* */
+    uint64 dxg_display_bind_transport; /* FB_GPU_DXG_PRESENT_*_TRANSPORT_* */
+    uint64 dxg_display_bind_transport_present; /* real transport exists */
+    uint64 dxg_display_bind_operation; /* FB_GPU_DXG_PRESENT_*_OP_* */
+    uint64 dxg_display_bind_required_metadata; /* FB_GPU_DXG_PRESENT_META_* */
+    uint64 dxg_display_bind_lifetime; /* FB_GPU_DXG_PRESENT_LIFE_* */
+    uint64 dxg_display_bind_block_reason; /* FB_GPU_DXG_PRESENT_BLOCK_* */
+    uint64 dxg_display_bind_completion_source; /* FB_GPU_DXG_PRESENT_COMPLETION_* */
+    uint64 dxg_display_bind_present_id; /* nonzero after native bind */
+    uint64 dxg_display_bind_completed_id; /* display-correlated complete id */
+    uint64 dxg_display_bind_source_generation; /* source generation */
+    uint64 dxg_display_bind_resource_generation; /* resource generation */
+    uint64 dxg_display_bind_status; /* last errno/status */
     uint64 display_presents;  /* display present/flush operations issued */
     uint64 display_completions; /* display present completions observed */
     uint64 display_last_present; /* latest issued display-present sequence */
