@@ -268,6 +268,14 @@ struct pci_device_info {
     uint32 resource_unclaimed_release_count;
     uint32 dma_mask_fallback_32_count;
     uint32 coherent_dma_mask_fallback_32_count;
+    uint32 irq_alloc_request_count;
+    uint32 irq_alloc_failure_count;
+    uint32 irq_msi_request_count;
+    uint32 irq_msi_unsupported_count;
+    uint32 irq_msix_request_count;
+    uint32 irq_msix_unsupported_count;
+    uint32 irq_legacy_request_count;
+    uint32 irq_legacy_grant_count;
     uint32 dma_map_count;
     uint32 dma_unmap_count;
     uint32 dma_map_fail_count;

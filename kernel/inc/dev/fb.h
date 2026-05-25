@@ -948,11 +948,24 @@ struct fb_gpu_stats {
     uint64 nouveau_pci_irq_mode; /* PCI_IRQ_* granted by PCI core */
     uint64 nouveau_pci_msi_requested; /* MSI/MSI-X requested when present */
     uint64 nouveau_pci_msi_fail_closed; /* MSI/MSI-X unsupported path hit */
+    uint64 nouveau_pci_irq_alloc_requests; /* PCI IRQ allocation attempts */
+    uint64 nouveau_pci_irq_alloc_failures; /* PCI IRQ allocation failures */
+    uint64 nouveau_pci_msi_program_attempts; /* MSI programming attempts */
+    uint64 nouveau_pci_msi_program_unsupported; /* MSI unsupported results */
+    uint64 nouveau_pci_msix_program_attempts; /* MSI-X programming attempts */
+    uint64 nouveau_pci_msix_program_unsupported; /* MSI-X unsupported results */
+    uint64 nouveau_pci_legacy_irq_requests; /* legacy IRQ allocation attempts */
+    uint64 nouveau_pci_legacy_irq_grants; /* legacy IRQ vectors granted */
     uint64 nouveau_pci_irq_vector_valid; /* selected vector is usable */
     uint64 nouveau_pci_irq_handler_registered; /* driver installed handler */
     uint64 nouveau_pci_irq_delivery_enabled; /* interrupts can be delivered */
     uint64 nouveau_pci_irq_delivery_claimed; /* driver claims live delivery */
     uint64 nouveau_pci_legacy_irq_fallback; /* legacy vector fallback used */
+    uint64 nouveau_pci_irq_handler_invocations; /* handler entry count */
+    uint64 nouveau_pci_irq_cause_reads; /* device cause reads */
+    uint64 nouveau_pci_irq_cause_valid; /* nonzero device causes */
+    uint64 nouveau_pci_irq_cause_acks; /* device cause acknowledgements */
+    uint64 nouveau_pci_irq_spurious; /* handler entries without cause */
     uint64 nouveau_pci_dma_map_api_present; /* PCI DMA map API available */
     uint64 nouveau_pci_dma_map_attempts; /* Nouveau DMA map attempts */
     uint64 nouveau_pci_dma_map_successes; /* Nouveau DMA map successes */

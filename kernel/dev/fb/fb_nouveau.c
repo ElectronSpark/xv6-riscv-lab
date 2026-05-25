@@ -80,6 +80,9 @@ static void gpu_nouveau_pci_irq_handler(int irq, void *data, device_t *dev)
     (void)data;
     (void)dev;
     gpu_nouveau_stat_inc(
+        &fb_state.stats.nouveau_pci_irq_handler_invocations);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_spurious);
+    gpu_nouveau_stat_inc(
         &fb_state.stats.nouveau_pci_irq_delivery_claimed);
 }
 
@@ -151,6 +154,24 @@ static void gpu_nouveau_pci_publish_core_state(struct pci_device_info *pdev)
                          pdev->resource_unclaimed_release_count);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_mode,
                          pdev->irq_flags);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_alloc_requests,
+                         pdev->irq_alloc_request_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_alloc_failures,
+                         pdev->irq_alloc_failure_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_msi_program_attempts,
+                         pdev->irq_msi_request_count);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_msi_program_unsupported,
+        pdev->irq_msi_unsupported_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_msix_program_attempts,
+                         pdev->irq_msix_request_count);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_msix_program_unsupported,
+        pdev->irq_msix_unsupported_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_legacy_irq_requests,
+                         pdev->irq_legacy_request_count);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_legacy_irq_grants,
+                         pdev->irq_legacy_grant_count);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_vector_valid,
                          pdev->irq_vectors_allocated &&
                              pdev->irq_vector_count > 0);
@@ -502,6 +523,23 @@ static void gpu_nouveau_pci_remove(struct pci_device_info *pdev)
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_irq_delivery_claimed, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_legacy_irq_fallback, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_alloc_requests, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_alloc_failures, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_msi_program_attempts, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_msi_program_unsupported, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_msix_program_attempts, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_msix_program_unsupported, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_legacy_irq_requests, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_legacy_irq_grants, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_pci_irq_handler_invocations, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_cause_reads, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_cause_valid, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_cause_acks, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_spurious, 0);
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_dma_mask_requested_bits, 0);
     gpu_nouveau_stat_set(

@@ -530,24 +530,41 @@ int pci_alloc_irq_vectors(struct pci_device_info *pdev, int min_vecs,
 {
     if (pdev == NULL || min_vecs < 0 || max_vecs < min_vecs)
         return -EINVAL;
+    pdev->irq_alloc_request_count++;
     if (pdev->irq_vectors_allocated)
         return pdev->irq_vector_count;
-    if (max_vecs == 0)
+    if (max_vecs == 0) {
+        pdev->irq_alloc_failure_count++;
         return -ENOSPC;
+    }
     if ((flags & (PCI_IRQ_MSI | PCI_IRQ_MSIX)) != 0 &&
         (flags & PCI_IRQ_LEGACY) == 0) {
+        if ((flags & PCI_IRQ_MSI) != 0) {
+            pdev->irq_msi_request_count++;
+            pdev->irq_msi_unsupported_count++;
+        }
+        if ((flags & PCI_IRQ_MSIX) != 0) {
+            pdev->irq_msix_request_count++;
+            pdev->irq_msix_unsupported_count++;
+        }
         /*
          * We discover MSI/MSI-X so drivers can make an honest decision, but
          * xv6 does not program message address/data or MSI-X tables yet.
          */
+        pdev->irq_alloc_failure_count++;
         return -ENOTSUP;
     }
+    if ((flags & PCI_IRQ_LEGACY) != 0)
+        pdev->irq_legacy_request_count++;
     if (pdev->irq_pin == PCIE_INTR_PIN_NONE || pdev->irq_line == 0 ||
-        pdev->irq_line == 0xff || min_vecs > 1)
+        pdev->irq_line == 0xff || min_vecs > 1) {
+        pdev->irq_alloc_failure_count++;
         return -ENOSPC;
+    }
     pdev->irq_vectors_allocated = 1;
     pdev->irq_vector_count = 1;
     pdev->irq_flags = PCI_IRQ_LEGACY;
+    pdev->irq_legacy_grant_count++;
     return 1;
 }
 
