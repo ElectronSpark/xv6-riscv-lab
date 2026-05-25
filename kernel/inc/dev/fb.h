@@ -1268,6 +1268,7 @@ struct fb_gpu_stats {
     uint64 dxg_scanout_bind_candidate_presenthistory_cmd; /* VMBus enum ID */
     uint64 dxg_scanout_bind_candidate_redirected_flip_fence_cmd; /* VMBus enum ID */
     uint64 dxg_scanout_bind_candidate_blt_cmd; /* VMBus enum ID */
+    uint64 dxg_scanout_bind_candidate_propagate_presenthistory_cmd; /* host-to-VM enum ID */
     uint64 dxg_scanout_bind_candidate_vmbus_enum_known; /* enum namespace known */
     uint64 dxg_scanout_bind_candidate_linux_ioctl_contracts; /* ioctl send ABI */
     uint64 dxg_scanout_bind_candidate_resource_bind_contracts; /* resource bind ABI */
