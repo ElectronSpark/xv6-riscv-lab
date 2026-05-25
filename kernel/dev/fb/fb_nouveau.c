@@ -263,27 +263,19 @@ static int gpu_nouveau_pci_configure_dma_masks(struct pci_device_info *pdev)
 {
     int ret;
 
-    ret = pci_set_dma_mask(pdev, ~0ULL);
+    ret = dma_set_mask_and_coherent(pdev, ~0ULL);
     if (ret != 0) {
-        if (pdev != NULL)
+        if (pdev != NULL) {
             pdev->dma_mask_fallback_32_count++;
-        ret = pci_set_dma_mask(pdev, 0xffffffffULL);
-    }
-    if (ret != 0)
-        return ret;
-
-    ret = pci_set_consistent_dma_mask(pdev, ~0ULL);
-    if (ret != 0) {
-        if (pdev != NULL)
             pdev->coherent_dma_mask_fallback_32_count++;
-        ret = pci_set_consistent_dma_mask(pdev, 0xffffffffULL);
+        }
+        ret = dma_set_mask_and_coherent(pdev, 0xffffffffULL);
     }
     return ret;
 }
 
 static int gpu_nouveau_pci_register_irq(struct pci_device_info *pdev)
 {
-    static struct irq_desc nouveau_irq_desc;
     int irq;
     int ret;
 
@@ -293,12 +285,11 @@ static int gpu_nouveau_pci_register_irq(struct pci_device_info *pdev)
     irq = pci_irq_vector(pdev, 0);
     if (irq < 0)
         return irq;
-    memset(&nouveau_irq_desc, 0, sizeof(nouveau_irq_desc));
-    nouveau_irq_desc.handler = gpu_nouveau_pci_irq_handler;
-    nouveau_irq_desc.data = pdev;
-    ret = register_irq_handler(PLIC_IRQ(irq), &nouveau_irq_desc);
+    ret = pci_request_irq(pdev, 0, gpu_nouveau_pci_irq_handler, pdev,
+                          "nouveau");
     if (ret != 0)
         return ret;
+    gpu_nouveau_pci.pdev = pdev;
     gpu_nouveau_pci.irq_registered = 1;
     gpu_nouveau_pci.irq_number = PLIC_IRQ(irq);
     return 0;
@@ -308,7 +299,7 @@ static void gpu_nouveau_pci_unregister_irq(void)
 {
     if (!gpu_nouveau_pci.irq_registered)
         return;
-    unregister_irq_handler(gpu_nouveau_pci.irq_number);
+    pci_free_irq(gpu_nouveau_pci.pdev, 0, gpu_nouveau_pci.pdev);
     gpu_nouveau_pci.irq_registered = 0;
     gpu_nouveau_pci.irq_number = 0;
     gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_unregisters);
@@ -479,7 +470,10 @@ static int gpu_nouveau_pci_probe(struct pci_device_info *pdev,
             msi_flags |= PCI_IRQ_MSIX;
         gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_msi_requested,
                              msi_flags);
-        irq = pci_alloc_irq_vectors(pdev, 1, 1, msi_flags);
+        irq = pdev->msi_cap != 0 ? pci_enable_msi(pdev) :
+            pci_enable_msix_range(pdev, 1, 1);
+        if (irq == -ENOTSUP && pdev->msi_cap != 0 && pdev->msix_cap != 0)
+            irq = pci_enable_msix_range(pdev, 1, 1);
         if (irq == -ENOTSUP)
             gpu_nouveau_stat_inc(
                 &fb_state.stats.nouveau_pci_msi_fail_closed);

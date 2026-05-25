@@ -3,6 +3,7 @@
 #define __KERNEL_PCI_H_
 
 #include "compiler.h"
+#include "trap.h"
 
 extern uint64 __pcie_ecam_mmio_base;
 #define PCIE_ECAM __pcie_ecam_mmio_base
@@ -285,6 +286,9 @@ struct pci_device_info {
     uint32 remove_runtime_barrier_count;
     uint32 hot_remove_event_count;
     uint8 removed;
+    uint8 runtime_usage_count;
+    uint8 irq_requested;
+    int32 irq_requested_irq;
     uint32 dma_map_count;
     uint32 dma_unmap_count;
     uint32 dma_map_fail_count;
@@ -348,6 +352,8 @@ void pci_release_region(struct pci_device_info *pdev, int bar);
 uint8 pci_find_capability(const struct pci_device_info *pdev, uint8 cap_id);
 int pci_has_capability(const struct pci_device_info *pdev, uint8 cap_id);
 void *pci_iomap(struct pci_device_info *pdev, int bar, uint64 maxlen);
+int pci_mmap_bar(struct pci_device_info *pdev, int bar, uint64 offset,
+                 uint64 size, uint64 *paddr, uint32 *flags);
 void pci_iounmap(struct pci_device_info *pdev, void *addr);
 int pci_enable_device(struct pci_device_info *pdev);
 void pci_disable_device(struct pci_device_info *pdev);
@@ -357,14 +363,26 @@ int pci_alloc_irq_vectors(struct pci_device_info *pdev, int min_vecs,
                           int max_vecs, uint32 flags);
 int pci_irq_vector(struct pci_device_info *pdev, uint32 nr);
 void pci_free_irq_vectors(struct pci_device_info *pdev);
+int pci_enable_msi(struct pci_device_info *pdev);
+int pci_enable_msix_range(struct pci_device_info *pdev, int min_vecs,
+                          int max_vecs);
+int pci_request_irq(struct pci_device_info *pdev, uint32 nr,
+                    irq_handler_t handler, void *data, const char *name);
+void pci_free_irq(struct pci_device_info *pdev, uint32 nr, void *data);
 int pci_set_dma_mask(struct pci_device_info *pdev, uint64 mask);
 int pci_set_consistent_dma_mask(struct pci_device_info *pdev, uint64 mask);
+int dma_set_mask_and_coherent(struct pci_device_info *pdev, uint64 mask);
 int pci_dma_map_single(struct pci_device_info *pdev, void *cpu_addr,
                        uint64 size, uint32 direction, uint64 *dma_addr);
 void pci_dma_unmap_single(struct pci_device_info *pdev, uint64 dma_addr,
                           uint64 size, uint32 direction);
 int pci_pm_suspend_device(struct pci_device_info *pdev);
 int pci_pm_resume_device(struct pci_device_info *pdev);
+int pm_runtime_resume_and_get(struct pci_device_info *pdev);
+void pm_runtime_get_noresume(struct pci_device_info *pdev);
+void pm_runtime_put_noidle(struct pci_device_info *pdev);
+int pm_runtime_put(struct pci_device_info *pdev);
+int pm_runtime_barrier(struct pci_device_info *pdev);
 void pci_pm_suspend_all(void);
 void pci_pm_resume_all(void);
 

@@ -316,7 +316,7 @@ static void pci_detach_driver(struct pci_device_info *pdev)
     if (pdev->runtime_suspended) {
         pdev->remove_runtime_resume_attempt_count++;
         pdev->remove_runtime_barrier_count++;
-        if (pci_pm_resume_device(pdev) == 0)
+        if (pm_runtime_barrier(pdev) == 0)
             pdev->remove_runtime_resume_success_count++;
     }
     pdev->remove_call_count++;
@@ -478,6 +478,35 @@ void *pci_iomap(struct pci_device_info *pdev, int bar, uint64 maxlen)
     return (void *)PA2VA(start);
 }
 
+int pci_mmap_bar(struct pci_device_info *pdev, int bar, uint64 offset,
+                 uint64 size, uint64 *paddr, uint32 *flags)
+{
+    uint64 start;
+    uint64 len;
+
+    if (paddr != NULL)
+        *paddr = 0;
+    if (flags != NULL)
+        *flags = 0;
+    if (pdev == NULL || bar < 0 || bar >= 6 || size == 0)
+        return -EINVAL;
+    if (!pdev->resource_claimed[bar]) {
+        pdev->resource_unclaimed_iomap_count++;
+        return -EBUSY;
+    }
+    start = pci_resource_start(pdev, bar);
+    len = pci_resource_len(pdev, bar);
+    if (start == 0 || (pci_resource_flags(pdev, bar) & PCI_RESOURCE_MEM) == 0)
+        return -ENODEV;
+    if (offset > len || size > len - offset)
+        return -ERANGE;
+    if (paddr != NULL)
+        *paddr = start + offset;
+    if (flags != NULL)
+        *flags = pci_resource_flags(pdev, bar);
+    return 0;
+}
+
 void pci_iounmap(struct pci_device_info *pdev, void *addr)
 {
     (void)pdev;
@@ -599,9 +628,59 @@ void pci_free_irq_vectors(struct pci_device_info *pdev)
 {
     if (pdev == NULL)
         return;
+    if (pdev->irq_requested)
+        pci_free_irq(pdev, 0, NULL);
     pdev->irq_vectors_allocated = 0;
     pdev->irq_vector_count = 0;
     pdev->irq_flags = 0;
+}
+
+int pci_enable_msi(struct pci_device_info *pdev)
+{
+    return pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI);
+}
+
+int pci_enable_msix_range(struct pci_device_info *pdev, int min_vecs,
+                          int max_vecs)
+{
+    return pci_alloc_irq_vectors(pdev, min_vecs, max_vecs, PCI_IRQ_MSIX);
+}
+
+int pci_request_irq(struct pci_device_info *pdev, uint32 nr,
+                    irq_handler_t handler, void *data, const char *name)
+{
+    struct irq_desc desc;
+    int irq;
+    int ret;
+
+    (void)name;
+    if (pdev == NULL || handler == NULL)
+        return -EINVAL;
+    if (pdev->irq_requested)
+        return -EBUSY;
+    irq = pci_irq_vector(pdev, nr);
+    if (irq < 0)
+        return irq;
+    memset(&desc, 0, sizeof(desc));
+    desc.handler = handler;
+    desc.data = data;
+    ret = register_irq_handler(PLIC_IRQ(irq), &desc);
+    if (ret != 0)
+        return ret;
+    pdev->irq_requested = 1;
+    pdev->irq_requested_irq = PLIC_IRQ(irq);
+    return 0;
+}
+
+void pci_free_irq(struct pci_device_info *pdev, uint32 nr, void *data)
+{
+    (void)nr;
+    (void)data;
+    if (pdev == NULL || !pdev->irq_requested)
+        return;
+    (void)unregister_irq_handler(pdev->irq_requested_irq);
+    pdev->irq_requested = 0;
+    pdev->irq_requested_irq = 0;
 }
 
 static int pci_dma_mask_bits(uint64 mask)
@@ -647,6 +726,16 @@ int pci_set_consistent_dma_mask(struct pci_device_info *pdev, uint64 mask)
     pdev->coherent_dma_mask_bits = (uint8)bits;
     pdev->coherent_dma_mask_configured = 1;
     return 0;
+}
+
+int dma_set_mask_and_coherent(struct pci_device_info *pdev, uint64 mask)
+{
+    int ret;
+
+    ret = pci_set_dma_mask(pdev, mask);
+    if (ret != 0)
+        return ret;
+    return pci_set_consistent_dma_mask(pdev, mask);
 }
 
 static uint64 pci_dma_mask_from_bits(uint8 bits)
@@ -779,6 +868,53 @@ int pci_pm_resume_device(struct pci_device_info *pdev)
             return ret;
     }
     return 0;
+}
+
+int pm_runtime_resume_and_get(struct pci_device_info *pdev)
+{
+    int ret;
+
+    if (pdev == NULL)
+        return -ENODEV;
+    ret = pci_pm_resume_device(pdev);
+    if (ret != 0)
+        return ret;
+    if (pdev->runtime_usage_count != 0xff)
+        pdev->runtime_usage_count++;
+    return 0;
+}
+
+void pm_runtime_get_noresume(struct pci_device_info *pdev)
+{
+    if (pdev == NULL)
+        return;
+    if (pdev->runtime_usage_count != 0xff)
+        pdev->runtime_usage_count++;
+}
+
+void pm_runtime_put_noidle(struct pci_device_info *pdev)
+{
+    if (pdev == NULL || pdev->runtime_usage_count == 0)
+        return;
+    pdev->runtime_usage_count--;
+}
+
+int pm_runtime_put(struct pci_device_info *pdev)
+{
+    if (pdev == NULL)
+        return -ENODEV;
+    if (pdev->runtime_usage_count != 0)
+        pdev->runtime_usage_count--;
+    if (pdev->runtime_usage_count != 0)
+        return 0;
+    return pci_pm_suspend_device(pdev);
+}
+
+int pm_runtime_barrier(struct pci_device_info *pdev)
+{
+    if (pdev == NULL)
+        return -ENODEV;
+    return pci_pm_resume_device(pdev);
 }
 
 void pci_pm_suspend_all(void)
