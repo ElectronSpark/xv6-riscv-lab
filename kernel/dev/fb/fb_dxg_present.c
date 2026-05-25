@@ -1332,6 +1332,10 @@ static int fb_dxg_present_query(uint64 owner_id, pid_t owner_tgid,
 {
     struct fb_gpu_dxg_present_source_entry *source;
     uint32 source_handle;
+    uint32 provider_submitted;
+    uint32 provider_no_host_abi;
+    uint32 provider_no_sender;
+    uint32 provider_no_completion;
     uint64 helper_meta;
     uint64 helper_lifetime;
 
@@ -1369,6 +1373,14 @@ static int fb_dxg_present_query(uint64 owner_id, pid_t owner_tgid,
     fb_dxg_present_note_transport_contract_locked(
         source, (uint32)fb_state.stats.dxg_present_last_flags);
     fb_dxg_present_sync_display_bind_state_locked(source);
+    provider_submitted =
+        fb_state.stats.dxg_display_bind_provider_submits != 0;
+    provider_no_host_abi = provider_submitted ?
+        (uint32)fb_state.stats.dxg_display_bind_provider_no_host_abi : 1;
+    provider_no_sender = provider_submitted ?
+        (uint32)fb_state.stats.dxg_display_bind_provider_no_sender : 1;
+    provider_no_completion = provider_submitted ?
+        (uint32)fb_state.stats.dxg_display_bind_provider_no_completion : 1;
     helper_meta = fb_state.stats.dxg_present_helper_required_metadata;
     helper_lifetime = fb_state.stats.dxg_present_helper_lifetime;
 
@@ -1423,6 +1435,9 @@ static int fb_dxg_present_query(uint64 owner_id, pid_t owner_tgid,
         req->resource_fd_shared_records_valid =
             source->resource_fd_shared_records_valid;
         req->resource_fd_generation = source->resource_fd_generation;
+        req->source_generation = source->generation;
+        req->resource_generation =
+            fb_dxg_present_source_resource_generation_locked(source);
     } else {
         req->dxg_fd = (int32)fb_state.stats.dxg_present_last_dxg_fd;
         req->resource_fd =
@@ -1435,12 +1450,37 @@ static int fb_dxg_present_query(uint64 owner_id, pid_t owner_tgid,
             (uint32)fb_state.stats.dxg_present_last_adapter_luid_high;
         req->adapter_identity =
             (uint32)fb_state.stats.dxg_present_last_adapter_identity;
+        req->source_generation =
+            fb_state.stats.dxg_scanout_bind_last_source_generation;
+        req->resource_generation =
+            fb_state.stats.dxg_scanout_bind_last_resource_generation;
     }
     req->selected_lane = (uint32)fb_state.stats.dxg_present_selected_lane;
     req->helper_block_reason =
         (uint32)fb_state.stats.dxg_present_helper_block_reason;
     req->host_candidates = fb_state.stats.dxg_present_host_candidates;
     req->host_rejects = fb_state.stats.dxg_present_host_rejects;
+    req->display_bind_status = fb_state.stats.dxg_display_bind_status;
+    req->display_bind_block_reason =
+        fb_state.stats.dxg_display_bind_block_reason;
+    req->display_bind_completion_source =
+        fb_state.stats.dxg_display_bind_completion_source;
+    req->display_bind_dirty_sequence =
+        fb_state.stats.dxg_scanout_bind_last_dirty_sequence;
+    req->display_bind_dirty_rects =
+        fb_state.stats.dxg_scanout_bind_last_dirty_rects;
+    req->display_bind_host_abi_present =
+        provider_submitted && provider_no_host_abi == 0;
+    req->display_bind_sender_present =
+        provider_submitted && provider_no_sender == 0;
+    req->display_bind_completion_present =
+        provider_submitted && provider_no_completion == 0;
+    req->display_bind_provider_no_host_abi = provider_no_host_abi;
+    req->display_bind_provider_no_sender = provider_no_sender;
+    req->display_bind_provider_no_completion = provider_no_completion;
+    req->display_bind_provider_pin_revalidated =
+        (uint32)fb_state.stats.dxg_display_bind_provider_pin_revalidated;
+    req->reserved2 = 0;
     spin_unlock(&fb_state.lock);
 
     return -EOPNOTSUPP;
@@ -1495,6 +1535,10 @@ static int fb_dxg_present_bind_contract_query(
     uint32 flags;
     uint32 adapter_identity;
     uint32 provenance;
+    uint32 provider_submitted;
+    uint32 provider_no_host_abi;
+    uint32 provider_no_sender;
+    uint32 provider_no_completion;
     uint32 source_live = 0;
     uint64 source_generation = 0;
     uint64 resource_generation = 0;
@@ -1624,6 +1668,15 @@ static int fb_dxg_present_bind_contract_query(
     else
         fb_state.stats.dxg_present_bind_contract_rejects++;
 
+    provider_submitted =
+        fb_state.stats.dxg_display_bind_provider_submits != 0;
+    provider_no_host_abi = provider_submitted ?
+        (uint32)fb_state.stats.dxg_display_bind_provider_no_host_abi : 1;
+    provider_no_sender = provider_submitted ?
+        (uint32)fb_state.stats.dxg_display_bind_provider_no_sender : 1;
+    provider_no_completion = provider_submitted ?
+        (uint32)fb_state.stats.dxg_display_bind_provider_no_completion : 1;
+
     req->version = 1;
     req->transport = (uint32)fb_state.stats.dxg_present_helper_transport;
     req->operation = (uint32)fb_state.stats.dxg_present_helper_operation;
@@ -1646,6 +1699,25 @@ static int fb_dxg_present_bind_contract_query(
     req->adapter_identity = adapter_identity;
     req->reserved = 0;
     req->reserved2 = 0;
+    req->provider_status = ret < 0 ? (uint64)(-ret) : 0;
+    req->provider_block_reason =
+        fb_state.stats.dxg_present_helper_block_reason;
+    req->dirty_sequence =
+        fb_state.stats.dxg_scanout_bind_last_dirty_sequence;
+    req->dirty_rects =
+        fb_state.stats.dxg_scanout_bind_last_dirty_rects;
+    req->host_abi_present =
+        provider_submitted && provider_no_host_abi == 0;
+    req->sender_present =
+        provider_submitted && provider_no_sender == 0;
+    req->completion_present =
+        provider_submitted && provider_no_completion == 0;
+    req->provider_no_host_abi = provider_no_host_abi;
+    req->provider_no_sender = provider_no_sender;
+    req->provider_no_completion = provider_no_completion;
+    req->provider_pin_revalidated =
+        (uint32)fb_state.stats.dxg_display_bind_provider_pin_revalidated;
+    req->reserved3 = 0;
     spin_unlock(&fb_state.lock);
 
     return ret;

@@ -584,6 +584,21 @@ struct fb_gpu_dxg_present_source_query {
     uint32   resource_fd_matches_handles; /* fd metadata matches D3DKMT handles */
     uint32   resource_fd_shared_records_valid;
     uint64   resource_fd_generation; /* sealed shared-resource generation */
+    uint64   source_generation; /* registered source generation */
+    uint64   resource_generation; /* display-bind resource generation */
+    uint64   display_bind_status; /* last display-bind errno/status */
+    uint64   display_bind_block_reason; /* FB_GPU_DXG_PRESENT_BLOCK_* */
+    uint64   display_bind_completion_source; /* FB_GPU_DXG_PRESENT_COMPLETION_* */
+    uint64   display_bind_dirty_sequence; /* display dirty seq, if any */
+    uint64   display_bind_dirty_rects; /* display dirty rect count, if any */
+    uint32   display_bind_host_abi_present; /* provider reported host ABI */
+    uint32   display_bind_sender_present; /* provider reported sender */
+    uint32   display_bind_completion_present; /* provider reported completion */
+    uint32   display_bind_provider_no_host_abi; /* provider lacks ABI */
+    uint32   display_bind_provider_no_sender; /* provider lacks sender */
+    uint32   display_bind_provider_no_completion; /* provider lacks done */
+    uint32   display_bind_provider_pin_revalidated; /* provider checked pin */
+    uint32   reserved2;
 };
 
 /*
@@ -640,6 +655,18 @@ struct fb_gpu_dxg_present_host_bind_contract {
     uint32 resource_fd_shared_records_valid;
     uint32 reserved2;
     uint64 resource_fd_generation;
+    uint64 provider_status; /* last provider errno/status */
+    uint64 provider_block_reason; /* FB_GPU_DXG_PRESENT_BLOCK_* */
+    uint64 dirty_sequence; /* display dirty seq, if any */
+    uint64 dirty_rects; /* display dirty rect count, if any */
+    uint32 host_abi_present; /* provider reported host ABI */
+    uint32 sender_present; /* provider reported sender */
+    uint32 completion_present; /* provider reported completion */
+    uint32 provider_no_host_abi; /* provider lacks ABI */
+    uint32 provider_no_sender; /* provider lacks sender */
+    uint32 provider_no_completion; /* provider lacks done */
+    uint32 provider_pin_revalidated; /* provider checked pin */
+    uint32 reserved3;
 };
 
 struct fb_gpu_bo_fence {
