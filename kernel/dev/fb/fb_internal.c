@@ -269,6 +269,14 @@ struct fb_gpu_dxg_present_source_entry {
     uint32 adapter_luid_high;
     uint32 provenance_flags;
     uint32 adapter_identity;
+    uint64 display_bind_attempts;
+    uint64 display_bind_present_id;
+    uint64 display_bind_completed_id;
+    uint64 display_bind_source_generation;
+    uint64 display_bind_resource_generation;
+    uint64 display_bind_status;
+    uint64 display_bind_block_reason;
+    uint32 display_bind_completion_source;
 };
 
 struct fb_gpu_fence {

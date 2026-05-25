@@ -12,6 +12,43 @@ static int fb_dxg_present_source_owner_matches(
     return 1;
 }
 
+struct fb_dxg_display_bind_request {
+    uint32 present_source;
+    uint64 source_generation;
+    uint64 resource_generation;
+    uint32 flags;
+    uint32 sync_object;
+    uint64 fence_value;
+    int32 dxg_fd;
+    int32 resource_fd;
+    uint32 device;
+    uint32 resource;
+    uint32 allocation;
+    uint32 allocation_count;
+    uint32 width;
+    uint32 height;
+    uint32 pitch;
+    uint32 format;
+    uint64 modifier;
+    uint32 adapter_luid_low;
+    uint32 adapter_luid_high;
+    uint32 adapter_identity;
+    uint32 provenance_flags;
+    uint64 required_metadata;
+    uint64 lifetime;
+    uint64 block_reason;
+};
+
+struct fb_dxg_display_bind_result {
+    int status;
+    uint32 transport;
+    uint32 operation;
+    uint32 completion_source;
+    uint64 present_id;
+    uint64 completed_id;
+    uint64 block_reason;
+};
+
 static uint64 fb_dxg_present_resource_generation(uint32 device,
                                                  uint32 resource,
                                                  uint32 allocation,
@@ -92,6 +129,26 @@ static void fb_dxg_present_note_wsl_candidate_namespace_locked(void)
     fb_state.stats.dxg_scanout_bind_candidate_display_completion_contracts = 0;
     fb_state.stats.dxg_scanout_bind_candidate_reject_reasons |=
         FB_GPU_DXG_SCANOUT_CANDIDATE_REJECT_ALL;
+}
+
+static int
+fb_dxg_present_provider_submit_display_bind(
+    const struct fb_dxg_display_bind_request *bind,
+    struct fb_dxg_display_bind_result *result)
+{
+    if (bind == NULL || result == NULL)
+        return -EINVAL;
+    memset(result, 0, sizeof(*result));
+    result->status = EOPNOTSUPP;
+    result->transport = FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE;
+    result->operation = FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND;
+    result->completion_source = FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY;
+    result->present_id = 0;
+    result->completed_id = 0;
+    result->block_reason = bind->block_reason |
+                           FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT |
+                           FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION;
+    return -EOPNOTSUPP;
 }
 
 static void fb_dxg_present_hex32(char out[9], uint32 value)
@@ -388,28 +445,75 @@ fb_dxg_present_sync_display_bind_state_locked(
     fb_state.stats.dxg_display_bind_block_reason =
         fb_state.stats.dxg_present_helper_block_reason;
     fb_state.stats.dxg_display_bind_completion_source =
+        source != NULL && source->display_bind_completion_source != 0 ?
+        source->display_bind_completion_source :
         FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY;
     fb_state.stats.dxg_display_bind_present_id =
+        source != NULL && source->display_bind_attempts != 0 ?
+        source->display_bind_present_id :
         fb_state.stats.dxg_scanout_bind_last_present_id;
     fb_state.stats.dxg_display_bind_completed_id =
+        source != NULL && source->display_bind_attempts != 0 ?
+        source->display_bind_completed_id :
         fb_state.stats.dxg_scanout_bind_last_completed;
     fb_state.stats.dxg_display_bind_source_generation =
+        source != NULL && source->display_bind_attempts != 0 ?
+        source->display_bind_source_generation :
         source != NULL ? source->generation :
         fb_state.stats.dxg_scanout_bind_last_source_generation;
     fb_state.stats.dxg_display_bind_resource_generation =
+        source != NULL && source->display_bind_attempts != 0 ?
+        source->display_bind_resource_generation :
         source != NULL ? fb_dxg_present_source_resource_generation_locked(source) :
         fb_state.stats.dxg_scanout_bind_last_resource_generation;
     fb_state.stats.dxg_display_bind_status =
+        source != NULL && source->display_bind_attempts != 0 ?
+        source->display_bind_status :
         fb_state.stats.dxg_scanout_bind_last_status;
 }
 
 static int
 fb_dxg_present_scanout_bind_locked(
-    const struct fb_gpu_dxg_present_source_entry *source,
+    struct fb_gpu_dxg_present_source_entry *source,
     const struct fb_gpu_dxg_present_source_commit *req)
 {
+    struct fb_dxg_display_bind_request bind;
+    struct fb_dxg_display_bind_result result;
     uint64 weak_evidence = 0;
     uint32 source_provenance = source != NULL ? source->provenance_flags : 0;
+
+    memset(&bind, 0, sizeof(bind));
+    memset(&result, 0, sizeof(result));
+    if (source != NULL) {
+        bind.present_source = source->handle;
+        bind.source_generation = source->generation;
+        bind.resource_generation =
+            fb_dxg_present_source_resource_generation_locked(source);
+        bind.dxg_fd = source->dxg_fd;
+        bind.resource_fd = source->resource_fd;
+        bind.device = source->device;
+        bind.resource = source->resource;
+        bind.allocation = source->allocation;
+        bind.allocation_count = source->allocation_count;
+        bind.width = source->width;
+        bind.height = source->height;
+        bind.pitch = source->pitch;
+        bind.format = source->format;
+        bind.modifier = source->modifier;
+        bind.adapter_luid_low = source->adapter_luid_low;
+        bind.adapter_luid_high = source->adapter_luid_high;
+        bind.adapter_identity = source->adapter_identity;
+        bind.provenance_flags = source->provenance_flags;
+    }
+    if (req != NULL) {
+        bind.flags = req->flags;
+        bind.sync_object = req->sync_object;
+        bind.fence_value = req->fence_value;
+    }
+    bind.required_metadata =
+        fb_state.stats.dxg_present_helper_required_metadata;
+    bind.lifetime = fb_state.stats.dxg_present_helper_lifetime;
+    bind.block_reason = fb_state.stats.dxg_present_helper_block_reason;
 
     fb_state.stats.dxg_scanout_bind_attempts++;
     fb_dxg_present_note_wsl_candidate_namespace_locked();
@@ -421,12 +525,19 @@ fb_dxg_present_scanout_bind_locked(
     fb_state.stats.dxg_scanout_bind_last_present_id = 0;
     fb_state.stats.dxg_scanout_bind_last_completed = 0;
     fb_state.stats.dxg_scanout_bind_last_source_generation =
-        source != NULL ? source->generation : 0;
+        bind.source_generation;
     fb_state.stats.dxg_scanout_bind_last_resource_generation =
-        fb_dxg_present_source_resource_generation_locked(source);
+        bind.resource_generation;
     fb_state.stats.dxg_scanout_bind_last_dirty_sequence = 0;
     fb_state.stats.dxg_scanout_bind_last_dirty_rects = 0;
     fb_dxg_present_sync_display_bind_state_locked(source);
+
+    fb_dxg_present_provider_submit_display_bind(&bind, &result);
+    fb_state.stats.dxg_scanout_bind_last_transport = result.transport;
+    fb_state.stats.dxg_scanout_bind_last_status = (uint64)result.status;
+    fb_state.stats.dxg_scanout_bind_last_present_id = result.present_id;
+    fb_state.stats.dxg_scanout_bind_last_completed = result.completed_id;
+    fb_state.stats.dxg_present_helper_block_reason = result.block_reason;
 
     if (req == NULL || source == NULL)
         weak_evidence = 1;
@@ -435,8 +546,8 @@ fb_dxg_present_scanout_bind_locked(
             FB_GPU_DXG_DISPLAY_TARGET_NONE ||
         fb_state.stats.dxg_present_missing_host_abi ==
             FB_GPU_DXG_PRESENT_MISSING_SCANOUT_BIND ||
-        fb_state.stats.dxg_scanout_bind_last_present_id == 0 ||
-        fb_state.stats.dxg_scanout_bind_last_completed == 0)
+        result.present_id == 0 ||
+        result.completed_id == 0)
         weak_evidence = 1;
     if (weak_evidence) {
         fb_state.stats.dxg_scanout_bind_weak_evidence_rejects++;
@@ -464,6 +575,19 @@ fb_dxg_present_scanout_bind_locked(
     if (fb_state.stats.dxg_present_display_target_kind ==
         FB_GPU_DXG_DISPLAY_TARGET_NONE)
         fb_state.stats.dxg_scanout_bind_weak_software_or_readback_path++;
+    if (source != NULL) {
+        source->display_bind_attempts++;
+        source->display_bind_present_id = result.present_id;
+        source->display_bind_completed_id = result.completed_id;
+        source->display_bind_source_generation =
+            bind.source_generation;
+        source->display_bind_resource_generation =
+            bind.resource_generation;
+        source->display_bind_status = (uint64)result.status;
+        source->display_bind_block_reason = result.block_reason;
+        source->display_bind_completion_source =
+            result.completion_source;
+    }
     fb_state.stats.dxg_scanout_bind_rejects++;
     fb_dxg_present_sync_display_bind_state_locked(source);
     return -EOPNOTSUPP;
