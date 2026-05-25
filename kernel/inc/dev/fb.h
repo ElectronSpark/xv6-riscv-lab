@@ -1301,6 +1301,11 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_source_generation; /* source generation */
     uint64 dxg_display_bind_resource_generation; /* resource generation */
     uint64 dxg_display_bind_status; /* last errno/status */
+    uint64 dxg_display_bind_provider_submits; /* provider submit attempts */
+    uint64 dxg_display_bind_lock_dropped_submits; /* submits outside fb lock */
+    uint64 dxg_display_bind_revalidate_attempts; /* post-submit rechecks */
+    uint64 dxg_display_bind_revalidate_successes; /* source still current */
+    uint64 dxg_display_bind_revalidate_failures; /* stale source/resource */
     uint64 display_presents;  /* display present/flush operations issued */
     uint64 display_completions; /* display present completions observed */
     uint64 display_last_present; /* latest issued display-present sequence */

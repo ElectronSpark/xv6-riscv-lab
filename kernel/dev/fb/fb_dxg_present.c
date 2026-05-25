@@ -474,17 +474,24 @@ fb_dxg_present_sync_display_bind_state_locked(
 
 static int
 fb_dxg_present_scanout_bind_locked(
-    struct fb_gpu_dxg_present_source_entry *source,
+    struct fb_gpu_dxg_present_source_entry **sourcep,
     const struct fb_gpu_dxg_present_source_commit *req)
 {
+    struct fb_gpu_dxg_present_source_entry *source =
+        sourcep != NULL ? *sourcep : NULL;
     struct fb_dxg_display_bind_request bind;
     struct fb_dxg_display_bind_result result;
     uint64 weak_evidence = 0;
     uint32 source_provenance = source != NULL ? source->provenance_flags : 0;
+    uint32 source_adapter_identity =
+        source != NULL ? source->adapter_identity :
+        FB_GPU_DXG_PRESENT_ADAPTER_UNKNOWN;
+    int source_index = -1;
 
     memset(&bind, 0, sizeof(bind));
     memset(&result, 0, sizeof(result));
     if (source != NULL) {
+        source_index = (int)(source - fb_state.dxg_present_sources);
         bind.present_source = source->handle;
         bind.source_generation = source->generation;
         bind.resource_generation =
@@ -532,7 +539,42 @@ fb_dxg_present_scanout_bind_locked(
     fb_state.stats.dxg_scanout_bind_last_dirty_rects = 0;
     fb_dxg_present_sync_display_bind_state_locked(source);
 
+    fb_state.stats.dxg_display_bind_provider_submits++;
+    fb_state.stats.dxg_display_bind_lock_dropped_submits++;
+    spin_unlock(&fb_state.lock);
     fb_dxg_present_provider_submit_display_bind(&bind, &result);
+    spin_lock(&fb_state.lock);
+
+    fb_state.stats.dxg_display_bind_revalidate_attempts++;
+    source = NULL;
+    if (source_index >= 0 &&
+        source_index < FB_GPU_MAX_DXG_PRESENT_SOURCES) {
+        struct fb_gpu_dxg_present_source_entry *candidate =
+            &fb_state.dxg_present_sources[source_index];
+
+        if (candidate->in_use &&
+            candidate->handle == bind.present_source &&
+            candidate->generation == bind.source_generation &&
+            fb_dxg_present_source_resource_generation_locked(candidate) ==
+                bind.resource_generation)
+            source = candidate;
+    }
+    if (sourcep != NULL)
+        *sourcep = source;
+    if (source == NULL) {
+        fb_state.stats.dxg_display_bind_revalidate_failures++;
+        result.status = ESTALE;
+        result.transport = FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE;
+        result.operation = FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND;
+        result.completion_source = FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY;
+        result.present_id = 0;
+        result.completed_id = 0;
+        result.block_reason |= FB_GPU_DXG_PRESENT_BLOCK_NO_REGISTERED_SOURCE |
+                               FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION;
+    } else {
+        fb_state.stats.dxg_display_bind_revalidate_successes++;
+        source_adapter_identity = source->adapter_identity;
+    }
     fb_state.stats.dxg_scanout_bind_last_transport = result.transport;
     fb_state.stats.dxg_scanout_bind_last_status = (uint64)result.status;
     fb_state.stats.dxg_scanout_bind_last_present_id = result.present_id;
@@ -562,8 +604,7 @@ fb_dxg_present_scanout_bind_locked(
         fb_state.stats.dxg_scanout_bind_weak_d3dkmt_handles_only++;
     if ((source_provenance &
          FB_GPU_DXG_PRESENT_PROV_RESOURCE_FD) != 0 &&
-        source != NULL &&
-        source->adapter_identity == FB_GPU_DXG_PRESENT_ADAPTER_MATCH)
+        source_adapter_identity == FB_GPU_DXG_PRESENT_ADAPTER_MATCH)
         fb_state.stats.dxg_scanout_bind_weak_same_adapter_resource_only++;
     if (req != NULL &&
         (req->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) != 0 &&
@@ -907,8 +948,9 @@ static int fb_dxg_present_commit(uint64 owner_id, pid_t owner_tgid,
         fb_state.stats.dxg_present_commit_no_transport++;
     if (fb_state.stats.dxg_present_helper_requires_completion != 0)
         fb_state.stats.dxg_present_commit_no_completion++;
-    ret = fb_dxg_present_scanout_bind_locked(source, req);
-    if (fb_state.stats.dxg_present_host_handoff_missing <= 8) {
+    ret = fb_dxg_present_scanout_bind_locked(&source, req);
+    if (source != NULL &&
+        fb_state.stats.dxg_present_host_handoff_missing <= 8) {
         print_missing = 1;
         print_source = source->handle;
         print_device = source->device;
