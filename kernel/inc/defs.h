@@ -201,6 +201,9 @@ int hyperv_dxg_display_bind_pin_from_fds(
     struct hyperv_dxg_display_bind_pin_snapshot *snapshot);
 void hyperv_dxg_display_bind_unpin(
     struct hyperv_dxg_display_bind_pin_snapshot *snapshot);
+int hyperv_dxg_display_bind_submit(
+    const struct hyperv_dxg_display_bind_request *bind,
+    struct hyperv_dxg_display_bind_result *result);
 int hyperv_dxg_display_bind_submit_failclosed(
     const struct hyperv_dxg_display_bind_request *bind,
     struct hyperv_dxg_display_bind_result *result);

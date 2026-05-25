@@ -185,7 +185,7 @@ fb_dxg_present_provider_submit_display_bind(
     hv_bind.pin_valid = bind->pin_valid;
     hv_bind.pin = bind->pin;
 
-    ret = hyperv_dxg_display_bind_submit_failclosed(&hv_bind, &hv_result);
+    ret = hyperv_dxg_display_bind_submit(&hv_bind, &hv_result);
     result->status = hv_result.status;
     result->transport = hv_result.transport;
     result->operation = hv_result.operation;
@@ -660,6 +660,14 @@ fb_dxg_present_scanout_bind_locked(
     fb_state.stats.dxg_scanout_bind_last_present_id = result.present_id;
     fb_state.stats.dxg_scanout_bind_last_completed = result.completed_id;
     fb_state.stats.dxg_present_helper_block_reason = result.block_reason;
+    fb_state.stats.dxg_display_bind_provider_pin_revalidated =
+        result.pin_revalidated;
+    fb_state.stats.dxg_display_bind_provider_no_host_abi =
+        result.no_host_abi;
+    fb_state.stats.dxg_display_bind_provider_no_sender =
+        result.no_sender;
+    fb_state.stats.dxg_display_bind_provider_no_completion =
+        result.no_completion;
 
     if (req == NULL || source == NULL)
         weak_evidence = 1;

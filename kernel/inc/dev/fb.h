@@ -1318,6 +1318,10 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_resource_generation; /* resource generation */
     uint64 dxg_display_bind_status; /* last errno/status */
     uint64 dxg_display_bind_provider_submits; /* provider submit attempts */
+    uint64 dxg_display_bind_provider_pin_revalidated; /* provider checked pin */
+    uint64 dxg_display_bind_provider_no_host_abi; /* provider lacks ABI */
+    uint64 dxg_display_bind_provider_no_sender; /* provider lacks sender */
+    uint64 dxg_display_bind_provider_no_completion; /* provider lacks done */
     uint64 dxg_display_bind_lock_dropped_submits; /* submits outside fb lock */
     uint64 dxg_display_bind_revalidate_attempts; /* post-submit rechecks */
     uint64 dxg_display_bind_revalidate_successes; /* source still current */

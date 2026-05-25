@@ -5408,6 +5408,13 @@ int hyperv_dxg_display_bind_submit_failclosed(
     return -EOPNOTSUPP;
 }
 
+int hyperv_dxg_display_bind_submit(
+    const struct hyperv_dxg_display_bind_request *bind,
+    struct hyperv_dxg_display_bind_result *result)
+{
+    return hyperv_dxg_display_bind_submit_failclosed(bind, result);
+}
+
 static int hvdxg_sync_file_release(struct vfs_inode *ip,
                                    struct vfs_file *file)
 {
