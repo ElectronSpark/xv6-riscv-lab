@@ -1834,15 +1834,19 @@ static uint32 hvdxg_open_process_refs(struct hvdxg_open_state *owner)
     return 0;
 }
 
-static void hvdxg_track_sync(struct hvdxg_open_state *owner,
-                             uint32 device, uint32 sync, uint32 type,
-                             uint32 flags, uint32 global_shared,
-                             uint64 fence_cpu_va, uint64 fence_kva,
-                             uint32 monitor_fence_handle)
+static int hvdxg_track_sync(struct hvdxg_open_state *owner,
+                            uint32 device, uint32 sync, uint32 type,
+                            uint32 flags, uint32 global_shared,
+                            uint64 fence_cpu_va, uint64 fence_kva,
+                            uint32 monitor_fence_handle)
 {
+    int ret;
+
     if (owner == NULL || sync == 0)
-        return;
-    (void)hvdxg_track_object(owner, HV_DXG_OBJECT_SYNC, sync, device, device);
+        return -EINVAL;
+    ret = hvdxg_track_object(owner, HV_DXG_OBJECT_SYNC, sync, device, device);
+    if (ret != 0)
+        return ret;
     for (uint32 i = 0; i < owner->sync_object_count; i++) {
         if (owner->sync_objects[i].sync == sync) {
             owner->sync_objects[i].type = type;
@@ -1859,32 +1863,36 @@ static void hvdxg_track_sync(struct hvdxg_open_state *owner,
                 monitor_fence_handle ? 1 : 0;
             owner->sync_objects[i].fence_cpu_va = fence_cpu_va;
             owner->sync_objects[i].fence_kva = fence_kva;
-            return;
+            return 0;
         }
     }
-    if (hvdxg_grow_table((void **)&owner->sync_objects,
-                         &owner->sync_object_capacity,
-                         owner->sync_object_count + 1,
-                         sizeof(owner->sync_objects[0]),
-                         HV_DXG_OPEN_TRACKED_MAX) == 0) {
-        uint32 i = owner->sync_object_count++;
-
-        owner->sync_objects[i].sync = sync;
-        owner->sync_objects[i].type = type;
-        owner->sync_objects[i].device = device;
-        owner->sync_objects[i].owner_process =
-            hvdxg_open_host_process(owner);
-        owner->sync_objects[i].owner_generation =
-            hvdxg_open_process_generation(owner);
-        owner->sync_objects[i].owner_refs =
-            hvdxg_open_process_refs(owner);
-        owner->sync_objects[i].flags = flags;
-        owner->sync_objects[i].global_shared = global_shared;
-        owner->sync_objects[i].monitor_fence_handle =
-            monitor_fence_handle ? 1 : 0;
-        owner->sync_objects[i].fence_cpu_va = fence_cpu_va;
-        owner->sync_objects[i].fence_kva = fence_kva;
+    ret = hvdxg_grow_table((void **)&owner->sync_objects,
+                           &owner->sync_object_capacity,
+                           owner->sync_object_count + 1,
+                           sizeof(owner->sync_objects[0]),
+                           HV_DXG_OPEN_TRACKED_MAX);
+    if (ret != 0) {
+        hvdxg_untrack_object(owner, HV_DXG_OBJECT_SYNC, sync);
+        return ret;
     }
+    uint32 i = owner->sync_object_count++;
+
+    owner->sync_objects[i].sync = sync;
+    owner->sync_objects[i].type = type;
+    owner->sync_objects[i].device = device;
+    owner->sync_objects[i].owner_process =
+        hvdxg_open_host_process(owner);
+    owner->sync_objects[i].owner_generation =
+        hvdxg_open_process_generation(owner);
+    owner->sync_objects[i].owner_refs =
+        hvdxg_open_process_refs(owner);
+    owner->sync_objects[i].flags = flags;
+    owner->sync_objects[i].global_shared = global_shared;
+    owner->sync_objects[i].monitor_fence_handle =
+        monitor_fence_handle ? 1 : 0;
+    owner->sync_objects[i].fence_cpu_va = fence_cpu_va;
+    owner->sync_objects[i].fence_kva = fence_kva;
+    return 0;
 }
 
 static void hvdxg_untrack_sync(struct hvdxg_open_state *owner, uint32 sync)

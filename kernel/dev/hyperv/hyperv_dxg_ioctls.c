@@ -6688,14 +6688,29 @@ createhwqueue_done:
             req.monitored_fence.fence_value_gpu_va =
                 result.gpu_virtual_address;
         }
+        ret = owner != NULL ?
+              hvdxg_track_sync(owner, req.device.v, req.sync_object.v,
+                               shared->sync_type, req.flags.value,
+                               shared->global_share,
+                               req.monitored_fence.fence_value_cpu_va,
+                               fence_kva, 0) :
+              -EINVAL;
+        if (ret != 0) {
+            (void)hvdxg_destroy_syncobject_host_for_syncfile(
+                owner, req.device.v, req.sync_object.v, shared->sync_type,
+                req.flags.value, shared->global_share);
+            hvdxg.sharedhandle_last_ret = ret;
+            hvdxg.opensync_last_ret = ret;
+            goto opensync_done;
+        }
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
-        if (ret == 0 && owner != NULL)
-            hvdxg_track_sync(owner, req.device.v, req.sync_object.v,
-                             shared->sync_type, req.flags.value,
-                             shared->global_share,
-                             req.monitored_fence.fence_value_cpu_va,
-                             fence_kva, 0);
+        if (ret != 0) {
+            hvdxg_untrack_sync(owner, req.sync_object.v);
+            (void)hvdxg_destroy_syncobject_host_for_syncfile(
+                owner, req.device.v, req.sync_object.v, shared->sync_type,
+                req.flags.value, shared->global_share);
+        }
         hvdxg.sharedhandle_last_object = req.sync_object.v;
         hvdxg.sharedhandle_last_ret = ret;
         hvdxg.opensync_last_ret = ret;
@@ -7001,6 +7016,63 @@ queryresource_done:
             ret = -EOVERFLOW;
             goto openresource_done;
         }
+        req.resource.v = result->resource.v;
+        req.total_priv_drv_data_size =
+            shared->resource.total_priv_drv_data_size;
+        if (owner == NULL) {
+            ret = -EINVAL;
+            goto openresource_done;
+        }
+        if (hvdxg_clone_resource(&opened, &shared->resource) == 0) {
+            struct hvdxg_tracked_resource *slot;
+
+            opened.device = req.device.v;
+            opened.resource = req.resource.v;
+            opened.global_share = shared->global_share;
+            opened.owner_process = hvdxg_open_host_process(owner);
+            opened.owner_generation = hvdxg_open_process_generation(owner);
+            opened.owner_refs = hvdxg_open_process_refs(owner);
+            opened.sealed = 1;
+            opened.opened_from_shared = 1;
+            opened.open_count = 1;
+            for (uint32 i = 0; i < req.allocation_count; i++)
+                opened.allocation_handles[i] = result->allocations[i].v;
+            hvdxg_sync_shared_resource_records(&opened);
+            slot = hvdxg_owner_find_resource(owner, opened.device,
+                                             opened.resource);
+            if (slot == NULL &&
+                hvdxg_grow_table((void **)&owner->resources,
+                                 &owner->resource_capacity,
+                                 owner->resource_count + 1,
+                                 sizeof(owner->resources[0]),
+                                 HV_DXG_RESOURCE_TRACKED_MAX) == 0)
+                slot = &owner->resources[owner->resource_count++];
+            if (slot != NULL) {
+                hvdxg_free_tracked_resource(slot);
+                *slot = opened;
+                if (hvdxg_track_object(owner, HV_DXG_OBJECT_RESOURCE,
+                                       opened.resource, opened.device,
+                                       opened.device) == 0)
+                    hvdxg.sharedresource_open_tracked++;
+                else
+                    ret = -ENOMEM;
+            } else {
+                hvdxg_free_tracked_resource(&opened);
+                ret = -ENOMEM;
+            }
+        } else {
+            ret = -ENOMEM;
+        }
+        if (ret != 0)
+            goto openresource_done;
+        for (uint32 i = 0; i < req.allocation_count; i++) {
+            ret = hvdxg_track_allocation(
+                owner, req.device.v, req.resource.v, result->allocations[i].v,
+                shared->resource.allocation_sizes[i],
+                shared->resource.allocation_flags[i], 0, NULL, 0);
+            if (ret != 0)
+                goto openresource_done;
+        }
         if (shared->resource.private_runtime_data_size != 0 &&
             either_copyout(1, req.private_runtime_data,
                            shared->resource.private_runtime_data,
@@ -7034,68 +7106,8 @@ queryresource_done:
             ret = -EFAULT;
             goto openresource_done;
         }
-        req.resource.v = result->resource.v;
-        req.total_priv_drv_data_size =
-            shared->resource.total_priv_drv_data_size;
         ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
               -EFAULT : 0;
-        if (ret == 0 && owner != NULL) {
-            if (hvdxg_clone_resource(&opened, &shared->resource) == 0) {
-                struct hvdxg_tracked_resource *slot;
-
-                opened.device = req.device.v;
-                opened.resource = req.resource.v;
-                opened.global_share = shared->global_share;
-                opened.owner_process = hvdxg_open_host_process(owner);
-                opened.owner_generation =
-                    hvdxg_open_process_generation(owner);
-                opened.owner_refs = hvdxg_open_process_refs(owner);
-                opened.sealed = 1;
-                opened.opened_from_shared = 1;
-                opened.open_count = 1;
-                for (uint32 i = 0; i < req.allocation_count; i++)
-                    opened.allocation_handles[i] =
-                        result->allocations[i].v;
-                hvdxg_sync_shared_resource_records(&opened);
-                slot = hvdxg_owner_find_resource(owner, opened.device,
-                                                 opened.resource);
-                if (slot == NULL &&
-                    hvdxg_grow_table((void **)&owner->resources,
-                                     &owner->resource_capacity,
-                                     owner->resource_count + 1,
-                                     sizeof(owner->resources[0]),
-                                     HV_DXG_RESOURCE_TRACKED_MAX) == 0)
-                    slot = &owner->resources[owner->resource_count++];
-                if (slot != NULL) {
-                    hvdxg_free_tracked_resource(slot);
-                    *slot = opened;
-                    if (hvdxg_track_object(owner, HV_DXG_OBJECT_RESOURCE,
-                                           opened.resource,
-                                           opened.device,
-                                           opened.device) == 0)
-                        hvdxg.sharedresource_open_tracked++;
-                    else
-                        ret = -ENOMEM;
-                } else {
-                    hvdxg_free_tracked_resource(&opened);
-                    ret = -ENOMEM;
-                }
-            } else {
-                ret = -ENOMEM;
-            }
-            if (ret == 0) {
-                for (uint32 i = 0; i < req.allocation_count; i++) {
-                    ret = hvdxg_track_allocation(
-                        owner, req.device.v, req.resource.v,
-                        result->allocations[i].v,
-                        shared->resource.allocation_sizes[i],
-                        shared->resource.allocation_flags[i],
-                        0, NULL, 0);
-                    if (ret != 0)
-                        break;
-                }
-            }
-        }
 openresource_done:
         if (ret != 0 && owner != NULL &&
             (req.resource.v != 0 ||
@@ -7886,16 +7898,22 @@ openresource_done:
             req.fence_value = sync_file->fence_value;
             req.fence_value_cpu_va = cpu_va;
             req.fence_value_gpu_va = gpu_va;
+            ret = owner != NULL ?
+                  hvdxg_track_sync(owner, req.device.v, req.syncobj.v,
+                                   sync_file->sync_type, open_flags.value,
+                                   sync_file->global_share, cpu_va,
+                                   fence_kva, 0) :
+                  -EINVAL;
+        }
+        if (ret == 0) {
             ret = either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0 ?
                   -EFAULT : 0;
         }
-        if (ret == 0 && owner != NULL) {
-            hvdxg_track_sync(owner, req.device.v, req.syncobj.v,
-                             sync_file->sync_type, open_flags.value,
-                             sync_file->global_share, cpu_va, fence_kva, 0);
-        } else if (ret != 0 && opened.v != 0) {
+        if (ret != 0 && opened.v != 0) {
             int destroy_ret;
 
+            if (owner != NULL)
+                hvdxg_untrack_sync(owner, opened.v);
             hvdxg.syncfile_open_copyout_failures++;
             hvdxg.syncfile_open_unwind_destroy_attempts++;
             destroy_ret = hvdxg_destroy_syncobject_host_for_syncfile(
