@@ -621,6 +621,22 @@ struct drm_mode_get_blob_compat {
     uint64 data;
 };
 
+struct drm_format_modifier_compat {
+    uint64 formats;
+    uint32 offset;
+    uint32 pad;
+    uint64 modifier;
+};
+
+struct drm_format_modifier_blob_compat {
+    uint32 version;
+    uint32 flags;
+    uint32 count_formats;
+    uint32 formats_offset;
+    uint32 count_modifiers;
+    uint32 modifiers_offset;
+};
+
 struct drm_mode_fb_cmd_compat {
     uint32 fb_id;
     uint32 width;

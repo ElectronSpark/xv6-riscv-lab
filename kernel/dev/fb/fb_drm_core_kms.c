@@ -169,6 +169,29 @@ static void gpu_drm_copy_prop_name(char dst[32], const char *src)
         memmove(dst, src, strlen(src) < 32 ? strlen(src) : 31);
 }
 
+struct gpu_drm_in_formats_blob {
+    struct drm_format_modifier_blob_compat header;
+    uint32 formats[2];
+    struct drm_format_modifier_compat modifiers[1];
+};
+
+static void gpu_drm_fill_in_formats_blob(struct gpu_drm_in_formats_blob *blob)
+{
+    memset(blob, 0, sizeof(*blob));
+    blob->header.version = 1;
+    blob->header.count_formats = 2;
+    blob->header.formats_offset =
+        (uint32)((char *)&blob->formats[0] - (char *)blob);
+    blob->header.count_modifiers = 1;
+    blob->header.modifiers_offset =
+        (uint32)((char *)&blob->modifiers[0] - (char *)blob);
+    blob->formats[0] = DRM_FORMAT_XRGB8888;
+    blob->formats[1] = DRM_FORMAT_ARGB8888;
+    blob->modifiers[0].formats = 0x3;
+    blob->modifiers[0].offset = 0;
+    blob->modifiers[0].modifier = DRM_FORMAT_MOD_LINEAR;
+}
+
 static int gpu_drm_property_info(uint32 prop_id, const char **name,
                                  uint32 *flags, uint64 values[2],
                                  uint32 *count_values,
@@ -268,6 +291,10 @@ static int gpu_drm_property_info(uint32 prop_id, const char **name,
         *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
         values[1] = (uint64)-1;
         *count_values = 2;
+        break;
+    case GPU_DRM_PROP_IN_FORMATS:
+        *name = "IN_FORMATS";
+        *flags = DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE;
         break;
     default:
         return -ENOENT;
@@ -1224,19 +1251,30 @@ static int gpu_drm_mode_getblob(uint64 arg)
 {
     struct drm_mode_get_blob_compat req;
     struct drm_mode_modeinfo_compat mode;
+    struct gpu_drm_in_formats_blob in_formats;
+    const void *blob_data = NULL;
+    uint32 blob_size = 0;
     uint32 capacity;
     uint32 n;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
-    if (req.blob_id != GPU_DRM_MODE_BLOB_ID)
+    if (req.blob_id == GPU_DRM_MODE_BLOB_ID) {
+        gpu_drm_fill_mode(&mode);
+        blob_data = &mode;
+        blob_size = sizeof(mode);
+    } else if (req.blob_id == GPU_DRM_IN_FORMATS_BLOB_ID) {
+        gpu_drm_fill_in_formats_blob(&in_formats);
+        blob_data = &in_formats;
+        blob_size = sizeof(in_formats);
+    } else {
         return -ENOENT;
-    gpu_drm_fill_mode(&mode);
+    }
     capacity = req.length;
-    req.length = sizeof(mode);
+    req.length = blob_size;
     if (req.data != 0 && capacity != 0) {
-        n = capacity < sizeof(mode) ? capacity : sizeof(mode);
-        if (either_copyout(1, req.data, &mode, n) < 0)
+        n = capacity < blob_size ? capacity : blob_size;
+        if (either_copyout(1, req.data, (void *)blob_data, n) < 0)
             return -EFAULT;
     }
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
@@ -1531,8 +1569,8 @@ static int gpu_drm_mode_dirtyfb(struct fb_gpu_render_owner *owner, uint64 arg)
 }
 
 struct gpu_kms_obj_props {
-    uint32 props[12];
-    uint64 values[12];
+    uint32 props[16];
+    uint64 values[16];
     uint32 count;
 };
 
@@ -1568,7 +1606,8 @@ static int gpu_kms_object_exists_locked(uint32 obj_id, uint32 obj_type,
         if (obj_id == GPU_DRM_CRTC_ID || obj_id == GPU_DRM_CONNECTOR_ID ||
             obj_id == GPU_DRM_ENCODER_ID ||
             obj_id == GPU_DRM_PRIMARY_PLANE_ID ||
-            obj_id == GPU_DRM_MODE_BLOB_ID)
+            obj_id == GPU_DRM_MODE_BLOB_ID ||
+            obj_id == GPU_DRM_IN_FORMATS_BLOB_ID)
             return 1;
         return gpu_kms_fb_owner_matches(gpu_kms_fb_lookup_locked(obj_id),
                                         owner);
@@ -1584,7 +1623,8 @@ static int gpu_kms_object_exists_locked(uint32 obj_id, uint32 obj_type,
         return obj_id == GPU_DRM_PRIMARY_PLANE_ID;
     case DRM_MODE_OBJECT_BLOB:
     case DRM_MODE_OBJECT_MODE:
-        return obj_id == GPU_DRM_MODE_BLOB_ID;
+        return obj_id == GPU_DRM_MODE_BLOB_ID ||
+            obj_id == GPU_DRM_IN_FORMATS_BLOB_ID;
     case DRM_MODE_OBJECT_FB:
         return gpu_kms_fb_owner_matches(gpu_kms_fb_lookup_locked(obj_id),
                                         owner);
@@ -1633,6 +1673,8 @@ static int gpu_kms_collect_obj_props_locked(uint32 obj_id, uint32 obj_type,
             obj_type = DRM_MODE_OBJECT_ENCODER;
         else if (obj_id == GPU_DRM_MODE_BLOB_ID)
             obj_type = DRM_MODE_OBJECT_BLOB;
+        else if (obj_id == GPU_DRM_IN_FORMATS_BLOB_ID)
+            obj_type = DRM_MODE_OBJECT_BLOB;
         else
             obj_type = DRM_MODE_OBJECT_FB;
     }
@@ -1664,6 +1706,8 @@ static int gpu_kms_collect_obj_props_locked(uint32 obj_id, uint32 obj_type,
         gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_W, w);
         gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_H, h);
         gpu_kms_push_prop(out, GPU_DRM_PROP_IN_FENCE_FD, (uint64)-1);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_IN_FORMATS,
+                          GPU_DRM_IN_FORMATS_BLOB_ID);
         break;
     default:
         break;
@@ -1768,6 +1812,10 @@ static int gpu_kms_validate_prop_locked(struct fb_gpu_render_owner *owner,
     case GPU_DRM_PROP_OUT_FENCE_PTR:
         if (out_fence_ptr != NULL)
             *out_fence_ptr = value;
+        break;
+    case GPU_DRM_PROP_IN_FORMATS:
+        if (value != GPU_DRM_IN_FORMATS_BLOB_ID)
+            return -EINVAL;
         break;
     default:
         break;

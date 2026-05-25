@@ -20,6 +20,7 @@
 #define GPU_DRM_CONNECTOR_ID                  3
 #define GPU_DRM_PRIMARY_PLANE_ID              4
 #define GPU_DRM_MODE_BLOB_ID                  5
+#define GPU_DRM_IN_FORMATS_BLOB_ID            6
 #define GPU_DRM_PROP_CRTC_ID                  10
 #define GPU_DRM_PROP_MODE_ID                  11
 #define GPU_DRM_PROP_ACTIVE                   12
@@ -35,6 +36,7 @@
 #define GPU_DRM_PROP_CRTC_H                   22
 #define GPU_DRM_PROP_IN_FENCE_FD              23
 #define GPU_DRM_PROP_OUT_FENCE_PTR            24
+#define GPU_DRM_PROP_IN_FORMATS               25
 
 #define FB_TTM_PL_SYSTEM                      0x0001
 #define FB_TTM_PL_TT                          0x0002
