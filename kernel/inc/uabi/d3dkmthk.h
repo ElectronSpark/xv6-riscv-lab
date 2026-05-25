@@ -446,12 +446,38 @@ enum d3dddiformat {
     _D3DDDIFMT_UNKNOWN = 0,
 };
 
+struct d3dddi_rational {
+    uint32 numerator;
+    uint32 denominator;
+};
+
 struct d3dkmdt_gdisurfacedata {
     uint32 width;
     uint32 height;
     uint32 format;
     enum d3dkmdt_gdisurfacetype type;
     uint32 flags;
+    uint32 pitch;
+};
+
+struct d3dkmdt_stagingsurfacedata {
+    uint32 width;
+    uint32 height;
+    uint32 pitch;
+};
+
+struct d3dkmdt_sharedprimarysurfacedata {
+    uint32 width;
+    uint32 height;
+    enum d3dddiformat format;
+    struct d3dddi_rational refresh_rate;
+    uint32 vidpn_source_id;
+};
+
+struct d3dkmdt_shadowsurfacedata {
+    uint32 width;
+    uint32 height;
+    enum d3dddiformat format;
     uint32 pitch;
 };
 

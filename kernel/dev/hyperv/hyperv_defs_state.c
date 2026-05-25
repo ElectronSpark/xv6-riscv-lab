@@ -1187,6 +1187,9 @@ struct hvdxg_command_getstandardallocprivdata {
     uint32 priv_driver_resource_size;
     uint32 physical_adapter_index;
     union {
+        struct d3dkmdt_sharedprimarysurfacedata primary;
+        struct d3dkmdt_shadowsurfacedata shadow;
+        struct d3dkmdt_stagingsurfacedata staging;
         struct d3dkmdt_gdisurfacedata gdi_surface;
     };
 } __PACKED;
@@ -1196,6 +1199,9 @@ struct hvdxg_command_getstandardallocprivdata_return {
     uint32 priv_driver_data_size;
     uint32 priv_driver_resource_size;
     union {
+        struct d3dkmdt_sharedprimarysurfacedata primary;
+        struct d3dkmdt_shadowsurfacedata shadow;
+        struct d3dkmdt_stagingsurfacedata staging;
         struct d3dkmdt_gdisurfacedata gdi_surface;
     };
 } __PACKED;
