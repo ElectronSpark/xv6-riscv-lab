@@ -1189,6 +1189,21 @@ struct fb_gpu_stats {
     uint64 dxg_present_bind_contract_queries; /* future bind contract queries */
     uint64 dxg_present_bind_contract_rejects; /* bind queries fail-closed */
     uint64 dxg_present_bind_contract_successes; /* native bind query accepts */
+    uint64 dxg_scanout_bind_attempts; /* selected scanout-bind attempts */
+    uint64 dxg_scanout_bind_rejects; /* scanout-bind fail-closed rejects */
+    uint64 dxg_scanout_bind_successes; /* real scanout-bind accepts */
+    uint64 dxg_scanout_bind_completion_queries; /* completion polls */
+    uint64 dxg_scanout_bind_completion_successes; /* completed native polls */
+    uint64 dxg_scanout_bind_completion_pending; /* no native completion yet */
+    uint64 dxg_scanout_bind_weak_evidence_rejects; /* no loose credit */
+    uint64 dxg_scanout_bind_last_transport; /* helper transport snapshot */
+    uint64 dxg_scanout_bind_last_status; /* last errno/status */
+    uint64 dxg_scanout_bind_last_present_id; /* last native present id */
+    uint64 dxg_scanout_bind_last_completed; /* last native completion id */
+    uint64 dxg_scanout_bind_last_source_generation; /* source generation */
+    uint64 dxg_scanout_bind_last_resource_generation; /* resource generation */
+    uint64 dxg_scanout_bind_last_dirty_sequence; /* display dirty seq */
+    uint64 dxg_scanout_bind_last_dirty_rects; /* display dirty rect count */
     uint64 display_presents;  /* display present/flush operations issued */
     uint64 display_completions; /* display present completions observed */
     uint64 display_last_present; /* latest issued display-present sequence */
