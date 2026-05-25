@@ -722,6 +722,7 @@ void pci_dma_unmap_single(struct pci_device_info *pdev, uint64 dma_addr,
 
 int pci_pm_suspend_device(struct pci_device_info *pdev)
 {
+    uint16 cmd;
     int ret = 0;
 
     if (pdev == NULL)
@@ -733,6 +734,14 @@ int pci_pm_suspend_device(struct pci_device_info *pdev)
         if (ret != 0)
             return ret;
     }
+    cmd = pci_config_read16(pdev->bus, pdev->dev, pdev->func, 0x04);
+    pdev->saved_command = cmd;
+    pdev->saved_command_valid = 1;
+    pdev->saved_master_enabled = pdev->master_enabled;
+    cmd &= ~(uint16)(PCIE_CSCMD_IAE | PCIE_CSCMD_MAE | PCIE_CSCMD_BME);
+    pci_config_write16(pdev->bus, pdev->dev, pdev->func, 0x04, cmd);
+    pdev->enabled = 0;
+    pdev->master_enabled = 0;
     pdev->runtime_suspended = 1;
     pdev->suspend_count++;
     return 0;
@@ -740,19 +749,35 @@ int pci_pm_suspend_device(struct pci_device_info *pdev)
 
 int pci_pm_resume_device(struct pci_device_info *pdev)
 {
+    uint16 cmd;
     int ret = 0;
 
     if (pdev == NULL)
         return -ENODEV;
     if (!pdev->runtime_suspended)
         return 0;
+    if (pdev->saved_command_valid) {
+        cmd = pdev->saved_command;
+        pci_config_write16(pdev->bus, pdev->dev, pdev->func, 0x04, cmd);
+        pdev->enabled =
+            (cmd & (PCIE_CSCMD_IAE | PCIE_CSCMD_MAE)) != 0;
+        pdev->master_enabled = (cmd & PCIE_CSCMD_BME) != 0;
+    } else {
+        cmd = pci_config_read16(pdev->bus, pdev->dev, pdev->func, 0x04);
+        cmd |= PCIE_CSCMD_MAE;
+        if (pdev->saved_master_enabled)
+            cmd |= PCIE_CSCMD_BME;
+        pci_config_write16(pdev->bus, pdev->dev, pdev->func, 0x04, cmd);
+        pdev->enabled = 1;
+        pdev->master_enabled = pdev->saved_master_enabled;
+    }
+    pdev->runtime_suspended = 0;
+    pdev->resume_count++;
     if (pdev->driver != NULL && pdev->driver->resume != NULL) {
         ret = pdev->driver->resume(pdev);
         if (ret != 0)
             return ret;
     }
-    pdev->runtime_suspended = 0;
-    pdev->resume_count++;
     return 0;
 }
 

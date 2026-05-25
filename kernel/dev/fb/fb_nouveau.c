@@ -55,6 +55,31 @@ static void gpu_nouveau_stat_set(uint64 *counter, uint64 value)
 static unsigned char gpu_nouveau_dma_probe_page[4096]
     __attribute__((aligned(4096)));
 
+#define NV_PMC_INTR_0     0x00000100U
+#define NV_PMC_INTR_EN_0  0x00000140U
+
+static uint32 gpu_nouveau_bar0_read32(uint32 offset)
+{
+    volatile uint32 *reg;
+
+    if (gpu_nouveau_pci.bar0 == NULL ||
+        (uint64)offset + sizeof(uint32) > gpu_nouveau_pci.bar0_len)
+        return 0;
+    reg = (volatile uint32 *)((uint8 *)gpu_nouveau_pci.bar0 + offset);
+    return *reg;
+}
+
+static void gpu_nouveau_bar0_write32(uint32 offset, uint32 value)
+{
+    volatile uint32 *reg;
+
+    if (gpu_nouveau_pci.bar0 == NULL ||
+        (uint64)offset + sizeof(uint32) > gpu_nouveau_pci.bar0_len)
+        return;
+    reg = (volatile uint32 *)((uint8 *)gpu_nouveau_pci.bar0 + offset);
+    *reg = value;
+}
+
 static uint64 gpu_nouveau_resource_len(struct pci_device_info *dev, int bar)
 {
     if (dev == NULL)
@@ -76,12 +101,26 @@ static uint64 gpu_nouveau_gart_aperture_len(struct pci_device_info *dev)
 
 static void gpu_nouveau_pci_irq_handler(int irq, void *data, device_t *dev)
 {
+    uint32 cause;
+    uint32 enabled;
+
     (void)irq;
     (void)data;
     (void)dev;
     gpu_nouveau_stat_inc(
         &fb_state.stats.nouveau_pci_irq_handler_invocations);
-    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_spurious);
+    cause = gpu_nouveau_bar0_read32(NV_PMC_INTR_0);
+    enabled = gpu_nouveau_bar0_read32(NV_PMC_INTR_EN_0);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_cause_reads);
+    cause &= enabled;
+    if (cause == 0) {
+        gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_spurious);
+        return;
+    }
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_cause_valid);
+    gpu_nouveau_bar0_write32(NV_PMC_INTR_0, cause);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_cause_acks);
+    gpu_nouveau_stat_inc(&fb_state.stats.nouveau_pci_irq_delivery_claimed);
 }
 
 static void gpu_nouveau_pci_publish_core_state(struct pci_device_info *pdev)

@@ -241,6 +241,8 @@ struct pci_device_info {
     uint8  irq_vectors_allocated;
     uint8  irq_vector_count;
     uint8  irq_flags;
+    uint8  saved_command_valid;
+    uint8  saved_master_enabled;
     uint8  dma_mask_requested_bits;
     uint8  coherent_dma_mask_requested_bits;
     uint8  dma_mask_bits;
@@ -251,6 +253,7 @@ struct pci_device_info {
     uint8  msi_cap;
     uint8  msix_cap;
     uint32 class_code;
+    uint16 saved_command;
     uint32 enable_count;
     uint32 suspend_count;
     uint32 resume_count;
