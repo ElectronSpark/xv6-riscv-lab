@@ -296,6 +296,15 @@ fb_dxg_present_display_bind_result_accepts(
            result->sender_present != 0 &&
            result->completion_present != 0 &&
            result->pin_revalidated != 0 &&
+           result->publication_attempted != 0 &&
+           result->publish_before_send != 0 &&
+           result->transport_pending_id != 0 &&
+           result->command_id != 0 &&
+           result->transaction_id != 0 &&
+           result->channel != 0 &&
+           result->completion_demux_registered != 0 &&
+           result->host_saw_packet != 0 &&
+           result->wsl_presenthistory_completion_credit == 0 &&
            result->no_host_abi == 0 &&
            result->no_sender == 0 &&
            result->no_completion == 0 &&
