@@ -1101,6 +1101,22 @@ struct fb_gpu_stats {
     uint64 nouveau_display_page_flip_completion_ready; /* HW flip complete gate */
     uint64 nouveau_display_page_flip_completions; /* HW flip completions */
     uint64 nouveau_display_atomic_pageflip_backend_missing; /* no KMS HW backend */
+    uint64 nouveau_display_engine_object_created; /* nvif/nvkm display object */
+    uint64 nouveau_display_mode_config_ready; /* DRM mode_config initialized */
+    uint64 nouveau_display_crtc_count; /* DRM CRTC/head objects registered */
+    uint64 nouveau_display_encoder_count; /* DRM encoder/outp objects */
+    uint64 nouveau_display_primary_plane_count; /* primary plane objects */
+    uint64 nouveau_display_primary_plane_linear_required; /* LINEAR scanout gate */
+    uint64 nouveau_display_primary_plane_nonlinear_modifiers; /* blocked mods */
+    uint64 nouveau_display_outp_mask_seen; /* NVIF/NVKM outp mask observed */
+    uint64 nouveau_display_conn_mask_seen; /* connector mask observed */
+    uint64 nouveau_display_head_mask_seen; /* head mask observed */
+    uint64 nouveau_display_nvif_head_ctor_successes; /* nvif_head objects */
+    uint64 nouveau_display_vblank_event_registered; /* nvif vblank event */
+    uint64 nouveau_display_hpd_event_registered; /* connector HPD event */
+    uint64 nouveau_display_dp_irq_event_registered; /* DP IRQ event */
+    uint64 nouveau_display_atomic_commit_tail_ready; /* HW commit tail exists */
+    uint64 nouveau_display_page_flip_event_source; /* FB_GPU_NOUVEAU_DISPLAY_VBLANK_* */
     uint64 nouveau_native_display_reject_reasons; /* KMS present reject bits */
     uint64 kms_present_last_lane; /* FB_GPU_KMS_PRESENT_LANE_* */
     uint64 kms_present_dumb; /* KMS presents through dumb/software lane */

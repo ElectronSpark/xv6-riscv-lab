@@ -399,6 +399,36 @@ static void gpu_nouveau_display_create_failclosed(void)
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_display_atomic_pageflip_backend_missing, 1);
     gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_engine_object_created, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_mode_config_ready, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_crtc_count, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_encoder_count, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_primary_plane_count, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_primary_plane_linear_required, 1);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_primary_plane_nonlinear_modifiers, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_outp_mask_seen, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_conn_mask_seen, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_head_mask_seen, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_nvif_head_ctor_successes, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_vblank_event_registered, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_hpd_event_registered, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_dp_irq_event_registered, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_atomic_commit_tail_ready, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_page_flip_event_source,
+        FB_GPU_NOUVEAU_DISPLAY_VBLANK_SOURCE_NONE);
+    gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_native_display_reject_reasons,
         reasons);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_native_display_ready, 0);
@@ -683,6 +713,34 @@ static void gpu_nouveau_pci_remove(struct pci_device_info *pdev)
         &fb_state.stats.nouveau_pci_dma_map_last_ret, 0);
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_pci_native_present_credit, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_engine_object_created, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_mode_config_ready, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_crtc_count, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_encoder_count, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_primary_plane_count, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_primary_plane_linear_required, 1);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_primary_plane_nonlinear_modifiers, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_outp_mask_seen, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_conn_mask_seen, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_head_mask_seen, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_nvif_head_ctor_successes, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_vblank_event_registered, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_hpd_event_registered, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_dp_irq_event_registered, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_atomic_commit_tail_ready, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_page_flip_event_source,
+        FB_GPU_NOUVEAU_DISPLAY_VBLANK_SOURCE_NONE);
 }
 
 static int gpu_nouveau_pci_suspend(struct pci_device_info *pdev)
