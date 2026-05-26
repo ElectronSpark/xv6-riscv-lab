@@ -1397,6 +1397,11 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_no_host_abi; /* provider lacks ABI */
     uint64 dxg_display_bind_provider_no_sender; /* provider lacks sender */
     uint64 dxg_display_bind_provider_no_completion; /* provider lacks done */
+    uint64 dxg_display_bind_provider_preflight_ready; /* ready before send */
+    uint64 dxg_display_bind_provider_send_attempts; /* real sends attempted */
+    uint64 dxg_display_bind_provider_send_blocked_no_host_abi; /* ABI block */
+    uint64 dxg_display_bind_provider_completion_demux_attempts; /* done demux */
+    uint64 dxg_display_bind_provider_completion_demux_blocked_no_contract; /* no done ABI */
     uint64 dxg_display_bind_provider_publication_attempts; /* publish decisions */
     uint64 dxg_display_bind_provider_publish_before_send; /* published before send */
     uint64 dxg_display_bind_provider_transport_pending_id; /* host pending id */

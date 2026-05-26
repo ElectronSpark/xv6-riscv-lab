@@ -58,6 +58,11 @@ struct fb_dxg_display_bind_result {
     uint32 no_host_abi;
     uint32 no_sender;
     uint32 no_completion;
+    uint32 preflight_ready;
+    uint32 send_attempts;
+    uint32 send_blocked_no_host_abi;
+    uint32 completion_demux_attempts;
+    uint32 completion_demux_blocked_no_contract;
     uint32 publication_attempted;
     uint32 publish_before_send;
     uint64 transport_pending_id;
@@ -237,6 +242,14 @@ fb_dxg_present_provider_submit_display_bind(
     result->no_host_abi = hv_result.no_host_abi;
     result->no_sender = hv_result.no_sender;
     result->no_completion = hv_result.no_completion;
+    result->preflight_ready = hv_result.preflight_ready;
+    result->send_attempts = hv_result.send_attempts;
+    result->send_blocked_no_host_abi =
+        hv_result.send_blocked_no_host_abi;
+    result->completion_demux_attempts =
+        hv_result.completion_demux_attempts;
+    result->completion_demux_blocked_no_contract =
+        hv_result.completion_demux_blocked_no_contract;
     result->publication_attempted = hv_result.publication_attempted;
     result->publish_before_send = hv_result.publish_before_send;
     result->transport_pending_id = hv_result.transport_pending_id;
@@ -989,6 +1002,16 @@ fb_dxg_present_scanout_bind_locked(
         result.no_sender;
     fb_state.stats.dxg_display_bind_provider_no_completion =
         result.no_completion;
+    fb_state.stats.dxg_display_bind_provider_preflight_ready =
+        result.preflight_ready;
+    fb_state.stats.dxg_display_bind_provider_send_attempts +=
+        result.send_attempts;
+    fb_state.stats.dxg_display_bind_provider_send_blocked_no_host_abi +=
+        result.send_blocked_no_host_abi;
+    fb_state.stats.dxg_display_bind_provider_completion_demux_attempts +=
+        result.completion_demux_attempts;
+    fb_state.stats.dxg_display_bind_provider_completion_demux_blocked_no_contract +=
+        result.completion_demux_blocked_no_contract;
     fb_state.stats.dxg_display_bind_provider_publication_attempts +=
         result.publication_attempted != 0;
     fb_state.stats.dxg_display_bind_provider_publish_before_send =

@@ -5582,6 +5582,13 @@ int hyperv_dxg_display_bind_submit_failclosed(
     else
         block_reason |= FB_GPU_DXG_PRESENT_BLOCK_RESOURCE_FD_UNVERIFIED;
 
+    result->preflight_ready = (missing_metadata == 0 && pin_valid);
+    result->send_attempts = 0;
+    result->send_blocked_no_host_abi =
+        result->preflight_ready != 0 ? 1 : 0;
+    result->completion_demux_attempts = 0;
+    result->completion_demux_blocked_no_contract =
+        result->preflight_ready != 0 ? 1 : 0;
     result->block_reason = block_reason;
     result->status = EOPNOTSUPP;
     return -EOPNOTSUPP;

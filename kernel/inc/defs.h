@@ -201,6 +201,11 @@ struct hyperv_dxg_display_bind_result {
     uint32 no_host_abi;
     uint32 no_sender;
     uint32 no_completion;
+    uint32 preflight_ready;
+    uint32 send_attempts;
+    uint32 send_blocked_no_host_abi;
+    uint32 completion_demux_attempts;
+    uint32 completion_demux_blocked_no_contract;
     uint32 publication_attempted;
     uint32 publish_before_send;
     uint64 transport_pending_id;
