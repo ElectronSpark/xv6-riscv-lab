@@ -1479,12 +1479,26 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_pending_dxgprocess_generation; /* WSL proc */
     uint64 dxg_display_bind_provider_pending_process_adapter_generation; /* WSL adapter */
     uint64 dxg_display_bind_provider_pending_hmgr_index_unique_valid; /* hmgr index/unique valid */
+    uint64 dxg_display_bind_provider_pending_process_namespace_valid; /* TGID namespace */
+    uint64 dxg_display_bind_provider_pending_device_hmgr_index_unique_valid; /* device hmgr */
+    uint64 dxg_display_bind_provider_pending_resource_hmgr_index_unique_valid; /* resource hmgr */
+    uint64 dxg_display_bind_provider_pending_allocation_hmgr_index_unique_valid; /* allocation hmgr */
     uint64 dxg_display_bind_provider_pending_device_object_ref_active; /* device entry ref */
     uint64 dxg_display_bind_provider_pending_resource_object_ref_active; /* resource entry ref */
     uint64 dxg_display_bind_provider_pending_allocation_object_ref_active; /* allocation entry ref */
+    uint64 dxg_display_bind_provider_pending_shared_parent_id; /* parent id */
+    uint64 dxg_display_bind_provider_pending_shared_parent_refs; /* parent refs */
+    uint64 dxg_display_bind_provider_pending_shared_parent_children; /* children */
     uint64 dxg_display_bind_provider_pending_shared_parent_snapshot_valid; /* parent snapshot */
     uint64 dxg_display_bind_provider_pending_opened_child_snapshot_valid; /* child snapshot */
+    uint64 dxg_display_bind_provider_pending_shared_parent_global_share_match; /* child share */
     uint64 dxg_display_bind_provider_pending_syncobject_object_ref_active; /* sync entry ref */
+    uint64 dxg_display_bind_provider_pending_syncobject_shared_owner_present; /* sync owner */
+    uint64 dxg_display_bind_provider_pending_syncobject_monitored_fence; /* monitored sync */
+    uint64 dxg_display_bind_provider_pending_syncobject_fence_value; /* wait fence */
+    uint64 dxg_display_bind_provider_pending_syncobject_fence_cpu_va_present; /* user VA */
+    uint64 dxg_display_bind_provider_pending_syncobject_fence_gpu_va_present; /* kernel/GPU VA */
+    uint64 dxg_display_bind_provider_pending_syncobject_fence_map_size; /* map bytes */
     uint64 dxg_display_bind_provider_pending_owner_close_cancelled; /* owner close */
 };
 

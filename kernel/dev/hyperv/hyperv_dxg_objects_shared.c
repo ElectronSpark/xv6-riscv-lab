@@ -2136,6 +2136,18 @@ static uint64 hvdxg_owner_sync_fence_cpu_va(struct hvdxg_open_state *owner,
     return 0;
 }
 
+static uint64 hvdxg_owner_sync_fence_map_size(struct hvdxg_open_state *owner,
+                                              uint32 sync)
+{
+    if (owner == NULL || sync == 0)
+        return 0;
+    for (uint32 i = 0; i < owner->sync_object_count; i++) {
+        if (owner->sync_objects[i].sync == sync)
+            return owner->sync_objects[i].fence_map_size;
+    }
+    return 0;
+}
+
 static uint64 hvdxg_sync_cpu_fence_value(uint64 fence_kva)
 {
     volatile uint64 *current_value;
@@ -5353,6 +5365,8 @@ int hyperv_dxg_display_bind_pin_from_fds(
         snapshot->shared_parent_children = shared->opened_child_count;
     }
     snapshot->process = hvdxg_open_host_process(owner);
+    snapshot->process_tgid =
+        owner->process_state != NULL ? owner->process_state->tgid : 0;
     snapshot->process_generation = hvdxg_open_process_generation(owner);
     snapshot->process_refs = hvdxg_open_process_refs(owner);
     if (owner->process_state != NULL)
@@ -5362,13 +5376,19 @@ int hyperv_dxg_display_bind_pin_from_fds(
         snapshot->process_adapter_generation = process_adapter->generation;
         snapshot->process_adapter_refs = process_adapter->refs;
     }
-    snapshot->hmgr_index_unique_valid =
+    snapshot->device_hmgr_index_unique_valid =
         hvdxg_hmgr_handle_index_unique_valid(owner, HV_DXG_OBJECT_DEVICE,
-                                             device) &&
+                                             device);
+    snapshot->resource_hmgr_index_unique_valid =
         hvdxg_hmgr_handle_index_unique_valid(owner, HV_DXG_OBJECT_RESOURCE,
-                                             resource) &&
+                                             resource);
+    snapshot->allocation_hmgr_index_unique_valid =
         hvdxg_hmgr_handle_index_unique_valid(owner, HV_DXG_OBJECT_ALLOCATION,
                                              allocation);
+    snapshot->hmgr_index_unique_valid =
+        snapshot->device_hmgr_index_unique_valid &&
+        snapshot->resource_hmgr_index_unique_valid &&
+        snapshot->allocation_hmgr_index_unique_valid;
     snapshot->device_object_ref_active =
         hvdxg_hmgr_object_ref_active(owner, HV_DXG_OBJECT_DEVICE, device);
     snapshot->resource_object_ref_active =
@@ -5523,25 +5543,60 @@ int hyperv_dxg_display_bind_submit_failclosed(
         bind->pin_valid ? bind->pin.process_adapter_generation : 0;
     result->pending_hmgr_index_unique_valid =
         bind->pin_valid ? bind->pin.hmgr_index_unique_valid : 0;
+    result->pending_process_namespace_valid =
+        bind->pin_valid && bind->pin.process_tgid != 0 &&
+        bind->pin.process_generation != 0 &&
+        bind->pin.process_adapter_generation != 0;
+    result->pending_device_hmgr_index_unique_valid =
+        bind->pin_valid ? bind->pin.device_hmgr_index_unique_valid : 0;
+    result->pending_resource_hmgr_index_unique_valid =
+        bind->pin_valid ? bind->pin.resource_hmgr_index_unique_valid : 0;
+    result->pending_allocation_hmgr_index_unique_valid =
+        bind->pin_valid ? bind->pin.allocation_hmgr_index_unique_valid : 0;
     result->pending_device_object_ref_active =
         bind->pin_valid ? bind->pin.device_object_ref_active : 0;
     result->pending_resource_object_ref_active =
         bind->pin_valid ? bind->pin.resource_object_ref_active : 0;
     result->pending_allocation_object_ref_active =
         bind->pin_valid ? bind->pin.allocation_object_ref_active : 0;
+    result->pending_shared_parent_id =
+        bind->pin_valid ? bind->pin.shared_parent_id : 0;
+    result->pending_shared_parent_refs =
+        bind->pin_valid ? bind->pin.shared_parent_refs : 0;
+    result->pending_shared_parent_children =
+        bind->pin_valid ? bind->pin.shared_parent_children : 0;
     result->pending_shared_parent_snapshot_valid =
         bind->pin_valid ? bind->pin.shared_parent_snapshot_valid : 0;
     result->pending_opened_child_snapshot_valid =
         bind->pin_valid ? bind->pin.opened_child_snapshot_valid : 0;
+    result->pending_shared_parent_global_share_match =
+        result->pending_opened_child_snapshot_valid;
     if (bind->pin_valid && bind->pin.dxg_file_cookie != NULL &&
         bind->sync_object != 0) {
         struct hvdxg_open_state *owner =
             (struct hvdxg_open_state *)
                 ((struct vfs_file *)bind->pin.dxg_file_cookie)->private_data;
+        uint64 fence_cpu_va;
+        uint64 fence_kva;
 
         result->pending_syncobject_object_ref_active =
             hvdxg_hmgr_object_ref_active(owner, HV_DXG_OBJECT_SYNC,
                                        bind->sync_object);
+        result->pending_syncobject_shared_owner_present =
+            hvdxg_owner_sync_global_shared(owner, bind->sync_object) != 0;
+        result->pending_syncobject_monitored_fence =
+            hvdxg_owner_sync_is_monitored(owner, bind->sync_object) ||
+            hvdxg_owner_sync_is_monitor_fence_handle(owner,
+                                                     bind->sync_object);
+        result->pending_syncobject_fence_value = bind->fence_value;
+        fence_cpu_va = hvdxg_owner_sync_fence_cpu_va(owner,
+                                                     bind->sync_object);
+        fence_kva = hvdxg_owner_sync_fence_kva(owner, bind->sync_object);
+        result->pending_syncobject_fence_cpu_va_present =
+            fence_cpu_va != 0;
+        result->pending_syncobject_fence_gpu_va_present = fence_kva != 0;
+        result->pending_syncobject_fence_map_size =
+            hvdxg_owner_sync_fence_map_size(owner, bind->sync_object);
     }
     result->pending_owner_close_cancelled = 0;
     missing_metadata =

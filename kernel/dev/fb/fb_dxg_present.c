@@ -83,12 +83,26 @@ struct fb_dxg_display_bind_result {
     uint64 pending_dxgprocess_generation;
     uint64 pending_process_adapter_generation;
     uint32 pending_hmgr_index_unique_valid;
+    uint32 pending_process_namespace_valid;
+    uint32 pending_device_hmgr_index_unique_valid;
+    uint32 pending_resource_hmgr_index_unique_valid;
+    uint32 pending_allocation_hmgr_index_unique_valid;
     uint32 pending_device_object_ref_active;
     uint32 pending_resource_object_ref_active;
     uint32 pending_allocation_object_ref_active;
+    uint32 pending_shared_parent_id;
+    uint32 pending_shared_parent_refs;
+    uint32 pending_shared_parent_children;
     uint32 pending_shared_parent_snapshot_valid;
     uint32 pending_opened_child_snapshot_valid;
+    uint32 pending_shared_parent_global_share_match;
     uint32 pending_syncobject_object_ref_active;
+    uint32 pending_syncobject_shared_owner_present;
+    uint32 pending_syncobject_monitored_fence;
+    uint64 pending_syncobject_fence_value;
+    uint32 pending_syncobject_fence_cpu_va_present;
+    uint32 pending_syncobject_fence_gpu_va_present;
+    uint64 pending_syncobject_fence_map_size;
     uint32 pending_owner_close_cancelled;
     uint32 request_metadata_complete;
     uint32 request_sync_metadata_complete;
@@ -277,18 +291,44 @@ fb_dxg_present_provider_submit_display_bind(
         hv_result.pending_process_adapter_generation;
     result->pending_hmgr_index_unique_valid =
         hv_result.pending_hmgr_index_unique_valid;
+    result->pending_process_namespace_valid =
+        hv_result.pending_process_namespace_valid;
+    result->pending_device_hmgr_index_unique_valid =
+        hv_result.pending_device_hmgr_index_unique_valid;
+    result->pending_resource_hmgr_index_unique_valid =
+        hv_result.pending_resource_hmgr_index_unique_valid;
+    result->pending_allocation_hmgr_index_unique_valid =
+        hv_result.pending_allocation_hmgr_index_unique_valid;
     result->pending_device_object_ref_active =
         hv_result.pending_device_object_ref_active;
     result->pending_resource_object_ref_active =
         hv_result.pending_resource_object_ref_active;
     result->pending_allocation_object_ref_active =
         hv_result.pending_allocation_object_ref_active;
+    result->pending_shared_parent_id = hv_result.pending_shared_parent_id;
+    result->pending_shared_parent_refs = hv_result.pending_shared_parent_refs;
+    result->pending_shared_parent_children =
+        hv_result.pending_shared_parent_children;
     result->pending_shared_parent_snapshot_valid =
         hv_result.pending_shared_parent_snapshot_valid;
     result->pending_opened_child_snapshot_valid =
         hv_result.pending_opened_child_snapshot_valid;
+    result->pending_shared_parent_global_share_match =
+        hv_result.pending_shared_parent_global_share_match;
     result->pending_syncobject_object_ref_active =
         hv_result.pending_syncobject_object_ref_active;
+    result->pending_syncobject_shared_owner_present =
+        hv_result.pending_syncobject_shared_owner_present;
+    result->pending_syncobject_monitored_fence =
+        hv_result.pending_syncobject_monitored_fence;
+    result->pending_syncobject_fence_value =
+        hv_result.pending_syncobject_fence_value;
+    result->pending_syncobject_fence_cpu_va_present =
+        hv_result.pending_syncobject_fence_cpu_va_present;
+    result->pending_syncobject_fence_gpu_va_present =
+        hv_result.pending_syncobject_fence_gpu_va_present;
+    result->pending_syncobject_fence_map_size =
+        hv_result.pending_syncobject_fence_map_size;
     result->pending_owner_close_cancelled =
         hv_result.pending_owner_close_cancelled;
     result->request_metadata_complete =
@@ -1052,18 +1092,46 @@ fb_dxg_present_scanout_bind_locked(
         result.pending_process_adapter_generation;
     fb_state.stats.dxg_display_bind_provider_pending_hmgr_index_unique_valid =
         result.pending_hmgr_index_unique_valid;
+    fb_state.stats.dxg_display_bind_provider_pending_process_namespace_valid =
+        result.pending_process_namespace_valid;
+    fb_state.stats.dxg_display_bind_provider_pending_device_hmgr_index_unique_valid =
+        result.pending_device_hmgr_index_unique_valid;
+    fb_state.stats.dxg_display_bind_provider_pending_resource_hmgr_index_unique_valid =
+        result.pending_resource_hmgr_index_unique_valid;
+    fb_state.stats.dxg_display_bind_provider_pending_allocation_hmgr_index_unique_valid =
+        result.pending_allocation_hmgr_index_unique_valid;
     fb_state.stats.dxg_display_bind_provider_pending_device_object_ref_active =
         result.pending_device_object_ref_active;
     fb_state.stats.dxg_display_bind_provider_pending_resource_object_ref_active =
         result.pending_resource_object_ref_active;
     fb_state.stats.dxg_display_bind_provider_pending_allocation_object_ref_active =
         result.pending_allocation_object_ref_active;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_id =
+        result.pending_shared_parent_id;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_refs =
+        result.pending_shared_parent_refs;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_children =
+        result.pending_shared_parent_children;
     fb_state.stats.dxg_display_bind_provider_pending_shared_parent_snapshot_valid =
         result.pending_shared_parent_snapshot_valid;
     fb_state.stats.dxg_display_bind_provider_pending_opened_child_snapshot_valid =
         result.pending_opened_child_snapshot_valid;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_global_share_match =
+        result.pending_shared_parent_global_share_match;
     fb_state.stats.dxg_display_bind_provider_pending_syncobject_object_ref_active =
         result.pending_syncobject_object_ref_active;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_shared_owner_present =
+        result.pending_syncobject_shared_owner_present;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_monitored_fence =
+        result.pending_syncobject_monitored_fence;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_fence_value =
+        result.pending_syncobject_fence_value;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_fence_cpu_va_present =
+        result.pending_syncobject_fence_cpu_va_present;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_fence_gpu_va_present =
+        result.pending_syncobject_fence_gpu_va_present;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_fence_map_size =
+        result.pending_syncobject_fence_map_size;
     fb_state.stats.dxg_display_bind_provider_pending_owner_close_cancelled =
         result.pending_owner_close_cancelled;
     if (result.request_metadata_complete)
