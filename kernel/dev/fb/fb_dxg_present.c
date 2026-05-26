@@ -444,7 +444,7 @@ fb_dxg_present_display_bind_result_accepts(
            result->transaction_id != 0 &&
            result->channel != 0 &&
            result->completion_demux_registered != 0 &&
-           result->host_saw_packet != 0 &&
+           result->host_saw_packet == 1 &&
            result->wsl_presenthistory_completion_credit == 0 &&
            result->no_host_abi == 0 &&
            result->no_sender == 0 &&
