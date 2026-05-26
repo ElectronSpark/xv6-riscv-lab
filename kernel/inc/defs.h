@@ -244,6 +244,14 @@ int hyperv_dxg_display_bind_submit(
 int hyperv_dxg_display_bind_submit_failclosed(
     const struct hyperv_dxg_display_bind_request *bind,
     struct hyperv_dxg_display_bind_result *result);
+int hyperv_dxg_display_bind_cancel(
+    uint64 transport_pending_id, uint64 source_generation,
+    uint64 resource_generation, uint64 reason,
+    struct hyperv_dxg_display_bind_result *result);
+int hyperv_dxg_display_bind_cancel_failclosed(
+    uint64 transport_pending_id, uint64 source_generation,
+    uint64 resource_generation, uint64 reason,
+    struct hyperv_dxg_display_bind_result *result);
 void hyperv_dxg_note_pci(uint32 domain, uint32 bus, uint32 dev, uint32 func,
                          uint32 vendor, uint32 device, uint32 class_code,
                          uint32 guid0, uint32 guid1, uint32 guid2,

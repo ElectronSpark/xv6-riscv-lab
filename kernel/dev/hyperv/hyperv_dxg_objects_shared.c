@@ -5569,6 +5569,48 @@ int hyperv_dxg_display_bind_submit(
     return hyperv_dxg_display_bind_submit_failclosed(bind, result);
 }
 
+int hyperv_dxg_display_bind_cancel_failclosed(
+    uint64 transport_pending_id, uint64 source_generation,
+    uint64 resource_generation, uint64 reason,
+    struct hyperv_dxg_display_bind_result *result)
+{
+    (void)transport_pending_id;
+    if (result == NULL)
+        return -EINVAL;
+    memset(result, 0, sizeof(*result));
+    result->status = ESTALE;
+    result->transport = FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE;
+    result->operation = FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND;
+    result->completion_source = FB_GPU_DXG_PRESENT_COMPLETION_DISPLAY;
+    result->source_generation = source_generation;
+    result->resource_generation = resource_generation;
+    result->block_reason = reason |
+                           FB_GPU_DXG_PRESENT_BLOCK_NO_TRANSPORT |
+                           FB_GPU_DXG_PRESENT_BLOCK_DXG_NO_DISPLAY_BIND |
+                           FB_GPU_DXG_PRESENT_BLOCK_NO_COMPLETION;
+    result->no_host_abi = 1;
+    result->no_sender = 1;
+    result->no_completion = 1;
+    result->resolved_or_cancelled = 1;
+    result->refs_released = 1;
+    result->no_host_abi_cancelled = 1;
+    result->no_host_abi_refs_released = 1;
+    result->pending_owner_close_cancelled = 1;
+    result->transport_source = FB_GPU_DXG_DISPLAY_BIND_SOURCE_NONE;
+    result->wsl_presenthistory_completion_credit = 0;
+    return -EOPNOTSUPP;
+}
+
+int hyperv_dxg_display_bind_cancel(
+    uint64 transport_pending_id, uint64 source_generation,
+    uint64 resource_generation, uint64 reason,
+    struct hyperv_dxg_display_bind_result *result)
+{
+    return hyperv_dxg_display_bind_cancel_failclosed(
+        transport_pending_id, source_generation, resource_generation, reason,
+        result);
+}
+
 static int hvdxg_sync_file_release(struct vfs_inode *ip,
                                    struct vfs_file *file)
 {

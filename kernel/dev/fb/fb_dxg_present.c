@@ -279,6 +279,49 @@ fb_dxg_present_provider_submit_display_bind(
 }
 
 static int
+fb_dxg_present_provider_cancel_display_bind(
+    uint64 transport_pending_id, uint64 source_generation,
+    uint64 resource_generation, uint64 reason,
+    struct fb_dxg_display_bind_result *result)
+{
+    struct hyperv_dxg_display_bind_result hv_result;
+    int ret;
+
+    if (result == NULL)
+        return -EINVAL;
+    memset(result, 0, sizeof(*result));
+    memset(&hv_result, 0, sizeof(hv_result));
+
+    ret = hyperv_dxg_display_bind_cancel(
+        transport_pending_id, source_generation, resource_generation, reason,
+        &hv_result);
+    result->status = hv_result.status;
+    result->transport = hv_result.transport;
+    result->operation = hv_result.operation;
+    result->completion_source = hv_result.completion_source;
+    result->present_id = hv_result.present_id;
+    result->completed_id = hv_result.completed_id;
+    result->source_generation = hv_result.source_generation;
+    result->resource_generation = hv_result.resource_generation;
+    result->block_reason = hv_result.block_reason;
+    result->no_host_abi = hv_result.no_host_abi;
+    result->no_sender = hv_result.no_sender;
+    result->no_completion = hv_result.no_completion;
+    result->transport_source = hv_result.transport_source;
+    result->host_saw_packet = hv_result.host_saw_packet;
+    result->wsl_presenthistory_completion_credit =
+        hv_result.wsl_presenthistory_completion_credit;
+    result->resolved_or_cancelled = hv_result.resolved_or_cancelled;
+    result->refs_released = hv_result.refs_released;
+    result->no_host_abi_cancelled = hv_result.no_host_abi_cancelled;
+    result->no_host_abi_refs_released =
+        hv_result.no_host_abi_refs_released;
+    result->pending_owner_close_cancelled =
+        hv_result.pending_owner_close_cancelled;
+    return ret;
+}
+
+static int
 fb_dxg_present_display_bind_result_accepts(
     const struct fb_dxg_display_bind_request *bind,
     const struct fb_dxg_display_bind_result *result,
@@ -752,8 +795,30 @@ static void
 fb_dxg_present_pending_cancel_release_locked(
     struct fb_gpu_dxg_present_source_entry *source, uint64 reason)
 {
+    struct fb_dxg_display_bind_result result;
+    int ret;
+
     if (source == NULL || !source->display_bind_pending_active)
         return;
+    memset(&result, 0, sizeof(result));
+    ret = fb_dxg_present_provider_cancel_display_bind(
+        0, source->display_bind_pending_source_generation,
+        source->display_bind_pending_resource_generation, reason, &result);
+    (void)ret;
+    fb_state.stats.dxg_display_bind_provider_resolved_or_cancelled =
+        result.resolved_or_cancelled;
+    fb_state.stats.dxg_display_bind_provider_refs_released =
+        result.refs_released;
+    fb_state.stats.dxg_display_bind_provider_no_host_abi_cancelled =
+        result.no_host_abi_cancelled;
+    fb_state.stats.dxg_display_bind_provider_no_host_abi_refs_released =
+        result.no_host_abi_refs_released;
+    fb_state.stats.dxg_display_bind_provider_pending_owner_close_cancelled =
+        result.pending_owner_close_cancelled;
+    fb_state.stats.dxg_display_bind_host_saw_packet =
+        result.host_saw_packet;
+    fb_state.stats.dxg_display_bind_wsl_presenthistory_completion_credit =
+        result.wsl_presenthistory_completion_credit;
     fb_dxg_present_pending_resolve_locked(source,
                                          source->display_bind_pending_id,
                                          0, ESTALE, reason);
