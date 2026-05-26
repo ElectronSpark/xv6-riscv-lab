@@ -193,6 +193,15 @@ struct hyperv_dxg_display_bind_result {
     uint32 no_host_abi;
     uint32 no_sender;
     uint32 no_completion;
+    uint32 publication_attempted;
+    uint32 publish_before_send;
+    uint64 transport_pending_id;
+    uint32 command_id;
+    uint64 transaction_id;
+    uint32 channel;
+    uint32 completion_demux_registered;
+    uint32 resolved_or_cancelled;
+    uint32 refs_released;
     uint32 request_metadata_complete;
     uint32 request_sync_metadata_complete;
     uint64 request_missing_metadata;

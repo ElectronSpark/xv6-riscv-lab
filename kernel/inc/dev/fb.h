@@ -1349,6 +1349,15 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_no_host_abi; /* provider lacks ABI */
     uint64 dxg_display_bind_provider_no_sender; /* provider lacks sender */
     uint64 dxg_display_bind_provider_no_completion; /* provider lacks done */
+    uint64 dxg_display_bind_provider_publication_attempts; /* publish decisions */
+    uint64 dxg_display_bind_provider_publish_before_send; /* published before send */
+    uint64 dxg_display_bind_provider_transport_pending_id; /* host pending id */
+    uint64 dxg_display_bind_provider_command_id; /* host command id */
+    uint64 dxg_display_bind_provider_transaction_id; /* host transaction id */
+    uint64 dxg_display_bind_provider_channel; /* host channel enum */
+    uint64 dxg_display_bind_provider_completion_demux_registered; /* demux armed */
+    uint64 dxg_display_bind_provider_resolved_or_cancelled; /* pending done */
+    uint64 dxg_display_bind_provider_refs_released; /* pending refs released */
     uint64 dxg_display_bind_request_metadata_complete; /* provider saw shape */
     uint64 dxg_display_bind_request_sync_metadata_complete; /* sync/fence seen */
     uint64 dxg_display_bind_request_missing_metadata; /* FB_GPU_DXG_PRESENT_META_* */

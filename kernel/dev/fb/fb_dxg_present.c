@@ -58,6 +58,15 @@ struct fb_dxg_display_bind_result {
     uint32 no_host_abi;
     uint32 no_sender;
     uint32 no_completion;
+    uint32 publication_attempted;
+    uint32 publish_before_send;
+    uint64 transport_pending_id;
+    uint32 command_id;
+    uint64 transaction_id;
+    uint32 channel;
+    uint32 completion_demux_registered;
+    uint32 resolved_or_cancelled;
+    uint32 refs_released;
     uint32 request_metadata_complete;
     uint32 request_sync_metadata_complete;
     uint64 request_missing_metadata;
@@ -210,6 +219,16 @@ fb_dxg_present_provider_submit_display_bind(
     result->no_host_abi = hv_result.no_host_abi;
     result->no_sender = hv_result.no_sender;
     result->no_completion = hv_result.no_completion;
+    result->publication_attempted = hv_result.publication_attempted;
+    result->publish_before_send = hv_result.publish_before_send;
+    result->transport_pending_id = hv_result.transport_pending_id;
+    result->command_id = hv_result.command_id;
+    result->transaction_id = hv_result.transaction_id;
+    result->channel = hv_result.channel;
+    result->completion_demux_registered =
+        hv_result.completion_demux_registered;
+    result->resolved_or_cancelled = hv_result.resolved_or_cancelled;
+    result->refs_released = hv_result.refs_released;
     result->request_metadata_complete =
         hv_result.request_metadata_complete;
     result->request_sync_metadata_complete =
@@ -835,6 +854,24 @@ fb_dxg_present_scanout_bind_locked(
         result.no_sender;
     fb_state.stats.dxg_display_bind_provider_no_completion =
         result.no_completion;
+    fb_state.stats.dxg_display_bind_provider_publication_attempts +=
+        result.publication_attempted != 0;
+    fb_state.stats.dxg_display_bind_provider_publish_before_send =
+        result.publish_before_send;
+    fb_state.stats.dxg_display_bind_provider_transport_pending_id =
+        result.transport_pending_id;
+    fb_state.stats.dxg_display_bind_provider_command_id =
+        result.command_id;
+    fb_state.stats.dxg_display_bind_provider_transaction_id =
+        result.transaction_id;
+    fb_state.stats.dxg_display_bind_provider_channel =
+        result.channel;
+    fb_state.stats.dxg_display_bind_provider_completion_demux_registered =
+        result.completion_demux_registered;
+    fb_state.stats.dxg_display_bind_provider_resolved_or_cancelled =
+        result.resolved_or_cancelled;
+    fb_state.stats.dxg_display_bind_provider_refs_released =
+        result.refs_released;
     fb_state.stats.dxg_display_bind_request_metadata_complete =
         result.request_metadata_complete;
     fb_state.stats.dxg_display_bind_request_sync_metadata_complete =

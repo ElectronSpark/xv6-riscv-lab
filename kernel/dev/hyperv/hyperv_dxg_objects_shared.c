@@ -5442,6 +5442,15 @@ int hyperv_dxg_display_bind_submit_failclosed(
     result->no_host_abi = 1;
     result->no_sender = 1;
     result->no_completion = 1;
+    result->publication_attempted = 1;
+    result->publish_before_send = 0;
+    result->transport_pending_id = 0;
+    result->command_id = 0;
+    result->transaction_id = 0;
+    result->channel = 0;
+    result->completion_demux_registered = 0;
+    result->resolved_or_cancelled = 0;
+    result->refs_released = 0;
     missing_metadata =
         hvdxg_display_bind_missing_required_metadata(bind);
     result->request_missing_metadata = missing_metadata;
