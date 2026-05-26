@@ -359,6 +359,7 @@ static void gpu_nouveau_pci_unwind_probe_resources(
 static void gpu_nouveau_display_create_failclosed(void)
 {
     uint64 reasons = FB_GPU_KMS_PRESENT_REJECT_NO_NATIVE_DISPLAY |
+                     FB_GPU_KMS_PRESENT_REJECT_NO_NOUVEAU_DISPLAY |
                      FB_GPU_KMS_PRESENT_REJECT_NO_DISPLAY_CREATE |
                      FB_GPU_KMS_PRESENT_REJECT_NO_HEADS |
                      FB_GPU_KMS_PRESENT_REJECT_NO_CONNECTORS |
