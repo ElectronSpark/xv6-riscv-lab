@@ -5449,10 +5449,10 @@ int hyperv_dxg_display_bind_submit_failclosed(
     result->transaction_id = 0;
     result->channel = 0;
     result->completion_demux_registered = 0;
-    result->resolved_or_cancelled = 0;
-    result->refs_released = 0;
-    result->no_host_abi_cancelled = 0;
-    result->no_host_abi_refs_released = 0;
+    result->resolved_or_cancelled = 1;
+    result->refs_released = 1;
+    result->no_host_abi_cancelled = 1;
+    result->no_host_abi_refs_released = 1;
     result->pending_owner_generation =
         bind->pin_valid ? bind->pin.process_generation : 0;
     result->pending_source_generation = bind->source_generation;
