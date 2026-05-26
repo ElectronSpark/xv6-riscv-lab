@@ -745,12 +745,18 @@ hvdxg_process_get_adapter(struct hvdxg_process_state *process,
 static int hvdxg_process_adapter_add_device(
     struct hvdxg_process_adapter *adapter, uint32 device)
 {
+    int ret;
+
     if (adapter == NULL || device == 0)
         return 0;
-    return hvdxg_track_u32_grow(&adapter->devices,
-                                &adapter->device_count,
-                                &adapter->device_capacity,
-                                device);
+    ret = hvdxg_track_u32_grow(&adapter->devices,
+                               &adapter->device_count,
+                               &adapter->device_capacity,
+                               device);
+    hvdxg.process_adapter_last_add_device = device;
+    hvdxg.process_adapter_last_device_count = adapter->device_count;
+    hvdxg.process_adapter_last_destroyed = adapter->destroyed;
+    return ret;
 }
 
 static void hvdxg_process_adapter_remove_device(
@@ -758,9 +764,15 @@ static void hvdxg_process_adapter_remove_device(
 {
     if (process == NULL || process->adapters == NULL || device == 0)
         return;
-    for (uint32 i = 0; i < process->adapter_count; i++)
+    for (uint32 i = 0; i < process->adapter_count; i++) {
         hvdxg_untrack_u32(process->adapters[i].devices,
                           &process->adapters[i].device_count, device);
+        hvdxg.process_adapter_last_remove_device = device;
+        hvdxg.process_adapter_last_device_count =
+            process->adapters[i].device_count;
+        hvdxg.process_adapter_last_destroyed =
+            process->adapters[i].destroyed;
+    }
 }
 
 static struct hvdxg_local_adapter_entry *
@@ -1094,6 +1106,88 @@ static void hvdxg_note_object_free_list(struct hvdxg_open_state *owner)
         free_tail != NULL ? *free_tail : HV_DXG_HMGR_FREE_NONE;
 }
 
+static uint32 *hvdxg_object_type_active_counter(uint32 type)
+{
+    switch (type) {
+    case HV_DXG_OBJECT_ADAPTER:
+        return &hvdxg.object_type_active_adapter;
+    case HV_DXG_OBJECT_DEVICE:
+        return &hvdxg.object_type_active_device;
+    case HV_DXG_OBJECT_CONTEXT:
+        return &hvdxg.object_type_active_context;
+    case HV_DXG_OBJECT_HWQUEUE:
+        return &hvdxg.object_type_active_hwqueue;
+    case HV_DXG_OBJECT_PAGINGQUEUE:
+        return &hvdxg.object_type_active_pagingqueue;
+    case HV_DXG_OBJECT_SYNC:
+        return &hvdxg.object_type_active_sync;
+    case HV_DXG_OBJECT_ALLOCATION:
+        return &hvdxg.object_type_active_allocation;
+    case HV_DXG_OBJECT_RESOURCE:
+        return &hvdxg.object_type_active_resource;
+    case HV_DXG_OBJECT_GPUVA:
+        return &hvdxg.object_type_active_gpuva;
+    default:
+        return NULL;
+    }
+}
+
+static void hvdxg_note_object_type_active(uint32 type, int delta)
+{
+    uint32 *counter = hvdxg_object_type_active_counter(type);
+
+    if (counter == NULL)
+        return;
+    if (delta > 0) {
+        (*counter)++;
+    } else if (delta < 0 && *counter != 0) {
+        (*counter)--;
+    }
+}
+
+static void hvdxg_note_object_table_scope(struct hvdxg_open_state *owner)
+{
+    uint32 *count;
+
+    hvdxg.object_table_scope = 0;
+    hvdxg.object_table_scope_process_generation = 0;
+    hvdxg.object_table_scope_object_count = 0;
+    hvdxg.object_table_scope_local_adapter_count = 0;
+    if (owner == NULL)
+        return;
+    count = hvdxg_owner_object_count(owner);
+    if (owner->process_state != NULL) {
+        hvdxg.object_table_scope = 1;
+        hvdxg.object_table_scope_process_generation =
+            owner->process_state->generation;
+        hvdxg.object_table_scope_local_adapter_count =
+            owner->process_state->local_adapter_count;
+    } else {
+        hvdxg.object_table_scope = 2;
+    }
+    hvdxg.object_table_scope_object_count = count != NULL ? *count : 0;
+}
+
+static void hvdxg_note_object_lifecycle(uint32 type,
+                                        const struct hvdxg_object_entry *entry,
+                                        uint32 unique_before,
+                                        uint32 unique_after,
+                                        uint32 destroyed_before,
+                                        uint32 destroyed_after)
+{
+    hvdxg.object_table_last_lifecycle_type = type;
+    hvdxg.object_table_last_lifecycle_index =
+        entry != NULL ? entry->index : 0;
+    hvdxg.object_table_last_lifecycle_unique_before = unique_before;
+    hvdxg.object_table_last_lifecycle_unique_after = unique_after;
+    hvdxg.object_table_last_lifecycle_instance =
+        entry != NULL ? entry->instance : 0;
+    hvdxg.object_table_last_lifecycle_destroyed_before = destroyed_before;
+    hvdxg.object_table_last_lifecycle_destroyed_after = destroyed_after;
+    hvdxg.object_table_last_lifecycle_on_free_list =
+        entry != NULL ? entry->on_free_list : 0;
+}
+
 static struct hvdxg_object_entry *
 hvdxg_owner_find_object(struct hvdxg_open_state *owner, uint32 type,
                         uint64 handle)
@@ -1340,7 +1434,11 @@ static int hvdxg_track_object(struct hvdxg_open_state *owner, uint32 type,
     hvdxg.object_table_generation = slot->generation;
     if (*count > hvdxg.object_table_max)
         hvdxg.object_table_max = *count;
+    hvdxg_note_object_type_active(type, 1);
+    hvdxg_note_object_lifecycle(type, slot, 0, slot->unique, 0,
+                                slot->destroyed);
     hvdxg_note_object_free_list(owner);
+    hvdxg_note_object_table_scope(owner);
     return 0;
 }
 
@@ -1522,6 +1620,7 @@ static int hvdxg_close_local_adapter_handle(struct hvdxg_open_state *owner,
         process_adapter->refs--;
     if (process_adapter->refs == 0) {
         process_adapter->destroyed = 1;
+        hvdxg.process_adapter_final_close_destroyed++;
         if (final_close_out != NULL)
             *final_close_out = 1;
     }
@@ -1674,17 +1773,28 @@ static int hvdxg_untrack_object(struct hvdxg_open_state *owner, uint32 type,
     if (entry->type != type || entry->handle != handle ||
         entry->destroyed != 0)
         return 0;
-    entry->destroyed = 1;
-    entry->refs = 0;
-    (*destroy_serial)++;
-    if (*destroy_serial == 0)
+    {
+        uint32 unique_before = entry->unique;
+        uint32 destroyed_before = entry->destroyed;
+
+        entry->destroyed = 1;
+        entry->refs = 0;
         (*destroy_serial)++;
-    entry->destroyed_serial = *alloc_serial;
-    entry->unique = (entry->unique + 1) & HV_DXG_HMGR_UNIQUE_MASK;
-    if (entry->unique == 0)
-        entry->unique = 1;
-    (void)hvdxg_hmgr_append_free_index(owner, index);
+        if (*destroy_serial == 0)
+            (*destroy_serial)++;
+        entry->destroyed_serial = *alloc_serial;
+        entry->unique = (entry->unique + 1) & HV_DXG_HMGR_UNIQUE_MASK;
+        if (entry->unique == 0)
+            entry->unique = 1;
+        (void)hvdxg_hmgr_append_free_index(owner, index);
+        hvdxg_note_object_type_active(type, -1);
+        hvdxg_note_object_lifecycle(type, entry, unique_before,
+                                    entry->unique, destroyed_before,
+                                    entry->destroyed);
+        hvdxg.object_table_free_while_destroyed++;
+    }
     hvdxg_note_object_free_list(owner);
+    hvdxg_note_object_table_scope(owner);
     return 1;
 }
 
@@ -6961,6 +7071,12 @@ static struct hvdxg_process_state *hvdxg_process_get_current(void)
 
     if (candidate != NULL)
         kvfree(candidate);
+    if (process != NULL) {
+        hvdxg.process_identity_pid_present = process->pid != 0;
+        hvdxg.process_identity_tgid_present = process->tgid != 0;
+        hvdxg.process_identity_vpid_present = 0;
+        hvdxg.process_identity_nspid_present = 0;
+    }
     return process;
 }
 

@@ -1876,6 +1876,94 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
     }
     if ((size_t)len < status_size) {
         len += snprintf(status + len, status_size - (size_t)len,
+            "dxg_hmgr_type_coverage=local_types:9 wsl_hmgr_types:20 "
+            "adapter:%u device:%u context:%u hwqueue:%u paging:%u "
+            "sync:%u allocation:%u resource:%u gpuva:%u "
+            "sharedresource_placeholder:0 monitoredfence_placeholder:0 "
+            "missing_sharedresource:1 missing_overlay:1 "
+            "missing_keyedmutex:1 missing_devicesyncobject:1 "
+            "missing_process_entry:1 missing_sharedvmobject:1 "
+            "missing_protectedsession:1 missing_remotebundle:1 "
+            "missing_compositionsurface:1 missing_trackedworkload:1 "
+            "missing_monitoredfence:1 native_present_credit:0 "
+            "opengl_submit_credit:0 status:PASS_FAILCLOSED\n"
+            "dxg_object_table_type_counts=adapter:%u device:%u "
+            "context:%u hwqueue:%u paging:%u sync:%u allocation:%u "
+            "resource:%u gpuva:%u sharedresource:0 monitoredfence:0 "
+            "native_present_credit:0 opengl_submit_credit:0 "
+            "status:PASS_FAILCLOSED\n"
+            "dxg_hmgr_entry_lifecycle=type:%u index:%u "
+            "unique_before:%u unique_after:%u instance:%u "
+            "destroyed_before:%u destroyed_after:%u on_free_list:%u "
+            "min_free:%u free_count:%u native_present_credit:0 "
+            "opengl_submit_credit:0 status:PASS\n"
+            "dxg_hmgr_pending_validity=pending_invalid_allocations:%u "
+            "unmark_destroyed_successes:%u unmark_destroyed_failures:%u "
+            "free_while_destroyed:%u native_present_credit:0 "
+            "opengl_submit_credit:0 status:PASS_FAILCLOSED\n"
+            "dxg_object_table_scope=scope:%s process_generation:%u "
+            "object_count:%u local_adapter_count:%u "
+            "process_namespace:%s native_present_credit:0 "
+            "opengl_submit_credit:0 status:PASS\n"
+            "dxg_process_identity=pid_present:%u tgid_present:%u "
+            "vpid_present:%u nspid_present:%u wsl_pid_tgid_model:1 "
+            "native_present_credit:0 opengl_submit_credit:0 "
+            "status:PASS_FAILCLOSED\n"
+            "dxg_process_adapter_device_counts=last_add_device:0x%x "
+            "last_remove_device:0x%x device_count:%u destroyed:%u "
+            "final_close_destroyed:%u native_present_credit:0 "
+            "opengl_submit_credit:0 status:PASS\n",
+            hvdxg.object_type_active_adapter,
+            hvdxg.object_type_active_device,
+            hvdxg.object_type_active_context,
+            hvdxg.object_type_active_hwqueue,
+            hvdxg.object_type_active_pagingqueue,
+            hvdxg.object_type_active_sync,
+            hvdxg.object_type_active_allocation,
+            hvdxg.object_type_active_resource,
+            hvdxg.object_type_active_gpuva,
+            hvdxg.object_type_active_adapter,
+            hvdxg.object_type_active_device,
+            hvdxg.object_type_active_context,
+            hvdxg.object_type_active_hwqueue,
+            hvdxg.object_type_active_pagingqueue,
+            hvdxg.object_type_active_sync,
+            hvdxg.object_type_active_allocation,
+            hvdxg.object_type_active_resource,
+            hvdxg.object_type_active_gpuva,
+            hvdxg.object_table_last_lifecycle_type,
+            hvdxg.object_table_last_lifecycle_index,
+            hvdxg.object_table_last_lifecycle_unique_before,
+            hvdxg.object_table_last_lifecycle_unique_after,
+            hvdxg.object_table_last_lifecycle_instance,
+            hvdxg.object_table_last_lifecycle_destroyed_before,
+            hvdxg.object_table_last_lifecycle_destroyed_after,
+            hvdxg.object_table_last_lifecycle_on_free_list,
+            hvdxg.object_table_min_free_entries,
+            hvdxg.object_table_free_count,
+            hvdxg.object_table_pending_invalid_allocations,
+            hvdxg.object_table_unmark_destroyed_successes,
+            hvdxg.object_table_unmark_destroyed_failures,
+            hvdxg.object_table_free_while_destroyed,
+            hvdxg.object_table_scope == 1 ? "process" :
+                (hvdxg.object_table_scope == 2 ? "open" : "none"),
+            hvdxg.object_table_scope_process_generation,
+            hvdxg.object_table_scope_object_count,
+            hvdxg.object_table_scope_local_adapter_count,
+            hvdxg.object_table_scope == 1 ? "process" :
+                (hvdxg.object_table_scope == 2 ? "open" : "none"),
+            hvdxg.process_identity_pid_present,
+            hvdxg.process_identity_tgid_present,
+            hvdxg.process_identity_vpid_present,
+            hvdxg.process_identity_nspid_present,
+            hvdxg.process_adapter_last_add_device,
+            hvdxg.process_adapter_last_remove_device,
+            hvdxg.process_adapter_last_device_count,
+            hvdxg.process_adapter_last_destroyed,
+            hvdxg.process_adapter_final_close_destroyed);
+    }
+    if ((size_t)len < status_size) {
+        len += snprintf(status + len, status_size - (size_t)len,
             "dxg_adapter_luids=adapter:%x:%x host_adapter:%x:%x "
             "host_vgpu:%x:%x pci:%x:%x\n"
             "dxg_luid_equivalence=user_luid:%x:%x "
