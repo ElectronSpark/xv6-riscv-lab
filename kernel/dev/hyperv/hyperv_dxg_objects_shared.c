@@ -5490,6 +5490,9 @@ int hyperv_dxg_display_bind_submit_failclosed(
     result->transaction_id = 0;
     result->channel = 0;
     result->completion_demux_registered = 0;
+    result->transport_source = FB_GPU_DXG_DISPLAY_BIND_SOURCE_NONE;
+    result->host_saw_packet = 0;
+    result->wsl_presenthistory_completion_credit = 0;
     result->resolved_or_cancelled = 1;
     result->refs_released = 1;
     result->no_host_abi_cancelled = 1;

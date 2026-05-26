@@ -205,6 +205,9 @@ struct hyperv_dxg_display_bind_result {
     uint64 transaction_id;
     uint32 channel;
     uint32 completion_demux_registered;
+    uint32 transport_source;
+    uint32 host_saw_packet;
+    uint32 wsl_presenthistory_completion_credit;
     uint32 resolved_or_cancelled;
     uint32 refs_released;
     uint32 no_host_abi_cancelled;

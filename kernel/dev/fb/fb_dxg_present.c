@@ -65,6 +65,9 @@ struct fb_dxg_display_bind_result {
     uint64 transaction_id;
     uint32 channel;
     uint32 completion_demux_registered;
+    uint32 transport_source;
+    uint32 host_saw_packet;
+    uint32 wsl_presenthistory_completion_credit;
     uint32 resolved_or_cancelled;
     uint32 refs_released;
     uint32 no_host_abi_cancelled;
@@ -239,6 +242,10 @@ fb_dxg_present_provider_submit_display_bind(
     result->channel = hv_result.channel;
     result->completion_demux_registered =
         hv_result.completion_demux_registered;
+    result->transport_source = hv_result.transport_source;
+    result->host_saw_packet = hv_result.host_saw_packet;
+    result->wsl_presenthistory_completion_credit =
+        hv_result.wsl_presenthistory_completion_credit;
     result->resolved_or_cancelled = hv_result.resolved_or_cancelled;
     result->refs_released = hv_result.refs_released;
     result->no_host_abi_cancelled = hv_result.no_host_abi_cancelled;
@@ -911,6 +918,12 @@ fb_dxg_present_scanout_bind_locked(
         result.channel;
     fb_state.stats.dxg_display_bind_provider_completion_demux_registered =
         result.completion_demux_registered;
+    fb_state.stats.dxg_display_bind_transport_source =
+        result.transport_source;
+    fb_state.stats.dxg_display_bind_host_saw_packet =
+        result.host_saw_packet;
+    fb_state.stats.dxg_display_bind_wsl_presenthistory_completion_credit =
+        result.wsl_presenthistory_completion_credit;
     fb_state.stats.dxg_display_bind_provider_resolved_or_cancelled =
         result.resolved_or_cancelled;
     fb_state.stats.dxg_display_bind_provider_refs_released =
@@ -1747,6 +1760,12 @@ static int fb_dxg_present_query(uint64 owner_id, pid_t owner_tgid,
     req->display_bind_provider_no_completion = provider_no_completion;
     req->display_bind_provider_pin_revalidated =
         (uint32)fb_state.stats.dxg_display_bind_provider_pin_revalidated;
+    req->display_bind_transport_source =
+        (uint32)fb_state.stats.dxg_display_bind_transport_source;
+    req->display_bind_host_saw_packet =
+        (uint32)fb_state.stats.dxg_display_bind_host_saw_packet;
+    req->display_bind_wsl_presenthistory_completion_credit =
+        (uint32)fb_state.stats.dxg_display_bind_wsl_presenthistory_completion_credit;
     req->reserved2 = 0;
     spin_unlock(&fb_state.lock);
 
@@ -1998,6 +2017,12 @@ static int fb_dxg_present_bind_contract_query(
     req->provider_no_completion = provider_no_completion;
     req->provider_pin_revalidated =
         (uint32)fb_state.stats.dxg_display_bind_provider_pin_revalidated;
+    req->transport_source =
+        (uint32)fb_state.stats.dxg_display_bind_transport_source;
+    req->host_saw_packet =
+        (uint32)fb_state.stats.dxg_display_bind_host_saw_packet;
+    req->wsl_presenthistory_completion_credit =
+        (uint32)fb_state.stats.dxg_display_bind_wsl_presenthistory_completion_credit;
     req->reserved3 = 0;
     spin_unlock(&fb_state.lock);
 

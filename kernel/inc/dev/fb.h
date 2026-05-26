@@ -141,6 +141,9 @@
 #define FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_VMBUS  1
 #define FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_HVSOCK 2
 #define FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND  1
+#define FB_GPU_DXG_DISPLAY_BIND_SOURCE_NONE          0
+#define FB_GPU_DXG_DISPLAY_BIND_SOURCE_NON_WSL_DXGKRNL_EXTENSION 1
+#define FB_GPU_DXG_DISPLAY_BIND_SOURCE_DDA_NOUVEAU_NATIVE_DISPLAY 2
 #define FB_GPU_DXG_PRESENT_COMPLETION_NONE           0
 #define FB_GPU_DXG_PRESENT_COMPLETION_DXG_SYNC_FILE  1
 #define FB_GPU_DXG_PRESENT_COMPLETION_DXG_FENCE      2
@@ -603,6 +606,9 @@ struct fb_gpu_dxg_present_source_query {
     uint32   display_bind_provider_no_sender; /* provider lacks sender */
     uint32   display_bind_provider_no_completion; /* provider lacks done */
     uint32   display_bind_provider_pin_revalidated; /* provider checked pin */
+    uint32   display_bind_transport_source; /* FB_GPU_DXG_DISPLAY_BIND_SOURCE_* */
+    uint32   display_bind_host_saw_packet; /* host observed bind packet */
+    uint32   display_bind_wsl_presenthistory_completion_credit; /* must be 0 */
     uint32   reserved2;
 };
 
@@ -671,6 +677,9 @@ struct fb_gpu_dxg_present_host_bind_contract {
     uint32 provider_no_sender; /* provider lacks sender */
     uint32 provider_no_completion; /* provider lacks done */
     uint32 provider_pin_revalidated; /* provider checked pin */
+    uint32 transport_source; /* FB_GPU_DXG_DISPLAY_BIND_SOURCE_* */
+    uint32 host_saw_packet; /* host observed bind packet */
+    uint32 wsl_presenthistory_completion_credit; /* must be 0 */
     uint32 reserved3;
 };
 
@@ -1379,6 +1388,9 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_transaction_id; /* host transaction id */
     uint64 dxg_display_bind_provider_channel; /* host channel enum */
     uint64 dxg_display_bind_provider_completion_demux_registered; /* demux armed */
+    uint64 dxg_display_bind_transport_source; /* FB_GPU_DXG_DISPLAY_BIND_SOURCE_* */
+    uint64 dxg_display_bind_host_saw_packet; /* host saw bind packet */
+    uint64 dxg_display_bind_wsl_presenthistory_completion_credit; /* WSL telemetry credit */
     uint64 dxg_display_bind_provider_resolved_or_cancelled; /* pending done */
     uint64 dxg_display_bind_provider_refs_released; /* pending refs released */
     uint64 dxg_display_bind_request_metadata_complete; /* provider saw shape */
