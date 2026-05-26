@@ -72,6 +72,17 @@ static struct {
     uint64 fence_value_last_target;
     uint32 global_rx_packets;
     uint32 vgpu_rx_packets;
+    uint32 host_to_vm_packets;
+    uint32 host_to_vm_unknown_packets;
+    uint32 host_to_vm_last_command;
+    uint32 host_to_vm_last_channel;
+    uint32 host_to_vm_last_payload_len;
+    uint64 host_to_vm_last_command_id;
+    uint32 host_to_vm_presenthistory_packets;
+    uint32 host_to_vm_presenthistory_last_len;
+    uint64 host_to_vm_presenthistory_last_command_id;
+    uint32 host_to_vm_presenthistory_head_len;
+    uint8 host_to_vm_presenthistory_head[32];
     uint8 global_monitorid;
     uint8 vgpu_monitorid;
     uint64 next_trans_id;

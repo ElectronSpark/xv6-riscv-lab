@@ -878,6 +878,11 @@ static int hvdxg_process_host_to_vm_packet(const uint8 *payload,
     if (payload_len < sizeof(*hdr))
         return 0;
     hdr = (const struct hvdxg_command_host_to_vm *)payload;
+    hvdxg.host_to_vm_packets++;
+    hvdxg.host_to_vm_last_command = hdr->command_type;
+    hvdxg.host_to_vm_last_channel = hdr->channel_type;
+    hvdxg.host_to_vm_last_payload_len = payload_len;
+    hvdxg.host_to_vm_last_command_id = hdr->command_id;
     switch (hdr->command_type) {
     case HV_DXGK_VMBCOMMAND_SIGNALGUESTEVENT:
     case HV_DXGK_VMBCOMMAND_SIGNALGUESTEVENTPASSIVE:
@@ -887,10 +892,23 @@ static int hvdxg_process_host_to_vm_packet(const uint8 *payload,
         signal = (const struct hvdxg_command_signalguestevent *)payload;
         hvdxg_signal_host_event(signal->event);
         return 1;
+    case HV_DXGK_VMBCOMMAND_PROPAGATEPRESENTHISTORYTOKEN:
+        hvdxg.host_to_vm_presenthistory_packets++;
+        hvdxg.host_to_vm_presenthistory_last_len = payload_len;
+        hvdxg.host_to_vm_presenthistory_last_command_id = hdr->command_id;
+        hvdxg.host_to_vm_presenthistory_head_len =
+            payload_len < sizeof(hvdxg.host_to_vm_presenthistory_head) ?
+            payload_len : sizeof(hvdxg.host_to_vm_presenthistory_head);
+        memset(hvdxg.host_to_vm_presenthistory_head, 0,
+               sizeof(hvdxg.host_to_vm_presenthistory_head));
+        memcpy(hvdxg.host_to_vm_presenthistory_head, payload,
+               hvdxg.host_to_vm_presenthistory_head_len);
+        return 1;
     case HV_DXGK_VMBCOMMAND_SETGUESTDATA:
     case HV_DXGK_VMBCOMMAND_SENDWNFNOTIFICATION:
         return 1;
     default:
+        hvdxg.host_to_vm_unknown_packets++;
         return 0;
     }
 }
