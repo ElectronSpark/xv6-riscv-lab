@@ -202,6 +202,11 @@ struct hyperv_dxg_display_bind_result {
     uint32 completion_demux_registered;
     uint32 resolved_or_cancelled;
     uint32 refs_released;
+    uint32 no_host_abi_cancelled;
+    uint32 no_host_abi_refs_released;
+    uint64 pending_owner_generation;
+    uint64 pending_source_generation;
+    uint64 pending_resource_generation;
     uint32 request_metadata_complete;
     uint32 request_sync_metadata_complete;
     uint64 request_missing_metadata;

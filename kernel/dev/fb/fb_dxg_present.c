@@ -67,6 +67,11 @@ struct fb_dxg_display_bind_result {
     uint32 completion_demux_registered;
     uint32 resolved_or_cancelled;
     uint32 refs_released;
+    uint32 no_host_abi_cancelled;
+    uint32 no_host_abi_refs_released;
+    uint64 pending_owner_generation;
+    uint64 pending_source_generation;
+    uint64 pending_resource_generation;
     uint32 request_metadata_complete;
     uint32 request_sync_metadata_complete;
     uint64 request_missing_metadata;
@@ -229,6 +234,13 @@ fb_dxg_present_provider_submit_display_bind(
         hv_result.completion_demux_registered;
     result->resolved_or_cancelled = hv_result.resolved_or_cancelled;
     result->refs_released = hv_result.refs_released;
+    result->no_host_abi_cancelled = hv_result.no_host_abi_cancelled;
+    result->no_host_abi_refs_released =
+        hv_result.no_host_abi_refs_released;
+    result->pending_owner_generation = hv_result.pending_owner_generation;
+    result->pending_source_generation = hv_result.pending_source_generation;
+    result->pending_resource_generation =
+        hv_result.pending_resource_generation;
     result->request_metadata_complete =
         hv_result.request_metadata_complete;
     result->request_sync_metadata_complete =
@@ -663,6 +675,8 @@ fb_dxg_present_pending_create_locked(
     fb_state.stats.dxg_display_bind_pending_last_status = EINPROGRESS;
     fb_state.stats.dxg_display_bind_pending_last_block_reason =
         bind->block_reason;
+    fb_state.stats.dxg_display_bind_pending_last_owner_generation =
+        bind->pin_valid ? bind->pin.process_generation : 0;
     return pending_id;
 }
 
@@ -774,8 +788,6 @@ fb_dxg_present_scanout_bind_locked(
         bind.resource_generation;
     fb_state.stats.dxg_scanout_bind_last_dirty_sequence = 0;
     fb_state.stats.dxg_scanout_bind_last_dirty_rects = 0;
-    fb_dxg_present_sync_display_bind_state_locked(source);
-    pending_id = fb_dxg_present_pending_create_locked(source, &bind);
 
     if (source != NULL && source->display_bind_pin_active) {
         bind.pin_valid = 1;
@@ -797,6 +809,8 @@ fb_dxg_present_scanout_bind_locked(
         fb_state.stats.dxg_display_bind_pinned_parent_children =
             source->display_bind_pin.shared_parent_children;
     }
+    fb_dxg_present_sync_display_bind_state_locked(source);
+    pending_id = fb_dxg_present_pending_create_locked(source, &bind);
     fb_state.stats.dxg_display_bind_provider_submits++;
     fb_state.stats.dxg_display_bind_lock_dropped_submits++;
     spin_unlock(&fb_state.lock);
@@ -821,7 +835,13 @@ fb_dxg_present_scanout_bind_locked(
         *sourcep = source;
     if (source == NULL) {
         fb_state.stats.dxg_display_bind_revalidate_failures++;
+        fb_state.stats.dxg_display_bind_stale_after_release_rejects++;
         fb_state.stats.dxg_display_bind_stale_generation_rejects++;
+        if (result.present_id != 0 || result.completed_id != 0 ||
+            result.resolved_or_cancelled != 0) {
+            fb_state.stats.dxg_display_bind_stale_completion_rejects++;
+            fb_state.stats.dxg_display_bind_late_completion_after_release++;
+        }
         result.status = ESTALE;
         result.transport = FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE;
         result.operation = FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND;
@@ -833,6 +853,8 @@ fb_dxg_present_scanout_bind_locked(
         fb_state.stats.dxg_display_bind_pending_last_status = ESTALE;
         fb_state.stats.dxg_display_bind_pending_last_block_reason =
             result.block_reason;
+        fb_state.stats.dxg_display_bind_pending_last_owner_generation =
+            result.pending_owner_generation;
         fb_state.stats.dxg_display_bind_pending_last_source_generation =
             bind.source_generation;
         fb_state.stats.dxg_display_bind_pending_last_resource_generation =
@@ -872,12 +894,25 @@ fb_dxg_present_scanout_bind_locked(
         result.resolved_or_cancelled;
     fb_state.stats.dxg_display_bind_provider_refs_released =
         result.refs_released;
-    fb_state.stats.dxg_display_bind_request_metadata_complete =
-        result.request_metadata_complete;
-    fb_state.stats.dxg_display_bind_request_sync_metadata_complete =
-        result.request_sync_metadata_complete;
-    fb_state.stats.dxg_display_bind_request_missing_metadata =
-        result.request_missing_metadata;
+    fb_state.stats.dxg_display_bind_provider_no_host_abi_cancelled =
+        result.no_host_abi_cancelled;
+    fb_state.stats.dxg_display_bind_provider_no_host_abi_refs_released =
+        result.no_host_abi_refs_released;
+    fb_state.stats.dxg_display_bind_provider_pending_owner_generation =
+        result.pending_owner_generation;
+    fb_state.stats.dxg_display_bind_provider_pending_source_generation =
+        result.pending_source_generation;
+    fb_state.stats.dxg_display_bind_provider_pending_resource_generation =
+        result.pending_resource_generation;
+    if (result.request_metadata_complete)
+        fb_state.stats.dxg_display_bind_request_metadata_complete = 1;
+    if (result.request_sync_metadata_complete)
+        fb_state.stats.dxg_display_bind_request_sync_metadata_complete = 1;
+    if (result.request_missing_metadata == 0 ||
+        fb_state.stats.dxg_display_bind_request_metadata_complete == 0 ||
+        fb_state.stats.dxg_display_bind_request_sync_metadata_complete == 0)
+        fb_state.stats.dxg_display_bind_request_missing_metadata =
+            result.request_missing_metadata;
     fb_state.stats.dxg_scanout_bind_candidate_sender_contracts =
         result.sender_present != 0;
     fb_state.stats.dxg_scanout_bind_candidate_completion_contracts =
@@ -1544,12 +1579,15 @@ static int fb_dxg_present_query(uint64 owner_id, pid_t owner_tgid,
     if (source_handle != 0 && source == NULL) {
         fb_state.stats.dxg_display_bind_after_close_queries++;
         fb_state.stats.dxg_display_bind_stale_source_rejects++;
+        fb_state.stats.dxg_display_bind_stale_generation_rejects++;
+        fb_state.stats.dxg_display_bind_stale_completion_rejects++;
+        fb_state.stats.dxg_display_bind_stale_after_release_rejects++;
         if (fb_state.stats.dxg_display_bind_present_id != 0 ||
             fb_state.stats.dxg_display_bind_completed_id != 0 ||
             fb_state.stats.dxg_scanout_bind_last_present_id != 0 ||
             fb_state.stats.dxg_scanout_bind_last_completed != 0) {
             fb_state.stats.dxg_display_bind_after_close_nonzero_id_rejects++;
-            fb_state.stats.dxg_display_bind_stale_completion_rejects++;
+            fb_state.stats.dxg_display_bind_late_completion_after_release++;
         }
     }
 
@@ -1777,12 +1815,15 @@ static int fb_dxg_present_bind_contract_query(
     if (req->present_source != 0 && source == NULL) {
         fb_state.stats.dxg_display_bind_after_close_queries++;
         fb_state.stats.dxg_display_bind_stale_source_rejects++;
+        fb_state.stats.dxg_display_bind_stale_generation_rejects++;
+        fb_state.stats.dxg_display_bind_stale_completion_rejects++;
+        fb_state.stats.dxg_display_bind_stale_after_release_rejects++;
         if (fb_state.stats.dxg_display_bind_present_id != 0 ||
             fb_state.stats.dxg_display_bind_completed_id != 0 ||
             fb_state.stats.dxg_scanout_bind_last_present_id != 0 ||
             fb_state.stats.dxg_scanout_bind_last_completed != 0) {
             fb_state.stats.dxg_display_bind_after_close_nonzero_id_rejects++;
-            fb_state.stats.dxg_display_bind_stale_completion_rejects++;
+            fb_state.stats.dxg_display_bind_late_completion_after_release++;
         }
     }
     flags = req->flags;

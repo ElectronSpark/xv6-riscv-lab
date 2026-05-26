@@ -5451,6 +5451,12 @@ int hyperv_dxg_display_bind_submit_failclosed(
     result->completion_demux_registered = 0;
     result->resolved_or_cancelled = 0;
     result->refs_released = 0;
+    result->no_host_abi_cancelled = 0;
+    result->no_host_abi_refs_released = 0;
+    result->pending_owner_generation =
+        bind->pin_valid ? bind->pin.process_generation : 0;
+    result->pending_source_generation = bind->source_generation;
+    result->pending_resource_generation = bind->resource_generation;
     missing_metadata =
         hvdxg_display_bind_missing_required_metadata(bind);
     result->request_missing_metadata = missing_metadata;

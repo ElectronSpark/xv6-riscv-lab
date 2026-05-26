@@ -1413,6 +1413,13 @@ struct fb_gpu_stats {
     uint64 fence_objects_callbacks_fired; /* callbacks fired by signal */
     uint64 fence_objects_callbacks_late; /* add after signaled */
     uint64 fence_objects_callback_errors; /* inconsistent callback state */
+    uint64 dxg_display_bind_provider_no_host_abi_cancelled; /* no-ABI cancels */
+    uint64 dxg_display_bind_provider_no_host_abi_refs_released; /* no-ABI refs */
+    uint64 dxg_display_bind_provider_pending_owner_generation; /* dxgprocess gen */
+    uint64 dxg_display_bind_provider_pending_source_generation; /* source gen */
+    uint64 dxg_display_bind_provider_pending_resource_generation; /* resource gen */
+    uint64 dxg_display_bind_pending_last_owner_generation; /* dxgprocess gen */
+    uint64 dxg_display_bind_stale_after_release_rejects; /* stale after release */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */
