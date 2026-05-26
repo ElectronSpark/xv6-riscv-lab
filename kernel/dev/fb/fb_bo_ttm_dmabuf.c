@@ -1380,6 +1380,9 @@ static void fb_dmabuf_note_import_locked(struct fb_gpu_dmabuf_object *dmabuf,
                                          struct fb_gpu_bo_entry *bo,
                                          uint32 importer_tag)
 {
+    fb_state.stats.dmabuf_import_attempts++;
+    fb_state.stats.dmabuf_local_imports++;
+    fb_state.stats.dmabuf_local_only_import_path = 1;
     if (dmabuf != NULL) {
         dmabuf->importer_tag = importer_tag;
         dmabuf->import_count++;
@@ -1416,6 +1419,8 @@ static void fb_dmabuf_note_import_locked(struct fb_gpu_dmabuf_object *dmabuf,
 static void fb_dmabuf_note_bad_fd_reject(void)
 {
     spin_lock(&fb_state.lock);
+    fb_state.stats.dmabuf_import_attempts++;
+    fb_state.stats.dmabuf_local_only_import_path = 1;
     fb_state.stats.dmabuf_bad_fd_rejects++;
     spin_unlock(&fb_state.lock);
 }
@@ -1423,6 +1428,10 @@ static void fb_dmabuf_note_bad_fd_reject(void)
 static void fb_dmabuf_note_foreign_fd_reject(void)
 {
     spin_lock(&fb_state.lock);
+    fb_state.stats.dmabuf_import_attempts++;
+    fb_state.stats.dmabuf_foreign_import_attempts++;
+    fb_state.stats.dmabuf_foreign_import_rejects++;
+    fb_state.stats.dmabuf_local_only_import_path = 1;
     fb_state.stats.dmabuf_foreign_fd_rejects++;
     spin_unlock(&fb_state.lock);
 }

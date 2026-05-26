@@ -832,6 +832,14 @@ struct fb_gpu_stats {
     uint64 dmabuf_live;        /* currently open dma-buf-shaped fds */
     uint64 dmabuf_peak;        /* high-water mark of open dma-buf fds */
     uint64 dmabuf_releases;    /* dma-buf-shaped fd releases */
+    uint64 dmabuf_import_attempts; /* BO/PRIME fd-to-handle attempts */
+    uint64 dmabuf_local_imports; /* accepted local fb dma-buf imports */
+    uint64 dmabuf_foreign_import_attempts; /* valid but non-local fds */
+    uint64 dmabuf_foreign_import_rejects; /* foreign fds rejected */
+    uint64 dmabuf_local_only_import_path; /* only fb_dmabuf_file_ops accepted */
+    uint64 dmabuf_d3d12_foreign_resource_imports; /* D3D12 foreign imports */
+    uint64 dmabuf_nouveau_scanout_bind_imports; /* Nouveau scanout binds */
+    uint64 dmabuf_native_present_credit; /* native present credit from import */
     uint64 dmabuf_bad_fd_rejects; /* invalid/closed fd import rejects */
     uint64 dmabuf_foreign_fd_rejects; /* non-dma-buf fd import rejects */
     uint64 dmabuf_resv_snapshots; /* exported/imported reservation snapshots */
