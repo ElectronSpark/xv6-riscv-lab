@@ -364,12 +364,40 @@ static void gpu_nouveau_display_create_failclosed(void)
                      FB_GPU_KMS_PRESENT_REJECT_NO_HEADS |
                      FB_GPU_KMS_PRESENT_REJECT_NO_CONNECTORS |
                      FB_GPU_KMS_PRESENT_REJECT_NO_VBLANK |
-                     FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION;
+                     FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION |
+                     FB_GPU_KMS_PRESENT_REJECT_NO_ATOMIC_PAGEFLIP_BACKEND;
 
+    gpu_nouveau_stat_inc(
+        &fb_state.stats.nouveau_display_probe_attempts);
     gpu_nouveau_stat_inc(
         &fb_state.stats.nouveau_display_create_attempts);
     gpu_nouveau_stat_inc(
         &fb_state.stats.nouveau_display_create_fail_closed);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_create_fail_reason,
+        reasons);
+    gpu_nouveau_stat_inc(
+        &fb_state.stats.nouveau_display_head_probe_attempts);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_heads, 0);
+    gpu_nouveau_stat_inc(
+        &fb_state.stats.nouveau_display_connector_probe_attempts);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_connectors, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_nonvirtual_connectors, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_vblank_supported, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_vblank_irq_supported, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_vblank_source,
+        FB_GPU_NOUVEAU_DISPLAY_VBLANK_SOURCE_NONE);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_display_vblank_irqs, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_page_flip_completion_ready, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_page_flip_completions, 0);
+    gpu_nouveau_stat_set(
+        &fb_state.stats.nouveau_display_atomic_pageflip_backend_missing, 1);
     gpu_nouveau_stat_set(
         &fb_state.stats.nouveau_native_display_reject_reasons,
         reasons);

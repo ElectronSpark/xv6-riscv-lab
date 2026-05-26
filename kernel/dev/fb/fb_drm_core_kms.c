@@ -1441,14 +1441,21 @@ static uint64 gpu_kms_native_present_reject_reasons_locked(void)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_DISPLAY_CREATE;
     if (fb_state.stats.nouveau_display_heads == 0)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_HEADS;
-    if (fb_state.stats.nouveau_display_connectors == 0)
+    if (fb_state.stats.nouveau_display_connectors == 0 ||
+        fb_state.stats.nouveau_display_nonvirtual_connectors == 0)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_CONNECTORS;
-    if (fb_state.stats.nouveau_display_vblank_supported == 0)
+    if (fb_state.stats.nouveau_display_vblank_supported == 0 ||
+        fb_state.stats.nouveau_display_vblank_irq_supported == 0 ||
+        fb_state.stats.nouveau_display_vblank_source !=
+            FB_GPU_NOUVEAU_DISPLAY_VBLANK_SOURCE_IRQ)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_VBLANK;
-    if (fb_state.stats.nouveau_display_page_flip_completions == 0)
+    if (fb_state.stats.nouveau_display_page_flip_completion_ready == 0 ||
+        fb_state.stats.nouveau_display_page_flip_completions == 0)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION;
+    if (fb_state.stats.nouveau_display_atomic_pageflip_backend_missing != 0)
+        reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_ATOMIC_PAGEFLIP_BACKEND;
     if (reasons == 0)
-        reasons = FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION;
+        reasons = FB_GPU_KMS_PRESENT_REJECT_NO_ATOMIC_PAGEFLIP_BACKEND;
     return reasons;
 }
 
@@ -1462,6 +1469,7 @@ static int gpu_kms_try_native_present_fb_locked(uint32 fb_id)
     fb_state.stats.kms_present_last_lane = FB_GPU_KMS_PRESENT_LANE_NONE;
     fb_state.stats.kms_present_rejects++;
     fb_state.stats.kms_present_reject_reasons |= reasons;
+    fb_state.stats.nouveau_native_display_reject_reasons = reasons;
     if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_NATIVE_DISPLAY) != 0)
         fb_state.stats.kms_present_reject_no_native_display++;
     if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_NOUVEAU_DISPLAY) != 0)
@@ -1476,6 +1484,9 @@ static int gpu_kms_try_native_present_fb_locked(uint32 fb_id)
         fb_state.stats.kms_present_reject_no_vblank++;
     if ((reasons & FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION) != 0)
         fb_state.stats.kms_present_reject_no_hw_completion++;
+    if ((reasons &
+         FB_GPU_KMS_PRESENT_REJECT_NO_ATOMIC_PAGEFLIP_BACKEND) != 0)
+        fb_state.stats.kms_present_reject_no_atomic_pageflip_backend++;
     return -EOPNOTSUPP;
 }
 

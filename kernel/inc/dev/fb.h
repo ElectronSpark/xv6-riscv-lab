@@ -201,6 +201,7 @@
 #define FB_GPU_KMS_PRESENT_REJECT_NO_CONNECTORS       0x0010
 #define FB_GPU_KMS_PRESENT_REJECT_NO_VBLANK           0x0020
 #define FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION    0x0040
+#define FB_GPU_KMS_PRESENT_REJECT_NO_ATOMIC_PAGEFLIP_BACKEND 0x0080
 #define FB_GPU_KMS_PRESENT_REJECT_ALL \
     (FB_GPU_KMS_PRESENT_REJECT_NO_NATIVE_DISPLAY | \
      FB_GPU_KMS_PRESENT_REJECT_NO_NOUVEAU_DISPLAY | \
@@ -208,7 +209,11 @@
      FB_GPU_KMS_PRESENT_REJECT_NO_HEADS | \
      FB_GPU_KMS_PRESENT_REJECT_NO_CONNECTORS | \
      FB_GPU_KMS_PRESENT_REJECT_NO_VBLANK | \
-     FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION)
+     FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION | \
+     FB_GPU_KMS_PRESENT_REJECT_NO_ATOMIC_PAGEFLIP_BACKEND)
+
+#define FB_GPU_NOUVEAU_DISPLAY_VBLANK_SOURCE_NONE 0
+#define FB_GPU_NOUVEAU_DISPLAY_VBLANK_SOURCE_IRQ  1
 
 #define FB_GPU_NOUVEAU_GETPARAM_SOURCE_NONE      0
 #define FB_GPU_NOUVEAU_GETPARAM_SOURCE_DDA_PCI   1
@@ -1062,14 +1067,23 @@ struct fb_gpu_stats {
     uint64 nouveau_pci_native_present_credit; /* native scanout credit */
     uint64 nouveau_native_display_ready; /* real DDA/Nouveau display ready */
     uint64 nouveau_dda_native_display_present; /* HW present path exists */
+    uint64 nouveau_display_probe_attempts; /* DDA display readiness probes */
     uint64 nouveau_display_create_attempts; /* display object create attempts */
     uint64 nouveau_display_create_successes; /* real display create successes */
     uint64 nouveau_display_create_fail_closed; /* display create not wired */
+    uint64 nouveau_display_create_fail_reason; /* FB_GPU_KMS_PRESENT_REJECT_* */
+    uint64 nouveau_display_head_probe_attempts; /* head discovery probes */
     uint64 nouveau_display_heads; /* detected DDA/Nouveau display heads */
+    uint64 nouveau_display_connector_probe_attempts; /* connector probes */
     uint64 nouveau_display_connectors; /* detected display connectors */
+    uint64 nouveau_display_nonvirtual_connectors; /* non-virtual connectors */
     uint64 nouveau_display_vblank_supported; /* HW vblank source exists */
+    uint64 nouveau_display_vblank_irq_supported; /* HW vblank IRQ capable */
+    uint64 nouveau_display_vblank_source; /* FB_GPU_NOUVEAU_DISPLAY_VBLANK_* */
     uint64 nouveau_display_vblank_irqs; /* HW vblank IRQs observed */
+    uint64 nouveau_display_page_flip_completion_ready; /* HW flip complete gate */
     uint64 nouveau_display_page_flip_completions; /* HW flip completions */
+    uint64 nouveau_display_atomic_pageflip_backend_missing; /* no KMS HW backend */
     uint64 nouveau_native_display_reject_reasons; /* KMS present reject bits */
     uint64 kms_present_last_lane; /* FB_GPU_KMS_PRESENT_LANE_* */
     uint64 kms_present_dumb; /* KMS presents through dumb/software lane */
@@ -1084,6 +1098,7 @@ struct fb_gpu_stats {
     uint64 kms_present_reject_no_connectors; /* no HW connectors */
     uint64 kms_present_reject_no_vblank; /* no HW vblank */
     uint64 kms_present_reject_no_hw_completion; /* no flip completion */
+    uint64 kms_present_reject_no_atomic_pageflip_backend; /* no HW backend */
     uint64 kms_framebuffers;   /* currently registered KMS framebuffer IDs */
     uint64 kms_page_flips;     /* accepted KMS page flips */
     uint64 kms_atomic_commits; /* accepted/tested atomic commits */
