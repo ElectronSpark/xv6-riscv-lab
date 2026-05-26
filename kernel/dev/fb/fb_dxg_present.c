@@ -289,6 +289,8 @@ fb_dxg_present_display_bind_result_accepts(
     return submit_ret == 0 &&
            result->status == 0 &&
            result->transport != FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE &&
+           result->transport_source ==
+               FB_GPU_DXG_DISPLAY_BIND_SOURCE_NON_WSL_DXGKRNL_EXTENSION &&
            result->operation == FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND &&
            result->host_abi_present != 0 &&
            result->sender_present != 0 &&
