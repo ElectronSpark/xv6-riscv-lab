@@ -1437,22 +1437,39 @@ static uint64 gpu_kms_native_present_reject_reasons_locked(void)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_NATIVE_DISPLAY;
     if (fb_state.stats.nouveau_dda_native_display_present == 0)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_NOUVEAU_DISPLAY;
-    if (fb_state.stats.nouveau_display_create_successes == 0)
+    if (fb_state.stats.nouveau_display_create_successes == 0 ||
+        fb_state.stats.nouveau_display_engine_object_created == 0 ||
+        fb_state.stats.nouveau_display_mode_config_ready == 0)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_DISPLAY_CREATE;
-    if (fb_state.stats.nouveau_display_heads == 0)
+    if (fb_state.stats.nouveau_display_heads == 0 ||
+        fb_state.stats.nouveau_display_crtc_count == 0 ||
+        fb_state.stats.nouveau_display_head_mask_seen == 0 ||
+        fb_state.stats.nouveau_display_nvif_head_ctor_successes == 0)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_HEADS;
     if (fb_state.stats.nouveau_display_connectors == 0 ||
-        fb_state.stats.nouveau_display_nonvirtual_connectors == 0)
+        fb_state.stats.nouveau_display_nonvirtual_connectors == 0 ||
+        fb_state.stats.nouveau_display_encoder_count == 0 ||
+        fb_state.stats.nouveau_display_outp_mask_seen == 0 ||
+        fb_state.stats.nouveau_display_conn_mask_seen == 0 ||
+        fb_state.stats.nouveau_display_hpd_event_registered == 0 ||
+        fb_state.stats.nouveau_display_dp_irq_event_registered == 0)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_CONNECTORS;
     if (fb_state.stats.nouveau_display_vblank_supported == 0 ||
         fb_state.stats.nouveau_display_vblank_irq_supported == 0 ||
+        fb_state.stats.nouveau_display_vblank_event_registered == 0 ||
         fb_state.stats.nouveau_display_vblank_source !=
             FB_GPU_NOUVEAU_DISPLAY_VBLANK_SOURCE_IRQ)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_VBLANK;
     if (fb_state.stats.nouveau_display_page_flip_completion_ready == 0 ||
-        fb_state.stats.nouveau_display_page_flip_completions == 0)
+        fb_state.stats.nouveau_display_page_flip_completions == 0 ||
+        fb_state.stats.nouveau_display_page_flip_event_source !=
+            FB_GPU_NOUVEAU_DISPLAY_VBLANK_SOURCE_IRQ)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_HW_COMPLETION;
-    if (fb_state.stats.nouveau_display_atomic_pageflip_backend_missing != 0)
+    if (fb_state.stats.nouveau_display_atomic_pageflip_backend_missing != 0 ||
+        fb_state.stats.nouveau_display_atomic_commit_tail_ready == 0 ||
+        fb_state.stats.nouveau_display_primary_plane_count == 0 ||
+        fb_state.stats.nouveau_display_primary_plane_linear_required == 0 ||
+        fb_state.stats.nouveau_display_primary_plane_nonlinear_modifiers != 0)
         reasons |= FB_GPU_KMS_PRESENT_REJECT_NO_ATOMIC_PAGEFLIP_BACKEND;
     if (reasons == 0)
         reasons = FB_GPU_KMS_PRESENT_REJECT_NO_ATOMIC_PAGEFLIP_BACKEND;
