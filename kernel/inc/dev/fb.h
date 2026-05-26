@@ -1443,6 +1443,13 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_pending_resource_generation; /* resource gen */
     uint64 dxg_display_bind_pending_last_owner_generation; /* dxgprocess gen */
     uint64 dxg_display_bind_stale_after_release_rejects; /* stale after release */
+    uint64 dxg_display_bind_provider_pending_dxgprocess_generation; /* WSL proc */
+    uint64 dxg_display_bind_provider_pending_process_adapter_generation; /* WSL adapter */
+    uint64 dxg_display_bind_provider_pending_hmgr_index_unique_valid; /* hmgr refs */
+    uint64 dxg_display_bind_provider_pending_parent_resource_ref_held; /* parent ref */
+    uint64 dxg_display_bind_provider_pending_opened_child_ref_held; /* child ref */
+    uint64 dxg_display_bind_provider_pending_syncobject_ref_held; /* sync ref */
+    uint64 dxg_display_bind_provider_pending_owner_close_cancelled; /* owner close */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

@@ -639,6 +639,24 @@ static uint32 hvdxg_hmgr_instance(uint64 handle)
                     HV_DXG_HMGR_INSTANCE_SHIFT);
 }
 
+static struct hvdxg_object_entry *
+hvdxg_owner_find_object(struct hvdxg_open_state *owner, uint32 type,
+                        uint64 handle);
+
+static int hvdxg_hmgr_handle_index_unique_valid(
+    struct hvdxg_open_state *owner, uint32 type, uint32 handle)
+{
+    struct hvdxg_object_entry *entry;
+
+    if (owner == NULL || handle == 0)
+        return 0;
+    entry = hvdxg_owner_find_object(owner, type, handle);
+    return entry != NULL &&
+           entry->index == hvdxg_hmgr_index(handle) &&
+           entry->unique == hvdxg_hmgr_unique(handle) &&
+           entry->instance == hvdxg_hmgr_instance(handle);
+}
+
 static uint32 hvdxg_make_local_adapter_handle(uint32 index, uint32 unique)
 {
     return (unique << HV_DXG_HMGR_UNIQUE_SHIFT) |
@@ -5225,6 +5243,7 @@ int hyperv_dxg_display_bind_pin_from_fds(
     struct vfs_file *shared_file = NULL;
     struct vfs_file *dxg_file = NULL;
     struct hvdxg_open_state *owner = NULL;
+    struct hvdxg_process_adapter *process_adapter = NULL;
     uint32 fops_kind = HV_DXG_SHARED_FOPS_NONE;
     uint32 reason = HV_DXG_BIND_PIN_REASON_OK;
     uint32 selected = 0;
@@ -5327,6 +5346,28 @@ int hyperv_dxg_display_bind_pin_from_fds(
     snapshot->process = hvdxg_open_host_process(owner);
     snapshot->process_generation = hvdxg_open_process_generation(owner);
     snapshot->process_refs = hvdxg_open_process_refs(owner);
+    if (owner->process_state != NULL)
+        process_adapter = hvdxg_process_find_adapter(owner->process_state,
+                                                     hvdxg.host_adapter_handle);
+    if (process_adapter != NULL) {
+        snapshot->process_adapter_generation = process_adapter->generation;
+        snapshot->process_adapter_refs = process_adapter->refs;
+    }
+    snapshot->hmgr_index_unique_valid =
+        hvdxg_hmgr_handle_index_unique_valid(owner, HV_DXG_OBJECT_DEVICE,
+                                             device) &&
+        hvdxg_hmgr_handle_index_unique_valid(owner, HV_DXG_OBJECT_RESOURCE,
+                                             resource) &&
+        hvdxg_hmgr_handle_index_unique_valid(owner, HV_DXG_OBJECT_ALLOCATION,
+                                             allocation);
+    snapshot->parent_resource_ref_held =
+        snapshot->shared_parent_id != 0 &&
+        snapshot->shared_parent_refs != 0;
+    snapshot->opened_child_ref_held =
+        opened != NULL &&
+        snapshot->shared_parent_id != 0 &&
+        snapshot->shared_parent_children != 0 &&
+        opened->global_share == shared->global_share;
     ret = 0;
     reason = HV_DXG_BIND_PIN_REASON_OK;
 
@@ -5457,6 +5498,27 @@ int hyperv_dxg_display_bind_submit_failclosed(
         bind->pin_valid ? bind->pin.process_generation : 0;
     result->pending_source_generation = bind->source_generation;
     result->pending_resource_generation = bind->resource_generation;
+    result->pending_dxgprocess_generation =
+        bind->pin_valid ? bind->pin.process_generation : 0;
+    result->pending_process_adapter_generation =
+        bind->pin_valid ? bind->pin.process_adapter_generation : 0;
+    result->pending_hmgr_index_unique_valid =
+        bind->pin_valid ? bind->pin.hmgr_index_unique_valid : 0;
+    result->pending_parent_resource_ref_held =
+        bind->pin_valid ? bind->pin.parent_resource_ref_held : 0;
+    result->pending_opened_child_ref_held =
+        bind->pin_valid ? bind->pin.opened_child_ref_held : 0;
+    if (bind->pin_valid && bind->pin.dxg_file_cookie != NULL &&
+        bind->sync_object != 0) {
+        struct hvdxg_open_state *owner =
+            (struct hvdxg_open_state *)
+                ((struct vfs_file *)bind->pin.dxg_file_cookie)->private_data;
+
+        result->pending_syncobject_ref_held =
+            hvdxg_hmgr_handle_index_unique_valid(owner, HV_DXG_OBJECT_SYNC,
+                                                 bind->sync_object);
+    }
+    result->pending_owner_close_cancelled = 0;
     missing_metadata =
         hvdxg_display_bind_missing_required_metadata(bind);
     result->request_missing_metadata = missing_metadata;
@@ -5478,9 +5540,15 @@ int hyperv_dxg_display_bind_submit_failclosed(
                 bind->pin.allocation_count == bind->allocation_count &&
                 bind->pin.process != 0 &&
                 bind->pin.process_generation != 0 &&
+                bind->pin.process_adapter_generation != 0 &&
+                bind->pin.hmgr_index_unique_valid != 0 &&
                 bind->pin.shared_parent_id != 0 &&
                 bind->pin.shared_parent_refs != 0 &&
-                bind->pin.shared_parent_children != 0;
+                bind->pin.shared_parent_children != 0 &&
+                bind->pin.parent_resource_ref_held != 0 &&
+                bind->pin.opened_child_ref_held != 0 &&
+                ((bind->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) == 0 ||
+                 result->pending_syncobject_ref_held != 0);
     if (pin_valid)
         result->pin_revalidated = 1;
     else

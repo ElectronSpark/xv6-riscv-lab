@@ -144,9 +144,14 @@ struct hyperv_dxg_display_bind_pin_snapshot {
     uint32 process;
     uint32 process_generation;
     uint32 process_refs;
+    uint32 process_adapter_generation;
+    uint32 process_adapter_refs;
+    uint32 hmgr_index_unique_valid;
     uint32 shared_parent_id;
     uint32 shared_parent_refs;
     uint32 shared_parent_children;
+    uint32 parent_resource_ref_held;
+    uint32 opened_child_ref_held;
 };
 struct hyperv_dxg_display_bind_request {
     uint32 present_source;
@@ -207,6 +212,13 @@ struct hyperv_dxg_display_bind_result {
     uint64 pending_owner_generation;
     uint64 pending_source_generation;
     uint64 pending_resource_generation;
+    uint64 pending_dxgprocess_generation;
+    uint64 pending_process_adapter_generation;
+    uint32 pending_hmgr_index_unique_valid;
+    uint32 pending_parent_resource_ref_held;
+    uint32 pending_opened_child_ref_held;
+    uint32 pending_syncobject_ref_held;
+    uint32 pending_owner_close_cancelled;
     uint32 request_metadata_complete;
     uint32 request_sync_metadata_complete;
     uint64 request_missing_metadata;
