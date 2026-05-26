@@ -1368,6 +1368,17 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_pinned_shared_parent; /* WSL-style parent id */
     uint64 dxg_display_bind_pinned_parent_refs; /* parent refs while pinned */
     uint64 dxg_display_bind_pinned_parent_children; /* opened children */
+    uint64 dxg_display_bind_pending_sequence; /* last source-owned bind request */
+    uint64 dxg_display_bind_pending_created; /* pending bind records created */
+    uint64 dxg_display_bind_pending_active; /* currently unresolved binds */
+    uint64 dxg_display_bind_pending_peak; /* max unresolved bind records */
+    uint64 dxg_display_bind_pending_completed; /* display-bind completions */
+    uint64 dxg_display_bind_pending_failclosed; /* resolved by fail-closed provider */
+    uint64 dxg_display_bind_pending_cancelled; /* stale/release cancellations */
+    uint64 dxg_display_bind_pending_last_status; /* last pending resolution errno */
+    uint64 dxg_display_bind_pending_last_block_reason; /* last pending block reason */
+    uint64 dxg_display_bind_pending_last_source_generation; /* source gen snapshot */
+    uint64 dxg_display_bind_pending_last_resource_generation; /* resource gen snapshot */
     uint64 dxg_display_bind_release_clears; /* release cleared bind ids */
     uint64 dxg_display_bind_stale_source_rejects; /* stale source rejected */
     uint64 dxg_display_bind_stale_generation_rejects; /* stale generation */
