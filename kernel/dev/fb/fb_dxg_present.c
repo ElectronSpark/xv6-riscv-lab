@@ -569,6 +569,35 @@ fb_dxg_present_sync_display_bind_state_locked(
         fb_state.stats.dxg_scanout_bind_last_status;
 }
 
+static void
+fb_dxg_present_clear_display_bind_release_locked(
+    const struct fb_gpu_dxg_present_source_entry *source)
+{
+    int had_source_bind =
+        source != NULL &&
+        (source->display_bind_attempts != 0 ||
+         source->display_bind_present_id != 0 ||
+         source->display_bind_completed_id != 0 ||
+         source->display_bind_source_generation != 0 ||
+         source->display_bind_resource_generation != 0);
+    int had_global_bind =
+        fb_state.stats.dxg_display_bind_present_id != 0 ||
+        fb_state.stats.dxg_display_bind_completed_id != 0 ||
+        fb_state.stats.dxg_scanout_bind_last_present_id != 0 ||
+        fb_state.stats.dxg_scanout_bind_last_completed != 0;
+
+    if (had_source_bind || had_global_bind)
+        fb_state.stats.dxg_display_bind_release_clears++;
+    if (had_global_bind)
+        fb_state.stats.dxg_display_bind_stale_completion_rejects++;
+
+    fb_state.stats.dxg_display_bind_present_id = 0;
+    fb_state.stats.dxg_display_bind_completed_id = 0;
+    fb_state.stats.dxg_display_bind_status = EOPNOTSUPP;
+    fb_state.stats.dxg_scanout_bind_last_present_id = 0;
+    fb_state.stats.dxg_scanout_bind_last_completed = 0;
+}
+
 static int
 fb_dxg_present_scanout_bind_locked(
     struct fb_gpu_dxg_present_source_entry **sourcep,
@@ -682,6 +711,7 @@ fb_dxg_present_scanout_bind_locked(
         *sourcep = source;
     if (source == NULL) {
         fb_state.stats.dxg_display_bind_revalidate_failures++;
+        fb_state.stats.dxg_display_bind_stale_generation_rejects++;
         result.status = ESTALE;
         result.transport = FB_GPU_DXG_PRESENT_GPUP_DDA_TRANSPORT_NONE;
         result.operation = FB_GPU_DXG_PRESENT_GPUP_DDA_OP_SCANOUT_BIND;
@@ -1032,6 +1062,7 @@ static void fb_dxg_present_source_unregister(uint32 handle)
     struct fb_gpu_dxg_present_source_entry *source =
         fb_dxg_present_source_lookup_locked(handle);
     if (source != NULL) {
+        fb_dxg_present_clear_display_bind_release_locked(source);
         if (source->display_bind_pin_active) {
             pin_snapshot = source->display_bind_pin;
             source->display_bind_pin_active = 0;
@@ -1068,6 +1099,7 @@ static void fb_dxg_present_release_owner_sources(uint64 owner_id,
             source->display_bind_pin_active = 0;
             fb_state.stats.dxg_display_bind_unpins++;
         }
+        fb_dxg_present_clear_display_bind_release_locked(source);
         memset(source, 0, sizeof(*source));
         fb_state.stats.dxg_present_release_sources++;
     }
@@ -1358,6 +1390,17 @@ static int fb_dxg_present_query(uint64 owner_id, pid_t owner_tgid,
     if (source != NULL &&
         !fb_dxg_present_source_owner_matches(source, owner_id, owner_tgid))
         source = NULL;
+    if (source_handle != 0 && source == NULL) {
+        fb_state.stats.dxg_display_bind_after_close_queries++;
+        fb_state.stats.dxg_display_bind_stale_source_rejects++;
+        if (fb_state.stats.dxg_display_bind_present_id != 0 ||
+            fb_state.stats.dxg_display_bind_completed_id != 0 ||
+            fb_state.stats.dxg_scanout_bind_last_present_id != 0 ||
+            fb_state.stats.dxg_scanout_bind_last_completed != 0) {
+            fb_state.stats.dxg_display_bind_after_close_nonzero_id_rejects++;
+            fb_state.stats.dxg_display_bind_stale_completion_rejects++;
+        }
+    }
 
     if (source != NULL) {
         fb_state.stats.dxg_present_last_source = source->handle;
@@ -1578,6 +1621,17 @@ static int fb_dxg_present_bind_contract_query(
             req->resource_fd_shared_records_valid =
                 source->resource_fd_shared_records_valid;
             req->resource_fd_generation = source->resource_fd_generation;
+        }
+    }
+    if (req->present_source != 0 && source == NULL) {
+        fb_state.stats.dxg_display_bind_after_close_queries++;
+        fb_state.stats.dxg_display_bind_stale_source_rejects++;
+        if (fb_state.stats.dxg_display_bind_present_id != 0 ||
+            fb_state.stats.dxg_display_bind_completed_id != 0 ||
+            fb_state.stats.dxg_scanout_bind_last_present_id != 0 ||
+            fb_state.stats.dxg_scanout_bind_last_completed != 0) {
+            fb_state.stats.dxg_display_bind_after_close_nonzero_id_rejects++;
+            fb_state.stats.dxg_display_bind_stale_completion_rejects++;
         }
     }
     flags = req->flags;

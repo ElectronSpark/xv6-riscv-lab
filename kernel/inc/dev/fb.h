@@ -1365,6 +1365,13 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_pinned_shared_parent; /* WSL-style parent id */
     uint64 dxg_display_bind_pinned_parent_refs; /* parent refs while pinned */
     uint64 dxg_display_bind_pinned_parent_children; /* opened children */
+    uint64 dxg_display_bind_release_clears; /* release cleared bind ids */
+    uint64 dxg_display_bind_stale_source_rejects; /* stale source rejected */
+    uint64 dxg_display_bind_stale_generation_rejects; /* stale generation */
+    uint64 dxg_display_bind_stale_completion_rejects; /* stale completion */
+    uint64 dxg_display_bind_late_completion_after_release; /* late done */
+    uint64 dxg_display_bind_after_close_queries; /* stale queries after close */
+    uint64 dxg_display_bind_after_close_nonzero_id_rejects; /* stale ids */
     uint64 display_presents;  /* display present/flush operations issued */
     uint64 display_completions; /* display present completions observed */
     uint64 display_last_present; /* latest issued display-present sequence */
