@@ -2033,8 +2033,10 @@ createallocation_done:
         if (ret != 0 && host_allocation_created) {
             int unwind_ret =
                 hvdxg_destroy_createallocation_result(
-                    create_process.v, req.device.v, requested_resource, result,
-                    req.alloc_count);
+                    create_process.v, req.device.v,
+                    req.resource.v != 0 ? req.resource.v : requested_resource,
+                    result,
+                    req.flags.create_resource ? 0 : req.alloc_count);
 
             if (unwind_ret != 0 && hvdxg.allocation_last_ret == ret)
                 hvdxg.allocation_last_ret = unwind_ret;

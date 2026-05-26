@@ -642,7 +642,7 @@ static uint32 hvdxg_hmgr_instance(uint64 handle)
 static uint32 hvdxg_make_local_adapter_handle(uint32 index, uint32 unique)
 {
     return (unique << HV_DXG_HMGR_UNIQUE_SHIFT) |
-           (index << HV_DXG_HMGR_INDEX_SHIFT);
+           (index << HV_DXG_HMGR_INDEX_SHIFT) | 1U;
 }
 
 static void hvdxg_note_hmgr_min_free(void)
@@ -1393,7 +1393,8 @@ static int hvdxg_resolve_adapter_handle(struct hvdxg_open_state *owner,
         hvdxg.local_adapter_last_locals = 0;
         hvdxg.local_adapter_last_generation = 0;
     }
-    if (adapter == hvdxg.host_adapter_handle) {
+    if ((owner == NULL || owner->process_state == NULL) &&
+        adapter == hvdxg.host_adapter_handle) {
         if (host_out != NULL)
             *host_out = hvdxg.host_adapter_handle;
         return 0;
@@ -4950,12 +4951,14 @@ static struct vfs_file_ops hvdxg_shared_sync_file_ops = {
     .stat = hvdxg_shared_object_stat,
     .readlink = hvdxg_shared_object_readlink,
     .release = hvdxg_shared_object_release,
+    .early_release_on_close = 1,
 };
 
 static struct vfs_file_ops hvdxg_shared_resource_file_ops = {
     .stat = hvdxg_shared_object_stat,
     .readlink = hvdxg_shared_object_readlink,
     .release = hvdxg_shared_object_release,
+    .early_release_on_close = 1,
 };
 
 static struct vfs_file_ops hvdxg_file_ops;
@@ -6403,7 +6406,8 @@ static int hvdxg_destroy_createallocation_result(
     uint32 command_len;
     int ret;
 
-    if (process == 0 || device == 0 || result == NULL || alloc_count == 0 ||
+    if (process == 0 || device == 0 || result == NULL ||
+        (resource == 0 && alloc_count == 0) ||
         alloc_count > HV_DXG_ALLOCATION_MAX)
         return 0;
     memset(command_buf, 0, sizeof(command_buf));
