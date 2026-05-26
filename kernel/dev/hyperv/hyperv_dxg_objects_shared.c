@@ -657,6 +657,15 @@ static int hvdxg_hmgr_handle_index_unique_valid(
            entry->instance == hvdxg_hmgr_instance(handle);
 }
 
+static int hvdxg_hmgr_object_ref_active(
+    struct hvdxg_open_state *owner, uint32 type, uint32 handle)
+{
+    struct hvdxg_object_entry *entry;
+
+    entry = hvdxg_owner_find_object(owner, type, handle);
+    return entry != NULL && entry->refs != 0;
+}
+
 static uint32 hvdxg_make_local_adapter_handle(uint32 index, uint32 unique)
 {
     return (unique << HV_DXG_HMGR_UNIQUE_SHIFT) |
@@ -5360,10 +5369,17 @@ int hyperv_dxg_display_bind_pin_from_fds(
                                              resource) &&
         hvdxg_hmgr_handle_index_unique_valid(owner, HV_DXG_OBJECT_ALLOCATION,
                                              allocation);
-    snapshot->parent_resource_ref_held =
+    snapshot->device_object_ref_active =
+        hvdxg_hmgr_object_ref_active(owner, HV_DXG_OBJECT_DEVICE, device);
+    snapshot->resource_object_ref_active =
+        hvdxg_hmgr_object_ref_active(owner, HV_DXG_OBJECT_RESOURCE, resource);
+    snapshot->allocation_object_ref_active =
+        hvdxg_hmgr_object_ref_active(owner, HV_DXG_OBJECT_ALLOCATION,
+                                   allocation);
+    snapshot->shared_parent_snapshot_valid =
         snapshot->shared_parent_id != 0 &&
         snapshot->shared_parent_refs != 0;
-    snapshot->opened_child_ref_held =
+    snapshot->opened_child_snapshot_valid =
         opened != NULL &&
         snapshot->shared_parent_id != 0 &&
         snapshot->shared_parent_children != 0 &&
@@ -5507,19 +5523,25 @@ int hyperv_dxg_display_bind_submit_failclosed(
         bind->pin_valid ? bind->pin.process_adapter_generation : 0;
     result->pending_hmgr_index_unique_valid =
         bind->pin_valid ? bind->pin.hmgr_index_unique_valid : 0;
-    result->pending_parent_resource_ref_held =
-        bind->pin_valid ? bind->pin.parent_resource_ref_held : 0;
-    result->pending_opened_child_ref_held =
-        bind->pin_valid ? bind->pin.opened_child_ref_held : 0;
+    result->pending_device_object_ref_active =
+        bind->pin_valid ? bind->pin.device_object_ref_active : 0;
+    result->pending_resource_object_ref_active =
+        bind->pin_valid ? bind->pin.resource_object_ref_active : 0;
+    result->pending_allocation_object_ref_active =
+        bind->pin_valid ? bind->pin.allocation_object_ref_active : 0;
+    result->pending_shared_parent_snapshot_valid =
+        bind->pin_valid ? bind->pin.shared_parent_snapshot_valid : 0;
+    result->pending_opened_child_snapshot_valid =
+        bind->pin_valid ? bind->pin.opened_child_snapshot_valid : 0;
     if (bind->pin_valid && bind->pin.dxg_file_cookie != NULL &&
         bind->sync_object != 0) {
         struct hvdxg_open_state *owner =
             (struct hvdxg_open_state *)
                 ((struct vfs_file *)bind->pin.dxg_file_cookie)->private_data;
 
-        result->pending_syncobject_ref_held =
-            hvdxg_hmgr_handle_index_unique_valid(owner, HV_DXG_OBJECT_SYNC,
-                                                 bind->sync_object);
+        result->pending_syncobject_object_ref_active =
+            hvdxg_hmgr_object_ref_active(owner, HV_DXG_OBJECT_SYNC,
+                                       bind->sync_object);
     }
     result->pending_owner_close_cancelled = 0;
     missing_metadata =
@@ -5545,13 +5567,16 @@ int hyperv_dxg_display_bind_submit_failclosed(
                 bind->pin.process_generation != 0 &&
                 bind->pin.process_adapter_generation != 0 &&
                 bind->pin.hmgr_index_unique_valid != 0 &&
+                bind->pin.device_object_ref_active != 0 &&
+                bind->pin.resource_object_ref_active != 0 &&
+                bind->pin.allocation_object_ref_active != 0 &&
                 bind->pin.shared_parent_id != 0 &&
                 bind->pin.shared_parent_refs != 0 &&
                 bind->pin.shared_parent_children != 0 &&
-                bind->pin.parent_resource_ref_held != 0 &&
-                bind->pin.opened_child_ref_held != 0 &&
+                bind->pin.shared_parent_snapshot_valid != 0 &&
+                bind->pin.opened_child_snapshot_valid != 0 &&
                 ((bind->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) == 0 ||
-                 result->pending_syncobject_ref_held != 0);
+                 result->pending_syncobject_object_ref_active != 0);
     if (pin_valid)
         result->pin_revalidated = 1;
     else

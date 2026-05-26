@@ -78,9 +78,12 @@ struct fb_dxg_display_bind_result {
     uint64 pending_dxgprocess_generation;
     uint64 pending_process_adapter_generation;
     uint32 pending_hmgr_index_unique_valid;
-    uint32 pending_parent_resource_ref_held;
-    uint32 pending_opened_child_ref_held;
-    uint32 pending_syncobject_ref_held;
+    uint32 pending_device_object_ref_active;
+    uint32 pending_resource_object_ref_active;
+    uint32 pending_allocation_object_ref_active;
+    uint32 pending_shared_parent_snapshot_valid;
+    uint32 pending_opened_child_snapshot_valid;
+    uint32 pending_syncobject_object_ref_active;
     uint32 pending_owner_close_cancelled;
     uint32 request_metadata_complete;
     uint32 request_sync_metadata_complete;
@@ -261,12 +264,18 @@ fb_dxg_present_provider_submit_display_bind(
         hv_result.pending_process_adapter_generation;
     result->pending_hmgr_index_unique_valid =
         hv_result.pending_hmgr_index_unique_valid;
-    result->pending_parent_resource_ref_held =
-        hv_result.pending_parent_resource_ref_held;
-    result->pending_opened_child_ref_held =
-        hv_result.pending_opened_child_ref_held;
-    result->pending_syncobject_ref_held =
-        hv_result.pending_syncobject_ref_held;
+    result->pending_device_object_ref_active =
+        hv_result.pending_device_object_ref_active;
+    result->pending_resource_object_ref_active =
+        hv_result.pending_resource_object_ref_active;
+    result->pending_allocation_object_ref_active =
+        hv_result.pending_allocation_object_ref_active;
+    result->pending_shared_parent_snapshot_valid =
+        hv_result.pending_shared_parent_snapshot_valid;
+    result->pending_opened_child_snapshot_valid =
+        hv_result.pending_opened_child_snapshot_valid;
+    result->pending_syncobject_object_ref_active =
+        hv_result.pending_syncobject_object_ref_active;
     result->pending_owner_close_cancelled =
         hv_result.pending_owner_close_cancelled;
     result->request_metadata_complete =
@@ -1020,12 +1029,18 @@ fb_dxg_present_scanout_bind_locked(
         result.pending_process_adapter_generation;
     fb_state.stats.dxg_display_bind_provider_pending_hmgr_index_unique_valid =
         result.pending_hmgr_index_unique_valid;
-    fb_state.stats.dxg_display_bind_provider_pending_parent_resource_ref_held =
-        result.pending_parent_resource_ref_held;
-    fb_state.stats.dxg_display_bind_provider_pending_opened_child_ref_held =
-        result.pending_opened_child_ref_held;
-    fb_state.stats.dxg_display_bind_provider_pending_syncobject_ref_held =
-        result.pending_syncobject_ref_held;
+    fb_state.stats.dxg_display_bind_provider_pending_device_object_ref_active =
+        result.pending_device_object_ref_active;
+    fb_state.stats.dxg_display_bind_provider_pending_resource_object_ref_active =
+        result.pending_resource_object_ref_active;
+    fb_state.stats.dxg_display_bind_provider_pending_allocation_object_ref_active =
+        result.pending_allocation_object_ref_active;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_snapshot_valid =
+        result.pending_shared_parent_snapshot_valid;
+    fb_state.stats.dxg_display_bind_provider_pending_opened_child_snapshot_valid =
+        result.pending_opened_child_snapshot_valid;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_object_ref_active =
+        result.pending_syncobject_object_ref_active;
     fb_state.stats.dxg_display_bind_provider_pending_owner_close_cancelled =
         result.pending_owner_close_cancelled;
     if (result.request_metadata_complete)

@@ -1458,9 +1458,12 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_pending_dxgprocess_generation; /* WSL proc */
     uint64 dxg_display_bind_provider_pending_process_adapter_generation; /* WSL adapter */
     uint64 dxg_display_bind_provider_pending_hmgr_index_unique_valid; /* hmgr index/unique valid */
-    uint64 dxg_display_bind_provider_pending_parent_resource_ref_held; /* parent ref */
-    uint64 dxg_display_bind_provider_pending_opened_child_ref_held; /* child ref */
-    uint64 dxg_display_bind_provider_pending_syncobject_ref_held; /* sync ref */
+    uint64 dxg_display_bind_provider_pending_device_object_ref_active; /* device entry ref */
+    uint64 dxg_display_bind_provider_pending_resource_object_ref_active; /* resource entry ref */
+    uint64 dxg_display_bind_provider_pending_allocation_object_ref_active; /* allocation entry ref */
+    uint64 dxg_display_bind_provider_pending_shared_parent_snapshot_valid; /* parent snapshot */
+    uint64 dxg_display_bind_provider_pending_opened_child_snapshot_valid; /* child snapshot */
+    uint64 dxg_display_bind_provider_pending_syncobject_object_ref_active; /* sync entry ref */
     uint64 dxg_display_bind_provider_pending_owner_close_cancelled; /* owner close */
 };
 
