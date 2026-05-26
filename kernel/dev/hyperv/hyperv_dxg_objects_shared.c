@@ -1997,6 +1997,8 @@ static int hvdxg_track_sync(struct hvdxg_open_state *owner,
                             uint32 device, uint32 sync, uint32 type,
                             uint32 flags, uint32 global_shared,
                             uint64 fence_cpu_va, uint64 fence_kva,
+                            uint64 fence_gpu_va,
+                            uint32 fence_gpu_va_source,
                             uint64 fence_map_size,
                             uint32 monitor_fence_handle)
 {
@@ -2028,6 +2030,10 @@ static int hvdxg_track_sync(struct hvdxg_open_state *owner,
                 monitor_fence_handle ? 1 : 0;
             owner->sync_objects[i].fence_cpu_va = fence_cpu_va;
             owner->sync_objects[i].fence_kva = fence_kva;
+            owner->sync_objects[i].fence_gpu_va = fence_gpu_va;
+            owner->sync_objects[i].fence_gpu_va_source =
+                fence_gpu_va != 0 ? fence_gpu_va_source :
+                HV_DXG_SYNC_FENCE_GPUVA_NONE;
             owner->sync_objects[i].fence_map_size = fence_map_size;
             owner->sync_objects[i].fence_cpu_vm =
                 fence_cpu_va != 0 && current != NULL ? current->vm : NULL;
@@ -2060,6 +2066,10 @@ static int hvdxg_track_sync(struct hvdxg_open_state *owner,
         monitor_fence_handle ? 1 : 0;
     owner->sync_objects[i].fence_cpu_va = fence_cpu_va;
     owner->sync_objects[i].fence_kva = fence_kva;
+    owner->sync_objects[i].fence_gpu_va = fence_gpu_va;
+    owner->sync_objects[i].fence_gpu_va_source =
+        fence_gpu_va != 0 ? fence_gpu_va_source :
+        HV_DXG_SYNC_FENCE_GPUVA_NONE;
     owner->sync_objects[i].fence_map_size = fence_map_size;
     owner->sync_objects[i].fence_cpu_vm =
         fence_cpu_va != 0 && current != NULL ? current->vm : NULL;
@@ -2115,6 +2125,8 @@ static void hvdxg_stop_sync_mapping(struct hvdxg_tracked_sync *sync)
                                  sync->fence_cpu_vm);
     sync->fence_cpu_va = 0;
     sync->fence_kva = 0;
+    sync->fence_gpu_va = 0;
+    sync->fence_gpu_va_source = HV_DXG_SYNC_FENCE_GPUVA_NONE;
     sync->fence_map_size = 0;
     sync->fence_cpu_vm = NULL;
 }
@@ -2256,6 +2268,30 @@ static uint64 hvdxg_owner_sync_fence_map_size(struct hvdxg_open_state *owner,
             return owner->sync_objects[i].fence_map_size;
     }
     return 0;
+}
+
+static uint64 hvdxg_owner_sync_fence_gpu_va(struct hvdxg_open_state *owner,
+                                            uint32 sync)
+{
+    if (owner == NULL || sync == 0)
+        return 0;
+    for (uint32 i = 0; i < owner->sync_object_count; i++) {
+        if (owner->sync_objects[i].sync == sync)
+            return owner->sync_objects[i].fence_gpu_va;
+    }
+    return 0;
+}
+
+static uint32 hvdxg_owner_sync_fence_gpu_va_source(
+    struct hvdxg_open_state *owner, uint32 sync)
+{
+    if (owner == NULL || sync == 0)
+        return HV_DXG_SYNC_FENCE_GPUVA_NONE;
+    for (uint32 i = 0; i < owner->sync_object_count; i++) {
+        if (owner->sync_objects[i].sync == sync)
+            return owner->sync_objects[i].fence_gpu_va_source;
+    }
+    return HV_DXG_SYNC_FENCE_GPUVA_NONE;
 }
 
 static uint64 hvdxg_sync_cpu_fence_value(uint64 fence_kva)
@@ -5269,10 +5305,25 @@ int hyperv_dxg_shared_resource_snapshot_from_fd(
         snapshot->shared_parent_id = shared->resource_parent->id;
         snapshot->shared_parent_refs = shared->resource_parent->refs;
         snapshot->shared_parent_children = shared->resource_parent->child_count;
+        snapshot->shared_parent_fd_refs = shared->resource_parent->fd_refs;
+        snapshot->shared_parent_host_nt_refs =
+            shared->resource_parent->host_nt_refs;
+        snapshot->shared_parent_child_refs =
+            shared->resource_parent->child_refs;
+        snapshot->shared_parent_global_share =
+            shared->resource_parent->global_share;
+        snapshot->shared_parent_host_nt_handle =
+            shared->resource_parent->host_nt_handle;
     } else {
         snapshot->shared_parent_id = shared->parent_id;
         snapshot->shared_parent_refs = shared->parent_refs;
         snapshot->shared_parent_children = shared->opened_child_count;
+        snapshot->shared_parent_fd_refs = shared->fd_refs;
+        snapshot->shared_parent_host_nt_refs =
+            shared->host_nt_handle != 0 ? 1 : 0;
+        snapshot->shared_parent_child_refs = shared->opened_child_count;
+        snapshot->shared_parent_global_share = shared->global_share;
+        snapshot->shared_parent_host_nt_handle = shared->host_nt_handle;
     }
     vfs_fput(file);
     return snapshot->kind == HV_DXG_SHARED_OBJECT_RESOURCE &&
@@ -5347,10 +5398,25 @@ int hyperv_dxg_shared_resource_snapshot_from_opened_resource(
         snapshot->shared_parent_id = shared->resource_parent->id;
         snapshot->shared_parent_refs = shared->resource_parent->refs;
         snapshot->shared_parent_children = shared->resource_parent->child_count;
+        snapshot->shared_parent_fd_refs = shared->resource_parent->fd_refs;
+        snapshot->shared_parent_host_nt_refs =
+            shared->resource_parent->host_nt_refs;
+        snapshot->shared_parent_child_refs =
+            shared->resource_parent->child_refs;
+        snapshot->shared_parent_global_share =
+            shared->resource_parent->global_share;
+        snapshot->shared_parent_host_nt_handle =
+            shared->resource_parent->host_nt_handle;
     } else {
         snapshot->shared_parent_id = shared->parent_id;
         snapshot->shared_parent_refs = shared->parent_refs;
         snapshot->shared_parent_children = shared->opened_child_count;
+        snapshot->shared_parent_fd_refs = shared->fd_refs;
+        snapshot->shared_parent_host_nt_refs =
+            shared->host_nt_handle != 0 ? 1 : 0;
+        snapshot->shared_parent_child_refs = shared->opened_child_count;
+        snapshot->shared_parent_global_share = shared->global_share;
+        snapshot->shared_parent_host_nt_handle = shared->host_nt_handle;
     }
     ret = 0;
 
@@ -5469,11 +5535,32 @@ int hyperv_dxg_display_bind_pin_from_fds(
         snapshot->shared_parent_id = shared->resource_parent->id;
         snapshot->shared_parent_refs = shared->resource_parent->refs;
         snapshot->shared_parent_children = shared->resource_parent->child_count;
+        snapshot->shared_parent_fd_refs = shared->resource_parent->fd_refs;
+        snapshot->shared_parent_host_nt_refs =
+            shared->resource_parent->host_nt_refs;
+        snapshot->shared_parent_child_refs =
+            shared->resource_parent->child_refs;
+        snapshot->shared_parent_global_share =
+            shared->resource_parent->global_share;
+        snapshot->shared_parent_host_nt_handle =
+            shared->resource_parent->host_nt_handle;
     } else {
         snapshot->shared_parent_id = shared->parent_id;
         snapshot->shared_parent_refs = shared->parent_refs;
         snapshot->shared_parent_children = shared->opened_child_count;
+        snapshot->shared_parent_fd_refs = shared->fd_refs;
+        snapshot->shared_parent_host_nt_refs =
+            shared->host_nt_handle != 0 ? 1 : 0;
+        snapshot->shared_parent_child_refs = shared->opened_child_count;
+        snapshot->shared_parent_global_share = shared->global_share;
+        snapshot->shared_parent_host_nt_handle = shared->host_nt_handle;
     }
+    snapshot->opened_child_parent_id_match =
+        shared->parent_id == snapshot->shared_parent_id;
+    snapshot->opened_child_global_share_match =
+        opened != NULL && opened->global_share == snapshot->shared_parent_global_share;
+    snapshot->opened_child_sealed_generation_match =
+        shared->parent_sealed_generation == snapshot->generation;
     snapshot->process = hvdxg_open_host_process(owner);
     snapshot->process_tgid =
         owner->process_state != NULL ? owner->process_state->tgid : 0;
@@ -5508,12 +5595,17 @@ int hyperv_dxg_display_bind_pin_from_fds(
                                    allocation);
     snapshot->shared_parent_snapshot_valid =
         snapshot->shared_parent_id != 0 &&
-        snapshot->shared_parent_refs != 0;
+        snapshot->shared_parent_refs != 0 &&
+        snapshot->shared_parent_fd_refs != 0 &&
+        snapshot->shared_parent_global_share != 0 &&
+        snapshot->shared_parent_host_nt_handle != 0;
     snapshot->opened_child_snapshot_valid =
         opened != NULL &&
         snapshot->shared_parent_id != 0 &&
         snapshot->shared_parent_children != 0 &&
-        opened->global_share == shared->global_share;
+        snapshot->opened_child_parent_id_match != 0 &&
+        snapshot->opened_child_global_share_match != 0 &&
+        snapshot->opened_child_sealed_generation_match != 0;
     ret = 0;
     reason = HV_DXG_BIND_PIN_REASON_OK;
 
@@ -5675,6 +5767,22 @@ int hyperv_dxg_display_bind_submit_failclosed(
         bind->pin_valid ? bind->pin.shared_parent_refs : 0;
     result->pending_shared_parent_children =
         bind->pin_valid ? bind->pin.shared_parent_children : 0;
+    result->pending_shared_parent_fd_refs =
+        bind->pin_valid ? bind->pin.shared_parent_fd_refs : 0;
+    result->pending_shared_parent_host_nt_refs =
+        bind->pin_valid ? bind->pin.shared_parent_host_nt_refs : 0;
+    result->pending_shared_parent_child_refs =
+        bind->pin_valid ? bind->pin.shared_parent_child_refs : 0;
+    result->pending_shared_parent_global_share =
+        bind->pin_valid ? bind->pin.shared_parent_global_share : 0;
+    result->pending_shared_parent_host_nt_handle =
+        bind->pin_valid ? bind->pin.shared_parent_host_nt_handle : 0;
+    result->pending_opened_child_parent_id_match =
+        bind->pin_valid ? bind->pin.opened_child_parent_id_match : 0;
+    result->pending_opened_child_global_share_match =
+        bind->pin_valid ? bind->pin.opened_child_global_share_match : 0;
+    result->pending_opened_child_sealed_generation_match =
+        bind->pin_valid ? bind->pin.opened_child_sealed_generation_match : 0;
     result->pending_shared_parent_snapshot_valid =
         bind->pin_valid ? bind->pin.shared_parent_snapshot_valid : 0;
     result->pending_opened_child_snapshot_valid =
@@ -5688,6 +5796,7 @@ int hyperv_dxg_display_bind_submit_failclosed(
                 ((struct vfs_file *)bind->pin.dxg_file_cookie)->private_data;
         uint64 fence_cpu_va;
         uint64 fence_kva;
+        uint64 fence_gpu_va;
 
         result->pending_syncobject_object_ref_active =
             hvdxg_hmgr_object_ref_active(owner, HV_DXG_OBJECT_SYNC,
@@ -5702,9 +5811,18 @@ int hyperv_dxg_display_bind_submit_failclosed(
         fence_cpu_va = hvdxg_owner_sync_fence_cpu_va(owner,
                                                      bind->sync_object);
         fence_kva = hvdxg_owner_sync_fence_kva(owner, bind->sync_object);
+        fence_gpu_va = hvdxg_owner_sync_fence_gpu_va(owner,
+                                                     bind->sync_object);
         result->pending_syncobject_fence_cpu_va_present =
             fence_cpu_va != 0;
-        result->pending_syncobject_fence_gpu_va_present = fence_kva != 0;
+        result->pending_syncobject_fence_gpu_va_present = fence_gpu_va != 0;
+        result->pending_syncobject_fence_kva_present = fence_kva != 0;
+        result->pending_syncobject_fence_gpu_va_alias_gap =
+            fence_kva != 0 && fence_gpu_va == 0;
+        result->pending_syncobject_real_fence_gpu_va_present =
+            fence_gpu_va != 0;
+        result->pending_syncobject_fence_gpu_va_source =
+            hvdxg_owner_sync_fence_gpu_va_source(owner, bind->sync_object);
         result->pending_syncobject_fence_map_size =
             hvdxg_owner_sync_fence_map_size(owner, bind->sync_object);
     }
@@ -5738,6 +5856,12 @@ int hyperv_dxg_display_bind_submit_failclosed(
                 bind->pin.shared_parent_id != 0 &&
                 bind->pin.shared_parent_refs != 0 &&
                 bind->pin.shared_parent_children != 0 &&
+                bind->pin.shared_parent_fd_refs != 0 &&
+                bind->pin.shared_parent_global_share != 0 &&
+                bind->pin.shared_parent_host_nt_handle != 0 &&
+                bind->pin.opened_child_parent_id_match != 0 &&
+                bind->pin.opened_child_global_share_match != 0 &&
+                bind->pin.opened_child_sealed_generation_match != 0 &&
                 bind->pin.shared_parent_snapshot_valid != 0 &&
                 bind->pin.opened_child_snapshot_valid != 0 &&
                 ((bind->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) == 0 ||

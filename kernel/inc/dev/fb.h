@@ -1489,6 +1489,14 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_pending_shared_parent_id; /* parent id */
     uint64 dxg_display_bind_provider_pending_shared_parent_refs; /* parent refs */
     uint64 dxg_display_bind_provider_pending_shared_parent_children; /* children */
+    uint64 dxg_display_bind_provider_pending_shared_parent_fd_refs; /* fd refs */
+    uint64 dxg_display_bind_provider_pending_shared_parent_host_nt_refs; /* NT refs */
+    uint64 dxg_display_bind_provider_pending_shared_parent_child_refs; /* child refs */
+    uint64 dxg_display_bind_provider_pending_shared_parent_global_share; /* host share */
+    uint64 dxg_display_bind_provider_pending_shared_parent_host_nt_handle; /* NT handle */
+    uint64 dxg_display_bind_provider_pending_opened_child_parent_id_match; /* parent id match */
+    uint64 dxg_display_bind_provider_pending_opened_child_global_share_match; /* share match */
+    uint64 dxg_display_bind_provider_pending_opened_child_sealed_generation_match; /* gen match */
     uint64 dxg_display_bind_provider_pending_shared_parent_snapshot_valid; /* parent snapshot */
     uint64 dxg_display_bind_provider_pending_opened_child_snapshot_valid; /* child snapshot */
     uint64 dxg_display_bind_provider_pending_shared_parent_global_share_match; /* child share */
@@ -1498,6 +1506,10 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_pending_syncobject_fence_value; /* wait fence */
     uint64 dxg_display_bind_provider_pending_syncobject_fence_cpu_va_present; /* user VA */
     uint64 dxg_display_bind_provider_pending_syncobject_fence_gpu_va_present; /* kernel/GPU VA */
+    uint64 dxg_display_bind_provider_pending_syncobject_fence_kva_present; /* kernel VA */
+    uint64 dxg_display_bind_provider_pending_syncobject_fence_gpu_va_alias_gap; /* GPU VA alias */
+    uint64 dxg_display_bind_provider_pending_syncobject_real_fence_gpu_va_present; /* real GPU VA */
+    uint64 dxg_display_bind_provider_pending_syncobject_fence_gpu_va_source; /* source */
     uint64 dxg_display_bind_provider_pending_syncobject_fence_map_size; /* map bytes */
     uint64 dxg_display_bind_provider_pending_owner_close_cancelled; /* owner close */
 };

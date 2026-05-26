@@ -93,6 +93,14 @@ struct fb_dxg_display_bind_result {
     uint32 pending_shared_parent_id;
     uint32 pending_shared_parent_refs;
     uint32 pending_shared_parent_children;
+    uint32 pending_shared_parent_fd_refs;
+    uint32 pending_shared_parent_host_nt_refs;
+    uint32 pending_shared_parent_child_refs;
+    uint32 pending_shared_parent_global_share;
+    uint32 pending_shared_parent_host_nt_handle;
+    uint32 pending_opened_child_parent_id_match;
+    uint32 pending_opened_child_global_share_match;
+    uint32 pending_opened_child_sealed_generation_match;
     uint32 pending_shared_parent_snapshot_valid;
     uint32 pending_opened_child_snapshot_valid;
     uint32 pending_shared_parent_global_share_match;
@@ -102,6 +110,10 @@ struct fb_dxg_display_bind_result {
     uint64 pending_syncobject_fence_value;
     uint32 pending_syncobject_fence_cpu_va_present;
     uint32 pending_syncobject_fence_gpu_va_present;
+    uint32 pending_syncobject_fence_kva_present;
+    uint32 pending_syncobject_fence_gpu_va_alias_gap;
+    uint32 pending_syncobject_real_fence_gpu_va_present;
+    uint32 pending_syncobject_fence_gpu_va_source;
     uint64 pending_syncobject_fence_map_size;
     uint32 pending_owner_close_cancelled;
     uint32 request_metadata_complete;
@@ -309,6 +321,22 @@ fb_dxg_present_provider_submit_display_bind(
     result->pending_shared_parent_refs = hv_result.pending_shared_parent_refs;
     result->pending_shared_parent_children =
         hv_result.pending_shared_parent_children;
+    result->pending_shared_parent_fd_refs =
+        hv_result.pending_shared_parent_fd_refs;
+    result->pending_shared_parent_host_nt_refs =
+        hv_result.pending_shared_parent_host_nt_refs;
+    result->pending_shared_parent_child_refs =
+        hv_result.pending_shared_parent_child_refs;
+    result->pending_shared_parent_global_share =
+        hv_result.pending_shared_parent_global_share;
+    result->pending_shared_parent_host_nt_handle =
+        hv_result.pending_shared_parent_host_nt_handle;
+    result->pending_opened_child_parent_id_match =
+        hv_result.pending_opened_child_parent_id_match;
+    result->pending_opened_child_global_share_match =
+        hv_result.pending_opened_child_global_share_match;
+    result->pending_opened_child_sealed_generation_match =
+        hv_result.pending_opened_child_sealed_generation_match;
     result->pending_shared_parent_snapshot_valid =
         hv_result.pending_shared_parent_snapshot_valid;
     result->pending_opened_child_snapshot_valid =
@@ -327,6 +355,14 @@ fb_dxg_present_provider_submit_display_bind(
         hv_result.pending_syncobject_fence_cpu_va_present;
     result->pending_syncobject_fence_gpu_va_present =
         hv_result.pending_syncobject_fence_gpu_va_present;
+    result->pending_syncobject_fence_kva_present =
+        hv_result.pending_syncobject_fence_kva_present;
+    result->pending_syncobject_fence_gpu_va_alias_gap =
+        hv_result.pending_syncobject_fence_gpu_va_alias_gap;
+    result->pending_syncobject_real_fence_gpu_va_present =
+        hv_result.pending_syncobject_real_fence_gpu_va_present;
+    result->pending_syncobject_fence_gpu_va_source =
+        hv_result.pending_syncobject_fence_gpu_va_source;
     result->pending_syncobject_fence_map_size =
         hv_result.pending_syncobject_fence_map_size;
     result->pending_owner_close_cancelled =
@@ -1112,6 +1148,22 @@ fb_dxg_present_scanout_bind_locked(
         result.pending_shared_parent_refs;
     fb_state.stats.dxg_display_bind_provider_pending_shared_parent_children =
         result.pending_shared_parent_children;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_fd_refs =
+        result.pending_shared_parent_fd_refs;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_host_nt_refs =
+        result.pending_shared_parent_host_nt_refs;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_child_refs =
+        result.pending_shared_parent_child_refs;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_global_share =
+        result.pending_shared_parent_global_share;
+    fb_state.stats.dxg_display_bind_provider_pending_shared_parent_host_nt_handle =
+        result.pending_shared_parent_host_nt_handle;
+    fb_state.stats.dxg_display_bind_provider_pending_opened_child_parent_id_match =
+        result.pending_opened_child_parent_id_match;
+    fb_state.stats.dxg_display_bind_provider_pending_opened_child_global_share_match =
+        result.pending_opened_child_global_share_match;
+    fb_state.stats.dxg_display_bind_provider_pending_opened_child_sealed_generation_match =
+        result.pending_opened_child_sealed_generation_match;
     fb_state.stats.dxg_display_bind_provider_pending_shared_parent_snapshot_valid =
         result.pending_shared_parent_snapshot_valid;
     fb_state.stats.dxg_display_bind_provider_pending_opened_child_snapshot_valid =
@@ -1130,6 +1182,14 @@ fb_dxg_present_scanout_bind_locked(
         result.pending_syncobject_fence_cpu_va_present;
     fb_state.stats.dxg_display_bind_provider_pending_syncobject_fence_gpu_va_present =
         result.pending_syncobject_fence_gpu_va_present;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_fence_kva_present =
+        result.pending_syncobject_fence_kva_present;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_fence_gpu_va_alias_gap =
+        result.pending_syncobject_fence_gpu_va_alias_gap;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_real_fence_gpu_va_present =
+        result.pending_syncobject_real_fence_gpu_va_present;
+    fb_state.stats.dxg_display_bind_provider_pending_syncobject_fence_gpu_va_source =
+        result.pending_syncobject_fence_gpu_va_source;
     fb_state.stats.dxg_display_bind_provider_pending_syncobject_fence_map_size =
         result.pending_syncobject_fence_map_size;
     fb_state.stats.dxg_display_bind_provider_pending_owner_close_cancelled =

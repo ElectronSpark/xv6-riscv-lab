@@ -2290,6 +2290,8 @@ createallocation_done:
                                    0, result.sync_object.v,
                                    req.fence_cpu_virtual_address,
                                    fence_kva,
+                                   0,
+                                   HV_DXG_SYNC_FENCE_GPUVA_PAGING,
                                    hvdxg_iospace_user_map_size(
                                        req.fence_cpu_virtual_address,
                                        PGSIZE),
@@ -4333,6 +4335,8 @@ submithwqueue_done:
                                result.global_sync_object.v,
                                hvdxg.syncobject_last_fence_cpu,
                                fence_kva,
+                               result.fence_gpu_va,
+                               HV_DXG_SYNC_FENCE_GPUVA_CREATE,
                                hvdxg_iospace_user_map_size(
                                    hvdxg.syncobject_last_fence_cpu,
                                    PGSIZE),
@@ -5556,6 +5560,8 @@ createcontext_done:
                                        0, req.queue_progress_fence.v,
                                        req.queue_progress_fence_cpu_va,
                                        fence_kva,
+                                       req.queue_progress_fence_gpu_va,
+                                       HV_DXG_SYNC_FENCE_GPUVA_HWQUEUE,
                                        hvdxg_iospace_user_map_size(
                                            req.queue_progress_fence_cpu_va,
                                            PGSIZE),
@@ -6889,6 +6895,8 @@ createhwqueue_done:
                                shared->global_share,
                                req.monitored_fence.fence_value_cpu_va,
                                fence_kva,
+                               result.gpu_virtual_address,
+                               HV_DXG_SYNC_FENCE_GPUVA_NT_OPEN,
                                hvdxg_iospace_user_map_size(
                                    req.monitored_fence.fence_value_cpu_va,
                                    PGSIZE),
@@ -8157,6 +8165,8 @@ openresource_done:
                                    sync_file->sync_type, open_flags.value,
                                    sync_file->global_share, cpu_va,
                                    fence_kva,
+                                   gpu_va,
+                                   HV_DXG_SYNC_FENCE_GPUVA_SYNCFILE,
                                    hvdxg_iospace_user_map_size(cpu_va,
                                                                PGSIZE),
                                    0) :

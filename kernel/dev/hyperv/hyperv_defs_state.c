@@ -1714,6 +1714,13 @@ struct hvdxg_tracked_pagingqueue {
     uint64 fence_pa;
 };
 
+#define HV_DXG_SYNC_FENCE_GPUVA_NONE       0U
+#define HV_DXG_SYNC_FENCE_GPUVA_PAGING     1U
+#define HV_DXG_SYNC_FENCE_GPUVA_CREATE     2U
+#define HV_DXG_SYNC_FENCE_GPUVA_HWQUEUE    3U
+#define HV_DXG_SYNC_FENCE_GPUVA_NT_OPEN    4U
+#define HV_DXG_SYNC_FENCE_GPUVA_SYNCFILE   5U
+
 struct hvdxg_tracked_sync {
     uint32 sync;
     uint32 type;
@@ -1726,6 +1733,8 @@ struct hvdxg_tracked_sync {
     uint32 monitor_fence_handle;
     uint64 fence_cpu_va;
     uint64 fence_kva;
+    uint64 fence_gpu_va;
+    uint32 fence_gpu_va_source;
     uint64 fence_map_size;
     void *fence_cpu_vm;
 };

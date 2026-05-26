@@ -125,6 +125,11 @@ struct hyperv_dxg_shared_resource_snapshot {
     uint32 shared_parent_id;
     uint32 shared_parent_refs;
     uint32 shared_parent_children;
+    uint32 shared_parent_fd_refs;
+    uint32 shared_parent_host_nt_refs;
+    uint32 shared_parent_child_refs;
+    uint32 shared_parent_global_share;
+    uint32 shared_parent_host_nt_handle;
 };
 struct hyperv_dxg_display_bind_pin_snapshot {
     void *dxg_file_cookie;
@@ -157,6 +162,14 @@ struct hyperv_dxg_display_bind_pin_snapshot {
     uint32 shared_parent_id;
     uint32 shared_parent_refs;
     uint32 shared_parent_children;
+    uint32 shared_parent_fd_refs;
+    uint32 shared_parent_host_nt_refs;
+    uint32 shared_parent_child_refs;
+    uint32 shared_parent_global_share;
+    uint32 shared_parent_host_nt_handle;
+    uint32 opened_child_parent_id_match;
+    uint32 opened_child_global_share_match;
+    uint32 opened_child_sealed_generation_match;
     uint32 shared_parent_snapshot_valid;
     uint32 opened_child_snapshot_valid;
 };
@@ -240,6 +253,14 @@ struct hyperv_dxg_display_bind_result {
     uint32 pending_shared_parent_id;
     uint32 pending_shared_parent_refs;
     uint32 pending_shared_parent_children;
+    uint32 pending_shared_parent_fd_refs;
+    uint32 pending_shared_parent_host_nt_refs;
+    uint32 pending_shared_parent_child_refs;
+    uint32 pending_shared_parent_global_share;
+    uint32 pending_shared_parent_host_nt_handle;
+    uint32 pending_opened_child_parent_id_match;
+    uint32 pending_opened_child_global_share_match;
+    uint32 pending_opened_child_sealed_generation_match;
     uint32 pending_shared_parent_snapshot_valid;
     uint32 pending_opened_child_snapshot_valid;
     uint32 pending_shared_parent_global_share_match;
@@ -249,6 +270,10 @@ struct hyperv_dxg_display_bind_result {
     uint64 pending_syncobject_fence_value;
     uint32 pending_syncobject_fence_cpu_va_present;
     uint32 pending_syncobject_fence_gpu_va_present;
+    uint32 pending_syncobject_fence_kva_present;
+    uint32 pending_syncobject_fence_gpu_va_alias_gap;
+    uint32 pending_syncobject_real_fence_gpu_va_present;
+    uint32 pending_syncobject_fence_gpu_va_source;
     uint64 pending_syncobject_fence_map_size;
     uint32 pending_owner_close_cancelled;
     uint32 request_metadata_complete;
