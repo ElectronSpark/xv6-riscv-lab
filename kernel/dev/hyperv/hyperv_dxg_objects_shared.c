@@ -5358,11 +5358,63 @@ void hyperv_dxg_display_bind_unpin(
     }
 }
 
+static uint64
+hvdxg_display_bind_missing_required_metadata(
+    const struct hyperv_dxg_display_bind_request *bind)
+{
+    uint64 expected;
+    uint64 missing = 0;
+
+    if (bind == NULL)
+        return FB_GPU_DXG_PRESENT_META_DEVICE |
+               FB_GPU_DXG_PRESENT_META_RESOURCE |
+               FB_GPU_DXG_PRESENT_META_ALLOCATION |
+               FB_GPU_DXG_PRESENT_META_DIMENSIONS |
+               FB_GPU_DXG_PRESENT_META_FORMAT |
+               FB_GPU_DXG_PRESENT_META_MODIFIER |
+               FB_GPU_DXG_PRESENT_META_ADAPTER_LUID |
+               FB_GPU_DXG_PRESENT_META_SYNC_OBJECT |
+               FB_GPU_DXG_PRESENT_META_FENCE_VALUE;
+
+    expected = FB_GPU_DXG_PRESENT_META_DEVICE |
+               FB_GPU_DXG_PRESENT_META_RESOURCE |
+               FB_GPU_DXG_PRESENT_META_ALLOCATION |
+               FB_GPU_DXG_PRESENT_META_DIMENSIONS |
+               FB_GPU_DXG_PRESENT_META_FORMAT |
+               FB_GPU_DXG_PRESENT_META_MODIFIER |
+               FB_GPU_DXG_PRESENT_META_ADAPTER_LUID;
+    if ((bind->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) != 0)
+        expected |= FB_GPU_DXG_PRESENT_META_SYNC_OBJECT |
+                    FB_GPU_DXG_PRESENT_META_FENCE_VALUE;
+
+    missing |= expected & ~bind->required_metadata;
+    if (bind->device == 0)
+        missing |= FB_GPU_DXG_PRESENT_META_DEVICE;
+    if (bind->resource == 0)
+        missing |= FB_GPU_DXG_PRESENT_META_RESOURCE;
+    if (bind->allocation == 0 || bind->allocation_count == 0)
+        missing |= FB_GPU_DXG_PRESENT_META_ALLOCATION;
+    if (bind->width == 0 || bind->height == 0 || bind->pitch == 0)
+        missing |= FB_GPU_DXG_PRESENT_META_DIMENSIONS;
+    if (bind->format == 0)
+        missing |= FB_GPU_DXG_PRESENT_META_FORMAT;
+    if (bind->adapter_luid_low == 0 && bind->adapter_luid_high == 0)
+        missing |= FB_GPU_DXG_PRESENT_META_ADAPTER_LUID;
+    if ((bind->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) != 0) {
+        if (bind->sync_object == 0)
+            missing |= FB_GPU_DXG_PRESENT_META_SYNC_OBJECT;
+        if (bind->fence_value == 0)
+            missing |= FB_GPU_DXG_PRESENT_META_FENCE_VALUE;
+    }
+    return missing;
+}
+
 int hyperv_dxg_display_bind_submit_failclosed(
     const struct hyperv_dxg_display_bind_request *bind,
     struct hyperv_dxg_display_bind_result *result)
 {
     uint64 block_reason;
+    uint64 missing_metadata;
     int pin_valid;
 
     if (bind == NULL || result == NULL)
@@ -5387,6 +5439,14 @@ int hyperv_dxg_display_bind_submit_failclosed(
     result->no_host_abi = 1;
     result->no_sender = 1;
     result->no_completion = 1;
+    missing_metadata =
+        hvdxg_display_bind_missing_required_metadata(bind);
+    result->request_missing_metadata = missing_metadata;
+    result->request_metadata_complete = missing_metadata == 0;
+    result->request_sync_metadata_complete =
+        (bind->flags & FB_GPU_DXG_PRESENT_F_WAIT_SYNC) == 0 ||
+        (missing_metadata & (FB_GPU_DXG_PRESENT_META_SYNC_OBJECT |
+                             FB_GPU_DXG_PRESENT_META_FENCE_VALUE)) == 0;
 
     pin_valid = bind->pin_valid &&
                 bind->pin.dxg_file_pinned != 0 &&

@@ -58,6 +58,9 @@ struct fb_dxg_display_bind_result {
     uint32 no_host_abi;
     uint32 no_sender;
     uint32 no_completion;
+    uint32 request_metadata_complete;
+    uint32 request_sync_metadata_complete;
+    uint64 request_missing_metadata;
 };
 
 static uint64 fb_dxg_present_resource_generation(uint32 device,
@@ -207,6 +210,12 @@ fb_dxg_present_provider_submit_display_bind(
     result->no_host_abi = hv_result.no_host_abi;
     result->no_sender = hv_result.no_sender;
     result->no_completion = hv_result.no_completion;
+    result->request_metadata_complete =
+        hv_result.request_metadata_complete;
+    result->request_sync_metadata_complete =
+        hv_result.request_sync_metadata_complete;
+    result->request_missing_metadata =
+        hv_result.request_missing_metadata;
     return ret;
 }
 
@@ -737,6 +746,12 @@ fb_dxg_present_scanout_bind_locked(
         result.no_sender;
     fb_state.stats.dxg_display_bind_provider_no_completion =
         result.no_completion;
+    fb_state.stats.dxg_display_bind_request_metadata_complete =
+        result.request_metadata_complete;
+    fb_state.stats.dxg_display_bind_request_sync_metadata_complete =
+        result.request_sync_metadata_complete;
+    fb_state.stats.dxg_display_bind_request_missing_metadata =
+        result.request_missing_metadata;
     fb_state.stats.dxg_scanout_bind_candidate_sender_contracts =
         result.sender_present != 0;
     fb_state.stats.dxg_scanout_bind_candidate_completion_contracts =

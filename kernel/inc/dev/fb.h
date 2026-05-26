@@ -1349,6 +1349,9 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_no_host_abi; /* provider lacks ABI */
     uint64 dxg_display_bind_provider_no_sender; /* provider lacks sender */
     uint64 dxg_display_bind_provider_no_completion; /* provider lacks done */
+    uint64 dxg_display_bind_request_metadata_complete; /* provider saw shape */
+    uint64 dxg_display_bind_request_sync_metadata_complete; /* sync/fence seen */
+    uint64 dxg_display_bind_request_missing_metadata; /* FB_GPU_DXG_PRESENT_META_* */
     uint64 dxg_display_bind_lock_dropped_submits; /* submits outside fb lock */
     uint64 dxg_display_bind_revalidate_attempts; /* post-submit rechecks */
     uint64 dxg_display_bind_revalidate_successes; /* source still current */

@@ -193,6 +193,9 @@ struct hyperv_dxg_display_bind_result {
     uint32 no_host_abi;
     uint32 no_sender;
     uint32 no_completion;
+    uint32 request_metadata_complete;
+    uint32 request_sync_metadata_complete;
+    uint64 request_missing_metadata;
 };
 int hyperv_dxg_shared_resource_snapshot_from_fd(
     int fd, struct hyperv_dxg_shared_resource_snapshot *snapshot);
