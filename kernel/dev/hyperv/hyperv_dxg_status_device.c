@@ -245,7 +245,7 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         "dxg_context_priv_head=len:%u bytes:%02x%02x%02x%02x%02x%02x%02x%02x\n"
         "dxg_destroy_last=device_len:%u device_ret:%d device_status:0x%x context_len:%u context_ret:%d context_status:0x%x paging_len:%u paging_ret:%d paging_status:0x%x sync_len:%u sync_ret:%d sync_status:0x%x sync_handle:0x%x sync_device:0x%x sync_type:%u sync_flags:0x%x sync_global:0x%x sync_monitor_fence:%u sync_cmd_len:%u sync_wire:%u sync_ext:%u sync_eoff:%u\n"
         "dxg_flushdevice_last=len:%u ret:%d status:0x%x device:0x%x reason:%u\n"
-        "dxg_hwqueue_last=create_len:%u create_ret:%d create_status:0x%x context:0x%x flags:0x%x priv:%u queue:0x%x fence:0x%x fence_cpu:0x%lx fence_gpu:0x%lx submit_len:%u submit_ret:%d destroy_len:%u destroy_ret:%d\n"
+        "dxg_hwqueue_last=create_len:%u create_ret:%d create_status:0x%x context:0x%x flags:0x%x priv:%u queue:0x%x fence:0x%x fence_cpu:0x%lx fence_gpu:0x%lx submit_len:%u submit_ret:%d submit_status:0x%x destroy_len:%u destroy_ret:%d\n"
         "dxg_hwqueue_unwind=attempts:%u successes:%u ret:%d process:0x%x queue:0x%x fence:0x%x\n"
         "dxg_hwqueue_priv_head=create_len:%u create:%02x%02x%02x%02x%02x%02x%02x%02x submit_queue:0x%x submit_fence:%lu submit_cmd_len:%u submit_priv:%u submit_len:%u submit:%02x%02x%02x%02x%02x%02x%02x%02x\n"
         "dxg_probe_attempts=%u successes=%u last_ret=%d\n"
@@ -1610,7 +1610,9 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
         hvdxg.createhwqueue_last_queue, hvdxg.createhwqueue_last_fence,
         hvdxg.createhwqueue_last_fence_cpu,
         hvdxg.createhwqueue_last_fence_gpu, hvdxg.submithwqueue_last_len,
-        hvdxg.submithwqueue_last_ret, hvdxg.destroyhwqueue_last_len,
+        hvdxg.submithwqueue_last_ret,
+        (uint32)hvdxg.submithwqueue_last_status,
+        hvdxg.destroyhwqueue_last_len,
         hvdxg.destroyhwqueue_last_ret,
         hvdxg.createhwqueue_unwind_attempts,
         hvdxg.createhwqueue_unwind_successes,

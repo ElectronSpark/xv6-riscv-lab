@@ -1897,6 +1897,7 @@ static struct {
     uint32 createhwqueue_unwind_fence;
     uint32 submithwqueue_last_len;
     int32 submithwqueue_last_ret;
+    int32 submithwqueue_last_status;
     uint32 submithwqueue_last_queue;
     uint64 submithwqueue_last_fence_id;
     uint32 submithwqueue_last_command_length;

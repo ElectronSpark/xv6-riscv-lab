@@ -2945,6 +2945,7 @@ submitcommand_done:
             req.hwqueue_progress_fence_id;
         hvdxg.submithwqueue_last_command_length = req.command_length;
         hvdxg.submithwqueue_last_priv_size = req.priv_drv_data_size;
+        hvdxg.submithwqueue_last_status = 0;
         hvdxg.submithwqueue_last_priv_head_len = 0;
         memset(hvdxg.submithwqueue_last_priv_head, 0,
                sizeof(hvdxg.submithwqueue_last_priv_head));
@@ -2994,6 +2995,8 @@ submitcommand_done:
             ret = hvdxg_send_sync_vgpu(submit, command_len, &status,
                                        sizeof(status), &actual_len);
         }
+        if (actual_len >= sizeof(status))
+            hvdxg.submithwqueue_last_status = status.v;
         if (ret == 0 && actual_len >= sizeof(status))
             ret = hvdxg_ntstatus_to_errno(status);
         hvdxg.submithwqueue_last_len = actual_len;
