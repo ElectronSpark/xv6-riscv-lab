@@ -594,6 +594,23 @@ static int gpu_nouveau_pci_probe(struct pci_device_info *pdev,
                          gpu_nouveau_pci.msi_cap);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_msix_cap,
                          gpu_nouveau_pci.msix_cap);
+    /*
+     * Record the real identity of the assigned NVIDIA function for the DDA
+     * device-presence matrix (GPU plan 1.2).  Every value here is read back
+     * from the probed pci_device_info, so a nonzero nouveau_dda_present can
+     * only mean a physical 0x10DE BAR-backed display function reached the
+     * guest over Hyper-V vPCI.  bar_count counts the BARs we actually claimed.
+     */
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_vendor_id,
+                         pdev->vendor_id);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_device_id,
+                         pdev->device_id);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_class_code,
+                         pdev->class_code & 0xffffffU);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_bar_count,
+                         (uint64)(gpu_nouveau_pci.bar0_claimed +
+                                  gpu_nouveau_pci.bar1_claimed));
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_present, 1);
     gpu_nouveau_pci_publish_core_state(pdev);
     gpu_nouveau_display_create_failclosed();
     gpu_nouveau_stat_set(
@@ -657,6 +674,11 @@ static void gpu_nouveau_pci_remove(struct pci_device_info *pdev)
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_irq_pin, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_msi_cap, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_msix_cap, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_present, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_vendor_id, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_device_id, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_class_code, 0);
+    gpu_nouveau_stat_set(&fb_state.stats.nouveau_dda_bar_count, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_bar0_claimed, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_bar1_claimed, 0);
     gpu_nouveau_stat_set(&fb_state.stats.nouveau_pci_resource_iomaps, 0);

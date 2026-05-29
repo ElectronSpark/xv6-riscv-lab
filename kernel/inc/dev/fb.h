@@ -1082,6 +1082,19 @@ struct fb_gpu_stats {
     uint64 nouveau_pci_dma_map_last_addr; /* last DMA bus address */
     uint64 nouveau_pci_dma_map_last_ret; /* last DMA map errno */
     uint64 nouveau_pci_native_present_credit; /* native scanout credit */
+    /*
+     * DDA device-presence facts (GPU plan section 1.2).  These record the
+     * REAL identity of the NVIDIA function that the Nouveau PCI probe accepted
+     * over the Hyper-V vPCI bus.  They are zero when no physical 0x10DE BAR-
+     * backed display function is assigned to the guest, in which case the
+     * presence matrix reports fail-closed.  vendor/device/class/bar values are
+     * copied verbatim from the probed pci_device_info, never synthesized.
+     */
+    uint64 nouveau_dda_present; /* 1 == real NVIDIA DDA function accepted */
+    uint64 nouveau_dda_vendor_id; /* real PCI vendor id (expect 0x10DE) */
+    uint64 nouveau_dda_device_id; /* real PCI device id of assigned GPU */
+    uint64 nouveau_dda_class_code; /* real 24-bit PCI class code */
+    uint64 nouveau_dda_bar_count; /* count of usable (nonzero-len) BARs */
     uint64 nouveau_native_display_ready; /* real DDA/Nouveau display ready */
     uint64 nouveau_dda_native_display_present; /* HW present path exists */
     uint64 nouveau_display_probe_attempts; /* DDA display readiness probes */
