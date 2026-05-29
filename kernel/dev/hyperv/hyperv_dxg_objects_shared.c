@@ -5878,6 +5878,25 @@ int hyperv_dxg_display_bind_submit_failclosed(
     result->completion_demux_attempts = 0;
     result->completion_demux_blocked_no_contract =
         result->preflight_ready != 0 ? 1 : 0;
+    /*
+     * Define the narrow display-bind packet boundary without emitting it.
+     * The wire format a future GPU-P/DDA sender must marshal is now declared
+     * (packet_boundary_defined=1), but the fail-closed provider never puts a
+     * packet on the wire: request/completion stay unsent and host_saw_packet
+     * remains 0, so no native-present or OpenGL-submit credit is granted.
+     */
+    result->packet_boundary_defined = 1;
+    result->packet_abi_version = HV_DXG_DISPLAY_BIND_PACKET_ABI_VERSION;
+    result->packet_request_command_id =
+        HV_DXG_DISPLAY_BIND_PACKET_CMD_REQUEST;
+    result->packet_completion_command_id =
+        HV_DXG_DISPLAY_BIND_PACKET_CMD_COMPLETION;
+    result->packet_request_size =
+        (uint32)sizeof(struct hyperv_dxg_display_bind_packet_request);
+    result->packet_completion_size =
+        (uint32)sizeof(struct hyperv_dxg_display_bind_packet_completion);
+    result->packet_request_sent = 0;
+    result->packet_completion_seen = 0;
     result->block_reason = block_reason;
     result->status = EOPNOTSUPP;
     return -EOPNOTSUPP;

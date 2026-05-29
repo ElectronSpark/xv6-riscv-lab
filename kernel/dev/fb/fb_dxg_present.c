@@ -1250,8 +1250,16 @@ fb_dxg_present_scanout_bind_locked(
         fb_state.stats.dxg_scanout_bind_weak_software_or_readback_path++;
     if (source != NULL) {
         source->display_bind_attempts++;
-        source->display_bind_present_id = result.present_id;
-        source->display_bind_completed_id = result.completed_id;
+        /*
+         * Only an accepted result (which the strict accept gate already
+         * requires to carry present_id != 0 and completed_id >= present_id)
+         * may record nonzero ids.  A rejected result must force the recorded
+         * ids to zero regardless of what the provider returned, so a future
+         * partial or buggy sender cannot leak a nonzero present/completed id
+         * into the validator-read display-bind stats through the reject path.
+         */
+        source->display_bind_present_id = accept ? result.present_id : 0;
+        source->display_bind_completed_id = accept ? result.completed_id : 0;
         source->display_bind_source_generation =
             bind.source_generation;
         source->display_bind_resource_generation =

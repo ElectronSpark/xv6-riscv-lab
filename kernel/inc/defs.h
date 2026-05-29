@@ -279,6 +279,78 @@ struct hyperv_dxg_display_bind_result {
     uint32 request_metadata_complete;
     uint32 request_sync_metadata_complete;
     uint64 request_missing_metadata;
+    /*
+     * Display-bind packet wire-format boundary description (fail-closed).
+     *
+     * These fields describe the narrow GPU-P/DDA display-bind packet that a
+     * future sender would marshal. They are DESCRIPTIVE ONLY: the current
+     * fail-closed provider defines the boundary (packet_boundary_defined=1)
+     * but never emits or receives a packet (packet_request_sent=0,
+     * packet_completion_seen=0, host_saw_packet stays 0) and grants zero
+     * native-present / OpenGL-submit credit. They intentionally do NOT reuse
+     * the runtime command_id/transaction_id/channel fields above, which stay
+     * zero until a real packet is actually sent on the wire.
+     */
+    uint32 packet_boundary_defined;       /* 1 = wire format is defined */
+    uint32 packet_abi_version;            /* HV_DXG_DISPLAY_BIND_PACKET_ABI_VERSION */
+    uint32 packet_request_command_id;     /* proposed cmd id, not runtime */
+    uint32 packet_completion_command_id;  /* proposed completion cmd id */
+    uint32 packet_request_size;           /* sizeof request packet */
+    uint32 packet_completion_size;        /* sizeof completion packet */
+    uint32 packet_request_sent;           /* 0 until a real sender exists */
+    uint32 packet_completion_seen;        /* 0 until a real completion path */
+};
+/*
+ * Display-bind VMBus packet wire-format boundary (fail-closed definition).
+ *
+ * This declares the narrow guest->host request packet and host->guest
+ * completion packet that a future GPU-P/DDA display-bind sender would
+ * marshal onto the DXG VMBus channel. It is a DEFINITION ONLY: the current
+ * provider never emits or receives these packets, so it grants zero
+ * native-present / OpenGL-submit credit. Only a real, documented GPU-P/DDA
+ * sender wired into hyperv_dxg_display_bind_submit() may marshal these and
+ * set packet_request_sent / host_saw_packet / packet_completion_seen to 1.
+ *
+ * The proposed command ids are placed in the non-WSL extension range so they
+ * cannot be confused with WSL guest-to-host enum ids (34/35/38) or the
+ * host-to-VM PROPAGATEPRESENTHISTORYTOKEN completion enum id (1).
+ */
+#define HV_DXG_DISPLAY_BIND_PACKET_ABI_VERSION 1u
+#define HV_DXG_DISPLAY_BIND_PACKET_CMD_REQUEST    0x80000001u
+#define HV_DXG_DISPLAY_BIND_PACKET_CMD_COMPLETION 0x80000002u
+struct hyperv_dxg_display_bind_packet_request {
+    uint32 abi_version;       /* HV_DXG_DISPLAY_BIND_PACKET_ABI_VERSION */
+    uint32 command_id;        /* HV_DXG_DISPLAY_BIND_PACKET_CMD_REQUEST */
+    uint64 transaction_id;    /* sender-assigned, 0 until a real sender */
+    uint32 present_source;    /* registered source to bind */
+    uint32 flags;             /* FB_GPU_DXG_PRESENT_F_* */
+    uint64 source_generation; /* stable source registration token */
+    uint64 resource_generation; /* stable resource metadata token */
+    uint32 device;
+    uint32 resource;
+    uint32 allocation;
+    uint32 allocation_count;
+    uint32 width;
+    uint32 height;
+    uint32 pitch;
+    uint32 format;
+    uint64 modifier;
+    uint32 adapter_luid_low;
+    uint32 adapter_luid_high;
+    uint32 sync_object;       /* monitored fence handle, if WAIT_SYNC */
+    uint32 reserved0;
+    uint64 fence_value;       /* acquire fence target, if WAIT_SYNC */
+};
+struct hyperv_dxg_display_bind_packet_completion {
+    uint32 abi_version;       /* HV_DXG_DISPLAY_BIND_PACKET_ABI_VERSION */
+    uint32 command_id;        /* HV_DXG_DISPLAY_BIND_PACKET_CMD_COMPLETION */
+    uint64 transaction_id;    /* echoes the request transaction id */
+    uint32 completion_source; /* FB_GPU_DXG_PRESENT_COMPLETION_* */
+    uint32 status;            /* host-side bind/scanout status */
+    uint64 source_generation; /* must echo the request source generation */
+    uint64 resource_generation; /* must echo the request resource generation */
+    uint64 present_id;        /* nonzero only on real display completion */
+    uint64 completed_id;      /* >= present_id only on real completion */
 };
 int hyperv_dxg_shared_resource_snapshot_from_fd(
     int fd, struct hyperv_dxg_shared_resource_snapshot *snapshot);
