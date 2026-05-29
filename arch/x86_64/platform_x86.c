@@ -328,6 +328,8 @@ static void x86_acpi_scan_pci_root_hids(const struct acpi_sdt_header *hdr,
     }
 }
 
+static void x86_acpi_scan_mmio_windows(const struct acpi_sdt_header *hdr);
+
 static void x86_acpi_scan_facp_dsdt(const struct acpi_sdt_header *facp,
                                     int *pnp0a03, int *pnp0a08)
 {
@@ -352,6 +354,88 @@ static void x86_acpi_scan_facp_dsdt(const struct acpi_sdt_header *facp,
         return;
     }
     x86_acpi_scan_pci_root_hids(dsdt, pnp0a03, pnp0a08);
+    x86_acpi_scan_mmio_windows(dsdt);
+}
+
+/*
+ * Record a high-MMIO producer window discovered in an ACPI resource template.
+ * Values are copied verbatim from the real ACPI descriptor; ranges below 4GB
+ * (low MMIO gap) are ignored because assigned-device (DDA) BARs for large GPU
+ * apertures live in the high window the host advertises. Duplicates and zero
+ * lengths are dropped.
+ */
+static void x86_acpi_store_high_mmio(uint64 base, uint64 len)
+{
+    if (len == 0 || base < 0x100000000ULL)
+        return;
+    if (base + len < base)
+        return; /* overflow */
+    for (int i = 0; i < platform.high_mmio_count; i++) {
+        if (platform.high_mmio[i].base == base &&
+            platform.high_mmio[i].size == len)
+            return;
+    }
+    if (platform.high_mmio_count >= ACPI_HIGH_MMIO_MAX)
+        return;
+    platform.high_mmio[platform.high_mmio_count].base = base;
+    platform.high_mmio[platform.high_mmio_count].size = len;
+    platform.high_mmio_count++;
+    printf("ACPI: high MMIO window base=0x%lx size=0x%lx (DDA BAR pool)\n",
+           base, len);
+}
+
+/*
+ * Scan an ACPI table blob (DSDT/SSDT) for QWord Address Space Descriptors
+ * (large resource tag 0x8A) describing memory producer windows above 4GB.
+ * On Hyper-V Gen2 VMs the VMBus root _CRS exposes the high-MMIO aperture this
+ * way; the same descriptors back the window configured by the host's
+ * -HighMemoryMappedIoSpace setting. The scan validates the descriptor layout
+ * to avoid matching unrelated AML bytes.
+ */
+static void x86_acpi_scan_mmio_windows(const struct acpi_sdt_header *hdr)
+{
+    const uint8 *base;
+    uint32 len;
+
+    if (!x86_acpi_table_ok(hdr))
+        return;
+    base = (const uint8 *)hdr;
+    len = hdr->length;
+    if (len < sizeof(*hdr) + 46)
+        return;
+
+    for (uint32 i = sizeof(*hdr); i + 46 <= len; i++) {
+        uint16 dlen;
+        uint8 res_type;
+        uint64 addr_min;
+        uint64 addr_max;
+        uint64 addr_len;
+
+        if (base[i] != 0x8A)
+            continue;
+        /* Large resource length covers bytes after the 3-byte tag+length. */
+        dlen = x86_acpi_read_u16(base, i + 1);
+        if (dlen < 43 || (uint64)i + 3 + dlen > len)
+            continue;
+        res_type = base[i + 3];
+        if (res_type != 0) /* 0 == memory range */
+            continue;
+        addr_min = x86_acpi_read_u64(base, i + 14);
+        addr_max = x86_acpi_read_u64(base, i + 22);
+        addr_len = x86_acpi_read_u64(base, i + 38);
+
+        /* Derive length when the descriptor only fixes the address range. */
+        if (addr_len == 0 && addr_max >= addr_min)
+            addr_len = addr_max - addr_min + 1;
+        if (addr_len == 0 || addr_min < 0x100000000ULL)
+            continue;
+        /* Sanity: aligned and self-consistent (min..max bounds the length). */
+        if ((addr_min & 0xFFFULL) != 0)
+            continue;
+        if (addr_max >= addr_min && addr_len > (addr_max - addr_min + 1))
+            continue;
+        x86_acpi_store_high_mmio(addr_min, addr_len);
+    }
 }
 
 static int x86_acpi_log_mcfg(const struct acpi_sdt_header *mcfg)
@@ -432,6 +516,7 @@ static void x86_acpi_log_pci_diagnostics(const struct acpi_sdt_header *root,
         } else if (x86_acpi_sig_eq(hdr->signature, "SSDT")) {
             ssdt_count++;
             x86_acpi_scan_pci_root_hids(hdr, &pnp0a03, &pnp0a08);
+            x86_acpi_scan_mmio_windows(hdr);
         }
     }
 

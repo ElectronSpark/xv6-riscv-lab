@@ -639,6 +639,7 @@ void hyperv_input_init(void)
             } else {
                 (void)hvpci_register_backend();
                 (void)hvpci_config_window_init();
+                (void)hvpci_bar_window_init();
                 (void)hvpci_enter_d0();
                 (void)hvpci_query_bus_relations();
                 printf("hyperv-pci: channel open relid=%u version=0x%x\n",

@@ -2539,6 +2539,20 @@ static struct {
     uint32 config_window_rejects;
     uint64 config_window_candidate;
     uint64 config_window_limit;
+    /*
+     * Device-BAR MMIO window for assigned (DDA) functions. Sub-allocated from
+     * the ACPI-discovered high-MMIO aperture (platform.high_mmio[]) and bounded
+     * by the host offer's MMIO budget. Assigned BAR base addresses are written
+     * back through the config window so the host VSP programs the passed-through
+     * device. All values are derived from real ACPI/offer data; none synthetic.
+     */
+    uint64 bar_window_base;
+    uint64 bar_window_size;
+    uint64 bar_window_next;
+    uint32 bar_window_source;   /* 0=none, 1=ACPI high-mmio */
+    int32 bar_window_ret;
+    uint32 bar_assign_count;
+    uint32 bar_assign_fail;
     spinlock_t config_lock;
     struct {
         uint32 win_slot;

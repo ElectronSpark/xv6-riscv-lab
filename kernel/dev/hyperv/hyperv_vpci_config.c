@@ -219,6 +219,164 @@ static void hvpci_record_child(uint32 index, const void *desc,
     hvpci.child[index].registered = 0;
 }
 
+/*
+ * Select the device-BAR MMIO window for assigned (DDA) functions. The base and
+ * size come from the largest ACPI-discovered high-MMIO aperture
+ * (platform.high_mmio[], parsed from the Hyper-V VMBus _CRS QWordMemory
+ * descriptors), clamped to the host offer's MMIO budget. When no aperture is
+ * advertised we fail closed and leave BAR assignment disabled rather than
+ * guessing an address.
+ */
+static int hvpci_bar_window_init(void)
+{
+    uint64 budget;
+
+    hvpci.bar_window_base = 0;
+    hvpci.bar_window_size = 0;
+    hvpci.bar_window_next = 0;
+    hvpci.bar_window_source = 0;
+    hvpci.bar_window_ret = -ENODEV;
+    hvpci.bar_assign_count = 0;
+    hvpci.bar_assign_fail = 0;
+
+    for (int i = 0; i < platform.high_mmio_count; i++) {
+        if (platform.high_mmio[i].size > hvpci.bar_window_size) {
+            hvpci.bar_window_base = platform.high_mmio[i].base;
+            hvpci.bar_window_size = platform.high_mmio[i].size;
+            hvpci.bar_window_source = 1;
+        }
+    }
+    if (hvpci.bar_window_source == 0 || hvpci.bar_window_size == 0) {
+        printf("hyperv-pci: no ACPI high-MMIO window; DDA BAR assignment "
+               "disabled\n");
+        hvpci.bar_window_ret = -ENODEV;
+        return hvpci.bar_window_ret;
+    }
+
+    budget = (uint64)hvpci.offer_mmio_megabytes << 20;
+    if (budget != 0 && budget < hvpci.bar_window_size)
+        hvpci.bar_window_size = budget;
+    hvpci.bar_window_next = hvpci.bar_window_base;
+    hvpci.bar_window_ret = 0;
+    printf("hyperv-pci: DDA BAR window base=0x%lx size=0x%lx offer_mmio=%uMB\n",
+           hvpci.bar_window_base, hvpci.bar_window_size,
+           hvpci.offer_mmio_megabytes);
+    return 0;
+}
+
+/* Bump-allocate a naturally aligned region from the device-BAR window. */
+static uint64 hvpci_bar_alloc(uint64 size)
+{
+    uint64 aligned;
+    uint64 end;
+
+    if (size == 0 || hvpci.bar_window_ret != 0)
+        return 0;
+    /* PCI BAR sizes are always powers of two, so size-1 is a valid mask. */
+    aligned = (hvpci.bar_window_next + (size - 1)) & ~(size - 1);
+    end = aligned + size;
+    if (end < aligned)
+        return 0; /* overflow */
+    if (end > hvpci.bar_window_base + hvpci.bar_window_size)
+        return 0; /* exhausted */
+    hvpci.bar_window_next = end;
+    return aligned;
+}
+
+/*
+ * Probe a registered child's memory BARs, allocate guest-physical addresses
+ * from the device-BAR window, and program them back through the config window
+ * so the host VSP maps the passed-through device. Memory Space and Bus Master
+ * are then enabled. BAR sizes are read from the device; addresses come from the
+ * ACPI window; nothing is fabricated. Runs before PCI-core registration so the
+ * device is presented with usable resources.
+ */
+static void hvpci_assign_child_bars(uint32 idx)
+{
+    uint32 token;
+    uint32 cmd;
+
+    if (idx >= HVPCI_CHILD_MAX || hvpci.bar_window_ret != 0)
+        return;
+    token = hvpci.child[idx].win_slot;
+
+    for (int i = 0; i < 6; i++) {
+        uint16 off = (uint16)(0x10 + i * 4);
+        uint32 bar;
+        uint32 size_lo;
+        uint32 size_hi = 0;
+        uint32 is_64;
+        uint64 mask64;
+        uint64 size;
+        uint64 base;
+
+        if (hvpci_config_read(&hvpci, token, off, 4, &bar) != 0)
+            break;
+        if ((bar & 0x1U) != 0)
+            continue; /* I/O BAR: not used by DDA GPU apertures */
+        is_64 = ((bar >> 1) & 0x3U) == 0x2U;
+        if (is_64 && i >= 5)
+            break; /* malformed: 64-bit BAR with no high register */
+
+        if (hvpci_config_write(&hvpci, token, off, 4, 0xffffffffU) != 0)
+            continue;
+        if (hvpci_config_read(&hvpci, token, off, 4, &size_lo) != 0)
+            continue;
+        if (is_64) {
+            if (hvpci_config_write(&hvpci, token, (uint16)(off + 4), 4,
+                                   0xffffffffU) != 0)
+                continue;
+            if (hvpci_config_read(&hvpci, token, (uint16)(off + 4), 4,
+                                  &size_hi) != 0)
+                continue;
+        }
+
+        mask64 = ((uint64)size_hi << 32) | (uint64)(size_lo & ~0xfU);
+        if (mask64 == 0) {
+            /* Unimplemented BAR: restore and move on. */
+            (void)hvpci_config_write(&hvpci, token, off, 4, bar);
+            if (is_64) {
+                (void)hvpci_config_write(&hvpci, token, (uint16)(off + 4), 4,
+                                         0);
+                i++;
+            }
+            continue;
+        }
+        size = (~mask64) + 1ULL;
+        base = hvpci_bar_alloc(size);
+        if (base == 0) {
+            /* Window exhausted: fail closed, restore original BAR. */
+            (void)hvpci_config_write(&hvpci, token, off, 4, bar);
+            if (is_64)
+                (void)hvpci_config_write(&hvpci, token, (uint16)(off + 4), 4,
+                                         0);
+            hvpci.bar_assign_fail++;
+            printf("hyperv-pci: slot=0x%x bar%d size=0x%lx unassigned "
+                   "(window exhausted)\n", token, i, size);
+            if (is_64)
+                i++;
+            continue;
+        }
+
+        (void)hvpci_config_write(&hvpci, token, off, 4,
+                                 ((uint32)base & 0xfffffff0U) | (bar & 0xfU));
+        if (is_64)
+            (void)hvpci_config_write(&hvpci, token, (uint16)(off + 4), 4,
+                                     (uint32)(base >> 32));
+        hvpci.bar_assign_count++;
+        printf("hyperv-pci: assigned slot=0x%x bar%d base=0x%lx size=0x%lx%s\n",
+               token, i, base, size, is_64 ? " (64-bit)" : "");
+        if (is_64)
+            i++;
+    }
+
+    /* Enable Memory Space + Bus Master for the assigned function. */
+    if (hvpci_config_read(&hvpci, token, 0x04, 2, &cmd) == 0) {
+        cmd |= 0x0006U;
+        (void)hvpci_config_write(&hvpci, token, 0x04, 2, cmd & 0xffffU);
+    }
+}
+
 static void hvpci_register_children(void)
 {
     uint32 limit;
@@ -235,6 +393,12 @@ static void hvpci_register_children(void)
         if (hvpci.child[i].registered)
             continue;
         memset(&child, 0, sizeof(child));
+        /*
+         * Program assigned-device BARs before the PCI core enumerates the
+         * function so it is presented with usable resources. Uses the win_slot
+         * token recorded in hvpci_record_child; independent of bus/dev/func.
+         */
+        hvpci_assign_child_bars(i);
         child.backend_index = (uint32)hvpci.backend_index;
         child.backend_token = hvpci.child[i].win_slot;
         child.vendor_id = hvpci.child[i].vendor_id;

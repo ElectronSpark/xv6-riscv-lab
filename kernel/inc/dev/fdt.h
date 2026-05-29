@@ -260,6 +260,18 @@ struct platform_info {
     uint32 pmic_power_bus;   // I2C adapter-id hosting the PMIC
     uint32 pmic_power_addr;  // I2C slave address (e.g. 0x41)
 
+    // High MMIO windows discovered from ACPI (e.g. Hyper-V Gen2 VMBus _CRS
+    // QWordMemory producer ranges above 4GB). These describe the guest-physical
+    // MMIO aperture the host advertises (configured via -HighMemoryMappedIoSpace)
+    // and from which assigned-device (DDA) BARs must be allocated. Values are
+    // copied verbatim from real ACPI resource descriptors; no synthetic ranges.
+#define ACPI_HIGH_MMIO_MAX 4
+    int high_mmio_count;
+    struct {
+        uint64 base;
+        uint64 size;
+    } high_mmio[ACPI_HIGH_MMIO_MAX];
+
     // Kernel command line (from bootloader: FDT /chosen/bootargs,
     // QEMU -append, PVH cmdline, or multiboot cmdline)
 #define CMDLINE_MAX 512
