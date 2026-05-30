@@ -393,7 +393,8 @@ static void gpu_backend_fill(struct fb_gpu_backend_info *info)
         info->dxg_vgpu_open = dxg.vgpu_open_ok != 0;
         info->dxg_d3dkmt = hyperv_dxg_d3dkmt_ready() != 0;
         if (info->dxg_d3dkmt)
-            info->flags |= FB_GPU_BACKEND_F_D3DKMT;
+            info->flags |= FB_GPU_BACKEND_F_D3DKMT |
+                           FB_GPU_BACKEND_F_GPU_COMPUTE;
         info->dxg_global_status = dxg.global_open_status;
         info->dxg_vgpu_status = dxg.vgpu_open_status;
         info->dxg_global_rx = dxg.global_rx_packets;
@@ -402,7 +403,7 @@ static void gpu_backend_fill(struct fb_gpu_backend_info *info)
                                 "hyperv-dxg");
         gpu_backend_copy_string(info->renderer, sizeof(info->renderer),
                                 info->dxg_d3dkmt ?
-                                "Hyper-V GPU-PV D3DKMT/DXCore; OpenGL-submit gated" :
+                                "Hyper-V GPU-PV D3DKMT/DXCore; GPU-compute ready, OpenGL-submit gated" :
                                 "Hyper-V GPU-PV DXG transport; D3DKMT pending");
     }
 }

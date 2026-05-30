@@ -191,6 +191,14 @@
 #define FB_GPU_BACKEND_F_DXG_SAME_ADAPTER    0x0080
 #define FB_GPU_BACKEND_F_DXG_NO_READBACK     0x0100
 #define FB_GPU_BACKEND_F_DDA_NOUVEAU         0x0200
+/*
+ * Real GPU compute (D3D12/D3DKMT submit + hardware monitored-fence) is reachable
+ * on this backend. This is NOT the same promise as FB_GPU_BACKEND_F_OPENGL_SUBMIT,
+ * which specifically guarantees a *presented* OpenGL frame. GPU_COMPUTE only means
+ * the runtime D3DKMT path can submit a command buffer that completes on the host
+ * GPU and signals a real fence (proven in-guest by user/programs/d3d12probe).
+ */
+#define FB_GPU_BACKEND_F_GPU_COMPUTE         0x0400
 
 #define FB_GPU_KMS_PRESENT_LANE_NONE         0
 #define FB_GPU_KMS_PRESENT_LANE_DUMB         1
