@@ -1048,6 +1048,175 @@ static void x86_consider_early_mem_end(uint64 region_base, uint64 region_end,
         *chosen_end = region_end;
 }
 
+/*
+ * Ingest a single e820-style region into the platform memory/reserved tables.
+ * Shared by the static bzImage e820 path and the fw_cfg "etc/e820" path.
+ */
+static void x86_ingest_e820_entry(uint64 region_base, uint64 region_end,
+                                  uint32 type, uint64 *chosen_end)
+{
+    if (region_end <= region_base ||
+        region_base >= X86_MAX_PROBED_PA || region_end > X86_MAX_PROBED_PA)
+        return;
+
+    if (type == 1) {
+        if (region_end > 0x100000ULL && platform.mem_count < MAX_MEM_REGIONS) {
+            if (region_base < 0x100000ULL)
+                region_base = 0x100000ULL;
+            if (region_base < region_end) {
+                platform.mem[platform.mem_count].base = region_base;
+                platform.mem[platform.mem_count].size =
+                    region_end - region_base;
+                platform.total_mem += region_end - region_base;
+                x86_consider_early_mem_end(region_base, region_end, chosen_end);
+                platform.mem_count++;
+            }
+        }
+    } else if (platform.reserved_count < MAX_RESERVED_REGIONS) {
+        platform.reserved[platform.reserved_count].base = region_base;
+        platform.reserved[platform.reserved_count].size =
+            region_end - region_base;
+        platform.reserved_count++;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  QEMU fw_cfg memory map (etc/e820)                                  */
+/*                                                                     */
+/*  The bzImage setup header we synthesize only advertises a fixed     */
+/*  static e820 map (1 GiB) and cannot know the runtime -m size.       */
+/*  QEMU's fw_cfg "etc/e820" file always reflects the real machine     */
+/*  memory layout, so prefer it when present.                          */
+/* ------------------------------------------------------------------ */
+
+#define X86_FWCFG_PORT_SEL   0x510
+#define X86_FWCFG_PORT_DATA  0x511
+#define X86_FWCFG_SIGNATURE  0x0000
+#define X86_FWCFG_FILE_DIR   0x0019
+
+static inline void x86_fwcfg_select(uint16 key)
+{
+    asm volatile("outw %0, %1" : : "a"(key), "Nd"((uint16)X86_FWCFG_PORT_SEL));
+}
+
+static inline uint8 x86_fwcfg_data_byte(void)
+{
+    uint8 v;
+    asm volatile("inb %1, %0" : "=a"(v) : "Nd"((uint16)X86_FWCFG_PORT_DATA));
+    return v;
+}
+
+static void x86_fwcfg_read(void *buf, uint32 len)
+{
+    uint8 *p = (uint8 *)buf;
+    for (uint32 i = 0; i < len; i++)
+        p[i] = x86_fwcfg_data_byte();
+}
+
+static uint32 x86_be32(const uint8 *p)
+{
+    return ((uint32)p[0] << 24) | ((uint32)p[1] << 16) |
+           ((uint32)p[2] << 8) | (uint32)p[3];
+}
+
+static uint64 x86_le64(const uint8 *p)
+{
+    uint64 v = 0;
+    for (int i = 7; i >= 0; i--)
+        v = (v << 8) | p[i];
+    return v;
+}
+
+static uint32 x86_le32(const uint8 *p)
+{
+    return (uint32)p[0] | ((uint32)p[1] << 8) |
+           ((uint32)p[2] << 16) | ((uint32)p[3] << 24);
+}
+
+static int x86_fwcfg_present(void)
+{
+    uint8 sig[4];
+    x86_fwcfg_select(X86_FWCFG_SIGNATURE);
+    x86_fwcfg_read(sig, sizeof(sig));
+    return sig[0] == 'Q' && sig[1] == 'E' && sig[2] == 'M' && sig[3] == 'U';
+}
+
+static int x86_fwcfg_name_eq(const char *a, const char *b, uint32 max)
+{
+    for (uint32 i = 0; i < max; i++) {
+        if (a[i] != b[i])
+            return 0;
+        if (a[i] == '\0')
+            return 1;
+    }
+    return 1;
+}
+
+/* Locate a fw_cfg file by name, returning its selector key and byte size. */
+static int x86_fwcfg_find_file(const char *name, uint16 *key_out,
+                               uint32 *size_out)
+{
+    x86_fwcfg_select(X86_FWCFG_FILE_DIR);
+
+    uint8 cnt[4];
+    x86_fwcfg_read(cnt, sizeof(cnt));
+    uint32 count = x86_be32(cnt);
+    if (count > 4096)
+        return -1;
+
+    for (uint32 i = 0; i < count; i++) {
+        uint8 entry[64];           /* size(4) select(2) reserved(2) name(56) */
+        x86_fwcfg_read(entry, sizeof(entry));
+        uint32 fsize = x86_be32(entry);
+        uint16 sel = (uint16)(((uint16)entry[4] << 8) | entry[5]);
+        const char *fname = (const char *)(entry + 8);
+        if (x86_fwcfg_name_eq(fname, name, 56)) {
+            *key_out = sel;
+            *size_out = fsize;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+/*
+ * Read QEMU's "etc/e820" memory map.  Returns the number of usable RAM
+ * regions ingested, or -1 if fw_cfg / the file is unavailable.
+ */
+static int x86_fwcfg_collect_e820(uint64 *chosen_end)
+{
+    if (!x86_fwcfg_present())
+        return -1;
+
+    uint16 key;
+    uint32 size;
+    if (x86_fwcfg_find_file("etc/e820", &key, &size) != 0)
+        return -1;
+    if (size == 0 || (size % 20) != 0)
+        return -1;
+
+    uint32 n = size / 20;
+    if (n > 256)
+        n = 256;
+
+    x86_fwcfg_select(key);
+    int ram_regions = 0;
+    for (uint32 i = 0; i < n; i++) {
+        uint8 raw[20];             /* addr(8) length(8) type(4), little-endian */
+        x86_fwcfg_read(raw, sizeof(raw));
+        uint64 addr = x86_le64(raw);
+        uint64 len = x86_le64(raw + 8);
+        uint32 type = x86_le32(raw + 16);
+        if (len == 0 || addr + len < addr)
+            continue;
+        uint32 before = platform.mem_count;
+        x86_ingest_e820_entry(addr, addr + len, type, chosen_end);
+        if (platform.mem_count > before)
+            ram_regions++;
+    }
+    return ram_regions > 0 ? ram_regions : -1;
+}
+
 static int x86_parse_linux_boot_params(void *boot_params, uint64 *base_out,
                                        uint64 *size_out)
 {
@@ -1063,40 +1232,28 @@ static int x86_parse_linux_boot_params(void *boot_params, uint64 *base_out,
     if (entries == 0 || entries > 128)
         return -1;
 
-    struct x86_linux_e820_entry *e820 =
-        (struct x86_linux_e820_entry *)(params + 0x2d0);
     uint64 chosen_base = 0x100000ULL;
     uint64 chosen_end = 0;
 
-    for (uint32 i = 0; i < entries; i++) {
-        uint64 region_base = e820[i].addr;
-        uint64 region_end  = region_base + e820[i].size;
-
-        if (e820[i].size == 0 || region_end < region_base ||
-            region_base >= X86_MAX_PROBED_PA || region_end > X86_MAX_PROBED_PA)
-            continue;
-
-        if (e820[i].type == 1) {
-            if (region_end > 0x100000ULL &&
-                platform.mem_count < MAX_MEM_REGIONS) {
-                if (region_base < 0x100000ULL)
-                    region_base = 0x100000ULL;
-                if (region_base < region_end) {
-                    platform.mem[platform.mem_count].base = region_base;
-                    platform.mem[platform.mem_count].size =
-                        region_end - region_base;
-                    platform.total_mem += region_end - region_base;
-                    x86_consider_early_mem_end(region_base, region_end,
-                                               &chosen_end);
-                    platform.mem_count++;
-                }
-            }
-        } else if (platform.reserved_count < MAX_RESERVED_REGIONS) {
-            platform.reserved[platform.reserved_count].base = region_base;
-            platform.reserved[platform.reserved_count].size =
-                region_end - region_base;
-            platform.reserved_count++;
+    /*
+     * Prefer QEMU's fw_cfg "etc/e820" map: it reflects the real -m memory
+     * size at runtime.  The static e820 baked into our synthesized bzImage
+     * setup header always advertises a fixed 1 GiB regardless of -m, which
+     * starves large guests (OOM under memory pressure).  Fall back to the
+     * static map only when fw_cfg is unavailable (non-QEMU firmware).
+     */
+    if (x86_fwcfg_collect_e820(&chosen_end) > 0) {
+        x86_mem_source = "fwcfg-e820";
+    } else {
+        struct x86_linux_e820_entry *e820 =
+            (struct x86_linux_e820_entry *)(params + 0x2d0);
+        for (uint32 i = 0; i < entries; i++) {
+            if (e820[i].size == 0)
+                continue;
+            x86_ingest_e820_entry(e820[i].addr, e820[i].addr + e820[i].size,
+                                  e820[i].type, &chosen_end);
         }
+        x86_mem_source = "linux-e820";
     }
 
     uint64 cmdline_ptr = x86_boot_u32(params, 0x228);
@@ -1136,7 +1293,6 @@ static int x86_parse_linux_boot_params(void *boot_params, uint64 *base_out,
     if (platform.mem_count == 0 || chosen_end <= chosen_base)
         return -1;
 
-    x86_mem_source = "linux-e820";
     platform.ncpu = 1;
     *base_out = chosen_base;
     *size_out = chosen_end - chosen_base;
