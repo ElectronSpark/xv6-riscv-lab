@@ -401,7 +401,11 @@ void fbdevinit(void)
                fb_state.xres, fb_state.yres, fb_state.bpp);
     }
 
-    int ret = fb_gpu_register_render_node();
+    int ret;
+
+    virtio_gpu_init();
+
+    ret = fb_gpu_register_render_node();
     if (ret != 0)
         assert(ret == 0, "fbdevinit: failed to register gpu devices: %d", ret);
     if (!virtio_gpu_has_virgl())
@@ -602,4 +606,3 @@ void fb_panic_screen(const char *text)
     panic_puts(fb, stride, xres, yres, &cx, &cy,
                "System halted. Please restart the computer.", fg_yellow);
 }
-

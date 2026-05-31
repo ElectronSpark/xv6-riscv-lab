@@ -2402,8 +2402,13 @@ static bool vm_copyout_fast_src(const void *src, uint64 len,
         return false;
 
     if (start >= PAGE_OFFSET) {
-        *src_safe = src;
-        return true;
+        uint64 pa_start = start - PAGE_OFFSET;
+        uint64 pa_end = end - PAGE_OFFSET;
+        if (pa_start >= KERNBASE && pa_end <= PHYSTOP) {
+            *src_safe = src;
+            return true;
+        }
+        return false;
     }
 
     /*
@@ -2513,6 +2518,39 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
             if (!vm_copyout_fast_src(fsrc, chunk, &src_safe)) {
                 fast_ok = false;
                 break;
+            }
+
+            /*
+             * The fast path copies while running on the target user CR3.  The
+             * destination check above is not enough: kernel stack/direct-map
+             * source bytes must also be mapped in that page table, otherwise a
+             * small copyout (for example waitpid status) can fault with
+             * interrupts disabled.  Check only the shared PML4 slots here:
+             * the direct map uses static/huge lower-level tables that walk()
+             * intentionally diagnoses when reached from a user page table.
+             */
+            uint64 sstart = (uint64)src_safe;
+            uint64 send = sstart + chunk;
+            if (send < sstart) {
+                fast_ok = false;
+                break;
+            }
+            if (sstart >= PAGE_OFFSET) {
+                uint64 span = 1ULL << PXSHIFT(PAGETABLE_LEVELS - 1);
+                uint64 pg = sstart;
+                while (pg < send) {
+                    pte_t *spte = &vm->pagetable[PX(PAGETABLE_LEVELS - 1, pg)];
+                    if ((*spte & PTE_V) == 0) {
+                        fast_ok = false;
+                        break;
+                    }
+                    uint64 next = (pg & ~(span - 1)) + span;
+                    if (next <= pg || next > send)
+                        next = send;
+                    pg = next;
+                }
+                if (!fast_ok)
+                    break;
             }
 
             int was = intr_off_save();

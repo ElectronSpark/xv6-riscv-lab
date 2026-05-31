@@ -72,8 +72,8 @@
 #define VIRTIO_GPU_CAPSET_DRM            6
 #define VIRTIO_GPU_SMOKE_WIDTH 32
 #define VIRTIO_GPU_SMOKE_HEIGHT 32
-#define VIRTIO_GPU_MAX_RESOURCES 4096
-#define VIRTIO_GPU_MAX_CONTEXTS 64
+#define VIRTIO_GPU_MAX_RESOURCES 16384
+#define VIRTIO_GPU_MAX_CONTEXTS 256
 #define VIRTIO_GPU_MAX_CAPSETS 8
 
 #define VIRGL_CCMD_NOP 0
@@ -2842,7 +2842,11 @@ static int virtio_gpu_queue_init(struct virtio_gpu *g)
 void virtio_gpu_init(void)
 {
     struct virtio_pci_discovery *vd = pci_get_virtio_gpu(0);
+    struct virtio_gpu *g = &gpu;
+
     if (!vd || !vd->found)
+        return;
+    if (g->initialized)
         return;
 
     printf("virtio_gpu: init begin\n");
@@ -2880,7 +2884,6 @@ void virtio_gpu_init(void)
     uint64 dev_cfg_va = virtio_gpu_map_mmio_window(
         virtio_gpu_bar_base(vd, d_bar), d_off, d_len);
 
-    struct virtio_gpu *g = &gpu;
     memset(g, 0, sizeof(*g));
     spin_init(&g->lock, "virtio_gpu");
     mutex_init(&g->op_lock, "virtio_gpuop");
