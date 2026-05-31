@@ -492,7 +492,18 @@ static int fb_bo_map_current(struct fb_gpu_bo_entry *bo, uint64 *addr_out)
         return -EINVAL;
 
     vm = current->vm;
-    flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER;
+    /*
+     * The BO mapping aliases the kernel's bo->pages, which are read directly
+     * (via PA2VA) by the FB_GPU_BO_PRESENT path.  It must stay coherent with
+     * those pages across fork(): without VMA_FLAG_DONTFORK a fork (e.g. when
+     * the compositor spawns a browser/helper process) write-protects the
+     * parent's PTEs for COW, so the parent's next render to a BO page is
+     * copied to a private page while the kernel keeps presenting the stale
+     * bo->page -- leaving wallpaper over freshly drawn window chrome.  The
+     * scanout mapping uses the same flags for the same reason.
+     */
+    flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER |
+            VMA_FLAG_DONTFORK | VMA_FLAG_DONTDUMP;
 
     vm_wlock(vm);
     addr = vm_find_free_range(vm, (size_t)(bo->size + FB_GPU_D3D12_HEAP_ALIGN), 0);
