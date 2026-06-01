@@ -245,6 +245,8 @@
 #define FB_GPU_RESV_ATTACH_SYNC_FILE_IMPORT 10
 
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
+#define FB_GPU_BO_PRESENT_F_VIRGL_COPY 0x1 /* try virgl resource copy */
+#define FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT 0x2 /* bind BO resource as scanout */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
 #define FB_GPU_FENCE_WAIT 0x1         /* wait for fence fd to signal */
 #define FB_GPU_VIRGL_FENCE_WAIT 0x1   /* wait_for must be signaled */
@@ -347,7 +349,7 @@ struct fb_gpu_bo_present {
     uint32   src_pitch;      /* source pitch in bytes */
     uint64   pixels;         /* mapped buffer address */
     uint32   handle;         /* optional BO handle; overrides pixels/pitch */
-    uint32   flags;          /* reserved, must be 0 */
+    uint32   flags;          /* FB_GPU_BO_PRESENT_F_* */
     uint64   fence;          /* returned completed fence for handle presents */
 };
 
@@ -1267,6 +1269,15 @@ struct fb_gpu_stats {
     uint64 virtio_last_fence;  /* last completed virtio-gpu fence id */
     uint64 virtio_irq_completions; /* queue completions observed by IRQ */
     uint64 virtio_poll_fallbacks;  /* queue waits that fell back to polling */
+    uint64 virgl_bo_presents;  /* BO presents whose dmabuf came from virgl */
+    uint64 virgl_bo_present_pixels; /* virgl-backed BO present pixels */
+    uint64 virgl_bo_present_last_resource; /* last presented virgl resource */
+    uint64 bo_present_copy_ticks; /* CPU BO-to-scanout copy time */
+    uint64 bo_present_virtio_ticks; /* virtio transfer/flush wait time */
+    uint64 bo_present_total_ticks; /* total BO present hot-path time */
+    uint64 bo_present_last_copy_us; /* last BO copy duration */
+    uint64 bo_present_last_virtio_us; /* last virtio scanout duration */
+    uint64 bo_present_last_total_us; /* last BO present duration */
     uint64 gpu_backend;       /* FB_GPU_BACKEND_* currently selected */
     uint64 gpu_backend_flags; /* FB_GPU_BACKEND_F_* currently selected */
     uint64 dxg_global_open;   /* Hyper-V DXG global transport opened */

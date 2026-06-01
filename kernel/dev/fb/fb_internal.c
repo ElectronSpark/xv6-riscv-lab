@@ -113,6 +113,9 @@ struct fb_gpu_bo_entry {
     uint32 nouveau_tile_flags;
     uint32 dmabuf_attachment_accounted;
     uint32 dmabuf_importer_tag;
+    uint32 virtio_resource_id;
+    uint64 virtio_resource_owner_id;
+    pid_t virtio_resource_owner_tgid;
     page_t **pages;
     struct fb_gpu_gem_object *gem;
 };
@@ -169,6 +172,9 @@ struct fb_gpu_gem_object {
     uint32 nouveau_domain;
     uint32 nouveau_tile_mode;
     uint32 nouveau_tile_flags;
+    uint32 virtio_resource_id;
+    uint64 virtio_resource_owner_id;
+    pid_t virtio_resource_owner_tgid;
     struct fb_gpu_dmabuf_metadata metadata;
     page_t **pages;
 };

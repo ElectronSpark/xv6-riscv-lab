@@ -308,6 +308,65 @@ static uint64 fb_note_display_complete_locked(void)
     return seq;
 }
 
+static uint64 fb_ticks_to_us(uint64 ticks)
+{
+    extern uint64 __timebase_frequency;
+    uint64 freq = __timebase_frequency ? __timebase_frequency : 10000000UL;
+
+    return ticks * 1000000ULL / freq;
+}
+
+static int fb_present_perf_enabled(void)
+{
+    static int cached = -1;
+    char value[16];
+
+    if (cached >= 0)
+        return cached;
+    cached =
+        (cmdline_get_param("fb_present_perf", value, sizeof(value)) == 0 &&
+         strcmp(value, "0") != 0) ||
+        (cmdline_get_param("wlcomp_gpu_perf", value, sizeof(value)) == 0 &&
+         strcmp(value, "0") != 0);
+    return cached;
+}
+
+static void fb_bo_present_perf_log(struct fb_gpu_bo_entry *bo, uint32 w,
+                                   uint32 h, uint64 copy_ticks,
+                                   uint64 virtio_ticks, uint64 total_ticks)
+{
+    static uint64 frames;
+    static uint64 pixels;
+    static uint64 copy_total;
+    static uint64 virtio_total;
+    static uint64 total_total;
+    uint32 resource_id;
+
+    if (!fb_present_perf_enabled() || bo == NULL ||
+        bo->virtio_resource_id == 0)
+        return;
+
+    resource_id = bo->virtio_resource_id;
+    frames++;
+    pixels += (uint64)w * h;
+    copy_total += copy_ticks;
+    virtio_total += virtio_ticks;
+    total_total += total_ticks;
+    if (frames < 20)
+        return;
+
+    printf("FB: virgl BO present avg_us total=%lu copy=%lu virtio=%lu frames=%lu pixels=%lu last_resource=%u\n",
+           fb_ticks_to_us(total_total) / frames,
+           fb_ticks_to_us(copy_total) / frames,
+           fb_ticks_to_us(virtio_total) / frames,
+           frames, pixels, resource_id);
+    frames = 0;
+    pixels = 0;
+    copy_total = 0;
+    virtio_total = 0;
+    total_total = 0;
+}
+
 static int fb_scanout_format_needs_rb_swap(uint32 pixel_format)
 {
     return pixel_format == DRM_FORMAT_XBGR8888 ||
@@ -350,8 +409,17 @@ static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
     uint32 cw, ch;
     uint64 offset;
     uint64 last;
+    uint64 total_start;
+    uint64 copy_start;
+    uint64 copy_ticks;
+    uint64 total_ticks;
+    uint64 virtio_ticks = 0;
     int clipped = 0;
     int swap_rb;
+    static uint32 virgl_copy_cooldown;
+    static int virgl_copy_success_logs;
+    static int virgl_copy_fail_logs;
+    static int virgl_scanout_logs;
 
     if (bo == NULL)
         return -EINVAL;
@@ -394,6 +462,8 @@ static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
     if (cw == 0 || ch == 0)
         return 0;
     swap_rb = fb_scanout_format_needs_rb_swap(pixel_format);
+    total_start = r_time();
+    copy_start = total_start;
     spin_lock(&fb_state.lock);
     if (cmd.x == 0 && cmd.y == 0 && cw == xres && ch == yres)
         fb_state.stats.full_blits++;
@@ -404,6 +474,161 @@ static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
     fb_state.stats.blit_bytes += (uint64)cw * ch * 4;
     fb_state.stats.bo_presents++;
     spin_unlock(&fb_state.lock);
+
+    if (virgl_copy_cooldown > 0)
+        virgl_copy_cooldown--;
+    if ((cmd.flags & FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT) != 0 &&
+        virtio_backed && !swap_rb && bo->virtio_resource_id != 0 &&
+        bo->pitch != 0 && (offset & 3) == 0) {
+        uint32 src_y = offset / bo->pitch;
+        uint64 row_off = offset - (uint64)src_y * bo->pitch;
+        uint32 src_x = row_off / 4;
+
+        if ((row_off & 3) == 0 &&
+            src_x <= bo->width && cw <= bo->width - src_x &&
+            src_y <= bo->height && ch <= bo->height - src_y) {
+            uint64 virtio_start = r_time();
+            int ret = virtio_gpu_bind_resource_scanout(
+                bo->virtio_resource_id, src_x, src_y, cw, ch);
+            virtio_ticks = r_time() - virtio_start;
+            if (ret == 0) {
+                copy_ticks = 0;
+                hyperv_video_dirty(0, 0, cw, ch);
+                total_ticks = r_time() - total_start;
+                spin_lock(&fb_state.lock);
+                fb_state.stats.virgl_bo_presents++;
+                fb_state.stats.virgl_bo_present_pixels += (uint64)cw * ch;
+                fb_state.stats.virgl_bo_present_last_resource =
+                    bo->virtio_resource_id;
+                fb_state.stats.bo_present_virtio_ticks += virtio_ticks;
+                fb_state.stats.bo_present_total_ticks += total_ticks;
+                fb_state.stats.bo_present_last_copy_us = 0;
+                fb_state.stats.bo_present_last_virtio_us =
+                    fb_ticks_to_us(virtio_ticks);
+                fb_state.stats.bo_present_last_total_us =
+                    fb_ticks_to_us(total_ticks);
+                fb_note_display_complete_locked();
+                if (fence_out)
+                    *fence_out = fb_bo_signal_present_locked(bo);
+                spin_unlock(&fb_state.lock);
+                if (fb_present_perf_enabled() && virgl_scanout_logs < 8) {
+                    printf("FB: virgl resource-scanout present resource=%u src=%u,%u %ux%u\n",
+                           bo->virtio_resource_id, src_x, src_y, cw, ch);
+                    virgl_scanout_logs++;
+                }
+                fb_bo_present_perf_log(bo, cw, ch, copy_ticks, virtio_ticks,
+                                       total_ticks);
+                return 0;
+            }
+            if (fb_present_perf_enabled() && virgl_scanout_logs < 8) {
+                printf("FB: virgl resource-scanout failed ret=%d resource=%u src=%u,%u %ux%u\n",
+                       ret, bo->virtio_resource_id, src_x, src_y, cw, ch);
+                virgl_scanout_logs++;
+            }
+            return ret;
+        }
+        return -EINVAL;
+    }
+    if ((cmd.flags & FB_GPU_BO_PRESENT_F_VIRGL_COPY) != 0 &&
+        virgl_copy_cooldown == 0 && virtio_backed && !swap_rb &&
+        bo->virtio_resource_id != 0 && bo->pitch != 0 &&
+        (offset & 3) == 0) {
+        uint32 src_y = offset / bo->pitch;
+        uint64 row_off = offset - (uint64)src_y * bo->pitch;
+        uint32 src_x = row_off / 4;
+
+        if ((row_off & 3) == 0 &&
+            src_x <= bo->width && cw <= bo->width - src_x &&
+            src_y <= bo->height && ch <= bo->height - src_y) {
+            uint64 virtio_start = r_time();
+            int ret = virtio_gpu_copy_resource_to_scanout(
+                bo->virtio_resource_id, src_x, src_y, cmd.x, cmd.y, cw, ch);
+            virtio_ticks = r_time() - virtio_start;
+            if (ret == 0) {
+                copy_ticks = 0;
+                hyperv_video_dirty(cmd.x, cmd.y, cw, ch);
+                total_ticks = r_time() - total_start;
+                spin_lock(&fb_state.lock);
+                fb_state.stats.virgl_bo_presents++;
+                fb_state.stats.virgl_bo_present_pixels += (uint64)cw * ch;
+                fb_state.stats.virgl_bo_present_last_resource =
+                    bo->virtio_resource_id;
+                fb_state.stats.bo_present_virtio_ticks += virtio_ticks;
+                fb_state.stats.bo_present_total_ticks += total_ticks;
+                fb_state.stats.bo_present_last_copy_us = 0;
+                fb_state.stats.bo_present_last_virtio_us =
+                    fb_ticks_to_us(virtio_ticks);
+                fb_state.stats.bo_present_last_total_us =
+                    fb_ticks_to_us(total_ticks);
+                fb_note_display_complete_locked();
+                if (fence_out)
+                    *fence_out = fb_bo_signal_present_locked(bo);
+                spin_unlock(&fb_state.lock);
+                if (fb_present_perf_enabled() && virgl_copy_success_logs < 4) {
+                    printf("FB: virgl resource-copy present resource=%u rect=%u,%u %ux%u src=%u,%u\n",
+                           bo->virtio_resource_id, cmd.x, cmd.y, cw, ch,
+                           src_x, src_y);
+                    virgl_copy_success_logs++;
+                }
+                fb_bo_present_perf_log(bo, cw, ch, copy_ticks, virtio_ticks,
+                                       total_ticks);
+                return 0;
+            }
+            if (ret == -ENODEV || ret == -EOPNOTSUPP)
+                virgl_copy_cooldown = 240;
+            else if (ret != -EINVAL)
+                virgl_copy_cooldown = 8;
+            if (fb_present_perf_enabled() && virgl_copy_fail_logs < 4) {
+                printf("FB: virgl resource-copy present %s ret=%d resource=%u rect=%u,%u %ux%u\n",
+                       virgl_copy_cooldown ? "cooldown" : "fallback",
+                       ret, bo->virtio_resource_id, cmd.x, cmd.y, cw, ch);
+                virgl_copy_fail_logs++;
+            }
+        }
+    }
+
+    if (bo->virtio_resource_id != 0 && bo->pitch != 0) {
+        uint32 src_y = offset / bo->pitch;
+        uint64 row_off = offset - (uint64)src_y * bo->pitch;
+        uint32 src_x = row_off / 4;
+        uint64 resource_owner_id = bo->virtio_resource_owner_id ?
+            bo->virtio_resource_owner_id : bo->owner_id;
+        pid_t resource_owner_tgid = bo->virtio_resource_owner_tgid ?
+            bo->virtio_resource_owner_tgid : bo->owner_tgid;
+        static int readback_fail_logs;
+
+        if ((row_off & 3) == 0 &&
+            src_x <= bo->width && cw <= bo->width - src_x &&
+            src_y <= bo->height && ch <= bo->height - src_y) {
+            struct fb_gpu_virgl_transfer transfer;
+            int ret;
+
+            memset(&transfer, 0, sizeof(transfer));
+            transfer.resource_id = bo->virtio_resource_id;
+            transfer.x = src_x;
+            transfer.y = src_y;
+            transfer.z = 0;
+            transfer.w = cw;
+            transfer.h = ch;
+            transfer.d = 1;
+            transfer.level = 0;
+            transfer.offset = offset;
+            transfer.stride = bo->pitch;
+            transfer.layer_stride = (uint64)bo->pitch * bo->height;
+            ret = virtio_gpu_user_transfer(resource_owner_id,
+                                           resource_owner_tgid,
+                                           &transfer, 1);
+            if (ret != 0 && fb_present_perf_enabled() &&
+                readback_fail_logs < 4) {
+                printf("FB: virgl readback failed ret=%d resource=%u bo_owner=%lu/%d resource_owner=%lu/%d rect=%u,%u %ux%u src=%u,%u\n",
+                       ret, bo->virtio_resource_id, bo->owner_id,
+                       bo->owner_tgid, resource_owner_id,
+                       resource_owner_tgid, cmd.x, cmd.y, cw, ch,
+                       src_x, src_y);
+                readback_fail_logs++;
+            }
+        }
+    }
 
     for (uint32 row = 0; row < ch; row++) {
         uint64 src_off = offset + (uint64)row * bo->pitch;
@@ -440,15 +665,33 @@ static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
             remaining -= chunk;
         }
     }
-    if (virtio_backed)
+    copy_ticks = r_time() - copy_start;
+    if (virtio_backed) {
+        uint64 virtio_start = r_time();
         virtio_gpu_present_fb_rect(fb_state.fb_virt, pitch,
                                    cmd.x, cmd.y, cw, ch);
+        virtio_ticks = r_time() - virtio_start;
+    }
     hyperv_video_dirty(cmd.x, cmd.y, cw, ch);
+    total_ticks = r_time() - total_start;
     spin_lock(&fb_state.lock);
+    if (bo->virtio_resource_id != 0) {
+        fb_state.stats.virgl_bo_presents++;
+        fb_state.stats.virgl_bo_present_pixels += (uint64)cw * ch;
+        fb_state.stats.virgl_bo_present_last_resource =
+            bo->virtio_resource_id;
+    }
+    fb_state.stats.bo_present_copy_ticks += copy_ticks;
+    fb_state.stats.bo_present_virtio_ticks += virtio_ticks;
+    fb_state.stats.bo_present_total_ticks += total_ticks;
+    fb_state.stats.bo_present_last_copy_us = fb_ticks_to_us(copy_ticks);
+    fb_state.stats.bo_present_last_virtio_us = fb_ticks_to_us(virtio_ticks);
+    fb_state.stats.bo_present_last_total_us = fb_ticks_to_us(total_ticks);
     fb_note_display_complete_locked();
     if (fence_out)
         *fence_out = fb_bo_signal_present_locked(bo);
     spin_unlock(&fb_state.lock);
+    fb_bo_present_perf_log(bo, cw, ch, copy_ticks, virtio_ticks, total_ticks);
     return 0;
 
 reject:
@@ -502,7 +745,14 @@ static int fb_map_scanout_current(struct fb_gpu_scanout_map *req)
         return -EINVAL;
 
     vm = current->vm;
-    pfnmap = fb_phys != 0;
+    /*
+     * The scanout resource owns this backing for its lifetime.  Map it as a
+     * PFN alias so high-order virtio scanout pages do not need per-tail-page
+     * anonymous refs.  Only real firmware/MMIO framebuffers get a device cache
+     * policy below; virtio RAM must keep the normal cached policy or wlcomp can
+     * see its own writes while the virtio transfer path reads stale pixels.
+     */
+    pfnmap = 1;
     flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER |
             VMA_FLAG_DONTFORK | VMA_FLAG_DONTDUMP |
             (pfnmap ? VMA_FLAG_PFNMAP : 0);
@@ -543,7 +793,7 @@ static int fb_map_scanout_current(struct fb_gpu_scanout_map *req)
      * the old boot-logo contents.
      */
 #ifdef PTE_PWT
-    if (pfnmap)
+    if (fb_phys != 0)
         pte_flags |= PTE_PWT;
 #endif
     for (uint64 off = 0; off < map_size; off += PGSIZE) {
@@ -557,20 +807,16 @@ static int fb_map_scanout_current(struct fb_gpu_scanout_map *req)
             uint64 kva = fb_virt + off;
             pte_t *kpte = NULL;
 
-            if (kva >= (uint64)PA2VA(KERNBASE) &&
-                kva < (uint64)PA2VA(PHYSTOP)) {
-                pa = VA2PA(kva);
-            } else if (kernel_vm != NULL && kernel_vm->pagetable != NULL) {
+            if (kernel_vm != NULL && kernel_vm->pagetable != NULL)
                 kpte = walk(kernel_vm->pagetable, kva, 0, NULL, NULL);
-                if (kpte == NULL || !pte_present(kpte)) {
-                    printf("FB: scanout map kernel walk failed kva=0x%lx off=0x%lx\n",
-                           kva, off);
-                    vma_free(vm, vma);
-                    vm_wunlock(vm);
-                    return -ENODEV;
-                }
+            if (kpte != NULL && pte_present(kpte)) {
                 pa = pte_pa(kpte) + (kva & (PGSIZE - 1));
+            } else if (kva >= (uint64)PA2VA(KERNBASE) &&
+                       kva < (uint64)PA2VA(PHYSTOP)) {
+                pa = VA2PA(kva);
             } else {
+                printf("FB: scanout map kernel walk failed kva=0x%lx off=0x%lx\n",
+                       kva, off);
                 vma_free(vm, vma);
                 vm_wunlock(vm);
                 return -ENODEV;

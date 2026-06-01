@@ -180,6 +180,8 @@ void fb_pci_init(uint8 bus, uint8 dev, uint8 func)
 
     fb_state.fb_phys = (uint64)bar0;
     fb_state.fb_virt = (volatile uint8 *)PA2VA(fb_state.fb_phys);
+    fb_state.firmware_backed = 0;
+    fb_state.scanout_mappable = fb_state.fb_phys != 0;
 
     printf("FB: BAR0 = 0x%lx (VA = 0x%lx)\n",
            fb_state.fb_phys, (uint64)fb_state.fb_virt);
@@ -718,7 +720,8 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
-        if (req.flags != 0)
+        if ((req.flags & ~(FB_GPU_BO_PRESENT_F_VIRGL_COPY |
+                           FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT)) != 0)
             return -EINVAL;
 
         if (req.handle != 0) {
@@ -741,6 +744,8 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
             return ret;
         }
 
+        if (req.flags != 0)
+            return -EINVAL;
         req.fence = 0;
         blit.x = req.x;
         blit.y = req.y;
@@ -1701,6 +1706,12 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
                              pages, npages, &handle);
         if (ret != 0) {
             fb_bo_release_pages(pages, npages);
+            return ret;
+        }
+        ret = fb_bo_set_virtio_resource(handle, owner_id, owner_tgid,
+                                        req.resource_id);
+        if (ret != 0) {
+            (void)fb_bo_destroy(handle);
             return ret;
         }
 

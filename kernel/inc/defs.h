@@ -551,6 +551,12 @@ int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
 int virtio_gpu_resize_scanout(uint32 width, uint32 height);
 void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
                                 uint32 x, uint32 y, uint32 w, uint32 h);
+int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
+                                        uint32 src_x, uint32 src_y,
+                                        uint32 dst_x, uint32 dst_y,
+                                        uint32 w, uint32 h);
+int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
+                                     uint32 w, uint32 h);
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
                                    uint32 capset_id, const char *name,
                                    uint32 *ctx_id);

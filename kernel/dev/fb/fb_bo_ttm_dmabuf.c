@@ -71,6 +71,9 @@ static void fb_gem_copy_to_bo_locked(struct fb_gpu_bo_entry *bo,
     bo->nouveau_domain = gem->nouveau_domain;
     bo->nouveau_tile_mode = gem->nouveau_tile_mode;
     bo->nouveau_tile_flags = gem->nouveau_tile_flags;
+    bo->virtio_resource_id = gem->virtio_resource_id;
+    bo->virtio_resource_owner_id = gem->virtio_resource_owner_id;
+    bo->virtio_resource_owner_tgid = gem->virtio_resource_owner_tgid;
     bo->pages = gem->pages;
 }
 
@@ -124,6 +127,37 @@ fb_gem_alloc_locked(uint32 width, uint32 height, uint32 pitch, uint64 size,
     gem->metadata.offsets[0] = 0;
     gem->metadata.strides[0] = pitch;
     return gem;
+}
+
+static int fb_bo_set_virtio_resource(uint32 handle, uint64 owner_id,
+                                     pid_t owner_tgid,
+                                     uint32 virtio_resource_id)
+{
+    struct fb_gpu_bo_entry *bo;
+
+    if (handle == 0 || virtio_resource_id == 0)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    bo = fb_bo_lookup_locked(handle);
+    if (bo == NULL) {
+        spin_unlock(&fb_state.lock);
+        return -ENOENT;
+    }
+    if (!fb_bo_owner_matches(bo, owner_id, owner_tgid)) {
+        spin_unlock(&fb_state.lock);
+        return -EPERM;
+    }
+    bo->virtio_resource_id = virtio_resource_id;
+    bo->virtio_resource_owner_id = owner_id;
+    bo->virtio_resource_owner_tgid = owner_tgid;
+    if (bo->gem != NULL) {
+        bo->gem->virtio_resource_id = virtio_resource_id;
+        bo->gem->virtio_resource_owner_id = owner_id;
+        bo->gem->virtio_resource_owner_tgid = owner_tgid;
+    }
+    spin_unlock(&fb_state.lock);
+    return 0;
 }
 
 static void fb_gem_get_locked(struct fb_gpu_gem_object *gem)
