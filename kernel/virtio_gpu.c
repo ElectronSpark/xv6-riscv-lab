@@ -3364,6 +3364,8 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_resource *res;
+    uint32 scanout_w;
+    uint32 scanout_h;
     int ret = -EIO;
 
     if (resource_id == 0 || w == 0 || h == 0)
@@ -3382,6 +3384,21 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
         goto out;
     }
     spin_unlock(&g->lock);
+
+    /*
+     * SET_SCANOUT changes the host-visible mode to the supplied rectangle.
+     * Linux's fast path is safe when KMS page-flips a full-size framebuffer;
+     * binding a window-sized virgl resource here makes QEMU resize between the
+     * desktop and the client window.  Keep partial scanout behind an explicit
+     * diagnostic flag so normal windowed compositing cannot trigger that jump.
+     */
+    scanout_w = g->scanout_width;
+    scanout_h = g->scanout_height;
+    if (!virtio_gpu_cmdline_enabled("virtio_gpu_allow_partial_scanout") &&
+        (w != scanout_w || h != scanout_h)) {
+        ret = -EOPNOTSUPP;
+        goto out;
+    }
 
     if (virtio_gpu_set_scanout(g, 0, res, x, y, w, h) != 0)
         goto out;
@@ -3538,6 +3555,60 @@ static uint32 virtio_gpu_resource_sample_pixel(struct virtio_gpu_resource *res,
     return *(uint32 *)p;
 }
 
+static int virtio_gpu_resource_host_nonblack(struct virtio_gpu *g,
+                                             struct virtio_gpu_resource *res,
+                                             uint32 ctx_id,
+                                             uint32 x, uint32 y,
+                                             uint32 w, uint32 h)
+{
+    struct virtio_gpu_transfer_host_3d *transfer =
+        (struct virtio_gpu_transfer_host_3d *)g->cmd_page;
+    struct virtio_gpu_ctrl_hdr *resp =
+        (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+    uint32 p[5];
+    uint32 nonblack = 0;
+
+    if (res == NULL || res->width == 0 || res->height == 0 ||
+        w == 0 || h == 0 ||
+        x > res->width || w > res->width - x ||
+        y > res->height || h > res->height - y ||
+        (res->backing == NULL && (res->pages == NULL || res->npages == 0)))
+        return -EINVAL;
+
+    memset(transfer, 0, sizeof(*transfer));
+    transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
+    transfer->hdr.ctx_id = ctx_id;
+    transfer->box.x = x;
+    transfer->box.y = y;
+    transfer->box.z = 0;
+    transfer->box.w = w;
+    transfer->box.h = h;
+    transfer->box.d = 1;
+    transfer->offset = ((uint64)y * res->width + x) * sizeof(uint32);
+    transfer->resource_id = res->id;
+    transfer->level = 0;
+    transfer->stride = res->width * sizeof(uint32);
+    transfer->layer_stride = (uint64)transfer->stride * res->height;
+    if (virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0, false,
+                          resp, sizeof(*resp),
+                          VIRTIO_GPU_RESP_OK_NODATA) != 0)
+        return -EIO;
+
+    p[0] = virtio_gpu_resource_sample_pixel(res, x + w / 2, y + h / 2);
+    p[1] = virtio_gpu_resource_sample_pixel(res, x + w / 4, y + h / 4);
+    p[2] = virtio_gpu_resource_sample_pixel(res, x + (w * 3) / 4,
+                                            y + h / 4);
+    p[3] = virtio_gpu_resource_sample_pixel(res, x + w / 4,
+                                            y + (h * 3) / 4);
+    p[4] = virtio_gpu_resource_sample_pixel(res, x + (w * 3) / 4,
+                                            y + (h * 3) / 4);
+    for (int i = 0; i < 5; i++) {
+        if ((p[i] & 0x00ffffffu) != 0)
+            nonblack++;
+    }
+    return (int)nonblack;
+}
+
 static void virtio_gpu_probe_present_source(struct virtio_gpu *g,
                                             struct virtio_gpu_resource *src,
                                             uint32 ctx_id)
@@ -3676,6 +3747,8 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     int ret = -EIO;
     static int invalid_logs;
     static int debug_logs;
+    static int copy_validation_state;
+    static int copy_validation_logs;
     int use_blit = !virtio_gpu_cmdline_enabled("virtio_gpu_present_copy_region");
 
     if (src_resource_id == 0 || w == 0 || h == 0)
@@ -3719,7 +3792,7 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     }
     dst_resource_id = dst->id;
     if (src->ctx_id != 0 &&
-        !virtio_gpu_cmdline_enabled("virtio_gpu_present_copy_ctx")) {
+        virtio_gpu_cmdline_enabled("virtio_gpu_present_source_ctx")) {
         ctx = virtio_gpu_lookup_context_locked(g, src->ctx_id);
         if (ctx != NULL && !ctx->failed)
             ctx_id = src->ctx_id;
@@ -3746,6 +3819,19 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
 
     if (virtio_gpu_cmdline_enabled("virtio_gpu_present_readback_copy")) {
         ret = -EINVAL;
+        goto out;
+    }
+
+    /*
+     * Mesa submits virgl command streams asynchronously.  Linux/Alpine gets an
+     * implicit dma-buf fence before scanout import; xv6's native Wayland path
+     * currently hands the compositor only the resource fd.  Drain the one
+     * pending virgl submit before copying that resource into the scanout, so we
+     * present the rendered frame instead of the previous/empty contents.
+     */
+    ret = virtio_gpu_drain_async_submit(g, 1);
+    if (ret != 0) {
+        ret = -EIO;
         goto out;
     }
 
@@ -3824,6 +3910,32 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
         ret = virtio_gpu_submit_3d(g, ctx_id, cmds,
                                    sizeof(cmds) / sizeof(cmds[0]),
                                    fence_id) == 0 ? 0 : -EIO;
+    }
+    if (ret == 0 &&
+        copy_validation_state < 0 &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_present_force_copy")) {
+        ret = -EOPNOTSUPP;
+        goto out_detach;
+    }
+    if (ret == 0 && copy_validation_state == 0 &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_present_force_copy")) {
+        int src_nonblack = virtio_gpu_resource_host_nonblack(
+            g, src, ctx_id, src_x, src_y, w, h);
+        int dst_nonblack = virtio_gpu_resource_host_nonblack(
+            g, dst, ctx_id, dst_x, dst_y, w, h);
+
+        if (src_nonblack > 0 && dst_nonblack <= 0) {
+            copy_validation_state = -1;
+            if (copy_validation_logs < 4) {
+                printf("virtio_gpu: virgl resource-copy validation failed src_nonblack=%d dst_nonblack=%d; falling back to readback present\n",
+                       src_nonblack, dst_nonblack);
+                copy_validation_logs++;
+            }
+            ret = -EOPNOTSUPP;
+            goto out_detach;
+        }
+        if (dst_nonblack > 0)
+            copy_validation_state = 1;
     }
     if (ret == 0 &&
         virtio_gpu_cmdline_enabled("virtio_gpu_rearm_scanout_copy")) {
