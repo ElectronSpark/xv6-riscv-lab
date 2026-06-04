@@ -35,6 +35,7 @@
 #define VIRTIO_GPU_POLL_LIMIT 10000000
 #define VIRTIO_GPU_FAST_POLL_LIMIT 20000
 #define VIRTIO_GPU_IRQ_WAIT_MS 5000
+#define VIRTIO_GPU_IRQ_WAIT_MS_MAX 60000
 #define VIRTIO_GPU_IRQ_WAIT_SLICE_MS 1
 
 #define VIRTIO_GPU_F_VIRGL          0
@@ -78,8 +79,14 @@
 #define VIRGL_CCMD_NOP 0
 #define VIRGL_CCMD_BLIT 16
 #define VIRGL_CCMD_RESOURCE_COPY_REGION 17
+#define VIRGL_CCMD_COPY_TRANSFER3D 45
+#define VIRGL_CCMD_CLEAR_TEXTURE 47
 #define VIRGL_CMD_BLIT_SIZE 21
 #define VIRGL_CMD_RESOURCE_COPY_REGION_SIZE 13
+#define VIRGL_COPY_TRANSFER3D_SIZE 14
+#define VIRGL_COPY_TRANSFER3D_FLAGS_SYNCHRONIZED (1u << 0)
+#define VIRGL_COPY_TRANSFER3D_FLAGS_READ_FROM_HOST (1u << 1)
+#define VIRGL_CLEAR_TEXTURE_SIZE 12
 #define VIRGL_CMD0(cmd, obj, len) ((cmd) | ((obj) << 8) | ((len) << 16))
 #define VIRGL_CMD_BLIT_S0_MASK(x) (((x) & 0xff) << 0)
 #define VIRGL_CMD_BLIT_S0_FILTER(x) (((x) & 0x3) << 8)
@@ -93,6 +100,7 @@
 #define VIRTIO_GPU_PIPE_BIND_SCANOUT        (1u << 18)
 #define VIRTIO_GPU_PIPE_BIND_SHARED         (1u << 20)
 #define VIRTIO_GPU_PIPE_BIND_LINEAR         (1u << 22)
+#define VIRTIO_GPU_PRESENT_SAMPLE_COUNT 5
 
 extern pagetable_t kernel_pagetable;
 
@@ -306,6 +314,54 @@ struct virtio_gpu_stats {
     uint64 last_fence;
     uint64 irq_completions;
     uint64 poll_fallbacks;
+    uint64 async_posted;
+    uint64 async_posted_submit_3d;
+    uint64 async_posted_flush;
+    uint64 async_posted_transfer;
+    uint64 async_retired;
+    uint64 async_make_room_calls;
+    uint64 async_make_room_submit_3d_calls;
+    uint64 async_make_room_flush_calls;
+    uint64 async_make_room_transfer_calls;
+    uint64 async_make_room_stalls;
+    uint64 async_make_room_submit_3d_stalls;
+    uint64 async_make_room_flush_stalls;
+    uint64 async_make_room_transfer_stalls;
+    uint64 async_wait_progress_calls;
+    uint64 async_make_room_wait_ticks;
+    uint64 async_make_room_last_wait_us;
+    uint64 async_make_room_max_wait_us;
+};
+
+enum virtio_gpu_async_reason {
+    VIRTIO_GPU_ASYNC_REASON_OTHER = 0,
+    VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D,
+    VIRTIO_GPU_ASYNC_REASON_FLUSH,
+    VIRTIO_GPU_ASYNC_REASON_TRANSFER,
+};
+
+enum virtio_gpu_op_holder {
+    VIRTIO_GPU_OP_NONE = 0,
+    VIRTIO_GPU_OP_SUBMIT_3D,
+    VIRTIO_GPU_OP_SCANOUT,
+    VIRTIO_GPU_OP_CONTEXT,
+    VIRTIO_GPU_OP_FENCE,
+    VIRTIO_GPU_OP_CAPSET,
+    VIRTIO_GPU_OP_RESOURCE,
+    VIRTIO_GPU_OP_TRANSFER,
+    VIRTIO_GPU_OP_FB_PRESENT,
+    VIRTIO_GPU_OP_PRESENT_COPY,
+    VIRTIO_GPU_OP_PROBE,
+    VIRTIO_GPU_OP_RESIZE,
+    VIRTIO_GPU_OP_PAGE_FLIP,
+    VIRTIO_GPU_OP_OTHER,
+};
+
+struct virtio_gpu_async_drain_sample {
+    uint64 submit_3d;
+    uint64 flush;
+    uint64 transfer;
+    uint64 other;
 };
 
 struct virtio_gpu_resource {
@@ -329,6 +385,9 @@ struct virtio_gpu_resource {
     uint32 ctx_id;
     uint32 target;
     uint32 bind;
+    uint64 last_submit_fence;
+    uint32 export_refs;
+    int destroy_pending;
 };
 
 struct virtio_gpu_context {
@@ -395,6 +454,7 @@ struct virtio_gpu_async_submit {
     uint32 type;
     uint32 expected;
     uint32 data_order;
+    uint32 desc_base;
     void *cmd;
     uint32 cmd_len;
     void *data;
@@ -403,6 +463,19 @@ struct virtio_gpu_async_submit {
     uint32 resp_len;
     completion_t done;
 };
+
+/*
+ * Async submission ring.  The control queue keeps up to VIRTIO_GPU_ASYNC_DEPTH
+ * commands in flight at once so the compositor's GL-compose submit can overlap
+ * the previous frame's scanout RESOURCE_FLUSH (which blocks on host vsync).
+ * Each ring slot owns a private block of descriptors so an in-flight command's
+ * descriptors are never overwritten while a younger one is posted.  QEMU's
+ * virtio-gpu control queue retires buffers in submission order, so the ring is
+ * drained strictly FIFO.
+ */
+#define VIRTIO_GPU_ASYNC_MAX_DEPTH 4
+#define VIRTIO_GPU_ASYNC_DESC_PER_SLOT 4
+#define VIRTIO_GPU_ASYNC_DESC_BASE 8
 
 struct virtio_gpu {
     int initialized;
@@ -430,11 +503,32 @@ struct virtio_gpu {
     uint32 present_ctx_id;
     uint32 present_scanout_ctx_id;
     uint32 present_scanout_resource_id;
+    struct virtio_gpu_resource *present_flip_resource[2];
+    uint8 present_flip_valid[2];
+    uint32 present_flip_base_generation[2];
+    uint32 present_flip_rect_x[2];
+    uint32 present_flip_rect_y[2];
+    uint32 present_flip_rect_w[2];
+    uint32 present_flip_rect_h[2];
+    uint32 present_flip_index;
+    uint32 present_base_generation;
     uint32 bound_scanout_resource_id;
+    uint32 diagnostic_present_resource_id;
+    uint32 diagnostic_present_ctx_id;
+    uint32 diagnostic_present_src_x;
+    uint32 diagnostic_present_src_y;
+    uint32 diagnostic_present_dst_x;
+    uint32 diagnostic_present_dst_y;
+    uint32 diagnostic_present_w;
+    uint32 diagnostic_present_h;
     uint32 next_context_id;
     struct virtio_gpu_context contexts[VIRTIO_GPU_MAX_CONTEXTS];
     uint64 next_fence_id;
-    struct virtio_gpu_async_submit async_submit;
+    struct virtio_gpu_async_submit async_ring[VIRTIO_GPU_ASYNC_MAX_DEPTH];
+    uint32 async_count;
+    int async_depth;
+    int op_lock_holder;
+    completion_t async_wait;
     void *cmd_page;
     void *resp_page;
     void *data_page;
@@ -572,8 +666,75 @@ static int virtio_gpu_cmdline_enabled(const char *key)
            strcmp(buf, "on") == 0;
 }
 
+static uint32 virtio_gpu_cmdline_uint(const char *key, uint32 default_value,
+                                      uint32 max_value)
+{
+    char buf[16];
+    uint32 value = 0;
+
+    if (cmdline_get_param(key, buf, sizeof(buf)) != 0 || buf[0] == '\0')
+        return default_value;
+    for (int i = 0; buf[i] != '\0'; i++) {
+        if (buf[i] < '0' || buf[i] > '9')
+            return default_value;
+        value = value * 10 + (uint32)(buf[i] - '0');
+        if (value > max_value)
+            return max_value;
+    }
+    return value;
+}
+
+static int virtio_gpu_async_scanout_flush_enabled(void)
+{
+    return virtio_gpu_cmdline_enabled("virtio_gpu_async_scanout_flush") ||
+           virtio_gpu_cmdline_enabled("vgpu_async_flush");
+}
+
+static int virtio_gpu_use_3d_scanout(struct virtio_gpu *g)
+{
+    if (g == NULL || g->virgl_capset_id == 0 ||
+        virtio_gpu_cmdline_enabled("virtio_gpu_no_3d_scanout"))
+        return 0;
+    /*
+     * Alpine/Linux uses virgl-capable scanout resources and then flips between
+     * full-screen resources.  Keep the old 2D scanout as an explicit opt-out for
+     * hosts that cannot scan out a virgl 3D resource.
+     */
+    return 1;
+}
+
+static int virtio_gpu_pageflip_copy_enabled(void)
+{
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_disable_pageflip_copy"))
+        return 0;
+    return virtio_gpu_cmdline_enabled("virtio_gpu_pageflip_copy");
+}
+
+static int virtio_gpu_pageflip_validate_enabled(void)
+{
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_pageflip_no_validate") ||
+        virtio_gpu_cmdline_enabled("virtio_gpu_pageflip_skip_validate"))
+        return 0;
+    return virtio_gpu_cmdline_enabled("virtio_gpu_pageflip_validate_copy");
+}
+
 static void virtio_gpu_mark_all_contexts_failed_locked(struct virtio_gpu *g);
+static void virtio_gpu_drain_sample_count(
+    struct virtio_gpu_async_drain_sample *sample, uint32 type);
+static int virtio_gpu_async_validate_retire(
+    struct virtio_gpu *g, struct virtio_gpu_async_submit *a);
+static struct virtio_gpu_async_submit *
+virtio_gpu_async_find_slot_by_desc(struct virtio_gpu *g, uint32 id);
+static int virtio_gpu_drain_async_submit_sample(
+    struct virtio_gpu *g, int wait,
+    struct virtio_gpu_async_drain_sample *sample);
 static int virtio_gpu_drain_async_submit(struct virtio_gpu *g, int wait);
+static void virtio_gpu_drop_present_flip_resources(struct virtio_gpu *g);
+static int virtio_gpu_present_flip_slot_for_id(struct virtio_gpu *g,
+                                               uint32 resource_id,
+                                               uint32 *slot_out);
+static void virtio_gpu_invalidate_present_flip_slot(struct virtio_gpu *g,
+                                                    uint32 slot);
 
 static int virtio_gpu_complete_pending_locked(struct virtio_gpu_queue *q)
 {
@@ -595,6 +756,9 @@ static int virtio_gpu_wait_for_used(struct virtio_gpu *g,
                                     completion_t *done)
 {
     uint64 waited_ms = 0;
+    uint32 wait_limit_ms = virtio_gpu_cmdline_uint(
+        "virtio_gpu_irq_wait_ms", VIRTIO_GPU_IRQ_WAIT_MS,
+        VIRTIO_GPU_IRQ_WAIT_MS_MAX);
     int poll_fallback_counted = 0;
 
     /*
@@ -609,11 +773,12 @@ static int virtio_gpu_wait_for_used(struct virtio_gpu *g,
     }
 
     /*
-     * Keep the historical five-second failure deadline, but poll the used ring
-     * between short sleeps.  A missed or coalesced interrupt should cost about
-     * a millisecond, not a multi-second UI freeze.
+     * Keep the historical five-second failure deadline unless the launch asks
+     * for a longer host-warmup window.  Poll the used ring between short sleeps
+     * so a missed or coalesced interrupt costs about a millisecond, not a
+     * multi-second UI freeze.
      */
-    while (waited_ms < VIRTIO_GPU_IRQ_WAIT_MS) {
+    while (waited_ms < wait_limit_ms) {
         if (wait_for_completion_timeout(done,
                                         VIRTIO_GPU_IRQ_WAIT_SLICE_MS) != 0)
             return 1;
@@ -659,17 +824,27 @@ static void virtio_gpu_intr(int irq, void *data, device_t *dev)
     spin_unlock(&q->lock);
 }
 
-static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
-                             void *data, uint32 data_len, bool data_write,
-                             void *resp, uint32 resp_len, uint32 expected)
+static int virtio_gpu_submit_internal(struct virtio_gpu *g, void *cmd,
+                                      uint32 cmd_len, void *data,
+                                      uint32 data_len, bool data_write,
+                                      void *resp, uint32 resp_len,
+                                      uint32 expected,
+                                      uint64 *drain_ticks_out,
+                                      uint64 *command_ticks_out,
+                                      struct virtio_gpu_async_drain_sample
+                                      *drain_sample)
 {
     struct virtio_gpu_queue *q = &g->ctrlq;
     uint32 type = ((struct virtio_gpu_ctrl_hdr *)cmd)->type;
     struct virtio_gpu_ctrl_hdr *resp_hdr = resp;
     completion_t done;
+    uint64 start;
 
-    if (virtio_gpu_drain_async_submit(g, 1) != 0)
+    start = r_time();
+    if (virtio_gpu_drain_async_submit_sample(g, 1, drain_sample) != 0)
         return -1;
+    if (drain_ticks_out != NULL)
+        *drain_ticks_out = r_time() - start;
 
     completion_init(&done);
     int intena = spin_lock_irqsave(&q->lock);
@@ -705,7 +880,10 @@ static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
     virtio_gpu_notify(g, 0);
     spin_unlock_irqrestore(&q->lock, intena);
 
+    start = r_time();
     (void)virtio_gpu_wait_for_used(g, q, &done);
+    if (command_ticks_out != NULL)
+        *command_ticks_out = r_time() - start;
 
     intena = spin_lock_irqsave(&q->lock);
 
@@ -734,6 +912,129 @@ static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
 
     virtio_gpu_count_command(g, type);
     return 0;
+}
+
+static int virtio_gpu_submit_mixed_async(struct virtio_gpu *g, void *cmd,
+                                         uint32 cmd_len, void *data,
+                                         uint32 data_len, bool data_write,
+                                         void *resp, uint32 resp_len,
+                                         uint32 expected,
+                                         struct virtio_gpu_async_drain_sample
+                                         *drain_sample)
+{
+    struct virtio_gpu_queue *q = &g->ctrlq;
+    uint32 type = ((struct virtio_gpu_ctrl_hdr *)cmd)->type;
+    struct virtio_gpu_ctrl_hdr *resp_hdr = resp;
+    completion_t done;
+    int ret = 0;
+
+    completion_init(&done);
+    int intena = spin_lock_irqsave(&q->lock);
+
+    memset(resp, 0, resp_len);
+    memset(q->desc, 0, 4 * sizeof(q->desc[0]));
+
+    int resp_desc = 1;
+    q->desc[0].addr = (uint64)cmd;
+    q->desc[0].len = cmd_len;
+    q->desc[0].flags = VRING_DESC_F_NEXT;
+    if (data && data_len) {
+        resp_desc = 2;
+        q->desc[0].next = 1;
+        q->desc[1].addr = (uint64)data;
+        q->desc[1].len = data_len;
+        q->desc[1].flags = VRING_DESC_F_NEXT |
+                            (data_write ? VRING_DESC_F_WRITE : 0);
+        q->desc[1].next = 2;
+    } else {
+        q->desc[0].next = 1;
+    }
+    q->desc[resp_desc].addr = (uint64)resp;
+    q->desc[resp_desc].len = resp_len;
+    q->desc[resp_desc].flags = VRING_DESC_F_WRITE;
+    q->desc[resp_desc].next = 0;
+
+    q->avail->ring[q->avail->idx % q->size] = 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    q->avail->idx++;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    q->pending_completion = &done;
+    virtio_gpu_notify(g, 0);
+    spin_unlock_irqrestore(&q->lock, intena);
+
+    for (;;) {
+        uint32 id = 0;
+        struct virtio_gpu_async_submit *a;
+
+        if (!virtio_gpu_wait_for_used(g, q, &done)) {
+            intena = spin_lock_irqsave(&q->lock);
+            q->pending_completion = NULL;
+            spin_unlock_irqrestore(&q->lock, intena);
+            virtio_gpu_count_timeout(g);
+            virtio_gpu_count_failure(g);
+            spin_lock(&g->lock);
+            virtio_gpu_mark_all_contexts_failed_locked(g);
+            spin_unlock(&g->lock);
+            printf("virtio_gpu: mixed command 0x%x timed out\n", type);
+            return -1;
+        }
+
+        for (;;) {
+            int have = 0;
+
+            intena = spin_lock_irqsave(&q->lock);
+            if (q->used->idx != q->used_idx) {
+                id = q->used->ring[q->used_idx % q->size].id;
+                q->used_idx = (uint16)(q->used_idx + 1);
+                have = 1;
+            }
+            spin_unlock_irqrestore(&q->lock, intena);
+            if (!have)
+                break;
+
+            if (id == 0) {
+                intena = spin_lock_irqsave(&q->lock);
+                q->pending_completion = NULL;
+                spin_unlock_irqrestore(&q->lock, intena);
+                if (resp_hdr->type != expected) {
+                    virtio_gpu_count_failure(g);
+                    printf("virtio_gpu: mixed command 0x%x response=0x%x expected=0x%x\n",
+                           type, resp_hdr->type, expected);
+                    return -1;
+                }
+                virtio_gpu_count_command(g, type);
+                return ret;
+            }
+
+            a = virtio_gpu_async_find_slot_by_desc(g, id);
+            if (a == NULL) {
+                printf("virtio_gpu: mixed reap unknown desc id=%u\n", id);
+                continue;
+            }
+            virtio_gpu_drain_sample_count(drain_sample, a->type);
+            if (virtio_gpu_async_validate_retire(g, a) != 0)
+                ret = -1;
+            g->async_count--;
+            spin_lock(&g->lock);
+            g->stats.async_retired++;
+            spin_unlock(&g->lock);
+        }
+
+        completion_init(&done);
+        intena = spin_lock_irqsave(&q->lock);
+        if (q->pending_completion != NULL)
+            q->pending_completion = &done;
+        spin_unlock_irqrestore(&q->lock, intena);
+    }
+}
+
+static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
+                             void *data, uint32 data_len, bool data_write,
+                             void *resp, uint32 resp_len, uint32 expected)
+{
+    return virtio_gpu_submit_internal(g, cmd, cmd_len, data, data_len,
+                                      data_write, resp, resp_len, expected,
+                                      NULL, NULL, NULL);
 }
 
 static struct virtio_gpu_resource *virtio_gpu_alloc_resource_slot(
@@ -878,45 +1179,445 @@ static void virtio_gpu_async_submit_free(struct virtio_gpu_async_submit *a)
     memset(a, 0, sizeof(*a));
 }
 
-static int virtio_gpu_drain_async_submit(struct virtio_gpu *g, int wait)
+static uint64 virtio_gpu_ticks_to_us(uint64 ticks)
 {
-    struct virtio_gpu_async_submit *a = &g->async_submit;
-    struct virtio_gpu_queue *q = &g->ctrlq;
-    struct virtio_gpu_ctrl_hdr *resp_hdr;
-    int intena;
-    int completed;
+    extern uint64 __timebase_frequency;
+    uint64 freq = __timebase_frequency ? __timebase_frequency : 10000000UL;
 
-    if (!a->pending)
-        return 0;
+    return ticks * 1000000ULL / freq;
+}
 
-    spin_lock(&q->lock);
-    completed = virtio_gpu_used_advanced(q);
-    spin_unlock(&q->lock);
-    if (!completed && !wait)
-        return 0;
+static void virtio_gpu_op_lock(struct virtio_gpu *g,
+                               enum virtio_gpu_op_holder holder)
+{
+    mutex_lock(&g->op_lock);
+    __atomic_store_n(&g->op_lock_holder, holder, __ATOMIC_RELAXED);
+}
 
-    if (!completed)
-        (void)virtio_gpu_wait_for_used(g, q, &a->done);
+static void virtio_gpu_op_unlock(struct virtio_gpu *g)
+{
+    __atomic_store_n(&g->op_lock_holder, VIRTIO_GPU_OP_NONE,
+                     __ATOMIC_RELAXED);
+    mutex_unlock(&g->op_lock);
+}
 
-    intena = spin_lock_irqsave(&q->lock);
-    if (q->used->idx == q->used_idx) {
-        q->pending_completion = NULL;
-        spin_unlock_irqrestore(&q->lock, intena);
-        virtio_gpu_count_timeout(g);
-        virtio_gpu_count_failure(g);
-        spin_lock(&g->lock);
-        virtio_gpu_mark_all_contexts_failed_locked(g);
-        spin_unlock(&g->lock);
-        printf("virtio_gpu: async command 0x%x timed out\n", a->type);
-        virtio_gpu_async_submit_free(a);
-        return -1;
+static void virtio_gpu_scanout_perf_log(int ret, int path, int already_bound,
+                                        int wait_holder,
+                                        uint64 total_ticks,
+                                        uint64 lock_wait_ticks,
+                                        uint64 set_scanout_ticks,
+                                        uint64 flush_ticks)
+{
+    static uint64 calls;
+    static uint64 total_total;
+    static uint64 lock_wait_total;
+    static uint64 set_scanout_total;
+    static uint64 flush_total;
+    static uint64 failed;
+    static uint64 wait_submit_3d;
+    static uint64 wait_scanout;
+    static uint64 wait_context;
+    static uint64 wait_fence;
+    static uint64 wait_capset;
+    static uint64 wait_resource;
+    static uint64 wait_transfer;
+    static uint64 wait_fb_present;
+    static uint64 wait_present_copy;
+    static uint64 wait_probe;
+    static uint64 wait_resize;
+    static uint64 wait_page_flip;
+    static uint64 wait_other;
+    static uint64 wait_none;
+    static uint64 wait_submit_3d_ticks;
+    static uint64 wait_scanout_ticks;
+    static uint64 wait_context_ticks;
+    static uint64 wait_fence_ticks;
+    static uint64 wait_capset_ticks;
+    static uint64 wait_resource_ticks;
+    static uint64 wait_transfer_ticks;
+    static uint64 wait_fb_present_ticks;
+    static uint64 wait_present_copy_ticks;
+    static uint64 wait_probe_ticks;
+    static uint64 wait_resize_ticks;
+    static uint64 wait_page_flip_ticks;
+    static uint64 wait_other_ticks;
+    static uint64 wait_none_ticks;
+    const char *path_name = "none";
+
+    switch (path) {
+    case 1:
+        path_name = "noflush";
+        break;
+    case 2:
+        path_name = "async-flush";
+        break;
+    case 3:
+        path_name = "sync-flush";
+        break;
     }
 
-    q->used_idx = q->used->idx;
-    q->pending_completion = NULL;
-    spin_unlock_irqrestore(&q->lock, intena);
+    calls++;
+    total_total += total_ticks;
+    lock_wait_total += lock_wait_ticks;
+    set_scanout_total += set_scanout_ticks;
+    flush_total += flush_ticks;
+    if (ret != 0)
+        failed++;
+    if (lock_wait_ticks != 0) {
+        switch (wait_holder) {
+        case VIRTIO_GPU_OP_SUBMIT_3D:
+            wait_submit_3d++;
+            wait_submit_3d_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_SCANOUT:
+            wait_scanout++;
+            wait_scanout_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_CONTEXT:
+            wait_context++;
+            wait_context_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_FENCE:
+            wait_fence++;
+            wait_fence_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_CAPSET:
+            wait_capset++;
+            wait_capset_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_RESOURCE:
+            wait_resource++;
+            wait_resource_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_TRANSFER:
+            wait_transfer++;
+            wait_transfer_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_FB_PRESENT:
+            wait_fb_present++;
+            wait_fb_present_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_PRESENT_COPY:
+            wait_present_copy++;
+            wait_present_copy_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_PROBE:
+            wait_probe++;
+            wait_probe_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_RESIZE:
+            wait_resize++;
+            wait_resize_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_PAGE_FLIP:
+            wait_page_flip++;
+            wait_page_flip_ticks += lock_wait_ticks;
+            break;
+        case VIRTIO_GPU_OP_OTHER:
+            wait_other++;
+            wait_other_ticks += lock_wait_ticks;
+            break;
+        default:
+            wait_none++;
+            wait_none_ticks += lock_wait_ticks;
+            break;
+        }
+    }
+    if (calls < 20)
+        return;
 
-    resp_hdr = (struct virtio_gpu_ctrl_hdr *)a->resp;
+    printf("virtio-gpu: scanout avg_us total=%lu lock_wait=%lu set_scanout=%lu flush=%lu calls=%lu failed=%lu wait_submit_3d=%lu wait_scanout=%lu wait_context=%lu wait_fence=%lu wait_capset=%lu wait_resource=%lu wait_transfer=%lu wait_fb_present=%lu wait_present_copy=%lu wait_probe=%lu wait_resize=%lu wait_page_flip=%lu wait_other=%lu wait_none=%lu wait_us submit_3d=%lu scanout=%lu context=%lu fence=%lu capset=%lu resource=%lu transfer=%lu fb_present=%lu present_copy=%lu probe=%lu resize=%lu page_flip=%lu other=%lu none=%lu path=%s already_bound=%d\n",
+           virtio_gpu_ticks_to_us(total_total) / calls,
+           virtio_gpu_ticks_to_us(lock_wait_total) / calls,
+           virtio_gpu_ticks_to_us(set_scanout_total) / calls,
+           virtio_gpu_ticks_to_us(flush_total) / calls,
+           calls, failed, wait_submit_3d, wait_scanout, wait_context,
+           wait_fence, wait_capset, wait_resource, wait_transfer,
+           wait_fb_present, wait_present_copy, wait_probe, wait_resize,
+           wait_page_flip, wait_other, wait_none,
+           virtio_gpu_ticks_to_us(wait_submit_3d_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_scanout_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_context_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_fence_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_capset_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_resource_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_transfer_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_fb_present_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_present_copy_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_probe_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_resize_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_page_flip_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_other_ticks) / calls,
+           virtio_gpu_ticks_to_us(wait_none_ticks) / calls,
+           path_name, already_bound);
+    calls = 0;
+    total_total = 0;
+    lock_wait_total = 0;
+    set_scanout_total = 0;
+    flush_total = 0;
+    failed = 0;
+    wait_submit_3d = 0;
+    wait_scanout = 0;
+    wait_context = 0;
+    wait_fence = 0;
+    wait_capset = 0;
+    wait_resource = 0;
+    wait_transfer = 0;
+    wait_fb_present = 0;
+    wait_present_copy = 0;
+    wait_probe = 0;
+    wait_resize = 0;
+    wait_page_flip = 0;
+    wait_other = 0;
+    wait_none = 0;
+    wait_submit_3d_ticks = 0;
+    wait_scanout_ticks = 0;
+    wait_context_ticks = 0;
+    wait_fence_ticks = 0;
+    wait_capset_ticks = 0;
+    wait_resource_ticks = 0;
+    wait_transfer_ticks = 0;
+    wait_fb_present_ticks = 0;
+    wait_present_copy_ticks = 0;
+    wait_probe_ticks = 0;
+    wait_resize_ticks = 0;
+    wait_page_flip_ticks = 0;
+    wait_other_ticks = 0;
+    wait_none_ticks = 0;
+}
+
+static void virtio_gpu_transfer_perf_log(int ret, int from_host, int async_path,
+                                         int mixed_path,
+                                         int bound_scanout,
+                                         int wait_holder,
+                                         uint64 total_ticks,
+                                         uint64 lock_wait_ticks,
+                                         uint64 submit_ticks,
+                                         uint64 drain_ticks,
+                                         uint64 command_ticks,
+                                         uint64 drain_submit_3d,
+                                         uint64 drain_flush,
+                                         uint64 drain_transfer,
+                                         uint64 drain_other,
+                                         uint32 x, uint32 y,
+                                         uint32 width, uint32 height,
+                                         uint32 resource_id, uint32 ctx_id,
+                                         uint32 res_width, uint32 res_height,
+                                         uint32 target, uint32 bind,
+                                         uint64 offset, uint32 stride,
+                                         pid_t owner_tgid)
+{
+    static uint64 calls;
+    static uint64 failed;
+    static uint64 from_host_calls;
+    static uint64 to_host_calls;
+    static uint64 async_calls;
+    static uint64 mixed_calls;
+    static uint64 bound_scanout_calls;
+    static uint64 total_total;
+    static uint64 lock_wait_total;
+    static uint64 submit_total;
+    static uint64 drain_total;
+    static uint64 command_total;
+    static uint64 drain_submit_3d_total;
+    static uint64 drain_flush_total;
+    static uint64 drain_transfer_total;
+    static uint64 drain_other_total;
+    static uint64 pixels_total;
+    static uint64 wait_transfer;
+    static uint64 wait_scanout;
+    static uint64 wait_submit_3d;
+    static uint64 wait_fence;
+    static uint64 wait_other;
+    static uint64 wait_none;
+
+    calls++;
+    total_total += total_ticks;
+    lock_wait_total += lock_wait_ticks;
+    submit_total += submit_ticks;
+    drain_total += drain_ticks;
+    command_total += command_ticks;
+    drain_submit_3d_total += drain_submit_3d;
+    drain_flush_total += drain_flush;
+    drain_transfer_total += drain_transfer;
+    drain_other_total += drain_other;
+    pixels_total += (uint64)width * height;
+    if (ret != 0)
+        failed++;
+    if (from_host)
+        from_host_calls++;
+    else
+        to_host_calls++;
+    if (async_path)
+        async_calls++;
+    if (mixed_path)
+        mixed_calls++;
+    if (bound_scanout)
+        bound_scanout_calls++;
+    if (lock_wait_ticks != 0) {
+        switch (wait_holder) {
+        case VIRTIO_GPU_OP_TRANSFER:
+            wait_transfer++;
+            break;
+        case VIRTIO_GPU_OP_SCANOUT:
+            wait_scanout++;
+            break;
+        case VIRTIO_GPU_OP_SUBMIT_3D:
+            wait_submit_3d++;
+            break;
+        case VIRTIO_GPU_OP_FENCE:
+            wait_fence++;
+            break;
+        case VIRTIO_GPU_OP_NONE:
+            wait_none++;
+            break;
+        default:
+            wait_other++;
+            break;
+        }
+    }
+    if (calls < 20)
+        return;
+
+    printf("virtio-gpu: transfer avg_us total=%lu lock_wait=%lu submit=%lu drain=%lu command=%lu drain_submit_3d=%lu drain_flush=%lu drain_transfer=%lu drain_other=%lu calls=%lu failed=%lu from_host=%lu to_host=%lu async=%lu mixed=%lu bound_scanout=%lu avg_pixels=%lu wait_transfer=%lu wait_scanout=%lu wait_submit_3d=%lu wait_fence=%lu wait_other=%lu wait_none=%lu last_from_host=%d last_res=%u ctx=%u owner_tgid=%d res=%ux%u target=0x%x bind=0x%x offset=%lu stride=%u last_rect=%u,%u %ux%u\n",
+           virtio_gpu_ticks_to_us(total_total) / calls,
+           virtio_gpu_ticks_to_us(lock_wait_total) / calls,
+           virtio_gpu_ticks_to_us(submit_total) / calls,
+           virtio_gpu_ticks_to_us(drain_total) / calls,
+           virtio_gpu_ticks_to_us(command_total) / calls,
+           drain_submit_3d_total, drain_flush_total, drain_transfer_total,
+           drain_other_total,
+           calls, failed, from_host_calls, to_host_calls, async_calls, mixed_calls,
+           bound_scanout_calls, pixels_total / calls, wait_transfer,
+           wait_scanout, wait_submit_3d, wait_fence, wait_other, wait_none,
+           from_host, resource_id, ctx_id, owner_tgid, res_width, res_height,
+           target, bind, offset, stride, x, y, width, height);
+    calls = 0;
+    failed = 0;
+    from_host_calls = 0;
+    to_host_calls = 0;
+    async_calls = 0;
+    mixed_calls = 0;
+    bound_scanout_calls = 0;
+    total_total = 0;
+    lock_wait_total = 0;
+    submit_total = 0;
+    drain_total = 0;
+    command_total = 0;
+    drain_submit_3d_total = 0;
+    drain_flush_total = 0;
+    drain_transfer_total = 0;
+    drain_other_total = 0;
+    pixels_total = 0;
+    wait_transfer = 0;
+    wait_scanout = 0;
+    wait_submit_3d = 0;
+    wait_fence = 0;
+    wait_other = 0;
+    wait_none = 0;
+}
+
+static int virtio_gpu_async_depth(struct virtio_gpu *g)
+{
+    if (g->async_depth == 0) {
+        char buf[16];
+        int depth = (virtio_gpu_cmdline_enabled("vgpu_async_pf") ||
+                     virtio_gpu_cmdline_enabled(
+                         "virtio_gpu_async_page_flip_scanout")) ? 4 : 2;
+
+        if (cmdline_get_param("virtio_gpu_async_depth", buf,
+                              sizeof(buf)) == 0 &&
+            buf[0] >= '1' && buf[0] <= '0' + VIRTIO_GPU_ASYNC_MAX_DEPTH &&
+            buf[1] == '\0')
+            depth = buf[0] - '0';
+        g->async_depth = depth;
+    }
+    return g->async_depth;
+}
+
+static void virtio_gpu_count_async_make_room_locked(
+    struct virtio_gpu *g, enum virtio_gpu_async_reason reason, int count_call,
+    int stalled)
+{
+    if (count_call)
+        g->stats.async_make_room_calls++;
+    switch (reason) {
+    case VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D:
+        if (count_call)
+            g->stats.async_make_room_submit_3d_calls++;
+        if (stalled)
+            g->stats.async_make_room_submit_3d_stalls++;
+        break;
+    case VIRTIO_GPU_ASYNC_REASON_FLUSH:
+        if (count_call)
+            g->stats.async_make_room_flush_calls++;
+        if (stalled)
+            g->stats.async_make_room_flush_stalls++;
+        break;
+    case VIRTIO_GPU_ASYNC_REASON_TRANSFER:
+        if (count_call)
+            g->stats.async_make_room_transfer_calls++;
+        if (stalled)
+            g->stats.async_make_room_transfer_stalls++;
+        break;
+    default:
+        break;
+    }
+    if (stalled)
+        g->stats.async_make_room_stalls++;
+}
+
+static void virtio_gpu_count_async_posted_locked(
+    struct virtio_gpu *g, uint32 type)
+{
+    g->stats.async_posted++;
+    switch (type) {
+    case VIRTIO_GPU_CMD_SUBMIT_3D:
+        g->stats.async_posted_submit_3d++;
+        break;
+    case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
+        g->stats.async_posted_flush++;
+        break;
+    case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D:
+        g->stats.async_posted_transfer++;
+        break;
+    default:
+        break;
+    }
+}
+
+static void virtio_gpu_drain_sample_count(
+    struct virtio_gpu_async_drain_sample *sample, uint32 type)
+{
+    if (sample == NULL)
+        return;
+    switch (type) {
+    case VIRTIO_GPU_CMD_SUBMIT_3D:
+        sample->submit_3d++;
+        break;
+    case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
+        sample->flush++;
+        break;
+    case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D:
+        sample->transfer++;
+        break;
+    default:
+        sample->other++;
+        break;
+    }
+}
+
+/*
+ * Validate and free a single completed async slot.  The host has already
+ * written this slot's response (its descriptor chain appeared in the used
+ * ring).  Returns 0 on success, -1 if the response/fence was unexpected.
+ */
+static int virtio_gpu_async_validate_retire(struct virtio_gpu *g,
+                                            struct virtio_gpu_async_submit *a)
+{
+    struct virtio_gpu_ctrl_hdr *resp_hdr = (struct virtio_gpu_ctrl_hdr *)a->resp;
+    int ret = 0;
+
     if (resp_hdr->type != a->expected) {
         virtio_gpu_count_failure(g);
         spin_lock(&g->lock);
@@ -925,11 +1626,8 @@ static int virtio_gpu_drain_async_submit(struct virtio_gpu *g, int wait)
         spin_unlock(&g->lock);
         printf("virtio_gpu: async command 0x%x response=0x%x expected=0x%x\n",
                a->type, resp_hdr->type, a->expected);
-        virtio_gpu_async_submit_free(a);
-        return -1;
-    }
-
-    if (a->fence_id != 0) {
+        ret = -1;
+    } else if (a->fence_id != 0) {
         if (resp_hdr->fence_id != a->fence_id) {
             virtio_gpu_count_failure(g);
             spin_lock(&g->lock);
@@ -938,18 +1636,345 @@ static int virtio_gpu_drain_async_submit(struct virtio_gpu *g, int wait)
             spin_unlock(&g->lock);
             printf("virtio_gpu: async fence mismatch got=%lu expected=%lu\n",
                    resp_hdr->fence_id, a->fence_id);
-            virtio_gpu_async_submit_free(a);
-            return -1;
+            ret = -1;
+        } else {
+            spin_lock(&g->lock);
+            g->stats.fences++;
+            g->stats.last_fence = a->fence_id;
+            spin_unlock(&g->lock);
         }
-        spin_lock(&g->lock);
-        g->stats.fences++;
-        g->stats.last_fence = a->fence_id;
-        spin_unlock(&g->lock);
     }
 
-    virtio_gpu_count_command(g, a->type);
+    if (ret == 0)
+        virtio_gpu_count_command(g, a->type);
     virtio_gpu_async_submit_free(a);
+    return ret;
+}
+
+/* Map a completed descriptor-chain head id back to its owning ring slot. */
+static struct virtio_gpu_async_submit *
+virtio_gpu_async_find_slot_by_desc(struct virtio_gpu *g, uint32 id)
+{
+    for (int i = 0; i < VIRTIO_GPU_ASYNC_MAX_DEPTH; i++) {
+        if (g->async_ring[i].pending && g->async_ring[i].desc_base == id)
+            return &g->async_ring[i];
+    }
+    return NULL;
+}
+
+/*
+ * Reap every async command the host has already completed.  Retirement follows
+ * the host's actual completion order (read from the used ring) rather than
+ * submission order, because QEMU's virgl renderer may finish a fenced SUBMIT_3D
+ * after a later unfenced RESOURCE_FLUSH.  Must be called with g->op_lock held.
+ * Returns -1 if any retired command reported an unexpected response.
+ */
+static int virtio_gpu_async_reap_completed_sample(
+    struct virtio_gpu *g, struct virtio_gpu_async_drain_sample *sample)
+{
+    struct virtio_gpu_queue *q = &g->ctrlq;
+    int ret = 0;
+
+    for (;;) {
+        struct virtio_gpu_async_submit *a;
+        uint32 id = 0;
+        int have = 0;
+        int intena;
+
+        intena = spin_lock_irqsave(&q->lock);
+        if (q->used->idx != q->used_idx) {
+            id = q->used->ring[q->used_idx % q->size].id;
+            q->used_idx = (uint16)(q->used_idx + 1);
+            have = 1;
+        }
+        spin_unlock_irqrestore(&q->lock, intena);
+        if (!have)
+            break;
+
+        a = virtio_gpu_async_find_slot_by_desc(g, id);
+        if (a == NULL) {
+            printf("virtio_gpu: async reap unknown desc id=%u\n", id);
+            continue;
+        }
+        virtio_gpu_drain_sample_count(sample, a->type);
+        if (virtio_gpu_async_validate_retire(g, a) != 0)
+            ret = -1;
+        g->async_count--;
+        spin_lock(&g->lock);
+        g->stats.async_retired++;
+        spin_unlock(&g->lock);
+    }
+    return ret;
+}
+
+static int virtio_gpu_async_reap_completed(struct virtio_gpu *g)
+{
+    return virtio_gpu_async_reap_completed_sample(g, NULL);
+}
+
+/* Block until the control queue retires at least one more buffer. */
+static int virtio_gpu_async_wait_progress(struct virtio_gpu *g)
+{
+    struct virtio_gpu_queue *q = &g->ctrlq;
+    int intena;
+
+    intena = spin_lock_irqsave(&q->lock);
+    if (q->used->idx != q->used_idx) {
+        spin_unlock_irqrestore(&q->lock, intena);
+        return 1;
+    }
+    completion_init(&g->async_wait);
+    q->pending_completion = &g->async_wait;
+    spin_unlock_irqrestore(&q->lock, intena);
+
+    return virtio_gpu_wait_for_used(g, q, &g->async_wait);
+}
+
+/* Tear down all outstanding async slots after a host timeout. */
+static void virtio_gpu_async_abort_all(struct virtio_gpu *g)
+{
+    struct virtio_gpu_queue *q = &g->ctrlq;
+    int intena;
+
+    virtio_gpu_count_timeout(g);
+    virtio_gpu_count_failure(g);
+    spin_lock(&g->lock);
+    virtio_gpu_mark_all_contexts_failed_locked(g);
+    spin_unlock(&g->lock);
+
+    for (int i = 0; i < VIRTIO_GPU_ASYNC_MAX_DEPTH; i++) {
+        if (g->async_ring[i].pending) {
+            printf("virtio_gpu: async command 0x%x timed out\n",
+                   g->async_ring[i].type);
+            virtio_gpu_async_submit_free(&g->async_ring[i]);
+        }
+    }
+    g->async_count = 0;
+
+    intena = spin_lock_irqsave(&q->lock);
+    q->used_idx = q->used->idx;
+    q->pending_completion = NULL;
+    spin_unlock_irqrestore(&q->lock, intena);
+}
+
+static int virtio_gpu_drain_async_submit_sample(
+    struct virtio_gpu *g, int wait,
+    struct virtio_gpu_async_drain_sample *sample)
+{
+    int ret = virtio_gpu_async_reap_completed_sample(g, sample);
+
+    if (!wait)
+        return ret;
+
+    while (g->async_count > 0) {
+        if (!virtio_gpu_async_wait_progress(g)) {
+            virtio_gpu_async_abort_all(g);
+            return -1;
+        }
+        if (virtio_gpu_async_reap_completed_sample(g, sample) != 0)
+            ret = -1;
+    }
+    return ret;
+}
+
+static int virtio_gpu_drain_async_submit(struct virtio_gpu *g, int wait)
+{
+    return virtio_gpu_drain_async_submit_sample(g, wait, NULL);
+}
+
+static int virtio_gpu_drain_async_until_fence(struct virtio_gpu *g,
+                                              uint64 fence_id)
+{
+    int ret = virtio_gpu_async_reap_completed(g);
+    uint64 done;
+
+    for (;;) {
+        spin_lock(&g->lock);
+        done = g->stats.last_fence;
+        spin_unlock(&g->lock);
+        if (done >= fence_id || g->async_count == 0)
+            return ret;
+        if (!virtio_gpu_async_wait_progress(g)) {
+            virtio_gpu_async_abort_all(g);
+            return -1;
+        }
+        if (virtio_gpu_async_reap_completed(g) != 0)
+            ret = -1;
+    }
+}
+
+/*
+ * Ensure at least one ring slot is free before posting a new async command.
+ * When the ring is full this blocks on the next in-flight completion, which is
+ * exactly where the host-vsync wait of a previous frame's flush is absorbed
+ * while a younger command (e.g. this frame's GL compose) stays in flight.
+ */
+static int virtio_gpu_async_make_room(struct virtio_gpu *g,
+                                      enum virtio_gpu_async_reason reason)
+{
+    int depth = virtio_gpu_async_depth(g);
+    uint64 wait_start = 0;
+    int waited = 0;
+
+    spin_lock(&g->lock);
+    virtio_gpu_count_async_make_room_locked(g, reason, 1, 0);
+    spin_unlock(&g->lock);
+    /* Opportunistically reap anything the host has already finished. */
+    (void)virtio_gpu_async_reap_completed(g);
+    while ((int)g->async_count >= depth) {
+        if (!waited) {
+            wait_start = r_time();
+            waited = 1;
+            spin_lock(&g->lock);
+            virtio_gpu_count_async_make_room_locked(g, reason, 0, 1);
+            spin_unlock(&g->lock);
+        }
+        spin_lock(&g->lock);
+        g->stats.async_wait_progress_calls++;
+        spin_unlock(&g->lock);
+        if (!virtio_gpu_async_wait_progress(g)) {
+            virtio_gpu_async_abort_all(g);
+            return -1;
+        }
+        /* A retired command may report an error; its slot is still freed. */
+        (void)virtio_gpu_async_reap_completed(g);
+    }
+    if (waited) {
+        uint64 ticks = r_time() - wait_start;
+        uint64 us = virtio_gpu_ticks_to_us(ticks);
+
+        spin_lock(&g->lock);
+        g->stats.async_make_room_wait_ticks += ticks;
+        g->stats.async_make_room_last_wait_us = us;
+        if (us > g->stats.async_make_room_max_wait_us)
+            g->stats.async_make_room_max_wait_us = us;
+        spin_unlock(&g->lock);
+    }
     return 0;
+}
+
+/*
+ * Post a fully-prepared async slot onto the control queue.  The slot owns the
+ * descriptor block [desc_base .. desc_base + used).  Must be called with
+ * g->op_lock held and a slot reserved by virtio_gpu_async_reserve_slot().
+ */
+static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
+                                         struct virtio_gpu_async_submit *a)
+{
+    struct virtio_gpu_queue *q = &g->ctrlq;
+    uint32 base = a->desc_base;
+    int intena;
+
+    intena = spin_lock_irqsave(&q->lock);
+    memset(&q->desc[base], 0,
+           VIRTIO_GPU_ASYNC_DESC_PER_SLOT * sizeof(q->desc[0]));
+    q->desc[base].addr = (uint64)a->cmd;
+    q->desc[base].len = a->cmd_len;
+    q->desc[base].flags = VRING_DESC_F_NEXT;
+    if (a->data != NULL && a->data_len != 0) {
+        q->desc[base].next = base + 1;
+        q->desc[base + 1].addr = (uint64)a->data;
+        q->desc[base + 1].len = a->data_len;
+        q->desc[base + 1].flags = VRING_DESC_F_NEXT;
+        q->desc[base + 1].next = base + 2;
+        q->desc[base + 2].addr = (uint64)a->resp;
+        q->desc[base + 2].len = a->resp_len;
+        q->desc[base + 2].flags = VRING_DESC_F_WRITE;
+        q->desc[base + 2].next = 0;
+    } else {
+        q->desc[base].next = base + 1;
+        q->desc[base + 1].addr = (uint64)a->resp;
+        q->desc[base + 1].len = a->resp_len;
+        q->desc[base + 1].flags = VRING_DESC_F_WRITE;
+        q->desc[base + 1].next = 0;
+    }
+
+    q->avail->ring[q->avail->idx % q->size] = (uint16)base;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    q->avail->idx++;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    q->pending_completion = &g->async_wait;
+    virtio_gpu_notify(g, 0);
+    spin_unlock_irqrestore(&q->lock, intena);
+    spin_lock(&g->lock);
+    virtio_gpu_count_async_posted_locked(g, a->type);
+    spin_unlock(&g->lock);
+}
+
+/*
+ * Reserve a free ring slot, assign its private descriptor block and return it.
+ * Caller must have ensured room via virtio_gpu_async_make_room().
+ */
+static struct virtio_gpu_async_submit *
+virtio_gpu_async_reserve_slot(struct virtio_gpu *g)
+{
+    for (int i = 0; i < VIRTIO_GPU_ASYNC_MAX_DEPTH; i++) {
+        struct virtio_gpu_async_submit *a = &g->async_ring[i];
+
+        if (a->pending)
+            continue;
+        memset(a, 0, sizeof(*a));
+        a->pending = 1;
+        a->desc_base = VIRTIO_GPU_ASYNC_DESC_BASE +
+                       i * VIRTIO_GPU_ASYNC_DESC_PER_SLOT;
+        g->async_count++;
+        return a;
+    }
+    return NULL;
+}
+
+static int virtio_gpu_async_post_prepared(
+    struct virtio_gpu *g, struct virtio_gpu_async_submit *prep,
+    enum virtio_gpu_async_reason reason)
+{
+    struct virtio_gpu_async_submit *a;
+
+    if (virtio_gpu_async_make_room(g, reason) != 0)
+        return -1;
+
+    a = virtio_gpu_async_reserve_slot(g);
+    if (a == NULL)
+        return -1;
+    a->ctx_id = prep->ctx_id;
+    a->fence_id = prep->fence_id;
+    a->type = prep->type;
+    a->expected = prep->expected;
+    a->cmd = prep->cmd;
+    a->cmd_len = prep->cmd_len;
+    a->data = prep->data;
+    a->data_len = prep->data_len;
+    a->data_order = prep->data_order;
+    a->resp = prep->resp;
+    a->resp_len = prep->resp_len;
+    prep->cmd = NULL;
+    prep->data = NULL;
+    prep->resp = NULL;
+
+    virtio_gpu_async_post_locked(g, a);
+    return 0;
+}
+
+/* Any async commands still in flight on the control queue? */
+static int virtio_gpu_async_pending(struct virtio_gpu *g)
+{
+    return g->async_count > 0;
+}
+
+/*
+ * Fence id of the most recently submitted outstanding async command, or 0 if
+ * none are in flight.  Used to decide whether an outstanding submit needs to be
+ * drained before a dependent operation (e.g. scanout readback).
+ */
+static uint64 virtio_gpu_async_newest_fence(struct virtio_gpu *g)
+{
+    uint64 newest = 0;
+
+    for (int i = 0; i < VIRTIO_GPU_ASYNC_MAX_DEPTH; i++) {
+        if (g->async_ring[i].pending &&
+            g->async_ring[i].fence_id > newest)
+            newest = g->async_ring[i].fence_id;
+    }
+    return newest;
 }
 
 static int virtio_gpu_backing_order(uint64 bytes, uint32 *alloc_len)
@@ -1412,6 +2437,48 @@ static int virtio_gpu_set_scanout(struct virtio_gpu *g, uint32 scanout_id,
                              VIRTIO_GPU_RESP_OK_NODATA);
 }
 
+static int virtio_gpu_set_scanout_async_prepare(
+    uint32 scanout_id, uint32 resource_id, uint32 x, uint32 y, uint32 width,
+    uint32 height, struct virtio_gpu_async_submit *prep)
+{
+    struct virtio_gpu_set_scanout *cmd;
+    struct virtio_gpu_ctrl_hdr *resp;
+
+    memset(prep, 0, sizeof(*prep));
+    cmd = kalloc();
+    resp = kalloc();
+    if (cmd == NULL || resp == NULL) {
+        if (cmd != NULL)
+            kfree(cmd);
+        if (resp != NULL)
+            kfree(resp);
+        return -ENOMEM;
+    }
+
+    memset(cmd, 0, sizeof(*cmd));
+    memset(resp, 0, sizeof(*resp));
+    cmd->hdr.type = VIRTIO_GPU_CMD_SET_SCANOUT;
+    cmd->r.x = x;
+    cmd->r.y = y;
+    cmd->r.width = width;
+    cmd->r.height = height;
+    cmd->scanout_id = scanout_id;
+    cmd->resource_id = resource_id;
+
+    prep->ctx_id = 0;
+    prep->fence_id = 0;
+    prep->type = VIRTIO_GPU_CMD_SET_SCANOUT;
+    prep->expected = VIRTIO_GPU_RESP_OK_NODATA;
+    prep->cmd = cmd;
+    prep->cmd_len = sizeof(*cmd);
+    prep->data = NULL;
+    prep->data_len = 0;
+    prep->data_order = 0;
+    prep->resp = resp;
+    prep->resp_len = sizeof(*resp);
+    return 0;
+}
+
 static int virtio_gpu_resource_transfer_2d(struct virtio_gpu *g,
                                            struct virtio_gpu_resource *res,
                                            uint32 x, uint32 y, uint32 width,
@@ -1500,6 +2567,194 @@ static int virtio_gpu_resource_flush(struct virtio_gpu *g,
     flush->resource_id = res->id;
     return virtio_gpu_submit(g, flush, sizeof(*flush), NULL, 0, false, resp,
                              sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA);
+}
+
+/*
+ * Fire-and-forget RESOURCE_FLUSH for the bound scanout resource.
+ *
+ * The synchronous virtio_gpu_resource_flush() path blocks the compositor's
+ * present loop on the host's flush acknowledgement, which on the WSL D3D12
+ * virgl host costs ~15ms per frame and serialises the desktop at roughly half
+ * the application's render rate.  Linux/Alpine instead pipelines: it posts the
+ * flush and continues servicing the event loop while the host composites in
+ * parallel.  This routes the flush through the single-slot async submit so the
+ * present returns immediately; the next ctrlq submission drains it (waiting for
+ * the prior flush only if the host has not finished yet).  Gated by the
+ * "virtio_gpu_async_scanout_flush" cmdline flag so the synchronous behaviour
+ * remains the default.
+ */
+static int virtio_gpu_resource_flush_async(struct virtio_gpu *g,
+                                           struct virtio_gpu_resource *res,
+                                           uint32 x, uint32 y, uint32 width,
+                                           uint32 height)
+{
+    struct virtio_gpu_resource_flush *cmd;
+    struct virtio_gpu_ctrl_hdr *resp;
+    struct virtio_gpu_async_submit prep;
+
+    memset(&prep, 0, sizeof(prep));
+    cmd = kalloc();
+    resp = kalloc();
+    if (cmd == NULL || resp == NULL) {
+        if (cmd != NULL)
+            kfree(cmd);
+        if (resp != NULL)
+            kfree(resp);
+        return -ENOMEM;
+    }
+
+    memset(cmd, 0, sizeof(*cmd));
+    memset(resp, 0, sizeof(struct virtio_gpu_ctrl_hdr));
+    cmd->hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+    cmd->r.x = x;
+    cmd->r.y = y;
+    cmd->r.width = width;
+    cmd->r.height = height;
+    cmd->resource_id = res->id;
+
+    prep.ctx_id = 0;
+    prep.fence_id = 0;
+    prep.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+    prep.expected = VIRTIO_GPU_RESP_OK_NODATA;
+    prep.cmd = cmd;
+    prep.cmd_len = sizeof(*cmd);
+    prep.data = NULL;
+    prep.data_len = 0;
+    prep.data_order = 0;
+    prep.resp = resp;
+    prep.resp_len = sizeof(struct virtio_gpu_ctrl_hdr);
+
+    if (virtio_gpu_async_post_prepared(
+            g, &prep, VIRTIO_GPU_ASYNC_REASON_FLUSH) != 0) {
+        virtio_gpu_async_submit_free(&prep);
+        return -1;
+    }
+    return 0;
+}
+
+static int virtio_gpu_resource_flush_async_prepare(
+    uint32 resource_id, uint32 x, uint32 y, uint32 width, uint32 height,
+    struct virtio_gpu_async_submit *prep)
+{
+    struct virtio_gpu_resource_flush *cmd;
+    struct virtio_gpu_ctrl_hdr *resp;
+
+    memset(prep, 0, sizeof(*prep));
+    cmd = kalloc();
+    resp = kalloc();
+    if (cmd == NULL || resp == NULL) {
+        if (cmd != NULL)
+            kfree(cmd);
+        if (resp != NULL)
+            kfree(resp);
+        return -ENOMEM;
+    }
+
+    memset(cmd, 0, sizeof(*cmd));
+    memset(resp, 0, sizeof(struct virtio_gpu_ctrl_hdr));
+    cmd->hdr.type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+    cmd->r.x = x;
+    cmd->r.y = y;
+    cmd->r.width = width;
+    cmd->r.height = height;
+    cmd->resource_id = resource_id;
+
+    prep->ctx_id = 0;
+    prep->fence_id = 0;
+    prep->type = VIRTIO_GPU_CMD_RESOURCE_FLUSH;
+    prep->expected = VIRTIO_GPU_RESP_OK_NODATA;
+    prep->cmd = cmd;
+    prep->cmd_len = sizeof(*cmd);
+    prep->data = NULL;
+    prep->data_len = 0;
+    prep->data_order = 0;
+    prep->resp = resp;
+    prep->resp_len = sizeof(struct virtio_gpu_ctrl_hdr);
+    return 0;
+}
+
+/*
+ * Fire-and-forget TRANSFER_TO_HOST_3D for the compositor's CPU-damaged chrome.
+ *
+ * The synchronous transfer path (virtio_gpu_user_transfer) routes through
+ * virtio_gpu_submit(), which first drains the entire async ring -- so the small
+ * per-frame chrome upload ends up blocking on the previous frame's RESOURCE_FLUSH
+ * completing on the host (a ~vsync wait on the single in-order control queue).
+ * Posting the transfer asynchronously lets the guest continue encoding the
+ * gl-compose command stream while the host drains the queue, so host queue
+ * processing overlaps guest CPU work.  The transfer references the resource's
+ * already-attached backing pages (no inline data descriptor), exactly like the
+ * synchronous TRANSFER_TO_HOST_3D command.  Gated by "virtio_gpu_async_fb_transfer".
+ */
+static int virtio_gpu_transfer_to_host_3d_async(struct virtio_gpu *g,
+                                                struct virtio_gpu_resource *res,
+                                                uint32 ctx_id, uint32 x,
+                                                uint32 y, uint32 width,
+                                                uint32 height, uint32 z,
+                                                uint32 depth, uint32 level,
+                                                uint64 offset, uint32 stride,
+                                                uint32 layer_stride)
+{
+    struct virtio_gpu_async_submit *a;
+    struct virtio_gpu_transfer_host_3d *cmd;
+    struct virtio_gpu_ctrl_hdr *resp;
+    uint32 transfer_stride;
+
+    if (res == NULL || res->width == 0 || res->height == 0 ||
+        width == 0 || height == 0 || depth == 0)
+        return -1;
+
+    if (virtio_gpu_async_make_room(g, VIRTIO_GPU_ASYNC_REASON_TRANSFER) != 0)
+        return -1;
+
+    cmd = kalloc();
+    resp = kalloc();
+    if (cmd == NULL || resp == NULL) {
+        if (cmd != NULL)
+            kfree(cmd);
+        if (resp != NULL)
+            kfree(resp);
+        return -ENOMEM;
+    }
+
+    transfer_stride = stride ? stride : res->width * sizeof(uint32);
+    memset(cmd, 0, sizeof(*cmd));
+    memset(resp, 0, sizeof(struct virtio_gpu_ctrl_hdr));
+    cmd->hdr.type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D;
+    cmd->hdr.ctx_id = ctx_id;
+    cmd->box.x = x;
+    cmd->box.y = y;
+    cmd->box.z = z;
+    cmd->box.w = width;
+    cmd->box.h = height;
+    cmd->box.d = depth;
+    cmd->offset = offset;
+    cmd->resource_id = res->id;
+    cmd->level = level;
+    cmd->stride = transfer_stride;
+    cmd->layer_stride = layer_stride ? layer_stride :
+        (uint64)transfer_stride * res->height;
+
+    a = virtio_gpu_async_reserve_slot(g);
+    if (a == NULL) {
+        kfree(cmd);
+        kfree(resp);
+        return -1;
+    }
+    a->ctx_id = ctx_id;
+    a->fence_id = 0;
+    a->type = VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D;
+    a->expected = VIRTIO_GPU_RESP_OK_NODATA;
+    a->cmd = cmd;
+    a->cmd_len = sizeof(*cmd);
+    a->data = NULL;
+    a->data_len = 0;
+    a->data_order = 0;
+    a->resp = resp;
+    a->resp_len = sizeof(struct virtio_gpu_ctrl_hdr);
+
+    virtio_gpu_async_post_locked(g, a);
+    return 0;
 }
 
 static int virtio_gpu_resource_unref(struct virtio_gpu *g,
@@ -1870,25 +3125,21 @@ static int virtio_gpu_submit_3d(struct virtio_gpu *g, uint32 ctx_id,
     return 0;
 }
 
-static int virtio_gpu_submit_3d_async(struct virtio_gpu *g, uint32 ctx_id,
-                                      const uint32 *cmds, uint32 nr_dwords,
-                                      uint64 fence_id)
+static int virtio_gpu_submit_3d_async_prepare(
+    struct virtio_gpu *g, uint32 ctx_id, const uint32 *cmds,
+    uint32 nr_dwords, uint64 fence_id, struct virtio_gpu_async_submit *prep)
 {
-    struct virtio_gpu_async_submit *a = &g->async_submit;
     struct virtio_gpu_cmd_submit *cmd;
     struct virtio_gpu_ctrl_hdr *resp;
-    struct virtio_gpu_queue *q = &g->ctrlq;
     uint32 bytes = nr_dwords * sizeof(uint32);
     uint32 order;
-    int intena;
+    void *data;
 
+    memset(prep, 0, sizeof(*prep));
     if (nr_dwords == 0 || bytes > PGSIZE * 64) {
         virtio_gpu_count_failure(g);
         return -1;
     }
-
-    if (virtio_gpu_drain_async_submit(g, 1) != 0)
-        return -1;
     {
         uint32 alloc_len;
         int backing_order = virtio_gpu_backing_order(bytes, &alloc_len);
@@ -1906,7 +3157,7 @@ static int virtio_gpu_submit_3d_async(struct virtio_gpu *g, uint32 ctx_id,
             kfree(resp);
         return -ENOMEM;
     }
-    void *data = page_alloc(order, PAGE_TYPE_ANON);
+    data = page_alloc(order, PAGE_TYPE_ANON);
     if (data == NULL) {
         kfree(cmd);
         kfree(resp);
@@ -1924,43 +3175,25 @@ static int virtio_gpu_submit_3d_async(struct virtio_gpu *g, uint32 ctx_id,
     }
     cmd->size = bytes;
 
-    completion_init(&a->done);
-    a->pending = 1;
-    a->ctx_id = ctx_id;
-    a->fence_id = fence_id;
-    a->type = VIRTIO_GPU_CMD_SUBMIT_3D;
-    a->expected = VIRTIO_GPU_RESP_OK_NODATA;
-    a->cmd = cmd;
-    a->cmd_len = sizeof(*cmd);
-    a->data = data;
-    a->data_len = bytes;
-    a->data_order = order;
-    a->resp = resp;
-    a->resp_len = sizeof(*resp);
-
-    intena = spin_lock_irqsave(&q->lock);
-    memset(q->desc, 0, 4 * sizeof(q->desc[0]));
-    q->desc[0].addr = (uint64)a->cmd;
-    q->desc[0].len = a->cmd_len;
-    q->desc[0].flags = VRING_DESC_F_NEXT;
-    q->desc[0].next = 1;
-    q->desc[1].addr = (uint64)a->data;
-    q->desc[1].len = a->data_len;
-    q->desc[1].flags = VRING_DESC_F_NEXT;
-    q->desc[1].next = 2;
-    q->desc[2].addr = (uint64)a->resp;
-    q->desc[2].len = a->resp_len;
-    q->desc[2].flags = VRING_DESC_F_WRITE;
-    q->desc[2].next = 0;
-
-    q->avail->ring[q->avail->idx % q->size] = 0;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    q->avail->idx++;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    q->pending_completion = &a->done;
-    virtio_gpu_notify(g, 0);
-    spin_unlock_irqrestore(&q->lock, intena);
+    prep->ctx_id = ctx_id;
+    prep->fence_id = fence_id;
+    prep->type = VIRTIO_GPU_CMD_SUBMIT_3D;
+    prep->expected = VIRTIO_GPU_RESP_OK_NODATA;
+    prep->cmd = cmd;
+    prep->cmd_len = sizeof(*cmd);
+    prep->data = data;
+    prep->data_len = bytes;
+    prep->data_order = order;
+    prep->resp = resp;
+    prep->resp_len = sizeof(*resp);
     return 0;
+}
+
+static int virtio_gpu_submit_3d_async_post_prepared(
+    struct virtio_gpu *g, struct virtio_gpu_async_submit *prep)
+{
+    return virtio_gpu_async_post_prepared(
+        g, prep, VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D);
 }
 
 static void virtio_gpu_smoke_context(struct virtio_gpu *g)
@@ -2051,21 +3284,21 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return -ENODEV;
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_CONTEXT);
     spin_lock(&g->lock);
     if (capset_id == 0)
         capset_id = g->virgl_capset_id;
     capset = virtio_gpu_lookup_capset_locked(g, capset_id);
     if (capset == NULL) {
         spin_unlock(&g->lock);
-        mutex_unlock(&g->op_lock);
+        virtio_gpu_op_unlock(g);
         return -EINVAL;
     }
     ctx = virtio_gpu_alloc_context_slot_locked(g);
     if (ctx == NULL) {
         g->stats.failures++;
         spin_unlock(&g->lock);
-        mutex_unlock(&g->op_lock);
+        virtio_gpu_op_unlock(g);
         return -ENOSPC;
     }
     id = g->next_context_id++;
@@ -2087,10 +3320,10 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
         if (ctx != NULL)
             memset(ctx, 0, sizeof(*ctx));
         spin_unlock(&g->lock);
-        mutex_unlock(&g->op_lock);
+        virtio_gpu_op_unlock(g);
         return -EIO;
     }
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
 
     *ctx_id = id;
     return 0;
@@ -2109,18 +3342,18 @@ int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return -ENODEV;
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_CONTEXT);
     spin_lock(&g->lock);
     ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
     if (ctx == NULL) {
         spin_unlock(&g->lock);
-        mutex_unlock(&g->op_lock);
+        virtio_gpu_op_unlock(g);
         return -ENOENT;
     }
     if (!virtio_gpu_owner_matches(ctx->owner_id, ctx->owner_tgid,
                                   owner_id, owner_tgid)) {
         spin_unlock(&g->lock);
-        mutex_unlock(&g->op_lock);
+        virtio_gpu_op_unlock(g);
         return -EPERM;
     }
     spin_unlock(&g->lock);
@@ -2140,18 +3373,22 @@ int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
         }
         spin_unlock(&g->lock);
     }
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     return ret == 0 ? 0 : -EIO;
 }
 
 int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 flags, const uint32 *cmds,
-                           uint32 nr_dwords, uint64 *fence, uint64 *signaled)
+                           uint32 nr_dwords, const uint32 *resources,
+                           uint32 resource_count, uint64 *fence,
+                           uint64 *signaled)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
+    struct virtio_gpu_async_submit prep;
     uint64 fence_id;
     int ret;
+    int async_submit;
 
     if ((flags & ~(FB_GPU_VIRGL_SUBMIT_ASYNC |
                    FB_GPU_VIRGL_SUBMIT_FORCE_FAIL)) != 0 ||
@@ -2188,13 +3425,23 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     fence_id = ++g->next_fence_id;
     spin_unlock(&g->lock);
 
-    mutex_lock(&g->op_lock);
-    if (flags & FB_GPU_VIRGL_SUBMIT_ASYNC)
-        ret = virtio_gpu_submit_3d_async(g, ctx_id, cmds, nr_dwords,
-                                         fence_id);
+    async_submit = (flags & FB_GPU_VIRGL_SUBMIT_ASYNC) != 0;
+    memset(&prep, 0, sizeof(prep));
+    if (async_submit) {
+        ret = virtio_gpu_submit_3d_async_prepare(
+            g, ctx_id, cmds, nr_dwords, fence_id, &prep);
+        if (ret != 0)
+            return ret;
+    }
+
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_SUBMIT_3D);
+    if (async_submit)
+        ret = virtio_gpu_submit_3d_async_post_prepared(g, &prep);
     else
         ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, fence_id);
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
+    if (ret != 0)
+        virtio_gpu_async_submit_free(&prep);
     if (ret != 0) {
         spin_lock(&g->lock);
         ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
@@ -2206,6 +3453,21 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     spin_lock(&g->lock);
     if (signaled)
         *signaled = g->stats.last_fence;
+    if (resources != NULL) {
+        for (uint32 i = 0; i < resource_count; i++) {
+            struct virtio_gpu_resource *res;
+
+            if (resources[i] == 0)
+                continue;
+            res = virtio_gpu_lookup_resource_locked(g, resources[i]);
+            if (res == NULL)
+                continue;
+            if (!virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                          owner_id, owner_tgid))
+                continue;
+            res->last_submit_fence = fence_id;
+        }
+    }
     spin_unlock(&g->lock);
     if (fence)
         *fence = fence_id;
@@ -2222,22 +3484,29 @@ int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return -ENODEV;
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_FENCE);
     spin_lock(&g->lock);
     done = g->stats.last_fence;
     spin_unlock(&g->lock);
-    if (g->async_submit.pending &&
-        (wait || wait_for == 0 || wait_for <= g->async_submit.fence_id)) {
+    if (virtio_gpu_async_pending(g) && wait && wait_for != 0) {
+        ret = virtio_gpu_drain_async_until_fence(g, wait_for);
+        if (ret != 0) {
+            virtio_gpu_op_unlock(g);
+            return -EIO;
+        }
+    } else if (virtio_gpu_async_pending(g) &&
+               (wait || wait_for == 0 ||
+                wait_for <= virtio_gpu_async_newest_fence(g))) {
         ret = virtio_gpu_drain_async_submit(g, wait);
         if (ret != 0) {
-            mutex_unlock(&g->op_lock);
+            virtio_gpu_op_unlock(g);
             return -EIO;
         }
     }
     spin_lock(&g->lock);
     done = g->stats.last_fence;
     spin_unlock(&g->lock);
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
 
     if (signaled)
         *signaled = done;
@@ -2304,9 +3573,9 @@ int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
     if (transfer_size > PGSIZE - sizeof(struct virtio_gpu_resp_capset))
         transfer_size = PGSIZE - sizeof(struct virtio_gpu_resp_capset);
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_CAPSET);
     ret = virtio_gpu_submit_capset(g, id, version, transfer_size, buf);
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     return ret == 0 ? 0 : -EIO;
 }
 
@@ -2373,7 +3642,7 @@ int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
         spin_unlock(&g->lock);
     }
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
     ret = virtio_gpu_resource_create_3d(g, owner_id, owner_tgid, req, &res);
     if (ret != 0)
         goto out;
@@ -2398,7 +3667,7 @@ int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
     req->resource_id = res->id;
     req->size = res->alloc_len;
     req->addr = addr;
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     return 0;
 
 out_detach:
@@ -2409,7 +3678,7 @@ out_unref:
     if (res != NULL)
         virtio_gpu_resource_unref(g, res);
 out:
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     return ret;
 }
 
@@ -2433,6 +3702,14 @@ static int virtio_gpu_destroy_resource_locked(struct virtio_gpu *g,
     if (res == NULL)
         return -ENOENT;
 
+    spin_lock(&g->lock);
+    if (res->export_refs != 0) {
+        res->destroy_pending = 1;
+        spin_unlock(&g->lock);
+        return 0;
+    }
+    spin_unlock(&g->lock);
+
     if (ctx_id != 0)
         virtio_gpu_context_resource(g, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE,
                                     ctx_id, resource_id);
@@ -2452,11 +3729,66 @@ int virtio_gpu_user_resource_destroy(uint64 owner_id, pid_t owner_tgid,
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return -ENODEV;
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
     ret = virtio_gpu_destroy_resource_locked(g, resource_id, owner_id,
                                              owner_tgid);
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     return ret;
+}
+
+int virtio_gpu_user_resource_attach(uint64 owner_id, pid_t owner_tgid,
+                                    uint32 ctx_id, uint32 resource_id,
+                                    int allow_imported)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_context *ctx;
+    struct virtio_gpu_resource *res;
+    int ret;
+
+    if (ctx_id == 0 || resource_id == 0)
+        return -EINVAL;
+    if (!g->initialized || !g->virgl_capset_id ||
+        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+        return -ENODEV;
+
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
+    spin_lock(&g->lock);
+    ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
+    if (ctx == NULL) {
+        spin_unlock(&g->lock);
+        virtio_gpu_op_unlock(g);
+        return -ENOENT;
+    }
+    if (!virtio_gpu_owner_matches(ctx->owner_id, ctx->owner_tgid,
+                                  owner_id, owner_tgid)) {
+        spin_unlock(&g->lock);
+        virtio_gpu_op_unlock(g);
+        return -EPERM;
+    }
+    if (ctx->failed) {
+        spin_unlock(&g->lock);
+        virtio_gpu_op_unlock(g);
+        return -EIO;
+    }
+    res = virtio_gpu_lookup_resource_locked(g, resource_id);
+    if (res == NULL) {
+        spin_unlock(&g->lock);
+        virtio_gpu_op_unlock(g);
+        return -ENOENT;
+    }
+    if (!virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                  owner_id, owner_tgid) &&
+        !allow_imported) {
+        spin_unlock(&g->lock);
+        virtio_gpu_op_unlock(g);
+        return -EPERM;
+    }
+    spin_unlock(&g->lock);
+
+    ret = virtio_gpu_context_resource(g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+                                      ctx_id, resource_id);
+    virtio_gpu_op_unlock(g);
+    return ret == 0 ? 0 : -EIO;
 }
 
 int virtio_gpu_user_resource_export_pages(uint64 owner_id, pid_t owner_tgid,
@@ -2519,6 +3851,7 @@ int virtio_gpu_user_resource_export_pages(uint64 owner_id, pid_t owner_tgid,
     *size = res->alloc_len;
     *pages_out = pages;
     *npages_out = npages;
+    res->export_refs++;
     spin_unlock(&g->lock);
     return 0;
 
@@ -2531,6 +3864,40 @@ fail_locked:
     kvfree(pages);
     spin_unlock(&g->lock);
     return -ENOMEM;
+}
+
+void virtio_gpu_user_resource_export_put(uint32 resource_id)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *res;
+    uint32 ctx_id = 0;
+    int destroy_now = 0;
+
+    if (resource_id == 0 || !g->initialized || !g->virgl_capset_id ||
+        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+        return;
+
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
+    spin_lock(&g->lock);
+    res = virtio_gpu_lookup_resource_locked(g, resource_id);
+    if (res != NULL) {
+        if (res->export_refs > 0)
+            res->export_refs--;
+        if (res->export_refs == 0 && res->destroy_pending) {
+            ctx_id = res->ctx_id;
+            destroy_now = 1;
+        }
+    }
+    spin_unlock(&g->lock);
+
+    if (destroy_now && res != NULL) {
+        if (ctx_id != 0)
+            virtio_gpu_context_resource(g,
+                                        VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE,
+                                        ctx_id, resource_id);
+        (void)virtio_gpu_resource_unref(g, res);
+    }
+    virtio_gpu_op_unlock(g);
 }
 
 int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
@@ -2563,6 +3930,36 @@ int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
         *format = res->format;
     if (size)
         *size = res->alloc_len;
+    spin_unlock(&g->lock);
+    return 0;
+}
+
+int virtio_gpu_user_resource_last_submit_fence(uint64 owner_id,
+                                               pid_t owner_tgid,
+                                               uint32 resource_id,
+                                               uint64 *fence)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *res;
+
+    if (fence)
+        *fence = 0;
+    if (resource_id == 0)
+        return -EINVAL;
+    if (!g->initialized || !g->virgl_capset_id ||
+        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+        return -ENODEV;
+
+    spin_lock(&g->lock);
+    res = virtio_gpu_lookup_resource_locked(g, resource_id);
+    if (res == NULL ||
+        !virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                  owner_id, owner_tgid)) {
+        spin_unlock(&g->lock);
+        return -ENOENT;
+    }
+    if (fence)
+        *fence = res->last_submit_fence;
     spin_unlock(&g->lock);
     return 0;
 }
@@ -2617,7 +4014,7 @@ void virtio_gpu_user_destroy_owner(pid_t owner_tgid)
         return;
     }
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
     spin_lock(&g->lock);
     for (int i = 0; i < VIRTIO_GPU_MAX_RESOURCES; i++) {
         if (g->resources[i].in_use &&
@@ -2655,7 +4052,7 @@ void virtio_gpu_user_destroy_owner(pid_t owner_tgid)
         }
         spin_unlock(&g->lock);
     }
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     kvfree(resource_ids);
     kvfree(context_ids);
 }
@@ -2684,7 +4081,7 @@ void virtio_gpu_user_destroy_render_owner(uint64 owner_id)
         return;
     }
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
     spin_lock(&g->lock);
     for (int i = 0; i < VIRTIO_GPU_MAX_RESOURCES; i++) {
         if (g->resources[i].in_use &&
@@ -2722,7 +4119,7 @@ void virtio_gpu_user_destroy_render_owner(uint64 owner_id)
         }
         spin_unlock(&g->lock);
     }
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     kvfree(resource_ids);
     kvfree(context_ids);
 }
@@ -2740,16 +4137,63 @@ int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,
     uint32 cmd_type = from_host ? VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D :
                                   VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D;
     uint32 ctx_id = 0;
-    int ret;
+    int ret = -EIO;
+    int transfer_perf;
+    int async_path = 0;
+    int mixed_path = 0;
+    int linear_transfer_path = 0;
+    int bound_scanout_path = 0;
+    int wait_holder = VIRTIO_GPU_OP_NONE;
+    uint64 total_start = 0;
+    uint64 lock_acquired = 0;
+    uint64 submit_start;
+    uint64 submit_ticks = 0;
+    uint64 drain_ticks = 0;
+    uint64 command_ticks = 0;
+    struct virtio_gpu_async_drain_sample drain_sample;
+    uint32 log_x = 0;
+    uint32 log_y = 0;
+    uint32 log_w = 0;
+    uint32 log_h = 0;
+    uint32 log_resource_id = 0;
+    uint32 log_ctx_id = 0;
+    uint32 log_res_width = 0;
+    uint32 log_res_height = 0;
+    uint32 log_target = 0;
+    uint32 log_bind = 0;
+    uint64 log_offset = 0;
+    uint32 log_stride = 0;
 
     if (req == NULL || req->resource_id == 0 || req->flags != 0 ||
         req->w == 0 || req->h == 0 || req->d == 0)
         return -EINVAL;
+    memset(&drain_sample, 0, sizeof(drain_sample));
     if (!g->initialized || !g->virgl_capset_id ||
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return -ENODEV;
+    log_x = req->x;
+    log_y = req->y;
+    log_w = req->w;
+    log_h = req->h;
+    log_resource_id = req->resource_id;
+    log_offset = req->offset;
+    log_stride = req->stride;
 
-    mutex_lock(&g->op_lock);
+    transfer_perf = virtio_gpu_cmdline_enabled("virtio_gpu_transfer_perf");
+    if (transfer_perf)
+        total_start = r_time();
+    if (transfer_perf && mutex_trylock(&g->op_lock)) {
+        wait_holder = VIRTIO_GPU_OP_NONE;
+    } else {
+        if (transfer_perf)
+            wait_holder = __atomic_load_n(&g->op_lock_holder,
+                                          __ATOMIC_RELAXED);
+        mutex_lock(&g->op_lock);
+    }
+    __atomic_store_n(&g->op_lock_holder, VIRTIO_GPU_OP_TRANSFER,
+                     __ATOMIC_RELAXED);
+    if (transfer_perf)
+        lock_acquired = r_time();
     spin_lock(&g->lock);
     res = virtio_gpu_lookup_resource_locked(g, req->resource_id);
     if (res != NULL) {
@@ -2769,9 +4213,17 @@ int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,
     }
     spin_unlock(&g->lock);
     if (res == NULL) {
-        mutex_unlock(&g->op_lock);
-        return -EINVAL;
+        ret = -EINVAL;
+        goto out;
     }
+    bound_scanout_path = req->resource_id == g->bound_scanout_resource_id;
+    log_ctx_id = ctx_id;
+    log_res_width = res->width;
+    log_res_height = res->height;
+    log_target = res->target;
+    log_bind = res->bind;
+    linear_transfer_path = !from_host && res->height == 1 && req->h == 1 &&
+        res->target == 0 && (res->bind & 0x20) != 0;
 
     memset(cmd, 0, sizeof(*cmd));
     cmd->hdr.type = cmd_type;
@@ -2789,10 +4241,76 @@ int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,
     cmd->layer_stride = req->layer_stride ? req->layer_stride :
         cmd->stride * res->height;
 
-    ret = virtio_gpu_submit(g, cmd, sizeof(*cmd), NULL, 0, false, resp,
-                            sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA);
-    mutex_unlock(&g->op_lock);
-    return ret == 0 ? 0 : -EIO;
+    /*
+     * The compositor's per-frame chrome upload to the bound scanout resource is
+     * small and on the present hot path.  The synchronous submit below first
+     * drains the whole async ring, so the upload ends up blocking on the prior
+     * frame's RESOURCE_FLUSH completing (a ~vsync wait on the single in-order
+     * control queue).  Posting it asynchronously instead lets the guest keep
+     * encoding the gl-compose stream while the host drains the queue.  Only
+     * TO_HOST transfers of the bound scanout resource are eligible; FROM_HOST
+     * readbacks and other resources keep the synchronous semantics callers
+     * rely on.  Opt-in via the "virtio_gpu_async_fb_transfer" cmdline flag.
+     *
+     * Mesa's linear transfer resources are a separate diagnostic path: they use
+     * a 1D resource layout and must preserve the caller's offset/stride exactly.
+     * Keep that behind "virtio_gpu_async_linear_transfer" until validation proves
+     * it is safe and useful.
+     */
+    if (!from_host &&
+        ((req->resource_id == g->bound_scanout_resource_id &&
+          virtio_gpu_cmdline_enabled("virtio_gpu_async_fb_transfer")) ||
+         (res->height == 1 && req->h == 1 && res->target == 0 &&
+          (res->bind & 0x20) != 0 &&
+          virtio_gpu_cmdline_enabled("virtio_gpu_async_linear_transfer")))) {
+        async_path = 1;
+        submit_start = transfer_perf ? r_time() : 0;
+        ret = virtio_gpu_transfer_to_host_3d_async(g, res, ctx_id, req->x,
+                                                   req->y, req->w, req->h,
+                                                   req->z, req->d,
+                                                   req->level, req->offset,
+                                                   cmd->stride,
+                                                   cmd->layer_stride);
+        if (transfer_perf)
+            submit_ticks = r_time() - submit_start;
+        ret = ret == 0 ? 0 : -EIO;
+        goto out;
+    }
+
+    submit_start = transfer_perf ? r_time() : 0;
+    if (linear_transfer_path &&
+        virtio_gpu_cmdline_enabled("virtio_gpu_linear_transfer_mixed_wait")) {
+        mixed_path = 1;
+        ret = virtio_gpu_submit_mixed_async(
+            g, cmd, sizeof(*cmd), NULL, 0, false, resp, sizeof(*resp),
+            VIRTIO_GPU_RESP_OK_NODATA,
+            transfer_perf ? &drain_sample : NULL);
+        if (transfer_perf)
+            command_ticks = r_time() - submit_start;
+    } else {
+        ret = virtio_gpu_submit_internal(g, cmd, sizeof(*cmd), NULL, 0, false,
+                                         resp, sizeof(*resp),
+                                         VIRTIO_GPU_RESP_OK_NODATA,
+                                         transfer_perf ? &drain_ticks : NULL,
+                                         transfer_perf ? &command_ticks : NULL,
+                                         transfer_perf ? &drain_sample : NULL);
+    }
+    if (transfer_perf)
+        submit_ticks = r_time() - submit_start;
+    ret = ret == 0 ? 0 : -EIO;
+out:
+    if (transfer_perf)
+        virtio_gpu_transfer_perf_log(
+            ret, from_host, async_path, mixed_path, bound_scanout_path,
+            wait_holder,
+            r_time() - total_start, lock_acquired - total_start, submit_ticks,
+            drain_ticks, command_ticks, drain_sample.submit_3d,
+            drain_sample.flush, drain_sample.transfer, drain_sample.other,
+            log_x, log_y, log_w, log_h, log_resource_id, log_ctx_id,
+            log_res_width, log_res_height, log_target, log_bind, log_offset,
+            log_stride, owner_tgid);
+    virtio_gpu_op_unlock(g);
+    return ret;
 }
 
 static int virtio_gpu_smoke_resource(struct virtio_gpu *g)
@@ -2936,8 +4454,7 @@ static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
                width, height);
     }
 
-    if (virtio_gpu_cmdline_enabled("virtio_gpu_3d_scanout") &&
-        g->virgl_capset_id != 0 &&
+    if (virtio_gpu_use_3d_scanout(g) &&
         virtio_gpu_resource_create_3d_backing(
             g, width, height, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
             VIRTIO_GPU_PIPE_BIND_RENDER_TARGET |
@@ -2947,7 +4464,7 @@ static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
             VIRTIO_GPU_PIPE_BIND_SHARED |
             VIRTIO_GPU_PIPE_BIND_LINEAR,
             &res) == 0) {
-        printf("virtio_gpu: using virgl-compatible 3D scanout resource\n");
+        printf("virtio_gpu: using Alpine-style virgl 3D scanout resource\n");
     } else if (virtio_gpu_resource_create_2d(
                    g, width, height, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
                    &res) != 0) {
@@ -3185,12 +4702,16 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_stats vg_stats;
+    uint64 async_pending;
+    uint64 async_depth;
 
     if (!g->initialized)
         return;
 
     spin_lock(&g->lock);
     vg_stats = g->stats;
+    async_pending = g->async_count;
+    async_depth = g->async_depth ? (uint64)g->async_depth : 2;
     spin_unlock(&g->lock);
 
     stats->virtio_commands = vg_stats.commands;
@@ -3213,6 +4734,35 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
     stats->virtio_last_fence = vg_stats.last_fence;
     stats->virtio_irq_completions = vg_stats.irq_completions;
     stats->virtio_poll_fallbacks = vg_stats.poll_fallbacks;
+    stats->virtio_async_posted = vg_stats.async_posted;
+    stats->virtio_async_posted_submit_3d = vg_stats.async_posted_submit_3d;
+    stats->virtio_async_posted_flush = vg_stats.async_posted_flush;
+    stats->virtio_async_posted_transfer = vg_stats.async_posted_transfer;
+    stats->virtio_async_retired = vg_stats.async_retired;
+    stats->virtio_async_pending = async_pending;
+    stats->virtio_async_depth = async_depth;
+    stats->virtio_async_make_room_calls = vg_stats.async_make_room_calls;
+    stats->virtio_async_make_room_submit_3d_calls =
+        vg_stats.async_make_room_submit_3d_calls;
+    stats->virtio_async_make_room_flush_calls =
+        vg_stats.async_make_room_flush_calls;
+    stats->virtio_async_make_room_transfer_calls =
+        vg_stats.async_make_room_transfer_calls;
+    stats->virtio_async_make_room_stalls = vg_stats.async_make_room_stalls;
+    stats->virtio_async_make_room_submit_3d_stalls =
+        vg_stats.async_make_room_submit_3d_stalls;
+    stats->virtio_async_make_room_flush_stalls =
+        vg_stats.async_make_room_flush_stalls;
+    stats->virtio_async_make_room_transfer_stalls =
+        vg_stats.async_make_room_transfer_stalls;
+    stats->virtio_async_wait_progress_calls =
+        vg_stats.async_wait_progress_calls;
+    stats->virtio_async_make_room_wait_ticks =
+        vg_stats.async_make_room_wait_ticks;
+    stats->virtio_async_make_room_last_wait_us =
+        vg_stats.async_make_room_last_wait_us;
+    stats->virtio_async_make_room_max_wait_us =
+        vg_stats.async_make_room_max_wait_us;
 }
 
 int virtio_gpu_has_virgl(void)
@@ -3235,9 +4785,9 @@ int virtio_gpu_probe_scanout(uint32 *width, uint32 *height)
     if (!g->initialized)
         return -ENODEV;
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PROBE);
     ret = virtio_gpu_get_display_info(g, width, height, 0);
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     return ret == 0 ? 0 : -EIO;
 }
 
@@ -3256,7 +4806,7 @@ int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
     if (!g->initialized)
         return -ENODEV;
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PROBE);
     ret = virtio_gpu_get_edid_mode(g, width, height, refresh_millihz, 0);
     if (ret != 0 && g->edid_width != 0 && g->edid_height != 0) {
         if (width != NULL)
@@ -3267,7 +4817,7 @@ int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
             *refresh_millihz = g->edid_refresh_millihz;
         ret = 0;
     }
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     return ret == 0 ? 0 : -EIO;
 }
 
@@ -3284,15 +4834,14 @@ int virtio_gpu_resize_scanout(uint32 width, uint32 height)
     if (!g->initialized)
         return -ENODEV;
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESIZE);
     old = g->scanout_resource;
     if (old != NULL && old->width == width && old->height == height) {
         ret = 0;
         goto out;
     }
 
-    if (virtio_gpu_cmdline_enabled("virtio_gpu_3d_scanout") &&
-        g->virgl_capset_id != 0 &&
+    if (virtio_gpu_use_3d_scanout(g) &&
         virtio_gpu_resource_create_3d_backing(
             g, width, height, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
             VIRTIO_GPU_PIPE_BIND_RENDER_TARGET |
@@ -3302,7 +4851,7 @@ int virtio_gpu_resize_scanout(uint32 width, uint32 height)
             VIRTIO_GPU_PIPE_BIND_SHARED |
             VIRTIO_GPU_PIPE_BIND_LINEAR,
             &res) == 0) {
-        printf("virtio_gpu: using virgl-compatible 3D scanout resource for mode set\n");
+        printf("virtio_gpu: using Alpine-style virgl 3D scanout resource for mode set\n");
     } else if (virtio_gpu_resource_create_2d(
                    g, width, height, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
                    &res) != 0) {
@@ -3324,6 +4873,7 @@ int virtio_gpu_resize_scanout(uint32 width, uint32 height)
     g->scanout_resource = res;
     g->scanout_width = width;
     g->scanout_height = height;
+    virtio_gpu_drop_present_flip_resources(g);
     g->present_scanout_ctx_id = 0;
     g->present_scanout_resource_id = 0;
     g->bound_scanout_resource_id = res->id;
@@ -3355,7 +4905,7 @@ fail_new:
     }
     virtio_gpu_resource_unref(g, res);
 out:
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     return ret;
 }
 
@@ -3366,14 +4916,50 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
     struct virtio_gpu_resource *res;
     uint32 scanout_w;
     uint32 scanout_h;
+    int already_bound = 0;
+    int full_size_resource;
     int ret = -EIO;
+    int scanout_perf;
+    int scanout_path = 0;
+    int prepared_async_flush = 0;
+    int wait_holder = VIRTIO_GPU_OP_NONE;
+    struct virtio_gpu_async_submit scanout_flush_prep;
+    uint64 total_start = 0;
+    uint64 lock_acquired = 0;
+    uint64 set_scanout_start;
+    uint64 set_scanout_ticks = 0;
+    uint64 flush_start;
+    uint64 flush_ticks = 0;
 
     if (resource_id == 0 || w == 0 || h == 0)
         return -EINVAL;
     if (!g->initialized)
         return -ENODEV;
 
-    mutex_lock(&g->op_lock);
+    memset(&scanout_flush_prep, 0, sizeof(scanout_flush_prep));
+    if (virtio_gpu_async_scanout_flush_enabled() &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_no_scanout_flush") &&
+        __atomic_load_n(&g->bound_scanout_resource_id,
+                        __ATOMIC_RELAXED) == resource_id &&
+        virtio_gpu_resource_flush_async_prepare(resource_id, x, y, w, h,
+                                                &scanout_flush_prep) == 0)
+        prepared_async_flush = 1;
+
+    scanout_perf = virtio_gpu_cmdline_enabled("virtio_gpu_scanout_perf");
+    if (scanout_perf)
+        total_start = r_time();
+    if (scanout_perf && mutex_trylock(&g->op_lock)) {
+        wait_holder = VIRTIO_GPU_OP_NONE;
+    } else {
+        if (scanout_perf)
+            wait_holder = __atomic_load_n(&g->op_lock_holder,
+                                          __ATOMIC_RELAXED);
+        mutex_lock(&g->op_lock);
+    }
+    __atomic_store_n(&g->op_lock_holder, VIRTIO_GPU_OP_SCANOUT,
+                     __ATOMIC_RELAXED);
+    if (scanout_perf)
+        lock_acquired = r_time();
     spin_lock(&g->lock);
     res = virtio_gpu_lookup_resource_locked(g, resource_id);
     if (res == NULL || !res->attached ||
@@ -3394,18 +4980,160 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
      */
     scanout_w = g->scanout_width;
     scanout_h = g->scanout_height;
+    already_bound = g->bound_scanout_resource_id == res->id;
+    full_size_resource = res->width == scanout_w && res->height == scanout_h;
+    if (already_bound &&
+        ((uint64)x + w > scanout_w || (uint64)y + h > scanout_h)) {
+        ret = -EINVAL;
+        goto out;
+    }
     if (!virtio_gpu_cmdline_enabled("virtio_gpu_allow_partial_scanout") &&
+        !already_bound && !full_size_resource &&
         (w != scanout_w || h != scanout_h)) {
         ret = -EOPNOTSUPP;
         goto out;
     }
 
-    if (virtio_gpu_set_scanout(g, 0, res, x, y, w, h) != 0)
-        goto out;
-    g->bound_scanout_resource_id = res->id;
-    ret = virtio_gpu_resource_flush(g, res, x, y, w, h) == 0 ? 0 : -EIO;
+    if (!already_bound) {
+        uint32 bind_x = full_size_resource ? 0 : x;
+        uint32 bind_y = full_size_resource ? 0 : y;
+        uint32 bind_w = full_size_resource ? scanout_w : w;
+        uint32 bind_h = full_size_resource ? scanout_h : h;
+
+        set_scanout_start = scanout_perf ? r_time() : 0;
+        if (virtio_gpu_set_scanout(g, 0, res, bind_x, bind_y,
+                                   bind_w, bind_h) != 0)
+            goto out;
+        if (scanout_perf)
+            set_scanout_ticks += r_time() - set_scanout_start;
+        g->bound_scanout_resource_id = res->id;
+        if (!virtio_gpu_present_flip_slot_for_id(g, res->id, NULL)) {
+            virtio_gpu_invalidate_present_flip_slot(g, 0);
+            virtio_gpu_invalidate_present_flip_slot(g, 1);
+        }
+    }
+    /*
+     * The compositor's virgl target is updated by GL, not by the CPU backing.
+     * A TRANSFER_TO_HOST here would overwrite that rendered target, but QEMU
+     * still needs RESOURCE_FLUSH as the display update signal for the bound
+     * scanout resource.  Leave a diagnostic escape hatch for comparing hosts
+     * that repaint a 3D scanout without this notification.
+     */
+    flush_start = scanout_perf ? r_time() : 0;
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_no_scanout_flush")) {
+        scanout_path = 1;
+        ret = 0;
+    } else if (already_bound && virtio_gpu_async_scanout_flush_enabled()) {
+        scanout_path = 2;
+        if (prepared_async_flush)
+            ret = virtio_gpu_async_post_prepared(
+                g, &scanout_flush_prep,
+                VIRTIO_GPU_ASYNC_REASON_FLUSH) == 0 ? 0 : -EIO;
+        else
+            ret = virtio_gpu_resource_flush_async(g, res, x, y, w, h) == 0 ?
+                  0 : -EIO;
+    } else {
+        scanout_path = 3;
+        ret = virtio_gpu_resource_flush(g, res, x, y, w, h) == 0 ? 0 : -EIO;
+    }
+    if (scanout_perf)
+        flush_ticks = r_time() - flush_start;
 out:
-    mutex_unlock(&g->op_lock);
+    if (scanout_perf)
+        virtio_gpu_scanout_perf_log(
+            ret, scanout_path, already_bound, wait_holder,
+            r_time() - total_start, lock_acquired - total_start,
+            set_scanout_ticks, flush_ticks);
+    virtio_gpu_op_unlock(g);
+    if (prepared_async_flush)
+        virtio_gpu_async_submit_free(&scanout_flush_prep);
+    return ret;
+}
+
+int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *res;
+    uint32 scanout_w;
+    uint32 scanout_h;
+    int already_bound;
+    int async_scanout = 0;
+    int ret;
+    struct virtio_gpu_async_submit scanout_prep;
+    static int flip_logs;
+
+    if (resource_id == 0 || w == 0 || h == 0)
+        return -EINVAL;
+    if (!g->initialized)
+        return -ENODEV;
+
+    memset(&scanout_prep, 0, sizeof(scanout_prep));
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PAGE_FLIP);
+    spin_lock(&g->lock);
+    res = virtio_gpu_lookup_resource_locked(g, resource_id);
+    scanout_w = g->scanout_width;
+    scanout_h = g->scanout_height;
+    if (res == NULL || !res->attached ||
+        res->width != scanout_w || res->height != scanout_h ||
+        w != scanout_w || h != scanout_h) {
+        spin_unlock(&g->lock);
+        ret = -EINVAL;
+        goto out;
+    }
+    spin_unlock(&g->lock);
+
+    already_bound = g->bound_scanout_resource_id == res->id;
+    if (!already_bound) {
+        if ((virtio_gpu_cmdline_enabled(
+                 "virtio_gpu_async_page_flip_scanout") ||
+             virtio_gpu_cmdline_enabled("vgpu_async_pf")) &&
+            virtio_gpu_async_scanout_flush_enabled() &&
+            virtio_gpu_set_scanout_async_prepare(
+                0, res->id, 0, 0, scanout_w, scanout_h,
+                &scanout_prep) == 0) {
+            if (virtio_gpu_async_post_prepared(
+                    g, &scanout_prep,
+                    VIRTIO_GPU_ASYNC_REASON_OTHER) != 0) {
+                virtio_gpu_async_submit_free(&scanout_prep);
+                if (virtio_gpu_set_scanout(g, 0, res, 0, 0,
+                                           scanout_w, scanout_h) != 0) {
+                    ret = -EIO;
+                    goto out;
+                }
+            } else {
+                async_scanout = 1;
+            }
+        } else {
+            if (virtio_gpu_set_scanout(g, 0, res, 0, 0,
+                                       scanout_w, scanout_h) != 0) {
+                ret = -EIO;
+                goto out;
+            }
+        }
+        g->bound_scanout_resource_id = res->id;
+        g->scanout_resource = res;
+        if (!virtio_gpu_present_flip_slot_for_id(g, res->id, NULL)) {
+            virtio_gpu_invalidate_present_flip_slot(g, 0);
+            virtio_gpu_invalidate_present_flip_slot(g, 1);
+        }
+    }
+    if (virtio_gpu_async_scanout_flush_enabled())
+        ret = virtio_gpu_resource_flush_async(g, res, 0, 0,
+                                              scanout_w, scanout_h) == 0 ?
+            0 : -EIO;
+    else
+        ret = virtio_gpu_resource_flush(g, res, 0, 0, scanout_w,
+                                        scanout_h) == 0 ? 0 : -EIO;
+    if (ret == 0 && flip_logs < 8) {
+        printf("virtio_gpu: page-flip present resource=%u size=%ux%u already_bound=%d async_scanout=%d\n",
+               res->id, scanout_w, scanout_h, already_bound, async_scanout);
+        flip_logs++;
+    }
+out:
+    if (scanout_prep.cmd != NULL || scanout_prep.resp != NULL ||
+        scanout_prep.data != NULL)
+        virtio_gpu_async_submit_free(&scanout_prep);
+    virtio_gpu_op_unlock(g);
     return ret;
 }
 
@@ -3461,6 +5189,21 @@ static int virtio_gpu_ensure_present_context(struct virtio_gpu *g,
     }
     *ctx_id = id;
     return 0;
+}
+
+static void virtio_gpu_note_diagnostic_present_locked(
+    struct virtio_gpu *g, uint32 ctx_id, uint32 resource_id,
+    uint32 src_x, uint32 src_y, uint32 dst_x, uint32 dst_y,
+    uint32 w, uint32 h)
+{
+    g->diagnostic_present_ctx_id = ctx_id;
+    g->diagnostic_present_resource_id = resource_id;
+    g->diagnostic_present_src_x = src_x;
+    g->diagnostic_present_src_y = src_y;
+    g->diagnostic_present_dst_x = dst_x;
+    g->diagnostic_present_dst_y = dst_y;
+    g->diagnostic_present_w = w;
+    g->diagnostic_present_h = h;
 }
 
 static void virtio_gpu_drop_present_context(struct virtio_gpu *g, uint32 ctx_id)
@@ -3530,6 +5273,136 @@ static int virtio_gpu_ensure_scanout_attached(struct virtio_gpu *g,
     return 0;
 }
 
+static void virtio_gpu_drop_present_flip_resources(struct virtio_gpu *g)
+{
+    for (int i = 0; i < 2; i++) {
+        struct virtio_gpu_resource *res = g->present_flip_resource[i];
+
+        g->present_flip_valid[i] = 0;
+        g->present_flip_rect_x[i] = 0;
+        g->present_flip_rect_y[i] = 0;
+        g->present_flip_rect_w[i] = 0;
+        g->present_flip_rect_h[i] = 0;
+        if (res == NULL)
+            continue;
+        g->present_flip_resource[i] = NULL;
+        if (g->bound_scanout_resource_id == res->id) {
+            (void)virtio_gpu_set_scanout(g, 0, NULL, 0, 0, 0, 0);
+            g->bound_scanout_resource_id = 0;
+        }
+        (void)virtio_gpu_resource_unref(g, res);
+    }
+    g->present_flip_index = 0;
+}
+
+static int virtio_gpu_present_flip_slot_for_id(struct virtio_gpu *g,
+                                               uint32 resource_id,
+                                               uint32 *slot_out)
+{
+    if (resource_id == 0)
+        return 0;
+    for (uint32 i = 0; i < 2; i++) {
+        struct virtio_gpu_resource *res = g->present_flip_resource[i];
+
+        if (res != NULL && res->id == resource_id) {
+            if (slot_out != NULL)
+                *slot_out = i;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void virtio_gpu_invalidate_present_flip_slot(struct virtio_gpu *g,
+                                                    uint32 slot)
+{
+    if (slot >= 2)
+        return;
+    g->present_flip_valid[slot] = 0;
+    g->present_flip_base_generation[slot] = 0;
+    g->present_flip_rect_x[slot] = 0;
+    g->present_flip_rect_y[slot] = 0;
+    g->present_flip_rect_w[slot] = 0;
+    g->present_flip_rect_h[slot] = 0;
+}
+
+static int virtio_gpu_ensure_present_flip_resource(
+    struct virtio_gpu *g, uint32 width, uint32 height,
+    struct virtio_gpu_resource **out, uint32 *slot_out)
+{
+    struct virtio_gpu_resource *res;
+    uint32 first;
+
+    if (out == NULL || width == 0 || height == 0 ||
+        width > 4096 || height > 4096)
+        return -EINVAL;
+
+    first = (g->present_flip_index + 1) & 1u;
+    for (int pass = 0; pass < 2; pass++) {
+        uint32 slot = (first + (uint32)pass) & 1u;
+
+        res = g->present_flip_resource[slot];
+        if (res != NULL && res->width == width && res->height == height &&
+            res->attached) {
+            if (g->bound_scanout_resource_id == res->id)
+                continue;
+            *out = res;
+            if (slot_out)
+                *slot_out = slot;
+            return 0;
+        }
+    }
+
+    for (int pass = 0; pass < 2; pass++) {
+        uint32 slot = (first + (uint32)pass) & 1u;
+
+        res = g->present_flip_resource[slot];
+        if (res != NULL) {
+            if (g->bound_scanout_resource_id == res->id)
+                continue;
+            g->present_flip_resource[slot] = NULL;
+            virtio_gpu_invalidate_present_flip_slot(g, slot);
+            (void)virtio_gpu_resource_unref(g, res);
+        }
+
+        if (virtio_gpu_resource_create_3d_backing(
+                g, width, height, VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+                VIRTIO_GPU_PIPE_BIND_RENDER_TARGET |
+                VIRTIO_GPU_PIPE_BIND_SAMPLER_VIEW |
+                VIRTIO_GPU_PIPE_BIND_DISPLAY_TARGET |
+                VIRTIO_GPU_PIPE_BIND_SCANOUT |
+                VIRTIO_GPU_PIPE_BIND_SHARED |
+                VIRTIO_GPU_PIPE_BIND_LINEAR,
+                &res) != 0)
+            return -EIO;
+        memset(res->backing, 0, res->backing_len);
+        if (virtio_gpu_resource_attach_backing(g, res) != 0) {
+            (void)virtio_gpu_resource_unref(g, res);
+            return -EIO;
+        }
+        /*
+         * Match the persistent scanout resource setup: make QEMU/virgl create
+         * host storage from the newly attached guest backing before the
+         * resource is used as a pageflip target.  Without this, copies into
+         * the flip resource can complete but TRANSFER_FROM_HOST_3D validates
+         * black on WSL/D3D12, causing the same blank/blinking path the Linux
+         * KMS import sequence avoids.
+         */
+        if (virtio_gpu_resource_transfer_scanout(g, res, 0, 0, width,
+                                                 height) != 0) {
+            (void)virtio_gpu_resource_unref(g, res);
+            return -EIO;
+        }
+        g->present_flip_resource[slot] = res;
+        virtio_gpu_invalidate_present_flip_slot(g, slot);
+        *out = res;
+        if (slot_out)
+            *slot_out = slot;
+        return 0;
+    }
+    return -EAGAIN;
+}
+
 static uint32 virtio_gpu_resource_sample_pixel(struct virtio_gpu_resource *res,
                                                uint32 x, uint32 y)
 {
@@ -3555,24 +5428,54 @@ static uint32 virtio_gpu_resource_sample_pixel(struct virtio_gpu_resource *res,
     return *(uint32 *)p;
 }
 
-static int virtio_gpu_resource_host_nonblack(struct virtio_gpu *g,
-                                             struct virtio_gpu_resource *res,
-                                             uint32 ctx_id,
-                                             uint32 x, uint32 y,
-                                             uint32 w, uint32 h)
+struct virtio_gpu_present_samples {
+    uint32 p[VIRTIO_GPU_PRESENT_SAMPLE_COUNT];
+    uint32 nonblack;
+    uint32 unique_nonblack;
+};
+
+static void virtio_gpu_count_present_samples(
+    struct virtio_gpu_present_samples *samples)
+{
+    samples->nonblack = 0;
+    samples->unique_nonblack = 0;
+    for (int i = 0; i < VIRTIO_GPU_PRESENT_SAMPLE_COUNT; i++) {
+        uint32 rgb = samples->p[i] & 0x00ffffffu;
+        int seen = 0;
+
+        if (rgb == 0)
+            continue;
+        samples->nonblack++;
+        for (int j = 0; j < i; j++) {
+            if ((samples->p[j] & 0x00ffffffu) == rgb) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen)
+            samples->unique_nonblack++;
+    }
+}
+
+static int virtio_gpu_resource_host_samples(
+    struct virtio_gpu *g,
+    struct virtio_gpu_resource *res,
+    uint32 ctx_id,
+    uint32 x, uint32 y,
+    uint32 w, uint32 h,
+    struct virtio_gpu_present_samples *samples)
 {
     struct virtio_gpu_transfer_host_3d *transfer =
         (struct virtio_gpu_transfer_host_3d *)g->cmd_page;
     struct virtio_gpu_ctrl_hdr *resp =
         (struct virtio_gpu_ctrl_hdr *)g->resp_page;
-    uint32 p[5];
-    uint32 nonblack = 0;
 
     if (res == NULL || res->width == 0 || res->height == 0 ||
         w == 0 || h == 0 ||
         x > res->width || w > res->width - x ||
         y > res->height || h > res->height - y ||
-        (res->backing == NULL && (res->pages == NULL || res->npages == 0)))
+        (res->backing == NULL && (res->pages == NULL || res->npages == 0)) ||
+        samples == NULL)
         return -EINVAL;
 
     memset(transfer, 0, sizeof(*transfer));
@@ -3594,19 +5497,475 @@ static int virtio_gpu_resource_host_nonblack(struct virtio_gpu *g,
                           VIRTIO_GPU_RESP_OK_NODATA) != 0)
         return -EIO;
 
-    p[0] = virtio_gpu_resource_sample_pixel(res, x + w / 2, y + h / 2);
-    p[1] = virtio_gpu_resource_sample_pixel(res, x + w / 4, y + h / 4);
-    p[2] = virtio_gpu_resource_sample_pixel(res, x + (w * 3) / 4,
-                                            y + h / 4);
-    p[3] = virtio_gpu_resource_sample_pixel(res, x + w / 4,
-                                            y + (h * 3) / 4);
-    p[4] = virtio_gpu_resource_sample_pixel(res, x + (w * 3) / 4,
-                                            y + (h * 3) / 4);
-    for (int i = 0; i < 5; i++) {
-        if ((p[i] & 0x00ffffffu) != 0)
-            nonblack++;
+    memset(samples, 0, sizeof(*samples));
+    samples->p[0] = virtio_gpu_resource_sample_pixel(res, x + w / 2,
+                                                     y + h / 2);
+    samples->p[1] = virtio_gpu_resource_sample_pixel(res, x + w / 4,
+                                                     y + h / 4);
+    samples->p[2] = virtio_gpu_resource_sample_pixel(res, x + (w * 3) / 4,
+                                                     y + h / 4);
+    samples->p[3] = virtio_gpu_resource_sample_pixel(res, x + w / 4,
+                                                     y + (h * 3) / 4);
+    samples->p[4] = virtio_gpu_resource_sample_pixel(res,
+                                                     x + (w * 3) / 4,
+                                                     y + (h * 3) / 4);
+    virtio_gpu_count_present_samples(samples);
+    return 0;
+}
+
+static int virtio_gpu_resource_host_nonblack(struct virtio_gpu *g,
+                                             struct virtio_gpu_resource *res,
+                                             uint32 ctx_id,
+                                             uint32 x, uint32 y,
+                                             uint32 w, uint32 h)
+{
+    struct virtio_gpu_present_samples samples;
+    int ret = virtio_gpu_resource_host_samples(g, res, ctx_id, x, y, w, h,
+                                               &samples);
+
+    return ret == 0 ? (int)samples.nonblack : ret;
+}
+
+static int virtio_gpu_present_sample_matches(
+    const struct virtio_gpu_present_samples *src,
+    const struct virtio_gpu_present_samples *dst)
+{
+    int matches = 0;
+
+    if (src == NULL || dst == NULL)
+        return 0;
+    for (int i = 0; i < VIRTIO_GPU_PRESENT_SAMPLE_COUNT; i++) {
+        uint32 rgb = src->p[i] & 0x00ffffffu;
+
+        if (rgb != 0 && rgb == (dst->p[i] & 0x00ffffffu))
+            matches++;
     }
-    return (int)nonblack;
+    return matches;
+}
+
+static int virtio_gpu_clear_texture_rect(struct virtio_gpu *g,
+                                         uint32 ctx_id,
+                                         uint32 resource_id,
+                                         uint32 x, uint32 y,
+                                         uint32 w, uint32 h,
+                                         uint32 color)
+{
+    uint32 cmds[VIRGL_CLEAR_TEXTURE_SIZE + 1];
+    uint64 fence_id;
+
+    if (resource_id == 0 || w == 0 || h == 0)
+        return -EINVAL;
+
+    spin_lock(&g->lock);
+    fence_id = ++g->next_fence_id;
+    spin_unlock(&g->lock);
+
+    memset(cmds, 0, sizeof(cmds));
+    cmds[0] = VIRGL_CMD0(VIRGL_CCMD_CLEAR_TEXTURE, 0,
+                         VIRGL_CLEAR_TEXTURE_SIZE);
+    cmds[1] = resource_id;
+    cmds[2] = 0;
+    cmds[3] = x;
+    cmds[4] = y;
+    cmds[5] = 0;
+    cmds[6] = w;
+    cmds[7] = h;
+    cmds[8] = 1;
+    cmds[9] = color;
+    cmds[10] = 0;
+    cmds[11] = 0;
+    cmds[12] = 0;
+
+    return virtio_gpu_submit_3d(g, ctx_id, cmds,
+                                sizeof(cmds) / sizeof(cmds[0]),
+                                fence_id) == 0 ? 0 : -EIO;
+}
+
+static int virtio_gpu_submit_blit_rect(struct virtio_gpu *g,
+                                       uint32 ctx_id,
+                                       uint32 dst_resource_id,
+                                       uint32 dst_format,
+                                       uint32 dst_x, uint32 dst_y,
+                                       uint32 w, uint32 h,
+                                       uint32 src_resource_id,
+                                       uint32 src_format,
+                                       uint32 src_x, uint32 src_y,
+                                       uint64 fence_id)
+{
+    uint32 cmds[VIRGL_CMD_BLIT_SIZE + 1];
+
+    memset(cmds, 0, sizeof(cmds));
+    cmds[0] = VIRGL_CMD0(VIRGL_CCMD_BLIT, 0, VIRGL_CMD_BLIT_SIZE);
+    cmds[1] = VIRGL_CMD_BLIT_S0_MASK(VIRGL_PIPE_MASK_RGBA) |
+              VIRGL_CMD_BLIT_S0_FILTER(VIRGL_PIPE_TEX_FILTER_NEAREST);
+    cmds[2] = 0;
+    cmds[3] = 0;
+    cmds[4] = dst_resource_id;
+    cmds[5] = 0;
+    cmds[6] = dst_format ? dst_format : VIRGL_FORMAT_B8G8R8A8_UNORM;
+    cmds[7] = dst_x;
+    cmds[8] = dst_y;
+    cmds[9] = 0;
+    cmds[10] = w;
+    cmds[11] = h;
+    cmds[12] = 1;
+    cmds[13] = src_resource_id;
+    cmds[14] = 0;
+    cmds[15] = src_format ? src_format : VIRGL_FORMAT_B8G8R8A8_UNORM;
+    cmds[16] = src_x;
+    cmds[17] = src_y;
+    cmds[18] = 0;
+    cmds[19] = w;
+    cmds[20] = h;
+    cmds[21] = 1;
+    return virtio_gpu_submit_3d(g, ctx_id, cmds,
+                                sizeof(cmds) / sizeof(cmds[0]),
+                                fence_id) == 0 ? 0 : -EIO;
+}
+
+static int virtio_gpu_submit_copy_rect(struct virtio_gpu *g,
+                                       uint32 ctx_id,
+                                       uint32 dst_resource_id,
+                                       uint32 dst_x, uint32 dst_y,
+                                       uint32 w, uint32 h,
+                                       uint32 src_resource_id,
+                                       uint32 src_x, uint32 src_y,
+                                       uint64 fence_id)
+{
+    uint32 cmds[VIRGL_CMD_RESOURCE_COPY_REGION_SIZE + 1];
+
+    memset(cmds, 0, sizeof(cmds));
+    cmds[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0,
+                         VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
+    cmds[1] = dst_resource_id;
+    cmds[2] = 0;
+    cmds[3] = dst_x;
+    cmds[4] = dst_y;
+    cmds[5] = 0;
+    cmds[6] = src_resource_id;
+    cmds[7] = 0;
+    cmds[8] = src_x;
+    cmds[9] = src_y;
+    cmds[10] = 0;
+    cmds[11] = w;
+    cmds[12] = h;
+    cmds[13] = 1;
+    return virtio_gpu_submit_3d(g, ctx_id, cmds,
+                                sizeof(cmds) / sizeof(cmds[0]),
+                                fence_id) == 0 ? 0 : -EIO;
+}
+
+static int virtio_gpu_submit_copy_transfer_rect(struct virtio_gpu *g,
+                                                uint32 ctx_id,
+                                                struct virtio_gpu_resource *dst,
+                                                uint32 dst_x, uint32 dst_y,
+                                                uint32 w, uint32 h,
+                                                struct virtio_gpu_resource *src,
+                                                uint32 src_x, uint32 src_y,
+                                                uint64 fence_id)
+{
+    uint32 cmds[VIRGL_COPY_TRANSFER3D_SIZE + 1];
+    uint64 src_offset;
+
+    if (dst == NULL || src == NULL || dst->width == 0 || src->width == 0)
+        return -EINVAL;
+    src_offset = ((uint64)src_y * src->width + src_x) * sizeof(uint32);
+    if (src_offset > 0xffffffffu)
+        return -EINVAL;
+
+    memset(cmds, 0, sizeof(cmds));
+    cmds[0] = VIRGL_CMD0(VIRGL_CCMD_COPY_TRANSFER3D, 0,
+                         VIRGL_COPY_TRANSFER3D_SIZE);
+    cmds[1] = dst->id;
+    cmds[2] = 0;
+    cmds[3] = 0;
+    cmds[4] = dst->width * sizeof(uint32);
+    cmds[5] = dst->width * dst->height * sizeof(uint32);
+    cmds[6] = dst_x;
+    cmds[7] = dst_y;
+    cmds[8] = 0;
+    cmds[9] = w;
+    cmds[10] = h;
+    cmds[11] = 1;
+    cmds[12] = src->id;
+    cmds[13] = (uint32)src_offset;
+    cmds[14] = VIRGL_COPY_TRANSFER3D_FLAGS_SYNCHRONIZED |
+               VIRGL_COPY_TRANSFER3D_FLAGS_READ_FROM_HOST;
+    return virtio_gpu_submit_3d(g, ctx_id, cmds,
+                                sizeof(cmds) / sizeof(cmds[0]),
+                                fence_id) == 0 ? 0 : -EIO;
+}
+
+static int virtio_gpu_submit_present_copy_method(
+    struct virtio_gpu *g, uint32 ctx_id,
+    struct virtio_gpu_resource *dst, uint32 dst_x, uint32 dst_y,
+    uint32 w, uint32 h,
+    struct virtio_gpu_resource *src, uint32 src_x, uint32 src_y,
+    uint64 fence_id, int use_copy_transfer, int use_blit)
+{
+    if (dst == NULL || src == NULL)
+        return -EINVAL;
+    if (use_copy_transfer) {
+        return virtio_gpu_submit_copy_transfer_rect(g, ctx_id, dst, dst_x,
+                                                    dst_y, w, h, src, src_x,
+                                                    src_y, fence_id);
+    }
+    if (use_blit) {
+        return virtio_gpu_submit_blit_rect(
+            g, ctx_id, dst->id, dst->format, dst_x, dst_y, w, h,
+            src->id, src->format, src_x, src_y, fence_id);
+    }
+    return virtio_gpu_submit_copy_rect(g, ctx_id, dst->id, dst_x, dst_y,
+                                       w, h, src->id, src_x, src_y,
+                                       fence_id);
+}
+
+static int virtio_gpu_try_pageflip_copy(
+    struct virtio_gpu *g, struct virtio_gpu_resource *src,
+    struct virtio_gpu_resource *scanout, uint32 ctx_id,
+    uint32 src_x, uint32 src_y, uint32 dst_x, uint32 dst_y,
+    uint32 w, uint32 h, int use_copy_transfer, int use_blit)
+{
+    struct virtio_gpu_resource *base;
+    struct virtio_gpu_resource *flip = NULL;
+    uint32 base_resource_id;
+    uint32 flip_slot = 0;
+    uint64 fence_id;
+    int ret;
+    int base_attached = 0;
+    int flip_attached = 0;
+    int need_base_copy = 1;
+    uint32 base_slot = 0;
+    int base_is_valid_flip = 0;
+    int same_rect_as_flip = 0;
+    int flip_has_current_base = 0;
+    uint32 base_generation = g->present_base_generation;
+    uint32 flush_x = 0;
+    uint32 flush_y = 0;
+    uint32 flush_w = 0;
+    uint32 flush_h = 0;
+    int validate_copy = virtio_gpu_pageflip_validate_enabled();
+    static int validation_state;
+    static int fail_logs;
+    static int success_logs;
+
+    if (!virtio_gpu_pageflip_copy_enabled() ||
+        src == NULL || scanout == NULL || !scanout->is_3d ||
+        scanout->width == 0 || scanout->height == 0)
+        return -EOPNOTSUPP;
+    if (dst_x > scanout->width || w > scanout->width - dst_x ||
+        dst_y > scanout->height || h > scanout->height - dst_y)
+        return -EINVAL;
+    flush_w = scanout->width;
+    flush_h = scanout->height;
+    if (validate_copy && validation_state < 0 &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_present_force_copy"))
+        return -EOPNOTSUPP;
+
+    ret = virtio_gpu_ensure_present_flip_resource(
+        g, scanout->width, scanout->height, &flip, &flip_slot);
+    if (ret != 0) {
+        if (fail_logs < 8) {
+            printf("virtio_gpu: pageflip-copy setup failed ret=%d screen=%ux%u\n",
+                   ret, scanout->width, scanout->height);
+            fail_logs++;
+        }
+        return ret;
+    }
+
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_pageflip_base_scanout")) {
+        base = scanout;
+        base_resource_id = base->id;
+    } else {
+        spin_lock(&g->lock);
+        base = virtio_gpu_lookup_resource_locked(g,
+                                                 g->bound_scanout_resource_id);
+        if (base == NULL || !base->attached ||
+            base->width != scanout->width || base->height != scanout->height)
+            base = scanout;
+        base_resource_id = base->id;
+        spin_unlock(&g->lock);
+    }
+
+    base_is_valid_flip =
+        virtio_gpu_present_flip_slot_for_id(g, base_resource_id, &base_slot) &&
+        g->present_flip_valid[base_slot];
+    same_rect_as_flip =
+        g->present_flip_valid[flip_slot] &&
+        g->present_flip_rect_x[flip_slot] == dst_x &&
+        g->present_flip_rect_y[flip_slot] == dst_y &&
+        g->present_flip_rect_w[flip_slot] == w &&
+        g->present_flip_rect_h[flip_slot] == h;
+    flip_has_current_base =
+        g->present_flip_valid[flip_slot] &&
+        g->present_flip_base_generation[flip_slot] == base_generation;
+    if (base_is_valid_flip && same_rect_as_flip &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_pageflip_full_copy"))
+        need_base_copy = 0;
+    if (same_rect_as_flip && flip_has_current_base &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_pageflip_full_copy"))
+        need_base_copy = 0;
+
+    if (need_base_copy &&
+        base_resource_id != scanout->id && base_resource_id != src->id) {
+        ret = virtio_gpu_context_resource(
+            g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id, base_resource_id);
+        if (ret != 0) {
+            if (fail_logs < 8) {
+                printf("virtio_gpu: pageflip-copy attach-base failed ret=%d ctx=%u base=%u\n",
+                       ret, ctx_id, base_resource_id);
+                fail_logs++;
+            }
+            return -EIO;
+        }
+        base_attached = 1;
+    }
+    ret = virtio_gpu_context_resource(
+        g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id, flip->id);
+    if (ret != 0) {
+        if (fail_logs < 8) {
+            printf("virtio_gpu: pageflip-copy attach-flip failed ret=%d ctx=%u flip=%u\n",
+                   ret, ctx_id, flip->id);
+            fail_logs++;
+        }
+        ret = -EIO;
+        goto out;
+    }
+    flip_attached = 1;
+
+    spin_lock(&g->lock);
+    fence_id = ++g->next_fence_id;
+    spin_unlock(&g->lock);
+    if (need_base_copy) {
+        ret = virtio_gpu_submit_present_copy_method(
+            g, ctx_id, flip, 0, 0, scanout->width, scanout->height,
+            base, 0, 0, fence_id, 0, use_blit);
+        if (ret != 0) {
+            if (fail_logs < 8) {
+                printf("virtio_gpu: pageflip-copy base-copy failed ret=%d ctx=%u base=%u flip=%u size=%ux%u mode=%s\n",
+                       ret, ctx_id, base_resource_id, flip->id,
+                       scanout->width, scanout->height,
+                       use_blit ? "blit" : "copy");
+                fail_logs++;
+            }
+            virtio_gpu_invalidate_present_flip_slot(g, flip_slot);
+            goto out;
+        }
+        g->present_flip_base_generation[flip_slot] = base_generation;
+    } else {
+        flush_x = dst_x;
+        flush_y = dst_y;
+        flush_w = w;
+        flush_h = h;
+    }
+
+    spin_lock(&g->lock);
+    fence_id = ++g->next_fence_id;
+    spin_unlock(&g->lock);
+    ret = virtio_gpu_submit_present_copy_method(
+        g, ctx_id, flip, dst_x, dst_y, w, h, src, src_x, src_y,
+        fence_id, use_copy_transfer, use_blit);
+    if (ret != 0) {
+        if (fail_logs < 8) {
+            printf("virtio_gpu: pageflip-copy overlay-copy failed ret=%d ctx=%u src=%u flip=%u rect=%u,%u %ux%u mode=%s\n",
+                   ret, ctx_id, src->id, flip->id, dst_x, dst_y, w, h,
+                   use_copy_transfer ? "copy-transfer" :
+                                       (use_blit ? "blit" : "copy"));
+            fail_logs++;
+        }
+        virtio_gpu_invalidate_present_flip_slot(g, flip_slot);
+        goto out;
+    }
+
+    ret = virtio_gpu_set_scanout(g, 0, flip, 0, 0, scanout->width,
+                                 scanout->height) == 0 ? 0 : -EIO;
+    if (ret != 0) {
+        if (fail_logs < 8) {
+            printf("virtio_gpu: pageflip-copy set-scanout failed ret=%d flip=%u size=%ux%u\n",
+                   ret, flip->id, scanout->width, scanout->height);
+            fail_logs++;
+        }
+        goto out;
+    }
+    g->bound_scanout_resource_id = flip->id;
+    g->present_flip_index = flip_slot;
+    g->present_flip_valid[flip_slot] = 1;
+    g->present_flip_rect_x[flip_slot] = dst_x;
+    g->present_flip_rect_y[flip_slot] = dst_y;
+    g->present_flip_rect_w[flip_slot] = w;
+    g->present_flip_rect_h[flip_slot] = h;
+    ret = virtio_gpu_resource_flush(g, flip, flush_x, flush_y, flush_w,
+                                    flush_h) == 0 ? 0 : -EIO;
+    if (ret != 0 && fail_logs < 8) {
+        printf("virtio_gpu: pageflip-copy flush failed ret=%d flip=%u rect=%u,%u %ux%u\n",
+               ret, flip->id, flush_x, flush_y, flush_w, flush_h);
+        fail_logs++;
+    }
+    if (ret == 0 && validate_copy && validation_state == 0 &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_present_force_copy")) {
+        struct virtio_gpu_present_samples src_samples;
+        struct virtio_gpu_present_samples flip_samples;
+        int src_ret = virtio_gpu_resource_host_samples(
+            g, src, ctx_id, src_x, src_y, w, h, &src_samples);
+        int flip_ret = virtio_gpu_resource_host_samples(
+            g, flip, ctx_id, dst_x, dst_y, w, h, &flip_samples);
+        int matches = (src_ret == 0 && flip_ret == 0) ?
+            virtio_gpu_present_sample_matches(&src_samples,
+                                              &flip_samples) : 0;
+        int required_matches =
+            (src_ret == 0 && src_samples.unique_nonblack >= 2 &&
+             src_samples.nonblack >= 3) ? 2 : 1;
+
+        if (src_ret != 0 || flip_ret != 0 ||
+            (src_samples.nonblack > 0 && matches < required_matches)) {
+            validation_state = -1;
+            if (fail_logs < 4) {
+                printf("virtio_gpu: pageflip-copy validation failed after-scanout src_ret=%d flip_ret=%d src_nonblack=%u flip_nonblack=%u matches=%d required=%d src=%08x,%08x,%08x,%08x,%08x flip=%08x,%08x,%08x,%08x,%08x; disabling pageflip-copy for this boot\n",
+                       src_ret, flip_ret,
+                       src_ret == 0 ? src_samples.nonblack : 0,
+                       flip_ret == 0 ? flip_samples.nonblack : 0,
+                       matches, required_matches,
+                       src_ret == 0 ? src_samples.p[0] : 0,
+                       src_ret == 0 ? src_samples.p[1] : 0,
+                       src_ret == 0 ? src_samples.p[2] : 0,
+                       src_ret == 0 ? src_samples.p[3] : 0,
+                       src_ret == 0 ? src_samples.p[4] : 0,
+                       flip_ret == 0 ? flip_samples.p[0] : 0,
+                       flip_ret == 0 ? flip_samples.p[1] : 0,
+                       flip_ret == 0 ? flip_samples.p[2] : 0,
+                       flip_ret == 0 ? flip_samples.p[3] : 0,
+                       flip_ret == 0 ? flip_samples.p[4] : 0);
+                fail_logs++;
+            }
+            (void)virtio_gpu_set_scanout(g, 0, scanout, 0, 0,
+                                         scanout->width, scanout->height);
+            g->bound_scanout_resource_id = scanout->id;
+            virtio_gpu_invalidate_present_flip_slot(g, flip_slot);
+            ret = -EOPNOTSUPP;
+            goto out;
+        }
+        if (matches >= required_matches)
+            validation_state = 1;
+    }
+    if (ret == 0 && success_logs < 8) {
+        printf("virtio_gpu: pageflip-copy present src=%u base=%u flip=%u slot=%u rect=%u,%u %ux%u screen=%ux%u base_copy=%d base_gen=%u flush=%u,%u %ux%u\n",
+               src->id, base_resource_id, flip->id, flip_slot,
+               dst_x, dst_y, w, h, scanout->width, scanout->height,
+               need_base_copy, base_generation, flush_x, flush_y, flush_w,
+               flush_h);
+        success_logs++;
+    }
+    if (ret != 0)
+        virtio_gpu_invalidate_present_flip_slot(g, flip_slot);
+
+out:
+    if (flip_attached)
+        (void)virtio_gpu_context_resource(
+            g, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, ctx_id, flip->id);
+    if (base_attached)
+        (void)virtio_gpu_context_resource(
+            g, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, ctx_id, base_resource_id);
+    return ret;
 }
 
 static void virtio_gpu_probe_present_source(struct virtio_gpu *g,
@@ -3729,8 +6088,6 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     struct virtio_gpu_resource *src;
     struct virtio_gpu_resource *dst;
     struct virtio_gpu_context *ctx;
-    uint32 blit_cmds[VIRGL_CMD_BLIT_SIZE + 1];
-    uint32 cmds[VIRGL_CMD_RESOURCE_COPY_REGION_SIZE + 1];
     uint32 ctx_id = 0;
     uint32 dst_resource_id;
     uint32 src_width = 0;
@@ -3738,6 +6095,9 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     uint32 dst_width = 0;
     uint32 dst_height = 0;
     uint64 fence_id;
+    uint64 src_submit_fence = 0;
+    uint64 completed_fence = 0;
+    int should_wait_src_fence = 0;
     int src_present = 0;
     int src_is_attached = 0;
     int dst_present = 0;
@@ -3749,7 +6109,18 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     static int debug_logs;
     static int copy_validation_state;
     static int copy_validation_logs;
-    int use_blit = !virtio_gpu_cmdline_enabled("virtio_gpu_present_copy_region");
+    int validate_copy =
+        virtio_gpu_cmdline_enabled("virtio_gpu_present_validate_copy");
+    int use_copy_transfer =
+        virtio_gpu_cmdline_enabled("virtio_gpu_present_copy_transfer");
+    int use_blit =
+        virtio_gpu_cmdline_enabled("virtio_gpu_present_blit") &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_present_copy_region");
+    int unbind_scanout_copy =
+        virtio_gpu_cmdline_enabled("virtio_gpu_unbind_scanout_copy");
+    int rearm_scanout_copy =
+        virtio_gpu_cmdline_enabled("virtio_gpu_rearm_scanout_copy") &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_no_rearm_scanout_copy");
 
     if (src_resource_id == 0 || w == 0 || h == 0)
         return -EINVAL;
@@ -3757,7 +6128,7 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
         !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
         return -ENODEV;
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PRESENT_COPY);
     spin_lock(&g->lock);
     src = virtio_gpu_lookup_resource_locked(g, src_resource_id);
     dst = g->scanout_resource;
@@ -3767,6 +6138,7 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
         src_width = src->width;
         src_height = src->height;
         src_is_attached = src->attached;
+        src_submit_fence = src->last_submit_fence;
     }
     if (dst != NULL) {
         dst_width = dst->width;
@@ -3792,7 +6164,7 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     }
     dst_resource_id = dst->id;
     if (src->ctx_id != 0 &&
-        virtio_gpu_cmdline_enabled("virtio_gpu_present_source_ctx")) {
+        !virtio_gpu_cmdline_enabled("virtio_gpu_present_separate_ctx")) {
         ctx = virtio_gpu_lookup_context_locked(g, src->ctx_id);
         if (ctx != NULL && !ctx->failed)
             ctx_id = src->ctx_id;
@@ -3803,19 +6175,17 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
                src->format, src->bind, src->target, src->width, src->height,
                dst->id, dst->is_3d ? "3d" : "2d", dst->format, dst->bind,
                dst->target, dst->width, dst->height, src_x, src_y, dst_x,
-               dst_y, w, h, use_blit ? "blit" : "copy");
+               dst_y, w, h,
+               use_copy_transfer ? "copy-transfer" :
+                                    (use_blit ? "blit" : "copy"));
         debug_logs++;
     }
+    completed_fence = g->stats.last_fence;
+    should_wait_src_fence = src_submit_fence != 0 &&
+        src_submit_fence > completed_fence &&
+        virtio_gpu_async_pending(g) &&
+        virtio_gpu_async_newest_fence(g) <= src_submit_fence;
     spin_unlock(&g->lock);
-
-    if (g->bound_scanout_resource_id != dst_resource_id) {
-        if (virtio_gpu_set_scanout(g, 0, dst, 0, 0, dst_width,
-                                   dst_height) != 0) {
-            ret = -EIO;
-            goto out;
-        }
-        g->bound_scanout_resource_id = dst_resource_id;
-    }
 
     if (virtio_gpu_cmdline_enabled("virtio_gpu_present_readback_copy")) {
         ret = -EINVAL;
@@ -3828,11 +6198,33 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
      * currently hands the compositor only the resource fd.  Drain the one
      * pending virgl submit before copying that resource into the scanout, so we
      * present the rendered frame instead of the previous/empty contents.
+     *
+     * By default this drains the WHOLE async ring with wait=1, which also waits
+     * for the previous frame's async RESOURCE_FLUSH to retire on the host (its
+     * ~vsync).  That re-serialises the pipeline at every frame boundary and is
+     * the dominant reason async flush/transfer buy nothing: compose(N) blocks on
+     * flush(N-1).  should_wait_src_fence already precisely captures "the source
+     * buffer's render is still in flight in the ring" (src_submit_fence newer
+     * than the last completed fence and still pending).  In minimal-drain mode
+     * we drain only when that is true, so a compose whose source is already
+     * complete proceeds immediately and overlaps the prior flush's host vsync.
+     * Opt-in via "virtio_gpu_present_minimal_drain"; the blanket drain remains
+     * the default and "virtio_gpu_present_no_drain" still force-skips it.
      */
-    ret = virtio_gpu_drain_async_submit(g, 1);
-    if (ret != 0) {
-        ret = -EIO;
-        goto out;
+    {
+        int minimal_drain =
+            virtio_gpu_cmdline_enabled("virtio_gpu_present_minimal_drain");
+        int want_drain = should_wait_src_fence ||
+            (!minimal_drain &&
+             !virtio_gpu_cmdline_enabled("virtio_gpu_present_no_drain"));
+
+        if (want_drain) {
+            ret = virtio_gpu_drain_async_submit(g, 1);
+            if (ret != 0) {
+                ret = -EIO;
+                goto out;
+            }
+        }
     }
 
     if (ctx_id == 0) {
@@ -3854,97 +6246,209 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
 
     virtio_gpu_probe_present_source(g, src, ctx_id);
 
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_present_clear_probe")) {
+        uint32 pw = w < 64 ? w : 64;
+        uint32 ph = h < 64 ? h : 64;
+        int clear_ret = virtio_gpu_clear_texture_rect(
+            g, ctx_id, dst_resource_id, dst_x, dst_y, pw, ph, 0xffffffffu);
+        int dst_nonblack = clear_ret == 0 ?
+            virtio_gpu_resource_host_nonblack(g, dst, ctx_id,
+                                              dst_x, dst_y, pw, ph) :
+            clear_ret;
+
+        printf("virtio_gpu: present clear-probe resource=%u ctx=%u ret=%d nonblack=%d rect=%u,%u %ux%u\n",
+               dst_resource_id, ctx_id, clear_ret, dst_nonblack,
+               dst_x, dst_y, pw, ph);
+        ret = -EOPNOTSUPP;
+        goto out_detach;
+    }
+
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_present_temp_blit_probe")) {
+        struct virtio_gpu_resource *tmp = NULL;
+        struct virtio_gpu_present_samples src_samples;
+        struct virtio_gpu_present_samples tmp_samples;
+        uint64 tmp_fence;
+        int tmp_ret;
+        int tmp_attached = 0;
+        int tmp_ctx_attached = 0;
+        int src_ret;
+        int sample_ret;
+        int matches = 0;
+
+        tmp_ret = virtio_gpu_resource_create_3d_backing(
+            g, w, h, src->format ? src->format : VIRGL_FORMAT_B8G8R8A8_UNORM,
+            VIRTIO_GPU_PIPE_BIND_RENDER_TARGET |
+            VIRTIO_GPU_PIPE_BIND_SAMPLER_VIEW |
+            VIRTIO_GPU_PIPE_BIND_SHARED |
+            VIRTIO_GPU_PIPE_BIND_LINEAR, &tmp);
+        if (tmp_ret == 0) {
+            tmp_ret = virtio_gpu_resource_attach_backing(g, tmp);
+            tmp_attached = tmp_ret == 0;
+        }
+        if (tmp_ret == 0) {
+            memset(tmp->backing, 0, tmp->backing_len);
+            tmp_ret = virtio_gpu_resource_transfer_3d(g, tmp, 0, 0, w, h);
+        }
+        if (tmp_ret == 0) {
+            tmp_ret = virtio_gpu_context_resource(
+                g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id, tmp->id);
+            tmp_ctx_attached = tmp_ret == 0;
+        }
+        if (tmp_ret == 0) {
+            spin_lock(&g->lock);
+            tmp_fence = ++g->next_fence_id;
+            spin_unlock(&g->lock);
+            if (use_copy_transfer) {
+                tmp_ret = virtio_gpu_submit_copy_transfer_rect(
+                    g, ctx_id, tmp, 0, 0, w, h, src, src_x, src_y,
+                    tmp_fence);
+            } else if (use_blit) {
+                tmp_ret = virtio_gpu_submit_blit_rect(
+                    g, ctx_id, tmp->id, tmp->format, 0, 0, w, h,
+                    src_resource_id, src->format, src_x, src_y, tmp_fence);
+            } else {
+                tmp_ret = virtio_gpu_submit_copy_rect(
+                    g, ctx_id, tmp->id, 0, 0, w, h,
+                    src_resource_id, src_x, src_y, tmp_fence);
+            }
+        }
+        src_ret = virtio_gpu_resource_host_samples(g, src, ctx_id,
+                                                   src_x, src_y, w, h,
+                                                   &src_samples);
+        sample_ret = tmp_ret == 0 ?
+            virtio_gpu_resource_host_samples(g, tmp, ctx_id, 0, 0, w, h,
+                                             &tmp_samples) : tmp_ret;
+        if (src_ret == 0 && sample_ret == 0)
+            matches = virtio_gpu_present_sample_matches(&src_samples,
+                                                        &tmp_samples);
+        printf("virtio_gpu: present temp-%s-probe create=%d attached=%d ctx_attached=%d sample=%d matches=%d src_nonblack=%u tmp_nonblack=%u src=%08x,%08x,%08x,%08x,%08x tmp=%08x,%08x,%08x,%08x,%08x\n",
+               use_copy_transfer ? "copy-transfer" :
+                                   (use_blit ? "blit" : "copy"),
+               tmp_ret, tmp_attached,
+               tmp_ctx_attached, sample_ret, matches,
+               src_ret == 0 ? src_samples.nonblack : 0,
+               sample_ret == 0 ? tmp_samples.nonblack : 0,
+               src_ret == 0 ? src_samples.p[0] : 0,
+               src_ret == 0 ? src_samples.p[1] : 0,
+               src_ret == 0 ? src_samples.p[2] : 0,
+               src_ret == 0 ? src_samples.p[3] : 0,
+               src_ret == 0 ? src_samples.p[4] : 0,
+               sample_ret == 0 ? tmp_samples.p[0] : 0,
+               sample_ret == 0 ? tmp_samples.p[1] : 0,
+               sample_ret == 0 ? tmp_samples.p[2] : 0,
+               sample_ret == 0 ? tmp_samples.p[3] : 0,
+               sample_ret == 0 ? tmp_samples.p[4] : 0);
+        if (tmp_ctx_attached)
+            (void)virtio_gpu_context_resource(
+                g, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, ctx_id, tmp->id);
+        if (tmp != NULL)
+            (void)virtio_gpu_resource_unref(g, tmp);
+        ret = -EOPNOTSUPP;
+        goto out_detach;
+    }
+
+    ret = virtio_gpu_try_pageflip_copy(g, src, dst, ctx_id, src_x, src_y,
+                                       dst_x, dst_y, w, h,
+                                       use_copy_transfer, use_blit);
+    if (ret == 0) {
+        spin_lock(&g->lock);
+        virtio_gpu_note_diagnostic_present_locked(
+            g, ctx_id, src_resource_id, src_x, src_y, dst_x, dst_y, w, h);
+        spin_unlock(&g->lock);
+        goto out_detach;
+    }
+
+    if (g->bound_scanout_resource_id != dst_resource_id) {
+        if (virtio_gpu_set_scanout(g, 0, dst, 0, 0, dst_width,
+                                   dst_height) != 0) {
+            ret = -EIO;
+            goto out_detach;
+        }
+        g->bound_scanout_resource_id = dst_resource_id;
+    }
+
     spin_lock(&g->lock);
     fence_id = ++g->next_fence_id;
     spin_unlock(&g->lock);
-    if (use_blit) {
-        memset(blit_cmds, 0, sizeof(blit_cmds));
-        blit_cmds[0] = VIRGL_CMD0(VIRGL_CCMD_BLIT, 0,
-                                  VIRGL_CMD_BLIT_SIZE);
-        blit_cmds[1] = VIRGL_CMD_BLIT_S0_MASK(VIRGL_PIPE_MASK_RGBA) |
-                       VIRGL_CMD_BLIT_S0_FILTER(
-                           VIRGL_PIPE_TEX_FILTER_NEAREST);
-        blit_cmds[2] = 0;
-        blit_cmds[3] = 0;
-        blit_cmds[4] = dst_resource_id;
-        blit_cmds[5] = 0;
-        blit_cmds[6] = dst->format ? dst->format :
-                       VIRGL_FORMAT_B8G8R8A8_UNORM;
-        blit_cmds[7] = dst_x;
-        blit_cmds[8] = dst_y;
-        blit_cmds[9] = 0;
-        blit_cmds[10] = w;
-        blit_cmds[11] = h;
-        blit_cmds[12] = 1;
-        blit_cmds[13] = src_resource_id;
-        blit_cmds[14] = 0;
-        blit_cmds[15] = src->format ? src->format :
-                        VIRGL_FORMAT_B8G8R8A8_UNORM;
-        blit_cmds[16] = src_x;
-        blit_cmds[17] = src_y;
-        blit_cmds[18] = 0;
-        blit_cmds[19] = w;
-        blit_cmds[20] = h;
-        blit_cmds[21] = 1;
-        ret = virtio_gpu_submit_3d(g, ctx_id, blit_cmds,
-                                   sizeof(blit_cmds) /
-                                   sizeof(blit_cmds[0]),
-                                   fence_id) == 0 ? 0 : -EIO;
-    } else {
-        memset(cmds, 0, sizeof(cmds));
-        cmds[0] = VIRGL_CMD0(VIRGL_CCMD_RESOURCE_COPY_REGION, 0,
-                             VIRGL_CMD_RESOURCE_COPY_REGION_SIZE);
-        cmds[1] = dst_resource_id;
-        cmds[2] = 0;
-        cmds[3] = dst_x;
-        cmds[4] = dst_y;
-        cmds[5] = 0;
-        cmds[6] = src_resource_id;
-        cmds[7] = 0;
-        cmds[8] = src_x;
-        cmds[9] = src_y;
-        cmds[10] = 0;
-        cmds[11] = w;
-        cmds[12] = h;
-        cmds[13] = 1;
-        ret = virtio_gpu_submit_3d(g, ctx_id, cmds,
-                                   sizeof(cmds) / sizeof(cmds[0]),
-                                   fence_id) == 0 ? 0 : -EIO;
+    if (unbind_scanout_copy &&
+        g->bound_scanout_resource_id == dst_resource_id) {
+        if (virtio_gpu_set_scanout(g, 0, NULL, 0, 0, 0, 0) != 0) {
+            ret = -EIO;
+            goto out_detach;
+        }
+        g->bound_scanout_resource_id = 0;
     }
-    if (ret == 0 &&
+    if (use_copy_transfer) {
+        ret = virtio_gpu_submit_copy_transfer_rect(g, ctx_id, dst, dst_x,
+                                                   dst_y, w, h, src, src_x,
+                                                   src_y, fence_id);
+    } else if (use_blit) {
+        ret = virtio_gpu_submit_blit_rect(g, ctx_id, dst_resource_id,
+                                          dst->format, dst_x, dst_y, w, h,
+                                          src_resource_id, src->format,
+                                          src_x, src_y, fence_id);
+    } else {
+        ret = virtio_gpu_submit_copy_rect(g, ctx_id, dst_resource_id,
+                                          dst_x, dst_y, w, h,
+                                          src_resource_id, src_x, src_y,
+                                          fence_id);
+    }
+    if (validate_copy && ret == 0 &&
         copy_validation_state < 0 &&
         !virtio_gpu_cmdline_enabled("virtio_gpu_present_force_copy")) {
         ret = -EOPNOTSUPP;
         goto out_detach;
     }
-    if (ret == 0 && copy_validation_state == 0 &&
+    if (validate_copy && ret == 0 && copy_validation_state == 0 &&
         !virtio_gpu_cmdline_enabled("virtio_gpu_present_force_copy")) {
-        int src_nonblack = virtio_gpu_resource_host_nonblack(
-            g, src, ctx_id, src_x, src_y, w, h);
-        int dst_nonblack = virtio_gpu_resource_host_nonblack(
-            g, dst, ctx_id, dst_x, dst_y, w, h);
+        struct virtio_gpu_present_samples src_samples;
+        struct virtio_gpu_present_samples dst_samples;
+        int src_ret = virtio_gpu_resource_host_samples(
+            g, src, ctx_id, src_x, src_y, w, h, &src_samples);
+        int dst_ret = virtio_gpu_resource_host_samples(
+            g, dst, ctx_id, dst_x, dst_y, w, h, &dst_samples);
+        int matches = (src_ret == 0 && dst_ret == 0) ?
+            virtio_gpu_present_sample_matches(&src_samples, &dst_samples) : 0;
+        int required_matches =
+            (src_ret == 0 && src_samples.unique_nonblack >= 2 &&
+             src_samples.nonblack >= 3) ? 2 : 1;
 
-        if (src_nonblack > 0 && dst_nonblack <= 0) {
+        if (src_ret != 0 || dst_ret != 0 ||
+            (src_samples.nonblack > 0 && matches < required_matches)) {
             copy_validation_state = -1;
             if (copy_validation_logs < 4) {
-                printf("virtio_gpu: virgl resource-copy validation failed src_nonblack=%d dst_nonblack=%d; falling back to readback present\n",
-                       src_nonblack, dst_nonblack);
+                printf("virtio_gpu: virgl resource-copy validation failed src_ret=%d dst_ret=%d src_nonblack=%u dst_nonblack=%u matches=%d required=%d src=%08x,%08x,%08x,%08x,%08x dst=%08x,%08x,%08x,%08x,%08x; falling back to readback present\n",
+                       src_ret, dst_ret,
+                       src_ret == 0 ? src_samples.nonblack : 0,
+                       dst_ret == 0 ? dst_samples.nonblack : 0,
+                       matches, required_matches,
+                       src_ret == 0 ? src_samples.p[0] : 0,
+                       src_ret == 0 ? src_samples.p[1] : 0,
+                       src_ret == 0 ? src_samples.p[2] : 0,
+                       src_ret == 0 ? src_samples.p[3] : 0,
+                       src_ret == 0 ? src_samples.p[4] : 0,
+                       dst_ret == 0 ? dst_samples.p[0] : 0,
+                       dst_ret == 0 ? dst_samples.p[1] : 0,
+                       dst_ret == 0 ? dst_samples.p[2] : 0,
+                       dst_ret == 0 ? dst_samples.p[3] : 0,
+                       dst_ret == 0 ? dst_samples.p[4] : 0);
                 copy_validation_logs++;
             }
             ret = -EOPNOTSUPP;
             goto out_detach;
         }
-        if (dst_nonblack > 0)
+        if (matches >= required_matches)
             copy_validation_state = 1;
     }
     if (ret == 0 &&
-        virtio_gpu_cmdline_enabled("virtio_gpu_rearm_scanout_copy")) {
+        (unbind_scanout_copy ||
+         rearm_scanout_copy)) {
         /*
-         * Linux DRM page-flip paths keep the host display pipeline notified
-         * when a virgl-rendered resource becomes the visible scanout content.
-         * Some QEMU/virgl hosts otherwise accept the 3D copy but leave the
-         * already-bound scanout visually stale. Re-issuing SET_SCANOUT for the
-         * same full-size scanout resource is a no-mode-change refresh hint.
+         * Some QEMU/virgl hosts need a no-mode-change SET_SCANOUT refresh hint
+         * after a 3D copy into the already-bound scanout.  It is expensive on
+         * WSL/NVIDIA and the resource flush is sufficient there, so keep it
+         * available as virtio_gpu_rearm_scanout_copy=1 rather than defaulting
+         * to it every frame.
          */
         ret = virtio_gpu_set_scanout(g, 0, dst, 0, 0, dst_width,
                                      dst_height) == 0 ? 0 : -EIO;
@@ -3956,6 +6460,12 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     if (ret == 0)
         ret = virtio_gpu_resource_flush(g, dst, dst_x, dst_y, w, h) == 0 ?
             0 : -EIO;
+    if (ret == 0) {
+        spin_lock(&g->lock);
+        virtio_gpu_note_diagnostic_present_locked(
+            g, ctx_id, src_resource_id, src_x, src_y, dst_x, dst_y, w, h);
+        spin_unlock(&g->lock);
+    }
 
 out_detach:
     if (src_attached)
@@ -3965,8 +6475,153 @@ out_drop_context:
     if (ret != 0 && used_present_ctx)
         virtio_gpu_drop_present_context(g, ctx_id);
 out:
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
     return ret;
+}
+
+int virtio_gpu_copy_resource_to_resource(uint32 src_resource_id,
+                                         uint32 dst_resource_id,
+                                         uint32 src_x, uint32 src_y,
+                                         uint32 dst_x, uint32 dst_y,
+                                         uint32 w, uint32 h)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *src;
+    struct virtio_gpu_resource *dst;
+    struct virtio_gpu_context *ctx;
+    uint32 ctx_id = 0;
+    uint64 src_submit_fence = 0;
+    uint64 completed_fence = 0;
+    uint64 fence_id;
+    int should_wait_src_fence = 0;
+    int src_attached = 0;
+    int dst_attached = 0;
+    int used_present_ctx = 0;
+    int ret = -EIO;
+    static int copy_logs;
+    int use_copy_transfer =
+        virtio_gpu_cmdline_enabled("virtio_gpu_present_copy_transfer");
+    int use_blit = virtio_gpu_cmdline_enabled("virtio_gpu_present_blit") &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_present_copy_region");
+
+    if (src_resource_id == 0 || dst_resource_id == 0 ||
+        src_resource_id == dst_resource_id || w == 0 || h == 0)
+        return -EINVAL;
+    if (!g->initialized || !g->virgl_capset_id ||
+        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+        return -ENODEV;
+
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PRESENT_COPY);
+    spin_lock(&g->lock);
+    src = virtio_gpu_lookup_resource_locked(g, src_resource_id);
+    dst = virtio_gpu_lookup_resource_locked(g, dst_resource_id);
+    if (src == NULL || dst == NULL || !src->attached || !dst->attached ||
+        src_x > src->width || w > src->width - src_x ||
+        src_y > src->height || h > src->height - src_y ||
+        dst_x > dst->width || w > dst->width - dst_x ||
+        dst_y > dst->height || h > dst->height - dst_y) {
+        spin_unlock(&g->lock);
+        ret = -EINVAL;
+        goto out;
+    }
+    if (src->ctx_id != 0) {
+        ctx = virtio_gpu_lookup_context_locked(g, src->ctx_id);
+        if (ctx != NULL && !ctx->failed)
+            ctx_id = src->ctx_id;
+    }
+    src_submit_fence = src->last_submit_fence;
+    completed_fence = g->stats.last_fence;
+    should_wait_src_fence = src_submit_fence != 0 &&
+        src_submit_fence > completed_fence &&
+        virtio_gpu_async_pending(g) &&
+        virtio_gpu_async_newest_fence(g) <= src_submit_fence;
+    if (copy_logs < 8) {
+        printf("virtio_gpu: resource-copy-to-resource src=%u dst=%u ctx=%u rect src=%u,%u dst=%u,%u %ux%u\n",
+               src_resource_id, dst_resource_id, ctx_id, src_x, src_y,
+               dst_x, dst_y, w, h);
+        copy_logs++;
+    }
+    spin_unlock(&g->lock);
+
+    if (should_wait_src_fence ||
+        !virtio_gpu_cmdline_enabled("virtio_gpu_present_no_drain")) {
+        ret = virtio_gpu_drain_async_submit(g, 1);
+        if (ret != 0) {
+            ret = -EIO;
+            goto out;
+        }
+    }
+
+    if (ctx_id == 0) {
+        ret = virtio_gpu_ensure_present_context(g, &ctx_id);
+        if (ret != 0)
+            goto out;
+        used_present_ctx = 1;
+        if (virtio_gpu_context_resource(g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+                                        ctx_id, src_resource_id) != 0) {
+            ret = -EIO;
+            goto out_drop_context;
+        }
+        src_attached = 1;
+    }
+    if (virtio_gpu_context_resource(g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+                                    ctx_id, dst_resource_id) != 0) {
+        ret = -EIO;
+        goto out_detach_src;
+    }
+    dst_attached = 1;
+
+    spin_lock(&g->lock);
+    src = virtio_gpu_lookup_resource_locked(g, src_resource_id);
+    dst = virtio_gpu_lookup_resource_locked(g, dst_resource_id);
+    fence_id = ++g->next_fence_id;
+    spin_unlock(&g->lock);
+    if (src == NULL || dst == NULL) {
+        ret = -EINVAL;
+        goto out_detach_dst;
+    }
+    ret = virtio_gpu_submit_present_copy_method(
+        g, ctx_id, dst, dst_x, dst_y, w, h, src, src_x, src_y, fence_id,
+        use_copy_transfer, use_blit);
+
+out_detach_dst:
+    if (dst_attached)
+        (void)virtio_gpu_context_resource(
+            g, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, ctx_id, dst_resource_id);
+out_detach_src:
+    if (src_attached)
+        (void)virtio_gpu_context_resource(
+            g, VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE, ctx_id, src_resource_id);
+out_drop_context:
+    if (ret != 0 && used_present_ctx)
+        virtio_gpu_drop_present_context(g, ctx_id);
+out:
+    virtio_gpu_op_unlock(g);
+    return ret;
+}
+
+static void virtio_gpu_copy_fb_rect_to_resource(
+    struct virtio_gpu_resource *res, volatile void *fb, uint32 src_pitch,
+    uint32 x, uint32 y, uint32 w, uint32 h)
+{
+    uint8 *dst_base;
+    volatile uint8 *src_base;
+
+    if (res == NULL || res->backing == NULL || fb == NULL)
+        return;
+
+    dst_base = (uint8 *)res->backing;
+    src_base = (volatile uint8 *)fb;
+    for (uint32 row = 0; row < h; row++) {
+        volatile uint32 *src =
+            (volatile uint32 *)(src_base + (uint64)(y + row) * src_pitch +
+                                (uint64)x * sizeof(uint32));
+        uint32 *dst =
+            (uint32 *)(dst_base + (uint64)(y + row) * res->width *
+                       sizeof(uint32) + (uint64)x * sizeof(uint32));
+        for (uint32 col = 0; col < w; col++)
+            dst[col] = src[col];
+    }
 }
 
 void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
@@ -3974,11 +6629,14 @@ void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_resource *res;
+    struct virtio_gpu_resource *target;
+    uint32 target_slot = 0;
+    int target_is_flip = 0;
 
     if (!g->initialized || fb == NULL || w == 0 || h == 0)
         return;
 
-    mutex_lock(&g->op_lock);
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_FB_PRESENT);
     res = g->scanout_resource;
     if (res == NULL || !res->attached || res->backing == NULL)
         goto out;
@@ -3991,36 +6649,285 @@ void virtio_gpu_present_fb_rect(volatile void *fb, uint32 src_pitch,
     if (w == 0 || h == 0)
         goto out;
 
+    target = res;
     if (g->bound_scanout_resource_id != res->id) {
-        if (virtio_gpu_set_scanout(g, 0, res, 0, 0, res->width,
-                                   res->height) != 0)
-            goto out;
-        g->bound_scanout_resource_id = res->id;
-    }
+        struct virtio_gpu_resource *bound = NULL;
+        uint32 bound_id = g->bound_scanout_resource_id;
 
-    if ((void *)fb != res->backing ||
-        src_pitch != res->width * sizeof(uint32)) {
-        uint8 *dst_base = (uint8 *)res->backing;
-        volatile uint8 *src_base = (volatile uint8 *)fb;
+        spin_lock(&g->lock);
+        bound = virtio_gpu_lookup_resource_locked(g, bound_id);
+        if (bound == NULL || !bound->attached || bound->backing == NULL ||
+            bound->width != res->width || bound->height != res->height ||
+            !virtio_gpu_present_flip_slot_for_id(g, bound->id,
+                                                 &target_slot)) {
+            bound = NULL;
+        }
+        spin_unlock(&g->lock);
 
-        for (uint32 row = 0; row < h; row++) {
-            volatile uint32 *src =
-                (volatile uint32 *)(src_base + (uint64)(y + row) * src_pitch +
-                                    (uint64)x * sizeof(uint32));
-            uint32 *dst =
-                (uint32 *)(dst_base + (uint64)(y + row) * res->width *
-                           sizeof(uint32) + (uint64)x * sizeof(uint32));
-            for (uint32 col = 0; col < w; col++)
-                dst[col] = src[col];
+        if (bound != NULL) {
+            target = bound;
+            target_is_flip = 1;
+        } else {
+            if (virtio_gpu_set_scanout(g, 0, res, 0, 0, res->width,
+                                       res->height) != 0)
+                goto out;
+            g->bound_scanout_resource_id = res->id;
+            virtio_gpu_invalidate_present_flip_slot(g, 0);
+            virtio_gpu_invalidate_present_flip_slot(g, 1);
         }
     }
 
-    if (virtio_gpu_resource_transfer_scanout(g, res, x, y, w, h) != 0)
+    if ((void *)fb != res->backing ||
+        src_pitch != res->width * sizeof(uint32))
+        virtio_gpu_copy_fb_rect_to_resource(res, fb, src_pitch, x, y, w, h);
+    g->present_base_generation++;
+    if (g->present_base_generation == 0)
+        g->present_base_generation = 1;
+
+    if (target_is_flip) {
+        for (uint32 i = 0; i < 2; i++) {
+            struct virtio_gpu_resource *flip = g->present_flip_resource[i];
+
+            if (flip == NULL || flip == target || !g->present_flip_valid[i] ||
+                flip->width != res->width || flip->height != res->height)
+                continue;
+            virtio_gpu_copy_fb_rect_to_resource(flip, fb, src_pitch,
+                                                x, y, w, h);
+            if (virtio_gpu_resource_transfer_scanout(g, flip, x, y, w, h) != 0) {
+                virtio_gpu_invalidate_present_flip_slot(g, i);
+            } else {
+                g->present_flip_base_generation[i] =
+                    g->present_base_generation;
+            }
+        }
+        virtio_gpu_copy_fb_rect_to_resource(target, fb, src_pitch, x, y, w, h);
+        g->present_flip_base_generation[target_slot] =
+            g->present_base_generation;
+    }
+
+    if (virtio_gpu_resource_transfer_scanout(g, target, x, y, w, h) != 0)
         goto out;
-    virtio_gpu_resource_flush(g, res, x, y, w, h);
+    virtio_gpu_resource_flush(g, target, x, y, w, h);
 
 out:
-    mutex_unlock(&g->op_lock);
+    virtio_gpu_op_unlock(g);
+}
+
+int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
+                                    void *dst, uint32 dst_pitch,
+                                    uint32 *screen_width,
+                                    uint32 *screen_height,
+                                    uint32 *screen_pitch)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *res = NULL;
+    struct virtio_gpu_resource *present = NULL;
+    uint32 src_pitch;
+    uint8 *src_base;
+    uint8 *dst_base = (uint8 *)dst;
+    uint32 present_resource_id = 0;
+    uint32 present_ctx_id = 0;
+    uint32 present_src_x = 0;
+    uint32 present_src_y = 0;
+    uint32 present_dst_x = 0;
+    uint32 present_dst_y = 0;
+    uint32 present_w = 0;
+    uint32 present_h = 0;
+    uint32 read_ctx_id = 0;
+    int ret = 0;
+
+    if (dst == NULL || w == 0 || h == 0 || dst_pitch < w * sizeof(uint32))
+        return -EINVAL;
+    if (!g->initialized)
+        return -ENODEV;
+
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PROBE);
+    spin_lock(&g->lock);
+    res = g->scanout_resource;
+    present_resource_id = g->diagnostic_present_resource_id;
+    present_ctx_id = g->diagnostic_present_ctx_id;
+    present_src_x = g->diagnostic_present_src_x;
+    present_src_y = g->diagnostic_present_src_y;
+    present_dst_x = g->diagnostic_present_dst_x;
+    present_dst_y = g->diagnostic_present_dst_y;
+    present_w = g->diagnostic_present_w;
+    present_h = g->diagnostic_present_h;
+    spin_unlock(&g->lock);
+
+    if (res == NULL || !res->attached ||
+        (res->backing == NULL &&
+         (res->pages == NULL || res->npages == 0)) ||
+        res->width == 0 || res->height == 0 ||
+        x > res->width || w > res->width - x ||
+        y > res->height || h > res->height - y) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    src_pitch = res->width * sizeof(uint32);
+    if (res->backing != NULL &&
+        (uint64)src_pitch * res->height > res->backing_len) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if (virtio_gpu_async_pending(g) &&
+        virtio_gpu_drain_async_submit(g, 1) != 0) {
+        ret = -EIO;
+        goto out;
+    }
+
+    if (res->is_3d) {
+        struct virtio_gpu_transfer_host_3d *transfer =
+            (struct virtio_gpu_transfer_host_3d *)g->cmd_page;
+        struct virtio_gpu_ctrl_hdr *resp =
+            (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+
+        read_ctx_id = res->ctx_id;
+        if (read_ctx_id == 0) {
+            ret = virtio_gpu_ensure_present_context(g, &read_ctx_id);
+            if (ret != 0)
+                goto out;
+            ret = virtio_gpu_context_resource(
+                g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, read_ctx_id, res->id);
+            if (ret != 0) {
+                ret = -EIO;
+                goto out;
+            }
+        }
+        memset(transfer, 0, sizeof(*transfer));
+        transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
+        transfer->hdr.ctx_id = read_ctx_id;
+        transfer->box.x = x;
+        transfer->box.y = y;
+        transfer->box.z = 0;
+        transfer->box.w = w;
+        transfer->box.h = h;
+        transfer->box.d = 1;
+        transfer->offset = (uint64)y * src_pitch +
+                           (uint64)x * sizeof(uint32);
+        transfer->resource_id = res->id;
+        transfer->level = 0;
+        transfer->stride = src_pitch;
+        transfer->layer_stride = (uint64)src_pitch * res->height;
+        if (virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0,
+                              false, resp, sizeof(*resp),
+                              VIRTIO_GPU_RESP_OK_NODATA) != 0) {
+            ret = -EIO;
+            goto out;
+        }
+    }
+
+    if (res->backing != NULL) {
+        src_base = (uint8 *)res->backing;
+        for (uint32 row = 0; row < h; row++) {
+            memcpy(dst_base + (uint64)row * dst_pitch,
+                   src_base + (uint64)(y + row) * src_pitch +
+                       (uint64)x * sizeof(uint32),
+                   (size_t)w * sizeof(uint32));
+        }
+    } else {
+        for (uint32 row = 0; row < h; row++) {
+            uint32 *dst_row =
+                (uint32 *)(dst_base + (uint64)row * dst_pitch);
+
+            for (uint32 col = 0; col < w; col++)
+                dst_row[col] =
+                    virtio_gpu_resource_sample_pixel(res, x + col, y + row);
+        }
+    }
+
+    spin_lock(&g->lock);
+    present = virtio_gpu_lookup_resource_locked(g, present_resource_id);
+    spin_unlock(&g->lock);
+    if (present != NULL && present->attached &&
+        (present->backing != NULL ||
+         (present->pages != NULL && present->npages != 0)) &&
+        present_w != 0 && present_h != 0 &&
+        present_src_x <= present->width &&
+        present_w <= present->width - present_src_x &&
+        present_src_y <= present->height &&
+        present_h <= present->height - present_src_y &&
+        present_dst_x <= res->width &&
+        present_w <= res->width - present_dst_x &&
+        present_dst_y <= res->height &&
+        present_h <= res->height - present_dst_y) {
+        uint32 ix0 = x > present_dst_x ? x : present_dst_x;
+        uint32 iy0 = y > present_dst_y ? y : present_dst_y;
+        uint32 req_x1 = x + w;
+        uint32 req_y1 = y + h;
+        uint32 pres_x1 = present_dst_x + present_w;
+        uint32 pres_y1 = present_dst_y + present_h;
+        uint32 ix1 = req_x1 < pres_x1 ? req_x1 : pres_x1;
+        uint32 iy1 = req_y1 < pres_y1 ? req_y1 : pres_y1;
+
+        if (ix1 > ix0 && iy1 > iy0) {
+            struct virtio_gpu_transfer_host_3d *transfer =
+                (struct virtio_gpu_transfer_host_3d *)g->cmd_page;
+            struct virtio_gpu_ctrl_hdr *resp =
+                (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+            uint32 present_pitch = present->width * sizeof(uint32);
+            uint32 src_start_x;
+            uint32 src_start_y;
+
+            if (present_ctx_id == 0) {
+                ret = virtio_gpu_ensure_present_context(g, &present_ctx_id);
+                if (ret != 0)
+                    goto out;
+                ret = virtio_gpu_context_resource(
+                    g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+                    present_ctx_id, present->id);
+                if (ret != 0) {
+                    ret = -EIO;
+                    goto out;
+                }
+            }
+            memset(transfer, 0, sizeof(*transfer));
+            transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
+            transfer->hdr.ctx_id = present_ctx_id;
+            src_start_x = present_src_x + (ix0 - present_dst_x);
+            src_start_y = present_src_y + (iy0 - present_dst_y);
+            transfer->box.x = src_start_x;
+            transfer->box.y = src_start_y;
+            transfer->box.z = 0;
+            transfer->box.w = ix1 - ix0;
+            transfer->box.h = iy1 - iy0;
+            transfer->box.d = 1;
+            transfer->offset = (uint64)transfer->box.y * present_pitch +
+                               (uint64)transfer->box.x * sizeof(uint32);
+            transfer->resource_id = present->id;
+            transfer->level = 0;
+            transfer->stride = present_pitch;
+            transfer->layer_stride = (uint64)present_pitch * present->height;
+            if (virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0,
+                                  false, resp, sizeof(*resp),
+                                  VIRTIO_GPU_RESP_OK_NODATA) != 0) {
+                ret = -EIO;
+                goto out;
+            }
+            for (uint32 row = 0; row < iy1 - iy0; row++) {
+                uint32 *dst_row =
+                    (uint32 *)(dst_base +
+                               (uint64)(iy0 - y + row) * dst_pitch +
+                               (uint64)(ix0 - x) * sizeof(uint32));
+
+                for (uint32 col = 0; col < ix1 - ix0; col++)
+                    dst_row[col] = virtio_gpu_resource_sample_pixel(
+                        present, src_start_x + col, src_start_y + row);
+            }
+        }
+    }
+
+    if (screen_width != NULL)
+        *screen_width = res->width;
+    if (screen_height != NULL)
+        *screen_height = res->height;
+    if (screen_pitch != NULL)
+        *screen_pitch = src_pitch;
+
+out:
+    virtio_gpu_op_unlock(g);
+    return ret;
 }
 
 #else
@@ -4077,6 +6984,33 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
     (void)h;
     return -ENODEV;
 }
+int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h)
+{
+    (void)resource_id;
+    (void)w;
+    (void)h;
+    return -ENODEV;
+}
+int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
+                                    void *dst, uint32 dst_pitch,
+                                    uint32 *screen_width,
+                                    uint32 *screen_height,
+                                    uint32 *screen_pitch)
+{
+    (void)x;
+    (void)y;
+    (void)w;
+    (void)h;
+    (void)dst;
+    (void)dst_pitch;
+    if (screen_width != NULL)
+        *screen_width = 0;
+    if (screen_height != NULL)
+        *screen_height = 0;
+    if (screen_pitch != NULL)
+        *screen_pitch = 0;
+    return -ENODEV;
+}
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
                                    uint32 capset_id, const char *name,
                                    uint32 *ctx_id)
@@ -4098,7 +7032,9 @@ int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
 }
 int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 flags, const uint32 *cmds,
-                           uint32 nr_dwords, uint64 *fence, uint64 *signaled)
+                           uint32 nr_dwords, const uint32 *resources,
+                           uint32 resource_count, uint64 *fence,
+                           uint64 *signaled)
 {
     (void)owner_id;
     (void)owner_tgid;
@@ -4106,6 +7042,8 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     (void)flags;
     (void)cmds;
     (void)nr_dwords;
+    (void)resources;
+    (void)resource_count;
     (void)fence;
     (void)signaled;
     return -ENODEV;
@@ -4180,6 +7118,10 @@ int virtio_gpu_user_resource_export_pages(uint64 owner_id, pid_t owner_tgid,
     (void)npages_out;
     return -ENODEV;
 }
+void virtio_gpu_user_resource_export_put(uint32 resource_id)
+{
+    (void)resource_id;
+}
 int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
                                   uint32 resource_id, uint32 *width,
                                   uint32 *height, uint32 *format,
@@ -4192,6 +7134,18 @@ int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
     (void)height;
     (void)format;
     (void)size;
+    return -ENODEV;
+}
+int virtio_gpu_user_resource_last_submit_fence(uint64 owner_id,
+                                               pid_t owner_tgid,
+                                               uint32 resource_id,
+                                               uint64 *fence)
+{
+    (void)owner_id;
+    (void)owner_tgid;
+    (void)resource_id;
+    if (fence)
+        *fence = 0;
     return -ENODEV;
 }
 void *virtio_gpu_user_resource_page(uint64 owner_id, pid_t owner_tgid,

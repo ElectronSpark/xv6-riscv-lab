@@ -52,6 +52,10 @@
 #define FB_GPU_DXG_PRESENT_SOURCE_QUERY    0x4631 /* query fail-closed DXG source */
 #define FB_GPU_TTM_VALIDATE  0x4632 /* test/validate TTM placement state */
 #define FB_GPU_DXG_PRESENT_BIND_CONTRACT_QUERY 0x4633 /* query future DXG display bind */
+#define FB_GPU_VIRGL_RESOURCE_ATTACH 0x4634 /* attach/import a virgl resource into a context */
+#define FB_GPU_SCANOUT_READ 0x4635 /* diagnostic readback of current scanout */
+#define FB_GPU_BO_COPY       0x4636 /* copy one virgl-backed BO into another */
+#define FB_GPU_PAGE_FLIP     0x4637 /* bind full-screen virgl BO as scanout */
 
 #define FB_GPU_DXG_DISPLAY_TARGET_NONE          0
 /*
@@ -247,6 +251,7 @@
 #define FB_GPU_BO_F_EXPORTABLE 0x1    /* return a stable kernel handle */
 #define FB_GPU_BO_PRESENT_F_VIRGL_COPY 0x1 /* try virgl resource copy */
 #define FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT 0x2 /* bind BO resource as scanout */
+#define FB_GPU_BO_PRESENT_F_READBACK_FALLBACK 0x80000000u
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
 #define FB_GPU_FENCE_WAIT 0x1         /* wait for fence fd to signal */
 #define FB_GPU_VIRGL_FENCE_WAIT 0x1   /* wait_for must be signaled */
@@ -353,6 +358,26 @@ struct fb_gpu_bo_present {
     uint64   fence;          /* returned completed fence for handle presents */
 };
 
+struct fb_gpu_bo_copy {
+    uint32   src_handle;
+    uint32   dst_handle;
+    uint32   src_x;
+    uint32   src_y;
+    uint32   dst_x;
+    uint32   dst_y;
+    uint32   w;
+    uint32   h;
+    uint32   flags;
+    uint32   reserved;
+    uint64   fence;
+};
+
+struct fb_gpu_page_flip {
+    uint32   handle;         /* full-screen virgl-backed BO handle */
+    uint32   flags;          /* reserved, must be zero */
+    uint64   fence;          /* returned completed display fence */
+};
+
 struct fb_gpu_scanout_map {
     uint32   width;          /* returned width in pixels */
     uint32   height;         /* returned height in pixels */
@@ -367,6 +392,20 @@ struct fb_gpu_scanout_flush {
     uint32   y;
     uint32   w;
     uint32   h;
+};
+
+struct fb_gpu_scanout_read {
+    uint32   x;
+    uint32   y;
+    uint32   w;
+    uint32   h;
+    uint32   pitch;          /* destination pitch in bytes */
+    uint32   flags;
+    uint64   pixels;         /* userspace BGRA/XRGB destination */
+    uint32   screen_width;   /* returned current scanout width */
+    uint32   screen_height;  /* returned current scanout height */
+    uint32   screen_pitch;   /* returned current scanout pitch */
+    uint32   reserved;
 };
 
 struct fb_gpu_display_probe {
@@ -470,6 +509,11 @@ struct fb_gpu_bo_info {
     uint32   strides[4];     /* returned plane strides */
     uint64   implicit_fence; /* returned latest implicit fence */
     uint64   explicit_fence; /* returned latest explicit fence */
+    uint32   virtio_resource_id; /* returned backing virgl resource, if any */
+    uint32   reserved1;
+    uint64   virtio_resource_owner_id;
+    int32    virtio_resource_owner_tgid;
+    uint32   reserved2;
 };
 
 struct fb_gpu_ttm_validate {
@@ -727,10 +771,11 @@ struct fb_gpu_virgl_submit {
     uint32   ctx_id;          /* context returned by CTX_CREATE */
     uint32   flags;           /* FB_GPU_VIRGL_SUBMIT_* */
     uint32   cmd_size;        /* command bytes at cmd, max 256 KiB */
-    uint32   reserved;
+    uint32   resource_count;  /* optional referenced resource id count */
     uint64   cmd;             /* user pointer to uint32 command dwords */
     uint64   fence;           /* returned submitted fence id */
     uint64   signaled;        /* returned latest completed fence id */
+    uint64   resources;       /* optional user pointer to uint32 resource ids */
 };
 
 struct fb_gpu_virgl_fence {
@@ -782,6 +827,13 @@ struct fb_gpu_virgl_resource_create {
 struct fb_gpu_virgl_resource_destroy {
     uint32   resource_id;
     uint32   flags;           /* reserved, must be 0 */
+};
+
+struct fb_gpu_virgl_resource_attach {
+    uint32   ctx_id;           /* target context */
+    uint32   resource_id;      /* existing virgl resource */
+    uint32   handle;           /* caller-owned imported BO handle, or 0 */
+    uint32   flags;            /* reserved, must be 0 */
 };
 
 struct fb_gpu_virgl_resource_export_fd {
@@ -1269,6 +1321,25 @@ struct fb_gpu_stats {
     uint64 virtio_last_fence;  /* last completed virtio-gpu fence id */
     uint64 virtio_irq_completions; /* queue completions observed by IRQ */
     uint64 virtio_poll_fallbacks;  /* queue waits that fell back to polling */
+    uint64 virtio_async_posted; /* async virtio-gpu commands posted */
+    uint64 virtio_async_posted_submit_3d; /* async 3D submits posted */
+    uint64 virtio_async_posted_flush; /* async resource flushes posted */
+    uint64 virtio_async_posted_transfer; /* async transfer-to-host posted */
+    uint64 virtio_async_retired; /* async commands retired from used ring */
+    uint64 virtio_async_pending; /* async commands still in flight */
+    uint64 virtio_async_depth; /* configured async ring depth */
+    uint64 virtio_async_make_room_calls; /* async slot admission attempts */
+    uint64 virtio_async_make_room_submit_3d_calls; /* 3D admission attempts */
+    uint64 virtio_async_make_room_flush_calls; /* flush admission attempts */
+    uint64 virtio_async_make_room_transfer_calls; /* transfer admission attempts */
+    uint64 virtio_async_make_room_stalls; /* admissions that waited for room */
+    uint64 virtio_async_make_room_submit_3d_stalls; /* 3D admissions stalled */
+    uint64 virtio_async_make_room_flush_stalls; /* flush admissions stalled */
+    uint64 virtio_async_make_room_transfer_stalls; /* transfer admissions stalled */
+    uint64 virtio_async_wait_progress_calls; /* blocking async wait calls */
+    uint64 virtio_async_make_room_wait_ticks; /* total room-wait time */
+    uint64 virtio_async_make_room_last_wait_us; /* last room-wait duration */
+    uint64 virtio_async_make_room_max_wait_us; /* max room-wait duration */
     uint64 virgl_bo_presents;  /* BO presents whose dmabuf came from virgl */
     uint64 virgl_bo_present_pixels; /* virgl-backed BO present pixels */
     uint64 virgl_bo_present_last_resource; /* last presented virgl resource */

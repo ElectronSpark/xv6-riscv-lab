@@ -149,7 +149,7 @@ int fb_init_virtio_gpu_scanout(uint32 width, uint32 height)
         return -EINVAL;
 
     spin_lock(&fb_state.lock);
-    if (fb_state.detected && !fb_state.firmware_backed) {
+    if (fb_state.detected && fb_state.virtio_backed) {
         spin_unlock(&fb_state.lock);
         return 0;
     }
@@ -165,7 +165,7 @@ int fb_init_virtio_gpu_scanout(uint32 width, uint32 height)
     memset(buf, 0, (size_t)size);
 
     spin_lock(&fb_state.lock);
-    if (fb_state.detected && !fb_state.firmware_backed) {
+    if (fb_state.detected && fb_state.virtio_backed) {
         spin_unlock(&fb_state.lock);
         kvfree(buf);
         return 0;
@@ -211,7 +211,7 @@ int fb_init_virtio_gpu_scanout_backing(uint32 width, uint32 height,
         return -EINVAL;
 
     spin_lock(&fb_state.lock);
-    if (fb_state.detected && !fb_state.firmware_backed) {
+    if (fb_state.detected && fb_state.virtio_backed) {
         spin_unlock(&fb_state.lock);
         return 0;
     }

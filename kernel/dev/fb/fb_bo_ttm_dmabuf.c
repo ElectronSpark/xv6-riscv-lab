@@ -170,6 +170,7 @@ static void fb_gem_put(struct fb_gpu_gem_object *gem)
 {
     page_t **pages = NULL;
     uint32 npages = 0;
+    uint32 virtio_resource_id = 0;
 
     if (gem == NULL)
         return;
@@ -179,9 +180,12 @@ static void fb_gem_put(struct fb_gpu_gem_object *gem)
     if (gem->refs == 0) {
         pages = gem->pages;
         npages = gem->npages;
+        virtio_resource_id = gem->virtio_resource_id;
         memset(gem, 0, sizeof(*gem));
     }
     spin_unlock(&fb_state.lock);
+    if (virtio_resource_id != 0)
+        virtio_gpu_user_resource_export_put(virtio_resource_id);
     fb_bo_release_pages(pages, npages);
 }
 

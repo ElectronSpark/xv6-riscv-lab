@@ -527,8 +527,8 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         }
         ret = virtio_gpu_user_submit(owner->id, owner->tgid,
                                      owner->default_ctx_id, 0, cmds,
-                                     req.size / sizeof(uint32), &fence,
-                                     &signaled);
+                                     req.size / sizeof(uint32), NULL, 0,
+                                     &fence, &signaled);
         kvfree(cmds);
         return ret;
     }
@@ -879,6 +879,8 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case FB_GPU_GET_STATS:
     case FB_GPU_BO_CREATE:
     case FB_GPU_BO_PRESENT:
+    case FB_GPU_PAGE_FLIP:
+    case FB_GPU_BO_COPY:
     case FB_GPU_BO_DESTROY:
     case FB_GPU_BO_IMPORT:
     case FB_GPU_BO_EXPORT_FD:
@@ -901,6 +903,7 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case FB_GPU_VIRGL_GET_CAPS:
     case FB_GPU_VIRGL_RESOURCE_CREATE:
     case FB_GPU_VIRGL_RESOURCE_DESTROY:
+    case FB_GPU_VIRGL_RESOURCE_ATTACH:
     case FB_GPU_VIRGL_RESOURCE_EXPORT_FD:
     case FB_GPU_VIRGL_TRANSFER_TO_HOST:
     case FB_GPU_VIRGL_TRANSFER_FROM_HOST:
@@ -1023,6 +1026,7 @@ static int gpu_drm_private_render_ioctl_allowed(uint64 cmd)
     case FB_GPU_DISPLAY_PROBE:
     case FB_GPU_BO_CREATE:
     case FB_GPU_BO_DESTROY:
+    case FB_GPU_BO_COPY:
     case FB_GPU_BO_IMPORT:
     case FB_GPU_BO_EXPORT_FD:
     case FB_GPU_BO_IMPORT_FD:
@@ -1039,6 +1043,7 @@ static int gpu_drm_private_render_ioctl_allowed(uint64 cmd)
     case FB_GPU_VIRGL_GET_CAPS:
     case FB_GPU_VIRGL_RESOURCE_CREATE:
     case FB_GPU_VIRGL_RESOURCE_DESTROY:
+    case FB_GPU_VIRGL_RESOURCE_ATTACH:
     case FB_GPU_VIRGL_RESOURCE_EXPORT_FD:
     case FB_GPU_VIRGL_TRANSFER_TO_HOST:
     case FB_GPU_VIRGL_TRANSFER_FROM_HOST:

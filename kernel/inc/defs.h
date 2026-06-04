@@ -555,8 +555,19 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
                                         uint32 src_x, uint32 src_y,
                                         uint32 dst_x, uint32 dst_y,
                                         uint32 w, uint32 h);
+int virtio_gpu_copy_resource_to_resource(uint32 src_resource_id,
+                                         uint32 dst_resource_id,
+                                         uint32 src_x, uint32 src_y,
+                                         uint32 dst_x, uint32 dst_y,
+                                         uint32 w, uint32 h);
 int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
                                      uint32 w, uint32 h);
+int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h);
+int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
+                                    void *dst, uint32 dst_pitch,
+                                    uint32 *screen_width,
+                                    uint32 *screen_height,
+                                    uint32 *screen_pitch);
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
                                    uint32 capset_id, const char *name,
                                    uint32 *ctx_id);
@@ -564,7 +575,9 @@ int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
                                     uint32 ctx_id);
 int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 flags, const uint32 *cmds,
-                           uint32 nr_dwords, uint64 *fence, uint64 *signaled);
+                           uint32 nr_dwords, const uint32 *resources,
+                           uint32 resource_count, uint64 *fence,
+                           uint64 *signaled);
 int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled);
 int virtio_gpu_user_capset_ids(uint64 *ids);
 int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
@@ -578,15 +591,23 @@ int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
                                     struct fb_gpu_virgl_resource_create *req);
 int virtio_gpu_user_resource_destroy(uint64 owner_id, pid_t owner_tgid,
                                      uint32 resource_id);
+int virtio_gpu_user_resource_attach(uint64 owner_id, pid_t owner_tgid,
+                                    uint32 ctx_id, uint32 resource_id,
+                                    int allow_imported);
 int virtio_gpu_user_resource_export_pages(uint64 owner_id, pid_t owner_tgid,
                                           uint32 resource_id, uint32 *width,
                                           uint32 *height, uint32 *pitch,
                                           uint64 *size, page_t ***pages_out,
                                           uint32 *npages_out);
+void virtio_gpu_user_resource_export_put(uint32 resource_id);
 int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
                                   uint32 resource_id, uint32 *width,
                                   uint32 *height, uint32 *format,
                                   uint64 *size);
+int virtio_gpu_user_resource_last_submit_fence(uint64 owner_id,
+                                               pid_t owner_tgid,
+                                               uint32 resource_id,
+                                               uint64 *fence);
 void *virtio_gpu_user_resource_page(uint64 owner_id, pid_t owner_tgid,
                                     uint32 resource_id, uint64 page_index);
 void virtio_gpu_user_destroy_owner(pid_t owner_tgid);

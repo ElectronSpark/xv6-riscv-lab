@@ -1515,6 +1515,8 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
     uint32 bo_handle = 0;
     uint32 width = 0;
     uint32 height = 0;
+    uint32 xres = 0;
+    uint32 yres = 0;
     uint32 pixel_format = 0;
     uint64 modifier = DRM_FORMAT_MOD_LINEAR;
     uint64 fence = 0;
@@ -1535,6 +1537,8 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
         modifier = fb->modifier;
         break;
     }
+    xres = fb_state.xres;
+    yres = fb_state.yres;
     spin_unlock(&fb_state.lock);
     if (bo_handle == 0)
         return -ENOENT;
@@ -1553,8 +1557,29 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
     memset(&present, 0, sizeof(present));
     present.w = width;
     present.h = height;
+    if (width == xres && height == yres &&
+        modifier == DRM_FORMAT_MOD_LINEAR &&
+        !fb_scanout_format_needs_rb_swap(pixel_format) &&
+        !fb_cmdline_enabled("virtio_gpu_no_kms_resource_scanout")) {
+        /*
+         * Alpine's smooth virgl/KMS path presents completed full-screen GBM
+         * buffers by flipping scanout to that resource, then flushing it.  Use
+         * that same shape for full-size KMS framebuffers; fb_blit_from_bo_format
+         * falls back to the existing CPU/readback path when the BO is not
+         * virtio-resource backed.
+         */
+        present.flags = FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT;
+    }
     ret = fb_blit_from_bo_format(bo, present, pixel_format, modifier,
-                                 &fence);
+                                 &fence, NULL);
+    if (ret != 0 &&
+        (present.flags & FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT) != 0) {
+        memset(&present, 0, sizeof(present));
+        present.w = width;
+        present.h = height;
+        ret = fb_blit_from_bo_format(bo, present, pixel_format, modifier,
+                                     &fence, NULL);
+    }
     fb_bo_put(bo);
     return ret;
 }
