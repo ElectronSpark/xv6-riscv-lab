@@ -473,7 +473,7 @@ struct virtio_gpu_async_submit {
  * virtio-gpu control queue retires buffers in submission order, so the ring is
  * drained strictly FIFO.
  */
-#define VIRTIO_GPU_ASYNC_MAX_DEPTH 4
+#define VIRTIO_GPU_ASYNC_MAX_DEPTH 8
 #define VIRTIO_GPU_ASYNC_DESC_PER_SLOT 4
 #define VIRTIO_GPU_ASYNC_DESC_BASE 8
 
@@ -1523,7 +1523,7 @@ static int virtio_gpu_async_depth(struct virtio_gpu *g)
         char buf[16];
         int depth = (virtio_gpu_cmdline_enabled("vgpu_async_pf") ||
                      virtio_gpu_cmdline_enabled(
-                         "virtio_gpu_async_page_flip_scanout")) ? 4 : 2;
+                         "virtio_gpu_async_page_flip_scanout")) ? 8 : 2;
 
         if (cmdline_get_param("virtio_gpu_async_depth", buf,
                               sizeof(buf)) == 0 &&
