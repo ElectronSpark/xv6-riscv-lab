@@ -16,6 +16,7 @@ static void gpu_syncobj_state_put_locked(uint32 state_index)
         state->refs--;
     if (state->refs == 0) {
         proxy_source_index = state->proxy_source_index;
+        dma_fence_put(state->fence);
         memset(state, 0, sizeof(*state));
     }
     if (proxy_source_index != 0)
@@ -36,15 +37,38 @@ static int gpu_syncobj_state_get_locked(uint32 state_index)
 #define FB_GPU_SYNCOBJ_PROXY_SYNC_FILE 1U
 #define FB_GPU_SYNCOBJ_PROXY_TRANSFER  2U
 
-static void gpu_syncobj_state_init_fence_locked(
+static int gpu_syncobj_state_init_fence_locked(
     struct fb_gpu_syncobj_state_entry *state, uint64 point, int signaled)
 {
+    struct dma_fence *old_fence;
+    struct dma_fence *fence;
+
     if (state == NULL)
-        return;
-    dma_fence_init(&state->fence, 0, point != 0 ? point : 1);
-    state->fence_valid = 1;
+        return -EINVAL;
+
+    fence = kvmalloc(sizeof(*fence));
+    if (fence == NULL)
+        return -ENOMEM;
+    dma_fence_init(fence, 0, point != 0 ? point : 1);
     if (signaled)
-        (void)dma_fence_signal(&state->fence, 0);
+        (void)dma_fence_signal(fence, 0);
+
+    old_fence = state->fence;
+    state->fence = fence;
+    dma_fence_put(old_fence);
+    return 0;
+}
+
+static void gpu_syncobj_state_set_fence_locked(
+    struct fb_gpu_syncobj_state_entry *state, struct dma_fence *fence)
+{
+    struct dma_fence *old_fence;
+
+    if (state == NULL || fence == NULL)
+        return;
+    old_fence = state->fence;
+    state->fence = dma_fence_get(fence);
+    dma_fence_put(old_fence);
 }
 
 static void gpu_syncobj_clear_proxy_locked(
@@ -78,9 +102,12 @@ static int gpu_syncobj_alloc_state_locked(int signaled,
         state->timeline_value = signaled ? 1 : 0;
         state->signaled_point = signaled ? 1 : 0;
         state->reservation_fence = state->timeline_value;
-        gpu_syncobj_state_init_fence_locked(
+        if (gpu_syncobj_state_init_fence_locked(
             state, state->timeline_value != 0 ? state->timeline_value : 1,
-            signaled);
+            signaled) != 0) {
+            memset(state, 0, sizeof(*state));
+            return -ENOMEM;
+        }
         *state_index = i + 1;
         return 0;
     }
@@ -130,8 +157,7 @@ static int gpu_syncobj_state_ready_locked(
                 state->signaled_point = ready_point;
             state->reservation_seq++;
             state->reservation_fence = source->reservation_fence;
-            if (state->fence_valid)
-                (void)dma_fence_signal(&state->fence, 0);
+            (void)dma_fence_signal(state->fence, 0);
             if (state->proxy_kind == FB_GPU_SYNCOBJ_PROXY_TRANSFER)
                 fb_state.stats.syncobj_pending_transfer_wakeups++;
             else
@@ -141,7 +167,7 @@ static int gpu_syncobj_state_ready_locked(
         }
     }
     return state->signaled_point >= point &&
-        (!state->fence_valid || dma_fence_is_signaled(&state->fence));
+        (state->fence == NULL || dma_fence_is_signaled(state->fence));
 }
 
 static int gpu_syncobj_alloc_handle_locked(struct fb_gpu_render_owner *owner,
@@ -254,8 +280,7 @@ static void gpu_syncobj_signal_state_locked(
         state->signaled_point = point;
     state->reservation_seq++;
     state->reservation_fence = state->timeline_value;
-    if (state->fence_valid)
-        (void)dma_fence_signal(&state->fence, 0);
+    (void)dma_fence_signal(state->fence, 0);
     fb_state.stats.syncobj_signals++;
     gpu_syncobj_clear_proxy_locked(state);
     gpu_syncobj_fire_state_callbacks_locked(state);
@@ -271,7 +296,7 @@ static void gpu_syncobj_reset_state_locked(
     state->signaled_point = 0;
     state->reservation_seq++;
     state->reservation_fence = 0;
-    gpu_syncobj_state_init_fence_locked(
+    (void)gpu_syncobj_state_init_fence_locked(
         state, state->timeline_value != 0 ? state->timeline_value : 1, 0);
     gpu_syncobj_clear_proxy_locked(state);
     gpu_syncobj_wakeup_locked();
@@ -546,8 +571,14 @@ static int gpu_syncobj_handle_to_fd(struct fb_gpu_render_owner *owner,
                 sync_file->snapshot_timeline_value = point;
                 sync_file->snapshot_reservation_fence =
                     state->reservation_fence;
-                if (!sync_file->snapshot_signaled)
+                sync_file->fence = dma_fence_get(state->fence);
+                if (sync_file->fence == NULL) {
+                    gpu_syncobj_state_put_locked(obj->state_index);
+                    sync_file->state_index = 0;
+                    ret = -ENOMEM;
+                } else if (!sync_file->snapshot_signaled) {
                     fb_state.stats.sync_file_pending_exports++;
+                }
             }
         }
         fb_state.stats.syncobj_sync_file_exports++;
@@ -631,6 +662,8 @@ static int gpu_syncobj_fd_to_handle(struct fb_gpu_render_owner *owner,
         sync_file = (struct fb_gpu_syncobj_file *)file->private_data;
         if (sync_file->kind != FB_GPU_SYNCOBJ_FD_SYNC_FILE) {
             ret = -EINVAL;
+        } else if (sync_file->fence == NULL) {
+            ret = -EINVAL;
         } else {
             struct fb_gpu_syncobj_state_entry *source_state;
             int ready;
@@ -640,6 +673,7 @@ static int gpu_syncobj_fd_to_handle(struct fb_gpu_render_owner *owner,
             spin_lock(&fb_state.lock);
             source_state = gpu_syncobj_state_locked(sync_file->state_index);
             ready = sync_file->snapshot_signaled ||
+                dma_fence_is_signaled(sync_file->fence) ||
                 gpu_syncobj_state_ready_locked(
                     source_state, sync_file->snapshot_timeline_value);
             if (!ready && source_state == NULL) {
@@ -658,6 +692,8 @@ static int gpu_syncobj_fd_to_handle(struct fb_gpu_render_owner *owner,
                     state->signaled = ready;
                     state->reservation_fence =
                         sync_file->snapshot_reservation_fence;
+                    gpu_syncobj_state_set_fence_locked(state,
+                                                       sync_file->fence);
                     if (!ready) {
                         ret = gpu_syncobj_state_get_locked(
                             sync_file->state_index);

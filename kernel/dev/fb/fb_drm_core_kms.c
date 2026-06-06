@@ -2092,7 +2092,8 @@ static int gpu_kms_wait_in_fence_file(struct fb_gpu_render_owner *owner,
 
         if (sync_file->kind != FB_GPU_SYNCOBJ_FD_SYNC_FILE) {
             ret = -EINVAL;
-        } else if (sync_file->snapshot_signaled) {
+        } else if (sync_file->snapshot_signaled ||
+                   dma_fence_is_signaled(sync_file->fence)) {
             ret = 0;
         } else {
             spin_lock(&fb_state.lock);

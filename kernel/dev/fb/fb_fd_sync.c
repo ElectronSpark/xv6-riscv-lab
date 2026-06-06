@@ -359,6 +359,43 @@ static int gpu_syncobj_alloc_state_locked(int signaled,
 static int gpu_syncobj_state_ready_locked(
     struct fb_gpu_syncobj_state_entry *state, uint64 point);
 
+static void fb_syncobj_fence_callback(struct dma_fence *fence, void *arg)
+{
+    struct fb_gpu_syncobj_file *sync_file =
+        (struct fb_gpu_syncobj_file *)arg;
+    struct vfs_file *file;
+
+    (void)fence;
+    if (sync_file == NULL)
+        return;
+    file = sync_file->callback_file;
+    sync_file->callback_file = NULL;
+    sync_file->fence_callback_armed = 0;
+    if (file != NULL) {
+        vfs_file_knote_notify(file, EVFILT_READ, 0);
+        vfs_file_knote_notify(file, EVFILT_WRITE, 0);
+        vfs_fput(file);
+    }
+    wakeup_on_chan(&fb_state.syncobj_wakeup_seq);
+}
+
+static void fb_syncobj_cancel_fence_callback(struct fb_gpu_syncobj_file *sync_file)
+{
+    struct vfs_file *file;
+
+    if (sync_file == NULL || !sync_file->fence_callback_armed ||
+        sync_file->fence == NULL)
+        return;
+    if (dma_fence_remove_callback(sync_file->fence,
+                                  &sync_file->fence_cb) != 0)
+        return;
+    file = sync_file->callback_file;
+    sync_file->callback_file = NULL;
+    sync_file->fence_callback_armed = 0;
+    if (file != NULL)
+        vfs_fput(file);
+}
+
 static void fb_syncobj_cancel_pending_callback_locked(
     struct fb_gpu_syncobj_file *sync_file)
 {
@@ -380,7 +417,7 @@ static void fb_syncobj_cancel_pending_callback_locked(
         sync_file->pending_callback_armed = 0;
         return;
     }
-    if (state != NULL && (!state->signaled || state->timeline_value < point)) {
+    if (state != NULL && state->signaled_point < point) {
         if (state->pending_sync_file_callbacks > 0) {
             state->pending_sync_file_callbacks--;
             fb_state.stats.sync_file_pending_callbacks_cancelled++;
@@ -398,6 +435,7 @@ static void fb_syncobj_fops_last_fd_close(struct vfs_file *file)
 
     if (sync_file == NULL)
         return;
+    fb_syncobj_cancel_fence_callback(sync_file);
     spin_lock(&fb_state.lock);
     fb_syncobj_cancel_pending_callback_locked(sync_file);
     spin_unlock(&fb_state.lock);
@@ -413,12 +451,14 @@ static int fb_syncobj_fops_release(struct vfs_inode *inode,
     if (file != NULL)
         file->private_data = NULL;
     if (sync_file != NULL) {
+        fb_syncobj_cancel_fence_callback(sync_file);
         if (sync_file->state_index != 0) {
             spin_lock(&fb_state.lock);
             fb_syncobj_cancel_pending_callback_locked(sync_file);
             gpu_syncobj_state_put_locked(sync_file->state_index);
             spin_unlock(&fb_state.lock);
         }
+        dma_fence_put(sync_file->fence);
         kvfree(sync_file);
     }
     return 0;
@@ -434,31 +474,67 @@ static int fb_syncobj_fops_poll(struct vfs_file *file, short events)
     if (sync_file == NULL)
         return POLLERR | POLLHUP;
     if (sync_file->kind == FB_GPU_SYNCOBJ_FD_SYNC_FILE) {
-        int ready = sync_file->snapshot_signaled;
+        int ready = sync_file->snapshot_signaled ||
+            dma_fence_is_signaled(sync_file->fence);
 
-        spin_lock(&fb_state.lock);
         if (!ready && sync_file->state_index != 0) {
+            spin_lock(&fb_state.lock);
             state = gpu_syncobj_state_locked(sync_file->state_index);
             ready = gpu_syncobj_state_ready_locked(
                 state, sync_file->snapshot_timeline_value);
+            spin_unlock(&fb_state.lock);
         }
         if (ready) {
             revents |= events & (POLLIN | POLLRDNORM | POLLRDBAND |
                                  POLLOUT | POLLWRNORM | POLLWRBAND);
-            if (!sync_file->snapshot_signaled)
+            if (!sync_file->snapshot_signaled) {
+                spin_lock(&fb_state.lock);
                 fb_state.stats.sync_file_pending_poll_ready++;
+                spin_unlock(&fb_state.lock);
+            }
         } else {
+            struct vfs_file *callback_file = NULL;
+            int armed = 0;
+
+            if (!sync_file->fence_callback_armed &&
+                sync_file->fence != NULL) {
+                callback_file = vfs_fdup(file);
+                if (callback_file != NULL) {
+                    int cb_ret;
+
+                    sync_file->callback_file = callback_file;
+                    sync_file->fence_callback_armed = 1;
+                    cb_ret = dma_fence_add_callback(
+                        sync_file->fence, &sync_file->fence_cb,
+                        fb_syncobj_fence_callback, sync_file);
+                    if (cb_ret == 0) {
+                        armed = 1;
+                    } else {
+                        sync_file->callback_file = NULL;
+                        sync_file->fence_callback_armed = 0;
+                        vfs_fput(callback_file);
+                        if (cb_ret == -ENOENT)
+                            revents |= events &
+                                (POLLIN | POLLRDNORM | POLLRDBAND |
+                                 POLLOUT | POLLWRNORM | POLLWRBAND);
+                    }
+                }
+            }
+            if (revents != 0)
+                return revents;
+            spin_lock(&fb_state.lock);
             fb_state.stats.sync_file_pending_poll_not_ready++;
+            if (armed)
+                fb_state.stats.sync_file_pending_callbacks_armed++;
             if (!sync_file->pending_callback_armed && state != NULL) {
                 state->pending_sync_file_callbacks++;
                 state->sync_file_callback_generation++;
                 sync_file->pending_callback_armed = 1;
                 sync_file->pending_callback_generation =
                     state->sync_file_callback_generation;
-                fb_state.stats.sync_file_pending_callbacks_armed++;
             }
+            spin_unlock(&fb_state.lock);
         }
-        spin_unlock(&fb_state.lock);
         return revents;
     }
     spin_lock(&fb_state.lock);
@@ -547,4 +623,3 @@ static int fb_bo_map_current(struct fb_gpu_bo_entry *bo, uint64 *addr_out)
     *addr_out = addr;
     return 0;
 }
-

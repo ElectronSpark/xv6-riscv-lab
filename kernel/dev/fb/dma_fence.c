@@ -146,6 +146,23 @@ int dma_fence_add_callback(struct dma_fence *fence, struct dma_fence_cb *cb,
     return 0;
 }
 
+int dma_fence_remove_callback(struct dma_fence *fence,
+                              struct dma_fence_cb *cb)
+{
+    int ret = -ENOENT;
+
+    if (fence == NULL || cb == NULL)
+        return -EINVAL;
+
+    spin_lock(&fence->lock);
+    if (!LIST_ENTRY_IS_DETACHED(&cb->node)) {
+        list_node_detach(cb, node);
+        ret = 0;
+    }
+    spin_unlock(&fence->lock);
+    return ret;
+}
+
 int dma_fence_is_signaled(struct dma_fence *fence)
 {
     int signaled;

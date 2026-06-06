@@ -32,6 +32,8 @@ int dma_fence_signal(struct dma_fence *fence, int error);
 int dma_fence_add_callback(struct dma_fence *fence, struct dma_fence_cb *cb,
                            void (*fn)(struct dma_fence *fence, void *arg),
                            void *arg);
+int dma_fence_remove_callback(struct dma_fence *fence,
+                              struct dma_fence_cb *cb);
 int dma_fence_is_signaled(struct dma_fence *fence);
 int dma_fence_wait(struct dma_fence *fence, int64 timeout_ns);
 

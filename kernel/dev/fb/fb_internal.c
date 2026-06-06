@@ -236,8 +236,7 @@ struct fb_gpu_syncobj_state_entry {
     int signaled;
     uint64 timeline_value;
     uint64 signaled_point;
-    int fence_valid;
-    struct dma_fence fence;
+    struct dma_fence *fence;
     uint32 waiters;
     uint64 wakeup_seq;
     uint64 reservation_seq;
@@ -330,6 +329,10 @@ struct fb_gpu_syncobj_file {
     int snapshot_signaled;
     uint64 snapshot_timeline_value;
     uint64 snapshot_reservation_fence;
+    struct dma_fence *fence;
+    struct dma_fence_cb fence_cb;
+    struct vfs_file *callback_file;
+    int fence_callback_armed;
     int pending_callback_armed;
     uint64 pending_callback_generation;
 };
