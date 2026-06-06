@@ -4406,6 +4406,14 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     if (file != NULL) {
         vma->file = file;
         vma->pgoff = offset;
+        if (file->ops != NULL && file->ops->mmap != NULL) {
+            int mmap_ret = file->ops->mmap(file, vma);
+            if (mmap_ret != 0) {
+                vma_free(vm, vma);
+                vm_wunlock(vm);
+                return (uint64)mmap_ret;
+            }
+        }
     }
 
     vma = __vma_try_merge_neighbors(vma);

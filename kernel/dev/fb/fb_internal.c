@@ -187,6 +187,7 @@ struct dma_buf;
 
 struct dma_buf_ops {
     int (*get_gem)(struct dma_buf *dbuf, struct fb_gpu_gem_object **gem_out);
+    void *(*fault)(struct dma_buf *dbuf, uint64 offset);
     void (*release)(struct dma_buf *dbuf);
 };
 

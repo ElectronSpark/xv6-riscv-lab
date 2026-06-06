@@ -490,6 +490,17 @@ struct vfs_file_ops {
     int (*set_flags)(struct vfs_file *file, int old_flags, int new_flags);
 
     /*
+     * mmap - Validate and adjust a file-backed mapping at mmap() time
+     * @file: the file being mapped
+     * @vma:  the newly-created VMA (start/end/flags/pgoff already set)
+     *
+     * Optional. Called with the VM write lock held before the VMA may be
+     * merged or faulted. Implementations may reject unsupported ranges or add
+     * driver-specific VMA flags such as DONTFORK/DONTDUMP.
+     */
+    int (*mmap)(struct vfs_file *file, struct vma *vma);
+
+    /*
      * fault - Demand-page a single page for a file-backed mapping
      * @file:  the file being mapped
      * @vma:   the faulting VMA (start/end/flags/pgoff already set)

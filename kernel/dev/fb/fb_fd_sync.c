@@ -88,6 +88,37 @@ static int fb_dmabuf_fops_poll(struct vfs_file *file, short events)
     return revents;
 }
 
+static int fb_dmabuf_fops_mmap(struct vfs_file *file, struct vma *vma)
+{
+    struct dma_buf *dbuf = file ? (struct dma_buf *)file->private_data : NULL;
+    uint64 length;
+
+    if (dbuf == NULL || vma == NULL)
+        return -EINVAL;
+    if (vma->end <= vma->start)
+        return -EINVAL;
+    length = vma->end - vma->start;
+    if ((vma->pgoff & (PGSIZE - 1)) != 0 ||
+        vma->pgoff >= dbuf->size ||
+        length > dbuf->size - vma->pgoff)
+        return -EINVAL;
+
+    vma->flags |= VMA_FLAG_DONTFORK | VMA_FLAG_DONTDUMP;
+    return 0;
+}
+
+static void *fb_dmabuf_fops_fault(struct vfs_file *file, struct vma *vma,
+                                  uint64 va)
+{
+    struct dma_buf *dbuf = file ? (struct dma_buf *)file->private_data : NULL;
+    uint64 offset;
+
+    if (dbuf == NULL || vma == NULL || va < vma->start || va >= vma->end)
+        return NULL;
+    offset = vma->pgoff + (va - vma->start);
+    return fb_dma_buf_fault(dbuf, offset);
+}
+
 static void fb_dmabuf_fops_last_fd_close(struct vfs_file *file)
 {
     struct dma_buf *dbuf = file ? (struct dma_buf *)file->private_data : NULL;
@@ -110,6 +141,8 @@ static void fb_dmabuf_fops_first_fd_open(struct vfs_file *file)
 
 static struct vfs_file_ops fb_dmabuf_file_ops = {
     .poll = fb_dmabuf_fops_poll,
+    .mmap = fb_dmabuf_fops_mmap,
+    .fault = fb_dmabuf_fops_fault,
     .release = fb_dmabuf_fops_release,
     .first_fd_open = fb_dmabuf_fops_first_fd_open,
     .last_fd_close = fb_dmabuf_fops_last_fd_close,

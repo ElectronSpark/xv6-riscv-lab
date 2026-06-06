@@ -1592,16 +1592,19 @@ static int fb_gem_open_name(uint64 owner_id, pid_t owner_tgid, uint32 name,
 
 static int fb_dmabuf_get_gem(struct dma_buf *dbuf,
                              struct fb_gpu_gem_object **gem_out);
+static void *fb_dmabuf_fault(struct dma_buf *dbuf, uint64 offset);
 static void fb_dmabuf_release(struct dma_buf *dbuf);
 static struct vfs_file_ops fb_dmabuf_file_ops;
 
 static const struct dma_buf_ops fb_dmabuf_ops = {
     .get_gem = fb_dmabuf_get_gem,
+    .fault = fb_dmabuf_fault,
     .release = fb_dmabuf_release,
 };
 
 static const struct dma_buf_ops fb_test_dmabuf_ops = {
     .get_gem = fb_dmabuf_get_gem,
+    .fault = fb_dmabuf_fault,
     .release = fb_dmabuf_release,
 };
 
@@ -1826,6 +1829,41 @@ static int fb_dma_buf_get_gem(struct dma_buf *dbuf,
     if (dbuf == NULL || dbuf->ops == NULL || dbuf->ops->get_gem == NULL)
         return -EINVAL;
     return dbuf->ops->get_gem(dbuf, gem_out);
+}
+
+static void *fb_dma_buf_fault(struct dma_buf *dbuf, uint64 offset)
+{
+    if (dbuf == NULL || dbuf->ops == NULL || dbuf->ops->fault == NULL)
+        return NULL;
+    return dbuf->ops->fault(dbuf, offset);
+}
+
+static void *fb_dmabuf_fault(struct dma_buf *dbuf, uint64 offset)
+{
+    struct fb_gpu_dmabuf_object *dmabuf;
+    struct fb_gpu_gem_object *gem;
+    uint64 page_index;
+    void *pa = NULL;
+
+    if (dbuf == NULL || (offset & (PGSIZE - 1)) != 0 ||
+        offset >= dbuf->size)
+        return NULL;
+
+    dmabuf = (struct fb_gpu_dmabuf_object *)dbuf->priv;
+    if (dmabuf == NULL)
+        return NULL;
+
+    page_index = offset / PGSIZE;
+    spin_lock(&fb_state.lock);
+    gem = dmabuf->gem;
+    if (gem != NULL && gem->in_use && !gem->dead &&
+        page_index < gem->npages && gem->pages[page_index] != NULL) {
+        pa = (void *)__page_to_pa(gem->pages[page_index]);
+        if (page_ref_inc(pa) <= 0)
+            pa = NULL;
+    }
+    spin_unlock(&fb_state.lock);
+    return pa;
 }
 
 static void fb_dmabuf_put(struct dma_buf *dbuf)
