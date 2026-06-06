@@ -297,20 +297,69 @@
 #define FB_GPU_TTM_F_UNRESERVE     0x0020u
 #define FB_GPU_TTM_F_WW_VALIDATE   0x0040u
 
+/* Linux fbdev screen info ABI.  Keep these layouts in sync with linux/fb.h. */
+struct fb_bitfield {
+    uint32 offset;
+    uint32 length;
+    uint32 msb_right;
+};
+
+#define FB_TYPE_PACKED_PIXELS 0
+#define FB_VISUAL_TRUECOLOR   2
+#define FB_ACCEL_NONE         0
+#define FB_ACTIVATE_NOW       0
+#define FB_VMODE_NONINTERLACED 0
+
 /* Variable screen info (returned by FBIOGET_VSCREENINFO) */
 struct fb_var_screeninfo {
-    uint32 xres;            /* visible resolution */
+    uint32 xres;
     uint32 yres;
-    uint32 bits_per_pixel;  /* 32 for BGRA8888 */
-    uint32 pitch;           /* bytes per scanline */
+    uint32 xres_virtual;
+    uint32 yres_virtual;
+    uint32 xoffset;
+    uint32 yoffset;
+    uint32 bits_per_pixel;
+    uint32 grayscale;
+    struct fb_bitfield red;
+    struct fb_bitfield green;
+    struct fb_bitfield blue;
+    struct fb_bitfield transp;
+    uint32 nonstd;
+    uint32 activate;
+    uint32 height;
+    uint32 width;
+    uint32 accel_flags;
+    uint32 pixclock;
+    uint32 left_margin;
+    uint32 right_margin;
+    uint32 upper_margin;
+    uint32 lower_margin;
+    uint32 hsync_len;
+    uint32 vsync_len;
+    uint32 sync;
+    uint32 vmode;
+    uint32 rotate;
+    uint32 colorspace;
+    uint32 reserved[4];
 };
 
 /* Fixed screen info (returned by FBIOGET_FSCREENINFO) */
 struct fb_fix_screeninfo {
-    char   id[16];          /* identification string */
-    uint64 smem_start;      /* physical address of framebuffer */
-    uint32 smem_len;        /* length of framebuffer mem */
-    uint32 line_length;     /* bytes per scanline */
+    char   id[16];
+    uint64 smem_start;
+    uint32 smem_len;
+    uint32 type;
+    uint32 type_aux;
+    uint32 visual;
+    uint16 xpanstep;
+    uint16 ypanstep;
+    uint16 ywrapstep;
+    uint32 line_length;
+    uint64 mmio_start;
+    uint32 mmio_len;
+    uint32 accel;
+    uint16 capabilities;
+    uint16 reserved[2];
 };
 
 /* GPU fill rectangle command */

@@ -581,11 +581,31 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
     switch (cmd) {
     case FBIOGET_VSCREENINFO: {
         struct fb_var_screeninfo info;
+        memset(&info, 0, sizeof(info));
         spin_lock(&fb_state.lock);
         info.xres = fb_state.xres;
         info.yres = fb_state.yres;
+        info.xres_virtual = fb_state.xres;
+        info.yres_virtual = fb_state.yres;
         info.bits_per_pixel = fb_state.bpp;
-        info.pitch = fb_state.pitch;
+        if (fb_state.firmware_backed && platform.has_framebuffer) {
+            info.red.offset = platform.framebuffer_red_pos;
+            info.green.offset = platform.framebuffer_green_pos;
+            info.blue.offset = platform.framebuffer_blue_pos;
+        } else {
+            info.red.offset = 16;
+            info.green.offset = 8;
+            info.blue.offset = 0;
+        }
+        info.red.length = 8;
+        info.green.length = 8;
+        info.blue.length = 8;
+        if (fb_state.bpp == 32) {
+            info.transp.offset = 24;
+            info.transp.length = 8;
+        }
+        info.activate = FB_ACTIVATE_NOW;
+        info.vmode = FB_VMODE_NONINTERLACED;
         spin_unlock(&fb_state.lock);
         if (either_copyout(1, (uint64)arg, (char *)&info, sizeof(info)) < 0)
             return -EFAULT;
@@ -600,7 +620,10 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
                 sizeof(info.id) - 1);
         info.smem_start = fb_state.fb_phys;
         info.smem_len = fb_state.fb_size;
+        info.type = FB_TYPE_PACKED_PIXELS;
+        info.visual = FB_VISUAL_TRUECOLOR;
         info.line_length = fb_state.pitch;
+        info.accel = FB_ACCEL_NONE;
         spin_unlock(&fb_state.lock);
         if (either_copyout(1, (uint64)arg, (char *)&info, sizeof(info)) < 0)
             return -EFAULT;
