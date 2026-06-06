@@ -88,13 +88,15 @@ static void gpu_drm_get_mode_size(uint32 *width, uint32 *height)
         *height = h;
 }
 
-static void gpu_drm_fill_mode(struct drm_mode_modeinfo_compat *mode)
+static void gpu_drm_fill_mode_size(struct drm_mode_modeinfo_compat *mode,
+                                   uint32 w, uint32 h,
+                                   uint32 refresh_millihz, int preferred)
 {
-    uint32 w, h, pos = 0;
+    uint32 pos = 0;
     uint32 hblank, vblank;
+    uint32 refresh_hz;
 
     memset(mode, 0, sizeof(*mode));
-    gpu_drm_get_mode_size(&w, &h);
 
     hblank = w / 5;
     if (hblank < 160)
@@ -111,19 +113,33 @@ static void gpu_drm_fill_mode(struct drm_mode_modeinfo_compat *mode)
     mode->vsync_start = (uint16)(h + vblank / 3);
     mode->vsync_end = (uint16)(h + (2 * vblank) / 3);
     mode->vtotal = (uint16)(h + vblank);
-    mode->vrefresh = 60;
+    refresh_hz = refresh_millihz != 0 ?
+        (refresh_millihz + 500) / 1000 : 60;
+    if (refresh_hz == 0)
+        refresh_hz = 60;
+    mode->vrefresh = refresh_hz;
     mode->clock = (uint32)(((uint64)mode->htotal * mode->vtotal *
-                            mode->vrefresh) / 1000);
+                            (refresh_millihz != 0 ?
+                             refresh_millihz : 60000)) / 1000000);
     if (mode->clock == 0)
         mode->clock = 40000;
     mode->flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
-    mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
+    mode->type = DRM_MODE_TYPE_DRIVER |
+        (preferred ? DRM_MODE_TYPE_PREFERRED : 0);
 
     gpu_drm_mode_append_uint(mode->name, &pos, w);
     if (pos < 31)
         mode->name[pos++] = 'x';
     gpu_drm_mode_append_uint(mode->name, &pos, h);
     mode->name[pos < 32 ? pos : 31] = 0;
+}
+
+static void gpu_drm_fill_mode(struct drm_mode_modeinfo_compat *mode)
+{
+    uint32 w, h;
+
+    gpu_drm_get_mode_size(&w, &h);
+    gpu_drm_fill_mode_size(mode, w, h, 60000, 1);
 }
 
 static int gpu_drm_copyout_u32_array(uint64 ptr, uint32 capacity,
@@ -153,11 +169,16 @@ static int gpu_drm_copyout_u64_array(uint64 ptr, uint32 capacity,
 }
 
 static int gpu_drm_copyout_mode_array(uint64 ptr, uint32 capacity,
-                                      const struct drm_mode_modeinfo_compat *mode)
+                                      const struct drm_mode_modeinfo_compat *modes,
+                                      uint32 count)
 {
-    if (ptr == 0 || capacity == 0 || mode == NULL)
+    uint32 n;
+
+    if (ptr == 0 || capacity == 0 || modes == NULL || count == 0)
         return 0;
-    if (either_copyout(1, ptr, (void *)mode, sizeof(*mode)) < 0)
+    n = capacity < count ? capacity : count;
+    if (either_copyout(1, ptr, (void *)modes,
+                       (uint64)n * sizeof(modes[0])) < 0)
         return -EFAULT;
     return 0;
 }
@@ -1221,25 +1242,114 @@ static int gpu_drm_mode_getencoder(uint64 arg)
     return 0;
 }
 
+#define GPU_DRM_CONNECTOR_MODE_CAP 8
+
+static void gpu_drm_connector_add_mode(
+    struct drm_mode_modeinfo_compat modes[GPU_DRM_CONNECTOR_MODE_CAP],
+    uint32 *count, uint32 width, uint32 height, uint32 refresh_millihz,
+    int preferred)
+{
+    if (modes == NULL || count == NULL ||
+        *count >= GPU_DRM_CONNECTOR_MODE_CAP ||
+        width < 640 || width > 2560 || height < 400 || height > 1600)
+        return;
+    for (uint32 i = 0; i < *count; i++) {
+        if (modes[i].hdisplay == width && modes[i].vdisplay == height)
+            return;
+    }
+    gpu_drm_fill_mode_size(&modes[*count], width, height,
+                           refresh_millihz, preferred);
+    (*count)++;
+}
+
+static uint32 gpu_drm_connector_min_u32(uint32 a, uint32 b)
+{
+    if (a == 0)
+        return b;
+    if (b == 0)
+        return a;
+    return a < b ? a : b;
+}
+
+static uint32 gpu_drm_connector_max_u32(uint32 a, uint32 b)
+{
+    return a > b ? a : b;
+}
+
+static uint32 gpu_drm_build_connector_modes(
+    struct drm_mode_modeinfo_compat modes[GPU_DRM_CONNECTOR_MODE_CAP])
+{
+    uint32 current_w = 0, current_h = 0;
+    uint32 host_w = 0, host_h = 0;
+    uint32 edid_w = 0, edid_h = 0, edid_refresh = 0;
+    uint32 limit_w, limit_h;
+    uint32 count = 0;
+
+    gpu_drm_get_mode_size(&current_w, &current_h);
+    virtio_gpu_probe_scanout(&host_w, &host_h);
+    virtio_gpu_probe_edid_mode(&edid_w, &edid_h, &edid_refresh);
+
+    if (edid_w != 0 && edid_h != 0)
+        gpu_drm_connector_add_mode(modes, &count, edid_w, edid_h,
+                                   edid_refresh, 1);
+    gpu_drm_connector_add_mode(modes, &count, current_w, current_h,
+                               60000, edid_w == 0 || edid_h == 0);
+    if (host_w != 0 && host_h != 0)
+        gpu_drm_connector_add_mode(modes, &count, host_w, host_h,
+                                   60000, 0);
+
+    limit_w = gpu_drm_connector_max_u32(current_w, host_w);
+    limit_w = gpu_drm_connector_max_u32(limit_w, edid_w);
+    limit_h = gpu_drm_connector_max_u32(current_h, host_h);
+    limit_h = gpu_drm_connector_max_u32(limit_h, edid_h);
+
+    if (limit_w == 0 || limit_h == 0) {
+        limit_w = FB_DEFAULT_WIDTH;
+        limit_h = FB_DEFAULT_HEIGHT;
+    }
+
+    if (gpu_drm_connector_min_u32(limit_w, 1920) == 1920 &&
+        gpu_drm_connector_min_u32(limit_h, 1080) == 1080)
+        gpu_drm_connector_add_mode(modes, &count, 1920, 1080, 60000, 0);
+    if (gpu_drm_connector_min_u32(limit_w, 1280) == 1280 &&
+        gpu_drm_connector_min_u32(limit_h, 800) == 800)
+        gpu_drm_connector_add_mode(modes, &count, 1280, 800, 60000, 0);
+    if (gpu_drm_connector_min_u32(limit_w, 1280) == 1280 &&
+        gpu_drm_connector_min_u32(limit_h, 720) == 720)
+        gpu_drm_connector_add_mode(modes, &count, 1280, 720, 60000, 0);
+    if (gpu_drm_connector_min_u32(limit_w, 1024) == 1024 &&
+        gpu_drm_connector_min_u32(limit_h, 768) == 768)
+        gpu_drm_connector_add_mode(modes, &count, 1024, 768, 60000, 0);
+    if (gpu_drm_connector_min_u32(limit_w, 800) == 800 &&
+        gpu_drm_connector_min_u32(limit_h, 600) == 600)
+        gpu_drm_connector_add_mode(modes, &count, 800, 600, 60000, 0);
+    gpu_drm_connector_add_mode(modes, &count, 640, 480, 60000, 0);
+
+    return count;
+}
+
 static int gpu_drm_mode_getconnector(uint64 arg)
 {
     struct drm_mode_get_connector_compat req;
-    struct drm_mode_modeinfo_compat mode;
+    struct drm_mode_modeinfo_compat modes[GPU_DRM_CONNECTOR_MODE_CAP];
     uint32 encoder = GPU_DRM_ENCODER_ID;
     uint32 props[2] = { GPU_DRM_PROP_CRTC_ID, GPU_DRM_PROP_MODE_ID };
     uint64 prop_values[2] = { GPU_DRM_CRTC_ID, GPU_DRM_MODE_BLOB_ID };
+    uint32 mode_count;
     int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
     if (req.connector_id != GPU_DRM_CONNECTOR_ID)
         return -ENOENT;
-    gpu_drm_fill_mode(&mode);
+    memset(modes, 0, sizeof(modes));
+    mode_count = gpu_drm_build_connector_modes(modes);
     ret = gpu_drm_copyout_u32_array(req.encoders_ptr, req.count_encoders,
                                     &encoder, 1);
     if (ret != 0)
         return ret;
-    ret = gpu_drm_copyout_mode_array(req.modes_ptr, req.count_modes, &mode);
+    ret = gpu_drm_copyout_mode_array(req.modes_ptr, req.count_modes, modes,
+                                     mode_count);
     if (ret != 0)
         return ret;
     ret = gpu_drm_copyout_u32_array(req.props_ptr, req.count_props, props, 2);
@@ -1250,15 +1360,15 @@ static int gpu_drm_mode_getconnector(uint64 arg)
     if (ret != 0)
         return ret;
 
-    req.count_modes = 1;
+    req.count_modes = mode_count;
     req.count_props = 2;
     req.count_encoders = 1;
     req.encoder_id = GPU_DRM_ENCODER_ID;
     req.connector_type = DRM_MODE_CONNECTOR_VIRTUAL;
     req.connector_type_id = 1;
     req.connection = DRM_MODE_CONNECTED;
-    req.mm_width = mode.hdisplay / 4;
-    req.mm_height = mode.vdisplay / 4;
+    req.mm_width = modes[0].hdisplay / 4;
+    req.mm_height = modes[0].vdisplay / 4;
     req.subpixel = DRM_MODE_SUBPIXEL_UNKNOWN;
     req.pad = 0;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)

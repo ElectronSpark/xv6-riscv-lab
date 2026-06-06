@@ -5305,6 +5305,15 @@ int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
         *refresh_millihz = 0;
     if (!g->initialized)
         return -ENODEV;
+    if (g->edid_width != 0 && g->edid_height != 0) {
+        if (width != NULL)
+            *width = g->edid_width;
+        if (height != NULL)
+            *height = g->edid_height;
+        if (refresh_millihz != NULL)
+            *refresh_millihz = g->edid_refresh_millihz;
+        return 0;
+    }
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PROBE);
     ret = virtio_gpu_get_edid_mode(g, width, height, refresh_millihz, 0);
