@@ -56,6 +56,13 @@
 #define FB_GPU_SCANOUT_READ 0x4635 /* diagnostic readback of current scanout */
 #define FB_GPU_BO_COPY       0x4636 /* copy one virgl-backed BO into another */
 #define FB_GPU_PAGE_FLIP     0x4637 /* bind full-screen virgl BO as scanout */
+#define FB_GPU_SET_CURSOR    0x4638 /* upload hardware cursor image + hotspot */
+#define FB_GPU_MOVE_CURSOR   0x4639 /* move/show/hide the hardware cursor */
+
+/* Hardware cursor plane (virtio-gpu cursor queue) ── */
+#define FB_GPU_CURSOR_MAX_DIM 64    /* virtio-gpu cursor resources are 64x64 */
+#define FB_GPU_CURSOR_F_VISIBLE 0x1 /* MOVE_CURSOR: show (clear = hide) */
+
 
 #define FB_GPU_DXG_DISPLAY_TARGET_NONE          0
 /*
@@ -252,6 +259,8 @@
 #define FB_GPU_BO_PRESENT_F_VIRGL_COPY 0x1 /* try virgl resource copy */
 #define FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT 0x2 /* bind BO resource as scanout */
 #define FB_GPU_BO_PRESENT_F_READBACK_FALLBACK 0x80000000u
+#define FB_GPU_PAGE_FLIP_F_SCANOUT_REBIND 0x1 /* output: SET_SCANOUT issued */
+#define FB_GPU_PAGE_FLIP_F_SCANOUT_CACHED 0x2 /* output: cached scanout set */
 #define FB_GPU_BO_FENCE_WAIT 0x1      /* wait_for must be signaled */
 #define FB_GPU_FENCE_WAIT 0x1         /* wait for fence fd to signal */
 #define FB_GPU_VIRGL_FENCE_WAIT 0x1   /* wait_for must be signaled */
@@ -374,7 +383,7 @@ struct fb_gpu_bo_copy {
 
 struct fb_gpu_page_flip {
     uint32   handle;         /* full-screen virgl-backed BO handle */
-    uint32   flags;          /* reserved, must be zero */
+    uint32   flags;          /* input zero; output FB_GPU_PAGE_FLIP_F_* */
     uint64   fence;          /* returned completed display fence */
 };
 
@@ -392,6 +401,23 @@ struct fb_gpu_scanout_flush {
     uint32   y;
     uint32   w;
     uint32   h;
+};
+
+struct fb_gpu_cursor_image {
+    uint32   width;          /* <= FB_GPU_CURSOR_MAX_DIM */
+    uint32   height;         /* <= FB_GPU_CURSOR_MAX_DIM */
+    uint32   hot_x;          /* hotspot within the image */
+    uint32   hot_y;
+    uint32   flags;          /* reserved, must be zero */
+    uint32   reserved;
+    uint64   pixels;         /* user ptr to width*height BGRA (0xAARRGGBB) */
+};
+
+struct fb_gpu_cursor_move {
+    int32    x;              /* cursor hotspot position in scanout pixels */
+    int32    y;
+    uint32   flags;          /* FB_GPU_CURSOR_F_VISIBLE */
+    uint32   reserved;
 };
 
 struct fb_gpu_scanout_read {

@@ -881,6 +881,8 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case FB_GPU_BO_PRESENT:
     case FB_GPU_PAGE_FLIP:
     case FB_GPU_BO_COPY:
+    case FB_GPU_SET_CURSOR:
+    case FB_GPU_MOVE_CURSOR:
     case FB_GPU_BO_DESTROY:
     case FB_GPU_BO_IMPORT:
     case FB_GPU_BO_EXPORT_FD:

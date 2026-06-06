@@ -783,6 +783,49 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         return ret;
     }
 
+    case FB_GPU_SET_CURSOR: {
+        struct fb_gpu_cursor_image req;
+        uint64 npix;
+        uint64 size;
+        void *pixels;
+        int ret;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.reserved != 0 ||
+            req.width == 0 || req.height == 0 ||
+            req.width > FB_GPU_CURSOR_MAX_DIM ||
+            req.height > FB_GPU_CURSOR_MAX_DIM ||
+            req.hot_x >= req.width || req.hot_y >= req.height ||
+            req.pixels == 0)
+            return -EINVAL;
+
+        npix = (uint64)req.width * req.height;
+        size = npix * sizeof(uint32);
+        pixels = kvmalloc((size_t)size);
+        if (pixels == NULL)
+            return -ENOMEM;
+        if (either_copyin((char *)pixels, 1, req.pixels, size) < 0) {
+            kvfree(pixels);
+            return -EFAULT;
+        }
+        ret = virtio_gpu_user_set_cursor(pixels, req.width, req.height,
+                                         req.hot_x, req.hot_y);
+        kvfree(pixels);
+        return ret;
+    }
+
+    case FB_GPU_MOVE_CURSOR: {
+        struct fb_gpu_cursor_move req;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.reserved != 0)
+            return -EINVAL;
+        return virtio_gpu_user_move_cursor(
+            req.x, req.y, (req.flags & FB_GPU_CURSOR_F_VISIBLE) ? 1 : 0);
+    }
+
     case FB_GPU_BO_COPY: {
         struct fb_gpu_bo_copy req;
         struct fb_gpu_bo_entry *src_bo;
@@ -2102,6 +2145,8 @@ static int gpu_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     case FB_GPU_BO_PRESENT:
     case FB_GPU_PAGE_FLIP:
     case FB_GPU_BO_COPY:
+    case FB_GPU_SET_CURSOR:
+    case FB_GPU_MOVE_CURSOR:
     case FB_GPU_BO_DESTROY:
     case FB_GPU_BO_IMPORT:
     case FB_GPU_BO_EXPORT_FD:

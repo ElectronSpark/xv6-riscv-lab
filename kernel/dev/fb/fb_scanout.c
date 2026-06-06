@@ -33,6 +33,8 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
     case FB_GPU_BO_CREATE: return "FB_GPU_BO_CREATE";
     case FB_GPU_BO_PRESENT: return "FB_GPU_BO_PRESENT";
     case FB_GPU_PAGE_FLIP: return "FB_GPU_PAGE_FLIP";
+    case FB_GPU_SET_CURSOR: return "FB_GPU_SET_CURSOR";
+    case FB_GPU_MOVE_CURSOR: return "FB_GPU_MOVE_CURSOR";
     case FB_GPU_BO_DESTROY: return "FB_GPU_BO_DESTROY";
     case FB_GPU_BO_IMPORT: return "FB_GPU_BO_IMPORT";
     case FB_GPU_BO_EXPORT_FD: return "FB_GPU_BO_EXPORT_FD";
@@ -758,7 +760,8 @@ static int fb_page_flip_bo(struct fb_gpu_bo_entry *bo,
         return -EINVAL;
 
     ret = virtio_gpu_page_flip_resource(bo->virtio_resource_id,
-                                        bo->width, bo->height);
+                                        bo->width, bo->height,
+                                        &cmd->flags);
     if (ret != 0)
         return ret;
 
