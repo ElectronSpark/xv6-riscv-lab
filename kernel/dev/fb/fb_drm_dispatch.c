@@ -14,6 +14,141 @@ static int gpu_drm_gem_close(struct fb_gpu_render_owner *owner, uint64 arg)
     return ret;
 }
 
+static int gpu_drm_execbuffer_resource_id_for_handle(
+    struct fb_gpu_render_owner *owner, uint32 handle, uint32 *resource_id)
+{
+    struct fb_gpu_bo_entry *bo;
+    uint32 id = 0;
+    int ret;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (resource_id == NULL || handle == 0)
+        return -EINVAL;
+    ret = virtio_gpu_user_resource_info(owner->id, owner->tgid, handle,
+                                        NULL, NULL, NULL, NULL);
+    if (ret == 0) {
+        *resource_id = handle;
+        return 0;
+    }
+
+    bo = fb_bo_get_owned(handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return ret;
+    id = bo->virtio_resource_id;
+    fb_bo_put(bo);
+    if (id == 0)
+        return -ENOENT;
+    ret = virtio_gpu_user_resource_info(owner->id, owner->tgid, id,
+                                        NULL, NULL, NULL, NULL);
+    if (ret != 0)
+        return ret;
+    *resource_id = id;
+    return 0;
+}
+
+static int gpu_drm_execbuffer_wait_fence_fd(int32 fd)
+{
+    struct vfs_file *file;
+    int ret = 0;
+
+    if (fd < 0)
+        return -EINVAL;
+    if (current == NULL || current->fdtable == NULL)
+        return -EBADF;
+    file = vfs_fdtable_get_file(current->fdtable, fd);
+    if (file == NULL)
+        return -EBADF;
+
+    if (file->ops == &fb_fence_file_ops && file->private_data != NULL) {
+        struct fb_gpu_fence_file *fence_file =
+            (struct fb_gpu_fence_file *)file->private_data;
+
+        spin_lock(&fb_state.lock);
+        ret = fb_gpu_fence_file_wait_locked(fence_file);
+        spin_unlock(&fb_state.lock);
+    } else if (file->ops == &fb_virgl_fence_file_ops &&
+               file->private_data != NULL) {
+        struct fb_gpu_virgl_fence_file *fence_file =
+            (struct fb_gpu_virgl_fence_file *)file->private_data;
+        uint64 signaled = 0;
+
+        ret = virtio_gpu_user_fence(fence_file->fence, 1, &signaled);
+        if (ret == 0 && signaled < fence_file->fence)
+            ret = -EAGAIN;
+    } else if (file->ops == &fb_syncobj_file_ops &&
+               file->private_data != NULL) {
+        struct fb_gpu_syncobj_file *sync_file =
+            (struct fb_gpu_syncobj_file *)file->private_data;
+
+        if (sync_file->kind != FB_GPU_SYNCOBJ_FD_SYNC_FILE) {
+            ret = -EINVAL;
+        } else if (sync_file->snapshot_signaled ||
+                   dma_fence_is_signaled(sync_file->fence)) {
+            ret = 0;
+        } else if (sync_file->fence != NULL) {
+            ret = dma_fence_wait(sync_file->fence, -1);
+        } else {
+            ret = -EINVAL;
+        }
+    } else {
+        ret = -EINVAL;
+    }
+
+    vfs_fput(file);
+    return ret;
+}
+
+static int gpu_drm_execbuffer_export_fence_fd(uint64 fence_id, int signaled,
+                                              int *fd_out)
+{
+    struct fb_gpu_syncobj_file *sync_file;
+    struct dma_fence *fence;
+    int fd;
+
+    if (fd_out == NULL || fence_id == 0)
+        return -EINVAL;
+    *fd_out = -1;
+
+    fence = kvmalloc(sizeof(*fence));
+    if (fence == NULL)
+        return -ENOMEM;
+    dma_fence_init(fence, 0, fence_id);
+    if (signaled)
+        (void)dma_fence_signal(fence, 0);
+
+    sync_file = kvmalloc(sizeof(*sync_file));
+    if (sync_file == NULL) {
+        dma_fence_put(fence);
+        return -ENOMEM;
+    }
+    memset(sync_file, 0, sizeof(*sync_file));
+    sync_file->kind = FB_GPU_SYNCOBJ_FD_SYNC_FILE;
+    sync_file->snapshot_signaled = signaled != 0;
+    sync_file->snapshot_timeline_value = fence_id;
+    sync_file->fence = dma_fence_get(fence);
+    if (sync_file->fence == NULL) {
+        kvfree(sync_file);
+        dma_fence_put(fence);
+        return -ENOMEM;
+    }
+
+    fd = vfs_custom_fd_alloc(&fb_syncobj_file_ops, sync_file, 0);
+    if (fd < 0) {
+        dma_fence_put(sync_file->fence);
+        kvfree(sync_file);
+        dma_fence_put(fence);
+        return fd;
+    }
+
+    spin_lock(&fb_state.lock);
+    fb_state.stats.syncobj_sync_file_exports++;
+    spin_unlock(&fb_state.lock);
+    dma_fence_put(fence);
+    *fd_out = fd;
+    return 0;
+}
+
 static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                                 void *driver_file, uint64 cmd, uint64 arg)
 {
@@ -515,15 +650,34 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_VIRTGPU_EXECBUFFER: {
         struct drm_virtgpu_execbuffer_compat req;
         uint32 *cmds;
+        uint32 *handles = NULL;
+        uint32 *resources = NULL;
         uint64 fence = 0, signaled = 0;
+        int out_fence_fd = -1;
         int ret;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         ret = gpu_owner_ensure_context(owner);
         if (ret != 0)
             return ret;
+        if ((req.flags & ~VIRTGPU_EXECBUF_SUPPORTED_FLAGS) != 0)
+            return -EINVAL;
+        if ((req.flags & VIRTGPU_EXECBUF_RING_IDX) != 0 && req.ring_idx != 0)
+            return -EOPNOTSUPP;
+        if (req.syncobj_stride != 0 || req.num_in_syncobjs != 0 ||
+            req.num_out_syncobjs != 0 || req.in_syncobjs != 0 ||
+            req.out_syncobjs != 0)
+            return -EOPNOTSUPP;
+        if ((req.flags & VIRTGPU_EXECBUF_FENCE_FD_IN) != 0) {
+            ret = gpu_drm_execbuffer_wait_fence_fd(req.fence_fd);
+            if (ret != 0)
+                return ret;
+        }
         if (req.command == 0 || req.size == 0 || req.size > PGSIZE * 64 ||
             (req.size & 3) != 0)
+            return -EINVAL;
+        if ((req.num_bo_handles != 0 && req.bo_handles == 0) ||
+            req.num_bo_handles > 4096)
             return -EINVAL;
         cmds = kvmalloc(req.size);
         if (cmds == NULL)
@@ -532,10 +686,57 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             kvfree(cmds);
             return -EFAULT;
         }
+        if (req.num_bo_handles != 0) {
+            uint64 bytes = (uint64)req.num_bo_handles * sizeof(uint32);
+
+            handles = kvmalloc(bytes);
+            resources = kvmalloc(bytes);
+            if (handles == NULL || resources == NULL) {
+                kvfree(handles);
+                kvfree(resources);
+                kvfree(cmds);
+                return -ENOMEM;
+            }
+            if (either_copyin(handles, 1, req.bo_handles, bytes) < 0) {
+                kvfree(handles);
+                kvfree(resources);
+                kvfree(cmds);
+                return -EFAULT;
+            }
+            for (uint32 i = 0; i < req.num_bo_handles; i++) {
+                ret = gpu_drm_execbuffer_resource_id_for_handle(
+                    owner, handles[i], &resources[i]);
+                if (ret != 0) {
+                    kvfree(handles);
+                    kvfree(resources);
+                    kvfree(cmds);
+                    return ret;
+                }
+            }
+        }
         ret = virtio_gpu_user_submit(owner->id, owner->tgid,
                                      owner->default_ctx_id, 0, cmds,
-                                     req.size / sizeof(uint32), NULL, 0,
-                                     &fence, &signaled);
+                                     req.size / sizeof(uint32), resources,
+                                     req.num_bo_handles, &fence, &signaled);
+        if (ret == 0 &&
+            (req.flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0 &&
+            signaled < fence)
+            ret = virtio_gpu_user_fence(fence, 1, &signaled);
+        if (ret == 0 &&
+            (req.flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0) {
+            ret = gpu_drm_execbuffer_export_fence_fd(fence,
+                                                     signaled >= fence,
+                                                     &out_fence_fd);
+            if (ret == 0) {
+                req.fence_fd = out_fence_fd;
+                if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
+                    fb_gpu_close_exported_fd(out_fence_fd);
+                    ret = -EFAULT;
+                }
+            }
+        }
+        kvfree(handles);
+        kvfree(resources);
         kvfree(cmds);
         return ret;
     }
