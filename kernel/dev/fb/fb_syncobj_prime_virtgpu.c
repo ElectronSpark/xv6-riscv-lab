@@ -36,6 +36,17 @@ static int gpu_syncobj_state_get_locked(uint32 state_index)
 #define FB_GPU_SYNCOBJ_PROXY_SYNC_FILE 1U
 #define FB_GPU_SYNCOBJ_PROXY_TRANSFER  2U
 
+static void gpu_syncobj_state_init_fence_locked(
+    struct fb_gpu_syncobj_state_entry *state, uint64 point, int signaled)
+{
+    if (state == NULL)
+        return;
+    dma_fence_init(&state->fence, 0, point != 0 ? point : 1);
+    state->fence_valid = 1;
+    if (signaled)
+        (void)dma_fence_signal(&state->fence, 0);
+}
+
 static void gpu_syncobj_clear_proxy_locked(
     struct fb_gpu_syncobj_state_entry *state)
 {
@@ -66,6 +77,9 @@ static int gpu_syncobj_alloc_state_locked(int signaled,
         state->signaled = signaled;
         state->timeline_value = signaled ? 1 : 0;
         state->reservation_fence = state->timeline_value;
+        gpu_syncobj_state_init_fence_locked(
+            state, state->timeline_value != 0 ? state->timeline_value : 1,
+            signaled);
         *state_index = i + 1;
         return 0;
     }
@@ -114,6 +128,8 @@ static int gpu_syncobj_state_ready_locked(
             state->timeline_value = ready_point;
             state->reservation_seq++;
             state->reservation_fence = source->reservation_fence;
+            if (state->fence_valid)
+                (void)dma_fence_signal(&state->fence, 0);
             if (state->proxy_kind == FB_GPU_SYNCOBJ_PROXY_TRANSFER)
                 fb_state.stats.syncobj_pending_transfer_wakeups++;
             else
@@ -122,7 +138,8 @@ static int gpu_syncobj_state_ready_locked(
             gpu_syncobj_clear_proxy_locked(state);
         }
     }
-    return state->signaled && state->timeline_value >= point;
+    return state->signaled && state->timeline_value >= point &&
+        (!state->fence_valid || dma_fence_is_signaled(&state->fence));
 }
 
 static int gpu_syncobj_alloc_handle_locked(struct fb_gpu_render_owner *owner,
@@ -233,6 +250,8 @@ static void gpu_syncobj_signal_state_locked(
         state->timeline_value = point;
     state->reservation_seq++;
     state->reservation_fence = state->timeline_value;
+    if (state->fence_valid)
+        (void)dma_fence_signal(&state->fence, 0);
     fb_state.stats.syncobj_signals++;
     gpu_syncobj_clear_proxy_locked(state);
     gpu_syncobj_fire_state_callbacks_locked(state);
@@ -247,6 +266,8 @@ static void gpu_syncobj_reset_state_locked(
     state->signaled = 0;
     state->reservation_seq++;
     state->reservation_fence = 0;
+    gpu_syncobj_state_init_fence_locked(
+        state, state->timeline_value != 0 ? state->timeline_value : 1, 0);
     gpu_syncobj_clear_proxy_locked(state);
     gpu_syncobj_wakeup_locked();
 }
