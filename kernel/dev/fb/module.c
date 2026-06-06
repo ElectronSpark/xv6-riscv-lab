@@ -8,6 +8,7 @@
 #include "fb_common.c"
 
 #if defined(__x86_64__) || defined(__i386__)
+#include "dma_fence.c"
 #include "fb_internal.c"
 #include "fb_scanout.c"
 #include "fb_bo_ttm_dmabuf.c"

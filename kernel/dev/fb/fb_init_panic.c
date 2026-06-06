@@ -384,7 +384,13 @@ static int fb_init_firmware_framebuffer(void)
 
 void fbdevinit(void)
 {
+    int fence_ret;
+
     gpu_nouveau_register_pci_driver();
+
+    fence_ret = dma_fence_selftest();
+    assert(fence_ret == 0, "fbdevinit: dma_fence selftest failed: %d",
+           fence_ret);
 
     if (!fb_state.detected)
         fb_init_firmware_framebuffer();

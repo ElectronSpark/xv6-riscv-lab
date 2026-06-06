@@ -36,4 +36,5 @@
 #include <vfs/file.h>
 #include <vfs/poll.h>
 #include <vfs/vfs_types.h>
+#include <dev/dma_fence.h>
 #include <uabi/drm.h>
