@@ -386,6 +386,13 @@ void fbdevinit(void)
 {
     int fence_ret;
 
+    spin_lock(&fb_state.lock);
+    if (!fb_state.kms_pending_out_fences_ready) {
+        list_entry_init(&fb_state.kms_pending_out_fences);
+        fb_state.kms_pending_out_fences_ready = 1;
+    }
+    spin_unlock(&fb_state.lock);
+
     gpu_nouveau_register_pci_driver();
 
     fence_ret = dma_fence_selftest();

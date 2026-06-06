@@ -531,6 +531,17 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
                                            in_fence_ref_count);
             return -EFAULT;
         }
+        ret = gpu_kms_arm_prepared_out_fence(&prepared_out_fence);
+        if (ret != 0) {
+            int32 failed_fd = -1;
+
+            gpu_kms_cleanup_prepared_out_fence(&prepared_out_fence);
+            gpu_kms_put_in_fence_file_refs(in_fence_files,
+                                           in_fence_ref_count);
+            (void)either_copyout(1, out_fence_ptr, &failed_fd,
+                                 sizeof(failed_fd));
+            return ret;
+        }
     }
 
     spin_lock(&fb_state.lock);
@@ -540,6 +551,8 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
                 !gpu_kms_fb_owner_matches(gpu_kms_fb_lookup_locked(new_fb),
                                           owner)) {
                 spin_unlock(&fb_state.lock);
+                gpu_kms_cancel_prepared_out_fence(&prepared_out_fence,
+                                                  -ENOENT);
                 gpu_kms_cleanup_prepared_out_fence(&prepared_out_fence);
                 gpu_kms_put_in_fence_file_refs(in_fence_files,
                                                in_fence_ref_count);
@@ -561,6 +574,7 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
     if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 && has_new_fb) {
         ret = gpu_kms_present_fb(owner, new_fb);
         if (ret != 0) {
+            gpu_kms_cancel_prepared_out_fence(&prepared_out_fence, ret);
             gpu_kms_cleanup_prepared_out_fence(&prepared_out_fence);
             if (out_fence_ptr != 0) {
                 int32 failed_fd = -1;
@@ -574,9 +588,11 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
         }
     }
     if (out_fence_fd >= 0) {
-        gpu_kms_complete_prepared_out_fence(&prepared_out_fence);
         spin_lock(&fb_state.lock);
         fb_state.stats.kms_atomic_out_fence_fd_exports++;
+        if (!prepared_out_fence.display_correlated)
+            fb_state.stats.
+                kms_atomic_out_fence_software_scanout_correlated++;
         spin_unlock(&fb_state.lock);
         prepared_out_fence.fd = -1;
         out_fence_fd = -1;

@@ -2262,25 +2262,25 @@ static int gpu_kms_wait_in_fence_file(struct fb_gpu_render_owner *owner,
                file->private_data != NULL) {
         struct fb_gpu_syncobj_file *sync_file =
             (struct fb_gpu_syncobj_file *)file->private_data;
-        struct fb_gpu_syncobj_state_entry *state;
-        int ready;
 
         if (sync_file->kind != FB_GPU_SYNCOBJ_FD_SYNC_FILE) {
             ret = -EINVAL;
         } else if (sync_file->snapshot_signaled ||
                    dma_fence_is_signaled(sync_file->fence)) {
             ret = 0;
-        } else {
+        } else if (sync_file->fence != NULL) {
             spin_lock(&fb_state.lock);
             fb_state.stats.kms_atomic_in_fence_sync_file_pending_waits++;
-            state = gpu_syncobj_state_locked(sync_file->state_index);
-            ready = gpu_syncobj_state_ready_locked(
-                state, sync_file->snapshot_timeline_value);
-            if (ready)
+            spin_unlock(&fb_state.lock);
+            ret = dma_fence_wait(sync_file->fence, -1);
+            if (ret == 0) {
+                spin_lock(&fb_state.lock);
                 fb_state.stats.
                     kms_atomic_in_fence_sync_file_pending_wakeups++;
-            spin_unlock(&fb_state.lock);
-            ret = ready ? 0 : -EAGAIN;
+                spin_unlock(&fb_state.lock);
+            }
+        } else {
+            ret = -EINVAL;
         }
     } else {
         ret = -EINVAL;
@@ -2321,7 +2321,7 @@ out_note:
 
 struct gpu_kms_prepared_out_fence {
     int fd;
-    struct fb_gpu_fence *fence_obj;
+    struct dma_fence *fence;
     uint64 target_sequence;
     int display_correlated;
 };
@@ -2332,17 +2332,25 @@ static void gpu_kms_init_prepared_out_fence(
     if (out == NULL)
         return;
     out->fd = -1;
-    out->fence_obj = NULL;
+    out->fence = NULL;
     out->target_sequence = 0;
     out->display_correlated = 0;
+}
+
+static void gpu_kms_ensure_out_fence_list_locked(void)
+{
+    if (fb_state.kms_pending_out_fences_ready)
+        return;
+    list_entry_init(&fb_state.kms_pending_out_fences);
+    fb_state.kms_pending_out_fences_ready = 1;
 }
 
 static int gpu_kms_export_out_fence_fd(
     struct gpu_kms_prepared_out_fence *out,
     int display_correlated)
 {
-    struct fb_gpu_fence_file *fence_file;
-    struct fb_gpu_fence *fence_obj;
+    struct fb_gpu_syncobj_file *sync_file;
+    struct dma_fence *fence;
     int fd;
     uint64 seqno;
 
@@ -2357,33 +2365,42 @@ static int gpu_kms_export_out_fence_fd(
         seqno++;
     spin_unlock(&fb_state.lock);
 
-    fence_obj = fb_gpu_fence_create(0, seqno,
-                                    display_correlated ? 0 : 1, 0);
-    if (fence_obj == NULL)
+    fence = kvmalloc(sizeof(*fence));
+    if (fence == NULL)
         return -ENOMEM;
+    dma_fence_init(fence, 0, seqno);
+    if (!display_correlated)
+        (void)dma_fence_signal(fence, 0);
 
-    fence_file = kvmalloc(sizeof(*fence_file));
-    if (fence_file == NULL) {
-        fb_gpu_fence_put(fence_obj);
+    sync_file = kvmalloc(sizeof(*sync_file));
+    if (sync_file == NULL) {
+        dma_fence_put(fence);
         return -ENOMEM;
     }
-    memset(fence_file, 0, sizeof(*fence_file));
-    fence_file->fence = seqno;
-    fence_file->fence_obj = fence_obj;
+    memset(sync_file, 0, sizeof(*sync_file));
+    sync_file->kind = FB_GPU_SYNCOBJ_FD_SYNC_FILE;
+    sync_file->snapshot_signaled = !display_correlated;
+    sync_file->snapshot_timeline_value = seqno;
+    sync_file->fence = dma_fence_get(fence);
+    if (sync_file->fence == NULL) {
+        kvfree(sync_file);
+        dma_fence_put(fence);
+        return -ENOMEM;
+    }
 
-    fd = vfs_custom_fd_alloc(&fb_fence_file_ops, fence_file, 0);
+    fd = vfs_custom_fd_alloc(&fb_syncobj_file_ops, sync_file, 0);
     if (fd < 0) {
-        fb_gpu_fence_put(fence_obj);
-        kvfree(fence_file);
+        dma_fence_put(sync_file->fence);
+        kvfree(sync_file);
+        dma_fence_put(fence);
         return fd;
     }
 
     spin_lock(&fb_state.lock);
-    fb_gpu_fence_get_locked(fence_obj);
-    fb_state.stats.fence_fd_exports++;
+    fb_state.stats.syncobj_sync_file_exports++;
     spin_unlock(&fb_state.lock);
     out->fd = fd;
-    out->fence_obj = fence_obj;
+    out->fence = fence;
     out->target_sequence = seqno;
     out->display_correlated = display_correlated != 0;
     return fd;
@@ -2408,13 +2425,13 @@ static void gpu_kms_cleanup_prepared_out_fence_fd(int *fdp)
 static void gpu_kms_release_prepared_out_fence(
     struct gpu_kms_prepared_out_fence *out)
 {
-    struct fb_gpu_fence *fence_obj;
+    struct dma_fence *fence;
 
-    if (out == NULL || out->fence_obj == NULL)
+    if (out == NULL || out->fence == NULL)
         return;
-    fence_obj = out->fence_obj;
-    out->fence_obj = NULL;
-    fb_gpu_fence_put(fence_obj);
+    fence = out->fence;
+    out->fence = NULL;
+    dma_fence_put(fence);
 }
 
 static void gpu_kms_cleanup_prepared_out_fence(
@@ -2426,24 +2443,75 @@ static void gpu_kms_cleanup_prepared_out_fence(
     gpu_kms_release_prepared_out_fence(out);
 }
 
-static void gpu_kms_complete_prepared_out_fence(
+static int gpu_kms_arm_prepared_out_fence(
     struct gpu_kms_prepared_out_fence *out)
 {
-    if (out == NULL || out->fence_obj == NULL)
-        return;
+    struct gpu_kms_pending_out_fence *pending;
+
+    if (out == NULL || out->fence == NULL || !out->display_correlated)
+        return 0;
+    pending = kvmalloc(sizeof(*pending));
+    if (pending == NULL)
+        return -ENOMEM;
+    memset(pending, 0, sizeof(*pending));
+    list_entry_init(&pending->node);
+    pending->fence = dma_fence_get(out->fence);
+    if (pending->fence == NULL) {
+        kvfree(pending);
+        return -ENOMEM;
+    }
+    pending->target_sequence = out->target_sequence;
 
     spin_lock(&fb_state.lock);
-    if (out->display_correlated) {
-        out->fence_obj->seqno = fb_state.stats.display_last_complete != 0 ?
-            fb_state.stats.display_last_complete : out->target_sequence;
-        fb_state.stats.kms_atomic_out_fence_display_correlated++;
-    } else {
-        fb_state.stats.
-            kms_atomic_out_fence_software_scanout_correlated++;
-    }
-    (void)fb_gpu_fence_signal_locked(out->fence_obj, 0);
+    gpu_kms_ensure_out_fence_list_locked();
+    list_node_push_back(&fb_state.kms_pending_out_fences, pending, node);
     spin_unlock(&fb_state.lock);
-    gpu_kms_release_prepared_out_fence(out);
+    return 0;
+}
+
+static void gpu_kms_cancel_prepared_out_fence(
+    struct gpu_kms_prepared_out_fence *out, int error)
+{
+    struct gpu_kms_pending_out_fence *pending;
+    struct gpu_kms_pending_out_fence *tmp;
+    struct dma_fence *fence;
+
+    if (out == NULL || out->fence == NULL)
+        return;
+    fence = out->fence;
+    spin_lock(&fb_state.lock);
+    if (fb_state.kms_pending_out_fences_ready) {
+        list_foreach_node_safe(&fb_state.kms_pending_out_fences, pending,
+                               tmp, node) {
+            if (pending->fence != fence)
+                continue;
+            list_node_detach(pending, node);
+            (void)dma_fence_signal(pending->fence, error);
+            dma_fence_put(pending->fence);
+            kvfree(pending);
+            break;
+        }
+    }
+    spin_unlock(&fb_state.lock);
+}
+
+static void gpu_kms_signal_pending_out_fences_locked(uint64 sequence)
+{
+    struct gpu_kms_pending_out_fence *pending;
+    struct gpu_kms_pending_out_fence *tmp;
+
+    if (!fb_state.kms_pending_out_fences_ready)
+        return;
+    list_foreach_node_safe(&fb_state.kms_pending_out_fences, pending, tmp,
+                           node) {
+        if (pending->target_sequence > sequence)
+            continue;
+        list_node_detach(pending, node);
+        (void)dma_fence_signal(pending->fence, 0);
+        dma_fence_put(pending->fence);
+        kvfree(pending);
+        fb_state.stats.kms_atomic_out_fence_display_correlated++;
+    }
 }
 
 static void gpu_kms_unpin_bo_locked(uint32 handle, uint64 owner_id,

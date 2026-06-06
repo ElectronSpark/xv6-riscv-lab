@@ -290,6 +290,12 @@ struct fb_gpu_syncobj_eventfd_waiter {
     int fired;
 };
 
+struct gpu_kms_pending_out_fence {
+    list_node_t node;
+    struct dma_fence *fence;
+    uint64 target_sequence;
+};
+
 struct fb_gpu_dxg_present_source_entry {
     int in_use;
     uint32 handle;
@@ -455,6 +461,8 @@ static struct {
     struct fb_gpu_syncobj_state_entry syncobj_states[FB_GPU_MAX_SYNCOBJ_STATES];
     uint32      syncobj_waiters;
     uint64      syncobj_wakeup_seq;
+    list_node_t kms_pending_out_fences;
+    int         kms_pending_out_fences_ready;
     struct fb_gpu_render_owner *render_owners[FB_GPU_MAX_RENDER_OWNERS];
     uint32      current_kms_fb_id;
     struct fb_gpu_dxg_present_source_entry dxg_present_sources[FB_GPU_MAX_DXG_PRESENT_SOURCES];
@@ -538,6 +546,7 @@ static int fb_kernel_range_has_pages(uint64 base, uint64 size);
 static void gpu_backend_fill(struct fb_gpu_backend_info *info);
 static int gpu_backend_query(uint64 arg);
 static uint64 fb_note_display_complete_locked(void);
+static void gpu_kms_signal_pending_out_fences_locked(uint64 sequence);
 static void fb_ttm_resv_wakeup_locked(struct fb_gpu_gem_object *gem,
                                       uint32 source);
 static void fb_ttm_propagate_gem_locked(struct fb_gpu_bo_entry *bo);
@@ -626,13 +635,6 @@ static int fb_gpu_fence_signal_locked(struct fb_gpu_fence *fence, int error)
         fence->callback_fired_generation = fence->callback_generation;
     }
     return 0;
-}
-
-static void fb_gpu_fence_get_locked(struct fb_gpu_fence *fence)
-{
-    if (fence == NULL)
-        return;
-    fence->refs++;
 }
 
 static void fb_gpu_fence_put(struct fb_gpu_fence *fence)

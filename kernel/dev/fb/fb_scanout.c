@@ -320,6 +320,7 @@ static uint64 fb_note_display_complete_locked(void)
     fb_state.stats.kms_vblank_source_synthetic = 0;
     fb_state.stats.kms_vblank_source_software_display = 1;
     fb_state.stats.kms_vblank_source_nouveau_hw = 0;
+    gpu_kms_signal_pending_out_fences_locked(seq);
     return seq;
 }
 
