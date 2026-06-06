@@ -15,7 +15,19 @@ static void gpu_syncobj_state_put_locked(uint32 state_index)
     if (state->refs > 0)
         state->refs--;
     if (state->refs == 0) {
+        struct fb_gpu_syncobj_eventfd_waiter *waiter;
+        struct fb_gpu_syncobj_eventfd_waiter *tmp;
+
         proxy_source_index = state->proxy_source_index;
+        list_foreach_node_safe(&state->eventfd_waiters, waiter, tmp, node) {
+            list_node_detach(waiter, node);
+            if (!waiter->fired)
+                (void)dma_fence_remove_callback(waiter->fence, &waiter->cb);
+            if (waiter->event_file != NULL)
+                vfs_fput(waiter->event_file);
+            dma_fence_put(waiter->fence);
+            kvfree(waiter);
+        }
         dma_fence_put(state->fence);
         memset(state, 0, sizeof(*state));
     }
@@ -102,6 +114,7 @@ static int gpu_syncobj_alloc_state_locked(int signaled,
         state->timeline_value = signaled ? 1 : 0;
         state->signaled_point = signaled ? 1 : 0;
         state->reservation_fence = state->timeline_value;
+        list_entry_init(&state->eventfd_waiters);
         if (gpu_syncobj_state_init_fence_locked(
             state, state->timeline_value != 0 ? state->timeline_value : 1,
             signaled) != 0) {
@@ -1098,10 +1111,31 @@ static int gpu_syncobj_transfer(struct fb_gpu_render_owner *owner, uint64 arg)
     return ret;
 }
 
+static void gpu_syncobj_eventfd_callback(struct dma_fence *fence, void *arg)
+{
+    struct fb_gpu_syncobj_eventfd_waiter *waiter =
+        (struct fb_gpu_syncobj_eventfd_waiter *)arg;
+
+    (void)fence;
+    if (waiter == NULL)
+        return;
+    waiter->fired = 1;
+    if (waiter->event_file != NULL) {
+        (void)eventfd_signal_file(waiter->event_file, 1);
+        vfs_fput(waiter->event_file);
+        waiter->event_file = NULL;
+    }
+}
+
 static int gpu_syncobj_eventfd(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_syncobj_eventfd_compat req;
     struct fb_gpu_syncobj_entry *obj;
+    struct fb_gpu_syncobj_state_entry *state;
+    struct fb_gpu_syncobj_eventfd_waiter *waiter = NULL;
+    struct vfs_file *event_file = NULL;
+    struct dma_fence *fence = NULL;
+    uint64 point;
     int ret = 0;
 
     if (owner == NULL)
@@ -1111,14 +1145,61 @@ static int gpu_syncobj_eventfd(struct fb_gpu_render_owner *owner, uint64 arg)
     if ((req.flags & ~DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE) != 0 ||
         req.pad != 0 || req.fd < 0)
         return -EINVAL;
+    event_file = vfs_fdtable_get_file(current->fdtable, req.fd);
+    if (event_file == NULL)
+        return -EBADF;
+    if (!eventfd_file_is_eventfd(event_file)) {
+        vfs_fput(event_file);
+        return -EINVAL;
+    }
+    waiter = kvmalloc(sizeof(*waiter));
+    if (waiter == NULL) {
+        vfs_fput(event_file);
+        return -ENOMEM;
+    }
+    memset(waiter, 0, sizeof(*waiter));
+    list_entry_init(&waiter->node);
+    point = req.point != 0 ? req.point : 1;
+
     spin_lock(&fb_state.lock);
     obj = gpu_syncobj_lookup_locked(req.handle, owner);
-    if (obj == NULL)
+    state = obj != NULL ? gpu_syncobj_state_locked(obj->state_index) : NULL;
+    if (obj == NULL || state == NULL) {
         ret = -ENOENT;
+    } else if ((req.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE) != 0 &&
+               state->fence != NULL) {
+        ret = eventfd_signal_file(event_file, 1);
+    } else if (gpu_syncobj_state_ready_locked(state, point)) {
+        ret = eventfd_signal_file(event_file, 1);
+    } else if (state->fence == NULL) {
+        ret = -EAGAIN;
+    } else {
+        fence = dma_fence_get(state->fence);
+        if (fence == NULL) {
+            ret = -ENOMEM;
+        } else {
+            waiter->fence = fence;
+            waiter->event_file = event_file;
+            ret = dma_fence_add_callback(fence, &waiter->cb,
+                                         gpu_syncobj_eventfd_callback,
+                                         waiter);
+            if (ret == -ENOENT) {
+                ret = eventfd_signal_file(event_file, 1);
+            } else if (ret == 0) {
+                list_node_push(&state->eventfd_waiters, waiter, node);
+                waiter = NULL;
+                event_file = NULL;
+                fence = NULL;
+            }
+        }
+    }
     spin_unlock(&fb_state.lock);
-    if (ret != 0)
-        return ret;
-    return -EOPNOTSUPP;
+    if (event_file != NULL)
+        vfs_fput(event_file);
+    dma_fence_put(fence);
+    if (waiter != NULL)
+        kvfree(waiter);
+    return ret;
 }
 
 static uint32 gpu_syncobj_destroy_owner(struct fb_gpu_render_owner *owner)

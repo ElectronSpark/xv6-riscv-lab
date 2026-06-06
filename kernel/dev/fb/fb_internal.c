@@ -250,6 +250,15 @@ struct fb_gpu_syncobj_state_entry {
     uint32 pending_wait_callbacks;
     uint64 wait_callback_generation;
     uint64 wait_callback_fired_generation;
+    list_node_t eventfd_waiters;
+};
+
+struct fb_gpu_syncobj_eventfd_waiter {
+    list_node_t node;
+    struct dma_fence *fence;
+    struct dma_fence_cb cb;
+    struct vfs_file *event_file;
+    int fired;
 };
 
 struct fb_gpu_dxg_present_source_entry {
