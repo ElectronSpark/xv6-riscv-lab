@@ -143,6 +143,10 @@ static int gpu_drm_mode_rmfb(struct fb_gpu_render_owner *owner, uint64 arg)
             continue;
         if (fb_state.current_kms_fb_id == fb_id)
             fb_state.current_kms_fb_id = 0;
+        if (fb_state.current_cursor_fb_id == fb_id) {
+            fb_state.current_cursor_fb_id = 0;
+            fb_state.current_cursor_visible = 0;
+        }
         gpu_kms_unpin_bo_locked(fb->bo_handle, owner->id, owner->tgid);
         memset(fb, 0, sizeof(*fb));
         if (fb_state.stats.kms_framebuffers > 0)
@@ -176,6 +180,10 @@ static int gpu_drm_mode_closefb(struct fb_gpu_render_owner *owner, uint64 arg)
 
         if (fb->fb_id != req.fb_id || !gpu_kms_fb_owner_matches(fb, owner))
             continue;
+        if (fb_state.current_cursor_fb_id == req.fb_id) {
+            fb_state.current_cursor_fb_id = 0;
+            fb_state.current_cursor_visible = 0;
+        }
         gpu_kms_unpin_bo_locked(fb->bo_handle, owner->id, owner->tgid);
         memset(fb, 0, sizeof(*fb));
         if (fb_state.stats.kms_framebuffers > 0)
@@ -393,10 +401,12 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
     int has_new_fb = 0;
     int32 out_fence_fd = -1;
     struct gpu_kms_prepared_out_fence prepared_out_fence;
+    struct gpu_kms_cursor_atomic_state cursor_state;
     int ret = 0;
 
     memset(in_fence_files, 0, sizeof(in_fence_files));
     gpu_kms_init_prepared_out_fence(&prepared_out_fence);
+    memset(&cursor_state, 0, sizeof(cursor_state));
     if (!gpu_drm_is_primary_like(owner))
         return -EOPNOTSUPP;
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
@@ -439,6 +449,7 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
     }
 
     spin_lock(&fb_state.lock);
+    gpu_kms_cursor_atomic_snapshot_locked(&cursor_state);
     total_props = 0;
     for (uint32 i = 0; i < req.count_objs && ret == 0; i++) {
         for (uint32 j = 0; j < prop_counts[i]; j++) {
@@ -450,7 +461,8 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
                                                &out_fence_ptr,
                                                in_fence_fds,
                                                &in_fence_count,
-                                               GPU_KMS_MAX_IN_FENCES);
+                                               GPU_KMS_MAX_IN_FENCES,
+                                               &cursor_state);
             if (ret != 0)
                 break;
         }
@@ -509,6 +521,22 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
         if (ret != 0) {
             gpu_kms_put_in_fence_file_refs(in_fence_files,
                                            in_fence_ref_count);
+            return ret;
+        }
+    }
+
+    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 &&
+        cursor_state.touched) {
+        ret = gpu_kms_apply_cursor_atomic_state(owner, &cursor_state);
+        if (ret != 0) {
+            gpu_kms_put_in_fence_file_refs(in_fence_files,
+                                           in_fence_ref_count);
+            if (out_fence_ptr != 0) {
+                int32 failed_fd = -1;
+
+                (void)either_copyout(1, out_fence_ptr, &failed_fd,
+                                     sizeof(failed_fd));
+            }
             return ret;
         }
     }

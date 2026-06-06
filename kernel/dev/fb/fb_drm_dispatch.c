@@ -187,7 +187,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_MODE_CURSOR:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
-        return gpu_drm_mode_cursor(arg, 0);
+        return gpu_drm_mode_cursor(owner, arg, 0);
     case DRM_IOCTL_MODE_GETGAMMA:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
@@ -245,7 +245,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_MODE_CURSOR2:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
-        return gpu_drm_mode_cursor(arg, 1);
+        return gpu_drm_mode_cursor(owner, arg, 1);
     case DRM_IOCTL_MODE_CREATEPROPBLOB: {
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;

@@ -27,6 +27,7 @@ struct fb_gpu_render_owner;
 #define GPU_DRM_PRIMARY_PLANE_ID              4
 #define GPU_DRM_MODE_BLOB_ID                  5
 #define GPU_DRM_IN_FORMATS_BLOB_ID            6
+#define GPU_DRM_CURSOR_PLANE_ID               7
 #define GPU_DRM_PROP_CRTC_ID                  10
 #define GPU_DRM_PROP_MODE_ID                  11
 #define GPU_DRM_PROP_ACTIVE                   12
@@ -465,6 +466,12 @@ static struct {
     int         kms_pending_out_fences_ready;
     struct fb_gpu_render_owner *render_owners[FB_GPU_MAX_RENDER_OWNERS];
     uint32      current_kms_fb_id;
+    uint32      current_cursor_fb_id;
+    int32       current_cursor_x;
+    int32       current_cursor_y;
+    uint32      current_cursor_w;
+    uint32      current_cursor_h;
+    int         current_cursor_visible;
     struct fb_gpu_dxg_present_source_entry dxg_present_sources[FB_GPU_MAX_DXG_PRESENT_SOURCES];
     spinlock_t  lock;           /* serializes concurrent access */
 } fb_state = {
