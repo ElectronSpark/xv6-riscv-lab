@@ -1334,7 +1334,7 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
     }
     bo = fb_bo_get_owned(handle, owner->id, owner->tgid);
     if (bo == NULL) {
-        (void)fb_bo_destroy(handle);
+        (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
         vfs_fput(file);
         return -ENOENT;
     }
