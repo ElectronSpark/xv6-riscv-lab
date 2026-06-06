@@ -564,7 +564,6 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
                 }
                 return -ENOENT;
             }
-            fb_state.current_kms_fb_id = new_fb;
         }
         fb_state.stats.kms_atomic_commits++;
     } else {
@@ -586,6 +585,11 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
                                            in_fence_ref_count);
             return ret;
         }
+    }
+    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 && has_new_fb) {
+        spin_lock(&fb_state.lock);
+        fb_state.current_kms_fb_id = new_fb;
+        spin_unlock(&fb_state.lock);
     }
     if (out_fence_fd >= 0) {
         spin_lock(&fb_state.lock);
