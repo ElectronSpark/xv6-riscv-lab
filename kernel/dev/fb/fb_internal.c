@@ -547,6 +547,9 @@ static int fb_ttm_resv_wait_fence_locked(struct fb_gpu_gem_object *gem,
 static void gpu_kms_sample_vblank_locked(uint64 min_sequence,
                                          uint64 *sequence_out,
                                          uint64 *timestamp_ns_out);
+static int gpu_kms_wait_vblank_sequence(uint64 min_sequence,
+                                        uint64 *sequence_out,
+                                        uint64 *timestamp_ns_out);
 
 static uint64 fb_gpu_fence_next_context_locked(void)
 {

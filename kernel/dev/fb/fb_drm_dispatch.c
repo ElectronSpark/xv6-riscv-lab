@@ -173,7 +173,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_CRTC_QUEUE_SEQUENCE:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
-        return gpu_drm_crtc_queue_sequence(arg);
+        return gpu_drm_crtc_queue_sequence(owner, arg);
     case DRM_IOCTL_MODE_GETRESOURCES:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;

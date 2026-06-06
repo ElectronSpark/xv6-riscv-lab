@@ -894,13 +894,15 @@ static int gpu_drm_wait_vblank(uint64 arg)
     union drm_wait_vblank_compat req;
     uint64 sequence;
     uint64 timestamp_ns;
+    uint64 target;
+    int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
-    spin_lock(&fb_state.lock);
-    gpu_kms_sample_vblank_locked(req.request.sequence + 1, &sequence,
-                                 &timestamp_ns);
-    spin_unlock(&fb_state.lock);
+    target = req.request.sequence + 1;
+    ret = gpu_kms_wait_vblank_sequence(target, &sequence, &timestamp_ns);
+    if (ret != 0)
+        return ret;
     req.reply.sequence = (uint32)sequence;
     req.reply.tval_sec = (int64)(timestamp_ns / 1000000000ULL);
     req.reply.tval_usec =
@@ -908,6 +910,29 @@ static int gpu_drm_wait_vblank(uint64 arg)
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
+}
+
+static int gpu_kms_wait_vblank_sequence(uint64 min_sequence,
+                                        uint64 *sequence_out,
+                                        uint64 *timestamp_ns_out)
+{
+    uint64 sequence;
+    uint64 timestamp_ns;
+
+    for (int i = 0; i < 1000; i++) {
+        spin_lock(&fb_state.lock);
+        gpu_kms_sample_vblank_locked(min_sequence, &sequence, &timestamp_ns);
+        spin_unlock(&fb_state.lock);
+        if (min_sequence == 0 || sequence >= min_sequence) {
+            if (sequence_out != NULL)
+                *sequence_out = sequence;
+            if (timestamp_ns_out != NULL)
+                *timestamp_ns_out = timestamp_ns;
+            return 0;
+        }
+        sleep_ms(1);
+    }
+    return -ETIMEDOUT;
 }
 
 static int gpu_drm_event_queue_locked(struct fb_gpu_render_owner *owner,
@@ -978,60 +1003,25 @@ static void gpu_kms_sample_vblank_locked(uint64 min_sequence,
                                          uint64 *sequence_out,
                                          uint64 *timestamp_ns_out)
 {
-    uint64 now = r_time();
     uint64 display_seq = fb_state.stats.display_last_complete;
-    uint64 last = fb_state.stats.kms_vblank_last_tick;
     uint64 seq = fb_state.stats.kms_vblank_sequence;
+    uint64 timestamp_ns = fb_state.stats.kms_vblank_timestamp_ns;
 
-    if (display_seq != 0 &&
-        (min_sequence == 0 || display_seq >= min_sequence)) {
+    if (display_seq != 0 && display_seq > seq) {
         fb_state.stats.kms_vblank_sequence = display_seq;
-        fb_state.stats.kms_vblank_last_tick = now;
-        fb_state.stats.kms_vblank_timestamp_ns = now * 100ULL;
-        fb_state.stats.kms_vblank_samples++;
+        seq = display_seq;
+        timestamp_ns = fb_state.stats.kms_vblank_timestamp_ns;
         fb_state.stats.kms_vblank_synthetic = 0;
         fb_state.stats.kms_vblank_display_correlated = 1;
         fb_state.stats.kms_vblank_source_synthetic = 0;
         fb_state.stats.kms_vblank_source_software_display = 1;
         fb_state.stats.kms_vblank_source_nouveau_hw = 0;
-        if (sequence_out != NULL)
-            *sequence_out = display_seq;
-        if (timestamp_ns_out != NULL)
-            *timestamp_ns_out = fb_state.stats.kms_vblank_timestamp_ns;
-        return;
     }
-
-    if (seq == 0)
-        seq = 1;
-    if (last == 0)
-        last = now;
-    if (now > last) {
-        uint64 elapsed = now - last;
-        uint64 steps = elapsed / FB_GPU_SYNTHETIC_VBLANK_PERIOD_TICKS;
-
-        if (steps != 0) {
-            seq += steps;
-            last += steps * FB_GPU_SYNTHETIC_VBLANK_PERIOD_TICKS;
-        }
-    }
-    if (min_sequence != 0 && seq < min_sequence) {
-        seq = min_sequence;
-        last = now;
-    }
-
-    fb_state.stats.kms_vblank_sequence = seq;
-    fb_state.stats.kms_vblank_last_tick = last;
-    fb_state.stats.kms_vblank_timestamp_ns = last * 100ULL;
     fb_state.stats.kms_vblank_samples++;
-    fb_state.stats.kms_vblank_synthetic = 1;
-    fb_state.stats.kms_vblank_display_correlated = 0;
-    fb_state.stats.kms_vblank_source_synthetic = 1;
-    fb_state.stats.kms_vblank_source_software_display = 0;
-    fb_state.stats.kms_vblank_source_nouveau_hw = 0;
     if (sequence_out != NULL)
         *sequence_out = seq;
     if (timestamp_ns_out != NULL)
-        *timestamp_ns_out = fb_state.stats.kms_vblank_timestamp_ns;
+        *timestamp_ns_out = timestamp_ns;
 }
 
 static int gpu_drm_crtc_get_sequence(uint64 arg)
@@ -1055,10 +1045,14 @@ static int gpu_drm_crtc_get_sequence(uint64 arg)
     return 0;
 }
 
-static int gpu_drm_crtc_queue_sequence(uint64 arg)
+static int gpu_drm_crtc_queue_sequence(struct fb_gpu_render_owner *owner,
+                                       uint64 arg)
 {
     struct drm_crtc_queue_sequence_compat req;
-    int ret = -EOPNOTSUPP;
+    uint64 current_sequence;
+    uint64 target_sequence;
+    uint64 timestamp_ns;
+    int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
@@ -1067,13 +1061,39 @@ static int gpu_drm_crtc_queue_sequence(uint64 arg)
     spin_lock(&fb_state.lock);
     if ((req.flags & ~DRM_CRTC_SEQUENCE_FLAGS) != 0) {
         fb_state.stats.kms_crtc_queue_sequence_bad_flags++;
-        ret = -EINVAL;
-    } else {
-        fb_state.stats.kms_crtc_queue_sequence_rejects++;
+        spin_unlock(&fb_state.lock);
+        return -EINVAL;
     }
-    fb_state.stats.kms_crtc_queue_sequence_noevent_rejects++;
+    gpu_kms_sample_vblank_locked(0, &current_sequence, &timestamp_ns);
     spin_unlock(&fb_state.lock);
-    return ret;
+
+    target_sequence = req.sequence;
+    if ((req.flags & DRM_CRTC_SEQUENCE_RELATIVE) != 0)
+        target_sequence = current_sequence + req.sequence;
+    if (target_sequence <= current_sequence &&
+        (req.flags & DRM_CRTC_SEQUENCE_NEXT_ON_MISS) != 0)
+        target_sequence = current_sequence + 1;
+
+    ret = gpu_kms_wait_vblank_sequence(target_sequence, &current_sequence,
+                                       &timestamp_ns);
+    if (ret != 0) {
+        spin_lock(&fb_state.lock);
+        fb_state.stats.kms_crtc_queue_sequence_rejects++;
+        spin_unlock(&fb_state.lock);
+        return ret;
+    }
+
+    req.sequence = current_sequence;
+    spin_lock(&fb_state.lock);
+    ret = gpu_drm_event_queue_locked(owner, DRM_EVENT_VBLANK, req.user_data,
+                                     current_sequence, GPU_DRM_CRTC_ID,
+                                     timestamp_ns);
+    spin_unlock(&fb_state.lock);
+    if (ret != 0)
+        return ret;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
 }
 
 static int gpu_drm_mode_gamma(uint64 arg, int set)
