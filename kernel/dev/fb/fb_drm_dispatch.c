@@ -115,22 +115,32 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         return gpu_drm_gem_close(owner, arg);
     case DRM_IOCTL_GEM_FLINK: {
         struct drm_gem_flink_compat req;
-        struct fb_gpu_bo_entry *bo;
+        int ret;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
-        bo = fb_bo_get_owned(req.handle, owner->id, owner->tgid);
-        if (bo == NULL)
-            return -ENOENT;
-        fb_bo_put(bo);
-        return -EOPNOTSUPP;
+        ret = fb_gem_flink(req.handle, owner->id, owner->tgid, &req.name);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
     }
     case DRM_IOCTL_GEM_OPEN: {
         struct drm_gem_open_compat req;
+        int ret;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         if (req.name == 0)
             return -EINVAL;
-        return -EOPNOTSUPP;
+        ret = fb_gem_open_name(owner->id, owner->tgid, req.name,
+                               &req.handle, &req.size);
+        if (ret != 0)
+            return ret;
+        if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
+            (void)fb_bo_destroy_owned(req.handle, owner->id, owner->tgid);
+            return -EFAULT;
+        }
+        return 0;
     }
     case DRM_IOCTL_PRIME_HANDLE_TO_FD:
         return gpu_drm_prime_handle_to_fd(owner, arg);

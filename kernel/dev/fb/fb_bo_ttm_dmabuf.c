@@ -1507,6 +1507,89 @@ static int fb_bo_register_gem(uint64 owner_id, pid_t owner_tgid,
     return 0;
 }
 
+static int fb_gem_name_in_use_locked(uint32 name)
+{
+    if (name == 0)
+        return 1;
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        struct fb_gpu_gem_object *gem = &fb_state.gems[i];
+        if (gem->in_use && !gem->dead && gem->flink_name == name)
+            return 1;
+    }
+    return 0;
+}
+
+static int fb_gem_flink(uint32 handle, uint64 owner_id, pid_t owner_tgid,
+                        uint32 *name_out)
+{
+    struct fb_gpu_bo_entry *bo;
+    int ret = 0;
+
+    if (handle == 0 || name_out == NULL)
+        return -EINVAL;
+    bo = fb_bo_get_owned(handle, owner_id, owner_tgid);
+    if (bo == NULL)
+        return -ENOENT;
+
+    spin_lock(&fb_state.lock);
+    if (bo->gem == NULL || !bo->gem->in_use || bo->gem->dead) {
+        ret = -ENOENT;
+    } else if (bo->gem->flink_name == 0) {
+        uint32 name = 0;
+        for (int attempt = 0; attempt < FB_GPU_MAX_BOS + 1; attempt++) {
+            name = fb_state.next_flink_name++;
+            if (fb_state.next_flink_name == 0)
+                fb_state.next_flink_name = 1;
+            if (!fb_gem_name_in_use_locked(name))
+                break;
+            name = 0;
+        }
+        if (name == 0)
+            ret = -ENOSPC;
+        else
+            bo->gem->flink_name = name;
+    }
+    if (ret == 0)
+        *name_out = bo->gem->flink_name;
+    spin_unlock(&fb_state.lock);
+
+    fb_bo_put(bo);
+    return ret;
+}
+
+static int fb_gem_open_name(uint64 owner_id, pid_t owner_tgid, uint32 name,
+                            uint32 *handle_out, uint64 *size_out)
+{
+    struct fb_gpu_gem_object *gem = NULL;
+    uint64 size = 0;
+    int ret;
+
+    if (name == 0 || handle_out == NULL || size_out == NULL)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        struct fb_gpu_gem_object *candidate = &fb_state.gems[i];
+        if (candidate->in_use && !candidate->dead &&
+            candidate->flink_name == name) {
+            gem = candidate;
+            fb_gem_get_locked(gem);
+            size = gem->size;
+            break;
+        }
+    }
+    spin_unlock(&fb_state.lock);
+    if (gem == NULL)
+        return -ENOENT;
+
+    ret = fb_bo_register_gem(owner_id, owner_tgid, gem, handle_out);
+    fb_gem_put(gem);
+    if (ret != 0)
+        return ret;
+    *size_out = size;
+    return 0;
+}
+
 static void fb_dmabuf_snapshot_locked(struct fb_gpu_dmabuf_object *dmabuf)
 {
     struct fb_gpu_gem_object *gem;

@@ -137,6 +137,7 @@ struct fb_gpu_gem_object {
     int in_use;
     int dead;
     uint32 id;
+    uint32 flink_name;
     uint32 refs;
     uint32 width;
     uint32 height;
@@ -409,6 +410,7 @@ static struct {
     struct fb_gpu_stats stats;
     uint32      next_bo_handle;
     uint32      next_gem_id;
+    uint32      next_flink_name;
     uint32      next_kms_fb_id;
     uint32      next_syncobj_handle;
     uint32      next_dxg_present_source;
@@ -433,6 +435,7 @@ static struct {
 } fb_state = {
     .next_bo_handle = 1,
     .next_gem_id = 1,
+    .next_flink_name = 1,
     .next_kms_fb_id = 100,
     .next_syncobj_handle = 1,
     .next_dxg_present_source = 1,
