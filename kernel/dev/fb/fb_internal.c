@@ -5,6 +5,8 @@
 #define FB_GPU_MAX_SYNCOBJ_STATES 128
 #define FB_GPU_MAX_DXG_PRESENT_SOURCES 32
 #define FB_GPU_MAX_RENDER_OWNERS 64
+#define FB_GPU_MAX_USER_BLOBS 32
+#define FB_GPU_MAX_USER_BLOB_SIZE (16U * 1024U)
 #define FB_GPU_DRM_EVENT_QUEUE_CAPACITY DRM_XV6_EVENT_QUEUE_CAPACITY
 #define FB_GPU_SYNTHETIC_VBLANK_PERIOD_TICKS (10000000ULL / 60ULL)
 #define FB_GPU_DXG_MISSING_PRESENT_BIND "dxg-resource-scanout-bind"
@@ -242,6 +244,13 @@ struct fb_gpu_kms_fb_entry {
     uint64 modifier;
 };
 
+struct fb_gpu_user_blob {
+    int in_use;
+    uint32 id;
+    uint32 length;
+    void *data;
+};
+
 struct fb_gpu_syncobj_entry {
     int in_use;
     uint32 handle;
@@ -430,6 +439,7 @@ static struct {
     uint32      next_kms_fb_id;
     uint32      next_syncobj_handle;
     uint32      next_dxg_present_source;
+    uint32      next_user_blob_id;
     uint64      next_bo_fence;
     uint64      next_fence_context;
     uint64      next_render_owner_id;
@@ -440,6 +450,7 @@ static struct {
     struct fb_gpu_gem_object gems[FB_GPU_MAX_BOS];
     struct fb_ttm_resource_manager ttm_mgr[4];
     struct fb_gpu_kms_fb_entry kms_fbs[FB_GPU_MAX_KMS_FBS];
+    struct fb_gpu_user_blob user_blobs[FB_GPU_MAX_USER_BLOBS];
     struct fb_gpu_syncobj_entry syncobjs[FB_GPU_MAX_SYNCOBJS];
     struct fb_gpu_syncobj_state_entry syncobj_states[FB_GPU_MAX_SYNCOBJ_STATES];
     uint32      syncobj_waiters;
@@ -455,6 +466,7 @@ static struct {
     .next_kms_fb_id = 100,
     .next_syncobj_handle = 1,
     .next_dxg_present_source = 1,
+    .next_user_blob_id = 1000,
     .next_bo_fence = 1,
     .next_fence_context = 1,
     .next_render_owner_id = 1,

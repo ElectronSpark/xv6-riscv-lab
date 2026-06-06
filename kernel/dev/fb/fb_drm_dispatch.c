@@ -247,24 +247,14 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             return -EOPNOTSUPP;
         return gpu_drm_mode_cursor(arg, 1);
     case DRM_IOCTL_MODE_CREATEPROPBLOB: {
-        struct drm_mode_create_blob_compat req;
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
-        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-            return -EFAULT;
-        if (req.length != 0 && req.data == 0)
-            return -EINVAL;
-        return -EOPNOTSUPP;
+        return gpu_drm_mode_createblob(arg);
     }
     case DRM_IOCTL_MODE_DESTROYPROPBLOB: {
-        struct drm_mode_destroy_blob_compat req;
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
-        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-            return -EFAULT;
-        if (req.blob_id == 0 || req.blob_id == GPU_DRM_MODE_BLOB_ID)
-            return -EINVAL;
-        return -ENOENT;
+        return gpu_drm_mode_destroyblob(arg);
     }
     case DRM_IOCTL_MODE_CREATE_LEASE:
     case DRM_IOCTL_MODE_LIST_LESSEES:

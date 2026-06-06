@@ -1284,10 +1284,12 @@ static int gpu_drm_mode_getblob(uint64 arg)
     struct drm_mode_get_blob_compat req;
     struct drm_mode_modeinfo_compat mode;
     struct gpu_drm_in_formats_blob in_formats;
+    void *user_copy = NULL;
     const void *blob_data = NULL;
     uint32 blob_size = 0;
     uint32 capacity;
     uint32 n;
+    int found_user_blob = 0;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
@@ -1300,18 +1302,171 @@ static int gpu_drm_mode_getblob(uint64 arg)
         blob_data = &in_formats;
         blob_size = sizeof(in_formats);
     } else {
-        return -ENOENT;
+        spin_lock(&fb_state.lock);
+        for (int i = 0; i < FB_GPU_MAX_USER_BLOBS; i++) {
+            if (fb_state.user_blobs[i].in_use &&
+                fb_state.user_blobs[i].id == req.blob_id) {
+                blob_size = fb_state.user_blobs[i].length;
+                found_user_blob = 1;
+                break;
+            }
+        }
+        spin_unlock(&fb_state.lock);
+        if (!found_user_blob)
+            return -ENOENT;
+        if (req.data != 0 && req.length != 0) {
+            user_copy = kvmalloc(blob_size);
+            if (user_copy == NULL)
+                return -ENOMEM;
+            found_user_blob = 0;
+            spin_lock(&fb_state.lock);
+            for (int i = 0; i < FB_GPU_MAX_USER_BLOBS; i++) {
+                if (fb_state.user_blobs[i].in_use &&
+                    fb_state.user_blobs[i].id == req.blob_id) {
+                    if (fb_state.user_blobs[i].length == blob_size) {
+                        memmove(user_copy, fb_state.user_blobs[i].data,
+                                blob_size);
+                        found_user_blob = 1;
+                    }
+                    break;
+                }
+            }
+            spin_unlock(&fb_state.lock);
+            if (!found_user_blob) {
+                kvfree(user_copy);
+                return -ENOENT;
+            }
+            blob_data = user_copy;
+        }
     }
     capacity = req.length;
     req.length = blob_size;
     if (req.data != 0 && capacity != 0) {
         n = capacity < blob_size ? capacity : blob_size;
-        if (either_copyout(1, req.data, (void *)blob_data, n) < 0)
+        if (either_copyout(1, req.data, (void *)blob_data, n) < 0) {
+            if (user_copy != NULL)
+                kvfree(user_copy);
             return -EFAULT;
+        }
     }
+    if (user_copy != NULL)
+        kvfree(user_copy);
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;
+}
+
+static uint32 gpu_drm_alloc_user_blob_id_locked(void)
+{
+    uint32 start = fb_state.next_user_blob_id;
+    uint32 id = start;
+
+    if (start <= GPU_DRM_IN_FORMATS_BLOB_ID)
+        start = GPU_DRM_IN_FORMATS_BLOB_ID + 1;
+    id = start;
+    do {
+        int used = 0;
+
+        for (int i = 0; i < FB_GPU_MAX_USER_BLOBS; i++) {
+            if (fb_state.user_blobs[i].in_use &&
+                fb_state.user_blobs[i].id == id) {
+                used = 1;
+                break;
+            }
+        }
+        if (!used) {
+            fb_state.next_user_blob_id = id + 1;
+            if (fb_state.next_user_blob_id <= GPU_DRM_IN_FORMATS_BLOB_ID)
+                fb_state.next_user_blob_id = GPU_DRM_IN_FORMATS_BLOB_ID + 1;
+            return id;
+        }
+        id++;
+        if (id <= GPU_DRM_IN_FORMATS_BLOB_ID)
+            id = GPU_DRM_IN_FORMATS_BLOB_ID + 1;
+    } while (id != start);
+    return 0;
+}
+
+static int gpu_drm_mode_createblob(uint64 arg)
+{
+    struct drm_mode_create_blob_compat req;
+    void *data = NULL;
+    uint32 id;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.length > FB_GPU_MAX_USER_BLOB_SIZE)
+        return -E2BIG;
+    if (req.length != 0 && req.data == 0)
+        return -EINVAL;
+    if (req.length != 0) {
+        data = kvmalloc(req.length);
+        if (data == NULL)
+            return -ENOMEM;
+        if (either_copyin(data, 1, req.data, req.length) < 0) {
+            kvfree(data);
+            return -EFAULT;
+        }
+    }
+
+    spin_lock(&fb_state.lock);
+    for (int i = 0; i < FB_GPU_MAX_USER_BLOBS; i++) {
+        if (!fb_state.user_blobs[i].in_use) {
+            id = gpu_drm_alloc_user_blob_id_locked();
+            if (id == 0) {
+                spin_unlock(&fb_state.lock);
+                kvfree(data);
+                return -ENOSPC;
+            }
+            fb_state.user_blobs[i].in_use = 1;
+            fb_state.user_blobs[i].id = id;
+            fb_state.user_blobs[i].length = req.length;
+            fb_state.user_blobs[i].data = data;
+            req.blob_id = id;
+            spin_unlock(&fb_state.lock);
+            if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
+                spin_lock(&fb_state.lock);
+                if (fb_state.user_blobs[i].in_use &&
+                    fb_state.user_blobs[i].id == id)
+                    memset(&fb_state.user_blobs[i], 0,
+                           sizeof(fb_state.user_blobs[i]));
+                spin_unlock(&fb_state.lock);
+                kvfree(data);
+                return -EFAULT;
+            }
+            return 0;
+        }
+    }
+    spin_unlock(&fb_state.lock);
+    kvfree(data);
+    return -ENOSPC;
+}
+
+static int gpu_drm_mode_destroyblob(uint64 arg)
+{
+    struct drm_mode_destroy_blob_compat req;
+    void *data = NULL;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    if (req.blob_id == 0 || req.blob_id == GPU_DRM_MODE_BLOB_ID ||
+        req.blob_id == GPU_DRM_IN_FORMATS_BLOB_ID)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    for (int i = 0; i < FB_GPU_MAX_USER_BLOBS; i++) {
+        if (fb_state.user_blobs[i].in_use &&
+            fb_state.user_blobs[i].id == req.blob_id) {
+            data = fb_state.user_blobs[i].data;
+            memset(&fb_state.user_blobs[i], 0,
+                   sizeof(fb_state.user_blobs[i]));
+            spin_unlock(&fb_state.lock);
+            kvfree(data);
+            return 0;
+        }
+    }
+    spin_unlock(&fb_state.lock);
+    return -ENOENT;
 }
 
 static int gpu_drm_mode_getplaneresources(uint64 arg)
