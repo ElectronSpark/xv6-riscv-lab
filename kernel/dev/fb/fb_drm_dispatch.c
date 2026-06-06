@@ -595,11 +595,34 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         return gpu_drm_virtgpu_transfer(owner, arg, 0);
     case DRM_IOCTL_VIRTGPU_WAIT: {
         struct drm_virtgpu_3d_wait_compat req;
+        uint32 resource_id = 0;
+        uint64 wait_for = 0;
         uint64 signaled = 0;
+        int ret;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
-        return virtio_gpu_user_fence(0, !(req.flags & VIRTGPU_WAIT_NOWAIT),
-                                     &signaled);
+        if ((req.flags & ~VIRTGPU_WAIT_NOWAIT) != 0)
+            return -EINVAL;
+        ret = gpu_drm_execbuffer_resource_id_for_handle(owner, req.handle,
+                                                        &resource_id);
+        if (ret != 0)
+            return ret;
+        ret = virtio_gpu_user_resource_last_submit_fence(owner->id,
+                                                        owner->tgid,
+                                                        resource_id,
+                                                        &wait_for);
+        if (ret != 0)
+            return ret;
+        if (wait_for == 0)
+            return 0;
+        ret = virtio_gpu_user_fence(wait_for,
+                                    !(req.flags & VIRTGPU_WAIT_NOWAIT),
+                                    &signaled);
+        if (ret != 0)
+            return ret;
+        if (signaled < wait_for)
+            return (req.flags & VIRTGPU_WAIT_NOWAIT) ? -EBUSY : -EAGAIN;
+        return 0;
     }
     case DRM_IOCTL_VIRTGPU_GET_CAPS: {
         struct drm_virtgpu_get_caps_compat req;
