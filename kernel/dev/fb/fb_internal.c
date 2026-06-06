@@ -235,6 +235,7 @@ struct fb_gpu_syncobj_state_entry {
     uint32 refs;
     int signaled;
     uint64 timeline_value;
+    uint64 signaled_point;
     int fence_valid;
     struct dma_fence fence;
     uint32 waiters;
