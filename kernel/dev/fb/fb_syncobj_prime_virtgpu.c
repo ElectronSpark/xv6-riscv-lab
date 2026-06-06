@@ -1275,6 +1275,7 @@ static int gpu_drm_prime_handle_to_fd(struct fb_gpu_render_owner *owner,
     struct drm_prime_handle_compat req;
     struct fb_gpu_bo_entry *bo;
     struct fb_gpu_dmabuf_object *dmabuf;
+    struct dma_buf *dbuf;
     int fd;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
@@ -1286,9 +1287,10 @@ static int gpu_drm_prime_handle_to_fd(struct fb_gpu_render_owner *owner,
     fb_bo_put(bo);
     if (dmabuf == NULL)
         return -ENOENT;
-    fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dmabuf, 0);
+    dbuf = dmabuf->dbuf;
+    fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dbuf, 0);
     if (fd < 0) {
-        fb_dmabuf_put(dmabuf);
+        fb_dmabuf_put(dbuf);
         return fd;
     }
     req.fd = fd;
@@ -1307,6 +1309,8 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
     struct vfs_file *file;
     struct fb_gpu_bo_entry *bo;
     struct fb_gpu_dmabuf_object *dmabuf;
+    struct fb_gpu_gem_object *gem = NULL;
+    struct dma_buf *dbuf;
     uint32 handle;
     int ret;
 
@@ -1321,13 +1325,20 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
         fb_dmabuf_note_bad_fd_reject();
         return -EBADF;
     }
-    if (file->ops != &fb_dmabuf_file_ops || file->private_data == NULL) {
+    dbuf = fb_dma_buf_from_file(file);
+    if (dbuf == NULL) {
         fb_dmabuf_note_foreign_fd_reject();
         vfs_fput(file);
         return -EINVAL;
     }
-    dmabuf = (struct fb_gpu_dmabuf_object *)file->private_data;
-    ret = fb_bo_register_gem(owner->id, owner->tgid, dmabuf->gem, &handle);
+    dmabuf = fb_dmabuf_from_dma_buf(dbuf);
+    ret = fb_dma_buf_get_gem(dbuf, &gem);
+    if (ret != 0) {
+        vfs_fput(file);
+        return ret;
+    }
+    ret = fb_bo_register_gem(owner->id, owner->tgid, gem, &handle);
+    fb_gem_put(gem);
     if (ret != 0) {
         vfs_fput(file);
         return ret;

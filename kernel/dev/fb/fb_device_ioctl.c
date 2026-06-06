@@ -795,15 +795,16 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
             return ret;
         }
 
-        struct fb_gpu_bo_entry *bo = fb_bo_get(handle);
+        struct fb_gpu_bo_entry *bo =
+            fb_bo_get_owned(handle, owner_id, owner_tgid);
         if (bo == NULL) {
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             return -ENOENT;
         }
         ret = fb_bo_map_current(bo, &addr);
         fb_bo_put(bo);
         if (ret != 0) {
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             return ret;
         }
 
@@ -816,7 +817,7 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
         spin_unlock(&fb_state.lock);
 
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             (void)vm_munmap(current->vm, addr, (size_t)req.size);
             return -EFAULT;
         }
@@ -1153,6 +1154,7 @@ bo_copy_out:
     case FB_GPU_BO_EXPORT_FD: {
         struct fb_gpu_bo_export_fd req;
         struct fb_gpu_bo_entry *bo;
+        struct dma_buf *dbuf;
         int fd;
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
@@ -1174,9 +1176,47 @@ bo_copy_out:
         fb_bo_put(bo);
         if (dmabuf == NULL)
             return -ENOENT;
-        fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dmabuf, 0);
+        dbuf = dmabuf->dbuf;
+        fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dbuf, 0);
         if (fd < 0) {
-            fb_dmabuf_put(dmabuf);
+            fb_dmabuf_put(dbuf);
+            return fd;
+        }
+
+        req.fd = fd;
+        req.reserved = 0;
+        fb_dmabuf_note_export(dmabuf);
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            fb_gpu_close_exported_fd(fd);
+            return -EFAULT;
+        }
+        return 0;
+    }
+
+    case FB_GPU_TEST_DMABUF_EXPORT_FD: {
+        struct fb_gpu_bo_export_fd req;
+        struct fb_gpu_bo_entry *bo;
+        struct fb_gpu_dmabuf_object *dmabuf;
+        struct dma_buf *dbuf;
+        int fd;
+
+        if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if (req.flags != 0 || req.handle == 0)
+            return -EINVAL;
+
+        bo = fb_bo_get_owned(req.handle, owner_id, owner_tgid);
+        if (bo == NULL)
+            return -ENOENT;
+
+        dmabuf = fb_test_dmabuf_create_from_bo(bo, FB_GPU_DMABUF_TAG_FB_BO);
+        fb_bo_put(bo);
+        if (dmabuf == NULL)
+            return -ENOENT;
+        dbuf = dmabuf->dbuf;
+        fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dbuf, 0);
+        if (fd < 0) {
+            fb_dmabuf_put(dbuf);
             return fd;
         }
 
@@ -1195,6 +1235,8 @@ bo_copy_out:
         struct vfs_file *file;
         struct fb_gpu_bo_entry *bo;
         struct fb_gpu_dmabuf_object *dmabuf;
+        struct fb_gpu_gem_object *gem = NULL;
+        struct dma_buf *dbuf;
         uint32 handle;
         uint64 addr;
         int ret;
@@ -1213,22 +1255,29 @@ bo_copy_out:
             fb_dmabuf_note_bad_fd_reject();
             return -EBADF;
         }
-        if (file->ops != &fb_dmabuf_file_ops || file->private_data == NULL) {
+        dbuf = fb_dma_buf_from_file(file);
+        if (dbuf == NULL) {
             fb_dmabuf_note_foreign_fd_reject();
             vfs_fput(file);
             return -EINVAL;
         }
-        dmabuf = (struct fb_gpu_dmabuf_object *)file->private_data;
+        dmabuf = fb_dmabuf_from_dma_buf(dbuf);
 
-        ret = fb_bo_register_gem(owner_id, owner_tgid, dmabuf->gem, &handle);
+        ret = fb_dma_buf_get_gem(dbuf, &gem);
+        if (ret != 0) {
+            vfs_fput(file);
+            return ret;
+        }
+        ret = fb_bo_register_gem(owner_id, owner_tgid, gem, &handle);
+        fb_gem_put(gem);
         if (ret != 0) {
             vfs_fput(file);
             return ret;
         }
 
-        bo = fb_bo_get(handle);
+        bo = fb_bo_get_owned(handle, owner_id, owner_tgid);
         if (bo == NULL) {
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             vfs_fput(file);
             return -ENOENT;
         }
@@ -1240,7 +1289,7 @@ bo_copy_out:
         spin_unlock(&fb_state.lock);
         if (ret != 0) {
             fb_bo_put(bo);
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             vfs_fput(file);
             return ret;
         }
@@ -1250,7 +1299,7 @@ bo_copy_out:
         ret = fb_bo_map_current(bo, &addr);
         if (ret != 0) {
             fb_bo_put(bo);
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             vfs_fput(file);
             return ret;
         }
@@ -1296,7 +1345,7 @@ bo_copy_out:
 
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
             (void)vm_munmap(current->vm, addr, (size_t)req.size);
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             return -EFAULT;
         }
 
@@ -2024,6 +2073,7 @@ bo_copy_out:
         struct fb_gpu_virgl_resource_export_fd req;
         struct fb_gpu_bo_entry *bo;
         struct fb_gpu_dmabuf_object *dmabuf;
+        struct dma_buf *dbuf;
         page_t **pages = NULL;
         uint32 width = 0;
         uint32 height = 0;
@@ -2070,9 +2120,10 @@ bo_copy_out:
             (void)fb_bo_destroy(handle);
             return -ENOENT;
         }
-        fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dmabuf, 0);
+        dbuf = dmabuf->dbuf;
+        fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dbuf, 0);
         if (fd < 0) {
-            fb_dmabuf_put(dmabuf);
+            fb_dmabuf_put(dbuf);
             (void)fb_bo_destroy(handle);
             return fd;
         }
@@ -2259,6 +2310,7 @@ static int gpu_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
     case FB_GPU_BO_DESTROY:
     case FB_GPU_BO_IMPORT:
     case FB_GPU_BO_EXPORT_FD:
+    case FB_GPU_TEST_DMABUF_EXPORT_FD:
     case FB_GPU_BO_IMPORT_FD:
     case FB_GPU_BO_INFO:
     case FB_GPU_TTM_VALIDATE:

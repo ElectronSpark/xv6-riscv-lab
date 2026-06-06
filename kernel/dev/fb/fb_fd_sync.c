@@ -4,19 +4,19 @@ static int fb_dmabuf_fops_release(struct vfs_inode *inode,
                                   struct vfs_file *file)
 {
     (void)inode;
-    struct fb_gpu_dmabuf_object *dmabuf =
-        file ? (struct fb_gpu_dmabuf_object *)file->private_data : NULL;
+    struct dma_buf *dbuf =
+        file ? (struct dma_buf *)file->private_data : NULL;
 
     if (file != NULL)
         file->private_data = NULL;
-    fb_dmabuf_put(dmabuf);
+    fb_dmabuf_put(dbuf);
     return 0;
 }
 
 static int fb_dmabuf_fops_poll(struct vfs_file *file, short events)
 {
-    struct fb_gpu_dmabuf_object *dmabuf =
-        file ? (struct fb_gpu_dmabuf_object *)file->private_data : NULL;
+    struct dma_buf *dbuf = file ? (struct dma_buf *)file->private_data : NULL;
+    struct fb_gpu_dmabuf_object *dmabuf = fb_dmabuf_from_dma_buf(dbuf);
     struct fb_gpu_gem_object *gem;
     uint64 read_fence;
     uint64 write_fence;
@@ -90,8 +90,8 @@ static int fb_dmabuf_fops_poll(struct vfs_file *file, short events)
 
 static void fb_dmabuf_fops_last_fd_close(struct vfs_file *file)
 {
-    struct fb_gpu_dmabuf_object *dmabuf =
-        file ? (struct fb_gpu_dmabuf_object *)file->private_data : NULL;
+    struct dma_buf *dbuf = file ? (struct dma_buf *)file->private_data : NULL;
+    struct fb_gpu_dmabuf_object *dmabuf = fb_dmabuf_from_dma_buf(dbuf);
 
     spin_lock(&fb_state.lock);
     fb_dmabuf_live_close_locked(dmabuf);
@@ -100,8 +100,8 @@ static void fb_dmabuf_fops_last_fd_close(struct vfs_file *file)
 
 static void fb_dmabuf_fops_first_fd_open(struct vfs_file *file)
 {
-    struct fb_gpu_dmabuf_object *dmabuf =
-        file ? (struct fb_gpu_dmabuf_object *)file->private_data : NULL;
+    struct dma_buf *dbuf = file ? (struct dma_buf *)file->private_data : NULL;
+    struct fb_gpu_dmabuf_object *dmabuf = fb_dmabuf_from_dma_buf(dbuf);
 
     spin_lock(&fb_state.lock);
     fb_dmabuf_live_open_locked(dmabuf);

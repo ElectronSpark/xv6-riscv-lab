@@ -58,6 +58,7 @@
 #define FB_GPU_PAGE_FLIP     0x4637 /* bind full-screen virgl BO as scanout */
 #define FB_GPU_SET_CURSOR    0x4638 /* upload hardware cursor image + hotspot */
 #define FB_GPU_MOVE_CURSOR   0x4639 /* move/show/hide the hardware cursor */
+#define FB_GPU_TEST_DMABUF_EXPORT_FD 0x463A /* test-only generic dma-buf exporter */
 
 /* Hardware cursor plane (virtio-gpu cursor queue) ── */
 #define FB_GPU_CURSOR_MAX_DIM 64    /* virtio-gpu cursor resources are 64x64 */

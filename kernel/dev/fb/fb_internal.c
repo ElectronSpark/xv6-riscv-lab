@@ -183,8 +183,23 @@ struct fb_gpu_gem_object {
     page_t **pages;
 };
 
+struct dma_buf;
+
+struct dma_buf_ops {
+    int (*get_gem)(struct dma_buf *dbuf, struct fb_gpu_gem_object **gem_out);
+    void (*release)(struct dma_buf *dbuf);
+};
+
+struct dma_buf {
+    const struct dma_buf_ops *ops;
+    void *priv;
+    uint64 size;
+    struct dma_fence *resv_excl;
+};
+
 struct fb_gpu_dmabuf_object {
     struct fb_gpu_gem_object *gem;
+    struct dma_buf *dbuf;
     uint32 exporter_tag;
     uint32 importer_tag;
     uint32 attachment_count;

@@ -1590,6 +1590,21 @@ static int fb_gem_open_name(uint64 owner_id, pid_t owner_tgid, uint32 name,
     return 0;
 }
 
+static int fb_dmabuf_get_gem(struct dma_buf *dbuf,
+                             struct fb_gpu_gem_object **gem_out);
+static void fb_dmabuf_release(struct dma_buf *dbuf);
+static struct vfs_file_ops fb_dmabuf_file_ops;
+
+static const struct dma_buf_ops fb_dmabuf_ops = {
+    .get_gem = fb_dmabuf_get_gem,
+    .release = fb_dmabuf_release,
+};
+
+static const struct dma_buf_ops fb_test_dmabuf_ops = {
+    .get_gem = fb_dmabuf_get_gem,
+    .release = fb_dmabuf_release,
+};
+
 static void fb_dmabuf_snapshot_locked(struct fb_gpu_dmabuf_object *dmabuf)
 {
     struct fb_gpu_gem_object *gem;
@@ -1616,25 +1631,38 @@ static void fb_dmabuf_snapshot_locked(struct fb_gpu_dmabuf_object *dmabuf)
         dmabuf->ttm_resv_shared_count_snapshot;
 }
 
-static struct fb_gpu_dmabuf_object *
-fb_dmabuf_create_from_bo(struct fb_gpu_bo_entry *bo, uint32 exporter_tag)
+static struct fb_gpu_dmabuf_object *fb_dmabuf_create_from_bo_ops(
+    struct fb_gpu_bo_entry *bo, uint32 exporter_tag,
+    const struct dma_buf_ops *ops)
 {
     struct fb_gpu_dmabuf_object *dmabuf;
+    struct dma_buf *dbuf;
 
     dmabuf = kvmalloc(sizeof(*dmabuf));
     if (dmabuf == NULL)
         return NULL;
+    dbuf = kvmalloc(sizeof(*dbuf));
+    if (dbuf == NULL) {
+        kvfree(dmabuf);
+        return NULL;
+    }
     memset(dmabuf, 0, sizeof(*dmabuf));
+    memset(dbuf, 0, sizeof(*dbuf));
     dmabuf->exporter_tag = exporter_tag;
+    dmabuf->dbuf = dbuf;
+    dbuf->ops = ops != NULL ? ops : &fb_dmabuf_ops;
+    dbuf->priv = dmabuf;
 
     spin_lock(&fb_state.lock);
     if (bo == NULL || bo->gem == NULL || !bo->gem->in_use ||
         bo->gem->dead) {
         spin_unlock(&fb_state.lock);
+        kvfree(dbuf);
         kvfree(dmabuf);
         return NULL;
     }
     dmabuf->gem = bo->gem;
+    dbuf->size = bo->gem->size;
     fb_gem_get_locked(dmabuf->gem);
     fb_ttm_resv_record_shared_locked(
         bo, exporter_tag == FB_GPU_DMABUF_TAG_DRM_PRIME ?
@@ -1644,6 +1672,19 @@ fb_dmabuf_create_from_bo(struct fb_gpu_bo_entry *bo, uint32 exporter_tag)
     fb_dmabuf_snapshot_locked(dmabuf);
     spin_unlock(&fb_state.lock);
     return dmabuf;
+}
+
+static struct fb_gpu_dmabuf_object *
+fb_dmabuf_create_from_bo(struct fb_gpu_bo_entry *bo, uint32 exporter_tag)
+{
+    return fb_dmabuf_create_from_bo_ops(bo, exporter_tag, &fb_dmabuf_ops);
+}
+
+static struct fb_gpu_dmabuf_object *
+fb_test_dmabuf_create_from_bo(struct fb_gpu_bo_entry *bo, uint32 exporter_tag)
+{
+    return fb_dmabuf_create_from_bo_ops(bo, exporter_tag,
+                                        &fb_test_dmabuf_ops);
 }
 
 static void fb_dmabuf_note_export(struct fb_gpu_dmabuf_object *dmabuf)
@@ -1740,10 +1781,67 @@ static void fb_dmabuf_note_foreign_fd_reject(void)
     spin_unlock(&fb_state.lock);
 }
 
-static void fb_dmabuf_put(struct fb_gpu_dmabuf_object *dmabuf)
+static int fb_dmabuf_get_gem(struct dma_buf *dbuf,
+                             struct fb_gpu_gem_object **gem_out)
+{
+    struct fb_gpu_dmabuf_object *dmabuf;
+
+    if (gem_out != NULL)
+        *gem_out = NULL;
+    if (dbuf == NULL || gem_out == NULL)
+        return -EINVAL;
+    dmabuf = (struct fb_gpu_dmabuf_object *)dbuf->priv;
+    if (dmabuf == NULL || dmabuf->gem == NULL)
+        return -ENOENT;
+
+    spin_lock(&fb_state.lock);
+    if (!dmabuf->gem->in_use || dmabuf->gem->dead) {
+        spin_unlock(&fb_state.lock);
+        return -ENOENT;
+    }
+    fb_gem_get_locked(dmabuf->gem);
+    *gem_out = dmabuf->gem;
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
+static struct fb_gpu_dmabuf_object *fb_dmabuf_from_dma_buf(struct dma_buf *dbuf)
+{
+    if (dbuf == NULL || dbuf->ops == NULL)
+        return NULL;
+    return (struct fb_gpu_dmabuf_object *)dbuf->priv;
+}
+
+static struct dma_buf *fb_dma_buf_from_file(struct vfs_file *file)
+{
+    if (file == NULL || file->ops != &fb_dmabuf_file_ops ||
+        file->private_data == NULL)
+        return NULL;
+    return (struct dma_buf *)file->private_data;
+}
+
+static int fb_dma_buf_get_gem(struct dma_buf *dbuf,
+                              struct fb_gpu_gem_object **gem_out)
+{
+    if (dbuf == NULL || dbuf->ops == NULL || dbuf->ops->get_gem == NULL)
+        return -EINVAL;
+    return dbuf->ops->get_gem(dbuf, gem_out);
+}
+
+static void fb_dmabuf_put(struct dma_buf *dbuf)
+{
+    if (dbuf == NULL)
+        return;
+    if (dbuf->ops != NULL && dbuf->ops->release != NULL)
+        dbuf->ops->release(dbuf);
+}
+
+static void fb_dmabuf_release(struct dma_buf *dbuf)
 {
     struct fb_gpu_gem_object *gem;
+    struct fb_gpu_dmabuf_object *dmabuf;
 
+    dmabuf = fb_dmabuf_from_dma_buf(dbuf);
     if (dmabuf == NULL)
         return;
     gem = dmabuf->gem;
@@ -1754,5 +1852,6 @@ static void fb_dmabuf_put(struct fb_gpu_dmabuf_object *dmabuf)
     fb_state.stats.dmabuf_last_importer_tag = dmabuf->importer_tag;
     spin_unlock(&fb_state.lock);
     fb_gem_put(gem);
+    kvfree(dbuf);
     kvfree(dmabuf);
 }

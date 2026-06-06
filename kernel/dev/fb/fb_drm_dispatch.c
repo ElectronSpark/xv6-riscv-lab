@@ -904,6 +904,7 @@ static int gpu_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     case FB_GPU_BO_DESTROY:
     case FB_GPU_BO_IMPORT:
     case FB_GPU_BO_EXPORT_FD:
+    case FB_GPU_TEST_DMABUF_EXPORT_FD:
     case FB_GPU_BO_IMPORT_FD:
     case FB_GPU_BO_INFO:
     case FB_GPU_TTM_VALIDATE:
@@ -1049,6 +1050,7 @@ static int gpu_drm_private_render_ioctl_allowed(uint64 cmd)
     case FB_GPU_BO_COPY:
     case FB_GPU_BO_IMPORT:
     case FB_GPU_BO_EXPORT_FD:
+    case FB_GPU_TEST_DMABUF_EXPORT_FD:
     case FB_GPU_BO_IMPORT_FD:
     case FB_GPU_BO_INFO:
     case FB_GPU_BO_FENCE:

@@ -38,6 +38,7 @@ static const char *fb_gpu_ioctl_name(uint64 cmd)
     case FB_GPU_BO_DESTROY: return "FB_GPU_BO_DESTROY";
     case FB_GPU_BO_IMPORT: return "FB_GPU_BO_IMPORT";
     case FB_GPU_BO_EXPORT_FD: return "FB_GPU_BO_EXPORT_FD";
+    case FB_GPU_TEST_DMABUF_EXPORT_FD: return "FB_GPU_TEST_DMABUF_EXPORT_FD";
     case FB_GPU_BO_IMPORT_FD: return "FB_GPU_BO_IMPORT_FD";
     case FB_GPU_BO_INFO: return "FB_GPU_BO_INFO";
     case FB_GPU_TTM_VALIDATE: return "FB_GPU_TTM_VALIDATE";
