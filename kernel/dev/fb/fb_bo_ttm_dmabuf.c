@@ -11,6 +11,157 @@ static struct fb_gpu_bo_entry *fb_bo_lookup_locked(uint32 handle)
     return NULL;
 }
 
+static struct fb_gpu_render_owner *
+fb_gpu_render_owner_lookup_locked(uint64 owner_id, pid_t owner_tgid)
+{
+    if (owner_id == 0)
+        return NULL;
+    for (int i = 0; i < FB_GPU_MAX_RENDER_OWNERS; i++) {
+        struct fb_gpu_render_owner *owner = fb_state.render_owners[i];
+        if (owner == NULL)
+            continue;
+        if (owner->id == owner_id &&
+            (owner_tgid <= 0 || owner->tgid == owner_tgid))
+            return owner;
+    }
+    return NULL;
+}
+
+static int fb_gpu_render_owner_register(struct fb_gpu_render_owner *owner)
+{
+    if (owner == NULL || owner->id == 0)
+        return -EINVAL;
+    spin_lock(&fb_state.lock);
+    for (int i = 0; i < FB_GPU_MAX_RENDER_OWNERS; i++) {
+        if (fb_state.render_owners[i] == NULL) {
+            fb_state.render_owners[i] = owner;
+            spin_unlock(&fb_state.lock);
+            return 0;
+        }
+    }
+    spin_unlock(&fb_state.lock);
+    return -ENOSPC;
+}
+
+static void fb_gpu_render_owner_unregister(struct fb_gpu_render_owner *owner)
+{
+    if (owner == NULL)
+        return;
+    spin_lock(&fb_state.lock);
+    for (int i = 0; i < FB_GPU_MAX_RENDER_OWNERS; i++) {
+        if (fb_state.render_owners[i] == owner)
+            fb_state.render_owners[i] = NULL;
+    }
+    spin_unlock(&fb_state.lock);
+}
+
+static struct fb_gpu_bo_entry *
+fb_bo_owner_handle_lookup_locked(struct fb_gpu_render_owner *owner,
+                                 uint32 handle)
+{
+    if (owner == NULL || handle == 0)
+        return NULL;
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        if (owner->bo_handles[i].in_use &&
+            owner->bo_handles[i].handle == handle) {
+            struct fb_gpu_bo_entry *bo = owner->bo_handles[i].bo;
+            if (bo != NULL && bo->in_use && !bo->dead)
+                return bo;
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+static int fb_bo_owner_matches(const struct fb_gpu_bo_entry *bo,
+                               uint64 owner_id, pid_t owner_tgid);
+
+static struct fb_gpu_bo_entry *fb_bo_lookup_owned_locked(uint32 handle,
+                                                        uint64 owner_id,
+                                                        pid_t owner_tgid)
+{
+    struct fb_gpu_render_owner *owner =
+        fb_gpu_render_owner_lookup_locked(owner_id, owner_tgid);
+    struct fb_gpu_bo_entry *bo;
+
+    if (owner != NULL)
+        return fb_bo_owner_handle_lookup_locked(owner, handle);
+    bo = fb_bo_lookup_locked(handle);
+    if (bo != NULL && !fb_bo_owner_matches(bo, owner_id, owner_tgid))
+        bo = NULL;
+    return bo;
+}
+
+static uint32 fb_bo_owner_alloc_handle_locked(struct fb_gpu_render_owner *owner)
+{
+    uint32 start;
+    uint32 handle;
+
+    if (owner == NULL)
+        return 0;
+    if (owner->next_bo_handle == 0)
+        owner->next_bo_handle = 1;
+    start = owner->next_bo_handle;
+    handle = start;
+    do {
+        if (handle == 0)
+            handle = 1;
+        if (fb_bo_owner_handle_lookup_locked(owner, handle) == NULL) {
+            owner->next_bo_handle = handle + 1;
+            if (owner->next_bo_handle == 0)
+                owner->next_bo_handle = 1;
+            return handle;
+        }
+        handle++;
+        if (handle == 0)
+            handle = 1;
+    } while (handle != start);
+    return 0;
+}
+
+static int fb_bo_owner_add_handle_locked(struct fb_gpu_render_owner *owner,
+                                         struct fb_gpu_bo_entry *bo,
+                                         uint32 *handle)
+{
+    uint32 local_handle;
+
+    if (owner == NULL || bo == NULL || handle == NULL)
+        return -EINVAL;
+    local_handle = fb_bo_owner_alloc_handle_locked(owner);
+    if (local_handle == 0)
+        return -ENOSPC;
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        if (!owner->bo_handles[i].in_use) {
+            owner->bo_handles[i].in_use = 1;
+            owner->bo_handles[i].handle = local_handle;
+            owner->bo_handles[i].bo = bo;
+            *handle = local_handle;
+            return 0;
+        }
+    }
+    return -ENOSPC;
+}
+
+static int fb_bo_owner_remove_handle_locked(struct fb_gpu_render_owner *owner,
+                                            uint32 handle,
+                                            struct fb_gpu_bo_entry **bo_out)
+{
+    if (bo_out != NULL)
+        *bo_out = NULL;
+    if (owner == NULL || handle == 0)
+        return -ENOENT;
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        if (!owner->bo_handles[i].in_use ||
+            owner->bo_handles[i].handle != handle)
+            continue;
+        if (bo_out != NULL)
+            *bo_out = owner->bo_handles[i].bo;
+        memset(&owner->bo_handles[i], 0, sizeof(owner->bo_handles[i]));
+        return 0;
+    }
+    return -ENOENT;
+}
+
 static int fb_bo_owner_matches(const struct fb_gpu_bo_entry *bo,
                                uint64 owner_id, pid_t owner_tgid)
 {
@@ -1104,7 +1255,7 @@ static int fb_bo_set_ttm_placement(uint32 handle, uint64 owner_id,
     int ret;
 
     spin_lock(&fb_state.lock);
-    bo = fb_bo_lookup_locked(handle);
+    bo = fb_bo_lookup_owned_locked(handle, owner_id, owner_tgid);
     if (bo == NULL) {
         fb_state.stats.ttm_validate_failures++;
         spin_unlock(&fb_state.lock);
@@ -1128,7 +1279,7 @@ static int fb_bo_set_nouveau_metadata(uint32 handle, uint64 owner_id,
     struct fb_gpu_bo_entry *bo;
 
     spin_lock(&fb_state.lock);
-    bo = fb_bo_lookup_locked(handle);
+    bo = fb_bo_lookup_owned_locked(handle, owner_id, owner_tgid);
     if (bo == NULL) {
         spin_unlock(&fb_state.lock);
         return -ENOENT;
@@ -1171,9 +1322,7 @@ static struct fb_gpu_bo_entry *fb_bo_get_owned(uint32 handle, uint64 owner_id,
     struct fb_gpu_bo_entry *bo;
 
     spin_lock(&fb_state.lock);
-    bo = fb_bo_lookup_locked(handle);
-    if (bo != NULL && !fb_bo_owner_matches(bo, owner_id, owner_tgid))
-        bo = NULL;
+    bo = fb_bo_lookup_owned_locked(handle, owner_id, owner_tgid);
     if (bo != NULL)
         bo->refs++;
     spin_unlock(&fb_state.lock);
@@ -1192,7 +1341,7 @@ static void *fb_bo_page_for_owner(uint32 handle, uint64 owner_id,
     void *pa = NULL;
 
     spin_lock(&fb_state.lock);
-    bo = fb_bo_lookup_locked(handle);
+    bo = fb_bo_lookup_owned_locked(handle, owner_id, owner_tgid);
     if (bo != NULL && fb_bo_owner_matches(bo, owner_id, owner_tgid) &&
         page_index < bo->npages && bo->pages[page_index] != NULL) {
         pa = (void *)__page_to_pa(bo->pages[page_index]);
@@ -1233,6 +1382,7 @@ static int fb_bo_register(uint64 owner_id, pid_t owner_tgid,
                           uint32 *handle)
 {
     struct fb_gpu_gem_object *gem;
+    struct fb_gpu_render_owner *owner;
 
     spin_lock(&fb_state.lock);
     struct fb_gpu_bo_entry *bo = NULL;
@@ -1273,7 +1423,26 @@ static int fb_bo_register(uint64 owner_id, pid_t owner_tgid,
         fb_state.stats.bo_peak_handles = fb_state.stats.bo_handles;
     if (fb_state.stats.bo_live_bytes > fb_state.stats.bo_peak_bytes)
         fb_state.stats.bo_peak_bytes = fb_state.stats.bo_live_bytes;
-    *handle = next;
+    owner = fb_gpu_render_owner_lookup_locked(owner_id, owner_tgid);
+    if (owner != NULL) {
+        int ret = fb_bo_owner_add_handle_locked(owner, bo, handle);
+        if (ret != 0) {
+            bo->in_use = 0;
+            bo->dead = 1;
+            fb_state.stats.bo_handles--;
+            if (bo->stats_accounted &&
+                fb_state.stats.bo_live_bytes >= bo->size)
+                fb_state.stats.bo_live_bytes -= bo->size;
+            else if (bo->stats_accounted)
+                fb_state.stats.bo_live_bytes = 0;
+            fb_ttm_account_locked(bo->ttm_mem_type, bo->size, 0);
+            spin_unlock(&fb_state.lock);
+            fb_bo_put(bo);
+            return ret;
+        }
+    } else {
+        *handle = next;
+    }
     spin_unlock(&fb_state.lock);
     return 0;
 }
@@ -1283,6 +1452,7 @@ static int fb_bo_register_gem(uint64 owner_id, pid_t owner_tgid,
                               uint32 *handle)
 {
     struct fb_gpu_bo_entry *bo = NULL;
+    struct fb_gpu_render_owner *owner;
     uint32 next;
 
     if (gem == NULL || handle == NULL)
@@ -1319,7 +1489,20 @@ static int fb_bo_register_gem(uint64 owner_id, pid_t owner_tgid,
     fb_state.stats.bo_handles++;
     if (fb_state.stats.bo_handles > fb_state.stats.bo_peak_handles)
         fb_state.stats.bo_peak_handles = fb_state.stats.bo_handles;
-    *handle = next;
+    owner = fb_gpu_render_owner_lookup_locked(owner_id, owner_tgid);
+    if (owner != NULL) {
+        int ret = fb_bo_owner_add_handle_locked(owner, bo, handle);
+        if (ret != 0) {
+            bo->in_use = 0;
+            bo->dead = 1;
+            fb_state.stats.bo_handles--;
+            spin_unlock(&fb_state.lock);
+            fb_bo_put(bo);
+            return ret;
+        }
+    } else {
+        *handle = next;
+    }
     spin_unlock(&fb_state.lock);
     return 0;
 }

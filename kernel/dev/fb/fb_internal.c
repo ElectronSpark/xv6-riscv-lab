@@ -4,6 +4,7 @@
 #define FB_GPU_MAX_SYNCOBJS 128
 #define FB_GPU_MAX_SYNCOBJ_STATES 128
 #define FB_GPU_MAX_DXG_PRESENT_SOURCES 32
+#define FB_GPU_MAX_RENDER_OWNERS 64
 #define FB_GPU_DRM_EVENT_QUEUE_CAPACITY DRM_XV6_EVENT_QUEUE_CAPACITY
 #define FB_GPU_SYNTHETIC_VBLANK_PERIOD_TICKS (10000000ULL / 60ULL)
 #define FB_GPU_DXG_MISSING_PRESENT_BIND "dxg-resource-scanout-bind"
@@ -15,6 +16,8 @@
 #define FB_GPU_DXG_WSL_PROPAGATE_PRESENTHISTORYTOKEN_CMD 1U
 #define FB_GPU_D3D12_HEAP_ALIGN (64ULL * 1024ULL)
 #define FB_GPU_ALIGN_UP(x, a) ((((uint64)(x)) + ((uint64)(a) - 1)) & ~((uint64)(a) - 1))
+
+struct fb_gpu_render_owner;
 
 #define GPU_DRM_CRTC_ID                       1
 #define GPU_DRM_ENCODER_ID                    2
@@ -423,6 +426,7 @@ static struct {
     struct fb_gpu_syncobj_state_entry syncobj_states[FB_GPU_MAX_SYNCOBJ_STATES];
     uint32      syncobj_waiters;
     uint64      syncobj_wakeup_seq;
+    struct fb_gpu_render_owner *render_owners[FB_GPU_MAX_RENDER_OWNERS];
     uint32      current_kms_fb_id;
     struct fb_gpu_dxg_present_source_entry dxg_present_sources[FB_GPU_MAX_DXG_PRESENT_SOURCES];
     spinlock_t  lock;           /* serializes concurrent access */
@@ -966,6 +970,12 @@ struct fb_gpu_render_owner {
     uint64 id;
     pid_t tgid;
     struct drm_core_file drm;
+    uint32 next_bo_handle;
+    struct {
+        int in_use;
+        uint32 handle;
+        struct fb_gpu_bo_entry *bo;
+    } bo_handles[FB_GPU_MAX_BOS];
     uint32 default_ctx_id;
     uint32 capset_id;
     int nouveau_channel;

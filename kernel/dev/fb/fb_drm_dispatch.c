@@ -834,6 +834,7 @@ static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
         stale_syncobjs = gpu_syncobj_destroy_owner(owner);
         stale_gem_handles = fb_gpu_count_render_owner_bos(owner->id);
         fb_gpu_destroy_render_owner(owner->id);
+        fb_gpu_render_owner_unregister(owner);
         virtio_gpu_user_destroy_render_owner(owner->id);
         gpu_drm_lifecycle_live_close(owner);
         gpu_drm_lifecycle_close(node_type, stale_gem_handles, stale_kms_fbs,
@@ -1126,9 +1127,16 @@ static int gpu_open_file_common(cdev_t *cdev, struct vfs_file *file,
     memset(owner, 0, sizeof(*owner));
     owner->id = gpu_alloc_render_owner_id();
     owner->tgid = current ? current->tgid : 0;
+    owner->next_bo_handle = 1;
     drm_core_file_init(&fb_drm_device, &owner->drm,
                        gpu_drm_node_from_cdev(cdev),
                        owner->id, owner->tgid);
+    ret = fb_gpu_render_owner_register(owner);
+    if (ret != 0) {
+        kvfree(owner);
+        (void)gpu_release(cdev);
+        return ret;
+    }
     file->ops = ops;
     file->private_data = owner;
     gpu_drm_lifecycle_open(owner->drm.node_type);
