@@ -1,8 +1,8 @@
 }
 
-static int gpu_drm_mode_addfb2(struct fb_gpu_render_owner *owner, uint64 arg)
+static int gpu_drm_mode_addfb2_req(struct fb_gpu_render_owner *owner,
+                                   struct drm_mode_fb_cmd2_compat *req)
 {
-    struct drm_mode_fb_cmd2_compat req;
     struct fb_gpu_bo_entry *bo;
     uint64 min_size;
     uint32 fb_id = 0;
@@ -11,53 +11,55 @@ static int gpu_drm_mode_addfb2(struct fb_gpu_render_owner *owner, uint64 arg)
 
     if (!gpu_drm_is_primary_like(owner))
         return -EOPNOTSUPP;
-    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-        return -EFAULT;
-    if (req.width == 0 || req.height == 0 || req.handles[0] == 0 ||
-        req.pitches[0] == 0)
+    if (req == NULL)
         return -EINVAL;
-    if ((req.flags & ~(DRM_MODE_FB_MODIFIERS)) != 0)
+    if (req->width == 0 || req->height == 0 || req->handles[0] == 0 ||
+        req->pitches[0] == 0)
         return -EINVAL;
-    if (req.pixel_format != DRM_FORMAT_XRGB8888 &&
-        req.pixel_format != DRM_FORMAT_ARGB8888 &&
-        req.pixel_format != DRM_FORMAT_XBGR8888 &&
-        req.pixel_format != DRM_FORMAT_ABGR8888 &&
-        req.pixel_format != DRM_FORMAT_NV12)
+    if ((req->flags & ~(DRM_MODE_FB_MODIFIERS)) != 0)
         return -EINVAL;
-    if (req.pixel_format == DRM_FORMAT_NV12) {
+    if (req->pixel_format != DRM_FORMAT_XRGB8888 &&
+        req->pixel_format != DRM_FORMAT_ARGB8888 &&
+        req->pixel_format != DRM_FORMAT_XBGR8888 &&
+        req->pixel_format != DRM_FORMAT_ABGR8888 &&
+        req->pixel_format != DRM_FORMAT_NV12)
+        return -EINVAL;
+    if (req->pixel_format == DRM_FORMAT_NV12) {
         plane_count = 2;
-        if (req.pitches[0] < req.width ||
-            req.pitches[1] < req.width ||
-            req.offsets[1] == 0 ||
-            (req.handles[1] != 0 && req.handles[1] != req.handles[0]))
+        if (req->pitches[0] < req->width ||
+            req->pitches[1] < req->width ||
+            req->offsets[1] == 0 ||
+            (req->handles[1] != 0 &&
+             req->handles[1] != req->handles[0]))
             return -EINVAL;
-    } else if (req.pitches[0] < req.width * 4) {
+    } else if (req->pitches[0] < req->width * 4) {
         return -EINVAL;
     }
     for (uint32 i = plane_count; i < 4; i++) {
-        if (req.handles[i] != 0 || req.pitches[i] != 0 ||
-            req.offsets[i] != 0 || req.modifier[i] != 0)
+        if (req->handles[i] != 0 || req->pitches[i] != 0 ||
+            req->offsets[i] != 0 || req->modifier[i] != 0)
             return -EINVAL;
     }
-    if ((req.flags & DRM_MODE_FB_MODIFIERS) &&
-        req.modifier[0] != DRM_FORMAT_MOD_LINEAR)
+    if ((req->flags & DRM_MODE_FB_MODIFIERS) &&
+        req->modifier[0] != DRM_FORMAT_MOD_LINEAR)
         return -EINVAL;
     for (uint32 i = 1; i < plane_count; i++) {
-        if (req.modifier[i] != 0 &&
-            req.modifier[i] != req.modifier[0])
+        if (req->modifier[i] != 0 &&
+            req->modifier[i] != req->modifier[0])
             return -EINVAL;
     }
-    min_size = (uint64)req.pitches[0] * req.height + req.offsets[0];
-    if (req.pixel_format == DRM_FORMAT_NV12) {
-        uint64 uv_size = (uint64)req.pitches[1] * ((req.height + 1) / 2) +
-            req.offsets[1];
+    min_size = (uint64)req->pitches[0] * req->height + req->offsets[0];
+    if (req->pixel_format == DRM_FORMAT_NV12) {
+        uint64 uv_size =
+            (uint64)req->pitches[1] * ((req->height + 1) / 2) +
+            req->offsets[1];
         if (uv_size > min_size)
             min_size = uv_size;
     }
-    if (min_size < req.offsets[0])
+    if (min_size < req->offsets[0])
         return -EINVAL;
 
-    bo = fb_bo_get_owned(req.handles[0], owner->id, owner->tgid);
+    bo = fb_bo_get_owned(req->handles[0], owner->id, owner->tgid);
     if (bo == NULL)
         return -ENOENT;
     if (bo->size < min_size) {
@@ -82,31 +84,31 @@ static int gpu_drm_mode_addfb2(struct fb_gpu_render_owner *owner, uint64 arg)
         memset(fb, 0, sizeof(*fb));
         fb->in_use = 1;
         fb->fb_id = fb_id;
-        fb->bo_handle = req.handles[0];
+        fb->bo_handle = req->handles[0];
         for (uint32 p = 0; p < plane_count; p++) {
-            fb->bo_handles[p] = req.handles[p] != 0 ?
-                req.handles[p] : req.handles[0];
-            fb->pitches[p] = req.pitches[p];
-            fb->offsets[p] = req.offsets[p];
+            fb->bo_handles[p] = req->handles[p] != 0 ?
+                req->handles[p] : req->handles[0];
+            fb->pitches[p] = req->pitches[p];
+            fb->offsets[p] = req->offsets[p];
         }
         fb->owner_id = owner->id;
         fb->owner_tgid = owner->tgid;
-        fb->width = req.width;
-        fb->height = req.height;
-        fb->pitch = req.pitches[0];
+        fb->width = req->width;
+        fb->height = req->height;
+        fb->pitch = req->pitches[0];
         fb->plane_count = plane_count;
-        fb->pixel_format = req.pixel_format;
-        fb->modifier = (req.flags & DRM_MODE_FB_MODIFIERS) ?
-            req.modifier[0] : DRM_FORMAT_MOD_LINEAR;
+        fb->pixel_format = req->pixel_format;
+        fb->modifier = (req->flags & DRM_MODE_FB_MODIFIERS) ?
+            req->modifier[0] : DRM_FORMAT_MOD_LINEAR;
         if (bo->gem != NULL) {
-            bo->gem->metadata.format = req.pixel_format;
+            bo->gem->metadata.format = req->pixel_format;
             bo->gem->metadata.modifier =
-                (req.flags & DRM_MODE_FB_MODIFIERS) ?
-                    req.modifier[0] : DRM_FORMAT_MOD_LINEAR;
+                (req->flags & DRM_MODE_FB_MODIFIERS) ?
+                    req->modifier[0] : DRM_FORMAT_MOD_LINEAR;
             bo->gem->metadata.plane_count = plane_count;
             for (uint32 p = 0; p < plane_count; p++) {
-                bo->gem->metadata.offsets[p] = req.offsets[p];
-                bo->gem->metadata.strides[p] = req.pitches[p];
+                bo->gem->metadata.offsets[p] = req->offsets[p];
+                bo->gem->metadata.strides[p] = req->pitches[p];
             }
         }
         fb_state.stats.kms_framebuffers++;
@@ -119,10 +121,54 @@ static int gpu_drm_mode_addfb2(struct fb_gpu_render_owner *owner, uint64 arg)
     if (fb_id == 0)
         return -ENOSPC;
 
-    req.fb_id = fb_id;
-    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
-        ret = -EFAULT;
+    req->fb_id = fb_id;
     return ret;
+}
+
+static int gpu_drm_mode_addfb2(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_mode_fb_cmd2_compat req;
+    int ret;
+
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    ret = gpu_drm_mode_addfb2_req(owner, &req);
+    if (ret != 0)
+        return ret;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int gpu_drm_mode_addfb(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_mode_fb_cmd_compat legacy;
+    struct drm_mode_fb_cmd2_compat req;
+    int ret;
+
+    if (either_copyin(&legacy, 1, arg, sizeof(legacy)) < 0)
+        return -EFAULT;
+    if (legacy.bpp != 32)
+        return -EINVAL;
+    memset(&req, 0, sizeof(req));
+    req.width = legacy.width;
+    req.height = legacy.height;
+    req.handles[0] = legacy.handle;
+    req.pitches[0] = legacy.pitch;
+    if (legacy.depth == 24)
+        req.pixel_format = DRM_FORMAT_XRGB8888;
+    else if (legacy.depth == 32)
+        req.pixel_format = DRM_FORMAT_ARGB8888;
+    else
+        return -EINVAL;
+
+    ret = gpu_drm_mode_addfb2_req(owner, &req);
+    if (ret != 0)
+        return ret;
+    legacy.fb_id = req.fb_id;
+    if (either_copyout(1, arg, &legacy, sizeof(legacy)) < 0)
+        return -EFAULT;
+    return 0;
 }
 
 static int gpu_drm_mode_rmfb(struct fb_gpu_render_owner *owner, uint64 arg)

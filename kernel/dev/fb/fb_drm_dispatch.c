@@ -215,7 +215,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_MODE_GETFB:
         return gpu_drm_mode_getfb(owner, arg);
     case DRM_IOCTL_MODE_ADDFB:
-        return -EOPNOTSUPP;
+        return gpu_drm_mode_addfb(owner, arg);
     case DRM_IOCTL_MODE_GETPLANERESOURCES:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
