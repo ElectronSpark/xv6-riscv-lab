@@ -1,3 +1,19 @@
+static int gpu_drm_gem_close(struct fb_gpu_render_owner *owner, uint64 arg)
+{
+    struct drm_gem_close_compat req;
+    int ret;
+
+    if (owner == NULL)
+        return -EBADF;
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
+        return -EFAULT;
+    ret = fb_bo_destroy_owned(req.handle, owner->id, owner->tgid);
+    if (ret == -ENOENT)
+        ret = virtio_gpu_user_resource_destroy(owner->id, owner->tgid,
+                                               req.handle);
+    return ret;
+}
+
 static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                                 void *driver_file, uint64 cmd, uint64 arg)
 {
@@ -95,17 +111,8 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
         return gpu_drm_legacy_lock(arg);
-    case DRM_IOCTL_GEM_CLOSE: {
-        struct drm_gem_close_compat req;
-        int ret;
-        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-            return -EFAULT;
-        ret = fb_bo_destroy_owned(req.handle, owner->id, owner->tgid);
-        if (ret == -ENOENT)
-            ret = virtio_gpu_user_resource_destroy(owner->id, owner->tgid,
-                                                   req.handle);
-        return ret;
-    }
+    case DRM_IOCTL_GEM_CLOSE:
+        return gpu_drm_gem_close(owner, arg);
     case DRM_IOCTL_GEM_FLINK: {
         struct drm_gem_flink_compat req;
         struct fb_gpu_bo_entry *bo;
