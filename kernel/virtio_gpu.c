@@ -2318,41 +2318,6 @@ static int virtio_gpu_backing_order(uint64 bytes, uint32 *alloc_len)
     return order;
 }
 
-static void virtio_gpu_release_pages(page_t **pages, uint32 npages)
-{
-    if (pages == NULL)
-        return;
-    for (uint32 i = 0; i < npages; i++) {
-        if (pages[i] != NULL)
-            page_ref_dec((void *)__page_to_pa(pages[i]));
-    }
-    kvfree(pages);
-}
-
-static int virtio_gpu_alloc_pages(uint32 npages, page_t ***pages_out)
-{
-    page_t **pages;
-
-    if (npages == 0 || pages_out == NULL)
-        return -EINVAL;
-    pages = kvmalloc((size_t)npages * sizeof(*pages));
-    if (pages == NULL)
-        return -ENOMEM;
-    memset(pages, 0, (size_t)npages * sizeof(*pages));
-
-    for (uint32 i = 0; i < npages; i++) {
-        pages[i] = __page_alloc(0, PAGE_TYPE_ANON);
-        if (pages[i] == NULL) {
-            virtio_gpu_release_pages(pages, npages);
-            return -ENOMEM;
-        }
-        memset((void *)PA2VA(__page_to_pa(pages[i])), 0, PGSIZE);
-    }
-
-    *pages_out = pages;
-    return 0;
-}
-
 static int virtio_gpu_map_pages_current(page_t **pages, uint32 npages,
                                         uint64 size, uint64 *addr_out)
 {
@@ -2367,7 +2332,8 @@ static int virtio_gpu_map_pages_current(page_t **pages, uint32 npages,
         return -EINVAL;
 
     vm = current->vm;
-    flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER;
+    flags = PROT_READ | PROT_WRITE | VMA_FLAG_USER |
+            VMA_FLAG_DONTFORK | VMA_FLAG_DONTDUMP;
 
     vm_wlock(vm);
     addr = vm_find_free_range(vm, (size_t)size, 0);
@@ -2510,7 +2476,7 @@ static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
         return -EINVAL;
     npages = (uint32)PGROUNDUP(bytes) / PGSIZE;
 
-    if (virtio_gpu_alloc_pages(npages, &pages) != 0)
+    if (fb_shmem_alloc_pages(npages, &pages) != 0)
         return -ENOMEM;
 
     spin_lock(&g->lock);
@@ -2518,7 +2484,7 @@ static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
     if (res == NULL) {
         g->stats.failures++;
         spin_unlock(&g->lock);
-        virtio_gpu_release_pages(pages, npages);
+        fb_shmem_release_pages(pages, npages);
         return -ENOSPC;
     }
     uint32 id = g->next_resource_id++;
@@ -2541,7 +2507,7 @@ static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
     create->flags = req->flags;
     if (virtio_gpu_submit(g, create, sizeof(*create), NULL, 0, false, resp,
                           sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA) != 0) {
-        virtio_gpu_release_pages(pages, npages);
+        fb_shmem_release_pages(pages, npages);
         return -EIO;
     }
 
@@ -2624,14 +2590,14 @@ static int virtio_gpu_resource_create_blob(
         return -EINVAL;
 
     if (guest_backed) {
-        ret = virtio_gpu_alloc_pages(npages, &pages);
+        ret = fb_shmem_alloc_pages(npages, &pages);
         if (ret != 0)
             return ret;
 
         entries_len = npages * sizeof(*entries);
         entries = kvmalloc(entries_len);
         if (entries == NULL) {
-            virtio_gpu_release_pages(pages, npages);
+            fb_shmem_release_pages(pages, npages);
             return -ENOMEM;
         }
         memset(entries, 0, entries_len);
@@ -2652,7 +2618,7 @@ static int virtio_gpu_resource_create_blob(
         if (entries != NULL)
             kvfree(entries);
         if (pages != NULL)
-            virtio_gpu_release_pages(pages, npages);
+            fb_shmem_release_pages(pages, npages);
         return -ENOSPC;
     }
     id = g->next_resource_id++;
@@ -2681,7 +2647,7 @@ static int virtio_gpu_resource_create_blob(
         printf("virtio_gpu: resource blob create submit failed resource=%u ret=%d\n",
                id, ret);
         if (pages != NULL)
-            virtio_gpu_release_pages(pages, npages);
+            fb_shmem_release_pages(pages, npages);
         return -EIO;
     }
 
@@ -3344,7 +3310,7 @@ static int virtio_gpu_resource_unref(struct virtio_gpu *g,
     spin_unlock(&g->lock);
     if (backing != NULL)
         page_free(backing, backing_order);
-    virtio_gpu_release_pages(pages, npages);
+    fb_shmem_release_pages(pages, npages);
     return 0;
 }
 

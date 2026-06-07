@@ -784,14 +784,14 @@ static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
 
         req.size = FB_GPU_ALIGN_UP(size, FB_GPU_D3D12_HEAP_ALIGN);
         npages = req.size / PGSIZE;
-        ret = fb_bo_alloc_pages(npages, &pages);
+        ret = fb_shmem_alloc_pages(npages, &pages);
         if (ret != 0)
             return ret;
 
         ret = fb_bo_register(owner_id, owner_tgid, req.width, req.height,
                              req.pitch, req.size, pages, npages, &handle);
         if (ret != 0) {
-            fb_bo_release_pages(pages, npages);
+            fb_shmem_release_pages(pages, npages);
             return ret;
         }
 
@@ -2099,7 +2099,7 @@ bo_copy_out:
         ret = fb_bo_register(owner_id, owner_tgid, width, height, pitch, size,
                              pages, npages, &handle);
         if (ret != 0) {
-            fb_bo_release_pages(pages, npages);
+            fb_shmem_release_pages(pages, npages);
             return ret;
         }
         ret = fb_bo_set_virtio_resource(handle, owner_id, owner_tgid,

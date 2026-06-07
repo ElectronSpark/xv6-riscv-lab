@@ -1246,14 +1246,14 @@ static int gpu_drm_create_dumb(struct fb_gpu_render_owner *owner, uint64 arg)
     req.size = PGROUNDUP(size);
     npages = req.size / PGSIZE;
 
-    ret = fb_bo_alloc_pages(npages, &pages);
+    ret = fb_shmem_alloc_pages(npages, &pages);
     if (ret != 0)
         return ret;
 
     ret = fb_bo_register(owner->id, owner->tgid, req.width, req.height,
                          req.pitch, req.size, pages, npages, &handle);
     if (ret != 0) {
-        fb_bo_release_pages(pages, npages);
+        fb_shmem_release_pages(pages, npages);
         return ret;
     }
     req.handle = handle;
@@ -1301,7 +1301,7 @@ static int gpu_drm_prime_handle_to_fd(struct fb_gpu_render_owner *owner,
         ret = fb_bo_register(owner->id, owner->tgid, width, height, pitch,
                              size, pages, npages, &handle);
         if (ret != 0) {
-            fb_bo_release_pages(pages, npages);
+            fb_shmem_release_pages(pages, npages);
             virtio_gpu_user_resource_export_put(req.handle);
             return ret;
         }
@@ -1441,7 +1441,7 @@ static int gpu_drm_register_virtgpu_resource_bo(
     if (ret != 0) {
         printf("drm: virtgpu resource BO register failed resource=%u ret=%d\n",
                resource_id, ret);
-        fb_bo_release_pages(pages, npages);
+        fb_shmem_release_pages(pages, npages);
         virtio_gpu_user_resource_export_put(resource_id);
         return ret;
     }

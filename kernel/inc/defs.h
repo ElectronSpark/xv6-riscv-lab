@@ -542,6 +542,8 @@ void plic_enable_irq(int);
 
 // virtio_disk.c
 void virtio_disk_init(void);
+int fb_shmem_alloc_pages(uint32 npages, page_t ***pages_out);
+void fb_shmem_release_pages(page_t **pages, uint32 npages);
 void virtio_gpu_init(void);
 void virtio_input_init(void);
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);

@@ -174,17 +174,6 @@ static int fb_bo_owner_matches(const struct fb_gpu_bo_entry *bo,
     return 1;
 }
 
-static void fb_bo_release_pages(page_t **pages, uint32 npages)
-{
-    if (pages == NULL)
-        return;
-    for (uint32 i = 0; i < npages; i++) {
-        if (pages[i] != NULL)
-            page_ref_dec((void *)__page_to_pa(pages[i]));
-    }
-    kvfree(pages);
-}
-
 static void fb_gem_copy_to_bo_locked(struct fb_gpu_bo_entry *bo,
                                      struct fb_gpu_gem_object *gem)
 {
@@ -337,7 +326,7 @@ static void fb_gem_put(struct fb_gpu_gem_object *gem)
     spin_unlock(&fb_state.lock);
     if (virtio_resource_id != 0)
         virtio_gpu_user_resource_export_put(virtio_resource_id);
-    fb_bo_release_pages(pages, npages);
+    fb_shmem_release_pages(pages, npages);
 }
 
 static int fb_bo_apply_dmabuf_metadata_locked(
@@ -1350,30 +1339,6 @@ static void *fb_bo_page_for_owner(uint32 handle, uint64 owner_id,
     }
     spin_unlock(&fb_state.lock);
     return pa;
-}
-
-static int fb_bo_alloc_pages(uint32 npages, page_t ***pages_out)
-{
-    page_t **pages;
-
-    if (npages == 0 || pages_out == NULL)
-        return -EINVAL;
-    pages = kvmalloc((size_t)npages * sizeof(*pages));
-    if (pages == NULL)
-        return -ENOMEM;
-    memset(pages, 0, (size_t)npages * sizeof(*pages));
-
-    for (uint32 i = 0; i < npages; i++) {
-        pages[i] = __page_alloc(0, PAGE_TYPE_ANON);
-        if (pages[i] == NULL) {
-            fb_bo_release_pages(pages, npages);
-            return -ENOMEM;
-        }
-        memset((void *)PA2VA(__page_to_pa(pages[i])), 0, PGSIZE);
-    }
-
-    *pages_out = pages;
-    return 0;
 }
 
 static int fb_bo_register(uint64 owner_id, pid_t owner_tgid,

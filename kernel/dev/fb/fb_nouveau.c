@@ -1256,13 +1256,13 @@ static int gpu_nouveau_gem_new(struct fb_gpu_render_owner *owner, uint64 arg)
 
     size = FB_GPU_ALIGN_UP(req.info.size, PGSIZE);
     npages = size / PGSIZE;
-    ret = fb_bo_alloc_pages(npages, &pages);
+    ret = fb_shmem_alloc_pages(npages, &pages);
     if (ret != 0)
         return ret;
     ret = fb_bo_register(owner->id, owner->tgid, (uint32)(size / 4), 1,
                          (uint32)size, size, pages, npages, &handle);
     if (ret != 0) {
-        fb_bo_release_pages(pages, npages);
+        fb_shmem_release_pages(pages, npages);
         return ret;
     }
 
