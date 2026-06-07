@@ -50,7 +50,7 @@
 #define FB_GPU_DXG_PRESENT_SOURCE_REGISTER 0x462F /* declare opened DXG source */
 #define FB_GPU_DXG_PRESENT_SOURCE_COMMIT   0x4630 /* present registered DXG source */
 #define FB_GPU_DXG_PRESENT_SOURCE_QUERY    0x4631 /* query fail-closed DXG source */
-#define FB_GPU_TTM_VALIDATE  0x4632 /* test/validate TTM placement state */
+#define FB_GPU_TTM_VALIDATE  0x4632 /* compat: validate sysmem placement metadata */
 #define FB_GPU_DXG_PRESENT_BIND_CONTRACT_QUERY 0x4633 /* query future DXG display bind */
 #define FB_GPU_VIRGL_RESOURCE_ATTACH 0x4634 /* attach/import a virgl resource into a context */
 #define FB_GPU_SCANOUT_READ 0x4635 /* diagnostic readback of current scanout */
@@ -285,6 +285,10 @@
 #define FB_GPU_DMABUF_POLL_WAKE_PRESENT_SIGNAL    3u
 #define FB_GPU_DMABUF_POLL_WAKE_EXCLUSIVE_ACQUIRE 4u
 
+/*
+ * FB_GPU_TTM_* names are frozen private xv6 ABI compatibility labels.
+ * They expose sysmem/shmem placement metadata, not a Linux TTM allocator.
+ */
 #define FB_GPU_TTM_PL_SYSTEM 0x0001u
 #define FB_GPU_TTM_PL_TT     0x0002u
 #define FB_GPU_TTM_PL_VRAM   0x0004u

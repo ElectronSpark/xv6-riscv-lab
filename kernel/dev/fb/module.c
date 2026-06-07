@@ -11,7 +11,7 @@
 #include "dma_fence.c"
 #include "fb_internal.c"
 #include "fb_scanout.c"
-#include "fb_bo_ttm_dmabuf.c"
+#include "fb_bo_shmem_dmabuf.c"
 #include "fb_dxg_present.c"
 #include "fb_fd_sync.c"
 #include "fb_device_ioctl.c"

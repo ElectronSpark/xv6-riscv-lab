@@ -45,6 +45,10 @@ struct fb_gpu_render_owner;
 #define GPU_DRM_PROP_OUT_FENCE_PTR            24
 #define GPU_DRM_PROP_IN_FORMATS               25
 
+/*
+ * Private compatibility placement labels. The implementation is sysmem-backed
+ * shmem page arrays plus dma_resv-like metadata, not Linux TTM.
+ */
 #define FB_TTM_PL_SYSTEM                      0x0001
 #define FB_TTM_PL_TT                          0x0002
 #define FB_TTM_PL_VRAM                        0x0004

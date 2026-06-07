@@ -1,4 +1,13 @@
 
+/*
+ * GEM/BO, PRIME, and dma-buf support over xv6 shmem-style page arrays.
+ *
+ * Some private FB_GPU_TTM_* ioctl/status names remain for ABI compatibility
+ * with existing xv6 GPU probes. They describe placement metadata and
+ * dma_resv-like diagnostics only; backing storage is sysmem pages allocated
+ * through fb_shmem_alloc_pages(), not a Linux TTM memory manager.
+ */
+
 static struct fb_gpu_bo_entry *fb_bo_lookup_locked(uint32 handle)
 {
     if (handle == 0)
