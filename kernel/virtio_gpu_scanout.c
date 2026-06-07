@@ -667,6 +667,7 @@ void virtio_gpu_init(void)
 
     virtio_gpu_query_capsets(g);
     virtio_gpu_smoke_context(g);
+    virtio_gpu_smoke_host_visible_map(g);
     virtio_gpu_submit_display_info(g);
     virtio_gpu_get_edid_mode(g, NULL, NULL, NULL, 1);
     virtio_gpu_smoke_resource(g);

@@ -439,7 +439,8 @@ int virtio_gpu_user_resource_create_blob(uint64 owner_id, pid_t owner_tgid,
     }
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
-    ret = virtio_gpu_resource_create_blob(g, owner_id, owner_tgid, req, &res);
+    ret = virtio_gpu_resource_create_blob(g, owner_id, owner_tgid, req, &res,
+                                          0);
     if (ret != 0) {
         printf("virtio_gpu: user blob create failed ret=%d blob_mem=%u size=%lu\n",
                ret, req->blob_mem, req->size);
@@ -1224,6 +1225,7 @@ int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,
         ret = virtio_gpu_submit_internal(g, cmd, sizeof(*cmd), NULL, 0, false,
                                          resp, sizeof(*resp),
                                          VIRTIO_GPU_RESP_OK_NODATA,
+                                         0,
                                          transfer_perf ? &drain_ticks : NULL,
                                          transfer_perf ? &command_ticks : NULL,
                                          transfer_perf ? &drain_sample : NULL);

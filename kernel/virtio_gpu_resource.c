@@ -238,7 +238,7 @@ static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
 static int virtio_gpu_resource_create_blob(
     struct virtio_gpu *g, uint64 owner_id, pid_t owner_tgid,
     struct fb_gpu_virgl_blob_create *req,
-    struct virtio_gpu_resource **out)
+    struct virtio_gpu_resource **out, int allow_host_decline)
 {
     struct virtio_gpu_resource_create_blob *create =
         (struct virtio_gpu_resource_create_blob *)g->cmd_page;
@@ -335,14 +335,24 @@ static int virtio_gpu_resource_create_blob(
     printf("virtio_gpu: resource blob create resource=%u ctx=%u blob_mem=%u flags=0x%x blob_id=%lu size=%lu entries=%u\n",
            id, req->ctx_id, req->blob_mem, req->blob_flags, req->blob_id,
            bytes, npages);
-    ret = virtio_gpu_submit(g, create, sizeof(*create), entries, entries_len,
-                            false, resp, sizeof(*resp),
-                            VIRTIO_GPU_RESP_OK_NODATA);
+    if (allow_host_decline)
+        ret = virtio_gpu_submit_accepting_error(
+            g, create, sizeof(*create), entries, entries_len, false, resp,
+            sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA,
+            VIRTIO_GPU_RESP_ERR_UNSPEC);
+    else
+        ret = virtio_gpu_submit(g, create, sizeof(*create), entries,
+                                entries_len, false, resp, sizeof(*resp),
+                                VIRTIO_GPU_RESP_OK_NODATA);
     if (entries != NULL)
         kvfree(entries);
     if (ret != 0) {
-        printf("virtio_gpu: resource blob create submit failed resource=%u ret=%d\n",
-               id, ret);
+        if (ret > 0)
+            printf("virtio_gpu: resource blob create host rejected resource=%u response=0x%x\n",
+                   id, resp->type);
+        else
+            printf("virtio_gpu: resource blob create submit failed resource=%u ret=%d\n",
+                   id, ret);
         if (pages != NULL)
             fb_shmem_release_pages(pages, npages);
         return -EIO;

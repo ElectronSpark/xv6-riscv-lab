@@ -76,6 +76,7 @@
 #define VIRTIO_GPU_RESP_OK_CAPSET       0x1103
 #define VIRTIO_GPU_RESP_OK_EDID         0x1104
 #define VIRTIO_GPU_RESP_OK_MAP_INFO     0x1106
+#define VIRTIO_GPU_RESP_ERR_UNSPEC      0x1200
 
 #define VIRTIO_GPU_FLAG_FENCE  (1 << 0)
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
@@ -1032,6 +1033,7 @@ static int virtio_gpu_submit_internal(struct virtio_gpu *g, void *cmd,
                                       uint32 data_len, bool data_write,
                                       void *resp, uint32 resp_len,
                                       uint32 expected,
+                                      uint32 accepted_error,
                                       uint64 *drain_ticks_out,
                                       uint64 *command_ticks_out,
                                       struct virtio_gpu_async_drain_sample
@@ -1110,6 +1112,10 @@ static int virtio_gpu_submit_internal(struct virtio_gpu *g, void *cmd,
     spin_unlock_irqrestore(&q->lock, intena);
 
     if (resp_hdr->type != expected) {
+        if (accepted_error != 0 && resp_hdr->type == accepted_error) {
+            virtio_gpu_count_command(g, type);
+            return 1;
+        }
         virtio_gpu_count_failure(g);
         printf("virtio_gpu: command 0x%x response=0x%x expected=0x%x\n",
                type, resp_hdr->type, expected);
@@ -1244,7 +1250,20 @@ static int virtio_gpu_submit(struct virtio_gpu *g, void *cmd, uint32 cmd_len,
 {
     return virtio_gpu_submit_internal(g, cmd, cmd_len, data, data_len,
                                       data_write, resp, resp_len, expected,
-                                      NULL, NULL, NULL);
+                                      0, NULL, NULL, NULL);
+}
+
+static int virtio_gpu_submit_accepting_error(struct virtio_gpu *g, void *cmd,
+                                             uint32 cmd_len, void *data,
+                                             uint32 data_len,
+                                             bool data_write, void *resp,
+                                             uint32 resp_len,
+                                             uint32 expected,
+                                             uint32 accepted_error)
+{
+    return virtio_gpu_submit_internal(g, cmd, cmd_len, data, data_len,
+                                      data_write, resp, resp_len, expected,
+                                      accepted_error, NULL, NULL, NULL);
 }
 
 static struct virtio_gpu_resource *virtio_gpu_alloc_resource_slot(

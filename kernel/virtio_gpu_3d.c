@@ -242,3 +242,70 @@ out:
         virtio_gpu_destroy_context(g, ctx_id);
 }
 
+/*
+ * One-shot, init-time probe that actually exercises the host-visible blob
+ * map path against the host.  Without it the HOST_VISIBLE capability gate is
+ * circular: GETPARAM(HOST_VISIBLE) only reports true after a RESOURCE_MAP_BLOB
+ * succeeds, but nothing attempts that map until the capability is advertised.
+ * This sends exactly one RESOURCE_CREATE_BLOB and, if creation succeeds, one
+ * RESOURCE_MAP_BLOB so the host itself decides whether mappable host-visible
+ * blobs are supported.  The advertised capability reflects a real, verified
+ * mapping instead of a guess.
+ * It only runs when the host has negotiated a host-visible blob aperture, so
+ * backends without one keep failing closed with no extra traffic.
+ */
+static void virtio_gpu_smoke_host_visible_map(struct virtio_gpu *g)
+{
+    struct fb_gpu_virgl_blob_create req;
+    struct virtio_gpu_resource *res = NULL;
+    uint32 ctx_id = 2;
+    uint32 map_info = 0;
+    int created_ctx = 0;
+    int created_blob = 0;
+    int create_ret;
+    int map_ret = -EOPNOTSUPP;
+
+    if (!virtio_gpu_host_visible_operational(g) || g->host_visible_mapped_once)
+        return;
+
+    if (virtio_gpu_create_context(g, ctx_id, g->virgl_capset_id,
+                                  "xv6-hostvis-probe") != 0) {
+        printf("virtio_gpu: host-visible map probe: context create failed\n");
+        return;
+    }
+    created_ctx = 1;
+
+    memset(&req, 0, sizeof(req));
+    req.ctx_id = ctx_id;
+    req.blob_mem = VIRTIO_GPU_BLOB_MEM_HOST3D;
+    req.blob_flags = VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE;
+    req.blob_id = 1; /* host3d mappable blobs require a nonzero blob id */
+    req.size = PGSIZE;
+
+    create_ret = virtio_gpu_resource_create_blob(g, 0, 0, &req, &res, 1);
+    if (create_ret != 0 || res == NULL) {
+        printf("virtio_gpu: host-visible map probe: create=%d (host declined mappable host3d blob)\n",
+               create_ret);
+        goto out;
+    }
+    created_blob = 1;
+
+    /*
+     * map_blob sets g->host_visible_blob_ok on success, which is exactly what
+     * GETPARAM(HOST_VISIBLE) reports; leave that flag set (unmap keeps it
+     * sticky) so the capability mirrors a mapping the host actually honoured.
+     */
+    map_ret = virtio_gpu_resource_map_blob(g, res, 0, &map_info);
+    printf("virtio_gpu: host-visible map probe: create=%d map=%d map_info=0x%x advertised=%d\n",
+           create_ret, map_ret, map_info,
+           virtio_gpu_host_visible_ready(g) ? 1 : 0);
+
+    if (map_ret == 0)
+        virtio_gpu_resource_unmap_blob(g, res);
+
+out:
+    if (created_blob && res != NULL)
+        virtio_gpu_resource_unref(g, res);
+    if (created_ctx)
+        virtio_gpu_destroy_context(g, ctx_id);
+}
