@@ -641,6 +641,7 @@ struct virtio_gpu {
     uint32 cursor_hot_x;
     uint32 cursor_hot_y;
     int host_visible_cap_present;
+    int host_visible_blob_ok;
     int host_visible_mapped_once;
     uint64 host_visible_pa;
     uint64 host_visible_va;
@@ -722,12 +723,18 @@ static int virtio_gpu_host_visible_configured(struct virtio_gpu *g)
         g->host_visible_pa != 0 && g->host_visible_length != 0;
 }
 
-static int virtio_gpu_host_visible_ready(struct virtio_gpu *g)
+static int virtio_gpu_host_visible_operational(struct virtio_gpu *g)
 {
     return virtio_gpu_host_visible_configured(g) &&
         g->virgl_capset_id != 0 &&
         (g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)) &&
         (g->driver_features0 & (1u << VIRTIO_GPU_F_RESOURCE_BLOB));
+}
+
+static int virtio_gpu_host_visible_ready(struct virtio_gpu *g)
+{
+    return virtio_gpu_host_visible_operational(g) &&
+        g->host_visible_blob_ok;
 }
 
 static void virtio_gpu_notify(struct virtio_gpu *g, uint16 queue)

@@ -272,7 +272,7 @@ static int virtio_gpu_resource_create_blob(
         VIRTIO_GPU_BLOB_FLAG_USE_CROSS_DEVICE;
     if ((req->blob_flags & ~allowed_flags) != 0)
         return -EOPNOTSUPP;
-    if (req->blob_flags != 0 && !virtio_gpu_host_visible_ready(g))
+    if (req->blob_flags != 0 && !virtio_gpu_host_visible_operational(g))
         return -EOPNOTSUPP;
     if (req->blob_mem == VIRTIO_GPU_BLOB_MEM_HOST3D &&
         (req->blob_flags & VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE) == 0)
@@ -396,7 +396,7 @@ static int virtio_gpu_resource_map_blob(struct virtio_gpu *g,
 
     if (g == NULL || res == NULL || res->id == 0)
         return -EINVAL;
-    if (!virtio_gpu_host_visible_ready(g))
+    if (!virtio_gpu_host_visible_operational(g))
         return -EOPNOTSUPP;
     if (res->host_visible_mapped) {
         if (map_info_out != NULL)
@@ -426,6 +426,7 @@ static int virtio_gpu_resource_map_blob(struct virtio_gpu *g,
     res->host_visible_offset = offset;
     res->host_visible_size = map_size;
     res->host_visible_map_info = resp->map_info & VIRTIO_GPU_MAP_CACHE_MASK;
+    g->host_visible_blob_ok = 1;
     g->host_visible_mapped_once = 1;
     spin_unlock(&g->lock);
     if (map_info_out != NULL)

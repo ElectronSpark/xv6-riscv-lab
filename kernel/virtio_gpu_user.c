@@ -785,7 +785,7 @@ int virtio_gpu_user_resource_map_offset(uint64 owner_id, pid_t owner_tgid,
         return 0;
     }
     map_offset = virtio_gpu_align_up(g->host_visible_next_offset, PGSIZE);
-    if (!virtio_gpu_host_visible_ready(g) ||
+    if (!virtio_gpu_host_visible_operational(g) ||
         map_offset + PGROUNDUP(res->alloc_len) < map_offset ||
         map_offset + PGROUNDUP(res->alloc_len) > g->host_visible_length) {
         spin_unlock(&g->lock);
@@ -816,7 +816,8 @@ int virtio_gpu_user_host_visible_mmap(uint64 owner_id, pid_t owner_tgid,
         return -EINVAL;
 
     spin_lock(&g->lock);
-    if (virtio_gpu_host_visible_ready(g) && end <= g->host_visible_length) {
+    if (virtio_gpu_host_visible_operational(g) &&
+        end <= g->host_visible_length) {
         for (int i = 0; i < VIRTIO_GPU_MAX_RESOURCES; i++) {
             struct virtio_gpu_resource *res = &g->resources[i];
             uint64 res_end;
@@ -845,7 +846,8 @@ void *virtio_gpu_user_host_visible_page(uint64 owner_id, pid_t owner_tgid,
     if (!g->initialized)
         return NULL;
     spin_lock(&g->lock);
-    if (virtio_gpu_host_visible_ready(g) && offset < g->host_visible_length) {
+    if (virtio_gpu_host_visible_operational(g) &&
+        offset < g->host_visible_length) {
         for (int i = 0; i < VIRTIO_GPU_MAX_RESOURCES; i++) {
             struct virtio_gpu_resource *res = &g->resources[i];
             uint64 res_end;
