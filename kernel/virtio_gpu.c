@@ -581,7 +581,9 @@ struct virtio_gpu {
     uint32 scanout_height;
     uint32 num_capsets;
     uint32 features0;
+    uint32 features1;
     uint32 driver_features0;
+    uint32 driver_features1;
     uint32 edid_width;
     uint32 edid_height;
     uint32 edid_refresh_millihz;

@@ -594,7 +594,11 @@ void virtio_gpu_init(void)
     cfg->device_feature_select = 0;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     uint32 features0 = cfg->device_feature;
+    cfg->device_feature_select = 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    uint32 features1 = cfg->device_feature;
     uint32 driver_features0 = 0;
+    uint32 driver_features1 = 0;
     if (features0 & (1u << VIRTIO_GPU_F_VIRGL))
         driver_features0 |= (1u << VIRTIO_GPU_F_VIRGL);
     if (features0 & (1u << VIRTIO_GPU_F_EDID))
@@ -603,12 +607,19 @@ void virtio_gpu_init(void)
         driver_features0 |= (1u << VIRTIO_GPU_F_RESOURCE_BLOB);
     if (features0 & (1u << VIRTIO_GPU_F_CONTEXT_INIT))
         driver_features0 |= (1u << VIRTIO_GPU_F_CONTEXT_INIT);
+    if (features1 & (1u << (VIRTIO_F_VERSION_1 - 32)))
+        driver_features1 |= (1u << (VIRTIO_F_VERSION_1 - 32));
     g->features0 = features0;
+    g->features1 = features1;
     g->driver_features0 = driver_features0;
+    g->driver_features1 = driver_features1;
 
     cfg->driver_feature_select = 0;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     cfg->driver_feature = driver_features0;
+    cfg->driver_feature_select = 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    cfg->driver_feature = driver_features1;
 
     status |= VIRTIO_CONFIG_S_FEATURES_OK;
     cfg->device_status = status;
@@ -649,8 +660,9 @@ void virtio_gpu_init(void)
                vd->irq_line, irq_ret);
     }
 
-    printf("virtio_gpu: initialized queues=%u features0=0x%x driver_features0=0x%x scanouts=%u capsets=%u irq=%d\n",
-           cfg->num_queues, features0, driver_features0,
+    printf("virtio_gpu: initialized queues=%u features0=0x%x features1=0x%x driver_features0=0x%x driver_features1=0x%x scanouts=%u capsets=%u irq=%d\n",
+           cfg->num_queues, features0, features1, driver_features0,
+           driver_features1,
            g->config->num_scanouts, g->config->num_capsets, vd->irq_line);
 
     virtio_gpu_query_capsets(g);
@@ -1146,4 +1158,3 @@ out:
     virtio_gpu_op_unlock(g);
     return ret;
 }
-
