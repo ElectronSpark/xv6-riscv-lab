@@ -174,6 +174,14 @@
 #define DRM_MODE_FB_DIRTY_ANNOTATE_FILL 0x02
 #define DRM_MODE_FB_DIRTY_FLAGS         0x03
 #define DRM_MODE_FB_DIRTY_MAX_CLIPS     256
+
+struct drm_clip_rect_compat {
+    uint16 x1;
+    uint16 y1;
+    uint16 x2;
+    uint16 y2;
+};
+
 #define DRM_MODE_CURSOR_BO              0x01
 #define DRM_MODE_CURSOR_MOVE            0x02
 #define DRM_MODE_CURSOR_FLAGS           0x03

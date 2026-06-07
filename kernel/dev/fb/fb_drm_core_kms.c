@@ -2101,6 +2101,53 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
     return ret;
 }
 
+static int gpu_kms_present_fb_rect(struct fb_gpu_render_owner *owner,
+                                   const struct fb_gpu_kms_fb_entry *fb,
+                                   uint32 x, uint32 y, uint32 w, uint32 h)
+{
+    struct fb_gpu_bo_entry *bo;
+    struct fb_gpu_bo_present present;
+    uint64 fence = 0;
+    int ret;
+
+    if (owner == NULL || fb == NULL)
+        return -EINVAL;
+    if (w == 0 || h == 0)
+        return 0;
+    if ((uint64)x + w > fb->width || (uint64)y + h > fb->height)
+        return -EINVAL;
+    if (!gpu_kms_primary_scanout_format_supported(fb->pixel_format,
+                                                  fb->modifier))
+        return -EOPNOTSUPP;
+
+    bo = fb_bo_get_owned(fb->bo_handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
+
+    memset(&present, 0, sizeof(present));
+    present.x = x;
+    present.y = y;
+    present.w = w;
+    present.h = h;
+    present.pixels = fb->offsets[0] + (uint64)y * fb->pitch + (uint64)x * 4;
+    if (fb->modifier == DRM_FORMAT_MOD_LINEAR &&
+        !fb_scanout_format_needs_rb_swap(fb->pixel_format) &&
+        bo->virtio_resource_id != 0 &&
+        !fb_cmdline_enabled("virtio_gpu_no_kms_resource_scanout"))
+        present.flags = FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT;
+
+    ret = fb_blit_from_bo_format(bo, present, fb->pixel_format,
+                                 fb->modifier, &fence, NULL);
+    if (ret != 0 &&
+        (present.flags & FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT) != 0) {
+        present.flags = 0;
+        ret = fb_blit_from_bo_format(bo, present, fb->pixel_format,
+                                     fb->modifier, &fence, NULL);
+    }
+    fb_bo_put(bo);
+    return ret;
+}
+
 static int gpu_kms_fb_presentable_for_owner(struct fb_gpu_render_owner *owner,
                                             uint32 fb_id)
 {
@@ -2275,6 +2322,7 @@ static int gpu_drm_mode_dirtyfb(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_mode_fb_dirty_cmd_compat req;
     struct fb_gpu_kms_fb_entry fb;
+    int is_current;
     int ret;
 
     if (!gpu_drm_is_primary_like(owner))
@@ -2289,9 +2337,38 @@ static int gpu_drm_mode_dirtyfb(struct fb_gpu_render_owner *owner, uint64 arg)
     if (ret != 0)
         return ret;
     spin_lock(&fb_state.lock);
-    ret = fb_state.current_kms_fb_id == req.fb_id ? 0 : 1;
+    is_current = fb_state.current_kms_fb_id == req.fb_id;
     spin_unlock(&fb_state.lock);
-    return ret == 0 ? gpu_kms_present_fb(owner, req.fb_id) : 0;
+    if (!is_current)
+        return 0;
+    if (req.num_clips == 0)
+        return gpu_kms_present_fb(owner, req.fb_id);
+
+    for (uint32 i = 0; i < req.num_clips; i++) {
+        struct drm_clip_rect_compat clip;
+        uint32 x, y, w, h;
+
+        if (either_copyin(&clip, 1,
+                          req.clips_ptr + i * sizeof(clip),
+                          sizeof(clip)) < 0)
+            return -EFAULT;
+        if (clip.x2 <= clip.x1 || clip.y2 <= clip.y1)
+            continue;
+        x = clip.x1;
+        y = clip.y1;
+        if (x >= fb.width || y >= fb.height)
+            continue;
+        w = clip.x2 - clip.x1;
+        h = clip.y2 - clip.y1;
+        if ((uint64)x + w > fb.width)
+            w = fb.width - x;
+        if ((uint64)y + h > fb.height)
+            h = fb.height - y;
+        ret = gpu_kms_present_fb_rect(owner, &fb, x, y, w, h);
+        if (ret != 0)
+            return ret;
+    }
+    return 0;
 }
 
 struct gpu_kms_obj_props {
