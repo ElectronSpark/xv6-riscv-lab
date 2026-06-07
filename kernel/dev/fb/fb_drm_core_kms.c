@@ -259,6 +259,8 @@ static int gpu_drm_property_info(uint32 prop_id, const char **name,
     case GPU_DRM_PROP_CRTC_ID:
         *name = "CRTC_ID";
         *flags = DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC;
+        values[0] = DRM_MODE_OBJECT_CRTC;
+        *count_values = 1;
         break;
     case GPU_DRM_PROP_MODE_ID:
         *name = "MODE_ID";
@@ -282,6 +284,8 @@ static int gpu_drm_property_info(uint32 prop_id, const char **name,
     case GPU_DRM_PROP_FB_ID:
         *name = "FB_ID";
         *flags = DRM_MODE_PROP_OBJECT | DRM_MODE_PROP_ATOMIC;
+        values[0] = DRM_MODE_OBJECT_FB;
+        *count_values = 1;
         break;
     case GPU_DRM_PROP_SRC_X:
         *name = "SRC_X";
