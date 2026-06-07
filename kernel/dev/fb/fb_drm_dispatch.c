@@ -511,6 +511,8 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                 value = 0;
             break;
         case VIRTGPU_PARAM_RESOURCE_BLOB:
+            value = virtio_gpu_has_resource_blob() ? 1 : 0;
+            break;
         case VIRTGPU_PARAM_HOST_VISIBLE:
             value = 0;
             break;
@@ -588,6 +590,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_VIRTGPU_RESOURCE_INFO: {
         struct drm_virtgpu_resource_info_compat req;
         uint32 resource_id = 0;
+        uint32 blob_mem = 0;
         uint64 size = 0;
         int ret;
         if (owner != NULL && owner->nouveau_channel != 0 &&
@@ -604,9 +607,13 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                                             &size);
         if (ret != 0)
             return ret;
+        ret = virtio_gpu_user_resource_blob_mem(owner->id, owner->tgid,
+                                                resource_id, &blob_mem);
+        if (ret != 0)
+            return ret;
         req.res_handle = resource_id;
         req.size = (uint32)size;
-        req.blob_mem = 0;
+        req.blob_mem = blob_mem;
         if (either_copyout(1, arg, &req, sizeof(req)) < 0)
             return -EFAULT;
         return 0;

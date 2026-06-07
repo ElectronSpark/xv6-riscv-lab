@@ -40,6 +40,7 @@
 
 #define VIRTIO_GPU_F_VIRGL          0
 #define VIRTIO_GPU_F_EDID           1
+#define VIRTIO_GPU_F_RESOURCE_BLOB  3
 #define VIRTIO_GPU_F_CONTEXT_INIT   4
 
 #define VIRTIO_GPU_CMD_GET_DISPLAY_INFO 0x0100
@@ -52,6 +53,7 @@
 #define VIRTIO_GPU_CMD_GET_CAPSET_INFO    0x0108
 #define VIRTIO_GPU_CMD_GET_CAPSET         0x0109
 #define VIRTIO_GPU_CMD_GET_EDID           0x010a
+#define VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB 0x010c
 #define VIRTIO_GPU_CMD_CTX_CREATE         0x0200
 #define VIRTIO_GPU_CMD_CTX_DESTROY        0x0201
 #define VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE 0x0202
@@ -74,6 +76,12 @@
 
 #define VIRTIO_GPU_FLAG_FENCE  (1 << 0)
 #define VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM 1
+#define VIRTIO_GPU_BLOB_MEM_GUEST             0x0001
+#define VIRTIO_GPU_BLOB_MEM_HOST3D            0x0002
+#define VIRTIO_GPU_BLOB_MEM_HOST3D_GUEST      0x0003
+#define VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE     0x0001
+#define VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE    0x0002
+#define VIRTIO_GPU_BLOB_FLAG_USE_CROSS_DEVICE 0x0004
 #define VIRTIO_GPU_CAPSET_VIRGL          1
 #define VIRTIO_GPU_CAPSET_VIRGL2         2
 #define VIRTIO_GPU_CAPSET_DRM            6
@@ -198,6 +206,16 @@ struct virtio_gpu_resource_create_3d {
     uint32 nr_samples;
     uint32 flags;
     uint32 padding;
+};
+
+struct virtio_gpu_resource_create_blob {
+    struct virtio_gpu_ctrl_hdr hdr;
+    uint32 resource_id;
+    uint32 blob_mem;
+    uint32 blob_flags;
+    uint32 nr_entries;
+    uint64 blob_id;
+    uint64 size;
 };
 
 struct virtio_gpu_box {
@@ -423,6 +441,10 @@ struct virtio_gpu_resource {
     uint32 ctx_id;
     uint32 target;
     uint32 bind;
+    int is_blob;
+    uint32 blob_mem;
+    uint32 blob_flags;
+    uint64 blob_id;
     uint64 last_submit_fence;
     uint32 export_refs;
     int destroy_pending;
@@ -2495,6 +2517,131 @@ static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
     return 0;
 }
 
+static int virtio_gpu_resource_create_blob(
+    struct virtio_gpu *g, uint64 owner_id, pid_t owner_tgid,
+    struct fb_gpu_virgl_blob_create *req,
+    struct virtio_gpu_resource **out)
+{
+    struct virtio_gpu_resource_create_blob *create =
+        (struct virtio_gpu_resource_create_blob *)g->cmd_page;
+    struct virtio_gpu_ctrl_hdr *resp =
+        (struct virtio_gpu_ctrl_hdr *)g->resp_page;
+    struct virtio_gpu_mem_entry *entries = NULL;
+    struct virtio_gpu_resource *res = NULL;
+    page_t **pages = NULL;
+    uint64 rounded;
+    uint64 bytes;
+    uint32 npages;
+    uint32 entries_len;
+    uint32 pitch;
+    uint32 id;
+    int ret;
+
+    if (!(g->driver_features0 & (1u << VIRTIO_GPU_F_RESOURCE_BLOB)))
+        return -EOPNOTSUPP;
+    if (req == NULL || req->size == 0)
+        return -EINVAL;
+    if (req->blob_mem != VIRTIO_GPU_BLOB_MEM_GUEST &&
+        req->blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D_GUEST)
+        return -EOPNOTSUPP;
+    if (req->blob_flags != 0)
+        return -EOPNOTSUPP;
+
+    bytes = req->size;
+    if (bytes > 64ULL * 1024 * 1024)
+        return -EINVAL;
+    rounded = PGROUNDUP(bytes);
+    npages = (uint32)(rounded / PGSIZE);
+    if (npages == 0 || npages > UINT32_MAX / sizeof(*entries))
+        return -EINVAL;
+
+    ret = virtio_gpu_alloc_pages(npages, &pages);
+    if (ret != 0)
+        return ret;
+
+    entries_len = npages * sizeof(*entries);
+    entries = kvmalloc(entries_len);
+    if (entries == NULL) {
+        virtio_gpu_release_pages(pages, npages);
+        return -ENOMEM;
+    }
+    memset(entries, 0, entries_len);
+    for (uint32 i = 0; i < npages; i++) {
+        entries[i].addr = __page_to_pa(pages[i]);
+        entries[i].length = PGSIZE;
+    }
+
+    spin_lock(&g->lock);
+    res = virtio_gpu_alloc_resource_slot(g);
+    if (res == NULL) {
+        g->stats.failures++;
+        spin_unlock(&g->lock);
+        kvfree(entries);
+        virtio_gpu_release_pages(pages, npages);
+        return -ENOSPC;
+    }
+    id = g->next_resource_id++;
+    if (g->next_resource_id == 0)
+        g->next_resource_id = 1;
+    spin_unlock(&g->lock);
+
+    memset(create, 0, sizeof(*create));
+    create->hdr.type = VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB;
+    create->hdr.ctx_id = req->ctx_id;
+    create->resource_id = id;
+    create->blob_mem = req->blob_mem;
+    create->blob_flags = req->blob_flags;
+    create->nr_entries = npages;
+    create->blob_id = req->blob_id;
+    create->size = bytes;
+    printf("virtio_gpu: resource blob create resource=%u ctx=%u blob_mem=%u flags=0x%x blob_id=%lu size=%lu entries=%u\n",
+           id, req->ctx_id, req->blob_mem, req->blob_flags, req->blob_id,
+           bytes, npages);
+    ret = virtio_gpu_submit(g, create, sizeof(*create), entries, entries_len,
+                            false, resp, sizeof(*resp),
+                            VIRTIO_GPU_RESP_OK_NODATA);
+    kvfree(entries);
+    if (ret != 0) {
+        printf("virtio_gpu: resource blob create submit failed resource=%u ret=%d\n",
+               id, ret);
+        virtio_gpu_release_pages(pages, npages);
+        return -EIO;
+    }
+
+    pitch = rounded >= PGSIZE ? PGSIZE : (uint32)rounded;
+    if (pitch == 0)
+        pitch = PGSIZE;
+
+    spin_lock(&g->lock);
+    memset(res, 0, sizeof(*res));
+    res->in_use = 1;
+    res->id = id;
+    res->owner_id = owner_id;
+    res->owner_tgid = owner_tgid;
+    res->width = pitch / 4;
+    res->height = (uint32)((rounded + pitch - 1) / pitch);
+    res->depth = 1;
+    res->format = VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM;
+    res->backing_len = (uint32)bytes;
+    res->alloc_len = npages * PGSIZE;
+    res->pages = pages;
+    res->npages = npages;
+    res->ctx_id = req->ctx_id;
+    res->is_blob = 1;
+    res->blob_mem = req->blob_mem;
+    res->blob_flags = req->blob_flags;
+    res->blob_id = req->blob_id;
+    g->stats.resources++;
+    g->stats.resource_bytes += bytes;
+    spin_unlock(&g->lock);
+
+    req->resource_id = id;
+    req->size = res->alloc_len;
+    req->addr = 0;
+    *out = res;
+    return 0;
+}
+
 static int virtio_gpu_resource_create_3d_backing(struct virtio_gpu *g,
                                                  uint32 width,
                                                  uint32 height,
@@ -3527,8 +3674,7 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
 
     if (ctx_id == NULL)
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_CONTEXT);
@@ -3585,8 +3731,7 @@ int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
 
     if (ctx_id == 0)
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_CONTEXT);
@@ -3642,8 +3787,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
         ctx_id == 0 || cmds == NULL || nr_dwords == 0 ||
         nr_dwords > (PGSIZE * 64) / sizeof(uint32))
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     spin_lock(&g->lock);
@@ -3727,8 +3871,7 @@ int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)
     uint64 done;
     int ret = 0;
 
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_FENCE);
@@ -3776,8 +3919,7 @@ int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
     uint32 transfer_size;
     int ret = 0;
 
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     if (requested_capset_id == VIRTIO_GPU_CAPSET_DRM)
@@ -3840,8 +3982,7 @@ int virtio_gpu_user_capset_ids(uint64 *ids)
 
     if (ids == NULL)
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     spin_lock(&g->lock);
@@ -3866,8 +4007,7 @@ int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
 
     if (req == NULL)
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     if (req->ctx_id != 0) {
@@ -3929,6 +4069,69 @@ out:
     return ret;
 }
 
+int virtio_gpu_user_resource_create_blob(uint64 owner_id, pid_t owner_tgid,
+                                         struct fb_gpu_virgl_blob_create *req)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_context *ctx;
+    struct virtio_gpu_resource *res = NULL;
+    uint64 addr;
+    int ret;
+
+    if (req == NULL)
+        return -EINVAL;
+    if (!g->initialized)
+        return -ENODEV;
+
+    if (req->ctx_id != 0) {
+        spin_lock(&g->lock);
+        ctx = virtio_gpu_lookup_context_locked(g, req->ctx_id);
+        if (ctx == NULL) {
+            spin_unlock(&g->lock);
+            return -ENOENT;
+        }
+        if (!virtio_gpu_owner_matches(ctx->owner_id, ctx->owner_tgid,
+                                      owner_id, owner_tgid)) {
+            spin_unlock(&g->lock);
+            return -EPERM;
+        }
+        if (ctx->failed) {
+            spin_unlock(&g->lock);
+            return -EIO;
+        }
+        spin_unlock(&g->lock);
+    }
+
+    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
+    ret = virtio_gpu_resource_create_blob(g, owner_id, owner_tgid, req, &res);
+    if (ret != 0) {
+        printf("virtio_gpu: user blob create failed ret=%d blob_mem=%u size=%lu\n",
+               ret, req->blob_mem, req->size);
+        goto out;
+    }
+
+    ret = virtio_gpu_map_pages_current(res->pages, res->npages,
+                                       res->alloc_len, &addr);
+    if (ret != 0) {
+        printf("virtio_gpu: user blob map failed resource=%u ret=%d pages=%u size=%u\n",
+               res->id, ret, res->npages, res->alloc_len);
+        goto out_unref;
+    }
+
+    req->resource_id = res->id;
+    req->size = res->alloc_len;
+    req->addr = addr;
+    virtio_gpu_op_unlock(g);
+    return 0;
+
+out_unref:
+    if (res != NULL)
+        virtio_gpu_resource_unref(g, res);
+out:
+    virtio_gpu_op_unlock(g);
+    return ret;
+}
+
 static int virtio_gpu_destroy_resource_locked(struct virtio_gpu *g,
                                               uint32 resource_id,
                                               uint64 owner_id,
@@ -3973,8 +4176,7 @@ int virtio_gpu_user_resource_destroy(uint64 owner_id, pid_t owner_tgid,
 
     if (resource_id == 0)
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
@@ -3995,8 +4197,7 @@ int virtio_gpu_user_resource_attach(uint64 owner_id, pid_t owner_tgid,
 
     if (ctx_id == 0 || resource_id == 0)
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_RESOURCE);
@@ -4055,8 +4256,7 @@ int virtio_gpu_user_resource_export_pages(uint64 owner_id, pid_t owner_tgid,
         pitch == NULL || size == NULL || pages_out == NULL ||
         npages_out == NULL)
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     spin_lock(&g->lock);
@@ -4158,8 +4358,7 @@ int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
 
     if (resource_id == 0)
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     spin_lock(&g->lock);
@@ -4178,6 +4377,33 @@ int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
         *format = res->format;
     if (size)
         *size = res->alloc_len;
+    spin_unlock(&g->lock);
+    return 0;
+}
+
+int virtio_gpu_user_resource_blob_mem(uint64 owner_id, pid_t owner_tgid,
+                                      uint32 resource_id, uint32 *blob_mem)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *res;
+
+    if (blob_mem != NULL)
+        *blob_mem = 0;
+    if (resource_id == 0)
+        return -EINVAL;
+    if (!g->initialized)
+        return -ENODEV;
+
+    spin_lock(&g->lock);
+    res = virtio_gpu_lookup_resource_locked(g, resource_id);
+    if (res == NULL ||
+        !virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                  owner_id, owner_tgid)) {
+        spin_unlock(&g->lock);
+        return -ENOENT;
+    }
+    if (blob_mem != NULL)
+        *blob_mem = res->is_blob ? res->blob_mem : 0;
     spin_unlock(&g->lock);
     return 0;
 }
@@ -5136,6 +5362,8 @@ void virtio_gpu_init(void)
         driver_features0 |= (1u << VIRTIO_GPU_F_VIRGL);
     if (features0 & (1u << VIRTIO_GPU_F_EDID))
         driver_features0 |= (1u << VIRTIO_GPU_F_EDID);
+    if (features0 & (1u << VIRTIO_GPU_F_RESOURCE_BLOB))
+        driver_features0 |= (1u << VIRTIO_GPU_F_RESOURCE_BLOB);
     if (features0 & (1u << VIRTIO_GPU_F_CONTEXT_INIT))
         driver_features0 |= (1u << VIRTIO_GPU_F_CONTEXT_INIT);
     g->features0 = features0;
@@ -5271,6 +5499,14 @@ int virtio_gpu_has_virgl(void)
 
     return g->initialized && g->virgl_capset_id &&
         (g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL));
+}
+
+int virtio_gpu_has_resource_blob(void)
+{
+    struct virtio_gpu *g = &gpu;
+
+    return g->initialized &&
+        (g->driver_features0 & (1u << VIRTIO_GPU_F_RESOURCE_BLOB));
 }
 
 int virtio_gpu_probe_scanout(uint32 *width, uint32 *height)
@@ -6654,8 +6890,7 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
 
     if (src_resource_id == 0 || w == 0 || h == 0)
         return -EINVAL;
-    if (!g->initialized || !g->virgl_capset_id ||
-        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+    if (!g->initialized)
         return -ENODEV;
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PRESENT_COPY);
@@ -7465,6 +7700,7 @@ out:
 void virtio_gpu_init(void) {}
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats) { (void)stats; }
 int virtio_gpu_has_virgl(void) { return 0; }
+int virtio_gpu_has_resource_blob(void) { return 0; }
 int virtio_gpu_probe_scanout(uint32 *width, uint32 *height)
 {
     if (width != NULL)
@@ -7626,6 +7862,14 @@ int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
     (void)req;
     return -ENODEV;
 }
+int virtio_gpu_user_resource_create_blob(uint64 owner_id, pid_t owner_tgid,
+                                         struct fb_gpu_virgl_blob_create *req)
+{
+    (void)owner_id;
+    (void)owner_tgid;
+    (void)req;
+    return -ENODEV;
+}
 int virtio_gpu_user_resource_destroy(uint64 owner_id, pid_t owner_tgid,
                                      uint32 resource_id)
 {
@@ -7667,6 +7911,16 @@ int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
     (void)height;
     (void)format;
     (void)size;
+    return -ENODEV;
+}
+int virtio_gpu_user_resource_blob_mem(uint64 owner_id, pid_t owner_tgid,
+                                      uint32 resource_id,
+                                      uint32 *blob_mem)
+{
+    (void)owner_id;
+    (void)owner_tgid;
+    (void)resource_id;
+    (void)blob_mem;
     return -ENODEV;
 }
 int virtio_gpu_user_resource_last_submit_fence(uint64 owner_id,

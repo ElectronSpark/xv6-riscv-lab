@@ -1419,12 +1419,17 @@ static int gpu_drm_register_virtgpu_resource_bo(
                                                 resource_id, &width, &height,
                                                 &pitch, &size, &pages,
                                                 &npages);
-    if (ret != 0)
+    if (ret != 0) {
+        printf("drm: virtgpu resource export pages failed resource=%u ret=%d\n",
+               resource_id, ret);
         return ret;
+    }
 
     ret = fb_bo_register(owner->id, owner->tgid, width, height, pitch, size,
                          pages, npages, &handle);
     if (ret != 0) {
+        printf("drm: virtgpu resource BO register failed resource=%u ret=%d\n",
+               resource_id, ret);
         fb_bo_release_pages(pages, npages);
         virtio_gpu_user_resource_export_put(resource_id);
         return ret;
@@ -1433,6 +1438,8 @@ static int gpu_drm_register_virtgpu_resource_bo(
     ret = fb_bo_set_virtio_resource(handle, owner->id, owner->tgid,
                                     resource_id);
     if (ret != 0) {
+        printf("drm: virtgpu resource BO attach failed resource=%u handle=%u ret=%d\n",
+               resource_id, handle, ret);
         (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
         return ret;
     }
@@ -1455,14 +1462,10 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
     uint32 out_stride = 0;
     int ret;
 
-    ret = gpu_owner_ensure_context(owner);
-    if (ret != 0)
-        return ret;
-
     memset(&create, 0, sizeof(create));
-    create.ctx_id = owner->default_ctx_id;
     if (blob) {
         struct drm_virtgpu_resource_create_blob_compat req;
+        struct fb_gpu_virgl_blob_create blob_create;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         if (req.size == 0 ||
@@ -1470,23 +1473,37 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
              req.blob_mem != VIRTGPU_BLOB_MEM_HOST3D &&
              req.blob_mem != VIRTGPU_BLOB_MEM_HOST3D_GUEST))
             return -EINVAL;
-        create.width = req.size > 4096 ? 4096 : (uint32)req.size;
-        create.height = (uint32)((req.size + create.width - 1) / create.width);
-        create.depth = 1;
-        create.array_size = 1;
-        create.format = 1; /* B8G8R8A8_UNORM */
-        create.bind = 0;
-        create.size = req.size;
-        ret = virtio_gpu_user_resource_create(owner->id, owner->tgid, &create);
-        if (ret != 0)
+        if (req.blob_mem == VIRTGPU_BLOB_MEM_HOST3D)
+            return -EOPNOTSUPP;
+        if (req.blob_mem != VIRTGPU_BLOB_MEM_GUEST) {
+            ret = gpu_owner_ensure_context(owner);
+            if (ret != 0)
+                return ret;
+        }
+        memset(&blob_create, 0, sizeof(blob_create));
+        blob_create.ctx_id = req.blob_mem == VIRTGPU_BLOB_MEM_GUEST ?
+            0 : owner->default_ctx_id;
+        blob_create.size = req.size;
+        blob_create.blob_mem = req.blob_mem;
+        blob_create.blob_flags = req.blob_flags;
+        blob_create.blob_id = req.blob_id;
+        ret = virtio_gpu_user_resource_create_blob(owner->id, owner->tgid,
+                                                   &blob_create);
+        if (ret != 0) {
+            printf("drm: virtgpu create blob ioctl failed ret=%d blob_mem=%u size=%lu\n",
+                   ret, req.blob_mem, req.size);
             return ret;
-        resource_id = create.resource_id;
-        if (create.addr != 0 && create.size != 0)
-            (void)vm_munmap(current->vm, create.addr, (size_t)create.size);
+        }
+        resource_id = blob_create.resource_id;
+        if (blob_create.addr != 0 && blob_create.size != 0)
+            (void)vm_munmap(current->vm, blob_create.addr,
+                            (size_t)blob_create.size);
         ret = gpu_drm_register_virtgpu_resource_bo(owner, resource_id,
                                                    &out_handle, &out_size,
                                                    &out_stride);
         if (ret != 0) {
+            printf("drm: virtgpu create blob BO registration failed resource=%u ret=%d\n",
+                   resource_id, ret);
             (void)virtio_gpu_user_resource_destroy(owner->id, owner->tgid,
                                                    resource_id);
             return ret;
@@ -1503,6 +1520,10 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
         return 0;
     } else {
         struct drm_virtgpu_resource_create_compat req;
+        ret = gpu_owner_ensure_context(owner);
+        if (ret != 0)
+            return ret;
+        create.ctx_id = owner->default_ctx_id;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         create.target = req.target;

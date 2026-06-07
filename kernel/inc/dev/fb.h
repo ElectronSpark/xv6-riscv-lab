@@ -900,6 +900,16 @@ struct fb_gpu_virgl_resource_create {
     uint64   addr;            /* returned caller-local mapping */
 };
 
+struct fb_gpu_virgl_blob_create {
+    uint32   ctx_id;
+    uint32   resource_id;     /* returned virtio resource id */
+    uint32   blob_mem;        /* VIRTGPU_BLOB_MEM_* */
+    uint32   blob_flags;      /* VIRTGPU_BLOB_FLAG_* */
+    uint64   blob_id;
+    uint64   size;
+    uint64   addr;            /* returned caller-local mapping */
+};
+
 struct fb_gpu_virgl_resource_destroy {
     uint32   resource_id;
     uint32   flags;           /* reserved, must be 0 */

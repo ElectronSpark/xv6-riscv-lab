@@ -26,6 +26,7 @@ struct sock;
 struct vfs_file;
 struct fb_gpu_stats;
 struct fb_gpu_virgl_resource_create;
+struct fb_gpu_virgl_blob_create;
 struct fb_gpu_virgl_transfer;
 struct hyperv_dxg_status {
     int global_present;
@@ -545,6 +546,7 @@ void virtio_gpu_init(void);
 void virtio_input_init(void);
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);
 int virtio_gpu_has_virgl(void);
+int virtio_gpu_has_resource_blob(void);
 int virtio_gpu_probe_scanout(uint32 *width, uint32 *height);
 int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
                                uint32 *refresh_millihz);
@@ -593,6 +595,8 @@ int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
                              uint32 *capset_version, uint32 *capset_size);
 int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
                                     struct fb_gpu_virgl_resource_create *req);
+int virtio_gpu_user_resource_create_blob(uint64 owner_id, pid_t owner_tgid,
+                                         struct fb_gpu_virgl_blob_create *req);
 int virtio_gpu_user_resource_destroy(uint64 owner_id, pid_t owner_tgid,
                                      uint32 resource_id);
 int virtio_gpu_user_resource_attach(uint64 owner_id, pid_t owner_tgid,
@@ -608,6 +612,9 @@ int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
                                   uint32 resource_id, uint32 *width,
                                   uint32 *height, uint32 *format,
                                   uint64 *size);
+int virtio_gpu_user_resource_blob_mem(uint64 owner_id, pid_t owner_tgid,
+                                      uint32 resource_id,
+                                      uint32 *blob_mem);
 int virtio_gpu_user_resource_last_submit_fence(uint64 owner_id,
                                                pid_t owner_tgid,
                                                uint32 resource_id,
