@@ -1,18 +1,3 @@
-    transfer.resource_id = req.bo_handle;
-    transfer.x = req.box.x;
-    transfer.y = req.box.y;
-    transfer.z = req.box.z;
-    transfer.w = req.box.w;
-    transfer.h = req.box.h;
-    transfer.d = req.box.d ? req.box.d : 1;
-    transfer.level = req.level;
-    transfer.offset = req.offset;
-    transfer.stride = req.stride;
-    transfer.layer_stride = req.layer_stride;
-    return virtio_gpu_user_transfer(owner->id, owner->tgid, &transfer,
-                                    from_host);
-}
-
 static struct pci_device_info *gpu_nouveau_device(void)
 {
     return gpu_nouveau_pci.probed ? gpu_nouveau_pci.pdev : NULL;

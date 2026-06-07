@@ -290,7 +290,7 @@ static int fb_bo_set_virtio_resource(uint32 handle, uint64 owner_id,
         return -EINVAL;
 
     spin_lock(&fb_state.lock);
-    bo = fb_bo_lookup_locked(handle);
+    bo = fb_bo_lookup_owned_locked(handle, owner_id, owner_tgid);
     if (bo == NULL) {
         spin_unlock(&fb_state.lock);
         return -ENOENT;
