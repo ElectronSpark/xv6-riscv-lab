@@ -446,12 +446,16 @@ int virtio_gpu_user_resource_create_blob(uint64 owner_id, pid_t owner_tgid,
         goto out;
     }
 
-    ret = virtio_gpu_map_pages_current(res->pages, res->npages,
-                                       res->alloc_len, &addr);
-    if (ret != 0) {
-        printf("virtio_gpu: user blob map failed resource=%u ret=%d pages=%u size=%u\n",
-               res->id, ret, res->npages, res->alloc_len);
-        goto out_unref;
+    if (req->blob_mem == VIRTIO_GPU_BLOB_MEM_HOST3D) {
+        addr = 0;
+    } else {
+        ret = virtio_gpu_map_pages_current(res->pages, res->npages,
+                                           res->alloc_len, &addr);
+        if (ret != 0) {
+            printf("virtio_gpu: user blob map failed resource=%u ret=%d pages=%u size=%u\n",
+                   res->id, ret, res->npages, res->alloc_len);
+            goto out_unref;
+        }
     }
 
     req->resource_id = res->id;
@@ -1239,4 +1243,3 @@ out:
     virtio_gpu_op_unlock(g);
     return ret;
 }
-
