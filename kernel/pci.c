@@ -28,6 +28,9 @@ void e1000_init(uint32 *xregs);
 #define PCI_VIRTUAL_BUS 0xff
 #define PCI_DEVICE_RECORD_MAX 128
 #define PCI_DRIVER_RECORD_MAX 32
+#define PCI_VIRTIO_GPU_HOSTMEM_BASE 0xc0000000ULL
+#define PCI_VIRTIO_GPU_HOSTMEM_LIMIT 0xfd000000ULL
+#define VIRTIO_GPU_SHM_ID_HOST_VISIBLE 1
 
 struct pci_config_backend {
     int used;
@@ -57,6 +60,7 @@ static struct pci_device_info pci_devices[PCI_DEVICE_RECORD_MAX];
 static uint32 pci_device_count;
 static struct pci_driver *pci_drivers[PCI_DRIVER_RECORD_MAX];
 static uint32 pci_driver_count;
+static uint64 pci_virtio_gpu_hostmem_next = PCI_VIRTIO_GPU_HOSTMEM_BASE;
 
 static void pci_probe_function(uint8 bus, uint8 dev, uint8 func);
 
@@ -1281,6 +1285,78 @@ static uint8 pci_find_virtio_cap(uint8 bus, uint8 dev, uint8 func,
     return 0;
 }
 
+static uint8 pci_find_virtio_cap_id(uint8 bus, uint8 dev, uint8 func,
+                                    uint8 cfg_type, uint8 cap_id)
+{
+    uint16 status = pci_config_read16(bus, dev, func, 0x06);
+    uint8 pos;
+
+    if ((status & PCIE_STATUS_CAPL) == 0)
+        return 0;
+
+    pos = pci_config_read8(bus, dev, func, 0x34) & 0xFC;
+    for (uint32 guard = 0; pos != 0 && guard < 64; guard++) {
+        uint8 id;
+        uint8 next;
+
+        if (pos == 0xFF || pos < 0x40)
+            return 0;
+        id = pci_config_read8(bus, dev, func, pos);
+        next = pci_config_read8(bus, dev, func, pos + 1) & 0xFC;
+        if (id == PCI_CAP_ID_VENDOR &&
+            pci_config_read8(bus, dev, func, pos + 3) == cfg_type &&
+            pci_config_read8(bus, dev, func, pos + 5) == cap_id)
+            return pos;
+        if (next == pos)
+            break;
+        pos = next;
+    }
+    return 0;
+}
+
+static uint64 pci_align_up_u64(uint64 value, uint64 alignment)
+{
+    if (alignment == 0)
+        return value;
+    return (value + alignment - 1) & ~(alignment - 1);
+}
+
+static uint64 pci_virtio_gpu_assign_hostmem_bar(uint8 bus, uint8 dev,
+                                                uint8 func, uint8 bar,
+                                                uint64 length)
+{
+    uint64 align;
+    uint64 base;
+    uint32 raw;
+
+    if (bar >= 6 || length == 0)
+        return 0;
+    raw = pci_config_read32(bus, dev, func, (uint16)(0x10 + bar * 4));
+    if ((raw & 0x1) != 0 || (raw & 0x6) != 0x4 || bar >= 5)
+        return 0;
+
+    align = length;
+    if ((align & (align - 1)) != 0) {
+        uint64 pow2 = 1;
+        while (pow2 < align && pow2 < (1ULL << 63))
+            pow2 <<= 1;
+        align = pow2;
+    }
+    if (align < (1ULL << 20))
+        align = 1ULL << 20;
+    base = pci_align_up_u64(pci_virtio_gpu_hostmem_next, align);
+    if (base == 0 || base + length < base ||
+        base + length > PCI_VIRTIO_GPU_HOSTMEM_LIMIT)
+        return 0;
+
+    pci_config_write32(bus, dev, func, (uint16)(0x10 + bar * 4),
+                       (uint32)base | (raw & 0xfU));
+    pci_config_write32(bus, dev, func, (uint16)(0x10 + (bar + 1) * 4),
+                       (uint32)(base >> 32));
+    pci_virtio_gpu_hostmem_next = base + length;
+    return base;
+}
+
 // Stored info about discovered virtio device for virtio_disk_init_pci()
 // (struct defined in pci.h)
 
@@ -1497,13 +1573,52 @@ static void pci_note_virtio_gpu(uint8 bus, uint8 dev, uint8 func)
                                           VIRTIO_PCI_CAP_ISR_CFG);
     vd->device_cfg_cap = pci_find_virtio_cap(bus, dev, func,
                                              VIRTIO_PCI_CAP_DEVICE_CFG);
+    vd->shared_memory_cfg_cap = pci_find_virtio_cap_id(
+        bus, dev, func, VIRTIO_PCI_CAP_SHARED_MEMORY_CFG,
+        VIRTIO_GPU_SHM_ID_HOST_VISIBLE);
+    if (vd->shared_memory_cfg_cap != 0) {
+        uint8 cap = vd->shared_memory_cfg_cap;
+        uint8 cap_len = pci_config_read8(bus, dev, func, cap + 2);
+        uint8 bar = pci_config_read8(bus, dev, func, cap + 4);
+        uint64 offset = pci_config_read32(bus, dev, func, cap + 8);
+        uint64 length = pci_config_read32(bus, dev, func, cap + 12);
+        uint64 base;
+
+        if (cap_len >= sizeof(struct virtio_pci_cap64)) {
+            offset |= (uint64)pci_config_read32(bus, dev, func,
+                                                cap + 16) << 32;
+            length |= (uint64)pci_config_read32(bus, dev, func,
+                                                cap + 20) << 32;
+        }
+        vd->shared_memory_bar = bar;
+        vd->shared_memory_id = pci_config_read8(bus, dev, func, cap + 5);
+        vd->shared_memory_offset = offset;
+        vd->shared_memory_length = length;
+        base = bar < 6 ? pci_bar_start(vd->bar[bar],
+                                       bar < 5 ? vd->bar[bar + 1] : 0) : 0;
+        if (base == 0 && length != 0) {
+            base = pci_virtio_gpu_assign_hostmem_bar(bus, dev, func, bar,
+                                                     length);
+            if (base != 0) {
+                vd->bar[bar] = pci_read_bar(bus, dev, func, bar);
+                if (bar < 5)
+                    vd->bar[bar + 1] = pci_read_bar(bus, dev, func,
+                                                    bar + 1);
+                vd->shared_memory_assigned = 1;
+            }
+        }
+        vd->shared_memory_bar_base = base;
+    }
 
     virtio_gpu_pci_count++;
     printf("PCI: virtio-gpu detected at %d:%d:%d\n", bus, dev, func);
-    printf("PCI: virtio-gpu BAR0=0x%lx BAR1=0x%lx BAR2=0x%lx BAR4=0x%lx IRQ=%d caps: common=%d notify=%d isr=%d dev=%d\n",
+    printf("PCI: virtio-gpu BAR0=0x%lx BAR1=0x%lx BAR2=0x%lx BAR4=0x%lx IRQ=%d caps: common=%d notify=%d isr=%d dev=%d shm=%d shm_bar=%u shm_base=0x%lx shm_off=0x%lx shm_len=0x%lx assigned=%u\n",
            (uint64)vd->bar[0], (uint64)vd->bar[1], (uint64)vd->bar[2],
            (uint64)vd->bar[4], vd->irq_line, vd->common_cfg_cap,
-           vd->notify_cfg_cap, vd->isr_cfg_cap, vd->device_cfg_cap);
+           vd->notify_cfg_cap, vd->isr_cfg_cap, vd->device_cfg_cap,
+           vd->shared_memory_cfg_cap, vd->shared_memory_bar,
+           vd->shared_memory_bar_base, vd->shared_memory_offset,
+           vd->shared_memory_length, vd->shared_memory_assigned);
 }
 
 static void pci_note_virtio_input(uint8 bus, uint8 dev, uint8 func)

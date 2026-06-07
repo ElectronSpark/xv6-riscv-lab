@@ -547,6 +547,7 @@ void virtio_input_init(void);
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);
 int virtio_gpu_has_virgl(void);
 int virtio_gpu_has_resource_blob(void);
+int virtio_gpu_has_host_visible(void);
 int virtio_gpu_probe_scanout(uint32 *width, uint32 *height);
 int virtio_gpu_probe_edid_mode(uint32 *width, uint32 *height,
                                uint32 *refresh_millihz);
@@ -615,6 +616,12 @@ int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
 int virtio_gpu_user_resource_blob_mem(uint64 owner_id, pid_t owner_tgid,
                                       uint32 resource_id,
                                       uint32 *blob_mem);
+int virtio_gpu_user_resource_map_offset(uint64 owner_id, pid_t owner_tgid,
+                                        uint32 resource_id, uint64 *offset);
+int virtio_gpu_user_host_visible_mmap(uint64 owner_id, pid_t owner_tgid,
+                                      uint64 offset, uint64 size);
+void *virtio_gpu_user_host_visible_page(uint64 owner_id, pid_t owner_tgid,
+                                        uint64 offset);
 int virtio_gpu_user_resource_last_submit_fence(uint64 owner_id,
                                                pid_t owner_tgid,
                                                uint32 resource_id,

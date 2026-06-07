@@ -481,7 +481,46 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                 fb_bo_get_owned(req.handle, owner->id, owner->tgid);
             if (bo == NULL)
                 return ret;
+            if (bo->virtio_resource_id != 0) {
+                uint64 blob_offset = 0;
+                uint32 blob_mem = 0;
+
+                ret = virtio_gpu_user_resource_map_offset(
+                    owner->id, owner->tgid, bo->virtio_resource_id,
+                    &blob_offset);
+                if (ret == 0) {
+                    req.offset = blob_offset;
+                    fb_bo_put(bo);
+                    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+                        return -EFAULT;
+                    return 0;
+                }
+                if (virtio_gpu_user_resource_blob_mem(
+                        owner->id, owner->tgid, bo->virtio_resource_id,
+                        &blob_mem) == 0 &&
+                    blob_mem == VIRTGPU_BLOB_MEM_HOST3D) {
+                    fb_bo_put(bo);
+                    return ret;
+                }
+            }
             fb_bo_put(bo);
+        } else {
+            uint64 blob_offset = 0;
+            uint32 blob_mem = 0;
+
+            ret = virtio_gpu_user_resource_map_offset(owner->id, owner->tgid,
+                                                      req.handle,
+                                                      &blob_offset);
+            if (ret == 0) {
+                req.offset = blob_offset;
+                if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+                    return -EFAULT;
+                return 0;
+            }
+            if (virtio_gpu_user_resource_blob_mem(owner->id, owner->tgid,
+                                                  req.handle, &blob_mem) == 0 &&
+                blob_mem == VIRTGPU_BLOB_MEM_HOST3D)
+                return ret;
         }
         req.offset = GPU_DRM_MMAP_OFFSET(req.handle);
         if (either_copyout(1, arg, &req, sizeof(req)) < 0)
@@ -514,7 +553,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             value = virtio_gpu_has_resource_blob() ? 1 : 0;
             break;
         case VIRTGPU_PARAM_HOST_VISIBLE:
-            value = 0;
+            value = virtio_gpu_has_host_visible() ? 1 : 0;
             break;
         default:
             value = 0;
@@ -1264,7 +1303,8 @@ static void *gpu_fops_fault(struct vfs_file *file, struct vma *vma, uint64 va)
     handle = GPU_DRM_MMAP_HANDLE(off);
     page_index = GPU_DRM_MMAP_PAGE(off);
     if (handle == 0)
-        return NULL;
+        return virtio_gpu_user_host_visible_page(owner->id, owner->tgid,
+                                                 off);
 
     pa = fb_bo_page_for_owner(handle, owner->id, owner->tgid, page_index);
     if (pa != NULL)
@@ -1273,11 +1313,30 @@ static void *gpu_fops_fault(struct vfs_file *file, struct vma *vma, uint64 va)
                                          page_index);
 }
 
+static int gpu_fops_mmap(struct vfs_file *file, struct vma *vma)
+{
+    struct fb_gpu_render_owner *owner =
+        file ? (struct fb_gpu_render_owner *)file->private_data : NULL;
+    uint64 size;
+
+    if (owner == NULL || vma == NULL)
+        return -EBADF;
+    size = vma->end - vma->start;
+    if (GPU_DRM_MMAP_HANDLE(vma->pgoff) != 0)
+        return 0;
+    if (virtio_gpu_user_host_visible_mmap(owner->id, owner->tgid,
+                                          vma->pgoff, size) != 0)
+        return 0;
+    vma->flags |= VMA_FLAG_PFNMAP;
+    return 0;
+}
+
 static struct vfs_file_ops gpu_file_ops = {
     .read    = gpu_fops_read,
     .release = gpu_fops_release,
     .ioctl   = gpu_fops_ioctl,
     .poll    = gpu_fops_poll,
+    .mmap    = gpu_fops_mmap,
     .fault   = gpu_fops_fault,
     .first_fd_open = gpu_fops_first_fd_open,
     .last_fd_close = gpu_fops_last_fd_close,
@@ -1368,6 +1427,7 @@ static struct vfs_file_ops gpu_drm_file_ops = {
     .release = gpu_fops_release,
     .ioctl   = gpu_drm_fops_ioctl,
     .poll    = gpu_fops_poll,
+    .mmap    = gpu_fops_mmap,
     .fault   = gpu_fops_fault,
     .first_fd_open = gpu_fops_first_fd_open,
     .last_fd_close = gpu_fops_last_fd_close,

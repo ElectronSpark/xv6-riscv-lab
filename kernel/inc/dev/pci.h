@@ -132,6 +132,7 @@ struct pci_common_confspace_header {
 #define VIRTIO_PCI_CAP_ISR_CFG     3
 #define VIRTIO_PCI_CAP_DEVICE_CFG  4
 #define VIRTIO_PCI_CAP_PCI_CFG     5
+#define VIRTIO_PCI_CAP_SHARED_MEMORY_CFG 8
 
 // Virtio PCI capability structure
 struct virtio_pci_cap {
@@ -140,9 +141,16 @@ struct virtio_pci_cap {
     uint8	cap_len;        // Generic PCI field: capability length
     uint8	cfg_type;       // Identifies the structure (VIRTIO_PCI_CAP_*)
     uint8	bar;            // BAR index [0..5]
-    uint8	padding[3];     // Padding
+    uint8	id;             // Capability-specific id (shared memory id)
+    uint8	padding[2];     // Padding
     uint32	offset;         // Offset within bar
     uint32	length;         // Length of the structure, in bytes
+};
+
+struct virtio_pci_cap64 {
+    struct virtio_pci_cap cap;
+    uint32 offset_hi;
+    uint32 length_hi;
 };
 
 // Virtio PCI notify capability (extends virtio_pci_cap)
@@ -397,6 +405,13 @@ struct virtio_pci_discovery {
     uint8 notify_cfg_cap;
     uint8 isr_cfg_cap;
     uint8 device_cfg_cap;
+    uint8 shared_memory_cfg_cap;
+    uint8 shared_memory_bar;
+    uint8 shared_memory_id;
+    uint8 shared_memory_assigned;
+    uint64 shared_memory_offset;
+    uint64 shared_memory_length;
+    uint64 shared_memory_bar_base;
 };
 
 // Get discovered virtio-blk PCI device info by index

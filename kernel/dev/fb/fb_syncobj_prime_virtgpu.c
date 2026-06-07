@@ -1420,9 +1420,20 @@ static int gpu_drm_register_virtgpu_resource_bo(
                                                 &pitch, &size, &pages,
                                                 &npages);
     if (ret != 0) {
-        printf("drm: virtgpu resource export pages failed resource=%u ret=%d\n",
-               resource_id, ret);
-        return ret;
+        uint32 format = 0;
+        uint32 blob_mem = 0;
+
+        if (virtio_gpu_user_resource_blob_mem(owner->id, owner->tgid,
+                                              resource_id, &blob_mem) != 0 ||
+            blob_mem != VIRTGPU_BLOB_MEM_HOST3D ||
+            virtio_gpu_user_resource_info(owner->id, owner->tgid,
+                                          resource_id, &width, &height,
+                                          &format, &size) != 0) {
+            printf("drm: virtgpu resource export pages failed resource=%u ret=%d\n",
+                   resource_id, ret);
+            return ret;
+        }
+        pitch = width * 4;
     }
 
     ret = fb_bo_register(owner->id, owner->tgid, width, height, pitch, size,
@@ -1473,8 +1484,6 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
              req.blob_mem != VIRTGPU_BLOB_MEM_HOST3D &&
              req.blob_mem != VIRTGPU_BLOB_MEM_HOST3D_GUEST))
             return -EINVAL;
-        if (req.blob_mem == VIRTGPU_BLOB_MEM_HOST3D)
-            return -EOPNOTSUPP;
         if (req.blob_mem != VIRTGPU_BLOB_MEM_GUEST) {
             ret = gpu_owner_ensure_context(owner);
             if (ret != 0)

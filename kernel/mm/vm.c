@@ -2302,7 +2302,8 @@ hp_per_page:
 
                     page_t *fault_pg = __pa_to_page((uint64)pa);
                     page_t *fault_pc_head = page_pcache_head(fault_pg);
-                    int is_pcache = (fault_pc_head != NULL);
+                    int is_pfnmap = (vma->flags & VMA_FLAG_PFNMAP) != 0;
+                    int is_pcache = !is_pfnmap && (fault_pc_head != NULL);
 
                     vm_pgtable_lock(vma->vm);
                     pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
@@ -2311,10 +2312,10 @@ hp_per_page:
                         if (is_pcache)
                             pcache_put_folio(fault_pc_head->pcache.pcache,
                                              page_folio(fault_pc_head));
-                        else if (vma->file->ops != NULL &&
+                        else if (!is_pfnmap && vma->file->ops != NULL &&
                                  vma->file->ops->fault != NULL)
                             page_ref_dec(pa);
-                        else
+                        else if (!is_pfnmap)
                             page_free(pa, 0);
                         return -ENOMEM;
                     }
@@ -2322,10 +2323,10 @@ hp_per_page:
                         if (is_pcache)
                             pcache_put_folio(fault_pc_head->pcache.pcache,
                                              page_folio(fault_pc_head));
-                        else if (vma->file->ops != NULL &&
+                        else if (!is_pfnmap && vma->file->ops != NULL &&
                                  vma->file->ops->fault != NULL)
                             page_ref_dec(pa);
-                        else
+                        else if (!is_pfnmap)
                             page_free(pa, 0);
                     } else {
                         uint64 pte_flags = vma->flags;
