@@ -2105,26 +2105,26 @@ bo_copy_out:
         ret = fb_bo_set_virtio_resource(handle, owner_id, owner_tgid,
                                         req.resource_id);
         if (ret != 0) {
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             return ret;
         }
 
-        bo = fb_bo_get(handle);
+        bo = fb_bo_get_owned(handle, owner_id, owner_tgid);
         if (bo == NULL) {
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             return -ENOENT;
         }
         dmabuf = fb_dmabuf_create_from_bo(bo, FB_GPU_DMABUF_TAG_FB_BO);
         fb_bo_put(bo);
         if (dmabuf == NULL) {
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             return -ENOENT;
         }
         dbuf = dmabuf->dbuf;
         fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dbuf, 0);
         if (fd < 0) {
             fb_dmabuf_put(dbuf);
-            (void)fb_bo_destroy(handle);
+            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             return fd;
         }
 
@@ -2141,7 +2141,7 @@ bo_copy_out:
          * The fd owns the exported BO capability. Drop the transient handle
          * immediately so closing the fd releases the shared page references.
          */
-        (void)fb_bo_destroy(handle);
+        (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
 
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
             fb_gpu_close_exported_fd(fd);

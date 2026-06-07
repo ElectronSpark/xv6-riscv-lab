@@ -1327,11 +1327,6 @@ static struct fb_gpu_bo_entry *fb_bo_get_owned(uint32 handle, uint64 owner_id,
     return bo;
 }
 
-static struct fb_gpu_bo_entry *fb_bo_get(uint32 handle)
-{
-    return fb_bo_get_owned(handle, 0, 0);
-}
-
 static void *fb_bo_page_for_owner(uint32 handle, uint64 owner_id,
                                   pid_t owner_tgid, uint64 page_index)
 {
