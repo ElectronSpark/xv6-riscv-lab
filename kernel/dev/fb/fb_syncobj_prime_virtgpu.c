@@ -1477,6 +1477,10 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
     if (blob) {
         struct drm_virtgpu_resource_create_blob_compat req;
         struct fb_gpu_virgl_blob_create blob_create;
+        uint32 *cmds = NULL;
+        uint32 cmd_alloc_len = PGSIZE;
+        int cmd_order = 0;
+        int host3d_blob;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         if (req.size == 0 ||
@@ -1484,14 +1488,42 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
              req.blob_mem != VIRTGPU_BLOB_MEM_HOST3D &&
              req.blob_mem != VIRTGPU_BLOB_MEM_HOST3D_GUEST))
             return -EINVAL;
-        if (req.blob_mem != VIRTGPU_BLOB_MEM_GUEST) {
+        host3d_blob = req.blob_mem != VIRTGPU_BLOB_MEM_GUEST;
+        if (host3d_blob) {
+            if ((req.cmd_size & (sizeof(uint32) - 1)) != 0 ||
+                req.cmd_size > PGSIZE * 64 ||
+                (req.cmd_size != 0 && req.cmd == 0))
+                return -EINVAL;
             ret = gpu_owner_ensure_context(owner);
+            if (ret != 0)
+                return ret;
+        } else if (req.blob_id != 0 || req.cmd_size != 0) {
+            return -EINVAL;
+        }
+        if (req.cmd_size != 0) {
+            while (cmd_alloc_len < req.cmd_size) {
+                if (cmd_order >= PAGE_BUDDY_MAX_ORDER)
+                    return -ENOMEM;
+                cmd_order++;
+                cmd_alloc_len <<= 1;
+            }
+            cmds = page_alloc(cmd_order, PAGE_TYPE_ANON);
+            if (cmds == NULL)
+                return -ENOMEM;
+            if (either_copyin((char *)cmds, 1, req.cmd, req.cmd_size) < 0) {
+                page_free(cmds, cmd_order);
+                return -EFAULT;
+            }
+            ret = virtio_gpu_user_submit(owner->id, owner->tgid,
+                                         owner->default_ctx_id, 0, cmds,
+                                         req.cmd_size / sizeof(uint32),
+                                         NULL, 0, NULL, NULL);
+            page_free(cmds, cmd_order);
             if (ret != 0)
                 return ret;
         }
         memset(&blob_create, 0, sizeof(blob_create));
-        blob_create.ctx_id = req.blob_mem == VIRTGPU_BLOB_MEM_GUEST ?
-            0 : owner->default_ctx_id;
+        blob_create.ctx_id = host3d_blob ? owner->default_ctx_id : 0;
         blob_create.size = req.size;
         blob_create.blob_mem = req.blob_mem;
         blob_create.blob_flags = req.blob_flags;
