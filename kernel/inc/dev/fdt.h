@@ -274,7 +274,7 @@ struct platform_info {
 
     // Kernel command line (from bootloader: FDT /chosen/bootargs,
     // QEMU -append, PVH cmdline, or multiboot cmdline)
-#define CMDLINE_MAX 512
+#define CMDLINE_MAX 2048
     char cmdline[CMDLINE_MAX];
     int has_cmdline;
 };
