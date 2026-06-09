@@ -1221,6 +1221,10 @@ static uint32 gpu_syncobj_destroy_owner(struct fb_gpu_render_owner *owner)
     return stale;
 }
 
+static int gpu_drm_register_virtgpu_resource_bo(
+    struct fb_gpu_render_owner *owner, uint32 resource_id, uint32 *handle_out,
+    uint64 *size_out, uint32 *pitch_out);
+
 static int gpu_drm_create_dumb(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_mode_create_dumb_compat req;
@@ -1245,6 +1249,73 @@ static int gpu_drm_create_dumb(struct fb_gpu_render_owner *owner, uint64 arg)
         return -EINVAL;
     req.size = PGROUNDUP(size);
     npages = req.size / PGSIZE;
+
+    if (req.bpp == 32) {
+        enum {
+            DRM_DUMB_VIRGL_FORMAT_B8G8R8A8_UNORM = 1,
+            DRM_DUMB_PIPE_TEXTURE_2D = 2,
+            DRM_DUMB_VIRGL_BIND_RENDER_TARGET = 1u << 1,
+            DRM_DUMB_VIRGL_BIND_SAMPLER_VIEW = 1u << 3,
+            DRM_DUMB_VIRGL_BIND_DISPLAY_TARGET = 1u << 7,
+            DRM_DUMB_VIRGL_BIND_SCANOUT = 1u << 18,
+            DRM_DUMB_VIRGL_BIND_SHARED = 1u << 20,
+            DRM_DUMB_VIRGL_BIND_LINEAR = 1u << 22,
+        };
+        struct fb_gpu_virgl_resource_create create;
+        uint64 out_size = 0;
+        uint32 out_stride = 0;
+        uint32 resource_id;
+
+        memset(&create, 0, sizeof(create));
+        create.target = DRM_DUMB_PIPE_TEXTURE_2D;
+        create.format = DRM_DUMB_VIRGL_FORMAT_B8G8R8A8_UNORM;
+        create.bind = DRM_DUMB_VIRGL_BIND_RENDER_TARGET |
+                      DRM_DUMB_VIRGL_BIND_SAMPLER_VIEW |
+                      DRM_DUMB_VIRGL_BIND_DISPLAY_TARGET |
+                      DRM_DUMB_VIRGL_BIND_SCANOUT |
+                      DRM_DUMB_VIRGL_BIND_SHARED |
+                      DRM_DUMB_VIRGL_BIND_LINEAR;
+        create.width = req.width;
+        create.height = req.height;
+        create.depth = 1;
+        create.array_size = 1;
+        create.last_level = 0;
+        create.nr_samples = 0;
+        create.size = req.size;
+        ret = virtio_gpu_user_resource_create(owner->id, owner->tgid,
+                                              &create);
+        if (ret == 0) {
+            resource_id = create.resource_id;
+            if (create.addr != 0 && create.size != 0)
+                (void)vm_munmap(current->vm, create.addr,
+                                (size_t)create.size);
+            ret = gpu_drm_register_virtgpu_resource_bo(owner, resource_id,
+                                                       &handle, &out_size,
+                                                       &out_stride);
+            if (ret != 0) {
+                (void)virtio_gpu_user_resource_destroy(owner->id,
+                                                       owner->tgid,
+                                                       resource_id);
+                return ret;
+            }
+            req.handle = handle;
+            req.size = (uint32)out_size;
+            req.pitch = out_stride != 0 ? out_stride : req.pitch;
+            spin_lock(&fb_state.lock);
+            fb_state.stats.bo_allocs++;
+            fb_state.stats.bo_bytes += req.size;
+            spin_unlock(&fb_state.lock);
+
+            if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
+                (void)fb_bo_destroy_owned(req.handle, owner->id, owner->tgid);
+                (void)virtio_gpu_user_resource_destroy(owner->id,
+                                                       owner->tgid,
+                                                       resource_id);
+                return -EFAULT;
+            }
+            return 0;
+        }
+    }
 
     ret = fb_shmem_alloc_pages(npages, &pages);
     if (ret != 0)
@@ -1613,6 +1684,8 @@ static int gpu_drm_virtgpu_transfer(struct fb_gpu_render_owner *owner,
     struct fb_gpu_virgl_transfer transfer;
     struct fb_gpu_bo_entry *bo;
     uint32 resource_id = 0;
+    uint64 resource_owner_id = 0;
+    pid_t resource_owner_tgid = 0;
     int ret;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
@@ -1626,13 +1699,27 @@ static int gpu_drm_virtgpu_transfer(struct fb_gpu_render_owner *owner,
     bo = fb_bo_get_owned(req.bo_handle, owner->id, owner->tgid);
     if (bo != NULL) {
         resource_id = bo->virtio_resource_id;
+        resource_owner_id = bo->virtio_resource_owner_id;
+        resource_owner_tgid = bo->virtio_resource_owner_tgid;
+        if (resource_id == 0 && bo->gem != NULL) {
+            resource_id = bo->gem->virtio_resource_id;
+            resource_owner_id = bo->gem->virtio_resource_owner_id;
+            resource_owner_tgid = bo->gem->virtio_resource_owner_tgid;
+        }
         fb_bo_put(bo);
         if (resource_id == 0)
             return -ENOENT;
+        if (resource_owner_id == 0 && resource_owner_tgid <= 0) {
+            resource_owner_id = owner->id;
+            resource_owner_tgid = owner->tgid;
+        }
     } else {
         resource_id = req.bo_handle;
+        resource_owner_id = owner->id;
+        resource_owner_tgid = owner->tgid;
     }
-    ret = virtio_gpu_user_resource_info(owner->id, owner->tgid, resource_id,
+    ret = virtio_gpu_user_resource_info(resource_owner_id,
+                                        resource_owner_tgid, resource_id,
                                         NULL, NULL, NULL, NULL);
     if (ret != 0)
         return ret;
@@ -1649,6 +1736,6 @@ static int gpu_drm_virtgpu_transfer(struct fb_gpu_render_owner *owner,
     transfer.offset = req.offset;
     transfer.stride = req.stride;
     transfer.layer_stride = req.layer_stride;
-    return virtio_gpu_user_transfer(owner->id, owner->tgid, &transfer,
-                                    from_host);
+    return virtio_gpu_user_transfer(resource_owner_id, resource_owner_tgid,
+                                    &transfer, from_host);
 }

@@ -305,7 +305,7 @@ static uint64 fb_bo_signal_present_locked(struct fb_gpu_bo_entry *bo)
 static uint64 fb_note_display_complete_locked(void)
 {
     uint64 seq = ++fb_state.stats.display_last_present;
-    uint64 now = r_time();
+    uint64 now = gpu_kms_monotonic_ns();
 
     if (seq == 0)
         seq = fb_state.stats.display_last_present = 1;
@@ -313,8 +313,8 @@ static uint64 fb_note_display_complete_locked(void)
     fb_state.stats.display_last_complete = seq;
     fb_state.stats.display_completions++;
     fb_state.stats.kms_vblank_sequence = seq;
-    fb_state.stats.kms_vblank_last_tick = now;
-    fb_state.stats.kms_vblank_timestamp_ns = now * 100ULL;
+    fb_state.stats.kms_vblank_last_tick = r_time();
+    fb_state.stats.kms_vblank_timestamp_ns = now;
     fb_state.stats.kms_vblank_synthetic = 0;
     fb_state.stats.kms_vblank_display_correlated = 1;
     fb_state.stats.kms_vblank_source_synthetic = 0;

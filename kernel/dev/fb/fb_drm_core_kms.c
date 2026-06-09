@@ -982,7 +982,7 @@ static int gpu_drm_event_queue_locked(struct fb_gpu_render_owner *owner,
     }
 
     if (timestamp_ns == 0)
-        timestamp_ns = r_time() * 100ULL;
+        timestamp_ns = gpu_kms_monotonic_ns();
     ev = &owner->drm_events[owner->drm_event_tail];
     memset(ev, 0, sizeof(*ev));
     ev->base.type = type;

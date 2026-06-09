@@ -143,11 +143,11 @@ static uint32 gpu_drm_build_connector_modes(
     virtio_gpu_probe_scanout(&host_w, &host_h);
     virtio_gpu_probe_edid_mode(&edid_w, &edid_h, &edid_refresh);
 
+    gpu_drm_connector_add_mode(modes, &count, current_w, current_h,
+                               60000, 1);
     if (edid_w != 0 && edid_h != 0)
         gpu_drm_connector_add_mode(modes, &count, edid_w, edid_h,
-                                   edid_refresh, 1);
-    gpu_drm_connector_add_mode(modes, &count, current_w, current_h,
-                               60000, edid_w == 0 || edid_h == 0);
+                                   edid_refresh, 0);
     if (host_w != 0 && host_h != 0)
         gpu_drm_connector_add_mode(modes, &count, host_w, host_h,
                                    60000, 0);
@@ -229,4 +229,3 @@ static int gpu_drm_mode_getconnector(uint64 arg)
         return -EFAULT;
     return 0;
 }
-

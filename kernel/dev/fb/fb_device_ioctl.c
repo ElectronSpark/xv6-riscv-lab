@@ -1,84 +1,106 @@
+enum { FB_GPU_DESTROY_BATCH = 64 };
+
 void fb_gpu_destroy_owner(pid_t owner_tgid)
 {
-    uint32 handles[FB_GPU_MAX_BOS];
-    int n = 0;
+    uint32 handles[FB_GPU_DESTROY_BATCH];
 
     if (owner_tgid <= 0)
         return;
 
-    spin_lock(&fb_state.lock);
-    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
-        struct fb_gpu_bo_entry *bo = &fb_state.bos[i];
+    for (;;) {
+        int n = 0;
 
-        if (!bo->in_use || bo->owner_tgid != owner_tgid)
-            continue;
-        handles[n++] = bo->handle;
+        spin_lock(&fb_state.lock);
+        for (int i = 0; i < FB_GPU_MAX_BOS && n < FB_GPU_DESTROY_BATCH; i++) {
+            struct fb_gpu_bo_entry *bo = &fb_state.bos[i];
+
+            if (!bo->in_use || bo->owner_tgid != owner_tgid)
+                continue;
+            handles[n++] = bo->handle;
+        }
+        spin_unlock(&fb_state.lock);
+
+        if (n == 0)
+            break;
+        for (int i = 0; i < n; i++)
+            (void)fb_bo_destroy(handles[i]);
     }
-    spin_unlock(&fb_state.lock);
-
-    for (int i = 0; i < n; i++)
-        (void)fb_bo_destroy(handles[i]);
 }
 
 void fb_gpu_destroy_render_owner(uint64 owner_id)
 {
-    struct fb_gpu_bo_entry *bos[FB_GPU_MAX_BOS];
-    int n = 0;
-
     if (owner_id == 0)
         return;
 
-    spin_lock(&fb_state.lock);
-    struct fb_gpu_render_owner *owner =
-        fb_gpu_render_owner_lookup_locked(owner_id, 0);
-    if (owner != NULL) {
-        for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
-            if (!owner->bo_handles[i].in_use)
-                continue;
-            bos[n++] = owner->bo_handles[i].bo;
-            memset(&owner->bo_handles[i], 0, sizeof(owner->bo_handles[i]));
-        }
-    } else {
-        for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
-            struct fb_gpu_bo_entry *bo = &fb_state.bos[i];
+    for (;;) {
+        struct fb_gpu_bo_entry *bos[FB_GPU_DESTROY_BATCH];
+        int borrowed[FB_GPU_DESTROY_BATCH];
+        int n = 0;
 
-            if (!bo->in_use || bo->owner_id != owner_id)
-                continue;
-            bos[n++] = bo;
-        }
-    }
-    spin_unlock(&fb_state.lock);
-
-    for (int i = 0; i < n; i++) {
-        if (bos[i] == NULL)
-            continue;
         spin_lock(&fb_state.lock);
-        if (bos[i]->in_use) {
-            bos[i]->in_use = 0;
-            bos[i]->dead = 1;
-            fb_ttm_resv_release_owner_if_last_locked(bos[i]);
-            if (bos[i]->stats_accounted)
-                fb_ttm_account_locked(bos[i]->ttm_mem_type, bos[i]->size, 0);
-            if (bos[i]->stats_accounted && bos[i]->ttm_pin_count != 0) {
-                if (fb_state.stats.ttm_pinned_bytes >= bos[i]->size)
-                    fb_state.stats.ttm_pinned_bytes -= bos[i]->size;
-                else
-                    fb_state.stats.ttm_pinned_bytes = 0;
-                bos[i]->ttm_pin_count = 0;
+        struct fb_gpu_render_owner *owner =
+            fb_gpu_render_owner_lookup_locked(owner_id, 0);
+        if (owner != NULL) {
+            for (int i = 0; i < FB_GPU_MAX_BOS && n < FB_GPU_DESTROY_BATCH; i++) {
+                if (!owner->bo_handles[i].in_use)
+                    continue;
+                bos[n] = owner->bo_handles[i].bo;
+                borrowed[n] = owner->bo_handles[i].borrowed;
+                n++;
+                memset(&owner->bo_handles[i], 0,
+                       sizeof(owner->bo_handles[i]));
             }
-            if (fb_state.stats.bo_handles > 0)
-                fb_state.stats.bo_handles--;
-            if (bos[i]->stats_accounted &&
-                fb_state.stats.bo_live_bytes >= bos[i]->size)
-                fb_state.stats.bo_live_bytes -= bos[i]->size;
-            else if (bos[i]->stats_accounted)
-                fb_state.stats.bo_live_bytes = 0;
-            if (bos[i]->dmabuf_attachment_accounted &&
-                fb_state.stats.dmabuf_live_attachments > 0)
-                fb_state.stats.dmabuf_live_attachments--;
+        } else {
+            for (int i = 0; i < FB_GPU_MAX_BOS && n < FB_GPU_DESTROY_BATCH; i++) {
+                struct fb_gpu_bo_entry *bo = &fb_state.bos[i];
+
+                if (!bo->in_use || bo->owner_id != owner_id)
+                    continue;
+                bos[n] = bo;
+                borrowed[n] = 0;
+                n++;
+            }
         }
         spin_unlock(&fb_state.lock);
-        fb_bo_put(bos[i]);
+
+        if (n == 0)
+            break;
+        for (int i = 0; i < n; i++) {
+            if (bos[i] == NULL)
+                continue;
+            if (borrowed[i]) {
+                fb_bo_put(bos[i]);
+                continue;
+            }
+            spin_lock(&fb_state.lock);
+            if (bos[i]->in_use) {
+                bos[i]->in_use = 0;
+                bos[i]->dead = 1;
+                fb_ttm_resv_release_owner_if_last_locked(bos[i]);
+                if (bos[i]->stats_accounted)
+                    fb_ttm_account_locked(bos[i]->ttm_mem_type,
+                                          bos[i]->size, 0);
+                if (bos[i]->stats_accounted && bos[i]->ttm_pin_count != 0) {
+                    if (fb_state.stats.ttm_pinned_bytes >= bos[i]->size)
+                        fb_state.stats.ttm_pinned_bytes -= bos[i]->size;
+                    else
+                        fb_state.stats.ttm_pinned_bytes = 0;
+                    bos[i]->ttm_pin_count = 0;
+                }
+                if (fb_state.stats.bo_handles > 0)
+                    fb_state.stats.bo_handles--;
+                if (bos[i]->stats_accounted &&
+                    fb_state.stats.bo_live_bytes >= bos[i]->size)
+                    fb_state.stats.bo_live_bytes -= bos[i]->size;
+                else if (bos[i]->stats_accounted)
+                    fb_state.stats.bo_live_bytes = 0;
+                if (bos[i]->dmabuf_attachment_accounted &&
+                    fb_state.stats.dmabuf_live_attachments > 0)
+                    fb_state.stats.dmabuf_live_attachments--;
+            }
+            spin_unlock(&fb_state.lock);
+            fb_bo_put(bos[i]);
+        }
     }
 }
 
@@ -151,12 +173,18 @@ static int fb_bo_destroy_owned(uint32 handle, uint64 owner_id,
 {
     struct fb_gpu_bo_entry *bo;
     struct fb_gpu_render_owner *owner;
+    int borrowed = 0;
     int removed;
 
     spin_lock(&fb_state.lock);
     owner = fb_gpu_render_owner_lookup_locked(owner_id, owner_tgid);
-    removed = fb_bo_owner_remove_handle_locked(owner, handle, &bo);
+    removed = fb_bo_owner_remove_handle_locked(owner, handle, &bo, &borrowed);
     if (removed == 0) {
+        if (borrowed) {
+            spin_unlock(&fb_state.lock);
+            fb_bo_put(bo);
+            return 0;
+        }
         if (bo != NULL && bo->in_use) {
             bo->in_use = 0;
             bo->dead = 1;

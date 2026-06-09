@@ -1,5 +1,5 @@
 
-#define FB_GPU_MAX_BOS 128
+#define FB_GPU_MAX_BOS 4096
 #define FB_GPU_MAX_KMS_FBS 32
 #define FB_GPU_MAX_SYNCOBJS 128
 #define FB_GPU_MAX_SYNCOBJ_STATES 128
@@ -570,6 +570,17 @@ static void gpu_kms_sample_vblank_locked(uint64 min_sequence,
 static int gpu_kms_wait_vblank_sequence(uint64 min_sequence,
                                         uint64 *sequence_out,
                                         uint64 *timestamp_ns_out);
+static uint64 gpu_kms_monotonic_ns(void);
+
+static uint64 gpu_kms_monotonic_ns(void)
+{
+    extern uint64 __timebase_frequency;
+    uint64 ticks = r_time();
+    uint64 freq = __timebase_frequency ? __timebase_frequency : 10000000UL;
+
+    return (ticks / freq) * 1000000000ULL +
+           ((ticks % freq) * 1000000000ULL) / freq;
+}
 
 static uint64 fb_gpu_fence_next_context_locked(void)
 {
@@ -1020,6 +1031,7 @@ struct fb_gpu_render_owner {
     uint32 next_bo_handle;
     struct {
         int in_use;
+        int borrowed;
         uint32 handle;
         struct fb_gpu_bo_entry *bo;
     } bo_handles[FB_GPU_MAX_BOS];

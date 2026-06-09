@@ -162,10 +162,52 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     }
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_SUBMIT_3D);
+    if (resources != NULL) {
+        for (uint32 i = 0; i < resource_count; i++) {
+            struct virtio_gpu_resource *res;
+            int already_attached = 0;
+
+            if (resources[i] == 0)
+                continue;
+
+            spin_lock(&g->lock);
+            res = virtio_gpu_lookup_resource_locked(g, resources[i]);
+            if (res == NULL ||
+                (!virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                           owner_id, owner_tgid) &&
+                 res->ctx_id != ctx_id)) {
+                spin_unlock(&g->lock);
+                ret = -ENOENT;
+                goto out_unlock_submit;
+            }
+            already_attached = res->ctx_id == ctx_id;
+            spin_unlock(&g->lock);
+
+            if (already_attached)
+                continue;
+
+            ret = virtio_gpu_context_resource(
+                g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id, resources[i]);
+            if (ret != 0) {
+                ret = -EIO;
+                goto out_unlock_submit;
+            }
+
+            spin_lock(&g->lock);
+            res = virtio_gpu_lookup_resource_locked(g, resources[i]);
+            if (res != NULL &&
+                virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                         owner_id, owner_tgid))
+                res->ctx_id = ctx_id;
+            spin_unlock(&g->lock);
+        }
+    }
+
     if (async_submit)
         ret = virtio_gpu_submit_3d_async_post_prepared(g, &prep);
     else
         ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, fence_id);
+out_unlock_submit:
     virtio_gpu_op_unlock(g);
     if (ret != 0)
         virtio_gpu_async_submit_free(&prep);
@@ -577,6 +619,13 @@ int virtio_gpu_user_resource_attach(uint64 owner_id, pid_t owner_tgid,
 
     ret = virtio_gpu_context_resource(g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
                                       ctx_id, resource_id);
+    if (ret == 0) {
+        spin_lock(&g->lock);
+        res = virtio_gpu_lookup_resource_locked(g, resource_id);
+        if (res != NULL)
+            res->ctx_id = ctx_id;
+        spin_unlock(&g->lock);
+    }
     virtio_gpu_op_unlock(g);
     return ret == 0 ? 0 : -EIO;
 }
@@ -1171,9 +1220,8 @@ int virtio_gpu_user_transfer(uint64 owner_id, pid_t owner_tgid,
     cmd->offset = req->offset;
     cmd->resource_id = req->resource_id;
     cmd->level = req->level;
-    cmd->stride = req->stride ? req->stride : res->width * sizeof(uint32);
-    cmd->layer_stride = req->layer_stride ? req->layer_stride :
-        cmd->stride * res->height;
+    cmd->stride = req->stride;
+    cmd->layer_stride = req->layer_stride;
 
     /*
      * The compositor's per-frame chrome upload to the bound scanout resource is

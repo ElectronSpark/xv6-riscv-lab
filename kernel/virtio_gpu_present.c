@@ -1595,6 +1595,8 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
     uint32 present_h = 0;
     uint32 read_ctx_id = 0;
     int ret = 0;
+    int read_bound = 0;
+    static int read_logs;
 
     if (dst == NULL || w == 0 || h == 0 || dst_pitch < w * sizeof(uint32))
         return -EINVAL;
@@ -1604,6 +1606,18 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PROBE);
     spin_lock(&g->lock);
     res = g->scanout_resource;
+    if (g->bound_scanout_resource_id != 0) {
+        struct virtio_gpu_resource *bound =
+            virtio_gpu_lookup_resource_locked(g, g->bound_scanout_resource_id);
+
+        if (bound != NULL && bound->attached &&
+            (bound->backing != NULL ||
+             (bound->pages != NULL && bound->npages != 0)) &&
+            bound->width != 0 && bound->height != 0) {
+            res = bound;
+            read_bound = 1;
+        }
+    }
     present_resource_id = g->diagnostic_present_resource_id;
     present_ctx_id = g->diagnostic_present_ctx_id;
     present_src_x = g->diagnostic_present_src_x;
@@ -1643,21 +1657,49 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
         struct virtio_gpu_ctrl_hdr *resp =
             (struct virtio_gpu_ctrl_hdr *)g->resp_page;
 
-        read_ctx_id = res->ctx_id;
-        if (read_ctx_id == 0) {
-            ret = virtio_gpu_ensure_present_context(g, &read_ctx_id);
-            if (ret != 0)
-                goto out;
+        read_ctx_id = virtio_gpu_cmdline_enabled("virtio_gpu_scanout_read_ctx0") ?
+            0 : res->ctx_id;
+	        if (read_ctx_id == 0) {
+	            ret = virtio_gpu_ensure_present_context(g, &read_ctx_id);
+	            if (ret != 0)
+	                goto out;
             ret = virtio_gpu_context_resource(
                 g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, read_ctx_id, res->id);
             if (ret != 0) {
                 ret = -EIO;
-                goto out;
-            }
-        }
-        memset(transfer, 0, sizeof(*transfer));
-        transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
-        transfer->hdr.ctx_id = read_ctx_id;
+	                goto out;
+	            }
+	        }
+	        /*
+	         * Some virgl hosts keep the scanout resource's guest backing stale
+	         * until a small readback on that resource establishes the current host
+	         * cache line.  Prime the resource before the full scanout read so
+	         * framebuffer snapshots observe the same contents as the display.
+	         */
+	        memset(transfer, 0, sizeof(*transfer));
+	        transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
+	        transfer->hdr.ctx_id = read_ctx_id;
+	        transfer->box.x = x + w / 2;
+	        transfer->box.y = y + h / 2;
+	        transfer->box.z = 0;
+	        transfer->box.w = 1;
+	        transfer->box.h = 1;
+	        transfer->box.d = 1;
+	        transfer->offset = (uint64)transfer->box.y * src_pitch +
+	                           (uint64)transfer->box.x * sizeof(uint32);
+	        transfer->resource_id = res->id;
+	        transfer->level = 0;
+	        transfer->stride = src_pitch;
+	        transfer->layer_stride = (uint64)src_pitch * res->height;
+	        if (virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0,
+	                              false, resp, sizeof(*resp),
+	                              VIRTIO_GPU_RESP_OK_NODATA) != 0) {
+	            ret = -EIO;
+	            goto out;
+	        }
+	        memset(transfer, 0, sizeof(*transfer));
+	        transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
+	        transfer->hdr.ctx_id = read_ctx_id;
         transfer->box.x = x;
         transfer->box.y = y;
         transfer->box.z = 0;
@@ -1676,6 +1718,26 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
             ret = -EIO;
             goto out;
         }
+    }
+
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_scanout_read_diag") &&
+        read_logs < 12) {
+        uint32 p0 = virtio_gpu_resource_sample_pixel(res, x + w / 2,
+                                                     y + h / 2);
+        uint32 p1 = virtio_gpu_resource_sample_pixel(res, x + w / 4,
+                                                     y + h / 4);
+        uint32 p2 = virtio_gpu_resource_sample_pixel(res, x + (w * 3) / 4,
+                                                     y + h / 4);
+        uint32 p3 = virtio_gpu_resource_sample_pixel(res, x + w / 4,
+                                                     y + (h * 3) / 4);
+        uint32 p4 = virtio_gpu_resource_sample_pixel(res,
+                                                     x + (w * 3) / 4,
+                                                     y + (h * 3) / 4);
+
+        printf("virtio_gpu: scanout-read resource=%u bound=%d ctx=%u is_3d=%d backing=%p pages=%u rect=%u,%u %ux%u samples=%08x,%08x,%08x,%08x,%08x\n",
+               res->id, read_bound, read_ctx_id, res->is_3d, res->backing,
+               res->npages, x, y, w, h, p0, p1, p2, p3, p4);
+        read_logs++;
     }
 
     if (res->backing != NULL) {
@@ -1789,4 +1851,3 @@ out:
     virtio_gpu_op_unlock(g);
     return ret;
 }
-

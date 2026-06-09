@@ -73,6 +73,9 @@ typedef struct thread_signal {
     // signal trap frames would be put at the user stack.
     // This is used to restore the user context when a signal is delivered.
     uint64 sig_ucontext; // Address of the signal user context
+    int sig_sigsuspend_active; // sigreturn for wake frame restores saved mask
+    sigset_t sig_sigsuspend_saved_mask; // Original mask for active sigsuspend
+    uint64 sig_sigsuspend_ucontext; // Signal frame that woke sigsuspend
     stack_t sig_stack;   // Alternate signal stack
     uint64 esignal;      // Signal to be sent to parent on exit
     int stop_signal;     // Signal number that caused THREAD_STOPPED

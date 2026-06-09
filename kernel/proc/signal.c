@@ -337,6 +337,9 @@ void sigpending_clone(struct thread_signal *dst, struct thread_signal *src,
     // Copy per-thread signal mask from parent
     dst->sig_mask = src->sig_mask;
     dst->sig_saved_mask = src->sig_saved_mask;
+    dst->sig_sigsuspend_active = 0;
+    dst->sig_sigsuspend_saved_mask = 0;
+    dst->sig_sigsuspend_ucontext = 0;
 
     if (clone_flags & CLONE_THREAD) {
         // For CLONE_THREAD, the child does not send a signal to the parent
@@ -953,14 +956,19 @@ int signal_restore(struct thread *p, ucontext_t *context) {
     sigacts_lock(sa);
 
     p->signal.sig_stack = context->uc_stack;
+    bool restore_sigsuspend = p->signal.sig_sigsuspend_active &&
+                              p->signal.sig_sigsuspend_ucontext != 0 &&
+                              p->signal.sig_ucontext ==
+                                  p->signal.sig_sigsuspend_ucontext;
     p->signal.sig_ucontext = (uint64)context->uc_link;
 
-    if (p->signal.sig_ucontext == 0) {
-        p->signal.sig_mask = p->signal.sig_saved_mask; // Reset to original mask
+    if (restore_sigsuspend) {
+        p->signal.sig_mask = p->signal.sig_sigsuspend_saved_mask;
+        p->signal.sig_sigsuspend_active = 0;
+        p->signal.sig_sigsuspend_saved_mask = 0;
+        p->signal.sig_sigsuspend_ucontext = 0;
     } else {
         p->signal.sig_mask = context->uc_sigmask;
-        p->signal.sig_mask |=
-            p->signal.sig_saved_mask; // Update the signal mask
     }
 
     sigdelset(&p->signal.sig_mask, SIGKILL);
@@ -1285,6 +1293,10 @@ static int __deliver_signal(struct thread *p, int signo, ksiginfo_t *info,
         // If the thread has user space, push the signal to its user stack
         // This may call vm_try_growstack which needs vm_wlock (sleep lock)
         ret = push_sigframe(p, signo, sa, info);
+        if (ret == 0 && p->signal.sig_sigsuspend_active &&
+            p->signal.sig_sigsuspend_ucontext == 0) {
+            p->signal.sig_sigsuspend_ucontext = p->signal.sig_ucontext;
+        }
     }
 
     // Acquire sigacts_lock to update signal masks
@@ -1813,6 +1825,7 @@ int sigsuspend(const sigset_t *mask) {
     // Save the current mask and set the temporary one
     sigset_t saved = p->signal.sig_mask;
     p->signal.sig_saved_mask = p->signal.sig_mask; // Also save original
+    p->signal.sig_sigsuspend_saved_mask = saved;
     p->signal.sig_mask = *mask;
     // SIGKILL and SIGSTOP cannot be blocked
     sigdelset(&p->signal.sig_mask, SIGKILL);
@@ -1831,11 +1844,16 @@ int sigsuspend(const sigset_t *mask) {
         // Signals already pending and unblocked — restore and return
         p->signal.sig_mask = saved;
         p->signal.sig_saved_mask = saved;
+        p->signal.sig_sigsuspend_active = 0;
+        p->signal.sig_sigsuspend_saved_mask = 0;
+        p->signal.sig_sigsuspend_ucontext = 0;
         recalc_sigpending_tsk(p);
         sigacts_unlock(sa);
         return -EINTR;
     }
 
+    p->signal.sig_sigsuspend_active = 1;
+    p->signal.sig_sigsuspend_ucontext = 0;
     recalc_sigpending_tsk(p);
     sigacts_unlock(sa);
 

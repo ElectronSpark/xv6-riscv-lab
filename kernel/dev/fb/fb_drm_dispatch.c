@@ -31,10 +31,13 @@ static int gpu_drm_gem_close(struct fb_gpu_render_owner *owner, uint64 arg)
 }
 
 static int gpu_drm_execbuffer_resource_id_for_handle(
-    struct fb_gpu_render_owner *owner, uint32 handle, uint32 *resource_id)
+    struct fb_gpu_render_owner *owner, uint32 handle, uint32 *resource_id,
+    uint64 *resource_owner_id, pid_t *resource_owner_tgid, int *imported)
 {
     struct fb_gpu_bo_entry *bo;
     uint32 id = 0;
+    uint64 id_owner = 0;
+    pid_t id_tgid = 0;
     int ret;
 
     if (owner == NULL)
@@ -45,14 +48,31 @@ static int gpu_drm_execbuffer_resource_id_for_handle(
     bo = fb_bo_get_owned(handle, owner->id, owner->tgid);
     if (bo != NULL) {
         id = bo->virtio_resource_id;
+        id_owner = bo->virtio_resource_owner_id;
+        id_tgid = bo->virtio_resource_owner_tgid;
+        if (id == 0 && bo->gem != NULL) {
+            id = bo->gem->virtio_resource_id;
+            id_owner = bo->gem->virtio_resource_owner_id;
+            id_tgid = bo->gem->virtio_resource_owner_tgid;
+        }
         fb_bo_put(bo);
         if (id == 0)
             return -ENOENT;
-        ret = virtio_gpu_user_resource_info(owner->id, owner->tgid, id,
+        if (id_owner == 0 && id_tgid <= 0) {
+            id_owner = owner->id;
+            id_tgid = owner->tgid;
+        }
+        ret = virtio_gpu_user_resource_info(id_owner, id_tgid, id,
                                             NULL, NULL, NULL, NULL);
         if (ret != 0)
             return ret;
         *resource_id = id;
+        if (resource_owner_id != NULL)
+            *resource_owner_id = id_owner;
+        if (resource_owner_tgid != NULL)
+            *resource_owner_tgid = id_tgid;
+        if (imported != NULL)
+            *imported = id_owner != owner->id;
         return 0;
     }
 
@@ -61,6 +81,12 @@ static int gpu_drm_execbuffer_resource_id_for_handle(
     if (ret != 0)
         return ret;
     *resource_id = handle;
+    if (resource_owner_id != NULL)
+        *resource_owner_id = owner->id;
+    if (resource_owner_tgid != NULL)
+        *resource_owner_tgid = owner->tgid;
+    if (imported != NULL)
+        *imported = 0;
     return 0;
 }
 
@@ -629,6 +655,8 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_VIRTGPU_RESOURCE_INFO: {
         struct drm_virtgpu_resource_info_compat req;
         uint32 resource_id = 0;
+        uint64 resource_owner_id = 0;
+        pid_t resource_owner_tgid = 0;
         uint32 blob_mem = 0;
         uint64 size = 0;
         int ret;
@@ -638,15 +666,20 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         ret = gpu_drm_execbuffer_resource_id_for_handle(owner, req.bo_handle,
-                                                        &resource_id);
+                                                        &resource_id,
+                                                        &resource_owner_id,
+                                                        &resource_owner_tgid,
+                                                        NULL);
         if (ret != 0)
             return ret;
-        ret = virtio_gpu_user_resource_info(owner->id, owner->tgid,
+        ret = virtio_gpu_user_resource_info(resource_owner_id,
+                                            resource_owner_tgid,
                                             resource_id, NULL, NULL, NULL,
                                             &size);
         if (ret != 0)
             return ret;
-        ret = virtio_gpu_user_resource_blob_mem(owner->id, owner->tgid,
+        ret = virtio_gpu_user_resource_blob_mem(resource_owner_id,
+                                                resource_owner_tgid,
                                                 resource_id, &blob_mem);
         if (ret != 0)
             return ret;
@@ -664,6 +697,8 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_VIRTGPU_WAIT: {
         struct drm_virtgpu_3d_wait_compat req;
         uint32 resource_id = 0;
+        uint64 resource_owner_id = 0;
+        pid_t resource_owner_tgid = 0;
         uint64 wait_for = 0;
         uint64 signaled = 0;
         int ret;
@@ -672,11 +707,14 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         if ((req.flags & ~VIRTGPU_WAIT_NOWAIT) != 0)
             return -EINVAL;
         ret = gpu_drm_execbuffer_resource_id_for_handle(owner, req.handle,
-                                                        &resource_id);
+                                                        &resource_id,
+                                                        &resource_owner_id,
+                                                        &resource_owner_tgid,
+                                                        NULL);
         if (ret != 0)
             return ret;
-        ret = virtio_gpu_user_resource_last_submit_fence(owner->id,
-                                                        owner->tgid,
+        ret = virtio_gpu_user_resource_last_submit_fence(resource_owner_id,
+                                                        resource_owner_tgid,
                                                         resource_id,
                                                         &wait_for);
         if (ret != 0)
@@ -743,6 +781,9 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         uint32 *cmds;
         uint32 *handles = NULL;
         uint32 *resources = NULL;
+        uint32 alloc_len = PGSIZE;
+        uint32 submit_flags = 0;
+        int order = 0;
         uint64 fence = 0, signaled = 0;
         int out_fence_fd = -1;
         int ret;
@@ -770,11 +811,19 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         if ((req.num_bo_handles != 0 && req.bo_handles == 0) ||
             req.num_bo_handles > 4096)
             return -EINVAL;
-        cmds = kvmalloc(req.size);
+
+        while (alloc_len < req.size) {
+            if (order >= PAGE_BUDDY_MAX_ORDER)
+                return -ENOMEM;
+            order++;
+            alloc_len <<= 1;
+        }
+
+        cmds = page_alloc(order, PAGE_TYPE_ANON);
         if (cmds == NULL)
             return -ENOMEM;
         if (either_copyin(cmds, 1, req.command, req.size) < 0) {
-            kvfree(cmds);
+            page_free(cmds, order);
             return -EFAULT;
         }
         if (req.num_bo_handles != 0) {
@@ -785,28 +834,45 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             if (handles == NULL || resources == NULL) {
                 kvfree(handles);
                 kvfree(resources);
-                kvfree(cmds);
+                page_free(cmds, order);
                 return -ENOMEM;
             }
             if (either_copyin(handles, 1, req.bo_handles, bytes) < 0) {
                 kvfree(handles);
                 kvfree(resources);
-                kvfree(cmds);
+                page_free(cmds, order);
                 return -EFAULT;
             }
             for (uint32 i = 0; i < req.num_bo_handles; i++) {
+                int imported = 0;
+
                 ret = gpu_drm_execbuffer_resource_id_for_handle(
-                    owner, handles[i], &resources[i]);
+                    owner, handles[i], &resources[i], NULL, NULL, &imported);
                 if (ret != 0) {
                     kvfree(handles);
                     kvfree(resources);
-                    kvfree(cmds);
+                    page_free(cmds, order);
                     return ret;
+                }
+                if (imported) {
+                    ret = virtio_gpu_user_resource_attach(owner->id,
+                                                          owner->tgid,
+                                                          owner->default_ctx_id,
+                                                          resources[i], 1);
+                    if (ret != 0) {
+                        kvfree(handles);
+                        kvfree(resources);
+                        page_free(cmds, order);
+                        return ret;
+                    }
                 }
             }
         }
+        if (fb_cmdline_enabled("vgpu_async_pf") ||
+            fb_cmdline_enabled("virtio_gpu_async_submit_3d"))
+            submit_flags |= FB_GPU_VIRGL_SUBMIT_ASYNC;
         ret = virtio_gpu_user_submit(owner->id, owner->tgid,
-                                     owner->default_ctx_id, 0, cmds,
+                                     owner->default_ctx_id, submit_flags, cmds,
                                      req.size / sizeof(uint32), resources,
                                      req.num_bo_handles, &fence, &signaled);
         if (ret == 0 &&
@@ -828,7 +894,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         }
         kvfree(handles);
         kvfree(resources);
-        kvfree(cmds);
+        page_free(cmds, order);
         return ret;
     }
     case DRM_IOCTL_NOUVEAU_GETPARAM:
