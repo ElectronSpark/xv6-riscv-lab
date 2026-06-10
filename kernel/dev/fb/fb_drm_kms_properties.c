@@ -379,6 +379,48 @@ static int gpu_kms_copy_bo_cursor_pixels(struct fb_gpu_bo_entry *bo,
     return 0;
 }
 
+static void gpu_kms_record_cursor_pixels(const uint32 *pixels, uint32 width,
+                                         uint32 height, uint32 hot_x,
+                                         uint32 hot_y)
+{
+    uint64 checksum = 1469598103934665603ULL;
+    uint64 alpha_nonzero = 0;
+    uint64 alpha_zero = 0;
+    uint64 alpha_opaque = 0;
+    uint64 rgb_nonzero = 0;
+    uint64 count = (uint64)width * height;
+
+    for (uint64 i = 0; i < count; i++) {
+        uint32 pixel = pixels[i];
+        uint32 alpha = pixel >> 24;
+
+        checksum ^= pixel;
+        checksum *= 1099511628211ULL;
+        if (alpha == 0)
+            alpha_zero++;
+        else
+            alpha_nonzero++;
+        if (alpha == 0xff)
+            alpha_opaque++;
+        if ((pixel & 0x00ffffffU) != 0)
+            rgb_nonzero++;
+    }
+
+    fb_state.stats.kms_cursor_uploads++;
+    fb_state.stats.kms_cursor_last_width = width;
+    fb_state.stats.kms_cursor_last_height = height;
+    fb_state.stats.kms_cursor_last_hot_x = hot_x;
+    fb_state.stats.kms_cursor_last_hot_y = hot_y;
+    fb_state.stats.kms_cursor_last_checksum = checksum;
+    fb_state.stats.kms_cursor_last_alpha_nonzero = alpha_nonzero;
+    fb_state.stats.kms_cursor_last_alpha_zero = alpha_zero;
+    fb_state.stats.kms_cursor_last_alpha_opaque = alpha_opaque;
+    fb_state.stats.kms_cursor_last_rgb_nonzero = rgb_nonzero;
+    fb_state.stats.kms_cursor_last_first_pixel = count != 0 ? pixels[0] : 0;
+    fb_state.stats.kms_cursor_last_center_pixel =
+        count != 0 ? pixels[(height / 2) * width + (width / 2)] : 0;
+}
+
 static int gpu_kms_upload_cursor_from_bo(struct fb_gpu_render_owner *owner,
                                          uint32 handle, uint32 width,
                                          uint32 height, uint32 pitch,
@@ -408,9 +450,13 @@ static int gpu_kms_upload_cursor_from_bo(struct fb_gpu_render_owner *owner,
     ret = gpu_kms_copy_bo_cursor_pixels(bo, width, height, pitch, offset,
                                         pixels);
     fb_bo_put(bo);
-    if (ret == 0)
+    if (ret == 0) {
+        gpu_kms_record_cursor_pixels(pixels, width, height, hot_x, hot_y);
         ret = virtio_gpu_user_set_cursor(pixels, width, height, hot_x,
                                          hot_y);
+    }
+    if (ret != 0)
+        fb_state.stats.kms_cursor_upload_failures++;
     kvfree(pixels);
     return ret;
 }
@@ -1000,4 +1046,3 @@ struct gpu_kms_obj_props {
 };
 
 #define GPU_KMS_MAX_IN_FENCES 8
-

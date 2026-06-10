@@ -1705,6 +1705,19 @@ struct fb_gpu_stats {
     uint64 dxg_display_bind_provider_pending_syncobject_fence_gpu_va_source; /* source */
     uint64 dxg_display_bind_provider_pending_syncobject_fence_map_size; /* map bytes */
     uint64 dxg_display_bind_provider_pending_owner_close_cancelled; /* owner close */
+    uint64 kms_cursor_uploads; /* KMS cursor images handed to virtio */
+    uint64 kms_cursor_upload_failures; /* KMS cursor image upload failures */
+    uint64 kms_cursor_last_width; /* last KMS cursor image width */
+    uint64 kms_cursor_last_height; /* last KMS cursor image height */
+    uint64 kms_cursor_last_hot_x; /* last KMS cursor hotspot X */
+    uint64 kms_cursor_last_hot_y; /* last KMS cursor hotspot Y */
+    uint64 kms_cursor_last_checksum; /* rolling checksum of last cursor */
+    uint64 kms_cursor_last_alpha_nonzero; /* pixels with alpha != 0 */
+    uint64 kms_cursor_last_alpha_zero; /* pixels with alpha == 0 */
+    uint64 kms_cursor_last_alpha_opaque; /* pixels with alpha == 255 */
+    uint64 kms_cursor_last_rgb_nonzero; /* visible-color candidate pixels */
+    uint64 kms_cursor_last_first_pixel; /* first ARGB8888/BGRA-memory pixel */
+    uint64 kms_cursor_last_center_pixel; /* center ARGB8888/BGRA-memory pixel */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */
