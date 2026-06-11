@@ -835,6 +835,14 @@ uint64 sys_sched_setaffinity(void) {
 /* ================================================================== */
 
 uint64 sys_sched_yield(void) {
+    struct sched_entity *se = current ? current->sched_entity : NULL;
+
+    if (se && se->rq && se->sched_class && se->sched_class->yield_task) {
+        int intr = rq_lock_current_irqsave();
+
+        rq_yield_task();
+        rq_unlock_current_irqrestore(intr);
+    }
     scheduler_yield();
     return 0;
 }

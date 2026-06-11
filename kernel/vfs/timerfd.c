@@ -33,6 +33,7 @@
 #include "proc/sched.h"
 #include "proc/workqueue.h"
 #include "timer/goldfish_rtc.h"
+#include "cmdline.h"
 
 /* Flags from <sys/timerfd.h> — match musl */
 #define TFD_NONBLOCK      O_NONBLOCK
@@ -77,10 +78,47 @@ struct timerfd_ctx {
     bool            notify_pending;
     bool            work_pending; /* deferred work is queued or running */
     struct vfs_file *file;      /* back-pointer for kqueue notification */
+    char            owner_name[16];
+    pid_t           owner_pid;
 };
 
 static struct vfs_file_ops timerfd_file_ops;
 static struct workqueue *timerfd_wq;
+
+static int webkit_timerfd_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_timerfd_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static bool webkit_timerfd_trace_ctx(struct timerfd_ctx *ctx)
+{
+    if (!webkit_timerfd_trace_enabled() || ctx == NULL)
+        return false;
+
+    return strncmp(ctx->owner_name, "MiniBrowser", 11) == 0 ||
+           strncmp(ctx->owner_name, "WebKit", 6) == 0 ||
+           strncmp(ctx->owner_name, "webkitgpusmoke", 14) == 0;
+}
+
+static bool webkit_timerfd_trace_current(void)
+{
+    if (!webkit_timerfd_trace_enabled() || current == NULL)
+        return false;
+
+    return strncmp(current->name, "MiniBrowser", 11) == 0 ||
+           strncmp(current->name, "WebKit", 6) == 0 ||
+           strncmp(current->name, "webkitgpusmoke", 14) == 0;
+}
 
 static bool timerfd_clock_supported(int clockid)
 {
@@ -259,6 +297,15 @@ static void timerfd_timer_callback(struct timer_node *tn)
     tq_wakeup_all(&ctx->rq, 0, 0);
     spin_unlock(&ctx->lock);
 
+    if (webkit_timerfd_trace_ctx(ctx)) {
+        printf("timerfd: expire owner=%s pid=%d clock=%d now_ns=%lu "
+               "count=%lu expirations=%lu interval_ns=%lu next_ns=%lu "
+               "rearm=%d\n",
+               ctx->owner_name, ctx->owner_pid, ctx->clockid, now_ns, count,
+               ctx->expirations, ctx->interval_ns, ctx->next_expiration_ns,
+               need_rearm ? 1 : 0);
+    }
+
     /* Defer kqueue notification and repeating timer re-arm out of timer
      * interrupt context.  kqueue locks may be held by the interrupted thread.
      */
@@ -299,6 +346,14 @@ static ssize_t timerfd_read(struct vfs_file *file, char *buf, size_t count,
     uint64 val = ctx->expirations;
     ctx->expirations = 0;
     spin_unlock(&ctx->lock);
+
+    if (webkit_timerfd_trace_ctx(ctx)) {
+        printf("timerfd: read owner=%s pid=%d reader=%s reader_pid=%d "
+               "count=%lu\n",
+               ctx->owner_name, ctx->owner_pid,
+               current ? current->name : "(none)", current ? current->pid : -1,
+               val);
+    }
 
     if (user) {
         if (vm_copyout(current->vm, (uint64)buf, (char *)&val,
@@ -406,6 +461,11 @@ uint64 sys_timerfd_create(void)
     ctx->armed = false;
     ctx->cancelled = false;
     ctx->expirations = 0;
+    if (current != NULL) {
+        memmove(ctx->owner_name, current->name, sizeof(ctx->owner_name));
+        ctx->owner_name[sizeof(ctx->owner_name) - 1] = '\0';
+        ctx->owner_pid = current->pid;
+    }
 
     int file_flags = O_RDWR;
     if (flags & TFD_NONBLOCK)
@@ -424,6 +484,11 @@ uint64 sys_timerfd_create(void)
     if (flags & TFD_CLOEXEC)
         vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
     spin_unlock(&current->fdtable->lock);
+
+    if (webkit_timerfd_trace_ctx(ctx)) {
+        printf("timerfd: create owner=%s pid=%d fd=%d clock=%d flags=0x%x\n",
+               ctx->owner_name, ctx->owner_pid, fd, clockid, flags);
+    }
 
     return (uint64)fd;
 }
@@ -470,6 +535,13 @@ uint64 sys_timerfd_settime(void)
 
     bool notify_now = false;
     bool queue_deferred = false;
+    bool trace = webkit_timerfd_trace_current();
+    bool trace_armed = false;
+    uint64 trace_now_ns = 0;
+    uint64 trace_delay_ns = 0;
+    uint64 trace_delay_ms = 0;
+    uint64 trace_next_ns = 0;
+    uint64 trace_expirations = 0;
 
     spin_lock(&ctx->lock);
 
@@ -555,6 +627,13 @@ uint64 sys_timerfd_settime(void)
             if (delay_ms == 0)
                 delay_ms = 1; /* minimum 1ms to ensure timer fires */
 
+            trace_now_ns = now_ns;
+            trace_delay_ns = delay_ns;
+            trace_delay_ms = delay_ms;
+            trace_next_ns = ctx->next_expiration_ns;
+            trace_expirations = ctx->expirations;
+            trace_armed = true;
+
             ctx->armed = true;
             spin_unlock(&ctx->lock);
             int timer_ret = sched_timer_set_cb(&ctx->timer, delay_ms,
@@ -568,10 +647,28 @@ uint64 sys_timerfd_settime(void)
             }
         } else {
             ctx->armed = false;
+            trace_now_ns = timerfd_now_ns(ctx->clockid);
+            trace_next_ns = ctx->next_expiration_ns;
+            trace_expirations = ctx->expirations;
         }
+    } else {
+        trace_now_ns = timerfd_now_ns(ctx->clockid);
+        trace_next_ns = ctx->next_expiration_ns;
+        trace_expirations = ctx->expirations;
     }
 
     spin_unlock(&ctx->lock);
+    if (trace) {
+        printf("timerfd: settime proc=%s pid=%d fd=%d owner=%s owner_pid=%d "
+               "clock=%d flags=0x%x value_ns=%lu interval_ns=%lu "
+               "now_ns=%lu delay_ns=%lu delay_ms=%lu next_ns=%lu "
+               "armed=%d expirations=%lu notify_now=%d\n",
+               current ? current->name : "(none)",
+               current ? current->pid : -1, fd, ctx->owner_name,
+               ctx->owner_pid, ctx->clockid, flags, value_ns, interval_ns,
+               trace_now_ns, trace_delay_ns, trace_delay_ms, trace_next_ns,
+               trace_armed ? 1 : 0, trace_expirations, notify_now ? 1 : 0);
+    }
     if (queue_deferred) {
         if (timerfd_wq == NULL || !queue_work(timerfd_wq, &ctx->rearm_work)) {
             vfs_file_knote_notify(fp, EVFILT_READ, 0);
