@@ -26,6 +26,7 @@
 #include "timer/timer.h"
 #include "timer/goldfish_rtc.h"
 #include "proc/pgroup.h"
+#include "vfs/file.h"
 
 /* Forward declarations for arg helpers */
 void argint(int n, int *ip);
@@ -1098,6 +1099,57 @@ uint64 sys_membarrier(void) {
 }
 
 /* ================================================================== */
+/*  kcmp                                                              */
+/* ================================================================== */
+
+#define KCMP_FILE 0
+
+uint64 sys_kcmp(void)
+{
+    int pid1, pid2, type;
+    uint64 idx1, idx2;
+    struct vfs_file *file1;
+    struct vfs_file *file2;
+    uint64 self_pid;
+    int ret;
+
+    argint(0, &pid1);
+    argint(1, &pid2);
+    argint(2, &type);
+    argaddr(3, &idx1);
+    argaddr(4, &idx2);
+
+    if (type != KCMP_FILE)
+        return (uint64)-EINVAL;
+    if (idx1 >= NOFILE || idx2 >= NOFILE)
+        return (uint64)-EBADF;
+    if (current == NULL || current->fdtable == NULL)
+        return (uint64)-ESRCH;
+
+    self_pid = (uint64)thread_tgid(current);
+    if (pid1 != (int)self_pid || pid2 != (int)self_pid)
+        return (uint64)-EPERM;
+
+    file1 = vfs_fdtable_get_file(current->fdtable, (int)idx1);
+    if (file1 == NULL)
+        return (uint64)-EBADF;
+    file2 = vfs_fdtable_get_file(current->fdtable, (int)idx2);
+    if (file2 == NULL) {
+        vfs_fput(file1);
+        return (uint64)-EBADF;
+    }
+
+    if (file1 == file2)
+        ret = 0;
+    else
+        ret = (file1 < file2) ? 1 : 2;
+
+    vfs_fput(file2);
+    vfs_fput(file1);
+    return (uint64)ret;
+}
+
+/* ================================================================== */
 /*  Linux optional/privileged compatibility syscalls                   */
 /* ================================================================== */
 
@@ -1235,7 +1287,6 @@ LINUX_PRIVILEGED_STUB(clock_adjtime)
 LINUX_PRIVILEGED_STUB(setns)
 LINUX_INVALID_STUB(process_vm_readv)
 LINUX_INVALID_STUB(process_vm_writev)
-LINUX_INVALID_STUB(kcmp)
 LINUX_PRIVILEGED_STUB(finit_module)
 LINUX_INVALID_STUB(seccomp)
 LINUX_PRIVILEGED_STUB(kexec_file_load)
