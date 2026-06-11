@@ -1044,7 +1044,7 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     should_wait_src_fence = src_submit_fence != 0 &&
         src_submit_fence > completed_fence &&
         virtio_gpu_async_pending(g) &&
-        virtio_gpu_async_newest_fence(g) <= src_submit_fence;
+        virtio_gpu_async_newest_fence(g) >= src_submit_fence;
     spin_unlock(&g->lock);
 
     if (virtio_gpu_cmdline_enabled("virtio_gpu_present_readback_copy")) {
@@ -1394,7 +1394,7 @@ int virtio_gpu_copy_resource_to_resource(uint32 src_resource_id,
     should_wait_src_fence = src_submit_fence != 0 &&
         src_submit_fence > completed_fence &&
         virtio_gpu_async_pending(g) &&
-        virtio_gpu_async_newest_fence(g) <= src_submit_fence;
+        virtio_gpu_async_newest_fence(g) >= src_submit_fence;
     if (copy_logs < 8) {
         printf("virtio_gpu: resource-copy-to-resource src=%u dst=%u ctx=%u rect src=%u,%u dst=%u,%u %ux%u\n",
                src_resource_id, dst_resource_id, ctx_id, src_x, src_y,
