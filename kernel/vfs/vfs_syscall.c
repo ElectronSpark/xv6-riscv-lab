@@ -1724,38 +1724,58 @@ uint64 sys_vfs_unlink(void) {
 }
 
 uint64 sys_vfs_link(void) {
-    char old[MAXPATH], new[MAXPATH];
-    char name[MAXPATH];
-    int n1, n2;
+    char *old = NULL, *new = NULL, *name = NULL;
+    int n1, n2, ret;
 
-    if ((n1 = argstr(0, old, MAXPATH)) < 0 ||
-        (n2 = argstr(1, new, MAXPATH)) < 0) {
-        return -EFAULT;
+    ret = __vfs_argpath(0, &old, &n1);
+    if (ret < 0)
+        return ret;
+    ret = __vfs_argpath(1, &new, &n2);
+    if (ret < 0) {
+        kvfree(old);
+        return ret;
+    }
+    name = __vfs_alloc_pathbuf();
+    if (name == NULL) {
+        kvfree(old);
+        kvfree(new);
+        return -ENOMEM;
     }
 
     // Get the source inode
     struct vfs_inode *src = vfs_namei(old, n1);
+    kvfree(old);
     if (IS_ERR(src)) {
+        kvfree(new);
+        kvfree(name);
         return PTR_ERR(src);
     }
     if (src == NULL) {
+        kvfree(new);
+        kvfree(name);
         return -ENOENT;
     }
 
     // Cannot link directories
     if (S_ISDIR(src->mode)) {
         vfs_iput(src);
+        kvfree(new);
+        kvfree(name);
         return -EPERM;
     }
 
     // Get parent directory of new path
-    struct vfs_inode *parent = vfs_nameiparent(new, n2, name, MAXPATH);
+    struct vfs_inode *parent =
+        vfs_nameiparent(new, n2, name, VFS_USER_PATH_MAX);
+    kvfree(new);
     if (IS_ERR(parent)) {
         vfs_iput(src);
+        kvfree(name);
         return PTR_ERR(parent);
     }
     if (parent == NULL) {
         vfs_iput(src);
+        kvfree(name);
         return -ENOENT;
     }
 
@@ -1769,7 +1789,8 @@ uint64 sys_vfs_link(void) {
         .name_len = 0,
     };
 
-    int ret = vfs_link(&old_dentry, parent, name, name_len);
+    ret = vfs_link(&old_dentry, parent, name, name_len);
+    kvfree(name);
 
     vfs_iput(src);
     vfs_iput(parent);
@@ -5602,12 +5623,12 @@ uint64 sys_vfs_unlinkat(void) {
  */
 uint64 sys_vfs_linkat(void) {
     int olddirfd, newdirfd, flags;
-    char old[MAXPATH], new[MAXPATH];
-    char name[MAXPATH];
+    char *old = NULL, *new = NULL, *name = NULL;
 
     argint(0, &olddirfd);
     argint(2, &newdirfd);
     argint(4, &flags);
+    (void)flags;
 
     struct vfs_inode *old_start = NULL, *new_start = NULL;
     int err = __vfs_resolve_dirfd(olddirfd, &old_start);
@@ -5619,38 +5640,64 @@ uint64 sys_vfs_linkat(void) {
         return err;
     }
 
-    int n1 = argstr(1, old, MAXPATH);
-    int n2 = argstr(3, new, MAXPATH);
-    if (n1 < 0 || n2 < 0) {
+    int n1, n2;
+    int path_ret = __vfs_argpath(1, &old, &n1);
+    if (path_ret < 0) {
         if (old_start) vfs_iput(old_start);
         if (new_start) vfs_iput(new_start);
-        return -EFAULT;
+        return path_ret;
+    }
+    path_ret = __vfs_argpath(3, &new, &n2);
+    if (path_ret < 0) {
+        if (old_start) vfs_iput(old_start);
+        if (new_start) vfs_iput(new_start);
+        kvfree(old);
+        return path_ret;
+    }
+    name = __vfs_alloc_pathbuf();
+    if (name == NULL) {
+        if (old_start) vfs_iput(old_start);
+        if (new_start) vfs_iput(new_start);
+        kvfree(old);
+        kvfree(new);
+        return -ENOMEM;
     }
 
     struct vfs_inode *src = vfs_namei_at(old_start, old, n1);
     if (old_start) vfs_iput(old_start);
+    kvfree(old);
     if (IS_ERR(src)) {
         if (new_start) vfs_iput(new_start);
+        kvfree(new);
+        kvfree(name);
         return PTR_ERR(src);
     }
     if (src == NULL) {
         if (new_start) vfs_iput(new_start);
+        kvfree(new);
+        kvfree(name);
         return -ENOENT;
     }
     if (S_ISDIR(src->mode)) {
         vfs_iput(src);
         if (new_start) vfs_iput(new_start);
+        kvfree(new);
+        kvfree(name);
         return -EPERM;
     }
 
-    struct vfs_inode *parent = vfs_nameiparent_at(new_start, new, n2, name, MAXPATH);
+    struct vfs_inode *parent =
+        vfs_nameiparent_at(new_start, new, n2, name, VFS_USER_PATH_MAX);
     if (new_start) vfs_iput(new_start);
+    kvfree(new);
     if (IS_ERR(parent)) {
         vfs_iput(src);
+        kvfree(name);
         return PTR_ERR(parent);
     }
     if (parent == NULL) {
         vfs_iput(src);
+        kvfree(name);
         return -ENOENT;
     }
 
@@ -5662,6 +5709,7 @@ uint64 sys_vfs_linkat(void) {
     };
 
     int ret = vfs_link(&old_dentry, parent, name, strlen(name));
+    kvfree(name);
     vfs_iput(src);
     vfs_iput(parent);
     if (ret == 0)
