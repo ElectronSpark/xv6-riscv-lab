@@ -55,6 +55,7 @@ struct proc_acct {
     _Atomic uint64 mm_mmap_count;     /* mmap() calls (success)          */
     _Atomic uint64 mm_munmap_count;   /* munmap() calls                  */
     _Atomic int64  mm_brk_delta;      /* cumulative brk delta (bytes)    */
+    _Atomic uint64 mm_rss_pages;      /* live resident pages             */
     _Atomic uint64 mm_peak_vm;        /* peak virtual memory (bytes)     */
 
     /* ── Scheduler / Process ─────────────────────────────────────── */

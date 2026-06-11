@@ -254,6 +254,8 @@ int thread_clone(struct clone_args *args) {
         // Not CLONE_THREAD: create a new thread group for the child.
         int tg_ret = thread_group_alloc(ret_ptr);
         assert(tg_ret == 0, "clone: thread_group_alloc failed");
+        __atomic_store_n(&ret_ptr->thread_group->acct.mm_rss_pages,
+                         vm_resident_pages(new_vm), __ATOMIC_RELAXED);
 
         // Inherit rlimits from the parent; acct counters start at zero.
         memmove(ret_ptr->thread_group->rlim, p->thread_group->rlim,

@@ -33,6 +33,7 @@ void vm_dup(vm_t *vm);
 void vm_put(vm_t *vm);
 vm_t *vm_copy(vm_t *src);
 void vm_destroy(vm_t *vm);
+uint64 vm_resident_pages(vm_t *vm);
 vma_t *vma_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags);
 int vm_growstack(vm_t *vm, int64 change_size);
 int vm_growheap(vm_t *vm, int64 change_size);

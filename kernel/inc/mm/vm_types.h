@@ -136,6 +136,7 @@ typedef struct vm {
     int refcount; // Reference count
     uint64 vm_bottom;    // Lowest VA managed by this VM
     uint64 vm_top;       // Highest VA (exclusive) managed by this VM
+    _Atomic uint64 resident_pages; // Present user leaf PTE pages
     int is_kernel;       // Non-zero if this is the kernel VM singleton
     uint16 asid;       // ASID (RISC-V) / PCID (x86_64), 0 = kernel
     uint16 asid_gen;   // Generation when ASID was assigned

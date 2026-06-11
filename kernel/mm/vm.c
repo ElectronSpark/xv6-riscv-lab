@@ -115,6 +115,60 @@ static slab_cache_t __vm_pool = {0};
 static void __vm_destroy(vm_t *vm);
 static int __vm_unmap_range_locked(vm_t *vm, uint64 start, uint64 end);
 
+static void atomic_sub_floor_u64(_Atomic uint64 *ptr, uint64 delta)
+{
+    uint64 old;
+
+    if (delta == 0)
+        return;
+
+    old = __atomic_load_n(ptr, __ATOMIC_RELAXED);
+    while (old != 0) {
+        uint64 next = old > delta ? old - delta : 0;
+        if (__atomic_compare_exchange_n(ptr, &old, next, 1,
+                                        __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+            return;
+    }
+}
+
+uint64 vm_resident_pages(vm_t *vm)
+{
+    if (vm == NULL)
+        return 0;
+    return __atomic_load_n(&vm->resident_pages, __ATOMIC_RELAXED);
+}
+
+static void vm_account_resident_add(vma_t *vma, uint64 pages)
+{
+    if (vma == NULL || vma->vm == NULL || pages == 0)
+        return;
+    if ((vma->flags & VMA_FLAG_USER) == 0)
+        return;
+
+    __atomic_fetch_add(&vma->vm->resident_pages, pages, __ATOMIC_RELAXED);
+    if (current != NULL && current->vm == vma->vm &&
+        current->thread_group != NULL) {
+        __atomic_fetch_add(&current->thread_group->acct.mm_rss_pages,
+                           pages, __ATOMIC_RELAXED);
+    }
+}
+
+static void vm_account_resident_sub(vma_t *vma, uint64 pages)
+{
+    if (vma == NULL || vma->vm == NULL || pages == 0)
+        return;
+    if ((vma->flags & VMA_FLAG_USER) == 0)
+        return;
+
+    atomic_sub_floor_u64(&vma->vm->resident_pages, pages);
+    if (current != NULL && current->vm == vma->vm &&
+        current->thread_group != NULL) {
+        atomic_sub_floor_u64(&current->thread_group->acct.mm_rss_pages,
+                             pages);
+    }
+}
+
 static void __vma_pool_init(void) {
     slab_cache_init(&__vma_pool, "vm area", sizeof(vma_t),
                     SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
@@ -328,6 +382,7 @@ static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
     int tlb_needs_flush = 0;
     uint64 pages_freed = 0;
     uint64 anon_pages = 0;
+    uint64 resident_pages_cleared = 0;
 
     /*
      * Two-phase page release: Phase 1 clears PTEs and collects pages
@@ -426,6 +481,8 @@ static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
                         uint64 pa = pte_pa(pte);
                         pte_clear(pte);
                         tlb_needs_flush = 1;
+                        if (!is_pfnmap)
+                            resident_pages_cleared += HUGEPAGE_SIZE / PGSIZE;
                         defer[ndefer].pa = pa;
                         defer[ndefer].pg = __pa_to_page(pa);
                         ndefer++;
@@ -450,6 +507,8 @@ static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
             pte_clear(pte);
             tlb_needs_flush = 1;
             pages_freed++;
+            if (!is_pfnmap)
+                resident_pages_cleared++;
 
             /* Write dirty pages back for MAP_SHARED file mappings. */
             if (shared_file_wb && was_dirty)
@@ -470,6 +529,7 @@ static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
         /* Phase 2: release all deferred pages after TLB flush. */
         FLUSH_DEFERRED();
     }
+    vm_account_resident_sub(vma, resident_pages_cleared);
 #undef FLUSH_DEFERRED
 #undef VMA_FREE_DEFER_MAX
     g_vm_munmap_pages_freed += pages_freed;
@@ -565,6 +625,7 @@ static int __vma_copy(vma_t *dst, vma_t *src)
                 uint64 pa = pte_pa(src_pte);
                 assert(page_ref_inc((void *)pa) > 0,
                        "__vma_copy: hugepage refcnt should be > 0");
+                vm_account_resident_add(dst, HUGEPAGE_SIZE / PGSIZE);
                 page_t *pg = __pa_to_page(pa);
                 if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
                     !is_shared) {
@@ -606,6 +667,7 @@ hugepage_skip:
             uint64 pa = pte_pa(src_pte);
             assert(page_ref_inc((void *)pa) > 0,
                    "__vma_copy: page refcnt should be greater than 0");
+            vm_account_resident_add(dst, 1);
             page_t *pg = __pa_to_page(pa);
             /* Only bump mapcount for HEAD pages (PAGE_TYPE_ANON).
              * Tail pages must be skipped — their anon union stores
@@ -1463,6 +1525,7 @@ static void *__vma_map_anon_folio(vma_t *vma, uint64 fault_va,
     }
     *pte = mk_pte(folio_pa, pte_flags);
     folio_add_anon_rmap(folio, vma, fault_va);
+    vm_account_resident_add(vma, 1);
     /* TLB flush deferred to vma_validate end (single batch flush). */
     return (void *)folio_pa;
 }
@@ -2048,6 +2111,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                         pte_clear(pmd);
                         sfence_vma();
                         pgtab_free((void *)l0_pa);
+                        if (nd > 0)
+                            vm_account_resident_sub(vma, (uint64)nd);
 
                         /* Install hugepage under lock. */
                         folio_t *hp_folio =
@@ -2055,6 +2120,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                         uint64 hp_flags = vma->flags & ~PROT_WRITE;
                         *pmd = mk_pte_huge((uint64)hp_pa, hp_flags);
                         folio_add_anon_rmap(hp_folio, vma, hp_base);
+                        vm_account_resident_add(vma,
+                                                HUGEPAGE_SIZE / PGSIZE);
 
                         /* Release deferred pages outside lock. */
                         vm_pgtable_unlock(vma->vm);
@@ -2082,6 +2149,7 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                     uint64 hp_flags = vma->flags & ~PROT_WRITE;
                     *pmd = mk_pte_huge((uint64)hp_pa, hp_flags);
                     folio_add_anon_rmap(hp_folio, vma, hp_base);
+                    vm_account_resident_add(vma, HUGEPAGE_SIZE / PGSIZE);
                     /* TLB flush deferred */
                     i = hp_base + HUGEPAGE_SIZE - PGSIZE;
                     continue;
@@ -2264,8 +2332,10 @@ hp_per_page:
                     /* Release unused PTE refs in batch. */
                     if (unused_refs > 0)
                         __page_ref_sub(pcpage, unused_refs);
-                    if (batch_faults > 0)
+                    if (batch_faults > 0) {
                         g_vm_file_faults += batch_faults;
+                        vm_account_resident_add(vma, (uint64)batch_faults);
+                    }
                     /* No TLB flush needed: we're installing PTEs for
                      * previously-unmapped addresses (PTE was 0).
                      * Non-present entries are not cached in TLB. */
@@ -2335,6 +2405,7 @@ hp_per_page:
                         *pte = mk_pte((uint64)pa, pte_flags);
                         if (is_pcache)
                             pte_mkclean(pte);
+                        vm_account_resident_add(vma, 1);
                         /* No TLB flush: PTE was 0, non-present entries
                          * are not cached in TLB. */
                     }
@@ -3202,6 +3273,7 @@ int vm_mmap_region_locked(vm_t *vm, uint64 start, size_t size, uint64 flags,
                    "vm_mmap_region_locked: failed to free vma");
             return -ENOMEM;
         }
+        vm_account_resident_add(vma, size / PGSIZE);
     }
     return 0;
 }

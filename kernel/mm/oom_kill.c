@@ -6,7 +6,7 @@
 // reclaim paths must be exhausted first.
 //
 // Scoring is modeled after Linux's oom_badness():
-//   - Base score = process RSS (resident pages via anon page count)
+//   - Base score = process RSS (live resident pages)
 //   - Kernel threads and PID 1 (init) are exempt
 //   - Zombie/exiting processes are skipped
 
@@ -19,6 +19,7 @@
 #include "proc/sched.h"
 #include "signal.h"
 #include "signo.h"
+#include "string.h"
 #include <mm/oom_kill.h>
 #include <mm/mm_watermark.h>
 #include "smp/atomic.h"
@@ -58,14 +59,9 @@ static uint64 __oom_badness(struct thread_group *tg) {
     if (thread_group_exiting(tg))
         return 0;
 
-    // Score = RSS estimate from memory accounting
-    // Use mm_peak_vm as a proxy for memory consumption since we don't
-    // have per-process RSS tracking. Processes with large address spaces
-    // are the prime OOM candidates.
-    uint64 score = __atomic_load_n(&tg->acct.mm_peak_vm, __ATOMIC_RELAXED);
-
-    // Normalize to pages
-    score = score / PAGE_SIZE;
+    // Lock-free live RSS accounting.  OOM may run from allocation-failure
+    // paths that cannot safely acquire vm_rlock().
+    uint64 score = __atomic_load_n(&tg->acct.mm_rss_pages, __ATOMIC_RELAXED);
 
     // Minimum score of 1 for any killable process (so we always have a victim)
     if (score == 0)
@@ -130,8 +126,13 @@ int oom_kill_process(uint64 order, uint64 gfp_flags) {
         return OOM_NO_VICTIM;
     }
 
-    printf("OOM killer: killing process %d (score=%ld)\n",
-           ctx.best_tgid, ctx.best_score);
+    char victim_name[16] = "?";
+    if (victim_tg->group_leader != NULL)
+        safestrcpy(victim_name, victim_tg->group_leader->name,
+                   sizeof(victim_name));
+    printf("OOM killer: killing process %d name=%s "
+           "(score=%ld rss_pages=%ld)\n",
+           ctx.best_tgid, victim_name, ctx.best_score, ctx.best_score);
 
     // Send SIGKILL to the thread group
     struct ksiginfo info = {0};

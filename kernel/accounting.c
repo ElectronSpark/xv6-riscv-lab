@@ -211,6 +211,7 @@ int acct_format(struct thread_group *tg, char *buf, int sz) {
     EMIT_U64(mm_mmap_count);
     EMIT_U64(mm_munmap_count);
     EMIT_I64(mm_brk_delta);
+    EMIT_U64(mm_rss_pages);
     EMIT_U64(mm_peak_vm);
 
     /* Sched */

@@ -771,6 +771,8 @@ int exec(char *path, char **argv, char **envp) {
     vm_put(p->vm); // Destroy the old VM
     p->vm = NULL;
     p->vm = tmp_vm;
+    __atomic_store_n(&p->thread_group->acct.mm_rss_pages,
+                     vm_resident_pages(tmp_vm), __ATOMIC_RELAXED);
 
     /* Store interpreter info in thread_group for the gdbstub.
      * This lets qXfer:libraries-svr4:read report the dynamic
