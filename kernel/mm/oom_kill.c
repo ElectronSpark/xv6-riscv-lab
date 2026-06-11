@@ -32,6 +32,17 @@ void oom_init(void) {
     printf("OOM killer initialized\n");
 }
 
+static struct thread_group *oom_get_thread_group_ref(int tgid) {
+    struct thread_group *tg;
+
+    pid_rlock();
+    tg = get_thread_group(tgid);
+    if (tg != NULL)
+        thread_group_get(tg);
+    pid_runlock();
+    return tg;
+}
+
 // Compute badness score for a thread group.
 // Higher = more likely to be killed. Returns 0 for unkillable processes.
 static uint64 __oom_badness(struct thread_group *tg) {
@@ -71,7 +82,7 @@ struct oom_scan_ctx {
 
 static void __oom_scan_tgid(int tgid, void *arg) {
     struct oom_scan_ctx *ctx = (struct oom_scan_ctx *)arg;
-    struct thread_group *tg = get_thread_group(tgid);
+    struct thread_group *tg = oom_get_thread_group_ref(tgid);
     if (tg == NULL)
         return;
 
@@ -111,7 +122,7 @@ int oom_kill_process(uint64 order, uint64 gfp_flags) {
     }
 
     // Kill the victim
-    struct thread_group *victim_tg = get_thread_group(ctx.best_tgid);
+    struct thread_group *victim_tg = oom_get_thread_group_ref(ctx.best_tgid);
     if (victim_tg == NULL) {
         printf("OOM killer: victim tgid %d vanished\n", ctx.best_tgid);
         spin_unlock(&__oom_lock);
@@ -138,7 +149,7 @@ int oom_kill_process(uint64 order, uint64 gfp_flags) {
 }
 
 int oom_score(int tgid) {
-    struct thread_group *tg = get_thread_group(tgid);
+    struct thread_group *tg = oom_get_thread_group_ref(tgid);
     if (tg == NULL)
         return 0;
     uint64 score = __oom_badness(tg);
