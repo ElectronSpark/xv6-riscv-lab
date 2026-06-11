@@ -293,8 +293,32 @@ static int kbd_read(cdev_t *cdev, bool user, void *buf, size_t count)
 
 static int kbd_write(cdev_t *cdev, bool user, const void *buf, size_t count)
 {
-    (void)cdev; (void)user; (void)buf; (void)count;
-    return -ENOSYS;
+    size_t off = 0;
+
+    (void)cdev;
+    if (buf == NULL)
+        return -EFAULT;
+    if (count == 0 || (count % sizeof(struct kbd_event)) != 0)
+        return -EINVAL;
+
+    while (off < count) {
+        struct kbd_event ev;
+
+        if (user) {
+            if (either_copyin(&ev, 1, (uint64)buf + off, sizeof(ev)) < 0)
+                return -EFAULT;
+        } else {
+            memcpy(&ev, (const char *)buf + off, sizeof(ev));
+        }
+
+        spin_lock(&kbd_state.lock);
+        ring_push(&ev);
+        spin_unlock(&kbd_state.lock);
+        off += sizeof(ev);
+    }
+
+    wakeup_on_chan(&kbd_state.ring);
+    return (int)count;
 }
 
 static int kbd_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
@@ -324,7 +348,7 @@ static cdev_t kbd_cdev = {
         .devmode = S_IFCHR | 0666,
     },
     .readable = 1,
-    .writable = 0,
+    .writable = 1,
     .ops = {
         .read    = kbd_read,
         .write   = kbd_write,
