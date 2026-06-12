@@ -35,6 +35,7 @@
 #include "accounting.h"
 #include "kstats.h"
 #include "timer/timer.h"
+#include "proc/chrome_lifecycle.h"
 
 /* Enable verbose exec debugging — set to 1 to trace ELF loading steps */
 #define EXEC_DEBUG 0
@@ -349,6 +350,7 @@ int exec(char *path, char **argv, char **envp) {
     size_t snapshot_cmdline_len = 0;
     char *snapshot_environ = NULL;
     size_t snapshot_environ_len = 0;
+    char old_name[sizeof(p->name)];
 
     exec_dbg("pid %d: exec(\"%s\")\n", current->pid, path);
 
@@ -758,6 +760,8 @@ int exec(char *path, char **argv, char **envp) {
     // register (RDI), so both argc and argv must be set explicitly.
     arch_tf_set_exec_args(p->trapframe, argc, sp + sizeof(uint64));
 
+    safestrcpy(old_name, p->name, sizeof(old_name));
+
     // Save program name for debugging.
     for (last = s = path; *s; s++)
         if (*s == '/')
@@ -795,6 +799,22 @@ int exec(char *path, char **argv, char **envp) {
                                    &ustack[auxv_start_idx], auxv_len);
     snapshot_cmdline = NULL;
     snapshot_environ = NULL;
+
+    if (chrome_lifecycle_trace_enabled() &&
+        (chrome_lifecycle_string_match(path) ||
+         chrome_lifecycle_thread_match(p))) {
+        printf("chrome-lifecycle: exec pid=%d tgid=%d old_name='%s' "
+               "name='%s' path='%s' argc=%ld has_interp=%d interp='%s' "
+               "entry=0x%lx\n",
+               p->pid, p->tgid, old_name, p->name, path, argc,
+               has_interp, has_interp ? interp_path : "",
+               has_interp ? interp_entry : elf.entry + load_bias);
+        uint64 arg_limit = argc < 16 ? argc : 16;
+        for (uint64 ai = 0; ai < arg_limit; ai++) {
+            printf("chrome-lifecycle: exec-argv pid=%d argv[%ld]='%s'\n",
+                   p->pid, ai, argv[ai] ? argv[ai] : "");
+        }
+    }
 
     /*
      * Entry point:

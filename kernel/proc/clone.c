@@ -38,6 +38,7 @@
 #include "arch_thread.h"
 #include "accounting.h"
 #include "resource.h"
+#include "proc/chrome_lifecycle.h"
 
 // Entry wrapper for forked user threads.
 // This is called as the entry point from context switch.
@@ -350,6 +351,18 @@ int thread_clone(struct clone_args *args) {
 
     /* kqueue: notify EVFILT_PROC watchers of fork */
     kqueue_proc_notify(p, NOTE_FORK, ret_ptr->pid);
+
+    if (chrome_lifecycle_trace_enabled() &&
+        (chrome_lifecycle_thread_match(p) ||
+         chrome_lifecycle_thread_match(ret_ptr))) {
+        printf("chrome-lifecycle: clone parent_pid=%d parent_tgid=%d "
+               "parent_name='%s' child_pid=%d child_tgid=%d child_name='%s' "
+               "flags=0x%lx thread=%d vfork=%d child_exec='%s'\n",
+               p->pid, p->tgid, p->name, ret_ptr->pid, ret_ptr->tgid,
+               ret_ptr->name, args->flags, !!(args->flags & CLONE_THREAD),
+               !!(args->flags & CLONE_VFORK),
+               ret_ptr->thread_group ? ret_ptr->thread_group->exec_path : "");
+    }
 
     // For vfork, parent blocks until child exits or execs
     if (args->flags & CLONE_VFORK) {

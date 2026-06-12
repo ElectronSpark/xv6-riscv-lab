@@ -28,6 +28,7 @@
 #include "tty/session.h"
 #include "tty/tty.h"
 #include "proc/pgroup.h"
+#include "proc/chrome_lifecycle.h"
 
 void argint(int n, int *ip);
 void argaddr(int n, uint64 *ip);
@@ -101,6 +102,8 @@ static bool trace_browser_child(struct thread *child) {
     return strstr(child->name, "mb") != NULL ||
            strstr(child->name, "MiniBrowser") != NULL ||
            strstr(child->name, "WebKit") != NULL ||
+           (chrome_lifecycle_trace_enabled() &&
+            chrome_lifecycle_thread_match(child)) ||
            child->pgid == 48 || child->tgid == 48;
 }
 
@@ -179,6 +182,18 @@ void exit(int status) {
             p->killed_signo = tg->group_exit_signo;
             p->killed_code = tg->group_exit_kill_code;
         }
+    }
+
+    if (chrome_lifecycle_trace_enabled() && chrome_lifecycle_thread_match(p)) {
+        int live = tg ?
+            __atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE) : -1;
+        printf("chrome-lifecycle: exit pid=%d tgid=%d name='%s' "
+               "status=%d killed_signo=%d killed_code=%d leader=%d "
+               "live=%d group_exiting=%d exec='%s'\n",
+               p->pid, p->tgid, p->name, status, p->killed_signo,
+               p->killed_code, thread_is_group_leader(p), live,
+               thread_group_exiting(tg),
+               tg ? tg->exec_path : "");
     }
 
     // Notify GDB stub before tearing down resources (VM, fds, etc.).
