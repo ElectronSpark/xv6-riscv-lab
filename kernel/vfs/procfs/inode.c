@@ -148,6 +148,13 @@ static const struct procfs_static_entry procfs_sys_fs_entries[] = {
     {"file-nr", PROCFS_INO_SYS_FS_FILE_NR},
     {"nr_open", PROCFS_INO_SYS_FS_NR_OPEN},
     {"pipe-max-size", PROCFS_INO_SYS_FS_PIPE_MAX_SIZE},
+    {"inotify", PROCFS_INO_SYS_FS_INOTIFY},
+};
+
+static const struct procfs_static_entry procfs_sys_fs_inotify_entries[] = {
+    {"max_user_watches", PROCFS_INO_SYS_FS_INOTIFY_MAX_USER_WATCHES},
+    {"max_user_instances", PROCFS_INO_SYS_FS_INOTIFY_MAX_USER_INSTANCES},
+    {"max_queued_events", PROCFS_INO_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS},
 };
 
 static int procfs_lookup_static(const struct procfs_static_entry *entries,
@@ -444,6 +451,17 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         return -ENOENT;
     }
 
+    case PROC_SYS_FS_INOTIFY_DIR: {
+        uint64 ino;
+        if (procfs_lookup_static(procfs_sys_fs_inotify_entries,
+                                 NELEM(procfs_sys_fs_inotify_entries), name,
+                                 name_len, &ino) == 0) {
+            dentry->ino = ino;
+            return 0;
+        }
+        return -ENOENT;
+    }
+
     case PROC_FDDIR:
     case PROC_FDINFODIR:
     case PROC_TASK_FDDIR:
@@ -638,6 +656,12 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
     case PROC_SYS_FS_DIR:
         return procfs_emit_static(iter, ret_dentry, procfs_sys_fs_entries,
                                   NELEM(procfs_sys_fs_entries), child_idx);
+
+    case PROC_SYS_FS_INOTIFY_DIR:
+        return procfs_emit_static(iter, ret_dentry,
+                                  procfs_sys_fs_inotify_entries,
+                                  NELEM(procfs_sys_fs_inotify_entries),
+                                  child_idx);
 
     /* ---- fd and fdinfo children ---- */
     case PROC_FDDIR:
@@ -1972,6 +1996,15 @@ static char *procfs_gen_sys_file(enum procfs_entry_type type)
     case PROC_SYS_FS_PIPE_MAX_SIZE:
         snprintf(buf, PROCFS_BUF_SIZE, "1048576\n");
         break;
+    case PROC_SYS_FS_INOTIFY_MAX_USER_WATCHES:
+        snprintf(buf, PROCFS_BUF_SIZE, "8192\n");
+        break;
+    case PROC_SYS_FS_INOTIFY_MAX_USER_INSTANCES:
+        snprintf(buf, PROCFS_BUF_SIZE, "128\n");
+        break;
+    case PROC_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS:
+        snprintf(buf, PROCFS_BUF_SIZE, "16384\n");
+        break;
     default:
         kvfree(buf);
         return ERR_PTR(-EINVAL);
@@ -2140,6 +2173,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_SYS_FS_FILE_NR:
     case PROC_SYS_FS_NR_OPEN:
     case PROC_SYS_FS_PIPE_MAX_SIZE:
+    case PROC_SYS_FS_INOTIFY_MAX_USER_WATCHES:
+    case PROC_SYS_FS_INOTIFY_MAX_USER_INSTANCES:
+    case PROC_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS:
         buf = procfs_gen_sys_file(pi->type);
         break;
     default:

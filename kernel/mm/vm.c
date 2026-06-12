@@ -3350,110 +3350,116 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
         goto out;
     }
 
-    vma_t *vma = vm_find_area(vm, addr);
-    if (vma == NULL) {
-        ret = -ENOMEM;
-        goto out;
-    }
-    if (addr < vma->start || (addr + size) > vma->end) {
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    if (addr > vma->start) {
-        vma = vma_split(vma, addr);
-        if (vma == NULL) {
-            ret = -ENOMEM;
-            goto out;
-        }
-    }
-
     uint64 end = addr + size;
-    if (end < vma->end) {
-        if (vma_split(vma, end) == NULL) {
+    uint64 cur = addr;
+    int flush_needed = 0;
+    uint64 prot_bits = PROT_READ | PROT_WRITE | PROT_EXEC;
+
+    while (cur < end) {
+        vma_t *vma = vm_find_area(vm, cur);
+        if (vma == NULL || cur < vma->start) {
             ret = -ENOMEM;
             goto out;
         }
-    }
 
-    uint64 old_flags = vma->flags;
-    uint64 new_flags = (vma->flags & ~PROT_MASK);
-    new_flags |= prot & PROT_MASK;
+        if (cur > vma->start) {
+            vma = vma_split(vma, cur);
+            if (vma == NULL) {
+                ret = -ENOMEM;
+                goto out;
+            }
+        }
 
-    /*
-     * Compute effective VMA-level flags for PTE construction.
-     * On x86, PTE_R == PTE_V (Present), so a Present+User page is always
-     * readable.  For PROT_NONE, strip VMA_FLAG_USER so user-mode access
-     * faults (supervisor-only page).  The PTE remains valid so that
-     * __vma_set_free / __vma_copy still handle it correctly.
-     */
-    uint64 effective_flags = new_flags;
-    if ((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
-        effective_flags &= ~VMA_FLAG_USER;
+        uint64 seg_end = vma->end < end ? vma->end : end;
+        if (seg_end < vma->end) {
+            if (vma_split(vma, seg_end) == NULL) {
+                ret = -ENOMEM;
+                goto out;
+            }
+        }
 
-    vm_pgtable_lock(vm);
-    for (uint64 va = addr; va < addr + size; va += PGSIZE) {
-        pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
-        if (pte != NULL && pte_present(pte)) {
-            /* Handle hugepage: modify the 2MB PTE and skip ahead. */
-            if (pte_is_hugepage(pte)) {
+        uint64 old_flags = vma->flags;
+        uint64 new_flags = (vma->flags & ~PROT_MASK);
+        new_flags |= prot & PROT_MASK;
+
+        /*
+         * Compute effective VMA-level flags for PTE construction.
+         * On x86, PTE_R == PTE_V (Present), so a Present+User page is always
+         * readable.  For PROT_NONE, strip VMA_FLAG_USER so user-mode access
+         * faults (supervisor-only page).  The PTE remains valid so that
+         * __vma_set_free / __vma_copy still handle it correctly.
+         */
+        uint64 effective_flags = new_flags;
+        if ((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
+            effective_flags &= ~VMA_FLAG_USER;
+
+        vm_pgtable_lock(vm);
+        for (uint64 va = cur; va < seg_end; va += PGSIZE) {
+            pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+            if (pte != NULL && pte_present(pte)) {
+                /* Handle hugepage: modify the 2MB PTE and skip ahead. */
+                if (pte_is_hugepage(pte)) {
+                    uint64 mflags = effective_flags;
+                    if (mflags & PROT_WRITE) {
+                        uint64 pa = pte_pa(pte);
+                        page_t *pg = __pa_to_page(pa);
+                        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
+                            page_mapcount(pg) > 1)
+                            mflags &= ~PROT_WRITE;
+                    }
+                    uint64 pa = pte_pa(pte);
+                    *pte = mk_pte_huge(pa, mflags);
+                    uint64 next = (va & HUGEPAGE_MASK) + HUGEPAGE_SIZE;
+                    if (next > va + PGSIZE)
+                        va = next - PGSIZE;
+                    continue;
+                }
                 uint64 mflags = effective_flags;
+                /* rmap-based COW: if page has mapcount > 1 and we're trying
+                 * to grant write, suppress write — the write-fault handler
+                 * will resolve it via COW when the page is actually written.
+                 * All pcache pages stay write-protected in the PTE so the
+                 * first write faults and we can either COW (MAP_PRIVATE) or
+                 * mark the backing cache dirty (MAP_SHARED) explicitly. */
                 if (mflags & PROT_WRITE) {
                     uint64 pa = pte_pa(pte);
                     page_t *pg = __pa_to_page(pa);
-                    if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
-                        page_mapcount(pg) > 1)
+                    if (page_is_pcache(pg)) {
                         mflags &= ~PROT_WRITE;
+                    } else if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
+                        page_mapcount(pg) > 1) {
+                        mflags &= ~PROT_WRITE;
+                    }
                 }
-                uint64 pa = pte_pa(pte);
-                *pte = mk_pte_huge(pa, mflags);
-                uint64 next = (va & HUGEPAGE_MASK) + HUGEPAGE_SIZE;
-                if (next > va + PGSIZE)
-                    va = next - PGSIZE;
-                continue;
-            }
-            uint64 mflags = effective_flags;
-            /* rmap-based COW: if page has mapcount > 1 and we're trying
-             * to grant write, suppress write — the write-fault handler
-             * will resolve it via COW when the page is actually written.
-             * All pcache pages stay write-protected in the PTE so the
-             * first write faults and we can either COW (MAP_PRIVATE) or
-             * mark the backing cache dirty (MAP_SHARED) explicitly. */
-            if (mflags & PROT_WRITE) {
-                uint64 pa = pte_pa(pte);
-                page_t *pg = __pa_to_page(pa);
-                if (page_is_pcache(pg)) {
-                    mflags &= ~PROT_WRITE;
-                } else if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
-                    page_mapcount(pg) > 1) {
-                    mflags &= ~PROT_WRITE;
-                }
-            }
-            /*
-             * Capture PTE dirty state before pte_modify overwrites
-             * the flags.  If the old PTE was dirty and the page is a
-             * pcache page, propagate dirty to the page cache.
-             */
-            int old_dirty = pte_dirty(pte);
-            pte_modify(pte, mflags);
-            {
-                uint64 pa = pte_pa(pte);
-                page_t *pg = __pa_to_page(pa);
-                page_t *pc_head = page_pcache_head(pg);
-                if (pc_head != NULL) {
-                    if (old_dirty)
-                        pcache_mark_page_dirty(pc_head->pcache.pcache, pc_head);
-                    pte_mkclean(pte);
+                /*
+                 * Capture PTE dirty state before pte_modify overwrites
+                 * the flags.  If the old PTE was dirty and the page is a
+                 * pcache page, propagate dirty to the page cache.
+                 */
+                int old_dirty = pte_dirty(pte);
+                pte_modify(pte, mflags);
+                {
+                    uint64 pa = pte_pa(pte);
+                    page_t *pg = __pa_to_page(pa);
+                    page_t *pc_head = page_pcache_head(pg);
+                    if (pc_head != NULL) {
+                        if (old_dirty)
+                            pcache_mark_page_dirty(pc_head->pcache.pcache, pc_head);
+                        pte_mkclean(pte);
+                    }
                 }
             }
         }
+        vm_pgtable_unlock(vm);
+
+        vma->flags = new_flags;
+
+        if ((old_flags ^ new_flags) & prot_bits)
+            flush_needed = 1;
+        cur = seg_end;
     }
-    vm_pgtable_unlock(vm);
 
-    vma->flags = new_flags;
-
-    uint64 prot_bits = PROT_READ | PROT_WRITE | PROT_EXEC;
-    if ((old_flags ^ new_flags) & prot_bits)
+    if (flush_needed)
         vm_remote_sfence_range(vm, addr, size);
 
     ret = 0;
@@ -4390,9 +4396,9 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     if ((flags & MAP_FIXED) && (flags & MAP_FIXED_NOREPLACE))
         return (uint64)-EINVAL;
 
-    if (fd != -1) {
-        if (flags & MAP_ANONYMOUS)
-            return (uint64)-EINVAL;
+    if (flags & MAP_ANONYMOUS) {
+        file = NULL;
+    } else if (fd != -1) {
         if (offset & (PGSIZE - 1))
             return (uint64)-EINVAL;
         file = vfs_fdtable_get_file(current->fdtable, fd);

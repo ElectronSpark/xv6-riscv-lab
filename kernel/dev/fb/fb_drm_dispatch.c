@@ -1174,6 +1174,53 @@ static int gpu_drm_ioctl(struct fb_gpu_render_owner *owner, uint64 cmd,
     return ret;
 }
 
+static int chrome_drm_ioctl_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_drm_ioctl_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static _Atomic int chrome_drm_trace_tgid;
+
+static int chrome_drm_trace_owner(const struct fb_gpu_render_owner *owner)
+{
+    int trace_tgid;
+
+    if (!chrome_drm_ioctl_trace_enabled() || owner == NULL)
+        return 0;
+    if (current != NULL &&
+        (strncmp(current->name, "chrome", 6) == 0 ||
+         strncmp(current->name, "Chrome", 6) == 0))
+        return 1;
+    trace_tgid = __atomic_load_n(&chrome_drm_trace_tgid, __ATOMIC_ACQUIRE);
+    return owner->tgid > 0 && owner->tgid == trace_tgid;
+}
+
+static void chrome_drm_trace(const char *phase,
+                             const struct fb_gpu_render_owner *owner,
+                             uint64 cmd, const char *name, int ret)
+{
+    if (!chrome_drm_trace_owner(owner))
+        return;
+
+    printf("chrome-drm-ioctl: %s pid=%d name=%s node=%s owner=%lu:%d "
+           "cmd=0x%lx(%s) ret=%d\n",
+           phase, current ? current->pid : -1,
+           current ? current->name : "?",
+           owner ? drm_core_node_name(owner->drm.node_type) : "?",
+           owner ? owner->id : 0, owner ? owner->tgid : -1, cmd,
+           name ? name : fb_gpu_ioctl_name(cmd), ret);
+}
+
 static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
 {
     struct fb_gpu_render_owner *owner =
@@ -1448,6 +1495,7 @@ static int gpu_drm_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     struct fb_gpu_render_owner *owner =
         file ? (struct fb_gpu_render_owner *)file->private_data : NULL;
     int trace = fb_gpu_trace_enabled() && fb_gpu_trace_process();
+    const char *chrome_name = fb_gpu_ioctl_name(cmd);
     int ret;
 
     if (owner == NULL)
@@ -1469,8 +1517,10 @@ static int gpu_drm_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
         spin_lock(&fb_state.lock);
         fb_state.stats.gpu_ioctls++;
         spin_unlock(&fb_state.lock);
+        chrome_drm_trace("enter-private", owner, cmd, chrome_name, 0);
         ret = fb_ioctl_for_owner(&gpu_cdev, cmd, arg, owner->id,
                                  owner->tgid);
+        chrome_drm_trace("exit-private", owner, cmd, chrome_name, ret);
         if (trace)
             printf("fb-gpu-trace: exit pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
                    current ? current->pid : -1,
@@ -1479,7 +1529,9 @@ static int gpu_drm_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
         return ret;
     }
 
+    chrome_drm_trace("enter", owner, cmd, chrome_name, 0);
     ret = gpu_drm_ioctl(owner, cmd, (uint64)arg);
+    chrome_drm_trace("exit", owner, cmd, chrome_name, ret);
     if (trace)
         printf("fb-gpu-trace: exit pid=%d name=%s drm-owner=%lu:%d cmd=0x%lx(%s) ret=%d\n",
                current ? current->pid : -1,
@@ -1498,6 +1550,109 @@ static struct vfs_file_ops gpu_drm_file_ops = {
     .first_fd_open = gpu_fops_first_fd_open,
     .last_fd_close = gpu_fops_last_fd_close,
 };
+
+struct chrome_drm_dump_ctx {
+    int tgid;
+    int sample;
+    int count;
+};
+
+static int chrome_drm_thread_dump_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_drm_thread_dump", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static void chrome_drm_dump_thread_cb(struct thread *p, void *arg)
+{
+    struct chrome_drm_dump_ctx *ctx = arg;
+
+    if (p == NULL || ctx == NULL || p->tgid != ctx->tgid)
+        return;
+
+    enum thread_state state = __thread_state_get(p);
+    int pid = p->pid;
+    int tgid = p->tgid;
+    int cpu = p->sched_entity ? p->sched_entity->cpu_id : -1;
+    int on_cpu = p->sched_entity ?
+        smp_load_acquire(&p->sched_entity->on_cpu) : 0;
+    void *chan = p->chan;
+    char name[sizeof(p->name)];
+    safestrcpy(name, p->name, sizeof(name));
+    ctx->count++;
+
+    printf("chrome-drm-dump: sample=%d tgid=%d tid=%d name=%s state=%s "
+           "cpu=%d on_cpu=%d chan=%p\n",
+           ctx->sample, tgid, pid, name, thread_state_short(state),
+           cpu, on_cpu, chan);
+}
+
+static void chrome_drm_dump_worker(uint64 arg1, uint64 arg2)
+{
+    (void)arg2;
+    int tgid = (int)arg1;
+
+    for (int sample = 0; sample < 3; sample++) {
+        sleep_ms(sample == 0 ? 1000 : 1500);
+        struct chrome_drm_dump_ctx ctx = {
+            .tgid = tgid,
+            .sample = sample,
+        };
+        printf("chrome-drm-dump: begin sample=%d tgid=%d\n", sample, tgid);
+        proctab_for_each_rcu(chrome_drm_dump_thread_cb, &ctx);
+        printf("chrome-drm-dump: end sample=%d tgid=%d count=%d\n",
+               sample, tgid, ctx.count);
+    }
+}
+
+static void maybe_start_chrome_drm_thread_dump(const struct fb_gpu_render_owner *owner)
+{
+    static _Atomic int started;
+
+    if (owner == NULL || owner->drm.node_type != DRM_CORE_NODE_RENDER ||
+        owner->tgid <= 0)
+        return;
+    if (current == NULL)
+        return;
+    if (chrome_drm_ioctl_trace_enabled() &&
+        strcmp(current->name, "sh") != 0 &&
+        strcmp(current->name, "weston") != 0) {
+        int old = 0;
+        (void)__atomic_compare_exchange_n(&chrome_drm_trace_tgid, &old,
+                                          owner->tgid, 0, __ATOMIC_ACQ_REL,
+                                          __ATOMIC_ACQUIRE);
+        printf("chrome-drm-ioctl: trace-target candidate tgid=%d name=%s target=%d\n",
+               owner->tgid, current->name,
+               __atomic_load_n(&chrome_drm_trace_tgid, __ATOMIC_ACQUIRE));
+    }
+    if (!chrome_drm_thread_dump_enabled())
+        return;
+    printf("chrome-drm-dump: render-open candidate tgid=%d name=%s\n",
+           owner->tgid, current->name);
+    if (strcmp(current->name, "sh") == 0 || strcmp(current->name, "weston") == 0)
+        return;
+    if (__atomic_exchange_n(&started, 1, __ATOMIC_ACQ_REL) != 0)
+        return;
+
+    struct thread *t = kthread_create("chrome_drm_dump",
+                                      chrome_drm_dump_worker,
+                                      (uint64)owner->tgid, 0,
+                                      KERNEL_STACK_ORDER);
+    if (IS_ERR_OR_NULL(t)) {
+        printf("chrome-drm-dump: failed to start tgid=%d\n", owner->tgid);
+        return;
+    }
+    wakeup(t);
+}
 
 static int gpu_open_file_common(cdev_t *cdev, struct vfs_file *file,
                                 struct vfs_file_ops *ops)
@@ -1532,6 +1687,7 @@ static int gpu_open_file_common(cdev_t *cdev, struct vfs_file *file,
     printf("DRM: open node=%s owner=%lu tgid=%d magic=%u\n",
            drm_core_node_name(owner->drm.node_type), owner->id, owner->tgid,
            owner->drm.magic);
+    maybe_start_chrome_drm_thread_dump(owner);
     return 0;
 }
 

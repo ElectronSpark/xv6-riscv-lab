@@ -284,7 +284,7 @@ static int devtmpfs_mount(struct vfs_inode *mountpoint,
         return PTR_ERR(vi);
     }
     root_inode = container_of(vi, struct tmpfs_inode, vfs_inode);
-    tmpfs_make_directory(root_inode);
+    tmpfs_make_directory(root_inode, 0755);
     root_inode->vfs_inode.n_links = 2;
 
     sb->vfs_sb.block_size = PAGE_SIZE;

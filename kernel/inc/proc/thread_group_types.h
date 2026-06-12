@@ -123,6 +123,11 @@ struct thread_group {
     uint32 groups[NGROUPS_MAX];  /* Supplementary group list */
     mode_t umask;                /* File creation mask (default 022) */
 
+    /* Linux prctl process attributes used by imported user runtimes. */
+    _Atomic int dumpable;         /* PR_GET/SET_DUMPABLE (default SUID_DUMP_USER) */
+    _Atomic int no_new_privs;     /* PR_GET/SET_NO_NEW_PRIVS */
+    _Atomic uint64 timer_slack_ns; /* PR_GET/SET_TIMERSLACK */
+
     /* Per-process resource accounting (cumulative counters) */
     struct proc_acct acct;
 

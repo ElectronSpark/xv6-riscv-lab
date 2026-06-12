@@ -1578,6 +1578,8 @@ int unix_sock_getpeername(int fd, uint64 uaddr, uint64 uaddrlen)
     struct unix_sock *sk = unix_sock_from_fd(fd);
     if (sk == NULL)
         return -EBADF;
+    if (uaddr == 0 || uaddrlen == 0)
+        return -EFAULT;
 
     spin_lock(&sk->lock);
     struct unix_sock *peer = sk->peer;
@@ -1593,9 +1595,17 @@ int unix_sock_getpeername(int fd, uint64 uaddr, uint64 uaddrlen)
         strncpy(sa.sun_path, peer->bind_path, UNIX_PATH_MAX);
     spin_unlock(&sk->lock);
 
+    int user_len = 0;
+    if (vm_copyin(current->vm, &user_len, uaddrlen, sizeof(user_len)) < 0)
+        return -EFAULT;
+    if (user_len < 0)
+        return -EINVAL;
     int alen = sizeof(sa);
-    vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
-    vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
+    int copy_len = user_len < alen ? user_len : alen;
+    if (vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen)) < 0)
+        return -EFAULT;
+    if (copy_len > 0 && vm_copyout(current->vm, uaddr, &sa, copy_len) < 0)
+        return -EFAULT;
     return 0;
 }
 
@@ -1607,6 +1617,8 @@ int unix_sock_getsockname(int fd, uint64 uaddr, uint64 uaddrlen)
     struct unix_sock *sk = unix_sock_from_fd(fd);
     if (sk == NULL)
         return -EBADF;
+    if (uaddr == 0 || uaddrlen == 0)
+        return -EFAULT;
 
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof(sa));
@@ -1617,9 +1629,17 @@ int unix_sock_getsockname(int fd, uint64 uaddr, uint64 uaddrlen)
         strncpy(sa.sun_path, sk->bind_path, UNIX_PATH_MAX);
     spin_unlock(&sk->lock);
 
+    int user_len = 0;
+    if (vm_copyin(current->vm, &user_len, uaddrlen, sizeof(user_len)) < 0)
+        return -EFAULT;
+    if (user_len < 0)
+        return -EINVAL;
     int alen = sizeof(sa);
-    vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
-    vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
+    int copy_len = user_len < alen ? user_len : alen;
+    if (vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen)) < 0)
+        return -EFAULT;
+    if (copy_len > 0 && vm_copyout(current->vm, uaddr, &sa, copy_len) < 0)
+        return -EFAULT;
     return 0;
 }
 
@@ -1685,6 +1705,12 @@ int unix_sock_socketpair(int type, int protocol, int file_flags, int sv[2])
     unix_sock_get(sk1);  /* sk0 holds ref on sk1 */
     sk1->peer = sk0;
     unix_sock_get(sk0);  /* sk1 holds ref on sk0 */
+    sk0->peer_pid = current->tgid;
+    sk0->peer_uid = current->thread_group->uid;
+    sk0->peer_gid = current->thread_group->gid;
+    sk1->peer_pid = current->tgid;
+    sk1->peer_uid = current->thread_group->uid;
+    sk1->peer_gid = current->thread_group->gid;
     sk0->state = UNIX_STATE_CONNECTED;
     sk1->state = UNIX_STATE_CONNECTED;
 
@@ -1710,10 +1736,25 @@ int unix_sock_setsockopt(int fd, int level, int optname, uint64 optval,
         case 10: /* SO_OOBINLINE - no-op */
         case 13: /* SO_LINGER - no-op */
         case 15: /* SO_REUSEPORT - no-op */
-        case 16: /* SO_PASSCRED - credentials are always available */
         case 20: /* SO_RCVTIMEO_OLD */
         case 21: /* SO_SNDTIMEO_OLD */
             return 0;
+        case 16: { /* SO_PASSCRED */
+            int val;
+            struct unix_sock *sk;
+
+            if (optlen < (int)sizeof(val))
+                return -EINVAL;
+            if (vm_copyin(current->vm, &val, optval, sizeof(val)) < 0)
+                return -EFAULT;
+            sk = unix_sock_from_fd(fd);
+            if (sk == NULL)
+                return -EBADF;
+            spin_lock(&sk->lock);
+            sk->passcred = val != 0;
+            spin_unlock(&sk->lock);
+            return 0;
+        }
         case 7:  /* SO_SNDBUF */
         case 8: { /* SO_RCVBUF */
             int val;
@@ -1807,9 +1848,17 @@ int unix_sock_getsockopt(int fd, int level, int optname, uint64 optval,
         case 10: /* SO_OOBINLINE */
         case 13: /* SO_LINGER */
         case 15: /* SO_REUSEPORT */
-        case 16: /* SO_PASSCRED */
             val = 0;
             break;
+        case 16: { /* SO_PASSCRED */
+            struct unix_sock *sk = unix_sock_from_fd(fd);
+            if (sk == NULL)
+                return -EBADF;
+            spin_lock(&sk->lock);
+            val = sk->passcred ? 1 : 0;
+            spin_unlock(&sk->lock);
+            break;
+        }
         case 7:  /* SO_SNDBUF */
         case 8: { /* SO_RCVBUF */
             struct unix_sock *sk = unix_sock_from_fd(fd);

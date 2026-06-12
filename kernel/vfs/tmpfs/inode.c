@@ -134,9 +134,9 @@ static struct hlist_func_struct __tmpfs_dir_hlist_funcs = {
 };
 
 // Initialize a tmpfs inode as a directory
-void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode) {
+void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode, mode_t mode) {
     tmpfs_inode->vfs_inode.size = 0;
-    tmpfs_inode->vfs_inode.mode = S_IFDIR | 0755;
+    tmpfs_inode->vfs_inode.mode = S_IFDIR | (mode & 07777);
     int ret = hlist_init(&tmpfs_inode->dir.children, TMPFS_HASH_BUCKETS,
                          &__tmpfs_dir_hlist_funcs);
     assert(ret == 0,
@@ -427,7 +427,7 @@ struct vfs_inode *__tmpfs_mkdir(struct vfs_inode *dir, mode_t mode,
     if (IS_ERR(tmpfs_inode)) {
         return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
-    tmpfs_make_directory(tmpfs_inode);
+    tmpfs_make_directory(tmpfs_inode, mode);
     // Directory has n_links=2 for "." and ".." entries
     tmpfs_inode->vfs_inode.n_links = 2;
     // Increment parent's n_links for this subdir's ".." entry

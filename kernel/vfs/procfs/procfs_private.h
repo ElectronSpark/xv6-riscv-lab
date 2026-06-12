@@ -152,6 +152,10 @@ enum procfs_entry_type {
     PROC_SYS_FS_FILE_NR,
     PROC_SYS_FS_NR_OPEN,
     PROC_SYS_FS_PIPE_MAX_SIZE,
+    PROC_SYS_FS_INOTIFY_DIR,
+    PROC_SYS_FS_INOTIFY_MAX_USER_WATCHES,
+    PROC_SYS_FS_INOTIFY_MAX_USER_INSTANCES,
+    PROC_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS,
 };
 
 /* ------------------------------------------------------------------ */
@@ -193,6 +197,10 @@ enum procfs_entry_type {
 #define PROCFS_INO_SYS_FS_FILE_NR 34ULL
 #define PROCFS_INO_SYS_FS_NR_OPEN 35ULL
 #define PROCFS_INO_SYS_FS_PIPE_MAX_SIZE 36ULL
+#define PROCFS_INO_SYS_FS_INOTIFY 37ULL
+#define PROCFS_INO_SYS_FS_INOTIFY_MAX_USER_WATCHES 38ULL
+#define PROCFS_INO_SYS_FS_INOTIFY_MAX_USER_INSTANCES 39ULL
+#define PROCFS_INO_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS 40ULL
 
 /* Each pid occupies 32 slots; max pid in xv6 fits well within 64-bit */
 #define PROCFS_PID_BASE    100ULL

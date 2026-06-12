@@ -38,8 +38,25 @@ int argstr(int n, char *buf, int max);
 /*  prctl                                                             */
 /* ================================================================== */
 
+#define PR_GET_DUMPABLE 3
+#define PR_SET_DUMPABLE 4
 #define PR_SET_NAME 15
 #define PR_GET_NAME 16
+#define PR_GET_SECCOMP 21
+#define PR_SET_SECCOMP 22
+#define PR_CAPBSET_READ 23
+#define PR_CAPBSET_DROP 24
+#define PR_GET_SECUREBITS 27
+#define PR_SET_SECUREBITS 28
+#define PR_SET_TIMERSLACK 29
+#define PR_GET_TIMERSLACK 30
+#define PR_SET_NO_NEW_PRIVS 38
+#define PR_GET_NO_NEW_PRIVS 39
+#define PR_SET_VMA 0x53564d41
+#define PR_SET_VMA_ANON_NAME 0
+
+#define CAP_LAST_CAP 40
+#define DEFAULT_TIMER_SLACK_NS 50000ULL
 
 uint64 sys_prctl(void) {
     int option;
@@ -51,6 +68,20 @@ uint64 sys_prctl(void) {
     argaddr(4, &arg5);
 
     switch (option) {
+    case PR_GET_DUMPABLE: {
+        struct thread_group *tg = current->thread_group;
+        if (arg2 || arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        return tg != NULL ? __atomic_load_n(&tg->dumpable, __ATOMIC_SEQ_CST) : 1;
+    }
+    case PR_SET_DUMPABLE: {
+        struct thread_group *tg = current->thread_group;
+        if (arg2 > 2 || arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        if (tg != NULL)
+            __atomic_store_n(&tg->dumpable, (int)arg2, __ATOMIC_SEQ_CST);
+        return 0;
+    }
     case PR_SET_NAME: {
         char name[16];
         if (either_copyin(name, 1, arg2, sizeof(name)) < 0)
@@ -69,6 +100,70 @@ uint64 sys_prctl(void) {
             return (uint64)-EFAULT;
         return 0;
     }
+    case PR_GET_SECCOMP:
+        if (arg2 || arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        return 0;
+    case PR_SET_SECCOMP:
+        /*
+         * The current kernel has no seccomp filter engine.  Match Linux's
+         * disabled-sandbox shape: strict/filter requests are unsupported,
+         * but the option itself is recognized.
+         */
+        return (uint64)-EINVAL;
+    case PR_CAPBSET_READ:
+        if (arg2 > CAP_LAST_CAP || arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        return 0;
+    case PR_CAPBSET_DROP:
+        if (arg2 > CAP_LAST_CAP || arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        return 0;
+    case PR_GET_SECUREBITS:
+        if (arg2 || arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        return 0;
+    case PR_SET_SECUREBITS:
+        if (arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        return arg2 == 0 ? 0 : (uint64)-EINVAL;
+    case PR_SET_TIMERSLACK: {
+        struct thread_group *tg = current->thread_group;
+        if (arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        if (tg != NULL) {
+            uint64 slack = arg2 != 0 ? arg2 : DEFAULT_TIMER_SLACK_NS;
+            __atomic_store_n(&tg->timer_slack_ns, slack, __ATOMIC_SEQ_CST);
+        }
+        return 0;
+    }
+    case PR_GET_TIMERSLACK: {
+        struct thread_group *tg = current->thread_group;
+        if (arg2 || arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        return tg != NULL ?
+            __atomic_load_n(&tg->timer_slack_ns, __ATOMIC_SEQ_CST) :
+            DEFAULT_TIMER_SLACK_NS;
+    }
+    case PR_SET_NO_NEW_PRIVS: {
+        struct thread_group *tg = current->thread_group;
+        if (arg2 != 1 || arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        if (tg != NULL)
+            __atomic_store_n(&tg->no_new_privs, 1, __ATOMIC_SEQ_CST);
+        return 0;
+    }
+    case PR_GET_NO_NEW_PRIVS: {
+        struct thread_group *tg = current->thread_group;
+        if (arg2 || arg3 || arg4 || arg5)
+            return (uint64)-EINVAL;
+        return tg != NULL ?
+            __atomic_load_n(&tg->no_new_privs, __ATOMIC_SEQ_CST) : 0;
+    }
+    case PR_SET_VMA:
+        if (arg2 != PR_SET_VMA_ANON_NAME || arg4 == 0)
+            return (uint64)-EINVAL;
+        return 0;
     default:
         return (uint64)-EINVAL;
     }

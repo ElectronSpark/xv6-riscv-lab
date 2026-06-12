@@ -215,7 +215,7 @@ int tmpfs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
         tmpfs_free(&sb->vfs_sb);
         return -ENOMEM; // Failed to allocate root inode
     }
-    tmpfs_make_directory(root_inode);
+    tmpfs_make_directory(root_inode, 0755);
     root_inode->vfs_inode.ino = 1; // Root inode number is 1
     root_inode->vfs_inode.n_links =
         2; // Root has 2 links: "." and ".." (both point to self)

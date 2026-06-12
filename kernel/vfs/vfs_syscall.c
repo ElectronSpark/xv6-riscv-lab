@@ -48,6 +48,8 @@
 #include "kstats.h"
 #include "cmdline.h"
 
+int snprintf(char *buf, size_t size, const char *fmt, ...);
+
 #ifndef FALLOC_FL_KEEP_SIZE
 #define FALLOC_FL_KEEP_SIZE 1
 #endif
@@ -181,6 +183,28 @@ static int webkit_poll_summary_enabled(void)
         initialized = 1;
     }
     return enabled;
+}
+
+static int chrome_poll_summary_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_poll_summary", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_vfs_trace_process(void)
+{
+    return current != NULL &&
+        strncmp(current->name, "chrome", 6) == 0 &&
+        strncmp(current->name, "chrome_crashpad", 15) != 0;
 }
 
 static int timespec_to_timeout_ms_ceil(int64 tv_sec, int64 tv_nsec,
@@ -626,6 +650,8 @@ uint64 sys_vfs_close(void) {
     return 0;
 }
 
+static void vfs_stat_prepare_user(struct stat *st);
+
 uint64 sys_vfs_fstat(void) {
     SYSCALL_PROFILE_BEGIN(g_sys_fstat_calls);
     int fd;
@@ -646,6 +672,7 @@ uint64 sys_vfs_fstat(void) {
         SYSCALL_PROFILE_RETURN(ret, g_sys_fstat_ticks);
     }
 
+    vfs_stat_prepare_user(&kst);
     if (vm_copyout(current->vm, st, (char *)&kst, sizeof(kst)) < 0) {
         vfs_fput(f); // remove the reference from __vfs_argfd
         SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstat_ticks);
@@ -1068,6 +1095,29 @@ uint64 sys_vfs_fcntl(void) {
     return ret;
 }
 
+static uint64 vfs_linux_encode_dev(dev_t dev)
+{
+    uint64 maj = major(dev);
+    uint64 min = minor(dev);
+
+    return (min & 0xff) | ((maj & 0xfff) << 8) |
+           ((min & ~0xffULL) << 12);
+}
+
+static dev_t vfs_linux_decode_dev(uint64 dev)
+{
+    uint64 maj = (dev >> 8) & 0xfff;
+    uint64 min = (dev & 0xff) | ((dev >> 12) & ~0xffULL);
+
+    return mkdev(maj, min);
+}
+
+static void vfs_stat_prepare_user(struct stat *st)
+{
+    if (S_ISCHR(st->st_mode) || S_ISBLK(st->st_mode))
+        st->st_rdev = vfs_linux_encode_dev(st->st_rdev);
+}
+
 static int __vfs_inode_stat(struct vfs_inode *inode, struct stat *kst) {
     if (inode->ops && inode->ops->getattr) {
         memset(kst, 0, sizeof(*kst));
@@ -1121,6 +1171,7 @@ uint64 sys_vfs_stat(void) {
     if (ret != 0) {
         return ret;
     }
+    vfs_stat_prepare_user(&kst);
     if (either_copyout(1, st_addr, &kst, sizeof(kst)) < 0) {
         return -EFAULT;
     }
@@ -1165,6 +1216,7 @@ uint64 sys_vfs_lstat(void) {
         vfs_iput(inode);
         if (ret != 0)
             return ret;
+        vfs_stat_prepare_user(&kst);
         if (either_copyout(1, st_addr, &kst, sizeof(kst)) < 0)
             return -EFAULT;
         return 0;
@@ -1206,6 +1258,7 @@ uint64 sys_vfs_lstat(void) {
     if (ret != 0) {
         return ret;
     }
+    vfs_stat_prepare_user(&kst);
     if (either_copyout(1, st_addr, &kst, sizeof(kst)) < 0) {
         return -EFAULT;
     }
@@ -1639,9 +1692,8 @@ uint64 sys_vfs_mkdir(void) {
  * sys_vfs_mknod - Create a special file
  * Args: a0=path, a1=mode, a2=dev
  *
- * musl packs major/minor into a single dev_t via makedev().
- * The kernel's mkdev() uses (major << 20 | minor); user-space must
- * encode dev_t with the same layout.
+ * Linux user space packs major/minor into a dev_t with the glibc/sysmacros
+ * layout. Decode that ABI value before storing the kernel's internal dev_t.
  */
 uint64 sys_vfs_mknod(void) {
     if (!capable())
@@ -1677,7 +1729,8 @@ uint64 sys_vfs_mknod(void) {
     size_t name_len = strlen(name);
 
     struct vfs_inode *node =
-        vfs_mknod(parent, (mode_t)mode, (dev_t)dev, name, name_len);
+        vfs_mknod(parent, (mode_t)mode, vfs_linux_decode_dev(dev),
+                  name, name_len);
     kvfree(name);
     vfs_iput(parent);
 
@@ -3183,6 +3236,52 @@ static const char *webkit_poll_fd_kind(struct vfs_file *f)
     return "regular";
 }
 
+static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
+                                      size_t buflen)
+{
+    struct unix_sock *sk;
+    struct unix_sock *peer = NULL;
+    uint self_tx = 0;
+    uint peer_tx = 0;
+    int state = 0;
+    int peer_state = -1;
+    int shutdown_flags = 0;
+    int peer_shutdown = 0;
+
+    if (buflen == 0)
+        return;
+    buf[0] = '\0';
+
+    if (!chrome_poll_summary_enabled() || !chrome_vfs_trace_process() ||
+        f == NULL || f->ops != &unix_socket_file_ops ||
+        f->private_data == NULL)
+        return;
+
+    sk = (struct unix_sock *)f->private_data;
+    spin_lock(&sk->lock);
+    state = sk->state;
+    shutdown_flags = sk->shutdown_flags;
+    self_tx = sk->tx.nwrite - sk->tx.nread;
+    peer = sk->peer;
+    if (peer != NULL)
+        unix_sock_get_ref(peer);
+    spin_unlock(&sk->lock);
+
+    if (peer != NULL) {
+        spin_lock(&peer->lock);
+        peer_state = peer->state;
+        peer_shutdown = peer->shutdown_flags;
+        peer_tx = peer->tx.nwrite - peer->tx.nread;
+        spin_unlock(&peer->lock);
+        unix_sock_put_ref(peer);
+    }
+
+    snprintf(buf, buflen,
+             "/unix:s%d/sh%x/selftx%u/peer_s%d/peer_sh%x/peertx%u",
+             state, shutdown_flags, self_tx, peer_state, peer_shutdown,
+             peer_tx);
+}
+
 /*
  * __vfs_poll_always_ready - report requested events as ready based on
  * file access mode.  Used as fallback when no specific poll callback
@@ -3302,7 +3401,8 @@ done:
 static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
                                 int ready, struct pollfd_k *pfds)
 {
-    if (!webkit_poll_summary_enabled() || !webkit_vfs_trace_process())
+    if (!((webkit_poll_summary_enabled() && webkit_vfs_trace_process()) ||
+          (chrome_poll_summary_enabled() && chrome_vfs_trace_process())))
         return;
 
     static _Atomic uint64 seq;
@@ -3316,6 +3416,7 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
     short sample_revents[6];
     const char *sample_kind[6];
     void *sample_poll[6];
+    char sample_detail[6][80];
     int nsample = 0;
 
     for (int i = 0; i < nfds; i++) {
@@ -3349,6 +3450,8 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
             sample_revents[nsample] = r;
             sample_kind[nsample] = kind;
             sample_poll[nsample] = poll;
+            chrome_poll_unix_snapshot(f, sample_detail[nsample],
+                                      sizeof(sample_detail[nsample]));
             nsample++;
             if (f != NULL)
                 vfs_fput(f);
@@ -3363,6 +3466,8 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
         printf(" sample%d=fd%d/e%x/r%x/%s/%p", i, sample_fd[i],
                (uint)sample_events[i], (uint)sample_revents[i],
                sample_kind[i], sample_poll[i]);
+        if (sample_detail[i][0] != '\0')
+            printf("%s", sample_detail[i]);
     }
     printf("\n");
 }
@@ -5120,6 +5225,7 @@ uint64 sys_vfs_fstatat(void) {
         if (ret != 0)
             SYSCALL_PROFILE_RETURN(ret, g_sys_fstatat_ticks);
 
+        vfs_stat_prepare_user(&st);
         if (either_copyout(1, stat_addr, &st, sizeof(st)) < 0)
             SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstatat_ticks);
         SYSCALL_PROFILE_RETURN(0, g_sys_fstatat_ticks);
@@ -5185,6 +5291,7 @@ uint64 sys_vfs_fstatat(void) {
 
     // Copy the 128-byte struct stat directly to userspace.
     // Kernel struct stat layout matches musl's riscv64 layout exactly.
+    vfs_stat_prepare_user(&st);
     if (either_copyout(1, stat_addr, &st, sizeof(st)) < 0)
         SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstatat_ticks);
 

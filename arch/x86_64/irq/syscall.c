@@ -20,6 +20,7 @@
 #include "string.h"
 #include "seg.h"    /* wrmsr, rdmsr, MSR_FS_BASE */
 #include "clone_flags.h"
+#include "cmdline.h"
 
 int fetchaddr(uint64 addr, uint64 *ip) {
     struct thread *p = current;
@@ -1209,6 +1210,256 @@ static int looks_like_linux_munmap(uint64 addr, uint64 length)
            length != 0 && length < (UVMTOP - UVMBOTTOM);
 }
 
+static int chrome_syscall_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_syscall_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_syscall_trace_process(struct thread *p)
+{
+    return chrome_syscall_trace_enabled() && p != NULL &&
+        strncmp(p->name, "chrome", 6) == 0 &&
+        strncmp(p->name, "chrome_crashpad", 15) != 0;
+}
+
+static int chrome_syscall_trace_interesting(int orig_num)
+{
+    switch (orig_num) {
+    case SYS_read_x86:
+    case SYS_write_x86:
+    case SYS_close_x86:
+    case SYS_mmap_x86:
+    case SYS_mprotect_x86:
+    case SYS_munmap_x86:
+    case SYS_brk_x86:
+    case SYS_rt_sigaction_x86:
+    case SYS_rt_sigprocmask_x86:
+    case SYS_getpid_x86:
+    case SYS_getuid_x86:
+    case SYS_getgid_x86:
+    case SYS_geteuid_x86:
+    case SYS_getegid_x86:
+    case SYS_getppid_x86:
+    case SYS_gettid_x86:
+    case SYS_clock_gettime_x86:
+    case SYS_clock_getres_x86:
+    case SYS_getrandom_x86:
+    case SYS_rseq_x86:
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+static const char *x86_syscall_trace_name(int num)
+{
+    switch (num) {
+    case SYS_read_x86: return "read";
+    case SYS_write_x86: return "write";
+    case SYS_open_x86: return "open";
+    case SYS_close_x86: return "close";
+    case SYS_fstat_x86: return "fstat";
+    case SYS_lseek_x86: return "lseek";
+    case SYS_mmap_x86: return "mmap";
+    case SYS_mprotect_x86: return "mprotect";
+    case SYS_munmap_x86: return "munmap";
+    case SYS_brk_x86: return "brk";
+    case SYS_rt_sigaction_x86: return "rt_sigaction";
+    case SYS_rt_sigprocmask_x86: return "rt_sigprocmask";
+    case SYS_ioctl_x86: return "ioctl";
+    case SYS_pread64_x86: return "pread64";
+    case SYS_readv_x86: return "readv";
+    case SYS_writev_x86: return "writev";
+    case SYS_access_x86: return "access";
+    case SYS_poll_x86: return "poll";
+    case SYS_select_x86: return "select";
+    case SYS_mremap_x86: return "mremap";
+    case SYS_madvise_x86: return "madvise";
+    case SYS_nanosleep_x86: return "nanosleep";
+    case SYS_getpid_x86: return "getpid";
+    case SYS_socket_x86: return "socket";
+    case SYS_bind_x86: return "bind";
+    case SYS_listen_x86: return "listen";
+    case SYS_connect_x86: return "connect";
+    case SYS_sendto_x86: return "sendto";
+    case SYS_recvfrom_x86: return "recvfrom";
+    case SYS_sendmsg_x86: return "sendmsg";
+    case SYS_recvmsg_x86: return "recvmsg";
+    case SYS_getsockname_x86: return "getsockname";
+    case SYS_getsockopt_x86: return "getsockopt";
+    case SYS_socketpair_x86: return "socketpair";
+    case SYS_clone_x86: return "clone";
+    case SYS_execve_x86: return "execve";
+    case SYS_exit_x86: return "exit";
+    case SYS_wait4_x86: return "wait4";
+    case SYS_kill_x86: return "kill";
+    case SYS_uname_x86: return "uname";
+    case SYS_fcntl_x86: return "fcntl";
+    case SYS_fsync_x86: return "fsync";
+    case SYS_ftruncate_x86: return "ftruncate";
+    case SYS_getcwd_x86: return "getcwd";
+    case SYS_chdir_x86: return "chdir";
+    case SYS_mkdir_x86: return "mkdir";
+    case SYS_unlink_x86: return "unlink";
+    case SYS_readlink_x86: return "readlink";
+    case SYS_gettimeofday_x86: return "gettimeofday";
+    case SYS_getrlimit_x86: return "getrlimit";
+    case SYS_getuid_x86: return "getuid";
+    case SYS_getgid_x86: return "getgid";
+    case SYS_geteuid_x86: return "geteuid";
+    case SYS_getegid_x86: return "getegid";
+    case SYS_getppid_x86: return "getppid";
+    case SYS_gettid_x86: return "gettid";
+    case SYS_futex_x86: return "futex";
+    case SYS_sched_getaffinity_x86: return "sched_getaffinity";
+    case SYS_set_tid_address_x86: return "set_tid_address";
+    case SYS_clock_gettime_x86: return "clock_gettime";
+    case SYS_clock_getres_x86: return "clock_getres";
+    case SYS_exit_group_x86: return "exit_group";
+    case SYS_tgkill_x86: return "tgkill";
+    case SYS_openat_x86: return "openat";
+    case SYS_newfstatat_x86: return "newfstatat";
+    case SYS_readlinkat_x86: return "readlinkat";
+    case SYS_faccessat_x86: return "faccessat";
+    case SYS_pselect6_x86: return "pselect6";
+    case SYS_ppoll_x86: return "ppoll";
+    case SYS_set_robust_list_x86: return "set_robust_list";
+    case SYS_timerfd_create_x86: return "timerfd_create";
+    case SYS_timerfd_settime_x86: return "timerfd_settime";
+    case SYS_timerfd_gettime_x86: return "timerfd_gettime";
+    case SYS_eventfd_x86: return "eventfd";
+    case SYS_accept4_x86: return "accept4";
+    case SYS_dup3_x86: return "dup3";
+    case SYS_prlimit64_x86: return "prlimit64";
+    case SYS_getrandom_x86: return "getrandom";
+    case SYS_membarrier_x86: return "membarrier";
+    case SYS_statx_x86: return "statx";
+    case SYS_rseq_x86: return "rseq";
+    case SYS_clone3_x86: return "clone3";
+    case SYS_close_range_x86: return "close_range";
+    case SYS_seccomp_x86: return "seccomp";
+    case SYS_landlock_create_ruleset_x86: return "landlock_create_ruleset";
+    case SYS_landlock_add_rule_x86: return "landlock_add_rule";
+    case SYS_landlock_restrict_self_x86: return "landlock_restrict_self";
+    case SYS_futex_wake_x86: return "futex_wake";
+    case SYS_futex_wait_x86: return "futex_wait";
+    default: return "?";
+    }
+}
+
+static void chrome_syscall_trace_path_arg(const char *label, uint64 addr)
+{
+    char path[160];
+
+    if (addr == 0)
+        return;
+    if (fetchstr(addr, path, sizeof(path)) < 0) {
+        printf("chrome-syscall-detail: %s=<fault 0x%lx>\n", label, addr);
+        return;
+    }
+    printf("chrome-syscall-detail: %s=%s\n", label, path);
+}
+
+struct trace_sockaddr_un {
+    uint16 family;
+    char path[108];
+};
+
+struct trace_msghdr {
+    uint64 msg_name;
+    uint64 msg_namelen;
+    uint64 msg_iov;
+    uint64 msg_iovlen;
+    uint64 msg_control;
+    uint64 msg_controllen;
+    uint32 msg_flags;
+};
+
+static void chrome_syscall_trace_sockaddr(const char *label, uint64 addr,
+                                          uint64 len)
+{
+    struct trace_sockaddr_un sa;
+    size_t copy_len = len < sizeof(sa) ? len : sizeof(sa);
+
+    if (addr == 0 || copy_len < sizeof(sa.family))
+        return;
+    memset(&sa, 0, sizeof(sa));
+    if (vm_copyin(current->vm, &sa, addr, copy_len) < 0) {
+        printf("chrome-syscall-detail: %s=<fault 0x%lx len=%lu>\n",
+               label, addr, len);
+        return;
+    }
+    if (sa.family == 1) {
+        sa.path[sizeof(sa.path) - 1] = '\0';
+        printf("chrome-syscall-detail: %s=AF_UNIX path=%s len=%lu\n",
+               label, sa.path, len);
+    } else {
+        printf("chrome-syscall-detail: %s=family=%u len=%lu\n",
+               label, sa.family, len);
+    }
+}
+
+static void chrome_syscall_trace_msghdr(uint64 addr)
+{
+    struct trace_msghdr msg;
+
+    if (addr == 0)
+        return;
+    memset(&msg, 0, sizeof(msg));
+    if (vm_copyin(current->vm, &msg, addr, sizeof(msg)) < 0) {
+        printf("chrome-syscall-detail: sendmsg msghdr=<fault 0x%lx>\n",
+               addr);
+        return;
+    }
+    printf("chrome-syscall-detail: sendmsg name=0x%lx namelen=%lu "
+           "iov=0x%lx iovlen=%lu control=0x%lx controllen=%lu flags=0x%x\n",
+           msg.msg_name, msg.msg_namelen, msg.msg_iov, msg.msg_iovlen,
+           msg.msg_control, msg.msg_controllen, msg.msg_flags);
+    chrome_syscall_trace_sockaddr("sendmsg.name", msg.msg_name,
+                                  msg.msg_namelen);
+}
+
+static void chrome_syscall_trace_details(int orig_num, uint64 a0, uint64 a1,
+                                         uint64 a2)
+{
+    switch (orig_num) {
+    case SYS_open_x86:
+    case SYS_stat_x86:
+    case SYS_lstat_x86:
+    case SYS_access_x86:
+    case SYS_readlink_x86:
+    case SYS_symlink_x86:
+        chrome_syscall_trace_path_arg("path", a0);
+        break;
+    case SYS_openat_x86:
+    case SYS_newfstatat_x86:
+    case SYS_readlinkat_x86:
+    case SYS_faccessat_x86:
+    case SYS_faccessat2_x86:
+    case SYS_symlinkat_x86:
+        chrome_syscall_trace_path_arg("path", a1);
+        break;
+    case SYS_connect_x86:
+        chrome_syscall_trace_sockaddr("connect.addr", a1, a2);
+        break;
+    case SYS_sendmsg_x86:
+        chrome_syscall_trace_msghdr(a1);
+        break;
+    default:
+        break;
+    }
+}
+
 /*
  * syscall — dispatch system call.
  *
@@ -1218,8 +1469,17 @@ static int looks_like_linux_munmap(uint64 addr, uint64 length)
 void syscall(void) {
     struct thread *p = current;
     int num = (int)p->trapframe->trapframe.rax;
+    int orig_num = num;
     uint64 a0 = p->trapframe->trapframe.rdi;
     uint64 a1 = p->trapframe->trapframe.rsi;
+    uint64 a2 = p->trapframe->trapframe.rdx;
+    uint64 a3 = p->trapframe->trapframe.r10;
+    uint64 a4 = p->trapframe->trapframe.r8;
+    uint64 a5 = p->trapframe->trapframe.r9;
+    static int chrome_syscall_trace_count;
+    int trace = chrome_syscall_trace_process(p) &&
+                chrome_syscall_trace_interesting(orig_num) &&
+                chrome_syscall_trace_count < 4096;
     /*
      * Some musl x86_64 assembly helpers use native Linux syscall numbers
      * directly.  Most libc entry points go through xv6's generated syscall
@@ -1245,5 +1505,15 @@ void syscall(void) {
 #else
         p->trapframe->trapframe.rax = (uint64)-ENOSYS;
 #endif
+    }
+    if (trace) {
+        uint64 ret = p->trapframe->trapframe.rax;
+        chrome_syscall_trace_count++;
+        printf("chrome-syscall: pid=%d name=%s orig=%d num=%d(%s) "
+               "a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx a4=0x%lx "
+               "a5=0x%lx ret=0x%lx\n",
+               p->pid, p->name, orig_num, num, x86_syscall_trace_name(orig_num),
+               a0, a1, a2, a3, a4, a5, ret);
+        chrome_syscall_trace_details(orig_num, a0, a1, a2);
     }
 }

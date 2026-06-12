@@ -2902,8 +2902,7 @@ struct k_msghdr {
     int    msg_iovlen;      /* int                     */
     int    __pad1;
     uint64 msg_control;     /* void *msg_control       */
-    uint32 msg_controllen;  /* socklen_t               */
-    uint32 __pad2;
+    uint64 msg_controllen;  /* size_t                  */
     int    msg_flags;       /* int                     */
 };
 
@@ -2914,20 +2913,26 @@ struct k_iovec {
 
 /* Kernel-space cmsghdr — must match LP64 POSIX layout (musl) */
 struct k_cmsghdr {
-    uint32 cmsg_len;        /* data byte count incl. header */
-    uint32 __pad1;
+    uint64 cmsg_len;        /* data byte count incl. header */
     int    cmsg_level;
     int    cmsg_type;
     /* followed by cmsg data */
 };
 
 #define SCM_RIGHTS       1
+#define SCM_CREDENTIALS  2
 #define K_CMSG_ALIGN(n)  (((n) + sizeof(uint64) - 1) & ~(sizeof(uint64) - 1))
 #define K_CMSG_DATA(cmsg) ((unsigned char *)((struct k_cmsghdr *)(cmsg) + 1))
 #define K_CMSG_LEN(len)   (K_CMSG_ALIGN(sizeof(struct k_cmsghdr)) + (len))
 #define K_CMSG_SPACE(len) (K_CMSG_ALIGN(sizeof(struct k_cmsghdr)) + K_CMSG_ALIGN(len))
 
 #define SENDMSG_MAX_IOV 16
+
+struct k_ucred {
+    int pid;
+    uint32 uid;
+    uint32 gid;
+};
 
 static ssize_t sock_udp_copy_netbuf_to_iovs(struct netbuf *nb,
                                             const struct k_iovec *iovs,
@@ -2980,10 +2985,62 @@ static ssize_t sock_udp_copy_netbuf_to_iovs(struct netbuf *nb,
 
 static size_t k_cmsg_payload_len(struct k_cmsghdr *cmsg)
 {
-    uint32 cmsg_len = (uint32)cmsg->cmsg_len;
+    uint64 cmsg_len = cmsg->cmsg_len;
     if (cmsg_len < K_CMSG_LEN(0))
         return 0;
     return cmsg_len - K_CMSG_LEN(0);
+}
+
+static int k_cmsg_readable(struct k_cmsghdr *cmsg, size_t copied,
+                           size_t payload_len)
+{
+    uint64 cmsg_len = cmsg->cmsg_len;
+
+    if (copied < K_CMSG_LEN(0) || cmsg_len < K_CMSG_LEN(payload_len))
+        return 0;
+    if (cmsg_len > copied)
+        return 0;
+    return 1;
+}
+
+static int k_cmsg_append(unsigned char *buf, size_t buflen, size_t *used,
+                         int level, int type, const void *data,
+                         size_t data_len)
+{
+    size_t need = K_CMSG_SPACE(data_len);
+    size_t len = K_CMSG_LEN(data_len);
+
+    if (*used > buflen || buflen - *used < need)
+        return -ENOSPC;
+
+    struct k_cmsghdr *cmsg = (struct k_cmsghdr *)(buf + *used);
+    memset(buf + *used, 0, need);
+    cmsg->cmsg_len = len;
+    cmsg->cmsg_level = level;
+    cmsg->cmsg_type = type;
+    if (data_len != 0)
+        memmove(K_CMSG_DATA(cmsg), data, data_len);
+    *used += need;
+    return 0;
+}
+
+static int unix_sock_passcred_enabled(struct unix_sock *sk)
+{
+    int passcred;
+
+    spin_lock(&sk->lock);
+    passcred = sk->passcred;
+    spin_unlock(&sk->lock);
+    return passcred;
+}
+
+static void unix_sock_peer_ucred(struct unix_sock *sk, struct k_ucred *ucred)
+{
+    spin_lock(&sk->lock);
+    ucred->pid = sk->peer_pid;
+    ucred->uid = sk->peer_uid;
+    ucred->gid = sk->peer_gid;
+    spin_unlock(&sk->lock);
 }
 
 static size_t unix_scm_count_locked(struct unix_sock *sk)
@@ -3375,14 +3432,10 @@ uint64 sys_sendmsg(void)
             }
 
             struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
-            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
-                (uint32)cmsg->cmsg_len >= K_CMSG_LEN(sizeof(int))) {
+            if (k_cmsg_readable(cmsg, copy_len, sizeof(int)) &&
+                cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
                 size_t payload_len = k_cmsg_payload_len(cmsg);
                 size_t nfds = payload_len / sizeof(int);
-                size_t max_fds = (copy_len >= K_CMSG_LEN(0))
-                    ? (copy_len - K_CMSG_LEN(0)) / sizeof(int) : 0;
-                if (nfds > max_fds)
-                    nfds = max_fds;
                 if (nfds >= UNIX_SCM_QUEUE_MAX) {
                     kvfree(msg_buf);
                     return (uint64)-EMSGSIZE;
@@ -3951,9 +4004,9 @@ unix_recvmsg_done:
         f->f_flags = saved_fflags;
         vfs_fput(f);
 
-        /* Check for pending SCM_RIGHTS file from peer */
+        /* Check for pending ancillary data from peer. */
         if (flags & MSG_PEEK) {
-            uint32 zero = 0;
+            uint64 zero = 0;
             vm_copyout(current->vm,
                        umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
                        &zero, sizeof(zero));
@@ -3970,18 +4023,36 @@ unix_recvmsg_done:
                                                        UNIX_SCM_QUEUE_MAX);
             unix_sock_put_ref(peer);
 
+            unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(struct k_ucred)) +
+                                   K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
+            size_t cmsg_used = 0;
+            size_t cmsg_cap = mh.msg_controllen;
+            if (cmsg_cap > sizeof(cmsg_buf))
+                cmsg_cap = sizeof(cmsg_buf);
+
+            if (unix_sock_passcred_enabled(sk)) {
+                struct k_ucred ucred;
+                unix_sock_peer_ucred(sk, &ucred);
+                if (mh.msg_control == 0 ||
+                    k_cmsg_append(cmsg_buf, cmsg_cap, &cmsg_used,
+                                  SOL_SOCKET, SCM_CREDENTIALS,
+                                  &ucred, sizeof(ucred)) < 0)
+                    unix_out_flags |= MSG_CTRUNC;
+            }
+
             if (scm_count > 0) {
                 int newfds[UNIX_SCM_QUEUE_MAX];
                 size_t max_fds = 0;
-                if (mh.msg_control != 0 &&
-                    mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
-                    max_fds = (mh.msg_controllen >= K_CMSG_SPACE(0))
-                        ? (mh.msg_controllen - K_CMSG_SPACE(0)) / sizeof(int) : 0;
-                    if (max_fds > UNIX_SCM_QUEUE_MAX)
-                        max_fds = UNIX_SCM_QUEUE_MAX;
-                }
-                size_t to_install = scm_count < max_fds ? scm_count : max_fds;
+                size_t to_install;
                 size_t installed = 0;
+
+                if (mh.msg_control != 0 && cmsg_cap > cmsg_used) {
+                    size_t remain = cmsg_cap - cmsg_used;
+                    while (max_fds < scm_count &&
+                           K_CMSG_SPACE(sizeof(int) * (max_fds + 1)) <= remain)
+                        max_fds++;
+                }
+                to_install = scm_count < max_fds ? scm_count : max_fds;
 
                 for (; installed < to_install; installed++) {
                     spin_lock(&current->fdtable->lock);
@@ -4001,36 +4072,20 @@ unix_recvmsg_done:
                 unix_discard_scm_rights(scm_files, installed, scm_count);
                 if (installed < scm_count)
                     unix_out_flags |= MSG_CTRUNC;
-
-                if (installed > 0) {
-                    unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
-                    memset(cmsg_buf, 0, sizeof(cmsg_buf));
-                    struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
-                    cmsg->cmsg_len = K_CMSG_LEN(sizeof(int) * installed);
-                    cmsg->cmsg_level = SOL_SOCKET;
-                    cmsg->cmsg_type = SCM_RIGHTS;
-                    memmove(K_CMSG_DATA(cmsg), newfds, sizeof(int) * installed);
-
-                    size_t clen = K_CMSG_SPACE(sizeof(int) * installed);
-                    vm_copyout(current->vm, mh.msg_control, cmsg_buf, clen);
-
-                    uint32 uclen = (uint32)clen;
-                    vm_copyout(current->vm,
-                               umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
-                               &uclen, sizeof(uclen));
-                } else {
-                    uint32 zero = 0;
-                    vm_copyout(current->vm,
-                               umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
-                               &zero, sizeof(zero));
-                }
-            } else {
-                /* No pending fd — set msg_controllen = 0 */
-                uint32 zero = 0;
-                vm_copyout(current->vm,
-                           umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
-                           &zero, sizeof(zero));
+                if (installed > 0 &&
+                    k_cmsg_append(cmsg_buf, cmsg_cap, &cmsg_used,
+                                  SOL_SOCKET, SCM_RIGHTS, newfds,
+                                  sizeof(int) * installed) < 0)
+                    unix_out_flags |= MSG_CTRUNC;
             }
+
+            if (mh.msg_control != 0 && cmsg_used > 0)
+                vm_copyout(current->vm, mh.msg_control, cmsg_buf, cmsg_used);
+
+            uint64 uclen = cmsg_used;
+            vm_copyout(current->vm,
+                       umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
+                       &uclen, sizeof(uclen));
         }
 
         /* Clear msg_flags */
@@ -4239,7 +4294,7 @@ unix_recvmsg_done:
                 &out_flags, sizeof(out_flags));
 
     /* Clear msg_controllen (no ancillary data support) */
-    uint32 zero = 0;
+    uint64 zero = 0;
     vm_copyout(current->vm,
                 umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
                 &zero, sizeof(zero));
@@ -4392,15 +4447,11 @@ uint64 sys_sendmmsg(void)
                 }
 
                 struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
-                if (cmsg->cmsg_level == SOL_SOCKET &&
-                    cmsg->cmsg_type == SCM_RIGHTS &&
-                    cmsg->cmsg_len >= K_CMSG_LEN(sizeof(int))) {
+                if (k_cmsg_readable(cmsg, copy_len, sizeof(int)) &&
+                    cmsg->cmsg_level == SOL_SOCKET &&
+                    cmsg->cmsg_type == SCM_RIGHTS) {
                     size_t payload_len = k_cmsg_payload_len(cmsg);
                     size_t nfds = payload_len / sizeof(int);
-                    size_t max_fds = (copy_len >= K_CMSG_LEN(0))
-                        ? (copy_len - K_CMSG_LEN(0)) / sizeof(int) : 0;
-                    if (nfds > max_fds)
-                        nfds = max_fds;
                     if (nfds >= UNIX_SCM_QUEUE_MAX) {
                         kvfree(msg_buf);
                         return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
@@ -4886,7 +4937,7 @@ uint64 sys_recvmmsg(void)
             vfs_fput(f);
 
             if (recv_flags & MSG_PEEK) {
-                uint32 zero = 0;
+                uint64 zero = 0;
                 vm_copyout(current->vm,
                            entry_addr + __builtin_offsetof(struct k_msghdr,
                                                            msg_controllen),
@@ -4948,7 +4999,7 @@ uint64 sys_recvmmsg(void)
                         memmove(K_CMSG_DATA(cmsg), newfds,
                                 sizeof(int) * installed);
 
-                        uint32 clen = (uint32)K_CMSG_SPACE(sizeof(int) * installed);
+                        uint64 clen = K_CMSG_SPACE(sizeof(int) * installed);
                         vm_copyout(current->vm, mh.msg_control,
                                    cmsg_buf, clen);
                         vm_copyout(current->vm,
@@ -4956,14 +5007,14 @@ uint64 sys_recvmmsg(void)
                                                                    msg_controllen),
                                    &clen, sizeof(clen));
                     } else {
-                        uint32 zero = 0;
+                        uint64 zero = 0;
                         vm_copyout(current->vm,
                                    entry_addr + __builtin_offsetof(struct k_msghdr,
                                                                    msg_controllen),
                                    &zero, sizeof(zero));
                     }
                 } else {
-                    uint32 zero = 0;
+                    uint64 zero = 0;
                     vm_copyout(current->vm,
                                entry_addr + __builtin_offsetof(struct k_msghdr,
                                                                msg_controllen),

@@ -43,6 +43,8 @@
 #include "accounting.h"
 #include "resource.h"
 
+#define DEFAULT_TIMER_SLACK_NS 50000ULL
+
 static slab_cache_t __tg_pool;
 
 #define TG_MAX_SIGINFO_PER_SIGNAL 8
@@ -238,6 +240,10 @@ int thread_group_alloc(struct thread *leader) {
 
     // Default process credentials (root, umask 022)
     tg->umask = 022;
+    __atomic_store_n(&tg->dumpable, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->no_new_privs, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->timer_slack_ns, DEFAULT_TIMER_SLACK_NS,
+                     __ATOMIC_SEQ_CST);
 
     // Initialise per-process accounting and resource limits
     acct_init(tg);
@@ -283,6 +289,10 @@ int thread_group_alloc_kernel(struct thread_group **out_tg, pid_t tgid) {
     // Initialise per-process accounting and resource limits
     acct_init(tg);
     rlimit_init_defaults(tg->rlim);
+    __atomic_store_n(&tg->dumpable, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->no_new_privs, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->timer_slack_ns, DEFAULT_TIMER_SLACK_NS,
+                     __ATOMIC_SEQ_CST);
 
     *out_tg = tg;
     return 0;

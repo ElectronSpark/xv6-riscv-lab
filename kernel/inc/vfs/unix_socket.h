@@ -111,6 +111,7 @@ struct unix_sock {
     int        protocol;        /* always 0 for AF_UNIX */
     int        shutdown_flags;  /* UNIX_SHUT_RD | UNIX_SHUT_WR */
     int        so_error;        /* pending async socket error for SO_ERROR */
+    int        passcred;        /* SO_PASSCRED: attach SCM_CREDENTIALS */
     size_t     rcv_lowat;       /* SO_RCVLOWAT */
     size_t     snd_lowat;       /* SO_SNDLOWAT */
     size_t     rcv_buf;         /* SO_RCVBUF cap for peer writes */

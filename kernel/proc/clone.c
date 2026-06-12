@@ -274,6 +274,18 @@ int thread_clone(struct clone_args *args) {
         memmove(ret_ptr->thread_group->groups, p->thread_group->groups,
                 sizeof(uint32) * p->thread_group->ngroups);
         ret_ptr->thread_group->umask  = p->thread_group->umask;
+        __atomic_store_n(&ret_ptr->thread_group->dumpable,
+                         __atomic_load_n(&p->thread_group->dumpable,
+                                         __ATOMIC_SEQ_CST),
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&ret_ptr->thread_group->no_new_privs,
+                         __atomic_load_n(&p->thread_group->no_new_privs,
+                                         __ATOMIC_SEQ_CST),
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&ret_ptr->thread_group->timer_slack_ns,
+                         __atomic_load_n(&p->thread_group->timer_slack_ns,
+                                         __ATOMIC_SEQ_CST),
+                         __ATOMIC_SEQ_CST);
 
         // Inherit dynamic linker / executable metadata so that
         // /proc/<pid>/exe and GDB's shared-library queries work
