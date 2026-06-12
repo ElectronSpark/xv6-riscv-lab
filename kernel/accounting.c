@@ -112,9 +112,13 @@ void rlimit_init_defaults(struct rlimit rlim[RLIMIT_NLIMITS]) {
         rlim[i].rlim_max = RLIM_INFINITY;
     }
 
-    /* RLIMIT_NOFILE — match the compile-time NOFILE constant */
+    /*
+     * RLIMIT_NOFILE: imported Linux daemons commonly raise the hard limit to
+     * 65536 during startup.  The fd allocator still clips to NOFILE, so this
+     * only satisfies the Linux ABI probe without growing each fd table.
+     */
     rlim[RLIMIT_NOFILE].rlim_cur = NOFILE;
-    rlim[RLIMIT_NOFILE].rlim_max = NOFILE;
+    rlim[RLIMIT_NOFILE].rlim_max = 65536;
 
     /* RLIMIT_NPROC — match the compile-time NR_THREAD constant */
     rlim[RLIMIT_NPROC].rlim_cur = NR_THREAD;

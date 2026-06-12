@@ -56,6 +56,8 @@ extern void argaddr(int n, uint64 *ip);
 /* ========================================================================== */
 
 #define NETLINK_RESP_SIZE (PAGE_SIZE * 2) /* 8KB response buffer */
+#define NETLINK_MSG_PEEK       0x02
+#define NETLINK_MSG_DONTWAIT   0x40
 
 struct netlink_sock {
     spinlock_t lock;
@@ -651,7 +653,7 @@ static ssize_t netlink_file_read(struct vfs_file *file, char *buf,
     size_t avail = sk->resp_len - sk->resp_off;
     if (avail == 0) {
         spin_unlock(&sk->lock);
-        return 0;
+        return -EAGAIN;
     }
 
     size_t to_copy = count < avail ? count : avail;
@@ -938,17 +940,29 @@ int netlink_sock_sendto(int fd, uint64 ubuf, size_t len, int flags,
 int netlink_sock_recvfrom(int fd, uint64 ubuf, size_t len, int flags,
                           uint64 usrc, uint64 uaddrlen)
 {
-    (void)flags;
-
-    struct netlink_sock *sk = netlink_from_fd(fd);
-    if (sk == NULL)
+    struct vfs_file *file = vfs_fdtable_get_file(current->fdtable, fd);
+    if (file == NULL)
         return -EBADF;
+    if (file->ops != &netlink_socket_file_ops) {
+        vfs_fput(file);
+        return -EBADF;
+    }
+
+    struct netlink_sock *sk = (struct netlink_sock *)file->private_data;
+    if (sk == NULL) {
+        vfs_fput(file);
+        return -EBADF;
+    }
+    int nonblock = (file->f_flags & O_NONBLOCK) ||
+                   (flags & NETLINK_MSG_DONTWAIT);
 
     spin_lock(&sk->lock);
     size_t avail = sk->resp_len - sk->resp_off;
     if (avail == 0) {
         spin_unlock(&sk->lock);
-        return 0;
+        vfs_fput(file);
+        (void)nonblock;
+        return -EAGAIN;
     }
 
     size_t to_copy = len < avail ? len : avail;
@@ -961,16 +975,18 @@ int netlink_sock_recvfrom(int fd, uint64 ubuf, size_t len, int flags,
         staging = kalloc();
         if (staging == NULL) {
             spin_unlock(&sk->lock);
+            vfs_fput(file);
             return -ENOMEM;
         }
     }
     memmove(staging, sk->resp_buf + sk->resp_off, to_copy);
-    if (!(flags & 0x02)) /* MSG_PEEK */
+    if (!(flags & NETLINK_MSG_PEEK))
         sk->resp_off += to_copy;
     spin_unlock(&sk->lock);
 
     if (vm_copyout(current->vm, ubuf, staging, to_copy) < 0) {
         if (staging != tmp) kfree(staging);
+        vfs_fput(file);
         return -EFAULT;
     }
     if (staging != tmp)
@@ -988,5 +1004,6 @@ int netlink_sock_recvfrom(int fd, uint64 ubuf, size_t len, int flags,
         vm_copyout(current->vm, usrc, &sa, sizeof(sa));
     }
 
+    vfs_fput(file);
     return (int)to_copy;
 }

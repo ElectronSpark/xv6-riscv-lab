@@ -167,9 +167,27 @@ struct vfs_inode *sysfs_get_inode(struct vfs_superblock *sb, uint64 ino)
     case SYSFS_INO_CLASS_DRM:
     case SYSFS_INO_DEVICES:
     case SYSFS_INO_DEVICES_PCI_ROOT:
+    case SYSFS_INO_DEVICES_SYSTEM:
+    case SYSFS_INO_DEVICES_SYSTEM_CPU:
     case SYSFS_INO_PCI_DEVICE:
     case SYSFS_INO_PCI_DRM:
         sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_NONE, SYSFS_ATTR_NONE);
+        break;
+    case SYSFS_INO_CPU_ONLINE:
+        sysfs_fill_inode(si, ino, SYSFS_FILE, SYSFS_DEV_NONE,
+                         SYSFS_ATTR_CPU_ONLINE);
+        break;
+    case SYSFS_INO_CPU_PRESENT:
+        sysfs_fill_inode(si, ino, SYSFS_FILE, SYSFS_DEV_NONE,
+                         SYSFS_ATTR_CPU_PRESENT);
+        break;
+    case SYSFS_INO_CPU_POSSIBLE:
+        sysfs_fill_inode(si, ino, SYSFS_FILE, SYSFS_DEV_NONE,
+                         SYSFS_ATTR_CPU_POSSIBLE);
+        break;
+    case SYSFS_INO_CPU_KERNEL_MAX:
+        sysfs_fill_inode(si, ino, SYSFS_FILE, SYSFS_DEV_NONE,
+                         SYSFS_ATTR_CPU_KERNEL_MAX);
         break;
     case SYSFS_INO_BUS_PCI_DEVICE_LINK:
     case SYSFS_INO_BUS_PCI_DRIVER_DEVICE_LINK:

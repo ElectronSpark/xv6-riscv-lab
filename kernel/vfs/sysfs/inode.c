@@ -13,6 +13,7 @@
 #include "vfs/file.h"
 #include "../vfs_private.h"
 #include <mm/vm.h>
+#include "smp/percpu.h"
 #include "sysfs_private.h"
 
 int snprintf(char *buf, size_t size, const char *fmt, ...);
@@ -93,10 +94,22 @@ static const struct sysfs_entry class_node_entries[] = {
 
 static const struct sysfs_entry devices_entries[] = {
     {"pci0000:00", SYSFS_INO_DEVICES_PCI_ROOT},
+    {"system", SYSFS_INO_DEVICES_SYSTEM},
 };
 
 static const struct sysfs_entry pci_root_entries[] = {
     {"0000:00:04.0", SYSFS_INO_PCI_DEVICE},
+};
+
+static const struct sysfs_entry system_entries[] = {
+    {"cpu", SYSFS_INO_DEVICES_SYSTEM_CPU},
+};
+
+static const struct sysfs_entry system_cpu_entries[] = {
+    {"online", SYSFS_INO_CPU_ONLINE},
+    {"present", SYSFS_INO_CPU_PRESENT},
+    {"possible", SYSFS_INO_CPU_POSSIBLE},
+    {"kernel_max", SYSFS_INO_CPU_KERNEL_MAX},
 };
 
 static const struct sysfs_entry drm_device_entries[] = {
@@ -310,6 +323,17 @@ static int sysfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                                 name, name_len, &ino) == 0)
             break;
         return -ENOENT;
+    case SYSFS_INO_DEVICES_SYSTEM:
+        if (sysfs_lookup_static(system_entries, NELEM(system_entries), name,
+                                name_len, &ino) == 0)
+            break;
+        return -ENOENT;
+    case SYSFS_INO_DEVICES_SYSTEM_CPU:
+        if (sysfs_lookup_static(system_cpu_entries,
+                                NELEM(system_cpu_entries), name, name_len,
+                                &ino) == 0)
+            break;
+        return -ENOENT;
     case SYSFS_INO_PCI_DRM:
     case SYSFS_INO_DRM_PRIMARY_DEVICE_DRM:
     case SYSFS_INO_DRM_RENDER_DEVICE_DRM:
@@ -358,6 +382,15 @@ static int sysfs_parent_ino(uint64 ino, enum sysfs_device_kind kind)
         return SYSFS_INO_ROOT;
     if (ino == SYSFS_INO_DEVICES_PCI_ROOT)
         return SYSFS_INO_DEVICES;
+    if (ino == SYSFS_INO_DEVICES_SYSTEM)
+        return SYSFS_INO_DEVICES;
+    if (ino == SYSFS_INO_DEVICES_SYSTEM_CPU)
+        return SYSFS_INO_DEVICES_SYSTEM;
+    if (ino == SYSFS_INO_CPU_ONLINE ||
+        ino == SYSFS_INO_CPU_PRESENT ||
+        ino == SYSFS_INO_CPU_POSSIBLE ||
+        ino == SYSFS_INO_CPU_KERNEL_MAX)
+        return SYSFS_INO_DEVICES_SYSTEM_CPU;
     if (ino == SYSFS_INO_PCI_DEVICE)
         return SYSFS_INO_DEVICES_PCI_ROOT;
     if (ino == SYSFS_INO_PCI_DRM)
@@ -454,6 +487,12 @@ static int sysfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
     case SYSFS_INO_DEVICES_PCI_ROOT:
         return sysfs_emit_static(iter, ret, pci_root_entries,
                                  NELEM(pci_root_entries), child_idx);
+    case SYSFS_INO_DEVICES_SYSTEM:
+        return sysfs_emit_static(iter, ret, system_entries,
+                                 NELEM(system_entries), child_idx);
+    case SYSFS_INO_DEVICES_SYSTEM_CPU:
+        return sysfs_emit_static(iter, ret, system_cpu_entries,
+                                 NELEM(system_cpu_entries), child_idx);
     case SYSFS_INO_PCI_DRM:
     case SYSFS_INO_DRM_PRIMARY_DEVICE_DRM:
     case SYSFS_INO_DRM_RENDER_DEVICE_DRM:
@@ -520,9 +559,12 @@ static char *sysfs_gen_file(struct sysfs_inode *si)
     const char *node = sysfs_dev_name(si->dev_kind);
     const char *devnum = sysfs_dev_number(si->dev_kind);
     int n = 0;
+    int last_cpu = cpu_possible_count() - 1;
 
     if (buf == NULL)
         return ERR_PTR(-ENOMEM);
+    if (last_cpu < 0)
+        last_cpu = 0;
 
     switch (si->attr) {
     case SYSFS_ATTR_VENDOR:
@@ -563,6 +605,14 @@ static char *sysfs_gen_file(struct sysfs_inode *si)
         break;
     case SYSFS_ATTR_CLASS:
         n = snprintf(buf, 512, "0x030000\n");
+        break;
+    case SYSFS_ATTR_CPU_ONLINE:
+    case SYSFS_ATTR_CPU_PRESENT:
+    case SYSFS_ATTR_CPU_POSSIBLE:
+        n = snprintf(buf, 512, "0-%d\n", last_cpu);
+        break;
+    case SYSFS_ATTR_CPU_KERNEL_MAX:
+        n = snprintf(buf, 512, "%d\n", last_cpu);
         break;
     default:
         kvfree(buf);
