@@ -4214,10 +4214,6 @@ uint64 sys_vfs_openat(void) {
     argint(0, &dirfd);
 
     struct vfs_inode *start_dir = NULL;
-    int err = __vfs_resolve_dirfd(dirfd, &start_dir);
-    if (err)
-        SYSCALL_PROFILE_RETURN(err, g_sys_openat_ticks);
-
     // path is in a1, flags in a2, mode in a3
     char *path;
     char *name;
@@ -4227,8 +4223,14 @@ uint64 sys_vfs_openat(void) {
 
     int path_ret = __vfs_argpath(1, &path, &n);
     if (path_ret < 0) {
-        if (start_dir) vfs_iput(start_dir);
         SYSCALL_PROFILE_RETURN(path_ret, g_sys_openat_ticks);
+    }
+    if (path[0] != '/') {
+        int err = __vfs_resolve_dirfd(dirfd, &start_dir);
+        if (err) {
+            kvfree(path);
+            SYSCALL_PROFILE_RETURN(err, g_sys_openat_ticks);
+        }
     }
     name = __vfs_alloc_pathbuf();
     if (name == NULL) {
