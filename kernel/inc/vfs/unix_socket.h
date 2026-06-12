@@ -119,6 +119,7 @@ struct unix_sock {
 
     /* Bind address */
     char       bind_path[UNIX_PATH_MAX];
+    size_t     bind_len;
     int        bound;           /* non-zero if bound */
 
     /* Connected peer (SOCK_STREAM) */

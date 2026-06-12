@@ -2069,9 +2069,31 @@ uint64 sys_sendto(void)
     if (domain == AF_NETLINK)
         return (uint64)netlink_sock_sendto(fd, ubuf, (size_t)len, flags,
                                            uaddr, addrlen);
-    /* AF_UNIX: sendto on connected socket works like write */
-    if (domain == AF_UNIX)
-        return (uint64)-EOPNOTSUPP;
+    /* AF_UNIX: send()/sendto(NULL) on a connected socket works like write. */
+    if (domain == AF_UNIX) {
+        if (uaddr != 0 || addrlen != 0)
+            return (uint64)-EOPNOTSUPP;
+        if (len <= 0)
+            return 0;
+        if (flags & ~(MSG_DONTWAIT | MSG_NOSIGNAL))
+            return (uint64)-EOPNOTSUPP;
+
+        struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+        if (f == NULL || f->ops != &unix_socket_file_ops) {
+            if (f != NULL)
+                vfs_fput(f);
+            return (uint64)-EBADF;
+        }
+
+        int saved_fflags = f->f_flags;
+        if (flags & MSG_DONTWAIT)
+            f->f_flags |= O_NONBLOCK;
+        ssize_t n = unix_socket_file_ops.write(f, (const char *)ubuf,
+                                               (size_t)len, true);
+        f->f_flags = saved_fflags;
+        vfs_fput(f);
+        return (uint64)n;
+    }
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -2164,8 +2186,34 @@ uint64 sys_recvfrom(void)
     if (domain == AF_NETLINK)
         return (uint64)netlink_sock_recvfrom(fd, ubuf, (size_t)len, flags,
                                              uaddr, uaddrlen);
-    if (domain == AF_UNIX)
-        return (uint64)-EOPNOTSUPP;
+    if (domain == AF_UNIX) {
+        if (len <= 0)
+            return 0;
+        if (flags & ~(MSG_DONTWAIT))
+            return (uint64)-EOPNOTSUPP;
+
+        struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+        if (f == NULL || f->ops != &unix_socket_file_ops) {
+            if (f != NULL)
+                vfs_fput(f);
+            return (uint64)-EBADF;
+        }
+
+        int saved_fflags = f->f_flags;
+        if (flags & MSG_DONTWAIT)
+            f->f_flags |= O_NONBLOCK;
+        ssize_t n = unix_socket_file_ops.read(f, (char *)ubuf,
+                                              (size_t)len, true);
+        f->f_flags = saved_fflags;
+
+        if (n >= 0 && uaddrlen != 0) {
+            int zero = 0;
+            (void)vm_copyout(current->vm, uaddrlen, &zero, sizeof(zero));
+        }
+
+        vfs_fput(f);
+        return (uint64)n;
+    }
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)

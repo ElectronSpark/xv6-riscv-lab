@@ -52,6 +52,7 @@ static slab_cache_t __unix_pending_cache = {0};
 
 struct unix_bind_entry {
     char path[UNIX_PATH_MAX];
+    size_t path_len;
     struct unix_sock *sock;
     struct unix_bind_entry *next;
 };
@@ -433,12 +434,26 @@ static void unix_sock_cancel_pending_connect(struct unix_sock *sk, int err)
 /* Bind registry                                                              */
 /* ========================================================================== */
 
-static struct unix_sock *bind_lookup(const char *path)
+static size_t unix_addr_len(const struct sockaddr_un *sa, int addrlen)
+{
+    size_t max_len = (size_t)addrlen - sizeof(uint16);
+
+    if (max_len > UNIX_PATH_MAX)
+        max_len = UNIX_PATH_MAX;
+    if (max_len == 0)
+        return 0;
+    if (sa->sun_path[0] == '\0')
+        return max_len;
+    return strnlen(sa->sun_path, max_len) + 1;
+}
+
+static struct unix_sock *bind_lookup(const char *path, size_t path_len)
 {
     spin_lock(&bind_list_lock);
     struct unix_bind_entry *e = bind_list_head;
     while (e != NULL) {
-        if (strncmp(e->path, path, UNIX_PATH_MAX) == 0) {
+        if (e->path_len == path_len &&
+            memcmp(e->path, path, path_len) == 0) {
             struct unix_sock *sk = e->sock;
             unix_sock_get(sk);
             spin_unlock(&bind_list_lock);
@@ -450,14 +465,15 @@ static struct unix_sock *bind_lookup(const char *path)
     return NULL;
 }
 
-static int bind_register(const char *path, struct unix_sock *sk)
+static int bind_register(const char *path, size_t path_len, struct unix_sock *sk)
 {
     spin_lock(&bind_list_lock);
 
     /* Check for duplicate */
     struct unix_bind_entry *e = bind_list_head;
     while (e != NULL) {
-        if (strncmp(e->path, path, UNIX_PATH_MAX) == 0) {
+        if (e->path_len == path_len &&
+            memcmp(e->path, path, path_len) == 0) {
             spin_unlock(&bind_list_lock);
             return -EADDRINUSE;
         }
@@ -469,7 +485,9 @@ static int bind_register(const char *path, struct unix_sock *sk)
         spin_unlock(&bind_list_lock);
         return -ENOMEM;
     }
-    strncpy(e->path, path, UNIX_PATH_MAX);
+    memset(e->path, 0, sizeof(e->path));
+    memmove(e->path, path, path_len);
+    e->path_len = path_len;
     e->sock = sk;
     unix_sock_get(sk);
     e->next = bind_list_head;
@@ -478,12 +496,13 @@ static int bind_register(const char *path, struct unix_sock *sk)
     return 0;
 }
 
-static void bind_unregister(const char *path)
+static void bind_unregister(const char *path, size_t path_len)
 {
     spin_lock(&bind_list_lock);
     struct unix_bind_entry **pp = &bind_list_head;
     while (*pp != NULL) {
-        if (strncmp((*pp)->path, path, UNIX_PATH_MAX) == 0) {
+        if ((*pp)->path_len == path_len &&
+            memcmp((*pp)->path, path, path_len) == 0) {
             struct unix_bind_entry *e = *pp;
             struct unix_sock *sk = e->sock;
             *pp = e->next;
@@ -577,7 +596,6 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
     struct unix_sock *sk = (struct unix_sock *)file->private_data;
     if (sk == NULL)
         return -EBADF;
-
 
     if (sk->state != UNIX_STATE_CONNECTED &&
         unix_sock_connection_oriented(sk)) {
@@ -697,15 +715,12 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
     if (sk == NULL)
         return -EBADF;
 
-
-    if (sk->shutdown_flags & UNIX_SHUT_WR) {
+    if (sk->shutdown_flags & UNIX_SHUT_WR)
         return -EPIPE;
-    }
 
     if (sk->state != UNIX_STATE_CONNECTED &&
-        unix_sock_connection_oriented(sk)) {
+        unix_sock_connection_oriented(sk))
         return -ENOTCONN;
-    }
 
     bool nonblock = (file->f_flags & O_NONBLOCK) != 0;
     ssize_t total = 0;
@@ -883,7 +898,7 @@ static int unix_file_release(struct vfs_inode *inode, struct vfs_file *file)
 
     /* Unbind if bound */
     if (sk->bound)
-        bind_unregister(sk->bind_path);
+        bind_unregister(sk->bind_path, sk->bind_len);
 
     sk->file = NULL;
 
@@ -1181,12 +1196,12 @@ int unix_sock_bind(int fd, uint64 uaddr, int addrlen)
     if (sa.sun_family != AF_UNIX)
         return -EAFNOSUPPORT;
 
-    /* Ensure null-terminated */
+    size_t path_len = unix_addr_len(&sa, addrlen);
+    if (path_len == 0)
+        return -EINVAL;
+
+    /* Keep pathname sockets null-terminated for callers that inspect them. */
     sa.sun_path[UNIX_PATH_MAX - 1] = '\0';
-    if (sa.sun_path[0] == '\0' && addrlen > (int)sizeof(uint16) + 1) {
-        /* Abstract namespace: use bytes after the first null */
-        /* Keep as-is; strncmp will compare from byte 0 */
-    }
 
     spin_lock(&sk->lock);
     if (sk->bound) {
@@ -1194,13 +1209,15 @@ int unix_sock_bind(int fd, uint64 uaddr, int addrlen)
         return -EINVAL;
     }
 
-    int ret = bind_register(sa.sun_path, sk);
+    int ret = bind_register(sa.sun_path, path_len, sk);
     if (ret < 0) {
         spin_unlock(&sk->lock);
         return ret;
     }
 
-    strncpy(sk->bind_path, sa.sun_path, UNIX_PATH_MAX);
+    memset(sk->bind_path, 0, sizeof(sk->bind_path));
+    memmove(sk->bind_path, sa.sun_path, path_len);
+    sk->bind_len = path_len;
     sk->bound = 1;
     if (sk->state == UNIX_STATE_UNCONNECTED)
         sk->state = UNIX_STATE_BOUND;
@@ -1380,12 +1397,16 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
         struct sockaddr_un sa;
         memset(&sa, 0, sizeof(sa));
         sa.sun_family = AF_UNIX;
-        if (client->bound)
-            strncpy(sa.sun_path, client->bind_path, UNIX_PATH_MAX);
+        size_t bind_len = 0;
+        if (client->bound) {
+            bind_len = client->bind_len;
+            memmove(sa.sun_path, client->bind_path, bind_len);
+        }
 
-        int alen = sizeof(sa);
+        int alen = bind_len ? (int)(sizeof(uint16) + bind_len) :
+                              (int)sizeof(uint16);
         vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
-        vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
+        vm_copyout(current->vm, uaddr, &sa, alen);
     }
 
     unix_sock_put(client);  /* drop pending-queue reference */
@@ -1413,6 +1434,9 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     if (sa.sun_family != AF_UNIX)
         return -EAFNOSUPPORT;
 
+    size_t path_len = unix_addr_len(&sa, addrlen);
+    if (path_len == 0)
+        return -EINVAL;
     sa.sun_path[UNIX_PATH_MAX - 1] = '\0';
 
     spin_lock(&sk->lock);
@@ -1431,7 +1455,7 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     spin_unlock(&sk->lock);
 
     /* Find the target listening socket */
-    struct unix_sock *target = bind_lookup(sa.sun_path);
+    struct unix_sock *target = bind_lookup(sa.sun_path, path_len);
     if (target == NULL) {
         return -ECONNREFUSED;
     }
@@ -1591,8 +1615,11 @@ int unix_sock_getpeername(int fd, uint64 uaddr, uint64 uaddrlen)
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof(sa));
     sa.sun_family = AF_UNIX;
-    if (peer->bound)
-        strncpy(sa.sun_path, peer->bind_path, UNIX_PATH_MAX);
+    size_t bind_len = 0;
+    if (peer->bound) {
+        bind_len = peer->bind_len;
+        memmove(sa.sun_path, peer->bind_path, bind_len);
+    }
     spin_unlock(&sk->lock);
 
     int user_len = 0;
@@ -1600,7 +1627,8 @@ int unix_sock_getpeername(int fd, uint64 uaddr, uint64 uaddrlen)
         return -EFAULT;
     if (user_len < 0)
         return -EINVAL;
-    int alen = sizeof(sa);
+    int alen = bind_len ? (int)(sizeof(uint16) + bind_len) :
+                          (int)sizeof(uint16);
     int copy_len = user_len < alen ? user_len : alen;
     if (vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen)) < 0)
         return -EFAULT;
@@ -1625,8 +1653,11 @@ int unix_sock_getsockname(int fd, uint64 uaddr, uint64 uaddrlen)
     sa.sun_family = AF_UNIX;
 
     spin_lock(&sk->lock);
-    if (sk->bound)
-        strncpy(sa.sun_path, sk->bind_path, UNIX_PATH_MAX);
+    size_t bind_len = 0;
+    if (sk->bound) {
+        bind_len = sk->bind_len;
+        memmove(sa.sun_path, sk->bind_path, bind_len);
+    }
     spin_unlock(&sk->lock);
 
     int user_len = 0;
@@ -1634,7 +1665,8 @@ int unix_sock_getsockname(int fd, uint64 uaddr, uint64 uaddrlen)
         return -EFAULT;
     if (user_len < 0)
         return -EINVAL;
-    int alen = sizeof(sa);
+    int alen = bind_len ? (int)(sizeof(uint16) + bind_len) :
+                          (int)sizeof(uint16);
     int copy_len = user_len < alen ? user_len : alen;
     if (vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen)) < 0)
         return -EFAULT;
