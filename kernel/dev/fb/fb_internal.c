@@ -64,6 +64,22 @@ struct fb_gpu_render_owner;
 #define GPU_DRM_MMAP_PAGE(offset) \
     (((offset) & ((1ULL << GPU_DRM_MMAP_HANDLE_SHIFT) - 1)) >> PGSHIFT)
 
+struct fb_gpu_sg_entry {
+    page_t *page;
+    uint64 dma_addr;
+    uint32 offset;
+    uint32 length;
+};
+
+struct fb_gpu_sg_table {
+    page_t **pages;
+    uint32 nents;
+    uint32 orig_nents;
+    uint64 total_len;
+    uint64 dma_addr_base;
+    uint64 dma_addr_last;
+};
+
 struct fb_gpu_resv_shared_fence {
     uint64 seq;
     uint64 fence;
@@ -105,6 +121,7 @@ struct fb_gpu_bo_entry {
     uint32 ttm_tt_populated;
     uint32 ttm_sg_nents;
     uint64 ttm_dma_addr_base;
+    struct fb_gpu_sg_table sgt;
     uint64 ttm_lru_seq;
     uint64 ttm_move_count;
     uint64 ttm_resv_count;
@@ -160,6 +177,7 @@ struct fb_gpu_gem_object {
     uint32 ttm_tt_populated;
     uint32 ttm_sg_nents;
     uint64 ttm_dma_addr_base;
+    struct fb_gpu_sg_table sgt;
     uint64 ttm_lru_seq;
     uint64 ttm_move_count;
     uint64 ttm_resv_count;

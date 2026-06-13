@@ -191,6 +191,43 @@ static int fb_bo_owner_matches(const struct fb_gpu_bo_entry *bo,
     return 1;
 }
 
+static void fb_sg_table_build(struct fb_gpu_sg_table *sgt, page_t **pages,
+                              uint32 npages, uint64 size)
+{
+    uint32 last;
+
+    if (sgt == NULL)
+        return;
+    memset(sgt, 0, sizeof(*sgt));
+    if (pages == NULL || npages == 0 || size == 0)
+        return;
+    sgt->pages = pages;
+    sgt->nents = npages;
+    sgt->orig_nents = npages;
+    sgt->total_len = size;
+    if (pages[0] != NULL)
+        sgt->dma_addr_base = __page_to_pa(pages[0]);
+    last = npages - 1;
+    if (pages[last] != NULL)
+        sgt->dma_addr_last = __page_to_pa(pages[last]);
+}
+
+static void fb_sg_table_first_entry(const struct fb_gpu_sg_table *sgt,
+                                    struct fb_gpu_sg_entry *entry)
+{
+    if (entry == NULL)
+        return;
+    memset(entry, 0, sizeof(*entry));
+    if (sgt == NULL || sgt->pages == NULL || sgt->nents == 0 ||
+        sgt->pages[0] == NULL)
+        return;
+    entry->page = sgt->pages[0];
+    entry->dma_addr = __page_to_pa(entry->page);
+    entry->offset = 0;
+    entry->length = sgt->total_len < PGSIZE ? (uint32)sgt->total_len :
+        PGSIZE;
+}
+
 static void fb_gem_copy_to_bo_locked(struct fb_gpu_bo_entry *bo,
                                      struct fb_gpu_gem_object *gem)
 {
@@ -212,6 +249,7 @@ static void fb_gem_copy_to_bo_locked(struct fb_gpu_bo_entry *bo,
     bo->ttm_tt_populated = gem->ttm_tt_populated;
     bo->ttm_sg_nents = gem->ttm_sg_nents;
     bo->ttm_dma_addr_base = gem->ttm_dma_addr_base;
+    bo->sgt = gem->sgt;
     bo->ttm_lru_seq = gem->ttm_lru_seq;
     bo->ttm_move_count = gem->ttm_move_count;
     bo->ttm_resv_count = gem->ttm_resv_count;
@@ -267,10 +305,9 @@ fb_gem_alloc_locked(uint32 width, uint32 height, uint32 pitch, uint64 size,
     gem->ttm_mem_type = FB_TTM_MEM_SYSTEM;
     gem->ttm_reservation_seq = 1;
     gem->ttm_tt_populated = 0;
-    gem->ttm_sg_nents = npages;
-    gem->ttm_dma_addr_base =
-        pages != NULL && npages != 0 && pages[0] != NULL ?
-            __page_to_pa(pages[0]) : 0;
+    fb_sg_table_build(&gem->sgt, pages, npages, size);
+    gem->ttm_sg_nents = gem->sgt.nents;
+    gem->ttm_dma_addr_base = gem->sgt.dma_addr_base;
     gem->ttm_lru_seq = ++fb_state.ttm_lru_clock;
     gem->ttm_move_count = 0;
     gem->nouveau_domain = NOUVEAU_GEM_DOMAIN_CPU |
@@ -981,6 +1018,7 @@ static void fb_ttm_propagate_gem_locked(struct fb_gpu_bo_entry *bo)
     gem->ttm_tt_populated = bo->ttm_tt_populated;
     gem->ttm_sg_nents = bo->ttm_sg_nents;
     gem->ttm_dma_addr_base = bo->ttm_dma_addr_base;
+    gem->sgt = bo->sgt;
     gem->ttm_lru_seq = bo->ttm_lru_seq;
     gem->ttm_move_count = bo->ttm_move_count;
     gem->nouveau_domain = bo->nouveau_domain;
@@ -999,6 +1037,7 @@ static void fb_ttm_propagate_gem_locked(struct fb_gpu_bo_entry *bo)
         peer->ttm_tt_populated = gem->ttm_tt_populated;
         peer->ttm_sg_nents = gem->ttm_sg_nents;
         peer->ttm_dma_addr_base = gem->ttm_dma_addr_base;
+        peer->sgt = gem->sgt;
         peer->ttm_lru_seq = gem->ttm_lru_seq;
         peer->ttm_move_count = gem->ttm_move_count;
         peer->ttm_resv_count = gem->ttm_resv_count;
@@ -1023,10 +1062,9 @@ static void fb_ttm_set_metadata_locked(struct fb_gpu_bo_entry *bo)
     if (bo == NULL)
         return;
     bo->ttm_tt_populated = bo->ttm_mem_type == FB_TTM_MEM_TT;
-    bo->ttm_sg_nents = bo->npages;
-    bo->ttm_dma_addr_base =
-        bo->pages != NULL && bo->pages[0] != NULL ?
-            __page_to_pa(bo->pages[0]) : 0;
+    fb_sg_table_build(&bo->sgt, bo->pages, bo->npages, bo->size);
+    bo->ttm_sg_nents = bo->sgt.nents;
+    bo->ttm_dma_addr_base = bo->sgt.dma_addr_base;
 }
 
 static void fb_ttm_move_bo_locked(struct fb_gpu_bo_entry *bo,
@@ -1193,6 +1231,8 @@ static int fb_ttm_unpin_locked(struct fb_gpu_bo_entry *bo, uint64 owner_id,
 static void fb_ttm_fill_validate_locked(struct fb_gpu_ttm_validate *req,
                                         const struct fb_gpu_bo_entry *bo)
 {
+    struct fb_gpu_sg_entry first;
+
     req->placement = bo->ttm_placement;
     req->mem_type = bo->ttm_mem_type;
     req->pin_count = bo->ttm_pin_count;
@@ -1201,6 +1241,10 @@ static void fb_ttm_fill_validate_locked(struct fb_gpu_ttm_validate *req,
     req->peer_handle = 0;
     req->size = bo->size;
     req->dma_addr_base = bo->ttm_dma_addr_base;
+    fb_sg_table_first_entry(&bo->sgt, &first);
+    req->sg_total_len = bo->sgt.total_len;
+    req->sg_dma_addr_first = first.dma_addr;
+    req->sg_dma_addr_last = bo->sgt.dma_addr_last;
     req->reservation_seq = bo->ttm_reservation_seq;
     req->lru_seq = bo->ttm_lru_seq;
     req->move_count = bo->ttm_move_count;

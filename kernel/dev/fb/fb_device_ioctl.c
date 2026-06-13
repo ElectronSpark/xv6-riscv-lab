@@ -1469,7 +1469,7 @@ bo_copy_out:
             return -EINVAL;
 
         spin_lock(&fb_state.lock);
-        bo = fb_bo_lookup_locked(req.handle);
+        bo = fb_bo_lookup_owned_locked(req.handle, owner_id, owner_tgid);
         if (bo == NULL) {
             fb_state.stats.ttm_validate_failures++;
             spin_unlock(&fb_state.lock);
@@ -1482,7 +1482,9 @@ bo_copy_out:
         }
         bo->refs++;
         if ((req.flags & FB_GPU_TTM_F_WW_VALIDATE) != 0) {
-            struct fb_gpu_bo_entry *peer = fb_bo_lookup_locked(req.peer_handle);
+            struct fb_gpu_bo_entry *peer =
+                fb_bo_lookup_owned_locked(req.peer_handle, owner_id,
+                                          owner_tgid);
 
             if (peer == NULL || !fb_bo_owner_matches(peer, owner_id,
                                                      owner_tgid)) {

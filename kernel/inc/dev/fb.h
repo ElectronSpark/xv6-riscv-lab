@@ -607,6 +607,9 @@ struct fb_gpu_ttm_validate {
     uint32 peer_handle;     /* optional second BO for ww-acquire validation */
     uint64 size;
     uint64 dma_addr_base;
+    uint64 sg_total_len;
+    uint64 sg_dma_addr_first;
+    uint64 sg_dma_addr_last;
     uint64 reservation_seq;
     uint64 lru_seq;
     uint64 move_count;
