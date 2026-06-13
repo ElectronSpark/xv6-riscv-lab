@@ -29,9 +29,67 @@ struct shm_segment {
     struct shmid_ds ds;
     void **pages;    /* dynamically-allocated array of kalloc'd PA pointers */
     int    npages;
+    int    removed;
 };
 
 static struct ipc_ids shm_ids;
+
+struct linux_ipc64_perm {
+    int32  key;
+    uint32 uid;
+    uint32 gid;
+    uint32 cuid;
+    uint32 cgid;
+    uint32 mode;
+    uint16 seq;
+    uint16 __pad2;
+    uint64 __unused1;
+    uint64 __unused2;
+};
+
+struct linux_shmid64_ds {
+    struct linux_ipc64_perm shm_perm;
+    uint64 shm_segsz;
+    int64  shm_atime;
+    int64  shm_dtime;
+    int64  shm_ctime;
+    int32  shm_cpid;
+    int32  shm_lpid;
+    uint64 shm_nattch;
+    uint64 __unused4;
+    uint64 __unused5;
+};
+
+static void
+shm_to_linux_ds(struct linux_shmid64_ds *out, const struct shm_segment *seg)
+{
+    memset(out, 0, sizeof(*out));
+    out->shm_perm.key  = seg->ds.shm_perm.key;
+    out->shm_perm.uid  = seg->ds.shm_perm.uid;
+    out->shm_perm.gid  = seg->ds.shm_perm.gid;
+    out->shm_perm.cuid = seg->ds.shm_perm.cuid;
+    out->shm_perm.cgid = seg->ds.shm_perm.cgid;
+    out->shm_perm.mode = seg->ds.shm_perm.mode;
+    out->shm_perm.seq  = seg->ds.shm_perm.seq;
+    out->shm_segsz     = seg->ds.shm_segsz;
+    out->shm_atime     = seg->ds.shm_atime;
+    out->shm_dtime     = seg->ds.shm_dtime;
+    out->shm_ctime     = seg->ds.shm_ctime;
+    out->shm_cpid      = seg->ds.shm_cpid;
+    out->shm_lpid      = seg->ds.shm_lpid;
+    out->shm_nattch    = seg->ds.shm_nattch;
+}
+
+static void
+shm_free_segment(struct shm_segment *seg)
+{
+    if (seg == NULL)
+        return;
+    for (int i = 0; i < seg->npages; i++)
+        kfree(seg->pages[i]);
+    kvfree(seg->pages);
+    kvfree(seg);
+}
 
 void ipc_shm_init(void)
 {
@@ -242,6 +300,7 @@ uint64 sys_shmdt(void)
     int irq = spin_lock_irqsave(&shm_ids.lock);
 
     struct shm_segment *found = NULL;
+    int found_id = -1;
     for (int i = 0; i < shm_ids.max_id; i++) {
         if (!shm_ids.entries[i].in_use)
             continue;
@@ -257,6 +316,7 @@ uint64 sys_shmdt(void)
             continue;
 
         found = seg;
+        found_id = ipc_buildid(i, shm_ids.entries[i].seq);
         break;
     }
 
@@ -270,6 +330,9 @@ uint64 sys_shmdt(void)
         found->ds.shm_nattch--;
     found->ds.shm_lpid  = current->pid;
     found->ds.shm_dtime = goldfish_rtc_read_ns() / 1000000000ULL;
+    int free_removed = found->removed && found->ds.shm_nattch == 0;
+    if (free_removed)
+        ipc_rmid(&shm_ids, found_id);
 
     spin_unlock_irqrestore(&shm_ids.lock, irq);
 
@@ -278,6 +341,9 @@ uint64 sys_shmdt(void)
      * mapped page; the segment's own reference (from kalloc) keeps
      * the physical pages alive until IPC_RMID. */
     vm_munmap_region(current->vm, shmaddr, (size_t)npages * PAGE_SIZE);
+
+    if (free_removed)
+        shm_free_segment(found);
 
     return 0;
 }
@@ -293,10 +359,11 @@ uint64 sys_shmctl(void)
     argint(0, &shmid);
     argint(1, &cmd);
     argaddr(2, &ubuf);
+    cmd &= ~IPC_64;
 
     /* For IPC_SET, copy user data before acquiring the spinlock
      * (either_copyin may sleep for VM lock). */
-    struct shmid_ds set_buf;
+    struct linux_shmid64_ds set_buf;
     if (cmd == IPC_SET) {
         if (either_copyin(&set_buf, 1, ubuf, sizeof(set_buf)) < 0)
             return (uint64)-EFAULT;
@@ -311,14 +378,18 @@ uint64 sys_shmctl(void)
 
     switch (cmd) {
     case IPC_STAT: {
-        struct shmid_ds buf;
-        memmove(&buf, &seg->ds, sizeof(buf));
+        struct linux_shmid64_ds buf;
+        shm_to_linux_ds(&buf, seg);
         spin_unlock_irqrestore(&shm_ids.lock, irq);
         if (either_copyout(1, ubuf, &buf, sizeof(buf)) < 0)
             return (uint64)-EFAULT;
         return 0;
     }
     case IPC_SET: {
+        if (seg->removed) {
+            spin_unlock_irqrestore(&shm_ids.lock, irq);
+            return (uint64)-EINVAL;
+        }
         seg->ds.shm_perm.uid  = set_buf.shm_perm.uid;
         seg->ds.shm_perm.gid  = set_buf.shm_perm.gid;
         seg->ds.shm_perm.mode = set_buf.shm_perm.mode & 0777;
@@ -328,18 +399,18 @@ uint64 sys_shmctl(void)
     }
     case IPC_RMID: {
         if (seg->ds.shm_nattch > 0) {
-            /* Can't destroy while attached — mark key invalid and let
-             * last shmdt clean up.  Simplified: just refuse. */
+            int idx = ipc_id_to_idx(shmid);
+
+            seg->removed = 1;
+            seg->ds.shm_ctime = goldfish_rtc_read_ns() / 1000000000ULL;
+            if (idx >= 0 && idx < IPC_MAX_IDS)
+                shm_ids.entries[idx].key = IPC_PRIVATE;
             spin_unlock_irqrestore(&shm_ids.lock, irq);
-            return (uint64)-EBUSY;
+            return 0;
         }
-        /* Free backing pages */
-        for (int i = 0; i < seg->npages; i++)
-            kfree(seg->pages[i]);
-        kvfree(seg->pages);
         ipc_rmid(&shm_ids, shmid);
         spin_unlock_irqrestore(&shm_ids.lock, irq);
-        kvfree(seg);
+        shm_free_segment(seg);
         return 0;
     }
     default:

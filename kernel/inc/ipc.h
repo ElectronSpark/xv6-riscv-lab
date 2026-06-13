@@ -22,6 +22,7 @@
 #define IPC_SET      1
 #define IPC_STAT     2
 #define IPC_INFO     3
+#define IPC_64       0x0100
 
 /* ── Permission bits ── */
 struct ipc_perm {
