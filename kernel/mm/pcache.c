@@ -2885,10 +2885,10 @@ loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
     pcache->ops->submit_readahead(
         pcache, ra_pages, n_pages, ra_bios, n_pages);
 
-    /* Phase 3: await each BIO, mark page uptodate, release */
+    /* Phase 3: await each BIO, mark successful pages uptodate, release */
     for (int i = 0; i < n_pages; i++) {
         if (ra_bios[i] != NULL) {
-            bio_await(ra_bios[i]);
+            int bio_ret = bio_await(ra_bios[i]);
             bio_release(ra_bios[i]);
 
 retry_ra_complete:
@@ -2900,10 +2900,12 @@ retry_ra_complete:
             }
             struct pcache_node *pcn = ra_pages[i]->pcache.pcache_node;
             if (__pcache_page_valid(pcache, ra_pages[i])) {
-                if (!LIST_NODE_IS_DETACHED(pcn, lru_entry))
-                    __pcache_remove_lru(pcache, ra_pages[i]);
-                pcn->dirty = 0;
-                pcn->uptodate = 1;
+                if (bio_ret == 0) {
+                    if (!LIST_NODE_IS_DETACHED(pcn, lru_entry))
+                        __pcache_remove_lru(pcache, ra_pages[i]);
+                    pcn->dirty = 0;
+                    pcn->uptodate = 1;
+                }
             }
             page_lock_release(ra_pages[i]);
             __pcache_spin_unlock(pcache);

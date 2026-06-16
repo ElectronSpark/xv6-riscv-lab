@@ -314,6 +314,7 @@ static int gpu_kms_fb_owner_matches(const struct fb_gpu_kms_fb_entry *fb,
 
 struct gpu_kms_cursor_atomic_state {
     int touched;
+    int fb_touched;
     uint32 fb_id;
     uint32 crtc_id;
     int32 crtc_x;
@@ -482,7 +483,8 @@ static int gpu_kms_apply_cursor_fb(struct fb_gpu_render_owner *owner,
                                    uint32 crtc_w, uint32 crtc_h,
                                    uint32 src_x, uint32 src_y,
                                    uint32 src_w, uint32 src_h,
-                                   uint32 hot_x, uint32 hot_y)
+                                   uint32 hot_x, uint32 hot_y,
+                                   int force_image_upload)
 {
     struct fb_gpu_kms_fb_entry fb;
     int image_changed;
@@ -515,7 +517,8 @@ static int gpu_kms_apply_cursor_fb(struct fb_gpu_render_owner *owner,
         src_h != ((uint32)fb.height << 16))
         return -EINVAL;
     spin_lock(&fb_state.lock);
-    image_changed = fb_state.current_cursor_fb_id != fb_id ||
+    image_changed = force_image_upload ||
+        fb_state.current_cursor_fb_id != fb_id ||
         fb_state.current_cursor_w != fb.width ||
         fb_state.current_cursor_h != fb.height;
     spin_unlock(&fb_state.lock);
@@ -549,14 +552,15 @@ static int gpu_kms_apply_cursor_atomic_state(
     if (cursor->fb_id == 0 || cursor->crtc_id == 0)
         return gpu_kms_apply_cursor_fb(owner, 0, cursor->crtc_x,
                                        cursor->crtc_y, 0, 0, 0, 0, 0, 0,
-                                       0, 0);
+                                       0, 0, 0);
     if (cursor->crtc_id != GPU_DRM_CRTC_ID)
         return -EINVAL;
     return gpu_kms_apply_cursor_fb(owner, cursor->fb_id, cursor->crtc_x,
                                    cursor->crtc_y, cursor->crtc_w,
                                    cursor->crtc_h, cursor->src_x,
                                    cursor->src_y, cursor->src_w,
-                                   cursor->src_h, 0, 0);
+                                   cursor->src_h, 0, 0,
+                                   cursor->fb_touched);
 }
 
 static int gpu_drm_mode_setplane(struct fb_gpu_render_owner *owner,
@@ -581,7 +585,7 @@ static int gpu_drm_mode_setplane(struct fb_gpu_render_owner *owner,
                                        req.crtc_y, req.crtc_w,
                                        req.crtc_h, req.src_x,
                                        req.src_y, req.src_w, req.src_h,
-                                       0, 0);
+                                       0, 0, 1);
     }
     if (req.plane_id != GPU_DRM_PRIMARY_PLANE_ID)
         return -EINVAL;

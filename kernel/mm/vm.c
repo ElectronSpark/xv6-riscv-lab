@@ -209,6 +209,19 @@ static int vm_file_fault_trace_take_slot(void)
     return slot < vm_file_fault_trace_limit();
 }
 
+static uint64 vm_file_fault_readahead_min_size(void)
+{
+    static uint64 min_size;
+    static int initialized;
+
+    if (!initialized) {
+        min_size = vm_trace_parse_u64("vm_file_fault_ra_min_bytes",
+                                      64ULL << 20);
+        initialized = 1;
+    }
+    return min_size;
+}
+
 struct vm_copy_trace_stats {
     uint64 vmas_seen;
     uint64 vmas_copied;
@@ -2842,6 +2855,7 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
     uint64 trace_start_ms = trace ? sched_timer_now_ms() : 0;
     uint64 trace_t = trace_start_ms;
     uint64 trace_lookup_ms = 0;
+    uint64 trace_ra_ms = 0;
     uint64 trace_get_ms = 0;
     uint64 trace_read_ms = 0;
     uint64 trace_relock_ms = 0;
@@ -2898,6 +2912,17 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
     if (file_off >= inode_size || file_off + PGSIZE > inode_size) {
         ret = -EAGAIN;
         goto out_file;
+    }
+
+    if (inode_size >= vm_file_fault_readahead_min_size() &&
+        pc->ops != NULL && pc->ops->submit_readahead != NULL &&
+        (loff_t)file_off >= pc->ra_pos) {
+        pc->ra_pos = pcache_readahead(pc, (loff_t)file_off,
+                                      (loff_t)inode_size);
+    }
+    if (trace) {
+        trace_ra_ms = sched_timer_now_ms() - trace_t;
+        trace_t = sched_timer_now_ms();
     }
 
     pcpage = pcache_get_page(pc, file_off / 512ULL);
@@ -3004,13 +3029,14 @@ out_file:
                 kind = "fill-io";
             printf("vm-file-fault-trace: pid=%d tgid=%d name=%s ret=%d "
                    "kind=%s va=0x%lx off=%lu ino=%lu isize=%lu "
-                   "total_ms=%lu lookup_ms=%lu get_ms=%lu read_ms=%lu "
-                   "relock_ms=%lu install_ms=%lu before_uptodate=%d "
-                   "before_io=%d after_uptodate=%d after_io=%d\n",
+                   "total_ms=%lu lookup_ms=%lu ra_ms=%lu get_ms=%lu "
+                   "read_ms=%lu relock_ms=%lu install_ms=%lu "
+                   "before_uptodate=%d before_io=%d after_uptodate=%d "
+                   "after_io=%d\n",
                    self ? self->pid : -1, self ? self->tgid : -1,
                    self ? self->name : "-", ret, kind, fault_va, file_off,
                    trace_ino, trace_inode_size, total_ms, trace_lookup_ms,
-                   trace_get_ms, trace_read_ms, trace_relock_ms,
+                   trace_ra_ms, trace_get_ms, trace_read_ms, trace_relock_ms,
                    trace_install_ms, trace_before_uptodate, trace_before_io,
                    trace_after_uptodate, trace_after_io);
         }

@@ -295,6 +295,24 @@ static int ext4fs_fill_page_from_ref(struct ext4_fs *fs,
     return 0;
 }
 
+static unsigned int ext4fs_full_pages_in_pcache_node(struct pcache_node *pcn,
+                                                     uint64 inode_size)
+{
+    if (pcn == NULL)
+        return 0;
+
+    uint64 base_off = (uint64)pcn->blkno * 512ULL;
+    unsigned int full = 0;
+
+    for (unsigned int p = 0; p < pcn->page_count; p++) {
+        uint64 page_off = base_off + (uint64)p * PGSIZE;
+        if (page_off > inode_size || page_off + PGSIZE > inode_size)
+            break;
+        full++;
+    }
+    return full;
+}
+
 static int ext4fs_prefault_begin_page(struct pcache *pc, page_t *page,
                                       struct pcache_node **out_node)
 {
@@ -897,15 +915,13 @@ static int ext4fs_submit_readahead(struct pcache *pcache,
         struct pcache_node *pcn = pages[i]->pcache.pcache_node;
         uint64 base_off = (uint64)pcn->blkno * 512ULL;
 
-        /* How many pages of this folio have valid file data? */
-        unsigned int fill = pcn->page_count;
-        for (unsigned int p = 0; p < pcn->page_count; p++) {
-            if (base_off + (uint64)p * PGSIZE >= inode_size) {
-                fill = p;
-                break;
-            }
-        }
-        if (block_size != PGSIZE || fill < 2) {
+        /*
+         * Only submit complete file pages through readahead.  Partial EOF
+         * pages need the synchronous fault/read path so their tail is
+         * zero-filled instead of exposing stale disk bytes beyond i_size.
+         */
+        unsigned int fill = ext4fs_full_pages_in_pcache_node(pcn, inode_size);
+        if (block_size != PGSIZE || fill < 1) {
             i++;
             continue;
         }
@@ -930,73 +946,50 @@ static int ext4fs_submit_readahead(struct pcache *pcache,
         ext4_fsblk_t expected_next = first_fblock + fill;
         uint32 run_bytes = fill * PGSIZE;
 
-        /* Precompute candidate run: gather folio fill counts and total
-         * byte/block span without any extent lookups.  Then do a single
-         * speculative extent lookup on the very last logical block —
-         * if it maps to exactly the right physical block, the entire
-         * range is contiguous and we skip all intermediate lookups. */
+        /*
+         * Gather adjacent full pages while proving each logical block maps to
+         * the next physical block.  A first/last-only shortcut can publish bad
+         * executable/library bytes if a fragmented extent range happens to
+         * end at the expected physical block.
+         */
         unsigned int cand_fills[BIO_MAX_VECS];
         cand_fills[0] = fill;
         int cand_len = 1;
         uint32 cand_bytes = run_bytes;
-        ext4_lblk_t cand_last_lblock = first_iblock + fill - 1;
 
         while (i + cand_len < nr_pages && cand_len < BIO_MAX_VECS) {
             struct pcache_node *pn = pages[i + cand_len]->pcache.pcache_node;
-            uint64 n_off = (uint64)pn->blkno * 512ULL;
-            unsigned int n_fill = pn->page_count;
-            for (unsigned int p = 0; p < pn->page_count; p++) {
-                if (n_off + (uint64)p * PGSIZE >= inode_size) {
-                    n_fill = p;
-                    break;
-                }
-            }
-            if (n_fill < 2)
+            unsigned int n_fill =
+                ext4fs_full_pages_in_pcache_node(pn, inode_size);
+            if (n_fill < 1)
                 break;
             if (cand_bytes + n_fill * PGSIZE > BIO_MAX_SIZE)
                 break;
             cand_fills[cand_len] = n_fill;
             cand_bytes += n_fill * PGSIZE;
-            cand_last_lblock += n_fill;
             cand_len++;
         }
 
-        /* Speculative check: is the entire candidate range contiguous? */
-        if (cand_len > 1) {
-            ext4_fsblk_t spec_fblock;
-            r = ext4_fs_get_inode_dblk_idx(&ref, cand_last_lblock,
-                                           &spec_fblock, true);
-            if (r == EOK &&
-                spec_fblock == first_fblock + (cand_last_lblock - first_iblock)) {
-                /* Entire range confirmed contiguous — accept all */
-                run_len = cand_len;
-                run_bytes = cand_bytes;
-            } else {
-                /* Fall back to per-folio contiguity check */
-                while (i + run_len < nr_pages && run_len < cand_len) {
-                    struct pcache_node *pn =
-                        pages[i + run_len]->pcache.pcache_node;
-                    uint64 n_off = (uint64)pn->blkno * 512ULL;
-                    unsigned int n_fill = cand_fills[run_len];
+        while (i + run_len < nr_pages && run_len < cand_len) {
+            struct pcache_node *pn = pages[i + run_len]->pcache.pcache_node;
+            uint64 n_off = (uint64)pn->blkno * 512ULL;
+            unsigned int n_fill = cand_fills[run_len];
 
-                    ext4_lblk_t n_iblk = (ext4_lblk_t)(n_off / block_size);
-                    ext4_fsblk_t n_fblk;
-                    r = ext4_fs_get_inode_dblk_idx(&ref, n_iblk,
-                                                   &n_fblk, true);
-                    if (r != EOK || n_fblk != expected_next)
-                        break;
+            ext4_lblk_t n_iblk = (ext4_lblk_t)(n_off / block_size);
+            ext4_fsblk_t n_fblk;
+            r = ext4_fs_get_inode_dblk_idx(&ref, n_iblk, &n_fblk, true);
+            if (r != EOK || n_fblk != expected_next)
+                break;
 
-                    ext4_fsblk_t n_last;
-                    r = ext4_fs_get_inode_dblk_idx(&ref, n_iblk + n_fill - 1,
-                                                   &n_last, true);
-                    if (r != EOK || n_last != n_fblk + n_fill - 1)
-                        break;
+            ext4_fsblk_t n_last;
+            r = ext4_fs_get_inode_dblk_idx(&ref, n_iblk + n_fill - 1,
+                                           &n_last, true);
+            if (r != EOK || n_last != n_fblk + n_fill - 1)
+                break;
 
-                    expected_next = n_fblk + n_fill;
-                    run_bytes += n_fill * PGSIZE;
-                    run_len++;
-                }
-            }
+            expected_next = n_fblk + n_fill;
+            run_bytes += n_fill * PGSIZE;
+            run_len++;
         }
 
         /* Create one merged BIO for the entire contiguous run */
@@ -1014,14 +1007,8 @@ static int ext4fs_submit_readahead(struct pcache *pcache,
         bool ok = true;
         for (int j = 0; j < run_len; j++) {
             struct pcache_node *pj = pages[i + j]->pcache.pcache_node;
-            uint64 oj = (uint64)pj->blkno * 512ULL;
-            unsigned int fj = pj->page_count;
-            for (unsigned int p = 0; p < pj->page_count; p++) {
-                if (oj + (uint64)p * PGSIZE >= inode_size) {
-                    fj = p;
-                    break;
-                }
-            }
+            unsigned int fj =
+                ext4fs_full_pages_in_pcache_node(pj, inode_size);
             r = bio_add_folio(bio, pj->folio, fj * PGSIZE, 0);
             if (r != 0) {
                 ok = false;

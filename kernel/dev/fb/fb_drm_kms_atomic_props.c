@@ -287,6 +287,7 @@ static int gpu_kms_validate_prop_locked(struct fb_gpu_render_owner *owner,
         if (obj_id == GPU_DRM_CURSOR_PLANE_ID && cursor != NULL) {
             cursor->fb_id = (uint32)value;
             cursor->touched = 1;
+            cursor->fb_touched = 1;
         } else if (new_fb_id != NULL && has_new_fb != NULL) {
             *new_fb_id = (uint32)value;
             *has_new_fb = 1;
