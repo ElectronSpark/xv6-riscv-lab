@@ -69,8 +69,18 @@ static void __pcb_init(struct thread *p, struct vfs_fdtable *fdtable) {
     p->fs = NULL;
     p->fdtable = fdtable;
     p->fpu_state = NULL;  /* FPU state allocated on first FP use (lazy) */
+    p->rseq_addr = 0;
+    p->rseq_len = 0;
+    p->rseq_signature = 0;
+    p->rseq_cpu_id = -1;
     p->killed_signo = 0;
     p->killed_code = 0;
+    p->ptrace_tracer = NULL;
+    p->ptrace_tracer_tgid = 0;
+    p->ptrace_real_parent_pid = 0;
+    p->ptrace_real_parent_seq = 0;
+    p->ptrace_real_parent_listed = 0;
+    p->ptrace_options = 0;
     if (p->sched_entity != NULL) {
         memset(p->sched_entity, 0, sizeof(*(p->sched_entity)));
         sched_entity_init(p->sched_entity, p);

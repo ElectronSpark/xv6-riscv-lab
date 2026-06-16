@@ -18,6 +18,7 @@
 #include "proc/thread.h"
 #include "proc/sched.h"
 #include "defs.h"
+#include "string.h"
 #include "printf.h"
 #include <mm/vm.h>
 #include <mm/pgtable.h>
@@ -49,6 +50,20 @@
 #define FUTEX_OWNER_DIED       0x40000000U
 #define FUTEX_TID_MASK         0x3fffffffU
 #define ROBUST_LIST_LIMIT      2048
+
+#define FUTEX2_SIZE_U8     0x00
+#define FUTEX2_SIZE_U16    0x01
+#define FUTEX2_SIZE_U32    0x02
+#define FUTEX2_SIZE_U64    0x03
+#define FUTEX2_NUMA        0x04
+#define FUTEX2_PRIVATE     FUTEX_PRIVATE_FLAG
+#define FUTEX2_SIZE_MASK   0x03
+#define FUTEX2_VALID_MASK  (FUTEX2_SIZE_MASK | FUTEX2_NUMA | FUTEX2_PRIVATE)
+#define FUTEX_32           FUTEX2_SIZE_U32
+#define FUTEX_WAITV_MAX    128
+
+#define CLOCK_REALTIME     0
+#define CLOCK_MONOTONIC    1
 
 #define FUTEX_OP_SET         0
 #define FUTEX_OP_ADD         1
@@ -107,6 +122,22 @@ struct robust_list_head_user {
     struct robust_list_user list;
     int64 futex_offset;
     uint64 list_op_pending;
+};
+
+struct futex_waitv_user {
+    uint64 val;
+    uint64 uaddr;
+    uint32 flags;
+    uint32 reserved;
+};
+
+struct futex_waitv_entry {
+    struct futex_waiter waiter;
+    struct futex_key key;
+    struct futex_bucket *bucket;
+    uint64 uaddr;
+    uint32 val;
+    uint64 bucket_idx;
 };
 
 static uint64 futex_hash(const struct futex_key *key) {
@@ -277,6 +308,94 @@ static int futex_parse_timeout(uint64 timeout_addr, bool absolute,
         return 0;
     }
     *timeout_ms = futex_ns_to_ms_ceil(timeout_ns - now_ns);
+    return 0;
+}
+
+static int futex2_parse_flags(uint32 flags, bool *private)
+{
+    if ((flags & ~FUTEX2_VALID_MASK) != 0)
+        return -EINVAL;
+    if ((flags & FUTEX2_NUMA) != 0)
+        return -EINVAL;
+    if ((flags & FUTEX2_SIZE_MASK) != FUTEX_32)
+        return -EINVAL;
+
+    *private = (flags & FUTEX2_PRIVATE) != 0;
+    return 0;
+}
+
+static int futex2_parse_abs_timeout(uint64 timeout_addr, int clockid,
+                                    bool *has_timeout, uint64 *timeout_ms)
+{
+    if (timeout_addr == 0) {
+        *has_timeout = false;
+        *timeout_ms = 0;
+        return 0;
+    }
+    if (clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC)
+        return -EINVAL;
+
+    return futex_parse_timeout(timeout_addr, true, clockid == CLOCK_REALTIME,
+                               has_timeout, timeout_ms);
+}
+
+static int futex2_validate_val(uint64 val)
+{
+    if (val >> 32)
+        return -EINVAL;
+    return 0;
+}
+
+static int futex_lock_index_present(uint64 *indices, int count, uint64 idx)
+{
+    for (int i = 0; i < count; i++) {
+        if (indices[i] == idx)
+            return 1;
+    }
+    return 0;
+}
+
+static int futex_lock_index_insert(uint64 *indices, int *count, uint64 idx)
+{
+    if (futex_lock_index_present(indices, *count, idx))
+        return 0;
+    if (*count >= FUTEX_WAITV_MAX)
+        return -EINVAL;
+
+    int pos = *count;
+    while (pos > 0 && indices[pos - 1] > idx) {
+        indices[pos] = indices[pos - 1];
+        pos--;
+    }
+    indices[pos] = idx;
+    (*count)++;
+    return 0;
+}
+
+static void futex_lock_buckets(uint64 *indices, int count)
+{
+    for (int i = 0; i < count; i++)
+        spin_lock(&futex_table[indices[i]].lock);
+}
+
+static void futex_unlock_buckets(uint64 *indices, int count)
+{
+    for (int i = count - 1; i >= 0; i--)
+        spin_unlock(&futex_table[indices[i]].lock);
+}
+
+static int futex_waiter_unlink(struct futex_bucket *bucket,
+                               struct futex_waiter *waiter)
+{
+    struct futex_waiter **pp = &bucket->head;
+    while (*pp) {
+        if (*pp == waiter) {
+            *pp = waiter->next;
+            waiter->next = NULL;
+            return 1;
+        }
+        pp = &(*pp)->next;
+    }
     return 0;
 }
 
@@ -800,6 +919,9 @@ uint64 sys_futex(void) {
     bool realtime = (futex_op & FUTEX_CLOCK_REALTIME) != 0;
     bool private = (futex_op & FUTEX_PRIVATE_FLAG) != 0;
 
+    if (realtime && cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET)
+        return (uint64)-ENOSYS;
+
     switch (cmd) {
     case FUTEX_WAIT: {
         bool has_timeout;
@@ -856,4 +978,243 @@ uint64 sys_futex(void) {
     default:
         return (uint64)-ENOSYS;
     }
+}
+
+uint64 sys_futex_wake(void)
+{
+    uint64 uaddr;
+    uint64 mask;
+    int nr;
+    int flags;
+    bool private;
+
+    argaddr(0, &uaddr);
+    argaddr(1, &mask);
+    argint(2, &nr);
+    argint(3, &flags);
+
+    if (uaddr & 3)
+        return (uint64)-EINVAL;
+    if (nr < 0)
+        return (uint64)-EINVAL;
+    if (futex2_parse_flags((uint32)flags, &private) < 0 ||
+        futex2_validate_val(mask) < 0 || mask == 0)
+        return (uint64)-EINVAL;
+
+    return (uint64)futex_wake(uaddr, nr, (uint32)mask, private);
+}
+
+uint64 sys_futex_wait(void)
+{
+    uint64 uaddr;
+    uint64 val;
+    uint64 mask;
+    int flags;
+    uint64 timeout_addr;
+    int clockid;
+    bool private;
+    bool has_timeout;
+    uint64 timeout_ms;
+
+    argaddr(0, &uaddr);
+    argaddr(1, &val);
+    argaddr(2, &mask);
+    argint(3, &flags);
+    argaddr(4, &timeout_addr);
+    argint(5, &clockid);
+
+    if (uaddr & 3)
+        return (uint64)-EINVAL;
+    if (futex2_parse_flags((uint32)flags, &private) < 0 ||
+        futex2_validate_val(val) < 0 ||
+        futex2_validate_val(mask) < 0 || mask == 0)
+        return (uint64)-EINVAL;
+
+    int ret = futex2_parse_abs_timeout(timeout_addr, clockid, &has_timeout,
+                                       &timeout_ms);
+    if (ret < 0)
+        return (uint64)ret;
+
+    return (uint64)futex_wait(uaddr, (uint32)val, (uint32)mask, private,
+                              has_timeout, timeout_ms);
+}
+
+uint64 sys_futex_requeue(void)
+{
+    uint64 waiters_addr;
+    int flags;
+    int nr_wake;
+    int nr_requeue;
+    struct futex_waitv_user src;
+    struct futex_waitv_user dst;
+    bool private_src;
+    bool private_dst;
+
+    argaddr(0, &waiters_addr);
+    argint(1, &flags);
+    argint(2, &nr_wake);
+    argint(3, &nr_requeue);
+
+    if (flags != 0 || waiters_addr == 0 || nr_wake < 0 || nr_requeue < 0)
+        return (uint64)-EINVAL;
+    if (vm_copyin(current->vm, &src, waiters_addr, sizeof(src)) < 0 ||
+        vm_copyin(current->vm, &dst, waiters_addr + sizeof(src),
+                  sizeof(dst)) < 0)
+        return (uint64)-EFAULT;
+    if (src.reserved != 0 || dst.reserved != 0 ||
+        src.flags != dst.flags ||
+        (src.uaddr & 3) != 0 || (dst.uaddr & 3) != 0)
+        return (uint64)-EINVAL;
+    if (futex2_parse_flags(src.flags, &private_src) < 0 ||
+        futex2_parse_flags(dst.flags, &private_dst) < 0 ||
+        private_src != private_dst ||
+        futex2_validate_val(src.val) < 0 ||
+        futex2_validate_val(dst.val) < 0)
+        return (uint64)-EINVAL;
+
+    return (uint64)futex_requeue(src.uaddr, nr_wake, dst.uaddr, nr_requeue,
+                                 (uint32)src.val, 1, private_src);
+}
+
+uint64 sys_futex_waitv(void)
+{
+    uint64 waiters_addr;
+    int nr_futexes;
+    int flags;
+    uint64 timeout_addr;
+    int clockid;
+    bool has_timeout;
+    uint64 timeout_ms;
+    struct futex_waitv_entry entries[FUTEX_WAITV_MAX];
+    uint64 lock_indices[FUTEX_WAITV_MAX];
+    int lock_count = 0;
+    int ret;
+
+    argaddr(0, &waiters_addr);
+    argint(1, &nr_futexes);
+    argint(2, &flags);
+    argaddr(3, &timeout_addr);
+    argint(4, &clockid);
+
+    if (flags != 0 || waiters_addr == 0 ||
+        nr_futexes <= 0 || nr_futexes > FUTEX_WAITV_MAX)
+        return (uint64)-EINVAL;
+
+    ret = futex2_parse_abs_timeout(timeout_addr, clockid, &has_timeout,
+                                   &timeout_ms);
+    if (ret < 0)
+        return (uint64)ret;
+
+    memset(entries, 0, sizeof(entries));
+    memset(lock_indices, 0, sizeof(lock_indices));
+
+    for (int i = 0; i < nr_futexes; i++) {
+        struct futex_waitv_user uw;
+        bool private;
+
+        if (vm_copyin(current->vm, &uw,
+                      waiters_addr + i * sizeof(uw), sizeof(uw)) < 0)
+            return (uint64)-EFAULT;
+        if (uw.reserved != 0 || (uw.uaddr & 3) != 0)
+            return (uint64)-EINVAL;
+        ret = futex2_parse_flags(uw.flags, &private);
+        if (ret < 0)
+            return (uint64)ret;
+        ret = futex2_validate_val(uw.val);
+        if (ret < 0)
+            return (uint64)ret;
+
+        ret = futex_make_key(current->vm, uw.uaddr, private,
+                             &entries[i].key);
+        if (ret < 0)
+            return (uint64)ret;
+
+        entries[i].uaddr = uw.uaddr;
+        entries[i].val = (uint32)uw.val;
+        entries[i].bucket_idx = futex_hash(&entries[i].key);
+        entries[i].bucket = &futex_table[entries[i].bucket_idx];
+        entries[i].waiter.thread = current;
+        entries[i].waiter.key_vm = entries[i].key.vm;
+        entries[i].waiter.key_addr = entries[i].key.addr;
+        entries[i].waiter.bitset = FUTEX_BITSET_MATCH_ANY;
+        entries[i].waiter.next = NULL;
+
+        ret = futex_lock_index_insert(lock_indices, &lock_count,
+                                      entries[i].bucket_idx);
+        if (ret < 0)
+            return (uint64)ret;
+    }
+
+    futex_lock_buckets(lock_indices, lock_count);
+
+    for (int i = 0; i < nr_futexes; i++) {
+        uint32 curval;
+        ret = futex_read_u32(current->vm, entries[i].uaddr, &curval);
+        if (ret < 0)
+            goto out_unlock;
+        if (curval != entries[i].val) {
+            ret = -EAGAIN;
+            goto out_unlock;
+        }
+    }
+
+    if (has_timeout && timeout_ms == 0) {
+        ret = -ETIMEDOUT;
+        goto out_unlock;
+    }
+
+    for (int i = 0; i < nr_futexes; i++) {
+        entries[i].waiter.next = entries[i].bucket->head;
+        entries[i].bucket->head = &entries[i].waiter;
+    }
+
+    struct timer_node tn = {0};
+    uint64 deadline_ms = 0;
+    bool timer_armed = false;
+    bool timeout_arm_failed = false;
+
+    int intr = intr_off_save();
+    __thread_state_set(current, THREAD_INTERRUPTIBLE);
+    if (has_timeout) {
+        deadline_ms = sched_timer_now_ms() + timeout_ms;
+        if (sched_timer_set(&tn, timeout_ms) == 0) {
+            timer_armed = true;
+        } else {
+            __thread_state_set(current, THREAD_RUNNING);
+            timeout_arm_failed = true;
+        }
+    }
+    futex_unlock_buckets(lock_indices, lock_count);
+
+    if (!timeout_arm_failed)
+        scheduler_yield();
+
+    futex_lock_buckets(lock_indices, lock_count);
+    intr_restore(intr);
+
+    int woken_index = -1;
+    for (int i = 0; i < nr_futexes; i++) {
+        if (!futex_waiter_unlink(entries[i].bucket, &entries[i].waiter) &&
+            woken_index < 0) {
+            woken_index = i;
+        }
+    }
+    futex_unlock_buckets(lock_indices, lock_count);
+
+    if (timer_armed)
+        sched_timer_done(&tn);
+
+    if (signal_pending(current) || killed(current))
+        return (uint64)-EINTR;
+    if (timeout_arm_failed)
+        return (uint64)-ETIMEDOUT;
+    if (woken_index >= 0)
+        return (uint64)woken_index;
+    if (has_timeout && sched_timer_now_ms() >= deadline_ms)
+        return (uint64)-ETIMEDOUT;
+    return 0;
+
+out_unlock:
+    futex_unlock_buckets(lock_indices, lock_count);
+    return (uint64)ret;
 }

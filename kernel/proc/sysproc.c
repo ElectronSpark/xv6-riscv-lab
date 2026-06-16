@@ -530,12 +530,19 @@ uint64 sys_clone(void) {
         CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID |
         CLONE_NEWNET | CLONE_IO | CLONE_CLEAR_SIGHAND |
         CLONE_INTO_CGROUP | CLONE_PID | CLONE_SYSTEM | CLONE_SIGSTOPPED;
+    uint64 unsupported_linux_clone_flags =
+        CLONE_PIDFD | CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS |
+        CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET |
+        CLONE_CLEAR_SIGHAND | CLONE_INTO_CGROUP | CLONE_PID |
+        CLONE_SYSTEM | CLONE_SIGSTOPPED;
 
     if ((uargs & ~linux_clone_mask) == 0) {
         // Linux-style clone(flags, stack, ptid, ctid, tls).  musl's
         // pthread_create uses CLONE_CHILD_CLEARTID and friends, so a numeric
         // threshold is not a safe way to distinguish this ABI from the legacy
         // xv6 clone_args pointer ABI.
+        if (uargs & unsupported_linux_clone_flags)
+            return (uint64)-EINVAL;
         uint64 stack, ptid, ctid, tls;
         argaddr(1, &stack);
         argaddr(2, &ptid);

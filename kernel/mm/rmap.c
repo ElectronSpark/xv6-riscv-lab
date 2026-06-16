@@ -17,8 +17,10 @@
 #include <mm/slab.h>
 #include "lock/rwsem.h"
 #include "bintree.h"
+#include "rbtree.h"
 #include "list.h"
 #include "string.h"
+#include "printf.h"
 #include <smp/atomic.h>
 
 /* ========================================================================== */
@@ -29,7 +31,7 @@ static slab_cache_t __anon_vma_pool = {0};
 static slab_cache_t __avc_pool = {0};
 
 /* ========================================================================== */
-/*  RB-tree opts for anon_vma->vma_tree (keyed by vma->start)                 */
+/*  RB-tree opts for anon_vma->vma_tree                                       */
 /* ========================================================================== */
 
 static int __avc_cmp(uint64 a, uint64 b)
@@ -43,7 +45,7 @@ static uint64 __avc_get_key(struct rb_node *node)
 {
     struct anon_vma_chain *avc =
         container_of(node, struct anon_vma_chain, rb_entry);
-    return avc->vma->start;
+    return avc->tree_key;
 }
 
 static struct rb_root_opts __avc_tree_opts = {
@@ -100,6 +102,7 @@ struct anon_vma_chain *avc_alloc(void)
         return NULL;
     memset(avc, 0, sizeof(*avc));
     rb_node_init(&avc->rb_entry);
+    avc->tree_key = (uint64)avc;
     list_entry_init(&avc->same_vma);
     return avc;
 }
@@ -123,14 +126,16 @@ void anon_vma_chain_link(vma_t *vma, struct anon_vma_chain *avc,
     /* Add to VMA's list of AVCs. */
     list_node_push_back(&vma->anon_vma_chain, avc, same_vma);
 
-    /* Add to anon_vma's rb-tree.
-     * If a node with the same key exists (same vma->start from a
-     * previous VMA that occupied this address), rb_insert_node returns
-     * the existing node.  For simplicity we allow duplicates by ensuring
-     * keys include enough uniqueness.  In practice, the VMA start
-     * address plus refcount serialisation prevents collisions. */
+    /*
+     * Add to anon_vma's rb-tree.  Rmap traverses this tree to find every
+     * linked VMA; it does not look up by start address.  Use a stable AVC key
+     * so forked or split VMAs may share the same start without colliding, and
+     * so start-moving VMA metadata updates do not need to re-key rmap nodes.
+     */
     anon_vma_ref(anon_vma);
-    rb_insert_node(&anon_vma->vma_tree, &avc->rb_entry);
+    assert(rb_insert_color(&anon_vma->vma_tree, &avc->rb_entry) ==
+               &avc->rb_entry,
+           "anon_vma_chain_link: duplicate tree key");
 }
 
 int anon_vma_prepare(vma_t *vma)
@@ -205,9 +210,10 @@ void anon_vma_unlink(vma_t *vma)
         /* Remove from VMA's list first. */
         list_entry_detach(entry);
 
-        /* Remove from anon_vma's rb-tree. */
+        /* Remove this exact AVC from anon_vma's rb-tree. */
         rwsem_acquire_write(&av->rwsem);
-        rb_delete_key(&av->vma_tree, (unsigned long)avc->vma->start);
+        if (!rb_node_is_empty(&avc->rb_entry))
+            rb_delete_node_color(&av->vma_tree, &avc->rb_entry);
         rwsem_release(&av->rwsem);
 
         anon_vma_put(av);

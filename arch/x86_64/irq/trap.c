@@ -27,8 +27,10 @@
 #include <proc/sched.h>
 #include "memlayout.h"
 #include "ksymbols.h"
+#include "proc/chrome_lifecycle.h"
+#include "vfs/file.h"
 
-#define USER_FAULT_AROUND_PAGES 2048UL
+#define USER_FAULT_AROUND_PAGES 8UL
 
 static const char *fault_vma_file_name(vma_t *vma)
 {
@@ -94,6 +96,96 @@ static void print_fault_vma(vm_t *vm, const char *label, uint64 addr)
            fault_vma_file_name(vma));
 }
 
+static const char *vma_debug_path(vma_t *vma)
+{
+    if (vma == NULL || vma->file == NULL)
+        return "-";
+    if (vma->file->opened_path != NULL &&
+        vma->file->opened_path[0] != '\0')
+        return vma->file->opened_path;
+    return fault_vma_file_name(vma);
+}
+
+static void chrome_dump_icu_vmas(struct thread *p, const char *reason)
+{
+    if (p == NULL || p->vm == NULL)
+        return;
+    if (!chrome_lifecycle_thread_match(p) && strncmp(p->name, "exe", 4) != 0)
+        return;
+
+    vm_t *vm = p->vm;
+    int found = 0;
+
+    vm_rlock(vm);
+    vma_t *vma;
+    uint64 index = 0;
+    mt_for_each(&vm->vm_mt, vma, index, (uint64)(-1ULL)) {
+        const char *path = vma_debug_path(vma);
+        if (strstr(path, "icudtl.dat") == NULL)
+            continue;
+
+        found++;
+        printf("chrome-icu-vma: reason=%s pid=%d tgid=%d name=%s map=[0x%lx-0x%lx) %c%c%c %s pgoff=0x%lx file=%p path=%s\n",
+               reason, p->pid, thread_tgid(p), p->name, vma->start, vma->end,
+               (vma->flags & PROT_READ) ? 'r' : '-',
+               (vma->flags & PROT_WRITE) ? 'w' : '-',
+               (vma->flags & PROT_EXEC) ? 'x' : '-',
+               (vma->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+               vma->pgoff, (void *)vma->file, path);
+    }
+    vm_runlock(vm);
+
+    if (found == 0) {
+        printf("chrome-icu-vma: reason=%s pid=%d tgid=%d name=%s found=0\n",
+               reason, p->pid, thread_tgid(p), p->name);
+    }
+}
+
+static int trap_is_fd(struct vfs_file *file)
+{
+    return (uint64)file > NOFILE;
+}
+
+static void chrome_dump_asset_fds(struct thread *p, const char *reason)
+{
+    struct vfs_fdtable *fdt;
+    int found = 0;
+
+    if (p == NULL || p->fdtable == NULL)
+        return;
+    if (!chrome_lifecycle_thread_match(p) && strncmp(p->name, "exe", 4) != 0)
+        return;
+
+    fdt = p->fdtable;
+    spin_lock(&fdt->lock);
+    for (int fd = 0; fd < NOFILE; fd++) {
+        struct vfs_file *file = fdt->files[fd];
+        const char *path;
+        if (!trap_is_fd(file))
+            continue;
+
+        path = file->opened_path;
+        if (path == NULL || path[0] == '\0')
+            path = "(no-path)";
+
+        if (fd != 3 && strstr(path, "icudtl.dat") == NULL &&
+            strstr(path, "v8_context_snapshot.bin") == NULL)
+            continue;
+
+        found++;
+        printf("chrome-asset-fd: reason=%s pid=%d tgid=%d name=%s fd=%d cloexec=%d kind=%d flags=0x%x file=%p path=%s\n",
+               reason, p->pid, thread_tgid(p), p->name, fd,
+               !!(fdt->cloexec_bitmap[fd >> 6] & (1ULL << (fd & 63))),
+               file->f_kind, file->f_flags, (void *)file, path);
+    }
+    spin_unlock(&fdt->lock);
+
+    if (found == 0) {
+        printf("chrome-asset-fd: reason=%s pid=%d tgid=%d name=%s found=0\n",
+               reason, p->pid, thread_tgid(p), p->name);
+    }
+}
+
 /* ──────────────────────────────────────────────────────────────
  *  User-ABI signal types — exact binary layout that musl (and
  *  Linux) expects on the user stack.  The kernel's own types
@@ -157,7 +249,7 @@ typedef struct user_ucontext {
     unsigned long            __fpregs_mem[64];   /* 512 bytes */
 } user_ucontext_t;
 #define USER_FAULT_AROUND_SIZE  (USER_FAULT_AROUND_PAGES * PGSIZE)
-#define USER_WRITE_FAULT_AROUND_PAGES 128UL
+#define USER_WRITE_FAULT_AROUND_PAGES 4UL
 #define USER_WRITE_FAULT_AROUND_SIZE  (USER_WRITE_FAULT_AROUND_PAGES * PGSIZE)
 
 extern pagetable_t kernel_pagetable;
@@ -191,7 +283,14 @@ static void dbg_hex(uint64 v);
 void usertrapret(void) {
     struct thread *p = current;
     struct trapframe *tf = &p->trapframe->trapframe;
+    uint32 rseq_events = 0;
 
+    if (killed(p))
+        exit(-1);
+
+    if (THREAD_SIGPENDING(p))
+        rseq_events |= RSEQ_EVENT_SIGNAL;
+    rseq_user_return(p, rseq_events);
     if (killed(p))
         exit(-1);
 
@@ -209,6 +308,9 @@ void usertrapret(void) {
 
     if (NEEDS_RESCHED()) {
         scheduler_yield();
+        rseq_user_return(p, RSEQ_EVENT_PREEMPT);
+        if (killed(p))
+            exit(-1);
     }
 
     /* Disable interrupts while setting up the return path. */
@@ -888,6 +990,13 @@ void x86_trap_handler(struct trapframe *tf) {
             /* Try growing the stack first */
             vm_try_growstack(current->vm, cr2);
 
+            if (!is_write &&
+                vm_file_read_fault_unlocked(current->vm, fault_base, prot) == 0) {
+                if (vm_asid_max() > 0)
+                    sfence_vma_global();
+                goto user_return;
+            }
+
             vm_rlock(current->vm);
             vma_t *vma = vm_find_area(current->vm, cr2);
             if (vma != NULL) {
@@ -1185,6 +1294,15 @@ void x86_trap_handler(struct trapframe *tf) {
             /* GDB stub didn't handle it — deliver SIGTRAP */
             printf("pid %d %s: breakpoint trap rip=0x%lx\n", current->pid,
                    current->name, current->trapframe->trapframe.rip);
+            if (chrome_trace_value_enabled("chrome_fd_trace")) {
+                chrome_dump_icu_vmas(current, "trap-int3");
+                chrome_dump_asset_fds(current, "trap-int3");
+            }
+            if (chrome_trace_value_enabled("chrome_fd_trace") &&
+                (chrome_lifecycle_thread_match(current) ||
+                 strncmp(current->name, "exe", 4) == 0)) {
+                vfs_fdtable_debug_dump(current, "trap-int3", 128);
+            }
             kill(current->pid, SIGTRAP);
         }
         usertrapret(); /* noreturn — returns via utrapframe */

@@ -15,6 +15,7 @@
 #include "printf.h"
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "proc_private.h"
 #include "proc/sched.h"
 #include "proc/rq.h"
 #include "mm/vm.h"
@@ -27,6 +28,8 @@
 #include "timer/goldfish_rtc.h"
 #include "proc/pgroup.h"
 #include "vfs/file.h"
+#include "smp/percpu.h"
+#include "proc/chrome_lifecycle.h"
 
 /* Forward declarations for arg helpers */
 void argint(int n, int *ip);
@@ -112,9 +115,9 @@ uint64 sys_prctl(void) {
          */
         return (uint64)-EINVAL;
     case PR_CAPBSET_READ:
-        if (arg2 > CAP_LAST_CAP || arg3 || arg4 || arg5)
+        if (arg2 > CAP_LAST_CAP)
             return (uint64)-EINVAL;
-        return 0;
+        return 1;
     case PR_CAPBSET_DROP:
         if (arg2 > CAP_LAST_CAP || arg3 || arg4 || arg5)
             return (uint64)-EINVAL;
@@ -502,6 +505,168 @@ uint64 sys_get_robust_list(void) {
 /*  getcpu / rseq / capabilities                                      */
 /* ================================================================== */
 
+#define RSEQ_CPU_ID_UNINITIALIZED      (-1)
+#define RSEQ_CPU_ID_REGISTRATION_FAILED (-2)
+#define RSEQ_FLAG_UNREGISTER           (1U << 0)
+#define RSEQ_ABI_SIZE                  32U
+#define RSEQ_ABI_ALIGN                 32U
+#define RSEQ_SIG_SIZE                  4U
+#define RSEQ_CS_FLAG_NO_RESTART_ON_PREEMPT (1U << 0)
+#define RSEQ_CS_FLAG_NO_RESTART_ON_SIGNAL  (1U << 1)
+#define RSEQ_CS_FLAG_NO_RESTART_ON_MIGRATE (1U << 2)
+
+struct linux_rseq_abi {
+    uint32 cpu_id_start;
+    uint32 cpu_id;
+    uint64 rseq_cs;
+    uint32 flags;
+    uint32 node_id;
+    uint32 mm_cid;
+    uint32 padding;
+} __attribute__((packed, aligned(4)));
+_Static_assert(sizeof(struct linux_rseq_abi) == RSEQ_ABI_SIZE,
+               "Linux rseq ABI struct must be 32 bytes");
+
+struct linux_rseq_cs_abi {
+    uint32 version;
+    uint32 flags;
+    uint64 start_ip;
+    uint64 post_commit_offset;
+    uint64 abort_ip;
+} __attribute__((packed));
+_Static_assert(sizeof(struct linux_rseq_cs_abi) == 32,
+               "Linux rseq_cs ABI struct must be 32 bytes");
+
+static int rseq_copyout_cpu(struct thread *p, int cpu)
+{
+    struct linux_rseq_abi rseq;
+
+    if (p == NULL || p->vm == NULL || p->rseq_addr == 0)
+        return 0;
+
+    if (vm_copyin(p->vm, &rseq, p->rseq_addr, sizeof(rseq)) < 0)
+        return -EFAULT;
+
+    rseq.cpu_id_start = (uint32)cpu;
+    rseq.cpu_id = (uint32)cpu;
+    rseq.node_id = 0;
+    rseq.mm_cid = (uint32)p->pid;
+
+    if (vm_copyout(p->vm, p->rseq_addr, &rseq, sizeof(rseq)) < 0)
+        return -EFAULT;
+    p->rseq_cpu_id = cpu;
+    return 0;
+}
+
+static int rseq_mark_unregistered(struct thread *p)
+{
+    uint32 cpu_id = (uint32)RSEQ_CPU_ID_UNINITIALIZED;
+
+    if (p == NULL || p->vm == NULL || p->rseq_addr == 0)
+        return 0;
+    if (vm_copyout(p->vm, p->rseq_addr + 4, &cpu_id, sizeof(cpu_id)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int rseq_event_restart_allowed(uint32 cs_flags, uint32 events)
+{
+    if ((events & RSEQ_EVENT_PREEMPT) &&
+        !(cs_flags & RSEQ_CS_FLAG_NO_RESTART_ON_PREEMPT))
+        return 1;
+    if ((events & RSEQ_EVENT_SIGNAL) &&
+        !(cs_flags & RSEQ_CS_FLAG_NO_RESTART_ON_SIGNAL))
+        return 1;
+    if ((events & RSEQ_EVENT_MIGRATE) &&
+        !(cs_flags & RSEQ_CS_FLAG_NO_RESTART_ON_MIGRATE))
+        return 1;
+    return 0;
+}
+
+static int rseq_abort_active_cs(struct thread *p, uint32 events)
+{
+    struct linux_rseq_abi rseq;
+    struct linux_rseq_cs_abi cs;
+    uint64 ip;
+    uint32 abort_sig = 0;
+    uint64 cs_end;
+    uint64 zero = 0;
+
+    if (p == NULL || p->vm == NULL || p->trapframe == NULL ||
+        p->rseq_addr == 0 || events == 0)
+        return 0;
+
+    if (vm_copyin(p->vm, &rseq, p->rseq_addr, sizeof(rseq)) < 0)
+        return -EFAULT;
+    if (rseq.rseq_cs == 0)
+        return 0;
+    if (vm_copyin(p->vm, &cs, rseq.rseq_cs, sizeof(cs)) < 0)
+        return -EFAULT;
+    if (cs.version != 0)
+        return -EINVAL;
+    if (!rseq_event_restart_allowed(cs.flags, events))
+        return 0;
+    if (cs.post_commit_offset == 0 ||
+        cs.post_commit_offset > (~0ULL - cs.start_ip))
+        return -EINVAL;
+
+    ip = p->trapframe->trapframe.sepc;
+    cs_end = cs.start_ip + cs.post_commit_offset;
+    if (ip < cs.start_ip || ip >= cs_end)
+        return 0;
+
+    if (cs.abort_ip >= RSEQ_SIG_SIZE) {
+        if (vm_copyin(p->vm, &abort_sig, cs.abort_ip - RSEQ_SIG_SIZE,
+                      sizeof(abort_sig)) < 0)
+            return -EFAULT;
+        if (abort_sig != p->rseq_signature)
+            return -EINVAL;
+    } else {
+        return -EINVAL;
+    }
+
+    if (vm_copyout(p->vm, p->rseq_addr + 8, &zero, sizeof(zero)) < 0)
+        return -EFAULT;
+    p->trapframe->trapframe.sepc = cs.abort_ip;
+    return 0;
+}
+
+void rseq_user_return(struct thread *p, uint32 events)
+{
+    int cpu;
+    uint32 effective_events = events;
+
+    if (p == NULL || p->rseq_addr == 0 || p->vm == NULL)
+        return;
+
+    cpu = cpuid();
+    if (p->rseq_cpu_id >= 0 && p->rseq_cpu_id != cpu)
+        effective_events |= RSEQ_EVENT_MIGRATE;
+
+    if (effective_events == 0 && p->rseq_cpu_id == cpu)
+        return;
+
+    if (rseq_abort_active_cs(p, effective_events) < 0 ||
+        rseq_copyout_cpu(p, cpu) < 0) {
+        /*
+         * Linux treats a bad registered rseq area as a task fault.  Mark the
+         * thread for SIGSEGV so usertrapret's existing signal/exit path owns
+         * the final disposition instead of silently publishing stale state.
+         */
+        kill_thread(p, SIGSEGV);
+    }
+}
+
+void rseq_clear_thread(struct thread *p)
+{
+    if (p == NULL)
+        return;
+    p->rseq_addr = 0;
+    p->rseq_len = 0;
+    p->rseq_signature = 0;
+    p->rseq_cpu_id = RSEQ_CPU_ID_UNINITIALIZED;
+}
+
 uint64 sys_getcpu(void) {
     uint64 cpu_addr;
     uint64 node_addr;
@@ -519,66 +684,54 @@ uint64 sys_getcpu(void) {
     return 0;
 }
 
-#define RSEQ_FLAG_UNREGISTER 1
-#define RSEQ_MIN_SIZE 32
-#define RSEQ_ALIGNMENT 32
-#define RSEQ_CPU_ID_UNINITIALIZED 0xffffffffU
-
-struct linux_rseq_area {
-    uint32 cpu_id_start;
-    uint32 cpu_id;
-    uint64 rseq_cs;
-    uint32 flags;
-};
-
-static int rseq_write_state(uint64 rseq_addr, uint32 cpu_id)
-{
-    struct linux_rseq_area area;
-
-    memset(&area, 0, sizeof(area));
-    area.cpu_id_start = cpu_id;
-    area.cpu_id = cpu_id;
-    return either_copyout(1, rseq_addr, &area, sizeof(area));
-}
-
 uint64 sys_rseq(void) {
     uint64 rseq_addr;
-    uint32 rseq_len;
+    uint64 rseq_len64;
     int flags;
+    uint64 signature64;
     uint32 signature;
 
     argaddr(0, &rseq_addr);
-    argint(1, (int *)&rseq_len);
+    argaddr(1, &rseq_len64);
     argint(2, &flags);
-    argint(3, (int *)&signature);
+    argaddr(3, &signature64);
+    signature = (uint32)signature64;
 
-    if (flags & ~RSEQ_FLAG_UNREGISTER)
+    if ((uint32)flags & ~RSEQ_FLAG_UNREGISTER)
         return (uint64)-EINVAL;
 
-    if (flags & RSEQ_FLAG_UNREGISTER) {
-        if (current->rseq_addr == 0 || current->rseq_addr != rseq_addr ||
-            current->rseq_len != rseq_len ||
-            current->rseq_signature != signature)
+    if ((uint32)flags & RSEQ_FLAG_UNREGISTER) {
+        if ((uint32)flags != RSEQ_FLAG_UNREGISTER)
             return (uint64)-EINVAL;
-        if (rseq_write_state(rseq_addr, RSEQ_CPU_ID_UNINITIALIZED) < 0)
+        if (current->rseq_addr == 0)
+            return (uint64)-EINVAL;
+        if (rseq_addr != current->rseq_addr ||
+            (uint32)rseq_len64 != current->rseq_len ||
+            signature != current->rseq_signature)
+            return (uint64)-EINVAL;
+        if (rseq_mark_unregistered(current) < 0)
             return (uint64)-EFAULT;
-        current->rseq_addr = 0;
-        current->rseq_len = 0;
-        current->rseq_signature = 0;
+        rseq_clear_thread(current);
         return 0;
     }
 
-    if (rseq_addr == 0 || rseq_len != RSEQ_MIN_SIZE ||
-        (rseq_addr & (RSEQ_ALIGNMENT - 1)) != 0)
+    if (rseq_addr == 0 || (rseq_addr & (RSEQ_ABI_ALIGN - 1)) != 0)
+        return (uint64)-EINVAL;
+    if (rseq_len64 < RSEQ_ABI_SIZE || rseq_len64 > UINT32_MAX)
         return (uint64)-EINVAL;
     if (current->rseq_addr != 0)
         return (uint64)-EBUSY;
-    if (rseq_write_state(rseq_addr, (uint32)cpuid()) < 0)
-        return (uint64)-EFAULT;
 
     current->rseq_addr = rseq_addr;
-    current->rseq_len = rseq_len;
+    current->rseq_len = (uint32)rseq_len64;
     current->rseq_signature = signature;
+    current->rseq_cpu_id = RSEQ_CPU_ID_UNINITIALIZED;
+
+    if (rseq_copyout_cpu(current, cpuid()) < 0) {
+        rseq_clear_thread(current);
+        return (uint64)-EFAULT;
+    }
+
     return 0;
 }
 
@@ -888,7 +1041,6 @@ uint64 sys_sched_rr_get_interval(void) {
 
 /*
  * sched_getaffinity(pid, cpusetsize, mask)
- * xv6 is single-CPU: return a mask with only bit 0 set.
  */
 uint64 sys_sched_getaffinity(void) {
     int pid;
@@ -903,13 +1055,14 @@ uint64 sys_sched_getaffinity(void) {
     if (cpusetsize <= 0)
         return (uint64)-EINVAL;
 
-    /* Zero the entire mask, then set bit 0 (CPU 0) */
+    /* Keep this consistent with /sys/devices/system/cpu/{online,present,possible}. */
     uint8 buf[128];
     int len = cpusetsize;
+    cpumask_t mask = cpu_possible_mask();
     if (len > (int)sizeof(buf))
         len = (int)sizeof(buf);
     memset(buf, 0, len);
-    buf[0] = 1;  /* CPU 0 */
+    memcpy(buf, &mask, len < (int)sizeof(mask) ? len : (int)sizeof(mask));
 
     if (either_copyout(1, mask_addr, buf, len) < 0)
         return (uint64)-EFAULT;
@@ -1030,19 +1183,14 @@ struct linux_clone_args {
 };
 
 uint64 sys_clone3(void) {
-    /*
-     * glibc probes clone3() before falling back to clone().  Returning EINVAL
-     * from a partial clone3 implementation makes pthread_create fail, while
-     * ENOSYS matches older Linux kernels and preserves the working clone ABI.
-     */
-    return (uint64)-ENOSYS;
-#if 0
     uint64 uargs_addr;
     uint64 size;
     argaddr(0, &uargs_addr);
     argaddr(1, &size);
 
     if (uargs_addr == 0)
+        return (uint64)-EINVAL;
+    if (size < 64 || size > 4096)
         return (uint64)-EINVAL;
 
     /* Copy in the Linux clone_args (up to what we support) */
@@ -1055,21 +1203,123 @@ uint64 sys_clone3(void) {
 
     if (vm_copyin(current->vm, &largs, uargs_addr, copy_size) < 0)
         return (uint64)-EFAULT;
+    if (size > sizeof(largs)) {
+        uint8 extra[64];
+        uint64 pos = sizeof(largs);
+
+        while (pos < size) {
+            uint64 chunk = size - pos;
+            if (chunk > sizeof(extra))
+                chunk = sizeof(extra);
+            if (vm_copyin(current->vm, extra, uargs_addr + pos, chunk) < 0)
+                return (uint64)-EFAULT;
+            for (uint64 i = 0; i < chunk; i++) {
+                if (extra[i] != 0)
+                    return (uint64)-E2BIG;
+            }
+            pos += chunk;
+        }
+    }
+
+    /*
+     * Support the Linux clone3 subset needed by glibc/Chromium thread and
+     * process creation.  Features that need extra Linux objects must fail
+     * explicitly rather than being silently ignored.
+     */
+    uint64 unsupported_linux_clone3_flags =
+        CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS |
+        CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET |
+        CLONE_INTO_CGROUP | CLONE_PID | CLONE_SYSTEM | CLONE_SIGSTOPPED;
+    if ((largs.flags & unsupported_linux_clone3_flags) != 0 ||
+        largs.cgroup != 0 || largs.set_tid != 0 || largs.set_tid_size != 0) {
+        return (uint64)-EINVAL;
+    }
+    if ((largs.flags & (CLONE_CLEAR_SIGHAND | CLONE_SIGHAND)) ==
+        (CLONE_CLEAR_SIGHAND | CLONE_SIGHAND)) {
+        return (uint64)-EINVAL;
+    }
+    if ((largs.flags & CLONE_PIDFD) != 0) {
+        if ((largs.flags & CLONE_DETACHED) != 0)
+            return (uint64)-EINVAL;
+        if (largs.pidfd == 0)
+            return (uint64)-EFAULT;
+    }
+    if (largs.exit_signal != 0 && SIGBAD(largs.exit_signal))
+        return (uint64)-EINVAL;
+
+    uint64 linux_clone_mask =
+        0xffULL | CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+        CLONE_PIDFD | CLONE_PTRACE | CLONE_VFORK | CLONE_PARENT |
+        CLONE_THREAD | CLONE_NEWNS | CLONE_SYSVSEM | CLONE_SETTLS |
+        CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID | CLONE_DETACHED |
+        CLONE_UNTRACED | CLONE_CHILD_SETTID | CLONE_NEWCGROUP |
+        CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID |
+        CLONE_NEWNET | CLONE_IO | CLONE_CLEAR_SIGHAND |
+        CLONE_INTO_CGROUP | CLONE_PID | CLONE_SYSTEM | CLONE_SIGSTOPPED;
+    if ((largs.flags & ~linux_clone_mask) != 0)
+        return (uint64)-EINVAL;
 
     /* Map to xv6 clone_args */
     struct clone_args args = {
-        .flags      = largs.flags,
+        .flags      = largs.flags & ~0xffULL,
         .stack      = largs.stack,
         .stack_size = largs.stack_size,
         .entry      = 0,
-        .esignal    = largs.exit_signal,
+        .esignal    = largs.exit_signal ? largs.exit_signal : (largs.flags & 0xff),
         .tls        = largs.tls,
         .ctid       = largs.child_tid,
         .ptid       = largs.parent_tid,
+        .pidfd      = largs.pidfd,
     };
 
     return (uint64)thread_clone(&args);
-#endif
+}
+
+/* ================================================================== */
+/*  Memory protection keys                                             */
+/* ================================================================== */
+
+#define PKEY_DISABLE_ACCESS 0x1
+#define PKEY_DISABLE_WRITE  0x2
+#define PKEY_ACCESS_MASK    (PKEY_DISABLE_ACCESS | PKEY_DISABLE_WRITE)
+
+/*
+ * xv6 does not currently expose x86 PKU state to user space.  Keep the Linux
+ * ABI shape: applications can probe pkey_alloc() and learn that no key is
+ * available, while pkey_mprotect(..., -1) is normal mprotect().  Accept pkey 0
+ * too because Linux reserves it as the default protection domain.
+ */
+uint64 sys_pkey_alloc(void)
+{
+    uint64 flags, access_rights;
+    argaddr(0, &flags);
+    argaddr(1, &access_rights);
+
+    if (flags != 0 || (access_rights & ~PKEY_ACCESS_MASK) != 0)
+        return (uint64)-EINVAL;
+    return (uint64)-ENOSPC;
+}
+
+uint64 sys_pkey_free(void)
+{
+    return (uint64)-EINVAL;
+}
+
+uint64 sys_pkey_mprotect(void)
+{
+    uint64 addr, length;
+    int prot, pkey;
+
+    argaddr(0, &addr);
+    argaddr(1, &length);
+    argint(2, &prot);
+    argint(3, &pkey);
+
+    if (pkey != -1 && pkey != 0)
+        return (uint64)-EINVAL;
+    if (length == 0)
+        return (uint64)-EINVAL;
+    return (uint64)vm_mprotect(current->vm, addr, (size_t)length, prot);
 }
 
 #define MLOCK_ONFAULT 0x1
@@ -1248,6 +1498,81 @@ uint64 sys_kcmp(void)
 /*  Linux optional/privileged compatibility syscalls                   */
 /* ================================================================== */
 
+#define LANDLOCK_CREATE_RULESET_VERSION (1U << 0)
+#define LANDLOCK_CREATE_RULESET_ERRATA  (1U << 1)
+#define LANDLOCK_ABI_VERSION 7
+#define LANDLOCK_FIXED_ERRATA 0
+
+struct landlock_ruleset_attr_compat {
+    uint64 handled_access_fs;
+    uint64 handled_access_net;
+};
+
+uint64 sys_landlock_create_ruleset(void)
+{
+    uint64 attr_addr;
+    uint64 size;
+    int flags;
+    argaddr(0, &attr_addr);
+    argaddr(1, &size);
+    argint(2, &flags);
+
+    const int query_flags =
+        LANDLOCK_CREATE_RULESET_VERSION | LANDLOCK_CREATE_RULESET_ERRATA;
+    if ((flags & ~query_flags) != 0)
+        return (uint64)-EINVAL;
+
+    if (flags != 0) {
+        if (attr_addr != 0 || size != 0)
+            return (uint64)-EINVAL;
+        if (flags == LANDLOCK_CREATE_RULESET_VERSION)
+            return LANDLOCK_ABI_VERSION;
+        if (flags == LANDLOCK_CREATE_RULESET_ERRATA)
+            return LANDLOCK_FIXED_ERRATA;
+        return (uint64)-EINVAL;
+    }
+
+    if (attr_addr == 0)
+        return (uint64)-EFAULT;
+    if (size < sizeof(uint64))
+        return (uint64)-EINVAL;
+    if (size > sizeof(struct landlock_ruleset_attr_compat))
+        return (uint64)-E2BIG;
+
+    struct landlock_ruleset_attr_compat attr;
+    memset(&attr, 0, sizeof(attr));
+    if (vm_copyin(current->vm, &attr, attr_addr, size) < 0)
+        return (uint64)-EFAULT;
+    if (attr.handled_access_fs == 0 && attr.handled_access_net == 0)
+        return (uint64)-ENOMSG;
+
+    /*
+     * The Chromium-observed query path needs Linux's ABI-version result, but
+     * xv6 does not yet have a Landlock enforcement engine.  Do not create an
+     * inert ruleset fd or allow a no-op restrict_self(); report the same
+     * fail-closed shape Linux uses when Landlock is supported but disabled.
+     */
+    return (uint64)-EOPNOTSUPP;
+}
+
+uint64 sys_landlock_add_rule(void)
+{
+    int flags;
+    argint(3, &flags);
+    if (flags != 0)
+        return (uint64)-EINVAL;
+    return (uint64)-EOPNOTSUPP;
+}
+
+uint64 sys_landlock_restrict_self(void)
+{
+    int flags;
+    argint(1, &flags);
+    if (flags != 0)
+        return (uint64)-EINVAL;
+    return (uint64)-EOPNOTSUPP;
+}
+
 #define LINUX_PERSONALITY_QUERY 0xffffffffUL
 
 uint64 sys_personality(void)
@@ -1301,6 +1626,641 @@ uint64 sys_restart_syscall(void)
     return (uint64)-EINTR;
 }
 
+/* ================================================================== */
+/*  ptrace                                                            */
+/* ================================================================== */
+
+#define PTRACE_TRACEME      0
+#define PTRACE_PEEKTEXT     1
+#define PTRACE_PEEKDATA     2
+#define PTRACE_PEEKUSR      3
+#define PTRACE_POKETEXT     4
+#define PTRACE_POKEDATA     5
+#define PTRACE_CONT         7
+#define PTRACE_ATTACH       16
+#define PTRACE_DETACH       17
+#define PTRACE_SETOPTIONS   0x4200
+#define PTRACE_GETEVENTMSG  0x4201
+#define PTRACE_GETSIGINFO   0x4202
+#define PTRACE_GETREGSET    0x4204
+#define PTRACE_SEIZE        0x4206
+#define PTRACE_INTERRUPT    0x4207
+
+#define PTRACE_O_MASK       0x003000ffUL
+#define NT_PRSTATUS         1
+#define NT_FPREGSET         2
+
+struct ptrace_iovec {
+    uint64 iov_base;
+    uint64 iov_len;
+};
+
+struct ptrace_x86_user_regs {
+    uint64 r15;
+    uint64 r14;
+    uint64 r13;
+    uint64 r12;
+    uint64 rbp;
+    uint64 rbx;
+    uint64 r11;
+    uint64 r10;
+    uint64 r9;
+    uint64 r8;
+    uint64 rax;
+    uint64 rcx;
+    uint64 rdx;
+    uint64 rsi;
+    uint64 rdi;
+    uint64 orig_rax;
+    uint64 rip;
+    uint64 cs;
+    uint64 eflags;
+    uint64 rsp;
+    uint64 ss;
+    uint64 fs_base;
+    uint64 gs_base;
+    uint64 ds;
+    uint64 es;
+    uint64 fs;
+    uint64 gs;
+};
+
+static int ptrace_trace_caller(void)
+{
+    if (current == NULL)
+        return 0;
+    if (!chrome_trace_value_enabled("chrome_ptrace_trace") &&
+        !chrome_trace_value_enabled("chrome_syscall_trace"))
+        return 0;
+    return strstr(current->name, "chrome") != NULL ||
+           strstr(current->name, "crashpad") != NULL ||
+           chrome_lifecycle_thread_match(current);
+}
+
+static void ptrace_trace_result(int request, int pid, uint64 addr, uint64 data,
+                                int ret)
+{
+    struct thread_group *ctg = current != NULL ? current->thread_group : NULL;
+    struct thread *target = NULL;
+    struct thread_group *ttg = NULL;
+    int target_state = -1;
+    int target_pid = 0;
+    int target_tgid = 0;
+    int target_tracer_tgid = 0;
+    int target_dumpable = -1;
+    int target_uid = -1;
+    int target_euid = -1;
+    int current_uid = ctg != NULL ? ctg->uid : -1;
+    int current_euid = ctg != NULL ? ctg->euid : -1;
+    int current_tgid = current != NULL ? thread_tgid(current) : -1;
+    const char *target_name = "?";
+    int target_is_chrome = 0;
+
+    if (!ptrace_trace_caller())
+        return;
+
+    pid_rlock();
+    if (pid > 0 && get_pid_thread(pid, &target) == 0 && target != NULL) {
+        ttg = target->thread_group;
+        target_pid = target->pid;
+        target_tgid = target->tgid;
+        target_name = target->name;
+        target_state = __thread_state_get(target);
+        target_tracer_tgid = target->ptrace_tracer_tgid;
+        if (ttg != NULL) {
+            target_dumpable =
+                __atomic_load_n(&ttg->dumpable, __ATOMIC_ACQUIRE);
+            target_uid = ttg->uid;
+            target_euid = ttg->euid;
+        }
+        target_is_chrome = chrome_lifecycle_thread_match(target);
+    }
+
+    printf("ptrace: request=%d pid=%d addr=0x%lx data=0x%lx ret=%d "
+           "caller='%s' caller_pid=%d caller_tgid=%d uid=%d euid=%d "
+           "target='%s' target_pid=%d target_tgid=%d state=%d "
+           "tracer_tgid=%d dumpable=%d target_uid=%d target_euid=%d "
+           "target_chrome=%d\n",
+           request, pid, addr, data, ret, current ? current->name : "?",
+           current ? current->pid : -1, current_tgid, current_uid,
+           current_euid, target_name, target_pid, target_tgid, target_state,
+           target_tracer_tgid, target_dumpable, target_uid, target_euid,
+           target_is_chrome);
+    pid_runlock();
+}
+
+static int ptrace_signal_valid(uint64 signo)
+{
+    return signo == 0 || (signo > 0 && signo <= NSIG);
+}
+
+static int ptrace_may_access(struct thread *target)
+{
+    struct thread_group *sender_tg;
+    struct thread_group *target_tg;
+
+    if (current == NULL || target == NULL || target == current)
+        return 0;
+    if (current->thread_group == target->thread_group)
+        return 0;
+    sender_tg = current->thread_group;
+    target_tg = target->thread_group;
+    if (sender_tg == NULL || target_tg == NULL || target_tg->is_kernel)
+        return 0;
+    if (sender_tg->euid == 0)
+        return 1;
+    if (__atomic_load_n(&target_tg->dumpable, __ATOMIC_ACQUIRE) == 0)
+        return 0;
+    return sender_tg->uid == target_tg->uid ||
+           sender_tg->uid == target_tg->suid ||
+           sender_tg->euid == target_tg->uid ||
+           sender_tg->euid == target_tg->suid;
+}
+
+static int ptrace_find_target(int pid, struct thread **out)
+{
+    struct thread *target = NULL;
+
+    if (out == NULL)
+        return -EINVAL;
+    *out = NULL;
+    if (pid <= 0)
+        return -ESRCH;
+    if (get_pid_thread(pid, &target) != 0 || target == NULL)
+        return -ESRCH;
+    if (__thread_state_get(target) == THREAD_UNUSED ||
+        __thread_state_get(target) == THREAD_ZOMBIE)
+        return -ESRCH;
+    *out = target;
+    return 0;
+}
+
+static int ptrace_is_tracer(struct thread *target)
+{
+    if (current == NULL || target == NULL)
+        return 0;
+    return target->ptrace_tracer_tgid == thread_tgid(current);
+}
+
+static int ptrace_send_thread_signal(struct thread *target, int signo)
+{
+    ksiginfo_t info = {0};
+
+    if (signo == 0)
+        return 0;
+    info.signo = signo;
+    info.sender = current;
+    info.info.si_pid = current != NULL ? thread_tgid(current) : 0;
+    return __signal_send(target, &info);
+}
+
+static int ptrace_attach_common(int pid, int seize)
+{
+    struct thread *target = NULL;
+    int parent_listed = 0;
+    int ret;
+
+    pid_wlock();
+    ret = ptrace_find_target(pid, &target);
+    if (ret != 0)
+        goto out;
+    if (!ptrace_may_access(target)) {
+        ret = -EPERM;
+        goto out;
+    }
+    if (target->ptrace_tracer != NULL) {
+        ret = -EBUSY;
+        goto out;
+    }
+
+    target->ptrace_tracer = current;
+    target->ptrace_tracer_tgid = thread_tgid(current);
+    target->ptrace_real_parent_pid =
+        target->parent != NULL ? target->parent->pid : 0;
+    target->ptrace_real_parent_seq =
+        target->parent != NULL ? target->parent->pid_seq : 0;
+    parent_listed =
+        target->parent != NULL && !LIST_ENTRY_IS_DETACHED(&target->siblings);
+    target->ptrace_real_parent_listed = parent_listed;
+    target->ptrace_options = 0;
+
+    if (target->parent != current) {
+        if (parent_listed)
+            detach_child(target->parent, target);
+        else
+            target->parent = NULL;
+        attach_child(current, target);
+    }
+out:
+    pid_wunlock();
+    if (ret == 0 && !seize)
+        ret = ptrace_send_thread_signal(target, SIGSTOP);
+    return ret;
+}
+
+static int ptrace_set_options(int pid, uint64 options)
+{
+    struct thread *target = NULL;
+    int ret;
+
+    pid_rlock();
+    ret = ptrace_find_target(pid, &target);
+    if (ret == 0 && !ptrace_is_tracer(target))
+        ret = -ESRCH;
+    if (ret == 0)
+        target->ptrace_options = options;
+    pid_runlock();
+    return ret;
+}
+
+static struct thread *ptrace_restore_parent_locked(struct thread *target)
+{
+    struct thread *parent = NULL;
+
+    if (target == NULL)
+        return NULL;
+    if (target->ptrace_real_parent_pid > 0 &&
+        get_pid_thread(target->ptrace_real_parent_pid, &parent) == 0 &&
+        parent != NULL &&
+        parent->pid_seq == target->ptrace_real_parent_seq &&
+        __thread_state_get(parent) != THREAD_UNUSED &&
+        __thread_state_get(parent) != THREAD_ZOMBIE) {
+        return parent;
+    }
+    return __proctab_get_initproc();
+}
+
+static int ptrace_detach_common(int pid, uint64 signo)
+{
+    struct thread *target = NULL;
+    struct thread *restore_parent;
+    int wake_stopped = 0;
+    int ret;
+
+    if (!ptrace_signal_valid(signo))
+        return -EINVAL;
+
+    pid_wlock();
+    ret = ptrace_find_target(pid, &target);
+    if (ret != 0)
+        goto out;
+    if (!ptrace_is_tracer(target)) {
+        ret = -ESRCH;
+        goto out;
+    }
+
+    restore_parent = ptrace_restore_parent_locked(target);
+    if (restore_parent == NULL) {
+        ret = -ESRCH;
+        goto out;
+    }
+    if (target->parent != restore_parent) {
+        if (target->parent != NULL && !LIST_ENTRY_IS_DETACHED(&target->siblings))
+            detach_child(target->parent, target);
+        else
+            target->parent = NULL;
+        if (target->ptrace_real_parent_listed)
+            attach_child(restore_parent, target);
+        else
+            target->parent = restore_parent;
+    }
+
+    target->ptrace_tracer = NULL;
+    target->ptrace_tracer_tgid = 0;
+    target->ptrace_real_parent_pid = 0;
+    target->ptrace_real_parent_seq = 0;
+    target->ptrace_real_parent_listed = 0;
+    target->ptrace_options = 0;
+    wake_stopped = THREAD_STOPPED(target);
+out:
+    pid_wunlock();
+
+    if (ret == 0) {
+        if (wake_stopped)
+            scheduler_wakeup_stopped(target);
+        ret = ptrace_send_thread_signal(target, (int)signo);
+    }
+    return ret;
+}
+
+static int ptrace_continue_common(int pid, uint64 signo)
+{
+    struct thread *target = NULL;
+    int wake_stopped = 0;
+    int ret;
+
+    if (!ptrace_signal_valid(signo))
+        return -EINVAL;
+
+    pid_rlock();
+    ret = ptrace_find_target(pid, &target);
+    if (ret == 0 && !ptrace_is_tracer(target))
+        ret = -ESRCH;
+    if (ret == 0)
+        wake_stopped = THREAD_STOPPED(target);
+    pid_runlock();
+
+    if (ret != 0)
+        return ret;
+    if (wake_stopped)
+        scheduler_wakeup_stopped(target);
+    return ptrace_send_thread_signal(target, (int)signo);
+}
+
+static void ptrace_fill_x86_regs(struct thread *target,
+                                 struct ptrace_x86_user_regs *regs)
+{
+    memset(regs, 0, sizeof(*regs));
+#ifdef __x86_64__
+    if (target == NULL || target->trapframe == NULL)
+        return;
+    struct trapframe *tf = &target->trapframe->trapframe;
+    regs->r15 = tf->r15;
+    regs->r14 = tf->r14;
+    regs->r13 = tf->r13;
+    regs->r12 = tf->r12;
+    regs->rbp = tf->rbp;
+    regs->rbx = tf->rbx;
+    regs->r11 = tf->r11;
+    regs->r10 = tf->r10;
+    regs->r9 = tf->r9;
+    regs->r8 = tf->r8;
+    regs->rax = tf->rax;
+    regs->rcx = tf->rcx;
+    regs->rdx = tf->rdx;
+    regs->rsi = tf->rsi;
+    regs->rdi = tf->rdi;
+    regs->orig_rax = tf->rax;
+    regs->rip = tf->rip;
+    regs->cs = tf->cs;
+    regs->eflags = tf->rflags;
+    regs->rsp = tf->rsp;
+    regs->ss = tf->ss;
+    regs->fs_base = 0;
+    regs->gs_base = target->trapframe->user_gs_base;
+#endif
+}
+
+static int ptrace_require_stopped(struct thread *target)
+{
+    if (!ptrace_is_tracer(target))
+        return -ESRCH;
+    if (!THREAD_STOPPED(target))
+        return -EBUSY;
+    return 0;
+}
+
+static int ptrace_getregs(int pid, uint64 data)
+{
+    struct thread *target = NULL;
+    struct ptrace_x86_user_regs regs;
+    int ret;
+
+    if (data == 0)
+        return -EFAULT;
+    pid_rlock();
+    ret = ptrace_find_target(pid, &target);
+    if (ret == 0)
+        ret = ptrace_require_stopped(target);
+    if (ret == 0)
+        ptrace_fill_x86_regs(target, &regs);
+    pid_runlock();
+    if (ret != 0)
+        return ret;
+    return either_copyout(1, data, &regs, sizeof(regs)) < 0 ? -EFAULT : 0;
+}
+
+static int ptrace_getregset(int pid, uint64 addr, uint64 data)
+{
+    struct ptrace_iovec iov;
+    struct ptrace_x86_user_regs regs;
+    uint8 fpregs[X86_FPU_LEGACY_SIZE];
+    struct thread *target = NULL;
+    uint64 copy_len;
+    int ret;
+
+    if (addr != NT_PRSTATUS && addr != NT_FPREGSET)
+        return -EINVAL;
+    if (data == 0)
+        return -EFAULT;
+    if (either_copyin(&iov, 1, data, sizeof(iov)) < 0)
+        return -EFAULT;
+    if (iov.iov_base == 0)
+        return -EFAULT;
+
+    pid_rlock();
+    ret = ptrace_find_target(pid, &target);
+    if (ret == 0)
+        ret = ptrace_require_stopped(target);
+    if (ret == 0) {
+        if (addr == NT_PRSTATUS) {
+            ptrace_fill_x86_regs(target, &regs);
+        } else {
+            memset(fpregs, 0, sizeof(fpregs));
+            if (target->fpu_state != NULL) {
+                if (mycpu()->fpu_owner_tid == target->pid &&
+                    target->fpu_seq == mycpu()->fpu_seq)
+                    fpu_save_state(target->fpu_state);
+                memmove(fpregs, target->fpu_state, sizeof(fpregs));
+            }
+        }
+    }
+    pid_runlock();
+    if (ret != 0)
+        return ret;
+
+    if (addr == NT_PRSTATUS)
+        copy_len = iov.iov_len < sizeof(regs) ? iov.iov_len : sizeof(regs);
+    else
+        copy_len = iov.iov_len < sizeof(fpregs) ? iov.iov_len : sizeof(fpregs);
+    if (copy_len != 0 &&
+        either_copyout(1, iov.iov_base,
+                       addr == NT_PRSTATUS ? (void *)&regs : (void *)fpregs,
+                       copy_len) < 0)
+        return -EFAULT;
+    iov.iov_len = copy_len;
+    return either_copyout(1, data, &iov, sizeof(iov)) < 0 ? -EFAULT : 0;
+}
+
+static int ptrace_peek(int request, int pid, uint64 addr, uint64 *out)
+{
+    struct ptrace_x86_user_regs regs;
+    struct thread *target = NULL;
+    vm_t *target_vm = NULL;
+    uint64 word = 0;
+    int ret;
+
+    if (out == NULL)
+        return -EINVAL;
+    pid_rlock();
+    ret = ptrace_find_target(pid, &target);
+    if (ret == 0)
+        ret = ptrace_require_stopped(target);
+    if (ret == 0 && request == PTRACE_PEEKUSR) {
+        if ((addr & (sizeof(uint64) - 1)) != 0 ||
+            addr >= sizeof(struct ptrace_x86_user_regs)) {
+            ret = -EIO;
+        } else {
+            ptrace_fill_x86_regs(target, &regs);
+            memcpy(&word, ((char *)&regs) + addr, sizeof(word));
+        }
+    } else if (ret == 0) {
+        target_vm = target->vm;
+        if (target_vm == NULL)
+            ret = -EIO;
+    }
+    pid_runlock();
+    if (ret == 0 && request != PTRACE_PEEKUSR &&
+        vm_copyin(target_vm, &word, addr, sizeof(word)) < 0)
+        ret = -EIO;
+    if (ret == 0)
+        *out = word;
+    return ret;
+}
+
+static int ptrace_poke(int pid, uint64 addr, uint64 data)
+{
+    struct thread *target = NULL;
+    vm_t *target_vm = NULL;
+    int ret;
+
+    pid_rlock();
+    ret = ptrace_find_target(pid, &target);
+    if (ret == 0)
+        ret = ptrace_require_stopped(target);
+    if (ret == 0) {
+        target_vm = target->vm;
+        if (target_vm == NULL)
+            ret = -EIO;
+    }
+    pid_runlock();
+    if (ret == 0 && vm_copyout(target_vm, addr, &data, sizeof(data)) < 0)
+        ret = -EIO;
+    return ret;
+}
+
+uint64 sys_ptrace(void)
+{
+    int request;
+    int pid;
+    uint64 addr;
+    uint64 data;
+    struct thread *target = NULL;
+    uint64 word = 0;
+    int ret = 0;
+
+    argint(0, &request);
+    argint(1, &pid);
+    argaddr(2, &addr);
+    argaddr(3, &data);
+
+    switch (request) {
+    case PTRACE_TRACEME:
+        if (current == NULL || current->parent == NULL) {
+            ptrace_trace_result(request, pid, addr, data, -EPERM);
+            return (uint64)-EPERM;
+        }
+        if (current->ptrace_tracer != NULL) {
+            ptrace_trace_result(request, pid, addr, data, -EPERM);
+            return (uint64)-EPERM;
+        }
+        current->ptrace_tracer = current->parent;
+        current->ptrace_tracer_tgid = thread_tgid(current->parent);
+        current->ptrace_real_parent_pid = current->parent->pid;
+        current->ptrace_real_parent_seq = current->parent->pid_seq;
+        current->ptrace_options = 0;
+        ptrace_trace_result(request, pid, addr, data, 0);
+        return 0;
+    case PTRACE_ATTACH:
+        ret = ptrace_attach_common(pid, 0);
+        break;
+    case PTRACE_SEIZE:
+        if ((data & ~PTRACE_O_MASK) != 0)
+            ret = -EINVAL;
+        else {
+            ret = ptrace_attach_common(pid, 1);
+            if (ret == 0)
+                ret = ptrace_set_options(pid, data);
+        }
+        break;
+    case PTRACE_DETACH:
+        ret = ptrace_detach_common(pid, data);
+        break;
+    case PTRACE_CONT:
+        ret = ptrace_continue_common(pid, data);
+        break;
+    case PTRACE_INTERRUPT:
+        pid_rlock();
+        ret = ptrace_find_target(pid, &target);
+        if (ret == 0 && !ptrace_is_tracer(target))
+            ret = -ESRCH;
+        pid_runlock();
+        if (ret == 0)
+            ret = ptrace_send_thread_signal(target, SIGSTOP);
+        break;
+    case PTRACE_SETOPTIONS:
+        if ((data & ~PTRACE_O_MASK) != 0) {
+            ret = -EINVAL;
+            break;
+        }
+        pid_rlock();
+        ret = ptrace_find_target(pid, &target);
+        if (ret == 0 && !ptrace_is_tracer(target))
+            ret = -ESRCH;
+        if (ret == 0)
+            target->ptrace_options = data;
+        pid_runlock();
+        break;
+    case PTRACE_GETEVENTMSG:
+        if (data == 0)
+            ret = -EFAULT;
+        else {
+            uint64 zero = 0;
+            ret = either_copyout(1, data, &zero, sizeof(zero)) < 0 ?
+                -EFAULT : 0;
+        }
+        break;
+    case PTRACE_GETSIGINFO:
+        if (data == 0) {
+            ret = -EFAULT;
+        } else {
+            char siginfo[128];
+            memset(siginfo, 0, sizeof(siginfo));
+            ret = either_copyout(1, data, siginfo, sizeof(siginfo)) < 0 ?
+                -EFAULT : 0;
+        }
+        break;
+    case PTRACE_GETREGSET:
+        ret = ptrace_getregset(pid, addr, data);
+        break;
+    case 12: /* PTRACE_GETREGS, x86-64 */
+        ret = ptrace_getregs(pid, data);
+        break;
+    case PTRACE_PEEKTEXT:
+    case PTRACE_PEEKDATA:
+    case PTRACE_PEEKUSR:
+        ret = ptrace_peek(request, pid, addr, &word);
+        if (ret == 0) {
+            ptrace_trace_result(request, pid, addr, data, 0);
+            return word;
+        }
+        break;
+    case PTRACE_POKETEXT:
+    case PTRACE_POKEDATA:
+        ret = ptrace_poke(pid, addr, data);
+        break;
+    default:
+        if (ptrace_trace_caller())
+            printf("ptrace: unsupported request=%d pid=%d addr=0x%lx data=0x%lx name=%s tgid=%d\n",
+                   request, pid, addr, data, current ? current->name : "?",
+                   current ? thread_tgid(current) : -1);
+        ret = -EIO;
+        break;
+    }
+    ptrace_trace_result(request, pid, addr, data, ret);
+    return (uint64)ret;
+}
+
 #define LINUX_PRIVILEGED_STUB(name) \
     uint64 sys_##name(void) { return (uint64)-EPERM; }
 
@@ -1310,7 +2270,6 @@ uint64 sys_restart_syscall(void)
 #define LINUX_NODEV_STUB(name) \
     uint64 sys_##name(void) { return (uint64)-ENODEV; }
 
-LINUX_PRIVILEGED_STUB(ptrace)
 LINUX_PRIVILEGED_STUB(syslog)
 LINUX_INVALID_STUB(uselib)
 LINUX_INVALID_STUB(ustat)
@@ -1386,13 +2345,8 @@ LINUX_PRIVILEGED_STUB(finit_module)
 LINUX_INVALID_STUB(seccomp)
 LINUX_PRIVILEGED_STUB(kexec_file_load)
 LINUX_PRIVILEGED_STUB(bpf)
-LINUX_INVALID_STUB(execveat)
 LINUX_INVALID_STUB(userfaultfd)
-LINUX_INVALID_STUB(pkey_mprotect)
-LINUX_INVALID_STUB(pkey_alloc)
-LINUX_INVALID_STUB(pkey_free)
 LINUX_INVALID_STUB(io_pgetevents)
-LINUX_INVALID_STUB(pidfd_send_signal)
 LINUX_INVALID_STUB(io_uring_setup)
 LINUX_INVALID_STUB(io_uring_enter)
 LINUX_INVALID_STUB(io_uring_register)
@@ -1402,23 +2356,15 @@ LINUX_INVALID_STUB(fsopen)
 LINUX_INVALID_STUB(fsconfig)
 LINUX_INVALID_STUB(fsmount)
 LINUX_INVALID_STUB(fspick)
-LINUX_INVALID_STUB(pidfd_open)
 LINUX_INVALID_STUB(pidfd_getfd)
 LINUX_INVALID_STUB(process_madvise)
 LINUX_PRIVILEGED_STUB(mount_setattr)
 LINUX_NODEV_STUB(quotactl_fd)
-LINUX_INVALID_STUB(landlock_create_ruleset)
-LINUX_INVALID_STUB(landlock_add_rule)
-LINUX_INVALID_STUB(landlock_restrict_self)
 LINUX_INVALID_STUB(memfd_secret)
 LINUX_INVALID_STUB(process_mrelease)
-LINUX_INVALID_STUB(futex_waitv)
 LINUX_INVALID_STUB(set_mempolicy_home_node)
 LINUX_INVALID_STUB(cachestat)
 LINUX_INVALID_STUB(map_shadow_stack)
-LINUX_INVALID_STUB(futex_wake)
-LINUX_INVALID_STUB(futex_wait)
-LINUX_INVALID_STUB(futex_requeue)
 LINUX_INVALID_STUB(statmount)
 LINUX_INVALID_STUB(listmount)
 LINUX_INVALID_STUB(lsm_get_self_attr)

@@ -619,6 +619,61 @@ void uvm_visit_present_leafs(pagetable_t pagetable, uvm_leaf_visitor_t visitor,
     __uvm_visit_present_leafs(pagetable, 3, 0, visitor, arg);
 }
 
+static int __uvm_visit_present_leaf_ptes(pagetable_t pagetable, int level,
+                                         uint64 base_va, uint64 start,
+                                         uint64 end,
+                                         uvm_leaf_pte_visitor_t visitor,
+                                         void *arg)
+{
+    static const int shift[] = {12, 21, 30, 39};
+    uint64 span = 1ULL << shift[level];
+
+    for (int i = 0; i < 512; i++) {
+        if (level == 3 && i >= 256)
+            break;
+
+        uint64 va = base_va | ((uint64)i << shift[level]);
+        uint64 next = va + span;
+        if (next <= start || va >= end)
+            continue;
+
+        pte_t *pte = &pagetable[i];
+        if ((*pte & PTE_V) == 0)
+            continue;
+
+        if (level > 0) {
+            if (level == 1 && (*pte & PTE_PS))
+                return visitor(va, HUGEPAGE_SIZE, pte, arg);
+
+            uint64 child = PTE2PA(*pte);
+            page_t *child_pg = __pa_to_page(child);
+            if (!PAGE_IS_TYPE(child_pg, PAGE_TYPE_PGTABLE))
+                continue;
+
+            int ret = __uvm_visit_present_leaf_ptes((pagetable_t)child,
+                                                    level - 1, va, start, end,
+                                                    visitor, arg);
+            if (ret != 0)
+                return ret;
+        } else {
+            int ret = visitor(va, PGSIZE, pte, arg);
+            if (ret != 0)
+                return ret;
+        }
+    }
+    return 0;
+}
+
+int uvm_visit_present_leaf_ptes(pagetable_t pagetable, uint64 start,
+                                uint64 end, uvm_leaf_pte_visitor_t visitor,
+                                void *arg)
+{
+    if (pagetable == NULL || visitor == NULL || start >= end)
+        return 0;
+    return __uvm_visit_present_leaf_ptes(pagetable, 3, 0, start, end,
+                                         visitor, arg);
+}
+
 static void __freewalk(pagetable_t pagetable, int level, uint64 base_va)
 {
     /* Bits per level: PT=12, PD=21, PDPT=30, PML4=39 */

@@ -38,6 +38,7 @@
 #include <mm/folio.h>
 #include <smp/percpu.h>
 #include <smp/atomic.h>
+#include "proc/sched.h"
 #include "list.h"
 #include "lock/spinlock.h"
 #include "lock/rwsem.h"
@@ -84,6 +85,148 @@ static int webkit_mremap_trace_process(void)
                    r_time(), current != NULL ? current->pid : -1,             \
                    current != NULL ? current->name : "?", ##__VA_ARGS__);     \
     } while (0)
+
+static uint64 vm_trace_parse_u64(const char *key, uint64 fallback)
+{
+    char value[32];
+
+    if (cmdline_get_param(key, value, sizeof(value)) != 0 || value[0] == '\0')
+        return fallback;
+    return strtoul(value, NULL, 10);
+}
+
+static int vm_mprotect_trace_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+
+    if (cached == -1) {
+        cached = cmdline_get_param("vm_mprotect_trace", value,
+                                   sizeof(value)) == 0 && value[0] != '0';
+    }
+    return cached;
+}
+
+static uint64 vm_mprotect_trace_threshold_ms(void)
+{
+    static uint64 threshold;
+
+    if (threshold == 0)
+        threshold = vm_trace_parse_u64("vm_mprotect_trace_ms", 100);
+    return threshold;
+}
+
+static uint64 vm_mprotect_trace_limit(void)
+{
+    static uint64 limit;
+
+    if (limit == 0)
+        limit = vm_trace_parse_u64("vm_mprotect_trace_limit", 128);
+    return limit;
+}
+
+static int vm_mprotect_trace_take_slot(void)
+{
+    static uint64 emitted;
+    uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
+
+    return slot < vm_mprotect_trace_limit();
+}
+
+static int vm_copy_trace_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+
+    if (cached == -1) {
+        cached = cmdline_get_param("vm_copy_trace", value,
+                                   sizeof(value)) == 0 && value[0] != '0';
+    }
+    return cached;
+}
+
+static uint64 vm_copy_trace_threshold_ms(void)
+{
+    static uint64 threshold;
+
+    if (threshold == 0)
+        threshold = vm_trace_parse_u64("vm_copy_trace_ms", 100);
+    return threshold;
+}
+
+static uint64 vm_copy_trace_limit(void)
+{
+    static uint64 limit;
+
+    if (limit == 0)
+        limit = vm_trace_parse_u64("vm_copy_trace_limit", 64);
+    return limit;
+}
+
+static int vm_copy_trace_take_slot(void)
+{
+    static uint64 emitted;
+    uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
+
+    return slot < vm_copy_trace_limit();
+}
+
+static int vm_file_fault_trace_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+
+    if (cached == -1) {
+        cached = cmdline_get_param("vm_file_fault_trace", value,
+                                   sizeof(value)) == 0 && value[0] != '0';
+    }
+    return cached;
+}
+
+static uint64 vm_file_fault_trace_threshold_ms(void)
+{
+    static uint64 threshold;
+
+    if (threshold == 0)
+        threshold = vm_trace_parse_u64("vm_file_fault_trace_ms", 100);
+    return threshold;
+}
+
+static uint64 vm_file_fault_trace_limit(void)
+{
+    static uint64 limit;
+
+    if (limit == 0)
+        limit = vm_trace_parse_u64("vm_file_fault_trace_limit", 128);
+    return limit;
+}
+
+static int vm_file_fault_trace_take_slot(void)
+{
+    static uint64 emitted;
+    uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
+
+    return slot < vm_file_fault_trace_limit();
+}
+
+struct vm_copy_trace_stats {
+    uint64 vmas_seen;
+    uint64 vmas_copied;
+    uint64 dontfork_vmas;
+    uint64 file_vmas;
+    uint64 shared_vmas;
+    uint64 wipe_vmas;
+    uint64 span_pages;
+    uint64 pte_walks;
+    uint64 present_4k;
+    uint64 huge_entries;
+    uint64 resident_pages;
+    uint64 wrprotect_pages;
+    uint64 page_refs;
+    uint64 rmap_updates;
+    uint64 anon_prepares;
+    uint64 anon_forks;
+};
 
 /*
  * Default compound order for anonymous folio allocation during demand faults.
@@ -549,7 +692,122 @@ static void __vma_set_free(vma_t *vma)
     vma->pgoff = 0;
 }
 
-static int __vma_copy(vma_t *dst, vma_t *src)
+struct vma_copy_leaf_ctx {
+    vma_t *dst;
+    vma_t *src;
+    int is_shared;
+    int src_tlb_flush_needed;
+    struct vm_copy_trace_stats *trace_stats;
+};
+
+static int __vma_copy_present_leaf(uint64 va, uint64 size, pte_t *src_pte,
+                                   void *arg)
+{
+    struct vma_copy_leaf_ctx *ctx = arg;
+    vma_t *dst = ctx->dst;
+    vma_t *src = ctx->src;
+    int is_shared = ctx->is_shared;
+    struct vm_copy_trace_stats *trace_stats = ctx->trace_stats;
+    pagetable_t pgtb_dst = dst->vm->pagetable;
+
+    if (trace_stats != NULL)
+        trace_stats->pte_walks++;
+    if (src_pte == NULL || !pte_present(src_pte))
+        return 0;
+    if (va < src->start || va + size > src->end)
+        return -EINVAL;
+
+    if (pte_is_hugepage(src_pte)) {
+        if (size != HUGEPAGE_SIZE)
+            return -EINVAL;
+        pte_t *dst_pmd = walk_pmd(pgtb_dst, va, 1);
+        if (dst_pmd == NULL)
+            return -ENOMEM;
+        if (*dst_pmd != 0)
+            return -ENOMEM;
+
+        int was_writable = pte_write(src_pte);
+        if (is_shared) {
+            *dst_pmd = *src_pte;
+        } else {
+            if (was_writable) {
+                pte_wrprotect(src_pte);
+                ctx->src_tlb_flush_needed = 1;
+            }
+            *dst_pmd = *src_pte;
+        }
+
+        uint64 pa = pte_pa(src_pte);
+        assert(page_ref_inc((void *)pa) > 0,
+               "__vma_copy: hugepage refcnt should be > 0");
+        if (trace_stats != NULL) {
+            trace_stats->huge_entries++;
+            trace_stats->resident_pages += HUGEPAGE_SIZE / PGSIZE;
+            trace_stats->page_refs++;
+            if (!is_shared && was_writable)
+                trace_stats->wrprotect_pages += HUGEPAGE_SIZE / PGSIZE;
+        }
+        vm_account_resident_add(dst, HUGEPAGE_SIZE / PGSIZE);
+
+        page_t *pg = __pa_to_page(pa);
+        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) && !is_shared) {
+            if (page_mapcount(pg) == 0)
+                page_add_anon_rmap(pg, src, va);
+            page_add_anon_rmap(pg, dst, va);
+            if (trace_stats != NULL)
+                trace_stats->rmap_updates += 2;
+        }
+        return 0;
+    }
+
+    if (size != PGSIZE)
+        return -EINVAL;
+    if (pte_nonleaf(src_pte))
+        panic("__vma_copy: not a leaf");
+
+    pte_t *new_pte = walk(pgtb_dst, va, 1, NULL, NULL);
+    if (new_pte == NULL)
+        return -ENOMEM;
+    if (*new_pte != 0)
+        return -ENOMEM;
+
+    int was_writable = pte_write(src_pte);
+    if (is_shared) {
+        *new_pte = *src_pte;
+    } else {
+        /* COW is detected via mapcount > 1 at fault time. */
+        if (was_writable) {
+            pte_wrprotect(src_pte);
+            ctx->src_tlb_flush_needed = 1;
+        }
+        *new_pte = *src_pte;
+    }
+
+    uint64 pa = pte_pa(src_pte);
+    assert(page_ref_inc((void *)pa) > 0,
+           "__vma_copy: page refcnt should be greater than 0");
+    if (trace_stats != NULL) {
+        trace_stats->present_4k++;
+        trace_stats->resident_pages++;
+        trace_stats->page_refs++;
+        if (!is_shared && was_writable)
+            trace_stats->wrprotect_pages++;
+    }
+    vm_account_resident_add(dst, 1);
+
+    page_t *pg = __pa_to_page(pa);
+    if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) && !is_shared) {
+        if (page_mapcount(pg) == 0)
+            page_add_anon_rmap(pg, src, va);
+        page_add_anon_rmap(pg, dst, va);
+        if (trace_stats != NULL)
+            trace_stats->rmap_updates += 2;
+    }
+    return 0;
+}
+
+static int __vma_copy(vma_t *dst, vma_t *src,
+                      struct vm_copy_trace_stats *trace_stats)
 {
     if (dst == NULL || src == NULL)
         return -EINVAL;
@@ -572,7 +830,15 @@ static int __vma_copy(vma_t *dst, vma_t *src)
 
     int is_shared = (src->flags & VMA_FLAG_SHARED) != 0;
     int wipe_on_fork = (src->flags & VMA_FLAG_WIPEONFORK) != 0;
-    int src_tlb_flush_needed = 0;
+    if (trace_stats != NULL) {
+        trace_stats->span_pages += VMA_SIZE(src) / PGSIZE;
+        if (src->file != NULL)
+            trace_stats->file_vmas++;
+        if (is_shared)
+            trace_stats->shared_vmas++;
+        if (wipe_on_fork)
+            trace_stats->wipe_vmas++;
+    }
 
     /* For non-shared (COW) VMAs, ensure the parent has an anon_vma before
      * we enter the PTE loop.  This is required so that:
@@ -584,110 +850,26 @@ static int __vma_copy(vma_t *dst, vma_t *src)
         int ret = anon_vma_prepare(src);
         if (ret != 0)
             return ret;
+        if (trace_stats != NULL)
+            trace_stats->anon_prepares++;
     }
 
-    {
-        pagetable_t pgtb_src = src->vm->pagetable;
-        pagetable_t pgtb_dst = dst->vm->pagetable;
-        if (wipe_on_fork)
-            goto skip_pte_copy;
-        for (uint64 a = src->start; a < src->end; a += PGSIZE) {
-            pte_t *src_pte = walk(pgtb_src, a, 0, NULL, NULL);
-            if (src_pte == NULL || *src_pte == 0)
-                continue;
-
-            /* ---- 2 MB hugepage PTE at level 1 ----
-             * File-backed MAP_PRIVATE hugepages are PAGE_TYPE_ANON.
-             * Fork COW: write-protect in both parent and child,
-             * bump refcount.  On write fault, __vma_validate_pte_rxw
-             * copies the entire 2 MB folio (no splitting). */
-            if (pte_is_hugepage(src_pte)) {
-                if (!pte_present(src_pte))
-                    goto hugepage_skip;
-                pte_t *dst_pmd = walk_pmd(pgtb_dst, a, 1);
-                if (dst_pmd == NULL) {
-                    __vma_set_free(dst);
-                    return -ENOMEM;
-                }
-                if (*dst_pmd != 0) {
-                    __vma_set_free(dst);
-                    return -ENOMEM;
-                }
-                if (is_shared) {
-                    *dst_pmd = *src_pte;
-                } else {
-                    if (pte_write(src_pte)) {
-                        pte_wrprotect(src_pte);
-                        src_tlb_flush_needed = 1;
-                    }
-                    *dst_pmd = *src_pte;
-                }
-                uint64 pa = pte_pa(src_pte);
-                assert(page_ref_inc((void *)pa) > 0,
-                       "__vma_copy: hugepage refcnt should be > 0");
-                vm_account_resident_add(dst, HUGEPAGE_SIZE / PGSIZE);
-                page_t *pg = __pa_to_page(pa);
-                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
-                    !is_shared) {
-                    if (page_mapcount(pg) == 0)
-                        page_add_anon_rmap(pg, src, a);
-                    page_add_anon_rmap(pg, dst, a);
-                }
-hugepage_skip:
-                /* Advance to end of this 2 MB region. */
-                {
-                    uint64 next = (a & HUGEPAGE_MASK) + HUGEPAGE_SIZE;
-                    if (next > a + PGSIZE)
-                        a = next - PGSIZE;
-                }
-                continue;
-            }
-
-            /* ---- regular 4 KB PTE ---- */
-            if (pte_nonleaf(src_pte))
-                panic("__vma_copy: not a leaf");
-            if (!pte_present(src_pte))
-                continue;
-            pte_t *new_pte = walk(pgtb_dst, a, 1, NULL, NULL);
-            if (new_pte == NULL) {
-                __vma_set_free(dst);
-                return -ENOMEM;
-            }
-            if (is_shared) {
-                *new_pte = *src_pte;
-            } else {
-                /* COW: clear write on both, no PTE_RSW_w needed —
-                 * COW is detected via mapcount > 1 at fault time. */
-                if (pte_write(src_pte)) {
-                    pte_wrprotect(src_pte);
-                    src_tlb_flush_needed = 1;
-                }
-                *new_pte = *src_pte;
-            }
-            uint64 pa = pte_pa(src_pte);
-            assert(page_ref_inc((void *)pa) > 0,
-                   "__vma_copy: page refcnt should be greater than 0");
-            vm_account_resident_add(dst, 1);
-            page_t *pg = __pa_to_page(pa);
-            /* Only bump mapcount for HEAD pages (PAGE_TYPE_ANON).
-             * Tail pages must be skipped — their anon union stores
-             * head_page, not mapcount.  Each folio has exactly one
-             * head PTE, so mapcount stays balanced (one inc per fork
-             * per folio). */
-            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) && !is_shared) {
-                /* The parent's folios (e.g. from exec→mappages) may
-                 * never have had rmap set up, so mapcount could be 0.
-                 * Bump for both parent and child so that COW check
-                 * (mapcount > 1) fires correctly. */
-                if (page_mapcount(pg) == 0)
-                    page_add_anon_rmap(pg, src, a);
-                page_add_anon_rmap(pg, dst, a);
-            }
+    if (!wipe_on_fork) {
+        struct vma_copy_leaf_ctx ctx = {
+            .dst = dst,
+            .src = src,
+            .is_shared = is_shared,
+            .trace_stats = trace_stats,
+        };
+        int ret = uvm_visit_present_leaf_ptes(src->vm->pagetable, src->start,
+                                              src->end,
+                                              __vma_copy_present_leaf, &ctx);
+        if (ret != 0) {
+            __vma_set_free(dst);
+            return ret;
         }
-        if (src_tlb_flush_needed)
+        if (ctx.src_tlb_flush_needed)
             vm_remote_sfence_range(src->vm, src->start, VMA_SIZE(src));
-skip_pte_copy:
-        ;
     }
 
     /* Set up anon_vma chain for the child VMA. */
@@ -697,6 +879,8 @@ skip_pte_copy:
             __vma_set_free(dst);
             return ret;
         }
+        if (trace_stats != NULL)
+            trace_stats->anon_forks++;
     }
 
     return 0;
@@ -973,7 +1157,12 @@ vm_t *vm_init(void)
     }
 
     spin_init(&vm->spinlock, "vm_pgtable_lock");
-    rwsem_init(&vm->rw_lock, RWLOCK_PRIO_READ, "vm_rw_lock");
+    /*
+     * User VM readers are frequent during copyin/copyout, procfs scans, and
+     * page-fault validation.  Prefer queued writers so mmap/munmap/madvise
+     * cannot starve behind a steady stream of short readers.
+     */
+    rwsem_init(&vm->rw_lock, RWLOCK_PRIO_WRITE, "vm_rw_lock");
     vm->refcount = 1;
     vm->vm_bottom = UVMBOTTOM;
     vm->vm_top = UVMTOP;
@@ -1069,16 +1258,35 @@ vm_t *vm_copy(vm_t *src)
 {
     if (src == NULL)
         return ERR_PTR(-EINVAL);
+    int trace = vm_copy_trace_enabled();
+    uint64 trace_start_ms = trace ? sched_timer_now_ms() : 0;
+    uint64 trace_t = trace_start_ms;
+    uint64 trace_init_ms = 0;
+    uint64 trace_lock_ms = 0;
+    uint64 trace_alloc_ms = 0;
+    uint64 trace_copy_ms = 0;
+    struct vm_copy_trace_stats trace_stats = {0};
+
     vm_t *dst = vm_init();
     if (dst == NULL)
         return ERR_PTR(-ENOMEM);
+    if (trace) {
+        trace_init_ms = sched_timer_now_ms() - trace_t;
+        trace_t = sched_timer_now_ms();
+    }
     vm_rlock(src);
     vm_wlock(dst);
+    if (trace) {
+        trace_lock_ms = sched_timer_now_ms() - trace_t;
+        trace_t = sched_timer_now_ms();
+    }
     void *mt_entry;
     vma_t *last_vma = NULL;  /* duplicate detection for partial mtree_store_range */
     uint64 cursor = src->vm_bottom;
     while ((mt_entry = vm_tree_next_slot(src, &cursor, NULL, NULL)) != NULL) {
         vma_t *vma = (vma_t *)mt_entry;
+        if (trace)
+            trace_stats.vmas_seen++;
 
         /* Skip duplicate: a prior partial mtree_store_range can leave
          * the same VMA pointer in two disjoint maple tree ranges.
@@ -1088,10 +1296,16 @@ vm_t *vm_copy(vm_t *src)
         if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC)
             continue;
         last_vma = vma;
-        if (vma->flags & VMA_FLAG_DONTFORK)
+        if (vma->flags & VMA_FLAG_DONTFORK) {
+            if (trace)
+                trace_stats.dontfork_vmas++;
             continue;
+        }
 
+        uint64 stage_ms = trace ? sched_timer_now_ms() : 0;
         vma_t *new_vma = vma_alloc(dst, vma->start, VMA_SIZE(vma), vma->flags);
+        if (trace)
+            trace_alloc_ms += sched_timer_now_ms() - stage_ms;
         if (new_vma == NULL) {
             /* If vma_alloc failed because the range already exists in dst,
              * this is a non-consecutive duplicate from a partial
@@ -1113,6 +1327,8 @@ vm_t *vm_copy(vm_t *src)
             vm_put(dst);
             return ERR_PTR(-ENOMEM);
         }
+        if (trace)
+            trace_stats.vmas_copied++;
         if (vma == src->stack) {
             dst->stack = new_vma;
             dst->stack_size = src->stack_size;
@@ -1121,16 +1337,44 @@ vm_t *vm_copy(vm_t *src)
             dst->heap_size = src->heap_size;
             dst->heap_reserve_end = src->heap_reserve_end;
         }
-        if (__vma_copy(new_vma, vma) != 0) {
+        stage_ms = trace ? sched_timer_now_ms() : 0;
+        if (__vma_copy(new_vma, vma, trace ? &trace_stats : NULL) != 0) {
             vm_runlock(src);
             vm_wunlock(dst);
             vm_put(dst);
             return ERR_PTR(-ENOMEM);
         }
+        if (trace)
+            trace_copy_ms += sched_timer_now_ms() - stage_ms;
     }
 
     vm_runlock(src);
     vm_wunlock(dst);
+    if (trace) {
+        uint64 total_ms = sched_timer_now_ms() - trace_start_ms;
+        if (total_ms >= vm_copy_trace_threshold_ms() &&
+            vm_copy_trace_take_slot()) {
+            struct thread *self = current;
+            printf("vm-copy-trace: pid=%d tgid=%d name=%s total_ms=%lu "
+                   "init_ms=%lu lock_ms=%lu alloc_ms=%lu copy_ms=%lu "
+                   "vmas_seen=%lu vmas_copied=%lu dontfork=%lu file_vmas=%lu "
+                   "shared_vmas=%lu wipe_vmas=%lu span_pages=%lu pte_walks=%lu "
+                   "present_4k=%lu huge_entries=%lu resident_pages=%lu "
+                   "wrprotect_pages=%lu page_refs=%lu rmap_updates=%lu "
+                   "anon_prepares=%lu anon_forks=%lu\n",
+                   self ? self->pid : -1, self ? self->tgid : -1,
+                   self ? self->name : "-", total_ms, trace_init_ms,
+                   trace_lock_ms, trace_alloc_ms, trace_copy_ms,
+                   trace_stats.vmas_seen, trace_stats.vmas_copied,
+                   trace_stats.dontfork_vmas, trace_stats.file_vmas,
+                   trace_stats.shared_vmas, trace_stats.wipe_vmas,
+                   trace_stats.span_pages, trace_stats.pte_walks,
+                   trace_stats.present_4k, trace_stats.huge_entries,
+                   trace_stats.resident_pages, trace_stats.wrprotect_pages,
+                   trace_stats.page_refs, trace_stats.rmap_updates,
+                   trace_stats.anon_prepares, trace_stats.anon_forks);
+        }
+    }
     return dst;
 }
 
@@ -1146,7 +1390,7 @@ void vm_rlock(vm_t *vm) __acquires(vm)
     if (vm->is_kernel)
         spin_lock(&vm->spinlock);
     else
-        rwsem_acquire_read(&vm->rw_lock);
+        rwsem_acquire_read_caller(&vm->rw_lock, __builtin_return_address(0));
 #endif
 }
 void vm_runlock(vm_t *vm) __releases(vm)
@@ -1168,7 +1412,7 @@ void vm_wlock(vm_t *vm) __acquires(vm)
     if (vm->is_kernel)
         spin_lock(&vm->spinlock);
     else
-        rwsem_acquire_write(&vm->rw_lock);
+        rwsem_acquire_write_caller(&vm->rw_lock, __builtin_return_address(0));
 #endif
 }
 void vm_wunlock(vm_t *vm) __releases(vm)
@@ -1320,6 +1564,112 @@ vma_t *vma_split(vma_t *vma, uint64 va)
         __vma_free(new_vma);
         return NULL;
     }
+
+    return new_vma;
+}
+
+#define VM_SPLIT_KEEP_RIGHT_MAX (2ULL * 1024 * 1024)
+#define VM_SPLIT_KEEP_RIGHT_SKIP_BAD     1
+#define VM_SPLIT_KEEP_RIGHT_SKIP_ANON    2
+#define VM_SPLIT_KEEP_RIGHT_SKIP_SPECIAL 3
+#define VM_SPLIT_KEEP_RIGHT_SKIP_LARGE   4
+#define VM_SPLIT_KEEP_RIGHT_SKIP_ALLOC   5
+#define VM_SPLIT_KEEP_RIGHT_SKIP_FILE    6
+#define VM_SPLIT_KEEP_RIGHT_SKIP_STORE   7
+#define VM_SPLIT_KEEP_RIGHT_SKIP_RESTORE 8
+#define VM_SPLIT_KEEP_RIGHT_SKIP_RMAP    9
+
+static vma_t *vma_split_keep_right(vma_t *vma, uint64 va, int *skip_reason)
+{
+    if (skip_reason != NULL)
+        *skip_reason = 0;
+    if (vma == NULL || vma->vm == NULL) {
+        if (skip_reason != NULL)
+            *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_BAD;
+        return NULL;
+    }
+    if ((va & (PGSIZE - 1)) != 0 || va <= vma->start || va >= vma->end) {
+        if (skip_reason != NULL)
+            *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_BAD;
+        return NULL;
+    }
+
+    if (vma == vma->vm->stack || vma == vma->vm->heap) {
+        if (skip_reason != NULL)
+            *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_SPECIAL;
+        return NULL;
+    }
+
+    uint64 old_start = vma->start;
+    uint64 old_pgoff = vma->pgoff;
+    uint64 left_size = va - old_start;
+
+    if (left_size > VM_SPLIT_KEEP_RIGHT_MAX) {
+        if (skip_reason != NULL)
+            *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_LARGE;
+        return NULL;
+    }
+
+    vma_t *new_vma = __vma_alloc(vma->vm);
+    if (new_vma == NULL) {
+        if (skip_reason != NULL)
+            *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_ALLOC;
+        return NULL;
+    }
+
+    new_vma->start = old_start;
+    new_vma->end = va;
+    new_vma->flags = vma->flags;
+    if (vma->file != NULL) {
+        new_vma->file = vfs_fdup(vma->file);
+        if (new_vma->file == NULL) {
+            if (skip_reason != NULL)
+                *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_FILE;
+            __vma_free(new_vma);
+            return NULL;
+        }
+        new_vma->pgoff = old_pgoff;
+    } else {
+        new_vma->file = NULL;
+        new_vma->pgoff = 0;
+    }
+
+    if (vma->anon_vma != NULL && anon_vma_fork(new_vma, vma) != 0) {
+        if (skip_reason != NULL)
+            *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_RMAP;
+        if (new_vma->file != NULL)
+            vfs_fput(new_vma->file);
+        __vma_free(new_vma);
+        return NULL;
+    }
+
+    /*
+     * The tree already maps the original VMA over the right side.  Store only
+     * the new left range, then adjust the original VMA metadata after success.
+     */
+    if (__mt_store_vma(vma->vm, new_vma) != 0) {
+        int restore = mtree_store_range(&vma->vm->vm_mt, new_vma->start,
+                                        new_vma->end - 1, vma);
+        if (restore == 0) {
+            if (skip_reason != NULL)
+                *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_STORE;
+            if (new_vma->file != NULL)
+                vfs_fput(new_vma->file);
+            __vma_free(new_vma);
+        } else {
+            if (skip_reason != NULL)
+                *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_RESTORE;
+            printf("vma_split_keep_right: restore failed ret=%d "
+                   "range=[0x%lx-0x%lx]\n",
+                   restore, new_vma->start, new_vma->end);
+            return ERR_PTR(-ENOMEM);
+        }
+        return NULL;
+    }
+
+    vma->start = va;
+    if (vma->file != NULL)
+        vma->pgoff = old_pgoff + (va - old_start);
 
     return new_vma;
 }
@@ -1685,8 +2035,21 @@ fail:
 
 static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
 {
-    if (pte_write_ready(pte))
-        return 0;
+    if (pte_write_ready(pte)) {
+        page_t *pg = NULL;
+        page_t *pc_head = NULL;
+        if (pte_present(pte) && !pte_is_hugepage(pte)) {
+            pg = __pa_to_page(pte_pa(pte));
+            pc_head = page_pcache_head(pg);
+        }
+        /*
+         * A MAP_PRIVATE file page must never be writable while still backed
+         * directly by pcache.  If such a PTE exists from an older mapping path
+         * or permission transition, fall through to the pcache COW path below.
+         */
+        if (pc_head == NULL || (vma->flags & VMA_FLAG_SHARED))
+            return 0;
+    }
 
     /*
      * ---- 2 MB hugepage write-fault fast paths ----
@@ -1773,11 +2136,16 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
     if (pte_present(pte) && pte_write(pte) && !pte_dirty(pte)) {
         page_t *pg = __pa_to_page(pte_pa(pte));
         page_t *pc_head = page_pcache_head(pg);
-        if (pc_head != NULL)
+        if (pc_head != NULL && (vma->flags & VMA_FLAG_SHARED)) {
             pcache_mark_page_dirty(pc_head->pcache.pcache, pc_head);
-        pte_mkdirty(pte);
-        /* TLB flush deferred */
-        return 0;
+            pte_mkdirty(pte);
+            /* TLB flush deferred */
+            return 0;
+        } else if (pc_head == NULL) {
+            pte_mkdirty(pte);
+            /* TLB flush deferred */
+            return 0;
+        }
     }
 
     void *addr = (void *)pte_pa(pte);
@@ -1795,7 +2163,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
         /* PTEs and rmap already set up by __vma_map_anon_folio. */
         return 0;
     } else if (pte_present(pte)) {
-        /* Page present but not writable — check COW via mapcount. */
+        /* Page present but not write-ready — check COW via backing type. */
         page_t *old_page = __pa_to_page((uint64)addr);
         /* Resolve tail→head so we can check PAGE_TYPE_ANON and
          * mapcount on the compound head (tails use the same union
@@ -2457,6 +2825,199 @@ __do_pte_check:
     return 0;
 }
 
+/*
+ * Handle a single read fault on a file-backed VMA without holding the
+ * process-wide VM rwsem across blocking filesystem I/O.  The VMA is
+ * revalidated after I/O before the PTE is installed.
+ */
+int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
+{
+    uint64 fault_va = PGROUNDDOWN(va);
+    struct vfs_file *file = NULL;
+    struct pcache *pc = NULL;
+    page_t *pcpage = NULL;
+    uint64 file_off = 0;
+    int ret = -EAGAIN;
+    int trace = vm_file_fault_trace_enabled();
+    uint64 trace_start_ms = trace ? sched_timer_now_ms() : 0;
+    uint64 trace_t = trace_start_ms;
+    uint64 trace_lookup_ms = 0;
+    uint64 trace_get_ms = 0;
+    uint64 trace_read_ms = 0;
+    uint64 trace_relock_ms = 0;
+    uint64 trace_install_ms = 0;
+    uint64 trace_inode_size = 0;
+    uint64 trace_ino = 0;
+    int trace_before_uptodate = -1;
+    int trace_before_io = -1;
+    int trace_after_uptodate = -1;
+    int trace_after_io = -1;
+    int before_uptodate = -1;
+    int before_io = -1;
+
+    if (vm == NULL || vm->pagetable == NULL)
+        return -EINVAL;
+    if ((flags & PROT_WRITE) || (flags & PROT_READ) == 0)
+        return -EAGAIN;
+
+    vm_rlock(vm);
+    vma_t *vma = vm_find_area(vm, fault_va);
+    if (vma == NULL || vma->file == NULL ||
+        (vma->flags & VMA_FLAG_PFNMAP) ||
+        (flags & vma->flags) != flags ||
+        fault_va < vma->start || fault_va + PGSIZE > vma->end) {
+        vm_runlock(vm);
+        return -EAGAIN;
+    }
+
+    file = vfs_fdup(vma->file);
+    if (file == NULL) {
+        vm_runlock(vm);
+        return -ENOMEM;
+    }
+    file_off = vma->pgoff + (fault_va - vma->start);
+    vm_runlock(vm);
+    if (trace) {
+        trace_lookup_ms = sched_timer_now_ms() - trace_t;
+        trace_t = sched_timer_now_ms();
+    }
+
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL) {
+        ret = -EAGAIN;
+        goto out_file;
+    }
+    trace_ino = inode->ino;
+    pc = &inode->i_data;
+    if (!pc->active) {
+        ret = -EAGAIN;
+        goto out_file;
+    }
+    uint64 inode_size = (uint64)READ_ONCE(inode->size);
+    trace_inode_size = inode_size;
+    if (file_off >= inode_size || file_off + PGSIZE > inode_size) {
+        ret = -EAGAIN;
+        goto out_file;
+    }
+
+    pcpage = pcache_get_page(pc, file_off / 512ULL);
+    if (pcpage == NULL) {
+        ret = -ENOMEM;
+        goto out_file;
+    }
+    struct pcache_node *before_pcn = pcpage->pcache.pcache_node;
+    if (before_pcn != NULL) {
+        before_uptodate = before_pcn->uptodate;
+        before_io = before_pcn->io_in_progress;
+    }
+    if (trace) {
+        trace_get_ms = sched_timer_now_ms() - trace_t;
+        trace_t = sched_timer_now_ms();
+        trace_before_uptodate = before_uptodate;
+        trace_before_io = before_io;
+    }
+
+    ret = pcache_read_page(pc, pcpage);
+    if (trace) {
+        trace_read_ms = sched_timer_now_ms() - trace_t;
+        trace_t = sched_timer_now_ms();
+        struct pcache_node *trace_pcn = pcpage->pcache.pcache_node;
+        if (trace_pcn != NULL) {
+            trace_after_uptodate = trace_pcn->uptodate;
+            trace_after_io = trace_pcn->io_in_progress;
+        }
+    }
+    if (ret != 0)
+        goto out_page;
+
+    struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    if (pcn == NULL || pcn->data == NULL) {
+        ret = -EFAULT;
+        goto out_page;
+    }
+    uint64 folio_base = (uint64)pcn->blkno * 512ULL;
+    if (file_off < folio_base || file_off + PGSIZE > folio_base + pcn->size) {
+        ret = -EAGAIN;
+        goto out_page;
+    }
+
+    vm_rlock(vm);
+    vma = vm_find_area(vm, fault_va);
+    if (vma == NULL || vma->file != file ||
+        (vma->flags & VMA_FLAG_PFNMAP) ||
+        (flags & vma->flags) != flags ||
+        fault_va < vma->start || fault_va + PGSIZE > vma->end ||
+        vma->pgoff + (fault_va - vma->start) != file_off) {
+        vm_runlock(vm);
+        ret = -EAGAIN;
+        goto out_page;
+    }
+    if (trace) {
+        trace_relock_ms = sched_timer_now_ms() - trace_t;
+        trace_t = sched_timer_now_ms();
+    }
+
+    vm_pgtable_lock(vm);
+    pte_t *pte = walk(vm->pagetable, fault_va, 1, NULL, NULL);
+    if (pte == NULL) {
+        vm_pgtable_unlock(vm);
+        vm_runlock(vm);
+        ret = -ENOMEM;
+        goto out_page;
+    }
+    if (*pte != 0) {
+        ret = __vma_validate_pte(vma, pte, flags, fault_va);
+        vm_pgtable_unlock(vm);
+        vm_runlock(vm);
+        goto out_page;
+    }
+
+    __page_ref_add(pcpage, 1);
+    void *pa = (char *)pcn->data + (file_off - folio_base);
+    *pte = mk_pte((uint64)pa, vma->flags & ~PROT_WRITE);
+    pte_mkclean(pte);
+    g_vm_file_faults += 1;
+    vm_account_resident_add(vma, 1);
+    vm_pgtable_unlock(vm);
+    vm_runlock(vm);
+    ret = 0;
+    if (trace)
+        trace_install_ms = sched_timer_now_ms() - trace_t;
+
+out_page:
+    if (pcpage != NULL)
+        pcache_put_page(pc, pcpage);
+out_file:
+    if (file != NULL)
+        vfs_fput(file);
+    if (trace) {
+        uint64 total_ms = sched_timer_now_ms() - trace_start_ms;
+        if (total_ms >= vm_file_fault_trace_threshold_ms() &&
+            vm_file_fault_trace_take_slot()) {
+            struct thread *self = current;
+            const char *kind = "unknown";
+            if (trace_before_uptodate == 1)
+                kind = "cache-hit";
+            else if (trace_before_io == 1)
+                kind = "wait-io";
+            else if (trace_before_uptodate == 0)
+                kind = "fill-io";
+            printf("vm-file-fault-trace: pid=%d tgid=%d name=%s ret=%d "
+                   "kind=%s va=0x%lx off=%lu ino=%lu isize=%lu "
+                   "total_ms=%lu lookup_ms=%lu get_ms=%lu read_ms=%lu "
+                   "relock_ms=%lu install_ms=%lu before_uptodate=%d "
+                   "before_io=%d after_uptodate=%d after_io=%d\n",
+                   self ? self->pid : -1, self ? self->tgid : -1,
+                   self ? self->name : "-", ret, kind, fault_va, file_off,
+                   trace_ino, trace_inode_size, total_ms, trace_lookup_ms,
+                   trace_get_ms, trace_read_ms, trace_relock_ms,
+                   trace_install_ms, trace_before_uptodate, trace_before_io,
+                   trace_after_uptodate, trace_after_io);
+        }
+    }
+    return ret;
+}
+
 /* ========================================================================== */
 /*  User memory accessors                                                     */
 /* ========================================================================== */
@@ -3093,13 +3654,14 @@ int vm_growstack(vm_t *vm, int64 change_size)
 int vm_try_growstack(vm_t *vm, uint64 va)
 {
     int ret = 0;
+    if (vm == NULL)
+        return -EINVAL;
+    if (va < USTACK_MAX_BOTTOM || va >= USTACKTOP)
+        return 0;
+
     vm_wlock(vm);
-    if (vm == NULL || vm->pagetable == NULL) {
+    if (vm->pagetable == NULL) {
         ret = -EINVAL;
-        goto out;
-    }
-    if (va < USTACK_MAX_BOTTOM || va >= USTACKTOP) {
-        ret = 0;
         goto out;
     }
     if (vm->stack == NULL) {
@@ -3329,7 +3891,30 @@ out:
 int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
 {
     int ret = 0;
+    int trace = vm_mprotect_trace_enabled();
+    uint64 trace_arg_addr = addr;
+    uint64 trace_arg_size = size;
+    uint64 trace_lock_ms = 0;
+    uint64 trace_meta_ms = 0;
+    uint64 trace_pte_ms = 0;
+    uint64 trace_flush_ms = 0;
+    uint64 trace_start_ms = trace ? sched_timer_now_ms() : 0;
+    uint64 trace_t = trace_start_ms;
+    uint64 trace_segments = 0;
+    uint64 trace_splits = 0;
+    uint64 trace_fast_splits = 0;
+    int trace_fast_skip = 0;
+    uint64 trace_pages = 0;
+    uint64 trace_present_pages = 0;
+    uint64 trace_huge_entries = 0;
+    int trace_flush_needed = 0;
+
     vm_wlock(vm);
+    if (trace) {
+        uint64 now = sched_timer_now_ms();
+        trace_lock_ms = now - trace_t;
+        trace_t = now;
+    }
 
     if (vm == NULL || vm->pagetable == NULL) {
         ret = -EINVAL;
@@ -3368,15 +3953,31 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
                 ret = -ENOMEM;
                 goto out;
             }
+            trace_splits++;
         }
 
         uint64 seg_end = vma->end < end ? vma->end : end;
         if (seg_end < vma->end) {
-            if (vma_split(vma, seg_end) == NULL) {
-                ret = -ENOMEM;
+            int fast_skip = 0;
+            vma_t *left = vma_split_keep_right(vma, seg_end, &fast_skip);
+            if (IS_ERR(left)) {
+                trace_fast_skip = fast_skip;
+                ret = PTR_ERR(left);
                 goto out;
+            } else if (left != NULL) {
+                vma = left;
+                trace_fast_splits++;
+            } else {
+                if (fast_skip != 0)
+                    trace_fast_skip = fast_skip;
+                if (vma_split(vma, seg_end) == NULL) {
+                    ret = -ENOMEM;
+                    goto out;
+                }
             }
+            trace_splits++;
         }
+        trace_segments++;
 
         uint64 old_flags = vma->flags;
         uint64 new_flags = (vma->flags & ~PROT_MASK);
@@ -3393,12 +3994,20 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
         if ((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
             effective_flags &= ~VMA_FLAG_USER;
 
+        if (trace) {
+            uint64 now = sched_timer_now_ms();
+            trace_meta_ms += now - trace_t;
+            trace_t = now;
+        }
         vm_pgtable_lock(vm);
         for (uint64 va = cur; va < seg_end; va += PGSIZE) {
+            trace_pages++;
             pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
             if (pte != NULL && pte_present(pte)) {
                 /* Handle hugepage: modify the 2MB PTE and skip ahead. */
                 if (pte_is_hugepage(pte)) {
+                    trace_huge_entries++;
+                    trace_present_pages += HUGEPAGE_SIZE / PGSIZE;
                     uint64 mflags = effective_flags;
                     if (mflags & PROT_WRITE) {
                         uint64 pa = pte_pa(pte);
@@ -3414,6 +4023,7 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
                         va = next - PGSIZE;
                     continue;
                 }
+                trace_present_pages++;
                 uint64 mflags = effective_flags;
                 /* rmap-based COW: if page has mapcount > 1 and we're trying
                  * to grant write, suppress write — the write-fault handler
@@ -3451,6 +4061,11 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
             }
         }
         vm_pgtable_unlock(vm);
+        if (trace) {
+            uint64 now = sched_timer_now_ms();
+            trace_pte_ms += now - trace_t;
+            trace_t = now;
+        }
 
         vma->flags = new_flags;
 
@@ -3459,11 +4074,37 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
         cur = seg_end;
     }
 
-    if (flush_needed)
+    trace_flush_needed = flush_needed;
+    if (flush_needed) {
+        if (trace)
+            trace_t = sched_timer_now_ms();
         vm_remote_sfence_range(vm, addr, size);
+        if (trace)
+            trace_flush_ms += sched_timer_now_ms() - trace_t;
+    }
 
     ret = 0;
 out:
+    if (trace) {
+        uint64 total_ms = sched_timer_now_ms() - trace_start_ms;
+        if (total_ms >= vm_mprotect_trace_threshold_ms() &&
+            vm_mprotect_trace_take_slot()) {
+            struct thread *self = current;
+            printf("vm-mprotect-trace: pid=%d tgid=%d name=%s ret=%d "
+                   "arg_addr=0x%lx arg_len=%lu addr=0x%lx len=%lu prot=0x%x "
+                   "total_ms=%lu lock_ms=%lu meta_ms=%lu pte_ms=%lu "
+                   "flush_ms=%lu segments=%lu splits=%lu pages=%lu "
+                   "fast_splits=%lu fast_skip=%d present_pages=%lu "
+                   "huge_entries=%lu flush=%d\n",
+                   self ? self->pid : -1, self ? self->tgid : -1,
+                   self ? self->name : "-", ret, trace_arg_addr,
+                   trace_arg_size, addr, size, prot, total_ms, trace_lock_ms,
+                   trace_meta_ms, trace_pte_ms, trace_flush_ms,
+                   trace_segments, trace_splits, trace_pages,
+                   trace_fast_splits, trace_fast_skip, trace_present_pages,
+                   trace_huge_entries, trace_flush_needed);
+        }
+    }
     vm_wunlock(vm);
     return ret;
 }
@@ -4000,6 +4641,7 @@ static int __vm_madvise_dontneed(vm_t *vm, uint64 addr, size_t size)
 {
     uint64 end = addr + size;
     uint64 cur = addr;
+    int tlb_needs_flush = 0;
 
     while (cur < end) {
         vma_t *vma = vm_find_area(vm, cur);
@@ -4009,6 +4651,67 @@ static int __vm_madvise_dontneed(vm_t *vm, uint64 addr, size_t size)
         int shared_file_wb =
             (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
             (vma->flags & VMA_FLAG_FILE);
+        int is_anon_vma = (vma->file == NULL);
+        int is_pfnmap = (vma->flags & VMA_FLAG_PFNMAP) != 0;
+        uint64 resident_pages_cleared = 0;
+
+#define MADVISE_DEFER_MAX 256
+        struct {
+            page_t *pg;
+        } defer[MADVISE_DEFER_MAX];
+        int ndefer = 0;
+
+#define FLUSH_MADVISE_DEFERRED() do {                                  \
+    page_t *anon_batch[MADVISE_DEFER_MAX];                             \
+    int anon_count = 0;                                                 \
+    if (is_anon_vma) {                                                  \
+        for (int __d = 0; __d < ndefer; __d++) {                        \
+            page_t *__pg = defer[__d].pg;                               \
+            if (__pg != NULL) {                                         \
+                __sync_fetch_and_sub(&__pg->anon.mapcount, 1);          \
+                anon_batch[anon_count++] = __pg;                        \
+            }                                                           \
+        }                                                               \
+    } else {                                                            \
+        struct pcache *batch_pc = NULL;                                 \
+        folio_t *batch_folio = NULL;                                    \
+        int batch_count = 0;                                            \
+        for (int __d = 0; __d < ndefer; __d++) {                        \
+            page_t *__pg = defer[__d].pg;                               \
+            if (__pg == NULL)                                           \
+                continue;                                               \
+            page_t *__pc_head = page_pcache_head(__pg);                 \
+            if (__pc_head != NULL) {                                    \
+                folio_t *__f = page_folio(__pc_head);                   \
+                if (__f == batch_folio) {                               \
+                    batch_count++;                                      \
+                } else {                                                \
+                    if (batch_folio != NULL)                            \
+                        pcache_put_folio_refs(batch_pc, batch_folio,    \
+                                             batch_count);              \
+                    batch_pc = __pc_head->pcache.pcache;                \
+                    batch_folio = __f;                                  \
+                    batch_count = 1;                                    \
+                }                                                       \
+            } else {                                                    \
+                if (batch_folio != NULL) {                              \
+                    pcache_put_folio_refs(batch_pc, batch_folio,        \
+                                         batch_count);                  \
+                    batch_folio = NULL;                                 \
+                    batch_count = 0;                                    \
+                }                                                       \
+                if (__pg != NULL && PAGE_IS_TYPE(__pg, PAGE_TYPE_ANON)) \
+                    page_remove_rmap(__pg);                             \
+                anon_batch[anon_count++] = __pg;                        \
+            }                                                           \
+        }                                                               \
+        if (batch_folio != NULL)                                        \
+            pcache_put_folio_refs(batch_pc, batch_folio, batch_count);  \
+    }                                                                   \
+    if (anon_count > 0)                                                 \
+        page_free_anon_batch(anon_batch, anon_count);                   \
+    ndefer = 0;                                                         \
+} while (0)
 
         vm_pgtable_lock(vm);
         for (uint64 va = cur; va < seg_end; va += PGSIZE) {
@@ -4018,6 +4721,9 @@ static int __vm_madvise_dontneed(vm_t *vm, uint64 addr, size_t size)
                 if (pa != 0) {
                     int was_dirty = pte_dirty(pte);
                     pte_clear(pte);
+                    tlb_needs_flush = 1;
+                    if (!is_pfnmap)
+                        resident_pages_cleared++;
 
                     if (shared_file_wb && was_dirty) {
                         vm_pgtable_unlock(vm);
@@ -4025,26 +4731,30 @@ static int __vm_madvise_dontneed(vm_t *vm, uint64 addr, size_t size)
                         vm_pgtable_lock(vm);
                     }
 
-                    page_t *pg = __pa_to_page(pa);
-                    page_t *pc_head = page_pcache_head(pg);
-                    if (pc_head != NULL) {
-                        folio_t *folio = page_folio(pc_head);
-                        pcache_put_folio(pc_head->pcache.pcache, folio);
-                    } else {
-                        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
-                            page_remove_rmap(pg);
-                        page_ref_dec((void *)pa);
+                    if (!is_pfnmap) {
+                        defer[ndefer].pg = __pa_to_page(pa);
+                        ndefer++;
+                        if (ndefer == MADVISE_DEFER_MAX)
+                            FLUSH_MADVISE_DEFERRED();
                     }
                 } else {
                     pte_clear(pte);
+                    tlb_needs_flush = 1;
                 }
             }
         }
         vm_pgtable_unlock(vm);
+        if (resident_pages_cleared != 0)
+            vm_account_resident_sub(vma, resident_pages_cleared);
         cur = seg_end;
+        FLUSH_MADVISE_DEFERRED();
+
+#undef FLUSH_MADVISE_DEFERRED
+#undef MADVISE_DEFER_MAX
     }
 
-    vm_remote_sfence_range(vm, addr, size);
+    if (tlb_needs_flush)
+        vm_remote_sfence_range(vm, addr, size);
     return 0;
 }
 
@@ -4389,12 +5099,21 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     if (length > ((size_t)-1) - (PGSIZE - 1))
         return (uint64)-EINVAL;
 
-    if (!(flags & MAP_PRIVATE) && !(flags & MAP_SHARED))
-        return (uint64)-EINVAL;
-    if ((flags & MAP_PRIVATE) && (flags & MAP_SHARED))
+    int map_type = flags & MAP_TYPE;
+    if (map_type != MAP_PRIVATE && map_type != MAP_SHARED &&
+        map_type != MAP_SHARED_VALIDATE)
         return (uint64)-EINVAL;
     if ((flags & MAP_FIXED) && (flags & MAP_FIXED_NOREPLACE))
         return (uint64)-EINVAL;
+    if (map_type == MAP_SHARED_VALIDATE) {
+        const int supported_validate_flags =
+            MAP_TYPE | MAP_FIXED | MAP_ANONYMOUS | MAP_GROWSDOWN |
+            MAP_DENYWRITE | MAP_EXECUTABLE | MAP_NORESERVE |
+            MAP_POPULATE | MAP_NONBLOCK | MAP_STACK |
+            MAP_FIXED_NOREPLACE;
+        if (flags & ~supported_validate_flags)
+            return (uint64)-EOPNOTSUPP;
+    }
 
     if (flags & MAP_ANONYMOUS) {
         file = NULL;
@@ -4420,7 +5139,7 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         VMA_FLAG_USER | (prot & (PROT_READ | PROT_WRITE | PROT_EXEC));
     if (file != NULL)
         vm_flags |= VMA_FLAG_FILE;
-    if (flags & MAP_SHARED)
+    if (map_type == MAP_SHARED || map_type == MAP_SHARED_VALIDATE)
         vm_flags |= VMA_FLAG_SHARED;
 
     vm_wlock(vm);

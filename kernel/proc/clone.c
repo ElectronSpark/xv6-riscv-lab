@@ -9,6 +9,7 @@
 
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "proc/chrome_lifecycle.h"
 #include "clone_flags.h"
 #include "defs.h"
 #include "kqueue_types.h"
@@ -31,6 +32,7 @@
 #include "types.h"
 #include "vfs/file.h"
 #include "vfs/fs.h"
+#include "maple_tree.h"
 #include <mm/vm.h>
 #include "errno.h"
 #include "proc/pgroup.h"
@@ -38,7 +40,142 @@
 #include "arch_thread.h"
 #include "accounting.h"
 #include "resource.h"
-#include "proc/chrome_lifecycle.h"
+
+static const char *clone_asset_vma_path(vma_t *vma)
+{
+    if (vma == NULL || vma->file == NULL)
+        return "-";
+    if (vma->file->opened_path != NULL &&
+        vma->file->opened_path[0] != '\0')
+        return vma->file->opened_path;
+    if (vma->file->inode.inode != NULL &&
+        vma->file->inode.inode->name != NULL)
+        return vma->file->inode.inode->name;
+    return "(unnamed)";
+}
+
+static int clone_asset_fd_valid(struct vfs_file *file)
+{
+    return (uint64)file > NOFILE;
+}
+
+static int clone_asset_path_match(const char *path)
+{
+    if (path == NULL)
+        return 0;
+    return strstr(path, "icudtl.dat") != NULL ||
+           strstr(path, "v8_context_snapshot.bin") != NULL;
+}
+
+static void chrome_clone_dump_asset_vmas(struct thread *p, const char *tag)
+{
+    vm_t *vm;
+    int found = 0;
+
+    if (p == NULL || p->vm == NULL)
+        return;
+    vm = p->vm;
+
+    vm_rlock(vm);
+    vma_t *vma;
+    uint64 index = 0;
+    mt_for_each(&vm->vm_mt, vma, index, (uint64)(-1ULL)) {
+        const char *path = clone_asset_vma_path(vma);
+
+        if (!clone_asset_path_match(path))
+            continue;
+
+        found++;
+        printf("chrome-clone-asset-vma: tag=%s pid=%d tgid=%d name=%s map=[0x%lx-0x%lx) %c%c%c %s flags=0x%lx pgoff=0x%lx file=%p path=%s\n",
+               tag, p->pid, p->tgid, p->name, vma->start, vma->end,
+               (vma->flags & PROT_READ) ? 'r' : '-',
+               (vma->flags & PROT_WRITE) ? 'w' : '-',
+               (vma->flags & PROT_EXEC) ? 'x' : '-',
+               (vma->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+               vma->flags, vma->pgoff, (void *)vma->file, path);
+    }
+    vm_runlock(vm);
+
+    if (found == 0) {
+        printf("chrome-clone-asset-vma: tag=%s pid=%d tgid=%d name=%s found=0\n",
+               tag, p->pid, p->tgid, p->name);
+    }
+}
+
+static void chrome_clone_dump_asset_fds(struct thread *p, const char *tag)
+{
+    struct vfs_fdtable *fdt;
+    int found = 0;
+
+    if (p == NULL || p->fdtable == NULL)
+        return;
+    fdt = p->fdtable;
+
+    spin_lock(&fdt->lock);
+    for (int fd = 0; fd < NOFILE; fd++) {
+        struct vfs_file *file = fdt->files[fd];
+        const char *path;
+
+        if (!clone_asset_fd_valid(file))
+            continue;
+        path = file->opened_path;
+        if (path == NULL || path[0] == '\0')
+            path = "(no-path)";
+        if (fd != 3 && !clone_asset_path_match(path))
+            continue;
+
+        found++;
+        printf("chrome-clone-asset-fd: tag=%s pid=%d tgid=%d name=%s fd=%d cloexec=%d kind=%d flags=0x%x file=%p path=%s\n",
+               tag, p->pid, p->tgid, p->name, fd,
+               !!(fdt->cloexec_bitmap[fd >> 6] & (1ULL << (fd & 63))),
+               file->f_kind, file->f_flags, (void *)file, path);
+    }
+    spin_unlock(&fdt->lock);
+
+    if (found == 0) {
+        printf("chrome-clone-asset-fd: tag=%s pid=%d tgid=%d name=%s found=0\n",
+               tag, p->pid, p->tgid, p->name);
+    }
+}
+
+static void chrome_clone_dump_asset_state(struct thread *parent,
+                                          struct thread *child,
+                                          uint64 flags)
+{
+    if (!chrome_trace_value_enabled("chrome_fd_trace"))
+        return;
+    if (!chrome_lifecycle_thread_match(parent) &&
+        !chrome_lifecycle_thread_match(child))
+        return;
+    if (flags & CLONE_THREAD)
+        return;
+
+    chrome_clone_dump_asset_vmas(parent, "parent-prewake");
+    chrome_clone_dump_asset_vmas(child, "child-prewake");
+    chrome_clone_dump_asset_fds(parent, "parent-prewake");
+    chrome_clone_dump_asset_fds(child, "child-prewake");
+}
+
+static void clone_destroy_unstarted_child(struct thread *child)
+{
+    if (child == NULL)
+        return;
+
+    pid_wlock();
+    if (child->parent != NULL && !LIST_ENTRY_IS_DETACHED(&child->siblings))
+        detach_child(child->parent, child);
+    if (child->pgroup != NULL)
+        pgroup_remove_thread(child);
+    if (child->session != NULL)
+        (void)session_remove_thread(child->session, child);
+    if (child->thread_group != NULL)
+        (void)thread_group_remove(child);
+    proctab_proc_remove(child);
+    pid_wunlock();
+
+    __free_pid();
+    thread_destroy(child);
+}
 
 // Entry wrapper for forked user threads.
 // This is called as the entry point from context switch.
@@ -95,12 +232,19 @@ int thread_clone(struct clone_args *args) {
         return -EINVAL;
     }
 
-    // When stack is specified and stack_size is non-zero, validate alignment.
-    // stack_size=0 is valid (Linux clone takes just the stack pointer).
+    // When stack is specified and stack_size is non-zero, require a usable
+    // range. Linux clone3 callers such as glibc may pass a non-page-multiple
+    // stack_size; arch_clone_child_regs() aligns the computed stack top.
     if (args->stack != 0 && args->stack_size != 0 &&
-        (args->stack_size < USERSTACK_MINSZ ||
-         (args->stack_size & (PAGE_SIZE - 1)) != 0)) {
+        args->stack_size < USERSTACK_MINSZ) {
         return -EINVAL;
+    }
+
+    if (args->flags & CLONE_PIDFD) {
+        if (args->flags & CLONE_DETACHED)
+            return -EINVAL;
+        if (args->pidfd == 0)
+            return -EFAULT;
     }
 
     // Too many processes are already running
@@ -164,6 +308,7 @@ int thread_clone(struct clone_args *args) {
     // Copy per-thread signal mask from parent
     sigpending_clone(&ret_ptr->signal, &p->signal, args->flags, args->esignal);
     ret_ptr->clone_flags = args->flags;
+    rseq_clear_thread(ret_ptr);
 
     // copy saved user registers.
     *(ret_ptr->trapframe) = *(p->trapframe);
@@ -287,6 +432,17 @@ int thread_clone(struct clone_args *args) {
                          __atomic_load_n(&p->thread_group->timer_slack_ns,
                                          __ATOMIC_SEQ_CST),
                          __ATOMIC_SEQ_CST);
+        __atomic_store_n(&ret_ptr->thread_group->oom_score_adj,
+                         __atomic_load_n(&p->thread_group->oom_score_adj,
+                                         __ATOMIC_SEQ_CST),
+                         __ATOMIC_SEQ_CST);
+        uint32 chrome_roles =
+            __atomic_load_n(&p->thread_group->chrome_trace_roles,
+                            __ATOMIC_SEQ_CST);
+        if (chrome_lifecycle_thread_match(p))
+            chrome_roles |= TG_CHROME_TRACE_CHILD_PROCESS;
+        __atomic_store_n(&ret_ptr->thread_group->chrome_trace_roles,
+                         chrome_roles, __ATOMIC_SEQ_CST);
 
         // Inherit dynamic linker / executable metadata so that
         // /proc/<pid>/exe and GDB's shared-library queries work
@@ -326,6 +482,14 @@ int thread_clone(struct clone_args *args) {
 
     pid_wunlock();
 
+    if (args->flags & CLONE_PIDFD) {
+        int pidfd_ret = pidfd_install_for_thread(ret_ptr, args->pidfd);
+        if (pidfd_ret < 0) {
+            clone_destroy_unstarted_child(ret_ptr);
+            return pidfd_ret;
+        }
+    }
+
     // CLONE_CHILD_SETTID: write child's TID into the ctid address in child's
     // memory. Done after PID assignment so we have the actual TID.
     if (args->flags & CLONE_CHILD_SETTID) {
@@ -345,6 +509,8 @@ int thread_clone(struct clone_args *args) {
         }
     }
 
+    chrome_clone_dump_asset_state(p, ret_ptr, args->flags);
+
     // Wake up the new child thread
     // Note: pi_lock no longer needed - rq_lock serializes wakeups
     scheduler_wakeup(ret_ptr);
@@ -353,14 +519,20 @@ int thread_clone(struct clone_args *args) {
     kqueue_proc_notify(p, NOTE_FORK, ret_ptr->pid);
 
     if (chrome_lifecycle_trace_enabled() &&
+        (!(args->flags & CLONE_THREAD) ||
+         chrome_thread_lifecycle_trace_enabled()) &&
         (chrome_lifecycle_thread_match(p) ||
          chrome_lifecycle_thread_match(ret_ptr))) {
+        uint32 child_roles = ret_ptr->thread_group ?
+            __atomic_load_n(&ret_ptr->thread_group->chrome_trace_roles,
+                            __ATOMIC_RELAXED) : 0;
         printf("chrome-lifecycle: clone parent_pid=%d parent_tgid=%d "
                "parent_name='%s' child_pid=%d child_tgid=%d child_name='%s' "
-               "flags=0x%lx thread=%d vfork=%d child_exec='%s'\n",
+               "flags=0x%lx thread=%d vfork=%d child_roles=0x%x "
+               "child_exec='%s'\n",
                p->pid, p->tgid, p->name, ret_ptr->pid, ret_ptr->tgid,
                ret_ptr->name, args->flags, !!(args->flags & CLONE_THREAD),
-               !!(args->flags & CLONE_VFORK),
+               !!(args->flags & CLONE_VFORK), child_roles,
                ret_ptr->thread_group ? ret_ptr->thread_group->exec_path : "");
     }
 

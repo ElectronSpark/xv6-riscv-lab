@@ -519,6 +519,84 @@ void vm_cpu_offline(vm_t *vm, int cpu)
 
 cpumask_t vm_get_cpumask(vm_t *vm) { return smp_load_acquire(&vm->cpumask); }
 
+static void __uvm_visit_present_leafs(pagetable_t pagetable, int level,
+                                      uint64 base_va,
+                                      uvm_leaf_visitor_t visitor, void *arg)
+{
+    uint64 span = 1ULL << (PGSHIFT + 9 * level);
+
+    for (int i = 0; i < 512; i++) {
+        if (level == 2 && i >= 256)
+            break;
+
+        pte_t pte = pagetable[i];
+        if ((pte & PTE_V) == 0)
+            continue;
+
+        uint64 va = base_va | ((uint64)i << (PGSHIFT + 9 * level));
+        if (level > 0 && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+            __uvm_visit_present_leafs((pagetable_t)PA2VA(PTE2PA(pte)),
+                                      level - 1, va, visitor, arg);
+        } else {
+            visitor(va, span, pte, arg);
+        }
+    }
+}
+
+void uvm_visit_present_leafs(pagetable_t pagetable, uvm_leaf_visitor_t visitor,
+                             void *arg)
+{
+    if (pagetable == NULL || visitor == NULL)
+        return;
+    __uvm_visit_present_leafs(pagetable, 2, 0, visitor, arg);
+}
+
+static int __uvm_visit_present_leaf_ptes(pagetable_t pagetable, int level,
+                                         uint64 base_va, uint64 start,
+                                         uint64 end,
+                                         uvm_leaf_pte_visitor_t visitor,
+                                         void *arg)
+{
+    uint64 span = 1ULL << (PGSHIFT + 9 * level);
+
+    for (int i = 0; i < 512; i++) {
+        if (level == 2 && i >= 256)
+            break;
+
+        uint64 va = base_va | ((uint64)i << (PGSHIFT + 9 * level));
+        uint64 next = va + span;
+        if (next <= start || va >= end)
+            continue;
+
+        pte_t *pte = &pagetable[i];
+        if ((*pte & PTE_V) == 0)
+            continue;
+
+        if (level > 0 && (*pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+            int ret = __uvm_visit_present_leaf_ptes(
+                (pagetable_t)PA2VA(PTE2PA(*pte)), level - 1, va, start, end,
+                visitor, arg);
+            if (ret != 0)
+                return ret;
+        } else {
+            int ret = visitor(va, span, pte, arg);
+            if (ret != 0)
+                return ret;
+        }
+    }
+    return 0;
+}
+
+int uvm_visit_present_leaf_ptes(pagetable_t pagetable, uint64 start,
+                                uint64 end, uvm_leaf_pte_visitor_t visitor,
+                                void *arg)
+{
+    if (pagetable == NULL || visitor == NULL || start >= end)
+        return 0;
+    return __uvm_visit_present_leaf_ptes(pagetable, 2, 0, start, end,
+                                         visitor, arg);
+}
+
 /* ========================================================================== */
 /*  Page-table dump (RISC-V Sv39 format)                                      */
 /* ========================================================================== */

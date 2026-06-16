@@ -42,7 +42,7 @@ typedef struct page_struct page_t;
  * struct anon_vma - shared object that groups VMAs whose pages may overlap.
  * @rwsem:    protects the vma_tree; read for traversal, write for modification.
  * @refcount: number of AVCs pointing here.  Freed when it drops to 0.
- * @vma_tree: rb-tree of anon_vma_chain nodes, keyed by vma->start.
+ * @vma_tree: rb-tree of anon_vma_chain nodes, keyed by a stable AVC key.
  */
 struct anon_vma {
     rwsem_t rwsem;
@@ -52,13 +52,15 @@ struct anon_vma {
 
 /**
  * struct anon_vma_chain - link between a VMA and an anon_vma.
- * @rb_entry: node in anon_vma->vma_tree (keyed by vma->start).
+ * @rb_entry: node in anon_vma->vma_tree.
+ * @tree_key: stable unique key for anon_vma->vma_tree.
  * @vma:      the VMA this AVC belongs to.
  * @anon_vma: the anon_vma this AVC points to.
  * @same_vma: list node chaining all AVCs that belong to the same VMA.
  */
 struct anon_vma_chain {
     struct rb_node rb_entry;
+    uint64 tree_key;
     vma_t *vma;
     struct anon_vma *anon_vma;
     list_node_t same_vma;

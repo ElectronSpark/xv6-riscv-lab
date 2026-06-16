@@ -94,6 +94,7 @@ struct thread {
     uint64 rseq_addr;      // rseq(2): registered user rseq area
     uint32 rseq_len;       // rseq(2): user rseq area length
     uint32 rseq_signature; // rseq(2): abort signature
+    int rseq_cpu_id;       // rseq(2): CPU id last published to userspace
     struct fs_struct *fs; // Filesystem state (slab allocated, may be shared)
     struct vfs_fdtable
         *fdtable; // File descriptor table (slab allocated, may be shared)
@@ -117,6 +118,7 @@ struct thread {
     pid_t pgid;           // Process group ID (for job control)
     pid_t tgid;           // Thread group ID (process ID)
     pid_t pid;            // Thread ID
+    uint64 pid_seq;       // Monotonic identity cookie for pidfd/PID reuse checks
     list_node_t tg_entry; // Link in thread_group->thread_list
     list_node_t pg_entry; // Link in pgroup->threads list
     list_node_t sid_entry; // Link in session->threads list
@@ -126,6 +128,12 @@ struct thread {
     int xstate;            // Exit status to be returned to parent's wait
     int killed_signo;      // Signal that caused THREAD_KILLED, if any
     int killed_code;       // Kernel reason code for THREAD_KILLED
+    struct thread *ptrace_tracer; // Current ptrace tracer, if attached
+    int ptrace_tracer_tgid;       // Tracer thread-group ID
+    int ptrace_real_parent_pid;   // Original parent PID while traced
+    uint64 ptrace_real_parent_seq; // Original parent identity cookie
+    int ptrace_real_parent_listed; // Original parent owned siblings entry
+    uint64 ptrace_options;        // PTRACE_SETOPTIONS bits
     list_node_t siblings;  // List of sibling threads
     __STRUCT_CACHELINE_PADDING;
 
