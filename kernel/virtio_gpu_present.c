@@ -1023,11 +1023,12 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
         goto out;
     }
     dst_resource_id = dst->id;
-    if (src->ctx_id != 0 &&
+    uint32 primary_ctx_id = virtio_gpu_resource_primary_context_locked(src);
+    if (primary_ctx_id != 0 &&
         !virtio_gpu_cmdline_enabled("virtio_gpu_present_separate_ctx")) {
-        ctx = virtio_gpu_lookup_context_locked(g, src->ctx_id);
+        ctx = virtio_gpu_lookup_context_locked(g, primary_ctx_id);
         if (ctx != NULL && !ctx->failed)
-            ctx_id = src->ctx_id;
+            ctx_id = primary_ctx_id;
     }
     if (debug_logs < 8) {
         printf("virtio_gpu: present copy src=%u ctx=%u kind=%s fmt=%u bind=0x%x target=%u %ux%u -> dst=%u kind=%s fmt=%u bind=0x%x target=%u %ux%u rect src=%u,%u dst=%u,%u %ux%u mode=%s\n",
@@ -1384,10 +1385,11 @@ int virtio_gpu_copy_resource_to_resource(uint32 src_resource_id,
         ret = -EINVAL;
         goto out;
     }
-    if (src->ctx_id != 0) {
-        ctx = virtio_gpu_lookup_context_locked(g, src->ctx_id);
+    uint32 primary_ctx_id = virtio_gpu_resource_primary_context_locked(src);
+    if (primary_ctx_id != 0) {
+        ctx = virtio_gpu_lookup_context_locked(g, primary_ctx_id);
         if (ctx != NULL && !ctx->failed)
-            ctx_id = src->ctx_id;
+            ctx_id = primary_ctx_id;
     }
     src_submit_fence = src->last_submit_fence;
     completed_fence = g->stats.last_fence;
@@ -1596,14 +1598,52 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
     uint32 read_ctx_id = 0;
     int ret = 0;
     int read_bound = 0;
+    int diag;
+    uint32 lock_wait_ms;
     static int read_logs;
+    static int stage_logs;
+    static uint32 read_seq;
+    uint32 seq = 0;
+    uint64 total_start = 0;
+    uint64 stage_start = 0;
 
     if (dst == NULL || w == 0 || h == 0 || dst_pitch < w * sizeof(uint32))
         return -EINVAL;
     if (!g->initialized)
         return -ENODEV;
 
-    virtio_gpu_op_lock(g, VIRTIO_GPU_OP_PROBE);
+    diag = virtio_gpu_cmdline_enabled("virtio_gpu_scanout_read_diag");
+    if (diag) {
+        seq = __atomic_add_fetch(&read_seq, 1, __ATOMIC_RELAXED);
+        total_start = r_time();
+        stage_start = total_start;
+        if (stage_logs < 48) {
+            printf("virtio_gpu: scanout-read[%u] begin rect=%u,%u %ux%u dst_pitch=%u\n",
+                   seq, x, y, w, h, dst_pitch);
+            stage_logs++;
+        }
+    }
+
+    lock_wait_ms = virtio_gpu_cmdline_uint(
+        "virtio_gpu_scanout_read_lock_wait_ms",
+        VIRTIO_GPU_SCANOUT_READ_LOCK_WAIT_MS,
+        VIRTIO_GPU_SCANOUT_READ_LOCK_WAIT_MS_MAX);
+    ret = virtio_gpu_op_lock_timed(g, VIRTIO_GPU_OP_PROBE, lock_wait_ms);
+    if (ret != 0) {
+        if (diag)
+            printf("virtio_gpu: scanout-read[%u] op-lock-timeout ret=%d timeout_ms=%u holder=%d elapsed_us=%lu\n",
+                   seq, ret, lock_wait_ms,
+                   __atomic_load_n(&g->op_lock_holder, __ATOMIC_RELAXED),
+                   virtio_gpu_ticks_to_us(r_time() - total_start));
+        return ret;
+    }
+    if (diag && stage_logs < 48) {
+        printf("virtio_gpu: scanout-read[%u] op-lock-acquired holder=%d elapsed_us=%lu\n",
+               seq, __atomic_load_n(&g->op_lock_holder, __ATOMIC_RELAXED),
+               virtio_gpu_ticks_to_us(r_time() - total_start));
+        stage_logs++;
+    }
+    stage_start = r_time();
     spin_lock(&g->lock);
     res = g->scanout_resource;
     if (g->bound_scanout_resource_id != 0) {
@@ -1627,6 +1667,14 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
     present_w = g->diagnostic_present_w;
     present_h = g->diagnostic_present_h;
     spin_unlock(&g->lock);
+    if (diag && stage_logs < 48) {
+        printf("virtio_gpu: scanout-read[%u] selected resource=%u bound=%d present=%u present_rect=%u,%u->%u,%u %ux%u elapsed_us=%lu\n",
+               seq, res ? res->id : 0, read_bound, present_resource_id,
+               present_src_x, present_src_y, present_dst_x, present_dst_y,
+               present_w, present_h,
+               virtio_gpu_ticks_to_us(r_time() - total_start));
+        stage_logs++;
+    }
 
     if (res == NULL || !res->attached ||
         (res->backing == NULL &&
@@ -1645,10 +1693,23 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
         goto out;
     }
 
-    if (virtio_gpu_async_pending(g) &&
-        virtio_gpu_drain_async_submit(g, 1) != 0) {
-        ret = -EIO;
-        goto out;
+    if (virtio_gpu_async_pending(g)) {
+        if (diag && stage_logs < 48) {
+            printf("virtio_gpu: scanout-read[%u] async-drain-begin elapsed_us=%lu\n",
+                   seq, virtio_gpu_ticks_to_us(r_time() - total_start));
+            stage_logs++;
+        }
+        ret = virtio_gpu_drain_async_submit(g, 1);
+        if (diag && stage_logs < 48) {
+            printf("virtio_gpu: scanout-read[%u] async-drain-end ret=%d stage_us=%lu elapsed_us=%lu\n",
+                   seq, ret, virtio_gpu_ticks_to_us(r_time() - stage_start),
+                   virtio_gpu_ticks_to_us(r_time() - total_start));
+            stage_logs++;
+        }
+        if (ret != 0) {
+            ret = -EIO;
+            goto out;
+        }
     }
 
     if (res->is_3d) {
@@ -1658,7 +1719,7 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
             (struct virtio_gpu_ctrl_hdr *)g->resp_page;
 
         read_ctx_id = virtio_gpu_cmdline_enabled("virtio_gpu_scanout_read_ctx0") ?
-            0 : res->ctx_id;
+            0 : virtio_gpu_resource_primary_context_locked(res);
 	        if (read_ctx_id == 0) {
 	            ret = virtio_gpu_ensure_present_context(g, &read_ctx_id);
 	            if (ret != 0)
@@ -1691,12 +1752,25 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
 	        transfer->level = 0;
 	        transfer->stride = src_pitch;
 	        transfer->layer_stride = (uint64)src_pitch * res->height;
+        if (diag && stage_logs < 48) {
+            printf("virtio_gpu: scanout-read[%u] prime-transfer-begin resource=%u ctx=%u elapsed_us=%lu\n",
+                   seq, res->id, read_ctx_id,
+                   virtio_gpu_ticks_to_us(r_time() - total_start));
+            stage_logs++;
+        }
+        stage_start = r_time();
 	        if (virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0,
 	                              false, resp, sizeof(*resp),
 	                              VIRTIO_GPU_RESP_OK_NODATA) != 0) {
 	            ret = -EIO;
 	            goto out;
 	        }
+        if (diag && stage_logs < 48) {
+            printf("virtio_gpu: scanout-read[%u] prime-transfer-end stage_us=%lu elapsed_us=%lu\n",
+                   seq, virtio_gpu_ticks_to_us(r_time() - stage_start),
+                   virtio_gpu_ticks_to_us(r_time() - total_start));
+            stage_logs++;
+        }
 	        memset(transfer, 0, sizeof(*transfer));
 	        transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
 	        transfer->hdr.ctx_id = read_ctx_id;
@@ -1712,14 +1786,32 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
         transfer->level = 0;
         transfer->stride = src_pitch;
         transfer->layer_stride = (uint64)src_pitch * res->height;
+        if (diag && stage_logs < 48) {
+            printf("virtio_gpu: scanout-read[%u] full-transfer-begin resource=%u ctx=%u elapsed_us=%lu\n",
+                   seq, res->id, read_ctx_id,
+                   virtio_gpu_ticks_to_us(r_time() - total_start));
+            stage_logs++;
+        }
+        stage_start = r_time();
         if (virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0,
                               false, resp, sizeof(*resp),
                               VIRTIO_GPU_RESP_OK_NODATA) != 0) {
             ret = -EIO;
             goto out;
         }
+        if (diag && stage_logs < 48) {
+            printf("virtio_gpu: scanout-read[%u] full-transfer-end stage_us=%lu elapsed_us=%lu\n",
+                   seq, virtio_gpu_ticks_to_us(r_time() - stage_start),
+                   virtio_gpu_ticks_to_us(r_time() - total_start));
+            stage_logs++;
+        }
     }
 
+    if (diag && stage_logs < 48) {
+        printf("virtio_gpu: scanout-read[%u] copy-begin resource=%u elapsed_us=%lu\n",
+               seq, res->id, virtio_gpu_ticks_to_us(r_time() - total_start));
+        stage_logs++;
+    }
     if (virtio_gpu_cmdline_enabled("virtio_gpu_scanout_read_diag") &&
         read_logs < 12) {
         uint32 p0 = virtio_gpu_resource_sample_pixel(res, x + w / 2,
@@ -1757,6 +1849,11 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
                 dst_row[col] =
                     virtio_gpu_resource_sample_pixel(res, x + col, y + row);
         }
+    }
+    if (diag && stage_logs < 48) {
+        printf("virtio_gpu: scanout-read[%u] copy-end elapsed_us=%lu\n",
+               seq, virtio_gpu_ticks_to_us(r_time() - total_start));
+        stage_logs++;
     }
 
     spin_lock(&g->lock);
@@ -1821,11 +1918,25 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
             transfer->level = 0;
             transfer->stride = present_pitch;
             transfer->layer_stride = (uint64)present_pitch * present->height;
+            if (diag && stage_logs < 48) {
+                printf("virtio_gpu: scanout-read[%u] present-transfer-begin resource=%u ctx=%u rect=%u,%u %ux%u elapsed_us=%lu\n",
+                       seq, present->id, present_ctx_id, src_start_x,
+                       src_start_y, ix1 - ix0, iy1 - iy0,
+                       virtio_gpu_ticks_to_us(r_time() - total_start));
+                stage_logs++;
+            }
+            stage_start = r_time();
             if (virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0,
                                   false, resp, sizeof(*resp),
                                   VIRTIO_GPU_RESP_OK_NODATA) != 0) {
                 ret = -EIO;
                 goto out;
+            }
+            if (diag && stage_logs < 48) {
+                printf("virtio_gpu: scanout-read[%u] present-transfer-end stage_us=%lu elapsed_us=%lu\n",
+                       seq, virtio_gpu_ticks_to_us(r_time() - stage_start),
+                       virtio_gpu_ticks_to_us(r_time() - total_start));
+                stage_logs++;
             }
             for (uint32 row = 0; row < iy1 - iy0; row++) {
                 uint32 *dst_row =
@@ -1848,6 +1959,11 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
         *screen_pitch = src_pitch;
 
 out:
+    if (diag && stage_logs < 48) {
+        printf("virtio_gpu: scanout-read[%u] end ret=%d elapsed_us=%lu\n",
+               seq, ret, virtio_gpu_ticks_to_us(r_time() - total_start));
+        stage_logs++;
+    }
     virtio_gpu_op_unlock(g);
     return ret;
 }

@@ -33,6 +33,8 @@
 #include "vfs/fcntl.h"
 #include "vfs/poll.h"
 #include "kqueue_types.h"
+#include "proc/tq.h"
+#include "signal.h"
 #include <mm/vm.h>
 #include "mm/slab.h"
 
@@ -69,6 +71,7 @@ struct netlink_sock {
     char      *resp_buf;    /* allocated response buffer */
     size_t     resp_len;    /* total bytes of response data */
     size_t     resp_off;    /* current read offset */
+    tq_t       rd_queue;    /* blocking recv/read waiters */
 
     /* Back-reference for kqueue */
     struct vfs_file *file;
@@ -120,6 +123,7 @@ static struct netlink_sock *netlink_sock_alloc(void)
         return NULL;
     memset(sk, 0, sizeof(*sk));
     spin_init(&sk->lock, "netlink_sock");
+    tq_init(&sk->rd_queue, "netlink_rd", &sk->lock);
     return sk;
 }
 
@@ -211,6 +215,98 @@ static int resp_put(struct netlink_sock *sk, const void *data, size_t len)
     memmove(sk->resp_buf + sk->resp_len, data, len);
     sk->resp_len += len;
     return 0;
+}
+
+static struct vfs_file *netlink_wake_readers_locked(struct netlink_sock *sk)
+{
+    struct vfs_file *file = NULL;
+
+    if (sk->resp_len > sk->resp_off) {
+        tq_wakeup_all(&sk->rd_queue, 0, 0);
+        if (sk->file != NULL)
+            file = vfs_fdup(sk->file);
+    }
+    return file;
+}
+
+static int netlink_wait_readable_locked(struct netlink_sock *sk,
+                                        struct vfs_file *file, int flags)
+{
+    int nonblock = (file->f_flags & O_NONBLOCK) ||
+                   (flags & NETLINK_MSG_DONTWAIT);
+
+    if (nonblock)
+        return -EAGAIN;
+
+    int ret = tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
+                               THREAD_INTERRUPTIBLE);
+    if (ret < 0)
+        return ret;
+    if (signal_pending(current))
+        return -EINTR;
+    return 0;
+}
+
+static int netlink_recv_from_file(struct vfs_file *file, uint64 buf, size_t len,
+                                  int flags, uint64 usrc, uint64 uaddrlen,
+                                  bool user)
+{
+    struct netlink_sock *sk = (struct netlink_sock *)file->private_data;
+    if (sk == NULL)
+        return -EBADF;
+    if (len == 0)
+        return 0;
+
+    char *staging = NULL;
+    size_t to_copy;
+
+    spin_lock(&sk->lock);
+    for (;;) {
+        size_t avail = sk->resp_len - sk->resp_off;
+        if (avail != 0) {
+            to_copy = len < avail ? len : avail;
+            staging = kvmalloc(to_copy);
+            if (staging == NULL) {
+                spin_unlock(&sk->lock);
+                return -ENOMEM;
+            }
+            memmove(staging, sk->resp_buf + sk->resp_off, to_copy);
+            if (!(flags & NETLINK_MSG_PEEK))
+                sk->resp_off += to_copy;
+            break;
+        }
+
+        int ret = netlink_wait_readable_locked(sk, file, flags);
+        if (ret < 0) {
+            spin_unlock(&sk->lock);
+            return ret;
+        }
+    }
+    spin_unlock(&sk->lock);
+
+    int err = 0;
+    if (user) {
+        if (vm_copyout(current->vm, buf, staging, to_copy) < 0)
+            err = -EFAULT;
+    } else {
+        memmove((void *)buf, staging, to_copy);
+    }
+    kvfree(staging);
+    if (err != 0)
+        return err;
+
+    if (usrc != 0 && uaddrlen != 0) {
+        struct sockaddr_nl sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.nl_family = AF_NETLINK;
+        sa.nl_pid = 0; /* from kernel */
+
+        int alen = sizeof(sa);
+        vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
+        vm_copyout(current->vm, usrc, &sa, sizeof(sa));
+    }
+
+    return (int)to_copy;
 }
 
 /*
@@ -645,45 +741,7 @@ static int netlink_handle_msg(struct netlink_sock *sk, char *msg, size_t len)
 static ssize_t netlink_file_read(struct vfs_file *file, char *buf,
                                  size_t count, bool user)
 {
-    struct netlink_sock *sk = (struct netlink_sock *)file->private_data;
-    if (sk == NULL)
-        return -EBADF;
-
-    spin_lock(&sk->lock);
-    size_t avail = sk->resp_len - sk->resp_off;
-    if (avail == 0) {
-        spin_unlock(&sk->lock);
-        return -EAGAIN;
-    }
-
-    size_t to_copy = count < avail ? count : avail;
-
-    /* Copy to a temporary buffer while holding the lock, then unlock
-     * before calling vm_copyout (which takes vm rwsem). */
-    char tmp[512];
-    char *staging = tmp;
-    if (to_copy > sizeof(tmp)) {
-        staging = kalloc();
-        if (staging == NULL) {
-            spin_unlock(&sk->lock);
-            return -ENOMEM;
-        }
-    }
-    memmove(staging, sk->resp_buf + sk->resp_off, to_copy);
-    sk->resp_off += to_copy;
-    spin_unlock(&sk->lock);
-
-    int err = 0;
-    if (user) {
-        if (vm_copyout(current->vm, (uint64)buf, staging, to_copy) < 0)
-            err = -EFAULT;
-    } else {
-        memmove(buf, staging, to_copy);
-    }
-    if (staging != tmp)
-        kfree(staging);
-
-    return err ? err : (ssize_t)to_copy;
+    return netlink_recv_from_file(file, (uint64)buf, count, 0, 0, 0, user);
 }
 
 /*
@@ -718,7 +776,14 @@ static ssize_t netlink_file_write(struct vfs_file *file, const char *buf,
 
     spin_lock(&sk->lock);
     int ret = netlink_handle_msg(sk, msg, count);
+    struct vfs_file *notify_file = (ret < 0) ? NULL :
+        netlink_wake_readers_locked(sk);
     spin_unlock(&sk->lock);
+
+    if (notify_file != NULL) {
+        vfs_file_knote_notify(notify_file, EVFILT_READ, 0);
+        vfs_fput(notify_file);
+    }
 
     if (msg != kbuf)
         kfree(msg);
@@ -737,6 +802,10 @@ static int netlink_file_release(struct vfs_inode *inode, struct vfs_file *file)
     struct netlink_sock *sk = (struct netlink_sock *)file->private_data;
     if (sk == NULL)
         return 0;
+
+    spin_lock(&sk->lock);
+    tq_wakeup_all(&sk->rd_queue, -EBADF, 0);
+    spin_unlock(&sk->lock);
 
     sk->file = NULL;
     netlink_sock_free(sk);
@@ -924,7 +993,14 @@ int netlink_sock_sendto(int fd, uint64 ubuf, size_t len, int flags,
 
     spin_lock(&sk->lock);
     int ret = netlink_handle_msg(sk, msg, len);
+    struct vfs_file *notify_file = (ret < 0) ? NULL :
+        netlink_wake_readers_locked(sk);
     spin_unlock(&sk->lock);
+
+    if (notify_file != NULL) {
+        vfs_file_knote_notify(notify_file, EVFILT_READ, 0);
+        vfs_fput(notify_file);
+    }
 
     if (msg != kbuf)
         kfree(msg);
@@ -940,6 +1016,12 @@ int netlink_sock_sendto(int fd, uint64 ubuf, size_t len, int flags,
 int netlink_sock_recvfrom(int fd, uint64 ubuf, size_t len, int flags,
                           uint64 usrc, uint64 uaddrlen)
 {
+    return netlink_sock_recv(fd, ubuf, len, flags, usrc, uaddrlen, true);
+}
+
+int netlink_sock_recv(int fd, uint64 buf, size_t len, int flags,
+                      uint64 usrc, uint64 uaddrlen, bool user)
+{
     struct vfs_file *file = vfs_fdtable_get_file(current->fdtable, fd);
     if (file == NULL)
         return -EBADF;
@@ -948,62 +1030,8 @@ int netlink_sock_recvfrom(int fd, uint64 ubuf, size_t len, int flags,
         return -EBADF;
     }
 
-    struct netlink_sock *sk = (struct netlink_sock *)file->private_data;
-    if (sk == NULL) {
-        vfs_fput(file);
-        return -EBADF;
-    }
-    int nonblock = (file->f_flags & O_NONBLOCK) ||
-                   (flags & NETLINK_MSG_DONTWAIT);
-
-    spin_lock(&sk->lock);
-    size_t avail = sk->resp_len - sk->resp_off;
-    if (avail == 0) {
-        spin_unlock(&sk->lock);
-        vfs_fput(file);
-        (void)nonblock;
-        return -EAGAIN;
-    }
-
-    size_t to_copy = len < avail ? len : avail;
-
-    /* Stage into temporary buffer before unlocking — vm_copyout needs
-     * the vm rwsem which cannot be taken under a spinlock. */
-    char tmp[512];
-    char *staging = tmp;
-    if (to_copy > sizeof(tmp)) {
-        staging = kalloc();
-        if (staging == NULL) {
-            spin_unlock(&sk->lock);
-            vfs_fput(file);
-            return -ENOMEM;
-        }
-    }
-    memmove(staging, sk->resp_buf + sk->resp_off, to_copy);
-    if (!(flags & NETLINK_MSG_PEEK))
-        sk->resp_off += to_copy;
-    spin_unlock(&sk->lock);
-
-    if (vm_copyout(current->vm, ubuf, staging, to_copy) < 0) {
-        if (staging != tmp) kfree(staging);
-        vfs_fput(file);
-        return -EFAULT;
-    }
-    if (staging != tmp)
-        kfree(staging);
-
-    /* Fill in source address if requested */
-    if (usrc != 0 && uaddrlen != 0) {
-        struct sockaddr_nl sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.nl_family = AF_NETLINK;
-        sa.nl_pid = 0; /* from kernel */
-
-        int alen = sizeof(sa);
-        vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
-        vm_copyout(current->vm, usrc, &sa, sizeof(sa));
-    }
-
+    int ret = netlink_recv_from_file(file, buf, len, flags, usrc, uaddrlen,
+                                     user);
     vfs_fput(file);
-    return (int)to_copy;
+    return ret;
 }

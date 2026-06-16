@@ -47,6 +47,9 @@
 #include "kqueue_types.h"
 #include "kstats.h"
 #include "cmdline.h"
+#include "proc/chrome_lifecycle.h"
+#include "proc/tq.h"
+#include "list.h"
 
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 
@@ -128,6 +131,11 @@ static int webkit_vfs_trace_enabled(void)
         enabled = cmdline_get_param("webkit_vfs_trace", value,
                                     sizeof(value)) == 0 &&
             value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        if (!enabled) {
+            enabled = cmdline_get_param("chrome_vfs_trace", value,
+                                        sizeof(value)) == 0 &&
+                value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        }
         initialized = 1;
     }
     return enabled;
@@ -137,7 +145,9 @@ static int webkit_vfs_trace_process(void)
 {
     return current != NULL &&
         (strncmp(current->name, "MiniBrowser", 11) == 0 ||
-         strncmp(current->name, "WebKit", 6) == 0);
+         strncmp(current->name, "WebKit", 6) == 0 ||
+         (strncmp(current->name, "chrome", 6) == 0 &&
+          strncmp(current->name, "chrome_crashpad", 15) != 0));
 }
 
 static int webkit_readlink_trace_enabled(void)
@@ -202,10 +212,205 @@ static int chrome_poll_summary_enabled(void)
 
 static int chrome_vfs_trace_process(void)
 {
-    return current != NULL &&
-        strncmp(current->name, "chrome", 6) == 0 &&
-        strncmp(current->name, "chrome_crashpad", 15) != 0;
+    if (current == NULL || strncmp(current->name, "chrome_crashpad", 15) == 0)
+        return 0;
+    if (strncmp(current->name, "chrome", 6) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    if (strstr(current->thread_group->exec_path,
+               "chrome_crashpad_handler") != NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "/chrome") != NULL ||
+           strstr(current->thread_group->exec_path, "wayland-chromium") != NULL;
 }
+
+static int chrome_fd_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_fd_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static const char *chrome_fd_trace_path(struct vfs_file *f)
+{
+    if (f == NULL)
+        return "(null)";
+    if (f->opened_path != NULL)
+        return f->opened_path;
+    if (f->f_kind == VFS_FILE_KIND_PIPE)
+        return "pipe";
+    if (f->f_kind == VFS_FILE_KIND_LEGACY_SOCKET)
+        return "socket";
+    if (f->f_kind == VFS_FILE_KIND_CUSTOM)
+        return "custom";
+    if (f->f_kind == VFS_FILE_KIND_CDEV)
+        return "cdev";
+    if (f->f_kind == VFS_FILE_KIND_BDEV)
+        return "bdev";
+    return "(unknown)";
+}
+
+static int chrome_fd_trace_valid_file(struct vfs_file *f)
+{
+    return f != NULL && (uint64)f > NOFILE;
+}
+
+static int chrome_asset_lifecycle_path_match(const char *path)
+{
+    if (path == NULL)
+        return 0;
+    return strstr(path, "icudtl.dat") != NULL ||
+           strstr(path, "v8_context_snapshot.bin") != NULL;
+}
+
+static int chrome_asset_lifecycle_trace_enabled(void)
+{
+    return chrome_fd_trace_enabled() && chrome_vfs_trace_process();
+}
+
+static int chrome_asset_lifecycle_file_match(struct vfs_file *f, int fd)
+{
+    if (!chrome_fd_trace_valid_file(f))
+        return 0;
+    return fd == 3 ||
+           chrome_asset_lifecycle_path_match(chrome_fd_trace_path(f));
+}
+
+static int chrome_asset_lifecycle_shared_fd_match(int fd)
+{
+    return fd >= 90 && fd <= 120;
+}
+
+static void chrome_asset_lifecycle_trace_close(const char *op, int fd,
+                                               struct vfs_file *f)
+{
+    if (!chrome_asset_lifecycle_trace_enabled() ||
+        (!chrome_asset_lifecycle_file_match(f, fd) &&
+         !chrome_asset_lifecycle_shared_fd_match(fd)))
+        return;
+
+    printf("chrome-asset-fd-op: op=%s pid=%d tgid=%d name=%s fd=%d path=%s file=%p kind=%d flags=0x%x ref=%d\n",
+           op, current->pid, current->tgid, current->name, fd,
+           chrome_fd_trace_path(f), f, f->f_kind, f->f_flags, f->ref_count);
+}
+
+static void chrome_asset_lifecycle_trace_dup(const char *op, int oldfd,
+                                             int newfd, int ret,
+                                             struct vfs_file *f,
+                                             struct vfs_file *replaced)
+{
+    const char *path;
+    const char *replaced_path;
+
+    if (!chrome_asset_lifecycle_trace_enabled())
+        return;
+    if (!chrome_asset_lifecycle_file_match(f, oldfd) &&
+        !chrome_asset_lifecycle_file_match(replaced, newfd) &&
+        newfd != 3 && ret != 3 &&
+        !chrome_asset_lifecycle_shared_fd_match(oldfd) &&
+        !chrome_asset_lifecycle_shared_fd_match(newfd) &&
+        !chrome_asset_lifecycle_shared_fd_match(ret))
+        return;
+
+    path = chrome_fd_trace_valid_file(f) ? chrome_fd_trace_path(f) : "(bad)";
+    replaced_path = chrome_fd_trace_valid_file(replaced) ?
+        chrome_fd_trace_path(replaced) : "(none)";
+
+    printf("chrome-asset-fd-op: op=%s pid=%d tgid=%d name=%s oldfd=%d newfd=%d ret=%d path=%s file=%p kind=%d flags=0x%x replaced=%p replaced_path=%s replaced_kind=%d replaced_flags=0x%x\n",
+           op, current->pid, current->tgid, current->name, oldfd, newfd, ret,
+           path, f, chrome_fd_trace_valid_file(f) ? f->f_kind : -1,
+           chrome_fd_trace_valid_file(f) ? f->f_flags : 0, replaced,
+           replaced_path,
+           chrome_fd_trace_valid_file(replaced) ? replaced->f_kind : -1,
+           chrome_fd_trace_valid_file(replaced) ? replaced->f_flags : 0);
+}
+
+static int chrome_fd_trace_statat_path(const char *path)
+{
+    if (path == NULL)
+        return 0;
+    return strstr(path, "/proc") != NULL || strstr(path, "self") != NULL ||
+           strstr(path, "task") != NULL || strstr(path, "fd") != NULL;
+}
+
+static void chrome_fd_trace_fstatat(int dirfd, const char *path, int flags,
+                                    int ret, const struct stat *st)
+{
+    if (!chrome_fd_trace_enabled() || !chrome_vfs_trace_process())
+        return;
+    if (!chrome_fd_trace_statat_path(path))
+        return;
+
+    struct vfs_file *dir = NULL;
+    const char *dir_path = "";
+    if (dirfd >= 0) {
+        dir = vfs_fdtable_get_file(current->fdtable, dirfd);
+        dir_path = chrome_fd_trace_path(dir);
+    }
+
+    if (ret == 0 && st != NULL) {
+        printf("chrome-fd-trace: fstatat pid=%d tgid=%d name=%s dirfd=%d "
+               "dirpath=%s path=%s flags=0x%x ret=0 ino=%lu mode=0x%x "
+               "size=%ld nlink=%lu\n",
+               current->pid, current->tgid, current->name, dirfd, dir_path,
+               path ? path : "(null)", flags, st->st_ino, st->st_mode,
+               st->st_size, st->st_nlink);
+    } else {
+        printf("chrome-fd-trace: fstatat pid=%d tgid=%d name=%s dirfd=%d "
+               "dirpath=%s path=%s flags=0x%x ret=%d\n",
+               current->pid, current->tgid, current->name, dirfd, dir_path,
+               path ? path : "(null)", flags, ret);
+    }
+
+    if (dir != NULL)
+        vfs_fput(dir);
+}
+
+static void chrome_fd_trace_read_payload(int fd, struct vfs_file *f,
+                                         uint64 user_buf, ssize_t ret,
+                                         loff_t pos_before)
+{
+    if (!chrome_fd_trace_enabled() || !chrome_vfs_trace_process() || ret <= 0)
+        return;
+
+    const char *path = chrome_fd_trace_path(f);
+    if (path == NULL || strstr(path, "cmdline") == NULL)
+        return;
+
+    size_t sample_len = (ret < 240) ? (size_t)ret : 240;
+    char sample[241];
+    if (vm_copyin(current->vm, sample, user_buf, sample_len) < 0)
+        return;
+    for (size_t i = 0; i < sample_len; i++) {
+        unsigned char c = (unsigned char)sample[i];
+        if (c == '\0')
+            sample[i] = '|';
+        else if (c < 0x20 || c >= 0x7f)
+            sample[i] = '.';
+    }
+    sample[sample_len] = '\0';
+
+    printf("chrome-fd-trace: read-payload pid=%d tgid=%d name=%s fd=%d "
+           "ret=%ld pos=%lld->%lld path=%s sample='%s'%s\n",
+           current->pid, current->tgid, current->name, fd, (long)ret,
+           pos_before, f->f_pos, path, sample,
+           (ret > (ssize_t)sample_len) ? "..." : "");
+}
+
+#define CHROME_FD_TRACE(fmt, ...)                                             \
+    do {                                                                      \
+        if (chrome_fd_trace_enabled() && chrome_vfs_trace_process())          \
+            printf("chrome-fd-trace: " fmt, ##__VA_ARGS__);                  \
+    } while (0)
 
 static int timespec_to_timeout_ms_ceil(int64 tv_sec, int64 tv_nsec,
                                        int *timeout_ms)
@@ -473,6 +678,7 @@ static void __attribute__((unused)) __vfs_close_fd(int fd) {
     struct vfs_file *f = __vfs_fdfree(fd);
     spin_unlock(&current->fdtable->lock);
     if (f != NULL) {
+        chrome_asset_lifecycle_trace_close("close-internal", fd, f);
         __vfs_finish_close_file(f);
     }
 }
@@ -494,6 +700,11 @@ uint64 sys_vfs_dup(void) {
     int newfd = __vfs_fdalloc(f);
     spin_unlock(&current->fdtable->lock);
 
+    CHROME_FD_TRACE("dup pid=%d tgid=%d name=%s oldfd=%d newfd=%d path=%s "
+                    "file=%p f_flags=0x%x\n",
+                    current->pid, current->tgid, current->name, fd, newfd,
+                    chrome_fd_trace_path(f), f, f->f_flags);
+    chrome_asset_lifecycle_trace_dup("dup", fd, -1, newfd, f, NULL);
     vfs_fput(f); // remove the reference from __vfs_argfd
     return newfd;
 }
@@ -519,14 +730,24 @@ uint64 sys_vfs_dup2(void) {
 
     spin_lock(&current->fdtable->lock);
     struct vfs_file *old_newfd = __vfs_fdfree(newfd);
-    int ret = vfs_fdtable_alloc_fd_from(current->fdtable, f, newfd);
+    const char *replaced_path = old_newfd ? chrome_fd_trace_path(old_newfd) : "(none)";
+    uint32 replaced_flags = old_newfd ? old_newfd->f_flags : 0;
+    int ret = vfs_fdtable_install_fd_at(current->fdtable, f, newfd);
     spin_unlock(&current->fdtable->lock);
 
     if (old_newfd) {
-        vfs_file_lock_release(old_newfd, current->tgid);
-        vfs_file_maybe_last_fd_close(old_newfd);
-        __vfs_fput_call_rcu(old_newfd);
+        chrome_asset_lifecycle_trace_dup("dup2-replace", oldfd, newfd, ret, f,
+                                         old_newfd);
+        __vfs_finish_close_file(old_newfd);
+    } else {
+        chrome_asset_lifecycle_trace_dup("dup2", oldfd, newfd, ret, f, NULL);
     }
+    CHROME_FD_TRACE("dup2 pid=%d tgid=%d name=%s oldfd=%d newfd=%d ret=%d "
+                    "path=%s file=%p f_flags=0x%x replaced=%p "
+                    "replaced_path=%s replaced_flags=0x%x\n",
+                    current->pid, current->tgid, current->name, oldfd, newfd,
+                    ret, chrome_fd_trace_path(f), f, f->f_flags, old_newfd,
+                    replaced_path, replaced_flags);
     vfs_fput(f);
     return ret;
 }
@@ -592,6 +813,7 @@ uint64 sys_vfs_read(void) {
     }
 
     ssize_t ret = vfs_fileread(f, (void *)p, n, true);
+    chrome_fd_trace_read_payload(fd, f, p, ret, pos_before);
     if (webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
         if (inode == NULL) {
             printf("webkit-vfs: read-exit pid=%d name=%s fd=%d kind=%s "
@@ -645,6 +867,11 @@ uint64 sys_vfs_close(void) {
     }
     spin_unlock(&current->fdtable->lock);
 
+    CHROME_FD_TRACE("close pid=%d tgid=%d name=%s fd=%d path=%s "
+                    "file=%p f_flags=0x%x\n",
+                    current->pid, current->tgid, current->name, fd,
+                    chrome_fd_trace_path(f), f, f->f_flags);
+    chrome_asset_lifecycle_trace_close("close", fd, f);
     __vfs_finish_close_file(f);
     ACCT_INC(current->thread_group, fs_closes);
     return 0;
@@ -666,7 +893,14 @@ uint64 sys_vfs_fstat(void) {
     }
 
     struct stat kst;
+    memset(&kst, 0, sizeof(kst));
     int ret = vfs_filestat(f, &kst);
+    CHROME_FD_TRACE("fstat pid=%d tgid=%d name=%s fd=%d ret=%d "
+                    "mode=0x%x size=%ld blocks=%ld path=%s file=%p "
+                    "f_flags=0x%x\n",
+                    current->pid, current->tgid, current->name, fd, ret,
+                    kst.st_mode, kst.st_size, kst.st_blocks,
+                    chrome_fd_trace_path(f), f, f->f_flags);
     if (ret != 0) {
         vfs_fput(f); // remove the reference from __vfs_argfd
         SYSCALL_PROFILE_RETURN(ret, g_sys_fstat_ticks);
@@ -864,10 +1098,25 @@ uint64 sys_vfs_fcntl(void) {
 
     if (cmd == F_GETFD || cmd == F_SETFD) {
         spin_lock(&current->fdtable->lock);
+        struct vfs_file *trace_file = NULL;
+        if (fd >= 0 && fd < NOFILE)
+            trace_file = current->fdtable->files[fd];
         int ret = (cmd == F_GETFD)
                       ? vfs_fdtable_get_fdflags(current->fdtable, fd)
                       : vfs_fdtable_set_fdflags(current->fdtable, fd,
                                                arg & FD_CLOEXEC);
+        if (chrome_fd_trace_valid_file(trace_file)) {
+            CHROME_FD_TRACE("fcntl-fd pid=%d tgid=%d name=%s fd=%d cmd=%d "
+                            "arg=0x%x ret=%d path=%s file=%p f_flags=0x%x\n",
+                            current->pid, current->tgid, current->name, fd,
+                            cmd, arg, ret, chrome_fd_trace_path(trace_file),
+                            trace_file, trace_file->f_flags);
+        } else {
+            CHROME_FD_TRACE("fcntl-fd pid=%d tgid=%d name=%s fd=%d cmd=%d "
+                            "arg=0x%x ret=%d path=(bad)\n",
+                            current->pid, current->tgid, current->name, fd,
+                            cmd, arg, ret);
+        }
         spin_unlock(&current->fdtable->lock);
         return ret;
     }
@@ -1085,12 +1334,24 @@ uint64 sys_vfs_fcntl(void) {
             (void)vfs_fdtable_set_fdflags(current->fdtable, ret, FD_CLOEXEC);
         }
         spin_unlock(&current->fdtable->lock);
+        chrome_asset_lifecycle_trace_dup(normalized_cmd == F_DUPFD_CLOEXEC ?
+                                             "fcntl-dupfd-cloexec" :
+                                             "fcntl-dupfd",
+                                         fd, arg, ret, f, NULL);
         break;
     default:
         ret = -EINVAL;
         break;
     }
 
+    if (cmd == F_GETFL || cmd == F_SETFL ||
+        cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) {
+        CHROME_FD_TRACE("fcntl-file pid=%d tgid=%d name=%s fd=%d cmd=%d "
+                        "arg=0x%x ret=%d path=%s file=%p f_flags=0x%x\n",
+                        current->pid, current->tgid, current->name, fd,
+                        cmd, arg, ret, chrome_fd_trace_path(f), f,
+                        f->f_flags);
+    }
     vfs_fput(f);
     return ret;
 }
@@ -1466,9 +1727,16 @@ uint64 sys_vfs_open(void) {
 
 #define SYS_VFS_OPEN_RETURN(ret_expr)                                        \
     do {                                                                     \
+        long __ret = (long)(ret_expr);                                       \
+        if (__ret < 0) {                                                     \
+            CHROME_FD_TRACE("open fail pid=%d tgid=%d name=%s path=%s "      \
+                            "flags=0x%x ret=%ld\n",                        \
+                            current->pid, current->tgid, current->name,      \
+                            path, omode, __ret);                            \
+        }                                                                    \
         kvfree(path);                                                        \
         kvfree(name);                                                        \
-        SYSCALL_PROFILE_RETURN(ret_expr, g_sys_open_ticks);                  \
+        SYSCALL_PROFILE_RETURN(__ret, g_sys_open_ticks);                     \
     } while (0)
 
     if (n < 0) {
@@ -1604,6 +1872,7 @@ uint64 sys_vfs_open(void) {
     if (IS_ERR(f)) {
         SYS_VFS_OPEN_RETURN(PTR_ERR(f));
     }
+    vfs_file_set_opened_path(f, path);
 
     // Handle O_TRUNC - truncate the file to zero length
     if (should_truncate) {
@@ -3236,6 +3505,20 @@ static const char *webkit_poll_fd_kind(struct vfs_file *f)
     return "regular";
 }
 
+static uint chrome_unix_scm_count_locked(struct unix_sock *sk)
+{
+    if (sk->scm_tail >= sk->scm_head)
+        return sk->scm_tail - sk->scm_head;
+    return UNIX_SCM_QUEUE_MAX - sk->scm_head + sk->scm_tail;
+}
+
+static uint chrome_unix_packet_count_locked(struct unix_sock *sk)
+{
+    if (sk->packet_tail >= sk->packet_head)
+        return sk->packet_tail - sk->packet_head;
+    return UNIX_PACKET_QUEUE_MAX - sk->packet_head + sk->packet_tail;
+}
+
 static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
                                       size_t buflen)
 {
@@ -3243,6 +3526,10 @@ static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
     struct unix_sock *peer = NULL;
     uint self_tx = 0;
     uint peer_tx = 0;
+    uint self_packets = 0;
+    uint peer_packets = 0;
+    uint self_scm = 0;
+    uint peer_scm = 0;
     int state = 0;
     int peer_state = -1;
     int shutdown_flags = 0;
@@ -3262,6 +3549,8 @@ static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
     state = sk->state;
     shutdown_flags = sk->shutdown_flags;
     self_tx = sk->tx.nwrite - sk->tx.nread;
+    self_packets = chrome_unix_packet_count_locked(sk);
+    self_scm = chrome_unix_scm_count_locked(sk);
     peer = sk->peer;
     if (peer != NULL)
         unix_sock_get_ref(peer);
@@ -3272,14 +3561,17 @@ static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
         peer_state = peer->state;
         peer_shutdown = peer->shutdown_flags;
         peer_tx = peer->tx.nwrite - peer->tx.nread;
+        peer_packets = chrome_unix_packet_count_locked(peer);
+        peer_scm = chrome_unix_scm_count_locked(peer);
         spin_unlock(&peer->lock);
         unix_sock_put_ref(peer);
     }
 
     snprintf(buf, buflen,
-             "/unix:s%d/sh%x/selftx%u/peer_s%d/peer_sh%x/peertx%u",
-             state, shutdown_flags, self_tx, peer_state, peer_shutdown,
-             peer_tx);
+             "/unix:s%d/sh%x/selftx%u/selfpkt%u/selfscm%u"
+             "/peer_s%d/peer_sh%x/peertx%u/peerpkt%u/peerscm%u",
+             state, shutdown_flags, self_tx, self_packets, self_scm,
+             peer_state, peer_shutdown, peer_tx, peer_packets, peer_scm);
 }
 
 /*
@@ -3401,9 +3693,22 @@ done:
 static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
                                 int ready, struct pollfd_k *pfds)
 {
-    if (!((webkit_poll_summary_enabled() && webkit_vfs_trace_process()) ||
-          (chrome_poll_summary_enabled() && chrome_vfs_trace_process())))
+    int trace_webkit = webkit_poll_summary_enabled() && webkit_vfs_trace_process();
+    int trace_chrome = chrome_poll_summary_enabled() && chrome_vfs_trace_process();
+
+    if (!(trace_webkit || trace_chrome))
         return;
+
+    if (trace_chrome && !trace_webkit && ready == 0 && timeout_ms < 0 &&
+        nfds == 1 && strcmp(phase, "wait") == 0 && pfds[0].fd >= 0) {
+        struct vfs_file *f = __vfs_argfd(pfds[0].fd);
+        if (f != NULL && f->ops != &unix_socket_file_ops) {
+            vfs_fput(f);
+            return;
+        }
+        if (f != NULL)
+            vfs_fput(f);
+    }
 
     static _Atomic uint64 seq;
     uint64 n = __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED);
@@ -4225,9 +4530,15 @@ uint64 sys_vfs_openat(void) {
     if (path_ret < 0) {
         SYSCALL_PROFILE_RETURN(path_ret, g_sys_openat_ticks);
     }
+    WEBKIT_VFS_TRACE("openat begin pid=%d name=%s dirfd=%d path=%s "
+                     "path_len=%d\n",
+                     current->pid, current->name, dirfd, path, n);
     if (path[0] != '/') {
         int err = __vfs_resolve_dirfd(dirfd, &start_dir);
         if (err) {
+            WEBKIT_VFS_TRACE("openat dirfd fail pid=%d dirfd=%d path=%s "
+                             "err=%d\n",
+                             current->pid, dirfd, path, err);
             kvfree(path);
             SYSCALL_PROFILE_RETURN(err, g_sys_openat_ticks);
         }
@@ -4245,16 +4556,30 @@ uint64 sys_vfs_openat(void) {
 
 #define SYS_VFS_OPENAT_RETURN(ret_expr)                                      \
     do {                                                                     \
+        long __ret = (long)(ret_expr);                                       \
+        if (__ret < 0) {                                                     \
+            CHROME_FD_TRACE("openat fail pid=%d tgid=%d name=%s dirfd=%d "   \
+                            "path=%s flags=0x%x ret=%ld\n",                \
+                            current->pid, current->tgid, current->name,      \
+                            dirfd, path, omode, __ret);                     \
+        }                                                                    \
         if (start_dir) vfs_iput(start_dir);                                  \
         kvfree(path);                                                        \
         kvfree(name);                                                        \
-        SYSCALL_PROFILE_RETURN(ret_expr, g_sys_openat_ticks);                \
+        SYSCALL_PROFILE_RETURN(__ret, g_sys_openat_ticks);                   \
     } while (0)
 
     struct vfs_inode *inode = NULL;
 
     if ((omode & O_TMPFILE) == O_TMPFILE) {
+        WEBKIT_VFS_TRACE("openat lookup tmpfile-dir pid=%d path=%s "
+                         "flags=0x%x\n",
+                         current->pid, path, omode);
         inode = vfs_namei_at(start_dir, path, n);
+        WEBKIT_VFS_TRACE("openat lookup tmpfile-dir done pid=%d path=%s "
+                         "inode=%p err=%ld\n",
+                         current->pid, path, inode,
+                         IS_ERR(inode) ? PTR_ERR(inode) : 0);
         if (IS_ERR(inode))
             SYS_VFS_OPENAT_RETURN(PTR_ERR(inode));
         if (inode == NULL)
@@ -4275,39 +4600,61 @@ uint64 sys_vfs_openat(void) {
         if (root_path)
             SYS_VFS_OPENAT_RETURN(-EISDIR);
 
-        struct vfs_inode *parent =
-            vfs_nameiparent_at(start_dir, path, n, name, VFS_USER_PATH_MAX);
-        if (IS_ERR(parent)) {
-            SYS_VFS_OPENAT_RETURN(PTR_ERR(parent));
-        }
-        if (parent == NULL) {
-            SYS_VFS_OPENAT_RETURN(-ENOENT);
-        }
+        WEBKIT_VFS_TRACE("openat lookup create pid=%d path=%s flags=0x%x\n",
+                         current->pid, path, omode);
+        inode = vfs_namei_at(start_dir, path, n);
+        WEBKIT_VFS_TRACE("openat lookup create done pid=%d path=%s inode=%p "
+                         "err=%ld\n",
+                         current->pid, path, inode,
+                         IS_ERR(inode) ? PTR_ERR(inode) : 0);
+        if (!IS_ERR_OR_NULL(inode)) {
+            if (omode & O_EXCL) {
+                vfs_iput(inode);
+                SYS_VFS_OPENAT_RETURN(-EEXIST);
+            }
+            if (S_ISDIR(inode->mode)) {
+                vfs_iput(inode);
+                SYS_VFS_OPENAT_RETURN(-EISDIR);
+            }
+        } else {
+            int lookup_err = IS_ERR(inode) ? PTR_ERR(inode) : -ENOENT;
+            inode = NULL;
+            if (lookup_err != -ENOENT)
+                SYS_VFS_OPENAT_RETURN(lookup_err);
 
-        size_t name_len = strlen(name);
-        if (name_len == 0) {
+            struct vfs_inode *parent =
+                vfs_nameiparent_at(start_dir, path, n, name, VFS_USER_PATH_MAX);
+            if (IS_ERR(parent)) {
+                SYS_VFS_OPENAT_RETURN(PTR_ERR(parent));
+            }
+            if (parent == NULL) {
+                SYS_VFS_OPENAT_RETURN(-ENOENT);
+            }
+
+            size_t name_len = strlen(name);
+            if (name_len == 0) {
+                vfs_iput(parent);
+                SYS_VFS_OPENAT_RETURN(-EISDIR);
+            }
+            inode = vfs_create(parent, (mode_t)mode & ~current_umask(),
+                               name, name_len);
             vfs_iput(parent);
-            SYS_VFS_OPENAT_RETURN(-EISDIR);
-        }
-        inode = vfs_create(parent, (mode_t)mode & ~current_umask(),
-                           name, name_len);
-        vfs_iput(parent);
 
-        if (IS_ERR(inode)) {
-            if (PTR_ERR(inode) == -EEXIST && !(omode & O_EXCL)) {
-                inode = vfs_namei_at(start_dir, path, n);
-                if (!IS_ERR_OR_NULL(inode) && S_ISDIR(inode->mode)) {
-                    vfs_iput(inode);
-                    SYS_VFS_OPENAT_RETURN(-EISDIR);
-                }
-            } else {
+            if (IS_ERR(inode)) {
                 SYS_VFS_OPENAT_RETURN(PTR_ERR(inode));
             }
         }
     } else {
         if (omode & O_NOFOLLOW) {
+            WEBKIT_VFS_TRACE("openat lookup nofollow-parent pid=%d path=%s "
+                             "flags=0x%x\n",
+                             current->pid, path, omode);
             struct vfs_inode *parent =
                 vfs_nameiparent_at(start_dir, path, n, name, VFS_USER_PATH_MAX);
+            WEBKIT_VFS_TRACE("openat lookup nofollow-parent done pid=%d "
+                             "path=%s parent=%p err=%ld\n",
+                             current->pid, path, parent,
+                             IS_ERR(parent) ? PTR_ERR(parent) : 0);
             if (IS_ERR(parent))
                 SYS_VFS_OPENAT_RETURN(PTR_ERR(parent));
             if (parent == NULL)
@@ -4331,7 +4678,13 @@ uint64 sys_vfs_openat(void) {
                 SYS_VFS_OPENAT_RETURN(-ELOOP);
             }
         } else {
+            WEBKIT_VFS_TRACE("openat lookup pid=%d path=%s flags=0x%x\n",
+                             current->pid, path, omode);
             inode = vfs_namei_at(start_dir, path, n);
+            WEBKIT_VFS_TRACE("openat lookup done pid=%d path=%s inode=%p "
+                             "err=%ld\n",
+                             current->pid, path, inode,
+                             IS_ERR(inode) ? PTR_ERR(inode) : 0);
             if (IS_ERR(inode))
                 SYS_VFS_OPENAT_RETURN(PTR_ERR(inode));
             if (inode == NULL)
@@ -4358,12 +4711,17 @@ uint64 sys_vfs_openat(void) {
         SYS_VFS_OPENAT_RETURN(-ENOTDIR);
     }
 
+    WEBKIT_VFS_TRACE("openat fileopen pid=%d path=%s flags=0x%x inode=%p\n",
+                     current->pid, path, omode, inode);
     struct vfs_file *f = vfs_fileopen(inode, omode);
+    WEBKIT_VFS_TRACE("openat fileopen done pid=%d path=%s file=%p err=%ld\n",
+                     current->pid, path, f, IS_ERR(f) ? PTR_ERR(f) : 0);
     vfs_iput(inode);
     if (IS_ERR(f))
         SYS_VFS_OPENAT_RETURN(PTR_ERR(f));
     if (f == NULL)
         SYS_VFS_OPENAT_RETURN(-ENOMEM);
+    vfs_file_set_opened_path(f, path);
 
     if (!(omode & O_PATH) && (omode & O_TRUNC)) {
         truncate(f, 0);
@@ -4375,6 +4733,12 @@ uint64 sys_vfs_openat(void) {
         vfs_fdtable_set_fdflags(current->fdtable, n, FD_CLOEXEC);
     }
     spin_unlock(&current->fdtable->lock);
+    WEBKIT_VFS_TRACE("openat fdalloc done pid=%d path=%s fd=%d\n",
+                     current->pid, path, n);
+    CHROME_FD_TRACE("openat pid=%d tgid=%d name=%s fd=%d dirfd=%d path=%s "
+                    "flags=0x%x file=%p f_flags=0x%x cloexec=%d\n",
+                    current->pid, current->tgid, current->name, n, dirfd,
+                    path, omode, f, f->f_flags, (omode & O_CLOEXEC) != 0);
 
     if (n >= 0 && webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
         const char *fs_name = "(none)";
@@ -4461,6 +4825,11 @@ uint64 sys_vfs_close_range(void) {
         return 0;
     if (last >= NOFILE)
         last = NOFILE - 1;
+
+    CHROME_FD_TRACE("close_range pid=%d tgid=%d name=%s first=%u last=%u "
+                    "flags=0x%x\n",
+                    current->pid, current->tgid, current->name, first, last,
+                    flags);
 
     if (flags & CLOSE_RANGE_UNSHARE) {
         struct vfs_fdtable *old = current->fdtable;
@@ -5209,6 +5578,7 @@ uint64 sys_vfs_fstatat(void) {
     const int allowed_flags = AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT |
                               AT_EMPTY_PATH;
     if (flags & ~allowed_flags) {
+        chrome_fd_trace_fstatat(dirfd, path, flags, -EINVAL, NULL);
         kvfree(path);
         SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_fstatat_ticks);
     }
@@ -5224,10 +5594,13 @@ uint64 sys_vfs_fstatat(void) {
         int ret = vfs_filestat(f, &st);
         vfs_fput(f);
         kvfree(path);
-        if (ret != 0)
+        if (ret != 0) {
+            chrome_fd_trace_fstatat(dirfd, "", flags, ret, NULL);
             SYSCALL_PROFILE_RETURN(ret, g_sys_fstatat_ticks);
+        }
 
         vfs_stat_prepare_user(&st);
+        chrome_fd_trace_fstatat(dirfd, "", flags, 0, &st);
         if (either_copyout(1, stat_addr, &st, sizeof(st)) < 0)
             SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstatat_ticks);
         SYSCALL_PROFILE_RETURN(0, g_sys_fstatat_ticks);
@@ -5236,6 +5609,7 @@ uint64 sys_vfs_fstatat(void) {
     struct vfs_inode *start_dir = NULL;
     int err = __vfs_resolve_dirfd(dirfd, &start_dir);
     if (err) {
+        chrome_fd_trace_fstatat(dirfd, path, flags, err, NULL);
         kvfree(path);
         SYSCALL_PROFILE_RETURN(err, g_sys_fstatat_ticks);
     }
@@ -5278,22 +5652,32 @@ uint64 sys_vfs_fstatat(void) {
         inode = vfs_namei_at(start_dir, path, path_len);
         if (start_dir) vfs_iput(start_dir);
     }
-    kvfree(path);
-
-    if (IS_ERR(inode))
-        SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_fstatat_ticks);
-    if (inode == NULL)
+    if (IS_ERR(inode)) {
+        err = PTR_ERR(inode);
+        chrome_fd_trace_fstatat(dirfd, path, flags, err, NULL);
+        kvfree(path);
+        SYSCALL_PROFILE_RETURN(err, g_sys_fstatat_ticks);
+    }
+    if (inode == NULL) {
+        chrome_fd_trace_fstatat(dirfd, path, flags, -ENOENT, NULL);
+        kvfree(path);
         SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_fstatat_ticks);
+    }
 
     struct stat st;
     int ret = __vfs_inode_stat(inode, &st);
     vfs_iput(inode);
-    if (ret != 0)
+    if (ret != 0) {
+        chrome_fd_trace_fstatat(dirfd, path, flags, ret, NULL);
+        kvfree(path);
         SYSCALL_PROFILE_RETURN(ret, g_sys_fstatat_ticks);
+    }
 
     // Copy the 128-byte struct stat directly to userspace.
     // Kernel struct stat layout matches musl's riscv64 layout exactly.
     vfs_stat_prepare_user(&st);
+    chrome_fd_trace_fstatat(dirfd, path, flags, 0, &st);
+    kvfree(path);
     if (either_copyout(1, stat_addr, &st, sizeof(st)) < 0)
         SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstatat_ticks);
 
@@ -6162,6 +6546,8 @@ uint64 sys_vfs_dup3(void) {
 
     if (oldfd == newfd)
         return -EINVAL;  /* Linux dup3 behavior: EINVAL if oldfd == newfd */
+    if (flags & ~O_CLOEXEC)
+        return -EINVAL;
     if (newfd < 0 || newfd >= NOFILE)
         return -EBADF;
 
@@ -6171,15 +6557,26 @@ uint64 sys_vfs_dup3(void) {
 
     spin_lock(&current->fdtable->lock);
     struct vfs_file *old_newfd = __vfs_fdfree(newfd);
-    int ret = vfs_fdtable_alloc_fd_from(current->fdtable, f, newfd);
+    const char *replaced_path = old_newfd ? chrome_fd_trace_path(old_newfd) : "(none)";
+    uint32 replaced_flags = old_newfd ? old_newfd->f_flags : 0;
+    int ret = vfs_fdtable_install_fd_at(current->fdtable, f, newfd);
     if (ret >= 0 && (flags & O_CLOEXEC))
         vfs_fdtable_set_fdflags(current->fdtable, ret, FD_CLOEXEC);
     spin_unlock(&current->fdtable->lock);
 
     if (old_newfd) {
-        vfs_file_maybe_last_fd_close(old_newfd);
-        __vfs_fput_call_rcu(old_newfd);
+        chrome_asset_lifecycle_trace_dup("dup3-replace", oldfd, newfd, ret, f,
+                                         old_newfd);
+        __vfs_finish_close_file(old_newfd);
+    } else {
+        chrome_asset_lifecycle_trace_dup("dup3", oldfd, newfd, ret, f, NULL);
     }
+    CHROME_FD_TRACE("dup3 pid=%d tgid=%d name=%s oldfd=%d newfd=%d "
+                    "flags=0x%x ret=%d path=%s file=%p f_flags=0x%x "
+                    "replaced=%p replaced_path=%s replaced_flags=0x%x\n",
+                    current->pid, current->tgid, current->name, oldfd, newfd,
+                    flags, ret, chrome_fd_trace_path(f), f, f->f_flags,
+                    old_newfd, replaced_path, replaced_flags);
     vfs_fput(f);
 
     return ret;
@@ -6550,35 +6947,435 @@ uint64 sys_signalfd4(void)
 #define IN_CLOEXEC  O_CLOEXEC
 #define IN_NONBLOCK O_NONBLOCK
 
+#define INOTIFY_MAX_QUEUED_EVENTS 512
+#define INOTIFY_NAME_MAX          255
+
+struct linux_inotify_event {
+    int wd;
+    uint32 mask;
+    uint32 cookie;
+    uint32 len;
+};
+
+struct inotify_event_node {
+    list_node_t entry;
+    struct linux_inotify_event ev;
+    char name[INOTIFY_NAME_MAX + 1];
+    size_t record_len;
+};
+
+struct inotify_watch {
+    list_node_t ctx_entry;
+    list_node_t global_entry;
+    struct inotify_ctx *ctx;
+    struct vfs_inode *inode;
+    int wd;
+    uint32 mask;
+    bool active;
+};
+
 struct inotify_ctx {
     int next_wd;
-    bool active[256];
+    tq_t readq;
+    list_node_t watches;
+    list_node_t events;
+    int event_count;
+    bool overflow_queued;
+    bool closing;
+    struct vfs_file *file;
 };
+
+static spinlock_t inotify_global_lock = SPINLOCK_INITIALIZED("inotify");
+static list_node_t inotify_global_watches =
+    LIST_ENTRY_INITIALIZED(inotify_global_watches);
+static uint32 inotify_next_cookie = 1;
+
+static size_t inotify_align_name_len(size_t len)
+{
+    return (len + 3) & ~(size_t)3;
+}
+
+static size_t inotify_copy_name(char *dst, const char *name, size_t name_len)
+{
+    size_t len = name_len;
+    if (name == NULL || name_len == 0) {
+        dst[0] = '\0';
+        return 0;
+    }
+    if (len > INOTIFY_NAME_MAX)
+        len = INOTIFY_NAME_MAX;
+    memmove(dst, name, len);
+    dst[len] = '\0';
+    return len + 1;
+}
+
+static struct inotify_event_node *
+inotify_alloc_event(int wd, uint32 mask, uint32 cookie, const char *name,
+                    size_t name_len)
+{
+    struct inotify_event_node *ev = kalloc();
+    if (ev == NULL)
+        return NULL;
+    memset(ev, 0, sizeof(*ev));
+    list_entry_init(&ev->entry);
+    size_t raw_name_len = inotify_copy_name(ev->name, name, name_len);
+    size_t aligned_name_len = inotify_align_name_len(raw_name_len);
+    ev->ev.wd = wd;
+    ev->ev.mask = mask;
+    ev->ev.cookie = cookie;
+    ev->ev.len = (uint32)aligned_name_len;
+    ev->record_len = sizeof(ev->ev) + aligned_name_len;
+    return ev;
+}
+
+static void inotify_free_event(struct inotify_event_node *ev)
+{
+    if (ev != NULL)
+        kfree(ev);
+}
+
+static void inotify_free_watch(struct inotify_watch *watch)
+{
+    if (watch == NULL)
+        return;
+    if (watch->inode != NULL)
+        vfs_iput(watch->inode);
+    kfree(watch);
+}
+
+static bool inotify_mask_matches(uint32 watch_mask, uint32 event_mask)
+{
+    uint32 match_mask = event_mask & ~IN_ISDIR;
+    return (watch_mask & match_mask) != 0;
+}
+
+static uint32 inotify_stored_mask(uint32 mask)
+{
+    return mask & ~(IN_MASK_ADD | IN_MASK_CREATE);
+}
+
+static struct vfs_inode *inotify_lookup_watch_path(const char *path,
+                                                   uint32 mask)
+{
+    if ((mask & IN_DONT_FOLLOW) == 0)
+        return vfs_namei(path, strlen(path));
+
+    char name[MAXPATH];
+    struct vfs_inode *parent =
+        vfs_nameiparent(path, strlen(path), name, sizeof(name));
+    if (IS_ERR_OR_NULL(parent))
+        return parent;
+
+    struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
+    int ret = vfs_ilookup(parent, &dentry, name, strlen(name));
+    vfs_iput(parent);
+    if (ret != 0)
+        return ERR_PTR(ret);
+
+    struct vfs_inode *inode = vfs_get_dentry_inode(&dentry);
+    vfs_release_dentry(&dentry);
+    return inode;
+}
+
+static void inotify_queue_overflow_locked(struct inotify_ctx *ctx)
+{
+    if (ctx->overflow_queued)
+        return;
+    struct inotify_event_node *overflow =
+        inotify_alloc_event(-1, IN_Q_OVERFLOW, 0, NULL, 0);
+    if (overflow == NULL)
+        return;
+    list_entry_push(&ctx->events, &overflow->entry);
+    ctx->event_count++;
+    ctx->overflow_queued = true;
+}
+
+static bool inotify_queue_event_locked(struct inotify_ctx *ctx, int wd,
+                                       uint32 mask, uint32 cookie,
+                                       const char *name, size_t name_len)
+{
+    if (ctx == NULL || ctx->closing)
+        return false;
+    if (ctx->event_count >= INOTIFY_MAX_QUEUED_EVENTS) {
+        inotify_queue_overflow_locked(ctx);
+        return false;
+    }
+    struct inotify_event_node *ev =
+        inotify_alloc_event(wd, mask, cookie, name, name_len);
+    if (ev == NULL) {
+        inotify_queue_overflow_locked(ctx);
+        return false;
+    }
+    list_entry_push(&ctx->events, &ev->entry);
+    ctx->event_count++;
+    tq_wakeup_all(&ctx->readq, 0, 0);
+    return true;
+}
+
+static void inotify_notify_file_readable(struct vfs_file *file)
+{
+    if (file == NULL)
+        return;
+    vfs_file_knote_notify(file, EVFILT_READ, 0);
+    vfs_fput(file);
+}
+
+static void inotify_detach_watch_locked(struct inotify_watch *watch,
+                                        list_node_t *free_list,
+                                        bool queue_ignored)
+{
+    if (watch == NULL || !watch->active)
+        return;
+    if (queue_ignored)
+        (void)inotify_queue_event_locked(watch->ctx, watch->wd, IN_IGNORED,
+                                         0, NULL, 0);
+    watch->active = false;
+    list_entry_detach(&watch->ctx_entry);
+    list_entry_detach(&watch->global_entry);
+    list_entry_push(free_list, &watch->ctx_entry);
+}
+
+static void inotify_free_detached_watch_list(list_node_t *free_list)
+{
+    struct inotify_watch *watch, *tmp;
+    list_foreach_node_safe(free_list, watch, tmp, ctx_entry) {
+        list_entry_detach(&watch->ctx_entry);
+        inotify_free_watch(watch);
+    }
+}
+
+static struct vfs_file *inotify_emit_locked(struct vfs_inode *inode,
+                                            uint32 mask, uint32 cookie,
+                                            const char *name,
+                                            size_t name_len,
+                                            bool remove_self,
+                                            list_node_t *free_list)
+{
+    struct vfs_file *notify_file = NULL;
+    struct inotify_watch *watch, *tmp;
+    list_foreach_node_safe(&inotify_global_watches, watch, tmp, global_entry) {
+        if (!watch->active || watch->inode != inode)
+            continue;
+        if (!inotify_mask_matches(watch->mask, mask) && !remove_self)
+            continue;
+        if (inotify_mask_matches(watch->mask, mask)) {
+            if (inotify_queue_event_locked(watch->ctx, watch->wd, mask,
+                                           cookie, name, name_len) &&
+                notify_file == NULL) {
+                notify_file = vfs_fdup(watch->ctx->file);
+            }
+        }
+        if (remove_self || (watch->mask & IN_ONESHOT))
+            inotify_detach_watch_locked(watch, free_list, true);
+    }
+    return notify_file;
+}
+
+void vfs_inotify_inode_event(struct vfs_inode *inode, uint32 mask)
+{
+    if (inode == NULL)
+        return;
+    if (S_ISDIR(inode->mode))
+        mask |= IN_ISDIR;
+
+    list_node_t free_list = LIST_ENTRY_INITIALIZED(free_list);
+    spin_lock(&inotify_global_lock);
+    struct vfs_file *notify_file =
+        inotify_emit_locked(inode, mask, 0, NULL, 0, false, &free_list);
+    spin_unlock(&inotify_global_lock);
+    inotify_notify_file_readable(notify_file);
+    inotify_free_detached_watch_list(&free_list);
+}
+
+void vfs_inotify_child_event(struct vfs_inode *dir, struct vfs_inode *child,
+                             uint32 mask, const char *name, size_t name_len)
+{
+    if (dir == NULL)
+        return;
+    if (child != NULL && S_ISDIR(child->mode))
+        mask |= IN_ISDIR;
+
+    list_node_t free_list = LIST_ENTRY_INITIALIZED(free_list);
+    spin_lock(&inotify_global_lock);
+    struct vfs_file *notify_file =
+        inotify_emit_locked(dir, mask, 0, name, name_len, false, &free_list);
+    spin_unlock(&inotify_global_lock);
+    inotify_notify_file_readable(notify_file);
+    inotify_free_detached_watch_list(&free_list);
+}
+
+void vfs_inotify_inode_removed(struct vfs_inode *inode, uint32 mask)
+{
+    if (inode == NULL)
+        return;
+    if (S_ISDIR(inode->mode))
+        mask |= IN_ISDIR;
+
+    list_node_t free_list = LIST_ENTRY_INITIALIZED(free_list);
+    spin_lock(&inotify_global_lock);
+    struct vfs_file *notify_file =
+        inotify_emit_locked(inode, mask, 0, NULL, 0, true, &free_list);
+    spin_unlock(&inotify_global_lock);
+    inotify_notify_file_readable(notify_file);
+    inotify_free_detached_watch_list(&free_list);
+}
+
+void vfs_inotify_move_event(struct vfs_inode *old_dir,
+                            struct vfs_inode *new_dir,
+                            struct vfs_inode *target,
+                            const char *old_name, size_t old_name_len,
+                            const char *new_name, size_t new_name_len)
+{
+    uint32 cookie =
+        __atomic_fetch_add(&inotify_next_cookie, 1, __ATOMIC_RELAXED);
+    if (cookie == 0)
+        cookie =
+            __atomic_fetch_add(&inotify_next_cookie, 1, __ATOMIC_RELAXED);
+    uint32 isdir = (target != NULL && S_ISDIR(target->mode)) ? IN_ISDIR : 0;
+    list_node_t free_list = LIST_ENTRY_INITIALIZED(free_list);
+    struct vfs_file *notify_file = NULL;
+    spin_lock(&inotify_global_lock);
+    if (old_dir != NULL)
+        notify_file = inotify_emit_locked(old_dir, IN_MOVED_FROM | isdir,
+                                          cookie, old_name, old_name_len,
+                                          false, &free_list);
+    if (new_dir != NULL) {
+        struct vfs_file *nf =
+            inotify_emit_locked(new_dir, IN_MOVED_TO | isdir, cookie,
+                                new_name, new_name_len, false, &free_list);
+        if (notify_file == NULL)
+            notify_file = nf;
+        else if (nf != NULL)
+            vfs_fput(nf);
+    }
+    if (target != NULL) {
+        struct vfs_file *nf = inotify_emit_locked(target, IN_MOVE_SELF | isdir,
+                                                  cookie, NULL, 0, false,
+                                                  &free_list);
+        if (notify_file == NULL)
+            notify_file = nf;
+        else if (nf != NULL)
+            vfs_fput(nf);
+    }
+    spin_unlock(&inotify_global_lock);
+    inotify_notify_file_readable(notify_file);
+    inotify_free_detached_watch_list(&free_list);
+}
 
 static ssize_t inotify_read(struct vfs_file *file, char *buf, size_t count,
                             bool user)
 {
-    (void)file;
-    (void)buf;
-    (void)count;
-    (void)user;
-    return -EAGAIN;
+    struct inotify_ctx *ctx = file->private_data;
+    if (ctx == NULL)
+        return -EINVAL;
+    if (count < sizeof(struct linux_inotify_event))
+        return -EINVAL;
+
+    spin_lock(&inotify_global_lock);
+    while (LIST_IS_EMPTY(&ctx->events)) {
+        if (file->f_flags & O_NONBLOCK) {
+            spin_unlock(&inotify_global_lock);
+            return -EAGAIN;
+        }
+        int wait_ret = tq_wait_in_state(&ctx->readq, &inotify_global_lock,
+                                        NULL, THREAD_INTERRUPTIBLE);
+        if (wait_ret < 0 || signal_pending(current) || killed(current)) {
+            spin_unlock(&inotify_global_lock);
+            return -EINTR;
+        }
+        if (ctx->closing) {
+            spin_unlock(&inotify_global_lock);
+            return 0;
+        }
+    }
+
+    size_t copied = 0;
+    while (!LIST_IS_EMPTY(&ctx->events)) {
+        struct inotify_event_node *ev =
+            LIST_FIRST_NODE(&ctx->events, struct inotify_event_node, entry);
+        if (ev == NULL)
+            break;
+        if (copied == 0 && ev->record_len > count) {
+            spin_unlock(&inotify_global_lock);
+            return -EINVAL;
+        }
+        if (copied + ev->record_len > count)
+            break;
+        list_entry_detach(&ev->entry);
+        ctx->event_count--;
+        if (ev->ev.mask & IN_Q_OVERFLOW)
+            ctx->overflow_queued = false;
+        spin_unlock(&inotify_global_lock);
+
+        if (user) {
+            if (vm_copyout(current->vm, (uint64)buf + copied, &ev->ev,
+                           sizeof(ev->ev)) < 0) {
+                inotify_free_event(ev);
+                return -EFAULT;
+            }
+            if (ev->ev.len != 0 &&
+                vm_copyout(current->vm,
+                           (uint64)buf + copied + sizeof(ev->ev), ev->name,
+                           ev->ev.len) < 0) {
+                inotify_free_event(ev);
+                return -EFAULT;
+            }
+        } else {
+            memmove(buf + copied, &ev->ev, sizeof(ev->ev));
+            if (ev->ev.len != 0)
+                memmove(buf + copied + sizeof(ev->ev), ev->name, ev->ev.len);
+        }
+        copied += ev->record_len;
+        inotify_free_event(ev);
+        spin_lock(&inotify_global_lock);
+    }
+    spin_unlock(&inotify_global_lock);
+    return (ssize_t)copied;
 }
 
 static int inotify_poll(struct vfs_file *file, short events)
 {
-    (void)file;
-    (void)events;
-    return 0;
+    struct inotify_ctx *ctx = file->private_data;
+    short revents = 0;
+    if (ctx == NULL)
+        return POLLERR;
+    spin_lock(&inotify_global_lock);
+    if (!LIST_IS_EMPTY(&ctx->events))
+        revents |= events & (POLLIN | POLLRDNORM | POLLRDBAND);
+    spin_unlock(&inotify_global_lock);
+    return revents;
 }
 
 static int inotify_release(struct vfs_inode *ip, struct vfs_file *file)
 {
     (void)ip;
-    if (file->private_data != NULL) {
-        kfree(file->private_data);
-        file->private_data = NULL;
+    struct inotify_ctx *ctx = file->private_data;
+    if (ctx == NULL)
+        return 0;
+
+    list_node_t free_watches = LIST_ENTRY_INITIALIZED(free_watches);
+    list_node_t free_events = LIST_ENTRY_INITIALIZED(free_events);
+    spin_lock(&inotify_global_lock);
+    ctx->closing = true;
+    tq_wakeup_all(&ctx->readq, -1, 0);
+    struct inotify_watch *watch, *watch_tmp;
+    list_foreach_node_safe(&ctx->watches, watch, watch_tmp, ctx_entry) {
+        inotify_detach_watch_locked(watch, &free_watches, false);
     }
+    struct inotify_event_node *ev, *ev_tmp;
+    list_foreach_node_safe(&ctx->events, ev, ev_tmp, entry) {
+        list_entry_detach(&ev->entry);
+        list_entry_push(&free_events, &ev->entry);
+    }
+    file->private_data = NULL;
+    spin_unlock(&inotify_global_lock);
+
+    inotify_free_detached_watch_list(&free_watches);
+    list_foreach_node_safe(&free_events, ev, ev_tmp, entry) {
+        list_entry_detach(&ev->entry);
+        inotify_free_event(ev);
+    }
+    kfree(ctx);
     return 0;
 }
 
@@ -6598,6 +7395,9 @@ static uint64 inotify_create_fd(int flags)
         return (uint64)-ENOMEM;
     memset(ctx, 0, sizeof(*ctx));
     ctx->next_wd = 1;
+    tq_init(&ctx->readq, "inotify_read", &inotify_global_lock);
+    list_entry_init(&ctx->watches);
+    list_entry_init(&ctx->events);
 
     int file_flags = O_RDONLY;
     if (flags & IN_NONBLOCK)
@@ -6607,6 +7407,11 @@ static uint64 inotify_create_fd(int flags)
     if (fd < 0) {
         kfree(ctx);
         return (uint64)fd;
+    }
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f != NULL) {
+        ctx->file = f;
+        vfs_fput(f);
     }
     if (flags & IN_CLOEXEC) {
         spin_lock(&current->fdtable->lock);
@@ -6650,23 +7455,77 @@ uint64 sys_inotify_add_watch(void)
         vfs_fput(f);
         return (uint64)-EFAULT;
     }
-    struct vfs_inode *inode = vfs_namei(path, strlen(path));
+    struct vfs_inode *inode = inotify_lookup_watch_path(path, mask);
     if (IS_ERR_OR_NULL(inode)) {
         vfs_fput(f);
         return (uint64)(IS_ERR(inode) ? PTR_ERR(inode) : -ENOENT);
     }
-    vfs_iput(inode);
+    if ((mask & ~IN_ALL_USER_FLAGS) != 0 ||
+        (mask & (IN_MASK_ADD | IN_MASK_CREATE)) ==
+            (IN_MASK_ADD | IN_MASK_CREATE) ||
+        mask == 0) {
+        vfs_iput(inode);
+        vfs_fput(f);
+        return (uint64)-EINVAL;
+    }
+    if ((mask & IN_ONLYDIR) && !S_ISDIR(inode->mode)) {
+        vfs_iput(inode);
+        vfs_fput(f);
+        return (uint64)-ENOTDIR;
+    }
 
     struct inotify_ctx *ctx = f->private_data;
-    int wd = ctx->next_wd++;
-    if (wd <= 0 || wd >= (int)(sizeof(ctx->active) / sizeof(ctx->active[0]))) {
-        vfs_fput(f);
-        return (uint64)-ENOSPC;
+    int ret_wd = -1;
+    spin_lock(&inotify_global_lock);
+    struct inotify_watch *watch, *tmp;
+    list_foreach_node_safe(&ctx->watches, watch, tmp, ctx_entry) {
+        if (watch->active && watch->inode == inode) {
+            if (mask & IN_MASK_CREATE) {
+                spin_unlock(&inotify_global_lock);
+                vfs_iput(inode);
+                vfs_fput(f);
+                return (uint64)-EEXIST;
+            }
+            if (mask & IN_MASK_ADD)
+                watch->mask |= inotify_stored_mask(mask);
+            else
+                watch->mask = inotify_stored_mask(mask);
+            ret_wd = watch->wd;
+            break;
+        }
     }
-    ctx->active[wd] = true;
-    (void)mask;
+    if (ret_wd < 0) {
+        watch = kalloc();
+        if (watch == NULL) {
+            spin_unlock(&inotify_global_lock);
+            vfs_iput(inode);
+            vfs_fput(f);
+            return (uint64)-ENOMEM;
+        }
+        memset(watch, 0, sizeof(*watch));
+        list_entry_init(&watch->ctx_entry);
+        list_entry_init(&watch->global_entry);
+        watch->ctx = ctx;
+        watch->inode = inode;
+        watch->wd = ctx->next_wd++;
+        watch->mask = inotify_stored_mask(mask);
+        watch->active = true;
+        if (watch->wd <= 0) {
+            spin_unlock(&inotify_global_lock);
+            kfree(watch);
+            vfs_iput(inode);
+            vfs_fput(f);
+            return (uint64)-ENOSPC;
+        }
+        vfs_idup(inode);
+        list_entry_push(&ctx->watches, &watch->ctx_entry);
+        list_entry_push(&inotify_global_watches, &watch->global_entry);
+        ret_wd = watch->wd;
+    }
+    spin_unlock(&inotify_global_lock);
+    vfs_iput(inode);
     vfs_fput(f);
-    return (uint64)wd;
+    return (uint64)ret_wd;
 }
 
 uint64 sys_inotify_rm_watch(void)
@@ -6685,13 +7544,25 @@ uint64 sys_inotify_rm_watch(void)
     }
 
     struct inotify_ctx *ctx = f->private_data;
-    if (wd <= 0 || wd >= (int)(sizeof(ctx->active) / sizeof(ctx->active[0])) ||
-        !ctx->active[wd]) {
-        vfs_fput(f);
-        return (uint64)-EINVAL;
+    list_node_t free_watches = LIST_ENTRY_INITIALIZED(free_watches);
+    int found = 0;
+    struct vfs_file *notify_file = NULL;
+    spin_lock(&inotify_global_lock);
+    struct inotify_watch *watch, *tmp;
+    list_foreach_node_safe(&ctx->watches, watch, tmp, ctx_entry) {
+        if (watch->active && watch->wd == wd) {
+            inotify_detach_watch_locked(watch, &free_watches, true);
+            notify_file = vfs_fdup(ctx->file);
+            found = 1;
+            break;
+        }
     }
-    ctx->active[wd] = false;
+    spin_unlock(&inotify_global_lock);
+    inotify_notify_file_readable(notify_file);
+    inotify_free_detached_watch_list(&free_watches);
     vfs_fput(f);
+    if (!found)
+        return (uint64)-EINVAL;
     return 0;
 }
 

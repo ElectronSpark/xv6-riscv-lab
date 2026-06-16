@@ -211,6 +211,64 @@ int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable,
 }
 
 /**
+ * vfs_fdtable_install_fd_at - Install a file at one exact descriptor
+ * @fdtable: The file descriptor table
+ * @file: The file to associate with @fd
+ * @fd: Exact descriptor number to install
+ *
+ * Linux dup2()/dup3() semantics require the duplicated descriptor to be
+ * exactly the requested value.  This helper deliberately does not fall back to
+ * the next free slot; callers that want "lowest fd >= start" should use
+ * vfs_fdtable_alloc_fd_from().
+ *
+ * LOCKING: Caller MUST hold fdtable->lock
+ *
+ * Returns: @fd on success, negative errno on failure
+ *   -EBADF: @fd is outside the process fd limit
+ *   -EBUSY: @fd is already occupied
+ *   -ENOMEM: Failed to increment file reference count
+ */
+int vfs_fdtable_install_fd_at(struct vfs_fdtable *fdtable,
+                              struct vfs_file *file, int fd) {
+    if (fdtable == NULL || file == NULL || fd < 0 || fd >= NOFILE) {
+        return -EBADF;
+    }
+    assert(spin_holding(&fdtable->lock),
+           "vfs_fdtable_install_fd_at: fdtable lock not held");
+
+    int max_fd = NOFILE;
+    if (current && current->thread_group) {
+        uint64 rl = current->thread_group->rlim[RLIMIT_NOFILE].rlim_cur;
+        if (rl < (uint64)max_fd)
+            max_fd = (int)rl;
+    }
+
+    if (fd >= max_fd) {
+        return -EBADF;
+    }
+
+    if (IS_FD(fdtable->files[fd]) ||
+        bits_test_bit64(&fdtable->files_bitmap[fd >> 6], fd & 63)) {
+        return -EBUSY;
+    }
+
+    if (fdtable->fd_count >= max_fd) {
+        return -EMFILE;
+    }
+    if (vfs_fdup(file) == NULL) {
+        return -ENOMEM;
+    }
+    int first_visible = vfs_file_note_fd_open(file);
+
+    bits_test_and_set_bit64(&fdtable->files_bitmap[fd >> 6], fd & 63);
+    bits_test_and_clear_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63);
+    rcu_assign_pointer(fdtable->files[fd], file);
+    atomic_inc(&fdtable->fd_count);
+    vfs_file_maybe_first_fd_open(file, first_visible);
+    return fd;
+}
+
+/**
  * vfs_fdtable_alloc_fd - Allocate a file descriptor for a file
  * @fdtable: The file descriptor table
  * @file: The file to associate with the new fd
@@ -254,8 +312,10 @@ struct vfs_fdtable *vfs_fdtable_init(void) {
  * If CLONE_FILES is set, increments src's ref_count and returns src.
  * Otherwise, creates a deep copy with duplicated file references.
  *
- * SYNCHRONIZATION: Uses RCU read lock to safely iterate src during copy.
- * This protects against concurrent close() operations.
+ * SYNCHRONIZATION: Takes src->lock while snapshotting the table.  Linux fork()
+ * semantics require a coherent descriptor table snapshot for non-CLONE_FILES
+ * children, even when other parent threads are opening, duping, or closing
+ * descriptors concurrently.
  *
  * Returns: Pointer to fdtable (shared or new), or ERR_PTR on failure
  */
@@ -265,28 +325,32 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src,
         return ERR_PTR(-EINVAL); // Invalid arguments
     }
 
-    rcu_read_lock();
     if (clone_flags & CLONE_FILES) {
         // share the fdtable
         atomic_inc(&src->ref_count);
-        rcu_read_unlock();
         return src;
     }
 
     struct vfs_fdtable *dest = __vfs_fdtable_alloc_init();
     if (dest == NULL) {
-        rcu_read_unlock();
         return ERR_PTR(-ENOMEM); // Allocation failed
     }
     dest->fd_count = 0;
     memset(dest->files, 0, sizeof(dest->files));
     memset(dest->files_bitmap, 0, sizeof(dest->files_bitmap));
     memset(dest->cloexec_bitmap, 0, sizeof(dest->cloexec_bitmap));
+    uint64 first_visible_bitmap[(NOFILE + 63) / 64];
+    memset(first_visible_bitmap, 0, sizeof(first_visible_bitmap));
 
-    // Duplicate file references while holding RCU read lock
-    // This protects against concurrent close() deallocating files
+    /*
+     * Duplicate file references while holding the source fdtable lock.  The
+     * refcount bump is atomic and non-sleeping; defer first-visible callbacks
+     * until after the lock is dropped because DRM/fence backends may do more
+     * than simple accounting.
+     */
+    spin_lock(&src->lock);
     for (int i = 0; i < NOFILE; i++) {
-        struct vfs_file *src_file = rcu_dereference(src->files[i]);
+        struct vfs_file *src_file = src->files[i];
         if (IS_FD(src_file)) {
             struct vfs_file *dst_file = vfs_fdup(src_file);
             if (!IS_ERR_OR_NULL(dst_file)) {
@@ -298,13 +362,24 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src,
                     bits_test_and_set_bit64(&dest->cloexec_bitmap[i >> 6],
                                             i & 63);
                 }
-                vfs_file_maybe_first_fd_open(dst_file, first_visible);
+                if (first_visible) {
+                    bits_test_and_set_bit64(&first_visible_bitmap[i >> 6],
+                                            i & 63);
+                }
             } else {
                 dest->files[i] = NULL;
             }
         }
     }
-    rcu_read_unlock();
+    spin_unlock(&src->lock);
+
+    for (int i = 0; i < NOFILE; i++) {
+        if (bits_test_bit64(&first_visible_bitmap[i >> 6], i & 63)) {
+            struct vfs_file *file = dest->files[i];
+            if (IS_FD(file))
+                vfs_file_maybe_first_fd_open(file, 1);
+        }
+    }
     smp_mb(); // Ensure all writes are visible before returning
 
     return dest;
@@ -488,4 +563,57 @@ void vfs_fdtable_close_on_exec(struct vfs_fdtable *fdtable) {
             vfs_fput(to_close[i]);
         }
     }
+}
+
+static const char *vfs_fdtable_debug_path(struct vfs_file *f)
+{
+    if (f == NULL)
+        return "(null)";
+    if (f->opened_path != NULL)
+        return f->opened_path;
+    if (f->f_kind == VFS_FILE_KIND_PIPE)
+        return "pipe";
+    if (f->f_kind == VFS_FILE_KIND_LEGACY_SOCKET)
+        return "socket";
+    if (f->f_kind == VFS_FILE_KIND_CUSTOM)
+        return "custom";
+    if (f->f_kind == VFS_FILE_KIND_CDEV)
+        return "cdev";
+    if (f->f_kind == VFS_FILE_KIND_BDEV)
+        return "bdev";
+    return "(unknown)";
+}
+
+void vfs_fdtable_debug_dump(struct thread *p, const char *tag, int max_fd)
+{
+    if (p == NULL || p->fdtable == NULL)
+        return;
+    if (max_fd < 0 || max_fd > NOFILE)
+        max_fd = NOFILE;
+
+    int total = 0;
+    spin_lock(&p->fdtable->lock);
+    for (int fd = 0; fd < NOFILE; fd++) {
+        struct vfs_file *f = p->fdtable->files[fd];
+        if (IS_FD(f))
+            total++;
+    }
+
+    printf("chrome-fd-trace: fdtable pid=%d tgid=%d name=%s tag=%s "
+           "total=%d max_fd=%d fdtable=%p\n",
+           p->pid, p->tgid, p->name, tag ? tag : "", total, max_fd,
+           p->fdtable);
+
+    for (int fd = 0; fd < max_fd; fd++) {
+        struct vfs_file *f = p->fdtable->files[fd];
+        if (!IS_FD(f))
+            continue;
+        int cloexec =
+            (p->fdtable->cloexec_bitmap[fd >> 6] >> (fd & 63)) & 1;
+        printf("chrome-fd-trace: fdtable-entry pid=%d tag=%s fd=%d "
+               "cloexec=%d file=%p kind=%d f_flags=0x%x path=%s\n",
+               p->pid, tag ? tag : "", fd, cloexec, f, f->f_kind,
+               f->f_flags, vfs_fdtable_debug_path(f));
+    }
+    spin_unlock(&p->fdtable->lock);
 }

@@ -1,4 +1,286 @@
 static int fb_bo_destroy(uint32 handle);
+static struct vfs_file_ops fb_fence_file_ops;
+static struct vfs_file_ops fb_virgl_fence_file_ops;
+static struct vfs_file_ops fb_syncobj_file_ops;
+static void fb_gpu_close_exported_fd(int fd);
+static struct fb_gpu_syncobj_state_entry *
+gpu_syncobj_state_locked(uint32 state_index);
+static int gpu_syncobj_state_ready_locked(
+    struct fb_gpu_syncobj_state_entry *state, uint64 point);
+
+#ifndef _IOC_NRBITS
+#define _IOC_NRBITS 8
+#define _IOC_TYPEBITS 8
+#define _IOC_SIZEBITS 14
+#define _IOC_DIRBITS 2
+#define _IOC_NRSHIFT 0
+#define _IOC_TYPESHIFT (_IOC_NRSHIFT + _IOC_NRBITS)
+#define _IOC_SIZESHIFT (_IOC_TYPESHIFT + _IOC_TYPEBITS)
+#define _IOC_DIRSHIFT (_IOC_SIZESHIFT + _IOC_SIZEBITS)
+#define _IOC_NONE 0U
+#define _IOC_WRITE 1U
+#define _IOC_READ 2U
+#define _IOC(dir, type, nr, size) \
+    (((dir) << _IOC_DIRSHIFT) | ((type) << _IOC_TYPESHIFT) | \
+     ((nr) << _IOC_NRSHIFT) | ((size) << _IOC_SIZESHIFT))
+#define _IOW(type, nr, size) _IOC(_IOC_WRITE, (type), (nr), sizeof(size))
+#define _IOWR(type, nr, size) \
+    _IOC(_IOC_READ | _IOC_WRITE, (type), (nr), sizeof(size))
+#endif
+
+#define DMA_BUF_SYNC_READ  (1U << 0)
+#define DMA_BUF_SYNC_WRITE (2U << 0)
+#define DMA_BUF_SYNC_RW    (DMA_BUF_SYNC_READ | DMA_BUF_SYNC_WRITE)
+#define DMA_BUF_SYNC_END   (1U << 2)
+#define DMA_BUF_SYNC_VALID_FLAGS_MASK (DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END)
+
+struct dma_buf_sync_compat {
+    uint64 flags;
+};
+
+struct dma_buf_export_sync_file_compat {
+    uint32 flags;
+    int32 fd;
+};
+
+struct dma_buf_import_sync_file_compat {
+    uint32 flags;
+    int32 fd;
+};
+
+#define DMA_BUF_BASE 'b'
+#define DMA_BUF_IOCTL_SYNC \
+    _IOW(DMA_BUF_BASE, 0, struct dma_buf_sync_compat)
+#define DMA_BUF_SET_NAME_A _IOW(DMA_BUF_BASE, 1, uint32)
+#define DMA_BUF_SET_NAME_B _IOW(DMA_BUF_BASE, 1, uint64)
+#define DMA_BUF_IOCTL_EXPORT_SYNC_FILE \
+    _IOWR(DMA_BUF_BASE, 2, struct dma_buf_export_sync_file_compat)
+#define DMA_BUF_IOCTL_IMPORT_SYNC_FILE \
+    _IOW(DMA_BUF_BASE, 3, struct dma_buf_import_sync_file_compat)
+
+struct sync_fence_info_compat {
+    char obj_name[32];
+    char driver_name[32];
+    int32 status;
+    uint32 flags;
+    uint64 timestamp_ns;
+};
+
+struct sync_file_info_compat {
+    char name[32];
+    int32 status;
+    uint32 flags;
+    uint32 num_fences;
+    uint32 pad;
+    uint64 sync_fence_info;
+};
+
+struct sync_set_deadline_compat {
+    uint64 deadline_ns;
+    uint64 pad;
+};
+
+#define SYNC_IOC_MAGIC '>'
+#define SYNC_IOC_FILE_INFO \
+    _IOWR(SYNC_IOC_MAGIC, 4, struct sync_file_info_compat)
+#define SYNC_IOC_SET_DEADLINE \
+    _IOW(SYNC_IOC_MAGIC, 5, struct sync_set_deadline_compat)
+
+static int fb_dmabuf_sync_flags_valid(uint32 flags)
+{
+    return (flags & DMA_BUF_SYNC_RW) != 0 &&
+        (flags & ~DMA_BUF_SYNC_RW) == 0;
+}
+
+static int fb_dma_fence_status(struct dma_fence *fence)
+{
+    int status = 1;
+
+    if (fence == NULL)
+        return -EINVAL;
+    spin_lock(&fence->lock);
+    if (fence->error != 0)
+        status = fence->error < 0 ? fence->error : -fence->error;
+    else if (!fence->signaled)
+        status = 0;
+    spin_unlock(&fence->lock);
+    return status;
+}
+
+static int fb_syncobj_file_status(struct fb_gpu_syncobj_file *sync_file)
+{
+    uint64 virtio_fence;
+    int status;
+
+    if (sync_file == NULL || sync_file->kind != FB_GPU_SYNCOBJ_FD_SYNC_FILE)
+        return -EINVAL;
+    if (sync_file->virtio_fence == 0)
+        sync_file->virtio_fence =
+            dma_fence_get_virtio_fence(sync_file->fence);
+    status = fb_dma_fence_status(sync_file->fence);
+    if (status != 0)
+        return status;
+    if (sync_file->snapshot_signaled)
+        return 1;
+    virtio_fence = sync_file->virtio_fence;
+    if (virtio_fence != 0 && virtio_gpu_user_last_fence() >= virtio_fence) {
+        (void)dma_fence_signal(sync_file->fence, 0);
+        sync_file->snapshot_signaled = 1;
+        return 1;
+    }
+    if (sync_file->reservation_gem != NULL &&
+        sync_file->reservation_fence != 0) {
+        int ready = 0;
+
+        spin_lock(&fb_state.lock);
+        if (sync_file->reservation_gem->in_use &&
+            !sync_file->reservation_gem->dead &&
+            sync_file->reservation_gem->signaled_fence >=
+                sync_file->reservation_fence)
+            ready = 1;
+        spin_unlock(&fb_state.lock);
+        if (ready) {
+            (void)dma_fence_signal(sync_file->fence, 0);
+            sync_file->snapshot_signaled = 1;
+            return 1;
+        }
+    }
+    if (sync_file->state_index != 0) {
+        struct fb_gpu_syncobj_state_entry *state;
+        uint64 reservation_fence = 0;
+        int ready;
+
+        spin_lock(&fb_state.lock);
+        state = gpu_syncobj_state_locked(sync_file->state_index);
+        ready = gpu_syncobj_state_ready_locked(
+            state, sync_file->snapshot_timeline_value);
+        if (ready && state != NULL)
+            reservation_fence = state->reservation_fence;
+        spin_unlock(&fb_state.lock);
+        if (ready) {
+            if (sync_file->snapshot_reservation_fence == 0)
+                sync_file->snapshot_reservation_fence = reservation_fence;
+            (void)dma_fence_signal(sync_file->fence, 0);
+            sync_file->snapshot_signaled = 1;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int fb_syncobj_file_info_ioctl(struct fb_gpu_syncobj_file *sync_file,
+                                      uint64 arg)
+{
+    struct sync_file_info_compat info;
+    struct sync_fence_info_compat fence_info;
+    uint32 user_num_fences;
+    int status;
+
+    if (arg == 0)
+        return -EFAULT;
+    if (either_copyin(&info, 1, arg, sizeof(info)) < 0)
+        return -EFAULT;
+
+    user_num_fences = info.num_fences;
+    status = fb_syncobj_file_status(sync_file);
+    memset(info.name, 0, sizeof(info.name));
+    memcpy(info.name, "xv6-sync-file", sizeof("xv6-sync-file"));
+    info.status = status;
+    info.flags = 0;
+    info.num_fences = 1;
+    info.pad = 0;
+
+    if (user_num_fences != 0) {
+        if (info.sync_fence_info == 0)
+            return -EFAULT;
+        memset(&fence_info, 0, sizeof(fence_info));
+        memcpy(fence_info.obj_name, "xv6-fence", sizeof("xv6-fence"));
+        memcpy(fence_info.driver_name, "xv6-gpu", sizeof("xv6-gpu"));
+        fence_info.status = status;
+        fence_info.timestamp_ns = (sched_timer_now_ms() + 1) * 1000000ULL;
+        if (either_copyout(1, info.sync_fence_info, &fence_info,
+                           sizeof(fence_info)) < 0)
+            return -EFAULT;
+    }
+
+    if (either_copyout(1, arg, &info, sizeof(info)) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static int fb_syncobj_create_sync_file_fd(
+    uint64 fence_id, int signaled, struct dma_fence *source_fence,
+    struct fb_gpu_gem_object *reservation_gem, uint64 reservation_fence,
+    int *fd_out)
+{
+    struct fb_gpu_syncobj_file *sync_file;
+    struct dma_fence *fence;
+    int fd;
+
+    if (fd_out == NULL) {
+        fb_gem_put(reservation_gem);
+        return -EINVAL;
+    }
+    *fd_out = -1;
+    if (fence_id == 0)
+        fence_id = 1;
+
+    if (source_fence != NULL) {
+        fence = dma_fence_get(source_fence);
+        if (fence == NULL) {
+            fb_gem_put(reservation_gem);
+            return -ENOMEM;
+        }
+    } else {
+        fence = kvmalloc(sizeof(*fence));
+        if (fence == NULL) {
+            fb_gem_put(reservation_gem);
+            return -ENOMEM;
+        }
+        dma_fence_init(fence, 0, fence_id);
+        if (signaled)
+            (void)dma_fence_signal(fence, 0);
+    }
+
+    sync_file = kvmalloc(sizeof(*sync_file));
+    if (sync_file == NULL) {
+        dma_fence_put(fence);
+        return -ENOMEM;
+    }
+    memset(sync_file, 0, sizeof(*sync_file));
+    sync_file->kind = FB_GPU_SYNCOBJ_FD_SYNC_FILE;
+    sync_file->snapshot_signaled = signaled != 0 || dma_fence_is_signaled(fence);
+    sync_file->snapshot_timeline_value = fence_id;
+    sync_file->snapshot_reservation_fence = fence_id;
+    sync_file->virtio_fence = dma_fence_get_virtio_fence(fence);
+    sync_file->reservation_gem = reservation_gem;
+    sync_file->reservation_fence = reservation_fence;
+    sync_file->fence = dma_fence_get(fence);
+    if (sync_file->fence == NULL) {
+        kvfree(sync_file);
+        dma_fence_put(fence);
+        fb_gem_put(reservation_gem);
+        return -ENOMEM;
+    }
+
+    fd = vfs_custom_fd_alloc(&fb_syncobj_file_ops, sync_file, 0);
+    if (fd < 0) {
+        dma_fence_put(sync_file->fence);
+        kvfree(sync_file);
+        dma_fence_put(fence);
+        fb_gem_put(reservation_gem);
+        return fd;
+    }
+
+    spin_lock(&fb_state.lock);
+    fb_state.stats.syncobj_sync_file_exports++;
+    fb_state.stats.ttm_resv_attach_sync_file_export++;
+    fb_state.stats.syncobj_resv_attach++;
+    spin_unlock(&fb_state.lock);
+    dma_fence_put(fence);
+    *fd_out = fd;
+    return 0;
+}
 
 static int fb_dmabuf_fops_release(struct vfs_inode *inode,
                                   struct vfs_file *file)
@@ -9,8 +291,273 @@ static int fb_dmabuf_fops_release(struct vfs_inode *inode,
 
     if (file != NULL)
         file->private_data = NULL;
+    if (dbuf != NULL) {
+        dma_fence_put(dbuf->resv_excl);
+        dbuf->resv_excl = NULL;
+    }
     fb_dmabuf_put(dbuf);
     return 0;
+}
+
+static int fb_dmabuf_export_sync_file_ioctl(
+    struct dma_buf *dbuf, struct dma_buf_export_sync_file_compat *req)
+{
+    struct fb_gpu_dmabuf_object *dmabuf = fb_dmabuf_from_dma_buf(dbuf);
+    struct fb_gpu_gem_object *gem;
+    struct dma_fence *source_fence = NULL;
+    struct fb_gpu_gem_object *reservation_gem = NULL;
+    uint64 target = 0;
+    uint64 reservation_fence = 0;
+    uint64 signaled = 0;
+    int ready = 1;
+    int ret;
+
+    if (dbuf == NULL || req == NULL || !fb_dmabuf_sync_flags_valid(req->flags))
+        return -EINVAL;
+    if (dmabuf == NULL || dmabuf->gem == NULL)
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    gem = dmabuf->gem;
+    if (gem == NULL || !gem->in_use || gem->dead) {
+        spin_unlock(&fb_state.lock);
+        return -ENOENT;
+    }
+    target = gem->ttm_resv_exclusive_fence;
+    if ((req->flags & DMA_BUF_SYNC_WRITE) != 0) {
+        uint64 shared = fb_ttm_resv_latest_shared_fence_locked(gem);
+
+        if (shared > target)
+            target = shared;
+    }
+    signaled = gem->signaled_fence;
+    if (target == 0)
+        target = 1;
+    ready = signaled >= target;
+    if (dbuf->resv_excl != NULL)
+        source_fence = dma_fence_get(dbuf->resv_excl);
+    if (!ready) {
+        fb_gem_get_locked(gem);
+        reservation_gem = gem;
+        reservation_fence = target;
+    }
+    fb_ttm_resv_note_attach_locked(FB_GPU_RESV_ATTACH_SYNC_FILE_EXPORT);
+    spin_unlock(&fb_state.lock);
+
+    ret = fb_syncobj_create_sync_file_fd(target, ready, source_fence,
+                                         reservation_gem, reservation_fence,
+                                         &req->fd);
+    dma_fence_put(source_fence);
+    return ret;
+}
+
+static int fb_dmabuf_import_sync_file_ioctl(
+    struct dma_buf *dbuf, const struct dma_buf_import_sync_file_compat *req)
+{
+    struct fb_gpu_dmabuf_object *dmabuf = fb_dmabuf_from_dma_buf(dbuf);
+    struct vfs_file *file;
+    struct dma_fence *fence = NULL;
+    uint64 fence_id = 0;
+    int ready = 0;
+
+    if (dbuf == NULL || req == NULL || !fb_dmabuf_sync_flags_valid(req->flags))
+        return -EINVAL;
+    if (dmabuf == NULL || dmabuf->gem == NULL)
+        return -EINVAL;
+    if (req->fd < 0 || current == NULL || current->fdtable == NULL)
+        return -EBADF;
+
+    file = vfs_fdtable_get_file(current->fdtable, req->fd);
+    if (file == NULL)
+        return -EBADF;
+
+    if (file->ops == &fb_syncobj_file_ops && file->private_data != NULL) {
+        struct fb_gpu_syncobj_file *sync_file =
+            (struct fb_gpu_syncobj_file *)file->private_data;
+
+        if (sync_file->kind != FB_GPU_SYNCOBJ_FD_SYNC_FILE ||
+            sync_file->fence == NULL) {
+            vfs_fput(file);
+            return -EINVAL;
+        }
+        fence = dma_fence_get(sync_file->fence);
+        if (sync_file->virtio_fence != 0)
+            dma_fence_set_virtio_fence(fence, sync_file->virtio_fence);
+        fence_id = sync_file->snapshot_reservation_fence != 0 ?
+            sync_file->snapshot_reservation_fence :
+            (sync_file->snapshot_timeline_value != 0 ?
+                sync_file->snapshot_timeline_value : sync_file->fence->seqno);
+        ready = fb_syncobj_file_status(sync_file) > 0;
+    } else if (file->ops == &fb_fence_file_ops && file->private_data != NULL) {
+        struct fb_gpu_fence_file *fence_file =
+            (struct fb_gpu_fence_file *)file->private_data;
+
+        fence_id = fence_file->fence;
+        spin_lock(&fb_state.lock);
+        (void)fb_gpu_fence_file_refresh_locked(fence_file);
+        ready = fb_gpu_fence_file_signaled_locked(fence_file) >=
+            fence_file->fence;
+        spin_unlock(&fb_state.lock);
+    } else if (file->ops == &fb_virgl_fence_file_ops &&
+               file->private_data != NULL) {
+        struct fb_gpu_virgl_fence_file *fence_file =
+            (struct fb_gpu_virgl_fence_file *)file->private_data;
+        uint64 signaled = 0;
+
+        fence_id = fence_file->fence;
+        ready = virtio_gpu_user_fence(fence_file->fence, 1, &signaled) == 0 &&
+            signaled >= fence_file->fence;
+    } else {
+        vfs_fput(file);
+        return -EINVAL;
+    }
+    vfs_fput(file);
+
+    if (fence_id == 0)
+        fence_id = 1;
+    if (fence == NULL) {
+        fence = kvmalloc(sizeof(*fence));
+        if (fence == NULL)
+            return -ENOMEM;
+        dma_fence_init(fence, 0, fence_id);
+        if (ready)
+            (void)dma_fence_signal(fence, 0);
+    }
+
+    spin_lock(&fb_state.lock);
+    if (dmabuf->gem == NULL || !dmabuf->gem->in_use || dmabuf->gem->dead) {
+        spin_unlock(&fb_state.lock);
+        dma_fence_put(fence);
+        return -ENOENT;
+    }
+    if ((req->flags & DMA_BUF_SYNC_WRITE) != 0) {
+        struct fb_gpu_bo_entry *bo = NULL;
+
+        for (uint32 i = 0; i < FB_GPU_MAX_BOS; i++) {
+            if (fb_state.bos[i].in_use &&
+                fb_state.bos[i].gem == dmabuf->gem) {
+                bo = &fb_state.bos[i];
+                break;
+            }
+        }
+        dmabuf->gem->ttm_resv_seq++;
+        dmabuf->gem->ttm_resv_exclusive_fence = fence_id;
+        fb_ttm_resv_note_issued_fence_locked(dmabuf->gem, fence_id);
+        if (ready && dmabuf->gem->signaled_fence < fence_id)
+            dmabuf->gem->signaled_fence = fence_id;
+        fb_state.stats.ttm_resv_exclusive_fences++;
+        dma_fence_put(dbuf->resv_excl);
+        dbuf->resv_excl = dma_fence_get(fence);
+        fb_ttm_resv_wakeup_locked(dmabuf->gem,
+                                  FB_GPU_DMABUF_POLL_WAKE_EXCLUSIVE_ACQUIRE);
+        if (bo != NULL)
+            fb_ttm_propagate_gem_locked(bo);
+        fb_ttm_resv_note_attach_locked(FB_GPU_RESV_ATTACH_SYNC_FILE_IMPORT);
+    } else {
+        struct fb_gpu_bo_entry *bo = NULL;
+
+        for (uint32 i = 0; i < FB_GPU_MAX_BOS; i++) {
+            if (fb_state.bos[i].in_use &&
+                fb_state.bos[i].gem == dmabuf->gem) {
+                bo = &fb_state.bos[i];
+                break;
+            }
+        }
+        if (bo != NULL) {
+            struct fb_gpu_resv_shared_fence *slot;
+            uint32 index;
+
+            index = dmabuf->gem->ttm_resv_shared_next %
+                FB_GPU_RESV_SHARED_SLOTS;
+            if (dmabuf->gem->ttm_resv_shared_count ==
+                FB_GPU_RESV_SHARED_SLOTS)
+                fb_state.stats.ttm_resv_shared_replaced++;
+            else
+                dmabuf->gem->ttm_resv_shared_count++;
+            dmabuf->gem->ttm_resv_shared_next =
+                (index + 1) % FB_GPU_RESV_SHARED_SLOTS;
+
+            slot = &dmabuf->gem->ttm_resv_shared[index];
+            memset(slot, 0, sizeof(*slot));
+            slot->seq = ++dmabuf->gem->ttm_resv_seq;
+            slot->fence = fence_id;
+            slot->owner_id = bo->owner_id;
+            slot->owner_tgid = bo->owner_tgid;
+            slot->attach_point = FB_GPU_RESV_ATTACH_SYNC_FILE_IMPORT;
+            slot->exporter_tag = FB_GPU_DMABUF_TAG_DRM_PRIME;
+
+            fb_state.stats.ttm_resv_shared_fences++;
+            fb_state.stats.ttm_resv_shared_used =
+                dmabuf->gem->ttm_resv_shared_count;
+            fb_state.stats.ttm_resv_last_shared_fence = fence_id;
+            fb_state.stats.dmabuf_last_ttm_resv_shared_fence = fence_id;
+            fb_state.stats.dmabuf_last_ttm_resv_shared_count =
+                dmabuf->gem->ttm_resv_shared_count;
+            fb_ttm_resv_note_attach_locked(
+                FB_GPU_RESV_ATTACH_SYNC_FILE_IMPORT);
+            fb_ttm_resv_wakeup_locked(
+                dmabuf->gem, FB_GPU_DMABUF_POLL_WAKE_SHARED_ATTACH);
+            fb_ttm_resv_sync_bo_from_gem_locked(bo, dmabuf->gem);
+            fb_ttm_propagate_gem_locked(bo);
+        } else {
+            fb_ttm_resv_note_attach_locked(
+                FB_GPU_RESV_ATTACH_SYNC_FILE_IMPORT);
+            fb_ttm_resv_wakeup_locked(dmabuf->gem,
+                                      FB_GPU_DMABUF_POLL_WAKE_SHARED_ATTACH);
+        }
+    }
+    fb_dmabuf_snapshot_locked(dmabuf);
+    spin_unlock(&fb_state.lock);
+
+    dma_fence_put(fence);
+    return 0;
+}
+
+static int fb_dmabuf_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    struct dma_buf *dbuf = file ? (struct dma_buf *)file->private_data : NULL;
+
+    switch (cmd) {
+    case DMA_BUF_IOCTL_SYNC: {
+        struct dma_buf_sync_compat req;
+
+        if (arg == NULL ||
+            either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        if ((req.flags & ~DMA_BUF_SYNC_VALID_FLAGS_MASK) != 0 ||
+            (req.flags & DMA_BUF_SYNC_RW) == 0)
+            return -EINVAL;
+        return dbuf != NULL ? 0 : -EINVAL;
+    }
+    case DMA_BUF_SET_NAME_A:
+    case DMA_BUF_SET_NAME_B:
+        return dbuf != NULL ? 0 : -EINVAL;
+    case DMA_BUF_IOCTL_EXPORT_SYNC_FILE: {
+        struct dma_buf_export_sync_file_compat req;
+        int ret;
+
+        if (arg == NULL ||
+            either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        ret = fb_dmabuf_export_sync_file_ioctl(dbuf, &req);
+        if (ret == 0 &&
+            either_copyout(1, (uint64)arg, &req, sizeof(req)) < 0) {
+            fb_gpu_close_exported_fd(req.fd);
+            return -EFAULT;
+        }
+        return ret;
+    }
+    case DMA_BUF_IOCTL_IMPORT_SYNC_FILE: {
+        struct dma_buf_import_sync_file_compat req;
+
+        if (arg == NULL ||
+            either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        return fb_dmabuf_import_sync_file_ioctl(dbuf, &req);
+    }
+    default:
+        return -ENOTTY;
+    }
 }
 
 static int fb_dmabuf_fops_poll(struct vfs_file *file, short events)
@@ -141,6 +688,7 @@ static void fb_dmabuf_fops_first_fd_open(struct vfs_file *file)
 
 static struct vfs_file_ops fb_dmabuf_file_ops = {
     .poll = fb_dmabuf_fops_poll,
+    .ioctl = fb_dmabuf_fops_ioctl,
     .mmap = fb_dmabuf_fops_mmap,
     .fault = fb_dmabuf_fops_fault,
     .release = fb_dmabuf_fops_release,
@@ -362,8 +910,7 @@ static int fb_virgl_fence_fops_poll(struct vfs_file *file, short events)
 
     if (fence == NULL)
         return POLLERR | POLLHUP;
-    if (virtio_gpu_user_fence(0, 0, &signaled) != 0)
-        return POLLERR | POLLHUP;
+    signaled = virtio_gpu_user_last_fence();
 
     spin_lock(&fb_state.lock);
     fb_state.stats.fence_fd_polls++;
@@ -492,6 +1039,7 @@ static int fb_syncobj_fops_release(struct vfs_inode *inode,
             spin_unlock(&fb_state.lock);
         }
         dma_fence_put(sync_file->fence);
+        fb_gem_put(sync_file->reservation_gem);
         kvfree(sync_file);
     }
     return 0;
@@ -507,8 +1055,7 @@ static int fb_syncobj_fops_poll(struct vfs_file *file, short events)
     if (sync_file == NULL)
         return POLLERR | POLLHUP;
     if (sync_file->kind == FB_GPU_SYNCOBJ_FD_SYNC_FILE) {
-        int ready = sync_file->snapshot_signaled ||
-            dma_fence_is_signaled(sync_file->fence);
+        int ready = fb_syncobj_file_status(sync_file) > 0;
 
         if (!ready && sync_file->state_index != 0) {
             spin_lock(&fb_state.lock);
@@ -582,8 +1129,32 @@ static int fb_syncobj_fops_poll(struct vfs_file *file, short events)
     return revents;
 }
 
+static int fb_syncobj_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    struct fb_gpu_syncobj_file *sync_file =
+        file ? (struct fb_gpu_syncobj_file *)file->private_data : NULL;
+
+    if (sync_file == NULL)
+        return -EINVAL;
+    switch (cmd) {
+    case SYNC_IOC_FILE_INFO:
+        return fb_syncobj_file_info_ioctl(sync_file, (uint64)arg);
+    case SYNC_IOC_SET_DEADLINE: {
+        struct sync_set_deadline_compat req;
+
+        if (arg == NULL ||
+            either_copyin(&req, 1, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        return req.pad == 0 ? 0 : -EINVAL;
+    }
+    default:
+        return -ENOTTY;
+    }
+}
+
 static struct vfs_file_ops fb_syncobj_file_ops = {
     .poll = fb_syncobj_fops_poll,
+    .ioctl = fb_syncobj_fops_ioctl,
     .release = fb_syncobj_fops_release,
     .last_fd_close = fb_syncobj_fops_last_fd_close,
 };

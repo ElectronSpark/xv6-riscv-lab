@@ -5,7 +5,9 @@
 #include <param.h>
 #include <types.h>
 #include <kobject.h>
+#include <list_type.h>
 #include <lock/rcu_type.h>
+#include <lock/spinlock.h>
 #include <vfs/stat.h>
 #include <dev/iosched_types.h>
 
@@ -82,6 +84,8 @@ typedef struct cdev_ops {
 
 typedef struct cdev {
     device_t dev;
+    spinlock_t knote_lock;
+    list_node_t knote_list;
     struct {
         uint64 readable : 1; // Is the device readable
         uint64 writable : 1; // Is the device writable

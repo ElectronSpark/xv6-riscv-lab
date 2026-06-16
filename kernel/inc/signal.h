@@ -76,6 +76,7 @@ int sigpending_empty(struct thread *p, int signo);
 sig_defact signo_default_action(int signo);
 int __signal_send(struct thread *p, ksiginfo_t *info);
 int signal_send(int pid, ksiginfo_t *info);
+int signal_send_pidfd(int pid, uint64 pid_seq, ksiginfo_t *info);
 bool signal_pending(struct thread *p);
 int signal_notify(struct thread *p);
 

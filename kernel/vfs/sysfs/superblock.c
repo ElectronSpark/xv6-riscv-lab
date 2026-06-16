@@ -14,6 +14,7 @@
 #include "list.h"
 #include "hlist.h"
 #include <mm/slab.h>
+#include "smp/percpu.h"
 #include "printf.h"
 #include "sysfs_private.h"
 
@@ -221,6 +222,27 @@ struct vfs_inode *sysfs_get_inode(struct vfs_superblock *sb, uint64 ino)
                          SYSFS_ATTR_NONE);
         break;
     default:
+    {
+        uint64 cpu_rel = ino >= SYSFS_INO_CPU_BASE ?
+            ino - SYSFS_INO_CPU_BASE : (uint64)-1;
+        int cpu = cpu_rel == (uint64)-1 ? -1 :
+            (int)(cpu_rel / SYSFS_INO_CPU_STRIDE);
+        uint64 cpu_kind = cpu_rel == (uint64)-1 ? (uint64)-1 :
+            cpu_rel % SYSFS_INO_CPU_STRIDE;
+
+        if (cpu >= 0 && cpu < cpu_possible_count()) {
+            if (cpu_kind == 0 || cpu_kind == 1) {
+                sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_NONE,
+                                 SYSFS_ATTR_NONE);
+                break;
+            }
+            if (cpu_kind == 2) {
+                sysfs_fill_inode(si, ino, SYSFS_FILE, SYSFS_DEV_NONE,
+                                 SYSFS_ATTR_CPUINFO_MAX_FREQ);
+                break;
+            }
+        }
+    }
         ret = sysfs_decode_device_attr(ino, SYSFS_INO_PRIMARY_ATTR_BASE,
                                        SYSFS_DEV_DRM_PRIMARY, si);
         if (ret != 0)

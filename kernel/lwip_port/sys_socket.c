@@ -39,6 +39,7 @@
 #include "lwip/netbuf.h"
 #include "lwip/ip_addr.h"
 #include "lwip/ip.h"
+#include "lwip/inet.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
 #include "lwip/udp.h"
@@ -52,6 +53,8 @@
 #include "vfs/unix_socket.h"
 #include "netlink.h"
 #include "proc/sched.h"
+#include "cmdline.h"
+#include "lock/rcu.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -59,6 +62,21 @@ extern void argint64(int n, int64 *ip);
 extern void argaddr(int n, uint64 *ip);
 extern int argstr(int n, char *buf, int max);
 extern void sleep_ms(uint64 ms);
+
+static void socket_unwind_created_fd(int fd)
+{
+    if (fd < 0)
+        return;
+
+    spin_lock(&current->fdtable->lock);
+    struct vfs_file *f = vfs_fdtable_dealloc_fd(current->fdtable, fd);
+    spin_unlock(&current->fdtable->lock);
+
+    if (f != NULL) {
+        vfs_file_maybe_last_fd_close(f);
+        vfs_fput(f);
+    }
+}
 
 /* ========================================================================== */
 /* Debug socket tracing (set to 1 to enable)                                  */
@@ -69,6 +87,219 @@ extern void sleep_ms(uint64 ms);
 #else
 #define sock_dbg(fmt, ...) ((void)0)
 #endif
+
+static int chrome_socket_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_socket_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        if (!enabled) {
+            enabled = cmdline_get_param("chrome_unix_seqpacket_trace", value,
+                                        sizeof(value)) == 0 &&
+                value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        }
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_socket_trace_process(void)
+{
+    if (current == NULL || strncmp(current->name, "chrome_crashpad", 15) == 0)
+        return 0;
+    if (strncmp(current->name, "chrome", 6) == 0 ||
+        strncmp(current->name, "exe", 3) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    if (strstr(current->thread_group->exec_path,
+               "chrome_crashpad_handler") != NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "/chrome") != NULL ||
+           strstr(current->thread_group->exec_path, "wayland-chromium") != NULL;
+}
+
+static const char *chrome_socket_trace_path(struct vfs_file *f)
+{
+    if (f == NULL)
+        return "(null)";
+    if (f->opened_path != NULL)
+        return f->opened_path;
+    if (f->f_kind == VFS_FILE_KIND_PIPE)
+        return "pipe";
+    if (f->f_kind == VFS_FILE_KIND_LEGACY_SOCKET)
+        return "socket";
+    if (f->f_kind == VFS_FILE_KIND_CUSTOM)
+        return "custom";
+    if (f->f_kind == VFS_FILE_KIND_CDEV)
+        return "cdev";
+    if (f->f_kind == VFS_FILE_KIND_BDEV)
+        return "bdev";
+    return "(unknown)";
+}
+
+static int chrome_unix_ipc_trace_enabled(void);
+
+#define CHROME_SOCKET_TRACE(fmt, ...)                                        \
+    do {                                                                     \
+        if (chrome_socket_trace_enabled() && chrome_socket_trace_process())   \
+            printf("chrome-socket-trace: " fmt, ##__VA_ARGS__);              \
+    } while (0)
+
+#define CHROME_UNIX_SOCKET_TRACE(fmt, ...)                                   \
+    do {                                                                     \
+        if (chrome_unix_ipc_trace_enabled() && chrome_socket_trace_process()) \
+            printf("chrome-unix-ipc: " fmt, ##__VA_ARGS__);                  \
+    } while (0)
+
+static const char *chrome_socket_trace_evt_name(enum netconn_evt evt)
+{
+    switch (evt) {
+    case NETCONN_EVT_RCVPLUS: return "rcvplus";
+    case NETCONN_EVT_RCVMINUS: return "rcvminus";
+    case NETCONN_EVT_SENDPLUS: return "sendplus";
+    case NETCONN_EVT_SENDMINUS: return "sendminus";
+    case NETCONN_EVT_ERROR: return "error";
+    default: return "unknown";
+    }
+}
+
+static int chrome_unix_ipc_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_unix_ipc_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static size_t chrome_unix_queue_count(int head, int tail, int max)
+{
+    if (tail >= head)
+        return (size_t)(tail - head);
+    return (size_t)(max - head + tail);
+}
+
+static int chrome_unix_scm_ready_locked(struct unix_sock *sk,
+                                        uint *start_out, uint *end_out)
+{
+    if (sk == NULL || sk->scm_head == sk->scm_tail)
+        return 0;
+
+    uint start = sk->scm_queue[sk->scm_head].start_nread;
+    uint end = sk->scm_queue[sk->scm_head].end_nread;
+    uint nread = sk->tx.nread;
+
+    if (start_out != NULL)
+        *start_out = start;
+    if (end_out != NULL)
+        *end_out = end;
+    return (start == end && (int)(nread - start) >= 0) ||
+           (start != end && (int)(nread - start) > 0);
+}
+
+static void chrome_unix_ipc_trace_state(const char *op, int fd, ssize_t ret,
+                                        size_t want, int flags,
+                                        uint64 control, uint64 controllen,
+                                        size_t cmsg_count, int has_cred,
+                                        struct unix_sock *sk)
+{
+    if (!chrome_unix_ipc_trace_enabled() || !chrome_socket_trace_process())
+        return;
+
+    struct unix_sock *peer = NULL;
+    int sk_type = -1, sk_state = -1, sk_shutdown = 0, sk_error = 0;
+    int sk_passcred = 0, sk_refcount = 0;
+    size_t sk_tx_bytes = 0, sk_tx_capacity = 0, sk_scm = 0, sk_packets = 0;
+    uint sk_tx_nread = 0, sk_tx_nwrite = 0;
+    int peer_type = -1, peer_state = -1, peer_shutdown = 0, peer_error = 0;
+    int peer_passcred = 0, peer_refcount = 0, peer_first_scm_ready = 0;
+    size_t peer_tx_bytes = 0, peer_tx_capacity = 0, peer_scm = 0;
+    size_t peer_packets = 0;
+    uint peer_tx_nread = 0, peer_tx_nwrite = 0;
+    uint peer_first_scm_start = 0, peer_first_scm_end = 0;
+
+    if (sk != NULL) {
+        spin_lock(&sk->lock);
+        sk_type = sk->type;
+        sk_state = sk->state;
+        sk_shutdown = sk->shutdown_flags;
+        sk_error = sk->so_error;
+        sk_passcred = sk->passcred;
+        sk_refcount = sk->refcount;
+        sk_tx_bytes = sk->tx.nwrite - sk->tx.nread;
+        sk_tx_capacity = sk->tx.capacity;
+        sk_tx_nread = sk->tx.nread;
+        sk_tx_nwrite = sk->tx.nwrite;
+        sk_scm = chrome_unix_queue_count(sk->scm_head, sk->scm_tail,
+                                         UNIX_SCM_QUEUE_MAX);
+        sk_packets = chrome_unix_queue_count(sk->packet_head, sk->packet_tail,
+                                             UNIX_PACKET_QUEUE_MAX);
+        peer = sk->peer;
+        unix_sock_get_ref(peer);
+        spin_unlock(&sk->lock);
+    }
+
+    if (peer != NULL) {
+        spin_lock(&peer->lock);
+        peer_type = peer->type;
+        peer_state = peer->state;
+        peer_shutdown = peer->shutdown_flags;
+        peer_error = peer->so_error;
+        peer_passcred = peer->passcred;
+        peer_refcount = peer->refcount;
+        peer_tx_bytes = peer->tx.nwrite - peer->tx.nread;
+        peer_tx_capacity = peer->tx.capacity;
+        peer_tx_nread = peer->tx.nread;
+        peer_tx_nwrite = peer->tx.nwrite;
+        peer_scm = chrome_unix_queue_count(peer->scm_head, peer->scm_tail,
+                                           UNIX_SCM_QUEUE_MAX);
+        peer_packets = chrome_unix_queue_count(peer->packet_head,
+                                               peer->packet_tail,
+                                               UNIX_PACKET_QUEUE_MAX);
+        peer_first_scm_ready =
+            chrome_unix_scm_ready_locked(peer, &peer_first_scm_start,
+                                         &peer_first_scm_end);
+        spin_unlock(&peer->lock);
+    }
+
+    printf("chrome-unix-ipc: %s pid=%d tgid=%d name=%s fd=%d ret=%ld "
+           "want=%lu flags=0x%x control=0x%lx controllen=%lu cmsg=%lu "
+           "has_cred=%d sk=%p peer=%p sk_type=%d sk_state=%d "
+           "sk_shutdown=0x%x sk_err=%d sk_passcred=%d sk_ref=%d "
+           "sk_tx=%lu/%lu sk_marks=%u:%u sk_scm=%lu sk_packets=%lu "
+           "peer_type=%d peer_state=%d peer_shutdown=0x%x peer_err=%d "
+           "peer_passcred=%d peer_ref=%d peer_tx=%lu/%lu "
+           "peer_marks=%u:%u peer_scm=%lu peer_packets=%lu "
+           "peer_first_scm=%u:%u ready=%d\n",
+           op != NULL ? op : "?", current != NULL ? current->pid : -1,
+           current != NULL ? current->tgid : -1,
+           current != NULL ? current->name : "?", fd, (long)ret,
+           (unsigned long)want, flags, (unsigned long)control,
+           (unsigned long)controllen, (unsigned long)cmsg_count, has_cred,
+           sk, peer, sk_type, sk_state, sk_shutdown, sk_error, sk_passcred,
+           sk_refcount, (unsigned long)sk_tx_bytes,
+           (unsigned long)sk_tx_capacity, sk_tx_nread, sk_tx_nwrite,
+           (unsigned long)sk_scm, (unsigned long)sk_packets, peer_type,
+           peer_state, peer_shutdown, peer_error, peer_passcred, peer_refcount,
+           (unsigned long)peer_tx_bytes, (unsigned long)peer_tx_capacity,
+           peer_tx_nread, peer_tx_nwrite, (unsigned long)peer_scm,
+           (unsigned long)peer_packets, peer_first_scm_start,
+           peer_first_scm_end, peer_first_scm_ready);
+
+    unix_sock_put_ref(peer);
+}
 
 /* ========================================================================== */
 /* lwIP error → POSIX errno mapping                                           */
@@ -105,6 +336,7 @@ struct lwip_sock {
     struct netconn *conn;        /* lwIP netconn handle */
     int            type;         /* SOCK_STREAM / SOCK_DGRAM / SOCK_RAW */
     int            protocol;     /* protocol number */
+    int            domain;       /* AF_INET / AF_INET6 */
     struct netbuf  *lastbuf;     /* partially consumed recv buffer (UDP) */
     uint16         lastoffset;   /* offset into lastbuf */
     struct pbuf    *lastpbuf;    /* partially consumed TCP recv pbuf */
@@ -143,12 +375,14 @@ struct lwip_sock {
 
 /* Address family constants */
 #define AF_INET        2
+#define AF_INET6       10
 
 /* Protocol constants */
 #define IPPROTO_IP     0
 #define IPPROTO_TCP    6
 #define IPPROTO_UDP    17
 #define IPPROTO_ICMP   1
+#define IPPROTO_IPV6   41
 
 /* Shutdown constants */
 #define SHUT_RD        0
@@ -200,6 +434,9 @@ struct lwip_sock {
 #define IP_MULTICAST_TTL    33
 #define IP_MULTICAST_LOOP   34
 
+/* IPPROTO_IPV6 options */
+#define IPV6_V6ONLY         26
+
 /* IPPROTO_TCP options (beyond TCP_NODELAY=1) */
 #define TCP_NODELAY    1
 #define TCP_KEEPIDLE   4
@@ -236,6 +473,159 @@ struct k_sockaddr_in {
 };
 
 #define K_SOCKADDR_IN_SIZE  16
+
+struct k_sockaddr_in6 {
+    uint16 sin6_family;
+    uint16 sin6_port;      /* network byte order */
+    uint32 sin6_flowinfo;
+    uchar  sin6_addr[16];
+    uint32 sin6_scope_id;
+};
+
+#define K_SOCKADDR_IN6_SIZE 28
+
+static void chrome_socket_trace_inet_endpoint(const char *op, int fd,
+                                              const struct lwip_sock *sk,
+                                              const struct k_sockaddr_in *sa,
+                                              int nonblock, err_t err,
+                                              int ret)
+{
+    if (!chrome_socket_trace_enabled() || !chrome_socket_trace_process())
+        return;
+
+    const uchar *addr = (const uchar *)&sa->sin_addr;
+    const struct netconn *conn = sk != NULL ? sk->conn : NULL;
+    printf("chrome-socket-trace: %s pid=%d tgid=%d name=%s fd=%d "
+           "dst=%u.%u.%u.%u:%u nb=%d type=%d err=%d errno=%d ret=%d "
+           "state=%d flags=0x%x pending=%d sendevent=%d\n",
+           op, current->pid, current->tgid, current->name, fd,
+           addr[0], addr[1], addr[2], addr[3], ntohs(sa->sin_port),
+           nonblock, sk != NULL ? sk->type : -1, err,
+           err == ERR_OK ? 0 : lwip_err_to_errno(err), ret,
+           conn != NULL ? conn->state : -1,
+           conn != NULL ? conn->flags : 0,
+           conn != NULL ? conn->pending_err : 0,
+           sk != NULL ? sk->sendevent : -1);
+}
+
+static int sock_copyin_inet_addr(int domain, uint64 uaddr, int addrlen,
+                                 ip_addr_t *out, u16_t *port)
+{
+    if (out == NULL || port == NULL)
+        return -EINVAL;
+
+    if (domain == AF_INET) {
+        if (addrlen < K_SOCKADDR_IN_SIZE)
+            return -EINVAL;
+        struct k_sockaddr_in sa;
+        if (vm_copyin(current->vm, &sa, uaddr, sizeof(sa)) < 0)
+            return -EFAULT;
+        if (sa.sin_family != AF_INET)
+            return -EAFNOSUPPORT;
+        ip_addr_set_ip4_u32(out, sa.sin_addr);
+        *port = ntohs(sa.sin_port);
+        return 0;
+    }
+
+#if LWIP_IPV6
+    if (domain == AF_INET6) {
+        if (addrlen < K_SOCKADDR_IN6_SIZE)
+            return -EINVAL;
+        struct k_sockaddr_in6 sa6;
+        struct in6_addr in6;
+        ip6_addr_t ip6;
+
+        if (vm_copyin(current->vm, &sa6, uaddr, sizeof(sa6)) < 0)
+            return -EFAULT;
+        if (sa6.sin6_family != AF_INET6)
+            return -EAFNOSUPPORT;
+
+        memmove(in6.s6_addr, sa6.sin6_addr, sizeof(sa6.sin6_addr));
+        inet6_addr_to_ip6addr(&ip6, &in6);
+        ip_addr_copy_from_ip6(*out, ip6);
+        *port = ntohs(sa6.sin6_port);
+        return 0;
+    }
+#endif
+
+    return -EAFNOSUPPORT;
+}
+
+static int sock_pack_inet_addr(int domain, const ip_addr_t *addr, u16_t port,
+                               char *storage, int *addrlen)
+{
+    if (addr == NULL || storage == NULL || addrlen == NULL)
+        return -EINVAL;
+
+#if LWIP_IPV6
+    if (domain == AF_INET6) {
+        struct k_sockaddr_in6 sa6;
+        memset(&sa6, 0, sizeof(sa6));
+        sa6.sin6_family = AF_INET6;
+        sa6.sin6_port = htons(port);
+
+        if (IP_IS_V6(addr)) {
+            struct in6_addr in6;
+            inet6_addr_from_ip6addr(&in6, ip_2_ip6(addr));
+            memmove(sa6.sin6_addr, in6.s6_addr, sizeof(sa6.sin6_addr));
+        } else {
+            sa6.sin6_addr[10] = 0xff;
+            sa6.sin6_addr[11] = 0xff;
+            uint32 ip4 = ip_addr_get_ip4_u32(addr);
+            memmove(&sa6.sin6_addr[12], &ip4, sizeof(ip4));
+        }
+
+        memmove(storage, &sa6, sizeof(sa6));
+        *addrlen = K_SOCKADDR_IN6_SIZE;
+        return 0;
+    }
+#endif
+
+    struct k_sockaddr_in sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr = ip_addr_get_ip4_u32(addr);
+    memmove(storage, &sa, sizeof(sa));
+    *addrlen = K_SOCKADDR_IN_SIZE;
+    return 0;
+}
+
+static int sock_copyout_inet_addr(int domain, const ip_addr_t *addr, u16_t port,
+                                  uint64 uaddr, uint64 uaddrlen)
+{
+    char storage[K_SOCKADDR_IN6_SIZE];
+    int addrlen = 0;
+    int ret = sock_pack_inet_addr(domain, addr, port, storage, &addrlen);
+    if (ret < 0)
+        return ret;
+
+    if (vm_copyout(current->vm, uaddrlen, &addrlen, sizeof(addrlen)) < 0)
+        return -EFAULT;
+    if (vm_copyout(current->vm, uaddr, storage, addrlen) < 0)
+        return -EFAULT;
+    return 0;
+}
+
+static void chrome_socket_trace_conn_state(const char *op, int fd,
+                                           const struct lwip_sock *sk,
+                                           short events, short revents)
+{
+    if (!chrome_socket_trace_enabled() || !chrome_socket_trace_process())
+        return;
+
+    const struct netconn *conn = sk != NULL ? sk->conn : NULL;
+    printf("chrome-socket-trace: %s pid=%d tgid=%d name=%s fd=%d "
+           "events=0x%x revents=0x%x type=%d state=%d flags=0x%x "
+           "pending=%d sendevent=%d rx_eof=%d\n",
+           op, current->pid, current->tgid, current->name, fd,
+           events, revents, sk != NULL ? sk->type : -1,
+           conn != NULL ? conn->state : -1,
+           conn != NULL ? conn->flags : 0,
+           conn != NULL ? conn->pending_err : 0,
+           sk != NULL ? sk->sendevent : -1,
+           sk != NULL ? sk->rx_eof : -1);
+}
 
 static int sock_is_nonblock(int fd, int msg_flags);
 static ssize_t sock_tcp_send_common(struct lwip_sock *sk, int fd,
@@ -956,6 +1346,12 @@ static int sock_file_poll(struct vfs_file *file, short events)
     if (conn->pending_err != ERR_OK) {
         revents |= POLLERR;
     }
+    if (sk->type == SOCK_STREAM && sk->rx_eof) {
+        revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
+        revents |= POLLHUP;
+        if (events & POLLRDHUP)
+            revents |= POLLRDHUP;
+    }
     if (conn->flags & NETCONN_FLAG_MBOXCLOSED) {
         revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
         revents |= POLLHUP;
@@ -974,6 +1370,17 @@ static int sock_file_poll(struct vfs_file *file, short events)
             (conn->flags & NETCONN_FLAG_MBOXCLOSED) ||
             sk->sendevent) {
             revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
+        }
+    }
+
+    if (sk->type == SOCK_STREAM &&
+        ((events & (POLLOUT | POLLWRNORM | POLLWRBAND)) ||
+         conn->state == NETCONN_CONNECT || conn->pending_err != ERR_OK)) {
+        static int trace_count;
+        if (trace_count < 512) {
+            trace_count++;
+            chrome_socket_trace_conn_state("poll", sk->fd, sk, events,
+                                           revents);
         }
     }
 
@@ -1517,8 +1924,27 @@ static void sock_netconn_callback(struct netconn *conn,
                                ? (struct lwip_sock *)file->private_data
                                : NULL;
 
+    if (sk != NULL && sk->type == SOCK_STREAM) {
+        static int trace_count;
+        if (chrome_socket_trace_enabled() && trace_count < 512) {
+            trace_count++;
+            printf("chrome-socket-trace: callback pid=%d tgid=%d name=%s "
+                   "fd=%d evt=%s len=%u state=%d flags=0x%x pending=%d "
+                   "sendevent=%d\n",
+                   current != NULL ? current->pid : -1,
+                   current != NULL ? current->tgid : -1,
+                   current != NULL ? current->name : "(null)",
+                   sk->fd, chrome_socket_trace_evt_name(evt),
+                   len, conn->state, conn->flags, conn->pending_err,
+                   sk->sendevent);
+        }
+    }
+
     switch (evt) {
     case NETCONN_EVT_RCVPLUS:
+        if (sk != NULL && sk->type == SOCK_STREAM && len == 0 &&
+            conn->state != NETCONN_LISTEN && conn->pending_err == ERR_OK)
+            sk->rx_eof = 1;
         vfs_file_knote_notify(file, EVFILT_READ, (int64)len);
         break;
     case NETCONN_EVT_SENDPLUS:
@@ -1554,7 +1980,7 @@ static void sock_netconn_callback(struct netconn *conn,
 /* ========================================================================== */
 
 static int sock_fd_alloc(struct netconn *conn, int type, int protocol,
-                         int file_flags)
+                         int domain, int file_flags)
 {
     struct lwip_sock *sk = lwip_sock_alloc();
     if (sk == NULL)
@@ -1563,6 +1989,7 @@ static int sock_fd_alloc(struct netconn *conn, int type, int protocol,
     sk->conn = conn;
     sk->type = type;
     sk->protocol = protocol;
+    sk->domain = domain;
 
     /* Propagate O_NONBLOCK to the lwIP netconn layer so that
      * netconn_connect() etc. return ERR_INPROGRESS instead of blocking. */
@@ -1604,7 +2031,8 @@ static struct lwip_sock *sock_from_fd(int fd)
 
 /*
  * sock_domain_from_fd - detect domain of a socket fd
- * Returns AF_INET (2), AF_UNIX (1), AF_NETLINK (16), or 0 if not a socket.
+ * Returns AF_INET (2), AF_INET6 (10), AF_UNIX (1), AF_NETLINK (16), or 0 if
+ * not a socket.
  */
 static int sock_domain_from_fd(int fd)
 {
@@ -1617,8 +2045,10 @@ static int sock_domain_from_fd(int fd)
 
     if (f == NULL)
         return 0;
-    if (f->ops == &lwip_socket_file_ops)
-        return AF_INET;
+    if (f->ops == &lwip_socket_file_ops) {
+        struct lwip_sock *sk = (struct lwip_sock *)f->private_data;
+        return sk != NULL && sk->domain != 0 ? sk->domain : AF_INET;
+    }
     if (f->ops == &unix_socket_file_ops)
         return AF_UNIX;
     if (f->ops == &netlink_socket_file_ops)
@@ -1646,6 +2076,31 @@ static int sock_is_nonblock(int fd, int msg_flags)
     return (f->f_flags & O_NONBLOCK) != 0;
 }
 
+static void chrome_socket_trace_tcp_io(const char *op, struct lwip_sock *sk,
+                                       int fd, size_t requested,
+                                       ssize_t result, int flags,
+                                       int user, uint64 first0,
+                                       uint64 first1)
+{
+    if (!chrome_socket_trace_enabled() || !chrome_socket_trace_process())
+        return;
+
+    const struct netconn *conn = sk != NULL ? sk->conn : NULL;
+    printf("chrome-socket-trace: %s pid=%d tgid=%d name=%s fd=%d "
+           "requested=%lu result=%ld flags=0x%x user=%d type=%d state=%d "
+           "conn_flags=0x%x pending=%d sendevent=%d rx_eof=%d "
+           "first=0x%lx/0x%lx\n",
+           op, current->pid, current->tgid, current->name, fd,
+           (unsigned long)requested, (long)result, flags, user,
+           sk != NULL ? sk->type : -1,
+           conn != NULL ? conn->state : -1,
+           conn != NULL ? conn->flags : 0,
+           conn != NULL ? conn->pending_err : 0,
+           sk != NULL ? sk->sendevent : -1,
+           sk != NULL ? sk->rx_eof : -1,
+           first0, first1);
+}
+
 static ssize_t sock_tcp_send_common(struct lwip_sock *sk, int fd,
                                     uint64 ubuf, const char *kbuf,
                                     size_t count, int flags, int user)
@@ -1653,11 +2108,20 @@ static ssize_t sock_tcp_send_common(struct lwip_sock *sk, int fd,
     char tmpbuf[1500];
     size_t written = 0;
     int nonblock;
+    uint64 first0 = 0;
+    uint64 first1 = 0;
+    int have_first = 0;
 
-    if (sk == NULL || sk->conn == NULL)
+    if (sk == NULL || sk->conn == NULL) {
+        chrome_socket_trace_tcp_io("tcp-send", sk, fd, count, -EBADF,
+                                   flags, user, 0, 0);
         return -EBADF;
-    if (count == 0)
+    }
+    if (count == 0) {
+        chrome_socket_trace_tcp_io("tcp-send", sk, fd, count, 0,
+                                   flags, user, 0, 0);
         return 0;
+    }
 
     nonblock = sock_is_nonblock(fd, flags);
 
@@ -1675,6 +2139,17 @@ static ssize_t sock_tcp_send_common(struct lwip_sock *sk, int fd,
         } else {
             memmove(tmpbuf, kbuf + written, chunk);
         }
+        if (!have_first) {
+            size_t first_len = chunk < sizeof(first0) ? chunk : sizeof(first0);
+            memmove(&first0, tmpbuf, first_len);
+            if (chunk > sizeof(first0)) {
+                size_t second_len = chunk - sizeof(first0);
+                if (second_len > sizeof(first1))
+                    second_len = sizeof(first1);
+                memmove(&first1, tmpbuf + sizeof(first0), second_len);
+            }
+            have_first = 1;
+        }
 
         u8_t apiflags = NETCONN_COPY;
         if (nonblock)
@@ -1689,15 +2164,28 @@ static ssize_t sock_tcp_send_common(struct lwip_sock *sk, int fd,
 
             if (err == ERR_WOULDBLOCK || err == ERR_TIMEOUT)
                 posix = EAGAIN;
-            if (written > 0)
+            if (written > 0) {
+                chrome_socket_trace_tcp_io("tcp-send", sk, fd, count,
+                                           (ssize_t)written, flags, user,
+                                           first0, first1);
                 return (ssize_t)written;
+            }
+            chrome_socket_trace_tcp_io("tcp-send", sk, fd, count, -posix,
+                                       flags, user, first0, first1);
             return -posix;
         }
 
         if (chunk_written == 0) {
-            if (written > 0)
+            if (written > 0) {
+                chrome_socket_trace_tcp_io("tcp-send", sk, fd, count,
+                                           (ssize_t)written, flags, user,
+                                           first0, first1);
                 return (ssize_t)written;
-            return nonblock ? -EAGAIN : -EPIPE;
+            }
+            ssize_t ret = nonblock ? -EAGAIN : -EPIPE;
+            chrome_socket_trace_tcp_io("tcp-send", sk, fd, count, ret,
+                                       flags, user, first0, first1);
+            return ret;
         }
 
         written += chunk_written;
@@ -1707,10 +2195,16 @@ static ssize_t sock_tcp_send_common(struct lwip_sock *sk, int fd,
                 break;
         }
 
-        if (signal_pending(current))
+        if (signal_pending(current)) {
+            ssize_t ret = written > 0 ? (ssize_t)written : -EINTR;
+            chrome_socket_trace_tcp_io("tcp-send", sk, fd, count, ret,
+                                       flags, user, first0, first1);
             return written > 0 ? (ssize_t)written : -EINTR;
+        }
     }
 
+    chrome_socket_trace_tcp_io("tcp-send", sk, fd, count, (ssize_t)written,
+                               flags, user, first0, first1);
     return (ssize_t)written;
 }
 
@@ -1740,8 +2234,23 @@ static size_t unix_ring_peek(const struct unix_ring *r, uint start_off,
 /* Map POSIX socket type → lwIP netconn type                                  */
 /* ========================================================================== */
 
-static enum netconn_type posix_to_netconn_type(int type, int protocol)
+static enum netconn_type posix_to_netconn_type(int domain, int type,
+                                               int protocol)
 {
+    (void)protocol;
+    if (domain == AF_INET6) {
+#if LWIP_IPV6
+        switch (type) {
+        case SOCK_STREAM:  return NETCONN_TCP_IPV6;
+        case SOCK_DGRAM:   return NETCONN_UDP_IPV6;
+        case SOCK_RAW:     return NETCONN_RAW_IPV6;
+        default:           return NETCONN_INVALID;
+        }
+#else
+        return NETCONN_INVALID;
+#endif
+    }
+
     switch (type) {
     case SOCK_STREAM:  return NETCONN_TCP;
     case SOCK_DGRAM:   return NETCONN_UDP;
@@ -1767,6 +2276,9 @@ uint64 sys_socket(void)
     /* Strip Linux-style flags from type field */
     int flags = type & ~SOCK_TYPE_MASK;
     type &= SOCK_TYPE_MASK;
+
+    if (flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC))
+        return (uint64)-EINVAL;
 
     int file_flags = O_RDWR;
     if (flags & SOCK_NONBLOCK)
@@ -1800,11 +2312,11 @@ uint64 sys_socket(void)
         return (uint64)fd;
     }
 
-    /* ---- AF_INET (lwIP) ---- */
-    if (domain != AF_INET)
+    /* ---- AF_INET / AF_INET6 (lwIP) ---- */
+    if (domain != AF_INET && domain != AF_INET6)
         return (uint64)-EAFNOSUPPORT;
 
-    enum netconn_type ntype = posix_to_netconn_type(type, protocol);
+    enum netconn_type ntype = posix_to_netconn_type(domain, type, protocol);
     if (ntype == NETCONN_INVALID)
         return (uint64)-EPROTOTYPE;
 
@@ -1812,7 +2324,7 @@ uint64 sys_socket(void)
     if (conn == NULL)
         return (uint64)-ENOMEM;
 
-    int fd = sock_fd_alloc(conn, type, protocol, file_flags);
+    int fd = sock_fd_alloc(conn, type, protocol, domain, file_flags);
     if (fd < 0) {
         netconn_delete(conn);
         return (uint64)fd;
@@ -1850,20 +2362,14 @@ uint64 sys_bind(void)
     if (sk == NULL)
         return (uint64)-EBADF;
 
-    if (addrlen < K_SOCKADDR_IN_SIZE)
-        return (uint64)-EINVAL;
-
-    struct k_sockaddr_in sa;
-    if (vm_copyin(current->vm, &sa, uaddr, sizeof(sa)) < 0)
-        return (uint64)-EFAULT;
-
-    if (sa.sin_family != AF_INET)
-        return (uint64)-EAFNOSUPPORT;
-
     ip_addr_t ipaddr;
-    ip_addr_set_ip4_u32(&ipaddr, sa.sin_addr);
+    u16_t port;
+    int addr_ret = sock_copyin_inet_addr(domain, uaddr, addrlen, &ipaddr,
+                                         &port);
+    if (addr_ret < 0)
+        return (uint64)addr_ret;
 
-    err_t err = netconn_bind(sk->conn, &ipaddr, ntohs(sa.sin_port));
+    err_t err = netconn_bind(sk->conn, &ipaddr, port);
     if (err != ERR_OK)
         return (uint64)-lwip_err_to_errno(err);
 
@@ -1939,7 +2445,8 @@ uint64 sys_accept(void)
         return (uint64)-lwip_err_to_errno(err);
     }
 
-    int newfd = sock_fd_alloc(newconn, SOCK_STREAM, sk->protocol, O_RDWR);
+    int newfd = sock_fd_alloc(newconn, SOCK_STREAM, sk->protocol, sk->domain,
+                              O_RDWR);
     if (newfd < 0) {
         netconn_delete(newconn);
         return (uint64)newfd;
@@ -1951,15 +2458,10 @@ uint64 sys_accept(void)
         u16_t rport;
         netconn_peer(newconn, &raddr, &rport);
 
-        struct k_sockaddr_in sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sin_family = AF_INET;
-        sa.sin_port = htons(rport);
-        sa.sin_addr = ip_addr_get_ip4_u32(&raddr);
-
-        int alen = K_SOCKADDR_IN_SIZE;
-        vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
-        vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
+        int out_ret = sock_copyout_inet_addr(sk->domain, &raddr, rport,
+                                             uaddr, uaddrlen);
+        if (out_ret < 0)
+            return (uint64)out_ret;
     }
 
     ACCT_INC(current->thread_group, net_accepts);
@@ -2000,20 +2502,14 @@ uint64 sys_sconnect(void)
         vfs_fput(f);
     }
 
-    if (addrlen < K_SOCKADDR_IN_SIZE)
-        return (uint64)-EINVAL;
-
-    struct k_sockaddr_in sa;
-    if (vm_copyin(current->vm, &sa, uaddr, sizeof(sa)) < 0)
-        return (uint64)-EFAULT;
-
-    if (sa.sin_family != AF_INET)
-        return (uint64)-EAFNOSUPPORT;
-
     ip_addr_t ipaddr;
-    ip_addr_set_ip4_u32(&ipaddr, sa.sin_addr);
+    u16_t port;
+    int addr_ret = sock_copyin_inet_addr(domain, uaddr, addrlen, &ipaddr,
+                                         &port);
+    if (addr_ret < 0)
+        return (uint64)addr_ret;
 
-    uint32 ip4 = ip_addr_get_ip4_u32(&ipaddr);
+    uint32 ip4 = IP_IS_V4(&ipaddr) ? ip_addr_get_ip4_u32(&ipaddr) : 0;
 
     /*
      * For non-blocking TCP connects, mark the socket non-writable before
@@ -2025,7 +2521,7 @@ uint64 sys_sconnect(void)
     if (is_nb && sk->type == SOCK_STREAM)
         sk->sendevent = 0;
 
-    err_t err = netconn_connect(sk->conn, &ipaddr, ntohs(sa.sin_port));
+    err_t err = netconn_connect(sk->conn, &ipaddr, port);
 
 
     if (err == ERR_INPROGRESS) {
@@ -2039,14 +2535,42 @@ uint64 sys_sconnect(void)
         if (sk->conn->state == NETCONN_NONE)
             sk->sendevent = 1;
         ACCT_INC(current->thread_group, net_connects);
+        if (domain == AF_INET) {
+            struct k_sockaddr_in sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sin_family = AF_INET;
+            sa.sin_port = htons(port);
+            sa.sin_addr = ip4;
+            chrome_socket_trace_inet_endpoint("connect", fd, sk, &sa, is_nb,
+                                              err, -EINPROGRESS);
+        }
         return (uint64)-EINPROGRESS;
     }
     if (err == ERR_OK)
         sk->sendevent = 1;
-    if (err != ERR_OK)
+    if (err != ERR_OK) {
+        if (domain == AF_INET) {
+            struct k_sockaddr_in sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sin_family = AF_INET;
+            sa.sin_port = htons(port);
+            sa.sin_addr = ip4;
+            chrome_socket_trace_inet_endpoint("connect", fd, sk, &sa, is_nb,
+                                              err, -lwip_err_to_errno(err));
+        }
         return (uint64)-lwip_err_to_errno(err);
+    }
 
     ACCT_INC(current->thread_group, net_connects);
+    if (domain == AF_INET) {
+        struct k_sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(port);
+        sa.sin_addr = ip4;
+        chrome_socket_trace_inet_endpoint("connect", fd, sk, &sa, is_nb,
+                                          err, 0);
+    }
     return 0;
 }
 
@@ -2073,8 +2597,8 @@ uint64 sys_sendto(void)
     if (domain == AF_UNIX) {
         if (uaddr != 0 || addrlen != 0)
             return (uint64)-EOPNOTSUPP;
-        if (len <= 0)
-            return 0;
+        if (len < 0)
+            return (uint64)-EINVAL;
         if (flags & ~(MSG_DONTWAIT | MSG_NOSIGNAL))
             return (uint64)-EOPNOTSUPP;
 
@@ -2083,6 +2607,16 @@ uint64 sys_sendto(void)
             if (f != NULL)
                 vfs_fput(f);
             return (uint64)-EBADF;
+        }
+
+        struct unix_sock *usk = (struct unix_sock *)f->private_data;
+        if (usk == NULL) {
+            vfs_fput(f);
+            return (uint64)-EBADF;
+        }
+        if (len == 0 && usk->type == SOCK_STREAM) {
+            vfs_fput(f);
+            return 0;
         }
 
         int saved_fflags = f->f_flags;
@@ -2143,19 +2677,16 @@ uint64 sys_sendto(void)
         }
 
         err_t err;
-        if (uaddr != 0 && addrlen >= K_SOCKADDR_IN_SIZE) {
-            struct k_sockaddr_in sa;
-            if (vm_copyin(current->vm, &sa, uaddr, sizeof(sa)) < 0) {
-                netbuf_delete(nb);
-                return (uint64)-EFAULT;
-            }
-            if (sa.sin_family != AF_INET) {
-                netbuf_delete(nb);
-                return (uint64)-EAFNOSUPPORT;
-            }
+        if (uaddr != 0) {
             ip_addr_t destip;
-            ip_addr_set_ip4_u32(&destip, sa.sin_addr);
-            err = netconn_sendto(sk->conn, nb, &destip, ntohs(sa.sin_port));
+            u16_t port;
+            int addr_ret = sock_copyin_inet_addr(domain, uaddr, addrlen,
+                                                 &destip, &port);
+            if (addr_ret < 0) {
+                netbuf_delete(nb);
+                return (uint64)addr_ret;
+            }
+            err = netconn_sendto(sk->conn, nb, &destip, port);
         } else {
             err = netconn_send(sk->conn, nb);
         }
@@ -2337,15 +2868,13 @@ uint64 sys_recvfrom(void)
             const ip_addr_t *fromaddr = netbuf_fromaddr(nb);
             u16_t fromport = netbuf_fromport(nb);
 
-            struct k_sockaddr_in sa;
-            memset(&sa, 0, sizeof(sa));
-            sa.sin_family = AF_INET;
-            sa.sin_port = htons(fromport);
-            sa.sin_addr = ip_addr_get_ip4_u32(fromaddr);
-
-            int alen = K_SOCKADDR_IN_SIZE;
-            vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
-            vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
+            int out_ret = sock_copyout_inet_addr(domain, fromaddr, fromport,
+                                                 uaddr, uaddrlen);
+            if (out_ret < 0) {
+                if (sk->lastbuf == NULL)
+                    netbuf_delete(nb);
+                return (uint64)out_ret;
+            }
         }
 
         if (flags & MSG_PEEK) {
@@ -2552,6 +3081,23 @@ uint64 sys_setsockopt(void)
         }
     }
 
+    if (level == IPPROTO_IPV6) {
+        switch (optname) {
+        case IPV6_V6ONLY:
+#if LWIP_IPV6
+            if (sk->domain != AF_INET6)
+                return (uint64)-EINVAL;
+            if (val)
+                netconn_set_ipv6only(sk->conn, 1);
+            else
+                netconn_set_ipv6only(sk->conn, 0);
+#endif
+            return 0;
+        default:
+            return 0;
+        }
+    }
+
     if (level == IPPROTO_UDP || level == IPPROTO_ICMP) {
         /* Accept silently */
         return 0;
@@ -2600,6 +3146,12 @@ uint64 sys_getsockopt(void)
             /* Read and clear pending error */
             val = lwip_err_to_errno(sk->conn->pending_err);
             sk->conn->pending_err = ERR_OK;
+            CHROME_SOCKET_TRACE("getsockopt-so-error pid=%d tgid=%d "
+                                "name=%s fd=%d val=%d state=%d flags=0x%x "
+                                "sendevent=%d\n",
+                                current->pid, current->tgid, current->name,
+                                fd, val, sk->conn->state, sk->conn->flags,
+                                sk->sendevent);
             break;
         }
         case SO_TYPE:
@@ -2629,6 +3181,12 @@ uint64 sys_getsockopt(void)
             break;
         case SO_ACCEPTCONN:
             val = (sk->conn->state == NETCONN_LISTEN) ? 1 : 0;
+            break;
+        case SO_DOMAIN:
+            val = sk->domain;
+            break;
+        case SO_PROTOCOL:
+            val = sk->protocol;
             break;
         case SO_LINGER:
             is_linger = 1;
@@ -2682,6 +3240,19 @@ uint64 sys_getsockopt(void)
             break;
         case IP_TOS:
             val = sk->conn->pcb.ip->tos;
+            break;
+        default:
+            val = 0;
+            break;
+        }
+    } else if (level == IPPROTO_IPV6) {
+        switch (optname) {
+        case IPV6_V6ONLY:
+#if LWIP_IPV6
+            val = sk->domain == AF_INET6 ? netconn_get_ipv6only(sk->conn) : 0;
+#else
+            val = 0;
+#endif
             break;
         default:
             val = 0;
@@ -2759,16 +3330,8 @@ uint64 sys_getpeername(void)
     if (err != ERR_OK)
         return (uint64)-lwip_err_to_errno(err);
 
-    struct k_sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(rport);
-    sa.sin_addr = ip_addr_get_ip4_u32(&raddr);
-
-    int alen = K_SOCKADDR_IN_SIZE;
-    vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
-    vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
-    return 0;
+    return (uint64)sock_copyout_inet_addr(sk->domain, &raddr, rport,
+                                          uaddr, uaddrlen);
 }
 
 /*
@@ -2814,16 +3377,8 @@ uint64 sys_getsockname(void)
         }
     }
 
-    struct k_sockaddr_in sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sin_family = AF_INET;
-    sa.sin_port = htons(lport);
-    sa.sin_addr = ip_addr_get_ip4_u32(&laddr);
-
-    int alen = K_SOCKADDR_IN_SIZE;
-    vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
-    vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
-    return 0;
+    return (uint64)sock_copyout_inet_addr(sk->domain, &laddr, lport,
+                                          uaddr, uaddrlen);
 }
 
 /* ========================================================================== */
@@ -2893,6 +3448,7 @@ uint64 sys_accept4(void)
     newsk->conn = newconn;
     newsk->type = SOCK_STREAM;
     newsk->protocol = sk->protocol;
+    newsk->domain = sk->domain;
 
     int newfd = vfs_custom_fd_alloc(&lwip_socket_file_ops, newsk, file_flags);
     if (newfd < 0) {
@@ -2919,15 +3475,10 @@ uint64 sys_accept4(void)
         u16_t rport;
         netconn_peer(newconn, &raddr, &rport);
 
-        struct k_sockaddr_in sa;
-        memset(&sa, 0, sizeof(sa));
-        sa.sin_family = AF_INET;
-        sa.sin_port = htons(rport);
-        sa.sin_addr = ip_addr_get_ip4_u32(&raddr);
-
-        int alen = K_SOCKADDR_IN_SIZE;
-        vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
-        vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
+        int out_ret = sock_copyout_inet_addr(sk->domain, &raddr, rport,
+                                             uaddr, uaddrlen);
+        if (out_ret < 0)
+            return (uint64)out_ret;
     }
 
     ACCT_INC(current->thread_group, net_accepts);
@@ -2973,14 +3524,134 @@ struct k_cmsghdr {
 #define K_CMSG_DATA(cmsg) ((unsigned char *)((struct k_cmsghdr *)(cmsg) + 1))
 #define K_CMSG_LEN(len)   (K_CMSG_ALIGN(sizeof(struct k_cmsghdr)) + (len))
 #define K_CMSG_SPACE(len) (K_CMSG_ALIGN(sizeof(struct k_cmsghdr)) + K_CMSG_ALIGN(len))
+#define K_CMSG_PARSE_MAX  4096
 
 #define SENDMSG_MAX_IOV 16
+
+static uint64 sys_recvmsg_netlink(int fd, uint64 umsg, int flags)
+{
+    struct k_msghdr mh;
+    if (vm_copyin(current->vm, &mh, umsg, sizeof(mh)) < 0)
+        return (uint64)-EFAULT;
+    if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
+        return (uint64)-EINVAL;
+
+    struct k_iovec iovs[SENDMSG_MAX_IOV];
+    uint64 iov_bytes = (uint64)mh.msg_iovlen * sizeof(struct k_iovec);
+    if (iov_bytes != 0 &&
+        vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
+        return (uint64)-EFAULT;
+
+    size_t total_len = 0;
+    for (int i = 0; i < mh.msg_iovlen; i++) {
+        if (iovs[i].iov_len > PAGE_SIZE ||
+            total_len > PAGE_SIZE - iovs[i].iov_len)
+            return (uint64)-EMSGSIZE;
+        total_len += iovs[i].iov_len;
+    }
+
+    char *buf = kvmalloc(total_len ? total_len : 1);
+    if (buf == NULL)
+        return (uint64)-ENOMEM;
+
+    int ret = netlink_sock_recv(fd, (uint64)buf, total_len, flags,
+                                mh.msg_name,
+                                umsg + __builtin_offsetof(struct k_msghdr,
+                                                          msg_namelen),
+                                false);
+    if (ret < 0) {
+        kvfree(buf);
+        return (uint64)ret;
+    }
+
+    size_t copied = 0;
+    for (int i = 0; i < mh.msg_iovlen && copied < (size_t)ret; i++) {
+        size_t n = iovs[i].iov_len;
+        if (n > (size_t)ret - copied)
+            n = (size_t)ret - copied;
+        if (n != 0 &&
+            vm_copyout(current->vm, iovs[i].iov_base, buf + copied, n) < 0) {
+            kvfree(buf);
+            return (uint64)-EFAULT;
+        }
+        copied += n;
+    }
+    kvfree(buf);
+
+    int msg_flags = 0;
+    if (vm_copyout(current->vm,
+                   umsg + __builtin_offsetof(struct k_msghdr, msg_flags),
+                   &msg_flags, sizeof(msg_flags)) < 0)
+        return (uint64)-EFAULT;
+    return (uint64)ret;
+}
+
+static uint64 sys_sendmsg_netlink(int fd, uint64 umsg, int flags)
+{
+    if (flags & ~(MSG_DONTWAIT | MSG_NOSIGNAL))
+        return (uint64)-EOPNOTSUPP;
+
+    struct k_msghdr mh;
+    if (vm_copyin(current->vm, &mh, umsg, sizeof(mh)) < 0)
+        return (uint64)-EFAULT;
+    if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
+        return (uint64)-EINVAL;
+
+    struct k_iovec iovs[SENDMSG_MAX_IOV];
+    uint64 iov_bytes = (uint64)mh.msg_iovlen * sizeof(struct k_iovec);
+    if (iov_bytes != 0 &&
+        vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
+        return (uint64)-EFAULT;
+
+    size_t total_len = 0;
+    for (int i = 0; i < mh.msg_iovlen; i++) {
+        if (iovs[i].iov_len > PAGE_SIZE ||
+            total_len > PAGE_SIZE - iovs[i].iov_len)
+            return (uint64)-EMSGSIZE;
+        total_len += iovs[i].iov_len;
+    }
+
+    char *buf = kvmalloc(total_len ? total_len : 1);
+    if (buf == NULL)
+        return (uint64)-ENOMEM;
+
+    size_t copied = 0;
+    for (int i = 0; i < mh.msg_iovlen; i++) {
+        if (iovs[i].iov_len == 0)
+            continue;
+        if (vm_copyin(current->vm, buf + copied, iovs[i].iov_base,
+                      iovs[i].iov_len) < 0) {
+            kvfree(buf);
+            return (uint64)-EFAULT;
+        }
+        copied += iovs[i].iov_len;
+    }
+
+    struct vfs_file *file = vfs_fdtable_get_file(current->fdtable, fd);
+    if (file == NULL) {
+        kvfree(buf);
+        return (uint64)-EBADF;
+    }
+    if (file->ops != &netlink_socket_file_ops) {
+        vfs_fput(file);
+        kvfree(buf);
+        return (uint64)-EBADF;
+    }
+
+    ssize_t ret = netlink_socket_file_ops.write(file, buf, total_len, false);
+    vfs_fput(file);
+    kvfree(buf);
+    return (uint64)ret;
+}
 
 struct k_ucred {
     int pid;
     uint32 uid;
     uint32 gid;
 };
+
+#define LINUX_OVERFLOW_UID 65534U
+#define LINUX_OVERFLOW_GID 65534U
 
 static ssize_t sock_udp_copy_netbuf_to_iovs(struct netbuf *nb,
                                             const struct k_iovec *iovs,
@@ -3051,24 +3722,192 @@ static int k_cmsg_readable(struct k_cmsghdr *cmsg, size_t copied,
     return 1;
 }
 
+static int k_cmsg_append_common(unsigned char *buf, size_t buflen, size_t *used,
+                                int level, int type, const void *data,
+                                size_t data_len, int allow_partial_data,
+                                int *partial_data)
+{
+    size_t space = K_CMSG_SPACE(data_len);
+    size_t len = K_CMSG_LEN(data_len);
+    size_t hdr_len = K_CMSG_LEN(0);
+    size_t avail;
+    size_t consume;
+    size_t cmsg_len;
+    size_t copy_len;
+
+    if (partial_data != NULL)
+        *partial_data = 0;
+    if (*used > buflen)
+        return -ENOSPC;
+    avail = buflen - *used;
+    if (avail < hdr_len)
+        return -ENOSPC;
+    if (avail < len) {
+        if (!allow_partial_data)
+            return -ENOSPC;
+        cmsg_len = avail;
+        copy_len = avail - hdr_len;
+        consume = avail;
+        if (partial_data != NULL)
+            *partial_data = 1;
+    } else {
+        cmsg_len = len;
+        copy_len = data_len;
+        consume = avail < space ? avail : space;
+    }
+    if (copy_len > data_len)
+        copy_len = data_len;
+    if (consume < hdr_len)
+        return -ENOSPC;
+
+    struct k_cmsghdr *cmsg = (struct k_cmsghdr *)(buf + *used);
+    memset(buf + *used, 0, consume);
+    cmsg->cmsg_len = cmsg_len;
+    cmsg->cmsg_level = level;
+    cmsg->cmsg_type = type;
+    if (copy_len != 0)
+        memmove(K_CMSG_DATA(cmsg), data, copy_len);
+    *used += consume;
+    return 0;
+}
+
 static int k_cmsg_append(unsigned char *buf, size_t buflen, size_t *used,
                          int level, int type, const void *data,
                          size_t data_len)
 {
-    size_t need = K_CMSG_SPACE(data_len);
-    size_t len = K_CMSG_LEN(data_len);
+    return k_cmsg_append_common(buf, buflen, used, level, type, data,
+                                data_len, 0, NULL);
+}
 
-    if (*used > buflen || buflen - *used < need)
-        return -ENOSPC;
+static int k_cmsg_append_partial_data(unsigned char *buf, size_t buflen,
+                                      size_t *used, int level, int type,
+                                      const void *data, size_t data_len,
+                                      int *partial_data)
+{
+    return k_cmsg_append_common(buf, buflen, used, level, type, data,
+                                data_len, 1, partial_data);
+}
 
-    struct k_cmsghdr *cmsg = (struct k_cmsghdr *)(buf + *used);
-    memset(buf + *used, 0, need);
-    cmsg->cmsg_len = len;
-    cmsg->cmsg_level = level;
-    cmsg->cmsg_type = type;
-    if (data_len != 0)
-        memmove(K_CMSG_DATA(cmsg), data, data_len);
-    *used += need;
+static struct unix_scm_cred unix_current_scm_cred(void);
+
+static int unix_scm_cred_validate(const struct unix_scm_cred *cred)
+{
+    struct unix_scm_cred current_cred = unix_current_scm_cred();
+    struct thread *target = NULL;
+
+    if (cred->pid <= 0)
+        return -ESRCH;
+    if (current_cred.uid == 0) {
+        rcu_read_lock();
+        get_pid_thread(cred->pid, &target);
+        rcu_read_unlock();
+        return target != NULL ? 0 : -ESRCH;
+    }
+    if (cred->pid != current_cred.pid)
+        return -EPERM;
+    if (cred->uid != current_cred.uid)
+        return -EPERM;
+    if (cred->gid != current_cred.gid)
+        return -EPERM;
+    return 0;
+}
+
+static int unix_collect_scm_from_control(uint64 ucontrol, uint64 controllen,
+                                         struct vfs_file **scm_files,
+                                         size_t *scm_count,
+                                         struct unix_scm_cred *scm_cred,
+                                         int *has_scm_cred)
+{
+    unsigned char cmsg_buf[K_CMSG_PARSE_MAX];
+    uint64 copy_len = controllen;
+
+    if (has_scm_cred != NULL)
+        *has_scm_cred = 0;
+    if (ucontrol == 0 || controllen < K_CMSG_LEN(0))
+        return 0;
+    if (copy_len > sizeof(cmsg_buf))
+        copy_len = sizeof(cmsg_buf);
+    if (vm_copyin(current->vm, cmsg_buf, ucontrol, copy_len) < 0)
+        return -EFAULT;
+
+    for (size_t off = 0; off + K_CMSG_LEN(0) <= copy_len; ) {
+        struct k_cmsghdr *cmsg = (struct k_cmsghdr *)(cmsg_buf + off);
+        uint64 cmsg_len = cmsg->cmsg_len;
+
+        if (cmsg_len < K_CMSG_LEN(0))
+            return -EINVAL;
+        if (cmsg_len > copy_len - off) {
+            if (controllen > copy_len)
+                return -EMSGSIZE;
+            return -EINVAL;
+        }
+
+        if (cmsg->cmsg_level == SOL_SOCKET &&
+            cmsg->cmsg_type == SCM_CREDENTIALS) {
+            size_t payload_len = k_cmsg_payload_len(cmsg);
+            struct k_ucred *ucred = (struct k_ucred *)K_CMSG_DATA(cmsg);
+            struct unix_scm_cred cred;
+
+            if (payload_len != sizeof(*ucred))
+                return -EINVAL;
+            cred.pid = ucred->pid;
+            cred.uid = ucred->uid;
+            cred.gid = ucred->gid;
+            int cred_ret = unix_scm_cred_validate(&cred);
+            if (cred_ret < 0)
+                return cred_ret;
+            if (scm_cred != NULL) {
+                *scm_cred = cred;
+                if (has_scm_cred != NULL)
+                    *has_scm_cred = 1;
+            }
+            CHROME_UNIX_SOCKET_TRACE("scm-send-cred pid=%d tgid=%d name=%s "
+                                     "cred_pid=%d cred_uid=%u cred_gid=%u\n",
+                                     current->pid, current->tgid,
+                                     current->name, cred.pid, cred.uid,
+                                     cred.gid);
+        } else if (cmsg->cmsg_level == SOL_SOCKET &&
+                   cmsg->cmsg_type == SCM_RIGHTS) {
+            size_t payload_len = k_cmsg_payload_len(cmsg);
+
+            if ((payload_len % sizeof(int)) != 0)
+                return -EINVAL;
+
+            size_t nfds = payload_len / sizeof(int);
+            int *pass_fds = (int *)K_CMSG_DATA(cmsg);
+            for (size_t i = 0; i < nfds; i++) {
+                if (*scm_count >= UNIX_SCM_QUEUE_MAX - 1)
+                    return -EMSGSIZE;
+
+                struct vfs_file *file =
+                    vfs_fdtable_get_file(current->fdtable, pass_fds[i]);
+                if (file == NULL)
+                    return -EBADF;
+
+                scm_files[*scm_count] = vfs_fdup(file);
+                vfs_fput(file);
+                if (scm_files[*scm_count] == NULL)
+                    return -ENOMEM;
+                CHROME_UNIX_SOCKET_TRACE("scm-send pid=%d tgid=%d name=%s "
+                                         "pass_fd=%d path=%s file=%p "
+                                         "f_flags=0x%x index=%lu\n",
+                                         current->pid, current->tgid,
+                                         current->name, pass_fds[i],
+                                         chrome_socket_trace_path(
+                                             scm_files[*scm_count]),
+                                         scm_files[*scm_count],
+                                         scm_files[*scm_count]->f_flags,
+                                         (unsigned long)*scm_count);
+                (*scm_count)++;
+            }
+        }
+
+        size_t next = off + K_CMSG_ALIGN(cmsg_len);
+        if (next <= off)
+            return -EINVAL;
+        off = next;
+    }
+
     return 0;
 }
 
@@ -3082,13 +3921,14 @@ static int unix_sock_passcred_enabled(struct unix_sock *sk)
     return passcred;
 }
 
-static void unix_sock_peer_ucred(struct unix_sock *sk, struct k_ucred *ucred)
+static struct unix_scm_cred unix_current_scm_cred(void)
 {
-    spin_lock(&sk->lock);
-    ucred->pid = sk->peer_pid;
-    ucred->uid = sk->peer_uid;
-    ucred->gid = sk->peer_gid;
-    spin_unlock(&sk->lock);
+    struct unix_scm_cred cred;
+
+    cred.pid = current ? current->tgid : 0;
+    cred.uid = (current && current->thread_group) ? current->thread_group->uid : 0;
+    cred.gid = (current && current->thread_group) ? current->thread_group->gid : 0;
+    return cred;
 }
 
 static size_t unix_scm_count_locked(struct unix_sock *sk)
@@ -3105,13 +3945,35 @@ static size_t unix_packet_count_locked(struct unix_sock *sk)
     return UNIX_PACKET_QUEUE_MAX - sk->packet_head + sk->packet_tail;
 }
 
-static int unix_packet_enqueue_locked(struct unix_sock *sk, uint end_mark)
+static int unix_packet_enqueue_locked(struct unix_sock *sk, uint start_mark,
+                                      uint end_mark)
 {
     if (sk->type != SOCK_SEQPACKET)
         return 0;
     if ((unsigned long)unix_packet_count_locked(sk) >= UNIX_PACKET_QUEUE_MAX - 1)
         return -EAGAIN;
-    sk->packet_queue[sk->packet_tail] = end_mark;
+    sk->packet_queue[sk->packet_tail].start_nread = start_mark;
+    sk->packet_queue[sk->packet_tail].end_nread = end_mark;
+    sk->packet_queue[sk->packet_tail].data = NULL;
+    sk->packet_queue[sk->packet_tail].len = 0;
+    sk->packet_tail = (sk->packet_tail + 1) % UNIX_PACKET_QUEUE_MAX;
+    return 0;
+}
+
+static int unix_packet_enqueue_payload_locked(struct unix_sock *sk,
+                                              uint start_mark,
+                                              uint end_mark,
+                                              char *data,
+                                              size_t len)
+{
+    if (sk->type != SOCK_SEQPACKET)
+        return 0;
+    if ((unsigned long)unix_packet_count_locked(sk) >= UNIX_PACKET_QUEUE_MAX - 1)
+        return -EAGAIN;
+    sk->packet_queue[sk->packet_tail].start_nread = start_mark;
+    sk->packet_queue[sk->packet_tail].end_nread = end_mark;
+    sk->packet_queue[sk->packet_tail].data = data;
+    sk->packet_queue[sk->packet_tail].len = len;
     sk->packet_tail = (sk->packet_tail + 1) % UNIX_PACKET_QUEUE_MAX;
     return 0;
 }
@@ -3126,50 +3988,207 @@ static int unix_packet_next_len_locked(struct unix_sock *peer, size_t *len)
 {
     if (peer->packet_head == peer->packet_tail)
         return -EAGAIN;
-    uint mark = peer->packet_queue[peer->packet_head];
-    if ((int)(mark - peer->tx.nread) < 0)
+    uint start = peer->packet_queue[peer->packet_head].start_nread;
+    uint end = peer->packet_queue[peer->packet_head].end_nread;
+    uint cursor = peer->tx.nread;
+    if ((int)(end - cursor) < 0 || (int)(cursor - start) < 0)
         return -EIO;
-    *len = mark - peer->tx.nread;
+    *len = end - cursor;
     return 0;
 }
 
 static void unix_packet_pop_locked(struct unix_sock *peer)
 {
     if (peer->packet_head != peer->packet_tail) {
-        peer->packet_queue[peer->packet_head] = 0;
+        if (peer->packet_queue[peer->packet_head].data != NULL) {
+            kvfree(peer->packet_queue[peer->packet_head].data);
+            peer->packet_queue[peer->packet_head].data = NULL;
+        }
+        peer->packet_queue[peer->packet_head].start_nread = 0;
+        peer->packet_queue[peer->packet_head].end_nread = 0;
+        peer->packet_queue[peer->packet_head].len = 0;
         peer->packet_head = (peer->packet_head + 1) % UNIX_PACKET_QUEUE_MAX;
     }
 }
 
-static size_t unix_dequeue_scm_rights(struct unix_sock *peer,
+static int unix_scm_ready_at_nread(const struct unix_scm_entry *entry,
+                                   uint virtual_nread, int sock_type);
+static int unix_scm_ready_for_stream_zero_recv_locked(
+    const struct unix_scm_entry *entry, const struct unix_sock *peer);
+
+static size_t unix_dequeue_scm_locked(struct unix_sock *peer,
                                       struct vfs_file **files,
-                                      size_t max_files)
+                                      size_t max_files,
+                                      struct unix_scm_cred *cred,
+                                      int *has_cred)
 {
     size_t count = 0;
-    if (peer == NULL || max_files == 0)
+    if (has_cred != NULL)
+        *has_cred = 0;
+    if (peer == NULL)
         return 0;
 
-    spin_lock(&peer->lock);
-    while (peer->scm_head != peer->scm_tail && count < max_files &&
-           ((peer->scm_queue[peer->scm_head].start_nread ==
-             peer->scm_queue[peer->scm_head].end_nread &&
-             (int)(peer->tx.nread -
-                   peer->scm_queue[peer->scm_head].start_nread) >= 0) ||
-            (peer->scm_queue[peer->scm_head].start_nread !=
-             peer->scm_queue[peer->scm_head].end_nread &&
-             (int)(peer->tx.nread -
-                   peer->scm_queue[peer->scm_head].end_nread) >= 0))) {
-        files[count] = peer->scm_queue[peer->scm_head].file;
+    while (peer->scm_head != peer->scm_tail &&
+           unix_scm_ready_at_nread(&peer->scm_queue[peer->scm_head],
+                                   peer->tx.nread, peer->type)) {
+        if (peer->scm_queue[peer->scm_head].file != NULL) {
+            if (count >= max_files)
+                break;
+            files[count++] = peer->scm_queue[peer->scm_head].file;
+        }
+        if (peer->scm_queue[peer->scm_head].has_cred &&
+            has_cred != NULL && *has_cred == 0) {
+            *cred = peer->scm_queue[peer->scm_head].cred;
+            *has_cred = 1;
+        }
         peer->scm_queue[peer->scm_head].file = NULL;
+        peer->scm_queue[peer->scm_head].has_cred = 0;
+        memset(&peer->scm_queue[peer->scm_head].cred, 0,
+               sizeof(peer->scm_queue[peer->scm_head].cred));
         peer->scm_queue[peer->scm_head].start_nread = 0;
         peer->scm_queue[peer->scm_head].end_nread = 0;
         peer->scm_head = (peer->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
-        count++;
     }
-    if (count > 0)
+    if (count > 0 || (has_cred != NULL && *has_cred))
+        tq_wakeup_all(&peer->wr_queue, 0, 0);
+    return count;
+}
+
+static size_t unix_dequeue_scm(struct unix_sock *peer,
+                               struct vfs_file **files,
+                               size_t max_files,
+                               struct unix_scm_cred *cred,
+                               int *has_cred)
+{
+    size_t count;
+
+    if (has_cred != NULL)
+        *has_cred = 0;
+    if (peer == NULL)
+        return 0;
+
+    spin_lock(&peer->lock);
+    count = unix_dequeue_scm_locked(peer, files, max_files, cred, has_cred);
+    spin_unlock(&peer->lock);
+    return count;
+}
+
+static size_t unix_dequeue_scm_stream_zero_recv(struct unix_sock *peer,
+                                                struct vfs_file **files,
+                                                size_t max_files,
+                                                struct unix_scm_cred *cred,
+                                                int *has_cred)
+{
+    size_t count = 0;
+
+    if (has_cred != NULL)
+        *has_cred = 0;
+    if (peer == NULL)
+        return 0;
+
+    spin_lock(&peer->lock);
+    while (peer->scm_head != peer->scm_tail &&
+           unix_scm_ready_for_stream_zero_recv_locked(
+               &peer->scm_queue[peer->scm_head], peer)) {
+        if (peer->scm_queue[peer->scm_head].file != NULL) {
+            if (count >= max_files)
+                break;
+            files[count++] = peer->scm_queue[peer->scm_head].file;
+        }
+        if (peer->scm_queue[peer->scm_head].has_cred &&
+            has_cred != NULL && *has_cred == 0) {
+            *cred = peer->scm_queue[peer->scm_head].cred;
+            *has_cred = 1;
+        }
+        peer->scm_queue[peer->scm_head].file = NULL;
+        peer->scm_queue[peer->scm_head].has_cred = 0;
+        memset(&peer->scm_queue[peer->scm_head].cred, 0,
+               sizeof(peer->scm_queue[peer->scm_head].cred));
+        peer->scm_queue[peer->scm_head].start_nread = 0;
+        peer->scm_queue[peer->scm_head].end_nread = 0;
+        peer->scm_head = (peer->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
+    }
+    if (count > 0 || (has_cred != NULL && *has_cred))
         tq_wakeup_all(&peer->wr_queue, 0, 0);
     spin_unlock(&peer->lock);
     return count;
+}
+
+static int unix_scm_ready_at_nread(const struct unix_scm_entry *entry,
+                                   uint virtual_nread, int sock_type)
+{
+    if (entry->start_nread == entry->end_nread)
+        return (int)(virtual_nread - entry->start_nread) >= 0;
+    if (sock_type == SOCK_SEQPACKET)
+        return (int)(virtual_nread - entry->end_nread) >= 0;
+    /*
+     * Linux stream sockets deliver SCM_RIGHTS/SCM_CREDENTIALS with the first
+     * byte read from the sendmsg() segment that carried the control message,
+     * not after the whole segment has drained.
+     */
+    return (int)(virtual_nread - entry->start_nread) > 0;
+}
+
+static int unix_scm_ready_for_stream_zero_recv_locked(
+    const struct unix_scm_entry *entry, const struct unix_sock *peer)
+{
+    size_t readable;
+
+    if (peer == NULL)
+        return 0;
+    if (unix_scm_ready_at_nread(entry, peer->tx.nread, SOCK_STREAM))
+        return 1;
+
+    readable = peer->tx.nwrite - peer->tx.nread;
+    return readable > 0 && entry->start_nread == peer->tx.nread;
+}
+
+static int unix_peek_scm(struct unix_sock *peer, uint virtual_nread,
+                         struct vfs_file **files, size_t max_files,
+                         struct unix_scm_cred *cred, int *has_cred,
+                         size_t *out_count)
+{
+    size_t count = 0;
+
+    if (has_cred != NULL)
+        *has_cred = 0;
+    if (out_count != NULL)
+        *out_count = 0;
+    if (peer == NULL)
+        return 0;
+
+    spin_lock(&peer->lock);
+    for (int idx = peer->scm_head; idx != peer->scm_tail;
+         idx = (idx + 1) % UNIX_SCM_QUEUE_MAX) {
+        struct unix_scm_entry *entry = &peer->scm_queue[idx];
+
+        if (!unix_scm_ready_at_nread(entry, virtual_nread, peer->type))
+            break;
+
+        if (entry->file != NULL) {
+            if (count >= max_files)
+                break;
+            files[count] = vfs_fdup(entry->file);
+            if (files[count] == NULL) {
+                spin_unlock(&peer->lock);
+                for (size_t i = 0; i < count; i++) {
+                    vfs_fput(files[i]);
+                    files[i] = NULL;
+                }
+                return -ENOMEM;
+            }
+            count++;
+        }
+        if (entry->has_cred && has_cred != NULL && *has_cred == 0) {
+            *cred = entry->cred;
+            *has_cred = 1;
+        }
+    }
+    spin_unlock(&peer->lock);
+
+    if (out_count != NULL)
+        *out_count = count;
+    return 0;
 }
 
 static void unix_discard_scm_rights(struct vfs_file **files, size_t start,
@@ -3181,6 +4200,168 @@ static void unix_discard_scm_rights(struct vfs_file **files, size_t start,
             files[i] = NULL;
         }
     }
+}
+
+static void unix_rollback_recvmsg_fds(const int *fds, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (fds[i] < 0)
+            continue;
+        spin_lock(&current->fdtable->lock);
+        struct vfs_file *f = vfs_fdtable_dealloc_fd(current->fdtable, fds[i]);
+        spin_unlock(&current->fdtable->lock);
+        if (f != NULL)
+            vfs_fput(f);
+    }
+}
+
+static struct k_ucred unix_unknown_scm_ucred(void)
+{
+    struct k_ucred ucred;
+
+    /*
+     * Linux still emits SCM_CREDENTIALS when SO_PASSCRED is enabled after a
+     * message was already queued without credentials.  Those credentials are
+     * intentionally "unknown", not the stale socket peer credentials captured
+     * at socketpair/connect time.
+     */
+    ucred.pid = 0;
+    ucred.uid = LINUX_OVERFLOW_UID;
+    ucred.gid = LINUX_OVERFLOW_GID;
+    return ucred;
+}
+
+static int unix_emit_recvmsg_scm(struct unix_sock *sk,
+                                 const struct k_msghdr *mh,
+                                 uint64 msg_addr, int sockfd,
+                                 int recv_flags,
+                                 ssize_t payload_bytes,
+                                 int message_present,
+                                 struct vfs_file **scm_files,
+                                 size_t scm_count,
+                                 const struct unix_scm_cred *scm_cred,
+                                 int has_scm_cred,
+                                 int *out_flags)
+{
+    unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(struct k_ucred)) +
+                           K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
+    int installed_fds[UNIX_SCM_QUEUE_MAX];
+    size_t cmsg_used = 0;
+    size_t cmsg_cap = mh->msg_controllen;
+    size_t installed = 0;
+
+    if (cmsg_cap > sizeof(cmsg_buf))
+        cmsg_cap = sizeof(cmsg_buf);
+    for (size_t i = 0; i < UNIX_SCM_QUEUE_MAX; i++)
+        installed_fds[i] = -1;
+
+    /*
+     * Linux attaches SCM_CREDENTIALS to the received message when
+     * SO_PASSCRED is enabled; this is not conditional on a positive payload
+     * length.  AF_UNIX users can send zero-byte seqpacket/control messages,
+     * and dropping the queued credential there permanently loses the control
+     * state after unix_dequeue_scm().
+     */
+    if (unix_sock_passcred_enabled(sk) &&
+        (message_present || payload_bytes > 0 || has_scm_cred ||
+         scm_count > 0)) {
+        struct k_ucred ucred;
+        if (has_scm_cred && scm_cred != NULL) {
+            ucred.pid = scm_cred->pid;
+            ucred.uid = scm_cred->uid;
+            ucred.gid = scm_cred->gid;
+        } else {
+            ucred = unix_unknown_scm_ucred();
+        }
+        CHROME_UNIX_SOCKET_TRACE("scm-emit-cred pid=%d tgid=%d name=%s fd=%d "
+                                 "source=%s cred_pid=%d cred_uid=%u "
+                                 "cred_gid=%u payload=%ld scm_count=%lu\n",
+                                 current->pid, current->tgid, current->name,
+                                 sockfd,
+                                 has_scm_cred ? "queued" : "unknown",
+                                 ucred.pid, ucred.uid, ucred.gid,
+                                 (long)payload_bytes,
+                                 (unsigned long)scm_count);
+        int partial_cred = 0;
+        if (mh->msg_control == 0 ||
+            k_cmsg_append_partial_data(cmsg_buf, cmsg_cap, &cmsg_used,
+                                       SOL_SOCKET, SCM_CREDENTIALS,
+                                       &ucred, sizeof(ucred),
+                                       &partial_cred) < 0 ||
+            partial_cred)
+            *out_flags |= MSG_CTRUNC;
+    }
+
+    if (scm_count > 0) {
+        int newfds[UNIX_SCM_QUEUE_MAX];
+        size_t max_fds = 0;
+        size_t to_install;
+
+        if (mh->msg_control != 0 && cmsg_cap > cmsg_used) {
+            size_t remain = cmsg_cap - cmsg_used;
+            while (max_fds < scm_count &&
+                   K_CMSG_LEN(sizeof(int) * (max_fds + 1)) <= remain)
+                max_fds++;
+        }
+        to_install = scm_count < max_fds ? scm_count : max_fds;
+
+        while (installed < to_install) {
+            struct vfs_file *install_file = scm_files[installed];
+            spin_lock(&current->fdtable->lock);
+            int newfd = vfs_fdtable_alloc_fd(current->fdtable, install_file);
+            if (newfd >= 0 && (recv_flags & MSG_CMSG_CLOEXEC))
+                vfs_fdtable_set_fdflags(current->fdtable, newfd, FD_CLOEXEC);
+            spin_unlock(&current->fdtable->lock);
+            CHROME_UNIX_SOCKET_TRACE("scm-recv pid=%d tgid=%d name=%s "
+                                     "sockfd=%d newfd=%d path=%s file=%p "
+                                     "f_flags=0x%x index=%lu cloexec=%d "
+                                     "peek=%d\n",
+                                     current->pid, current->tgid,
+                                     current->name, sockfd, newfd,
+                                     chrome_socket_trace_path(install_file),
+                                     install_file,
+                                     install_file != NULL ?
+                                         install_file->f_flags : 0,
+                                     (unsigned long)installed,
+                                     (recv_flags & MSG_CMSG_CLOEXEC) != 0,
+                                     (recv_flags & MSG_PEEK) != 0);
+            vfs_fput(scm_files[installed]);
+            scm_files[installed] = NULL;
+            if (newfd < 0)
+                break;
+            newfds[installed] = newfd;
+            installed_fds[installed] = newfd;
+            installed++;
+        }
+
+        unix_discard_scm_rights(scm_files, installed, scm_count);
+        if (installed < scm_count)
+            *out_flags |= MSG_CTRUNC;
+        if (installed > 0 &&
+            k_cmsg_append(cmsg_buf, cmsg_cap, &cmsg_used,
+                          SOL_SOCKET, SCM_RIGHTS, newfds,
+                          sizeof(int) * installed) < 0) {
+            unix_rollback_recvmsg_fds(installed_fds, installed);
+            installed = 0;
+            *out_flags |= MSG_CTRUNC;
+        }
+    }
+
+    if (mh->msg_control != 0 && cmsg_used > 0 &&
+        vm_copyout(current->vm, mh->msg_control, cmsg_buf, cmsg_used) < 0) {
+        unix_rollback_recvmsg_fds(installed_fds, installed);
+        return -EFAULT;
+    }
+
+    uint64 uclen = cmsg_used;
+    if (vm_copyout(current->vm,
+                   msg_addr + __builtin_offsetof(struct k_msghdr,
+                                                 msg_controllen),
+                   &uclen, sizeof(uclen)) < 0) {
+        unix_rollback_recvmsg_fds(installed_fds, installed);
+        return -EFAULT;
+    }
+    return 0;
 }
 
 static int unix_next_scm_read_window_locked(struct unix_sock *peer,
@@ -3204,7 +4385,7 @@ static int unix_next_scm_read_window_locked(struct unix_sock *peer,
         return 1;
     }
 
-    if ((int)(end - nread) <= 0) {
+    if (start == end || (int)(nread - start) > 0) {
         *bytes = 0;
         *stop_after_read = 1;
         return 1;
@@ -3217,7 +4398,7 @@ static int unix_next_scm_read_window_locked(struct unix_sock *peer,
 
 static size_t unix_tx_limit_locked(struct unix_sock *sk)
 {
-    size_t limit = sk->snd_buf ? sk->snd_buf : UNIX_BUF_MAX_SIZE;
+    size_t limit = sk->snd_buf ? sk->snd_buf : UNIX_SOCKBUF_DEFAULT;
     struct unix_sock *peer = sk->peer;
 
     if (peer != NULL && peer->rcv_buf != 0 && peer->rcv_buf < limit)
@@ -3305,9 +4486,12 @@ static void unix_rebase_stream_marks_locked(struct unix_sock *sk,
 
     for (idx = sk->packet_head; idx != sk->packet_tail;
          idx = (idx + 1) % UNIX_PACKET_QUEUE_MAX) {
-        uint mark = sk->packet_queue[idx];
-        sk->packet_queue[idx] =
-            (uint)((int)(mark - old_nread) < 0 ? 0 : mark - old_nread);
+        uint start = sk->packet_queue[idx].start_nread;
+        uint end = sk->packet_queue[idx].end_nread;
+        sk->packet_queue[idx].start_nread =
+            (uint)((int)(start - old_nread) < 0 ? 0 : start - old_nread);
+        sk->packet_queue[idx].end_nread =
+            (uint)((int)(end - old_nread) < 0 ? 0 : end - old_nread);
     }
 }
 
@@ -3325,7 +4509,6 @@ static char *unix_ring_install_storage_locked(struct unix_sock *sk,
     uint old_nread = r->nread;
     size_t readable = r->nwrite - r->nread;
     size_t copied = 0;
-
 
     while (copied < readable) {
         uint idx = (r->nread + copied) % old_capacity;
@@ -3356,6 +4539,9 @@ static int unix_sendmsg_growth_needed_locked(struct unix_sock *sk, size_t len,
     if (readable > max_capacity || len > max_capacity - readable)
         return -EAGAIN;
 
+    if (sk->type == SOCK_SEQPACKET)
+        return 0;
+
     size_t needed = readable + len;
     if (needed <= sk->tx.capacity)
         return 0;
@@ -3365,8 +4551,13 @@ static int unix_sendmsg_growth_needed_locked(struct unix_sock *sk, size_t len,
 static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
                                       size_t len,
                                       struct vfs_file **scm_files,
-                                      size_t scm_count)
+                                      size_t scm_count,
+                                      const struct unix_scm_cred *scm_cred,
+                                      int has_scm_cred,
+                                      int *buf_queued)
 {
+    if (buf_queued != NULL)
+        *buf_queued = 0;
     if (sk->shutdown_flags & UNIX_SHUT_WR)
         return -EPIPE;
     if (sk->state != UNIX_STATE_CONNECTED && sk->type == SOCK_STREAM)
@@ -3376,33 +4567,249 @@ static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
     size_t readable = (unsigned long)(sk->tx.nwrite - sk->tx.nread);
     size_t max_capacity = unix_tx_limit_locked(sk);
     size_t writable = readable < max_capacity ? max_capacity - readable : 0;
-    if (writable > sk->tx.capacity - readable)
+    if (sk->type != SOCK_SEQPACKET &&
+        writable > sk->tx.capacity - readable)
         writable = sk->tx.capacity - readable;
     if (writable < len)
         return -EAGAIN;
 
+    int send_auto_cred = sk->peer != NULL &&
+        __atomic_load_n(&sk->peer->passcred, __ATOMIC_ACQUIRE) != 0;
+    int send_cred = has_scm_cred || send_auto_cred;
     size_t scm_used = unix_scm_count_locked(sk);
     size_t scm_free = UNIX_SCM_QUEUE_MAX - 1 - scm_used;
-    if (scm_free < scm_count)
+    if (scm_free < scm_count + (send_cred ? 1 : 0))
         return -EAGAIN;
     if (!unix_packet_has_space_locked(sk))
         return -EAGAIN;
 
     uint scm_start = sk->tx.nwrite;
-    size_t wrote = unix_ring_write_locked(&sk->tx, buf, len, max_capacity);
-    if (wrote != len)
-        panic("unix_sendmsg_atomic_locked: short atomic write");
-    uint mark = sk->tx.nwrite;
-    for (size_t i = 0; i < scm_count; i++) {
-        sk->scm_queue[sk->scm_tail].file = scm_files[i];
+    uint mark = scm_start + (uint)len;
+    if (send_cred) {
+        sk->scm_queue[sk->scm_tail].file = NULL;
+        sk->scm_queue[sk->scm_tail].has_cred = 1;
+        sk->scm_queue[sk->scm_tail].cred = has_scm_cred
+            ? *scm_cred
+            : unix_current_scm_cred();
         sk->scm_queue[sk->scm_tail].start_nread = scm_start;
         sk->scm_queue[sk->scm_tail].end_nread = mark;
         sk->scm_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
     }
-    int pkt_ret = unix_packet_enqueue_locked(sk, mark);
-    if (pkt_ret < 0)
-        panic("unix_sendmsg_atomic_locked: packet queue lost reservation");
+    for (size_t i = 0; i < scm_count; i++) {
+        sk->scm_queue[sk->scm_tail].file = scm_files[i];
+        sk->scm_queue[sk->scm_tail].has_cred = 0;
+        memset(&sk->scm_queue[sk->scm_tail].cred, 0,
+               sizeof(sk->scm_queue[sk->scm_tail].cred));
+        sk->scm_queue[sk->scm_tail].start_nread = scm_start;
+        sk->scm_queue[sk->scm_tail].end_nread = mark;
+        sk->scm_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
+    }
+    int pkt_ret;
+    if (sk->type == SOCK_SEQPACKET) {
+        pkt_ret = unix_packet_enqueue_payload_locked(sk, scm_start, mark,
+                                                     (char *)buf, len);
+        if (pkt_ret < 0)
+            panic("unix_sendmsg_atomic_locked: packet queue lost reservation");
+        smp_store_release(&sk->tx.nwrite, mark);
+        if (buf_queued != NULL)
+            *buf_queued = 1;
+    } else {
+        size_t wrote = unix_ring_write_locked(&sk->tx, buf, len, max_capacity);
+        if (wrote != len)
+            panic("unix_sendmsg_atomic_locked: short atomic write");
+        pkt_ret = unix_packet_enqueue_locked(sk, scm_start, sk->tx.nwrite);
+        if (pkt_ret < 0)
+            panic("unix_sendmsg_atomic_locked: packet queue lost reservation");
+    }
     return 0;
+}
+
+static int unix_seqpacket_recv_buffer(struct unix_sock *peer, int flags,
+                                      size_t capacity, char **packet_buf,
+                                      size_t *copied_packet,
+                                      size_t *packet_len,
+                                      uint *scm_virtual_nread,
+                                      int *have_scm_virtual_nread,
+                                      struct vfs_file **scm_files,
+                                      size_t scm_max_files,
+                                      struct unix_scm_cred *scm_cred,
+                                      int *has_scm_cred,
+                                      size_t *scm_count,
+                                      int *scm_dequeued_with_packet,
+                                      struct vfs_file **peer_wr_file)
+{
+    *packet_buf = NULL;
+    *copied_packet = 0;
+    *packet_len = 0;
+    if (peer_wr_file != NULL)
+        *peer_wr_file = NULL;
+
+    for (;;) {
+        size_t observed_packet_len = 0;
+        int pkt_ret;
+
+        spin_lock(&peer->lock);
+        pkt_ret = unix_packet_next_len_locked(peer, &observed_packet_len);
+        spin_unlock(&peer->lock);
+        if (pkt_ret != 0)
+            return pkt_ret;
+
+        size_t observed_to_copy =
+            observed_packet_len < capacity ? observed_packet_len : capacity;
+        char *buf = kvmalloc(observed_to_copy ? observed_to_copy : 1);
+        if (buf == NULL)
+            return -ENOMEM;
+
+        spin_lock(&peer->lock);
+        size_t locked_packet_len = 0;
+        pkt_ret = unix_packet_next_len_locked(peer, &locked_packet_len);
+        if (pkt_ret != 0) {
+            spin_unlock(&peer->lock);
+            kvfree(buf);
+            if (pkt_ret == -EAGAIN)
+                continue;
+            return pkt_ret;
+        }
+
+        size_t locked_to_copy =
+            locked_packet_len < capacity ? locked_packet_len : capacity;
+        if (locked_to_copy > observed_to_copy) {
+            spin_unlock(&peer->lock);
+            kvfree(buf);
+            continue;
+        }
+
+        size_t copied;
+        struct unix_packet_entry *entry =
+            &peer->packet_queue[peer->packet_head];
+        char *packet_data = entry->data;
+        if (flags & MSG_PEEK) {
+            if (scm_virtual_nread != NULL)
+                *scm_virtual_nread = peer->tx.nread + (uint)locked_packet_len;
+            if (have_scm_virtual_nread != NULL)
+                *have_scm_virtual_nread = 1;
+            if (packet_data != NULL) {
+                if (locked_to_copy > entry->len) {
+                    spin_unlock(&peer->lock);
+                    kvfree(buf);
+                    return -EIO;
+                }
+                memmove(buf, packet_data, locked_to_copy);
+                copied = locked_to_copy;
+            } else {
+                copied = unix_ring_peek(&peer->tx, 0, buf, locked_to_copy);
+            }
+        } else {
+            if (packet_data != NULL) {
+                if (locked_to_copy > entry->len) {
+                    spin_unlock(&peer->lock);
+                    kvfree(buf);
+                    return -EIO;
+                }
+                memmove(buf, packet_data, locked_to_copy);
+                copied = locked_to_copy;
+                smp_store_release(&peer->tx.nread, entry->end_nread);
+            } else {
+                copied = unix_ring_read_locked(&peer->tx, buf, locked_to_copy);
+                if (locked_packet_len > copied) {
+                    uint mark =
+                        peer->packet_queue[peer->packet_head].end_nread;
+                    smp_store_release(&peer->tx.nread, mark);
+                }
+            }
+            unix_packet_pop_locked(peer);
+            if (scm_count != NULL) {
+                *scm_count = unix_dequeue_scm_locked(peer, scm_files,
+                                                     scm_max_files,
+                                                     scm_cred,
+                                                     has_scm_cred);
+            }
+            if (scm_dequeued_with_packet != NULL)
+                *scm_dequeued_with_packet = 1;
+            tq_wakeup_all(&peer->wr_queue, 0, 0);
+            if (peer_wr_file != NULL)
+                *peer_wr_file = peer->file ? vfs_fdup(peer->file) : NULL;
+        }
+        spin_unlock(&peer->lock);
+
+        if (copied != locked_to_copy) {
+            kvfree(buf);
+            return -EIO;
+        }
+
+        *packet_buf = buf;
+        *copied_packet = copied;
+        *packet_len = locked_packet_len;
+        return 0;
+    }
+}
+
+struct webkit_ipc_stress_header {
+    uint magic;
+    uint seq;
+    uint len;
+    uint checksum;
+};
+
+static int webkit_seqpacket_verify_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("webkit_seqpacket_verify", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '\0' && value[0] != '0' &&
+            value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static uint webkit_ipc_stress_checksum(const uchar *buf, uint len)
+{
+    uint h = 2166136261u;
+
+    for (uint i = 0; i < len; i++) {
+        h ^= buf[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void unix_seqpacket_verify_webkit_packet(const char *op,
+                                                const char *proc_name,
+                                                const char *exec_path,
+                                                const char *buf,
+                                                size_t copied,
+                                                size_t packet_len)
+{
+    if (!webkit_seqpacket_verify_enabled())
+        return;
+    if (buf == NULL || copied < sizeof(struct webkit_ipc_stress_header))
+        return;
+
+    const struct webkit_ipc_stress_header *hdr =
+        (const struct webkit_ipc_stress_header *)buf;
+    if (hdr->magic != 0x574b4950u)
+        return;
+    if (packet_len != sizeof(*hdr) + 2048 || copied != packet_len ||
+        hdr->len != 2048 || hdr->len > copied - sizeof(*hdr))
+        return;
+
+    uint actual = webkit_ipc_stress_checksum(
+        (const uchar *)(buf + sizeof(*hdr)), hdr->len);
+    if (actual != hdr->checksum) {
+        printf("webkit-seqpacket-verify: op=%s role=%s exec=%s "
+               "seq=%u packet=%lu copied=%lu len=%u hdr_checksum=0x%x "
+               "actual_checksum=0x%x\n",
+               op != NULL ? op : "?",
+               proc_name != NULL ? proc_name : "?",
+               exec_path != NULL ? exec_path : "?",
+               hdr->seq, packet_len, copied, hdr->len,
+               hdr->checksum, actual);
+    }
 }
 
 /*
@@ -3422,7 +4829,7 @@ uint64 sys_sendmsg(void)
     /* Domain dispatch */
     int domain = sock_domain_from_fd(fd);
     if (domain == AF_NETLINK)
-        return (uint64)-EOPNOTSUPP;
+        return sys_sendmsg_netlink(fd, umsg, flags);
 
     if (domain == AF_UNIX) {
         /* ---- AF_UNIX sendmsg with optional SCM_RIGHTS ---- */
@@ -3464,52 +4871,45 @@ uint64 sys_sendmsg(void)
             }
             off += iovs[i].iov_len;
         }
-
         struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
         memset(scm_files, 0, sizeof(scm_files));
         size_t scm_count = 0;
+        struct unix_scm_cred scm_cred;
+        memset(&scm_cred, 0, sizeof(scm_cred));
+        int has_scm_cred = 0;
 
-        if (mh.msg_control != 0 && mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
-            unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
-            uint64 copy_len = mh.msg_controllen;
-            if (copy_len > sizeof(cmsg_buf))
-                copy_len = sizeof(cmsg_buf);
-            if (vm_copyin(current->vm, cmsg_buf, mh.msg_control, copy_len) < 0) {
-                kvfree(msg_buf);
-                return (uint64)-EFAULT;
-            }
-
-            struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
-            if (k_cmsg_readable(cmsg, copy_len, sizeof(int)) &&
-                cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
-                size_t payload_len = k_cmsg_payload_len(cmsg);
-                size_t nfds = payload_len / sizeof(int);
-                if (nfds >= UNIX_SCM_QUEUE_MAX) {
-                    kvfree(msg_buf);
-                    return (uint64)-EMSGSIZE;
-                }
-                int *pass_fds = (int *)K_CMSG_DATA(cmsg);
-                for (size_t i = 0; i < nfds; i++) {
-                    struct vfs_file *file =
-                        vfs_fdtable_get_file(current->fdtable, pass_fds[i]);
-                    if (file == NULL) {
-                        for (size_t j = 0; j < scm_count; j++)
-                            vfs_fput(scm_files[j]);
-                        kvfree(msg_buf);
-                        return (uint64)-EBADF;
-                    }
-
-                    scm_files[scm_count] = vfs_fdup(file);
-                    vfs_fput(file);
-                    if (scm_files[scm_count] == NULL) {
-                        for (size_t j = 0; j < scm_count; j++)
-                            vfs_fput(scm_files[j]);
-                        kvfree(msg_buf);
-                        return (uint64)-ENOMEM;
-                    }
-                    scm_count++;
-                }
-            }
+        int scm_ret = unix_collect_scm_from_control(mh.msg_control,
+                                                    mh.msg_controllen,
+                                                    scm_files,
+                                                    &scm_count,
+                                                    &scm_cred,
+                                                    &has_scm_cred);
+        CHROME_UNIX_SOCKET_TRACE("sendmsg-enter pid=%d tgid=%d name=%s fd=%d "
+                                 "bytes=%lu flags=0x%x control=0x%lx "
+                                 "controllen=%lu scm_count=%lu has_cred=%d "
+                                 "ret=%d\n",
+                                 current->pid, current->tgid, current->name,
+                                 fd, (unsigned long)total_len, flags,
+                                 mh.msg_control, mh.msg_controllen,
+                                 (unsigned long)scm_count, has_scm_cred,
+                                 scm_ret);
+        if (scm_ret < 0) {
+            chrome_unix_ipc_trace_state("sendmsg-cmsg-error", fd, scm_ret,
+                                        total_len, flags, mh.msg_control,
+                                        mh.msg_controllen, scm_count,
+                                        has_scm_cred, sk);
+            unix_discard_scm_rights(scm_files, 0, scm_count);
+            kvfree(msg_buf);
+            return (uint64)scm_ret;
+        }
+        if (total_len == 0 && sk->type == SOCK_STREAM) {
+            chrome_unix_ipc_trace_state("sendmsg-zero-stream", fd, 0,
+                                        total_len, flags, mh.msg_control,
+                                        mh.msg_controllen, scm_count,
+                                        has_scm_cred, sk);
+            unix_discard_scm_rights(scm_files, 0, scm_count);
+            kvfree(msg_buf);
+            return 0;
         }
 
         int ret;
@@ -3517,6 +4917,7 @@ uint64 sys_sendmsg(void)
         struct vfs_file *notify_file = NULL;
         char *grow_data = NULL;
         size_t grow_capacity = 0;
+        int msg_buf_queued = 0;
         for (;;) {
             spin_lock(&sk->lock);
             char *old_data = NULL;
@@ -3552,7 +4953,9 @@ uint64 sys_sendmsg(void)
             }
 
             ret = unix_sendmsg_atomic_locked(sk, msg_buf, total_len,
-                                             scm_files, scm_count);
+                                             scm_files, scm_count,
+                                             &scm_cred, has_scm_cred,
+                                             &msg_buf_queued);
             struct unix_sock *notify_peer = NULL;
             if (ret == 0 && sk->peer != NULL) {
                 notify_peer = sk->peer;
@@ -3587,8 +4990,20 @@ uint64 sys_sendmsg(void)
 
         if (grow_data != NULL)
             kvfree(grow_data);
-        kvfree(msg_buf);
+        if (!msg_buf_queued)
+            kvfree(msg_buf);
         if (ret < 0) {
+            CHROME_UNIX_SOCKET_TRACE("sendmsg-exit pid=%d tgid=%d name=%s "
+                                     "fd=%d ret=%d bytes=%lu scm_count=%lu "
+                                     "has_cred=%d\n",
+                                     current->pid, current->tgid,
+                                     current->name, fd, ret,
+                                     (unsigned long)total_len,
+                                     (unsigned long)scm_count, has_scm_cred);
+            chrome_unix_ipc_trace_state("sendmsg-exit", fd, ret, total_len,
+                                        flags, mh.msg_control,
+                                        mh.msg_controllen, scm_count,
+                                        has_scm_cred, sk);
             for (size_t i = 0; i < scm_count; i++)
                 vfs_fput(scm_files[i]);
             if (notify_file != NULL)
@@ -3601,6 +5016,16 @@ uint64 sys_sendmsg(void)
             vfs_fput(notify_file);
         }
 
+        CHROME_UNIX_SOCKET_TRACE("sendmsg-exit pid=%d tgid=%d name=%s fd=%d "
+                                 "ret=%lu bytes=%lu scm_count=%lu\n",
+                                 current->pid, current->tgid, current->name,
+                                 fd, (unsigned long)total_len,
+                                 (unsigned long)total_len,
+                                 (unsigned long)scm_count);
+        chrome_unix_ipc_trace_state("sendmsg-exit", fd, (ssize_t)total_len,
+                                    total_len, flags, mh.msg_control,
+                                    mh.msg_controllen, scm_count,
+                                    has_scm_cred, sk);
         return (uint64)total_len;
     }
 
@@ -3628,16 +5053,12 @@ uint64 sys_sendmsg(void)
     ip_addr_t msg_destip;
     u16_t msg_destport = 0;
     int have_msg_dest = 0;
-    if (mh.msg_name != 0 && mh.msg_namelen >= K_SOCKADDR_IN_SIZE &&
-        sk->type != SOCK_STREAM) {
-        struct k_sockaddr_in sa;
-        if (vm_copyin(current->vm, &sa, mh.msg_name, sizeof(sa)) < 0)
-            return (uint64)-EFAULT;
-        if (sa.sin_family != AF_INET)
-            return (uint64)-EAFNOSUPPORT;
-
-        ip_addr_set_ip4_u32(&msg_destip, sa.sin_addr);
-        msg_destport = ntohs(sa.sin_port);
+    if (mh.msg_name != 0 && sk->type != SOCK_STREAM) {
+        int addr_ret = sock_copyin_inet_addr(domain, mh.msg_name,
+                                             mh.msg_namelen, &msg_destip,
+                                             &msg_destport);
+        if (addr_ret < 0)
+            return (uint64)addr_ret;
         have_msg_dest = 1;
     }
 
@@ -3763,11 +5184,28 @@ uint64 sys_recvmsg(void)
             f->f_flags |= O_NONBLOCK;
 
         ssize_t total = 0;
+        ssize_t ret_total = -1;
         int unix_out_flags = 0;
+        uint scm_virtual_nread = 0;
+        int have_scm_virtual_nread = 0;
+        struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
+        memset(scm_files, 0, sizeof(scm_files));
+        struct unix_scm_cred scm_cred;
+        memset(&scm_cred, 0, sizeof(scm_cred));
+        int has_scm_cred = 0;
+        size_t scm_count = 0;
+        int scm_ret = 0;
+        int scm_dequeued_with_packet = 0;
+        int message_present = 0;
+        size_t recv_capacity = 0;
+        for (uint64 i = 0; i < mh.msg_iovlen; i++)
+            recv_capacity += iovs[i].iov_len;
+
         if (sk->type == SOCK_SEQPACKET) {
             struct unix_sock *peer = NULL;
             size_t packet_len = 0;
 
+seqpacket_recvmsg_wait:
             for (;;) {
                 bool read_shutdown;
                 bool peer_write_shutdown = false;
@@ -3801,6 +5239,10 @@ uint64 sys_recvmsg(void)
                     unix_sock_put_ref(peer);
                     f->f_flags = saved_fflags;
                     vfs_fput(f);
+                    chrome_unix_ipc_trace_state("recvmsg-eagain-seqpacket",
+                                                fd, -EAGAIN, recv_capacity,
+                                                flags, mh.msg_control,
+                                                mh.msg_controllen, 0, 0, sk);
                     return (uint64)-EAGAIN;
                 }
                 if (signal_pending(current)) {
@@ -3823,56 +5265,44 @@ uint64 sys_recvmsg(void)
                     return (uint64)-EINTR;
                 }
             }
-
-            size_t capacity = 0;
-            for (uint64 i = 0; i < mh.msg_iovlen; i++)
-                capacity += iovs[i].iov_len;
-            size_t to_copy = packet_len < capacity ? packet_len : capacity;
-            if (packet_len > capacity) {
-                unix_out_flags |= MSG_TRUNC;
-                printf("unix_recvmsg: seqpacket trunc pid=%d fd=%d packet=%lu capacity=%lu\n",
-                       current->pid, fd, packet_len, capacity);
-            }
-
-            char *packet_buf = kvmalloc(to_copy ? to_copy : 1);
-            if (packet_buf == NULL) {
-                unix_sock_put_ref(peer);
-                f->f_flags = saved_fflags;
-                vfs_fput(f);
-                return (uint64)-ENOMEM;
-            }
-
+            char *packet_buf = NULL;
             size_t copied_packet = 0;
             struct vfs_file *peer_wr_file = NULL;
-            spin_lock(&peer->lock);
-            if (flags & MSG_PEEK) {
-                copied_packet = unix_ring_peek(&peer->tx, 0, packet_buf,
-                                               to_copy);
-            } else {
-                copied_packet = unix_ring_read_locked(&peer->tx, packet_buf,
-                                                      to_copy);
-                if (packet_len > copied_packet) {
-                    uint mark = peer->packet_queue[peer->packet_head];
-                    smp_store_release(&peer->tx.nread, mark);
-                }
-                unix_packet_pop_locked(peer);
-                tq_wakeup_all(&peer->wr_queue, 0, 0);
-                peer_wr_file = peer->file ? vfs_fdup(peer->file) : NULL;
+            int recv_ret = unix_seqpacket_recv_buffer(peer, flags,
+                                                      recv_capacity,
+                                                      &packet_buf,
+                                                      &copied_packet,
+                                                      &packet_len,
+                                                      &scm_virtual_nread,
+                                                      &have_scm_virtual_nread,
+                                                      scm_files,
+                                                      UNIX_SCM_QUEUE_MAX,
+                                                      &scm_cred,
+                                                      &has_scm_cred,
+                                                      &scm_count,
+                                                      &scm_dequeued_with_packet,
+                                                      &peer_wr_file);
+            if (recv_ret != 0) {
+                unix_sock_put_ref(peer);
+                if (recv_ret == -EAGAIN && !recv_nonblock)
+                    goto seqpacket_recvmsg_wait;
+                f->f_flags = saved_fflags;
+                vfs_fput(f);
+                return (uint64)recv_ret;
             }
-            spin_unlock(&peer->lock);
+            message_present = 1;
             if (peer_wr_file != NULL) {
                 vfs_file_knote_notify(peer_wr_file, EVFILT_WRITE, 0);
                 vfs_fput(peer_wr_file);
             }
-
-            if (copied_packet != to_copy) {
-                printf("unix_recvmsg: seqpacket short pid=%d fd=%d packet=%lu copied=%lu want=%lu\n",
-                       current->pid, fd, packet_len, copied_packet, to_copy);
-                kvfree(packet_buf);
-                unix_sock_put_ref(peer);
-                goto unix_recvmsg_done;
-            }
-
+            unix_seqpacket_verify_webkit_packet(
+                "recvmsg",
+                current != NULL ? current->name : NULL,
+                (current != NULL && current->thread_group != NULL)
+                    ? current->thread_group->exec_path : NULL,
+                packet_buf, copied_packet, packet_len);
+            if (packet_len > recv_capacity)
+                unix_out_flags |= MSG_TRUNC;
             size_t packet_off = 0;
             for (uint64 i = 0; i < mh.msg_iovlen && packet_off < copied_packet; i++) {
                 size_t want = iovs[i].iov_len;
@@ -3892,6 +5322,88 @@ uint64 sys_recvmsg(void)
                 total += want;
             }
             kvfree(packet_buf);
+            if ((flags & MSG_TRUNC) && packet_len > recv_capacity)
+                ret_total = (ssize_t)packet_len;
+            unix_sock_put_ref(peer);
+        } else if (sk->type == SOCK_STREAM && recv_capacity == 0) {
+            struct unix_sock *peer = NULL;
+            int stream_zero_ready_scm = 0;
+
+            for (;;) {
+                bool read_shutdown;
+                bool peer_write_shutdown = false;
+                size_t readable = 0;
+
+                spin_lock(&sk->lock);
+                if (sk->state != UNIX_STATE_CONNECTED &&
+                    !(sk->shutdown_flags & UNIX_SHUT_RD)) {
+                    spin_unlock(&sk->lock);
+                    f->f_flags = saved_fflags;
+                    vfs_fput(f);
+                    return (uint64)-ENOTCONN;
+                }
+                peer = sk->peer;
+                unix_sock_get_ref(peer);
+                read_shutdown = (sk->shutdown_flags & UNIX_SHUT_RD) != 0;
+                spin_unlock(&sk->lock);
+
+                if (peer != NULL) {
+                    spin_lock(&peer->lock);
+                    readable = peer->tx.nwrite - peer->tx.nread;
+                    peer_write_shutdown =
+                        (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
+                    if (peer->scm_head != peer->scm_tail &&
+                        unix_scm_ready_for_stream_zero_recv_locked(
+                            &peer->scm_queue[peer->scm_head], peer))
+                        stream_zero_ready_scm = 1;
+                    spin_unlock(&peer->lock);
+                }
+
+                if (readable > 0 || stream_zero_ready_scm ||
+                    read_shutdown || peer == NULL || peer_write_shutdown)
+                    break;
+
+                unix_sock_put_ref(peer);
+                peer = NULL;
+                if (recv_nonblock) {
+                    f->f_flags = saved_fflags;
+                    vfs_fput(f);
+                    chrome_unix_ipc_trace_state("recvmsg-eagain-stream-zero",
+                                                fd, -EAGAIN, recv_capacity,
+                                                flags, mh.msg_control,
+                                                mh.msg_controllen, 0, 0, sk);
+                    return (uint64)-EAGAIN;
+                }
+                if (signal_pending(current)) {
+                    f->f_flags = saved_fflags;
+                    vfs_fput(f);
+                    return (uint64)-EINTR;
+                }
+
+                spin_lock(&sk->lock);
+                tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
+                                 THREAD_INTERRUPTIBLE);
+                spin_unlock(&sk->lock);
+
+                if (signal_pending(current)) {
+                    f->f_flags = saved_fflags;
+                    vfs_fput(f);
+                    return (uint64)-EINTR;
+                }
+            }
+
+            if (!(flags & MSG_PEEK) && stream_zero_ready_scm) {
+                scm_count = unix_dequeue_scm_stream_zero_recv(
+                    peer, scm_files, UNIX_SCM_QUEUE_MAX, &scm_cred,
+                    &has_scm_cred);
+                scm_dequeued_with_packet = 1;
+            }
+            if (flags & MSG_PEEK && stream_zero_ready_scm && peer != NULL) {
+                spin_lock(&peer->lock);
+                scm_virtual_nread = peer->tx.nread + 1;
+                spin_unlock(&peer->lock);
+                have_scm_virtual_nread = 1;
+            }
             unix_sock_put_ref(peer);
         } else if (flags & MSG_PEEK) {
             if (sk->state != UNIX_STATE_CONNECTED && sk->type == SOCK_STREAM) {
@@ -3950,6 +5462,12 @@ uint64 sys_recvmsg(void)
                             unix_sock_put_ref(peer);
                             f->f_flags = saved_fflags;
                             vfs_fput(f);
+                            chrome_unix_ipc_trace_state("recvmsg-eagain-peek",
+                                                        fd, -EAGAIN,
+                                                        recv_capacity, flags,
+                                                        mh.msg_control,
+                                                        mh.msg_controllen, 0,
+                                                        0, sk);
                             return (uint64)-EAGAIN;
                         }
                         if (signal_pending(current)) {
@@ -4001,6 +5519,7 @@ uint64 sys_recvmsg(void)
                     struct unix_sock *peer;
                     size_t want = iovs[i].iov_len - copied_iov;
                     size_t barrier_bytes = 0;
+                    size_t readable = 0;
                     int stop_after_read = 0;
 
                     spin_lock(&sk->lock);
@@ -4010,6 +5529,7 @@ uint64 sys_recvmsg(void)
 
                     if (peer != NULL) {
                         spin_lock(&peer->lock);
+                        readable = peer->tx.nwrite - peer->tx.nread;
                         if (unix_next_scm_read_window_locked(peer,
                                                              &barrier_bytes,
                                                              &stop_after_read)) {
@@ -4024,14 +5544,23 @@ uint64 sys_recvmsg(void)
 
                     if (want == 0 || hit_scm_barrier)
                         break;
+                    if (readable == 0 && total > 0)
+                        break;
+                    if (readable > 0 && want > readable)
+                        want = readable;
 
-                    ssize_t n = unix_socket_file_ops.read(
+                    ssize_t n = unix_sock_read_preserve_scm(
                         f, (char *)(iovs[i].iov_base + copied_iov), want, 1);
                     if (n < 0) {
                         if (total > 0)
                             goto unix_recvmsg_done;
                         f->f_flags = saved_fflags;
                         vfs_fput(f);
+                        chrome_unix_ipc_trace_state("recvmsg-read-error", fd,
+                                                    n, recv_capacity, flags,
+                                                    mh.msg_control,
+                                                    mh.msg_controllen, 0, 0,
+                                                    sk);
                         return (uint64)n;
                     }
                     total += n;
@@ -4049,99 +5578,74 @@ uint64 sys_recvmsg(void)
         }
 
 unix_recvmsg_done:
+        if (ret_total < 0)
+            ret_total = total;
+        if (total > 0)
+            message_present = 1;
         f->f_flags = saved_fflags;
         vfs_fput(f);
 
         /* Check for pending ancillary data from peer. */
+        struct unix_sock *peer = NULL;
+        spin_lock(&sk->lock);
+        peer = sk->peer;
+        unix_sock_get_ref(peer);
+        spin_unlock(&sk->lock);
+
         if (flags & MSG_PEEK) {
-            uint64 zero = 0;
-            vm_copyout(current->vm,
-                       umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
-                       &zero, sizeof(zero));
+            if (!have_scm_virtual_nread && peer != NULL) {
+                spin_lock(&peer->lock);
+                scm_virtual_nread = peer->tx.nread + (uint)total;
+                spin_unlock(&peer->lock);
+                have_scm_virtual_nread = 1;
+            }
+            scm_ret = unix_peek_scm(peer, scm_virtual_nread, scm_files,
+                                    UNIX_SCM_QUEUE_MAX, &scm_cred,
+                                    &has_scm_cred, &scm_count);
+        } else if (!scm_dequeued_with_packet) {
+            scm_count = unix_dequeue_scm(peer, scm_files, UNIX_SCM_QUEUE_MAX,
+                                         &scm_cred, &has_scm_cred);
+        }
+        CHROME_UNIX_SOCKET_TRACE("recvmsg-scm pid=%d tgid=%d name=%s fd=%d "
+                                 "bytes=%ld ret_bytes=%ld flags=0x%x "
+                                 "control=0x%lx controllen=%lu scm_count=%lu "
+                                 "has_cred=%d peek=%d scm_ret=%d\n",
+                                 current->pid, current->tgid, current->name,
+                                 fd, (long)total, (long)ret_total, flags,
+                                 mh.msg_control, mh.msg_controllen,
+                                 (unsigned long)scm_count, has_scm_cred,
+                                 (flags & MSG_PEEK) != 0, scm_ret);
+        chrome_unix_ipc_trace_state("recvmsg-done", fd, ret_total,
+                                    recv_capacity, flags, mh.msg_control,
+                                    mh.msg_controllen, scm_count,
+                                    has_scm_cred, sk);
+        unix_sock_put_ref(peer);
+
+        int emit_ret = 0;
+        if (scm_ret < 0) {
+            unix_out_flags |= MSG_CTRUNC;
         } else {
-            struct unix_sock *peer = NULL;
-            spin_lock(&sk->lock);
-            peer = sk->peer;
-            unix_sock_get_ref(peer);
-            spin_unlock(&sk->lock);
-
-            struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
-            memset(scm_files, 0, sizeof(scm_files));
-            size_t scm_count = unix_dequeue_scm_rights(peer, scm_files,
-                                                       UNIX_SCM_QUEUE_MAX);
-            unix_sock_put_ref(peer);
-
-            unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(struct k_ucred)) +
-                                   K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
-            size_t cmsg_used = 0;
-            size_t cmsg_cap = mh.msg_controllen;
-            if (cmsg_cap > sizeof(cmsg_buf))
-                cmsg_cap = sizeof(cmsg_buf);
-
-            if (unix_sock_passcred_enabled(sk)) {
-                struct k_ucred ucred;
-                unix_sock_peer_ucred(sk, &ucred);
-                if (mh.msg_control == 0 ||
-                    k_cmsg_append(cmsg_buf, cmsg_cap, &cmsg_used,
-                                  SOL_SOCKET, SCM_CREDENTIALS,
-                                  &ucred, sizeof(ucred)) < 0)
-                    unix_out_flags |= MSG_CTRUNC;
+            emit_ret = unix_emit_recvmsg_scm(sk, &mh, umsg, fd, flags, total,
+                                             message_present, scm_files,
+                                             scm_count, &scm_cred,
+                                             has_scm_cred, &unix_out_flags);
+            if (emit_ret < 0) {
+                chrome_unix_ipc_trace_state("recvmsg-emit-error", fd,
+                                            emit_ret, recv_capacity, flags,
+                                            mh.msg_control,
+                                            mh.msg_controllen, scm_count,
+                                            has_scm_cred, sk);
+                return (uint64)emit_ret;
             }
-
-            if (scm_count > 0) {
-                int newfds[UNIX_SCM_QUEUE_MAX];
-                size_t max_fds = 0;
-                size_t to_install;
-                size_t installed = 0;
-
-                if (mh.msg_control != 0 && cmsg_cap > cmsg_used) {
-                    size_t remain = cmsg_cap - cmsg_used;
-                    while (max_fds < scm_count &&
-                           K_CMSG_SPACE(sizeof(int) * (max_fds + 1)) <= remain)
-                        max_fds++;
-                }
-                to_install = scm_count < max_fds ? scm_count : max_fds;
-
-                for (; installed < to_install; installed++) {
-                    spin_lock(&current->fdtable->lock);
-                    int newfd = vfs_fdtable_alloc_fd(current->fdtable,
-                                                     scm_files[installed]);
-                    if (newfd >= 0 && (flags & MSG_CMSG_CLOEXEC))
-                        vfs_fdtable_set_fdflags(current->fdtable, newfd,
-                                                FD_CLOEXEC);
-                    spin_unlock(&current->fdtable->lock);
-                    vfs_fput(scm_files[installed]);
-                    scm_files[installed] = NULL;
-                    if (newfd < 0)
-                        break;
-                    newfds[installed] = newfd;
-                }
-
-                unix_discard_scm_rights(scm_files, installed, scm_count);
-                if (installed < scm_count)
-                    unix_out_flags |= MSG_CTRUNC;
-                if (installed > 0 &&
-                    k_cmsg_append(cmsg_buf, cmsg_cap, &cmsg_used,
-                                  SOL_SOCKET, SCM_RIGHTS, newfds,
-                                  sizeof(int) * installed) < 0)
-                    unix_out_flags |= MSG_CTRUNC;
-            }
-
-            if (mh.msg_control != 0 && cmsg_used > 0)
-                vm_copyout(current->vm, mh.msg_control, cmsg_buf, cmsg_used);
-
-            uint64 uclen = cmsg_used;
-            vm_copyout(current->vm,
-                       umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
-                       &uclen, sizeof(uclen));
         }
 
         /* Clear msg_flags */
-        vm_copyout(current->vm,
-                   umsg + __builtin_offsetof(struct k_msghdr, msg_flags),
-                   &unix_out_flags, sizeof(unix_out_flags));
+        if (vm_copyout(current->vm,
+                       umsg + __builtin_offsetof(struct k_msghdr, msg_flags),
+                       &unix_out_flags, sizeof(unix_out_flags)) < 0)
+            return (uint64)-EFAULT;
 
-        return (uint64)total;
+        return (uint64)ret_total;
     }
 
     struct lwip_sock *sk = sock_from_fd(fd);
@@ -4308,22 +5812,28 @@ unix_recvmsg_done:
         }
 
         /* Copy source address into msg_name if requested */
-        if (mh.msg_name != 0 && mh.msg_namelen >= K_SOCKADDR_IN_SIZE) {
+        if (mh.msg_name != 0) {
             const ip_addr_t *fromaddr = netbuf_fromaddr(nb);
             u16_t fromport = netbuf_fromport(nb);
 
-            struct k_sockaddr_in sa;
-            memset(&sa, 0, sizeof(sa));
-            sa.sin_family = AF_INET;
-            sa.sin_port = htons(fromport);
-            sa.sin_addr = ip_addr_get_ip4_u32(fromaddr);
-
-            vm_copyout(current->vm, mh.msg_name, &sa, sizeof(sa));
+            char storage[K_SOCKADDR_IN6_SIZE];
+            int nlen = 0;
+            int pack_ret = sock_pack_inet_addr(domain, fromaddr, fromport,
+                                               storage, &nlen);
+            if (pack_ret < 0) {
+                netbuf_delete(nb);
+                return (uint64)pack_ret;
+            }
+            if (mh.msg_namelen >= (uint32)nlen &&
+                vm_copyout(current->vm, mh.msg_name, storage, nlen) < 0) {
+                netbuf_delete(nb);
+                return (uint64)-EFAULT;
+            }
             /* Update msg_namelen in user msghdr */
-            uint32 nlen = K_SOCKADDR_IN_SIZE;
+            uint32 out_nlen = (uint32)nlen;
             vm_copyout(current->vm,
                         umsg + __builtin_offsetof(struct k_msghdr, msg_namelen),
-                        &nlen, sizeof(nlen));
+                        &out_nlen, sizeof(out_nlen));
         }
 
         if (flags & MSG_PEEK) {
@@ -4372,6 +5882,9 @@ uint64 sys_socketpair(void)
     int flags = type & ~SOCK_TYPE_MASK;
     type &= SOCK_TYPE_MASK;
 
+    if (flags & ~(SOCK_NONBLOCK | SOCK_CLOEXEC))
+        return (uint64)-EINVAL;
+
     if (domain != AF_UNIX)
         return (uint64)-EAFNOSUPPORT;
 
@@ -4392,8 +5905,11 @@ uint64 sys_socketpair(void)
     }
 
     /* Copy sv[] to user space */
-    if (vm_copyout(current->vm, usv, sv, sizeof(sv)) < 0)
+    if (vm_copyout(current->vm, usv, sv, sizeof(sv)) < 0) {
+        socket_unwind_created_fd(sv[0]);
+        socket_unwind_created_fd(sv[1]);
         return (uint64)-EFAULT;
+    }
 
     return 0;
 }
@@ -4435,13 +5951,13 @@ uint64 sys_sendmmsg(void)
         if (vm_copyin(current->vm, &mh, entry_addr, sizeof(mh)) < 0)
             return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
 
-        if (mh.msg_iovlen == 0 || mh.msg_iovlen < 0 ||
-            mh.msg_iovlen > SENDMSG_MAX_IOV)
+        if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
             return sent > 0 ? (uint64)sent : (uint64)-EINVAL;
 
         struct k_iovec iovs[SENDMSG_MAX_IOV];
-        if (vm_copyin(current->vm, iovs, mh.msg_iov,
-                      mh.msg_iovlen * sizeof(struct k_iovec)) < 0)
+        uint64 iov_bytes = (uint64)mh.msg_iovlen * sizeof(struct k_iovec);
+        if (iov_bytes != 0 &&
+            vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
             return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
 
         /* Gather data */
@@ -4482,52 +5998,20 @@ uint64 sys_sendmmsg(void)
             struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
             memset(scm_files, 0, sizeof(scm_files));
             size_t scm_count = 0;
+            struct unix_scm_cred scm_cred;
+            memset(&scm_cred, 0, sizeof(scm_cred));
+            int has_scm_cred = 0;
 
-            if (mh.msg_control != 0 &&
-                mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
-                unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) * UNIX_SCM_QUEUE_MAX)];
-                uint64 copy_len = mh.msg_controllen;
-                if (copy_len > sizeof(cmsg_buf))
-                    copy_len = sizeof(cmsg_buf);
-                if (vm_copyin(current->vm, cmsg_buf, mh.msg_control, copy_len) < 0) {
-                    kvfree(msg_buf);
-                    return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
-                }
-
-                struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
-                if (k_cmsg_readable(cmsg, copy_len, sizeof(int)) &&
-                    cmsg->cmsg_level == SOL_SOCKET &&
-                    cmsg->cmsg_type == SCM_RIGHTS) {
-                    size_t payload_len = k_cmsg_payload_len(cmsg);
-                    size_t nfds = payload_len / sizeof(int);
-                    if (nfds >= UNIX_SCM_QUEUE_MAX) {
-                        kvfree(msg_buf);
-                        return sent > 0 ? (uint64)sent : (uint64)-EMSGSIZE;
-                    }
-                    if (nfds > 0) {
-                        int *pass_fds = (int *)K_CMSG_DATA(cmsg);
-                        for (size_t k = 0; k < nfds; k++) {
-                            struct vfs_file *file =
-                                vfs_fdtable_get_file(current->fdtable, pass_fds[k]);
-                            if (file == NULL) {
-                                for (size_t l = 0; l < scm_count; l++)
-                                    vfs_fput(scm_files[l]);
-                                kvfree(msg_buf);
-                                return sent > 0 ? (uint64)sent : (uint64)-EBADF;
-                            }
-
-                            scm_files[scm_count] = vfs_fdup(file);
-                            vfs_fput(file);
-                            if (scm_files[scm_count] == NULL) {
-                                for (size_t l = 0; l < scm_count; l++)
-                                    vfs_fput(scm_files[l]);
-                                kvfree(msg_buf);
-                                return sent > 0 ? (uint64)sent : (uint64)-ENOMEM;
-                            }
-                            scm_count++;
-                        }
-                    }
-                }
+            int scm_ret = unix_collect_scm_from_control(mh.msg_control,
+                                                        mh.msg_controllen,
+                                                        scm_files,
+                                                        &scm_count,
+                                                        &scm_cred,
+                                                        &has_scm_cred);
+            if (scm_ret < 0) {
+                unix_discard_scm_rights(scm_files, 0, scm_count);
+                kvfree(msg_buf);
+                return sent > 0 ? (uint64)sent : (uint64)scm_ret;
             }
 
             struct vfs_file *notify_file = NULL;
@@ -4535,6 +6019,13 @@ uint64 sys_sendmmsg(void)
             size_t grow_capacity = 0;
             int ret;
             int nonblock = sock_is_nonblock(sockfd, flags);
+            int msg_buf_queued = 0;
+            if (total == 0 && usk->type == SOCK_STREAM) {
+                unix_discard_scm_rights(scm_files, 0, scm_count);
+                kvfree(msg_buf);
+                n = 0;
+                goto sendmmsg_entry_done;
+            }
             for (;;) {
                 spin_lock(&usk->lock);
                 char *old_data = NULL;
@@ -4570,7 +6061,9 @@ uint64 sys_sendmmsg(void)
                 }
 
                 ret = unix_sendmsg_atomic_locked(usk, msg_buf, total,
-                                                 scm_files, scm_count);
+                                                 scm_files, scm_count,
+                                                 &scm_cred, has_scm_cred,
+                                                 &msg_buf_queued);
                 if (ret == 0 && usk->peer != NULL) {
                     tq_wakeup_all(&usk->peer->rd_queue, 0, 0);
                     if (usk->peer->file != NULL)
@@ -4596,7 +6089,8 @@ uint64 sys_sendmmsg(void)
             }
             if (grow_data != NULL)
                 kvfree(grow_data);
-            kvfree(msg_buf);
+            if (!msg_buf_queued)
+                kvfree(msg_buf);
 
             if (ret < 0) {
                 for (size_t k = 0; k < scm_count; k++)
@@ -4631,6 +6125,18 @@ uint64 sys_sendmmsg(void)
                 n = sock_tcp_send_common(sk, sockfd, 0, tmpbuf, total,
                                          flags, 0);
             } else {
+                ip_addr_t msg_destip;
+                u16_t msg_destport = 0;
+                int have_msg_dest = 0;
+                if (mh.msg_name != 0) {
+                    int addr_ret = sock_copyin_inet_addr(domain, mh.msg_name,
+                                                         mh.msg_namelen,
+                                                         &msg_destip,
+                                                         &msg_destport);
+                    if (addr_ret < 0)
+                        return sent > 0 ? (uint64)sent : (uint64)addr_ret;
+                    have_msg_dest = 1;
+                }
                 struct netbuf nb;
                 memset(&nb, 0, sizeof(nb));
                 struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (uint16)total, PBUF_RAM);
@@ -4638,7 +6144,9 @@ uint64 sys_sendmmsg(void)
                     return sent > 0 ? (uint64)sent : (uint64)-ENOMEM;
                 pbuf_take(p, tmpbuf, (uint16)total);
                 nb.p = p;
-                err_t err = netconn_send(sk->conn, &nb);
+                err_t err = have_msg_dest
+                    ? netconn_sendto(sk->conn, &nb, &msg_destip, msg_destport)
+                    : netconn_send(sk->conn, &nb);
                 pbuf_free(p);
                 n = (err == ERR_OK) ? (ssize_t)total : -(ssize_t)lwip_err_to_errno(err);
             }
@@ -4647,6 +6155,7 @@ uint64 sys_sendmmsg(void)
         if (n < 0)
             return sent > 0 ? (uint64)sent : (uint64)n;
 
+sendmmsg_entry_done:
         /* Write msg_len back */
         uint32 msg_len = (uint32)n;
         vm_copyout(current->vm,
@@ -4710,13 +6219,13 @@ uint64 sys_recvmmsg(void)
         if (vm_copyin(current->vm, &mh, entry_addr, sizeof(mh)) < 0)
             return received > 0 ? (uint64)received : (uint64)-EFAULT;
 
-        if (mh.msg_iovlen == 0 || mh.msg_iovlen < 0 ||
-            mh.msg_iovlen > SENDMSG_MAX_IOV)
+        if (mh.msg_iovlen < 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
             return received > 0 ? (uint64)received : (uint64)-EINVAL;
 
         struct k_iovec iovs[SENDMSG_MAX_IOV];
-        if (vm_copyin(current->vm, iovs, mh.msg_iov,
-                      mh.msg_iovlen * sizeof(struct k_iovec)) < 0)
+        uint64 iov_bytes = (uint64)mh.msg_iovlen * sizeof(struct k_iovec);
+        if (iov_bytes != 0 &&
+            vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
             return received > 0 ? (uint64)received : (uint64)-EFAULT;
 
         /* Determine domain */
@@ -4727,8 +6236,11 @@ uint64 sys_recvmmsg(void)
         if ((flags & MSG_WAITFORONE) && received > 0)
             recv_flags |= MSG_DONTWAIT;
         ssize_t total = 0;
+        ssize_t msg_len_total = -1;
         int msg_flags = 0;
         int count_zero_message = 0;
+        uint scm_virtual_nread = 0;
+        int have_scm_virtual_nread = 0;
 
         if (has_timeout && !timeout_is_zero && received == 0) {
             int expired = 0;
@@ -4753,10 +6265,19 @@ uint64 sys_recvmmsg(void)
                 f->f_flags |= O_NONBLOCK;
 
             int out_flags = 0;
+            struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
+            memset(scm_files, 0, sizeof(scm_files));
+            struct unix_scm_cred scm_cred;
+            memset(&scm_cred, 0, sizeof(scm_cred));
+            int has_scm_cred = 0;
+            size_t scm_count = 0;
+            int scm_ret = 0;
+            int scm_dequeued_with_packet = 0;
             if (usk->type == SOCK_SEQPACKET) {
                 struct unix_sock *peer = NULL;
                 size_t packet_len = 0;
 
+seqpacket_recvmmsg_wait:
                 for (;;) {
                     bool read_shutdown;
                     bool peer_write_shutdown = false;
@@ -4790,6 +6311,11 @@ uint64 sys_recvmmsg(void)
                         unix_sock_put_ref(peer);
                         f->f_flags = saved_fflags;
                         vfs_fput(f);
+                        chrome_unix_ipc_trace_state("recvmmsg-eagain-seqpacket",
+                                                    sockfd, -EAGAIN, 0,
+                                                    recv_flags, mh.msg_control,
+                                                    mh.msg_controllen, 0, 0,
+                                                    usk);
                         return received > 0 ? (uint64)received : (uint64)-EAGAIN;
                     }
                     if (signal_pending(current)) {
@@ -4817,48 +6343,45 @@ uint64 sys_recvmmsg(void)
                     size_t capacity = 0;
                     for (uint64 j = 0; j < mh.msg_iovlen; j++)
                         capacity += iovs[j].iov_len;
-                    size_t to_copy = packet_len < capacity ? packet_len : capacity;
-                    if (packet_len > capacity)
-                        out_flags |= MSG_TRUNC;
 
-                    char *packet_buf = kvmalloc(to_copy ? to_copy : 1);
-                    if (packet_buf == NULL) {
+                    char *packet_buf = NULL;
+                    size_t copied_packet = 0;
+                    struct vfs_file *peer_wr_file = NULL;
+                    int recv_ret = unix_seqpacket_recv_buffer(peer,
+                                                              recv_flags,
+                                                              capacity,
+                                                              &packet_buf,
+                                                              &copied_packet,
+                                                              &packet_len,
+                                                              &scm_virtual_nread,
+                                                              &have_scm_virtual_nread,
+                                                              scm_files,
+                                                              UNIX_SCM_QUEUE_MAX,
+                                                              &scm_cred,
+                                                              &has_scm_cred,
+                                                              &scm_count,
+                                                              &scm_dequeued_with_packet,
+                                                              &peer_wr_file);
+                    if (recv_ret != 0) {
                         unix_sock_put_ref(peer);
+                        if (recv_ret == -EAGAIN && !recv_nonblock)
+                            goto seqpacket_recvmmsg_wait;
                         f->f_flags = saved_fflags;
                         vfs_fput(f);
-                        return received > 0 ? (uint64)received : (uint64)-ENOMEM;
+                        return received > 0 ? (uint64)received : (uint64)recv_ret;
                     }
-
-                    size_t copied_packet;
-                    struct vfs_file *peer_wr_file = NULL;
-                    spin_lock(&peer->lock);
-                    if (recv_flags & MSG_PEEK) {
-                        copied_packet = unix_ring_peek(&peer->tx, 0,
-                                                       packet_buf, to_copy);
-                    } else {
-                        copied_packet = unix_ring_read_locked(&peer->tx,
-                                                             packet_buf, to_copy);
-                        if (packet_len > copied_packet) {
-                            uint mark = peer->packet_queue[peer->packet_head];
-                            smp_store_release(&peer->tx.nread, mark);
-                        }
-                        unix_packet_pop_locked(peer);
-                        tq_wakeup_all(&peer->wr_queue, 0, 0);
-                        peer_wr_file = peer->file ? vfs_fdup(peer->file) : NULL;
-                    }
-                    spin_unlock(&peer->lock);
                     if (peer_wr_file != NULL) {
                         vfs_file_knote_notify(peer_wr_file, EVFILT_WRITE, 0);
                         vfs_fput(peer_wr_file);
                     }
-
-                    if (copied_packet != to_copy) {
-                        kvfree(packet_buf);
-                        unix_sock_put_ref(peer);
-                        f->f_flags = saved_fflags;
-                        vfs_fput(f);
-                        return received > 0 ? (uint64)received : (uint64)-EIO;
-                    }
+                    unix_seqpacket_verify_webkit_packet(
+                        "recvmmsg",
+                        current != NULL ? current->name : NULL,
+                        (current != NULL && current->thread_group != NULL)
+                            ? current->thread_group->exec_path : NULL,
+                        packet_buf, copied_packet, packet_len);
+                    if (packet_len > capacity)
+                        out_flags |= MSG_TRUNC;
 
                     size_t packet_off = 0;
                     for (uint64 j = 0; j < mh.msg_iovlen &&
@@ -4880,6 +6403,8 @@ uint64 sys_recvmmsg(void)
                         total += want;
                     }
                     kvfree(packet_buf);
+                    if ((recv_flags & MSG_TRUNC) && packet_len > capacity)
+                        msg_len_total = (ssize_t)packet_len;
                     unix_sock_put_ref(peer);
                 }
             } else if (recv_flags & MSG_PEEK) {
@@ -4936,6 +6461,7 @@ uint64 sys_recvmmsg(void)
                         struct unix_sock *peer;
                         size_t want = iovs[j].iov_len - copied_iov;
                         size_t barrier_bytes = 0;
+                        size_t readable = 0;
                         int stop_after_read = 0;
 
                         spin_lock(&usk->lock);
@@ -4945,6 +6471,7 @@ uint64 sys_recvmmsg(void)
 
                         if (peer != NULL) {
                             spin_lock(&peer->lock);
+                            readable = peer->tx.nwrite - peer->tx.nread;
                             if (unix_next_scm_read_window_locked(peer,
                                                                  &barrier_bytes,
                                                                  &stop_after_read)) {
@@ -4959,13 +6486,23 @@ uint64 sys_recvmmsg(void)
 
                         if (want == 0 || hit_scm_barrier)
                             break;
+                        if (readable == 0 && total > 0)
+                            break;
+                        if (readable > 0 && want > readable)
+                            want = readable;
 
-                        ssize_t n = unix_socket_file_ops.read(
+                        ssize_t n = unix_sock_read_preserve_scm(
                             f, (char *)(iovs[j].iov_base + copied_iov),
                             want, 1);
                         if (n < 0) {
                             f->f_flags = saved_fflags;
                             vfs_fput(f);
+                            chrome_unix_ipc_trace_state("recvmmsg-read-error",
+                                                        sockfd, n, 0,
+                                                        recv_flags,
+                                                        mh.msg_control,
+                                                        mh.msg_controllen, 0,
+                                                        0, usk);
                             return received > 0 ? (uint64)received : (uint64)n;
                         }
                         total += n;
@@ -4984,93 +6521,49 @@ uint64 sys_recvmmsg(void)
             f->f_flags = saved_fflags;
             vfs_fput(f);
 
+            struct unix_sock *peer = NULL;
+            spin_lock(&usk->lock);
+            peer = usk->peer;
+            unix_sock_get_ref(peer);
+            spin_unlock(&usk->lock);
+
             if (recv_flags & MSG_PEEK) {
-                uint64 zero = 0;
-                vm_copyout(current->vm,
-                           entry_addr + __builtin_offsetof(struct k_msghdr,
-                                                           msg_controllen),
-                           &zero, sizeof(zero));
-            } else {
-                struct unix_sock *peer = NULL;
-                spin_lock(&usk->lock);
-                peer = usk->peer;
-                unix_sock_get_ref(peer);
-                spin_unlock(&usk->lock);
-
-                struct vfs_file *scm_files[UNIX_SCM_QUEUE_MAX];
-                memset(scm_files, 0, sizeof(scm_files));
-                size_t scm_count = unix_dequeue_scm_rights(peer, scm_files,
-                                                           UNIX_SCM_QUEUE_MAX);
-                unix_sock_put_ref(peer);
-
-                if (scm_count > 0) {
-                    int newfds[UNIX_SCM_QUEUE_MAX];
-                    size_t max_fds = 0;
-                    if (mh.msg_control != 0 &&
-                        mh.msg_controllen >= K_CMSG_LEN(sizeof(int))) {
-                        max_fds = (mh.msg_controllen >= K_CMSG_SPACE(0))
-                            ? (mh.msg_controllen - K_CMSG_SPACE(0)) / sizeof(int) : 0;
-                        if (max_fds > UNIX_SCM_QUEUE_MAX)
-                            max_fds = UNIX_SCM_QUEUE_MAX;
-                    }
-                    size_t to_install = scm_count < max_fds ? scm_count : max_fds;
-                    size_t installed = 0;
-
-                    for (; installed < to_install; installed++) {
-                        spin_lock(&current->fdtable->lock);
-                        int newfd = vfs_fdtable_alloc_fd(current->fdtable,
-                                                         scm_files[installed]);
-                        if (newfd >= 0 && (recv_flags & MSG_CMSG_CLOEXEC))
-                            vfs_fdtable_set_fdflags(current->fdtable, newfd,
-                                                    FD_CLOEXEC);
-                        spin_unlock(&current->fdtable->lock);
-                        vfs_fput(scm_files[installed]);
-                        scm_files[installed] = NULL;
-                        if (newfd < 0)
-                            break;
-                        newfds[installed] = newfd;
-                    }
-
-                    unix_discard_scm_rights(scm_files, installed, scm_count);
-                    if (installed < scm_count)
-                        out_flags |= MSG_CTRUNC;
-
-                    if (installed > 0) {
-                        unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int) *
-                                                            UNIX_SCM_QUEUE_MAX)];
-                        memset(cmsg_buf, 0, sizeof(cmsg_buf));
-                        struct k_cmsghdr *cmsg =
-                            (struct k_cmsghdr *)cmsg_buf;
-                        cmsg->cmsg_len = K_CMSG_LEN(sizeof(int) * installed);
-                        cmsg->cmsg_level = SOL_SOCKET;
-                        cmsg->cmsg_type = SCM_RIGHTS;
-                        memmove(K_CMSG_DATA(cmsg), newfds,
-                                sizeof(int) * installed);
-
-                        uint64 clen = K_CMSG_SPACE(sizeof(int) * installed);
-                        vm_copyout(current->vm, mh.msg_control,
-                                   cmsg_buf, clen);
-                        vm_copyout(current->vm,
-                                   entry_addr + __builtin_offsetof(struct k_msghdr,
-                                                                   msg_controllen),
-                                   &clen, sizeof(clen));
-                    } else {
-                        uint64 zero = 0;
-                        vm_copyout(current->vm,
-                                   entry_addr + __builtin_offsetof(struct k_msghdr,
-                                                                   msg_controllen),
-                                   &zero, sizeof(zero));
-                    }
-                } else {
-                    uint64 zero = 0;
-                    vm_copyout(current->vm,
-                               entry_addr + __builtin_offsetof(struct k_msghdr,
-                                                               msg_controllen),
-                               &zero, sizeof(zero));
+                if (!have_scm_virtual_nread && peer != NULL) {
+                    spin_lock(&peer->lock);
+                    scm_virtual_nread = peer->tx.nread + (uint)total;
+                    spin_unlock(&peer->lock);
+                    have_scm_virtual_nread = 1;
                 }
+                scm_ret = unix_peek_scm(peer, scm_virtual_nread, scm_files,
+                                        UNIX_SCM_QUEUE_MAX, &scm_cred,
+                                        &has_scm_cred, &scm_count);
+            } else if (!scm_dequeued_with_packet) {
+                scm_count = unix_dequeue_scm(peer, scm_files,
+                                             UNIX_SCM_QUEUE_MAX,
+                                             &scm_cred, &has_scm_cred);
+            }
+            unix_sock_put_ref(peer);
+
+            int emit_ret = 0;
+            if (scm_ret < 0) {
+                out_flags |= MSG_CTRUNC;
+            } else {
+                emit_ret = unix_emit_recvmsg_scm(usk, &mh, entry_addr, sockfd,
+                                                 recv_flags, total,
+                                                 count_zero_message,
+                                                 scm_files, scm_count,
+                                                 &scm_cred, has_scm_cred,
+                                                 &out_flags);
+                if (emit_ret < 0)
+                    return received > 0 ? (uint64)received : (uint64)emit_ret;
             }
 
             msg_flags = out_flags;
+            chrome_unix_ipc_trace_state("recvmmsg-done", sockfd,
+                                        msg_len_total < 0 ? total : msg_len_total,
+                                        0, recv_flags, mh.msg_control,
+                                        mh.msg_controllen, scm_count,
+                                        has_scm_cred, usk);
         } else {
             struct lwip_sock *sk = sock_from_fd(sockfd);
             if (sk == NULL)
@@ -5264,21 +6757,31 @@ uint64 sys_recvmmsg(void)
                     return received > 0 ? (uint64)received : (uint64)total;
                 }
 
-                if (mh.msg_name != 0 && mh.msg_namelen >= K_SOCKADDR_IN_SIZE) {
+                if (mh.msg_name != 0) {
                     const ip_addr_t *fromaddr = netbuf_fromaddr(nb);
                     u16_t fromport = netbuf_fromport(nb);
-                    struct k_sockaddr_in sa;
-                    memset(&sa, 0, sizeof(sa));
-                    sa.sin_family = AF_INET;
-                    sa.sin_port = htons(fromport);
-                    sa.sin_addr = ip_addr_get_ip4_u32(fromaddr);
-
-                    vm_copyout(current->vm, mh.msg_name, &sa, sizeof(sa));
-                    uint32 nlen = K_SOCKADDR_IN_SIZE;
+                    char storage[K_SOCKADDR_IN6_SIZE];
+                    int nlen = 0;
+                    int pack_ret = sock_pack_inet_addr(domain, fromaddr,
+                                                       fromport, storage,
+                                                       &nlen);
+                    if (pack_ret < 0) {
+                        netbuf_delete(nb);
+                        return received > 0 ? (uint64)received
+                                            : (uint64)pack_ret;
+                    }
+                    if (mh.msg_namelen >= (uint32)nlen &&
+                        vm_copyout(current->vm, mh.msg_name, storage,
+                                   nlen) < 0) {
+                        netbuf_delete(nb);
+                        return received > 0 ? (uint64)received
+                                            : (uint64)-EFAULT;
+                    }
+                    uint32 out_nlen = (uint32)nlen;
                     vm_copyout(current->vm,
                                entry_addr + __builtin_offsetof(struct k_msghdr,
                                                                msg_namelen),
-                               &nlen, sizeof(nlen));
+                               &out_nlen, sizeof(out_nlen));
                 }
 
                 if (recv_flags & MSG_PEEK) {
@@ -5293,7 +6796,9 @@ uint64 sys_recvmmsg(void)
         }
 
         /* Write msg_len back to user mmsghdr */
-        uint32 msg_len = (uint32)total;
+        if (msg_len_total < 0)
+            msg_len_total = total;
+        uint32 msg_len = (uint32)msg_len_total;
         vm_copyout(current->vm,
                    entry_addr + sizeof(struct k_msghdr),
                    &msg_len, sizeof(msg_len));

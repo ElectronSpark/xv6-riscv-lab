@@ -113,12 +113,12 @@ void rlimit_init_defaults(struct rlimit rlim[RLIMIT_NLIMITS]) {
     }
 
     /*
-     * RLIMIT_NOFILE: imported Linux daemons commonly raise the hard limit to
-     * 65536 during startup.  The fd allocator still clips to NOFILE, so this
-     * only satisfies the Linux ABI probe without growing each fd table.
+     * RLIMIT_NOFILE: imported Linux daemons commonly raise the hard limit
+     * during startup.  The fd allocator still clips to NOFILE, so the hard
+     * limit satisfies the Linux ABI probe without growing each fd table.
      */
     rlim[RLIMIT_NOFILE].rlim_cur = NOFILE;
-    rlim[RLIMIT_NOFILE].rlim_max = 65536;
+    rlim[RLIMIT_NOFILE].rlim_max = 1024 * 1024;
 
     /* RLIMIT_NPROC — match the compile-time NR_THREAD constant */
     rlim[RLIMIT_NPROC].rlim_cur = NR_THREAD;
@@ -127,6 +127,20 @@ void rlimit_init_defaults(struct rlimit rlim[RLIMIT_NLIMITS]) {
     /* RLIMIT_STACK — 8 MiB soft, unlimited hard */
     rlim[RLIMIT_STACK].rlim_cur = (uint64)MAXUSTACK * PAGE_SIZE;
     rlim[RLIMIT_STACK].rlim_max = RLIM_INFINITY;
+
+    /*
+     * Linux GUI runtimes probe the post-RLIMIT_AS resources even when xv6 does
+     * not enforce every one yet.  Return Linux-shaped defaults instead of
+     * EINVAL so feature probes and sandbox setup follow the normal path.
+     */
+    rlim[RLIMIT_SIGPENDING].rlim_cur = NR_THREAD;
+    rlim[RLIMIT_SIGPENDING].rlim_max = NR_THREAD;
+    rlim[RLIMIT_MSGQUEUE].rlim_cur = 819200;
+    rlim[RLIMIT_MSGQUEUE].rlim_max = 819200;
+    rlim[RLIMIT_NICE].rlim_cur = 0;
+    rlim[RLIMIT_NICE].rlim_max = 0;
+    rlim[RLIMIT_RTPRIO].rlim_cur = 0;
+    rlim[RLIMIT_RTPRIO].rlim_max = 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -238,6 +252,12 @@ int acct_format(struct thread_group *tg, char *buf, int sz) {
         "rlimit_nofile",
         "rlimit_memlock",
         "rlimit_as",
+        "rlimit_locks",
+        "rlimit_sigpending",
+        "rlimit_msgqueue",
+        "rlimit_nice",
+        "rlimit_rtprio",
+        "rlimit_rttime",
     };
 
     for (int i = 0; i < RLIMIT_NLIMITS; i++) {
@@ -266,6 +286,7 @@ int acct_format(struct thread_group *tg, char *buf, int sz) {
 uint64 sys_prlimit64(void) {
     int pid, resource;
     uint64 new_addr, old_addr;
+    int need_put = 0;
 
     argint(0, &pid);
     argint(1, &resource);
@@ -280,7 +301,7 @@ uint64 sys_prlimit64(void) {
     if (pid == 0) {
         tg = current->thread_group;
     } else {
-        /* Look up the target process by tgid */
+        /* Look up the target process by TGID and pin its thread_group. */
         rcu_read_lock();
         struct thread *target = NULL;
         get_pid_thread(pid, &target);
@@ -290,6 +311,10 @@ uint64 sys_prlimit64(void) {
             return -ESRCH;
         }
         tg = target->thread_group;
+        if (tg != NULL) {
+            thread_group_get(tg);
+            need_put = 1;
+        }
         rcu_read_unlock();
         if (tg == NULL)
             return -ESRCH;
@@ -298,28 +323,42 @@ uint64 sys_prlimit64(void) {
     /* Return the old limit to user-space */
     if (old_addr != 0) {
         if (vm_copyout(current->vm, old_addr, (char *)&tg->rlim[resource],
-                       sizeof(struct rlimit)) < 0)
+                       sizeof(struct rlimit)) < 0) {
+            if (need_put)
+                thread_group_put(tg);
             return -EFAULT;
+        }
     }
 
     /* Set a new limit from user-space */
     if (new_addr != 0) {
         struct rlimit new_rl;
         if (vm_copyin(current->vm, (char *)&new_rl, new_addr,
-                      sizeof(struct rlimit)) < 0)
+                      sizeof(struct rlimit)) < 0) {
+            if (need_put)
+                thread_group_put(tg);
             return -EFAULT;
+        }
 
         /* Soft limit must not exceed hard limit */
-        if (new_rl.rlim_cur > new_rl.rlim_max)
+        if (new_rl.rlim_cur > new_rl.rlim_max) {
+            if (need_put)
+                thread_group_put(tg);
             return -EINVAL;
+        }
 
         /* Unprivileged process cannot raise the hard limit */
-        if (new_rl.rlim_max > tg->rlim[resource].rlim_max)
+        if (new_rl.rlim_max > tg->rlim[resource].rlim_max) {
+            if (need_put)
+                thread_group_put(tg);
             return -EPERM;
+        }
 
         tg->rlim[resource] = new_rl;
     }
 
+    if (need_put)
+        thread_group_put(tg);
     return 0;
 }
 

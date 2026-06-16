@@ -151,6 +151,8 @@ static void gpu_syncobj_fire_state_callbacks_locked(
 static int gpu_syncobj_state_ready_locked(
     struct fb_gpu_syncobj_state_entry *state, uint64 point)
 {
+    uint64 virtio_fence;
+
     if (state == NULL)
         return 0;
     if (point == 0)
@@ -178,6 +180,22 @@ static int gpu_syncobj_state_ready_locked(
             gpu_syncobj_fire_state_callbacks_locked(state);
             gpu_syncobj_clear_proxy_locked(state);
         }
+    }
+    virtio_fence = dma_fence_get_virtio_fence(state->fence);
+    if (!state->signaled && virtio_fence != 0 &&
+        virtio_gpu_user_last_fence() >= virtio_fence) {
+        uint64 ready_point = state->timeline_value != 0 ?
+            state->timeline_value : point;
+
+        state->signaled = 1;
+        state->timeline_value = ready_point;
+        if (state->signaled_point < ready_point)
+            state->signaled_point = ready_point;
+        state->reservation_seq++;
+        state->reservation_fence = virtio_fence;
+        (void)dma_fence_signal(state->fence, 0);
+        gpu_syncobj_fire_state_callbacks_locked(state);
+        gpu_syncobj_clear_proxy_locked(state);
     }
     return state->signaled_point >= point &&
         (state->fence == NULL || dma_fence_is_signaled(state->fence));
@@ -585,6 +603,8 @@ static int gpu_syncobj_handle_to_fd(struct fb_gpu_render_owner *owner,
                 sync_file->snapshot_reservation_fence =
                     state->reservation_fence;
                 sync_file->fence = dma_fence_get(state->fence);
+                sync_file->virtio_fence =
+                    dma_fence_get_virtio_fence(state->fence);
                 if (sync_file->fence == NULL) {
                     gpu_syncobj_state_put_locked(obj->state_index);
                     sync_file->state_index = 0;
@@ -671,6 +691,7 @@ static int gpu_syncobj_fd_to_handle(struct fb_gpu_render_owner *owner,
     } else if (file->ops == &fb_syncobj_file_ops &&
                file->private_data != NULL) {
         uint32 state_index = 0;
+        int file_ready = 0;
 
         sync_file = (struct fb_gpu_syncobj_file *)file->private_data;
         if (sync_file->kind != FB_GPU_SYNCOBJ_FD_SYNC_FILE) {
@@ -683,13 +704,14 @@ static int gpu_syncobj_fd_to_handle(struct fb_gpu_render_owner *owner,
             uint64 import_point = req.point != 0 ? req.point :
                 sync_file->snapshot_timeline_value;
 
+            file_ready = fb_syncobj_file_status(sync_file) > 0;
             spin_lock(&fb_state.lock);
             source_state = gpu_syncobj_state_locked(sync_file->state_index);
-            ready = sync_file->snapshot_signaled ||
-                dma_fence_is_signaled(sync_file->fence) ||
+            ready = file_ready ||
                 gpu_syncobj_state_ready_locked(
                     source_state, sync_file->snapshot_timeline_value);
-            if (!ready && source_state == NULL) {
+            if (!ready && source_state == NULL &&
+                sync_file->virtio_fence == 0) {
                 fb_state.stats.sync_file_pending_import_rejects++;
                 ret = -ENOENT;
             } else {
@@ -1352,6 +1374,8 @@ static int gpu_drm_prime_handle_to_fd(struct fb_gpu_render_owner *owner,
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
+    if ((req.flags & ~(DRM_CLOEXEC | DRM_RDWR)) != 0)
+        return -EINVAL;
     bo = fb_bo_get_owned(req.handle, owner->id, owner->tgid);
     if (bo == NULL) {
         page_t **pages = NULL;
@@ -1396,10 +1420,16 @@ static int gpu_drm_prime_handle_to_fd(struct fb_gpu_render_owner *owner,
     if (dmabuf == NULL)
         return -ENOENT;
     dbuf = dmabuf->dbuf;
-    fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dbuf, 0);
+    fd = vfs_custom_fd_alloc(&fb_dmabuf_file_ops, dbuf,
+                             (req.flags & DRM_RDWR) ? O_RDWR : 0);
     if (fd < 0) {
         fb_dmabuf_put(dbuf);
         return fd;
+    }
+    if (req.flags & DRM_CLOEXEC) {
+        spin_lock(&current->fdtable->lock);
+        (void)vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
+        spin_unlock(&current->fdtable->lock);
     }
     req.fd = fd;
     fb_dmabuf_note_export(dmabuf);
@@ -1424,6 +1454,8 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
+    if (req.flags != 0)
+        return -EINVAL;
     if (req.fd < 0) {
         fb_dmabuf_note_bad_fd_reject();
         return -EBADF;

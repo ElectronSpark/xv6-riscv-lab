@@ -44,6 +44,10 @@ struct vfs_file_ops;
 #define UNIX_BUF_DEFAULT_SIZE (64 * PAGE_SIZE)        /* initial ring size */
 #define UNIX_BUF_MAX_SIZE     (16 * 1024 * 1024)      /* maximum growable ring */
 #define UNIX_BUF_SIZE         UNIX_BUF_DEFAULT_SIZE   /* compatibility alias */
+#define UNIX_SOCKBUF_DEFAULT  212992                  /* Linux net.core default */
+#define UNIX_SNDBUF_MIN       4608                    /* Linux SO_SNDBUF floor */
+#define UNIX_RCVBUF_MIN       2304                    /* Linux SO_RCVBUF floor */
+#define UNIX_SOCKBUF_MAX      (8 * 1024 * 1024)       /* Linux net.core max */
 #define UNIX_LOWAT_DEFAULT    1
 #define UNIX_IO_CHUNK         PAGE_SIZE
 
@@ -94,8 +98,16 @@ struct unix_pending {
     struct unix_pending *next; /* linked-list next pointer */
 };
 
+struct unix_scm_cred {
+    int pid;
+    uint32 uid;
+    uint32 gid;
+};
+
 struct unix_scm_entry {
     struct vfs_file *file;
+    int has_cred;
+    struct unix_scm_cred cred;
     uint start_nread;
     uint end_nread;
 };
@@ -121,10 +133,16 @@ struct unix_sock {
     char       bind_path[UNIX_PATH_MAX];
     size_t     bind_len;
     int        bound;           /* non-zero if bound */
+    int        bind_registered;  /* this socket owns the bind registry entry */
 
     /* Connected peer (SOCK_STREAM) */
     struct unix_sock *peer;
     struct unix_sock *connect_target;
+
+    /* Credentials of this socket endpoint */
+    int  cred_pid;
+    uint32 cred_uid;
+    uint32 cred_gid;
 
     /* Peer credentials (set during connect, read via SO_PEERCRED) */
     int  peer_pid;
@@ -154,10 +172,10 @@ struct unix_sock {
     struct vfs_file *file;
 
     /*
-     * SCM_RIGHTS entries are attached to the sender tx stream position.  The
-     * receiver may read a Wayland message in pieces, so descriptors must not
-     * be delivered before the byte stream has reached the message that carried
-     * them.
+     * SCM entries are attached to the sender tx stream position.  The receiver
+     * may read a message in pieces, so descriptors and SO_PASSCRED credentials
+     * must not be delivered before the byte stream has reached the message
+     * that carried them.
      */
 #define UNIX_SCM_QUEUE_MAX 256
     struct unix_scm_entry *scm_queue;
@@ -172,9 +190,14 @@ struct unix_sock {
  * artificial EAGAIN while byte capacity remains.
  */
 #define UNIX_PACKET_QUEUE_MAX 8192
-    uint *packet_queue;
-    int packet_head;  /* next packet end mark to consume */
-    int packet_tail;  /* next packet end mark to enqueue */
+    struct unix_packet_entry {
+        uint start_nread;
+        uint end_nread;
+        char *data;
+        size_t len;
+    } *packet_queue;
+    int packet_head;  /* next packet boundary to consume */
+    int packet_tail;  /* next packet boundary to enqueue */
 };
 
 /* ========================================================================== */
@@ -195,6 +218,14 @@ int  unix_sock_listen(int fd, int backlog);
 int  unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags);
 int  unix_sock_connect(int fd, uint64 uaddr, int addrlen);
 int  unix_sock_shutdown(int fd, int how);
+
+/*
+ * recvmsg()/recvmmsg() need to read stream payload up to an SCM boundary and
+ * then emit the queued control message.  Plain read()/readv() instead discards
+ * control messages whose carrying byte was consumed.
+ */
+ssize_t unix_sock_read_preserve_scm(struct vfs_file *file, char *buf,
+                                    size_t count, bool user);
 int  unix_sock_getpeername(int fd, uint64 uaddr, uint64 uaddrlen);
 int  unix_sock_getsockname(int fd, uint64 uaddr, uint64 uaddrlen);
 int  unix_sock_socketpair(int type, int protocol, int file_flags, int sv[2]);

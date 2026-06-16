@@ -111,6 +111,10 @@ static void __vfs_file_free(struct vfs_file *file) {
     if (file == NULL) {
         return;
     }
+    if (file->opened_path != NULL) {
+        kvfree(file->opened_path);
+        file->opened_path = NULL;
+    }
     vfs_file_lock_release(file, file->f_ofd_lock_owner);
     if (file->ops != NULL && file->ops->release != NULL) {
         // Call file release operation
@@ -315,6 +319,7 @@ struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags) {
     if (file->f_kind == VFS_FILE_KIND_NONE)
         file->f_kind = VFS_FILE_KIND_INODE;
     file->f_pos = 0;
+    vfs_inotify_inode_event(inode, IN_OPEN);
     return file;
 }
 
@@ -386,6 +391,12 @@ void vfs_fput(struct vfs_file *file) {
     // Note: anonymous pipe cleanup (pipe != NULL, inode == NULL) is now
     // handled by pipe_file_ops.release via __vfs_file_free below.
     if (inode != NULL) {
+        if (S_ISREG(inode->mode) || S_ISDIR(inode->mode)) {
+            uint32 close_mask =
+                ((file->f_flags & O_ACCMODE) == O_RDONLY) ? IN_CLOSE_NOWRITE
+                                                          : IN_CLOSE_WRITE;
+            vfs_inotify_inode_event(inode, close_mask);
+        }
         if (file->f_kind == VFS_FILE_KIND_CDEV && file->cdev != NULL) {
             ret = cdev_put(file->cdev);
             file->cdev = NULL;
@@ -433,6 +444,17 @@ struct vfs_file *vfs_fdup(struct vfs_file *file) {
     }
 
     return file;
+}
+
+void vfs_file_set_opened_path(struct vfs_file *file, const char *path) {
+    if (file == NULL || path == NULL)
+        return;
+    char *copy = strdup(path);
+    if (copy == NULL)
+        return;
+    if (file->opened_path != NULL)
+        kvfree(file->opened_path);
+    file->opened_path = copy;
 }
 
 int vfs_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
@@ -698,8 +720,10 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
         file->f_pos += ret;
         /* kqueue: notify EVFILT_VNODE watchers of write to file */
         struct vfs_inode *ino = vfs_inode_deref(&file->inode);
-        if (ino != NULL)
+        if (ino != NULL) {
             vfs_inode_knote_notify(ino, NOTE_WRITE);
+            vfs_inotify_inode_event(ino, IN_MODIFY);
+        }
     }
 out:
     __vfs_file_unlock(file);

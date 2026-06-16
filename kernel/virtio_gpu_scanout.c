@@ -90,6 +90,32 @@ static int virtio_gpu_cmdline_video(uint32 *width, uint32 *height)
     return 0;
 }
 
+static int virtio_gpu_scanout_takeover_allowed(
+    const struct virtio_pci_discovery *vd)
+{
+    uint8 base_class;
+    uint8 subclass;
+
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_force_scanout"))
+        return 1;
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_render_only"))
+        return 0;
+    if (vd == NULL)
+        return 1;
+
+    base_class = (uint8)((vd->class_code >> 16) & 0xff);
+    subclass = (uint8)((vd->class_code >> 8) & 0xff);
+
+    /*
+     * QEMU's two-adapter fallback exposes Bochs as the visible VGA console and
+     * virtio-gpu as a secondary display controller (PCI class 0x038000).  Keep
+     * that virtio device render-only so /dev/fb0 continues to point at the
+     * host-visible Bochs scanout.  A virtio-vga primary device reports
+     * PCI class 0x030000 and may take over scanout.
+     */
+    return base_class == 0x03 && subclass == 0x00;
+}
+
 static int virtio_gpu_init_persistent_scanout(struct virtio_gpu *g)
 {
     struct virtio_gpu_resource *res;
@@ -321,22 +347,46 @@ static int virtio_gpu_cursor_queue_init(struct virtio_gpu *g)
     g->cursor_ring = qsize;
     g->cursor_visible = 1;
     g->cursor_ready = 1;
-    printf("virtio_gpu: cursor queue init size=%u notify_off=%u\n",
-           q->size, q->notify_off);
     return 0;
+}
+
+static struct virtio_gpu_resource *
+virtio_gpu_cursor_next_resource(struct virtio_gpu *g)
+{
+    struct virtio_gpu_resource *res;
+    uint32 slot = g->cursor_resource_next % VIRTIO_GPU_CURSOR_IMAGE_SLOTS;
+
+    res = g->cursor_resources[slot];
+    if (res == NULL) {
+        if (virtio_gpu_resource_create_2d(g, VIRTIO_GPU_CURSOR_DIM,
+                                          VIRTIO_GPU_CURSOR_DIM,
+                                          VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+                                          &res) != 0 || res == NULL)
+            return NULL;
+        if (virtio_gpu_resource_attach_backing(g, res) != 0) {
+            virtio_gpu_resource_unref(g, res);
+            return NULL;
+        }
+        g->cursor_resources[slot] = res;
+    }
+
+    g->cursor_resource_next =
+        (slot + 1) % VIRTIO_GPU_CURSOR_IMAGE_SLOTS;
+    return res;
 }
 
 /*
  * Upload (or replace) the hardware cursor image.  pixels points to a kernel
  * buffer of width*height BGRA pixels (0xAARRGGBB) with width,height <= 64.
- * Runs rarely (cursor theme change), so the control-queue create/transfer is
- * acceptable here.
+ * Rotate among a few resources so QEMU never sees us rewrite the image
+ * resource currently bound to the hardware cursor plane.
  */
 int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
                                uint32 height, uint32 hot_x, uint32 hot_y)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_update_cursor cmd;
+    struct virtio_gpu_resource *res;
     uint32 *dst;
 
     if (!g->initialized || !g->cursor_ready || pixels == NULL)
@@ -346,27 +396,14 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
         return -EINVAL;
 
     mutex_lock(&g->op_lock);
-    if (g->cursor_resource == NULL) {
-        struct virtio_gpu_resource *res = NULL;
-
-        if (virtio_gpu_resource_create_2d(g, VIRTIO_GPU_CURSOR_DIM,
-                                          VIRTIO_GPU_CURSOR_DIM,
-                                          VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
-                                          &res) != 0 || res == NULL) {
-            mutex_unlock(&g->op_lock);
-            return -EIO;
-        }
-        if (virtio_gpu_resource_attach_backing(g, res) != 0) {
-            virtio_gpu_resource_unref(g, res);
-            mutex_unlock(&g->op_lock);
-            return -EIO;
-        }
-        g->cursor_resource = res;
-        g->cursor_resource_id = res->id;
+    res = virtio_gpu_cursor_next_resource(g);
+    if (res == NULL) {
+        mutex_unlock(&g->op_lock);
+        return -EIO;
     }
 
     /* Compose the image into the 64x64 backing (rest transparent). */
-    dst = (uint32 *)g->cursor_resource->backing;
+    dst = (uint32 *)res->backing;
     memset(dst, 0,
            VIRTIO_GPU_CURSOR_DIM * VIRTIO_GPU_CURSOR_DIM * sizeof(uint32));
     for (uint32 row = 0; row < height; row++)
@@ -374,13 +411,15 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
                 (const uint32 *)pixels + (uint64)row * width,
                 (uint64)width * sizeof(uint32));
 
-    if (virtio_gpu_resource_transfer_2d(g, g->cursor_resource, 0, 0,
+    if (virtio_gpu_resource_transfer_2d(g, res, 0, 0,
                                         VIRTIO_GPU_CURSOR_DIM,
                                         VIRTIO_GPU_CURSOR_DIM) != 0) {
         mutex_unlock(&g->op_lock);
         return -EIO;
     }
 
+    g->cursor_resource = res;
+    g->cursor_resource_id = res->id;
     g->cursor_hot_x = hot_x;
     g->cursor_hot_y = hot_y;
 
@@ -389,7 +428,7 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
     cmd.pos.scanout_id = 0;
     cmd.pos.x = (uint32)(g->cursor_x < 0 ? 0 : g->cursor_x);
     cmd.pos.y = (uint32)(g->cursor_y < 0 ? 0 : g->cursor_y);
-    cmd.resource_id = g->cursor_resource_id;
+    cmd.resource_id = res->id;
     cmd.hot_x = hot_x;
     cmd.hot_y = hot_y;
     g->cursor_visible = 1;
@@ -670,8 +709,13 @@ void virtio_gpu_init(void)
     virtio_gpu_smoke_host_visible_map(g);
     virtio_gpu_submit_display_info(g);
     virtio_gpu_get_edid_mode(g, NULL, NULL, NULL, 1);
-    virtio_gpu_smoke_resource(g);
-    virtio_gpu_init_persistent_scanout(g);
+    if (virtio_gpu_scanout_takeover_allowed(vd)) {
+        virtio_gpu_smoke_resource(g);
+        virtio_gpu_init_persistent_scanout(g);
+    } else {
+        printf("virtio_gpu: keeping secondary display controller render-only class=0x%lx\n",
+               (uint64)vd->class_code);
+    }
     if (virtio_gpu_has_virgl())
         fb_gpu_register_render_node();
 }

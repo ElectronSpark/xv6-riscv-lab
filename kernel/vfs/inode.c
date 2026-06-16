@@ -961,6 +961,9 @@ out:
         }
     }
 
+    if (!IS_ERR(ret_ptr))
+        vfs_inotify_child_event(dir, ret_ptr, IN_CREATE, name, name_len);
+
     return ret_ptr;
 }
 
@@ -1027,6 +1030,9 @@ out:
                    end_ret);
         }
     }
+
+    if (!IS_ERR(ret_ptr))
+        vfs_inotify_child_event(dir, ret_ptr, IN_CREATE, name, name_len);
 
     return ret_ptr;
 }
@@ -1102,8 +1108,11 @@ out_unlock_sb:
     }
 
     /* kqueue: notify EVFILT_VNODE watchers of new link.\n     * Must happen BEFORE iput to avoid use-after-free. */
-    if (ret == 0)
+    if (ret == 0) {
         vfs_inode_knote_notify(target, NOTE_LINK);
+        vfs_inotify_child_event(dir, target, IN_CREATE, name, name_len);
+        vfs_inotify_inode_event(target, IN_ATTRIB);
+    }
     vfs_iput(target);
     return ret;
 }
@@ -1238,6 +1247,10 @@ out_unlock:
      * Must happen BEFORE iput — iput may free the inode. */
     if (ret == 0 && target != NULL)
         vfs_inode_knote_notify(target, NOTE_DELETE);
+    if (ret == 0 && target != NULL) {
+        vfs_inotify_child_event(dir, target, IN_DELETE, name, name_len);
+        vfs_inotify_inode_removed(target, IN_DELETE_SELF);
+    }
     if (target != NULL)
         vfs_iput(target); // Drop our reference from lookup
     vfs_release_dentry(&dentry);
@@ -1315,6 +1328,9 @@ out:
         }
     }
 
+    if (!IS_ERR(ret_ptr))
+        vfs_inotify_child_event(dir, ret_ptr, IN_CREATE, name, name_len);
+
     return ret_ptr;
 }
 
@@ -1363,6 +1379,9 @@ out:
         if (new_dir != old_dir) {
             __vfs_dcache_bump_dir_seq(new_dir);
         }
+        vfs_inotify_move_event(old_dir, new_dir, NULL,
+                               old_dentry->name, old_dentry->name_len,
+                               name, name_len);
     }
     return ret;
 }
@@ -1439,12 +1458,16 @@ out:
         }
     }
 
+    if (!IS_ERR(ret_ptr))
+        vfs_inotify_child_event(dir, ret_ptr, IN_CREATE, name, name_len);
+
     return ret_ptr;
 }
 
 int vfs_itruncate(struct vfs_inode *inode, loff_t new_size) {
     if (inode == NULL || inode->sb == NULL)
         return -EINVAL; // Invalid argument
+    bool changed = false;
     vfs_ilock(inode);
     int ret = __vfs_inode_valid(inode);
     if (ret != 0)
@@ -1462,8 +1485,11 @@ int vfs_itruncate(struct vfs_inode *inode, loff_t new_size) {
         goto out;
     }
     ret = inode->ops->truncate(inode, new_size);
+    changed = (ret == 0);
 out:
     vfs_iunlock(inode);
+    if (changed)
+        vfs_inotify_inode_event(inode, IN_MODIFY | IN_ATTRIB);
     return ret;
 }
 

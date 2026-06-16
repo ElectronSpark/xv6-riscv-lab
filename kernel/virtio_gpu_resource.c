@@ -223,7 +223,7 @@ static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
     res->alloc_len = npages * PGSIZE;
     res->pages = pages;
     res->npages = npages;
-    res->ctx_id = req->ctx_id;
+    res->ctx_id = 0;
     res->is_3d = 1;
     res->target = req->target;
     res->bind = req->bind;
@@ -376,7 +376,9 @@ static int virtio_gpu_resource_create_blob(
     res->alloc_len = (uint32)rounded;
     res->pages = pages;
     res->npages = npages;
-    res->ctx_id = req->ctx_id;
+    res->ctx_id = 0;
+    if (req->ctx_id != 0)
+        (void)virtio_gpu_resource_record_context_locked(res, req->ctx_id);
     res->is_blob = 1;
     res->blob_mem = req->blob_mem;
     res->blob_flags = req->blob_flags;

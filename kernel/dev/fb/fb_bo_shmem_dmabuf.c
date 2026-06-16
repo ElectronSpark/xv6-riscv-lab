@@ -661,6 +661,23 @@ static void fb_ttm_resv_wakeup_locked(struct fb_gpu_gem_object *gem,
     }
 }
 
+static void fb_ttm_resv_note_issued_fence_locked(struct fb_gpu_gem_object *gem,
+                                                 uint64 fence)
+{
+    if (gem != NULL && fence != 0 && gem->last_fence < fence)
+        gem->last_fence = fence;
+}
+
+static void fb_ttm_resv_signal_bookkeeping_fence_locked(
+    struct fb_gpu_gem_object *gem, uint64 fence)
+{
+    if (gem == NULL || fence == 0)
+        return;
+    fb_ttm_resv_note_issued_fence_locked(gem, fence);
+    if (gem->signaled_fence < fence)
+        gem->signaled_fence = fence;
+}
+
 static int fb_ttm_resv_owner_explicitly_matches(
     const struct fb_gpu_gem_object *gem, uint64 owner_id, pid_t owner_tgid)
 {
@@ -703,6 +720,8 @@ static void fb_ttm_resv_release_owner_if_last_locked(
     gem->ttm_resv_owner_tgid = 0;
     gem->ttm_resv_seq++;
     gem->ttm_resv_exclusive_fence++;
+    fb_ttm_resv_signal_bookkeeping_fence_locked(
+        gem, gem->ttm_resv_exclusive_fence);
     fb_state.stats.ttm_resv_releases++;
     fb_state.stats.ttm_resv_exclusive_fences++;
     fb_ttm_resv_wakeup_locked(gem,
@@ -856,6 +875,7 @@ static void fb_ttm_resv_record_shared_locked(struct fb_gpu_bo_entry *bo,
         fb_ttm_resv_mark_stale_locked();
         return;
     }
+    fb_ttm_resv_signal_bookkeeping_fence_locked(gem, fence);
 
     fb_ttm_resv_note_enabled_locked();
     index = gem->ttm_resv_shared_next % FB_GPU_RESV_SHARED_SLOTS;
@@ -958,6 +978,8 @@ static int fb_ttm_reserve_locked(struct fb_gpu_bo_entry *bo,
     gem->ttm_resv_count++;
     gem->ttm_resv_seq++;
     gem->ttm_resv_exclusive_fence++;
+    fb_ttm_resv_signal_bookkeeping_fence_locked(
+        gem, gem->ttm_resv_exclusive_fence);
     bo->ttm_resv_count = gem->ttm_resv_count;
     bo->ttm_resv_seq = gem->ttm_resv_seq;
     bo->ttm_resv_exclusive_fence = gem->ttm_resv_exclusive_fence;
@@ -987,6 +1009,8 @@ static int fb_ttm_unreserve_locked(struct fb_gpu_bo_entry *bo,
     gem->ttm_resv_count--;
     gem->ttm_resv_seq++;
     gem->ttm_resv_exclusive_fence++;
+    fb_ttm_resv_signal_bookkeeping_fence_locked(
+        gem, gem->ttm_resv_exclusive_fence);
     if (gem->ttm_resv_count == 0) {
         gem->ttm_resv_owner_id = 0;
         gem->ttm_resv_owner_tgid = 0;

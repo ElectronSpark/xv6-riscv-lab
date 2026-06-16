@@ -42,6 +42,7 @@
 #include <mm/vm.h>
 #include "signal.h"
 #include "cmdline.h"
+#include "proc/chrome_lifecycle.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -141,6 +142,36 @@ static int webkit_epoll_trace_process(void)
     return current != NULL &&
         (strncmp(current->name, "MiniBrowser", 11) == 0 ||
          strncmp(current->name, "WebKit", 6) == 0);
+}
+
+static int chrome_epoll_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+
+    if (!initialized) {
+        enabled = chrome_trace_value_enabled("chrome_epoll_trace");
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_epoll_trace_verbose(void)
+{
+    static int initialized;
+    static int enabled;
+
+    if (!initialized) {
+        enabled = chrome_trace_value_enabled("chrome_epoll_trace_verbose") ||
+            chrome_trace_value_enabled("chrome_epoll_trace_all");
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_epoll_trace_process(void)
+{
+    return chrome_lifecycle_thread_match(current);
 }
 
 /* ========================================================================== */
@@ -317,6 +348,15 @@ uint64 sys_epoll_ctl(void)
     }
     vfs_fput(target);
 
+    /*
+     * Linux removes an epoll interest after the last fdtable-visible
+     * descriptor for the watched open file description closes.  The kqueue
+     * backend keeps an internal vfs_file reference for knotes, so purge those
+     * now before testing ADD/EEXIST or MOD/DEL/ENOENT against a reused fd
+     * number.
+     */
+    kqueue_epoll_purge_closed_files(kq);
+
     if (op == EPOLL_CTL_MOD && (ev.events & EPOLLEXCLUSIVE)) {
         vfs_fput(fp);
         return (uint64)-EINVAL;
@@ -460,6 +500,19 @@ uint64 sys_epoll_ctl(void)
         }
     }
 
+    if (chrome_epoll_trace_enabled() && chrome_epoll_trace_process()) {
+        static _Atomic uint64 ctl_seq;
+        uint64 n = __atomic_add_fetch(&ctl_seq, 1, __ATOMIC_RELAXED);
+
+        if (chrome_epoll_trace_verbose() || n <= 256 || (n & 0x3ff) == 0) {
+            printf("chrome-epoll: ctl seq=%lu pid=%d tgid=%d name=%s "
+                   "epfd=%d op=%d fd=%d events=0x%x data=0x%lx "
+                   "nchanges=%d ret=%d\n",
+                   n, current->pid, current->tgid, current->name, epfd, op,
+                   fd, ev.events, ev.data, nchanges, ret);
+        }
+    }
+
     vfs_fput(fp);
     return ret < 0 ? (uint64)ret : 0;
 }
@@ -572,6 +625,7 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
             wait_ms = rescan_slice_ms;
         }
 
+        kqueue_epoll_purge_closed_files(kq);
         nkev = kqueue_wait(kq, kevents, kev_max, wait_ms);
         if (nkev != 0 || timeout == 0)
             break;
@@ -684,11 +738,17 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
         }
     }
 
-    if (webkit_epoll_trace_enabled() && webkit_epoll_trace_process()) {
+    int trace_chrome = chrome_epoll_trace_enabled() &&
+        chrome_epoll_trace_process();
+    int trace_webkit = webkit_epoll_trace_enabled() &&
+        webkit_epoll_trace_process();
+    if (trace_chrome || trace_webkit) {
         static _Atomic uint64 seq;
         uint64 n = __atomic_add_fetch(&seq, 1, __ATOMIC_RELAXED);
 
-        if (n <= 64 || (n & 0x1ff) == 0) {
+        if (!trace_chrome || chrome_epoll_trace_verbose() ||
+            n <= 256 || (n & 0x3ff) == 0) {
+            const char *tag = trace_chrome ? "chrome-epoll" : "webkit-epoll";
             uint32 mask_or = 0;
             int in_count = 0;
             int out_count = 0;
@@ -703,11 +763,20 @@ static uint64 epoll_pwait_common(int epfd, uint64 uevents, int maxevents,
                 if (out_events[i].events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))
                     err_count++;
             }
-            printf("webkit-epoll: seq=%lu pid=%d name=%s epfd=%d "
-                   "timeout=%d nkev=%d nout=%d mask=0x%x in=%d out=%d "
-                   "err=%d\n",
-                   n, current->pid, current->name, epfd, timeout, nkev, nout,
-                   mask_or, in_count, out_count, err_count);
+            printf("%s: wait seq=%lu pid=%d tgid=%d name=%s epfd=%d "
+                   "timeout=%d maxevents=%d nkev=%d nout=%d mask=0x%x "
+                   "in=%d out=%d err=%d\n",
+                   tag, n, current->pid, current->tgid, current->name, epfd,
+                   timeout, maxevents, nkev, nout, mask_or, in_count,
+                   out_count, err_count);
+            int event_limit = chrome_epoll_trace_verbose() ? nout : 8;
+
+            for (int i = 0; i < nout && i < event_limit; i++) {
+                printf("%s: event seq=%lu pid=%d epfd=%d fd=%lu "
+                       "events=0x%x data=0x%lx\n",
+                       tag, n, current->pid, epfd, out_ident[i],
+                       out_events[i].events, out_events[i].data);
+            }
         }
     }
 

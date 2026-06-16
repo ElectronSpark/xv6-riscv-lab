@@ -92,8 +92,14 @@ void thread_group_get(struct thread_group *tg);
 
 void thread_group_exec_snapshot_clear(struct thread_group *tg);
 void thread_group_exec_snapshot_set(struct thread_group *tg, char *cmdline,
-                                    size_t cmdline_len, char *environ,
-                                    size_t environ_len, const uint64 *auxv,
+                                    size_t cmdline_len,
+                                    const uint64 *cmdline_addrs,
+                                    const size_t *cmdline_lens,
+                                    size_t cmdline_argc, char *environ,
+                                    size_t environ_len,
+                                    const uint64 *environ_addrs,
+                                    const size_t *environ_lens,
+                                    size_t environ_count, const uint64 *auxv,
                                     size_t auxv_len);
 int thread_group_exec_snapshot_clone_locked(struct thread_group *dst,
                                             const struct thread_group *src);

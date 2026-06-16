@@ -396,6 +396,9 @@ struct fb_gpu_syncobj_file {
     int snapshot_signaled;
     uint64 snapshot_timeline_value;
     uint64 snapshot_reservation_fence;
+    uint64 virtio_fence;
+    struct fb_gpu_gem_object *reservation_gem;
+    uint64 reservation_fence;
     struct dma_fence *fence;
     struct dma_fence_cb fence_cb;
     struct vfs_file *callback_file;

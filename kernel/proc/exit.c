@@ -66,6 +66,15 @@ void reparent(struct thread *p) {
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
         // make sure the child isn't still in exit() or arch_context_switch().
         child->signal.esignal = SIGCHLD; // reset to default exit signal
+        if (child->ptrace_tracer == p) {
+            child->ptrace_tracer = NULL;
+            child->ptrace_tracer_tgid = 0;
+            child->ptrace_real_parent_pid = 0;
+            child->ptrace_real_parent_seq = 0;
+            child->ptrace_options = 0;
+            if (THREAD_STOPPED(child))
+                scheduler_wakeup_stopped(child);
+        }
         if (__thread_state_get(child) == THREAD_ZOMBIE) {
             zombie_found = true;
         }
@@ -103,14 +112,47 @@ static bool trace_browser_child(struct thread *child) {
            strstr(child->name, "MiniBrowser") != NULL ||
            strstr(child->name, "WebKit") != NULL ||
            (chrome_lifecycle_trace_enabled() &&
-            chrome_lifecycle_thread_match(child)) ||
-           child->pgid == 48 || child->tgid == 48;
+            (chrome_lifecycle_thread_match(child) ||
+             chrome_lifecycle_network_service_match(child) ||
+             chrome_lifecycle_child_process_match(child)));
 }
 
 static int wait_status_from_child(struct thread *child) {
     if (child != NULL && child->killed_signo > 0)
         return child->killed_signo & 0x7f;
     return (child->xstate & 0xff) << 8;
+}
+
+static bool child_ptraced_by_waiter(struct thread *child,
+                                    struct thread *waiter) {
+    if (child == NULL || waiter == NULL)
+        return false;
+    return child->ptrace_tracer_tgid != 0 &&
+           child->ptrace_tracer_tgid == thread_tgid(waiter);
+}
+
+static bool wait_child_matches_linux_type(struct thread *child,
+                                          struct thread *waiter,
+                                          uint32 opts) {
+    const uint32 __WALL = 0x40000000U;
+    const uint32 __WCLONE = 0x80000000U;
+
+    if (child == NULL)
+        return false;
+
+    if ((opts & __WALL) || child_ptraced_by_waiter(child, waiter))
+        return true;
+
+    /*
+     * Linux wait-family calls split children by exit signal.  Plain wait()
+     * and waitpid() match only children that report SIGCHLD.  Children that
+     * report no signal, or a non-SIGCHLD signal, are "clone" children and
+     * require __WCLONE unless __WALL selects both classes.
+     */
+    bool clone_child = child->signal.esignal != SIGCHLD;
+    if (opts & __WCLONE)
+        return clone_child;
+    return !clone_child;
 }
 
 struct linux_wait_siginfo {
@@ -184,7 +226,10 @@ void exit(int status) {
         }
     }
 
-    if (chrome_lifecycle_trace_enabled() && chrome_lifecycle_thread_match(p)) {
+    if (chrome_lifecycle_trace_enabled() &&
+        (chrome_lifecycle_thread_match(p) ||
+         chrome_lifecycle_network_service_match(p) ||
+         chrome_lifecycle_child_process_match(p))) {
         int live = tg ?
             __atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE) : -1;
         printf("chrome-lifecycle: exit pid=%d tgid=%d name='%s' "
@@ -215,6 +260,7 @@ void exit(int status) {
     // Robust futexes: mark any userspace mutexes still owned by this thread
     // as OWNER_DIED and wake waiters before the address space disappears.
     futex_exit_robust_list(p);
+    rseq_clear_thread(p);
 
     // CLONE_CHILD_CLEARTID: zero the TID word at the stored address and
     // issue a futex wake so pthread_join can detect thread exit.
@@ -267,6 +313,14 @@ void exit(int status) {
             virtio_gpu_user_destroy_owner(thread_tgid(p));
         }
 
+        /*
+         * Linux thread pidfds become readable when the specific thread exits,
+         * even though non-leader CLONE_THREAD tasks are not waitable children.
+         * Notify after proctab removal so a level-triggered poll recheck sees
+         * the pidfd target as gone/exited.
+         */
+        pidfd_notify_exit(p);
+
         __free_pid();
 
         // If we're the last thread and the leader is already zombie,
@@ -282,6 +336,7 @@ void exit(int status) {
                 leader->killed_signo = p->killed_signo;
                 leader->killed_code = p->killed_code;
             }
+            pidfd_notify_exit(leader);
             pid_rlock();
             struct thread *parent = leader->parent;
             pid_runlock();
@@ -382,6 +437,8 @@ void exit(int status) {
     p->xstate = status;
     __thread_state_set(p, THREAD_ZOMBIE);
     tcb_unlock(p);
+    if (last_in_group || tg == NULL)
+        pidfd_notify_exit(p);
 
     // Read parent under pid_rlock to avoid racing with reparent() on
     // another CPU which temporarily NULLs child->parent inside
@@ -465,14 +522,16 @@ int wait(uint64 addr) {
         // will change our state back to RUNNING (or WAKENING if on_cpu).
         __thread_state_set(p, THREAD_INTERRUPTIBLE);
 
-        int total_children = 0;
+        int matching_children = 0;
 
         // Scan children of ALL threads in our thread group.
         struct thread *thr, *thr_tmp;
         list_foreach_node_safe(&tg->thread_list, thr, thr_tmp, tg_entry) {
-            total_children += thr->children_count;
-
             list_foreach_node_safe(&thr->children, child, tmp, siblings) {
+                if (!wait_child_matches_linux_type(child, p, 0))
+                    continue;
+                matching_children++;
+
                 // Thread state will never transition back from ZOMBIE, so no
                 // need to lock the child.
                 if (zombie_child_is_reapable(child)) {
@@ -517,8 +576,8 @@ int wait(uint64 addr) {
             }
         }
 
-        // No point waiting if there are no children across the whole group.
-        if (total_children == 0) {
+        // No point waiting if there are no matching children across the group.
+        if (matching_children == 0) {
             __thread_state_set(p, THREAD_RUNNING);
             pid = -ECHILD;
             goto ret;
@@ -557,9 +616,16 @@ ret_unlocked:
 // thread in the same process.  We scan the children lists of all threads
 // in the calling thread's thread group (matching Linux's do_wait behaviour).
 int waitpid(int target_pid, uint64 addr, int options) {
-    const int WNOHANG   = 1;
-    const int WUNTRACED = 2;
-    if (options & ~(WNOHANG | WUNTRACED)) {
+    const uint32 WNOHANG = 1;
+    const uint32 WUNTRACED = 2;
+    const uint32 WCONTINUED = 8;
+    const uint32 __WNOTHREAD = 0x20000000U;
+    const uint32 __WALL = 0x40000000U;
+    const uint32 __WCLONE = 0x80000000U;
+    uint32 opts = (uint32)options;
+
+    if (opts & ~(WNOHANG | WUNTRACED | WCONTINUED |
+                 __WNOTHREAD | __WALL | __WCLONE)) {
         return -EINVAL;
     }
 
@@ -580,18 +646,29 @@ int waitpid(int target_pid, uint64 addr, int options) {
         // Scan children of ALL threads in our thread group.
         struct thread *thr, *thr_tmp;
         list_foreach_node_safe(&tg->thread_list, thr, thr_tmp, tg_entry) {
+            if ((opts & __WNOTHREAD) && thr != p)
+                continue;
             list_foreach_node_safe(&thr->children, child, tmp, siblings) {
                 if (target_pid > 0 && child->pid != target_pid) {
                     continue;
                 }
+                if (!wait_child_matches_linux_type(child, p, opts))
+                    continue;
                 has_match = true;
 
-                // Check for stopped child (WUNTRACED)
-                if ((options & WUNTRACED) && THREAD_STOPPED(child)) {
+                /*
+                 * Linux reports ptrace-stop state to the tracer through
+                 * waitpid() even when WUNTRACED is not explicitly supplied.
+                 */
+                if (THREAD_STOPPED(child) &&
+                    ((opts & WUNTRACED) ||
+                     child_ptraced_by_waiter(child, p))) {
                     __thread_state_set(p, THREAD_RUNNING);
                     pid = child->pid;
                     // Encode stopped status: (signal << 8) | 0x7f
                     int stopsig = child->signal.stop_signal;
+                    if (stopsig == 0)
+                        stopsig = SIGSTOP;
                     xstate = (stopsig << 8) | 0x7f;
                     goto ret;
                 }
@@ -645,7 +722,7 @@ int waitpid(int target_pid, uint64 addr, int options) {
             goto ret;
         }
 
-        if (options & WNOHANG) {
+        if (opts & WNOHANG) {
             __thread_state_set(p, THREAD_RUNNING);
             pid = 0;
             goto ret;
@@ -671,11 +748,15 @@ uint64 sys_waitid(void) {
     const int P_ALL = 0;
     const int P_PID = 1;
     const int P_PGID = 2;
+    const int P_PIDFD = 3;
     const int WNOHANG = 1;
     const int WSTOPPED = 2;
     const int WEXITED = 4;
     const int WCONTINUED = 8;
     const int WNOWAIT = 0x01000000;
+    const uint32 __WNOTHREAD = 0x20000000U;
+    const uint32 __WALL = 0x40000000U;
+    const uint32 __WCLONE = 0x80000000U;
     const int CLD_EXITED = 1;
     const int CLD_KILLED = 2;
     const int CLD_STOPPED = 5;
@@ -688,20 +769,35 @@ uint64 sys_waitid(void) {
     argint(1, &id);
     argaddr(2, &infop_addr);
     argint(3, &options);
+    uint32 opts = (uint32)options;
 
     if (infop_addr == 0)
         return (uint64)-EFAULT;
-    if (idtype != P_ALL && idtype != P_PID && idtype != P_PGID)
+    if (idtype != P_ALL && idtype != P_PID && idtype != P_PGID &&
+        idtype != P_PIDFD)
         return (uint64)-EINVAL;
-    if ((options & ~(WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT)) != 0)
+    if ((opts & ~(WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT |
+                  __WNOTHREAD | __WALL | __WCLONE)) != 0)
         return (uint64)-EINVAL;
-    if ((options & (WEXITED | WSTOPPED | WCONTINUED)) == 0)
+    if ((opts & (WEXITED | WSTOPPED | WCONTINUED)) == 0)
         return (uint64)-EINVAL;
 
     struct thread *p = current;
     struct thread_group *tg = p->thread_group;
     struct linux_wait_siginfo si;
     linux_wait_siginfo_init(&si, 0, 0, 0, 0);
+    pid_t pidfd_pid = -1;
+    uint64 pidfd_seq = 0;
+
+    if (idtype == P_PIDFD) {
+        struct vfs_file *file = vfs_fdtable_get_file(current->fdtable, id);
+        if (file == NULL)
+            return (uint64)-EBADF;
+        int ret = pidfd_file_get_target(file, &pidfd_pid, &pidfd_seq);
+        vfs_fput(file);
+        if (ret < 0)
+            return (uint64)ret;
+    }
 
     pid_rlock();
     for (;;) {
@@ -710,28 +806,37 @@ uint64 sys_waitid(void) {
 
         struct thread *thr, *thr_tmp;
         list_foreach_node_safe(&tg->thread_list, thr, thr_tmp, tg_entry) {
+            if ((opts & __WNOTHREAD) && thr != p)
+                continue;
             struct thread *child, *tmp;
             list_foreach_node_safe(&thr->children, child, tmp, siblings) {
                 if (child->parent != thr)
                     continue;
                 if (idtype == P_PID && child->pid != id)
                     continue;
+                if (idtype == P_PIDFD &&
+                    (child->pid != pidfd_pid || child->pid_seq != pidfd_seq))
+                    continue;
                 if (idtype == P_PGID) {
                     int pgid = id == 0 ? p->pgid : id;
                     if (child->pgid != pgid)
                         continue;
                 }
+                if (!wait_child_matches_linux_type(child, p, opts))
+                    continue;
                 has_match = true;
 
-                if ((options & WSTOPPED) && THREAD_STOPPED(child)) {
+                if ((opts & WSTOPPED) && THREAD_STOPPED(child)) {
                     __thread_state_set(p, THREAD_RUNNING);
+                    int stopsig = child->signal.stop_signal;
+                    if (stopsig == 0)
+                        stopsig = SIGSTOP;
                     linux_wait_siginfo_init(&si, SIGCHLD, CLD_STOPPED,
-                                            child->pid,
-                                            child->signal.stop_signal);
+                                            child->pid, stopsig);
                     goto copyout;
                 }
 
-                if ((options & WEXITED) && zombie_child_is_reapable(child)) {
+                if ((opts & WEXITED) && zombie_child_is_reapable(child)) {
                     __thread_state_set(p, THREAD_RUNNING);
                     int spin_count = 0;
                     while (smp_load_acquire(&child->sched_entity->on_cpu)) {
@@ -753,7 +858,7 @@ uint64 sys_waitid(void) {
                                             child->killed_signo :
                                             (child->xstate & 0xff));
 
-                    if (!(options & WNOWAIT)) {
+                    if (!(opts & WNOWAIT)) {
                         if (!pid_try_lock_upgrade()) {
                             pid_runlock();
                             pid_wlock();
@@ -777,7 +882,7 @@ uint64 sys_waitid(void) {
             return (uint64)-ECHILD;
         }
 
-        if (options & WNOHANG) {
+        if (opts & WNOHANG) {
             __thread_state_set(p, THREAD_RUNNING);
             pid_runlock();
             if (either_copyout(1, infop_addr, &si, sizeof(si)) < 0)

@@ -29,6 +29,7 @@
 #include "vfs/vfs_types.h"
 #include "vfs/fcntl.h"
 #include "vfs/poll.h"
+#include "cmdline.h"
 #include "kqueue_types.h"
 #include <mm/vm.h>
 #include "mm/slab.h"
@@ -65,6 +66,9 @@ static spinlock_t bind_list_lock;
 /* Forward declarations                                                       */
 /* ========================================================================== */
 
+static ssize_t unix_file_read_common(struct vfs_file *file, char *buf,
+                                     size_t count, bool user,
+                                     bool discard_stream_scm);
 static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
                               bool user);
 static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
@@ -110,13 +114,17 @@ static inline size_t unix_packet_count_locked(const struct unix_sock *sk)
     return UNIX_PACKET_QUEUE_MAX - sk->packet_head + sk->packet_tail;
 }
 
-static int unix_packet_enqueue_locked(struct unix_sock *sk, uint end_mark)
+static int unix_packet_enqueue_locked(struct unix_sock *sk, uint start_mark,
+                                      uint end_mark)
 {
     if (sk->type != SOCK_SEQPACKET)
         return 0;
     if ((unsigned long)unix_packet_count_locked(sk) >= UNIX_PACKET_QUEUE_MAX - 1)
         return -EAGAIN;
-    sk->packet_queue[sk->packet_tail] = end_mark;
+    sk->packet_queue[sk->packet_tail].start_nread = start_mark;
+    sk->packet_queue[sk->packet_tail].end_nread = end_mark;
+    sk->packet_queue[sk->packet_tail].data = NULL;
+    sk->packet_queue[sk->packet_tail].len = 0;
     sk->packet_tail = (sk->packet_tail + 1) % UNIX_PACKET_QUEUE_MAX;
     return 0;
 }
@@ -125,6 +133,224 @@ static int unix_packet_has_space_locked(struct unix_sock *sk)
 {
     return sk->type != SOCK_SEQPACKET ||
         (unsigned long)unix_packet_count_locked(sk) < UNIX_PACKET_QUEUE_MAX - 1;
+}
+
+static int unix_packet_next_len_locked(struct unix_sock *peer, size_t *len)
+{
+    if (peer->packet_head == peer->packet_tail)
+        return -EAGAIN;
+    uint start = peer->packet_queue[peer->packet_head].start_nread;
+    uint end = peer->packet_queue[peer->packet_head].end_nread;
+    uint cursor = peer->tx.nread;
+    if ((int)(end - cursor) < 0 || (int)(cursor - start) < 0)
+        return -EIO;
+    *len = end - cursor;
+    return 0;
+}
+
+static void unix_packet_pop_locked(struct unix_sock *peer)
+{
+    if (peer->packet_head != peer->packet_tail) {
+        peer->packet_queue[peer->packet_head].start_nread = 0;
+        peer->packet_queue[peer->packet_head].end_nread = 0;
+        peer->packet_queue[peer->packet_head].data = NULL;
+        peer->packet_queue[peer->packet_head].len = 0;
+        peer->packet_head = (peer->packet_head + 1) % UNIX_PACKET_QUEUE_MAX;
+    }
+}
+
+static size_t unix_scm_count_locked(const struct unix_sock *sk)
+{
+    if (sk->scm_tail >= sk->scm_head)
+        return sk->scm_tail - sk->scm_head;
+    return UNIX_SCM_QUEUE_MAX - sk->scm_head + sk->scm_tail;
+}
+
+static int unix_scm_has_space_locked(const struct unix_sock *sk)
+{
+    return (unsigned long)unix_scm_count_locked(sk) < UNIX_SCM_QUEUE_MAX - 1;
+}
+
+static struct unix_scm_cred unix_current_scm_cred(void)
+{
+    struct unix_scm_cred cred;
+
+    cred.pid = current ? current->tgid : 0;
+    cred.uid = (current && current->thread_group) ? current->thread_group->uid : 0;
+    cred.gid = (current && current->thread_group) ? current->thread_group->gid : 0;
+    return cred;
+}
+
+static int unix_peer_passcred_locked(struct unix_sock *sk)
+{
+    struct unix_sock *peer = sk->peer;
+
+    if (peer == NULL)
+        return 0;
+    /*
+     * The caller holds sk->lock.  Do not also take peer->lock here: two peers
+     * writing at the same time would otherwise invert the lock order.  The
+     * passcred flag is an int and a slightly stale read can only decide whether
+     * this write gets credentials, matching Linux's per-message semantics.
+     */
+    return __atomic_load_n(&peer->passcred, __ATOMIC_ACQUIRE) != 0;
+}
+
+static int unix_peer_read_shutdown_locked(struct unix_sock *sk)
+{
+    struct unix_sock *peer = sk->peer;
+
+    if (peer == NULL)
+        return 0;
+    /*
+     * Writers already hold sk->lock.  Sample the peer flag atomically instead
+     * of taking peer->lock and risking an AB/BA inversion with the peer's
+     * writer path.
+     */
+    return (__atomic_load_n(&peer->shutdown_flags, __ATOMIC_ACQUIRE) &
+            UNIX_SHUT_RD) != 0;
+}
+
+static int unix_enqueue_cred_locked(struct unix_sock *sk, uint start, uint end,
+                                    struct unix_scm_cred cred)
+{
+    if (!unix_scm_has_space_locked(sk))
+        return -EAGAIN;
+
+    sk->scm_queue[sk->scm_tail].file = NULL;
+    sk->scm_queue[sk->scm_tail].has_cred = 1;
+    sk->scm_queue[sk->scm_tail].cred = cred;
+    sk->scm_queue[sk->scm_tail].start_nread = start;
+    sk->scm_queue[sk->scm_tail].end_nread = end;
+    sk->scm_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
+    return 0;
+}
+
+static int unix_scm_ready_at_nread(const struct unix_scm_entry *entry,
+                                   uint virtual_nread, int sock_type)
+{
+    if (entry->start_nread == entry->end_nread)
+        return (int)(virtual_nread - entry->start_nread) >= 0;
+    if (sock_type == SOCK_SEQPACKET)
+        return (int)(virtual_nread - entry->end_nread) >= 0;
+    /*
+     * Linux stream sockets deliver or discard control data with the first byte
+     * read from the sendmsg() segment that carried it.
+     */
+    return (int)(virtual_nread - entry->start_nread) > 0;
+}
+
+static size_t unix_discard_ready_scm_locked(struct unix_sock *peer,
+                                            struct vfs_file **files,
+                                            size_t max_files,
+                                            size_t *dropped_entries)
+{
+    size_t count = 0;
+    size_t dropped = 0;
+
+    if (dropped_entries != NULL)
+        *dropped_entries = 0;
+    if (peer == NULL)
+        return 0;
+
+    while (peer->scm_head != peer->scm_tail &&
+           unix_scm_ready_at_nread(&peer->scm_queue[peer->scm_head],
+                                   peer->tx.nread, peer->type)) {
+        if (peer->scm_queue[peer->scm_head].file != NULL) {
+            if (count >= max_files)
+                break;
+            files[count++] = peer->scm_queue[peer->scm_head].file;
+        }
+        peer->scm_queue[peer->scm_head].file = NULL;
+        peer->scm_queue[peer->scm_head].has_cred = 0;
+        memset(&peer->scm_queue[peer->scm_head].cred, 0,
+               sizeof(peer->scm_queue[peer->scm_head].cred));
+        peer->scm_queue[peer->scm_head].start_nread = 0;
+        peer->scm_queue[peer->scm_head].end_nread = 0;
+        peer->scm_head = (peer->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
+        dropped++;
+    }
+    if (dropped > 0)
+        tq_wakeup_all(&peer->wr_queue, 0, 0);
+    if (dropped_entries != NULL)
+        *dropped_entries = dropped;
+    return count;
+}
+
+static void unix_fput_scm_files(struct vfs_file **files, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (files[i] != NULL) {
+            vfs_fput(files[i]);
+            files[i] = NULL;
+        }
+    }
+}
+
+static int chrome_unix_seqpacket_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_unix_seqpacket_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int unix_seqpacket_trace_process(void)
+{
+    return current != NULL && strncmp(current->name, "chrome", 6) == 0;
+}
+
+static void unix_seqpacket_trace(const char *op, struct unix_sock *sk,
+                                 struct unix_sock *peer, size_t count,
+                                 size_t value, int state, int flags)
+{
+    if (!chrome_unix_seqpacket_trace_enabled() ||
+        !unix_seqpacket_trace_process() || sk == NULL ||
+        sk->type != SOCK_SEQPACKET) {
+        return;
+    }
+
+    size_t peer_readable = 0;
+    size_t peer_packets = 0;
+    if (peer != NULL) {
+        peer_readable = RING_READABLE(&peer->tx);
+        peer_packets = unix_packet_count_locked(peer);
+    }
+
+    printf("chrome-unix-seqpacket: pid=%d name=%s op=%s sk=%p peer=%p "
+           "count=%lu value=%lu state=%d flags=0x%x tx=%u/%u packets=%lu "
+           "peer_tx=%lu peer_packets=%lu\n",
+           current->pid, current->name, op, sk, peer, count, value, state,
+           flags, sk->tx.nread, sk->tx.nwrite,
+           (unsigned long)unix_packet_count_locked(sk),
+           (unsigned long)peer_readable, (unsigned long)peer_packets);
+}
+
+static void unix_sock_set_cred_current(struct unix_sock *sk)
+{
+    sk->cred_pid = current ? current->tgid : 0;
+    sk->cred_uid = (current && current->thread_group)
+        ? current->thread_group->uid : 0;
+    sk->cred_gid = (current && current->thread_group)
+        ? current->thread_group->gid : 0;
+}
+
+static void unix_sock_copy_local_addr(struct unix_sock *dst,
+                                      const struct unix_sock *src)
+{
+    memset(dst->bind_path, 0, sizeof(dst->bind_path));
+    dst->bind_len = src->bind_len;
+    if (src->bind_len != 0)
+        memmove(dst->bind_path, src->bind_path, src->bind_len);
+    dst->bound = src->bound;
+    dst->bind_registered = 0;
 }
 
 static int ring_alloc(struct unix_ring *r)
@@ -245,12 +471,26 @@ static size_t ring_write(struct unix_ring *r, const char *buf, size_t len,
 
 static size_t unix_tx_limit_locked(struct unix_sock *sk)
 {
-    size_t limit = sk->snd_buf ? sk->snd_buf : UNIX_BUF_MAX_SIZE;
+    size_t limit = sk->snd_buf ? sk->snd_buf : UNIX_SOCKBUF_DEFAULT;
     struct unix_sock *peer = sk->peer;
 
     if (peer != NULL && peer->rcv_buf != 0 && peer->rcv_buf < limit)
         limit = peer->rcv_buf;
     return limit;
+}
+
+static size_t unix_linux_sockbuf_value(int requested, int optname)
+{
+    uint32 req = (uint32)requested;
+    uint64 doubled = (uint64)req * 2;
+    size_t min_value = optname == 7 /* SO_SNDBUF */
+        ? UNIX_SNDBUF_MIN : UNIX_RCVBUF_MIN;
+
+    if (doubled < min_value)
+        doubled = min_value;
+    if (doubled > UNIX_SOCKBUF_MAX)
+        doubled = UNIX_SOCKBUF_MAX;
+    return (size_t)doubled;
 }
 
 /*
@@ -308,9 +548,10 @@ static struct unix_sock *unix_sock_alloc(void)
     tq_init(&sk->conn_queue, "unix_conn", NULL);
     sk->rcv_lowat = UNIX_LOWAT_DEFAULT;
     sk->snd_lowat = UNIX_LOWAT_DEFAULT;
-    sk->rcv_buf = UNIX_BUF_MAX_SIZE;
-    sk->snd_buf = UNIX_BUF_MAX_SIZE;
+    sk->rcv_buf = UNIX_SOCKBUF_DEFAULT;
+    sk->snd_buf = UNIX_SOCKBUF_DEFAULT;
     sk->state = UNIX_STATE_UNCONNECTED;
+    unix_sock_set_cred_current(sk);
     return sk;
 }
 
@@ -319,6 +560,9 @@ static void unix_sock_free(struct unix_sock *sk)
     while (sk->scm_queue != NULL && sk->scm_head != sk->scm_tail) {
         struct vfs_file *pending = sk->scm_queue[sk->scm_head].file;
         sk->scm_queue[sk->scm_head].file = NULL;
+        sk->scm_queue[sk->scm_head].has_cred = 0;
+        memset(&sk->scm_queue[sk->scm_head].cred, 0,
+               sizeof(sk->scm_queue[sk->scm_head].cred));
         sk->scm_queue[sk->scm_head].start_nread = 0;
         sk->scm_queue[sk->scm_head].end_nread = 0;
         sk->scm_head = (sk->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
@@ -331,6 +575,14 @@ static void unix_sock_free(struct unix_sock *sk)
         sk->scm_queue = NULL;
     }
     if (sk->packet_queue != NULL) {
+        while (sk->packet_head != sk->packet_tail) {
+            if (sk->packet_queue[sk->packet_head].data != NULL) {
+                kvfree(sk->packet_queue[sk->packet_head].data);
+                sk->packet_queue[sk->packet_head].data = NULL;
+            }
+            sk->packet_queue[sk->packet_head].len = 0;
+            sk->packet_head = (sk->packet_head + 1) % UNIX_PACKET_QUEUE_MAX;
+        }
         kvfree(sk->packet_queue);
         sk->packet_queue = NULL;
     }
@@ -376,6 +628,7 @@ static inline struct unix_sock *unix_sock_ref_peer_locked(struct unix_sock *sk)
 static void unix_sock_cancel_pending_connect(struct unix_sock *sk, int err)
 {
     struct unix_sock *target;
+    struct unix_sock *server = NULL;
 
     spin_lock(&sk->lock);
     target = sk->connect_target;
@@ -392,7 +645,14 @@ static void unix_sock_cancel_pending_connect(struct unix_sock *sk, int err)
     struct unix_pending *prev = NULL;
     while (*pp != NULL) {
         struct unix_pending *p = *pp;
-        if (p->sock == sk) {
+        bool matches = (p->sock == sk);
+        if (!matches && p->sock != NULL) {
+            spin_lock(&p->sock->lock);
+            matches = (p->sock->peer == sk);
+            spin_unlock(&p->sock->lock);
+        }
+        if (matches) {
+            server = p->sock;
             *pp = p->next;
             if (target->pending_tail == p)
                 target->pending_tail = prev;
@@ -410,6 +670,21 @@ static void unix_sock_cancel_pending_connect(struct unix_sock *sk, int err)
 
     if (removed) {
         bool drop_target_ref = false;
+        bool drop_client_peer_ref = false;
+        struct vfs_file *client_file = NULL;
+        struct unix_sock *client = NULL;
+
+        if (server != NULL) {
+            spin_lock(&server->lock);
+            client = server->peer;
+            if (client != NULL) {
+                unix_sock_get(client);
+                server->peer = NULL;
+            }
+            server->so_error = err;
+            server->shutdown_flags |= UNIX_SHUT_RD | UNIX_SHUT_WR;
+            spin_unlock(&server->lock);
+        }
 
         spin_lock(&sk->lock);
         if (sk->connect_target == target) {
@@ -417,17 +692,86 @@ static void unix_sock_cancel_pending_connect(struct unix_sock *sk, int err)
             sk->so_error = err;
             if (sk->state == UNIX_STATE_CONNECTING)
                 sk->state = UNIX_STATE_UNCONNECTED;
+            if (sk->peer == server) {
+                sk->peer = NULL;
+                drop_client_peer_ref = true;
+            }
+            client_file = sk->file ? vfs_fdup(sk->file) : NULL;
             drop_target_ref = true;
             tq_wakeup_all(&sk->conn_queue, -1, 0);
+            tq_wakeup_all(&sk->rd_queue, -1, 0);
+            tq_wakeup_all(&sk->wr_queue, -1, 0);
         }
         spin_unlock(&sk->lock);
 
+        if (client_file != NULL) {
+            vfs_file_knote_notify(client_file, EVFILT_READ, 0);
+            vfs_file_knote_notify(client_file, EVFILT_WRITE, 0);
+            vfs_fput(client_file);
+        }
         if (drop_target_ref)
             unix_sock_put(target);
-        unix_sock_put(sk);  /* drop pending-queue reference */
+        if (drop_client_peer_ref && server != NULL)
+            unix_sock_put(server);
+        if (client != NULL) {
+            unix_sock_put(client); /* drop server's peer reference */
+            unix_sock_put(client); /* drop temporary reference */
+        }
+        if (server != NULL)
+            unix_sock_put(server); /* drop pending-queue reference */
     }
 
     unix_sock_put(target);  /* drop temporary reference */
+}
+
+static void unix_sock_complete_pending_connect(struct unix_sock *listener,
+                                               struct unix_sock *server)
+{
+    struct unix_sock *client = NULL;
+    struct unix_sock *drop_target = NULL;
+    struct vfs_file *client_file = NULL;
+    bool completed = false;
+
+    spin_lock(&server->lock);
+    client = server->peer;
+    if (client != NULL)
+        unix_sock_get(client);
+    spin_unlock(&server->lock);
+
+    if (client == NULL)
+        return;
+
+    spin_lock(&client->lock);
+    if (client->state == UNIX_STATE_CONNECTING &&
+        client->connect_target == listener) {
+        client->peer = server;
+        unix_sock_get(server); /* client now owns a peer reference */
+        drop_target = client->connect_target;
+        client->connect_target = NULL;
+        client->so_error = 0;
+        client->state = UNIX_STATE_CONNECTED;
+        tq_wakeup_all(&client->conn_queue, 0, 0);
+        tq_wakeup_all(&client->rd_queue, 0, 0);
+        tq_wakeup_all(&client->wr_queue, 0, 0);
+        client_file = client->file ? vfs_fdup(client->file) : NULL;
+        completed = true;
+    }
+    spin_unlock(&client->lock);
+
+    if (client_file != NULL) {
+        vfs_file_knote_notify(client_file, EVFILT_WRITE, 0);
+        vfs_file_knote_notify(client_file, EVFILT_READ, 0);
+        vfs_fput(client_file);
+    }
+    if (drop_target != NULL)
+        unix_sock_put(drop_target);
+    if (completed) {
+        spin_lock(&server->lock);
+        server->so_error = 0;
+        server->state = UNIX_STATE_CONNECTED;
+        spin_unlock(&server->lock);
+    }
+    unix_sock_put(client);
 }
 
 /* ========================================================================== */
@@ -556,6 +900,21 @@ static int unix_fd_alloc(struct unix_sock *sk, int file_flags)
     return fd;
 }
 
+static void unix_socketpair_unwind_fd(int fd)
+{
+    if (fd < 0)
+        return;
+
+    spin_lock(&current->fdtable->lock);
+    struct vfs_file *f = vfs_fdtable_dealloc_fd(current->fdtable, fd);
+    spin_unlock(&current->fdtable->lock);
+
+    if (f != NULL) {
+        vfs_file_maybe_last_fd_close(f);
+        vfs_fput(f);
+    }
+}
+
 /* ========================================================================== */
 /* Check if a vfs_file is an AF_UNIX socket                                   */
 /* ========================================================================== */
@@ -590,8 +949,9 @@ struct unix_sock *unix_sock_from_fd(int fd)
  * For SOCK_STREAM: reads from peer->tx ring buffer (bytes the peer wrote).
  * Blocks if no data and not non-blocking.
  */
-static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
-                              bool user)
+static ssize_t unix_file_read_common(struct vfs_file *file, char *buf,
+                                     size_t count, bool user,
+                                     bool discard_stream_scm)
 {
     struct unix_sock *sk = (struct unix_sock *)file->private_data;
     if (sk == NULL)
@@ -606,6 +966,110 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
     }
 
     bool nonblock = (file->f_flags & O_NONBLOCK) != 0;
+    if (sk->type == SOCK_SEQPACKET) {
+        struct unix_sock *peer = NULL;
+        size_t packet_len = 0;
+
+        if (count == 0)
+            return 0;
+
+        for (;;) {
+            bool read_shutdown;
+            bool peer_write_shutdown = false;
+            int pkt_ret = -EAGAIN;
+
+            spin_lock(&sk->lock);
+            peer = unix_sock_ref_peer_locked(sk);
+            read_shutdown = (sk->shutdown_flags & UNIX_SHUT_RD) != 0;
+            spin_unlock(&sk->lock);
+
+            if (peer == NULL)
+                return 0;
+
+            spin_lock(&peer->lock);
+            pkt_ret = unix_packet_next_len_locked(peer, &packet_len);
+            peer_write_shutdown =
+                (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
+            spin_unlock(&peer->lock);
+
+            if (pkt_ret == 0)
+                break;
+
+            unix_sock_put(peer);
+            peer = NULL;
+            if (read_shutdown || peer_write_shutdown)
+                return 0;
+            if (nonblock)
+                return -EAGAIN;
+            if (signal_pending(current))
+                return -EINTR;
+
+            spin_lock(&sk->lock);
+            tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
+                             THREAD_INTERRUPTIBLE);
+            spin_unlock(&sk->lock);
+
+            if (signal_pending(current))
+                return -EINTR;
+        }
+
+        size_t to_copy = packet_len < count ? packet_len : count;
+        char *packet_buf = kvmalloc(to_copy ? to_copy : 1);
+        if (packet_buf == NULL) {
+            unix_sock_put(peer);
+            return -ENOMEM;
+        }
+
+        size_t copied;
+        struct vfs_file *peer_wr_file = NULL;
+        struct vfs_file *discarded_scm[UNIX_SCM_QUEUE_MAX];
+        size_t discarded_scm_count = 0;
+        size_t discarded_scm_entries = 0;
+        memset(discarded_scm, 0, sizeof(discarded_scm));
+        spin_lock(&peer->lock);
+        uint mark = peer->packet_queue[peer->packet_head].end_nread;
+        copied = ring_read(&peer->tx, packet_buf, to_copy);
+        if (packet_len > copied)
+            smp_store_release(&peer->tx.nread, mark);
+        discarded_scm_count = unix_discard_ready_scm_locked(
+            peer, discarded_scm, UNIX_SCM_QUEUE_MAX, &discarded_scm_entries);
+        if (discarded_scm_entries > 0) {
+            unix_seqpacket_trace("read-discard-scm", sk, peer, count,
+                                 discarded_scm_entries, sk->state,
+                                 sk->shutdown_flags);
+        }
+        unix_packet_pop_locked(peer);
+        tq_wakeup_all(&peer->wr_queue, 0, 0);
+        peer_wr_file = peer->file ? vfs_fdup(peer->file) : NULL;
+        spin_unlock(&peer->lock);
+
+        unix_fput_scm_files(discarded_scm, discarded_scm_count);
+
+        if (peer_wr_file != NULL) {
+            vfs_file_knote_notify(peer_wr_file, EVFILT_WRITE, 0);
+            vfs_fput(peer_wr_file);
+        }
+
+        if (copied != to_copy) {
+            kvfree(packet_buf);
+            unix_sock_put(peer);
+            return copied > 0 ? (ssize_t)copied : -EIO;
+        }
+
+        if (user) {
+            if (vm_copyout(current->vm, (uint64)buf, packet_buf, copied) < 0) {
+                kvfree(packet_buf);
+                unix_sock_put(peer);
+                return -EFAULT;
+            }
+        } else {
+            memmove(buf, packet_buf, copied);
+        }
+        kvfree(packet_buf);
+        unix_sock_put(peer);
+        return (ssize_t)copied;
+    }
+
     ssize_t total = 0;
     char tmp[UNIX_IO_CHUNK];
 
@@ -623,16 +1087,36 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
         spin_unlock(&sk->lock);
 
         /* Read from peer's tx ring */
+        struct vfs_file *discarded_scm[UNIX_SCM_QUEUE_MAX];
+        size_t discarded_scm_count = 0;
+        size_t discarded_scm_entries = 0;
+        memset(discarded_scm, 0, sizeof(discarded_scm));
+
         spin_lock(&peer->lock);
         size_t want = count - (size_t)total;
         if (want > sizeof(tmp))
             want = sizeof(tmp);
         got = ring_read(&peer->tx, tmp, want);
+        if (got > 0 && discard_stream_scm) {
+            discarded_scm_count = unix_discard_ready_scm_locked(
+                peer, discarded_scm, UNIX_SCM_QUEUE_MAX,
+                &discarded_scm_entries);
+            if (discarded_scm_entries > 0) {
+                unix_seqpacket_trace("read-discard-stream-scm", sk, peer,
+                                     count, discarded_scm_entries,
+                                     sk->state, sk->shutdown_flags);
+            }
+        }
         if (got > 0)
             tq_wakeup_all(&peer->wr_queue, 0, 0);
+        if (sk->type == SOCK_SEQPACKET)
+            unix_seqpacket_trace("read-got", sk, peer, count, got,
+                                 sk->state, sk->shutdown_flags);
         struct vfs_file *peer_rd_file =
             (got > 0 && peer->file) ? vfs_fdup(peer->file) : NULL;
         spin_unlock(&peer->lock);
+
+        unix_fput_scm_files(discarded_scm, discarded_scm_count);
 
         if (peer_rd_file) {
             vfs_file_knote_notify(peer_rd_file, EVFILT_WRITE, 0);
@@ -662,6 +1146,8 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
             }
 
             if (nonblock) {
+                unix_seqpacket_trace("read-eagain", sk, peer, count, 0,
+                                     sk->state, sk->shutdown_flags);
                 unix_sock_put(peer);
                 ssize_t ret = total > 0 ? total : -EAGAIN;
                 return ret;
@@ -674,6 +1160,8 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
             }
 
             /* Sleep waiting for data */
+            unix_seqpacket_trace("read-wait", sk, peer, count, 0,
+                                 sk->state, sk->shutdown_flags);
             unix_sock_put(peer);
             spin_lock(&sk->lock);
             tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
@@ -703,6 +1191,18 @@ static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
     return total;
 }
 
+static ssize_t unix_file_read(struct vfs_file *file, char *buf, size_t count,
+                              bool user)
+{
+    return unix_file_read_common(file, buf, count, user, true);
+}
+
+ssize_t unix_sock_read_preserve_scm(struct vfs_file *file, char *buf,
+                                    size_t count, bool user)
+{
+    return unix_file_read_common(file, buf, count, user, false);
+}
+
 /*
  * unix_file_write - write data to a connected AF_UNIX socket
  *
@@ -728,7 +1228,16 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
 
     for (;;) {
         spin_lock(&sk->lock);
-        if (unix_packet_has_space_locked(sk)) {
+        if (sk->shutdown_flags & UNIX_SHUT_WR) {
+            spin_unlock(&sk->lock);
+            return -EPIPE;
+        }
+        if (unix_peer_read_shutdown_locked(sk)) {
+            spin_unlock(&sk->lock);
+            return -EPIPE;
+        }
+        if (unix_packet_has_space_locked(sk) &&
+            (!unix_peer_passcred_locked(sk) || unix_scm_has_space_locked(sk))) {
             spin_unlock(&sk->lock);
             break;
         }
@@ -766,6 +1275,11 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
             spin_lock(&sk->lock);
             struct unix_sock *peer = sk->peer;
             if (peer == NULL) {
+                spin_unlock(&sk->lock);
+                return total > 0 ? total : -EPIPE;
+            }
+            if ((sk->shutdown_flags & UNIX_SHUT_WR) ||
+                unix_peer_read_shutdown_locked(sk)) {
                 spin_unlock(&sk->lock);
                 return total > 0 ? total : -EPIPE;
             }
@@ -820,7 +1334,26 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
     struct unix_sock *packet_peer = NULL;
     struct vfs_file *packet_peer_file = NULL;
     spin_lock(&sk->lock);
-    int pkt_ret = unix_packet_enqueue_locked(sk, sk->tx.nwrite);
+    int need_cred = unix_peer_passcred_locked(sk);
+    while ((need_cred && !unix_scm_has_space_locked(sk)) ||
+           !unix_packet_has_space_locked(sk)) {
+        tq_wait_in_state(&sk->wr_queue, &sk->lock, NULL,
+                         THREAD_INTERRUPTIBLE);
+    }
+    if (need_cred) {
+        int cred_ret = unix_enqueue_cred_locked(sk,
+                                                sk->tx.nwrite - (uint)total,
+                                                sk->tx.nwrite,
+                                                unix_current_scm_cred());
+        if (cred_ret < 0)
+            panic("unix_file_write: metadata queue lost reservation");
+    }
+    uint packet_start = sk->tx.nwrite - (uint)total;
+    int pkt_ret = unix_packet_enqueue_locked(sk, packet_start, sk->tx.nwrite);
+    if (sk->type == SOCK_SEQPACKET) {
+        unix_seqpacket_trace("write-packet", sk, sk->peer, count,
+                             (size_t)total, sk->state, sk->shutdown_flags);
+    }
     if (pkt_ret == 0 && sk->type == SOCK_SEQPACKET && sk->peer != NULL) {
         packet_peer = sk->peer;
         unix_sock_get(packet_peer);
@@ -875,21 +1408,59 @@ static int unix_file_release(struct vfs_inode *inode, struct vfs_file *file)
     struct unix_pending *p = sk->pending_head;
     while (p != NULL) {
         struct unix_pending *next = p->next;
-        bool drop_target_ref = false;
+        struct unix_sock *server = p->sock;
+        struct unix_sock *client = NULL;
 
-        /* Wake the connecting socket so it gets ECONNREFUSED */
-        spin_lock(&p->sock->lock);
-        if (p->sock->connect_target == sk) {
-            p->sock->connect_target = NULL;
-            drop_target_ref = true;
+        spin_lock(&server->lock);
+        client = server->peer;
+        if (client != NULL) {
+            unix_sock_get(client);
+            server->peer = NULL;
         }
-        p->sock->so_error = ECONNREFUSED;
-        p->sock->state = UNIX_STATE_UNCONNECTED;
-        tq_wakeup_all(&p->sock->conn_queue, -1, 0);
-        spin_unlock(&p->sock->lock);
-        if (drop_target_ref)
-            unix_sock_put(sk);
-        unix_sock_put(p->sock);
+        server->so_error = ECONNABORTED;
+        server->shutdown_flags |= UNIX_SHUT_RD | UNIX_SHUT_WR;
+        spin_unlock(&server->lock);
+
+        if (client != NULL) {
+            bool drop_client_peer_ref = false;
+            struct unix_sock *drop_target = NULL;
+            struct vfs_file *client_file = NULL;
+
+            spin_lock(&client->lock);
+            if (client->peer == server) {
+                client->peer = NULL;
+                client->so_error = ECONNRESET;
+                client->shutdown_flags |= UNIX_SHUT_RD | UNIX_SHUT_WR;
+                drop_client_peer_ref = true;
+            }
+            if (client->connect_target == sk) {
+                drop_target = client->connect_target;
+                client->connect_target = NULL;
+                client->so_error = ECONNRESET;
+                if (client->state == UNIX_STATE_CONNECTING)
+                    client->state = UNIX_STATE_UNCONNECTED;
+            }
+            if (drop_client_peer_ref || drop_target != NULL) {
+                tq_wakeup_all(&client->rd_queue, -1, 0);
+                tq_wakeup_all(&client->wr_queue, -1, 0);
+                tq_wakeup_all(&client->conn_queue, -1, 0);
+                client_file = client->file ? vfs_fdup(client->file) : NULL;
+            }
+            spin_unlock(&client->lock);
+            if (client_file != NULL) {
+                vfs_file_knote_notify(client_file, EVFILT_READ, 0);
+                vfs_file_knote_notify(client_file, EVFILT_WRITE, 0);
+                vfs_fput(client_file);
+            }
+            if (drop_target != NULL)
+                unix_sock_put(drop_target);
+            if (drop_client_peer_ref)
+                unix_sock_put(server); /* drop client's peer reference */
+            unix_sock_put(client); /* drop server's peer reference */
+            unix_sock_put(client); /* drop temporary reference */
+        }
+
+        unix_sock_put(server); /* drop pending queue reference */
         slab_free(p);
         p = next;
     }
@@ -897,7 +1468,7 @@ static int unix_file_release(struct vfs_inode *inode, struct vfs_file *file)
     sk->pending_tail = NULL;
 
     /* Unbind if bound */
-    if (sk->bound)
+    if (sk->bind_registered)
         bind_unregister(sk->bind_path, sk->bind_len);
 
     sk->file = NULL;
@@ -992,7 +1563,6 @@ static int unix_file_poll(struct vfs_file *file, short events)
     int type;
     int shutdown_flags;
     int so_error;
-    size_t rcv_lowat;
     size_t snd_lowat;
     size_t tx_writable = 0;
     int packet_writable;
@@ -1011,7 +1581,6 @@ static int unix_file_poll(struct vfs_file *file, short events)
     type = sk->type;
     shutdown_flags = sk->shutdown_flags;
     so_error = sk->so_error;
-    rcv_lowat = sk->rcv_lowat ? sk->rcv_lowat : UNIX_LOWAT_DEFAULT;
     snd_lowat = sk->snd_lowat ? sk->snd_lowat : UNIX_LOWAT_DEFAULT;
     peer = sk->peer;
     if (peer != NULL)
@@ -1026,7 +1595,10 @@ static int unix_file_poll(struct vfs_file *file, short events)
 
     /* Check readability: data in peer's tx ring (which we read), or EOF. */
     if (events & (POLLIN | POLLRDNORM | POLLRDBAND)) {
-        if (peer != NULL) {
+        if (shutdown_flags & UNIX_SHUT_RD) {
+            if (state != UNIX_STATE_CONNECTING)
+                revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
+        } else if (peer != NULL) {
             if (type == SOCK_SEQPACKET) {
                 spin_lock(&peer->lock);
                 bool packet_ready = unix_packet_count_locked(peer) > 0;
@@ -1044,12 +1616,18 @@ static int unix_file_poll(struct vfs_file *file, short events)
                     uint nread = peer->tx.nread;
                     scm_ready =
                         (start == end && (int)(nread - start) >= 0) ||
-                        (start != end && (int)(nread - end) >= 0);
+                        (start != end && (int)(nread - start) > 0);
                 }
                 bool peer_wr_shutdown =
                     (peer->shutdown_flags & UNIX_SHUT_WR) != 0;
+                /*
+                 * Linux AF_UNIX streams report readable once any byte is
+                 * queued, even when SO_RCVLOWAT is larger than the payload.
+                 * Keep the configured low-water mark visible via getsockopt(),
+                 * but do not let it suppress poll/epoll readiness.
+                 */
                 bool stream_ready =
-                    RING_READABLE(&peer->tx) >= rcv_lowat || scm_ready ||
+                    RING_READABLE(&peer->tx) > 0 || scm_ready ||
                     peer_wr_shutdown;
                 spin_unlock(&peer->lock);
                 if (stream_ready)
@@ -1068,7 +1646,10 @@ static int unix_file_poll(struct vfs_file *file, short events)
             if (peer != NULL)
                 revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
         } else if (peer == NULL) {
-            revents |= POLLERR;
+            if (state == UNIX_STATE_CONNECTED)
+                revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
+            else
+                revents |= POLLERR;
         } else if (packet_writable && tx_writable >= snd_lowat) {
             revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
         }
@@ -1082,6 +1663,8 @@ static int unix_file_poll(struct vfs_file *file, short events)
         if (events & POLLRDHUP)
             revents |= POLLRDHUP;
     }
+    if ((events & POLLRDHUP) && (shutdown_flags & UNIX_SHUT_RD))
+        revents |= POLLRDHUP;
     if (peer != NULL) {
         spin_lock(&peer->lock);
         if ((events & POLLRDHUP) &&
@@ -1089,9 +1672,6 @@ static int unix_file_poll(struct vfs_file *file, short events)
             revents |= POLLRDHUP;
         spin_unlock(&peer->lock);
     }
-    if (shutdown_flags & UNIX_SHUT_WR)
-        revents |= POLLHUP;
-
     if (peer != NULL)
         unix_sock_put(peer);
     return revents;
@@ -1114,7 +1694,15 @@ static int unix_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
         spin_unlock(&sk->lock);
         if (peer != NULL) {
             spin_lock(&peer->lock);
-            count = (int)RING_READABLE(&peer->tx);
+            if (sk->type == SOCK_SEQPACKET) {
+                size_t packet_len = 0;
+                if (unix_packet_next_len_locked(peer, &packet_len) == 0)
+                    count = packet_len > (size_t)0x7fffffff
+                        ? 0x7fffffff
+                        : (int)packet_len;
+            } else {
+                count = (int)RING_READABLE(&peer->tx);
+            }
             spin_unlock(&peer->lock);
             unix_sock_put(peer);
         }
@@ -1141,15 +1729,30 @@ static int unix_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
 /* Syscall-level operations                                                   */
 /* ========================================================================== */
 
+static int unix_sock_normalize_type(int *type)
+{
+    if (*type == SOCK_RAW) {
+        *type = SOCK_DGRAM;
+        return 0;
+    }
+    if (*type == SOCK_STREAM || *type == SOCK_SEQPACKET ||
+        *type == SOCK_DGRAM)
+        return 0;
+    if (*type >= 11 && *type <= 15)
+        return -EINVAL;
+    return -ESOCKTNOSUPPORT;
+}
+
 /*
  * unix_sock_create - create a new AF_UNIX socket
  */
 int unix_sock_create(int type, int protocol, int file_flags)
 {
-    if (type != SOCK_STREAM && type != SOCK_SEQPACKET && type != SOCK_DGRAM)
-        return -EPROTOTYPE;
+    int ret = unix_sock_normalize_type(&type);
+    if (ret < 0)
+        return ret;
 
-    if (protocol != 0)
+    if (protocol != 0 && protocol != AF_UNIX)
         return -EPROTONOSUPPORT;
 
     struct unix_sock *sk = unix_sock_alloc();
@@ -1160,7 +1763,7 @@ int unix_sock_create(int type, int protocol, int file_flags)
     sk->protocol = protocol;
 
     /* Allocate tx ring buffer */
-    int ret = ring_alloc(&sk->tx);
+    ret = ring_alloc(&sk->tx);
     if (ret < 0) {
         unix_sock_free(sk);
         return ret;
@@ -1219,6 +1822,7 @@ int unix_sock_bind(int fd, uint64 uaddr, int addrlen)
     memmove(sk->bind_path, sa.sun_path, path_len);
     sk->bind_len = path_len;
     sk->bound = 1;
+    sk->bind_registered = 1;
     if (sk->state == UNIX_STATE_UNCONNECTED)
         sk->state = UNIX_STATE_BOUND;
     spin_unlock(&sk->lock);
@@ -1244,9 +1848,11 @@ int unix_sock_listen(int fd, int backlog)
     }
 
     sk->state = UNIX_STATE_LISTENING;
-    sk->backlog = backlog > 0 ? (backlog < UNIX_BACKLOG_MAX ? backlog
-                                                             : UNIX_BACKLOG_MAX)
-                              : 1;
+    sk->backlog = backlog > 0 ? (backlog < UNIX_BACKLOG_MAX - 1
+                                     ? backlog
+                                     : UNIX_BACKLOG_MAX - 1)
+                              : 0;
+    unix_sock_set_cred_current(sk);
     spin_unlock(&sk->lock);
     return 0;
 }
@@ -1302,44 +1908,10 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
     if (sk->pending_head == NULL)
         sk->pending_tail = NULL;
     sk->pending_count--;
-    struct unix_sock *client = pen->sock;
+    struct unix_sock *server = pen->sock;
     spin_unlock(&sk->lock);
     slab_free(pen);
-
-    bool drop_target_ref = false;
-    spin_lock(&client->lock);
-    if (client->connect_target == sk) {
-        client->connect_target = NULL;
-        drop_target_ref = true;
-    }
-    spin_unlock(&client->lock);
-    if (drop_target_ref)
-        unix_sock_put(sk);
-
-    /* Create a new server-side socket to pair with the client */
-    struct unix_sock *server = unix_sock_alloc();
-    if (server == NULL) {
-        /* Reject the connection */
-        spin_lock(&client->lock);
-        client->so_error = ECONNREFUSED;
-        client->state = UNIX_STATE_UNCONNECTED;
-        tq_wakeup_all(&client->conn_queue, -1, 0);
-        spin_unlock(&client->lock);
-        unix_sock_put(client);
-        return -ENOMEM;
-    }
-    server->type = sk->type;
-    server->protocol = 0;
-    if (ring_alloc(&server->tx) < 0) {
-        unix_sock_free(server);
-        spin_lock(&client->lock);
-        client->so_error = ECONNREFUSED;
-        client->state = UNIX_STATE_UNCONNECTED;
-        tq_wakeup_all(&client->conn_queue, -1, 0);
-        spin_unlock(&client->lock);
-        unix_sock_put(client);
-        return -ENOMEM;
-    }
+    unix_sock_get(server); /* keep local pointer stable through fd publish */
 
     /* Determine file flags for new socket */
     int file_flags = O_RDWR;
@@ -1348,13 +1920,56 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
 
     int newfd = unix_fd_alloc(server, file_flags);
     if (newfd < 0) {
-        unix_sock_free(server);
-        spin_lock(&client->lock);
-        client->so_error = ECONNREFUSED;
-        client->state = UNIX_STATE_UNCONNECTED;
-        tq_wakeup_all(&client->conn_queue, -1, 0);
-        spin_unlock(&client->lock);
-        unix_sock_put(client);
+        struct unix_sock *client;
+
+        spin_lock(&server->lock);
+        client = server->peer;
+        if (client != NULL) {
+            unix_sock_get(client);
+            server->peer = NULL;
+        }
+        spin_unlock(&server->lock);
+
+        if (client != NULL) {
+            bool drop_client_peer_ref = false;
+            struct unix_sock *drop_target = NULL;
+            struct vfs_file *client_file = NULL;
+
+            spin_lock(&client->lock);
+            if (client->peer == server) {
+                client->peer = NULL;
+                client->so_error = ECONNABORTED;
+                client->shutdown_flags |= UNIX_SHUT_RD | UNIX_SHUT_WR;
+                drop_client_peer_ref = true;
+            }
+            if (client->connect_target == sk) {
+                drop_target = client->connect_target;
+                client->connect_target = NULL;
+                client->so_error = ECONNABORTED;
+                if (client->state == UNIX_STATE_CONNECTING)
+                    client->state = UNIX_STATE_UNCONNECTED;
+            }
+            if (drop_client_peer_ref || drop_target != NULL) {
+                tq_wakeup_all(&client->rd_queue, -1, 0);
+                tq_wakeup_all(&client->wr_queue, -1, 0);
+                tq_wakeup_all(&client->conn_queue, -1, 0);
+                client_file = client->file ? vfs_fdup(client->file) : NULL;
+            }
+            spin_unlock(&client->lock);
+            if (client_file != NULL) {
+                vfs_file_knote_notify(client_file, EVFILT_READ, 0);
+                vfs_file_knote_notify(client_file, EVFILT_WRITE, 0);
+                vfs_fput(client_file);
+            }
+            if (drop_target != NULL)
+                unix_sock_put(drop_target);
+            if (drop_client_peer_ref)
+                unix_sock_put(server); /* drop client's peer reference */
+            unix_sock_put(client); /* drop server's peer reference */
+            unix_sock_put(client); /* drop temporary reference */
+        }
+        unix_sock_put(server); /* drop pending/file-transfer reference */
+        unix_sock_put(server); /* drop local temporary reference */
         return newfd;
     }
     if (flags & SOCK_CLOEXEC) {
@@ -1362,46 +1977,27 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
         vfs_fdtable_set_fdflags(current->fdtable, newfd, FD_CLOEXEC);
         spin_unlock(&current->fdtable->lock);
     }
-
-    /* Cross-link client ↔ server (each takes a ref on the other) */
-    spin_lock(&client->lock);
-    spin_lock(&server->lock);
-    client->peer = server;
-    unix_sock_get(server);  /* client holds ref on server */
-    server->peer = client;
-    unix_sock_get(client);  /* server holds ref on client */
-    /* Copy credentials: server sees client's creds, client sees server's */
-    server->peer_pid = client->peer_pid;
-    server->peer_uid = client->peer_uid;
-    server->peer_gid = client->peer_gid;
-    client->peer_pid = current->tgid;
-    client->peer_uid = current->thread_group->uid;
-    client->peer_gid = current->thread_group->gid;
-    client->state = UNIX_STATE_CONNECTED;
-    server->state = UNIX_STATE_CONNECTED;
-    /* Wake the connecting client */
-    tq_wakeup_all(&client->conn_queue, 0, 0);
-    struct vfs_file *client_file =
-        client->file ? vfs_fdup(client->file) : NULL;
-    spin_unlock(&server->lock);
-    spin_unlock(&client->lock);
-
-    if (client_file) {
-        vfs_file_knote_notify(client_file, EVFILT_WRITE, 0);
-        vfs_file_knote_notify(client_file, EVFILT_READ, 0);
-        vfs_fput(client_file);
-    }
+    unix_sock_complete_pending_connect(sk, server);
 
     /* Copy peer address back if requested */
     if (uaddr != 0 && uaddrlen != 0) {
+        struct unix_sock *client;
         struct sockaddr_un sa;
         memset(&sa, 0, sizeof(sa));
         sa.sun_family = AF_UNIX;
         size_t bind_len = 0;
-        if (client->bound) {
+
+        spin_lock(&server->lock);
+        client = server->peer;
+        if (client != NULL)
+            unix_sock_get(client);
+        spin_unlock(&server->lock);
+        if (client != NULL && client->bound) {
             bind_len = client->bind_len;
             memmove(sa.sun_path, client->bind_path, bind_len);
         }
+        if (client != NULL)
+            unix_sock_put(client);
 
         int alen = bind_len ? (int)(sizeof(uint16) + bind_len) :
                               (int)sizeof(uint16);
@@ -1409,7 +2005,7 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
         vm_copyout(current->vm, uaddr, &sa, alen);
     }
 
-    unix_sock_put(client);  /* drop pending-queue reference */
+    unix_sock_put(server); /* drop local temporary reference */
     return newfd;
 }
 
@@ -1454,6 +2050,12 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     }
     spin_unlock(&sk->lock);
 
+    struct vfs_file *client_file = vfs_fdtable_get_file(current->fdtable, fd);
+    bool nonblock = (client_file != NULL &&
+                     (client_file->f_flags & O_NONBLOCK) != 0);
+    if (client_file != NULL)
+        vfs_fput(client_file);
+
     /* Find the target listening socket */
     struct unix_sock *target = bind_lookup(sa.sun_path, path_len);
     if (target == NULL) {
@@ -1466,13 +2068,17 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
         unix_sock_put(target);
         return -ECONNREFUSED;
     }
-    if (target->pending_count >= target->backlog) {
+    if (target->type != sk->type) {
+        spin_unlock(&target->lock);
+        unix_sock_put(target);
+        return -EPROTOTYPE;
+    }
+    if (target->pending_count >= target->backlog + 1) {
         spin_unlock(&target->lock);
         unix_sock_put(target);
         return -EAGAIN;
     }
 
-    /* Enqueue this socket as a pending connection */
     struct unix_pending *pen = slab_alloc(&__unix_pending_cache);
     if (pen == NULL) {
         spin_unlock(&target->lock);
@@ -1480,19 +2086,55 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
         return -ENOMEM;
     }
 
+    struct unix_sock *server = unix_sock_alloc();
+    if (server == NULL) {
+        slab_free(pen);
+        spin_unlock(&target->lock);
+        unix_sock_put(target);
+        return -ENOMEM;
+    }
+    server->type = target->type;
+    server->protocol = target->protocol;
+    server->state = UNIX_STATE_CONNECTED;
+    unix_sock_copy_local_addr(server, target);
+    server->cred_pid = target->cred_pid;
+    server->cred_uid = target->cred_uid;
+    server->cred_gid = target->cred_gid;
+    if (ring_alloc(&server->tx) < 0) {
+        unix_sock_free(server);
+        slab_free(pen);
+        spin_unlock(&target->lock);
+        unix_sock_put(target);
+        return -ENOMEM;
+    }
+
     spin_lock(&sk->lock);
-    sk->peer_pid = current->tgid;
-    sk->peer_uid = current->thread_group->uid;
-    sk->peer_gid = current->thread_group->gid;
+    if (nonblock) {
+        sk->connect_target = target;
+        unix_sock_get(target); /* pending client owns this until accept/cancel */
+    } else {
+        sk->peer = server;
+        unix_sock_get(server);  /* client holds ref on accepted child */
+    }
+    sk->peer_pid = target->cred_pid;
+    sk->peer_uid = target->cred_uid;
+    sk->peer_gid = target->cred_gid;
     sk->so_error = 0;
-    sk->state = UNIX_STATE_CONNECTING;
-    sk->connect_target = target;
-    unix_sock_get(target);
+    sk->state = nonblock ? UNIX_STATE_CONNECTING : UNIX_STATE_CONNECTED;
     spin_unlock(&sk->lock);
 
-    pen->sock = sk;
+    spin_lock(&server->lock);
+    server->peer = sk;
+    unix_sock_get(sk);  /* server child holds ref on client */
+    server->peer_pid = current ? current->tgid : 0;
+    server->peer_uid = (current && current->thread_group)
+        ? current->thread_group->uid : 0;
+    server->peer_gid = (current && current->thread_group)
+        ? current->thread_group->gid : 0;
+    spin_unlock(&server->lock);
+
+    pen->sock = server;
     pen->next = NULL;
-    unix_sock_get(sk);  /* pending queue owns this reference */
     if (target->pending_tail != NULL)
         target->pending_tail->next = pen;
     else
@@ -1511,44 +2153,7 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     }
     unix_sock_put(target);
 
-    /* Check if non-blocking */
-    struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
-    bool nonblock = (f != NULL && (f->f_flags & O_NONBLOCK));
-    if (f)
-        vfs_fput(f);
-
-    if (nonblock) {
-        return -EINPROGRESS;
-    }
-
-    /* Block until accepted or error */
-    spin_lock(&sk->lock);
-    while (sk->state != UNIX_STATE_CONNECTED) {
-        tq_wait_in_state(&sk->conn_queue, &sk->lock, NULL,
-                         THREAD_INTERRUPTIBLE);
-        spin_unlock(&sk->lock);
-
-        if (signal_pending(current)) {
-            spin_lock(&sk->lock);
-            bool connected = sk->state == UNIX_STATE_CONNECTED;
-            spin_unlock(&sk->lock);
-            if (connected)
-                return 0;
-            unix_sock_cancel_pending_connect(sk, ECONNRESET);
-            return -EINTR;
-        }
-
-        spin_lock(&sk->lock);
-        if (sk->so_error != 0) {
-            int err = sk->so_error;
-            sk->so_error = 0;
-            spin_unlock(&sk->lock);
-            return -err;
-        }
-    }
-    spin_unlock(&sk->lock);
-
-    return 0;
+    return nonblock ? -EINPROGRESS : 0;
 }
 
 /*
@@ -1559,6 +2164,8 @@ int unix_sock_shutdown(int fd, int how)
     struct unix_sock *sk = unix_sock_from_fd(fd);
     if (sk == NULL)
         return -EBADF;
+    if (how < 0 || how > 2)
+        return -EINVAL;
 
     spin_lock(&sk->lock);
 
@@ -1606,21 +2213,24 @@ int unix_sock_getpeername(int fd, uint64 uaddr, uint64 uaddrlen)
         return -EFAULT;
 
     spin_lock(&sk->lock);
-    struct unix_sock *peer = sk->peer;
+    struct unix_sock *peer = unix_sock_ref_peer_locked(sk);
     if (peer == NULL) {
         spin_unlock(&sk->lock);
         return -ENOTCONN;
     }
+    spin_unlock(&sk->lock);
 
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof(sa));
     sa.sun_family = AF_UNIX;
     size_t bind_len = 0;
+    spin_lock(&peer->lock);
     if (peer->bound) {
         bind_len = peer->bind_len;
         memmove(sa.sun_path, peer->bind_path, bind_len);
     }
-    spin_unlock(&sk->lock);
+    spin_unlock(&peer->lock);
+    unix_sock_put(peer);
 
     int user_len = 0;
     if (vm_copyin(current->vm, &user_len, uaddrlen, sizeof(user_len)) < 0)
@@ -1680,10 +2290,11 @@ int unix_sock_getsockname(int fd, uint64 uaddr, uint64 uaddrlen)
  */
 int unix_sock_socketpair(int type, int protocol, int file_flags, int sv[2])
 {
-    if (type != SOCK_STREAM && type != SOCK_SEQPACKET && type != SOCK_DGRAM)
-        return -EPROTOTYPE;
+    int ret = unix_sock_normalize_type(&type);
+    if (ret < 0)
+        return ret;
 
-    if (protocol != 0)
+    if (protocol != 0 && protocol != AF_UNIX)
         return -EPROTONOSUPPORT;
 
     /* Allocate two sockets */
@@ -1722,12 +2333,7 @@ int unix_sock_socketpair(int type, int protocol, int file_flags, int sv[2])
     }
     int fd1 = unix_fd_alloc(sk1, file_flags);
     if (fd1 < 0) {
-        /* Close fd0 properly */
-        struct vfs_file *f0 = vfs_fdtable_get_file(current->fdtable, fd0);
-        if (f0) {
-            vfs_fput(f0);
-            /* Let the release handler clean up sk0 */
-        }
+        unix_socketpair_unwind_fd(fd0);
         unix_sock_free(sk1);
         return fd1;
     }
@@ -1796,18 +2402,15 @@ int unix_sock_setsockopt(int fd, int level, int optname, uint64 optval,
                 return -EINVAL;
             if (vm_copyin(current->vm, &val, optval, sizeof(val)) < 0)
                 return -EFAULT;
-            if (val < 1)
-                return -EINVAL;
-            if ((size_t)val > UNIX_BUF_MAX_SIZE)
-                val = UNIX_BUF_MAX_SIZE;
+            size_t linux_value = unix_linux_sockbuf_value(val, optname);
             sk = unix_sock_from_fd(fd);
             if (sk == NULL)
                 return -EBADF;
             spin_lock(&sk->lock);
             if (optname == 7)
-                sk->snd_buf = (size_t)val;
+                sk->snd_buf = linux_value;
             else
-                sk->rcv_buf = (size_t)val;
+                sk->rcv_buf = linux_value;
             spin_unlock(&sk->lock);
             return 0;
         }
@@ -1835,7 +2438,12 @@ int unix_sock_setsockopt(int fd, int level, int optname, uint64 optval,
         }
         }
     }
-    return -ENOPROTOOPT;
+    /*
+     * Linux rejects protocol-family option levels such as SOL_TCP on AF_UNIX
+     * sockets with EOPNOTSUPP.  Chromium hits this through D-Bus setup before
+     * falling back to ordinary UNIX-socket negotiation.
+     */
+    return -EOPNOTSUPP;
 }
 
 int unix_sock_getsockopt(int fd, int level, int optname, uint64 optval,
@@ -1938,9 +2546,16 @@ int unix_sock_getsockopt(int fd, int level, int optname, uint64 optval,
                 uint32 gid;
             } ucred;
             spin_lock(&sk->lock);
-            ucred.pid = sk->peer_pid;
-            ucred.uid = sk->peer_uid;
-            ucred.gid = sk->peer_gid;
+            if (unix_sock_connection_oriented(sk) &&
+                sk->state != UNIX_STATE_CONNECTED) {
+                ucred.pid = 0;
+                ucred.uid = (uint32)-1;
+                ucred.gid = (uint32)-1;
+            } else {
+                ucred.pid = sk->peer_pid;
+                ucred.uid = sk->peer_uid;
+                ucred.gid = sk->peer_gid;
+            }
             spin_unlock(&sk->lock);
             int clen = sizeof(ucred);
             vm_copyout(current->vm, optlen_ptr, &clen, sizeof(clen));
@@ -1956,5 +2571,5 @@ int unix_sock_getsockopt(int fd, int level, int optname, uint64 optval,
         vm_copyout(current->vm, optval, &val, sizeof(val));
         return 0;
     }
-    return -ENOPROTOOPT;
+    return -EOPNOTSUPP;
 }

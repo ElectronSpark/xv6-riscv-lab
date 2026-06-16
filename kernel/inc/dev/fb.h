@@ -266,6 +266,7 @@
 #define FB_GPU_FENCE_WAIT 0x1         /* wait for fence fd to signal */
 #define FB_GPU_VIRGL_FENCE_WAIT 0x1   /* wait_for must be signaled */
 #define FB_GPU_VIRGL_SUBMIT_ASYNC 0x1 /* return once the command is queued */
+#define FB_GPU_VIRGL_SUBMIT_ALLOW_IMPORTED_RESOURCES 0x40000000u /* kernel DRM execbuffer adapter */
 #define FB_GPU_VIRGL_SUBMIT_FORCE_FAIL 0x80000000u /* test-only context fault */
 #define FB_GPU_DISPLAY_WAIT_F_WAIT 0x1 /* wait_for must be complete */
 #define FB_GPU_DXG_PRESENT_F_WAIT_SYNC 0x1 /* wait for sync_object/fence_value */

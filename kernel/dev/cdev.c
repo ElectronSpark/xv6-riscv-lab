@@ -10,6 +10,7 @@
 #include <mm/slab.h>
 #include <mm/page.h>
 #include <errno.h>
+#include <list.h>
 
 static int __underlying_dev_open(device_t *dev) {
     if (dev == NULL) {
@@ -98,6 +99,8 @@ int cdev_register(cdev_t *dev) {
     device_t *device = (device_t *)dev;
     device->type = DEV_TYPE_CHAR;
     device->ops = __cdev_underlying_ops; // Set underlying device operations
+    spin_init(&dev->knote_lock, "cdev knote");
+    list_entry_init(&dev->knote_list);
     return device_register(device);
 }
 

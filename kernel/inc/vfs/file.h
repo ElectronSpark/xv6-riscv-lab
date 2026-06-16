@@ -14,6 +14,8 @@
 #include "vfs/uio.h"
 #include "clone_flags.h"
 
+struct thread;
+
 /**
  * @brief Open a file from an inode
  * @param inode The inode to open
@@ -38,6 +40,7 @@ void vfs_fput(struct vfs_file *file);
  */
 struct vfs_file *vfs_fdup(struct vfs_file *file);
 
+void vfs_file_set_opened_path(struct vfs_file *file, const char *path);
 int vfs_ioctl(struct vfs_file *file, uint64 cmd, void *arg);
 ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user);
 int vfs_filestat(struct vfs_file *file, struct stat *stat);
@@ -93,11 +96,14 @@ void vfs_fdtable_put(struct vfs_fdtable *fdtable);
 int vfs_fdtable_alloc_fd(struct vfs_fdtable *fdtable, struct vfs_file *file);
 int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable,
                               struct vfs_file *file, int start_fd);
+int vfs_fdtable_install_fd_at(struct vfs_fdtable *fdtable,
+                              struct vfs_file *file, int fd);
 struct vfs_file *vfs_fdtable_get_file(struct vfs_fdtable *fdtable, int fd);
 struct vfs_file *vfs_fdtable_dealloc_fd(struct vfs_fdtable *fdtable, int fd);
 int vfs_fdtable_get_fdflags(struct vfs_fdtable *fdtable, int fd);
 int vfs_fdtable_set_fdflags(struct vfs_fdtable *fdtable, int fd, int flags);
 void vfs_fdtable_close_on_exec(struct vfs_fdtable *fdtable);
+void vfs_fdtable_debug_dump(struct thread *p, const char *tag, int max_fd);
 void vfs_file_maybe_last_fd_close(struct vfs_file *file);
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_FILE_H

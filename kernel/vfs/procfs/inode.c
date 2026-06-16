@@ -94,8 +94,12 @@ static const struct procfs_static_entry procfs_pid_entries[] = {
     {"limits", 0},
     {"environ", 0},
     {"auxv", 0},
+    {"oom_score_adj", 0},
+    {"mem", 0},
     {"task", 0},
     {"fdinfo", 0},
+    {"ns", 0},
+    {"setgroups", 0},
 };
 
 static const struct procfs_static_entry procfs_task_entries[] = {
@@ -112,8 +116,28 @@ static const struct procfs_static_entry procfs_task_entries[] = {
     {"limits", 0},
     {"environ", 0},
     {"auxv", 0},
+    {"mem", 0},
     {"fd", 0},
     {"fdinfo", 0},
+    {"ns", 0},
+};
+
+struct procfs_ns_desc {
+    const char *name;
+    uint64 initial_ino;
+};
+
+static const struct procfs_ns_desc procfs_ns_entries[] = {
+    {"cgroup", 4026531835ULL},
+    {"ipc", 4026531839ULL},
+    {"mnt", 4026531841ULL},
+    {"net", 4026531840ULL},
+    {"pid", 4026531836ULL},
+    {"pid_for_children", 4026531836ULL},
+    {"time", 4026531834ULL},
+    {"time_for_children", 4026531834ULL},
+    {"user", 4026531837ULL},
+    {"uts", 4026531838ULL},
 };
 
 static const struct procfs_static_entry procfs_sys_entries[] = {
@@ -212,8 +236,12 @@ static uint64 procfs_pid_entry_ino(int tgid, int child_idx)
     case 13: return PROCFS_PID_LIMITS_INO(tgid);
     case 14: return PROCFS_PID_ENVIRON_INO(tgid);
     case 15: return PROCFS_PID_AUXV_INO(tgid);
-    case 16: return PROCFS_PID_TASKDIR_INO(tgid);
-    case 17: return PROCFS_PID_FDINFODIR_INO(tgid);
+    case 16: return PROCFS_PID_OOM_SCORE_ADJ_INO(tgid);
+    case 17: return PROCFS_PID_MEM_INO(tgid);
+    case 18: return PROCFS_PID_TASKDIR_INO(tgid);
+    case 19: return PROCFS_PID_FDINFODIR_INO(tgid);
+    case 20: return PROCFS_PID_NS_DIR_INO(tgid);
+    case 21: return PROCFS_PID_SETGROUPS_INO(tgid);
     default: return 0;
     }
 }
@@ -221,6 +249,17 @@ static uint64 procfs_pid_entry_ino(int tgid, int child_idx)
 static uint64 procfs_task_entry_ino(int tgid, int tid, int child_idx)
 {
     return PROCFS_TASK_INO(tgid, tid, child_idx + 1);
+}
+
+static int procfs_lookup_ns_entry(const char *name, size_t name_len)
+{
+    for (int i = 0; i < NELEM(procfs_ns_entries); i++) {
+        size_t len = strlen(procfs_ns_entries[i].name);
+        if (len == name_len &&
+            memcmp(name, procfs_ns_entries[i].name, len) == 0)
+            return i;
+    }
+    return -1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -288,6 +327,28 @@ static int procfs_valid_tid_in_tgid(int tgid, int tid)
     valid = p != NULL && p->tgid == tgid;
     rcu_read_unlock();
     return valid;
+}
+
+struct __count_tid_arg {
+    int tgid;
+    int count;
+};
+
+static void __count_tid_cb(struct thread *p, void *arg)
+{
+    struct __count_tid_arg *a = arg;
+    if (p->tgid == a->tgid)
+        a->count++;
+}
+
+static int procfs_count_tids(int tgid)
+{
+    struct __count_tid_arg arg = {
+        .tgid = tgid,
+        .count = 0,
+    };
+    proctab_for_each_rcu(__count_tid_cb, &arg);
+    return arg.count;
 }
 
 /* ------------------------------------------------------------------ */
@@ -408,6 +469,22 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         return -ENOENT;
     }
 
+    case PROC_PID_NS_DIR: {
+        int ns_idx = procfs_lookup_ns_entry(name, name_len);
+        if (ns_idx < 0)
+            return -ENOENT;
+        dentry->ino = PROCFS_PID_NS_ENTRY_INO(pi->pid, ns_idx);
+        return 0;
+    }
+
+    case PROC_TASK_NS_DIR: {
+        int ns_idx = procfs_lookup_ns_entry(name, name_len);
+        if (ns_idx < 0)
+            return -ENOENT;
+        dentry->ino = PROCFS_TASK_NS_ENTRY_INO(pi->pid, pi->tid, ns_idx);
+        return 0;
+    }
+
     case PROC_SYS_DIR: {
         uint64 ino;
         if (procfs_lookup_static(procfs_sys_entries, NELEM(procfs_sys_entries),
@@ -517,12 +594,13 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         if (pi->type == PROC_PID_DIR) {
             parent_ino = PROCFS_INO_ROOT;
         } else if (pi->type == PROC_FDDIR || pi->type == PROC_FDINFODIR ||
-                   pi->type == PROC_TASKDIR) {
+                   pi->type == PROC_TASKDIR || pi->type == PROC_PID_NS_DIR) {
             parent_ino = PROCFS_PID_DIR_INO(pi->pid);
         } else if (pi->type == PROC_TASK_TID_DIR) {
             parent_ino = PROCFS_PID_TASKDIR_INO(pi->pid);
         } else if (pi->type == PROC_TASK_FDDIR ||
-                   pi->type == PROC_TASK_FDINFODIR) {
+                   pi->type == PROC_TASK_FDINFODIR ||
+                   pi->type == PROC_TASK_NS_DIR) {
             parent_ino = PROCFS_TASK_TID_DIR_INO(pi->pid, pi->tid);
         } else if (pi->type == PROC_SYS_DIR) {
             parent_ino = PROCFS_INO_ROOT;
@@ -663,6 +741,28 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
                                   NELEM(procfs_sys_fs_inotify_entries),
                                   child_idx);
 
+    case PROC_PID_NS_DIR:
+    case PROC_TASK_NS_DIR: {
+        if (child_idx < 0 || child_idx >= NELEM(procfs_ns_entries)) {
+            vfs_release_dentry(ret_dentry);
+            ret_dentry->name = NULL;
+            return 0;
+        }
+
+        const char *name = procfs_ns_entries[child_idx].name;
+        vfs_release_dentry(ret_dentry);
+        ret_dentry->name = strdup(name);
+        if (ret_dentry->name == NULL)
+            return -ENOMEM;
+        ret_dentry->name_len = (uint16)strlen(name);
+        ret_dentry->ino = (pi->type == PROC_PID_NS_DIR)
+                              ? PROCFS_PID_NS_ENTRY_INO(pi->pid, child_idx)
+                              : PROCFS_TASK_NS_ENTRY_INO(pi->pid, pi->tid,
+                                                         child_idx);
+        ret_dentry->cookies = (int64)iter->index;
+        return 0;
+    }
+
     /* ---- fd and fdinfo children ---- */
     case PROC_FDDIR:
     case PROC_FDINFODIR:
@@ -736,6 +836,16 @@ static ssize_t procfs_readlink(struct vfs_inode *inode, char *buf,
         return (ssize_t)len;
     }
 
+    case PROC_PID_NS_ENTRY:
+    case PROC_TASK_NS_ENTRY: {
+        if (pi->ns_idx < 0 || pi->ns_idx >= NELEM(procfs_ns_entries))
+            return -EINVAL;
+        n = snprintf(buf, buflen, "%s:[%llu]",
+                     procfs_ns_entries[pi->ns_idx].name,
+                     (unsigned long long)procfs_ns_entries[pi->ns_idx].initial_ino);
+        return n;
+    }
+
     case PROC_FD_ENTRY: {
         struct vfs_file *custom_file = NULL;
         rcu_read_lock();
@@ -802,13 +912,19 @@ static ssize_t procfs_readlink(struct vfs_inode *inode, char *buf,
 /* ------------------------------------------------------------------ */
 
 static int procfs_getattr(struct vfs_inode *inode, struct stat *st) {
+    struct procfs_inode *pi = procfs_i(inode);
+
     memset(st, 0, sizeof(*st));
     st->st_ino   = inode->ino;
     st->st_mode  = inode->mode;
     st->st_nlink = inode->n_links;
-    st->st_size  = inode->size;
+    st->st_size  = S_ISREG(inode->mode) ? 0 : inode->size;
     st->st_dev   = 0;
     st->st_blksize = 4096;
+    if (pi->type == PROC_TASKDIR) {
+        int tids = procfs_count_tids(pi->pid);
+        st->st_nlink = 2 + (tids > 0 ? (uint64)tids : 0);
+    }
     return 0;
 }
 
@@ -819,6 +935,8 @@ static int procfs_getattr(struct vfs_inode *inode, struct stat *st) {
 #define PROCFS_BUF_SIZE 4096
 #define PROCFS_MAPS_INITIAL_BUF_SIZE (64 * 1024)
 #define PROCFS_MAPS_MAX_BUF_SIZE     (1024 * 1024)
+#define PROCFS_MAPS_LINE_RESERVE     (VFS_USER_PATH_MAX + 160)
+#define PROCFS_SMAPS_ENTRY_RESERVE   (VFS_USER_PATH_MAX + 1024)
 
 struct procfs_vm_accounting {
     vm_t *vm;
@@ -863,7 +981,7 @@ static void procfs_collect_vm_accounting(vm_t *vm,
     vm_rlock(vm);
     vma_t *vma;
     uint64 index = 0;
-    mt_for_each(&vm->vm_mt, vma, index, (uint64)(-1ULL)) {
+    mt_for_each(&vm->vm_mt, vma, index, UVMTOP - 1) {
         if ((vma->flags & VMA_FLAG_USER) == 0)
             continue;
         uint64 pages = (vma->end - vma->start) / PGSIZE;
@@ -972,7 +1090,7 @@ static char *procfs_gen_status(int tgid) {
                        "Uid:\t%u\t%u\t%u\t%u\n"
                        "Gid:\t%u\t%u\t%u\t%u\n"
                        "FDSize:\t%d\n"
-                       "Groups:",
+                       "Groups:\t",
                        name, 22, statestr, statelong, real_tgid, pid, ppid,
                        (unsigned)p_uid, (unsigned)p_euid,
                        (unsigned)p_suid, (unsigned)p_euid,
@@ -981,10 +1099,15 @@ static char *procfs_gen_status(int tgid) {
                        NOFILE);
     if (pos < 0)
         pos = 0;
+    if ((size_t)pos < PROCFS_BUF_SIZE && ngroups == 0) {
+        int n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos, " ");
+        if (n > 0)
+            pos += n;
+    }
     if ((size_t)pos < PROCFS_BUF_SIZE) {
         for (int i = 0; i < ngroups && (size_t)pos < PROCFS_BUF_SIZE; i++) {
             int n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
-                             "\t%u", (unsigned)groups[i]);
+                             "%u ", (unsigned)groups[i]);
             if (n < 0)
                 break;
             pos += n;
@@ -1096,6 +1219,88 @@ static char *procfs_gen_statm(int tgid) {
     return buf;
 }
 
+static size_t procfs_strnlen(const char *s, size_t max)
+{
+    size_t len = 0;
+    while (len < max && s[len] != '\0')
+        len++;
+    return len;
+}
+
+static int procfs_format_vma_header(char *buf, size_t size, vma_t *vma)
+{
+    char r = (vma->flags & PROT_READ) ? 'r' : '-';
+    char w = (vma->flags & PROT_WRITE) ? 'w' : '-';
+    char x = (vma->flags & PROT_EXEC) ? 'x' : '-';
+    char s = (vma->flags & VMA_FLAG_SHARED) ? 's' : 'p';
+    uint64 dev = 0;
+    uint64 ino = 0;
+    const char *path = NULL;
+
+    if ((vma->flags & VMA_FLAG_FILE) && vma->file != NULL) {
+        struct vfs_inode *inode = vfs_inode_deref(&vma->file->inode);
+        if (inode != NULL) {
+            struct stat st;
+
+            ino = inode->ino;
+            if (inode->ops != NULL && inode->ops->getattr != NULL &&
+                inode->ops->getattr(inode, &st) == 0) {
+                dev = st.st_dev;
+                ino = st.st_ino;
+            }
+        }
+        if (vma->file->opened_path != NULL &&
+            vma->file->opened_path[0] != '\0')
+            path = vma->file->opened_path;
+    }
+
+    if (path != NULL) {
+        size_t path_len = procfs_strnlen(path, VFS_USER_PATH_MAX);
+        int n = snprintf(buf, size,
+                         "%016llx-%016llx %c%c%c%c %08llx %02llx:%02llx %llu ",
+                         (unsigned long long)vma->start,
+                         (unsigned long long)vma->end,
+                         r, w, x, s,
+                         (unsigned long long)vma->pgoff,
+                         (unsigned long long)major(dev),
+                         (unsigned long long)minor(dev),
+                         (unsigned long long)ino);
+        if (n < 0)
+            return n;
+
+        size_t need = (size_t)n + path_len + 1;
+        if ((size_t)n < size) {
+            size_t pos = (size_t)n;
+            size_t room = size - pos;
+            size_t copy = path_len;
+            if (copy >= room)
+                copy = (room > 0) ? room - 1 : 0;
+            if (copy > 0) {
+                memmove(buf + pos, path, copy);
+                pos += copy;
+                room -= copy;
+            }
+            if (room > 1) {
+                buf[pos++] = '\n';
+                buf[pos] = '\0';
+            } else if (size > 0) {
+                buf[size - 1] = '\0';
+            }
+        }
+        return (int)need;
+    }
+
+    return snprintf(buf, size,
+                    "%016llx-%016llx %c%c%c%c %08llx %02llx:%02llx %llu \n",
+                    (unsigned long long)vma->start,
+                    (unsigned long long)vma->end,
+                    r, w, x, s,
+                    (unsigned long long)vma->pgoff,
+                    (unsigned long long)major(dev),
+                    (unsigned long long)minor(dev),
+                    (unsigned long long)ino);
+}
+
 static char *procfs_gen_maps(int tgid) {
     /* Get the vm pointer under RCU; then iterate VMAs under vm_rlock */
     rcu_read_lock();
@@ -1120,27 +1325,22 @@ static char *procfs_gen_maps(int tgid) {
         vm_rlock(vm);
         vma_t  *vma;
         uint64  index = 0;
-        mt_for_each(&vm->vm_mt, vma, index, (uint64)(-1ULL)) {
-            char r = (vma->flags & PROT_READ)      ? 'r' : '-';
-            char w = (vma->flags & PROT_WRITE)     ? 'w' : '-';
-            char x = (vma->flags & PROT_EXEC)      ? 'x' : '-';
-            char s = (vma->flags & VMA_FLAG_SHARED) ? 's' : 'p';
-            char line[96];
-            int n = snprintf(line, sizeof(line),
-                             "%016llx-%016llx %c%c%c%c %08llx 00:00 0\n",
-                             (unsigned long long)vma->start,
-                             (unsigned long long)vma->end,
-                             r, w, x, s,
-                             (unsigned long long)vma->pgoff);
-            if (n < 0 || (size_t)n >= sizeof(line)) {
+        for (;;) {
+            vma = mt_find(&vm->vm_mt, &index, UVMTOP - 1);
+            if (vma == NULL)
+                break;
+            if ((vma->flags & VMA_FLAG_USER) == 0)
+                continue;
+            if (pos >= buf_size ||
+                buf_size - pos < PROCFS_MAPS_LINE_RESERVE) {
                 truncated = true;
                 break;
             }
-            if (pos + (size_t)n >= buf_size) {
+            int n = procfs_format_vma_header(buf + pos, buf_size - pos, vma);
+            if (n < 0 || (size_t)n >= buf_size - pos) {
                 truncated = true;
                 break;
             }
-            memmove(buf + pos, line, (size_t)n);
             pos += (size_t)n;
         }
         vm_runlock(vm);
@@ -1310,85 +1510,22 @@ static char *procfs_gen_cpuinfo(void) {
     if (buf == NULL)
         return ERR_PTR(-ENOMEM);
 #ifdef __x86_64__
-    uint32 max_leaf, ebx, ecx, edx;
-    uint32 ebx_ext, ecx_ext, edx_ext;
-    uint32 max_ext;
-    char vendor[13];
-    char brand[49];
     int pos = 0;
     int ncpu = cpu_possible_count();
-
-    asm volatile("cpuid"
-                 : "=a"(max_leaf), "=b"(ebx), "=c"(ecx), "=d"(edx)
-                 : "a"(0), "c"(0));
-    memmove(vendor + 0, &ebx, sizeof(ebx));
-    memmove(vendor + 4, &edx, sizeof(edx));
-    memmove(vendor + 8, &ecx, sizeof(ecx));
-    vendor[12] = '\0';
-
-    uint32 eax1 = 0, ebx1 = 0, ecx1 = 0, edx1 = 0;
-    if (max_leaf >= 1) {
-        asm volatile("cpuid"
-                     : "=a"(eax1), "=b"(ebx1), "=c"(ecx1), "=d"(edx1)
-                     : "a"(1), "c"(0));
-    }
-
-    uint32 eax7 = 0, ebx7 = 0, ecx7 = 0, edx7 = 0;
-    if (max_leaf >= 7) {
-        asm volatile("cpuid"
-                     : "=a"(eax7), "=b"(ebx7), "=c"(ecx7), "=d"(edx7)
-                     : "a"(7), "c"(0));
-    }
-
-    asm volatile("cpuid"
-                 : "=a"(max_ext), "=b"(ebx_ext), "=c"(ecx_ext), "=d"(edx_ext)
-                 : "a"(0x80000000U), "c"(0));
-    (void)ebx_ext;
-    (void)ecx_ext;
-    (void)edx_ext;
-    uint32 eax_ext1 = 0, ebx_ext1 = 0, ecx_ext1 = 0, edx_ext1 = 0;
-    if (max_ext >= 0x80000001U) {
-        asm volatile("cpuid"
-                     : "=a"(eax_ext1), "=b"(ebx_ext1), "=c"(ecx_ext1), "=d"(edx_ext1)
-                     : "a"(0x80000001U), "c"(0));
-    }
-    (void)eax_ext1;
-    (void)ebx_ext1;
-
-    memset(brand, 0, sizeof(brand));
-    if (max_ext >= 0x80000004U) {
-        uint32 *brand_words = (uint32 *)brand;
-        for (uint32 leaf = 0; leaf < 3; leaf++) {
-            asm volatile("cpuid"
-                         : "=a"(brand_words[leaf * 4 + 0]),
-                           "=b"(brand_words[leaf * 4 + 1]),
-                           "=c"(brand_words[leaf * 4 + 2]),
-                           "=d"(brand_words[leaf * 4 + 3])
-                         : "a"(0x80000002U + leaf), "c"(0));
-        }
-        brand[48] = '\0';
-    }
-    if (brand[0] == '\0')
-        snprintf(brand, sizeof(brand), "QEMU Virtual CPU version 2.5+");
-
-    uint32 family = (eax1 >> 8) & 0xf;
-    uint32 model = (eax1 >> 4) & 0xf;
-    uint32 stepping = eax1 & 0xf;
-    uint32 ext_family = (eax1 >> 20) & 0xff;
-    uint32 ext_model = (eax1 >> 16) & 0xf;
-    if (family == 0xf)
-        family += ext_family;
-    if (family == 0x6 || family == 0xf)
-        model += ext_model << 4;
+    const char *vendor = "GenuineIntel";
+    const char *brand = "xv6 Linux ABI Virtual CPU";
+    const char *flags =
+        "fpu tsc msr pae cx8 apic sep cmov mmx fxsr sse sse2 syscall nx lm";
 
     for (int cpu = 0; cpu < ncpu && (size_t)pos < PROCFS_BUF_SIZE; cpu++) {
-        int n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
+        size_t rem = PROCFS_BUF_SIZE - (size_t)pos;
+        int n = snprintf(buf + pos, rem,
                          "processor\t: %d\n"
                          "vendor_id\t: %s\n"
-                         "cpu family\t: %u\n"
-                         "model\t\t: %u\n"
+                         "cpu family\t: 6\n"
+                         "model\t\t: 158\n"
                          "model name\t: %s\n"
-                         "stepping\t: %u\n"
+                         "stepping\t: 10\n"
                          "microcode\t: 0x0\n"
                          "cpu MHz\t\t: 0.000\n"
                          "cache size\t: 0 KB\n"
@@ -1400,116 +1537,22 @@ static char *procfs_gen_cpuinfo(void) {
                          "initial apicid\t: %d\n"
                          "fpu\t\t: yes\n"
                          "fpu_exception\t: yes\n"
-                         "cpuid level\t: %u\n"
+                         "cpuid level\t: 13\n"
                          "wp\t\t: yes\n"
-                         "flags\t\t:",
-                         cpu, vendor, family, model, brand, stepping,
-                         ncpu, cpu, ncpu, cpu, cpu, max_leaf);
-        if (n < 0)
+                         "flags\t\t: %s\n"
+                         "bugs\t\t:\n"
+                         "bogomips\t: 0.00\n"
+                         "clflush size\t: 64\n"
+                         "cache_alignment\t: 64\n"
+                         "address sizes\t: 40 bits physical, 48 bits virtual\n"
+                         "power management:\n"
+                         "\n",
+                         cpu, vendor, brand, ncpu, cpu, ncpu, cpu, cpu,
+                         flags);
+        if (n < 0 || (size_t)n >= rem) {
+            pos = PROCFS_BUF_SIZE - 1;
             break;
-        pos += n;
-
-#define PROCFS_APPEND_FLAG(cond, name) do {                                      \
-            if ((cond) && (size_t)pos < PROCFS_BUF_SIZE) {                      \
-                int __n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,    \
-                                   " %s", (name));                             \
-                if (__n > 0)                                                    \
-                    pos += __n;                                                 \
-            }                                                                   \
-        } while (0)
-        PROCFS_APPEND_FLAG(edx1 & (1U << 0), "fpu");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 3), "pse");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 4), "tsc");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 5), "msr");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 6), "pae");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 8), "cx8");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 9), "apic");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 11), "sep");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 12), "mtrr");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 13), "pge");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 15), "cmov");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 23), "mmx");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 24), "fxsr");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 25), "sse");
-        PROCFS_APPEND_FLAG(edx1 & (1U << 26), "sse2");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 0), "pni");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 1), "pclmulqdq");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 3), "monitor");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 9), "ssse3");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 12), "fma");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 13), "cx16");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 19), "sse4_1");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 20), "sse4_2");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 21), "x2apic");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 22), "movbe");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 23), "popcnt");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 24), "tsc_deadline_timer");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 25), "aes");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 26), "xsave");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 27), "osxsave");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 28), "avx");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 29), "f16c");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 30), "rdrand");
-        PROCFS_APPEND_FLAG(ecx1 & (1U << 31), "hypervisor");
-        PROCFS_APPEND_FLAG(edx_ext1 & (1U << 11), "syscall");
-        PROCFS_APPEND_FLAG(edx_ext1 & (1U << 20), "nx");
-        PROCFS_APPEND_FLAG(edx_ext1 & (1U << 27), "rdtscp");
-        PROCFS_APPEND_FLAG(edx_ext1 & (1U << 29), "lm");
-        PROCFS_APPEND_FLAG(ecx_ext1 & (1U << 0), "lahf_lm");
-        PROCFS_APPEND_FLAG(ecx_ext1 & (1U << 5), "abm");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 3), "bmi1");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 4), "hle");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 5), "avx2");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 7), "smep");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 8), "bmi2");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 9), "erms");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 10), "invpcid");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 11), "rtm");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 19), "adx");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 20), "smap");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 23), "clflushopt");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 24), "clwb");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 29), "sha_ni");
-        PROCFS_APPEND_FLAG(ebx7 & (1U << 30), "avx512bw");
-        PROCFS_APPEND_FLAG(ecx7 & (1U << 2), "umip");
-        PROCFS_APPEND_FLAG(ecx7 & (1U << 3), "pku");
-        PROCFS_APPEND_FLAG(ecx7 & (1U << 4), "ospke");
-        PROCFS_APPEND_FLAG(ecx7 & (1U << 22), "rdpid");
-#undef PROCFS_APPEND_FLAG
-
-        uint32 cpu_mhz = __timebase_frequency / 1000000U;
-        uint32 phys_bits = 40;
-        uint32 virt_bits = 48;
-        if (max_ext >= 0x80000008U) {
-            uint32 eax_ext8 = 0, ebx_ext8 = 0, ecx_ext8 = 0, edx_ext8 = 0;
-            asm volatile("cpuid"
-                         : "=a"(eax_ext8), "=b"(ebx_ext8),
-                           "=c"(ecx_ext8), "=d"(edx_ext8)
-                         : "a"(0x80000008U), "c"(0));
-            (void)ebx_ext8;
-            (void)ecx_ext8;
-            (void)edx_ext8;
-            if ((eax_ext8 & 0xff) != 0)
-                phys_bits = eax_ext8 & 0xff;
-            if (((eax_ext8 >> 8) & 0xff) != 0)
-                virt_bits = (eax_ext8 >> 8) & 0xff;
         }
-
-        n = snprintf(buf + pos, PROCFS_BUF_SIZE - (size_t)pos,
-                     "\n"
-                     "bugs\t\t:\n"
-                     "bogomips\t: %u.00\n"
-                     "clflush size\t: %u\n"
-                     "cache_alignment\t: %u\n"
-                     "address sizes\t: %u bits physical, %u bits virtual\n"
-                     "power management:\n"
-                     "\n",
-                     cpu_mhz * 2,
-                     ((ebx1 >> 8) & 0xff) ? ((ebx1 >> 8) & 0xff) * 8 : 64,
-                     ((ebx1 >> 8) & 0xff) ? ((ebx1 >> 8) & 0xff) * 8 : 64,
-                     phys_bits, virt_bits);
-        if (n < 0)
-            break;
         pos += n;
     }
 #else
@@ -1628,6 +1671,8 @@ static char *procfs_gen_mounts(void)
         return ERR_PTR(-ENOMEM);
     snprintf(buf, PROCFS_BUF_SIZE,
              "rootfs / ext4 rw 0 0\n"
+             "devtmpfs /dev devtmpfs rw,nosuid 0 0\n"
+             "tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n"
              "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
              "tmpfs /tmp tmpfs rw,nosuid,nodev 0 0\n");
     return buf;
@@ -1647,8 +1692,10 @@ static char *procfs_gen_mountinfo(void)
      */
     snprintf(buf, PROCFS_BUF_SIZE,
              "21 0 8:1 / / rw,relatime - ext4 rootfs rw\n"
-             "22 21 0:3 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n"
-             "23 21 0:4 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw\n");
+             "22 21 0:2 / /dev rw,nosuid - devtmpfs devtmpfs rw\n"
+             "23 22 0:5 / /dev/shm rw,nosuid,nodev - tmpfs tmpfs rw\n"
+             "24 21 0:3 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n"
+             "25 21 0:4 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw\n");
     return buf;
 }
 
@@ -1669,6 +1716,15 @@ static char *procfs_gen_limits(void)
              "Max open files            %d                  %d                  files     \n"
              "Max address space         unlimited            unlimited            bytes     \n",
              NR_THREAD, NR_THREAD, NOFILE, NOFILE);
+    return buf;
+}
+
+static char *procfs_gen_setgroups(void)
+{
+    char *buf = kvmalloc(16);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    snprintf(buf, 16, "allow\n");
     return buf;
 }
 
@@ -1755,40 +1811,49 @@ static char *procfs_gen_smaps(int tgid)
         vm_rlock(vm);
         vma_t *vma;
         uint64 index = 0;
-        mt_for_each(&vm->vm_mt, vma, index, (uint64)(-1ULL)) {
-            char r = (vma->flags & PROT_READ) ? 'r' : '-';
-            char w = (vma->flags & PROT_WRITE) ? 'w' : '-';
-            char x = (vma->flags & PROT_EXEC) ? 'x' : '-';
-            char s = (vma->flags & VMA_FLAG_SHARED) ? 's' : 'p';
+        for (;;) {
+            vma = mt_find(&vm->vm_mt, &index, UVMTOP - 1);
+            if (vma == NULL)
+                break;
+            if ((vma->flags & VMA_FLAG_USER) == 0)
+                continue;
             unsigned long size_kb =
                 (unsigned long)((vma->end - vma->start) / 1024);
-            char entry[512];
-            int n = snprintf(entry, sizeof(entry),
-                             "%016llx-%016llx %c%c%c%c %08llx 00:00 0\n"
-                             "Size:           %8lu kB\n"
-                             "KernelPageSize: %8u kB\n"
-                             "MMUPageSize:    %8u kB\n"
-                             "Rss:            %8u kB\n"
-                             "Pss:            %8u kB\n"
-                             "Shared_Clean:   %8u kB\n"
-                             "Shared_Dirty:   %8u kB\n"
-                             "Private_Clean:  %8u kB\n"
-                             "Private_Dirty:  %8u kB\n"
-                             "Referenced:     %8u kB\n"
-                             "Anonymous:      %8u kB\n"
-                             "Swap:           %8u kB\n"
-                             "VmFlags: rd wr ex sh mr mw me ac\n",
-                             (unsigned long long)vma->start,
-                             (unsigned long long)vma->end,
-                             r, w, x, s,
-                             (unsigned long long)vma->pgoff,
-                             size_kb, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-            if (n < 0 || (size_t)n >= sizeof(entry) ||
-                pos + (size_t)n >= buf_size) {
+            if (pos >= buf_size ||
+                buf_size - pos < PROCFS_SMAPS_ENTRY_RESERVE) {
                 truncated = true;
                 break;
             }
-            memmove(buf + pos, entry, (size_t)n);
+            int n = procfs_format_vma_header(buf + pos, buf_size - pos, vma);
+            if (n < 0 || (size_t)n >= buf_size - pos) {
+                truncated = true;
+                break;
+            }
+            pos += (size_t)n;
+
+            if (pos >= buf_size) {
+                truncated = true;
+                break;
+            }
+            n = snprintf(buf + pos, buf_size - pos,
+                         "Size:           %8lu kB\n"
+                         "KernelPageSize: %8u kB\n"
+                         "MMUPageSize:    %8u kB\n"
+                         "Rss:            %8u kB\n"
+                         "Pss:            %8u kB\n"
+                         "Shared_Clean:   %8u kB\n"
+                         "Shared_Dirty:   %8u kB\n"
+                         "Private_Clean:  %8u kB\n"
+                         "Private_Dirty:  %8u kB\n"
+                         "Referenced:     %8u kB\n"
+                         "Anonymous:      %8u kB\n"
+                         "Swap:           %8u kB\n"
+                         "VmFlags: rd wr ex sh mr mw me ac\n",
+                         size_kb, 4, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+            if (n < 0 || (size_t)n >= buf_size - pos) {
+                truncated = true;
+                break;
+            }
             pos += (size_t)n;
         }
         vm_runlock(vm);
@@ -1906,6 +1971,126 @@ static struct procfs_blob *procfs_gen_pid_snapshot_blob(int tgid,
     if (src != NULL && len != 0)
         memmove(blob->data, src, len);
     blob->len = len;
+    pid_runlock();
+    return blob;
+}
+
+static struct procfs_blob *procfs_gen_pid_exec_blob(int tgid,
+                                                    enum procfs_entry_type type)
+{
+    struct procfs_blob *blob =
+        procfs_blob_alloc(TG_EXEC_SNAPSHOT_MAX_BYTES);
+    if (IS_ERR(blob))
+        return blob;
+
+    uint64 addrs[MAXARG > MAXENV ? MAXARG : MAXENV] = {0};
+    size_t lens[MAXARG > MAXENV ? MAXARG : MAXENV] = {0};
+    size_t count = 0;
+    vm_t *target_vm = NULL;
+
+    pid_rlock();
+    struct thread *p = NULL;
+    get_pid_thread(tgid, &p);
+    if (p == NULL || p->thread_group == NULL) {
+        pid_runlock();
+        kvfree(blob);
+        return ERR_PTR(-ESRCH);
+    }
+
+    const struct thread_group_exec_snapshot *snap =
+        &p->thread_group->exec_snapshot;
+    const char *fallback = NULL;
+    size_t fallback_len = 0;
+
+    switch (type) {
+    case PROC_PID_CMDLINE:
+    case PROC_TASK_CMDLINE:
+        fallback = snap->cmdline;
+        fallback_len = snap->cmdline_len;
+        count = snap->cmdline_argc;
+        if (count > MAXARG)
+            count = MAXARG;
+        memmove(addrs, snap->cmdline_addrs, count * sizeof(addrs[0]));
+        memmove(lens, snap->cmdline_lens, count * sizeof(lens[0]));
+        break;
+    case PROC_PID_ENVIRON:
+    case PROC_TASK_ENVIRON:
+        fallback = snap->environ;
+        fallback_len = snap->environ_len;
+        count = snap->environ_count;
+        if (count > MAXENV)
+            count = MAXENV;
+        memmove(addrs, snap->environ_addrs, count * sizeof(addrs[0]));
+        memmove(lens, snap->environ_lens, count * sizeof(lens[0]));
+        break;
+    default:
+        pid_runlock();
+        kvfree(blob);
+        return ERR_PTR(-EINVAL);
+    }
+
+    if (fallback_len > TG_EXEC_SNAPSHOT_MAX_BYTES)
+        fallback_len = TG_EXEC_SNAPSHOT_MAX_BYTES;
+    if (fallback != NULL && fallback_len != 0)
+        memmove(blob->data, fallback, fallback_len);
+    blob->len = fallback_len;
+
+    if (p->vm != NULL && count != 0) {
+        target_vm = p->vm;
+        vm_dup(target_vm);
+    }
+    pid_runlock();
+
+    if (target_vm == NULL)
+        return blob;
+
+    size_t pos = 0;
+    int live_ok = 1;
+    memset(blob->data, 0, TG_EXEC_SNAPSHOT_MAX_BYTES);
+    for (size_t i = 0; i < count && pos < TG_EXEC_SNAPSHOT_MAX_BYTES; i++) {
+        size_t len = lens[i];
+        if (addrs[i] == 0 || len == 0)
+            continue;
+        if (len > TG_EXEC_SNAPSHOT_MAX_BYTES - pos)
+            len = TG_EXEC_SNAPSHOT_MAX_BYTES - pos;
+        if (vm_copyin(target_vm, blob->data + pos, addrs[i], len) != 0) {
+            live_ok = 0;
+            break;
+        }
+        pos += len;
+    }
+    vm_put(target_vm);
+
+    if (live_ok) {
+        blob->len = pos;
+        blob->data[blob->len] = '\0';
+        return blob;
+    }
+
+    memset(blob->data, 0, TG_EXEC_SNAPSHOT_MAX_BYTES);
+    pid_rlock();
+    p = NULL;
+    get_pid_thread(tgid, &p);
+    if (p == NULL || p->thread_group == NULL) {
+        pid_runlock();
+        blob->len = 0;
+        return blob;
+    }
+    snap = &p->thread_group->exec_snapshot;
+    fallback = NULL;
+    fallback_len = 0;
+    if (type == PROC_PID_CMDLINE || type == PROC_TASK_CMDLINE) {
+        fallback = snap->cmdline;
+        fallback_len = snap->cmdline_len;
+    } else {
+        fallback = snap->environ;
+        fallback_len = snap->environ_len;
+    }
+    if (fallback_len > TG_EXEC_SNAPSHOT_MAX_BYTES)
+        fallback_len = TG_EXEC_SNAPSHOT_MAX_BYTES;
+    if (fallback != NULL && fallback_len != 0)
+        memmove(blob->data, fallback, fallback_len);
+    blob->len = fallback_len;
     pid_runlock();
     return blob;
 }
@@ -2033,13 +2218,68 @@ static char *procfs_gen_resources(int tgid) {
     return buf;
 }
 
+static int procfs_open_mem(struct procfs_inode *pi, struct vfs_file *file,
+                           int f_flags)
+{
+    (void)f_flags;
+
+    struct procfs_mem_file *mf = kvmalloc(sizeof(*mf));
+    if (mf == NULL)
+        return -ENOMEM;
+    memset(mf, 0, sizeof(*mf));
+
+    int target = (pi->type == PROC_TASK_MEM && pi->tid > 0) ? pi->tid : pi->pid;
+    vm_t *target_vm = NULL;
+    int ret = 0;
+
+    pid_rlock();
+    struct thread *p = NULL;
+    get_pid_thread(target, &p);
+    if (p == NULL || p->vm == NULL || p->tgid != pi->pid ||
+        p->thread_group == NULL || p->thread_group->is_kernel) {
+        ret = -ESRCH;
+        goto out_unlock;
+    }
+
+    struct thread_group *target_tg = p->thread_group;
+    struct thread_group *current_tg = current != NULL ? current->thread_group : NULL;
+    bool same_group = current != NULL && current->tgid == p->tgid;
+    bool root = current_tg != NULL && current_tg->euid == 0;
+    bool same_creds = current_tg != NULL &&
+        current_tg->euid == target_tg->euid &&
+        current_tg->egid == target_tg->egid &&
+        current_tg->euid == target_tg->suid;
+    int dumpable = __atomic_load_n(&target_tg->dumpable, __ATOMIC_ACQUIRE);
+
+    if (!same_group && !root && !(same_creds && dumpable != 0)) {
+        ret = -EACCES;
+        goto out_unlock;
+    }
+
+    target_vm = p->vm;
+    vm_dup(target_vm);
+
+out_unlock:
+    pid_runlock();
+
+    if (ret != 0) {
+        kvfree(mf);
+        return ret;
+    }
+
+    mf->vm = target_vm;
+    mf->pid = pi->pid;
+    file->private_data = mf;
+    file->ops = &procfs_mem_file_ops;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  procfs_open – set file ops; generate content for regular files   */
 /* ------------------------------------------------------------------ */
 
 static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
                        int f_flags) {
-    (void)f_flags;
     struct procfs_inode *pi = procfs_i(inode);
 
     if (S_ISDIR(inode->mode)) {
@@ -2051,6 +2291,19 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         /* Symlinks: readlink is invoked by VFS, no file ops needed */
         return 0;
     }
+
+    if (pi->type == PROC_PID_OOM_SCORE_ADJ) {
+        struct procfs_pid_file *pf = kvmalloc(sizeof(*pf));
+        if (pf == NULL)
+            return -ENOMEM;
+        pf->pid = pi->pid;
+        file->private_data = pf;
+        file->ops = &procfs_oom_score_adj_file_ops;
+        return 0;
+    }
+
+    if (pi->type == PROC_PID_MEM || pi->type == PROC_TASK_MEM)
+        return procfs_open_mem(pi, file, f_flags);
 
     /* Regular file: generate content into a heap buffer */
     char *buf = NULL;
@@ -2071,7 +2324,7 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_PID_CMDLINE:
     case PROC_TASK_CMDLINE:
-        blob = procfs_gen_pid_snapshot_blob(pi->pid, pi->type);
+        blob = procfs_gen_pid_exec_blob(pi->pid, pi->type);
         break;
     case PROC_PID_COMM:
         buf = procfs_gen_pid_comm(pi->pid);
@@ -2139,9 +2392,14 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_TASK_LIMITS:
         buf = procfs_gen_limits();
         break;
+    case PROC_PID_SETGROUPS:
+        buf = procfs_gen_setgroups();
+        break;
     case PROC_PID_ENVIRON:
-    case PROC_PID_AUXV:
     case PROC_TASK_ENVIRON:
+        blob = procfs_gen_pid_exec_blob(pi->pid, pi->type);
+        break;
+    case PROC_PID_AUXV:
     case PROC_TASK_AUXV:
         blob = procfs_gen_pid_snapshot_blob(pi->pid, pi->type);
         break;

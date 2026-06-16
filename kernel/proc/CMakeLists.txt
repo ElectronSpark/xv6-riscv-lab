@@ -8,6 +8,7 @@ set(PROC_C_SRCS
     sys_signal.c
     sys_misc.c
     sysproc.c
+    pidfd.c
     workqueue.c
     exit.c
     pid.c

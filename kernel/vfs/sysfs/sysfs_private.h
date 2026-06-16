@@ -40,6 +40,14 @@
 #define SYSFS_INO_CPU_PRESENT          28ULL
 #define SYSFS_INO_CPU_POSSIBLE         29ULL
 #define SYSFS_INO_CPU_KERNEL_MAX       30ULL
+#define SYSFS_INO_CPU_BASE             1000ULL
+#define SYSFS_INO_CPU_STRIDE           3ULL
+#define SYSFS_CPU_DIR_INO(cpu) \
+    (SYSFS_INO_CPU_BASE + (uint64)(cpu) * SYSFS_INO_CPU_STRIDE)
+#define SYSFS_CPU_CPUFREQ_INO(cpu) \
+    (SYSFS_CPU_DIR_INO(cpu) + 1ULL)
+#define SYSFS_CPU_CPUFREQ_MAX_INO(cpu) \
+    (SYSFS_CPU_DIR_INO(cpu) + 2ULL)
 
 #define SYSFS_INO_DRM_ATTR_BASE        100ULL
 #define SYSFS_INO_PRIMARY_ATTR_BASE    SYSFS_INO_DRM_ATTR_BASE
@@ -79,6 +87,7 @@ enum sysfs_attr_type {
     SYSFS_ATTR_CPU_PRESENT,
     SYSFS_ATTR_CPU_POSSIBLE,
     SYSFS_ATTR_CPU_KERNEL_MAX,
+    SYSFS_ATTR_CPUINFO_MAX_FREQ,
 };
 
 struct sysfs_inode {

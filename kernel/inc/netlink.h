@@ -209,6 +209,8 @@ int  netlink_sock_sendto(int fd, uint64 ubuf, size_t len, int flags,
                          uint64 udest, int addrlen);
 int  netlink_sock_recvfrom(int fd, uint64 ubuf, size_t len, int flags,
                            uint64 usrc, uint64 uaddrlen);
+int  netlink_sock_recv(int fd, uint64 buf, size_t len, int flags,
+                       uint64 usrc, uint64 uaddrlen, bool user);
 
 /* Check if a vfs_file is an AF_NETLINK socket */
 int  netlink_sock_is_netlink(struct vfs_file *f);

@@ -17,6 +17,7 @@
 #include "proc/tq.h"
 #include "proc/sched.h"
 #include "mm/slab.h"
+#include "dev/cdev.h"
 #include "vfs/file.h"
 #include "vfs/vfs_types.h"
 #include "vfs/poll.h"
@@ -77,6 +78,11 @@ static int knote_file_poll_revents(struct knote *kn)
         return 0;
 
     struct vfs_file *f = kn->attached_file;
+    if (kn->kq != NULL && (kn->kq->flags & KQ_EPOLL_COMPAT) &&
+        __atomic_load_n(&f->visible_fd_refs, __ATOMIC_ACQUIRE) == 0) {
+        return 0;
+    }
+
     short events = kn->filter == EVFILT_READ
         ? (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND | POLLRDHUP)
         : (POLLOUT | POLLWRNORM | POLLWRBAND);
@@ -263,6 +269,9 @@ int kqueue_epoll_contains_kqueue(struct kqueue *root, struct kqueue *needle,
     struct knote *tmp = NULL;
     list_foreach_node_safe(&root->registered, kn, tmp, kq_entry) {
         if (!knote_is_file_filter(kn) || kn->attached_file == NULL)
+            continue;
+        if (__atomic_load_n(&kn->attached_file->visible_fd_refs,
+                            __ATOMIC_ACQUIRE) == 0)
             continue;
 
         struct kqueue *child = kqueue_from_file(kn->attached_file);
@@ -469,6 +478,45 @@ void vfs_file_knote_notify(struct vfs_file *file, int filter, int64 data) {
 }
 
 /*
+ * cdev_knote_notify - walk a character device's knote list and enqueue
+ * matching knotes.
+ *
+ * Character device readiness is often shared device state rather than
+ * per-open-file state.  /dev/kbd and /dev/mouse are examples: an input event
+ * pushed by one fd must wake a compositor epolling a different fd for the
+ * same device.
+ */
+void cdev_knote_notify(cdev_t *cdev, int filter, int64 data) {
+    if (cdev == NULL)
+        return;
+
+    struct vfs_file *propagate[MAX_KNOTE_PROPAGATE];
+    int nprop = 0;
+
+    spin_lock(&cdev->knote_lock);
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+    list_foreach_node_safe(&cdev->knote_list, kn, tmp, source_entry) {
+        if (kn->filter == filter) {
+            struct vfs_file *kq_file =
+                __knote_enqueue_core(kn, data, 0);
+            if (kq_file) {
+                if (nprop < MAX_KNOTE_PROPAGATE)
+                    propagate[nprop++] = kq_file;
+                else
+                    vfs_fput(kq_file);
+            }
+        }
+    }
+    spin_unlock(&cdev->knote_lock);
+
+    for (int i = 0; i < nprop; i++) {
+        vfs_file_knote_notify(propagate[i], EVFILT_READ, 0);
+        vfs_fput(propagate[i]);
+    }
+}
+
+/*
  * vfs_inode_knote_notify - walk an inode's knote list and enqueue for vnode events
  */
 void vfs_inode_knote_notify(struct vfs_inode *inode, uint32 fflags) {
@@ -578,7 +626,10 @@ int kqueue_epoll_has_ident(struct kqueue *kq, uint64 ident)
     struct knote *tmp = NULL;
     list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry) {
         if (kn->ident == ident &&
-            (kn->filter == EVFILT_READ || kn->filter == EVFILT_WRITE)) {
+            (kn->filter == EVFILT_READ || kn->filter == EVFILT_WRITE) &&
+            (kn->attached_file == NULL ||
+             __atomic_load_n(&kn->attached_file->visible_fd_refs,
+                             __ATOMIC_ACQUIRE) != 0)) {
             found = 1;
             break;
         }
@@ -641,6 +692,37 @@ static void __kqueue_detach_knote(struct kqueue *kq, struct knote *kn) {
         return;
 
     knote_free(kn);
+}
+
+void kqueue_epoll_purge_closed_files(struct kqueue *kq)
+{
+    if (kq == NULL || !(kq->flags & KQ_EPOLL_COMPAT))
+        return;
+
+    for (;;) {
+        struct knote *closed = NULL;
+
+        spin_lock(&kq->lock);
+        struct knote *kn = NULL;
+        struct knote *tmp = NULL;
+        list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry) {
+            if (!knote_is_file_filter(kn) || kn->attached_file == NULL)
+                continue;
+            if (__atomic_load_n(&kn->attached_file->visible_fd_refs,
+                                __ATOMIC_ACQUIRE) == 0) {
+                closed = kn;
+                break;
+            }
+        }
+
+        if (closed == NULL) {
+            spin_unlock(&kq->lock);
+            break;
+        }
+
+        __kqueue_detach_knote(kq, closed);
+        spin_unlock(&kq->lock);
+    }
 }
 
 /*

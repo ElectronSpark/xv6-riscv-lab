@@ -24,6 +24,7 @@
 #include "timer/timer.h"
 #include "timer/goldfish_rtc.h"
 #include "string.h"
+#include "cmdline.h"
 
 #include <stdarg.h>
 
@@ -51,6 +52,21 @@ static uint64 sem_timeout_count = 0;
 #else
 #define SYS_DBG(fmt, ...) do {} while(0)
 #endif
+
+static int lwip_mbox_full_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("lwip_mbox_full_trace", value,
+                                    sizeof(value)) == 0 &&
+                  value[0] != '0';
+        initialized = 1;
+    }
+    return enabled;
+}
 
 /* ========================================================================== */
 /* Minimal snprintf / vsnprintf for lwIP (kernel has no libc)                 */
@@ -535,13 +551,16 @@ err_t sys_mbox_trypost(sys_mbox_t *mbox, void *msg)
     if (sem_trywait(&mbox->not_full) != 0) {
         static uint64 trypost_full_count;
         trypost_full_count++;
-        if (trypost_full_count <= 8 || (trypost_full_count % 256) == 0) {
+        if (lwip_mbox_full_trace_enabled() &&
+            (trypost_full_count <= 8 || (trypost_full_count % 256) == 0)) {
             int cnt;
+            int max;
             spin_lock(&mbox->lock);
             cnt = mbox->count;
+            max = mbox->max;
             spin_unlock(&mbox->lock);
-            printf("lwip: mailbox full in trypost (count=%d size=%d total=%lu)\n",
-                   cnt, SYS_MBOX_SIZE, trypost_full_count);
+            printf("lwip: mailbox full in trypost (count=%d max=%d cap=%d total=%lu)\n",
+                   cnt, max, SYS_MBOX_SIZE, trypost_full_count);
         }
 #if SYS_ARCH_DEBUG
         mbox_trypost_fail_count++;

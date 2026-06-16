@@ -34,6 +34,7 @@
  *           cgroup         → regular file
  *       maps               → regular file
  *       smaps              → regular file
+ *       mem                → process memory image
  *       mountinfo          → regular file
  *       mounts             → regular file
  *       limits             → regular file
@@ -69,6 +70,7 @@
 #define KERNEL_VFS_PROCFS_PRIVATE_H
 
 #include "vfs/vfs_types.h"
+#include "mm/vm_types.h"
 
 /* ------------------------------------------------------------------ */
 /*  VFS directory iteration cookie sentinels (same as tmpfs)          */
@@ -116,8 +118,13 @@ enum procfs_entry_type {
     PROC_PID_ENVIRON,   /* /proc/<tgid>/environ   */
     PROC_PID_AUXV,      /* /proc/<tgid>/auxv      */
     PROC_PID_SMAPS,     /* /proc/<tgid>/smaps     */
+    PROC_PID_OOM_SCORE_ADJ, /* /proc/<tgid>/oom_score_adj */
+    PROC_PID_MEM,       /* /proc/<tgid>/mem       */
     PROC_TASKDIR,       /* /proc/<tgid>/task      */
     PROC_TASK_TID_DIR,  /* /proc/<tgid>/task/<tid> */
+    PROC_PID_NS_DIR,    /* /proc/<tgid>/ns        */
+    PROC_PID_NS_ENTRY,  /* /proc/<tgid>/ns/<name> */
+    PROC_PID_SETGROUPS, /* /proc/<tgid>/setgroups */
     PROC_TASK_STATUS,
     PROC_TASK_STAT,
     PROC_TASK_STATM,
@@ -131,8 +138,11 @@ enum procfs_entry_type {
     PROC_TASK_LIMITS,
     PROC_TASK_ENVIRON,
     PROC_TASK_AUXV,
+    PROC_TASK_MEM,
     PROC_TASK_FDDIR,
     PROC_TASK_FDINFODIR,
+    PROC_TASK_NS_DIR,
+    PROC_TASK_NS_ENTRY,
     PROC_SYS_KERNEL_OSTYPE,
     PROC_SYS_KERNEL_OSRELEASE,
     PROC_SYS_KERNEL_VERSION,
@@ -202,9 +212,9 @@ enum procfs_entry_type {
 #define PROCFS_INO_SYS_FS_INOTIFY_MAX_USER_INSTANCES 39ULL
 #define PROCFS_INO_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS 40ULL
 
-/* Each pid occupies 32 slots; max pid in xv6 fits well within 64-bit */
+/* Each pid occupies 64 slots; max pid in xv6 fits well within 64-bit */
 #define PROCFS_PID_BASE    100ULL
-#define PROCFS_PID_STRIDE  32ULL
+#define PROCFS_PID_STRIDE  64ULL
 #define PROCFS_FD_BASE     (PROCFS_PID_BASE + 100000ULL * PROCFS_PID_STRIDE)
 
 #define PROCFS_PID_DIR_INO(tgid)    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 0)
@@ -224,8 +234,16 @@ enum procfs_entry_type {
 #define PROCFS_PID_ENVIRON_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 14)
 #define PROCFS_PID_AUXV_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 15)
 #define PROCFS_PID_SMAPS_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 16)
-#define PROCFS_PID_TASKDIR_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 17)
-#define PROCFS_PID_FDINFODIR_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 18)
+#define PROCFS_PID_MEM_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 17)
+#define PROCFS_PID_TASKDIR_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 18)
+#define PROCFS_PID_FDINFODIR_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 19)
+#define PROCFS_PID_OOM_SCORE_ADJ_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 20)
+#define PROCFS_NS_COUNT 10
+#define PROCFS_PID_NS_DIR_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 21)
+#define PROCFS_PID_NS_ENTRY_INO(tgid, nsidx) \
+    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 22 + (uint64)(nsidx))
+#define PROCFS_PID_SETGROUPS_INO(tgid) \
+    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 32)
 #define PROCFS_FD_INO(tgid, fd)     (PROCFS_FD_BASE + (uint64)(tgid)*1000ULL + (uint64)(fd))
 
 /*
@@ -240,6 +258,10 @@ enum procfs_entry_type {
     (PROCFS_TASK_BASE + (uint64)(tgid) * PROCFS_TASK_TGID_STRIDE + \
      (uint64)(tid) * PROCFS_TASK_TID_STRIDE + (uint64)(slot))
 #define PROCFS_TASK_TID_DIR_INO(tgid, tid) PROCFS_TASK_INO(tgid, tid, 0)
+#define PROCFS_TASK_MEM_INO(tgid, tid) PROCFS_TASK_INO(tgid, tid, 14)
+#define PROCFS_TASK_NS_DIR_INO(tgid, tid) PROCFS_TASK_INO(tgid, tid, 17)
+#define PROCFS_TASK_NS_ENTRY_INO(tgid, tid, nsidx) \
+    PROCFS_TASK_INO(tgid, tid, 18 + (uint64)(nsidx))
 
 #define PROCFS_FDINFO_BASE \
     (PROCFS_TASK_BASE + 100000ULL * PROCFS_TASK_TGID_STRIDE)
@@ -255,6 +277,7 @@ struct procfs_inode {
     int                    pid;       /* tgid; 0 for global entries       */
     int                    tid;       /* only valid for PROC_TASK_*       */
     int                    fd;        /* only valid for PROC_FD_ENTRY      */
+    int                    ns_idx;    /* only valid for PROC_*_NS_ENTRY   */
 };
 
 /* Cast helper: get procfs_inode from embedded vfs_inode */
@@ -274,6 +297,15 @@ struct procfs_blob {
     char data[0];
 };
 
+struct procfs_pid_file {
+    int pid;
+};
+
+struct procfs_mem_file {
+    vm_t *vm;
+    int pid;
+};
+
 /* ------------------------------------------------------------------ */
 /*  Module-internal symbols                                           */
 /* ------------------------------------------------------------------ */
@@ -288,6 +320,8 @@ extern struct vfs_inode_ops procfs_inode_ops;
 /* Exported by file.c */
 extern struct vfs_file_ops procfs_reg_file_ops;
 extern struct vfs_file_ops procfs_blob_file_ops;
+extern struct vfs_file_ops procfs_oom_score_adj_file_ops;
+extern struct vfs_file_ops procfs_mem_file_ops;
 extern struct vfs_file_ops procfs_dir_file_ops;
 
 #endif /* KERNEL_VFS_PROCFS_PRIVATE_H */

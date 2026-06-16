@@ -87,6 +87,27 @@ void dma_fence_put(struct dma_fence *fence)
         kvfree(fence);
 }
 
+void dma_fence_set_virtio_fence(struct dma_fence *fence, uint64 virtio_fence)
+{
+    if (fence == NULL)
+        return;
+    spin_lock(&fence->lock);
+    fence->virtio_fence = virtio_fence;
+    spin_unlock(&fence->lock);
+}
+
+uint64 dma_fence_get_virtio_fence(struct dma_fence *fence)
+{
+    uint64 virtio_fence;
+
+    if (fence == NULL)
+        return 0;
+    spin_lock(&fence->lock);
+    virtio_fence = fence->virtio_fence;
+    spin_unlock(&fence->lock);
+    return virtio_fence;
+}
+
 int dma_fence_signal(struct dma_fence *fence, int error)
 {
     list_node_t callbacks;
@@ -216,6 +237,22 @@ int dma_fence_wait(struct dma_fence *fence, int64 timeout_ns)
     return ret;
 }
 
+int dma_fence_wait_uninterruptible(struct dma_fence *fence)
+{
+    int ret = 0;
+
+    if (fence == NULL)
+        return -EINVAL;
+
+    spin_lock(&fence->lock);
+    while (!fence->signaled && fence->error == 0)
+        sleep_on_chan(&fence->wakeup_seq, &fence->lock);
+    if (fence->error != 0)
+        ret = fence->error < 0 ? fence->error : -fence->error;
+    spin_unlock(&fence->lock);
+    return ret;
+}
+
 struct dma_fence_selftest_state {
     int callbacks;
     uint64 context;
@@ -267,8 +304,6 @@ int dma_fence_selftest(void)
     }
 
     dma_fence_selftest_done = 1;
-    printf("dma_fence: selftest ok context=%lu seqno=%lu callbacks=%d\n",
-           fence->context, fence->seqno, state.callbacks);
 out:
     dma_fence_put(fence);
     return ret;

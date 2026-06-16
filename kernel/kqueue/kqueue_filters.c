@@ -35,9 +35,22 @@ static int knote_read_attach(struct knote *kn) {
         return -EBADF;
     kn->attached_file = f;
 
-    spin_lock(&f->knote_lock);
-    list_node_push(&f->knote_list, kn, source_entry);
-    spin_unlock(&f->knote_lock);
+    if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL) {
+        int ret = cdev_dup(f->cdev);
+        if (ret != 0) {
+            vfs_fput(f);
+            kn->attached_file = NULL;
+            return ret;
+        }
+        kn->attached_cdev = f->cdev;
+        spin_lock(&f->cdev->knote_lock);
+        list_node_push(&f->cdev->knote_list, kn, source_entry);
+        spin_unlock(&f->cdev->knote_lock);
+    } else {
+        spin_lock(&f->knote_lock);
+        list_node_push(&f->knote_list, kn, source_entry);
+        spin_unlock(&f->knote_lock);
+    }
 
     return 0;
 }
@@ -46,10 +59,20 @@ static void knote_read_detach(struct knote *kn) {
     struct vfs_file *f = kn->attached_file;
     if (f == NULL)
         return;
-    spin_lock(&f->knote_lock);
-    list_node_detach(kn, source_entry);
-    list_entry_init(&kn->source_entry);
-    spin_unlock(&f->knote_lock);
+    if (kn->attached_cdev != NULL) {
+        cdev_t *cdev = kn->attached_cdev;
+        spin_lock(&cdev->knote_lock);
+        list_node_detach(kn, source_entry);
+        list_entry_init(&kn->source_entry);
+        spin_unlock(&cdev->knote_lock);
+        kn->attached_cdev = NULL;
+        cdev_put(cdev);
+    } else {
+        spin_lock(&f->knote_lock);
+        list_node_detach(kn, source_entry);
+        list_entry_init(&kn->source_entry);
+        spin_unlock(&f->knote_lock);
+    }
     vfs_fput(f);
     kn->attached_file = NULL;
 }
@@ -99,9 +122,22 @@ static int knote_write_attach(struct knote *kn) {
         return -EBADF;
     kn->attached_file = f;
 
-    spin_lock(&f->knote_lock);
-    list_node_push(&f->knote_list, kn, source_entry);
-    spin_unlock(&f->knote_lock);
+    if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL) {
+        int ret = cdev_dup(f->cdev);
+        if (ret != 0) {
+            vfs_fput(f);
+            kn->attached_file = NULL;
+            return ret;
+        }
+        kn->attached_cdev = f->cdev;
+        spin_lock(&f->cdev->knote_lock);
+        list_node_push(&f->cdev->knote_list, kn, source_entry);
+        spin_unlock(&f->cdev->knote_lock);
+    } else {
+        spin_lock(&f->knote_lock);
+        list_node_push(&f->knote_list, kn, source_entry);
+        spin_unlock(&f->knote_lock);
+    }
 
     return 0;
 }
@@ -110,10 +146,20 @@ static void knote_write_detach(struct knote *kn) {
     struct vfs_file *f = kn->attached_file;
     if (f == NULL)
         return;
-    spin_lock(&f->knote_lock);
-    list_node_detach(kn, source_entry);
-    list_entry_init(&kn->source_entry);
-    spin_unlock(&f->knote_lock);
+    if (kn->attached_cdev != NULL) {
+        cdev_t *cdev = kn->attached_cdev;
+        spin_lock(&cdev->knote_lock);
+        list_node_detach(kn, source_entry);
+        list_entry_init(&kn->source_entry);
+        spin_unlock(&cdev->knote_lock);
+        kn->attached_cdev = NULL;
+        cdev_put(cdev);
+    } else {
+        spin_lock(&f->knote_lock);
+        list_node_detach(kn, source_entry);
+        list_entry_init(&kn->source_entry);
+        spin_unlock(&f->knote_lock);
+    }
     vfs_fput(f);
     kn->attached_file = NULL;
 }

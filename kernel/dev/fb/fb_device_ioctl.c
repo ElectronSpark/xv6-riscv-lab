@@ -682,6 +682,51 @@ static int fb_read(cdev_t *cdev, bool user, void *buf, size_t count)
     }
 }
 
+static int fb_read_current_framebuffer(uint32 x, uint32 y, uint32 w, uint32 h,
+                                       void *dst, uint32 dst_pitch,
+                                       uint32 *screen_width,
+                                       uint32 *screen_height,
+                                       uint32 *screen_pitch)
+{
+    uint32 xres;
+    uint32 yres;
+    uint32 pitch;
+    volatile uint8 *src;
+    uint8 *out = (uint8 *)dst;
+
+    if (dst == NULL || w == 0 || h == 0 || dst_pitch < w * sizeof(uint32))
+        return -EINVAL;
+
+    spin_lock(&fb_state.lock);
+    if (!fb_state.detected || fb_state.fb_virt == NULL ||
+        fb_state.bpp != 32) {
+        spin_unlock(&fb_state.lock);
+        return -ENODEV;
+    }
+    xres = fb_state.xres;
+    yres = fb_state.yres;
+    pitch = fb_state.pitch;
+    if (pitch < xres * sizeof(uint32) || x > xres || w > xres - x ||
+        y > yres || h > yres - y) {
+        spin_unlock(&fb_state.lock);
+        return -EINVAL;
+    }
+    src = fb_state.fb_virt + (uint64)y * pitch + (uint64)x * sizeof(uint32);
+    for (uint32 row = 0; row < h; row++)
+        memcpy(out + (uint64)row * dst_pitch,
+               (const void *)(src + (uint64)row * pitch),
+               (uint64)w * sizeof(uint32));
+    spin_unlock(&fb_state.lock);
+
+    if (screen_width != NULL)
+        *screen_width = xres;
+    if (screen_height != NULL)
+        *screen_height = yres;
+    if (screen_pitch != NULL)
+        *screen_pitch = pitch;
+    return 0;
+}
+
 static int fb_ioctl_for_owner(cdev_t *cdev, uint64 cmd, void *arg,
                               uint64 owner_id, pid_t owner_tgid)
 {
@@ -1037,6 +1082,7 @@ bo_copy_out:
         struct fb_gpu_scanout_read req;
         void *pixels;
         uint64 size;
+        int virtio_backed;
         int ret;
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
@@ -1051,9 +1097,19 @@ bo_copy_out:
         pixels = kvmalloc((size_t)size);
         if (pixels == NULL)
             return -ENOMEM;
-        ret = virtio_gpu_read_current_scanout(
-            req.x, req.y, req.w, req.h, pixels, req.pitch,
-            &req.screen_width, &req.screen_height, &req.screen_pitch);
+        memset(pixels, 0, (size_t)size);
+        spin_lock(&fb_state.lock);
+        virtio_backed = fb_state.virtio_backed;
+        spin_unlock(&fb_state.lock);
+        if (virtio_backed) {
+            ret = virtio_gpu_read_current_scanout(
+                req.x, req.y, req.w, req.h, pixels, req.pitch,
+                &req.screen_width, &req.screen_height, &req.screen_pitch);
+        } else {
+            ret = fb_read_current_framebuffer(
+                req.x, req.y, req.w, req.h, pixels, req.pitch,
+                &req.screen_width, &req.screen_height, &req.screen_pitch);
+        }
         if (ret == 0 &&
             either_copyout(1, req.pixels, pixels, (uint64)req.pitch * req.h) < 0)
             ret = -EFAULT;

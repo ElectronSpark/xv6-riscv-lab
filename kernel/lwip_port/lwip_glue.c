@@ -33,6 +33,7 @@
 #include "lwip/netif.h"
 #include "lwip/tcpip.h"
 #include "lwip/etharp.h"
+#include "lwip/ethip6.h"
 #include "lwip/dhcp.h"
 #include "lwip/pbuf.h"
 #include "lwip/err.h"
@@ -132,6 +133,9 @@ xv6_netif_init(struct netif *netif)
     netif->name[1] = 'n';
     netif->linkoutput = xv6_netif_linkoutput;
     netif->output     = etharp_output;
+#if LWIP_IPV6
+    netif->output_ip6 = ethip6_output;
+#endif
     netif->mtu        = 1500;
     netif->hwaddr_len = 6;
     /* Use MAC from registered netdev, fall back to hardcoded default */
@@ -358,7 +362,7 @@ static int __apply_netconf(struct netconf_req *req)
         /* Update DNS if provided */
         if (req->dns != 0) {
             ip_addr_t dns_addr;
-            dns_addr.addr = req->dns;
+            ip_addr_set_ip4_u32(&dns_addr, req->dns);
             dns_setserver(0, &dns_addr);
         }
 
@@ -728,6 +732,10 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
 
     netif_set_default(&xv6_netif);
 
+#if LWIP_IPV6
+    netif_create_ip6_linklocal_address(&xv6_netif, 1);
+#endif
+
     /* Set hostname before starting DHCP (sent in DHCP DISCOVER) */
     if (__netconf_req.hostname[0]) {
         netif_set_hostname(&xv6_netif, __netconf_req.hostname);
@@ -816,7 +824,7 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
     /* Override with config-specified DNS if provided */
     if (__netconf_req.dns != 0) {
         ip_addr_t dns_addr;
-        dns_addr.addr = __netconf_req.dns;
+        ip_addr_set_ip4_u32(&dns_addr, __netconf_req.dns);
         dns_setserver(0, &dns_addr);
         printf("lwip: DNS server set to %d.%d.%d.%d (from config)\n",
                (__netconf_req.dns >>  0) & 0xff,

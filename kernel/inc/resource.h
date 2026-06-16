@@ -27,7 +27,7 @@ struct rlimit {
 
 #define RLIM_INFINITY  ((uint64)-1ULL)
 
-/* Resource identifiers — match the newlib/musl/Linux values exactly */
+/* Resource identifiers — match the x86_64 Linux values exactly. */
 #define RLIMIT_CPU        0    /* CPU time per process (seconds)      */
 #define RLIMIT_FSIZE      1    /* max file size (bytes)               */
 #define RLIMIT_DATA       2    /* max data segment size               */
@@ -38,8 +38,14 @@ struct rlimit {
 #define RLIMIT_NOFILE     7    /* max number of open files            */
 #define RLIMIT_MEMLOCK    8    /* max locked-in-memory address space  */
 #define RLIMIT_AS         9    /* max address space (virtual memory)  */
+#define RLIMIT_LOCKS      10   /* max file locks held                 */
+#define RLIMIT_SIGPENDING 11   /* max queued signals                  */
+#define RLIMIT_MSGQUEUE   12   /* POSIX message queue bytes           */
+#define RLIMIT_NICE       13   /* max nice priority raise             */
+#define RLIMIT_RTPRIO     14   /* max realtime priority               */
+#define RLIMIT_RTTIME     15   /* realtime CPU time in microseconds   */
 
-#define RLIMIT_NLIMITS   10    /* number of resource limit types      */
+#define RLIMIT_NLIMITS   16    /* number of resource limit types      */
 
 /**
  * @brief Initialise a rlimit array to sensible defaults.

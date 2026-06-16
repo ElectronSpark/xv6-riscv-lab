@@ -82,7 +82,14 @@ static struct shrinker __pcache_shrinker = {
  * Falls back to order 0 on OOM.
  */
 #define PCACHE_FOLIO_ORDER_TMPFS 5
-#define PCACHE_FOLIO_ORDER_DISK  4
+/*
+ * Disk-backed multi-page folios need race-free per-subpage metadata before
+ * they are safe for mmaped ELF/shared-library faults.  ext4's fallback reader
+ * temporarily rewrites pcache_node offsets while filling a folio; concurrent
+ * loaders can observe the wrong dynamic-section page.  Keep disk pcache at
+ * order-0 until that path is fixed.
+ */
+#define PCACHE_FOLIO_ORDER_DISK  0
 
 /******************************************************************************
  * Predefine functions
@@ -2799,8 +2806,8 @@ void pcache_put_pages(struct pcache *pcache, struct pcache_page_vec *pvec) {
  * per-page pcache_read_page calls hit the fast path (uptodate check).
  *****************************************************************************/
 
-#define PCACHE_RA_WINDOW 16  /* max folios per readahead batch */
-#define PCACHE_RA_MAX_BYTES (1UL << 20)
+#define PCACHE_RA_WINDOW 64  /* max folios per readahead batch */
+#define PCACHE_RA_MAX_BYTES (4UL << 20)
 
 static inline loff_t pcache_readahead_window_end(loff_t start_pos,
                                                  loff_t file_end)

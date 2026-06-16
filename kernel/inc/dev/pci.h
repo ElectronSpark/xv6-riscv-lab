@@ -399,6 +399,7 @@ struct virtio_pci_discovery {
     int found;
     uint8 bus, dev, func;
     uint8 irq_line;
+    uint32 class_code;
     uint32 bar[6];
     // Offsets of virtio PCI caps in config space
     uint8 common_cfg_cap;

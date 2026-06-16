@@ -12,6 +12,7 @@
 
 struct vfs_file;
 struct vfs_inode;
+struct cdev;
 struct knote;  /* forward declaration for knote_ops */
 
 /*
@@ -43,8 +44,9 @@ struct knote_ops {
  *   - kqueue::registered (via kq_entry) — all registered knotes
  *   - kqueue::ready      (via ready_entry) — triggered knotes awaiting delivery
  * And optionally on a source-specific list:
- *   - vfs_file::knote_list / vfs_inode::knote_list / thread::kqueue_proc_knotes
- *     / sigacts_t::kqueue_signal_knotes[]  (via source_entry)
+ *   - vfs_file::knote_list / cdev::knote_list / vfs_inode::knote_list /
+ *     thread::kqueue_proc_knotes / sigacts_t::kqueue_signal_knotes[]
+ *     (via source_entry)
  */
 struct knote {
     /* Linkage on kqueue's registered list */
@@ -76,6 +78,7 @@ struct knote {
 
     /* Filter-specific state */
     struct vfs_file *attached_file;     /* EVFILT_READ/WRITE: tracked file */
+    struct cdev *attached_cdev;         /* EVFILT_READ/WRITE: cdev source */
     struct vfs_inode *attached_inode;   /* EVFILT_VNODE: tracked inode */
     int attached_pid;                   /* EVFILT_PROC: tracked PID */
     int64 timer_ms;                     /* EVFILT_TIMER: saved interval (ms) */
@@ -117,6 +120,7 @@ int kqueue_file_is_epoll(struct vfs_file *file);
 int kqueue_epoll_contains_kqueue(struct kqueue *root, struct kqueue *needle,
                                  int depth_limit);
 int kqueue_epoll_has_ident(struct kqueue *kq, uint64 ident);
+void kqueue_epoll_purge_closed_files(struct kqueue *kq);
 int kqueue_register(struct kqueue *kq, struct kevent *changelist, int nchanges);
 int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                 int timeout_ms);

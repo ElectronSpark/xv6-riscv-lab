@@ -247,7 +247,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         int    tgid   = (int)(offset / PROCFS_PID_STRIDE);
         int    slot   = (int)(offset % PROCFS_PID_STRIDE);
 
-        if (tgid <= 0 || slot > 18) {
+        if (tgid <= 0 || slot >= (int)PROCFS_PID_STRIDE) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -366,15 +366,45 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 4096;
             break;
-        case 17: /* /proc/<tgid>/task/ */
+        case 17: /* /proc/<tgid>/mem */
+            pi->type              = PROC_PID_MEM;
+            pi->vfs_inode.mode    = S_IFREG | 0600;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 0;
+            break;
+        case 18: /* /proc/<tgid>/task/ */
             pi->type              = PROC_TASKDIR;
             pi->vfs_inode.mode    = S_IFDIR | 0555;
             pi->vfs_inode.n_links = 2;
             break;
-        case 18: /* /proc/<tgid>/fdinfo/ */
+        case 19: /* /proc/<tgid>/fdinfo/ */
             pi->type              = PROC_FDINFODIR;
             pi->vfs_inode.mode    = S_IFDIR | 0555;
             pi->vfs_inode.n_links = 2;
+            break;
+        case 20: /* /proc/<tgid>/oom_score_adj */
+            pi->type              = PROC_PID_OOM_SCORE_ADJ;
+            pi->vfs_inode.mode    = S_IFREG | 0644;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 8;
+            break;
+        case 21: /* /proc/<tgid>/ns/ */
+            pi->type              = PROC_PID_NS_DIR;
+            pi->vfs_inode.mode    = S_IFDIR | 0555;
+            pi->vfs_inode.n_links = 2;
+            break;
+        case 22 ... 31: /* /proc/<tgid>/ns/<name> */
+            pi->type              = PROC_PID_NS_ENTRY;
+            pi->ns_idx            = slot - 22;
+            pi->vfs_inode.mode    = S_IFLNK | 0777;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 64;
+            break;
+        case 32: /* /proc/<tgid>/setgroups */
+            pi->type              = PROC_PID_SETGROUPS;
+            pi->vfs_inode.mode    = S_IFREG | 0644;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 8;
             break;
         default:
             slab_free(pi);
@@ -425,7 +455,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         int    tid    = (int)(rem / PROCFS_TASK_TID_STRIDE);
         int    slot   = (int)(rem % PROCFS_TASK_TID_STRIDE);
 
-        if (tgid <= 0 || tid <= 0 || slot < 0 || slot > 15) {
+        if (tgid <= 0 || tid <= 0 || slot < 0 || slot > 27) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -528,15 +558,33 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 0;
             break;
-        case 14: /* fd */
+        case 14: /* mem */
+            pi->type              = PROC_TASK_MEM;
+            pi->vfs_inode.mode    = S_IFREG | 0600;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 0;
+            break;
+        case 15: /* fd */
             pi->type              = PROC_TASK_FDDIR;
             pi->vfs_inode.mode    = S_IFDIR | 0555;
             pi->vfs_inode.n_links = 2;
             break;
-        case 15: /* fdinfo */
+        case 16: /* fdinfo */
             pi->type              = PROC_TASK_FDINFODIR;
             pi->vfs_inode.mode    = S_IFDIR | 0555;
             pi->vfs_inode.n_links = 2;
+            break;
+        case 17: /* ns */
+            pi->type              = PROC_TASK_NS_DIR;
+            pi->vfs_inode.mode    = S_IFDIR | 0555;
+            pi->vfs_inode.n_links = 2;
+            break;
+        case 18 ... 27: /* ns/<name> */
+            pi->type              = PROC_TASK_NS_ENTRY;
+            pi->ns_idx            = slot - 18;
+            pi->vfs_inode.mode    = S_IFLNK | 0777;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 64;
             break;
         default:
             slab_free(pi);

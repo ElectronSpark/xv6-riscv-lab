@@ -412,6 +412,7 @@ struct vfs_file {
     int f_flags;   // file access mode
     vfs_file_kind_t f_kind; // discriminator for the anonymous union below
     int ref_count; // reference count
+    char *opened_path; // best-effort path captured at open for /proc maps
     struct vfs_file_ops *ops;
     void *private_data; // filesystem-specific data
     mutex_t lock;       // protects f_pos

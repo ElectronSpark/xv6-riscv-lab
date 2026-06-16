@@ -69,7 +69,9 @@
  * IP options
  * -------------------------------------------------------------------------- */
 #define LWIP_IPV4                       1
-#define LWIP_IPV6                       0    /* IPv4 only for now */
+#define LWIP_IPV6                       1
+#define LWIP_IPV6_SCOPES                0    /* single xv6 netif; keep ABI scope_id in sockaddr */
+#define IPV6_FRAG_COPYHEADER            1    /* required by lwIP IPv6 reassembly on 64-bit */
 #define IP_FORWARD                      0
 /* xv6 NICs (e1000, virtio-net) support 1500-byte MTU and TCP MSS=1460,
  * so we never originate fragments and we don't accept inbound fragments

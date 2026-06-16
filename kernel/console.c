@@ -395,6 +395,16 @@ void consoleintr(int c) {
             procdump();
             return;
         }
+        if (c == C('B')) {
+            procdump_bt();
+            return;
+        }
+        if (c == C('O')) {
+            int irq_state = sleep_lock_irqsave();
+            scheduler_dump_chan_queue();
+            sleep_unlock_irqrestore(irq_state);
+            return;
+        }
         uint w = tty_inbuf_w;
         uint next = (w + 1) % TTY_INBUF_SIZE;
         if (next != tty_inbuf_r) { /* drop if full */
@@ -411,6 +421,15 @@ void consoleintr(int c) {
     case C('P'): // Print process list.
         procdump();
         break;
+    case C('B'):
+        procdump_bt();
+        break;
+    case C('O'): {
+        int irq_state = sleep_lock_irqsave();
+        scheduler_dump_chan_queue();
+        sleep_unlock_irqrestore(irq_state);
+        break;
+    }
     case C('U'): // Kill line.
         while (cons.e != cons.w &&
                cons.buf[(cons.e - 1) % INPUT_BUF_SIZE] != '\n') {

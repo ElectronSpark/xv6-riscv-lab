@@ -1,3 +1,24 @@
+#include <signal.h>
+
+#define GPU_DRM_FENCE_WAIT_TIMEOUT_MS 60000
+
+static int chrome_drm_ioctl_trace_enabled(void);
+
+static int chrome_drm_fence_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_drm_fence_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
 static int gpu_drm_gem_close(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_gem_close_compat req;
@@ -28,6 +49,14 @@ static int gpu_drm_gem_close(struct fb_gpu_render_owner *owner, uint64 arg)
         ret = virtio_gpu_user_resource_destroy(owner->id, owner->tgid,
                                                req.handle);
     return ret;
+}
+
+static int gpu_drm_execbuffer_async_allowed(void)
+{
+    if (!fb_cmdline_enabled("vgpu_async_pf") &&
+        !fb_cmdline_enabled("virtio_gpu_async_submit_3d"))
+        return 0;
+    return 1;
 }
 
 static int gpu_drm_execbuffer_resource_id_for_handle(
@@ -90,7 +119,57 @@ static int gpu_drm_execbuffer_resource_id_for_handle(
     return 0;
 }
 
-static int gpu_drm_execbuffer_wait_fence_fd(int32 fd)
+static int gpu_drm_wait_virtio_fence(uint64 fence, uint64 *signaled_out)
+{
+    uint64 deadline_ms;
+    uint64 signaled = 0;
+    int ret;
+
+    if (fence == 0)
+        return -EINVAL;
+
+    deadline_ms = sched_timer_now_ms() + GPU_DRM_FENCE_WAIT_TIMEOUT_MS;
+    for (;;) {
+        ret = virtio_gpu_user_fence(fence, 1, &signaled);
+        if (signaled_out != NULL)
+            *signaled_out = signaled;
+        if (ret != 0 && ret != -EAGAIN)
+            return ret;
+        if (signaled >= fence)
+            return 0;
+        if (signal_pending(current))
+            return -EINTR;
+        if (sched_timer_now_ms() >= deadline_ms)
+            return -ETIME;
+        sleep_ms(1);
+    }
+}
+
+static void gpu_drm_trace_execbuffer_fence_wait(
+    const struct fb_gpu_render_owner *owner, int32 fd, const char *kind,
+    int ret, uint64 target, uint64 signaled, uint64 virtio_fence,
+    uint64 reservation_fence, uint64 snapshot_point, int snapshot_signaled)
+{
+    static _Atomic int printed;
+    int slot;
+
+    if (!chrome_drm_fence_trace_enabled() &&
+        !chrome_drm_ioctl_trace_enabled())
+        return;
+    slot = __atomic_fetch_add(&printed, 1, __ATOMIC_RELAXED);
+    if (slot >= 64)
+        return;
+    printf("chrome-drm-fence-wait: fd=%d kind=%s ret=%d target=%lu "
+           "signaled=%lu virtio=%lu reservation=%lu point=%lu "
+           "snapshot=%d owner=%lu:%d pid=%d name=%s\n",
+           fd, kind ? kind : "?", ret, target, signaled, virtio_fence,
+           reservation_fence, snapshot_point, snapshot_signaled,
+           owner ? owner->id : 0, owner ? owner->tgid : -1,
+           current ? current->pid : -1, current ? current->name : "?");
+}
+
+static int gpu_drm_execbuffer_wait_fence_fd(
+    const struct fb_gpu_render_owner *owner, int32 fd)
 {
     struct vfs_file *file;
     int ret = 0;
@@ -106,19 +185,28 @@ static int gpu_drm_execbuffer_wait_fence_fd(int32 fd)
     if (file->ops == &fb_fence_file_ops && file->private_data != NULL) {
         struct fb_gpu_fence_file *fence_file =
             (struct fb_gpu_fence_file *)file->private_data;
+        uint64 signaled = 0;
 
         spin_lock(&fb_state.lock);
         ret = fb_gpu_fence_file_wait_locked(fence_file);
+        signaled = fb_gpu_fence_file_signaled_locked(fence_file);
         spin_unlock(&fb_state.lock);
+        if (ret != 0)
+            gpu_drm_trace_execbuffer_fence_wait(
+                owner, fd, "fb-fence", ret, fence_file->fence, signaled,
+                0, 0, 0, fence_file->fence_obj != NULL &&
+                fence_file->fence_obj->signaled);
     } else if (file->ops == &fb_virgl_fence_file_ops &&
                file->private_data != NULL) {
         struct fb_gpu_virgl_fence_file *fence_file =
             (struct fb_gpu_virgl_fence_file *)file->private_data;
         uint64 signaled = 0;
 
-        ret = virtio_gpu_user_fence(fence_file->fence, 1, &signaled);
-        if (ret == 0 && signaled < fence_file->fence)
-            ret = -EAGAIN;
+        ret = gpu_drm_wait_virtio_fence(fence_file->fence, &signaled);
+        if (ret != 0)
+            gpu_drm_trace_execbuffer_fence_wait(
+                owner, fd, "virgl-fence", ret, fence_file->fence,
+                signaled, fence_file->fence, 0, 0, 0);
     } else if (file->ops == &fb_syncobj_file_ops &&
                file->private_data != NULL) {
         struct fb_gpu_syncobj_file *sync_file =
@@ -126,16 +214,79 @@ static int gpu_drm_execbuffer_wait_fence_fd(int32 fd)
 
         if (sync_file->kind != FB_GPU_SYNCOBJ_FD_SYNC_FILE) {
             ret = -EINVAL;
+        } else if (sync_file->virtio_fence != 0 ||
+                   (sync_file->fence != NULL &&
+                    dma_fence_get_virtio_fence(sync_file->fence) != 0)) {
+            uint64 signaled = 0;
+
+            if (sync_file->virtio_fence == 0)
+                sync_file->virtio_fence =
+                    dma_fence_get_virtio_fence(sync_file->fence);
+            ret = gpu_drm_wait_virtio_fence(sync_file->virtio_fence,
+                                            &signaled);
+            if (ret == 0)
+                (void)fb_syncobj_file_status(sync_file);
+            else
+                gpu_drm_trace_execbuffer_fence_wait(
+                    owner, fd, "sync-file-virtio", ret,
+                    sync_file->virtio_fence, signaled,
+                    sync_file->virtio_fence,
+                    sync_file->snapshot_reservation_fence,
+                    sync_file->snapshot_timeline_value,
+                    sync_file->snapshot_signaled);
+        } else if (sync_file->reservation_gem != NULL &&
+                   sync_file->reservation_fence != 0) {
+            uint64 signaled = 0;
+
+            spin_lock(&fb_state.lock);
+            ret = fb_ttm_resv_wait_fence_locked(
+                sync_file->reservation_gem, sync_file->reservation_fence);
+            if (sync_file->reservation_gem->in_use &&
+                !sync_file->reservation_gem->dead)
+                signaled = sync_file->reservation_gem->signaled_fence;
+            spin_unlock(&fb_state.lock);
+            if (ret == 0)
+                (void)fb_syncobj_file_status(sync_file);
+            else
+                gpu_drm_trace_execbuffer_fence_wait(
+                    owner, fd, "sync-file-resv", ret,
+                    sync_file->reservation_fence, signaled,
+                    sync_file->virtio_fence,
+                    sync_file->snapshot_reservation_fence,
+                    sync_file->snapshot_timeline_value,
+                    sync_file->snapshot_signaled);
         } else if (sync_file->snapshot_signaled ||
                    dma_fence_is_signaled(sync_file->fence)) {
             ret = 0;
         } else if (sync_file->fence != NULL) {
-            ret = dma_fence_wait(sync_file->fence, -1);
+            int status = fb_syncobj_file_status(sync_file);
+
+            if (status > 0)
+                ret = 0;
+            else if (status < 0)
+                ret = status;
+            else
+                ret = dma_fence_wait_uninterruptible(sync_file->fence);
+            if (ret != 0)
+                gpu_drm_trace_execbuffer_fence_wait(
+                    owner, fd, "sync-file-dma", ret, 0, 0,
+                    sync_file->virtio_fence,
+                    sync_file->snapshot_reservation_fence,
+                    sync_file->snapshot_timeline_value,
+                    sync_file->snapshot_signaled);
         } else {
             ret = -EINVAL;
+            gpu_drm_trace_execbuffer_fence_wait(
+                owner, fd, "sync-file-invalid", ret, 0, 0,
+                sync_file->virtio_fence,
+                sync_file->snapshot_reservation_fence,
+                sync_file->snapshot_timeline_value,
+                sync_file->snapshot_signaled);
         }
     } else {
         ret = -EINVAL;
+        gpu_drm_trace_execbuffer_fence_wait(
+            owner, fd, "unknown", ret, 0, 0, 0, 0, 0, 0);
     }
 
     vfs_fput(file);
@@ -157,6 +308,7 @@ static int gpu_drm_execbuffer_export_fence_fd(uint64 fence_id, int signaled,
     if (fence == NULL)
         return -ENOMEM;
     dma_fence_init(fence, 0, fence_id);
+    dma_fence_set_virtio_fence(fence, fence_id);
     if (signaled)
         (void)dma_fence_signal(fence, 0);
 
@@ -169,6 +321,8 @@ static int gpu_drm_execbuffer_export_fence_fd(uint64 fence_id, int signaled,
     sync_file->kind = FB_GPU_SYNCOBJ_FD_SYNC_FILE;
     sync_file->snapshot_signaled = signaled != 0;
     sync_file->snapshot_timeline_value = fence_id;
+    sync_file->snapshot_reservation_fence = fence_id;
+    sync_file->virtio_fence = fence_id;
     sync_file->fence = dma_fence_get(fence);
     if (sync_file->fence == NULL) {
         kvfree(sync_file);
@@ -721,9 +875,10 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             return ret;
         if (wait_for == 0)
             return 0;
-        ret = virtio_gpu_user_fence(wait_for,
-                                    !(req.flags & VIRTGPU_WAIT_NOWAIT),
-                                    &signaled);
+        if (req.flags & VIRTGPU_WAIT_NOWAIT)
+            ret = virtio_gpu_user_fence(wait_for, 0, &signaled);
+        else
+            ret = gpu_drm_wait_virtio_fence(wait_for, &signaled);
         if (ret != 0)
             return ret;
         if (signaled < wait_for)
@@ -801,7 +956,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             req.out_syncobjs != 0)
             return -EOPNOTSUPP;
         if ((req.flags & VIRTGPU_EXECBUF_FENCE_FD_IN) != 0) {
-            ret = gpu_drm_execbuffer_wait_fence_fd(req.fence_fd);
+            ret = gpu_drm_execbuffer_wait_fence_fd(owner, req.fence_fd);
             if (ret != 0)
                 return ret;
         }
@@ -868,17 +1023,13 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                 }
             }
         }
-        if (fb_cmdline_enabled("vgpu_async_pf") ||
-            fb_cmdline_enabled("virtio_gpu_async_submit_3d"))
+        if (gpu_drm_execbuffer_async_allowed())
             submit_flags |= FB_GPU_VIRGL_SUBMIT_ASYNC;
+        submit_flags |= FB_GPU_VIRGL_SUBMIT_ALLOW_IMPORTED_RESOURCES;
         ret = virtio_gpu_user_submit(owner->id, owner->tgid,
                                      owner->default_ctx_id, submit_flags, cmds,
                                      req.size / sizeof(uint32), resources,
                                      req.num_bo_handles, &fence, &signaled);
-        if (ret == 0 &&
-            (req.flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0 &&
-            signaled < fence)
-            ret = virtio_gpu_user_fence(fence, 1, &signaled);
         if (ret == 0 &&
             (req.flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0) {
             ret = gpu_drm_execbuffer_export_fence_fd(fence,
@@ -1684,9 +1835,10 @@ static int gpu_open_file_common(cdev_t *cdev, struct vfs_file *file,
     file->private_data = owner;
     gpu_drm_lifecycle_open(owner->drm.node_type);
     owner->lifecycle_live_accounted = 1;
-    printf("DRM: open node=%s owner=%lu tgid=%d magic=%u\n",
-           drm_core_node_name(owner->drm.node_type), owner->id, owner->tgid,
-           owner->drm.magic);
+    if (chrome_drm_ioctl_trace_enabled())
+        printf("DRM: open node=%s owner=%lu tgid=%d magic=%u\n",
+               drm_core_node_name(owner->drm.node_type), owner->id,
+               owner->tgid, owner->drm.magic);
     maybe_start_chrome_drm_thread_dump(owner);
     return 0;
 }

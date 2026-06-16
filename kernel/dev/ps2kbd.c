@@ -20,9 +20,12 @@
 #include <lock/spinlock.h>
 #include <proc/sched.h>
 #include <mm/vm.h>
+#include <kqueue.h>
 #include <vfs/poll.h>
 
 #if defined(__x86_64__) || defined(__i386__)
+
+static cdev_t kbd_cdev;
 
 /* ── I/O port helpers ────────────────────────────────────────────── */
 
@@ -219,10 +222,10 @@ void ps2kbd_handle_byte(uint8 scancode)
     }
 
     ring_push(&ev);
-    wakeup_on_chan(&kbd_state.ring);
-
     kbd_state.extended = 0;
     spin_unlock(&kbd_state.lock);
+    wakeup_on_chan(&kbd_state.ring);
+    cdev_knote_notify(&kbd_cdev, EVFILT_READ, 0);
 }
 
 /*
@@ -311,13 +314,21 @@ static int kbd_write(cdev_t *cdev, bool user, const void *buf, size_t count)
             memcpy(&ev, (const char *)buf + off, sizeof(ev));
         }
 
-        spin_lock(&kbd_state.lock);
-        ring_push(&ev);
-        spin_unlock(&kbd_state.lock);
+        if (ev.scancode != 0) {
+            uint8 scancode = ev.scancode & 0x7f;
+
+            ps2kbd_handle_byte(ev.pressed ? scancode : (uint8)(scancode | 0x80));
+        } else {
+            spin_lock(&kbd_state.lock);
+            ring_push(&ev);
+            spin_unlock(&kbd_state.lock);
+            cdev_knote_notify(&kbd_cdev, EVFILT_READ, 0);
+        }
         off += sizeof(ev);
     }
 
     wakeup_on_chan(&kbd_state.ring);
+    cdev_knote_notify(&kbd_cdev, EVFILT_READ, 0);
     return (int)count;
 }
 

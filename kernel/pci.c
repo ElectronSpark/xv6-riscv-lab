@@ -1559,6 +1559,7 @@ static void pci_note_virtio_gpu(uint8 bus, uint8 dev, uint8 func)
     vd->bus = bus;
     vd->dev = dev;
     vd->func = func;
+    vd->class_code = pci_config_read32(bus, dev, func, 0x08) >> 8;
     vd->irq_line = piix3_compute_irq(dev, pci_config_read8(bus, dev, func,
                                                             0x3D));
 
@@ -1611,7 +1612,8 @@ static void pci_note_virtio_gpu(uint8 bus, uint8 dev, uint8 func)
     }
 
     virtio_gpu_pci_count++;
-    printf("PCI: virtio-gpu detected at %d:%d:%d\n", bus, dev, func);
+    printf("PCI: virtio-gpu detected at %d:%d:%d class=0x%lx\n",
+           bus, dev, func, (uint64)vd->class_code);
     printf("PCI: virtio-gpu BAR0=0x%lx BAR1=0x%lx BAR2=0x%lx BAR4=0x%lx IRQ=%d caps: common=%d notify=%d isr=%d dev=%d shm=%d shm_bar=%u shm_base=0x%lx shm_off=0x%lx shm_len=0x%lx assigned=%u\n",
            (uint64)vd->bar[0], (uint64)vd->bar[1], (uint64)vd->bar[2],
            (uint64)vd->bar[4], vd->irq_line, vd->common_cfg_cap,

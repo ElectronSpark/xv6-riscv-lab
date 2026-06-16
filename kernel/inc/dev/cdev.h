@@ -14,5 +14,6 @@ int cdev_read(cdev_t *cdev, bool user, void *buf, size_t count);
 int cdev_write(cdev_t *cdev, bool user, const void *buf, size_t count);
 int cdev_write_file(cdev_t *cdev, struct vfs_file *file, bool user,
                     const void *buf, size_t count);
+void cdev_knote_notify(cdev_t *cdev, int filter, int64 data);
 
 #endif // __KERNEL_CHARACTER_DEVICE_H

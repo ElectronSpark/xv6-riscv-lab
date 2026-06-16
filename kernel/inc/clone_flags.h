@@ -64,6 +64,7 @@ struct clone_args {
     uint64 tls;        // Thread Local Storage descriptor
     uint64 ctid;       // Child TID address (for CLONE_CHILD_SETTID/CLEARTID)
     uint64 ptid;       // Parent TID address (for CLONE_PARENT_SETTID)
+    uint64 pidfd;      // Parent PID fd address (for clone3 CLONE_PIDFD)
 };
 
 #endif // __KERNEL_CLONE_FLAGS_H

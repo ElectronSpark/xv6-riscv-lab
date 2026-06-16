@@ -21,6 +21,13 @@
 #include "seg.h"    /* wrmsr, rdmsr, MSR_FS_BASE */
 #include "clone_flags.h"
 #include "cmdline.h"
+#include "proc/chrome_lifecycle.h"
+#include "proc/sched.h"
+#include "timer/timer.h"
+
+#ifndef CLONE_NEWTIME
+#define CLONE_NEWTIME 0x00000080
+#endif
 
 int fetchaddr(uint64 addr, uint64 *ip) {
     struct thread *p = current;
@@ -1210,6 +1217,25 @@ static int looks_like_linux_munmap(uint64 addr, uint64 length)
            length != 0 && length < (UVMTOP - UVMBOTTOM);
 }
 
+static int chrome_trace_parse_uint(const char *value, int default_value,
+                                   int max_value)
+{
+    int parsed = 0;
+    int saw_digit = 0;
+
+    if (value == NULL)
+        return default_value;
+    while (*value >= '0' && *value <= '9') {
+        saw_digit = 1;
+        if (parsed < max_value)
+            parsed = parsed * 10 + (*value - '0');
+        if (parsed > max_value)
+            parsed = max_value;
+        value++;
+    }
+    return saw_digit ? parsed : default_value;
+}
+
 static int chrome_syscall_trace_enabled(void)
 {
     static int initialized;
@@ -1225,17 +1251,373 @@ static int chrome_syscall_trace_enabled(void)
     return enabled;
 }
 
-static int chrome_syscall_trace_process(struct thread *p)
+static int chrome_syscall_trace_limit(void)
 {
-    return chrome_syscall_trace_enabled() && p != NULL &&
-        strncmp(p->name, "chrome", 6) == 0 &&
-        strncmp(p->name, "chrome_crashpad", 15) != 0;
+    static int initialized;
+    static int limit = 4096;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_syscall_trace_limit", value,
+                              sizeof(value)) == 0) {
+            limit = chrome_trace_parse_uint(value, 4096, 65536);
+        }
+        initialized = 1;
+    }
+    return limit;
 }
 
-static int chrome_syscall_trace_interesting(int orig_num)
+static int chrome_syscall_enter_trace_limit(void)
+{
+    static int initialized;
+    static int limit = 2048;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_syscall_enter_trace_limit", value,
+                              sizeof(value)) == 0) {
+            limit = chrome_trace_parse_uint(value, 2048, 65536);
+        }
+        initialized = 1;
+    }
+    return limit;
+}
+
+static int chrome_syscall_enter_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_syscall_enter_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_syscall_enter_ipc_only_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_syscall_enter_ipc_only", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_syscall_enter_read_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled = 1;
+    char value[8];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_syscall_enter_read_trace", value,
+                              sizeof(value)) == 0 &&
+            (value[0] == '0' || value[0] == 'n' || value[0] == 'N')) {
+            enabled = 0;
+        }
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_syscall_enter_futex_wake_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_syscall_enter_futex_wake_trace",
+                                    value, sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_syscall_slow_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_syscall_slow_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static uint64 chrome_syscall_slow_trace_threshold_us(void)
+{
+    static int initialized;
+    static uint64 threshold_us = 10000;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_syscall_slow_trace_us", value,
+                              sizeof(value)) == 0) {
+            threshold_us = chrome_trace_parse_uint(value, 10000, 10000000);
+        }
+        initialized = 1;
+    }
+    return threshold_us;
+}
+
+static int chrome_syscall_slow_trace_limit(void)
+{
+    static int initialized;
+    static int limit = 512;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_syscall_slow_trace_limit", value,
+                              sizeof(value)) == 0) {
+            limit = chrome_trace_parse_uint(value, 512, 16384);
+        }
+        initialized = 1;
+    }
+    return limit;
+}
+
+static int chrome_syscall_progress_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_syscall_progress_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_syscall_progress_interval(void)
+{
+    static int initialized;
+    static int interval = 2048;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_syscall_progress_interval", value,
+                              sizeof(value)) == 0) {
+            interval = chrome_trace_parse_uint(value, 2048, 1048576);
+        }
+        if (interval < 1)
+            interval = 1;
+        initialized = 1;
+    }
+    return interval;
+}
+
+static int chrome_syscall_progress_limit(void)
+{
+    static int initialized;
+    static int limit = 512;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_syscall_progress_limit", value,
+                              sizeof(value)) == 0) {
+            limit = chrome_trace_parse_uint(value, 512, 16384);
+        }
+        initialized = 1;
+    }
+    return limit;
+}
+
+static int chrome_syscall_trace_process(struct thread *p);
+
+struct chrome_thread_dump_ctx {
+    int sample;
+    int count;
+};
+
+static int chrome_thread_dump_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_thread_dump", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_thread_dump_samples(void)
+{
+    static int initialized;
+    static int samples = 6;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_thread_dump_samples", value,
+                              sizeof(value)) == 0) {
+            samples = chrome_trace_parse_uint(value, 6, 64);
+        }
+        if (samples < 1)
+            samples = 1;
+        initialized = 1;
+    }
+    return samples;
+}
+
+static int chrome_thread_dump_interval_ms(void)
+{
+    static int initialized;
+    static int interval_ms = 15000;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_thread_dump_interval_ms", value,
+                              sizeof(value)) == 0) {
+            interval_ms = chrome_trace_parse_uint(value, 15000, 120000);
+        }
+        if (interval_ms < 100)
+            interval_ms = 100;
+        initialized = 1;
+    }
+    return interval_ms;
+}
+
+static void chrome_thread_dump_cb(struct thread *t, void *arg)
+{
+    struct chrome_thread_dump_ctx *ctx = arg;
+
+    if (t == NULL || ctx == NULL || !chrome_syscall_trace_process(t))
+        return;
+
+    enum thread_state state = __thread_state_get(t);
+    int cpu = t->sched_entity ? t->sched_entity->cpu_id : -1;
+    int on_cpu = t->sched_entity ?
+        smp_load_acquire(&t->sched_entity->on_cpu) : 0;
+    void *chan = t->chan;
+    char name[sizeof(t->name)];
+    const char *exec_path = "";
+    uint64 rip = 0, rsp = 0, rax = 0, rdi = 0, rsi = 0, rdx = 0;
+
+    if (t->trapframe != NULL) {
+        rip = t->trapframe->trapframe.rip;
+        rsp = t->trapframe->trapframe.rsp;
+        rax = t->trapframe->trapframe.rax;
+        rdi = t->trapframe->trapframe.rdi;
+        rsi = t->trapframe->trapframe.rsi;
+        rdx = t->trapframe->trapframe.rdx;
+    }
+
+    safestrcpy(name, t->name, sizeof(name));
+    if (t->thread_group != NULL && t->thread_group->exec_path[0] != '\0')
+        exec_path = t->thread_group->exec_path;
+    ctx->count++;
+    printf("chrome-thread-dump: sample=%d pid=%d tgid=%d name=%s "
+           "state=%s cpu=%d on_cpu=%d chan=%p rip=0x%lx rsp=0x%lx "
+           "rax=0x%lx rdi=0x%lx rsi=0x%lx rdx=0x%lx exec=%s\n",
+           ctx->sample, t->pid, t->tgid, name, thread_state_short(state),
+           cpu, on_cpu, chan, rip, rsp, rax, rdi, rsi, rdx, exec_path);
+}
+
+static void chrome_thread_dump_worker(uint64 arg1, uint64 arg2)
+{
+    (void)arg1;
+    (void)arg2;
+
+    for (int sample = 0; sample < chrome_thread_dump_samples(); sample++) {
+        sleep_ms(sample == 0 ? 3000 : chrome_thread_dump_interval_ms());
+        struct chrome_thread_dump_ctx ctx = {
+            .sample = sample,
+        };
+        printf("chrome-thread-dump: begin sample=%d\n", sample);
+        proctab_for_each_rcu(chrome_thread_dump_cb, &ctx);
+        printf("chrome-thread-dump: end sample=%d count=%d\n",
+               sample, ctx.count);
+    }
+}
+
+static void maybe_start_chrome_thread_dump(struct thread *p)
+{
+    static _Atomic int started;
+
+    if (!chrome_thread_dump_enabled() || !chrome_syscall_trace_process(p))
+        return;
+    if (__atomic_exchange_n(&started, 1, __ATOMIC_ACQ_REL) != 0)
+        return;
+
+    struct thread *t = kthread_create("chrome_thr_dump",
+                                      chrome_thread_dump_worker,
+                                      0, 0, KERNEL_STACK_ORDER);
+    if (IS_ERR_OR_NULL(t)) {
+        printf("chrome-thread-dump: failed to start\n");
+        return;
+    }
+    wakeup(t);
+}
+
+static int chrome_syscall_trace_process(struct thread *p)
+{
+    static int initialized;
+    static int network_service_only;
+    static int child_processes;
+    static int crashpad_processes;
+    char value[8];
+
+    if (!initialized) {
+        network_service_only =
+            cmdline_get_param("chrome_syscall_trace_network_service", value,
+                              sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        child_processes =
+            cmdline_get_param("chrome_syscall_trace_child_processes", value,
+                              sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        crashpad_processes =
+            cmdline_get_param("chrome_syscall_trace_crashpad", value,
+                              sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    if (p == NULL)
+        return 0;
+    int is_crashpad = strncmp(p->name, "chrome_crashpad", 15) == 0;
+    if (is_crashpad)
+        return crashpad_processes;
+    if (network_service_only || child_processes)
+        return (network_service_only &&
+                chrome_lifecycle_network_service_match(p)) ||
+               (child_processes &&
+                chrome_lifecycle_child_process_match(p));
+    return chrome_lifecycle_thread_match(p);
+}
+
+#define TRACE_FUTEX_WAKE        1
+#define TRACE_FUTEX_WAKE_OP     5
+#define TRACE_FUTEX_WAKE_BITSET 10
+#define TRACE_FUTEX_PRIVATE     128
+#define TRACE_FUTEX_REALTIME    256
+
+static int chrome_syscall_trace_interesting(int orig_num, uint64 a1)
 {
     switch (orig_num) {
     case SYS_read_x86:
+        return chrome_syscall_enter_read_trace_enabled();
     case SYS_write_x86:
     case SYS_close_x86:
     case SYS_mmap_x86:
@@ -1254,10 +1636,81 @@ static int chrome_syscall_trace_interesting(int orig_num)
     case SYS_clock_gettime_x86:
     case SYS_clock_getres_x86:
     case SYS_getrandom_x86:
-    case SYS_rseq_x86:
         return 0;
+    case SYS_futex_x86:
+    {
+        uint64 futex_cmd = a1 & ~(TRACE_FUTEX_PRIVATE | TRACE_FUTEX_REALTIME);
+        if (futex_cmd == TRACE_FUTEX_WAKE ||
+            futex_cmd == TRACE_FUTEX_WAKE_OP ||
+            futex_cmd == TRACE_FUTEX_WAKE_BITSET) {
+            return chrome_syscall_enter_futex_wake_trace_enabled();
+        }
+        return 1;
+    }
     default:
         return 1;
+    }
+}
+
+static int chrome_syscall_enter_trace_interesting(int orig_num, uint64 a1)
+{
+    int ipc_only = chrome_syscall_enter_ipc_only_enabled();
+
+    switch (orig_num) {
+    case SYS_read_x86:
+        return !ipc_only && chrome_syscall_enter_read_trace_enabled();
+    case SYS_poll_x86:
+    case SYS_select_x86:
+    case SYS_connect_x86:
+    case SYS_recvfrom_x86:
+    case SYS_sendmsg_x86:
+    case SYS_recvmsg_x86:
+    case SYS_accept4_x86:
+        return 1;
+    case SYS_openat_x86:
+        return !ipc_only;
+    case SYS_mmap_x86:
+    case SYS_madvise_x86:
+    case SYS_mprotect_x86:
+    case SYS_rt_sigprocmask_x86:
+    case SYS_sched_getaffinity_x86:
+    case SYS_prlimit64_x86:
+    case SYS_geteuid_x86:
+    case SYS_getresuid_x86:
+    case SYS_getrandom_x86:
+    case SYS_rseq_x86:
+        return !ipc_only;
+    case SYS_clone3_x86:
+    case SYS_prctl_x86:
+    case SYS_unshare_x86:
+    case SYS_setns_x86:
+    case SYS_seccomp_x86:
+        return 1;
+    case SYS_futex_x86:
+    {
+        uint64 futex_cmd = a1 & ~(TRACE_FUTEX_PRIVATE | TRACE_FUTEX_REALTIME);
+        if (futex_cmd == TRACE_FUTEX_WAKE ||
+            futex_cmd == TRACE_FUTEX_WAKE_OP ||
+            futex_cmd == TRACE_FUTEX_WAKE_BITSET) {
+            return chrome_syscall_enter_futex_wake_trace_enabled();
+        }
+        return 1;
+    }
+    case SYS_wait4_x86:
+    case SYS_waitid_x86:
+    case SYS_nanosleep_x86:
+    case SYS_pselect6_x86:
+    case SYS_ppoll_x86:
+    case SYS_epoll_pwait:
+    case SYS_epoll_pwait_legacy:
+    case SYS_epoll_pwait2:
+    case SYS_epoll_wait:
+    case SYS_clock_nanosleep_x86:
+    case SYS_futex_wait_x86:
+    case SYS_futex_waitv_x86:
+        return 1;
+    default:
+        return 0;
     }
 }
 
@@ -1268,7 +1721,10 @@ static const char *x86_syscall_trace_name(int num)
     case SYS_write_x86: return "write";
     case SYS_open_x86: return "open";
     case SYS_close_x86: return "close";
+    case SYS_creat_x86: return "creat";
     case SYS_fstat_x86: return "fstat";
+    case SYS_stat_x86: return "stat";
+    case SYS_lstat_x86: return "lstat";
     case SYS_lseek_x86: return "lseek";
     case SYS_mmap_x86: return "mmap";
     case SYS_mprotect_x86: return "mprotect";
@@ -1276,8 +1732,10 @@ static const char *x86_syscall_trace_name(int num)
     case SYS_brk_x86: return "brk";
     case SYS_rt_sigaction_x86: return "rt_sigaction";
     case SYS_rt_sigprocmask_x86: return "rt_sigprocmask";
+    case SYS_sigaltstack_x86: return "sigaltstack";
     case SYS_ioctl_x86: return "ioctl";
     case SYS_pread64_x86: return "pread64";
+    case SYS_pwrite64_x86: return "pwrite64";
     case SYS_readv_x86: return "readv";
     case SYS_writev_x86: return "writev";
     case SYS_access_x86: return "access";
@@ -1295,7 +1753,9 @@ static const char *x86_syscall_trace_name(int num)
     case SYS_recvfrom_x86: return "recvfrom";
     case SYS_sendmsg_x86: return "sendmsg";
     case SYS_recvmsg_x86: return "recvmsg";
+    case SYS_getpeername_x86: return "getpeername";
     case SYS_getsockname_x86: return "getsockname";
+    case SYS_setsockopt_x86: return "setsockopt";
     case SYS_getsockopt_x86: return "getsockopt";
     case SYS_socketpair_x86: return "socketpair";
     case SYS_clone_x86: return "clone";
@@ -1306,7 +1766,11 @@ static const char *x86_syscall_trace_name(int num)
     case SYS_uname_x86: return "uname";
     case SYS_fcntl_x86: return "fcntl";
     case SYS_fsync_x86: return "fsync";
+    case SYS_fdatasync_x86: return "fdatasync";
     case SYS_ftruncate_x86: return "ftruncate";
+    case SYS_fchown_x86: return "fchown";
+    case SYS_statfs_x86: return "statfs";
+    case SYS_fstatfs_x86: return "fstatfs";
     case SYS_getcwd_x86: return "getcwd";
     case SYS_chdir_x86: return "chdir";
     case SYS_mkdir_x86: return "mkdir";
@@ -1319,8 +1783,11 @@ static const char *x86_syscall_trace_name(int num)
     case SYS_geteuid_x86: return "geteuid";
     case SYS_getegid_x86: return "getegid";
     case SYS_getppid_x86: return "getppid";
+    case SYS_setsid_x86: return "setsid";
     case SYS_gettid_x86: return "gettid";
     case SYS_futex_x86: return "futex";
+    case SYS_getpriority_x86: return "getpriority";
+    case SYS_setpriority_x86: return "setpriority";
     case SYS_sched_getaffinity_x86: return "sched_getaffinity";
     case SYS_set_tid_address_x86: return "set_tid_address";
     case SYS_clock_gettime_x86: return "clock_gettime";
@@ -1331,22 +1798,50 @@ static const char *x86_syscall_trace_name(int num)
     case SYS_newfstatat_x86: return "newfstatat";
     case SYS_readlinkat_x86: return "readlinkat";
     case SYS_faccessat_x86: return "faccessat";
+    case SYS_fchownat_x86: return "fchownat";
     case SYS_pselect6_x86: return "pselect6";
     case SYS_ppoll_x86: return "ppoll";
     case SYS_set_robust_list_x86: return "set_robust_list";
+    case SYS_capget_x86: return "capget";
+    case SYS_capset_x86: return "capset";
+    case SYS_arch_prctl: return "arch_prctl";
+    case SYS_epoll_create1: return "epoll_create1";
+    case SYS_epoll_create1_legacy: return "epoll_create1";
+    case SYS_epoll_create: return "epoll_create";
+    case SYS_epoll_ctl: return "epoll_ctl";
+    case SYS_eventfd2: return "eventfd2";
+    case SYS_eventfd2_legacy: return "eventfd2";
     case SYS_timerfd_create_x86: return "timerfd_create";
     case SYS_timerfd_settime_x86: return "timerfd_settime";
     case SYS_timerfd_gettime_x86: return "timerfd_gettime";
     case SYS_eventfd_x86: return "eventfd";
+    case SYS_pipe2_x86: return "pipe2";
+    case SYS_inotify_add_watch_x86: return "inotify_add_watch";
+    case SYS_fallocate_x86: return "fallocate";
+    case SYS_dup2_x86: return "dup2";
     case SYS_accept4_x86: return "accept4";
     case SYS_dup3_x86: return "dup3";
+    case SYS_memfd_create_x86: return "memfd_create";
     case SYS_prlimit64_x86: return "prlimit64";
     case SYS_getrandom_x86: return "getrandom";
     case SYS_membarrier_x86: return "membarrier";
     case SYS_statx_x86: return "statx";
     case SYS_rseq_x86: return "rseq";
+    case SYS_prctl_x86: return "prctl";
+    case SYS_sysinfo_x86: return "sysinfo";
+    case SYS_getdents64_x86: return "getdents64";
+    case SYS_pkey_alloc_x86: return "pkey_alloc";
+    case SYS_pkey_free_x86: return "pkey_free";
+    case SYS_pkey_mprotect_x86: return "pkey_mprotect";
+    case SYS_epoll_pwait: return "epoll_pwait";
+    case SYS_epoll_pwait_legacy: return "epoll_pwait";
+    case SYS_epoll_pwait2: return "epoll_pwait2";
+    case SYS_epoll_wait: return "epoll_wait";
+    case SYS_waitid_x86: return "waitid";
     case SYS_clone3_x86: return "clone3";
     case SYS_close_range_x86: return "close_range";
+    case SYS_unshare_x86: return "unshare";
+    case SYS_setns_x86: return "setns";
     case SYS_seccomp_x86: return "seccomp";
     case SYS_landlock_create_ruleset_x86: return "landlock_create_ruleset";
     case SYS_landlock_add_rule_x86: return "landlock_add_rule";
@@ -1354,6 +1849,34 @@ static const char *x86_syscall_trace_name(int num)
     case SYS_futex_wake_x86: return "futex_wake";
     case SYS_futex_wait_x86: return "futex_wait";
     default: return "?";
+    }
+}
+
+static void chrome_syscall_trace_line(const char *phase, struct thread *p,
+                                      int orig_num, int num, uint64 a0,
+                                      uint64 a1, uint64 a2, uint64 a3,
+                                      uint64 a4, uint64 a5, uint64 ret,
+                                      int have_ret)
+{
+    if (have_ret) {
+        uint32 roles = p->thread_group ?
+            __atomic_load_n(&p->thread_group->chrome_trace_roles,
+                            __ATOMIC_RELAXED) : 0;
+        printf("chrome-syscall-%s: pid=%d tgid=%d roles=0x%x name=%s "
+               "orig=%d num=%d(%s) a0=0x%lx a1=0x%lx a2=0x%lx "
+               "a3=0x%lx a4=0x%lx a5=0x%lx ret=0x%lx\n",
+               phase, p->pid, p->tgid, roles, p->name, orig_num, num,
+               x86_syscall_trace_name(orig_num), a0, a1, a2, a3, a4, a5,
+               ret);
+    } else {
+        uint32 roles = p->thread_group ?
+            __atomic_load_n(&p->thread_group->chrome_trace_roles,
+                            __ATOMIC_RELAXED) : 0;
+        printf("chrome-syscall-%s: pid=%d tgid=%d roles=0x%x name=%s "
+               "orig=%d num=%d(%s) a0=0x%lx a1=0x%lx a2=0x%lx "
+               "a3=0x%lx a4=0x%lx a5=0x%lx\n",
+               phase, p->pid, p->tgid, roles, p->name, orig_num, num,
+               x86_syscall_trace_name(orig_num), a0, a1, a2, a3, a4, a5);
     }
 }
 
@@ -1385,6 +1908,20 @@ struct trace_msghdr {
     uint32 msg_flags;
 };
 
+struct trace_linux_clone3_args {
+    uint64 flags;
+    uint64 pidfd;
+    uint64 child_tid;
+    uint64 parent_tid;
+    uint64 exit_signal;
+    uint64 stack;
+    uint64 stack_size;
+    uint64 tls;
+    uint64 set_tid;
+    uint64 set_tid_size;
+    uint64 cgroup;
+};
+
 static void chrome_syscall_trace_sockaddr(const char *label, uint64 addr,
                                           uint64 len)
 {
@@ -1409,7 +1946,7 @@ static void chrome_syscall_trace_sockaddr(const char *label, uint64 addr,
     }
 }
 
-static void chrome_syscall_trace_msghdr(uint64 addr)
+static void chrome_syscall_trace_msghdr(const char *syscall, uint64 addr)
 {
     struct trace_msghdr msg;
 
@@ -1417,16 +1954,128 @@ static void chrome_syscall_trace_msghdr(uint64 addr)
         return;
     memset(&msg, 0, sizeof(msg));
     if (vm_copyin(current->vm, &msg, addr, sizeof(msg)) < 0) {
-        printf("chrome-syscall-detail: sendmsg msghdr=<fault 0x%lx>\n",
-               addr);
+        printf("chrome-syscall-detail: %s msghdr=<fault 0x%lx>\n",
+               syscall, addr);
         return;
     }
-    printf("chrome-syscall-detail: sendmsg name=0x%lx namelen=%lu "
+    printf("chrome-syscall-detail: %s name=0x%lx namelen=%lu "
            "iov=0x%lx iovlen=%lu control=0x%lx controllen=%lu flags=0x%x\n",
-           msg.msg_name, msg.msg_namelen, msg.msg_iov, msg.msg_iovlen,
-           msg.msg_control, msg.msg_controllen, msg.msg_flags);
-    chrome_syscall_trace_sockaddr("sendmsg.name", msg.msg_name,
+           syscall, msg.msg_name, msg.msg_namelen, msg.msg_iov,
+           msg.msg_iovlen, msg.msg_control, msg.msg_controllen,
+           msg.msg_flags);
+    chrome_syscall_trace_sockaddr("msg.name", msg.msg_name,
                                   msg.msg_namelen);
+}
+
+static void chrome_syscall_trace_clone3(uint64 addr, uint64 size)
+{
+    struct trace_linux_clone3_args args;
+    uint64 copy_len = size;
+    uint64 unsupported_flags;
+    uint64 known_flags;
+
+    if (addr == 0)
+        return;
+    memset(&args, 0, sizeof(args));
+    if (copy_len > sizeof(args))
+        copy_len = sizeof(args);
+    if (copy_len != 0 && vm_copyin(current->vm, &args, addr, copy_len) < 0) {
+        printf("chrome-syscall-detail: clone3 args=<fault 0x%lx size=%lu>\n",
+               addr, size);
+        return;
+    }
+
+    unsupported_flags =
+        CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS |
+        CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET |
+        CLONE_INTO_CGROUP | CLONE_PID | CLONE_SYSTEM | CLONE_SIGSTOPPED;
+    known_flags =
+        0xffULL | CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+        CLONE_PIDFD | CLONE_PTRACE | CLONE_VFORK | CLONE_PARENT |
+        CLONE_THREAD | CLONE_NEWNS | CLONE_SYSVSEM | CLONE_SETTLS |
+        CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID | CLONE_DETACHED |
+        CLONE_UNTRACED | CLONE_CHILD_SETTID | CLONE_NEWCGROUP |
+        CLONE_NEWUTS | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID |
+        CLONE_NEWNET | CLONE_IO | CLONE_CLEAR_SIGHAND |
+        CLONE_INTO_CGROUP | CLONE_PID | CLONE_SYSTEM | CLONE_SIGSTOPPED;
+
+    printf("chrome-syscall-detail: clone3 size=%lu copied=%lu flags=0x%lx "
+           "unsupported=0x%lx unknown=0x%lx exit_signal=%lu pidfd=0x%lx "
+           "parent_tid=0x%lx child_tid=0x%lx stack=0x%lx stack_size=0x%lx "
+           "tls=0x%lx set_tid=0x%lx set_tid_size=%lu cgroup=0x%lx\n",
+           size, copy_len, args.flags, args.flags & unsupported_flags,
+           args.flags & ~known_flags, args.exit_signal, args.pidfd,
+           args.parent_tid, args.child_tid, args.stack, args.stack_size,
+           args.tls, args.set_tid, args.set_tid_size, args.cgroup);
+}
+
+static const char *chrome_prctl_option_name(uint64 option)
+{
+    switch (option) {
+    case 3: return "PR_GET_DUMPABLE";
+    case 4: return "PR_SET_DUMPABLE";
+    case 15: return "PR_SET_NAME";
+    case 16: return "PR_GET_NAME";
+    case 21: return "PR_GET_SECCOMP";
+    case 22: return "PR_SET_SECCOMP";
+    case 23: return "PR_CAPBSET_READ";
+    case 24: return "PR_CAPBSET_DROP";
+    case 27: return "PR_GET_SECUREBITS";
+    case 28: return "PR_SET_SECUREBITS";
+    case 29: return "PR_SET_TIMERSLACK";
+    case 30: return "PR_GET_TIMERSLACK";
+    case 38: return "PR_SET_NO_NEW_PRIVS";
+    case 39: return "PR_GET_NO_NEW_PRIVS";
+    case 0x53564d41: return "PR_SET_VMA";
+    default: return "?";
+    }
+}
+
+static const char *chrome_seccomp_op_name(uint64 op)
+{
+    switch (op) {
+    case 0: return "SECCOMP_SET_MODE_STRICT";
+    case 1: return "SECCOMP_SET_MODE_FILTER";
+    case 2: return "SECCOMP_GET_ACTION_AVAIL";
+    case 3: return "SECCOMP_GET_NOTIF_SIZES";
+    default: return "?";
+    }
+}
+
+static void chrome_syscall_trace_namespace_flags(const char *syscall,
+                                                 uint64 flags)
+{
+    uint64 namespace_flags =
+        CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS |
+        CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET;
+    uint64 known_flags =
+        namespace_flags | CLONE_VM | CLONE_FS | CLONE_FILES |
+        CLONE_SIGHAND | CLONE_SYSVSEM | CLONE_THREAD | CLONE_IO |
+        CLONE_NEWTIME;
+
+    printf("chrome-syscall-detail: %s flags=0x%lx namespace=0x%lx "
+           "unknown=0x%lx newns=%d newcg=%d newuts=%d newipc=%d "
+           "newuser=%d newpid=%d newnet=%d newtime=%d\n",
+           syscall, flags, flags & namespace_flags, flags & ~known_flags,
+           (flags & CLONE_NEWNS) != 0, (flags & CLONE_NEWCGROUP) != 0,
+           (flags & CLONE_NEWUTS) != 0, (flags & CLONE_NEWIPC) != 0,
+           (flags & CLONE_NEWUSER) != 0, (flags & CLONE_NEWPID) != 0,
+           (flags & CLONE_NEWNET) != 0, (flags & CLONE_NEWTIME) != 0);
+}
+
+static void chrome_syscall_trace_prctl(uint64 option, uint64 arg2,
+                                       uint64 arg3)
+{
+    printf("chrome-syscall-detail: prctl option=%lu(%s) arg2=0x%lx "
+           "arg3=0x%lx\n",
+           option, chrome_prctl_option_name(option), arg2, arg3);
+}
+
+static void chrome_syscall_trace_seccomp(uint64 op, uint64 flags, uint64 args)
+{
+    printf("chrome-syscall-detail: seccomp op=%lu(%s) flags=0x%lx "
+           "args=0x%lx\n",
+           op, chrome_seccomp_op_name(op), flags, args);
 }
 
 static void chrome_syscall_trace_details(int orig_num, uint64 a0, uint64 a1,
@@ -1453,11 +2102,114 @@ static void chrome_syscall_trace_details(int orig_num, uint64 a0, uint64 a1,
         chrome_syscall_trace_sockaddr("connect.addr", a1, a2);
         break;
     case SYS_sendmsg_x86:
-        chrome_syscall_trace_msghdr(a1);
+        chrome_syscall_trace_msghdr("sendmsg", a1);
+        break;
+    case SYS_recvmsg_x86:
+        chrome_syscall_trace_msghdr("recvmsg", a1);
+        break;
+    case SYS_clone3_x86:
+        chrome_syscall_trace_clone3(a0, a1);
+        break;
+    case SYS_prctl_x86:
+        chrome_syscall_trace_prctl(a0, a1, a2);
+        break;
+    case SYS_unshare_x86:
+        chrome_syscall_trace_namespace_flags("unshare", a0);
+        break;
+    case SYS_setns_x86:
+        chrome_syscall_trace_namespace_flags("setns", a1);
+        break;
+    case SYS_seccomp_x86:
+        chrome_syscall_trace_seccomp(a0, a1, a2);
         break;
     default:
         break;
     }
+}
+
+static uint64 chrome_trace_ticks_to_us(uint64 ticks)
+{
+    uint64 freq = __timebase_frequency ? __timebase_frequency : 10000000UL;
+
+    return (ticks / freq) * 1000000ULL +
+           ((ticks % freq) * 1000000ULL) / freq;
+}
+
+static void chrome_syscall_slow_trace_line(struct thread *p, int orig_num,
+                                           int num, uint64 a0, uint64 a1,
+                                           uint64 a2, uint64 a3, uint64 a4,
+                                           uint64 a5, uint64 ret,
+                                           uint64 elapsed_ticks)
+{
+    int cpu = -1;
+    enum thread_state state = THREAD_UNUSED;
+    void *chan = NULL;
+
+    if (p->sched_entity != NULL)
+        cpu = p->sched_entity->cpu_id;
+    state = p->state;
+    chan = p->chan;
+    printf("chrome-syscall-slow: pid=%d tgid=%d name=%s cpu=%d "
+           "state=%s chan=%p orig=%d num=%d(%s) us=%lu "
+           "a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx a4=0x%lx "
+           "a5=0x%lx ret=0x%lx\n",
+           p->pid, p->tgid, p->name, cpu, thread_state_short(state), chan,
+           orig_num, num, x86_syscall_trace_name(orig_num),
+           chrome_trace_ticks_to_us(elapsed_ticks), a0, a1, a2, a3, a4, a5,
+           ret);
+}
+
+#define CHROME_SYSCALL_PROGRESS_SLOTS 64
+
+struct chrome_syscall_progress_slot {
+    int pid;
+    uint64 count;
+};
+
+static struct chrome_syscall_progress_slot chrome_progress_slots
+    [CHROME_SYSCALL_PROGRESS_SLOTS];
+
+static struct chrome_syscall_progress_slot *
+chrome_syscall_progress_slot(struct thread *p)
+{
+    int empty = -1;
+
+    if (p == NULL)
+        return NULL;
+    for (int i = 0; i < CHROME_SYSCALL_PROGRESS_SLOTS; i++) {
+        int pid = __atomic_load_n(&chrome_progress_slots[i].pid,
+                                  __ATOMIC_RELAXED);
+        if (pid == p->pid)
+            return &chrome_progress_slots[i];
+        if (pid == 0 && empty < 0)
+            empty = i;
+    }
+    if (empty >= 0) {
+        int expected = 0;
+        if (__atomic_compare_exchange_n(&chrome_progress_slots[empty].pid,
+                                        &expected, p->pid, 0,
+                                        __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+            return &chrome_progress_slots[empty];
+    }
+    return NULL;
+}
+
+static void chrome_syscall_progress_trace_line(struct thread *p, int orig_num,
+                                               int num, uint64 a0, uint64 a1,
+                                               uint64 a2, uint64 ret,
+                                               uint64 count)
+{
+    int cpu = -1;
+
+    if (p->sched_entity != NULL)
+        cpu = p->sched_entity->cpu_id;
+    printf("chrome-syscall-progress: pid=%d tgid=%d name=%s cpu=%d "
+           "state=%s count=%lu orig=%d num=%d(%s) a0=0x%lx a1=0x%lx "
+           "a2=0x%lx ret=0x%lx\n",
+           p->pid, p->tgid, p->name, cpu, thread_state_short(p->state),
+           count, orig_num, num, x86_syscall_trace_name(orig_num), a0, a1,
+           a2, ret);
 }
 
 /*
@@ -1477,9 +2229,28 @@ void syscall(void) {
     uint64 a4 = p->trapframe->trapframe.r8;
     uint64 a5 = p->trapframe->trapframe.r9;
     static int chrome_syscall_trace_count;
-    int trace = chrome_syscall_trace_process(p) &&
-                chrome_syscall_trace_interesting(orig_num) &&
-                chrome_syscall_trace_count < 4096;
+    static int chrome_syscall_enter_trace_count;
+    static int chrome_syscall_slow_trace_count;
+    static int chrome_syscall_progress_trace_count;
+    int trace = chrome_syscall_trace_enabled() &&
+                chrome_syscall_trace_process(p) &&
+                chrome_syscall_trace_interesting(orig_num, a1) &&
+                chrome_syscall_trace_count < chrome_syscall_trace_limit();
+    int enter_trace = chrome_syscall_enter_trace_enabled() &&
+                      chrome_syscall_trace_process(p) &&
+                      chrome_syscall_enter_trace_interesting(orig_num, a1) &&
+                      chrome_syscall_enter_trace_count <
+                          chrome_syscall_enter_trace_limit();
+    int slow_trace = chrome_syscall_slow_trace_enabled() &&
+                     chrome_syscall_trace_process(p) &&
+                     chrome_syscall_slow_trace_count <
+                         chrome_syscall_slow_trace_limit();
+    uint64 slow_start = slow_trace ? r_time() : 0;
+    int progress_trace = chrome_syscall_progress_trace_enabled() &&
+                         chrome_syscall_trace_process(p) &&
+                         chrome_syscall_progress_trace_count <
+                             chrome_syscall_progress_limit();
+    maybe_start_chrome_thread_dump(p);
     /*
      * Some musl x86_64 assembly helpers use native Linux syscall numbers
      * directly.  Most libc entry points go through xv6's generated syscall
@@ -1491,6 +2262,12 @@ void syscall(void) {
         num = SYS_munmap;
     } else if (num == 60 && (p->clone_flags & CLONE_THREAD)) {
         num = SYS_exit;
+    }
+    if (enter_trace) {
+        chrome_syscall_enter_trace_count++;
+        chrome_syscall_trace_line("enter", p, orig_num, num, a0, a1, a2, a3,
+                                  a4, a5, 0, 0);
+        chrome_syscall_trace_details(orig_num, a0, a1, a2);
     }
     if (num >= 0 && num < (int)NELEM(syscalls) && syscalls[num]) {
         p->trapframe->trapframe.rax = syscalls[num]();
@@ -1509,11 +2286,38 @@ void syscall(void) {
     if (trace) {
         uint64 ret = p->trapframe->trapframe.rax;
         chrome_syscall_trace_count++;
-        printf("chrome-syscall: pid=%d name=%s orig=%d num=%d(%s) "
-               "a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx a4=0x%lx "
-               "a5=0x%lx ret=0x%lx\n",
-               p->pid, p->name, orig_num, num, x86_syscall_trace_name(orig_num),
-               a0, a1, a2, a3, a4, a5, ret);
+        chrome_syscall_trace_line("return", p, orig_num, num, a0, a1, a2, a3,
+                                  a4, a5, ret, 1);
         chrome_syscall_trace_details(orig_num, a0, a1, a2);
+    }
+    if (slow_trace) {
+        uint64 elapsed = r_time() - slow_start;
+        uint64 elapsed_us = chrome_trace_ticks_to_us(elapsed);
+
+        if (elapsed_us >= chrome_syscall_slow_trace_threshold_us()) {
+            chrome_syscall_slow_trace_count++;
+            chrome_syscall_slow_trace_line(p, orig_num, num, a0, a1, a2, a3,
+                                           a4, a5,
+                                           p->trapframe->trapframe.rax,
+                                           elapsed);
+            chrome_syscall_trace_details(orig_num, a0, a1, a2);
+        }
+    }
+    if (progress_trace) {
+        struct chrome_syscall_progress_slot *slot =
+            chrome_syscall_progress_slot(p);
+        int interval = chrome_syscall_progress_interval();
+
+        if (slot != NULL && interval > 0) {
+            uint64 count = __atomic_add_fetch(&slot->count, 1,
+                                              __ATOMIC_RELAXED);
+            if ((count % (uint64)interval) == 0) {
+                chrome_syscall_progress_trace_count++;
+                chrome_syscall_progress_trace_line(
+                    p, orig_num, num, a0, a1, a2,
+                    p->trapframe->trapframe.rax, count);
+                chrome_syscall_trace_details(orig_num, a0, a1, a2);
+            }
+        }
     }
 }

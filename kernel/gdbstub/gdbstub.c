@@ -50,6 +50,7 @@
 #include "smp/ipi.h"
 #include "smp/atomic.h"
 #include "smp/percpu.h"
+#include "cmdline.h"
 
 /* lwIP netconn (blocking TCP) API */
 #include "lwip/api.h"
@@ -84,6 +85,21 @@ int snprintf(char *buf, size_t size, const char *fmt, ...);
 #else
 #define GDB_LOG(fmt, ...) ((void)0)
 #endif
+
+static int gdbstub_wait_trap_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+
+    if (__atomic_load_n(&cached, __ATOMIC_ACQUIRE) >= 0)
+        return cached;
+
+    int enabled =
+        cmdline_get_param("gdbstub_wait_trap", value, sizeof(value)) == 0 &&
+        strcmp(value, "0") != 0;
+    __atomic_store_n(&cached, enabled, __ATOMIC_RELEASE);
+    return enabled;
+}
 
 #if GDB_LOG_LEVEL >= 2
 #define GDB_DBG(fmt, ...) printf("gdb: " fmt "\n", ##__VA_ARGS__)
@@ -2024,15 +2040,17 @@ int gdbstub_trap(struct thread *t)
         return -1;
 
     int tgid = thread_tgid(t);
-    GDB_LOG("trap: tid=%d tgid=%d pc=0x%lx attached=%d target_pid=%d",
-              t->pid, tgid, gdb_arch_get_pc(t->trapframe), gdb.attached, gdb.target_pid);
+
     /* Is this a thread in the process we're debugging? */
-    if (!gdb.attached || tgid != gdb.target_pid) {
-        /*
-         * No debugger attached for this PID.  If no other process is
-         * already waiting, block here until a GDB client connects and
-         * attaches to our PID.  This implements the waitgdb() helper.
-         */
+    if (!gdb.attached) {
+        /* Linux delivers an ordinary user INT3/EBREAK as SIGTRAP.  Do not
+         * park arbitrary applications here; Chromium and similar programs use
+         * trap instructions internally and may handle the signal themselves.
+         * The legacy waitgdb trap-stop mode is still available when explicitly
+         * requested on the kernel command line. */
+        if (!gdbstub_wait_trap_enabled())
+            return -1;
+
         if (gdb.pending_pid != 0) {
             /* Another process is already waiting — can't queue two. */
             return -1;
@@ -2052,7 +2070,12 @@ int gdbstub_trap(struct thread *t)
          * Check a0: waitgdb() sets a0=0 (don't stop on exec),
          * waitgdb -e sets a0=1 (stop at entry point after exec). */
         gdb.stop_on_exec = (arch_tf_get_arg0(t->trapframe) != 0) ? 1 : 0;
+    } else if (tgid != gdb.target_pid) {
+        return -1;
     }
+
+    GDB_LOG("trap: tid=%d tgid=%d pc=0x%lx attached=%d target_pid=%d",
+              t->pid, tgid, gdb_arch_get_pc(t->trapframe), gdb.attached, gdb.target_pid);
 
     uint64 pc = gdb_arch_get_pc(t->trapframe);
 

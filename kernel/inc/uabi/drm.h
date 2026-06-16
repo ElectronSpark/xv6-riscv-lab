@@ -2,6 +2,7 @@
 #define __UAPI_DRM_H
 
 #include <types.h>
+#include "uabi/fcntl.h"
 
 #define DRM_IOCTL_VERSION                      0xc0406400UL
 #define DRM_IOCTL_GET_UNIQUE                   0xc0106401UL
@@ -153,6 +154,9 @@
 #define DRM_CAP_SYNCOBJ                 0x13
 #define DRM_CAP_SYNCOBJ_TIMELINE        0x14
 #define DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP  0x15
+
+#define DRM_RDWR                        O_RDWR
+#define DRM_CLOEXEC                     O_CLOEXEC
 
 #define DRM_CLIENT_CAP_STEREO_3D        1
 #define DRM_CLIENT_CAP_UNIVERSAL_PLANES 2

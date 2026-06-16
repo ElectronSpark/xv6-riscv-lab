@@ -56,15 +56,15 @@ static ssize_t eventfd_read(struct vfs_file *file, char *buf, size_t count,
 
     spin_lock(&ctx->lock);
     while (ctx->count == 0) {
+        int wait_ret;
+
         if (file->f_flags & O_NONBLOCK) {
             spin_unlock(&ctx->lock);
             return -EAGAIN;
         }
-        spin_unlock(&ctx->lock);
-        hyperv_input_intr();
-        sleep_ms(1);
-        spin_lock(&ctx->lock);
-        if (signal_pending(current) || killed(current)) {
+        wait_ret = tq_wait_in_state(&ctx->rq, &ctx->lock, NULL,
+                                    THREAD_INTERRUPTIBLE);
+        if (wait_ret < 0 || signal_pending(current) || killed(current)) {
             spin_unlock(&ctx->lock);
             return -EINTR;
         }
@@ -103,7 +103,7 @@ static ssize_t eventfd_write(struct vfs_file *file, const char *buf,
     struct eventfd_ctx *ctx = file->private_data;
     uint64 val;
 
-    if (count < sizeof(uint64))
+    if (count != sizeof(uint64))
         return -EINVAL;
 
     if (user) {
@@ -132,12 +132,13 @@ static ssize_t eventfd_write(struct vfs_file *file, const char *buf,
     }
     ctx->count += val;
 
-    /* Wake readers */
-    tq_wakeup_all(&ctx->rq, 0, 0);
+    /* Linux accepts a zero write, but it does not make the fd readable. */
+    if (val != 0)
+        tq_wakeup_all(&ctx->rq, 0, 0);
     spin_unlock(&ctx->lock);
 
     /* Notify epoll/kqueue that the fd is now readable */
-    if (ctx->file)
+    if (val != 0 && ctx->file)
         vfs_file_knote_notify(ctx->file, EVFILT_READ, 0);
 
     return sizeof(uint64);

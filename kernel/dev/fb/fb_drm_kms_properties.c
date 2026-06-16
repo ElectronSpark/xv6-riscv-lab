@@ -485,6 +485,7 @@ static int gpu_kms_apply_cursor_fb(struct fb_gpu_render_owner *owner,
                                    uint32 hot_x, uint32 hot_y)
 {
     struct fb_gpu_kms_fb_entry fb;
+    int image_changed;
     int ret;
 
     if (fb_id == 0) {
@@ -513,11 +514,18 @@ static int gpu_kms_apply_cursor_fb(struct fb_gpu_render_owner *owner,
         src_w != ((uint32)fb.width << 16) ||
         src_h != ((uint32)fb.height << 16))
         return -EINVAL;
-    ret = gpu_kms_upload_cursor_from_bo(owner, fb.bo_handle, fb.width,
-                                        fb.height, fb.pitches[0],
-                                        fb.offsets[0], hot_x, hot_y);
-    if (ret != 0)
-        return ret;
+    spin_lock(&fb_state.lock);
+    image_changed = fb_state.current_cursor_fb_id != fb_id ||
+        fb_state.current_cursor_w != fb.width ||
+        fb_state.current_cursor_h != fb.height;
+    spin_unlock(&fb_state.lock);
+    if (image_changed) {
+        ret = gpu_kms_upload_cursor_from_bo(owner, fb.bo_handle, fb.width,
+                                            fb.height, fb.pitches[0],
+                                            fb.offsets[0], hot_x, hot_y);
+        if (ret != 0)
+            return ret;
+    }
     ret = virtio_gpu_user_move_cursor(x, y, 1);
     if (ret != 0)
         return ret;

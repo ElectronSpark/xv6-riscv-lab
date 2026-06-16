@@ -76,6 +76,7 @@ static void __vfs_set_mountpoint(struct vfs_superblock *sb,
 static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint);
 static struct fs_struct *__vfs_struct_alloc_init(void);
 static void __vfs_struct_free(struct fs_struct *fs);
+static void vfs_mount_standard_dev_shm(void);
 
 /******************************************************************************
  * Private functions
@@ -511,10 +512,53 @@ void vfs_init(void) {
     // Mount real root filesystem and chroot into it.
     // ext4fs_mount_root() will also move /dev into the new root.
     ext4fs_mount_root();
+    vfs_mount_standard_dev_shm();
 
     // Optional: run smoke tests in a separate kernel thread with chroot to /tmp
     // tmpfs_smoketest_start();
     // xv6fs_run_all_smoketests();
+}
+
+static void vfs_mount_standard_dev_shm(void)
+{
+    struct vfs_inode *shm_inode = vfs_namei("/dev/shm", 8);
+    if (IS_ERR(shm_inode)) {
+        struct vfs_inode *dev_inode = vfs_namei("/dev", 4);
+        if (IS_ERR_OR_NULL(dev_inode)) {
+            printf("vfs: failed to resolve /dev for /dev/shm, errno=%ld\n",
+                   IS_ERR(dev_inode) ? PTR_ERR(dev_inode) : -ENOENT);
+            return;
+        }
+
+        shm_inode = vfs_mkdir(dev_inode, 01777, "shm", 3);
+        vfs_iput(dev_inode);
+        if (IS_ERR_OR_NULL(shm_inode)) {
+            long err = IS_ERR(shm_inode) ? PTR_ERR(shm_inode) : -ENOMEM;
+            if (err != -EEXIST) {
+                printf("vfs: failed to create /dev/shm, errno=%ld\n", err);
+                return;
+            }
+            shm_inode = vfs_namei("/dev/shm", 8);
+            if (IS_ERR_OR_NULL(shm_inode)) {
+                printf("vfs: failed to resolve existing /dev/shm, errno=%ld\n",
+                       IS_ERR(shm_inode) ? PTR_ERR(shm_inode) : -ENOENT);
+                return;
+            }
+        }
+    }
+
+    if (!S_ISDIR(shm_inode->mode)) {
+        printf("vfs: /dev/shm exists but is not a directory\n");
+        vfs_iput(shm_inode);
+        return;
+    }
+    vfs_iput(shm_inode);
+
+    int ret = vfs_mount_path("tmpfs", "/dev/shm", 8, NULL, 0, 0, NULL);
+    if (ret == 0)
+        printf("tmpfs: mounted at /dev/shm\n");
+    else if (ret != -EBUSY)
+        printf("tmpfs: failed to mount at /dev/shm, errno=%d\n", ret);
 }
 
 /*

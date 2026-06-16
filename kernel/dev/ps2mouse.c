@@ -20,9 +20,13 @@
 #include <lock/spinlock.h>
 #include <proc/sched.h>
 #include <mm/vm.h>
+#include <kqueue.h>
 #include <vfs/poll.h>
+#include <cmdline.h>
 
 #if defined(__x86_64__) || defined(__i386__)
+
+static cdev_t mouse_cdev;
 
 /* ── I/O port helpers ────────────────────────────────────────────── */
 
@@ -288,6 +292,7 @@ void mouse_input_push_event(const struct mouse_event *ev)
     ring_push((struct mouse_event *)ev);
     spin_unlock(&mouse_state.lock);
     wakeup_on_chan(&mouse_state.ring);
+    cdev_knote_notify(&mouse_cdev, EVFILT_READ, 0);
 }
 
 /* ── IRQ handler ──────────────────────────────────────────────────── */
@@ -303,6 +308,15 @@ static volatile uint64 dbg_mouse_overflow;
 static volatile uint64 dbg_mouse_ringpush;
 static volatile uint64 dbg_mouse_reads;
 static volatile uint64 dbg_mouse_reads_ok;
+
+static int ps2mouse_cmdline_enabled(const char *key)
+{
+    char value[8];
+
+    if (cmdline_get_param(key, value, sizeof(value)) != 0)
+        return 0;
+    return value[0] != '0';
+}
 
 static int vmmouse_drain_locked(void)
 {
@@ -333,8 +347,10 @@ static void vmmouse_poll_thread(uint64 arg1, uint64 arg2)
         got = vmmouse_drain_locked();
         spin_unlock(&mouse_state.lock);
 
-        if (got)
+        if (got) {
             wakeup_on_chan(&mouse_state.ring);
+            cdev_knote_notify(&mouse_cdev, EVFILT_READ, 0);
+        }
 
         sleep_ms(8);
     }
@@ -368,6 +384,7 @@ void ps2mouse_handle_byte(uint8 byte)
             mouse_state.packet_idx = 0;
             spin_unlock(&mouse_state.lock);
             wakeup_on_chan(&mouse_state.ring);
+            cdev_knote_notify(&mouse_cdev, EVFILT_READ, 0);
             return;
         }
 
@@ -430,6 +447,7 @@ void ps2mouse_handle_byte(uint8 byte)
     mouse_state.packet_idx = 0;
     spin_unlock(&mouse_state.lock);
     wakeup_on_chan(&mouse_state.ring);
+    cdev_knote_notify(&mouse_cdev, EVFILT_READ, 0);
 }
 
 /*
@@ -519,6 +537,7 @@ static int mouse_read(cdev_t *cdev, bool user, void *buf, size_t count)
 static int mouse_write(cdev_t *cdev, bool user, const void *buf, size_t count)
 {
     struct mouse_event ev;
+    int trace;
 
     (void)cdev;
     if (count != sizeof(ev))
@@ -531,7 +550,14 @@ static int mouse_write(cdev_t *cdev, bool user, const void *buf, size_t count)
         memcpy(&ev, buf, sizeof(ev));
     }
 
+    trace = ps2mouse_cmdline_enabled("ps2mouse_write_trace");
+    if (trace)
+        printf("PS2 mouse: write begin flags=0x%x x=%u y=%u buttons=0x%x\n",
+               ev.flags, (uint16)ev.dx, (uint16)ev.dy, ev.buttons);
     mouse_input_push_event(&ev);
+    if (trace)
+        printf("PS2 mouse: write end flags=0x%x x=%u y=%u buttons=0x%x\n",
+               ev.flags, (uint16)ev.dx, (uint16)ev.dy, ev.buttons);
     return sizeof(ev);
 }
 

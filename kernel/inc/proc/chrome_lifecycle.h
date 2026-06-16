@@ -27,6 +27,16 @@ static inline int chrome_lifecycle_trace_enabled(void)
     return enabled;
 }
 
+static inline int chrome_thread_lifecycle_trace_enabled(void)
+{
+    return chrome_trace_value_enabled("chrome_thread_lifecycle_trace");
+}
+
+static inline int chrome_exec_syscall_trace_enabled(void)
+{
+    return chrome_trace_value_enabled("chrome_exec_syscall_trace");
+}
+
 static inline int chrome_lifecycle_string_match(const char *value)
 {
     if (value == NULL || value[0] == '\0')
@@ -46,6 +56,24 @@ static inline int chrome_lifecycle_thread_match(struct thread *p)
         chrome_lifecycle_string_match(p->thread_group->exec_path))
         return 1;
     return 0;
+}
+
+static inline int chrome_lifecycle_network_service_match(struct thread *p)
+{
+    if (p == NULL || p->thread_group == NULL)
+        return 0;
+    uint32 roles = __atomic_load_n(&p->thread_group->chrome_trace_roles,
+                                   __ATOMIC_RELAXED);
+    return (roles & TG_CHROME_TRACE_NETWORK_SERVICE) != 0;
+}
+
+static inline int chrome_lifecycle_child_process_match(struct thread *p)
+{
+    if (p == NULL || p->thread_group == NULL)
+        return 0;
+    uint32 roles = __atomic_load_n(&p->thread_group->chrome_trace_roles,
+                                   __ATOMIC_RELAXED);
+    return (roles & TG_CHROME_TRACE_CHILD_PROCESS) != 0;
 }
 
 #endif /* __KERNEL_CHROME_LIFECYCLE_H */

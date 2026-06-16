@@ -802,6 +802,34 @@ static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
         return NULL;
     }
 
+    /*
+     * Large Linux GUI processes fault executable and shared-object mappings
+     * sequentially during dynamic-loader startup.  Mirror the read(2) path's
+     * pcache readahead here so file-backed mmap does not submit one blocking
+     * disk I/O per page fault.
+     */
+    loff_t isize = inode->size;
+    if (pc->ops && pc->ops->submit_readahead && (loff_t)file_off >= pc->ra_pos) {
+        vfs_iunlock(inode);
+        pc->ra_pos = pcache_readahead(pc, (loff_t)file_off, isize);
+        vfs_ilock(inode);
+        if (file_off >= (uint64)inode->size) {
+            vfs_iunlock(inode);
+            void *pa = page_alloc(0, PAGE_TYPE_ANON);
+            if (pa == NULL)
+                return NULL;
+            memset(pa, 0, PGSIZE);
+            return pa;
+        }
+        bytes_to_read = PGSIZE;
+        if (file_off + PGSIZE > (uint64)inode->size)
+            bytes_to_read = (uint64)inode->size - file_off;
+        if (!pc->active) {
+            vfs_iunlock(inode);
+            return NULL;
+        }
+    }
+
     // Convert file offset to xv6fs pcache key (512-byte units).
     // Since file_off is page-aligned, bn is a multiple of BSIZE_PER_PAGE,
     // so the target data begins at offset 0 within the pcache page.

@@ -9,6 +9,7 @@
 #include "proc/thread_group.h"
 #include "printf.h"
 #include "proc/sched.h"
+#include "proc/chrome_lifecycle.h"
 #include "signal.h"
 #include <mm/page.h>
 #include <mm/vm.h>
@@ -94,6 +95,17 @@ static void __trap_panic(struct trapframe *tf, uint64 s0) {
     panic("kerneltrap");
 }
 
+static bool trace_browser_faults_for(struct thread *p) {
+    if (p == NULL)
+        return false;
+    return strstr(p->name, "mb") != NULL ||
+           strstr(p->name, "MiniBrowser") != NULL ||
+           strstr(p->name, "WebKit") != NULL ||
+           chrome_lifecycle_thread_match(p) ||
+           chrome_lifecycle_network_service_match(p) ||
+           chrome_lifecycle_child_process_match(p);
+}
+
 void user_kirq_entrance(uint64 ksp, uint64 s0) {
     enter_irq();
     if ((current->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
@@ -127,11 +139,7 @@ void usertrap(void) {
     uint64 va;
     vma_t *vma = NULL;
     uint64 scause = current->trapframe->trapframe.scause;
-    bool trace_browser_fault =
-        strstr(current->name, "mb") != NULL ||
-        strstr(current->name, "MiniBrowser") != NULL ||
-        strstr(current->name, "WebKit") != NULL ||
-        current->pgid == 48 || current->tgid == 48;
+    bool trace_browser_fault = trace_browser_faults_for(current);
 
     if ((current->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
@@ -436,10 +444,7 @@ void usertrapret(void) {
 
     if (killed(p)) {
         // If the thread is terminated, exit it.
-        if ((strstr(p->name, "mb") != NULL ||
-             strstr(p->name, "MiniBrowser") != NULL ||
-             strstr(p->name, "WebKit") != NULL ||
-             p->pgid == 48 || p->tgid == 48)) {
+        if (trace_browser_faults_for(p)) {
             printf("usertrapret: exiting killed pid=%d tgid=%d name='%s' signo=%d code=%d\n",
                    p->pid, p->tgid, p->name, p->killed_signo, p->killed_code);
         }

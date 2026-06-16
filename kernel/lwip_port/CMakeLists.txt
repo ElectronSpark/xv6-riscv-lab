@@ -47,6 +47,18 @@ set(LWIP_CORE4_SRCS
     ${LWIP_DIR}/src/core/ipv4/ip4_addr.c
 )
 
+set(LWIP_CORE6_SRCS
+    ${LWIP_DIR}/src/core/ipv6/dhcp6.c
+    ${LWIP_DIR}/src/core/ipv6/ethip6.c
+    ${LWIP_DIR}/src/core/ipv6/icmp6.c
+    ${LWIP_DIR}/src/core/ipv6/inet6.c
+    ${LWIP_DIR}/src/core/ipv6/ip6.c
+    ${LWIP_DIR}/src/core/ipv6/ip6_addr.c
+    ${LWIP_DIR}/src/core/ipv6/ip6_frag.c
+    ${LWIP_DIR}/src/core/ipv6/mld6.c
+    ${LWIP_DIR}/src/core/ipv6/nd6.c
+)
+
 set(LWIP_API_SRCS
     ${LWIP_DIR}/src/api/api_lib.c
     ${LWIP_DIR}/src/api/api_msg.c
@@ -94,6 +106,7 @@ set(LWIP_APP_SRCS
 set(LWIP_ALL_SRCS
     ${LWIP_CORE_SRCS}
     ${LWIP_CORE4_SRCS}
+    ${LWIP_CORE6_SRCS}
     ${LWIP_API_SRCS}
     ${LWIP_NETIF_SRCS}
     ${LWIP_APP_SRCS}

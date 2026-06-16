@@ -37,6 +37,8 @@
 #define VIRTIO_GPU_IRQ_WAIT_MS 5000
 #define VIRTIO_GPU_IRQ_WAIT_MS_MAX 60000
 #define VIRTIO_GPU_IRQ_WAIT_SLICE_MS 1
+#define VIRTIO_GPU_SCANOUT_READ_LOCK_WAIT_MS 3000
+#define VIRTIO_GPU_SCANOUT_READ_LOCK_WAIT_MS_MAX 30000
 
 #define VIRTIO_GPU_F_VIRGL          0
 #define VIRTIO_GPU_F_EDID           1
@@ -69,6 +71,7 @@
 
 /* virtio-gpu cursor resources are a fixed 64x64 BGRA image. */
 #define VIRTIO_GPU_CURSOR_DIM   64
+#define VIRTIO_GPU_CURSOR_IMAGE_SLOTS 16
 #define VIRTIO_GPU_CURSOR_RING  64
 #define VIRTIO_GPU_RESP_OK_NODATA       0x1100
 #define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x1101
@@ -95,6 +98,7 @@
 #define VIRTIO_GPU_SMOKE_HEIGHT 32
 #define VIRTIO_GPU_MAX_RESOURCES 16384
 #define VIRTIO_GPU_MAX_CONTEXTS 256
+#define VIRTIO_GPU_RESOURCE_MAX_CONTEXT_ATTACHMENTS 8
 #define VIRTIO_GPU_MAX_CAPSETS 8
 #define VIRTIO_GPU_PAGE_FLIP_SCANOUT_SET_MAX 4
 #define VIRGL_CCMD_NOP 0
@@ -464,6 +468,8 @@ struct virtio_gpu_resource {
     int is_3d;
     int attached;
     uint32 ctx_id;
+    uint32 ctx_attach_count;
+    uint32 ctx_attached[VIRTIO_GPU_RESOURCE_MAX_CONTEXT_ATTACHMENTS];
     uint32 target;
     uint32 bind;
     int is_blob;
@@ -563,7 +569,7 @@ struct virtio_gpu_async_submit {
  * virtio-gpu control queue retires buffers in submission order, so the ring is
  * drained strictly FIFO.
  */
-#define VIRTIO_GPU_ASYNC_MAX_DEPTH 8
+#define VIRTIO_GPU_ASYNC_MAX_DEPTH 32
 #define VIRTIO_GPU_ASYNC_DESC_PER_SLOT 4
 #define VIRTIO_GPU_ASYNC_DESC_BASE 8
 
@@ -633,6 +639,8 @@ struct virtio_gpu {
     int cursor_ready;
     uint32 cursor_resource_id;
     struct virtio_gpu_resource *cursor_resource;
+    struct virtio_gpu_resource *cursor_resources[VIRTIO_GPU_CURSOR_IMAGE_SLOTS];
+    uint32 cursor_resource_next;
     void *cursor_cmd_page;
     uint16 cursor_cmd_idx;
     uint16 cursor_ring;
@@ -663,6 +671,78 @@ static int virtio_gpu_owner_matches(uint64 object_owner_id,
     if (owner_tgid > 0)
         return object_owner_tgid == owner_tgid;
     return 1;
+}
+
+static int virtio_gpu_resource_context_attached_locked(
+    const struct virtio_gpu_resource *res, uint32 ctx_id)
+{
+    if (res == NULL || ctx_id == 0)
+        return 0;
+
+    for (uint32 i = 0; i < res->ctx_attach_count; i++) {
+        if (res->ctx_attached[i] == ctx_id)
+            return 1;
+    }
+    return 0;
+}
+
+static uint32 virtio_gpu_resource_primary_context_locked(
+    const struct virtio_gpu_resource *res)
+{
+    if (res == NULL)
+        return 0;
+    if (virtio_gpu_resource_context_attached_locked(res, res->ctx_id))
+        return res->ctx_id;
+    return res->ctx_attach_count != 0 ? res->ctx_attached[0] : 0;
+}
+
+static int virtio_gpu_resource_record_context_locked(
+    struct virtio_gpu_resource *res, uint32 ctx_id)
+{
+    if (res == NULL || ctx_id == 0)
+        return -EINVAL;
+    if (virtio_gpu_resource_context_attached_locked(res, ctx_id)) {
+        res->ctx_id = ctx_id;
+        return 0;
+    }
+    if (res->ctx_attach_count >= VIRTIO_GPU_RESOURCE_MAX_CONTEXT_ATTACHMENTS)
+        return -ENOSPC;
+    res->ctx_attached[res->ctx_attach_count++] = ctx_id;
+    res->ctx_id = ctx_id;
+    return 0;
+}
+
+static void virtio_gpu_resource_forget_context_locked(
+    struct virtio_gpu_resource *res, uint32 ctx_id)
+{
+    if (res == NULL || ctx_id == 0)
+        return;
+
+    for (uint32 i = 0; i < res->ctx_attach_count; i++) {
+        if (res->ctx_attached[i] != ctx_id)
+            continue;
+        res->ctx_attach_count--;
+        if (i != res->ctx_attach_count)
+            res->ctx_attached[i] = res->ctx_attached[res->ctx_attach_count];
+        res->ctx_attached[res->ctx_attach_count] = 0;
+        break;
+    }
+    if (res->ctx_id == ctx_id)
+        res->ctx_id = virtio_gpu_resource_primary_context_locked(res);
+}
+
+static uint32 virtio_gpu_resource_copy_contexts_locked(
+    const struct virtio_gpu_resource *res, uint32 *ctx_ids, uint32 max)
+{
+    uint32 count = 0;
+
+    if (res == NULL || ctx_ids == NULL)
+        return 0;
+    while (count < res->ctx_attach_count && count < max) {
+        ctx_ids[count] = res->ctx_attached[count];
+        count++;
+    }
+    return count;
 }
 
 static uint64 virtio_gpu_bar_base(struct virtio_pci_discovery *vd, uint8 bar)
@@ -807,6 +887,13 @@ static int virtio_gpu_cmdline_enabled(const char *key)
            strcmp(buf, "yes") == 0 ||
            strcmp(buf, "true") == 0 ||
            strcmp(buf, "on") == 0;
+}
+
+static int virtio_gpu_cmdline_present(const char *key)
+{
+    char buf[16];
+
+    return cmdline_get_param(key, buf, sizeof(buf)) == 0;
 }
 
 static uint32 virtio_gpu_cmdline_uint(const char *key, uint32 default_value,
@@ -1046,8 +1133,24 @@ static int virtio_gpu_submit_internal(struct virtio_gpu *g, void *cmd,
     uint64 start;
 
     start = r_time();
-    if (virtio_gpu_drain_async_submit_sample(g, 1, drain_sample) != 0)
-        return -1;
+    if (virtio_gpu_drain_async_submit_sample(g, 1, drain_sample) != 0) {
+        struct virtio_gpu_context *ctx;
+        uint32 ctx_id = ((struct virtio_gpu_ctrl_hdr *)cmd)->ctx_id;
+        int current_ctx_failed = 0;
+
+        /*
+         * Retiring an older async slot can report an error for a different
+         * context.  That context is marked failed by the retire path; do not
+         * poison the synchronous command that merely happened to drain it.
+         */
+        spin_lock(&g->lock);
+        ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
+        current_ctx_failed = ctx != NULL && ctx->failed;
+        spin_unlock(&g->lock);
+        if (current_ctx_failed && type != VIRTIO_GPU_CMD_CTX_DESTROY &&
+            type != VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE)
+            return -1;
+    }
     if (drain_ticks_out != NULL)
         *drain_ticks_out = r_time() - start;
 
@@ -1228,8 +1331,7 @@ static int virtio_gpu_submit_mixed_async(struct virtio_gpu *g, void *cmd,
                 continue;
             }
             virtio_gpu_drain_sample_count(drain_sample, a->type);
-            if (virtio_gpu_async_validate_retire(g, a) != 0)
-                ret = -1;
+            (void)virtio_gpu_async_validate_retire(g, a);
             g->async_count--;
             spin_lock(&g->lock);
             g->stats.async_retired++;
@@ -1530,6 +1632,18 @@ static void virtio_gpu_op_lock(struct virtio_gpu *g,
 {
     mutex_lock(&g->op_lock);
     __atomic_store_n(&g->op_lock_holder, holder, __ATOMIC_RELAXED);
+}
+
+static int virtio_gpu_op_lock_timed(struct virtio_gpu *g,
+                                    enum virtio_gpu_op_holder holder,
+                                    uint64 timeout_ms)
+{
+    int ret;
+
+    ret = mutex_lock_timed(&g->op_lock, timeout_ms);
+    if (ret == 0)
+        __atomic_store_n(&g->op_lock_holder, holder, __ATOMIC_RELAXED);
+    return ret;
 }
 
 static void virtio_gpu_op_unlock(struct virtio_gpu *g)
@@ -1858,19 +1972,33 @@ static void virtio_gpu_transfer_perf_log(int ret, int from_host, int async_path,
 static int virtio_gpu_async_depth(struct virtio_gpu *g)
 {
     if (g->async_depth == 0) {
-        char buf[16];
         int depth = (virtio_gpu_cmdline_enabled("vgpu_async_pf") ||
                      virtio_gpu_cmdline_enabled(
-                         "virtio_gpu_async_page_flip_scanout")) ? 8 : 2;
+                         "virtio_gpu_async_page_flip_scanout")) ? 32 : 2;
 
-        if (cmdline_get_param("virtio_gpu_async_depth", buf,
-                              sizeof(buf)) == 0 &&
-            buf[0] >= '1' && buf[0] <= '0' + VIRTIO_GPU_ASYNC_MAX_DEPTH &&
-            buf[1] == '\0')
-            depth = buf[0] - '0';
+        depth = (int)virtio_gpu_cmdline_uint("virtio_gpu_async_depth",
+                                             (uint32)depth,
+                                             VIRTIO_GPU_ASYNC_MAX_DEPTH);
+        if (depth < 1)
+            depth = 1;
         g->async_depth = depth;
     }
     return g->async_depth;
+}
+
+static int virtio_gpu_async_depth_for_reason(
+    struct virtio_gpu *g, enum virtio_gpu_async_reason reason)
+{
+    int depth = virtio_gpu_async_depth(g);
+
+    if (reason == VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D &&
+        !virtio_gpu_cmdline_present("virtio_gpu_async_depth")) {
+        depth = (int)virtio_gpu_cmdline_uint(
+            "virtio_gpu_async_submit_depth", 1, VIRTIO_GPU_ASYNC_MAX_DEPTH);
+        if (depth < 1)
+            depth = 1;
+    }
+    return depth;
 }
 
 static void virtio_gpu_count_async_make_room_locked(
@@ -2163,7 +2291,7 @@ static int virtio_gpu_drain_async_until_fence(struct virtio_gpu *g,
 static int virtio_gpu_async_make_room(struct virtio_gpu *g,
                                       enum virtio_gpu_async_reason reason)
 {
-    int depth = virtio_gpu_async_depth(g);
+    int depth = virtio_gpu_async_depth_for_reason(g, reason);
     uint64 wait_start = 0;
     int waited = 0;
 

@@ -130,6 +130,38 @@ static int sysfs_lookup_static(const struct sysfs_entry *entries, int nentries,
     return -ENOENT;
 }
 
+static int sysfs_parse_cpu_name(const char *name, size_t name_len)
+{
+    int cpu = 0;
+
+    if (name_len < 4 || memcmp(name, "cpu", 3) != 0)
+        return -1;
+    for (size_t i = 3; i < name_len; i++) {
+        if (name[i] < '0' || name[i] > '9')
+            return -1;
+        cpu = cpu * 10 + (name[i] - '0');
+        if (cpu >= cpu_possible_count())
+            return -1;
+    }
+    return cpu;
+}
+
+static int sysfs_cpu_from_ino(uint64 ino, uint64 *kind)
+{
+    uint64 rel;
+    int cpu;
+
+    if (ino < SYSFS_INO_CPU_BASE)
+        return -1;
+    rel = ino - SYSFS_INO_CPU_BASE;
+    cpu = (int)(rel / SYSFS_INO_CPU_STRIDE);
+    if (cpu < 0 || cpu >= cpu_possible_count())
+        return -1;
+    if (kind != NULL)
+        *kind = rel % SYSFS_INO_CPU_STRIDE;
+    return cpu;
+}
+
 static uint64 device_attr_ino(enum sysfs_device_kind kind, int child_idx)
 {
     uint64 base = kind == SYSFS_DEV_DRM_PRIMARY ?
@@ -333,7 +365,30 @@ static int sysfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                                 NELEM(system_cpu_entries), name, name_len,
                                 &ino) == 0)
             break;
+        {
+            int cpu = sysfs_parse_cpu_name(name, name_len);
+            if (cpu >= 0) {
+                ino = SYSFS_CPU_DIR_INO(cpu);
+                break;
+            }
+        }
         return -ENOENT;
+    default:
+    {
+        uint64 kind;
+        int cpu = sysfs_cpu_from_ino(dir->ino, &kind);
+        if (cpu >= 0 && kind == 0 &&
+            name_len == 7 && memcmp(name, "cpufreq", 7) == 0) {
+            ino = SYSFS_CPU_CPUFREQ_INO(cpu);
+            break;
+        }
+        if (cpu >= 0 && kind == 1 &&
+            name_len == 16 && memcmp(name, "cpuinfo_max_freq", 16) == 0) {
+            ino = SYSFS_CPU_CPUFREQ_MAX_INO(cpu);
+            break;
+        }
+        return -ENOENT;
+    }
     case SYSFS_INO_PCI_DRM:
     case SYSFS_INO_DRM_PRIMARY_DEVICE_DRM:
     case SYSFS_INO_DRM_RENDER_DEVICE_DRM:
@@ -341,8 +396,6 @@ static int sysfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                                 NELEM(drm_device_entries), name, name_len,
                                 &ino) == 0)
             break;
-        return -ENOENT;
-    default:
         return -ENOENT;
     }
 
@@ -391,6 +444,17 @@ static int sysfs_parent_ino(uint64 ino, enum sysfs_device_kind kind)
         ino == SYSFS_INO_CPU_POSSIBLE ||
         ino == SYSFS_INO_CPU_KERNEL_MAX)
         return SYSFS_INO_DEVICES_SYSTEM_CPU;
+    {
+        uint64 cpu_kind;
+        int cpu = sysfs_cpu_from_ino(ino, &cpu_kind);
+        if (cpu >= 0) {
+        if (cpu_kind == 0)
+            return SYSFS_INO_DEVICES_SYSTEM_CPU;
+        if (cpu_kind == 1)
+            return SYSFS_CPU_DIR_INO(cpu);
+        return SYSFS_CPU_CPUFREQ_INO(cpu);
+        }
+    }
     if (ino == SYSFS_INO_PCI_DEVICE)
         return SYSFS_INO_DEVICES_PCI_ROOT;
     if (ino == SYSFS_INO_PCI_DRM)
@@ -491,15 +555,41 @@ static int sysfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         return sysfs_emit_static(iter, ret, system_entries,
                                  NELEM(system_entries), child_idx);
     case SYSFS_INO_DEVICES_SYSTEM_CPU:
-        return sysfs_emit_static(iter, ret, system_cpu_entries,
-                                 NELEM(system_cpu_entries), child_idx);
+        if (child_idx < NELEM(system_cpu_entries)) {
+            return sysfs_emit_static(iter, ret, system_cpu_entries,
+                                     NELEM(system_cpu_entries), child_idx);
+        } else {
+            int cpu = child_idx - NELEM(system_cpu_entries);
+            char name[16];
+            if (cpu < 0 || cpu >= cpu_possible_count()) {
+                vfs_release_dentry(ret);
+                ret->name = NULL;
+                return 0;
+            }
+            snprintf(name, sizeof(name), "cpu%d", cpu);
+            return sysfs_emit(iter, ret, name, SYSFS_CPU_DIR_INO(cpu));
+        }
+    default:
+    {
+        uint64 kind;
+        int cpu = sysfs_cpu_from_ino(dir->ino, &kind);
+        if (cpu >= 0 && kind == 0)
+            return child_idx == 0 ?
+                sysfs_emit(iter, ret, "cpufreq",
+                           SYSFS_CPU_CPUFREQ_INO(cpu)) :
+                sysfs_emit_static(iter, ret, NULL, 0, 0);
+        if (cpu >= 0 && kind == 1)
+            return child_idx == 0 ?
+                sysfs_emit(iter, ret, "cpuinfo_max_freq",
+                           SYSFS_CPU_CPUFREQ_MAX_INO(cpu)) :
+                sysfs_emit_static(iter, ret, NULL, 0, 0);
+        return -ENOTDIR;
+    }
     case SYSFS_INO_PCI_DRM:
     case SYSFS_INO_DRM_PRIMARY_DEVICE_DRM:
     case SYSFS_INO_DRM_RENDER_DEVICE_DRM:
         return sysfs_emit_static(iter, ret, drm_device_entries,
                                  NELEM(drm_device_entries), child_idx);
-    default:
-        return -ENOTDIR;
     }
 }
 
@@ -613,6 +703,9 @@ static char *sysfs_gen_file(struct sysfs_inode *si)
         break;
     case SYSFS_ATTR_CPU_KERNEL_MAX:
         n = snprintf(buf, 512, "%d\n", last_cpu);
+        break;
+    case SYSFS_ATTR_CPUINFO_MAX_FREQ:
+        n = snprintf(buf, 512, "2400000\n");
         break;
     default:
         kvfree(buf);

@@ -49,7 +49,7 @@ static ssize_t ext4fs_file_readv(struct vfs_file *file, struct iov_iter *iter,
                                  bool user);
 
 #define EXT4FS_BLKS_PER_PAGE ((uint64)(PGSIZE / 512))
-#define EXT4FS_FAULT_READAHEAD_PAGES 2
+#define EXT4FS_FAULT_READAHEAD_BYTES (4UL << 20)
 #define EXT4FS_MAP_CACHE_BLOCKS 32
 
 static inline uint64 ext4fs_pcache_blk_count(loff_t size)
@@ -60,25 +60,20 @@ static inline uint64 ext4fs_pcache_blk_count(loff_t size)
     return pages * EXT4FS_BLKS_PER_PAGE;
 }
 
-static void ext4fs_pcache_readahead(struct pcache *pc, uint64 start_blkno_512,
-                                    uint64 limit_blkno_512, int nr_pages)
+static void ext4fs_pcache_readahead(struct pcache *pc, uint64 start_pos,
+                                    uint64 file_size)
 {
-    if (pc == NULL || !pc->active || nr_pages <= 0)
+    uint64 end_pos;
+
+    if (pc == NULL || !pc->active || pc->ops == NULL ||
+        pc->ops->submit_readahead == NULL || start_pos >= file_size)
         return;
 
-    for (int i = 0; i < nr_pages; i++) {
-        uint64 blkno_512 = start_blkno_512 +
-                           (uint64)i * EXT4FS_BLKS_PER_PAGE;
-        if (blkno_512 >= limit_blkno_512)
-            break;
+    end_pos = start_pos + EXT4FS_FAULT_READAHEAD_BYTES;
+    if (end_pos < start_pos || end_pos > file_size)
+        end_pos = file_size;
 
-        page_t *page = pcache_get_page(pc, blkno_512);
-        if (page == NULL)
-            break;
-
-        (void)pcache_read_page(pc, page);
-        pcache_put_page(pc, page);
-    }
+    pc->ra_pos = pcache_readahead(pc, (loff_t)start_pos, (loff_t)end_pos);
 }
 
 /*
@@ -654,8 +649,13 @@ static int ext4fs_pcache_read_folio(struct pcache *pcache, folio_t *folio) {
     struct pcache_node *pcn = head->pcache.pcache_node;
     unsigned long nr = pcn->page_count;
 
-    /* Try direct multi-page BIO for multi-page folios. */
-    if (nr >= 2) {
+    /*
+     * Use the per-page fallback for now.  The direct multi-page BIO path can
+     * feed stale or wrong-offset data to mmap faults for dynamically loaded
+     * ELF objects with non-page-aligned RW LOAD segments, which can corrupt
+     * ld.so's view of PT_DYNAMIC.
+     */
+    if (0 && nr >= 2) {
         struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
         if (inode != NULL && inode->sb != NULL) {
             struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
@@ -1722,6 +1722,9 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
         bytes_to_read = PGSIZE;
         if (file_off + PGSIZE > inode_size)
             bytes_to_read = inode_size - file_off;
+
+        if ((loff_t)file_off >= pc->ra_pos)
+            ext4fs_pcache_readahead(pc, file_off, inode_size);
 
         uint64 blkno_512 = file_off / 512ULL;
         page_t *pcpage = pcache_get_page(pc, blkno_512);

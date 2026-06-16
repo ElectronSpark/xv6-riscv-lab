@@ -95,20 +95,36 @@ void thread_group_exec_snapshot_clear(struct thread_group *tg)
         tg->exec_snapshot.cmdline = NULL;
     }
     tg->exec_snapshot.cmdline_len = 0;
+    memset(tg->exec_snapshot.cmdline_addrs, 0,
+           sizeof(tg->exec_snapshot.cmdline_addrs));
+    memset(tg->exec_snapshot.cmdline_lens, 0,
+           sizeof(tg->exec_snapshot.cmdline_lens));
+    tg->exec_snapshot.cmdline_argc = 0;
 
     if (tg->exec_snapshot.environ != NULL) {
         kvfree(tg->exec_snapshot.environ);
         tg->exec_snapshot.environ = NULL;
     }
     tg->exec_snapshot.environ_len = 0;
+    memset(tg->exec_snapshot.environ_addrs, 0,
+           sizeof(tg->exec_snapshot.environ_addrs));
+    memset(tg->exec_snapshot.environ_lens, 0,
+           sizeof(tg->exec_snapshot.environ_lens));
+    tg->exec_snapshot.environ_count = 0;
 
     memset(tg->exec_snapshot.auxv, 0, sizeof(tg->exec_snapshot.auxv));
     tg->exec_snapshot.auxv_len = 0;
 }
 
 void thread_group_exec_snapshot_set(struct thread_group *tg, char *cmdline,
-                                    size_t cmdline_len, char *environ,
-                                    size_t environ_len, const uint64 *auxv,
+                                    size_t cmdline_len,
+                                    const uint64 *cmdline_addrs,
+                                    const size_t *cmdline_lens,
+                                    size_t cmdline_argc, char *environ,
+                                    size_t environ_len,
+                                    const uint64 *environ_addrs,
+                                    const size_t *environ_lens,
+                                    size_t environ_count, const uint64 *auxv,
                                     size_t auxv_len)
 {
     if (tg == NULL) {
@@ -121,6 +137,10 @@ void thread_group_exec_snapshot_set(struct thread_group *tg, char *cmdline,
         cmdline_len = TG_EXEC_SNAPSHOT_MAX_BYTES;
     if (environ_len > TG_EXEC_SNAPSHOT_MAX_BYTES)
         environ_len = TG_EXEC_SNAPSHOT_MAX_BYTES;
+    if (cmdline_argc > MAXARG)
+        cmdline_argc = MAXARG;
+    if (environ_count > MAXENV)
+        environ_count = MAXENV;
     if (auxv_len > sizeof(tg->exec_snapshot.auxv))
         auxv_len = sizeof(tg->exec_snapshot.auxv);
 
@@ -130,8 +150,32 @@ void thread_group_exec_snapshot_set(struct thread_group *tg, char *cmdline,
 
     tg->exec_snapshot.cmdline = cmdline;
     tg->exec_snapshot.cmdline_len = cmdline_len;
+    memset(tg->exec_snapshot.cmdline_addrs, 0,
+           sizeof(tg->exec_snapshot.cmdline_addrs));
+    memset(tg->exec_snapshot.cmdline_lens, 0,
+           sizeof(tg->exec_snapshot.cmdline_lens));
+    if (cmdline_addrs != NULL && cmdline_lens != NULL &&
+        cmdline_argc != 0) {
+        memmove(tg->exec_snapshot.cmdline_addrs, cmdline_addrs,
+                cmdline_argc * sizeof(tg->exec_snapshot.cmdline_addrs[0]));
+        memmove(tg->exec_snapshot.cmdline_lens, cmdline_lens,
+                cmdline_argc * sizeof(tg->exec_snapshot.cmdline_lens[0]));
+    }
+    tg->exec_snapshot.cmdline_argc = cmdline_argc;
     tg->exec_snapshot.environ = environ;
     tg->exec_snapshot.environ_len = environ_len;
+    memset(tg->exec_snapshot.environ_addrs, 0,
+           sizeof(tg->exec_snapshot.environ_addrs));
+    memset(tg->exec_snapshot.environ_lens, 0,
+           sizeof(tg->exec_snapshot.environ_lens));
+    if (environ_addrs != NULL && environ_lens != NULL &&
+        environ_count != 0) {
+        memmove(tg->exec_snapshot.environ_addrs, environ_addrs,
+                environ_count * sizeof(tg->exec_snapshot.environ_addrs[0]));
+        memmove(tg->exec_snapshot.environ_lens, environ_lens,
+                environ_count * sizeof(tg->exec_snapshot.environ_lens[0]));
+    }
+    tg->exec_snapshot.environ_count = environ_count;
     memset(tg->exec_snapshot.auxv, 0, sizeof(tg->exec_snapshot.auxv));
     if (auxv != NULL && auxv_len != 0)
         memmove(tg->exec_snapshot.auxv, auxv, auxv_len);
@@ -174,8 +218,14 @@ int thread_group_exec_snapshot_clone_locked(struct thread_group *dst,
 
     ds->cmdline = cmdline;
     ds->cmdline_len = ss->cmdline_len;
+    memmove(ds->cmdline_addrs, ss->cmdline_addrs, sizeof(ds->cmdline_addrs));
+    memmove(ds->cmdline_lens, ss->cmdline_lens, sizeof(ds->cmdline_lens));
+    ds->cmdline_argc = ss->cmdline_argc;
     ds->environ = environ;
     ds->environ_len = ss->environ_len;
+    memmove(ds->environ_addrs, ss->environ_addrs, sizeof(ds->environ_addrs));
+    memmove(ds->environ_lens, ss->environ_lens, sizeof(ds->environ_lens));
+    ds->environ_count = ss->environ_count;
     memmove(ds->auxv, ss->auxv, sizeof(ds->auxv));
     ds->auxv_len = ss->auxv_len;
     return 0;
@@ -244,6 +294,8 @@ int thread_group_alloc(struct thread *leader) {
     __atomic_store_n(&tg->no_new_privs, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->timer_slack_ns, DEFAULT_TIMER_SLACK_NS,
                      __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->oom_score_adj, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->chrome_trace_roles, 0, __ATOMIC_SEQ_CST);
 
     // Initialise per-process accounting and resource limits
     acct_init(tg);
@@ -293,6 +345,8 @@ int thread_group_alloc_kernel(struct thread_group **out_tg, pid_t tgid) {
     __atomic_store_n(&tg->no_new_privs, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->timer_slack_ns, DEFAULT_TIMER_SLACK_NS,
                      __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->oom_score_adj, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->chrome_trace_roles, 0, __ATOMIC_SEQ_CST);
 
     *out_tg = tg;
     return 0;
@@ -401,7 +455,11 @@ void thread_group_exit(struct thread *p, int code) {
     tg->group_exit_kill_code = p->killed_code;
     tg->group_exit_task = p;
 
-    // Send SIGKILL to all other threads in the group.
+    // Force all other threads in the group to leave userspace and exit.
+    // For a normal exit_group(status), Linux reports the process as a normal
+    // exit with that status; sibling threads are not externally visible as
+    // SIGKILL deaths.  Preserve a real fatal-signal reason when one initiated
+    // the group exit, but do not manufacture SIGKILL for normal exit_group().
     // Acquire pid_rlock to safely iterate the thread list.
     pid_rlock();
     struct thread *t;
@@ -409,9 +467,10 @@ void thread_group_exit(struct thread *p, int code) {
     list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
         if (t == p)
             continue;
-        // Set the killed flag directly — SIGKILL bypasses all signal logic
-        t->killed_signo = SIGKILL;
-        t->killed_code = 2;
+        if (tg->group_exit_signo > 0) {
+            t->killed_signo = tg->group_exit_signo;
+            t->killed_code = tg->group_exit_kill_code;
+        }
         THREAD_SET_KILLED(t);
         THREAD_SET_SIGPENDING(t);
         // Wake sleeping/stopped threads via the scheduler so they are

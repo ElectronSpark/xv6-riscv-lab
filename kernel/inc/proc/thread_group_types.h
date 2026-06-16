@@ -29,6 +29,7 @@
  */
 
 #include "types.h"
+#include "param.h"
 #include "list_type.h"
 #include "signal_types.h"
 #include "accounting.h"
@@ -38,14 +39,22 @@
 #define NGROUPS_MAX 32  /* Maximum supplementary groups per process */
 #define TG_EXEC_SNAPSHOT_MAX_BYTES 4096
 #define TG_EXEC_AUXV_MAX_PAIRS 32
+#define TG_CHROME_TRACE_NETWORK_SERVICE (1U << 0)
+#define TG_CHROME_TRACE_CHILD_PROCESS   (1U << 1)
 
 struct pgroup;
 
 struct thread_group_exec_snapshot {
     char *cmdline;                /* Linux /proc/<pid>/cmdline bytes */
     size_t cmdline_len;
+    uint64 cmdline_addrs[MAXARG];
+    size_t cmdline_lens[MAXARG];
+    size_t cmdline_argc;
     char *environ;                /* Linux /proc/<pid>/environ bytes */
     size_t environ_len;
+    uint64 environ_addrs[MAXENV];
+    size_t environ_lens[MAXENV];
+    size_t environ_count;
     uint64 auxv[TG_EXEC_AUXV_MAX_PAIRS * 2];
     size_t auxv_len;              /* bytes populated in auxv[] */
 };
@@ -127,6 +136,8 @@ struct thread_group {
     _Atomic int dumpable;         /* PR_GET/SET_DUMPABLE (default SUID_DUMP_USER) */
     _Atomic int no_new_privs;     /* PR_GET/SET_NO_NEW_PRIVS */
     _Atomic uint64 timer_slack_ns; /* PR_GET/SET_TIMERSLACK */
+    _Atomic int oom_score_adj;     /* /proc/<pid>/oom_score_adj */
+    _Atomic uint32 chrome_trace_roles; /* Chromium utility-role trace markers */
 
     /* Per-process resource accounting (cumulative counters) */
     struct proc_acct acct;

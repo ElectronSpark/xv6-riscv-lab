@@ -38,8 +38,10 @@ static int virtio_gpu_destroy_context(struct virtio_gpu *g, uint32 ctx_id)
                              sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA);
 }
 
-static int virtio_gpu_context_resource(struct virtio_gpu *g, uint32 type,
-                                       uint32 ctx_id, uint32 resource_id)
+static int virtio_gpu_context_resource_submit(struct virtio_gpu *g,
+                                              uint32 type, uint32 ctx_id,
+                                              uint32 resource_id,
+                                              int mixed_async_wait)
 {
     struct virtio_gpu_ctx_resource *cmd =
         (struct virtio_gpu_ctx_resource *)g->cmd_page;
@@ -51,8 +53,24 @@ static int virtio_gpu_context_resource(struct virtio_gpu *g, uint32 type,
     cmd->hdr.ctx_id = ctx_id;
     cmd->resource_id = resource_id;
 
+    if (mixed_async_wait && virtio_gpu_async_pending(g))
+        return virtio_gpu_submit_mixed_async(g, cmd, sizeof(*cmd), NULL, 0,
+                                             false, resp, sizeof(*resp),
+                                             VIRTIO_GPU_RESP_OK_NODATA, NULL);
     return virtio_gpu_submit(g, cmd, sizeof(*cmd), NULL, 0, false, resp,
                              sizeof(*resp), VIRTIO_GPU_RESP_OK_NODATA);
+}
+
+static int virtio_gpu_context_resource(struct virtio_gpu *g, uint32 type,
+                                       uint32 ctx_id, uint32 resource_id)
+{
+    return virtio_gpu_context_resource_submit(g, type, ctx_id, resource_id, 0);
+}
+
+static int virtio_gpu_context_resource_mixed_async(
+    struct virtio_gpu *g, uint32 type, uint32 ctx_id, uint32 resource_id)
+{
+    return virtio_gpu_context_resource_submit(g, type, ctx_id, resource_id, 1);
 }
 
 static int virtio_gpu_submit_3d(struct virtio_gpu *g, uint32 ctx_id,
@@ -229,8 +247,6 @@ static void virtio_gpu_smoke_context(struct virtio_gpu *g)
         goto out;
     }
     created = 0;
-    printf("virtio_gpu: 3D context smoke ok ctx=%u capset=%u resource=%u fence=%lu\n",
-           ctx_id, g->virgl_capset_id, res ? res->id : 0, fence_id);
 
 out:
     if (attached_to_ctx && res)

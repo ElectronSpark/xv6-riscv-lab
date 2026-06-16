@@ -406,6 +406,13 @@ void futex_init(void);
 int futex_wake_addr(vm_t *vm, uint64 uaddr, int val);
 void futex_exit_robust_list(struct thread *p);
 
+// rseq.c/sys_misc.c
+#define RSEQ_EVENT_PREEMPT  (1U << 0)
+#define RSEQ_EVENT_SIGNAL   (1U << 1)
+#define RSEQ_EVENT_MIGRATE  (1U << 2)
+void rseq_user_return(struct thread *p, uint32 events);
+void rseq_clear_thread(struct thread *p);
+
 // timerfd.c
 void timerfd_init(void);
 int eventfd_file_is_eventfd(struct vfs_file *file);
@@ -588,6 +595,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 resource_count, uint64 *fence,
                            uint64 *signaled);
 int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled);
+uint64 virtio_gpu_user_last_fence(void);
 int virtio_gpu_user_capset_ids(uint64 *ids);
 int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
                                  uint32 requested_capset_version,

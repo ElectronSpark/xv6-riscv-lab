@@ -37,6 +37,7 @@ static struct {
     list_node_t procs_list; // List of all threads, for dumping
     struct thread *initproc;
     int nextpid;
+    uint64 next_pid_seq;
     struct rwlock pid_lock;
 } proc_table;
 
@@ -75,6 +76,7 @@ void __proctab_init(void) {
     list_entry_init(&proc_table.procs_list);
     proc_table.initproc = NULL;
     proc_table.nextpid = 1;
+    proc_table.next_pid_seq = 1;
 }
 
 /* Lock and unlock proc table
@@ -162,6 +164,9 @@ void proctab_proc_add(struct thread *p) {
     }
     p->pid = proc_table.nextpid;
     __nextpid_inc(p->pid);
+    p->pid_seq = proc_table.next_pid_seq++;
+    if (proc_table.next_pid_seq == 0)
+        proc_table.next_pid_seq = 1;
 
     // Use RCU-safe insertion for concurrent readers
     struct thread *existing = hlist_put_rcu(&proc_table.procs, p, false);

@@ -44,6 +44,7 @@
 #include "errno.h"
 #include "proc/pgroup.h"
 #include "proc/cred.h"
+#include "proc/chrome_lifecycle.h"
 #include "timer/timer.h"
 
 static slab_cache_t __sigacts_pool;
@@ -180,7 +181,9 @@ static bool trace_browser_signal(struct thread *p) {
     return strstr(p->name, "mb") != NULL ||
            strstr(p->name, "MiniBrowser") != NULL ||
            strstr(p->name, "WebKit") != NULL ||
-           p->pgid == 48 || p->tgid == 48;
+           chrome_lifecycle_thread_match(p) ||
+           chrome_lifecycle_network_service_match(p) ||
+           chrome_lifecycle_child_process_match(p);
 }
 
 static const char *kill_code_name(int code) {
@@ -210,9 +213,14 @@ static void mark_thread_killed(struct thread *p, int signo, int code) {
 
 static void trace_browser_signal_send(const char *op, int target_pid,
                                       int signum, struct thread *target) {
+    if (!chrome_trace_value_enabled("chrome_signal_trace") &&
+        !chrome_lifecycle_trace_enabled())
+        return;
     if (!trace_browser_signal(current) && !trace_browser_signal(target))
         return;
 #ifdef __x86_64__
+    int want_backtrace = chrome_trace_value_enabled("chrome_signal_backtrace") ||
+                         chrome_trace_value_enabled("chrome_syscall_trace");
     struct trapframe *tf = &current->trapframe->trapframe;
     printf("signal: %s signum=%d sender pid=%d tgid=%d name='%s' target=%d",
            op, signum, current->pid, thread_tgid(current), current->name, target_pid);
@@ -220,7 +228,7 @@ static void trace_browser_signal_send(const char *op, int target_pid,
         printf(" target_name='%s' target_tgid=%d", target->name,
                thread_tgid(target));
     printf(" rip=0x%lx rsp=0x%lx\n", tf->rip, tf->rsp);
-    if (current->vm != NULL)
+    if (want_backtrace && current->vm != NULL)
         print_user_backtrace(current->vm->pagetable,
                              tf->rbp, tf->rip, tf->rsp, tf->rip, 16);
 #else
@@ -582,6 +590,15 @@ sigacts_t *sigacts_dup(sigacts_t *psa, uint64 clone_flags) {
         for (int i = 0; i < NSIG; i++) {
             list_entry_init(&sa->kqueue_signal_knotes[i]);
         }
+
+        if (clone_flags & CLONE_CLEAR_SIGHAND) {
+            for (int i = 1; i <= NSIG; i++) {
+                if (sa->sa[i].sa_handler != SIG_DFL &&
+                    sa->sa[i].sa_handler != SIG_IGN) {
+                    __sig_setdefault(sa, i);
+                }
+            }
+        }
     }
     return sa;
 }
@@ -820,6 +837,65 @@ int signal_send(int pid, ksiginfo_t *info) {
         ret = tg_signal_send(tg, info);
     } else {
         // Thread-directed signal (pid is a TID, not a TGID)
+        ret = __signal_send(p, info);
+    }
+    rcu_read_unlock();
+    return ret;
+}
+
+int signal_send_pidfd(int pid, uint64 pid_seq, ksiginfo_t *info) {
+    struct thread *p = NULL;
+    if (pid < 0 || info == NULL ||
+        (SIGBAD(info->signo) && info->signo != 0)) {
+        return -EINVAL;
+    }
+
+    rcu_read_lock();
+    if (get_pid_thread(pid, &p) != 0 || p == NULL ||
+        p->pid_seq != pid_seq) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
+
+    enum thread_state pstate = __thread_state_get(p);
+    if (pstate == THREAD_UNUSED || pstate == THREAD_ZOMBIE) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
+
+    if (info->sender != NULL && p->thread_group != NULL &&
+        !p->thread_group->is_kernel) {
+        struct thread_group *sender_tg = info->sender->thread_group;
+        struct thread_group *target_tg = p->thread_group;
+        if (sender_tg != NULL && sender_tg->euid != 0) {
+            int allowed = 0;
+            if (sender_tg->uid == target_tg->uid ||
+                sender_tg->uid == target_tg->suid ||
+                sender_tg->euid == target_tg->uid ||
+                sender_tg->euid == target_tg->suid)
+                allowed = 1;
+            if (info->signo == SIGCONT &&
+                info->sender->session == p->session)
+                allowed = 1;
+            if (!allowed) {
+                rcu_read_unlock();
+                return -EPERM;
+            }
+        }
+    }
+
+    if (info->signo == 0) {
+        rcu_read_unlock();
+        return 0;
+    }
+
+    int ret;
+    struct thread_group *tg = p->thread_group;
+    if (tg != NULL && tg->is_kernel) {
+        ret = __signal_send(p, info);
+    } else if (tg != NULL && tg->tgid == pid) {
+        ret = tg_signal_send(tg, info);
+    } else {
         ret = __signal_send(p, info);
     }
     rcu_read_unlock();
