@@ -642,6 +642,7 @@ struct virtio_gpu {
     struct virtio_gpu_resource *cursor_resources[VIRTIO_GPU_CURSOR_IMAGE_SLOTS];
     uint32 cursor_resource_next;
     void *cursor_cmd_page;
+    uint8 cursor_cmd_inflight[VIRTIO_GPU_CURSOR_RING];
     uint16 cursor_cmd_idx;
     uint16 cursor_ring;
     int cursor_x;

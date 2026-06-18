@@ -44,6 +44,8 @@ struct fb_gpu_render_owner;
 #define GPU_DRM_PROP_IN_FENCE_FD              23
 #define GPU_DRM_PROP_OUT_FENCE_PTR            24
 #define GPU_DRM_PROP_IN_FORMATS               25
+#define GPU_DRM_PROP_HOTSPOT_X                26
+#define GPU_DRM_PROP_HOTSPOT_Y                27
 
 /*
  * Private compatibility placement labels. The implementation is sysmem-backed
@@ -496,6 +498,8 @@ static struct {
     int32       current_cursor_y;
     uint32      current_cursor_w;
     uint32      current_cursor_h;
+    uint32      current_cursor_hot_x;
+    uint32      current_cursor_hot_y;
     int         current_cursor_visible;
     struct fb_gpu_dxg_present_source_entry dxg_present_sources[FB_GPU_MAX_DXG_PRESENT_SOURCES];
     spinlock_t  lock;           /* serializes concurrent access */

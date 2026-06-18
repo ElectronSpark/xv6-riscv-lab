@@ -708,10 +708,22 @@ static int virtio_gpu_set_scanout_async_prepare(
     return 0;
 }
 
+static int virtio_gpu_resource_transfer_2d_fenced(
+    struct virtio_gpu *g, struct virtio_gpu_resource *res, uint32 x, uint32 y,
+    uint32 width, uint32 height, uint64 fence_id);
+
 static int virtio_gpu_resource_transfer_2d(struct virtio_gpu *g,
                                            struct virtio_gpu_resource *res,
                                            uint32 x, uint32 y, uint32 width,
                                            uint32 height)
+{
+    return virtio_gpu_resource_transfer_2d_fenced(g, res, x, y, width,
+                                                  height, 0);
+}
+
+static int virtio_gpu_resource_transfer_2d_fenced(
+    struct virtio_gpu *g, struct virtio_gpu_resource *res, uint32 x, uint32 y,
+    uint32 width, uint32 height, uint64 fence_id)
 {
     struct virtio_gpu_transfer_to_host_2d *transfer =
         (struct virtio_gpu_transfer_to_host_2d *)g->cmd_page;
@@ -727,9 +739,27 @@ static int virtio_gpu_resource_transfer_2d(struct virtio_gpu *g,
     transfer->offset = (uint64)y * res->width * sizeof(uint32) +
                        (uint64)x * sizeof(uint32);
     transfer->resource_id = res->id;
-    return virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0, false,
-                             resp, sizeof(*resp),
-                             VIRTIO_GPU_RESP_OK_NODATA);
+    if (fence_id != 0) {
+        transfer->hdr.flags = VIRTIO_GPU_FLAG_FENCE;
+        transfer->hdr.fence_id = fence_id;
+    }
+    if (virtio_gpu_submit(g, transfer, sizeof(*transfer), NULL, 0, false,
+                          resp, sizeof(*resp),
+                          VIRTIO_GPU_RESP_OK_NODATA) != 0)
+        return -1;
+    if (fence_id != 0) {
+        if (resp->fence_id != fence_id) {
+            virtio_gpu_count_failure(g);
+            printf("virtio_gpu: transfer fence mismatch got=%lu expected=%lu\n",
+                   resp->fence_id, fence_id);
+            return -1;
+        }
+        spin_lock(&g->lock);
+        g->stats.fences++;
+        g->stats.last_fence = fence_id;
+        spin_unlock(&g->lock);
+    }
+    return 0;
 }
 
 static int virtio_gpu_resource_transfer_3d(struct virtio_gpu *g,

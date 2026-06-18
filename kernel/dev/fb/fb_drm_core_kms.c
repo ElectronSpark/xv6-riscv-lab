@@ -352,6 +352,18 @@ static int gpu_drm_property_info(uint32 prop_id, const char **name,
         *name = "IN_FORMATS";
         *flags = DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE;
         break;
+    case GPU_DRM_PROP_HOTSPOT_X:
+        *name = "HOTSPOT_X";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = FB_GPU_CURSOR_MAX_DIM - 1;
+        *count_values = 2;
+        break;
+    case GPU_DRM_PROP_HOTSPOT_Y:
+        *name = "HOTSPOT_Y";
+        *flags = DRM_MODE_PROP_RANGE | DRM_MODE_PROP_ATOMIC;
+        values[1] = FB_GPU_CURSOR_MAX_DIM - 1;
+        *count_values = 2;
+        break;
     default:
         return -ENOENT;
     }

@@ -325,6 +325,8 @@ struct gpu_kms_cursor_atomic_state {
     uint32 src_y;
     uint32 src_w;
     uint32 src_h;
+    uint32 hot_x;
+    uint32 hot_y;
 };
 
 static int gpu_kms_cursor_format_supported(uint32 pixel_format,
@@ -498,6 +500,8 @@ static int gpu_kms_apply_cursor_fb(struct fb_gpu_render_owner *owner,
         fb_state.current_cursor_fb_id = 0;
         fb_state.current_cursor_x = x;
         fb_state.current_cursor_y = y;
+        fb_state.current_cursor_hot_x = 0;
+        fb_state.current_cursor_hot_y = 0;
         fb_state.current_cursor_visible = 0;
         spin_unlock(&fb_state.lock);
         return 0;
@@ -520,7 +524,9 @@ static int gpu_kms_apply_cursor_fb(struct fb_gpu_render_owner *owner,
     image_changed = force_image_upload ||
         fb_state.current_cursor_fb_id != fb_id ||
         fb_state.current_cursor_w != fb.width ||
-        fb_state.current_cursor_h != fb.height;
+        fb_state.current_cursor_h != fb.height ||
+        fb_state.current_cursor_hot_x != hot_x ||
+        fb_state.current_cursor_hot_y != hot_y;
     spin_unlock(&fb_state.lock);
     if (image_changed) {
         ret = gpu_kms_upload_cursor_from_bo(owner, fb.bo_handle, fb.width,
@@ -538,6 +544,8 @@ static int gpu_kms_apply_cursor_fb(struct fb_gpu_render_owner *owner,
     fb_state.current_cursor_y = y;
     fb_state.current_cursor_w = fb.width;
     fb_state.current_cursor_h = fb.height;
+    fb_state.current_cursor_hot_x = hot_x;
+    fb_state.current_cursor_hot_y = hot_y;
     fb_state.current_cursor_visible = 1;
     spin_unlock(&fb_state.lock);
     return 0;
@@ -559,7 +567,8 @@ static int gpu_kms_apply_cursor_atomic_state(
                                    cursor->crtc_y, cursor->crtc_w,
                                    cursor->crtc_h, cursor->src_x,
                                    cursor->src_y, cursor->src_w,
-                                   cursor->src_h, 0, 0,
+                                   cursor->src_h, cursor->hot_x,
+                                   cursor->hot_y,
                                    cursor->fb_touched);
 }
 
@@ -953,6 +962,8 @@ static int gpu_drm_mode_cursor(struct fb_gpu_render_owner *owner,
         fb_state.current_cursor_fb_id = 0;
         fb_state.current_cursor_w = req.width;
         fb_state.current_cursor_h = req.height;
+        fb_state.current_cursor_hot_x = (uint32)req.hot_x;
+        fb_state.current_cursor_hot_y = (uint32)req.hot_y;
         fb_state.current_cursor_visible = 1;
         spin_unlock(&fb_state.lock);
     } else if ((req.flags & DRM_MODE_CURSOR_BO) != 0) {
@@ -971,6 +982,8 @@ static int gpu_drm_mode_cursor(struct fb_gpu_render_owner *owner,
         fb_state.current_cursor_fb_id = 0;
         fb_state.current_cursor_x = x;
         fb_state.current_cursor_y = y;
+        fb_state.current_cursor_hot_x = 0;
+        fb_state.current_cursor_hot_y = 0;
         fb_state.current_cursor_visible = 0;
         spin_unlock(&fb_state.lock);
         return 0;

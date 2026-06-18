@@ -13,6 +13,8 @@ static void gpu_kms_cursor_atomic_snapshot_locked(
     cursor->crtc_h = fb_state.current_cursor_h;
     cursor->src_w = (uint32)fb_state.current_cursor_w << 16;
     cursor->src_h = (uint32)fb_state.current_cursor_h << 16;
+    cursor->hot_x = fb_state.current_cursor_hot_x;
+    cursor->hot_y = fb_state.current_cursor_hot_y;
 }
 
 static int gpu_kms_record_in_fence_locked(uint64 value, int32 *fds,
@@ -160,6 +162,14 @@ static int gpu_kms_collect_obj_props_locked(uint32 obj_id, uint32 obj_type,
                               fb_state.current_cursor_h);
             gpu_kms_push_prop(out, GPU_DRM_PROP_IN_FENCE_FD,
                               (uint64)-1);
+            if (owner != NULL &&
+                drm_core_has_client_cap(&owner->drm,
+                                        DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT)) {
+                gpu_kms_push_prop(out, GPU_DRM_PROP_HOTSPOT_X,
+                                  fb_state.current_cursor_hot_x);
+                gpu_kms_push_prop(out, GPU_DRM_PROP_HOTSPOT_Y,
+                                  fb_state.current_cursor_hot_y);
+            }
         } else {
             gpu_kms_push_prop(out, GPU_DRM_PROP_PLANE_TYPE,
                               DRM_PLANE_TYPE_PRIMARY);
@@ -355,6 +365,30 @@ static int gpu_kms_validate_prop_locked(struct fb_gpu_render_owner *owner,
     case GPU_DRM_PROP_IN_FORMATS:
         if (value != GPU_DRM_IN_FORMATS_BLOB_ID)
             return -EINVAL;
+        break;
+    case GPU_DRM_PROP_HOTSPOT_X:
+        if (obj_id != GPU_DRM_CURSOR_PLANE_ID || owner == NULL ||
+            !drm_core_has_client_cap(&owner->drm,
+                                     DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT) ||
+            value >= FB_GPU_CURSOR_MAX_DIM)
+            return -EINVAL;
+        if (cursor != NULL) {
+            cursor->hot_x = (uint32)value;
+            cursor->touched = 1;
+            cursor->fb_touched = 1;
+        }
+        break;
+    case GPU_DRM_PROP_HOTSPOT_Y:
+        if (obj_id != GPU_DRM_CURSOR_PLANE_ID || owner == NULL ||
+            !drm_core_has_client_cap(&owner->drm,
+                                     DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT) ||
+            value >= FB_GPU_CURSOR_MAX_DIM)
+            return -EINVAL;
+        if (cursor != NULL) {
+            cursor->hot_y = (uint32)value;
+            cursor->touched = 1;
+            cursor->fb_touched = 1;
+        }
         break;
     default:
         break;

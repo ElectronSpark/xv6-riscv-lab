@@ -60,6 +60,8 @@ void drm_core_file_init(struct drm_core_device *dev, struct drm_core_file *file,
                         uint64 owner_cookie, pid_t owner_tgid);
 const char *drm_core_node_name(enum drm_core_node_type type);
 int drm_core_is_primary_like(const struct drm_core_file *file);
+int drm_core_has_client_cap(const struct drm_core_file *file,
+                            uint64 capability);
 int drm_core_get_magic(struct drm_core_file *file, uint64 arg);
 int drm_core_auth_magic(struct drm_core_file *file, uint64 arg);
 int drm_core_get_client(struct drm_core_file *file, uint64 arg);

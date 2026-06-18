@@ -67,6 +67,14 @@ int drm_core_is_primary_like(const struct drm_core_file *file)
          file->node_type == DRM_CORE_NODE_LEGACY);
 }
 
+int drm_core_has_client_cap(const struct drm_core_file *file,
+                            uint64 capability)
+{
+    if (file == NULL || capability >= 64)
+        return 0;
+    return (file->client_caps & (1ULL << capability)) != 0;
+}
+
 int drm_core_get_magic(struct drm_core_file *file, uint64 arg)
 {
     struct drm_auth_compat req;
@@ -126,6 +134,7 @@ int drm_core_set_client_cap(struct drm_core_file *file, uint64 arg)
     case DRM_CLIENT_CAP_ATOMIC:
     case DRM_CLIENT_CAP_ASPECT_RATIO:
     case DRM_CLIENT_CAP_WRITEBACK_CONNECTORS:
+    case DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT:
         break;
     default:
         return -EINVAL;

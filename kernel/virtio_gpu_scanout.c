@@ -241,13 +241,23 @@ static void virtio_gpu_cursor_post(struct virtio_gpu *g,
     static int drop_logs;
     uint16 outstanding;
     uint16 slot;
+    uint16 next_used;
+    int found = 0;
 
     if (!g->cursor_ready)
         return;
 
     int intena = spin_lock_irqsave(&q->lock);
     /* Reclaim descriptors the device has already consumed. */
-    q->used_idx = q->used->idx;
+    next_used = q->used->idx;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    while (q->used_idx != next_used) {
+        uint16 used_slot = q->used->ring[q->used_idx % q->size].id;
+
+        if (used_slot < g->cursor_ring)
+            g->cursor_cmd_inflight[used_slot] = 0;
+        q->used_idx++;
+    }
     outstanding = (uint16)(q->avail->idx - q->used_idx);
     if (outstanding >= q->size) {
         /*
@@ -264,6 +274,24 @@ static void virtio_gpu_cursor_post(struct virtio_gpu *g,
         return;
     }
     slot = g->cursor_cmd_idx % g->cursor_ring;
+    for (uint16 i = 0; i < g->cursor_ring; i++) {
+        uint16 candidate = (slot + i) % g->cursor_ring;
+
+        if (!g->cursor_cmd_inflight[candidate]) {
+            slot = candidate;
+            found = 1;
+            break;
+        }
+    }
+    if (!found) {
+        if (drop_logs < 4) {
+            printf("virtio_gpu: cursor command slots busy, dropping cmd type=0x%x outstanding=%u size=%u\n",
+                   cmd->hdr.type, outstanding, q->size);
+            drop_logs++;
+        }
+        spin_unlock_irqrestore(&q->lock, intena);
+        return;
+    }
     slotcmd = &((struct virtio_gpu_update_cursor *)g->cursor_cmd_page)[slot];
     *slotcmd = *cmd;
 
@@ -272,11 +300,12 @@ static void virtio_gpu_cursor_post(struct virtio_gpu *g,
     q->desc[slot].flags = 0; /* device-read-only, no response */
     q->desc[slot].next = 0;
 
+    g->cursor_cmd_inflight[slot] = 1;
     q->avail->ring[q->avail->idx % q->size] = slot;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     q->avail->idx++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    g->cursor_cmd_idx++;
+    g->cursor_cmd_idx = slot + 1;
     virtio_gpu_notify_cursor(g);
     spin_unlock_irqrestore(&q->lock, intena);
 }
@@ -345,7 +374,7 @@ static int virtio_gpu_cursor_queue_init(struct virtio_gpu *g)
     q->notify_off = cfg->queue_notify_off;
     spin_init(&q->lock, "virtio_gpucur");
     g->cursor_ring = qsize;
-    g->cursor_visible = 1;
+    g->cursor_visible = 0;
     g->cursor_ready = 1;
     return 0;
 }
@@ -375,6 +404,40 @@ virtio_gpu_cursor_next_resource(struct virtio_gpu *g)
     return res;
 }
 
+static uint8
+virtio_gpu_cursor_unpremul(uint8 c, uint8 a)
+{
+    uint32 v;
+
+    if (a == 0 || a == 255)
+        return c;
+    v = ((uint32)c * 255u + (uint32)a / 2u) / (uint32)a;
+    return v > 255u ? 255u : (uint8)v;
+}
+
+/*
+ * QEMU's GTK cursor path has historically interpreted virtio-gpu cursor
+ * images as unpremultiplied RGBA even though the resource format is BGRA.
+ * Keep the normal guest cursor BO format unchanged and only translate the
+ * uploaded cursor resource when the launch path asks for this compatibility
+ * mode.
+ */
+static uint32
+virtio_gpu_cursor_qemu_gtk_pixel(uint32 pixel)
+{
+    uint8 a = (uint8)(pixel >> 24);
+    uint8 r = (uint8)(pixel >> 16);
+    uint8 g = (uint8)(pixel >> 8);
+    uint8 b = (uint8)pixel;
+
+    r = virtio_gpu_cursor_unpremul(r, a);
+    g = virtio_gpu_cursor_unpremul(g, a);
+    b = virtio_gpu_cursor_unpremul(b, a);
+
+    return ((uint32)a << 24) | ((uint32)b << 16) |
+           ((uint32)g << 8) | (uint32)r;
+}
+
 /*
  * Upload (or replace) the hardware cursor image.  pixels points to a kernel
  * buffer of width*height BGRA pixels (0xAARRGGBB) with width,height <= 64.
@@ -388,12 +451,23 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
     struct virtio_gpu_update_cursor cmd;
     struct virtio_gpu_resource *res;
     uint32 *dst;
+    uint64 fence_id;
+    int qemu_gtk_cursor_compat;
 
     if (!g->initialized || !g->cursor_ready || pixels == NULL)
         return -ENODEV;
     if (width == 0 || height == 0 ||
         width > VIRTIO_GPU_CURSOR_DIM || height > VIRTIO_GPU_CURSOR_DIM)
         return -EINVAL;
+
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_host_cursor_only")) {
+        g->cursor_hot_x = hot_x;
+        g->cursor_hot_y = hot_y;
+        g->cursor_resource = NULL;
+        g->cursor_resource_id = 0;
+        g->cursor_visible = 0;
+        return 0;
+    }
 
     mutex_lock(&g->op_lock);
     res = virtio_gpu_cursor_next_resource(g);
@@ -404,16 +478,29 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
 
     /* Compose the image into the 64x64 backing (rest transparent). */
     dst = (uint32 *)res->backing;
+    qemu_gtk_cursor_compat =
+        virtio_gpu_cmdline_enabled("virtio_gpu_cursor_rgba_compat");
     memset(dst, 0,
            VIRTIO_GPU_CURSOR_DIM * VIRTIO_GPU_CURSOR_DIM * sizeof(uint32));
-    for (uint32 row = 0; row < height; row++)
-        memmove(&dst[row * VIRTIO_GPU_CURSOR_DIM],
-                (const uint32 *)pixels + (uint64)row * width,
-                (uint64)width * sizeof(uint32));
+    for (uint32 row = 0; row < height; row++) {
+        const uint32 *src = (const uint32 *)pixels + (uint64)row * width;
+        uint32 *row_dst = &dst[row * VIRTIO_GPU_CURSOR_DIM];
 
-    if (virtio_gpu_resource_transfer_2d(g, res, 0, 0,
-                                        VIRTIO_GPU_CURSOR_DIM,
-                                        VIRTIO_GPU_CURSOR_DIM) != 0) {
+        if (!qemu_gtk_cursor_compat) {
+            memmove(row_dst, src, (uint64)width * sizeof(uint32));
+            continue;
+        }
+        for (uint32 col = 0; col < width; col++)
+            row_dst[col] = virtio_gpu_cursor_qemu_gtk_pixel(src[col]);
+    }
+
+    spin_lock(&g->lock);
+    fence_id = ++g->next_fence_id;
+    spin_unlock(&g->lock);
+    if (virtio_gpu_resource_transfer_2d_fenced(g, res, 0, 0,
+                                               VIRTIO_GPU_CURSOR_DIM,
+                                               VIRTIO_GPU_CURSOR_DIM,
+                                               fence_id) != 0) {
         mutex_unlock(&g->op_lock);
         return -EIO;
     }
@@ -449,6 +536,20 @@ int virtio_gpu_user_move_cursor(int32 x, int32 y, int visible)
 
     if (!g->initialized || !g->cursor_ready)
         return -ENODEV;
+
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_host_cursor_only")) {
+        g->cursor_x = x;
+        g->cursor_y = y;
+        g->cursor_visible = 0;
+        return 0;
+    }
+
+    if (visible && g->cursor_resource_id == 0) {
+        g->cursor_x = x;
+        g->cursor_y = y;
+        g->cursor_visible = 0;
+        return 0;
+    }
 
     memset(&cmd, 0, sizeof(cmd));
     cmd.pos.scanout_id = 0;
