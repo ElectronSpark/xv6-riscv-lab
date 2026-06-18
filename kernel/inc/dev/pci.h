@@ -120,6 +120,7 @@ struct pci_common_confspace_header {
 #define PCI_DEVICE_VIRTIO_NET_MODERN       0x1041 // virtio net (modern only)
 #define PCI_DEVICE_VIRTIO_GPU_MODERN       0x1050 // virtio gpu (modern only)
 #define PCI_DEVICE_VIRTIO_INPUT_MODERN     0x1052 // virtio input (modern only)
+#define PCI_DEVICE_VIRTIO_SND_MODERN       0x1059 // virtio sound (modern only)
 
 // PCI Capability IDs
 #define PCI_CAP_ID_MSI      0x05   // Message Signaled Interrupts
@@ -420,6 +421,7 @@ struct virtio_pci_discovery *pci_get_virtio_blk(int index);
 struct virtio_pci_discovery *pci_get_virtio_gpu(int index);
 struct virtio_pci_discovery *pci_get_virtio_input(int index);
 struct virtio_pci_discovery *pci_get_virtio_net(int index);
+struct virtio_pci_discovery *pci_get_virtio_snd(int index);
 struct pci_device_info *pci_get_nvidia_gpu(int index);
 
 // Prototype

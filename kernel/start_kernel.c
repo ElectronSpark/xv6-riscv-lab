@@ -224,6 +224,7 @@ void start_kernel_post_init(void) {
     virtio_gpu_init();  // optional virtio-gpu PCI device (Bochs fb remains fallback)
     virtio_input_init(); // optional virtio tablet/mouse routed to /dev/mouse
     virtio_net_init();   // optional virtio-net PCI device (preferred over e1000)
+    virtio_snd_init();   // optional virtio-sound backend for /dev/dsp
     hyperv_netvsc_init(); // Hyper-V synthetic NIC (keeps virtio preferred)
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
     loop_init();        // Loopback block devices (/dev/loop0..7)

@@ -1364,11 +1364,13 @@ static struct virtio_pci_discovery virtio_pci_devs[N_VIRTIO_DISK];
 static struct virtio_pci_discovery virtio_gpu_pci_devs[N_VIRTIO_GPU];
 static struct virtio_pci_discovery virtio_input_pci_devs[N_VIRTIO_INPUT];
 static struct virtio_pci_discovery virtio_net_pci_devs[N_VIRTIO_NET];
+static struct virtio_pci_discovery virtio_snd_pci_devs[N_VIRTIO_SND];
 static struct pci_device_info nvidia_gpu_pci_devs[4];
 static int virtio_pci_count = 0;
 static int virtio_gpu_pci_count = 0;
 static int virtio_input_pci_count = 0;
 static int virtio_net_pci_count = 0;
+static int virtio_snd_pci_count = 0;
 static int nvidia_gpu_pci_count = 0;
 static int pci_diag_microsoft_count = 0;
 static int pci_diag_display_count = 0;
@@ -1423,6 +1425,13 @@ struct virtio_pci_discovery *pci_get_virtio_net(int index)
     if (index < 0 || index >= virtio_net_pci_count)
         return 0;
     return &virtio_net_pci_devs[index];
+}
+
+struct virtio_pci_discovery *pci_get_virtio_snd(int index)
+{
+    if (index < 0 || index >= virtio_snd_pci_count)
+        return 0;
+    return &virtio_snd_pci_devs[index];
 }
 
 struct pci_device_info *pci_get_nvidia_gpu(int index)
@@ -1702,6 +1711,45 @@ static void pci_note_virtio_net(uint8 bus, uint8 dev, uint8 func)
            vd->isr_cfg_cap, vd->device_cfg_cap);
 }
 
+static void pci_note_virtio_snd(uint8 bus, uint8 dev, uint8 func)
+{
+    if (virtio_snd_pci_count >= N_VIRTIO_SND) {
+        printf("PCI: too many virtio-sound devices\n");
+        return;
+    }
+
+    uint16 cmd = pci_config_read16(bus, dev, func, 0x04);
+    cmd |= PCIE_CSCMD_MAE | PCIE_CSCMD_BME;
+    pci_config_write16(bus, dev, func, 0x04, cmd);
+
+    struct virtio_pci_discovery *vd =
+        &virtio_snd_pci_devs[virtio_snd_pci_count];
+    vd->found = 1;
+    vd->bus = bus;
+    vd->dev = dev;
+    vd->func = func;
+    vd->irq_line = piix3_compute_irq(dev, pci_config_read8(bus, dev, func,
+                                                            0x3D));
+
+    for (int i = 0; i < 6; i++)
+        vd->bar[i] = pci_read_bar(bus, dev, func, i);
+
+    vd->common_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                             VIRTIO_PCI_CAP_COMMON_CFG);
+    vd->notify_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                             VIRTIO_PCI_CAP_NOTIFY_CFG);
+    vd->isr_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                          VIRTIO_PCI_CAP_ISR_CFG);
+    vd->device_cfg_cap = pci_find_virtio_cap(bus, dev, func,
+                                             VIRTIO_PCI_CAP_DEVICE_CFG);
+
+    virtio_snd_pci_count++;
+    printf("PCI: virtio-sound detected at %d:%d:%d\n", bus, dev, func);
+    printf("PCI: virtio-sound IRQ=%d caps: common=%d notify=%d isr=%d dev=%d\n",
+           vd->irq_line, vd->common_cfg_cap, vd->notify_cfg_cap,
+           vd->isr_cfg_cap, vd->device_cfg_cap);
+}
+
 static void pci_diag_note_candidate(uint8 bus, uint8 dev, uint8 func,
                                     uint16 vendor, uint16 device)
 {
@@ -1910,6 +1958,9 @@ static void pci_probe_function(uint8 bus, uint8 dev, uint8 func)
                (device == PCI_DEVICE_VIRTIO_NET_TRANSITIONAL ||
                 device == PCI_DEVICE_VIRTIO_NET_MODERN)) {
         pci_note_virtio_net(bus, dev, func);
+    } else if (vendor == PCI_VENDOR_VIRTIO &&
+               device == PCI_DEVICE_VIRTIO_SND_MODERN) {
+        pci_note_virtio_snd(bus, dev, func);
     } else if (vendor == PCI_VENDOR_MICROSOFT &&
            (device == PCI_DEVICE_MS_VIRTUAL_RENDER ||
             device == PCI_DEVICE_MS_COMPUTE_ACCELERATOR)) {

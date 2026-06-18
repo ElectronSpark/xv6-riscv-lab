@@ -16,6 +16,7 @@
 #define N_VIRTIO_GPU 1  // number of virtio GPU devices
 #define N_VIRTIO_INPUT 1 // number of virtio input devices
 #define N_VIRTIO_NET 1  // number of virtio NICs
+#define N_VIRTIO_SND 1  // number of virtio sound devices
 #define N_VIRTIO 3      // number of virtio devices
 extern uint64 __virtio_mmio_base[N_VIRTIO];
 extern uint64 __virtio_irqno[N_VIRTIO];
@@ -179,5 +180,16 @@ _Static_assert(sizeof(struct virtio_net_hdr) == 12,
 #define VIRTIO_NET_HDR_LEN  12
 
 void virtio_net_init(void);
+void virtio_snd_init(void);
+int virtio_snd_available(void);
+int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
+                     int rate, int channels, int nonblock);
+void virtio_snd_reset(void);
+void virtio_snd_drain(void);
+uint64 virtio_snd_free_bytes(void);
+uint64 virtio_snd_pending_bytes(void);
+uint64 virtio_snd_played_bytes(void);
+int virtio_snd_supported_oss_formats(void);
+const char *virtio_snd_backend_name(void);
 
 #endif /* __KERNEL_VIRTIO_H */

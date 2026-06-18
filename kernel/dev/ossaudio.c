@@ -14,6 +14,7 @@
 #include "proc/sched.h"
 #include "printf.h"
 #include "uabi/poll.h"
+#include "dev/virtio.h"
 
 #define OSS_SOUND_MAJOR 14
 
@@ -214,6 +215,7 @@ static int oss_notify_armed;
 static spinlock_t oss_lock;
 
 static struct vfs_file_ops oss_pcm_file_ops;
+static struct vfs_file_ops oss_sndstat_file_ops;
 static void oss_schedule_notify(void);
 static void oss_notify_writable_callback(void *arg);
 
@@ -245,18 +247,27 @@ static void oss_put_string(char *dst, size_t len, const char *src) {
 }
 
 static int oss_normalize_format(int fmt) {
+    int available = virtio_snd_available() ?
+        virtio_snd_supported_oss_formats() : OSS_FORMATS;
+
     if (fmt == 0)
         return oss_format;
-    if (fmt == AFMT_U8 || fmt == AFMT_S16_LE || fmt == AFMT_S24_LE ||
-        fmt == AFMT_S32_LE)
+    if ((fmt == AFMT_U8 || fmt == AFMT_S16_LE || fmt == AFMT_S24_LE ||
+         fmt == AFMT_S32_LE) && (fmt & available))
         return fmt;
-    if (fmt & AFMT_S16_LE)
+    if ((fmt & AFMT_S16_LE) && (available & AFMT_S16_LE))
         return AFMT_S16_LE;
-    if (fmt & AFMT_U8)
+    if ((fmt & AFMT_U8) && (available & AFMT_U8))
         return AFMT_U8;
-    if (fmt & AFMT_S24_LE)
+    if ((fmt & AFMT_S24_LE) && (available & AFMT_S24_LE))
         return AFMT_S24_LE;
-    if (fmt & AFMT_S32_LE)
+    if ((fmt & AFMT_S32_LE) && (available & AFMT_S32_LE))
+        return AFMT_S32_LE;
+    if (available & AFMT_S16_LE)
+        return AFMT_S16_LE;
+    if (available & AFMT_U8)
+        return AFMT_U8;
+    if (available & AFMT_S32_LE)
         return AFMT_S32_LE;
     return OSS_DEFAULT_FORMAT;
 }
@@ -309,6 +320,8 @@ static void oss_playback_update_locked(void) {
 }
 
 static uint64 oss_pending_locked(void) {
+    if (virtio_snd_available())
+        return virtio_snd_pending_bytes();
     oss_playback_update_locked();
     return oss_play_written_bytes - oss_play_consumed_bytes;
 }
@@ -411,6 +424,11 @@ static int oss_is_pcm_device(cdev_t *cdev) {
 }
 
 static void oss_drain_playback(void) {
+    if (virtio_snd_available()) {
+        virtio_snd_drain();
+        return;
+    }
+
     for (;;) {
         spin_lock(&oss_lock);
         uint64 pending = oss_pending_locked();
@@ -444,11 +462,17 @@ static void oss_fill_audioinfo(oss_audioinfo_t *ai) {
         requested = 0;
 
     ai->dev = 0;
-    oss_put_string(ai->name, sizeof(ai->name), "xv6 OSS virtual PCM");
+    oss_put_string(ai->name, sizeof(ai->name),
+                   virtio_snd_available() ?
+                   "xv6 OSS PCM (virtio-sound)" :
+                   "xv6 OSS virtual PCM");
     ai->caps = PCM_CAP_INPUT | PCM_CAP_OUTPUT | PCM_CAP_DUPLEX |
-               PCM_CAP_TRIGGER | PCM_CAP_MULTI | PCM_CAP_VIRTUAL;
+               PCM_CAP_TRIGGER | PCM_CAP_MULTI;
+    if (!virtio_snd_available())
+        ai->caps |= PCM_CAP_VIRTUAL;
     ai->iformats = OSS_FORMATS;
-    ai->oformats = OSS_FORMATS;
+    ai->oformats = virtio_snd_available() ?
+                   virtio_snd_supported_oss_formats() : OSS_FORMATS;
     ai->mixer_dev = 0;
     ai->legacy_device = OSS_MINOR_DSP;
     ai->enabled = 1;
@@ -478,6 +502,8 @@ static int oss_open(cdev_t *cdev) {
         spin_lock(&oss_lock);
         oss_reset_playback_locked();
         spin_unlock(&oss_lock);
+        if (virtio_snd_available())
+            virtio_snd_reset();
     }
     return 0;
 }
@@ -502,6 +528,8 @@ static int oss_pcm_open_file(cdev_t *cdev, struct vfs_file *file) {
         }
     }
     spin_unlock(&oss_lock);
+    if (virtio_snd_available())
+        virtio_snd_reset();
     if (slot < 0)
         return -EMFILE;
 
@@ -549,12 +577,20 @@ static int oss_read(cdev_t *cdev, bool user, void *buf, size_t count) {
     return count;
 }
 
-static int oss_pcm_write_data(struct vfs_file *file, const void *buf,
-                              size_t count) {
+static int oss_pcm_write_data(struct vfs_file *file, bool user,
+                              const void *buf, size_t count) {
     if (buf == NULL)
         return -EINVAL;
 
     bool nonblock = file != NULL && (file->f_flags & O_NONBLOCK);
+    if (virtio_snd_available()) {
+        int ret = virtio_snd_write(user ? 1 : 0, buf, count, oss_format,
+                                   oss_rate, oss_channels,
+                                   nonblock ? 1 : 0);
+        if (ret != -ENODEV)
+            return ret;
+    }
+
     size_t done = 0;
     while (done < count) {
         spin_lock(&oss_lock);
@@ -582,15 +618,14 @@ static int oss_pcm_write_data(struct vfs_file *file, const void *buf,
 
 static int oss_write_file(cdev_t *cdev, struct vfs_file *file, bool user,
                           const void *buf, size_t count) {
-    (void)user;
     if (!oss_is_pcm_device(cdev))
         return (int)count;
-    return oss_pcm_write_data(file, buf, count);
+    return oss_pcm_write_data(file, user, buf, count);
 }
 
 static int oss_write(cdev_t *cdev, bool user, const void *buf, size_t count) {
     if (oss_is_pcm_device(cdev))
-        return oss_pcm_write_data(NULL, buf, count);
+        return oss_pcm_write_data(NULL, user, buf, count);
     return oss_write_file(cdev, NULL, user, buf, count);
 }
 
@@ -602,19 +637,26 @@ static ssize_t oss_pcm_file_read(struct vfs_file *file, char *buf,
 
 static ssize_t oss_pcm_file_write(struct vfs_file *file, const char *buf,
                                   size_t count, bool user) {
-    (void)user;
-    return oss_pcm_write_data(file, buf, count);
+    return oss_pcm_write_data(file, user, buf, count);
 }
 
 static int sndstat_read(cdev_t *cdev, bool user, void *buf, size_t count) {
     (void)cdev;
-    static const char text[] =
+    static const char timer_text[] =
         "OSS 4.0 compatible virtual audio\n"
         "Audio devices:\n"
         "0: xv6 OSS virtual PCM /dev/dsp\n"
         "Mixers:\n"
         "0: xv6 virtual mixer /dev/mixer\n";
+    static const char virtio_text[] =
+        "OSS 4.0 compatible audio\n"
+        "Audio devices:\n"
+        "0: xv6 OSS PCM /dev/dsp (virtio-sound)\n"
+        "Mixers:\n"
+        "0: xv6 virtual mixer /dev/mixer\n";
+    const char *text = virtio_snd_available() ? virtio_text : timer_text;
     size_t len = sizeof(text) - 1;
+    len = strlen(text);
     if (count < len)
         len = count;
     if (!user) {
@@ -622,6 +664,52 @@ static int sndstat_read(cdev_t *cdev, bool user, void *buf, size_t count) {
         return len;
     }
     return either_copyout(1, (uint64)buf, (void *)text, len) < 0 ? -EFAULT : (int)len;
+}
+
+static ssize_t oss_sndstat_file_read(struct vfs_file *file, char *buf,
+                                     size_t count, bool user) {
+    static const char timer_text[] =
+        "OSS 4.0 compatible virtual audio\n"
+        "Audio devices:\n"
+        "0: xv6 OSS virtual PCM /dev/dsp\n"
+        "Mixers:\n"
+        "0: xv6 virtual mixer /dev/mixer\n";
+    static const char virtio_text[] =
+        "OSS 4.0 compatible audio\n"
+        "Audio devices:\n"
+        "0: xv6 OSS PCM /dev/dsp (virtio-sound)\n"
+        "Mixers:\n"
+        "0: xv6 virtual mixer /dev/mixer\n";
+    const char *text = virtio_snd_available() ? virtio_text : timer_text;
+    size_t len = strlen(text);
+
+    if (file->f_pos >= (loff_t)len)
+        return 0;
+    size_t off = (size_t)file->f_pos;
+    size_t n = len - off;
+    if (n > count)
+        n = count;
+
+    int ret;
+    if (!user) {
+        memcpy(buf, text + off, n);
+        ret = (int)n;
+    } else {
+        ret = either_copyout(1, (uint64)buf, (void *)(text + off), n) < 0 ?
+              -EFAULT : (int)n;
+    }
+    if (ret > 0)
+        file->f_pos += ret;
+    return ret;
+}
+
+static int oss_sndstat_open_file(cdev_t *cdev, struct vfs_file *file) {
+    if (cdev == NULL || file == NULL)
+        return -EINVAL;
+    file->ops = &oss_sndstat_file_ops;
+    file->private_data = NULL;
+    file->f_pos = 0;
+    return 0;
 }
 
 static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
@@ -662,6 +750,8 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
         spin_lock(&oss_lock);
         oss_reset_playback_locked();
         spin_unlock(&oss_lock);
+        if (virtio_snd_available())
+            virtio_snd_reset();
         return 0;
 
     case SNDCTL_DSP_SYNC:
@@ -679,10 +769,14 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
         spin_lock(&oss_lock);
         oss_reset_playback_locked();
         spin_unlock(&oss_lock);
+        if (virtio_snd_available())
+            virtio_snd_reset();
         return 0;
 
     case SNDCTL_DSP_GETFMTS:
-        return oss_put_int(uarg, OSS_FORMATS);
+        return oss_put_int(uarg, virtio_snd_available() ?
+                           virtio_snd_supported_oss_formats() :
+                           OSS_FORMATS);
 
     case SNDCTL_DSP_SETFMT:
         if (oss_get_int(uarg, &value) < 0)
@@ -692,6 +786,8 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
         oss_reset_playback_locked();
         value = oss_format;
         spin_unlock(&oss_lock);
+        if (virtio_snd_available())
+            virtio_snd_reset();
         return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_SPEED:
@@ -706,6 +802,8 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
         oss_reset_playback_locked();
         value = oss_rate;
         spin_unlock(&oss_lock);
+        if (virtio_snd_available())
+            virtio_snd_reset();
         return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_CHANNELS:
@@ -716,6 +814,8 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
         oss_reset_playback_locked();
         value = oss_channels;
         spin_unlock(&oss_lock);
+        if (virtio_snd_available())
+            virtio_snd_reset();
         return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_STEREO:
@@ -726,6 +826,8 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
         oss_reset_playback_locked();
         value = oss_channels == 2;
         spin_unlock(&oss_lock);
+        if (virtio_snd_available())
+            virtio_snd_reset();
         return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_GETBLKSIZE:
@@ -749,7 +851,9 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
 
     case SNDCTL_DSP_GETCAPS:
         value = PCM_CAP_INPUT | PCM_CAP_OUTPUT | PCM_CAP_DUPLEX |
-                PCM_CAP_TRIGGER | PCM_CAP_MULTI | PCM_CAP_VIRTUAL;
+                PCM_CAP_TRIGGER | PCM_CAP_MULTI;
+        if (!virtio_snd_available())
+            value |= PCM_CAP_VIRTUAL;
         return oss_put_int(uarg, value);
 
     case SNDCTL_DSP_GETTRIGGER:
@@ -771,7 +875,9 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
     case SNDCTL_DSP_GETOPTR: {
         spin_lock(&oss_lock);
         oss_pending_locked();
-        uint64 played = oss_play_consumed_bytes;
+        uint64 played = virtio_snd_available() ?
+                        virtio_snd_played_bytes() :
+                        oss_play_consumed_bytes;
         count_info_t ci = { .bytes = (uint)played,
                             .blocks = (int)(played / OSS_BLOCK_SIZE),
                             .ptr = (int)(played % OSS_BLOCK_SIZE) };
@@ -831,7 +937,9 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
     case SNDCTL_DSP_CURRENT_OPTR: {
         spin_lock(&oss_lock);
         oss_pending_locked();
-        uint64 played = oss_play_consumed_bytes;
+        uint64 played = virtio_snd_available() ?
+                        virtio_snd_played_bytes() :
+                        oss_play_consumed_bytes;
         uint64 bytes_per_sample = oss_bytes_per_second_locked() /
                                   ((uint64)oss_rate * (uint64)oss_channels);
         if (bytes_per_sample == 0)
@@ -917,6 +1025,10 @@ static struct vfs_file_ops oss_pcm_file_ops = {
     .ioctl = oss_pcm_file_ioctl,
 };
 
+static struct vfs_file_ops oss_sndstat_file_ops = {
+    .read = oss_sndstat_file_read,
+};
+
 #define OSS_CDEV(_name, _minor, _readable, _writable, _read, _write, _open_file) \
     { \
         .dev = { \
@@ -956,7 +1068,8 @@ static cdev_t audio0_cdev =
     OSS_CDEV("audio0", OSS_MINOR_AUDIO0, 1, 1, oss_read, oss_write,
              oss_pcm_open_file);
 static cdev_t sndstat_cdev =
-    OSS_CDEV("sndstat", OSS_MINOR_SNDSTAT, 1, 0, sndstat_read, NULL, NULL);
+    OSS_CDEV("sndstat", OSS_MINOR_SNDSTAT, 1, 0, sndstat_read, NULL,
+             oss_sndstat_open_file);
 
 void ossaudiodevinit(void) {
     spin_init(&oss_lock, "ossaudio");
