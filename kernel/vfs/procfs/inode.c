@@ -34,6 +34,7 @@
 #include "arch/vm.h"
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "proc/rq.h"
 #include "proc/sched.h"
 #include "maple_tree.h"
 #include "printf.h"
@@ -1890,8 +1891,16 @@ static char *procfs_gen_pid_stat(int tgid)
     int sid = p->sid;
     vm_t *vm = p->vm;
     uint64 cputime_raw = 0;
+    int priority = LINUX_NICE_BIAS;
+    int nice = 0;
     if (p->sched_entity)
         cputime_raw = p->sched_entity->sum_exec_runtime;
+    if (p->sched_entity) {
+        int sched_priority = p->sched_entity->priority;
+        if (IS_EEVDF_PRIORITY(sched_priority))
+            nice = sched_priority - EEVDF_PRIORITY_START - LINUX_NICE_BIAS;
+        priority = LINUX_NICE_BIAS + nice;
+    }
     rcu_read_unlock();
 
     struct procfs_vm_accounting acct;
@@ -1903,9 +1912,9 @@ static char *procfs_gen_pid_stat(int tgid)
     if (buf == NULL)
         return ERR_PTR(-ENOMEM);
     snprintf(buf, PROCFS_BUF_SIZE,
-             "%d (%s) %c %d %d %d 0 -1 4194304 0 0 0 0 %lu 0 0 0 20 0 1 0 0 %lu %lu 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+             "%d (%s) %c %d %d %d 0 -1 4194304 0 0 0 0 %lu 0 0 0 %d %d 1 0 0 %lu %lu 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
              tgid, name, state, ppid, pgid, sid, cputime_ticks,
-             (unsigned long)(acct.size_pages * PGSIZE),
+             priority, nice, (unsigned long)(acct.size_pages * PGSIZE),
              (unsigned long)acct.resident_pages);
     return buf;
 }

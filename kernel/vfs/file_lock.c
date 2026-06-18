@@ -328,6 +328,7 @@ int vfs_file_lock_ctl(struct vfs_file *file, pid_t owner, int cmd,
         ret = tq_wait_in_state(&inode->file_lock_waiters, &inode->file_lock,
                                NULL, THREAD_INTERRUPTIBLE);
         if (ret != 0) {
+            spin_unlock(&inode->file_lock);
             return ret;
         }
     }

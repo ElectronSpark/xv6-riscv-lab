@@ -43,16 +43,20 @@ static void __free_irq_desc(struct irq_desc *desc) {
     slab_free(desc);
 }
 
+static void __rcu_free_irq_desc_chain(void *data)
+{
+    struct irq_desc *desc = (struct irq_desc *)data;
+    while (desc != NULL) {
+        struct irq_desc *next = desc->next;
+        __free_irq_desc(desc);
+        desc = next;
+    }
+}
+
 void irq_desc_init(void) {
     int ret = slab_cache_init(&__irq_desc_slab, "irq_desc",
                               sizeof(struct irq_desc), SLAB_FLAG_EMBEDDED);
     assert(ret == 0, "irq_desc_init: Failed to initialize irq_desc slab cache");
-}
-
-// Callback for freeing IRQ descriptor after grace period
-static void __rcu_free_irq_desc(void *data) {
-    struct irq_desc *desc = (struct irq_desc *)data;
-    __free_irq_desc(desc);
 }
 
 int register_irq_handler(int irq_num, struct irq_desc *desc) {
@@ -70,20 +74,26 @@ int register_irq_handler(int irq_num, struct irq_desc *desc) {
     }
     new_desc->irq = irq_num;
     new_desc->count = 0;
+    new_desc->next = NULL;
 
     // Acquire write lock to serialize registration
     spin_lock(&irq_write_lock);
 
-    // Check if handler already exists - fail to prevent double registration
     struct irq_desc *old_desc = rcu_dereference(irq_descs[irq_num]);
-    if (old_desc != NULL) {
-        spin_unlock(&irq_write_lock);
-        __free_irq_desc(new_desc);
-        return -EEXIST; // Handler already registered
+    if (old_desc == NULL) {
+        // Use RCU to safely publish the new descriptor
+        rcu_assign_pointer(irq_descs[irq_num], new_desc);
+    } else {
+        struct irq_desc *tail = old_desc;
+        while (tail->next != NULL)
+            tail = tail->next;
+        /*
+         * Legacy PCI INTx lines are commonly shared.  The descriptor list is
+         * append-only while readers run under RCU; the write lock serializes
+         * registration so publishing the next pointer is enough here.
+         */
+        rcu_assign_pointer(tail->next, new_desc);
     }
-
-    // Use RCU to safely publish the new descriptor
-    rcu_assign_pointer(irq_descs[irq_num], new_desc);
 
     spin_unlock(&irq_write_lock);
 
@@ -117,11 +127,20 @@ int unregister_irq_handler(int irq_num) {
 
     spin_unlock(&irq_write_lock);
 
-    // Use call_rcu() for non-blocking deferred freeing
-    // The descriptor will be freed after all readers complete
-    call_rcu(&old_desc->rcu_head, __rcu_free_irq_desc, old_desc);
+    // Use call_rcu() for non-blocking deferred freeing.
+    call_rcu(&old_desc->rcu_head, __rcu_free_irq_desc_chain, old_desc);
 
     return 0;
+}
+
+static void irq_dispatch_chain(int irq, struct irq_desc *desc)
+{
+    for (struct irq_desc *cur = desc; cur != NULL;
+         cur = rcu_dereference(cur->next)) {
+        __atomic_add_fetch(&cur->count, 1, __ATOMIC_SEQ_CST);
+        if (cur->handler != NULL)
+            cur->handler(irq, cur->data, cur->dev);
+    }
 }
 
 static int __do_plic_irq(void) {
@@ -149,14 +168,7 @@ static int __do_plic_irq(void) {
         return -ENODEV;
     }
 
-    // When an IRQ exists, increase its counter no matter whether handler is
-    // NULL
-    __atomic_add_fetch(&desc->count, 1, __ATOMIC_SEQ_CST);
-
-    // Call the handler if it exists
-    if (desc->handler != NULL) {
-        desc->handler(irq, desc->data, desc->dev);
-    }
+    irq_dispatch_chain(irq, desc);
 
     // Exit RCU read-side critical section
     rcu_read_unlock();
@@ -187,14 +199,7 @@ int do_irq(int irq_num) {
         return -ENODEV;
     }
 
-    // When an IRQ exists, increase its counter no matter whether handler is
-    // NULL
-    __atomic_add_fetch(&desc->count, 1, __ATOMIC_SEQ_CST);
-
-    // Call the handler if it exists
-    if (desc->handler != NULL) {
-        desc->handler(irq_num, desc->data, desc->dev);
-    }
+    irq_dispatch_chain(irq_num, desc);
 
     // Exit RCU read-side critical section
     rcu_read_unlock();
@@ -228,11 +233,7 @@ int do_device_irq(int hw_irq) {
         return 0;
     }
 
-    __atomic_add_fetch(&desc->count, 1, __ATOMIC_SEQ_CST);
-
-    if (desc->handler != NULL) {
-        desc->handler(irq, desc->data, desc->dev);
-    }
+    irq_dispatch_chain(irq, desc);
 
     rcu_read_unlock();
     return irq;

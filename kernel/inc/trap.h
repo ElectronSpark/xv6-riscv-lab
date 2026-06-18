@@ -68,6 +68,9 @@ struct irq_desc {
     int irq;
     uint64 count; // Number of times this IRQ has been handled
 
+    // Next handler on a shared IRQ line.
+    struct irq_desc *next;
+
     // RCU support for deferred freeing
     rcu_head_t rcu_head;
 };

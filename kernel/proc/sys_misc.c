@@ -356,22 +356,6 @@ uint64 sys_getrusage(void) {
 #define PRIO_PGRP    1
 #define PRIO_USER    2
 
-static int nice_to_eevdf_priority(int nice)
-{
-    if (nice < -20)
-        nice = -20;
-    if (nice > 19)
-        nice = 19;
-    return EEVDF_PRIORITY_START + nice + 20;
-}
-
-static int priority_to_nice(int priority)
-{
-    if (!IS_EEVDF_PRIORITY(priority))
-        return 0;
-    return priority - EEVDF_PRIORITY_START - 20;
-}
-
 /*
  * Linux getpriority returns 20 - nice, so range [1, 40].
  * Normal SCHED_OTHER tasks live in the EEVDF priority range:
@@ -408,10 +392,12 @@ uint64 sys_getpriority(void) {
 
     int nice = 0;
     if (target->sched_entity) {
-        nice = priority_to_nice(target->sched_entity->priority);
+        int priority = target->sched_entity->priority;
+        if (IS_EEVDF_PRIORITY(priority))
+            nice = priority - EEVDF_PRIORITY_START - LINUX_NICE_BIAS;
     }
 
-    return (uint64)(20 - nice);
+    return (uint64)(LINUX_NICE_BIAS - nice);
 }
 
 uint64 sys_setpriority(void) {
@@ -450,7 +436,7 @@ uint64 sys_setpriority(void) {
     if (target->sched_entity) {
         struct sched_attr attr;
         sched_attr_init(&attr);
-        attr.priority = nice_to_eevdf_priority(niceval);
+        attr.priority = EEVDF_PRIORITY_START + niceval + LINUX_NICE_BIAS;
         sched_setattr(target->sched_entity, &attr);
     }
 
@@ -907,7 +893,18 @@ uint64 sys_sched_getattr(void) {
     memset(&attr, 0, sizeof(attr));
     attr.size = sizeof(attr);
     attr.sched_policy = SCHED_OTHER;
-    attr.sched_nice = 0;
+    struct thread *target = current;
+    if (pid != 0 && get_pid_thread(pid, &target) != 0)
+        return (uint64)-ESRCH;
+
+    int nice = 0;
+    if (target != NULL && target->sched_entity != NULL) {
+        int priority = target->sched_entity->priority;
+        if (IS_EEVDF_PRIORITY(priority))
+            nice = priority - EEVDF_PRIORITY_START - LINUX_NICE_BIAS;
+    }
+
+    attr.sched_nice = nice;
     attr.sched_priority = 0;
 
     size_t copy_size = (size_t)size;
@@ -948,10 +945,28 @@ uint64 sys_sched_setattr(void) {
         return (uint64)-EFAULT;
 
     if (attr.sched_policy != SCHED_OTHER || attr.sched_flags != 0 ||
-        attr.sched_nice != 0 || attr.sched_priority != 0 ||
-        attr.sched_runtime != 0 || attr.sched_deadline != 0 ||
-        attr.sched_period != 0)
+        attr.sched_priority != 0 || attr.sched_runtime != 0 ||
+        attr.sched_deadline != 0 || attr.sched_period != 0)
         return (uint64)-EINVAL;
+
+    if (attr.sched_nice < -20 || attr.sched_nice > 19)
+        return (uint64)-EINVAL;
+    if (attr.sched_nice < 0 && current->thread_group->euid != 0)
+        return (uint64)-EACCES;
+
+    struct thread *target = current;
+    if (pid != 0 && get_pid_thread(pid, &target) != 0)
+        return (uint64)-ESRCH;
+
+    if (target != NULL && target->sched_entity != NULL) {
+        struct sched_attr sattr;
+        sched_attr_init(&sattr);
+        sattr.priority =
+            EEVDF_PRIORITY_START + attr.sched_nice + LINUX_NICE_BIAS;
+        int ret = sched_setattr(target->sched_entity, &sattr);
+        if (ret < 0)
+            return (uint64)ret;
+    }
     return 0;
 }
 

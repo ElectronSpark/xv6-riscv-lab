@@ -8,6 +8,7 @@
 #include <vfs/fcntl.h>
 #include <vfs/file.h>
 #include <vfs/vfs_types.h>
+#include <cmdline.h>
 #include "kqueue.h"
 #include "kqueue_types.h"
 #include "lock/spinlock.h"
@@ -17,6 +18,7 @@
 #include "dev/virtio.h"
 
 #define OSS_SOUND_MAJOR 14
+#define ALSA_SOUND_MAJOR 116
 
 #define OSS_MINOR_MIXER   0
 #define OSS_MINOR_DSP     3
@@ -25,6 +27,13 @@
 #define OSS_MINOR_MIXER0  16
 #define OSS_MINOR_DSP0    19
 #define OSS_MINOR_AUDIO0  20
+
+/*
+ * xv6's device table reserves minor 0 for dynamic allocation.  Publish
+ * Linux-compatible /dev/snd names, but keep internal minors non-zero.
+ */
+#define ALSA_MINOR_CONTROL0 1
+#define ALSA_MINOR_PCM0P    16
 
 #define OSS_VERSION 0x040090
 
@@ -98,6 +107,10 @@
 #define OSS_NOTIFY_INTERVAL_MS 5
 #define OSS_MAX_PCM_FILES 32
 
+#ifndef INT_MAX
+#define INT_MAX 0x7fffffff
+#endif
+
 #define PCM_CAP_DUPLEX   0x00000100
 #define PCM_CAP_TRIGGER  0x00001000
 #define PCM_CAP_MULTI    0x00004000
@@ -112,6 +125,73 @@
 #define SOUND_MASK_VOLUME (1 << 0)
 #define SOUND_MASK_PCM    (1 << 4)
 #define SOUND_MIXER_VALUE(left, right) (((right) << 8) | (left))
+
+#define SNDRV_CTL_VERSION 0x00020009
+#define SNDRV_PCM_VERSION 0x00020011
+
+#define SNDRV_CTL_IOCTL_PVERSION         0x80045500
+#define SNDRV_CTL_IOCTL_CARD_INFO        0x81785501
+#define SNDRV_CTL_IOCTL_ELEM_LIST        0xc0505510
+#define SNDRV_CTL_IOCTL_SUBSCRIBE_EVENTS 0xc0045516
+#define SNDRV_CTL_IOCTL_HWDEP_NEXT_DEVICE 0xc0045520
+#define SNDRV_CTL_IOCTL_PCM_NEXT_DEVICE  0x80045530
+#define SNDRV_CTL_IOCTL_PCM_INFO         0xc1205531
+#define SNDRV_CTL_IOCTL_PCM_PREFER_SUBDEVICE 0x40045532
+#define SNDRV_CTL_IOCTL_RAWMIDI_NEXT_DEVICE 0xc0045540
+#define SNDRV_CTL_IOCTL_POWER       0xc00455d0
+#define SNDRV_CTL_IOCTL_POWER_STATE 0x800455d1
+
+#define SNDRV_PCM_IOCTL_PVERSION      0x80044100
+#define SNDRV_PCM_IOCTL_INFO          0x81204101
+#define SNDRV_PCM_IOCTL_TSTAMP        0x40044102
+#define SNDRV_PCM_IOCTL_TTSTAMP       0x40044103
+#define SNDRV_PCM_IOCTL_USER_PVERSION 0x40044104
+#define SNDRV_PCM_IOCTL_HW_REFINE     0xc2604110
+#define SNDRV_PCM_IOCTL_HW_PARAMS     0xc2604111
+#define SNDRV_PCM_IOCTL_HW_FREE       0x4112
+#define SNDRV_PCM_IOCTL_SW_PARAMS     0xc0884113
+#define SNDRV_PCM_IOCTL_STATUS        0x80984120
+#define SNDRV_PCM_IOCTL_DELAY         0x80084121
+#define SNDRV_PCM_IOCTL_HWSYNC        0x4122
+#define SNDRV_PCM_IOCTL_SYNC_PTR      0xc0884123
+#define SNDRV_PCM_IOCTL_STATUS_EXT    0xc0984124
+#define SNDRV_PCM_IOCTL_CHANNEL_INFO  0x80184132
+#define SNDRV_PCM_IOCTL_PREPARE       0x4140
+#define SNDRV_PCM_IOCTL_START         0x4142
+#define SNDRV_PCM_IOCTL_DROP          0x4143
+#define SNDRV_PCM_IOCTL_DRAIN         0x4144
+#define SNDRV_PCM_IOCTL_WRITEI_FRAMES 0x40184150
+
+#define SNDRV_PCM_STREAM_PLAYBACK 0
+#define SNDRV_PCM_STREAM_CAPTURE  1
+
+#define SNDRV_PCM_STATE_OPEN     0
+#define SNDRV_PCM_STATE_SETUP    1
+#define SNDRV_PCM_STATE_PREPARED 2
+#define SNDRV_PCM_STATE_RUNNING  3
+
+#define SNDRV_PCM_ACCESS_RW_INTERLEAVED 3
+#define SNDRV_PCM_FORMAT_S16_LE 2
+#define SNDRV_PCM_SUBFORMAT_STD 0
+
+#define SNDRV_PCM_HW_PARAM_ACCESS       0
+#define SNDRV_PCM_HW_PARAM_FORMAT       1
+#define SNDRV_PCM_HW_PARAM_SUBFORMAT    2
+#define SNDRV_PCM_HW_PARAM_SAMPLE_BITS  8
+#define SNDRV_PCM_HW_PARAM_FRAME_BITS   9
+#define SNDRV_PCM_HW_PARAM_CHANNELS     10
+#define SNDRV_PCM_HW_PARAM_RATE         11
+#define SNDRV_PCM_HW_PARAM_PERIOD_TIME  12
+#define SNDRV_PCM_HW_PARAM_PERIOD_SIZE  13
+#define SNDRV_PCM_HW_PARAM_PERIOD_BYTES 14
+#define SNDRV_PCM_HW_PARAM_PERIODS      15
+#define SNDRV_PCM_HW_PARAM_BUFFER_TIME  16
+#define SNDRV_PCM_HW_PARAM_BUFFER_SIZE  17
+#define SNDRV_PCM_HW_PARAM_BUFFER_BYTES 18
+#define SNDRV_PCM_HW_PARAM_TICK_TIME    19
+
+#define SNDRV_PCM_INFO_INTERLEAVED 0x00000100
+#define SNDRV_PCM_INFO_BLOCK_TRANSFER 0x00010000
 
 typedef struct audio_buf_info {
     int fragments;
@@ -194,12 +274,169 @@ typedef struct oss_count {
     int filler[34];
 } oss_count_t;
 
+typedef struct alsa_ctl_card_info {
+    int card;
+    int pad;
+    unsigned char id[16];
+    unsigned char driver[16];
+    unsigned char name[32];
+    unsigned char longname[80];
+    unsigned char reserved_[16];
+    unsigned char mixername[80];
+    unsigned char components[128];
+} alsa_ctl_card_info_t;
+
+typedef struct alsa_ctl_elem_id {
+    uint numid;
+    int iface;
+    uint device;
+    uint subdevice;
+    unsigned char name[44];
+    uint index;
+} alsa_ctl_elem_id_t;
+
+typedef struct alsa_ctl_elem_list {
+    uint offset;
+    uint space;
+    uint used;
+    uint count;
+    alsa_ctl_elem_id_t *pids;
+    unsigned char reserved[50];
+} alsa_ctl_elem_list_t;
+
+typedef union alsa_pcm_sync_id {
+    unsigned char id[16];
+    uint16 id16[8];
+    uint id32[4];
+} alsa_pcm_sync_id_t;
+
+typedef struct alsa_pcm_info {
+    uint device;
+    uint subdevice;
+    int stream;
+    int card;
+    unsigned char id[64];
+    unsigned char name[80];
+    unsigned char subname[32];
+    int dev_class;
+    int dev_subclass;
+    uint subdevices_count;
+    uint subdevices_avail;
+    alsa_pcm_sync_id_t sync;
+    unsigned char reserved[64];
+} alsa_pcm_info_t;
+
+typedef struct alsa_mask {
+    uint bits[8];
+} alsa_mask_t;
+
+typedef struct alsa_interval {
+    uint min, max;
+    uint openmin : 1, openmax : 1, integer : 1, empty : 1;
+} alsa_interval_t;
+
+typedef struct alsa_pcm_hw_params {
+    uint flags;
+    alsa_mask_t masks[3];
+    alsa_mask_t mres[5];
+    alsa_interval_t intervals[12];
+    alsa_interval_t ires[9];
+    uint rmask;
+    uint cmask;
+    uint info;
+    uint msbits;
+    uint rate_num;
+    uint rate_den;
+    uint64 fifo_size;
+    unsigned char reserved[64];
+} alsa_pcm_hw_params_t;
+
+typedef struct alsa_pcm_sw_params {
+    int tstamp_mode;
+    uint period_step;
+    uint sleep_min;
+    uint64 avail_min;
+    uint64 xfer_align;
+    uint64 start_threshold;
+    uint64 stop_threshold;
+    uint64 silence_threshold;
+    uint64 silence_size;
+    uint64 boundary;
+    uint proto;
+    uint tstamp_type;
+    unsigned char reserved[56];
+} alsa_pcm_sw_params_t;
+
+typedef struct alsa_timespec {
+    int64 tv_sec;
+    int64 tv_nsec;
+} alsa_timespec_t;
+
+typedef struct alsa_pcm_status {
+    int state;
+    int pad1;
+    alsa_timespec_t trigger_tstamp;
+    alsa_timespec_t tstamp;
+    uint64 appl_ptr;
+    uint64 hw_ptr;
+    int64 delay;
+    uint64 avail;
+    uint64 avail_max;
+    uint64 overrange;
+    int suspended_state;
+    uint audio_tstamp_data;
+    alsa_timespec_t audio_tstamp;
+    alsa_timespec_t driver_tstamp;
+    uint audio_tstamp_accuracy;
+    unsigned char reserved[20];
+} alsa_pcm_status_t;
+
+typedef struct alsa_pcm_mmap_status {
+    int state;
+    int pad1;
+    uint64 hw_ptr;
+    alsa_timespec_t tstamp;
+    int suspended_state;
+    alsa_timespec_t audio_tstamp;
+} alsa_pcm_mmap_status_t;
+
+typedef struct alsa_pcm_mmap_control {
+    uint64 appl_ptr;
+    uint64 avail_min;
+} alsa_pcm_mmap_control_t;
+
+typedef struct alsa_pcm_sync_ptr {
+    uint flags;
+    union {
+        alsa_pcm_mmap_status_t status;
+        unsigned char reserved[64];
+    } s;
+    union {
+        alsa_pcm_mmap_control_t control;
+        unsigned char reserved[64];
+    } c;
+} alsa_pcm_sync_ptr_t;
+
+typedef struct alsa_xferi {
+    int64 result;
+    void *buf;
+    uint64 frames;
+} alsa_xferi_t;
+
 _Static_assert(sizeof(audio_buf_info_t) == 16, "audio_buf_info size");
 _Static_assert(sizeof(count_info_t) == 12, "count_info size");
 _Static_assert(sizeof(audio_errinfo_t) == 104, "audio_errinfo size");
 _Static_assert(sizeof(oss_sysinfo_t) == 1248, "oss_sysinfo size");
 _Static_assert(sizeof(oss_audioinfo_t) == 1180, "oss_audioinfo size");
 _Static_assert(sizeof(oss_count_t) == 144, "oss_count size");
+_Static_assert(sizeof(alsa_ctl_card_info_t) == 376, "alsa card info size");
+_Static_assert(sizeof(alsa_ctl_elem_list_t) == 80, "alsa elem list size");
+_Static_assert(sizeof(alsa_pcm_info_t) == 288, "alsa pcm info size");
+_Static_assert(sizeof(alsa_pcm_hw_params_t) == 608, "alsa hw params size");
+_Static_assert(sizeof(alsa_pcm_sw_params_t) == 136, "alsa sw params size");
+_Static_assert(sizeof(alsa_pcm_status_t) == 152, "alsa status size");
+_Static_assert(sizeof(alsa_pcm_sync_ptr_t) == 136, "alsa sync ptr size");
+_Static_assert(sizeof(alsa_xferi_t) == 24, "alsa xferi size");
 
 static int oss_format = OSS_DEFAULT_FORMAT;
 static int oss_rate = OSS_DEFAULT_RATE;
@@ -210,12 +447,17 @@ static uint64 oss_play_written_bytes;
 static uint64 oss_play_consumed_bytes;
 static uint64 oss_play_last_ms;
 static uint oss_rec_bytes;
+static int alsa_pcm_state = SNDRV_PCM_STATE_OPEN;
+static uint64 alsa_appl_ptr;
+static uint64 alsa_hw_ptr;
 static struct vfs_file *oss_pcm_files[OSS_MAX_PCM_FILES];
 static int oss_notify_armed;
 static spinlock_t oss_lock;
 
 static struct vfs_file_ops oss_pcm_file_ops;
+static struct vfs_file_ops alsa_pcm_file_ops;
 static struct vfs_file_ops oss_sndstat_file_ops;
+static void oss_reset_playback_locked(void);
 static void oss_schedule_notify(void);
 static void oss_notify_writable_callback(void *arg);
 
@@ -244,6 +486,22 @@ static void oss_put_string(char *dst, size_t len, const char *src) {
         return;
     strncpy(dst, src, len - 1);
     dst[len - 1] = '\0';
+}
+
+static void alsa_put_ustr(unsigned char *dst, size_t len, const char *src) {
+    oss_put_string((char *)dst, len, src);
+}
+
+static int alsa_ioctl_trace_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        char value[8];
+        cached = cmdline_get_param("alsa_ioctl_trace", value,
+                                   sizeof(value)) == 0 &&
+                 value[0] != '0';
+    }
+    return cached;
 }
 
 static int oss_normalize_format(int fmt) {
@@ -338,6 +596,27 @@ static int oss_playback_writable_locked(void) {
     return free_bytes >= OSS_POLL_LOW_WATER || free_bytes == OSS_BUFFER_BYTES;
 }
 
+static int oss_track_pcm_file(struct vfs_file *file) {
+    int slot = -1;
+
+    spin_lock(&oss_lock);
+    oss_reset_playback_locked();
+    for (int i = 0; i < OSS_MAX_PCM_FILES; i++) {
+        if (oss_pcm_files[i] == NULL) {
+            oss_pcm_files[i] = file;
+            slot = i;
+            break;
+        }
+    }
+    spin_unlock(&oss_lock);
+    if (virtio_snd_available())
+        virtio_snd_reset();
+    if (slot < 0)
+        return -EMFILE;
+    file->private_data = (void *)(uint64)(slot + 1);
+    return 0;
+}
+
 static int oss_any_pcm_file_locked(void) {
     for (int i = 0; i < OSS_MAX_PCM_FILES; i++) {
         if (oss_pcm_files[i] != NULL)
@@ -413,6 +692,8 @@ static void oss_reset_playback_locked(void) {
     oss_play_written_bytes = 0;
     oss_play_consumed_bytes = 0;
     oss_play_last_ms = sched_timer_now_ms();
+    alsa_appl_ptr = 0;
+    alsa_hw_ptr = 0;
 }
 
 static int oss_is_pcm_device(cdev_t *cdev) {
@@ -514,27 +795,12 @@ static int oss_release(cdev_t *cdev) {
 }
 
 static int oss_pcm_open_file(cdev_t *cdev, struct vfs_file *file) {
-    int slot = -1;
-
     if (!oss_is_pcm_device(cdev))
         return -EINVAL;
-    spin_lock(&oss_lock);
-    oss_reset_playback_locked();
-    for (int i = 0; i < OSS_MAX_PCM_FILES; i++) {
-        if (oss_pcm_files[i] == NULL) {
-            oss_pcm_files[i] = file;
-            slot = i;
-            break;
-        }
-    }
-    spin_unlock(&oss_lock);
-    if (virtio_snd_available())
-        virtio_snd_reset();
-    if (slot < 0)
-        return -EMFILE;
-
+    int ret = oss_track_pcm_file(file);
+    if (ret < 0)
+        return ret;
     file->ops = &oss_pcm_file_ops;
-    file->private_data = (void *)(uint64)(slot + 1);
     return 0;
 }
 
@@ -976,7 +1242,481 @@ static int oss_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
         return oss_put_int(uarg, 0);
     }
 
+    if (alsa_ioctl_trace_enabled())
+        printf("alsa-ioctl: oss unknown cmd=0x%lx\n", cmd);
     return -ENOTTY;
+}
+
+static void alsa_mask_only(alsa_mask_t *mask, uint bit)
+{
+    memset(mask, 0, sizeof(*mask));
+    if (bit < 256)
+        mask->bits[bit / 32] = 1U << (bit % 32);
+}
+
+static int alsa_mask_empty(const alsa_mask_t *mask)
+{
+    for (int i = 0; i < 8; i++) {
+        if (mask->bits[i] != 0)
+            return 0;
+    }
+    return 1;
+}
+
+static int alsa_mask_has(const alsa_mask_t *mask, uint bit)
+{
+    if (bit >= 256)
+        return 0;
+    return (mask->bits[bit / 32] & (1U << (bit % 32))) != 0;
+}
+
+static int alsa_mask_constrain(alsa_mask_t *mask, uint bit)
+{
+    if (!alsa_mask_empty(mask) && !alsa_mask_has(mask, bit))
+        return -EINVAL;
+    alsa_mask_only(mask, bit);
+    return 0;
+}
+
+static void alsa_interval_set(alsa_interval_t *ival, uint min, uint max)
+{
+    memset(ival, 0, sizeof(*ival));
+    ival->min = min;
+    ival->max = max;
+    ival->integer = 1;
+}
+
+static int alsa_interval_constrain(alsa_interval_t *ival, uint min, uint max)
+{
+    if (ival->empty)
+        return -EINVAL;
+
+    uint req_min = ival->min;
+    uint req_max = ival->max;
+
+    if (req_min == 0 && req_max == 0) {
+        alsa_interval_set(ival, min, max);
+        return 0;
+    }
+
+    if (ival->openmin && req_min < ~0U)
+        req_min++;
+    if (ival->openmax && req_max > 0)
+        req_max--;
+    if (req_max == 0 || req_max > max)
+        req_max = max;
+    if (req_min < min)
+        req_min = min;
+    if (req_max < req_min)
+        return -EINVAL;
+
+    alsa_interval_set(ival, req_min, req_max);
+    return 0;
+}
+
+static alsa_interval_t *alsa_hw_interval(alsa_pcm_hw_params_t *params, uint hw)
+{
+    return &params->intervals[hw - SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+}
+
+static void alsa_fill_card_info(alsa_ctl_card_info_t *info)
+{
+    memset(info, 0, sizeof(*info));
+    info->card = 0;
+    alsa_put_ustr(info->id, sizeof(info->id), "XV6SND");
+    alsa_put_ustr(info->driver, sizeof(info->driver), "xv6");
+    alsa_put_ustr(info->name, sizeof(info->name), "xv6 Audio");
+    alsa_put_ustr(info->longname, sizeof(info->longname),
+                  virtio_snd_available() ?
+                  "xv6 virtio-sound OSS/ALSA compatibility PCM" :
+                  "xv6 virtual OSS/ALSA compatibility PCM");
+    alsa_put_ustr(info->mixername, sizeof(info->mixername), "xv6 Mixer");
+    alsa_put_ustr(info->components, sizeof(info->components), "VIRTIO");
+}
+
+static void alsa_fill_pcm_info(alsa_pcm_info_t *info, int from_control)
+{
+    uint device = from_control ? info->device : 0;
+    uint subdevice = from_control ? info->subdevice : 0;
+    int stream = from_control ? info->stream : SNDRV_PCM_STREAM_PLAYBACK;
+
+    memset(info, 0, sizeof(*info));
+    info->device = device;
+    info->subdevice = subdevice;
+    info->stream = stream;
+    info->card = 0;
+    alsa_put_ustr(info->id, sizeof(info->id), "xv6pcm0");
+    alsa_put_ustr(info->name, sizeof(info->name),
+                  virtio_snd_available() ?
+                  "xv6 virtio-sound PCM" : "xv6 virtual PCM");
+    alsa_put_ustr(info->subname, sizeof(info->subname), "subdevice #0");
+    info->subdevices_count = 1;
+    info->subdevices_avail = stream == SNDRV_PCM_STREAM_PLAYBACK ? 1 : 0;
+    memcpy(info->sync.id, "xv6-alsa-pcm0", 13);
+}
+
+static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params)
+{
+    if (alsa_mask_constrain(&params->masks[SNDRV_PCM_HW_PARAM_ACCESS],
+                            SNDRV_PCM_ACCESS_RW_INTERLEAVED) < 0 ||
+        alsa_mask_constrain(&params->masks[SNDRV_PCM_HW_PARAM_FORMAT],
+                            SNDRV_PCM_FORMAT_S16_LE) < 0 ||
+        alsa_mask_constrain(&params->masks[SNDRV_PCM_HW_PARAM_SUBFORMAT],
+                            SNDRV_PCM_SUBFORMAT_STD) < 0)
+        return -EINVAL;
+
+    if (alsa_interval_constrain(alsa_hw_interval(params,
+                                                 SNDRV_PCM_HW_PARAM_SAMPLE_BITS),
+                                16, 16) < 0 ||
+        alsa_interval_constrain(alsa_hw_interval(params,
+                                                 SNDRV_PCM_HW_PARAM_CHANNELS),
+                                1, 2) < 0 ||
+        alsa_interval_constrain(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_RATE),
+                                8000, 96000) < 0 ||
+        alsa_interval_constrain(alsa_hw_interval(params,
+                                                 SNDRV_PCM_HW_PARAM_PERIOD_TIME),
+                                1000, 1000000) < 0 ||
+        alsa_interval_constrain(alsa_hw_interval(params,
+                                                 SNDRV_PCM_HW_PARAM_TICK_TIME),
+                                0, 0) < 0)
+        return -EINVAL;
+
+    uint channels = alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS)->min;
+    uint frame_bits_min = channels <= 1 ? 16 : 32;
+    uint frame_bits_max = channels >= 2 ? 32 : 16;
+    alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_FRAME_BITS),
+                      frame_bits_min, frame_bits_max);
+
+    uint rate = alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_RATE)->min;
+    uint frame_bytes = channels * 2;
+    uint max_buffer_frames = frame_bytes ? OSS_BUFFER_BYTES / frame_bytes : 128;
+    if (max_buffer_frames < 128)
+        max_buffer_frames = 128;
+
+    uint requested_time = alsa_hw_interval(params,
+                                           SNDRV_PCM_HW_PARAM_BUFFER_TIME)->min;
+    uint requested_frames = alsa_hw_interval(params,
+                                             SNDRV_PCM_HW_PARAM_BUFFER_SIZE)->min;
+    uint buffer_frames = requested_frames;
+    if (buffer_frames == 0 && requested_time != 0)
+        buffer_frames = (uint)(((uint64)rate * requested_time) / 1000000ULL);
+    if (buffer_frames == 0)
+        buffer_frames = rate / 10;
+    if (buffer_frames < 128)
+        buffer_frames = 128;
+    if (buffer_frames > max_buffer_frames)
+        buffer_frames = max_buffer_frames;
+
+    uint period_frames = buffer_frames / 4;
+    if (period_frames < 64)
+        period_frames = 64;
+    if (period_frames > buffer_frames)
+        period_frames = buffer_frames;
+    uint periods = period_frames ? buffer_frames / period_frames : 1;
+    if (periods == 0)
+        periods = 1;
+
+    uint buffer_time = rate ? (uint)(((uint64)buffer_frames * 1000000ULL) /
+                                    rate) : 0;
+    uint period_time = rate ? (uint)(((uint64)period_frames * 1000000ULL) /
+                                    rate) : 0;
+    alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE),
+                      buffer_frames, buffer_frames);
+    alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_BYTES),
+                      buffer_frames * frame_bytes, buffer_frames * frame_bytes);
+    alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_TIME),
+                      buffer_time, buffer_time);
+    alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE),
+                      period_frames, period_frames);
+    alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_BYTES),
+                      period_frames * frame_bytes, period_frames * frame_bytes);
+    alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_TIME),
+                      period_time, period_time);
+    alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIODS),
+                      periods, periods);
+
+    params->info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER;
+    params->msbits = 16;
+    params->rate_num = alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_RATE)->min;
+    params->rate_den = 1;
+    params->fifo_size = OSS_BUFFER_BYTES / 4;
+    return 0;
+}
+
+static uint64 alsa_frames_from_bytes(uint64 bytes)
+{
+    uint64 frame_bytes = (uint64)oss_channels * 2;
+    return frame_bytes ? bytes / frame_bytes : 0;
+}
+
+static void alsa_refresh_hw_ptr_locked(void)
+{
+    oss_pending_locked();
+    uint64 played = virtio_snd_available() ?
+                    virtio_snd_played_bytes() : oss_play_consumed_bytes;
+    alsa_hw_ptr = alsa_frames_from_bytes(played);
+}
+
+static void alsa_fill_status(alsa_pcm_status_t *status)
+{
+    memset(status, 0, sizeof(*status));
+    spin_lock(&oss_lock);
+    alsa_refresh_hw_ptr_locked();
+    status->state = alsa_pcm_state;
+    status->appl_ptr = alsa_appl_ptr;
+    status->hw_ptr = alsa_hw_ptr;
+    status->delay = (int64)(alsa_appl_ptr - alsa_hw_ptr);
+    status->avail = OSS_BUFFER_BYTES / ((uint64)oss_channels * 2);
+    status->avail_max = status->avail;
+    spin_unlock(&oss_lock);
+}
+
+static int alsa_ctl_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
+{
+    (void)cdev;
+    uint64 uarg = (uint64)arg;
+    int value;
+
+    switch ((uint)cmd) {
+    case SNDRV_CTL_IOCTL_PVERSION:
+        return oss_put_int(uarg, SNDRV_CTL_VERSION);
+    case SNDRV_CTL_IOCTL_CARD_INFO: {
+        alsa_ctl_card_info_t info;
+        alsa_fill_card_info(&info);
+        return oss_copyout(uarg, &info, sizeof(info));
+    }
+    case SNDRV_CTL_IOCTL_PCM_NEXT_DEVICE:
+        if (oss_get_int(uarg, &value) < 0)
+            value = -1;
+        value = value < 0 ? 0 : -1;
+        return oss_put_int(uarg, value);
+    case SNDRV_CTL_IOCTL_HWDEP_NEXT_DEVICE:
+    case SNDRV_CTL_IOCTL_RAWMIDI_NEXT_DEVICE:
+        return oss_put_int(uarg, -1);
+    case SNDRV_CTL_IOCTL_PCM_PREFER_SUBDEVICE:
+        return 0;
+    case SNDRV_CTL_IOCTL_POWER:
+    case SNDRV_CTL_IOCTL_POWER_STATE:
+        return oss_put_int(uarg, 0);
+    case SNDRV_CTL_IOCTL_PCM_INFO: {
+        alsa_pcm_info_t info;
+        if (oss_copyin(&info, uarg, sizeof(info)) < 0)
+            return -EFAULT;
+        if (info.device != 0 || info.subdevice != 0 ||
+            info.stream != SNDRV_PCM_STREAM_PLAYBACK)
+            return -ENODEV;
+        alsa_fill_pcm_info(&info, 1);
+        return oss_copyout(uarg, &info, sizeof(info));
+    }
+    case SNDRV_CTL_IOCTL_ELEM_LIST: {
+        alsa_ctl_elem_list_t list;
+        if (oss_copyin(&list, uarg, sizeof(list)) < 0)
+            memset(&list, 0, sizeof(list));
+        list.count = 0;
+        list.used = 0;
+        return oss_copyout(uarg, &list, sizeof(list));
+    }
+    case SNDRV_CTL_IOCTL_SUBSCRIBE_EVENTS:
+        return oss_put_int(uarg, 0);
+    }
+
+    if (alsa_ioctl_trace_enabled())
+        printf("alsa-ioctl: ctl unknown cmd=0x%lx\n", cmd);
+    return -ENOTTY;
+}
+
+static int alsa_pcm_open_file(cdev_t *cdev, struct vfs_file *file)
+{
+    if (cdev == NULL || cdev->dev.minor != ALSA_MINOR_PCM0P)
+        return -EINVAL;
+    int ret = oss_track_pcm_file(file);
+    if (ret < 0)
+        return ret;
+    spin_lock(&oss_lock);
+    alsa_pcm_state = SNDRV_PCM_STATE_OPEN;
+    spin_unlock(&oss_lock);
+    file->ops = &alsa_pcm_file_ops;
+    return 0;
+}
+
+static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    uint64 uarg = (uint64)arg;
+
+    switch ((uint)cmd) {
+    case SNDRV_PCM_IOCTL_PVERSION:
+        return oss_put_int(uarg, SNDRV_PCM_VERSION);
+    case SNDRV_PCM_IOCTL_TSTAMP:
+    case SNDRV_PCM_IOCTL_TTSTAMP:
+    case SNDRV_PCM_IOCTL_USER_PVERSION:
+        return 0;
+    case SNDRV_PCM_IOCTL_INFO: {
+        alsa_pcm_info_t info;
+        alsa_fill_pcm_info(&info, 0);
+        return oss_copyout(uarg, &info, sizeof(info));
+    }
+    case SNDRV_PCM_IOCTL_HW_REFINE:
+    case SNDRV_PCM_IOCTL_HW_PARAMS: {
+        alsa_pcm_hw_params_t params;
+        if (oss_copyin(&params, uarg, sizeof(params)) < 0)
+            memset(&params, 0, sizeof(params));
+        if (alsa_refine_hw_params(&params) < 0)
+            return -EINVAL;
+        if ((uint)cmd == SNDRV_PCM_IOCTL_HW_PARAMS) {
+            uint rate = alsa_hw_interval(&params, SNDRV_PCM_HW_PARAM_RATE)->min;
+            uint channels = alsa_hw_interval(&params,
+                                             SNDRV_PCM_HW_PARAM_CHANNELS)->min;
+            if (rate < 8000 || rate > 96000)
+                rate = OSS_DEFAULT_RATE;
+            if (channels < 1 || channels > 2)
+                channels = OSS_DEFAULT_CHANNELS;
+            spin_lock(&oss_lock);
+            oss_format = AFMT_S16_LE;
+            oss_rate = (int)rate;
+            oss_channels = (int)channels;
+            oss_reset_playback_locked();
+            alsa_pcm_state = SNDRV_PCM_STATE_SETUP;
+            spin_unlock(&oss_lock);
+            if (virtio_snd_available())
+                virtio_snd_reset();
+        }
+        return oss_copyout(uarg, &params, sizeof(params));
+    }
+    case SNDRV_PCM_IOCTL_SW_PARAMS: {
+        alsa_pcm_sw_params_t params;
+        if (oss_copyin(&params, uarg, sizeof(params)) < 0)
+            memset(&params, 0, sizeof(params));
+        if (params.avail_min == 0)
+            params.avail_min = OSS_BLOCK_SIZE / 4;
+        if (params.boundary == 0)
+            params.boundary = 0x40000000ULL;
+        return oss_copyout(uarg, &params, sizeof(params));
+    }
+    case SNDRV_PCM_IOCTL_HW_FREE:
+        spin_lock(&oss_lock);
+        alsa_pcm_state = SNDRV_PCM_STATE_OPEN;
+        spin_unlock(&oss_lock);
+        return 0;
+    case SNDRV_PCM_IOCTL_HWSYNC:
+        return 0;
+    case SNDRV_PCM_IOCTL_PREPARE:
+        spin_lock(&oss_lock);
+        oss_reset_playback_locked();
+        alsa_pcm_state = SNDRV_PCM_STATE_PREPARED;
+        spin_unlock(&oss_lock);
+        if (virtio_snd_available())
+            virtio_snd_reset();
+        return 0;
+    case SNDRV_PCM_IOCTL_START:
+        spin_lock(&oss_lock);
+        alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
+        spin_unlock(&oss_lock);
+        return 0;
+    case SNDRV_PCM_IOCTL_DROP:
+        spin_lock(&oss_lock);
+        oss_reset_playback_locked();
+        alsa_pcm_state = SNDRV_PCM_STATE_SETUP;
+        spin_unlock(&oss_lock);
+        if (virtio_snd_available())
+            virtio_snd_reset();
+        return 0;
+    case SNDRV_PCM_IOCTL_DRAIN:
+        oss_drain_playback();
+        return 0;
+    case SNDRV_PCM_IOCTL_DELAY: {
+        spin_lock(&oss_lock);
+        alsa_refresh_hw_ptr_locked();
+        int64 delay = (int64)(alsa_appl_ptr - alsa_hw_ptr);
+        spin_unlock(&oss_lock);
+        return oss_copyout(uarg, &delay, sizeof(delay));
+    }
+    case SNDRV_PCM_IOCTL_STATUS: {
+        alsa_pcm_status_t status;
+        alsa_fill_status(&status);
+        return oss_copyout(uarg, &status, sizeof(status));
+    }
+    case SNDRV_PCM_IOCTL_STATUS_EXT: {
+        alsa_pcm_status_t status;
+        if (oss_copyin(&status, uarg, sizeof(status)) < 0)
+            memset(&status, 0, sizeof(status));
+        alsa_fill_status(&status);
+        return oss_copyout(uarg, &status, sizeof(status));
+    }
+    case SNDRV_PCM_IOCTL_CHANNEL_INFO:
+        return -ENOTTY;
+    case SNDRV_PCM_IOCTL_SYNC_PTR: {
+        alsa_pcm_sync_ptr_t sync;
+        if (oss_copyin(&sync, uarg, sizeof(sync)) < 0)
+            memset(&sync, 0, sizeof(sync));
+        spin_lock(&oss_lock);
+        alsa_refresh_hw_ptr_locked();
+        sync.s.status.state = alsa_pcm_state;
+        sync.s.status.hw_ptr = alsa_hw_ptr;
+        sync.c.control.appl_ptr = alsa_appl_ptr;
+        if (sync.c.control.avail_min == 0)
+            sync.c.control.avail_min = OSS_BLOCK_SIZE / 4;
+        spin_unlock(&oss_lock);
+        return oss_copyout(uarg, &sync, sizeof(sync));
+    }
+    case SNDRV_PCM_IOCTL_WRITEI_FRAMES: {
+        alsa_xferi_t xfer;
+        if (oss_copyin(&xfer, uarg, sizeof(xfer)) < 0)
+            return -EFAULT;
+        uint64 frame_bytes = (uint64)oss_channels * 2;
+        if (frame_bytes == 0)
+            frame_bytes = 4;
+        uint64 bytes = xfer.frames * frame_bytes;
+        if (bytes > INT_MAX)
+            bytes = INT_MAX;
+        int ret = oss_pcm_write_data(file, 1, xfer.buf, (size_t)bytes);
+        if (ret < 0) {
+            xfer.result = ret;
+        } else {
+            xfer.result = ret / (int64)frame_bytes;
+            spin_lock(&oss_lock);
+            alsa_appl_ptr += (uint64)xfer.result;
+            alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
+            spin_unlock(&oss_lock);
+        }
+        int copy_ret = oss_copyout(uarg, &xfer, sizeof(xfer));
+        return copy_ret < 0 ? copy_ret : (ret < 0 ? ret : 0);
+    }
+    }
+
+    if (alsa_ioctl_trace_enabled())
+        printf("alsa-ioctl: pcm unknown cmd=0x%lx\n", cmd);
+    return -ENOTTY;
+}
+
+static int alsa_pcm_cdev_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
+{
+    (void)cdev;
+    return alsa_pcm_ioctl_common(NULL, cmd, arg);
+}
+
+static ssize_t alsa_pcm_file_read(struct vfs_file *file, char *buf,
+                                  size_t count, bool user)
+{
+    (void)file;
+    return oss_read(NULL, user, buf, count);
+}
+
+static ssize_t alsa_pcm_file_write(struct vfs_file *file, const char *buf,
+                                   size_t count, bool user)
+{
+    int ret = oss_pcm_write_data(file, user, buf, count);
+    if (ret > 0) {
+        spin_lock(&oss_lock);
+        alsa_appl_ptr += alsa_frames_from_bytes((uint64)ret);
+        alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
+        spin_unlock(&oss_lock);
+    }
+    return ret;
+}
+
+static int alsa_pcm_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    return alsa_pcm_ioctl_common(file, cmd, arg);
 }
 
 static int oss_pcm_poll_events(short events) {
@@ -1025,6 +1765,14 @@ static struct vfs_file_ops oss_pcm_file_ops = {
     .ioctl = oss_pcm_file_ioctl,
 };
 
+static struct vfs_file_ops alsa_pcm_file_ops = {
+    .read = alsa_pcm_file_read,
+    .write = alsa_pcm_file_write,
+    .release = oss_pcm_file_release,
+    .poll = oss_pcm_file_poll,
+    .ioctl = alsa_pcm_file_ioctl,
+};
+
 static struct vfs_file_ops oss_sndstat_file_ops = {
     .read = oss_sndstat_file_read,
 };
@@ -1071,6 +1819,34 @@ static cdev_t sndstat_cdev =
     OSS_CDEV("sndstat", OSS_MINOR_SNDSTAT, 1, 0, sndstat_read, NULL,
              oss_sndstat_open_file);
 
+#define ALSA_CDEV(_name, _minor, _ioctl, _open_file) \
+    { \
+        .dev = { \
+            .major = ALSA_SOUND_MAJOR, \
+            .minor = (_minor), \
+            .devname = (_name), \
+            .devmode = S_IFCHR | 0666, \
+        }, \
+        .readable = 1, \
+        .writable = 1, \
+        .ops = { \
+            .read = oss_read, \
+            .write = oss_write, \
+            .write_file = oss_write_file, \
+            .open = oss_open, \
+            .release = oss_release, \
+            .ioctl = (_ioctl), \
+            .poll = oss_poll, \
+            .open_file = (_open_file), \
+        }, \
+    }
+
+static cdev_t alsa_control0_cdev =
+    ALSA_CDEV("snd/controlC0", ALSA_MINOR_CONTROL0, alsa_ctl_ioctl, NULL);
+static cdev_t alsa_pcm0p_cdev =
+    ALSA_CDEV("snd/pcmC0D0p", ALSA_MINOR_PCM0P, alsa_pcm_cdev_ioctl,
+              alsa_pcm_open_file);
+
 void ossaudiodevinit(void) {
     spin_init(&oss_lock, "ossaudio");
     oss_play_last_ms = sched_timer_now_ms();
@@ -1089,6 +1865,12 @@ void ossaudiodevinit(void) {
     assert(ret == 0, "ossaudio: failed to register /dev/audio0: %d", ret);
     ret = cdev_register(&sndstat_cdev);
     assert(ret == 0, "ossaudio: failed to register /dev/sndstat: %d", ret);
+    ret = cdev_register(&alsa_control0_cdev);
+    assert(ret == 0, "ossaudio: failed to register /dev/snd/controlC0: %d",
+           ret);
+    ret = cdev_register(&alsa_pcm0p_cdev);
+    assert(ret == 0, "ossaudio: failed to register /dev/snd/pcmC0D0p: %d",
+           ret);
 
-    printf("audio: registered OSS virtual PCM /dev/dsp and /dev/mixer\n");
+    printf("audio: registered OSS /dev/dsp and ALSA /dev/snd/pcmC0D0p\n");
 }

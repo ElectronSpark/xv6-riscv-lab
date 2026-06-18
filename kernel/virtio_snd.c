@@ -651,7 +651,8 @@ static void virtio_snd_intr(int irq, void *data, device_t *dev)
         return;
     if (vsnd.pci.isr != NULL) {
         volatile uint8 isr_status = *vsnd.pci.isr;
-        (void)isr_status;
+        if (isr_status == 0)
+            return;
     }
     vsnd_drain_events();
 }

@@ -43,6 +43,8 @@ extern int __rq_lock_context;
 #define IS_EEVDF_PRIORITY(prio)                                                \
     (((prio) >= EEVDF_PRIORITY_START) && ((prio) < EEVDF_PRIORITY_LIMIT))
 
+#define LINUX_NICE_BIAS 20
+
 #define GET_RQ_FOR_CURRENT(cls_id) get_rq_for_cpu((cls_id), cpuid())
 
 struct rq *get_rq_for_cpu(int cls_id, int cpu_id);
