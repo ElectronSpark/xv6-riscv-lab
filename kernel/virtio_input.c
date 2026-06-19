@@ -222,7 +222,12 @@ static void virtio_input_handle_event(struct virtio_input *in,
             in->rel_y += ev->value;
             in->pending = 1;
         } else if (ev->code == REL_WHEEL) {
-            in->wheel += ev->value;
+            /*
+             * Linux evdev reports REL_WHEEL > 0 for wheel-up.  The shared
+             * /dev/mouse ABI uses negative=up, positive=down, matching the
+             * PS/2 path consumed by the Wayland/libinput shim.
+             */
+            in->wheel -= ev->value;
             in->pending = 1;
         }
         break;

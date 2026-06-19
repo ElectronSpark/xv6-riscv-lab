@@ -905,17 +905,18 @@ struct vfs_inode *vfs_create(struct vfs_inode *dir, uint32 mode,
         return ERR_PTR(-EINVAL); // Invalid argument
     }
     struct vfs_inode *ret_ptr = NULL;
+    struct vfs_superblock *sb = dir->sb;
 
 retry:
     // Begin transaction BEFORE acquiring any locks
-    if (dir->sb->ops->begin_transaction != NULL) {
-        int ret = dir->sb->ops->begin_transaction(dir->sb);
+    if (sb->ops->begin_transaction != NULL) {
+        int ret = sb->ops->begin_transaction(sb);
         if (ret != 0) {
             return ERR_PTR(ret);
         }
     }
 
-    vfs_superblock_wlock(dir->sb);
+    vfs_superblock_wlock(sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
@@ -936,24 +937,24 @@ retry:
     // Release all locks and transaction, yield, and retry.
     if (PTR_ERR(ret_ptr) == -EAGAIN) {
         vfs_iunlock(dir);
-        vfs_superblock_unlock(dir->sb);
-        if (dir->sb->ops->end_transaction != NULL) {
-            dir->sb->ops->end_transaction(dir->sb);
+        vfs_superblock_unlock(sb);
+        if (sb->ops->end_transaction != NULL) {
+            sb->ops->end_transaction(sb);
         }
         scheduler_yield();
         goto retry;
     }
 out:
     vfs_iunlock(dir);
-    vfs_superblock_unlock(dir->sb);
+    vfs_superblock_unlock(sb);
 
     if (!IS_ERR(ret_ptr)) {
         __vfs_dcache_bump_dir_seq(dir);
     }
 
     // End transaction AFTER releasing locks
-    if (dir->sb->ops->end_transaction != NULL) {
-        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+    if (sb->ops->end_transaction != NULL) {
+        int end_ret = sb->ops->end_transaction(sb);
         if (end_ret != 0) {
             printf(
                 "vfs_create: warning: end_transaction failed with error %d\n",
@@ -976,17 +977,18 @@ struct vfs_inode *vfs_mknod(struct vfs_inode *dir, uint32 mode, dev_t dev,
         return ERR_PTR(-EINVAL); // Invalid argument
     }
     struct vfs_inode *ret_ptr = NULL;
+    struct vfs_superblock *sb = dir->sb;
 
 retry:
     // Begin transaction BEFORE acquiring any locks
-    if (dir->sb->ops->begin_transaction != NULL) {
-        int ret = dir->sb->ops->begin_transaction(dir->sb);
+    if (sb->ops->begin_transaction != NULL) {
+        int ret = sb->ops->begin_transaction(sb);
         if (ret != 0) {
             return ERR_PTR(ret);
         }
     }
 
-    vfs_superblock_wlock(dir->sb);
+    vfs_superblock_wlock(sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
@@ -1007,24 +1009,24 @@ retry:
     // Release all locks and transaction, yield, and retry.
     if (PTR_ERR(ret_ptr) == -EAGAIN) {
         vfs_iunlock(dir);
-        vfs_superblock_unlock(dir->sb);
-        if (dir->sb->ops->end_transaction != NULL) {
-            dir->sb->ops->end_transaction(dir->sb);
+        vfs_superblock_unlock(sb);
+        if (sb->ops->end_transaction != NULL) {
+            sb->ops->end_transaction(sb);
         }
         scheduler_yield();
         goto retry;
     }
 out:
     vfs_iunlock(dir);
-    vfs_superblock_unlock(dir->sb);
+    vfs_superblock_unlock(sb);
 
     if (!IS_ERR(ret_ptr)) {
         __vfs_dcache_bump_dir_seq(dir);
     }
 
     // End transaction AFTER releasing locks
-    if (dir->sb->ops->end_transaction != NULL) {
-        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+    if (sb->ops->end_transaction != NULL) {
+        int end_ret = sb->ops->end_transaction(sb);
         if (end_ret != 0) {
             printf("vfs_mknod: warning: end_transaction failed with error %d\n",
                    end_ret);
@@ -1051,21 +1053,22 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, const char *name,
         return PTR_ERR(target);
     }
     assert(target != NULL, "vfs_link: old dentry inode is NULL");
-    if (target->sb != dir->sb) {
+    struct vfs_superblock *sb = dir->sb;
+    if (target->sb != sb) {
         vfs_iput(target);
         return -EXDEV; // Cross-device hard link not supported
     }
 
     // Begin transaction BEFORE acquiring any locks
-    if (dir->sb->ops->begin_transaction != NULL) {
-        ret = dir->sb->ops->begin_transaction(dir->sb);
+    if (sb->ops->begin_transaction != NULL) {
+        ret = sb->ops->begin_transaction(sb);
         if (ret != 0) {
             vfs_iput(target);
             return ret;
         }
     }
 
-    vfs_superblock_wlock(dir->sb);
+    vfs_superblock_wlock(sb);
     if (S_ISDIR(target->mode)) {
         ret = -EPERM; // Cannot create hard link to a directory
         goto out_unlock_sb;
@@ -1092,15 +1095,15 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, const char *name,
 out:
     vfs_iunlock_two(target, dir);
 out_unlock_sb:
-    vfs_superblock_unlock(dir->sb);
+    vfs_superblock_unlock(sb);
 
     if (ret == 0) {
         __vfs_dcache_bump_dir_seq(dir);
     }
 
     // End transaction AFTER releasing locks
-    if (dir->sb->ops->end_transaction != NULL) {
-        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+    if (sb->ops->end_transaction != NULL) {
+        int end_ret = sb->ops->end_transaction(sb);
         if (end_ret != 0) {
             printf("vfs_link: warning: end_transaction failed with error %d\n",
                    end_ret);
@@ -1134,10 +1137,11 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
 
     struct vfs_dentry dentry = {0};
     struct vfs_inode *target = NULL;
+    struct vfs_superblock *sb = dir->sb;
 
     // Begin transaction BEFORE acquiring any locks
-    if (dir->sb->ops->begin_transaction != NULL) {
-        ret = dir->sb->ops->begin_transaction(dir->sb);
+    if (sb->ops->begin_transaction != NULL) {
+        ret = sb->ops->begin_transaction(sb);
         if (ret != 0) {
             return ret;
         }
@@ -1155,7 +1159,7 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
      * used for the unlink itself, no concurrent modification can occur
      * between the two operations.
      */
-    vfs_superblock_wlock(dir->sb);
+    vfs_superblock_wlock(sb);
     vfs_ilock(dir);
 
     ret = __vfs_inode_valid(dir);
@@ -1228,15 +1232,15 @@ out:
     vfs_iunlock(target);
 out_unlock:
     vfs_iunlock(dir);
-    vfs_superblock_unlock(dir->sb);
+    vfs_superblock_unlock(sb);
 
     if (ret == 0) {
         __vfs_dcache_bump_dir_seq(dir);
     }
 
     // End transaction AFTER releasing locks
-    if (dir->sb->ops->end_transaction != NULL) {
-        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+    if (sb->ops->end_transaction != NULL) {
+        int end_ret = sb->ops->end_transaction(sb);
         if (end_ret != 0) {
             printf(
                 "vfs_unlink: warning: end_transaction failed with error %d\n",
@@ -1266,17 +1270,18 @@ struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, uint32 mode,
         return ERR_PTR(-EINVAL); // Invalid argument
     }
     struct vfs_inode *ret_ptr = NULL;
+    struct vfs_superblock *sb = dir->sb;
 
 retry:
     // Begin transaction BEFORE acquiring any locks
-    if (dir->sb->ops->begin_transaction != NULL) {
-        int ret = dir->sb->ops->begin_transaction(dir->sb);
+    if (sb->ops->begin_transaction != NULL) {
+        int ret = sb->ops->begin_transaction(sb);
         if (ret != 0) {
             return ERR_PTR(ret);
         }
     }
 
-    vfs_superblock_wlock(dir->sb);
+    vfs_superblock_wlock(sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
@@ -1297,9 +1302,9 @@ retry:
     // Release all locks and transaction, yield, and retry.
     if (PTR_ERR(ret_ptr) == -EAGAIN) {
         vfs_iunlock(dir);
-        vfs_superblock_unlock(dir->sb);
-        if (dir->sb->ops->end_transaction != NULL) {
-            dir->sb->ops->end_transaction(dir->sb);
+        vfs_superblock_unlock(sb);
+        if (sb->ops->end_transaction != NULL) {
+            sb->ops->end_transaction(sb);
         }
         scheduler_yield();
         goto retry;
@@ -1313,15 +1318,15 @@ retry:
     }
 out:
     vfs_iunlock(dir);
-    vfs_superblock_unlock(dir->sb);
+    vfs_superblock_unlock(sb);
 
     if (!IS_ERR(ret_ptr)) {
         __vfs_dcache_bump_dir_seq(dir);
     }
 
     // End transaction AFTER releasing locks
-    if (dir->sb->ops->end_transaction != NULL) {
-        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+    if (sb->ops->end_transaction != NULL) {
+        int end_ret = sb->ops->end_transaction(sb);
         if (end_ret != 0) {
             printf("vfs_mkdir: warning: end_transaction failed with error %d\n",
                    end_ret);
@@ -1400,17 +1405,18 @@ struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode,
     }
 
     struct vfs_inode *ret_ptr = NULL;
+    struct vfs_superblock *sb = dir->sb;
 
 retry:
     // Begin transaction BEFORE acquiring any locks
-    if (dir->sb->ops->begin_transaction != NULL) {
-        int ret = dir->sb->ops->begin_transaction(dir->sb);
+    if (sb->ops->begin_transaction != NULL) {
+        int ret = sb->ops->begin_transaction(sb);
         if (ret != 0) {
             return ERR_PTR(ret);
         }
     }
 
-    vfs_superblock_wlock(dir->sb);
+    vfs_superblock_wlock(sb);
     vfs_ilock(dir);
     long ret = __vfs_inode_valid(dir);
     if (ret != 0) {
@@ -1431,9 +1437,9 @@ retry:
     // Release all locks and transaction, yield, and retry.
     if (PTR_ERR(ret_ptr) == -EAGAIN) {
         vfs_iunlock(dir);
-        vfs_superblock_unlock(dir->sb);
-        if (dir->sb->ops->end_transaction != NULL) {
-            dir->sb->ops->end_transaction(dir->sb);
+        vfs_superblock_unlock(sb);
+        if (sb->ops->end_transaction != NULL) {
+            sb->ops->end_transaction(sb);
         }
         scheduler_yield();
         goto retry;
@@ -1442,15 +1448,15 @@ retry:
     // Note: symlinks don't need parent reference (no ".." traversal needed)
 out:
     vfs_iunlock(dir);
-    vfs_superblock_unlock(dir->sb);
+    vfs_superblock_unlock(sb);
 
     if (!IS_ERR(ret_ptr)) {
         __vfs_dcache_bump_dir_seq(dir);
     }
 
     // End transaction AFTER releasing locks
-    if (dir->sb->ops->end_transaction != NULL) {
-        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+    if (sb->ops->end_transaction != NULL) {
+        int end_ret = sb->ops->end_transaction(sb);
         if (end_ret != 0) {
             printf(
                 "vfs_symlink: warning: end_transaction failed with error %d\n",
