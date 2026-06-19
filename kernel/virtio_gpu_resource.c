@@ -165,6 +165,10 @@ static int virtio_gpu_resource_create_3d(struct virtio_gpu *g,
     uint32 npages;
     page_t **pages = NULL;
 
+    if (g->virgl_capset_id == 0 ||
+        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+        return -EOPNOTSUPP;
+
     if (req->width == 0 || req->height == 0)
         return -EINVAL;
     if (bytes == 0)
@@ -493,6 +497,10 @@ static int virtio_gpu_resource_create_3d_backing(struct virtio_gpu *g,
     uint32 alloc_len = PGSIZE;
     int order = 0;
     void *backing;
+
+    if (g->virgl_capset_id == 0 ||
+        !(g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL)))
+        return -EOPNOTSUPP;
 
     if (width == 0 || height == 0 || bytes == 0 ||
         bytes > 64ULL * 1024 * 1024)
