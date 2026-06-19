@@ -497,7 +497,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_WAIT_VBLANK:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
-        return gpu_drm_wait_vblank(arg);
+        return gpu_drm_wait_vblank(owner, arg);
     case DRM_IOCTL_CRTC_GET_SEQUENCE:
         if (!gpu_drm_is_primary_like(owner))
             return -EOPNOTSUPP;
@@ -1388,6 +1388,7 @@ static int gpu_fops_release(struct vfs_inode *inode, struct vfs_file *file)
         enum drm_core_node_type node_type = owner->drm.node_type;
 
         spin_lock(&fb_state.lock);
+        owner->drm_event_file = NULL;
         stale_events = gpu_drm_event_release_stale_locked(owner);
         spin_unlock(&fb_state.lock);
         drm_core_release_file(&owner->drm);
@@ -1833,6 +1834,7 @@ static int gpu_open_file_common(cdev_t *cdev, struct vfs_file *file,
     }
     file->ops = ops;
     file->private_data = owner;
+    owner->drm_event_file = file;
     gpu_drm_lifecycle_open(owner->drm.node_type);
     owner->lifecycle_live_accounted = 1;
     if (chrome_drm_ioctl_trace_enabled())

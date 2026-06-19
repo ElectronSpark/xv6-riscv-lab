@@ -1079,5 +1079,6 @@ struct fb_gpu_render_owner {
     uint32 drm_event_tail;
     uint32 drm_event_count;
     uint32 drm_event_high_water;
+    struct vfs_file *drm_event_file;
     int lifecycle_live_accounted;
 };

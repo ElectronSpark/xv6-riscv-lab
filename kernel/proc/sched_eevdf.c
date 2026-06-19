@@ -202,7 +202,7 @@ static void __update_min_vruntime(struct eevdf_rq *erq) {
     if (leftmost) {
         struct sched_entity *se =
             rb_entry(leftmost, struct sched_entity, rb_entry);
-        if (se->vruntime < vruntime) {
+        if (se->vruntime > vruntime) {
             vruntime = se->vruntime;
         }
     }

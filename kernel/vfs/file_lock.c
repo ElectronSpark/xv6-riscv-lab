@@ -284,8 +284,8 @@ int vfs_file_lock_ctl(struct vfs_file *file, pid_t owner, int cmd,
     bool getlk = cmd == F_GETLK || cmd == F_OFD_GETLK;
     bool setlkw = cmd == F_SETLKW || cmd == F_OFD_SETLKW;
 
+    spin_lock(&inode->file_lock);
     for (;;) {
-        spin_lock(&inode->file_lock);
         struct vfs_file_lock_range *conflict =
             __vfs_file_lock_find_conflict(inode, owner, normalized.l_type,
                                           start, end);

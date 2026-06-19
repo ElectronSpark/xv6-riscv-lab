@@ -404,6 +404,7 @@ static int gpu_drm_mode_page_flip(struct fb_gpu_render_owner *owner,
     {
         uint64 sequence;
         uint64 timestamp_ns;
+        int queued_event = 0;
 
         gpu_kms_sample_vblank_locked(0, &sequence, &timestamp_ns);
         fb_state.stats.kms_vblank_page_flip_events++;
@@ -419,12 +420,19 @@ static int gpu_drm_mode_page_flip(struct fb_gpu_render_owner *owner,
                                              req.user_data, sequence,
                                              GPU_DRM_CRTC_ID,
                                              timestamp_ns);
+        if (ret == 0 && (req.flags & DRM_MODE_PAGE_FLIP_EVENT) != 0)
+            queued_event = 1;
         if (ret != 0) {
             spin_unlock(&fb_state.lock);
             return ret;
         }
         fb_state.current_kms_fb_id = req.fb_id;
         fb_state.stats.kms_page_flips++;
+        if (queued_event) {
+            spin_unlock(&fb_state.lock);
+            gpu_drm_event_notify_read(owner);
+            return 0;
+        }
     }
     spin_unlock(&fb_state.lock);
     return 0;
