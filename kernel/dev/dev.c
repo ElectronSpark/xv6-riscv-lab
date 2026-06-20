@@ -108,7 +108,8 @@ static bool __dev_type_validate(dev_type_e type) {
 // For writers (alloc=true): must hold __dev_tab_spinlock
 // For readers (alloc=false): must be in RCU read-side critical section
 static int __dev_slot_get(int major, int minor, device_major_t ***ret_major,
-                          int *ret_minor, device_t ***ret_dev, bool alloc) {
+                          int *ret_minor, device_t ***ret_dev, bool alloc,
+                          bool explicit_minor_zero) {
     if (alloc) {
         __dev_tab_assert_held();
     }
@@ -137,8 +138,9 @@ static int __dev_slot_get(int major, int minor, device_major_t ***ret_major,
         rcu_assign_pointer(__dev_table[major], dmajor);
     }
 
-    // If minor is 0, return the slot with the lowest minor number
-    if (minor == 0) {
+    // Historically minor 0 requested auto-allocation.  Linux ABI devices can
+    // opt in to a real minor 0 with DEV_FLAG_EXPLICIT_MINOR_ZERO.
+    if (minor == 0 && !explicit_minor_zero) {
         if (!alloc) {
             return -EINVAL; // Minor number 0 is invalid for lookup
         }
@@ -187,7 +189,8 @@ static void __device_unregister(device_t *dev) {
     device_t **dev_slot = NULL;
     device_major_t **dmajor_slot = NULL;
     int ret = __dev_slot_get(dev->major, dev->minor, &dmajor_slot, NULL,
-                             &dev_slot, true);
+                             &dev_slot, true,
+                             (dev->flags & DEV_FLAG_EXPLICIT_MINOR_ZERO) != 0);
     if (ret != 0) {
         // Device already removed from table
         __dev_tab_unlock();
@@ -230,7 +233,7 @@ device_t *device_get(int major, int minor) {
     rcu_read_lock();
 
     // Validate parameters first
-    if (major <= 0 || major >= MAX_MAJOR_DEVICES || minor <= 0 ||
+    if (major <= 0 || major >= MAX_MAJOR_DEVICES || minor < 0 ||
         minor >= MAX_MINOR_DEVICES) {
         rcu_read_unlock();
         return ERR_PTR(-EINVAL);
@@ -309,7 +312,8 @@ int device_register(device_t *dev) {
     int ret_minor = 0;
 
     int ret = __dev_slot_get(dev->major, dev->minor, &dmajor_slot, &ret_minor,
-                             &dev_slot, true);
+                             &dev_slot, true,
+                             (dev->flags & DEV_FLAG_EXPLICIT_MINOR_ZERO) != 0);
     if (ret != 0) {
         __dev_tab_unlock();
         return ret;

@@ -27,6 +27,7 @@ static cdev_t gpu_primary_cdev = {
     .dev = {
         .major = DRM_PRIMARY_MAJOR,
         .minor = DRM_PRIMARY_MINOR,
+        .flags = DEV_FLAG_EXPLICIT_MINOR_ZERO,
         .devname = "dri/card0",
         .devmode = S_IFCHR | 0666,
     },

@@ -1660,6 +1660,7 @@ static char *procfs_gen_filesystems(void)
         return ERR_PTR(-ENOMEM);
     snprintf(buf, PROCFS_BUF_SIZE,
              "nodev\tproc\n"
+             "nodev\tsysfs\n"
              "nodev\ttmpfs\n"
              "\text4\n");
     return buf;
@@ -1675,6 +1676,7 @@ static char *procfs_gen_mounts(void)
              "devtmpfs /dev devtmpfs rw,nosuid 0 0\n"
              "tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0\n"
              "proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0\n"
+             "sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0\n"
              "tmpfs /tmp tmpfs rw,nosuid,nodev 0 0\n");
     return buf;
 }
@@ -1696,7 +1698,8 @@ static char *procfs_gen_mountinfo(void)
              "22 21 0:2 / /dev rw,nosuid - devtmpfs devtmpfs rw\n"
              "23 22 0:5 / /dev/shm rw,nosuid,nodev - tmpfs tmpfs rw\n"
              "24 21 0:3 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw\n"
-             "25 21 0:4 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw\n");
+             "25 21 0:6 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw\n"
+             "26 21 0:4 / /tmp rw,nosuid,nodev - tmpfs tmpfs rw\n");
     return buf;
 }
 

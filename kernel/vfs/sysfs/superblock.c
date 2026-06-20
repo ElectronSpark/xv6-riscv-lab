@@ -105,6 +105,7 @@ static int sysfs_decode_device_attr(uint64 ino, uint64 base,
     case 7: attr = SYSFS_ATTR_MODALIAS; break;
     case 8: attr = SYSFS_ATTR_CLASS; break;
     case 9: attr = SYSFS_ATTR_DRIVER_LINK; break;
+    case 10: attr = SYSFS_ATTR_BOOT_VGA; break;
     default: return -ENOENT;
     }
 

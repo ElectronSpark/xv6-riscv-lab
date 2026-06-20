@@ -1,4 +1,6 @@
 
+int snprintf(char *buf, size_t size, const char *fmt, ...);
+
 static int gpu_drm_is_primary_like(struct fb_gpu_render_owner *owner)
 {
     return owner != NULL && drm_core_is_primary_like(&owner->drm);
@@ -28,6 +30,18 @@ static int gpu_copyout_string(uint64 dst, uint64 *len, const char *src)
             return -EFAULT;
     }
     return 0;
+}
+
+static void gpu_virtio_pci_unique(char unique[32])
+{
+    struct virtio_pci_discovery *vd = pci_get_virtio_gpu(0);
+
+    if (vd != NULL && vd->found) {
+        snprintf(unique, 32, "pci:0000:%02x:%02x.%u", vd->bus, vd->dev,
+                 vd->func & 0x7);
+        return;
+    }
+    snprintf(unique, 32, "pci:0000:00:04.0");
 }
 
 static int gpu_user_debug_name(uint64 user_ptr, char name[64])
@@ -570,10 +584,16 @@ static int gpu_drm_get_unique(uint64 arg)
             return -EFAULT;
         return 0;
     }
-    if (gpu_copyout_string(req.unique, &req.unique_len,
-                           backend.backend == FB_GPU_BACKEND_HYPERV_DXG ?
-                               "vmbus:hyperv-dxg" : "pci:0000:00:04.0") != 0)
-        return -EFAULT;
+    if (backend.backend == FB_GPU_BACKEND_HYPERV_DXG) {
+        if (gpu_copyout_string(req.unique, &req.unique_len,
+                               "vmbus:hyperv-dxg") != 0)
+            return -EFAULT;
+    } else {
+        gpu_virtio_pci_unique(pci_unique);
+        if (gpu_copyout_string(req.unique, &req.unique_len,
+                               pci_unique) != 0)
+            return -EFAULT;
+    }
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;

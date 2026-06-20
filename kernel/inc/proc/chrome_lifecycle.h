@@ -43,7 +43,9 @@ static inline int chrome_lifecycle_string_match(const char *value)
         return 0;
     return strncmp(value, "chrome", 6) == 0 ||
            strstr(value, "chromium") != NULL ||
-           strstr(value, "wayland-chromium") != NULL;
+           strstr(value, "wayland-chromium") != NULL ||
+           strstr(value, "webkit") != NULL ||
+           strstr(value, "WebKit") != NULL;
 }
 
 static inline int chrome_lifecycle_thread_match(struct thread *p)

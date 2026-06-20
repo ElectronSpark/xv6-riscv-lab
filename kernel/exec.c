@@ -126,6 +126,14 @@ static void chrome_exec_phase_trace(const char *path, const char *phase,
 #define AT_VECTOR_SIZE 20
 
 /*
+ * Linux GUI launchers can legitimately carry more argv/env entries than the
+ * original xv6 teaching limits.  Keep the wider exec input capacity local to
+ * exec so procfs snapshots and thread-group state do not grow with it.
+ */
+#define EXEC_MAXARG 128
+#define EXEC_MAXENV 256
+
+/*
  * Keep the initial exec stack payload away from the bottom edge of the stack
  * VMA. Some dynamic loaders probe one byte before argv/env strings; if exec
  * places a string at the exact low edge, that benign probe becomes SEGV_MAPERR.
@@ -415,10 +423,11 @@ int exec(char *path, char **argv, char **envp) {
     /*
      * ustack layout (Linux ELF convention):
      *   argc, argv[0..argc-1], NULL, envp[0..envc-1], NULL, auxv[], AT_NULL
-     * We size the array generously: MAXARG + MAXENV + auxv pairs + terminators.
+     * We size the array generously: exec input vectors + auxv pairs +
+     * terminators.
      */
     uint64 argc, envc, sp;
-    uint64 ustack[MAXARG + MAXENV + AT_VECTOR_SIZE * 2 + 8];
+    uint64 ustack[EXEC_MAXARG + EXEC_MAXENV + AT_VECTOR_SIZE * 2 + 8];
     uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
     uint64 stackfloor = stackbase + EXEC_STACK_BOTTOM_SLACK;
     struct elfhdr elf;
@@ -726,7 +735,7 @@ int exec(char *path, char **argv, char **envp) {
 
     // Count argument strings before placing the Linux-style argv/env block.
     for (argc = 0; argv[argc]; argc++) {
-        if (argc >= MAXARG)
+        if (argc >= EXEC_MAXARG)
         {
             goto bad;
         }
@@ -735,7 +744,7 @@ int exec(char *path, char **argv, char **envp) {
     envc = 0;
     if (envp) {
         for (envc = 0; envp[envc]; envc++) {
-            if (envc >= MAXENV)
+            if (envc >= EXEC_MAXENV)
             {
                 goto bad;
             }
@@ -760,8 +769,10 @@ int exec(char *path, char **argv, char **envp) {
             goto bad;
         }
         ustack[argc + 2 + i] = sp;
-        snapshot_environ_addrs[i] = sp;
-        snapshot_environ_lens[i] = len;
+        if (i < MAXENV) {
+            snapshot_environ_addrs[i] = sp;
+            snapshot_environ_lens[i] = len;
+        }
     }
 
     // Push argument strings onto the stack.
@@ -776,8 +787,10 @@ int exec(char *path, char **argv, char **envp) {
             goto bad;
         }
         ustack[i] = sp;
-        snapshot_cmdline_addrs[i] = sp;
-        snapshot_cmdline_lens[i] = len;
+        if (i < MAXARG) {
+            snapshot_cmdline_addrs[i] = sp;
+            snapshot_cmdline_lens[i] = len;
+        }
     }
     chrome_exec_phase_trace(path, "copy-argv-env", exec_start,
                             &exec_phase_last);
@@ -1127,7 +1140,7 @@ static void exec_resolve_current_proc_exe(char *path, size_t size)
 }
 
 uint64 sys_exec(void) {
-    char path[MAXPATH], *argv[MAXARG], *envp[MAXENV];
+    char path[MAXPATH], *argv[EXEC_MAXARG + 1], *envp[EXEC_MAXENV + 1];
     int i;
     uint64 uargv, uarg, uenvp, uenv;
 
@@ -1140,7 +1153,7 @@ uint64 sys_exec(void) {
     memset(argv, 0, sizeof(argv));
     memset(envp, 0, sizeof(envp));
     for (i = 0;; i++) {
-        if (i >= NELEM(argv)) {
+        if (i >= NELEM(argv) - 1) {
             goto bad;
         }
         if (fetchaddr(uargv + sizeof(uint64) * i, (uint64 *)&uarg) < 0) {
@@ -1161,8 +1174,8 @@ uint64 sys_exec(void) {
     int envc = 0;
     if (uenvp != 0) {
         for (i = 0;; i++) {
-            if (i >= NELEM(envp)) {
-                break; // too many env vars, just truncate
+            if (i >= NELEM(envp) - 1) {
+                goto bad;
             }
             if (fetchaddr(uenvp + sizeof(uint64) * i, (uint64 *)&uenv) < 0) {
                 break; // invalid pointer, treat as no envp
@@ -1217,7 +1230,7 @@ static int exec_copy_user_strings(uint64 uvec, char **strings, int limit,
         return 0;
 
     for (int i = 0;; i++) {
-        if (i >= limit)
+        if (i >= limit - 1)
             return strict ? -E2BIG : 0;
         if (fetchaddr(uvec + sizeof(uint64) * i, &ustr) < 0)
             return strict ? -EFAULT : 0;
@@ -1262,7 +1275,7 @@ uint64 sys_execveat(void)
     int dirfd, flags;
     uint64 uargv, uenvp;
     char path[MAXPATH], exec_path[MAXPATH];
-    char *argv[MAXARG], *envp[MAXENV];
+    char *argv[EXEC_MAXARG + 1], *envp[EXEC_MAXENV + 1];
     int ret = -EINVAL;
 
     argint(0, &dirfd);

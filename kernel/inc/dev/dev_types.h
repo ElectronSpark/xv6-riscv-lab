@@ -38,11 +38,14 @@ typedef struct device_ops {
 
 typedef enum { DEV_TYPE_UNKNOWN = 0, DEV_TYPE_BLOCK, DEV_TYPE_CHAR } dev_type_e;
 
+#define DEV_FLAG_EXPLICIT_MINOR_ZERO 0x1
+
 typedef struct device_instance {
     struct kobject kobj;
     int major;         // Major device number
     int minor;         // Minor device number
     dev_type_e type;   // Device type (block, char, etc.)
+    uint32 flags;      // DEV_FLAG_* registration semantics
     int unregistering; // Set to 1 when device is being unregistered
     device_ops_t ops;
 

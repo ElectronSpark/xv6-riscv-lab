@@ -13,6 +13,7 @@
 #include "vfs/file.h"
 #include "../vfs_private.h"
 #include <mm/vm.h>
+#include <dev/pci.h>
 #include "smp/percpu.h"
 #include "sysfs_private.h"
 
@@ -50,16 +51,8 @@ static const struct sysfs_entry bus_pci_entries[] = {
     {"drivers", SYSFS_INO_BUS_PCI_DRIVERS},
 };
 
-static const struct sysfs_entry bus_pci_devices_entries[] = {
-    {"0000:00:04.0", SYSFS_INO_BUS_PCI_DEVICE_LINK},
-};
-
 static const struct sysfs_entry bus_pci_drivers_entries[] = {
     {"virtio-pci", SYSFS_INO_BUS_PCI_DRIVER_VIRTIO},
-};
-
-static const struct sysfs_entry bus_pci_driver_entries[] = {
-    {"0000:00:04.0", SYSFS_INO_BUS_PCI_DRIVER_DEVICE_LINK},
 };
 
 static const struct sysfs_entry class_entries[] = {
@@ -82,6 +75,7 @@ static const struct sysfs_entry device_entries[] = {
     {"modalias", 0},
     {"class", 0},
     {"driver", 0},
+    {"boot_vga", 0},
     {"drm", 0},
 };
 
@@ -95,10 +89,6 @@ static const struct sysfs_entry class_node_entries[] = {
 static const struct sysfs_entry devices_entries[] = {
     {"pci0000:00", SYSFS_INO_DEVICES_PCI_ROOT},
     {"system", SYSFS_INO_DEVICES_SYSTEM},
-};
-
-static const struct sysfs_entry pci_root_entries[] = {
-    {"0000:00:04.0", SYSFS_INO_PCI_DEVICE},
 };
 
 static const struct sysfs_entry system_entries[] = {
@@ -126,6 +116,50 @@ static int sysfs_lookup_static(const struct sysfs_entry *entries, int nentries,
             *ino = entries[i].ino;
             return 0;
         }
+    }
+    return -ENOENT;
+}
+
+static void sysfs_gpu_pci_bdf(char *buf, size_t size)
+{
+    struct virtio_pci_discovery *vd = pci_get_virtio_gpu(0);
+
+    if (vd != NULL && vd->found) {
+        snprintf(buf, size, "0000:%02x:%02x.%u", vd->bus, vd->dev,
+                 vd->func & 0x7);
+        return;
+    }
+    snprintf(buf, size, "0000:00:04.0");
+}
+
+static uint32 sysfs_gpu_pci_class_code(void)
+{
+    struct virtio_pci_discovery *vd = pci_get_virtio_gpu(0);
+
+    if (vd != NULL && vd->found && vd->class_code != 0)
+        return vd->class_code & 0xffffffU;
+    return 0x030000U;
+}
+
+static void sysfs_gpu_pci_path(char *buf, size_t size)
+{
+    char bdf[16];
+
+    sysfs_gpu_pci_bdf(bdf, sizeof(bdf));
+    snprintf(buf, size, "/sys/devices/pci0000:00/%s", bdf);
+}
+
+static int sysfs_lookup_gpu_pci_bdf(const char *name, size_t name_len,
+                                    uint64 ino, uint64 *out_ino)
+{
+    char bdf[16];
+    size_t len;
+
+    sysfs_gpu_pci_bdf(bdf, sizeof(bdf));
+    len = strlen(bdf);
+    if (len == name_len && memcmp(name, bdf, len) == 0) {
+        *out_ino = ino;
+        return 0;
     }
     return -ENOENT;
 }
@@ -306,9 +340,9 @@ static int sysfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             break;
         return -ENOENT;
     case SYSFS_INO_BUS_PCI_DEVICES:
-        if (sysfs_lookup_static(bus_pci_devices_entries,
-                                NELEM(bus_pci_devices_entries), name,
-                                name_len, &ino) == 0)
+        if (sysfs_lookup_gpu_pci_bdf(name, name_len,
+                                     SYSFS_INO_BUS_PCI_DEVICE_LINK,
+                                     &ino) == 0)
             break;
         return -ENOENT;
     case SYSFS_INO_BUS_PCI_DRIVERS:
@@ -318,9 +352,9 @@ static int sysfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             break;
         return -ENOENT;
     case SYSFS_INO_BUS_PCI_DRIVER_VIRTIO:
-        if (sysfs_lookup_static(bus_pci_driver_entries,
-                                NELEM(bus_pci_driver_entries), name,
-                                name_len, &ino) == 0)
+        if (sysfs_lookup_gpu_pci_bdf(name, name_len,
+                                     SYSFS_INO_BUS_PCI_DRIVER_DEVICE_LINK,
+                                     &ino) == 0)
             break;
         return -ENOENT;
     case SYSFS_INO_CLASS:
@@ -351,8 +385,8 @@ static int sysfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             break;
         return -ENOENT;
     case SYSFS_INO_DEVICES_PCI_ROOT:
-        if (sysfs_lookup_static(pci_root_entries, NELEM(pci_root_entries),
-                                name, name_len, &ino) == 0)
+        if (sysfs_lookup_gpu_pci_bdf(name, name_len, SYSFS_INO_PCI_DEVICE,
+                                     &ino) == 0)
             break;
         return -ENOENT;
     case SYSFS_INO_DEVICES_SYSTEM:
@@ -522,14 +556,23 @@ static int sysfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         return sysfs_emit_static(iter, ret, bus_pci_entries,
                                  NELEM(bus_pci_entries), child_idx);
     case SYSFS_INO_BUS_PCI_DEVICES:
-        return sysfs_emit_static(iter, ret, bus_pci_devices_entries,
-                                 NELEM(bus_pci_devices_entries), child_idx);
+        if (child_idx == 0) {
+            char bdf[16];
+            sysfs_gpu_pci_bdf(bdf, sizeof(bdf));
+            return sysfs_emit(iter, ret, bdf, SYSFS_INO_BUS_PCI_DEVICE_LINK);
+        }
+        return sysfs_emit_static(iter, ret, NULL, 0, 0);
     case SYSFS_INO_BUS_PCI_DRIVERS:
         return sysfs_emit_static(iter, ret, bus_pci_drivers_entries,
                                  NELEM(bus_pci_drivers_entries), child_idx);
     case SYSFS_INO_BUS_PCI_DRIVER_VIRTIO:
-        return sysfs_emit_static(iter, ret, bus_pci_driver_entries,
-                                 NELEM(bus_pci_driver_entries), child_idx);
+        if (child_idx == 0) {
+            char bdf[16];
+            sysfs_gpu_pci_bdf(bdf, sizeof(bdf));
+            return sysfs_emit(iter, ret, bdf,
+                              SYSFS_INO_BUS_PCI_DRIVER_DEVICE_LINK);
+        }
+        return sysfs_emit_static(iter, ret, NULL, 0, 0);
     case SYSFS_INO_CLASS:
         return sysfs_emit_static(iter, ret, class_entries,
                                  NELEM(class_entries), child_idx);
@@ -549,8 +592,12 @@ static int sysfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         return sysfs_emit_static(iter, ret, devices_entries,
                                  NELEM(devices_entries), child_idx);
     case SYSFS_INO_DEVICES_PCI_ROOT:
-        return sysfs_emit_static(iter, ret, pci_root_entries,
-                                 NELEM(pci_root_entries), child_idx);
+        if (child_idx == 0) {
+            char bdf[16];
+            sysfs_gpu_pci_bdf(bdf, sizeof(bdf));
+            return sysfs_emit(iter, ret, bdf, SYSFS_INO_PCI_DEVICE);
+        }
+        return sysfs_emit_static(iter, ret, NULL, 0, 0);
     case SYSFS_INO_DEVICES_SYSTEM:
         return sysfs_emit_static(iter, ret, system_entries,
                                  NELEM(system_entries), child_idx);
@@ -620,7 +667,8 @@ static ssize_t sysfs_readlink(struct vfs_inode *inode, char *buf,
         target = "/sys/bus/pci/drivers/virtio-pci";
     } else if (inode->ino == SYSFS_INO_BUS_PCI_DEVICE_LINK ||
                inode->ino == SYSFS_INO_BUS_PCI_DRIVER_DEVICE_LINK) {
-        target = "/sys/devices/pci0000:00/0000:00:04.0";
+        sysfs_gpu_pci_path(local, sizeof(local));
+        target = local;
     } else {
         return -EINVAL;
     }
@@ -676,25 +724,48 @@ static char *sysfs_gen_file(struct sysfs_inode *si)
         n = snprintf(buf, 512, "%s\n", devnum);
         break;
     case SYSFS_ATTR_UEVENT:
+    {
+        char bdf[16];
+        uint32 class_code;
+
+        sysfs_gpu_pci_bdf(bdf, sizeof(bdf));
+        class_code = sysfs_gpu_pci_class_code();
         n = snprintf(buf, 512,
                      "DRIVER=virtio-pci\n"
-                     "PCI_CLASS=30000\n"
+                     "PCI_CLASS=%lX\n"
                      "PCI_ID=1AF4:1050\n"
                      "PCI_SUBSYS_ID=1AF4:1100\n"
-                     "PCI_SLOT_NAME=0000:00:04.0\n"
-                     "MODALIAS=pci:v00001AF4d00001050sv00001AF4sd00001100bc03sc00i00\n"
+                     "PCI_SLOT_NAME=%s\n"
+                     "MODALIAS=pci:v00001AF4d00001050sv00001AF4sd00001100bc%02lXsc%02lXi%02lX\n"
                      "DEVNAME=dri/%s\n"
                      "MAJOR=226\n"
                      "MINOR=%s\n",
+                     (uint64)class_code,
+                     bdf,
+                     (uint64)((class_code >> 16) & 0xffU),
+                     (uint64)((class_code >> 8) & 0xffU),
+                     (uint64)(class_code & 0xffU),
                      node,
                      si->dev_kind == SYSFS_DEV_DRM_RENDER ? "128" : "0");
         break;
+    }
     case SYSFS_ATTR_MODALIAS:
+    {
+        uint32 class_code = sysfs_gpu_pci_class_code();
+
         n = snprintf(buf, 512,
-                     "pci:v00001AF4d00001050sv00001AF4sd00001100bc03sc00i00\n");
+                     "pci:v00001AF4d00001050sv00001AF4sd00001100bc%02lXsc%02lXi%02lX\n",
+                     (uint64)((class_code >> 16) & 0xffU),
+                     (uint64)((class_code >> 8) & 0xffU),
+                     (uint64)(class_code & 0xffU));
         break;
+    }
     case SYSFS_ATTR_CLASS:
-        n = snprintf(buf, 512, "0x030000\n");
+        n = snprintf(buf, 512, "0x%06lX\n",
+                     (uint64)sysfs_gpu_pci_class_code());
+        break;
+    case SYSFS_ATTR_BOOT_VGA:
+        n = snprintf(buf, 512, "1\n");
         break;
     case SYSFS_ATTR_CPU_ONLINE:
     case SYSFS_ATTR_CPU_PRESENT:
