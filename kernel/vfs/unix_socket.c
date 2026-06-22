@@ -10,7 +10,8 @@
  *   - Reading from a socket reads from peer->tx (the peer's transmit buffer).
  *   - Writing to a socket writes to our own tx (which the peer reads).
  *   - For socketpair, two sockets are created and cross-linked.
- *   - Bind uses an abstract namespace stored in-kernel (no filesystem backing).
+ *   - Bind uses an in-kernel registry for lookup; pathname sockets also create
+ *     a visible S_IFSOCK filesystem node like Linux.
  *   - Listen/accept uses a pending-connection queue.
  */
 
@@ -25,20 +26,24 @@
 #include "proc/thread.h"
 #include "lock/mutex_types.h"
 #include "vfs/unix_socket.h"
+#include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs/vfs_types.h"
 #include "vfs/fcntl.h"
 #include "vfs/poll.h"
+#include "vfs/stat.h"
 #include "cmdline.h"
 #include "kqueue_types.h"
 #include <mm/vm.h>
 #include "mm/slab.h"
+#include "proc/cred.h"
 #include "proc/sched.h"
 #include "signal.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
 extern void argaddr(int n, uint64 *ip);
+int snprintf(char *buf, size_t size, const char *fmt, ...);
 
 /* ========================================================================== */
 /* Slab cache                                                                 */
@@ -46,6 +51,7 @@ extern void argaddr(int n, uint64 *ip);
 
 static slab_cache_t __unix_sock_cache = {0};
 static slab_cache_t __unix_pending_cache = {0};
+static uint64 unix_next_proc_ino = 1;
 
 /* ========================================================================== */
 /* Global bind registry — simple linked list of bound sockets                 */
@@ -76,6 +82,8 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
 static int unix_file_release(struct vfs_inode *inode, struct vfs_file *file);
 static int unix_file_poll(struct vfs_file *file, short events);
 static int unix_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg);
+static ssize_t unix_file_readlink(struct vfs_file *file, char *buf,
+                                  size_t buflen);
 
 /* ========================================================================== */
 /* File operations                                                            */
@@ -90,6 +98,7 @@ struct vfs_file_ops unix_socket_file_ops = {
     .fflush  = NULL,
     .poll    = unix_file_poll,
     .ioctl   = unix_file_ioctl,
+    .readlink = unix_file_readlink,
     .fault   = NULL,
 };
 
@@ -542,6 +551,8 @@ static struct unix_sock *unix_sock_alloc(void)
     }
     memset(sk->packet_queue, 0, sizeof(*sk->packet_queue) * UNIX_PACKET_QUEUE_MAX);
     spin_init(&sk->lock, "unix_sock");
+    sk->proc_ino = __atomic_fetch_add(&unix_next_proc_ino, 1,
+                                      __ATOMIC_RELAXED);
     sk->refcount = 1;
     tq_init(&sk->rd_queue, "unix_rd", NULL);
     tq_init(&sk->wr_queue, "unix_wr", NULL);
@@ -615,6 +626,104 @@ void unix_sock_put_ref(struct unix_sock *sk)
 {
     if (sk != NULL)
         unix_sock_put(sk);
+}
+
+static int unix_wayland_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_wayland_unix_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int unix_wayland_path_locked(const struct unix_sock *sk)
+{
+    return sk != NULL && sk->bind_len != 0 &&
+        strstr(sk->bind_path, "wayland-0") != NULL;
+}
+
+static int unix_wayland_socket_matches(struct unix_sock *sk)
+{
+    struct unix_sock *peer = NULL;
+    int matched = 0;
+
+    if (sk == NULL)
+        return 0;
+
+    spin_lock(&sk->lock);
+    matched = unix_wayland_path_locked(sk);
+    peer = sk->peer;
+    if (peer != NULL)
+        unix_sock_get(peer);
+    spin_unlock(&sk->lock);
+
+    if (!matched && peer != NULL) {
+        spin_lock(&peer->lock);
+        matched = unix_wayland_path_locked(peer);
+        spin_unlock(&peer->lock);
+    }
+    if (peer != NULL)
+        unix_sock_put(peer);
+    return matched;
+}
+
+static void unix_wayland_trace(const char *op, struct unix_sock *sk,
+                               long value, long extra)
+{
+    struct unix_sock *peer = NULL;
+    int state, type, pending, flags, bound;
+    uint tx_read, tx_write;
+    char path[UNIX_PATH_MAX];
+    int peer_state = -1;
+    uint peer_tx_read = 0, peer_tx_write = 0;
+
+    if (!unix_wayland_trace_enabled() || !unix_wayland_socket_matches(sk))
+        return;
+
+    memset(path, 0, sizeof(path));
+    spin_lock(&sk->lock);
+    state = sk->state;
+    type = sk->type;
+    pending = sk->pending_count;
+    flags = sk->shutdown_flags;
+    bound = sk->bound;
+    tx_read = sk->tx.nread;
+    tx_write = sk->tx.nwrite;
+    if (sk->bind_len != 0)
+        memmove(path, sk->bind_path, sk->bind_len);
+    peer = sk->peer;
+    if (peer != NULL)
+        unix_sock_get(peer);
+    spin_unlock(&sk->lock);
+
+    if (peer != NULL) {
+        spin_lock(&peer->lock);
+        peer_state = peer->state;
+        peer_tx_read = peer->tx.nread;
+        peer_tx_write = peer->tx.nwrite;
+        if (path[0] == '\0' && peer->bind_len != 0)
+            memmove(path, peer->bind_path, peer->bind_len);
+        spin_unlock(&peer->lock);
+    }
+
+    printf("kde-wayland-unix: pid=%d name=%s op=%s sk=%p peer=%p "
+           "state=%d peer_state=%d type=%d bound=%d pending=%d flags=0x%x "
+           "tx=%u/%u peer_tx=%u/%u value=%ld extra=%ld path=%s\n",
+           current ? current->pid : -1,
+           current ? current->name : "(none)",
+           op, sk, peer, state, peer_state, type, bound, pending, flags,
+           tx_read, tx_write, peer_tx_read, peer_tx_write, value, extra,
+           path[0] != '\0' ? path : "(anonymous)");
+
+    if (peer != NULL)
+        unix_sock_put(peer);
 }
 
 static inline struct unix_sock *unix_sock_ref_peer_locked(struct unix_sock *sk)
@@ -838,6 +947,90 @@ static int bind_register(const char *path, size_t path_len, struct unix_sock *sk
     bind_list_head = e;
     spin_unlock(&bind_list_lock);
     return 0;
+}
+
+static int unix_bind_is_pathname(const char *path, size_t path_len)
+{
+    return path_len != 0 && path[0] != '\0';
+}
+
+static int unix_pathname_mknod(const char *path, size_t bind_len)
+{
+    if (!unix_bind_is_pathname(path, bind_len))
+        return 0;
+
+    /*
+     * unix_addr_len includes the trailing NUL for pathname sockets.  VFS path
+     * helpers take an explicit byte length without that terminator.
+     */
+    size_t path_len = bind_len - 1;
+    if (path_len == 0)
+        return -EINVAL;
+
+    char *name = kvmalloc(VFS_USER_PATH_MAX);
+    if (name == NULL)
+        return -ENOMEM;
+
+    struct vfs_inode *parent =
+        vfs_nameiparent(path, path_len, name, VFS_USER_PATH_MAX);
+    if (IS_ERR(parent)) {
+        int ret = (int)PTR_ERR(parent);
+        kvfree(name);
+        return ret;
+    }
+    if (parent == NULL) {
+        kvfree(name);
+        return -ENOENT;
+    }
+
+    size_t name_len = strlen(name);
+    if (name_len == 0) {
+        vfs_iput(parent);
+        kvfree(name);
+        return -EINVAL;
+    }
+
+    mode_t mode = S_IFSOCK | (0777 & ~current_umask());
+    struct vfs_inode *inode = vfs_mknod(parent, mode, 0, name, name_len);
+    vfs_iput(parent);
+    kvfree(name);
+
+    if (IS_ERR(inode)) {
+        int ret = (int)PTR_ERR(inode);
+        if (ret == -EEXIST)
+            return -EADDRINUSE;
+        return ret;
+    }
+
+    vfs_iput(inode);
+    return 0;
+}
+
+static void unix_pathname_unlink_created(const char *path, size_t bind_len)
+{
+    if (!unix_bind_is_pathname(path, bind_len))
+        return;
+
+    size_t path_len = bind_len - 1;
+    if (path_len == 0)
+        return;
+
+    char *name = kvmalloc(VFS_USER_PATH_MAX);
+    if (name == NULL)
+        return;
+
+    struct vfs_inode *parent =
+        vfs_nameiparent(path, path_len, name, VFS_USER_PATH_MAX);
+    if (IS_ERR_OR_NULL(parent)) {
+        kvfree(name);
+        return;
+    }
+
+    size_t name_len = strlen(name);
+    if (name_len != 0)
+        (void)vfs_unlink(parent, name, name_len);
+    vfs_iput(parent);
+    kvfree(name);
 }
 
 static void bind_unregister(const char *path, size_t path_len)
@@ -1122,6 +1315,8 @@ static ssize_t unix_file_read_common(struct vfs_file *file, char *buf,
             vfs_file_knote_notify(peer_rd_file, EVFILT_WRITE, 0);
             vfs_fput(peer_rd_file);
         }
+        if (got > 0)
+            unix_wayland_trace("read", sk, (long)got, (long)(total + got));
 
         if (got == 0) {
             /* No data available */
@@ -1148,6 +1343,8 @@ static ssize_t unix_file_read_common(struct vfs_file *file, char *buf,
             if (nonblock) {
                 unix_seqpacket_trace("read-eagain", sk, peer, count, 0,
                                      sk->state, sk->shutdown_flags);
+                unix_wayland_trace("read-eagain", sk, (long)count,
+                                   (long)total);
                 unix_sock_put(peer);
                 ssize_t ret = total > 0 ? total : -EAGAIN;
                 return ret;
@@ -1162,6 +1359,7 @@ static ssize_t unix_file_read_common(struct vfs_file *file, char *buf,
             /* Sleep waiting for data */
             unix_seqpacket_trace("read-wait", sk, peer, count, 0,
                                  sk->state, sk->shutdown_flags);
+            unix_wayland_trace("read-wait", sk, (long)count, (long)total);
             unix_sock_put(peer);
             spin_lock(&sk->lock);
             tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
@@ -1375,6 +1573,7 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
         unix_sock_put(packet_peer);
     }
 
+    unix_wayland_trace("write", sk, (long)total, (long)count);
     return total;
 }
 
@@ -1548,6 +1747,17 @@ static int unix_file_release(struct vfs_inode *inode, struct vfs_file *file)
     return 0;
 }
 
+static ssize_t unix_file_readlink(struct vfs_file *file, char *buf,
+                                  size_t buflen)
+{
+    struct unix_sock *sk =
+        file ? (struct unix_sock *)file->private_data : NULL;
+    uint64 ino = sk != NULL ? sk->proc_ino : 0;
+
+    return snprintf(buf, buflen, "socket:[%llu]",
+                    (unsigned long long)ino);
+}
+
 /*
  * unix_file_poll - check socket readiness for I/O
  */
@@ -1574,6 +1784,9 @@ static int unix_file_poll(struct vfs_file *file, short events)
         if ((events & (POLLIN | POLLRDNORM)) && sk->pending_count > 0)
             revents |= (events & (POLLIN | POLLRDNORM));
         spin_unlock(&sk->lock);
+        if (revents != 0)
+            unix_wayland_trace("poll-ready-listen", sk, (long)events,
+                               (long)revents);
         return revents;
     }
 
@@ -1674,6 +1887,8 @@ static int unix_file_poll(struct vfs_file *file, short events)
     }
     if (peer != NULL)
         unix_sock_put(peer);
+    if (revents != 0)
+        unix_wayland_trace("poll-ready", sk, (long)events, (long)revents);
     return revents;
 }
 
@@ -1811,10 +2026,23 @@ int unix_sock_bind(int fd, uint64 uaddr, int addrlen)
         spin_unlock(&sk->lock);
         return -EINVAL;
     }
+    spin_unlock(&sk->lock);
 
-    int ret = bind_register(sa.sun_path, path_len, sk);
+    int ret = unix_pathname_mknod(sa.sun_path, path_len);
+    if (ret < 0)
+        return ret;
+
+    spin_lock(&sk->lock);
+    if (sk->bound) {
+        spin_unlock(&sk->lock);
+        unix_pathname_unlink_created(sa.sun_path, path_len);
+        return -EINVAL;
+    }
+
+    ret = bind_register(sa.sun_path, path_len, sk);
     if (ret < 0) {
         spin_unlock(&sk->lock);
+        unix_pathname_unlink_created(sa.sun_path, path_len);
         return ret;
     }
 
@@ -1826,6 +2054,7 @@ int unix_sock_bind(int fd, uint64 uaddr, int addrlen)
     if (sk->state == UNIX_STATE_UNCONNECTED)
         sk->state = UNIX_STATE_BOUND;
     spin_unlock(&sk->lock);
+    unix_wayland_trace("bind", sk, (long)fd, (long)path_len);
     return 0;
 }
 
@@ -1854,6 +2083,7 @@ int unix_sock_listen(int fd, int backlog)
                               : 0;
     unix_sock_set_cred_current(sk);
     spin_unlock(&sk->lock);
+    unix_wayland_trace("listen", sk, (long)fd, (long)backlog);
     return 0;
 }
 
@@ -2005,6 +2235,7 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
         vm_copyout(current->vm, uaddr, &sa, alen);
     }
 
+    unix_wayland_trace("accept", server, (long)newfd, (long)flags);
     unix_sock_put(server); /* drop local temporary reference */
     return newfd;
 }
@@ -2049,12 +2280,6 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
         return -EINVAL;
     }
     spin_unlock(&sk->lock);
-
-    struct vfs_file *client_file = vfs_fdtable_get_file(current->fdtable, fd);
-    bool nonblock = (client_file != NULL &&
-                     (client_file->f_flags & O_NONBLOCK) != 0);
-    if (client_file != NULL)
-        vfs_fput(client_file);
 
     /* Find the target listening socket */
     struct unix_sock *target = bind_lookup(sa.sun_path, path_len);
@@ -2109,18 +2334,13 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     }
 
     spin_lock(&sk->lock);
-    if (nonblock) {
-        sk->connect_target = target;
-        unix_sock_get(target); /* pending client owns this until accept/cancel */
-    } else {
-        sk->peer = server;
-        unix_sock_get(server);  /* client holds ref on accepted child */
-    }
+    sk->peer = server;
+    unix_sock_get(server);  /* client holds ref on accepted child */
     sk->peer_pid = target->cred_pid;
     sk->peer_uid = target->cred_uid;
     sk->peer_gid = target->cred_gid;
     sk->so_error = 0;
-    sk->state = nonblock ? UNIX_STATE_CONNECTING : UNIX_STATE_CONNECTED;
+    sk->state = UNIX_STATE_CONNECTED;
     spin_unlock(&sk->lock);
 
     spin_lock(&server->lock);
@@ -2147,13 +2367,16 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     struct vfs_file *target_file =
         target->file ? vfs_fdup(target->file) : NULL;
     spin_unlock(&target->lock);
+    unix_wayland_trace("connect-notify", target, (long)fd,
+                       target_file != NULL ? 1L : 0L);
     if (target_file) {
         vfs_file_knote_notify(target_file, EVFILT_READ, 0);
         vfs_fput(target_file);
     }
     unix_sock_put(target);
 
-    return nonblock ? -EINPROGRESS : 0;
+    unix_wayland_trace("connect", sk, (long)fd, (long)path_len);
+    return 0;
 }
 
 /*
@@ -2372,6 +2595,7 @@ int unix_sock_setsockopt(int fd, int level, int optname, uint64 optval,
         case 6:  /* SO_BROADCAST - no-op */
         case 9:  /* SO_KEEPALIVE - no-op for UNIX sockets */
         case 10: /* SO_OOBINLINE - no-op */
+        case 12: /* SO_PRIORITY - no-op for UNIX sockets */
         case 13: /* SO_LINGER - no-op */
         case 15: /* SO_REUSEPORT - no-op */
         case 20: /* SO_RCVTIMEO_OLD */
@@ -2486,6 +2710,7 @@ int unix_sock_getsockopt(int fd, int level, int optname, uint64 optval,
         case 6:  /* SO_BROADCAST */
         case 9:  /* SO_KEEPALIVE */
         case 10: /* SO_OOBINLINE */
+        case 12: /* SO_PRIORITY */
         case 13: /* SO_LINGER */
         case 15: /* SO_REUSEPORT */
             val = 0;

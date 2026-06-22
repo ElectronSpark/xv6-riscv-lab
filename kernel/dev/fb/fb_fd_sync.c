@@ -635,6 +635,21 @@ static int fb_dmabuf_fops_poll(struct vfs_file *file, short events)
     return revents;
 }
 
+static ssize_t fb_dmabuf_fops_readlink(struct vfs_file *file, char *buf,
+                                       size_t buflen)
+{
+    static const char target[] = "anon_inode:[dmabuf]";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
+
 static int fb_dmabuf_fops_mmap(struct vfs_file *file, struct vma *vma)
 {
     struct dma_buf *dbuf = file ? (struct dma_buf *)file->private_data : NULL;
@@ -689,6 +704,7 @@ static void fb_dmabuf_fops_first_fd_open(struct vfs_file *file)
 static struct vfs_file_ops fb_dmabuf_file_ops = {
     .poll = fb_dmabuf_fops_poll,
     .ioctl = fb_dmabuf_fops_ioctl,
+    .readlink = fb_dmabuf_fops_readlink,
     .mmap = fb_dmabuf_fops_mmap,
     .fault = fb_dmabuf_fops_fault,
     .release = fb_dmabuf_fops_release,
@@ -840,9 +856,25 @@ static int fb_fence_fops_poll(struct vfs_file *file, short events)
     return revents;
 }
 
+static ssize_t fb_fence_fops_readlink(struct vfs_file *file, char *buf,
+                                      size_t buflen)
+{
+    static const char target[] = "anon_inode:[sync_file]";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
+
 static struct vfs_file_ops fb_fence_file_ops = {
     .poll = fb_fence_fops_poll,
     .release = fb_fence_fops_release,
+    .readlink = fb_fence_fops_readlink,
     .first_fd_open = fb_fence_fops_first_fd_open,
     .last_fd_close = fb_fence_fops_last_fd_close,
     .early_release_on_close = 1,
@@ -923,9 +955,25 @@ static int fb_virgl_fence_fops_poll(struct vfs_file *file, short events)
     return revents;
 }
 
+static ssize_t fb_virgl_fence_fops_readlink(struct vfs_file *file, char *buf,
+                                            size_t buflen)
+{
+    static const char target[] = "anon_inode:[sync_file]";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
+
 static struct vfs_file_ops fb_virgl_fence_file_ops = {
     .poll = fb_virgl_fence_fops_poll,
     .release = fb_virgl_fence_fops_release,
+    .readlink = fb_virgl_fence_fops_readlink,
     .first_fd_open = fb_virgl_fence_fops_first_fd_open,
     .last_fd_close = fb_virgl_fence_fops_last_fd_close,
 };
@@ -1152,10 +1200,26 @@ static int fb_syncobj_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
     }
 }
 
+static ssize_t fb_syncobj_fops_readlink(struct vfs_file *file, char *buf,
+                                        size_t buflen)
+{
+    static const char target[] = "anon_inode:[drm_syncobj]";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
+
 static struct vfs_file_ops fb_syncobj_file_ops = {
     .poll = fb_syncobj_fops_poll,
     .ioctl = fb_syncobj_fops_ioctl,
     .release = fb_syncobj_fops_release,
+    .readlink = fb_syncobj_fops_readlink,
     .last_fd_close = fb_syncobj_fops_last_fd_close,
 };
 

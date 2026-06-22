@@ -35,6 +35,8 @@ static slab_cache_t __knote_cache = {0};
 /* Forward declarations */
 static int kqueue_file_release(struct vfs_inode *inode, struct vfs_file *file);
 static int kqueue_file_poll(struct vfs_file *file, short events);
+static ssize_t kqueue_file_readlink(struct vfs_file *file, char *buf,
+                                    size_t buflen);
 
 /* External filter ops (defined in kqueue_filters.c) */
 extern struct knote_ops knote_read_ops;
@@ -51,10 +53,26 @@ static struct vfs_file_ops kqueue_file_ops = {
     .llseek = NULL,
     .release = kqueue_file_release,
     .fsync = NULL,
+    .readlink = kqueue_file_readlink,
     .poll = kqueue_file_poll,
     .ioctl = NULL,
     .fault = NULL,
 };
+
+static ssize_t kqueue_file_readlink(struct vfs_file *file, char *buf,
+                                    size_t buflen)
+{
+    static const char target[] = "anon_inode:[kqueue]";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
 
 static int knote_is_file_filter(struct knote *kn)
 {

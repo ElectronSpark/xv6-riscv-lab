@@ -261,6 +261,7 @@ struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags) {
         vfs_iunlock(inode);
         return ERR_PTR(ret);
     }
+    file->f_flags = f_flags;
 
     // Handle special file types
     if (S_ISCHR(inode->mode)) {
@@ -273,7 +274,6 @@ struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags) {
         }
         vfs_iunlock(inode);
         __vfs_ftable_attatch(file);
-        file->f_flags = f_flags;
         return file;
     }
 
@@ -287,7 +287,6 @@ struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags) {
         }
         vfs_iunlock(inode);
         __vfs_ftable_attatch(file);
-        file->f_flags = f_flags;
         return file;
     }
 
@@ -315,7 +314,6 @@ struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags) {
 
     vfs_iunlock(inode);
     __vfs_ftable_attatch(file);
-    file->f_flags = f_flags;
     if (file->f_kind == VFS_FILE_KIND_NONE)
         file->f_kind = VFS_FILE_KIND_INODE;
     file->f_pos = 0;
@@ -506,14 +504,16 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
         if (file->ops == NULL || file->ops->read == NULL) {
             return -EBADF; // Not a readable file object
         }
-        __vfs_file_lock(file);
         if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
-            __vfs_file_unlock(file);
             return -EBADF; // File not opened for reading
         }
-        ssize_t ret = file->ops->read(file, buf, n, user);
-        __vfs_file_unlock(file);
-        return ret;
+        /*
+         * Inode-less descriptors (eventfd, timerfd, sockets, pipes, epoll)
+         * synchronize inside their own file ops.  Do not hold the generic file
+         * lock here: a blocking eventfd write/read can otherwise prevent the
+         * peer operation on a dup'd fd from acquiring the same file lock.
+         */
+        return file->ops->read(file, buf, n, user);
     }
 
     // Handle character device read - check access and call without holding lock
@@ -649,14 +649,16 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
         if (file->ops == NULL || file->ops->write == NULL) {
             return -EBADF; // Not a writable file object
         }
-        __vfs_file_lock(file);
         if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
-            __vfs_file_unlock(file);
             return -EBADF; // File not opened for writing
         }
-        ssize_t ret = file->ops->write(file, buf, n, user);
-        __vfs_file_unlock(file);
-        return ret;
+        /*
+         * Inode-less descriptors (eventfd, timerfd, sockets, pipes, epoll)
+         * synchronize inside their own file ops.  Do not hold the generic file
+         * lock here: a blocking eventfd write/read can otherwise prevent the
+         * peer operation on a dup'd fd from acquiring the same file lock.
+         */
+        return file->ops->write(file, buf, n, user);
     }
 
     // Handle character device write - check access and call without holding

@@ -32,15 +32,22 @@
 #include "mm/slab.h"
 #include "mm/vm.h"
 #include "dev/cdev.h"
+#include "kqueue.h"
+#include "kqueue_types.h"
+#include "proc/thread.h"
 #include "vfs/vfs_types.h"
 #include "vfs/file.h"
+#include "vfs/fs.h"
 #include "vfs/poll.h"
 #include "vfs/pipe.h"
 #include "vfs/fcntl.h"
 #include "tty/tty.h"
 #include "tty/termios.h"
+#include "tty/session.h"
 #include "devtmpfs.h"
 #include "vfs/stat.h"
+
+int snprintf(char *buf, size_t size, const char *fmt, ...);
 
 /* ---- Constants ---- */
 
@@ -53,12 +60,15 @@
 
 struct pty_pair {
     struct tty  *slave;         /* The slave tty (allocated by pty_alloc) */
+    struct vfs_file *master_file; /* Master fd file for readiness wakeups */
     cdev_t       slave_cdev;    /* Registered cdev for /dev/pts/N */
     int          index;         /* PTY index (N in /dev/pts/N) */
     int          refcount;      /* Open master + slave fds */
     int          master_open;   /* Master side still alive? */
     int          slave_count;   /* Number of open slave fds */
     int          cdev_live;     /* Slave cdev still registered? */
+    int          pts_node_stat_valid; /* /dev/pts/N stat snapshot available */
+    struct stat  pts_node_stat;  /* stat identity of the devtmpfs slave node */
     spinlock_t   lock;          /* Protects refcount / flags */
 };
 
@@ -116,6 +126,64 @@ static void pts_name(char *buf, int idx)
     buf[n] = '\0';
 }
 
+static int vfs_inode_stat_snapshot(struct vfs_inode *inode, struct stat *st)
+{
+    if (inode == NULL || st == NULL)
+        return -EINVAL;
+
+    if (inode->ops && inode->ops->getattr) {
+        memset(st, 0, sizeof(*st));
+        return inode->ops->getattr(inode, st);
+    }
+
+    vfs_ilock(inode);
+    memset(st, 0, sizeof(*st));
+    st->st_dev = inode->sb ? (uint64)inode->sb : 0;
+    st->st_ino = inode->ino;
+    st->st_mode = inode->mode;
+    st->st_nlink = inode->n_links;
+    st->st_uid = inode->uid;
+    st->st_gid = inode->gid;
+    if (S_ISBLK(inode->mode))
+        st->st_rdev = inode->bdev;
+    else if (S_ISCHR(inode->mode))
+        st->st_rdev = inode->cdev;
+    st->st_size = inode->size;
+    st->st_blksize = 4096;
+    st->st_blocks = (inode->size + 511) >> 9;
+    st->st_atime_sec = inode->atime;
+    st->st_mtime_sec = inode->mtime;
+    st->st_ctime_sec = inode->ctime;
+    vfs_iunlock(inode);
+    return 0;
+}
+
+static void pts_snapshot_node_stat(struct pty_pair *pair)
+{
+    char path[48];
+    int n;
+
+    if (pair == NULL || pair->slave == NULL)
+        return;
+
+    n = snprintf(path, sizeof(path), "/dev/%s", pair->slave->name);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return;
+
+    struct vfs_inode *inode = vfs_namei(path, (size_t)n);
+    if (IS_ERR_OR_NULL(inode))
+        return;
+
+    struct stat st;
+    int ret = vfs_inode_stat_snapshot(inode, &st);
+    vfs_iput(inode);
+    if (ret != 0)
+        return;
+
+    pair->pts_node_stat = st;
+    pair->pts_node_stat_valid = 1;
+}
+
 /* ================================================================== */
 /*  /dev/pts/N — slave vfs_file_ops (installed by open_file callback) */
 /* ================================================================== */
@@ -133,9 +201,29 @@ static ssize_t pts_fops_write(struct vfs_file *file, const char *buf,
                               size_t count, bool user)
 {
     struct pty_pair *pair = (struct pty_pair *)file->private_data;
+    struct vfs_file *master_file = NULL;
+    ssize_t ret;
+
     if (pair == NULL || pair->slave == NULL)
         return -EIO;
-    return tty_write(pair->slave, (const char *)buf, count, user);
+    ret = tty_write(pair->slave, (const char *)buf, count, user);
+
+    /*
+     * Slave writes make the master fd readable.  Event loops such as
+     * Konsole's epoll backend wait on /dev/ptmx itself, not on the internal
+     * output pipe, so propagate the readiness edge to the master file knotes.
+     */
+    if (ret > 0) {
+        spin_lock(&pair->lock);
+        master_file = vfs_fdup(pair->master_file);
+        spin_unlock(&pair->lock);
+        if (master_file != NULL) {
+            vfs_file_knote_notify(master_file, EVFILT_READ, ret);
+            vfs_fput(master_file);
+        }
+    }
+
+    return ret;
 }
 
 static int pts_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
@@ -152,6 +240,43 @@ static int pts_fops_poll(struct vfs_file *file, short events)
     if (pair == NULL || pair->slave == NULL)
         return 0;
     return tty_poll(pair->slave, events);
+}
+
+static int pts_fops_stat(struct vfs_file *file, struct stat *st)
+{
+    struct pty_pair *pair = (struct pty_pair *)file->private_data;
+
+    if (file == NULL || st == NULL)
+        return -EINVAL;
+    if (pair == NULL || pair->slave == NULL)
+        return -EIO;
+
+    memset(st, 0, sizeof(*st));
+    if (pair->pts_node_stat_valid) {
+        *st = pair->pts_node_stat;
+    } else {
+        st->st_dev = mkdev(PTS_MAJOR, 0);
+        st->st_ino = (uint64)pair->index + 1;
+        st->st_nlink = 1;
+        st->st_mode = S_IFCHR | 0620;
+        st->st_uid = 0;
+        st->st_gid = 0;
+        st->st_rdev = mkdev(PTS_MAJOR, pair->index + 1);
+        st->st_blksize = 4096;
+    }
+    return 0;
+}
+
+static ssize_t pts_fops_readlink(struct vfs_file *file, char *buf,
+                                 size_t buflen)
+{
+    struct pty_pair *pair = (struct pty_pair *)file->private_data;
+
+    if (file == NULL || buf == NULL)
+        return -EINVAL;
+    if (pair == NULL || pair->slave == NULL)
+        return -EIO;
+    return snprintf(buf, buflen, "/dev/pts/%d", pair->index);
 }
 
 static int pts_fops_release(struct vfs_inode *inode, struct vfs_file *file)
@@ -191,9 +316,74 @@ static struct vfs_file_ops pts_slave_file_ops = {
     .read    = pts_fops_read,
     .write   = pts_fops_write,
     .release = pts_fops_release,
+    .stat    = pts_fops_stat,
+    .readlink = pts_fops_readlink,
     .ioctl   = pts_fops_ioctl,
     .poll    = pts_fops_poll,
 };
+
+static int pts_install_peer_fd(struct pty_pair *pair, int flags)
+{
+    int file_flags = (flags & O_ACCMODE) == 0 ?
+        ((flags & ~O_ACCMODE) | O_RDWR) : flags;
+    int fd;
+    int ret;
+
+    file_flags &= (O_ACCMODE | O_NONBLOCK | O_CLOEXEC | O_NOCTTY);
+    file_flags &= ~O_NOCTTY;
+
+    spin_lock(&pair->lock);
+    if (!pair->master_open) {
+        spin_unlock(&pair->lock);
+        return -ENXIO;
+    }
+    pair->refcount++;
+    pair->slave_count++;
+    spin_unlock(&pair->lock);
+
+    ret = tty_open(pair->slave);
+    if (ret != 0) {
+        if (pty_pair_put(pair))
+            pty_pair_destroy(pair);
+        return ret;
+    }
+
+    fd = vfs_custom_fd_alloc(&pts_slave_file_ops, pair, file_flags);
+    if (fd < 0) {
+        tty_close(pair->slave);
+        spin_lock(&pair->lock);
+        pair->slave_count--;
+        spin_unlock(&pair->lock);
+        if (pty_pair_put(pair))
+            pty_pair_destroy(pair);
+        return fd;
+    }
+
+    if (file_flags & O_CLOEXEC) {
+        spin_lock(&current->fdtable->lock);
+        (void)vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
+        spin_unlock(&current->fdtable->lock);
+    }
+
+    return fd;
+}
+
+static void pts_maybe_set_controlling_tty(struct pty_pair *pair,
+                                          int open_flags)
+{
+    if (pair == NULL || pair->slave == NULL || current == NULL)
+        return;
+    if (open_flags & O_NOCTTY)
+        return;
+    if (current->session == NULL)
+        return;
+    if (session_get_ctrl_tty(current->session) != NULL)
+        return;
+    if (current->session->sid != thread_tgid(current))
+        return;
+
+    session_set_ctrl_tty(current->session, pair->slave);
+}
 
 /* ================================================================== */
 /*  /dev/pts/N — cdev (open_file installs vfs_file_ops above)         */
@@ -229,6 +419,7 @@ static int pts_open_file(cdev_t *cdev, struct vfs_file *file)
 
     file->ops = &pts_slave_file_ops;
     file->private_data = pair;
+    pts_maybe_set_controlling_tty(pair, file->f_flags);
     return 0;
 }
 
@@ -281,6 +472,7 @@ static int ptmx_fops_release(struct vfs_inode *inode, struct vfs_file *file) {
 
     spin_lock(&pair->lock);
     pair->master_open = 0;
+    pair->master_file = NULL;
     int do_unregister = pair->cdev_live;
     pair->cdev_live = 0;
     spin_unlock(&pair->lock);
@@ -320,6 +512,8 @@ static int ptmx_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
     case TIOCSPTLCK:
         /* PTY slave locking is not implemented; always succeed (no-op) */
         return 0;
+    case TIOCGPTPEER:
+        return pts_install_peer_fd(pair, (int)(uint64)arg);
     default:
         /* Forward termios / winsize ioctls to the slave tty */
         if (pair->slave != NULL)
@@ -360,10 +554,42 @@ static int ptmx_fops_poll(struct vfs_file *file, short events) {
     return revents;
 }
 
+static int ptmx_fops_stat(struct vfs_file *file, struct stat *st)
+{
+    struct pty_pair *pair = (struct pty_pair *)file->private_data;
+
+    if (file == NULL || st == NULL)
+        return -EINVAL;
+    if (pair == NULL)
+        return -ENXIO;
+
+    memset(st, 0, sizeof(*st));
+    st->st_dev = mkdev(PTMX_MAJOR, PTMX_MINOR);
+    st->st_ino = (uint64)pair->index + 1;
+    st->st_nlink = 1;
+    st->st_mode = S_IFCHR | 0666;
+    st->st_uid = 0;
+    st->st_gid = 0;
+    st->st_rdev = mkdev(PTMX_MAJOR, PTMX_MINOR);
+    st->st_blksize = 4096;
+    return 0;
+}
+
+static ssize_t ptmx_fops_readlink(struct vfs_file *file, char *buf,
+                                  size_t buflen)
+{
+    (void)file;
+    if (buf == NULL)
+        return -EINVAL;
+    return snprintf(buf, buflen, "/dev/ptmx");
+}
+
 static struct vfs_file_ops ptmx_master_file_ops = {
     .read    = ptmx_fops_read,
     .write   = ptmx_fops_write,
     .release = ptmx_fops_release,
+    .stat    = ptmx_fops_stat,
+    .readlink = ptmx_fops_readlink,
     .ioctl   = ptmx_fops_ioctl,
     .poll    = ptmx_fops_poll,
 };
@@ -453,6 +679,7 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
         return ret;
     }
     pair->cdev_live = 1;
+    pts_snapshot_node_stat(pair);
 
     /* Record in global table */
     spin_lock(&ptmx_lock);
@@ -462,6 +689,7 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
     /* Install master file ops on the opened file */
     file->ops = &ptmx_master_file_ops;
     file->private_data = pair;
+    pair->master_file = file;
 
     return 0;
 }

@@ -316,10 +316,18 @@ static int sysfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             ino = SYSFS_INO_DRM_PRIMARY_DEVICE;
             break;
         }
+        if (name_len == 6 && memcmp(name, "uevent", 6) == 0) {
+            ino = device_attr_ino(SYSFS_DEV_DRM_PRIMARY, 5);
+            break;
+        }
         return -ENOENT;
     case SYSFS_INO_DRM_RENDER:
         if (name_len == 6 && memcmp(name, "device", 6) == 0) {
             ino = SYSFS_INO_DRM_RENDER_DEVICE;
+            break;
+        }
+        if (name_len == 6 && memcmp(name, "uevent", 6) == 0) {
+            ino = device_attr_ino(SYSFS_DEV_DRM_RENDER, 5);
             break;
         }
         return -ENOENT;
@@ -524,13 +532,21 @@ static int sysfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         return sysfs_emit_static(iter, ret, char_entries,
                                  NELEM(char_entries), child_idx);
     case SYSFS_INO_DRM_PRIMARY:
-        return child_idx == 0 ? sysfs_emit(iter, ret, "device",
-                                           SYSFS_INO_DRM_PRIMARY_DEVICE) :
-                                sysfs_emit_static(iter, ret, NULL, 0, 0);
+        if (child_idx == 0)
+            return sysfs_emit(iter, ret, "device",
+                              SYSFS_INO_DRM_PRIMARY_DEVICE);
+        if (child_idx == 1)
+            return sysfs_emit(iter, ret, "uevent",
+                              device_attr_ino(SYSFS_DEV_DRM_PRIMARY, 5));
+        return sysfs_emit_static(iter, ret, NULL, 0, 0);
     case SYSFS_INO_DRM_RENDER:
-        return child_idx == 0 ? sysfs_emit(iter, ret, "device",
-                                           SYSFS_INO_DRM_RENDER_DEVICE) :
-                                sysfs_emit_static(iter, ret, NULL, 0, 0);
+        if (child_idx == 0)
+            return sysfs_emit(iter, ret, "device",
+                              SYSFS_INO_DRM_RENDER_DEVICE);
+        if (child_idx == 1)
+            return sysfs_emit(iter, ret, "uevent",
+                              device_attr_ino(SYSFS_DEV_DRM_RENDER, 5));
+        return sysfs_emit_static(iter, ret, NULL, 0, 0);
     case SYSFS_INO_DRM_PRIMARY_DEVICE:
     case SYSFS_INO_DRM_RENDER_DEVICE:
     case SYSFS_INO_PCI_DEVICE:

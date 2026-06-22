@@ -378,6 +378,19 @@ static int gpu_drm_property_info(uint32 prop_id, const char **name,
         values[1] = FB_GPU_CURSOR_MAX_DIM - 1;
         *count_values = 2;
         break;
+    case GPU_DRM_PROP_DPMS:
+        *name = "DPMS";
+        *flags = DRM_MODE_PROP_ENUM;
+        enums[0].value = DRM_MODE_DPMS_ON;
+        gpu_drm_copy_prop_name(enums[0].name, "On");
+        enums[1].value = DRM_MODE_DPMS_STANDBY;
+        gpu_drm_copy_prop_name(enums[1].name, "Standby");
+        enums[2].value = DRM_MODE_DPMS_SUSPEND;
+        gpu_drm_copy_prop_name(enums[2].name, "Suspend");
+        enums[3].value = DRM_MODE_DPMS_OFF;
+        gpu_drm_copy_prop_name(enums[3].name, "Off");
+        *count_enums = 4;
+        break;
     default:
         return -ENOENT;
     }
@@ -1294,19 +1307,53 @@ static int gpu_drm_crtc_queue_sequence(struct fb_gpu_render_owner *owner,
     return 0;
 }
 
+#define GPU_DRM_GAMMA_LUT_SIZE 256
+
+static uint16 gpu_drm_gamma_identity(uint32 index)
+{
+    if (GPU_DRM_GAMMA_LUT_SIZE <= 1)
+        return 0xffff;
+    return (uint16)((index * 0xffffu) / (GPU_DRM_GAMMA_LUT_SIZE - 1));
+}
+
 static int gpu_drm_mode_gamma(uint64 arg, int set)
 {
     struct drm_mode_crtc_lut_compat req;
+    uint16 red[GPU_DRM_GAMMA_LUT_SIZE];
+    uint16 green[GPU_DRM_GAMMA_LUT_SIZE];
+    uint16 blue[GPU_DRM_GAMMA_LUT_SIZE];
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
     if (req.crtc_id != GPU_DRM_CRTC_ID)
         return -EINVAL;
+    if (req.gamma_size > GPU_DRM_GAMMA_LUT_SIZE)
+        return -EINVAL;
     if (req.gamma_size != 0 &&
         (req.red == 0 || req.green == 0 || req.blue == 0))
         return -EINVAL;
-    if (set || req.gamma_size != 0)
-        return -EOPNOTSUPP;
+    if (req.gamma_size != 0) {
+        uint64 bytes = (uint64)req.gamma_size * sizeof(uint16);
+
+        if (set) {
+            if (either_copyin(red, 1, req.red, bytes) < 0 ||
+                either_copyin(green, 1, req.green, bytes) < 0 ||
+                either_copyin(blue, 1, req.blue, bytes) < 0)
+                return -EFAULT;
+        } else {
+            for (uint32 i = 0; i < req.gamma_size; i++) {
+                uint16 value = gpu_drm_gamma_identity(i);
+
+                red[i] = value;
+                green[i] = value;
+                blue[i] = value;
+            }
+            if (either_copyout(1, req.red, red, bytes) < 0 ||
+                either_copyout(1, req.green, green, bytes) < 0 ||
+                either_copyout(1, req.blue, blue, bytes) < 0)
+                return -EFAULT;
+        }
+    }
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;

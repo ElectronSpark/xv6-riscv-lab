@@ -35,7 +35,11 @@ static int knote_read_attach(struct knote *kn) {
         return -EBADF;
     kn->attached_file = f;
 
-    if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL) {
+    if (f->ops != NULL && f->ops->poll != NULL) {
+        spin_lock(&f->knote_lock);
+        list_node_push(&f->knote_list, kn, source_entry);
+        spin_unlock(&f->knote_lock);
+    } else if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL) {
         int ret = cdev_dup(f->cdev);
         if (ret != 0) {
             vfs_fput(f);
@@ -122,7 +126,11 @@ static int knote_write_attach(struct knote *kn) {
         return -EBADF;
     kn->attached_file = f;
 
-    if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL) {
+    if (f->ops != NULL && f->ops->poll != NULL) {
+        spin_lock(&f->knote_lock);
+        list_node_push(&f->knote_list, kn, source_entry);
+        spin_unlock(&f->knote_lock);
+    } else if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL) {
         int ret = cdev_dup(f->cdev);
         if (ret != 0) {
             vfs_fput(f);

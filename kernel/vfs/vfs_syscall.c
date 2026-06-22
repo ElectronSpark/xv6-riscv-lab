@@ -210,6 +210,21 @@ static int chrome_poll_summary_enabled(void)
     return enabled;
 }
 
+static int kde_poll_summary_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_poll_summary", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
 static int chrome_vfs_trace_process(void)
 {
     if (current == NULL || strncmp(current->name, "chrome_crashpad", 15) == 0)
@@ -225,6 +240,21 @@ static int chrome_vfs_trace_process(void)
            strstr(current->thread_group->exec_path, "wayland-chromium") != NULL;
 }
 
+static int kde_vfs_trace_process(void)
+{
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "kwin_wayland", 12) == 0 ||
+        strncmp(current->name, "plasmashell", 11) == 0 ||
+        strncmp(current->name, "kded5", 5) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "kwin_wayland") != NULL ||
+           strstr(current->thread_group->exec_path, "plasmashell") != NULL ||
+           strstr(current->thread_group->exec_path, "/kded5") != NULL;
+}
+
 static int chrome_fd_trace_enabled(void)
 {
     static int initialized;
@@ -238,6 +268,28 @@ static int chrome_fd_trace_enabled(void)
         initialized = 1;
     }
     return enabled;
+}
+
+static int drm_open_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("drm_open_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int drm_open_trace_path(const char *path)
+{
+    return path != NULL &&
+        (strstr(path, "/dev/dri/") != NULL ||
+         strncmp(path, "dri/", 4) == 0);
 }
 
 static const char *chrome_fd_trace_path(struct vfs_file *f)
@@ -1415,6 +1467,10 @@ uint64 sys_vfs_stat(void) {
     argaddr(1, &st_addr);
     if (ret < 0)
         return ret;
+    if (n == 0) {
+        kvfree(path);
+        return -ENOENT;
+    }
 
     /* vfs_namei now follows all symlinks automatically */
     struct vfs_inode *inode = vfs_namei(path, n);
@@ -1454,6 +1510,11 @@ uint64 sys_vfs_lstat(void) {
     if (ret < 0) {
         kvfree(name);
         return ret;
+    }
+    if (n == 0) {
+        kvfree(path);
+        kvfree(name);
+        return -ENOENT;
     }
 
     bool root_path = true;
@@ -1733,6 +1794,11 @@ uint64 sys_vfs_open(void) {
                             "flags=0x%x ret=%ld\n",                        \
                             current->pid, current->tgid, current->name,      \
                             path, omode, __ret);                            \
+            if (drm_open_trace_enabled() && drm_open_trace_path(path))       \
+                printf("drm-open-trace: open fail pid=%d tgid=%d name=%s "   \
+                       "path=%s flags=0x%x ret=%ld\n",                     \
+                       current->pid, current->tgid, current->name, path,     \
+                       omode, __ret);                                        \
         }                                                                    \
         kvfree(path);                                                        \
         kvfree(name);                                                        \
@@ -1903,6 +1969,18 @@ uint64 sys_vfs_open(void) {
                opened_inode != NULL ? opened_inode->mode : 0,
                opened_inode != NULL ? opened_inode->ino : 0, fs_name,
                opened_inode != NULL ? opened_inode->size : 0);
+    }
+    if (drm_open_trace_enabled() && drm_open_trace_path(path)) {
+        if (fd >= 0)
+            printf("drm-open-trace: open pid=%d tgid=%d name=%s fd=%d "
+                   "path=%s flags=0x%x file=%p f_flags=0x%x cloexec=%d\n",
+                   current->pid, current->tgid, current->name, fd, path,
+                   omode, f, f->f_flags, (omode & O_CLOEXEC) != 0);
+        else
+            printf("drm-open-trace: open fdalloc-fail pid=%d tgid=%d "
+                   "name=%s path=%s flags=0x%x ret=%d file=%p\n",
+                   current->pid, current->tgid, current->name, path, omode,
+                   fd, f);
     }
 
     // When success, the refcount of f will be increased by fdtable, thus we do
@@ -2214,7 +2292,9 @@ uint64 sys_vfs_chdir(void) {
  *   arg1: size - buffer size
  *
  * Returns:
- *   Pointer to buf on success, or negative errno on failure.
+ *   Number of bytes copied, including the trailing NUL, on success, or
+ *   negative errno on failure. This matches Linux getcwd(2) syscall ABI; libc
+ *   turns the byte count into the user-facing buffer pointer.
  */
 uint64 sys_getcwd(void) {
     uint64 buf_addr;
@@ -2310,7 +2390,7 @@ uint64 sys_getcwd(void) {
 
     vfs_iput(root);
     vfs_iput(cwd);
-    return buf_addr;
+    return pathlen + 1;
 }
 
 /******************************************************************************
@@ -3539,7 +3619,8 @@ static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
         return;
     buf[0] = '\0';
 
-    if (!chrome_poll_summary_enabled() || !chrome_vfs_trace_process() ||
+    if (!((chrome_poll_summary_enabled() && chrome_vfs_trace_process()) ||
+          (kde_poll_summary_enabled() && kde_vfs_trace_process())) ||
         f == NULL || f->ops != &unix_socket_file_ops ||
         f->private_data == NULL)
         return;
@@ -3695,8 +3776,9 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
 {
     int trace_webkit = webkit_poll_summary_enabled() && webkit_vfs_trace_process();
     int trace_chrome = chrome_poll_summary_enabled() && chrome_vfs_trace_process();
+    int trace_kde = kde_poll_summary_enabled() && kde_vfs_trace_process();
 
-    if (!(trace_webkit || trace_chrome))
+    if (!(trace_webkit || trace_chrome || trace_kde))
         return;
 
     if (trace_chrome && !trace_webkit && ready == 0 && timeout_ms < 0 &&
@@ -4562,6 +4644,11 @@ uint64 sys_vfs_openat(void) {
                             "path=%s flags=0x%x ret=%ld\n",                \
                             current->pid, current->tgid, current->name,      \
                             dirfd, path, omode, __ret);                     \
+            if (drm_open_trace_enabled() && drm_open_trace_path(path))       \
+                printf("drm-open-trace: openat fail pid=%d tgid=%d name=%s " \
+                       "dirfd=%d path=%s flags=0x%x ret=%ld\n",            \
+                       current->pid, current->tgid, current->name, dirfd,    \
+                       path, omode, __ret);                                  \
         }                                                                    \
         if (start_dir) vfs_iput(start_dir);                                  \
         kvfree(path);                                                        \
@@ -4739,6 +4826,19 @@ uint64 sys_vfs_openat(void) {
                     "flags=0x%x file=%p f_flags=0x%x cloexec=%d\n",
                     current->pid, current->tgid, current->name, n, dirfd,
                     path, omode, f, f->f_flags, (omode & O_CLOEXEC) != 0);
+    if (drm_open_trace_enabled() && drm_open_trace_path(path)) {
+        if (n >= 0)
+            printf("drm-open-trace: openat pid=%d tgid=%d name=%s fd=%d "
+                   "dirfd=%d path=%s flags=0x%x file=%p f_flags=0x%x "
+                   "cloexec=%d\n",
+                   current->pid, current->tgid, current->name, n, dirfd,
+                   path, omode, f, f->f_flags, (omode & O_CLOEXEC) != 0);
+        else
+            printf("drm-open-trace: openat fdalloc-fail pid=%d tgid=%d "
+                   "name=%s dirfd=%d path=%s flags=0x%x ret=%d file=%p\n",
+                   current->pid, current->tgid, current->name, dirfd, path,
+                   omode, n, f);
+    }
 
     if (n >= 0 && webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
         const char *fs_name = "(none)";
@@ -5561,6 +5661,17 @@ uint64 sys_vfs_pwritev2(void) {
 #define AT_EMPTY_PATH 0x1000
 #endif
 
+static bool vfs_path_is_all_slashes(const char *path, int path_len)
+{
+    if (path == NULL || path_len <= 0)
+        return false;
+    for (int i = 0; i < path_len; i++) {
+        if (path[i] != '/')
+            return false;
+    }
+    return true;
+}
+
 uint64 sys_vfs_fstatat(void) {
     SYSCALL_PROFILE_BEGIN(g_sys_fstatat_calls);
     int dirfd, flags;
@@ -5605,6 +5716,11 @@ uint64 sys_vfs_fstatat(void) {
             SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstatat_ticks);
         SYSCALL_PROFILE_RETURN(0, g_sys_fstatat_ticks);
     }
+    if (path_len == 0) {
+        chrome_fd_trace_fstatat(dirfd, path, flags, -ENOENT, NULL);
+        kvfree(path);
+        SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_fstatat_ticks);
+    }
 
     struct vfs_inode *start_dir = NULL;
     int err = __vfs_resolve_dirfd(dirfd, &start_dir);
@@ -5616,7 +5732,8 @@ uint64 sys_vfs_fstatat(void) {
 
     struct vfs_inode *inode = NULL;
 
-    if (flags & AT_SYMLINK_NOFOLLOW) {
+    if ((flags & AT_SYMLINK_NOFOLLOW) &&
+        !vfs_path_is_all_slashes(path, path_len)) {
         char *name = __vfs_alloc_pathbuf();
         if (name == NULL) {
             if (start_dir) vfs_iput(start_dir);
@@ -5799,6 +5916,11 @@ uint64 sys_statx(void)
     } else {
         struct vfs_inode *start_dir = NULL;
 
+        if (path_len == 0) {
+            kvfree(path);
+            return (uint64)-ENOENT;
+        }
+
         ret = __vfs_resolve_dirfd(dirfd, &start_dir);
         if (ret < 0) {
             kvfree(path);
@@ -5807,7 +5929,8 @@ uint64 sys_statx(void)
 
         struct vfs_inode *inode = NULL;
 
-        if (flags & AT_SYMLINK_NOFOLLOW) {
+        if ((flags & AT_SYMLINK_NOFOLLOW) &&
+            !vfs_path_is_all_slashes(path, path_len)) {
             char *name = __vfs_alloc_pathbuf();
             if (name == NULL) {
                 if (start_dir) vfs_iput(start_dir);
@@ -6857,10 +6980,26 @@ static int signalfd_release(struct vfs_inode *ip, struct vfs_file *file)
     return 0;
 }
 
+static ssize_t signalfd_readlink(struct vfs_file *file, char *buf,
+                                 size_t buflen)
+{
+    static const char target[] = "anon_inode:[signalfd]";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
+
 static struct vfs_file_ops signalfd_file_ops = {
     .read = signalfd_read,
     .poll = signalfd_poll,
     .release = signalfd_release,
+    .readlink = signalfd_readlink,
 };
 
 static uint64 signalfd_create_fd(sigset_t mask, int flags)
@@ -7379,10 +7518,26 @@ static int inotify_release(struct vfs_inode *ip, struct vfs_file *file)
     return 0;
 }
 
+static ssize_t inotify_readlink(struct vfs_file *file, char *buf,
+                                size_t buflen)
+{
+    static const char target[] = "anon_inode:inotify";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
+
 static struct vfs_file_ops inotify_file_ops = {
     .read = inotify_read,
     .poll = inotify_poll,
     .release = inotify_release,
+    .readlink = inotify_readlink,
 };
 
 static uint64 inotify_create_fd(int flags)

@@ -29,6 +29,7 @@
 #include "ksymbols.h"
 #include "proc/chrome_lifecycle.h"
 #include "vfs/file.h"
+#include "cmdline.h"
 
 #define USER_FAULT_AROUND_PAGES 8UL
 
@@ -104,6 +105,80 @@ static const char *vma_debug_path(vma_t *vma)
         vma->file->opened_path[0] != '\0')
         return vma->file->opened_path;
     return fault_vma_file_name(vma);
+}
+
+static int kde_exception_vma_trace_enabled(struct thread *p)
+{
+    char value[16];
+
+    if (p == NULL)
+        return 0;
+    if (strstr(p->name, "kwin") != NULL ||
+        strstr(p->name, "plasmashell") != NULL)
+        return 1;
+    if (cmdline_get_param("kde_fault_maps", value, sizeof(value)) != 0)
+        return 0;
+    return value[0] != '\0' && value[0] != '0';
+}
+
+static void kde_dump_exception_vmas(struct thread *p, struct trapframe *tf,
+                                    uint64 vec, const char *name)
+{
+    vm_t *vm;
+    void *mt_entry;
+    unsigned long mt_idx;
+    int found_ip = 0;
+
+    if (p == NULL || p->vm == NULL || tf == NULL)
+        return;
+    if (!kde_exception_vma_trace_enabled(p))
+        return;
+
+    vm = p->vm;
+    vm_rlock(vm);
+    printf("kde-exception-vmas: pid=%d tgid=%d name=%s vec=%lu exception=%s rip=0x%lx rsp=0x%lx rbp=0x%lx\n",
+           p->pid, thread_tgid(p), p->name, vec, name ? name : "???",
+           tf->rip, tf->rsp, tf->rbp);
+    print_fault_vma(vm, "exception-ip", tf->rip);
+    print_fault_vma(vm, "exception-rsp", tf->rsp);
+    printf("  --- KDE exception VMA map (exec+file) ---\n");
+    mt_for_each(&vm->vm_mt, mt_entry, mt_idx, MAPLE_MAX) {
+        vma_t *v = (vma_t *)mt_entry;
+        struct vfs_inode *inode;
+        const char *path;
+        uint64 rip_file_off = 0;
+        int has_rip = 0;
+
+        if (!fault_vma_entry_valid(vm, v)) {
+            printf("  kde-exception-vma: invalid entry=%p\n", v);
+            continue;
+        }
+        if ((v->flags & PROT_EXEC) == 0 && v->file == NULL)
+            continue;
+
+        inode = fault_vma_inode(v);
+        path = vma_debug_path(v);
+        if (tf->rip >= v->start && tf->rip < v->end) {
+            has_rip = 1;
+            found_ip = 1;
+            rip_file_off = v->pgoff + (tf->rip - v->start);
+        }
+        printf("  kde-exception-vma:%s [0x%lx-0x%lx) %c%c%c %s pgoff=0x%lx file=%p ino=%lu size=%lld path=%s",
+               has_rip ? " rip" : "", v->start, v->end,
+               (v->flags & PROT_READ) ? 'r' : '-',
+               (v->flags & PROT_WRITE) ? 'w' : '-',
+               (v->flags & PROT_EXEC) ? 'x' : '-',
+               (v->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+               v->pgoff, (void *)v->file,
+               inode ? inode->ino : 0, inode ? inode->size : 0, path);
+        if (has_rip)
+            printf(" rip_file_off=0x%lx", rip_file_off);
+        printf("\n");
+    }
+    if (!found_ip)
+        printf("  kde-exception-vma: rip mapping not found\n");
+    printf("  --- end KDE exception VMA map ---\n");
+    vm_runlock(vm);
 }
 
 static void chrome_dump_icu_vmas(struct thread *p, const char *reason)
@@ -919,6 +994,74 @@ static inline uint64 read_cr2(void) {
     return v;
 }
 
+static int kde_xwayland_fault_trace_enabled(void)
+{
+    char value[16];
+
+    if (cmdline_get_param("kde_xwayland_fault_trace", value,
+                          sizeof(value)) != 0)
+        return 0;
+    return value[0] != '\0' && value[0] != '0';
+}
+
+static void kde_xwayland_fault_trace(struct thread *p, struct trapframe *tf,
+                                     uint64 cr2, vma_t *known_vma)
+{
+    uint8 code[16];
+    uint64 stack_words[6];
+    int code_ok = -1;
+    int stack_ok = -1;
+
+    if (p == NULL || p->vm == NULL || tf == NULL)
+        return;
+    if (!kde_xwayland_fault_trace_enabled())
+        return;
+    if (strstr(p->name, "Xwayland") == NULL)
+        return;
+
+    if (tf->rip >= sizeof(code) / 2)
+        code_ok = vm_copyin(p->vm, code, tf->rip - sizeof(code) / 2,
+                            sizeof(code));
+    stack_ok = vm_copyin(p->vm, stack_words, tf->rsp, sizeof(stack_words));
+
+    printf("kde-xwayland-fault: pid=%d tgid=%d name='%s' cr2=0x%lx err=0x%lx rip=0x%lx rsp=0x%lx rbp=0x%lx handler=yes vma=%p\n",
+           p->pid, thread_tgid(p), p->name, cr2, tf->err, tf->rip, tf->rsp,
+           tf->rbp, known_vma);
+    printf("  regs: rax=0x%lx rbx=0x%lx rcx=0x%lx rdx=0x%lx\n",
+           tf->rax, tf->rbx, tf->rcx, tf->rdx);
+    printf("        rdi=0x%lx rsi=0x%lx r8=0x%lx r9=0x%lx\n",
+           tf->rdi, tf->rsi, tf->r8, tf->r9);
+    printf("        r10=0x%lx r11=0x%lx r12=0x%lx r13=0x%lx r14=0x%lx r15=0x%lx\n",
+           tf->r10, tf->r11, tf->r12, tf->r13, tf->r14, tf->r15);
+
+    if (code_ok == 0) {
+        printf("  code @rip-8:");
+        for (size_t i = 0; i < sizeof(code); i++)
+            printf(" %02x", code[i]);
+        printf("\n");
+    } else {
+        printf("  code @rip-8: <unreadable>\n");
+    }
+
+    if (stack_ok == 0) {
+        printf("  stack @rsp:");
+        for (size_t i = 0; i < sizeof(stack_words) / sizeof(stack_words[0]);
+             i++)
+            printf(" 0x%lx", stack_words[i]);
+        printf("\n");
+    } else {
+        printf("  stack @rsp: <unreadable>\n");
+    }
+
+    vm_rlock(p->vm);
+    print_fault_vma(p->vm, "kde-xwayland-ip", tf->rip);
+    print_fault_vma(p->vm, "kde-xwayland-va", cr2);
+    vm_runlock(p->vm);
+
+    print_user_backtrace(p->vm->pagetable, tf->rbp, tf->rip, tf->rsp,
+                         tf->rip, 16);
+}
+
 /* ── Timer tick advance (defined in timer.c) ── */
 extern void timer_tick_advance(void);
 
@@ -1049,6 +1192,7 @@ void x86_trap_handler(struct trapframe *tf) {
                     sigacts_unlock(sa);
                 }
                 if (has_handler) {
+                    kde_xwayland_fault_trace(current, tf, cr2, vma);
                     /* Deliver SIGSEGV with fault address and code. */
                     ksiginfo_t si = {0};
                     si.signo = SIGSEGV;
@@ -1385,6 +1529,7 @@ void x86_trap_handler(struct trapframe *tf) {
                    tf->r8, tf->r9, tf->r10, tf->r11);
             printf("  fs_base(tp)=0x%lx\n",
                    current->trapframe ? current->trapframe->tp : 0);
+            kde_dump_exception_vmas(current, tf, vec, name);
             assert(current->pid != 1, "init exiting");
             print_user_backtrace(current->vm->pagetable,
                                  tf->rbp, tf->rip, tf->rsp, tf->rip, 20);

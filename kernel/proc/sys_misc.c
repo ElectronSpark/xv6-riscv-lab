@@ -820,6 +820,11 @@ struct linux_sched_param {
 };
 
 #define SCHED_OTHER 0
+#define SCHED_FIFO  1
+#define SCHED_RR    2
+#define SCHED_BATCH 3
+#define SCHED_IDLE  5
+#define SCHED_DEADLINE 6
 #define LINUX_SCHED_ATTR_SIZE_VER0 48
 #define LINUX_SCHED_ATTR_SIZE      56
 
@@ -1128,11 +1133,39 @@ uint64 sys_sched_setscheduler(void) {
 /* ================================================================== */
 
 uint64 sys_sched_get_priority_max(void) {
-    return 0;
+    int policy;
+
+    argint(0, &policy);
+    switch (policy) {
+    case SCHED_FIFO:
+    case SCHED_RR:
+        return 99;
+    case SCHED_OTHER:
+    case SCHED_BATCH:
+    case SCHED_IDLE:
+    case SCHED_DEADLINE:
+        return 0;
+    default:
+        return (uint64)-EINVAL;
+    }
 }
 
 uint64 sys_sched_get_priority_min(void) {
-    return 0;
+    int policy;
+
+    argint(0, &policy);
+    switch (policy) {
+    case SCHED_FIFO:
+    case SCHED_RR:
+        return 1;
+    case SCHED_OTHER:
+    case SCHED_BATCH:
+    case SCHED_IDLE:
+    case SCHED_DEADLINE:
+        return 0;
+    default:
+        return (uint64)-EINVAL;
+    }
 }
 
 /* ================================================================== */

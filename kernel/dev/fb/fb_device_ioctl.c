@@ -1105,6 +1105,15 @@ bo_copy_out:
             ret = virtio_gpu_read_current_scanout(
                 req.x, req.y, req.w, req.h, pixels, req.pitch,
                 &req.screen_width, &req.screen_height, &req.screen_pitch);
+            if (ret == 0) {
+                int kms_ret = fb_read_current_kms_framebuffer(
+                    req.x, req.y, req.w, req.h, pixels, req.pitch,
+                    &req.screen_width, &req.screen_height,
+                    &req.screen_pitch);
+
+                if (kms_ret == 0)
+                    ret = 0;
+            }
         } else {
             ret = fb_read_current_framebuffer(
                 req.x, req.y, req.w, req.h, pixels, req.pitch,

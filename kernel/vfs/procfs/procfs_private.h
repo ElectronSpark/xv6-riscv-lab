@@ -41,6 +41,7 @@
  *       environ            → regular file
  *       auxv               → regular file
  *       exe                → symlink  → executable path
+ *       root               → symlink  → process root
  *       fd/
  *         <n>              → symlink  → target path
  *       fdinfo/
@@ -92,6 +93,7 @@ enum procfs_entry_type {
     PROC_STATM,       /* /proc/<tgid>/statm   */
     PROC_CGROUP,      /* /proc/<tgid>/cgroup  */
     PROC_EXE,         /* /proc/<tgid>/exe     */
+    PROC_PID_ROOT,    /* /proc/<tgid>/root    */
     PROC_FDDIR,       /* /proc/<tgid>/fd/     */
     PROC_FD_ENTRY,    /* /proc/<tgid>/fd/<n>  */
     PROC_FDINFODIR,   /* /proc/<tgid>/fdinfo/ */
@@ -125,6 +127,9 @@ enum procfs_entry_type {
     PROC_PID_NS_DIR,    /* /proc/<tgid>/ns        */
     PROC_PID_NS_ENTRY,  /* /proc/<tgid>/ns/<name> */
     PROC_PID_SETGROUPS, /* /proc/<tgid>/setgroups */
+    PROC_PID_WCHAN,     /* /proc/<tgid>/wchan     */
+    PROC_PID_SYSCALL,   /* /proc/<tgid>/syscall   */
+    PROC_PID_STACK,     /* /proc/<tgid>/stack     */
     PROC_TASK_STATUS,
     PROC_TASK_STAT,
     PROC_TASK_STATM,
@@ -143,6 +148,9 @@ enum procfs_entry_type {
     PROC_TASK_FDINFODIR,
     PROC_TASK_NS_DIR,
     PROC_TASK_NS_ENTRY,
+    PROC_TASK_WCHAN,
+    PROC_TASK_SYSCALL,
+    PROC_TASK_STACK,
     PROC_SYS_KERNEL_OSTYPE,
     PROC_SYS_KERNEL_OSRELEASE,
     PROC_SYS_KERNEL_VERSION,
@@ -244,6 +252,14 @@ enum procfs_entry_type {
     (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 22 + (uint64)(nsidx))
 #define PROCFS_PID_SETGROUPS_INO(tgid) \
     (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 32)
+#define PROCFS_PID_ROOT_INO(tgid) \
+    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 33)
+#define PROCFS_PID_WCHAN_INO(tgid) \
+    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 34)
+#define PROCFS_PID_SYSCALL_INO(tgid) \
+    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 35)
+#define PROCFS_PID_STACK_INO(tgid) \
+    (PROCFS_PID_BASE + (uint64)(tgid)*PROCFS_PID_STRIDE + 36)
 #define PROCFS_FD_INO(tgid, fd)     (PROCFS_FD_BASE + (uint64)(tgid)*1000ULL + (uint64)(fd))
 
 /*
@@ -319,6 +335,8 @@ extern struct vfs_inode_ops procfs_inode_ops;
 
 /* Exported by file.c */
 extern struct vfs_file_ops procfs_reg_file_ops;
+extern struct vfs_file_ops procfs_comm_file_ops;
+extern struct vfs_file_ops procfs_mountinfo_file_ops;
 extern struct vfs_file_ops procfs_blob_file_ops;
 extern struct vfs_file_ops procfs_oom_score_adj_file_ops;
 extern struct vfs_file_ops procfs_mem_file_ops;

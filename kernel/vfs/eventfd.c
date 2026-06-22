@@ -176,11 +176,27 @@ static int eventfd_release(struct vfs_inode *ip, struct vfs_file *file)
     return 0;
 }
 
+static ssize_t eventfd_readlink(struct vfs_file *file, char *buf,
+                                size_t buflen)
+{
+    static const char target[] = "anon_inode:[eventfd]";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
+
 static struct vfs_file_ops eventfd_file_ops = {
     .read    = eventfd_read,
     .write   = eventfd_write,
     .poll    = eventfd_poll,
     .release = eventfd_release,
+    .readlink = eventfd_readlink,
 };
 
 int eventfd_file_is_eventfd(struct vfs_file *file)

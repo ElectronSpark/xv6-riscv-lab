@@ -1403,6 +1403,147 @@ static struct fb_gpu_bo_entry *fb_bo_get_owned(uint32 handle, uint64 owner_id,
     return bo;
 }
 
+static int fb_read_current_kms_framebuffer(uint32 x, uint32 y, uint32 w,
+                                           uint32 h, void *dst,
+                                           uint32 dst_pitch,
+                                           uint32 *screen_width,
+                                           uint32 *screen_height,
+                                           uint32 *screen_pitch)
+{
+    struct fb_gpu_kms_fb_entry fb_snapshot;
+    struct fb_gpu_bo_entry *bo;
+    uint64 base_offset;
+    int swap_rb;
+    static int read_logs;
+
+    if (dst == NULL || w == 0 || h == 0 || dst_pitch < w * sizeof(uint32))
+        return -EINVAL;
+
+    memset(&fb_snapshot, 0, sizeof(fb_snapshot));
+    spin_lock(&fb_state.lock);
+    if (fb_state.current_kms_fb_id != 0) {
+        for (uint32 i = 0; i < FB_GPU_MAX_KMS_FBS; i++) {
+            struct fb_gpu_kms_fb_entry *fb = &fb_state.kms_fbs[i];
+
+            if (fb->in_use && fb->fb_id == fb_state.current_kms_fb_id) {
+                fb_snapshot = *fb;
+                break;
+            }
+        }
+    }
+    spin_unlock(&fb_state.lock);
+
+    if (!fb_snapshot.in_use || fb_snapshot.bo_handle == 0 ||
+        fb_snapshot.width == 0 || fb_snapshot.height == 0 ||
+        fb_snapshot.pitch == 0)
+        return -ENOENT;
+    if (!fb_scanout_format_supported(fb_snapshot.pixel_format,
+                                     fb_snapshot.modifier))
+        return -EOPNOTSUPP;
+    if (x > fb_snapshot.width || w > fb_snapshot.width - x ||
+        y > fb_snapshot.height || h > fb_snapshot.height - y)
+        return -EINVAL;
+
+    bo = fb_bo_get_owned(fb_snapshot.bo_handle, fb_snapshot.owner_id,
+                         fb_snapshot.owner_tgid);
+    if (bo == NULL)
+        return -ENOENT;
+    if (bo->pages == NULL || bo->npages == 0 ||
+        fb_snapshot.pitch < fb_snapshot.width * sizeof(uint32)) {
+        fb_bo_put(bo);
+        return -EINVAL;
+    }
+
+    base_offset = fb_snapshot.offsets[0] + (uint64)y * fb_snapshot.pitch +
+                  (uint64)x * sizeof(uint32);
+    if (base_offset >= bo->size ||
+        base_offset + (uint64)(h - 1) * fb_snapshot.pitch +
+            (uint64)w * sizeof(uint32) > bo->size) {
+        fb_bo_put(bo);
+        return -EINVAL;
+    }
+
+    if (bo->virtio_resource_id != 0) {
+        struct fb_gpu_virgl_transfer transfer;
+        uint64 row_off;
+        uint32 src_y;
+        uint32 src_x;
+
+        src_y = (uint32)(base_offset / fb_snapshot.pitch);
+        row_off = base_offset - (uint64)src_y * fb_snapshot.pitch;
+        src_x = (uint32)(row_off / sizeof(uint32));
+        if ((row_off & 3) == 0 && src_x <= bo->width &&
+            w <= bo->width - src_x && src_y <= bo->height &&
+            h <= bo->height - src_y) {
+            uint64 resource_owner_id = bo->virtio_resource_owner_id ?
+                bo->virtio_resource_owner_id : bo->owner_id;
+            pid_t resource_owner_tgid = bo->virtio_resource_owner_tgid ?
+                bo->virtio_resource_owner_tgid : bo->owner_tgid;
+
+            memset(&transfer, 0, sizeof(transfer));
+            transfer.resource_id = bo->virtio_resource_id;
+            transfer.x = src_x;
+            transfer.y = src_y;
+            transfer.z = 0;
+            transfer.w = w;
+            transfer.h = h;
+            transfer.d = 1;
+            transfer.level = 0;
+            transfer.offset = base_offset;
+            transfer.stride = fb_snapshot.pitch;
+            transfer.layer_stride =
+                (uint64)fb_snapshot.pitch * fb_snapshot.height;
+            (void)virtio_gpu_user_transfer(resource_owner_id,
+                                           resource_owner_tgid,
+                                           &transfer, 1);
+        }
+    }
+
+    swap_rb = fb_scanout_format_needs_rb_swap(fb_snapshot.pixel_format);
+    for (uint32 row = 0; row < h; row++) {
+        uint64 src_off = base_offset + (uint64)row * fb_snapshot.pitch;
+        uint8 *dst_row = (uint8 *)dst + (uint64)row * dst_pitch;
+        uint32 remaining = w * sizeof(uint32);
+        uint32 copied = 0;
+
+        while (remaining > 0) {
+            uint32 page_idx = src_off / PGSIZE;
+            uint32 page_off = src_off & (PGSIZE - 1);
+            uint32 chunk = PGSIZE - page_off;
+            uint8 *src;
+
+            if (page_idx >= bo->npages || bo->pages[page_idx] == NULL) {
+                fb_bo_put(bo);
+                return -EINVAL;
+            }
+            if (chunk > remaining)
+                chunk = remaining;
+            src = (uint8 *)PA2VA(__page_to_pa(bo->pages[page_idx])) +
+                  page_off;
+            fb_copy_scanout_chunk(dst_row + copied, src, chunk, swap_rb);
+            src_off += chunk;
+            copied += chunk;
+            remaining -= chunk;
+        }
+    }
+
+    if (screen_width != NULL)
+        *screen_width = fb_snapshot.width;
+    if (screen_height != NULL)
+        *screen_height = fb_snapshot.height;
+    if (screen_pitch != NULL)
+        *screen_pitch = fb_snapshot.pitch;
+    if (fb_cmdline_enabled("virtio_gpu_scanout_read_diag") &&
+        read_logs < 12) {
+        printf("FB: scanout-read used current KMS fb=%u bo=%u resource=%u rect=%u,%u %ux%u\n",
+               fb_snapshot.fb_id, fb_snapshot.bo_handle,
+               bo->virtio_resource_id, x, y, w, h);
+        read_logs++;
+    }
+    fb_bo_put(bo);
+    return 0;
+}
+
 static void *fb_bo_page_for_owner(uint32 handle, uint64 owner_id,
                                   pid_t owner_tgid, uint64 page_index)
 {

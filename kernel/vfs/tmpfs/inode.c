@@ -466,20 +466,23 @@ struct vfs_inode *__tmpfs_mknod(struct vfs_inode *dir, mode_t mode, dev_t dev,
     struct tmpfs_inode *tmpfs_dir =
         container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_inode = NULL;
-    if (!S_ISBLK(mode) && !S_ISCHR(mode)) {
-        // @TODO: Support FIFO, socket, and other special files
-        return ERR_PTR(
-            -EINVAL); // Mknod can only create character or block device files
-    }
+    if (!S_ISBLK(mode) && !S_ISCHR(mode) && !S_ISFIFO(mode) &&
+        !S_ISSOCK(mode))
+        return ERR_PTR(-EINVAL);
+
     tmpfs_inode =
         __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
     if (IS_ERR(tmpfs_inode)) {
         return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
     if (S_ISBLK(mode)) {
-        tmpfs_make_bdev(tmpfs_inode, dev);
+        tmpfs_inode->vfs_inode.size = 0;
+        tmpfs_inode->vfs_inode.bdev = dev;
     } else if (S_ISCHR(mode)) {
-        tmpfs_make_cdev(tmpfs_inode, dev);
+        tmpfs_inode->vfs_inode.size = 0;
+        tmpfs_inode->vfs_inode.cdev = dev;
+    } else {
+        tmpfs_inode->vfs_inode.size = 0;
     }
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     return &tmpfs_inode->vfs_inode;
@@ -491,9 +494,10 @@ int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
         container_of(old_dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_new_dir =
         container_of(new_dir, struct tmpfs_inode, vfs_inode);
-    struct vfs_inode *target = NULL;
+    struct vfs_inode *moved = NULL;
     int ret = 0;
     struct tmpfs_dentry *tmpfs_old_dentry = NULL;
+    struct tmpfs_dentry *existing_dentry = NULL;
     struct tmpfs_dentry *new_entry = NULL;
 
     // Lookup the old dentry in the old directory
@@ -503,34 +507,58 @@ int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
         return -ENOENT; // Old entry not found
     }
 
-    // Increase the link count and refcount of the old inode
-    target = &tmpfs_old_dentry->inode->vfs_inode;
-    if ((ret = vfs_inode_refcount(target)) > 2) {
-        printf("Tmpfs move: target inode is busy, %d\n", ret);
-        return -EBUSY; // Target inode is busy
+    moved = &tmpfs_old_dentry->inode->vfs_inode;
+    existing_dentry =
+        __tmpfs_dir_lookup_by_name(tmpfs_new_dir, name, name_len);
+    if (existing_dentry != NULL) {
+        struct vfs_inode *existing = &existing_dentry->inode->vfs_inode;
+
+        if (existing == moved)
+            return 0;
+        if (S_ISDIR(moved->mode) && !S_ISDIR(existing->mode))
+            return -ENOTDIR;
+        if (!S_ISDIR(moved->mode) && S_ISDIR(existing->mode))
+            return -EISDIR;
+        if (S_ISDIR(existing->mode) &&
+            hlist_len(&existing_dentry->inode->dir.children) != 0)
+            return -ENOTEMPTY;
     }
-    target->n_links++;
 
     // Create a new dentry in the new directory
     ret = __tmpfs_dentry_name_copy(name, name_len, &new_entry);
     if (ret != 0) {
-        goto done;
+        return ret;
     }
     new_entry->inode = tmpfs_old_dentry->inode;
+
+    if (existing_dentry != NULL) {
+        struct vfs_inode *existing = &existing_dentry->inode->vfs_inode;
+
+        __tmpfs_do_unlink(existing_dentry);
+        if (S_ISDIR(existing->mode)) {
+            existing->n_links -= 2;
+            new_dir->n_links--;
+        } else {
+            existing->n_links--;
+        }
+        __tmpfs_free_dentry(existing_dentry);
+    }
+
+    moved->n_links++;
     ret = __tmpfs_do_link(tmpfs_new_dir, new_entry);
     if (ret != 0) {
-        goto done;
+        moved->n_links--;
+        __tmpfs_free_dentry(new_entry);
+        return ret;
     }
     __tmpfs_do_unlink(tmpfs_old_dentry);
-
-done:
-    target->n_links--;
-    if (ret != 0 && new_entry != NULL) {
-        __tmpfs_free_dentry(new_entry);
-    } else {
-        __tmpfs_free_dentry(tmpfs_old_dentry);
+    moved->n_links--;
+    if (S_ISDIR(moved->mode) && old_dir != new_dir) {
+        old_dir->n_links--;
+        new_dir->n_links++;
     }
-    return ret;
+    __tmpfs_free_dentry(tmpfs_old_dentry);
+    return 0;
 }
 
 struct vfs_inode *__tmpfs_symlink(struct vfs_inode *dir, mode_t mode,

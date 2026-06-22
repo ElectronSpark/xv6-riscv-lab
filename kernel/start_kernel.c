@@ -215,6 +215,7 @@ void start_kernel_post_init(void) {
     fbdevinit();       // Register /dev/fb0 (framebuffer, if Bochs VGA detected)
     ps2mouse_init();   // Register /dev/mouse (PS/2 mouse)
     ps2kbd_init();     // Register /dev/kbd (PS/2 keyboard)
+    evdev_init();      // Register Linux evdev-compatible input devices
     hyperv_input_init(); // optional Hyper-V synthetic HID mouse
     ttydevinit();      // Register /dev/tty (controlling terminal device)
     ptmxinit();        // Register /dev/ptmx (PTY multiplexer)

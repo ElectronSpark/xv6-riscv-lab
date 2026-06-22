@@ -100,6 +100,7 @@ void nullranddevinit(void);
 void ossaudiodevinit(void);
 void random_fill_bytes(void *buf, size_t count);
 void fbdevinit(void);
+void evdev_init(void);
 void fb_gpu_destroy_owner(pid_t owner_tgid);
 void fb_gpu_destroy_render_owner(uint64 owner_id);
 void ps2mouse_init(void);

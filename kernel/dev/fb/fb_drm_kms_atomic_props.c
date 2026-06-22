@@ -136,6 +136,7 @@ static int gpu_kms_collect_obj_props_locked(uint32 obj_id, uint32 obj_type,
         gpu_kms_push_prop(out, GPU_DRM_PROP_CRTC_ID, GPU_DRM_CRTC_ID);
         gpu_kms_push_prop(out, GPU_DRM_PROP_MODE_ID,
                           GPU_DRM_MODE_BLOB_ID);
+        gpu_kms_push_prop(out, GPU_DRM_PROP_DPMS, DRM_MODE_DPMS_ON);
         break;
     case DRM_MODE_OBJECT_PLANE:
         if (obj_id == GPU_DRM_CURSOR_PLANE_ID) {
@@ -272,6 +273,11 @@ static int gpu_kms_validate_prop_locked(struct fb_gpu_render_owner *owner,
             *new_fb_id = 0;
             *has_new_fb = 1;
         }
+        break;
+    case GPU_DRM_PROP_DPMS:
+        if (obj_id != GPU_DRM_CONNECTOR_ID ||
+            value > DRM_MODE_DPMS_OFF)
+            return -EINVAL;
         break;
     case GPU_DRM_PROP_PLANE_TYPE:
         if (obj_id == GPU_DRM_CURSOR_PLANE_ID) {

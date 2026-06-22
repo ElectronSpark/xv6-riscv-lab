@@ -404,10 +404,26 @@ static int timerfd_release(struct vfs_inode *ip, struct vfs_file *file)
     return 0;
 }
 
+static ssize_t timerfd_readlink(struct vfs_file *file, char *buf,
+                                size_t buflen)
+{
+    static const char target[] = "anon_inode:[timerfd]";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
+
 static struct vfs_file_ops timerfd_file_ops = {
     .read    = timerfd_read,
     .poll    = timerfd_poll,
     .release = timerfd_release,
+    .readlink = timerfd_readlink,
 };
 
 /* ── Helper: validate timerfd and get ctx ────────────────────────────── */

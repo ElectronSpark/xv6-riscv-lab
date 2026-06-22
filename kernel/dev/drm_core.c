@@ -90,9 +90,20 @@ int drm_core_get_magic(struct drm_core_file *file, uint64 arg)
 int drm_core_auth_magic(struct drm_core_file *file, uint64 arg)
 {
     struct drm_auth_compat req;
+    struct drm_core_device *dev;
+    int is_master;
 
     if (!drm_core_is_primary_like(file))
         return -EOPNOTSUPP;
+    dev = file->dev;
+    if (dev == NULL)
+        return -ENODEV;
+    spin_lock(&dev->lock);
+    is_master = file->is_master &&
+        dev->master_owner_cookie == file->owner_cookie;
+    spin_unlock(&dev->lock);
+    if (!is_master)
+        return -EACCES;
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
     if (req.magic == 0 || req.magic != file->magic)

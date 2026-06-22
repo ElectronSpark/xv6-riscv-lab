@@ -14,6 +14,7 @@
 #include <dev/cdev.h>
 #include <dev/ps2kbd.h>
 #include <dev/ps2mouse.h>
+#include <dev/evdev.h>
 #include <trap.h>
 #include <printf.h>
 #include <proc/thread.h>
@@ -224,6 +225,7 @@ void ps2kbd_handle_byte(uint8 scancode)
     ring_push(&ev);
     kbd_state.extended = 0;
     spin_unlock(&kbd_state.lock);
+    evdev_keyboard_event(&ev);
     wakeup_on_chan(&kbd_state.ring);
     cdev_knote_notify(&kbd_cdev, EVFILT_READ, 0);
 }

@@ -1577,7 +1577,9 @@ static int chrome_syscall_trace_process(struct thread *p)
     static int network_service_only;
     static int child_processes;
     static int crashpad_processes;
+    static char process_name[32];
     char value[8];
+    char name_value[sizeof(process_name)];
 
     if (!initialized) {
         network_service_only =
@@ -1592,10 +1594,29 @@ static int chrome_syscall_trace_process(struct thread *p)
             cmdline_get_param("chrome_syscall_trace_crashpad", value,
                               sizeof(value)) == 0 &&
             value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        if (cmdline_get_param("syscall_trace_name", name_value,
+                              sizeof(name_value)) == 0 &&
+            name_value[0] != '\0') {
+            safestrcpy(process_name, name_value, sizeof(process_name));
+        }
         initialized = 1;
     }
     if (p == NULL)
         return 0;
+    if (process_name[0] != '\0') {
+        const char *exec_path = "";
+        const char *base;
+
+        if (strncmp(p->name, process_name, sizeof(p->name)) == 0)
+            return 1;
+        if (p->thread_group != NULL &&
+            p->thread_group->exec_path[0] != '\0')
+            exec_path = p->thread_group->exec_path;
+        base = strrchr(exec_path, '/');
+        base = base ? base + 1 : exec_path;
+        if (strcmp(base, process_name) == 0)
+            return 1;
+    }
     int is_crashpad = strncmp(p->name, "chrome_crashpad", 15) == 0;
     if (is_crashpad)
         return crashpad_processes;

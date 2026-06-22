@@ -117,6 +117,7 @@ struct unix_scm_entry {
  */
 struct unix_sock {
     spinlock_t lock;            /* protects most fields */
+    uint64     proc_ino;        /* procfs socket:[N] identity */
     int        refcount;        /* atomic reference count */
     int        state;           /* UNIX_STATE_* */
     int        type;            /* SOCK_STREAM, SOCK_SEQPACKET, or SOCK_DGRAM */

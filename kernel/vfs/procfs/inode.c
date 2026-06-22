@@ -101,6 +101,10 @@ static const struct procfs_static_entry procfs_pid_entries[] = {
     {"fdinfo", 0},
     {"ns", 0},
     {"setgroups", 0},
+    {"root", 0},
+    {"wchan", 0},
+    {"syscall", 0},
+    {"stack", 0},
 };
 
 static const struct procfs_static_entry procfs_task_entries[] = {
@@ -121,6 +125,9 @@ static const struct procfs_static_entry procfs_task_entries[] = {
     {"fd", 0},
     {"fdinfo", 0},
     {"ns", 0},
+    {"wchan", 0},
+    {"syscall", 0},
+    {"stack", 0},
 };
 
 struct procfs_ns_desc {
@@ -243,13 +250,22 @@ static uint64 procfs_pid_entry_ino(int tgid, int child_idx)
     case 19: return PROCFS_PID_FDINFODIR_INO(tgid);
     case 20: return PROCFS_PID_NS_DIR_INO(tgid);
     case 21: return PROCFS_PID_SETGROUPS_INO(tgid);
+    case 22: return PROCFS_PID_ROOT_INO(tgid);
+    case 23: return PROCFS_PID_WCHAN_INO(tgid);
+    case 24: return PROCFS_PID_SYSCALL_INO(tgid);
+    case 25: return PROCFS_PID_STACK_INO(tgid);
     default: return 0;
     }
 }
 
 static uint64 procfs_task_entry_ino(int tgid, int tid, int child_idx)
 {
-    return PROCFS_TASK_INO(tgid, tid, child_idx + 1);
+    switch (child_idx) {
+    case 17: return PROCFS_TASK_INO(tgid, tid, 28);
+    case 18: return PROCFS_TASK_INO(tgid, tid, 29);
+    case 19: return PROCFS_TASK_INO(tgid, tid, 30);
+    default: return PROCFS_TASK_INO(tgid, tid, child_idx + 1);
+    }
 }
 
 static int procfs_lookup_ns_entry(const char *name, size_t name_len)
@@ -836,6 +852,10 @@ static ssize_t procfs_readlink(struct vfs_inode *inode, char *buf,
         memmove(buf, exec_path, len + 1);
         return (ssize_t)len;
     }
+
+    case PROC_PID_ROOT:
+        n = snprintf(buf, buflen, "/");
+        return n;
 
     case PROC_PID_NS_ENTRY:
     case PROC_TASK_NS_ENTRY: {
@@ -1922,6 +1942,106 @@ static char *procfs_gen_pid_stat(int tgid)
     return buf;
 }
 
+static char *procfs_gen_wchan(int tid)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tid, &p);
+    if (p == NULL) {
+        rcu_read_unlock();
+        kvfree(buf);
+        return ERR_PTR(-ESRCH);
+    }
+
+    enum thread_state state = __thread_state_get(p);
+    void *chan = p->chan;
+    rcu_read_unlock();
+
+    if (THREAD_IS_SLEEPING(state) && chan != NULL)
+        snprintf(buf, PROCFS_BUF_SIZE, "chan:0x%lx\n", (uint64)chan);
+    else
+        snprintf(buf, PROCFS_BUF_SIZE, "0\n");
+    return buf;
+}
+
+static char *procfs_gen_syscall_snapshot(int tid)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tid, &p);
+    if (p == NULL || p->trapframe == NULL) {
+        rcu_read_unlock();
+        kvfree(buf);
+        return ERR_PTR(-ESRCH);
+    }
+
+    struct trapframe tf = p->trapframe->trapframe;
+    enum thread_state state = __thread_state_get(p);
+    rcu_read_unlock();
+
+    if (state == THREAD_RUNNING) {
+        snprintf(buf, PROCFS_BUF_SIZE, "running\n");
+        return buf;
+    }
+
+    snprintf(buf, PROCFS_BUF_SIZE,
+             "%ld 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx\n",
+             (long)tf.rax, tf.rdi, tf.rsi, tf.rdx, tf.r10, tf.r8, tf.r9,
+             tf.rsp, tf.rip);
+    return buf;
+}
+
+static char *procfs_gen_stack_snapshot(int tid)
+{
+    char *buf = kvmalloc(PROCFS_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tid, &p);
+    if (p == NULL) {
+        rcu_read_unlock();
+        kvfree(buf);
+        return ERR_PTR(-ESRCH);
+    }
+
+    enum thread_state state = __thread_state_get(p);
+    void *chan = p->chan;
+    uint64 ctx_rsp = 0;
+    uint64 ctx_rbp = 0;
+    uint64 user_rip = 0;
+    uint64 user_rsp = 0;
+    uint64 syscall_no = 0;
+
+    if (p->sched_entity != NULL) {
+        ctx_rsp = p->sched_entity->context.rsp;
+        ctx_rbp = p->sched_entity->context.rbp;
+    }
+    if (p->trapframe != NULL) {
+        user_rip = p->trapframe->trapframe.rip;
+        user_rsp = p->trapframe->trapframe.rsp;
+        syscall_no = p->trapframe->trapframe.rax;
+    }
+    rcu_read_unlock();
+
+    snprintf(buf, PROCFS_BUF_SIZE,
+             "[<0>] xv6_thread_state+0x0/0x0 state=%s chan=0x%lx syscall=%lu\n"
+             "[<0>] xv6_kernel_context+0x0/0x0 rsp=0x%lx rbp=0x%lx\n"
+             "[<0>] xv6_user_context+0x0/0x0 rip=0x%lx rsp=0x%lx\n",
+             thread_state_to_str(state), (uint64)chan, syscall_no,
+             ctx_rsp, ctx_rbp, user_rip, user_rsp);
+    return buf;
+}
+
 static struct procfs_blob *procfs_blob_alloc(size_t len)
 {
     struct procfs_blob *blob = kvmalloc(sizeof(*blob) + len + 1);
@@ -1985,147 +2105,6 @@ static struct procfs_blob *procfs_gen_pid_snapshot_blob(int tgid,
     blob->len = len;
     pid_runlock();
     return blob;
-}
-
-static struct procfs_blob *procfs_gen_pid_exec_blob(int tgid,
-                                                    enum procfs_entry_type type)
-{
-    struct procfs_blob *blob =
-        procfs_blob_alloc(TG_EXEC_SNAPSHOT_MAX_BYTES);
-    if (IS_ERR(blob))
-        return blob;
-
-    uint64 addrs[MAXARG > MAXENV ? MAXARG : MAXENV] = {0};
-    size_t lens[MAXARG > MAXENV ? MAXARG : MAXENV] = {0};
-    size_t count = 0;
-    vm_t *target_vm = NULL;
-
-    pid_rlock();
-    struct thread *p = NULL;
-    get_pid_thread(tgid, &p);
-    if (p == NULL || p->thread_group == NULL) {
-        pid_runlock();
-        kvfree(blob);
-        return ERR_PTR(-ESRCH);
-    }
-
-    const struct thread_group_exec_snapshot *snap =
-        &p->thread_group->exec_snapshot;
-    const char *fallback = NULL;
-    size_t fallback_len = 0;
-
-    switch (type) {
-    case PROC_PID_CMDLINE:
-    case PROC_TASK_CMDLINE:
-        fallback = snap->cmdline;
-        fallback_len = snap->cmdline_len;
-        count = snap->cmdline_argc;
-        if (count > MAXARG)
-            count = MAXARG;
-        memmove(addrs, snap->cmdline_addrs, count * sizeof(addrs[0]));
-        memmove(lens, snap->cmdline_lens, count * sizeof(lens[0]));
-        break;
-    case PROC_PID_ENVIRON:
-    case PROC_TASK_ENVIRON:
-        fallback = snap->environ;
-        fallback_len = snap->environ_len;
-        count = snap->environ_count;
-        if (count > MAXENV)
-            count = MAXENV;
-        memmove(addrs, snap->environ_addrs, count * sizeof(addrs[0]));
-        memmove(lens, snap->environ_lens, count * sizeof(lens[0]));
-        break;
-    default:
-        pid_runlock();
-        kvfree(blob);
-        return ERR_PTR(-EINVAL);
-    }
-
-    if (fallback_len > TG_EXEC_SNAPSHOT_MAX_BYTES)
-        fallback_len = TG_EXEC_SNAPSHOT_MAX_BYTES;
-    if (fallback != NULL && fallback_len != 0)
-        memmove(blob->data, fallback, fallback_len);
-    blob->len = fallback_len;
-
-    if (p->vm != NULL && count != 0) {
-        target_vm = p->vm;
-        vm_dup(target_vm);
-    }
-    pid_runlock();
-
-    if (target_vm == NULL)
-        return blob;
-
-    size_t pos = 0;
-    int live_ok = 1;
-    memset(blob->data, 0, TG_EXEC_SNAPSHOT_MAX_BYTES);
-    for (size_t i = 0; i < count && pos < TG_EXEC_SNAPSHOT_MAX_BYTES; i++) {
-        size_t len = lens[i];
-        if (addrs[i] == 0 || len == 0)
-            continue;
-        if (len > TG_EXEC_SNAPSHOT_MAX_BYTES - pos)
-            len = TG_EXEC_SNAPSHOT_MAX_BYTES - pos;
-        if (vm_copyin(target_vm, blob->data + pos, addrs[i], len) != 0) {
-            live_ok = 0;
-            break;
-        }
-        pos += len;
-    }
-    vm_put(target_vm);
-
-    if (live_ok) {
-        blob->len = pos;
-        blob->data[blob->len] = '\0';
-        return blob;
-    }
-
-    memset(blob->data, 0, TG_EXEC_SNAPSHOT_MAX_BYTES);
-    pid_rlock();
-    p = NULL;
-    get_pid_thread(tgid, &p);
-    if (p == NULL || p->thread_group == NULL) {
-        pid_runlock();
-        blob->len = 0;
-        return blob;
-    }
-    snap = &p->thread_group->exec_snapshot;
-    fallback = NULL;
-    fallback_len = 0;
-    if (type == PROC_PID_CMDLINE || type == PROC_TASK_CMDLINE) {
-        fallback = snap->cmdline;
-        fallback_len = snap->cmdline_len;
-    } else {
-        fallback = snap->environ;
-        fallback_len = snap->environ_len;
-    }
-    if (fallback_len > TG_EXEC_SNAPSHOT_MAX_BYTES)
-        fallback_len = TG_EXEC_SNAPSHOT_MAX_BYTES;
-    if (fallback != NULL && fallback_len != 0)
-        memmove(blob->data, fallback, fallback_len);
-    blob->len = fallback_len;
-    pid_runlock();
-    return blob;
-}
-
-static char *procfs_gen_pid_comm(int tgid)
-{
-    rcu_read_lock();
-    struct thread *p = NULL;
-    get_pid_thread(tgid, &p);
-    if (p == NULL) {
-        rcu_read_unlock();
-        return ERR_PTR(-ESRCH);
-    }
-    char name[17];
-    memmove(name, p->name, 16);
-    name[16] = '\0';
-    rcu_read_unlock();
-
-    char *buf = kvmalloc(PROCFS_BUF_SIZE);
-    if (buf == NULL)
-        return ERR_PTR(-ENOMEM);
-    snprintf(buf, PROCFS_BUF_SIZE, "%s\n", name);
-    return buf;
 }
 
 static char *procfs_gen_sys_file(enum procfs_entry_type type)
@@ -2314,12 +2293,23 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         return 0;
     }
 
+    if (pi->type == PROC_PID_COMM || pi->type == PROC_TASK_COMM) {
+        struct procfs_pid_file *pf = kvmalloc(sizeof(*pf));
+        if (pf == NULL)
+            return -ENOMEM;
+        pf->pid = pi->type == PROC_TASK_COMM ? pi->tid : pi->pid;
+        file->private_data = pf;
+        file->ops = &procfs_comm_file_ops;
+        return 0;
+    }
+
     if (pi->type == PROC_PID_MEM || pi->type == PROC_TASK_MEM)
         return procfs_open_mem(pi, file, f_flags);
 
     /* Regular file: generate content into a heap buffer */
     char *buf = NULL;
     struct procfs_blob *blob = NULL;
+    bool mountinfo_pollable = false;
 
     switch (pi->type) {
     case PROC_STATUS:
@@ -2334,15 +2324,27 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_TASK_STAT:
         buf = procfs_gen_pid_stat(pi->tid);
         break;
+    case PROC_PID_WCHAN:
+        buf = procfs_gen_wchan(pi->pid);
+        break;
+    case PROC_TASK_WCHAN:
+        buf = procfs_gen_wchan(pi->tid);
+        break;
+    case PROC_PID_SYSCALL:
+        buf = procfs_gen_syscall_snapshot(pi->pid);
+        break;
+    case PROC_TASK_SYSCALL:
+        buf = procfs_gen_syscall_snapshot(pi->tid);
+        break;
+    case PROC_PID_STACK:
+        buf = procfs_gen_stack_snapshot(pi->pid);
+        break;
+    case PROC_TASK_STACK:
+        buf = procfs_gen_stack_snapshot(pi->tid);
+        break;
     case PROC_PID_CMDLINE:
     case PROC_TASK_CMDLINE:
-        blob = procfs_gen_pid_exec_blob(pi->pid, pi->type);
-        break;
-    case PROC_PID_COMM:
-        buf = procfs_gen_pid_comm(pi->pid);
-        break;
-    case PROC_TASK_COMM:
-        buf = procfs_gen_pid_comm(pi->tid);
+        blob = procfs_gen_pid_snapshot_blob(pi->pid, pi->type);
         break;
     case PROC_STATM:
     case PROC_TASK_STATM:
@@ -2399,6 +2401,7 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
     case PROC_PID_MOUNTINFO:
     case PROC_TASK_MOUNTINFO:
         buf = procfs_gen_mountinfo();
+        mountinfo_pollable = true;
         break;
     case PROC_PID_LIMITS:
     case PROC_TASK_LIMITS:
@@ -2409,7 +2412,7 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_PID_ENVIRON:
     case PROC_TASK_ENVIRON:
-        blob = procfs_gen_pid_exec_blob(pi->pid, pi->type);
+        blob = procfs_gen_pid_snapshot_blob(pi->pid, pi->type);
         break;
     case PROC_PID_AUXV:
     case PROC_TASK_AUXV:
@@ -2466,7 +2469,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         return -ENOMEM;
 
     file->private_data = buf;
-    file->ops          = &procfs_reg_file_ops;
+    file->ops          = mountinfo_pollable
+        ? &procfs_mountinfo_file_ops
+        : &procfs_reg_file_ops;
     return 0;
 }
 

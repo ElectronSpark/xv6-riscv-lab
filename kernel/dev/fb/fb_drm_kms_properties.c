@@ -3,7 +3,7 @@ static int gpu_drm_mode_getproperty(uint64 arg)
     struct drm_mode_get_property_compat req;
     const char *name;
     uint64 values[2];
-    struct drm_mode_property_enum_compat enums[3];
+    struct drm_mode_property_enum_compat enums[4];
     uint32 count_values;
     uint32 count_enums;
     int ret;
@@ -288,7 +288,8 @@ static int gpu_drm_mode_getplane(uint64 arg)
         !fb_state.current_cursor_visible ? 0 : GPU_DRM_CRTC_ID;
     req.fb_id = current_fb;
     req.possible_crtcs = 1;
-    req.gamma_size = 0;
+    req.gamma_size = req.plane_id == GPU_DRM_PRIMARY_PLANE_ID ?
+        GPU_DRM_GAMMA_LUT_SIZE : 0;
     req.count_format_types = format_count;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
@@ -774,7 +775,13 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
          * falls back to the existing CPU/readback path when the BO is not
          * virtio-resource backed.
          */
-        present.flags = FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT;
+        if (fb_cmdline_enabled("virtio_gpu_pageflip_copy") &&
+            !fb_cmdline_enabled("virtio_gpu_disable_pageflip_copy")) {
+            present.flags = FB_GPU_BO_PRESENT_F_VIRGL_COPY |
+                            FB_GPU_BO_PRESENT_F_READBACK_FALLBACK;
+        } else {
+            present.flags = FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT;
+        }
     }
     ret = fb_blit_from_bo_format(bo, present, pixel_format, modifier,
                                  &fence, NULL);
@@ -822,8 +829,15 @@ static int gpu_kms_present_fb_rect(struct fb_gpu_render_owner *owner,
     if (fb->modifier == DRM_FORMAT_MOD_LINEAR &&
         !fb_scanout_format_needs_rb_swap(fb->pixel_format) &&
         bo->virtio_resource_id != 0 &&
-        !fb_cmdline_enabled("virtio_gpu_no_kms_resource_scanout"))
-        present.flags = FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT;
+        !fb_cmdline_enabled("virtio_gpu_no_kms_resource_scanout")) {
+        if (fb_cmdline_enabled("virtio_gpu_pageflip_copy") &&
+            !fb_cmdline_enabled("virtio_gpu_disable_pageflip_copy")) {
+            present.flags = FB_GPU_BO_PRESENT_F_VIRGL_COPY |
+                            FB_GPU_BO_PRESENT_F_READBACK_FALLBACK;
+        } else {
+            present.flags = FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT;
+        }
+    }
 
     ret = fb_blit_from_bo_format(bo, present, fb->pixel_format,
                                  fb->modifier, &fence, NULL);

@@ -46,6 +46,7 @@ struct fb_gpu_render_owner;
 #define GPU_DRM_PROP_IN_FORMATS               25
 #define GPU_DRM_PROP_HOTSPOT_X                26
 #define GPU_DRM_PROP_HOTSPOT_Y                27
+#define GPU_DRM_PROP_DPMS                     28
 
 /*
  * Private compatibility placement labels. The implementation is sysmem-backed

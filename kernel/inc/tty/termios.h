@@ -152,6 +152,7 @@ struct termios {
 #define TIOCSCTTY 0x540E  /* Set controlling terminal */
 #define TIOCGPTN   0x80045430 /* Get PTY slave number */
 #define TIOCSPTLCK 0x40045431 /* Lock/unlock PTY slave */
+#define TIOCGPTPEER 0x5441    /* Safely open PTY slave */
 #define TIOCNOTTY  0x5422     /* Detach from controlling terminal */
 
 /* Window size structure */

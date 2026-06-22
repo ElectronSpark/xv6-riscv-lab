@@ -25,6 +25,7 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
+#include "vfs/poll.h"
 #include "lock/rcu.h"
 #include "list.h"
 #include <mm/slab.h>
@@ -121,6 +122,155 @@ struct vfs_file_ops procfs_reg_file_ops = {
     .read    = procfs_reg_read,
     .llseek  = procfs_reg_llseek,
     .release = procfs_reg_release,
+};
+
+static int procfs_comm_get_thread(int pid, struct thread **out)
+{
+    if (out == NULL)
+        return -EINVAL;
+
+    rcu_read_lock();
+    struct thread *p = NULL;
+    if (get_pid_thread(pid, &p) != 0 || p == NULL) {
+        rcu_read_unlock();
+        *out = NULL;
+        return -ESRCH;
+    }
+
+    *out = p;
+    return 0;
+}
+
+static ssize_t procfs_comm_read(struct vfs_file *file, char *buf, size_t count,
+                                bool user)
+{
+    struct procfs_pid_file *pf = (struct procfs_pid_file *)file->private_data;
+    if (pf == NULL)
+        return -EIO;
+
+    struct thread *p = NULL;
+    int ret = procfs_comm_get_thread(pf->pid, &p);
+    if (ret < 0)
+        return ret;
+
+    char data[17];
+    memmove(data, p->name, 15);
+    data[15] = '\n';
+    data[16] = '\0';
+    rcu_read_unlock();
+
+    size_t size = strlen(data);
+    loff_t pos = file->f_pos;
+    if (pos < 0 || (uint64)pos >= size)
+        return 0;
+
+    size_t remaining = size - (size_t)pos;
+    size_t chunk = count < remaining ? count : remaining;
+    if (user) {
+        ret = either_copyout(1, (uint64)buf, data + pos, chunk);
+        if (ret < 0)
+            return ret;
+    } else {
+        memmove(buf, data + pos, chunk);
+    }
+    return (ssize_t)chunk;
+}
+
+static ssize_t procfs_comm_write(struct vfs_file *file, const char *buf,
+                                 size_t count, bool user)
+{
+    struct procfs_pid_file *pf = (struct procfs_pid_file *)file->private_data;
+    if (pf == NULL)
+        return -EIO;
+    if (count == 0)
+        return 0;
+
+    size_t copy = count < 15 ? count : 15;
+    char name[16];
+    memset(name, 0, sizeof(name));
+    if (user) {
+        int ret = either_copyin(name, 1, (uint64)buf, copy);
+        if (ret < 0)
+            return ret;
+    } else {
+        memmove(name, buf, copy);
+    }
+    for (size_t i = 0; i < copy; i++) {
+        if (name[i] == '\n' || name[i] == '\0') {
+            name[i] = '\0';
+            break;
+        }
+    }
+
+    struct thread *p = NULL;
+    int ret = procfs_comm_get_thread(pf->pid, &p);
+    if (ret < 0)
+        return ret;
+
+    memmove(p->name, name, sizeof(name));
+    rcu_read_unlock();
+    file->f_pos += (loff_t)count;
+    return (ssize_t)count;
+}
+
+static loff_t procfs_comm_llseek(struct vfs_file *file, loff_t offset,
+                                 int whence)
+{
+    char data[17];
+    struct procfs_pid_file *pf = (struct procfs_pid_file *)file->private_data;
+    if (pf == NULL)
+        return -EIO;
+
+    struct thread *p = NULL;
+    int ret = procfs_comm_get_thread(pf->pid, &p);
+    if (ret < 0)
+        return ret;
+    memmove(data, p->name, 15);
+    data[15] = '\n';
+    data[16] = '\0';
+    rcu_read_unlock();
+
+    loff_t size = (loff_t)strlen(data);
+    loff_t new_pos;
+    switch (whence) {
+    case SEEK_SET:
+        new_pos = offset;
+        break;
+    case SEEK_CUR:
+        new_pos = file->f_pos + offset;
+        break;
+    case SEEK_END:
+        new_pos = size + offset;
+        break;
+    default:
+        return -EINVAL;
+    }
+    if (new_pos < 0)
+        new_pos = 0;
+    if (new_pos > size)
+        new_pos = size;
+    file->f_pos = new_pos;
+    return new_pos;
+}
+
+struct vfs_file_ops procfs_comm_file_ops = {
+    .read    = procfs_comm_read,
+    .write   = procfs_comm_write,
+    .llseek  = procfs_comm_llseek,
+    .release = procfs_reg_release,
+};
+
+static int procfs_mountinfo_poll(struct vfs_file *file, short events)
+{
+    (void)file;
+    return events & (POLLIN | POLLRDNORM | POLLRDBAND);
+}
+
+struct vfs_file_ops procfs_mountinfo_file_ops = {
+    .read    = procfs_reg_read,
+    .llseek  = procfs_reg_llseek,
+    .release = procfs_reg_release,
+    .poll    = procfs_mountinfo_poll,
 };
 
 static ssize_t procfs_blob_read(struct vfs_file *file, char *buf, size_t count,

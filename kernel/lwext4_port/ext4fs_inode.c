@@ -1096,7 +1096,8 @@ static struct vfs_inode *ext4fs_mknod(struct vfs_inode *dir, mode_t mode,
 {
     if (dir == NULL || name == NULL || name_len == 0)
         return ERR_PTR(-EINVAL);
-    if (!S_ISBLK(mode) && !S_ISCHR(mode))
+    if (!S_ISBLK(mode) && !S_ISCHR(mode) && !S_ISFIFO(mode) &&
+        !S_ISSOCK(mode))
         return ERR_PTR(-EINVAL);
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(dir->sb);
@@ -1110,7 +1111,7 @@ static struct vfs_inode *ext4fs_mknod(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(-r);
     }
 
-    int de_type = S_ISCHR(mode) ? EXT4_DE_CHRDEV : EXT4_DE_BLKDEV;
+    int de_type = vfs_mode_to_ext4_filetype(mode);
     struct ext4_inode_ref child_ref;
     r = ext4_fs_alloc_inode(fs, &child_ref, de_type);
     if (r != EOK) {
@@ -1122,7 +1123,8 @@ static struct vfs_inode *ext4fs_mknod(struct vfs_inode *dir, mode_t mode,
     ext4_inode_set_mode(&fs->sb, child_ref.inode,
                         vfs_mode_to_ext4_imode(mode));
     ext4_inode_set_links_cnt(child_ref.inode, 1);
-    ext4_inode_set_dev(child_ref.inode, (uint32_t)dev);
+    if (S_ISCHR(mode) || S_ISBLK(mode))
+        ext4_inode_set_dev(child_ref.inode, (uint32_t)dev);
     {
         uint32_t now = (uint32_t)goldfish_rtc_read_sec();
         ext4_inode_set_access_time(child_ref.inode, now);
@@ -1157,7 +1159,7 @@ static struct vfs_inode *ext4fs_mknod(struct vfs_inode *dir, mode_t mode,
 
     if (S_ISCHR(mode))
         new_inode->cdev = dev;
-    else
+    else if (S_ISBLK(mode))
         new_inode->bdev = dev;
 
     return new_inode;

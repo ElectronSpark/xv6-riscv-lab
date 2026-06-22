@@ -326,7 +326,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             break;
         case 10: /* /proc/<tgid>/comm */
             pi->type              = PROC_PID_COMM;
-            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.mode    = S_IFREG | 0644;
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 64;
             break;
@@ -406,6 +406,30 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 8;
             break;
+        case 33: /* /proc/<tgid>/root */
+            pi->type              = PROC_PID_ROOT;
+            pi->vfs_inode.mode    = S_IFLNK | 0777;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 1;
+            break;
+        case 34: /* /proc/<tgid>/wchan */
+            pi->type              = PROC_PID_WCHAN;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 64;
+            break;
+        case 35: /* /proc/<tgid>/syscall */
+            pi->type              = PROC_PID_SYSCALL;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 128;
+            break;
+        case 36: /* /proc/<tgid>/stack */
+            pi->type              = PROC_PID_STACK;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 512;
+            break;
         default:
             slab_free(pi);
             return ERR_PTR(-ENOENT);
@@ -455,7 +479,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         int    tid    = (int)(rem / PROCFS_TASK_TID_STRIDE);
         int    slot   = (int)(rem % PROCFS_TASK_TID_STRIDE);
 
-        if (tgid <= 0 || tid <= 0 || slot < 0 || slot > 27) {
+        if (tgid <= 0 || tid <= 0 || slot < 0 || slot > 30) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -500,7 +524,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             break;
         case 4: /* comm */
             pi->type              = PROC_TASK_COMM;
-            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.mode    = S_IFREG | 0644;
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 64;
             break;
@@ -585,6 +609,24 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->vfs_inode.mode    = S_IFLNK | 0777;
             pi->vfs_inode.n_links = 1;
             pi->vfs_inode.size    = 64;
+            break;
+        case 28: /* wchan */
+            pi->type              = PROC_TASK_WCHAN;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 64;
+            break;
+        case 29: /* syscall */
+            pi->type              = PROC_TASK_SYSCALL;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 128;
+            break;
+        case 30: /* stack */
+            pi->type              = PROC_TASK_STACK;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 512;
             break;
         default:
             slab_free(pi);

@@ -430,6 +430,26 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
 /*  Read (user → input pipe)                                          */
 /* ------------------------------------------------------------------ */
 
+static int tty_current_read_error(struct tty *tty) {
+    struct session *sess = tty->session;
+    pid_t fg;
+
+    if (sess == NULL || current == NULL || current->session != sess)
+        return (sess != NULL && current != NULL) ? -EIO : 0;
+
+    fg = session_get_fg_pgid(sess);
+    if (fg <= 0 || current->pgid == fg)
+        return 0;
+
+    /*
+     * Linux sends SIGTTIN when a background process group attempts to read
+     * from its controlling terminal.  This prevents daemons and desktop
+     * helpers from draining the interactive console behind the shell.
+     */
+    pgroup_kill(current->pgid, SIGTTIN);
+    return -EINTR;
+}
+
 /*
  * tty_read - read data from the terminal
  *
@@ -446,6 +466,11 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
  */
 ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user) {
     ssize_t total = 0;
+    int err;
+
+    err = tty_current_read_error(tty);
+    if (err < 0)
+        return err;
 
     spin_lock(&tty->lock);
     while ((size_t)total < count) {

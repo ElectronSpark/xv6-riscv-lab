@@ -10,54 +10,78 @@
 
 #include "types.h"
 
-/* c_cc characters */
-#define VINTR 0  /* Interrupt character (^C) - ASCII: 0x03 */
-#define VQUIT 1  /* Quit character (^\) - ASCII: 0x1C */
-#define VERASE 2 /* Erase character (^H/DEL) - ASCII: 0x08/0x7F */
-#define VKILL 3  /* Kill line character (^U) - ASCII: 0x15 */
-#define VEOF 4   /* EOF character (^D) - ASCII: 0x04 */
-#define VTIME 5  /* Timeout for non-canonical read */
-#define VMIN 6   /* Minimum chars for non-canonical read */
-#define VSTART 7 /* Start character (^Q) - ASCII: 0x11 */
-#define VSTOP 8  /* Stop character (^S) - ASCII: 0x13 */
-#define VSUSP 9  /* Suspend character (^Z) - ASCII: 0x1A */
-#define VEOL 10  /* End of line - ASCII: 0x00 */
-#define NCCS 16  /* Size of c_cc array */
+/* c_cc characters — must match Linux generic and musl indices. */
+#define VINTR 0
+#define VQUIT 1
+#define VERASE 2
+#define VKILL 3
+#define VEOF 4
+#define VTIME 5
+#define VMIN 6
+#define VSWTC 7
+#define VSTART 8
+#define VSTOP 9
+#define VSUSP 10
+#define VEOL 11
+#define VREPRINT 12
+#define VDISCARD 13
+#define VWERASE 14
+#define VLNEXT 15
+#define VEOL2 16
+#define NCCS 32
 
-/* c_iflag bits */
-#define IGNBRK 0x0001 /* Ignore break condition */
-#define BRKINT 0x0002 /* Signal interrupt on break */
-#define IGNPAR 0x0004 /* Ignore parity errors */
-#define PARMRK 0x0008 /* Mark parity errors */
-#define INPCK 0x0010  /* Enable input parity check */
-#define ISTRIP 0x0020 /* Strip 8th bit */
-#define INLCR 0x0040  /* Translate NL to CR */
-#define IGNCR 0x0080  /* Ignore CR */
-#define ICRNL 0x0100  /* Translate CR to NL */
-#define IXON 0x0200   /* Enable start/stop output control */
-#define IXOFF 0x0400  /* Enable start/stop input control */
+/* c_iflag bits — Linux generic values. */
+#define IGNBRK  0x0001
+#define BRKINT  0x0002
+#define IGNPAR  0x0004
+#define PARMRK  0x0008
+#define INPCK   0x0010
+#define ISTRIP  0x0020
+#define INLCR   0x0040
+#define IGNCR   0x0080
+#define ICRNL   0x0100
+#define IUCLC   0x0200
+#define IXON    0x0400
+#define IXANY   0x0800
+#define IXOFF   0x1000
+#define IMAXBEL 0x2000
+#define IUTF8   0x4000
 
-/* c_oflag bits */
-#define OPOST 0x0001 /* Post-process output */
-#define ONLCR 0x0002 /* Map NL to CR-NL */
+/* c_oflag bits — Linux generic values. */
+#define OPOST  0x0001
+#define OLCUC  0x0002
+#define ONLCR  0x0004
+#define OCRNL  0x0008
+#define ONOCR  0x0010
+#define ONLRET 0x0020
 
-/* c_cflag bits (simplified) */
-#define CSIZE 0x0030  /* Character size mask */
-#define CS5 0x0000    /* 5 bits */
-#define CS6 0x0010    /* 6 bits */
-#define CS7 0x0020    /* 7 bits */
-#define CS8 0x0030    /* 8 bits */
-#define CREAD 0x0080  /* Enable receiver */
-#define CLOCAL 0x0800 /* Ignore modem status lines */
+/* c_cflag bits — Linux generic values. */
+#define CSIZE  0x0030
+#define CS5    0x0000
+#define CS6    0x0010
+#define CS7    0x0020
+#define CS8    0x0030
+#define CSTOPB 0x0040
+#define CREAD  0x0080
+#define PARENB 0x0100
+#define PARODD 0x0200
+#define HUPCL  0x0400
+#define CLOCAL 0x0800
 
-/* c_lflag bits */
-#define ISIG 0x0001   /* Enable signals (INTR, QUIT, SUSP) */
-#define ICANON 0x0002 /* Canonical mode (line buffering) */
-#define ECHO 0x0008   /* Echo input characters */
-#define ECHOE 0x0010  /* Echo ERASE as backspace-space-backspace */
-#define ECHOK 0x0020  /* Echo NL after KILL */
-#define ECHONL 0x0040 /* Echo NL even if ECHO is off */
-#define IEXTEN 0x0100 /* Enable extended input processing */
+/* c_lflag bits — Linux generic values. */
+#define ISIG    0x0001
+#define ICANON  0x0002
+#define XCASE   0x0004
+#define ECHO    0x0008
+#define ECHOE   0x0010
+#define ECHOK   0x0020
+#define ECHONL  0x0040
+#define NOFLSH  0x0080
+#define TOSTOP  0x0100
+#define ECHOCTL 0x0200
+#define ECHOPRT 0x0400
+#define ECHOKE  0x0800
+#define IEXTEN  0x8000
 
 /* tcsetattr optional_actions */
 #define TCSANOW 0   /* Change immediately */
@@ -75,13 +99,25 @@
 #define TCIOFF 2 /* Transmit STOP character */
 #define TCION 3  /* Transmit START character */
 
-/* Speed values (baud rates) - simplified */
-#define B0 0
-#define B9600 9600
-#define B19200 19200
-#define B38400 38400
-#define B57600 57600
-#define B115200 115200
+/* Speed values — Linux generic enumeration. */
+#define B0      0x0000
+#define B50     0x0001
+#define B75     0x0002
+#define B110    0x0003
+#define B134    0x0004
+#define B150    0x0005
+#define B200    0x0006
+#define B300    0x0007
+#define B600    0x0008
+#define B1200   0x0009
+#define B1800   0x000A
+#define B2400   0x000B
+#define B4800   0x000C
+#define B9600   0x000D
+#define B19200  0x000E
+#define B38400  0x000F
+#define B57600  0x1001
+#define B115200 0x1002
 
 typedef uint32 tcflag_t;
 typedef uint8 cc_t;
@@ -92,6 +128,7 @@ struct termios {
     tcflag_t c_oflag; /* Output mode flags */
     tcflag_t c_cflag; /* Control mode flags */
     tcflag_t c_lflag; /* Local mode flags */
+    cc_t c_line;      /* Line discipline */
     cc_t c_cc[NCCS];  /* Control characters */
     speed_t c_ispeed; /* Input speed */
     speed_t c_ospeed; /* Output speed */
@@ -107,7 +144,10 @@ struct termios {
 #define TIOCGPGRP 0x540F  /* Get foreground process group */
 #define TIOCSPGRP 0x5410  /* Set foreground process group */
 #define TIOCSCTTY 0x540E  /* Set controlling terminal */
-#define TIOCGPTN  0x80045430 /* Get PTY slave number */
+#define TIOCGPTN   0x80045430 /* Get PTY slave number */
+#define TIOCSPTLCK 0x40045431 /* Lock/unlock PTY slave */
+#define TIOCGPTPEER 0x5441    /* Safely open PTY slave */
+#define TIOCNOTTY  0x5422     /* Detach from controlling terminal */
 
 /* Window size structure */
 struct winsize {

@@ -73,9 +73,25 @@ static int pidfd_release(struct vfs_inode *ip, struct vfs_file *file)
     return 0;
 }
 
+static ssize_t pidfd_readlink(struct vfs_file *file, char *buf,
+                              size_t buflen)
+{
+    static const char target[] = "anon_inode:[pidfd]";
+    size_t len = sizeof(target) - 1;
+
+    (void)file;
+    if (buflen != 0) {
+        size_t copy = len < buflen - 1 ? len : buflen - 1;
+        memmove(buf, target, copy);
+        buf[copy] = '\0';
+    }
+    return (ssize_t)len;
+}
+
 static struct vfs_file_ops pidfd_file_ops = {
     .poll = pidfd_poll,
     .release = pidfd_release,
+    .readlink = pidfd_readlink,
 };
 
 static void pidfd_close_installed_fd(int fd)

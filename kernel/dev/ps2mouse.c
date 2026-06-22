@@ -14,6 +14,7 @@
 #include <dev/cdev.h>
 #include <dev/ps2mouse.h>
 #include <dev/ps2kbd.h>
+#include <dev/evdev.h>
 #include <trap.h>
 #include <printf.h>
 #include <proc/thread.h>
@@ -291,6 +292,7 @@ void mouse_input_push_event(const struct mouse_event *ev)
     spin_lock(&mouse_state.lock);
     ring_push((struct mouse_event *)ev);
     spin_unlock(&mouse_state.lock);
+    evdev_pointer_event(ev);
     wakeup_on_chan(&mouse_state.ring);
     cdev_knote_notify(&mouse_cdev, EVFILT_READ, 0);
 }
@@ -325,6 +327,7 @@ static int vmmouse_drain_locked(void)
 
     while (got < 32 && vmmouse_read(&ev)) {
         ring_push(&ev);
+        evdev_pointer_event(&ev);
         dbg_mouse_ringpush++;
         dbg_mouse_packets++;
         got++;
@@ -446,6 +449,7 @@ void ps2mouse_handle_byte(uint8 byte)
 
     mouse_state.packet_idx = 0;
     spin_unlock(&mouse_state.lock);
+    evdev_pointer_event(&ev);
     wakeup_on_chan(&mouse_state.ring);
     cdev_knote_notify(&mouse_cdev, EVFILT_READ, 0);
 }

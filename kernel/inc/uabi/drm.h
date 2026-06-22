@@ -173,6 +173,10 @@
 #define DRM_MODE_CONNECTOR_VIRTUAL      15
 #define DRM_MODE_CONNECTED              1
 #define DRM_MODE_SUBPIXEL_UNKNOWN       1
+#define DRM_MODE_DPMS_ON                0
+#define DRM_MODE_DPMS_STANDBY           1
+#define DRM_MODE_DPMS_SUSPEND           2
+#define DRM_MODE_DPMS_OFF               3
 #define DRM_MODE_FB_INTERLACED          (1 << 0)
 #define DRM_MODE_FB_MODIFIERS           (1 << 1)
 #define DRM_MODE_FB_DIRTY_ANNOTATE_COPY 0x01

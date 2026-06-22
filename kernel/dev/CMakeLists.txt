@@ -19,6 +19,7 @@ add_library(dev OBJECT
     gpt.c
     loop.c
     fb/module.c
+    evdev.c
     ps2mouse.c
     ps2kbd.c
     hyperv/module.c

@@ -108,15 +108,22 @@ uint64 sys_shmget(void)
     argaddr(1, &size);
     argint(2, &shmflg);
 
-    if (size == 0 || size > SHMMAX)
-        return (uint64)-EINVAL;
-
     int irq = spin_lock_irqsave(&shm_ids.lock);
 
-    /* If key != IPC_PRIVATE, check for existing segment */
+    /* If key != IPC_PRIVATE, check for an existing segment before applying
+     * creation-size limits.  Linux allows shmget(existing_key, 0, flags) as
+     * an attach lookup; Qt's QSharedMemory uses that path for single-instance
+     * application blocks. */
     if (key != IPC_PRIVATE) {
         int idx = ipc_findkey(&shm_ids, key);
         if (idx >= 0) {
+            struct shm_segment *seg =
+                (struct shm_segment *)shm_ids.entries[idx].kern_obj;
+
+            if (seg == NULL || size > seg->ds.shm_segsz) {
+                spin_unlock_irqrestore(&shm_ids.lock, irq);
+                return (uint64)-EINVAL;
+            }
             if (shmflg & IPC_CREAT && shmflg & IPC_EXCL) {
                 spin_unlock_irqrestore(&shm_ids.lock, irq);
                 return (uint64)-EEXIST;
@@ -131,6 +138,11 @@ uint64 sys_shmget(void)
             spin_unlock_irqrestore(&shm_ids.lock, irq);
             return (uint64)-ENOENT;
         }
+    }
+
+    if (size == 0 || size > SHMMAX) {
+        spin_unlock_irqrestore(&shm_ids.lock, irq);
+        return (uint64)-EINVAL;
     }
 
     /* Allocate a new segment */
