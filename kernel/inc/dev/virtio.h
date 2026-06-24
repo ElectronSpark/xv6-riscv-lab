@@ -189,7 +189,10 @@ void virtio_snd_drain(void);
 uint64 virtio_snd_free_bytes(void);
 uint64 virtio_snd_pending_bytes(void);
 uint64 virtio_snd_played_bytes(void);
+uint64 virtio_snd_period_bytes(void);
+uint64 virtio_snd_buffer_bytes(void);
 int virtio_snd_supported_oss_formats(void);
+int virtio_snd_supports_rate(int rate);
 const char *virtio_snd_backend_name(void);
 
 #endif /* __KERNEL_VIRTIO_H */

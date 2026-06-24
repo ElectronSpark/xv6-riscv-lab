@@ -16,13 +16,13 @@
 #include "lock/spinlock.h"
 #include "lock/mutex.h"
 #include "proc/thread.h"
+#include "proc/sched.h"
 #include "arch/vm.h"
 #include <mm/pgtable.h>
 #include <mm/vm.h>
 #include <vfs/fcntl.h>
 
 extern pagetable_t kernel_pagetable;
-extern void sleep_ms(uint64 ms);
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -36,10 +36,14 @@ extern void sleep_ms(uint64 ms);
 #define VSND_QUEUE_RX      3
 #define VSND_NQUEUES       4
 
-#define VSND_QSIZE         16
+#define VSND_QSIZE         256
 #define VSND_MAX_EVENTS    8
-#define VSND_PERIOD_BYTES  4096
-#define VSND_BUFFER_BYTES  (VSND_PERIOD_BYTES * 16)
+#define VSND_PERIOD_BYTES  2048
+#define VSND_BUFFER_BYTES  (VSND_PERIOD_BYTES * 64)
+#define VSND_ASYNC_BASE    0
+#define VSND_ASYNC_DESC_PER_SLOT 3
+#define VSND_ASYNC_DEPTH   64
+#define VSND_DRAIN_TIMEOUT_MS 10000
 
 #define VIRTIO_SND_D_OUTPUT 0
 
@@ -163,6 +167,21 @@ struct vsnd_state {
     uint64 submitted_bytes;
     uint64 completed_bytes;
     uint32 last_latency_bytes;
+    uint64 last_latency_ms;
+    uint64 play_started_ms;
+    int tx_error;
+    uint32 tx_error_status;
+    uint64 tx_error_count;
+    struct virtio_snd_pcm_xfer sync_xfer;
+    struct virtio_snd_pcm_status sync_status;
+    uint32 sync_bytes;
+    int sync_in_flight;
+    struct virtio_snd_pcm_xfer async_xfer[VSND_ASYNC_DEPTH];
+    struct virtio_snd_pcm_status async_status[VSND_ASYNC_DEPTH];
+    uint8 *async_tx_buf[VSND_ASYNC_DEPTH];
+    uint32 async_bytes[VSND_ASYNC_DEPTH];
+    uint64 async_in_flight_mask;
+    uint64 async_retired_mask;
     spinlock_t lock;
     mutex_t op_lock;
 };
@@ -271,16 +290,124 @@ static int vsnd_queue_setup(uint16 qi, uint16 desired)
     return 0;
 }
 
+static void vsnd_note_async_completion_locked(uint32 id)
+{
+    uint32 slot;
+    uint32 bytes;
+    uint32 status = VIRTIO_SND_S_OK;
+    int log_error = 0;
+    uint64 error_count = 0;
+
+    if (id < VSND_ASYNC_BASE)
+        return;
+    slot = (id - VSND_ASYNC_BASE) / VSND_ASYNC_DESC_PER_SLOT;
+    if (slot >= VSND_ASYNC_DEPTH ||
+        VSND_ASYNC_BASE + slot * VSND_ASYNC_DESC_PER_SLOT != id)
+        return;
+
+    spin_lock(&vsnd.lock);
+    bytes = vsnd.async_bytes[slot];
+    if (vsnd.async_in_flight_mask & (1ULL << slot)) {
+        status = vsnd.async_status[slot].status;
+        if ((vsnd.async_retired_mask & (1ULL << slot)) == 0) {
+            vsnd.completed_bytes += bytes;
+            vsnd.last_latency_bytes = vsnd.async_status[slot].latency_bytes;
+            vsnd.last_latency_ms = sched_timer_now_ms();
+        }
+        if ((vsnd.async_retired_mask & (1ULL << slot)) == 0 &&
+            status != VIRTIO_SND_S_OK) {
+            vsnd.tx_error = 1;
+            vsnd.tx_error_status = status;
+            vsnd.tx_error_count++;
+            error_count = vsnd.tx_error_count;
+            log_error = 1;
+        }
+        vsnd.async_in_flight_mask &= ~(1ULL << slot);
+        vsnd.async_retired_mask &= ~(1ULL << slot);
+        vsnd.async_bytes[slot] = 0;
+    }
+    spin_unlock(&vsnd.lock);
+
+    if (log_error)
+        printf("virtio_snd: tx completion status=0x%x slot=%u bytes=%u errors=%lu\n",
+               status, slot, bytes, error_count);
+}
+
+static uint32 vsnd_async_slot_limit(void)
+{
+    uint16 qsize = vsnd.q[VSND_QUEUE_TX].size;
+    uint32 limit;
+
+    if (qsize <= VSND_ASYNC_BASE)
+        return 0;
+    limit = (qsize - VSND_ASYNC_BASE) / VSND_ASYNC_DESC_PER_SLOT;
+    if (limit > VSND_ASYNC_DEPTH)
+        limit = VSND_ASYNC_DEPTH;
+    return limit;
+}
+
+static int vsnd_tx_busy_locked(void)
+{
+    return vsnd.sync_in_flight || vsnd.async_in_flight_mask != 0;
+}
+
+static void vsnd_retire_tx_locked(void)
+{
+    if (vsnd.sync_in_flight) {
+        /*
+         * The current TX path does not submit sync descriptors, but keep the
+         * accounting conservative if that path is reintroduced.
+         */
+        vsnd.sync_in_flight = 0;
+        vsnd.sync_bytes = 0;
+    }
+
+    vsnd.async_retired_mask |= vsnd.async_in_flight_mask;
+    for (uint32 slot = 0; slot < VSND_ASYNC_DEPTH; slot++) {
+        if ((vsnd.async_in_flight_mask & (1ULL << slot)) != 0)
+            continue;
+        vsnd.async_bytes[slot] = 0;
+    }
+}
+
+static int vsnd_drain_used_locked(struct vsnd_queue *q, uint16 wanted,
+                                  int look_for_wanted)
+{
+    int found = 0;
+
+    while (q->last_used_idx != q->used->idx) {
+        uint16 slot = q->last_used_idx % q->size;
+        uint32 id = q->used->ring[slot].id;
+        q->last_used_idx++;
+        if (q == &vsnd.q[VSND_QUEUE_TX])
+            vsnd_note_async_completion_locked(id);
+        if (look_for_wanted && id == wanted)
+            found = 1;
+    }
+    return found;
+}
+
+static void vsnd_poll_tx_completions(void)
+{
+    struct vsnd_queue *q = &vsnd.q[VSND_QUEUE_TX];
+
+    if (!vsnd.initialized)
+        return;
+    spin_lock(&q->lock);
+    (void)vsnd_drain_used_locked(q, 0, 0);
+    spin_unlock(&q->lock);
+}
+
 static int vsnd_wait_used(struct vsnd_queue *q, uint16 head, int timeout_ms)
 {
     for (int waited = 0; waited < timeout_ms; waited++) {
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        if (q->last_used_idx != q->used->idx) {
-            uint16 slot = q->last_used_idx % q->size;
-            uint32 id = q->used->ring[slot].id;
-            q->last_used_idx++;
+        spin_lock(&q->lock);
+        int found = vsnd_drain_used_locked(q, head, 1);
+        spin_unlock(&q->lock);
+        if (found) {
             __atomic_thread_fence(__ATOMIC_SEQ_CST);
-            return id == head ? 0 : -EIO;
+            return 0;
         }
         sleep_ms(1);
     }
@@ -362,6 +489,50 @@ static int vsnd_rate_to_virtio(int rate)
     }
 }
 
+static uint64 vsnd_bytes_per_second_locked(void)
+{
+    uint64 sample_bytes;
+    uint64 channels;
+    uint64 rate;
+
+    switch (vsnd.oss_format) {
+    case AFMT_U8:
+        sample_bytes = 1;
+        break;
+    case AFMT_S32_LE:
+        sample_bytes = 4;
+        break;
+    case AFMT_S16_LE:
+    default:
+        sample_bytes = 2;
+        break;
+    }
+
+    channels = vsnd.channels > 0 ? (uint64)vsnd.channels : 2;
+    rate = vsnd.rate > 0 ? (uint64)vsnd.rate : 48000;
+    return rate * channels * sample_bytes;
+}
+
+static uint64 vsnd_paced_played_bytes_locked(void)
+{
+    uint64 accepted;
+
+    accepted = vsnd.completed_bytes;
+    if (accepted > vsnd.submitted_bytes)
+        accepted = vsnd.submitted_bytes;
+
+    if (vsnd.play_started_ms == 0)
+        return accepted;
+
+    uint64 elapsed_ms = sched_timer_now_ms() - vsnd.play_started_ms;
+    uint64 elapsed_bytes = (vsnd_bytes_per_second_locked() * elapsed_ms) /
+                           1000;
+
+    if (elapsed_bytes > vsnd.submitted_bytes)
+        elapsed_bytes = vsnd.submitted_bytes;
+    return accepted < elapsed_bytes ? accepted : elapsed_bytes;
+}
+
 static int vsnd_stream_supports(int oss_format, int rate, int channels)
 {
     int vfmt = vsnd_oss_format_to_virtio(oss_format);
@@ -392,6 +563,13 @@ static int vsnd_configure_locked(int oss_format, int rate, int channels)
     if (!vsnd_stream_supports(oss_format, rate, channels))
         return -EOPNOTSUPP;
 
+    vsnd_poll_tx_completions();
+    spin_lock(&vsnd.lock);
+    int tx_busy = vsnd_tx_busy_locked();
+    spin_unlock(&vsnd.lock);
+    if (tx_busy)
+        return -EAGAIN;
+
     if (vsnd.started) {
         (void)vsnd_simple_cmd(VIRTIO_SND_R_PCM_STOP);
         vsnd.started = 0;
@@ -420,12 +598,9 @@ static int vsnd_configure_locked(int oss_format, int rate, int channels)
     ret = vsnd_simple_cmd(VIRTIO_SND_R_PCM_PREPARE);
     if (ret < 0)
         return ret;
-    ret = vsnd_simple_cmd(VIRTIO_SND_R_PCM_START);
-    if (ret < 0)
-        return ret;
 
     vsnd.configured = 1;
-    vsnd.started = 1;
+    vsnd.started = 0;
     vsnd.oss_format = oss_format;
     vsnd.rate = rate;
     vsnd.channels = channels;
@@ -433,76 +608,126 @@ static int vsnd_configure_locked(int oss_format, int rate, int channels)
     vsnd.submitted_bytes = 0;
     vsnd.completed_bytes = 0;
     vsnd.last_latency_bytes = 0;
+    vsnd.last_latency_ms = 0;
+    vsnd.play_started_ms = 0;
+    vsnd.tx_error = 0;
+    vsnd.tx_error_status = 0;
+    vsnd.sync_in_flight = 0;
+    vsnd.sync_bytes = 0;
+    vsnd.async_in_flight_mask = 0;
+    vsnd.async_retired_mask = 0;
+    memset(vsnd.async_bytes, 0, sizeof(vsnd.async_bytes));
     spin_unlock(&vsnd.lock);
     return 0;
 }
 
-static void vsnd_copyin_silence_tail(uint8 *dst, uint32 valid, uint32 total)
+static void vsnd_tx_timeout_recover_locked(struct vsnd_queue *q)
 {
-    if (valid < total)
-        memset(dst + valid, 0, total - valid);
+    (void)q;
+
+    if (vsnd.started) {
+        (void)vsnd_simple_cmd(VIRTIO_SND_R_PCM_STOP);
+        vsnd.started = 0;
+    }
+    if (vsnd.configured) {
+        (void)vsnd_simple_cmd(VIRTIO_SND_R_PCM_RELEASE);
+        vsnd.configured = 0;
+    }
+
+    spin_lock(&vsnd.lock);
+    vsnd.last_latency_bytes = 0;
+    vsnd.last_latency_ms = 0;
+    vsnd.play_started_ms = 0;
+    vsnd.tx_error = 1;
+    vsnd.tx_error_status = 0;
+    vsnd_retire_tx_locked();
+    vsnd.submitted_bytes = 0;
+    vsnd.completed_bytes = 0;
+    spin_unlock(&vsnd.lock);
 }
 
-static int vsnd_tx_period_locked(int user, const void *buf, uint32 count)
+static int vsnd_tx_period_nonblock_locked(int user, const void *buf, uint32 count)
 {
     struct vsnd_queue *q = &vsnd.q[VSND_QUEUE_TX];
-    struct virtio_snd_pcm_xfer xfer;
-    struct virtio_snd_pcm_status status;
     uint32 period = count;
+    uint32 slot = VSND_ASYNC_DEPTH;
+    uint32 head;
 
     if (period > VSND_PERIOD_BYTES)
         period = VSND_PERIOD_BYTES;
+
+    vsnd_poll_tx_completions();
+
+    spin_lock(&vsnd.lock);
+    if (vsnd.tx_error) {
+        spin_unlock(&vsnd.lock);
+        return -EPIPE;
+    }
+    uint64 busy_mask = vsnd.async_in_flight_mask;
+    spin_unlock(&vsnd.lock);
+    uint32 slot_limit = vsnd_async_slot_limit();
+    for (uint32 i = 0; i < slot_limit; i++) {
+        if ((busy_mask & (1ULL << i)) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot >= VSND_ASYNC_DEPTH)
+        return -EAGAIN;
+    head = VSND_ASYNC_BASE + slot * VSND_ASYNC_DESC_PER_SLOT;
+
+    if (!vsnd.started) {
+        int start_ret = vsnd_simple_cmd(VIRTIO_SND_R_PCM_START);
+        if (start_ret < 0)
+            return start_ret;
+        vsnd.started = 1;
+        spin_lock(&vsnd.lock);
+        vsnd.play_started_ms = sched_timer_now_ms();
+        spin_unlock(&vsnd.lock);
+    }
+
     if (user) {
-        if (either_copyin(vsnd.tx_buf, 1, (uint64)buf, period) < 0)
+        if (either_copyin(vsnd.async_tx_buf[slot], 1, (uint64)buf, period) < 0)
             return -EFAULT;
     } else {
-        memcpy(vsnd.tx_buf, buf, period);
+        memcpy(vsnd.async_tx_buf[slot], buf, period);
     }
-    vsnd_copyin_silence_tail(vsnd.tx_buf, period, VSND_PERIOD_BYTES);
 
-    memset(&xfer, 0, sizeof(xfer));
-    memset(&status, 0, sizeof(status));
-    xfer.stream_id = vsnd.stream_id;
+    memset(&vsnd.async_xfer[slot], 0, sizeof(vsnd.async_xfer[slot]));
+    memset(&vsnd.async_status[slot], 0, sizeof(vsnd.async_status[slot]));
+    vsnd.async_xfer[slot].stream_id = vsnd.stream_id;
 
     spin_lock(&q->lock);
-    q->desc[0].addr = vsnd_dma_addr(&xfer);
-    q->desc[0].len = sizeof(xfer);
-    q->desc[0].flags = VRING_DESC_F_NEXT;
-    q->desc[0].next = 1;
-    q->desc[1].addr = vsnd_dma_addr(vsnd.tx_buf);
-    q->desc[1].len = period;
-    q->desc[1].flags = VRING_DESC_F_NEXT;
-    q->desc[1].next = 2;
-    q->desc[2].addr = vsnd_dma_addr(&status);
-    q->desc[2].len = sizeof(status);
-    q->desc[2].flags = VRING_DESC_F_WRITE;
-    q->desc[2].next = 0;
-    q->avail->ring[q->avail->idx % q->size] = 0;
+    q->desc[head].addr = vsnd_dma_addr(&vsnd.async_xfer[slot]);
+    q->desc[head].len = sizeof(vsnd.async_xfer[slot]);
+    q->desc[head].flags = VRING_DESC_F_NEXT;
+    q->desc[head].next = head + 1;
+    q->desc[head + 1].addr = vsnd_dma_addr(vsnd.async_tx_buf[slot]);
+    q->desc[head + 1].len = period;
+    q->desc[head + 1].flags = VRING_DESC_F_NEXT;
+    q->desc[head + 1].next = head + 2;
+    q->desc[head + 2].addr = vsnd_dma_addr(&vsnd.async_status[slot]);
+    q->desc[head + 2].len = sizeof(vsnd.async_status[slot]);
+    q->desc[head + 2].flags = VRING_DESC_F_WRITE;
+    q->desc[head + 2].next = 0;
+    q->avail->ring[q->avail->idx % q->size] = head;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     q->avail->idx++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     spin_lock(&vsnd.lock);
     vsnd.submitted_bytes += period;
+    vsnd.async_bytes[slot] = period;
+    vsnd.async_in_flight_mask |= 1ULL << slot;
     spin_unlock(&vsnd.lock);
     spin_unlock(&q->lock);
 
     vsnd_notify(VSND_QUEUE_TX);
-    int ret = vsnd_wait_used(q, 0, 5000);
-    if (ret < 0)
-        return ret;
-    if (status.status != VIRTIO_SND_S_OK && status.status != 0)
-        return -EIO;
-    spin_lock(&vsnd.lock);
-    vsnd.completed_bytes += period;
-    vsnd.last_latency_bytes = status.latency_bytes;
-    spin_unlock(&vsnd.lock);
     return (int)period;
 }
 
 int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
                      int rate, int channels, int nonblock)
 {
-    (void)nonblock;
     if (buf == NULL)
         return -EINVAL;
     if (!vsnd.initialized)
@@ -516,15 +741,30 @@ int virtio_snd_write(int user, const void *buf, size_t count, int oss_format,
     }
 
     size_t done = 0;
+    int waited_ms = 0;
     while (done < count) {
         uint32 chunk = (uint32)(count - done);
         if (chunk > VSND_PERIOD_BYTES)
             chunk = VSND_PERIOD_BYTES;
-        ret = vsnd_tx_period_locked(user, (const uint8 *)buf + done, chunk);
+        ret = vsnd_tx_period_nonblock_locked(user, (const uint8 *)buf + done,
+                                             chunk);
+        if (ret == -EAGAIN && !nonblock) {
+            vsnd_poll_tx_completions();
+            sleep_ms(1);
+            if (++waited_ms >= 5000) {
+                vsnd_tx_timeout_recover_locked(&vsnd.q[VSND_QUEUE_TX]);
+                if (done != 0)
+                    break;
+                ret = -EAGAIN;
+            } else {
+                continue;
+            }
+        }
         if (ret < 0) {
             mutex_unlock(&vsnd.op_lock);
             return done ? (int)done : ret;
         }
+        waited_ms = 0;
         done += (size_t)ret;
     }
     mutex_unlock(&vsnd.op_lock);
@@ -544,48 +784,106 @@ void virtio_snd_reset(void)
         (void)vsnd_simple_cmd(VIRTIO_SND_R_PCM_RELEASE);
         vsnd.configured = 0;
     }
+    vsnd_poll_tx_completions();
     spin_lock(&vsnd.lock);
+    /*
+     * STOP/RELEASE can leave QEMU-owned TX descriptors without a later used-ring
+     * completion.  Retire them from the user-visible PCM stream, but do not
+     * make their descriptor IDs reusable until QEMU returns used entries.
+     */
+    vsnd_retire_tx_locked();
     vsnd.submitted_bytes = 0;
     vsnd.completed_bytes = 0;
     vsnd.last_latency_bytes = 0;
+    vsnd.last_latency_ms = 0;
+    vsnd.play_started_ms = 0;
+    vsnd.tx_error = 0;
+    vsnd.tx_error_status = 0;
+    vsnd.sync_bytes = 0;
     spin_unlock(&vsnd.lock);
     mutex_unlock(&vsnd.op_lock);
 }
 
 void virtio_snd_drain(void)
 {
-    while (virtio_snd_pending_bytes() != 0)
+    uint64 start_ms = sched_timer_now_ms();
+    uint64 last_progress_ms = start_ms;
+    uint64 last_pending = ~0ULL;
+
+    while (virtio_snd_pending_bytes() != 0) {
+        uint64 pending = virtio_snd_pending_bytes();
+        uint64 now = sched_timer_now_ms();
+
+        if (pending < last_pending) {
+            last_pending = pending;
+            last_progress_ms = now;
+        }
+        if (now - start_ms >= VSND_DRAIN_TIMEOUT_MS ||
+            now - last_progress_ms >= VSND_DRAIN_TIMEOUT_MS) {
+            printf("virtio_snd: drain timeout pending=%lu\n", pending);
+            mutex_lock(&vsnd.op_lock);
+            vsnd_tx_timeout_recover_locked(&vsnd.q[VSND_QUEUE_TX]);
+            mutex_unlock(&vsnd.op_lock);
+            return;
+        }
+        vsnd_poll_tx_completions();
         sleep_ms(1);
+    }
 }
 
 uint64 virtio_snd_pending_bytes(void)
 {
     if (!vsnd.initialized)
         return 0;
+    vsnd_poll_tx_completions();
     spin_lock(&vsnd.lock);
-    uint64 pending = vsnd.submitted_bytes - vsnd.completed_bytes;
-    if (vsnd.last_latency_bytes > pending)
-        pending = vsnd.last_latency_bytes;
+    uint64 played = vsnd_paced_played_bytes_locked();
+    uint64 pending = vsnd.submitted_bytes - played;
     spin_unlock(&vsnd.lock);
     return pending;
 }
 
 uint64 virtio_snd_free_bytes(void)
 {
+    if (!vsnd.initialized)
+        return 0;
+    vsnd_poll_tx_completions();
+    spin_lock(&vsnd.lock);
+    uint64 busy_mask = vsnd.async_in_flight_mask;
+    spin_unlock(&vsnd.lock);
+    uint32 free_slots = 0;
+    uint32 slot_limit = vsnd_async_slot_limit();
+    for (uint32 i = 0; i < slot_limit; i++) {
+        if ((busy_mask & (1ULL << i)) == 0)
+            free_slots++;
+    }
     uint64 pending = virtio_snd_pending_bytes();
     if (pending >= VSND_BUFFER_BYTES)
         return 0;
-    return VSND_BUFFER_BYTES - pending;
+    uint64 transport_free = (uint64)free_slots * VSND_PERIOD_BYTES;
+    uint64 logical_free = VSND_BUFFER_BYTES - pending;
+    return transport_free < logical_free ? transport_free : logical_free;
 }
 
 uint64 virtio_snd_played_bytes(void)
 {
     if (!vsnd.initialized)
         return 0;
+    vsnd_poll_tx_completions();
     spin_lock(&vsnd.lock);
-    uint64 played = vsnd.completed_bytes;
+    uint64 played = vsnd_paced_played_bytes_locked();
     spin_unlock(&vsnd.lock);
     return played;
+}
+
+uint64 virtio_snd_period_bytes(void)
+{
+    return VSND_PERIOD_BYTES;
+}
+
+uint64 virtio_snd_buffer_bytes(void)
+{
+    return VSND_BUFFER_BYTES;
 }
 
 int virtio_snd_available(void)
@@ -605,6 +903,16 @@ int virtio_snd_supported_oss_formats(void)
     if ((vsnd.formats >> VIRTIO_SND_PCM_FMT_S32) & 1ULL)
         formats |= AFMT_S32_LE;
     return formats;
+}
+
+int virtio_snd_supports_rate(int rate)
+{
+    int vrate;
+
+    if (!vsnd.initialized)
+        return 0;
+    vrate = vsnd_rate_to_virtio(rate);
+    return ((vsnd.rates >> vrate) & 1ULL) != 0;
 }
 
 const char *virtio_snd_backend_name(void)
@@ -654,6 +962,7 @@ static void virtio_snd_intr(int irq, void *data, device_t *dev)
         if (isr_status == 0)
             return;
     }
+    vsnd_poll_tx_completions();
     vsnd_drain_events();
 }
 
@@ -791,8 +1100,15 @@ void virtio_snd_init(void)
     vsnd.tx_buf = kalloc();
     if (!vsnd.events || !vsnd.tx_buf)
         panic("virtio_snd: kalloc buffers");
+    for (uint32 i = 0; i < VSND_ASYNC_DEPTH; i++) {
+        vsnd.async_tx_buf[i] = kalloc();
+        if (vsnd.async_tx_buf[i] == NULL)
+            panic("virtio_snd: kalloc async buffer");
+    }
     memset(vsnd.events, 0, PGSIZE);
     memset(vsnd.tx_buf, 0, PGSIZE);
+    for (uint32 i = 0; i < VSND_ASYNC_DEPTH; i++)
+        memset(vsnd.async_tx_buf[i], 0, PGSIZE);
     for (uint16 i = 0; i < VSND_MAX_EVENTS; i++)
         vsnd_post_event(i);
 
@@ -848,7 +1164,10 @@ void virtio_snd_drain(void) {}
 uint64 virtio_snd_free_bytes(void) { return 0; }
 uint64 virtio_snd_pending_bytes(void) { return 0; }
 uint64 virtio_snd_played_bytes(void) { return 0; }
+uint64 virtio_snd_period_bytes(void) { return 0; }
+uint64 virtio_snd_buffer_bytes(void) { return 0; }
 int virtio_snd_supported_oss_formats(void) { return 0; }
+int virtio_snd_supports_rate(int rate) { (void)rate; return 0; }
 const char *virtio_snd_backend_name(void) { return "timer"; }
 
 #endif

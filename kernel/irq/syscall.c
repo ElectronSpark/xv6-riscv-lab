@@ -240,6 +240,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_stat] sys_vfs_stat,
     [SYS_lstat] sys_vfs_lstat,
     [SYS_poll] sys_vfs_poll,
+    [SYS_poll_x86] sys_vfs_poll,
     [SYS_ftruncate] sys_vfs_ftruncate,
     [SYS_fallocate] sys_fallocate,
     [SYS_gettimeofday] sys_gettimeofday,
@@ -284,6 +285,7 @@ static const char *gpu_syscall_name(int num)
     case SYS_open_x86: return "open_x86";
     case SYS_close_x86: return "close_x86";
     case SYS_fstat_x86: return "fstat_x86";
+    case SYS_poll_x86: return "poll_x86";
     case SYS_ioctl_x86: return "ioctl_x86";
     case SYS_fcntl_x86: return "fcntl_x86";
     case SYS_stat_x86: return "stat_x86";
@@ -328,6 +330,7 @@ static int gpu_syscall_trace_interesting(int num)
     case SYS_open_x86:
     case SYS_close_x86:
     case SYS_fstat_x86:
+    case SYS_poll_x86:
     case SYS_ioctl_x86:
     case SYS_fcntl_x86:
     case SYS_stat_x86:

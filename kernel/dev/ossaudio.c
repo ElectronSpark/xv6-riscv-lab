@@ -101,11 +101,12 @@
 #define OSS_DEFAULT_RATE 48000
 #define OSS_DEFAULT_CHANNELS 2
 #define OSS_BLOCK_SIZE 4096
-#define OSS_FRAGMENTS 16
+#define OSS_FRAGMENTS 32
 #define OSS_BUFFER_BYTES (OSS_BLOCK_SIZE * OSS_FRAGMENTS)
 #define OSS_POLL_LOW_WATER (OSS_BLOCK_SIZE / 2)
 #define OSS_NOTIFY_INTERVAL_MS 5
 #define OSS_MAX_PCM_FILES 32
+#define ALSA_PRESTART_FLUSH_TIMEOUT_MS 10000
 
 #ifndef INT_MAX
 #define INT_MAX 0x7fffffff
@@ -132,6 +133,9 @@
 #define SNDRV_CTL_IOCTL_PVERSION         0x80045500
 #define SNDRV_CTL_IOCTL_CARD_INFO        0x81785501
 #define SNDRV_CTL_IOCTL_ELEM_LIST        0xc0505510
+#define SNDRV_CTL_IOCTL_ELEM_INFO        0xc1105511
+#define SNDRV_CTL_IOCTL_ELEM_READ        0xc4c85512
+#define SNDRV_CTL_IOCTL_ELEM_WRITE       0xc4c85513
 #define SNDRV_CTL_IOCTL_SUBSCRIBE_EVENTS 0xc0045516
 #define SNDRV_CTL_IOCTL_HWDEP_NEXT_DEVICE 0xc0045520
 #define SNDRV_CTL_IOCTL_PCM_NEXT_DEVICE  0x80045530
@@ -157,18 +161,42 @@
 #define SNDRV_PCM_IOCTL_STATUS_EXT    0xc0984124
 #define SNDRV_PCM_IOCTL_CHANNEL_INFO  0x80184132
 #define SNDRV_PCM_IOCTL_PREPARE       0x4140
+#define SNDRV_PCM_IOCTL_RESET         0x4141
 #define SNDRV_PCM_IOCTL_START         0x4142
 #define SNDRV_PCM_IOCTL_DROP          0x4143
 #define SNDRV_PCM_IOCTL_DRAIN         0x4144
+#define SNDRV_PCM_IOCTL_PAUSE         0x40044145
+#define SNDRV_PCM_IOCTL_REWIND        0x40084146
+#define SNDRV_PCM_IOCTL_RESUME        0x4147
+#define SNDRV_PCM_IOCTL_XRUN          0x4148
+#define SNDRV_PCM_IOCTL_FORWARD       0x40084149
 #define SNDRV_PCM_IOCTL_WRITEI_FRAMES 0x40184150
+#define SNDRV_PCM_IOCTL_LINK          0x40044160
+#define SNDRV_PCM_IOCTL_UNLINK        0x4161
+
+#define SNDRV_PCM_SYNC_PTR_HWSYNC    (1U << 0)
+#define SNDRV_PCM_SYNC_PTR_APPL      (1U << 1)
+#define SNDRV_PCM_SYNC_PTR_AVAIL_MIN (1U << 2)
 
 #define SNDRV_PCM_STREAM_PLAYBACK 0
 #define SNDRV_PCM_STREAM_CAPTURE  1
+
+#define SNDRV_CTL_ELEM_TYPE_BOOLEAN 1
+#define SNDRV_CTL_ELEM_TYPE_INTEGER 2
+#define SNDRV_CTL_ELEM_IFACE_MIXER  2
+#define SNDRV_CTL_ELEM_ACCESS_READ  (1U << 0)
+#define SNDRV_CTL_ELEM_ACCESS_WRITE (1U << 1)
+#define SNDRV_CTL_ELEM_ACCESS_READWRITE \
+    (SNDRV_CTL_ELEM_ACCESS_READ | SNDRV_CTL_ELEM_ACCESS_WRITE)
 
 #define SNDRV_PCM_STATE_OPEN     0
 #define SNDRV_PCM_STATE_SETUP    1
 #define SNDRV_PCM_STATE_PREPARED 2
 #define SNDRV_PCM_STATE_RUNNING  3
+#define SNDRV_PCM_STATE_XRUN     4
+#define SNDRV_PCM_STATE_PAUSED   6
+#define SNDRV_PCM_STATE_SUSPENDED 7
+#define SNDRV_PCM_STATE_DISCONNECTED 8
 
 #define SNDRV_PCM_ACCESS_RW_INTERLEAVED 3
 #define SNDRV_PCM_FORMAT_S16_LE 2
@@ -304,6 +332,61 @@ typedef struct alsa_ctl_elem_list {
     unsigned char reserved[50];
 } alsa_ctl_elem_list_t;
 
+typedef struct alsa_ctl_elem_info {
+    alsa_ctl_elem_id_t id;
+    int type;
+    uint access;
+    uint count;
+    int owner;
+    union {
+        struct {
+            long min;
+            long max;
+            long step;
+        } integer;
+        struct {
+            long long min;
+            long long max;
+            long long step;
+        } integer64;
+        struct {
+            uint items;
+            uint item;
+            char name[64];
+            uint64 names_ptr;
+            uint names_length;
+        } enumerated;
+        unsigned char reserved[128];
+    } value;
+    unsigned char reserved[64];
+} alsa_ctl_elem_info_t;
+
+typedef struct alsa_ctl_elem_value {
+    alsa_ctl_elem_id_t id;
+    uint indirect;
+    uint pad;
+    union {
+        union {
+            long value[128];
+            long *value_ptr;
+        } integer;
+        union {
+            long long value[64];
+            long long *value_ptr;
+        } integer64;
+        union {
+            uint item[128];
+            uint *item_ptr;
+        } enumerated;
+        union {
+            unsigned char data[512];
+            unsigned char *data_ptr;
+        } bytes;
+        unsigned char reserved[1024];
+    } value;
+    unsigned char reserved[128];
+} alsa_ctl_elem_value_t;
+
 typedef union alsa_pcm_sync_id {
     unsigned char id[16];
     uint16 id16[8];
@@ -391,6 +474,14 @@ typedef struct alsa_pcm_status {
     unsigned char reserved[20];
 } alsa_pcm_status_t;
 
+typedef struct alsa_pcm_channel_info {
+    uint channel;
+    uint pad;
+    int64 offset;
+    uint first;
+    uint step;
+} alsa_pcm_channel_info_t;
+
 typedef struct alsa_pcm_mmap_status {
     int state;
     int pad1;
@@ -431,10 +522,14 @@ _Static_assert(sizeof(oss_audioinfo_t) == 1180, "oss_audioinfo size");
 _Static_assert(sizeof(oss_count_t) == 144, "oss_count size");
 _Static_assert(sizeof(alsa_ctl_card_info_t) == 376, "alsa card info size");
 _Static_assert(sizeof(alsa_ctl_elem_list_t) == 80, "alsa elem list size");
+_Static_assert(sizeof(alsa_ctl_elem_info_t) == 272, "alsa elem info size");
+_Static_assert(sizeof(alsa_ctl_elem_value_t) == 1224, "alsa elem value size");
 _Static_assert(sizeof(alsa_pcm_info_t) == 288, "alsa pcm info size");
 _Static_assert(sizeof(alsa_pcm_hw_params_t) == 608, "alsa hw params size");
 _Static_assert(sizeof(alsa_pcm_sw_params_t) == 136, "alsa sw params size");
 _Static_assert(sizeof(alsa_pcm_status_t) == 152, "alsa status size");
+_Static_assert(sizeof(alsa_pcm_channel_info_t) == 24,
+               "alsa channel info size");
 _Static_assert(sizeof(alsa_pcm_sync_ptr_t) == 136, "alsa sync ptr size");
 _Static_assert(sizeof(alsa_xferi_t) == 24, "alsa xferi size");
 
@@ -450,6 +545,17 @@ static uint oss_rec_bytes;
 static int alsa_pcm_state = SNDRV_PCM_STATE_OPEN;
 static uint64 alsa_appl_ptr;
 static uint64 alsa_hw_ptr;
+static uint64 alsa_hw_start_offset;
+static uint64 alsa_buffer_frames = OSS_BUFFER_BYTES /
+                                   (OSS_DEFAULT_CHANNELS * 2);
+static uint64 alsa_start_threshold = 1;
+static uint64 alsa_avail_min;
+static uint64 alsa_boundary = 0x40000000ULL;
+static uint8 alsa_prestart_buf[OSS_BUFFER_BYTES];
+static uint64 alsa_prestart_bytes;
+static int alsa_prestart_flushing;
+static int alsa_prestart_write_inflight;
+static uint64 alsa_prestart_generation;
 static struct vfs_file *oss_pcm_files[OSS_MAX_PCM_FILES];
 static int oss_notify_armed;
 static spinlock_t oss_lock;
@@ -458,6 +564,8 @@ static struct vfs_file_ops oss_pcm_file_ops;
 static struct vfs_file_ops alsa_pcm_file_ops;
 static struct vfs_file_ops oss_sndstat_file_ops;
 static void oss_reset_playback_locked(void);
+static int oss_any_pcm_file_locked(void);
+static uint64 alsa_device_buffer_bytes(void);
 static void oss_schedule_notify(void);
 static void oss_notify_writable_callback(void *arg);
 
@@ -577,18 +685,50 @@ static void oss_playback_update_locked(void) {
     oss_play_consumed_bytes += consumed;
 }
 
-static uint64 oss_pending_locked(void) {
-    if (virtio_snd_available())
-        return virtio_snd_pending_bytes();
+static void oss_note_playback_write_locked(uint64 bytes)
+{
+    oss_playback_update_locked();
+    if (oss_play_written_bytes == oss_play_consumed_bytes)
+        oss_play_last_ms = sched_timer_now_ms();
+    oss_play_written_bytes += bytes;
+}
+
+static uint64 oss_logical_pending_locked(void)
+{
     oss_playback_update_locked();
     return oss_play_written_bytes - oss_play_consumed_bytes;
+}
+
+static uint64 oss_pending_locked(void) {
+    uint64 logical_pending = oss_logical_pending_locked();
+
+    if (virtio_snd_available()) {
+        uint64 virtio_pending = virtio_snd_pending_bytes();
+        return virtio_pending > logical_pending ? virtio_pending :
+               logical_pending;
+    }
+    return logical_pending;
 }
 
 static uint64 oss_free_locked(void) {
     uint64 pending = oss_pending_locked();
     if (pending >= OSS_BUFFER_BYTES)
         return 0;
-    return OSS_BUFFER_BYTES - pending;
+    uint64 logical_free = OSS_BUFFER_BYTES - pending;
+
+    if (virtio_snd_available()) {
+        uint64 virtio_free = virtio_snd_free_bytes();
+        return virtio_free < logical_free ? virtio_free : logical_free;
+    }
+    return logical_free;
+}
+
+static uint64 oss_played_bytes_locked(void)
+{
+    if (virtio_snd_available())
+        return virtio_snd_played_bytes();
+    oss_playback_update_locked();
+    return oss_play_consumed_bytes;
 }
 
 static int oss_playback_writable_locked(void) {
@@ -596,11 +736,12 @@ static int oss_playback_writable_locked(void) {
     return free_bytes >= OSS_POLL_LOW_WATER || free_bytes == OSS_BUFFER_BYTES;
 }
 
-static int oss_track_pcm_file(struct vfs_file *file) {
+static int oss_track_pcm_file(struct vfs_file *file, int *was_first) {
     int slot = -1;
 
     spin_lock(&oss_lock);
-    oss_reset_playback_locked();
+    if (was_first != NULL)
+        *was_first = !oss_any_pcm_file_locked();
     for (int i = 0; i < OSS_MAX_PCM_FILES; i++) {
         if (oss_pcm_files[i] == NULL) {
             oss_pcm_files[i] = file;
@@ -609,8 +750,6 @@ static int oss_track_pcm_file(struct vfs_file *file) {
         }
     }
     spin_unlock(&oss_lock);
-    if (virtio_snd_available())
-        virtio_snd_reset();
     if (slot < 0)
         return -EMFILE;
     file->private_data = (void *)(uint64)(slot + 1);
@@ -678,13 +817,14 @@ static void oss_notify_writable_callback(void *arg) {
     spin_lock(&oss_lock);
     oss_notify_armed = 0;
     writable = oss_playback_writable_locked();
-    if (!writable && oss_any_pcm_file_locked())
+    if (oss_any_pcm_file_locked() &&
+        (!writable || alsa_pcm_state == SNDRV_PCM_STATE_RUNNING))
         should_rearm = 1;
     spin_unlock(&oss_lock);
 
     if (writable)
         oss_notify_pcm_writers();
-    else if (should_rearm)
+    if (should_rearm)
         oss_schedule_notify();
 }
 
@@ -694,6 +834,18 @@ static void oss_reset_playback_locked(void) {
     oss_play_last_ms = sched_timer_now_ms();
     alsa_appl_ptr = 0;
     alsa_hw_ptr = 0;
+    alsa_hw_start_offset = 0;
+    alsa_prestart_bytes = 0;
+    alsa_prestart_generation++;
+}
+
+static void alsa_note_xrun_locked(void)
+{
+    if (alsa_ioctl_trace_enabled())
+        printf("alsa-ioctl: note-xrun state=%d appl=%lu hw=%lu\n",
+               alsa_pcm_state, alsa_appl_ptr, alsa_hw_ptr);
+    oss_reset_playback_locked();
+    alsa_pcm_state = SNDRV_PCM_STATE_XRUN;
 }
 
 static int oss_is_pcm_device(cdev_t *cdev) {
@@ -797,7 +949,7 @@ static int oss_release(cdev_t *cdev) {
 static int oss_pcm_open_file(cdev_t *cdev, struct vfs_file *file) {
     if (!oss_is_pcm_device(cdev))
         return -EINVAL;
-    int ret = oss_track_pcm_file(file);
+    int ret = oss_track_pcm_file(file, NULL);
     if (ret < 0)
         return ret;
     file->ops = &oss_pcm_file_ops;
@@ -808,12 +960,20 @@ static int oss_pcm_file_release(struct vfs_inode *inode,
                                 struct vfs_file *file) {
     (void)inode;
     int slot = (int)(uint64)file->private_data - 1;
+    int last = 0;
 
     if (slot >= 0 && slot < OSS_MAX_PCM_FILES) {
         spin_lock(&oss_lock);
         if (oss_pcm_files[slot] == file)
             oss_pcm_files[slot] = NULL;
+        last = !oss_any_pcm_file_locked();
+        if (last) {
+            oss_reset_playback_locked();
+            alsa_pcm_state = SNDRV_PCM_STATE_OPEN;
+        }
         spin_unlock(&oss_lock);
+        if (last && virtio_snd_available())
+            virtio_snd_reset();
     }
     return 0;
 }
@@ -850,11 +1010,48 @@ static int oss_pcm_write_data(struct vfs_file *file, bool user,
 
     bool nonblock = file != NULL && (file->f_flags & O_NONBLOCK);
     if (virtio_snd_available()) {
-        int ret = virtio_snd_write(user ? 1 : 0, buf, count, oss_format,
-                                   oss_rate, oss_channels,
-                                   nonblock ? 1 : 0);
-        if (ret != -ENODEV)
-            return ret;
+        size_t done = 0;
+        while (done < count) {
+            spin_lock(&oss_lock);
+            uint64 free_bytes = oss_free_locked();
+            spin_unlock(&oss_lock);
+
+            if (free_bytes == 0) {
+                if (nonblock)
+                    return done ? (int)done : -EAGAIN;
+                sleep_ms(1);
+                continue;
+            }
+
+            size_t chunk = count - done;
+            if ((uint64)chunk > free_bytes)
+                chunk = (size_t)free_bytes;
+            if (chunk > INT_MAX)
+                chunk = INT_MAX;
+
+            int ret = virtio_snd_write(user ? 1 : 0,
+                                       (const uint8 *)buf + done,
+                                       chunk, oss_format, oss_rate,
+                                       oss_channels, nonblock ? 1 : 0);
+            if (ret == -ENODEV)
+                break;
+            if (ret < 0)
+                return done ? (int)done : ret;
+            if (ret == 0)
+                break;
+
+            spin_lock(&oss_lock);
+            oss_note_playback_write_locked((uint64)ret);
+            spin_unlock(&oss_lock);
+            done += (size_t)ret;
+
+            if (nonblock)
+                break;
+        }
+
+        oss_schedule_notify();
+        if (done != 0 || count == 0)
+            return (int)done;
     }
 
     size_t done = 0;
@@ -872,7 +1069,7 @@ static int oss_pcm_write_data(struct vfs_file *file, bool user,
         size_t chunk = count - done;
         if ((uint64)chunk > free_bytes)
             chunk = (size_t)free_bytes;
-        oss_play_written_bytes += chunk;
+        oss_note_playback_write_locked((uint64)chunk);
         done += chunk;
         spin_unlock(&oss_lock);
         if (nonblock)
@@ -1314,9 +1511,448 @@ static int alsa_interval_constrain(alsa_interval_t *ival, uint min, uint max)
     return 0;
 }
 
+static alsa_interval_t *alsa_hw_interval(alsa_pcm_hw_params_t *params, uint hw);
+
+static int alsa_mask_equal(const alsa_mask_t *a, const alsa_mask_t *b)
+{
+    for (size_t i = 0; i < sizeof(a->bits) / sizeof(a->bits[0]); i++) {
+        if (a->bits[i] != b->bits[i])
+            return 0;
+    }
+    return 1;
+}
+
+static int alsa_interval_equal(const alsa_interval_t *a,
+                               const alsa_interval_t *b)
+{
+    return a->min == b->min && a->max == b->max &&
+           a->openmin == b->openmin && a->openmax == b->openmax &&
+           a->integer == b->integer && a->empty == b->empty;
+}
+
+static void alsa_mark_mask_changed(alsa_pcm_hw_params_t *params,
+                                   uint hw, const alsa_mask_t *old)
+{
+    alsa_mask_t *mask = &params->masks[hw];
+
+    if (!alsa_mask_equal(old, mask))
+        params->cmask |= 1U << hw;
+}
+
+static void alsa_mark_interval_changed(alsa_pcm_hw_params_t *params, uint hw,
+                                       const alsa_interval_t *old)
+{
+    alsa_interval_t *ival = alsa_hw_interval(params, hw);
+
+    if (!alsa_interval_equal(old, ival))
+        params->cmask |= 1U << hw;
+}
+
+static int alsa_hw_param_is_integer(uint hw);
+static int alsa_interval_exact(const alsa_interval_t *ival);
+static int alsa_interval_refine_with(alsa_interval_t *ival,
+                                     const alsa_interval_t *constraint);
+
+static int alsa_constrain_interval_param(alsa_pcm_hw_params_t *params, uint hw,
+                                         uint min, uint max,
+                                         const alsa_interval_t *old)
+{
+    alsa_interval_t *ival = alsa_hw_interval(params, hw);
+    alsa_interval_t constraint;
+
+    memset(&constraint, 0, sizeof(constraint));
+    constraint.min = min;
+    constraint.max = max;
+    constraint.integer = alsa_hw_param_is_integer(hw);
+
+    if (!ival->empty && ival->min == 0 && ival->max == 0 &&
+        !ival->openmin && !ival->openmax && !ival->integer) {
+        *ival = constraint;
+    } else if (alsa_interval_refine_with(ival, &constraint) < 0) {
+        return -EINVAL;
+    }
+    alsa_mark_interval_changed(params, hw, old);
+    return 0;
+}
+
+static int alsa_interval_exact(const alsa_interval_t *ival)
+{
+    return !ival->empty && !ival->openmin && !ival->openmax &&
+           ival->min == ival->max;
+}
+
+static int alsa_interval_checkempty(const alsa_interval_t *ival)
+{
+    if (ival->empty || ival->min > ival->max)
+        return 1;
+    if (ival->min == ival->max && (ival->openmin || ival->openmax))
+        return 1;
+    if (ival->integer) {
+        uint min = ival->min;
+        uint max = ival->max;
+
+        if (ival->openmin) {
+            if (min == ~0U)
+                return 1;
+            min++;
+        }
+        if (ival->openmax) {
+            if (max == 0)
+                return 1;
+            max--;
+        }
+        if (min > max)
+            return 1;
+    }
+    return 0;
+}
+
+static int alsa_interval_refine_with(alsa_interval_t *ival,
+                                     const alsa_interval_t *constraint)
+{
+    if (ival->empty)
+        return -EINVAL;
+
+    if (ival->min < constraint->min) {
+        ival->min = constraint->min;
+        ival->openmin = constraint->openmin;
+    } else if (ival->min == constraint->min && !ival->openmin &&
+               constraint->openmin) {
+        ival->openmin = 1;
+    }
+
+    if (ival->max > constraint->max) {
+        ival->max = constraint->max;
+        ival->openmax = constraint->openmax;
+    } else if (ival->max == constraint->max && !ival->openmax &&
+               constraint->openmax) {
+        ival->openmax = 1;
+    }
+
+    if (!ival->integer && constraint->integer)
+        ival->integer = 1;
+    if (ival->integer) {
+        if (ival->openmin) {
+            ival->min++;
+            ival->openmin = 0;
+        }
+        if (ival->openmax) {
+            ival->max--;
+            ival->openmax = 0;
+        }
+    } else if (!ival->openmin && !ival->openmax && ival->min == ival->max) {
+        ival->integer = 1;
+    }
+
+    if (alsa_interval_checkempty(ival)) {
+        memset(ival, 0, sizeof(*ival));
+        ival->empty = 1;
+        return -EINVAL;
+    }
+    return 0;
+}
+
+static int alsa_interval_set_fractional(alsa_interval_t *ival, uint min,
+                                        uint max, uint openmin, uint openmax)
+{
+    alsa_interval_t constraint;
+
+    memset(&constraint, 0, sizeof(constraint));
+    constraint.min = min;
+    constraint.max = max;
+    constraint.openmin = openmin != 0;
+    constraint.openmax = openmax != 0;
+    constraint.integer = 0;
+    return alsa_interval_refine_with(ival, &constraint);
+}
+
+static int alsa_interval_unset(const alsa_interval_t *ival)
+{
+    return !ival->empty && ival->min == 0 && ival->max == 0 &&
+           !ival->openmin && !ival->openmax && !ival->integer;
+}
+
+static int alsa_interval_constrain_frames_time(alsa_interval_t *ival,
+                                               uint frames, uint rate)
+{
+    alsa_interval_t constraint;
+    uint64 scaled;
+    uint min;
+    uint max;
+    uint remainder;
+
+    memset(&constraint, 0, sizeof(constraint));
+
+    if (rate == 0) {
+        constraint.integer = 1;
+        if (alsa_interval_unset(ival)) {
+            *ival = constraint;
+            return 0;
+        }
+        return alsa_interval_refine_with(ival, &constraint);
+    }
+
+    scaled = (uint64)frames * 1000000ULL;
+    min = (uint)(scaled / rate);
+    remainder = (uint)(scaled % rate);
+    constraint.min = min;
+    if (remainder == 0) {
+        constraint.max = min;
+        constraint.integer = 1;
+    } else {
+        if (min == ~0U)
+            return -EINVAL;
+        max = min + 1;
+        constraint.max = max;
+        constraint.openmin = 1;
+        constraint.openmax = 1;
+    }
+
+    if (alsa_interval_unset(ival)) {
+        *ival = constraint;
+        return 0;
+    }
+    return alsa_interval_refine_with(ival, &constraint);
+}
+
+static uint alsa_frames_time_ceil(uint frames, uint rate)
+{
+    uint64 scaled;
+
+    if (rate == 0)
+        return 0;
+    scaled = (uint64)frames * 1000000ULL;
+    return (uint)((scaled + rate - 1) / rate);
+}
+
+static int alsa_hw_param_is_integer(uint hw)
+{
+    switch (hw) {
+    case SNDRV_PCM_HW_PARAM_SAMPLE_BITS:
+    case SNDRV_PCM_HW_PARAM_FRAME_BITS:
+    case SNDRV_PCM_HW_PARAM_CHANNELS:
+    case SNDRV_PCM_HW_PARAM_BUFFER_SIZE:
+    case SNDRV_PCM_HW_PARAM_BUFFER_BYTES:
+    case SNDRV_PCM_HW_PARAM_TICK_TIME:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int alsa_refine_size_period_constraints(alsa_pcm_hw_params_t *params)
+{
+    alsa_interval_t *buffer =
+        alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE);
+    alsa_interval_t *period =
+        alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE);
+    alsa_interval_t *periods =
+        alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIODS);
+
+    if (alsa_interval_exact(buffer) && alsa_interval_exact(period) &&
+        !alsa_interval_exact(periods) && period->min > 0) {
+        uint remainder = buffer->min % period->min;
+        uint floor = buffer->min / period->min;
+        uint ceil = floor + (remainder != 0);
+        alsa_interval_t old = *periods;
+
+        if (ceil == 0)
+            return -EINVAL;
+        if (remainder == 0) {
+            if (alsa_interval_constrain(periods, floor, floor) < 0)
+                return -EINVAL;
+        } else if (alsa_interval_set_fractional(periods, floor, ceil,
+                                                1, 1) < 0) {
+            return -EINVAL;
+        }
+        alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_PERIODS, &old);
+    }
+
+    return 0;
+}
+
+static int alsa_refine_exact_frame_constraints(alsa_pcm_hw_params_t *params,
+                                               uint rate, uint frame_bytes)
+{
+    alsa_interval_t *buffer =
+        alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE);
+    alsa_interval_t *period =
+        alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE);
+
+    if (frame_bytes == 0)
+        return 0;
+
+    if (alsa_interval_exact(buffer)) {
+        uint64 bytes = (uint64)buffer->min * frame_bytes;
+        alsa_interval_t old_bytes =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_BYTES);
+        alsa_interval_t old_time =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_TIME);
+
+        if (bytes > ~0U ||
+            alsa_interval_constrain(alsa_hw_interval(params,
+                                                     SNDRV_PCM_HW_PARAM_BUFFER_BYTES),
+                                    (uint)bytes, (uint)bytes) < 0 ||
+            alsa_interval_constrain_frames_time(alsa_hw_interval(params,
+                                                     SNDRV_PCM_HW_PARAM_BUFFER_TIME),
+                                                buffer->min, rate) < 0)
+            return -EINVAL;
+        alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_BUFFER_BYTES,
+                                   &old_bytes);
+        alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_BUFFER_TIME,
+                                   &old_time);
+    }
+
+    if (alsa_interval_exact(period)) {
+        uint64 bytes = (uint64)period->min * frame_bytes;
+        alsa_interval_t old_bytes =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_BYTES);
+        alsa_interval_t old_time =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_TIME);
+
+        if (bytes > ~0U ||
+            alsa_interval_constrain(alsa_hw_interval(params,
+                                                     SNDRV_PCM_HW_PARAM_PERIOD_BYTES),
+                                    (uint)bytes, (uint)bytes) < 0 ||
+            alsa_interval_constrain_frames_time(alsa_hw_interval(params,
+                                                     SNDRV_PCM_HW_PARAM_PERIOD_TIME),
+                                                period->min, rate) < 0)
+            return -EINVAL;
+        alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_PERIOD_BYTES,
+                                   &old_bytes);
+        alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_PERIOD_TIME,
+                                   &old_time);
+    }
+
+    return 0;
+}
+
 static alsa_interval_t *alsa_hw_interval(alsa_pcm_hw_params_t *params, uint hw)
 {
     return &params->intervals[hw - SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+}
+
+static uint alsa_period_frames_for_channels(uint channels)
+{
+    uint frame_bytes = channels * 2;
+    uint64 period_bytes = virtio_snd_available() ?
+                          virtio_snd_period_bytes() : OSS_BLOCK_SIZE;
+
+    if (frame_bytes == 0)
+        frame_bytes = OSS_DEFAULT_CHANNELS * 2;
+    if (frame_bytes == 0)
+        return 1024;
+    if (period_bytes == 0)
+        period_bytes = OSS_BLOCK_SIZE;
+    return (uint)(period_bytes / frame_bytes);
+}
+
+static const uint alsa_rate_table[] = {
+    8000, 16000, 22050, 32000, 44100, 48000, 96000,
+};
+
+static int alsa_rate_supported(uint rate)
+{
+    if (virtio_snd_available())
+        return virtio_snd_supports_rate((int)rate);
+
+    for (size_t i = 0; i < sizeof(alsa_rate_table) / sizeof(alsa_rate_table[0]);
+         i++) {
+        if (alsa_rate_table[i] == rate)
+            return 1;
+    }
+    return 0;
+}
+
+static uint alsa_choose_supported_rate(uint min, uint max)
+{
+    if (min == 0 && max == 0) {
+        min = OSS_DEFAULT_RATE;
+        max = OSS_DEFAULT_RATE;
+    } else if (max == 0) {
+        max = 96000;
+    }
+
+    if (OSS_DEFAULT_RATE >= (int)min && OSS_DEFAULT_RATE <= (int)max &&
+        alsa_rate_supported(OSS_DEFAULT_RATE))
+        return OSS_DEFAULT_RATE;
+
+    for (size_t i = 0; i < sizeof(alsa_rate_table) / sizeof(alsa_rate_table[0]);
+         i++) {
+        uint rate = alsa_rate_table[i];
+
+        if (!alsa_rate_supported(rate))
+            continue;
+        if (rate >= min && rate <= max)
+            return rate;
+    }
+
+    return 0;
+}
+
+static void alsa_trace_hw_params(const char *phase,
+                                 const alsa_pcm_hw_params_t *params)
+{
+    const alsa_interval_t *rate;
+    const alsa_interval_t *channels;
+    const alsa_interval_t *buffer_size;
+    const alsa_interval_t *buffer_bytes;
+    const alsa_interval_t *buffer_time;
+    const alsa_interval_t *period_size;
+    const alsa_interval_t *period_bytes;
+    const alsa_interval_t *period_time;
+    const alsa_interval_t *periods;
+
+    if (!alsa_ioctl_trace_enabled())
+        return;
+
+    rate = &params->intervals[SNDRV_PCM_HW_PARAM_RATE -
+                              SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+    channels = &params->intervals[SNDRV_PCM_HW_PARAM_CHANNELS -
+                                  SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+    buffer_size = &params->intervals[SNDRV_PCM_HW_PARAM_BUFFER_SIZE -
+                                     SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+    buffer_bytes = &params->intervals[SNDRV_PCM_HW_PARAM_BUFFER_BYTES -
+                                      SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+    buffer_time = &params->intervals[SNDRV_PCM_HW_PARAM_BUFFER_TIME -
+                                     SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+    period_size = &params->intervals[SNDRV_PCM_HW_PARAM_PERIOD_SIZE -
+                                     SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+    period_bytes = &params->intervals[SNDRV_PCM_HW_PARAM_PERIOD_BYTES -
+                                      SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+    period_time = &params->intervals[SNDRV_PCM_HW_PARAM_PERIOD_TIME -
+                                     SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+    periods = &params->intervals[SNDRV_PCM_HW_PARAM_PERIODS -
+                                 SNDRV_PCM_HW_PARAM_SAMPLE_BITS];
+    printf("alsa-ioctl: %s access=0x%x format=0x%x subformat=0x%x "
+           "rate=%u..%u empty=%u open=%u/%u int=%u "
+           "channels=%u..%u empty=%u int=%u "
+           "buffer=%u..%u open=%u/%u int=%u "
+           "bbytes=%u..%u btime=%u..%u open=%u/%u int=%u "
+           "period=%u..%u open=%u/%u int=%u "
+           "pbytes=%u..%u ptime=%u..%u open=%u/%u int=%u "
+           "periods=%u..%u open=%u/%u int=%u "
+           "rmask=0x%x cmask=0x%x\n",
+           phase,
+           params->masks[SNDRV_PCM_HW_PARAM_ACCESS].bits[0],
+           params->masks[SNDRV_PCM_HW_PARAM_FORMAT].bits[0],
+           params->masks[SNDRV_PCM_HW_PARAM_SUBFORMAT].bits[0],
+           rate->min, rate->max, rate->empty, rate->openmin, rate->openmax,
+           rate->integer,
+           channels->min, channels->max, channels->empty, channels->integer,
+           buffer_size->min, buffer_size->max,
+           buffer_size->openmin, buffer_size->openmax, buffer_size->integer,
+           buffer_bytes->min, buffer_bytes->max,
+           buffer_time->min, buffer_time->max,
+           buffer_time->openmin, buffer_time->openmax, buffer_time->integer,
+           period_size->min, period_size->max,
+           period_size->openmin, period_size->openmax, period_size->integer,
+           period_bytes->min, period_bytes->max,
+           period_time->min, period_time->max,
+           period_time->openmin, period_time->openmax, period_time->integer,
+           periods->min, periods->max,
+           periods->openmin, periods->openmax, periods->integer,
+           params->rmask, params->cmask);
 }
 
 static void alsa_fill_card_info(alsa_ctl_card_info_t *info)
@@ -1355,8 +1991,173 @@ static void alsa_fill_pcm_info(alsa_pcm_info_t *info, int from_control)
     memcpy(info->sync.id, "xv6-alsa-pcm0", 13);
 }
 
-static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params)
+typedef struct alsa_ctl_simple_elem {
+    uint numid;
+    const char *name;
+    int type;
+    long min;
+    long max;
+} alsa_ctl_simple_elem_t;
+
+static const alsa_ctl_simple_elem_t alsa_ctl_elems[] = {
+    { 1, "Master Playback Volume", SNDRV_CTL_ELEM_TYPE_INTEGER, 0, 100 },
+    { 2, "Master Playback Switch", SNDRV_CTL_ELEM_TYPE_BOOLEAN, 0, 1 },
+    { 3, "PCM Playback Volume", SNDRV_CTL_ELEM_TYPE_INTEGER, 0, 100 },
+    { 4, "PCM Playback Switch", SNDRV_CTL_ELEM_TYPE_BOOLEAN, 0, 1 },
+};
+
+static const alsa_ctl_simple_elem_t *
+alsa_ctl_find_elem(const alsa_ctl_elem_id_t *id)
 {
+    size_t count = sizeof(alsa_ctl_elems) / sizeof(alsa_ctl_elems[0]);
+
+    if (id->numid != 0) {
+        for (size_t i = 0; i < count; i++) {
+            if (alsa_ctl_elems[i].numid == id->numid)
+                return &alsa_ctl_elems[i];
+        }
+    }
+
+    if (id->name[0] != '\0') {
+        for (size_t i = 0; i < count; i++) {
+            if (strncmp((const char *)id->name, alsa_ctl_elems[i].name,
+                        sizeof(id->name)) == 0)
+                return &alsa_ctl_elems[i];
+        }
+    }
+
+    return NULL;
+}
+
+static void alsa_ctl_fill_elem_id(alsa_ctl_elem_id_t *id,
+                                  const alsa_ctl_simple_elem_t *elem)
+{
+    memset(id, 0, sizeof(*id));
+    id->numid = elem->numid;
+    id->iface = SNDRV_CTL_ELEM_IFACE_MIXER;
+    alsa_put_ustr(id->name, sizeof(id->name), elem->name);
+}
+
+static int alsa_ctl_elem_list(uint64 uarg)
+{
+    alsa_ctl_elem_list_t list;
+    uint total = sizeof(alsa_ctl_elems) / sizeof(alsa_ctl_elems[0]);
+
+    if (oss_copyin(&list, uarg, sizeof(list)) < 0)
+        memset(&list, 0, sizeof(list));
+
+    uint used = 0;
+    if (list.pids != NULL && list.space > 0 && list.offset < total) {
+        uint avail = total - list.offset;
+        used = list.space < avail ? list.space : avail;
+        for (uint i = 0; i < used; i++) {
+            alsa_ctl_elem_id_t id;
+            alsa_ctl_fill_elem_id(&id, &alsa_ctl_elems[list.offset + i]);
+            if (oss_copyout((uint64)&list.pids[i], &id, sizeof(id)) < 0)
+                return -EFAULT;
+        }
+    }
+
+    list.count = total;
+    list.used = used;
+    return oss_copyout(uarg, &list, sizeof(list));
+}
+
+static int alsa_ctl_elem_info(uint64 uarg)
+{
+    alsa_ctl_elem_info_t info;
+
+    if (oss_copyin(&info, uarg, sizeof(info)) < 0)
+        return -EFAULT;
+
+    const alsa_ctl_simple_elem_t *elem = alsa_ctl_find_elem(&info.id);
+    if (elem == NULL)
+        return -ENOENT;
+
+    memset(&info, 0, sizeof(info));
+    alsa_ctl_fill_elem_id(&info.id, elem);
+    info.type = elem->type;
+    info.access = SNDRV_CTL_ELEM_ACCESS_READWRITE;
+    info.count = 2;
+    if (elem->type == SNDRV_CTL_ELEM_TYPE_INTEGER) {
+        info.value.integer.min = elem->min;
+        info.value.integer.max = elem->max;
+        info.value.integer.step = 1;
+    }
+    return oss_copyout(uarg, &info, sizeof(info));
+}
+
+static int alsa_ctl_elem_read(uint64 uarg)
+{
+    alsa_ctl_elem_value_t value;
+
+    if (oss_copyin(&value, uarg, sizeof(value)) < 0)
+        return -EFAULT;
+
+    const alsa_ctl_simple_elem_t *elem = alsa_ctl_find_elem(&value.id);
+    if (elem == NULL)
+        return -ENOENT;
+
+    int vol = oss_volume;
+    int left = vol & 0xff;
+    int right = (vol >> 8) & 0xff;
+
+    memset(&value, 0, sizeof(value));
+    alsa_ctl_fill_elem_id(&value.id, elem);
+    if (elem->type == SNDRV_CTL_ELEM_TYPE_BOOLEAN) {
+        value.value.integer.value[0] = left > 0;
+        value.value.integer.value[1] = right > 0;
+    } else {
+        value.value.integer.value[0] = left;
+        value.value.integer.value[1] = right;
+    }
+
+    return oss_copyout(uarg, &value, sizeof(value));
+}
+
+static int alsa_ctl_elem_write(uint64 uarg)
+{
+    alsa_ctl_elem_value_t value;
+
+    if (oss_copyin(&value, uarg, sizeof(value)) < 0)
+        return -EFAULT;
+
+    const alsa_ctl_simple_elem_t *elem = alsa_ctl_find_elem(&value.id);
+    if (elem == NULL)
+        return -ENOENT;
+
+    long left = value.value.integer.value[0];
+    long right = value.value.integer.value[1];
+    if (left < elem->min)
+        left = elem->min;
+    if (left > elem->max)
+        left = elem->max;
+    if (right < elem->min)
+        right = elem->min;
+    if (right > elem->max)
+        right = elem->max;
+
+    if (elem->type == SNDRV_CTL_ELEM_TYPE_BOOLEAN) {
+        int old_left = oss_volume & 0xff;
+        int old_right = (oss_volume >> 8) & 0xff;
+        left = left ? (old_left ? old_left : 100) : 0;
+        right = right ? (old_right ? old_right : 100) : 0;
+    }
+
+    oss_volume = SOUND_MIXER_VALUE((int)left, (int)right);
+    return alsa_ctl_elem_read(uarg);
+}
+
+static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params, int finalize)
+{
+    alsa_interval_t *rate_ival;
+    uint rate;
+
+    params->cmask = 0;
+
+    alsa_mask_t old_access = params->masks[SNDRV_PCM_HW_PARAM_ACCESS];
+    alsa_mask_t old_format = params->masks[SNDRV_PCM_HW_PARAM_FORMAT];
+    alsa_mask_t old_subformat = params->masks[SNDRV_PCM_HW_PARAM_SUBFORMAT];
     if (alsa_mask_constrain(&params->masks[SNDRV_PCM_HW_PARAM_ACCESS],
                             SNDRV_PCM_ACCESS_RW_INTERLEAVED) < 0 ||
         alsa_mask_constrain(&params->masks[SNDRV_PCM_HW_PARAM_FORMAT],
@@ -1364,34 +2165,162 @@ static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params)
         alsa_mask_constrain(&params->masks[SNDRV_PCM_HW_PARAM_SUBFORMAT],
                             SNDRV_PCM_SUBFORMAT_STD) < 0)
         return -EINVAL;
+    alsa_mark_mask_changed(params, SNDRV_PCM_HW_PARAM_ACCESS, &old_access);
+    alsa_mark_mask_changed(params, SNDRV_PCM_HW_PARAM_FORMAT, &old_format);
+    alsa_mark_mask_changed(params, SNDRV_PCM_HW_PARAM_SUBFORMAT,
+                           &old_subformat);
 
-    if (alsa_interval_constrain(alsa_hw_interval(params,
-                                                 SNDRV_PCM_HW_PARAM_SAMPLE_BITS),
-                                16, 16) < 0 ||
-        alsa_interval_constrain(alsa_hw_interval(params,
-                                                 SNDRV_PCM_HW_PARAM_CHANNELS),
-                                1, 2) < 0 ||
-        alsa_interval_constrain(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_RATE),
-                                8000, 96000) < 0 ||
-        alsa_interval_constrain(alsa_hw_interval(params,
-                                                 SNDRV_PCM_HW_PARAM_PERIOD_TIME),
-                                1000, 1000000) < 0 ||
-        alsa_interval_constrain(alsa_hw_interval(params,
-                                                 SNDRV_PCM_HW_PARAM_TICK_TIME),
-                                0, 0) < 0)
+    rate_ival = alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_RATE);
+    alsa_interval_t old_rate = *rate_ival;
+    if (alsa_constrain_interval_param(params, SNDRV_PCM_HW_PARAM_RATE,
+                                      8000, 96000, &old_rate) < 0)
+        return -EINVAL;
+    rate = alsa_choose_supported_rate(rate_ival->min, rate_ival->max);
+    if (rate == 0)
+        return -EINVAL;
+    if (finalize)
+        alsa_interval_set(rate_ival, rate, rate);
+    alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_RATE, &old_rate);
+
+    alsa_interval_t old_sample_bits =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_SAMPLE_BITS);
+    alsa_interval_t old_channels =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS);
+    alsa_interval_t old_period_time =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_TIME);
+    alsa_interval_t old_tick_time =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_TICK_TIME);
+    if (alsa_constrain_interval_param(params,
+                                      SNDRV_PCM_HW_PARAM_SAMPLE_BITS,
+                                      16, 16, &old_sample_bits) < 0 ||
+        alsa_constrain_interval_param(params,
+                                      SNDRV_PCM_HW_PARAM_CHANNELS,
+                                      1, 2, &old_channels) < 0 ||
+        alsa_constrain_interval_param(params,
+                                      SNDRV_PCM_HW_PARAM_PERIOD_TIME,
+                                      1000, 1000000, &old_period_time) < 0 ||
+        alsa_constrain_interval_param(params,
+                                      SNDRV_PCM_HW_PARAM_TICK_TIME,
+                                      0, 0, &old_tick_time) < 0)
         return -EINVAL;
 
     uint channels = alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS)->min;
+    uint channels_max =
+        alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_CHANNELS)->max;
     uint frame_bits_min = channels <= 1 ? 16 : 32;
-    uint frame_bits_max = channels >= 2 ? 32 : 16;
+    uint frame_bits_max = channels_max >= 2 ? 32 : 16;
+    alsa_interval_t old_frame_bits =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_FRAME_BITS);
     alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_FRAME_BITS),
                       frame_bits_min, frame_bits_max);
+    alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_FRAME_BITS,
+                               &old_frame_bits);
 
-    uint rate = alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_RATE)->min;
     uint frame_bytes = channels * 2;
-    uint max_buffer_frames = frame_bytes ? OSS_BUFFER_BYTES / frame_bytes : 128;
+    uint64 max_buffer_bytes = alsa_device_buffer_bytes();
+    uint max_buffer_frames = frame_bytes ? max_buffer_bytes / frame_bytes : 128;
     if (max_buffer_frames < 128)
         max_buffer_frames = 128;
+
+    if (!finalize) {
+        uint min_frame_bytes = frame_bits_min / 8;
+        uint max_frame_bytes = frame_bits_max / 8;
+        uint min_period_frames = 64;
+        uint max_period_frames = max_buffer_frames / 2;
+        uint min_buffer_frames = 128;
+        uint max_periods = OSS_FRAGMENTS;
+        uint min_rate = rate_ival->min != 0 ? rate_ival->min : 8000;
+        uint max_rate = rate_ival->max != 0 ? rate_ival->max : 96000;
+
+        if (min_frame_bytes == 0)
+            min_frame_bytes = 2;
+        if (max_frame_bytes < min_frame_bytes)
+            max_frame_bytes = min_frame_bytes;
+        if (max_period_frames < min_period_frames)
+            max_period_frames = min_period_frames;
+        if (max_buffer_frames < min_buffer_frames)
+            max_buffer_frames = min_buffer_frames;
+        if (max_rate == 0)
+            max_rate = OSS_DEFAULT_RATE;
+
+        alsa_interval_t old_buffer_size =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE);
+        alsa_interval_t old_buffer_bytes =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_BYTES);
+        alsa_interval_t old_buffer_time =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_TIME);
+        alsa_interval_t old_period_size =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE);
+        alsa_interval_t old_period_bytes =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_BYTES);
+        old_period_time =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_TIME);
+        alsa_interval_t old_periods =
+            *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIODS);
+
+        uint min_buffer_time =
+            (uint)(((uint64)min_buffer_frames * 1000000ULL) / max_rate);
+        uint max_buffer_time = alsa_frames_time_ceil(max_buffer_frames,
+                                                     min_rate);
+        uint min_period_time =
+            (uint)(((uint64)min_period_frames * 1000000ULL) / max_rate);
+        uint max_period_time = alsa_frames_time_ceil(max_period_frames,
+                                                     min_rate);
+
+        if (min_period_time < 1000)
+            min_period_time = 1000;
+        if (max_period_time < min_period_time)
+            max_period_time = min_period_time;
+        if (min_buffer_time == 0)
+            min_buffer_time = 1;
+        if (max_buffer_time < min_buffer_time)
+            max_buffer_time = min_buffer_time;
+
+        if (alsa_constrain_interval_param(params,
+                                          SNDRV_PCM_HW_PARAM_BUFFER_SIZE,
+                                          min_buffer_frames, max_buffer_frames,
+                                          &old_buffer_size) < 0 ||
+            alsa_constrain_interval_param(params,
+                                          SNDRV_PCM_HW_PARAM_BUFFER_BYTES,
+                                          min_buffer_frames * min_frame_bytes,
+                                          max_buffer_frames * max_frame_bytes,
+                                          &old_buffer_bytes) < 0 ||
+            alsa_constrain_interval_param(params,
+                                          SNDRV_PCM_HW_PARAM_BUFFER_TIME,
+                                          min_buffer_time, max_buffer_time,
+                                          &old_buffer_time) < 0 ||
+            alsa_constrain_interval_param(params,
+                                          SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+                                          min_period_frames, max_period_frames,
+                                          &old_period_size) < 0 ||
+            alsa_constrain_interval_param(params,
+                                          SNDRV_PCM_HW_PARAM_PERIOD_BYTES,
+                                          min_period_frames * min_frame_bytes,
+                                          max_period_frames * max_frame_bytes,
+                                          &old_period_bytes) < 0 ||
+            alsa_constrain_interval_param(params,
+                                          SNDRV_PCM_HW_PARAM_PERIOD_TIME,
+                                          min_period_time, max_period_time,
+                                          &old_period_time) < 0 ||
+            alsa_constrain_interval_param(params, SNDRV_PCM_HW_PARAM_PERIODS,
+                                          2, max_periods, &old_periods) < 0)
+            return -EINVAL;
+        if (alsa_refine_size_period_constraints(params) < 0)
+            return -EINVAL;
+        if (alsa_refine_exact_frame_constraints(params, rate,
+                                                channels == channels_max ?
+                                                channels * 2 : 0) < 0)
+            return -EINVAL;
+
+        params->info = SNDRV_PCM_INFO_INTERLEAVED |
+                       SNDRV_PCM_INFO_BLOCK_TRANSFER;
+        params->msbits = 16;
+        params->rate_num = 0;
+        params->rate_den = 0;
+        params->fifo_size = OSS_BUFFER_BYTES / 4;
+        params->rmask = 0;
+        return 0;
+    }
 
     uint requested_time = alsa_hw_interval(params,
                                            SNDRV_PCM_HW_PARAM_BUFFER_TIME)->min;
@@ -1407,11 +2336,32 @@ static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params)
     if (buffer_frames > max_buffer_frames)
         buffer_frames = max_buffer_frames;
 
-    uint period_frames = buffer_frames / 4;
+    uint requested_period_frames =
+        alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE)->min;
+    uint requested_period_time =
+        alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_TIME)->min;
+    uint requested_periods =
+        alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIODS)->min;
+    uint period_frames = requested_period_frames;
+    if (period_frames == 0 && requested_period_time != 0)
+        period_frames = (uint)(((uint64)rate * requested_period_time) /
+                               1000000ULL);
+    if (period_frames == 0 && requested_periods != 0 && buffer_frames != 0)
+        period_frames = buffer_frames / requested_periods;
+    if (period_frames == 0)
+        period_frames = alsa_period_frames_for_channels(channels);
     if (period_frames < 64)
         period_frames = 64;
-    if (period_frames > buffer_frames)
+    if (buffer_frames < period_frames * 2)
+        buffer_frames = period_frames * 2;
+    if (buffer_frames > max_buffer_frames)
+        buffer_frames = max_buffer_frames;
+    if (buffer_frames < period_frames)
         period_frames = buffer_frames;
+    if (period_frames != 0 && buffer_frames > period_frames)
+        buffer_frames -= buffer_frames % period_frames;
+    if (buffer_frames == 0)
+        buffer_frames = period_frames;
     uint periods = period_frames ? buffer_frames / period_frames : 1;
     if (periods == 0)
         periods = 1;
@@ -1420,6 +2370,19 @@ static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params)
                                     rate) : 0;
     uint period_time = rate ? (uint)(((uint64)period_frames * 1000000ULL) /
                                     rate) : 0;
+    alsa_interval_t old_buffer_size =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE);
+    alsa_interval_t old_buffer_bytes =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_BYTES);
+    alsa_interval_t old_buffer_time =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_TIME);
+    alsa_interval_t old_period_size =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE);
+    alsa_interval_t old_period_bytes =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_BYTES);
+    old_period_time = *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIOD_TIME);
+    alsa_interval_t old_periods =
+        *alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIODS);
     alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE),
                       buffer_frames, buffer_frames);
     alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_BUFFER_BYTES),
@@ -1434,12 +2397,27 @@ static int alsa_refine_hw_params(alsa_pcm_hw_params_t *params)
                       period_time, period_time);
     alsa_interval_set(alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_PERIODS),
                       periods, periods);
+    alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE,
+                               &old_buffer_size);
+    alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_BUFFER_BYTES,
+                               &old_buffer_bytes);
+    alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_BUFFER_TIME,
+                               &old_buffer_time);
+    alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_PERIOD_SIZE,
+                               &old_period_size);
+    alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_PERIOD_BYTES,
+                               &old_period_bytes);
+    alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_PERIOD_TIME,
+                               &old_period_time);
+    alsa_mark_interval_changed(params, SNDRV_PCM_HW_PARAM_PERIODS,
+                               &old_periods);
 
     params->info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER;
     params->msbits = 16;
     params->rate_num = alsa_hw_interval(params, SNDRV_PCM_HW_PARAM_RATE)->min;
     params->rate_den = 1;
     params->fifo_size = OSS_BUFFER_BYTES / 4;
+    params->rmask = 0;
     return 0;
 }
 
@@ -1449,12 +2427,381 @@ static uint64 alsa_frames_from_bytes(uint64 bytes)
     return frame_bytes ? bytes / frame_bytes : 0;
 }
 
+static uint64 alsa_device_buffer_bytes(void)
+{
+    uint64 bytes = virtio_snd_available() ? virtio_snd_buffer_bytes() : 0;
+
+    return bytes != 0 ? bytes : OSS_BUFFER_BYTES;
+}
+
+static uint64 alsa_ptr_add_locked(uint64 ptr, uint64 frames)
+{
+    uint64 boundary = alsa_boundary != 0 ? alsa_boundary : 0x40000000ULL;
+    return (ptr + frames) % boundary;
+}
+
+static uint64 alsa_ptr_delta_locked(uint64 newer, uint64 older)
+{
+    uint64 boundary = alsa_boundary != 0 ? alsa_boundary : 0x40000000ULL;
+
+    if (newer >= older)
+        return newer - older;
+    return boundary - older + newer;
+}
+
+static uint64 alsa_buffer_frames_locked(void)
+{
+    return alsa_buffer_frames != 0 ? alsa_buffer_frames :
+           alsa_frames_from_bytes(alsa_device_buffer_bytes());
+}
+
+static uint64 alsa_frame_bytes_locked(void)
+{
+    uint64 channels = oss_channels > 0 ? (uint64)oss_channels : 2;
+    return channels * 2;
+}
+
+static uint64 alsa_queued_frames_locked(void)
+{
+    uint64 queued = alsa_ptr_delta_locked(alsa_appl_ptr, alsa_hw_ptr);
+    uint64 buffer_frames = alsa_buffer_frames_locked();
+
+    if (queued > buffer_frames)
+        queued = buffer_frames;
+    return queued;
+}
+
+static int alsa_playback_has_data_locked(void)
+{
+    return alsa_queued_frames_locked() > 0;
+}
+
+static int alsa_write_state_error_locked(void)
+{
+    switch (alsa_pcm_state) {
+    case SNDRV_PCM_STATE_PREPARED:
+    case SNDRV_PCM_STATE_RUNNING:
+        return 0;
+    case SNDRV_PCM_STATE_XRUN:
+        return -EPIPE;
+    default:
+        return -EBADFD;
+    }
+}
+
+static int alsa_manual_start_pending_locked(void)
+{
+    if (alsa_pcm_state != SNDRV_PCM_STATE_PREPARED)
+        return 0;
+    if (alsa_start_threshold == 0)
+        return 0;
+    return alsa_queued_frames_locked() < alsa_start_threshold;
+}
+
+static void alsa_start_playback_locked(void)
+{
+    if (alsa_pcm_state != SNDRV_PCM_STATE_PREPARED)
+        return;
+
+    alsa_hw_start_offset = alsa_hw_ptr;
+    oss_play_last_ms = sched_timer_now_ms();
+    alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
+}
+
+static void alsa_account_app_frames_locked(uint64 frames)
+{
+    if (frames == 0)
+        return;
+
+    alsa_appl_ptr = alsa_ptr_add_locked(alsa_appl_ptr, frames);
+    if (alsa_pcm_state == SNDRV_PCM_STATE_PREPARED &&
+        !alsa_manual_start_pending_locked())
+        alsa_start_playback_locked();
+}
+
+static uint64 alsa_prestart_accept_bytes_locked(uint64 requested)
+{
+    uint64 frame_bytes = alsa_frame_bytes_locked();
+    uint64 queued_frames = alsa_queued_frames_locked();
+    uint64 buffer_frames = alsa_buffer_frames_locked();
+    uint64 avail_frames;
+    uint64 bytes;
+
+    if (frame_bytes == 0 || queued_frames >= buffer_frames)
+        return 0;
+    avail_frames = buffer_frames - queued_frames;
+    bytes = avail_frames * frame_bytes;
+    if (alsa_prestart_bytes >= sizeof(alsa_prestart_buf))
+        return 0;
+    if (bytes > sizeof(alsa_prestart_buf) - alsa_prestart_bytes)
+        bytes = sizeof(alsa_prestart_buf) - alsa_prestart_bytes;
+    if (bytes > requested)
+        bytes = requested;
+    return bytes - (bytes % frame_bytes);
+}
+
+static int alsa_copy_pcm_bytes(void *dst, bool user, const void *src,
+                               size_t bytes)
+{
+    if (src == NULL)
+        return -EINVAL;
+    if (!user) {
+        memcpy(dst, src, bytes);
+        return 0;
+    }
+    return either_copyin(dst, 1, (uint64)src, bytes) < 0 ? -EFAULT : 0;
+}
+
+static int alsa_stage_prestart_write(bool user, const void *buf, size_t count,
+                                     size_t *accepted, int *need_flush)
+{
+    uint64 stage_bytes;
+    uint64 generation;
+    uint8 *tmp;
+    int state_error;
+
+    *accepted = 0;
+    *need_flush = 0;
+    if (count == 0)
+        return 0;
+
+    spin_lock(&oss_lock);
+    state_error = alsa_write_state_error_locked();
+    if (state_error != 0) {
+        spin_unlock(&oss_lock);
+        return state_error;
+    }
+    if (!alsa_manual_start_pending_locked()) {
+        spin_unlock(&oss_lock);
+        return 0;
+    }
+    generation = alsa_prestart_generation;
+    stage_bytes = alsa_prestart_accept_bytes_locked((uint64)count);
+    spin_unlock(&oss_lock);
+
+    if (stage_bytes == 0)
+        return -EAGAIN;
+    tmp = kvmalloc((size_t)stage_bytes);
+    if (tmp == NULL)
+        return -ENOMEM;
+    int copy_ret = alsa_copy_pcm_bytes(tmp, user, buf, (size_t)stage_bytes);
+    if (copy_ret < 0) {
+        kvfree(tmp);
+        return copy_ret;
+    }
+
+    spin_lock(&oss_lock);
+    state_error = alsa_write_state_error_locked();
+    if (state_error != 0) {
+        spin_unlock(&oss_lock);
+        kvfree(tmp);
+        return state_error;
+    }
+    if (alsa_prestart_generation != generation) {
+        spin_unlock(&oss_lock);
+        kvfree(tmp);
+        return -EAGAIN;
+    }
+    if (!alsa_manual_start_pending_locked()) {
+        spin_unlock(&oss_lock);
+        kvfree(tmp);
+        return 0;
+    }
+    stage_bytes = alsa_prestart_accept_bytes_locked(stage_bytes);
+    if (stage_bytes == 0) {
+        spin_unlock(&oss_lock);
+        kvfree(tmp);
+        return -EAGAIN;
+    }
+    memcpy(alsa_prestart_buf + alsa_prestart_bytes, tmp,
+           (size_t)stage_bytes);
+    alsa_prestart_bytes += stage_bytes;
+    alsa_account_app_frames_locked(stage_bytes / alsa_frame_bytes_locked());
+    *accepted = (size_t)stage_bytes;
+    *need_flush = alsa_pcm_state == SNDRV_PCM_STATE_RUNNING &&
+                  alsa_prestart_bytes != 0;
+    spin_unlock(&oss_lock);
+    kvfree(tmp);
+    return 1;
+}
+
+static void alsa_consume_prestart_bytes_locked(uint64 bytes)
+{
+    if (bytes >= alsa_prestart_bytes) {
+        alsa_prestart_bytes = 0;
+        return;
+    }
+    memmove(alsa_prestart_buf, alsa_prestart_buf + bytes,
+            (size_t)(alsa_prestart_bytes - bytes));
+    alsa_prestart_bytes -= bytes;
+}
+
+static void alsa_cancel_prestart_accounting_locked(void)
+{
+    alsa_appl_ptr = 0;
+    alsa_hw_ptr = 0;
+    alsa_hw_start_offset = 0;
+    alsa_prestart_bytes = 0;
+    alsa_prestart_generation++;
+}
+
+static int alsa_wait_prestart_flush_idle(void)
+{
+    for (int waited = 0; waited < ALSA_PRESTART_FLUSH_TIMEOUT_MS; waited++) {
+        int busy;
+
+        spin_lock(&oss_lock);
+        busy = alsa_prestart_flushing;
+        spin_unlock(&oss_lock);
+        if (!busy)
+            return 0;
+        sleep_ms(1);
+    }
+
+    spin_lock(&oss_lock);
+    int busy = alsa_prestart_flushing;
+    spin_unlock(&oss_lock);
+    return busy ? -ETIMEDOUT : 0;
+}
+
+static int alsa_reset_playback_serialized(int final_state)
+{
+    spin_lock(&oss_lock);
+    alsa_cancel_prestart_accounting_locked();
+    alsa_pcm_state = SNDRV_PCM_STATE_SETUP;
+    spin_unlock(&oss_lock);
+
+    int ret = alsa_wait_prestart_flush_idle();
+    if (ret < 0)
+        return ret;
+
+    spin_lock(&oss_lock);
+    oss_reset_playback_locked();
+    spin_unlock(&oss_lock);
+    if (virtio_snd_available())
+        virtio_snd_reset();
+    spin_lock(&oss_lock);
+    alsa_pcm_state = final_state;
+    spin_unlock(&oss_lock);
+    return 0;
+}
+
+static int alsa_flush_prestart_playback(void)
+{
+    uint8 *buf;
+    uint64 bytes;
+    uint64 generation;
+
+    spin_lock(&oss_lock);
+    if (alsa_pcm_state != SNDRV_PCM_STATE_RUNNING ||
+        alsa_prestart_bytes == 0 || alsa_prestart_flushing) {
+        spin_unlock(&oss_lock);
+        return 0;
+    }
+    bytes = alsa_prestart_bytes;
+    generation = alsa_prestart_generation;
+    alsa_prestart_flushing = 1;
+    spin_unlock(&oss_lock);
+
+    buf = kvmalloc((size_t)bytes);
+    if (buf == NULL) {
+        spin_lock(&oss_lock);
+        alsa_prestart_flushing = 0;
+        spin_unlock(&oss_lock);
+        return -ENOMEM;
+    }
+
+    spin_lock(&oss_lock);
+    if (alsa_pcm_state != SNDRV_PCM_STATE_RUNNING ||
+        alsa_prestart_bytes == 0 ||
+        alsa_prestart_generation != generation) {
+        alsa_prestart_flushing = 0;
+        spin_unlock(&oss_lock);
+        kvfree(buf);
+        return 0;
+    }
+    bytes = alsa_prestart_bytes;
+    memcpy(buf, alsa_prestart_buf, (size_t)bytes);
+    spin_unlock(&oss_lock);
+
+    size_t done = 0;
+    while (done < (size_t)bytes) {
+        int running;
+
+        spin_lock(&oss_lock);
+        running = alsa_pcm_state == SNDRV_PCM_STATE_RUNNING &&
+                  alsa_prestart_generation == generation;
+        if (running)
+            alsa_prestart_write_inflight = 1;
+        spin_unlock(&oss_lock);
+        if (!running)
+            break;
+
+        int ret = oss_pcm_write_data(NULL, 0, buf + done,
+                                     (size_t)bytes - done);
+        spin_lock(&oss_lock);
+        alsa_prestart_write_inflight = 0;
+        spin_unlock(&oss_lock);
+        if (ret < 0) {
+            if (ret == -EPIPE) {
+                spin_lock(&oss_lock);
+                if (alsa_pcm_state == SNDRV_PCM_STATE_RUNNING &&
+                    alsa_prestart_generation == generation)
+                    alsa_note_xrun_locked();
+                spin_unlock(&oss_lock);
+            }
+            spin_lock(&oss_lock);
+            alsa_prestart_flushing = 0;
+            spin_unlock(&oss_lock);
+            kvfree(buf);
+            return ret;
+        }
+        if (ret == 0) {
+            spin_lock(&oss_lock);
+            alsa_prestart_flushing = 0;
+            spin_unlock(&oss_lock);
+            kvfree(buf);
+            return -EIO;
+        }
+        done += (size_t)ret;
+        spin_lock(&oss_lock);
+        if (alsa_prestart_generation != generation) {
+            spin_unlock(&oss_lock);
+            break;
+        }
+        alsa_consume_prestart_bytes_locked((uint64)ret);
+        spin_unlock(&oss_lock);
+    }
+
+    spin_lock(&oss_lock);
+    alsa_prestart_flushing = 0;
+    spin_unlock(&oss_lock);
+    kvfree(buf);
+    return 0;
+}
+
 static void alsa_refresh_hw_ptr_locked(void)
 {
-    oss_pending_locked();
-    uint64 played = virtio_snd_available() ?
-                    virtio_snd_played_bytes() : oss_play_consumed_bytes;
-    alsa_hw_ptr = alsa_frames_from_bytes(played);
+    uint64 next_hw;
+    uint64 queued_frames;
+
+    if (alsa_pcm_state != SNDRV_PCM_STATE_RUNNING)
+        return;
+
+    next_hw = alsa_ptr_add_locked(alsa_hw_start_offset,
+                                  alsa_frames_from_bytes(
+                                      oss_played_bytes_locked()));
+
+    /*
+     * The playback clock may run while no new PCM frames have been submitted.
+     * Linux ALSA never reports hw_ptr ahead of appl_ptr; doing so makes
+     * userland see a wrapped/full-buffer delay and enter xrun recovery.
+     */
+    queued_frames = alsa_ptr_delta_locked(alsa_appl_ptr, next_hw);
+    if (queued_frames > alsa_buffer_frames_locked())
+        next_hw = alsa_appl_ptr;
+
+    alsa_hw_ptr = next_hw;
 }
 
 static void alsa_fill_status(alsa_pcm_status_t *status)
@@ -1462,11 +2809,13 @@ static void alsa_fill_status(alsa_pcm_status_t *status)
     memset(status, 0, sizeof(*status));
     spin_lock(&oss_lock);
     alsa_refresh_hw_ptr_locked();
+    uint64 buffer_frames = alsa_buffer_frames_locked();
+    uint64 queued_frames = alsa_queued_frames_locked();
     status->state = alsa_pcm_state;
     status->appl_ptr = alsa_appl_ptr;
     status->hw_ptr = alsa_hw_ptr;
-    status->delay = (int64)(alsa_appl_ptr - alsa_hw_ptr);
-    status->avail = OSS_BUFFER_BYTES / ((uint64)oss_channels * 2);
+    status->delay = (int64)queued_frames;
+    status->avail = buffer_frames - queued_frames;
     status->avail_max = status->avail;
     spin_unlock(&oss_lock);
 }
@@ -1508,14 +2857,14 @@ static int alsa_ctl_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
         alsa_fill_pcm_info(&info, 1);
         return oss_copyout(uarg, &info, sizeof(info));
     }
-    case SNDRV_CTL_IOCTL_ELEM_LIST: {
-        alsa_ctl_elem_list_t list;
-        if (oss_copyin(&list, uarg, sizeof(list)) < 0)
-            memset(&list, 0, sizeof(list));
-        list.count = 0;
-        list.used = 0;
-        return oss_copyout(uarg, &list, sizeof(list));
-    }
+    case SNDRV_CTL_IOCTL_ELEM_LIST:
+        return alsa_ctl_elem_list(uarg);
+    case SNDRV_CTL_IOCTL_ELEM_INFO:
+        return alsa_ctl_elem_info(uarg);
+    case SNDRV_CTL_IOCTL_ELEM_READ:
+        return alsa_ctl_elem_read(uarg);
+    case SNDRV_CTL_IOCTL_ELEM_WRITE:
+        return alsa_ctl_elem_write(uarg);
     case SNDRV_CTL_IOCTL_SUBSCRIBE_EVENTS:
         return oss_put_int(uarg, 0);
     }
@@ -1527,14 +2876,18 @@ static int alsa_ctl_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
 
 static int alsa_pcm_open_file(cdev_t *cdev, struct vfs_file *file)
 {
+    int was_first = 0;
+
     if (cdev == NULL || cdev->dev.minor != ALSA_MINOR_PCM0P)
         return -EINVAL;
-    int ret = oss_track_pcm_file(file);
+    int ret = oss_track_pcm_file(file, &was_first);
     if (ret < 0)
         return ret;
-    spin_lock(&oss_lock);
-    alsa_pcm_state = SNDRV_PCM_STATE_OPEN;
-    spin_unlock(&oss_lock);
+    if (was_first) {
+        spin_lock(&oss_lock);
+        alsa_pcm_state = SNDRV_PCM_STATE_OPEN;
+        spin_unlock(&oss_lock);
+    }
     file->ops = &alsa_pcm_file_ops;
     return 0;
 }
@@ -1542,6 +2895,7 @@ static int alsa_pcm_open_file(cdev_t *cdev, struct vfs_file *file)
 static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
 {
     uint64 uarg = (uint64)arg;
+    int value;
 
     switch ((uint)cmd) {
     case SNDRV_PCM_IOCTL_PVERSION:
@@ -1560,8 +2914,17 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         alsa_pcm_hw_params_t params;
         if (oss_copyin(&params, uarg, sizeof(params)) < 0)
             memset(&params, 0, sizeof(params));
-        if (alsa_refine_hw_params(&params) < 0)
+        alsa_trace_hw_params((uint)cmd == SNDRV_PCM_IOCTL_HW_PARAMS ?
+                             "hw_params-in" : "hw_refine-in", &params);
+        if (alsa_refine_hw_params(&params,
+                                  (uint)cmd == SNDRV_PCM_IOCTL_HW_PARAMS) < 0) {
+            alsa_trace_hw_params((uint)cmd == SNDRV_PCM_IOCTL_HW_PARAMS ?
+                                 "hw_params-fail" : "hw_refine-fail",
+                                 &params);
             return -EINVAL;
+        }
+        alsa_trace_hw_params((uint)cmd == SNDRV_PCM_IOCTL_HW_PARAMS ?
+                             "hw_params-out" : "hw_refine-out", &params);
         if ((uint)cmd == SNDRV_PCM_IOCTL_HW_PARAMS) {
             uint rate = alsa_hw_interval(&params, SNDRV_PCM_HW_PARAM_RATE)->min;
             uint channels = alsa_hw_interval(&params,
@@ -1570,15 +2933,24 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
                 rate = OSS_DEFAULT_RATE;
             if (channels < 1 || channels > 2)
                 channels = OSS_DEFAULT_CHANNELS;
+            uint buffer_frames =
+                alsa_hw_interval(&params, SNDRV_PCM_HW_PARAM_BUFFER_SIZE)->min;
+            if (buffer_frames == 0)
+                buffer_frames = alsa_frames_from_bytes(
+                    alsa_device_buffer_bytes());
             spin_lock(&oss_lock);
             oss_format = AFMT_S16_LE;
             oss_rate = (int)rate;
             oss_channels = (int)channels;
-            oss_reset_playback_locked();
-            alsa_pcm_state = SNDRV_PCM_STATE_SETUP;
+            alsa_buffer_frames = buffer_frames;
+            alsa_start_threshold = 1;
+            alsa_avail_min = 0;
+            alsa_boundary = 0x40000000ULL;
             spin_unlock(&oss_lock);
-            if (virtio_snd_available())
-                virtio_snd_reset();
+            int reset_ret =
+                alsa_reset_playback_serialized(SNDRV_PCM_STATE_SETUP);
+            if (reset_ret < 0)
+                return reset_ret;
         }
         return oss_copyout(uarg, &params, sizeof(params));
     }
@@ -1590,49 +2962,126 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
             params.avail_min = OSS_BLOCK_SIZE / 4;
         if (params.boundary == 0)
             params.boundary = 0x40000000ULL;
+        spin_lock(&oss_lock);
+        alsa_avail_min = params.avail_min;
+        alsa_start_threshold = params.start_threshold;
+        alsa_boundary = params.boundary;
+        spin_unlock(&oss_lock);
         return oss_copyout(uarg, &params, sizeof(params));
     }
     case SNDRV_PCM_IOCTL_HW_FREE:
-        spin_lock(&oss_lock);
-        alsa_pcm_state = SNDRV_PCM_STATE_OPEN;
-        spin_unlock(&oss_lock);
-        return 0;
+        return alsa_reset_playback_serialized(SNDRV_PCM_STATE_OPEN);
     case SNDRV_PCM_IOCTL_HWSYNC:
-        return 0;
+        spin_lock(&oss_lock);
+        value = alsa_pcm_state == SNDRV_PCM_STATE_XRUN ? -EPIPE : 0;
+        spin_unlock(&oss_lock);
+        return value;
     case SNDRV_PCM_IOCTL_PREPARE:
-        spin_lock(&oss_lock);
-        oss_reset_playback_locked();
-        alsa_pcm_state = SNDRV_PCM_STATE_PREPARED;
-        spin_unlock(&oss_lock);
-        if (virtio_snd_available())
-            virtio_snd_reset();
-        return 0;
+    case SNDRV_PCM_IOCTL_RESET:
+        return alsa_reset_playback_serialized(SNDRV_PCM_STATE_PREPARED);
     case SNDRV_PCM_IOCTL_START:
+    case SNDRV_PCM_IOCTL_RESUME:
         spin_lock(&oss_lock);
-        alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
+        if (alsa_pcm_state == SNDRV_PCM_STATE_RUNNING) {
+            value = 0;
+        } else if (alsa_pcm_state != SNDRV_PCM_STATE_PREPARED) {
+            value = -EBADFD;
+        } else {
+            if (!alsa_playback_has_data_locked()) {
+                /*
+                 * START is a real state transition even when the stream is
+                 * currently empty.  PipeWire checks the reported ALSA state
+                 * after recovery; claiming success while remaining PREPARED
+                 * leaves it in a silent recover loop.
+                 */
+                alsa_hw_ptr = alsa_appl_ptr;
+            }
+            alsa_hw_start_offset = alsa_hw_ptr;
+            oss_play_last_ms = sched_timer_now_ms();
+            alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
+            value = 0;
+        }
         spin_unlock(&oss_lock);
+        if (value == 0) {
+            int flush_ret = alsa_flush_prestart_playback();
+            if (flush_ret < 0)
+                return flush_ret;
+            oss_schedule_notify();
+        }
+        return value;
+    case SNDRV_PCM_IOCTL_PAUSE:
+        if (oss_copyin(&value, uarg, sizeof(value)) < 0)
+            return -EFAULT;
+        int resumed = 0;
+        spin_lock(&oss_lock);
+        if (value)
+            alsa_pcm_state = SNDRV_PCM_STATE_PAUSED;
+        else if (alsa_pcm_state == SNDRV_PCM_STATE_PAUSED) {
+            alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
+            resumed = 1;
+        }
+        spin_unlock(&oss_lock);
+        if (resumed)
+            oss_schedule_notify();
         return 0;
     case SNDRV_PCM_IOCTL_DROP:
+        return alsa_reset_playback_serialized(SNDRV_PCM_STATE_SETUP);
+    case SNDRV_PCM_IOCTL_XRUN: {
+        int reset_virtio = 0;
+        spin_lock(&oss_lock);
+        if (alsa_pcm_state == SNDRV_PCM_STATE_RUNNING) {
+            alsa_refresh_hw_ptr_locked();
+            /*
+             * snd_pcm_recover() expects this ioctl to leave a RUNNING stream
+             * in XRUN so the following prepare/start sequence observes a
+             * Linux-shaped transition.  Leaving an empty stream RUNNING makes
+             * PipeWire spin in "recover from error state RUNNING".
+             */
+            alsa_note_xrun_locked();
+            reset_virtio = 1;
+            value = 0;
+        } else if (alsa_pcm_state == SNDRV_PCM_STATE_XRUN) {
+            value = 0;
+            reset_virtio = 1;
+        } else {
+            value = -EBADFD;
+        }
+        spin_unlock(&oss_lock);
+        if (reset_virtio && virtio_snd_available())
+            virtio_snd_reset();
+        return value;
+    }
+    case SNDRV_PCM_IOCTL_DRAIN:
+        spin_lock(&oss_lock);
+        alsa_cancel_prestart_accounting_locked();
+        alsa_pcm_state = SNDRV_PCM_STATE_SETUP;
+        spin_unlock(&oss_lock);
+        value = alsa_wait_prestart_flush_idle();
+        if (value < 0)
+            return value;
+        oss_drain_playback();
         spin_lock(&oss_lock);
         oss_reset_playback_locked();
         alsa_pcm_state = SNDRV_PCM_STATE_SETUP;
         spin_unlock(&oss_lock);
-        if (virtio_snd_available())
-            virtio_snd_reset();
-        return 0;
-    case SNDRV_PCM_IOCTL_DRAIN:
-        oss_drain_playback();
         return 0;
     case SNDRV_PCM_IOCTL_DELAY: {
         spin_lock(&oss_lock);
         alsa_refresh_hw_ptr_locked();
-        int64 delay = (int64)(alsa_appl_ptr - alsa_hw_ptr);
+        int64 delay = (int64)alsa_queued_frames_locked();
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: delay state=%d appl=%lu hw=%lu delay=%ld\n",
+                   alsa_pcm_state, alsa_appl_ptr, alsa_hw_ptr, delay);
         spin_unlock(&oss_lock);
         return oss_copyout(uarg, &delay, sizeof(delay));
     }
     case SNDRV_PCM_IOCTL_STATUS: {
         alsa_pcm_status_t status;
         alsa_fill_status(&status);
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: status state=%d appl=%lu hw=%lu avail=%lu delay=%ld\n",
+                   status.state, status.appl_ptr, status.hw_ptr,
+                   status.avail, status.delay);
         return oss_copyout(uarg, &status, sizeof(status));
     }
     case SNDRV_PCM_IOCTL_STATUS_EXT: {
@@ -1640,21 +3089,80 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         if (oss_copyin(&status, uarg, sizeof(status)) < 0)
             memset(&status, 0, sizeof(status));
         alsa_fill_status(&status);
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: status-ext state=%d appl=%lu hw=%lu avail=%lu delay=%ld\n",
+                   status.state, status.appl_ptr, status.hw_ptr,
+                   status.avail, status.delay);
         return oss_copyout(uarg, &status, sizeof(status));
     }
-    case SNDRV_PCM_IOCTL_CHANNEL_INFO:
-        return -ENOTTY;
+    case SNDRV_PCM_IOCTL_CHANNEL_INFO: {
+        alsa_pcm_channel_info_t info;
+        if (oss_copyin(&info, uarg, sizeof(info)) < 0)
+            memset(&info, 0, sizeof(info));
+        spin_lock(&oss_lock);
+        uint channels = oss_channels > 0 ? (uint)oss_channels : 2;
+        spin_unlock(&oss_lock);
+        if (info.channel >= channels)
+            return -EINVAL;
+        info.offset = 0;
+        info.first = info.channel * 16;
+        info.step = channels * 16;
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: channel-info ch=%u first=%u step=%u\n",
+                   info.channel, info.first, info.step);
+        return oss_copyout(uarg, &info, sizeof(info));
+    }
+    case SNDRV_PCM_IOCTL_REWIND: {
+        uint64 frames = 0;
+        (void)oss_copyin(&frames, uarg, sizeof(frames));
+        spin_lock(&oss_lock);
+        if (frames > alsa_appl_ptr)
+            alsa_appl_ptr = 0;
+        else
+            alsa_appl_ptr -= frames;
+        spin_unlock(&oss_lock);
+        return 0;
+    }
+    case SNDRV_PCM_IOCTL_FORWARD: {
+        uint64 frames = 0;
+        (void)oss_copyin(&frames, uarg, sizeof(frames));
+        spin_lock(&oss_lock);
+        alsa_appl_ptr += frames;
+        if (alsa_appl_ptr < alsa_hw_ptr)
+            alsa_appl_ptr = alsa_hw_ptr;
+        spin_unlock(&oss_lock);
+        return 0;
+    }
+    case SNDRV_PCM_IOCTL_LINK:
+    case SNDRV_PCM_IOCTL_UNLINK:
+        return 0;
     case SNDRV_PCM_IOCTL_SYNC_PTR: {
         alsa_pcm_sync_ptr_t sync;
         if (oss_copyin(&sync, uarg, sizeof(sync)) < 0)
             memset(&sync, 0, sizeof(sync));
         spin_lock(&oss_lock);
+        if ((sync.flags & SNDRV_PCM_SYNC_PTR_APPL) == 0) {
+            uint64 user_appl = sync.c.control.appl_ptr;
+            if (alsa_ptr_delta_locked(user_appl, alsa_hw_ptr) <=
+                alsa_buffer_frames_locked())
+                alsa_appl_ptr = user_appl;
+        }
+        if ((sync.flags & SNDRV_PCM_SYNC_PTR_AVAIL_MIN) == 0 &&
+            sync.c.control.avail_min != 0)
+            alsa_avail_min = sync.c.control.avail_min;
         alsa_refresh_hw_ptr_locked();
+        if (alsa_ioctl_trace_enabled())
+            printf("alsa-ioctl: sync flags=0x%x in_appl=%lu state=%d appl=%lu hw=%lu\n",
+                   sync.flags, sync.c.control.appl_ptr, alsa_pcm_state,
+                   alsa_appl_ptr, alsa_hw_ptr);
         sync.s.status.state = alsa_pcm_state;
         sync.s.status.hw_ptr = alsa_hw_ptr;
+        sync.s.status.suspended_state = 0;
         sync.c.control.appl_ptr = alsa_appl_ptr;
-        if (sync.c.control.avail_min == 0)
-            sync.c.control.avail_min = OSS_BLOCK_SIZE / 4;
+        if ((sync.flags & SNDRV_PCM_SYNC_PTR_AVAIL_MIN) != 0 ||
+            sync.c.control.avail_min == 0)
+            sync.c.control.avail_min = alsa_avail_min != 0 ?
+                                       alsa_avail_min : OSS_BLOCK_SIZE / 4;
         spin_unlock(&oss_lock);
         return oss_copyout(uarg, &sync, sizeof(sync));
     }
@@ -1668,14 +3176,40 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         uint64 bytes = xfer.frames * frame_bytes;
         if (bytes > INT_MAX)
             bytes = INT_MAX;
+        size_t staged = 0;
+        int need_flush = 0;
+        int stage_ret = alsa_stage_prestart_write(1, xfer.buf, (size_t)bytes,
+                                                  &staged, &need_flush);
+        if (stage_ret < 0) {
+            xfer.result = stage_ret;
+            int copy_ret = oss_copyout(uarg, &xfer, sizeof(xfer));
+            return copy_ret < 0 ? copy_ret : 0;
+        }
+        if (stage_ret > 0) {
+            int flush_ret = need_flush ? alsa_flush_prestart_playback() : 0;
+            xfer.result = (int64)(staged / (size_t)frame_bytes);
+            int copy_ret = oss_copyout(uarg, &xfer, sizeof(xfer));
+            return copy_ret < 0 ? copy_ret : (flush_ret < 0 ? flush_ret : 0);
+        }
         int ret = oss_pcm_write_data(file, 1, xfer.buf, (size_t)bytes);
         if (ret < 0) {
+            if (ret == -EPIPE) {
+                spin_lock(&oss_lock);
+                alsa_note_xrun_locked();
+                spin_unlock(&oss_lock);
+            }
             xfer.result = ret;
+            if (alsa_ioctl_trace_enabled())
+                printf("alsa-ioctl: writei ret=%d frames=%lu bytes=%lu\n",
+                       ret, xfer.frames, bytes);
         } else {
             xfer.result = ret / (int64)frame_bytes;
             spin_lock(&oss_lock);
-            alsa_appl_ptr += (uint64)xfer.result;
-            alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
+            alsa_account_app_frames_locked((uint64)xfer.result);
+            if (alsa_ioctl_trace_enabled())
+                printf("alsa-ioctl: writei ret=%d result=%ld state=%d appl=%lu hw=%lu\n",
+                       ret, xfer.result, alsa_pcm_state, alsa_appl_ptr,
+                       alsa_hw_ptr);
             spin_unlock(&oss_lock);
         }
         int copy_ret = oss_copyout(uarg, &xfer, sizeof(xfer));
@@ -1704,11 +3238,26 @@ static ssize_t alsa_pcm_file_read(struct vfs_file *file, char *buf,
 static ssize_t alsa_pcm_file_write(struct vfs_file *file, const char *buf,
                                    size_t count, bool user)
 {
+    size_t staged = 0;
+    int need_flush = 0;
+    int stage_ret = alsa_stage_prestart_write(user, buf, count, &staged,
+                                              &need_flush);
+    if (stage_ret < 0)
+        return stage_ret;
+    if (stage_ret > 0) {
+        int flush_ret = need_flush ? alsa_flush_prestart_playback() : 0;
+        return flush_ret < 0 ? flush_ret : (ssize_t)staged;
+    }
+
     int ret = oss_pcm_write_data(file, user, buf, count);
+    if (ret == -EPIPE) {
+        spin_lock(&oss_lock);
+        alsa_note_xrun_locked();
+        spin_unlock(&oss_lock);
+    }
     if (ret > 0) {
         spin_lock(&oss_lock);
-        alsa_appl_ptr += alsa_frames_from_bytes((uint64)ret);
-        alsa_pcm_state = SNDRV_PCM_STATE_RUNNING;
+        alsa_account_app_frames_locked(alsa_frames_from_bytes((uint64)ret));
         spin_unlock(&oss_lock);
     }
     return ret;
@@ -1727,15 +3276,18 @@ static int oss_pcm_poll_events(short events) {
         /*
          * The playback FIFO drains against monotonic time, not a hardware
          * interrupt.  Report writable only after enough room has drained for
-         * a useful nonblocking write; epoll performs short internal rescans,
-         * so waiters do not need a synthetic always-writable edge here.
+         * a useful nonblocking write.  While ALSA playback is running, keep
+         * a timer-backed wakeup source alive so edge-triggered epoll users
+         * still see period-like progress as the stream drains.
          */
+        int keep_notify;
         spin_lock(&oss_lock);
         int writable = oss_playback_writable_locked();
+        keep_notify = alsa_pcm_state == SNDRV_PCM_STATE_RUNNING;
         spin_unlock(&oss_lock);
         if (writable)
             revents |= events & (POLLOUT | POLLWRNORM | POLLWRBAND);
-        else
+        if (!writable || keep_notify)
             oss_schedule_notify();
     }
     return revents;
@@ -1750,6 +3302,58 @@ static int oss_poll(cdev_t *cdev, short events) {
 static int oss_pcm_file_poll(struct vfs_file *file, short events) {
     (void)file;
     return oss_pcm_poll_events(events);
+}
+
+static uint64 alsa_avail_min_frames_locked(void)
+{
+    return alsa_avail_min != 0 ? alsa_avail_min : OSS_BLOCK_SIZE / 4;
+}
+
+static uint64 alsa_playback_avail_frames_locked(void)
+{
+    uint64 buffer_frames = alsa_buffer_frames_locked();
+    uint64 queued_frames = alsa_queued_frames_locked();
+
+    return queued_frames < buffer_frames ? buffer_frames - queued_frames : 0;
+}
+
+static int alsa_pcm_file_poll(struct vfs_file *file, short events)
+{
+    (void)file;
+    short write_events = events & (POLLOUT | POLLWRNORM | POLLWRBAND);
+    short revents = 0;
+    int schedule_notify = 0;
+
+    spin_lock(&oss_lock);
+    alsa_refresh_hw_ptr_locked();
+    switch (alsa_pcm_state) {
+    case SNDRV_PCM_STATE_PREPARED:
+    case SNDRV_PCM_STATE_RUNNING:
+        if (write_events != 0) {
+            uint64 avail = alsa_playback_avail_frames_locked();
+            int writable = avail >= alsa_avail_min_frames_locked();
+
+            if (writable)
+                revents |= write_events;
+            if (alsa_pcm_state == SNDRV_PCM_STATE_RUNNING && !writable)
+                schedule_notify = 1;
+        }
+        break;
+    case SNDRV_PCM_STATE_OPEN:
+    case SNDRV_PCM_STATE_SETUP:
+    case SNDRV_PCM_STATE_XRUN:
+    case SNDRV_PCM_STATE_PAUSED:
+    case SNDRV_PCM_STATE_SUSPENDED:
+    case SNDRV_PCM_STATE_DISCONNECTED:
+    default:
+        revents |= POLLERR;
+        break;
+    }
+    spin_unlock(&oss_lock);
+
+    if (schedule_notify)
+        oss_schedule_notify();
+    return revents;
 }
 
 static int oss_pcm_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
@@ -1769,7 +3373,7 @@ static struct vfs_file_ops alsa_pcm_file_ops = {
     .read = alsa_pcm_file_read,
     .write = alsa_pcm_file_write,
     .release = oss_pcm_file_release,
-    .poll = oss_pcm_file_poll,
+    .poll = alsa_pcm_file_poll,
     .ioctl = alsa_pcm_file_ioctl,
 };
 
