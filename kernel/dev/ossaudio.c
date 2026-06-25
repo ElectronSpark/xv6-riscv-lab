@@ -549,6 +549,8 @@ static uint64 alsa_hw_start_offset;
 static uint64 alsa_buffer_frames = OSS_BUFFER_BYTES /
                                    (OSS_DEFAULT_CHANNELS * 2);
 static uint64 alsa_start_threshold = 1;
+static uint64 alsa_stop_threshold = OSS_BUFFER_BYTES /
+                                    (OSS_DEFAULT_CHANNELS * 2);
 static uint64 alsa_avail_min;
 static uint64 alsa_boundary = 0x40000000ULL;
 static uint8 alsa_prestart_buf[OSS_BUFFER_BYTES];
@@ -725,9 +727,12 @@ static uint64 oss_free_locked(void) {
 
 static uint64 oss_played_bytes_locked(void)
 {
-    if (virtio_snd_available())
-        return virtio_snd_played_bytes();
     oss_playback_update_locked();
+    if (virtio_snd_available()) {
+        uint64 virtio_played = virtio_snd_played_bytes();
+        return virtio_played < oss_play_consumed_bytes ? virtio_played :
+               oss_play_consumed_bytes;
+    }
     return oss_play_consumed_bytes;
 }
 
@@ -2476,6 +2481,42 @@ static int alsa_playback_has_data_locked(void)
     return alsa_queued_frames_locked() > 0;
 }
 
+static uint64 alsa_playback_avail_frames_locked(void)
+{
+    uint64 buffer_frames = alsa_buffer_frames_locked();
+    uint64 queued_frames = alsa_queued_frames_locked();
+
+    return queued_frames < buffer_frames ? buffer_frames - queued_frames : 0;
+}
+
+static uint64 alsa_playback_hw_avail_frames_locked(uint64 hw_ptr)
+{
+    uint64 buffer_frames = alsa_buffer_frames_locked();
+    uint64 boundary = alsa_boundary != 0 ? alsa_boundary : 0x40000000ULL;
+    uint64 queued_frames = alsa_ptr_delta_locked(alsa_appl_ptr, hw_ptr);
+    uint64 drained_frames;
+    uint64 avail_frames;
+
+    if (queued_frames <= buffer_frames)
+        return buffer_frames - queued_frames;
+
+    drained_frames = alsa_ptr_delta_locked(hw_ptr, alsa_appl_ptr);
+    avail_frames = buffer_frames + drained_frames;
+    if (avail_frames < buffer_frames || avail_frames > boundary)
+        return boundary;
+    return avail_frames;
+}
+
+static int alsa_stop_threshold_reached_locked(uint64 hw_ptr)
+{
+    uint64 boundary = alsa_boundary != 0 ? alsa_boundary : 0x40000000ULL;
+
+    if (alsa_stop_threshold >= boundary)
+        return 0;
+    return alsa_playback_hw_avail_frames_locked(hw_ptr) >=
+           alsa_stop_threshold;
+}
+
 static int alsa_write_state_error_locked(void)
 {
     switch (alsa_pcm_state) {
@@ -2780,10 +2821,11 @@ static int alsa_flush_prestart_playback(void)
     return 0;
 }
 
-static void alsa_refresh_hw_ptr_locked(void)
+static void alsa_refresh_hw_ptr_locked(bool may_xrun)
 {
     uint64 next_hw;
     uint64 queued_frames;
+    uint64 buffer_frames;
 
     if (alsa_pcm_state != SNDRV_PCM_STATE_RUNNING)
         return;
@@ -2791,6 +2833,10 @@ static void alsa_refresh_hw_ptr_locked(void)
     next_hw = alsa_ptr_add_locked(alsa_hw_start_offset,
                                   alsa_frames_from_bytes(
                                       oss_played_bytes_locked()));
+    if (may_xrun && alsa_stop_threshold_reached_locked(next_hw)) {
+        alsa_note_xrun_locked();
+        return;
+    }
 
     /*
      * The playback clock may run while no new PCM frames have been submitted.
@@ -2798,17 +2844,37 @@ static void alsa_refresh_hw_ptr_locked(void)
      * userland see a wrapped/full-buffer delay and enter xrun recovery.
      */
     queued_frames = alsa_ptr_delta_locked(alsa_appl_ptr, next_hw);
-    if (queued_frames > alsa_buffer_frames_locked())
+    buffer_frames = alsa_buffer_frames_locked();
+    if (queued_frames > buffer_frames)
         next_hw = alsa_appl_ptr;
 
     alsa_hw_ptr = next_hw;
+}
+
+static int alsa_hwsync_locked(void)
+{
+    alsa_refresh_hw_ptr_locked(true);
+    return alsa_pcm_state == SNDRV_PCM_STATE_XRUN ? -EPIPE : 0;
+}
+
+static int alsa_write_active_check_locked(void)
+{
+    int state_error = alsa_write_state_error_locked();
+
+    if (state_error != 0)
+        return state_error;
+    if (alsa_pcm_state == SNDRV_PCM_STATE_RUNNING) {
+        alsa_refresh_hw_ptr_locked(true);
+        state_error = alsa_write_state_error_locked();
+    }
+    return state_error;
 }
 
 static void alsa_fill_status(alsa_pcm_status_t *status)
 {
     memset(status, 0, sizeof(*status));
     spin_lock(&oss_lock);
-    alsa_refresh_hw_ptr_locked();
+    alsa_refresh_hw_ptr_locked(false);
     uint64 buffer_frames = alsa_buffer_frames_locked();
     uint64 queued_frames = alsa_queued_frames_locked();
     status->state = alsa_pcm_state;
@@ -2944,6 +3010,7 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
             oss_channels = (int)channels;
             alsa_buffer_frames = buffer_frames;
             alsa_start_threshold = 1;
+            alsa_stop_threshold = buffer_frames;
             alsa_avail_min = 0;
             alsa_boundary = 0x40000000ULL;
             spin_unlock(&oss_lock);
@@ -2965,6 +3032,7 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         spin_lock(&oss_lock);
         alsa_avail_min = params.avail_min;
         alsa_start_threshold = params.start_threshold;
+        alsa_stop_threshold = params.stop_threshold;
         alsa_boundary = params.boundary;
         spin_unlock(&oss_lock);
         return oss_copyout(uarg, &params, sizeof(params));
@@ -2973,7 +3041,7 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         return alsa_reset_playback_serialized(SNDRV_PCM_STATE_OPEN);
     case SNDRV_PCM_IOCTL_HWSYNC:
         spin_lock(&oss_lock);
-        value = alsa_pcm_state == SNDRV_PCM_STATE_XRUN ? -EPIPE : 0;
+        value = alsa_hwsync_locked();
         spin_unlock(&oss_lock);
         return value;
     case SNDRV_PCM_IOCTL_PREPARE:
@@ -3030,14 +3098,15 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         int reset_virtio = 0;
         spin_lock(&oss_lock);
         if (alsa_pcm_state == SNDRV_PCM_STATE_RUNNING) {
-            alsa_refresh_hw_ptr_locked();
+            alsa_refresh_hw_ptr_locked(true);
             /*
              * snd_pcm_recover() expects this ioctl to leave a RUNNING stream
              * in XRUN so the following prepare/start sequence observes a
              * Linux-shaped transition.  Leaving an empty stream RUNNING makes
              * PipeWire spin in "recover from error state RUNNING".
              */
-            alsa_note_xrun_locked();
+            if (alsa_pcm_state == SNDRV_PCM_STATE_RUNNING)
+                alsa_note_xrun_locked();
             reset_virtio = 1;
             value = 0;
         } else if (alsa_pcm_state == SNDRV_PCM_STATE_XRUN) {
@@ -3067,7 +3136,7 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         return 0;
     case SNDRV_PCM_IOCTL_DELAY: {
         spin_lock(&oss_lock);
-        alsa_refresh_hw_ptr_locked();
+        alsa_refresh_hw_ptr_locked(false);
         int64 delay = (int64)alsa_queued_frames_locked();
         if (alsa_ioctl_trace_enabled())
             printf("alsa-ioctl: delay state=%d appl=%lu hw=%lu delay=%ld\n",
@@ -3138,9 +3207,16 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         return 0;
     case SNDRV_PCM_IOCTL_SYNC_PTR: {
         alsa_pcm_sync_ptr_t sync;
+        int sync_ret = 0;
         if (oss_copyin(&sync, uarg, sizeof(sync)) < 0)
             memset(&sync, 0, sizeof(sync));
         spin_lock(&oss_lock);
+        if (sync.flags & SNDRV_PCM_SYNC_PTR_HWSYNC)
+            sync_ret = alsa_hwsync_locked();
+        if (sync_ret < 0) {
+            spin_unlock(&oss_lock);
+            return sync_ret;
+        }
         if ((sync.flags & SNDRV_PCM_SYNC_PTR_APPL) == 0) {
             uint64 user_appl = sync.c.control.appl_ptr;
             if (alsa_ptr_delta_locked(user_appl, alsa_hw_ptr) <=
@@ -3150,7 +3226,6 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
         if ((sync.flags & SNDRV_PCM_SYNC_PTR_AVAIL_MIN) == 0 &&
             sync.c.control.avail_min != 0)
             alsa_avail_min = sync.c.control.avail_min;
-        alsa_refresh_hw_ptr_locked();
         if (alsa_ioctl_trace_enabled())
             printf("alsa-ioctl: sync flags=0x%x in_appl=%lu state=%d appl=%lu hw=%lu\n",
                    sync.flags, sync.c.control.appl_ptr, alsa_pcm_state,
@@ -3190,6 +3265,14 @@ static int alsa_pcm_ioctl_common(struct vfs_file *file, uint64 cmd, void *arg)
             xfer.result = (int64)(staged / (size_t)frame_bytes);
             int copy_ret = oss_copyout(uarg, &xfer, sizeof(xfer));
             return copy_ret < 0 ? copy_ret : (flush_ret < 0 ? flush_ret : 0);
+        }
+        spin_lock(&oss_lock);
+        int active_ret = alsa_write_active_check_locked();
+        spin_unlock(&oss_lock);
+        if (active_ret < 0) {
+            xfer.result = active_ret;
+            int copy_ret = oss_copyout(uarg, &xfer, sizeof(xfer));
+            return copy_ret < 0 ? copy_ret : active_ret;
         }
         int ret = oss_pcm_write_data(file, 1, xfer.buf, (size_t)bytes);
         if (ret < 0) {
@@ -3248,6 +3331,12 @@ static ssize_t alsa_pcm_file_write(struct vfs_file *file, const char *buf,
         int flush_ret = need_flush ? alsa_flush_prestart_playback() : 0;
         return flush_ret < 0 ? flush_ret : (ssize_t)staged;
     }
+
+    spin_lock(&oss_lock);
+    int active_ret = alsa_write_active_check_locked();
+    spin_unlock(&oss_lock);
+    if (active_ret < 0)
+        return active_ret;
 
     int ret = oss_pcm_write_data(file, user, buf, count);
     if (ret == -EPIPE) {
@@ -3309,14 +3398,6 @@ static uint64 alsa_avail_min_frames_locked(void)
     return alsa_avail_min != 0 ? alsa_avail_min : OSS_BLOCK_SIZE / 4;
 }
 
-static uint64 alsa_playback_avail_frames_locked(void)
-{
-    uint64 buffer_frames = alsa_buffer_frames_locked();
-    uint64 queued_frames = alsa_queued_frames_locked();
-
-    return queued_frames < buffer_frames ? buffer_frames - queued_frames : 0;
-}
-
 static int alsa_pcm_file_poll(struct vfs_file *file, short events)
 {
     (void)file;
@@ -3325,7 +3406,7 @@ static int alsa_pcm_file_poll(struct vfs_file *file, short events)
     int schedule_notify = 0;
 
     spin_lock(&oss_lock);
-    alsa_refresh_hw_ptr_locked();
+    alsa_refresh_hw_ptr_locked(false);
     switch (alsa_pcm_state) {
     case SNDRV_PCM_STATE_PREPARED:
     case SNDRV_PCM_STATE_RUNNING:
