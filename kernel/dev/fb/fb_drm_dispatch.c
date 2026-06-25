@@ -691,10 +691,12 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             return -EFAULT;
         switch (req.param) {
         case VIRTGPU_PARAM_3D_FEATURES:
-        case VIRTGPU_PARAM_CAPSET_QUERY_FIX:
         case VIRTGPU_PARAM_CONTEXT_INIT:
         case VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME:
             value = virtio_gpu_has_virgl() ? 1 : 0;
+            break;
+        case VIRTGPU_PARAM_CAPSET_QUERY_FIX:
+            value = 1;
             break;
         case VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs:
             if (virtio_gpu_user_capset_ids(&value) != 0)
