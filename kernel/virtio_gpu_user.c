@@ -861,6 +861,46 @@ fail_locked:
     return -ENOMEM;
 }
 
+int virtio_gpu_user_resource_export_pin(uint64 owner_id, pid_t owner_tgid,
+                                        uint32 resource_id, uint32 *width,
+                                        uint32 *height, uint32 *format,
+                                        uint64 *size, uint32 *blob_mem)
+{
+    struct virtio_gpu *g = &gpu;
+    struct virtio_gpu_resource *res;
+
+    if (resource_id == 0)
+        return -EINVAL;
+    if (!g->initialized)
+        return -ENODEV;
+
+    spin_lock(&g->lock);
+    res = virtio_gpu_lookup_resource_locked(g, resource_id);
+    if (res == NULL ||
+        !virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                  owner_id, owner_tgid)) {
+        spin_unlock(&g->lock);
+        return -ENOENT;
+    }
+    if (res->width == 0 || res->height == 0 || res->alloc_len == 0) {
+        spin_unlock(&g->lock);
+        return -EINVAL;
+    }
+    if (width != NULL)
+        *width = res->width;
+    if (height != NULL)
+        *height = res->height;
+    if (format != NULL)
+        *format = res->format;
+    if (size != NULL)
+        *size = res->alloc_len;
+    if (blob_mem != NULL)
+        *blob_mem = res->is_blob ? res->blob_mem : 0;
+    res->export_refs++;
+    spin_unlock(&g->lock);
+    return 0;
+}
+
 void virtio_gpu_user_resource_export_put(uint32 resource_id)
 {
     struct virtio_gpu *g = &gpu;

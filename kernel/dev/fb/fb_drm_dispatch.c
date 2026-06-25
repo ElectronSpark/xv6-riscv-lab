@@ -454,16 +454,19 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_GEM_OPEN: {
         struct drm_gem_open_compat req;
         int ret;
+        int handle_created = 0;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         if (req.name == 0)
             return -EINVAL;
         ret = fb_gem_open_name(owner->id, owner->tgid, req.name,
-                               &req.handle, &req.size);
+                               &req.handle, &req.size, &handle_created);
         if (ret != 0)
             return ret;
         if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
-            (void)fb_bo_destroy_owned(req.handle, owner->id, owner->tgid);
+            if (handle_created)
+                (void)fb_bo_destroy_owned(req.handle, owner->id,
+                                          owner->tgid);
             return -EFAULT;
         }
         return 0;

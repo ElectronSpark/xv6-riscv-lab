@@ -1451,6 +1451,7 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
     struct dma_buf *dbuf;
     uint32 handle;
     int ret;
+    int handle_created = 0;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
@@ -1477,7 +1478,8 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
         vfs_fput(file);
         return ret;
     }
-    ret = fb_bo_register_gem(owner->id, owner->tgid, gem, &handle);
+    ret = fb_bo_register_gem(owner->id, owner->tgid, gem, &handle,
+                             &handle_created);
     fb_gem_put(gem);
     if (ret != 0) {
         vfs_fput(file);
@@ -1485,7 +1487,8 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
     }
     bo = fb_bo_get_owned(handle, owner->id, owner->tgid);
     if (bo == NULL) {
-        (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
+        if (handle_created)
+            (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
         vfs_fput(file);
         return -ENOENT;
     }
@@ -1496,7 +1499,8 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
     vfs_fput(file);
     req.handle = handle;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
-        (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
+        if (handle_created)
+            (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
         return -EFAULT;
     }
     return 0;
@@ -1513,6 +1517,7 @@ static int gpu_drm_register_virtgpu_resource_bo(
     uint32 npages = 0;
     uint32 handle = 0;
     uint64 size = 0;
+    int export_ref = 0;
     int ret;
 
     if (owner == NULL || resource_id == 0 || handle_out == NULL)
@@ -1522,20 +1527,27 @@ static int gpu_drm_register_virtgpu_resource_bo(
                                                 resource_id, &width, &height,
                                                 &pitch, &size, &pages,
                                                 &npages);
+    if (ret == 0) {
+        export_ref = 1;
+    }
     if (ret != 0) {
         uint32 format = 0;
         uint32 blob_mem = 0;
+        int pin_ret;
 
-        if (virtio_gpu_user_resource_blob_mem(owner->id, owner->tgid,
-                                              resource_id, &blob_mem) != 0 ||
-            blob_mem != VIRTGPU_BLOB_MEM_HOST3D ||
-            virtio_gpu_user_resource_info(owner->id, owner->tgid,
-                                          resource_id, &width, &height,
-                                          &format, &size) != 0) {
+        pin_ret = virtio_gpu_user_resource_export_pin(owner->id, owner->tgid,
+                                                      resource_id, &width,
+                                                      &height, &format,
+                                                      &size, &blob_mem);
+        if (pin_ret != 0 || blob_mem != VIRTGPU_BLOB_MEM_HOST3D ||
+            width > 0xffffffffU / 4) {
+            if (pin_ret == 0)
+                virtio_gpu_user_resource_export_put(resource_id);
             printf("drm: virtgpu resource export pages failed resource=%u ret=%d\n",
                    resource_id, ret);
-            return ret;
+            return pin_ret != 0 ? pin_ret : ret;
         }
+        export_ref = 1;
         pitch = width * 4;
     }
 
@@ -1545,7 +1557,8 @@ static int gpu_drm_register_virtgpu_resource_bo(
         printf("drm: virtgpu resource BO register failed resource=%u ret=%d\n",
                resource_id, ret);
         fb_shmem_release_pages(pages, npages);
-        virtio_gpu_user_resource_export_put(resource_id);
+        if (export_ref)
+            virtio_gpu_user_resource_export_put(resource_id);
         return ret;
     }
 
@@ -1555,6 +1568,8 @@ static int gpu_drm_register_virtgpu_resource_bo(
         printf("drm: virtgpu resource BO attach failed resource=%u handle=%u ret=%d\n",
                resource_id, handle, ret);
         (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
+        if (export_ref)
+            virtio_gpu_user_resource_export_put(resource_id);
         return ret;
     }
 

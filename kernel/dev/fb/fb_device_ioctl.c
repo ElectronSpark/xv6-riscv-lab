@@ -1333,6 +1333,7 @@ bo_copy_out:
         uint32 handle;
         uint64 addr;
         int ret;
+        int handle_created = 0;
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
@@ -1361,7 +1362,8 @@ bo_copy_out:
             vfs_fput(file);
             return ret;
         }
-        ret = fb_bo_register_gem(owner_id, owner_tgid, gem, &handle);
+        ret = fb_bo_register_gem(owner_id, owner_tgid, gem, &handle,
+                                 &handle_created);
         fb_gem_put(gem);
         if (ret != 0) {
             vfs_fput(file);
@@ -1370,7 +1372,8 @@ bo_copy_out:
 
         bo = fb_bo_get_owned(handle, owner_id, owner_tgid);
         if (bo == NULL) {
-            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
+            if (handle_created)
+                (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             vfs_fput(file);
             return -ENOENT;
         }
@@ -1382,7 +1385,8 @@ bo_copy_out:
         spin_unlock(&fb_state.lock);
         if (ret != 0) {
             fb_bo_put(bo);
-            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
+            if (handle_created)
+                (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             vfs_fput(file);
             return ret;
         }
@@ -1392,7 +1396,8 @@ bo_copy_out:
         ret = fb_bo_map_current(bo, &addr);
         if (ret != 0) {
             fb_bo_put(bo);
-            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
+            if (handle_created)
+                (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             vfs_fput(file);
             return ret;
         }
@@ -1438,7 +1443,8 @@ bo_copy_out:
 
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
             (void)vm_munmap(current->vm, addr, (size_t)req.size);
-            (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
+            if (handle_created)
+                (void)fb_bo_destroy_owned(handle, owner_id, owner_tgid);
             return -EFAULT;
         }
 

@@ -1667,14 +1667,40 @@ static int fb_bo_owner_has_owner0_import_wrapper_locked(
     return 0;
 }
 
+static int fb_bo_owner_gem_handle_locked(struct fb_gpu_render_owner *owner,
+                                         struct fb_gpu_gem_object *gem,
+                                         uint32 *handle)
+{
+    if (owner == NULL || gem == NULL || handle == NULL)
+        return 0;
+
+    for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
+        struct fb_gpu_bo_entry *bo;
+
+        if (!owner->bo_handles[i].in_use)
+            continue;
+        bo = owner->bo_handles[i].bo;
+        if (bo == NULL || !bo->in_use || bo->dead)
+            continue;
+        if (bo->gem != gem || bo->gem == NULL ||
+            !bo->gem->in_use || bo->gem->dead)
+            continue;
+        *handle = owner->bo_handles[i].handle;
+        return 1;
+    }
+    return 0;
+}
+
 static int fb_bo_register_gem(uint64 owner_id, pid_t owner_tgid,
                               struct fb_gpu_gem_object *gem,
-                              uint32 *handle)
+                              uint32 *handle, int *created_out)
 {
     struct fb_gpu_bo_entry *bo = NULL;
     struct fb_gpu_render_owner *owner;
     uint32 next;
 
+    if (created_out != NULL)
+        *created_out = 0;
     if (gem == NULL || handle == NULL)
         return -EINVAL;
 
@@ -1684,6 +1710,11 @@ static int fb_bo_register_gem(uint64 owner_id, pid_t owner_tgid,
         return -ENOENT;
     }
     owner = fb_gpu_render_owner_lookup_locked(owner_id, owner_tgid);
+    if (owner != NULL &&
+        fb_bo_owner_gem_handle_locked(owner, gem, handle)) {
+        spin_unlock(&fb_state.lock);
+        return 0;
+    }
     if (owner != NULL &&
         fb_bo_owner_has_owner0_import_wrapper_locked(owner)) {
         for (int i = 0; i < FB_GPU_MAX_BOS; i++) {
@@ -1698,6 +1729,8 @@ static int fb_bo_register_gem(uint64 owner_id, pid_t owner_tgid,
                 continue;
             int ret = fb_bo_owner_add_handle_locked(owner, candidate,
                                                     handle, 1);
+            if (ret == 0 && created_out != NULL)
+                *created_out = 1;
             spin_unlock(&fb_state.lock);
             return ret;
         }
@@ -1741,6 +1774,8 @@ static int fb_bo_register_gem(uint64 owner_id, pid_t owner_tgid,
     } else {
         *handle = next;
     }
+    if (created_out != NULL)
+        *created_out = 1;
     spin_unlock(&fb_state.lock);
     return 0;
 }
@@ -1796,7 +1831,8 @@ static int fb_gem_flink(uint32 handle, uint64 owner_id, pid_t owner_tgid,
 }
 
 static int fb_gem_open_name(uint64 owner_id, pid_t owner_tgid, uint32 name,
-                            uint32 *handle_out, uint64 *size_out)
+                            uint32 *handle_out, uint64 *size_out,
+                            int *created_out)
 {
     struct fb_gpu_gem_object *gem = NULL;
     uint64 size = 0;
@@ -1820,7 +1856,8 @@ static int fb_gem_open_name(uint64 owner_id, pid_t owner_tgid, uint32 name,
     if (gem == NULL)
         return -ENOENT;
 
-    ret = fb_bo_register_gem(owner_id, owner_tgid, gem, handle_out);
+    ret = fb_bo_register_gem(owner_id, owner_tgid, gem, handle_out,
+                             created_out);
     fb_gem_put(gem);
     if (ret != 0)
         return ret;

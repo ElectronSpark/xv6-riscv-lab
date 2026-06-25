@@ -621,6 +621,10 @@ int virtio_gpu_user_resource_export_pages(uint64 owner_id, pid_t owner_tgid,
                                           uint32 *height, uint32 *pitch,
                                           uint64 *size, page_t ***pages_out,
                                           uint32 *npages_out);
+int virtio_gpu_user_resource_export_pin(uint64 owner_id, pid_t owner_tgid,
+                                        uint32 resource_id, uint32 *width,
+                                        uint32 *height, uint32 *format,
+                                        uint64 *size, uint32 *blob_mem);
 void virtio_gpu_user_resource_export_put(uint32 resource_id);
 int virtio_gpu_user_resource_info(uint64 owner_id, pid_t owner_tgid,
                                   uint32 resource_id, uint32 *width,
