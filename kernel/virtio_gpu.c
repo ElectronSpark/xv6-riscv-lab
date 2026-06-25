@@ -2537,6 +2537,7 @@ int virtio_gpu_user_capset_query_only(uint32 capset_id)
     (void)capset_id;
     return 0;
 }
+int virtio_gpu_user_resource_blob_supported(void) { return 0; }
 int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
                                  uint32 requested_capset_version,
                                  void *buf, uint32 buf_size,

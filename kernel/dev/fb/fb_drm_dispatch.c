@@ -7,6 +7,7 @@ static int chrome_drm_current_is_chrome(void);
 static int chrome_drm_trace_owner(const struct fb_gpu_render_owner *owner);
 int virtio_gpu_user_creatable_capset_ids(uint64 *ids);
 int virtio_gpu_user_capset_query_only(uint32 capset_id);
+int virtio_gpu_user_resource_blob_supported(void);
 
 static int chrome_drm_fence_trace_enabled(void)
 {
@@ -734,7 +735,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                 value = 0;
             break;
         case VIRTGPU_PARAM_RESOURCE_BLOB:
-            value = virtio_gpu_has_resource_blob() ? 1 : 0;
+            value = virtio_gpu_user_resource_blob_supported() ? 1 : 0;
             break;
         case VIRTGPU_PARAM_HOST_VISIBLE:
             value = virtio_gpu_has_host_visible() ? 1 : 0;

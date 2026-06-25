@@ -23,10 +23,53 @@ virtio_gpu_user_capset_policy_for(uint32 capset_id)
     }
 }
 
+static int virtio_gpu_user_capset_creatable(uint32 capset_id)
+{
+    return virtio_gpu_user_capset_policy_for(capset_id) ==
+        VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE;
+}
+
 int virtio_gpu_user_capset_query_only(uint32 capset_id)
 {
     return virtio_gpu_user_capset_policy_for(capset_id) ==
         VIRTIO_GPU_USER_CAPSET_QUERY_ONLY;
+}
+
+static int virtio_gpu_user_blob_class_admissible(struct virtio_gpu *g,
+                                                 uint32 blob_mem,
+                                                 uint32 blob_flags)
+{
+    uint32 allowed_flags = VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE |
+        VIRTIO_GPU_BLOB_FLAG_USE_SHAREABLE;
+
+    if (g == NULL || !g->initialized)
+        return -ENODEV;
+    if ((g->driver_features0 & (1u << VIRTIO_GPU_F_RESOURCE_BLOB)) == 0)
+        return -EOPNOTSUPP;
+    if (blob_mem != VIRTIO_GPU_BLOB_MEM_GUEST &&
+        blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D &&
+        blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D_GUEST)
+        return -EOPNOTSUPP;
+    if ((blob_flags & ~allowed_flags) != 0)
+        return -EOPNOTSUPP;
+    if (blob_flags != 0 && !virtio_gpu_host_visible_operational(g))
+        return -EOPNOTSUPP;
+    if (blob_mem == VIRTIO_GPU_BLOB_MEM_HOST3D &&
+        (blob_flags & VIRTIO_GPU_BLOB_FLAG_USE_MAPPABLE) == 0)
+        return -EINVAL;
+    return 0;
+}
+
+static int virtio_gpu_user_resource_blob_contract_supported(struct virtio_gpu *g)
+{
+    return virtio_gpu_user_blob_class_admissible(g,
+                                                VIRTIO_GPU_BLOB_MEM_GUEST,
+                                                0) == 0;
+}
+
+int virtio_gpu_user_resource_blob_supported(void)
+{
+    return virtio_gpu_user_resource_blob_contract_supported(&gpu);
 }
 
 static int virtio_gpu_user_fill_probe_capset(uint32 requested_capset_id,
@@ -76,8 +119,7 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
     spin_lock(&g->lock);
     if (capset_id == 0)
         capset_id = g->virgl_capset_id;
-    if (virtio_gpu_user_capset_policy_for(capset_id) !=
-        VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE) {
+    if (!virtio_gpu_user_capset_creatable(capset_id)) {
         spin_unlock(&g->lock);
         virtio_gpu_op_unlock(g);
         return -EINVAL;
@@ -428,8 +470,7 @@ int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
                                                  capset_version,
                                                  capset_size);
     }
-    if (virtio_gpu_user_capset_policy_for(requested_capset_id) !=
-        VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE) {
+    if (!virtio_gpu_user_capset_creatable(requested_capset_id)) {
         spin_unlock(&g->lock);
         return -EINVAL;
     }
@@ -478,7 +519,7 @@ int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
                                         capset_version, capset_size);
 }
 
-int virtio_gpu_user_capset_ids(uint64 *ids)
+static int virtio_gpu_user_collect_creatable_capset_ids(uint64 *ids)
 {
     struct virtio_gpu *g = &gpu;
     uint64 value = 0;
@@ -491,8 +532,7 @@ int virtio_gpu_user_capset_ids(uint64 *ids)
     spin_lock(&g->lock);
     for (int i = 0; i < VIRTIO_GPU_MAX_CAPSETS; i++) {
         if (g->capsets[i].valid &&
-            virtio_gpu_user_capset_policy_for(g->capsets[i].id) ==
-            VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE &&
+            virtio_gpu_user_capset_creatable(g->capsets[i].id) &&
             g->capsets[i].id < 64)
             value |= 1ULL << g->capsets[i].id;
     }
@@ -501,27 +541,14 @@ int virtio_gpu_user_capset_ids(uint64 *ids)
     return 0;
 }
 
+int virtio_gpu_user_capset_ids(uint64 *ids)
+{
+    return virtio_gpu_user_collect_creatable_capset_ids(ids);
+}
+
 int virtio_gpu_user_creatable_capset_ids(uint64 *ids)
 {
-    struct virtio_gpu *g = &gpu;
-    uint64 value = 0;
-
-    if (ids == NULL)
-        return -EINVAL;
-    if (!g->initialized)
-        return -ENODEV;
-
-    spin_lock(&g->lock);
-    for (int i = 0; i < VIRTIO_GPU_MAX_CAPSETS; i++) {
-        if (g->capsets[i].valid &&
-            virtio_gpu_user_capset_policy_for(g->capsets[i].id) ==
-            VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE &&
-            g->capsets[i].id < 64)
-            value |= 1ULL << g->capsets[i].id;
-    }
-    spin_unlock(&g->lock);
-    *ids = value;
-    return 0;
+    return virtio_gpu_user_collect_creatable_capset_ids(ids);
 }
 
 int virtio_gpu_user_resource_create(uint64 owner_id, pid_t owner_tgid,
@@ -616,6 +643,10 @@ int virtio_gpu_user_resource_create_blob(uint64 owner_id, pid_t owner_tgid,
         return -EINVAL;
     if (!g->initialized)
         return -ENODEV;
+    ret = virtio_gpu_user_blob_class_admissible(g, req->blob_mem,
+                                                req->blob_flags);
+    if (ret != 0)
+        return ret;
 
     if (req->ctx_id != 0) {
         spin_lock(&g->lock);
