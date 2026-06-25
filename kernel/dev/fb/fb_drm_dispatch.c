@@ -64,8 +64,8 @@ static int gpu_drm_execbuffer_async_allowed(void)
     return 1;
 }
 
-static int gpu_drm_execbuffer_resource_id_for_handle(
-    struct fb_gpu_render_owner *owner, uint32 handle, uint32 *resource_id,
+static int gpu_drm_virtgpu_resource_for_bo_handle(
+    struct fb_gpu_render_owner *owner, uint32 bo_handle, uint32 *resource_id,
     uint64 *resource_owner_id, pid_t *resource_owner_tgid, int *imported)
 {
     struct fb_gpu_bo_entry *bo;
@@ -76,51 +76,40 @@ static int gpu_drm_execbuffer_resource_id_for_handle(
 
     if (owner == NULL)
         return -EBADF;
-    if (resource_id == NULL || handle == 0)
+    if (resource_id == NULL || bo_handle == 0)
         return -EINVAL;
 
-    bo = fb_bo_get_owned(handle, owner->id, owner->tgid);
-    if (bo != NULL) {
-        id = bo->virtio_resource_id;
-        id_owner = bo->virtio_resource_owner_id;
-        id_tgid = bo->virtio_resource_owner_tgid;
-        if (id == 0 && bo->gem != NULL) {
-            id = bo->gem->virtio_resource_id;
-            id_owner = bo->gem->virtio_resource_owner_id;
-            id_tgid = bo->gem->virtio_resource_owner_tgid;
-        }
-        fb_bo_put(bo);
-        if (id == 0)
-            return -ENOENT;
-        if (id_owner == 0 && id_tgid <= 0) {
-            id_owner = owner->id;
-            id_tgid = owner->tgid;
-        }
-        ret = virtio_gpu_user_resource_info(id_owner, id_tgid, id,
-                                            NULL, NULL, NULL, NULL);
-        if (ret != 0)
-            return ret;
-        *resource_id = id;
-        if (resource_owner_id != NULL)
-            *resource_owner_id = id_owner;
-        if (resource_owner_tgid != NULL)
-            *resource_owner_tgid = id_tgid;
-        if (imported != NULL)
-            *imported = id_owner != owner->id;
-        return 0;
-    }
+    bo = fb_bo_get_owned(bo_handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
 
-    ret = virtio_gpu_user_resource_info(owner->id, owner->tgid, handle,
+    id = bo->virtio_resource_id;
+    id_owner = bo->virtio_resource_owner_id;
+    id_tgid = bo->virtio_resource_owner_tgid;
+    if (id == 0 && bo->gem != NULL) {
+        id = bo->gem->virtio_resource_id;
+        id_owner = bo->gem->virtio_resource_owner_id;
+        id_tgid = bo->gem->virtio_resource_owner_tgid;
+    }
+    fb_bo_put(bo);
+
+    if (id == 0)
+        return -ENOENT;
+    if (id_owner == 0 && id_tgid <= 0) {
+        id_owner = owner->id;
+        id_tgid = owner->tgid;
+    }
+    ret = virtio_gpu_user_resource_info(id_owner, id_tgid, id,
                                         NULL, NULL, NULL, NULL);
     if (ret != 0)
         return ret;
-    *resource_id = handle;
+    *resource_id = id;
     if (resource_owner_id != NULL)
-        *resource_owner_id = owner->id;
+        *resource_owner_id = id_owner;
     if (resource_owner_tgid != NULL)
-        *resource_owner_tgid = owner->tgid;
+        *resource_owner_tgid = id_tgid;
     if (imported != NULL)
-        *imported = 0;
+        *imported = id_owner != owner->id;
     return 0;
 }
 
@@ -652,61 +641,38 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     }
     case DRM_IOCTL_VIRTGPU_MAP: {
         struct drm_virtgpu_map_compat req;
-        uint64 size = 0;
+        uint32 resource_id = 0;
+        uint64 resource_owner_id = 0;
+        pid_t resource_owner_tgid = 0;
+        uint64 blob_offset = 0;
+        uint32 blob_mem = 0;
         int ret;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         if (req.handle == 0)
             return -EINVAL;
-        ret = virtio_gpu_user_resource_info(owner->id, owner->tgid,
-                                            req.handle, NULL, NULL, NULL,
-                                            &size);
-        if (ret != 0) {
-            struct fb_gpu_bo_entry *bo =
-                fb_bo_get_owned(req.handle, owner->id, owner->tgid);
-            if (bo == NULL)
-                return ret;
-            if (bo->virtio_resource_id != 0) {
-                uint64 blob_offset = 0;
-                uint32 blob_mem = 0;
-
-                ret = virtio_gpu_user_resource_map_offset(
-                    owner->id, owner->tgid, bo->virtio_resource_id,
-                    &blob_offset);
-                if (ret == 0) {
-                    req.offset = blob_offset;
-                    fb_bo_put(bo);
-                    if (either_copyout(1, arg, &req, sizeof(req)) < 0)
-                        return -EFAULT;
-                    return 0;
-                }
-                if (virtio_gpu_user_resource_blob_mem(
-                        owner->id, owner->tgid, bo->virtio_resource_id,
-                        &blob_mem) == 0 &&
-                    blob_mem == VIRTGPU_BLOB_MEM_HOST3D) {
-                    fb_bo_put(bo);
-                    return ret;
-                }
-            }
-            fb_bo_put(bo);
-        } else {
-            uint64 blob_offset = 0;
-            uint32 blob_mem = 0;
-
-            ret = virtio_gpu_user_resource_map_offset(owner->id, owner->tgid,
-                                                      req.handle,
-                                                      &blob_offset);
-            if (ret == 0) {
-                req.offset = blob_offset;
-                if (either_copyout(1, arg, &req, sizeof(req)) < 0)
-                    return -EFAULT;
-                return 0;
-            }
-            if (virtio_gpu_user_resource_blob_mem(owner->id, owner->tgid,
-                                                  req.handle, &blob_mem) == 0 &&
-                blob_mem == VIRTGPU_BLOB_MEM_HOST3D)
-                return ret;
+        ret = gpu_drm_virtgpu_resource_for_bo_handle(owner, req.handle,
+                                                     &resource_id,
+                                                     &resource_owner_id,
+                                                     &resource_owner_tgid,
+                                                     NULL);
+        if (ret != 0)
+            return ret;
+        ret = virtio_gpu_user_resource_map_offset(resource_owner_id,
+                                                  resource_owner_tgid,
+                                                  resource_id,
+                                                  &blob_offset);
+        if (ret == 0) {
+            req.offset = blob_offset;
+            if (either_copyout(1, arg, &req, sizeof(req)) < 0)
+                return -EFAULT;
+            return 0;
         }
+        if (virtio_gpu_user_resource_blob_mem(resource_owner_id,
+                                              resource_owner_tgid,
+                                              resource_id, &blob_mem) == 0 &&
+            blob_mem == VIRTGPU_BLOB_MEM_HOST3D)
+            return ret;
         req.offset = GPU_DRM_MMAP_OFFSET(req.handle);
         if (either_copyout(1, arg, &req, sizeof(req)) < 0)
             return -EFAULT;
@@ -862,11 +828,11 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             return gpu_nouveau_notifier_alloc(owner, arg);
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
-        ret = gpu_drm_execbuffer_resource_id_for_handle(owner, req.bo_handle,
-                                                        &resource_id,
-                                                        &resource_owner_id,
-                                                        &resource_owner_tgid,
-                                                        NULL);
+        ret = gpu_drm_virtgpu_resource_for_bo_handle(owner, req.bo_handle,
+                                                     &resource_id,
+                                                     &resource_owner_id,
+                                                     &resource_owner_tgid,
+                                                     NULL);
         if (ret != 0)
             return ret;
         ret = virtio_gpu_user_resource_info(resource_owner_id,
@@ -903,11 +869,11 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             return -EFAULT;
         if ((req.flags & ~VIRTGPU_WAIT_NOWAIT) != 0)
             return -EINVAL;
-        ret = gpu_drm_execbuffer_resource_id_for_handle(owner, req.handle,
-                                                        &resource_id,
-                                                        &resource_owner_id,
-                                                        &resource_owner_tgid,
-                                                        NULL);
+        ret = gpu_drm_virtgpu_resource_for_bo_handle(owner, req.handle,
+                                                     &resource_id,
+                                                     &resource_owner_id,
+                                                     &resource_owner_tgid,
+                                                     NULL);
         if (ret != 0)
             return ret;
         ret = virtio_gpu_user_resource_last_submit_fence(resource_owner_id,
@@ -1074,7 +1040,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             for (uint32 i = 0; i < req.num_bo_handles; i++) {
                 int imported = 0;
 
-                ret = gpu_drm_execbuffer_resource_id_for_handle(
+                ret = gpu_drm_virtgpu_resource_for_bo_handle(
                     owner, handles[i], &resources[i], NULL, NULL, &imported);
                 if (ret != 0) {
                     kvfree(handles);
