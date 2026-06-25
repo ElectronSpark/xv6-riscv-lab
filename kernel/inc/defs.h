@@ -557,6 +557,7 @@ void virtio_input_init(void);
 void virtio_snd_init(void);
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats);
 int virtio_gpu_has_virgl(void);
+int virtio_gpu_has_context_init(void);
 int virtio_gpu_has_resource_blob(void);
 int virtio_gpu_has_host_visible(void);
 int virtio_gpu_probe_scanout(uint32 *width, uint32 *height);

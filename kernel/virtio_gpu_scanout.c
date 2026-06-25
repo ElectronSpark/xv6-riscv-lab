@@ -896,6 +896,14 @@ int virtio_gpu_has_virgl(void)
         (g->driver_features0 & (1u << VIRTIO_GPU_F_VIRGL));
 }
 
+int virtio_gpu_has_context_init(void)
+{
+    struct virtio_gpu *g = &gpu;
+
+    return virtio_gpu_has_virgl() &&
+        (g->driver_features0 & (1u << VIRTIO_GPU_F_CONTEXT_INIT));
+}
+
 int virtio_gpu_has_resource_blob(void)
 {
     struct virtio_gpu *g = &gpu;

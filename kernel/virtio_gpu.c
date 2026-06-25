@@ -2397,6 +2397,7 @@ static uint64 virtio_gpu_async_newest_fence(struct virtio_gpu *g)
 void virtio_gpu_init(void) {}
 void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats) { (void)stats; }
 int virtio_gpu_has_virgl(void) { return 0; }
+int virtio_gpu_has_context_init(void) { return 0; }
 int virtio_gpu_has_resource_blob(void) { return 0; }
 int virtio_gpu_has_host_visible(void) { return 0; }
 int virtio_gpu_probe_scanout(uint32 *width, uint32 *height)
