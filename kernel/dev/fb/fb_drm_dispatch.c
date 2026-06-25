@@ -911,41 +911,30 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         requested_size = req.size;
         requested_addr = req.addr;
 
-        ret = virtio_gpu_user_get_caps_for(req.cap_set_id, req.cap_set_ver,
-                                           NULL, 0, &capset_id, &capset_ver,
-                                           &capset_size);
-        if (ret == -ENODEV) {
-            capset_id = 0;
-            capset_ver = 0;
-            capset_size = 0;
-            ret = 0;
-        }
-        if (ret != 0) {
+        if (req.addr == 0 || req.size == 0) {
             if (chrome_drm_trace_owner(owner))
                 printf("chrome-drm-detail: get-caps fail owner=%lu:%d "
                        "req_id=%u req_ver=%u req_size=%u req_addr=0x%lx "
                        "ret=%d\n",
                        owner->id, owner->tgid, requested_id, requested_ver,
-                       requested_size, requested_addr, ret);
-            return ret;
+                       requested_size, requested_addr, -EINVAL);
+            return -EINVAL;
         }
 
-        if (req.addr != 0 && req.size != 0) {
-            caps = kalloc();
-            if (caps == NULL)
-                return -ENOMEM;
-        }
-        if (caps != NULL)
-            ret = virtio_gpu_user_get_caps_for(capset_id, capset_ver, caps,
-                                               req.size, NULL, NULL, NULL);
-        copy_size = caps != NULL ? capset_size : 0;
-        if (copy_size > req.size)
-            copy_size = req.size;
-        if (ret == 0 && caps != NULL && copy_size != 0 &&
+        caps = kalloc();
+        if (caps == NULL)
+            return -ENOMEM;
+
+        ret = virtio_gpu_user_get_caps_for(req.cap_set_id, req.cap_set_ver,
+                                           caps, req.size, &capset_id,
+                                           &capset_ver, &capset_size);
+        copy_size = capset_size;
+        if (copy_size > requested_size)
+            copy_size = requested_size;
+        if (ret == 0 && copy_size != 0 &&
             either_copyout(1, req.addr, caps, copy_size) < 0)
             ret = -EFAULT;
-        if (caps != NULL)
-            kfree(caps);
+        kfree(caps);
         if (ret != 0) {
             if (chrome_drm_trace_owner(owner))
                 printf("chrome-drm-detail: get-caps copy fail owner=%lu:%d "

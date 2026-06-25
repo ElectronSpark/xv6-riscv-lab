@@ -29,6 +29,24 @@ static int virtio_gpu_user_capset_creatable(uint32 capset_id)
         VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE;
 }
 
+static uint32 virtio_gpu_user_capset_payload_limit(void)
+{
+    return PGSIZE - sizeof(struct virtio_gpu_resp_capset);
+}
+
+static int virtio_gpu_user_capset_payload_nonzero(const void *buf, uint32 len)
+{
+    const uint8 *p = buf;
+
+    if (p == NULL || len == 0)
+        return 0;
+    for (uint32 i = 0; i < len; i++) {
+        if (p[i] != 0)
+            return 1;
+    }
+    return 0;
+}
+
 int virtio_gpu_user_capset_query_only(uint32 capset_id)
 {
     return virtio_gpu_user_capset_policy_for(capset_id) ==
@@ -91,12 +109,12 @@ static int virtio_gpu_user_fill_probe_capset(uint32 requested_capset_id,
         *capset_version = VIRTIO_GPU_DRM_CAPSET_VERSION;
     if (capset_size)
         *capset_size = VIRTIO_GPU_DRM_CAPSET_SIZE;
-    if (buf != NULL && buf_size != 0) {
-        transfer_size = VIRTIO_GPU_DRM_CAPSET_SIZE;
-        if (transfer_size > buf_size)
-            transfer_size = buf_size;
-        memset(buf, 0, transfer_size);
-    }
+    if (buf == NULL || buf_size == 0)
+        return 0;
+    transfer_size = VIRTIO_GPU_DRM_CAPSET_SIZE;
+    if (transfer_size > buf_size)
+        transfer_size = buf_size;
+    memset(buf, 0, transfer_size);
     return 0;
 }
 
@@ -503,13 +521,21 @@ int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
     transfer_size = size;
     if (transfer_size > buf_size)
         transfer_size = buf_size;
-    if (transfer_size > PGSIZE - sizeof(struct virtio_gpu_resp_capset))
-        transfer_size = PGSIZE - sizeof(struct virtio_gpu_resp_capset);
+    if (transfer_size == 0)
+        return -EINVAL;
+    if (transfer_size > virtio_gpu_user_capset_payload_limit())
+        return -EOVERFLOW;
 
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_CAPSET);
     ret = virtio_gpu_submit_capset(g, id, version, transfer_size, buf);
     virtio_gpu_op_unlock(g);
-    return ret == 0 ? 0 : -EIO;
+    if (ret != 0)
+        return -EIO;
+    if (transfer_size == size &&
+        !virtio_gpu_user_capset_payload_nonzero(buf, transfer_size))
+        return -ENODATA;
+
+    return 0;
 }
 
 int virtio_gpu_user_get_caps(void *buf, uint32 buf_size, uint32 *capset_id,
