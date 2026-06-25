@@ -7,6 +7,7 @@
 #define FB_GPU_MAX_RENDER_OWNERS 64
 #define FB_GPU_MAX_USER_BLOBS 32
 #define FB_GPU_MAX_USER_BLOB_SIZE (16U * 1024U)
+#define FB_GPU_VIRTGPU_CONTEXT_MAX_RINGS 1U
 #define FB_GPU_DRM_EVENT_QUEUE_CAPACITY DRM_XV6_EVENT_QUEUE_CAPACITY
 #define FB_GPU_SYNTHETIC_VBLANK_PERIOD_TICKS (10000000ULL / 60ULL)
 #define FB_GPU_DXG_MISSING_PRESENT_BIND "dxg-resource-scanout-bind"
@@ -1063,6 +1064,12 @@ struct fb_gpu_render_owner {
     } bo_handles[FB_GPU_MAX_BOS];
     uint32 default_ctx_id;
     uint32 capset_id;
+    int context_created;
+    uint32 context_init;
+    uint32 num_rings;
+    uint64 ring_idx_mask;
+    int explicit_debug_name;
+    char debug_name[64];
     int nouveau_channel;
     uint32 nouveau_channel_handle;
     uint32 nouveau_pushbuf_domains;

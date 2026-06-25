@@ -95,8 +95,8 @@ int virtio_gpu_user_resource_blob_supported(void)
 }
 
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
-                                   uint32 capset_id, const char *name,
-                                   uint32 *ctx_id)
+                                   uint32 capset_id, uint32 context_init,
+                                   const char *name, uint32 *ctx_id)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
@@ -138,7 +138,7 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
     ctx->owner_tgid = owner_tgid;
     spin_unlock(&g->lock);
 
-    ret = virtio_gpu_create_context(g, id, capset_id,
+    ret = virtio_gpu_create_context(g, id, capset_id, context_init,
                                     name ? name : "xv6-virgl");
     if (ret != 0) {
         spin_lock(&g->lock);

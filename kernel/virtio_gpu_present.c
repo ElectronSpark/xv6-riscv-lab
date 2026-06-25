@@ -37,7 +37,8 @@ static int virtio_gpu_ensure_present_context(struct virtio_gpu *g,
     g->present_ctx_id = id;
     spin_unlock(&g->lock);
 
-    ret = virtio_gpu_create_context(g, id, capset->id, "xv6-present-copy");
+    ret = virtio_gpu_create_context(g, id, capset->id, capset->id,
+                                    "xv6-present-copy");
     if (ret != 0) {
         spin_lock(&g->lock);
         ctx = virtio_gpu_lookup_context_locked(g, id);

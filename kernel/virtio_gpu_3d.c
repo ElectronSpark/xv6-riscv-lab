@@ -1,7 +1,8 @@
 }
 
 static int virtio_gpu_create_context(struct virtio_gpu *g, uint32 ctx_id,
-                                     uint32 capset_id, const char *name)
+                                     uint32 capset_id, uint32 context_init,
+                                     const char *name)
 {
     struct virtio_gpu_ctx_create *cmd =
         (struct virtio_gpu_ctx_create *)g->cmd_page;
@@ -9,11 +10,12 @@ static int virtio_gpu_create_context(struct virtio_gpu *g, uint32 ctx_id,
         (struct virtio_gpu_ctrl_hdr *)g->resp_page;
     uint32 name_len = 0;
 
+    (void)capset_id;
     memset(cmd, 0, sizeof(*cmd));
     cmd->hdr.type = VIRTIO_GPU_CMD_CTX_CREATE;
     cmd->hdr.ctx_id = ctx_id;
     if (g->driver_features0 & (1u << VIRTIO_GPU_F_CONTEXT_INIT))
-        cmd->context_init = capset_id;
+        cmd->context_init = context_init;
     while (name[name_len] && name_len < sizeof(cmd->debug_name))
         name_len++;
     memcpy(cmd->debug_name, name, name_len);
@@ -205,6 +207,7 @@ static void virtio_gpu_smoke_context(struct virtio_gpu *g)
     }
 
     if (virtio_gpu_create_context(g, ctx_id, g->virgl_capset_id,
+                                  g->virgl_capset_id,
                                   "xv6-virgl-smoke") != 0) {
         printf("virtio_gpu: 3D context create failed\n");
         return;
@@ -285,6 +288,7 @@ static void virtio_gpu_smoke_host_visible_map(struct virtio_gpu *g)
         return;
 
     if (virtio_gpu_create_context(g, ctx_id, g->virgl_capset_id,
+                                  g->virgl_capset_id,
                                   "xv6-hostvis-probe") != 0) {
         printf("virtio_gpu: host-visible map probe: context create failed\n");
         return;

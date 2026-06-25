@@ -734,8 +734,12 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         struct drm_virtgpu_context_set_param_compat param;
         char debug_name[64];
         uint32 capset_id = 0;
-        uint32 current_capset = 0;
+        uint32 context_init = 0;
+        uint32 num_rings = 1;
+        uint64 ring_idx_mask = 0;
         uint64 creatable_capsets = 0;
+        uint32 seen_params = 0;
+        int explicit_debug_name = 0;
         uint32 i;
         int ret;
 
@@ -745,32 +749,38 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             return -EINVAL;
         if (!virtio_gpu_has_context_init())
             return -EINVAL;
-
-        ret = gpu_drm_current_capset(&current_capset);
-        if (ret != 0)
-            return ret;
+        if (gpu_owner_context_created(owner))
+            return -EEXIST;
         ret = virtio_gpu_user_creatable_capset_ids(&creatable_capsets);
         if (ret != 0)
             return ret;
-        capset_id = current_capset;
         memcpy(debug_name, "xv6-drm", sizeof("xv6-drm"));
 
         if (req.num_params != 0 && req.ctx_set_params == 0)
             return -EFAULT;
         if (chrome_drm_trace_owner(owner))
             printf("chrome-drm-detail: context-init begin owner=%lu:%d "
-                   "num_params=%u params=0x%lx default_capset=%u\n",
+                   "num_params=%u params=0x%lx\n",
                    owner->id, owner->tgid, req.num_params,
-                   req.ctx_set_params, capset_id);
+                   req.ctx_set_params);
         for (i = 0; i < req.num_params; i++) {
             uint64 user_param = req.ctx_set_params +
                 (uint64)i * sizeof(param);
+            uint32 param_bit;
+
             if (either_copyin(&param, 1, user_param, sizeof(param)) < 0)
                 return -EFAULT;
             if (chrome_drm_trace_owner(owner))
                 printf("chrome-drm-detail: context-param owner=%lu:%d "
                        "index=%u param=%lu value=%lu\n",
                        owner->id, owner->tgid, i, param.param, param.value);
+
+            if (param.param == 0 || param.param > 31)
+                return -EINVAL;
+            param_bit = 1U << (uint32)param.param;
+            if ((seen_params & param_bit) != 0)
+                return -EINVAL;
+            seen_params |= param_bit;
 
             switch (param.param) {
             case VIRTGPU_CONTEXT_PARAM_CAPSET_ID:
@@ -788,14 +798,18 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                     return -EINVAL;
                 }
                 capset_id = (uint32)param.value;
+                context_init = (context_init & ~0xffU) |
+                    (capset_id & 0xffU);
                 break;
             case VIRTGPU_CONTEXT_PARAM_DEBUG_NAME:
                 ret = gpu_user_debug_name(param.value, debug_name);
                 if (ret != 0)
                     return ret;
+                explicit_debug_name = 1;
                 break;
             case VIRTGPU_CONTEXT_PARAM_NUM_RINGS:
-                if (param.value != 1) {
+                if (param.value == 0 ||
+                    param.value > FB_GPU_VIRTGPU_CONTEXT_MAX_RINGS) {
                     if (chrome_drm_trace_owner(owner))
                         printf("chrome-drm-detail: context-init reject "
                                "owner=%lu:%d param=num-rings value=%lu "
@@ -804,20 +818,27 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                                -EINVAL);
                     return -EINVAL;
                 }
+                num_rings = (uint32)param.value;
                 break;
             case VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK:
-                if ((param.value & ~1ULL) != 0)
-                    return -EINVAL;
+                ring_idx_mask = param.value;
                 break;
             default:
                 return -EINVAL;
             }
         }
-        ret = gpu_owner_create_context(owner, debug_name, capset_id);
+        if ((ring_idx_mask & ~((1ULL << num_rings) - 1)) != 0)
+            return -EINVAL;
+        ret = gpu_owner_create_context(owner, debug_name, capset_id,
+                                       context_init, num_rings,
+                                       ring_idx_mask,
+                                       explicit_debug_name, 1);
         if (chrome_drm_trace_owner(owner))
             printf("chrome-drm-detail: context-init end owner=%lu:%d "
-                   "capset=%u ret=%d debug_name=%s\n",
-                   owner->id, owner->tgid, capset_id, ret, debug_name);
+                   "capset=%u context_init=0x%x num_rings=%u "
+                   "ring_idx_mask=0x%lx ret=%d debug_name=%s\n",
+                   owner->id, owner->tgid, capset_id, context_init,
+                   num_rings, ring_idx_mask, ret, debug_name);
         return ret;
     }
     case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE:

@@ -399,21 +399,6 @@ static int gpu_drm_property_info(uint32 prop_id, const char **name,
     return 0;
 }
 
-static int gpu_drm_current_capset(uint32 *capset_id)
-{
-    uint32 id = 0;
-    int ret;
-
-    ret = virtio_gpu_user_get_caps(NULL, 0, &id, NULL, NULL);
-    if (ret != 0)
-        return ret;
-    if (id == 0)
-        return -ENODEV;
-    if (capset_id != NULL)
-        *capset_id = id;
-    return 0;
-}
-
 static void gpu_backend_copy_string(char *dst, size_t dst_size,
                                     const char *src)
 {
@@ -490,34 +475,59 @@ static int gpu_backend_query(uint64 arg)
     return 0;
 }
 
+static int gpu_owner_context_created(struct fb_gpu_render_owner *owner)
+{
+    return owner != NULL &&
+        (owner->context_created || owner->default_ctx_id != 0);
+}
+
 static int gpu_owner_create_context(struct fb_gpu_render_owner *owner,
-                                    const char *name, uint32 capset_id)
+                                    const char *name, uint32 capset_id,
+                                    uint32 context_init, uint32 num_rings,
+                                    uint64 ring_idx_mask,
+                                    int explicit_debug_name,
+                                    int fail_if_exists)
 {
     int ret;
-    uint32 current_capset = 0;
 
     if (owner == NULL)
         return -EBADF;
-    ret = gpu_drm_current_capset(&current_capset);
-    if (ret != 0)
-        return ret;
-    if (capset_id == 0)
-        capset_id = current_capset;
-    if (owner->capset_id != 0 && owner->capset_id != capset_id)
-        return -EINVAL;
-    if (owner->default_ctx_id != 0)
-        return 0;
+    /*
+     * There is no narrow sleepable per-owner lock here. fb_state.lock is a
+     * short critical-section spinlock and cannot be held while virtio creates
+     * the context, so concurrent duplicate context-init ioctls remain a
+     * future per-owner mutex cleanup rather than a broad lock in this patch.
+     */
+    if (gpu_owner_context_created(owner))
+        return fail_if_exists ? -EEXIST : 0;
     ret = virtio_gpu_user_context_create(owner->id, owner->tgid, capset_id,
+                                         context_init,
                                          name ? name : "xv6-drm",
                                          &owner->default_ctx_id);
-    if (ret == 0)
+    if (ret == 0) {
+        owner->context_created = 1;
         owner->capset_id = capset_id;
+        owner->context_init = context_init;
+        owner->num_rings = num_rings != 0 ? num_rings : 1;
+        owner->ring_idx_mask = ring_idx_mask;
+        owner->explicit_debug_name = explicit_debug_name != 0;
+        memset(owner->debug_name, 0, sizeof(owner->debug_name));
+        if (name != NULL)
+            memmove(owner->debug_name, name,
+                    strlen(name) < sizeof(owner->debug_name) ?
+                    strlen(name) + 1 : sizeof(owner->debug_name));
+        else
+            memcpy(owner->debug_name, "xv6-drm", sizeof("xv6-drm"));
+        owner->debug_name[sizeof(owner->debug_name) - 1] = 0;
+    }
     return ret;
 }
 
 static int gpu_owner_ensure_context(struct fb_gpu_render_owner *owner)
 {
-    return gpu_owner_create_context(owner, "xv6-drm", 0);
+    if (gpu_owner_context_created(owner))
+        return 0;
+    return gpu_owner_create_context(owner, "xv6-drm", 0, 0, 1, 0, 0, 0);
 }
 
 static int gpu_drm_version(uint64 arg)

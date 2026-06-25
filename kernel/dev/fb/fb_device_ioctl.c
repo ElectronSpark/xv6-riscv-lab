@@ -1881,7 +1881,8 @@ bo_copy_out:
         req.debug_name[sizeof(req.debug_name) - 1] = 0;
 
         ret = virtio_gpu_user_context_create(owner_id, owner_tgid,
-                                             0, req.debug_name, &req.ctx_id);
+                                             0, 0, req.debug_name,
+                                             &req.ctx_id);
         if (ret != 0)
             return ret;
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
