@@ -496,6 +496,7 @@ struct virtio_gpu_context {
 
 struct virtio_gpu_capset {
     int valid;
+    int creatable;
     uint32 id;
     uint32 version;
     uint32 size;

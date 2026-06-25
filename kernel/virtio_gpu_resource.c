@@ -1261,6 +1261,14 @@ static void virtio_gpu_query_capsets(struct virtio_gpu *g)
                i, resp->capset_id, resp->capset_max_version,
                resp->capset_max_size);
 
+        spin_lock(&g->lock);
+        g->capsets[i].valid = 1;
+        g->capsets[i].creatable = 0;
+        g->capsets[i].id = resp->capset_id;
+        g->capsets[i].version = resp->capset_max_version;
+        g->capsets[i].size = resp->capset_max_size;
+        spin_unlock(&g->lock);
+
         if (virtio_gpu_capset_supported(resp->capset_id)) {
             uint32 capset_id = resp->capset_id;
             uint32 capset_version = resp->capset_max_version;
@@ -1269,10 +1277,7 @@ static void virtio_gpu_query_capsets(struct virtio_gpu *g)
             if (virtio_gpu_submit_capset(g, capset_id, capset_version,
                                          capset_size, NULL) == 0) {
                 spin_lock(&g->lock);
-                g->capsets[i].valid = 1;
-                g->capsets[i].id = capset_id;
-                g->capsets[i].version = capset_version;
-                g->capsets[i].size = capset_size;
+                g->capsets[i].creatable = 1;
                 if (virtio_gpu_capset_preferred(g->virgl_capset_id,
                                                 g->virgl_capset_version,
                                                 capset_id, capset_version)) {
