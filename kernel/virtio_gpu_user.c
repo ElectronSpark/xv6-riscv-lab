@@ -35,6 +35,28 @@ int virtio_gpu_user_capset_query_only(uint32 capset_id)
         VIRTIO_GPU_USER_CAPSET_QUERY_ONLY;
 }
 
+static int virtio_gpu_resource_accessible_by_owner_locked(
+    struct virtio_gpu *g, const struct virtio_gpu_resource *res,
+    uint64 owner_id, pid_t owner_tgid)
+{
+    if (g == NULL || res == NULL || !res->in_use)
+        return 0;
+    if (virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
+                                 owner_id, owner_tgid))
+        return 1;
+
+    for (uint32 i = 0; i < res->ctx_attach_count; i++) {
+        struct virtio_gpu_context *ctx =
+            virtio_gpu_lookup_context_locked(g, res->ctx_attached[i]);
+
+        if (ctx != NULL && ctx->in_use && !ctx->failed &&
+            virtio_gpu_owner_matches(ctx->owner_id, ctx->owner_tgid,
+                                     owner_id, owner_tgid))
+            return 1;
+    }
+    return 0;
+}
+
 static int virtio_gpu_user_blob_class_admissible(struct virtio_gpu *g,
                                                  uint32 blob_mem,
                                                  uint32 blob_flags)
@@ -764,6 +786,11 @@ int virtio_gpu_user_resource_attach(uint64 owner_id, pid_t owner_tgid,
         virtio_gpu_op_unlock(g);
         return -EPERM;
     }
+    if (virtio_gpu_resource_context_attached_locked(res, ctx_id)) {
+        spin_unlock(&g->lock);
+        virtio_gpu_op_unlock(g);
+        return 0;
+    }
     spin_unlock(&g->lock);
 
     ret = virtio_gpu_context_resource(g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
@@ -1072,8 +1099,8 @@ int virtio_gpu_user_host_visible_mmap(uint64 owner_id, pid_t owner_tgid,
             uint64 res_end;
 
             if (!res->in_use || !res->host_visible_mapped ||
-                !virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
-                                          owner_id, owner_tgid))
+                !virtio_gpu_resource_accessible_by_owner_locked(
+                    g, res, owner_id, owner_tgid))
                 continue;
             res_end = res->host_visible_offset + res->host_visible_size;
             if (offset >= res->host_visible_offset && end <= res_end) {
@@ -1102,8 +1129,8 @@ void *virtio_gpu_user_host_visible_page(uint64 owner_id, pid_t owner_tgid,
             uint64 res_end;
 
             if (!res->in_use || !res->host_visible_mapped ||
-                !virtio_gpu_owner_matches(res->owner_id, res->owner_tgid,
-                                          owner_id, owner_tgid))
+                !virtio_gpu_resource_accessible_by_owner_locked(
+                    g, res, owner_id, owner_tgid))
                 continue;
             res_end = res->host_visible_offset + res->host_visible_size;
             if (offset >= res->host_visible_offset && offset < res_end) {

@@ -1440,6 +1440,54 @@ static int gpu_drm_prime_handle_to_fd(struct fb_gpu_render_owner *owner,
     return 0;
 }
 
+static int gpu_drm_prime_virtgpu_owner_matches(
+    struct fb_gpu_render_owner *owner, uint64 resource_owner_id,
+    pid_t resource_owner_tgid)
+{
+    if (owner == NULL)
+        return 0;
+    if (owner->id != 0)
+        return resource_owner_id == owner->id;
+    if (owner->tgid > 0 && resource_owner_id != 0)
+        return resource_owner_tgid == owner->tgid;
+    if (owner->tgid > 0)
+        return resource_owner_tgid == owner->tgid;
+    return 1;
+}
+
+static int gpu_drm_prime_attach_imported_virtgpu_resource(
+    struct fb_gpu_render_owner *owner, struct fb_gpu_bo_entry *bo)
+{
+    uint32 resource_id;
+    uint64 resource_owner_id;
+    pid_t resource_owner_tgid;
+    int ret;
+
+    if (owner == NULL || bo == NULL)
+        return -EINVAL;
+
+    resource_id = bo->virtio_resource_id;
+    resource_owner_id = bo->virtio_resource_owner_id;
+    resource_owner_tgid = bo->virtio_resource_owner_tgid;
+    if (resource_id == 0 && bo->gem != NULL) {
+        resource_id = bo->gem->virtio_resource_id;
+        resource_owner_id = bo->gem->virtio_resource_owner_id;
+        resource_owner_tgid = bo->gem->virtio_resource_owner_tgid;
+    }
+    if (resource_id == 0)
+        return 0;
+    if (gpu_drm_prime_virtgpu_owner_matches(owner, resource_owner_id,
+                                            resource_owner_tgid))
+        return 0;
+
+    ret = gpu_owner_ensure_context(owner);
+    if (ret != 0)
+        return ret;
+    return virtio_gpu_user_resource_attach(owner->id, owner->tgid,
+                                           owner->default_ctx_id,
+                                           resource_id, 1);
+}
+
 static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
                                       uint64 arg)
 {
@@ -1492,17 +1540,27 @@ static int gpu_drm_prime_fd_to_handle(struct fb_gpu_render_owner *owner,
         vfs_fput(file);
         return -ENOENT;
     }
+    req.handle = handle;
+    if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
+        fb_bo_put(bo);
+        if (handle_created)
+            (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
+        vfs_fput(file);
+        return -EFAULT;
+    }
+    ret = gpu_drm_prime_attach_imported_virtgpu_resource(owner, bo);
+    if (ret != 0) {
+        fb_bo_put(bo);
+        if (handle_created)
+            (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
+        vfs_fput(file);
+        return ret;
+    }
     spin_lock(&fb_state.lock);
     fb_dmabuf_note_import_locked(dmabuf, bo, FB_GPU_DMABUF_TAG_DRM_PRIME);
     spin_unlock(&fb_state.lock);
     fb_bo_put(bo);
     vfs_fput(file);
-    req.handle = handle;
-    if (either_copyout(1, arg, &req, sizeof(req)) < 0) {
-        if (handle_created)
-            (void)fb_bo_destroy_owned(handle, owner->id, owner->tgid);
-        return -EFAULT;
-    }
     return 0;
 }
 
