@@ -56,6 +56,8 @@ static uint32 chrome_exec_trace_roles(char **argv, uint64 argc)
             continue;
         if (strstr(arg, "network.mojom.NetworkService") != NULL)
             roles |= TG_CHROME_TRACE_NETWORK_SERVICE;
+        if (strstr(arg, "audio.mojom.AudioService") != NULL)
+            roles |= TG_CHROME_TRACE_AUDIO_SERVICE;
     }
     return roles;
 }
@@ -303,6 +305,9 @@ static int load_elf_segments(vm_t *vm, struct vfs_file *file,
                 kfree(pa);
                 return ret;
             }
+            vma_t *boundary_vma = vm_find_area(vm, file_pg_end);
+            if (boundary_vma != NULL && boundary_vma->start == file_pg_end)
+                boundary_vma->file_data_end = (uint64)foff + nbytes;
         }
 
         /* Region 3: anonymous BSS pages */
@@ -936,7 +941,7 @@ int exec(char *path, char **argv, char **envp) {
     // Commit to the user image.
     chrome_exec_phase_trace(path, "before-old-vm-put", exec_start,
                             &exec_phase_last);
-    vm_put(p->vm); // Destroy the old VM
+    vm_put_owner(p->vm, p->thread_group); // Destroy the old VM
     chrome_exec_phase_trace(path, "old-vm-put", exec_start, &exec_phase_last);
     p->vm = NULL;
     p->vm = tmp_vm;

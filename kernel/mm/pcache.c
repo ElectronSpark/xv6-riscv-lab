@@ -2827,7 +2827,10 @@ loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
 
     page_t *ra_pages[PCACHE_RA_WINDOW];
     struct bio *ra_bios[PCACHE_RA_WINDOW];
+    loff_t ra_starts[PCACHE_RA_WINDOW];
+    loff_t ra_ends[PCACHE_RA_WINDOW];
     int n_pages = 0;
+    loff_t frontier = start_pos;
 
     /* Phase 1: collect pages that need I/O, mark io_in_progress */
     loff_t pos = start_pos;
@@ -2838,10 +2841,13 @@ loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
             break;
 
         struct pcache_node *pcn = page->pcache.pcache_node;
+        loff_t page_start = (loff_t)(pcn->blkno * BLK_SIZE);
+        loff_t next_pos = page_start + pcn->size;
 
         /* Already cached — skip */
         if (pcn->uptodate) {
-            loff_t next_pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
+            if (page_start <= frontier && frontier < next_pos)
+                frontier = next_pos;
             pcache_put_page(pcache, page);
             pos = next_pos;
             continue;
@@ -2850,7 +2856,6 @@ loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
         /* Try to claim for I/O */
         __pcache_spin_lock(pcache);
         if (!spin_trylock(&page->lock)) {
-            loff_t next_pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
             __pcache_spin_unlock(pcache);
             pcache_put_page(pcache, page);
             pos = next_pos;
@@ -2859,7 +2864,8 @@ loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
 
         if (pcn->io_in_progress || pcn->uptodate ||
             !__pcache_is_active(pcache) || !__pcache_page_valid(pcache, page)) {
-            loff_t next_pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
+            if (pcn->uptodate && page_start <= frontier && frontier < next_pos)
+                frontier = next_pos;
             page_lock_release(page);
             __pcache_spin_unlock(pcache);
             pcache_put_page(pcache, page);
@@ -2873,13 +2879,15 @@ loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
 
         ra_pages[n_pages] = page;
         ra_bios[n_pages] = NULL;
+        ra_starts[n_pages] = page_start;
+        ra_ends[n_pages] = next_pos;
         n_pages++;
 
-        pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
+        pos = next_pos;
     }
 
     if (n_pages == 0)
-        return pos;
+        return frontier;
 
     /* Phase 2: batch-submit BIOs via filesystem callback */
     pcache->ops->submit_readahead(
@@ -2887,6 +2895,7 @@ loff_t pcache_readahead(struct pcache *pcache, loff_t start_pos,
 
     /* Phase 3: await each BIO, mark successful pages uptodate, release */
     for (int i = 0; i < n_pages; i++) {
+        bool page_uptodate = false;
         if (ra_bios[i] != NULL) {
             int bio_ret = bio_await(ra_bios[i]);
             bio_release(ra_bios[i]);
@@ -2906,6 +2915,7 @@ retry_ra_complete:
                     pcn->dirty = 0;
                     pcn->uptodate = 1;
                 }
+                page_uptodate = pcn->uptodate;
             }
             page_lock_release(ra_pages[i]);
             __pcache_spin_unlock(pcache);
@@ -2914,10 +2924,13 @@ retry_ra_complete:
             /* No BIO submitted — end I/O state, read via normal path */
             __pcache_node_io_end(pcache, ra_pages[i]);
         }
+        if (page_uptodate && ra_starts[i] <= frontier &&
+            frontier < ra_ends[i])
+            frontier = ra_ends[i];
         pcache_put_page(pcache, ra_pages[i]);
     }
 
-    return pos;
+    return frontier;
 }
 
 /******************************************************************************

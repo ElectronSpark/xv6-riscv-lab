@@ -1717,8 +1717,10 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
 
     struct vfs_inode *pos = NULL;
     struct vfs_inode *rooti = NULL;
-    char *pathbuf = NULL;
+    char stack_pathbuf[256];
+    char *pathbuf = stack_pathbuf;
     size_t pathbuf_len = 0;
+    bool pathbuf_heap = false;
     struct vfs_inode *ret_inode = NULL;
     int symlink_depth = 0;
 
@@ -1731,26 +1733,32 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
      * lookup makes small exec/open probes fail first under browser pressure.
      */
     pathbuf_len = path_len + 1;
-    pathbuf = kvmalloc(pathbuf_len);
-    if (pathbuf == NULL)
-        return ERR_PTR(-ENOMEM);
+    if (pathbuf_len > sizeof(stack_pathbuf)) {
+        pathbuf = kvmalloc(pathbuf_len);
+        if (pathbuf == NULL)
+            return ERR_PTR(-ENOMEM);
+        pathbuf_heap = true;
+    }
 
     /* Get current root for ".." at root handling */
     rooti = vfs_curroot();
     if (IS_ERR_OR_NULL(rooti)) {
-        kvfree(pathbuf);
+        if (pathbuf_heap)
+            kvfree(pathbuf);
         return rooti ? rooti : ERR_PTR(-EINVAL);
     }
     if (rooti->mount) {
         if (rooti->mnt_rooti == NULL) {
             vfs_iput(rooti);
-            kvfree(pathbuf);
+            if (pathbuf_heap)
+                kvfree(pathbuf);
             return ERR_PTR(-EINVAL);
         }
         struct vfs_inode *mnt_root = rooti->mnt_rooti;
         if (!vfs_idup_not_zero(mnt_root)) {
             vfs_iput(rooti);
-            kvfree(pathbuf);
+            if (pathbuf_heap)
+                kvfree(pathbuf);
             return ERR_PTR(-EAGAIN);
         }
         vfs_iput(rooti);
@@ -1773,7 +1781,8 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
         pos = vfs_curdir();
         if (IS_ERR(pos)) {
             vfs_iput(rooti);
-            kvfree(pathbuf);
+            if (pathbuf_heap)
+                kvfree(pathbuf);
             return pos ? pos : ERR_PTR(-EINVAL);
         }
     }
@@ -1896,9 +1905,11 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
                     ret_inode = INIT_ERR_PTR(-ENOMEM);
                     goto out;
                 }
-                kvfree(pathbuf);
+                if (pathbuf_heap)
+                    kvfree(pathbuf);
                 pathbuf = new_pathbuf;
                 pathbuf_len = new_len + 1;
+                pathbuf_heap = true;
             }
 
             /* Construct new path in pathbuf */
@@ -1956,7 +1967,8 @@ static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
     ret_inode = pos;
 out:
     vfs_iput(rooti);
-    kvfree(pathbuf);
+    if (pathbuf_heap)
+        kvfree(pathbuf);
     if (pos == NULL && !IS_ERR(ret_inode))
         return ERR_PTR(-ENOENT);
     return ret_inode;

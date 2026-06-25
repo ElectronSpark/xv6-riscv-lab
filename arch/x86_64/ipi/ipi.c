@@ -35,6 +35,19 @@ static volatile uint64 *ipi_pending;
  */
 #define TLB_FLUSH_ALL  ((uint64)-1)
 volatile uint64 *tlb_flush_va;
+volatile uint64 *tlb_flush_sync_req;
+volatile uint64 *tlb_flush_sync_ack;
+volatile uint64 tlb_flush_sync_epoch;
+
+static inline void tlb_flush_sync_acknowledge(int cpu)
+{
+    if (tlb_flush_sync_req == NULL || tlb_flush_sync_ack == NULL)
+        return;
+    uint64 seq = __atomic_load_n(&tlb_flush_sync_req[cpu],
+                                 __ATOMIC_ACQUIRE);
+    if (seq != 0)
+        __atomic_store_n(&tlb_flush_sync_ack[cpu], seq, __ATOMIC_RELEASE);
+}
 
 /* ── Internal: wait for LAPIC ICR idle ── */
 static inline void lapic_icr_wait(void) {
@@ -107,6 +120,7 @@ void x86_ipi_handler(void) {
                 "btsq $7, %%rax\n\t"     /* set PGE   */
                 "movq %%rax, %%cr4"
                 ::: "rax", "memory");
+            tlb_flush_sync_acknowledge(cpu);
             break;
 
         case IPI_REASON_TLB_FLUSH_PAGE: {
@@ -127,6 +141,7 @@ void x86_ipi_handler(void) {
                 sfence_vma_global();
             else
                 sfence_vma_page(va);
+            tlb_flush_sync_acknowledge(cpu);
             break;
         }
 
@@ -146,11 +161,20 @@ void ipi_init(void) {
     int ncpu = cpu_possible_count();
     ipi_pending = (volatile uint64 *)kvmalloc(sizeof(*ipi_pending) * ncpu);
     tlb_flush_va = (volatile uint64 *)kvmalloc(sizeof(*tlb_flush_va) * ncpu);
-    if (ipi_pending == NULL || tlb_flush_va == NULL)
+    tlb_flush_sync_req =
+        (volatile uint64 *)kvmalloc(sizeof(*tlb_flush_sync_req) * ncpu);
+    tlb_flush_sync_ack =
+        (volatile uint64 *)kvmalloc(sizeof(*tlb_flush_sync_ack) * ncpu);
+    if (ipi_pending == NULL || tlb_flush_va == NULL ||
+        tlb_flush_sync_req == NULL || tlb_flush_sync_ack == NULL)
         panic("ipi_init: per-CPU mailbox allocation failed");
 
     memset((void *)ipi_pending, 0, sizeof(*ipi_pending) * ncpu);
     memset((void *)tlb_flush_va, 0, sizeof(*tlb_flush_va) * ncpu);
+    memset((void *)tlb_flush_sync_req, 0,
+           sizeof(*tlb_flush_sync_req) * ncpu);
+    memset((void *)tlb_flush_sync_ack, 0,
+           sizeof(*tlb_flush_sync_ack) * ncpu);
     for (int i = 0; i < ncpu; i++)
         __atomic_store_n(&ipi_pending[i], 0, __ATOMIC_RELEASE);
     printf("ipi_init: IPI subsystem initialized (vector 0x%x)\n",

@@ -3,6 +3,8 @@
 #define GPU_DRM_FENCE_WAIT_TIMEOUT_MS 60000
 
 static int chrome_drm_ioctl_trace_enabled(void);
+static int chrome_drm_current_is_chrome(void);
+static int chrome_drm_trace_owner(const struct fb_gpu_render_owner *owner);
 
 static int chrome_drm_fence_trace_enabled(void)
 {
@@ -375,7 +377,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_SET_VERSION:
         return gpu_drm_set_version(arg);
     case DRM_IOCTL_GET_CAP:
-        return gpu_drm_get_cap(arg);
+        return gpu_drm_get_cap(owner, arg);
     case DRM_IOCTL_SET_CLIENT_CAP:
         return gpu_drm_set_client_cap(owner, arg);
     case DRM_IOCTL_SET_CLIENT_NAME:
@@ -735,14 +737,20 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         case VIRTGPU_PARAM_HOST_VISIBLE:
             value = virtio_gpu_has_host_visible() ? 1 : 0;
             break;
-        default:
+        case VIRTGPU_PARAM_CROSS_DEVICE:
             value = 0;
             break;
+        default:
+            return -EINVAL;
         }
         if (req.value == 0)
             return -EFAULT;
         if (either_copyout(1, req.value, &value, sizeof(value)) < 0)
             return -EFAULT;
+        if (chrome_drm_trace_owner(owner))
+            printf("chrome-drm-detail: getparam owner=%lu:%d param=%lu "
+                   "value=%lu value_ptr=0x%lx\n",
+                   owner->id, owner->tgid, req.param, value, req.value);
         return 0;
     }
     case DRM_IOCTL_VIRTGPU_CONTEXT_INIT: {
@@ -751,6 +759,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         char debug_name[64];
         uint32 capset_id = 0;
         uint32 current_capset = 0;
+        uint64 supported_capsets = 0;
         uint32 i;
         int ret;
 
@@ -762,25 +771,41 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         ret = gpu_drm_current_capset(&current_capset);
         if (ret != 0)
             return ret;
+        ret = virtio_gpu_user_capset_ids(&supported_capsets);
+        if (ret != 0)
+            return ret;
         capset_id = current_capset;
         memcpy(debug_name, "xv6-drm", sizeof("xv6-drm"));
 
         if (req.num_params != 0 && req.ctx_set_params == 0)
             return -EFAULT;
+        if (chrome_drm_trace_owner(owner))
+            printf("chrome-drm-detail: context-init begin owner=%lu:%d "
+                   "num_params=%u params=0x%lx default_capset=%u\n",
+                   owner->id, owner->tgid, req.num_params,
+                   req.ctx_set_params, capset_id);
         for (i = 0; i < req.num_params; i++) {
             uint64 user_param = req.ctx_set_params +
                 (uint64)i * sizeof(param);
             if (either_copyin(&param, 1, user_param, sizeof(param)) < 0)
                 return -EFAULT;
+            if (chrome_drm_trace_owner(owner))
+                printf("chrome-drm-detail: context-param owner=%lu:%d "
+                       "index=%u param=%lu value=%lu\n",
+                       owner->id, owner->tgid, i, param.param, param.value);
 
             switch (param.param) {
             case VIRTGPU_CONTEXT_PARAM_CAPSET_ID:
-                if (param.value == 0)
+                if (param.value == 0 || param.value >= 64 ||
+                    (supported_capsets & (1ULL << param.value)) == 0) {
+                    if (chrome_drm_trace_owner(owner))
+                        printf("chrome-drm-detail: context-init reject "
+                               "owner=%lu:%d param=capset value=%lu "
+                               "supported=0x%lx ret=%d\n",
+                               owner->id, owner->tgid, param.value,
+                               supported_capsets, -EINVAL);
                     return -EINVAL;
-                ret = virtio_gpu_user_get_caps_for((uint32)param.value, 0,
-                                                   NULL, 0, NULL, NULL, NULL);
-                if (ret != 0)
-                    return -EINVAL;
+                }
                 capset_id = (uint32)param.value;
                 break;
             case VIRTGPU_CONTEXT_PARAM_DEBUG_NAME:
@@ -789,18 +814,30 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                     return ret;
                 break;
             case VIRTGPU_CONTEXT_PARAM_NUM_RINGS:
-                if (param.value > 1)
+                if (param.value != 1) {
+                    if (chrome_drm_trace_owner(owner))
+                        printf("chrome-drm-detail: context-init reject "
+                               "owner=%lu:%d param=num-rings value=%lu "
+                               "ret=%d\n",
+                               owner->id, owner->tgid, param.value,
+                               -EINVAL);
                     return -EINVAL;
+                }
                 break;
             case VIRTGPU_CONTEXT_PARAM_POLL_RINGS_MASK:
-                if (param.value > 1)
+                if ((param.value & ~1ULL) != 0)
                     return -EINVAL;
                 break;
             default:
                 return -EINVAL;
             }
         }
-        return gpu_owner_create_context(owner, debug_name, capset_id);
+        ret = gpu_owner_create_context(owner, debug_name, capset_id);
+        if (chrome_drm_trace_owner(owner))
+            printf("chrome-drm-detail: context-init end owner=%lu:%d "
+                   "capset=%u ret=%d debug_name=%s\n",
+                   owner->id, owner->tgid, capset_id, ret, debug_name);
+        return ret;
     }
     case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE:
         return gpu_drm_virtgpu_resource_create(owner, arg, 0);
@@ -887,12 +924,20 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     }
     case DRM_IOCTL_VIRTGPU_GET_CAPS: {
         struct drm_virtgpu_get_caps_compat req;
+        uint32 requested_id;
+        uint32 requested_ver;
+        uint32 requested_size;
+        uint64 requested_addr;
         uint32 capset_id = 0, capset_ver = 0, capset_size = 0;
         uint32 copy_size;
         void *caps = NULL;
         int ret;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
+        requested_id = req.cap_set_id;
+        requested_ver = req.cap_set_ver;
+        requested_size = req.size;
+        requested_addr = req.addr;
 
         ret = virtio_gpu_user_get_caps_for(req.cap_set_id, req.cap_set_ver,
                                            NULL, 0, &capset_id, &capset_ver,
@@ -903,8 +948,15 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             capset_size = 0;
             ret = 0;
         }
-        if (ret != 0)
+        if (ret != 0) {
+            if (chrome_drm_trace_owner(owner))
+                printf("chrome-drm-detail: get-caps fail owner=%lu:%d "
+                       "req_id=%u req_ver=%u req_size=%u req_addr=0x%lx "
+                       "ret=%d\n",
+                       owner->id, owner->tgid, requested_id, requested_ver,
+                       requested_size, requested_addr, ret);
             return ret;
+        }
 
         if (req.addr != 0 && req.size != 0) {
             caps = kalloc();
@@ -914,7 +966,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         if (caps != NULL)
             ret = virtio_gpu_user_get_caps_for(capset_id, capset_ver, caps,
                                                req.size, NULL, NULL, NULL);
-        copy_size = capset_size;
+        copy_size = caps != NULL ? capset_size : 0;
         if (copy_size > req.size)
             copy_size = req.size;
         if (ret == 0 && caps != NULL && copy_size != 0 &&
@@ -922,11 +974,26 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             ret = -EFAULT;
         if (caps != NULL)
             kfree(caps);
-        if (ret != 0)
+        if (ret != 0) {
+            if (chrome_drm_trace_owner(owner))
+                printf("chrome-drm-detail: get-caps copy fail owner=%lu:%d "
+                       "req_id=%u req_ver=%u req_size=%u req_addr=0x%lx "
+                       "out_id=%u out_ver=%u out_size=%u ret=%d\n",
+                       owner->id, owner->tgid, requested_id, requested_ver,
+                       requested_size, requested_addr, capset_id, capset_ver,
+                       capset_size, ret);
             return ret;
+        }
         req.cap_set_id = capset_id;
         req.cap_set_ver = capset_ver;
         req.size = capset_size;
+        if (chrome_drm_trace_owner(owner))
+            printf("chrome-drm-detail: get-caps owner=%lu:%d "
+                   "req_id=%u req_ver=%u req_size=%u req_addr=0x%lx "
+                   "out_id=%u out_ver=%u out_size=%u copied=%u\n",
+                   owner->id, owner->tgid, requested_id, requested_ver,
+                   requested_size, requested_addr, capset_id, capset_ver,
+                   capset_size, copy_size);
         if (either_copyout(1, arg, &req, sizeof(req)) < 0)
             return -EFAULT;
         return 0;
@@ -1030,6 +1097,13 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                                      owner->default_ctx_id, submit_flags, cmds,
                                      req.size / sizeof(uint32), resources,
                                      req.num_bo_handles, &fence, &signaled);
+        if (chrome_drm_trace_owner(owner))
+            printf("chrome-drm-detail: execbuffer-submit owner=%lu:%d "
+                   "ctx=%u flags=0x%x size=%u words=%u bo_count=%u "
+                   "first=0x%x ret=%d fence=%lu signaled=%lu\n",
+                   owner->id, owner->tgid, owner->default_ctx_id,
+                   req.flags, req.size, req.size / (uint32)sizeof(uint32),
+                   req.num_bo_handles, cmds[0], ret, fence, signaled);
         if (ret == 0 &&
             (req.flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0) {
             ret = gpu_drm_execbuffer_export_fence_fd(fence,
@@ -1342,15 +1416,23 @@ static int chrome_drm_ioctl_trace_enabled(void)
 
 static _Atomic int chrome_drm_trace_tgid;
 
+static int chrome_drm_current_is_chrome(void)
+{
+    return current != NULL &&
+        (strncmp(current->name, "chrome", 6) == 0 ||
+         strncmp(current->name, "Chrome", 6) == 0 ||
+         strncmp(current->name, "egl-wayland", 11) == 0 ||
+         strncmp(current->name, "Xwayland", 8) == 0 ||
+         strncmp(current->name, "xwayland", 8) == 0);
+}
+
 static int chrome_drm_trace_owner(const struct fb_gpu_render_owner *owner)
 {
     int trace_tgid;
 
     if (!chrome_drm_ioctl_trace_enabled() || owner == NULL)
         return 0;
-    if (current != NULL &&
-        (strncmp(current->name, "chrome", 6) == 0 ||
-         strncmp(current->name, "Chrome", 6) == 0))
+    if (chrome_drm_current_is_chrome())
         return 1;
     trace_tgid = __atomic_load_n(&chrome_drm_trace_tgid, __ATOMIC_ACQUIRE);
     return owner->tgid > 0 && owner->tgid == trace_tgid;
@@ -1775,9 +1857,7 @@ static void maybe_start_chrome_drm_thread_dump(const struct fb_gpu_render_owner 
         return;
     if (current == NULL)
         return;
-    if (chrome_drm_ioctl_trace_enabled() &&
-        strcmp(current->name, "sh") != 0 &&
-        strcmp(current->name, "weston") != 0) {
+    if (chrome_drm_ioctl_trace_enabled() && chrome_drm_current_is_chrome()) {
         int old = 0;
         (void)__atomic_compare_exchange_n(&chrome_drm_trace_tgid, &old,
                                           owner->tgid, 0, __ATOMIC_ACQ_REL,

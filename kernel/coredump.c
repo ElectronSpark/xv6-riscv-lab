@@ -60,6 +60,7 @@ int snprintf(char *buf, size_t size, const char *fmt, ...);
 /* Align to 4-byte boundary (ELF note alignment) */
 #define NOTE_ALIGN(x) (((x) + 3) & ~3)
 
+#ifdef __riscv
 /*
  * RISC-V 64-bit prstatus register layout.
  * Matches Linux struct user_regs_struct:
@@ -67,6 +68,13 @@ int snprintf(char *buf, size_t size, const char *fmt, ...);
  * = 32 uint64 values.
  */
 #define ELF_NGREG 32
+#else
+/*
+ * x86_64 Linux struct user_regs_struct has 27 unsigned long registers.
+ * GDB checks the NT_PRSTATUS descriptor size before decoding pr_reg.
+ */
+#define ELF_NGREG 27
+#endif
 
 /*
  * Minimal elf_prstatus structure matching Linux layout.

@@ -73,6 +73,8 @@ static void __pcb_init(struct thread *p, struct vfs_fdtable *fdtable) {
     p->rseq_len = 0;
     p->rseq_signature = 0;
     p->rseq_cpu_id = -1;
+    p->linux_sched_policy = 0;
+    p->linux_sched_priority = 0;
     p->killed_signo = 0;
     p->killed_code = 0;
     p->ptrace_tracer = NULL;
@@ -398,7 +400,7 @@ void thread_destroy(struct thread *p) {
     }
 
     if (p->vm != NULL) {
-        vm_put(p->vm);
+        vm_put_owner(p->vm, p->thread_group);
         p->vm = NULL;
     }
 

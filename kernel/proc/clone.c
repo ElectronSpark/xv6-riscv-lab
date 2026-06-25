@@ -308,6 +308,8 @@ int thread_clone(struct clone_args *args) {
     // Copy per-thread signal mask from parent
     sigpending_clone(&ret_ptr->signal, &p->signal, args->flags, args->esignal);
     ret_ptr->clone_flags = args->flags;
+    ret_ptr->linux_sched_policy = p->linux_sched_policy;
+    ret_ptr->linux_sched_priority = p->linux_sched_priority;
     rseq_clear_thread(ret_ptr);
 
     // copy saved user registers.

@@ -54,6 +54,7 @@
 #include "netlink.h"
 #include "proc/sched.h"
 #include "cmdline.h"
+#include "proc/chrome_lifecycle.h"
 #include "lock/rcu.h"
 
 /* From irq/syscall.c — argument fetching */
@@ -117,11 +118,28 @@ static int chrome_socket_trace_process(void)
         return 1;
     if (current->thread_group == NULL)
         return 0;
+    if (chrome_lifecycle_network_service_match(current) ||
+        chrome_lifecycle_audio_service_match(current) ||
+        chrome_lifecycle_child_process_match(current))
+        return 1;
     if (strstr(current->thread_group->exec_path,
                "chrome_crashpad_handler") != NULL)
         return 0;
     return strstr(current->thread_group->exec_path, "/chrome") != NULL ||
            strstr(current->thread_group->exec_path, "wayland-chromium") != NULL;
+}
+
+static int portal_socket_trace_process(void)
+{
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "xdg-desktop-por", 15) == 0 ||
+        strncmp(current->name, "xdg-document-po", 15) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "xdg-desktop-portal") != NULL ||
+           strstr(current->thread_group->exec_path, "xdg-document-portal") != NULL;
 }
 
 static const char *chrome_socket_trace_path(struct vfs_file *f)
@@ -144,6 +162,9 @@ static const char *chrome_socket_trace_path(struct vfs_file *f)
 }
 
 static int chrome_unix_ipc_trace_enabled(void);
+static int audio_unix_ipc_trace_mode(void);
+static int audio_unix_ipc_trace_process(void);
+static int unix_ipc_trace_process(void);
 
 #define CHROME_SOCKET_TRACE(fmt, ...)                                        \
     do {                                                                     \
@@ -153,7 +174,7 @@ static int chrome_unix_ipc_trace_enabled(void);
 
 #define CHROME_UNIX_SOCKET_TRACE(fmt, ...)                                   \
     do {                                                                     \
-        if (chrome_unix_ipc_trace_enabled() && chrome_socket_trace_process()) \
+        if (unix_ipc_trace_process())                                         \
             printf("chrome-unix-ipc: " fmt, ##__VA_ARGS__);                  \
     } while (0)
 
@@ -182,6 +203,90 @@ static int chrome_unix_ipc_trace_enabled(void)
         initialized = 1;
     }
     return enabled;
+}
+
+static int portal_unix_ipc_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("portal_unix_ipc_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int audio_unix_ipc_trace_mode(void)
+{
+    static int initialized;
+    static int mode;
+    char value[8];
+
+    if (!initialized) {
+        if (cmdline_get_param("audio_unix_ipc_trace", value,
+                              sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N') {
+            mode = (value[0] == '2' || value[0] == 'a' ||
+                    value[0] == 'A') ? 2 : 1;
+        }
+        initialized = 1;
+    }
+    return mode;
+}
+
+static int audio_unix_ipc_trace_process(void)
+{
+    int mode;
+    const char *name;
+    const char *path;
+
+    if (current == NULL)
+        return 0;
+
+    mode = audio_unix_ipc_trace_mode();
+    if (mode == 0)
+        return 0;
+
+    name = current->name;
+    if (strncmp(name, "aplay", 5) == 0 ||
+        strncmp(name, "pactl", 5) == 0 ||
+        strncmp(name, "pacat", 5) == 0 ||
+        strncmp(name, "paplay", 6) == 0 ||
+        strncmp(name, "pw-cat", 6) == 0)
+        return 1;
+
+    if (mode >= 2 &&
+        (strncmp(name, "pipewire", 8) == 0 ||
+         strncmp(name, "wireplumber", 11) == 0))
+        return 1;
+
+    if (current->thread_group == NULL)
+        return 0;
+
+    path = current->thread_group->exec_path;
+    if (strstr(path, "/aplay") != NULL ||
+        strstr(path, "/pactl") != NULL ||
+        strstr(path, "/pacat") != NULL ||
+        strstr(path, "/paplay") != NULL ||
+        strstr(path, "/pw-cat") != NULL)
+        return 1;
+
+    return mode >= 2 &&
+           (strstr(path, "/pipewire") != NULL ||
+            strstr(path, "/wireplumber") != NULL);
+}
+
+static int unix_ipc_trace_process(void)
+{
+    if (chrome_unix_ipc_trace_enabled() && chrome_socket_trace_process())
+        return 1;
+    if (portal_unix_ipc_trace_enabled() && portal_socket_trace_process())
+        return 1;
+    return audio_unix_ipc_trace_process();
 }
 
 static size_t chrome_unix_queue_count(int head, int tail, int max)
@@ -215,7 +320,7 @@ static void chrome_unix_ipc_trace_state(const char *op, int fd, ssize_t ret,
                                         size_t cmsg_count, int has_cred,
                                         struct unix_sock *sk)
 {
-    if (!chrome_unix_ipc_trace_enabled() || !chrome_socket_trace_process())
+    if (!unix_ipc_trace_process())
         return;
 
     struct unix_sock *peer = NULL;
@@ -2056,6 +2161,18 @@ static int sock_domain_from_fd(int fd)
     return 0;
 }
 
+static int sock_fd_type_error(int fd)
+{
+    if (fd < 0 || fd >= NOFILE)
+        return -EBADF;
+
+    spin_lock(&current->fdtable->lock);
+    struct vfs_file *f = current->fdtable->files[fd];
+    spin_unlock(&current->fdtable->lock);
+
+    return f == NULL ? -EBADF : -ENOTSOCK;
+}
+
 /*
  * sock_is_nonblock - check if a socket fd should use non-blocking I/O
  *
@@ -2631,7 +2748,7 @@ uint64 sys_sendto(void)
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
-        return (uint64)-EBADF;
+        return (uint64)sock_fd_type_error(fd);
 
     if (len <= 0)
         return 0;
@@ -2748,7 +2865,7 @@ uint64 sys_recvfrom(void)
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
-        return (uint64)-EBADF;
+        return (uint64)sock_fd_type_error(fd);
 
     if (len <= 0)
         return 0;
@@ -6107,7 +6224,8 @@ uint64 sys_sendmmsg(void)
         } else {
             struct lwip_sock *sk = sock_from_fd(sockfd);
             if (sk == NULL)
-                return sent > 0 ? (uint64)sent : (uint64)-EBADF;
+                return sent > 0 ? (uint64)sent
+                                : (uint64)sock_fd_type_error(sockfd);
 
             char tmpbuf[8192];
             if (total > sizeof(tmpbuf))

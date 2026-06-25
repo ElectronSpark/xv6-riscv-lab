@@ -41,6 +41,7 @@
 #define TG_EXEC_AUXV_MAX_PAIRS 32
 #define TG_CHROME_TRACE_NETWORK_SERVICE (1U << 0)
 #define TG_CHROME_TRACE_CHILD_PROCESS   (1U << 1)
+#define TG_CHROME_TRACE_AUDIO_SERVICE   (1U << 2)
 
 struct pgroup;
 

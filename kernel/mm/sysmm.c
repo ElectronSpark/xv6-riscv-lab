@@ -57,6 +57,10 @@ static int chrome_mmap_trace_process(void)
         return 1;
     if (current->thread_group == NULL)
         return 0;
+    if (chrome_lifecycle_network_service_match(current) ||
+        chrome_lifecycle_audio_service_match(current) ||
+        chrome_lifecycle_child_process_match(current))
+        return 1;
     if (strstr(current->thread_group->exec_path,
                "chrome_crashpad_handler") != NULL)
         return 0;

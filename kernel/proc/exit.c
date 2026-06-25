@@ -29,6 +29,7 @@
 #include "tty/tty.h"
 #include "proc/pgroup.h"
 #include "proc/chrome_lifecycle.h"
+#include <mm/oom_kill.h>
 
 void argint(int n, int *ip);
 void argaddr(int n, uint64 *ip);
@@ -177,6 +178,17 @@ static void linux_wait_siginfo_init(struct linux_wait_siginfo *lsi,
     lsi->si_pid = pid;
     lsi->si_uid = 0;
     lsi->si_status = status;
+}
+
+static void exit_release_vm(struct thread *p)
+{
+    struct thread_group *tg = p != NULL ? p->thread_group : NULL;
+
+    if (p != NULL && p->vm != NULL) {
+        vm_put_owner(p->vm, p->thread_group);
+        p->vm = NULL;
+    }
+    oom_note_victim_exit(tg);
 }
 
 // Exit the current thread.  Does not return.
@@ -356,10 +368,7 @@ void exit(int status) {
             sigacts_put(p->sigacts);
             p->sigacts = NULL;
         }
-        if (p->vm != NULL) {
-            vm_put(p->vm);
-            p->vm = NULL;
-        }
+        exit_release_vm(p);
         // Release FPU state.  Seq-based ownership means stale
         // per-CPU entries are harmless — no need to scan all CPUs.
         if (p->fpu_state != NULL) {
@@ -426,6 +435,13 @@ void exit(int status) {
         pty_hangup_cleanup(hangup_tty);
         tty_unref(hangup_tty);
     }
+
+    /*
+     * A zombie should not keep its mm alive.  Dropping the leader/single-task
+     * VM here lets an OOM victim reclaim memory even if its parent is slow to
+     * waitpid() it; thread_destroy() will see p->vm == NULL later.
+     */
+    exit_release_vm(p);
 
     // Leader thread or single-threaded process: standard exit path
     reparent(p);

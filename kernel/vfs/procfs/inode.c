@@ -971,26 +971,6 @@ struct procfs_vm_accounting {
     uint64 file_pages;
 };
 
-static void procfs_vm_count_leaf(uint64 va, uint64 size,
-                                 pte_t pte __attribute__((unused)),
-                                 void *arg)
-{
-    struct procfs_vm_accounting *acct = arg;
-    uint64 check = va;
-    vma_t *vma = mt_find(&acct->vm->vm_mt, &check, va + size - 1);
-    if (vma == NULL || vma->start > va || vma->end < va + size)
-        return;
-
-    uint64 pages = size / PGSIZE;
-    acct->resident_pages += pages;
-    if (vma->flags & VMA_FLAG_SHARED)
-        acct->shared_pages += pages;
-    if (vma->flags & PROT_EXEC)
-        acct->text_pages += pages;
-    if (vma->flags & VMA_FLAG_FILE)
-        acct->file_pages += pages;
-}
-
 static void procfs_collect_vm_accounting(vm_t *vm,
                                          struct procfs_vm_accounting *acct)
 {
@@ -999,6 +979,14 @@ static void procfs_collect_vm_accounting(vm_t *vm,
     if (vm == NULL)
         return;
 
+    /*
+     * procfs status/stat/statm are hot paths for browsers and desktop
+     * supervisors.  Linux keeps RSS counters for these files; walking every
+     * present PTE here makes a cheap poll scale with process address-space
+     * population.  xv6 already maintains resident_pages on fault/unmap, so use
+     * that counter and derive the remaining layout fields from VMAs.
+     */
+    acct->resident_pages = vm_resident_pages(vm);
     vm_rlock(vm);
     vma_t *vma;
     uint64 index = 0;
@@ -1007,16 +995,28 @@ static void procfs_collect_vm_accounting(vm_t *vm,
             continue;
         uint64 pages = (vma->end - vma->start) / PGSIZE;
         acct->size_pages += pages;
+        if (vma->flags & VMA_FLAG_SHARED)
+            acct->shared_pages += pages;
         if (vma->flags & VMA_FLAG_GROWSDOWN)
             acct->stack_pages += pages;
-        if (vma->flags & PROT_EXEC)
+        if (vma->flags & PROT_EXEC) {
             acct->exec_pages += pages;
+            acct->text_pages += pages;
+        }
+        if (vma->flags & VMA_FLAG_FILE)
+            acct->file_pages += pages;
         if ((vma->flags & PROT_WRITE) || (vma->flags & VMA_FLAG_GROWSUP) ||
             (vma->flags & VMA_FLAG_GROWSDOWN))
             acct->data_pages += pages;
     }
-    uvm_visit_present_leafs(vm->pagetable, procfs_vm_count_leaf, acct);
     vm_runlock(vm);
+
+    if (acct->shared_pages > acct->resident_pages)
+        acct->shared_pages = acct->resident_pages;
+    if (acct->text_pages > acct->resident_pages)
+        acct->text_pages = acct->resident_pages;
+    if (acct->file_pages > acct->resident_pages)
+        acct->file_pages = acct->resident_pages;
 }
 
 static char *procfs_gen_status(int tgid) {
@@ -1322,12 +1322,37 @@ static int procfs_format_vma_header(char *buf, size_t size, vma_t *vma)
                     (unsigned long long)ino);
 }
 
+static int procfs_prepare_maps_vma(vma_t *out, vma_t *vma, uint64 *last_end)
+{
+    if (out == NULL || vma == NULL || last_end == NULL)
+        return 0;
+    if ((vma->flags & VMA_FLAG_USER) == 0)
+        return 0;
+    if (vma->end <= *last_end)
+        return 0;
+
+    *out = *vma;
+    if (out->start < *last_end) {
+        uint64 delta = *last_end - out->start;
+        out->start = *last_end;
+        if ((out->flags & VMA_FLAG_FILE) != 0)
+            out->pgoff += delta;
+    }
+    if (out->start >= out->end)
+        return 0;
+
+    *last_end = out->end;
+    return 1;
+}
+
 static char *procfs_gen_maps(int tgid) {
-    /* Get the vm pointer under RCU; then iterate VMAs under vm_rlock */
+    /* Pin the vm under RCU, then iterate VMAs under vm_rlock. */
     rcu_read_lock();
     struct thread *p = NULL;
     get_pid_thread(tgid, &p);
     vm_t *vm = (p != NULL) ? p->vm : NULL;
+    if (vm != NULL)
+        vm_dup(vm);
     rcu_read_unlock();
 
     if (vm == NULL)
@@ -1345,19 +1370,22 @@ static char *procfs_gen_maps(int tgid) {
 
         vm_rlock(vm);
         vma_t  *vma;
+        vma_t maps_vma;
         uint64  index = 0;
+        uint64 last_end = 0;
         for (;;) {
             vma = mt_find(&vm->vm_mt, &index, UVMTOP - 1);
             if (vma == NULL)
                 break;
-            if ((vma->flags & VMA_FLAG_USER) == 0)
+            if (!procfs_prepare_maps_vma(&maps_vma, vma, &last_end))
                 continue;
             if (pos >= buf_size ||
                 buf_size - pos < PROCFS_MAPS_LINE_RESERVE) {
                 truncated = true;
                 break;
             }
-            int n = procfs_format_vma_header(buf + pos, buf_size - pos, vma);
+            int n = procfs_format_vma_header(buf + pos, buf_size - pos,
+                                             &maps_vma);
             if (n < 0 || (size_t)n >= buf_size - pos) {
                 truncated = true;
                 break;
@@ -1368,12 +1396,15 @@ static char *procfs_gen_maps(int tgid) {
 
         if (!truncated) {
             buf[pos] = '\0';
+            vm_put(vm);
             return buf;
         }
 
         kvfree(buf);
-        if (buf_size >= PROCFS_MAPS_MAX_BUF_SIZE)
+        if (buf_size >= PROCFS_MAPS_MAX_BUF_SIZE) {
+            vm_put(vm);
             return ERR_PTR(-EOVERFLOW);
+        }
         buf_size *= 2;
         if (buf_size > PROCFS_MAPS_MAX_BUF_SIZE)
             buf_size = PROCFS_MAPS_MAX_BUF_SIZE;
@@ -1818,6 +1849,8 @@ static char *procfs_gen_smaps(int tgid)
     struct thread *p = NULL;
     get_pid_thread(tgid, &p);
     vm_t *vm = (p != NULL) ? p->vm : NULL;
+    if (vm != NULL)
+        vm_dup(vm);
     rcu_read_unlock();
 
     if (vm == NULL)
@@ -1834,21 +1867,24 @@ static char *procfs_gen_smaps(int tgid)
 
         vm_rlock(vm);
         vma_t *vma;
+        vma_t maps_vma;
         uint64 index = 0;
+        uint64 last_end = 0;
         for (;;) {
             vma = mt_find(&vm->vm_mt, &index, UVMTOP - 1);
             if (vma == NULL)
                 break;
-            if ((vma->flags & VMA_FLAG_USER) == 0)
+            if (!procfs_prepare_maps_vma(&maps_vma, vma, &last_end))
                 continue;
             unsigned long size_kb =
-                (unsigned long)((vma->end - vma->start) / 1024);
+                (unsigned long)((maps_vma.end - maps_vma.start) / 1024);
             if (pos >= buf_size ||
                 buf_size - pos < PROCFS_SMAPS_ENTRY_RESERVE) {
                 truncated = true;
                 break;
             }
-            int n = procfs_format_vma_header(buf + pos, buf_size - pos, vma);
+            int n = procfs_format_vma_header(buf + pos, buf_size - pos,
+                                             &maps_vma);
             if (n < 0 || (size_t)n >= buf_size - pos) {
                 truncated = true;
                 break;
@@ -1884,12 +1920,15 @@ static char *procfs_gen_smaps(int tgid)
 
         if (!truncated) {
             buf[pos] = '\0';
+            vm_put(vm);
             return buf;
         }
 
         kvfree(buf);
-        if (buf_size >= PROCFS_MAPS_MAX_BUF_SIZE)
+        if (buf_size >= PROCFS_MAPS_MAX_BUF_SIZE) {
+            vm_put(vm);
             return ERR_PTR(-EOVERFLOW);
+        }
         buf_size *= 2;
         if (buf_size > PROCFS_MAPS_MAX_BUF_SIZE)
             buf_size = PROCFS_MAPS_MAX_BUF_SIZE;

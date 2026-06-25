@@ -533,40 +533,71 @@ static struct thread *__tg_pick_thread(struct thread_group *tg, int signo) {
     return leader;
 }
 
-int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
-    if (tg == NULL || info == NULL)
-        return -EINVAL;
-    if (SIGBAD(info->signo))
+int tg_signal_force_sigkill(struct thread_group *tg, bool wake_sleepers)
+{
+    if (tg == NULL)
         return -EINVAL;
     if (tg->is_kernel)
         return -EPERM;
-
-    int signo = info->signo;
 
     // Check if the group is already dead
     if (__atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE) <= 0) {
         return -ESRCH;
     }
 
-    // For SIGKILL, bypass shared_pending and send directly to all threads
-    if (signo == SIGKILL) {
-        pid_rlock();
-        struct thread *t;
-        struct thread *tmp;
-        list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
-            THREAD_SET_KILLED(t);
-            t->killed_signo = SIGKILL;
-            t->killed_code = 2;
-            THREAD_SET_SIGPENDING(t);
-            if (THREAD_SLEEPING(t)) {
-                scheduler_wakeup_interruptible(t);
-            } else if (THREAD_STOPPED(t)) {
-                scheduler_wakeup_stopped(t);
-            }
-        }
+    pid_rlock();
+    if (__atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE) <= 0) {
         pid_runlock();
-        return 0;
+        return -ESRCH;
     }
+
+    int expected = 0;
+    if (__atomic_compare_exchange_n(&tg->group_exit, &expected, 1, false,
+                                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        tg->group_exit_code = -1;
+        tg->group_exit_signo = SIGKILL;
+        tg->group_exit_kill_code = 2;
+        tg->group_exit_task = NULL;
+    }
+
+    int marked = 0;
+    struct thread *t;
+    struct thread *tmp;
+    list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
+        enum thread_state st = __thread_state_get(t);
+        if (st == THREAD_UNUSED || st == THREAD_ZOMBIE)
+            continue;
+
+        THREAD_SET_KILLED(t);
+        t->killed_signo = SIGKILL;
+        t->killed_code = 2;
+        THREAD_SET_SIGPENDING(t);
+        marked++;
+
+        if (!wake_sleepers)
+            continue;
+        if (THREAD_SLEEPING(t)) {
+            scheduler_wakeup(t);
+        } else if (THREAD_STOPPED(t)) {
+            scheduler_wakeup_stopped(t);
+        }
+    }
+    pid_runlock();
+
+    return marked > 0 ? 0 : -ESRCH;
+}
+
+int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
+    if (tg == NULL || info == NULL)
+        return -EINVAL;
+    if (SIGBAD(info->signo))
+        return -EINVAL;
+
+    int signo = info->signo;
+
+    // For SIGKILL, bypass shared_pending and force a fatal group exit.
+    if (signo == SIGKILL)
+        return tg_signal_force_sigkill(tg, true);
 
     // For other signals, enqueue in shared_pending and pick a wake target.
     // Acquire pid_rlock to iterate the thread_list and pin group structure.

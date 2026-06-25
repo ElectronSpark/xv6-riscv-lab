@@ -278,11 +278,12 @@ static void __place_entity(struct eevdf_rq *erq, struct sched_entity *se,
          * A task that slept after a burst of CPU time can have a vruntime far
          * ahead of the runqueue. Keeping that full lead makes interactive
          * sleepers wait behind CPU-bound work after wakeup. Preserve short-term
-         * fairness, but cap the lead to one slice so UI/event-loop tasks remain
-         * eligible promptly after sleeping.
+         * fairness, but do not let a sleeper remain ahead of the runqueue
+         * minimum after wakeup. Chrome's audio/UI workers often sleep after
+         * short CPU bursts; leaving them one full slice ahead can bury futex
+         * wakeups behind a large worker pool and produce visible stalls.
          */
-        int64 max_ahead =
-            erq->min_vruntime + __calc_delta_vruntime(se->slice, &se->load);
+        int64 max_ahead = erq->min_vruntime;
         vruntime = se->vruntime > max_ahead ? max_ahead : se->vruntime;
     }
 

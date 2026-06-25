@@ -457,6 +457,9 @@ void e1000_poll_rx(void) {
     static uint64 poll_calls = 0;
     static uint64 poll_hits = 0;
 
+    if (regs == NULL)
+        return;
+
     poll_calls++;
 
     uint32 index = (regs[E1000_RDT] + 1) % RX_RING_SIZE;

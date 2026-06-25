@@ -686,7 +686,8 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
         __vfs_file_unlock(file);
         return -EBADF; // File not opened for writing
     }
-    if (file->f_is_memfd && (file->f_seals & F_SEAL_WRITE)) {
+    if (file->f_is_memfd &&
+        (file->f_seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE))) {
         __vfs_file_unlock(file);
         return -EPERM;
     }
@@ -972,7 +973,8 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
         __vfs_file_unlock(file);
         return -EBADF;
     }
-    if (file->f_is_memfd && (file->f_seals & F_SEAL_WRITE)) {
+    if (file->f_is_memfd &&
+        (file->f_seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE))) {
         __vfs_file_unlock(file);
         return -EPERM;
     }
@@ -1068,21 +1070,22 @@ int truncate(struct vfs_file *file, loff_t length) {
         return -EINVAL;
     }
 
-    __vfs_file_lock(file);
+    /*
+     * ftruncate operates on the inode, not on descriptor position.  Do not
+     * hold file->lock across vfs_itruncate(): the VFS lock order is inode
+     * before file, and Chromium shares memfd/tmpfs file objects across fork.
+     * Taking file->lock here can wedge a parent while a child holds the same
+     * open-file mutex during startup.
+     */
     if (file->f_is_memfd) {
         if ((file->f_seals & F_SEAL_SHRINK) && length < inode->size) {
-            __vfs_file_unlock(file);
             return -EPERM;
         }
         if ((file->f_seals & F_SEAL_GROW) && length > inode->size) {
-            __vfs_file_unlock(file);
             return -EPERM;
         }
     }
-    // ilock will be acquired in vfs_itruncate
-    int ret = vfs_itruncate(inode, length);
-    __vfs_file_unlock(file);
-    return ret;
+    return vfs_itruncate(inode, length);
 }
 
 /******************************************************************************

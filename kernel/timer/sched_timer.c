@@ -120,15 +120,15 @@ void __do_timer_tick(void) {
 
 static void __sched_timer_callback(struct timer_node *tn) {
     // Wake up threads with expired timers.
-    struct thread *p = tn->data;
-    if (p == NULL || p->pid <= 0)
+    int pid = (int)(uint64)tn->data;
+    if (pid <= 0)
         return;
 
     rcu_read_lock();
     struct thread *live = NULL;
-    int valid = get_pid_thread(p->pid, &live) == 0 && live == p;
-    if (valid && THREAD_SLEEPING(p)) {
-        wakeup(p);
+    int valid = get_pid_thread(pid, &live) == 0 && live != NULL;
+    if (valid && THREAD_SLEEPING(live)) {
+        wakeup(live);
     }
     rcu_read_unlock();
 }
@@ -142,7 +142,8 @@ int sched_timer_set(struct timer_node *tn, uint64 ms) {
      * fire once and be removed immediately; retrying a one-shot callback can
      * leave a stale timer node alive past the lifetime of its storage.
      */
-    timer_node_init(tn, expires, __sched_timer_callback, current, 1);
+    timer_node_init(tn, expires, __sched_timer_callback,
+                    (void *)(uint64)current->pid, 1);
     int ret = timer_add(&__sched_timer, tn);
     return ret;
 }

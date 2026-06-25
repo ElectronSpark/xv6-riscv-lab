@@ -13,6 +13,7 @@
 #include "signal.h"
 #include <mm/page.h>
 #include <mm/vm.h>
+#include <mm/oom_kill.h>
 #include "trap.h"
 
 extern char trampoline[], uservec[], userret[], _data_ktlb[];
@@ -191,8 +192,9 @@ void usertrap(void) {
     case RISCV_LOAD_PAGE_FAULT:
         // Load page fault - handle demand paging for read access
         va = current->trapframe->trapframe.stval;
-        // First try to grow stack if the address is in stack region
+        // First try to grow main and MAP_GROWSDOWN stacks.
         vm_try_growstack(current->vm, va);
+        vm_try_growdown(current->vm, va);
         // Now find the VMA (may be stack that just grew, or existing VMA
         // needing demand paging). Hold vm_rlock to protect VMA tree traversal.
         vm_rlock(current->vm);
@@ -219,8 +221,9 @@ void usertrap(void) {
     case RISCV_STORE_PAGE_FAULT:
         // Store page fault - handle demand paging for write access
         va = current->trapframe->trapframe.stval;
-        // First try to grow stack if the address is in stack region
+        // First try to grow main and MAP_GROWSDOWN stacks.
         vm_try_growstack(current->vm, va);
+        vm_try_growdown(current->vm, va);
         // Now find the VMA (may be stack that just grew, or existing VMA
         // needing demand paging). Hold vm_rlock to protect VMA tree traversal.
         vm_rlock(current->vm);
@@ -441,6 +444,15 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
 //
 void usertrapret(void) {
     struct thread *p = current;
+
+    /*
+     * OOM victim selection can happen while the allocator holds locks or runs
+     * from another unsafe context.  Deliver that deferred SIGKILL at the
+     * return-to-user boundary, before checking killed(), so the chosen victim
+     * can immediately enter exit-time VM reclaim instead of waiting for another
+     * allocator reclaim loop to notice it.
+     */
+    oom_process_deferred_kill();
 
     if (killed(p)) {
         // If the thread is terminated, exit it.

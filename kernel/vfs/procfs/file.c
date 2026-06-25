@@ -530,6 +530,8 @@ struct vfs_file_ops procfs_oom_score_adj_file_ops = {
     .release = procfs_reg_release,
 };
 
+#define PROCFS_MEM_STACK_BUF 256
+
 static ssize_t procfs_mem_read(struct vfs_file *file, char *buf, size_t count,
                                bool user)
 {
@@ -541,9 +543,15 @@ static ssize_t procfs_mem_read(struct vfs_file *file, char *buf, size_t count,
     if (file->f_pos < 0)
         return -EIO;
 
-    char *tmp = kvmalloc(PGSIZE);
-    if (tmp == NULL)
-        return -ENOMEM;
+    char stack_tmp[PROCFS_MEM_STACK_BUF];
+    char *tmp = stack_tmp;
+    int heap_tmp = 0;
+    if (count > sizeof(stack_tmp)) {
+        tmp = kvmalloc(PGSIZE);
+        if (tmp == NULL)
+            return -ENOMEM;
+        heap_tmp = 1;
+    }
 
     ssize_t done = 0;
     while ((size_t)done < count) {
@@ -581,7 +589,8 @@ static ssize_t procfs_mem_read(struct vfs_file *file, char *buf, size_t count,
         done += (ssize_t)chunk;
     }
 
-    kvfree(tmp);
+    if (heap_tmp)
+        kvfree(tmp);
     if (done > 0)
         file->f_pos += (loff_t)done;
     return done;
@@ -598,9 +607,15 @@ static ssize_t procfs_mem_write(struct vfs_file *file, const char *buf,
     if (file->f_pos < 0)
         return -EIO;
 
-    char *tmp = kvmalloc(PGSIZE);
-    if (tmp == NULL)
-        return -ENOMEM;
+    char stack_tmp[PROCFS_MEM_STACK_BUF];
+    char *tmp = stack_tmp;
+    int heap_tmp = 0;
+    if (count > sizeof(stack_tmp)) {
+        tmp = kvmalloc(PGSIZE);
+        if (tmp == NULL)
+            return -ENOMEM;
+        heap_tmp = 1;
+    }
 
     ssize_t done = 0;
     while ((size_t)done < count) {
@@ -639,7 +654,8 @@ static ssize_t procfs_mem_write(struct vfs_file *file, const char *buf,
         done += (ssize_t)chunk;
     }
 
-    kvfree(tmp);
+    if (heap_tmp)
+        kvfree(tmp);
     if (done > 0)
         file->f_pos += (loff_t)done;
     return done;

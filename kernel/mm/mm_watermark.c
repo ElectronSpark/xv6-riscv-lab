@@ -32,6 +32,7 @@
 #include "proc/thread.h"
 #include "proc/sched.h"
 #include "smp/atomic.h"
+#include "smp/percpu.h"
 #include "timer/timer.h"
 
 // ============================================================================
@@ -168,6 +169,45 @@ done:
     return total_freed;
 }
 
+static int __reclaim_can_wait_for_oom_victim(void)
+{
+    struct cpu_local *c = mycpu();
+
+    return !CPU_IN_ITR() && c->noff == 0 && c->spin_depth == 0;
+}
+
+static uint64 __wait_for_oom_victim_progress(uint64 order)
+{
+    uint64 needed = 1ULL << order;
+    uint64 total_freed = 0;
+
+    if (!__reclaim_can_wait_for_oom_victim())
+        return 0;
+
+    /*
+     * OOM only selects and signals a victim.  The freed pages arrive later,
+     * when that victim gets CPU time and tears down its VM.  Give it a few
+     * scheduling windows and run reclaim after each handoff.  Large GUI
+     * workloads otherwise churn in the allocator while a killed KWin/Chromium
+     * process has not reached exit-time VM teardown yet.
+     */
+    for (int i = 0; i < 32; i++) {
+        if (!__reclaim_can_wait_for_oom_victim())
+            break;
+        oom_process_deferred_kill();
+        if (!__reclaim_can_wait_for_oom_victim())
+            break;
+        if (__get_free_pages_fast() >= __wmark_state.wmark[WMARK_MIN] + needed)
+            break;
+        scheduler_yield();
+        total_freed += __direct_reclaim(order);
+        if (__get_free_pages_fast() >= __wmark_state.wmark[WMARK_MIN] + needed)
+            break;
+    }
+
+    return total_freed;
+}
+
 // Public reclaim entry point — called from page allocator
 uint64 mm_try_reclaim(uint64 order, uint64 gfp_flags) {
     // Don't recurse if we're already in reclaim
@@ -184,8 +224,8 @@ uint64 mm_try_reclaim(uint64 order, uint64 gfp_flags) {
             __atomic_fetch_add(&__wmark_state.oom_kill_count, 1,
                                __ATOMIC_RELAXED);
         }
-        // After OOM kill, give the victim time to die and release pages
-        // The caller should retry allocation after this returns
+        if (oom_ret == OOM_SUCCESS || oom_ret == OOM_ALREADY)
+            freed += __wait_for_oom_victim_progress(order);
     }
 
     return freed;

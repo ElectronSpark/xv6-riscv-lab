@@ -24,6 +24,8 @@
 #include "proc/chrome_lifecycle.h"
 #include "proc/sched.h"
 #include "timer/timer.h"
+#include "vfs/file.h"
+#include "maple_tree.h"
 
 #ifndef CLONE_NEWTIME
 #define CLONE_NEWTIME 0x00000080
@@ -1448,6 +1450,64 @@ struct chrome_thread_dump_ctx {
     int count;
 };
 
+static const char *chrome_thread_vma_path(vma_t *vma)
+{
+    if (vma == NULL || vma->file == NULL)
+        return "-";
+    if (vma->file->opened_path != NULL &&
+        vma->file->opened_path[0] != '\0')
+        return vma->file->opened_path;
+    if (vma->file->inode.inode != NULL &&
+        vma->file->inode.inode->name != NULL)
+        return vma->file->inode.inode->name;
+    return "(unnamed)";
+}
+
+static int chrome_thread_vma_interesting(vma_t *vma, uint64 rip, uint64 rsp)
+{
+    if (vma == NULL)
+        return 0;
+    if (rip >= vma->start && rip < vma->end)
+        return 1;
+    if (rsp >= vma->start && rsp < vma->end)
+        return 1;
+    return 0;
+}
+
+static void chrome_thread_dump_vmas(struct thread *t, uint64 rip, uint64 rsp)
+{
+    if (t == NULL || t->vm == NULL)
+        return;
+
+    vm_rlock(t->vm);
+    vma_t *vma;
+    uint64 index = 0;
+    int found = 0;
+    mt_for_each(&t->vm->vm_mt, vma, index, (uint64)(-1ULL)) {
+        if (!chrome_thread_vma_interesting(vma, rip, rsp))
+            continue;
+        found++;
+        printf("chrome-thread-vma: pid=%d tgid=%d name=%s "
+               "map=[0x%lx-0x%lx) %c%c%c %s flags=0x%lx pgoff=0x%lx "
+               "file=%p path=%s rip_in=%d rsp_in=%d\n",
+               t->pid, t->tgid, t->name, vma->start, vma->end,
+               (vma->flags & PROT_READ) ? 'r' : '-',
+               (vma->flags & PROT_WRITE) ? 'w' : '-',
+               (vma->flags & PROT_EXEC) ? 'x' : '-',
+               (vma->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+               vma->flags, vma->pgoff, (void *)vma->file,
+               chrome_thread_vma_path(vma),
+               rip >= vma->start && rip < vma->end,
+               rsp >= vma->start && rsp < vma->end);
+    }
+    vm_runlock(t->vm);
+
+    if (found == 0)
+        printf("chrome-thread-vma: pid=%d tgid=%d name=%s found=0 "
+               "rip=0x%lx rsp=0x%lx\n",
+               t->pid, t->tgid, t->name, rip, rsp);
+}
+
 static int chrome_thread_dump_enabled(void)
 {
     static int initialized;
@@ -1533,6 +1593,12 @@ static void chrome_thread_dump_cb(struct thread *t, void *arg)
            "rax=0x%lx rdi=0x%lx rsi=0x%lx rdx=0x%lx exec=%s\n",
            ctx->sample, t->pid, t->tgid, name, thread_state_short(state),
            cpu, on_cpu, chan, rip, rsp, rax, rdi, rsi, rdx, exec_path);
+    if (ctx->sample == 1 &&
+        (strncmp(name, "QDBusConnection", 15) == 0 ||
+         strncmp(name, "kwin_wayland", 12) == 0)) {
+        vfs_fdtable_debug_dump(t, "thread-dump", 16);
+        chrome_thread_dump_vmas(t, rip, rsp);
+    }
 }
 
 static void chrome_thread_dump_worker(uint64 arg1, uint64 arg2)
@@ -1575,6 +1641,7 @@ static int chrome_syscall_trace_process(struct thread *p)
 {
     static int initialized;
     static int network_service_only;
+    static int audio_service_only;
     static int child_processes;
     static int crashpad_processes;
     static char process_name[32];
@@ -1584,6 +1651,10 @@ static int chrome_syscall_trace_process(struct thread *p)
     if (!initialized) {
         network_service_only =
             cmdline_get_param("chrome_syscall_trace_network_service", value,
+                              sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        audio_service_only =
+            cmdline_get_param("chrome_syscall_trace_audio_service", value,
                               sizeof(value)) == 0 &&
             value[0] != '0' && value[0] != 'n' && value[0] != 'N';
         child_processes =
@@ -1620,9 +1691,11 @@ static int chrome_syscall_trace_process(struct thread *p)
     int is_crashpad = strncmp(p->name, "chrome_crashpad", 15) == 0;
     if (is_crashpad)
         return crashpad_processes;
-    if (network_service_only || child_processes)
+    if (network_service_only || audio_service_only || child_processes)
         return (network_service_only &&
                 chrome_lifecycle_network_service_match(p)) ||
+               (audio_service_only &&
+                chrome_lifecycle_audio_service_match(p)) ||
                (child_processes &&
                 chrome_lifecycle_child_process_match(p));
     return chrome_lifecycle_thread_match(p);
@@ -2148,6 +2221,95 @@ static void chrome_syscall_trace_details(int orig_num, uint64 a0, uint64 a1,
     }
 }
 
+static const char *chrome_trace_file_kind_name(struct vfs_file *f)
+{
+    if (f == NULL)
+        return "(null)";
+    switch (f->f_kind) {
+    case VFS_FILE_KIND_NONE: return "none";
+    case VFS_FILE_KIND_INODE: return "inode";
+    case VFS_FILE_KIND_CDEV: return "cdev";
+    case VFS_FILE_KIND_BDEV: return "bdev";
+    case VFS_FILE_KIND_PIPE: return "pipe";
+    case VFS_FILE_KIND_LEGACY_SOCKET: return "socket";
+    case VFS_FILE_KIND_CUSTOM: return "custom";
+    default: return "?";
+    }
+}
+
+static void chrome_syscall_trace_fd_arg(const char *label, uint64 fd_arg)
+{
+    if (current == NULL || current->fdtable == NULL)
+        return;
+    if (fd_arg >= NOFILE) {
+        printf("chrome-syscall-detail: %s=%ld fdpath=<invalid>\n",
+               label, (long)fd_arg);
+        return;
+    }
+
+    int fd = (int)fd_arg;
+    struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+    if (f == NULL) {
+        printf("chrome-syscall-detail: %s=%d fdpath=<closed>\n", label, fd);
+        return;
+    }
+
+    char anon_path[96];
+    const char *path = f->opened_path != NULL ? f->opened_path : NULL;
+    if (path == NULL && f->ops != NULL && f->ops->readlink != NULL) {
+        ssize_t n = f->ops->readlink(f, anon_path, sizeof(anon_path) - 1);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(anon_path))
+                n = sizeof(anon_path) - 1;
+            anon_path[n] = '\0';
+            path = anon_path;
+        }
+    }
+    if (path == NULL)
+        path = chrome_trace_file_kind_name(f);
+    printf("chrome-syscall-detail: %s=%d fdpath=%s fkind=%s flags=0x%x "
+           "pos=%lld file=%p ref=%d\n",
+           label, fd, path, chrome_trace_file_kind_name(f), f->f_flags,
+           f->f_pos, f, f->ref_count);
+    vfs_fput(f);
+}
+
+struct chrome_trace_pollfd {
+    int fd;
+    short events;
+    short revents;
+};
+
+static void chrome_syscall_trace_pollfds(uint64 pfds_addr, uint64 nfds_arg)
+{
+    if (current == NULL || current->vm == NULL)
+        return;
+    if (pfds_addr == 0 || nfds_arg == 0)
+        return;
+
+    uint64 nfds = nfds_arg;
+    if (nfds > 4)
+        nfds = 4;
+
+    struct chrome_trace_pollfd pfds[4];
+    size_t bytes = (size_t)nfds * sizeof(pfds[0]);
+    if (vm_copyin(current->vm, pfds, pfds_addr, bytes) < 0) {
+        printf("chrome-syscall-detail: pollfds=0x%lx nfds=%ld copy=<fault>\n",
+               pfds_addr, (long)nfds_arg);
+        return;
+    }
+
+    printf("chrome-syscall-detail: pollfds=0x%lx nfds=%ld showing=%ld\n",
+           pfds_addr, (long)nfds_arg, (long)nfds);
+    for (uint64 i = 0; i < nfds; i++) {
+        printf("chrome-syscall-detail: pollfd[%ld] fd=%d events=0x%x "
+               "revents=0x%x\n",
+               (long)i, pfds[i].fd, pfds[i].events, pfds[i].revents);
+        if (pfds[i].fd >= 0)
+            chrome_syscall_trace_fd_arg("pollfd", (uint64)pfds[i].fd);
+    }
+}
+
 static uint64 chrome_trace_ticks_to_us(uint64 ticks)
 {
     uint64 freq = __timebase_frequency ? __timebase_frequency : 10000000UL;
@@ -2322,6 +2484,10 @@ void syscall(void) {
                                            p->trapframe->trapframe.rax,
                                            elapsed);
             chrome_syscall_trace_details(orig_num, a0, a1, a2);
+            if (orig_num == SYS_read_x86)
+                chrome_syscall_trace_fd_arg("fd", a0);
+            if (orig_num == SYS_poll_x86 || orig_num == SYS_ppoll_x86)
+                chrome_syscall_trace_pollfds(a0, a1);
         }
     }
     if (progress_trace) {

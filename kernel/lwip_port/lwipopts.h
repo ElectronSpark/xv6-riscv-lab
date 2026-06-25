@@ -222,7 +222,7 @@
  * -------------------------------------------------------------------------- */
 #define TCPIP_THREAD_NAME               "lwip_tcpip"
 #define TCPIP_THREAD_STACKSIZE          0    /* ignored by xv6 port */
-#define TCPIP_THREAD_PRIO               ((0 << 2) | 2)  /* major=0, minor=2 */
+#define TCPIP_THREAD_PRIO               0    /* inherit xv6 default priority */
 #define TCPIP_MBOX_SIZE                 SYS_MBOX_SIZE
 #define DEFAULT_THREAD_NAME             "lwip"
 #define DEFAULT_THREAD_STACKSIZE        0

@@ -95,6 +95,8 @@ struct thread {
     uint32 rseq_len;       // rseq(2): user rseq area length
     uint32 rseq_signature; // rseq(2): abort signature
     int rseq_cpu_id;       // rseq(2): CPU id last published to userspace
+    int linux_sched_policy; // Linux-visible sched_getscheduler policy
+    int linux_sched_priority; // Linux-visible sched_param.sched_priority
     struct fs_struct *fs; // Filesystem state (slab allocated, may be shared)
     struct vfs_fdtable
         *fdtable; // File descriptor table (slab allocated, may be shared)

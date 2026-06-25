@@ -244,6 +244,8 @@ static void __tcpip_init_done(void *arg)
 
 #define GARP_COUNT       3   /* number of gratuitous ARPs on link-up */
 #define GARP_INTERVAL_MS 500 /* ms between gratuitous ARPs */
+#define DHCP_TIMEOUT_EMAC_MS 30000
+#define DHCP_TIMEOUT_QEMU_MS 2000
 
 static void __netdev_link_change(struct netdev *dev, int link_up)
 {
@@ -762,8 +764,16 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
         printf("lwip: starting DHCP discovery...\n");
         dhcp_start(&xv6_netif);
 
-        /* Wait for DHCP to complete (or timeout after 30s) */
-        int dhcp_timeout_ms = 30000;
+        /*
+         * QEMU user-mode networking has deterministic SLIRP defaults
+         * (10.0.2.15/24 via 10.0.2.2), and our DHCP exchange routinely waits
+         * around 20s before the lease is usable.  That delay overlaps GUI
+         * bring-up and can starve early desktop services.  Keep the long DHCP
+         * window for real EMAC hardware, but fall back quickly on the PC/QEMU
+         * path to the same address we used to apply after 30s.
+         */
+        int dhcp_timeout_ms = platform.has_emac ? DHCP_TIMEOUT_EMAC_MS
+                                                : DHCP_TIMEOUT_QEMU_MS;
         int dhcp_elapsed = 0;
         while (dhcp_elapsed < dhcp_timeout_ms) {
             const ip4_addr_t *assigned = netif_ip4_addr(&xv6_netif);

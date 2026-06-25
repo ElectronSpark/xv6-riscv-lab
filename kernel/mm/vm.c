@@ -33,6 +33,7 @@
 #include <mm/memlayout.h>
 #include <mm/page.h>
 #include <mm/slab.h>
+#include <mm/oom_kill.h>
 #include <mm/pcache.h>
 #include <mm/rmap.h>
 #include <mm/folio.h>
@@ -46,16 +47,25 @@
 #include "string.h"
 #include "printf.h"
 #include "proc/thread.h"
+#include "proc/thread_group.h"
 #include "errno.h"
 #include "kstats.h"
 #include "cmdline.h"
+#include "elf.h"
 #include <vfs/file.h>
 #include <vfs/fs.h>
+#include <vfs/fcntl.h>
 #include <dev/bio.h>
 
-/* Fault-around is now controlled by USER_FAULT_AROUND_PAGES in
- * the arch trap handler.  The batch install uses va_end directly. */
-#define VM_MMAP_EAGER_PAGES 64
+/* MAP_POPULATE is capped so one mmap() cannot monopolize the VM lock. */
+#define VM_MMAP_POPULATE_MAX_PAGES 64
+
+/*
+ * Keep normal mmap allocations away from the grow-down process stack.  Linux
+ * leaves a guard gap below the stack VMA; without one, a deep userspace stack
+ * can run straight into the last shared-library mapping below it.
+ */
+#define VM_STACK_GUARD_GAP_PAGES 256
 
 static int webkit_mremap_trace_enabled(void)
 {
@@ -209,6 +219,21 @@ static int vm_file_fault_trace_take_slot(void)
     return slot < vm_file_fault_trace_limit();
 }
 
+static int vm_elf_mmap_trace_enabled(void)
+{
+    static int initialized;
+    static int cached;
+    char value[16];
+
+    if (!initialized) {
+        cached = cmdline_get_param("vm_elf_mmap_trace", value,
+                                   sizeof(value)) == 0 &&
+                 strcmp(value, "0") != 0;
+        initialized = 1;
+    }
+    return cached;
+}
+
 static uint64 vm_file_fault_readahead_min_size(void)
 {
     static uint64 min_size;
@@ -220,6 +245,163 @@ static uint64 vm_file_fault_readahead_min_size(void)
         initialized = 1;
     }
     return min_size;
+}
+
+static int vm_file_read_at(struct vfs_file *file, uint64 offset,
+                           void *buf, size_t len)
+{
+    if (file == NULL || buf == NULL)
+        return -EINVAL;
+    if (len == 0)
+        return 0;
+
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL)
+        return -EINVAL;
+    if (offset > (uint64)inode->size ||
+        len > (size_t)((uint64)inode->size - offset))
+        return -EIO;
+
+    struct pcache *pc = &inode->i_data;
+    if (!pc->active) {
+        loff_t saved;
+        ssize_t nread;
+
+        mutex_lock(&file->lock);
+        saved = file->f_pos;
+        file->f_pos = (loff_t)offset;
+        nread = (file->ops != NULL && file->ops->read != NULL) ?
+                file->ops->read(file, buf, len, false) : -EOPNOTSUPP;
+        file->f_pos = saved;
+        mutex_unlock(&file->lock);
+
+        return nread == (ssize_t)len ? 0 : -EIO;
+    }
+
+    char *dst = buf;
+    size_t done = 0;
+    while (done < len) {
+        uint64 file_off = offset + done;
+        page_t *pcpage = pcache_get_page(pc, file_off / BLK_SIZE);
+        if (pcpage == NULL)
+            return -EIO;
+        if (pcache_read_page(pc, pcpage) != 0) {
+            pcache_put_page(pc, pcpage);
+            return -EIO;
+        }
+
+        struct pcache_node *pcn = pcpage->pcache.pcache_node;
+        if (pcn == NULL || pcn->data == NULL) {
+            pcache_put_page(pc, pcpage);
+            return -EIO;
+        }
+
+        uint64 pcn_base = (uint64)pcn->blkno * BLK_SIZE;
+        uint64 pcn_size = (uint64)pcn->page_count * PGSIZE;
+        if (file_off < pcn_base || file_off >= pcn_base + pcn_size) {
+            pcache_put_page(pc, pcpage);
+            return -EIO;
+        }
+
+        size_t chunk = (size_t)(pcn_base + pcn_size - file_off);
+        if (chunk > len - done)
+            chunk = len - done;
+        memmove(dst + done, (char *)pcn->data + (file_off - pcn_base),
+                chunk);
+        done += chunk;
+        pcache_put_page(pc, pcpage);
+    }
+
+    return 0;
+}
+
+static uint64 vm_elf_mmap_file_data_end(struct vfs_file *file,
+                                        uint64 map_offset,
+                                        uint64 map_length,
+                                        int map_type)
+{
+    if (file == NULL || map_type != MAP_PRIVATE)
+        return 0;
+
+    struct elfhdr eh;
+    if (vm_file_read_at(file, 0, &eh, sizeof(eh)) != 0)
+        return 0;
+    if (eh.magic != ELF_MAGIC ||
+        (eh.type != ET_DYN && eh.type != ET_EXEC) ||
+        eh.phentsize != sizeof(struct proghdr) || eh.phnum == 0 ||
+        eh.phnum > 256)
+        return 0;
+    if (eh.phoff > (uint64)-1 - (uint64)eh.phnum * sizeof(struct proghdr))
+        return 0;
+
+    uint64 map_end = map_offset + map_length;
+    if (map_end < map_offset)
+        return 0;
+
+    for (uint i = 0; i < eh.phnum; i++) {
+        struct proghdr ph;
+        uint64 phoff = eh.phoff + (uint64)i * sizeof(ph);
+
+        if (vm_file_read_at(file, phoff, &ph, sizeof(ph)) != 0)
+            return 0;
+        if (ph.type != ELF_PROG_LOAD || ph.memsz <= ph.filesz)
+            continue;
+        if (ph.off > (uint64)-1 - ph.memsz ||
+            ph.off > (uint64)-1 - ph.filesz)
+            continue;
+
+        uint64 seg_map_start = ELF_PAGESTART(ph.off);
+        uint64 seg_mem_end = ELF_PAGEALIGN(ph.off + ph.memsz);
+        uint64 seg_data_end = ph.off + ph.filesz;
+
+        if (map_offset >= seg_map_start && map_offset < seg_mem_end &&
+            map_end > seg_data_end)
+            return seg_data_end;
+    }
+
+    return 0;
+}
+
+uint64 vma_file_data_end(vma_t *vma, uint64 inode_size)
+{
+    uint64 data_end = 0;
+
+    if (vma == NULL)
+        return inode_size;
+
+    if (VMA_FILE_DATA_END_IS_LIMIT(vma->file_data_end))
+        data_end = vma->file_data_end;
+    else if (vma->file != NULL && (vma->flags & VMA_FLAG_SHARED) == 0)
+        data_end = vm_elf_mmap_file_data_end(vma->file, vma->pgoff,
+                                             VMA_SIZE(vma), MAP_PRIVATE);
+
+    if (data_end != 0 && data_end < inode_size)
+        return data_end;
+    return inode_size;
+}
+
+static void vma_copy_private_file_page(vma_t *vma, uint64 fault_va,
+                                       void *dst, const void *src)
+{
+    uint64 copy_len = PGSIZE;
+
+    if (vma != NULL && vma->file != NULL) {
+        struct vfs_inode *inode = vfs_inode_deref(&vma->file->inode);
+        if (inode != NULL) {
+            uint64 file_off = vma->pgoff + (fault_va - vma->start);
+            uint64 data_end = vma_file_data_end(vma, (uint64)READ_ONCE(inode->size));
+
+            if (file_off >= data_end)
+                copy_len = 0;
+            else if (file_off + PGSIZE > data_end)
+                copy_len = data_end - file_off;
+        }
+    }
+
+    if (copy_len != 0)
+        memmove(dst, src, copy_len);
+    if (copy_len < PGSIZE)
+        memset((char *)dst + copy_len, 0, PGSIZE - copy_len);
 }
 
 struct vm_copy_trace_stats {
@@ -271,12 +453,12 @@ static slab_cache_t __vm_pool = {0};
 static void __vm_destroy(vm_t *vm);
 static int __vm_unmap_range_locked(vm_t *vm, uint64 start, uint64 end);
 
-static void atomic_sub_floor_u64(_Atomic uint64 *ptr, uint64 delta)
+static uint64 atomic_sub_floor_u64(_Atomic uint64 *ptr, uint64 delta)
 {
     uint64 old;
 
     if (delta == 0)
-        return;
+        return __atomic_load_n(ptr, __ATOMIC_RELAXED);
 
     old = __atomic_load_n(ptr, __ATOMIC_RELAXED);
     while (old != 0) {
@@ -284,8 +466,9 @@ static void atomic_sub_floor_u64(_Atomic uint64 *ptr, uint64 delta)
         if (__atomic_compare_exchange_n(ptr, &old, next, 1,
                                         __ATOMIC_RELAXED,
                                         __ATOMIC_RELAXED))
-            return;
+            return next;
     }
+    return 0;
 }
 
 uint64 vm_resident_pages(vm_t *vm)
@@ -312,12 +495,22 @@ static void vm_account_resident_add(vma_t *vma, uint64 pages)
 
 static void vm_account_resident_sub(vma_t *vma, uint64 pages)
 {
+    struct thread_group *owner;
+
     if (vma == NULL || vma->vm == NULL || pages == 0)
         return;
     if ((vma->flags & VMA_FLAG_USER) == 0)
         return;
 
     atomic_sub_floor_u64(&vma->vm->resident_pages, pages);
+    owner = vma->vm->teardown_owner;
+    if (owner != NULL) {
+        uint64 remaining =
+            atomic_sub_floor_u64(&owner->acct.mm_rss_pages, pages);
+        if (remaining == 0)
+            oom_note_victim_reclaim(owner);
+        return;
+    }
     if (current != NULL && current->vm == vma->vm &&
         current->thread_group != NULL) {
         atomic_sub_floor_u64(&current->thread_group->acct.mm_rss_pages,
@@ -703,6 +896,7 @@ static void __vma_set_free(vma_t *vma)
         vfs_fput(vma->file);
     vma->file = NULL;
     vma->pgoff = 0;
+    vma->file_data_end = 0;
 }
 
 struct vma_copy_leaf_ctx {
@@ -833,6 +1027,7 @@ static int __vma_copy(vma_t *dst, vma_t *src,
 
     dst->flags = src->flags;
     dst->pgoff = src->pgoff;
+    dst->file_data_end = src->file_data_end;
     if (src->file != NULL) {
         dst->file = vfs_fdup(src->file);
         if (dst->file == NULL)
@@ -1190,19 +1385,49 @@ vm_t *vm_init(void)
 
 void vm_dup(vm_t *vm) { atomic_inc(&vm->refcount); }
 
-void vm_put(vm_t *vm)
+static void vm_record_teardown_owner(vm_t *vm, struct thread_group *owner)
+{
+    if (owner == NULL)
+        return;
+
+    spin_lock(&vm->spinlock);
+    if (vm->teardown_owner == NULL) {
+        thread_group_get(owner);
+        vm->teardown_owner = owner;
+    }
+    spin_unlock(&vm->spinlock);
+}
+
+void vm_put_owner(vm_t *vm, struct thread_group *owner)
 {
     if (vm == NULL)
         return;
     /* The kernel VM singleton must never be destroyed. */
     if (vm->is_kernel)
         return;
-    if (!atomic_dec_unless(&vm->refcount, 1))
-        __vm_destroy(vm);
+    /*
+     * Preserve the OOM victim owner before dropping this reference.  The
+     * victim can exit while procfs/debuggers or other temporary users still
+     * pin its address space; the eventual final vm_put() may not know which
+     * thread group should receive RSS reclaim accounting.
+     */
+    if (oom_thread_group_is_victim(owner))
+        vm_record_teardown_owner(vm, owner);
+    if (atomic_dec_unless(&vm->refcount, 1))
+        return;
+    vm_record_teardown_owner(vm, owner);
+    __vm_destroy(vm);
+}
+
+void vm_put(vm_t *vm)
+{
+    vm_put_owner(vm, NULL);
 }
 
 static void __vm_destroy(vm_t *vm)
 {
+    struct thread_group *teardown_owner;
+
     if (vm == NULL)
         return;
     if (vm->pagetable == VM_DESTROYED_MAGIC) {
@@ -1263,6 +1488,15 @@ static void __vm_destroy(vm_t *vm)
     if (vm->pagetable != NULL)
         uvmfree(vm->pagetable, 0);
 
+    teardown_owner = vm->teardown_owner;
+    if (teardown_owner != NULL)
+        __atomic_store_n(&teardown_owner->acct.mm_rss_pages, 0,
+                         __ATOMIC_RELAXED);
+    oom_note_victim_reclaim(teardown_owner);
+    if (teardown_owner != NULL) {
+        vm->teardown_owner = NULL;
+        thread_group_put(teardown_owner);
+    }
     vm->pagetable = VM_DESTROYED_MAGIC;
     slab_free((void *)vm);
 }
@@ -1540,6 +1774,7 @@ vma_t *vma_split(vma_t *vma, uint64 va)
     new_vma->start = va;
     new_vma->end = vma->end;
     new_vma->flags = vma->flags;
+    new_vma->file_data_end = vma->file_data_end;
     if (vma->file != NULL) {
         new_vma->file = vfs_fdup(vma->file);
         new_vma->pgoff = vma->pgoff + (va - vma->start);
@@ -1633,6 +1868,7 @@ static vma_t *vma_split_keep_right(vma_t *vma, uint64 va, int *skip_reason)
     new_vma->start = old_start;
     new_vma->end = va;
     new_vma->flags = vma->flags;
+    new_vma->file_data_end = vma->file_data_end;
     if (vma->file != NULL) {
         new_vma->file = vfs_fdup(vma->file);
         if (new_vma->file == NULL) {
@@ -1656,33 +1892,37 @@ static vma_t *vma_split_keep_right(vma_t *vma, uint64 va, int *skip_reason)
         return NULL;
     }
 
-    /*
-     * The tree already maps the original VMA over the right side.  Store only
-     * the new left range, then adjust the original VMA metadata after success.
-     */
-    if (__mt_store_vma(vma->vm, new_vma) != 0) {
-        int restore = mtree_store_range(&vma->vm->vm_mt, new_vma->start,
-                                        new_vma->end - 1, vma);
-        if (restore == 0) {
-            if (skip_reason != NULL)
-                *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_STORE;
-            if (new_vma->file != NULL)
-                vfs_fput(new_vma->file);
-            __vma_free(new_vma);
-        } else {
-            if (skip_reason != NULL)
-                *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_RESTORE;
-            printf("vma_split_keep_right: restore failed ret=%d "
-                   "range=[0x%lx-0x%lx]\n",
-                   restore, new_vma->start, new_vma->end);
-            return ERR_PTR(-ENOMEM);
-        }
-        return NULL;
-    }
-
     vma->start = va;
     if (vma->file != NULL)
         vma->pgoff = old_pgoff + (va - old_start);
+
+    if (__mt_update_vma(vma->vm, vma, old_start, vma->end) != 0) {
+        if (skip_reason != NULL)
+            *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_STORE;
+        if (new_vma->file != NULL)
+            vfs_fput(new_vma->file);
+        __vma_free(new_vma);
+        return NULL;
+    }
+
+    if (__mt_store_vma(vma->vm, new_vma) != 0) {
+        __mt_erase_vma(vma->vm, new_vma);
+        vma->start = old_start;
+        vma->pgoff = old_pgoff;
+        if (__mt_update_vma(vma->vm, vma, va, vma->end) != 0) {
+            if (skip_reason != NULL)
+                *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_RESTORE;
+            printf("vma_split_keep_right: restore failed range=[0x%lx-0x%lx]\n",
+                   old_start, vma->end);
+            return ERR_PTR(-ENOMEM);
+        }
+        if (skip_reason != NULL)
+            *skip_reason = VM_SPLIT_KEEP_RIGHT_SKIP_STORE;
+        if (new_vma->file != NULL)
+            vfs_fput(new_vma->file);
+        __vma_free(new_vma);
+        return NULL;
+    }
 
     return new_vma;
 }
@@ -1704,6 +1944,8 @@ vma_t *vma_merge(vma_t *vma1, vma_t *vma2)
         return NULL;
     if (vma1->file != NULL &&
         (vma2->pgoff - vma1->pgoff) != (vma2->start - vma1->start))
+        return NULL;
+    if (vma1->file_data_end != vma2->file_data_end)
         return NULL;
 
     /* Erase vma2 from the tree first. */
@@ -1906,7 +2148,12 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
     /*
      * Beyond EOF — return a zero anonymous page (no pcache mapping).
      */
-    if (file_off >= (uint64)inode->size) {
+    uint64 inode_size = (uint64)inode->size;
+    uint64 data_end = vma_file_data_end(vma, inode_size);
+    int private_elf_data = ((vma->flags & VMA_FLAG_SHARED) == 0 &&
+                            VMA_FILE_DATA_END_IS_LIMIT(vma->file_data_end) &&
+                            data_end < inode_size);
+    if (file_off >= data_end) {
         folio_t *folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
         if (folio == NULL)
             return NULL;
@@ -1915,8 +2162,8 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
     }
 
     uint64 bytes_to_read = PGSIZE;
-    if (file_off + PGSIZE > (uint64)inode->size)
-        bytes_to_read = (uint64)inode->size - file_off;
+    if (file_off + PGSIZE > data_end)
+        bytes_to_read = data_end - file_off;
 
     uint64 blkno_512 = file_off / BLK_SIZE;
     folio_t *pcfolio = pcache_get_folio(pc, blkno_512);
@@ -1936,11 +2183,11 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
     uint64 folio_byte_off = (uint64)blkno_512 * BLK_SIZE -
                             (uint64)pcn->blkno * BLK_SIZE;
 
-    if (bytes_to_read == PGSIZE) {
+    if (bytes_to_read == PGSIZE && !private_elf_data) {
         return (char *)pcn->data + folio_byte_off;
     }
 
-    /* Partial page: fall back to copy so tail bytes are zeroed. */
+    /* Private ELF data and partial pages need anonymous zero-tail copies. */
     folio_t *anon_folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
     if (anon_folio == NULL) {
         pcache_put_folio(pc, pcfolio);
@@ -1988,9 +2235,10 @@ static void *__vma_fault_file_hugepage(vma_t *vma, uint64 hp_base)
     /* File offset corresponding to the 2 MB base VA. */
     uint64 file_off_base = vma->pgoff + (hp_base - vma->start);
     uint64 file_off_end  = file_off_base + HUGEPAGE_SIZE;
+    uint64 data_end = vma_file_data_end(vma, (uint64)inode->size);
 
     /* All 512 pages must be fully covered by file data. */
-    if (file_off_end > (uint64)inode->size)
+    if (file_off_end > data_end)
         return NULL;
 
     /* Warm up pcache folios for the entire 2 MB region via the
@@ -2200,7 +2448,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
             if (new_folio == NULL)
                 return -ENOMEM;
             pa = (void *)folio_address(new_folio);
-            memmove(pa, addr, PGSIZE);
+            vma_copy_private_file_page(vma, fault_va, pa, addr);
             pcache_put_folio(pc_head->pcache.pcache, old_folio);
             page_add_anon_rmap((page_t *)new_folio, vma, fault_va);
         } else if (cow_head != NULL && PAGE_IS_TYPE(cow_head, PAGE_TYPE_ANON) &&
@@ -2342,7 +2590,8 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
         }
         /* Keep pcache pages clean unless the PTE was already dirty. */
         page_t *pg = __pa_to_page(pte_pa(pte));
-        if (!is_huge && page_is_pcache(pg) && !old_dirty)
+        page_t *pc_head = page_pcache_head(pg);
+        if (!is_huge && pc_head != NULL && !old_dirty)
             pte_mkclean(pte);
     }
 
@@ -2358,11 +2607,15 @@ static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags, uint64 fault
     if (*pte != 0 && (is_pte_user ^ is_vma_user))
         return -EACCES;
 
-    if ((flags & PROT_WRITE) && __vma_validate_pte_rxw(vma, pte, fault_va) != 0)
-        return -EFAULT;
-    else if ((flags & (PROT_READ | PROT_EXEC)) &&
-             __vma_validate_pte_rx(vma, pte, fault_va) != 0)
-        return -EFAULT;
+    if (flags & PROT_WRITE) {
+        int ret = __vma_validate_pte_rxw(vma, pte, fault_va);
+        if (ret != 0)
+            return ret;
+    } else if (flags & (PROT_READ | PROT_EXEC)) {
+        int ret = __vma_validate_pte_rx(vma, pte, fault_va);
+        if (ret != 0)
+            return ret;
+    }
     return 0;
 }
 
@@ -2381,6 +2634,7 @@ static int vma_file_hugepage_collapse_enabled(void)
 int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 {
     uint64 validate_start = r_time();
+    int tlb_needs_flush = 0;
     g_vm_vma_validate_calls += 1;
 
     if (flags == PROT_NONE)
@@ -2613,10 +2867,22 @@ hp_per_page:
                 }
 
                 uint64 fault_va = i;
+                if ((vma->flags & VMA_FLAG_SHARED) == 0 &&
+                    ((flags & PROT_WRITE) ||
+                     VMA_FILE_DATA_END_IS_LIMIT(vma->file_data_end))) {
+                    /*
+                     * Initial write faults and private ELF data mappings with
+                     * a known p_filesz limit must return anonymous pages.
+                     * Otherwise reads before the first write can observe bytes
+                     * from the backing file past the ELF segment's image.
+                     */
+                    __pc = NULL;
+                }
                 while (__pc != NULL && fault_va < fault_end) {
                     uint64 file_off = vma->pgoff + (fault_va - vma->start);
                     uint64 inode_sz = (uint64)READ_ONCE(__fi->size);
-                    if (file_off >= inode_sz)
+                    uint64 data_end = vma_file_data_end(vma, inode_sz);
+                    if (file_off >= data_end)
                         break;
 
                     uint64 blkno_512 = file_off / 512ULL;
@@ -2657,7 +2923,7 @@ hp_per_page:
                         uint64 fo = vma->pgoff + (v - vma->start);
                         if (fo < folio_base || fo >= folio_data_end)
                             break;
-                        if (fo + PGSIZE > inode_sz)
+                        if (fo + PGSIZE > data_end)
                             break; /* partial page — per-page fallback */
                         iv[nc] = v;
                         ip[nc] = (char *)pcn->data + (fo - folio_base);
@@ -2755,6 +3021,24 @@ hp_per_page:
                     page_t *fault_pc_head = page_pcache_head(fault_pg);
                     int is_pfnmap = (vma->flags & VMA_FLAG_PFNMAP) != 0;
                     int is_pcache = !is_pfnmap && (fault_pc_head != NULL);
+                    if (is_pcache && (flags & PROT_WRITE) &&
+                        (vma->flags & VMA_FLAG_SHARED) == 0) {
+                        folio_t *new_folio =
+                            folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+                        if (new_folio == NULL) {
+                            pcache_put_folio(fault_pc_head->pcache.pcache,
+                                             page_folio(fault_pc_head));
+                            return -ENOMEM;
+                        }
+                        void *new_pa = (void *)folio_address(new_folio);
+                        vma_copy_private_file_page(vma, fault_va, new_pa, pa);
+                        pcache_put_folio(fault_pc_head->pcache.pcache,
+                                         page_folio(fault_pc_head));
+                        pa = new_pa;
+                        fault_pg = __pa_to_page((uint64)pa);
+                        fault_pc_head = NULL;
+                        is_pcache = 0;
+                    }
 
                     vm_pgtable_lock(vma->vm);
                     pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
@@ -2786,6 +3070,9 @@ hp_per_page:
                         *pte = mk_pte((uint64)pa, pte_flags);
                         if (is_pcache)
                             pte_mkclean(pte);
+                        else if (!is_pfnmap && fault_pg != NULL &&
+                                 PAGE_IS_TYPE(fault_pg, PAGE_TYPE_ANON))
+                            page_add_anon_rmap(fault_pg, vma, fault_va);
                         vm_account_resident_add(vma, 1);
                         /* No TLB flush: PTE was 0, non-present entries
                          * are not cached in TLB. */
@@ -2799,11 +3086,14 @@ hp_per_page:
             }
 __do_pte_check:
             {
+                pte_t old_pte = *pte;
                 int pte_ret = __vma_validate_pte(vma, pte, flags, i);
                 if (pte_ret != 0) {
                     vm_pgtable_unlock(vma->vm);
-                    return -EFAULT;
+                    return pte_ret;
                 }
+                if (old_pte != 0 && old_pte != *pte)
+                    tlb_needs_flush = 1;
             }
             continue;
         }
@@ -2822,18 +3112,27 @@ __do_pte_check:
             __l0_base = pte - PX(0, i);
             __l0_rgn = __rgn;
         }
-        if (__vma_validate_pte(vma, pte, flags, i) != 0) {
+        pte_t old_pte = *pte;
+        int pte_ret = __vma_validate_pte(vma, pte, flags, i);
+        if (pte_ret != 0) {
             vm_pgtable_unlock(vma->vm);
-            return -EFAULT;
+            return pte_ret;
         }
+        if (old_pte != 0 && old_pte != *pte)
+            tlb_needs_flush = 1;
     }
 
-    /* Single bulk TLB flush: replaces per-page INVLPG calls in the
-     * validate PTE helpers.  Safe because we hold vm_pgtable_lock,
-     * so no user-space access can occur between PTE modifications
-     * and this flush. */
-    sfence_vma();
     vm_pgtable_unlock(vma->vm);
+    if (tlb_needs_flush) {
+        /*
+         * Present-PTE permission/COW transitions are visible to every thread
+         * sharing this address space.  A local INVLPG/CR3 flush is not enough
+         * on SMP: another CPU can keep using the old translation after the
+         * page table now points at a private COW page or grants write access.
+         * Newly-installed PTEs do not need this expensive path.
+         */
+        vm_remote_sfence_range(vma->vm, va, va_end - va);
+    }
     g_vm_vma_validate_ticks += r_time() - validate_start;
     return 0;
 }
@@ -2850,6 +3149,11 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
     struct pcache *pc = NULL;
     page_t *pcpage = NULL;
     uint64 file_off = 0;
+    uint64 file_data_end_limit = 0;
+    uint64 file_data_end_snapshot = 0;
+    uint64 map_offset_snapshot = 0;
+    uint64 map_length_snapshot = 0;
+    uint64 vma_flags_snapshot = 0;
     int ret = -EAGAIN;
     int trace = vm_file_fault_trace_enabled();
     uint64 trace_start_ms = trace ? sched_timer_now_ms() : 0;
@@ -2890,6 +3194,11 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
         return -ENOMEM;
     }
     file_off = vma->pgoff + (fault_va - vma->start);
+    file_data_end_snapshot = vma->file_data_end;
+    file_data_end_limit = file_data_end_snapshot;
+    map_offset_snapshot = vma->pgoff;
+    map_length_snapshot = VMA_SIZE(vma);
+    vma_flags_snapshot = vma->flags;
     vm_runlock(vm);
     if (trace) {
         trace_lookup_ms = sched_timer_now_ms() - trace_t;
@@ -2908,8 +3217,24 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
         goto out_file;
     }
     uint64 inode_size = (uint64)READ_ONCE(inode->size);
+    if ((file_data_end_limit == VMA_FILE_DATA_END_UNKNOWN ||
+         file_data_end_limit == VMA_FILE_DATA_END_EOF_MARKER) &&
+        (vma_flags_snapshot & VMA_FLAG_SHARED) == 0) {
+        file_data_end_limit =
+            vm_elf_mmap_file_data_end(file, map_offset_snapshot,
+                                      map_length_snapshot, MAP_PRIVATE);
+    }
+    uint64 data_end = (VMA_FILE_DATA_END_IS_LIMIT(file_data_end_limit) &&
+                       file_data_end_limit < inode_size) ?
+                      file_data_end_limit : inode_size;
     trace_inode_size = inode_size;
-    if (file_off >= inode_size || file_off + PGSIZE > inode_size) {
+    if ((vma_flags_snapshot & VMA_FLAG_SHARED) == 0 &&
+        VMA_FILE_DATA_END_IS_LIMIT(file_data_end_limit) &&
+        file_data_end_limit < inode_size) {
+        ret = -EAGAIN;
+        goto out_file;
+    }
+    if (file_off >= data_end || file_off + PGSIZE > data_end) {
         ret = -EAGAIN;
         goto out_file;
     }
@@ -2918,7 +3243,7 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
         pc->ops != NULL && pc->ops->submit_readahead != NULL &&
         (loff_t)file_off >= pc->ra_pos) {
         pc->ra_pos = pcache_readahead(pc, (loff_t)file_off,
-                                      (loff_t)inode_size);
+                                      (loff_t)data_end);
     }
     if (trace) {
         trace_ra_ms = sched_timer_now_ms() - trace_t;
@@ -2972,7 +3297,8 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
         (vma->flags & VMA_FLAG_PFNMAP) ||
         (flags & vma->flags) != flags ||
         fault_va < vma->start || fault_va + PGSIZE > vma->end ||
-        vma->pgoff + (fault_va - vma->start) != file_off) {
+        vma->pgoff + (fault_va - vma->start) != file_off ||
+        vma->file_data_end != file_data_end_snapshot) {
         vm_runlock(vm);
         ret = -EAGAIN;
         goto out_page;
@@ -2991,9 +3317,13 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
         goto out_page;
     }
     if (*pte != 0) {
+        pte_t old_pte = *pte;
         ret = __vma_validate_pte(vma, pte, flags, fault_va);
+        int flush_needed = (ret == 0 && old_pte != *pte);
         vm_pgtable_unlock(vm);
         vm_runlock(vm);
+        if (flush_needed)
+            vm_remote_sfence_range(vm, fault_va, PGSIZE);
         goto out_page;
     }
 
@@ -3130,8 +3460,11 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
      *   -O2 + fast path + PTE check: WRITE ~135 MB/s, READ ~91 MB/s
      */
 #ifdef __x86_64__
+    uint64 dstend = dstva + len;
     if (len > 0 && current != NULL && current->vm == vm &&
-        !vm->is_kernel && dstva < UVMTOP && dstva + len <= UVMTOP) {
+        !vm->is_kernel && dstva < UVMTOP && dstend >= dstva &&
+        dstend <= UVMTOP &&
+        !(dstva < USTACKTOP && dstend > USTACK_MAX_BOTTOM)) {
         uint64 fdst = dstva;
         const void *fsrc = src;
         uint64 flen = len;
@@ -3274,26 +3607,22 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
         if (vma == NULL ||
             vma_validate(vma, va0, validated_end - va0,
                          VMA_FLAG_USER | PROT_WRITE) != 0) {
-            if (va0 >= USTACK_MAX_BOTTOM && va0 < USTACKTOP) {
-                vm_runlock(vm);
-                if (vm_try_growstack(vm, va0) == 0) {
-                    vm_rlock(vm);
-                    vma = vm_find_area(vm, va0);
-                    if (vma != NULL) {
-                        uint64 chunk_end = vma->end;
-                        uint64 req_end = PGROUNDUP(dstva + len);
-                        if (chunk_end > req_end)
-                            chunk_end = req_end;
-                        validated_end = chunk_end;
-                    }
-                    if (vma != NULL &&
-                        vma_validate(vma, va0, validated_end - va0,
-                                     VMA_FLAG_USER | PROT_WRITE) == 0)
-                        goto copyout_ok;
-                    vm_runlock(vm);
-                }
-                return -EFAULT;
+            vm_runlock(vm);
+            vm_try_growstack(vm, va0);
+            vm_try_growdown(vm, va0);
+            vm_rlock(vm);
+            vma = vm_find_area(vm, va0);
+            if (vma != NULL) {
+                uint64 chunk_end = vma->end;
+                uint64 req_end = PGROUNDUP(dstva + len);
+                if (chunk_end > req_end)
+                    chunk_end = req_end;
+                validated_end = chunk_end;
             }
+            if (vma != NULL &&
+                vma_validate(vma, va0, validated_end - va0,
+                             VMA_FLAG_USER | PROT_WRITE) == 0)
+                goto copyout_ok;
             ret = -EFAULT;
             goto out;
         }
@@ -3431,26 +3760,22 @@ int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
         if (vma == NULL ||
             vma_validate(vma, va0, validated_end - va0,
                          VMA_FLAG_USER | PROT_READ) != 0) {
-            if (va0 >= USTACK_MAX_BOTTOM && va0 < USTACKTOP) {
-                vm_runlock(vm);
-                if (vm_try_growstack(vm, va0) == 0) {
-                    vm_rlock(vm);
-                    vma = vm_find_area(vm, va0);
-                    if (vma != NULL) {
-                        uint64 chunk_end = vma->end;
-                        uint64 req_end = PGROUNDUP(srcva + len);
-                        if (chunk_end > req_end)
-                            chunk_end = req_end;
-                        validated_end = chunk_end;
-                    }
-                    if (vma != NULL &&
-                        vma_validate(vma, va0, validated_end - va0,
-                                     VMA_FLAG_USER | PROT_READ) == 0)
-                        goto copyin_ok;
-                    vm_runlock(vm);
-                }
-                return -EFAULT;
+            vm_runlock(vm);
+            vm_try_growstack(vm, va0);
+            vm_try_growdown(vm, va0);
+            vm_rlock(vm);
+            vma = vm_find_area(vm, va0);
+            if (vma != NULL) {
+                uint64 chunk_end = vma->end;
+                uint64 req_end = PGROUNDUP(srcva + len);
+                if (chunk_end > req_end)
+                    chunk_end = req_end;
+                validated_end = chunk_end;
             }
+            if (vma != NULL &&
+                vma_validate(vma, va0, validated_end - va0,
+                             VMA_FLAG_USER | PROT_READ) == 0)
+                goto copyin_ok;
             ret = -EFAULT;
             goto out;
         }
@@ -3719,6 +4044,87 @@ out:
     return ret;
 }
 
+int vm_try_growdown(vm_t *vm, uint64 va)
+{
+    int ret = -EFAULT;
+    uint64 fault_page;
+    uint64 idx;
+    vma_t *vma;
+
+    if (vm == NULL)
+        return -EINVAL;
+    if (va < vm->vm_bottom || va >= vm->vm_top)
+        return -EFAULT;
+
+    fault_page = PGROUNDDOWN(va);
+
+    vm_wlock(vm);
+    if (vm->pagetable == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if (vm_find_area(vm, fault_page) != NULL) {
+        ret = 0;
+        goto out;
+    }
+
+    idx = fault_page;
+    vma = (vma_t *)mt_find(&vm->vm_mt, &idx, vm->vm_top - 1);
+    if (vma == NULL)
+        goto out;
+    if (!vma_tree_entry_valid(vm, vma)) {
+        ret = -EINVAL;
+        goto out;
+    }
+    if (vma->start <= fault_page)
+        goto out;
+    if ((vma->flags & (VMA_FLAG_USER | VMA_FLAG_GROWSDOWN)) !=
+        (VMA_FLAG_USER | VMA_FLAG_GROWSDOWN))
+        goto out;
+
+    uint64 needed = vma->start - fault_page;
+    uint64 growth_unit = USERSTACK_GROWTH << PAGE_SHIFT;
+    uint64 growth = ((needed + growth_unit - 1) / growth_unit) * growth_unit;
+    if (growth == 0)
+        growth = growth_unit;
+    if (vma->start < growth) {
+        ret = -ENOMEM;
+        goto out;
+    }
+    if (VMA_SIZE(vma) + growth > (MAXUSTACK << PGSHIFT)) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    uint64 new_start = vma->start - growth;
+    if (new_start < vm->vm_bottom)
+        new_start = vm->vm_bottom;
+    if (new_start > fault_page)
+        new_start = fault_page;
+
+    uint64 check = new_start;
+    void *overlap = mt_find(&vm->vm_mt, &check, vma->start - 1);
+    if (overlap != NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    uint64 old_start = vma->start;
+    vma->start = new_start;
+    if (__mt_update_vma(vm, vma, old_start, vma->end) != 0) {
+        vma->start = old_start;
+        ret = -ENOMEM;
+        goto out;
+    }
+    if (vma == vm->stack)
+        vm->stack_size += old_start - new_start;
+    ret = 0;
+out:
+    vm_wunlock(vm);
+    return ret;
+}
+
 int vm_growheap(vm_t *vm, int64 change_size)
 {
     int ret = 0;
@@ -3843,9 +4249,26 @@ int vm_mmap_region_locked(vm_t *vm, uint64 start, size_t size, uint64 flags,
             return -EBADF;
         }
         vma->pgoff = pgoff;
+        vma->file_data_end = VMA_FILE_DATA_END_EOF_MARKER;
     }
 
     if (pa != NULL) {
+        int needs_anon_rmap = 0;
+        if ((flags & VMA_FLAG_SHARED) == 0) {
+            for (uint64 off = 0; off < size; off += PGSIZE) {
+                page_t *pg = __pa_to_page((uint64)pa + off);
+                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON)) {
+                    needs_anon_rmap = 1;
+                    break;
+                }
+            }
+        }
+        if (needs_anon_rmap && anon_vma_prepare(vma) != 0) {
+            assert(vma_free(vm, vma) == 0,
+                   "vm_mmap_region_locked: failed to free vma");
+            return -ENOMEM;
+        }
+
         pte_t pte_flags = vma2pte_flags(flags);
         /*
          * pa is already a physical address (from kalloc/page_alloc).
@@ -3860,6 +4283,13 @@ int vm_mmap_region_locked(vm_t *vm, uint64 start, size_t size, uint64 flags,
             assert(vma_free(vm, vma) == 0,
                    "vm_mmap_region_locked: failed to free vma");
             return -ENOMEM;
+        }
+        if (needs_anon_rmap) {
+            for (uint64 off = 0; off < size; off += PGSIZE) {
+                page_t *pg = __pa_to_page((uint64)pa + off);
+                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+                    page_add_anon_rmap(pg, vma, vma->start + off);
+            }
         }
         vm_account_resident_add(vma, size / PGSIZE);
     }
@@ -3972,6 +4402,14 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
             ret = -ENOMEM;
             goto out;
         }
+        if ((prot & PROT_WRITE) && !(vma->flags & PROT_WRITE) &&
+            vma->file != NULL && (vma->flags & VMA_FLAG_SHARED) &&
+            vma->file->f_is_memfd &&
+            (vma->file->f_seals &
+             (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE))) {
+            ret = -EPERM;
+            goto out;
+        }
 
         if (cur > vma->start) {
             vma = vma_split(vma, cur);
@@ -4060,7 +4498,8 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
                 if (mflags & PROT_WRITE) {
                     uint64 pa = pte_pa(pte);
                     page_t *pg = __pa_to_page(pa);
-                    if (page_is_pcache(pg)) {
+                    page_t *pc_head = page_pcache_head(pg);
+                    if (pc_head != NULL) {
                         mflags &= ~PROT_WRITE;
                     } else if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
                         page_mapcount(pg) > 1) {
@@ -4377,6 +4816,7 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
             goto err_new_vma;
         }
         new_vma->pgoff = vma->pgoff;
+        new_vma->file_data_end = vma->file_data_end;
     }
 
     if (vma->anon_vma != NULL && anon_vma_fork(new_vma, vma) != 0) {
@@ -4914,7 +5354,10 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
     /* Reserve the entire potential stack growth region.  The stack can grow
      * down to USTACK_MAX_BOTTOM, so mmap allocations must stay below that
      * to avoid blocking future stack expansion. */
+    uint64 guard_gap = VM_STACK_GUARD_GAP_PAGES << PAGE_SHIFT;
     uint64 search_top = USTACK_MAX_BOTTOM;
+    if (search_top > vm->vm_bottom + guard_gap)
+        search_top -= guard_gap;
     uint64 search_bottom = effective_bottom;
 
     if (search_top <= search_bottom + size) {
@@ -5155,6 +5598,14 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
             vfs_fput(file);
             return (uint64)-ENODEV;
         }
+        if (file->f_is_memfd &&
+            (file->f_seals & (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE)) &&
+            (prot & PROT_WRITE) &&
+            ((flags & MAP_TYPE) == MAP_SHARED ||
+             (flags & MAP_TYPE) == MAP_SHARED_VALIDATE)) {
+            vfs_fput(file);
+            return (uint64)-EPERM;
+        }
     } else if (!(flags & MAP_ANONYMOUS)) {
         return (uint64)-EBADF;
     }
@@ -5211,6 +5662,13 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         }
         map_addr = addr;
         uint64 map_end = map_addr + map_length;
+        if (map_end <= map_addr || map_addr < vm->vm_bottom ||
+            map_end > vm->vm_top) {
+            vm_wunlock(vm);
+            if (file != NULL)
+                vfs_fput(file);
+            return (uint64)-ENOMEM;
+        }
         if (__vm_unmap_range_locked(vm, map_addr, map_end) != 0) {
             vm_wunlock(vm);
             if (file != NULL)
@@ -5230,6 +5688,20 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     if (file != NULL) {
         vma->file = file;
         vma->pgoff = offset;
+        uint64 file_data_end =
+            vm_elf_mmap_file_data_end(file, offset, map_length, map_type);
+        vma->file_data_end = file_data_end != 0 ?
+                             file_data_end :
+                             VMA_FILE_DATA_END_EOF_MARKER;
+        if (vm_elf_mmap_trace_enabled()) {
+            struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+            printf("vm-elf-mmap: ino=%lu size=%lu off=0x%lx len=0x%lx "
+                   "map_type=0x%x prot=0x%x flags=0x%lx data_end=0x%lx\n",
+                   inode != NULL ? inode->ino : 0,
+                   inode != NULL ? (uint64)READ_ONCE(inode->size) : 0,
+                   offset, map_length, map_type, prot, vm_flags,
+                   vma->file_data_end);
+        }
         if (file->ops != NULL && file->ops->mmap != NULL) {
             int mmap_ret = file->ops->mmap(file, vma);
             if (mmap_ret != 0) {
@@ -5242,16 +5714,18 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
 
     vma = __vma_try_merge_neighbors(vma);
 
-    if (file != NULL && !(vm_flags & PROT_WRITE) &&
-        (vm_flags & (PROT_READ | PROT_EXEC))) {
-        uint64 eager_flags = VMA_FLAG_USER | (vm_flags & (PROT_READ | PROT_EXEC));
-        uint64 eager_len = map_length;
-        uint64 eager_max = VM_MMAP_EAGER_PAGES * PGSIZE;
+    if (file != NULL && (flags & MAP_POPULATE) != 0 &&
+        (flags & MAP_NONBLOCK) == 0 &&
+        (vm_flags & (PROT_READ | PROT_WRITE | PROT_EXEC)) != 0) {
+        uint64 populate_flags =
+            VMA_FLAG_USER | (vm_flags & (PROT_READ | PROT_WRITE | PROT_EXEC));
+        uint64 populate_len = map_length;
+        uint64 populate_max = VM_MMAP_POPULATE_MAX_PAGES * PGSIZE;
 
-        if (eager_len > eager_max)
-            eager_len = eager_max;
-        if (eager_len != 0)
-            (void)vma_validate(vma, map_addr, eager_len, eager_flags);
+        if (populate_len > populate_max)
+            populate_len = populate_max;
+        if (populate_len != 0)
+            (void)vma_validate(vma, map_addr, populate_len, populate_flags);
     }
 
     vm_wunlock(vm);

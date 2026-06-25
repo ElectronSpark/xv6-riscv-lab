@@ -126,12 +126,22 @@ static int sysfs_decode_class_attr(uint64 ino, uint64 base,
     if (ino < base || ino >= base + 32)
         return -ENOENT;
 
-    switch (ino - base) {
-    case 0: attr = SYSFS_ATTR_DEV; break;
-    case 1: attr = SYSFS_ATTR_DEVICE_LINK; break;
-    case 2: attr = SYSFS_ATTR_SUBSYSTEM; break;
-    case 3: attr = SYSFS_ATTR_UEVENT; break;
-    default: return -ENOENT;
+    if (kind == SYSFS_DEV_SOUND_CARD) {
+        switch (ino - base) {
+        case 0: attr = SYSFS_ATTR_DEVICE_LINK; break;
+        case 1: attr = SYSFS_ATTR_SUBSYSTEM; break;
+        case 2: attr = SYSFS_ATTR_UEVENT; break;
+        case 3: attr = SYSFS_ATTR_ID; break;
+        default: return -ENOENT;
+        }
+    } else {
+        switch (ino - base) {
+        case 0: attr = SYSFS_ATTR_DEV; break;
+        case 1: attr = SYSFS_ATTR_DEVICE_LINK; break;
+        case 2: attr = SYSFS_ATTR_SUBSYSTEM; break;
+        case 3: attr = SYSFS_ATTR_UEVENT; break;
+        default: return -ENOENT;
+        }
     }
 
     sysfs_fill_inode(si, ino,
@@ -167,6 +177,7 @@ struct vfs_inode *sysfs_get_inode(struct vfs_superblock *sb, uint64 ino)
     case SYSFS_INO_BUS_PCI_DRIVER_VIRTIO:
     case SYSFS_INO_CLASS:
     case SYSFS_INO_CLASS_DRM:
+    case SYSFS_INO_CLASS_SOUND:
     case SYSFS_INO_DEVICES:
     case SYSFS_INO_DEVICES_PCI_ROOT:
     case SYSFS_INO_DEVICES_SYSTEM:
@@ -222,6 +233,18 @@ struct vfs_inode *sysfs_get_inode(struct vfs_superblock *sb, uint64 ino)
         sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_DRM_RENDER,
                          SYSFS_ATTR_NONE);
         break;
+    case SYSFS_INO_CLASS_SOUND_CARD0:
+        sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_SOUND_CARD,
+                         SYSFS_ATTR_NONE);
+        break;
+    case SYSFS_INO_CLASS_SOUND_CONTROL0:
+        sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_SOUND_CONTROL,
+                         SYSFS_ATTR_NONE);
+        break;
+    case SYSFS_INO_CLASS_SOUND_PCM0P:
+        sysfs_fill_inode(si, ino, SYSFS_DIR, SYSFS_DEV_SOUND_PCM,
+                         SYSFS_ATTR_NONE);
+        break;
     default:
     {
         uint64 cpu_rel = ino >= SYSFS_INO_CPU_BASE ?
@@ -255,6 +278,18 @@ struct vfs_inode *sysfs_get_inode(struct vfs_superblock *sb, uint64 ino)
         if (ret != 0)
             ret = sysfs_decode_class_attr(ino, SYSFS_INO_CLASS_RENDER_ATTR_BASE,
                                           SYSFS_DEV_DRM_RENDER, si);
+        if (ret != 0)
+            ret = sysfs_decode_class_attr(ino,
+                                          SYSFS_INO_CLASS_SOUND_CARD_ATTR_BASE,
+                                          SYSFS_DEV_SOUND_CARD, si);
+        if (ret != 0)
+            ret = sysfs_decode_class_attr(ino,
+                                          SYSFS_INO_CLASS_SOUND_CONTROL_ATTR_BASE,
+                                          SYSFS_DEV_SOUND_CONTROL, si);
+        if (ret != 0)
+            ret = sysfs_decode_class_attr(ino,
+                                          SYSFS_INO_CLASS_SOUND_PCM_ATTR_BASE,
+                                          SYSFS_DEV_SOUND_PCM, si);
         if (ret != 0) {
             slab_free(si);
             return ERR_PTR(ret);

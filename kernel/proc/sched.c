@@ -559,6 +559,10 @@ retry:
         smp_store_release(&p->state, THREAD_RUNNING);
         spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
+        if (target_cpu == cpuid())
+            SET_NEEDS_RESCHED();
+        else
+            ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
         return;
     }
 
@@ -582,9 +586,10 @@ retry:
     smp_store_release(&p->state, THREAD_RUNNING);
     spin_unlock(&se->pi_lock);
     rq_unlock_two(origin_cpuid, target_cpu);
-    if (target_cpu != cpuid()) {
+    if (target_cpu == cpuid())
+        SET_NEEDS_RESCHED();
+    else
         ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
-    }
 }
 
 // unconditionally wake up a process from the sleep queue.

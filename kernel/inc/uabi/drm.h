@@ -264,6 +264,7 @@ struct drm_clip_rect_compat {
 #define VIRTGPU_PARAM_CAPSET_QUERY_FIX        2
 #define VIRTGPU_PARAM_RESOURCE_BLOB           3
 #define VIRTGPU_PARAM_HOST_VISIBLE            4
+#define VIRTGPU_PARAM_CROSS_DEVICE            5
 #define VIRTGPU_PARAM_CONTEXT_INIT            6
 #define VIRTGPU_PARAM_SUPPORTED_CAPSET_IDs    7
 #define VIRTGPU_PARAM_EXPLICIT_DEBUG_NAME     8

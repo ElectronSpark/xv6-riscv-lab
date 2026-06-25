@@ -20,6 +20,8 @@
 
 #include "types.h"
 
+struct thread_group;
+
 // OOM killer constraints
 #define OOM_SCORE_ADJ_MIN  (-1000) // Never kill (kernel, init)
 #define OOM_SCORE_ADJ_MAX  1000    // Always kill first
@@ -44,5 +46,17 @@ int oom_score(int tgid);
 
 // Print OOM killer statistics
 void oom_dump_stats(void);
+
+// Called by VM teardown after an OOM victim's address space has been reclaimed.
+void oom_note_victim_reclaim(struct thread_group *tg);
+
+// Called after task exit cleanup when a victim group may be fully gone.
+void oom_note_victim_exit(struct thread_group *tg);
+
+// True when @tg is the currently tracked OOM victim.
+int oom_thread_group_is_victim(struct thread_group *tg);
+
+// Deliver an OOM kill that was selected while the allocator held locks.
+int oom_process_deferred_kill(void);
 
 #endif /* __KERNEL_OOM_KILL_H */

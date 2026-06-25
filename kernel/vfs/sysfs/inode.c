@@ -40,6 +40,8 @@ static const struct sysfs_entry dev_entries[] = {
 static const struct sysfs_entry char_entries[] = {
     {"226:0", SYSFS_INO_DRM_PRIMARY},
     {"226:128", SYSFS_INO_DRM_RENDER},
+    {"116:1", SYSFS_INO_CLASS_SOUND_CONTROL0},
+    {"116:16", SYSFS_INO_CLASS_SOUND_PCM0P},
 };
 
 static const struct sysfs_entry bus_entries[] = {
@@ -57,11 +59,18 @@ static const struct sysfs_entry bus_pci_drivers_entries[] = {
 
 static const struct sysfs_entry class_entries[] = {
     {"drm", SYSFS_INO_CLASS_DRM},
+    {"sound", SYSFS_INO_CLASS_SOUND},
 };
 
 static const struct sysfs_entry class_drm_entries[] = {
     {"card0", SYSFS_INO_CLASS_DRM_CARD0},
     {"renderD128", SYSFS_INO_CLASS_DRM_RENDER},
+};
+
+static const struct sysfs_entry class_sound_entries[] = {
+    {"card0", SYSFS_INO_CLASS_SOUND_CARD0},
+    {"controlC0", SYSFS_INO_CLASS_SOUND_CONTROL0},
+    {"pcmC0D0p", SYSFS_INO_CLASS_SOUND_PCM0P},
 };
 
 static const struct sysfs_entry device_entries[] = {
@@ -84,6 +93,13 @@ static const struct sysfs_entry class_node_entries[] = {
     {"device", 0},
     {"subsystem", 0},
     {"uevent", 0},
+};
+
+static const struct sysfs_entry sound_card_entries[] = {
+    {"device", 0},
+    {"subsystem", 0},
+    {"uevent", 0},
+    {"id", 0},
 };
 
 static const struct sysfs_entry devices_entries[] = {
@@ -208,11 +224,22 @@ static uint64 device_attr_ino(enum sysfs_device_kind kind, int child_idx)
 
 static uint64 class_attr_ino(enum sysfs_device_kind kind, int child_idx)
 {
-    uint64 base = kind == SYSFS_DEV_DRM_PRIMARY ?
-        SYSFS_INO_CLASS_CARD0_ATTR_BASE : SYSFS_INO_CLASS_RENDER_ATTR_BASE;
+    uint64 base;
 
-    if (child_idx < 0 || child_idx >= NELEM(class_node_entries))
+    if (kind == SYSFS_DEV_DRM_PRIMARY) {
+        base = SYSFS_INO_CLASS_CARD0_ATTR_BASE;
+    } else if (kind == SYSFS_DEV_DRM_RENDER) {
+        base = SYSFS_INO_CLASS_RENDER_ATTR_BASE;
+    } else if (kind == SYSFS_DEV_SOUND_CARD) {
+        base = SYSFS_INO_CLASS_SOUND_CARD_ATTR_BASE;
+    } else if (kind == SYSFS_DEV_SOUND_CONTROL) {
+        base = SYSFS_INO_CLASS_SOUND_CONTROL_ATTR_BASE;
+    } else if (kind == SYSFS_DEV_SOUND_PCM) {
+        base = SYSFS_INO_CLASS_SOUND_PCM_ATTR_BASE;
+    } else {
         return 0;
+    }
+
     return base + child_idx;
 }
 
@@ -230,6 +257,12 @@ static enum sysfs_device_kind sysfs_device_kind_for_ino(uint64 ino)
     case SYSFS_INO_DRM_RENDER_DEVICE_DRM:
     case SYSFS_INO_CLASS_DRM_RENDER:
         return SYSFS_DEV_DRM_RENDER;
+    case SYSFS_INO_CLASS_SOUND_CARD0:
+        return SYSFS_DEV_SOUND_CARD;
+    case SYSFS_INO_CLASS_SOUND_CONTROL0:
+        return SYSFS_DEV_SOUND_CONTROL;
+    case SYSFS_INO_CLASS_SOUND_PCM0P:
+        return SYSFS_DEV_SOUND_PCM;
     default:
         return SYSFS_DEV_DRM_PRIMARY;
     }
@@ -265,7 +298,7 @@ static int sysfs_emit(struct vfs_dir_iter *iter, struct vfs_dentry *ret,
         return -ENOMEM;
     ret->name_len = (uint16)strlen(name);
     ret->ino = ino;
-    ret->cookies = iter->index;
+    ret->cookies = iter->index + 1;
     return 0;
 }
 
@@ -375,8 +408,37 @@ static int sysfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                                 name, name_len, &ino) == 0)
             break;
         return -ENOENT;
+    case SYSFS_INO_CLASS_SOUND:
+        if (sysfs_lookup_static(class_sound_entries,
+                                NELEM(class_sound_entries), name, name_len,
+                                &ino) == 0)
+            break;
+        return -ENOENT;
     case SYSFS_INO_CLASS_DRM_CARD0:
     case SYSFS_INO_CLASS_DRM_RENDER:
+        for (int i = 0; i < NELEM(class_node_entries); i++) {
+            if (strlen(class_node_entries[i].name) == name_len &&
+                memcmp(class_node_entries[i].name, name, name_len) == 0) {
+                ino = class_attr_ino(si->dev_kind, i);
+                break;
+            }
+        }
+        if (ino == 0)
+            return -ENOENT;
+        break;
+    case SYSFS_INO_CLASS_SOUND_CARD0:
+        for (int i = 0; i < NELEM(sound_card_entries); i++) {
+            if (strlen(sound_card_entries[i].name) == name_len &&
+                memcmp(sound_card_entries[i].name, name, name_len) == 0) {
+                ino = class_attr_ino(si->dev_kind, i);
+                break;
+            }
+        }
+        if (ino == 0)
+            return -ENOENT;
+        break;
+    case SYSFS_INO_CLASS_SOUND_CONTROL0:
+    case SYSFS_INO_CLASS_SOUND_PCM0P:
         for (int i = 0; i < NELEM(class_node_entries); i++) {
             if (strlen(class_node_entries[i].name) == name_len &&
                 memcmp(class_node_entries[i].name, name, name_len) == 0) {
@@ -473,6 +535,12 @@ static int sysfs_parent_ino(uint64 ino, enum sysfs_device_kind kind)
     if (ino == SYSFS_INO_CLASS_DRM_CARD0 ||
         ino == SYSFS_INO_CLASS_DRM_RENDER)
         return SYSFS_INO_CLASS_DRM;
+    if (ino == SYSFS_INO_CLASS_SOUND)
+        return SYSFS_INO_CLASS;
+    if (ino == SYSFS_INO_CLASS_SOUND_CARD0 ||
+        ino == SYSFS_INO_CLASS_SOUND_CONTROL0 ||
+        ino == SYSFS_INO_CLASS_SOUND_PCM0P)
+        return SYSFS_INO_CLASS_SOUND;
     if (ino == SYSFS_INO_DEVICES)
         return SYSFS_INO_ROOT;
     if (ino == SYSFS_INO_DEVICES_PCI_ROOT)
@@ -595,8 +663,28 @@ static int sysfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
     case SYSFS_INO_CLASS_DRM:
         return sysfs_emit_static(iter, ret, class_drm_entries,
                                  NELEM(class_drm_entries), child_idx);
+    case SYSFS_INO_CLASS_SOUND:
+        return sysfs_emit_static(iter, ret, class_sound_entries,
+                                 NELEM(class_sound_entries), child_idx);
     case SYSFS_INO_CLASS_DRM_CARD0:
     case SYSFS_INO_CLASS_DRM_RENDER:
+        if (child_idx < 0 || child_idx >= NELEM(class_node_entries)) {
+            vfs_release_dentry(ret);
+            ret->name = NULL;
+            return 0;
+        }
+        return sysfs_emit(iter, ret, class_node_entries[child_idx].name,
+                          class_attr_ino(si->dev_kind, child_idx));
+    case SYSFS_INO_CLASS_SOUND_CARD0:
+        if (child_idx < 0 || child_idx >= NELEM(sound_card_entries)) {
+            vfs_release_dentry(ret);
+            ret->name = NULL;
+            return 0;
+        }
+        return sysfs_emit(iter, ret, sound_card_entries[child_idx].name,
+                          class_attr_ino(si->dev_kind, child_idx));
+    case SYSFS_INO_CLASS_SOUND_CONTROL0:
+    case SYSFS_INO_CLASS_SOUND_PCM0P:
         if (child_idx < 0 || child_idx >= NELEM(class_node_entries)) {
             vfs_release_dentry(ret);
             ret->name = NULL;
@@ -658,12 +746,35 @@ static int sysfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
 
 static const char *sysfs_dev_name(enum sysfs_device_kind kind)
 {
-    return kind == SYSFS_DEV_DRM_RENDER ? "renderD128" : "card0";
+    switch (kind) {
+    case SYSFS_DEV_DRM_RENDER:
+        return "renderD128";
+    case SYSFS_DEV_SOUND_CONTROL:
+        return "controlC0";
+    case SYSFS_DEV_SOUND_PCM:
+        return "pcmC0D0p";
+    case SYSFS_DEV_SOUND_CARD:
+    case SYSFS_DEV_DRM_PRIMARY:
+    default:
+        return "card0";
+    }
 }
 
 static const char *sysfs_dev_number(enum sysfs_device_kind kind)
 {
-    return kind == SYSFS_DEV_DRM_RENDER ? "226:128" : "226:0";
+    switch (kind) {
+    case SYSFS_DEV_DRM_RENDER:
+        return "226:128";
+    case SYSFS_DEV_SOUND_CONTROL:
+        return "116:1";
+    case SYSFS_DEV_SOUND_PCM:
+        return "116:16";
+    case SYSFS_DEV_SOUND_CARD:
+        return "";
+    case SYSFS_DEV_DRM_PRIMARY:
+    default:
+        return "226:0";
+    }
 }
 
 static ssize_t sysfs_readlink(struct vfs_inode *inode, char *buf,
@@ -674,11 +785,23 @@ static ssize_t sysfs_readlink(struct vfs_inode *inode, char *buf,
     char local[96];
 
     if (si->attr == SYSFS_ATTR_SUBSYSTEM) {
-        target = "/sys/bus/pci";
+        if (si->dev_kind == SYSFS_DEV_SOUND_CARD ||
+            si->dev_kind == SYSFS_DEV_SOUND_CONTROL ||
+            si->dev_kind == SYSFS_DEV_SOUND_PCM)
+            target = "/sys/class/sound";
+        else
+            target = "/sys/bus/pci";
     } else if (si->attr == SYSFS_ATTR_DEVICE_LINK) {
-        snprintf(local, sizeof(local), "/sys/dev/char/%s/device",
-                 sysfs_dev_number(si->dev_kind));
-        target = local;
+        if (si->dev_kind == SYSFS_DEV_SOUND_CARD) {
+            target = "/sys/devices/pci0000:00";
+        } else if (si->dev_kind == SYSFS_DEV_SOUND_CONTROL ||
+                   si->dev_kind == SYSFS_DEV_SOUND_PCM) {
+            target = "/sys/class/sound/card0";
+        } else {
+            snprintf(local, sizeof(local), "/sys/dev/char/%s/device",
+                     sysfs_dev_number(si->dev_kind));
+            target = local;
+        }
     } else if (si->attr == SYSFS_ATTR_DRIVER_LINK) {
         target = "/sys/bus/pci/drivers/virtio-pci";
     } else if (inode->ino == SYSFS_INO_BUS_PCI_DEVICE_LINK ||
@@ -744,6 +867,23 @@ static char *sysfs_gen_file(struct sysfs_inode *si)
         char bdf[16];
         uint32 class_code;
 
+        if (si->dev_kind == SYSFS_DEV_SOUND_CARD) {
+            n = snprintf(buf, 512,
+                         "SOUND_INITIALIZED=1\n"
+                         "ID=xv6snd\n");
+            break;
+        }
+        if (si->dev_kind == SYSFS_DEV_SOUND_CONTROL ||
+            si->dev_kind == SYSFS_DEV_SOUND_PCM) {
+            n = snprintf(buf, 512,
+                         "MAJOR=116\n"
+                         "MINOR=%s\n"
+                         "DEVNAME=snd/%s\n",
+                         si->dev_kind == SYSFS_DEV_SOUND_CONTROL ? "1" : "16",
+                         node);
+            break;
+        }
+
         sysfs_gpu_pci_bdf(bdf, sizeof(bdf));
         class_code = sysfs_gpu_pci_class_code();
         n = snprintf(buf, 512,
@@ -793,6 +933,9 @@ static char *sysfs_gen_file(struct sysfs_inode *si)
         break;
     case SYSFS_ATTR_CPUINFO_MAX_FREQ:
         n = snprintf(buf, 512, "2400000\n");
+        break;
+    case SYSFS_ATTR_ID:
+        n = snprintf(buf, 512, "xv6snd\n");
         break;
     default:
         kvfree(buf);

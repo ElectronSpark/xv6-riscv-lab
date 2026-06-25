@@ -183,6 +183,20 @@ int thread_tgid(struct thread *p);
 int tg_signal_send(struct thread_group *tg, struct ksiginfo *info);
 
 /**
+ * @brief Force SIGKILL state on every live thread in a group.
+ *
+ * When @wake_sleepers is false this only marks the group and threads as
+ * killed.  Callers in deep allocation, fault, or reclaim paths can use that
+ * half without entering the scheduler wakeup path.  A later safe point may call
+ * this again with @wake_sleepers true to wake sleeping/stopped victims.
+ *
+ * @param tg             The target thread group
+ * @param wake_sleepers  Wake sleeping/stopped threads through the scheduler
+ * @return 0 on success, negative errno on failure
+ */
+int tg_signal_force_sigkill(struct thread_group *tg, bool wake_sleepers);
+
+/**
  * @brief Initialize shared pending signals for a thread group.
  * @param tg  The thread group
  */

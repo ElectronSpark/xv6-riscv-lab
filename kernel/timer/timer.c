@@ -79,6 +79,7 @@ static void clockintr(int irq, void *data, device_t *dev) {
         __atomic_fetch_add((uint64 *)data, 1, __ATOMIC_SEQ_CST);
         sched_timer_tick();
         hyperv_input_intr();
+        e1000_poll_rx();
     }
     if (!sched_holding()) {
         SET_NEEDS_RESCHED();

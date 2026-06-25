@@ -11,6 +11,7 @@
 #include "errno.h"
 #include "printf.h"
 #include "string.h"
+#include "cmdline.h"
 #include "param.h"
 #include "lock/spinlock.h"
 #include "proc/thread.h"
@@ -136,6 +137,39 @@ static int knote_file_poll_revents(struct knote *kn)
     }
 
     return revents;
+}
+
+static int kqueue_kde_spin_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_kqueue_spin_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kqueue_kde_spin_trace_current(void)
+{
+    return current != NULL &&
+        (strncmp(current->name, "QDBusConnection", 15) == 0 ||
+         strncmp(current->name, "kwin_wayland", 12) == 0);
+}
+
+static int kqueue_count_registered_locked(struct kqueue *kq)
+{
+    int count = 0;
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+
+    list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry)
+        count++;
+    return count;
 }
 
 static void kqueue_rescan_registered_locked(struct kqueue *kq) {
@@ -943,6 +977,10 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
     int total = 0;
     uint64 *epoll_oneshot_idents = NULL;
     int epoll_oneshot_count = 0;
+    int trace_spin = kqueue_kde_spin_trace_enabled() &&
+                     kqueue_kde_spin_trace_current();
+    int trace_iter = 0;
+    uint64 trace_start_ms = trace_spin ? sched_timer_now_ms() : 0;
 
     if (kq->flags & KQ_EPOLL_COMPAT) {
         epoll_oneshot_idents = kvmalloc((size_t)nevents *
@@ -955,6 +993,7 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
     kq->waiters++;
 
     while (total == 0) {
+        trace_iter++;
         /* Check if kqueue was closed (e.g. process exiting) */
         if (kq->closed) {
             total = -EBADF;
@@ -962,6 +1001,15 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
         }
 
         kqueue_rescan_registered_locked(kq);
+        if (trace_spin &&
+            (trace_iter <= 16 || (trace_iter & 0x3ff) == 0)) {
+            printf("kde-kqueue-wait: phase=rescan pid=%d name=%s "
+                   "iter=%d timeout=%d nready=%d registered=%d "
+                   "waiters=%d elapsed_ms=%lu\n",
+                   current->pid, current->name, trace_iter, timeout_ms,
+                   kq->nready, kqueue_count_registered_locked(kq),
+                   kq->waiters, sched_timer_now_ms() - trace_start_ms);
+        }
 
         /* Drain ready list */
         while (total < nevents && !LIST_IS_EMPTY(&kq->ready)) {
@@ -982,6 +1030,14 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                 poll_revents = knote_file_poll_revents(kn);
                 if (poll_revents == 0) {
                     kn->status &= ~(KN_EDGE_ACTIVE | KN_LEVEL_SEEN);
+                    if (trace_spin &&
+                        (trace_iter <= 16 || (trace_iter & 0x3ff) == 0)) {
+                        printf("kde-kqueue-wait: stale pid=%d name=%s "
+                               "iter=%d ident=%lu filter=%d flags=0x%x "
+                               "status=0x%x\n",
+                               current->pid, current->name, trace_iter,
+                               kn->ident, kn->filter, kn->flags, kn->status);
+                    }
                     if (!knote_is_clear_file_filter(kn))
                         continue;
                 } else if (!knote_is_clear_file_filter(kn) &&
@@ -1058,6 +1114,13 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
 
         /* Sleep on kqueue wait queue */
         if (timeout_ms > 0) {
+            if (trace_spin &&
+                (trace_iter <= 16 || (trace_iter & 0x3ff) == 0)) {
+                printf("kde-kqueue-wait: sleep pid=%d name=%s iter=%d "
+                       "timeout=%d elapsed_ms=%lu\n",
+                       current->pid, current->name, trace_iter, timeout_ms,
+                       sched_timer_now_ms() - trace_start_ms);
+            }
             /* For timed wait: arm a per-thread timer that wakes us
              * directly, then sleep on the kqueue wait queue.  The
              * timer is cancelled on wakeup so there is no stale
@@ -1081,6 +1144,13 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             if (LIST_IS_EMPTY(&kq->ready))
                 break;
         } else {
+            if (trace_spin &&
+                (trace_iter <= 16 || (trace_iter & 0x3ff) == 0)) {
+                printf("kde-kqueue-wait: sleep-inf pid=%d name=%s "
+                       "iter=%d elapsed_ms=%lu\n",
+                       current->pid, current->name, trace_iter,
+                       sched_timer_now_ms() - trace_start_ms);
+            }
             /* timeout_ms == -1: block indefinitely */
             tq_wait_in_state(&kq->waitq, &kq->lock, NULL,
                              THREAD_INTERRUPTIBLE);

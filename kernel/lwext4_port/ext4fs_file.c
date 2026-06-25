@@ -1695,10 +1695,17 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
     if (pc->active) {
         uint64 file_off = vma->pgoff + (va - vma->start);
         uint64 inode_size;
+        uint64 data_end;
         uint64 bytes_to_read;
+        int private_elf_data;
 
         inode_size = (uint64)READ_ONCE(inode->size);
-        if (file_off >= inode_size) {
+        data_end = vma_file_data_end(vma, inode_size);
+        private_elf_data = ((vma->flags & VMA_FLAG_SHARED) == 0 &&
+                            VMA_FILE_DATA_END_IS_LIMIT(vma->file_data_end) &&
+                            data_end < inode_size);
+
+        if (file_off >= data_end) {
             void *pa = page_alloc(0, PAGE_TYPE_ANON);
             if (pa == NULL)
                 return NULL;
@@ -1707,11 +1714,11 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
         }
 
         bytes_to_read = PGSIZE;
-        if (file_off + PGSIZE > inode_size)
-            bytes_to_read = inode_size - file_off;
+        if (file_off + PGSIZE > data_end)
+            bytes_to_read = data_end - file_off;
 
         if ((loff_t)file_off >= pc->ra_pos)
-            ext4fs_pcache_readahead(pc, file_off, inode_size);
+            ext4fs_pcache_readahead(pc, file_off, data_end);
 
         uint64 blkno_512 = file_off / 512ULL;
         page_t *pcpage = pcache_get_page(pc, blkno_512);
@@ -1728,12 +1735,18 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
         /* Compute sub-page offset within multi-page folio. */
         uint64 folio_byte_off = blkno_512 * 512ULL -
                                 (uint64)pcn->blkno * 512ULL;
-        if (bytes_to_read == PGSIZE) {
+        if (bytes_to_read == PGSIZE && !private_elf_data) {
             g_ext4_fault_zero_copy += 1;
             g_ext4_fault_ticks += r_time() - fault_start;
             return (char *)pcn->data + folio_byte_off;
         }
 
+        /*
+         * Linux maps bytes beyond an ELF PT_LOAD segment's p_filesz as zeroes.
+         * For private ELF data mappings with a known file-data limit, make an
+         * anonymous page immediately so reads before the first write cannot
+         * observe unrelated bytes from the same page-cache folio.
+         */
         g_ext4_fault_partial_copy += 1;
 
         void *pa = page_alloc(0, PAGE_TYPE_ANON);
@@ -1765,16 +1778,17 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
     vfs_ilock(inode);
     uint64 inode_size = (uint64)inode->size;
     vfs_iunlock(inode);
+    uint64 data_end = vma_file_data_end(vma, inode_size);
 
     /* Entirely beyond EOF — return a zero page */
-    if (file_off >= inode_size) {
+    if (file_off >= data_end) {
         memset(pa, 0, PGSIZE);
         return pa;
     }
 
     uint64 bytes_to_read = PGSIZE;
-    if (file_off + PGSIZE > inode_size)
-        bytes_to_read = inode_size - file_off;
+    if (file_off + PGSIZE > data_end)
+        bytes_to_read = data_end - file_off;
 
     ext4fs_lock(esb);
 

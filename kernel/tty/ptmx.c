@@ -291,19 +291,16 @@ static int pts_fops_release(struct vfs_inode *inode, struct vfs_file *file)
     /* Drop the tty-level "open" ref taken in pts_open_file */
     tty_close(pair->slave);
 
-    /* When the last slave fd closes, also close pipe ends.
-     * The session-leader-exit path (pty_slave_hangup) may have
-     * already closed them — pipe_close is idempotent. */
+    /*
+     * Closing a slave fd must not destructively hang up the PTY while the
+     * master remains open.  Programs often open the slave temporarily for
+     * setup, close it, and later hand a dup'd slave to exec'd children.  The
+     * destructive hangup belongs to master close or controlling-session
+     * hangup, both of which call tty_hangup().
+     */
     spin_lock(&pair->lock);
-    int slave_gone = (--pair->slave_count <= 0);
+    pair->slave_count--;
     spin_unlock(&pair->lock);
-    if (slave_gone && pair->slave != NULL) {
-        struct tty *sl = pair->slave;
-        if (sl->output_pipe)
-            pipe_close(sl->output_pipe, 1);
-        if (sl->input_pipe)
-            pipe_close(sl->input_pipe, 0);
-    }
 
     /* Drop the pair ref — may destroy */
     if (pty_pair_put(pair))

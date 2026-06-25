@@ -501,47 +501,6 @@ struct virtio_gpu_capset {
     uint32 size;
 };
 
-struct virtio_gpu_drm_capset {
-    uint32 wire_format_version;
-    uint32 version_major;
-    uint32 version_minor;
-    uint32 version_patchlevel;
-    uint32 context_type;
-    uint32 pad;
-    union {
-        struct {
-            uint32 has_cached_coherent;
-            uint32 priorities;
-            uint64 va_start;
-            uint64 va_size;
-            uint32 gpu_id;
-            uint32 gmem_size;
-            uint64 gmem_base;
-            uint64 chip_id;
-            uint32 max_freq;
-            uint32 highest_bank_bit;
-            uint64 ubwc_swizzle;
-            uint64 macrotile_mode;
-            uint32 has_raytracing;
-            uint32 has_preemption;
-            uint64 uche_trap_base;
-        } msm;
-        struct {
-            uint32 address32_hi;
-            uint32 has_vm_always_valid;
-            char marketing_name[128];
-        } amdgpu;
-        struct {
-            uint32 pci_bus;
-            uint32 pci_dev;
-            uint32 pci_func;
-            uint32 pci_revision_id;
-            uint32 pci_domain;
-            uint32 pci_device_id;
-        } intel;
-    } u;
-};
-
 struct virtio_gpu_async_submit {
     int pending;
     uint32 ctx_id;
@@ -1444,36 +1403,6 @@ static int virtio_gpu_capset_preferred(uint32 current_id, uint32 current_version
         return 1;
     if (candidate_id == current_id && candidate_version > current_version)
         return 1;
-    return 0;
-}
-
-static int virtio_gpu_user_get_drm_caps(uint32 requested_version, void *buf,
-                                        uint32 buf_size, uint32 *capset_id,
-                                        uint32 *capset_version,
-                                        uint32 *capset_size)
-{
-    struct virtio_gpu_drm_capset caps;
-    uint32 copy_size;
-
-    if (requested_version > 1)
-        return -EINVAL;
-
-    memset(&caps, 0, sizeof(caps));
-    caps.wire_format_version = 1;
-
-    if (capset_id)
-        *capset_id = VIRTIO_GPU_CAPSET_DRM;
-    if (capset_version)
-        *capset_version = 1;
-    if (capset_size)
-        *capset_size = sizeof(caps);
-    if (buf == NULL || buf_size == 0)
-        return 0;
-
-    copy_size = sizeof(caps);
-    if (copy_size > buf_size)
-        copy_size = buf_size;
-    memcpy(buf, &caps, copy_size);
     return 0;
 }
 

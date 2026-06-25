@@ -21,9 +21,26 @@ typedef struct vma {
     uint64 flags; // Flags for the memory area (e.g., read, write, execute)
     struct vfs_file *file; // File associated with this memory area
     uint64 pgoff;          // Offset in the file for this memory area
+    uint64 file_data_end;  // ELF file-data limit marker, see below
     struct anon_vma *anon_vma;   // rmap: this VMA's own anon_vma
     list_node_t anon_vma_chain;  // rmap: list of anon_vma_chain nodes
 } vma_t;
+
+/*
+ * file_data_end is an absolute file offset used for MAP_PRIVATE ELF LOAD
+ * segments where p_memsz extends past p_filesz.  A real limit makes faults
+ * zero-fill bytes past p_filesz even when the backing file has more data in
+ * the same page-cache folio.
+ *
+ * UNKNOWN is kept for older/uninitialized VMAs.  Constructors may store
+ * EOF_MARKER when no special ELF limit was found, but fault paths can still
+ * re-derive a limit from the current VMA span before falling back to EOF.
+ */
+#define VMA_FILE_DATA_END_UNKNOWN 0ULL
+#define VMA_FILE_DATA_END_EOF_MARKER (~0ULL)
+#define VMA_FILE_DATA_END_IS_LIMIT(__end)                                     \
+    ((__end) != VMA_FILE_DATA_END_UNKNOWN &&                                  \
+     (__end) != VMA_FILE_DATA_END_EOF_MARKER)
 
 /*
  * VMA protection flags (POSIX-compatible)
@@ -140,6 +157,7 @@ typedef struct vm {
     uint64 vm_bottom;    // Lowest VA managed by this VM
     uint64 vm_top;       // Highest VA (exclusive) managed by this VM
     _Atomic uint64 resident_pages; // Present user leaf PTE pages
+    struct thread_group *teardown_owner; // RSS owner while last ref tears down
     int is_kernel;       // Non-zero if this is the kernel VM singleton
     uint16 asid;       // ASID (RISC-V) / PCID (x86_64), 0 = kernel
     uint16 asid_gen;   // Generation when ASID was assigned

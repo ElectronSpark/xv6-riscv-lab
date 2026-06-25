@@ -1,6 +1,8 @@
 
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 
+static int chrome_drm_trace_owner(const struct fb_gpu_render_owner *owner);
+
 static int gpu_drm_is_primary_like(struct fb_gpu_render_owner *owner)
 {
     return owner != NULL && drm_core_is_primary_like(&owner->drm);
@@ -501,10 +503,6 @@ static int gpu_owner_create_context(struct fb_gpu_render_owner *owner,
         return ret;
     if (capset_id == 0)
         capset_id = current_capset;
-    ret = virtio_gpu_user_get_caps_for(capset_id, 0, NULL, 0, NULL, NULL,
-                                       NULL);
-    if (ret != 0)
-        return ret;
     if (owner->capset_id != 0 && owner->capset_id != capset_id)
         return -EINVAL;
     if (owner->default_ctx_id != 0)
@@ -612,12 +610,15 @@ static int gpu_drm_get_unique(uint64 arg)
     return 0;
 }
 
-static int gpu_drm_get_cap(uint64 arg)
+static int gpu_drm_get_cap(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_get_cap_compat req;
+    uint64 capability;
+    int ret = 0;
 
     if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
         return -EFAULT;
+    capability = req.capability;
     switch (req.capability) {
     case DRM_CAP_DUMB_BUFFER:
     case DRM_CAP_VBLANK_HIGH_CRTC:
@@ -651,8 +652,16 @@ static int gpu_drm_get_cap(uint64 arg)
         req.value = 1;
         break;
     default:
-        return -EINVAL;
+        ret = -EINVAL;
+        break;
     }
+    if (chrome_drm_trace_owner(owner))
+        printf("chrome-drm-detail: get-cap owner=%lu:%d cap=%lu "
+               "value=%lu ret=%d\n",
+               owner ? owner->id : 0, owner ? owner->tgid : -1,
+               capability, req.value, ret);
+    if (ret != 0)
+        return ret;
     if (either_copyout(1, arg, &req, sizeof(req)) < 0)
         return -EFAULT;
     return 0;

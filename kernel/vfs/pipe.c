@@ -29,6 +29,8 @@
 
 static slab_cache_t __pipe_cache = {0};
 
+#define PIPE_IO_CHUNK PAGE_SIZE
+
 void pipe_init(void) {
     int ret = slab_cache_init(&__pipe_cache, "pipe_cache", sizeof(struct pipe),
                               SLAB_FLAG_STATIC);
@@ -201,7 +203,7 @@ ssize_t pipe_read(struct pipe *pi, char *buf, size_t count, bool user) {
     struct thread *pr = current;
     ssize_t total = 0;
     int ret = 0;
-    char tmp[128];
+    char tmp[PIPE_IO_CHUNK];
     size_t tmp_pos = 0;
     size_t tmp_len = 0;
     bool nonblock = PIPE_NONBLOCK_RD(pi);
@@ -294,7 +296,7 @@ ssize_t pipe_write(struct pipe *pi, const char *buf, size_t count, bool user) {
     struct thread *pr = current;
     ssize_t total = 0;
     int ret = 0;
-    char tmp[128];
+    char tmp[PIPE_IO_CHUNK];
     size_t tmp_pos = 0;
     size_t tmp_len = 0;
     bool nonblock = PIPE_NONBLOCK_WR(pi);

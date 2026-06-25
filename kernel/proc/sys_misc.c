@@ -825,6 +825,7 @@ struct linux_sched_param {
 #define SCHED_BATCH 3
 #define SCHED_IDLE  5
 #define SCHED_DEADLINE 6
+#define SCHED_RESET_ON_FORK 0x40000000
 #define LINUX_SCHED_ATTR_SIZE_VER0 48
 #define LINUX_SCHED_ATTR_SIZE      56
 
@@ -841,6 +842,65 @@ struct linux_sched_attr {
     uint32 sched_util_max;
 };
 
+static int linux_sched_policy_base(int policy) {
+    return policy & ~SCHED_RESET_ON_FORK;
+}
+
+static int linux_sched_priority_valid(int policy, int priority) {
+    switch (linux_sched_policy_base(policy)) {
+    case SCHED_FIFO:
+    case SCHED_RR:
+        return priority >= 1 && priority <= 99;
+    case SCHED_OTHER:
+    case SCHED_BATCH:
+    case SCHED_IDLE:
+        return priority == 0;
+    default:
+        return 0;
+    }
+}
+
+static int kde_sched_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+
+    if (!initialized) {
+        enabled = chrome_trace_value_enabled("kde_sched_trace");
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_sched_trace_current(void)
+{
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "wireplumber", 11) == 0 ||
+        strncmp(current->name, "pipewire", 8) == 0 ||
+        strncmp(current->name, "pipewire-pulse", 14) == 0)
+        return 1;
+    if (current->thread_group == NULL ||
+        current->thread_group->exec_path[0] == '\0')
+        return 0;
+    return strstr(current->thread_group->exec_path, "wireplumber") != NULL ||
+           strstr(current->thread_group->exec_path, "pipewire") != NULL;
+}
+
+static void kde_sched_trace(const char *op, int pid, int policy, int priority,
+                            int ret)
+{
+    if (!kde_sched_trace_enabled() || !kde_sched_trace_current())
+        return;
+
+    printf("kde-sched-trace: op=%s pid=%d tgid=%d name=%s arg_pid=%d "
+           "policy=%d base=%d priority=%d ret=%d stored_policy=%d "
+           "stored_priority=%d\n",
+           op, current->pid, current->tgid, current->name, pid, policy,
+           linux_sched_policy_base(policy), priority, ret,
+           current->linux_sched_policy, current->linux_sched_priority);
+}
+
 uint64 sys_sched_getparam(void) {
     int pid;
     uint64 param_addr;
@@ -851,9 +911,20 @@ uint64 sys_sched_getparam(void) {
     if (pid < 0)
         return (uint64)-EINVAL;
 
-    struct linux_sched_param param = { .sched_priority = 0 };
-    if (either_copyout(1, param_addr, &param, sizeof(param)) < 0)
+    struct thread *target = current;
+    if (pid != 0 && get_pid_thread(pid, &target) != 0)
+        return (uint64)-ESRCH;
+
+    int priority = target != NULL ? target->linux_sched_priority : 0;
+    struct linux_sched_param param = { .sched_priority = priority };
+    if (either_copyout(1, param_addr, &param, sizeof(param)) < 0) {
+        kde_sched_trace("getparam", pid, target != NULL ?
+                        target->linux_sched_policy : SCHED_OTHER, priority,
+                        -EFAULT);
         return (uint64)-EFAULT;
+    }
+    kde_sched_trace("getparam", pid, target != NULL ?
+                    target->linux_sched_policy : SCHED_OTHER, priority, 0);
     return 0;
 }
 
@@ -870,8 +941,25 @@ uint64 sys_sched_setparam(void) {
     struct linux_sched_param param;
     if (either_copyin(&param, 1, param_addr, sizeof(param)) < 0)
         return (uint64)-EFAULT;
-    if (param.sched_priority != 0)
+    struct thread *target = current;
+    if (pid != 0 && get_pid_thread(pid, &target) != 0)
+        return (uint64)-ESRCH;
+
+    int policy = target != NULL ? target->linux_sched_policy : SCHED_OTHER;
+    if (linux_sched_policy_base(policy) == SCHED_FIFO ||
+        linux_sched_policy_base(policy) == SCHED_RR) {
+        kde_sched_trace("setparam", pid, policy, param.sched_priority,
+                        -EPERM);
+        return (uint64)-EPERM;
+    }
+    if (!linux_sched_priority_valid(policy, param.sched_priority)) {
+        kde_sched_trace("setparam", pid, policy, param.sched_priority,
+                        -EINVAL);
         return (uint64)-EINVAL;
+    }
+    if (target != NULL)
+        target->linux_sched_priority = param.sched_priority;
+    kde_sched_trace("setparam", pid, policy, param.sched_priority, 0);
     return 0;
 }
 
@@ -910,7 +998,10 @@ uint64 sys_sched_getattr(void) {
     }
 
     attr.sched_nice = nice;
-    attr.sched_priority = 0;
+    if (target != NULL) {
+        attr.sched_policy = target->linux_sched_policy;
+        attr.sched_priority = target->linux_sched_priority;
+    }
 
     size_t copy_size = (size_t)size;
     if (copy_size > sizeof(attr))
@@ -949,9 +1040,14 @@ uint64 sys_sched_setattr(void) {
     if (either_copyin(&attr, 1, attr_addr, copy_size) < 0)
         return (uint64)-EFAULT;
 
-    if (attr.sched_policy != SCHED_OTHER || attr.sched_flags != 0 ||
-        attr.sched_priority != 0 || attr.sched_runtime != 0 ||
+    if ((attr.sched_policy & SCHED_RESET_ON_FORK) != 0 ||
+        attr.sched_flags != 0 || attr.sched_runtime != 0 ||
         attr.sched_deadline != 0 || attr.sched_period != 0)
+        return (uint64)-EINVAL;
+    if (linux_sched_policy_base(attr.sched_policy) == SCHED_FIFO ||
+        linux_sched_policy_base(attr.sched_policy) == SCHED_RR)
+        return (uint64)-EPERM;
+    if (!linux_sched_priority_valid(attr.sched_policy, attr.sched_priority))
         return (uint64)-EINVAL;
 
     if (attr.sched_nice < -20 || attr.sched_nice > 19)
@@ -963,7 +1059,12 @@ uint64 sys_sched_setattr(void) {
     if (pid != 0 && get_pid_thread(pid, &target) != 0)
         return (uint64)-ESRCH;
 
-    if (target != NULL && target->sched_entity != NULL) {
+    if (target != NULL) {
+        target->linux_sched_policy = linux_sched_policy_base(attr.sched_policy);
+        target->linux_sched_priority = attr.sched_priority;
+    }
+    if (target != NULL && target->sched_entity != NULL &&
+        linux_sched_policy_base(attr.sched_policy) == SCHED_OTHER) {
         struct sched_attr sattr;
         sched_attr_init(&sattr);
         sattr.priority =
@@ -1121,10 +1222,61 @@ uint64 sys_sched_yield(void) {
 /* ================================================================== */
 
 uint64 sys_sched_getscheduler(void) {
-    return SCHED_OTHER;
+    int pid;
+    argint(0, &pid);
+    if (pid < 0)
+        return (uint64)-EINVAL;
+
+    struct thread *target = current;
+    if (pid != 0 && get_pid_thread(pid, &target) != 0)
+        return (uint64)-ESRCH;
+    int policy = target != NULL ? target->linux_sched_policy : SCHED_OTHER;
+    kde_sched_trace("getscheduler", pid, policy,
+                    target != NULL ? target->linux_sched_priority : 0,
+                    policy);
+    return (uint64)policy;
 }
 
 uint64 sys_sched_setscheduler(void) {
+    int pid;
+    int policy;
+    uint64 param_addr;
+    argint(0, &pid);
+    argint(1, &policy);
+    argaddr(2, &param_addr);
+
+    if (pid < 0)
+        return (uint64)-EINVAL;
+    if (param_addr == 0)
+        return (uint64)-EFAULT;
+
+    int base_policy = linux_sched_policy_base(policy);
+    if (base_policy == SCHED_DEADLINE) {
+        kde_sched_trace("setscheduler", pid, policy, 0, -EINVAL);
+        return (uint64)-EINVAL;
+    }
+    if (base_policy == SCHED_FIFO || base_policy == SCHED_RR) {
+        kde_sched_trace("setscheduler", pid, policy, 0, -EPERM);
+        return (uint64)-EPERM;
+    }
+
+    struct linux_sched_param param;
+    if (either_copyin(&param, 1, param_addr, sizeof(param)) < 0)
+        return (uint64)-EFAULT;
+    if (!linux_sched_priority_valid(policy, param.sched_priority)) {
+        kde_sched_trace("setscheduler", pid, policy, param.sched_priority,
+                        -EINVAL);
+        return (uint64)-EINVAL;
+    }
+
+    struct thread *target = current;
+    if (pid != 0 && get_pid_thread(pid, &target) != 0)
+        return (uint64)-ESRCH;
+    if (target != NULL) {
+        target->linux_sched_policy = base_policy;
+        target->linux_sched_priority = param.sched_priority;
+    }
+    kde_sched_trace("setscheduler", pid, policy, param.sched_priority, 0);
     return 0;
 }
 
@@ -1136,16 +1288,20 @@ uint64 sys_sched_get_priority_max(void) {
     int policy;
 
     argint(0, &policy);
+    policy = linux_sched_policy_base(policy);
     switch (policy) {
     case SCHED_FIFO:
     case SCHED_RR:
+        kde_sched_trace("get_priority_max", -1, policy, 99, 99);
         return 99;
     case SCHED_OTHER:
     case SCHED_BATCH:
     case SCHED_IDLE:
     case SCHED_DEADLINE:
+        kde_sched_trace("get_priority_max", -1, policy, 0, 0);
         return 0;
     default:
+        kde_sched_trace("get_priority_max", -1, policy, 0, -EINVAL);
         return (uint64)-EINVAL;
     }
 }
@@ -1154,16 +1310,20 @@ uint64 sys_sched_get_priority_min(void) {
     int policy;
 
     argint(0, &policy);
+    policy = linux_sched_policy_base(policy);
     switch (policy) {
     case SCHED_FIFO:
     case SCHED_RR:
+        kde_sched_trace("get_priority_min", -1, policy, 1, 1);
         return 1;
     case SCHED_OTHER:
     case SCHED_BATCH:
     case SCHED_IDLE:
     case SCHED_DEADLINE:
+        kde_sched_trace("get_priority_min", -1, policy, 0, 0);
         return 0;
     default:
+        kde_sched_trace("get_priority_min", -1, policy, 0, -EINVAL);
         return (uint64)-EINVAL;
     }
 }

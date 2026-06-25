@@ -30,6 +30,8 @@
 #include "proc/chrome_lifecycle.h"
 #include "vfs/file.h"
 #include "cmdline.h"
+#include "errno.h"
+#include <mm/oom_kill.h>
 
 #define USER_FAULT_AROUND_PAGES 8UL
 
@@ -179,6 +181,49 @@ static void kde_dump_exception_vmas(struct thread *p, struct trapframe *tf,
         printf("  kde-exception-vma: rip mapping not found\n");
     printf("  --- end KDE exception VMA map ---\n");
     vm_runlock(vm);
+}
+
+static void kde_dump_user_bytes(struct thread *p, const char *label, uint64 addr)
+{
+    unsigned char bytes[32];
+    char ascii[sizeof(bytes) + 1];
+
+    if (p == NULL || p->vm == NULL || addr == 0)
+        return;
+    if (!kde_exception_vma_trace_enabled(p))
+        return;
+    if (vm_copyin(p->vm, bytes, addr, sizeof(bytes)) != 0) {
+        printf("  kde-exception-mem %s @0x%lx: <unreadable>\n", label, addr);
+        return;
+    }
+    for (size_t i = 0; i < sizeof(bytes); i++) {
+        unsigned char c = bytes[i];
+        ascii[i] = (c >= 0x20 && c <= 0x7e) ? (char)c : '.';
+    }
+    ascii[sizeof(bytes)] = '\0';
+    printf("  kde-exception-mem %s @0x%lx:", label, addr);
+    for (size_t i = 0; i < sizeof(bytes); i++)
+        printf(" %02x", bytes[i]);
+    printf("  \"%s\"\n", ascii);
+}
+
+static void kde_dump_exception_register_memory(struct thread *p,
+                                               struct trapframe *tf)
+{
+    if (p == NULL || tf == NULL || !kde_exception_vma_trace_enabled(p))
+        return;
+
+    kde_dump_user_bytes(p, "rax", tf->rax);
+    kde_dump_user_bytes(p, "rbx", tf->rbx);
+    kde_dump_user_bytes(p, "rdi", tf->rdi);
+    kde_dump_user_bytes(p, "rsi", tf->rsi);
+    kde_dump_user_bytes(p, "rcx", tf->rcx);
+    kde_dump_user_bytes(p, "r12", tf->r12);
+    kde_dump_user_bytes(p, "r13", tf->r13);
+    kde_dump_user_bytes(p, "r14", tf->r14);
+    kde_dump_user_bytes(p, "r15", tf->r15);
+    kde_dump_user_bytes(p, "rsp", tf->rsp);
+    kde_dump_user_bytes(p, "rbp", tf->rbp);
 }
 
 static void chrome_dump_icu_vmas(struct thread *p, const char *reason)
@@ -359,6 +404,8 @@ void usertrapret(void) {
     struct thread *p = current;
     struct trapframe *tf = &p->trapframe->trapframe;
     uint32 rseq_events = 0;
+
+    oom_process_deferred_kill();
 
     if (killed(p))
         exit(-1);
@@ -1130,8 +1177,9 @@ void x86_trap_handler(struct trapframe *tf) {
             uint64 fault_len = is_write ? USER_WRITE_FAULT_AROUND_SIZE
                                          : USER_FAULT_AROUND_SIZE;
 
-            /* Try growing the stack first */
+            /* Try growing main and MAP_GROWSDOWN stacks first. */
             vm_try_growstack(current->vm, cr2);
+            vm_try_growdown(current->vm, cr2);
 
             if (!is_write &&
                 vm_file_read_fault_unlocked(current->vm, fault_base, prot) == 0) {
@@ -1148,9 +1196,10 @@ void x86_trap_handler(struct trapframe *tf) {
                 else if (fault_base + fault_len > vma->end)
                     fault_len = vma->end - fault_base;
             }
-            if (vma != NULL &&
-                vma_validate(vma, fault_base,
-                             fault_len, prot) == 0) {
+            int fault_ret = -EFAULT;
+            if (vma != NULL)
+                fault_ret = vma_validate(vma, fault_base, fault_len, prot);
+            if (fault_ret == 0) {
                 vm_runlock(current->vm);
                 /*
                  * With PCID enabled, vma_validate()'s sfence_vma() only
@@ -1170,6 +1219,9 @@ void x86_trap_handler(struct trapframe *tf) {
                 goto user_return; /* fault resolved */
             }
             vm_runlock(current->vm);
+
+            if (fault_ret == -ENOMEM)
+                goto user_return;
 
             /*
              * Check whether the process has a user-installed SIGSEGV
@@ -1290,29 +1342,29 @@ void x86_trap_handler(struct trapframe *tf) {
                 print_fault_vma(current->vm, "fault-ip", tf->rip);
                 print_fault_vma(current->vm, "fault-va", cr2);
                 vm_runlock(current->vm);
-                /* Dump all executable VMAs for library identification */
+                /* Dump the full VMA map.  Allocator/JIT crashes often hinge
+                 * on anonymous mappings next to file-backed runtime state. */
                 {
                     void *mt_entry;
                     unsigned long mt_idx;
-                    printf("  --- VMA map (exec+file) ---\n");
+                    printf("  --- VMA map ---\n");
                     mt_for_each(&current->vm->vm_mt, mt_entry, mt_idx, MAPLE_MAX) {
                         vma_t *v = (vma_t *)mt_entry;
                         if (!fault_vma_entry_valid(current->vm, v)) {
                             printf("  <invalid VMA entry %p>\n", v);
                             continue;
                         }
-                        if ((v->flags & PROT_EXEC) || v->file) {
-                            struct vfs_inode *inode = fault_vma_inode(v);
-                            printf("  [0x%lx-0x%lx) %c%c%c pgoff=0x%lx file=%p ino=%lu size=%lld name=%s\n",
-                                   v->start, v->end,
-                                   (v->flags & PROT_READ) ? 'r' : '-',
-                                   (v->flags & PROT_WRITE) ? 'w' : '-',
-                                   (v->flags & PROT_EXEC) ? 'x' : '-',
-                                   v->pgoff, (void *)v->file,
-                                   inode ? inode->ino : 0,
-                                   inode ? inode->size : 0,
-                                   fault_vma_file_name(v));
-                        }
+                        struct vfs_inode *inode = fault_vma_inode(v);
+                        printf("  [0x%lx-0x%lx) %c%c%c %s pgoff=0x%lx file=%p ino=%lu size=%lld path=%s\n",
+                               v->start, v->end,
+                               (v->flags & PROT_READ) ? 'r' : '-',
+                               (v->flags & PROT_WRITE) ? 'w' : '-',
+                               (v->flags & PROT_EXEC) ? 'x' : '-',
+                               (v->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+                               v->pgoff, (void *)v->file,
+                               inode ? inode->ino : 0,
+                               inode ? inode->size : 0,
+                               vma_debug_path(v));
                     }
                     printf("  --- end VMA map ---\n");
                 }
@@ -1527,8 +1579,11 @@ void x86_trap_handler(struct trapframe *tf) {
                    tf->rdi, tf->rsi, tf->rdx, tf->rcx);
             printf("  r8=0x%lx r9=0x%lx r10=0x%lx r11=0x%lx\n",
                    tf->r8, tf->r9, tf->r10, tf->r11);
+            printf("  r12=0x%lx r13=0x%lx r14=0x%lx r15=0x%lx\n",
+                   tf->r12, tf->r13, tf->r14, tf->r15);
             printf("  fs_base(tp)=0x%lx\n",
                    current->trapframe ? current->trapframe->tp : 0);
+            kde_dump_exception_register_memory(current, tf);
             kde_dump_exception_vmas(current, tf, vec, name);
             assert(current->pid != 1, "init exiting");
             print_user_backtrace(current->vm->pagetable,

@@ -26,6 +26,7 @@
 #include "signal.h"
 #include "timer/goldfish_rtc.h"
 #include "timer/timer.h"
+#include "cmdline.h"
 
 // Futex operations (match Linux values)
 #define FUTEX_WAIT          0
@@ -113,6 +114,42 @@ struct futex_key {
     vm_t *vm;
     uint64 addr;
 };
+
+static int kde_futex_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_futex_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_futex_trace_current(void)
+{
+    return current != NULL &&
+        (strncmp(current->name, "QDBusConnection", 15) == 0 ||
+         strncmp(current->name, "kwin_wayland", 12) == 0);
+}
+
+static void kde_futex_trace_key(const char *phase, uint64 uaddr,
+                                const struct futex_key *key, int op,
+                                uint32 val, uint32 bitset, int ret)
+{
+    if (!kde_futex_trace_enabled() || !kde_futex_trace_current())
+        return;
+
+    printf("kde-futex-trace: phase=%s pid=%d tgid=%d name=%s "
+           "uaddr=0x%lx key_vm=%p key_addr=0x%lx op=%d val=0x%x "
+           "bitset=0x%x ret=%d\n",
+           phase, current->pid, current->tgid, current->name, uaddr,
+           key ? key->vm : NULL, key ? key->addr : 0, op, val, bitset, ret);
+}
 
 struct robust_list_user {
     uint64 next;
@@ -417,8 +454,11 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
     vm_t *vm = current->vm;
     struct futex_key key;
     int key_ret = futex_make_key(vm, uaddr, private, &key);
-    if (key_ret < 0)
+    if (key_ret < 0) {
+        kde_futex_trace_key("wait-key-fail", uaddr, NULL, FUTEX_WAIT, val,
+                            bitset, key_ret);
         return key_ret;
+    }
 
     uint64 idx = futex_hash(&key);
     struct futex_bucket *bucket = &futex_table[idx];
@@ -436,22 +476,30 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
     uint32 curval;
     if (futex_read_u32(vm, uaddr, &curval) < 0) {
         spin_unlock(&bucket->lock);
+        kde_futex_trace_key("wait-fault", uaddr, &key, FUTEX_WAIT, val,
+                            bitset, -EFAULT);
         return -EFAULT;
     }
 
     if (curval != val) {
         spin_unlock(&bucket->lock);
+        kde_futex_trace_key("wait-eagain", uaddr, &key, FUTEX_WAIT, val,
+                            bitset, -EAGAIN);
         return -EAGAIN;
     }
 
     if (has_timeout && timeout_ms == 0) {
         spin_unlock(&bucket->lock);
+        kde_futex_trace_key("wait-timeout-zero", uaddr, &key, FUTEX_WAIT,
+                            val, bitset, -ETIMEDOUT);
         return -ETIMEDOUT;
     }
 
     // Enqueue waiter
     waiter.next = bucket->head;
     bucket->head = &waiter;
+    kde_futex_trace_key("wait-enqueue", uaddr, &key, FUTEX_WAIT, val,
+                        bitset, 0);
 
     struct timer_node tn = {0};
     uint64 deadline_ms = 0;
@@ -507,16 +555,27 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
         sched_timer_done(&tn);
 
     // Check if we were woken by a signal
-    if (signal_pending(current))
+    if (signal_pending(current)) {
+        kde_futex_trace_key("wait-signal", uaddr, &key, FUTEX_WAIT, val,
+                            bitset, -EINTR);
         return -EINTR;
+    }
 
-    if (timeout_arm_failed)
+    if (timeout_arm_failed) {
+        kde_futex_trace_key("wait-timeout-arm-failed", uaddr, &key,
+                            FUTEX_WAIT, val, bitset, -ETIMEDOUT);
         return -ETIMEDOUT;
+    }
 
     if (has_timeout && still_linked &&
-        sched_timer_now_ms() >= deadline_ms)
+        sched_timer_now_ms() >= deadline_ms) {
+        kde_futex_trace_key("wait-timeout", uaddr, &key, FUTEX_WAIT, val,
+                            bitset, -ETIMEDOUT);
         return -ETIMEDOUT;
+    }
 
+    kde_futex_trace_key(still_linked ? "wait-spurious" : "wait-woken",
+                        uaddr, &key, FUTEX_WAIT, val, bitset, 0);
     return 0;
 }
 
@@ -532,32 +591,45 @@ static int futex_wake(uint64 uaddr, int val, uint32 bitset, bool private) {
     vm_t *vm = current->vm;
     struct futex_key key;
     int key_ret = futex_make_key(vm, uaddr, private, &key);
-    if (key_ret < 0)
+    if (key_ret < 0) {
+        kde_futex_trace_key("wake-key-fail", uaddr, NULL, FUTEX_WAKE,
+                            (uint32)val, bitset, key_ret);
         return key_ret;
+    }
 
     uint64 idx = futex_hash(&key);
     struct futex_bucket *bucket = &futex_table[idx];
 
-    int woken = 0;
-
     spin_lock(&bucket->lock);
+    int woken = futex_wake_locked(bucket, &key, val, bitset);
+    spin_unlock(&bucket->lock);
+    kde_futex_trace_key("wake", uaddr, &key, FUTEX_WAKE, (uint32)val,
+                        bitset, woken);
 
-    struct futex_waiter **pp = &bucket->head;
-    while (*pp && woken < val) {
-        struct futex_waiter *w = *pp;
-        if (futex_keys_equal(w, &key) && (w->bitset & bitset)) {
-            // Remove from list
-            *pp = w->next;
-            w->next = NULL;
-            // Wake the thread
-            scheduler_wakeup_interruptible(w->thread);
-            woken++;
-        } else {
-            pp = &(*pp)->next;
+    /*
+     * A few Linux GUI stacks mix FUTEX_PRIVATE_FLAG inconsistently across
+     * shared-library and shared-memory synchronization paths.  xv6 originally
+     * documented private and shared futexes as equivalent, so keep wakeups
+     * compatible by probing the alternate key only when the requested key had
+     * no waiters.
+     */
+    if (woken == 0) {
+        struct futex_key alt_key;
+        int alt_ret = futex_make_key(vm, uaddr, !private, &alt_key);
+        if (alt_ret == 0 &&
+            (alt_key.vm != key.vm || alt_key.addr != key.addr)) {
+            idx = futex_hash(&alt_key);
+            bucket = &futex_table[idx];
+            spin_lock(&bucket->lock);
+            woken = futex_wake_locked(bucket, &alt_key, val, bitset);
+            spin_unlock(&bucket->lock);
+            kde_futex_trace_key(private ? "wake-alt-shared" :
+                                "wake-alt-private",
+                                uaddr, &alt_key, FUTEX_WAKE, (uint32)val,
+                                bitset, woken);
         }
     }
 
-    spin_unlock(&bucket->lock);
     return woken;
 }
 

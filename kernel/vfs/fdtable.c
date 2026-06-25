@@ -61,6 +61,8 @@
 #include "vfs_private.h"
 #include <mm/page.h>
 
+int snprintf(char *buf, size_t size, const char *fmt, ...);
+
 // Check if a pointer value represents a valid file descriptor entry.
 // Valid file pointers have addresses > NOFILE (small integers are invalid).
 #define IS_FD(fd) ((uint64)(fd) > NOFILE)
@@ -610,10 +612,25 @@ void vfs_fdtable_debug_dump(struct thread *p, const char *tag, int max_fd)
             continue;
         int cloexec =
             (p->fdtable->cloexec_bitmap[fd >> 6] >> (fd & 63)) & 1;
+        char target[96];
+        target[0] = '\0';
+        if (f->ops != NULL && f->ops->readlink != NULL) {
+            ssize_t n = f->ops->readlink(f, target, sizeof(target));
+            if (n < 0) {
+                snprintf(target, sizeof(target), "readlink:%ld", (long)n);
+            } else {
+                size_t len = (n < (ssize_t)sizeof(target) - 1) ?
+                    (size_t)n : sizeof(target) - 1;
+                target[len] = '\0';
+            }
+        }
         printf("chrome-fd-trace: fdtable-entry pid=%d tag=%s fd=%d "
-               "cloexec=%d file=%p kind=%d f_flags=0x%x path=%s\n",
+               "cloexec=%d file=%p kind=%d f_flags=0x%x ops=%p poll=%p "
+               "path=%s target=%s\n",
                p->pid, tag ? tag : "", fd, cloexec, f, f->f_kind,
-               f->f_flags, vfs_fdtable_debug_path(f));
+               f->f_flags, f->ops, f->ops ? f->ops->poll : NULL,
+               vfs_fdtable_debug_path(f),
+               target[0] != '\0' ? target : "(none)");
     }
     spin_unlock(&p->fdtable->lock);
 }

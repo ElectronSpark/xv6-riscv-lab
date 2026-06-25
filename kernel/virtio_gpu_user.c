@@ -1,3 +1,41 @@
+enum {
+    VIRTIO_GPU_DRM_CAPSET_VERSION = 1,
+    VIRTIO_GPU_DRM_CAPSET_SIZE = 160,
+};
+
+static int virtio_gpu_user_capset_probe_only(uint32 capset_id)
+{
+    return capset_id == VIRTIO_GPU_CAPSET_DRM;
+}
+
+static int virtio_gpu_user_fill_probe_capset(uint32 requested_capset_id,
+                                             uint32 requested_capset_version,
+                                             void *buf, uint32 buf_size,
+                                             uint32 *capset_id,
+                                             uint32 *capset_version,
+                                             uint32 *capset_size)
+{
+    uint32 transfer_size;
+
+    if (!virtio_gpu_user_capset_probe_only(requested_capset_id))
+        return -EINVAL;
+    if (requested_capset_version > VIRTIO_GPU_DRM_CAPSET_VERSION)
+        return -EINVAL;
+    if (capset_id)
+        *capset_id = VIRTIO_GPU_CAPSET_DRM;
+    if (capset_version)
+        *capset_version = VIRTIO_GPU_DRM_CAPSET_VERSION;
+    if (capset_size)
+        *capset_size = VIRTIO_GPU_DRM_CAPSET_SIZE;
+    if (buf != NULL && buf_size != 0) {
+        transfer_size = VIRTIO_GPU_DRM_CAPSET_SIZE;
+        if (transfer_size > buf_size)
+            transfer_size = buf_size;
+        memset(buf, 0, transfer_size);
+    }
+    return 0;
+}
+
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
                                    uint32 capset_id, const char *name,
                                    uint32 *ctx_id)
@@ -351,18 +389,17 @@ int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
     if (!g->initialized)
         return -ENODEV;
 
-    if (requested_capset_id == VIRTIO_GPU_CAPSET_DRM)
-        return virtio_gpu_user_get_drm_caps(requested_capset_version, buf,
-                                           buf_size, capset_id,
-                                           capset_version, capset_size);
-
     spin_lock(&g->lock);
     if (requested_capset_id == 0)
         requested_capset_id = g->virgl_capset_id;
     capset = virtio_gpu_lookup_capset_locked(g, requested_capset_id);
     if (capset == NULL) {
         spin_unlock(&g->lock);
-        return -EINVAL;
+        return virtio_gpu_user_fill_probe_capset(requested_capset_id,
+                                                 requested_capset_version,
+                                                 buf, buf_size, capset_id,
+                                                 capset_version,
+                                                 capset_size);
     }
     id = capset->id;
     version = capset->version;

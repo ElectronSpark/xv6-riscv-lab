@@ -129,6 +129,14 @@ void rlimit_init_defaults(struct rlimit rlim[RLIMIT_NLIMITS]) {
     rlim[RLIMIT_STACK].rlim_max = RLIM_INFINITY;
 
     /*
+     * Match the common Linux desktop/session default: crash diagnostics are
+     * logged, but a faulting GUI process does not synchronously write a
+     * multi-hundred-MiB core file unless userland explicitly opts in.
+     */
+    rlim[RLIMIT_CORE].rlim_cur = 0;
+    rlim[RLIMIT_CORE].rlim_max = RLIM_INFINITY;
+
+    /*
      * Linux GUI runtimes probe the post-RLIMIT_AS resources even when xv6 does
      * not enforce every one yet.  Return Linux-shaped defaults instead of
      * EINVAL so feature probes and sandbox setup follow the normal path.

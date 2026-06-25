@@ -184,7 +184,7 @@ static inline uint64 arch_tf_get_arg2(struct utrapframe *tf) {
     return tf->trapframe.rdx;
 }
 static inline uint64 arch_tf_get_arg3(struct utrapframe *tf) {
-    return tf->trapframe.rcx;
+    return tf->trapframe.r10;
 }
 static inline uint64 arch_tf_get_arg4(struct utrapframe *tf) {
     return tf->trapframe.r8;

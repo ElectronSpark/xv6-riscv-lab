@@ -1633,6 +1633,13 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
         blob_create.blob_id = req.blob_id;
         ret = virtio_gpu_user_resource_create_blob(owner->id, owner->tgid,
                                                    &blob_create);
+        if (chrome_drm_trace_owner(owner))
+            printf("chrome-drm-detail: resource-create-blob owner=%lu:%d "
+                   "ret=%d blob_mem=%u flags=0x%x size=%lu cmd_size=%u "
+                   "blob_id=%lu resource=%u out_size=%lu\n",
+                   owner->id, owner->tgid, ret, req.blob_mem,
+                   req.blob_flags, req.size, req.cmd_size, req.blob_id,
+                   blob_create.resource_id, blob_create.size);
         if (ret != 0) {
             printf("drm: virtgpu create blob ioctl failed ret=%d blob_mem=%u size=%lu\n",
                    ret, req.blob_mem, req.size);
@@ -1682,6 +1689,15 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
         create.flags = req.flags;
         create.size = req.size;
         ret = virtio_gpu_user_resource_create(owner->id, owner->tgid, &create);
+        if (chrome_drm_trace_owner(owner))
+            printf("chrome-drm-detail: resource-create owner=%lu:%d ret=%d "
+                   "target=0x%x format=0x%x bind=0x%x size=%u "
+                   "dim=%ux%ux%u array=%u level=%u samples=%u flags=0x%x "
+                   "resource=%u out_size=%lu\n",
+                   owner->id, owner->tgid, ret, req.target, req.format,
+                   req.bind, req.size, req.width, req.height, req.depth,
+                   req.array_size, req.last_level, req.nr_samples, req.flags,
+                   create.resource_id, create.size);
         if (ret != 0)
             return ret;
         resource_id = create.resource_id;

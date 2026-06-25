@@ -33,6 +33,7 @@
  */
 
 #include "types.h"
+#include "param.h"
 #include "arch/vm.h"
 #include "x86.h"
 #include "dev/fdt.h"     /* platform_info */
@@ -41,7 +42,9 @@
 #include "memlayout.h"
 #include "seg.h"
 #include "platform.h"
+#include "cmdline.h"
 #include <mm/page.h>
+#include <smp/atomic.h>
 #include <smp/percpu.h>
 #include <smp/percpu_types.h>
 
@@ -71,6 +74,54 @@
 #define X86_PAT_WC       0x01ULL
 #define X86_PAT_UC_MINUS 0x07ULL
 #define X86_PAT_UC       0x00ULL
+
+extern volatile uint64 *tlb_flush_sync_req;
+extern volatile uint64 *tlb_flush_sync_ack;
+extern volatile uint64 tlb_flush_sync_epoch;
+extern volatile uint64 *tlb_flush_va;
+
+static int x86_pcid_enabled_by_cmdline(void)
+{
+    char value[16];
+
+    if (cmdline_get_param("x86_pcid", value, sizeof(value)) != 0 &&
+        cmdline_get_param("pcid", value, sizeof(value)) != 0)
+        return 0;
+
+    return value[0] == '1' || value[0] == 'y' || value[0] == 'Y';
+}
+
+static void x86_tlb_sync_begin(cpumask_t cpumask, uint64 *seqs)
+{
+    if (cpumask == 0 || seqs == NULL || tlb_flush_sync_req == NULL)
+        return;
+
+    uint64 seq = __atomic_add_fetch(&tlb_flush_sync_epoch, 1,
+                                    __ATOMIC_ACQ_REL);
+    int ncpu = cpu_possible_count();
+    for (int i = 0; i < ncpu && i < MAX_CPUS; i++) {
+        seqs[i] = 0;
+        if (!(cpumask & (1ULL << i)))
+            continue;
+        seqs[i] = seq;
+        __atomic_store_n(&tlb_flush_sync_req[i], seq, __ATOMIC_RELEASE);
+    }
+}
+
+static void x86_tlb_sync_wait(cpumask_t cpumask, uint64 *seqs)
+{
+    if (cpumask == 0 || seqs == NULL || tlb_flush_sync_ack == NULL)
+        return;
+
+    int ncpu = cpu_possible_count();
+    for (int i = 0; i < ncpu && i < MAX_CPUS; i++) {
+        if (!(cpumask & (1ULL << i)) || seqs[i] == 0)
+            continue;
+        while (__atomic_load_n(&tlb_flush_sync_ack[i], __ATOMIC_ACQUIRE) <
+               seqs[i])
+            cpu_relax();
+    }
+}
 
 static void x86_pat_init(void)
 {
@@ -348,14 +399,16 @@ void arch_vm_init(void)
             panic("arch_vm_init: idt page map failed");
     }
 
-    /* Detect and enable PCID (Process Context Identifiers).
-     * CPUID.01H:ECX bit 17 indicates hardware PCID support.
-     * CR4.PCIDE (bit 17) enables the feature. */
+    /* Detect PCID (Process Context Identifiers).  Keep it opt-in until the
+     * x86 TLB/ASID path is proven under SMP GUI workloads: KWin/Qt currently
+     * shows heap/object corruption with PCID enabled on KVM, while the same
+     * workload is stable with PCID absent. */
     {
         uint32 a, b, c, d;
         asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
                      : "a"((uint32)1), "c"((uint32)0));
-        if (c & (1U << 17)) {
+        int pcid_supported = (c & (1U << 17)) != 0;
+        if (pcid_supported && x86_pcid_enabled_by_cmdline()) {
             /* Enable CR4.PCIDE — safe because CR3[11:0] is currently 0
              * (page-aligned kernel PML4). */
             uint64 cr4;
@@ -365,6 +418,9 @@ void arch_vm_init(void)
             asm volatile("movq %0, %%cr4" : : "r"(cr4) : "memory");
             vm_asid_init(4095);     /* 12-bit PCID: 0-4095 */
         } else {
+            if (pcid_supported)
+                printf("vm_asid_init: PCID supported but disabled "
+                       "(boot with x86_pcid=1 to enable)\n");
             vm_asid_init(0);        /* no PCID support */
         }
     }
@@ -380,11 +436,9 @@ void arch_vm_init_hart(void)
      * Mirror the BSP's CR4 setup on every AP so that loading a user
      * CR3 with PCID + noflush bits does not raise #GP.  arch_vm_init
      * runs only on the BSP; APs come up via ap_trampoline.S which
-     * sets PAE/OSFXSR/OSXMMEXCPT but not PCIDE/PGE.  Without PCIDE,
-     * MOV CR3 with bit 63 (noflush) or any bits 11:0 set is reserved
-     * and faults — silently tolerated by TCG, strictly enforced by
-     * KVM.  We re-check CPUID on each hart in case PCID was masked
-     * for this CPU (it shouldn't be on real SMP, but stay defensive).
+     * sets PAE/OSFXSR/OSXMMEXCPT but not PCIDE/PGE.  Only mirror PCIDE
+     * when the BSP enabled PCID globally; otherwise user CR3 values never
+     * carry PCID or noflush bits.
      */
     {
         uint32 a, b, c, d;
@@ -393,7 +447,7 @@ void arch_vm_init_hart(void)
         uint64 cr4;
         asm volatile("movq %%cr4, %0" : "=r"(cr4));
         cr4 |= (1ULL << 7);            /* CR4.PGE — global pages */
-        if (c & (1U << 17))
+        if ((c & (1U << 17)) && vm_asid_max() > 0)
             cr4 |= (1ULL << 17);       /* CR4.PCIDE */
         asm volatile("movq %0, %%cr4" : : "r"(cr4) : "memory");
     }
@@ -451,10 +505,14 @@ void vm_remote_sfence(vm_t *vm)
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());
 
-    if (cpumask)
+    uint64 seqs[MAX_CPUS] = {0};
+    if (cpumask) {
+        x86_tlb_sync_begin(cpumask, seqs);
         ipi_send_mask(cpumask, 0, IPI_REASON_TLB_FLUSH);
+    }
 
     pop_off();
+    x86_tlb_sync_wait(cpumask, seqs);
 }
 
 void vm_remote_sfence_page(vm_t *vm, uint64 va)
@@ -467,8 +525,9 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());
 
+    uint64 seqs[MAX_CPUS] = {0};
     if (cpumask) {
-        extern volatile uint64 *tlb_flush_va;
+        x86_tlb_sync_begin(cpumask, seqs);
         for (int i = 0; i < cpu_possible_count(); i++) {
             if (!(cpumask & (1ULL << i)))
                 continue;
@@ -482,6 +541,7 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
     }
 
     pop_off();
+    x86_tlb_sync_wait(cpumask, seqs);
 }
 
 void vm_remote_sfence_range(vm_t *vm, uint64 start, uint64 size)

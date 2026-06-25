@@ -1046,7 +1046,8 @@ static void virtio_disk_intr(int irq, void *data, device_t *dev) {
     // Acknowledge the interrupt: PCI vs MMIO transport
     if (disk->pci_state.use_pci) {
         volatile uint8 isr_status = *disk->pci_state.isr;
-        (void)isr_status;
+        if ((isr_status & 0x3) == 0)
+            return;
     } else {
         *R(diskno, VIRTIO_MMIO_INTERRUPT_ACK) =
             *R(diskno, VIRTIO_MMIO_INTERRUPT_STATUS) & 0x3;
