@@ -5,6 +5,8 @@
 static int chrome_drm_ioctl_trace_enabled(void);
 static int chrome_drm_current_is_chrome(void);
 static int chrome_drm_trace_owner(const struct fb_gpu_render_owner *owner);
+int virtio_gpu_user_creatable_capset_ids(uint64 *ids);
+int virtio_gpu_user_capset_query_only(uint32 capset_id);
 
 static int chrome_drm_fence_trace_enabled(void)
 {
@@ -759,7 +761,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         char debug_name[64];
         uint32 capset_id = 0;
         uint32 current_capset = 0;
-        uint64 supported_capsets = 0;
+        uint64 creatable_capsets = 0;
         uint32 i;
         int ret;
 
@@ -771,7 +773,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         ret = gpu_drm_current_capset(&current_capset);
         if (ret != 0)
             return ret;
-        ret = virtio_gpu_user_capset_ids(&supported_capsets);
+        ret = virtio_gpu_user_creatable_capset_ids(&creatable_capsets);
         if (ret != 0)
             return ret;
         capset_id = current_capset;
@@ -797,13 +799,16 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
             switch (param.param) {
             case VIRTGPU_CONTEXT_PARAM_CAPSET_ID:
                 if (param.value == 0 || param.value >= 64 ||
-                    (supported_capsets & (1ULL << param.value)) == 0) {
+                    (creatable_capsets & (1ULL << param.value)) == 0) {
+                    const char *reason =
+                        virtio_gpu_user_capset_query_only(param.value) ?
+                        "query-only" : "unsupported";
                     if (chrome_drm_trace_owner(owner))
                         printf("chrome-drm-detail: context-init reject "
                                "owner=%lu:%d param=capset value=%lu "
-                               "supported=0x%lx ret=%d\n",
+                               "creatable=0x%lx reason=%s ret=%d\n",
                                owner->id, owner->tgid, param.value,
-                               supported_capsets, -EINVAL);
+                               creatable_capsets, reason, -EINVAL);
                     return -EINVAL;
                 }
                 capset_id = (uint32)param.value;

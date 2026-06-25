@@ -3,9 +3,30 @@ enum {
     VIRTIO_GPU_DRM_CAPSET_SIZE = 160,
 };
 
-static int virtio_gpu_user_capset_probe_only(uint32 capset_id)
+enum virtio_gpu_user_capset_policy {
+    VIRTIO_GPU_USER_CAPSET_UNSUPPORTED,
+    VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE,
+    VIRTIO_GPU_USER_CAPSET_QUERY_ONLY,
+};
+
+static enum virtio_gpu_user_capset_policy
+virtio_gpu_user_capset_policy_for(uint32 capset_id)
 {
-    return capset_id == VIRTIO_GPU_CAPSET_DRM;
+    switch (capset_id) {
+    case VIRTIO_GPU_CAPSET_VIRGL:
+    case VIRTIO_GPU_CAPSET_VIRGL2:
+        return VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE;
+    case VIRTIO_GPU_CAPSET_DRM:
+        return VIRTIO_GPU_USER_CAPSET_QUERY_ONLY;
+    default:
+        return VIRTIO_GPU_USER_CAPSET_UNSUPPORTED;
+    }
+}
+
+int virtio_gpu_user_capset_query_only(uint32 capset_id)
+{
+    return virtio_gpu_user_capset_policy_for(capset_id) ==
+        VIRTIO_GPU_USER_CAPSET_QUERY_ONLY;
 }
 
 static int virtio_gpu_user_fill_probe_capset(uint32 requested_capset_id,
@@ -17,7 +38,7 @@ static int virtio_gpu_user_fill_probe_capset(uint32 requested_capset_id,
 {
     uint32 transfer_size;
 
-    if (!virtio_gpu_user_capset_probe_only(requested_capset_id))
+    if (!virtio_gpu_user_capset_query_only(requested_capset_id))
         return -EINVAL;
     if (requested_capset_version > VIRTIO_GPU_DRM_CAPSET_VERSION)
         return -EINVAL;
@@ -55,6 +76,12 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
     spin_lock(&g->lock);
     if (capset_id == 0)
         capset_id = g->virgl_capset_id;
+    if (virtio_gpu_user_capset_policy_for(capset_id) !=
+        VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE) {
+        spin_unlock(&g->lock);
+        virtio_gpu_op_unlock(g);
+        return -EINVAL;
+    }
     capset = virtio_gpu_lookup_capset_locked(g, capset_id);
     if (capset == NULL) {
         spin_unlock(&g->lock);
@@ -392,14 +419,24 @@ int virtio_gpu_user_get_caps_for(uint32 requested_capset_id,
     spin_lock(&g->lock);
     if (requested_capset_id == 0)
         requested_capset_id = g->virgl_capset_id;
-    capset = virtio_gpu_lookup_capset_locked(g, requested_capset_id);
-    if (capset == NULL) {
+    if (virtio_gpu_user_capset_policy_for(requested_capset_id) ==
+        VIRTIO_GPU_USER_CAPSET_QUERY_ONLY) {
         spin_unlock(&g->lock);
         return virtio_gpu_user_fill_probe_capset(requested_capset_id,
                                                  requested_capset_version,
                                                  buf, buf_size, capset_id,
                                                  capset_version,
                                                  capset_size);
+    }
+    if (virtio_gpu_user_capset_policy_for(requested_capset_id) !=
+        VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE) {
+        spin_unlock(&g->lock);
+        return -EINVAL;
+    }
+    capset = virtio_gpu_lookup_capset_locked(g, requested_capset_id);
+    if (capset == NULL) {
+        spin_unlock(&g->lock);
+        return -EINVAL;
     }
     id = capset->id;
     version = capset->version;
@@ -453,7 +490,33 @@ int virtio_gpu_user_capset_ids(uint64 *ids)
 
     spin_lock(&g->lock);
     for (int i = 0; i < VIRTIO_GPU_MAX_CAPSETS; i++) {
-        if (g->capsets[i].valid && g->capsets[i].id < 64)
+        if (g->capsets[i].valid &&
+            virtio_gpu_user_capset_policy_for(g->capsets[i].id) ==
+            VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE &&
+            g->capsets[i].id < 64)
+            value |= 1ULL << g->capsets[i].id;
+    }
+    spin_unlock(&g->lock);
+    *ids = value;
+    return 0;
+}
+
+int virtio_gpu_user_creatable_capset_ids(uint64 *ids)
+{
+    struct virtio_gpu *g = &gpu;
+    uint64 value = 0;
+
+    if (ids == NULL)
+        return -EINVAL;
+    if (!g->initialized)
+        return -ENODEV;
+
+    spin_lock(&g->lock);
+    for (int i = 0; i < VIRTIO_GPU_MAX_CAPSETS; i++) {
+        if (g->capsets[i].valid &&
+            virtio_gpu_user_capset_policy_for(g->capsets[i].id) ==
+            VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE &&
+            g->capsets[i].id < 64)
             value |= 1ULL << g->capsets[i].id;
     }
     spin_unlock(&g->lock);
