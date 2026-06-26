@@ -1,6 +1,7 @@
 
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 
+static int chrome_drm_ioctl_trace_enabled(void);
 static int chrome_drm_trace_owner(const struct fb_gpu_render_owner *owner);
 
 static int gpu_drm_is_primary_like(struct fb_gpu_render_owner *owner)
@@ -65,6 +66,71 @@ static int gpu_user_debug_name(uint64 user_ptr, char name[64])
     }
     name[63] = 0;
     return 0;
+}
+
+static void gpu_drm_trace_safe_name(const char *src, char dst[64])
+{
+    uint32 i;
+
+    if (dst == NULL)
+        return;
+    if (src == NULL || src[0] == 0) {
+        memcpy(dst, "?", sizeof("?"));
+        return;
+    }
+
+    for (i = 0; i < 63 && src[i] != 0; i++) {
+        char c = src[i];
+
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+            (c >= '0' && c <= '9') || c == '_' || c == '-' ||
+            c == '.' || c == '/' || c == ':' || c == '+')
+            dst[i] = c;
+        else
+            dst[i] = '_';
+    }
+    if (i == 0)
+        dst[i++] = '?';
+    dst[i] = 0;
+}
+
+static void gpu_drm_trace_context_attrib(struct fb_gpu_render_owner *owner,
+                                         const char *phase,
+                                         uint32 ctx_id,
+                                         uint32 submit_flags,
+                                         uint32 ioctl_flags,
+                                         uint32 words,
+                                         uint32 resource_count,
+                                         uint32 first_dw,
+                                         uint64 fence,
+                                         uint64 signaled,
+                                         int ret)
+{
+    char debug_name[64];
+    char proc_name[64];
+
+    if (!chrome_drm_trace_owner(owner))
+        return;
+
+    gpu_drm_trace_safe_name(owner->debug_name, debug_name);
+    gpu_drm_trace_safe_name(current ? current->name : NULL, proc_name);
+    printf("chrome-drm-detail: virtgpu-context-%s pid=%d tgid=%d "
+           "proc=%s owner=%lu:%d node=%s ctx=%u capset=%u "
+           "context_init=0x%x num_rings=%u ring_idx_mask=0x%lx "
+           "explicit_debug_name=%d debug_name=%s submit_flags=0x%x "
+           "ioctl_flags=0x%x words=%u bo_count=%u first_dw=0x%x "
+           "fence=%lu signaled=%lu ret=%d\n",
+           phase, current ? current->pid : -1,
+           current ? current->tgid : -1, proc_name,
+           owner ? owner->id : 0, owner ? owner->tgid : -1,
+           owner ? drm_core_node_name(owner->drm.node_type) : "?",
+           ctx_id, owner ? owner->capset_id : 0,
+           owner ? owner->context_init : 0,
+           owner ? owner->num_rings : 0,
+           owner ? owner->ring_idx_mask : 0,
+           owner ? owner->explicit_debug_name : 0, debug_name,
+           submit_flags, ioctl_flags, words, resource_count, first_dw,
+           fence, signaled, ret);
 }
 
 static void gpu_drm_mode_append_uint(char *buf, uint32 *pos, uint32 value)
@@ -489,6 +555,7 @@ static int gpu_owner_create_context(struct fb_gpu_render_owner *owner,
                                     int fail_if_exists)
 {
     int ret;
+    uint32 actual_capset_id = capset_id;
 
     if (owner == NULL)
         return -EBADF;
@@ -503,10 +570,11 @@ static int gpu_owner_create_context(struct fb_gpu_render_owner *owner,
     ret = virtio_gpu_user_context_create(owner->id, owner->tgid, capset_id,
                                          context_init,
                                          name ? name : "xv6-drm",
-                                         &owner->default_ctx_id);
+                                         &owner->default_ctx_id,
+                                         &actual_capset_id);
     if (ret == 0) {
         owner->context_created = 1;
-        owner->capset_id = capset_id;
+        owner->capset_id = actual_capset_id;
         owner->context_init = context_init;
         owner->num_rings = num_rings != 0 ? num_rings : 1;
         owner->ring_idx_mask = ring_idx_mask;
@@ -519,6 +587,9 @@ static int gpu_owner_create_context(struct fb_gpu_render_owner *owner,
         else
             memcpy(owner->debug_name, "xv6-drm", sizeof("xv6-drm"));
         owner->debug_name[sizeof(owner->debug_name) - 1] = 0;
+        gpu_drm_trace_context_attrib(owner, "create",
+                                     owner->default_ctx_id, 0, 0, 0, 0, 0,
+                                     0, 0, ret);
     }
     return ret;
 }

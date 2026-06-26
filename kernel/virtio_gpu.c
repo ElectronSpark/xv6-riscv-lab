@@ -488,10 +488,13 @@ struct virtio_gpu_resource {
 struct virtio_gpu_context {
     int in_use;
     int failed;
+    int first_submit_seen;
     uint32 id;
     uint32 capset_id;
+    uint32 context_init;
     uint64 owner_id;
     pid_t owner_tgid;
+    char debug_name[64];
 };
 
 struct virtio_gpu_capset {
@@ -2482,7 +2485,8 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
 }
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
                                    uint32 capset_id, uint32 context_init,
-                                   const char *name, uint32 *ctx_id)
+                                   const char *name, uint32 *ctx_id,
+                                   uint32 *actual_capset_id)
 {
     (void)owner_id;
     (void)owner_tgid;
@@ -2490,6 +2494,7 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
     (void)context_init;
     (void)name;
     (void)ctx_id;
+    (void)actual_capset_id;
     return -ENODEV;
 }
 int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
@@ -2504,7 +2509,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 flags, const uint32 *cmds,
                            uint32 nr_dwords, const uint32 *resources,
                            uint32 resource_count, uint64 *fence,
-                           uint64 *signaled)
+                           uint64 *signaled, uint32 *first_submit)
 {
     (void)owner_id;
     (void)owner_tgid;
@@ -2516,6 +2521,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     (void)resource_count;
     (void)fence;
     (void)signaled;
+    (void)first_submit;
     return -ENODEV;
 }
 int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)

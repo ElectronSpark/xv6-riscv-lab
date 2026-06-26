@@ -1677,6 +1677,10 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
             return -EINVAL;
         }
         if (req.cmd_size != 0) {
+            uint64 fence = 0;
+            uint64 signaled = 0;
+            uint32 first_submit = 0;
+
             while (cmd_alloc_len < req.cmd_size) {
                 if (cmd_order >= PAGE_BUDDY_MAX_ORDER)
                     return -ENOMEM;
@@ -1693,7 +1697,13 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
             ret = virtio_gpu_user_submit(owner->id, owner->tgid,
                                          owner->default_ctx_id, 0, cmds,
                                          req.cmd_size / sizeof(uint32),
-                                         NULL, 0, NULL, NULL);
+                                         NULL, 0, &fence, &signaled,
+                                         &first_submit);
+            if (ret == 0 && first_submit)
+                gpu_drm_trace_context_attrib(
+                    owner, "first-submit-blob", owner->default_ctx_id,
+                    0, 0, req.cmd_size / sizeof(uint32), 0,
+                    cmds[0], fence, signaled, ret);
             page_free(cmds, cmd_order);
             if (ret != 0)
                 return ret;

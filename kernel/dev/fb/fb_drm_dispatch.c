@@ -833,12 +833,16 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                                        context_init, num_rings,
                                        ring_idx_mask,
                                        explicit_debug_name, 1);
-        if (chrome_drm_trace_owner(owner))
+        if (chrome_drm_trace_owner(owner)) {
+            char safe_debug_name[64];
+
+            gpu_drm_trace_safe_name(debug_name, safe_debug_name);
             printf("chrome-drm-detail: context-init end owner=%lu:%d "
                    "capset=%u context_init=0x%x num_rings=%u "
                    "ring_idx_mask=0x%lx ret=%d debug_name=%s\n",
                    owner->id, owner->tgid, capset_id, context_init,
-                   num_rings, ring_idx_mask, ret, debug_name);
+                   num_rings, ring_idx_mask, ret, safe_debug_name);
+        }
         return ret;
     }
     case DRM_IOCTL_VIRTGPU_RESOURCE_CREATE:
@@ -996,6 +1000,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         uint32 *resources = NULL;
         uint32 alloc_len = PGSIZE;
         uint32 submit_flags = 0;
+        uint32 first_submit = 0;
         int order = 0;
         uint64 fence = 0, signaled = 0;
         int out_fence_fd = -1;
@@ -1087,7 +1092,13 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         ret = virtio_gpu_user_submit(owner->id, owner->tgid,
                                      owner->default_ctx_id, submit_flags, cmds,
                                      req.size / sizeof(uint32), resources,
-                                     req.num_bo_handles, &fence, &signaled);
+                                     req.num_bo_handles, &fence, &signaled,
+                                     &first_submit);
+        if (ret == 0 && first_submit)
+            gpu_drm_trace_context_attrib(
+                owner, "first-submit-execbuffer", owner->default_ctx_id,
+                submit_flags, req.flags, req.size / sizeof(uint32),
+                req.num_bo_handles, cmds[0], fence, signaled, ret);
         if (chrome_drm_trace_owner(owner))
             printf("chrome-drm-detail: execbuffer-submit owner=%lu:%d "
                    "ctx=%u flags=0x%x size=%u words=%u bo_count=%u "

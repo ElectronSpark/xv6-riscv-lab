@@ -1882,7 +1882,7 @@ bo_copy_out:
 
         ret = virtio_gpu_user_context_create(owner_id, owner_tgid,
                                              0, 0, req.debug_name,
-                                             &req.ctx_id);
+                                             &req.ctx_id, NULL);
         if (ret != 0)
             return ret;
         if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
@@ -1958,7 +1958,7 @@ bo_copy_out:
                                      req.flags, cmds,
                                      req.cmd_size / sizeof(uint32),
                                      resources, req.resource_count,
-                                     &req.fence, &req.signaled);
+                                     &req.fence, &req.signaled, NULL);
         if (resources != NULL)
             kvfree(resources);
         page_free(cmds, order);

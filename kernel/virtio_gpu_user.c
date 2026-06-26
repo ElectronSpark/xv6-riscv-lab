@@ -96,7 +96,8 @@ int virtio_gpu_user_resource_blob_supported(void)
 
 int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
                                    uint32 capset_id, uint32 context_init,
-                                   const char *name, uint32 *ctx_id)
+                                   const char *name, uint32 *ctx_id,
+                                   uint32 *actual_capset_id)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
@@ -134,8 +135,17 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
     ctx->in_use = 1;
     ctx->id = id;
     ctx->capset_id = capset_id;
+    ctx->context_init = context_init;
     ctx->owner_id = owner_id;
     ctx->owner_tgid = owner_tgid;
+    if (name != NULL) {
+        memmove(ctx->debug_name, name,
+                strlen(name) < sizeof(ctx->debug_name) ?
+                strlen(name) + 1 : sizeof(ctx->debug_name));
+    } else {
+        memcpy(ctx->debug_name, "xv6-virgl", sizeof("xv6-virgl"));
+    }
+    ctx->debug_name[sizeof(ctx->debug_name) - 1] = 0;
     spin_unlock(&g->lock);
 
     ret = virtio_gpu_create_context(g, id, capset_id, context_init,
@@ -152,6 +162,8 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
     virtio_gpu_op_unlock(g);
 
     *ctx_id = id;
+    if (actual_capset_id != NULL)
+        *actual_capset_id = capset_id;
     return 0;
 }
 
@@ -221,7 +233,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 flags, const uint32 *cmds,
                            uint32 nr_dwords, const uint32 *resources,
                            uint32 resource_count, uint64 *fence,
-                           uint64 *signaled)
+                           uint64 *signaled, uint32 *first_submit)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_context *ctx;
@@ -229,7 +241,10 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     uint64 fence_id;
     int ret;
     int async_submit;
+    int first_submit_reserved = 0;
 
+    if (first_submit)
+        *first_submit = 0;
     if ((flags & ~(FB_GPU_VIRGL_SUBMIT_ASYNC |
                    FB_GPU_VIRGL_SUBMIT_ALLOW_IMPORTED_RESOURCES |
                    FB_GPU_VIRGL_SUBMIT_FORCE_FAIL)) != 0 ||
@@ -341,6 +356,15 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     else
         ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, fence_id);
 out_unlock_submit:
+    if (ret == 0) {
+        spin_lock(&g->lock);
+        ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
+        if (ctx != NULL && !ctx->first_submit_seen) {
+            ctx->first_submit_seen = 1;
+            first_submit_reserved = 1;
+        }
+        spin_unlock(&g->lock);
+    }
     virtio_gpu_op_unlock(g);
     if (ret != 0)
         virtio_gpu_async_submit_free(&prep);
@@ -374,6 +398,8 @@ out_unlock_submit:
     spin_unlock(&g->lock);
     if (fence)
         *fence = fence_id;
+    if (first_submit)
+        *first_submit = first_submit_reserved;
     return 0;
 }
 

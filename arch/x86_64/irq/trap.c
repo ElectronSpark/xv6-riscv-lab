@@ -32,6 +32,7 @@
 #include "cmdline.h"
 #include "errno.h"
 #include <mm/oom_kill.h>
+#include <mm/page.h>
 
 #define USER_FAULT_AROUND_PAGES 8UL
 
@@ -49,6 +50,29 @@ static struct vfs_inode *fault_vma_inode(vma_t *vma)
     if (vma == NULL || vma->file == NULL)
         return NULL;
     return vma->file->inode.inode;
+}
+
+static uint64 fault_vma_inode_size(struct vfs_inode *inode)
+{
+    return inode != NULL ? (uint64)inode->size : 0;
+}
+
+static void print_vma_file_data_end(vma_t *vma, struct vfs_inode *inode)
+{
+    uint64 raw;
+    uint64 computed = VMA_FILE_DATA_END_EOF_MARKER;
+
+    if (vma == NULL || vma->file == NULL)
+        return;
+
+    raw = vma->file_data_end;
+    if (VMA_FILE_DATA_END_IS_LIMIT(raw))
+        computed = raw;
+    else if (inode != NULL)
+        computed = fault_vma_inode_size(inode);
+
+    printf(" file_data_end_raw=0x%lx file_data_end_computed=0x%lx",
+           raw, computed);
 }
 
 static int fault_vma_entry_valid(vm_t *vm, vma_t *vma)
@@ -89,14 +113,15 @@ static void print_fault_vma(vm_t *vm, const char *label, uint64 addr)
 
     uint64 file_off = vma->pgoff + (addr - vma->start);
     struct vfs_inode *inode = fault_vma_inode(vma);
-    printf("  %s: addr=0x%lx map=[0x%lx-0x%lx) %c%c%c pgoff=0x%lx file_off=0x%lx file=%p ino=%lu size=%lld name=%s\n",
+    printf("  %s: addr=0x%lx map=[0x%lx-0x%lx) %c%c%c pgoff=0x%lx file_off=0x%lx file=%p ino=%lu size=%lld",
            label, addr, vma->start, vma->end,
            (vma->flags & PROT_READ) ? 'r' : '-',
            (vma->flags & PROT_WRITE) ? 'w' : '-',
            (vma->flags & PROT_EXEC) ? 'x' : '-',
            vma->pgoff, file_off, (void *)vma->file,
-           inode ? inode->ino : 0, inode ? inode->size : 0,
-           fault_vma_file_name(vma));
+           inode ? inode->ino : 0, inode ? inode->size : 0);
+    print_vma_file_data_end(vma, inode);
+    printf(" name=%s\n", fault_vma_file_name(vma));
 }
 
 static const char *vma_debug_path(vma_t *vma)
@@ -121,6 +146,201 @@ static int kde_exception_vma_trace_enabled(struct thread *p)
     if (cmdline_get_param("kde_fault_maps", value, sizeof(value)) != 0)
         return 0;
     return value[0] != '\0' && value[0] != '0';
+}
+
+static void kde_dump_user_bytes(struct thread *p, const char *label,
+                                uint64 addr);
+
+#define KDE_EXCEPTION_ICU_SLOT_FILE_OFF 0x20a9c0UL
+#define KDE_EXCEPTION_KWINGLUTILS_SLOT_FILE_TAIL 0x26000UL
+#define KDE_EXCEPTION_KWINGLUTILS_SLOT_FILE_END 0x26008UL
+#define KDE_EXCEPTION_KWINGLUTILS_SLOT_PLATFORM 0x26040UL
+
+static int kde_exception_vma_covers_file_off(vma_t *vma, uint64 file_off)
+{
+    uint64 span;
+
+    if (vma == NULL || vma->file == NULL)
+        return 0;
+    if (file_off < vma->pgoff)
+        return 0;
+
+    span = vma->end - vma->start;
+    return file_off - vma->pgoff < span;
+}
+
+static size_t kde_collect_exception_slot_bytes(uint64 slot_va, uint64 pa,
+                                               int huge, unsigned char *bytes,
+                                               size_t bytes_len)
+{
+    uint64 page_off;
+    uint64 limit;
+    size_t n = bytes_len;
+
+    if (bytes == NULL || n == 0)
+        return 0;
+    if (pa < KERNBASE || pa >= PHYSTOP)
+        return 0;
+
+    page_off = huge ? (slot_va & (HUGEPAGE_SIZE - 1)) :
+                      (slot_va & (PGSIZE - 1));
+    limit = huge ? HUGEPAGE_SIZE : PGSIZE;
+    if (limit - page_off < n)
+        n = limit - page_off;
+    if (PHYSTOP - pa < n)
+        n = PHYSTOP - pa;
+
+    memmove(bytes, PA2VA(pa), n);
+    return n;
+}
+
+static void kde_print_exception_slot_bytes(const char *tag, uint64 slot_va,
+                                           const unsigned char *bytes,
+                                           size_t n)
+{
+    char ascii[32 + 1];
+
+    if (bytes == NULL || n == 0) {
+        printf("  kde-exception-mem %s @0x%lx: <no-direct-pa>\n",
+               tag, slot_va);
+        return;
+    }
+    if (n > sizeof(ascii) - 1)
+        n = sizeof(ascii) - 1;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = bytes[i];
+        ascii[i] = (c >= 0x20 && c <= 0x7e) ? (char)c : '.';
+    }
+    ascii[n] = '\0';
+
+    printf("  kde-exception-mem %s @0x%lx:", tag, slot_va);
+    for (size_t i = 0; i < n; i++)
+        printf(" %02x", bytes[i]);
+    printf("  \"%s\"\n", ascii);
+}
+
+static void kde_dump_exception_file_slot(vm_t *vm, vma_t *vma,
+                                         uint64 file_off,
+                                         const char *marker,
+                                         const char *byte_tag)
+{
+    uint64 slot_va;
+    pte_t *pte;
+    pte_t pte_val = 0;
+    int present = 0;
+    int write = 0;
+    int user = 0;
+    int huge = 0;
+    uint64 pa = 0;
+    page_t *page = NULL;
+    page_t *head = NULL;
+    long page_type = -1;
+    long head_type = -1;
+    int page_ref = -1;
+    int head_ref = -1;
+    unsigned char slot_bytes[32];
+    size_t slot_bytes_len = 0;
+
+    if (vm == NULL || vm->pagetable == NULL || vma == NULL)
+        return;
+    if (!kde_exception_vma_covers_file_off(vma, file_off))
+        return;
+
+    slot_va = vma->start + (file_off - vma->pgoff);
+
+    vm_pgtable_lock(vm);
+    pte = walk(vm->pagetable, slot_va, 0, NULL, NULL);
+    if (pte != NULL)
+        pte_val = *pte;
+    present = pte_present(&pte_val);
+    write = pte_write(&pte_val);
+    user = pte_user(&pte_val);
+    huge = pte_is_hugepage(&pte_val);
+    if (present) {
+        pa = pte_pa(&pte_val);
+        pa += huge ? (slot_va & (HUGEPAGE_SIZE - 1)) :
+                     (slot_va & (PGSIZE - 1));
+        page = __pa_to_page(PGROUNDDOWN(pa));
+        if (page != NULL) {
+            page_type = (long)PAGE_FLAG_GET_TYPE(page->flags);
+            page_ref = page_ref_count(page);
+            if (PAGE_IS_TYPE(page, PAGE_TYPE_TAIL) &&
+                page->tail.head_page != NULL) {
+                head = page->tail.head_page;
+                head_type = (long)PAGE_FLAG_GET_TYPE(head->flags);
+                head_ref = page_ref_count(head);
+            }
+        }
+        slot_bytes_len = kde_collect_exception_slot_bytes(slot_va, pa, huge,
+                                                          slot_bytes,
+                                                          sizeof(slot_bytes));
+    }
+    vm_pgtable_unlock(vm);
+
+    printf("  %s: file_off=0x%lx va=0x%lx pte=0x%lx present=%d write=%d user=%d huge=%d pa=0x%lx page=%p page_type=%ld page_ref=%d head=%p head_type=%ld head_ref=%d\n",
+           marker, file_off, slot_va, pte_val, present, write, user, huge,
+           pa, page, page_type, page_ref, head, head_type, head_ref);
+    if (present)
+        kde_print_exception_slot_bytes(byte_tag, slot_va, slot_bytes,
+                                       slot_bytes_len);
+}
+
+static void kde_dump_exception_icu_vma(vm_t *vm, vma_t *vma,
+                                       struct vfs_inode *inode,
+                                       const char *path)
+{
+    if (vm == NULL || vma == NULL || path == NULL)
+        return;
+    if (strstr(path, "libicuuc.so.74") == NULL)
+        return;
+
+    printf("  kde-exception-icu-vma: map=[0x%lx-0x%lx) %c%c%c %s pgoff=0x%lx file=%p inode_ino=%lu inode_size=%lld",
+           vma->start, vma->end,
+           (vma->flags & PROT_READ) ? 'r' : '-',
+           (vma->flags & PROT_WRITE) ? 'w' : '-',
+           (vma->flags & PROT_EXEC) ? 'x' : '-',
+           (vma->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+           vma->pgoff, (void *)vma->file,
+           inode ? inode->ino : 0, inode ? inode->size : 0);
+    print_vma_file_data_end(vma, inode);
+    printf(" path=%s\n", path);
+
+    kde_dump_exception_file_slot(vm, vma, KDE_EXCEPTION_ICU_SLOT_FILE_OFF,
+                                 "kde-exception-icu-slot", "icu-slot");
+}
+
+static void kde_dump_exception_kwinglutils_vma(vm_t *vm, vma_t *vma,
+                                               struct vfs_inode *inode,
+                                               const char *path)
+{
+    if (vm == NULL || vma == NULL || path == NULL)
+        return;
+    if (strstr(path, "libkwinglutils.so.14") == NULL)
+        return;
+
+    printf("  kde-exception-kwinglutils-vma: map=[0x%lx-0x%lx) %c%c%c %s pgoff=0x%lx file=%p inode_ino=%lu inode_size=%lld",
+           vma->start, vma->end,
+           (vma->flags & PROT_READ) ? 'r' : '-',
+           (vma->flags & PROT_WRITE) ? 'w' : '-',
+           (vma->flags & PROT_EXEC) ? 'x' : '-',
+           (vma->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+           vma->pgoff, (void *)vma->file,
+           inode ? inode->ino : 0, inode ? inode->size : 0);
+    print_vma_file_data_end(vma, inode);
+    printf(" path=%s\n", path);
+
+    kde_dump_exception_file_slot(vm, vma,
+                                 KDE_EXCEPTION_KWINGLUTILS_SLOT_FILE_TAIL,
+                                 "kde-exception-kwinglutils-slot",
+                                 "kwinglutils-slot");
+    kde_dump_exception_file_slot(vm, vma,
+                                 KDE_EXCEPTION_KWINGLUTILS_SLOT_FILE_END,
+                                 "kde-exception-kwinglutils-slot",
+                                 "kwinglutils-slot");
+    kde_dump_exception_file_slot(vm, vma,
+                                 KDE_EXCEPTION_KWINGLUTILS_SLOT_PLATFORM,
+                                 "kde-exception-kwinglutils-slot",
+                                 "kwinglutils-slot");
 }
 
 static void kde_dump_exception_vmas(struct thread *p, struct trapframe *tf,
@@ -165,17 +385,21 @@ static void kde_dump_exception_vmas(struct thread *p, struct trapframe *tf,
             found_ip = 1;
             rip_file_off = v->pgoff + (tf->rip - v->start);
         }
-        printf("  kde-exception-vma:%s [0x%lx-0x%lx) %c%c%c %s pgoff=0x%lx file=%p ino=%lu size=%lld path=%s",
+        printf("  kde-exception-vma:%s [0x%lx-0x%lx) %c%c%c %s pgoff=0x%lx file=%p ino=%lu size=%lld",
                has_rip ? " rip" : "", v->start, v->end,
                (v->flags & PROT_READ) ? 'r' : '-',
                (v->flags & PROT_WRITE) ? 'w' : '-',
                (v->flags & PROT_EXEC) ? 'x' : '-',
                (v->flags & VMA_FLAG_SHARED) ? "shared" : "private",
                v->pgoff, (void *)v->file,
-               inode ? inode->ino : 0, inode ? inode->size : 0, path);
+               inode ? inode->ino : 0, inode ? inode->size : 0);
+        print_vma_file_data_end(v, inode);
+        printf(" path=%s", path);
         if (has_rip)
             printf(" rip_file_off=0x%lx", rip_file_off);
         printf("\n");
+        kde_dump_exception_icu_vma(vm, v, inode, path);
+        kde_dump_exception_kwinglutils_vma(vm, v, inode, path);
     }
     if (!found_ip)
         printf("  kde-exception-vma: rip mapping not found\n");
@@ -224,6 +448,133 @@ static void kde_dump_exception_register_memory(struct thread *p,
     kde_dump_user_bytes(p, "r15", tf->r15);
     kde_dump_user_bytes(p, "rsp", tf->rsp);
     kde_dump_user_bytes(p, "rbp", tf->rbp);
+}
+
+static void kde_dump_fatal_user_qword(struct thread *p, const char *label,
+                                      uint64 addr)
+{
+    uint64 value;
+
+    if (p == NULL || p->vm == NULL || addr == 0)
+        return;
+    if (!kde_exception_vma_trace_enabled(p))
+        return;
+
+    if (vm_copyin(p->vm, &value, addr, sizeof(value)) != 0) {
+        printf("  %s: addr=0x%lx qword=<unreadable>\n", label, addr);
+        return;
+    }
+
+    printf("  %s: addr=0x%lx qword=0x%lx\n", label, addr, value);
+}
+
+static void kde_dump_fatal_pointer_slot(struct thread *p, const char *label,
+                                        uint64 base, uint64 offset)
+{
+    uint64 addr;
+
+    if (p == NULL || p->vm == NULL || base == 0)
+        return;
+    if ((uint64)-1 - base < offset)
+        return;
+
+    addr = base + offset;
+    kde_dump_fatal_user_qword(p, label, addr);
+    vm_rlock(p->vm);
+    print_fault_vma(p->vm, label, addr);
+    vm_runlock(p->vm);
+    kde_dump_user_bytes(p, label, addr);
+}
+
+static void kde_dump_fatal_null_call_slots(struct thread *p,
+                                           struct trapframe *tf,
+                                           uint64 cr2)
+{
+    if (p == NULL || tf == NULL)
+        return;
+    if (tf->rip != 0 || cr2 != 0 || tf->r13 == 0)
+        return;
+
+    printf("  fatal-null-call-slots: base=r13=0x%lx\n", tf->r13);
+    kde_dump_fatal_pointer_slot(p, "fatal-r13+0x5c0", tf->r13, 0x5c0);
+    kde_dump_fatal_pointer_slot(p, "fatal-r13+0x5d0", tf->r13, 0x5d0);
+    kde_dump_fatal_pointer_slot(p, "fatal-r13+0x5e0", tf->r13, 0x5e0);
+}
+
+static void kde_dump_fatal_page_fault_summary(struct thread *p,
+                                              struct trapframe *tf,
+                                              uint64 cr2)
+{
+    struct fatal_reg_dump {
+        const char *name;
+        uint64 addr;
+    } regs[12];
+    uint64 stack_words[8];
+    int stack_ok;
+
+    if (p == NULL || p->vm == NULL || tf == NULL)
+        return;
+    if (!kde_exception_vma_trace_enabled(p))
+        return;
+
+    printf("kde-exception-fatal-summary: pid=%d name=%s cr2=0x%lx err=0x%lx rip=0x%lx rsp=0x%lx rbp=0x%lx\n",
+           p->pid, p->name, cr2, tf->err, tf->rip, tf->rsp, tf->rbp);
+    printf("  regs: rax=0x%lx rbx=0x%lx rcx=0x%lx rdx=0x%lx\n",
+           tf->rax, tf->rbx, tf->rcx, tf->rdx);
+    printf("        rdi=0x%lx rsi=0x%lx rbp=0x%lx rsp=0x%lx\n",
+           tf->rdi, tf->rsi, tf->rbp, tf->rsp);
+    printf("        r8 =0x%lx r9 =0x%lx r10=0x%lx r11=0x%lx\n",
+           tf->r8, tf->r9, tf->r10, tf->r11);
+    printf("        r12=0x%lx r13=0x%lx r14=0x%lx r15=0x%lx\n",
+           tf->r12, tf->r13, tf->r14, tf->r15);
+
+    stack_ok = vm_copyin(p->vm, stack_words, tf->rsp, sizeof(stack_words));
+    if (stack_ok == 0) {
+        printf("  fatal stack @rsp:");
+        for (size_t i = 0; i < sizeof(stack_words) / sizeof(stack_words[0]);
+             i++)
+            printf(" 0x%lx", stack_words[i]);
+        printf("\n");
+
+        if (stack_words[0] != 0) {
+            vm_rlock(p->vm);
+            print_fault_vma(p->vm, "fatal-ret", stack_words[0]);
+            vm_runlock(p->vm);
+            if (stack_words[0] >= 16)
+                kde_dump_user_bytes(p, "fatal-ret-16", stack_words[0] - 16);
+        }
+    } else {
+        printf("  fatal stack @rsp: <unreadable>\n");
+    }
+
+    regs[0] = (struct fatal_reg_dump){"fatal-rax", tf->rax};
+    regs[1] = (struct fatal_reg_dump){"fatal-rbx", tf->rbx};
+    regs[2] = (struct fatal_reg_dump){"fatal-rcx", tf->rcx};
+    regs[3] = (struct fatal_reg_dump){"fatal-rdx", tf->rdx};
+    regs[4] = (struct fatal_reg_dump){"fatal-rdi", tf->rdi};
+    regs[5] = (struct fatal_reg_dump){"fatal-rsi", tf->rsi};
+    regs[6] = (struct fatal_reg_dump){"fatal-r12", tf->r12};
+    regs[7] = (struct fatal_reg_dump){"fatal-r13", tf->r13};
+    regs[8] = (struct fatal_reg_dump){"fatal-r14", tf->r14};
+    regs[9] = (struct fatal_reg_dump){"fatal-r15", tf->r15};
+    regs[10] = (struct fatal_reg_dump){"fatal-rbp", tf->rbp};
+    regs[11] = (struct fatal_reg_dump){"fatal-rsp", tf->rsp};
+
+    vm_rlock(p->vm);
+    for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+        if (regs[i].addr == 0)
+            continue;
+        print_fault_vma(p->vm, regs[i].name, regs[i].addr);
+    }
+    vm_runlock(p->vm);
+
+    for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+        if (regs[i].addr == 0)
+            continue;
+        kde_dump_user_bytes(p, regs[i].name, regs[i].addr);
+    }
+
+    kde_dump_fatal_null_call_slots(p, tf, cr2);
 }
 
 static void chrome_dump_icu_vmas(struct thread *p, const char *reason)
@@ -1257,6 +1608,8 @@ void x86_trap_handler(struct trapframe *tf) {
                 }
 
                 /* No handler — fatal fault. */
+                kde_dump_fatal_page_fault_summary(current, tf, cr2);
+                kde_dump_exception_vmas(current, tf, vec, "#PF Page Fault");
                 printf(
                     "pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx"
                     " (SIGSEGV handler=%p sigacts=%p)\n",
