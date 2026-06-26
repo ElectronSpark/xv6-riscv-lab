@@ -1193,12 +1193,27 @@ static int gpu_syncobj_eventfd(struct fb_gpu_render_owner *owner, uint64 arg)
         goto out_trace;
     }
     if ((req.flags & ~DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE) != 0 ||
-        req.pad != 0 || req.fd < 0) {
+        req.pad != 0) {
         ret = -EINVAL;
         reason_key = "reject_reason";
         reason = "invalid_args";
         goto out_trace;
     }
+    spin_lock(&fb_state.lock);
+    obj = gpu_syncobj_lookup_locked(req.handle, owner);
+    state = obj != NULL ? gpu_syncobj_state_locked(obj->state_index) : NULL;
+    syncobj_exists = obj != NULL;
+    state_has_fence = state != NULL && state->fence != NULL;
+    if (obj == NULL || state == NULL) {
+        ret = -ENOENT;
+        reason_key = "reject_reason";
+        reason = obj == NULL ? "syncobj_missing" : "syncobj_state_missing";
+        spin_unlock(&fb_state.lock);
+        goto out_trace;
+    }
+    spin_unlock(&fb_state.lock);
+    obj = NULL;
+    state = NULL;
     event_file = vfs_fdtable_get_file(current->fdtable, req.fd);
     if (event_file == NULL) {
         fd_is_eventfd = 0;
