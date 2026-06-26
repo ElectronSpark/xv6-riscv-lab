@@ -416,6 +416,29 @@ struct virtio_gpu_stats {
     uint64 async_make_room_wait_ticks;
     uint64 async_make_room_last_wait_us;
     uint64 async_make_room_max_wait_us;
+    uint64 submit_trace_submit_calls;
+    uint64 submit_trace_submit_ticks;
+    uint64 submit_trace_lock_wait_ticks;
+    uint64 submit_trace_resource_attach_count;
+    uint64 submit_trace_resource_attach_ticks;
+    uint64 submit_trace_async_prepare_ticks;
+    uint64 submit_trace_post_ticks;
+    uint64 submit_trace_first_submits;
+    uint64 submit_trace_failures;
+    uint64 submit_trace_fence_calls;
+    uint64 submit_trace_fence_ticks;
+    uint64 submit_trace_fence_drain_calls;
+    uint64 submit_trace_fence_drain_ticks;
+    uint64 submit_trace_fence_failures;
+    uint64 submit_trace_wait_for_used_calls;
+    uint64 submit_trace_wait_for_used_ticks;
+    uint64 submit_trace_wait_for_used_max_us;
+    uint64 submit_trace_async_wait_progress_calls;
+    uint64 submit_trace_async_wait_progress_ticks;
+    uint64 submit_trace_async_make_room_ticks;
+    uint64 submit_trace_emitted_submit_calls;
+    uint64 submit_trace_emitted_fence_calls;
+    uint64 submit_trace_emitted_wait_for_used_calls;
 };
 
 enum virtio_gpu_async_reason {
@@ -860,6 +883,134 @@ static int virtio_gpu_cmdline_present(const char *key)
     return cmdline_get_param(key, buf, sizeof(buf)) == 0;
 }
 
+static uint64 virtio_gpu_ticks_to_us(uint64 ticks);
+
+static int virtio_gpu_submit_trace_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = virtio_gpu_cmdline_enabled("virtio_gpu_submit_trace");
+    return cached;
+}
+
+static void virtio_gpu_submit_trace_record_submit(
+    struct virtio_gpu *g, uint64 total_ticks, uint64 lock_wait_ticks,
+    uint64 resource_attach_count, uint64 resource_attach_ticks,
+    uint64 async_prepare_ticks, uint64 post_ticks, int first_submit,
+    int failed)
+{
+    spin_lock(&g->lock);
+    g->stats.submit_trace_submit_calls++;
+    g->stats.submit_trace_submit_ticks += total_ticks;
+    g->stats.submit_trace_lock_wait_ticks += lock_wait_ticks;
+    g->stats.submit_trace_resource_attach_count += resource_attach_count;
+    g->stats.submit_trace_resource_attach_ticks += resource_attach_ticks;
+    g->stats.submit_trace_async_prepare_ticks += async_prepare_ticks;
+    g->stats.submit_trace_post_ticks += post_ticks;
+    if (first_submit)
+        g->stats.submit_trace_first_submits++;
+    if (failed)
+        g->stats.submit_trace_failures++;
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_submit_trace_record_fence(
+    struct virtio_gpu *g, uint64 total_ticks, uint64 drain_calls,
+    uint64 drain_ticks, int failed)
+{
+    spin_lock(&g->lock);
+    g->stats.submit_trace_fence_calls++;
+    g->stats.submit_trace_fence_ticks += total_ticks;
+    g->stats.submit_trace_fence_drain_calls += drain_calls;
+    g->stats.submit_trace_fence_drain_ticks += drain_ticks;
+    if (failed)
+        g->stats.submit_trace_fence_failures++;
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_submit_trace_record_wait_for_used(
+    struct virtio_gpu *g, uint64 ticks)
+{
+    uint64 us = virtio_gpu_ticks_to_us(ticks);
+
+    spin_lock(&g->lock);
+    g->stats.submit_trace_wait_for_used_calls++;
+    g->stats.submit_trace_wait_for_used_ticks += ticks;
+    if (us > g->stats.submit_trace_wait_for_used_max_us)
+        g->stats.submit_trace_wait_for_used_max_us = us;
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_submit_trace_record_async_wait_progress(
+    struct virtio_gpu *g, uint64 ticks)
+{
+    spin_lock(&g->lock);
+    g->stats.submit_trace_async_wait_progress_calls++;
+    g->stats.submit_trace_async_wait_progress_ticks += ticks;
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_submit_trace_record_async_make_room(
+    struct virtio_gpu *g, uint64 ticks)
+{
+    spin_lock(&g->lock);
+    g->stats.submit_trace_async_make_room_ticks += ticks;
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_submit_trace_emit(struct virtio_gpu *g)
+{
+    struct virtio_gpu_stats s;
+
+    if (!virtio_gpu_submit_trace_enabled())
+        return;
+
+    spin_lock(&g->lock);
+    if (g->stats.submit_trace_submit_calls ==
+            g->stats.submit_trace_emitted_submit_calls &&
+        g->stats.submit_trace_fence_calls ==
+            g->stats.submit_trace_emitted_fence_calls &&
+        g->stats.submit_trace_wait_for_used_calls ==
+            g->stats.submit_trace_emitted_wait_for_used_calls) {
+        spin_unlock(&g->lock);
+        return;
+    }
+    s = g->stats;
+    g->stats.submit_trace_emitted_submit_calls =
+        g->stats.submit_trace_submit_calls;
+    g->stats.submit_trace_emitted_fence_calls =
+        g->stats.submit_trace_fence_calls;
+    g->stats.submit_trace_emitted_wait_for_used_calls =
+        g->stats.submit_trace_wait_for_used_calls;
+    spin_unlock(&g->lock);
+
+    printf("virtio-gpu-submit-trace: submit_calls=%lu submit_us=%lu lock_wait_us=%lu attach_count=%lu attach_us=%lu async_prepare_us=%lu post_us=%lu first_submit=%lu failures=%lu fence_calls=%lu fence_us=%lu fence_drains=%lu fence_drain_us=%lu fence_failures=%lu wait_used_calls=%lu wait_used_us=%lu wait_used_max_us=%lu async_wait_progress_calls=%lu async_wait_progress_us=%lu make_room_calls=%lu make_room_us=%lu make_room_stalls=%lu make_room_wait_us=%lu make_room_max_wait_us=%lu\n",
+           s.submit_trace_submit_calls,
+           virtio_gpu_ticks_to_us(s.submit_trace_submit_ticks),
+           virtio_gpu_ticks_to_us(s.submit_trace_lock_wait_ticks),
+           s.submit_trace_resource_attach_count,
+           virtio_gpu_ticks_to_us(s.submit_trace_resource_attach_ticks),
+           virtio_gpu_ticks_to_us(s.submit_trace_async_prepare_ticks),
+           virtio_gpu_ticks_to_us(s.submit_trace_post_ticks),
+           s.submit_trace_first_submits, s.submit_trace_failures,
+           s.submit_trace_fence_calls,
+           virtio_gpu_ticks_to_us(s.submit_trace_fence_ticks),
+           s.submit_trace_fence_drain_calls,
+           virtio_gpu_ticks_to_us(s.submit_trace_fence_drain_ticks),
+           s.submit_trace_fence_failures,
+           s.submit_trace_wait_for_used_calls,
+           virtio_gpu_ticks_to_us(s.submit_trace_wait_for_used_ticks),
+           s.submit_trace_wait_for_used_max_us,
+           s.submit_trace_async_wait_progress_calls,
+           virtio_gpu_ticks_to_us(s.submit_trace_async_wait_progress_ticks),
+           s.async_make_room_calls,
+           virtio_gpu_ticks_to_us(s.submit_trace_async_make_room_ticks),
+           s.async_make_room_stalls,
+           virtio_gpu_ticks_to_us(s.async_make_room_wait_ticks),
+           s.async_make_room_max_wait_us);
+}
+
 static uint32 virtio_gpu_cmdline_uint(const char *key, uint32 default_value,
                                       uint32 max_value)
 {
@@ -1011,10 +1162,13 @@ static int virtio_gpu_wait_for_used(struct virtio_gpu *g,
                                     completion_t *done)
 {
     uint64 waited_ms = 0;
+    int trace = virtio_gpu_submit_trace_enabled();
+    uint64 trace_start = trace ? r_time() : 0;
     uint32 wait_limit_ms = virtio_gpu_cmdline_uint(
         "virtio_gpu_irq_wait_ms", VIRTIO_GPU_IRQ_WAIT_MS,
         VIRTIO_GPU_IRQ_WAIT_MS_MAX);
     int poll_fallback_counted = 0;
+    int ret = 0;
 
     /*
      * QEMU often completes simple scanout and virgl control commands before
@@ -1023,8 +1177,10 @@ static int virtio_gpu_wait_for_used(struct virtio_gpu *g,
      * timer tick on every frame.
      */
     for (int i = 0; i < VIRTIO_GPU_FAST_POLL_LIMIT; i++) {
-        if (virtio_gpu_used_advanced(q))
-            return 1;
+        if (virtio_gpu_used_advanced(q)) {
+            ret = 1;
+            goto out;
+        }
     }
 
     /*
@@ -1035,25 +1191,34 @@ static int virtio_gpu_wait_for_used(struct virtio_gpu *g,
      */
     while (waited_ms < wait_limit_ms) {
         if (wait_for_completion_timeout(done,
-                                        VIRTIO_GPU_IRQ_WAIT_SLICE_MS) != 0)
-            return 1;
+                                        VIRTIO_GPU_IRQ_WAIT_SLICE_MS) != 0) {
+            ret = 1;
+            goto out;
+        }
         waited_ms += VIRTIO_GPU_IRQ_WAIT_SLICE_MS;
         if (virtio_gpu_used_advanced(q)) {
             if (!poll_fallback_counted) {
                 virtio_gpu_count_poll_fallback(g);
                 poll_fallback_counted = 1;
             }
-            return 1;
+            ret = 1;
+            goto out;
         }
     }
 
     if (!poll_fallback_counted)
         virtio_gpu_count_poll_fallback(g);
     for (int i = 0; i < VIRTIO_GPU_POLL_LIMIT; i++) {
-        if (virtio_gpu_used_advanced(q))
-            return 1;
+        if (virtio_gpu_used_advanced(q)) {
+            ret = 1;
+            goto out;
+        }
     }
-    return 0;
+out:
+    if (trace)
+        virtio_gpu_submit_trace_record_wait_for_used(g,
+                                                     r_time() - trace_start);
+    return ret;
 }
 
 static void virtio_gpu_intr(int irq, void *data, device_t *dev)
@@ -2116,18 +2281,27 @@ static int virtio_gpu_async_reap_completed(struct virtio_gpu *g)
 static int virtio_gpu_async_wait_progress(struct virtio_gpu *g)
 {
     struct virtio_gpu_queue *q = &g->ctrlq;
+    int trace = virtio_gpu_submit_trace_enabled();
+    uint64 trace_start = trace ? r_time() : 0;
     int intena;
+    int ret;
 
     intena = spin_lock_irqsave(&q->lock);
     if (q->used->idx != q->used_idx) {
         spin_unlock_irqrestore(&q->lock, intena);
-        return 1;
+        ret = 1;
+        goto out;
     }
     completion_init(&g->async_wait);
     q->pending_completion = &g->async_wait;
     spin_unlock_irqrestore(&q->lock, intena);
 
-    return virtio_gpu_wait_for_used(g, q, &g->async_wait);
+    ret = virtio_gpu_wait_for_used(g, q, &g->async_wait);
+out:
+    if (trace)
+        virtio_gpu_submit_trace_record_async_wait_progress(
+            g, r_time() - trace_start);
+    return ret;
 }
 
 /* Tear down all outstanding async slots after a host timeout. */
@@ -2226,8 +2400,11 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
                                       enum virtio_gpu_async_reason reason)
 {
     int depth = virtio_gpu_async_depth_for_reason(g, reason);
+    int trace = virtio_gpu_submit_trace_enabled();
+    uint64 trace_start = trace ? r_time() : 0;
     uint64 wait_start = 0;
     int waited = 0;
+    int ret = 0;
 
     spin_lock(&g->lock);
     virtio_gpu_count_async_make_room_locked(g, reason, 1, 0);
@@ -2247,7 +2424,8 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
         spin_unlock(&g->lock);
         if (!virtio_gpu_async_wait_progress(g)) {
             virtio_gpu_async_abort_all(g);
-            return -1;
+            ret = -1;
+            goto out;
         }
         /* A retired command may report an error; its slot is still freed. */
         (void)virtio_gpu_async_reap_completed(g);
@@ -2263,7 +2441,11 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
             g->stats.async_make_room_max_wait_us = us;
         spin_unlock(&g->lock);
     }
-    return 0;
+out:
+    if (trace)
+        virtio_gpu_submit_trace_record_async_make_room(
+            g, r_time() - trace_start);
+    return ret;
 }
 
 /*

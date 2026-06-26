@@ -239,6 +239,16 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     struct virtio_gpu_context *ctx;
     struct virtio_gpu_async_submit prep;
     uint64 fence_id;
+    int trace = virtio_gpu_submit_trace_enabled();
+    uint64 trace_start = trace ? r_time() : 0;
+    uint64 trace_lock_start = 0;
+    uint64 trace_lock_wait_ticks = 0;
+    uint64 trace_attach_count = 0;
+    uint64 trace_attach_ticks = 0;
+    uint64 trace_prepare_start = 0;
+    uint64 trace_prepare_ticks = 0;
+    uint64 trace_post_start = 0;
+    uint64 trace_post_ticks = 0;
     int ret;
     int async_submit;
     int first_submit_reserved = 0;
@@ -249,8 +259,12 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                    FB_GPU_VIRGL_SUBMIT_ALLOW_IMPORTED_RESOURCES |
                    FB_GPU_VIRGL_SUBMIT_FORCE_FAIL)) != 0 ||
         ctx_id == 0 || cmds == NULL || nr_dwords == 0 ||
-        nr_dwords > (PGSIZE * 64) / sizeof(uint32))
+        nr_dwords > (PGSIZE * 64) / sizeof(uint32)) {
+        if (trace && g->initialized)
+            virtio_gpu_submit_trace_record_submit(
+                g, r_time() - trace_start, 0, 0, 0, 0, 0, 0, 1);
         return -EINVAL;
+    }
     if (!g->initialized)
         return -ENODEV;
 
@@ -258,20 +272,32 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
     if (ctx == NULL) {
         spin_unlock(&g->lock);
+        if (trace)
+            virtio_gpu_submit_trace_record_submit(
+                g, r_time() - trace_start, 0, 0, 0, 0, 0, 0, 1);
         return -ENOENT;
     }
     if (!virtio_gpu_owner_matches(ctx->owner_id, ctx->owner_tgid,
                                   owner_id, owner_tgid)) {
         spin_unlock(&g->lock);
+        if (trace)
+            virtio_gpu_submit_trace_record_submit(
+                g, r_time() - trace_start, 0, 0, 0, 0, 0, 0, 1);
         return -EPERM;
     }
     if (ctx->failed) {
         spin_unlock(&g->lock);
+        if (trace)
+            virtio_gpu_submit_trace_record_submit(
+                g, r_time() - trace_start, 0, 0, 0, 0, 0, 0, 1);
         return -EIO;
     }
     if (flags & FB_GPU_VIRGL_SUBMIT_FORCE_FAIL) {
         virtio_gpu_mark_context_failed_locked(g, ctx);
         spin_unlock(&g->lock);
+        if (trace)
+            virtio_gpu_submit_trace_record_submit(
+                g, r_time() - trace_start, 0, 0, 0, 0, 0, 0, 1);
         return -EIO;
     }
     spin_unlock(&g->lock);
@@ -285,18 +311,32 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
         (flags & FB_GPU_VIRGL_SUBMIT_ALLOW_IMPORTED_RESOURCES) != 0;
     memset(&prep, 0, sizeof(prep));
     if (async_submit) {
+        if (trace)
+            trace_prepare_start = r_time();
         ret = virtio_gpu_submit_3d_async_prepare(
             g, ctx_id, cmds, nr_dwords, fence_id, &prep);
-        if (ret != 0)
+        if (trace)
+            trace_prepare_ticks = r_time() - trace_prepare_start;
+        if (ret != 0) {
+            if (trace)
+                virtio_gpu_submit_trace_record_submit(
+                    g, r_time() - trace_start, 0, 0, 0,
+                    trace_prepare_ticks, 0, 0, 1);
             return ret;
+        }
     }
 
+    if (trace)
+        trace_lock_start = r_time();
     virtio_gpu_op_lock(g, VIRTIO_GPU_OP_SUBMIT_3D);
+    if (trace)
+        trace_lock_wait_ticks = r_time() - trace_lock_start;
     if (resources != NULL) {
         for (uint32 i = 0; i < resource_count; i++) {
             struct virtio_gpu_resource *res;
             int already_attached = 0;
             int recorded = 0;
+            uint64 attach_start = 0;
 
             if (resources[i] == 0)
                 continue;
@@ -319,6 +359,10 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
             if (already_attached)
                 continue;
 
+            if (trace) {
+                trace_attach_count++;
+                attach_start = r_time();
+            }
             if (async_submit)
                 ret = virtio_gpu_context_resource_mixed_async(
                     g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id,
@@ -327,6 +371,8 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                 ret = virtio_gpu_context_resource(
                     g, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, ctx_id,
                     resources[i]);
+            if (trace)
+                trace_attach_ticks += r_time() - attach_start;
             if (ret != 0) {
                 ret = -EIO;
                 goto out_unlock_submit;
@@ -351,10 +397,14 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
         }
     }
 
+    if (trace)
+        trace_post_start = r_time();
     if (async_submit)
         ret = virtio_gpu_submit_3d_async_post_prepared(g, &prep);
     else
         ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, fence_id);
+    if (trace)
+        trace_post_ticks = r_time() - trace_post_start;
 out_unlock_submit:
     if (ret == 0) {
         spin_lock(&g->lock);
@@ -373,6 +423,11 @@ out_unlock_submit:
         ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
         virtio_gpu_mark_context_failed_locked(g, ctx);
         spin_unlock(&g->lock);
+        if (trace)
+            virtio_gpu_submit_trace_record_submit(
+                g, r_time() - trace_start, trace_lock_wait_ticks,
+                trace_attach_count, trace_attach_ticks, trace_prepare_ticks,
+                trace_post_ticks, 0, 1);
         return -EIO;
     }
 
@@ -400,6 +455,11 @@ out_unlock_submit:
         *fence = fence_id;
     if (first_submit)
         *first_submit = first_submit_reserved;
+    if (trace)
+        virtio_gpu_submit_trace_record_submit(
+            g, r_time() - trace_start, trace_lock_wait_ticks,
+            trace_attach_count, trace_attach_ticks, trace_prepare_ticks,
+            trace_post_ticks, first_submit_reserved, 0);
     return 0;
 }
 
@@ -407,6 +467,11 @@ int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)
 {
     struct virtio_gpu *g = &gpu;
     uint64 done;
+    int trace = virtio_gpu_submit_trace_enabled();
+    uint64 trace_start = trace ? r_time() : 0;
+    uint64 trace_drain_start = 0;
+    uint64 trace_drain_ticks = 0;
+    uint64 trace_drain_calls = 0;
     int ret = 0;
 
     if (!g->initialized)
@@ -417,17 +482,37 @@ int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)
     done = g->stats.last_fence;
     spin_unlock(&g->lock);
     if (virtio_gpu_async_pending(g) && wait && wait_for != 0) {
+        if (trace) {
+            trace_drain_calls++;
+            trace_drain_start = r_time();
+        }
         ret = virtio_gpu_drain_async_until_fence(g, wait_for);
+        if (trace)
+            trace_drain_ticks += r_time() - trace_drain_start;
         if (ret != 0) {
             virtio_gpu_op_unlock(g);
+            if (trace)
+                virtio_gpu_submit_trace_record_fence(
+                    g, r_time() - trace_start, trace_drain_calls,
+                    trace_drain_ticks, 1);
             return -EIO;
         }
     } else if (virtio_gpu_async_pending(g) &&
                (wait || wait_for == 0 ||
                 wait_for <= virtio_gpu_async_newest_fence(g))) {
+        if (trace) {
+            trace_drain_calls++;
+            trace_drain_start = r_time();
+        }
         ret = virtio_gpu_drain_async_submit(g, wait);
+        if (trace)
+            trace_drain_ticks += r_time() - trace_drain_start;
         if (ret != 0) {
             virtio_gpu_op_unlock(g);
+            if (trace)
+                virtio_gpu_submit_trace_record_fence(
+                    g, r_time() - trace_start, trace_drain_calls,
+                    trace_drain_ticks, 1);
             return -EIO;
         }
     }
@@ -438,8 +523,17 @@ int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)
 
     if (signaled)
         *signaled = done;
-    if (wait && wait_for != 0 && wait_for > done)
+    if (wait && wait_for != 0 && wait_for > done) {
+        if (trace)
+            virtio_gpu_submit_trace_record_fence(
+                g, r_time() - trace_start, trace_drain_calls,
+                trace_drain_ticks, 1);
         return -EAGAIN;
+    }
+    if (trace)
+        virtio_gpu_submit_trace_record_fence(
+            g, r_time() - trace_start, trace_drain_calls,
+            trace_drain_ticks, 0);
     return 0;
 }
 
@@ -1289,6 +1383,7 @@ void virtio_gpu_user_destroy_owner(pid_t owner_tgid)
         spin_unlock(&g->lock);
     }
     virtio_gpu_op_unlock(g);
+    virtio_gpu_submit_trace_emit(g);
     kvfree(resource_ids);
     kvfree(context_ids);
 }
@@ -1357,6 +1452,7 @@ void virtio_gpu_user_destroy_render_owner(uint64 owner_id)
         spin_unlock(&g->lock);
     }
     virtio_gpu_op_unlock(g);
+    virtio_gpu_submit_trace_emit(g);
     kvfree(resource_ids);
     kvfree(context_ids);
 }
