@@ -98,6 +98,9 @@
 #define VIRTIO_GPU_SMOKE_HEIGHT 32
 #define VIRTIO_GPU_MAX_RESOURCES 16384
 #define VIRTIO_GPU_MAX_CONTEXTS 256
+#define VIRTIO_GPU_SUBMIT_TRACE_OWNER_SLOTS VIRTIO_GPU_MAX_CONTEXTS
+#define VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN 16
+#define VIRTIO_GPU_SUBMIT_TRACE_DEBUG_LEN 64
 #define VIRTIO_GPU_RESOURCE_MAX_CONTEXT_ATTACHMENTS 8
 #define VIRTIO_GPU_MAX_CAPSETS 8
 #define VIRTIO_GPU_PAGE_FLIP_SCANOUT_SET_MAX 4
@@ -439,6 +442,8 @@ struct virtio_gpu_stats {
     uint64 submit_trace_emitted_submit_calls;
     uint64 submit_trace_emitted_fence_calls;
     uint64 submit_trace_emitted_wait_for_used_calls;
+    uint64 submit_trace_owner_drops;
+    uint64 submit_trace_owner_emitted_drops;
 };
 
 enum virtio_gpu_async_reason {
@@ -520,6 +525,51 @@ struct virtio_gpu_context {
     char debug_name[64];
 };
 
+struct virtio_gpu_submit_trace_key {
+    uint64 owner_id;
+    pid_t owner_tgid;
+    uint32 ctx_id;
+    char proc[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN];
+    char debug_name[VIRTIO_GPU_SUBMIT_TRACE_DEBUG_LEN];
+};
+
+struct virtio_gpu_submit_trace_owner_counts {
+    uint64 submit_calls;
+    uint64 submit_ticks;
+    uint64 lock_wait_ticks;
+    uint64 attach_count;
+    uint64 attach_ticks;
+    uint64 async_prepare_ticks;
+    uint64 post_ticks;
+    uint64 make_room_calls;
+    uint64 make_room_stalls;
+    uint64 make_room_ticks;
+    uint64 make_room_wait_ticks;
+    uint64 make_room_max_wait_ticks;
+    uint64 wait_progress_calls;
+    uint64 wait_progress_ticks;
+    uint64 wait_progress_max_ticks;
+    uint64 wait_used_calls;
+    uint64 wait_used_ticks;
+    uint64 wait_used_max_ticks;
+    uint64 posted;
+    uint64 retired;
+    uint64 first_submit;
+    uint64 failures;
+    int last_ret;
+    uint64 last_fence;
+};
+
+struct virtio_gpu_submit_trace_owner {
+    int in_use;
+    struct virtio_gpu_submit_trace_key key;
+    struct virtio_gpu_submit_trace_owner_counts total;
+    struct virtio_gpu_submit_trace_owner_counts emitted;
+    uint64 pending_make_room_max_wait_ticks;
+    uint64 pending_wait_progress_max_ticks;
+    uint64 pending_wait_used_max_ticks;
+};
+
 struct virtio_gpu_capset {
     int valid;
     int creatable;
@@ -543,6 +593,7 @@ struct virtio_gpu_async_submit {
     void *resp;
     uint32 resp_len;
     uint64 posted_ticks;
+    struct virtio_gpu_submit_trace_key trace_key;
     completion_t done;
 };
 
@@ -611,6 +662,10 @@ struct virtio_gpu {
     uint32 diagnostic_present_h;
     uint32 next_context_id;
     struct virtio_gpu_context contexts[VIRTIO_GPU_MAX_CONTEXTS];
+    struct virtio_gpu_submit_trace_owner
+        submit_trace_owners[VIRTIO_GPU_SUBMIT_TRACE_OWNER_SLOTS];
+    struct virtio_gpu_submit_trace_key submit_trace_current;
+    int submit_trace_current_valid;
     uint64 next_fence_id;
     struct virtio_gpu_async_submit async_ring[VIRTIO_GPU_ASYNC_MAX_DEPTH];
     uint32 async_count;
@@ -884,6 +939,8 @@ static int virtio_gpu_cmdline_present(const char *key)
 }
 
 static uint64 virtio_gpu_ticks_to_us(uint64 ticks);
+static struct virtio_gpu_context *virtio_gpu_lookup_context_locked(
+    struct virtio_gpu *g, uint32 id);
 
 static int virtio_gpu_submit_trace_enabled(void)
 {
@@ -894,12 +951,177 @@ static int virtio_gpu_submit_trace_enabled(void)
     return cached;
 }
 
+static void virtio_gpu_submit_trace_copy_string(char *dst, uint32 len,
+                                                const char *src)
+{
+    if (len == 0)
+        return;
+    if (src != NULL && src[0] != '\0') {
+        uint32 copy = (uint32)strlen(src);
+
+        if (copy >= len)
+            copy = len - 1;
+        memmove(dst, src, copy);
+        dst[copy] = '\0';
+    } else {
+        dst[0] = '-';
+        if (len > 1)
+            dst[1] = '\0';
+    }
+}
+
+static void virtio_gpu_submit_trace_copy_proc(
+    char dst[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN])
+{
+    if (current != NULL && current->name[0] != '\0') {
+        memmove(dst, current->name,
+                VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN);
+        dst[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN - 1] = '\0';
+    } else {
+        virtio_gpu_submit_trace_copy_string(
+            dst, VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN, NULL);
+    }
+}
+
+static void virtio_gpu_submit_trace_copy_debug(
+    char dst[VIRTIO_GPU_SUBMIT_TRACE_DEBUG_LEN], const char *src)
+{
+    virtio_gpu_submit_trace_copy_string(
+        dst, VIRTIO_GPU_SUBMIT_TRACE_DEBUG_LEN, src);
+}
+
+static void virtio_gpu_submit_trace_key_for_ctx_locked(
+    struct virtio_gpu *g, uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
+    const char proc[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN],
+    struct virtio_gpu_submit_trace_key *key)
+{
+    struct virtio_gpu_context *ctx = NULL;
+
+    memset(key, 0, sizeof(*key));
+    key->owner_id = owner_id;
+    key->owner_tgid = owner_tgid;
+    key->ctx_id = ctx_id;
+    virtio_gpu_submit_trace_copy_string(
+        key->proc, VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN, proc);
+    if (ctx_id != 0)
+        ctx = virtio_gpu_lookup_context_locked(g, ctx_id);
+    if (ctx != NULL) {
+        key->owner_id = ctx->owner_id;
+        key->owner_tgid = ctx->owner_tgid;
+        virtio_gpu_submit_trace_copy_debug(key->debug_name,
+                                           ctx->debug_name);
+    } else {
+        virtio_gpu_submit_trace_copy_debug(key->debug_name, NULL);
+    }
+}
+
+static int virtio_gpu_submit_trace_key_matches(
+    const struct virtio_gpu_submit_trace_key *a,
+    const struct virtio_gpu_submit_trace_key *b)
+{
+    return a->owner_id == b->owner_id &&
+        a->owner_tgid == b->owner_tgid &&
+        a->ctx_id == b->ctx_id &&
+        strncmp(a->proc, b->proc, VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN) == 0;
+}
+
+static struct virtio_gpu_submit_trace_owner *
+virtio_gpu_submit_trace_owner_locked(
+    struct virtio_gpu *g, const struct virtio_gpu_submit_trace_key *key)
+{
+    struct virtio_gpu_submit_trace_owner *free_slot = NULL;
+
+    for (int i = 0; i < VIRTIO_GPU_SUBMIT_TRACE_OWNER_SLOTS; i++) {
+        struct virtio_gpu_submit_trace_owner *o = &g->submit_trace_owners[i];
+
+        if (!o->in_use) {
+            if (free_slot == NULL)
+                free_slot = o;
+            continue;
+        }
+        if (virtio_gpu_submit_trace_key_matches(&o->key, key)) {
+            virtio_gpu_submit_trace_copy_debug(o->key.debug_name,
+                                               key->debug_name);
+            return o;
+        }
+    }
+
+    if (free_slot == NULL) {
+        g->stats.submit_trace_owner_drops++;
+        return NULL;
+    }
+
+    memset(free_slot, 0, sizeof(*free_slot));
+    free_slot->in_use = 1;
+    free_slot->key = *key;
+    return free_slot;
+}
+
+static struct virtio_gpu_submit_trace_owner *
+virtio_gpu_submit_trace_owner_for_ctx_locked(
+    struct virtio_gpu *g, uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
+    const char proc[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN])
+{
+    struct virtio_gpu_submit_trace_key key;
+
+    virtio_gpu_submit_trace_key_for_ctx_locked(g, owner_id, owner_tgid,
+                                               ctx_id, proc, &key);
+    return virtio_gpu_submit_trace_owner_locked(g, &key);
+}
+
+static void virtio_gpu_submit_trace_set_current(
+    struct virtio_gpu *g, uint64 owner_id, pid_t owner_tgid, uint32 ctx_id)
+{
+    char proc[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN];
+
+    if (!virtio_gpu_submit_trace_enabled())
+        return;
+
+    virtio_gpu_submit_trace_copy_proc(proc);
+    spin_lock(&g->lock);
+    virtio_gpu_submit_trace_key_for_ctx_locked(g, owner_id, owner_tgid,
+                                               ctx_id, proc,
+                                               &g->submit_trace_current);
+    g->submit_trace_current_valid = 1;
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_submit_trace_clear_current(struct virtio_gpu *g)
+{
+    if (!virtio_gpu_submit_trace_enabled())
+        return;
+
+    spin_lock(&g->lock);
+    g->submit_trace_current_valid = 0;
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_submit_trace_snapshot_slot(
+    struct virtio_gpu *g, struct virtio_gpu_async_submit *a, uint32 ctx_id)
+{
+    char proc[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN];
+
+    if (!virtio_gpu_submit_trace_enabled() || a == NULL)
+        return;
+
+    virtio_gpu_submit_trace_copy_proc(proc);
+    spin_lock(&g->lock);
+    virtio_gpu_submit_trace_key_for_ctx_locked(g, 0, 0, ctx_id, proc,
+                                               &a->trace_key);
+    spin_unlock(&g->lock);
+}
+
 static void virtio_gpu_submit_trace_record_submit(
-    struct virtio_gpu *g, uint64 total_ticks, uint64 lock_wait_ticks,
+    struct virtio_gpu *g, uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
+    uint64 total_ticks, uint64 lock_wait_ticks,
     uint64 resource_attach_count, uint64 resource_attach_ticks,
     uint64 async_prepare_ticks, uint64 post_ticks, int first_submit,
-    int failed)
+    int failed, int ret)
 {
+    char proc[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN];
+    struct virtio_gpu_submit_trace_owner *owner;
+
+    virtio_gpu_submit_trace_copy_proc(proc);
     spin_lock(&g->lock);
     g->stats.submit_trace_submit_calls++;
     g->stats.submit_trace_submit_ticks += total_ticks;
@@ -912,6 +1134,22 @@ static void virtio_gpu_submit_trace_record_submit(
         g->stats.submit_trace_first_submits++;
     if (failed)
         g->stats.submit_trace_failures++;
+    owner = virtio_gpu_submit_trace_owner_for_ctx_locked(
+        g, owner_id, owner_tgid, ctx_id, proc);
+    if (owner != NULL) {
+        owner->total.submit_calls++;
+        owner->total.submit_ticks += total_ticks;
+        owner->total.lock_wait_ticks += lock_wait_ticks;
+        owner->total.attach_count += resource_attach_count;
+        owner->total.attach_ticks += resource_attach_ticks;
+        owner->total.async_prepare_ticks += async_prepare_ticks;
+        owner->total.post_ticks += post_ticks;
+        if (first_submit)
+            owner->total.first_submit++;
+        if (failed)
+            owner->total.failures++;
+        owner->total.last_ret = ret;
+    }
     spin_unlock(&g->lock);
 }
 
@@ -933,82 +1171,314 @@ static void virtio_gpu_submit_trace_record_wait_for_used(
     struct virtio_gpu *g, uint64 ticks)
 {
     uint64 us = virtio_gpu_ticks_to_us(ticks);
+    struct virtio_gpu_submit_trace_owner *owner = NULL;
 
     spin_lock(&g->lock);
     g->stats.submit_trace_wait_for_used_calls++;
     g->stats.submit_trace_wait_for_used_ticks += ticks;
     if (us > g->stats.submit_trace_wait_for_used_max_us)
         g->stats.submit_trace_wait_for_used_max_us = us;
+    if (g->submit_trace_current_valid)
+        owner = virtio_gpu_submit_trace_owner_locked(
+            g, &g->submit_trace_current);
+    if (owner != NULL) {
+        owner->total.wait_used_calls++;
+        owner->total.wait_used_ticks += ticks;
+        if (ticks > owner->total.wait_used_max_ticks)
+            owner->total.wait_used_max_ticks = ticks;
+        if (ticks > owner->pending_wait_used_max_ticks)
+            owner->pending_wait_used_max_ticks = ticks;
+    }
     spin_unlock(&g->lock);
 }
 
 static void virtio_gpu_submit_trace_record_async_wait_progress(
     struct virtio_gpu *g, uint64 ticks)
 {
+    struct virtio_gpu_submit_trace_owner *owner = NULL;
+
     spin_lock(&g->lock);
     g->stats.submit_trace_async_wait_progress_calls++;
     g->stats.submit_trace_async_wait_progress_ticks += ticks;
+    if (g->submit_trace_current_valid)
+        owner = virtio_gpu_submit_trace_owner_locked(
+            g, &g->submit_trace_current);
+    if (owner != NULL) {
+        owner->total.wait_progress_calls++;
+        owner->total.wait_progress_ticks += ticks;
+        if (ticks > owner->total.wait_progress_max_ticks)
+            owner->total.wait_progress_max_ticks = ticks;
+        if (ticks > owner->pending_wait_progress_max_ticks)
+            owner->pending_wait_progress_max_ticks = ticks;
+    }
     spin_unlock(&g->lock);
 }
 
-static void virtio_gpu_submit_trace_record_async_make_room(
-    struct virtio_gpu *g, uint64 ticks)
+static void virtio_gpu_submit_trace_record_async_make_room_current(
+    struct virtio_gpu *g, uint64 ticks, uint64 wait_ticks, int stalled)
 {
+    struct virtio_gpu_submit_trace_owner *owner = NULL;
+
     spin_lock(&g->lock);
     g->stats.submit_trace_async_make_room_ticks += ticks;
+    if (g->submit_trace_current_valid)
+        owner = virtio_gpu_submit_trace_owner_locked(
+            g, &g->submit_trace_current);
+    if (owner != NULL) {
+        owner->total.make_room_calls++;
+        owner->total.make_room_ticks += ticks;
+        owner->total.make_room_wait_ticks += wait_ticks;
+        if (wait_ticks > owner->total.make_room_max_wait_ticks)
+            owner->total.make_room_max_wait_ticks = wait_ticks;
+        if (wait_ticks > owner->pending_make_room_max_wait_ticks)
+            owner->pending_make_room_max_wait_ticks = wait_ticks;
+        if (stalled)
+            owner->total.make_room_stalls++;
+    }
     spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_submit_trace_record_async_post(
+    struct virtio_gpu *g, const struct virtio_gpu_async_submit *a)
+{
+    struct virtio_gpu_submit_trace_owner *owner;
+
+    if (!virtio_gpu_submit_trace_enabled() || a == NULL)
+        return;
+
+    spin_lock(&g->lock);
+    owner = virtio_gpu_submit_trace_owner_locked(g, &a->trace_key);
+    if (owner != NULL) {
+        owner->total.posted++;
+        if (a->fence_id != 0)
+            owner->total.last_fence = a->fence_id;
+    }
+    spin_unlock(&g->lock);
+}
+
+static void virtio_gpu_submit_trace_record_async_retire(
+    struct virtio_gpu *g, const struct virtio_gpu_async_submit *a, int ret)
+{
+    struct virtio_gpu_submit_trace_owner *owner;
+
+    if (!virtio_gpu_submit_trace_enabled() || a == NULL)
+        return;
+
+    spin_lock(&g->lock);
+    owner = virtio_gpu_submit_trace_owner_locked(g, &a->trace_key);
+    if (owner != NULL) {
+        owner->total.retired++;
+        owner->total.last_ret = ret;
+        if (a->fence_id != 0)
+            owner->total.last_fence = a->fence_id;
+        if (ret != 0)
+            owner->total.failures++;
+    }
+    spin_unlock(&g->lock);
+}
+
+static int virtio_gpu_submit_trace_owner_counts_changed(
+    const struct virtio_gpu_submit_trace_owner_counts *total,
+    const struct virtio_gpu_submit_trace_owner_counts *emitted)
+{
+    return total->submit_calls != emitted->submit_calls ||
+        total->make_room_calls != emitted->make_room_calls ||
+        total->wait_progress_calls != emitted->wait_progress_calls ||
+        total->wait_used_calls != emitted->wait_used_calls ||
+        total->posted != emitted->posted ||
+        total->retired != emitted->retired ||
+        total->failures != emitted->failures;
+}
+
+static int virtio_gpu_submit_trace_owner_changed(
+    const struct virtio_gpu_submit_trace_owner *o)
+{
+    return virtio_gpu_submit_trace_owner_counts_changed(&o->total,
+                                                        &o->emitted) ||
+        o->pending_make_room_max_wait_ticks != 0 ||
+        o->pending_wait_progress_max_ticks != 0 ||
+        o->pending_wait_used_max_ticks != 0;
+}
+
+static int virtio_gpu_submit_trace_owner_changed_locked(struct virtio_gpu *g)
+{
+    if (g->stats.submit_trace_owner_drops !=
+        g->stats.submit_trace_owner_emitted_drops)
+        return 1;
+    for (int i = 0; i < VIRTIO_GPU_SUBMIT_TRACE_OWNER_SLOTS; i++) {
+        struct virtio_gpu_submit_trace_owner *o = &g->submit_trace_owners[i];
+
+        if (o->in_use && virtio_gpu_submit_trace_owner_changed(o))
+            return 1;
+    }
+    return 0;
 }
 
 static void virtio_gpu_submit_trace_emit(struct virtio_gpu *g)
 {
     struct virtio_gpu_stats s;
+    int print_global = 0;
 
     if (!virtio_gpu_submit_trace_enabled())
         return;
 
     spin_lock(&g->lock);
-    if (g->stats.submit_trace_submit_calls ==
-            g->stats.submit_trace_emitted_submit_calls &&
-        g->stats.submit_trace_fence_calls ==
-            g->stats.submit_trace_emitted_fence_calls &&
-        g->stats.submit_trace_wait_for_used_calls ==
-            g->stats.submit_trace_emitted_wait_for_used_calls) {
+    print_global = !(g->stats.submit_trace_submit_calls ==
+                         g->stats.submit_trace_emitted_submit_calls &&
+                     g->stats.submit_trace_fence_calls ==
+                         g->stats.submit_trace_emitted_fence_calls &&
+                     g->stats.submit_trace_wait_for_used_calls ==
+                         g->stats.submit_trace_emitted_wait_for_used_calls);
+    if (!print_global && !virtio_gpu_submit_trace_owner_changed_locked(g)) {
         spin_unlock(&g->lock);
         return;
     }
     s = g->stats;
-    g->stats.submit_trace_emitted_submit_calls =
-        g->stats.submit_trace_submit_calls;
-    g->stats.submit_trace_emitted_fence_calls =
-        g->stats.submit_trace_fence_calls;
-    g->stats.submit_trace_emitted_wait_for_used_calls =
-        g->stats.submit_trace_wait_for_used_calls;
+    if (print_global) {
+        g->stats.submit_trace_emitted_submit_calls =
+            g->stats.submit_trace_submit_calls;
+        g->stats.submit_trace_emitted_fence_calls =
+            g->stats.submit_trace_fence_calls;
+        g->stats.submit_trace_emitted_wait_for_used_calls =
+            g->stats.submit_trace_wait_for_used_calls;
+    }
     spin_unlock(&g->lock);
 
-    printf("virtio-gpu-submit-trace: submit_calls=%lu submit_us=%lu lock_wait_us=%lu attach_count=%lu attach_us=%lu async_prepare_us=%lu post_us=%lu first_submit=%lu failures=%lu fence_calls=%lu fence_us=%lu fence_drains=%lu fence_drain_us=%lu fence_failures=%lu wait_used_calls=%lu wait_used_us=%lu wait_used_max_us=%lu async_wait_progress_calls=%lu async_wait_progress_us=%lu make_room_calls=%lu make_room_us=%lu make_room_stalls=%lu make_room_wait_us=%lu make_room_max_wait_us=%lu\n",
-           s.submit_trace_submit_calls,
-           virtio_gpu_ticks_to_us(s.submit_trace_submit_ticks),
-           virtio_gpu_ticks_to_us(s.submit_trace_lock_wait_ticks),
-           s.submit_trace_resource_attach_count,
-           virtio_gpu_ticks_to_us(s.submit_trace_resource_attach_ticks),
-           virtio_gpu_ticks_to_us(s.submit_trace_async_prepare_ticks),
-           virtio_gpu_ticks_to_us(s.submit_trace_post_ticks),
-           s.submit_trace_first_submits, s.submit_trace_failures,
-           s.submit_trace_fence_calls,
-           virtio_gpu_ticks_to_us(s.submit_trace_fence_ticks),
-           s.submit_trace_fence_drain_calls,
-           virtio_gpu_ticks_to_us(s.submit_trace_fence_drain_ticks),
-           s.submit_trace_fence_failures,
-           s.submit_trace_wait_for_used_calls,
-           virtio_gpu_ticks_to_us(s.submit_trace_wait_for_used_ticks),
-           s.submit_trace_wait_for_used_max_us,
-           s.submit_trace_async_wait_progress_calls,
-           virtio_gpu_ticks_to_us(s.submit_trace_async_wait_progress_ticks),
-           s.async_make_room_calls,
-           virtio_gpu_ticks_to_us(s.submit_trace_async_make_room_ticks),
-           s.async_make_room_stalls,
-           virtio_gpu_ticks_to_us(s.async_make_room_wait_ticks),
-           s.async_make_room_max_wait_us);
+    if (print_global)
+        printf("virtio-gpu-submit-trace: submit_calls=%lu submit_us=%lu lock_wait_us=%lu attach_count=%lu attach_us=%lu async_prepare_us=%lu post_us=%lu first_submit=%lu failures=%lu fence_calls=%lu fence_us=%lu fence_drains=%lu fence_drain_us=%lu fence_failures=%lu wait_used_calls=%lu wait_used_us=%lu wait_used_max_us=%lu async_wait_progress_calls=%lu async_wait_progress_us=%lu make_room_calls=%lu make_room_us=%lu make_room_stalls=%lu make_room_wait_us=%lu make_room_max_wait_us=%lu\n",
+               s.submit_trace_submit_calls,
+               virtio_gpu_ticks_to_us(s.submit_trace_submit_ticks),
+               virtio_gpu_ticks_to_us(s.submit_trace_lock_wait_ticks),
+               s.submit_trace_resource_attach_count,
+               virtio_gpu_ticks_to_us(s.submit_trace_resource_attach_ticks),
+               virtio_gpu_ticks_to_us(s.submit_trace_async_prepare_ticks),
+               virtio_gpu_ticks_to_us(s.submit_trace_post_ticks),
+               s.submit_trace_first_submits, s.submit_trace_failures,
+               s.submit_trace_fence_calls,
+               virtio_gpu_ticks_to_us(s.submit_trace_fence_ticks),
+               s.submit_trace_fence_drain_calls,
+               virtio_gpu_ticks_to_us(s.submit_trace_fence_drain_ticks),
+               s.submit_trace_fence_failures,
+               s.submit_trace_wait_for_used_calls,
+               virtio_gpu_ticks_to_us(s.submit_trace_wait_for_used_ticks),
+               s.submit_trace_wait_for_used_max_us,
+               s.submit_trace_async_wait_progress_calls,
+               virtio_gpu_ticks_to_us(
+                   s.submit_trace_async_wait_progress_ticks),
+               s.async_make_room_calls,
+               virtio_gpu_ticks_to_us(s.submit_trace_async_make_room_ticks),
+               s.async_make_room_stalls,
+               virtio_gpu_ticks_to_us(s.async_make_room_wait_ticks),
+               s.async_make_room_max_wait_us);
+
+    for (;;) {
+        struct virtio_gpu_submit_trace_key key;
+        struct virtio_gpu_submit_trace_owner_counts delta;
+        int have = 0;
+
+        spin_lock(&g->lock);
+        for (int i = 0; i < VIRTIO_GPU_SUBMIT_TRACE_OWNER_SLOTS; i++) {
+            struct virtio_gpu_submit_trace_owner *o =
+                &g->submit_trace_owners[i];
+
+            if (!o->in_use || !virtio_gpu_submit_trace_owner_changed(o))
+                continue;
+            key = o->key;
+            memset(&delta, 0, sizeof(delta));
+            delta.submit_calls =
+                o->total.submit_calls - o->emitted.submit_calls;
+            delta.submit_ticks =
+                o->total.submit_ticks - o->emitted.submit_ticks;
+            delta.lock_wait_ticks =
+                o->total.lock_wait_ticks - o->emitted.lock_wait_ticks;
+            delta.attach_count =
+                o->total.attach_count - o->emitted.attach_count;
+            delta.attach_ticks =
+                o->total.attach_ticks - o->emitted.attach_ticks;
+            delta.async_prepare_ticks =
+                o->total.async_prepare_ticks -
+                o->emitted.async_prepare_ticks;
+            delta.post_ticks = o->total.post_ticks - o->emitted.post_ticks;
+            delta.make_room_calls =
+                o->total.make_room_calls - o->emitted.make_room_calls;
+            delta.make_room_stalls =
+                o->total.make_room_stalls - o->emitted.make_room_stalls;
+            delta.make_room_ticks =
+                o->total.make_room_ticks - o->emitted.make_room_ticks;
+            delta.make_room_wait_ticks =
+                o->total.make_room_wait_ticks -
+                o->emitted.make_room_wait_ticks;
+            delta.make_room_max_wait_ticks =
+                o->pending_make_room_max_wait_ticks;
+            delta.wait_progress_calls =
+                o->total.wait_progress_calls -
+                o->emitted.wait_progress_calls;
+            delta.wait_progress_ticks =
+                o->total.wait_progress_ticks -
+                o->emitted.wait_progress_ticks;
+            delta.wait_progress_max_ticks =
+                o->pending_wait_progress_max_ticks;
+            delta.wait_used_calls =
+                o->total.wait_used_calls - o->emitted.wait_used_calls;
+            delta.wait_used_ticks =
+                o->total.wait_used_ticks - o->emitted.wait_used_ticks;
+            delta.wait_used_max_ticks = o->pending_wait_used_max_ticks;
+            delta.posted = o->total.posted - o->emitted.posted;
+            delta.retired = o->total.retired - o->emitted.retired;
+            delta.first_submit =
+                o->total.first_submit - o->emitted.first_submit;
+            delta.failures = o->total.failures - o->emitted.failures;
+            delta.last_ret = o->total.last_ret;
+            delta.last_fence = o->total.last_fence;
+            o->emitted = o->total;
+            o->pending_make_room_max_wait_ticks = 0;
+            o->pending_wait_progress_max_ticks = 0;
+            o->pending_wait_used_max_ticks = 0;
+            have = 1;
+            break;
+        }
+        spin_unlock(&g->lock);
+        if (!have)
+            break;
+
+        printf("virtio-gpu-submit-owner-trace: owner_id=%lu owner_tgid=%d ctx_id=%u proc=%s debug=%s submit_calls=%lu submit_us=%lu lock_wait_us=%lu attach_count=%lu attach_us=%lu async_prepare_us=%lu post_us=%lu make_room_calls=%lu make_room_stalls=%lu make_room_us=%lu make_room_wait_us=%lu make_room_max_wait_us=%lu wait_progress_calls=%lu wait_progress_us=%lu wait_progress_max_us=%lu wait_used_calls=%lu wait_used_us=%lu wait_used_max_us=%lu posted=%lu retired=%lu first_submit=%lu failures=%lu last_ret=%d last_fence=%lu\n",
+               key.owner_id, key.owner_tgid, key.ctx_id, key.proc,
+               key.debug_name, delta.submit_calls,
+               virtio_gpu_ticks_to_us(delta.submit_ticks),
+               virtio_gpu_ticks_to_us(delta.lock_wait_ticks),
+               delta.attach_count,
+               virtio_gpu_ticks_to_us(delta.attach_ticks),
+               virtio_gpu_ticks_to_us(delta.async_prepare_ticks),
+               virtio_gpu_ticks_to_us(delta.post_ticks),
+               delta.make_room_calls, delta.make_room_stalls,
+               virtio_gpu_ticks_to_us(delta.make_room_ticks),
+               virtio_gpu_ticks_to_us(delta.make_room_wait_ticks),
+               virtio_gpu_ticks_to_us(delta.make_room_max_wait_ticks),
+               delta.wait_progress_calls,
+               virtio_gpu_ticks_to_us(delta.wait_progress_ticks),
+               virtio_gpu_ticks_to_us(delta.wait_progress_max_ticks),
+               delta.wait_used_calls,
+               virtio_gpu_ticks_to_us(delta.wait_used_ticks),
+               virtio_gpu_ticks_to_us(delta.wait_used_max_ticks),
+               delta.posted, delta.retired, delta.first_submit,
+               delta.failures, delta.last_ret, delta.last_fence);
+    }
+
+    spin_lock(&g->lock);
+    if (g->stats.submit_trace_owner_drops !=
+        g->stats.submit_trace_owner_emitted_drops) {
+        uint64 drops_delta = g->stats.submit_trace_owner_drops -
+            g->stats.submit_trace_owner_emitted_drops;
+        uint64 drops = g->stats.submit_trace_owner_drops;
+
+        g->stats.submit_trace_owner_emitted_drops =
+            g->stats.submit_trace_owner_drops;
+        spin_unlock(&g->lock);
+        printf("virtio-gpu-submit-owner-trace: drops_delta=%lu drops=%lu\n",
+               drops_delta, drops);
+    } else {
+        spin_unlock(&g->lock);
+    }
 }
 
 static uint32 virtio_gpu_cmdline_uint(const char *key, uint32 default_value,
@@ -2212,6 +2682,7 @@ static int virtio_gpu_async_validate_retire(struct virtio_gpu *g,
 
     if (ret == 0)
         virtio_gpu_count_command(g, a->type);
+    virtio_gpu_submit_trace_record_async_retire(g, a, ret == 0 ? 0 : -EIO);
     virtio_gpu_async_submit_free(a);
     return ret;
 }
@@ -2403,6 +2874,7 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
     int trace = virtio_gpu_submit_trace_enabled();
     uint64 trace_start = trace ? r_time() : 0;
     uint64 wait_start = 0;
+    uint64 wait_ticks = 0;
     int waited = 0;
     int ret = 0;
 
@@ -2431,11 +2903,13 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
         (void)virtio_gpu_async_reap_completed(g);
     }
     if (waited) {
-        uint64 ticks = r_time() - wait_start;
-        uint64 us = virtio_gpu_ticks_to_us(ticks);
+        uint64 us;
+
+        wait_ticks = r_time() - wait_start;
+        us = virtio_gpu_ticks_to_us(wait_ticks);
 
         spin_lock(&g->lock);
-        g->stats.async_make_room_wait_ticks += ticks;
+        g->stats.async_make_room_wait_ticks += wait_ticks;
         g->stats.async_make_room_last_wait_us = us;
         if (us > g->stats.async_make_room_max_wait_us)
             g->stats.async_make_room_max_wait_us = us;
@@ -2443,8 +2917,8 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
     }
 out:
     if (trace)
-        virtio_gpu_submit_trace_record_async_make_room(
-            g, r_time() - trace_start);
+        virtio_gpu_submit_trace_record_async_make_room_current(
+            g, r_time() - trace_start, wait_ticks, waited);
     return ret;
 }
 
@@ -2459,6 +2933,9 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
     struct virtio_gpu_queue *q = &g->ctrlq;
     uint32 base = a->desc_base;
     int intena;
+
+    if (virtio_gpu_submit_trace_enabled())
+        virtio_gpu_submit_trace_snapshot_slot(g, a, a->ctx_id);
 
     intena = spin_lock_irqsave(&q->lock);
     memset(&q->desc[base], 0,
@@ -2494,6 +2971,7 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
     spin_lock(&g->lock);
     virtio_gpu_count_async_posted_locked(g, a->type);
     spin_unlock(&g->lock);
+    virtio_gpu_submit_trace_record_async_post(g, a);
 }
 
 /*
