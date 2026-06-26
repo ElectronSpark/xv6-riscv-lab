@@ -1149,6 +1149,24 @@ static void gpu_syncobj_eventfd_callback(struct dma_fence *fence, void *arg)
     }
 }
 
+static void gpu_syncobj_eventfd_trace(
+    const struct fb_gpu_render_owner *owner,
+    const struct drm_syncobj_eventfd_compat *req, int fd_is_eventfd,
+    int syncobj_exists, int state_has_fence, int ret,
+    const char *reason_key, const char *reason)
+{
+    if (!chrome_drm_trace_owner(owner) || req == NULL)
+        return;
+
+    printf("chrome-drm-detail: syncobj-eventfd owner=%lu:%d ret=%d "
+           "handle=%u flags=0x%x point=%lu fd=%d pad=%u "
+           "fd_is_eventfd=%d syncobj_exists=%d state_has_fence=%d "
+           "%s=%s\n",
+           owner->id, owner->tgid, ret, req->handle, req->flags,
+           req->point, req->fd, req->pad, fd_is_eventfd,
+           syncobj_exists, state_has_fence, reason_key, reason);
+}
+
 static int gpu_syncobj_eventfd(struct fb_gpu_render_owner *owner, uint64 arg)
 {
     struct drm_syncobj_eventfd_compat req;
@@ -1158,26 +1176,51 @@ static int gpu_syncobj_eventfd(struct fb_gpu_render_owner *owner, uint64 arg)
     struct vfs_file *event_file = NULL;
     struct dma_fence *fence = NULL;
     uint64 point;
+    int fd_is_eventfd = -1;
+    int syncobj_exists = -1;
+    int state_has_fence = -1;
+    const char *reason_key = "reason";
+    const char *reason = "ok";
     int ret = 0;
 
     if (owner == NULL)
         return -EBADF;
-    if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-        return -EFAULT;
-    if ((req.flags & ~DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE) != 0 ||
-        req.pad != 0 || req.fd < 0)
-        return -EINVAL;
-    event_file = vfs_fdtable_get_file(current->fdtable, req.fd);
-    if (event_file == NULL)
-        return -EBADF;
-    if (!eventfd_file_is_eventfd(event_file)) {
-        vfs_fput(event_file);
-        return -EINVAL;
+    memset(&req, 0, sizeof(req));
+    if (either_copyin(&req, 1, arg, sizeof(req)) < 0) {
+        ret = -EFAULT;
+        reason_key = "reject_reason";
+        reason = "copyin";
+        goto out_trace;
     }
+    if ((req.flags & ~DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE) != 0 ||
+        req.pad != 0 || req.fd < 0) {
+        ret = -EINVAL;
+        reason_key = "reject_reason";
+        reason = "invalid_args";
+        goto out_trace;
+    }
+    event_file = vfs_fdtable_get_file(current->fdtable, req.fd);
+    if (event_file == NULL) {
+        fd_is_eventfd = 0;
+        ret = -EBADF;
+        reason_key = "reject_reason";
+        reason = "fd_lookup";
+        goto out_trace;
+    }
+    if (!eventfd_file_is_eventfd(event_file)) {
+        fd_is_eventfd = 0;
+        ret = -EINVAL;
+        reason_key = "reject_reason";
+        reason = "non_eventfd";
+        goto out_cleanup;
+    }
+    fd_is_eventfd = 1;
     waiter = kvmalloc(sizeof(*waiter));
     if (waiter == NULL) {
-        vfs_fput(event_file);
-        return -ENOMEM;
+        ret = -ENOMEM;
+        reason_key = "reject_reason";
+        reason = "alloc_waiter";
+        goto out_cleanup;
     }
     memset(waiter, 0, sizeof(*waiter));
     list_entry_init(&waiter->node);
@@ -1186,19 +1229,35 @@ static int gpu_syncobj_eventfd(struct fb_gpu_render_owner *owner, uint64 arg)
     spin_lock(&fb_state.lock);
     obj = gpu_syncobj_lookup_locked(req.handle, owner);
     state = obj != NULL ? gpu_syncobj_state_locked(obj->state_index) : NULL;
+    syncobj_exists = obj != NULL;
+    state_has_fence = state != NULL && state->fence != NULL;
     if (obj == NULL || state == NULL) {
         ret = -ENOENT;
+        reason_key = "reject_reason";
+        reason = obj == NULL ? "syncobj_missing" : "syncobj_state_missing";
     } else if ((req.flags & DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE) != 0 &&
                state->fence != NULL) {
         ret = eventfd_signal_file(event_file, 1);
+        if (ret != 0) {
+            reason_key = "reject_reason";
+            reason = "eventfd_signal";
+        }
     } else if (gpu_syncobj_state_ready_locked(state, point)) {
         ret = eventfd_signal_file(event_file, 1);
+        if (ret != 0) {
+            reason_key = "reject_reason";
+            reason = "eventfd_signal";
+        }
     } else if (state->fence == NULL) {
         ret = -EAGAIN;
+        reason_key = "reject_reason";
+        reason = "no_fence";
     } else {
         fence = dma_fence_get(state->fence);
         if (fence == NULL) {
             ret = -ENOMEM;
+            reason_key = "reject_reason";
+            reason = "fence_ref";
         } else {
             waiter->fence = fence;
             waiter->event_file = event_file;
@@ -1207,20 +1266,32 @@ static int gpu_syncobj_eventfd(struct fb_gpu_render_owner *owner, uint64 arg)
                                          waiter);
             if (ret == -ENOENT) {
                 ret = eventfd_signal_file(event_file, 1);
+                if (ret != 0) {
+                    reason_key = "reject_reason";
+                    reason = "eventfd_signal";
+                }
             } else if (ret == 0) {
                 list_node_push(&state->eventfd_waiters, waiter, node);
                 waiter = NULL;
                 event_file = NULL;
                 fence = NULL;
+            } else {
+                reason_key = "reject_reason";
+                reason = "callback_add";
             }
         }
     }
     spin_unlock(&fb_state.lock);
+
+out_cleanup:
     if (event_file != NULL)
         vfs_fput(event_file);
     dma_fence_put(fence);
     if (waiter != NULL)
         kvfree(waiter);
+out_trace:
+    gpu_syncobj_eventfd_trace(owner, &req, fd_is_eventfd, syncobj_exists,
+                              state_has_fence, ret, reason_key, reason);
     return ret;
 }
 
