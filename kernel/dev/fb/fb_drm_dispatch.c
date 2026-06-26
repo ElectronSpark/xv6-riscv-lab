@@ -9,6 +9,16 @@ int virtio_gpu_user_creatable_capset_ids(uint64 *ids);
 int virtio_gpu_user_capset_query_only(uint32 capset_id);
 int virtio_gpu_user_resource_blob_supported(void);
 
+static uint64 gpu_drm_ticks_to_us(uint64 ticks)
+{
+    extern uint64 __timebase_frequency;
+    uint64 freq = __timebase_frequency ? __timebase_frequency : 10000000UL;
+
+    if (ticks <= (uint64)-1 / 1000000ULL)
+        return ticks * 1000000ULL / freq;
+    return ticks / (freq / 1000000ULL ? freq / 1000000ULL : 1ULL);
+}
+
 static int chrome_drm_fence_trace_enabled(void)
 {
     static int initialized;
@@ -165,22 +175,34 @@ static void gpu_drm_trace_execbuffer_fence_wait(
 static int gpu_drm_execbuffer_wait_fence_fd(
     const struct fb_gpu_render_owner *owner, int32 fd)
 {
-    struct vfs_file *file;
+    struct vfs_file *file = NULL;
+    const char *kind = "none";
+    uint64 start_ticks = r_time();
     int ret = 0;
 
-    if (fd < 0)
-        return -EINVAL;
-    if (current == NULL || current->fdtable == NULL)
-        return -EBADF;
+    if (fd < 0) {
+        ret = -EINVAL;
+        kind = "invalid-fd";
+        goto out;
+    }
+    if (current == NULL || current->fdtable == NULL) {
+        ret = -EBADF;
+        kind = "no-fdtable";
+        goto out;
+    }
     file = vfs_fdtable_get_file(current->fdtable, fd);
-    if (file == NULL)
-        return -EBADF;
+    if (file == NULL) {
+        ret = -EBADF;
+        kind = "bad-fd";
+        goto out;
+    }
 
     if (file->ops == &fb_fence_file_ops && file->private_data != NULL) {
         struct fb_gpu_fence_file *fence_file =
             (struct fb_gpu_fence_file *)file->private_data;
         uint64 signaled = 0;
 
+        kind = "fb-fence";
         spin_lock(&fb_state.lock);
         ret = fb_gpu_fence_file_wait_locked(fence_file);
         signaled = fb_gpu_fence_file_signaled_locked(fence_file);
@@ -196,6 +218,7 @@ static int gpu_drm_execbuffer_wait_fence_fd(
             (struct fb_gpu_virgl_fence_file *)file->private_data;
         uint64 signaled = 0;
 
+        kind = "virgl-fence";
         ret = gpu_drm_wait_virtio_fence(fence_file->fence, &signaled);
         if (ret != 0)
             gpu_drm_trace_execbuffer_fence_wait(
@@ -206,13 +229,16 @@ static int gpu_drm_execbuffer_wait_fence_fd(
         struct fb_gpu_syncobj_file *sync_file =
             (struct fb_gpu_syncobj_file *)file->private_data;
 
+        kind = "sync-file";
         if (sync_file->kind != FB_GPU_SYNCOBJ_FD_SYNC_FILE) {
             ret = -EINVAL;
+            kind = "sync-file-kind";
         } else if (sync_file->virtio_fence != 0 ||
                    (sync_file->fence != NULL &&
                     dma_fence_get_virtio_fence(sync_file->fence) != 0)) {
             uint64 signaled = 0;
 
+            kind = "sync-file-virtio";
             if (sync_file->virtio_fence == 0)
                 sync_file->virtio_fence =
                     dma_fence_get_virtio_fence(sync_file->fence);
@@ -232,6 +258,7 @@ static int gpu_drm_execbuffer_wait_fence_fd(
                    sync_file->reservation_fence != 0) {
             uint64 signaled = 0;
 
+            kind = "sync-file-resv";
             spin_lock(&fb_state.lock);
             ret = fb_ttm_resv_wait_fence_locked(
                 sync_file->reservation_gem, sync_file->reservation_fence);
@@ -251,10 +278,12 @@ static int gpu_drm_execbuffer_wait_fence_fd(
                     sync_file->snapshot_signaled);
         } else if (sync_file->snapshot_signaled ||
                    dma_fence_is_signaled(sync_file->fence)) {
+            kind = "sync-file-signaled";
             ret = 0;
         } else if (sync_file->fence != NULL) {
             int status = fb_syncobj_file_status(sync_file);
 
+            kind = "sync-file-dma";
             if (status > 0)
                 ret = 0;
             else if (status < 0)
@@ -270,6 +299,7 @@ static int gpu_drm_execbuffer_wait_fence_fd(
                     sync_file->snapshot_signaled);
         } else {
             ret = -EINVAL;
+            kind = "sync-file-invalid";
             gpu_drm_trace_execbuffer_fence_wait(
                 owner, fd, "sync-file-invalid", ret, 0, 0,
                 sync_file->virtio_fence,
@@ -279,11 +309,25 @@ static int gpu_drm_execbuffer_wait_fence_fd(
         }
     } else {
         ret = -EINVAL;
+        kind = "unknown";
         gpu_drm_trace_execbuffer_fence_wait(
             owner, fd, "unknown", ret, 0, 0, 0, 0, 0, 0);
     }
 
-    vfs_fput(file);
+out:
+    if (file != NULL)
+        vfs_fput(file);
+    if (chrome_drm_trace_owner(owner) || chrome_drm_fence_trace_enabled()) {
+        uint64 total_ticks = r_time() - start_ticks;
+
+        printf("chrome-drm-detail: execbuffer-fence-fd-wait-time "
+               "owner=%lu:%d pid=%d proc=%s fd=%d kind=%s ret=%d "
+               "total_us=%lu total_ticks=%lu\n",
+               owner ? owner->id : 0, owner ? owner->tgid : -1,
+               current ? current->pid : -1, current ? current->name : "?",
+               fd, kind, ret, gpu_drm_ticks_to_us(total_ticks),
+               total_ticks);
+    }
     return ret;
 }
 
@@ -892,41 +936,84 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_VIRTGPU_TRANSFER_TO_HOST:
         return gpu_drm_virtgpu_transfer(owner, arg, 0);
     case DRM_IOCTL_VIRTGPU_WAIT: {
-        struct drm_virtgpu_3d_wait_compat req;
+        struct drm_virtgpu_3d_wait_compat req = {0};
         uint32 resource_id = 0;
         uint64 resource_owner_id = 0;
         pid_t resource_owner_tgid = 0;
         uint64 wait_for = 0;
         uint64 signaled = 0;
+        uint64 total_start = r_time();
+        uint64 resolve_ticks = 0;
+        uint64 fence_lookup_ticks = 0;
+        uint64 fence_wait_ticks = 0;
+        uint64 phase_start;
+        int traced = chrome_drm_trace_owner(owner);
         int ret;
-        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-            return -EFAULT;
-        if ((req.flags & ~VIRTGPU_WAIT_NOWAIT) != 0)
-            return -EINVAL;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0) {
+            ret = -EFAULT;
+            goto virtgpu_wait_done;
+        }
+        if ((req.flags & ~VIRTGPU_WAIT_NOWAIT) != 0) {
+            ret = -EINVAL;
+            goto virtgpu_wait_done;
+        }
+        phase_start = r_time();
         ret = gpu_drm_virtgpu_resource_for_bo_handle(owner, req.handle,
                                                      &resource_id,
                                                      &resource_owner_id,
                                                      &resource_owner_tgid,
                                                      NULL);
+        resolve_ticks = r_time() - phase_start;
         if (ret != 0)
-            return ret;
+            goto virtgpu_wait_done;
+        phase_start = r_time();
         ret = virtio_gpu_user_resource_last_submit_fence(resource_owner_id,
                                                         resource_owner_tgid,
                                                         resource_id,
                                                         &wait_for);
+        fence_lookup_ticks = r_time() - phase_start;
         if (ret != 0)
-            return ret;
-        if (wait_for == 0)
-            return 0;
+            goto virtgpu_wait_done;
+        if (wait_for == 0) {
+            ret = 0;
+            goto virtgpu_wait_done;
+        }
+        phase_start = r_time();
         if (req.flags & VIRTGPU_WAIT_NOWAIT)
             ret = virtio_gpu_user_fence(wait_for, 0, &signaled);
         else
             ret = gpu_drm_wait_virtio_fence(wait_for, &signaled);
+        fence_wait_ticks = r_time() - phase_start;
         if (ret != 0)
-            return ret;
-        if (signaled < wait_for)
-            return (req.flags & VIRTGPU_WAIT_NOWAIT) ? -EBUSY : -EAGAIN;
-        return 0;
+            goto virtgpu_wait_done;
+        if (signaled < wait_for) {
+            ret = (req.flags & VIRTGPU_WAIT_NOWAIT) ? -EBUSY : -EAGAIN;
+            goto virtgpu_wait_done;
+        }
+        ret = 0;
+virtgpu_wait_done:
+        if (traced) {
+            uint64 total_ticks = r_time() - total_start;
+
+            printf("chrome-drm-detail: virtgpu-wait-time owner=%lu:%d "
+                   "pid=%d proc=%s handle=%u flags=0x%x resource=%u "
+                   "resource_owner=%lu:%d wait_for=%lu signaled=%lu ret=%d "
+                   "total_us=%lu resolve_us=%lu fence_lookup_us=%lu "
+                   "fence_wait_us=%lu total_ticks=%lu resolve_ticks=%lu "
+                   "fence_lookup_ticks=%lu fence_wait_ticks=%lu\n",
+                   owner ? owner->id : 0, owner ? owner->tgid : -1,
+                   current ? current->pid : -1,
+                   current ? current->name : "?", req.handle, req.flags,
+                   resource_id, resource_owner_id, resource_owner_tgid,
+                   wait_for, signaled, ret,
+                   gpu_drm_ticks_to_us(total_ticks),
+                   gpu_drm_ticks_to_us(resolve_ticks),
+                   gpu_drm_ticks_to_us(fence_lookup_ticks),
+                   gpu_drm_ticks_to_us(fence_wait_ticks),
+                   total_ticks, resolve_ticks, fence_lookup_ticks,
+                   fence_wait_ticks);
+        }
+        return ret;
     }
     case DRM_IOCTL_VIRTGPU_GET_CAPS: {
         struct drm_virtgpu_get_caps_compat req;
@@ -994,72 +1081,111 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         return 0;
     }
     case DRM_IOCTL_VIRTGPU_EXECBUFFER: {
-        struct drm_virtgpu_execbuffer_compat req;
-        uint32 *cmds;
+        struct drm_virtgpu_execbuffer_compat req = {0};
+        uint32 *cmds = NULL;
         uint32 *handles = NULL;
         uint32 *resources = NULL;
         uint32 alloc_len = PGSIZE;
         uint32 submit_flags = 0;
         uint32 first_submit = 0;
+        uint32 first_word = 0;
         int order = 0;
         uint64 fence = 0, signaled = 0;
+        uint64 total_start = r_time();
+        uint64 ensure_ticks = 0;
+        uint64 in_fence_ticks = 0;
+        uint64 cmd_copy_ticks = 0;
+        uint64 bo_resolve_ticks = 0;
+        uint64 submit_ticks = 0;
+        uint64 out_fence_ticks = 0;
+        uint64 total_work_ticks = 0;
+        uint64 trace_log_ticks = 0;
+        uint64 phase_start;
+        uint64 trace_start;
         int out_fence_fd = -1;
+        int submit_ret = 0;
+        int submit_attempted = 0;
+        int traced = chrome_drm_trace_owner(owner);
         int ret;
-        if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
-            return -EFAULT;
+        if (either_copyin(&req, 1, arg, sizeof(req)) < 0) {
+            ret = -EFAULT;
+            goto execbuffer_done;
+        }
+        phase_start = r_time();
         ret = gpu_owner_ensure_context(owner);
+        ensure_ticks = r_time() - phase_start;
         if (ret != 0)
-            return ret;
-        if ((req.flags & ~VIRTGPU_EXECBUF_SUPPORTED_FLAGS) != 0)
-            return -EINVAL;
-        if ((req.flags & VIRTGPU_EXECBUF_RING_IDX) != 0 && req.ring_idx != 0)
-            return -EOPNOTSUPP;
+            goto execbuffer_done;
+        if ((req.flags & ~VIRTGPU_EXECBUF_SUPPORTED_FLAGS) != 0) {
+            ret = -EINVAL;
+            goto execbuffer_done;
+        }
+        if ((req.flags & VIRTGPU_EXECBUF_RING_IDX) != 0 && req.ring_idx != 0) {
+            ret = -EOPNOTSUPP;
+            goto execbuffer_done;
+        }
         if (req.syncobj_stride != 0 || req.num_in_syncobjs != 0 ||
             req.num_out_syncobjs != 0 || req.in_syncobjs != 0 ||
-            req.out_syncobjs != 0)
-            return -EOPNOTSUPP;
+            req.out_syncobjs != 0) {
+            ret = -EOPNOTSUPP;
+            goto execbuffer_done;
+        }
         if ((req.flags & VIRTGPU_EXECBUF_FENCE_FD_IN) != 0) {
+            phase_start = r_time();
             ret = gpu_drm_execbuffer_wait_fence_fd(owner, req.fence_fd);
+            in_fence_ticks = r_time() - phase_start;
             if (ret != 0)
-                return ret;
+                goto execbuffer_done;
         }
         if (req.command == 0 || req.size == 0 || req.size > PGSIZE * 64 ||
-            (req.size & 3) != 0)
-            return -EINVAL;
+            (req.size & 3) != 0) {
+            ret = -EINVAL;
+            goto execbuffer_done;
+        }
         if ((req.num_bo_handles != 0 && req.bo_handles == 0) ||
-            req.num_bo_handles > 4096)
-            return -EINVAL;
+            req.num_bo_handles > 4096) {
+            ret = -EINVAL;
+            goto execbuffer_done;
+        }
 
         while (alloc_len < req.size) {
-            if (order >= PAGE_BUDDY_MAX_ORDER)
-                return -ENOMEM;
+            if (order >= PAGE_BUDDY_MAX_ORDER) {
+                ret = -ENOMEM;
+                goto execbuffer_done;
+            }
             order++;
             alloc_len <<= 1;
         }
 
+        phase_start = r_time();
         cmds = page_alloc(order, PAGE_TYPE_ANON);
-        if (cmds == NULL)
-            return -ENOMEM;
-        if (either_copyin(cmds, 1, req.command, req.size) < 0) {
-            page_free(cmds, order);
-            return -EFAULT;
+        if (cmds == NULL) {
+            cmd_copy_ticks = r_time() - phase_start;
+            ret = -ENOMEM;
+            goto execbuffer_done;
         }
+        if (either_copyin(cmds, 1, req.command, req.size) < 0) {
+            cmd_copy_ticks = r_time() - phase_start;
+            ret = -EFAULT;
+            goto execbuffer_done;
+        }
+        first_word = cmds[0];
+        cmd_copy_ticks = r_time() - phase_start;
         if (req.num_bo_handles != 0) {
             uint64 bytes = (uint64)req.num_bo_handles * sizeof(uint32);
 
+            phase_start = r_time();
             handles = kvmalloc(bytes);
             resources = kvmalloc(bytes);
             if (handles == NULL || resources == NULL) {
-                kvfree(handles);
-                kvfree(resources);
-                page_free(cmds, order);
-                return -ENOMEM;
+                bo_resolve_ticks = r_time() - phase_start;
+                ret = -ENOMEM;
+                goto execbuffer_done;
             }
             if (either_copyin(handles, 1, req.bo_handles, bytes) < 0) {
-                kvfree(handles);
-                kvfree(resources);
-                page_free(cmds, order);
-                return -EFAULT;
+                bo_resolve_ticks = r_time() - phase_start;
+                ret = -EFAULT;
+                goto execbuffer_done;
             }
             for (uint32 i = 0; i < req.num_bo_handles; i++) {
                 int imported = 0;
@@ -1067,10 +1193,8 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                 ret = gpu_drm_virtgpu_resource_for_bo_handle(
                     owner, handles[i], &resources[i], NULL, NULL, &imported);
                 if (ret != 0) {
-                    kvfree(handles);
-                    kvfree(resources);
-                    page_free(cmds, order);
-                    return ret;
+                    bo_resolve_ticks = r_time() - phase_start;
+                    goto execbuffer_done;
                 }
                 if (imported) {
                     ret = virtio_gpu_user_resource_attach(owner->id,
@@ -1078,36 +1202,28 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                                                           owner->default_ctx_id,
                                                           resources[i], 1);
                     if (ret != 0) {
-                        kvfree(handles);
-                        kvfree(resources);
-                        page_free(cmds, order);
-                        return ret;
+                        bo_resolve_ticks = r_time() - phase_start;
+                        goto execbuffer_done;
                     }
                 }
             }
+            bo_resolve_ticks = r_time() - phase_start;
         }
         if (gpu_drm_execbuffer_async_allowed())
             submit_flags |= FB_GPU_VIRGL_SUBMIT_ASYNC;
         submit_flags |= FB_GPU_VIRGL_SUBMIT_ALLOW_IMPORTED_RESOURCES;
+        phase_start = r_time();
         ret = virtio_gpu_user_submit(owner->id, owner->tgid,
                                      owner->default_ctx_id, submit_flags, cmds,
                                      req.size / sizeof(uint32), resources,
                                      req.num_bo_handles, &fence, &signaled,
                                      &first_submit);
-        if (ret == 0 && first_submit)
-            gpu_drm_trace_context_attrib(
-                owner, "first-submit-execbuffer", owner->default_ctx_id,
-                submit_flags, req.flags, req.size / sizeof(uint32),
-                req.num_bo_handles, cmds[0], fence, signaled, ret);
-        if (chrome_drm_trace_owner(owner))
-            printf("chrome-drm-detail: execbuffer-submit owner=%lu:%d "
-                   "ctx=%u flags=0x%x size=%u words=%u bo_count=%u "
-                   "first=0x%x ret=%d fence=%lu signaled=%lu\n",
-                   owner->id, owner->tgid, owner->default_ctx_id,
-                   req.flags, req.size, req.size / (uint32)sizeof(uint32),
-                   req.num_bo_handles, cmds[0], ret, fence, signaled);
+        submit_ticks = r_time() - phase_start;
+        submit_ret = ret;
+        submit_attempted = 1;
         if (ret == 0 &&
             (req.flags & VIRTGPU_EXECBUF_FENCE_FD_OUT) != 0) {
+            phase_start = r_time();
             ret = gpu_drm_execbuffer_export_fence_fd(fence,
                                                      signaled >= fence,
                                                      &out_fence_fd);
@@ -1118,10 +1234,64 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
                     ret = -EFAULT;
                 }
             }
+            out_fence_ticks = r_time() - phase_start;
+        }
+execbuffer_done:
+        total_work_ticks = r_time() - total_start;
+        if (submit_attempted && submit_ret == 0 && first_submit) {
+            trace_start = r_time();
+            gpu_drm_trace_context_attrib(
+                owner, "first-submit-execbuffer", owner->default_ctx_id,
+                submit_flags, req.flags, req.size / sizeof(uint32),
+                req.num_bo_handles, first_word, fence, signaled, submit_ret);
+            trace_log_ticks += r_time() - trace_start;
+        }
+        if (submit_attempted && chrome_drm_trace_owner(owner)) {
+            trace_start = r_time();
+            printf("chrome-drm-detail: execbuffer-submit owner=%lu:%d "
+                   "ctx=%u flags=0x%x size=%u words=%u bo_count=%u "
+                   "first=0x%x ret=%d fence=%lu signaled=%lu\n",
+                   owner->id, owner->tgid, owner->default_ctx_id,
+                   req.flags, req.size, req.size / (uint32)sizeof(uint32),
+                   req.num_bo_handles, first_word, submit_ret, fence,
+                   signaled);
+            trace_log_ticks += r_time() - trace_start;
+        }
+        if (traced) {
+            printf("chrome-drm-detail: execbuffer-time owner=%lu:%d "
+                   "pid=%d proc=%s ctx=%u flags=0x%x submit_flags=0x%x "
+                   "size=%u words=%u bo_count=%u first=0x%x fence_fd=%d "
+                   "out_fence_fd=%d fence=%lu signaled=%lu ret=%d "
+                   "total_us=%lu ensure_us=%lu in_fence_us=%lu "
+                   "cmd_copy_us=%lu bo_resolve_us=%lu submit_us=%lu "
+                   "out_fence_us=%lu trace_log_us=%lu total_ticks=%lu "
+                   "ensure_ticks=%lu "
+                   "in_fence_ticks=%lu cmd_copy_ticks=%lu "
+                   "bo_resolve_ticks=%lu submit_ticks=%lu "
+                   "out_fence_ticks=%lu trace_log_ticks=%lu\n",
+                   owner ? owner->id : 0, owner ? owner->tgid : -1,
+                   current ? current->pid : -1,
+                   current ? current->name : "?",
+                   owner ? owner->default_ctx_id : 0, req.flags, submit_flags,
+                   req.size, req.size / (uint32)sizeof(uint32),
+                   req.num_bo_handles, first_word, req.fence_fd,
+                   out_fence_fd, fence, signaled, ret,
+                   gpu_drm_ticks_to_us(total_work_ticks),
+                   gpu_drm_ticks_to_us(ensure_ticks),
+                   gpu_drm_ticks_to_us(in_fence_ticks),
+                   gpu_drm_ticks_to_us(cmd_copy_ticks),
+                   gpu_drm_ticks_to_us(bo_resolve_ticks),
+                   gpu_drm_ticks_to_us(submit_ticks),
+                   gpu_drm_ticks_to_us(out_fence_ticks),
+                   gpu_drm_ticks_to_us(trace_log_ticks),
+                   total_work_ticks, ensure_ticks, in_fence_ticks,
+                   cmd_copy_ticks, bo_resolve_ticks, submit_ticks,
+                   out_fence_ticks, trace_log_ticks);
         }
         kvfree(handles);
         kvfree(resources);
-        page_free(cmds, order);
+        if (cmds != NULL)
+            page_free(cmds, order);
         return ret;
     }
     case DRM_IOCTL_NOUVEAU_GETPARAM:
