@@ -3,6 +3,7 @@
 #include "defs.h"
 #include <mm/slab.h>
 #include <mm/vm.h>
+#include <mm/kasan.h>
 
 /*
  * Performance note (tmpfs I/O optimization):
@@ -30,6 +31,9 @@
 void *memset(void *dst, int c, size_t n) {
     unsigned char *d = (unsigned char *)dst;
     unsigned char cc = (unsigned char)c;
+
+    kasan_check_range(dst, n, 1,
+                      (unsigned long)__builtin_return_address(0));
 
     /* Small fills: byte-at-a-time. */
     if (n < 16) {
@@ -95,6 +99,11 @@ int memcmp(const void *v1, const void *v2, size_t n) {
     const char *s1 = v1;
     const char *s2 = v2;
 
+    kasan_check_range(v1, n, 0,
+                      (unsigned long)__builtin_return_address(0));
+    kasan_check_range(v2, n, 0,
+                      (unsigned long)__builtin_return_address(0));
+
     while (n-- > 0) {
         if (*s1 != *s2) {
             return *s1 - *s2;
@@ -104,12 +113,17 @@ int memcmp(const void *v1, const void *v2, size_t n) {
     return 0;
 }
 
-void *memmove(void *dst, const void *src, size_t n) {
+static void *__memmove_checked(void *dst, const void *src, size_t n,
+                               unsigned long ret_ip)
+{
     if (n == 0)
         return dst;
 
     unsigned char *d = dst;
     const unsigned char *s = src;
+
+    kasan_check_range(src, n, 0, ret_ip);
+    kasan_check_range(dst, n, 1, ret_ip);
 
     if (s < d && s + n > d) {
         /* Backward copy for overlapping regions where src < dst. */
@@ -224,9 +238,15 @@ void *memmove(void *dst, const void *src, size_t n) {
     return dst;
 }
 
+void *memmove(void *dst, const void *src, size_t n) {
+    return __memmove_checked(dst, src, n,
+                             (unsigned long)__builtin_return_address(0));
+}
+
 // memcpy exists to placate GCC.  Use memmove.
 void *memcpy(void *dst, const void *src, size_t n) {
-    return memmove(dst, src, n);
+    return __memmove_checked(dst, src, n,
+                             (unsigned long)__builtin_return_address(0));
 }
 
 int strcmp(const char *p, const char *q) {

@@ -34,6 +34,7 @@ uint64 platform_default_mem_base(void)
 
 int platform_early_memory(void *boot_data, uint64 *base_out, uint64 *size_out)
 {
+    fdt_early_scan_cmdline(boot_data);
     return fdt_early_scan_memory(boot_data, base_out, size_out);
 }
 

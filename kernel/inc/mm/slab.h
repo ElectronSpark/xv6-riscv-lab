@@ -34,6 +34,9 @@ uint64 slab_dump_all(int detailed);
 void *slab_alloc(slab_cache_t *cache);
 void slab_free(void *obj);
 void slab_free_noshrink(void *obj);
+void slab_kasan_record_alloc_size(const void *obj, size_t requested);
+int slab_kasan_check_range(const void *addr, size_t size, int write,
+                           unsigned long ret_ip);
 
 // kalloc.c
 slab_t *slab_t_desc_alloc(void);

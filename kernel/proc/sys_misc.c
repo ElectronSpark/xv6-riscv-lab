@@ -27,9 +27,12 @@
 #include "timer/timer.h"
 #include "timer/goldfish_rtc.h"
 #include "proc/pgroup.h"
+#include "proc/cred.h"
 #include "vfs/file.h"
 #include "smp/percpu.h"
 #include "proc/chrome_lifecycle.h"
+#include "klog.h"
+#include <mm/slab.h>
 
 /* Forward declarations for arg helpers */
 void argint(int n, int *ip);
@@ -2478,7 +2481,79 @@ uint64 sys_ptrace(void)
 #define LINUX_NODEV_STUB(name) \
     uint64 sys_##name(void) { return (uint64)-ENODEV; }
 
-LINUX_PRIVILEGED_STUB(syslog)
+#define SYSLOG_ACTION_CLOSE 0
+#define SYSLOG_ACTION_OPEN 1
+#define SYSLOG_ACTION_READ 2
+#define SYSLOG_ACTION_READ_ALL 3
+#define SYSLOG_ACTION_READ_CLEAR 4
+#define SYSLOG_ACTION_CLEAR 5
+#define SYSLOG_ACTION_CONSOLE_OFF 6
+#define SYSLOG_ACTION_CONSOLE_ON 7
+#define SYSLOG_ACTION_CONSOLE_LEVEL 8
+#define SYSLOG_ACTION_SIZE_UNREAD 9
+#define SYSLOG_ACTION_SIZE_BUFFER 10
+
+uint64 sys_syslog(void)
+{
+    int type;
+    uint64 ubuf;
+    int len;
+
+    argint(0, &type);
+    argaddr(1, &ubuf);
+    argint(2, &len);
+
+    if (!capable())
+        return (uint64)-EPERM;
+
+    switch (type) {
+    case SYSLOG_ACTION_CLOSE:
+    case SYSLOG_ACTION_OPEN:
+    case SYSLOG_ACTION_CONSOLE_OFF:
+    case SYSLOG_ACTION_CONSOLE_ON:
+    case SYSLOG_ACTION_CONSOLE_LEVEL:
+        return 0;
+    case SYSLOG_ACTION_CLEAR:
+        klog_clear();
+        return 0;
+    case SYSLOG_ACTION_SIZE_UNREAD:
+        return klog_size();
+    case SYSLOG_ACTION_SIZE_BUFFER:
+        return klog_capacity();
+    case SYSLOG_ACTION_READ:
+    case SYSLOG_ACTION_READ_ALL:
+    case SYSLOG_ACTION_READ_CLEAR:
+        break;
+    default:
+        return (uint64)-EINVAL;
+    }
+
+    if (len < 0 || (len > 0 && ubuf == 0))
+        return (uint64)-EINVAL;
+    if (len == 0)
+        return 0;
+
+    size_t max = (size_t)len;
+    if (max > klog_capacity())
+        max = klog_capacity();
+
+    char *buf = kvmalloc(max);
+    if (buf == NULL)
+        return (uint64)-ENOMEM;
+
+    size_t n = klog_snapshot(buf, max, NULL);
+    int ret = 0;
+    if (n != 0 && either_copyout(1, ubuf, buf, n) < 0)
+        ret = -EFAULT;
+    kvfree(buf);
+
+    if (ret < 0)
+        return (uint64)ret;
+    if (type == SYSLOG_ACTION_READ_CLEAR)
+        klog_clear();
+    return n;
+}
+
 LINUX_INVALID_STUB(uselib)
 LINUX_INVALID_STUB(ustat)
 LINUX_INVALID_STUB(sysfs)

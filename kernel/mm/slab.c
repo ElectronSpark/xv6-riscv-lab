@@ -76,6 +76,8 @@
 #include "slab_private.h"
 #include <smp/percpu.h>
 #include <mm/shrinker.h>
+#include <mm/kasan.h>
+#include <mm/kmemleak.h>
 
 // ============================================================================
 // Global Slab Cache Registry
@@ -308,12 +310,19 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     slab->page = page;
     slab->state = SLAB_STATE_DEQUEUED;
     slab->bitmap = NULL;
+    slab->bitmap_order = 0;
+    slab->kasan_req_size = NULL;
+    slab->kasan_req_order = 0;
     __atomic_store_n(&slab->cpu_id, -1, __ATOMIC_RELEASE); // Initially unowned
     list_entry_init(&slab->list_entry);
 
     // Allocate bitmap if bitmap tracking is enabled
     if (bitmap_size > 0) {
-        slab->bitmap = kmm_alloc(bitmap_size * sizeof(uint64));
+        size_t bitmap_bytes = bitmap_size * sizeof(uint64);
+        uint16 bitmap_order = 0;
+        while ((PGSIZE << bitmap_order) < bitmap_bytes)
+            bitmap_order++;
+        slab->bitmap = page_alloc(bitmap_order, PAGE_TYPE_ANON);
         if (slab->bitmap == NULL) {
             // Failed to allocate bitmap, cleanup and return
             if ((uint64)slab != (uint64)page_base) {
@@ -322,10 +331,32 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
             __page_free(page, order);
             return NULL;
         }
+        slab->bitmap_order = bitmap_order;
         // Initialize bitmap to all zeros (all objects free)
-        for (uint32 i = 0; i < bitmap_size; i++) {
-            slab->bitmap[i] = 0;
+        memset(slab->bitmap, 0, PGSIZE << bitmap_order);
+    }
+
+    if (kasan_config_enabled() && obj_num > 0) {
+        size_t req_bytes = (size_t)obj_num * sizeof(uint16);
+        uint16 req_order = 0;
+
+        while ((PGSIZE << req_order) < req_bytes)
+            req_order++;
+        slab->kasan_req_size = page_alloc(req_order, PAGE_TYPE_ANON);
+        if (slab->kasan_req_size == NULL) {
+            if (slab->bitmap != NULL) {
+                page_free(slab->bitmap, slab->bitmap_order);
+                slab->bitmap = NULL;
+                slab->bitmap_order = 0;
+            }
+            if ((uint64)slab != (uint64)page_base) {
+                slab_t_desc_free(slab);
+            }
+            __page_free(page, order);
+            return NULL;
         }
+        slab->kasan_req_order = req_order;
+        memset(slab->kasan_req_size, 0, PGSIZE << req_order);
     }
 
     prev = NULL;
@@ -362,8 +393,14 @@ STATIC_INLINE void __slab_destroy(slab_t *slab) {
     }
     // Free bitmap if it was allocated
     if (slab->bitmap != NULL) {
-        kmm_free(slab->bitmap);
+        page_free(slab->bitmap, slab->bitmap_order);
         slab->bitmap = NULL;
+        slab->bitmap_order = 0;
+    }
+    if (slab->kasan_req_size != NULL) {
+        page_free(slab->kasan_req_size, slab->kasan_req_order);
+        slab->kasan_req_size = NULL;
+        slab->kasan_req_order = 0;
     }
     if ((uint64)slab != page_base) {
         slab_t_desc_free(slab);
@@ -497,6 +534,43 @@ STATIC_INLINE int __slab_bitmap_is_allocated(slab_t *slab, int idx) {
     return !!(slab->bitmap[word_idx] & mask);
 }
 
+STATIC_INLINE void __slab_kasan_set_req_size(slab_t *slab, int idx,
+                                             size_t requested) {
+#ifdef XV6_KASAN
+    if (slab == NULL || slab->cache == NULL || slab->kasan_req_size == NULL)
+        return;
+    if (idx < 0 || idx >= slab->cache->slab_obj_num)
+        return;
+    if (requested > slab->cache->obj_size)
+        requested = slab->cache->obj_size;
+    __atomic_store_n(&slab->kasan_req_size[idx], (uint16)requested,
+                     __ATOMIC_RELEASE);
+#else
+    (void)slab;
+    (void)idx;
+    (void)requested;
+#endif
+}
+
+STATIC_INLINE size_t __slab_kasan_get_req_size(slab_t *slab, int idx) {
+#ifdef XV6_KASAN
+    uint16 requested;
+
+    if (slab == NULL || slab->cache == NULL || slab->kasan_req_size == NULL)
+        return 0;
+    if (idx < 0 || idx >= slab->cache->slab_obj_num)
+        return 0;
+    requested = __atomic_load_n(&slab->kasan_req_size[idx], __ATOMIC_ACQUIRE);
+    if (requested == 0 || requested > slab->cache->obj_size)
+        return slab->cache->obj_size;
+    return requested;
+#else
+    (void)slab;
+    (void)idx;
+    return 0;
+#endif
+}
+
 STATIC_INLINE int __slab_free_ptr_valid(slab_t *slab, void *ptr) {
     int idx;
 
@@ -568,6 +642,7 @@ STATIC_INLINE void *__slab_obj_get(slab_t *slab) {
                 int old_val = __slab_bitmap_test_and_set(slab, idx);
                 assert(old_val == 0,
                        "__slab_obj_get(): double allocation detected");
+                __slab_kasan_set_req_size(slab, idx, slab->cache->obj_size);
             }
         }
     }
@@ -583,6 +658,7 @@ STATIC_INLINE void __slab_obj_put(slab_t *slab, void *ptr) {
     if (slab->bitmap != NULL) {
         int idx = __slab_obj2idx(slab, ptr);
         if (idx >= 0) {
+            __slab_kasan_set_req_size(slab, idx, 0);
             // Use test-and-clear: should return 1 (was allocated), now cleared
             // to 0 (free)
             int old_val = __slab_bitmap_test_and_clear(slab, idx);
@@ -788,7 +864,7 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
 
     // Calculate bitmap size if bitmap tracking is enabled
     uint32 bitmap_size = 0;
-    if (flags & SLAB_FLAG_DEBUG_BITMAP) {
+    if ((flags & SLAB_FLAG_DEBUG_BITMAP) || kasan_config_enabled()) {
         // Calculate number of uint64 words needed to track all objects
         bitmap_size = (slab_obj_num + 63) / 64;
     }
@@ -1087,6 +1163,8 @@ void *slab_alloc(slab_cache_t *cache) {
         __atomic_fetch_add(&cache->obj_active, 1, __ATOMIC_RELEASE);
         __percpu_cache_unlock_cpu(cache, cpu_id);
         __slab_sanitizer_check("slab_alloc", cache, slab, obj);
+        kmemleak_alloc(obj, cache->obj_size, "slab", cache->name,
+                       (unsigned long)__builtin_return_address(0));
         pop_off();
         return obj;
     }
@@ -1123,6 +1201,8 @@ void *slab_alloc(slab_cache_t *cache) {
         __percpu_cache_unlock_cpu(cache, cpu_id);
 
         __slab_sanitizer_check("slab_alloc", cache, slab, obj);
+        kmemleak_alloc(obj, cache->obj_size, "slab", cache->name,
+                       (unsigned long)__builtin_return_address(0));
         pop_off();
         return obj;
     }
@@ -1165,6 +1245,8 @@ void *slab_alloc(slab_cache_t *cache) {
     __percpu_cache_unlock_cpu(cache, cpu_id);
 
     __slab_sanitizer_check("slab_alloc", cache, slab, obj);
+    kmemleak_alloc(obj, cache->obj_size, "slab", cache->name,
+                   (unsigned long)__builtin_return_address(0));
     pop_off();
     return obj;
 }
@@ -1229,6 +1311,7 @@ void slab_free(void *obj) {
     slab_state_t old_state = slab->state;
     int was_full = __SLAB_FULL(slab);
 
+    kmemleak_free(obj);
     __slab_obj_put(slab, obj);
     __atomic_fetch_sub(&cache->obj_active, 1, __ATOMIC_RELEASE);
 
@@ -1357,6 +1440,7 @@ void slab_free_noshrink(void *obj) {
     slab_state_t old_state = slab->state;
     int was_full = __SLAB_FULL(slab);
 
+    kmemleak_free(obj);
     __slab_obj_put(slab, obj);
     __atomic_fetch_sub(&cache->obj_active, 1, __ATOMIC_RELEASE);
 
@@ -1402,4 +1486,92 @@ void slab_free_noshrink(void *obj) {
     __slab_sanitizer_check("slab_free_noshrink", cache, slab, obj);
 
     // PHASE 6: Skip shrinking - that's the whole point of this function
+}
+
+void __no_sanitize_address slab_kasan_record_alloc_size(const void *obj,
+                                                        size_t requested)
+{
+#ifdef XV6_KASAN
+    slab_t *slab;
+    int idx;
+
+    if (obj == NULL)
+        return;
+    slab = __find_obj_slab((void *)obj);
+    if (slab == NULL || slab->cache == NULL)
+        return;
+    idx = __slab_obj2idx(slab, (void *)obj);
+    if (idx < 0)
+        return;
+    __slab_kasan_set_req_size(slab, idx, requested);
+#else
+    (void)obj;
+    (void)requested;
+#endif
+}
+
+int __no_sanitize_address slab_kasan_check_range(const void *addr, size_t size,
+                                                 int write,
+                                                 unsigned long ret_ip)
+{
+#ifndef XV6_KASAN
+    (void)addr;
+    (void)size;
+    (void)write;
+    (void)ret_ip;
+    return 0;
+#else
+    uint64 start = (uint64)addr;
+    uint64 end;
+    slab_t *slab;
+    slab_cache_t *cache;
+    uint64 obj_area_start;
+    uint64 obj_area_end;
+    uint64 first;
+    uint64 last;
+    uint64 obj_start;
+    uint64 requested;
+
+    if (size == 0 || start + size < start)
+        return 0;
+    end = start + size - 1;
+
+    slab = __find_obj_slab((void *)start);
+    if (slab == NULL || slab->cache == NULL)
+        return 0;
+    cache = slab->cache;
+
+    obj_area_start = (uint64)__SLAB_PAGE_BASE(slab) + cache->offset;
+    obj_area_end = obj_area_start + (uint64)cache->slab_obj_num *
+                                        (uint64)cache->obj_size;
+    if (obj_area_end < obj_area_start)
+        return 0;
+    if (start < obj_area_start || end >= obj_area_end) {
+        kasan_report_access(start, size, write, "slab-out-of-range", ret_ip);
+        return -1;
+    }
+
+    first = (start - obj_area_start) / cache->obj_size;
+    last = (end - obj_area_start) / cache->obj_size;
+    if (first != last) {
+        kasan_report_access(start, size, write, "slab-cross-object", ret_ip);
+        return -1;
+    }
+    if (slab->bitmap != NULL &&
+        __slab_bitmap_is_allocated(slab, first) == 0) {
+        kasan_report_access(start, size, write, "slab-free-object", ret_ip);
+        return -1;
+    }
+
+    obj_start = (uint64)__slab_idx2obj(slab, first);
+    requested = __slab_kasan_get_req_size(slab, first);
+    if (requested == 0 || requested > cache->obj_size)
+        requested = cache->obj_size;
+    if (start + size > obj_start + requested) {
+        kasan_report_access(start, size, write, "slab-object-overflow",
+                            ret_ip);
+        return -1;
+    }
+    return 0;
+#endif
 }

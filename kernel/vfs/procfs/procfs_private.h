@@ -100,6 +100,8 @@ enum procfs_entry_type {
     PROC_FDINFO_ENTRY, /* /proc/<tgid>/fdinfo/<n> */
     PROC_RESOURCES,   /* /proc/<tgid>/resources */
     PROC_CRASHES,     /* /proc/crashes          */
+    PROC_KMSG,        /* /proc/kmsg             */
+    PROC_KMEMLEAK,    /* /proc/kmemleak         */
     PROC_CMDLINE,     /* /proc/cmdline          */
     PROC_VERSION,     /* /proc/version          */
     PROC_UPTIME,      /* /proc/uptime           */
@@ -219,6 +221,8 @@ enum procfs_entry_type {
 #define PROCFS_INO_SYS_FS_INOTIFY_MAX_USER_WATCHES 38ULL
 #define PROCFS_INO_SYS_FS_INOTIFY_MAX_USER_INSTANCES 39ULL
 #define PROCFS_INO_SYS_FS_INOTIFY_MAX_QUEUED_EVENTS 40ULL
+#define PROCFS_INO_KMSG 41ULL
+#define PROCFS_INO_KMEMLEAK 42ULL
 
 /* Each pid occupies 64 slots; max pid in xv6 fits well within 64-bit */
 #define PROCFS_PID_BASE    100ULL

@@ -117,6 +117,7 @@ void slab_cache_t_free(slab_cache_t *cache_desc) {
 // return NULL if failed
 void *kmm_alloc(size_t size) {
     int slab_idx = 0;
+    size_t requested = size;
     if (size > SLAB_OBJ_MAX_SIZE) {
         return NULL;
     }
@@ -141,6 +142,8 @@ void *kmm_alloc(size_t size) {
         return NULL;
     }
     void *ret = slab_alloc(__kmm_slab_cache[slab_idx]);
+    if (ret != NULL)
+        slab_kasan_record_alloc_size(ret, requested);
     return ret;
 }
 

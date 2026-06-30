@@ -30,6 +30,7 @@
 #include "proc/thread.h"
 #include "printf.h"
 #include "procfs_private.h"
+#include "klog.h"
 
 /* ------------------------------------------------------------------ */
 /*  Module globals                                                     */
@@ -174,6 +175,22 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         pi->vfs_inode.mode    = S_IFREG | 0444;
         pi->vfs_inode.n_links = 1;
         pi->vfs_inode.size    = 4096;
+        return &pi->vfs_inode;
+    }
+
+    if (ino == PROCFS_INO_KMSG) {
+        pi->type              = PROC_KMSG;
+        pi->vfs_inode.mode    = S_IFREG | 0400;
+        pi->vfs_inode.n_links = 1;
+        pi->vfs_inode.size    = KLOG_RING_SIZE;
+        return &pi->vfs_inode;
+    }
+
+    if (ino == PROCFS_INO_KMEMLEAK) {
+        pi->type              = PROC_KMEMLEAK;
+        pi->vfs_inode.mode    = S_IFREG | 0400;
+        pi->vfs_inode.n_links = 1;
+        pi->vfs_inode.size    = 32768;
         return &pi->vfs_inode;
     }
 

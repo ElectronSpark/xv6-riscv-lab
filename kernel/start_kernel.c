@@ -29,6 +29,7 @@
 #include <mm/oom_kill.h>
 #include <mm/shrinker.h>
 #include <mm/kasan.h>
+#include <mm/kmemleak.h>
 #include "klog.h"
 #include "xarray.h"
 #include "vfs/fs.h"
@@ -115,9 +116,11 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     platform_probe_extensions();
     ksymbols_init();  // Initialize kernel symbols
     kinit();          // physical page allocator
+    kmemleak_init();  // optional allocation leak tracker
     kasan_enable();   // optional KASAN checks need page metadata first
     arch_vm_init();   // create kernel page table
     kernel_vm_init(); // create kernel VM singleton (shared by all CPUs)
+    kasan_vmalloc_selftest(); // optional KASAN kernel-VM allocation checks
     printf("page table initialized\n");
     printf("about to enable paging (platform_post_vm_init)...\n");
     platform_post_vm_init();

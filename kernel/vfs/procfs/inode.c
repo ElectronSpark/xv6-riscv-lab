@@ -46,6 +46,8 @@
 #include "signal.h"
 #include "dev/fdt.h"
 #include "smp/percpu.h"
+#include "klog.h"
+#include <mm/kmemleak.h>
 
 /* snprintf is provided by lwip_port/sys_arch.c – forward-declare it here */
 int snprintf(char *buf, size_t size, const char *fmt, ...);
@@ -67,6 +69,8 @@ static const struct procfs_static_entry procfs_root_entries[] = {
     {"meminfo", PROCFS_INO_MEMINFO},
     {"cpuinfo", PROCFS_INO_CPUINFO},
     {"crashes", PROCFS_INO_CRASHES},
+    {"kmsg", PROCFS_INO_KMSG},
+    {"kmemleak", PROCFS_INO_KMEMLEAK},
     {"cmdline", PROCFS_INO_CMDLINE},
     {"zoneinfo", PROCFS_INO_ZONEINFO},
     {"version", PROCFS_INO_VERSION},
@@ -2081,6 +2085,33 @@ static char *procfs_gen_stack_snapshot(int tid)
     return buf;
 }
 
+static char *procfs_gen_kmsg(void)
+{
+    char *buf = kvmalloc(KLOG_RING_SIZE + 128);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    uint64 dropped = 0;
+    size_t n = klog_snapshot(buf, KLOG_RING_SIZE, &dropped);
+    if (dropped != 0 && n + 1 < KLOG_RING_SIZE + 128) {
+        n += snprintf(buf + n, KLOG_RING_SIZE + 128 - n,
+                      "\n[klog] dropped=%lu\n", dropped);
+    }
+    buf[n < KLOG_RING_SIZE + 128 ? n : KLOG_RING_SIZE + 127] = '\0';
+    return buf;
+}
+
+#define PROCFS_KMEMLEAK_BUF_SIZE 32768
+
+static char *procfs_gen_kmemleak(void)
+{
+    char *buf = kvmalloc(PROCFS_KMEMLEAK_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+    kmemleak_format(buf, PROCFS_KMEMLEAK_BUF_SIZE);
+    return buf;
+}
+
 static struct procfs_blob *procfs_blob_alloc(size_t len)
 {
     struct procfs_blob *blob = kvmalloc(sizeof(*blob) + len + 1);
@@ -2465,6 +2496,12 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_CRASHES:
         buf = crash_log_generate();
+        break;
+    case PROC_KMSG:
+        buf = procfs_gen_kmsg();
+        break;
+    case PROC_KMEMLEAK:
+        buf = procfs_gen_kmemleak();
         break;
     case PROC_SYS_KERNEL_OSTYPE:
     case PROC_SYS_KERNEL_OSRELEASE:

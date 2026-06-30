@@ -16,6 +16,40 @@
 #include "dev/fdt.h"
 #include "cmdline.h"
 
+static int cmdline_streq_ignore_case(const char *value, const char *word)
+{
+    if (value == NULL || word == NULL)
+        return 0;
+    while (*word != '\0') {
+        char c = *value++;
+        if (c >= 'A' && c <= 'Z')
+            c += 'a' - 'A';
+        if (c != *word++)
+            return 0;
+    }
+    return *value == '\0';
+}
+
+int cmdline_value_is_true(const char *value)
+{
+    if (value == NULL || value[0] == '\0')
+        return 0;
+    return cmdline_streq_ignore_case(value, "1") ||
+           cmdline_streq_ignore_case(value, "on") ||
+           cmdline_streq_ignore_case(value, "true") ||
+           cmdline_streq_ignore_case(value, "yes");
+}
+
+int cmdline_value_is_false(const char *value)
+{
+    if (value == NULL || value[0] == '\0')
+        return 0;
+    return cmdline_streq_ignore_case(value, "0") ||
+           cmdline_streq_ignore_case(value, "off") ||
+           cmdline_streq_ignore_case(value, "false") ||
+           cmdline_streq_ignore_case(value, "no");
+}
+
 /**
  * Look up a single key=value parameter from the kernel command line.
  * Parameters are space-separated.  Value ends at next space or end-of-string.

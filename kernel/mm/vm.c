@@ -33,6 +33,7 @@
 #include <mm/memlayout.h>
 #include <mm/page.h>
 #include <mm/slab.h>
+#include <mm/kasan.h>
 #include <mm/oom_kill.h>
 #include <mm/pcache.h>
 #include <mm/rmap.h>
@@ -3665,6 +3666,12 @@ copyout_ok:
             contig += add;
             prev_pa_end = next_pa + PGSIZE;
         }
+        if (kasan_check_range(src, contig, 0,
+                              (unsigned long)__builtin_return_address(0)) <
+            0) {
+            ret = -EFAULT;
+            goto out;
+        }
         memmove((void *)(pa0 + (dstva - va0)), src, contig);
 
         len -= contig;
@@ -3818,6 +3825,12 @@ copyin_ok:
             contig += add;
             prev_pa_end = next_pa + PGSIZE;
         }
+        if (kasan_check_range(dst, contig, 1,
+                              (unsigned long)__builtin_return_address(0)) <
+            0) {
+            ret = -EFAULT;
+            goto out;
+        }
         memmove(dst, (void *)((uint64)PA2VA(pa0) + (srcva - va0)), contig);
 
         len -= contig;
@@ -3884,6 +3897,13 @@ int either_copyout(int user_dst, uint64 dst, void *src, uint64 len)
     if (user_dst)
         return vm_copyout(p->vm, dst, src, len);
     else {
+        if (kasan_check_range(src, len, 0,
+                              (unsigned long)__builtin_return_address(0)) <
+                0 ||
+            kasan_check_range((const void *)dst, len, 1,
+                              (unsigned long)__builtin_return_address(0)) <
+                0)
+            return -EFAULT;
         memmove((char *)dst, src, len);
         return 0;
     }
@@ -3895,6 +3915,13 @@ int either_copyin(void *dst, int user_src, uint64 src, uint64 len)
     if (user_src)
         return vm_copyin(p->vm, dst, src, len);
     else {
+        if (kasan_check_range((const void *)src, len, 0,
+                              (unsigned long)__builtin_return_address(0)) <
+                0 ||
+            kasan_check_range(dst, len, 1,
+                              (unsigned long)__builtin_return_address(0)) <
+                0)
+            return -EFAULT;
         memmove(dst, (char *)src, len);
         return 0;
     }
@@ -5846,6 +5873,7 @@ int kvm_register_region(uint64 start, uint64 size, uint64 flags)
 uint64 kvm_mmap(uint64 addr, size_t size, uint64 flags)
 {
     vm_t *vm = kernel_vm;
+    size_t requested_size = size;
     if (vm == NULL)
         return 0;
 
@@ -5914,6 +5942,9 @@ uint64 kvm_mmap(uint64 addr, size_t size, uint64 flags)
     }
 
     vm_wunlock(vm);
+    kasan_vmalloc_alloc((const void *)map_addr, requested_size, size,
+                        "kvm_mmap",
+                        (unsigned long)__builtin_return_address(0));
     return map_addr;
 }
 
@@ -5935,6 +5966,8 @@ int kvm_munmap(uint64 addr, size_t size)
         vm_wunlock(vm);
         return -EINVAL;
     }
+
+    kasan_vmalloc_free((const void *)addr, size);
 
     /* Free the physical pages and clear PTEs. */
     for (uint64 a = addr; a < addr + size; a += PGSIZE) {
@@ -5963,6 +5996,9 @@ void *kvm_alloc(size_t npages)
     uint64 va = kvm_mmap(0, npages * PGSIZE, PROT_READ | PROT_WRITE);
     if (va == 0)
         return NULL;
+    kasan_vmalloc_alloc((const void *)va, npages * PGSIZE, npages * PGSIZE,
+                        "kvm_alloc",
+                        (unsigned long)__builtin_return_address(0));
     return (void *)va;
 }
 
@@ -6008,7 +6044,12 @@ void *kvmalloc(size_t size)
 
     /* Large (or slab-failed) allocation: round up to pages. */
     size_t npages = (size + PGSIZE - 1) / PGSIZE;
-    return kvm_alloc(npages);
+    void *ptr = kvm_alloc(npages);
+    if (ptr != NULL) {
+        kasan_vmalloc_alloc(ptr, size, npages * PGSIZE, "kvmalloc",
+                            (unsigned long)__builtin_return_address(0));
+    }
+    return ptr;
 }
 
 void kvfree(void *ptr)

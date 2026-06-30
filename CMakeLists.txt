@@ -206,6 +206,8 @@ endif()
 
 project(xv6-${ARCH}-kernel LANGUAGES C ASM)
 option(XV6_KASAN "Enable experimental kernel address sanitizer runtime" OFF)
+option(XV6_KMEMLEAK "Enable optional fixed-table kernel allocation tracker" ON)
+option(XV6_KLOG "Enable optional Linux-style kernel log ring and /proc/kmsg support" ON)
 
 if(ARCH STREQUAL "riscv")
     add_compile_definitions(CONFIG_ARCH_RISCV=1)
@@ -262,6 +264,14 @@ if(XV6_KASAN)
         " -fsanitize=kernel-address"
         " --param asan-instrumentation-with-call-threshold=0"
         " -DXV6_KASAN=1")
+endif()
+
+if(XV6_KMEMLEAK)
+    string(APPEND CMAKE_C_FLAGS " -DXV6_KMEMLEAK=1")
+endif()
+
+if(XV6_KLOG)
+    string(APPEND CMAKE_C_FLAGS " -DXV6_KLOG=1")
 endif()
 
 if(NOT "$ENV{KMM_SANITIZE_CHECK}" STREQUAL "")

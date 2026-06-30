@@ -42,4 +42,11 @@ dev_t cmdline_get_root_dev(void);
  */
 int cmdline_get_param(const char *key, char *buf, size_t bufsz);
 
+/**
+ * Exact, case-insensitive boolean value helpers for diagnostic command-line
+ * gates. These intentionally reject prefixes and unknown spellings.
+ */
+int cmdline_value_is_true(const char *value);
+int cmdline_value_is_false(const char *value);
+
 #endif /* __KERNEL_CMDLINE_H */

@@ -61,6 +61,7 @@
 #include <mm/mm_watermark.h>
 #include <mm/shrinker.h>
 #include <mm/kasan.h>
+#include <mm/kmemleak.h>
 
 #ifdef __x86_64__
 static inline void x86_page_dbg_outb(uint16 port, uint8 value) {
@@ -1260,6 +1261,7 @@ STATIC int __no_sanitize_address __buddy_put(page_t *page) {
         return -1;
     }
 
+    kmemleak_free((const void *)__page_to_pa(page));
     kasan_page_free((const void *)__page_to_pa(page), 0);
 
     // Try per-CPU cache first for order 0 pages
@@ -1314,6 +1316,7 @@ void __no_sanitize_address page_free_anon_batch(page_t **pages, int count)
             continue;
         }
         /* old == 1: we freed the last ref.  Page is exclusively ours. */
+        kmemleak_free((const void *)__page_to_pa(pg));
         kasan_page_free((const void *)__page_to_pa(pg), 0);
         pcpu_cache_t *cache = __get_pcpu_cache_for_page(pg, 0);
         uint32 cur = PCPU_CACHE_COUNT_LOAD(cache);
@@ -1739,6 +1742,9 @@ page_t *__no_sanitize_address __page_alloc(uint64 order, uint64 flags) {
     if (ret != NULL) {
         ret->compound_order = (uint8)order;
         kasan_page_alloc((const void *)__page_to_pa(ret), order);
+        kmemleak_alloc((const void *)__page_to_pa(ret), PGSIZE << order,
+                       "page", "page_alloc",
+                       (unsigned long)__builtin_return_address(0));
 
         // Watermark check: if free pages dropped below LOW, wake kswapd
         if (!(flags & (GFP_NORECLAIM | GFP_NOWATERMARK))) {
@@ -1757,6 +1763,9 @@ page_t *__no_sanitize_address __page_alloc(uint64 order, uint64 flags) {
         if (ret != NULL) {
             ret->compound_order = (uint8)order;
             kasan_page_alloc((const void *)__page_to_pa(ret), order);
+            kmemleak_alloc((const void *)__page_to_pa(ret), PGSIZE << order,
+                           "page", "page_alloc",
+                           (unsigned long)__builtin_return_address(0));
         }
     }
     return ret;
@@ -1794,6 +1803,7 @@ void __no_sanitize_address __page_free(page_t *page, uint64 order) {
         }
     }
 
+    kmemleak_free((const void *)__page_to_pa(page));
     kasan_page_free((const void *)__page_to_pa(page), order);
 
     // Try per-CPU cache first for cacheable orders

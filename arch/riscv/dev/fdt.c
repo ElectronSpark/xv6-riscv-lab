@@ -148,6 +148,76 @@ int fdt_early_scan_memory(void *dtb, uint64 *base_out, uint64 *size_out) {
     }
 }
 
+int fdt_early_scan_cmdline(void *dtb)
+{
+    if (!fdt_valid(dtb))
+        return -1;
+
+    char *struct_start = (char *)dtb + fdt_get_header(dtb, 8);
+    char *p = struct_start;
+    int depth = 0;
+    int in_chosen = 0;
+
+    while (1) {
+        uint32 token = fdt32_to_cpu(*(uint32 *)p);
+        p += 4;
+
+        switch (token) {
+        case FDT_BEGIN_NODE: {
+            const char *name = p;
+            int namelen = strlen(name);
+            int next_depth = depth + 1;
+            p += fdt_align(namelen + 1);
+
+            if (next_depth == 2 && strcmp(name, "chosen") == 0)
+                in_chosen = 1;
+            depth = next_depth;
+            break;
+        }
+
+        case FDT_END_NODE:
+            if (in_chosen && depth == 2)
+                in_chosen = 0;
+            depth--;
+            break;
+
+        case FDT_PROP: {
+            uint32 len = fdt32_to_cpu(*(uint32 *)p);
+            p += 4;
+            uint32 nameoff = fdt32_to_cpu(*(uint32 *)p);
+            p += 4;
+
+            const char *propname = fdt_get_string(dtb, nameoff);
+            void *data = p;
+            p += fdt_align(len);
+
+            if (in_chosen && strcmp(propname, "bootargs") == 0 && len > 0) {
+                const char *args = (const char *)data;
+                size_t arglen = strnlen(args, len);
+                if (arglen >= CMDLINE_MAX)
+                    arglen = CMDLINE_MAX - 1;
+                if (arglen > 0) {
+                    memcpy(platform.cmdline, args, arglen);
+                    platform.cmdline[arglen] = '\0';
+                    platform.has_cmdline = 1;
+                    return 0;
+                }
+            }
+            break;
+        }
+
+        case FDT_NOP:
+            break;
+
+        case FDT_END:
+            return -1;
+
+        default:
+            return -1;
+        }
+    }
+}
+
 // Parse and copy namestring into fdt_node
 // The full namestring (including @addr) is stored for comparison
 // name_size is the length of the base name (before @)

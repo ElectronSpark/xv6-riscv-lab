@@ -286,6 +286,7 @@ extern struct platform_info platform;
 // Returns 0 on success, -1 on failure
 // This is a lightweight linear scan used before full FDT tree is built
 int fdt_early_scan_memory(void *dtb, uint64 *base_out, uint64 *size_out);
+int fdt_early_scan_cmdline(void *dtb);
 
 // Initialize FDT parser and probe platform info
 // dtb: pointer to the device tree blob (passed by bootloader in a1)

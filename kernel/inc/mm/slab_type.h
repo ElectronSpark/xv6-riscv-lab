@@ -81,6 +81,10 @@ typedef struct slab_struct {
     slab_state_t state;
     // optional bitmap for tracking allocation/deallocation (NULL if disabled)
     uint64 *bitmap;
+    uint16 bitmap_order;
+    // optional KASAN requested-size table, one entry per object
+    uint16 *kasan_req_size;
+    uint16 kasan_req_order;
     // CPU ID that owns this slab (-1 for global free list, 0-7 for CPU ID)
     _Atomic int cpu_id;
 } slab_t;
