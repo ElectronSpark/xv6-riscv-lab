@@ -28,6 +28,7 @@
 #include <mm/mm_watermark.h>
 #include <mm/oom_kill.h>
 #include <mm/shrinker.h>
+#include <mm/kasan.h>
 #include "xarray.h"
 #include "vfs/fs.h"
 #include "vfs/pipe.h"
@@ -112,6 +113,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     platform_probe_extensions();
     ksymbols_init();  // Initialize kernel symbols
     kinit();          // physical page allocator
+    kasan_enable();   // optional KASAN checks need page metadata first
     arch_vm_init();   // create kernel page table
     kernel_vm_init(); // create kernel VM singleton (shared by all CPUs)
     printf("page table initialized\n");

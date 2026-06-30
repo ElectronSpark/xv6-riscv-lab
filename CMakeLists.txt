@@ -205,6 +205,7 @@ else()
 endif()
 
 project(xv6-${ARCH}-kernel LANGUAGES C ASM)
+option(XV6_KASAN "Enable experimental kernel address sanitizer runtime" OFF)
 
 if(ARCH STREQUAL "riscv")
     add_compile_definitions(CONFIG_ARCH_RISCV=1)
@@ -252,6 +253,16 @@ execute_process(
     OUTPUT_VARIABLE FNO_STACK_PROTECTOR
     OUTPUT_STRIP_TRAILING_WHITESPACE)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${FNO_STACK_PROTECTOR}")
+
+if(XV6_KASAN)
+    if(NOT ARCH STREQUAL "x86_64")
+        message(FATAL_ERROR "XV6_KASAN is currently supported only on x86_64")
+    endif()
+    string(APPEND CMAKE_C_FLAGS
+        " -fsanitize=kernel-address"
+        " --param asan-instrumentation-with-call-threshold=0"
+        " -DXV6_KASAN=1")
+endif()
 
 if(NOT "$ENV{KMM_SANITIZE_CHECK}" STREQUAL "")
     list(APPEND XCFLAGS -DKERNEL_PAGE_SANITIZER=1)

@@ -111,6 +111,15 @@
 #define __SECTION(seg_name) __attribute__((section(#seg_name)))
 #define WEAK __attribute__((weak))
 #define ALWAYS_INLINE __attribute__((always_inline)) inline
+#if defined(__has_attribute)
+#if __has_attribute(no_sanitize_address)
+#define __no_sanitize_address __attribute__((no_sanitize_address))
+#else
+#define __no_sanitize_address
+#endif
+#else
+#define __no_sanitize_address __attribute__((no_sanitize_address))
+#endif
 
 /**
  * @brief Create an anonymous struct with specified alignment
