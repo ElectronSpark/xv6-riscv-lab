@@ -227,17 +227,7 @@ static int kde_poll_summary_enabled(void)
 
 static int chrome_vfs_trace_process(void)
 {
-    if (current == NULL || strncmp(current->name, "chrome_crashpad", 15) == 0)
-        return 0;
-    if (strncmp(current->name, "chrome", 6) == 0)
-        return 1;
-    if (current->thread_group == NULL)
-        return 0;
-    if (strstr(current->thread_group->exec_path,
-               "chrome_crashpad_handler") != NULL)
-        return 0;
-    return strstr(current->thread_group->exec_path, "/chrome") != NULL ||
-           strstr(current->thread_group->exec_path, "wayland-chromium") != NULL;
+    return chrome_lifecycle_kernel_trace_process_match(current, 0, 0);
 }
 
 static int portal_vfs_trace_process(void)

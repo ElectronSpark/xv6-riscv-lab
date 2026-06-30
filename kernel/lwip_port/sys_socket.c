@@ -111,22 +111,7 @@ static int chrome_socket_trace_enabled(void)
 
 static int chrome_socket_trace_process(void)
 {
-    if (current == NULL || strncmp(current->name, "chrome_crashpad", 15) == 0)
-        return 0;
-    if (strncmp(current->name, "chrome", 6) == 0 ||
-        strncmp(current->name, "exe", 3) == 0)
-        return 1;
-    if (current->thread_group == NULL)
-        return 0;
-    if (chrome_lifecycle_network_service_match(current) ||
-        chrome_lifecycle_audio_service_match(current) ||
-        chrome_lifecycle_child_process_match(current))
-        return 1;
-    if (strstr(current->thread_group->exec_path,
-               "chrome_crashpad_handler") != NULL)
-        return 0;
-    return strstr(current->thread_group->exec_path, "/chrome") != NULL ||
-           strstr(current->thread_group->exec_path, "wayland-chromium") != NULL;
+    return chrome_lifecycle_kernel_trace_process_match(current, 1, 1);
 }
 
 static int portal_socket_trace_process(void)

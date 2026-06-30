@@ -87,4 +87,30 @@ static inline int chrome_lifecycle_audio_service_match(struct thread *p)
     return (roles & TG_CHROME_TRACE_AUDIO_SERVICE) != 0;
 }
 
+static inline int chrome_lifecycle_kernel_trace_process_match(struct thread *p,
+                                                              int include_exe,
+                                                              int include_roles)
+{
+    const char *path;
+
+    if (p == NULL || strncmp(p->name, "chrome_crashpad", 15) == 0)
+        return 0;
+    if (strncmp(p->name, "chrome", 6) == 0 ||
+        (include_exe && strncmp(p->name, "exe", 3) == 0))
+        return 1;
+    if (p->thread_group == NULL)
+        return 0;
+    if (include_roles &&
+        (chrome_lifecycle_network_service_match(p) ||
+         chrome_lifecycle_audio_service_match(p) ||
+         chrome_lifecycle_child_process_match(p)))
+        return 1;
+
+    path = p->thread_group->exec_path;
+    if (strstr(path, "chrome_crashpad_handler") != NULL)
+        return 0;
+    return strstr(path, "/chrome") != NULL ||
+           strstr(path, "wayland-chromium") != NULL;
+}
+
 #endif /* __KERNEL_CHROME_LIFECYCLE_H */
