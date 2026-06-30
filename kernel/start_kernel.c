@@ -29,6 +29,7 @@
 #include <mm/oom_kill.h>
 #include <mm/shrinker.h>
 #include <mm/kasan.h>
+#include "klog.h"
 #include "xarray.h"
 #include "vfs/fs.h"
 #include "vfs/pipe.h"
@@ -101,6 +102,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     // `end` is a higher-half VA; convert to PA for the early allocator.
     early_allocator_init((void *)kernel_end_pa, (void *)(mem_base + mem_size));
     kobject_global_init();
+    kloginit();
     printfinit();
     diaginit();
     printf("\nxv6 kernel booting (hart %d)\n\n", hartid);

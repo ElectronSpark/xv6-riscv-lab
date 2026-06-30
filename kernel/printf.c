@@ -15,6 +15,7 @@
 #include "proc/thread.h"
 #include "smp/ipi.h"
 #include <dev/fb.h>
+#include "klog.h"
 
 static spinlock_t __panic_bt_lock = SPINLOCK_INITIALIZED("panic_bt_lock");
 
@@ -46,7 +47,7 @@ STATIC struct {
 /* Wrapper: sends to console and also captures during panic */
 static inline void printf_emit(const char *buf, int len)
 {
-    consputs(buf, len);
+    klog_write(buf, len, KLOG_F_RING | KLOG_F_CONSOLE);
     if (__atomic_load_n(&__global_panic_state, __ATOMIC_RELAXED))
         panic_capture(buf, len);
 }
@@ -202,7 +203,7 @@ int printf(char *fmt, ...) {
         } else if (c0 == 'p') {
             printptr(va_arg(ap, uint64), outbuf, &outlen);
         } else if (c0 == 'c') {
-            consputc(va_arg(ap, int));
+            printf_putc_buf(outbuf, &outlen, va_arg(ap, int));
         } else if (c0 == 's') {
             if ((s = va_arg(ap, char *)) == 0)
                 s = "(null)";
