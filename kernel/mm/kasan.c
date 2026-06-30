@@ -9,9 +9,14 @@
 
 #ifdef XV6_KASAN
 
+#define KASAN_PAGE_POISON 0xff
+
 static volatile int kasan_ready;
 static volatile int kasan_reporting;
 static volatile uint64 kasan_reports;
+static uint8 *kasan_page_shadow;
+static uint64 kasan_page_shadow_len;
+static uint64 kasan_page_shadow_bytes;
 
 static __no_sanitize_address int kasan_addr_to_pa(uint64 addr, uint64 *pa)
 {
@@ -38,6 +43,73 @@ static __no_sanitize_address int kasan_addr_to_pa(uint64 addr, uint64 *pa)
     return 0;
 }
 
+static __no_sanitize_address int kasan_pa_to_index(uint64 pa, uint64 *index)
+{
+    if (index == NULL)
+        return 0;
+
+    pa = PGROUNDDOWN(pa);
+    if (pa < KERNBASE || pa >= PHYSTOP)
+        return 0;
+
+    *index = (pa - KERNBASE) >> PAGE_SHIFT;
+    if (*index >= kasan_page_shadow_len)
+        return 0;
+    return 1;
+}
+
+static __no_sanitize_address int kasan_shadow_test(uint64 index)
+{
+    uint64 byte = index >> 3;
+    uint8 bit = 1U << (index & 7);
+
+    if (kasan_page_shadow == NULL || index >= kasan_page_shadow_len ||
+        byte >= kasan_page_shadow_bytes)
+        return 0;
+    return (kasan_page_shadow[byte] & bit) != 0;
+}
+
+static __no_sanitize_address void kasan_shadow_mark(uint64 index, int poisoned)
+{
+    uint64 byte = index >> 3;
+    uint8 bit = 1U << (index & 7);
+
+    if (kasan_page_shadow == NULL || index >= kasan_page_shadow_len ||
+        byte >= kasan_page_shadow_bytes)
+        return;
+
+    if (poisoned)
+        kasan_page_shadow[byte] |= bit;
+    else
+        kasan_page_shadow[byte] &= (uint8)~bit;
+}
+
+static __no_sanitize_address void
+kasan_shadow_set_pa(uint64 start_pa, uint64 size, int poisoned)
+{
+    uint64 start;
+    uint64 end;
+
+    if (kasan_page_shadow == NULL || size == 0)
+        return;
+    if (start_pa + size < start_pa)
+        return;
+
+    start = PGROUNDDOWN(start_pa);
+    end = PGROUNDDOWN(start_pa + size - 1);
+
+    for (uint64 pa = start; pa <= end;) {
+        uint64 index;
+
+        if (kasan_pa_to_index(pa, &index))
+            kasan_shadow_mark(index, poisoned);
+
+        if (pa + PGSIZE <= pa || pa == end)
+            break;
+        pa += PGSIZE;
+    }
+}
+
 static __no_sanitize_address void
 kasan_report(uint64 addr, size_t size, int write, const char *reason,
              unsigned long ret_ip)
@@ -52,6 +124,62 @@ kasan_report(uint64 addr, size_t size, int write, const char *reason,
            kasan_reports);
 
     __atomic_clear(&kasan_reporting, __ATOMIC_RELEASE);
+}
+
+void __no_sanitize_address kasan_poison(const void *addr, size_t size,
+                                        uint8 tag)
+{
+    uint64 start = (uint64)addr;
+    uint64 end;
+
+    (void)tag;
+    if (size == 0 || start + size < start)
+        return;
+
+    end = start + size - 1;
+    for (uint64 cur = start; cur <= end;) {
+        uint64 pa;
+        uint64 next = (cur + PGSIZE) & ~(PGSIZE - 1);
+
+        if (kasan_addr_to_pa(cur, &pa))
+            kasan_shadow_set_pa(pa, 1, 1);
+
+        if (next <= cur || next > end)
+            break;
+        cur = next;
+    }
+}
+
+void __no_sanitize_address kasan_unpoison(const void *addr, size_t size)
+{
+    uint64 start = (uint64)addr;
+    uint64 end;
+
+    if (size == 0 || start + size < start)
+        return;
+
+    end = start + size - 1;
+    for (uint64 cur = start; cur <= end;) {
+        uint64 pa;
+        uint64 next = (cur + PGSIZE) & ~(PGSIZE - 1);
+
+        if (kasan_addr_to_pa(cur, &pa))
+            kasan_shadow_set_pa(pa, 1, 0);
+
+        if (next <= cur || next > end)
+            break;
+        cur = next;
+    }
+}
+
+void __no_sanitize_address kasan_page_alloc(const void *pa, uint64 order)
+{
+    kasan_unpoison(pa, PGSIZE << order);
+}
+
+void __no_sanitize_address kasan_page_free(const void *pa, uint64 order)
+{
+    kasan_poison(pa, PGSIZE << order, KASAN_PAGE_POISON);
 }
 
 int __no_sanitize_address kasan_check_range(const void *addr, size_t size,
@@ -86,7 +214,19 @@ int __no_sanitize_address kasan_check_range(const void *addr, size_t size,
         if (!kasan_addr_to_pa(cur, &cur_pa))
             return 0;
 
-        page = __pa_to_page(cur_pa);
+        if (kasan_page_shadow != NULL) {
+            uint64 index;
+
+            if (kasan_pa_to_index(cur_pa, &index) &&
+                kasan_shadow_test(index)) {
+                kasan_report(cur, size, write, "poisoned-page-access", ret_ip);
+                return -1;
+            }
+        }
+
+        page = __pa_to_page(PGROUNDDOWN(cur_pa));
+        if (page == NULL)
+            return 0;
         type = PAGE_FLAG_GET_TYPE(page->flags);
         ref = __atomic_load_n(&page->ref_count, __ATOMIC_ACQUIRE);
 
@@ -103,10 +243,88 @@ int __no_sanitize_address kasan_check_range(const void *addr, size_t size,
     return 0;
 }
 
+static __no_sanitize_address uint64 kasan_shadow_order(uint64 bytes)
+{
+    uint64 pages = (bytes + PGSIZE - 1) >> PAGE_SHIFT;
+    uint64 order = 0;
+    uint64 capacity = 1;
+
+    while (capacity < pages) {
+        capacity <<= 1;
+        order++;
+    }
+    return order;
+}
+
+static __no_sanitize_address int kasan_page_is_free(uint64 pa)
+{
+    page_t *page = __pa_to_page(pa);
+    uint64 type;
+
+    if (page == NULL)
+        return 0;
+
+    type = PAGE_FLAG_GET_TYPE(page->flags);
+    if (type == PAGE_TYPE_BUDDY)
+        return 1;
+
+    if (type == PAGE_TYPE_TAIL && page->tail.head_page != NULL &&
+        PAGE_FLAG_GET_TYPE(page->tail.head_page->flags) == PAGE_TYPE_BUDDY)
+        return 1;
+
+    return 0;
+}
+
+static __no_sanitize_address int kasan_shadow_init(void)
+{
+    uint64 pages = TOTALPAGES;
+    uint64 bytes = (pages + 7) >> 3;
+    uint64 order;
+    uint64 managed_base;
+
+    if (pages == 0 || bytes == 0)
+        return -1;
+
+    order = kasan_shadow_order(bytes);
+    if (order > PAGE_BUDDY_MAX_ORDER)
+        return -1;
+
+    kasan_page_shadow = (uint8 *)page_alloc(order, PAGE_TYPE_ANON);
+    if (kasan_page_shadow == NULL)
+        return -1;
+
+    kasan_page_shadow_len = pages;
+    kasan_page_shadow_bytes = bytes;
+    managed_base = managed_page_base();
+
+    for (uint64 i = 0; i < kasan_page_shadow_bytes; i++)
+        kasan_page_shadow[i] = 0;
+
+    for (uint64 pa = KERNBASE; pa < PHYSTOP;) {
+        uint64 index;
+
+        if (pa >= managed_base && kasan_pa_to_index(pa, &index) &&
+            kasan_page_is_free(pa))
+            kasan_shadow_mark(index, 1);
+
+        if (pa + PGSIZE <= pa)
+            break;
+        pa += PGSIZE;
+    }
+
+    return 0;
+}
+
 void __no_sanitize_address kasan_enable(void)
 {
+    if (kasan_shadow_init() != 0) {
+        printf("kasan: disabled, failed to initialize page shadow\n");
+        return;
+    }
+
     __atomic_store_n(&kasan_ready, 1, __ATOMIC_RELEASE);
-    printf("kasan: enabled page-state callback checks\n");
+    printf("kasan: enabled page-shadow callback checks (%lu pages, %lu bytes)\n",
+           kasan_page_shadow_len, kasan_page_shadow_bytes);
 }
 
 void __no_sanitize_address kasan_disable(void)

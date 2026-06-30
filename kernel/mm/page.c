@@ -60,6 +60,7 @@
 #include <mm/memstat.h>
 #include <mm/mm_watermark.h>
 #include <mm/shrinker.h>
+#include <mm/kasan.h>
 
 #ifdef __x86_64__
 static inline void x86_page_dbg_outb(uint16 port, uint8 value) {
@@ -946,7 +947,8 @@ STATIC_INLINE page_t *__pcpu_try_pop(pcpu_cache_t *cache, uint64 order) {
 
 // Try to get a page from per-CPU cache
 // Returns NULL if cache is empty
-STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
+STATIC page_t *__no_sanitize_address __pcpu_cache_get(uint64 order,
+                                                      uint64 flags) {
     if (order > PCPU_CACHE_MAX_ORDER) {
         return NULL;
     }
@@ -994,7 +996,7 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
 
 // Try to put a page into per-CPU cache
 // Returns 0 on success, -1 if cache is full
-STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
+STATIC int __no_sanitize_address __pcpu_cache_put(page_t *page, uint64 order) {
     if (order > PCPU_CACHE_MAX_ORDER) {
         return -1;
     }
@@ -1249,7 +1251,7 @@ STATIC void __buddy_merge_and_insert(page_t *page, uint64 start_order) {
 
 // Put a page back to buddy system
 // Right now pages can only be put one by one
-STATIC int __buddy_put(page_t *page) {
+STATIC int __no_sanitize_address __buddy_put(page_t *page) {
     if (page == NULL) {
         return -1;
     }
@@ -1257,6 +1259,8 @@ STATIC int __buddy_put(page_t *page) {
         // cannot free a page that's not freeable
         return -1;
     }
+
+    kasan_page_free((const void *)__page_to_pa(page), 0);
 
     // Try per-CPU cache first for order 0 pages
     if (__pcpu_cache_put(page, 0) == 0) {
@@ -1287,7 +1291,7 @@ STATIC int __buddy_put(page_t *page) {
  * @pages:  array of page_t pointers (order 0, PAGE_TYPE_ANON)
  * @count:  number of entries
  */
-void page_free_anon_batch(page_t **pages, int count)
+void __no_sanitize_address page_free_anon_batch(page_t **pages, int count)
 {
     page_t *overflow[256];
     int noverflow = 0;
@@ -1310,6 +1314,7 @@ void page_free_anon_batch(page_t **pages, int count)
             continue;
         }
         /* old == 1: we freed the last ref.  Page is exclusively ours. */
+        kasan_page_free((const void *)__page_to_pa(pg), 0);
         pcpu_cache_t *cache = __get_pcpu_cache_for_page(pg, 0);
         uint32 cur = PCPU_CACHE_COUNT_LOAD(cache);
         if (cur < PCPU_HOT_PAGE_CACHE_SIZE) {
@@ -1725,7 +1730,7 @@ STATIC_INLINE int __page_ref_dec_unlocked(page_t *page) {
 // SECTION 13: Public API - Allocation & Deallocation
 // ============================================================================
 
-page_t *__page_alloc(uint64 order, uint64 flags) {
+page_t *__no_sanitize_address __page_alloc(uint64 order, uint64 flags) {
     if (order > PAGE_BUDDY_MAX_ORDER) {
         return NULL;
     }
@@ -1733,6 +1738,7 @@ page_t *__page_alloc(uint64 order, uint64 flags) {
     __page_sanitizer_check("page_alloc", ret, order, flags);
     if (ret != NULL) {
         ret->compound_order = (uint8)order;
+        kasan_page_alloc((const void *)__page_to_pa(ret), order);
 
         // Watermark check: if free pages dropped below LOW, wake kswapd
         if (!(flags & (GFP_NORECLAIM | GFP_NOWATERMARK))) {
@@ -1750,6 +1756,7 @@ page_t *__page_alloc(uint64 order, uint64 flags) {
         ret = __buddy_get(order, flags);
         if (ret != NULL) {
             ret->compound_order = (uint8)order;
+            kasan_page_alloc((const void *)__page_to_pa(ret), order);
         }
     }
     return ret;
@@ -1757,7 +1764,7 @@ page_t *__page_alloc(uint64 order, uint64 flags) {
 
 // The base address of the page should be aligned to order
 // Otherwise panic
-void __page_free(page_t *page, uint64 order) {
+void __no_sanitize_address __page_free(page_t *page, uint64 order) {
     __page_sanitizer_check("page_free", page, order, 0);
     uint64 count = 1UL << order;
 
@@ -1786,6 +1793,8 @@ void __page_free(page_t *page, uint64 order) {
             panic("__page_free(): trying to free non-freeable page");
         }
     }
+
+    kasan_page_free((const void *)__page_to_pa(page), order);
 
     // Try per-CPU cache first for cacheable orders
     if (order <= PCPU_CACHE_MAX_ORDER) {
