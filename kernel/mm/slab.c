@@ -662,6 +662,13 @@ STATIC_INLINE void __slab_obj_put(slab_t *slab, void *ptr) {
             // Use test-and-clear: should return 1 (was allocated), now cleared
             // to 0 (free)
             int old_val = __slab_bitmap_test_and_clear(slab, idx);
+            if (old_val != 1) {
+                printf("__slab_obj_put: double free cache='%s' obj=%p "
+                       "slab=%p idx=%d in_use=%ld state=%d cpu=%d\n",
+                       slab->cache ? slab->cache->name : "<detached>", ptr,
+                       slab, idx, slab->in_use, slab->state,
+                       __atomic_load_n(&slab->cpu_id, __ATOMIC_ACQUIRE));
+            }
             assert(old_val == 1, "__slab_obj_put(): double free detected");
         }
     }

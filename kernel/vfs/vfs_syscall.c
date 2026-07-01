@@ -3868,6 +3868,21 @@ static int poll_notify_full_wait_enabled(void)
     return enabled;
 }
 
+static int af_unix_poll_notify_full_wait_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("af_unix_poll_notify_full_wait", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
 static int poll_fd_requires_rescan(struct vfs_file *f)
 {
     /*
@@ -3878,6 +3893,16 @@ static int poll_fd_requires_rescan(struct vfs_file *f)
      */
     if (f == NULL)
         return 1;
+    /*
+     * AF_UNIX is kept off the notify-backed default because older KDE traces
+     * caught a missed full-wait wakeup.  Newer Konsole/Wayland evidence shows
+     * the hot stream path does wake when peer bytes arrive, so allow a
+     * runtime-only opt-in for focused regression proof without broadening the
+     * default policy.
+     */
+    if (f->ops == &unix_socket_file_ops &&
+        af_unix_poll_notify_full_wait_enabled())
+        return 0;
     if (f->ops != NULL && f->ops->poll != NULL &&
         (f->ops->flags & VFS_FILE_OPS_F_POLL_NOTIFY_BACKED) != 0)
         return 0;
