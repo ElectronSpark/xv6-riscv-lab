@@ -320,6 +320,22 @@ static int ps2mouse_cmdline_enabled(const char *key)
     return value[0] != '0';
 }
 
+static void ps2mouse_mirror_injected_cursor(const struct mouse_event *ev)
+{
+    /*
+     * Keep synthetic input separate from compositor-owned cursor state by
+     * default.  Enabling mouseinject_cursor=1 is useful for guest hardware
+     * cursor debugging; normal GUI harnesses use the single QEMU host cursor
+     * for stable automated interaction.
+     */
+    if (!ps2mouse_cmdline_enabled("mouseinject_cursor"))
+        return;
+    if ((ev->flags & MOUSE_EVENT_F_ABSOLUTE) == 0)
+        return;
+    (void)virtio_gpu_user_move_injected_cursor((uint16)ev->dx,
+                                               (uint16)ev->dy, 1);
+}
+
 static int vmmouse_drain_locked(void)
 {
     struct mouse_event ev;
@@ -559,6 +575,7 @@ static int mouse_write(cdev_t *cdev, bool user, const void *buf, size_t count)
         printf("PS2 mouse: write begin flags=0x%x x=%u y=%u buttons=0x%x\n",
                ev.flags, (uint16)ev.dx, (uint16)ev.dy, ev.buttons);
     mouse_input_push_event(&ev);
+    ps2mouse_mirror_injected_cursor(&ev);
     if (trace)
         printf("PS2 mouse: write end flags=0x%x x=%u y=%u buttons=0x%x\n",
                ev.flags, (uint16)ev.dx, (uint16)ev.dy, ev.buttons);

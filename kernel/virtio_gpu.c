@@ -73,6 +73,8 @@
 #define VIRTIO_GPU_CURSOR_DIM   64
 #define VIRTIO_GPU_CURSOR_IMAGE_SLOTS 16
 #define VIRTIO_GPU_CURSOR_RING  64
+#define VIRTIO_GPU_INJECTED_CURSOR_W 16
+#define VIRTIO_GPU_INJECTED_CURSOR_H 24
 #define VIRTIO_GPU_RESP_OK_NODATA       0x1100
 #define VIRTIO_GPU_RESP_OK_DISPLAY_INFO 0x1101
 #define VIRTIO_GPU_RESP_OK_CAPSET_INFO  0x1102
@@ -3674,6 +3676,14 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
     (void)resource_id;
     (void)w;
     (void)h;
+    return -ENODEV;
+}
+int virtio_gpu_user_move_injected_cursor(uint16 x_abs, uint16 y_abs,
+                                         int visible)
+{
+    (void)x_abs;
+    (void)y_abs;
+    (void)visible;
     return -ENODEV;
 }
 int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,

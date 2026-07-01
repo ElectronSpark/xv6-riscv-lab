@@ -583,6 +583,8 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
 int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
                                uint32 height, uint32 hot_x, uint32 hot_y);
 int virtio_gpu_user_move_cursor(int32 x, int32 y, int visible);
+int virtio_gpu_user_move_injected_cursor(uint16 x_abs, uint16 y_abs,
+                                         int visible);
 int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
                                     void *dst, uint32 dst_pitch,
                                     uint32 *screen_width,

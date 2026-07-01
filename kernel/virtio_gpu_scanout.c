@@ -438,6 +438,76 @@ virtio_gpu_cursor_qemu_gtk_pixel(uint32 pixel)
            ((uint32)g << 8) | (uint32)r;
 }
 
+static uint64
+virtio_gpu_cursor_alpha_nonzero_count(const uint32 *pixels, uint32 width,
+                                      uint32 height)
+{
+    uint64 count = 0;
+
+    for (uint32 row = 0; row < height; row++) {
+        const uint32 *src = pixels + (uint64)row * width;
+
+        for (uint32 col = 0; col < width; col++) {
+            if ((src[col] >> 24) != 0)
+                count++;
+        }
+    }
+    return count;
+}
+
+static uint32
+virtio_gpu_scale_cursor_abs(uint16 value, uint32 extent)
+{
+    if (extent <= 1)
+        return 0;
+    return (uint32)((((uint64)value * (uint64)(extent - 1)) + 32767u) /
+                    65535u);
+}
+
+static void
+virtio_gpu_fill_default_injected_cursor(uint32 *pixels)
+{
+    static const char *shape[VIRTIO_GPU_INJECTED_CURSOR_H] = {
+        "#...............",
+        "##..............",
+        "#o#.............",
+        "#oo#............",
+        "#ooo#...........",
+        "#oooo#..........",
+        "#ooooo#.........",
+        "#oooooo#........",
+        "#ooooooo#.......",
+        "#oooooooo#......",
+        "#ooooo#####.....",
+        "#oo#oo#.........",
+        "#o#.#oo#........",
+        "##..#oo#........",
+        "#....#oo#.......",
+        ".....#oo#.......",
+        "......##........",
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+        "................",
+    };
+
+    memset(pixels, 0, VIRTIO_GPU_INJECTED_CURSOR_W *
+           VIRTIO_GPU_INJECTED_CURSOR_H * sizeof(uint32));
+    for (uint32 y = 0; y < VIRTIO_GPU_INJECTED_CURSOR_H; y++) {
+        for (uint32 x = 0; x < VIRTIO_GPU_INJECTED_CURSOR_W; x++) {
+            char c = shape[y][x];
+
+            if (c == '#')
+                pixels[y * VIRTIO_GPU_INJECTED_CURSOR_W + x] = 0xff000000u;
+            else if (c == 'o')
+                pixels[y * VIRTIO_GPU_INJECTED_CURSOR_W + x] = 0xffffffffu;
+        }
+    }
+}
+
 /*
  * Upload (or replace) the hardware cursor image.  pixels points to a kernel
  * buffer of width*height BGRA pixels (0xAARRGGBB) with width,height <= 64.
@@ -452,7 +522,9 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
     struct virtio_gpu_resource *res;
     uint32 *dst;
     uint64 fence_id;
+    uint64 alpha_nonzero;
     int qemu_gtk_cursor_compat;
+    int ret;
 
     if (!g->initialized || !g->cursor_ready || pixels == NULL)
         return -ENODEV;
@@ -467,6 +539,22 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
         g->cursor_resource_id = 0;
         g->cursor_visible = 0;
         return 0;
+    }
+
+    alpha_nonzero = virtio_gpu_cursor_alpha_nonzero_count(
+        (const uint32 *)pixels, width, height);
+    if (alpha_nonzero == 0) {
+        g->cursor_resource = NULL;
+        g->cursor_resource_id = 0;
+        g->cursor_hot_x = hot_x;
+        g->cursor_hot_y = hot_y;
+        ret = virtio_gpu_user_move_cursor(g->cursor_x, g->cursor_y, 0);
+        if (virtio_gpu_cmdline_enabled("virtio_gpu_cursor_trace")) {
+            printf("virtio_gpu: cursor upload hidden all-transparent "
+                   "size=%ux%u hot=%u,%u ret=%d\n",
+                   width, height, hot_x, hot_y, ret);
+        }
+        return ret;
     }
 
     mutex_lock(&g->op_lock);
@@ -520,6 +608,12 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
     cmd.hot_y = hot_y;
     g->cursor_visible = 1;
     virtio_gpu_cursor_post(g, &cmd);
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_cursor_trace")) {
+        printf("virtio_gpu: cursor upload visible resource=%u size=%ux%u "
+               "hot=%u,%u alpha_nonzero=%lu compat=%d\n",
+               res->id, width, height, hot_x, hot_y, alpha_nonzero,
+               qemu_gtk_cursor_compat);
+    }
     mutex_unlock(&g->op_lock);
     return 0;
 }
@@ -573,6 +667,61 @@ int virtio_gpu_user_move_cursor(int32 x, int32 y, int visible)
     g->cursor_visible = visible ? 1 : 0;
     virtio_gpu_cursor_post(g, &cmd);
     return 0;
+}
+
+/*
+ * Mirror synthetic absolute /dev/mouse injection into the active hardware
+ * cursor.  This preserves the single-cursor contract:
+ *  - guest hardware cursor mode moves the existing cursor image;
+ *  - before a compositor uploads one, a small built-in arrow is installed;
+ *  - host-cursor-only mode stays a no-op because QEMU's frontend cursor is
+ *    the only visible cursor and harnesses must move it from the host side.
+ */
+int virtio_gpu_user_move_injected_cursor(uint16 x_abs, uint16 y_abs,
+                                         int visible)
+{
+    struct virtio_gpu *g = &gpu;
+    uint32 pixels[VIRTIO_GPU_INJECTED_CURSOR_W *
+                  VIRTIO_GPU_INJECTED_CURSOR_H];
+    uint32 scanout_w;
+    uint32 scanout_h;
+    char value[8];
+    uint32 x;
+    uint32 y;
+    int installed = 0;
+    int ret;
+
+    if (cmdline_get_param("virtio_gpu_injected_cursor", value,
+                          sizeof(value)) == 0 && value[0] == '0')
+        return 0;
+    if (!g->initialized || !g->cursor_ready)
+        return -ENODEV;
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_host_cursor_only"))
+        return 0;
+
+    scanout_w = g->scanout_width ? g->scanout_width : 640;
+    scanout_h = g->scanout_height ? g->scanout_height : 480;
+    x = virtio_gpu_scale_cursor_abs(x_abs, scanout_w);
+    y = virtio_gpu_scale_cursor_abs(y_abs, scanout_h);
+
+    if (visible && g->cursor_resource_id == 0) {
+        virtio_gpu_fill_default_injected_cursor(pixels);
+        ret = virtio_gpu_user_set_cursor(pixels,
+                                         VIRTIO_GPU_INJECTED_CURSOR_W,
+                                         VIRTIO_GPU_INJECTED_CURSOR_H,
+                                         0, 0);
+        if (ret != 0)
+            return ret;
+        installed = 1;
+    }
+
+    ret = virtio_gpu_user_move_cursor((int32)x, (int32)y, visible);
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_injected_cursor_trace")) {
+        printf("virtio_gpu: injected cursor x_abs=%u y_abs=%u x=%u y=%u "
+               "visible=%d installed_default=%d ret=%d\n",
+               x_abs, y_abs, x, y, visible, installed, ret);
+    }
+    return ret;
 }
 
 static int virtio_gpu_queue_init(struct virtio_gpu *g)

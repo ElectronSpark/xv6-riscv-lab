@@ -423,6 +423,22 @@ static void gpu_kms_record_cursor_pixels(const uint32 *pixels, uint32 width,
     fb_state.stats.kms_cursor_last_first_pixel = count != 0 ? pixels[0] : 0;
     fb_state.stats.kms_cursor_last_center_pixel =
         count != 0 ? pixels[(height / 2) * width + (width / 2)] : 0;
+    if (fb_cmdline_enabled("kms_cursor_trace")) {
+        uint32 tl = count != 0 ? pixels[0] : 0;
+        uint32 tr = count != 0 ? pixels[width - 1] : 0;
+        uint32 bl = count != 0 ? pixels[(height - 1) * width] : 0;
+        uint32 br = count != 0 ? pixels[(height - 1) * width + width - 1] : 0;
+        uint32 center = count != 0 ? pixels[(height / 2) * width +
+                                            (width / 2)] : 0;
+
+        printf("gpu_kms_cursor: upload size=%ux%u hot=%u,%u "
+               "alpha_nonzero=%lu alpha_zero=%lu alpha_opaque=%lu "
+               "rgb_nonzero=%lu first=0x%x center=0x%x "
+               "corners=0x%x,0x%x,0x%x,0x%x checksum=%lu\n",
+               width, height, hot_x, hot_y, alpha_nonzero, alpha_zero,
+               alpha_opaque, rgb_nonzero, tl, center, tl, tr, bl, br,
+               checksum);
+    }
 }
 
 static int gpu_kms_upload_cursor_from_bo(struct fb_gpu_render_owner *owner,
