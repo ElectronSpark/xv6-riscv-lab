@@ -48,6 +48,10 @@ uint64 g_vfs_inode_cache_miss_hash;
 uint64 g_vfs_inode_cache_miss_revive_without_wlock;
 uint64 g_vfs_inode_cache_miss_dying;
 uint64 g_vfs_inode_cache_miss_invalid_destroying;
+uint64 g_vfs_inode_cache_read_revive_attempts;
+uint64 g_vfs_inode_cache_read_revive_success;
+uint64 g_vfs_inode_cache_read_revive_lock_fail;
+uint64 g_vfs_inode_cache_read_revive_stale;
 uint64 g_vfs_inode_cache_ticks;
 uint64 g_vfs_inode_load_calls;
 uint64 g_vfs_inode_load_success;
@@ -592,6 +596,14 @@ void kstats_collect(struct kstats *ks) {
         g_vfs_inode_cache_miss_dying;
     ks->vfs_inode_cache_miss_invalid_destroying =
         g_vfs_inode_cache_miss_invalid_destroying;
+    ks->vfs_inode_cache_read_revive_attempts =
+        g_vfs_inode_cache_read_revive_attempts;
+    ks->vfs_inode_cache_read_revive_success =
+        g_vfs_inode_cache_read_revive_success;
+    ks->vfs_inode_cache_read_revive_lock_fail =
+        g_vfs_inode_cache_read_revive_lock_fail;
+    ks->vfs_inode_cache_read_revive_stale =
+        g_vfs_inode_cache_read_revive_stale;
     ks->vfs_inode_cache_ticks =
         g_vfs_inode_cache_ticks;
     ks->vfs_inode_load_calls =

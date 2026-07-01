@@ -235,7 +235,8 @@ retry:
         // under memory pressure (oldest-first).  Mountpoint inodes and
         // root inodes must stay alive, so skip them.
         if (!sb->backendless && !inode->mount &&
-            inode != sb->root_inode) {
+            inode != sb->root_inode &&
+            LIST_NODE_IS_DETACHED(inode, lru_entry)) {
             list_node_push(&sb->inode_lru, inode, lru_entry);
             sb->inode_lru_count++;
         }

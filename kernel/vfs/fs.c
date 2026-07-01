@@ -17,6 +17,7 @@
 #include "vfs/file.h"
 #include "vfs/file_lock.h"
 #include "vfs_private.h"
+#include "cmdline.h"
 #include "list.h"
 #include "hlist.h"
 #include <mm/slab.h>
@@ -78,6 +79,19 @@ static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint);
 static struct fs_struct *__vfs_struct_alloc_init(void);
 static void __vfs_struct_free(struct fs_struct *fs);
 static void vfs_mount_standard_dev_shm(void);
+
+static int vfs_backend_read_revive_enabled(void) {
+    static int cached = -1;
+    char value[16];
+
+    if (cached >= 0)
+        return cached;
+    cached =
+        cmdline_get_param("vfs_backend_read_revive", value, sizeof(value)) ==
+            0 &&
+        cmdline_value_is_true(value);
+    return cached;
+}
 
 /******************************************************************************
  * Private functions
@@ -2323,6 +2337,7 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
     // re-acquired locks to evict it.  If we hold the sb write lock, we can
     // safely revive it (the evicting thread needs sb wlock to proceed).
     bool lru_removed = false;
+    bool inode_locked = false;
     if (!vfs_idup_not_zero(inode)) {
         if (inode->valid && !inode->destroying && inode->n_links > 0) {
             if (sb->backendless || vfs_superblock_wholding(sb)) {
@@ -2333,6 +2348,71 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
                     sb->inode_lru_count--;
                     lru_removed = true;
                 }
+            } else if (vfs_backend_read_revive_enabled()) {
+                if (profile)
+                    __atomic_add_fetch(
+                        &g_vfs_inode_cache_read_revive_attempts, 1,
+                        __ATOMIC_RELAXED);
+                if (!atomic_cas(&inode->ref_count, 0, 1)) {
+                    if (profile)
+                        __atomic_add_fetch(
+                            &g_vfs_inode_cache_read_revive_stale, 1,
+                            __ATOMIC_RELAXED);
+                    if (profile) {
+                        __atomic_add_fetch(&g_vfs_inode_cache_eagain, 1,
+                                           __ATOMIC_RELAXED);
+                        __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                                           r_time() - cache_start,
+                                           __ATOMIC_RELAXED);
+                    }
+                    return ERR_PTR(-EAGAIN);
+                }
+                /*
+                 * Do not detach the LRU node under a superblock read lock.
+                 * Reclaim already treats nonzero-ref LRU entries as stale and
+                 * removes them under the write lock. If this reference drops
+                 * before reclaim sees it, the original LRU entry remains a
+                 * valid candidate and vfs_iput() avoids pushing a duplicate.
+                 */
+                if (!vfs_ilock_trylock(inode)) {
+                    atomic_dec(&inode->ref_count);
+                    if (profile)
+                        __atomic_add_fetch(
+                            &g_vfs_inode_cache_read_revive_lock_fail, 1,
+                            __ATOMIC_RELAXED);
+                    if (profile) {
+                        __atomic_add_fetch(&g_vfs_inode_cache_eagain, 1,
+                                           __ATOMIC_RELAXED);
+                        __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                                           r_time() - cache_start,
+                                           __ATOMIC_RELAXED);
+                    }
+                    return ERR_PTR(-EAGAIN);
+                }
+                inode_locked = true;
+                if (!inode->valid || inode->destroying) {
+                    vfs_iunlock(inode);
+                    atomic_dec(&inode->ref_count);
+                    if (profile)
+                        __atomic_add_fetch(
+                            &g_vfs_inode_cache_read_revive_stale, 1,
+                            __ATOMIC_RELAXED);
+                    if (profile) {
+                        __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
+                                           __ATOMIC_RELAXED);
+                        __atomic_add_fetch(
+                            &g_vfs_inode_cache_miss_invalid_destroying, 1,
+                            __ATOMIC_RELAXED);
+                        __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                                           r_time() - cache_start,
+                                           __ATOMIC_RELAXED);
+                    }
+                    return ERR_PTR(-ENOENT);
+                }
+                if (profile)
+                    __atomic_add_fetch(
+                        &g_vfs_inode_cache_read_revive_success, 1,
+                        __ATOMIC_RELAXED);
             } else {
                 if (profile) {
                     __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
@@ -2365,7 +2445,9 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
      * metadata progress.  Drop the speculative reference and let callers
      * retry after releasing the superblock lock.
      */
-    if (vfs_superblock_wholding(sb)) {
+    if (inode_locked) {
+        /* Read-revive path already took the inode lock. */
+    } else if (vfs_superblock_wholding(sb)) {
         vfs_ilock(inode);
     } else if (!vfs_ilock_trylock(inode)) {
         atomic_dec(&inode->ref_count);
