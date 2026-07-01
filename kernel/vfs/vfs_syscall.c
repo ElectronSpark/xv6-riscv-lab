@@ -259,6 +259,103 @@ static int portal_vfs_trace_process(void)
            strstr(current->thread_group->exec_path, "xdg-document-portal") != NULL;
 }
 
+static int kde_ipc_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_ipc_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_ipc_trace_konsole_only_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_ipc_trace_konsole_only", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_ipc_trace_process_matches(void)
+{
+    if (kde_ready_trace_current())
+        return 1;
+    if (kde_ipc_trace_konsole_only_enabled())
+        return 0;
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "QDBusConnection", 15) == 0 ||
+        strncmp(current->name, "dbus-daemon", 11) == 0 ||
+        strncmp(current->name, "kded5", 5) == 0 ||
+        strncmp(current->name, "kwin_wayland", 12) == 0 ||
+        strncmp(current->name, "plasmashell", 11) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "/konsole") != NULL ||
+           strstr(current->thread_group->exec_path,
+                  "kde-konsole-shell-wrapper") != NULL ||
+           strstr(current->thread_group->exec_path, "/dbus-daemon") != NULL ||
+           strstr(current->thread_group->exec_path, "/kded5") != NULL ||
+           strstr(current->thread_group->exec_path, "/kwin_wayland") != NULL ||
+           strstr(current->thread_group->exec_path, "/plasmashell") != NULL;
+}
+
+static int kde_ipc_trace_file_matches(struct vfs_file *f, char *target,
+                                      size_t target_size)
+{
+    if (target_size != 0)
+        target[0] = '\0';
+    if (!kde_ipc_trace_enabled() || !kde_ipc_trace_process_matches() ||
+        f == NULL)
+        return 0;
+    if (f->ops == &unix_socket_file_ops)
+        return 1;
+    if (f->ops != NULL && f->ops->readlink != NULL && target_size != 0) {
+        ssize_t n = f->ops->readlink(f, target, target_size);
+        if (n >= 0) {
+            size_t len = (n < (ssize_t)target_size - 1) ?
+                (size_t)n : target_size - 1;
+            target[len] = '\0';
+            return strstr(target, "eventfd") != NULL;
+        }
+    }
+    return 0;
+}
+
+static const char *kde_ready_poll_target(struct vfs_file *f, char *buf,
+                                         size_t buflen);
+
+static void kde_ipc_trace_file_op(const char *op, int fd, struct vfs_file *f,
+                                  int count, ssize_t ret)
+{
+    char target[128];
+
+    if (!kde_ipc_trace_file_matches(f, target, sizeof(target)))
+        return;
+    if (target[0] == '\0')
+        (void)kde_ready_poll_target(f, target, sizeof(target));
+    printf("kde-ipc-fd: t=%lu pid=%d tgid=%d name=%s op=%s fd=%d "
+           "file=%p ops=%p flags=0x%x count=%d ret=%ld target=%s\n",
+           sched_timer_now_ms(), current ? current->pid : -1,
+           current ? current->tgid : -1, current ? current->name : "(none)",
+           op, fd, f, f ? f->ops : NULL, f ? f->f_flags : 0, count, ret,
+           target[0] != '\0' ? target : "(unknown)");
+}
+
 static int kde_vfs_trace_process(void)
 {
     if (current == NULL)
@@ -1080,7 +1177,9 @@ uint64 sys_vfs_read(void) {
     }
 
     chrome_unix_rw_trace_payload("read-enter", fd, f, p, n, 0, 1);
+    kde_ipc_trace_file_op("read-enter", fd, f, n, 0);
     ssize_t ret = vfs_fileread(f, (void *)p, n, true);
+    kde_ipc_trace_file_op("read-exit", fd, f, n, ret);
     chrome_unix_rw_trace_payload("read-exit", fd, f, p, n, ret, 0);
     chrome_fd_trace_read_payload(fd, f, p, ret, pos_before);
     chrome_media_fd_trace_file_op("read", fd, f, n, pos_before, ret);
@@ -1119,7 +1218,9 @@ uint64 sys_vfs_write(void) {
     }
 
     chrome_unix_rw_trace_payload("write-enter", fd, f, p, n, 0, 1);
+    kde_ipc_trace_file_op("write-enter", fd, f, n, 0);
     ssize_t ret = vfs_filewrite(f, (const void *)p, n, true);
+    kde_ipc_trace_file_op("write-exit", fd, f, n, ret);
     chrome_unix_rw_trace_payload("write-exit", fd, f, p, n, ret, 0);
     vfs_fput(f);
     if (ret > 0)
@@ -4339,13 +4440,15 @@ static void kde_ready_trace_poll_fds(const char *phase, int nfds,
             name = kde_ready_poll_target(f, target, sizeof(target));
             printf("kde-ready-poll-fd: phase=%s pid=%d tgid=%d name=%s "
                    "fd=%d events=0x%x revents=0x%x kind=%s ops=%p poll=%p "
-                   "notify_backed=%d requires_rescan=%d target=%s\n",
+                   "file=%p f_flags=0x%x notify_backed=%d "
+                   "requires_rescan=%d target=%s\n",
                    phase ? phase : "", current ? current->pid : -1,
                    current ? current->tgid : -1,
                    current ? current->name : "(none)", pfds[i].fd,
                    (uint)pfds[i].events, (uint)pfds[i].revents, kind,
                    f ? f->ops : NULL, (f && f->ops) ? f->ops->poll : NULL,
-                   notify_backed, requires_rescan, name);
+                   f, f ? f->f_flags : 0, notify_backed, requires_rescan,
+                   name);
             printed++;
         }
         if (f != NULL)

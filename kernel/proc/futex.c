@@ -132,25 +132,69 @@ static int kde_futex_trace_enabled(void)
     return enabled;
 }
 
+static int kde_ipc_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_ipc_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_ipc_trace_konsole_only_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_ipc_trace_konsole_only", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
 static int kde_futex_trace_current(void)
 {
-    return current != NULL &&
-        (strncmp(current->name, "QDBusConnection", 15) == 0 ||
-         strncmp(current->name, "kwin_wayland", 12) == 0);
+    if (kde_ipc_trace_konsole_only_enabled())
+        return kde_ready_trace_current();
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "QDBusConnection", 15) == 0 ||
+        strncmp(current->name, "WaylandEventThr", 15) == 0 ||
+        strncmp(current->name, "kwin_wayland", 12) == 0 ||
+        strncmp(current->name, "konsole", 7) == 0 ||
+        strncmp(current->name, "kde-konsole-she", 15) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "/konsole") != NULL ||
+           strstr(current->thread_group->exec_path,
+                  "kde-konsole-shell-wrapper") != NULL;
 }
 
 static void kde_futex_trace_key(const char *phase, uint64 uaddr,
                                 const struct futex_key *key, int op,
                                 uint32 val, uint32 bitset, int ret)
 {
-    if (!kde_futex_trace_enabled() || !kde_futex_trace_current())
+    if ((!kde_futex_trace_enabled() && !kde_ipc_trace_enabled()) ||
+        !kde_futex_trace_current())
         return;
 
-    printf("kde-futex-trace: phase=%s pid=%d tgid=%d name=%s "
+    printf("kde-futex-trace: ms=%lu phase=%s pid=%d tgid=%d name=%s "
            "uaddr=0x%lx key_vm=%p key_addr=0x%lx op=%d val=0x%x "
            "bitset=0x%x ret=%d\n",
-           phase, current->pid, current->tgid, current->name, uaddr,
-           key ? key->vm : NULL, key ? key->addr : 0, op, val, bitset, ret);
+           sched_timer_now_ms(), phase, current->pid, current->tgid,
+           current->name, uaddr, key ? key->vm : NULL,
+           key ? key->addr : 0, op, val, bitset, ret);
 }
 
 struct robust_list_user {

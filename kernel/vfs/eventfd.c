@@ -28,6 +28,77 @@
 #include "kqueue_types.h"
 #include "kqueue.h"
 #include "signal.h"
+#include "cmdline.h"
+#include "kde_ready_trace.h"
+
+static int kde_ipc_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_ipc_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_ipc_trace_konsole_only_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_ipc_trace_konsole_only", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_ipc_trace_process_matches(void)
+{
+    if (kde_ready_trace_current())
+        return 1;
+    if (kde_ipc_trace_konsole_only_enabled())
+        return 0;
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "QDBusConnection", 15) == 0 ||
+        strncmp(current->name, "dbus-daemon", 11) == 0 ||
+        strncmp(current->name, "kded5", 5) == 0 ||
+        strncmp(current->name, "kwin_wayland", 12) == 0 ||
+        strncmp(current->name, "plasmashell", 11) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "/konsole") != NULL ||
+           strstr(current->thread_group->exec_path,
+                  "kde-konsole-shell-wrapper") != NULL ||
+           strstr(current->thread_group->exec_path, "/dbus-daemon") != NULL ||
+           strstr(current->thread_group->exec_path, "/kded5") != NULL ||
+           strstr(current->thread_group->exec_path, "/kwin_wayland") != NULL ||
+           strstr(current->thread_group->exec_path, "/plasmashell") != NULL;
+}
+
+static void kde_ipc_eventfd_trace(const char *op, struct vfs_file *file,
+                                  uint64 before, uint64 after, uint64 value,
+                                  int ret)
+{
+    if (!kde_ipc_trace_enabled() || !kde_ipc_trace_process_matches())
+        return;
+
+    printf("kde-ipc-eventfd: t=%lu pid=%d tgid=%d name=%s op=%s "
+           "file=%p before=%lu after=%lu value=%lu ret=%d\n",
+           sched_timer_now_ms(), current ? current->pid : -1,
+           current ? current->tgid : -1, current ? current->name : "(none)",
+           op, file, before, after, value, ret);
+}
 
 /* eventfd flags (match musl <sys/eventfd.h>) */
 #define EFD_SEMAPHORE 1
@@ -50,6 +121,8 @@ static ssize_t eventfd_read(struct vfs_file *file, char *buf, size_t count,
                             bool user)
 {
     struct eventfd_ctx *ctx = file->private_data;
+    uint64 before = 0;
+    uint64 after = 0;
 
     if (count < sizeof(uint64))
         return -EINVAL;
@@ -71,6 +144,7 @@ static ssize_t eventfd_read(struct vfs_file *file, char *buf, size_t count,
     }
 
     uint64 val;
+    before = ctx->count;
     if (ctx->flags & EFD_SEMAPHORE) {
         val = 1;
         ctx->count--;
@@ -78,6 +152,7 @@ static ssize_t eventfd_read(struct vfs_file *file, char *buf, size_t count,
         val = ctx->count;
         ctx->count = 0;
     }
+    after = ctx->count;
     /* Wake writers that might be waiting for space */
     tq_wakeup_all(&ctx->wq, 0, 0);
     spin_unlock(&ctx->lock);
@@ -93,6 +168,8 @@ static ssize_t eventfd_read(struct vfs_file *file, char *buf, size_t count,
     } else {
         *(uint64 *)buf = val;
     }
+    kde_ipc_eventfd_trace("read", file, before, after, val,
+                          sizeof(uint64));
     return sizeof(uint64);
 }
 
@@ -130,7 +207,9 @@ static ssize_t eventfd_write(struct vfs_file *file, const char *buf,
             return -EINTR;
         }
     }
+    uint64 before = ctx->count;
     ctx->count += val;
+    uint64 after = ctx->count;
 
     /* Linux accepts a zero write, but it does not make the fd readable. */
     if (val != 0)
@@ -141,6 +220,8 @@ static ssize_t eventfd_write(struct vfs_file *file, const char *buf,
     if (val != 0 && ctx->file)
         vfs_file_knote_notify(ctx->file, EVFILT_READ, 0);
 
+    kde_ipc_eventfd_trace("write", file, before, after, val,
+                          sizeof(uint64));
     return sizeof(uint64);
 }
 
@@ -152,12 +233,16 @@ static int eventfd_poll(struct vfs_file *file, short events)
 
     hyperv_input_intr();
     spin_lock(&ctx->lock);
+    uint64 count = ctx->count;
     if (ctx->count > 0)
         revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND));
     if (ctx->count < EVENTFD_MAX)
         revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
     spin_unlock(&ctx->lock);
 
+    if (revents != 0)
+        kde_ipc_eventfd_trace("poll-ready", file, count, count,
+                              (uint64)(uint)events, revents);
     return revents;
 }
 
@@ -223,12 +308,15 @@ int eventfd_signal_file(struct vfs_file *file, uint64 value)
         spin_unlock(&ctx->lock);
         return -EAGAIN;
     }
+    uint64 before = ctx->count;
     ctx->count += value;
+    uint64 after = ctx->count;
     tq_wakeup_all(&ctx->rq, 0, 0);
     spin_unlock(&ctx->lock);
 
     if (ctx->file)
         vfs_file_knote_notify(ctx->file, EVFILT_READ, 0);
+    kde_ipc_eventfd_trace("signal", file, before, after, value, 0);
     return 0;
 }
 

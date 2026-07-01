@@ -39,6 +39,7 @@
 #include "proc/cred.h"
 #include "proc/sched.h"
 #include "signal.h"
+#include "kde_ready_trace.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -682,6 +683,78 @@ static int unix_wayland_trace_process_matches(void)
                   "kde-konsole-shell-wrapper") != NULL;
 }
 
+static int kde_ipc_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_ipc_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_ipc_trace_all_unix_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_ipc_trace_all_unix", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_ipc_trace_konsole_only_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_ipc_trace_konsole_only", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kde_ipc_trace_process_matches(void)
+{
+    if (kde_ready_trace_current())
+        return 1;
+    if (kde_ipc_trace_konsole_only_enabled())
+        return 0;
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "konsole", 7) == 0 ||
+        strncmp(current->name, "kde-konsole-she", 15) == 0 ||
+        strncmp(current->name, "QDBusConnection", 15) == 0 ||
+        strncmp(current->name, "dbus-daemon", 11) == 0 ||
+        strncmp(current->name, "kded5", 5) == 0 ||
+        strncmp(current->name, "kwin_wayland", 12) == 0 ||
+        strncmp(current->name, "plasmashell", 11) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "/konsole") != NULL ||
+           strstr(current->thread_group->exec_path,
+                  "kde-konsole-shell-wrapper") != NULL ||
+           strstr(current->thread_group->exec_path, "/dbus-daemon") != NULL ||
+           strstr(current->thread_group->exec_path, "/kded5") != NULL ||
+           strstr(current->thread_group->exec_path, "/kwin_wayland") != NULL ||
+           strstr(current->thread_group->exec_path, "/plasmashell") != NULL;
+}
+
 static int unix_wayland_path_locked(const struct unix_sock *sk)
 {
     return sk != NULL && sk->bind_len != 0 &&
@@ -711,6 +784,134 @@ static int unix_wayland_socket_matches(struct unix_sock *sk)
     if (peer != NULL)
         unix_sock_put(peer);
     return matched;
+}
+
+static int unix_ipc_path_matches_locked(const struct unix_sock *sk)
+{
+    if (sk == NULL || sk->bind_len == 0)
+        return 0;
+    return strstr(sk->bind_path, "wayland-0") != NULL ||
+           strstr(sk->bind_path, "/bus") != NULL ||
+           strstr(sk->bind_path, "dbus") != NULL;
+}
+
+static int unix_ipc_socket_matches(struct unix_sock *sk)
+{
+    struct unix_sock *peer = NULL;
+    int matched = 0;
+
+    if (sk == NULL)
+        return 0;
+    if (kde_ipc_trace_konsole_only_enabled())
+        return kde_ipc_trace_process_matches();
+    if (kde_ipc_trace_all_unix_enabled())
+        return 1;
+
+    spin_lock(&sk->lock);
+    matched = unix_ipc_path_matches_locked(sk);
+    peer = sk->peer;
+    if (peer != NULL)
+        unix_sock_get(peer);
+    spin_unlock(&sk->lock);
+
+    if (!matched && peer != NULL) {
+        spin_lock(&peer->lock);
+        matched = unix_ipc_path_matches_locked(peer);
+        spin_unlock(&peer->lock);
+    }
+    if (peer != NULL)
+        unix_sock_put(peer);
+    return matched || kde_ipc_trace_process_matches();
+}
+
+static void unix_ipc_copy_path_locked(const struct unix_sock *sk, char *path,
+                                      size_t path_size)
+{
+    size_t n;
+
+    if (path_size == 0 || sk == NULL || sk->bind_len == 0)
+        return;
+    n = sk->bind_len < path_size - 1 ? sk->bind_len : path_size - 1;
+    memmove(path, sk->bind_path, n);
+    path[n] = '\0';
+}
+
+static void unix_ipc_trace(const char *op, struct unix_sock *sk,
+                           long value, long extra)
+{
+    struct unix_sock *peer = NULL;
+    int state, type, pending, flags, bound;
+    uint64 ino;
+    uint tx_read, tx_write;
+    int peer_state = -1;
+    int peer_flags = 0;
+    uint64 peer_ino = 0;
+    uint peer_tx_read = 0, peer_tx_write = 0;
+    int peer_pid = 0;
+    uint32 peer_uid = 0, peer_gid = 0;
+    size_t scm_count, packet_count;
+    size_t peer_scm_count = 0, peer_packet_count = 0;
+    char path[UNIX_PATH_MAX];
+    char peer_path[UNIX_PATH_MAX];
+
+    if (!kde_ipc_trace_enabled() || !unix_ipc_socket_matches(sk))
+        return;
+
+    memset(path, 0, sizeof(path));
+    memset(peer_path, 0, sizeof(peer_path));
+    spin_lock(&sk->lock);
+    state = sk->state;
+    type = sk->type;
+    pending = sk->pending_count;
+    flags = sk->shutdown_flags;
+    bound = sk->bound;
+    ino = sk->proc_ino;
+    scm_count = unix_scm_count_locked(sk);
+    packet_count = unix_packet_count_locked(sk);
+    tx_read = sk->tx.nread;
+    tx_write = sk->tx.nwrite;
+    peer_pid = sk->peer_pid;
+    peer_uid = sk->peer_uid;
+    peer_gid = sk->peer_gid;
+    unix_ipc_copy_path_locked(sk, path, sizeof(path));
+    peer = sk->peer;
+    if (peer != NULL)
+        unix_sock_get(peer);
+    spin_unlock(&sk->lock);
+
+    if (peer != NULL) {
+        spin_lock(&peer->lock);
+        peer_ino = peer->proc_ino;
+        peer_state = peer->state;
+        peer_flags = peer->shutdown_flags;
+        peer_tx_read = peer->tx.nread;
+        peer_tx_write = peer->tx.nwrite;
+        peer_scm_count = unix_scm_count_locked(peer);
+        peer_packet_count = unix_packet_count_locked(peer);
+        unix_ipc_copy_path_locked(peer, peer_path, sizeof(peer_path));
+        spin_unlock(&peer->lock);
+    }
+
+    printf("kde-ipc-unix: t=%lu pid=%d tgid=%d name=%s op=%s sk=%p "
+           "peer=%p ino=%llu peer_ino=%llu state=%d peer_state=%d "
+           "type=%d bound=%d pending=%d flags=0x%x peer_flags=0x%x "
+           "tx=%u/%u peer_tx=%u/%u self_readable=%u peer_readable=%u "
+           "scm=%lu peer_scm=%lu packets=%lu peer_packets=%lu "
+           "peercred=%d:%u:%u value=%ld extra=%ld path=%s peer_path=%s\n",
+           sched_timer_now_ms(), current ? current->pid : -1,
+           current ? current->tgid : -1, current ? current->name : "(none)",
+           op, sk, peer, (unsigned long long)ino,
+           (unsigned long long)peer_ino, state, peer_state, type, bound,
+           pending, flags, peer_flags, tx_read, tx_write, peer_tx_read,
+           peer_tx_write, tx_write - tx_read, peer_tx_write - peer_tx_read,
+           (unsigned long)scm_count, (unsigned long)peer_scm_count,
+           (unsigned long)packet_count, (unsigned long)peer_packet_count,
+           peer_pid, peer_uid, peer_gid, value, extra,
+           path[0] != '\0' ? path : "(anonymous)",
+           peer_path[0] != '\0' ? peer_path : "(anonymous)");
+
+    if (peer != NULL)
+        unix_sock_put(peer);
 }
 
 static void unix_wayland_trace(const char *op, struct unix_sock *sk,
@@ -1420,10 +1621,16 @@ static ssize_t unix_file_read_common(struct vfs_file *file, char *buf,
                                  sk->state, sk->shutdown_flags);
             unix_wayland_trace("read-wait", sk, (long)count, (long)total);
             unix_sock_put(peer);
+            uint64 read_wait_start_ms = kde_ipc_trace_enabled() ?
+                sched_timer_now_ms() : 0;
             spin_lock(&sk->lock);
             tq_wait_in_state(&sk->rd_queue, &sk->lock, NULL,
                              THREAD_INTERRUPTIBLE);
             spin_unlock(&sk->lock);
+            if (kde_ipc_trace_enabled())
+                unix_ipc_trace("read-wait-exit", sk, (long)count,
+                               (long)(sched_timer_now_ms() -
+                                      read_wait_start_ms));
 
             if (signal_pending(current)) {
                 ssize_t ret = total > 0 ? total : -EINTR;
@@ -1557,6 +1764,8 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
                     vfs_file_knote_notify(pf, EVFILT_READ, 0);
                     vfs_fput(pf);
                 }
+                unix_ipc_trace("write-wake-readers", sk, (long)w,
+                               (long)wrote);
             }
             unix_sock_put(peer);
 
@@ -1629,9 +1838,12 @@ static ssize_t unix_file_write(struct vfs_file *file, const char *buf,
             vfs_file_knote_notify(packet_peer_file, EVFILT_READ, 0);
             vfs_fput(packet_peer_file);
         }
+        unix_ipc_trace("write-packet-wake-readers", sk, (long)total,
+                       (long)count);
         unix_sock_put(packet_peer);
     }
 
+    unix_ipc_trace("write", sk, (long)total, (long)count);
     unix_wayland_trace("write", sk, (long)total, (long)count);
     return total;
 }
@@ -1946,8 +2158,10 @@ static int unix_file_poll(struct vfs_file *file, short events)
     }
     if (peer != NULL)
         unix_sock_put(peer);
-    if (revents != 0)
+    if (revents != 0) {
+        unix_ipc_trace("poll-ready", sk, (long)events, (long)revents);
         unix_wayland_trace("poll-ready", sk, (long)events, (long)revents);
+    }
     return revents;
 }
 
@@ -2113,6 +2327,7 @@ int unix_sock_bind(int fd, uint64 uaddr, int addrlen)
     if (sk->state == UNIX_STATE_UNCONNECTED)
         sk->state = UNIX_STATE_BOUND;
     spin_unlock(&sk->lock);
+    unix_ipc_trace("bind", sk, (long)fd, (long)path_len);
     unix_wayland_trace("bind", sk, (long)fd, (long)path_len);
     return 0;
 }
@@ -2142,6 +2357,7 @@ int unix_sock_listen(int fd, int backlog)
                               : 0;
     unix_sock_set_cred_current(sk);
     spin_unlock(&sk->lock);
+    unix_ipc_trace("listen", sk, (long)fd, (long)backlog);
     unix_wayland_trace("listen", sk, (long)fd, (long)backlog);
     return 0;
 }
@@ -2173,13 +2389,20 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
     while (sk->pending_head == NULL) {
         if (nonblock) {
             spin_unlock(&sk->lock);
+            unix_ipc_trace("accept-eagain", sk, (long)fd, (long)flags);
             return -EAGAIN;
         }
+        uint64 wait_start_ms = kde_ipc_trace_enabled() ?
+            sched_timer_now_ms() : 0;
         tq_wait_in_state(&sk->conn_queue, &sk->lock, NULL,
                          THREAD_INTERRUPTIBLE);
         spin_unlock(&sk->lock);
+        if (kde_ipc_trace_enabled())
+            unix_ipc_trace("accept-wait-exit", sk, (long)fd,
+                           (long)(sched_timer_now_ms() - wait_start_ms));
 
         if (signal_pending(current)) {
+            unix_ipc_trace("accept-signal", sk, (long)fd, (long)flags);
             return -EINTR;
         }
 
@@ -2199,6 +2422,7 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
     sk->pending_count--;
     struct unix_sock *server = pen->sock;
     spin_unlock(&sk->lock);
+    unix_ipc_trace("accept-dequeue", sk, (long)fd, (long)flags);
     slab_free(pen);
     unix_sock_get(server); /* keep local pointer stable through fd publish */
 
@@ -2209,6 +2433,7 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
 
     int newfd = unix_fd_alloc(server, file_flags);
     if (newfd < 0) {
+        unix_ipc_trace("accept-fd-fail", server, (long)fd, (long)newfd);
         struct unix_sock *client;
 
         spin_lock(&server->lock);
@@ -2261,6 +2486,7 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
         unix_sock_put(server); /* drop local temporary reference */
         return newfd;
     }
+    unix_ipc_trace("accept-fd", server, (long)newfd, (long)file_flags);
     if (flags & SOCK_CLOEXEC) {
         spin_lock(&current->fdtable->lock);
         vfs_fdtable_set_fdflags(current->fdtable, newfd, FD_CLOEXEC);
@@ -2294,6 +2520,7 @@ int unix_sock_accept(int fd, uint64 uaddr, uint64 uaddrlen, int flags)
         vm_copyout(current->vm, uaddr, &sa, alen);
     }
 
+    unix_ipc_trace("accept", server, (long)newfd, (long)flags);
     unix_wayland_trace("accept", server, (long)newfd, (long)flags);
     unix_sock_put(server); /* drop local temporary reference */
     return newfd;
@@ -2420,12 +2647,18 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
         target->pending_head = pen;
     target->pending_tail = pen;
     target->pending_count++;
+    int pending_after = target->pending_count;
 
     /* Wake up accept() */
     tq_wakeup_all(&target->conn_queue, 0, 0);
     struct vfs_file *target_file =
         target->file ? vfs_fdup(target->file) : NULL;
     spin_unlock(&target->lock);
+    unix_ipc_trace("connect-enqueue", target, (long)fd,
+                   (long)pending_after);
+    unix_ipc_trace("connect-child", server, (long)fd, (long)path_len);
+    unix_ipc_trace("connect-notify", target, (long)fd,
+                   target_file != NULL ? 1L : 0L);
     unix_wayland_trace("connect-notify", target, (long)fd,
                        target_file != NULL ? 1L : 0L);
     if (target_file) {
@@ -2434,6 +2667,7 @@ int unix_sock_connect(int fd, uint64 uaddr, int addrlen)
     }
     unix_sock_put(target);
 
+    unix_ipc_trace("connect", sk, (long)fd, (long)path_len);
     unix_wayland_trace("connect", sk, (long)fd, (long)path_len);
     return 0;
 }
