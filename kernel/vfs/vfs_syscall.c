@@ -50,6 +50,7 @@
 #include "proc/chrome_lifecycle.h"
 #include "proc/tq.h"
 #include "list.h"
+#include "kde_ready_trace.h"
 
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 
@@ -3716,6 +3717,8 @@ uint64 sys_vfs_ioctl(void) {
     }
 
     vfs_fput(f);
+    if (bucket_calls != NULL && kde_ready_trace_current())
+        kde_ready_trace_event("ioctl", fd, (int)cmd, 0, ret, 0);
     if (__sys_profile && bucket_calls != NULL && bucket_ticks != NULL) {
         __atomic_add_fetch(bucket_calls, 1, __ATOMIC_RELAXED);
         __atomic_add_fetch(bucket_ticks, r_time() - __sys_start,
@@ -4381,10 +4384,16 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
             }
         }
 
+        int trace_ready = kde_ready_trace_current();
+        uint64 wait_start_ms = trace_ready ? sched_timer_now_ms() : 0;
         int nevents = kqueue_wait(kq, events, nfds, kq_tmo);
 
         if (nevents < 0 && nevents == -EINTR) {
             ready = -EINTR;
+            if (trace_ready)
+                kde_ready_trace_event("poll-wait", -1, nfds, kq_tmo,
+                                      nevents,
+                                      sched_timer_now_ms() - wait_start_ms);
             break;
         }
 
@@ -4392,6 +4401,13 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
          * revents is correctly populated for copyout. */
         ready = __vfs_poll_scan(pfds, nfds);
         webkit_poll_summary("wait", nfds, timeout_ms, ready, pfds);
+        if (trace_ready) {
+            uint64 wait_ms = sched_timer_now_ms() - wait_start_ms;
+            int arg1 = has_unnotified_fds ? -kq_tmo - 1 : kq_tmo;
+            if (wait_ms >= 50 || ready > 0 || nevents < 0)
+                kde_ready_trace_event("poll-wait", -1, nfds, arg1, ready,
+                                      wait_ms);
+        }
         if (ready > 0)
             break;
 

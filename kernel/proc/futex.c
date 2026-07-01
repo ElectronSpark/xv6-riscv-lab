@@ -28,6 +28,7 @@
 #include "timer/timer.h"
 #include "cmdline.h"
 #include "kstats.h"
+#include "kde_ready_trace.h"
 
 // Futex operations (match Linux values)
 #define FUTEX_WAIT          0
@@ -501,6 +502,8 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
     bucket->head = &waiter;
     kde_futex_trace_key("wait-enqueue", uaddr, &key, FUTEX_WAIT, val,
                         bitset, 0);
+    int trace_ready = kde_ready_trace_current();
+    uint64 wait_start_ms = trace_ready ? sched_timer_now_ms() : 0;
 
     struct timer_node tn = {0};
     uint64 deadline_ms = 0;
@@ -559,12 +562,20 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
     if (signal_pending(current)) {
         kde_futex_trace_key("wait-signal", uaddr, &key, FUTEX_WAIT, val,
                             bitset, -EINTR);
+        if (trace_ready)
+            kde_ready_trace_event("futex-wait", -1, FUTEX_WAIT, has_timeout,
+                                  -EINTR,
+                                  sched_timer_now_ms() - wait_start_ms);
         return -EINTR;
     }
 
     if (timeout_arm_failed) {
         kde_futex_trace_key("wait-timeout-arm-failed", uaddr, &key,
                             FUTEX_WAIT, val, bitset, -ETIMEDOUT);
+        if (trace_ready)
+            kde_ready_trace_event("futex-wait", -1, FUTEX_WAIT, has_timeout,
+                                  -ETIMEDOUT,
+                                  sched_timer_now_ms() - wait_start_ms);
         return -ETIMEDOUT;
     }
 
@@ -572,11 +583,21 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
         sched_timer_now_ms() >= deadline_ms) {
         kde_futex_trace_key("wait-timeout", uaddr, &key, FUTEX_WAIT, val,
                             bitset, -ETIMEDOUT);
+        if (trace_ready)
+            kde_ready_trace_event("futex-wait", -1, FUTEX_WAIT, has_timeout,
+                                  -ETIMEDOUT,
+                                  sched_timer_now_ms() - wait_start_ms);
         return -ETIMEDOUT;
     }
 
     kde_futex_trace_key(still_linked ? "wait-spurious" : "wait-woken",
                         uaddr, &key, FUTEX_WAIT, val, bitset, 0);
+    if (trace_ready) {
+        uint64 wait_ms = sched_timer_now_ms() - wait_start_ms;
+        if (wait_ms >= 50)
+            kde_ready_trace_event("futex-wait", -1, FUTEX_WAIT, has_timeout,
+                                  0, wait_ms);
+    }
     return 0;
 }
 

@@ -36,6 +36,7 @@
 #include "kstats.h"
 #include "timer/timer.h"
 #include "proc/chrome_lifecycle.h"
+#include "kde_ready_trace.h"
 #ifdef CONFIG_ARCH_X86_64
 #include "vdso.h"
 #endif
@@ -476,6 +477,8 @@ int exec(char *path, char **argv, char **envp) {
 
     exec_dbg("pid %d: exec(\"%s\")\n", current->pid, path);
     chrome_exec_phase_trace(path, "begin", exec_start, &exec_phase_last);
+    if (kde_ready_trace_enabled() && kde_ready_trace_path_match(path))
+        kde_ready_trace_event("exec-begin", -1, 0, 0, 0, 0);
     if (p->thread_group != NULL)
         __atomic_store_n(&p->thread_group->exec_in_progress, 1,
                          __ATOMIC_RELEASE);
@@ -1132,6 +1135,9 @@ int exec(char *path, char **argv, char **envp) {
         __atomic_add_fetch(&g_exec_ticks, r_time() - exec_start,
                            __ATOMIC_RELAXED);
     chrome_exec_phase_trace(path, "done", exec_start, &exec_phase_last);
+    if (kde_ready_trace_enabled() && kde_ready_trace_path_match(path))
+        kde_ready_trace_event("exec-done", -1, (int)argc, has_interp, 0,
+                              exec_ticks_to_us(r_time() - exec_start) / 1000);
     return argc; // this ends up in a0, the first argument to main(argc, argv)
 
 bad_locked:
@@ -1139,6 +1145,9 @@ bad_locked:
 bad:
     exec_dbg("  FAILED for \"%s\"\n", path);
     chrome_exec_phase_trace(path, "fail", exec_start, &exec_phase_last);
+    if (kde_ready_trace_enabled() && kde_ready_trace_path_match(path))
+        kde_ready_trace_event("exec-fail", -1, 0, 0, -1,
+                              exec_ticks_to_us(r_time() - exec_start) / 1000);
     vm_put(tmp_vm);
     tmp_vm = NULL;
     if (file) {
