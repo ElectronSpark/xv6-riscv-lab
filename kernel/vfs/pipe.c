@@ -10,6 +10,7 @@
 #include "defs.h"
 #include "string.h"
 #include "printf.h"
+#include "cmdline.h"
 #include "param.h"
 #include "errno.h"
 #include "lock/spinlock.h"
@@ -26,10 +27,19 @@
 #include "mm/slab.h"
 #include "proc/sched.h"
 #include "signal.h"
+#include "timer/timer.h"
 
 static slab_cache_t __pipe_cache = {0};
 
 #define PIPE_IO_CHUNK PAGE_SIZE
+
+static int konsole_prepty_wake_source_trace_enabled(void)
+{
+    char value[16];
+    int enabled = cmdline_get_param("konsole_prepty_wake_source_trace", value,
+                                    sizeof(value));
+    return enabled && value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+}
 
 void pipe_init(void) {
     int ret = slab_cache_init(&__pipe_cache, "pipe_cache", sizeof(struct pipe),
@@ -409,11 +419,36 @@ static ssize_t __pipe_file_write(struct vfs_file *file, const char *buf,
      * outside the lock because kqueue can synchronously poll the source. */
     if (ret > 0) {
         struct vfs_file *rf_ref = NULL;
+        struct vfs_file *rf = NULL;
+        struct vfs_file *wf = NULL;
+        uint nread = 0;
+        uint nwrite = 0;
         spin_lock(&pi->writer_lock);
-        struct vfs_file *rf = pi->read_file;
+        rf = pi->read_file;
+        wf = pi->write_file;
+        nread = pi->nread;
+        nwrite = pi->nwrite;
         if (rf != NULL)
             rf_ref = vfs_fdup(rf);
         spin_unlock(&pi->writer_lock);
+        if (konsole_prepty_wake_source_trace_enabled()) {
+            uint readable_after = nwrite - nread;
+            uint readable_before = readable_after > (uint)ret
+                                       ? readable_after - (uint)ret
+                                       : 0;
+            static uint64 pipe_seq;
+            uint64 id = __atomic_fetch_add(&pipe_seq, 1,
+                                           __ATOMIC_RELAXED) + 1;
+            printf("konsole-prepty-pipe-write: seq=%lu ms=%lu pid=%d "
+                   "tgid=%d name=%s pipe=%p write_file=%p read_file=%p "
+                   "bytes=%ld count=%lu nread=%u nwrite=%u "
+                   "readable_before=%u readable_after=%u\n",
+                   id, sched_timer_now_ms(), current ? current->pid : -1,
+                   current ? current->tgid : -1,
+                   current ? current->name : "(none)", pi, wf, rf,
+                   (long)ret, (uint64)count, nread, nwrite,
+                   readable_before, readable_after);
+        }
         if (rf_ref != NULL) {
             vfs_file_knote_notify(rf_ref, EVFILT_READ, 0);
             vfs_fput(rf_ref);
