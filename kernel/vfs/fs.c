@@ -2114,15 +2114,29 @@ __vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) {
 struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
     struct vfs_inode *inode = NULL;
     bool locked_here = false;
+    int profile = kstats_profile_enabled();
+    uint64 dentry_inode_start = profile ? r_time() : 0;
     KSTATS_PROFILE_INC(g_vfs_dentry_inode_calls);
     if (dentry == NULL) {
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                               r_time() - dentry_inode_start,
+                               __ATOMIC_RELAXED);
         return ERR_PTR(-EINVAL);
     }
     if (dentry->sb == NULL) {
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                               r_time() - dentry_inode_start,
+                               __ATOMIC_RELAXED);
         return ERR_PTR(-EINVAL);
     }
 
     if (!dentry->sb->valid) {
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                               r_time() - dentry_inode_start,
+                               __ATOMIC_RELAXED);
         return ERR_PTR(-EINVAL);
     }
 
@@ -2132,6 +2146,10 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
     inode = __vfs_dentry_get_self_inode(dentry);
     if (inode != NULL) {
         KSTATS_PROFILE_INC(g_vfs_dentry_inode_self_hits);
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                               r_time() - dentry_inode_start,
+                               __ATOMIC_RELAXED);
         return inode;
     }
 
@@ -2146,6 +2164,10 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
         locked_here = true;
         if (!dentry->sb->valid) {
             vfs_superblock_unlock(dentry->sb);
+            if (profile)
+                __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                                   r_time() - dentry_inode_start,
+                                   __ATOMIC_RELAXED);
             return ERR_PTR(-EINVAL);
         }
     }
@@ -2153,6 +2175,9 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
     inode = __vfs_get_dentry_inode_impl(dentry);
     if (locked_here)
         vfs_superblock_unlock(dentry->sb);
+    if (profile)
+        __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                           r_time() - dentry_inode_start, __ATOMIC_RELAXED);
     return inode;
 }
 
@@ -2177,11 +2202,21 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
  */
 struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
     struct vfs_inode *inode = NULL;
+    int profile = kstats_profile_enabled();
+    uint64 dentry_inode_start = profile ? r_time() : 0;
     KSTATS_PROFILE_INC(g_vfs_dentry_inode_calls);
     if (dentry == NULL) {
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                               r_time() - dentry_inode_start,
+                               __ATOMIC_RELAXED);
         return ERR_PTR(-EINVAL);
     }
     if (dentry->sb == NULL) {
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                               r_time() - dentry_inode_start,
+                               __ATOMIC_RELAXED);
         return ERR_PTR(-EINVAL);
     }
 
@@ -2191,11 +2226,14 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
     inode = __vfs_dentry_get_self_inode(dentry);
     if (inode != NULL) {
         KSTATS_PROFILE_INC(g_vfs_dentry_inode_self_hits);
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                               r_time() - dentry_inode_start,
+                               __ATOMIC_RELAXED);
         return inode;
     }
 
 retry:
-    int profile = kstats_profile_enabled();
     uint64 rlock_start = profile ? r_time() : 0;
     if (profile)
         __atomic_add_fetch(&g_vfs_dentry_inode_rlock_calls, 1,
@@ -2206,14 +2244,24 @@ retry:
                            r_time() - rlock_start, __ATOMIC_RELAXED);
     if (!dentry->sb->valid) {
         vfs_superblock_unlock(dentry->sb);
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                               r_time() - dentry_inode_start,
+                               __ATOMIC_RELAXED);
         return ERR_PTR(-EINVAL);
     }
     inode = __vfs_get_dentry_inode_impl(dentry);
     vfs_superblock_unlock(dentry->sb);
     if (IS_ERR(inode) && PTR_ERR(inode) == -EAGAIN) {
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_retries, 1,
+                               __ATOMIC_RELAXED);
         scheduler_yield();
         goto retry;
     }
+    if (profile)
+        __atomic_add_fetch(&g_vfs_dentry_inode_ticks,
+                           r_time() - dentry_inode_start, __ATOMIC_RELAXED);
     return inode;
 }
 
@@ -2258,6 +2306,8 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
         if (profile) {
             __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
                                __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_vfs_inode_cache_miss_hash, 1,
+                               __ATOMIC_RELAXED);
             __atomic_add_fetch(&g_vfs_inode_cache_ticks,
                                r_time() - cache_start, __ATOMIC_RELAXED);
         }
@@ -2287,6 +2337,9 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
                 if (profile) {
                     __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
                                        __ATOMIC_RELAXED);
+                    __atomic_add_fetch(
+                        &g_vfs_inode_cache_miss_revive_without_wlock, 1,
+                        __ATOMIC_RELAXED);
                     __atomic_add_fetch(&g_vfs_inode_cache_ticks,
                                        r_time() - cache_start,
                                        __ATOMIC_RELAXED);
@@ -2296,6 +2349,8 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
         } else {
             if (profile) {
                 __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
+                                   __ATOMIC_RELAXED);
+                __atomic_add_fetch(&g_vfs_inode_cache_miss_dying, 1,
                                    __ATOMIC_RELAXED);
                 __atomic_add_fetch(&g_vfs_inode_cache_ticks,
                                    r_time() - cache_start, __ATOMIC_RELAXED);
@@ -2335,6 +2390,8 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
         __vfs_queue_deferred_iput(inode);
         if (profile) {
             __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
+                               __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_vfs_inode_cache_miss_invalid_destroying, 1,
                                __ATOMIC_RELAXED);
             __atomic_add_fetch(&g_vfs_inode_cache_ticks,
                                r_time() - cache_start, __ATOMIC_RELAXED);

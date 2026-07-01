@@ -29,6 +29,7 @@
 #include "ext4fs_private.h"
 #include "kernel/vfs/vfs_private.h"
 #include "proc/cred.h"
+#include "kstats.h"
 
 #include <ext4_errno.h>
 #include <ext4_fs.h>
@@ -187,19 +188,55 @@ static int ext4fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(dir->sb);
     struct ext4_fs *fs = &esb->ext4fs;
+    int profile = kstats_profile_enabled();
+    uint64 lock_start = profile ? r_time() : 0;
+    uint64 lock_acquired = 0;
+    uint64 stage_start = 0;
 
+    KSTATS_PROFILE_INC(g_ext4_lookup_calls);
     ext4fs_lock(esb);
+    if (profile) {
+        lock_acquired = r_time();
+        __atomic_add_fetch(&g_ext4_lookup_lock_wait_ticks,
+                           lock_acquired - lock_start, __ATOMIC_RELAXED);
+        stage_start = lock_acquired;
+    }
     struct ext4_inode_ref parent_ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)dir->ino, &parent_ref);
+    if (profile) {
+        __atomic_add_fetch(&g_ext4_lookup_parent_ref_ticks,
+                           r_time() - stage_start, __ATOMIC_RELAXED);
+    }
     if (r != EOK) {
+        if (profile) {
+            __atomic_add_fetch(&g_ext4_lookup_lock_hold_ticks,
+                               r_time() - lock_acquired, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_ext4_lookup_errors, 1, __ATOMIC_RELAXED);
+        }
         ext4fs_unlock(esb);
         return -r;
     }
 
     struct ext4_dir_search_result result;
+    if (profile)
+        stage_start = r_time();
     r = ext4_dir_find_entry(&result, &parent_ref, name, (uint32_t)name_len);
+    if (profile) {
+        __atomic_add_fetch(&g_ext4_lookup_dir_find_ticks,
+                           r_time() - stage_start, __ATOMIC_RELAXED);
+    }
     if (r != EOK) {
         ext4_fs_put_inode_ref(&parent_ref);
+        if (profile) {
+            __atomic_add_fetch(&g_ext4_lookup_lock_hold_ticks,
+                               r_time() - lock_acquired, __ATOMIC_RELAXED);
+            if (r == ENOENT)
+                __atomic_add_fetch(&g_ext4_lookup_enoent, 1,
+                                   __ATOMIC_RELAXED);
+            else
+                __atomic_add_fetch(&g_ext4_lookup_errors, 1,
+                                   __ATOMIC_RELAXED);
+        }
         ext4fs_unlock(esb);
         return -r;
     }
@@ -207,6 +244,10 @@ static int ext4fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     uint32_t child_ino = ext4_dir_en_get_inode(result.dentry);
     ext4_dir_destroy_result(&parent_ref, &result);
     ext4_fs_put_inode_ref(&parent_ref);
+    if (profile) {
+        __atomic_add_fetch(&g_ext4_lookup_lock_hold_ticks,
+                           r_time() - lock_acquired, __ATOMIC_RELAXED);
+    }
     ext4fs_unlock(esb);
 
     /* Fill the VFS dentry */
@@ -214,10 +255,13 @@ static int ext4fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     dentry->sb       = dir->sb;
     dentry->parent   = dir;
     dentry->name     = strndup(name, name_len);
-    if (dentry->name == NULL)
+    if (dentry->name == NULL) {
+        KSTATS_PROFILE_INC(g_ext4_lookup_errors);
         return -ENOMEM;
+    }
     dentry->name_len = name_len;
 
+    KSTATS_PROFILE_INC(g_ext4_lookup_found);
     return 0;
 }
 

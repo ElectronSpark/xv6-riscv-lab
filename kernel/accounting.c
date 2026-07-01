@@ -33,6 +33,8 @@ uint64 g_vfs_lookup_cache_misses;
 uint64 g_vfs_lookup_driver_calls;
 uint64 g_vfs_lookup_driver_ticks;
 uint64 g_vfs_dentry_inode_calls;
+uint64 g_vfs_dentry_inode_ticks;
+uint64 g_vfs_dentry_inode_retries;
 uint64 g_vfs_dentry_inode_self_hits;
 uint64 g_vfs_dentry_inode_rlock_calls;
 uint64 g_vfs_dentry_inode_rlock_ticks;
@@ -42,6 +44,10 @@ uint64 g_vfs_inode_cache_calls;
 uint64 g_vfs_inode_cache_hits;
 uint64 g_vfs_inode_cache_misses;
 uint64 g_vfs_inode_cache_eagain;
+uint64 g_vfs_inode_cache_miss_hash;
+uint64 g_vfs_inode_cache_miss_revive_without_wlock;
+uint64 g_vfs_inode_cache_miss_dying;
+uint64 g_vfs_inode_cache_miss_invalid_destroying;
 uint64 g_vfs_inode_cache_ticks;
 uint64 g_vfs_inode_load_calls;
 uint64 g_vfs_inode_load_success;
@@ -69,6 +75,14 @@ uint64 g_ext4_fault_calls;
 uint64 g_ext4_fault_zero_copy;
 uint64 g_ext4_fault_partial_copy;
 uint64 g_ext4_fault_ticks;
+uint64 g_ext4_lookup_calls;
+uint64 g_ext4_lookup_lock_wait_ticks;
+uint64 g_ext4_lookup_lock_hold_ticks;
+uint64 g_ext4_lookup_parent_ref_ticks;
+uint64 g_ext4_lookup_dir_find_ticks;
+uint64 g_ext4_lookup_found;
+uint64 g_ext4_lookup_enoent;
+uint64 g_ext4_lookup_errors;
 
 uint64 g_sys_open_calls;
 uint64 g_sys_open_ticks;
@@ -548,6 +562,10 @@ void kstats_collect(struct kstats *ks) {
         g_vfs_lookup_driver_ticks;
     ks->vfs_dentry_inode_calls =
         g_vfs_dentry_inode_calls;
+    ks->vfs_dentry_inode_ticks =
+        g_vfs_dentry_inode_ticks;
+    ks->vfs_dentry_inode_retries =
+        g_vfs_dentry_inode_retries;
     ks->vfs_dentry_inode_self_hits =
         g_vfs_dentry_inode_self_hits;
     ks->vfs_dentry_inode_rlock_calls =
@@ -566,6 +584,14 @@ void kstats_collect(struct kstats *ks) {
         g_vfs_inode_cache_misses;
     ks->vfs_inode_cache_eagain =
         g_vfs_inode_cache_eagain;
+    ks->vfs_inode_cache_miss_hash =
+        g_vfs_inode_cache_miss_hash;
+    ks->vfs_inode_cache_miss_revive_without_wlock =
+        g_vfs_inode_cache_miss_revive_without_wlock;
+    ks->vfs_inode_cache_miss_dying =
+        g_vfs_inode_cache_miss_dying;
+    ks->vfs_inode_cache_miss_invalid_destroying =
+        g_vfs_inode_cache_miss_invalid_destroying;
     ks->vfs_inode_cache_ticks =
         g_vfs_inode_cache_ticks;
     ks->vfs_inode_load_calls =
@@ -634,6 +660,22 @@ void kstats_collect(struct kstats *ks) {
         g_ext4_fault_partial_copy;
     ks->ext4_fault_ticks =
         g_ext4_fault_ticks;
+    ks->ext4_lookup_calls =
+        g_ext4_lookup_calls;
+    ks->ext4_lookup_lock_wait_ticks =
+        g_ext4_lookup_lock_wait_ticks;
+    ks->ext4_lookup_lock_hold_ticks =
+        g_ext4_lookup_lock_hold_ticks;
+    ks->ext4_lookup_parent_ref_ticks =
+        g_ext4_lookup_parent_ref_ticks;
+    ks->ext4_lookup_dir_find_ticks =
+        g_ext4_lookup_dir_find_ticks;
+    ks->ext4_lookup_found =
+        g_ext4_lookup_found;
+    ks->ext4_lookup_enoent =
+        g_ext4_lookup_enoent;
+    ks->ext4_lookup_errors =
+        g_ext4_lookup_errors;
 
     ks->sys_open_calls =
         g_sys_open_calls;
