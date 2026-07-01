@@ -30,6 +30,9 @@
 #include "timer/timer.h"
 
 static slab_cache_t __pipe_cache = {0};
+static uint64 __pipe_next_id = 1;
+
+int snprintf(char *buf, size_t size, const char *fmt, ...);
 
 #define PIPE_IO_CHUNK PAGE_SIZE
 
@@ -113,6 +116,7 @@ struct pipe *pipe_alloc(int flags) {
     }
 
     // Initialize pipe
+    pi->id = __atomic_fetch_add(&__pipe_next_id, 1, __ATOMIC_RELAXED);
     smp_store_release(&pi->flags, PIPE_FLAGS_RW | flags);
     pi->nwrite = 0;
     pi->nread = 0;
@@ -559,6 +563,15 @@ static int __pipe_file_poll(struct vfs_file *file, short events) {
     return revents;
 }
 
+static ssize_t __pipe_file_readlink(struct vfs_file *file, char *buf,
+                                    size_t buflen)
+{
+    struct pipe *pi = file->pipe;
+    uint64 id = pi != NULL ? pi->id : 0;
+
+    return snprintf(buf, buflen, "pipe:[%llu]", (unsigned long long)id);
+}
+
 static struct vfs_file_ops pipe_file_ops = {
     .flags = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read = __pipe_file_read,
@@ -566,6 +579,7 @@ static struct vfs_file_ops pipe_file_ops = {
     .llseek = NULL,
     .release = __pipe_file_release,
     .fsync = NULL,
+    .readlink = __pipe_file_readlink,
     .poll = __pipe_file_poll,
     .fault = NULL,
 };

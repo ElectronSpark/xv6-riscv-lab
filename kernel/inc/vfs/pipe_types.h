@@ -8,6 +8,7 @@
 struct vfs_file;
 
 struct pipe {
+    uint64 id;
     spinlock_t reader_lock;
     uint nread; // number of bytes read
     tq_t nread_queue;
