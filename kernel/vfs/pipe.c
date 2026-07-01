@@ -35,10 +35,62 @@ static slab_cache_t __pipe_cache = {0};
 
 static int konsole_prepty_wake_source_trace_enabled(void)
 {
+    static int initialized;
+    static int enabled;
     char value[16];
-    int enabled = cmdline_get_param("konsole_prepty_wake_source_trace", value,
-                                    sizeof(value));
-    return enabled && value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+
+    if (!initialized) {
+        enabled = cmdline_get_param("konsole_prepty_wake_source_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int konsole_prepty_current_is_konsole(void)
+{
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "konsole", 7) == 0 ||
+        strncmp(current->name, "kde-konsole-she", 15) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "/konsole") != NULL ||
+           strstr(current->thread_group->exec_path,
+                  "/kde-konsole-shell-wrapper") != NULL;
+}
+
+static int konsole_prepty_pipe_trace_armed(void)
+{
+    static int armed;
+
+    if (!armed && konsole_prepty_current_is_konsole())
+        armed = 1;
+    return armed;
+}
+
+static uint64 konsole_prepty_pipe_trace_limit(void)
+{
+    static uint64 limit;
+    char value[32];
+
+    if (limit == 0) {
+        limit = 512;
+        if (cmdline_get_param("konsole_prepty_wake_source_trace_limit", value,
+                              sizeof(value)) == 0 && value[0] != '\0')
+            limit = strtoul(value, NULL, 10);
+    }
+    return limit;
+}
+
+static int konsole_prepty_pipe_trace_take_slot(void)
+{
+    static uint64 emitted;
+    uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
+
+    return slot < konsole_prepty_pipe_trace_limit();
 }
 
 void pipe_init(void) {
@@ -431,7 +483,9 @@ static ssize_t __pipe_file_write(struct vfs_file *file, const char *buf,
         if (rf != NULL)
             rf_ref = vfs_fdup(rf);
         spin_unlock(&pi->writer_lock);
-        if (konsole_prepty_wake_source_trace_enabled()) {
+        if (konsole_prepty_wake_source_trace_enabled() &&
+            konsole_prepty_pipe_trace_armed() &&
+            konsole_prepty_pipe_trace_take_slot()) {
             uint readable_after = nwrite - nread;
             uint readable_before = readable_after > (uint)ret
                                        ? readable_after - (uint)ret

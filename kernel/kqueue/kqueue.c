@@ -42,10 +42,16 @@ static ssize_t kqueue_file_readlink(struct vfs_file *file, char *buf,
                                     size_t buflen);
 
 static int konsole_prepty_wake_source_trace_enabled(void);
+static int konsole_prepty_wake_source_trace_armed(void);
+static int konsole_prepty_wake_source_trace_take_slot(void);
 static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
                                       int64 data, int matched,
                                       int enqueued_new, int already_queued,
-                                      int propagated);
+                                      int propagated, uint64 first_ident,
+                                      uint64 last_ident, uint64 first_udata,
+                                      uint64 last_udata,
+                                      struct kqueue *first_kq,
+                                      struct kqueue *last_kq);
 
 /* External filter ops (defined in kqueue_filters.c) */
 extern struct knote_ops knote_read_ops;
@@ -91,10 +97,62 @@ static int knote_is_file_filter(struct knote *kn)
 
 static int konsole_prepty_wake_source_trace_enabled(void)
 {
+    static int initialized;
+    static int enabled;
     char value[16];
-    int enabled = cmdline_get_param("konsole_prepty_wake_source_trace", value,
-                                    sizeof(value));
-    return enabled && value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+
+    if (!initialized) {
+        enabled = cmdline_get_param("konsole_prepty_wake_source_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int konsole_prepty_current_is_konsole(void)
+{
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "konsole", 7) == 0 ||
+        strncmp(current->name, "kde-konsole-she", 15) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "/konsole") != NULL ||
+           strstr(current->thread_group->exec_path,
+                  "/kde-konsole-shell-wrapper") != NULL;
+}
+
+static int konsole_prepty_wake_source_trace_armed(void)
+{
+    static int armed;
+
+    if (!armed && konsole_prepty_current_is_konsole())
+        armed = 1;
+    return armed;
+}
+
+static uint64 konsole_prepty_wake_source_trace_limit(void)
+{
+    static uint64 limit;
+    char value[32];
+
+    if (limit == 0) {
+        limit = 512;
+        if (cmdline_get_param("konsole_prepty_wake_source_trace_limit", value,
+                              sizeof(value)) == 0 && value[0] != '\0')
+            limit = strtoul(value, NULL, 10);
+    }
+    return limit;
+}
+
+static int konsole_prepty_wake_source_trace_take_slot(void)
+{
+    static uint64 emitted;
+    uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
+
+    return slot < konsole_prepty_wake_source_trace_limit();
 }
 
 static void konsole_prepty_readlink_target(struct vfs_file *file, char *buf,
@@ -108,16 +166,28 @@ static void konsole_prepty_readlink_target(struct vfs_file *file, char *buf,
     ssize_t n = file->ops->readlink(file, buf, buflen);
     if (n < 0)
         buf[0] = '\0';
-    else if ((size_t)n >= buflen)
-        buf[buflen - 1] = '\0';
+    else {
+        size_t end = (size_t)n < buflen - 1 ? (size_t)n : buflen - 1;
+        buf[end] = '\0';
+    }
 }
 
 static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
                                       int64 data, int matched,
                                       int enqueued_new, int already_queued,
-                                      int propagated)
+                                      int propagated, uint64 first_ident,
+                                      uint64 last_ident, uint64 first_udata,
+                                      uint64 last_udata,
+                                      struct kqueue *first_kq,
+                                      struct kqueue *last_kq)
 {
     if (!konsole_prepty_wake_source_trace_enabled())
+        return;
+    if (!konsole_prepty_wake_source_trace_armed())
+        return;
+    if (matched == 0 && propagated == 0)
+        return;
+    if (!konsole_prepty_wake_source_trace_take_slot())
         return;
 
     static uint64 seq;
@@ -128,6 +198,11 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
 
     uint64 ino = 0;
     uint64 peer_ino = 0;
+    int unix_type = -1;
+    int unix_state = -1;
+    int unix_shutdown = 0;
+    int unix_bind_len = 0;
+    int unix_peer_bind_len = 0;
     char path[UNIX_PATH_MAX];
     char peer_path[UNIX_PATH_MAX];
     path[0] = '\0';
@@ -140,6 +215,10 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
             struct unix_sock *peer = NULL;
             spin_lock(&sk->lock);
             ino = sk->proc_ino;
+            unix_type = sk->type;
+            unix_state = sk->state;
+            unix_shutdown = sk->shutdown_flags;
+            unix_bind_len = (int)sk->bind_len;
             if (sk->bound && sk->bind_len > 0)
                 safestrcpy(path, sk->bind_path, sizeof(path));
             peer = sk->peer;
@@ -150,6 +229,7 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
             if (peer != NULL) {
                 spin_lock(&peer->lock);
                 peer_ino = peer->proc_ino;
+                unix_peer_bind_len = (int)peer->bind_len;
                 if (peer->bound && peer->bind_len > 0)
                     safestrcpy(peer_path, peer->bind_path, sizeof(peer_path));
                 spin_unlock(&peer->lock);
@@ -171,11 +251,16 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
     printf("konsole-prepty-wake-source: seq=%lu ms=%lu pid=%d tgid=%d "
            "name=%s file=%p kind=%s target=%s filter=%d data=%ld "
            "matched=%d enqueued_new=%d already_queued=%d propagated=%d "
-           "unix_ino=%lu unix_peer_ino=%lu path=%s peer_path=%s\n",
+           "first_ident=%lu last_ident=%lu first_udata=%lu last_udata=%lu "
+           "first_kq=%p last_kq=%p unix_ino=%lu unix_peer_ino=%lu "
+           "unix_type=%d unix_state=%d unix_shutdown=0x%x "
+           "unix_bind_len=%d unix_peer_bind_len=%d path=%s peer_path=%s\n",
            id, sched_timer_now_ms(), current ? current->pid : -1,
            current ? current->tgid : -1, current ? current->name : "(none)",
            file, kind, target, filter, (long)data, matched, enqueued_new,
-           already_queued, propagated, ino, peer_ino,
+           already_queued, propagated, first_ident, last_ident, first_udata,
+           last_udata, first_kq, last_kq, ino, peer_ino, unix_type,
+           unix_state, unix_shutdown, unix_bind_len, unix_peer_bind_len,
            path[0] ? path : "-", peer_path[0] ? peer_path : "-");
 }
 
@@ -640,9 +725,23 @@ void vfs_file_knote_notify(struct vfs_file *file, int filter, int64 data) {
     int matched = 0;
     int enqueued_new = 0;
     int already_queued = 0;
+    uint64 first_ident = 0;
+    uint64 last_ident = 0;
+    uint64 first_udata = 0;
+    uint64 last_udata = 0;
+    struct kqueue *first_kq = NULL;
+    struct kqueue *last_kq = NULL;
     list_foreach_node_safe(&file->knote_list, kn, tmp, source_entry) {
         if (kn->filter == filter) {
             matched++;
+            if (matched == 1) {
+                first_ident = kn->ident;
+                first_udata = kn->udata;
+                first_kq = kn->kq;
+            }
+            last_ident = kn->ident;
+            last_udata = kn->udata;
+            last_kq = kn->kq;
             int was_queued = (kn->status & KN_QUEUED) != 0;
             struct vfs_file *kq_file =
                 __knote_enqueue_core(kn, data, 0);
@@ -661,7 +760,8 @@ void vfs_file_knote_notify(struct vfs_file *file, int filter, int64 data) {
     spin_unlock(&file->knote_lock);
 
     konsole_prepty_trace_file(file, filter, data, matched, enqueued_new,
-                              already_queued, nprop);
+                              already_queued, nprop, first_ident, last_ident,
+                              first_udata, last_udata, first_kq, last_kq);
 
     /* Propagate to outer kqueues/polls without holding any knote_lock */
     for (int i = 0; i < nprop; i++) {
