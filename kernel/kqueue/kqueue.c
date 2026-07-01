@@ -26,6 +26,7 @@
 #include "vfs/unix_socket.h"
 #include "kqueue.h"
 #include "kqueue_types.h"
+#include "ksymbols.h"
 #include "list.h"
 #include "signal.h"
 #include "timer/timer.h"
@@ -51,7 +52,8 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
                                       uint64 last_ident, uint64 first_udata,
                                       uint64 last_udata,
                                       struct kqueue *first_kq,
-                                      struct kqueue *last_kq);
+                                      struct kqueue *last_kq,
+                                      void *origin);
 
 /* External filter ops (defined in kqueue_filters.c) */
 extern struct knote_ops knote_read_ops;
@@ -179,7 +181,8 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
                                       uint64 last_ident, uint64 first_udata,
                                       uint64 last_udata,
                                       struct kqueue *first_kq,
-                                      struct kqueue *last_kq)
+                                      struct kqueue *last_kq,
+                                      void *origin)
 {
     if (!konsole_prepty_wake_source_trace_enabled())
         return;
@@ -205,6 +208,23 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
     char peer_path[UNIX_PATH_MAX];
     path[0] = '\0';
     peer_path[0] = '\0';
+    char origin_sym[64];
+    char origin_file[64];
+    uint32 origin_line = 0;
+    int origin_off = 0;
+    origin_sym[0] = '\0';
+    origin_file[0] = '\0';
+    if (origin != NULL) {
+        if (ksym_lookup((uint64)origin, origin_sym, sizeof(origin_sym),
+                        NULL) < 0)
+            origin_sym[0] = '\0';
+        ksymbols_t *sym = ksym_search((uint64)origin);
+        if (sym != NULL) {
+            ksym_get_location(sym, origin_file, sizeof(origin_file),
+                              &origin_line);
+            origin_off = ksym_get_offset(sym, (uint64)origin);
+        }
+    }
 
     if (file != NULL && file->ops == &unix_socket_file_ops) {
         kind = "unix";
@@ -252,14 +272,18 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
            "first_ident=%lu last_ident=%lu first_udata=%lu last_udata=%lu "
            "first_kq=%p last_kq=%p unix_ino=%lu unix_peer_ino=%lu "
            "unix_type=%d unix_state=%d unix_shutdown=0x%x "
-           "unix_bind_len=%d unix_peer_bind_len=%d path=%s peer_path=%s\n",
+           "unix_bind_len=%d unix_peer_bind_len=%d path=%s peer_path=%s "
+           "origin=%p origin_sym=%s origin_off=%d origin_file=%s "
+           "origin_line=%u\n",
            id, sched_timer_now_ms(), current ? current->pid : -1,
            current ? current->tgid : -1, current ? current->name : "(none)",
            file, kind, target, filter, (long)data, matched, enqueued_new,
            already_queued, propagated, first_ident, last_ident, first_udata,
            last_udata, first_kq, last_kq, ino, peer_ino, unix_type,
            unix_state, unix_shutdown, unix_bind_len, unix_peer_bind_len,
-           path[0] ? path : "-", peer_path[0] ? peer_path : "-");
+           path[0] ? path : "-", peer_path[0] ? peer_path : "-", origin,
+           origin_sym[0] ? origin_sym : "-", origin_off,
+           origin_file[0] ? origin_file : "-", origin_line);
 }
 
 static int knote_is_clear_file_filter(struct knote *kn)
@@ -699,7 +723,9 @@ void knote_enqueue_with_data(struct knote *kn, int64 data, uint32 fflags) {
  * the kqueue propagation path loops back to the original file.
  */
 #define MAX_KNOTE_PROPAGATE 16
-void vfs_file_knote_notify(struct vfs_file *file, int filter, int64 data) {
+static void vfs_file_knote_notify_origin(struct vfs_file *file, int filter,
+                                         int64 data, void *origin)
+{
     if (file == NULL)
         return;
 
@@ -759,13 +785,20 @@ void vfs_file_knote_notify(struct vfs_file *file, int filter, int64 data) {
 
     konsole_prepty_trace_file(file, filter, data, matched, enqueued_new,
                               already_queued, nprop, first_ident, last_ident,
-                              first_udata, last_udata, first_kq, last_kq);
+                              first_udata, last_udata, first_kq, last_kq,
+                              origin);
 
     /* Propagate to outer kqueues/polls without holding any knote_lock */
     for (int i = 0; i < nprop; i++) {
-        vfs_file_knote_notify(propagate[i], EVFILT_READ, 0);
+        vfs_file_knote_notify_origin(propagate[i], EVFILT_READ, 0, origin);
         vfs_fput(propagate[i]);
     }
+}
+
+void vfs_file_knote_notify(struct vfs_file *file, int filter, int64 data)
+{
+    vfs_file_knote_notify_origin(file, filter, data,
+                                 __builtin_return_address(0));
 }
 
 /*
