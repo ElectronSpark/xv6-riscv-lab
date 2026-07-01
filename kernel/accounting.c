@@ -32,6 +32,20 @@ uint64 g_vfs_lookup_negative_hits;
 uint64 g_vfs_lookup_cache_misses;
 uint64 g_vfs_lookup_driver_calls;
 uint64 g_vfs_lookup_driver_ticks;
+uint64 g_vfs_dentry_inode_calls;
+uint64 g_vfs_dentry_inode_self_hits;
+uint64 g_vfs_dentry_inode_rlock_calls;
+uint64 g_vfs_dentry_inode_rlock_ticks;
+uint64 g_vfs_dentry_inode_upgrade_calls;
+uint64 g_vfs_dentry_inode_upgrade_ticks;
+uint64 g_vfs_inode_cache_calls;
+uint64 g_vfs_inode_cache_hits;
+uint64 g_vfs_inode_cache_misses;
+uint64 g_vfs_inode_cache_eagain;
+uint64 g_vfs_inode_cache_ticks;
+uint64 g_vfs_inode_load_calls;
+uint64 g_vfs_inode_load_success;
+uint64 g_vfs_inode_load_ticks;
 
 uint64 g_vm_copyin_calls;
 uint64 g_vm_copyout_calls;
@@ -92,12 +106,35 @@ uint64 g_sys_brk_calls;
 uint64 g_sys_brk_ticks;
 uint64 g_sys_clock_gettime_calls;
 uint64 g_sys_clock_gettime_ticks;
+uint64 g_sys_clock_gettime_monotonic_calls;
+uint64 g_sys_clock_gettime_monotonic_ticks;
+uint64 g_sys_clock_gettime_monotonic_coarse_calls;
+uint64 g_sys_clock_gettime_monotonic_coarse_ticks;
+uint64 g_sys_clock_gettime_realtime_calls;
+uint64 g_sys_clock_gettime_realtime_ticks;
+uint64 g_sys_clock_gettime_process_calls;
+uint64 g_sys_clock_gettime_process_ticks;
+uint64 g_sys_clock_gettime_thread_calls;
+uint64 g_sys_clock_gettime_thread_ticks;
+uint64 g_sys_clock_gettime_other_calls;
+uint64 g_sys_clock_gettime_other_ticks;
 uint64 g_sys_gettimeofday_calls;
 uint64 g_sys_gettimeofday_ticks;
 uint64 g_sys_getrandom_calls;
 uint64 g_sys_getrandom_ticks;
 uint64 g_exec_calls;
 uint64 g_exec_ticks;
+uint64 g_sys_openat_path_copy_calls;
+uint64 g_sys_openat_path_copy_ticks;
+uint64 g_sys_openat_dirfd_calls;
+uint64 g_sys_openat_dirfd_ticks;
+uint64 g_sys_openat_lookup_calls;
+uint64 g_sys_openat_lookup_ticks;
+uint64 g_sys_openat_fileopen_calls;
+uint64 g_sys_openat_fileopen_ticks;
+uint64 g_sys_openat_fdalloc_calls;
+uint64 g_sys_openat_fdalloc_ticks;
+int g_kstats_profile_enabled;
 
 int snprintf(char *buf, size_t size, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
@@ -509,6 +546,34 @@ void kstats_collect(struct kstats *ks) {
         g_vfs_lookup_driver_calls;
     ks->vfs_lookup_driver_ticks =
         g_vfs_lookup_driver_ticks;
+    ks->vfs_dentry_inode_calls =
+        g_vfs_dentry_inode_calls;
+    ks->vfs_dentry_inode_self_hits =
+        g_vfs_dentry_inode_self_hits;
+    ks->vfs_dentry_inode_rlock_calls =
+        g_vfs_dentry_inode_rlock_calls;
+    ks->vfs_dentry_inode_rlock_ticks =
+        g_vfs_dentry_inode_rlock_ticks;
+    ks->vfs_dentry_inode_upgrade_calls =
+        g_vfs_dentry_inode_upgrade_calls;
+    ks->vfs_dentry_inode_upgrade_ticks =
+        g_vfs_dentry_inode_upgrade_ticks;
+    ks->vfs_inode_cache_calls =
+        g_vfs_inode_cache_calls;
+    ks->vfs_inode_cache_hits =
+        g_vfs_inode_cache_hits;
+    ks->vfs_inode_cache_misses =
+        g_vfs_inode_cache_misses;
+    ks->vfs_inode_cache_eagain =
+        g_vfs_inode_cache_eagain;
+    ks->vfs_inode_cache_ticks =
+        g_vfs_inode_cache_ticks;
+    ks->vfs_inode_load_calls =
+        g_vfs_inode_load_calls;
+    ks->vfs_inode_load_success =
+        g_vfs_inode_load_success;
+    ks->vfs_inode_load_ticks =
+        g_vfs_inode_load_ticks;
 
     ks->vm_copyin_calls =
         g_vm_copyin_calls;
@@ -518,6 +583,22 @@ void kstats_collect(struct kstats *ks) {
         g_vm_copyin_bytes;
     ks->vm_copyout_bytes =
         g_vm_copyout_bytes;
+    ks->vm_copyout_fast_hits =
+        g_vm_copyout_fast_hits;
+    ks->vm_copyout_fast_bytes =
+        g_vm_copyout_fast_bytes;
+    ks->vm_copyin_fast_hits =
+        g_vm_copyin_fast_hits;
+    ks->vm_copyin_fast_bytes =
+        g_vm_copyin_fast_bytes;
+    ks->vm_copyout_present_skip_hits =
+        g_vm_copyout_present_skip_hits;
+    ks->vm_copyout_present_skip_bytes =
+        g_vm_copyout_present_skip_bytes;
+    ks->vm_copyin_present_skip_hits =
+        g_vm_copyin_present_skip_hits;
+    ks->vm_copyin_present_skip_bytes =
+        g_vm_copyin_present_skip_bytes;
     ks->vm_vma_validate_calls =
         g_vm_vma_validate_calls;
     ks->vm_vma_validate_ticks =
@@ -626,6 +707,30 @@ void kstats_collect(struct kstats *ks) {
         g_sys_clock_gettime_calls;
     ks->sys_clock_gettime_ticks =
         g_sys_clock_gettime_ticks;
+    ks->sys_clock_gettime_monotonic_calls =
+        g_sys_clock_gettime_monotonic_calls;
+    ks->sys_clock_gettime_monotonic_ticks =
+        g_sys_clock_gettime_monotonic_ticks;
+    ks->sys_clock_gettime_monotonic_coarse_calls =
+        g_sys_clock_gettime_monotonic_coarse_calls;
+    ks->sys_clock_gettime_monotonic_coarse_ticks =
+        g_sys_clock_gettime_monotonic_coarse_ticks;
+    ks->sys_clock_gettime_realtime_calls =
+        g_sys_clock_gettime_realtime_calls;
+    ks->sys_clock_gettime_realtime_ticks =
+        g_sys_clock_gettime_realtime_ticks;
+    ks->sys_clock_gettime_process_calls =
+        g_sys_clock_gettime_process_calls;
+    ks->sys_clock_gettime_process_ticks =
+        g_sys_clock_gettime_process_ticks;
+    ks->sys_clock_gettime_thread_calls =
+        g_sys_clock_gettime_thread_calls;
+    ks->sys_clock_gettime_thread_ticks =
+        g_sys_clock_gettime_thread_ticks;
+    ks->sys_clock_gettime_other_calls =
+        g_sys_clock_gettime_other_calls;
+    ks->sys_clock_gettime_other_ticks =
+        g_sys_clock_gettime_other_ticks;
     ks->sys_gettimeofday_calls =
         g_sys_gettimeofday_calls;
     ks->sys_gettimeofday_ticks =
@@ -638,6 +743,31 @@ void kstats_collect(struct kstats *ks) {
         g_exec_calls;
     ks->exec_ticks =
         g_exec_ticks;
+    ks->sys_openat_path_copy_calls =
+        g_sys_openat_path_copy_calls;
+    ks->sys_openat_path_copy_ticks =
+        g_sys_openat_path_copy_ticks;
+    ks->sys_openat_dirfd_calls =
+        g_sys_openat_dirfd_calls;
+    ks->sys_openat_dirfd_ticks =
+        g_sys_openat_dirfd_ticks;
+    ks->sys_openat_lookup_calls =
+        g_sys_openat_lookup_calls;
+    ks->sys_openat_lookup_ticks =
+        g_sys_openat_lookup_ticks;
+    ks->sys_openat_fileopen_calls =
+        g_sys_openat_fileopen_calls;
+    ks->sys_openat_fileopen_ticks =
+        g_sys_openat_fileopen_ticks;
+    ks->sys_openat_fdalloc_calls =
+        g_sys_openat_fdalloc_calls;
+    ks->sys_openat_fdalloc_ticks =
+        g_sys_openat_fdalloc_ticks;
+}
+
+void kstats_profile_set(int enabled) {
+    __atomic_store_n(&g_kstats_profile_enabled, enabled != 0,
+                     __ATOMIC_RELAXED);
 }
 
 /*
@@ -660,5 +790,12 @@ uint64 sys_kstats(void) {
     if (vm_copyout(current->vm, uaddr, (char *)&ks, sizeof(ks)) < 0)
         return -EFAULT;
 
+    return 0;
+}
+
+uint64 sys_kstatsctl(void) {
+    int enabled;
+    argint(0, &enabled);
+    kstats_profile_set(enabled != 0);
     return 0;
 }

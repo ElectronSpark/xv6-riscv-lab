@@ -419,6 +419,19 @@ struct virtio_gpu_stats {
     uint64 async_make_room_wait_ticks;
     uint64 async_make_room_last_wait_us;
     uint64 async_make_room_max_wait_us;
+    uint64 present_copy_calls;
+    uint64 present_copy_drain_calls;
+    uint64 present_copy_src_fence_drains;
+    uint64 present_copy_blanket_drains;
+    uint64 present_copy_src_fence_only_drains;
+    uint64 present_copy_blanket_only_drains;
+    uint64 present_copy_src_fence_blanket_drains;
+    uint64 present_copy_no_drain_skips;
+    uint64 present_copy_minimal_skips;
+    uint64 present_copy_drain_failures;
+    uint64 present_copy_drain_ticks;
+    uint64 present_copy_drain_last_us;
+    uint64 present_copy_drain_max_us;
     uint64 submit_trace_submit_calls;
     uint64 submit_trace_submit_ticks;
     uint64 submit_trace_lock_wait_ticks;
@@ -439,6 +452,18 @@ struct virtio_gpu_stats {
     uint64 submit_trace_async_wait_progress_calls;
     uint64 submit_trace_async_wait_progress_ticks;
     uint64 submit_trace_async_make_room_ticks;
+    uint64 submit_trace_async_make_room_depth_max;
+    uint64 submit_trace_async_make_room_count_max;
+    uint64 submit_trace_async_make_room_wait_count_max;
+    uint64 submit_trace_async_post_count_max;
+    uint64 submit_trace_async_retire_ticks;
+    uint64 submit_trace_async_retire_max_us;
+    uint64 submit_trace_async_retire_submit_3d_ticks;
+    uint64 submit_trace_async_retire_submit_3d_max_us;
+    uint64 submit_trace_async_retire_flush_ticks;
+    uint64 submit_trace_async_retire_flush_max_us;
+    uint64 submit_trace_async_retire_transfer_ticks;
+    uint64 submit_trace_async_retire_transfer_max_us;
     uint64 submit_trace_emitted_submit_calls;
     uint64 submit_trace_emitted_fence_calls;
     uint64 submit_trace_emitted_wait_for_used_calls;
@@ -546,6 +571,9 @@ struct virtio_gpu_submit_trace_owner_counts {
     uint64 make_room_ticks;
     uint64 make_room_wait_ticks;
     uint64 make_room_max_wait_ticks;
+    uint64 make_room_depth_max;
+    uint64 make_room_count_max;
+    uint64 make_room_wait_count_max;
     uint64 wait_progress_calls;
     uint64 wait_progress_ticks;
     uint64 wait_progress_max_ticks;
@@ -553,7 +581,39 @@ struct virtio_gpu_submit_trace_owner_counts {
     uint64 wait_used_ticks;
     uint64 wait_used_max_ticks;
     uint64 posted;
+    uint64 post_count_max;
     uint64 retired;
+    uint64 retire_ticks;
+    uint64 retire_max_ticks;
+    uint64 retired_submit_3d;
+    uint64 retire_submit_3d_ticks;
+    uint64 retire_submit_3d_max_ticks;
+    uint64 retired_flush;
+    uint64 retire_flush_ticks;
+    uint64 retire_flush_max_ticks;
+    uint64 retired_transfer;
+    uint64 retire_transfer_ticks;
+    uint64 retire_transfer_max_ticks;
+    uint64 retired_other;
+    uint64 retire_other_ticks;
+    uint64 retire_other_max_ticks;
+    uint64 shape_submit_calls;
+    uint64 shape_make_room_calls;
+    uint64 shape_make_room_stalls;
+    uint64 shape_make_room_ticks;
+    uint64 shape_make_room_wait_ticks;
+    uint64 shape_make_room_max_wait_ticks;
+    uint64 shape_make_room_depth_max;
+    uint64 shape_make_room_count_max;
+    uint64 shape_make_room_wait_count_max;
+    uint64 shape_posted;
+    uint64 shape_post_count_max;
+    uint64 shape_retired;
+    uint64 shape_retire_ticks;
+    uint64 shape_retire_max_ticks;
+    uint64 shape_failures;
+    uint64 shape_mixed;
+    struct virtio_gpu_submit_trace_shape shape;
     uint64 first_submit;
     uint64 failures;
     int last_ret;
@@ -566,6 +626,21 @@ struct virtio_gpu_submit_trace_owner {
     struct virtio_gpu_submit_trace_owner_counts total;
     struct virtio_gpu_submit_trace_owner_counts emitted;
     uint64 pending_make_room_max_wait_ticks;
+    uint64 pending_make_room_depth_max;
+    uint64 pending_make_room_count_max;
+    uint64 pending_make_room_wait_count_max;
+    uint64 pending_post_count_max;
+    uint64 pending_retire_max_ticks;
+    uint64 pending_retire_submit_3d_max_ticks;
+    uint64 pending_retire_flush_max_ticks;
+    uint64 pending_retire_transfer_max_ticks;
+    uint64 pending_retire_other_max_ticks;
+    uint64 pending_shape_make_room_max_wait_ticks;
+    uint64 pending_shape_make_room_depth_max;
+    uint64 pending_shape_make_room_count_max;
+    uint64 pending_shape_make_room_wait_count_max;
+    uint64 pending_shape_post_count_max;
+    uint64 pending_shape_retire_max_ticks;
     uint64 pending_wait_progress_max_ticks;
     uint64 pending_wait_used_max_ticks;
 };
@@ -594,6 +669,7 @@ struct virtio_gpu_async_submit {
     uint32 resp_len;
     uint64 posted_ticks;
     struct virtio_gpu_submit_trace_key trace_key;
+    struct virtio_gpu_submit_trace_shape trace_shape;
     completion_t done;
 };
 
@@ -665,6 +741,7 @@ struct virtio_gpu {
     struct virtio_gpu_submit_trace_owner
         submit_trace_owners[VIRTIO_GPU_SUBMIT_TRACE_OWNER_SLOTS];
     struct virtio_gpu_submit_trace_key submit_trace_current;
+    struct virtio_gpu_submit_trace_shape submit_trace_current_shape;
     int submit_trace_current_valid;
     uint64 next_fence_id;
     struct virtio_gpu_async_submit async_ring[VIRTIO_GPU_ASYNC_MAX_DEPTH];
@@ -951,6 +1028,88 @@ static int virtio_gpu_submit_trace_enabled(void)
     return cached;
 }
 
+static int virtio_gpu_submit_hot_shape_trace_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = virtio_gpu_cmdline_enabled(
+            "virtio_gpu_submit_hot_shape_trace");
+    return cached;
+}
+
+static int virtio_gpu_submit_hot_shape_stats_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = virtio_gpu_cmdline_enabled(
+            "virtio_gpu_submit_hot_shape_stats");
+    return cached;
+}
+
+static int virtio_gpu_submit_trace_collect_enabled(void)
+{
+    return virtio_gpu_submit_trace_enabled() ||
+        virtio_gpu_submit_hot_shape_trace_enabled() ||
+        virtio_gpu_submit_hot_shape_stats_enabled();
+}
+
+static int virtio_gpu_submit_trace_shape_valid(
+    const struct virtio_gpu_submit_trace_shape *shape)
+{
+    return shape != NULL && shape->valid != 0;
+}
+
+static int virtio_gpu_submit_trace_shape_matches(
+    const struct virtio_gpu_submit_trace_shape *a,
+    const struct virtio_gpu_submit_trace_shape *b)
+{
+    return a->drm_flags == b->drm_flags &&
+        a->nr_dwords == b->nr_dwords &&
+        a->resource_count == b->resource_count &&
+        a->first_word == b->first_word;
+}
+
+static int virtio_gpu_submit_trace_shape_is_glx_hot(
+    const struct virtio_gpu_submit_trace_shape *shape)
+{
+    if (!virtio_gpu_submit_trace_shape_valid(shape))
+        return 0;
+    /*
+     * Userspace sees the exported out-fence fd after ioctl return; the kernel
+     * trace shape is captured before export, so key on the OUT request bit.
+     */
+    return shape->drm_flags == 0x2 &&
+        shape->nr_dwords == 1026 &&
+        shape->resource_count == 0;
+}
+
+static int virtio_gpu_submit_trace_full_or_hot_shape(
+    const struct virtio_gpu_submit_trace_shape *shape)
+{
+    return virtio_gpu_submit_trace_enabled() ||
+        ((virtio_gpu_submit_hot_shape_trace_enabled() ||
+          virtio_gpu_submit_hot_shape_stats_enabled()) &&
+         virtio_gpu_submit_trace_shape_is_glx_hot(shape));
+}
+
+static int virtio_gpu_submit_trace_note_shape_locked(
+    struct virtio_gpu_submit_trace_owner *owner,
+    const struct virtio_gpu_submit_trace_shape *shape)
+{
+    if (owner == NULL || !virtio_gpu_submit_trace_shape_is_glx_hot(shape))
+        return 0;
+    if (!owner->total.shape.valid) {
+        owner->total.shape = *shape;
+    } else if (!virtio_gpu_submit_trace_shape_matches(&owner->total.shape,
+                                                       shape)) {
+        owner->total.shape_mixed++;
+        owner->total.shape = *shape;
+    }
+    return 1;
+}
+
 static void virtio_gpu_submit_trace_copy_string(char *dst, uint32 len,
                                                 const char *src)
 {
@@ -1070,11 +1229,12 @@ virtio_gpu_submit_trace_owner_for_ctx_locked(
 }
 
 static void virtio_gpu_submit_trace_set_current(
-    struct virtio_gpu *g, uint64 owner_id, pid_t owner_tgid, uint32 ctx_id)
+    struct virtio_gpu *g, uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
+    const struct virtio_gpu_submit_trace_shape *shape)
 {
     char proc[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN];
 
-    if (!virtio_gpu_submit_trace_enabled())
+    if (!virtio_gpu_submit_trace_collect_enabled())
         return;
 
     virtio_gpu_submit_trace_copy_proc(proc);
@@ -1082,17 +1242,24 @@ static void virtio_gpu_submit_trace_set_current(
     virtio_gpu_submit_trace_key_for_ctx_locked(g, owner_id, owner_tgid,
                                                ctx_id, proc,
                                                &g->submit_trace_current);
+    if (virtio_gpu_submit_trace_shape_valid(shape))
+        g->submit_trace_current_shape = *shape;
+    else
+        memset(&g->submit_trace_current_shape, 0,
+               sizeof(g->submit_trace_current_shape));
     g->submit_trace_current_valid = 1;
     spin_unlock(&g->lock);
 }
 
 static void virtio_gpu_submit_trace_clear_current(struct virtio_gpu *g)
 {
-    if (!virtio_gpu_submit_trace_enabled())
+    if (!virtio_gpu_submit_trace_collect_enabled())
         return;
 
     spin_lock(&g->lock);
     g->submit_trace_current_valid = 0;
+    memset(&g->submit_trace_current_shape, 0,
+           sizeof(g->submit_trace_current_shape));
     spin_unlock(&g->lock);
 }
 
@@ -1101,13 +1268,14 @@ static void virtio_gpu_submit_trace_snapshot_slot(
 {
     char proc[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN];
 
-    if (!virtio_gpu_submit_trace_enabled() || a == NULL)
+    if (!virtio_gpu_submit_trace_collect_enabled() || a == NULL)
         return;
 
     virtio_gpu_submit_trace_copy_proc(proc);
     spin_lock(&g->lock);
     virtio_gpu_submit_trace_key_for_ctx_locked(g, 0, 0, ctx_id, proc,
                                                &a->trace_key);
+    a->trace_shape = g->submit_trace_current_shape;
     spin_unlock(&g->lock);
 }
 
@@ -1116,7 +1284,7 @@ static void virtio_gpu_submit_trace_record_submit(
     uint64 total_ticks, uint64 lock_wait_ticks,
     uint64 resource_attach_count, uint64 resource_attach_ticks,
     uint64 async_prepare_ticks, uint64 post_ticks, int first_submit,
-    int failed, int ret)
+    int failed, int ret, const struct virtio_gpu_submit_trace_shape *shape)
 {
     char proc[VIRTIO_GPU_SUBMIT_TRACE_PROC_LEN];
     struct virtio_gpu_submit_trace_owner *owner;
@@ -1134,6 +1302,10 @@ static void virtio_gpu_submit_trace_record_submit(
         g->stats.submit_trace_first_submits++;
     if (failed)
         g->stats.submit_trace_failures++;
+    if (!virtio_gpu_submit_trace_full_or_hot_shape(shape)) {
+        spin_unlock(&g->lock);
+        return;
+    }
     owner = virtio_gpu_submit_trace_owner_for_ctx_locked(
         g, owner_id, owner_tgid, ctx_id, proc);
     if (owner != NULL) {
@@ -1144,6 +1316,11 @@ static void virtio_gpu_submit_trace_record_submit(
         owner->total.attach_ticks += resource_attach_ticks;
         owner->total.async_prepare_ticks += async_prepare_ticks;
         owner->total.post_ticks += post_ticks;
+        if (virtio_gpu_submit_trace_note_shape_locked(owner, shape)) {
+            owner->total.shape_submit_calls++;
+            if (failed)
+                owner->total.shape_failures++;
+        }
         if (first_submit)
             owner->total.first_submit++;
         if (failed)
@@ -1178,7 +1355,9 @@ static void virtio_gpu_submit_trace_record_wait_for_used(
     g->stats.submit_trace_wait_for_used_ticks += ticks;
     if (us > g->stats.submit_trace_wait_for_used_max_us)
         g->stats.submit_trace_wait_for_used_max_us = us;
-    if (g->submit_trace_current_valid)
+    if (g->submit_trace_current_valid &&
+        virtio_gpu_submit_trace_full_or_hot_shape(
+            &g->submit_trace_current_shape))
         owner = virtio_gpu_submit_trace_owner_locked(
             g, &g->submit_trace_current);
     if (owner != NULL) {
@@ -1200,7 +1379,9 @@ static void virtio_gpu_submit_trace_record_async_wait_progress(
     spin_lock(&g->lock);
     g->stats.submit_trace_async_wait_progress_calls++;
     g->stats.submit_trace_async_wait_progress_ticks += ticks;
-    if (g->submit_trace_current_valid)
+    if (g->submit_trace_current_valid &&
+        virtio_gpu_submit_trace_full_or_hot_shape(
+            &g->submit_trace_current_shape))
         owner = virtio_gpu_submit_trace_owner_locked(
             g, &g->submit_trace_current);
     if (owner != NULL) {
@@ -1215,13 +1396,24 @@ static void virtio_gpu_submit_trace_record_async_wait_progress(
 }
 
 static void virtio_gpu_submit_trace_record_async_make_room_current(
-    struct virtio_gpu *g, uint64 ticks, uint64 wait_ticks, int stalled)
+    struct virtio_gpu *g, uint64 ticks, uint64 wait_ticks, int stalled,
+    uint64 depth, uint64 count_max, uint64 wait_count_max)
 {
     struct virtio_gpu_submit_trace_owner *owner = NULL;
 
     spin_lock(&g->lock);
     g->stats.submit_trace_async_make_room_ticks += ticks;
-    if (g->submit_trace_current_valid)
+    if (depth > g->stats.submit_trace_async_make_room_depth_max)
+        g->stats.submit_trace_async_make_room_depth_max = depth;
+    if (count_max > g->stats.submit_trace_async_make_room_count_max)
+        g->stats.submit_trace_async_make_room_count_max = count_max;
+    if (wait_count_max >
+        g->stats.submit_trace_async_make_room_wait_count_max)
+        g->stats.submit_trace_async_make_room_wait_count_max =
+            wait_count_max;
+    if (g->submit_trace_current_valid &&
+        virtio_gpu_submit_trace_full_or_hot_shape(
+            &g->submit_trace_current_shape))
         owner = virtio_gpu_submit_trace_owner_locked(
             g, &g->submit_trace_current);
     if (owner != NULL) {
@@ -1232,26 +1424,81 @@ static void virtio_gpu_submit_trace_record_async_make_room_current(
             owner->total.make_room_max_wait_ticks = wait_ticks;
         if (wait_ticks > owner->pending_make_room_max_wait_ticks)
             owner->pending_make_room_max_wait_ticks = wait_ticks;
+        if (depth > owner->total.make_room_depth_max)
+            owner->total.make_room_depth_max = depth;
+        if (depth > owner->pending_make_room_depth_max)
+            owner->pending_make_room_depth_max = depth;
+        if (count_max > owner->total.make_room_count_max)
+            owner->total.make_room_count_max = count_max;
+        if (count_max > owner->pending_make_room_count_max)
+            owner->pending_make_room_count_max = count_max;
+        if (wait_count_max > owner->total.make_room_wait_count_max)
+            owner->total.make_room_wait_count_max = wait_count_max;
+        if (wait_count_max > owner->pending_make_room_wait_count_max)
+            owner->pending_make_room_wait_count_max = wait_count_max;
         if (stalled)
             owner->total.make_room_stalls++;
+        if (virtio_gpu_submit_trace_note_shape_locked(
+                owner, &g->submit_trace_current_shape)) {
+            owner->total.shape_make_room_calls++;
+            owner->total.shape_make_room_ticks += ticks;
+            owner->total.shape_make_room_wait_ticks += wait_ticks;
+            if (wait_ticks > owner->total.shape_make_room_max_wait_ticks)
+                owner->total.shape_make_room_max_wait_ticks = wait_ticks;
+            if (wait_ticks > owner->pending_shape_make_room_max_wait_ticks)
+                owner->pending_shape_make_room_max_wait_ticks = wait_ticks;
+            if (depth > owner->total.shape_make_room_depth_max)
+                owner->total.shape_make_room_depth_max = depth;
+            if (depth > owner->pending_shape_make_room_depth_max)
+                owner->pending_shape_make_room_depth_max = depth;
+            if (count_max > owner->total.shape_make_room_count_max)
+                owner->total.shape_make_room_count_max = count_max;
+            if (count_max > owner->pending_shape_make_room_count_max)
+                owner->pending_shape_make_room_count_max = count_max;
+            if (wait_count_max > owner->total.shape_make_room_wait_count_max)
+                owner->total.shape_make_room_wait_count_max = wait_count_max;
+            if (wait_count_max > owner->pending_shape_make_room_wait_count_max)
+                owner->pending_shape_make_room_wait_count_max = wait_count_max;
+            if (stalled)
+                owner->total.shape_make_room_stalls++;
+        }
     }
     spin_unlock(&g->lock);
 }
 
 static void virtio_gpu_submit_trace_record_async_post(
-    struct virtio_gpu *g, const struct virtio_gpu_async_submit *a)
+    struct virtio_gpu *g, const struct virtio_gpu_async_submit *a,
+    uint64 async_count)
 {
     struct virtio_gpu_submit_trace_owner *owner;
 
-    if (!virtio_gpu_submit_trace_enabled() || a == NULL)
+    if (!virtio_gpu_submit_trace_collect_enabled() || a == NULL)
         return;
 
     spin_lock(&g->lock);
+    if (async_count > g->stats.submit_trace_async_post_count_max)
+        g->stats.submit_trace_async_post_count_max = async_count;
+    if (!virtio_gpu_submit_trace_full_or_hot_shape(&a->trace_shape)) {
+        spin_unlock(&g->lock);
+        return;
+    }
     owner = virtio_gpu_submit_trace_owner_locked(g, &a->trace_key);
     if (owner != NULL) {
         owner->total.posted++;
+        if (async_count > owner->total.post_count_max)
+            owner->total.post_count_max = async_count;
+        if (async_count > owner->pending_post_count_max)
+            owner->pending_post_count_max = async_count;
         if (a->fence_id != 0)
             owner->total.last_fence = a->fence_id;
+        if (virtio_gpu_submit_trace_note_shape_locked(owner,
+                                                      &a->trace_shape)) {
+            owner->total.shape_posted++;
+            if (async_count > owner->total.shape_post_count_max)
+                owner->total.shape_post_count_max = async_count;
+            if (async_count > owner->pending_shape_post_count_max)
+                owner->pending_shape_post_count_max = async_count;
+        }
     }
     spin_unlock(&g->lock);
 }
@@ -1260,19 +1507,100 @@ static void virtio_gpu_submit_trace_record_async_retire(
     struct virtio_gpu *g, const struct virtio_gpu_async_submit *a, int ret)
 {
     struct virtio_gpu_submit_trace_owner *owner;
+    uint64 age_ticks;
+    uint64 age_us;
 
-    if (!virtio_gpu_submit_trace_enabled() || a == NULL)
+    if (!virtio_gpu_submit_trace_collect_enabled() || a == NULL)
         return;
 
+    age_ticks = a->posted_ticks == 0 ? 0 : r_time() - a->posted_ticks;
+    age_us = virtio_gpu_ticks_to_us(age_ticks);
+
     spin_lock(&g->lock);
+    g->stats.submit_trace_async_retire_ticks += age_ticks;
+    if (age_us > g->stats.submit_trace_async_retire_max_us)
+        g->stats.submit_trace_async_retire_max_us = age_us;
+    switch (a->type) {
+    case VIRTIO_GPU_CMD_SUBMIT_3D:
+        g->stats.submit_trace_async_retire_submit_3d_ticks += age_ticks;
+        if (age_us > g->stats.submit_trace_async_retire_submit_3d_max_us)
+            g->stats.submit_trace_async_retire_submit_3d_max_us = age_us;
+        break;
+    case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
+        g->stats.submit_trace_async_retire_flush_ticks += age_ticks;
+        if (age_us > g->stats.submit_trace_async_retire_flush_max_us)
+            g->stats.submit_trace_async_retire_flush_max_us = age_us;
+        break;
+    case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D:
+        g->stats.submit_trace_async_retire_transfer_ticks += age_ticks;
+        if (age_us > g->stats.submit_trace_async_retire_transfer_max_us)
+            g->stats.submit_trace_async_retire_transfer_max_us = age_us;
+        break;
+    default:
+        break;
+    }
+    if (!virtio_gpu_submit_trace_full_or_hot_shape(&a->trace_shape)) {
+        spin_unlock(&g->lock);
+        return;
+    }
     owner = virtio_gpu_submit_trace_owner_locked(g, &a->trace_key);
     if (owner != NULL) {
         owner->total.retired++;
+        owner->total.retire_ticks += age_ticks;
+        if (age_ticks > owner->total.retire_max_ticks)
+            owner->total.retire_max_ticks = age_ticks;
+        if (age_ticks > owner->pending_retire_max_ticks)
+            owner->pending_retire_max_ticks = age_ticks;
+        switch (a->type) {
+        case VIRTIO_GPU_CMD_SUBMIT_3D:
+            owner->total.retired_submit_3d++;
+            owner->total.retire_submit_3d_ticks += age_ticks;
+            if (age_ticks > owner->total.retire_submit_3d_max_ticks)
+                owner->total.retire_submit_3d_max_ticks = age_ticks;
+            if (age_ticks > owner->pending_retire_submit_3d_max_ticks)
+                owner->pending_retire_submit_3d_max_ticks = age_ticks;
+            break;
+        case VIRTIO_GPU_CMD_RESOURCE_FLUSH:
+            owner->total.retired_flush++;
+            owner->total.retire_flush_ticks += age_ticks;
+            if (age_ticks > owner->total.retire_flush_max_ticks)
+                owner->total.retire_flush_max_ticks = age_ticks;
+            if (age_ticks > owner->pending_retire_flush_max_ticks)
+                owner->pending_retire_flush_max_ticks = age_ticks;
+            break;
+        case VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D:
+            owner->total.retired_transfer++;
+            owner->total.retire_transfer_ticks += age_ticks;
+            if (age_ticks > owner->total.retire_transfer_max_ticks)
+                owner->total.retire_transfer_max_ticks = age_ticks;
+            if (age_ticks > owner->pending_retire_transfer_max_ticks)
+                owner->pending_retire_transfer_max_ticks = age_ticks;
+            break;
+        default:
+            owner->total.retired_other++;
+            owner->total.retire_other_ticks += age_ticks;
+            if (age_ticks > owner->total.retire_other_max_ticks)
+                owner->total.retire_other_max_ticks = age_ticks;
+            if (age_ticks > owner->pending_retire_other_max_ticks)
+                owner->pending_retire_other_max_ticks = age_ticks;
+            break;
+        }
         owner->total.last_ret = ret;
         if (a->fence_id != 0)
             owner->total.last_fence = a->fence_id;
         if (ret != 0)
             owner->total.failures++;
+        if (virtio_gpu_submit_trace_note_shape_locked(owner,
+                                                      &a->trace_shape)) {
+            owner->total.shape_retired++;
+            owner->total.shape_retire_ticks += age_ticks;
+            if (age_ticks > owner->total.shape_retire_max_ticks)
+                owner->total.shape_retire_max_ticks = age_ticks;
+            if (age_ticks > owner->pending_shape_retire_max_ticks)
+                owner->pending_shape_retire_max_ticks = age_ticks;
+            if (ret != 0)
+                owner->total.shape_failures++;
+        }
     }
     spin_unlock(&g->lock);
 }
@@ -1287,6 +1615,12 @@ static int virtio_gpu_submit_trace_owner_counts_changed(
         total->wait_used_calls != emitted->wait_used_calls ||
         total->posted != emitted->posted ||
         total->retired != emitted->retired ||
+        total->shape_submit_calls != emitted->shape_submit_calls ||
+        total->shape_make_room_calls != emitted->shape_make_room_calls ||
+        total->shape_posted != emitted->shape_posted ||
+        total->shape_retired != emitted->shape_retired ||
+        total->shape_failures != emitted->shape_failures ||
+        total->shape_mixed != emitted->shape_mixed ||
         total->failures != emitted->failures;
 }
 
@@ -1296,6 +1630,21 @@ static int virtio_gpu_submit_trace_owner_changed(
     return virtio_gpu_submit_trace_owner_counts_changed(&o->total,
                                                         &o->emitted) ||
         o->pending_make_room_max_wait_ticks != 0 ||
+        o->pending_make_room_depth_max != 0 ||
+        o->pending_make_room_count_max != 0 ||
+        o->pending_make_room_wait_count_max != 0 ||
+        o->pending_post_count_max != 0 ||
+        o->pending_retire_max_ticks != 0 ||
+        o->pending_retire_submit_3d_max_ticks != 0 ||
+        o->pending_retire_flush_max_ticks != 0 ||
+        o->pending_retire_transfer_max_ticks != 0 ||
+        o->pending_retire_other_max_ticks != 0 ||
+        o->pending_shape_make_room_max_wait_ticks != 0 ||
+        o->pending_shape_make_room_depth_max != 0 ||
+        o->pending_shape_make_room_count_max != 0 ||
+        o->pending_shape_make_room_wait_count_max != 0 ||
+        o->pending_shape_post_count_max != 0 ||
+        o->pending_shape_retire_max_ticks != 0 ||
         o->pending_wait_progress_max_ticks != 0 ||
         o->pending_wait_used_max_ticks != 0;
 }
@@ -1318,17 +1667,20 @@ static void virtio_gpu_submit_trace_emit(struct virtio_gpu *g)
 {
     struct virtio_gpu_stats s;
     int print_global = 0;
+    int full_trace = virtio_gpu_submit_trace_enabled();
+    int hot_shape_trace = virtio_gpu_submit_hot_shape_trace_enabled();
 
-    if (!virtio_gpu_submit_trace_enabled())
+    if (!full_trace && !hot_shape_trace)
         return;
 
     spin_lock(&g->lock);
-    print_global = !(g->stats.submit_trace_submit_calls ==
-                         g->stats.submit_trace_emitted_submit_calls &&
-                     g->stats.submit_trace_fence_calls ==
-                         g->stats.submit_trace_emitted_fence_calls &&
-                     g->stats.submit_trace_wait_for_used_calls ==
-                         g->stats.submit_trace_emitted_wait_for_used_calls);
+    print_global = full_trace &&
+        !(g->stats.submit_trace_submit_calls ==
+              g->stats.submit_trace_emitted_submit_calls &&
+          g->stats.submit_trace_fence_calls ==
+              g->stats.submit_trace_emitted_fence_calls &&
+          g->stats.submit_trace_wait_for_used_calls ==
+              g->stats.submit_trace_emitted_wait_for_used_calls);
     if (!print_global && !virtio_gpu_submit_trace_owner_changed_locked(g)) {
         spin_unlock(&g->lock);
         return;
@@ -1345,7 +1697,7 @@ static void virtio_gpu_submit_trace_emit(struct virtio_gpu *g)
     spin_unlock(&g->lock);
 
     if (print_global)
-        printf("virtio-gpu-submit-trace: submit_calls=%lu submit_us=%lu lock_wait_us=%lu attach_count=%lu attach_us=%lu async_prepare_us=%lu post_us=%lu first_submit=%lu failures=%lu fence_calls=%lu fence_us=%lu fence_drains=%lu fence_drain_us=%lu fence_failures=%lu wait_used_calls=%lu wait_used_us=%lu wait_used_max_us=%lu async_wait_progress_calls=%lu async_wait_progress_us=%lu make_room_calls=%lu make_room_us=%lu make_room_stalls=%lu make_room_wait_us=%lu make_room_max_wait_us=%lu\n",
+        printf("virtio-gpu-submit-trace: submit_calls=%lu submit_us=%lu lock_wait_us=%lu attach_count=%lu attach_us=%lu async_prepare_us=%lu post_us=%lu first_submit=%lu failures=%lu fence_calls=%lu fence_us=%lu fence_drains=%lu fence_drain_us=%lu fence_failures=%lu wait_used_calls=%lu wait_used_us=%lu wait_used_max_us=%lu async_wait_progress_calls=%lu async_wait_progress_us=%lu make_room_calls=%lu make_room_us=%lu make_room_stalls=%lu make_room_wait_us=%lu make_room_max_wait_us=%lu make_room_depth_max=%lu make_room_count_max=%lu make_room_wait_count_max=%lu post_count_max=%lu retire_us=%lu retire_max_us=%lu retire_submit_3d_us=%lu retire_submit_3d_max_us=%lu retire_flush_us=%lu retire_flush_max_us=%lu retire_transfer_us=%lu retire_transfer_max_us=%lu\n",
                s.submit_trace_submit_calls,
                virtio_gpu_ticks_to_us(s.submit_trace_submit_ticks),
                virtio_gpu_ticks_to_us(s.submit_trace_lock_wait_ticks),
@@ -1369,7 +1721,22 @@ static void virtio_gpu_submit_trace_emit(struct virtio_gpu *g)
                virtio_gpu_ticks_to_us(s.submit_trace_async_make_room_ticks),
                s.async_make_room_stalls,
                virtio_gpu_ticks_to_us(s.async_make_room_wait_ticks),
-               s.async_make_room_max_wait_us);
+               s.async_make_room_max_wait_us,
+               s.submit_trace_async_make_room_depth_max,
+               s.submit_trace_async_make_room_count_max,
+               s.submit_trace_async_make_room_wait_count_max,
+               s.submit_trace_async_post_count_max,
+               virtio_gpu_ticks_to_us(s.submit_trace_async_retire_ticks),
+               s.submit_trace_async_retire_max_us,
+               virtio_gpu_ticks_to_us(
+                   s.submit_trace_async_retire_submit_3d_ticks),
+               s.submit_trace_async_retire_submit_3d_max_us,
+               virtio_gpu_ticks_to_us(
+                   s.submit_trace_async_retire_flush_ticks),
+               s.submit_trace_async_retire_flush_max_us,
+               virtio_gpu_ticks_to_us(
+                   s.submit_trace_async_retire_transfer_ticks),
+               s.submit_trace_async_retire_transfer_max_us);
 
     for (;;) {
         struct virtio_gpu_submit_trace_key key;
@@ -1410,6 +1777,12 @@ static void virtio_gpu_submit_trace_emit(struct virtio_gpu *g)
                 o->emitted.make_room_wait_ticks;
             delta.make_room_max_wait_ticks =
                 o->pending_make_room_max_wait_ticks;
+            delta.make_room_depth_max =
+                o->pending_make_room_depth_max;
+            delta.make_room_count_max =
+                o->pending_make_room_count_max;
+            delta.make_room_wait_count_max =
+                o->pending_make_room_wait_count_max;
             delta.wait_progress_calls =
                 o->total.wait_progress_calls -
                 o->emitted.wait_progress_calls;
@@ -1424,7 +1797,76 @@ static void virtio_gpu_submit_trace_emit(struct virtio_gpu *g)
                 o->total.wait_used_ticks - o->emitted.wait_used_ticks;
             delta.wait_used_max_ticks = o->pending_wait_used_max_ticks;
             delta.posted = o->total.posted - o->emitted.posted;
+            delta.post_count_max = o->pending_post_count_max;
             delta.retired = o->total.retired - o->emitted.retired;
+            delta.retire_ticks =
+                o->total.retire_ticks - o->emitted.retire_ticks;
+            delta.retire_max_ticks = o->pending_retire_max_ticks;
+            delta.retired_submit_3d =
+                o->total.retired_submit_3d -
+                o->emitted.retired_submit_3d;
+            delta.retire_submit_3d_ticks =
+                o->total.retire_submit_3d_ticks -
+                o->emitted.retire_submit_3d_ticks;
+            delta.retire_submit_3d_max_ticks =
+                o->pending_retire_submit_3d_max_ticks;
+            delta.retired_flush =
+                o->total.retired_flush - o->emitted.retired_flush;
+            delta.retire_flush_ticks =
+                o->total.retire_flush_ticks -
+                o->emitted.retire_flush_ticks;
+            delta.retire_flush_max_ticks =
+                o->pending_retire_flush_max_ticks;
+            delta.retired_transfer =
+                o->total.retired_transfer -
+                o->emitted.retired_transfer;
+            delta.retire_transfer_ticks =
+                o->total.retire_transfer_ticks -
+                o->emitted.retire_transfer_ticks;
+            delta.retire_transfer_max_ticks =
+                o->pending_retire_transfer_max_ticks;
+            delta.retired_other =
+                o->total.retired_other - o->emitted.retired_other;
+            delta.retire_other_ticks =
+                o->total.retire_other_ticks -
+                o->emitted.retire_other_ticks;
+            delta.retire_other_max_ticks =
+                o->pending_retire_other_max_ticks;
+            delta.shape_submit_calls =
+                o->total.shape_submit_calls - o->emitted.shape_submit_calls;
+            delta.shape_make_room_calls =
+                o->total.shape_make_room_calls -
+                o->emitted.shape_make_room_calls;
+            delta.shape_make_room_stalls =
+                o->total.shape_make_room_stalls -
+                o->emitted.shape_make_room_stalls;
+            delta.shape_make_room_ticks =
+                o->total.shape_make_room_ticks -
+                o->emitted.shape_make_room_ticks;
+            delta.shape_make_room_wait_ticks =
+                o->total.shape_make_room_wait_ticks -
+                o->emitted.shape_make_room_wait_ticks;
+            delta.shape_make_room_max_wait_ticks =
+                o->pending_shape_make_room_max_wait_ticks;
+            delta.shape_make_room_depth_max =
+                o->pending_shape_make_room_depth_max;
+            delta.shape_make_room_count_max =
+                o->pending_shape_make_room_count_max;
+            delta.shape_make_room_wait_count_max =
+                o->pending_shape_make_room_wait_count_max;
+            delta.shape_posted =
+                o->total.shape_posted - o->emitted.shape_posted;
+            delta.shape_post_count_max = o->pending_shape_post_count_max;
+            delta.shape_retired =
+                o->total.shape_retired - o->emitted.shape_retired;
+            delta.shape_retire_ticks =
+                o->total.shape_retire_ticks - o->emitted.shape_retire_ticks;
+            delta.shape_retire_max_ticks = o->pending_shape_retire_max_ticks;
+            delta.shape_failures =
+                o->total.shape_failures - o->emitted.shape_failures;
+            delta.shape_mixed =
+                o->total.shape_mixed - o->emitted.shape_mixed;
+            delta.shape = o->total.shape;
             delta.first_submit =
                 o->total.first_submit - o->emitted.first_submit;
             delta.failures = o->total.failures - o->emitted.failures;
@@ -1432,6 +1874,21 @@ static void virtio_gpu_submit_trace_emit(struct virtio_gpu *g)
             delta.last_fence = o->total.last_fence;
             o->emitted = o->total;
             o->pending_make_room_max_wait_ticks = 0;
+            o->pending_make_room_depth_max = 0;
+            o->pending_make_room_count_max = 0;
+            o->pending_make_room_wait_count_max = 0;
+            o->pending_post_count_max = 0;
+            o->pending_retire_max_ticks = 0;
+            o->pending_retire_submit_3d_max_ticks = 0;
+            o->pending_retire_flush_max_ticks = 0;
+            o->pending_retire_transfer_max_ticks = 0;
+            o->pending_retire_other_max_ticks = 0;
+            o->pending_shape_make_room_max_wait_ticks = 0;
+            o->pending_shape_make_room_depth_max = 0;
+            o->pending_shape_make_room_count_max = 0;
+            o->pending_shape_make_room_wait_count_max = 0;
+            o->pending_shape_post_count_max = 0;
+            o->pending_shape_retire_max_ticks = 0;
             o->pending_wait_progress_max_ticks = 0;
             o->pending_wait_used_max_ticks = 0;
             have = 1;
@@ -1441,27 +1898,69 @@ static void virtio_gpu_submit_trace_emit(struct virtio_gpu *g)
         if (!have)
             break;
 
-        printf("virtio-gpu-submit-owner-trace: owner_id=%lu owner_tgid=%d ctx_id=%u proc=%s debug=%s submit_calls=%lu submit_us=%lu lock_wait_us=%lu attach_count=%lu attach_us=%lu async_prepare_us=%lu post_us=%lu make_room_calls=%lu make_room_stalls=%lu make_room_us=%lu make_room_wait_us=%lu make_room_max_wait_us=%lu wait_progress_calls=%lu wait_progress_us=%lu wait_progress_max_us=%lu wait_used_calls=%lu wait_used_us=%lu wait_used_max_us=%lu posted=%lu retired=%lu first_submit=%lu failures=%lu last_ret=%d last_fence=%lu\n",
-               key.owner_id, key.owner_tgid, key.ctx_id, key.proc,
-               key.debug_name, delta.submit_calls,
-               virtio_gpu_ticks_to_us(delta.submit_ticks),
-               virtio_gpu_ticks_to_us(delta.lock_wait_ticks),
-               delta.attach_count,
-               virtio_gpu_ticks_to_us(delta.attach_ticks),
-               virtio_gpu_ticks_to_us(delta.async_prepare_ticks),
-               virtio_gpu_ticks_to_us(delta.post_ticks),
-               delta.make_room_calls, delta.make_room_stalls,
-               virtio_gpu_ticks_to_us(delta.make_room_ticks),
-               virtio_gpu_ticks_to_us(delta.make_room_wait_ticks),
-               virtio_gpu_ticks_to_us(delta.make_room_max_wait_ticks),
-               delta.wait_progress_calls,
-               virtio_gpu_ticks_to_us(delta.wait_progress_ticks),
-               virtio_gpu_ticks_to_us(delta.wait_progress_max_ticks),
-               delta.wait_used_calls,
-               virtio_gpu_ticks_to_us(delta.wait_used_ticks),
-               virtio_gpu_ticks_to_us(delta.wait_used_max_ticks),
-               delta.posted, delta.retired, delta.first_submit,
-               delta.failures, delta.last_ret, delta.last_fence);
+        if (full_trace)
+            printf("virtio-gpu-submit-owner-trace: owner_id=%lu owner_tgid=%d ctx_id=%u proc=%s debug=%s submit_calls=%lu submit_us=%lu lock_wait_us=%lu attach_count=%lu attach_us=%lu async_prepare_us=%lu post_us=%lu make_room_calls=%lu make_room_stalls=%lu make_room_us=%lu make_room_wait_us=%lu make_room_max_wait_us=%lu make_room_depth_max=%lu make_room_count_max=%lu make_room_wait_count_max=%lu wait_progress_calls=%lu wait_progress_us=%lu wait_progress_max_us=%lu wait_used_calls=%lu wait_used_us=%lu wait_used_max_us=%lu posted=%lu post_count_max=%lu retired=%lu retire_us=%lu retire_max_us=%lu retired_submit_3d=%lu retire_submit_3d_us=%lu retire_submit_3d_max_us=%lu retired_flush=%lu retire_flush_us=%lu retire_flush_max_us=%lu retired_transfer=%lu retire_transfer_us=%lu retire_transfer_max_us=%lu retired_other=%lu retire_other_us=%lu retire_other_max_us=%lu first_submit=%lu failures=%lu last_ret=%d last_fence=%lu\n",
+                   key.owner_id, key.owner_tgid, key.ctx_id, key.proc,
+                   key.debug_name, delta.submit_calls,
+                   virtio_gpu_ticks_to_us(delta.submit_ticks),
+                   virtio_gpu_ticks_to_us(delta.lock_wait_ticks),
+                   delta.attach_count,
+                   virtio_gpu_ticks_to_us(delta.attach_ticks),
+                   virtio_gpu_ticks_to_us(delta.async_prepare_ticks),
+                   virtio_gpu_ticks_to_us(delta.post_ticks),
+                   delta.make_room_calls, delta.make_room_stalls,
+                   virtio_gpu_ticks_to_us(delta.make_room_ticks),
+                   virtio_gpu_ticks_to_us(delta.make_room_wait_ticks),
+                   virtio_gpu_ticks_to_us(delta.make_room_max_wait_ticks),
+                   delta.make_room_depth_max, delta.make_room_count_max,
+                   delta.make_room_wait_count_max,
+                   delta.wait_progress_calls,
+                   virtio_gpu_ticks_to_us(delta.wait_progress_ticks),
+                   virtio_gpu_ticks_to_us(delta.wait_progress_max_ticks),
+                   delta.wait_used_calls,
+                   virtio_gpu_ticks_to_us(delta.wait_used_ticks),
+                   virtio_gpu_ticks_to_us(delta.wait_used_max_ticks),
+                   delta.posted, delta.post_count_max, delta.retired,
+                   virtio_gpu_ticks_to_us(delta.retire_ticks),
+                   virtio_gpu_ticks_to_us(delta.retire_max_ticks),
+                   delta.retired_submit_3d,
+                   virtio_gpu_ticks_to_us(delta.retire_submit_3d_ticks),
+                   virtio_gpu_ticks_to_us(delta.retire_submit_3d_max_ticks),
+                   delta.retired_flush,
+                   virtio_gpu_ticks_to_us(delta.retire_flush_ticks),
+                   virtio_gpu_ticks_to_us(delta.retire_flush_max_ticks),
+                   delta.retired_transfer,
+                   virtio_gpu_ticks_to_us(delta.retire_transfer_ticks),
+                   virtio_gpu_ticks_to_us(delta.retire_transfer_max_ticks),
+                   delta.retired_other,
+                   virtio_gpu_ticks_to_us(delta.retire_other_ticks),
+                   virtio_gpu_ticks_to_us(delta.retire_other_max_ticks),
+                   delta.first_submit,
+                   delta.failures, delta.last_ret, delta.last_fence);
+        if (hot_shape_trace && delta.shape.valid &&
+            (delta.shape_submit_calls || delta.shape_make_room_calls ||
+             delta.shape_posted || delta.shape_retired ||
+             delta.shape_failures || delta.shape_mixed)) {
+            printf("virtio-gpu-submit-depth-probe: owner_id=%lu owner_tgid=%d ctx_id=%u proc=%s debug=%s drm_flags=0x%x nr_dwords=%u resource_count=%u first_word=0x%x fence_fd=%d shape_submit_calls=%lu shape_make_room_calls=%lu shape_make_room_stalls=%lu shape_make_room_us=%lu shape_make_room_wait_us=%lu shape_make_room_max_wait_us=%lu shape_make_room_depth_max=%lu shape_make_room_count_max=%lu shape_make_room_wait_count_max=%lu shape_posted=%lu shape_post_count_max=%lu shape_retired=%lu shape_retire_us=%lu shape_retire_max_us=%lu shape_failures=%lu shape_mixed=%lu\n",
+                   key.owner_id, key.owner_tgid, key.ctx_id, key.proc,
+                   key.debug_name, delta.shape.drm_flags,
+                   delta.shape.nr_dwords, delta.shape.resource_count,
+                   delta.shape.first_word, delta.shape.fence_fd,
+                   delta.shape_submit_calls, delta.shape_make_room_calls,
+                   delta.shape_make_room_stalls,
+                   virtio_gpu_ticks_to_us(delta.shape_make_room_ticks),
+                   virtio_gpu_ticks_to_us(delta.shape_make_room_wait_ticks),
+                   virtio_gpu_ticks_to_us(
+                       delta.shape_make_room_max_wait_ticks),
+                   delta.shape_make_room_depth_max,
+                   delta.shape_make_room_count_max,
+                   delta.shape_make_room_wait_count_max,
+                   delta.shape_posted, delta.shape_post_count_max,
+                   delta.shape_retired,
+                   virtio_gpu_ticks_to_us(delta.shape_retire_ticks),
+                   virtio_gpu_ticks_to_us(delta.shape_retire_max_ticks),
+                   delta.shape_failures, delta.shape_mixed);
+        }
     }
 
     spin_lock(&g->lock);
@@ -1520,6 +2019,8 @@ static int virtio_gpu_use_3d_scanout(struct virtio_gpu *g)
 
 static int virtio_gpu_pageflip_copy_enabled(void)
 {
+    if (virtio_gpu_cmdline_enabled("virtio_gpu_force_pageflip_copy"))
+        return 1;
     if (virtio_gpu_cmdline_enabled("virtio_gpu_disable_pageflip_copy"))
         return 0;
     return virtio_gpu_cmdline_enabled("virtio_gpu_pageflip_copy");
@@ -2871,8 +3372,10 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
                                       enum virtio_gpu_async_reason reason)
 {
     int depth = virtio_gpu_async_depth_for_reason(g, reason);
-    int trace = virtio_gpu_submit_trace_enabled();
+    int trace = virtio_gpu_submit_trace_collect_enabled();
     uint64 trace_start = trace ? r_time() : 0;
+    uint64 trace_count_max = 0;
+    uint64 trace_wait_count_max = 0;
     uint64 wait_start = 0;
     uint64 wait_ticks = 0;
     int waited = 0;
@@ -2883,7 +3386,15 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
     spin_unlock(&g->lock);
     /* Opportunistically reap anything the host has already finished. */
     (void)virtio_gpu_async_reap_completed(g);
+    if (trace)
+        trace_count_max = g->async_count;
     while ((int)g->async_count >= depth) {
+        uint64 count = g->async_count;
+
+        if (trace && count > trace_count_max)
+            trace_count_max = count;
+        if (trace && count > trace_wait_count_max)
+            trace_wait_count_max = count;
         if (!waited) {
             wait_start = r_time();
             waited = 1;
@@ -2918,8 +3429,47 @@ static int virtio_gpu_async_make_room(struct virtio_gpu *g,
 out:
     if (trace)
         virtio_gpu_submit_trace_record_async_make_room_current(
-            g, r_time() - trace_start, wait_ticks, waited);
+            g, r_time() - trace_start, wait_ticks, waited,
+            (uint64)depth, trace_count_max, trace_wait_count_max);
     return ret;
+}
+
+static void virtio_gpu_note_present_copy_drain(struct virtio_gpu *g,
+                                               int src_fence_drain,
+                                               int blanket_drain,
+                                               int no_drain_skip,
+                                               int minimal_skip,
+                                               int drain_failed,
+                                               uint64 drain_ticks)
+{
+    uint64 us = drain_ticks ? virtio_gpu_ticks_to_us(drain_ticks) : 0;
+    int drained = src_fence_drain || blanket_drain;
+
+    spin_lock(&g->lock);
+    g->stats.present_copy_calls++;
+    if (drained)
+        g->stats.present_copy_drain_calls++;
+    if (src_fence_drain)
+        g->stats.present_copy_src_fence_drains++;
+    if (blanket_drain)
+        g->stats.present_copy_blanket_drains++;
+    if (src_fence_drain && !blanket_drain)
+        g->stats.present_copy_src_fence_only_drains++;
+    if (!src_fence_drain && blanket_drain)
+        g->stats.present_copy_blanket_only_drains++;
+    if (src_fence_drain && blanket_drain)
+        g->stats.present_copy_src_fence_blanket_drains++;
+    if (no_drain_skip)
+        g->stats.present_copy_no_drain_skips++;
+    if (minimal_skip)
+        g->stats.present_copy_minimal_skips++;
+    if (drain_failed)
+        g->stats.present_copy_drain_failures++;
+    g->stats.present_copy_drain_ticks += drain_ticks;
+    g->stats.present_copy_drain_last_us = us;
+    if (us > g->stats.present_copy_drain_max_us)
+        g->stats.present_copy_drain_max_us = us;
+    spin_unlock(&g->lock);
 }
 
 /*
@@ -2932,9 +3482,10 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
 {
     struct virtio_gpu_queue *q = &g->ctrlq;
     uint32 base = a->desc_base;
+    uint64 trace_async_count = 0;
     int intena;
 
-    if (virtio_gpu_submit_trace_enabled())
+    if (virtio_gpu_submit_trace_collect_enabled())
         virtio_gpu_submit_trace_snapshot_slot(g, a, a->ctx_id);
 
     intena = spin_lock_irqsave(&q->lock);
@@ -2970,8 +3521,9 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
     spin_unlock_irqrestore(&q->lock, intena);
     spin_lock(&g->lock);
     virtio_gpu_count_async_posted_locked(g, a->type);
+    trace_async_count = g->async_count;
     spin_unlock(&g->lock);
-    virtio_gpu_submit_trace_record_async_post(g, a);
+    virtio_gpu_submit_trace_record_async_post(g, a, trace_async_count);
 }
 
 /*
@@ -3020,6 +3572,7 @@ static int virtio_gpu_async_post_prepared(
     a->resp = prep->resp;
     a->resp_len = prep->resp_len;
     a->posted_ticks = r_time();
+    a->trace_shape = prep->trace_shape;
     prep->cmd = NULL;
     prep->data = NULL;
     prep->resp = NULL;
@@ -3169,7 +3722,8 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 flags, const uint32 *cmds,
                            uint32 nr_dwords, const uint32 *resources,
                            uint32 resource_count, uint64 *fence,
-                           uint64 *signaled, uint32 *first_submit)
+                           uint64 *signaled, uint32 *first_submit,
+                           const struct virtio_gpu_submit_trace_shape *shape)
 {
     (void)owner_id;
     (void)owner_tgid;
@@ -3182,6 +3736,7 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
     (void)fence;
     (void)signaled;
     (void)first_submit;
+    (void)shape;
     return -ENODEV;
 }
 int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled)

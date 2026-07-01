@@ -183,8 +183,11 @@
 // --- Power management ---
 #define SYS_poweroff       1366
 
+// --- Profiling controls ---
+#define SYS_kstatsctl      1367
+
 // Max syscall number (update when adding new syscalls)
-#define SYS_MAXNUM         1366
+#define SYS_MAXNUM         1367
 
 // --- Linux time64 compatibility stubs used by musl on rv64 ---
 // These are intentionally unsupported in xv6 and return -ENOSYS via

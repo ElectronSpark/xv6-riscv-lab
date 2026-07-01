@@ -148,15 +148,15 @@ int __vfs_dcache_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     spin_unlock(&__vfs_dcache_buckets[bucket].lock);
 
     if (!hit) {
-        g_vfs_lookup_cache_misses += 1;
+        KSTATS_PROFILE_INC(g_vfs_lookup_cache_misses);
         return -EAGAIN;
     }
     if (negative) {
-        g_vfs_lookup_negative_hits += 1;
+        KSTATS_PROFILE_INC(g_vfs_lookup_negative_hits);
         return -ENOENT;
     }
 
-    g_vfs_lookup_dcache_hits += 1;
+    KSTATS_PROFILE_INC(g_vfs_lookup_dcache_hits);
 
     dentry->name = strndup(name, name_len);
     if (dentry->name == NULL) {

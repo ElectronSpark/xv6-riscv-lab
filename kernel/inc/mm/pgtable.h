@@ -86,10 +86,28 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
             pte_t **retl1);
 
 /**
+ * walk_present_leaf_or_next - Find a present leaf PTE at @va, or the next
+ *                             address where the walk should resume.
+ *
+ * This is for sparse range operations such as mprotect() over large
+ * MAP_NORESERVE reservations.  If no lower page-table subtree exists for @va,
+ * or the existing leaf table has no present entries for the rest of its
+ * natural span, returns NULL and stores the first address after that empty
+ * span in @next_va.
+ */
+pte_t *walk_present_leaf_or_next(pagetable_t pagetable, uint64 va, uint64 end,
+                                 uint64 *next_va);
+
+/**
  * walkaddr - Look up a user virtual address and return its physical address,
  *            or 0 if not mapped or not user-accessible.
  */
 uint64 walkaddr(pagetable_t pagetable, uint64 va);
+
+/**
+ * pgtable_count_pages - Count allocated page-table pages reachable from root.
+ */
+uint64 pgtable_count_pages(pagetable_t pagetable);
 
 /* ========================================================================== */
 /*  Page-table bulk mapping / unmapping */

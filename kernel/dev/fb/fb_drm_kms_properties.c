@@ -775,8 +775,10 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
          * falls back to the existing CPU/readback path when the BO is not
          * virtio-resource backed.
          */
-        if (fb_cmdline_enabled("virtio_gpu_pageflip_copy") &&
-            !fb_cmdline_enabled("virtio_gpu_disable_pageflip_copy")) {
+        if (fb_cmdline_enabled("virtio_gpu_force_kms_resource_copy") ||
+            fb_cmdline_enabled("virtio_gpu_force_pageflip_copy") ||
+            (fb_cmdline_enabled("virtio_gpu_pageflip_copy") &&
+             !fb_cmdline_enabled("virtio_gpu_disable_pageflip_copy"))) {
             present.flags = FB_GPU_BO_PRESENT_F_VIRGL_COPY |
                             FB_GPU_BO_PRESENT_F_READBACK_FALLBACK;
         } else {
@@ -830,8 +832,10 @@ static int gpu_kms_present_fb_rect(struct fb_gpu_render_owner *owner,
         !fb_scanout_format_needs_rb_swap(fb->pixel_format) &&
         bo->virtio_resource_id != 0 &&
         !fb_cmdline_enabled("virtio_gpu_no_kms_resource_scanout")) {
-        if (fb_cmdline_enabled("virtio_gpu_pageflip_copy") &&
-            !fb_cmdline_enabled("virtio_gpu_disable_pageflip_copy")) {
+        if (fb_cmdline_enabled("virtio_gpu_force_kms_resource_copy") ||
+            fb_cmdline_enabled("virtio_gpu_force_pageflip_copy") ||
+            (fb_cmdline_enabled("virtio_gpu_pageflip_copy") &&
+             !fb_cmdline_enabled("virtio_gpu_disable_pageflip_copy"))) {
             present.flags = FB_GPU_BO_PRESENT_F_VIRGL_COPY |
                             FB_GPU_BO_PRESENT_F_READBACK_FALLBACK;
         } else {

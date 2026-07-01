@@ -95,8 +95,8 @@ pid_t pgroup_getpgid(pid_t pid);
 /*
  * pgroup_kill - send a signal to every process in a process group
  *
- * Iterates the pgroup's thread_groups list under pid_rlock, sending
- * @signum to each thread group via tg_signal_send().
+ * Snapshots the pgroup's thread_groups list under pid_rlock, then sends
+ * @signum to each thread group after dropping pid_lock.
  *
  * Returns 0 on success, negative errno if no processes were found.
  */

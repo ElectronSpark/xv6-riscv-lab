@@ -115,6 +115,107 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
     return &pagetable[PX(0, va)];
 }
 
+static inline uint64 pgtable_level_span(int level)
+{
+    return 1ULL << PXSHIFT(level);
+}
+
+static inline uint64 pgtable_next_boundary(uint64 va, uint64 end, int level)
+{
+    uint64 span = pgtable_level_span(level);
+    uint64 next = (va + span) & ~(span - 1);
+
+    if (next <= va || next > end)
+        next = end;
+    return next;
+}
+
+pte_t *walk_present_leaf_or_next(pagetable_t pagetable, uint64 va, uint64 end,
+                                 uint64 *next_va)
+{
+    assert(VA_IS_VALID(va), "walk_present_leaf_or_next: va not canonical");
+    assert(pagetable != NULL, "walk_present_leaf_or_next: pagetable is null");
+    int validate_children = (pagetable != kernel_pagetable);
+
+    if (next_va != NULL)
+        *next_va = end;
+    if (va >= end)
+        return NULL;
+
+    for (int level = PAGETABLE_LEVELS - 1; level > 0; level--) {
+        pte_t *pte = &pagetable[PX(level, va)];
+        uint64 next = pgtable_next_boundary(va, end, level);
+
+        if ((*pte & PTE_V) == 0) {
+            if (next_va != NULL)
+                *next_va = next;
+            return NULL;
+        }
+        if (level == 1 && (*pte & PTE_PS)) {
+            if (next_va != NULL)
+                *next_va = next;
+            return pte;
+        }
+        if (validate_children &&
+            !pgtab_child_valid(*pte, va, level, "walk_present_leaf_or_next")) {
+            if (next_va != NULL)
+                *next_va = next;
+            return NULL;
+        }
+        pagetable = (pagetable_t)PTE2PA(*pte);
+    }
+
+    int idx = PX(0, va);
+    uint64 l0_next = pgtable_next_boundary(va, end, 1);
+    pte_t *pte = &pagetable[idx];
+    if (*pte & PTE_V) {
+        if (next_va != NULL)
+            *next_va = va + PGSIZE < end ? va + PGSIZE : end;
+        return pte;
+    }
+
+    int last_idx = PX(0, l0_next - PGSIZE);
+    for (int i = idx + 1; i <= last_idx; i++) {
+        if (pagetable[i] & PTE_V) {
+            if (next_va != NULL)
+                *next_va = (va & ~(pgtable_level_span(1) - 1)) +
+                           ((uint64)i << PGSHIFT);
+            return NULL;
+        }
+    }
+
+    if (next_va != NULL)
+        *next_va = l0_next;
+    return NULL;
+}
+
+static uint64 pgtable_count_pages_level(pagetable_t pagetable, int level)
+{
+    uint64 pages = 1;
+
+    if (pagetable == NULL || level <= 0)
+        return pages;
+
+    for (int i = 0; i < 512; i++) {
+        pte_t pte = pagetable[i];
+
+        if ((pte & PTE_V) == 0)
+            continue;
+        if (level == 1 && (pte & PTE_PS))
+            continue;
+        pages += pgtable_count_pages_level((pagetable_t)PTE2PA(pte),
+                                           level - 1);
+    }
+    return pages;
+}
+
+uint64 pgtable_count_pages(pagetable_t pagetable)
+{
+    if (pagetable == NULL)
+        return 0;
+    return pgtable_count_pages_level(pagetable, PAGETABLE_LEVELS - 1);
+}
+
 /*
  * Look up a user virtual address and return its physical address,
  * or 0 if not mapped or not user-accessible.

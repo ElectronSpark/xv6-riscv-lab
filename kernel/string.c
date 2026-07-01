@@ -367,21 +367,103 @@ char *strtok(char *str, const char *delim) {
     return strtok_r(str, delim, &saveptr);
 }
 
-// Bounded substring search
-char *strstr(char *haystack, const char *needle) {
-    size_t needle_len = strlen(needle);
-    if (needle_len == 0)
-        return haystack;
+/*
+ * KMP substring search.
+ *
+ * Keep this allocation-free: strstr() is used by diagnostics and trap paths,
+ * and it must remain safe before the full allocator stack is available.
+ * Kernel needles are normally short path/name fragments; unusually large
+ * needles fall back to a bounded linear scan rather than risking stack growth.
+ */
+#define KMP_LPS_MAX 512
 
-    size_t haystack_len = strlen(haystack);
-    if (haystack_len < needle_len)
-        return 0;
+static void kmp_build_lps(const uchar *needle, size_t needle_len,
+                          uint16 lps[KMP_LPS_MAX])
+{
+    size_t len = 0;
+
+    lps[0] = 0;
+    for (size_t i = 1; i < needle_len;) {
+        if (needle[i] == needle[len]) {
+            lps[i++] = (uint16)++len;
+        } else if (len != 0) {
+            len = lps[len - 1];
+        } else {
+            lps[i++] = 0;
+        }
+    }
+}
+
+static const uchar *kmp_memmem(const uchar *haystack, size_t haystack_len,
+                               const uchar *needle, size_t needle_len)
+{
+    uint16 lps[KMP_LPS_MAX];
+    size_t j = 0;
+
+    kmp_build_lps(needle, needle_len, lps);
+    for (size_t i = 0; i < haystack_len;) {
+        if (haystack[i] == needle[j]) {
+            i++;
+            j++;
+            if (j == needle_len)
+                return haystack + i - j;
+        } else if (j != 0) {
+            j = lps[j - 1];
+        } else {
+            i++;
+        }
+    }
+
+    return NULL;
+}
+
+static const uchar *linear_memmem(const uchar *haystack, size_t haystack_len,
+                                  const uchar *needle, size_t needle_len)
+{
+    if (needle_len > haystack_len)
+        return NULL;
 
     for (size_t i = 0; i <= haystack_len - needle_len; i++) {
-        if (strncmp(haystack + i, needle, needle_len) == 0)
+        if (haystack[i] == needle[0] &&
+            memcmp(haystack + i, needle, needle_len) == 0)
             return haystack + i;
     }
-    return 0;
+
+    return NULL;
+}
+
+void *memmem(const void *haystack, size_t haystack_len, const void *needle,
+             size_t needle_len)
+{
+    const uchar *h = haystack;
+    const uchar *n = needle;
+
+    if (needle_len == 0)
+        return (void *)haystack;
+    if (haystack_len < needle_len)
+        return NULL;
+    if (needle_len <= KMP_LPS_MAX)
+        return (void *)kmp_memmem(h, haystack_len, n, needle_len);
+    return (void *)linear_memmem(h, haystack_len, n, needle_len);
+}
+
+char *strnstr(const char *haystack, const char *needle, size_t haystack_len)
+{
+    size_t needle_len = strlen(needle);
+    size_t bounded_haystack_len;
+
+    if (needle_len == 0)
+        return (char *)haystack;
+
+    bounded_haystack_len = strnlen(haystack, haystack_len);
+    return (char *)memmem(haystack, bounded_haystack_len, needle, needle_len);
+}
+
+char *strstr(const char *haystack, const char *needle)
+{
+    if (needle[0] == '\0')
+        return (char *)haystack;
+    return strnstr(haystack, needle, strlen(haystack));
 }
 
 char *strchr(const char *s, int c)

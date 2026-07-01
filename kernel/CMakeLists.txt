@@ -27,6 +27,7 @@ message(STATUS "Platform: ${PLATFORM}, kernel base: ${KERNEL_BASE}, page offset:
 set(KERNEL_C_FILES
     ${KERNEL_DIR}/start_kernel.c
     ${KERNEL_DIR}/string.c
+    ${KERNEL_DIR}/string_selftest.c
     ${KERNEL_DIR}/bio.c
     ${KERNEL_DIR}/exec.c
     ${KERNEL_DIR}/virtio_disk.c

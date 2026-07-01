@@ -399,10 +399,14 @@ void thread_destroy(struct thread *p) {
         p->sigacts = NULL;
     }
 
-    if (p->vm != NULL) {
-        vm_put_owner(p->vm, p->thread_group);
+    vm_t *vm = NULL;
+    tcb_lock(p);
+    vm = p->vm;
+    if (vm != NULL)
         p->vm = NULL;
-    }
+    tcb_unlock(p);
+    if (vm != NULL)
+        vm_put_owner(vm, p->thread_group);
 
     if (p->fdtable != NULL) {
         vfs_fdtable_put(p->fdtable);

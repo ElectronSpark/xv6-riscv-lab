@@ -315,6 +315,7 @@ extern uint64 sys_prlimit64(void);
 extern uint64 sys_getrlimit(void);
 extern uint64 sys_setrlimit(void);
 extern uint64 sys_kstats(void);
+extern uint64 sys_kstatsctl(void);
 
 // network configuration (lwip_port/lwip_glue.c)
 #ifdef USE_LWIP
@@ -799,6 +800,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_prlimit64] sys_prlimit64,
     [SYS_prlimit64_x86] sys_prlimit64,
     [SYS_kstats] sys_kstats,
+    [SYS_kstatsctl] sys_kstatsctl,
 #ifdef USE_LWIP
     [SYS_netconf] sys_netconf,
     [SYS_socket] sys_socket,
@@ -1300,6 +1302,37 @@ static int chrome_syscall_enter_trace_enabled(void)
     return enabled;
 }
 
+static int chrome_ppoll_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_ppoll_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_ppoll_trace_limit(void)
+{
+    static int initialized;
+    static int limit = 128;
+    char value[16];
+
+    if (!initialized) {
+        if (cmdline_get_param("chrome_ppoll_trace_limit", value,
+                              sizeof(value)) == 0) {
+            limit = chrome_trace_parse_uint(value, 128, 8192);
+        }
+        initialized = 1;
+    }
+    return limit;
+}
+
 static int chrome_syscall_enter_ipc_only_enabled(void)
 {
     static int initialized;
@@ -1441,6 +1474,21 @@ static int chrome_syscall_progress_limit(void)
         initialized = 1;
     }
     return limit;
+}
+
+static int chrome_syscall_tail_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_syscall_tail_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
 }
 
 static int chrome_syscall_trace_process(struct thread *p);
@@ -2395,6 +2443,387 @@ static void chrome_syscall_progress_trace_line(struct thread *p, int orig_num,
            a2, ret);
 }
 
+#define CHROME_SYSCALL_TAIL_SLOTS 64
+#define CHROME_SYSCALL_TAIL_DEPTH 64
+
+enum chrome_syscall_tail_family {
+    CHROME_SYSCALL_TAIL_OTHER = 0,
+    CHROME_SYSCALL_TAIL_CLONE,
+    CHROME_SYSCALL_TAIL_WAIT,
+    CHROME_SYSCALL_TAIL_FUTEX,
+    CHROME_SYSCALL_TAIL_EPOLL,
+    CHROME_SYSCALL_TAIL_POLL,
+    CHROME_SYSCALL_TAIL_OPEN,
+    CHROME_SYSCALL_TAIL_FCNTL,
+    CHROME_SYSCALL_TAIL_IOCTL,
+    CHROME_SYSCALL_TAIL_MMAP,
+    CHROME_SYSCALL_TAIL_SCHED,
+    CHROME_SYSCALL_TAIL_SIGNAL,
+    CHROME_SYSCALL_TAIL_IPC,
+    CHROME_SYSCALL_TAIL_MAX,
+};
+
+struct chrome_syscall_tail_entry {
+    uint64 seq;
+    uint64 ticks;
+    uint64 elapsed_us;
+    uint64 a0;
+    uint64 a1;
+    uint64 a2;
+    uint64 a3;
+    uint64 a4;
+    uint64 a5;
+    uint64 ret;
+    int orig_num;
+    int num;
+    int pid;
+    int tgid;
+    int cpu;
+    enum chrome_syscall_tail_family family;
+};
+
+struct chrome_syscall_tail_slot {
+    int pid;
+    uint64 next_seq;
+    struct chrome_syscall_tail_entry entries[CHROME_SYSCALL_TAIL_DEPTH];
+};
+
+static struct chrome_syscall_tail_slot chrome_tail_slots
+    [CHROME_SYSCALL_TAIL_SLOTS];
+
+static const char *chrome_syscall_tail_family_name(
+    enum chrome_syscall_tail_family family)
+{
+    switch (family) {
+    case CHROME_SYSCALL_TAIL_CLONE: return "clone";
+    case CHROME_SYSCALL_TAIL_WAIT: return "wait";
+    case CHROME_SYSCALL_TAIL_FUTEX: return "futex";
+    case CHROME_SYSCALL_TAIL_EPOLL: return "epoll";
+    case CHROME_SYSCALL_TAIL_POLL: return "poll";
+    case CHROME_SYSCALL_TAIL_OPEN: return "open";
+    case CHROME_SYSCALL_TAIL_FCNTL: return "fcntl";
+    case CHROME_SYSCALL_TAIL_IOCTL: return "ioctl";
+    case CHROME_SYSCALL_TAIL_MMAP: return "mmap";
+    case CHROME_SYSCALL_TAIL_SCHED: return "sched";
+    case CHROME_SYSCALL_TAIL_SIGNAL: return "signal";
+    case CHROME_SYSCALL_TAIL_IPC: return "ipc";
+    case CHROME_SYSCALL_TAIL_OTHER:
+    default:
+        return "other";
+    }
+}
+
+static enum chrome_syscall_tail_family
+chrome_syscall_tail_family_for(int orig_num)
+{
+    switch (orig_num) {
+    case SYS_clone_x86:
+    case SYS_clone3_x86:
+        return CHROME_SYSCALL_TAIL_CLONE;
+    case SYS_wait4_x86:
+    case SYS_waitid_x86:
+        return CHROME_SYSCALL_TAIL_WAIT;
+    case SYS_futex_x86:
+    case SYS_futex_wait_x86:
+    case SYS_futex_wake_x86:
+    case SYS_futex_waitv_x86:
+        return CHROME_SYSCALL_TAIL_FUTEX;
+    case SYS_epoll_create:
+    case SYS_epoll_create1:
+    case SYS_epoll_create1_legacy:
+    case SYS_epoll_ctl:
+    case SYS_epoll_ctl_legacy:
+    case SYS_epoll_ctl_old_x86:
+    case SYS_epoll_wait:
+    case SYS_epoll_wait_old_x86:
+    case SYS_epoll_pwait:
+    case SYS_epoll_pwait_legacy:
+    case SYS_epoll_pwait2:
+        return CHROME_SYSCALL_TAIL_EPOLL;
+    case SYS_poll_x86:
+    case SYS_ppoll_x86:
+    case SYS_pselect6_x86:
+        return CHROME_SYSCALL_TAIL_POLL;
+    case SYS_open_x86:
+    case SYS_openat_x86:
+    case SYS_openat2_x86:
+    case SYS_close_x86:
+    case SYS_close_range_x86:
+        return CHROME_SYSCALL_TAIL_OPEN;
+    case SYS_fcntl_x86:
+        return CHROME_SYSCALL_TAIL_FCNTL;
+    case SYS_ioctl_x86:
+        return CHROME_SYSCALL_TAIL_IOCTL;
+    case SYS_mmap_x86:
+    case SYS_mprotect_x86:
+    case SYS_munmap_x86:
+    case SYS_mremap_x86:
+    case SYS_madvise_x86:
+    case SYS_pkey_mprotect_x86:
+        return CHROME_SYSCALL_TAIL_MMAP;
+    case SYS_getpriority_x86:
+    case SYS_setpriority_x86:
+    case SYS_sched_yield_x86:
+    case SYS_sched_setparam_x86:
+    case SYS_sched_getparam_x86:
+    case SYS_sched_setscheduler_x86:
+    case SYS_sched_getscheduler_x86:
+    case SYS_sched_get_priority_max_x86:
+    case SYS_sched_get_priority_min_x86:
+    case SYS_sched_rr_get_interval_x86:
+    case SYS_sched_setaffinity_x86:
+    case SYS_sched_getaffinity_x86:
+    case SYS_sched_setattr_x86:
+    case SYS_sched_getattr_x86:
+    case SYS_prctl_x86:
+        return CHROME_SYSCALL_TAIL_SCHED;
+    case SYS_rt_sigaction_x86:
+    case SYS_rt_sigprocmask_x86:
+    case SYS_sigaltstack_x86:
+    case SYS_tgkill_x86:
+        return CHROME_SYSCALL_TAIL_SIGNAL;
+    case SYS_socket_x86:
+    case SYS_socketpair_x86:
+    case SYS_connect_x86:
+    case SYS_sendto_x86:
+    case SYS_recvfrom_x86:
+    case SYS_sendmsg_x86:
+    case SYS_recvmsg_x86:
+    case SYS_accept4_x86:
+    case SYS_read_x86:
+    case SYS_write_x86:
+    case SYS_readv_x86:
+    case SYS_writev_x86:
+        return CHROME_SYSCALL_TAIL_IPC;
+    default:
+        return CHROME_SYSCALL_TAIL_OTHER;
+    }
+}
+
+static struct chrome_syscall_tail_slot *
+chrome_syscall_tail_slot(struct thread *p)
+{
+    int empty = -1;
+
+    if (p == NULL)
+        return NULL;
+    for (int i = 0; i < CHROME_SYSCALL_TAIL_SLOTS; i++) {
+        int pid = __atomic_load_n(&chrome_tail_slots[i].pid,
+                                  __ATOMIC_RELAXED);
+        if (pid == p->pid)
+            return &chrome_tail_slots[i];
+        if (pid == 0 && empty < 0)
+            empty = i;
+    }
+    if (empty >= 0) {
+        int expected = 0;
+        if (__atomic_compare_exchange_n(&chrome_tail_slots[empty].pid,
+                                        &expected, p->pid, 0,
+                                        __ATOMIC_RELAXED,
+                                        __ATOMIC_RELAXED))
+            return &chrome_tail_slots[empty];
+    }
+    return NULL;
+}
+
+static void chrome_syscall_tail_record(struct thread *p, int orig_num, int num,
+                                       uint64 a0, uint64 a1, uint64 a2,
+                                       uint64 a3, uint64 a4, uint64 a5,
+                                       uint64 ret, uint64 start_ticks)
+{
+    struct chrome_syscall_tail_slot *slot = chrome_syscall_tail_slot(p);
+    struct chrome_syscall_tail_entry *entry;
+    uint64 seq;
+
+    if (slot == NULL)
+        return;
+    seq = __atomic_fetch_add(&slot->next_seq, 1, __ATOMIC_RELAXED);
+    entry = &slot->entries[seq % CHROME_SYSCALL_TAIL_DEPTH];
+    entry->seq = seq;
+    entry->ticks = start_ticks;
+    entry->elapsed_us = chrome_trace_ticks_to_us(r_time() - start_ticks);
+    entry->a0 = a0;
+    entry->a1 = a1;
+    entry->a2 = a2;
+    entry->a3 = a3;
+    entry->a4 = a4;
+    entry->a5 = a5;
+    entry->ret = ret;
+    entry->orig_num = orig_num;
+    entry->num = num;
+    entry->pid = p->pid;
+    entry->tgid = p->tgid;
+    entry->cpu = p->sched_entity ? p->sched_entity->cpu_id : -1;
+    entry->family = chrome_syscall_tail_family_for(orig_num);
+}
+
+static void chrome_syscall_tail_dump_fd(const char *prefix,
+                                        const struct chrome_syscall_tail_entry *e)
+{
+    int fd = (int)e->a0;
+
+    if (current == NULL || current->fdtable == NULL)
+        return;
+    if (e->family != CHROME_SYSCALL_TAIL_IOCTL &&
+        e->family != CHROME_SYSCALL_TAIL_FCNTL)
+        return;
+    if (fd < 0 || fd >= NOFILE)
+        return;
+
+    struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+    if (f == NULL) {
+        printf("%s fd=%d fdpath=<closed>\n", prefix, fd);
+        return;
+    }
+
+    char anon_path[96];
+    const char *path = f->opened_path != NULL ? f->opened_path : NULL;
+    if (path == NULL && f->ops != NULL && f->ops->readlink != NULL) {
+        ssize_t n = f->ops->readlink(f, anon_path, sizeof(anon_path) - 1);
+        if (n > 0) {
+            if ((size_t)n >= sizeof(anon_path))
+                n = sizeof(anon_path) - 1;
+            anon_path[n] = '\0';
+            path = anon_path;
+        }
+    }
+    if (path == NULL)
+        path = chrome_trace_file_kind_name(f);
+    printf("%s fd=%d fdpath=%s fkind=%s flags=0x%x file=%p ref=%d\n",
+           prefix, fd, path, chrome_trace_file_kind_name(f), f->f_flags,
+           f, f->ref_count);
+    vfs_fput(f);
+}
+
+static int chrome_syscall_tail_is_errno(uint64 ret)
+{
+    return ret >= (uint64)-4095 && ret != 0;
+}
+
+static void chrome_syscall_tail_dump_vma(const char *slot, vma_t *vma,
+                                         uint64 addr)
+{
+    if (vma == NULL) {
+        printf("chrome-syscall-tail-vma: slot=%s none addr=0x%lx\n",
+               slot, addr);
+        return;
+    }
+
+    struct vfs_inode *inode =
+        vma->file != NULL ? vma->file->inode.inode : NULL;
+    printf("chrome-syscall-tail-vma: slot=%s addr=0x%lx "
+           "map=[0x%lx-0x%lx) %c%c%c %s flags=0x%lx pgoff=0x%lx "
+           "file=%p ino=%lu size=%lld path=%s addr_in=%d\n",
+           slot, addr, vma->start, vma->end,
+           (vma->flags & PROT_READ) ? 'r' : '-',
+           (vma->flags & PROT_WRITE) ? 'w' : '-',
+           (vma->flags & PROT_EXEC) ? 'x' : '-',
+           (vma->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+           vma->flags, vma->pgoff, (void *)vma->file,
+           inode != NULL ? inode->ino : 0,
+           inode != NULL ? inode->size : 0,
+           chrome_thread_vma_path(vma),
+           addr >= vma->start && addr < vma->end);
+}
+
+static void chrome_syscall_tail_dump_mprotect_vmas(
+    const struct chrome_syscall_tail_entry *e)
+{
+    if (current == NULL || current->vm == NULL || e == NULL)
+        return;
+    if (e->orig_num != SYS_mprotect_x86 &&
+        e->orig_num != SYS_pkey_mprotect_x86)
+        return;
+    if (!chrome_syscall_tail_is_errno(e->ret))
+        return;
+
+    uint64 addr = e->a0;
+    vm_rlock(current->vm);
+    vma_t *hit = vm_find_area(current->vm, addr);
+    vma_t *left = hit != NULL ? (vma_t *)mt_prev(&current->vm->vm_mt,
+                                                  hit->start, 0) :
+        (vma_t *)mt_prev(&current->vm->vm_mt, addr, 0);
+    uint64 next_idx = addr;
+    vma_t *right = hit != NULL ? (vma_t *)mt_next(&current->vm->vm_mt,
+                                                   hit->end - 1, MAPLE_MAX) :
+        (vma_t *)mt_find(&current->vm->vm_mt, &next_idx, MAPLE_MAX);
+
+    printf("chrome-syscall-tail-mprotect-fail: seq=%lu addr=0x%lx "
+           "len=0x%lx prot=0x%lx ret=0x%lx errno=%ld\n",
+           e->seq, e->a0, e->a1, e->a2, e->ret, -(long)(int64)e->ret);
+    chrome_syscall_tail_dump_vma("left", left, addr);
+    chrome_syscall_tail_dump_vma("hit", hit, addr);
+    chrome_syscall_tail_dump_vma("right", right, addr);
+    vm_runlock(current->vm);
+}
+
+void chrome_syscall_tail_dump_current(const char *reason)
+{
+    struct thread *p = current;
+    struct chrome_syscall_tail_slot *slot;
+    uint64 next_seq;
+    uint64 first_seq;
+    uint64 family_counts[CHROME_SYSCALL_TAIL_MAX] = {0};
+
+    if (!chrome_syscall_tail_trace_enabled() ||
+        !chrome_syscall_trace_process(p))
+        return;
+
+    slot = chrome_syscall_tail_slot(p);
+    if (slot == NULL)
+        return;
+
+    next_seq = __atomic_load_n(&slot->next_seq, __ATOMIC_RELAXED);
+    first_seq = next_seq > CHROME_SYSCALL_TAIL_DEPTH ?
+        next_seq - CHROME_SYSCALL_TAIL_DEPTH : 0;
+
+    printf("chrome-syscall-tail-summary: reason=%s pid=%d tgid=%d name=%s "
+           "recorded=%lu first_seq=%lu next_seq=%lu depth=%d\n",
+           reason ? reason : "-", p->pid, p->tgid, p->name,
+           next_seq - first_seq, first_seq, next_seq,
+           CHROME_SYSCALL_TAIL_DEPTH);
+
+    for (uint64 seq = first_seq; seq < next_seq; seq++) {
+        struct chrome_syscall_tail_entry e =
+            slot->entries[seq % CHROME_SYSCALL_TAIL_DEPTH];
+
+        if (e.seq != seq)
+            continue;
+        if (e.family >= 0 && e.family < CHROME_SYSCALL_TAIL_MAX)
+            family_counts[e.family]++;
+        printf("chrome-syscall-tail: reason=%s seq=%lu rel=%ld pid=%d "
+               "tgid=%d cpu=%d family=%s orig=%d num=%d(%s) us=%lu "
+               "a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx a4=0x%lx "
+               "a5=0x%lx ret=0x%lx\n",
+               reason ? reason : "-", e.seq, (long)e.seq - (long)next_seq,
+               e.pid, e.tgid, e.cpu,
+               chrome_syscall_tail_family_name(e.family), e.orig_num, e.num,
+               x86_syscall_trace_name(e.orig_num), e.elapsed_us, e.a0, e.a1,
+               e.a2, e.a3, e.a4, e.a5, e.ret);
+        chrome_syscall_tail_dump_fd("chrome-syscall-tail-fd", &e);
+        chrome_syscall_tail_dump_mprotect_vmas(&e);
+    }
+
+    printf("chrome-syscall-tail-families: reason=%s pid=%d tgid=%d "
+           "clone=%lu wait=%lu futex=%lu epoll=%lu poll=%lu open=%lu "
+           "fcntl=%lu ioctl=%lu mmap=%lu sched=%lu signal=%lu ipc=%lu "
+           "other=%lu\n",
+           reason ? reason : "-", p->pid, p->tgid,
+           family_counts[CHROME_SYSCALL_TAIL_CLONE],
+           family_counts[CHROME_SYSCALL_TAIL_WAIT],
+           family_counts[CHROME_SYSCALL_TAIL_FUTEX],
+           family_counts[CHROME_SYSCALL_TAIL_EPOLL],
+           family_counts[CHROME_SYSCALL_TAIL_POLL],
+           family_counts[CHROME_SYSCALL_TAIL_OPEN],
+           family_counts[CHROME_SYSCALL_TAIL_FCNTL],
+           family_counts[CHROME_SYSCALL_TAIL_IOCTL],
+           family_counts[CHROME_SYSCALL_TAIL_MMAP],
+           family_counts[CHROME_SYSCALL_TAIL_SCHED],
+           family_counts[CHROME_SYSCALL_TAIL_SIGNAL],
+           family_counts[CHROME_SYSCALL_TAIL_IPC],
+           family_counts[CHROME_SYSCALL_TAIL_OTHER]);
+}
+
 /*
  * syscall — dispatch system call.
  *
@@ -2415,24 +2844,33 @@ void syscall(void) {
     static int chrome_syscall_enter_trace_count;
     static int chrome_syscall_slow_trace_count;
     static int chrome_syscall_progress_trace_count;
+    static int chrome_ppoll_trace_count;
+    int chrome_process = chrome_syscall_trace_process(p);
     int trace = chrome_syscall_trace_enabled() &&
-                chrome_syscall_trace_process(p) &&
+                chrome_process &&
                 chrome_syscall_trace_interesting(orig_num, a1) &&
                 chrome_syscall_trace_count < chrome_syscall_trace_limit();
     int enter_trace = chrome_syscall_enter_trace_enabled() &&
-                      chrome_syscall_trace_process(p) &&
+                      chrome_process &&
                       chrome_syscall_enter_trace_interesting(orig_num, a1) &&
                       chrome_syscall_enter_trace_count <
                           chrome_syscall_enter_trace_limit();
     int slow_trace = chrome_syscall_slow_trace_enabled() &&
-                     chrome_syscall_trace_process(p) &&
+                     chrome_process &&
                      chrome_syscall_slow_trace_count <
                          chrome_syscall_slow_trace_limit();
     uint64 slow_start = slow_trace ? r_time() : 0;
     int progress_trace = chrome_syscall_progress_trace_enabled() &&
-                         chrome_syscall_trace_process(p) &&
+                         chrome_process &&
                          chrome_syscall_progress_trace_count <
                              chrome_syscall_progress_limit();
+    int tail_trace = chrome_syscall_tail_trace_enabled() && chrome_process;
+    uint64 tail_start = tail_trace ? r_time() : 0;
+    int ppoll_trace = chrome_ppoll_trace_enabled() &&
+                      orig_num == SYS_ppoll_x86 &&
+                      chrome_lifecycle_kernel_trace_process_match(p, 0, 1) &&
+                      chrome_ppoll_trace_count < chrome_ppoll_trace_limit();
+    int ppoll_trace_seq = 0;
     maybe_start_chrome_thread_dump(p);
     /*
      * Some musl x86_64 assembly helpers use native Linux syscall numbers
@@ -2451,6 +2889,22 @@ void syscall(void) {
         chrome_syscall_trace_line("enter", p, orig_num, num, a0, a1, a2, a3,
                                   a4, a5, 0, 0);
         chrome_syscall_trace_details(orig_num, a0, a1, a2);
+        if (orig_num == SYS_poll_x86 || orig_num == SYS_ppoll_x86)
+            chrome_syscall_trace_pollfds(a0, a1);
+    }
+    if (ppoll_trace) {
+        uint32 roles = p->thread_group ?
+            __atomic_load_n(&p->thread_group->chrome_trace_roles,
+                            __ATOMIC_RELAXED) : 0;
+        ppoll_trace_seq =
+            __atomic_add_fetch(&chrome_ppoll_trace_count, 1,
+                               __ATOMIC_RELAXED);
+        printf("chrome-ppoll-trace: phase=enter seq=%d pid=%d tgid=%d "
+               "roles=0x%x name=%s fds=0x%lx nfds=%lu tmo=0x%lx "
+               "sigmask=0x%lx sigsetsize=%lu\n",
+               ppoll_trace_seq, p->pid, p->tgid, roles, p->name,
+               a0, a1, a2, a3, a4);
+        chrome_syscall_trace_pollfds(a0, a1);
     }
     if (num >= 0 && num < (int)NELEM(syscalls) && syscalls[num]) {
         p->trapframe->trapframe.rax = syscalls[num]();
@@ -2465,6 +2919,20 @@ void syscall(void) {
 #else
         p->trapframe->trapframe.rax = (uint64)-ENOSYS;
 #endif
+    }
+    if (ppoll_trace) {
+        uint32 roles = p->thread_group ?
+            __atomic_load_n(&p->thread_group->chrome_trace_roles,
+                            __ATOMIC_RELAXED) : 0;
+        printf("chrome-ppoll-trace: phase=return seq=%d pid=%d tgid=%d "
+               "roles=0x%x name=%s ret=0x%lx\n",
+               ppoll_trace_seq, p->pid, p->tgid, roles, p->name,
+               p->trapframe->trapframe.rax);
+        chrome_syscall_trace_pollfds(a0, a1);
+    }
+    if (tail_trace) {
+        chrome_syscall_tail_record(p, orig_num, num, a0, a1, a2, a3, a4, a5,
+                                   p->trapframe->trapframe.rax, tail_start);
     }
     if (trace) {
         uint64 ret = p->trapframe->trapframe.rax;

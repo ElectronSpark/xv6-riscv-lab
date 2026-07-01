@@ -36,6 +36,9 @@
 #include "kstats.h"
 #include "timer/timer.h"
 #include "proc/chrome_lifecycle.h"
+#ifdef CONFIG_ARCH_X86_64
+#include "vdso.h"
+#endif
 
 /* Enable verbose exec debugging — set to 1 to trace ELF loading steps */
 #define EXEC_DEBUG 0
@@ -54,6 +57,14 @@ static uint32 chrome_exec_trace_roles(char **argv, uint64 argc)
         const char *arg = argv[i];
         if (arg == NULL)
             continue;
+        if (strcmp(arg, "--type=gpu-process") == 0)
+            roles |= TG_CHROME_TRACE_GPU_PROCESS;
+        if (strcmp(arg, "--type=renderer") == 0)
+            roles |= TG_CHROME_TRACE_RENDERER;
+        if (strcmp(arg, "--type=utility") == 0)
+            roles |= TG_CHROME_TRACE_UTILITY;
+        if (strcmp(arg, "--type=zygote") == 0)
+            roles |= TG_CHROME_TRACE_ZYGOTE;
         if (strstr(arg, "network.mojom.NetworkService") != NULL)
             roles |= TG_CHROME_TRACE_NETWORK_SERVICE;
         if (strstr(arg, "audio.mojom.AudioService") != NULL)
@@ -125,7 +136,7 @@ static void chrome_exec_phase_trace(const char *path, const char *phase,
 #define ELF_INTERP_BASE  0x70000000UL
 
 /* Maximum number of auxiliary vector entries */
-#define AT_VECTOR_SIZE 20
+#define AT_VECTOR_SIZE 32
 
 /*
  * Linux GUI launchers can legitimately carry more argv/env entries than the
@@ -420,9 +431,10 @@ static char *exec_flatten_strings(char **strings, uint64 count, size_t *out_len)
 }
 
 int exec(char *path, char **argv, char **envp) {
+    int profile = kstats_profile_enabled();
     uint64 exec_start = r_time();
     uint64 exec_phase_last = exec_start;
-    g_exec_calls += 1;
+    KSTATS_PROFILE_INC(g_exec_calls);
     char *s, *last;
     int i;
     /*
@@ -447,6 +459,7 @@ int exec(char *path, char **argv, char **envp) {
     uint64 interp_base = 0;   /* load bias of interpreter */
     uint64 interp_entry = 0;  /* entry point of interpreter */
     uint64 interp_ld = 0;     /* loaded address of interpreter's .dynamic */
+    uint64 vdso_ehdr = 0;
     int exec_setuid = 0;      /* set if S_ISUID bit on executable */
     int exec_setgid = 0;      /* set if S_ISGID bit on executable */
     uint32 exec_uid = 0;      /* uid to adopt if setuid */
@@ -463,6 +476,9 @@ int exec(char *path, char **argv, char **envp) {
 
     exec_dbg("pid %d: exec(\"%s\")\n", current->pid, path);
     chrome_exec_phase_trace(path, "begin", exec_start, &exec_phase_last);
+    if (p->thread_group != NULL)
+        __atomic_store_n(&p->thread_group->exec_in_progress, 1,
+                         __ATOMIC_RELEASE);
 
     // Look up the file using VFS
     struct vfs_inode *inode = vfs_namei(path, strlen(path));
@@ -471,6 +487,9 @@ int exec(char *path, char **argv, char **envp) {
         exec_dbg("  FAIL: vfs_namei(\"%s\") failed\n", path);
         chrome_exec_phase_trace(path, "fail-namei", exec_start,
                                 &exec_phase_last);
+        if (p->thread_group != NULL)
+            __atomic_store_n(&p->thread_group->exec_in_progress, 0,
+                             __ATOMIC_RELEASE);
         return (int)err;
     }
     chrome_exec_phase_trace(path, "namei", exec_start, &exec_phase_last);
@@ -482,6 +501,9 @@ int exec(char *path, char **argv, char **envp) {
         vfs_iput(inode);
         chrome_exec_phase_trace(path, "fail-permission", exec_start,
                                 &exec_phase_last);
+        if (p->thread_group != NULL)
+            __atomic_store_n(&p->thread_group->exec_in_progress, 0,
+                             __ATOMIC_RELEASE);
         return perm_ret;
     }
     chrome_exec_phase_trace(path, "permission", exec_start, &exec_phase_last);
@@ -506,12 +528,18 @@ int exec(char *path, char **argv, char **envp) {
         exec_dbg("  FAIL: vfs_fileopen IS_ERR\n");
         chrome_exec_phase_trace(path, "fail-open", exec_start,
                                 &exec_phase_last);
+        if (p->thread_group != NULL)
+            __atomic_store_n(&p->thread_group->exec_in_progress, 0,
+                             __ATOMIC_RELEASE);
         return -1;
     }
     if (file == NULL) {
         exec_dbg("  FAIL: vfs_fileopen returned NULL\n");
         chrome_exec_phase_trace(path, "fail-open-null", exec_start,
                                 &exec_phase_last);
+        if (p->thread_group != NULL)
+            __atomic_store_n(&p->thread_group->exec_in_progress, 0,
+                             __ATOMIC_RELEASE);
         return -1;
     }
 
@@ -712,9 +740,15 @@ int exec(char *path, char **argv, char **envp) {
     tmp_vm->stack = vm_find_area(tmp_vm, USTACKTOP - stack_sz);
     tmp_vm->stack_size = stack_sz;
 
+#ifdef CONFIG_ARCH_X86_64
+    if (x86_vdso_map(tmp_vm, &vdso_ehdr) != 0) {
+        goto bad_locked;
+    }
+#endif
+
     vm_wunlock(tmp_vm);
     sp = USTACKTOP;
-    chrome_exec_phase_trace(path, "map-heap-stack", exec_start,
+    chrome_exec_phase_trace(path, "map-heap-stack-vdso", exec_start,
                             &exec_phase_last);
 
     // Preload pages near the entry point.
@@ -873,6 +907,9 @@ int exec(char *path, char **argv, char **envp) {
     push_auxv(ustack, &aidx, AT_RANDOM, random_addr);
     push_auxv(ustack, &aidx, AT_EXECFN, execfn_addr);
     push_auxv(ustack, &aidx, AT_PLATFORM, platform_addr);
+    if (vdso_ehdr != 0) {
+        push_auxv(ustack, &aidx, AT_SYSINFO_EHDR, vdso_ehdr);
+    }
 
     if (phdr_addr != 0) {
         push_auxv(ustack, &aidx, AT_PHDR, phdr_addr);
@@ -938,15 +975,19 @@ int exec(char *path, char **argv, char **envp) {
     chrome_exec_phase_trace(path, "kqueue-notify", exec_start,
                             &exec_phase_last);
 
-    // Commit to the user image.
-    chrome_exec_phase_trace(path, "before-old-vm-put", exec_start,
-                            &exec_phase_last);
-    vm_put_owner(p->vm, p->thread_group); // Destroy the old VM
-    chrome_exec_phase_trace(path, "old-vm-put", exec_start, &exec_phase_last);
-    p->vm = NULL;
+    // Commit to the user image before dropping the old VM.
+    vm_t *old_vm = NULL;
+    tcb_lock(p);
+    old_vm = p->vm;
     p->vm = tmp_vm;
+    tcb_unlock(p);
     chrome_exec_phase_trace(path, "assign-new-vm", exec_start,
                             &exec_phase_last);
+    chrome_exec_phase_trace(path, "before-old-vm-put", exec_start,
+                            &exec_phase_last);
+    if (old_vm != NULL)
+        vm_put_owner(old_vm, p->thread_group);
+    chrome_exec_phase_trace(path, "old-vm-put", exec_start, &exec_phase_last);
     __atomic_store_n(&p->thread_group->acct.mm_rss_pages,
                      vm_resident_pages(tmp_vm), __ATOMIC_RELAXED);
     chrome_exec_phase_trace(path, "rss-account", exec_start,
@@ -979,20 +1020,26 @@ int exec(char *path, char **argv, char **envp) {
     uint32 old_chrome_roles =
         __atomic_load_n(&p->thread_group->chrome_trace_roles,
                         __ATOMIC_SEQ_CST);
-    uint32 chrome_roles = chrome_exec_trace_roles(argv, argc) |
+    uint32 exec_chrome_roles = chrome_exec_trace_roles(argv, argc);
+    uint32 chrome_roles = exec_chrome_roles |
         (old_chrome_roles & TG_CHROME_TRACE_CHILD_PROCESS);
+    if (exec_chrome_roles == 0 && chrome_lifecycle_string_match(path))
+        chrome_roles |= TG_CHROME_TRACE_BROWSER;
     __atomic_store_n(&p->thread_group->chrome_trace_roles,
                      chrome_roles, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&p->thread_group->exec_in_progress, 0,
+                     __ATOMIC_RELEASE);
     snapshot_cmdline = NULL;
     snapshot_environ = NULL;
 
     if (chrome_lifecycle_trace_enabled() &&
         (chrome_lifecycle_string_match(path) ||
-         chrome_lifecycle_thread_match(p))) {
-        printf("chrome-lifecycle: exec pid=%d tgid=%d old_name='%s' "
-               "name='%s' path='%s' argc=%ld has_interp=%d interp='%s' "
-               "entry=0x%lx chrome_roles=0x%x\n",
-               p->pid, p->tgid, old_name, p->name, path, argc,
+         chrome_lifecycle_trace_match(p))) {
+        printf("chrome-lifecycle: exec pid=%d tgid=%d pid_seq=%lu "
+               "now_ticks=%lu old_name='%s' name='%s' path='%s' "
+               "argc=%ld has_interp=%d interp='%s' entry=0x%lx "
+               "chrome_roles=0x%x\n",
+               p->pid, p->tgid, p->pid_seq, r_time(), old_name, p->name, path, argc,
                has_interp, has_interp ? interp_path : "",
                has_interp ? interp_entry : elf.entry + load_bias,
                __atomic_load_n(&p->thread_group->chrome_trace_roles,
@@ -1004,7 +1051,7 @@ int exec(char *path, char **argv, char **envp) {
         }
     }
     int chrome_exec_trace_match =
-        chrome_lifecycle_string_match(path) || chrome_lifecycle_thread_match(p);
+        chrome_lifecycle_string_match(path) || chrome_lifecycle_trace_match(p);
     if (chrome_trace_value_enabled("chrome_fd_trace") &&
         chrome_exec_trace_match) {
         vfs_fdtable_debug_dump(p, "exec-before-close", 128);
@@ -1081,7 +1128,9 @@ int exec(char *path, char **argv, char **envp) {
                             &exec_phase_last);
 
     ACCT_INC(p->thread_group, sched_execs);
-    g_exec_ticks += r_time() - exec_start;
+    if (profile)
+        __atomic_add_fetch(&g_exec_ticks, r_time() - exec_start,
+                           __ATOMIC_RELAXED);
     chrome_exec_phase_trace(path, "done", exec_start, &exec_phase_last);
     return argc; // this ends up in a0, the first argument to main(argc, argv)
 
@@ -1097,7 +1146,12 @@ bad:
     }
     kvfree(snapshot_cmdline);
     kvfree(snapshot_environ);
-    g_exec_ticks += r_time() - exec_start;
+    if (p->thread_group != NULL)
+        __atomic_store_n(&p->thread_group->exec_in_progress, 0,
+                         __ATOMIC_RELEASE);
+    if (profile)
+        __atomic_add_fetch(&g_exec_ticks, r_time() - exec_start,
+                           __ATOMIC_RELAXED);
     return -1;
 }
 

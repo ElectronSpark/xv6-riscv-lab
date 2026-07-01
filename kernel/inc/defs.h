@@ -505,6 +505,7 @@ void argaddr(int, uint64 *);
 int fetchstr(uint64, char *, int);
 int fetchaddr(uint64, uint64 *);
 void syscall();
+void chrome_syscall_tail_dump_current(const char *reason);
 
 // trap.c
 void usertrapret(void);
@@ -593,11 +594,20 @@ int virtio_gpu_user_context_create(uint64 owner_id, pid_t owner_tgid,
                                    uint32 *actual_capset_id);
 int virtio_gpu_user_context_destroy(uint64 owner_id, pid_t owner_tgid,
                                     uint32 ctx_id);
+struct virtio_gpu_submit_trace_shape {
+    uint32 valid;
+    uint32 drm_flags;
+    uint32 nr_dwords;
+    uint32 resource_count;
+    uint32 first_word;
+    int fence_fd;
+};
 int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
                            uint32 flags, const uint32 *cmds,
                            uint32 nr_dwords, const uint32 *resources,
                            uint32 resource_count, uint64 *fence,
-                           uint64 *signaled, uint32 *first_submit);
+                           uint64 *signaled, uint32 *first_submit,
+                           const struct virtio_gpu_submit_trace_shape *shape);
 int virtio_gpu_user_fence(uint64 wait_for, int wait, uint64 *signaled);
 uint64 virtio_gpu_user_last_fence(void);
 int virtio_gpu_user_capset_ids(uint64 *ids);

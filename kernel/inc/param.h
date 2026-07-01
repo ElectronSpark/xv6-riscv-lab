@@ -48,6 +48,7 @@
 #define USERSTACK_GROWTH 32              // user stack growth pages
 #define MAXUSTACK (1UL << 11) // maximum number of pages in user stack (8 MiB)
 #define MAXUHEAP (1UL << 24) // maximum number of pages in user heap
+#define USER_STACK_GUARD_GAP_PAGES 256
 
 // Number of pages reserved above heap start for brk/sbrk growth.
 // mmap(addr=0) will not allocate within this range.

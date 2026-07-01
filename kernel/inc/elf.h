@@ -90,5 +90,6 @@ struct proghdr {
 #define AT_RANDOM  25  // Address of 16 random bytes
 #define AT_HWCAP2  26  // More arch-specific hints
 #define AT_EXECFN  31  // Filename of program
+#define AT_SYSINFO_EHDR 33 // vDSO ELF header
 
 #endif /* __KERNEL_ELF_H */

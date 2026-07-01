@@ -41,6 +41,7 @@
 #include <smp/percpu.h>
 #include <smp/atomic.h>
 #include "proc/sched.h"
+#include "proc/chrome_lifecycle.h"
 #include "list.h"
 #include "lock/spinlock.h"
 #include "lock/rwsem.h"
@@ -60,13 +61,6 @@
 
 /* MAP_POPULATE is capped so one mmap() cannot monopolize the VM lock. */
 #define VM_MMAP_POPULATE_MAX_PAGES 64
-
-/*
- * Keep normal mmap allocations away from the grow-down process stack.  Linux
- * leaves a guard gap below the stack VMA; without one, a deep userspace stack
- * can run straight into the last shared-library mapping below it.
- */
-#define VM_STACK_GUARD_GAP_PAGES 256
 
 static int webkit_mremap_trace_enabled(void)
 {
@@ -142,6 +136,48 @@ static int vm_mprotect_trace_take_slot(void)
     uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
 
     return slot < vm_mprotect_trace_limit();
+}
+
+static int vm_mprotect_fail_trace_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+
+    if (cached == -1) {
+        cached = cmdline_get_param("vm_mprotect_fail_trace", value,
+                                   sizeof(value)) == 0 && value[0] != '0';
+    }
+    return cached;
+}
+
+static uint64 vm_mprotect_fail_trace_limit(void)
+{
+    static uint64 limit;
+
+    if (limit == 0)
+        limit = vm_trace_parse_u64("vm_mprotect_fail_trace_limit", 64);
+    return limit;
+}
+
+static int vm_mprotect_fail_trace_take_slot(void)
+{
+    static uint64 emitted;
+    uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
+
+    return slot < vm_mprotect_fail_trace_limit();
+}
+
+static int vm_mprotect_fail_trace_process(void)
+{
+    char wanted[32];
+    const char *name = current != NULL ? current->name : "";
+
+    if (cmdline_get_param("vm_mprotect_fail_trace_name", wanted,
+                          sizeof(wanted)) == 0 &&
+        wanted[0] != '\0') {
+        return strncmp(name, wanted, sizeof(wanted)) == 0;
+    }
+    return 1;
 }
 
 static int vm_copy_trace_enabled(void)
@@ -233,6 +269,30 @@ static int vm_elf_mmap_trace_enabled(void)
         initialized = 1;
     }
     return cached;
+}
+
+static int vm_elf_mmap_trace_chrome_enabled(void)
+{
+    static int initialized;
+    static int cached;
+    char value[16];
+
+    if (!initialized) {
+        cached = cmdline_get_param("vm_elf_mmap_trace_chrome", value,
+                                   sizeof(value)) == 0 &&
+                 strcmp(value, "0") != 0;
+        initialized = 1;
+    }
+    return cached;
+}
+
+static int vm_elf_mmap_trace_current(void)
+{
+    if (vm_elf_mmap_trace_enabled())
+        return 1;
+    if (!vm_elf_mmap_trace_chrome_enabled())
+        return 0;
+    return chrome_lifecycle_trace_match(current);
 }
 
 static uint64 vm_file_fault_readahead_min_size(void)
@@ -1714,6 +1774,94 @@ static inline vma_t *__get_vma_right(vma_t *vma)
     return (vma_t *)mt_next(&vma->vm->vm_mt, vma->end - 1, MAPLE_MAX);
 }
 
+static const char *vm_mprotect_fail_reason(int stage)
+{
+    switch (stage) {
+    case 1: return "bad-vm";
+    case 2: return "bad-range";
+    case 3: return "outside-vm";
+    case 4: return "gap";
+    case 5: return "sealed-memfd";
+    case 6: return "split-left";
+    case 7: return "split-right";
+    case 8: return "split-right-fallback";
+    default: return "unknown";
+    }
+}
+
+static const char *vm_mprotect_trace_file_path(vma_t *vma)
+{
+    if (vma == NULL || vma->file == NULL)
+        return "-";
+    if (vma->file->opened_path != NULL &&
+        vma->file->opened_path[0] != '\0')
+        return vma->file->opened_path;
+    if (vma->file->inode.inode != NULL &&
+        vma->file->inode.inode->name != NULL)
+        return vma->file->inode.inode->name;
+    return "(unnamed)";
+}
+
+static void vm_mprotect_trace_one_vma(const char *slot, vma_t *vma,
+                                      uint64 fail_addr)
+{
+    if (vma == NULL) {
+        printf("vm-mprotect-fail-vma: slot=%s none fail_addr=0x%lx\n",
+               slot, fail_addr);
+        return;
+    }
+
+    struct vfs_inode *inode =
+        vma->file != NULL ? vma->file->inode.inode : NULL;
+    printf("vm-mprotect-fail-vma: slot=%s map=[0x%lx-0x%lx) %c%c%c %s "
+           "flags=0x%lx pgoff=0x%lx file=%p ino=%lu size=%lld "
+           "path=%s fail_in=%d\n",
+           slot, vma->start, vma->end,
+           (vma->flags & PROT_READ) ? 'r' : '-',
+           (vma->flags & PROT_WRITE) ? 'w' : '-',
+           (vma->flags & PROT_EXEC) ? 'x' : '-',
+           (vma->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+           vma->flags, vma->pgoff, (void *)vma->file,
+           inode != NULL ? inode->ino : 0,
+           inode != NULL ? inode->size : 0,
+           vm_mprotect_trace_file_path(vma),
+           fail_addr >= vma->start && fail_addr < vma->end);
+}
+
+static void vm_mprotect_trace_failure(vm_t *vm, int ret, uint64 arg_addr,
+                                      uint64 arg_size, uint64 addr,
+                                      uint64 size, int prot,
+                                      uint64 fail_addr, int stage)
+{
+    if (!vm_mprotect_fail_trace_enabled() ||
+        !vm_mprotect_fail_trace_process() ||
+        !vm_mprotect_fail_trace_take_slot())
+        return;
+
+    struct thread *self = current;
+    printf("vm-mprotect-fail: pid=%d tgid=%d name=%s ret=%d reason=%s "
+           "arg_addr=0x%lx arg_len=%lu addr=0x%lx len=%lu prot=0x%x "
+           "fail_addr=0x%lx vm_bottom=0x%lx vm_top=0x%lx\n",
+           self ? self->pid : -1, self ? self->tgid : -1,
+           self ? self->name : "-", ret, vm_mprotect_fail_reason(stage),
+           arg_addr, arg_size, addr, size, prot, fail_addr,
+           vm != NULL ? vm->vm_bottom : 0, vm != NULL ? vm->vm_top : 0);
+
+    if (vm == NULL)
+        return;
+
+    vma_t *hit = vm_find_area(vm, fail_addr);
+    vma_t *left = hit != NULL ? __get_vma_left(hit) :
+        (vma_t *)mt_prev(&vm->vm_mt, fail_addr, 0);
+    uint64 next_idx = fail_addr;
+    vma_t *right = hit != NULL ? __get_vma_right(hit) :
+        (vma_t *)mt_find(&vm->vm_mt, &next_idx, MAPLE_MAX);
+
+    vm_mprotect_trace_one_vma("left", left, fail_addr);
+    vm_mprotect_trace_one_vma("hit", hit, fail_addr);
+    vm_mprotect_trace_one_vma("right", right, fail_addr);
+}
+
 static vma_t *__vma_try_merge_neighbors(vma_t *vma)
 {
     if (vma == NULL)
@@ -1741,16 +1889,28 @@ vma_t *vm_find_area(vm_t *vm, uint64 va)
     if (va >= vm->vm_top || va < vm->vm_bottom)
         return NULL;
     vma_t *vma = (vma_t *)mtree_load(&vm->vm_mt, va);
-    if (vma != NULL) {
-        if (!vma_tree_entry_valid(vm, vma)) {
-            printf("vm_find_area: invalid maple entry=%p for va=0x%lx\n",
-                   vma, va);
+    if (vma == NULL) {
+        /*
+         * Some range updates can leave a NULL maple slot inside a still-live
+         * VMA's metadata range.  Treat the VMA descriptor as authoritative
+         * only when the previous non-NULL slot points at a valid VMA that
+         * really covers @va; true holes still return NULL.
+         */
+        vma_t *left = (vma_t *)mt_prev(&vm->vm_mt, va, 0);
+        if (left == NULL || !vma_tree_entry_valid(vm, left) ||
+            !VMA_IN_RANGE(left, va))
             return NULL;
-        }
-        assert(VMA_IN_RANGE(vma, va),
-               "vm_find_area: va %lx not in range [%lx, %lx)", va, vma->start,
-               vma->end);
+        return left;
     }
+
+    if (!vma_tree_entry_valid(vm, vma)) {
+        printf("vm_find_area: invalid maple entry=%p for va=0x%lx\n",
+               vma, va);
+        return NULL;
+    }
+    assert(VMA_IN_RANGE(vma, va),
+           "vm_find_area: va %lx not in range [%lx, %lx)", va, vma->start,
+           vma->end);
     return vma;
 }
 
@@ -2634,9 +2794,10 @@ static int vma_file_hugepage_collapse_enabled(void)
 
 int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 {
-    uint64 validate_start = r_time();
+    int profile = kstats_profile_enabled();
+    uint64 validate_start = profile ? r_time() : 0;
     int tlb_needs_flush = 0;
-    g_vm_vma_validate_calls += 1;
+    KSTATS_PROFILE_INC(g_vm_vma_validate_calls);
 
     if (flags == PROT_NONE)
         return -EINVAL;
@@ -2981,7 +3142,7 @@ hp_per_page:
                     if (unused_refs > 0)
                         __page_ref_sub(pcpage, unused_refs);
                     if (batch_faults > 0) {
-                        g_vm_file_faults += batch_faults;
+                        KSTATS_PROFILE_ADD(g_vm_file_faults, batch_faults);
                         vm_account_resident_add(vma, (uint64)batch_faults);
                     }
                     /* No TLB flush needed: we're installing PTEs for
@@ -3010,7 +3171,7 @@ hp_per_page:
                     vm_pgtable_unlock(vma->vm);
 
                     void *pa;
-                    g_vm_file_faults += 1;
+                    KSTATS_PROFILE_INC(g_vm_file_faults);
                     if (vma->file->ops != NULL && vma->file->ops->fault != NULL)
                         pa = vma->file->ops->fault(vma->file, vma, fault_va);
                     else
@@ -3134,7 +3295,9 @@ __do_pte_check:
          */
         vm_remote_sfence_range(vma->vm, va, va_end - va);
     }
-    g_vm_vma_validate_ticks += r_time() - validate_start;
+    if (profile)
+        __atomic_add_fetch(&g_vm_vma_validate_ticks,
+                           r_time() - validate_start, __ATOMIC_RELAXED);
     return 0;
 }
 
@@ -3332,7 +3495,7 @@ int vm_file_read_fault_unlocked(vm_t *vm, uint64 va, uint64 flags)
     void *pa = (char *)pcn->data + (file_off - folio_base);
     *pte = mk_pte((uint64)pa, vma->flags & ~PROT_WRITE);
     pte_mkclean(pte);
-    g_vm_file_faults += 1;
+    KSTATS_PROFILE_INC(g_vm_file_faults);
     vm_account_resident_add(vma, 1);
     vm_pgtable_unlock(vm);
     vm_runlock(vm);
@@ -3381,6 +3544,98 @@ out_file:
 
 uint64 g_vm_copyout_fast_hits = 0;
 uint64 g_vm_copyout_fast_bytes = 0;
+uint64 g_vm_copyin_fast_hits = 0;
+uint64 g_vm_copyin_fast_bytes = 0;
+uint64 g_vm_copyout_present_skip_hits = 0;
+uint64 g_vm_copyout_present_skip_bytes = 0;
+uint64 g_vm_copyin_present_skip_hits = 0;
+uint64 g_vm_copyin_present_skip_bytes = 0;
+
+#define VM_COPYOUT_PRESENT_FAST_MAX 64
+#define VM_COPYIN_PRESENT_FAST_MAX 64
+
+static int vm_cmdline_bool(const char *key, int fallback)
+{
+    char value[8];
+
+    if (cmdline_get_param(key, value, sizeof(value)) != 0 ||
+        value[0] == '\0')
+        return fallback;
+    return value[0] != '0';
+}
+
+static int vm_copyout_present_fast_enabled(void)
+{
+    static int cached = -1;
+
+    /*
+     * Keep this opt-in.  KDE/KWin startup can otherwise observe command-line
+     * text fragments in object pointers after procfs and D-Bus read paths copy
+     * small blobs through this resident-PTE shortcut.  The slow path remains
+     * authoritative until the shortcut has stronger lifetime/concurrency proof.
+     */
+    if (cached == -1)
+        cached = vm_cmdline_bool("vm_copyout_present_fast", 0);
+    return cached;
+}
+
+static int vm_copyin_present_fast_enabled(void)
+{
+    static int cached = -1;
+
+    /*
+     * Keep this opt-in.  The small reducer path passes, but KDE startup with
+     * this enabled can corrupt a userspace pointer path (pactl #GP while
+     * probing PulseAudio), and Konsole can stall before the shell marker.
+     */
+    if (cached == -1)
+        cached = vm_cmdline_bool("vm_copyin_present_fast", 0);
+    return cached;
+}
+
+static int vm_copy_present_skip_validate_enabled(void)
+{
+    static int cached = -1;
+
+    /*
+     * Default-on after KDE interaction profiling showed vma_validate()
+     * dominating launch-time user copies.  This skips validation only when the
+     * leaf PTE is already present and already grants the requested access,
+     * keeping the normal slow-path physical copy afterwards.  Boot with
+     * vm_copy_present_skip_validate=0 to force the conservative path.
+     */
+    if (cached == -1)
+        cached = vm_cmdline_bool("vm_copy_present_skip_validate", 1);
+    return cached;
+}
+
+static int vm_copy_present_leaf_pa(vm_t *vm, uint64 va0, int write,
+                                   uint64 *pa_out)
+{
+    pte_t *pte;
+    uint64 pa;
+
+    if (vm == NULL || pa_out == NULL)
+        return 0;
+
+    vm_pgtable_lock(vm);
+    pte = walk(vm->pagetable, va0, 0, NULL, NULL);
+    if (pte == NULL || !pte_present(pte) || !pte_user(pte) ||
+        (write && !pte_write_ready(pte))) {
+        vm_pgtable_unlock(vm);
+        return 0;
+    }
+
+    pa = pte_pa(pte);
+    if (pte_is_hugepage(pte))
+        pa += va0 & (HUGEPAGE_SIZE - 1);
+    vm_pgtable_unlock(vm);
+
+    if (pa < KERNBASE || pa >= PHYSTOP)
+        return 0;
+    *pa_out = pa;
+    return 1;
+}
 
 static bool vm_copyout_fast_src(const void *src, uint64 len,
                                 const void **src_safe)
@@ -3415,11 +3670,105 @@ static bool vm_copyout_fast_src(const void *src, uint64 len,
     return false;
 }
 
+static int vm_copyout_present_fast(vm_t *vm, uint64 dstva, const void *src,
+                                   uint64 len)
+{
+    uint64 end = dstva + len;
+    uint64 va0;
+    uint64 page_off;
+    uint64 pa0;
+    vma_t *vma;
+    pte_t *pte;
+
+    if (len == 0)
+        return 1;
+    if (len > VM_COPYOUT_PRESENT_FAST_MAX || end < dstva || end > UVMTOP)
+        return 0;
+    if (PGROUNDDOWN(dstva) != PGROUNDDOWN(end - 1))
+        return 0;
+
+    va0 = PGROUNDDOWN(dstva);
+    vma = vm_find_area(vm, va0);
+    if (vma == NULL || dstva < vma->start || end > vma->end)
+        return 0;
+    if ((vma->flags & (VMA_FLAG_USER | PROT_WRITE)) !=
+        (VMA_FLAG_USER | PROT_WRITE))
+        return 0;
+
+    pte = walk(vm->pagetable, va0, 0, NULL, NULL);
+    if (pte == NULL || !pte_present(pte) || !pte_user(pte) ||
+        !pte_write_ready(pte))
+        return 0;
+
+    pa0 = pte_pa(pte);
+    if (pte_is_hugepage(pte))
+        pa0 += va0 & (HUGEPAGE_SIZE - 1);
+    page_off = dstva - va0;
+    if (pa0 < KERNBASE || pa0 >= PHYSTOP || PHYSTOP - pa0 < page_off ||
+        PHYSTOP - pa0 - page_off < len)
+        return 0;
+    if (kasan_check_range(src, len, 0,
+                          (unsigned long)__builtin_return_address(0)) < 0)
+        return -EFAULT;
+
+    memmove((void *)(pa0 + page_off), src, len);
+    KSTATS_PROFILE_INC(g_vm_copyout_fast_hits);
+    KSTATS_PROFILE_ADD(g_vm_copyout_fast_bytes, len);
+    return 1;
+}
+
+static int vm_copyin_present_fast(vm_t *vm, void *dst, uint64 srcva,
+                                  uint64 len)
+{
+    uint64 end = srcva + len;
+    uint64 va0;
+    uint64 page_off;
+    uint64 pa0;
+    vma_t *vma;
+    pte_t *pte;
+
+    if (len == 0)
+        return 1;
+    if (len > VM_COPYIN_PRESENT_FAST_MAX || end < srcva || end > UVMTOP)
+        return 0;
+    if (PGROUNDDOWN(srcva) != PGROUNDDOWN(end - 1))
+        return 0;
+
+    va0 = PGROUNDDOWN(srcva);
+    vma = vm_find_area(vm, va0);
+    if (vma == NULL || srcva < vma->start || end > vma->end)
+        return 0;
+    if ((vma->flags & (VMA_FLAG_USER | PROT_READ)) !=
+        (VMA_FLAG_USER | PROT_READ))
+        return 0;
+
+    pte = walk(vm->pagetable, va0, 0, NULL, NULL);
+    if (pte == NULL || !pte_present(pte) || !pte_user(pte))
+        return 0;
+
+    pa0 = pte_pa(pte);
+    if (pte_is_hugepage(pte))
+        pa0 += va0 & (HUGEPAGE_SIZE - 1);
+    page_off = srcva - va0;
+    if (pa0 < KERNBASE || pa0 >= PHYSTOP || PHYSTOP - pa0 < page_off ||
+        PHYSTOP - pa0 - page_off < len)
+        return 0;
+    if (kasan_check_range(dst, len, 1,
+                          (unsigned long)__builtin_return_address(0)) < 0)
+        return -EFAULT;
+
+    memmove(dst, (void *)(pa0 + page_off), len);
+    KSTATS_PROFILE_INC(g_vm_copyin_fast_hits);
+    KSTATS_PROFILE_ADD(g_vm_copyin_fast_bytes, len);
+    return 1;
+}
+
 int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
 {
-    uint64 copy_start = r_time();
-    g_vm_copyout_calls += 1;
-    g_vm_copyout_bytes += len;
+    int profile = kstats_profile_enabled();
+    uint64 copy_start = profile ? r_time() : 0;
+    KSTATS_PROFILE_INC(g_vm_copyout_calls);
+    KSTATS_PROFILE_ADD(g_vm_copyout_bytes, len);
 
     uint64 n, va0, pa0;
     uint64 validated_end = 0;
@@ -3428,11 +3777,30 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
     int ret = 0;
 
     vm_rlock(vm);
+    if (vm_copyout_present_fast_enabled()) {
+        int present_fast = vm_copyout_present_fast(vm, dstva, src, len);
+        if (present_fast != 0) {
+            if (profile)
+                __atomic_add_fetch(&g_vm_copyout_ticks,
+                                   r_time() - copy_start, __ATOMIC_RELAXED);
+            vm_runlock(vm);
+            return present_fast < 0 ? present_fast : 0;
+        }
+    }
 
     /*
      * Fast path: switch CR3 to the user page table and copy directly
      * into user VAs instead of per-page software walks.  Processes the
      * copy in per-VMA chunks (the buffer may span multiple VMAs).
+     *
+     * Currently disabled (the leading "0 &&").  This path executes normal C
+     * while the user CR3 is loaded, so compiler-emitted stack accesses and the
+     * memmove implementation itself can touch kernel addresses that are not
+     * present in the user page table.  KDE/dconf D-Bus startup reached this
+     * as a #DF immediately after the CR3 switch, before memmove copied data.
+     * Keep the Linux-shaped slow path authoritative until the fast copy is
+     * rewritten as an assembly helper that uses only mappings valid under the
+     * loaded page table.
      *
      * Interrupts are disabled while the user CR3 is loaded because the
      * trap handler unconditionally switches CR3 to the kernel page table
@@ -3462,7 +3830,7 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
      */
 #ifdef __x86_64__
     uint64 dstend = dstva + len;
-    if (len > 0 && current != NULL && current->vm == vm &&
+    if (0 && len > 0 && current != NULL && current->vm == vm &&
         !vm->is_kernel && dstva < UVMTOP && dstend >= dstva &&
         dstend <= UVMTOP &&
         !(dstva < USTACKTOP && dstend > USTACK_MAX_BOTTOM)) {
@@ -3571,8 +3939,10 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
         }
 
         if (fast_ok) {
-            g_vm_copyout_fast_hits++;
-            g_vm_copyout_ticks += r_time() - copy_start;
+            KSTATS_PROFILE_INC(g_vm_copyout_fast_hits);
+            if (profile)
+                __atomic_add_fetch(&g_vm_copyout_ticks,
+                                   r_time() - copy_start, __ATOMIC_RELAXED);
             vm_runlock(vm);
             return 0;
         }
@@ -3587,6 +3957,7 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
     /* Slow path: per-page walk + coalesced memmove (multi-VMA, stack
      * growth, or validation failure on fast path). */
     while (len > 0) {
+        bool present_skip = false;
         va0 = PGROUNDDOWN(dstva);
         if (va0 >= UVMTOP) {
             ret = -EFAULT;
@@ -3603,6 +3974,15 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
                     chunk_end = req_end;
                 validated_end = chunk_end;
             }
+        }
+
+        if (vma != NULL && vm_copy_present_skip_validate_enabled() &&
+            (vma->flags & (VMA_FLAG_USER | PROT_WRITE)) ==
+                (VMA_FLAG_USER | PROT_WRITE) &&
+            vm_copy_present_leaf_pa(vm, va0, 1, &pa0)) {
+            KSTATS_PROFILE_INC(g_vm_copyout_present_skip_hits);
+            present_skip = true;
+            goto copyout_ok;
         }
 
         if (vma == NULL ||
@@ -3628,12 +4008,14 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
             goto out;
         }
 copyout_ok:
-        pte = walk(vm->pagetable, va0, 0, NULL, NULL);
-        assert(pte != NULL, "vma_copyout: pte should not be null");
+        if (!present_skip) {
+            pte = walk(vm->pagetable, va0, 0, NULL, NULL);
+            assert(pte != NULL, "vma_copyout: pte should not be null");
 
-        pa0 = pte_pa(pte);
-        if (pte_is_hugepage(pte))
-            pa0 += va0 & (HUGEPAGE_SIZE - 1);
+            pa0 = pte_pa(pte);
+            if (pte_is_hugepage(pte))
+                pa0 += va0 & (HUGEPAGE_SIZE - 1);
+        }
         n = PGSIZE - (dstva - va0);
         if (dstva + n > validated_end)
             n = validated_end - dstva;
@@ -3650,10 +4032,17 @@ copyout_ok:
             uint64 next_va = PGROUNDDOWN(dstva + contig);
             if (next_va <= va0 || next_va >= validated_end)
                 break;
-            pte_t *next_pte = walk(vm->pagetable, next_va, 0, NULL, NULL);
-            if (next_pte == NULL || !(*next_pte & PTE_V))
-                break;
-            uint64 next_pa = pte_pa(next_pte);
+            uint64 next_pa;
+            if (present_skip) {
+                if (!vm_copy_present_leaf_pa(vm, next_va, 1, &next_pa))
+                    break;
+            } else {
+                pte_t *next_pte =
+                    walk(vm->pagetable, next_va, 0, NULL, NULL);
+                if (next_pte == NULL || !(*next_pte & PTE_V))
+                    break;
+                next_pa = pte_pa(next_pte);
+            }
             if (next_pa != prev_pa_end)
                 break;
             uint64 add = PGSIZE;
@@ -3673,28 +4062,44 @@ copyout_ok:
             goto out;
         }
         memmove((void *)(pa0 + (dstva - va0)), src, contig);
+        if (present_skip)
+            KSTATS_PROFILE_ADD(g_vm_copyout_present_skip_bytes, contig);
 
         len -= contig;
         src += contig;
         dstva += contig;
     }
 out:
-    g_vm_copyout_ticks += r_time() - copy_start;
+    if (profile)
+        __atomic_add_fetch(&g_vm_copyout_ticks, r_time() - copy_start,
+                           __ATOMIC_RELAXED);
     vm_runlock(vm);
     return ret;
 }
 
 int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
 {
-    uint64 copy_start = r_time();
-    g_vm_copyin_calls += 1;
-    g_vm_copyin_bytes += len;
+    int profile = kstats_profile_enabled();
+    uint64 copy_start = profile ? r_time() : 0;
+    KSTATS_PROFILE_INC(g_vm_copyin_calls);
+    KSTATS_PROFILE_ADD(g_vm_copyin_bytes, len);
 
     uint64 n, va0, pa0;
     uint64 validated_end = 0;
     vma_t *vma = NULL;
     int ret = 0;
     vm_rlock(vm);
+
+    if (vm_copyin_present_fast_enabled()) {
+        int present_fast = vm_copyin_present_fast(vm, dst, srcva, len);
+        if (present_fast != 0) {
+            if (profile)
+                __atomic_add_fetch(&g_vm_copyin_ticks,
+                                   r_time() - copy_start, __ATOMIC_RELAXED);
+            vm_runlock(vm);
+            return present_fast < 0 ? present_fast : 0;
+        }
+    }
 
     /*
      * Fast path: single-VMA range — switch to user CR3 and copy
@@ -3742,7 +4147,9 @@ int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
             }
             intr_restore(was);
 
-            g_vm_copyin_ticks += r_time() - copy_start;
+            if (profile)
+                __atomic_add_fetch(&g_vm_copyin_ticks,
+                                   r_time() - copy_start, __ATOMIC_RELAXED);
             vm_runlock(vm);
             return 0;
         }
@@ -3751,7 +4158,9 @@ int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
 
     /* Slow path: per-page walk + coalesced memmove. */
     while (len > 0) {
+        bool present_skip = false;
         va0 = PGROUNDDOWN(srcva);
+        pa0 = 0;
         if (vma == NULL || srcva >= validated_end ||
             va0 < vma->start || va0 >= vma->end) {
             vma = vm_find_area(vm, va0);
@@ -3762,6 +4171,15 @@ int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
                     chunk_end = req_end;
                 validated_end = chunk_end;
             }
+        }
+
+        if (vma != NULL && vm_copy_present_skip_validate_enabled() &&
+            (vma->flags & (VMA_FLAG_USER | PROT_READ)) ==
+                (VMA_FLAG_USER | PROT_READ) &&
+            vm_copy_present_leaf_pa(vm, va0, 0, &pa0)) {
+            KSTATS_PROFILE_INC(g_vm_copyin_present_skip_hits);
+            present_skip = true;
+            goto copyin_ok;
         }
 
         if (vma == NULL ||
@@ -3787,10 +4205,12 @@ int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
             goto out;
         }
 copyin_ok:
-        pa0 = walkaddr(vm->pagetable, va0);
         if (pa0 == 0) {
-            ret = -EFAULT;
-            goto out;
+            pa0 = walkaddr(vm->pagetable, va0);
+            if (pa0 == 0) {
+                ret = -EFAULT;
+                goto out;
+            }
         }
         n = PGSIZE - (srcva - va0);
         if (srcva + n > validated_end)
@@ -3810,9 +4230,15 @@ copyin_ok:
                 break;
             if (next_va >= validated_end)
                 break;
-            uint64 next_pa = walkaddr(vm->pagetable, next_va);
-            if (next_pa == 0)
-                break;
+            uint64 next_pa;
+            if (present_skip) {
+                if (!vm_copy_present_leaf_pa(vm, next_va, 0, &next_pa))
+                    break;
+            } else {
+                next_pa = walkaddr(vm->pagetable, next_va);
+                if (next_pa == 0)
+                    break;
+            }
             if (next_pa != prev_pa_end)
                 break;
             uint64 add = PGSIZE;
@@ -3832,13 +4258,17 @@ copyin_ok:
             goto out;
         }
         memmove(dst, (void *)((uint64)PA2VA(pa0) + (srcva - va0)), contig);
+        if (present_skip)
+            KSTATS_PROFILE_ADD(g_vm_copyin_present_skip_bytes, contig);
 
         len -= contig;
         dst += contig;
         srcva += contig;
     }
 out:
-    g_vm_copyin_ticks += r_time() - copy_start;
+    if (profile)
+        __atomic_add_fetch(&g_vm_copyin_ticks, r_time() - copy_start,
+                           __ATOMIC_RELAXED);
     vm_runlock(vm);
     return ret;
 }
@@ -3868,20 +4298,26 @@ int vm_copyinstr(vm_t *vm, char *dst, uint64 srcva, uint64 max)
             n = max;
 
         char *p = (char *)((uint64)PA2VA(pa0) + (srcva - va0));
-        while (n > 0) {
-            if (*p == '\0') {
-                *dst = '\0';
-                got_null = 1;
-                break;
-            } else {
-                *dst = *p;
-            }
-            --n;
-            --max;
-            p++;
-            dst++;
+        uint64 copy_len = 0;
+        if (kasan_check_range(p, n, 0,
+                              (unsigned long)__builtin_return_address(0)) <
+            0) {
+            ret = -EFAULT;
+            goto out;
+        }
+        while (copy_len < n && p[copy_len] != '\0')
+            copy_len++;
+
+        if (copy_len < n) {
+            memmove(dst, p, copy_len);
+            dst[copy_len] = '\0';
+            got_null = 1;
+            break;
         }
 
+        memmove(dst, p, n);
+        max -= n;
+        dst += n;
         srcva = va0 + PGSIZE;
     }
     if (!got_null)
@@ -4391,6 +4827,11 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
     uint64 trace_present_pages = 0;
     uint64 trace_huge_entries = 0;
     int trace_flush_needed = 0;
+    uint64 trace_fail_addr = addr;
+    int trace_fail_stage = 0;
+
+    if (vm == NULL)
+        return -EINVAL;
 
     vm_wlock(vm);
     if (trace) {
@@ -4399,17 +4840,21 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
         trace_t = now;
     }
 
-    if (vm == NULL || vm->pagetable == NULL) {
+    if (vm->pagetable == NULL) {
+        trace_fail_stage = 1;
         ret = -EINVAL;
         goto out;
     }
 
     if (vm_normalize_user_range(&addr, &size) != 0) {
+        trace_fail_stage = 2;
         ret = -EINVAL;
         goto out;
     }
 
     if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
+        trace_fail_addr = addr;
+        trace_fail_stage = 3;
         ret = -ENOMEM;
         goto out;
     }
@@ -4426,6 +4871,8 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
     while (cur < end) {
         vma_t *vma = vm_find_area(vm, cur);
         if (vma == NULL || cur < vma->start) {
+            trace_fail_addr = cur;
+            trace_fail_stage = 4;
             ret = -ENOMEM;
             goto out;
         }
@@ -4434,6 +4881,8 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
             vma->file->f_is_memfd &&
             (vma->file->f_seals &
              (F_SEAL_WRITE | F_SEAL_FUTURE_WRITE))) {
+            trace_fail_addr = cur;
+            trace_fail_stage = 5;
             ret = -EPERM;
             goto out;
         }
@@ -4441,6 +4890,8 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
         if (cur > vma->start) {
             vma = vma_split(vma, cur);
             if (vma == NULL) {
+                trace_fail_addr = cur;
+                trace_fail_stage = 6;
                 ret = -ENOMEM;
                 goto out;
             }
@@ -4453,6 +4904,8 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
             vma_t *left = vma_split_keep_right(vma, seg_end, &fast_skip);
             if (IS_ERR(left)) {
                 trace_fast_skip = fast_skip;
+                trace_fail_addr = seg_end;
+                trace_fail_stage = 7;
                 ret = PTR_ERR(left);
                 goto out;
             } else if (left != NULL) {
@@ -4462,6 +4915,8 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
                 if (fast_skip != 0)
                     trace_fast_skip = fast_skip;
                 if (vma_split(vma, seg_end) == NULL) {
+                    trace_fail_addr = seg_end;
+                    trace_fail_stage = 8;
                     ret = -ENOMEM;
                     goto out;
                 }
@@ -4492,8 +4947,12 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
         }
         vm_pgtable_lock(vm);
         for (uint64 va = cur; va < seg_end; va += PGSIZE) {
-            trace_pages++;
-            pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+            uint64 next_va = va + PGSIZE;
+            pte_t *pte = walk_present_leaf_or_next(vm->pagetable, va,
+                                                   seg_end, &next_va);
+            if (next_va <= va || next_va > seg_end)
+                next_va = va + PGSIZE;
+            trace_pages += (next_va - va) / PGSIZE;
             if (pte != NULL && pte_present(pte)) {
                 /* Handle hugepage: modify the 2MB PTE and skip ahead. */
                 if (pte_is_hugepage(pte)) {
@@ -4550,6 +5009,8 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
                         pte_mkclean(pte);
                     }
                 }
+            } else {
+                va = next_va - PGSIZE;
             }
         }
         vm_pgtable_unlock(vm);
@@ -4596,6 +5057,11 @@ out:
                    trace_fast_splits, trace_fast_skip, trace_present_pages,
                    trace_huge_entries, trace_flush_needed);
         }
+    }
+    if (ret != 0) {
+        vm_mprotect_trace_failure(vm, ret, trace_arg_addr, trace_arg_size,
+                                  addr, size, prot, trace_fail_addr,
+                                  trace_fail_stage);
     }
     vm_wunlock(vm);
     return ret;
@@ -5381,7 +5847,7 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
     /* Reserve the entire potential stack growth region.  The stack can grow
      * down to USTACK_MAX_BOTTOM, so mmap allocations must stay below that
      * to avoid blocking future stack expansion. */
-    uint64 guard_gap = VM_STACK_GUARD_GAP_PAGES << PAGE_SHIFT;
+    uint64 guard_gap = USER_STACK_GUARD_GAP_PAGES << PAGE_SHIFT;
     uint64 search_top = USTACK_MAX_BOTTOM;
     if (search_top > vm->vm_bottom + guard_gap)
         search_top -= guard_gap;
@@ -5720,10 +6186,13 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         vma->file_data_end = file_data_end != 0 ?
                              file_data_end :
                              VMA_FILE_DATA_END_EOF_MARKER;
-        if (vm_elf_mmap_trace_enabled()) {
+        if (vm_elf_mmap_trace_current()) {
             struct vfs_inode *inode = vfs_inode_deref(&file->inode);
-            printf("vm-elf-mmap: ino=%lu size=%lu off=0x%lx len=0x%lx "
-                   "map_type=0x%x prot=0x%x flags=0x%lx data_end=0x%lx\n",
+            printf("vm-elf-mmap: pid=%d name='%s' ino=%lu size=%lu "
+                   "off=0x%lx len=0x%lx map_type=0x%x prot=0x%x "
+                   "flags=0x%lx data_end=0x%lx\n",
+                   current != NULL ? current->pid : -1,
+                   current != NULL ? current->name : "?",
                    inode != NULL ? inode->ino : 0,
                    inode != NULL ? (uint64)READ_ONCE(inode->size) : 0,
                    offset, map_length, map_type, prot, vm_flags,

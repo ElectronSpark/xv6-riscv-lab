@@ -57,6 +57,8 @@ static uint64 fault_vma_inode_size(struct vfs_inode *inode)
     return inode != NULL ? (uint64)inode->size : 0;
 }
 
+static const char *vma_debug_path(vma_t *vma);
+
 static void print_vma_file_data_end(vma_t *vma, struct vfs_inode *inode)
 {
     uint64 raw;
@@ -121,7 +123,135 @@ static void print_fault_vma(vm_t *vm, const char *label, uint64 addr)
            vma->pgoff, file_off, (void *)vma->file,
            inode ? inode->ino : 0, inode ? inode->size : 0);
     print_vma_file_data_end(vma, inode);
-    printf(" name=%s\n", fault_vma_file_name(vma));
+    printf(" name=%s path=%s\n", fault_vma_file_name(vma),
+           vma_debug_path(vma));
+}
+
+static int user_int3_diagnostics_thread_match(struct thread *p)
+{
+    if (p == NULL)
+        return 0;
+    if (chrome_lifecycle_thread_match(p))
+        return 1;
+    if (strstr(p->name, "chrome") != NULL ||
+        strstr(p->name, "chromium") != NULL ||
+        strstr(p->name, "wayland-chromium") != NULL)
+        return 1;
+    return 0;
+}
+
+static int copy_user_mapped_no_fault(vm_t *vm, void *dst, uint64 srcva,
+                                     uint64 len)
+{
+    unsigned char *out = dst;
+
+    if (vm == NULL || dst == NULL)
+        return -EFAULT;
+
+    vm_rlock(vm);
+    while (len > 0) {
+        uint64 va0 = PGROUNDDOWN(srcva);
+        uint64 pa0 = walkaddr(vm->pagetable, va0);
+        uint64 page_off = srcva - va0;
+        uint64 pa;
+        uint64 n;
+
+        if (page_off >= PGSIZE) {
+            vm_runlock(vm);
+            return -EFAULT;
+        }
+
+        pa = pa0 + page_off;
+        if (pa < KERNBASE || pa >= PHYSTOP) {
+            vm_runlock(vm);
+            return -EFAULT;
+        }
+
+        n = PGSIZE - page_off;
+        if (n > len)
+            n = len;
+        if (PHYSTOP - pa < n)
+            n = PHYSTOP - pa;
+        if (n == 0) {
+            vm_runlock(vm);
+            return -EFAULT;
+        }
+
+        memmove(out, PA2VA(pa), n);
+        out += n;
+        srcva += n;
+        len -= n;
+    }
+    vm_runlock(vm);
+    return 0;
+}
+
+static void dump_user_int3_diagnostics(struct thread *p, struct trapframe *tf)
+{
+    unsigned char code[32];
+    uint64 stack_words[8];
+    uint64 rip;
+    uint64 code_start;
+
+    if (p == NULL || p->vm == NULL || tf == NULL)
+        return;
+    if (!user_int3_diagnostics_thread_match(p))
+        return;
+    static int emitted;
+    if (__atomic_exchange_n(&emitted, 1, __ATOMIC_RELAXED) != 0)
+        return;
+
+    rip = tf->rip;
+    code_start = rip >= sizeof(code) / 2 ? rip - sizeof(code) / 2 : rip;
+
+    printf("  user-int3: pid=%d tgid=%d name=%s rip=0x%lx rsp=0x%lx rbp=0x%lx\n",
+           p->pid, thread_tgid(p), p->name, rip, tf->rsp, tf->rbp);
+    printf("  user-int3-regs: rax=0x%lx rbx=0x%lx rcx=0x%lx rdx=0x%lx rdi=0x%lx rsi=0x%lx\n",
+           tf->rax, tf->rbx, tf->rcx, tf->rdx, tf->rdi, tf->rsi);
+    chrome_syscall_tail_dump_current("user-int3");
+
+    vm_rlock(p->vm);
+    print_fault_vma(p->vm, "int3-ip", rip);
+    print_fault_vma(p->vm, "int3-rsp", tf->rsp);
+    vm_runlock(p->vm);
+
+    if (copy_user_mapped_no_fault(p->vm, code, code_start, sizeof(code)) == 0) {
+        printf("  user-int3-code @0x%lx int3_index=%lu:",
+               code_start, rip - code_start);
+        for (size_t i = 0; i < sizeof(code); i++)
+            printf(" %02x", code[i]);
+        printf("\n");
+    } else {
+        printf("  user-int3-code @0x%lx: <unreadable>\n", code_start);
+    }
+
+    if (copy_user_mapped_no_fault(p->vm, stack_words, tf->rsp,
+                                  sizeof(stack_words)) == 0) {
+        static const char *stack_labels[] = {
+            "int3-stack[0]",
+            "int3-stack[1]",
+            "int3-stack[2]",
+            "int3-stack[3]",
+            "int3-stack[4]",
+            "int3-stack[5]",
+            "int3-stack[6]",
+            "int3-stack[7]",
+        };
+
+        printf("  user-int3-stack @rsp:");
+        for (size_t i = 0; i < sizeof(stack_words) / sizeof(stack_words[0]); i++)
+            printf(" 0x%lx", stack_words[i]);
+        printf("\n");
+        vm_rlock(p->vm);
+        for (size_t i = 0; i < sizeof(stack_words) / sizeof(stack_words[0]); i++) {
+            if (stack_words[i] == 0)
+                continue;
+            print_fault_vma(p->vm, stack_labels[i], stack_words[i]);
+        }
+        vm_runlock(p->vm);
+    } else {
+        printf("  user-int3-stack @rsp: <unreadable>\n");
+    }
 }
 
 static const char *vma_debug_path(vma_t *vma)
@@ -155,6 +285,7 @@ static void kde_dump_user_bytes(struct thread *p, const char *label,
 #define KDE_EXCEPTION_KWINGLUTILS_SLOT_FILE_TAIL 0x26000UL
 #define KDE_EXCEPTION_KWINGLUTILS_SLOT_FILE_END 0x26008UL
 #define KDE_EXCEPTION_KWINGLUTILS_SLOT_PLATFORM 0x26040UL
+#define KDE_EXCEPTION_WIREPLUMBER_LOG_SPECS_FILE_OFF 0x72188UL
 
 static int kde_exception_vma_covers_file_off(vma_t *vma, uint64 file_off)
 {
@@ -343,6 +474,32 @@ static void kde_dump_exception_kwinglutils_vma(vm_t *vm, vma_t *vma,
                                  "kwinglutils-slot");
 }
 
+static void kde_dump_exception_wireplumber_vma(vm_t *vm, vma_t *vma,
+                                               struct vfs_inode *inode,
+                                               const char *path)
+{
+    if (vm == NULL || vma == NULL || path == NULL)
+        return;
+    if (strstr(path, "libwireplumber-0.4.so.0") == NULL)
+        return;
+
+    printf("  kde-exception-wireplumber-vma: map=[0x%lx-0x%lx) %c%c%c %s pgoff=0x%lx file=%p inode_ino=%lu inode_size=%lld",
+           vma->start, vma->end,
+           (vma->flags & PROT_READ) ? 'r' : '-',
+           (vma->flags & PROT_WRITE) ? 'w' : '-',
+           (vma->flags & PROT_EXEC) ? 'x' : '-',
+           (vma->flags & VMA_FLAG_SHARED) ? "shared" : "private",
+           vma->pgoff, (void *)vma->file,
+           inode ? inode->ino : 0, inode ? inode->size : 0);
+    print_vma_file_data_end(vma, inode);
+    printf(" path=%s\n", path);
+
+    kde_dump_exception_file_slot(vm, vma,
+                                 KDE_EXCEPTION_WIREPLUMBER_LOG_SPECS_FILE_OFF,
+                                 "kde-exception-wireplumber-log-specs",
+                                 "wireplumber-log-specs");
+}
+
 static void kde_dump_exception_vmas(struct thread *p, struct trapframe *tf,
                                     uint64 vec, const char *name)
 {
@@ -400,6 +557,7 @@ static void kde_dump_exception_vmas(struct thread *p, struct trapframe *tf,
         printf("\n");
         kde_dump_exception_icu_vma(vm, v, inode, path);
         kde_dump_exception_kwinglutils_vma(vm, v, inode, path);
+        kde_dump_exception_wireplumber_vma(vm, v, inode, path);
     }
     if (!found_ip)
         printf("  kde-exception-vma: rip mapping not found\n");
@@ -501,6 +659,23 @@ static void kde_dump_fatal_null_call_slots(struct thread *p,
     kde_dump_fatal_pointer_slot(p, "fatal-r13+0x5e0", tf->r13, 0x5e0);
 }
 
+static void kde_dump_fatal_lowptr_object_slots(struct thread *p,
+                                               struct trapframe *tf,
+                                               uint64 cr2)
+{
+    if (p == NULL || tf == NULL)
+        return;
+    if (cr2 >= PGSIZE || tf->rdi == 0)
+        return;
+
+    printf("  fatal-lowptr-object-slots: base=rdi=0x%lx cr2=0x%lx\n",
+           tf->rdi, cr2);
+    kde_dump_fatal_pointer_slot(p, "fatal-rdi+0x80", tf->rdi, 0x80);
+    kde_dump_fatal_pointer_slot(p, "fatal-rdi+0x88", tf->rdi, 0x88);
+    kde_dump_fatal_pointer_slot(p, "fatal-rdi+0x90", tf->rdi, 0x90);
+    kde_dump_fatal_pointer_slot(p, "fatal-rdi+0x98", tf->rdi, 0x98);
+}
+
 static void kde_dump_fatal_page_fault_summary(struct thread *p,
                                               struct trapframe *tf,
                                               uint64 cr2)
@@ -575,6 +750,7 @@ static void kde_dump_fatal_page_fault_summary(struct thread *p,
     }
 
     kde_dump_fatal_null_call_slots(p, tf, cr2);
+    kde_dump_fatal_lowptr_object_slots(p, tf, cr2);
 }
 
 static void chrome_dump_icu_vmas(struct thread *p, const char *reason)
@@ -1843,6 +2019,8 @@ void x86_trap_handler(struct trapframe *tf) {
             /* GDB stub didn't handle it — deliver SIGTRAP */
             printf("pid %d %s: breakpoint trap rip=0x%lx\n", current->pid,
                    current->name, current->trapframe->trapframe.rip);
+            dump_user_int3_diagnostics(current,
+                                       &current->trapframe->trapframe);
             if (chrome_trace_value_enabled("chrome_fd_trace")) {
                 chrome_dump_icu_vmas(current, "trap-int3");
                 chrome_dump_asset_fds(current, "trap-int3");

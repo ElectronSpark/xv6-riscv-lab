@@ -23,14 +23,19 @@
 #include "list.h"
 
 #define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
-    uint64 __sys_start = r_time();                                          \
-    __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED)
+    int __sys_profile = kstats_profile_enabled();                           \
+    uint64 __sys_start = __sys_profile ? r_time() : 0;                      \
+    do {                                                                    \
+        if (__sys_profile)                                                  \
+            __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED);           \
+    } while (0)
 
 #define SYSCALL_PROFILE_RETURN(ret_expr, tick_ctr)                          \
     do {                                                                    \
         uint64 __sys_ret = (uint64)(ret_expr);                              \
-        __atomic_add_fetch(&(tick_ctr), r_time() - __sys_start,             \
-                           __ATOMIC_RELAXED);                               \
+        if (__sys_profile)                                                  \
+            __atomic_add_fetch(&(tick_ctr), r_time() - __sys_start,         \
+                               __ATOMIC_RELAXED);                           \
         return __sys_ret;                                                   \
     } while (0)
 
@@ -116,6 +121,89 @@ static void ns_to_timespec(uint64 ns, struct __k_timespec *ts)
 {
     ts->tv_sec = (int64)(ns / NS_PER_SEC);
     ts->tv_nsec = (int64)(ns % NS_PER_SEC);
+}
+
+static void ticks_to_timespec(uint64 ticks, struct __k_timespec *ts)
+{
+    uint64 freq = __timebase_frequency;
+    if (freq == 0) {
+        ns_to_timespec(ticks, ts);
+        return;
+    }
+
+    ts->tv_sec = (int64)(ticks / freq);
+    ts->tv_nsec = (int64)(((ticks % freq) * NS_PER_SEC) / freq);
+}
+
+enum clock_gettime_profile_bucket {
+    CLOCK_PROFILE_MONOTONIC,
+    CLOCK_PROFILE_MONOTONIC_COARSE,
+    CLOCK_PROFILE_REALTIME,
+    CLOCK_PROFILE_PROCESS,
+    CLOCK_PROFILE_THREAD,
+    CLOCK_PROFILE_OTHER,
+};
+
+static enum clock_gettime_profile_bucket
+clock_gettime_profile_bucket(int clockid)
+{
+    switch (clockid) {
+    case CLOCK_MONOTONIC:
+    case CLOCK_MONOTONIC_RAW:
+    case CLOCK_BOOTTIME:
+    case CLOCK_BOOTTIME_ALARM:
+        return CLOCK_PROFILE_MONOTONIC;
+    case CLOCK_MONOTONIC_COARSE:
+        return CLOCK_PROFILE_MONOTONIC_COARSE;
+    case CLOCK_REALTIME:
+    case CLOCK_REALTIME_COARSE:
+    case CLOCK_REALTIME_ALARM:
+    case CLOCK_TAI:
+        return CLOCK_PROFILE_REALTIME;
+    case CLOCK_PROCESS_CPUTIME_ID:
+        return CLOCK_PROFILE_PROCESS;
+    case CLOCK_THREAD_CPUTIME_ID:
+        return CLOCK_PROFILE_THREAD;
+    default:
+        return CLOCK_PROFILE_OTHER;
+    }
+}
+
+static void clock_gettime_profile_add(enum clock_gettime_profile_bucket bucket,
+                                      uint64 ticks)
+{
+    uint64 *calls;
+    uint64 *tick_ctr;
+
+    switch (bucket) {
+    case CLOCK_PROFILE_MONOTONIC:
+        calls = &g_sys_clock_gettime_monotonic_calls;
+        tick_ctr = &g_sys_clock_gettime_monotonic_ticks;
+        break;
+    case CLOCK_PROFILE_MONOTONIC_COARSE:
+        calls = &g_sys_clock_gettime_monotonic_coarse_calls;
+        tick_ctr = &g_sys_clock_gettime_monotonic_coarse_ticks;
+        break;
+    case CLOCK_PROFILE_REALTIME:
+        calls = &g_sys_clock_gettime_realtime_calls;
+        tick_ctr = &g_sys_clock_gettime_realtime_ticks;
+        break;
+    case CLOCK_PROFILE_PROCESS:
+        calls = &g_sys_clock_gettime_process_calls;
+        tick_ctr = &g_sys_clock_gettime_process_ticks;
+        break;
+    case CLOCK_PROFILE_THREAD:
+        calls = &g_sys_clock_gettime_thread_calls;
+        tick_ctr = &g_sys_clock_gettime_thread_ticks;
+        break;
+    default:
+        calls = &g_sys_clock_gettime_other_calls;
+        tick_ctr = &g_sys_clock_gettime_other_ticks;
+        break;
+    }
+
+    __atomic_add_fetch(calls, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(tick_ctr, ticks, __ATOMIC_RELAXED);
 }
 
 static int timespec_to_ns(const struct __k_timespec *ts, uint64 *ns)
@@ -921,22 +1009,56 @@ uint64 sys_clock_gettime(void) {
     uint64 tp_addr;
     argint(0, &clockid);
     argaddr(1, &tp_addr);
+    enum clock_gettime_profile_bucket profile_bucket =
+        clock_gettime_profile_bucket(clockid);
+
+#define CLOCK_GETTIME_PROFILE_RETURN(ret_expr)                              \
+    do {                                                                    \
+        uint64 __sys_ret = (uint64)(ret_expr);                              \
+        if (__sys_profile) {                                                \
+            uint64 __sys_ticks = r_time() - __sys_start;                    \
+            clock_gettime_profile_add(profile_bucket, __sys_ticks);         \
+            __atomic_add_fetch(&g_sys_clock_gettime_ticks, __sys_ticks,     \
+                               __ATOMIC_RELAXED);                           \
+        }                                                                   \
+        return __sys_ret;                                                   \
+    } while (0)
 
     if (tp_addr == 0)
-        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_clock_gettime_ticks);
-
-    uint64 ns;
-    int ret = clock_get_ns(clockid, &ns);
-    if (ret != 0)
-        SYSCALL_PROFILE_RETURN(ret, g_sys_clock_gettime_ticks);
+        CLOCK_GETTIME_PROFILE_RETURN(-EINVAL);
 
     struct __k_timespec ts = {0};
-    ns_to_timespec(ns, &ts);
+    switch (clockid) {
+    case CLOCK_MONOTONIC:
+    case CLOCK_MONOTONIC_RAW:
+    case CLOCK_MONOTONIC_COARSE:
+    case CLOCK_BOOTTIME:
+    case CLOCK_BOOTTIME_ALARM:
+        ticks_to_timespec(r_time(), &ts);
+        break;
+    case CLOCK_PROCESS_CPUTIME_ID:
+        ticks_to_timespec(
+            thread_group_runtime_ticks(current->thread_group), &ts);
+        break;
+    case CLOCK_THREAD_CPUTIME_ID:
+        ticks_to_timespec(
+            sched_entity_runtime_ticks(current->sched_entity), &ts);
+        break;
+    default: {
+        uint64 ns;
+        int ret = clock_get_ns(clockid, &ns);
+        if (ret != 0)
+            CLOCK_GETTIME_PROFILE_RETURN(ret);
+        ns_to_timespec(ns, &ts);
+        break;
+    }
+    }
 
     if (either_copyout(1, tp_addr, &ts, sizeof(ts)) < 0)
-        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_clock_gettime_ticks);
+        CLOCK_GETTIME_PROFILE_RETURN(-EFAULT);
 
-    SYSCALL_PROFILE_RETURN(0, g_sys_clock_gettime_ticks);
+    CLOCK_GETTIME_PROFILE_RETURN(0);
+#undef CLOCK_GETTIME_PROFILE_RETURN
 }
 
 /*

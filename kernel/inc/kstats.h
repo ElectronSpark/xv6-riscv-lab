@@ -67,12 +67,34 @@ struct kstats {
     uint64 vfs_lookup_cache_misses;
     uint64 vfs_lookup_driver_calls;
     uint64 vfs_lookup_driver_ticks;
+    uint64 vfs_dentry_inode_calls;
+    uint64 vfs_dentry_inode_self_hits;
+    uint64 vfs_dentry_inode_rlock_calls;
+    uint64 vfs_dentry_inode_rlock_ticks;
+    uint64 vfs_dentry_inode_upgrade_calls;
+    uint64 vfs_dentry_inode_upgrade_ticks;
+    uint64 vfs_inode_cache_calls;
+    uint64 vfs_inode_cache_hits;
+    uint64 vfs_inode_cache_misses;
+    uint64 vfs_inode_cache_eagain;
+    uint64 vfs_inode_cache_ticks;
+    uint64 vfs_inode_load_calls;
+    uint64 vfs_inode_load_success;
+    uint64 vfs_inode_load_ticks;
 
     /* ── VM user-copy / fault path ──────────────────────────────── */
     uint64 vm_copyin_calls;
     uint64 vm_copyout_calls;
     uint64 vm_copyin_bytes;
     uint64 vm_copyout_bytes;
+    uint64 vm_copyout_fast_hits;
+    uint64 vm_copyout_fast_bytes;
+    uint64 vm_copyin_fast_hits;
+    uint64 vm_copyin_fast_bytes;
+    uint64 vm_copyout_present_skip_hits;
+    uint64 vm_copyout_present_skip_bytes;
+    uint64 vm_copyin_present_skip_hits;
+    uint64 vm_copyin_present_skip_bytes;
     uint64 vm_vma_validate_calls;
     uint64 vm_vma_validate_ticks;
     uint64 vm_file_faults;
@@ -130,12 +152,34 @@ struct kstats {
     uint64 sys_brk_ticks;
     uint64 sys_clock_gettime_calls;
     uint64 sys_clock_gettime_ticks;
+    uint64 sys_clock_gettime_monotonic_calls;
+    uint64 sys_clock_gettime_monotonic_ticks;
+    uint64 sys_clock_gettime_monotonic_coarse_calls;
+    uint64 sys_clock_gettime_monotonic_coarse_ticks;
+    uint64 sys_clock_gettime_realtime_calls;
+    uint64 sys_clock_gettime_realtime_ticks;
+    uint64 sys_clock_gettime_process_calls;
+    uint64 sys_clock_gettime_process_ticks;
+    uint64 sys_clock_gettime_thread_calls;
+    uint64 sys_clock_gettime_thread_ticks;
+    uint64 sys_clock_gettime_other_calls;
+    uint64 sys_clock_gettime_other_ticks;
     uint64 sys_gettimeofday_calls;
     uint64 sys_gettimeofday_ticks;
     uint64 sys_getrandom_calls;
     uint64 sys_getrandom_ticks;
     uint64 exec_calls;
     uint64 exec_ticks;
+    uint64 sys_openat_path_copy_calls;
+    uint64 sys_openat_path_copy_ticks;
+    uint64 sys_openat_dirfd_calls;
+    uint64 sys_openat_dirfd_ticks;
+    uint64 sys_openat_lookup_calls;
+    uint64 sys_openat_lookup_ticks;
+    uint64 sys_openat_fileopen_calls;
+    uint64 sys_openat_fileopen_ticks;
+    uint64 sys_openat_fdalloc_calls;
+    uint64 sys_openat_fdalloc_ticks;
 };
 
 /* ------------------------------------------------------------------ */
@@ -158,11 +202,33 @@ extern uint64 g_vfs_lookup_negative_hits;
 extern uint64 g_vfs_lookup_cache_misses;
 extern uint64 g_vfs_lookup_driver_calls;
 extern uint64 g_vfs_lookup_driver_ticks;
+extern uint64 g_vfs_dentry_inode_calls;
+extern uint64 g_vfs_dentry_inode_self_hits;
+extern uint64 g_vfs_dentry_inode_rlock_calls;
+extern uint64 g_vfs_dentry_inode_rlock_ticks;
+extern uint64 g_vfs_dentry_inode_upgrade_calls;
+extern uint64 g_vfs_dentry_inode_upgrade_ticks;
+extern uint64 g_vfs_inode_cache_calls;
+extern uint64 g_vfs_inode_cache_hits;
+extern uint64 g_vfs_inode_cache_misses;
+extern uint64 g_vfs_inode_cache_eagain;
+extern uint64 g_vfs_inode_cache_ticks;
+extern uint64 g_vfs_inode_load_calls;
+extern uint64 g_vfs_inode_load_success;
+extern uint64 g_vfs_inode_load_ticks;
 
 extern uint64 g_vm_copyin_calls;
 extern uint64 g_vm_copyout_calls;
 extern uint64 g_vm_copyin_bytes;
 extern uint64 g_vm_copyout_bytes;
+extern uint64 g_vm_copyout_fast_hits;
+extern uint64 g_vm_copyout_fast_bytes;
+extern uint64 g_vm_copyin_fast_hits;
+extern uint64 g_vm_copyin_fast_bytes;
+extern uint64 g_vm_copyout_present_skip_hits;
+extern uint64 g_vm_copyout_present_skip_bytes;
+extern uint64 g_vm_copyin_present_skip_hits;
+extern uint64 g_vm_copyin_present_skip_bytes;
 extern uint64 g_vm_vma_validate_calls;
 extern uint64 g_vm_vma_validate_ticks;
 extern uint64 g_vm_file_faults;
@@ -218,12 +284,51 @@ extern uint64 g_sys_brk_calls;
 extern uint64 g_sys_brk_ticks;
 extern uint64 g_sys_clock_gettime_calls;
 extern uint64 g_sys_clock_gettime_ticks;
+extern uint64 g_sys_clock_gettime_monotonic_calls;
+extern uint64 g_sys_clock_gettime_monotonic_ticks;
+extern uint64 g_sys_clock_gettime_monotonic_coarse_calls;
+extern uint64 g_sys_clock_gettime_monotonic_coarse_ticks;
+extern uint64 g_sys_clock_gettime_realtime_calls;
+extern uint64 g_sys_clock_gettime_realtime_ticks;
+extern uint64 g_sys_clock_gettime_process_calls;
+extern uint64 g_sys_clock_gettime_process_ticks;
+extern uint64 g_sys_clock_gettime_thread_calls;
+extern uint64 g_sys_clock_gettime_thread_ticks;
+extern uint64 g_sys_clock_gettime_other_calls;
+extern uint64 g_sys_clock_gettime_other_ticks;
 extern uint64 g_sys_gettimeofday_calls;
 extern uint64 g_sys_gettimeofday_ticks;
 extern uint64 g_sys_getrandom_calls;
 extern uint64 g_sys_getrandom_ticks;
 extern uint64 g_exec_calls;
 extern uint64 g_exec_ticks;
+extern uint64 g_sys_openat_path_copy_calls;
+extern uint64 g_sys_openat_path_copy_ticks;
+extern uint64 g_sys_openat_dirfd_calls;
+extern uint64 g_sys_openat_dirfd_ticks;
+extern uint64 g_sys_openat_lookup_calls;
+extern uint64 g_sys_openat_lookup_ticks;
+extern uint64 g_sys_openat_fileopen_calls;
+extern uint64 g_sys_openat_fileopen_ticks;
+extern uint64 g_sys_openat_fdalloc_calls;
+extern uint64 g_sys_openat_fdalloc_ticks;
+extern int g_kstats_profile_enabled;
+
+static inline int kstats_profile_enabled(void) {
+    return __atomic_load_n(&g_kstats_profile_enabled, __ATOMIC_RELAXED);
+}
+
+#define KSTATS_PROFILE_INC(counter)                                         \
+    do {                                                                    \
+        if (kstats_profile_enabled())                                       \
+            __atomic_add_fetch(&(counter), 1, __ATOMIC_RELAXED);           \
+    } while (0)
+
+#define KSTATS_PROFILE_ADD(counter, value)                                  \
+    do {                                                                    \
+        if (kstats_profile_enabled())                                       \
+            __atomic_add_fetch(&(counter), (value), __ATOMIC_RELAXED);     \
+    } while (0)
 
 /* ------------------------------------------------------------------ */
 /*  API                                                               */
@@ -231,5 +336,6 @@ extern uint64 g_exec_ticks;
 
 /** Fill a kstats struct with a point-in-time snapshot. */
 void kstats_collect(struct kstats *ks);
+void kstats_profile_set(int enabled);
 
 #endif /* __KERNEL_KSTATS_H */

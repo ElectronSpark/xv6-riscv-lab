@@ -716,6 +716,8 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
         ret = -EOPNOTSUPP; // Write operation not supported
         goto out;
     }
+    if (file->f_flags & O_APPEND)
+        file->f_pos = inode->size;
     // The driver handles file extension, size updates, and truncation
     // internally
     ret = file->ops->write(file, buf, n, user);
@@ -995,6 +997,9 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
         ret = -EOPNOTSUPP;
         goto writev_out;
     }
+
+    if (file->f_flags & O_APPEND)
+        file->f_pos = inode->size;
 
     /* Prefer native writev; fall back to per-segment write */
     if (file->ops->writev != NULL) {

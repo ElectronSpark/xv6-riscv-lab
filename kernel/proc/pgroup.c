@@ -18,6 +18,7 @@
 #include "param.h"
 #include "errno.h"
 #include "printf.h"
+#include "defs.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
 #include "proc/thread.h"
@@ -386,37 +387,72 @@ pid_t pgroup_getpgid(pid_t pid) {
 /*
  * pgroup_kill - send a signal to every process in a process group
  *
- * Iterates the process group's thread_groups list under pid_rlock,
- * sending the signal to each thread group via tg_signal_send().
+ * Snapshots the process group's thread_groups list under pid_rlock, then
+ * sends the signal after dropping pid_lock.  tg_signal_send() takes pid_rlock
+ * internally, so calling it while traversing the pgroup would self-deadlock
+ * on kill(-pgid, sig).
  *
  * Returns 0 on success, -ESRCH if no processes were found.
  */
 int pgroup_kill(pid_t pgid, int signum) {
     int count = 0;
+    int target_cap = 0;
+    struct thread_group **targets = NULL;
     struct pgroup *pg = NULL;
 
+retry:
     pid_rlock();
     pg = get_pgroup(pgid);
     if (pg == NULL || pg->exited) {
         pid_runlock();
+        if (targets != NULL)
+            kmm_free(targets);
         return -ESRCH;
     }
     if (pg->is_kernel) {
         pid_runlock();
+        if (targets != NULL)
+            kmm_free(targets);
         return -EPERM;
     }
+    if (pg->p_cnt <= 0) {
+        pid_runlock();
+        if (targets != NULL)
+            kmm_free(targets);
+        return -ESRCH;
+    }
+    if (pg->p_cnt > target_cap) {
+        int needed = pg->p_cnt;
 
-    /* Signal each thread group in the process group */
+        pid_runlock();
+        if (targets != NULL)
+            kmm_free(targets);
+        targets = kmm_alloc(sizeof(*targets) * (size_t)needed);
+        if (targets == NULL)
+            return -ENOMEM;
+        target_cap = needed;
+        goto retry;
+    }
+
+    /* Take refs while pid_lock pins membership, then deliver lock-free. */
     struct thread_group *tg;
     struct thread_group *tg_tmp;
     list_foreach_node_safe(&pg->thread_groups, tg, tg_tmp, list_entry) {
+        if (count >= target_cap)
+            break;
+        thread_group_get(tg);
+        targets[count++] = tg;
+    }
+    pid_runlock();
+
+    for (int i = 0; i < count; i++) {
         struct ksiginfo info;
         memset(&info, 0, sizeof(info));
         info.signo = signum;
-        tg_signal_send(tg, &info);
-        count++;
+        (void)tg_signal_send(targets[i], &info);
+        thread_group_put(targets[i]);
     }
-    pid_runlock();
+    kmm_free(targets);
 
     return count > 0 ? 0 : -ESRCH;
 }

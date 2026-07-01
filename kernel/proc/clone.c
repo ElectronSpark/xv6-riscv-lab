@@ -511,6 +511,31 @@ int thread_clone(struct clone_args *args) {
         }
     }
 
+    if (chrome_lifecycle_trace_enabled() &&
+        (!(args->flags & CLONE_THREAD) ||
+         chrome_thread_lifecycle_trace_enabled()) &&
+        (chrome_lifecycle_trace_match(p) ||
+         chrome_lifecycle_trace_match(ret_ptr))) {
+        uint32 child_roles = ret_ptr->thread_group ?
+            __atomic_load_n(&ret_ptr->thread_group->chrome_trace_roles,
+                            __ATOMIC_RELAXED) : 0;
+        uint32 parent_roles = chrome_lifecycle_roles(p);
+        printf("chrome-lifecycle: clone parent_pid=%d parent_tgid=%d "
+               "parent_name='%s' child_pid=%d child_tgid=%d child_name='%s' "
+               "flags=0x%lx thread=%d process=%d vfork=%d vm=%d "
+               "now_ticks=%lu parent_pid_seq=%lu child_pid_seq=%lu "
+               "parent_roles=0x%x child_roles=0x%x parent_exec='%s' "
+               "child_exec='%s' esignal=%lu\n",
+               p->pid, p->tgid, p->name, ret_ptr->pid, ret_ptr->tgid,
+               ret_ptr->name, args->flags, !!(args->flags & CLONE_THREAD),
+               !(args->flags & CLONE_THREAD), !!(args->flags & CLONE_VFORK),
+               !!(args->flags & CLONE_VM), r_time(), p->pid_seq,
+               ret_ptr->pid_seq, parent_roles, child_roles,
+               p->thread_group ? p->thread_group->exec_path : "",
+               ret_ptr->thread_group ? ret_ptr->thread_group->exec_path : "",
+               ret_ptr->signal.esignal);
+    }
+
     chrome_clone_dump_asset_state(p, ret_ptr, args->flags);
 
     // Wake up the new child thread
@@ -519,24 +544,6 @@ int thread_clone(struct clone_args *args) {
 
     /* kqueue: notify EVFILT_PROC watchers of fork */
     kqueue_proc_notify(p, NOTE_FORK, ret_ptr->pid);
-
-    if (chrome_lifecycle_trace_enabled() &&
-        (!(args->flags & CLONE_THREAD) ||
-         chrome_thread_lifecycle_trace_enabled()) &&
-        (chrome_lifecycle_thread_match(p) ||
-         chrome_lifecycle_thread_match(ret_ptr))) {
-        uint32 child_roles = ret_ptr->thread_group ?
-            __atomic_load_n(&ret_ptr->thread_group->chrome_trace_roles,
-                            __ATOMIC_RELAXED) : 0;
-        printf("chrome-lifecycle: clone parent_pid=%d parent_tgid=%d "
-               "parent_name='%s' child_pid=%d child_tgid=%d child_name='%s' "
-               "flags=0x%lx thread=%d vfork=%d child_roles=0x%x "
-               "child_exec='%s'\n",
-               p->pid, p->tgid, p->name, ret_ptr->pid, ret_ptr->tgid,
-               ret_ptr->name, args->flags, !!(args->flags & CLONE_THREAD),
-               !!(args->flags & CLONE_VFORK), child_roles,
-               ret_ptr->thread_group ? ret_ptr->thread_group->exec_path : "");
-    }
 
     // For vfork, parent blocks until child exits or execs
     if (args->flags & CLONE_VFORK) {

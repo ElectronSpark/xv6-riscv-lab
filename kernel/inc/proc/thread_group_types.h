@@ -42,6 +42,11 @@
 #define TG_CHROME_TRACE_NETWORK_SERVICE (1U << 0)
 #define TG_CHROME_TRACE_CHILD_PROCESS   (1U << 1)
 #define TG_CHROME_TRACE_AUDIO_SERVICE   (1U << 2)
+#define TG_CHROME_TRACE_GPU_PROCESS     (1U << 3)
+#define TG_CHROME_TRACE_RENDERER        (1U << 4)
+#define TG_CHROME_TRACE_UTILITY         (1U << 5)
+#define TG_CHROME_TRACE_ZYGOTE          (1U << 6)
+#define TG_CHROME_TRACE_BROWSER         (1U << 7)
 
 struct pgroup;
 
@@ -138,6 +143,7 @@ struct thread_group {
     _Atomic int no_new_privs;     /* PR_GET/SET_NO_NEW_PRIVS */
     _Atomic uint64 timer_slack_ns; /* PR_GET/SET_TIMERSLACK */
     _Atomic int oom_score_adj;     /* /proc/<pid>/oom_score_adj */
+    _Atomic int exec_in_progress;  /* procfs must not mix old argv with new VM */
     _Atomic uint32 chrome_trace_roles; /* Chromium utility-role trace markers */
 
     /* Per-process resource accounting (cumulative counters) */

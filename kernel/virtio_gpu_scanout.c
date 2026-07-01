@@ -827,6 +827,22 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
     struct virtio_gpu_stats vg_stats;
     uint64 async_pending;
     uint64 async_depth;
+    uint64 hot_shape_owners = 0;
+    uint64 hot_shape_submit_calls = 0;
+    uint64 hot_shape_make_room_calls = 0;
+    uint64 hot_shape_make_room_stalls = 0;
+    uint64 hot_shape_make_room_wait_ticks = 0;
+    uint64 hot_shape_make_room_max_wait_ticks = 0;
+    uint64 hot_shape_make_room_depth_max = 0;
+    uint64 hot_shape_make_room_count_max = 0;
+    uint64 hot_shape_make_room_wait_count_max = 0;
+    uint64 hot_shape_posted = 0;
+    uint64 hot_shape_post_count_max = 0;
+    uint64 hot_shape_retired = 0;
+    uint64 hot_shape_retire_ticks = 0;
+    uint64 hot_shape_retire_max_ticks = 0;
+    uint64 hot_shape_failures = 0;
+    uint64 hot_shape_mixed = 0;
 
     if (!g->initialized)
         return;
@@ -835,6 +851,40 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
     vg_stats = g->stats;
     async_pending = g->async_count;
     async_depth = g->async_depth ? (uint64)g->async_depth : 2;
+    for (int i = 0; i < VIRTIO_GPU_SUBMIT_TRACE_OWNER_SLOTS; i++) {
+        const struct virtio_gpu_submit_trace_owner *o =
+            &g->submit_trace_owners[i];
+        const struct virtio_gpu_submit_trace_owner_counts *c = &o->total;
+
+        if (!o->in_use || !c->shape.valid)
+            continue;
+        hot_shape_owners++;
+        hot_shape_submit_calls += c->shape_submit_calls;
+        hot_shape_make_room_calls += c->shape_make_room_calls;
+        hot_shape_make_room_stalls += c->shape_make_room_stalls;
+        hot_shape_make_room_wait_ticks += c->shape_make_room_wait_ticks;
+        if (c->shape_make_room_max_wait_ticks >
+            hot_shape_make_room_max_wait_ticks)
+            hot_shape_make_room_max_wait_ticks =
+                c->shape_make_room_max_wait_ticks;
+        if (c->shape_make_room_depth_max > hot_shape_make_room_depth_max)
+            hot_shape_make_room_depth_max = c->shape_make_room_depth_max;
+        if (c->shape_make_room_count_max > hot_shape_make_room_count_max)
+            hot_shape_make_room_count_max = c->shape_make_room_count_max;
+        if (c->shape_make_room_wait_count_max >
+            hot_shape_make_room_wait_count_max)
+            hot_shape_make_room_wait_count_max =
+                c->shape_make_room_wait_count_max;
+        hot_shape_posted += c->shape_posted;
+        if (c->shape_post_count_max > hot_shape_post_count_max)
+            hot_shape_post_count_max = c->shape_post_count_max;
+        hot_shape_retired += c->shape_retired;
+        hot_shape_retire_ticks += c->shape_retire_ticks;
+        if (c->shape_retire_max_ticks > hot_shape_retire_max_ticks)
+            hot_shape_retire_max_ticks = c->shape_retire_max_ticks;
+        hot_shape_failures += c->shape_failures;
+        hot_shape_mixed += c->shape_mixed;
+    }
     spin_unlock(&g->lock);
 
     stats->virtio_commands = vg_stats.commands;
@@ -886,6 +936,56 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
         vg_stats.async_make_room_last_wait_us;
     stats->virtio_async_make_room_max_wait_us =
         vg_stats.async_make_room_max_wait_us;
+    stats->virtio_present_copy_calls = vg_stats.present_copy_calls;
+    stats->virtio_present_copy_drain_calls =
+        vg_stats.present_copy_drain_calls;
+    stats->virtio_present_copy_src_fence_drains =
+        vg_stats.present_copy_src_fence_drains;
+    stats->virtio_present_copy_blanket_drains =
+        vg_stats.present_copy_blanket_drains;
+    stats->virtio_present_copy_src_fence_only_drains =
+        vg_stats.present_copy_src_fence_only_drains;
+    stats->virtio_present_copy_blanket_only_drains =
+        vg_stats.present_copy_blanket_only_drains;
+    stats->virtio_present_copy_src_fence_blanket_drains =
+        vg_stats.present_copy_src_fence_blanket_drains;
+    stats->virtio_present_copy_no_drain_skips =
+        vg_stats.present_copy_no_drain_skips;
+    stats->virtio_present_copy_minimal_skips =
+        vg_stats.present_copy_minimal_skips;
+    stats->virtio_present_copy_drain_failures =
+        vg_stats.present_copy_drain_failures;
+    stats->virtio_present_copy_drain_ticks =
+        vg_stats.present_copy_drain_ticks;
+    stats->virtio_present_copy_drain_last_us =
+        vg_stats.present_copy_drain_last_us;
+    stats->virtio_present_copy_drain_max_us =
+        vg_stats.present_copy_drain_max_us;
+    stats->virtio_hot_shape_owners = hot_shape_owners;
+    stats->virtio_hot_shape_owner_drops =
+        vg_stats.submit_trace_owner_drops;
+    stats->virtio_hot_shape_submit_calls = hot_shape_submit_calls;
+    stats->virtio_hot_shape_make_room_calls = hot_shape_make_room_calls;
+    stats->virtio_hot_shape_make_room_stalls = hot_shape_make_room_stalls;
+    stats->virtio_hot_shape_make_room_wait_us =
+        virtio_gpu_ticks_to_us(hot_shape_make_room_wait_ticks);
+    stats->virtio_hot_shape_make_room_max_wait_us =
+        virtio_gpu_ticks_to_us(hot_shape_make_room_max_wait_ticks);
+    stats->virtio_hot_shape_make_room_depth_max =
+        hot_shape_make_room_depth_max;
+    stats->virtio_hot_shape_make_room_count_max =
+        hot_shape_make_room_count_max;
+    stats->virtio_hot_shape_make_room_wait_count_max =
+        hot_shape_make_room_wait_count_max;
+    stats->virtio_hot_shape_posted = hot_shape_posted;
+    stats->virtio_hot_shape_post_count_max = hot_shape_post_count_max;
+    stats->virtio_hot_shape_retired = hot_shape_retired;
+    stats->virtio_hot_shape_retire_us =
+        virtio_gpu_ticks_to_us(hot_shape_retire_ticks);
+    stats->virtio_hot_shape_retire_max_us =
+        virtio_gpu_ticks_to_us(hot_shape_retire_max_ticks);
+    stats->virtio_hot_shape_failures = hot_shape_failures;
+    stats->virtio_hot_shape_mixed = hot_shape_mixed;
 }
 
 int virtio_gpu_has_virgl(void)
@@ -1218,9 +1318,14 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
     int registered;
     int rebind = 0;
     int async_scanout = 0;
+    uint64 src_submit_fence = 0;
+    uint64 completed_fence = 0;
+    int should_wait_src_fence = 0;
+    int ordered_async_src_fence = 0;
     int ret;
     struct virtio_gpu_async_submit scanout_prep;
     static int flip_logs;
+    static int wait_logs;
 
     if (flags_out != NULL)
         *flags_out = 0;
@@ -1242,7 +1347,48 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
         ret = -EINVAL;
         goto out;
     }
+    src_submit_fence = res->last_submit_fence;
+    completed_fence = g->stats.last_fence;
+    should_wait_src_fence = src_submit_fence != 0 &&
+        src_submit_fence > completed_fence &&
+        virtio_gpu_async_pending(g) &&
+        virtio_gpu_async_newest_fence(g) >= src_submit_fence;
+    ordered_async_src_fence = should_wait_src_fence &&
+        virtio_gpu_async_scanout_flush_enabled() &&
+        virtio_gpu_cmdline_enabled("virtio_gpu_ordered_page_flip") &&
+        !virtio_gpu_cmdline_enabled("virtio_gpu_page_flip_drain_src_fence");
     spin_unlock(&g->lock);
+
+    /*
+     * Direct page-flip scanout must preserve the same producer-before-present
+     * ordering as the resource-copy path.  Mesa can submit rendering work
+     * asynchronously, then KMS may immediately flip/flush the target resource.
+     *
+     * With virtio_gpu_ordered_page_flip=1, the SET_SCANOUT/RESOURCE_FLUSH
+     * below is posted after the pending producer submit on the same virtio
+     * control queue, so queue ordering should preserve producer-before-present
+     * without stalling the compositor here.  Keep this opt-in until reducers
+     * show a clear interaction-latency win across hosts.
+     */
+    if (should_wait_src_fence && !ordered_async_src_fence) {
+        ret = virtio_gpu_drain_async_until_fence(g, src_submit_fence);
+        if (ret != 0) {
+            ret = -EIO;
+            goto out;
+        }
+        if (virtio_gpu_cmdline_enabled("virtio_gpu_page_flip_wait_diag") &&
+            wait_logs < 8) {
+            printf("virtio_gpu: page-flip waited source fence=%lu completed=%lu resource=%u\n",
+                   src_submit_fence, completed_fence, resource_id);
+            wait_logs++;
+        }
+    } else if (ordered_async_src_fence &&
+               virtio_gpu_cmdline_enabled("virtio_gpu_page_flip_wait_diag") &&
+               wait_logs < 8) {
+        printf("virtio_gpu: page-flip ordered source fence=%lu completed=%lu resource=%u\n",
+               src_submit_fence, completed_fence, resource_id);
+        wait_logs++;
+    }
 
     if (g->page_flip_scanout_width != scanout_w ||
         g->page_flip_scanout_height != scanout_h)

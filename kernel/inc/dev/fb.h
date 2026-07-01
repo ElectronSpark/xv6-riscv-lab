@@ -1722,6 +1722,36 @@ struct fb_gpu_stats {
     uint64 kms_cursor_last_rgb_nonzero; /* visible-color candidate pixels */
     uint64 kms_cursor_last_first_pixel; /* first ARGB8888/BGRA-memory pixel */
     uint64 kms_cursor_last_center_pixel; /* center ARGB8888/BGRA-memory pixel */
+    uint64 virtio_hot_shape_owners; /* owner slots with hot-shape samples */
+    uint64 virtio_hot_shape_owner_drops; /* hot-shape owner table drops */
+    uint64 virtio_hot_shape_submit_calls; /* hot execbuffer submissions */
+    uint64 virtio_hot_shape_make_room_calls; /* hot-shape admissions */
+    uint64 virtio_hot_shape_make_room_stalls; /* hot admissions stalled */
+    uint64 virtio_hot_shape_make_room_wait_us; /* total hot wait time */
+    uint64 virtio_hot_shape_make_room_max_wait_us; /* max hot wait */
+    uint64 virtio_hot_shape_make_room_depth_max; /* max pending depth */
+    uint64 virtio_hot_shape_make_room_count_max; /* max pending count */
+    uint64 virtio_hot_shape_make_room_wait_count_max; /* max wait count */
+    uint64 virtio_hot_shape_posted; /* hot async commands posted */
+    uint64 virtio_hot_shape_post_count_max; /* max hot posted count */
+    uint64 virtio_hot_shape_retired; /* hot async commands retired */
+    uint64 virtio_hot_shape_retire_us; /* total hot retire age */
+    uint64 virtio_hot_shape_retire_max_us; /* max hot retire age */
+    uint64 virtio_hot_shape_failures; /* hot-shape failures */
+    uint64 virtio_hot_shape_mixed; /* hot-shape identity changes */
+    uint64 virtio_present_copy_calls; /* present-copy drain decisions */
+    uint64 virtio_present_copy_drain_calls; /* actual present drains */
+    uint64 virtio_present_copy_src_fence_drains; /* source fence drains */
+    uint64 virtio_present_copy_blanket_drains; /* legacy whole-ring drains */
+    uint64 virtio_present_copy_src_fence_only_drains; /* only source fence */
+    uint64 virtio_present_copy_blanket_only_drains; /* only legacy blanket */
+    uint64 virtio_present_copy_src_fence_blanket_drains; /* both reasons */
+    uint64 virtio_present_copy_no_drain_skips; /* no-drain fast-path skips */
+    uint64 virtio_present_copy_minimal_skips; /* minimal-drain fast skips */
+    uint64 virtio_present_copy_drain_failures; /* failed present drains */
+    uint64 virtio_present_copy_drain_ticks; /* total present drain time */
+    uint64 virtio_present_copy_drain_last_us; /* last present drain time */
+    uint64 virtio_present_copy_drain_max_us; /* max present drain time */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

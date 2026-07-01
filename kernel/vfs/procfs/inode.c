@@ -30,6 +30,7 @@
 #include "hlist.h"
 #include <mm/slab.h>
 #include <mm/vm.h>
+#include <mm/pgtable.h>
 #include <mm/mm_watermark.h>
 #include "arch/vm.h"
 #include "proc/thread.h"
@@ -973,6 +974,7 @@ struct procfs_vm_accounting {
     uint64 stack_pages;
     uint64 exec_pages;
     uint64 file_pages;
+    uint64 pagetable_pages;
 };
 
 static void procfs_collect_vm_accounting(vm_t *vm,
@@ -1015,12 +1017,30 @@ static void procfs_collect_vm_accounting(vm_t *vm,
     }
     vm_runlock(vm);
 
+    vm_pgtable_lock(vm);
+    acct->pagetable_pages = pgtable_count_pages(vm->pagetable);
+    vm_pgtable_unlock(vm);
+
     if (acct->shared_pages > acct->resident_pages)
         acct->shared_pages = acct->resident_pages;
     if (acct->text_pages > acct->resident_pages)
         acct->text_pages = acct->resident_pages;
     if (acct->file_pages > acct->resident_pages)
         acct->file_pages = acct->resident_pages;
+}
+
+static vm_t *procfs_pin_thread_vm(struct thread *p)
+{
+    vm_t *vm = NULL;
+
+    if (p == NULL)
+        return NULL;
+
+    vm = p->vm;
+    if (vm != NULL)
+        vm_dup(vm);
+
+    return vm;
 }
 
 static char *procfs_gen_status(int tgid) {
@@ -1037,7 +1057,7 @@ static char *procfs_gen_status(int tgid) {
     int              ppid     = (p->parent != NULL) ? p->parent->tgid : 0;
     const char      *statestr = thread_state_short(__thread_state_get(p));
     const char      *statelong = thread_state_to_str(__thread_state_get(p));
-    vm_t            *vm       = p->vm;
+    vm_t            *vm       = procfs_pin_thread_vm(p);
     int              real_tgid = p->tgid;
     int              pid      = p->pid;
     int              pgid     = p->pgid;
@@ -1085,6 +1105,8 @@ static char *procfs_gen_status(int tgid) {
 
     struct procfs_vm_accounting vmacct;
     procfs_collect_vm_accounting(vm, &vmacct);
+    if (vm != NULL)
+        vm_put(vm);
 
     char *buf = kvmalloc(PROCFS_BUF_SIZE);
     if (buf == NULL)
@@ -1099,9 +1121,8 @@ static char *procfs_gen_status(int tgid) {
     unsigned long vm_data_kb = (unsigned long)((vmacct.data_pages * PGSIZE) / 1024);
     unsigned long vm_stk_kb = (unsigned long)((vmacct.stack_pages * PGSIZE) / 1024);
     unsigned long vm_exe_kb = (unsigned long)((vmacct.exec_pages * PGSIZE) / 1024);
-    unsigned long vm_pte_kb = (unsigned long)((vmacct.size_pages * sizeof(pte_t)) / 1024);
-    if (vmacct.size_pages != 0 && vm_pte_kb == 0)
-        vm_pte_kb = 4;
+    unsigned long vm_pte_kb =
+        (unsigned long)((vmacct.pagetable_pages * PGSIZE) / 1024);
 
     int pos = snprintf(buf, PROCFS_BUF_SIZE,
                        "Name:\t%s\n"
@@ -1218,7 +1239,7 @@ static char *procfs_gen_statm(int tgid) {
     rcu_read_lock();
     struct thread *p = NULL;
     get_pid_thread(tgid, &p);
-    vm_t *vm = (p != NULL) ? p->vm : NULL;
+    vm_t *vm = procfs_pin_thread_vm(p);
     rcu_read_unlock();
 
     if (vm == NULL)
@@ -1226,6 +1247,7 @@ static char *procfs_gen_statm(int tgid) {
 
     struct procfs_vm_accounting acct;
     procfs_collect_vm_accounting(vm, &acct);
+    vm_put(vm);
 
     char *buf = kvmalloc(PROCFS_BUF_SIZE);
     if (buf == NULL)
@@ -1350,13 +1372,10 @@ static int procfs_prepare_maps_vma(vma_t *out, vma_t *vma, uint64 *last_end)
 }
 
 static char *procfs_gen_maps(int tgid) {
-    /* Pin the vm under RCU, then iterate VMAs under vm_rlock. */
     rcu_read_lock();
     struct thread *p = NULL;
     get_pid_thread(tgid, &p);
-    vm_t *vm = (p != NULL) ? p->vm : NULL;
-    if (vm != NULL)
-        vm_dup(vm);
+    vm_t *vm = procfs_pin_thread_vm(p);
     rcu_read_unlock();
 
     if (vm == NULL)
@@ -1366,8 +1385,10 @@ static char *procfs_gen_maps(int tgid) {
 
     for (;;) {
         char *buf = kvmalloc(buf_size);
-        if (buf == NULL)
+        if (buf == NULL) {
+            vm_put(vm);
             return ERR_PTR(-ENOMEM);
+        }
 
         size_t pos = 0;
         bool truncated = false;
@@ -1852,9 +1873,7 @@ static char *procfs_gen_smaps(int tgid)
     rcu_read_lock();
     struct thread *p = NULL;
     get_pid_thread(tgid, &p);
-    vm_t *vm = (p != NULL) ? p->vm : NULL;
-    if (vm != NULL)
-        vm_dup(vm);
+    vm_t *vm = procfs_pin_thread_vm(p);
     rcu_read_unlock();
 
     if (vm == NULL)
@@ -1863,8 +1882,10 @@ static char *procfs_gen_smaps(int tgid)
     size_t buf_size = PROCFS_MAPS_INITIAL_BUF_SIZE;
     for (;;) {
         char *buf = kvmalloc(buf_size);
-        if (buf == NULL)
+        if (buf == NULL) {
+            vm_put(vm);
             return ERR_PTR(-ENOMEM);
+        }
 
         size_t pos = 0;
         bool truncated = false;
@@ -1955,7 +1976,7 @@ static char *procfs_gen_pid_stat(int tgid)
     int ppid = (p->parent != NULL) ? p->parent->tgid : 0;
     int pgid = p->pgid;
     int sid = p->sid;
-    vm_t *vm = p->vm;
+    vm_t *vm = procfs_pin_thread_vm(p);
     uint64 cputime_raw = 0;
     int priority = LINUX_NICE_BIAS;
     int nice = 0;
@@ -1971,6 +1992,8 @@ static char *procfs_gen_pid_stat(int tgid)
 
     struct procfs_vm_accounting acct;
     procfs_collect_vm_accounting(vm, &acct);
+    if (vm != NULL)
+        vm_put(vm);
     uint64 hz = __timebase_frequency ? __timebase_frequency : 10000000UL;
     unsigned long cputime_ticks = (unsigned long)((cputime_raw * HZ) / hz);
 
@@ -2124,6 +2147,115 @@ static struct procfs_blob *procfs_blob_alloc(size_t len)
     return blob;
 }
 
+static size_t procfs_copy_live_exec_range(vm_t *vm, char *dst, size_t max,
+                                          const uint64 *addrs,
+                                          const size_t *lens, size_t count)
+{
+    uint64 start = UINT64_MAX;
+    uint64 end = 0;
+
+    if (vm == NULL || dst == NULL || max == 0 ||
+        addrs == NULL || lens == NULL || count == 0)
+        return 0;
+
+    for (size_t i = 0; i < count; i++) {
+        uint64 addr = addrs[i];
+        size_t len = lens[i];
+
+        if (addr == 0 || len == 0)
+            continue;
+        if (addr < start)
+            start = addr;
+        if (addr + len > end && addr + len >= addr)
+            end = addr + len;
+    }
+
+    if (start == UINT64_MAX || end <= start)
+        return 0;
+
+    size_t len = (size_t)(end - start);
+    if (len > max)
+        len = max;
+    if (vm_copyin(vm, dst, start, len) < 0)
+        return 0;
+    return len;
+}
+
+static int procfs_exec_range_bounds(const uint64 *addrs, const size_t *lens,
+                                    size_t count, uint64 *startp,
+                                    uint64 *endp)
+{
+    uint64 start = UINT64_MAX;
+    uint64 end = 0;
+
+    if (addrs == NULL || lens == NULL || startp == NULL || endp == NULL)
+        return 0;
+
+    for (size_t i = 0; i < count; i++) {
+        uint64 addr = addrs[i];
+        size_t len = lens[i];
+
+        if (addr == 0 || len == 0)
+            continue;
+        if (addr < start)
+            start = addr;
+        if (addr + len > end && addr + len >= addr)
+            end = addr + len;
+    }
+
+    if (start == UINT64_MAX || end <= start)
+        return 0;
+    *startp = start;
+    *endp = end;
+    return 1;
+}
+
+static size_t procfs_copy_live_cmdline(vm_t *vm, char *dst, size_t max,
+                                       const uint64 *arg_addrs,
+                                       const size_t *arg_lens,
+                                       size_t arg_count,
+                                       const uint64 *env_addrs,
+                                       const size_t *env_lens,
+                                       size_t env_count)
+{
+    uint64 arg_start;
+    uint64 arg_end;
+    uint64 env_start;
+    uint64 env_end;
+    size_t len;
+
+    if (vm == NULL || dst == NULL || max == 0)
+        return 0;
+    if (!procfs_exec_range_bounds(arg_addrs, arg_lens, arg_count,
+                                  &arg_start, &arg_end))
+        return 0;
+
+    len = (size_t)(arg_end - arg_start);
+    if (len > max)
+        len = max;
+    if (vm_copyin(vm, dst, arg_start, len) < 0)
+        return 0;
+
+    /*
+     * Linux extends /proc/<pid>/cmdline into the original environment area
+     * when a process overwrites its argv block for setproctitle-style names.
+     * Chromium's zygote children use that path for renderer/utility labels.
+     */
+    if (len != 0 && dst[len - 1] != '\0' &&
+        procfs_exec_range_bounds(env_addrs, env_lens, env_count,
+                                 &env_start, &env_end) &&
+        env_start >= arg_start && env_end > arg_end) {
+        size_t full_len = (size_t)(env_end - arg_start);
+
+        if (full_len > max)
+            full_len = max;
+        if (vm_copyin(vm, dst, arg_start, full_len) == 0)
+            len = full_len;
+    }
+
+    return len;
+}
+
 static struct procfs_blob *procfs_gen_pid_snapshot_blob(int tgid,
                                                         enum procfs_entry_type type)
 {
@@ -2131,6 +2263,20 @@ static struct procfs_blob *procfs_gen_pid_snapshot_blob(int tgid,
         procfs_blob_alloc(TG_EXEC_SNAPSHOT_MAX_BYTES);
     if (IS_ERR(blob))
         return blob;
+
+    vm_t *live_vm = NULL;
+    uint64 live_addrs[MAXENV];
+    size_t live_lens[MAXENV];
+    size_t live_count = 0;
+    uint64 live_env_addrs[MAXENV];
+    size_t live_env_lens[MAXENV];
+    size_t live_env_count = 0;
+    int try_live = 0;
+    int exec_in_progress = 0;
+    memset(live_addrs, 0, sizeof(live_addrs));
+    memset(live_lens, 0, sizeof(live_lens));
+    memset(live_env_addrs, 0, sizeof(live_env_addrs));
+    memset(live_env_lens, 0, sizeof(live_env_lens));
 
     pid_rlock();
     struct thread *p = NULL;
@@ -2143,6 +2289,8 @@ static struct procfs_blob *procfs_gen_pid_snapshot_blob(int tgid,
 
     const struct thread_group_exec_snapshot *snap =
         &p->thread_group->exec_snapshot;
+    exec_in_progress =
+        __atomic_load_n(&p->thread_group->exec_in_progress, __ATOMIC_ACQUIRE);
     const char *src = NULL;
     size_t len = 0;
 
@@ -2151,11 +2299,34 @@ static struct procfs_blob *procfs_gen_pid_snapshot_blob(int tgid,
     case PROC_TASK_CMDLINE:
         src = snap->cmdline;
         len = snap->cmdline_len;
+        live_count = snap->cmdline_argc;
+        if (live_count > MAXARG)
+            live_count = MAXARG;
+        memmove(live_addrs, snap->cmdline_addrs,
+                live_count * sizeof(live_addrs[0]));
+        memmove(live_lens, snap->cmdline_lens,
+                live_count * sizeof(live_lens[0]));
+        live_env_count = snap->environ_count;
+        if (live_env_count > MAXENV)
+            live_env_count = MAXENV;
+        memmove(live_env_addrs, snap->environ_addrs,
+                live_env_count * sizeof(live_env_addrs[0]));
+        memmove(live_env_lens, snap->environ_lens,
+                live_env_count * sizeof(live_env_lens[0]));
+        try_live = 1;
         break;
     case PROC_PID_ENVIRON:
     case PROC_TASK_ENVIRON:
         src = snap->environ;
         len = snap->environ_len;
+        live_count = snap->environ_count;
+        if (live_count > MAXENV)
+            live_count = MAXENV;
+        memmove(live_addrs, snap->environ_addrs,
+                live_count * sizeof(live_addrs[0]));
+        memmove(live_lens, snap->environ_lens,
+                live_count * sizeof(live_lens[0]));
+        try_live = 1;
         break;
     case PROC_PID_AUXV:
     case PROC_TASK_AUXV:
@@ -2173,7 +2344,29 @@ static struct procfs_blob *procfs_gen_pid_snapshot_blob(int tgid,
     if (src != NULL && len != 0)
         memmove(blob->data, src, len);
     blob->len = len;
+    if (try_live && !exec_in_progress)
+        live_vm = procfs_pin_thread_vm(p);
     pid_runlock();
+
+    if (live_vm != NULL) {
+        size_t live_len;
+
+        if (type == PROC_PID_CMDLINE || type == PROC_TASK_CMDLINE) {
+            live_len = procfs_copy_live_cmdline(
+                live_vm, blob->data, TG_EXEC_SNAPSHOT_MAX_BYTES,
+                live_addrs, live_lens, live_count,
+                live_env_addrs, live_env_lens, live_env_count);
+        } else {
+            live_len = procfs_copy_live_exec_range(
+                live_vm, blob->data, TG_EXEC_SNAPSHOT_MAX_BYTES,
+                live_addrs, live_lens, live_count);
+        }
+        if (live_len != 0) {
+            blob->len = live_len;
+            blob->data[live_len] = '\0';
+        }
+        vm_put(live_vm);
+    }
     return blob;
 }
 
@@ -2296,7 +2489,7 @@ static int procfs_open_mem(struct procfs_inode *pi, struct vfs_file *file,
     pid_rlock();
     struct thread *p = NULL;
     get_pid_thread(target, &p);
-    if (p == NULL || p->vm == NULL || p->tgid != pi->pid ||
+    if (p == NULL || p->tgid != pi->pid ||
         p->thread_group == NULL || p->thread_group->is_kernel) {
         ret = -ESRCH;
         goto out_unlock;
@@ -2317,8 +2510,11 @@ static int procfs_open_mem(struct procfs_inode *pi, struct vfs_file *file,
         goto out_unlock;
     }
 
-    target_vm = p->vm;
-    vm_dup(target_vm);
+    target_vm = procfs_pin_thread_vm(p);
+    if (target_vm == NULL) {
+        ret = -ESRCH;
+        goto out_unlock;
+    }
 
 out_unlock:
     pid_runlock();

@@ -3752,6 +3752,103 @@ struct k_ucred {
     uint32 gid;
 };
 
+#define CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX 64
+
+static int chrome_unix_ipc_payload_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_unix_ipc_payload_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static void chrome_unix_ipc_trace_payload_bytes(const char *op, int fd,
+                                                ssize_t ret, size_t total,
+                                                int flags, size_t cmsg_count,
+                                                int has_cred,
+                                                const char *buf, size_t len)
+{
+    static const char hexchars[] = "0123456789abcdef";
+    char hex[CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX * 2 + 1];
+    size_t n;
+
+    if (!chrome_unix_ipc_payload_trace_enabled() ||
+        !chrome_socket_trace_process() || buf == NULL)
+        return;
+
+    n = len;
+    if (n > CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX)
+        n = CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char byte = (unsigned char)buf[i];
+        hex[i * 2] = hexchars[byte >> 4];
+        hex[i * 2 + 1] = hexchars[byte & 0xf];
+    }
+    hex[n * 2] = '\0';
+
+    printf("chrome-unix-ipc-payload: %s pid=%d tgid=%d name=%s fd=%d "
+           "ret=%ld total=%lu flags=0x%x cmsg=%lu has_cred=%d "
+           "sample_len=%lu full_len=%lu hex=%s\n",
+           op != NULL ? op : "?", current != NULL ? current->pid : -1,
+           current != NULL ? current->tgid : -1,
+           current != NULL ? current->name : "?", fd, (long)ret,
+           (unsigned long)total, flags, (unsigned long)cmsg_count, has_cred,
+           (unsigned long)n, (unsigned long)len, hex);
+}
+
+static void chrome_unix_ipc_trace_recv_payload_iov(const char *op, int fd,
+                                                   ssize_t ret, size_t total,
+                                                   int flags,
+                                                   size_t cmsg_count,
+                                                   int has_cred,
+                                                   const struct k_iovec *iovs,
+                                                   int iovlen)
+{
+    char sample[CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX];
+    size_t want;
+    size_t copied = 0;
+
+    if (ret <= 0 || total == 0 ||
+        !chrome_unix_ipc_payload_trace_enabled() ||
+        !chrome_socket_trace_process())
+        return;
+
+    want = total;
+    if (want > CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX)
+        want = CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX;
+
+    for (int i = 0; i < iovlen && copied < want; i++) {
+        size_t n = iovs[i].iov_len;
+        if (n > want - copied)
+            n = want - copied;
+        if (n == 0)
+            continue;
+        if (vm_copyin(current->vm, sample + copied, iovs[i].iov_base, n) < 0) {
+            printf("chrome-unix-ipc-payload: %s pid=%d tgid=%d name=%s "
+                   "fd=%d ret=%ld total=%lu flags=0x%x cmsg=%lu "
+                   "has_cred=%d sample_copy=EFAULT copied=%lu want=%lu\n",
+                   op != NULL ? op : "?",
+                   current != NULL ? current->pid : -1,
+                   current != NULL ? current->tgid : -1,
+                   current != NULL ? current->name : "?", fd, (long)ret,
+                   (unsigned long)total, flags, (unsigned long)cmsg_count,
+                   has_cred, (unsigned long)copied, (unsigned long)want);
+            return;
+        }
+        copied += n;
+    }
+
+    chrome_unix_ipc_trace_payload_bytes(op, fd, ret, total, flags,
+                                        cmsg_count, has_cred, sample, copied);
+}
+
 #define LINUX_OVERFLOW_UID 65534U
 #define LINUX_OVERFLOW_GID 65534U
 
@@ -4641,9 +4738,6 @@ static int unix_sendmsg_growth_needed_locked(struct unix_sock *sk, size_t len,
     if (readable > max_capacity || len > max_capacity - readable)
         return -EAGAIN;
 
-    if (sk->type == SOCK_SEQPACKET)
-        return 0;
-
     size_t needed = readable + len;
     if (needed <= sk->tx.capacity)
         return 0;
@@ -4669,8 +4763,7 @@ static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
     size_t readable = (unsigned long)(sk->tx.nwrite - sk->tx.nread);
     size_t max_capacity = unix_tx_limit_locked(sk);
     size_t writable = readable < max_capacity ? max_capacity - readable : 0;
-    if (sk->type != SOCK_SEQPACKET &&
-        writable > sk->tx.capacity - readable)
+    if (writable > sk->tx.capacity - readable)
         writable = sk->tx.capacity - readable;
     if (writable < len)
         return -EAGAIN;
@@ -4707,22 +4800,12 @@ static int unix_sendmsg_atomic_locked(struct unix_sock *sk, const char *buf,
         sk->scm_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
     }
     int pkt_ret;
-    if (sk->type == SOCK_SEQPACKET) {
-        pkt_ret = unix_packet_enqueue_payload_locked(sk, scm_start, mark,
-                                                     (char *)buf, len);
-        if (pkt_ret < 0)
-            panic("unix_sendmsg_atomic_locked: packet queue lost reservation");
-        smp_store_release(&sk->tx.nwrite, mark);
-        if (buf_queued != NULL)
-            *buf_queued = 1;
-    } else {
-        size_t wrote = unix_ring_write_locked(&sk->tx, buf, len, max_capacity);
-        if (wrote != len)
-            panic("unix_sendmsg_atomic_locked: short atomic write");
-        pkt_ret = unix_packet_enqueue_locked(sk, scm_start, sk->tx.nwrite);
-        if (pkt_ret < 0)
-            panic("unix_sendmsg_atomic_locked: packet queue lost reservation");
-    }
+    size_t wrote = unix_ring_write_locked(&sk->tx, buf, len, max_capacity);
+    if (wrote != len)
+        panic("unix_sendmsg_atomic_locked: short atomic write");
+    pkt_ret = unix_packet_enqueue_locked(sk, scm_start, sk->tx.nwrite);
+    if (pkt_ret < 0)
+        panic("unix_sendmsg_atomic_locked: packet queue lost reservation");
     return 0;
 }
 
@@ -4995,6 +5078,10 @@ uint64 sys_sendmsg(void)
                                  mh.msg_control, mh.msg_controllen,
                                  (unsigned long)scm_count, has_scm_cred,
                                  scm_ret);
+        chrome_unix_ipc_trace_payload_bytes("sendmsg-enter", fd,
+                                            (ssize_t)total_len, total_len,
+                                            flags, scm_count, has_scm_cred,
+                                            msg_buf, total_len);
         if (scm_ret < 0) {
             chrome_unix_ipc_trace_state("sendmsg-cmsg-error", fd, scm_ret,
                                         total_len, flags, mh.msg_control,
@@ -5721,6 +5808,10 @@ unix_recvmsg_done:
                                     recv_capacity, flags, mh.msg_control,
                                     mh.msg_controllen, scm_count,
                                     has_scm_cred, sk);
+        chrome_unix_ipc_trace_recv_payload_iov("recvmsg-done", fd, ret_total,
+                                               (size_t)total, flags,
+                                               scm_count, has_scm_cred, iovs,
+                                               mh.msg_iovlen);
         unix_sock_put_ref(peer);
 
         int emit_ret = 0;

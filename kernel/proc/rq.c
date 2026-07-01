@@ -790,16 +790,27 @@ void rq_task_tick(struct sched_entity *se) {
 }
 
 void rq_task_fork(struct sched_entity *se) {
-    // This is called by the parent thread's rq when forking a new thread
-    // Thus the rq and se are of the parent thread
-    struct sched_entity *current_se = current->sched_entity;
+    struct sched_entity *current_se = current ? current->sched_entity : NULL;
+    struct rq *fork_rq = current_se ? current_se->rq : NULL;
 
-    if (current_se->sched_class && current_se->sched_class->task_fork) {
-        current_se->sched_class->task_fork(se->rq, se);
+    /*
+     * The child has not been enqueued yet, so se->rq is normally NULL here.
+     * Use the parent's runqueue for fork-time placement/accounting; fall back
+     * to normal selection for early bootstrap paths without an attached parent.
+     */
+    if (fork_rq == NULL) {
+        fork_rq = rq_select_task_rq(se, se->affinity_mask);
+        if (IS_ERR_OR_NULL(fork_rq))
+            return;
+    }
+
+    if (current_se && current_se->sched_class &&
+        current_se->sched_class->task_fork) {
+        current_se->sched_class->task_fork(fork_rq, se);
     } else if (__sched_class_of_id(DEFAULT_MAJOR_PRIORITY) != NULL &&
                __sched_class_of_id(DEFAULT_MAJOR_PRIORITY)->task_fork != NULL) {
         // Otherwise, pick default scheduler class if it has task_fork
-        __sched_class_of_id(DEFAULT_MAJOR_PRIORITY)->task_fork(se->rq, se);
+        __sched_class_of_id(DEFAULT_MAJOR_PRIORITY)->task_fork(fork_rq, se);
     }
     // If no task_fork callback, just inherit the priority from default
     // The child will inherit the same sched_class as the parent when enqueued

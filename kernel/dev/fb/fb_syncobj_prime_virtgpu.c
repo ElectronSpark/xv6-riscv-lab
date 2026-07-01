@@ -1784,7 +1784,7 @@ static int gpu_drm_virtgpu_resource_create(struct fb_gpu_render_owner *owner,
                                          owner->default_ctx_id, 0, cmds,
                                          req.cmd_size / sizeof(uint32),
                                          NULL, 0, &fence, &signaled,
-                                         &first_submit);
+                                         &first_submit, NULL);
             if (ret == 0 && first_submit)
                 gpu_drm_trace_context_attrib(
                     owner, "first-submit-blob", owner->default_ctx_id,

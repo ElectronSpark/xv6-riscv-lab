@@ -379,8 +379,9 @@ retry:
 
 static int ext4fs_pcache_read_page(struct pcache *pcache, page_t *page)
 {
-    uint64 read_start = r_time();
-    g_ext4_pcache_read_page_calls += 1;
+    int profile = kstats_profile_enabled();
+    uint64 read_start = profile ? r_time() : 0;
+    KSTATS_PROFILE_INC(g_ext4_pcache_read_page_calls);
 
     struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
     struct pcache_node *pcnode = page->pcache.pcache_node;
@@ -409,8 +410,10 @@ static int ext4fs_pcache_read_page(struct pcache *pcache, page_t *page)
     if (r != 0)
         return r;
 
-    g_ext4_pcache_pages_filled += 1;
-    g_ext4_pcache_read_page_ticks += r_time() - read_start;
+    KSTATS_PROFILE_INC(g_ext4_pcache_pages_filled);
+    if (profile)
+        __atomic_add_fetch(&g_ext4_pcache_read_page_ticks,
+                           r_time() - read_start, __ATOMIC_RELAXED);
 
     return 0;
 }
@@ -491,8 +494,9 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
                 /* Don't pcache_put_page yet — held until await completes. */
             } else {
                 /* Direct BIO failed — fall back to synchronous read. */
-                uint64 read_start = r_time();
-                g_ext4_pcache_read_page_calls += 1;
+                int profile = kstats_profile_enabled();
+                uint64 read_start = profile ? r_time() : 0;
+                KSTATS_PROFILE_INC(g_ext4_pcache_read_page_calls);
                 r = ext4fs_folio_read_direct(fs, esb, &ref, pcn,
                                              base_file_off, inode_size);
                 if (r != 0) {
@@ -507,8 +511,11 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
                     }
                 }
                 if (r == 0)
-                    g_ext4_pcache_pages_filled += nr_pages;
-                g_ext4_pcache_read_page_ticks += r_time() - read_start;
+                    KSTATS_PROFILE_ADD(g_ext4_pcache_pages_filled, nr_pages);
+                if (profile)
+                    __atomic_add_fetch(&g_ext4_pcache_read_page_ticks,
+                                       r_time() - read_start,
+                                       __ATOMIC_RELAXED);
                 ext4fs_prefault_end_page(pc, pcpage, r == 0);
                 if (r != 0 && ret == 0)
                     ret = r;
@@ -543,7 +550,8 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
      * Measure total batch I/O as a single interval (kick → all complete).
      */
     if (batch_count > 0) {
-        uint64 batch_start = r_time();
+        int profile = kstats_profile_enabled();
+        uint64 batch_start = profile ? r_time() : 0;
         blkdev_kick(esb->xv6_blkdev);
 
         for (int i = 0; i < batch_count; i++) {
@@ -560,7 +568,7 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
                 if (file_tail < (uint64)nr_pages * PGSIZE)
                     memset((char *)pcn->data + file_tail, 0,
                            (uint64)nr_pages * PGSIZE - file_tail);
-                g_ext4_pcache_pages_filled += nr_pages;
+                KSTATS_PROFILE_ADD(g_ext4_pcache_pages_filled, nr_pages);
             }
 
             ext4fs_prefault_end_page(pc, batch[i].pcpage, r == 0);
@@ -569,8 +577,10 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
             pcache_put_page(pc, batch[i].pcpage);
         }
 
-        g_ext4_pcache_read_page_calls += batch_count;
-        g_ext4_pcache_read_page_ticks += r_time() - batch_start;
+        KSTATS_PROFILE_ADD(g_ext4_pcache_read_page_calls, batch_count);
+        if (profile)
+            __atomic_add_fetch(&g_ext4_pcache_read_page_ticks,
+                               r_time() - batch_start, __ATOMIC_RELAXED);
     }
 #undef PREFAULT_MAX_BATCH
 
@@ -1564,7 +1574,7 @@ static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
         if (pcpage == NULL)
             return -ENOMEM;
 
-        g_ext4_pcache_readahead_pages += 1;
+        KSTATS_PROFILE_INC(g_ext4_pcache_readahead_pages);
 
         struct pcache_node *pcn = pcpage->pcache.pcache_node;
         /* Compute the sub-page offset for multi-page folios. */
@@ -1680,8 +1690,9 @@ static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
 static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
                                uint64 va)
 {
-    uint64 fault_start = r_time();
-    g_ext4_fault_calls += 1;
+    int profile = kstats_profile_enabled();
+    uint64 fault_start = profile ? r_time() : 0;
+    KSTATS_PROFILE_INC(g_ext4_fault_calls);
 
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (inode == NULL)
@@ -1736,8 +1747,10 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
         uint64 folio_byte_off = blkno_512 * 512ULL -
                                 (uint64)pcn->blkno * 512ULL;
         if (bytes_to_read == PGSIZE && !private_elf_data) {
-            g_ext4_fault_zero_copy += 1;
-            g_ext4_fault_ticks += r_time() - fault_start;
+            KSTATS_PROFILE_INC(g_ext4_fault_zero_copy);
+            if (profile)
+                __atomic_add_fetch(&g_ext4_fault_ticks,
+                                   r_time() - fault_start, __ATOMIC_RELAXED);
             return (char *)pcn->data + folio_byte_off;
         }
 
@@ -1747,7 +1760,7 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
          * anonymous page immediately so reads before the first write cannot
          * observe unrelated bytes from the same page-cache folio.
          */
-        g_ext4_fault_partial_copy += 1;
+        KSTATS_PROFILE_INC(g_ext4_fault_partial_copy);
 
         void *pa = page_alloc(0, PAGE_TYPE_ANON);
         if (pa == NULL) {
@@ -1759,7 +1772,9 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
         memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
         pcache_put_page(pc, pcpage);
-        g_ext4_fault_ticks += r_time() - fault_start;
+        if (profile)
+            __atomic_add_fetch(&g_ext4_fault_ticks, r_time() - fault_start,
+                               __ATOMIC_RELAXED);
         return pa;
     }
 
@@ -1845,7 +1860,9 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
     if (bytes_to_read < PGSIZE)
         memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
-    g_ext4_fault_ticks += r_time() - fault_start;
+    if (profile)
+        __atomic_add_fetch(&g_ext4_fault_ticks, r_time() - fault_start,
+                           __ATOMIC_RELAXED);
 
     return pa;
 }

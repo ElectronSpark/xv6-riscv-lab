@@ -1076,17 +1076,31 @@ int virtio_gpu_copy_resource_to_scanout(uint32 src_resource_id,
     {
         int minimal_drain =
             virtio_gpu_cmdline_enabled("virtio_gpu_present_minimal_drain");
+        int no_drain =
+            virtio_gpu_cmdline_enabled("virtio_gpu_present_no_drain");
+        int blanket_drain = !minimal_drain && !no_drain;
         int want_drain = should_wait_src_fence ||
-            (!minimal_drain &&
-             !virtio_gpu_cmdline_enabled("virtio_gpu_present_no_drain"));
+            blanket_drain;
+        int no_drain_skip = !want_drain && !minimal_drain && no_drain;
+        int minimal_skip = !want_drain && minimal_drain && !no_drain;
+        uint64 drain_start = 0;
+        uint64 drain_ticks = 0;
 
         if (want_drain) {
+            drain_start = r_time();
             ret = virtio_gpu_drain_async_submit(g, 1);
+            drain_ticks = r_time() - drain_start;
             if (ret != 0) {
+                virtio_gpu_note_present_copy_drain(
+                    g, should_wait_src_fence, blanket_drain, no_drain_skip,
+                    minimal_skip, 1, drain_ticks);
                 ret = -EIO;
                 goto out;
             }
         }
+        virtio_gpu_note_present_copy_drain(g, should_wait_src_fence,
+                                           blanket_drain, no_drain_skip,
+                                           minimal_skip, 0, drain_ticks);
     }
 
     if (ctx_id == 0) {
@@ -1406,13 +1420,31 @@ int virtio_gpu_copy_resource_to_resource(uint32 src_resource_id,
     }
     spin_unlock(&g->lock);
 
-    if (should_wait_src_fence ||
-        !virtio_gpu_cmdline_enabled("virtio_gpu_present_no_drain")) {
-        ret = virtio_gpu_drain_async_submit(g, 1);
-        if (ret != 0) {
-            ret = -EIO;
-            goto out;
+    {
+        int no_drain =
+            virtio_gpu_cmdline_enabled("virtio_gpu_present_no_drain");
+        int blanket_drain = !no_drain;
+        int want_drain = should_wait_src_fence || blanket_drain;
+        int no_drain_skip = !want_drain && no_drain;
+        int minimal_skip = 0;
+        uint64 drain_start = 0;
+        uint64 drain_ticks = 0;
+
+        if (want_drain) {
+            drain_start = r_time();
+            ret = virtio_gpu_drain_async_submit(g, 1);
+            drain_ticks = r_time() - drain_start;
+            if (ret != 0) {
+                virtio_gpu_note_present_copy_drain(
+                    g, should_wait_src_fence, blanket_drain, no_drain_skip,
+                    minimal_skip, 1, drain_ticks);
+                ret = -EIO;
+                goto out;
+            }
         }
+        virtio_gpu_note_present_copy_drain(g, should_wait_src_fence,
+                                           blanket_drain, no_drain_skip,
+                                           minimal_skip, 0, drain_ticks);
     }
 
     if (ctx_id == 0) {

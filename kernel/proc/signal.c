@@ -1668,6 +1668,12 @@ int kill(int pid, int signum) {
     return signal_send(pid, &info);
 }
 
+static bool signal_is_group_stop_or_continue(int signum)
+{
+    return signum == SIGSTOP || signum == SIGTSTP || signum == SIGTTIN ||
+           signum == SIGTTOU || signum == SIGCONT;
+}
+
 // Kill the given thread directly (thread-directed signal).
 // Instead of looking up by pid, directly send signal to the given thread.
 int kill_thread(struct thread *p, int signum) {
@@ -1714,7 +1720,13 @@ int tgkill(int tgid, int tid, int signum) {
     info.sender = current;
     info.info.si_pid = thread_tgid(current);
     trace_browser_signal_send("tgkill", tid, signum, p);
-    int ret = __signal_send(p, &info);
+    int ret;
+    if (p->thread_group != NULL && !p->thread_group->is_kernel &&
+        signal_is_group_stop_or_continue(signum)) {
+        ret = tg_signal_send(p->thread_group, &info);
+    } else {
+        ret = __signal_send(p, &info);
+    }
     rcu_read_unlock();
     return ret;
 }
@@ -1745,7 +1757,13 @@ int tkill(int tid, int signum) {
     info.sender = current;
     info.info.si_pid = thread_tgid(current);
     trace_browser_signal_send("tkill", tid, signum, p);
-    int ret = __signal_send(p, &info);
+    int ret;
+    if (p->thread_group != NULL && !p->thread_group->is_kernel &&
+        signal_is_group_stop_or_continue(signum)) {
+        ret = tg_signal_send(p->thread_group, &info);
+    } else {
+        ret = __signal_send(p, &info);
+    }
     rcu_read_unlock();
     return ret;
 }
@@ -2039,6 +2057,28 @@ int sigwait(const sigset_t *set, int *sig) {
         // Check if we were killed
         if (killed(p)) {
             return -EINTR;
+        }
+
+        /*
+         * A stop signal may have woken us even when it is not part of the
+         * sigwait set.  Do not loop back into rt_sigtimedwait with SIGSTOP
+         * left pending; Linux enters the stopped state before the syscall can
+         * continue.
+         */
+        if (signal_test_clear_stopped(p)) {
+            tcb_lock(p);
+            __thread_state_set(p, THREAD_STOPPED);
+            tcb_unlock(p);
+
+            pid_rlock();
+            struct thread *parent = p->parent;
+            pid_runlock();
+            if (parent != NULL) {
+                scheduler_wakeup_interruptible(parent);
+                kill_proc(parent, SIGCHLD);
+            }
+
+            scheduler_yield();
         }
     }
 }

@@ -681,9 +681,10 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
         }
     } else {
         // Standard (non-SA_SIGINFO) signal: if already pending, coalesce.
-        // Exception: SIGCONT side-effects and wakeups must still run.
+        // Exceptions: SIGCONT side-effects/wakeups and stop-signal group
+        // delivery must still run.
         if (sigismember(&tg->shared_pending.sig_pending_mask, signo) &&
-            !is_cont) {
+            !is_cont && !is_stop) {
             sigacts_unlock(sigacts);
             pid_runlock();
             return 0;
@@ -693,7 +694,7 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
     sigaddset(&tg->shared_pending.sig_pending_mask, signo);
 
     struct thread *target = NULL;
-    if (!is_cont) {
+    if (!is_cont && !is_stop) {
         target = __tg_pick_thread(tg, signo);
         if (target != NULL) {
             THREAD_SET_SIGPENDING(target);
@@ -712,6 +713,29 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
                 scheduler_wakeup_stopped(t);
             } else if (THREAD_INTERRUPTIBLE(t)) {
                 scheduler_wakeup_interruptible(t);
+            }
+        }
+    } else if (is_stop) {
+        /*
+         * Linux group-stop semantics stop every live thread in the thread
+         * group.  Shared pending alone is not enough here: the first thread to
+         * consume the shared stop would clear it before siblings observe it.
+         */
+        struct thread *t;
+        struct thread *tmp;
+        list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
+            sigaddset(&t->signal.sig_pending_mask, signo);
+            THREAD_SET_SIGPENDING(t);
+            if (THREAD_INTERRUPTIBLE(t)) {
+                scheduler_wakeup_interruptible(t);
+            } else if (THREAD_RUNNING(t)) {
+                int target_cpu =
+                    smp_load_acquire(&t->sched_entity->cpu_id);
+                if (target_cpu != cpuid()) {
+                    ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
+                } else {
+                    SET_NEEDS_RESCHED();
+                }
             }
         }
     } else {

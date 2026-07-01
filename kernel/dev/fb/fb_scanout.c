@@ -343,7 +343,42 @@ static int fb_present_perf_enabled(void)
         (cmdline_get_param("fb_present_perf", value, sizeof(value)) == 0 &&
          strcmp(value, "0") != 0) ||
         (cmdline_get_param("wlcomp_gpu_perf", value, sizeof(value)) == 0 &&
+           strcmp(value, "0") != 0);
+    return cached;
+}
+
+static int fb_present_sample_diag_enabled(void)
+{
+    static int cached = -1;
+    char value[16];
+
+    if (cached >= 0)
+        return cached;
+    cached =
+        (cmdline_get_param("fb_present_sample_diag", value, sizeof(value)) == 0 &&
+         strcmp(value, "0") != 0) ||
+        (cmdline_get_param("virtio_gpu_present_sample_diag", value,
+                           sizeof(value)) == 0 &&
          strcmp(value, "0") != 0);
+    return cached;
+}
+
+static int fb_present_sample_diag_limit(void)
+{
+    static int cached = -1;
+    char value[32];
+    unsigned long limit;
+
+    if (cached >= 0)
+        return cached;
+    cached = 16;
+    if (cmdline_get_param("fb_present_sample_diag_limit", value,
+                          sizeof(value)) == 0 && value[0] != '\0') {
+        limit = strtoul(value, NULL, 10);
+        if (limit > 4096)
+            limit = 4096;
+        cached = (int)limit;
+    }
     return cached;
 }
 
@@ -381,6 +416,121 @@ static void fb_bo_present_perf_log(struct fb_gpu_bo_entry *bo, uint32 w,
     copy_total = 0;
     virtio_total = 0;
     total_total = 0;
+}
+
+static uint32 fb_bo_diag_pixel(struct fb_gpu_bo_entry *bo, uint32 pitch,
+                               uint64 base_offset, uint32 w, uint32 h,
+                               uint32 sample_x, uint32 sample_y)
+{
+    uint64 off;
+    uint32 page_idx;
+    uint32 page_off;
+    uint8 *src;
+
+    if (bo == NULL || bo->pages == NULL || bo->npages == 0 ||
+        pitch == 0 || w == 0 || h == 0)
+        return 0;
+    if (sample_x >= w)
+        sample_x = w - 1;
+    if (sample_y >= h)
+        sample_y = h - 1;
+    off = base_offset + (uint64)sample_y * pitch +
+          (uint64)sample_x * sizeof(uint32);
+    if (off + sizeof(uint32) > bo->size)
+        return 0;
+    page_idx = off / PGSIZE;
+    page_off = off & (PGSIZE - 1);
+    if (page_idx >= bo->npages || bo->pages[page_idx] == NULL ||
+        page_off > PGSIZE - sizeof(uint32))
+        return 0;
+    src = (uint8 *)PA2VA(__page_to_pa(bo->pages[page_idx])) + page_off;
+    return *(uint32 *)src;
+}
+
+static int fb_bo_diag_transfer_pixel(struct fb_gpu_bo_entry *bo,
+                                     uint64 resource_owner_id,
+                                     pid_t resource_owner_tgid,
+                                     uint32 pitch, uint64 base_offset,
+                                     uint32 resource_x, uint32 resource_y,
+                                     uint32 w, uint32 h, uint32 sample_x,
+                                     uint32 sample_y)
+{
+    struct fb_gpu_virgl_transfer transfer;
+
+    if (bo == NULL || bo->virtio_resource_id == 0 || pitch == 0 ||
+        w == 0 || h == 0)
+        return -EINVAL;
+    if (sample_x >= w)
+        sample_x = w - 1;
+    if (sample_y >= h)
+        sample_y = h - 1;
+
+    memset(&transfer, 0, sizeof(transfer));
+    transfer.resource_id = bo->virtio_resource_id;
+    transfer.x = resource_x + sample_x;
+    transfer.y = resource_y + sample_y;
+    transfer.z = 0;
+    transfer.w = 1;
+    transfer.h = 1;
+    transfer.d = 1;
+    transfer.level = 0;
+    transfer.offset = base_offset + (uint64)sample_y * pitch +
+                      (uint64)sample_x * sizeof(uint32);
+    transfer.stride = pitch;
+    transfer.layer_stride = (uint64)pitch * bo->height;
+    return virtio_gpu_user_transfer(resource_owner_id, resource_owner_tgid,
+                                    &transfer, 1);
+}
+
+static uint64 fb_bo_diag_sample_hash(struct fb_gpu_bo_entry *bo, uint32 pitch,
+                                     uint64 base_offset,
+                                     uint64 resource_owner_id,
+                                     pid_t resource_owner_tgid,
+                                     uint32 resource_x, uint32 resource_y,
+                                     uint32 w, uint32 h,
+                                     uint32 *nonblack_out,
+                                     uint32 *center_out,
+                                     uint32 *transfer_fail_out)
+{
+    uint32 samples[5];
+    uint32 sample_x[5];
+    uint32 sample_y[5];
+    uint64 hash = 1469598103934665603ULL;
+    uint32 nonblack = 0;
+    uint32 transfer_fail = 0;
+
+    sample_x[0] = w / 2;
+    sample_y[0] = h / 2;
+    sample_x[1] = w / 4;
+    sample_y[1] = h / 4;
+    sample_x[2] = (w * 3) / 4;
+    sample_y[2] = h / 4;
+    sample_x[3] = w / 4;
+    sample_y[3] = (h * 3) / 4;
+    sample_x[4] = (w * 3) / 4;
+    sample_y[4] = (h * 3) / 4;
+
+    for (uint32 i = 0; i < 5; i++) {
+        if (fb_bo_diag_transfer_pixel(bo, resource_owner_id,
+                                      resource_owner_tgid, pitch,
+                                      base_offset, resource_x, resource_y,
+                                      w, h, sample_x[i], sample_y[i]) != 0)
+            transfer_fail++;
+        samples[i] = fb_bo_diag_pixel(bo, pitch, base_offset, w, h,
+                                      sample_x[i], sample_y[i]);
+        if ((samples[i] & 0x00ffffffU) != 0)
+            nonblack++;
+        hash ^= samples[i];
+        hash *= 1099511628211ULL;
+    }
+
+    if (nonblack_out != NULL)
+        *nonblack_out = nonblack;
+    if (center_out != NULL)
+        *center_out = samples[0];
+    if (transfer_fail_out != NULL)
+        *transfer_fail_out = transfer_fail;
+    return hash;
 }
 
 static int fb_scanout_format_needs_rb_swap(uint32 pixel_format)
@@ -442,6 +592,7 @@ static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
     static int virgl_copy_success_logs;
     static int virgl_copy_fail_logs;
     static int virgl_scanout_logs;
+    static int virgl_scanout_sample_logs;
 
     if (flags_out)
         *flags_out = cmd.flags & ~FB_GPU_BO_PRESENT_F_READBACK_FALLBACK;
@@ -486,10 +637,15 @@ static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
     if (cw == 0 || ch == 0)
         return 0;
     swap_rb = fb_scanout_format_needs_rb_swap(pixel_format);
+    requested_virgl_copy =
+        (cmd.flags & FB_GPU_BO_PRESENT_F_VIRGL_COPY) != 0;
+    requested_readback_fallback =
+        (cmd.flags & FB_GPU_BO_PRESENT_F_READBACK_FALLBACK) != 0;
     default_virgl_scanout =
         virtio_backed && !swap_rb && bo->virtio_resource_id != 0 &&
         bo->pitch != 0 && cmd.x == 0 && cmd.y == 0 &&
         cw == xres && ch == yres && offset == 0 &&
+        !requested_virgl_copy &&
         !fb_cmdline_enabled("virtio_gpu_no_kms_resource_scanout");
     requested_virgl_scanout =
         (cmd.flags & FB_GPU_BO_PRESENT_F_VIRGL_SCANOUT) != 0;
@@ -519,8 +675,22 @@ static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
             src_x <= bo->width && cw <= bo->width - src_x &&
             src_y <= bo->height && ch <= bo->height - src_y) {
             uint64 virtio_start = r_time();
-            int ret = virtio_gpu_bind_resource_scanout(
-                bo->virtio_resource_id, src_x, src_y, cw, ch);
+            int full_scanout_flip =
+                cmd.x == 0 && cmd.y == 0 && src_x == 0 && src_y == 0 &&
+                cw == xres && ch == yres &&
+                bo->width == xres && bo->height == yres;
+            int ret;
+
+            if (full_scanout_flip) {
+                ret = virtio_gpu_page_flip_resource(bo->virtio_resource_id,
+                                                    cw, ch, NULL);
+                if (ret != 0)
+                    ret = virtio_gpu_bind_resource_scanout(
+                        bo->virtio_resource_id, src_x, src_y, cw, ch);
+            } else {
+                ret = virtio_gpu_bind_resource_scanout(
+                    bo->virtio_resource_id, src_x, src_y, cw, ch);
+            }
             virtio_ticks = r_time() - virtio_start;
             if (ret == 0) {
                 copy_ticks = 0;
@@ -549,6 +719,34 @@ static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
                 }
                 fb_bo_present_perf_log(bo, cw, ch, copy_ticks, virtio_ticks,
                                        total_ticks);
+                if (fb_present_sample_diag_enabled() &&
+                    virgl_scanout_sample_logs <
+                        fb_present_sample_diag_limit()) {
+                    uint64 resource_owner_id = bo->virtio_resource_owner_id ?
+                        bo->virtio_resource_owner_id : bo->owner_id;
+                    pid_t resource_owner_tgid =
+                        bo->virtio_resource_owner_tgid ?
+                        bo->virtio_resource_owner_tgid : bo->owner_tgid;
+                    uint32 sample_nonblack = 0;
+                    uint32 sample_center = 0;
+                    uint32 sample_transfer_fail = 0;
+                    uint64 sample_hash =
+                        fb_bo_diag_sample_hash(bo, bo->pitch, offset,
+                                               resource_owner_id,
+                                               resource_owner_tgid, src_x,
+                                               src_y, cw, ch,
+                                               &sample_nonblack,
+                                               &sample_center,
+                                               &sample_transfer_fail);
+
+                    printf("FB: virgl resource-scanout sample resource=%u bo=%u owner=%lu:%d resource_owner=%lu:%d src=%u,%u %ux%u sample_hash=0x%lx sample_nonblack=%u sample_center=0x%x sample_transfer_fail=%u\n",
+                           bo->virtio_resource_id, bo->handle, bo->owner_id,
+                           bo->owner_tgid, resource_owner_id,
+                           resource_owner_tgid, src_x, src_y, cw, ch,
+                           sample_hash, sample_nonblack, sample_center,
+                           sample_transfer_fail);
+                    virgl_scanout_sample_logs++;
+                }
                 return 0;
             }
             if (fb_present_perf_enabled() && virgl_scanout_logs < 8) {
@@ -562,10 +760,6 @@ static int fb_blit_from_bo_format(struct fb_gpu_bo_entry *bo,
         if (requested_virgl_scanout)
             return -EINVAL;
     }
-    requested_virgl_copy =
-        (cmd.flags & FB_GPU_BO_PRESENT_F_VIRGL_COPY) != 0;
-    requested_readback_fallback =
-        (cmd.flags & FB_GPU_BO_PRESENT_F_READBACK_FALLBACK) != 0;
     if (requested_virgl_copy &&
         virgl_copy_cooldown == 0 && virtio_backed && !swap_rb &&
         bo->virtio_resource_id != 0 && bo->pitch != 0 &&

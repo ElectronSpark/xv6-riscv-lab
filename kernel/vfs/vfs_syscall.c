@@ -299,6 +299,26 @@ static int chrome_fd_trace_process(void)
            (portal_fd_trace_enabled() && portal_vfs_trace_process());
 }
 
+static int chrome_unix_rw_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_unix_rw_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_unix_rw_trace_process(void)
+{
+    return chrome_unix_rw_trace_enabled() && chrome_vfs_trace_process();
+}
+
 static int drm_open_trace_enabled(void)
 {
     static int initialized;
@@ -343,6 +363,91 @@ static const char *chrome_fd_trace_path(struct vfs_file *f)
 static int chrome_fd_trace_valid_file(struct vfs_file *f)
 {
     return f != NULL && (uint64)f > NOFILE;
+}
+
+static int chrome_media_fd_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("chrome_media_fd_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int chrome_media_fd_trace_process(void)
+{
+    return chrome_vfs_trace_process();
+}
+
+static int chrome_media_fd_trace_path_match(const char *path)
+{
+    if (path == NULL)
+        return 0;
+    return strstr(path, ".mp4") != NULL ||
+           strstr(path, "perf-video.html") != NULL;
+}
+
+static int chrome_media_fd_trace_file_match(struct vfs_file *f)
+{
+    if (!chrome_fd_trace_valid_file(f))
+        return 0;
+    return chrome_media_fd_trace_path_match(chrome_fd_trace_path(f));
+}
+
+static void chrome_media_fd_trace_open(const char *op, int fd, int dirfd,
+                                       const char *path, int flags,
+                                       struct vfs_file *f, long ret)
+{
+    struct vfs_inode *inode;
+    const char *fs_name = "(none)";
+    uint32 mode = 0;
+    uint64 ino = 0;
+    int64 size = 0;
+
+    if (!chrome_media_fd_trace_enabled() ||
+        !chrome_media_fd_trace_process() ||
+        (!chrome_media_fd_trace_path_match(path) &&
+         !chrome_media_fd_trace_file_match(f)))
+        return;
+
+    inode = chrome_fd_trace_valid_file(f) ? vfs_inode_deref(&f->inode) : NULL;
+    if (inode != NULL) {
+        mode = inode->mode;
+        ino = inode->ino;
+        size = inode->size;
+        if (inode->sb != NULL && inode->sb->fs_type != NULL &&
+            inode->sb->fs_type->name != NULL)
+            fs_name = inode->sb->fs_type->name;
+    }
+
+    printf("chrome-media-fd-trace: op=%s pid=%d tgid=%d name=%s fd=%d "
+           "dirfd=%d path=%s flags=0x%x ret=%ld file=%p f_flags=0x%x "
+           "mode=0x%x ino=%lu fs=%s size=%ld\n",
+           op, current->pid, current->tgid, current->name, fd, dirfd,
+           path ? path : "(null)", flags, ret, f,
+           chrome_fd_trace_valid_file(f) ? f->f_flags : 0, mode, ino,
+           fs_name, size);
+}
+
+static void chrome_media_fd_trace_file_op(const char *op, int fd,
+                                          struct vfs_file *f, int64 arg0,
+                                          int64 arg1, int64 ret)
+{
+    if (!chrome_media_fd_trace_enabled() ||
+        !chrome_media_fd_trace_process() ||
+        !chrome_media_fd_trace_file_match(f))
+        return;
+
+    printf("chrome-media-fd-trace: op=%s pid=%d tgid=%d name=%s fd=%d "
+           "path=%s file=%p f_flags=0x%x arg0=%ld arg1=%ld ret=%ld\n",
+           op, current->pid, current->tgid, current->name, fd,
+           chrome_fd_trace_path(f), f, f->f_flags, arg0, arg1, ret);
 }
 
 static int chrome_asset_lifecycle_path_match(const char *path)
@@ -487,6 +592,51 @@ static void chrome_fd_trace_read_payload(int fd, struct vfs_file *f,
            (ret > (ssize_t)sample_len) ? "..." : "");
 }
 
+static void chrome_unix_rw_trace_payload(const char *op, int fd,
+                                         struct vfs_file *f, uint64 user_buf,
+                                         int requested, ssize_t ret,
+                                         int before_op)
+{
+    char sample[33];
+    char hex[sizeof(sample) * 2 + 1];
+    size_t sample_len = 0;
+    size_t max_sample = sizeof(sample);
+
+    if (!chrome_unix_rw_trace_process() || f == NULL ||
+        f->ops != &unix_socket_file_ops)
+        return;
+
+    if (before_op) {
+        if (requested > 0)
+            sample_len = (size_t)requested;
+    } else if (ret > 0) {
+        sample_len = (size_t)ret;
+    }
+    if (sample_len > max_sample)
+        sample_len = max_sample;
+
+    hex[0] = '\0';
+    if (sample_len > 0 &&
+        vm_copyin(current->vm, sample, user_buf, sample_len) == 0) {
+        static const char hexchars[] = "0123456789abcdef";
+
+        for (size_t i = 0; i < sample_len; i++) {
+            unsigned char byte = (unsigned char)sample[i];
+            hex[i * 2] = hexchars[byte >> 4];
+            hex[i * 2 + 1] = hexchars[byte & 0xf];
+        }
+        hex[sample_len * 2] = '\0';
+    } else if (sample_len > 0) {
+        snprintf(hex, sizeof(hex), "EFAULT");
+    }
+
+    printf("chrome-unix-rw: op=%s pid=%d tgid=%d name=%s fd=%d requested=%d "
+           "ret=%ld file=%p f_flags=0x%x private=%p sample_len=%lu hex=%s\n",
+           op, current->pid, current->tgid, current->name, fd, requested,
+           (long)ret, f, f->f_flags, f->private_data,
+           (unsigned long)sample_len, hex);
+}
+
 #define CHROME_FD_TRACE(fmt, ...)                                             \
     do {                                                                      \
         if (chrome_fd_trace_enabled() && chrome_fd_trace_process())           \
@@ -528,14 +678,19 @@ static int timespec_to_timeout_ms_ceil(int64 tv_sec, int64 tv_nsec,
     } while (0)
 
 #define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
-    uint64 __sys_start = r_time();                                          \
-    __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED)
+    int __sys_profile = kstats_profile_enabled();                           \
+    uint64 __sys_start = __sys_profile ? r_time() : 0;                      \
+    do {                                                                    \
+        if (__sys_profile)                                                  \
+            __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED);           \
+    } while (0)
 
 #define SYSCALL_PROFILE_RETURN(ret_expr, tick_ctr)                          \
     do {                                                                    \
         uint64 __sys_ret = (uint64)(ret_expr);                              \
-        __atomic_add_fetch(&(tick_ctr), r_time() - __sys_start,             \
-                           __ATOMIC_RELAXED);                               \
+        if (__sys_profile)                                                  \
+            __atomic_add_fetch(&(tick_ctr), r_time() - __sys_start,         \
+                               __ATOMIC_RELAXED);                           \
         return __sys_ret;                                                   \
     } while (0)
 
@@ -898,8 +1053,11 @@ uint64 sys_vfs_read(void) {
         }
     }
 
+    chrome_unix_rw_trace_payload("read-enter", fd, f, p, n, 0, 1);
     ssize_t ret = vfs_fileread(f, (void *)p, n, true);
+    chrome_unix_rw_trace_payload("read-exit", fd, f, p, n, ret, 0);
     chrome_fd_trace_read_payload(fd, f, p, ret, pos_before);
+    chrome_media_fd_trace_file_op("read", fd, f, n, pos_before, ret);
     if (webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
         if (inode == NULL) {
             printf("webkit-vfs: read-exit pid=%d name=%s fd=%d kind=%s "
@@ -934,7 +1092,9 @@ uint64 sys_vfs_write(void) {
         return -EBADF;
     }
 
+    chrome_unix_rw_trace_payload("write-enter", fd, f, p, n, 0, 1);
     ssize_t ret = vfs_filewrite(f, (const void *)p, n, true);
+    chrome_unix_rw_trace_payload("write-exit", fd, f, p, n, ret, 0);
     vfs_fput(f);
     if (ret > 0)
         ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)ret);
@@ -983,6 +1143,8 @@ uint64 sys_vfs_fstat(void) {
     struct stat kst;
     memset(&kst, 0, sizeof(kst));
     int ret = vfs_filestat(f, &kst);
+    chrome_media_fd_trace_file_op("fstat", fd, f, kst.st_size, kst.st_mode,
+                                  ret);
     CHROME_FD_TRACE("fstat pid=%d tgid=%d name=%s fd=%d ret=%d "
                     "mode=0x%x size=%ld blocks=%ld path=%s file=%p "
                     "f_flags=0x%x\n",
@@ -1018,6 +1180,7 @@ uint64 sys_vfs_lseek(void) {
     }
 
     loff_t ret = vfs_filelseek(f, offset, whence);
+    chrome_media_fd_trace_file_op("lseek", fd, f, offset, whence, ret);
     vfs_fput(f);
     SYSCALL_PROFILE_RETURN(ret, g_sys_lseek_ticks);
 }
@@ -1834,6 +1997,8 @@ uint64 sys_vfs_open(void) {
     do {                                                                     \
         long __ret = (long)(ret_expr);                                       \
         if (__ret < 0) {                                                     \
+            chrome_media_fd_trace_open("open-fail", -1, AT_FDCWD, path,     \
+                                       omode, NULL, __ret);                  \
             CHROME_FD_TRACE("open fail pid=%d tgid=%d name=%s path=%s "      \
                             "flags=0x%x ret=%ld\n",                        \
                             current->pid, current->tgid, current->name,      \
@@ -2026,6 +2191,7 @@ uint64 sys_vfs_open(void) {
                    current->pid, current->tgid, current->name, path, omode,
                    fd, f);
     }
+    chrome_media_fd_trace_open("open", fd, AT_FDCWD, path, omode, f, fd);
 
     // When success, the refcount of f will be increased by fdtable, thus we do
     // not put f here. When failure, we need to put f anyway.
@@ -4647,12 +4813,26 @@ uint64 sys_vfs_openat(void) {
     struct vfs_inode *start_dir = NULL;
     // path is in a1, flags in a2, mode in a3
     char *path;
-    char *name;
+    char *name = NULL;
     int omode;
     int mode;
     int n;
 
-    int path_ret = __vfs_argpath(1, &path, &n);
+#define SYS_OPENAT_PROFILE_STAGE(call_ctr, tick_ctr, expr)                   \
+    ({                                                                       \
+        uint64 __stage_start = __sys_profile ? r_time() : 0;                 \
+        if (__sys_profile)                                                   \
+            __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED);            \
+        typeof(expr) __stage_ret = (expr);                                   \
+        if (__sys_profile)                                                   \
+            __atomic_add_fetch(&(tick_ctr), r_time() - __stage_start,        \
+                               __ATOMIC_RELAXED);                            \
+        __stage_ret;                                                         \
+    })
+
+    int path_ret = SYS_OPENAT_PROFILE_STAGE(g_sys_openat_path_copy_calls,
+                                            g_sys_openat_path_copy_ticks,
+                                            __vfs_argpath(1, &path, &n));
     if (path_ret < 0) {
         SYSCALL_PROFILE_RETURN(path_ret, g_sys_openat_ticks);
     }
@@ -4660,7 +4840,10 @@ uint64 sys_vfs_openat(void) {
                      "path_len=%d\n",
                      current->pid, current->name, dirfd, path, n);
     if (path[0] != '/') {
-        int err = __vfs_resolve_dirfd(dirfd, &start_dir);
+        int err = SYS_OPENAT_PROFILE_STAGE(g_sys_openat_dirfd_calls,
+                                           g_sys_openat_dirfd_ticks,
+                                           __vfs_resolve_dirfd(dirfd,
+                                                               &start_dir));
         if (err) {
             WEBKIT_VFS_TRACE("openat dirfd fail pid=%d dirfd=%d path=%s "
                              "err=%d\n",
@@ -4668,12 +4851,6 @@ uint64 sys_vfs_openat(void) {
             kvfree(path);
             SYSCALL_PROFILE_RETURN(err, g_sys_openat_ticks);
         }
-    }
-    name = __vfs_alloc_pathbuf();
-    if (name == NULL) {
-        if (start_dir) vfs_iput(start_dir);
-        kvfree(path);
-        SYSCALL_PROFILE_RETURN(-ENOMEM, g_sys_openat_ticks);
     }
     argint(2, &omode);
     argint(3, &mode);
@@ -4684,6 +4861,8 @@ uint64 sys_vfs_openat(void) {
     do {                                                                     \
         long __ret = (long)(ret_expr);                                       \
         if (__ret < 0) {                                                     \
+            chrome_media_fd_trace_open("openat-fail", -1, dirfd, path,      \
+                                       omode, NULL, __ret);                  \
             CHROME_FD_TRACE("openat fail pid=%d tgid=%d name=%s dirfd=%d "   \
                             "path=%s flags=0x%x ret=%ld\n",                \
                             current->pid, current->tgid, current->name,      \
@@ -4706,7 +4885,9 @@ uint64 sys_vfs_openat(void) {
         WEBKIT_VFS_TRACE("openat lookup tmpfile-dir pid=%d path=%s "
                          "flags=0x%x\n",
                          current->pid, path, omode);
-        inode = vfs_namei_at(start_dir, path, n);
+        inode = SYS_OPENAT_PROFILE_STAGE(g_sys_openat_lookup_calls,
+                                         g_sys_openat_lookup_ticks,
+                                         vfs_namei_at(start_dir, path, n));
         WEBKIT_VFS_TRACE("openat lookup tmpfile-dir done pid=%d path=%s "
                          "inode=%p err=%ld\n",
                          current->pid, path, inode,
@@ -4733,7 +4914,9 @@ uint64 sys_vfs_openat(void) {
 
         WEBKIT_VFS_TRACE("openat lookup create pid=%d path=%s flags=0x%x\n",
                          current->pid, path, omode);
-        inode = vfs_namei_at(start_dir, path, n);
+        inode = SYS_OPENAT_PROFILE_STAGE(g_sys_openat_lookup_calls,
+                                         g_sys_openat_lookup_ticks,
+                                         vfs_namei_at(start_dir, path, n));
         WEBKIT_VFS_TRACE("openat lookup create done pid=%d path=%s inode=%p "
                          "err=%ld\n",
                          current->pid, path, inode,
@@ -4753,8 +4936,16 @@ uint64 sys_vfs_openat(void) {
             if (lookup_err != -ENOENT)
                 SYS_VFS_OPENAT_RETURN(lookup_err);
 
+            name = __vfs_alloc_pathbuf();
+            if (name == NULL)
+                SYS_VFS_OPENAT_RETURN(-ENOMEM);
+
             struct vfs_inode *parent =
-                vfs_nameiparent_at(start_dir, path, n, name, VFS_USER_PATH_MAX);
+                SYS_OPENAT_PROFILE_STAGE(g_sys_openat_lookup_calls,
+                                         g_sys_openat_lookup_ticks,
+                                         vfs_nameiparent_at(start_dir, path,
+                                                            n, name,
+                                                            VFS_USER_PATH_MAX));
             if (IS_ERR(parent)) {
                 SYS_VFS_OPENAT_RETURN(PTR_ERR(parent));
             }
@@ -4777,11 +4968,19 @@ uint64 sys_vfs_openat(void) {
         }
     } else {
         if (omode & O_NOFOLLOW) {
+            name = __vfs_alloc_pathbuf();
+            if (name == NULL)
+                SYS_VFS_OPENAT_RETURN(-ENOMEM);
+
             WEBKIT_VFS_TRACE("openat lookup nofollow-parent pid=%d path=%s "
                              "flags=0x%x\n",
                              current->pid, path, omode);
             struct vfs_inode *parent =
-                vfs_nameiparent_at(start_dir, path, n, name, VFS_USER_PATH_MAX);
+                SYS_OPENAT_PROFILE_STAGE(g_sys_openat_lookup_calls,
+                                         g_sys_openat_lookup_ticks,
+                                         vfs_nameiparent_at(start_dir, path,
+                                                            n, name,
+                                                            VFS_USER_PATH_MAX));
             WEBKIT_VFS_TRACE("openat lookup nofollow-parent done pid=%d "
                              "path=%s parent=%p err=%ld\n",
                              current->pid, path, parent,
@@ -4792,7 +4991,10 @@ uint64 sys_vfs_openat(void) {
                 SYS_VFS_OPENAT_RETURN(-ENOENT);
 
             struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
-            int lr = vfs_ilookup(parent, &dentry, name, strlen(name));
+            int lr = SYS_OPENAT_PROFILE_STAGE(g_sys_openat_lookup_calls,
+                                              g_sys_openat_lookup_ticks,
+                                              vfs_ilookup(parent, &dentry,
+                                                          name, strlen(name)));
             if (lr != 0) {
                 vfs_iput(parent);
                 SYS_VFS_OPENAT_RETURN(lr);
@@ -4811,7 +5013,9 @@ uint64 sys_vfs_openat(void) {
         } else {
             WEBKIT_VFS_TRACE("openat lookup pid=%d path=%s flags=0x%x\n",
                              current->pid, path, omode);
-            inode = vfs_namei_at(start_dir, path, n);
+            inode = SYS_OPENAT_PROFILE_STAGE(g_sys_openat_lookup_calls,
+                                             g_sys_openat_lookup_ticks,
+                                             vfs_namei_at(start_dir, path, n));
             WEBKIT_VFS_TRACE("openat lookup done pid=%d path=%s inode=%p "
                              "err=%ld\n",
                              current->pid, path, inode,
@@ -4844,7 +5048,10 @@ uint64 sys_vfs_openat(void) {
 
     WEBKIT_VFS_TRACE("openat fileopen pid=%d path=%s flags=0x%x inode=%p\n",
                      current->pid, path, omode, inode);
-    struct vfs_file *f = vfs_fileopen(inode, omode);
+    struct vfs_file *f =
+        SYS_OPENAT_PROFILE_STAGE(g_sys_openat_fileopen_calls,
+                                 g_sys_openat_fileopen_ticks,
+                                 vfs_fileopen(inode, omode));
     WEBKIT_VFS_TRACE("openat fileopen done pid=%d path=%s file=%p err=%ld\n",
                      current->pid, path, f, IS_ERR(f) ? PTR_ERR(f) : 0);
     vfs_iput(inode);
@@ -4858,12 +5065,18 @@ uint64 sys_vfs_openat(void) {
         truncate(f, 0);
     }
 
+    uint64 fdalloc_start = __sys_profile ? r_time() : 0;
+    if (__sys_profile)
+        __atomic_add_fetch(&g_sys_openat_fdalloc_calls, 1, __ATOMIC_RELAXED);
     spin_lock(&current->fdtable->lock);
     n = __vfs_fdalloc(f);
     if (n >= 0 && (omode & O_CLOEXEC)) {
         vfs_fdtable_set_fdflags(current->fdtable, n, FD_CLOEXEC);
     }
     spin_unlock(&current->fdtable->lock);
+    if (__sys_profile)
+        __atomic_add_fetch(&g_sys_openat_fdalloc_ticks,
+                           r_time() - fdalloc_start, __ATOMIC_RELAXED);
     WEBKIT_VFS_TRACE("openat fdalloc done pid=%d path=%s fd=%d\n",
                      current->pid, path, n);
     CHROME_FD_TRACE("openat pid=%d tgid=%d name=%s fd=%d dirfd=%d path=%s "
@@ -4883,6 +5096,7 @@ uint64 sys_vfs_openat(void) {
                    current->pid, current->tgid, current->name, dirfd, path,
                    omode, n, f);
     }
+    chrome_media_fd_trace_open("openat", n, dirfd, path, omode, f, n);
 
     if (n >= 0 && webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
         const char *fs_name = "(none)";
@@ -4907,6 +5121,7 @@ uint64 sys_vfs_openat(void) {
     if (n >= 0)
         ACCT_INC(current->thread_group, fs_opens);
     SYS_VFS_OPENAT_RETURN(n);
+#undef SYS_OPENAT_PROFILE_STAGE
 #undef SYS_VFS_OPENAT_RETURN
 }
 
@@ -5223,6 +5438,7 @@ uint64 sys_vfs_pread64(void) {
     f->f_pos = saved;
     mutex_unlock(&f->lock);
 
+    chrome_media_fd_trace_file_op("pread64", fd, f, count, offset, ret);
     if (ret > 0)
         ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
     vfs_fput(f);

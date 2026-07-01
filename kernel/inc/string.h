@@ -16,11 +16,15 @@ size_t strnlen(const char *s, size_t maxlen);
 char *strcat(char *dest, const char *src);
 char *strtok_r(char *str, const char *delim, char **saveptr);
 char *strtok(char *str, const char *delim);
-const char *strstr(const char *haystack, const char *needle);
+char *strstr(const char *haystack, const char *needle);
+char *strnstr(const char *haystack, const char *needle, size_t haystack_len);
+void *memmem(const void *haystack, size_t haystack_len, const void *needle,
+             size_t needle_len);
 char *strchr(const char *s, int c);
 char *strrchr(const char *s, int c);
 char *strndup(const char *s, size_t n);
 char *strdup(const char *s);
+void string_selftest_run_if_enabled(void);
 
 // Only define strtoul if not already provided by host stdlib (for unit tests)
 #ifndef __KERNEL_SKIP_STRTOUL

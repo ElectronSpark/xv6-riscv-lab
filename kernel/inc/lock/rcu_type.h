@@ -5,6 +5,7 @@
 #include "types.h"
 #include "param.h"
 #include "list_type.h"
+#include "lock/spinlock.h"
 
 // RCU callback function type
 typedef void (*rcu_callback_t)(void *data);
@@ -36,8 +37,10 @@ typedef struct {
 
     // Pending callbacks list
     // Callbacks are checked for readiness based on their timestamp vs other
-    // CPUs' timestamps Access is protected by push_off()/pop_off() to ensure
-    // CPU-local exclusivity
+    // CPUs' timestamps. Access is protected by lock; push_off()/pop_off() is
+    // not enough once barrier and callback paths can inspect a CPU's list from
+    // thread context under KDE/Chromium-scale fd churn.
+    spinlock_t lock;
     rcu_head_t *_Atomic pending_head;
     rcu_head_t *_Atomic pending_tail;
 

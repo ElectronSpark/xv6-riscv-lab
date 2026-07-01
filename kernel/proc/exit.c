@@ -115,7 +115,51 @@ static bool trace_browser_child(struct thread *child) {
            (chrome_lifecycle_trace_enabled() &&
             (chrome_lifecycle_thread_match(child) ||
              chrome_lifecycle_network_service_match(child) ||
+             chrome_lifecycle_audio_service_match(child) ||
              chrome_lifecycle_child_process_match(child)));
+}
+
+static const char *thread_exec_path(struct thread *p)
+{
+    if (p == NULL || p->thread_group == NULL)
+        return "";
+    return p->thread_group->exec_path;
+}
+
+static void chrome_lifecycle_reap_trace(const char *kind,
+                                        struct thread *waiter,
+                                        struct thread *child,
+                                        int wait_status,
+                                        int target_pid,
+                                        uint32 options)
+{
+    struct thread_group *ctg = child ? child->thread_group : NULL;
+    struct thread *parent = child ? child->parent : NULL;
+    int live = ctg ? __atomic_load_n(&ctg->live_threads,
+                                     __ATOMIC_ACQUIRE) : -1;
+
+    if (!trace_browser_child(child))
+        return;
+
+    printf("%s: reaping now_ticks=%lu waiter_pid=%d waiter_tgid=%d "
+           "waiter_name='%s' waiter_roles=0x%x waiter_exec='%s' "
+           "pid=%d tgid=%d pid_seq=%lu name='%s' state=%d live=%d "
+           "xstate=%d wait_status=%d killed_signo=%d killed_code=%d "
+           "roles=0x%x exec='%s' parent_pid=%d parent_tgid=%d "
+           "parent_name='%s' parent_roles=0x%x parent_exec='%s' "
+           "target=%d options=0x%x\n",
+           kind, r_time(), waiter ? waiter->pid : -1,
+           waiter ? waiter->tgid : -1, waiter ? waiter->name : "",
+           chrome_lifecycle_roles(waiter), thread_exec_path(waiter),
+           child ? child->pid : -1, child ? child->tgid : -1,
+           child ? child->pid_seq : 0, child ? child->name : "",
+           child ? __thread_state_get(child) : -1, live,
+           child ? child->xstate : 0, wait_status,
+           child ? child->killed_signo : 0, child ? child->killed_code : 0,
+           chrome_lifecycle_roles(child), thread_exec_path(child),
+           parent ? parent->pid : -1, parent ? parent->tgid : -1,
+           parent ? parent->name : "NULL", chrome_lifecycle_roles(parent),
+           thread_exec_path(parent), target_pid, options);
 }
 
 static int wait_status_from_child(struct thread *child) {
@@ -183,11 +227,16 @@ static void linux_wait_siginfo_init(struct linux_wait_siginfo *lsi,
 static void exit_release_vm(struct thread *p)
 {
     struct thread_group *tg = p != NULL ? p->thread_group : NULL;
+    vm_t *vm = NULL;
 
-    if (p != NULL && p->vm != NULL) {
-        vm_put_owner(p->vm, p->thread_group);
+    if (p != NULL) {
+        tcb_lock(p);
+        vm = p->vm;
         p->vm = NULL;
+        tcb_unlock(p);
     }
+    if (vm != NULL)
+        vm_put_owner(vm, tg);
     oom_note_victim_exit(tg);
 }
 
@@ -241,17 +290,25 @@ void exit(int status) {
     if (chrome_lifecycle_trace_enabled() &&
         (chrome_lifecycle_thread_match(p) ||
          chrome_lifecycle_network_service_match(p) ||
+         chrome_lifecycle_audio_service_match(p) ||
          chrome_lifecycle_child_process_match(p))) {
         int live = tg ?
             __atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE) : -1;
+        struct thread *parent = p->parent;
         printf("chrome-lifecycle: exit pid=%d tgid=%d name='%s' "
-               "status=%d killed_signo=%d killed_code=%d leader=%d "
-               "live=%d group_exiting=%d exec='%s'\n",
-               p->pid, p->tgid, p->name, status, p->killed_signo,
-               p->killed_code, thread_is_group_leader(p), live,
-               thread_group_exiting(tg),
-               tg ? tg->exec_path : "");
+               "now_ticks=%lu pid_seq=%lu status=%d killed_signo=%d "
+               "killed_code=%d leader=%d live=%d group_exiting=%d "
+               "roles=0x%x exec='%s' parent_pid=%d parent_tgid=%d "
+               "parent_name='%s' parent_roles=0x%x parent_exec='%s'\n",
+               p->pid, p->tgid, p->name, r_time(), p->pid_seq, status,
+               p->killed_signo, p->killed_code, thread_is_group_leader(p),
+               live, thread_group_exiting(tg), chrome_lifecycle_roles(p),
+               tg ? tg->exec_path : "", parent ? parent->pid : -1,
+               parent ? parent->tgid : -1,
+               parent ? parent->name : "NULL",
+               chrome_lifecycle_roles(parent), thread_exec_path(parent));
     }
+    chrome_syscall_tail_dump_current("exit");
 
     // Notify GDB stub before tearing down resources (VM, fds, etc.).
     // For single-threaded or group leader: this is a process exit.
@@ -324,6 +381,14 @@ void exit(int status) {
             fb_gpu_destroy_owner(thread_tgid(p));
             virtio_gpu_user_destroy_owner(thread_tgid(p));
         }
+
+        /*
+         * Linux removes /proc/<tgid>/task/<tid> once a non-leader thread has
+         * exited.  Chromium's sandbox polls that exact path after joining a
+         * helper thread; stale procfs cache entries make it believe the thread
+         * is still alive and crash the GPU process.
+         */
+        procfs_evict_pid(thread_tgid(p));
 
         /*
          * Linux thread pidfds become readable when the specific thread exits,
@@ -569,14 +634,8 @@ int wait(uint64 addr) {
                     }
                     xstate = child->xstate;
                     pid = child->pid;
-                    if (trace_browser_child(child)) {
-                        struct thread_group *ctg = child->thread_group;
-                        int live = ctg ? __atomic_load_n(&ctg->live_threads, __ATOMIC_ACQUIRE) : -1;
-                        printf("wait: reaping pid=%d tgid=%d name='%s' state=%d live=%d xstate=%d parent='%s'\n",
-                               child->pid, child->tgid, child->name,
-                               __thread_state_get(child), live, child->xstate,
-                               child->parent ? child->parent->name : "NULL");
-                    }
+                    chrome_lifecycle_reap_trace("wait", p, child, xstate,
+                                                -1, 0);
                     if (!pid_try_lock_upgrade()) {
                         pid_runlock();
                         pid_wlock();
@@ -707,16 +766,8 @@ int waitpid(int target_pid, uint64 addr, int options) {
                     if (child->killed_signo > 0)
                         xstate = wait_status_from_child(child);
                     pid = child->pid;
-                    if (trace_browser_child(child)) {
-                        struct thread_group *ctg = child->thread_group;
-                        int live = ctg ? __atomic_load_n(&ctg->live_threads, __ATOMIC_ACQUIRE) : -1;
-                        printf("waitpid: reaping pid=%d tgid=%d name='%s' state=%d live=%d xstate=%d wait_status=%d killed_signo=%d killed_code=%d parent='%s' target=%d\n",
-                               child->pid, child->tgid, child->name,
-                               __thread_state_get(child), live, child->xstate,
-                               xstate, child->killed_signo, child->killed_code,
-                               child->parent ? child->parent->name : "NULL",
-                               target_pid);
-                    }
+                    chrome_lifecycle_reap_trace("waitpid", p, child, xstate,
+                                                target_pid, opts);
                     if (!pid_try_lock_upgrade()) {
                         pid_runlock();
                         pid_wlock();
@@ -873,6 +924,8 @@ uint64 sys_waitid(void) {
                                             child->killed_signo > 0 ?
                                             child->killed_signo :
                                             (child->xstate & 0xff));
+                    chrome_lifecycle_reap_trace("waitid", p, child,
+                                                si.si_status, (int)id, opts);
 
                     if (!(opts & WNOWAIT)) {
                         if (!pid_try_lock_upgrade()) {

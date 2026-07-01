@@ -108,6 +108,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     diaginit();
     printf("\nxv6 kernel booting (hart %d)\n\n", hartid);
     platform_init(fdt_base);
+    string_selftest_run_if_enabled();
     platform_print_mem_summary();
 
     // Apply platform configuration to kernel globals

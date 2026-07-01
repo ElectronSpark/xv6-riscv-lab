@@ -13,6 +13,42 @@ set(ARCH_C_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/platform_x86.c
     ${CMAKE_CURRENT_SOURCE_DIR}/backtrace.c
     ${CMAKE_CURRENT_SOURCE_DIR}/gdbstub_arch.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vdso.c
+)
+
+set(X86_VDSO_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR}/vdso)
+set(X86_VDSO_SO ${X86_VDSO_BUILD_DIR}/linux-vdso.so.1)
+set(X86_VDSO_BLOB_S ${X86_VDSO_BUILD_DIR}/vdso_blob.S)
+set(X86_VDSO_SRC ${CMAKE_CURRENT_SOURCE_DIR}/vdso/vdso.S)
+set(X86_VDSO_VERSION ${CMAKE_CURRENT_SOURCE_DIR}/vdso/vdso.version)
+set(X86_VDSO_LDS ${CMAKE_CURRENT_SOURCE_DIR}/vdso/vdso.lds)
+set(X86_VDSO_BLOB_GEN ${CMAKE_CURRENT_SOURCE_DIR}/vdso/gen_vdso_blob.py)
+
+add_custom_command(
+    OUTPUT ${X86_VDSO_SO}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${X86_VDSO_BUILD_DIR}
+    COMMAND ${CMAKE_C_COMPILER}
+            -nostdlib -shared -fPIC
+            -Wl,-soname,linux-vdso.so.1
+            -Wl,--hash-style=both
+            -Wl,--build-id=none
+            -Wl,-z,norelro
+            -Wl,-z,max-page-size=4096
+            -Wl,--version-script=${X86_VDSO_VERSION}
+            -Wl,-T,${X86_VDSO_LDS}
+            ${X86_VDSO_SRC}
+            -o ${X86_VDSO_SO}
+    DEPENDS ${X86_VDSO_SRC} ${X86_VDSO_VERSION} ${X86_VDSO_LDS}
+    COMMENT "Building x86_64 vDSO ELF"
+    VERBATIM
+)
+
+add_custom_command(
+    OUTPUT ${X86_VDSO_BLOB_S}
+    COMMAND python3 ${X86_VDSO_BLOB_GEN} ${X86_VDSO_SO} ${X86_VDSO_BLOB_S}
+    DEPENDS ${X86_VDSO_SO} ${X86_VDSO_BLOB_GEN}
+    COMMENT "Embedding x86_64 vDSO ELF"
+    VERBATIM
 )
 
 set(ARCH_S_FILES
@@ -23,10 +59,12 @@ set(ARCH_S_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/proc/fpu.S
     ${CMAKE_CURRENT_SOURCE_DIR}/irq/trapvec.S
     ${CMAKE_CURRENT_SOURCE_DIR}/irq/trampoline.S
+    ${X86_VDSO_BLOB_S}
 )
 
 set_source_files_properties(${ARCH_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${ARCH_S_FILES} PROPERTIES LANGUAGE C)
+set_source_files_properties(${X86_VDSO_BLOB_S} PROPERTIES GENERATED TRUE LANGUAGE C)
 
 add_library(arch_x86_64 OBJECT ${ARCH_C_FILES} ${ARCH_S_FILES})
 add_dependencies(arch_x86_64 generate_asm_offsets)

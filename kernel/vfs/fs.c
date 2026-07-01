@@ -23,6 +23,7 @@
 #include "tmpfs/tmpfs_smoketest.h"
 #include "xv6fs/xv6fs_smoketest.h"
 #include <mm/vm.h>
+#include "kstats.h"
 
 // Locking order
 // 1. mount mutex acquired via vfs_mount_lock()
@@ -2034,8 +2035,16 @@ __vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) {
 
     if (!vfs_superblock_wholding(dentry->sb)) {
         // Suppose holding read lock
+        int profile = kstats_profile_enabled();
+        uint64 upgrade_start = profile ? r_time() : 0;
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_upgrade_calls, 1,
+                               __ATOMIC_RELAXED);
         vfs_superblock_unlock(dentry->sb);
         vfs_superblock_wlock(dentry->sb);
+        if (profile)
+            __atomic_add_fetch(&g_vfs_dentry_inode_upgrade_ticks,
+                               r_time() - upgrade_start, __ATOMIC_RELAXED);
     }
 
     if (!dentry->sb->valid) {
@@ -2053,10 +2062,18 @@ __vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) {
         return inode;
     }
 
+    int profile = kstats_profile_enabled();
+    uint64 load_start = profile ? r_time() : 0;
+    if (profile)
+        __atomic_add_fetch(&g_vfs_inode_load_calls, 1, __ATOMIC_RELAXED);
     inode = vfs_get_inode(dentry->sb, dentry->ino);
+    if (profile)
+        __atomic_add_fetch(&g_vfs_inode_load_ticks, r_time() - load_start,
+                           __ATOMIC_RELAXED);
     if (IS_ERR_OR_NULL(inode)) {
         return inode;
     }
+    KSTATS_PROFILE_INC(g_vfs_inode_load_success);
 
     // "." and ".." are synthesized by VFS and should always hit the cache
     assert(
@@ -2097,6 +2114,7 @@ __vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) {
 struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
     struct vfs_inode *inode = NULL;
     bool locked_here = false;
+    KSTATS_PROFILE_INC(g_vfs_dentry_inode_calls);
     if (dentry == NULL) {
         return ERR_PTR(-EINVAL);
     }
@@ -2113,6 +2131,7 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
     // just duplicate the reference instead of cache lookup
     inode = __vfs_dentry_get_self_inode(dentry);
     if (inode != NULL) {
+        KSTATS_PROFILE_INC(g_vfs_dentry_inode_self_hits);
         return inode;
     }
 
@@ -2158,6 +2177,7 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
  */
 struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
     struct vfs_inode *inode = NULL;
+    KSTATS_PROFILE_INC(g_vfs_dentry_inode_calls);
     if (dentry == NULL) {
         return ERR_PTR(-EINVAL);
     }
@@ -2170,11 +2190,20 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
     // just duplicate the reference without acquiring locks
     inode = __vfs_dentry_get_self_inode(dentry);
     if (inode != NULL) {
+        KSTATS_PROFILE_INC(g_vfs_dentry_inode_self_hits);
         return inode;
     }
 
 retry:
+    int profile = kstats_profile_enabled();
+    uint64 rlock_start = profile ? r_time() : 0;
+    if (profile)
+        __atomic_add_fetch(&g_vfs_dentry_inode_rlock_calls, 1,
+                           __ATOMIC_RELAXED);
     vfs_superblock_rlock(dentry->sb);
+    if (profile)
+        __atomic_add_fetch(&g_vfs_dentry_inode_rlock_ticks,
+                           r_time() - rlock_start, __ATOMIC_RELAXED);
     if (!dentry->sb->valid) {
         vfs_superblock_unlock(dentry->sb);
         return ERR_PTR(-EINVAL);
@@ -2208,14 +2237,30 @@ retry:
  *   - ERR_PTR(-EINVAL) if @sb is NULL or the superblock is not valid.
  */
 struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
+    int profile = kstats_profile_enabled();
+    uint64 cache_start = profile ? r_time() : 0;
+    if (profile)
+        __atomic_add_fetch(&g_vfs_inode_cache_calls, 1, __ATOMIC_RELAXED);
     if (sb == NULL) {
+        if (profile)
+            __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                               r_time() - cache_start, __ATOMIC_RELAXED);
         return ERR_PTR(-EINVAL); // Invalid arguments
     }
     if (!sb->valid) {
+        if (profile)
+            __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                               r_time() - cache_start, __ATOMIC_RELAXED);
         return ERR_PTR(-EINVAL); // Superblock is not valid
     }
     struct vfs_inode *inode = __vfs_inode_hash_get(sb, ino);
     if (inode == NULL) {
+        if (profile) {
+            __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
+                               __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                               r_time() - cache_start, __ATOMIC_RELAXED);
+        }
         return ERR_PTR(-ENOENT); // Inode not found
     }
     // CRITICAL: Take a reference BEFORE locking to prevent use-after-free.
@@ -2239,9 +2284,22 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
                     lru_removed = true;
                 }
             } else {
+                if (profile) {
+                    __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
+                                       __ATOMIC_RELAXED);
+                    __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                                       r_time() - cache_start,
+                                       __ATOMIC_RELAXED);
+                }
                 return ERR_PTR(-ENOENT); // Cannot safely revive without wlock
             }
         } else {
+            if (profile) {
+                __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
+                                   __ATOMIC_RELAXED);
+                __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                                   r_time() - cache_start, __ATOMIC_RELAXED);
+            }
             return ERR_PTR(-ENOENT); // Inode is dying
         }
     }
@@ -2260,6 +2318,12 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
             list_node_push(&sb->inode_lru, inode, lru_entry);
             sb->inode_lru_count++;
         }
+        if (profile) {
+            __atomic_add_fetch(&g_vfs_inode_cache_eagain, 1,
+                               __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                               r_time() - cache_start, __ATOMIC_RELAXED);
+        }
         return ERR_PTR(-EAGAIN);
     }
     if (!inode->valid || inode->destroying) {
@@ -2269,9 +2333,20 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
         // because caller may hold superblock wlock. Queue to workqueue instead.
         vfs_iunlock(inode);
         __vfs_queue_deferred_iput(inode);
+        if (profile) {
+            __atomic_add_fetch(&g_vfs_inode_cache_misses, 1,
+                               __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_vfs_inode_cache_ticks,
+                               r_time() - cache_start, __ATOMIC_RELAXED);
+        }
         return ERR_PTR(-ENOENT); // Inode is not valid or being destroyed
     }
     // Return with reference held and inode locked
+    if (profile) {
+        __atomic_add_fetch(&g_vfs_inode_cache_hits, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_vfs_inode_cache_ticks, r_time() - cache_start,
+                           __ATOMIC_RELAXED);
+    }
     return inode;
 }
 

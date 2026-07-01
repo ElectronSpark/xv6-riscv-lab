@@ -1084,33 +1084,115 @@ bo_copy_out:
         uint64 size;
         int virtio_backed;
         int ret;
+        int diag;
+        int skip_kms;
+        uint32 seq = 0;
+        uint64 start_ticks = 0;
+        uint64 phase_ticks = 0;
+        static uint32 read_seq;
+        static int read_logs;
 
         if (either_copyin((char *)&req, 1, (uint64)arg, sizeof(req)) < 0)
             return -EFAULT;
+        diag = fb_cmdline_enabled("virtio_gpu_scanout_read_diag") ||
+               fb_cmdline_enabled("fb_scanout_read_ioctl_diag");
+        skip_kms = fb_cmdline_enabled("fb_scanout_read_skip_kms") ||
+                   fb_cmdline_enabled("virtio_gpu_scanout_read_skip_kms");
+        if (diag) {
+            seq = __atomic_add_fetch(&read_seq, 1, __ATOMIC_RELAXED);
+            start_ticks = r_time();
+            if (read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] begin rect=%u,%u %ux%u pitch=%u pixels=0x%lx flags=0x%x\n",
+                       seq, req.x, req.y, req.w, req.h, req.pitch,
+                       req.pixels, req.flags);
+                read_logs++;
+            }
+        }
         if (req.flags != 0 || req.pixels == 0 || req.w == 0 || req.h == 0 ||
-            req.pitch < req.w * sizeof(uint32))
+            req.pitch < req.w * sizeof(uint32)) {
+            if (diag && read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] end ret=%d elapsed_us=%lu reason=bad-args\n",
+                       seq, -EINVAL, fb_ticks_to_us(r_time() - start_ticks));
+                read_logs++;
+            }
             return -EINVAL;
+        }
         size = (uint64)req.pitch * req.h;
-        if (size == 0 || size > 64ULL * 1024 * 1024)
+        if (size == 0 || size > 64ULL * 1024 * 1024) {
+            if (diag && read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] end ret=%d elapsed_us=%lu reason=bad-size size=%lu\n",
+                       seq, -EINVAL, fb_ticks_to_us(r_time() - start_ticks),
+                       size);
+                read_logs++;
+            }
             return -EINVAL;
+        }
 
         pixels = kvmalloc((size_t)size);
-        if (pixels == NULL)
+        if (pixels == NULL) {
+            if (diag && read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] end ret=%d elapsed_us=%lu reason=nomem size=%lu\n",
+                       seq, -ENOMEM, fb_ticks_to_us(r_time() - start_ticks),
+                       size);
+                read_logs++;
+            }
             return -ENOMEM;
+        }
         memset(pixels, 0, (size_t)size);
         spin_lock(&fb_state.lock);
         virtio_backed = fb_state.virtio_backed;
         spin_unlock(&fb_state.lock);
+        if (diag && read_logs < 96) {
+            printf("FB: scanout-read-ioctl[%u] buffer-ready size=%lu virtio_backed=%d elapsed_us=%lu\n",
+                   seq, size, virtio_backed,
+                   fb_ticks_to_us(r_time() - start_ticks));
+            read_logs++;
+        }
         if (virtio_backed) {
+            phase_ticks = r_time();
+            if (diag && read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] virtio-begin elapsed_us=%lu\n",
+                       seq, fb_ticks_to_us(phase_ticks - start_ticks));
+                read_logs++;
+            }
             ret = virtio_gpu_read_current_scanout(
                 req.x, req.y, req.w, req.h, pixels, req.pitch,
                 &req.screen_width, &req.screen_height, &req.screen_pitch);
-            if (ret == 0) {
-                int kms_ret = fb_read_current_kms_framebuffer(
+            if (diag && read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] virtio-end ret=%d stage_us=%lu elapsed_us=%lu screen=%ux%u pitch=%u\n",
+                       seq, ret, fb_ticks_to_us(r_time() - phase_ticks),
+                       fb_ticks_to_us(r_time() - start_ticks),
+                       req.screen_width, req.screen_height, req.screen_pitch);
+                read_logs++;
+            }
+            if (ret == 0 && skip_kms) {
+                if (diag && read_logs < 96) {
+                    printf("FB: scanout-read-ioctl[%u] kms-skip elapsed_us=%lu\n",
+                           seq, fb_ticks_to_us(r_time() - start_ticks));
+                    read_logs++;
+                }
+            } else if (ret == 0) {
+                int kms_ret;
+
+                phase_ticks = r_time();
+                if (diag && read_logs < 96) {
+                    printf("FB: scanout-read-ioctl[%u] kms-begin elapsed_us=%lu\n",
+                           seq, fb_ticks_to_us(phase_ticks - start_ticks));
+                    read_logs++;
+                }
+                kms_ret = fb_read_current_kms_framebuffer(
                     req.x, req.y, req.w, req.h, pixels, req.pitch,
                     &req.screen_width, &req.screen_height,
                     &req.screen_pitch);
-
+                if (diag && read_logs < 96) {
+                    printf("FB: scanout-read-ioctl[%u] kms-end ret=%d stage_us=%lu elapsed_us=%lu screen=%ux%u pitch=%u\n",
+                           seq, kms_ret,
+                           fb_ticks_to_us(r_time() - phase_ticks),
+                           fb_ticks_to_us(r_time() - start_ticks),
+                           req.screen_width, req.screen_height,
+                           req.screen_pitch);
+                    read_logs++;
+                }
                 if (kms_ret == 0)
                     ret = 0;
             }
@@ -1119,14 +1201,54 @@ bo_copy_out:
                 req.x, req.y, req.w, req.h, pixels, req.pitch,
                 &req.screen_width, &req.screen_height, &req.screen_pitch);
         }
-        if (ret == 0 &&
-            either_copyout(1, req.pixels, pixels, (uint64)req.pitch * req.h) < 0)
-            ret = -EFAULT;
+        if (ret == 0) {
+            phase_ticks = r_time();
+            if (diag && read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] pixel-copyout-begin bytes=%lu elapsed_us=%lu\n",
+                       seq, (uint64)req.pitch * req.h,
+                       fb_ticks_to_us(phase_ticks - start_ticks));
+                read_logs++;
+            }
+            if (either_copyout(1, req.pixels, pixels,
+                               (uint64)req.pitch * req.h) < 0)
+                ret = -EFAULT;
+            if (diag && read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] pixel-copyout-end ret=%d stage_us=%lu elapsed_us=%lu\n",
+                       seq, ret, fb_ticks_to_us(r_time() - phase_ticks),
+                       fb_ticks_to_us(r_time() - start_ticks));
+                read_logs++;
+            }
+        }
         kvfree(pixels);
-        if (ret != 0)
+        if (ret != 0) {
+            if (diag && read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] end ret=%d elapsed_us=%lu reason=read-or-copyout\n",
+                       seq, ret, fb_ticks_to_us(r_time() - start_ticks));
+                read_logs++;
+            }
             return ret;
-        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0)
+        }
+        phase_ticks = r_time();
+        if (diag && read_logs < 96) {
+            printf("FB: scanout-read-ioctl[%u] req-copyout-begin elapsed_us=%lu\n",
+                   seq, fb_ticks_to_us(phase_ticks - start_ticks));
+            read_logs++;
+        }
+        if (either_copyout(1, (uint64)arg, (char *)&req, sizeof(req)) < 0) {
+            if (diag && read_logs < 96) {
+                printf("FB: scanout-read-ioctl[%u] end ret=%d stage_us=%lu elapsed_us=%lu reason=req-copyout\n",
+                       seq, -EFAULT, fb_ticks_to_us(r_time() - phase_ticks),
+                       fb_ticks_to_us(r_time() - start_ticks));
+                read_logs++;
+            }
             return -EFAULT;
+        }
+        if (diag && read_logs < 96) {
+            printf("FB: scanout-read-ioctl[%u] end ret=0 stage_us=%lu elapsed_us=%lu\n",
+                   seq, fb_ticks_to_us(r_time() - phase_ticks),
+                   fb_ticks_to_us(r_time() - start_ticks));
+            read_logs++;
+        }
         return 0;
     }
 
@@ -1958,7 +2080,7 @@ bo_copy_out:
                                      req.flags, cmds,
                                      req.cmd_size / sizeof(uint32),
                                      resources, req.resource_count,
-                                     &req.fence, &req.signaled, NULL);
+                                     &req.fence, &req.signaled, NULL, NULL);
         if (resources != NULL)
             kvfree(resources);
         page_free(cmds, order);

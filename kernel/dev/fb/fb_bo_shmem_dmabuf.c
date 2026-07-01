@@ -1403,6 +1403,54 @@ static struct fb_gpu_bo_entry *fb_bo_get_owned(uint32 handle, uint64 owner_id,
     return bo;
 }
 
+static uint32 fb_scanout_diag_pixel(void *dst, uint32 dst_pitch,
+                                    uint32 w, uint32 h,
+                                    uint32 sample_x, uint32 sample_y)
+{
+    uint8 *base = (uint8 *)dst;
+
+    if (w == 0 || h == 0)
+        return 0;
+    if (sample_x >= w)
+        sample_x = w - 1;
+    if (sample_y >= h)
+        sample_y = h - 1;
+    return *(uint32 *)(base + (uint64)sample_y * dst_pitch +
+                       (uint64)sample_x * sizeof(uint32));
+}
+
+static uint64 fb_scanout_diag_sample_hash(void *dst, uint32 dst_pitch,
+                                          uint32 w, uint32 h,
+                                          uint32 *nonblack_out,
+                                          uint32 *center_out)
+{
+    uint32 samples[5];
+    uint64 hash = 1469598103934665603ULL;
+    uint32 nonblack = 0;
+
+    samples[0] = fb_scanout_diag_pixel(dst, dst_pitch, w, h, w / 2, h / 2);
+    samples[1] = fb_scanout_diag_pixel(dst, dst_pitch, w, h, w / 4, h / 4);
+    samples[2] = fb_scanout_diag_pixel(dst, dst_pitch, w, h, (w * 3) / 4,
+                                       h / 4);
+    samples[3] = fb_scanout_diag_pixel(dst, dst_pitch, w, h, w / 4,
+                                       (h * 3) / 4);
+    samples[4] = fb_scanout_diag_pixel(dst, dst_pitch, w, h, (w * 3) / 4,
+                                       (h * 3) / 4);
+
+    for (uint32 i = 0; i < 5; i++) {
+        if ((samples[i] & 0x00ffffffU) != 0)
+            nonblack++;
+        hash ^= samples[i];
+        hash *= 1099511628211ULL;
+    }
+
+    if (nonblack_out != NULL)
+        *nonblack_out = nonblack;
+    if (center_out != NULL)
+        *center_out = samples[0];
+    return hash;
+}
+
 static int fb_read_current_kms_framebuffer(uint32 x, uint32 y, uint32 w,
                                            uint32 h, void *dst,
                                            uint32 dst_pitch,
@@ -1414,10 +1462,36 @@ static int fb_read_current_kms_framebuffer(uint32 x, uint32 y, uint32 w,
     struct fb_gpu_bo_entry *bo;
     uint64 base_offset;
     int swap_rb;
+    int transfer_attempted = 0;
+    int transfer_ret = 0;
+    int diag;
+    uint32 seq = 0;
+    uint64 start_ticks = 0;
+    uint64 phase_ticks = 0;
     static int read_logs;
+    static int stage_logs;
+    static uint32 read_seq;
 
-    if (dst == NULL || w == 0 || h == 0 || dst_pitch < w * sizeof(uint32))
+    diag = fb_cmdline_enabled("virtio_gpu_scanout_read_diag") ||
+           fb_cmdline_enabled("fb_scanout_read_ioctl_diag");
+    if (diag) {
+        seq = __atomic_add_fetch(&read_seq, 1, __ATOMIC_RELAXED);
+        start_ticks = r_time();
+        if (stage_logs < 96) {
+            printf("FB: kms-scanout-read[%u] begin rect=%u,%u %ux%u dst_pitch=%u\n",
+                   seq, x, y, w, h, dst_pitch);
+            stage_logs++;
+        }
+    }
+
+    if (dst == NULL || w == 0 || h == 0 || dst_pitch < w * sizeof(uint32)) {
+        if (diag && stage_logs < 96) {
+            printf("FB: kms-scanout-read[%u] end ret=%d elapsed_us=%lu reason=bad-args\n",
+                   seq, -EINVAL, fb_ticks_to_us(r_time() - start_ticks));
+            stage_logs++;
+        }
         return -EINVAL;
+    }
 
     memset(&fb_snapshot, 0, sizeof(fb_snapshot));
     spin_lock(&fb_state.lock);
@@ -1432,24 +1506,69 @@ static int fb_read_current_kms_framebuffer(uint32 x, uint32 y, uint32 w,
         }
     }
     spin_unlock(&fb_state.lock);
+    if (diag && stage_logs < 96) {
+        printf("FB: kms-scanout-read[%u] snapshot fb=%u bo=%u owner=%lu:%d size=%ux%u pitch=%u in_use=%d elapsed_us=%lu\n",
+               seq, fb_snapshot.fb_id, fb_snapshot.bo_handle,
+               fb_snapshot.owner_id, fb_snapshot.owner_tgid,
+               fb_snapshot.width, fb_snapshot.height, fb_snapshot.pitch,
+               fb_snapshot.in_use,
+               fb_ticks_to_us(r_time() - start_ticks));
+        stage_logs++;
+    }
 
     if (!fb_snapshot.in_use || fb_snapshot.bo_handle == 0 ||
         fb_snapshot.width == 0 || fb_snapshot.height == 0 ||
-        fb_snapshot.pitch == 0)
+        fb_snapshot.pitch == 0) {
+        if (diag && stage_logs < 96) {
+            printf("FB: kms-scanout-read[%u] end ret=%d elapsed_us=%lu reason=no-current-fb\n",
+                   seq, -ENOENT, fb_ticks_to_us(r_time() - start_ticks));
+            stage_logs++;
+        }
         return -ENOENT;
+    }
     if (!fb_scanout_format_supported(fb_snapshot.pixel_format,
-                                     fb_snapshot.modifier))
+                                     fb_snapshot.modifier)) {
+        if (diag && stage_logs < 96) {
+            printf("FB: kms-scanout-read[%u] end ret=%d elapsed_us=%lu reason=unsupported-format format=0x%lx modifier=0x%lx\n",
+                   seq, -EOPNOTSUPP, fb_ticks_to_us(r_time() - start_ticks),
+                   (uint64)fb_snapshot.pixel_format, fb_snapshot.modifier);
+            stage_logs++;
+        }
         return -EOPNOTSUPP;
+    }
     if (x > fb_snapshot.width || w > fb_snapshot.width - x ||
-        y > fb_snapshot.height || h > fb_snapshot.height - y)
+        y > fb_snapshot.height || h > fb_snapshot.height - y) {
+        if (diag && stage_logs < 96) {
+            printf("FB: kms-scanout-read[%u] end ret=%d elapsed_us=%lu reason=rect-outside\n",
+                   seq, -EINVAL, fb_ticks_to_us(r_time() - start_ticks));
+            stage_logs++;
+        }
         return -EINVAL;
+    }
 
     bo = fb_bo_get_owned(fb_snapshot.bo_handle, fb_snapshot.owner_id,
                          fb_snapshot.owner_tgid);
-    if (bo == NULL)
+    if (diag && stage_logs < 96) {
+        printf("FB: kms-scanout-read[%u] bo-lookup bo=%p elapsed_us=%lu\n",
+               seq, bo, fb_ticks_to_us(r_time() - start_ticks));
+        stage_logs++;
+    }
+    if (bo == NULL) {
+        if (diag && stage_logs < 96) {
+            printf("FB: kms-scanout-read[%u] end ret=%d elapsed_us=%lu reason=bo-missing\n",
+                   seq, -ENOENT, fb_ticks_to_us(r_time() - start_ticks));
+            stage_logs++;
+        }
         return -ENOENT;
+    }
     if (bo->pages == NULL || bo->npages == 0 ||
         fb_snapshot.pitch < fb_snapshot.width * sizeof(uint32)) {
+        if (diag && stage_logs < 96) {
+            printf("FB: kms-scanout-read[%u] end ret=%d elapsed_us=%lu reason=bad-bo npages=%u bo_size=%lu\n",
+                   seq, -EINVAL, fb_ticks_to_us(r_time() - start_ticks),
+                   bo->npages, bo->size);
+            stage_logs++;
+        }
         fb_bo_put(bo);
         return -EINVAL;
     }
@@ -1459,6 +1578,12 @@ static int fb_read_current_kms_framebuffer(uint32 x, uint32 y, uint32 w,
     if (base_offset >= bo->size ||
         base_offset + (uint64)(h - 1) * fb_snapshot.pitch +
             (uint64)w * sizeof(uint32) > bo->size) {
+        if (diag && stage_logs < 96) {
+            printf("FB: kms-scanout-read[%u] end ret=%d elapsed_us=%lu reason=range base=%lu bo_size=%lu\n",
+                   seq, -EINVAL, fb_ticks_to_us(r_time() - start_ticks),
+                   base_offset, bo->size);
+            stage_logs++;
+        }
         fb_bo_put(bo);
         return -EINVAL;
     }
@@ -1493,13 +1618,34 @@ static int fb_read_current_kms_framebuffer(uint32 x, uint32 y, uint32 w,
             transfer.stride = fb_snapshot.pitch;
             transfer.layer_stride =
                 (uint64)fb_snapshot.pitch * fb_snapshot.height;
-            (void)virtio_gpu_user_transfer(resource_owner_id,
-                                           resource_owner_tgid,
-                                           &transfer, 1);
+            transfer_attempted = 1;
+            phase_ticks = r_time();
+            if (diag && stage_logs < 96) {
+                printf("FB: kms-scanout-read[%u] transfer-begin resource=%u src=%u,%u %ux%u elapsed_us=%lu\n",
+                       seq, transfer.resource_id, src_x, src_y, w, h,
+                       fb_ticks_to_us(phase_ticks - start_ticks));
+                stage_logs++;
+            }
+            transfer_ret = virtio_gpu_user_transfer(resource_owner_id,
+                                                    resource_owner_tgid,
+                                                    &transfer, 1);
+            if (diag && stage_logs < 96) {
+                printf("FB: kms-scanout-read[%u] transfer-end ret=%d stage_us=%lu elapsed_us=%lu\n",
+                       seq, transfer_ret,
+                       fb_ticks_to_us(r_time() - phase_ticks),
+                       fb_ticks_to_us(r_time() - start_ticks));
+                stage_logs++;
+            }
         }
     }
 
     swap_rb = fb_scanout_format_needs_rb_swap(fb_snapshot.pixel_format);
+    phase_ticks = r_time();
+    if (diag && stage_logs < 96) {
+        printf("FB: kms-scanout-read[%u] copy-begin rows=%u elapsed_us=%lu\n",
+               seq, h, fb_ticks_to_us(phase_ticks - start_ticks));
+        stage_logs++;
+    }
     for (uint32 row = 0; row < h; row++) {
         uint64 src_off = base_offset + (uint64)row * fb_snapshot.pitch;
         uint8 *dst_row = (uint8 *)dst + (uint64)row * dst_pitch;
@@ -1513,6 +1659,13 @@ static int fb_read_current_kms_framebuffer(uint32 x, uint32 y, uint32 w,
             uint8 *src;
 
             if (page_idx >= bo->npages || bo->pages[page_idx] == NULL) {
+                if (diag && stage_logs < 96) {
+                    printf("FB: kms-scanout-read[%u] end ret=%d elapsed_us=%lu reason=page-missing row=%u page=%u npages=%u\n",
+                           seq, -EINVAL,
+                           fb_ticks_to_us(r_time() - start_ticks),
+                           row, page_idx, bo->npages);
+                    stage_logs++;
+                }
                 fb_bo_put(bo);
                 return -EINVAL;
             }
@@ -1526,6 +1679,12 @@ static int fb_read_current_kms_framebuffer(uint32 x, uint32 y, uint32 w,
             remaining -= chunk;
         }
     }
+    if (diag && stage_logs < 96) {
+        printf("FB: kms-scanout-read[%u] copy-end stage_us=%lu elapsed_us=%lu\n",
+               seq, fb_ticks_to_us(r_time() - phase_ticks),
+               fb_ticks_to_us(r_time() - start_ticks));
+        stage_logs++;
+    }
 
     if (screen_width != NULL)
         *screen_width = fb_snapshot.width;
@@ -1535,12 +1694,25 @@ static int fb_read_current_kms_framebuffer(uint32 x, uint32 y, uint32 w,
         *screen_pitch = fb_snapshot.pitch;
     if (fb_cmdline_enabled("virtio_gpu_scanout_read_diag") &&
         read_logs < 12) {
-        printf("FB: scanout-read used current KMS fb=%u bo=%u resource=%u rect=%u,%u %ux%u\n",
+        uint32 sample_nonblack = 0;
+        uint32 sample_center = 0;
+        uint64 sample_hash =
+            fb_scanout_diag_sample_hash(dst, dst_pitch, w, h,
+                                        &sample_nonblack, &sample_center);
+
+        printf("FB: scanout-read used current KMS fb=%u bo=%u resource=%u owner=%lu:%d transfer=%d transfer_ret=%d rect=%u,%u %ux%u sample_hash=0x%lx sample_nonblack=%u sample_center=0x%x\n",
                fb_snapshot.fb_id, fb_snapshot.bo_handle,
-               bo->virtio_resource_id, x, y, w, h);
+               bo->virtio_resource_id, fb_snapshot.owner_id,
+               fb_snapshot.owner_tgid, transfer_attempted, transfer_ret,
+               x, y, w, h, sample_hash, sample_nonblack, sample_center);
         read_logs++;
     }
     fb_bo_put(bo);
+    if (diag && stage_logs < 96) {
+        printf("FB: kms-scanout-read[%u] end ret=0 elapsed_us=%lu\n",
+               seq, fb_ticks_to_us(r_time() - start_ticks));
+        stage_logs++;
+    }
     return 0;
 }
 

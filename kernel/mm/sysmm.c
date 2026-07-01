@@ -23,14 +23,19 @@
 #include "proc/chrome_lifecycle.h"
 
 #define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
-    uint64 __sys_start = r_time();                                          \
-    __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED)
+    int __sys_profile = kstats_profile_enabled();                           \
+    uint64 __sys_start = __sys_profile ? r_time() : 0;                      \
+    do {                                                                    \
+        if (__sys_profile)                                                  \
+            __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED);           \
+    } while (0)
 
 #define SYSCALL_PROFILE_RETURN(ret_expr, tick_ctr)                          \
     do {                                                                    \
         uint64 __sys_ret = (uint64)(ret_expr);                              \
-        __atomic_add_fetch(&(tick_ctr), r_time() - __sys_start,             \
-                           __ATOMIC_RELAXED);                               \
+        if (__sys_profile)                                                  \
+            __atomic_add_fetch(&(tick_ctr), r_time() - __sys_start,         \
+                               __ATOMIC_RELAXED);                           \
         return __sys_ret;                                                   \
     } while (0)
 

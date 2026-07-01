@@ -95,6 +95,16 @@ extern uint64 __physical_total_pages;
 #define USTACK_MAX_BOTTOM (USTACKTOP - (MAXUSTACK << PAGE_SHIFT))
 #define UHEAP_MAX_TOP (UVMBOTTOM + (MAXUHEAP << PAGE_SHIFT))
 
+/*
+ * User vDSO window.  Keep it below the entire possible grow-down stack plus the
+ * mmap guard gap so top-down library mappings and future stack expansion do
+ * not collide.
+ */
+#define UVDSO_MAX_PAGES 4
+#define UVDSO_TOP                                                              \
+    (USTACK_MAX_BOTTOM - (USER_STACK_GUARD_GAP_PAGES << PAGE_SHIFT))
+#define UVDSO (UVDSO_TOP - (UVDSO_MAX_PAGES << PAGE_SHIFT))
+
 // Kernel VM address range.
 // On x86_64 the kernel identity-maps all physical memory starting at PA 0.
 // The kernel VM covers from PGSIZE (skipping the NULL guard page) up to the

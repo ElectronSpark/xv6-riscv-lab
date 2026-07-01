@@ -42,9 +42,9 @@
 //   on context switch timestamps, not on tracking nested read locks.
 //
 // PER-CPU CALLBACK LIST SYNCHRONIZATION:
-//   Both call_rcu() and the kthread access the same CPU's callback list.
-//   To prevent races, both use push_off()/pop_off() during list manipulation.
-//   Since push_off()/pop_off() are re-entrant, this is safe.
+//   Both call_rcu() and the kthread access the same CPU's callback list.  The
+//   list also needs safe inspection from barrier paths, so each CPU callback
+//   list has a real spinlock.  Callback invocation remains outside the lock.
 //
 // IMPLEMENTATION STRATEGY:
 //   - Per-CPU data structures minimize lock contention
@@ -272,6 +272,7 @@ void rcu_cpu_init(int cpu) {
     rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
 
     // Initialize pending callback list
+    spin_init(&rcp->lock, "rcu_cblist");
     __atomic_store_n(&rcp->pending_head, NULL, __ATOMIC_RELEASE);
     __atomic_store_n(&rcp->pending_tail, NULL, __ATOMIC_RELEASE);
 
@@ -355,6 +356,8 @@ int rcu_is_watching(void) {
 static void rcu_cblist_enqueue(rcu_cpu_data_t *rcp, rcu_head_t *head) {
     head->next = NULL;
 
+    spin_lock(&rcp->lock);
+
     rcu_head_t *tail = __atomic_load_n(&rcp->pending_tail, __ATOMIC_ACQUIRE);
     if (tail == NULL) {
         // Empty list
@@ -365,6 +368,8 @@ static void rcu_cblist_enqueue(rcu_cpu_data_t *rcp, rcu_head_t *head) {
         tail->next = head;
         __atomic_store_n(&rcp->pending_tail, head, __ATOMIC_RELEASE);
     }
+
+    spin_unlock(&rcp->lock);
 }
 
 // ============================================================================
@@ -569,9 +574,9 @@ static int rcu_invoke_callbacks(rcu_head_t *list) {
 }
 
 // Process completed RCU callbacks for a specific CPU using timestamp-based
-// readiness IMPORTANT: This must only be called for the CURRENT CPU to maintain
-// per-CPU exclusivity. This function manages its own push_off()/pop_off() calls
-// around list manipulation.
+// readiness IMPORTANT: This must only be called for the CURRENT CPU. The
+// pending list is protected by the per-CPU callback-list lock; callback
+// invocation happens after ready callbacks have been detached.
 static void rcu_process_callbacks_for_cpu(int cpu) {
     rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
 
@@ -580,15 +585,12 @@ static void rcu_process_callbacks_for_cpu(int cpu) {
     // switched after the callback was registered
     uint64 min_other_cpu_ts = rcu_get_min_other_cpu_timestamp(cpu);
 
-    // Disable preemption while taking the list to prevent race with call_rcu()
-    push_off();
-
-    // Take the entire pending list
+    // Take the entire pending list under the per-CPU callback lock.
+    spin_lock(&rcp->lock);
     rcu_head_t *pending =
         __atomic_exchange_n(&rcp->pending_head, NULL, __ATOMIC_ACQ_REL);
     __atomic_store_n(&rcp->pending_tail, NULL, __ATOMIC_RELEASE);
-
-    pop_off();
+    spin_unlock(&rcp->lock);
 
     if (pending == NULL) {
         return;
@@ -635,11 +637,9 @@ static void rcu_process_callbacks_for_cpu(int cpu) {
         __atomic_fetch_add(&rcp->cb_invoked, count, __ATOMIC_RELEASE);
     }
 
-    // Disable preemption while putting callbacks back to prevent race with
-    // call_rcu()
+    // Put callbacks back under the per-CPU callback lock.
     if (notready_head != NULL) {
-        push_off();
-
+        spin_lock(&rcp->lock);
         rcu_head_t *old_head =
             __atomic_load_n(&rcp->pending_head, __ATOMIC_ACQUIRE);
         notready_tail->next = old_head;
@@ -648,8 +648,7 @@ static void rcu_process_callbacks_for_cpu(int cpu) {
             __atomic_store_n(&rcp->pending_tail, notready_tail,
                              __ATOMIC_RELEASE);
         }
-
-        pop_off();
+        spin_unlock(&rcp->lock);
     }
 }
 
@@ -768,8 +767,10 @@ void rcu_barrier(void) {
                 continue;
             }
 
-            // Scan the pending list for old callbacks
-            // Note: This is a read-only scan, safe to do from any CPU
+            // Scan the pending list for old callbacks under the callback-list
+            // lock so detach/requeue on the owner CPU cannot invalidate the
+            // traversal.
+            spin_lock(&rcp->lock);
             rcu_head_t *cb =
                 __atomic_load_n(&rcp->pending_head, __ATOMIC_ACQUIRE);
             while (cb != NULL) {
@@ -780,6 +781,7 @@ void rcu_barrier(void) {
                 }
                 cb = cb->next;
             }
+            spin_unlock(&rcp->lock);
 
             if (!all_done) {
                 break;
@@ -943,17 +945,13 @@ static int rcu_cb_kthread(uint64 cpu_id, uint64 arg2) {
         // switched after the callback was registered
         uint64 min_other_cpu_ts = rcu_get_min_other_cpu_timestamp((int)cpu_id);
 
-        // Process callbacks from the pending list
-        // Disable preemption while manipulating the list to prevent race with
-        // call_rcu() which also runs on this CPU with preemption disabled.
-        push_off();
-
-        // Take the entire pending list atomically
+        // Process callbacks from the pending list under the per-CPU callback
+        // lock.  Callback invocation happens after the list is detached.
+        spin_lock(&rcp->lock);
         rcu_head_t *pending =
             __atomic_exchange_n(&rcp->pending_head, NULL, __ATOMIC_ACQ_REL);
         __atomic_store_n(&rcp->pending_tail, NULL, __ATOMIC_RELEASE);
-
-        pop_off();
+        spin_unlock(&rcp->lock);
 
         // Separate into ready (timestamp < min) and not-ready (timestamp >=
         // min)
@@ -1004,14 +1002,9 @@ static int rcu_cb_kthread(uint64 cpu_id, uint64 arg2) {
         __atomic_store_n(&rcu_kthread[cpu_id].wakeup_pending, 0,
                          __ATOMIC_RELEASE);
 
-        // Put not-ready callbacks back to the pending list
-        // Disable preemption to prevent race with call_rcu() during list
-        // manipulation
+        // Put not-ready callbacks back to the pending list.
         if (notready_head != NULL) {
-            push_off();
-
-            // Prepend not-ready list to pending list
-            // Since we hold push_off(), call_rcu() cannot interleave
+            spin_lock(&rcp->lock);
             rcu_head_t *old_head =
                 __atomic_load_n(&rcp->pending_head, __ATOMIC_ACQUIRE);
             notready_tail->next = old_head;
@@ -1021,8 +1014,7 @@ static int rcu_cb_kthread(uint64 cpu_id, uint64 arg2) {
                 __atomic_store_n(&rcp->pending_tail, notready_tail,
                                  __ATOMIC_RELEASE);
             }
-
-            pop_off();
+            spin_unlock(&rcp->lock);
 
             // There are still pending callbacks - take a nap before next
             // iteration

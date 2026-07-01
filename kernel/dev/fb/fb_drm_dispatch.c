@@ -734,6 +734,7 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
     case DRM_IOCTL_VIRTGPU_GETPARAM: {
         struct drm_virtgpu_getparam_compat req;
         uint64 value = 0;
+        uint32 value32;
         if (either_copyin(&req, 1, arg, sizeof(req)) < 0)
             return -EFAULT;
         switch (req.param) {
@@ -765,7 +766,10 @@ static int gpu_drm_ioctl_handle(struct drm_core_file *drm_file,
         }
         if (req.value == 0)
             return -EFAULT;
-        if (either_copyout(1, req.value, &value, sizeof(value)) < 0)
+        /* Linux virtgpu GETPARAM writes only the low 32 bits. Mesa zeroes the
+         * 64-bit destination before calling this ioctl. */
+        value32 = (uint32)value;
+        if (either_copyout(1, req.value, &value32, sizeof(value32)) < 0)
             return -EFAULT;
         if (chrome_drm_trace_owner(owner))
             printf("chrome-drm-detail: getparam owner=%lu:%d param=%lu "
@@ -1058,7 +1062,7 @@ virtgpu_wait_done:
         kfree(caps);
         if (ret != 0) {
             if (chrome_drm_trace_owner(owner))
-                printf("chrome-drm-detail: get-caps copy fail owner=%lu:%d "
+                printf("chrome-drm-detail: get-caps fail owner=%lu:%d "
                        "req_id=%u req_ver=%u req_size=%u req_addr=0x%lx "
                        "out_id=%u out_ver=%u out_size=%u ret=%d\n",
                        owner->id, owner->tgid, requested_id, requested_ver,
@@ -1089,6 +1093,7 @@ virtgpu_wait_done:
         uint32 submit_flags = 0;
         uint32 first_submit = 0;
         uint32 first_word = 0;
+        struct virtio_gpu_submit_trace_shape trace_shape = {0};
         int order = 0;
         uint64 fence = 0, signaled = 0;
         uint64 total_start = r_time();
@@ -1212,12 +1217,20 @@ virtgpu_wait_done:
         if (gpu_drm_execbuffer_async_allowed())
             submit_flags |= FB_GPU_VIRGL_SUBMIT_ASYNC;
         submit_flags |= FB_GPU_VIRGL_SUBMIT_ALLOW_IMPORTED_RESOURCES;
+        trace_shape.valid = 1;
+        trace_shape.drm_flags = req.flags;
+        trace_shape.nr_dwords = req.size / sizeof(uint32);
+        trace_shape.resource_count = req.num_bo_handles;
+        trace_shape.first_word = first_word;
+        trace_shape.fence_fd =
+            (req.flags & VIRTGPU_EXECBUF_FENCE_FD_IN) != 0 ?
+            req.fence_fd : -1;
         phase_start = r_time();
         ret = virtio_gpu_user_submit(owner->id, owner->tgid,
                                      owner->default_ctx_id, submit_flags, cmds,
                                      req.size / sizeof(uint32), resources,
                                      req.num_bo_handles, &fence, &signaled,
-                                     &first_submit);
+                                     &first_submit, &trace_shape);
         submit_ticks = r_time() - phase_start;
         submit_ret = ret;
         submit_attempted = 1;
