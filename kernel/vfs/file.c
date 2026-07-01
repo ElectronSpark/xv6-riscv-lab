@@ -48,6 +48,7 @@
 #include "dev/net.h"
 #include "vfs/pipe.h"
 #include "proc/tq.h"
+#include "cmdline.h"
 
 static slab_cache_t __vfs_file_slab = {0};
 static spinlock_t __vfs_ftable_lock = {0};
@@ -159,6 +160,91 @@ void __vfs_file_init(void) {
 
 void __vfs_file_shrink_cache(void) {
     slab_cache_shrink(&__vfs_file_slab, 0x7fffffff);
+}
+
+static int vfs_fput_underflow_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[16];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("vfs_fput_underflow_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static uint64 vfs_fput_underflow_trace_limit(void)
+{
+    static uint64 limit;
+    char value[32];
+
+    if (limit == 0) {
+        limit = 64;
+        if (cmdline_get_param("vfs_fput_underflow_trace_limit", value,
+                              sizeof(value)) == 0 && value[0] != '\0')
+            limit = strtoul(value, NULL, 10);
+    }
+    return limit;
+}
+
+static int vfs_fput_underflow_trace_take_slot(void)
+{
+    static uint64 emitted;
+    uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
+
+    return slot < vfs_fput_underflow_trace_limit();
+}
+
+static const char *vfs_file_kind_name(vfs_file_kind_t kind)
+{
+    switch (kind) {
+    case VFS_FILE_KIND_NONE:
+        return "none";
+    case VFS_FILE_KIND_INODE:
+        return "inode";
+    case VFS_FILE_KIND_CDEV:
+        return "cdev";
+    case VFS_FILE_KIND_BDEV:
+        return "bdev";
+    case VFS_FILE_KIND_PIPE:
+        return "pipe";
+    case VFS_FILE_KIND_LEGACY_SOCKET:
+        return "legacy_socket";
+    case VFS_FILE_KIND_CUSTOM:
+        return "custom";
+    default:
+        return "unknown";
+    }
+}
+
+static void vfs_fput_trace_underflow(struct vfs_file *file, int old)
+{
+    if (!vfs_fput_underflow_trace_enabled() ||
+        !vfs_fput_underflow_trace_take_slot())
+        return;
+
+    int pid = current ? current->pid : -1;
+    int tgid = current ? thread_tgid(current) : -1;
+    const char *name = current ? current->name : "?";
+    int visible_fd_refs =
+        __atomic_load_n(&file->visible_fd_refs, __ATOMIC_RELAXED);
+    int last_fd_close_notified =
+        __atomic_load_n(&file->last_fd_close_notified, __ATOMIC_RELAXED);
+    unsigned long caller = (unsigned long)__builtin_return_address(0);
+
+    printf("vfs-fput-underflow: old_ref=%d file=%p kind=%d(%s) "
+           "flags=0x%x ops=%p private=%p inode=%p visible_fd_refs=%d "
+           "last_fd_close_notified=%d opened_path=%p pid=%d tgid=%d "
+           "name='%s' caller=%p\n",
+           old, file, file->f_kind, vfs_file_kind_name(file->f_kind),
+           file->f_flags, file->ops, file->private_data,
+           vfs_inode_deref(&file->inode), visible_fd_refs,
+           last_fd_close_notified, file->opened_path, pid, tgid, name,
+           (void *)caller);
 }
 
 // Open a character device file
@@ -359,6 +445,7 @@ void vfs_fput(struct vfs_file *file) {
         if (old <= 0) {
             printf("vfs_fput: ref_count=%d on file %p (double free?)\n",
                    old, file);
+            vfs_fput_trace_underflow(file, old);
             return;
         }
         if (__atomic_compare_exchange_n(&file->ref_count, &old, old - 1,
