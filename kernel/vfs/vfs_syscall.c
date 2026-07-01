@@ -3558,6 +3558,8 @@ uint64 sys_vfs_ioctl(void) {
     int fd;
     uint64 cmd, arg;
 
+    SYSCALL_PROFILE_BEGIN(g_sys_ioctl_calls);
+
     argint(0, &fd);
     argaddr(1, &cmd);
     argaddr(2, &arg);
@@ -3570,9 +3572,11 @@ uint64 sys_vfs_ioctl(void) {
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL)
-        return -EBADF;
+        SYSCALL_PROFILE_RETURN(-EBADF, g_sys_ioctl_ticks);
 
     int ret;
+    uint64 *bucket_calls = NULL;
+    uint64 *bucket_ticks = NULL;
 
     /*
      * For known TTY ioctls, copy the data in/out of user space here,
@@ -3584,6 +3588,8 @@ uint64 sys_vfs_ioctl(void) {
     case TCGETS: {
         struct termios kt;
         struct linux_ioctl_termios lt;
+        bucket_calls = &g_sys_ioctl_tty_tcgets_calls;
+        bucket_ticks = &g_sys_ioctl_tty_tcgets_ticks;
         ret = vfs_ioctl(f, cmd, &kt);
         if (ret == 0) {
             termios_to_linux_ioctl(&kt, &lt);
@@ -3597,6 +3603,8 @@ uint64 sys_vfs_ioctl(void) {
     case TCSETSF: {
         struct termios kt;
         struct linux_ioctl_termios lt;
+        bucket_calls = &g_sys_ioctl_tty_tcsets_calls;
+        bucket_ticks = &g_sys_ioctl_tty_tcsets_ticks;
         ret = vfs_ioctl(f, TCGETS, &kt);
         if (ret != 0) {
             break;
@@ -3611,6 +3619,8 @@ uint64 sys_vfs_ioctl(void) {
     }
     case TIOCGWINSZ: {
         struct winsize kws;
+        bucket_calls = &g_sys_ioctl_tty_winsz_calls;
+        bucket_ticks = &g_sys_ioctl_tty_winsz_ticks;
         ret = vfs_ioctl(f, cmd, &kws);
         if (ret == 0) {
             if (either_copyout(1, arg, &kws, sizeof(kws)) < 0)
@@ -3620,6 +3630,8 @@ uint64 sys_vfs_ioctl(void) {
     }
     case TIOCSWINSZ: {
         struct winsize kws;
+        bucket_calls = &g_sys_ioctl_tty_winsz_calls;
+        bucket_ticks = &g_sys_ioctl_tty_winsz_ticks;
         if (either_copyin(&kws, 1, arg, sizeof(kws)) < 0) {
             ret = -EFAULT;
         } else {
@@ -3629,6 +3641,8 @@ uint64 sys_vfs_ioctl(void) {
     }
     case TIOCGPGRP: {
         pid_t kpgid;
+        bucket_calls = &g_sys_ioctl_tty_pgrp_calls;
+        bucket_ticks = &g_sys_ioctl_tty_pgrp_ticks;
         ret = vfs_ioctl(f, cmd, &kpgid);
         if (ret == 0) {
             if (either_copyout(1, arg, &kpgid, sizeof(kpgid)) < 0)
@@ -3638,6 +3652,8 @@ uint64 sys_vfs_ioctl(void) {
     }
     case TIOCSPGRP: {
         pid_t kpgid;
+        bucket_calls = &g_sys_ioctl_tty_pgrp_calls;
+        bucket_ticks = &g_sys_ioctl_tty_pgrp_ticks;
         if (either_copyin(&kpgid, 1, arg, sizeof(kpgid)) < 0) {
             ret = -EFAULT;
         } else {
@@ -3647,6 +3663,8 @@ uint64 sys_vfs_ioctl(void) {
     }
     case TIOCGPTN: {
         int kptn;
+        bucket_calls = &g_sys_ioctl_tty_ptmx_calls;
+        bucket_ticks = &g_sys_ioctl_tty_ptmx_ticks;
         ret = vfs_ioctl(f, cmd, &kptn);
         if (ret == 0) {
             if (either_copyout(1, arg, &kptn, sizeof(kptn)) < 0)
@@ -3656,9 +3674,16 @@ uint64 sys_vfs_ioctl(void) {
     }
     case TIOCSCTTY: {
         /* arg is an integer flag (usually 0), pass through */
+        bucket_calls = &g_sys_ioctl_tty_ctty_calls;
+        bucket_ticks = &g_sys_ioctl_tty_ctty_ticks;
         ret = vfs_ioctl(f, cmd, (void *)arg);
         break;
     }
+    case TIOCGPTPEER:
+        bucket_calls = &g_sys_ioctl_tty_ptmx_calls;
+        bucket_ticks = &g_sys_ioctl_tty_ptmx_ticks;
+        ret = vfs_ioctl(f, cmd, (void *)arg);
+        break;
     default:
         /* Unknown ioctl — pass arg through as opaque pointer */
         ret = vfs_ioctl(f, cmd, (void *)arg);
@@ -3666,7 +3691,12 @@ uint64 sys_vfs_ioctl(void) {
     }
 
     vfs_fput(f);
-    return ret;
+    if (__sys_profile && bucket_calls != NULL && bucket_ticks != NULL) {
+        __atomic_add_fetch(bucket_calls, 1, __ATOMIC_RELAXED);
+        __atomic_add_fetch(bucket_ticks, r_time() - __sys_start,
+                           __ATOMIC_RELAXED);
+    }
+    SYSCALL_PROFILE_RETURN(ret, g_sys_ioctl_ticks);
 }
 
 /**
@@ -4083,6 +4113,8 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
  */
 
 static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
+    int block_profile = 0;
+    uint64 block_start = 0;
 
     if (nfds < 0 || nfds > NOFILE) {
         return -EINVAL;
@@ -4116,6 +4148,12 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     webkit_poll_summary("initial", nfds, timeout_ms, ready, pfds);
     if (timeout_ms == 0 || ready > 0)
         goto copyout;
+    if (kstats_profile_enabled()) {
+        block_profile = 1;
+        block_start = r_time();
+        __atomic_add_fetch(&g_sys_poll_blocking_calls, 1,
+                           __ATOMIC_RELAXED);
+    }
 
     /* --- Blocking path: use kqueue for event-driven wait --- */
 
@@ -4243,11 +4281,19 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     kvfree(events);
 
     if (ready == -EINTR) {
+        if (block_profile) {
+            __atomic_add_fetch(&g_sys_poll_blocking_ticks,
+                               r_time() - block_start, __ATOMIC_RELAXED);
+        }
         kvfree(pfds);
         return -EINTR;
     }
 
 copyout:
+    if (block_profile) {
+        __atomic_add_fetch(&g_sys_poll_blocking_ticks,
+                           r_time() - block_start, __ATOMIC_RELAXED);
+    }
     webkit_poll_summary("copyout", nfds, timeout_ms, ready, pfds);
     if (either_copyout(1, fds_addr, pfds, bytes) < 0) {
         kvfree(pfds);
@@ -4267,11 +4313,14 @@ uint64 sys_vfs_poll(void) {
     uint64 fds_addr;
     int nfds, timeout_ms;
 
+    SYSCALL_PROFILE_BEGIN(g_sys_poll_calls);
+
     argaddr(0, &fds_addr);
     argint(1, &nfds);
     argint(2, &timeout_ms);
 
-    return __vfs_poll_impl(fds_addr, nfds, timeout_ms);
+    uint64 ret = __vfs_poll_impl(fds_addr, nfds, timeout_ms);
+    SYSCALL_PROFILE_RETURN(ret, g_sys_poll_ticks);
 }
 
 /*
@@ -4290,6 +4339,8 @@ uint64 sys_vfs_ppoll(void) {
     uint64 tmo_p, sigmask_addr;
     int sigsetsize;
 
+    SYSCALL_PROFILE_BEGIN(g_sys_ppoll_calls);
+
     argaddr(0, &fds_addr);
     argint(1, &nfds);
     argaddr(2, &tmo_p);
@@ -4303,20 +4354,20 @@ uint64 sys_vfs_ppoll(void) {
     } else {
         struct { int64 tv_sec; int64 tv_nsec; } ts;
         if (either_copyin(&ts, 1, tmo_p, sizeof(ts)) < 0)
-            return (uint64)-EFAULT;
+            SYSCALL_PROFILE_RETURN((uint64)-EFAULT, g_sys_ppoll_ticks);
         int ret = timespec_to_timeout_ms_ceil(ts.tv_sec, ts.tv_nsec,
                                               &timeout_ms);
         if (ret < 0)
-            return (uint64)ret;
+            SYSCALL_PROFILE_RETURN((uint64)ret, g_sys_ppoll_ticks);
     }
 
     sigset_t newmask, oldmask;
     int use_mask = 0;
     if (sigmask_addr != 0) {
         if (sigsetsize != (int)sizeof(sigset_t))
-            return (uint64)-EINVAL;
+            SYSCALL_PROFILE_RETURN((uint64)-EINVAL, g_sys_ppoll_ticks);
         if (either_copyin(&newmask, 1, sigmask_addr, sizeof(newmask)) < 0)
-            return (uint64)-EFAULT;
+            SYSCALL_PROFILE_RETURN((uint64)-EFAULT, g_sys_ppoll_ticks);
         sigmask_swap(&newmask, &oldmask);
         use_mask = 1;
     }
@@ -4324,7 +4375,7 @@ uint64 sys_vfs_ppoll(void) {
     uint64 ret = __vfs_poll_impl(fds_addr, nfds, timeout_ms);
     if (use_mask)
         sigmask_swap(&oldmask, NULL);
-    return ret;
+    SYSCALL_PROFILE_RETURN(ret, g_sys_ppoll_ticks);
 }
 
 /*

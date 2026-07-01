@@ -200,9 +200,37 @@ struct kstats {
     uint64 vfs_inode_cache_read_revive_success;
     uint64 vfs_inode_cache_read_revive_lock_fail;
     uint64 vfs_inode_cache_read_revive_stale;
+
+    /* ── Version 3 append-only GUI wait/terminal counters ─────────── */
+    uint64 sys_poll_calls;
+    uint64 sys_poll_ticks;
+    uint64 sys_ppoll_calls;
+    uint64 sys_ppoll_ticks;
+    uint64 sys_poll_blocking_calls;
+    uint64 sys_poll_blocking_ticks;
+    uint64 sys_ioctl_calls;
+    uint64 sys_ioctl_ticks;
+    uint64 sys_ioctl_tty_tcgets_calls;
+    uint64 sys_ioctl_tty_tcgets_ticks;
+    uint64 sys_ioctl_tty_tcsets_calls;
+    uint64 sys_ioctl_tty_tcsets_ticks;
+    uint64 sys_ioctl_tty_winsz_calls;
+    uint64 sys_ioctl_tty_winsz_ticks;
+    uint64 sys_ioctl_tty_pgrp_calls;
+    uint64 sys_ioctl_tty_pgrp_ticks;
+    uint64 sys_ioctl_tty_ptmx_calls;
+    uint64 sys_ioctl_tty_ptmx_ticks;
+    uint64 sys_ioctl_tty_ctty_calls;
+    uint64 sys_ioctl_tty_ctty_ticks;
+    uint64 sys_futex_calls;
+    uint64 sys_futex_ticks;
+    uint64 sys_futex_wait_calls;
+    uint64 sys_futex_wait_ticks;
+    uint64 sys_futex_wake_calls;
+    uint64 sys_futex_wake_ticks;
 };
 
-#define KSTATS_ABI_VERSION 2
+#define KSTATS_ABI_VERSION 3
 #define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
 /* ------------------------------------------------------------------ */
@@ -353,6 +381,32 @@ extern uint64 g_sys_openat_fileopen_calls;
 extern uint64 g_sys_openat_fileopen_ticks;
 extern uint64 g_sys_openat_fdalloc_calls;
 extern uint64 g_sys_openat_fdalloc_ticks;
+extern uint64 g_sys_poll_calls;
+extern uint64 g_sys_poll_ticks;
+extern uint64 g_sys_ppoll_calls;
+extern uint64 g_sys_ppoll_ticks;
+extern uint64 g_sys_poll_blocking_calls;
+extern uint64 g_sys_poll_blocking_ticks;
+extern uint64 g_sys_ioctl_calls;
+extern uint64 g_sys_ioctl_ticks;
+extern uint64 g_sys_ioctl_tty_tcgets_calls;
+extern uint64 g_sys_ioctl_tty_tcgets_ticks;
+extern uint64 g_sys_ioctl_tty_tcsets_calls;
+extern uint64 g_sys_ioctl_tty_tcsets_ticks;
+extern uint64 g_sys_ioctl_tty_winsz_calls;
+extern uint64 g_sys_ioctl_tty_winsz_ticks;
+extern uint64 g_sys_ioctl_tty_pgrp_calls;
+extern uint64 g_sys_ioctl_tty_pgrp_ticks;
+extern uint64 g_sys_ioctl_tty_ptmx_calls;
+extern uint64 g_sys_ioctl_tty_ptmx_ticks;
+extern uint64 g_sys_ioctl_tty_ctty_calls;
+extern uint64 g_sys_ioctl_tty_ctty_ticks;
+extern uint64 g_sys_futex_calls;
+extern uint64 g_sys_futex_ticks;
+extern uint64 g_sys_futex_wait_calls;
+extern uint64 g_sys_futex_wait_ticks;
+extern uint64 g_sys_futex_wake_calls;
+extern uint64 g_sys_futex_wake_ticks;
 extern int g_kstats_profile_enabled;
 
 static inline int kstats_profile_enabled(void) {

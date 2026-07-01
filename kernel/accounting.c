@@ -152,6 +152,32 @@ uint64 g_sys_openat_fileopen_calls;
 uint64 g_sys_openat_fileopen_ticks;
 uint64 g_sys_openat_fdalloc_calls;
 uint64 g_sys_openat_fdalloc_ticks;
+uint64 g_sys_poll_calls;
+uint64 g_sys_poll_ticks;
+uint64 g_sys_ppoll_calls;
+uint64 g_sys_ppoll_ticks;
+uint64 g_sys_poll_blocking_calls;
+uint64 g_sys_poll_blocking_ticks;
+uint64 g_sys_ioctl_calls;
+uint64 g_sys_ioctl_ticks;
+uint64 g_sys_ioctl_tty_tcgets_calls;
+uint64 g_sys_ioctl_tty_tcgets_ticks;
+uint64 g_sys_ioctl_tty_tcsets_calls;
+uint64 g_sys_ioctl_tty_tcsets_ticks;
+uint64 g_sys_ioctl_tty_winsz_calls;
+uint64 g_sys_ioctl_tty_winsz_ticks;
+uint64 g_sys_ioctl_tty_pgrp_calls;
+uint64 g_sys_ioctl_tty_pgrp_ticks;
+uint64 g_sys_ioctl_tty_ptmx_calls;
+uint64 g_sys_ioctl_tty_ptmx_ticks;
+uint64 g_sys_ioctl_tty_ctty_calls;
+uint64 g_sys_ioctl_tty_ctty_ticks;
+uint64 g_sys_futex_calls;
+uint64 g_sys_futex_ticks;
+uint64 g_sys_futex_wait_calls;
+uint64 g_sys_futex_wait_ticks;
+uint64 g_sys_futex_wake_calls;
+uint64 g_sys_futex_wake_ticks;
 int g_kstats_profile_enabled;
 
 int snprintf(char *buf, size_t size, const char *fmt, ...)
@@ -817,6 +843,58 @@ void kstats_collect(struct kstats *ks) {
         g_sys_openat_fdalloc_calls;
     ks->sys_openat_fdalloc_ticks =
         g_sys_openat_fdalloc_ticks;
+    ks->sys_poll_calls =
+        g_sys_poll_calls;
+    ks->sys_poll_ticks =
+        g_sys_poll_ticks;
+    ks->sys_ppoll_calls =
+        g_sys_ppoll_calls;
+    ks->sys_ppoll_ticks =
+        g_sys_ppoll_ticks;
+    ks->sys_poll_blocking_calls =
+        g_sys_poll_blocking_calls;
+    ks->sys_poll_blocking_ticks =
+        g_sys_poll_blocking_ticks;
+    ks->sys_ioctl_calls =
+        g_sys_ioctl_calls;
+    ks->sys_ioctl_ticks =
+        g_sys_ioctl_ticks;
+    ks->sys_ioctl_tty_tcgets_calls =
+        g_sys_ioctl_tty_tcgets_calls;
+    ks->sys_ioctl_tty_tcgets_ticks =
+        g_sys_ioctl_tty_tcgets_ticks;
+    ks->sys_ioctl_tty_tcsets_calls =
+        g_sys_ioctl_tty_tcsets_calls;
+    ks->sys_ioctl_tty_tcsets_ticks =
+        g_sys_ioctl_tty_tcsets_ticks;
+    ks->sys_ioctl_tty_winsz_calls =
+        g_sys_ioctl_tty_winsz_calls;
+    ks->sys_ioctl_tty_winsz_ticks =
+        g_sys_ioctl_tty_winsz_ticks;
+    ks->sys_ioctl_tty_pgrp_calls =
+        g_sys_ioctl_tty_pgrp_calls;
+    ks->sys_ioctl_tty_pgrp_ticks =
+        g_sys_ioctl_tty_pgrp_ticks;
+    ks->sys_ioctl_tty_ptmx_calls =
+        g_sys_ioctl_tty_ptmx_calls;
+    ks->sys_ioctl_tty_ptmx_ticks =
+        g_sys_ioctl_tty_ptmx_ticks;
+    ks->sys_ioctl_tty_ctty_calls =
+        g_sys_ioctl_tty_ctty_calls;
+    ks->sys_ioctl_tty_ctty_ticks =
+        g_sys_ioctl_tty_ctty_ticks;
+    ks->sys_futex_calls =
+        g_sys_futex_calls;
+    ks->sys_futex_ticks =
+        g_sys_futex_ticks;
+    ks->sys_futex_wait_calls =
+        g_sys_futex_wait_calls;
+    ks->sys_futex_wait_ticks =
+        g_sys_futex_wait_ticks;
+    ks->sys_futex_wake_calls =
+        g_sys_futex_wake_calls;
+    ks->sys_futex_wake_ticks =
+        g_sys_futex_wake_ticks;
 }
 
 void kstats_profile_set(int enabled) {

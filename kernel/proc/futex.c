@@ -27,6 +27,7 @@
 #include "timer/goldfish_rtc.h"
 #include "timer/timer.h"
 #include "cmdline.h"
+#include "kstats.h"
 
 // Futex operations (match Linux values)
 #define FUTEX_WAIT          0
@@ -976,6 +977,29 @@ uint64 sys_futex(void) {
     uint64 uaddr2;          /* a4 */
     uint32 val3;             /* a5 */
 
+    int __futex_profile = kstats_profile_enabled();
+    uint64 __futex_start = __futex_profile ? r_time() : 0;
+    if (__futex_profile)
+        __atomic_add_fetch(&g_sys_futex_calls, 1, __ATOMIC_RELAXED);
+
+#define FUTEX_PROFILE_RETURN(ret_expr, bucket_calls, bucket_ticks)          \
+    do {                                                                    \
+        uint64 __futex_ret = (uint64)(ret_expr);                            \
+        uint64 *__bucket_calls = (uint64 *)(bucket_calls);                  \
+        uint64 *__bucket_ticks = (uint64 *)(bucket_ticks);                  \
+        if (__futex_profile) {                                              \
+            uint64 __futex_elapsed = r_time() - __futex_start;              \
+            __atomic_add_fetch(&g_sys_futex_ticks, __futex_elapsed,         \
+                               __ATOMIC_RELAXED);                           \
+            if (__bucket_calls != NULL && __bucket_ticks != NULL) {         \
+                __atomic_add_fetch(__bucket_calls, 1, __ATOMIC_RELAXED);    \
+                __atomic_add_fetch(__bucket_ticks, __futex_elapsed,         \
+                                   __ATOMIC_RELAXED);                       \
+            }                                                               \
+        }                                                                   \
+        return __futex_ret;                                                 \
+    } while (0)
+
     argaddr(0, &uaddr);
     argint(1, &futex_op);
     argint(2, (int *)&val);
@@ -985,14 +1009,24 @@ uint64 sys_futex(void) {
 
     // Alignment check: futex word must be 4-byte aligned
     if (uaddr & 3)
-        return (uint64)-EINVAL;
+        FUTEX_PROFILE_RETURN((uint64)-EINVAL, NULL, NULL);
 
     int cmd = futex_op & FUTEX_CMD_MASK;
     bool realtime = (futex_op & FUTEX_CLOCK_REALTIME) != 0;
     bool private = (futex_op & FUTEX_PRIVATE_FLAG) != 0;
+    uint64 *bucket_calls = NULL;
+    uint64 *bucket_ticks = NULL;
+
+    if (cmd == FUTEX_WAIT || cmd == FUTEX_WAIT_BITSET) {
+        bucket_calls = &g_sys_futex_wait_calls;
+        bucket_ticks = &g_sys_futex_wait_ticks;
+    } else if (cmd == FUTEX_WAKE || cmd == FUTEX_WAKE_BITSET) {
+        bucket_calls = &g_sys_futex_wake_calls;
+        bucket_ticks = &g_sys_futex_wake_ticks;
+    }
 
     if (realtime && cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET)
-        return (uint64)-ENOSYS;
+        FUTEX_PROFILE_RETURN((uint64)-ENOSYS, NULL, NULL);
 
     switch (cmd) {
     case FUTEX_WAIT: {
@@ -1001,14 +1035,19 @@ uint64 sys_futex(void) {
         int ret = futex_parse_timeout(timeout_or_val2, false, realtime,
                                       &has_timeout, &timeout_ms);
         if (ret < 0)
-            return (uint64)ret;
-        return (uint64)futex_wait(uaddr, val, FUTEX_BITSET_MATCH_ANY, private,
-                                  has_timeout, timeout_ms);
+            FUTEX_PROFILE_RETURN((uint64)ret, bucket_calls, bucket_ticks);
+        FUTEX_PROFILE_RETURN((uint64)futex_wait(uaddr, val,
+                                                FUTEX_BITSET_MATCH_ANY,
+                                                private, has_timeout,
+                                                timeout_ms),
+                             bucket_calls, bucket_ticks);
     }
 
     case FUTEX_WAKE:
-        return (uint64)futex_wake(uaddr, val, FUTEX_BITSET_MATCH_ANY,
-                                  private);
+        FUTEX_PROFILE_RETURN((uint64)futex_wake(uaddr, val,
+                                                FUTEX_BITSET_MATCH_ANY,
+                                                private),
+                             bucket_calls, bucket_ticks);
 
     case FUTEX_WAIT_BITSET: {
         bool has_timeout;
@@ -1016,40 +1055,49 @@ uint64 sys_futex(void) {
         int ret = futex_parse_timeout(timeout_or_val2, true, realtime,
                                       &has_timeout, &timeout_ms);
         if (ret < 0)
-            return (uint64)ret;
-        return (uint64)futex_wait(uaddr, val, val3, private,
-                                  has_timeout, timeout_ms);
+            FUTEX_PROFILE_RETURN((uint64)ret, bucket_calls, bucket_ticks);
+        FUTEX_PROFILE_RETURN((uint64)futex_wait(uaddr, val, val3, private,
+                                                has_timeout, timeout_ms),
+                             bucket_calls, bucket_ticks);
     }
 
     case FUTEX_WAKE_BITSET:
-        return (uint64)futex_wake(uaddr, val, val3, private);
+        FUTEX_PROFILE_RETURN((uint64)futex_wake(uaddr, val, val3, private),
+                             bucket_calls, bucket_ticks);
 
     case FUTEX_REQUEUE:
         if (uaddr2 & 3)
-            return (uint64)-EINVAL;
+            FUTEX_PROFILE_RETURN((uint64)-EINVAL, NULL, NULL);
         /* val=nr_wake, timeout_or_val2=nr_requeue, uaddr2=target addr */
-        return (uint64)futex_requeue(uaddr, (int)val, uaddr2,
-                                     (int)timeout_or_val2, 0, 0, private);
+        FUTEX_PROFILE_RETURN((uint64)futex_requeue(uaddr, (int)val, uaddr2,
+                                                   (int)timeout_or_val2, 0,
+                                                   0, private),
+                             NULL, NULL);
 
     case FUTEX_CMP_REQUEUE:
         if (uaddr2 & 3)
-            return (uint64)-EINVAL;
+            FUTEX_PROFILE_RETURN((uint64)-EINVAL, NULL, NULL);
         /* val=nr_wake, timeout_or_val2=nr_requeue, uaddr2=target, val3=cmpval */
-        return (uint64)futex_requeue(uaddr, (int)val, uaddr2,
-                                     (int)timeout_or_val2, val3, 1, private);
+        FUTEX_PROFILE_RETURN((uint64)futex_requeue(uaddr, (int)val, uaddr2,
+                                                   (int)timeout_or_val2,
+                                                   val3, 1, private),
+                             NULL, NULL);
 
     case FUTEX_WAKE_OP:
         if (uaddr2 & 3)
-            return (uint64)-EINVAL;
+            FUTEX_PROFILE_RETURN((uint64)-EINVAL, NULL, NULL);
         /* val=nr_wake on uaddr, timeout_or_val2=nr_wake on uaddr2,
          * uaddr2=second futex, val3=encoded FUTEX_OP operation. */
-        return (uint64)futex_wake_op(uaddr, (int)val,
-                                     (int)timeout_or_val2, uaddr2, val3,
-                                     private);
+        FUTEX_PROFILE_RETURN((uint64)futex_wake_op(uaddr, (int)val,
+                                                   (int)timeout_or_val2,
+                                                   uaddr2, val3, private),
+                             NULL, NULL);
 
     default:
-        return (uint64)-ENOSYS;
+        FUTEX_PROFILE_RETURN((uint64)-ENOSYS, NULL, NULL);
     }
+
+#undef FUTEX_PROFILE_RETURN
 }
 
 uint64 sys_futex_wake(void)
