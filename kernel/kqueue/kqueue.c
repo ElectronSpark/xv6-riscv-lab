@@ -154,10 +154,40 @@ static int kqueue_kde_spin_trace_enabled(void)
     return enabled;
 }
 
+static int kqueue_kde_spin_trace_konsole_only_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_kqueue_spin_trace_konsole_only", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int kqueue_kde_spin_trace_konsole_current(void)
+{
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "konsole", 7) == 0)
+        return 1;
+    if (current->thread_group != NULL &&
+        strstr(current->thread_group->exec_path, "/konsole") != NULL)
+        return 1;
+    return 0;
+}
+
 static int kqueue_kde_spin_trace_current(void)
 {
+    if (kqueue_kde_spin_trace_konsole_only_enabled())
+        return kqueue_kde_spin_trace_konsole_current();
     return current != NULL &&
-        (strncmp(current->name, "QDBusConnection", 15) == 0 ||
+        (kqueue_kde_spin_trace_konsole_current() ||
+         strncmp(current->name, "QDBusConnection", 15) == 0 ||
          strncmp(current->name, "kwin_wayland", 12) == 0);
 }
 
@@ -1131,9 +1161,20 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                 .tn = &__tn,
                 .timeout_ms = timeout_ms,
             };
+            uint64 wait_start_ms = trace_spin ? sched_timer_now_ms() : 0;
             tq_wait_in_state_cb(&kq->waitq, __kq_timed_sleep_cb,
                                 __kq_timed_wakeup_cb, &__td, NULL,
                                 THREAD_INTERRUPTIBLE);
+            if (trace_spin &&
+                (trace_iter <= 16 || (trace_iter & 0x3ff) == 0)) {
+                uint64 wait_end_ms = sched_timer_now_ms();
+                printf("kde-kqueue-wait: wake pid=%d name=%s iter=%d "
+                       "timeout=%d slept_ms=%lu nready=%d closed=%d "
+                       "elapsed_ms=%lu\n",
+                       current->pid, current->name, trace_iter, timeout_ms,
+                       wait_end_ms - wait_start_ms, kq->nready, kq->closed,
+                       wait_end_ms - trace_start_ms);
+            }
             /* After wakeup, timeout or event or signal — drain the
              * ready list on the next iteration.  If it's still empty
              * (pure timeout), exit the loop. */
@@ -1152,8 +1193,18 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                        sched_timer_now_ms() - trace_start_ms);
             }
             /* timeout_ms == -1: block indefinitely */
+            uint64 wait_start_ms = trace_spin ? sched_timer_now_ms() : 0;
             tq_wait_in_state(&kq->waitq, &kq->lock, NULL,
                              THREAD_INTERRUPTIBLE);
+            if (trace_spin &&
+                (trace_iter <= 16 || (trace_iter & 0x3ff) == 0)) {
+                uint64 wait_end_ms = sched_timer_now_ms();
+                printf("kde-kqueue-wait: wake-inf pid=%d name=%s iter=%d "
+                       "slept_ms=%lu nready=%d closed=%d elapsed_ms=%lu\n",
+                       current->pid, current->name, trace_iter,
+                       wait_end_ms - wait_start_ms, kq->nready, kq->closed,
+                       wait_end_ms - trace_start_ms);
+            }
             if (kq->closed) {
                 total = -EBADF;
                 break;
