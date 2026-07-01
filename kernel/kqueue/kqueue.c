@@ -185,8 +185,6 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
         return;
     if (!konsole_prepty_wake_source_trace_armed())
         return;
-    if (matched == 0 && propagated == 0)
-        return;
     if (!konsole_prepty_wake_source_trace_take_slot())
         return;
 
