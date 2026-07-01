@@ -4028,6 +4028,110 @@ static int poll_fd_set_requires_rescan(struct pollfd_k *pfds, int nfds)
     return 0;
 }
 
+static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
+                                     uint64 wait_ticks,
+                                     int has_unnotified_fds, int ready)
+{
+    int saw_unix = 0;
+    int saw_eventfd = 0;
+    int saw_pipe = 0;
+    int saw_other = 0;
+    int saw_notify = 0;
+    int saw_rescan = has_unnotified_fds != 0;
+
+    if (!kstats_profile_enabled() || wait_ticks == 0)
+        return;
+
+    for (int i = 0; i < nfds; i++) {
+        struct vfs_file *f;
+        char target[64];
+
+        if (pfds[i].fd < 0)
+            continue;
+        f = __vfs_argfd(pfds[i].fd);
+        if (f == NULL) {
+            saw_other = 1;
+            continue;
+        }
+
+        if (poll_fd_requires_rescan(f))
+            saw_rescan = 1;
+        else
+            saw_notify = 1;
+
+        if (f->ops == &unix_socket_file_ops) {
+            saw_unix = 1;
+        } else if (f->f_kind == VFS_FILE_KIND_PIPE) {
+            saw_pipe = 1;
+        } else if (f->ops != NULL && f->ops->readlink != NULL) {
+            ssize_t n = f->ops->readlink(f, target, sizeof(target));
+            if (n >= 0) {
+                size_t len = (n < (ssize_t)sizeof(target) - 1) ?
+                    (size_t)n : sizeof(target) - 1;
+                target[len] = '\0';
+                if (strstr(target, "eventfd") != NULL)
+                    saw_eventfd = 1;
+                else
+                    saw_other = 1;
+            } else {
+                saw_other = 1;
+            }
+        } else {
+            saw_other = 1;
+        }
+
+        vfs_fput(f);
+    }
+
+    if (saw_unix) {
+        __atomic_add_fetch(&g_sys_poll_wait_unix_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_sys_poll_wait_unix_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (saw_eventfd) {
+        __atomic_add_fetch(&g_sys_poll_wait_eventfd_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_sys_poll_wait_eventfd_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (saw_pipe) {
+        __atomic_add_fetch(&g_sys_poll_wait_pipe_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_sys_poll_wait_pipe_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (saw_other) {
+        __atomic_add_fetch(&g_sys_poll_wait_other_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_sys_poll_wait_other_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (saw_notify) {
+        __atomic_add_fetch(&g_sys_poll_wait_notify_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_sys_poll_wait_notify_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (saw_rescan) {
+        __atomic_add_fetch(&g_sys_poll_wait_rescan_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_sys_poll_wait_rescan_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (ready > 0) {
+        __atomic_add_fetch(&g_sys_poll_wait_ready_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_sys_poll_wait_ready_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    } else {
+        __atomic_add_fetch(&g_sys_poll_wait_timeout_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_sys_poll_wait_timeout_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+}
+
 static uint chrome_unix_scm_count_locked(struct unix_sock *sk)
 {
     if (sk->scm_tail >= sk->scm_head)
@@ -4623,7 +4727,9 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
         }
 
         int trace_ready = kde_ready_trace_current();
+        int profile_ready = kstats_profile_enabled();
         uint64 wait_start_ms = trace_ready ? sched_timer_now_ms() : 0;
+        uint64 wait_start_ticks = profile_ready ? r_time() : 0;
         webkit_poll_summary("sleep", nfds, kq_tmo, ready, pfds);
         int nevents = kqueue_wait(kq, events, nfds, kq_tmo);
 
@@ -4639,6 +4745,9 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
         /* Always re-scan: catches chardev events and ensures
          * revents is correctly populated for copyout. */
         ready = __vfs_poll_scan(pfds, nfds);
+        if (profile_ready)
+            kstats_poll_wait_account(pfds, nfds, r_time() - wait_start_ticks,
+                                     has_unnotified_fds, ready);
         webkit_poll_summary("wait", nfds, timeout_ms, ready, pfds);
         if (trace_ready) {
             uint64 wait_ms = sched_timer_now_ms() - wait_start_ms;

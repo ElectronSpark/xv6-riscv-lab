@@ -228,9 +228,27 @@ struct kstats {
     uint64 sys_futex_wait_ticks;
     uint64 sys_futex_wake_calls;
     uint64 sys_futex_wake_ticks;
+
+    /* Version 4 append-only poll wait attribution counters. */
+    uint64 sys_poll_wait_unix_calls;
+    uint64 sys_poll_wait_unix_ticks;
+    uint64 sys_poll_wait_eventfd_calls;
+    uint64 sys_poll_wait_eventfd_ticks;
+    uint64 sys_poll_wait_pipe_calls;
+    uint64 sys_poll_wait_pipe_ticks;
+    uint64 sys_poll_wait_other_calls;
+    uint64 sys_poll_wait_other_ticks;
+    uint64 sys_poll_wait_notify_calls;
+    uint64 sys_poll_wait_notify_ticks;
+    uint64 sys_poll_wait_rescan_calls;
+    uint64 sys_poll_wait_rescan_ticks;
+    uint64 sys_poll_wait_ready_calls;
+    uint64 sys_poll_wait_ready_ticks;
+    uint64 sys_poll_wait_timeout_calls;
+    uint64 sys_poll_wait_timeout_ticks;
 };
 
-#define KSTATS_ABI_VERSION 3
+#define KSTATS_ABI_VERSION 4
 #define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
 /* ------------------------------------------------------------------ */
@@ -407,6 +425,22 @@ extern uint64 g_sys_futex_wait_calls;
 extern uint64 g_sys_futex_wait_ticks;
 extern uint64 g_sys_futex_wake_calls;
 extern uint64 g_sys_futex_wake_ticks;
+extern uint64 g_sys_poll_wait_unix_calls;
+extern uint64 g_sys_poll_wait_unix_ticks;
+extern uint64 g_sys_poll_wait_eventfd_calls;
+extern uint64 g_sys_poll_wait_eventfd_ticks;
+extern uint64 g_sys_poll_wait_pipe_calls;
+extern uint64 g_sys_poll_wait_pipe_ticks;
+extern uint64 g_sys_poll_wait_other_calls;
+extern uint64 g_sys_poll_wait_other_ticks;
+extern uint64 g_sys_poll_wait_notify_calls;
+extern uint64 g_sys_poll_wait_notify_ticks;
+extern uint64 g_sys_poll_wait_rescan_calls;
+extern uint64 g_sys_poll_wait_rescan_ticks;
+extern uint64 g_sys_poll_wait_ready_calls;
+extern uint64 g_sys_poll_wait_ready_ticks;
+extern uint64 g_sys_poll_wait_timeout_calls;
+extern uint64 g_sys_poll_wait_timeout_ticks;
 extern int g_kstats_profile_enabled;
 
 static inline int kstats_profile_enabled(void) {

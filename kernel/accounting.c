@@ -178,6 +178,22 @@ uint64 g_sys_futex_wait_calls;
 uint64 g_sys_futex_wait_ticks;
 uint64 g_sys_futex_wake_calls;
 uint64 g_sys_futex_wake_ticks;
+uint64 g_sys_poll_wait_unix_calls;
+uint64 g_sys_poll_wait_unix_ticks;
+uint64 g_sys_poll_wait_eventfd_calls;
+uint64 g_sys_poll_wait_eventfd_ticks;
+uint64 g_sys_poll_wait_pipe_calls;
+uint64 g_sys_poll_wait_pipe_ticks;
+uint64 g_sys_poll_wait_other_calls;
+uint64 g_sys_poll_wait_other_ticks;
+uint64 g_sys_poll_wait_notify_calls;
+uint64 g_sys_poll_wait_notify_ticks;
+uint64 g_sys_poll_wait_rescan_calls;
+uint64 g_sys_poll_wait_rescan_ticks;
+uint64 g_sys_poll_wait_ready_calls;
+uint64 g_sys_poll_wait_ready_ticks;
+uint64 g_sys_poll_wait_timeout_calls;
+uint64 g_sys_poll_wait_timeout_ticks;
 int g_kstats_profile_enabled;
 
 int snprintf(char *buf, size_t size, const char *fmt, ...)
@@ -895,6 +911,38 @@ void kstats_collect(struct kstats *ks) {
         g_sys_futex_wake_calls;
     ks->sys_futex_wake_ticks =
         g_sys_futex_wake_ticks;
+    ks->sys_poll_wait_unix_calls =
+        g_sys_poll_wait_unix_calls;
+    ks->sys_poll_wait_unix_ticks =
+        g_sys_poll_wait_unix_ticks;
+    ks->sys_poll_wait_eventfd_calls =
+        g_sys_poll_wait_eventfd_calls;
+    ks->sys_poll_wait_eventfd_ticks =
+        g_sys_poll_wait_eventfd_ticks;
+    ks->sys_poll_wait_pipe_calls =
+        g_sys_poll_wait_pipe_calls;
+    ks->sys_poll_wait_pipe_ticks =
+        g_sys_poll_wait_pipe_ticks;
+    ks->sys_poll_wait_other_calls =
+        g_sys_poll_wait_other_calls;
+    ks->sys_poll_wait_other_ticks =
+        g_sys_poll_wait_other_ticks;
+    ks->sys_poll_wait_notify_calls =
+        g_sys_poll_wait_notify_calls;
+    ks->sys_poll_wait_notify_ticks =
+        g_sys_poll_wait_notify_ticks;
+    ks->sys_poll_wait_rescan_calls =
+        g_sys_poll_wait_rescan_calls;
+    ks->sys_poll_wait_rescan_ticks =
+        g_sys_poll_wait_rescan_ticks;
+    ks->sys_poll_wait_ready_calls =
+        g_sys_poll_wait_ready_calls;
+    ks->sys_poll_wait_ready_ticks =
+        g_sys_poll_wait_ready_ticks;
+    ks->sys_poll_wait_timeout_calls =
+        g_sys_poll_wait_timeout_calls;
+    ks->sys_poll_wait_timeout_ticks =
+        g_sys_poll_wait_timeout_ticks;
 }
 
 void kstats_profile_set(int enabled) {
