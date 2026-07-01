@@ -3753,7 +3753,8 @@ struct k_ucred {
     uint32 gid;
 };
 
-#define CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX 64
+#define CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX 512
+#define CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX 128
 
 static int chrome_unix_ipc_payload_trace_enabled(void)
 {
@@ -3770,6 +3771,63 @@ static int chrome_unix_ipc_payload_trace_enabled(void)
     return enabled;
 }
 
+static void chrome_unix_ipc_payload_sanitize_ascii(char *dst, size_t dst_len,
+                                                   const char *src,
+                                                   size_t src_len)
+{
+    size_t n;
+
+    if (dst_len == 0)
+        return;
+    n = src_len;
+    if (n > dst_len - 1)
+        n = dst_len - 1;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)src[i];
+        dst[i] = (c >= 0x20 && c <= 0x7e && c != '"' && c != '\\') ?
+            (char)c : '.';
+    }
+    dst[n] = '\0';
+}
+
+static void chrome_unix_ipc_payload_extract_token(const char *buf, size_t len,
+                                                  const char *prefix,
+                                                  char *out, size_t out_len)
+{
+    size_t prefix_len;
+    const char *hit;
+    size_t pos;
+
+    if (out_len == 0)
+        return;
+    out[0] = '-';
+    out[1 < out_len ? 1 : 0] = '\0';
+    if (buf == NULL || prefix == NULL)
+        return;
+
+    prefix_len = strlen(prefix);
+    hit = memmem(buf, len, prefix, prefix_len);
+    if (hit == NULL)
+        return;
+    hit += prefix_len;
+
+    pos = 0;
+    while ((size_t)(hit - buf) + pos < len && pos + 1 < out_len) {
+        unsigned char c = (unsigned char)hit[pos];
+
+        if (c == '\0' || c == ' ' || c == '\t' || c == '\r' || c == '\n')
+            break;
+        out[pos] = (c >= 0x20 && c <= 0x7e && c != '"' && c != '\\') ?
+            (char)c : '.';
+        pos++;
+    }
+    out[pos] = '\0';
+    if (pos == 0) {
+        out[0] = '-';
+        out[1] = '\0';
+    }
+}
+
 static void chrome_unix_ipc_trace_payload_bytes(const char *op, int fd,
                                                 ssize_t ret, size_t total,
                                                 int flags, size_t cmsg_count,
@@ -3778,7 +3836,15 @@ static void chrome_unix_ipc_trace_payload_bytes(const char *op, int fd,
 {
     static const char hexchars[] = "0123456789abcdef";
     char hex[CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX * 2 + 1];
+    char ascii[CHROME_UNIX_IPC_PAYLOAD_TRACE_MAX + 1];
+    char type[CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX];
+    char initial_client_fd[32];
+    char utility_sub_type[CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX];
+    char service_sandbox_type[CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX];
+    char shared_files[CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX];
     size_t n;
+    uint32 roles = current != NULL ? chrome_lifecycle_roles(current) : 0;
+    uint64 pid_seq = current != NULL ? current->pid_seq : 0;
 
     if (!chrome_unix_ipc_payload_trace_enabled() ||
         !chrome_socket_trace_process() || buf == NULL)
@@ -3793,15 +3859,34 @@ static void chrome_unix_ipc_trace_payload_bytes(const char *op, int fd,
         hex[i * 2 + 1] = hexchars[byte & 0xf];
     }
     hex[n * 2] = '\0';
+    chrome_unix_ipc_payload_sanitize_ascii(ascii, sizeof(ascii), buf, n);
+    chrome_unix_ipc_payload_extract_token(buf, n, "--type=", type,
+                                          sizeof(type));
+    chrome_unix_ipc_payload_extract_token(buf, n, "--initial-client-fd=",
+                                          initial_client_fd,
+                                          sizeof(initial_client_fd));
+    chrome_unix_ipc_payload_extract_token(buf, n, "--utility-sub-type=",
+                                          utility_sub_type,
+                                          sizeof(utility_sub_type));
+    chrome_unix_ipc_payload_extract_token(buf, n, "--service-sandbox-type=",
+                                          service_sandbox_type,
+                                          sizeof(service_sandbox_type));
+    chrome_unix_ipc_payload_extract_token(buf, n, "--shared-files=",
+                                          shared_files,
+                                          sizeof(shared_files));
 
     printf("chrome-unix-ipc-payload: %s pid=%d tgid=%d name=%s fd=%d "
            "ret=%ld total=%lu flags=0x%x cmsg=%lu has_cred=%d "
-           "sample_len=%lu full_len=%lu hex=%s\n",
+           "sample_len=%lu full_len=%lu pid_seq=%lu roles=0x%x "
+           "type=%s initial_client_fd=%s utility=%s sandbox=%s "
+           "shared_files=%s ascii=\"%s\" hex=%s\n",
            op != NULL ? op : "?", current != NULL ? current->pid : -1,
            current != NULL ? current->tgid : -1,
            current != NULL ? current->name : "?", fd, (long)ret,
            (unsigned long)total, flags, (unsigned long)cmsg_count, has_cred,
-           (unsigned long)n, (unsigned long)len, hex);
+           (unsigned long)n, (unsigned long)len, pid_seq, roles, type,
+           initial_client_fd, utility_sub_type, service_sandbox_type,
+           shared_files, ascii, hex);
 }
 
 static void chrome_unix_ipc_trace_recv_payload_iov(const char *op, int fd,

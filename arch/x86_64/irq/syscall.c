@@ -2662,13 +2662,37 @@ static void chrome_syscall_tail_record(struct thread *p, int orig_num, int num,
 static void chrome_syscall_tail_dump_fd(const char *prefix,
                                         const struct chrome_syscall_tail_entry *e)
 {
-    int fd = (int)e->a0;
+    int fd;
 
     if (current == NULL || current->fdtable == NULL)
         return;
-    if (e->family != CHROME_SYSCALL_TAIL_IOCTL &&
-        e->family != CHROME_SYSCALL_TAIL_FCNTL)
+
+    switch (e->orig_num) {
+    case SYS_read_x86:
+    case SYS_write_x86:
+    case SYS_readv_x86:
+    case SYS_writev_x86:
+    case SYS_sendto_x86:
+    case SYS_recvfrom_x86:
+    case SYS_sendmsg_x86:
+    case SYS_recvmsg_x86:
+    case SYS_accept4_x86:
+    case SYS_fcntl_x86:
+    case SYS_ioctl_x86:
+    case SYS_epoll_ctl:
+    case SYS_epoll_ctl_legacy:
+    case SYS_epoll_ctl_old_x86:
+    case SYS_epoll_wait:
+    case SYS_epoll_wait_old_x86:
+    case SYS_epoll_pwait:
+    case SYS_epoll_pwait_legacy:
+    case SYS_epoll_pwait2:
+        fd = (int)e->a0;
+        break;
+    default:
         return;
+    }
+
     if (fd < 0 || fd >= NOFILE)
         return;
 
@@ -2691,9 +2715,11 @@ static void chrome_syscall_tail_dump_fd(const char *prefix,
     }
     if (path == NULL)
         path = chrome_trace_file_kind_name(f);
-    printf("%s fd=%d fdpath=%s fkind=%s flags=0x%x file=%p ref=%d\n",
-           prefix, fd, path, chrome_trace_file_kind_name(f), f->f_flags,
-           f, f->ref_count);
+    printf("%s pid=%d tgid=%d syscall=%s fd=%d fdpath=%s fkind=%s "
+           "flags=0x%x file=%p ref=%d\n",
+           prefix, e->pid, e->tgid, x86_syscall_trace_name(e->orig_num),
+           fd, path, chrome_trace_file_kind_name(f), f->f_flags, f,
+           f->ref_count);
     vfs_fput(f);
 }
 

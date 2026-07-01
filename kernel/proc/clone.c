@@ -156,6 +156,34 @@ static void chrome_clone_dump_asset_state(struct thread *parent,
     chrome_clone_dump_asset_fds(child, "child-prewake");
 }
 
+static int chrome_clone_fdtable_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+
+    if (!initialized) {
+        enabled = chrome_trace_value_enabled("chrome_clone_fdtable_trace") ||
+                  chrome_trace_value_enabled("chrome_exec_fdtable_trace");
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static void chrome_clone_dump_fdtable_state(struct thread *parent,
+                                            struct thread *child,
+                                            uint64 flags)
+{
+    if (flags & CLONE_THREAD)
+        return;
+    if (!chrome_clone_fdtable_trace_enabled())
+        return;
+    if (!chrome_lifecycle_trace_match(parent) &&
+        !chrome_lifecycle_trace_match(child))
+        return;
+
+    vfs_fdtable_debug_dump(child, "clone-child-prewake-lite", 64);
+}
+
 static void clone_destroy_unstarted_child(struct thread *child)
 {
     if (child == NULL)
@@ -537,6 +565,7 @@ int thread_clone(struct clone_args *args) {
     }
 
     chrome_clone_dump_asset_state(p, ret_ptr, args->flags);
+    chrome_clone_dump_fdtable_state(p, ret_ptr, args->flags);
 
     // Wake up the new child thread
     // Note: pi_lock no longer needed - rq_lock serializes wakeups
