@@ -1086,6 +1086,7 @@ bo_copy_out:
         int ret;
         int diag;
         int skip_kms;
+        int guard_kms_black;
         uint32 seq = 0;
         uint64 start_ticks = 0;
         uint64 phase_ticks = 0;
@@ -1098,6 +1099,9 @@ bo_copy_out:
                fb_cmdline_enabled("fb_scanout_read_ioctl_diag");
         skip_kms = fb_cmdline_enabled("fb_scanout_read_skip_kms") ||
                    fb_cmdline_enabled("virtio_gpu_scanout_read_skip_kms");
+        guard_kms_black =
+            !fb_cmdline_enabled("fb_scanout_read_no_kms_black_guard") &&
+            !fb_cmdline_enabled("virtio_gpu_scanout_read_no_kms_black_guard");
         if (diag) {
             seq = __atomic_add_fetch(&read_seq, 1, __ATOMIC_RELAXED);
             start_ticks = r_time();
@@ -1172,8 +1176,39 @@ bo_copy_out:
                     read_logs++;
                 }
             } else if (ret == 0) {
+                void *kms_pixels = NULL;
+                void *kms_dst = pixels;
+                uint32 virtio_nonblack = 0;
+                uint32 virtio_center = 0;
+                uint64 virtio_hash = 0;
+                uint32 kms_nonblack = 0;
+                uint32 kms_center = 0;
+                uint64 kms_hash = 0;
+                uint32 kms_screen_width = req.screen_width;
+                uint32 kms_screen_height = req.screen_height;
+                uint32 kms_screen_pitch = req.screen_pitch;
                 int kms_ret;
 
+                if (guard_kms_black) {
+                    virtio_hash =
+                        fb_scanout_diag_sample_hash(pixels, req.pitch,
+                                                    req.w, req.h,
+                                                    &virtio_nonblack,
+                                                    &virtio_center);
+                    kms_pixels = kvmalloc((size_t)size);
+                    if (kms_pixels != NULL) {
+                        memset(kms_pixels, 0, (size_t)size);
+                        kms_dst = kms_pixels;
+                    }
+                    if (diag && read_logs < 96) {
+                        printf("FB: scanout-read-ioctl[%u] virtio-sample hash=0x%lx nonblack=%u center=0x%x kms_guard=%d kms_temp=%d elapsed_us=%lu\n",
+                               seq, virtio_hash, virtio_nonblack,
+                               virtio_center, guard_kms_black,
+                               kms_pixels != NULL,
+                               fb_ticks_to_us(r_time() - start_ticks));
+                        read_logs++;
+                    }
+                }
                 phase_ticks = r_time();
                 if (diag && read_logs < 96) {
                     printf("FB: scanout-read-ioctl[%u] kms-begin elapsed_us=%lu\n",
@@ -1181,18 +1216,51 @@ bo_copy_out:
                     read_logs++;
                 }
                 kms_ret = fb_read_current_kms_framebuffer(
-                    req.x, req.y, req.w, req.h, pixels, req.pitch,
-                    &req.screen_width, &req.screen_height,
-                    &req.screen_pitch);
+                    req.x, req.y, req.w, req.h, kms_dst, req.pitch,
+                    &kms_screen_width, &kms_screen_height,
+                    &kms_screen_pitch);
+                if (guard_kms_black && kms_ret == 0) {
+                    kms_hash =
+                        fb_scanout_diag_sample_hash(kms_dst, req.pitch,
+                                                    req.w, req.h,
+                                                    &kms_nonblack,
+                                                    &kms_center);
+                }
                 if (diag && read_logs < 96) {
                     printf("FB: scanout-read-ioctl[%u] kms-end ret=%d stage_us=%lu elapsed_us=%lu screen=%ux%u pitch=%u\n",
                            seq, kms_ret,
                            fb_ticks_to_us(r_time() - phase_ticks),
                            fb_ticks_to_us(r_time() - start_ticks),
-                           req.screen_width, req.screen_height,
-                           req.screen_pitch);
+                           kms_screen_width, kms_screen_height,
+                           kms_screen_pitch);
                     read_logs++;
                 }
+                if (guard_kms_black && kms_ret == 0 &&
+                    kms_pixels != NULL) {
+                    int preserve_virtio =
+                        virtio_nonblack > 0 && kms_nonblack == 0;
+
+                    if (!preserve_virtio) {
+                        memcpy(pixels, kms_pixels, (size_t)size);
+                        req.screen_width = kms_screen_width;
+                        req.screen_height = kms_screen_height;
+                        req.screen_pitch = kms_screen_pitch;
+                    }
+                    if (diag && read_logs < 96) {
+                        printf("FB: scanout-read-ioctl[%u] kms-sample hash=0x%lx nonblack=%u center=0x%x preserve_virtio=%d virtio_hash=0x%lx virtio_nonblack=%u virtio_center=0x%x elapsed_us=%lu\n",
+                               seq, kms_hash, kms_nonblack, kms_center,
+                               preserve_virtio, virtio_hash,
+                               virtio_nonblack, virtio_center,
+                               fb_ticks_to_us(r_time() - start_ticks));
+                        read_logs++;
+                    }
+                } else if (kms_ret == 0) {
+                    req.screen_width = kms_screen_width;
+                    req.screen_height = kms_screen_height;
+                    req.screen_pitch = kms_screen_pitch;
+                }
+                if (kms_pixels != NULL)
+                    kvfree(kms_pixels);
                 if (kms_ret == 0)
                     ret = 0;
             }

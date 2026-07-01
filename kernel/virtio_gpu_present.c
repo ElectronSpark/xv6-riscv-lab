@@ -1608,6 +1608,69 @@ out:
     virtio_gpu_op_unlock(g);
 }
 
+static uint32 virtio_gpu_scanout_buffer_nonblack(void *dst, uint32 dst_pitch,
+                                                 uint32 sample_x,
+                                                 uint32 sample_y,
+                                                 uint32 sample_w,
+                                                 uint32 sample_h)
+{
+    uint8 *base = (uint8 *)dst;
+    uint32 xs[5];
+    uint32 ys[5];
+    uint32 nonblack = 0;
+
+    if (dst == NULL || dst_pitch == 0 || sample_w == 0 || sample_h == 0)
+        return 0;
+    xs[0] = sample_x + sample_w / 2;
+    ys[0] = sample_y + sample_h / 2;
+    xs[1] = sample_x + sample_w / 4;
+    ys[1] = sample_y + sample_h / 4;
+    xs[2] = sample_x + (sample_w * 3) / 4;
+    ys[2] = sample_y + sample_h / 4;
+    xs[3] = sample_x + sample_w / 4;
+    ys[3] = sample_y + (sample_h * 3) / 4;
+    xs[4] = sample_x + (sample_w * 3) / 4;
+    ys[4] = sample_y + (sample_h * 3) / 4;
+
+    for (uint32 i = 0; i < 5; i++) {
+        uint32 p = *(uint32 *)(base + (uint64)ys[i] * dst_pitch +
+                               (uint64)xs[i] * sizeof(uint32));
+
+        if ((p & 0x00ffffffU) != 0)
+            nonblack++;
+    }
+    return nonblack;
+}
+
+static uint32 virtio_gpu_resource_rect_nonblack(
+    struct virtio_gpu_resource *res, uint32 x, uint32 y, uint32 w, uint32 h)
+{
+    uint32 xs[5];
+    uint32 ys[5];
+    uint32 nonblack = 0;
+
+    if (res == NULL || w == 0 || h == 0)
+        return 0;
+    xs[0] = x + w / 2;
+    ys[0] = y + h / 2;
+    xs[1] = x + w / 4;
+    ys[1] = y + h / 4;
+    xs[2] = x + (w * 3) / 4;
+    ys[2] = y + h / 4;
+    xs[3] = x + w / 4;
+    ys[3] = y + (h * 3) / 4;
+    xs[4] = x + (w * 3) / 4;
+    ys[4] = y + (h * 3) / 4;
+
+    for (uint32 i = 0; i < 5; i++) {
+        uint32 p = virtio_gpu_resource_sample_pixel(res, xs[i], ys[i]);
+
+        if ((p & 0x00ffffffU) != 0)
+            nonblack++;
+    }
+    return nonblack;
+}
+
 int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
                                     void *dst, uint32 dst_pitch,
                                     uint32 *screen_width,
@@ -1921,6 +1984,15 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
             uint32 present_pitch = present->width * sizeof(uint32);
             uint32 src_start_x;
             uint32 src_start_y;
+            uint32 dst_sample_x = ix0 - x;
+            uint32 dst_sample_y = iy0 - y;
+            uint32 dst_sample_w = ix1 - ix0;
+            uint32 dst_sample_h = iy1 - iy0;
+            uint32 dst_nonblack = 0;
+            uint32 present_nonblack = 0;
+            int guard_black_present =
+                !virtio_gpu_cmdline_enabled(
+                    "virtio_gpu_scanout_read_no_present_black_guard");
 
             if (present_ctx_id == 0) {
                 ret = virtio_gpu_ensure_present_context(g, &present_ctx_id);
@@ -1933,6 +2005,14 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
                     ret = -EIO;
                     goto out;
                 }
+            }
+            if (guard_black_present) {
+                dst_nonblack =
+                    virtio_gpu_scanout_buffer_nonblack(dst, dst_pitch,
+                                                       dst_sample_x,
+                                                       dst_sample_y,
+                                                       dst_sample_w,
+                                                       dst_sample_h);
             }
             memset(transfer, 0, sizeof(*transfer));
             transfer->hdr.type = VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D;
@@ -1971,6 +2051,24 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
                        virtio_gpu_ticks_to_us(r_time() - total_start));
                 stage_logs++;
             }
+            if (guard_black_present) {
+                present_nonblack =
+                    virtio_gpu_resource_rect_nonblack(
+                        present, src_start_x, src_start_y,
+                        ix1 - ix0, iy1 - iy0);
+                if (dst_nonblack > 0 && present_nonblack == 0) {
+                    if (diag && stage_logs < 48) {
+                        printf("virtio_gpu: scanout-read[%u] present-overlay-skip resource=%u dst_nonblack=%u present_nonblack=%u rect=%u,%u %ux%u elapsed_us=%lu\n",
+                               seq, present->id, dst_nonblack,
+                               present_nonblack, src_start_x, src_start_y,
+                               ix1 - ix0, iy1 - iy0,
+                               virtio_gpu_ticks_to_us(r_time() -
+                                                      total_start));
+                        stage_logs++;
+                    }
+                    goto skip_present_overlay;
+                }
+            }
             for (uint32 row = 0; row < iy1 - iy0; row++) {
                 uint32 *dst_row =
                     (uint32 *)(dst_base +
@@ -1981,6 +2079,8 @@ int virtio_gpu_read_current_scanout(uint32 x, uint32 y, uint32 w, uint32 h,
                     dst_row[col] = virtio_gpu_resource_sample_pixel(
                         present, src_start_x + col, src_start_y + row);
             }
+skip_present_overlay:
+            ;
         }
     }
 
