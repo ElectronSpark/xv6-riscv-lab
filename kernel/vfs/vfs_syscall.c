@@ -4386,6 +4386,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
 
         int trace_ready = kde_ready_trace_current();
         uint64 wait_start_ms = trace_ready ? sched_timer_now_ms() : 0;
+        webkit_poll_summary("sleep", nfds, kq_tmo, ready, pfds);
         int nevents = kqueue_wait(kq, events, nfds, kq_tmo);
 
         if (nevents < 0 && nevents == -EINTR) {

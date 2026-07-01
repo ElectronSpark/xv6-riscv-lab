@@ -688,9 +688,14 @@ static void unix_wayland_trace(const char *op, struct unix_sock *sk,
     struct unix_sock *peer = NULL;
     int state, type, pending, flags, bound;
     uint tx_read, tx_write;
+    uint64 ino;
+    size_t scm_count, packet_count;
     char path[UNIX_PATH_MAX];
     int peer_state = -1;
+    int peer_flags = 0;
+    uint64 peer_ino = 0;
     uint peer_tx_read = 0, peer_tx_write = 0;
+    size_t peer_scm_count = 0, peer_packet_count = 0;
 
     if (!unix_wayland_trace_enabled() || !unix_wayland_socket_matches(sk))
         return;
@@ -702,6 +707,9 @@ static void unix_wayland_trace(const char *op, struct unix_sock *sk,
     pending = sk->pending_count;
     flags = sk->shutdown_flags;
     bound = sk->bound;
+    ino = sk->proc_ino;
+    scm_count = unix_scm_count_locked(sk);
+    packet_count = unix_packet_count_locked(sk);
     tx_read = sk->tx.nread;
     tx_write = sk->tx.nwrite;
     if (sk->bind_len != 0)
@@ -713,21 +721,31 @@ static void unix_wayland_trace(const char *op, struct unix_sock *sk,
 
     if (peer != NULL) {
         spin_lock(&peer->lock);
+        peer_ino = peer->proc_ino;
         peer_state = peer->state;
+        peer_flags = peer->shutdown_flags;
         peer_tx_read = peer->tx.nread;
         peer_tx_write = peer->tx.nwrite;
+        peer_scm_count = unix_scm_count_locked(peer);
+        peer_packet_count = unix_packet_count_locked(peer);
         if (path[0] == '\0' && peer->bind_len != 0)
             memmove(path, peer->bind_path, peer->bind_len);
         spin_unlock(&peer->lock);
     }
 
     printf("kde-wayland-unix: pid=%d name=%s op=%s sk=%p peer=%p "
-           "state=%d peer_state=%d type=%d bound=%d pending=%d flags=0x%x "
-           "tx=%u/%u peer_tx=%u/%u value=%ld extra=%ld path=%s\n",
+           "ino=%llu peer_ino=%llu state=%d peer_state=%d type=%d "
+           "bound=%d pending=%d flags=0x%x peer_flags=0x%x tx=%u/%u "
+           "peer_tx=%u/%u scm=%lu peer_scm=%lu packets=%lu "
+           "peer_packets=%lu value=%ld extra=%ld path=%s\n",
            current ? current->pid : -1,
            current ? current->name : "(none)",
-           op, sk, peer, state, peer_state, type, bound, pending, flags,
-           tx_read, tx_write, peer_tx_read, peer_tx_write, value, extra,
+           op, sk, peer, (unsigned long long)ino,
+           (unsigned long long)peer_ino, state, peer_state, type, bound,
+           pending, flags, peer_flags, tx_read, tx_write, peer_tx_read,
+           peer_tx_write, (unsigned long)scm_count,
+           (unsigned long)peer_scm_count, (unsigned long)packet_count,
+           (unsigned long)peer_packet_count, value, extra,
            path[0] != '\0' ? path : "(anonymous)");
 
     if (peer != NULL)
