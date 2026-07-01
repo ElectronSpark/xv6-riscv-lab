@@ -225,6 +225,21 @@ static int kde_poll_summary_enabled(void)
     return enabled;
 }
 
+static int kde_poll_summary_konsole_only_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_poll_summary_konsole_only", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
 static int chrome_vfs_trace_process(void)
 {
     return chrome_lifecycle_kernel_trace_process_match(current, 0, 0);
@@ -247,15 +262,25 @@ static int kde_vfs_trace_process(void)
 {
     if (current == NULL)
         return 0;
+    int konsole_process = 0;
+    if (strncmp(current->name, "konsole", 7) == 0)
+        konsole_process = 1;
+    if (!konsole_process && current->thread_group != NULL &&
+        strstr(current->thread_group->exec_path, "/konsole") != NULL)
+        konsole_process = 1;
+    if (kde_poll_summary_konsole_only_enabled())
+        return konsole_process;
     if (strncmp(current->name, "kwin_wayland", 12) == 0 ||
         strncmp(current->name, "plasmashell", 11) == 0 ||
-        strncmp(current->name, "kded5", 5) == 0)
+        strncmp(current->name, "kded5", 5) == 0 ||
+        konsole_process)
         return 1;
     if (current->thread_group == NULL)
         return 0;
     return strstr(current->thread_group->exec_path, "kwin_wayland") != NULL ||
            strstr(current->thread_group->exec_path, "plasmashell") != NULL ||
-           strstr(current->thread_group->exec_path, "/kded5") != NULL;
+           strstr(current->thread_group->exec_path, "/kded5") != NULL ||
+           strstr(current->thread_group->exec_path, "/konsole") != NULL;
 }
 
 static int chrome_fd_trace_cmdline_enabled(void)
@@ -3844,6 +3869,8 @@ static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
 {
     struct unix_sock *sk;
     struct unix_sock *peer = NULL;
+    uint64 self_ino = 0;
+    uint64 peer_ino = 0;
     uint self_tx = 0;
     uint peer_tx = 0;
     uint self_packets = 0;
@@ -3854,10 +3881,17 @@ static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
     int peer_state = -1;
     int shutdown_flags = 0;
     int peer_shutdown = 0;
+    int peer_pid = 0;
+    uint32 peer_uid = 0;
+    uint32 peer_gid = 0;
+    char self_path[UNIX_PATH_MAX];
+    char peer_path[UNIX_PATH_MAX];
 
     if (buflen == 0)
         return;
     buf[0] = '\0';
+    memset(self_path, 0, sizeof(self_path));
+    memset(peer_path, 0, sizeof(peer_path));
 
     if (!((chrome_poll_summary_enabled() && chrome_vfs_trace_process()) ||
           (kde_poll_summary_enabled() && kde_vfs_trace_process())) ||
@@ -3867,11 +3901,21 @@ static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
 
     sk = (struct unix_sock *)f->private_data;
     spin_lock(&sk->lock);
+    self_ino = sk->proc_ino;
     state = sk->state;
     shutdown_flags = sk->shutdown_flags;
     self_tx = sk->tx.nwrite - sk->tx.nread;
     self_packets = chrome_unix_packet_count_locked(sk);
     self_scm = chrome_unix_scm_count_locked(sk);
+    peer_pid = sk->peer_pid;
+    peer_uid = sk->peer_uid;
+    peer_gid = sk->peer_gid;
+    if (sk->bind_len != 0) {
+        size_t n = sk->bind_len < sizeof(self_path) - 1 ?
+            sk->bind_len : sizeof(self_path) - 1;
+        memmove(self_path, sk->bind_path, n);
+        self_path[n] = '\0';
+    }
     peer = sk->peer;
     if (peer != NULL)
         unix_sock_get_ref(peer);
@@ -3879,20 +3923,32 @@ static void chrome_poll_unix_snapshot(struct vfs_file *f, char *buf,
 
     if (peer != NULL) {
         spin_lock(&peer->lock);
+        peer_ino = peer->proc_ino;
         peer_state = peer->state;
         peer_shutdown = peer->shutdown_flags;
         peer_tx = peer->tx.nwrite - peer->tx.nread;
         peer_packets = chrome_unix_packet_count_locked(peer);
         peer_scm = chrome_unix_scm_count_locked(peer);
+        if (peer_path[0] == '\0' && peer->bind_len != 0) {
+            size_t n = peer->bind_len < sizeof(peer_path) - 1 ?
+                peer->bind_len : sizeof(peer_path) - 1;
+            memmove(peer_path, peer->bind_path, n);
+            peer_path[n] = '\0';
+        }
         spin_unlock(&peer->lock);
         unix_sock_put_ref(peer);
     }
 
     snprintf(buf, buflen,
-             "/unix:s%d/sh%x/selftx%u/selfpkt%u/selfscm%u"
-             "/peer_s%d/peer_sh%x/peertx%u/peerpkt%u/peerscm%u",
+             "/unix:ino%llu/peerino%llu/s%d/sh%x/selftx%u/selfpkt%u"
+             "/selfscm%u/peer_s%d/peer_sh%x/peertx%u/peerpkt%u/peerscm%u"
+             "/peercred%d:%u:%u/path%s/peerpath%s",
+             (unsigned long long)self_ino, (unsigned long long)peer_ino,
              state, shutdown_flags, self_tx, self_packets, self_scm,
-             peer_state, peer_shutdown, peer_tx, peer_packets, peer_scm);
+             peer_state, peer_shutdown, peer_tx, peer_packets, peer_scm,
+             peer_pid, peer_uid, peer_gid,
+             self_path[0] != '\0' ? self_path : "(anonymous)",
+             peer_path[0] != '\0' ? peer_path : "(anonymous)");
 }
 
 /*
@@ -4043,8 +4099,10 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
     short sample_revents[6];
     const char *sample_kind[6];
     void *sample_poll[6];
-    char sample_detail[6][80];
+    char sample_detail[6][256];
     int nsample = 0;
+    char line[2048];
+    int off = 0;
 
     for (int i = 0; i < nfds; i++) {
         short r = pfds[i].revents;
@@ -4085,18 +4143,36 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
         }
     }
 
-    printf("webkit-poll-summary: seq=%lu phase=%s pid=%d name=%s nfds=%d "
-           "timeout=%d ready=%d in=%d out=%d err=%d zero=%d",
-           n, phase, current->pid, current->name, nfds, timeout_ms, ready,
-           in, out, err, zero);
+#define POLL_SUMMARY_APPEND(fmt, ...)                                         \
+    do {                                                                      \
+        if (off < (int)sizeof(line)) {                                        \
+            int __n = snprintf(line + off, sizeof(line) - (size_t)off,        \
+                               fmt, ##__VA_ARGS__);                          \
+            if (__n > 0) {                                                    \
+                if (__n >= (int)(sizeof(line) - (size_t)off))                 \
+                    off = (int)sizeof(line) - 1;                              \
+                else                                                          \
+                    off += __n;                                               \
+            }                                                                 \
+        }                                                                     \
+    } while (0)
+
+    POLL_SUMMARY_APPEND("webkit-poll-summary: seq=%lu phase=%s pid=%d "
+                        "name=%s nfds=%d timeout=%d ready=%d in=%d out=%d "
+                        "err=%d zero=%d",
+                        n, phase, current->pid, current->name, nfds,
+                        timeout_ms, ready, in, out, err, zero);
     for (int i = 0; i < nsample; i++) {
-        printf(" sample%d=fd%d/e%x/r%x/%s/%p", i, sample_fd[i],
-               (uint)sample_events[i], (uint)sample_revents[i],
-               sample_kind[i], sample_poll[i]);
+        POLL_SUMMARY_APPEND(" sample%d=fd%d/e%x/r%x/%s/%p", i,
+                            sample_fd[i], (uint)sample_events[i],
+                            (uint)sample_revents[i], sample_kind[i],
+                            sample_poll[i]);
         if (sample_detail[i][0] != '\0')
-            printf("%s", sample_detail[i]);
+            POLL_SUMMARY_APPEND("%s", sample_detail[i]);
     }
-    printf("\n");
+    POLL_SUMMARY_APPEND("\n");
+    printf("%s", line);
+#undef POLL_SUMMARY_APPEND
 }
 
 /*
