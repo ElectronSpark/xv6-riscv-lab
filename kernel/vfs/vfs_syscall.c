@@ -4252,6 +4252,116 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
 #undef POLL_SUMMARY_APPEND
 }
 
+static const char *kde_ready_poll_target(struct vfs_file *f, char *buf,
+                                         size_t buflen)
+{
+    if (buflen == 0)
+        return "";
+    buf[0] = '\0';
+    if (f == NULL)
+        return "(badfd)";
+    if (f->ops != NULL && f->ops->readlink != NULL) {
+        ssize_t n = f->ops->readlink(f, buf, buflen);
+        if (n >= 0) {
+            size_t len = (n < (ssize_t)buflen - 1) ? (size_t)n : buflen - 1;
+            buf[len] = '\0';
+            return buf;
+        }
+    }
+    if (f->opened_path != NULL)
+        return f->opened_path;
+    switch (f->f_kind) {
+    case VFS_FILE_KIND_PIPE:
+        return "pipe";
+    case VFS_FILE_KIND_LEGACY_SOCKET:
+        return "socket";
+    case VFS_FILE_KIND_CUSTOM:
+        return "custom";
+    case VFS_FILE_KIND_CDEV:
+        return "cdev";
+    case VFS_FILE_KIND_BDEV:
+        return "bdev";
+    case VFS_FILE_KIND_INODE:
+        return "inode";
+    default:
+        return "(unknown)";
+    }
+}
+
+static void kde_ready_trace_poll_fds(const char *phase, int nfds,
+                                     int timeout_ms, int ready,
+                                     int has_unnotified_fds,
+                                     uint64 wait_ms,
+                                     struct pollfd_k *pfds)
+{
+    if (!kde_ready_trace_current())
+        return;
+    if (wait_ms < 50 && ready <= 0)
+        return;
+
+    int printed = 0;
+    int ready_fds = 0;
+    int rescan_fds = 0;
+    int notify_fds = 0;
+    int bad_fds = 0;
+    const int max_detail = 16;
+
+    for (int i = 0; i < nfds; i++) {
+        struct vfs_file *f = NULL;
+        int notify_backed = 0;
+        int requires_rescan = 1;
+        char target[128];
+        const char *kind = "neg";
+        const char *name;
+
+        if (pfds[i].fd < 0)
+            continue;
+
+        f = __vfs_argfd(pfds[i].fd);
+        if (f == NULL) {
+            bad_fds++;
+        } else {
+            kind = webkit_poll_fd_kind(f);
+            notify_backed =
+                f->ops != NULL && f->ops->poll != NULL &&
+                (f->ops->flags & VFS_FILE_OPS_F_POLL_NOTIFY_BACKED) != 0;
+            requires_rescan = poll_fd_requires_rescan(f);
+            if (notify_backed)
+                notify_fds++;
+            if (requires_rescan)
+                rescan_fds++;
+        }
+        if (pfds[i].revents != 0)
+            ready_fds++;
+
+        if (printed < max_detail &&
+            (pfds[i].revents != 0 || ready <= 0 || requires_rescan)) {
+            name = kde_ready_poll_target(f, target, sizeof(target));
+            printf("kde-ready-poll-fd: phase=%s pid=%d tgid=%d name=%s "
+                   "fd=%d events=0x%x revents=0x%x kind=%s ops=%p poll=%p "
+                   "notify_backed=%d requires_rescan=%d target=%s\n",
+                   phase ? phase : "", current ? current->pid : -1,
+                   current ? current->tgid : -1,
+                   current ? current->name : "(none)", pfds[i].fd,
+                   (uint)pfds[i].events, (uint)pfds[i].revents, kind,
+                   f ? f->ops : NULL, (f && f->ops) ? f->ops->poll : NULL,
+                   notify_backed, requires_rescan, name);
+            printed++;
+        }
+        if (f != NULL)
+            vfs_fput(f);
+    }
+
+    printf("kde-ready-poll-summary: phase=%s pid=%d tgid=%d name=%s "
+           "nfds=%d timeout_ms=%d ready=%d wait_ms=%lu "
+           "has_unnotified_fds=%d ready_fds=%d notify_fds=%d "
+           "rescan_fds=%d bad_fds=%d printed=%d\n",
+           phase ? phase : "", current ? current->pid : -1,
+           current ? current->tgid : -1, current ? current->name : "(none)",
+           nfds, timeout_ms, ready, wait_ms, has_unnotified_fds, ready_fds,
+           notify_fds, rescan_fds, bad_fds, printed);
+}
+
 /*
  * sys_vfs_poll - event polling over file descriptors using kqueue
  *
@@ -4430,9 +4540,13 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
         if (trace_ready) {
             uint64 wait_ms = sched_timer_now_ms() - wait_start_ms;
             int arg1 = has_unnotified_fds ? -kq_tmo - 1 : kq_tmo;
-            if (wait_ms >= 50 || ready > 0 || nevents < 0)
+            if (wait_ms >= 50 || ready > 0 || nevents < 0) {
                 kde_ready_trace_event("poll-wait", -1, nfds, arg1, ready,
                                       wait_ms);
+                kde_ready_trace_poll_fds("poll-wait", nfds, timeout_ms,
+                                         ready, has_unnotified_fds, wait_ms,
+                                         pfds);
+            }
         }
         if (ready > 0)
             break;

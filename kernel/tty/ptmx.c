@@ -46,6 +46,8 @@
 #include "tty/session.h"
 #include "devtmpfs.h"
 #include "vfs/stat.h"
+#include "cmdline.h"
+#include "proc/sched.h"
 
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 
@@ -74,6 +76,54 @@ struct pty_pair {
 
 static spinlock_t ptmx_lock = SPINLOCK_INITIALIZED("ptmx");
 static struct pty_pair *pty_table[MAX_PTYS];
+
+static int pty_ready_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("pty_ready_trace", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static void pty_ready_trace(const char *phase, struct pty_pair *pair,
+                            struct vfs_file *file, long value, long extra)
+{
+    if (!pty_ready_trace_enabled())
+        return;
+
+    int idx = pair ? pair->index : -1;
+    int refcount = -1;
+    int master_open = -1;
+    int slave_count = -1;
+    int cdev_live = -1;
+
+    if (pair != NULL) {
+        spin_lock(&pair->lock);
+        refcount = pair->refcount;
+        master_open = pair->master_open;
+        slave_count = pair->slave_count;
+        cdev_live = pair->cdev_live;
+        spin_unlock(&pair->lock);
+    }
+
+    printf("pty-ready-trace: ms=%lu pid=%d tgid=%d name=%s phase=%s "
+           "idx=%d file=%p f_flags=0x%x value=%ld extra=%ld "
+           "refcount=%d master_open=%d slave_count=%d cdev_live=%d "
+           "sid=%d pgid=%d\n",
+           sched_timer_now_ms(), current ? current->pid : -1,
+           current ? current->tgid : -1,
+           current ? current->name : "(none)", phase ? phase : "", idx,
+           file, file ? file->f_flags : 0, value, extra, refcount,
+           master_open, slave_count, cdev_live, current ? current->sid : -1,
+           current ? current->pgid : -1);
+}
 
 /* ---- refcount helpers ---- */
 
@@ -207,6 +257,8 @@ static ssize_t pts_fops_write(struct vfs_file *file, const char *buf,
     if (pair == NULL || pair->slave == NULL)
         return -EIO;
     ret = tty_write(pair->slave, (const char *)buf, count, user);
+    if (ret > 0)
+        pty_ready_trace("pts-write", pair, file, ret, count);
 
     /*
      * Slave writes make the master fd readable.  Event loops such as
@@ -219,6 +271,8 @@ static ssize_t pts_fops_write(struct vfs_file *file, const char *buf,
         spin_unlock(&pair->lock);
         if (master_file != NULL) {
             vfs_file_knote_notify(master_file, EVFILT_READ, ret);
+            pty_ready_trace("pts-write-notify-master", pair, master_file,
+                            ret, 0);
             vfs_fput(master_file);
         }
     }
@@ -355,6 +409,7 @@ static int pts_install_peer_fd(struct pty_pair *pair, int flags)
             pty_pair_destroy(pair);
         return fd;
     }
+    pty_ready_trace("pts-peer-fd", pair, NULL, fd, file_flags);
 
     if (file_flags & O_CLOEXEC) {
         spin_lock(&current->fdtable->lock);
@@ -380,6 +435,8 @@ static void pts_maybe_set_controlling_tty(struct pty_pair *pair,
         return;
 
     session_set_ctrl_tty(current->session, pair->slave);
+    pty_ready_trace("pts-control-tty", pair, NULL, current->session->sid,
+                    thread_tgid(current));
 }
 
 /* ================================================================== */
@@ -417,6 +474,7 @@ static int pts_open_file(cdev_t *cdev, struct vfs_file *file)
     file->ops = &pts_slave_file_ops;
     file->private_data = pair;
     pts_maybe_set_controlling_tty(pair, file->f_flags);
+    pty_ready_trace("pts-open", pair, file, file->f_flags, 0);
     return 0;
 }
 
@@ -443,10 +501,15 @@ static ssize_t ptmx_fops_read(struct vfs_file *file, char *buf,
         pipe_set_flags(outp, old | (1 << PIPE_FLAGS_NONBLOCK_RD));
         ssize_t ret = pty_master_read(pair->slave, buf, count, user);
         pipe_set_flags(outp, old);
+        if (ret > 0 || ret == -EAGAIN)
+            pty_ready_trace("ptmx-read", pair, file, ret, count);
         return ret;
     }
 
-    return pty_master_read(pair->slave, buf, count, user);
+    ssize_t ret = pty_master_read(pair->slave, buf, count, user);
+    if (ret > 0 || ret == -EAGAIN)
+        pty_ready_trace("ptmx-read", pair, file, ret, count);
+    return ret;
 }
 
 static ssize_t ptmx_fops_write(struct vfs_file *file, const char *buf,
@@ -547,6 +610,9 @@ static int ptmx_fops_poll(struct vfs_file *file, short events) {
     /* Master is always writable (slave input pipe has space) */
     if (events & (POLLOUT | POLLWRNORM | POLLWRBAND))
         revents |= (events & (POLLOUT | POLLWRNORM | POLLWRBAND));
+
+    if (revents & (POLLIN | POLLRDNORM | POLLRDBAND | POLLHUP | POLLRDHUP))
+        pty_ready_trace("ptmx-poll-ready", pair, file, revents, events);
 
     return revents;
 }
@@ -677,6 +743,7 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
     }
     pair->cdev_live = 1;
     pts_snapshot_node_stat(pair);
+    pty_ready_trace("ptmx-slave-cdev", pair, file, ret, dev_minor);
 
     /* Record in global table */
     spin_lock(&ptmx_lock);
@@ -687,6 +754,7 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
     file->ops = &ptmx_master_file_ops;
     file->private_data = pair;
     pair->master_file = file;
+    pty_ready_trace("ptmx-open", pair, file, idx, dev_minor);
 
     return 0;
 }
