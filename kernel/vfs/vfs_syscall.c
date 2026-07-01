@@ -4882,6 +4882,7 @@ static void kde_ready_trace_kqueue_events(struct kevent *events, int nevents,
 
     int max_detail = nevents < 16 ? nevents : 16;
     for (int i = 0; i < max_detail; i++) {
+        uint64 now_ms = sched_timer_now_ms();
         uint64 udata = events[i].udata;
         int idx = udata < (uint64)nfds ? (int)udata : -1;
         int fd = idx >= 0 ? pfds[idx].fd : -1;
@@ -4899,13 +4900,14 @@ static void kde_ready_trace_kqueue_events(struct kevent *events, int nevents,
             requires_rescan = poll_fd_requires_rescan(f);
         }
         name = kde_ready_poll_target(f, target, sizeof(target));
-        printf("kde-ready-kqueue-event: pid=%d tgid=%d name=%s "
+        printf("kde-ready-kqueue-event: ms=%lu pid=%d tgid=%d name=%s "
                "idx=%d fd=%d ident=%lu filter=%d flags=0x%x "
                "fflags=0x%x data=%ld udata=%lu wait_ms=%lu "
                "events=0x%x revents=0x%x kind=%s notify_backed=%d "
                "requires_rescan=%d target=%s\n",
-               current ? current->pid : -1, current ? current->tgid : -1,
-               current ? current->name : "(none)", idx, fd,
+               now_ms, current ? current->pid : -1,
+               current ? current->tgid : -1, current ? current->name : "(none)",
+               idx, fd,
                events[i].ident, events[i].filter, (uint)events[i].flags,
                (uint)events[i].fflags, events[i].data, udata, wait_ms,
                idx >= 0 ? (uint)pfds[idx].events : 0,
