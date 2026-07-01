@@ -651,6 +651,37 @@ static int unix_wayland_trace_enabled(void)
     return enabled;
 }
 
+static int unix_wayland_trace_konsole_only_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("kde_wayland_unix_trace_konsole_only",
+                                    value, sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int unix_wayland_trace_process_matches(void)
+{
+    if (!unix_wayland_trace_konsole_only_enabled())
+        return 1;
+    if (current == NULL)
+        return 0;
+    if (strncmp(current->name, "konsole", 7) == 0 ||
+        strncmp(current->name, "kde-konsole-she", 15) == 0)
+        return 1;
+    if (current->thread_group == NULL)
+        return 0;
+    return strstr(current->thread_group->exec_path, "/konsole") != NULL ||
+           strstr(current->thread_group->exec_path,
+                  "kde-konsole-shell-wrapper") != NULL;
+}
+
 static int unix_wayland_path_locked(const struct unix_sock *sk)
 {
     return sk != NULL && sk->bind_len != 0 &&
@@ -697,7 +728,9 @@ static void unix_wayland_trace(const char *op, struct unix_sock *sk,
     uint peer_tx_read = 0, peer_tx_write = 0;
     size_t peer_scm_count = 0, peer_packet_count = 0;
 
-    if (!unix_wayland_trace_enabled() || !unix_wayland_socket_matches(sk))
+    if (!unix_wayland_trace_enabled() ||
+        !unix_wayland_trace_process_matches() ||
+        !unix_wayland_socket_matches(sk))
         return;
 
     memset(path, 0, sizeof(path));
