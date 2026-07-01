@@ -4034,6 +4034,12 @@ static int kstats_poll_path_contains(const char *path, const char *needle)
            strstr(path, needle) != NULL;
 }
 
+static int kstats_current_thread_name_contains(const char *needle)
+{
+    return current != NULL && needle != NULL &&
+           strstr(current->name, needle) != NULL;
+}
+
 static void kstats_poll_unix_paths(struct vfs_file *f, char *self_path,
                                    size_t self_len, char *peer_path,
                                    size_t peer_len)
@@ -4092,6 +4098,8 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
     int saw_prepty_eventfd = 0;
     int saw_prepty_pipe = 0;
     int saw_prepty_other = 0;
+    int current_qdbus_thread =
+        kstats_current_thread_name_contains("QDBus");
 
     if (!kstats_profile_enabled() || wait_ticks == 0)
         return;
@@ -4125,7 +4133,8 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                 if (kstats_poll_path_contains(self_path, "wayland-") ||
                     kstats_poll_path_contains(peer_path, "wayland-")) {
                     saw_prepty_wayland = 1;
-                } else if (kstats_poll_path_contains(self_path, "/bus") ||
+                } else if (current_qdbus_thread ||
+                           kstats_poll_path_contains(self_path, "/bus") ||
                            kstats_poll_path_contains(peer_path, "/bus") ||
                            kstats_poll_path_contains(self_path, "dbus") ||
                            kstats_poll_path_contains(peer_path, "dbus")) {
@@ -4265,6 +4274,88 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                            __ATOMIC_RELAXED);
         __atomic_add_fetch(&g_konsole_prepty_poll_timeout_ticks, wait_ticks,
                            __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_wayland && saw_prepty_pipe) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_wayland_pipe_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_wayland_pipe_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_wayland && saw_prepty_eventfd) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_wayland_eventfd_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_wayland_eventfd_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_qdbus && saw_prepty_pipe) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_qdbus_pipe_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_qdbus_pipe_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_qdbus && saw_prepty_eventfd) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_qdbus_eventfd_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_qdbus_eventfd_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_unix_other && saw_prepty_pipe) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_unix_other_pipe_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_unix_other_pipe_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_unix_other && saw_prepty_eventfd) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_unix_other_eventfd_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_unix_other_eventfd_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_eventfd && saw_prepty_pipe) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_eventfd_pipe_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_eventfd_pipe_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_wayland && !saw_prepty_qdbus &&
+        !saw_prepty_unix_other && !saw_prepty_eventfd &&
+        !saw_prepty_pipe && !saw_prepty_other) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_wayland_only_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_wayland_only_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_qdbus && !saw_prepty_wayland &&
+        !saw_prepty_unix_other && !saw_prepty_eventfd &&
+        !saw_prepty_pipe && !saw_prepty_other) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_qdbus_only_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_qdbus_only_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_unix_other && !saw_prepty_wayland &&
+        !saw_prepty_qdbus && !saw_prepty_eventfd &&
+        !saw_prepty_pipe && !saw_prepty_other) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_unix_other_only_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_unix_other_only_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_eventfd && !saw_prepty_wayland &&
+        !saw_prepty_qdbus && !saw_prepty_unix_other &&
+        !saw_prepty_pipe && !saw_prepty_other) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_eventfd_only_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_eventfd_only_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_pipe && !saw_prepty_wayland &&
+        !saw_prepty_qdbus && !saw_prepty_unix_other &&
+        !saw_prepty_eventfd && !saw_prepty_other) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_pipe_only_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_pipe_only_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
     }
 }
 

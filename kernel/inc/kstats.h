@@ -277,9 +277,35 @@ struct kstats {
     uint64 konsole_prepty_futex_other_calls;
     uint64 konsole_prepty_futex_other_ticks;
     uint64 konsole_prepty_pty_seen;
+
+    /* Version 6 append-only Konsole pre-PTY endpoint-combo counters. */
+    uint64 konsole_prepty_poll_wayland_pipe_calls;
+    uint64 konsole_prepty_poll_wayland_pipe_ticks;
+    uint64 konsole_prepty_poll_wayland_eventfd_calls;
+    uint64 konsole_prepty_poll_wayland_eventfd_ticks;
+    uint64 konsole_prepty_poll_qdbus_pipe_calls;
+    uint64 konsole_prepty_poll_qdbus_pipe_ticks;
+    uint64 konsole_prepty_poll_qdbus_eventfd_calls;
+    uint64 konsole_prepty_poll_qdbus_eventfd_ticks;
+    uint64 konsole_prepty_poll_unix_other_pipe_calls;
+    uint64 konsole_prepty_poll_unix_other_pipe_ticks;
+    uint64 konsole_prepty_poll_unix_other_eventfd_calls;
+    uint64 konsole_prepty_poll_unix_other_eventfd_ticks;
+    uint64 konsole_prepty_poll_eventfd_pipe_calls;
+    uint64 konsole_prepty_poll_eventfd_pipe_ticks;
+    uint64 konsole_prepty_poll_wayland_only_calls;
+    uint64 konsole_prepty_poll_wayland_only_ticks;
+    uint64 konsole_prepty_poll_qdbus_only_calls;
+    uint64 konsole_prepty_poll_qdbus_only_ticks;
+    uint64 konsole_prepty_poll_unix_other_only_calls;
+    uint64 konsole_prepty_poll_unix_other_only_ticks;
+    uint64 konsole_prepty_poll_eventfd_only_calls;
+    uint64 konsole_prepty_poll_eventfd_only_ticks;
+    uint64 konsole_prepty_poll_pipe_only_calls;
+    uint64 konsole_prepty_poll_pipe_only_ticks;
 };
 
-#define KSTATS_ABI_VERSION 5
+#define KSTATS_ABI_VERSION 6
 #define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
 /* ------------------------------------------------------------------ */
@@ -501,6 +527,30 @@ extern uint64 g_konsole_prepty_futex_signal_ticks;
 extern uint64 g_konsole_prepty_futex_other_calls;
 extern uint64 g_konsole_prepty_futex_other_ticks;
 extern uint64 g_konsole_prepty_pty_seen;
+extern uint64 g_konsole_prepty_poll_wayland_pipe_calls;
+extern uint64 g_konsole_prepty_poll_wayland_pipe_ticks;
+extern uint64 g_konsole_prepty_poll_wayland_eventfd_calls;
+extern uint64 g_konsole_prepty_poll_wayland_eventfd_ticks;
+extern uint64 g_konsole_prepty_poll_qdbus_pipe_calls;
+extern uint64 g_konsole_prepty_poll_qdbus_pipe_ticks;
+extern uint64 g_konsole_prepty_poll_qdbus_eventfd_calls;
+extern uint64 g_konsole_prepty_poll_qdbus_eventfd_ticks;
+extern uint64 g_konsole_prepty_poll_unix_other_pipe_calls;
+extern uint64 g_konsole_prepty_poll_unix_other_pipe_ticks;
+extern uint64 g_konsole_prepty_poll_unix_other_eventfd_calls;
+extern uint64 g_konsole_prepty_poll_unix_other_eventfd_ticks;
+extern uint64 g_konsole_prepty_poll_eventfd_pipe_calls;
+extern uint64 g_konsole_prepty_poll_eventfd_pipe_ticks;
+extern uint64 g_konsole_prepty_poll_wayland_only_calls;
+extern uint64 g_konsole_prepty_poll_wayland_only_ticks;
+extern uint64 g_konsole_prepty_poll_qdbus_only_calls;
+extern uint64 g_konsole_prepty_poll_qdbus_only_ticks;
+extern uint64 g_konsole_prepty_poll_unix_other_only_calls;
+extern uint64 g_konsole_prepty_poll_unix_other_only_ticks;
+extern uint64 g_konsole_prepty_poll_eventfd_only_calls;
+extern uint64 g_konsole_prepty_poll_eventfd_only_ticks;
+extern uint64 g_konsole_prepty_poll_pipe_only_calls;
+extern uint64 g_konsole_prepty_poll_pipe_only_ticks;
 extern int g_kstats_profile_enabled;
 
 static inline int kstats_profile_enabled(void) {
