@@ -185,9 +185,10 @@
 
 // --- Profiling controls ---
 #define SYS_kstatsctl      1367
+#define SYS_kstats2        1368
 
 // Max syscall number (update when adding new syscalls)
-#define SYS_MAXNUM         1367
+#define SYS_MAXNUM         1368
 
 // --- Linux time64 compatibility stubs used by musl on rv64 ---
 // These are intentionally unsupported in xv6 and return -ENOSYS via

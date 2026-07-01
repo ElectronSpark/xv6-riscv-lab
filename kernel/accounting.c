@@ -824,27 +824,58 @@ void kstats_profile_set(int enabled) {
                      __ATOMIC_RELAXED);
 }
 
+static uint64 kstats_copyout(uint64 uaddr, uint64 usize) {
+    struct kstats ks;
+    uint64 n;
+    uint64 off;
+    char zeros[64];
+
+    if (uaddr == 0 || usize == 0)
+        return -EINVAL;
+
+    kstats_collect(&ks);
+
+    n = usize < sizeof(ks) ? usize : sizeof(ks);
+    if (vm_copyout(current->vm, uaddr, (char *)&ks, n) < 0)
+        return -EFAULT;
+
+    if (usize > sizeof(ks)) {
+        memset(zeros, 0, sizeof(zeros));
+        for (off = sizeof(ks); off < usize; off += sizeof(zeros)) {
+            n = usize - off;
+            if (n > sizeof(zeros))
+                n = sizeof(zeros);
+            if (vm_copyout(current->vm, uaddr + off, zeros, n) < 0)
+                return -EFAULT;
+        }
+    }
+
+    return 0;
+}
+
 /*
  * sys_kstats(uaddr)
  *
- *   a0 = user pointer to struct kstats
- *
- * Returns 0 on success, negative errno on failure.
+ * Legacy one-argument ABI. Copy only the stable v1 prefix so old binaries with
+ * a smaller struct are not overrun when new diagnostic counters are appended.
  */
 uint64 sys_kstats(void) {
     uint64 uaddr;
     argaddr(0, &uaddr);
+    return kstats_copyout(uaddr, KSTATS_ABI_V1_SIZE);
+}
 
-    if (uaddr == 0)
-        return -EINVAL;
-
-    struct kstats ks;
-    kstats_collect(&ks);
-
-    if (vm_copyout(current->vm, uaddr, (char *)&ks, sizeof(ks)) < 0)
-        return -EFAULT;
-
-    return 0;
+/*
+ * sys_kstats2(uaddr, size)
+ *
+ * Size-aware ABI for append-only kstats growth.
+ */
+uint64 sys_kstats2(void) {
+    uint64 uaddr;
+    uint64 usize;
+    argaddr(0, &uaddr);
+    argaddr(1, &usize);
+    return kstats_copyout(uaddr, usize);
 }
 
 uint64 sys_kstatsctl(void) {

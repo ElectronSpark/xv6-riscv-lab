@@ -44,7 +44,7 @@ struct ntstatus {
         struct {
             int code : 16;
             int facility : 13;
-            int customer : 1;
+            unsigned int customer : 1;
             int severity : 2;
         };
         int v;

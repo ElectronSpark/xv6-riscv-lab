@@ -83,10 +83,6 @@ struct kstats {
     uint64 vfs_inode_cache_miss_revive_without_wlock;
     uint64 vfs_inode_cache_miss_dying;
     uint64 vfs_inode_cache_miss_invalid_destroying;
-    uint64 vfs_inode_cache_read_revive_attempts;
-    uint64 vfs_inode_cache_read_revive_success;
-    uint64 vfs_inode_cache_read_revive_lock_fail;
-    uint64 vfs_inode_cache_read_revive_stale;
     uint64 vfs_inode_cache_ticks;
     uint64 vfs_inode_load_calls;
     uint64 vfs_inode_load_success;
@@ -198,7 +194,16 @@ struct kstats {
     uint64 sys_openat_fileopen_ticks;
     uint64 sys_openat_fdalloc_calls;
     uint64 sys_openat_fdalloc_ticks;
+
+    /* ── Version 2 append-only counters ────────────────────────────── */
+    uint64 vfs_inode_cache_read_revive_attempts;
+    uint64 vfs_inode_cache_read_revive_success;
+    uint64 vfs_inode_cache_read_revive_lock_fail;
+    uint64 vfs_inode_cache_read_revive_stale;
 };
+
+#define KSTATS_ABI_VERSION 2
+#define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
 /* ------------------------------------------------------------------ */
 /*  Global atomic counters (defined in bio.c / e1000.c)               */

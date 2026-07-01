@@ -50,6 +50,8 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
     size_t status_size = HV_DXG_STATUS_BUF_SIZE;
     int cached = 0;
     int len = 0;
+    size_t total;
+    size_t out;
     uint32 host_luid_equiv_basis;
     struct hvdxg_winluid user_luid;
     uint32 ioctl_top_nr[HV_DXG_IOCTL_TIME_TOP];
@@ -3465,15 +3467,14 @@ static int hvdxg_read_status(cdev_t *cdev, bool user, void *buf,
     }
 
 copy_cached:
-    size_t total = cached && read_status_len != NULL ?
-                   *read_status_len : (size_t)len;
+    total = cached && read_status_len != NULL ? *read_status_len : (size_t)len;
     if (*read_offset >= total) {
         *read_emitted = 1;
         if (!cached)
             kvfree(status);
         return 0;
     }
-    size_t out = min(count, total - *read_offset);
+    out = min(count, total - *read_offset);
     if (either_copyout(user, (uint64)buf, status + *read_offset, out) < 0) {
         if (!cached)
             kvfree(status);

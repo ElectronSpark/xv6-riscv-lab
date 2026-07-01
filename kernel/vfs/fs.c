@@ -2218,6 +2218,7 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
     struct vfs_inode *inode = NULL;
     int profile = kstats_profile_enabled();
     uint64 dentry_inode_start = profile ? r_time() : 0;
+    uint64 rlock_start;
     KSTATS_PROFILE_INC(g_vfs_dentry_inode_calls);
     if (dentry == NULL) {
         if (profile)
@@ -2248,7 +2249,7 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
     }
 
 retry:
-    uint64 rlock_start = profile ? r_time() : 0;
+    rlock_start = profile ? r_time() : 0;
     if (profile)
         __atomic_add_fetch(&g_vfs_dentry_inode_rlock_calls, 1,
                            __ATOMIC_RELAXED);
