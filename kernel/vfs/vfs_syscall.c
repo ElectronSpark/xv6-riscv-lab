@@ -3850,6 +3850,55 @@ static const char *webkit_poll_fd_kind(struct vfs_file *f)
     return "regular";
 }
 
+static int poll_notify_full_wait_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("poll_notify_full_wait", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int poll_fd_requires_rescan(struct vfs_file *f)
+{
+    /*
+     * Default to the conservative rescan path unless the descriptor uses
+     * VFS file operations with a poll callback.  Known custom descriptors
+     * on the KDE path (AF_UNIX sockets and eventfd) notify kqueue through
+     * vfs_file_knote_notify(); fds without this shape keep the legacy 10ms
+     * safety net under poll_notify_full_wait=1.
+     */
+    if (f == NULL)
+        return 1;
+    if (f->ops != NULL && f->ops->poll != NULL)
+        return 0;
+    return 1;
+}
+
+static int poll_fd_set_requires_rescan(struct pollfd_k *pfds, int nfds)
+{
+    for (int i = 0; i < nfds; i++) {
+        struct vfs_file *f;
+
+        if (pfds[i].fd < 0)
+            continue;
+        f = __vfs_argfd(pfds[i].fd);
+        if (f == NULL)
+            return 1;
+        int requires_rescan = poll_fd_requires_rescan(f);
+        vfs_fput(f);
+        if (requires_rescan)
+            return 1;
+    }
+    return 0;
+}
+
 static uint chrome_unix_scm_count_locked(struct unix_sock *sk)
 {
     if (sk->scm_tail >= sk->scm_head)
@@ -4234,14 +4283,16 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     /* --- Blocking path: use kqueue for event-driven wait --- */
 
     /*
-     * Always use periodic rescan.  Some fd types (e.g. PTY master) have
-     * a poll callback for readiness checks but never call
-     * vfs_file_knote_notify(), so relying on kqueue alone would block
-     * forever when only those fds become ready.  The 10 ms rescan
-     * interval (POLL_RESCAN_MS) adds negligible overhead while
-     * guaranteeing correctness for all fd types.
+     * By default, keep the legacy periodic rescan.  Some fd types have a
+     * readiness callback but no kqueue notification path, so relying on
+     * kqueue alone can miss wakeups.  With poll_notify_full_wait=1, allow
+     * notify-backed fd sets to sleep until their real timeout while keeping
+     * the 10 ms safety net for unknown or non-notifying descriptors.
      */
     int has_unnotified_fds = 1;
+    int notify_full_wait = poll_notify_full_wait_enabled();
+    if (notify_full_wait)
+        has_unnotified_fds = poll_fd_set_requires_rescan(pfds, nfds);
 
     struct kqueue *kq = kqueue_alloc_private();
     if (kq == NULL) {
