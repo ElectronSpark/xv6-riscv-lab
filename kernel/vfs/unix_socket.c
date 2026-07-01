@@ -90,7 +90,14 @@ static ssize_t unix_file_readlink(struct vfs_file *file, char *buf,
 /* ========================================================================== */
 
 struct vfs_file_ops unix_socket_file_ops = {
-    .flags   = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
+    /*
+     * AF_UNIX has explicit kqueue notifications in many state transitions,
+     * but KDE/Konsole Wayland traces still show missed readiness transitions
+     * when poll_notify_full_wait removes the periodic poll rescan.  Keep this
+     * fd family on the rescan safety net until notification coverage is proven
+     * complete for stream/socketpair/SCM/connect/shutdown edges.
+     */
+    .flags   = 0,
     .read    = unix_file_read,
     .write   = unix_file_write,
     .llseek  = NULL,
