@@ -296,6 +296,8 @@ int thread_group_alloc(struct thread *leader) {
                      __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->oom_score_adj, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->chrome_trace_roles, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->konsole_prepty_active, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->konsole_prepty_pty_seen, 0, __ATOMIC_SEQ_CST);
 
     // Initialise per-process accounting and resource limits
     acct_init(tg);
@@ -347,6 +349,8 @@ int thread_group_alloc_kernel(struct thread_group **out_tg, pid_t tgid) {
                      __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->oom_score_adj, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->chrome_trace_roles, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->konsole_prepty_active, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->konsole_prepty_pty_seen, 0, __ATOMIC_SEQ_CST);
 
     *out_tg = tg;
     return 0;

@@ -48,6 +48,7 @@
 #include "vfs/stat.h"
 #include "cmdline.h"
 #include "proc/sched.h"
+#include "kstats.h"
 
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 
@@ -564,6 +565,7 @@ static int ptmx_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
 
     switch (cmd) {
     case TIOCGPTN: {
+        kstats_konsole_prepty_mark_pty();
         /* Return the slave PTY index (what N in /dev/pts/N) */
         int *idxp = (int *)arg;
         *idxp = pair->index;
@@ -573,6 +575,7 @@ static int ptmx_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
         /* PTY slave locking is not implemented; always succeed (no-op) */
         return 0;
     case TIOCGPTPEER:
+        kstats_konsole_prepty_mark_pty();
         return pts_install_peer_fd(pair, (int)(uint64)arg);
     default:
         /* Forward termios / winsize ioctls to the slave tty */

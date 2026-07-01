@@ -34,6 +34,7 @@
 #include "signal.h"
 #include "signo.h"
 #include "smp/percpu.h"
+#include "kstats.h"
 
 /* ------------------------------------------------------------------ */
 /*  Slab cache                                                        */
@@ -738,6 +739,7 @@ int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
         return 0;
     }
     case TIOCSCTTY: {
+        kstats_konsole_prepty_mark_pty();
         /* Set controlling terminal: the calling process must be a session
          * leader and must not already have a controlling terminal. */
         if (current->session == NULL)

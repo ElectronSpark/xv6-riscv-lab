@@ -194,6 +194,35 @@ uint64 g_sys_poll_wait_ready_calls;
 uint64 g_sys_poll_wait_ready_ticks;
 uint64 g_sys_poll_wait_timeout_calls;
 uint64 g_sys_poll_wait_timeout_ticks;
+uint64 g_konsole_prepty_poll_total_calls;
+uint64 g_konsole_prepty_poll_total_ticks;
+uint64 g_konsole_prepty_poll_wayland_calls;
+uint64 g_konsole_prepty_poll_wayland_ticks;
+uint64 g_konsole_prepty_poll_qdbus_calls;
+uint64 g_konsole_prepty_poll_qdbus_ticks;
+uint64 g_konsole_prepty_poll_unix_other_calls;
+uint64 g_konsole_prepty_poll_unix_other_ticks;
+uint64 g_konsole_prepty_poll_eventfd_calls;
+uint64 g_konsole_prepty_poll_eventfd_ticks;
+uint64 g_konsole_prepty_poll_pipe_calls;
+uint64 g_konsole_prepty_poll_pipe_ticks;
+uint64 g_konsole_prepty_poll_other_calls;
+uint64 g_konsole_prepty_poll_other_ticks;
+uint64 g_konsole_prepty_poll_ready_calls;
+uint64 g_konsole_prepty_poll_ready_ticks;
+uint64 g_konsole_prepty_poll_timeout_calls;
+uint64 g_konsole_prepty_poll_timeout_ticks;
+uint64 g_konsole_prepty_futex_wait_calls;
+uint64 g_konsole_prepty_futex_wait_ticks;
+uint64 g_konsole_prepty_futex_woken_calls;
+uint64 g_konsole_prepty_futex_woken_ticks;
+uint64 g_konsole_prepty_futex_timeout_calls;
+uint64 g_konsole_prepty_futex_timeout_ticks;
+uint64 g_konsole_prepty_futex_signal_calls;
+uint64 g_konsole_prepty_futex_signal_ticks;
+uint64 g_konsole_prepty_futex_other_calls;
+uint64 g_konsole_prepty_futex_other_ticks;
+uint64 g_konsole_prepty_pty_seen;
 int g_kstats_profile_enabled;
 
 int snprintf(char *buf, size_t size, const char *fmt, ...)
@@ -943,11 +972,151 @@ void kstats_collect(struct kstats *ks) {
         g_sys_poll_wait_timeout_calls;
     ks->sys_poll_wait_timeout_ticks =
         g_sys_poll_wait_timeout_ticks;
+    ks->konsole_prepty_poll_total_calls =
+        g_konsole_prepty_poll_total_calls;
+    ks->konsole_prepty_poll_total_ticks =
+        g_konsole_prepty_poll_total_ticks;
+    ks->konsole_prepty_poll_wayland_calls =
+        g_konsole_prepty_poll_wayland_calls;
+    ks->konsole_prepty_poll_wayland_ticks =
+        g_konsole_prepty_poll_wayland_ticks;
+    ks->konsole_prepty_poll_qdbus_calls =
+        g_konsole_prepty_poll_qdbus_calls;
+    ks->konsole_prepty_poll_qdbus_ticks =
+        g_konsole_prepty_poll_qdbus_ticks;
+    ks->konsole_prepty_poll_unix_other_calls =
+        g_konsole_prepty_poll_unix_other_calls;
+    ks->konsole_prepty_poll_unix_other_ticks =
+        g_konsole_prepty_poll_unix_other_ticks;
+    ks->konsole_prepty_poll_eventfd_calls =
+        g_konsole_prepty_poll_eventfd_calls;
+    ks->konsole_prepty_poll_eventfd_ticks =
+        g_konsole_prepty_poll_eventfd_ticks;
+    ks->konsole_prepty_poll_pipe_calls =
+        g_konsole_prepty_poll_pipe_calls;
+    ks->konsole_prepty_poll_pipe_ticks =
+        g_konsole_prepty_poll_pipe_ticks;
+    ks->konsole_prepty_poll_other_calls =
+        g_konsole_prepty_poll_other_calls;
+    ks->konsole_prepty_poll_other_ticks =
+        g_konsole_prepty_poll_other_ticks;
+    ks->konsole_prepty_poll_ready_calls =
+        g_konsole_prepty_poll_ready_calls;
+    ks->konsole_prepty_poll_ready_ticks =
+        g_konsole_prepty_poll_ready_ticks;
+    ks->konsole_prepty_poll_timeout_calls =
+        g_konsole_prepty_poll_timeout_calls;
+    ks->konsole_prepty_poll_timeout_ticks =
+        g_konsole_prepty_poll_timeout_ticks;
+    ks->konsole_prepty_futex_wait_calls =
+        g_konsole_prepty_futex_wait_calls;
+    ks->konsole_prepty_futex_wait_ticks =
+        g_konsole_prepty_futex_wait_ticks;
+    ks->konsole_prepty_futex_woken_calls =
+        g_konsole_prepty_futex_woken_calls;
+    ks->konsole_prepty_futex_woken_ticks =
+        g_konsole_prepty_futex_woken_ticks;
+    ks->konsole_prepty_futex_timeout_calls =
+        g_konsole_prepty_futex_timeout_calls;
+    ks->konsole_prepty_futex_timeout_ticks =
+        g_konsole_prepty_futex_timeout_ticks;
+    ks->konsole_prepty_futex_signal_calls =
+        g_konsole_prepty_futex_signal_calls;
+    ks->konsole_prepty_futex_signal_ticks =
+        g_konsole_prepty_futex_signal_ticks;
+    ks->konsole_prepty_futex_other_calls =
+        g_konsole_prepty_futex_other_calls;
+    ks->konsole_prepty_futex_other_ticks =
+        g_konsole_prepty_futex_other_ticks;
+    ks->konsole_prepty_pty_seen =
+        g_konsole_prepty_pty_seen;
 }
 
 void kstats_profile_set(int enabled) {
     __atomic_store_n(&g_kstats_profile_enabled, enabled != 0,
                      __ATOMIC_RELAXED);
+}
+
+static int kstats_konsole_path_match(const char *path)
+{
+    return path != NULL && strstr(path, "/konsole") != NULL;
+}
+
+int kstats_konsole_prepty_current(void)
+{
+    struct thread_group *tg;
+
+    if (!kstats_profile_enabled() || current == NULL)
+        return 0;
+    tg = current->thread_group;
+    if (tg == NULL)
+        return 0;
+    return __atomic_load_n(&tg->konsole_prepty_active,
+                           __ATOMIC_RELAXED) != 0 &&
+           __atomic_load_n(&tg->konsole_prepty_pty_seen,
+                           __ATOMIC_RELAXED) == 0;
+}
+
+void kstats_konsole_prepty_exec(const char *path)
+{
+    struct thread_group *tg;
+    int active;
+
+    if (current == NULL || current->thread_group == NULL)
+        return;
+    tg = current->thread_group;
+    active = kstats_konsole_path_match(path);
+    __atomic_store_n(&tg->konsole_prepty_active, active, __ATOMIC_RELAXED);
+    __atomic_store_n(&tg->konsole_prepty_pty_seen, 0, __ATOMIC_RELAXED);
+}
+
+void kstats_konsole_prepty_mark_pty(void)
+{
+    struct thread_group *tg;
+
+    if (current == NULL || current->thread_group == NULL)
+        return;
+    tg = current->thread_group;
+    if (__atomic_load_n(&tg->konsole_prepty_active, __ATOMIC_RELAXED) == 0)
+        return;
+    if (__atomic_exchange_n(&tg->konsole_prepty_pty_seen, 1,
+                            __ATOMIC_RELAXED) == 0) {
+        __atomic_add_fetch(&g_konsole_prepty_pty_seen, 1,
+                           __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&tg->konsole_prepty_active, 0, __ATOMIC_RELAXED);
+}
+
+void kstats_konsole_prepty_futex_account(int ret, uint64 wait_ticks)
+{
+    if (!kstats_konsole_prepty_current() || wait_ticks == 0)
+        return;
+
+    __atomic_add_fetch(&g_konsole_prepty_futex_wait_calls, 1,
+                       __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_konsole_prepty_futex_wait_ticks, wait_ticks,
+                       __ATOMIC_RELAXED);
+    if (ret == 0) {
+        __atomic_add_fetch(&g_konsole_prepty_futex_woken_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_futex_woken_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    } else if (ret == -ETIMEDOUT) {
+        __atomic_add_fetch(&g_konsole_prepty_futex_timeout_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_futex_timeout_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    } else if (ret == -EINTR) {
+        __atomic_add_fetch(&g_konsole_prepty_futex_signal_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_futex_signal_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    } else {
+        __atomic_add_fetch(&g_konsole_prepty_futex_other_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_futex_other_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
 }
 
 static uint64 kstats_copyout(uint64 uaddr, uint64 usize) {

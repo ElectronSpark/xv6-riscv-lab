@@ -4028,6 +4028,53 @@ static int poll_fd_set_requires_rescan(struct pollfd_k *pfds, int nfds)
     return 0;
 }
 
+static int kstats_poll_path_contains(const char *path, const char *needle)
+{
+    return path != NULL && path[0] != '\0' &&
+           strstr(path, needle) != NULL;
+}
+
+static void kstats_poll_unix_paths(struct vfs_file *f, char *self_path,
+                                   size_t self_len, char *peer_path,
+                                   size_t peer_len)
+{
+    struct unix_sock *sk;
+    struct unix_sock *peer = NULL;
+
+    if (self_len != 0)
+        self_path[0] = '\0';
+    if (peer_len != 0)
+        peer_path[0] = '\0';
+    if (f == NULL || f->ops != &unix_socket_file_ops ||
+        f->private_data == NULL)
+        return;
+
+    sk = (struct unix_sock *)f->private_data;
+    spin_lock(&sk->lock);
+    if (self_len != 0 && sk->bind_len != 0) {
+        size_t n = sk->bind_len < self_len - 1 ?
+            sk->bind_len : self_len - 1;
+        memmove(self_path, sk->bind_path, n);
+        self_path[n] = '\0';
+    }
+    peer = sk->peer;
+    if (peer != NULL)
+        unix_sock_get_ref(peer);
+    spin_unlock(&sk->lock);
+
+    if (peer != NULL) {
+        spin_lock(&peer->lock);
+        if (peer_len != 0 && peer->bind_len != 0) {
+            size_t n = peer->bind_len < peer_len - 1 ?
+                peer->bind_len : peer_len - 1;
+            memmove(peer_path, peer->bind_path, n);
+            peer_path[n] = '\0';
+        }
+        spin_unlock(&peer->lock);
+        unix_sock_put_ref(peer);
+    }
+}
+
 static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                                      uint64 wait_ticks,
                                      int has_unnotified_fds, int ready)
@@ -4038,6 +4085,13 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
     int saw_other = 0;
     int saw_notify = 0;
     int saw_rescan = has_unnotified_fds != 0;
+    int prepty = kstats_konsole_prepty_current();
+    int saw_prepty_wayland = 0;
+    int saw_prepty_qdbus = 0;
+    int saw_prepty_unix_other = 0;
+    int saw_prepty_eventfd = 0;
+    int saw_prepty_pipe = 0;
+    int saw_prepty_other = 0;
 
     if (!kstats_profile_enabled() || wait_ticks == 0)
         return;
@@ -4051,6 +4105,7 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
         f = __vfs_argfd(pfds[i].fd);
         if (f == NULL) {
             saw_other = 1;
+            saw_prepty_other = prepty;
             continue;
         }
 
@@ -4060,24 +4115,51 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
             saw_notify = 1;
 
         if (f->ops == &unix_socket_file_ops) {
+            char self_path[UNIX_PATH_MAX];
+            char peer_path[UNIX_PATH_MAX];
+
             saw_unix = 1;
+            if (prepty) {
+                kstats_poll_unix_paths(f, self_path, sizeof(self_path),
+                                       peer_path, sizeof(peer_path));
+                if (kstats_poll_path_contains(self_path, "wayland-") ||
+                    kstats_poll_path_contains(peer_path, "wayland-")) {
+                    saw_prepty_wayland = 1;
+                } else if (kstats_poll_path_contains(self_path, "/bus") ||
+                           kstats_poll_path_contains(peer_path, "/bus") ||
+                           kstats_poll_path_contains(self_path, "dbus") ||
+                           kstats_poll_path_contains(peer_path, "dbus")) {
+                    saw_prepty_qdbus = 1;
+                } else {
+                    saw_prepty_unix_other = 1;
+                }
+            }
         } else if (f->f_kind == VFS_FILE_KIND_PIPE) {
             saw_pipe = 1;
+            saw_prepty_pipe = prepty;
+        } else if (eventfd_file_is_eventfd(f)) {
+            saw_eventfd = 1;
+            saw_prepty_eventfd = prepty;
         } else if (f->ops != NULL && f->ops->readlink != NULL) {
             ssize_t n = f->ops->readlink(f, target, sizeof(target));
             if (n >= 0) {
                 size_t len = (n < (ssize_t)sizeof(target) - 1) ?
                     (size_t)n : sizeof(target) - 1;
                 target[len] = '\0';
-                if (strstr(target, "eventfd") != NULL)
+                if (strstr(target, "eventfd") != NULL) {
                     saw_eventfd = 1;
-                else
+                    saw_prepty_eventfd = prepty;
+                } else {
                     saw_other = 1;
+                    saw_prepty_other = prepty;
+                }
             } else {
                 saw_other = 1;
+                saw_prepty_other = prepty;
             }
         } else {
             saw_other = 1;
+            saw_prepty_other = prepty;
         }
 
         vfs_fput(f);
@@ -4128,6 +4210,60 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
         __atomic_add_fetch(&g_sys_poll_wait_timeout_calls, 1,
                            __ATOMIC_RELAXED);
         __atomic_add_fetch(&g_sys_poll_wait_timeout_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (!prepty)
+        return;
+
+    __atomic_add_fetch(&g_konsole_prepty_poll_total_calls, 1,
+                       __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_konsole_prepty_poll_total_ticks, wait_ticks,
+                       __ATOMIC_RELAXED);
+    if (saw_prepty_wayland) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_wayland_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_wayland_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_qdbus) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_qdbus_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_qdbus_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_unix_other) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_unix_other_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_unix_other_ticks,
+                           wait_ticks, __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_eventfd) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_eventfd_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_eventfd_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_pipe) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_pipe_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_pipe_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (saw_prepty_other) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_other_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_other_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    }
+    if (ready > 0) {
+        __atomic_add_fetch(&g_konsole_prepty_poll_ready_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_ready_ticks, wait_ticks,
+                           __ATOMIC_RELAXED);
+    } else {
+        __atomic_add_fetch(&g_konsole_prepty_poll_timeout_calls, 1,
+                           __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_konsole_prepty_poll_timeout_ticks, wait_ticks,
                            __ATOMIC_RELAXED);
     }
 }

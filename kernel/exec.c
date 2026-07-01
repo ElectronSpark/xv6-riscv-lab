@@ -1011,6 +1011,7 @@ int exec(char *path, char **argv, char **envp) {
     }
     safestrcpy(p->thread_group->exec_path, path,
                sizeof(p->thread_group->exec_path));
+    kstats_konsole_prepty_exec(path);
     thread_group_exec_snapshot_set(p->thread_group, snapshot_cmdline,
                                    snapshot_cmdline_len,
                                    snapshot_cmdline_addrs,

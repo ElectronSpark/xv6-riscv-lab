@@ -246,9 +246,40 @@ struct kstats {
     uint64 sys_poll_wait_ready_ticks;
     uint64 sys_poll_wait_timeout_calls;
     uint64 sys_poll_wait_timeout_ticks;
+
+    /* Version 5 append-only Konsole pre-PTY attribution counters. */
+    uint64 konsole_prepty_poll_total_calls;
+    uint64 konsole_prepty_poll_total_ticks;
+    uint64 konsole_prepty_poll_wayland_calls;
+    uint64 konsole_prepty_poll_wayland_ticks;
+    uint64 konsole_prepty_poll_qdbus_calls;
+    uint64 konsole_prepty_poll_qdbus_ticks;
+    uint64 konsole_prepty_poll_unix_other_calls;
+    uint64 konsole_prepty_poll_unix_other_ticks;
+    uint64 konsole_prepty_poll_eventfd_calls;
+    uint64 konsole_prepty_poll_eventfd_ticks;
+    uint64 konsole_prepty_poll_pipe_calls;
+    uint64 konsole_prepty_poll_pipe_ticks;
+    uint64 konsole_prepty_poll_other_calls;
+    uint64 konsole_prepty_poll_other_ticks;
+    uint64 konsole_prepty_poll_ready_calls;
+    uint64 konsole_prepty_poll_ready_ticks;
+    uint64 konsole_prepty_poll_timeout_calls;
+    uint64 konsole_prepty_poll_timeout_ticks;
+    uint64 konsole_prepty_futex_wait_calls;
+    uint64 konsole_prepty_futex_wait_ticks;
+    uint64 konsole_prepty_futex_woken_calls;
+    uint64 konsole_prepty_futex_woken_ticks;
+    uint64 konsole_prepty_futex_timeout_calls;
+    uint64 konsole_prepty_futex_timeout_ticks;
+    uint64 konsole_prepty_futex_signal_calls;
+    uint64 konsole_prepty_futex_signal_ticks;
+    uint64 konsole_prepty_futex_other_calls;
+    uint64 konsole_prepty_futex_other_ticks;
+    uint64 konsole_prepty_pty_seen;
 };
 
-#define KSTATS_ABI_VERSION 4
+#define KSTATS_ABI_VERSION 5
 #define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
 /* ------------------------------------------------------------------ */
@@ -441,6 +472,35 @@ extern uint64 g_sys_poll_wait_ready_calls;
 extern uint64 g_sys_poll_wait_ready_ticks;
 extern uint64 g_sys_poll_wait_timeout_calls;
 extern uint64 g_sys_poll_wait_timeout_ticks;
+extern uint64 g_konsole_prepty_poll_total_calls;
+extern uint64 g_konsole_prepty_poll_total_ticks;
+extern uint64 g_konsole_prepty_poll_wayland_calls;
+extern uint64 g_konsole_prepty_poll_wayland_ticks;
+extern uint64 g_konsole_prepty_poll_qdbus_calls;
+extern uint64 g_konsole_prepty_poll_qdbus_ticks;
+extern uint64 g_konsole_prepty_poll_unix_other_calls;
+extern uint64 g_konsole_prepty_poll_unix_other_ticks;
+extern uint64 g_konsole_prepty_poll_eventfd_calls;
+extern uint64 g_konsole_prepty_poll_eventfd_ticks;
+extern uint64 g_konsole_prepty_poll_pipe_calls;
+extern uint64 g_konsole_prepty_poll_pipe_ticks;
+extern uint64 g_konsole_prepty_poll_other_calls;
+extern uint64 g_konsole_prepty_poll_other_ticks;
+extern uint64 g_konsole_prepty_poll_ready_calls;
+extern uint64 g_konsole_prepty_poll_ready_ticks;
+extern uint64 g_konsole_prepty_poll_timeout_calls;
+extern uint64 g_konsole_prepty_poll_timeout_ticks;
+extern uint64 g_konsole_prepty_futex_wait_calls;
+extern uint64 g_konsole_prepty_futex_wait_ticks;
+extern uint64 g_konsole_prepty_futex_woken_calls;
+extern uint64 g_konsole_prepty_futex_woken_ticks;
+extern uint64 g_konsole_prepty_futex_timeout_calls;
+extern uint64 g_konsole_prepty_futex_timeout_ticks;
+extern uint64 g_konsole_prepty_futex_signal_calls;
+extern uint64 g_konsole_prepty_futex_signal_ticks;
+extern uint64 g_konsole_prepty_futex_other_calls;
+extern uint64 g_konsole_prepty_futex_other_ticks;
+extern uint64 g_konsole_prepty_pty_seen;
 extern int g_kstats_profile_enabled;
 
 static inline int kstats_profile_enabled(void) {
@@ -466,5 +526,9 @@ static inline int kstats_profile_enabled(void) {
 /** Fill a kstats struct with a point-in-time snapshot. */
 void kstats_collect(struct kstats *ks);
 void kstats_profile_set(int enabled);
+int kstats_konsole_prepty_current(void);
+void kstats_konsole_prepty_exec(const char *path);
+void kstats_konsole_prepty_mark_pty(void);
+void kstats_konsole_prepty_futex_account(int ret, uint64 wait_ticks);
 
 #endif /* __KERNEL_KSTATS_H */

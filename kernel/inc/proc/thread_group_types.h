@@ -145,6 +145,8 @@ struct thread_group {
     _Atomic int oom_score_adj;     /* /proc/<pid>/oom_score_adj */
     _Atomic int exec_in_progress;  /* procfs must not mix old argv with new VM */
     _Atomic uint32 chrome_trace_roles; /* Chromium utility-role trace markers */
+    _Atomic int konsole_prepty_active; /* kstats: Konsole before first PTY */
+    _Atomic int konsole_prepty_pty_seen; /* kstats: first PTY boundary seen */
 
     /* Per-process resource accounting (cumulative counters) */
     struct proc_acct acct;

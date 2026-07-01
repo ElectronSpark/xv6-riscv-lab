@@ -547,7 +547,9 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
     kde_futex_trace_key("wait-enqueue", uaddr, &key, FUTEX_WAIT, val,
                         bitset, 0);
     int trace_ready = kde_ready_trace_current();
+    int prepty_profile = kstats_konsole_prepty_current();
     uint64 wait_start_ms = trace_ready ? sched_timer_now_ms() : 0;
+    uint64 wait_start_ticks = prepty_profile ? r_time() : 0;
 
     struct timer_node tn = {0};
     uint64 deadline_ms = 0;
@@ -604,6 +606,9 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
 
     // Check if we were woken by a signal
     if (signal_pending(current)) {
+        if (prepty_profile)
+            kstats_konsole_prepty_futex_account(
+                -EINTR, r_time() - wait_start_ticks);
         kde_futex_trace_key("wait-signal", uaddr, &key, FUTEX_WAIT, val,
                             bitset, -EINTR);
         if (trace_ready)
@@ -614,6 +619,9 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
     }
 
     if (timeout_arm_failed) {
+        if (prepty_profile)
+            kstats_konsole_prepty_futex_account(
+                -ETIMEDOUT, r_time() - wait_start_ticks);
         kde_futex_trace_key("wait-timeout-arm-failed", uaddr, &key,
                             FUTEX_WAIT, val, bitset, -ETIMEDOUT);
         if (trace_ready)
@@ -625,6 +633,9 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
 
     if (has_timeout && still_linked &&
         sched_timer_now_ms() >= deadline_ms) {
+        if (prepty_profile)
+            kstats_konsole_prepty_futex_account(
+                -ETIMEDOUT, r_time() - wait_start_ticks);
         kde_futex_trace_key("wait-timeout", uaddr, &key, FUTEX_WAIT, val,
                             bitset, -ETIMEDOUT);
         if (trace_ready)
@@ -636,6 +647,9 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
 
     kde_futex_trace_key(still_linked ? "wait-spurious" : "wait-woken",
                         uaddr, &key, FUTEX_WAIT, val, bitset, 0);
+    if (prepty_profile)
+        kstats_konsole_prepty_futex_account(0,
+                                            r_time() - wait_start_ticks);
     if (trace_ready) {
         uint64 wait_ms = sched_timer_now_ms() - wait_start_ms;
         if (wait_ms >= 50)
