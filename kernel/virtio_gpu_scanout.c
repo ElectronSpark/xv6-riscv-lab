@@ -538,6 +538,11 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
         g->cursor_resource = NULL;
         g->cursor_resource_id = 0;
         g->cursor_visible = 0;
+        if (virtio_gpu_cmdline_enabled("virtio_gpu_cursor_trace")) {
+            printf("virtio_gpu: host-cursor-only suppress cursor upload "
+                   "size=%ux%u hot=%u,%u\n",
+                   width, height, hot_x, hot_y);
+        }
         return 0;
     }
 
@@ -635,6 +640,11 @@ int virtio_gpu_user_move_cursor(int32 x, int32 y, int visible)
         g->cursor_x = x;
         g->cursor_y = y;
         g->cursor_visible = 0;
+        if (virtio_gpu_cmdline_enabled("virtio_gpu_cursor_trace")) {
+            printf("virtio_gpu: host-cursor-only suppress cursor move "
+                   "x=%d y=%d visible=%d\n",
+                   x, y, visible);
+        }
         return 0;
     }
 
