@@ -4872,6 +4872,58 @@ static void kde_ready_trace_poll_fds(const char *phase, int nfds,
            notify_fds, rescan_fds, bad_fds, printed);
 }
 
+static void kde_ready_trace_kqueue_events(struct kevent *events, int nevents,
+                                          struct pollfd_k *pfds, int nfds,
+                                          uint64 wait_ms)
+{
+    if (!kde_ready_trace_current() || events == NULL || pfds == NULL ||
+        nevents <= 0)
+        return;
+
+    int max_detail = nevents < 16 ? nevents : 16;
+    for (int i = 0; i < max_detail; i++) {
+        uint64 udata = events[i].udata;
+        int idx = udata < (uint64)nfds ? (int)udata : -1;
+        int fd = idx >= 0 ? pfds[idx].fd : -1;
+        struct vfs_file *f = fd >= 0 ? __vfs_argfd(fd) : NULL;
+        int notify_backed = 0;
+        int requires_rescan = 1;
+        char target[128];
+        const char *kind = f != NULL ? webkit_poll_fd_kind(f) : "badfd";
+        const char *name;
+
+        if (f != NULL) {
+            notify_backed =
+                f->ops != NULL && f->ops->poll != NULL &&
+                (f->ops->flags & VFS_FILE_OPS_F_POLL_NOTIFY_BACKED) != 0;
+            requires_rescan = poll_fd_requires_rescan(f);
+        }
+        name = kde_ready_poll_target(f, target, sizeof(target));
+        printf("kde-ready-kqueue-event: pid=%d tgid=%d name=%s "
+               "idx=%d fd=%d ident=%lu filter=%d flags=0x%x "
+               "fflags=0x%x data=%ld udata=%lu wait_ms=%lu "
+               "events=0x%x revents=0x%x kind=%s notify_backed=%d "
+               "requires_rescan=%d target=%s\n",
+               current ? current->pid : -1, current ? current->tgid : -1,
+               current ? current->name : "(none)", idx, fd,
+               events[i].ident, events[i].filter, (uint)events[i].flags,
+               (uint)events[i].fflags, events[i].data, udata, wait_ms,
+               idx >= 0 ? (uint)pfds[idx].events : 0,
+               idx >= 0 ? (uint)pfds[idx].revents : 0, kind, notify_backed,
+               requires_rescan, name);
+        if (f != NULL)
+            vfs_fput(f);
+    }
+
+    if (nevents > max_detail) {
+        printf("kde-ready-kqueue-event-summary: pid=%d tgid=%d name=%s "
+               "nevents=%d printed=%d wait_ms=%lu\n",
+               current ? current->pid : -1, current ? current->tgid : -1,
+               current ? current->name : "(none)", nevents, max_detail,
+               wait_ms);
+    }
+}
+
 /*
  * sys_vfs_poll - event polling over file descriptors using kqueue
  *
@@ -5057,6 +5109,8 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
             uint64 wait_ms = sched_timer_now_ms() - wait_start_ms;
             int arg1 = has_unnotified_fds ? -kq_tmo - 1 : kq_tmo;
             if (wait_ms >= 50 || ready > 0 || nevents < 0) {
+                kde_ready_trace_kqueue_events(events, nevents, pfds, nfds,
+                                              wait_ms);
                 kde_ready_trace_event("poll-wait", -1, nfds, arg1, ready,
                                       wait_ms);
                 kde_ready_trace_poll_fds("poll-wait", nfds, timeout_ms,
