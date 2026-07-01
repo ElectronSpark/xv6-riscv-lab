@@ -247,6 +247,34 @@ uint64 g_konsole_prepty_poll_eventfd_only_calls;
 uint64 g_konsole_prepty_poll_eventfd_only_ticks;
 uint64 g_konsole_prepty_poll_pipe_only_calls;
 uint64 g_konsole_prepty_poll_pipe_only_ticks;
+uint64 g_konsole_prepty_poll_kqueue_wake_calls;
+uint64 g_konsole_prepty_poll_kqueue_wake_ticks;
+uint64 g_konsole_prepty_poll_timed_rescan_calls;
+uint64 g_konsole_prepty_poll_timed_rescan_ticks;
+uint64 g_konsole_prepty_poll_rescan_ready_calls;
+uint64 g_konsole_prepty_poll_rescan_ready_ticks;
+uint64 g_konsole_prepty_poll_event_ready_calls;
+uint64 g_konsole_prepty_poll_event_ready_ticks;
+uint64 g_konsole_prepty_poll_ready_wayland_calls;
+uint64 g_konsole_prepty_poll_ready_wayland_ticks;
+uint64 g_konsole_prepty_poll_ready_qdbus_calls;
+uint64 g_konsole_prepty_poll_ready_qdbus_ticks;
+uint64 g_konsole_prepty_poll_ready_unix_other_calls;
+uint64 g_konsole_prepty_poll_ready_unix_other_ticks;
+uint64 g_konsole_prepty_poll_ready_eventfd_calls;
+uint64 g_konsole_prepty_poll_ready_eventfd_ticks;
+uint64 g_konsole_prepty_poll_ready_pipe_calls;
+uint64 g_konsole_prepty_poll_ready_pipe_ticks;
+uint64 g_konsole_prepty_poll_rescan_ready_wayland_calls;
+uint64 g_konsole_prepty_poll_rescan_ready_wayland_ticks;
+uint64 g_konsole_prepty_poll_rescan_ready_qdbus_calls;
+uint64 g_konsole_prepty_poll_rescan_ready_qdbus_ticks;
+uint64 g_konsole_prepty_poll_rescan_ready_unix_other_calls;
+uint64 g_konsole_prepty_poll_rescan_ready_unix_other_ticks;
+uint64 g_konsole_prepty_poll_rescan_ready_eventfd_calls;
+uint64 g_konsole_prepty_poll_rescan_ready_eventfd_ticks;
+uint64 g_konsole_prepty_poll_rescan_ready_pipe_calls;
+uint64 g_konsole_prepty_poll_rescan_ready_pipe_ticks;
 int g_kstats_profile_enabled;
 
 int snprintf(char *buf, size_t size, const char *fmt, ...)
@@ -1102,6 +1130,62 @@ void kstats_collect(struct kstats *ks) {
         g_konsole_prepty_poll_pipe_only_calls;
     ks->konsole_prepty_poll_pipe_only_ticks =
         g_konsole_prepty_poll_pipe_only_ticks;
+    ks->konsole_prepty_poll_kqueue_wake_calls =
+        g_konsole_prepty_poll_kqueue_wake_calls;
+    ks->konsole_prepty_poll_kqueue_wake_ticks =
+        g_konsole_prepty_poll_kqueue_wake_ticks;
+    ks->konsole_prepty_poll_timed_rescan_calls =
+        g_konsole_prepty_poll_timed_rescan_calls;
+    ks->konsole_prepty_poll_timed_rescan_ticks =
+        g_konsole_prepty_poll_timed_rescan_ticks;
+    ks->konsole_prepty_poll_rescan_ready_calls =
+        g_konsole_prepty_poll_rescan_ready_calls;
+    ks->konsole_prepty_poll_rescan_ready_ticks =
+        g_konsole_prepty_poll_rescan_ready_ticks;
+    ks->konsole_prepty_poll_event_ready_calls =
+        g_konsole_prepty_poll_event_ready_calls;
+    ks->konsole_prepty_poll_event_ready_ticks =
+        g_konsole_prepty_poll_event_ready_ticks;
+    ks->konsole_prepty_poll_ready_wayland_calls =
+        g_konsole_prepty_poll_ready_wayland_calls;
+    ks->konsole_prepty_poll_ready_wayland_ticks =
+        g_konsole_prepty_poll_ready_wayland_ticks;
+    ks->konsole_prepty_poll_ready_qdbus_calls =
+        g_konsole_prepty_poll_ready_qdbus_calls;
+    ks->konsole_prepty_poll_ready_qdbus_ticks =
+        g_konsole_prepty_poll_ready_qdbus_ticks;
+    ks->konsole_prepty_poll_ready_unix_other_calls =
+        g_konsole_prepty_poll_ready_unix_other_calls;
+    ks->konsole_prepty_poll_ready_unix_other_ticks =
+        g_konsole_prepty_poll_ready_unix_other_ticks;
+    ks->konsole_prepty_poll_ready_eventfd_calls =
+        g_konsole_prepty_poll_ready_eventfd_calls;
+    ks->konsole_prepty_poll_ready_eventfd_ticks =
+        g_konsole_prepty_poll_ready_eventfd_ticks;
+    ks->konsole_prepty_poll_ready_pipe_calls =
+        g_konsole_prepty_poll_ready_pipe_calls;
+    ks->konsole_prepty_poll_ready_pipe_ticks =
+        g_konsole_prepty_poll_ready_pipe_ticks;
+    ks->konsole_prepty_poll_rescan_ready_wayland_calls =
+        g_konsole_prepty_poll_rescan_ready_wayland_calls;
+    ks->konsole_prepty_poll_rescan_ready_wayland_ticks =
+        g_konsole_prepty_poll_rescan_ready_wayland_ticks;
+    ks->konsole_prepty_poll_rescan_ready_qdbus_calls =
+        g_konsole_prepty_poll_rescan_ready_qdbus_calls;
+    ks->konsole_prepty_poll_rescan_ready_qdbus_ticks =
+        g_konsole_prepty_poll_rescan_ready_qdbus_ticks;
+    ks->konsole_prepty_poll_rescan_ready_unix_other_calls =
+        g_konsole_prepty_poll_rescan_ready_unix_other_calls;
+    ks->konsole_prepty_poll_rescan_ready_unix_other_ticks =
+        g_konsole_prepty_poll_rescan_ready_unix_other_ticks;
+    ks->konsole_prepty_poll_rescan_ready_eventfd_calls =
+        g_konsole_prepty_poll_rescan_ready_eventfd_calls;
+    ks->konsole_prepty_poll_rescan_ready_eventfd_ticks =
+        g_konsole_prepty_poll_rescan_ready_eventfd_ticks;
+    ks->konsole_prepty_poll_rescan_ready_pipe_calls =
+        g_konsole_prepty_poll_rescan_ready_pipe_calls;
+    ks->konsole_prepty_poll_rescan_ready_pipe_ticks =
+        g_konsole_prepty_poll_rescan_ready_pipe_ticks;
 }
 
 void kstats_profile_set(int enabled) {

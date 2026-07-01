@@ -4083,7 +4083,8 @@ static void kstats_poll_unix_paths(struct vfs_file *f, char *self_path,
 
 static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                                      uint64 wait_ticks,
-                                     int has_unnotified_fds, int ready)
+                                     int has_unnotified_fds, int ready,
+                                     int kq_nevents, int kq_timeout_ms)
 {
     int saw_unix = 0;
     int saw_eventfd = 0;
@@ -4098,6 +4099,13 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
     int saw_prepty_eventfd = 0;
     int saw_prepty_pipe = 0;
     int saw_prepty_other = 0;
+    int ready_prepty_wayland = 0;
+    int ready_prepty_qdbus = 0;
+    int ready_prepty_unix_other = 0;
+    int ready_prepty_eventfd = 0;
+    int ready_prepty_pipe = 0;
+    int woke_by_kqueue = kq_nevents > 0;
+    int timed_rescan = kq_nevents == 0 && kq_timeout_ms > 0;
     int current_qdbus_thread =
         kstats_current_thread_name_contains("QDBus");
 
@@ -4107,6 +4115,11 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
     for (int i = 0; i < nfds; i++) {
         struct vfs_file *f;
         char target[64];
+        int fd_prepty_wayland = 0;
+        int fd_prepty_qdbus = 0;
+        int fd_prepty_unix_other = 0;
+        int fd_prepty_eventfd = 0;
+        int fd_prepty_pipe = 0;
 
         if (pfds[i].fd < 0)
             continue;
@@ -4133,22 +4146,27 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                 if (kstats_poll_path_contains(self_path, "wayland-") ||
                     kstats_poll_path_contains(peer_path, "wayland-")) {
                     saw_prepty_wayland = 1;
+                    fd_prepty_wayland = 1;
                 } else if (current_qdbus_thread ||
                            kstats_poll_path_contains(self_path, "/bus") ||
                            kstats_poll_path_contains(peer_path, "/bus") ||
                            kstats_poll_path_contains(self_path, "dbus") ||
                            kstats_poll_path_contains(peer_path, "dbus")) {
                     saw_prepty_qdbus = 1;
+                    fd_prepty_qdbus = 1;
                 } else {
                     saw_prepty_unix_other = 1;
+                    fd_prepty_unix_other = 1;
                 }
             }
         } else if (f->f_kind == VFS_FILE_KIND_PIPE) {
             saw_pipe = 1;
             saw_prepty_pipe = prepty;
+            fd_prepty_pipe = prepty;
         } else if (eventfd_file_is_eventfd(f)) {
             saw_eventfd = 1;
             saw_prepty_eventfd = prepty;
+            fd_prepty_eventfd = prepty;
         } else if (f->ops != NULL && f->ops->readlink != NULL) {
             ssize_t n = f->ops->readlink(f, target, sizeof(target));
             if (n >= 0) {
@@ -4158,6 +4176,7 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                 if (strstr(target, "eventfd") != NULL) {
                     saw_eventfd = 1;
                     saw_prepty_eventfd = prepty;
+                    fd_prepty_eventfd = prepty;
                 } else {
                     saw_other = 1;
                     saw_prepty_other = prepty;
@@ -4169,6 +4188,19 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
         } else {
             saw_other = 1;
             saw_prepty_other = prepty;
+        }
+
+        if (prepty && pfds[i].revents != 0) {
+            if (fd_prepty_wayland)
+                ready_prepty_wayland = 1;
+            if (fd_prepty_qdbus)
+                ready_prepty_qdbus = 1;
+            if (fd_prepty_unix_other)
+                ready_prepty_unix_other = 1;
+            if (fd_prepty_eventfd)
+                ready_prepty_eventfd = 1;
+            if (fd_prepty_pipe)
+                ready_prepty_pipe = 1;
         }
 
         vfs_fput(f);
@@ -4357,6 +4389,50 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
         __atomic_add_fetch(&g_konsole_prepty_poll_pipe_only_ticks,
                            wait_ticks, __ATOMIC_RELAXED);
     }
+
+#define KSTATS_ADD_PREPTY_POLL(field)                                      \
+    do {                                                                   \
+        __atomic_add_fetch(&g_konsole_prepty_poll_##field##_calls, 1,      \
+                           __ATOMIC_RELAXED);                              \
+        __atomic_add_fetch(&g_konsole_prepty_poll_##field##_ticks,         \
+                           wait_ticks, __ATOMIC_RELAXED);                  \
+    } while (0)
+
+    if (woke_by_kqueue)
+        KSTATS_ADD_PREPTY_POLL(kqueue_wake);
+    if (timed_rescan)
+        KSTATS_ADD_PREPTY_POLL(timed_rescan);
+    if (ready > 0 && timed_rescan)
+        KSTATS_ADD_PREPTY_POLL(rescan_ready);
+    if (ready > 0 && woke_by_kqueue)
+        KSTATS_ADD_PREPTY_POLL(event_ready);
+    if (ready_prepty_wayland) {
+        KSTATS_ADD_PREPTY_POLL(ready_wayland);
+        if (timed_rescan)
+            KSTATS_ADD_PREPTY_POLL(rescan_ready_wayland);
+    }
+    if (ready_prepty_qdbus) {
+        KSTATS_ADD_PREPTY_POLL(ready_qdbus);
+        if (timed_rescan)
+            KSTATS_ADD_PREPTY_POLL(rescan_ready_qdbus);
+    }
+    if (ready_prepty_unix_other) {
+        KSTATS_ADD_PREPTY_POLL(ready_unix_other);
+        if (timed_rescan)
+            KSTATS_ADD_PREPTY_POLL(rescan_ready_unix_other);
+    }
+    if (ready_prepty_eventfd) {
+        KSTATS_ADD_PREPTY_POLL(ready_eventfd);
+        if (timed_rescan)
+            KSTATS_ADD_PREPTY_POLL(rescan_ready_eventfd);
+    }
+    if (ready_prepty_pipe) {
+        KSTATS_ADD_PREPTY_POLL(ready_pipe);
+        if (timed_rescan)
+            KSTATS_ADD_PREPTY_POLL(rescan_ready_pipe);
+    }
+
+#undef KSTATS_ADD_PREPTY_POLL
 }
 
 static uint chrome_unix_scm_count_locked(struct unix_sock *sk)
@@ -4974,7 +5050,8 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
         ready = __vfs_poll_scan(pfds, nfds);
         if (profile_ready)
             kstats_poll_wait_account(pfds, nfds, r_time() - wait_start_ticks,
-                                     has_unnotified_fds, ready);
+                                     has_unnotified_fds, ready, nevents,
+                                     kq_tmo);
         webkit_poll_summary("wait", nfds, timeout_ms, ready, pfds);
         if (trace_ready) {
             uint64 wait_ms = sched_timer_now_ms() - wait_start_ms;
