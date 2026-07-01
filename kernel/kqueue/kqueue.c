@@ -14,6 +14,7 @@
 #include "cmdline.h"
 #include "param.h"
 #include "lock/spinlock.h"
+#include "lock/rcu.h"
 #include "proc/thread.h"
 #include "proc/tq.h"
 #include "proc/sched.h"
@@ -961,8 +962,38 @@ struct __kq_timed_data {
     spinlock_t *lock;
     struct timer_node *tn;
     uint64 timeout_ms;
+    int pid;
+    int trace;
     bool timer_armed;
+    int timer_fired;
+    int wake_valid;
+    int wake_sleeping;
+    uint64 fired_ms;
 };
+
+static void __kq_timed_timer_cb(struct timer_node *tn) {
+    struct __kq_timed_data *d = (struct __kq_timed_data *)tn->data;
+    if (d == NULL || d->pid <= 0)
+        return;
+
+    if (d->trace) {
+        __atomic_store_n(&d->fired_ms, sched_timer_now_ms(),
+                         __ATOMIC_RELAXED);
+        __atomic_store_n(&d->timer_fired, 1, __ATOMIC_RELEASE);
+    }
+
+    rcu_read_lock();
+    struct thread *live = NULL;
+    int valid = get_pid_thread(d->pid, &live) == 0 && live != NULL;
+    int sleeping = valid && THREAD_SLEEPING(live);
+    if (d->trace) {
+        __atomic_store_n(&d->wake_valid, valid, __ATOMIC_RELAXED);
+        __atomic_store_n(&d->wake_sleeping, sleeping, __ATOMIC_RELAXED);
+    }
+    if (sleeping)
+        wakeup(live);
+    rcu_read_unlock();
+}
 
 /*
  * Sleep callback: arm a one-shot timer that wakes the *current* thread
@@ -972,7 +1003,12 @@ struct __kq_timed_data {
  */
 static int __kq_timed_sleep_cb(void *data) {
     struct __kq_timed_data *d = (struct __kq_timed_data *)data;
-    d->timer_armed = sched_timer_set(d->tn, d->timeout_ms) == 0;
+    if (d->trace) {
+        d->timer_armed = sched_timer_set_cb(d->tn, d->timeout_ms,
+                                            __kq_timed_timer_cb, d) == 0;
+    } else {
+        d->timer_armed = sched_timer_set(d->tn, d->timeout_ms) == 0;
+    }
     int status = spin_sleep_cb(d->lock);
     if (!d->timer_armed)
         scheduler_wakeup(current);
@@ -1161,20 +1197,43 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                 .lock = &kq->lock,
                 .tn = &__tn,
                 .timeout_ms = timeout_ms,
+                .pid = current->pid,
+                .trace = trace_spin,
             };
             uint64 wait_start_ms = trace_spin ? sched_timer_now_ms() : 0;
-            tq_wait_in_state_cb(&kq->waitq, __kq_timed_sleep_cb,
-                                __kq_timed_wakeup_cb, &__td, NULL,
-                                THREAD_INTERRUPTIBLE);
+            int wait_ret =
+                tq_wait_in_state_cb(&kq->waitq, __kq_timed_sleep_cb,
+                                    __kq_timed_wakeup_cb, &__td, NULL,
+                                    THREAD_INTERRUPTIBLE);
             if (trace_spin &&
                 (trace_iter <= 16 || (trace_iter & 0x3ff) == 0)) {
                 uint64 wait_end_ms = sched_timer_now_ms();
+                int timer_fired =
+                    __atomic_load_n(&__td.timer_fired, __ATOMIC_ACQUIRE);
+                uint64 fired_ms =
+                    __atomic_load_n(&__td.fired_ms, __ATOMIC_RELAXED);
+                int wake_valid =
+                    __atomic_load_n(&__td.wake_valid, __ATOMIC_RELAXED);
+                int wake_sleeping =
+                    __atomic_load_n(&__td.wake_sleeping, __ATOMIC_RELAXED);
+                uint64 dispatch_ms =
+                    (timer_fired && fired_ms != 0 && wait_end_ms >= fired_ms)
+                        ? wait_end_ms - fired_ms
+                        : 0;
+                uint64 overrun_ms =
+                    (wait_end_ms >= wait_start_ms + (uint64)timeout_ms)
+                        ? wait_end_ms - wait_start_ms - (uint64)timeout_ms
+                        : 0;
                 printf("kde-kqueue-wait: wake pid=%d name=%s iter=%d "
-                       "timeout=%d slept_ms=%lu nready=%d closed=%d "
-                       "elapsed_ms=%lu\n",
+                       "timeout=%d wait_ret=%d slept_ms=%lu nready=%d closed=%d "
+                       "elapsed_ms=%lu timer_armed=%d timer_fired=%d "
+                       "wake_valid=%d wake_sleeping=%d dispatch_ms=%lu "
+                       "overrun_ms=%lu\n",
                        current->pid, current->name, trace_iter, timeout_ms,
-                       wait_end_ms - wait_start_ms, kq->nready, kq->closed,
-                       wait_end_ms - trace_start_ms);
+                       wait_ret, wait_end_ms - wait_start_ms, kq->nready,
+                       kq->closed, wait_end_ms - trace_start_ms,
+                       __td.timer_armed, timer_fired, wake_valid,
+                       wake_sleeping, dispatch_ms, overrun_ms);
             }
             /* After wakeup, timeout or event or signal — drain the
              * ready list on the next iteration.  If it's still empty
