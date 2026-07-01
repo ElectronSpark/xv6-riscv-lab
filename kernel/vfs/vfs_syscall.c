@@ -3868,15 +3868,15 @@ static int poll_notify_full_wait_enabled(void)
 static int poll_fd_requires_rescan(struct vfs_file *f)
 {
     /*
-     * Default to the conservative rescan path unless the descriptor uses
-     * VFS file operations with a poll callback.  Known custom descriptors
-     * on the KDE path (AF_UNIX sockets and eventfd) notify kqueue through
-     * vfs_file_knote_notify(); fds without this shape keep the legacy 10ms
-     * safety net under poll_notify_full_wait=1.
+     * Having a poll callback only proves the fd can answer readiness queries;
+     * it does not prove every readiness transition wakes kqueue waiters.  PTY
+     * and TTY fds are the important counterexample.  Only fd families marked
+     * as notify-backed may skip the legacy 10ms rescan safety net.
      */
     if (f == NULL)
         return 1;
-    if (f->ops != NULL && f->ops->poll != NULL)
+    if (f->ops != NULL && f->ops->poll != NULL &&
+        (f->ops->flags & VFS_FILE_OPS_F_POLL_NOTIFY_BACKED) != 0)
         return 0;
     return 1;
 }
@@ -4286,8 +4286,8 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
      * By default, keep the legacy periodic rescan.  Some fd types have a
      * readiness callback but no kqueue notification path, so relying on
      * kqueue alone can miss wakeups.  With poll_notify_full_wait=1, allow
-     * notify-backed fd sets to sleep until their real timeout while keeping
-     * the 10 ms safety net for unknown or non-notifying descriptors.
+     * explicitly notify-backed fd sets to sleep until their real timeout while
+     * keeping the 10 ms safety net for unknown or non-notifying descriptors.
      */
     int has_unnotified_fds = 1;
     int notify_full_wait = poll_notify_full_wait_enabled();
@@ -8002,6 +8002,7 @@ static ssize_t inotify_readlink(struct vfs_file *file, char *buf,
 }
 
 static struct vfs_file_ops inotify_file_ops = {
+    .flags = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read = inotify_read,
     .poll = inotify_poll,
     .release = inotify_release,

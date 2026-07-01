@@ -420,6 +420,7 @@ static ssize_t timerfd_readlink(struct vfs_file *file, char *buf,
 }
 
 static struct vfs_file_ops timerfd_file_ops = {
+    .flags   = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read    = timerfd_read,
     .poll    = timerfd_poll,
     .release = timerfd_release,

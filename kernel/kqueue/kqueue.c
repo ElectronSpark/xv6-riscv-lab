@@ -49,6 +49,7 @@ extern struct knote_ops knote_vnode_ops;
 
 /* File operations for a kqueue file descriptor */
 static struct vfs_file_ops kqueue_file_ops = {
+    .flags = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read = NULL,
     .write = NULL,
     .llseek = NULL,

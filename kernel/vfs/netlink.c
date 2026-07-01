@@ -101,6 +101,7 @@ static int netlink_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg);
 /* ========================================================================== */
 
 struct vfs_file_ops netlink_socket_file_ops = {
+    .flags   = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read    = netlink_file_read,
     .write   = netlink_file_write,
     .llseek  = NULL,

@@ -89,6 +89,7 @@ static ssize_t pidfd_readlink(struct vfs_file *file, char *buf,
 }
 
 static struct vfs_file_ops pidfd_file_ops = {
+    .flags = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .poll = pidfd_poll,
     .release = pidfd_release,
     .readlink = pidfd_readlink,

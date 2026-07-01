@@ -1951,6 +1951,7 @@ static int sock_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
 }
 
 static struct vfs_file_ops lwip_socket_file_ops = {
+    .flags   = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read    = sock_file_read,
     .write   = sock_file_write,
     .llseek  = NULL,

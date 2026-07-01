@@ -444,7 +444,11 @@ struct vfs_file {
 
 struct iov_iter; /* forward declaration — full definition in vfs/uio.h */
 
+#define VFS_FILE_OPS_F_POLL_NOTIFY_BACKED 0x1u
+
 struct vfs_file_ops {
+    uint flags;
+
     ssize_t (*read)(struct vfs_file *file, char *buf, size_t count, bool user);
     ssize_t (*write)(struct vfs_file *file, const char *buf, size_t count,
                      bool user);

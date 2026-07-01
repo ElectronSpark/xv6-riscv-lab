@@ -471,6 +471,7 @@ static int __pipe_file_poll(struct vfs_file *file, short events) {
 }
 
 static struct vfs_file_ops pipe_file_ops = {
+    .flags = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read = __pipe_file_read,
     .write = __pipe_file_write,
     .llseek = NULL,

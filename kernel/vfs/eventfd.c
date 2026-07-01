@@ -192,6 +192,7 @@ static ssize_t eventfd_readlink(struct vfs_file *file, char *buf,
 }
 
 static struct vfs_file_ops eventfd_file_ops = {
+    .flags   = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read    = eventfd_read,
     .write   = eventfd_write,
     .poll    = eventfd_poll,

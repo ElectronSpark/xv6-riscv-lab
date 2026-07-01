@@ -90,6 +90,7 @@ static ssize_t unix_file_readlink(struct vfs_file *file, char *buf,
 /* ========================================================================== */
 
 struct vfs_file_ops unix_socket_file_ops = {
+    .flags   = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read    = unix_file_read,
     .write   = unix_file_write,
     .llseek  = NULL,
