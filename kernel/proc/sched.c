@@ -21,7 +21,7 @@
 #include "smp/ipi.h"
 #include "mm/vm.h"
 #include "string.h"
-
+#include "kde_ready_trace.h"
 /* ================================================================== */
 /*  Linux-style global load averages (1s / 5s / 16s)                  */
 /* ================================================================== */
@@ -471,6 +471,9 @@ static void __do_scheduler_wakeup(struct thread *p, bool from_stopped) {
     }
 
     // Now we hold pi_lock and the process is in a wakeable state.
+    // Opt-in diagnostic stamp for Konsole-scoped wake-to-run latency;
+    // field writes only, no behavior change.
+    kde_wake_to_run_trace_note_wake(p);
     // We'll try to acquire rq_lock while holding pi_lock.
     // Use trylock to avoid lock convoy when many processes wake the same
     // target.
@@ -890,4 +893,8 @@ void context_switch_finish(struct thread *prev, struct thread *next, int intr) {
     }
 
     rq_unlock_current_irqrestore(intr);
+
+    // Opt-in diagnostic: report wake-to-run latency for Konsole-scoped
+    // threads now that all scheduler locks are released.
+    kde_wake_to_run_trace_note_run(next);
 }

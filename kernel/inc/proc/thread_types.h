@@ -151,6 +151,14 @@ struct thread {
     spinlock_t kqueue_proc_lock;
     list_node_t kqueue_proc_knotes;
 
+    /* kde_wake_to_run_trace=1 diagnostic only: wakeup stamp for
+     * Konsole-scoped threads, consumed when the thread next runs.
+     * Written under sched_entity->pi_lock in the wakeup path. */
+    uint64 kde_wake_trace_ms;
+    int kde_wake_trace_waker_pid;
+    int kde_wake_trace_waker_irq;
+    char kde_wake_trace_waker[16];
+
     // ===== FPU state (lazy save/restore, only for threads that use FP) =====
     struct fpu_state *fpu_state; // FP save area (NULL until first FP use)
     uint64 fpu_seq;              // FPU ownership seq when this thread last took ownership

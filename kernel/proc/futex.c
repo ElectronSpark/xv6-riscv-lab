@@ -197,6 +197,24 @@ static void kde_futex_trace_key(const char *phase, uint64 uaddr,
            key ? key->addr : 0, op, val, bitset, ret);
 }
 
+static void kde_futex_trace_wait_params(uint64 uaddr,
+                                        const struct futex_key *key,
+                                        uint32 val, uint32 bitset,
+                                        bool has_timeout, uint64 timeout_ms)
+{
+    if ((!kde_futex_trace_enabled() && !kde_ipc_trace_enabled()) ||
+        !kde_futex_trace_current())
+        return;
+
+    printf("kde-futex-trace: ms=%lu phase=wait-params pid=%d tgid=%d "
+           "name=%s uaddr=0x%lx key_vm=%p key_addr=0x%lx op=%d "
+           "val=0x%x bitset=0x%x ret=0 has_timeout=%d timeout_ms=%lu\n",
+           sched_timer_now_ms(), current->pid, current->tgid,
+           current->name, uaddr, key ? key->vm : NULL,
+           key ? key->addr : 0, FUTEX_WAIT, val, bitset,
+           has_timeout ? 1 : 0, timeout_ms);
+}
+
 struct robust_list_user {
     uint64 next;
 };
@@ -546,6 +564,8 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset, bool private,
     bucket->head = &waiter;
     kde_futex_trace_key("wait-enqueue", uaddr, &key, FUTEX_WAIT, val,
                         bitset, 0);
+    kde_futex_trace_wait_params(uaddr, &key, val, bitset, has_timeout,
+                                timeout_ms);
     int trace_ready = kde_ready_trace_current();
     int prepty_profile = kstats_konsole_prepty_current();
     uint64 wait_start_ms = trace_ready ? sched_timer_now_ms() : 0;
