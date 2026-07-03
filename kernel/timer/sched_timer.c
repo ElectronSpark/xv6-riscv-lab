@@ -13,6 +13,7 @@
 #include "timer/timer.h"
 #include "proc/workqueue.h"
 #include "timer/sched_timer_private.h"
+#include "smp/percpu.h"
 
 struct sched_timer_work {
     struct timer_node tn;
@@ -112,6 +113,28 @@ void sched_timer_tick(void) {
 
 uint64 sched_timer_now_ms(void) {
     return sched_timer_refresh_ms();
+}
+
+void sched_timer_starve_probe_snapshot(
+    struct sched_timer_starve_probe_snapshot *out, uint64 now_ms) {
+    if (out == NULL)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->lock_owner_cpu = -1;
+    out->current_tick =
+        __atomic_load_n(&__sched_timer.current_tick, __ATOMIC_ACQUIRE);
+    out->next_tick =
+        __atomic_load_n(&__sched_timer.next_tick, __ATOMIC_ACQUIRE);
+
+    struct cpu_local *owner =
+        __atomic_load_n(&__sched_timer.lock.cpu, __ATOMIC_ACQUIRE);
+    if (owner != NULL) {
+        out->lock_owner_cpu = cpuid_from_tp((uint64)owner);
+        uint64 acquired = __atomic_load_n(&__sched_timer.lock_acquired_ms,
+                                          __ATOMIC_ACQUIRE);
+        if (acquired != 0 && now_ms >= acquired)
+            out->lock_hold_ms = now_ms - acquired;
+    }
 }
 
 void __do_timer_tick(void) {

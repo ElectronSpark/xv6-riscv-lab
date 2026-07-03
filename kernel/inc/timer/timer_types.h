@@ -15,6 +15,7 @@ struct timer_root {
         uint64 valid : 1;
     };
     spinlock_t lock;
+    uint64 lock_acquired_ms;
 };
 
 struct timer_node {

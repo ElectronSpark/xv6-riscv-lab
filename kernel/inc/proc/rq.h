@@ -133,6 +133,25 @@ int rq_add_wake_list(int cpu_id, struct sched_entity *se);
 struct sched_entity *rq_pop_all_wake_list(struct rq_percpu *rq_pc);
 void rq_flush_wake_list(int cpu_id);
 
+struct rq_starve_probe_snapshot {
+    int active;
+    int halted;
+    int needs_resched;
+    int current_pid;
+    int current_state;
+    char current_name[16];
+    uint64 nr_queued;
+    int lock_owner_cpu;
+    uint64 lock_hold_ms;
+    uint64 wake_list_depth;
+    uint64 try_fail_seq;
+    uint64 try_fail_age_ms;
+};
+
+void rq_starve_probe_snapshot_cpu(int cpu_id,
+                                  struct rq_starve_probe_snapshot *out,
+                                  uint64 now_ms);
+
 // Check if a CPU is allowed by the task's affinity mask
 bool rq_cpu_allowed(struct sched_entity *se, int cpu_id);
 

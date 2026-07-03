@@ -312,6 +312,16 @@ static inline void arch_wait_for_interrupt(void) {
     asm volatile("wfi" ::: "memory");
 }
 
+/* Idle halt counterpart of the x86 sti;hlt;cli sequence.  RISC-V WFI
+ * resumes when an interrupt becomes pending even while globally disabled,
+ * so no enable-before-wait race exists; briefly enable afterwards to
+ * service the pending wake.  Call and return with interrupts disabled. */
+static inline void arch_idle_halt(void) {
+    asm volatile("wfi" ::: "memory");
+    asm volatile("csrs sstatus, %0" : : "r"(1UL << 1) : "memory");
+    asm volatile("csrc sstatus, %0" : : "r"(1UL << 1) : "memory");
+}
+
 // flush the TLB.
 static inline void sfence_vma() {
     // the zero, zero means flush all TLB entries.

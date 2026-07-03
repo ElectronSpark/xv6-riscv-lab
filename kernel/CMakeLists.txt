@@ -53,6 +53,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/power.c
     ${KERNEL_DIR}/cmdline.c
     ${KERNEL_DIR}/coredump.c
+    ${KERNEL_DIR}/sched_starve_probe.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})

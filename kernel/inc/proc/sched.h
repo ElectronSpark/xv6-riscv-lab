@@ -25,6 +25,12 @@ void scheduler_wakeup_timeout(struct thread *p);
 void scheduler_wakeup_killable(struct thread *p);
 void scheduler_wakeup_interruptible(struct thread *p);
 void scheduler_wakeup_stopped(struct thread *p);
+
+/* Idle-entry work stealing: called from the idle loop (no locks held)
+ * before the CPU halts.  Pulls one runnable EEVDF entity from a busy
+ * CPU onto @cpu's rq when the regular balance modes are unreachable.
+ * Returns 1 if local work exists or was pulled, 0 to allow halting. */
+int eevdf_idle_pull(int cpu);
 void sleep_on_chan(void *chan, spinlock_t *lk);
 int sleep_on_chan_interruptible(void *chan, spinlock_t *lk);
 void wakeup_on_chan(void *chan);
@@ -52,6 +58,16 @@ int sched_timer_add_deadline(void (*callback)(void *), void *data,
 int sched_timer_add(void (*callback)(void *), void *data, uint64 ms);
 int sched_timer_set_cb(struct timer_node *tn, uint64 ms,
                        void (*callback)(struct timer_node *), void *data);
+
+struct sched_timer_starve_probe_snapshot {
+    int lock_owner_cpu;
+    uint64 lock_hold_ms;
+    uint64 current_tick;
+    uint64 next_tick;
+};
+
+void sched_timer_starve_probe_snapshot(
+    struct sched_timer_starve_probe_snapshot *out, uint64 now_ms);
 
 // Wake up a sleeping threads
 // This function will aquire the locks of the threads and the sched lock

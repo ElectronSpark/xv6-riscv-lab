@@ -19,6 +19,9 @@
 #include "errno.h"
 #include "compiler.h"
 #include "smp/ipi.h"
+#include "timer/timer.h"
+#include "cmdline.h"
+#include "sched_starve_probe.h"
 
 /** @brief Runtime-sized per-CPU run queue data array. */
 static struct rq_percpu *rq_percpu_data;
@@ -68,6 +71,30 @@ static struct rq_global {
     uint64 active_cpu_mask;                /**< Bitmask of active CPUs */
 } rq_global;
 
+struct rq_starve_probe_cpu_state {
+    uint64 lock_acquired_ms;
+    uint64 try_fail_seq;
+    uint64 try_fail_ms;
+} __ALIGNED_CACHELINE;
+
+static struct rq_starve_probe_cpu_state rq_probe_cpu_state[MAX_CPUS]
+    __ALIGNED_CACHELINE;
+
+#define RQ_OBJECT_HASH_BITS 13
+#define RQ_OBJECT_HASH_SIZE (1UL << RQ_OBJECT_HASH_BITS)
+#define RQ_OBJECT_HASH_MASK (RQ_OBJECT_HASH_SIZE - 1UL)
+BUILD_BUG_ON(RQ_OBJECT_HASH_SIZE <= PRIORITY_MAINLEVELS * MAX_CPUS);
+
+struct rq_object_slot {
+    struct rq *rq;
+    int cpu_id;
+    int class_id;
+};
+
+static struct rq_object_slot rq_object_hash[RQ_OBJECT_HASH_SIZE];
+static uint64 rq_object_min = ~0ULL;
+static uint64 rq_object_max;
+
 /**
  * @brief Check if the RQ subsystem is initialized.
  * @return true if initialized, false otherwise.
@@ -87,6 +114,102 @@ static int __rq_lock_held_raw(int cpu_id) {
 }
 
 #define __rq_lock_held(cpu_id) __rq_lock_held_raw(cpu_id)
+
+static uint64 rq_object_hash_index(uint64 addr) {
+    uint64 key = addr >> 6;
+    key ^= key >> 11;
+    key ^= key >> 22;
+    return key & RQ_OBJECT_HASH_MASK;
+}
+
+static void rq_object_register_lookup(struct rq *rq, int cpu_id, int class_id) {
+    uint64 addr = (uint64)rq;
+    uint64 idx = rq_object_hash_index(addr);
+
+    for (uint64 probe = 0; probe < RQ_OBJECT_HASH_SIZE; probe++) {
+        struct rq_object_slot *slot = &rq_object_hash[idx];
+        if (slot->rq == NULL) {
+            slot->rq = rq;
+            slot->cpu_id = cpu_id;
+            slot->class_id = class_id;
+            if (addr < rq_object_min) {
+                rq_object_min = addr;
+            }
+            if (addr + sizeof(*rq) > rq_object_max) {
+                rq_object_max = addr + sizeof(*rq);
+            }
+            return;
+        }
+        if (slot->rq == rq) {
+            panic("rq_register: duplicate rq object %p\n", rq);
+        }
+        idx = (idx + 1) & RQ_OBJECT_HASH_MASK;
+    }
+
+    panic("rq_register: rq object lookup table full\n");
+}
+
+static int rq_identify_linear_scan_enabled(void) {
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("rq_identify_linear_scan", value,
+                                    sizeof(value)) == 0 &&
+                  cmdline_value_is_true(value);
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static int rq_identify_object_linear(void *ptr, int *cpu_id, int *class_id) {
+    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
+        for (int cls = 0; cls < PRIORITY_MAINLEVELS; cls++) {
+            struct rq *rq = __get_rq_for_cpu(cls, cpu);
+            if (rq == (struct rq *)ptr) {
+                if (cpu_id != NULL) {
+                    *cpu_id = cpu;
+                }
+                if (class_id != NULL) {
+                    *class_id = cls;
+                }
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static void rq_probe_note_lock_acquired(int cpu_id) {
+    if (!sched_starve_probe_is_enabled())
+        return;
+    if (cpu_id < 0 || cpu_id >= MAX_CPUS)
+        return;
+    __atomic_store_n(&rq_probe_cpu_state[cpu_id].lock_acquired_ms, get_jiffs(),
+                     __ATOMIC_RELEASE);
+}
+
+static void rq_probe_note_lock_released(int cpu_id) {
+    if (!sched_starve_probe_is_enabled())
+        return;
+    if (cpu_id < 0 || cpu_id >= MAX_CPUS)
+        return;
+    __atomic_store_n(&rq_probe_cpu_state[cpu_id].lock_acquired_ms, 0,
+                     __ATOMIC_RELEASE);
+}
+
+static void rq_probe_note_try_fail(int cpu_id) {
+    if (!sched_starve_probe_is_enabled())
+        return;
+    if (cpu_id < 0 || cpu_id >= MAX_CPUS)
+        return;
+    __atomic_fetch_add(&rq_probe_cpu_state[cpu_id].try_fail_seq, 1,
+                       __ATOMIC_RELAXED);
+    __atomic_store_n(&rq_probe_cpu_state[cpu_id].try_fail_ms, get_jiffs(),
+                     __ATOMIC_RELEASE);
+}
 
 void rq_set_ready(int cls_id, int cpu_id) {
     struct rq_percpu *rq_pc = __rqpc(cpu_id);
@@ -153,19 +276,31 @@ int rq_identify_object(void *ptr, int *cpu_id, int *class_id) {
         return 0;
     }
 
-    for (int cpu = 0; cpu < cpu_possible_count(); cpu++) {
-        for (int cls = 0; cls < PRIORITY_MAINLEVELS; cls++) {
-            struct rq *rq = __get_rq_for_cpu(cls, cpu);
-            if (rq == (struct rq *)ptr) {
-                if (cpu_id != NULL) {
-                    *cpu_id = cpu;
-                }
-                if (class_id != NULL) {
-                    *class_id = cls;
-                }
-                return 1;
-            }
+    if (rq_identify_linear_scan_enabled()) {
+        return rq_identify_object_linear(ptr, cpu_id, class_id);
+    }
+
+    uint64 addr = (uint64)ptr;
+    if (addr < rq_object_min || addr >= rq_object_max) {
+        return 0;
+    }
+
+    uint64 idx = rq_object_hash_index(addr);
+    for (uint64 probe = 0; probe < RQ_OBJECT_HASH_SIZE; probe++) {
+        struct rq_object_slot *slot = &rq_object_hash[idx];
+        if (slot->rq == NULL) {
+            return 0;
         }
+        if (slot->rq == (struct rq *)ptr) {
+            if (cpu_id != NULL) {
+                *cpu_id = slot->cpu_id;
+            }
+            if (class_id != NULL) {
+                *class_id = slot->class_id;
+            }
+            return 1;
+        }
+        idx = (idx + 1) & RQ_OBJECT_HASH_MASK;
     }
 
     return 0;
@@ -259,6 +394,7 @@ void rq_register(struct rq *rq, int cls_id, int cpu_id) {
     rq->sched_class = __sched_class_of_id(cls_id);
     assert(rq->sched_class != NULL, "rq_init: sched_class is NULL");
     rq_pc->rqs[cls_id] = rq;
+    rq_object_register_lookup(rq, cpu_id, cls_id);
 }
 
 void sched_entity_init(struct sched_entity *se, struct thread *p) {
@@ -310,6 +446,7 @@ void rq_lock(int cpu_id) __acquires(__rq_lock_context)
 #else
     assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "rq_lock: invalid cpu_id %d", cpu_id);
     spin_lock(&__rqpc(cpu_id)->rq_lock);
+    rq_probe_note_lock_acquired(cpu_id);
 #endif
 }
 
@@ -318,7 +455,12 @@ void rq_lock(int cpu_id) __acquires(__rq_lock_context)
 int rq_trylock(int cpu_id) {
     assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "rq_trylock: invalid cpu_id %d",
            cpu_id);
-    return spin_trylock(&__rqpc(cpu_id)->rq_lock);
+    int ret = spin_trylock(&__rqpc(cpu_id)->rq_lock);
+    if (ret)
+        rq_probe_note_lock_acquired(cpu_id);
+    else
+        rq_probe_note_try_fail(cpu_id);
+    return ret;
 }
 
 void rq_unlock(int cpu_id) __releases(__rq_lock_context)
@@ -331,6 +473,7 @@ void rq_unlock(int cpu_id) __releases(__rq_lock_context)
            cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d",
            cpu_id);
+    rq_probe_note_lock_released(cpu_id);
     spin_unlock(&__rqpc(cpu_id)->rq_lock);
 #endif
 }
@@ -343,7 +486,9 @@ int rq_lock_irqsave(int cpu_id) __acquires(__rq_lock_context)
     return 0;
 #else
     assert(cpu_id >= 0 && cpu_id < cpu_possible_count(), "rq_lock: invalid cpu_id %d", cpu_id);
-    return spin_lock_irqsave(&__rqpc(cpu_id)->rq_lock);
+    int intr = spin_lock_irqsave(&__rqpc(cpu_id)->rq_lock);
+    rq_probe_note_lock_acquired(cpu_id);
+    return intr;
 #endif
 }
 
@@ -358,6 +503,7 @@ void rq_unlock_irqrestore(int cpu_id, int state) __releases(__rq_lock_context)
            cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d",
            cpu_id);
+    rq_probe_note_lock_released(cpu_id);
     spin_unlock_irqrestore(&__rqpc(cpu_id)->rq_lock, state);
 #endif
 }
@@ -522,6 +668,7 @@ struct rq_percpu *rq_percpu_lock_get(int cpu_id) __acquires(__rq_lock_context)
     }
     struct rq_percpu *rq_pc = __rqpc(cpu_id);
     spin_lock(&rq_pc->rq_lock);
+    rq_probe_note_lock_acquired(cpu_id);
     return rq_pc;
 #endif
 }
@@ -543,6 +690,7 @@ struct rq_percpu *rq_percpu_lock_get_current(void)
     push_off(); // Disable preemption to pin to current CPU
     struct rq_percpu *rq_pc = __rqpc_current();
     spin_lock(&rq_pc->rq_lock);
+    rq_probe_note_lock_acquired(cpuid());
     pop_off();
     return rq_pc;
 #endif
@@ -564,6 +712,8 @@ void rq_percpu_put_unlock(struct rq_percpu *rq_pc)
     if (rq_pc == NULL) {
         return;
     }
+    int cpu_id = rq_global.percpu ? (int)(rq_pc - rq_global.percpu) : -1;
+    rq_probe_note_lock_released(cpu_id);
     spin_unlock(&rq_pc->rq_lock);
 #endif
 }
@@ -1224,4 +1374,74 @@ uint64 rq_count_nr_active(void) {
         }
     }
     return nr;
+}
+
+void rq_starve_probe_snapshot_cpu(int cpu_id,
+                                  struct rq_starve_probe_snapshot *out,
+                                  uint64 now_ms) {
+    if (out == NULL)
+        return;
+    memset(out, 0, sizeof(*out));
+    out->current_pid = -1;
+    out->current_state = THREAD_UNUSED;
+    out->lock_owner_cpu = -1;
+
+    if (!rq_is_initialized() || cpu_id < 0 ||
+        cpu_id >= cpu_possible_count()) {
+        return;
+    }
+
+    uint64 active_mask = smp_load_acquire(&rq_global.active_cpu_mask);
+    out->active = !!(active_mask & (1ULL << cpu_id));
+    uint64 flags = smp_load_acquire(&cpus[cpu_id].flags);
+    out->needs_resched = !!(flags & CPU_FLAG_NEEDS_RESCHED);
+    out->halted = out->active && !!(flags & CPU_FLAG_HALTED);
+
+    for (int prio = 0; prio < PRIORITY_MAINLEVELS; prio++) {
+        if (prio == IDLE_MAJOR_PRIORITY)
+            continue;
+        struct rq *rq = __get_rq_for_cpu(prio, cpu_id);
+        if (rq == NULL)
+            continue;
+        int task_count = smp_load_acquire(&rq->task_count);
+        if (task_count > 0)
+            out->nr_queued += (uint64)task_count;
+    }
+
+    struct sched_entity *current_se =
+        smp_load_acquire(&__rqpc(cpu_id)->current_se);
+    struct thread *p = current_se ? current_se->thread : cpus[cpu_id].proc;
+    if (p != NULL) {
+        out->current_pid = p->pid;
+        out->current_state = __thread_state_get(p);
+        strncpy(out->current_name, p->name, sizeof(out->current_name) - 1);
+        out->current_name[sizeof(out->current_name) - 1] = '\0';
+    }
+
+    spinlock_t *lk = &__rqpc(cpu_id)->rq_lock;
+    struct cpu_local *owner = __atomic_load_n(&lk->cpu, __ATOMIC_ACQUIRE);
+    if (owner != NULL) {
+        out->lock_owner_cpu = cpuid_from_tp((uint64)owner);
+        uint64 acquired =
+            __atomic_load_n(&rq_probe_cpu_state[cpu_id].lock_acquired_ms,
+                            __ATOMIC_ACQUIRE);
+        if (acquired != 0 && now_ms >= acquired)
+            out->lock_hold_ms = now_ms - acquired;
+    }
+
+    struct sched_entity *se =
+        smp_load_acquire(&__rqpc(cpu_id)->wake_list_head);
+    while (se != NULL && out->wake_list_depth < 4096) {
+        out->wake_list_depth++;
+        se = smp_load_acquire(&se->wake_next);
+    }
+
+    out->try_fail_seq =
+        __atomic_load_n(&rq_probe_cpu_state[cpu_id].try_fail_seq,
+                        __ATOMIC_ACQUIRE);
+    uint64 fail_ms =
+        __atomic_load_n(&rq_probe_cpu_state[cpu_id].try_fail_ms,
+                        __ATOMIC_ACQUIRE);
+    if (fail_ms != 0 && now_ms >= fail_ms)
+        out->try_fail_age_ms = now_ms - fail_ms;
 }

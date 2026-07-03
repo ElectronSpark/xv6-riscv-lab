@@ -21,6 +21,7 @@ extern struct cpu_local cpus[];
 #define CPU_FLAG_BOOT_HART 2 /**< This is the boot hart */
 #define CPU_FLAG_IN_ITR 4    /**< CPU is currently in interrupt handler */
 #define CPU_FLAG_CRASHED 8   /**< CPU has received panic IPI and halted */
+#define CPU_FLAG_HALTED 16    /**< CPU is in the idle interrupt-wait path */
 /** @} */
 
 #if !defined(ON_HOST_OS)
@@ -43,6 +44,14 @@ extern struct cpu_local cpus[];
         mycpu()->flags &= ~CPU_FLAG_IN_ITR;                                    \
     } while (0)
 #define CPU_IN_ITR() (!!(mycpu()->flags & CPU_FLAG_IN_ITR))
+#define CPU_SET_HALTED()                                                     \
+    do {                                                                     \
+        mycpu()->flags |= CPU_FLAG_HALTED;                                   \
+    } while (0)
+#define CPU_CLEAR_HALTED()                                                   \
+    do {                                                                     \
+        mycpu()->flags &= ~CPU_FLAG_HALTED;                                  \
+    } while (0)
 #define SET_BOOT_HART()                                                        \
     do {                                                                       \
         mycpu()->flags |= CPU_FLAG_BOOT_HART;                                  \
@@ -169,6 +178,12 @@ static inline int cpuid_from_tp(uint64 tp)
     do {                                                                       \
     } while (0)
 #define CPU_IN_ITR() (0)
+#define CPU_SET_HALTED()                                                       \
+    do {                                                                       \
+    } while (0)
+#define CPU_CLEAR_HALTED()                                                     \
+    do {                                                                       \
+    } while (0)
 #define SET_BOOT_HART()                                                        \
     do {                                                                       \
     } while (0)

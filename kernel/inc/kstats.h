@@ -333,9 +333,13 @@ struct kstats {
     uint64 konsole_prepty_poll_rescan_ready_eventfd_ticks;
     uint64 konsole_prepty_poll_rescan_ready_pipe_calls;
     uint64 konsole_prepty_poll_rescan_ready_pipe_ticks;
+
+    /* Version 8 append-only scheduler starvation probe counters. */
+    uint64 sched_starve_probe_snapshots;
+    uint64 sched_starve_probe_idle_needs_resched_samples;
 };
 
-#define KSTATS_ABI_VERSION 7
+#define KSTATS_ABI_VERSION 8
 #define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
 /* ------------------------------------------------------------------ */

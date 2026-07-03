@@ -991,7 +991,6 @@ static int __eevdf_idle_balance(struct eevdf_rq *this_erq, int this_cpu,
     if (now - this_erq->last_idle_pull_stamp < EEVDF_IDLE_COOLDOWN) {
         return 0;
     }
-    this_erq->last_idle_pull_stamp = now;
     this_erq->nr_idle_balance++;
 
     if (__eevdf_rqs[cls_id] == NULL) return 0;
@@ -1050,6 +1049,8 @@ static int __eevdf_idle_balance(struct eevdf_rq *this_erq, int this_cpu,
             rq_unlock(remote_cpu);
             continue;
         }
+
+        this_erq->last_idle_pull_stamp = now;
 
         /* Pick one entity to pull (we just need one to stop being idle). */
         struct sched_entity *pull_candidates[1];
@@ -1222,8 +1223,7 @@ static void __alloc_eevdf_rqs_for_cls(int cls_id) {
     for (int i = 0; i < cpu_possible_count(); i++) {
         __eevdf_rq_init(&__eevdf_rqs[cls_id][i], cls_id, i);
         rq_register(&__eevdf_rqs[cls_id][i].rq, cls_id, i);
-    }
-}
+    }}
 
 void init_eevdf_rq(void) {
     for (int cls_id = EEVDF_MAJOR_PRIORITY_START;
@@ -1231,4 +1231,57 @@ void init_eevdf_rq(void) {
         sched_class_register(cls_id, &__eevdf_sched_class);
         __alloc_eevdf_rqs_for_cls(cls_id);
     }
+}
+
+/*
+ * eevdf_idle_pull — idle-entry work stealing.
+ *
+ * Called from the idle loop with no locks held, before the CPU halts.
+ * Both regular balance modes are unreachable from a fully idle CPU:
+ * Mode A (periodic) runs from task_tick, which idle threads skip, and
+ * Mode B (__eevdf_idle_balance) runs from pick_next_task, which is never
+ * called for a class whose ready bit was cleared by its last dequeue.
+ * The wakeup fast paths (on_rq / on_cpu) also bypass select_task_rq, so
+ * fast sleep/wake tasks pile onto their previous CPUs.  This pull is the
+ * only mechanism by which a halted-idle CPU can acquire that queued work.
+ *
+ * The 1ms cooldown inside __eevdf_idle_balance rate-limits lock traffic;
+ * the lock-free remote-work precheck keeps the fully idle system silent.
+ *
+ * Returns 1 if local work exists or was pulled, 0 to allow halting.
+ */
+int eevdf_idle_pull(int cpu) {
+    if (cpu < 0 || cpu >= cpu_possible_count())
+        return 0;
+
+    for (int cls_id = EEVDF_MAJOR_PRIORITY_START;
+         cls_id < EEVDF_MAJOR_PRIORITY_LIMIT; cls_id++) {
+        if (__eevdf_rqs[cls_id] == NULL)
+            continue;
+
+        struct eevdf_rq *erq = &__eevdf_rqs[cls_id][cpu];
+        if (smp_load_acquire(&erq->nr_running) != 0)
+            return 1; /* Local work already queued — go run it. */
+
+        /* Lock-free precheck: running tasks are dequeued, so one queued
+         * remote entity is already pullable work for this idle CPU. */
+        int candidate = 0;
+        for (int rcpu = 0; rcpu < cpu_possible_count(); rcpu++) {
+            if (rcpu == cpu)
+                continue;
+            if (smp_load_acquire(&__eevdf_rqs[cls_id][rcpu].nr_running) >= 1) {
+                candidate = 1;
+                break;
+            }
+        }
+        if (!candidate)
+            continue;
+
+        int intr = rq_lock_current_irqsave();
+        int pulled = __eevdf_idle_balance(erq, cpu, cls_id);
+        rq_unlock_current_irqrestore(intr);
+        if (pulled)
+            return 1;
+    }
+    return 0;
 }

@@ -209,9 +209,31 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
     // Idle loop
     for (;;) {
         scheduler_yield();
-        intr_on();
-        arch_wait_for_interrupt();
-        intr_off();
+        /*
+         * Idle work stealing (starvation fix): both EEVDF balance modes
+         * are unreachable from a fully idle CPU — an empty class rq
+         * clears its ready bit so pick_next_task (Mode B idle balance)
+         * is never called, and idle threads skip task_tick (Mode A).
+         * The on_rq/on_cpu wakeup fast paths also bypass select_task_rq,
+         * so fast sleep/wake tasks pile onto their previous CPUs.  Pull
+         * queued work here before deciding to halt.
+         */
+        if (eevdf_idle_pull(cpuid()))
+            continue;
+        /*
+         * Halt only when no reschedule is pending, and enter the halt
+         * atomically with interrupt enable (arch_idle_halt) so a wake
+         * IPI arriving after this check cannot be consumed before the
+         * halt begins (lost-wakeup race).
+         */
+        int idle_intr = intr_off_save();
+        assert(!intr_get(), "idle loop must test halt condition with IF=0");
+        if (!NEEDS_RESCHED()) {
+            CPU_SET_HALTED();
+            arch_idle_halt();
+            CPU_CLEAR_HALTED();
+        }
+        intr_restore(idle_intr);
     }
 }
 

@@ -12,6 +12,7 @@
 #include "accounting.h"
 #include "resource.h"
 #include "kstats.h"
+#include "sched_starve_probe.h"
 #include "proc/thread.h"
 #include "proc/thread_group.h"
 #include "proc/rq.h"
@@ -1186,6 +1187,9 @@ void kstats_collect(struct kstats *ks) {
         g_konsole_prepty_poll_rescan_ready_pipe_calls;
     ks->konsole_prepty_poll_rescan_ready_pipe_ticks =
         g_konsole_prepty_poll_rescan_ready_pipe_ticks;
+    ks->sched_starve_probe_snapshots = sched_starve_probe_snapshots();
+    ks->sched_starve_probe_idle_needs_resched_samples =
+        sched_starve_probe_idle_needs_resched_samples();
 }
 
 void kstats_profile_set(int enabled) {

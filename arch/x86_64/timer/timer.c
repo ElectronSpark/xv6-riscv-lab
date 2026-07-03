@@ -33,6 +33,7 @@
 #include "lapic.h"
 #include "seg.h"
 #include "timer/sched_timer_private.h"
+#include "sched_starve_probe.h"
 
 /* ══════════════════════════════════════════════════════════════
  *  Linker-compat globals (RISC-V legacy)
@@ -172,22 +173,45 @@ static void dbg_hex(uint64 v) {
     }
 }
 
+static void timer_root_lock(struct timer_root *timer) {
+    spin_lock(&timer->lock);
+    if (sched_starve_probe_is_enabled()) {
+        __atomic_store_n(&timer->lock_acquired_ms, get_jiffs(),
+                         __ATOMIC_RELEASE);
+    }
+}
+
+static void timer_root_unlock(struct timer_root *timer) {
+    if (sched_starve_probe_is_enabled()) {
+        __atomic_store_n(&timer->lock_acquired_ms, 0, __ATOMIC_RELEASE);
+    }
+    spin_unlock(&timer->lock);
+}
+
 /* ══════════════════════════════════════════════════════════════
  *  Timer tick advance (called from trap handler)
  * ══════════════════════════════════════════════════════════════ */
 void timer_tick_advance(void) {
+    int cpu = cpuid();
+
     /* Only the BSP (CPU 0) advances the global jiffies counter.
      * On SMP, every CPU fires its own LAPIC timer at TIMER_HZ,
      * so without this guard jiffies_count would advance at
      * N_CPUS × TIMER_HZ instead of TIMER_HZ. */
-    if (cpuid() == 0) {
+    if (cpu == 0) {
         __atomic_fetch_add(&jiffies_count, 1, __ATOMIC_RELAXED);
+    }
+
+    sched_starve_probe_note_timer_tick(cpu);
+
+    if (cpu == 0) {
         /* Poll e1000 for received packets that may have been missed
          * due to QEMU's interrupt mitigation timer or host scheduling
          * delays.  This is cheap (single memory read) when no packets
          * are pending. */
         extern void e1000_poll_rx(void);
         e1000_poll_rx();
+        sched_starve_probe_tick();
     }
 
     /*
@@ -742,10 +766,8 @@ static struct rb_root_opts __timer_root_opts = {
 static void __timer_update_next_tick(struct timer_root *timer) {
     struct timer_node *next =
         LIST_FIRST_NODE(&timer->list_head, struct timer_node, list_entry);
-    if (next != NULL)
-        timer->next_tick = next->expires;
-    else
-        timer->next_tick = 0;
+    uint64 next_tick = next != NULL ? next->expires : 0;
+    __atomic_store_n(&timer->next_tick, next_tick, __ATOMIC_RELEASE);
 }
 
 static bool __timer_node_before(struct timer_node *a, struct timer_node *b) {
@@ -762,8 +784,8 @@ void timer_init(struct timer_root *timer) {
     memset(timer, 0, sizeof(struct timer_root));
     rb_root_init(&timer->root, &__timer_root_opts);
     list_entry_init(&timer->list_head);
-    timer->next_tick = 0;
-    timer->current_tick = 0;
+    __atomic_store_n(&timer->next_tick, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&timer->current_tick, 0, __ATOMIC_RELAXED);
     timer->valid = 1;
     spin_init(&timer->lock, "timer_lock");
 }
@@ -790,13 +812,14 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
     if (node->timer != NULL || !rb_node_is_empty(&node->rb) ||
         !LIST_ENTRY_IS_DETACHED(&node->list_entry))
         return -1;
-    spin_lock(&timer->lock);
+    timer_root_lock(timer);
     if (!timer->valid) {
-        spin_unlock(&timer->lock);
+        timer_root_unlock(timer);
         return -1;
     }
-    if (timer->current_tick >= node->expires) {
-        spin_unlock(&timer->lock);
+    if (__atomic_load_n(&timer->current_tick, __ATOMIC_ACQUIRE) >=
+        node->expires) {
+        timer_root_unlock(timer);
         return -1;
     }
     bool inserted = false;
@@ -813,7 +836,7 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
         list_node_push(&timer->list_head, node, list_entry);
     node->timer = timer;
     __timer_update_next_tick(timer);
-    spin_unlock(&timer->lock);
+    timer_root_unlock(timer);
     return 0;
 }
 
@@ -830,9 +853,9 @@ void timer_remove(struct timer_node *node) {
     struct timer_root *timer = node->timer;
     if (timer == NULL)
         return;
-    spin_lock(&timer->lock);
+    timer_root_lock(timer);
     __timer_remove_unlocked(timer, node);
-    spin_unlock(&timer->lock);
+    timer_root_unlock(timer);
 }
 
 void timer_tick(struct timer_root *timer, uint64 ticks) {
@@ -840,18 +863,42 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
         return;
     if (timer->valid == 0)
         return;
-    spin_lock(&timer->lock);
-    if (timer->next_tick == 0) {
-        spin_unlock(&timer->lock);
+
+    /*
+     * The x86 scheduler timer is global but every CPU receives a local
+     * periodic tick.  Most ticks either duplicate a millisecond another CPU
+     * already advanced or arrive before the next armed timer.  Avoid taking
+     * the global timer lock on those non-expiry ticks; the locked path below
+     * still handles all expiry and list mutation.
+     */
+    uint64 cur_tick = __atomic_load_n(&timer->current_tick, __ATOMIC_ACQUIRE);
+    if (cur_tick >= ticks)
+        return;
+
+    uint64 next_tick = __atomic_load_n(&timer->next_tick, __ATOMIC_ACQUIRE);
+    if (next_tick == 0 || next_tick > ticks) {
+        while (cur_tick < ticks) {
+            if (__atomic_compare_exchange_n(&timer->current_tick, &cur_tick,
+                                            ticks, false, __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE))
+                break;
+        }
         return;
     }
-    if (timer->current_tick >= ticks) {
-        spin_unlock(&timer->lock);
+
+    timer_root_lock(timer);
+    next_tick = __atomic_load_n(&timer->next_tick, __ATOMIC_ACQUIRE);
+    if (next_tick == 0) {
+        timer_root_unlock(timer);
         return;
     }
-    timer->current_tick = ticks;
-    if (timer->next_tick > ticks) {
-        spin_unlock(&timer->lock);
+    if (__atomic_load_n(&timer->current_tick, __ATOMIC_ACQUIRE) >= ticks) {
+        timer_root_unlock(timer);
+        return;
+    }
+    __atomic_store_n(&timer->current_tick, ticks, __ATOMIC_RELEASE);
+    if (next_tick > ticks) {
+        timer_root_unlock(timer);
         return;
     }
 
@@ -871,7 +918,7 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
         node->callback(node);
     }
 
-    spin_unlock(&timer->lock);
+    timer_root_unlock(timer);
 }
 
 /* ══════════════════════════════════════════════════════════════

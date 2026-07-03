@@ -198,4 +198,13 @@ static inline void arch_wait_for_interrupt(void) {
 	asm volatile("hlt" ::: "memory");
 }
 
+/* Idle halt without the lost-wakeup race.  Call with interrupts disabled
+ * after checking NEEDS_RESCHED: STI's one-instruction interrupt shadow
+ * defers delivery until HLT has begun, so a wake IPI arriving after the
+ * caller's check wakes the HLT instead of being consumed before it.
+ * Returns with interrupts disabled after the wake interrupt is serviced. */
+static inline void arch_idle_halt(void) {
+        asm volatile("sti; hlt; cli" ::: "memory");
+}
+
 #endif // _X86_H_

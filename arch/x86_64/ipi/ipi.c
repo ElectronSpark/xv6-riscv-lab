@@ -16,6 +16,7 @@
 #include "errno.h"
 #include "platform.h"
 #include "mm/vm.h"
+#include "sched_starve_probe.h"
 
 __attribute__((section("cpu_local_sec")))
 __attribute__((aligned(4096))) struct cpu_local cpus[MAX_CPUS] = {0};
@@ -102,6 +103,7 @@ void x86_ipi_handler(void) {
             break;
 
         case IPI_REASON_RESCHEDULE:
+            sched_starve_probe_note_wake_ipi_recv(cpu);
             rq_flush_wake_list(cpu);
             SET_NEEDS_RESCHED();
             break;
@@ -188,6 +190,8 @@ int ipi_send_single(int hartid, int reason) {
         return -EINVAL;
 
     __atomic_fetch_or(&ipi_pending[hartid], 1ULL << reason, __ATOMIC_RELEASE);
+    if (reason == IPI_REASON_RESCHEDULE)
+        sched_starve_probe_note_wake_ipi_send(hartid);
 
     lapic_send_ipi_single(x86_cpu_apic_id(hartid));
     return 0;
@@ -205,6 +209,8 @@ int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base,
             if (cpu >= 0 && cpu < ncpu)
                 __atomic_fetch_or(&ipi_pending[cpu], 1ULL << reason,
                                   __ATOMIC_RELEASE);
+            if (cpu >= 0 && cpu < ncpu && reason == IPI_REASON_RESCHEDULE)
+                sched_starve_probe_note_wake_ipi_send(cpu);
         }
     }
 
@@ -227,6 +233,8 @@ int ipi_send_all_but_self(int reason) {
         if (i != self) {
             __atomic_fetch_or(&ipi_pending[i], 1ULL << reason,
                               __ATOMIC_RELEASE);
+            if (reason == IPI_REASON_RESCHEDULE)
+                sched_starve_probe_note_wake_ipi_send(i);
             lapic_send_ipi_single(x86_cpu_apic_id(i));
         }
     }
@@ -239,6 +247,8 @@ int ipi_send_all(int reason) {
 
     for (int i = 0; i < cpu_possible_count(); i++) {
         __atomic_fetch_or(&ipi_pending[i], 1ULL << reason, __ATOMIC_RELEASE);
+        if (reason == IPI_REASON_RESCHEDULE)
+            sched_starve_probe_note_wake_ipi_send(i);
         lapic_send_ipi_single(x86_cpu_apic_id(i));
     }
     return 0;
