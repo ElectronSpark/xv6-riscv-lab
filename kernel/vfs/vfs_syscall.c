@@ -8284,6 +8284,7 @@ uint64 sys_signalfd4(void)
 
 #define INOTIFY_MAX_QUEUED_EVENTS 512
 #define INOTIFY_NAME_MAX          255
+#define INOTIFY_FIONREAD         0x541B
 
 struct linux_inotify_event {
     int wd;
@@ -8681,6 +8682,41 @@ static int inotify_poll(struct vfs_file *file, short events)
     return revents;
 }
 
+static int inotify_queued_bytes_locked(struct inotify_ctx *ctx)
+{
+    size_t total = 0;
+    struct inotify_event_node *ev, *tmp;
+
+    list_foreach_node_safe(&ctx->events, ev, tmp, entry) {
+        if (ev->record_len > (size_t)0x7fffffff ||
+            total > (size_t)0x7fffffff - ev->record_len)
+            return 0x7fffffff;
+        total += ev->record_len;
+    }
+    return (int)total;
+}
+
+static int inotify_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    struct inotify_ctx *ctx = file->private_data;
+    if (ctx == NULL)
+        return -EINVAL;
+
+    switch (cmd) {
+    case INOTIFY_FIONREAD: {
+        int count;
+        spin_lock(&inotify_global_lock);
+        count = inotify_queued_bytes_locked(ctx);
+        spin_unlock(&inotify_global_lock);
+        if (vm_copyout(current->vm, (uint64)arg, &count, sizeof(count)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    default:
+        return -ENOTTY;
+    }
+}
+
 static int inotify_release(struct vfs_inode *ip, struct vfs_file *file)
 {
     (void)ip;
@@ -8733,6 +8769,7 @@ static struct vfs_file_ops inotify_file_ops = {
     .flags = VFS_FILE_OPS_F_POLL_NOTIFY_BACKED,
     .read = inotify_read,
     .poll = inotify_poll,
+    .ioctl = inotify_ioctl,
     .release = inotify_release,
     .readlink = inotify_readlink,
 };

@@ -281,6 +281,110 @@ static size_t chrome_unix_queue_count(int head, int tail, int max)
     return (size_t)(max - head + tail);
 }
 
+struct chrome_unix_file_snapshot {
+    int is_unix;
+    struct unix_sock *sk;
+    struct unix_sock *peer;
+    struct vfs_file *file;
+    struct vfs_file *peer_file;
+    int visible_refs;
+    int peer_visible_refs;
+    uint64 ino;
+    uint64 peer_ino;
+    int type;
+    int state;
+    int shutdown;
+    int err;
+    size_t tx_bytes;
+    size_t tx_capacity;
+    uint tx_nread;
+    uint tx_nwrite;
+    size_t scm;
+    size_t packets;
+    int peer_type;
+    int peer_state;
+    int peer_shutdown;
+    int peer_err;
+    size_t peer_tx_bytes;
+    size_t peer_tx_capacity;
+    uint peer_tx_nread;
+    uint peer_tx_nwrite;
+    size_t peer_scm;
+    size_t peer_packets;
+};
+
+static void chrome_unix_file_snapshot_init(
+    struct chrome_unix_file_snapshot *snap)
+{
+    memset(snap, 0, sizeof(*snap));
+    snap->type = -1;
+    snap->state = -1;
+    snap->peer_type = -1;
+    snap->peer_state = -1;
+}
+
+static void chrome_unix_file_snapshot_fill(
+    struct vfs_file *file, struct chrome_unix_file_snapshot *snap)
+{
+    chrome_unix_file_snapshot_init(snap);
+
+    if (file == NULL || file->ops != &unix_socket_file_ops ||
+        file->private_data == NULL)
+        return;
+
+    struct unix_sock *sk = (struct unix_sock *)file->private_data;
+    struct unix_sock *peer = NULL;
+
+    snap->is_unix = 1;
+    snap->sk = sk;
+    snap->file = file;
+    snap->visible_refs = file->visible_fd_refs;
+
+    spin_lock(&sk->lock);
+    snap->ino = sk->proc_ino;
+    snap->type = sk->type;
+    snap->state = sk->state;
+    snap->shutdown = sk->shutdown_flags;
+    snap->err = sk->so_error;
+    snap->tx_bytes = sk->tx.nwrite - sk->tx.nread;
+    snap->tx_capacity = sk->tx.capacity;
+    snap->tx_nread = sk->tx.nread;
+    snap->tx_nwrite = sk->tx.nwrite;
+    snap->scm = chrome_unix_queue_count(sk->scm_head, sk->scm_tail,
+                                        UNIX_SCM_QUEUE_MAX);
+    snap->packets = chrome_unix_queue_count(sk->packet_head,
+                                            sk->packet_tail,
+                                            UNIX_PACKET_QUEUE_MAX);
+    peer = sk->peer;
+    unix_sock_get_ref(peer);
+    spin_unlock(&sk->lock);
+
+    snap->peer = peer;
+    if (peer != NULL) {
+        spin_lock(&peer->lock);
+        snap->peer_file = peer->file;
+        if (peer->file != NULL)
+            snap->peer_visible_refs = peer->file->visible_fd_refs;
+        snap->peer_ino = peer->proc_ino;
+        snap->peer_type = peer->type;
+        snap->peer_state = peer->state;
+        snap->peer_shutdown = peer->shutdown_flags;
+        snap->peer_err = peer->so_error;
+        snap->peer_tx_bytes = peer->tx.nwrite - peer->tx.nread;
+        snap->peer_tx_capacity = peer->tx.capacity;
+        snap->peer_tx_nread = peer->tx.nread;
+        snap->peer_tx_nwrite = peer->tx.nwrite;
+        snap->peer_scm = chrome_unix_queue_count(peer->scm_head,
+                                                 peer->scm_tail,
+                                                 UNIX_SCM_QUEUE_MAX);
+        snap->peer_packets = chrome_unix_queue_count(peer->packet_head,
+                                                     peer->packet_tail,
+                                                     UNIX_PACKET_QUEUE_MAX);
+        spin_unlock(&peer->lock);
+        unix_sock_put_ref(peer);
+    }
+}
+
 static int chrome_unix_scm_ready_locked(struct unix_sock *sk,
                                         uint *start_out, uint *end_out)
 {
@@ -3797,11 +3901,18 @@ static void chrome_unix_ipc_payload_extract_token(const char *buf, size_t len,
     size_t prefix_len;
     const char *hit;
     size_t pos;
+    size_t value_len;
+    size_t arg_off;
+    const char *arg_start;
 
     if (out_len == 0)
         return;
+    if (out_len == 1) {
+        out[0] = '\0';
+        return;
+    }
     out[0] = '-';
-    out[1 < out_len ? 1 : 0] = '\0';
+    out[1] = '\0';
     if (buf == NULL || prefix == NULL)
         return;
 
@@ -3812,13 +3923,26 @@ static void chrome_unix_ipc_payload_extract_token(const char *buf, size_t len,
     hit += prefix_len;
 
     pos = 0;
-    while ((size_t)(hit - buf) + pos < len && pos + 1 < out_len) {
+    value_len = len - (size_t)(hit - buf);
+    arg_start = hit - prefix_len;
+    arg_off = (size_t)(arg_start - buf);
+    if (arg_off >= sizeof(uint32)) {
+        const unsigned char *lenp =
+            (const unsigned char *)(arg_start - sizeof(uint32));
+        uint32 arg_len = (uint32)lenp[0] | ((uint32)lenp[1] << 8) |
+            ((uint32)lenp[2] << 16) | ((uint32)lenp[3] << 24);
+        size_t arg_avail = len - arg_off;
+
+        if (arg_len >= prefix_len && arg_len <= arg_avail)
+            value_len = arg_len - prefix_len;
+    }
+
+    while (pos < value_len && pos + 1 < out_len) {
         unsigned char c = (unsigned char)hit[pos];
 
-        if (c == '\0' || c == ' ' || c == '\t' || c == '\r' || c == '\n')
+        if (c <= 0x20 || c > 0x7e || c == '"' || c == '\\')
             break;
-        out[pos] = (c >= 0x20 && c <= 0x7e && c != '"' && c != '\\') ?
-            (char)c : '.';
+        out[pos] = (char)c;
         pos++;
     }
     out[pos] = '\0';
@@ -3842,7 +3966,16 @@ static void chrome_unix_ipc_trace_payload_bytes(const char *op, int fd,
     char utility_sub_type[CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX];
     char service_sandbox_type[CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX];
     char shared_files[CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX];
+    char mojo_channel_handle[32];
+    char renderer_client_id[32];
+    char gpu_client_id[32];
+    char render_node[64];
+    char metrics_shmem[CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX];
+    char field_trial[CHROME_UNIX_IPC_PAYLOAD_TOKEN_MAX];
+    char trace_uuid[64];
+    char time_ticks[64];
     size_t n;
+    size_t token_len;
     uint32 roles = current != NULL ? chrome_lifecycle_roles(current) : 0;
     uint64 pid_seq = current != NULL ? current->pid_seq : 0;
 
@@ -3860,33 +3993,81 @@ static void chrome_unix_ipc_trace_payload_bytes(const char *op, int fd,
     }
     hex[n * 2] = '\0';
     chrome_unix_ipc_payload_sanitize_ascii(ascii, sizeof(ascii), buf, n);
-    chrome_unix_ipc_payload_extract_token(buf, n, "--type=", type,
+
+    /*
+     * Keep the printable byte sample capped, but scan the whole captured
+     * payload for structured Chromium launch argv tokens.  sendmsg tracing
+     * has the full contiguous payload; recvmsg tracing may still have only
+     * the clipped iovec sample.
+     */
+    token_len = len;
+    chrome_unix_ipc_payload_extract_token(buf, token_len, "--type=", type,
                                           sizeof(type));
-    chrome_unix_ipc_payload_extract_token(buf, n, "--initial-client-fd=",
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--initial-client-fd=",
                                           initial_client_fd,
                                           sizeof(initial_client_fd));
-    chrome_unix_ipc_payload_extract_token(buf, n, "--utility-sub-type=",
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--utility-sub-type=",
                                           utility_sub_type,
                                           sizeof(utility_sub_type));
-    chrome_unix_ipc_payload_extract_token(buf, n, "--service-sandbox-type=",
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--service-sandbox-type=",
                                           service_sandbox_type,
                                           sizeof(service_sandbox_type));
-    chrome_unix_ipc_payload_extract_token(buf, n, "--shared-files=",
+    chrome_unix_ipc_payload_extract_token(buf, token_len, "--shared-files=",
                                           shared_files,
                                           sizeof(shared_files));
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--mojo-platform-channel-handle=",
+                                          mojo_channel_handle,
+                                          sizeof(mojo_channel_handle));
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--renderer-client-id=",
+                                          renderer_client_id,
+                                          sizeof(renderer_client_id));
+    chrome_unix_ipc_payload_extract_token(buf, token_len, "--gpu-client-id=",
+                                          gpu_client_id,
+                                          sizeof(gpu_client_id));
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--render-node-override=",
+                                          render_node,
+                                          sizeof(render_node));
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--metrics-shmem-handle=",
+                                          metrics_shmem,
+                                          sizeof(metrics_shmem));
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--field-trial-handle=",
+                                          field_trial,
+                                          sizeof(field_trial));
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--trace-process-track-uuid=",
+                                          trace_uuid,
+                                          sizeof(trace_uuid));
+    chrome_unix_ipc_payload_extract_token(buf, token_len,
+                                          "--time-ticks-at-unix-epoch=",
+                                          time_ticks,
+                                          sizeof(time_ticks));
 
     printf("chrome-unix-ipc-payload: %s pid=%d tgid=%d name=%s fd=%d "
            "ret=%ld total=%lu flags=0x%x cmsg=%lu has_cred=%d "
-           "sample_len=%lu full_len=%lu pid_seq=%lu roles=0x%x "
+           "sample_len=%lu full_len=%lu token_len=%lu "
+           "pid_seq=%lu roles=0x%x "
            "type=%s initial_client_fd=%s utility=%s sandbox=%s "
-           "shared_files=%s ascii=\"%s\" hex=%s\n",
+           "shared_files=%s mojo_channel_handle=%s renderer_client_id=%s "
+           "gpu_client_id=%s render_node=%s metrics=%s field_trial=%s "
+           "trace_uuid=%s time_ticks=%s ascii=\"%s\" hex=%s\n",
            op != NULL ? op : "?", current != NULL ? current->pid : -1,
            current != NULL ? current->tgid : -1,
            current != NULL ? current->name : "?", fd, (long)ret,
            (unsigned long)total, flags, (unsigned long)cmsg_count, has_cred,
-           (unsigned long)n, (unsigned long)len, pid_seq, roles, type,
+           (unsigned long)n, (unsigned long)total,
+           (unsigned long)token_len, pid_seq, roles, type,
            initial_client_fd, utility_sub_type, service_sandbox_type,
-           shared_files, ascii, hex);
+           shared_files, mojo_channel_handle, renderer_client_id,
+           gpu_client_id, render_node, metrics_shmem, field_trial,
+           trace_uuid, time_ticks, ascii, hex);
 }
 
 static void chrome_unix_ipc_trace_recv_payload_iov(const char *op, int fd,
@@ -4173,16 +4354,47 @@ static int unix_collect_scm_from_control(uint64 ucontrol, uint64 controllen,
                 vfs_fput(file);
                 if (scm_files[*scm_count] == NULL)
                     return -ENOMEM;
-                CHROME_UNIX_SOCKET_TRACE("scm-send pid=%d tgid=%d name=%s "
-                                         "pass_fd=%d path=%s file=%p "
-                                         "f_flags=0x%x index=%lu\n",
-                                         current->pid, current->tgid,
-                                         current->name, pass_fds[i],
-                                         chrome_socket_trace_path(
-                                             scm_files[*scm_count]),
-                                         scm_files[*scm_count],
-                                         scm_files[*scm_count]->f_flags,
-                                         (unsigned long)*scm_count);
+                if (unix_ipc_trace_process()) {
+                    struct chrome_unix_file_snapshot snap;
+                    chrome_unix_file_snapshot_fill(scm_files[*scm_count],
+                                                   &snap);
+                    printf("chrome-unix-ipc: scm-send pid=%d tgid=%d "
+                           "name=%s pass_fd=%d path=%s file=%p "
+                           "f_flags=0x%x index=%lu pass_is_unix=%d "
+                           "pass_sk=%p pass_peer=%p pass_ino=%llu "
+                           "pass_peer_ino=%llu pass_file_refs=%d "
+                           "pass_peer_file=%p pass_peer_file_refs=%d "
+                           "pass_type=%d pass_state=%d pass_shutdown=0x%x "
+                           "pass_err=%d pass_tx=%lu/%lu "
+                           "pass_marks=%u:%u pass_scm=%lu pass_packets=%lu "
+                           "pass_peer_type=%d "
+                           "pass_peer_state=%d pass_peer_shutdown=0x%x "
+                           "pass_peer_err=%d pass_peer_tx=%lu/%lu "
+                           "pass_peer_marks=%u:%u pass_peer_scm=%lu "
+                           "pass_peer_packets=%lu\n",
+                           current->pid, current->tgid, current->name,
+                           pass_fds[i],
+                           chrome_socket_trace_path(scm_files[*scm_count]),
+                           scm_files[*scm_count],
+                           scm_files[*scm_count]->f_flags,
+                           (unsigned long)*scm_count, snap.is_unix,
+                           snap.sk, snap.peer, (unsigned long long)snap.ino,
+                           (unsigned long long)snap.peer_ino,
+                           snap.visible_refs, snap.peer_file,
+                           snap.peer_visible_refs, snap.type, snap.state,
+                           snap.shutdown, snap.err,
+                           (unsigned long)snap.tx_bytes,
+                           (unsigned long)snap.tx_capacity, snap.tx_nread,
+                           snap.tx_nwrite, (unsigned long)snap.scm,
+                           (unsigned long)snap.packets, snap.peer_type,
+                           snap.peer_state, snap.peer_shutdown,
+                           snap.peer_err,
+                           (unsigned long)snap.peer_tx_bytes,
+                           (unsigned long)snap.peer_tx_capacity,
+                           snap.peer_tx_nread, snap.peer_tx_nwrite,
+                           (unsigned long)snap.peer_scm,
+                           (unsigned long)snap.peer_packets);
+                }
                 (*scm_count)++;
             }
         }
@@ -4597,19 +4809,47 @@ static int unix_emit_recvmsg_scm(struct unix_sock *sk,
             if (newfd >= 0 && (recv_flags & MSG_CMSG_CLOEXEC))
                 vfs_fdtable_set_fdflags(current->fdtable, newfd, FD_CLOEXEC);
             spin_unlock(&current->fdtable->lock);
-            CHROME_UNIX_SOCKET_TRACE("scm-recv pid=%d tgid=%d name=%s "
-                                     "sockfd=%d newfd=%d path=%s file=%p "
-                                     "f_flags=0x%x index=%lu cloexec=%d "
-                                     "peek=%d\n",
-                                     current->pid, current->tgid,
-                                     current->name, sockfd, newfd,
-                                     chrome_socket_trace_path(install_file),
-                                     install_file,
-                                     install_file != NULL ?
-                                         install_file->f_flags : 0,
-                                     (unsigned long)installed,
-                                     (recv_flags & MSG_CMSG_CLOEXEC) != 0,
-                                     (recv_flags & MSG_PEEK) != 0);
+            if (unix_ipc_trace_process()) {
+                struct chrome_unix_file_snapshot snap;
+                chrome_unix_file_snapshot_fill(install_file, &snap);
+                printf("chrome-unix-ipc: scm-recv pid=%d tgid=%d name=%s "
+                       "sockfd=%d newfd=%d path=%s file=%p f_flags=0x%x "
+                       "index=%lu cloexec=%d peek=%d install_is_unix=%d "
+                       "install_sk=%p install_peer=%p install_ino=%llu "
+                       "install_peer_ino=%llu install_file_refs=%d "
+                       "install_peer_file=%p install_peer_file_refs=%d "
+                       "install_type=%d install_state=%d "
+                       "install_shutdown=0x%x install_err=%d "
+                       "install_tx=%lu/%lu "
+                       "install_marks=%u:%u install_scm=%lu "
+                       "install_packets=%lu install_peer_type=%d "
+                       "install_peer_state=%d install_peer_shutdown=0x%x "
+                       "install_peer_err=%d install_peer_tx=%lu/%lu "
+                       "install_peer_marks=%u:%u install_peer_scm=%lu "
+                       "install_peer_packets=%lu\n",
+                       current->pid, current->tgid, current->name, sockfd,
+                       newfd, chrome_socket_trace_path(install_file),
+                       install_file,
+                       install_file != NULL ? install_file->f_flags : 0,
+                       (unsigned long)installed,
+                       (recv_flags & MSG_CMSG_CLOEXEC) != 0,
+                       (recv_flags & MSG_PEEK) != 0, snap.is_unix,
+                       snap.sk, snap.peer, (unsigned long long)snap.ino,
+                       (unsigned long long)snap.peer_ino,
+                       snap.visible_refs, snap.peer_file,
+                       snap.peer_visible_refs, snap.type, snap.state,
+                       snap.shutdown, snap.err,
+                       (unsigned long)snap.tx_bytes,
+                       (unsigned long)snap.tx_capacity, snap.tx_nread,
+                       snap.tx_nwrite, (unsigned long)snap.scm,
+                       (unsigned long)snap.packets, snap.peer_type,
+                       snap.peer_state, snap.peer_shutdown, snap.peer_err,
+                       (unsigned long)snap.peer_tx_bytes,
+                       (unsigned long)snap.peer_tx_capacity,
+                       snap.peer_tx_nread, snap.peer_tx_nwrite,
+                       (unsigned long)snap.peer_scm,
+                       (unsigned long)snap.peer_packets);
+            }
             vfs_fput(scm_files[installed]);
             scm_files[installed] = NULL;
             if (newfd < 0)
@@ -6148,6 +6388,51 @@ unix_recvmsg_done:
  *
  * Only AF_UNIX is supported for socketpair.
  */
+static void chrome_unix_ipc_trace_socketpair_result(int fd0, int fd1,
+                                                    int type, int protocol,
+                                                    int flags)
+{
+    if (!unix_ipc_trace_process())
+        return;
+
+    struct vfs_file *file0 = vfs_fdtable_get_file(current->fdtable, fd0);
+    struct vfs_file *file1 = vfs_fdtable_get_file(current->fdtable, fd1);
+    struct chrome_unix_file_snapshot snap0;
+    struct chrome_unix_file_snapshot snap1;
+
+    chrome_unix_file_snapshot_fill(file0, &snap0);
+    chrome_unix_file_snapshot_fill(file1, &snap1);
+
+    printf("chrome-unix-ipc: socketpair pid=%d tgid=%d name=%s "
+           "fd0=%d fd1=%d type=%d protocol=%d flags=0x%x cloexec=%d "
+           "path0=%s path1=%s file0=%p file1=%p f_flags0=0x%x "
+           "f_flags1=0x%x fd0_is_unix=%d fd0_sk=%p fd0_peer=%p "
+           "fd0_ino=%llu fd0_peer_ino=%llu fd0_file_refs=%d "
+           "fd0_peer_file=%p fd0_peer_file_refs=%d fd0_type=%d "
+           "fd0_state=%d fd0_shutdown=0x%x fd0_err=%d fd1_is_unix=%d "
+           "fd1_sk=%p fd1_peer=%p fd1_ino=%llu fd1_peer_ino=%llu "
+           "fd1_file_refs=%d fd1_peer_file=%p fd1_peer_file_refs=%d "
+           "fd1_type=%d fd1_state=%d fd1_shutdown=0x%x fd1_err=%d\n",
+           current->pid, current->tgid, current->name, fd0, fd1, type,
+           protocol, flags, (flags & SOCK_CLOEXEC) != 0,
+           chrome_socket_trace_path(file0), chrome_socket_trace_path(file1),
+           file0, file1, file0 != NULL ? file0->f_flags : 0,
+           file1 != NULL ? file1->f_flags : 0, snap0.is_unix, snap0.sk,
+           snap0.peer, (unsigned long long)snap0.ino,
+           (unsigned long long)snap0.peer_ino, snap0.visible_refs,
+           snap0.peer_file, snap0.peer_visible_refs, snap0.type,
+           snap0.state, snap0.shutdown, snap0.err, snap1.is_unix,
+           snap1.sk, snap1.peer, (unsigned long long)snap1.ino,
+           (unsigned long long)snap1.peer_ino, snap1.visible_refs,
+           snap1.peer_file, snap1.peer_visible_refs, snap1.type,
+           snap1.state, snap1.shutdown, snap1.err);
+
+    if (file0 != NULL)
+        vfs_fput(file0);
+    if (file1 != NULL)
+        vfs_fput(file1);
+}
+
 uint64 sys_socketpair(void)
 {
     int domain, type, protocol;
@@ -6189,6 +6474,9 @@ uint64 sys_socketpair(void)
         socket_unwind_created_fd(sv[1]);
         return (uint64)-EFAULT;
     }
+
+    chrome_unix_ipc_trace_socketpair_result(sv[0], sv[1], type, protocol,
+                                            flags);
 
     return 0;
 }

@@ -69,6 +69,7 @@
 #include "mm/slab.h"
 #include "mm/vm.h"
 #include "string.h"
+#include "cmdline.h"
 
 // Slab cache for rcu_head_t structures
 static slab_cache_t rcu_head_slab = {0};
@@ -109,8 +110,315 @@ static void rcu_check_timestamp_overflow(void);
 // Configuration constants (Linux-inspired)
 #define RCU_LAZY_GP_DELAY 100 // Callbacks to accumulate before starting GP
 
+enum rcu_head_trace_state {
+    RCU_HEAD_TRACE_EMPTY = 0,
+    RCU_HEAD_TRACE_ALLOCATED,
+    RCU_HEAD_TRACE_QUEUED,
+    RCU_HEAD_TRACE_INVOKING,
+    RCU_HEAD_TRACE_FREED,
+};
+
+struct rcu_head_trace_slot {
+    rcu_head_t *head;
+    rcu_callback_t func;
+    void *data;
+    void *caller;
+    uint64 seq;
+    uint64 alloc_time;
+    uint64 enqueue_time;
+    uint64 invoke_time;
+    uint64 free_time;
+    int alloc_cpu;
+    int enqueue_cpu;
+    int invoke_cpu;
+    int free_cpu;
+    int embedded;
+    int state;
+    uint64 free_count;
+};
+
+#define RCU_HEAD_TRACE_BITS 12
+#define RCU_HEAD_TRACE_SIZE (1UL << RCU_HEAD_TRACE_BITS)
+#define RCU_HEAD_TRACE_MASK (RCU_HEAD_TRACE_SIZE - 1UL)
+
+static spinlock_t rcu_head_trace_lock = SPINLOCK_INITIALIZED("rcu_head_trace");
+static struct rcu_head_trace_slot rcu_head_trace_slots[RCU_HEAD_TRACE_SIZE];
+static uint64 rcu_head_trace_seq;
+static int rcu_head_trace_full_logged;
+
 // Maximum value for uint64 type (defined locally to avoid stdint.h dependency)
 #define RCU_UINT64_MAX ((uint64) - 1)
+
+static int rcu_head_trace_enabled(void) {
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("rcu_head_trace", value, sizeof(value)) == 0 &&
+                  cmdline_value_is_true(value);
+        initialized = 1;
+    }
+
+    return enabled;
+}
+
+static const char *rcu_head_trace_state_name(int state) {
+    switch (state) {
+    case RCU_HEAD_TRACE_EMPTY:
+        return "empty";
+    case RCU_HEAD_TRACE_ALLOCATED:
+        return "allocated";
+    case RCU_HEAD_TRACE_QUEUED:
+        return "queued";
+    case RCU_HEAD_TRACE_INVOKING:
+        return "invoking";
+    case RCU_HEAD_TRACE_FREED:
+        return "freed";
+    default:
+        return "unknown";
+    }
+}
+
+static int rcu_head_trace_cpu(void) {
+    push_off();
+    int cpu = cpuid();
+    pop_off();
+    return cpu;
+}
+
+static uint64 rcu_head_trace_hash(rcu_head_t *head) {
+    uint64 key = (uint64)head >> 4;
+    key ^= key >> 12;
+    key ^= key >> 24;
+    return key & RCU_HEAD_TRACE_MASK;
+}
+
+static struct rcu_head_trace_slot *
+rcu_head_trace_lookup_locked(rcu_head_t *head, int create) {
+    uint64 idx = rcu_head_trace_hash(head);
+
+    for (uint64 probe = 0; probe < RCU_HEAD_TRACE_SIZE; probe++) {
+        struct rcu_head_trace_slot *slot = &rcu_head_trace_slots[idx];
+        if (slot->head == head) {
+            return slot;
+        }
+        if (slot->head == NULL) {
+            if (!create) {
+                return NULL;
+            }
+            slot->head = head;
+            return slot;
+        }
+        idx = (idx + 1) & RCU_HEAD_TRACE_MASK;
+    }
+
+    return NULL;
+}
+
+static void rcu_head_trace_print_slot(const char *event,
+                                      struct rcu_head_trace_slot *slot,
+                                      rcu_head_t *head,
+                                      rcu_callback_t func,
+                                      void *data,
+                                      void *caller,
+                                      int cpu) {
+    printf("rcu_head_trace: event=%s head=%p state=%s seq=%lu "
+           "embedded=%d free_count=%lu func=%p data=%p caller=%p cpu=%d "
+           "last_func=%p last_data=%p last_caller=%p alloc_cpu=%d "
+           "enqueue_cpu=%d invoke_cpu=%d free_cpu=%d alloc_time=%lu "
+           "enqueue_time=%lu invoke_time=%lu free_time=%lu\n",
+           event, head, rcu_head_trace_state_name(slot->state), slot->seq,
+           slot->embedded, slot->free_count, (void *)func, data, caller, cpu,
+           (void *)slot->func, slot->data, slot->caller, slot->alloc_cpu,
+           slot->enqueue_cpu, slot->invoke_cpu, slot->free_cpu,
+           slot->alloc_time, slot->enqueue_time, slot->invoke_time,
+           slot->free_time);
+}
+
+static void rcu_head_trace_note_alloc(rcu_head_t *head,
+                                      rcu_callback_t func,
+                                      void *data,
+                                      void *caller) {
+    if (head == NULL || !rcu_head_trace_enabled()) {
+        return;
+    }
+
+    int cpu = rcu_head_trace_cpu();
+    int log_event = 0;
+    int log_full = 0;
+    struct rcu_head_trace_slot snapshot = {0};
+
+    spin_lock(&rcu_head_trace_lock);
+    struct rcu_head_trace_slot *slot = rcu_head_trace_lookup_locked(head, 1);
+    if (slot == NULL) {
+        if (!rcu_head_trace_full_logged) {
+            rcu_head_trace_full_logged = 1;
+            log_full = 1;
+        }
+    } else {
+        if (slot->seq != 0 && slot->state != RCU_HEAD_TRACE_FREED) {
+            log_event = 1;
+            snapshot = *slot;
+        }
+        slot->seq = ++rcu_head_trace_seq;
+        slot->func = func;
+        slot->data = data;
+        slot->caller = caller;
+        slot->alloc_time = r_time();
+        slot->enqueue_time = 0;
+        slot->invoke_time = 0;
+        slot->free_time = 0;
+        slot->alloc_cpu = cpu;
+        slot->enqueue_cpu = -1;
+        slot->invoke_cpu = -1;
+        slot->free_cpu = -1;
+        slot->embedded = 0;
+        slot->state = RCU_HEAD_TRACE_ALLOCATED;
+        slot->free_count = 0;
+    }
+    spin_unlock(&rcu_head_trace_lock);
+
+    if (log_full) {
+        printf("rcu_head_trace: owner table full, further head history may be "
+               "missing\n");
+    }
+    if (log_event) {
+        rcu_head_trace_print_slot("alloc_reuse_while_live", &snapshot, head,
+                                  func, data, caller, cpu);
+    }
+}
+
+static void rcu_head_trace_note_enqueue(rcu_head_t *head,
+                                        rcu_callback_t func,
+                                        void *data,
+                                        void *caller,
+                                        int embedded) {
+    if (head == NULL || !rcu_head_trace_enabled()) {
+        return;
+    }
+
+    int cpu = rcu_head_trace_cpu();
+    int log_event = 0;
+    int log_full = 0;
+    struct rcu_head_trace_slot snapshot = {0};
+
+    spin_lock(&rcu_head_trace_lock);
+    struct rcu_head_trace_slot *slot = rcu_head_trace_lookup_locked(head, 1);
+    if (slot == NULL) {
+        if (!rcu_head_trace_full_logged) {
+            rcu_head_trace_full_logged = 1;
+            log_full = 1;
+        }
+    } else {
+        if (slot->seq == 0) {
+            slot->seq = ++rcu_head_trace_seq;
+            slot->alloc_time = 0;
+            slot->alloc_cpu = -1;
+            slot->free_count = 0;
+        } else if (slot->state == RCU_HEAD_TRACE_QUEUED ||
+                   slot->state == RCU_HEAD_TRACE_INVOKING) {
+            log_event = 1;
+            snapshot = *slot;
+        }
+        slot->func = func;
+        slot->data = data;
+        slot->caller = caller;
+        slot->enqueue_time = r_time();
+        slot->enqueue_cpu = cpu;
+        slot->invoke_time = 0;
+        slot->free_time = 0;
+        slot->invoke_cpu = -1;
+        slot->free_cpu = -1;
+        slot->embedded = embedded;
+        slot->state = RCU_HEAD_TRACE_QUEUED;
+        slot->free_count = 0;
+    }
+    spin_unlock(&rcu_head_trace_lock);
+
+    if (log_full) {
+        printf("rcu_head_trace: owner table full, further head history may be "
+               "missing\n");
+    }
+    if (log_event) {
+        rcu_head_trace_print_slot("duplicate_enqueue", &snapshot, head, func,
+                                  data, caller, cpu);
+    }
+}
+
+static void rcu_head_trace_note_invoke(rcu_head_t *head,
+                                       rcu_callback_t func,
+                                       void *data,
+                                       int embedded) {
+    if (head == NULL || !rcu_head_trace_enabled()) {
+        return;
+    }
+
+    int cpu = rcu_head_trace_cpu();
+    int log_event = 0;
+    struct rcu_head_trace_slot snapshot = {0};
+
+    spin_lock(&rcu_head_trace_lock);
+    struct rcu_head_trace_slot *slot = rcu_head_trace_lookup_locked(head, 0);
+    if (slot == NULL || slot->state != RCU_HEAD_TRACE_QUEUED) {
+        log_event = 1;
+        if (slot != NULL) {
+            snapshot = *slot;
+        }
+    }
+    if (slot != NULL) {
+        slot->func = func;
+        slot->data = data;
+        slot->invoke_time = r_time();
+        slot->invoke_cpu = cpu;
+        slot->embedded = embedded;
+        slot->state = RCU_HEAD_TRACE_INVOKING;
+    }
+    spin_unlock(&rcu_head_trace_lock);
+
+    if (log_event) {
+        rcu_head_trace_print_slot("invoke_without_queued", &snapshot, head,
+                                  func, data, __builtin_return_address(0),
+                                  cpu);
+    }
+}
+
+static void rcu_head_trace_note_free(rcu_head_t *head,
+                                     rcu_callback_t func,
+                                     void *data,
+                                     void *caller) {
+    if (head == NULL || !rcu_head_trace_enabled()) {
+        return;
+    }
+
+    int cpu = rcu_head_trace_cpu();
+    int log_event = 0;
+    struct rcu_head_trace_slot snapshot = {0};
+
+    spin_lock(&rcu_head_trace_lock);
+    struct rcu_head_trace_slot *slot = rcu_head_trace_lookup_locked(head, 0);
+    if (slot == NULL || slot->state == RCU_HEAD_TRACE_FREED) {
+        log_event = 1;
+        if (slot != NULL) {
+            snapshot = *slot;
+        }
+    }
+    if (slot != NULL) {
+        slot->func = func;
+        slot->data = data;
+        slot->caller = caller;
+        slot->free_time = r_time();
+        slot->free_cpu = cpu;
+        slot->state = RCU_HEAD_TRACE_FREED;
+        slot->free_count++;
+    }
+    spin_unlock(&rcu_head_trace_lock);
+
+    if (log_event) {
+        rcu_head_trace_print_slot("duplicate_free", &snapshot, head, func,
+                                  data, caller, cpu);
+    }
+}
 
 // Note on timestamp overflow:
 // With a 64-bit timestamp counter incrementing at 10MHz (100ns per tick),
@@ -470,6 +778,8 @@ void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
         return;
     }
 
+    void *caller = __builtin_return_address(0);
+
     if (!__atomic_load_n(&rcu_initialized, __ATOMIC_ACQUIRE)) {
         /*
          * Early boot uses RCU-tagged structures before per-CPU RCU storage and
@@ -490,6 +800,7 @@ void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
             return;
         }
         head->embedded_head = 0;
+        rcu_head_trace_note_alloc(head, func, data, caller);
     } else {
         head->embedded_head = 1;
     }
@@ -499,6 +810,9 @@ void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
     head->func = func;
     head->data = data;
     head->timestamp = r_time(); // Record when callback was registered
+    if (!head->embedded_head) {
+        rcu_head_trace_note_enqueue(head, func, data, caller, 0);
+    }
 
     // Disable preemption to ensure we stay on the same CPU
     push_off();
@@ -546,6 +860,9 @@ static int rcu_invoke_callbacks(rcu_head_t *list) {
         rcu_callback_t func = cur->func;
         void *data = cur->data;
         int embedded = cur->embedded_head;
+        if (!embedded) {
+            rcu_head_trace_note_invoke(cur, func, data, embedded);
+        }
 
         // Detach this node from the list before invoking callback
         cur->next = NULL;
@@ -559,6 +876,8 @@ static int rcu_invoke_callbacks(rcu_head_t *list) {
 
         // Free the rcu_head if it was allocated by call_rcu() (not embedded)
         if (!embedded) {
+            rcu_head_trace_note_free(cur, func, data,
+                                     __builtin_return_address(0));
             slab_free(cur);
         }
 
