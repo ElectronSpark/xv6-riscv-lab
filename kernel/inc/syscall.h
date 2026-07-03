@@ -100,7 +100,6 @@
 
 // --- Debug / introspection (90-99) ---
 #define SYS_memstat      1290
-#define SYS_dumpproc     1291
 #define SYS_dumpchan     1292
 #define SYS_dumppcache   1293
 #define SYS_dumprq       1294
@@ -108,7 +107,8 @@
 #define SYS_dumpinode    1296
 #define SYS_dumpblk      1297
 #define SYS_losetup      1298
-// 99 reserved
+// 1291 reserved for the old dumpproc slot.
+// 1299 reserved
 
 // --- Network / sockets (100-119) ---
 #define SYS_socket       1300
@@ -187,8 +187,11 @@
 #define SYS_kstatsctl      1367
 #define SYS_kstats2        1368
 
+// --- Legacy xv6 tools ---
+#define SYS_dumpproc       1369
+
 // Max syscall number (update when adding new syscalls)
-#define SYS_MAXNUM         1368
+#define SYS_MAXNUM         1369
 
 // --- Linux time64 compatibility stubs used by musl on rv64 ---
 // These are intentionally unsupported in xv6 and return -ENOSYS via

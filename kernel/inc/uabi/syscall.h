@@ -97,12 +97,15 @@
 
 // --- Debug / introspection (90-99) ---
 #define SYS_memstat 1290
-#define SYS_dumpproc 1291
 #define SYS_dumpchan 1292
 #define SYS_dumppcache 1293
 #define SYS_dumprq 1294
 #define SYS_kernbase 1295
 #define SYS_dumpinode 1296
-// 97-99 reserved
+// 1291 reserved for the old dumpproc slot.
+// 1297-1299 reserved
+
+// --- Legacy xv6 tools ---
+#define SYS_dumpproc 1369
 
 #endif /* __USER_ABI_SYSCALL_H */

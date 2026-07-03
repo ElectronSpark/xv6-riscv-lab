@@ -101,7 +101,7 @@ static const char *syscall_name(int num) {
     case 76: return "sigwait";
     case 77: return "tkill";
     case 90: return "memstat";
-    case 91: return "dumpproc";
+    case SYS_dumpproc: return "dumpproc";
     case 92: return "dumpchan";
     case 93: return "dumppcache";
     case 94: return "dumprq";
