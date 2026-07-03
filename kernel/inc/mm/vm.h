@@ -15,6 +15,8 @@
     ((__vma1)->end == (__vma2)->start || (__vma2)->end == (__vma1)->start)
 
 uint64 vm_cpu_online(vm_t *vm, int cpu, struct thread *p);
+uint64 vm_cpu_online_trapframe(vm_t *vm, int cpu, struct thread *p,
+                               bool *trapframe_pte_changed);
 void vm_cpu_offline(vm_t *vm, int cpu);
 cpumask_t vm_get_cpumask(vm_t *vm);
 void vm_remote_sfence(vm_t *vm);

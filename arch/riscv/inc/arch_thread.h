@@ -103,6 +103,11 @@ arch_kstack_arrange(void *kstack, size_t kstack_size, uint64 flags) {
 
 /* ── Child register adjustments for clone/fork ── */
 
+static inline int arch_clone_tls_valid(uint64 tls) {
+    (void)tls;
+    return 1;
+}
+
 /**
  * arch_clone_child_regs - Apply architecture-specific register
  *                         adjustments to a freshly cloned child.

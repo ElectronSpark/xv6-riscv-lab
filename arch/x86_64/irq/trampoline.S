@@ -15,6 +15,7 @@
  *   rsi = user pagetable (CR3 value)
  *   rdx = user GS base
  *   rcx = kernel GS base (per-CPU struct)
+ *   r8  = invalidate TRAPFRAME slot after loading user CR3
  */
 
 .align 4096
@@ -33,6 +34,10 @@ userret:
      * With PCID enabled, the noflush bit (63) in %r13 preserves TLB
      * entries from other PCIDs — no full TLB flush on context switch. */
     movq %r13, %cr3
+    testq %r8, %r8
+    jz 1f
+    invlpg (%rdi)
+1:
 
     /*
      * Use the trapframe page itself as temporary ring0 stack.

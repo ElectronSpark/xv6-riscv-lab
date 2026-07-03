@@ -911,7 +911,22 @@ extern void sig_trampoline(void); /* defined in sig_trampoline.S */
 
 extern char userret[];
 static void (*trampoline_userret)(uint64 tf, uint64 user_cr3,
-                                  uint64 user_gs, uint64 kernel_gs) = NULL;
+                                  uint64 user_gs, uint64 kernel_gs,
+                                  uint64 invalidate_trapframe) = NULL;
+static int x86_cr3_noflush_enabled;
+
+static int x86_cr3_noflush_enabled_by_cmdline(void)
+{
+    char value[16];
+
+    /*
+     * OPT-IN ONLY (see x86_pcid_enabled_by_cmdline): the 2026-07-02
+     * default-on attempt reproduced the KWin corruption signature.
+     */
+    if (cmdline_get_param("x86_cr3_noflush", value, sizeof(value)) != 0)
+        return 0;
+    return value[0] == '1';
+}
 
 /* ── Debugcon helpers (forward declarations for use in usertrapret) ── */
 static inline void dbg_outb(uint16 port, uint8 val);
@@ -965,11 +980,16 @@ void usertrapret(void) {
     /* Disable interrupts while setting up the return path. */
     intr_off();
 
-    /* Restore user FS base (TLS) for user-space threads. */
-    wrmsr(MSR_FS_BASE, p->trapframe->tp);
-
     struct cpu_local *my_cpu = mycpu();
     int cpu = cpuid();
+
+    /* Restore user FS base only when this CPU is not already current. */
+    if (!my_cpu->user_fs_base_valid ||
+        my_cpu->user_fs_base != p->trapframe->tp) {
+        wrmsr(MSR_FS_BASE, p->trapframe->tp);
+        my_cpu->user_fs_base = p->trapframe->tp;
+        my_cpu->user_fs_base_valid = 1;
+    }
 
     /*
      * TSS.RSP0 = higher-half VA of the thread kstack.
@@ -1020,15 +1040,18 @@ void usertrapret(void) {
     /* Mark the current CPU offline for the kernel VM (reverse of user VM) */
     vm_cpu_offline(kernel_vm, cpu);
 
-    uint64 trapframe_base = vm_cpu_online(p->vm, cpu, p);
+    bool trapframe_pte_changed = false;
+    uint64 trapframe_base =
+        vm_cpu_online_trapframe(p->vm, cpu, p, &trapframe_pte_changed);
 
     /*
      * Store the kernel stack top for the next SYSCALL entry.
-     * syscall_entry reads this from per-CPU via %gs:72 after swapgs.
+     * syscall_entry reads these per-CPU fields via %gs after swapgs.
      * Stored as higher-half VA (PA2VA) so syscall_entry can access
-     * the kstack via PML4[256] without a CR3 switch.
+     * them via PML4[256] without a CR3 switch.
      */
     my_cpu->syscall_kstack_top = (uint64)PA2VA(p->ksp);
+    my_cpu->syscall_trapframe = (uint64)PA2VA((uint64)p->trapframe);
 
     /* Ensure user RFLAGS is valid and has IF set.
      * Bit 1 in RFLAGS is architecturally fixed to 1.
@@ -1071,23 +1094,24 @@ void usertrapret(void) {
         my_cpu->asid_gen = cur_gen;
     }
 
-    /* Build CR3 value: with PCID support, include the VM's PCID.
-     * NOTE: noflush=0 (force flush) — using noflush=1 caused fork()
-     * to intermittently return the child's pid in the child under KVM,
-     * apparently due to stale TLB entries for the per-CPU TRAPFRAME
-     * slot whose PTE is rewritten by vm_cpu_online() without TLB
-     * invalidation.  TODO: invalidate the trapframe slot precisely so
-     * we can re-enable noflush=1 for performance. */
+    /*
+     * x86_cr3_noflush=1 is opt-in and only active with PCID.  When the
+     * TRAPFRAME slot changed, userret invalidates it after loading the user
+     * CR3 so invlpg targets the user PCID, not the kernel PCID.
+     */
+    int noflush_enabled = x86_cr3_noflush_enabled && vm_asid_max() > 0;
+    uint64 invalidate_trapframe = noflush_enabled && trapframe_pte_changed;
     uint64 user_cr3;
     if (vm_asid_max() > 0) {
         user_cr3 = MAKE_SATP_PCID((uint64)p->vm->pagetable,
-                                   p->vm->asid, 0);
+                                   p->vm->asid, noflush_enabled);
     } else {
         user_cr3 = (uint64)p->vm->pagetable;
     }
 
     trampoline_userret(trapframe_base, user_cr3,
-                        p->trapframe->user_gs_base, (uint64)my_cpu);
+                        p->trapframe->user_gs_base, (uint64)my_cpu,
+                        invalidate_trapframe);
 
     __builtin_unreachable();
 }
@@ -1398,6 +1422,8 @@ uint64 x86_idt_page_pa(void) { return (uint64)idt; }
 void arch_trap_init(void) {
     trampoline_userret =
         (void *)(TRAMPOLINE + ((uint64)userret - (uint64)trampoline));
+    x86_cr3_noflush_enabled =
+        x86_cr3_noflush_enabled_by_cmdline() && vm_asid_max() > 0;
     x86_gdt_init();
     x86_idt_init();
     x86_syscall_init();
@@ -1670,13 +1696,11 @@ void x86_trap_handler(struct trapframe *tf) {
      * utrapframe so that syscall arg fetching and other code that reads
      * p->trapframe->trapframe works correctly.
      *
-     * Also save user FS/GS bases so TLS state survives scheduling and
-     * clone() can inherit the live parent FS base when CLONE_SETTLS is
-     * not supplied.
+     * Also save user GS base. User FS base lives in trapframe->tp:
+     * FSGSBASE is not enabled, so only arch_prctl()/clone TLS changes it.
      */
     if (from_user && current && current->trapframe) {
         current->trapframe->trapframe = *tf;
-        current->trapframe->tp = rdmsr(MSR_FS_BASE);
         current->trapframe->user_gs_base = rdmsr(MSR_KERNEL_GS_BASE);
     }
 
@@ -2309,9 +2333,8 @@ user_return:
  * usertrap_syscall — C-level SYSCALL handler.
  *
  * Called from syscall_entry (trapvec.S) with RDI = pointer to
- * struct trapframe built on the kernel stack (Linux strategy).
- * We copy it into the per-process utrapframe, just like
- * x86_trap_handler does for IDT-based user traps.
+ * the current thread's authoritative utrapframe.  The SYSCALL entry path
+ * stores registers there directly so the hot path avoids a stack-frame copy.
  */
 void usertrap_syscall(struct trapframe *tf) {
     /*
@@ -2321,15 +2344,14 @@ void usertrap_syscall(struct trapframe *tf) {
     asm volatile("movq %0, %%cr3" : : "r"(trampoline_ksatp) : "memory");
 
     struct thread *p = current;
+    (void)tf;
 
     /*
-     * Copy the stack-based trapframe into the per-process utrapframe.
-     * This mirrors what x86_trap_handler does for IDT traps.
+     * syscall_entry saved the register frame directly into p->trapframe.
+     * Save user GS base here; FS base is cached in trapframe->tp because
+     * FSGSBASE is disabled and arch_prctl()/clone TLS own updates.
      */
     if (p && p->trapframe) {
-        p->trapframe->trapframe = *tf;
-        /* Save user FS/GS bases for TLS and arch_prctl state. */
-        p->trapframe->tp = rdmsr(MSR_FS_BASE);
         p->trapframe->user_gs_base = rdmsr(MSR_KERNEL_GS_BASE);
     }
 

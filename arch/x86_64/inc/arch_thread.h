@@ -15,6 +15,7 @@
 #include "trapframe.h"
 #include "types.h"
 #include "clone_flags.h"
+#include "memlayout.h"
 
 /* ── Kernel-stack pointer alignment ── */
 
@@ -111,6 +112,10 @@ arch_kstack_arrange(void *kstack, size_t kstack_size, uint64 flags) {
 }
 
 /* ── Child register adjustments for clone/fork ── */
+
+static inline int arch_clone_tls_valid(uint64 tls) {
+    return tls < UVMTOP;
+}
 
 /**
  * arch_clone_child_regs - Apply architecture-specific register

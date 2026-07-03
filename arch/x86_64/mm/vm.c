@@ -84,6 +84,13 @@ static int x86_pcid_enabled_by_cmdline(void)
 {
     char value[16];
 
+    /*
+     * OPT-IN ONLY.  A 2026-07-02 default-on attempt reproduced the KWin
+     * text-fragment-pointer #GP corruption within two KDE runs even after
+     * the vm_remote_sfence_page cross-PCID fix, so at least one more
+     * stale-TLB hole exists.  Keep default off until the remaining hole is
+     * found and a corruption reducer passes.
+     */
     if (cmdline_get_param("x86_pcid", value, sizeof(value)) != 0 &&
         cmdline_get_param("pcid", value, sizeof(value)) != 0)
         return 0;
@@ -520,7 +527,18 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
     push_off();
     smp_mb();
 
-    sfence_vma_page(va);
+    /*
+     * Cross-PCID correctness: this runs under the kernel PCID, and INVLPG
+     * only invalidates the current PCID's entry (plus globals).  With PCID
+     * enabled, the user PCID may cache a stale translation for @va on THIS
+     * CPU that a bare invlpg would miss; noflush=1 return paths would then
+     * re-enter user mode with the stale entry.  Use a full global flush
+     * when PCID is active, matching the remote handler's policy.
+     */
+    if (vm_asid_max() > 0)
+        sfence_vma_global();
+    else
+        sfence_vma_page(va);
 
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());
@@ -875,15 +893,30 @@ void arch_vm_teardown_trampoline(vm_t *vm)
  */
 uint64 vm_cpu_online(vm_t *vm, int cpu, struct thread *p)
 {
+    return vm_cpu_online_trapframe(vm, cpu, p, NULL);
+}
+
+uint64 vm_cpu_online_trapframe(vm_t *vm, int cpu, struct thread *p,
+                               bool *trapframe_pte_changed)
+{
     uint64 trapframe_poffset = TRAPFRAME_POFFSET;
+
+    if (trapframe_pte_changed != NULL)
+        *trapframe_pte_changed = false;
 
     if (vm->trapframe_pte != NULL && p != NULL && p->trapframe != NULL) {
         int pte_idx = PX(0, TRAPFRAME + (cpu * PGSIZE));
         uint64 trapframe_pa = PGROUNDDOWN((uint64)p->trapframe);
-        vm->trapframe_pte[pte_idx] =
-            PA2PTE(trapframe_pa) | PTE_R | PTE_W | PTE_V | PTE_A | PTE_D;
-        /* Ensure PTE write is visible before page table switch. */
-        asm volatile("" ::: "memory");
+        pte_t expected = PA2PTE(trapframe_pa) |
+                         PTE_R | PTE_W | PTE_V | PTE_A | PTE_D;
+
+        if (vm->trapframe_pte[pte_idx] != expected) {
+            vm->trapframe_pte[pte_idx] = expected;
+            /* Ensure PTE write is visible before page table switch. */
+            asm volatile("" ::: "memory");
+            if (trapframe_pte_changed != NULL)
+                *trapframe_pte_changed = true;
+        }
         /* Compute actual offset of utrapframe within the page. */
         trapframe_poffset = (uint64)p->trapframe & (PGSIZE - 1);
     }

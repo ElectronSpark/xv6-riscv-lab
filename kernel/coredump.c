@@ -189,7 +189,7 @@ static void fill_prstatus_regs(struct elf_prstatus *pr,
     r[19] = tf->rsp;
     r[20] = tf->ss;
     /* fs_base, gs_base, ds, es, fs, gs */
-    r[21] = 0;
+    r[21] = utf->tp;
     r[22] = utf->user_gs_base;
     r[23] = 0;
     r[24] = 0;

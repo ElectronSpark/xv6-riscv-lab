@@ -109,16 +109,29 @@ static uint64 sys_arch_prctl(void)
     argaddr(1, &addr);
 
     switch (code) {
-    case ARCH_SET_FS:
+    case ARCH_SET_FS: {
+        if (addr >= UVMTOP)
+            return (uint64)-EPERM;
+        struct thread *p = current;
+        push_off();
+        p->trapframe->tp = addr;  /* persist for context switch */
         wrmsr(MSR_FS_BASE, addr);
-        current->trapframe->tp = addr;  /* persist for context switch */
+        struct cpu_local *cpu = mycpu();
+        cpu->user_fs_base = addr;
+        cpu->user_fs_base_valid = 1;
+        pop_off();
         return 0;
+    }
     case ARCH_SET_GS:
         /* Don't allow user to set GS — it's used for per-CPU data */
         return (uint64)-EPERM;
     case ARCH_GET_FS:
-        if (vm_copyout(current->vm, addr, (char *)&(uint64){rdmsr(MSR_FS_BASE)}, sizeof(uint64)) < 0)
-            return (uint64)-EFAULT;
+        {
+            uint64 fs_base = current->trapframe->tp;
+            if (vm_copyout(current->vm, addr, (char *)&fs_base,
+                           sizeof(fs_base)) < 0)
+                return (uint64)-EFAULT;
+        }
         return 0;
     case ARCH_GET_GS:
         return (uint64)-EPERM;

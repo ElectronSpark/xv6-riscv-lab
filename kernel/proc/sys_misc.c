@@ -2207,7 +2207,7 @@ static void ptrace_fill_x86_regs(struct thread *target,
     regs->eflags = tf->rflags;
     regs->rsp = tf->rsp;
     regs->ss = tf->ss;
-    regs->fs_base = 0;
+    regs->fs_base = target->trapframe->tp;
     regs->gs_base = target->trapframe->user_gs_base;
 #endif
 }

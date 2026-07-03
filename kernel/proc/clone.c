@@ -268,6 +268,10 @@ int thread_clone(struct clone_args *args) {
         return -EINVAL;
     }
 
+    if ((args->flags & CLONE_SETTLS) && !arch_clone_tls_valid(args->tls)) {
+        return -EPERM;
+    }
+
     if (args->flags & CLONE_PIDFD) {
         if (args->flags & CLONE_DETACHED)
             return -EINVAL;

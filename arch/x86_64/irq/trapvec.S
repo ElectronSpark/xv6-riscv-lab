@@ -301,9 +301,9 @@ vectors:
  *  Follows the Linux entry_64.S strategy:
  *    0. swapgs: GS_BASE = KERNEL_GS_BASE = mycpu() (set by usertrapret)
  *    1. Save user RSP to per-CPU scratch (%gs:CPU_LOCAL_SYSCALL_SCRATCH)
- *    2. Load kernel stack from per-CPU (%gs:CPU_LOCAL_SYSCALL_KSTACK_TOP)
+ *    2. Save registers directly into current->trapframe->trapframe
  *       (No CR3 switch — kernel is always visible via shared PML4[256-511])
- *    3. Build struct trapframe on the kernel stack via pushq
+ *    3. Load kernel stack from per-CPU (%gs:CPU_LOCAL_SYSCALL_KSTACK_TOP)
  *    4. Call usertrap_syscall(struct trapframe *tf)
  *
  *  GS state on entry: usertrapret always writes KERNEL_GS_BASE = mycpu()
@@ -346,51 +346,50 @@ syscall_entry:
     movq %rsp, %gs:CPU_LOCAL_SYSCALL_SCRATCH
 
     /*
-     * Step 2: load kernel stack from per-CPU.
-     * No CR3 switch needed: user page tables share PML4[256-511],
-     * so the kernel stack (at a higher-half VA stored in
-     * syscall_kstack_top) is accessible from the user page table.
-     * GS works because TRAMPOLINE_CPULOCAL is in PML4[511].
+     * Step 2: store the register frame directly in the thread's utrapframe.
+     * usertrapret caches a higher-half trapframe VA in cpu_local so this
+     * code never dereferences low kernel-stack addresses under the user CR3.
+     *
+     * rcx = user RIP, r11 = user RFLAGS (set by SYSCALL HW).  Save user r15
+     * before using it as scratch for the saved user RSP.
      */
+    movq %gs:CPU_LOCAL_SYSCALL_TRAPFRAME, %rsp
+
+    movq %r15, TRAPFRAME_R15(%rsp)
+    movq %r14, TRAPFRAME_R14(%rsp)
+    movq %r13, TRAPFRAME_R13(%rsp)
+    movq %r12, TRAPFRAME_R12(%rsp)
+    movq %r11, TRAPFRAME_R11(%rsp)     /* clobbered: user RFLAGS */
+    movq %r10, TRAPFRAME_R10(%rsp)
+    movq %r9,  TRAPFRAME_R9(%rsp)
+    movq %r8,  TRAPFRAME_R8(%rsp)
+    movq %rbp, TRAPFRAME_RBP(%rsp)
+    movq %rdi, TRAPFRAME_RDI(%rsp)
+    movq %rsi, TRAPFRAME_RSI(%rsp)
+    movq %rdx, TRAPFRAME_RDX(%rsp)
+    movq %rcx, TRAPFRAME_RCX(%rsp)     /* clobbered: user RIP */
+    movq %rbx, TRAPFRAME_RBX(%rsp)
+    movq %rax, TRAPFRAME_RAX(%rsp)     /* syscall number */
+
+    movq $256,       TRAPFRAME_TRAPNO(%rsp)
+    movq $0,         TRAPFRAME_ERR(%rsp)
+    movq %rcx,       TRAPFRAME_RIP(%rsp)
+    movq $(0x28 | 3), TRAPFRAME_CS(%rsp)
+    movq %r11,       TRAPFRAME_RFLAGS(%rsp)
+    movq %gs:CPU_LOCAL_SYSCALL_SCRATCH, %r15
+    movq %r15,       TRAPFRAME_RSP(%rsp)
+    movq $(0x20 | 3), TRAPFRAME_SS(%rsp)
+
+    /*
+     * Step 3: move to the kernel stack before calling C.
+     * RDI = pointer to the authoritative thread trapframe.
+     */
+    movq %rsp, %rdi
     movq %gs:CPU_LOCAL_SYSCALL_KSTACK_TOP, %rsp
 
     /*
-     * Step 3: build struct trapframe on the kernel stack.
-     * Match the alltraps layout exactly:
-     *   SS, RSP, RFLAGS, CS, RIP, err, trapno, then 15 GPRs.
-     *
-     * rcx = user RIP, r11 = user RFLAGS (set by SYSCALL HW).
-     */
-    pushq $(0x20 | 3)             /* ss  = SEG_UDATA | DPL_USER    */
-    pushq %gs:CPU_LOCAL_SYSCALL_SCRATCH                  /* rsp = user RSP (from per-CPU)  */
-    pushq %r11                    /* rflags = user RFLAGS (from R11)*/
-    pushq $(0x28 | 3)             /* cs  = SEG_UCODE | DPL_USER    */
-    pushq %rcx                    /* rip = user RIP (from RCX)      */
-    pushq $0                      /* err = 0                        */
-    pushq $256                    /* trapno = 256 (syscall marker)  */
-
-    /* 15 GPRs in struct trapframe order (rax..r15, high→low addr) */
-    pushq %rax                    /* rax = syscall number           */
-    pushq %rbx
-    pushq %rcx                    /* clobbered (user RIP) — saved   */
-    pushq %rdx
-    pushq %rsi
-    pushq %rdi
-    pushq %rbp
-    pushq %r8
-    pushq %r9
-    pushq %r10
-    pushq %r11                    /* clobbered (user RFLAGS) — saved*/
-    pushq %r12
-    pushq %r13
-    pushq %r14
-    pushq %r15
-
-    /*
      * Step 4: call C handler.
-     * RDI = pointer to struct trapframe on the kernel stack.
      */
-    movq %rsp, %rdi
     cld
     movabsq $usertrap_syscall, %rax
     call *%rax

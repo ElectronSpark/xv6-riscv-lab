@@ -23,9 +23,10 @@ struct cpu_local {
     int __pad_rcu;              // keep following 64-bit fields aligned
     uint64 syscall_scratch;     // SWAPGS scratch (%gs:64 on SYSCALL entry)
     uint64 syscall_kstack_top;  // kernel stack top for SYSCALL entry (%gs:72)
+    uint64 syscall_trapframe;   // higher-half trapframe VA for SYSCALL entry
     int fpu_owner_tid;          // TID of thread whose FP state is in HW (0 = none)
-    int __pad0;                 // padding to keep intr_kstack_top at offset 88
-    uint64 intr_kstack_top;     // kernel stack top for IDT entry (%gs:88)
+    int __pad0;
+    uint64 intr_kstack_top;     // kernel stack top for IDT entry
     uint64 fpu_seq;             // FPU ownership sequence number
     uint64 busy_ticks;          // ticks spent running non-idle threads
     uint64 total_ticks;         // total timer ticks on this CPU
@@ -33,6 +34,9 @@ struct cpu_local {
     uint16 asid_gen;          // last-seen ASID generation on this CPU
     uint16 __pad1;
     uint32 __pad2;
+    uint64 user_fs_base;      // Last MSR_FS_BASE value installed on this CPU
+    int user_fs_base_valid;   // Avoid sentinel collisions with user values
+    int __pad_user_fs_base;
 } __ALIGNED_CACHELINE;
 
 #endif /* __KERNEL_PERCPU_TYPES_H */
