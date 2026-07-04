@@ -1015,6 +1015,7 @@ static int ext4fs_submit_readahead(struct pcache *pcache,
         bio->blkno = pba;
 
         bool ok = true;
+        unsigned int submitted_pages = 0;
         for (int j = 0; j < run_len; j++) {
             struct pcache_node *pj = pages[i + j]->pcache.pcache_node;
             unsigned int fj =
@@ -1024,6 +1025,7 @@ static int ext4fs_submit_readahead(struct pcache *pcache,
                 ok = false;
                 break;
             }
+            submitted_pages += fj;
         }
 
         if (!ok || blkdev_submit_bio(blk, bio) != 0) {
@@ -1042,6 +1044,7 @@ static int ext4fs_submit_readahead(struct pcache *pcache,
         }
 
         submitted += run_len;
+        KSTATS_PROFILE_ADD(g_ext4_pcache_readahead_pages, submitted_pages);
         i += run_len;
     }
 
@@ -1573,8 +1576,6 @@ static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
         page_t *pcpage = pcache_get_page(pc, blkno_512);
         if (pcpage == NULL)
             return -ENOMEM;
-
-        KSTATS_PROFILE_INC(g_ext4_pcache_readahead_pages);
 
         struct pcache_node *pcn = pcpage->pcache.pcache_node;
         /* Compute the sub-page offset for multi-page folios. */
