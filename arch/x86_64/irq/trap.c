@@ -36,6 +36,10 @@
 
 #define USER_FAULT_AROUND_PAGES 8UL
 
+extern char _rodata[];
+extern char _rodata_end[];
+extern void ext4fs_direct_read_debug_dump(const char *reason);
+
 static const char *fault_vma_file_name(vma_t *vma)
 {
     if (vma == NULL || vma->file == NULL || vma->file->inode.inode == NULL)
@@ -1594,6 +1598,144 @@ static inline uint64 read_cr2(void) {
     return v;
 }
 
+static void x86_dump_fault_pte(pagetable_t pt, const char *space,
+                               const char *label, uint64 va)
+{
+    if (pt == NULL) {
+        printf("  pte[%s] %s va=0x%lx pt=NULL\n", space, label, va);
+        return;
+    }
+    if (!VA_IS_CANONICAL(va)) {
+        printf("  pte[%s] %s va=0x%lx noncanonical\n", space, label, va);
+        return;
+    }
+
+    pte_t *pte = walk(pt, va, 0, NULL, NULL);
+    pte_t val = pte != NULL ? *pte : 0;
+    int present = pte != NULL && pte_present(&val);
+    int write = present ? pte_write(&val) : 0;
+    int user = present ? pte_user(&val) : 0;
+    int huge = present ? pte_is_hugepage(&val) : 0;
+    int nx = present ? ((val & PTE_NX) != 0) : 0;
+    uint64 pa = present ? pte_pa(&val) : 0;
+
+    printf("  pte[%s] %s va=0x%lx pt=%p pteptr=%p pte=0x%lx present=%d write=%d user=%d nx=%d huge=%d pa=0x%lx flags=0x%lx\n",
+           space, label, va, pt, pte, val, present, write, user, nx, huge,
+           pa, (uint64)PTE_FLAGS(val));
+}
+
+static int x86_kernel_range_present(uint64 addr, uint64 len)
+{
+    if (len == 0)
+        return 1;
+    if (!VA_IS_CANONICAL(addr) || !VA_IS_CANONICAL(addr + len - 1))
+        return 0;
+    pte_t *first = walk(kernel_pagetable, addr, 0, NULL, NULL);
+    pte_t *last = walk(kernel_pagetable, addr + len - 1, 0, NULL, NULL);
+    return first != NULL && last != NULL && pte_present(first) &&
+           pte_present(last);
+}
+
+static void x86_dump_kernel_bytes(const char *label, uint64 addr, uint64 len)
+{
+    if (!x86_kernel_range_present(addr, len)) {
+        printf("  %s bytes @0x%lx unavailable\n", label, addr);
+        return;
+    }
+
+    printf("  %s bytes @0x%lx:", label, addr);
+    for (uint64 i = 0; i < len; i++)
+        printf(" %02x", ((uint8 *)addr)[i]);
+    printf("\n");
+}
+
+static void x86_dump_kernel_stack_words(struct thread *p, uint64 rsp)
+{
+    if (p == NULL) {
+        printf("  stack dump unavailable: current=NULL\n");
+        return;
+    }
+
+    uint64 stack_size = (1UL << (PAGE_SHIFT + p->kstack_order));
+    uint64 stack_pa = p->kstack;
+    uint64 stack_pa_end = stack_pa + stack_size;
+    uint64 stack_va = (uint64)PA2VA(stack_pa);
+    uint64 stack_va_end = stack_va + stack_size;
+
+    if (!((rsp >= stack_pa && rsp + sizeof(uint64) <= stack_pa_end) ||
+          (rsp >= stack_va && rsp + sizeof(uint64) <= stack_va_end))) {
+        printf("  stack dump unavailable: rsp=0x%lx outside kstack pa=[0x%lx-0x%lx) va=[0x%lx-0x%lx)\n",
+               rsp, stack_pa, stack_pa_end, stack_va, stack_va_end);
+        return;
+    }
+
+    uint64 max_words = 8;
+    if (rsp >= stack_pa && rsp < stack_pa_end) {
+        uint64 avail = (stack_pa_end - rsp) / sizeof(uint64);
+        if (max_words > avail)
+            max_words = avail;
+    } else {
+        uint64 avail = (stack_va_end - rsp) / sizeof(uint64);
+        if (max_words > avail)
+            max_words = avail;
+    }
+
+    printf("  stack words @rsp=0x%lx:", rsp);
+    for (uint64 i = 0; i < max_words; i++)
+        printf(" 0x%lx", ((uint64 *)rsp)[i]);
+    printf("\n");
+}
+
+static void x86_dump_kernel_page_fault_context(struct trapframe *tf,
+                                               uint64 cr2)
+{
+    struct thread *p = current;
+    uint64 cr3 = r_satp();
+    pagetable_t active_pt =
+        (pagetable_t)(cr3 & ~(CR3_PCID_MASK | CR3_NOFLUSH));
+    const char *rip_class = "other";
+
+    if (tf->rip >= (uint64)_rodata && tf->rip < (uint64)_rodata_end)
+        rip_class = "kernel-rodata-exec";
+
+    printf("kernel-pf-context: class=%s cpu=%d current=%p pid=%d tgid=%d name=%s state=%d cr3=0x%lx active_pt=%p kernel_pt=%p current_vm=%p current_pt=%p\n",
+           rip_class, cpuid(), p, p != NULL ? p->pid : -1,
+           p != NULL ? p->tgid : -1, p != NULL ? p->name : "-",
+           p != NULL ? p->state : -1, cr3, active_pt, kernel_pagetable,
+           p != NULL ? p->vm : NULL,
+           p != NULL && p->vm != NULL ? p->vm->pagetable : NULL);
+    if (p != NULL) {
+        uint64 stack_size = (1UL << (PAGE_SHIFT + p->kstack_order));
+        printf("  current-kstack: pa=[0x%lx-0x%lx) va=[0x%lx-0x%lx) order=%d\n",
+               p->kstack, p->kstack + stack_size, (uint64)PA2VA(p->kstack),
+               (uint64)PA2VA(p->kstack) + stack_size, p->kstack_order);
+    }
+    printf("  regs0: rip=0x%lx rsp=0x%lx rbp=0x%lx rflags=0x%lx err=0x%lx trapno=%lu\n",
+           tf->rip, tf->rsp, tf->rbp, tf->rflags, tf->err, tf->trapno);
+    printf("  regs1: rax=0x%lx rbx=0x%lx rcx=0x%lx rdx=0x%lx rsi=0x%lx rdi=0x%lx\n",
+           tf->rax, tf->rbx, tf->rcx, tf->rdx, tf->rsi, tf->rdi);
+    printf("  regs2: r8=0x%lx r9=0x%lx r10=0x%lx r11=0x%lx r12=0x%lx r13=0x%lx r14=0x%lx r15=0x%lx\n",
+           tf->r8, tf->r9, tf->r10, tf->r11, tf->r12, tf->r13, tf->r14,
+           tf->r15);
+    x86_dump_fault_pte(active_pt, "active", "cr2", cr2);
+    x86_dump_fault_pte(active_pt, "active", "rip", tf->rip);
+    x86_dump_fault_pte(active_pt, "active", "rsp", tf->rsp);
+    x86_dump_fault_pte(active_pt, "active", "rbp", tf->rbp);
+    x86_dump_fault_pte(kernel_pagetable, "kernel", "cr2", cr2);
+    x86_dump_fault_pte(kernel_pagetable, "kernel", "rip", tf->rip);
+    x86_dump_fault_pte(kernel_pagetable, "kernel", "rsp", tf->rsp);
+    x86_dump_fault_pte(kernel_pagetable, "kernel", "rbp", tf->rbp);
+    if (p != NULL && p->vm != NULL) {
+        x86_dump_fault_pte(p->vm->pagetable, "current", "cr2", cr2);
+        x86_dump_fault_pte(p->vm->pagetable, "current", "rip", tf->rip);
+        x86_dump_fault_pte(p->vm->pagetable, "current", "rsp", tf->rsp);
+        x86_dump_fault_pte(p->vm->pagetable, "current", "rbp", tf->rbp);
+    }
+    if (tf->rip >= 8)
+        x86_dump_kernel_bytes("insn", tf->rip - 8, 32);
+    x86_dump_kernel_stack_words(p, tf->rsp);
+}
+
 static int kde_xwayland_fault_trace_enabled(void)
 {
     char value[16];
@@ -1997,6 +2139,8 @@ void x86_trap_handler(struct trapframe *tf) {
         dbg_puts("\n");
         printf("\n*** KERNEL PAGE FAULT: cr2=0x%lx err=0x%lx rip=0x%lx\n", cr2,
                tf->err, tf->rip);
+        x86_dump_kernel_page_fault_context(tf, cr2);
+        ext4fs_direct_read_debug_dump("kernel-page-fault");
         *(uint64 *)((uint64)tf - 8) = tf->rip;
         {
             /* Print crash site as first backtrace entry */

@@ -25,6 +25,7 @@
 #include <mm/pcache.h>
 #include <mm/folio.h>
 #include <smp/atomic.h>
+#include <smp/percpu.h>
 #include "proc/tq.h"
 #include "timer/timer.h"
 #include "vfs/fs.h"
@@ -393,6 +394,277 @@ static int ext4_read_page_direct_enabled(void)
     return cached;
 }
 
+static int ext4_read_page_direct_debug_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+
+    if (cached == -1) {
+        cached = cmdline_get_param("ext4_read_page_direct_debug", value,
+                                   sizeof(value)) == 0 && value[0] != '0';
+    }
+    return cached;
+}
+
+#define EXT4FS_DIRECT_READ_TRACE_ORDER 6
+#define EXT4FS_DIRECT_READ_TRACE_LEN (1U << EXT4FS_DIRECT_READ_TRACE_ORDER)
+#define EXT4FS_DIRECT_READ_TRACE_MASK (EXT4FS_DIRECT_READ_TRACE_LEN - 1)
+
+struct ext4fs_direct_read_trace_entry {
+    uint64 seq;
+    uint64 when;
+    const char *event;
+    int ret;
+    int cpu;
+    int pid;
+    int tgid;
+    char name[16];
+    uint64 ino;
+    uint64 file_off;
+    uint64 inode_size;
+    uint64 fblock;
+    uint64 pba;
+    uint64 off_in_folio;
+    uint64 pcache;
+    uint64 pcnode;
+    uint64 pcnode_page;
+    uint64 folio;
+    uint64 data;
+    uint64 node_blkno;
+    uint64 node_size;
+    int64 node_pages;
+    uint8 node_order;
+    uint8 dirty;
+    uint8 uptodate;
+    uint8 io_in_progress;
+    int page_ref;
+};
+
+static struct ext4fs_direct_read_trace_entry ext4fs_direct_read_trace[
+    EXT4FS_DIRECT_READ_TRACE_LEN];
+static uint64 ext4fs_direct_read_trace_seq;
+
+static void ext4fs_direct_read_trace_emit(const char *event,
+                                          struct pcache *pcache,
+                                          struct vfs_inode *inode,
+                                          struct pcache_node *pcnode,
+                                          uint64 file_off,
+                                          uint64 inode_size,
+                                          uint64 fblock,
+                                          uint64 pba,
+                                          uint64 off_in_folio,
+                                          int ret)
+{
+    if (!ext4_read_page_direct_debug_enabled())
+        return;
+
+    uint64 seq = __atomic_fetch_add(&ext4fs_direct_read_trace_seq, 1,
+                                    __ATOMIC_RELAXED);
+    struct ext4fs_direct_read_trace_entry *e =
+        &ext4fs_direct_read_trace[seq & EXT4FS_DIRECT_READ_TRACE_MASK];
+    struct thread *p = current;
+
+    memset(e, 0, sizeof(*e));
+    e->when = r_time();
+    e->event = event;
+    e->ret = ret;
+    e->cpu = cpuid();
+    e->pid = p != NULL ? p->pid : -1;
+    e->tgid = p != NULL ? p->tgid : -1;
+    if (p != NULL) {
+        for (size_t i = 0; i + 1 < sizeof(e->name); i++) {
+            e->name[i] = p->name[i];
+            if (p->name[i] == '\0')
+                break;
+        }
+    }
+    e->ino = inode != NULL ? inode->ino : 0;
+    e->file_off = file_off;
+    e->inode_size = inode_size;
+    e->fblock = fblock;
+    e->pba = pba;
+    e->off_in_folio = off_in_folio;
+    e->pcache = (uint64)pcache;
+    e->pcnode = (uint64)pcnode;
+    if (pcnode != NULL) {
+        e->pcnode_page = (uint64)pcnode->page;
+        e->folio = (uint64)pcnode->folio;
+        e->data = (uint64)pcnode->data;
+        e->node_blkno = pcnode->blkno;
+        e->node_size = pcnode->size;
+        e->node_pages = pcnode->page_count;
+        e->node_order = pcnode->order;
+        e->dirty = pcnode->dirty;
+        e->uptodate = pcnode->uptodate;
+        e->io_in_progress = pcnode->io_in_progress;
+        if (pcnode->page != NULL)
+            e->page_ref = page_ref_count(pcnode->page);
+    }
+
+    __atomic_store_n(&e->seq, seq + 1, __ATOMIC_RELEASE);
+}
+
+void ext4fs_direct_read_debug_dump(const char *reason)
+{
+    if (!ext4_read_page_direct_debug_enabled())
+        return;
+
+    uint64 next = __atomic_load_n(&ext4fs_direct_read_trace_seq,
+                                  __ATOMIC_ACQUIRE);
+    uint64 start = next > EXT4FS_DIRECT_READ_TRACE_LEN ?
+                   next - EXT4FS_DIRECT_READ_TRACE_LEN : 0;
+
+    printf("ext4-direct-read-debug: reason=%s next_seq=%lu entries=%u\n",
+           reason != NULL ? reason : "?", next,
+           EXT4FS_DIRECT_READ_TRACE_LEN);
+    for (uint64 seq = start; seq < next; seq++) {
+        struct ext4fs_direct_read_trace_entry *e =
+            &ext4fs_direct_read_trace[seq & EXT4FS_DIRECT_READ_TRACE_MASK];
+        uint64 seen = __atomic_load_n(&e->seq, __ATOMIC_ACQUIRE);
+        if (seen != seq + 1)
+            continue;
+        printf("  ext4dr[%lu] t=%lu cpu=%d pid=%d tgid=%d name=%s event=%s ret=%d ino=%lu off=0x%lx size=0x%lx fblk=%lu pba=%lu folio_off=0x%lx pcache=%p node=%p page=%p folio=%p data=%p node_blk=0x%lx node_size=0x%lx pages=%ld order=%u flags=d%d/u%d/io%d ref=%d\n",
+               seq, e->when, e->cpu, e->pid, e->tgid,
+               e->name[0] != '\0' ? e->name : "-",
+               e->event != NULL ? e->event : "?", e->ret, e->ino,
+               e->file_off, e->inode_size, e->fblock, e->pba,
+               e->off_in_folio, (void *)e->pcache, (void *)e->pcnode,
+               (void *)e->pcnode_page, (void *)e->folio, (void *)e->data,
+               e->node_blkno, e->node_size, (long)e->node_pages,
+               e->node_order, e->dirty, e->uptodate, e->io_in_progress,
+               e->page_ref);
+    }
+}
+
+static void ext4fs_direct_read_invariant_fail(const char *stage,
+                                              const char *why,
+                                              struct pcache *pcache,
+                                              struct vfs_inode *inode,
+                                              struct pcache_node *pcnode,
+                                              struct bio *bio,
+                                              uint64 file_off,
+                                              uint64 inode_size,
+                                              uint64 fblock,
+                                              uint64 pba,
+                                              uint64 off_in_folio)
+{
+    ext4fs_direct_read_trace_emit("invariant-fail", pcache, inode, pcnode,
+                                  file_off, inode_size, fblock, pba,
+                                  off_in_folio, -EIO);
+    printf("ext4-direct-read-invariant: stage=%s why=%s pcache=%p inode=%p pcnode=%p bio=%p off=0x%lx fblk=%lu pba=%lu\n",
+           stage != NULL ? stage : "?", why != NULL ? why : "?", pcache,
+           inode, pcnode, bio, off_in_folio, fblock, pba);
+    if (bio != NULL) {
+        printf("  bio: blkno=%lu size=%u vecs=%d done=%d error=%d bvec0_page=%p bvec0_off=%u bvec0_len=%u\n",
+               bio->blkno, bio->size, bio->vec_length, bio->done,
+               bio->error, bio->vec_length > 0 ? bio->bvecs[0].bv_page : NULL,
+               bio->vec_length > 0 ? bio->bvecs[0].offset : 0,
+               bio->vec_length > 0 ? bio->bvecs[0].len : 0);
+    }
+    ext4fs_direct_read_debug_dump("invariant-fail");
+    panic("ext4 direct-read invariant failed");
+}
+
+static void ext4fs_direct_read_check_invariants(const char *stage,
+                                                struct pcache *pcache,
+                                                struct vfs_inode *inode,
+                                                struct pcache_node *pcnode,
+                                                struct bio *bio,
+                                                uint64 file_off,
+                                                uint64 inode_size,
+                                                uint64 fblock,
+                                                uint64 pba,
+                                                uint64 off_in_folio)
+{
+    const char *why = NULL;
+    folio_t *folio;
+    page_t *page;
+    uint64 folio_base;
+    uint64 folio_len;
+
+    if (!ext4_read_page_direct_debug_enabled())
+        return;
+
+    if (pcache == NULL)
+        why = "pcache-null";
+    else if (inode == NULL)
+        why = "inode-null";
+    else if (pcnode == NULL)
+        why = "pcnode-null";
+    else if (pcnode->pcache != pcache)
+        why = "pcnode-pcache-mismatch";
+    else if (pcnode->folio == NULL)
+        why = "folio-null";
+    if (why != NULL)
+        goto fail;
+
+    folio = pcnode->folio;
+    page = &folio->page;
+    folio_base = folio_address(folio);
+    folio_len = folio_size(folio);
+
+    if (pcnode->page != page)
+        why = "pcnode-page-mismatch";
+    else if (!PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE))
+        why = "head-not-pcache";
+    else if (page->pcache.pcache != pcache)
+        why = "page-pcache-mismatch";
+    else if (page->pcache.pcache_node != pcnode)
+        why = "page-node-mismatch";
+    else if (pcnode->page_count != (int64)folio_nr_pages(folio))
+        why = "page-count-mismatch";
+    else if (pcnode->order != folio_order(folio))
+        why = "order-mismatch";
+    else if ((uint64)pcnode->data < folio_base)
+        why = "data-before-folio";
+    else if ((uint64)pcnode->data + PGSIZE > folio_base + folio_len)
+        why = "data-after-folio";
+    else if (off_in_folio != (uint64)pcnode->data - folio_base)
+        why = "offset-mismatch";
+    else if ((off_in_folio & (PGSIZE - 1)) != 0)
+        why = "offset-unaligned";
+    else if (off_in_folio > 0xFFFFULL)
+        why = "offset-too-wide";
+    else if (off_in_folio + PGSIZE > folio_len)
+        why = "range-past-folio";
+    else if (page_ref_count(page) < 2)
+        why = "page-ref-too-small";
+    else if (pcnode->dirty)
+        why = "dirty-direct-read";
+    else if (!pcnode->io_in_progress)
+        why = "io-not-in-progress";
+    else if (file_off != pcnode->blkno * 512ULL)
+        why = "file-off-node-mismatch";
+    else if (file_off < inode_size && fblock == 0)
+        why = "missing-fblock";
+
+    if (why != NULL)
+        goto fail;
+
+    if (bio != NULL) {
+        if (bio->vec_length != 1)
+            why = "bio-vec-count";
+        else if (bio->size != PGSIZE)
+            why = "bio-size";
+        else if (bio->blkno != pba)
+            why = "bio-pba";
+        else if (bio->bvecs[0].bv_page != page)
+            why = "bio-page";
+        else if (bio->bvecs[0].offset != (uint16)off_in_folio)
+            why = "bio-offset";
+        else if (bio->bvecs[0].len != PGSIZE)
+            why = "bio-len";
+    }
+
+    if (why == NULL)
+        return;
+
+fail:
+    ext4fs_direct_read_invariant_fail(stage, why, pcache, inode, pcnode, bio,
+                                      file_off, inode_size, fblock, pba,
+                                      off_in_folio);
+}
+
 /*
  * ext4fs_read_page_direct - Fill one pcache page without holding the
  * esb mutex across the device wait (the P3 read-path serialization
@@ -419,12 +691,41 @@ static int ext4fs_read_page_direct(struct ext4_fs *fs,
                                    uint64 inode_size)
 {
     uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+    uint64 folio_base;
+    uint64 folio_len;
+    uint64 off_in_folio;
 
-    if (block_size != PGSIZE || pcnode->folio == NULL)
+    ext4fs_direct_read_trace_emit("enter", pcnode != NULL ? pcnode->pcache : NULL,
+                                  inode, pcnode, file_off, inode_size, 0, 0,
+                                  0, 0);
+
+    if (block_size != PGSIZE || pcnode->folio == NULL) {
+        ext4fs_direct_read_trace_emit("fallback-shape",
+                                      pcnode != NULL ? pcnode->pcache : NULL,
+                                      inode, pcnode, file_off, inode_size, 0,
+                                      0, 0, 1);
         return 1;
+    }
+
+    folio_base = folio_address(pcnode->folio);
+    folio_len = folio_size(pcnode->folio);
+
+    if (pcnode->page != &pcnode->folio->page ||
+        pcnode->page_count != (int64)folio_nr_pages(pcnode->folio) ||
+        pcnode->size > folio_len ||
+        (uint64)pcnode->data < folio_base ||
+        (uint64)pcnode->data + PGSIZE > folio_base + folio_len) {
+        ext4fs_direct_read_trace_emit("fallback-bad-node", pcnode->pcache,
+                                      inode, pcnode, file_off, inode_size, 0,
+                                      0, 0, 1);
+        return 1;
+    }
 
     if (file_off >= inode_size) {
         memset(pcnode->data, 0, PGSIZE);
+        ext4fs_direct_read_trace_emit("zero-eof", pcnode->pcache, inode,
+                                      pcnode, file_off, inode_size, 0, 0, 0,
+                                      0);
         return 0;
     }
 
@@ -432,11 +733,30 @@ static int ext4fs_read_page_direct(struct ext4_fs *fs,
      * called from ext4fs_pcache_read_folio's per-page fallback loop
      * (it temporarily rewrites blkno/data/size).  Both pcnode->data
      * and folio_address() are physical addresses (identity map). */
-    uint64 off_in_folio = (uint64)pcnode->data - folio_address(pcnode->folio);
-    if (off_in_folio >= folio_size(pcnode->folio) ||
+    off_in_folio = (uint64)pcnode->data - folio_base;
+    if (off_in_folio >= folio_len ||
         (off_in_folio & (PGSIZE - 1)) != 0 ||
-        off_in_folio > 0xFFFFULL)
+        off_in_folio > 0xFFFFULL) {
+        ext4fs_direct_read_trace_emit("fallback-offset", pcnode->pcache,
+                                      inode, pcnode, file_off, inode_size, 0,
+                                      0, off_in_folio, 1);
         return 1;
+    }
+
+    /*
+     * read_folio() temporarily rewrites a compound folio's pcache_node to
+     * address one subpage at a time.  The direct path intentionally drops the
+     * ext4 mount mutex across bio_await(), which would leave that borrowed
+     * metadata visible to concurrent lookups for the whole device wait.
+     * Keep the opt-in fast path to stable order-0 nodes until this can be
+     * validated independently.
+     */
+    if ((uint64)pcnode->data != folio_base || pcnode->size != folio_len) {
+        ext4fs_direct_read_trace_emit("fallback-transient-node",
+                                      pcnode->pcache, inode, pcnode, file_off,
+                                      inode_size, 0, 0, off_in_folio, 1);
+        return 1;
+    }
 
     ext4fs_lock(esb);
 
@@ -444,6 +764,9 @@ static int ext4fs_read_page_direct(struct ext4_fs *fs,
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
     if (r != EOK) {
         ext4fs_unlock(esb);
+        ext4fs_direct_read_trace_emit("inode-ref-fail", pcnode->pcache,
+                                      inode, pcnode, file_off, inode_size, 0,
+                                      0, off_in_folio, -r);
         return -r;
     }
 
@@ -453,6 +776,9 @@ static int ext4fs_read_page_direct(struct ext4_fs *fs,
     ext4_fs_put_inode_ref(&ref);
     if (r != EOK) {
         ext4fs_unlock(esb);
+        ext4fs_direct_read_trace_emit("map-fallback", pcnode->pcache, inode,
+                                      pcnode, file_off, inode_size, 0, 0,
+                                      off_in_folio, 1);
         return 1;
     }
 
@@ -460,6 +786,9 @@ static int ext4fs_read_page_direct(struct ext4_fs *fs,
         /* Hole: no backing block, plain zero fill. */
         ext4fs_unlock(esb);
         memset(pcnode->data, 0, PGSIZE);
+        ext4fs_direct_read_trace_emit("hole-zero", pcnode->pcache, inode,
+                                      pcnode, file_off, inode_size, 0, 0,
+                                      off_in_folio, 0);
         goto tail;
     }
 
@@ -473,8 +802,16 @@ static int ext4fs_read_page_direct(struct ext4_fs *fs,
             memcpy(pcnode->data, cblk.data, PGSIZE);
         ext4_block_set(&esb->bdev, &cblk);
         ext4fs_unlock(esb);
-        if (!uptodate)
+        if (!uptodate) {
+            ext4fs_direct_read_trace_emit("bcache-stale-fallback",
+                                          pcnode->pcache, inode, pcnode,
+                                          file_off, inode_size, fblock, 0,
+                                          off_in_folio, 1);
             return 1;
+        }
+        ext4fs_direct_read_trace_emit("bcache-copy", pcnode->pcache, inode,
+                                      pcnode, file_off, inode_size, fblock, 0,
+                                      off_in_folio, 0);
         goto tail;
     }
 
@@ -485,6 +822,9 @@ static int ext4fs_read_page_direct(struct ext4_fs *fs,
     struct bio *bio = bio_alloc(blk, 1, false, NULL, NULL);
     if (IS_ERR_OR_NULL(bio)) {
         ext4fs_unlock(esb);
+        ext4fs_direct_read_trace_emit("bio-alloc-fallback", pcnode->pcache,
+                                      inode, pcnode, file_off, inode_size,
+                                      fblock, pba, off_in_folio, 1);
         return 1;
     }
     bio->blkno = pba;
@@ -493,8 +833,17 @@ static int ext4fs_read_page_direct(struct ext4_fs *fs,
     if (r != 0) {
         bio_release(bio);
         ext4fs_unlock(esb);
+        ext4fs_direct_read_trace_emit("bio-add-fallback", pcnode->pcache,
+                                      inode, pcnode, file_off, inode_size,
+                                      fblock, pba, off_in_folio, 1);
         return 1;
     }
+    ext4fs_direct_read_trace_emit("bio-ready", pcnode->pcache, inode, pcnode,
+                                  file_off, inode_size, fblock, pba,
+                                  off_in_folio, 0);
+    ext4fs_direct_read_check_invariants("bio-add", pcnode->pcache, inode,
+                                        pcnode, bio, file_off, inode_size,
+                                        fblock, pba, off_in_folio);
 
     r = blkdev_submit_bio(blk, bio);
     /* The point of this path: the device wait happens WITHOUT the
@@ -504,13 +853,29 @@ static int ext4fs_read_page_direct(struct ext4_fs *fs,
     ext4fs_unlock(esb);
     if (r != 0) {
         bio_release(bio);
+        ext4fs_direct_read_trace_emit("bio-submit-fallback", pcnode->pcache,
+                                      inode, pcnode, file_off, inode_size,
+                                      fblock, pba, off_in_folio, 1);
         return 1;
     }
 
+    ext4fs_direct_read_trace_emit("bio-submitted", pcnode->pcache, inode,
+                                  pcnode, file_off, inode_size, fblock, pba,
+                                  off_in_folio, 0);
     r = bio_await(bio);
+    ext4fs_direct_read_check_invariants("bio-await", pcnode->pcache, inode,
+                                        pcnode, bio, file_off, inode_size,
+                                        fblock, pba, off_in_folio);
     bio_release(bio);
-    if (r != 0)
+    if (r != 0) {
+        ext4fs_direct_read_trace_emit("bio-error", pcnode->pcache, inode,
+                                      pcnode, file_off, inode_size, fblock,
+                                      pba, off_in_folio, -EIO);
         return -EIO;
+    }
+    ext4fs_direct_read_trace_emit("bio-done", pcnode->pcache, inode, pcnode,
+                                  file_off, inode_size, fblock, pba,
+                                  off_in_folio, 0);
 
 tail:
     if (file_off + PGSIZE > inode_size) {
