@@ -1466,6 +1466,25 @@ out:
     return ret;
 }
 
+/*
+ * P2 default flip (2026-07-04): the ordered page-flip path is default-ON
+ * after the direct-KMS A/B (100 -> 118-125 FPS), two clean KDE passes,
+ * and removal of the R5 blocker that failed the first promotion attempt.
+ * Set virtio_gpu_ordered_page_flip=0 to restore the drain-to-fence path.
+ */
+static int virtio_gpu_ordered_page_flip_enabled(void)
+{
+    char buf[16];
+
+    if (cmdline_get_param("virtio_gpu_ordered_page_flip", buf,
+                          sizeof(buf)) != 0)
+        return 1;
+    return !(strcmp(buf, "0") == 0 ||
+             strcmp(buf, "no") == 0 ||
+             strcmp(buf, "false") == 0 ||
+             strcmp(buf, "off") == 0);
+}
+
 int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
                                   uint32 *flags_out)
 {
@@ -1514,7 +1533,7 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
         virtio_gpu_async_newest_fence(g) >= src_submit_fence;
     ordered_async_src_fence = should_wait_src_fence &&
         virtio_gpu_async_scanout_flush_enabled() &&
-        virtio_gpu_cmdline_enabled("virtio_gpu_ordered_page_flip") &&
+        virtio_gpu_ordered_page_flip_enabled() &&
         !virtio_gpu_cmdline_enabled("virtio_gpu_page_flip_drain_src_fence");
     spin_unlock(&g->lock);
 
@@ -1523,11 +1542,11 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
      * ordering as the resource-copy path.  Mesa can submit rendering work
      * asynchronously, then KMS may immediately flip/flush the target resource.
      *
-     * With virtio_gpu_ordered_page_flip=1, the SET_SCANOUT/RESOURCE_FLUSH
+     * With ordered page flip (default-on since 2026-07-04; opt out with
+     * virtio_gpu_ordered_page_flip=0), the SET_SCANOUT/RESOURCE_FLUSH
      * below is posted after the pending producer submit on the same virtio
-     * control queue, so queue ordering should preserve producer-before-present
-     * without stalling the compositor here.  Keep this opt-in until reducers
-     * show a clear interaction-latency win across hosts.
+     * control queue, so queue ordering preserves producer-before-present
+     * without stalling the compositor here.
      */
     if (should_wait_src_fence && !ordered_async_src_fence) {
         ret = virtio_gpu_drain_async_until_fence(g, src_submit_fence);
