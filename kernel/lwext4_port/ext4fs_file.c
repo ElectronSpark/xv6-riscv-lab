@@ -33,6 +33,7 @@
 #include "ext4fs_private.h"
 #include "vfs/uio.h"
 #include "dev/blkdev.h"
+#include "cmdline.h"
 
 #include <ext4_errno.h>
 #include <ext4_fs.h>
@@ -377,6 +378,148 @@ retry:
     spin_unlock(&pc->spinlock);
 }
 
+/* P3 gate: opt-in single-page direct fill that releases the esb mutex
+ * across the device wait (kernel cmdline ext4_read_page_direct=1,
+ * default off). */
+static int ext4_read_page_direct_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+
+    if (cached == -1) {
+        cached = cmdline_get_param("ext4_read_page_direct", value,
+                                   sizeof(value)) == 0 && value[0] != '0';
+    }
+    return cached;
+}
+
+/*
+ * ext4fs_read_page_direct - Fill one pcache page without holding the
+ * esb mutex across the device wait (the P3 read-path serialization
+ * fix).  Mirrors the two-phase pattern already used by
+ * ext4fs_file_prefault and ext4fs_submit_readahead: resolve the block
+ * mapping under ext4fs_lock, submit a direct BIO, then release the
+ * lock before bio_await.
+ *
+ * Read-after-write coherence: dirty file data can sit in the lwext4
+ * bcache (ext4fs_pcache_write_page dirties bcache blocks), so a disk
+ * read that bypasses the bcache is only performed when the block has
+ * NO bcache entry.  A cached uptodate block is copied under the lock
+ * (no device wait); anything else falls back to the locked bcache
+ * fill.
+ *
+ * Returns 0 on success, 1 when the caller must fall back to the
+ * locked ext4fs_fill_page_from_ref path, negative errno on hard error.
+ */
+static int ext4fs_read_page_direct(struct ext4_fs *fs,
+                                   struct ext4fs_superblock *esb,
+                                   struct vfs_inode *inode,
+                                   struct pcache_node *pcnode,
+                                   uint64 file_off,
+                                   uint64 inode_size)
+{
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+
+    if (block_size != PGSIZE || pcnode->folio == NULL)
+        return 1;
+
+    if (file_off >= inode_size) {
+        memset(pcnode->data, 0, PGSIZE);
+        return 0;
+    }
+
+    /* pcnode->data may point into the middle of a compound folio when
+     * called from ext4fs_pcache_read_folio's per-page fallback loop
+     * (it temporarily rewrites blkno/data/size).  Both pcnode->data
+     * and folio_address() are physical addresses (identity map). */
+    uint64 off_in_folio = (uint64)pcnode->data - folio_address(pcnode->folio);
+    if (off_in_folio >= folio_size(pcnode->folio) ||
+        (off_in_folio & (PGSIZE - 1)) != 0 ||
+        off_in_folio > 0xFFFFULL)
+        return 1;
+
+    ext4fs_lock(esb);
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        return -r;
+    }
+
+    ext4_lblk_t iblock = (ext4_lblk_t)(file_off / block_size);
+    ext4_fsblk_t fblock;
+    r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, true);
+    ext4_fs_put_inode_ref(&ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        return 1;
+    }
+
+    if (fblock == 0) {
+        /* Hole: no backing block, plain zero fill. */
+        ext4fs_unlock(esb);
+        memset(pcnode->data, 0, PGSIZE);
+        goto tail;
+    }
+
+    struct ext4_block cblk;
+    memset(&cblk, 0, sizeof(cblk));
+    struct ext4_buf *buf = ext4_bcache_find_get(esb->bdev.bc, &cblk, fblock);
+    if (buf != NULL) {
+        int uptodate = ext4_bcache_test_flag(buf, BC_UPTODATE) ? 1 : 0;
+
+        if (uptodate)
+            memcpy(pcnode->data, cblk.data, PGSIZE);
+        ext4_block_set(&esb->bdev, &cblk);
+        ext4fs_unlock(esb);
+        if (!uptodate)
+            return 1;
+        goto tail;
+    }
+
+    blkdev_t *blk = esb->xv6_blkdev;
+    uint64 pba = ((uint64)fblock * block_size + esb->bdev.part_offset) /
+                 esb->bdev_iface.ph_bsize;
+
+    struct bio *bio = bio_alloc(blk, 1, false, NULL, NULL);
+    if (IS_ERR_OR_NULL(bio)) {
+        ext4fs_unlock(esb);
+        return 1;
+    }
+    bio->blkno = pba;
+
+    r = bio_add_folio(bio, pcnode->folio, PGSIZE, (uint16)off_in_folio);
+    if (r != 0) {
+        bio_release(bio);
+        ext4fs_unlock(esb);
+        return 1;
+    }
+
+    r = blkdev_submit_bio(blk, bio);
+    /* The point of this path: the device wait happens WITHOUT the
+     * per-mount mutex, so other threads can resolve mappings and hit
+     * the bcache concurrently.  The pcache io_in_progress flag keeps
+     * concurrent readers of this page waiting on io_waiters. */
+    ext4fs_unlock(esb);
+    if (r != 0) {
+        bio_release(bio);
+        return 1;
+    }
+
+    r = bio_await(bio);
+    bio_release(bio);
+    if (r != 0)
+        return -EIO;
+
+tail:
+    if (file_off + PGSIZE > inode_size) {
+        uint64 valid = inode_size - file_off;
+        memset((char *)pcnode->data + valid, 0, PGSIZE - valid);
+    }
+    return 0;
+}
+
 static int ext4fs_pcache_read_page(struct pcache *pcache, page_t *page)
 {
     int profile = kstats_profile_enabled();
@@ -392,10 +535,22 @@ static int ext4fs_pcache_read_page(struct pcache *pcache, page_t *page)
     struct ext4_fs *fs = &esb->ext4fs;
     uint64 file_off = pcnode->blkno * 512ULL;
     uint64 inode_size = (uint64)inode->size;
+    int r;
+
+    if (ext4_read_page_direct_enabled()) {
+        r = ext4fs_read_page_direct(fs, esb, inode, pcnode, file_off,
+                                    inode_size);
+        if (r <= 0) {
+            if (r != 0)
+                return r;
+            goto filled;
+        }
+        /* r == 1: fall back to the locked bcache fill below. */
+    }
 
     ext4fs_lock(esb);
     struct ext4_inode_ref ref;
-    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
     if (r != EOK) {
         ext4fs_unlock(esb);
         return -r;
@@ -410,6 +565,7 @@ static int ext4fs_pcache_read_page(struct pcache *pcache, page_t *page)
     if (r != 0)
         return r;
 
+filled:
     KSTATS_PROFILE_INC(g_ext4_pcache_pages_filled);
     if (profile)
         __atomic_add_fetch(&g_ext4_pcache_read_page_ticks,
