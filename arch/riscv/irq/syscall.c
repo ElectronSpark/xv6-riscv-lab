@@ -150,7 +150,8 @@ static const char *syscall_name(int num) {
     case 148: return "setgroups";
     case 158: return "arch_prctl";
     case 159: return "prlimit64";
-    case 160: return "kstats";
+    case SYS_kstats: return "kstats";
+    case SYS_kprofile_pgroup: return "kprofile_pgroup";
     case 161: return "netconf";
     case 842: return "sendmmsg";
     case 847: return "umask";
@@ -456,6 +457,8 @@ extern uint64 sys_getrlimit(void);
 extern uint64 sys_setrlimit(void);
 extern uint64 sys_kstats(void);
 extern uint64 sys_kstats2(void);
+extern uint64 sys_kstatsctl(void);
+extern uint64 sys_kprofile_pgroup(void);
 
 // network configuration (lwip_port/lwip_glue.c)
 #ifdef USE_LWIP
@@ -668,6 +671,8 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_prlimit64_generic] sys_prlimit64,
     [SYS_kstats] sys_kstats,
     [SYS_kstats2] sys_kstats2,
+    [SYS_kstatsctl] sys_kstatsctl,
+    [SYS_kprofile_pgroup] sys_kprofile_pgroup,
 #ifdef USE_LWIP
     [SYS_netconf] sys_netconf,
     [SYS_socket] sys_socket,

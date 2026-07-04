@@ -342,6 +342,70 @@ struct kstats {
 #define KSTATS_ABI_VERSION 8
 #define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
+/*
+ * On-demand process-group profile snapshot. This is intentionally separate
+ * from struct kstats: kstats is a global append-only counter ABI, while this
+ * walks one process group only when userspace asks for it.
+ */
+struct kprofile_pgroup {
+    uint64 abi_version;
+    uint64 uptime_ms;
+    uint64 timestamp;
+    uint64 timebase_freq;
+    int32 pgid;
+    int32 found;
+
+    uint64 processes;
+    uint64 threads;
+    uint64 live_threads;
+    uint64 kernel_processes;
+
+    uint64 state_running;
+    uint64 state_runnable;
+    uint64 state_sleeping;
+    uint64 state_uninterruptible;
+    uint64 state_stopped;
+    uint64 state_zombie;
+    uint64 state_exiting;
+    uint64 state_wakening;
+    uint64 on_cpu;
+    uint64 on_rq;
+
+    uint64 cpu_runtime_ticks;
+    uint64 max_thread_runtime_ticks;
+    uint64 peak_vm_bytes;
+    uint64 rss_pages;
+
+    uint64 fs_opens;
+    uint64 fs_closes;
+    uint64 fs_bytes_read;
+    uint64 fs_bytes_written;
+    uint64 fs_creates;
+    uint64 fs_deletes;
+    uint64 fs_renames;
+    uint64 fs_links;
+    uint64 fs_chdirs;
+    uint64 fs_mounts;
+
+    uint64 bio_reads;
+    uint64 bio_writes;
+
+    uint64 net_sockets;
+    uint64 net_connects;
+    uint64 net_accepts;
+    uint64 net_bytes_sent;
+    uint64 net_bytes_recv;
+
+    uint64 mm_mmap_count;
+    uint64 mm_munmap_count;
+    int64 mm_brk_delta;
+    uint64 sched_forks;
+    uint64 sched_execs;
+    uint64 sched_exits;
+};
+
+#define KPROFILE_PGROUP_ABI_VERSION 1
+
 /* ------------------------------------------------------------------ */
 /*  Global atomic counters (defined in bio.c / e1000.c)               */
 /* ------------------------------------------------------------------ */
@@ -637,6 +701,7 @@ static inline int kstats_profile_enabled(void) {
 
 /** Fill a kstats struct with a point-in-time snapshot. */
 void kstats_collect(struct kstats *ks);
+int kprofile_pgroup_collect(pid_t pgid, struct kprofile_pgroup *kp);
 void kstats_profile_set(int enabled);
 int kstats_konsole_prepty_current(void);
 void kstats_konsole_prepty_exec(const char *path);

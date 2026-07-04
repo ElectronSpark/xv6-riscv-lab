@@ -330,6 +330,7 @@ extern uint64 sys_setrlimit(void);
 extern uint64 sys_kstats(void);
 extern uint64 sys_kstats2(void);
 extern uint64 sys_kstatsctl(void);
+extern uint64 sys_kprofile_pgroup(void);
 
 // network configuration (lwip_port/lwip_glue.c)
 #ifdef USE_LWIP
@@ -816,6 +817,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_kstats] sys_kstats,
     [SYS_kstats2] sys_kstats2,
     [SYS_kstatsctl] sys_kstatsctl,
+    [SYS_kprofile_pgroup] sys_kprofile_pgroup,
 #ifdef USE_LWIP
     [SYS_netconf] sys_netconf,
     [SYS_socket] sys_socket,

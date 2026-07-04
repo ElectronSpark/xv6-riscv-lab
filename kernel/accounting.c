@@ -15,8 +15,10 @@
 #include "sched_starve_probe.h"
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "proc/pgroup.h"
 #include "proc/rq.h"
 #include "proc/sched.h"
+#include "list.h"
 #include "defs.h"
 #include "param.h"
 #include "string.h"
@@ -1192,6 +1194,197 @@ void kstats_collect(struct kstats *ks) {
         sched_starve_probe_idle_needs_resched_samples();
 }
 
+static void kprofile_pgroup_add_acct(struct kprofile_pgroup *kp,
+                                     struct thread_group *tg)
+{
+    struct proc_acct *a = &tg->acct;
+
+#define ADD_U64(field)                                                       \
+    do {                                                                     \
+        kp->field += __atomic_load_n(&a->field, __ATOMIC_RELAXED);           \
+    } while (0)
+#define ADD_I64(field)                                                       \
+    do {                                                                     \
+        kp->field += __atomic_load_n(&a->field, __ATOMIC_RELAXED);           \
+    } while (0)
+
+    ADD_U64(fs_opens);
+    ADD_U64(fs_closes);
+    ADD_U64(fs_bytes_read);
+    ADD_U64(fs_bytes_written);
+    ADD_U64(fs_creates);
+    ADD_U64(fs_deletes);
+    ADD_U64(fs_renames);
+    ADD_U64(fs_links);
+    ADD_U64(fs_chdirs);
+    ADD_U64(fs_mounts);
+    ADD_U64(bio_reads);
+    ADD_U64(bio_writes);
+    ADD_U64(net_sockets);
+    ADD_U64(net_connects);
+    ADD_U64(net_accepts);
+    ADD_U64(net_bytes_sent);
+    ADD_U64(net_bytes_recv);
+    ADD_U64(mm_mmap_count);
+    ADD_U64(mm_munmap_count);
+    ADD_I64(mm_brk_delta);
+    ADD_U64(sched_forks);
+    ADD_U64(sched_execs);
+    ADD_U64(sched_exits);
+
+    kp->rss_pages += __atomic_load_n(&a->mm_rss_pages, __ATOMIC_RELAXED);
+    kp->peak_vm_bytes += __atomic_load_n(&a->mm_peak_vm, __ATOMIC_RELAXED);
+
+#undef ADD_U64
+#undef ADD_I64
+}
+
+static void kprofile_pgroup_add_thread(struct kprofile_pgroup *kp,
+                                       struct thread *p)
+{
+    struct sched_entity *se;
+    enum thread_state state;
+    uint64 runtime;
+    int on_rq;
+
+    if (p == NULL)
+        return;
+
+    kp->threads++;
+    state = __thread_state_get(p);
+    switch (state) {
+    case THREAD_RUNNING:
+        kp->state_running++;
+        break;
+    case THREAD_INTERRUPTIBLE:
+    case THREAD_KIILABLE:
+    case THREAD_TIMER:
+    case THREAD_KIILABLE_TIMER:
+        kp->state_sleeping++;
+        break;
+    case THREAD_UNINTERRUPTIBLE:
+        kp->state_uninterruptible++;
+        break;
+    case THREAD_STOPPED:
+        kp->state_stopped++;
+        break;
+    case THREAD_ZOMBIE:
+        kp->state_zombie++;
+        break;
+    case THREAD_EXITING:
+        kp->state_exiting++;
+        break;
+    case THREAD_WAKENING:
+        kp->state_wakening++;
+        break;
+    default:
+        break;
+    }
+
+    se = p->sched_entity;
+    if (se == NULL)
+        return;
+    if (smp_load_acquire(&se->on_cpu))
+        kp->on_cpu++;
+    on_rq = smp_load_acquire(&se->on_rq);
+    if (on_rq)
+        kp->on_rq++;
+    if (on_rq || state == THREAD_WAKENING)
+        kp->state_runnable++;
+
+    runtime = se->sum_exec_runtime;
+    kp->cpu_runtime_ticks += runtime;
+    if (runtime > kp->max_thread_runtime_ticks)
+        kp->max_thread_runtime_ticks = runtime;
+}
+
+static void kprofile_pgroup_add_tg(struct kprofile_pgroup *kp,
+                                   struct thread_group *tg,
+                                   struct thread *zombie_leader)
+{
+    struct thread *p;
+    struct thread *tmp;
+
+    if (tg == NULL)
+        return;
+
+    kp->processes++;
+    kp->live_threads += __atomic_load_n(&tg->live_threads,
+                                        __ATOMIC_RELAXED);
+    if (thread_group_is_kernel(tg))
+        kp->kernel_processes++;
+    kprofile_pgroup_add_acct(kp, tg);
+
+    list_foreach_node_safe(&tg->thread_list, p, tmp, tg_entry) {
+        kprofile_pgroup_add_thread(kp, p);
+    }
+    if (zombie_leader != NULL)
+        kprofile_pgroup_add_thread(kp, zombie_leader);
+}
+
+static void kprofile_pgroup_collect_zombie_child(struct kprofile_pgroup *kp,
+                                                pid_t pgid)
+{
+    struct thread_group *tg = current ? current->thread_group : NULL;
+    struct thread *thr;
+    struct thread *thr_tmp;
+
+    if (tg == NULL)
+        return;
+
+    list_foreach_node_safe(&tg->thread_list, thr, thr_tmp, tg_entry) {
+        struct thread *child;
+        struct thread *child_tmp;
+
+        list_foreach_node_safe(&thr->children, child, child_tmp, siblings) {
+            if (child->pid != pgid && child->tgid != pgid)
+                continue;
+            if (child->thread_group == NULL)
+                continue;
+            kprofile_pgroup_add_tg(kp, child->thread_group, child);
+            kp->found = 1;
+            return;
+        }
+    }
+}
+
+int kprofile_pgroup_collect(pid_t pgid, struct kprofile_pgroup *kp)
+{
+    struct pgroup *pg;
+
+    if (kp == NULL)
+        return -EINVAL;
+    memset(kp, 0, sizeof(*kp));
+    kp->abi_version = KPROFILE_PGROUP_ABI_VERSION;
+    kp->uptime_ms = (uint64)get_jiffs();
+    kp->timestamp = r_time();
+    kp->timebase_freq = __timebase_frequency;
+
+    if (pgid == 0) {
+        if (current == NULL || current->pgroup == NULL)
+            return -ESRCH;
+        pgid = current->pgroup->pgid;
+    }
+    kp->pgid = pgid;
+
+    pid_rlock();
+    pg = get_pgroup(pgid);
+    if (pg != NULL) {
+        struct thread_group *tg;
+        struct thread_group *tmp;
+
+        kp->found = 1;
+        list_foreach_node_safe(&pg->thread_groups, tg, tmp, list_entry) {
+            kprofile_pgroup_add_tg(kp, tg, NULL);
+        }
+    } else {
+        kprofile_pgroup_collect_zombie_child(kp, pgid);
+    }
+    pid_runlock();
+
+    return kp->found ? 0 : -ESRCH;
+}
+
 void kstats_profile_set(int enabled) {
     __atomic_store_n(&g_kstats_profile_enabled, enabled != 0,
                      __ATOMIC_RELAXED);
@@ -1331,6 +1524,43 @@ uint64 sys_kstats2(void) {
     argaddr(0, &uaddr);
     argaddr(1, &usize);
     return kstats_copyout(uaddr, usize);
+}
+
+uint64 sys_kprofile_pgroup(void) {
+    int pgid;
+    uint64 uaddr;
+    uint64 usize;
+    uint64 n;
+    uint64 off;
+    char zeros[64];
+    struct kprofile_pgroup kp;
+
+    argint(0, &pgid);
+    argaddr(1, &uaddr);
+    argaddr(2, &usize);
+
+    if (uaddr == 0 || usize == 0)
+        return (uint64)-EINVAL;
+    int ret = kprofile_pgroup_collect((pid_t)pgid, &kp);
+    if (ret < 0)
+        return (uint64)ret;
+
+    n = usize < sizeof(kp) ? usize : sizeof(kp);
+    if (vm_copyout(current->vm, uaddr, (char *)&kp, n) < 0)
+        return (uint64)-EFAULT;
+
+    if (usize > sizeof(kp)) {
+        memset(zeros, 0, sizeof(zeros));
+        for (off = sizeof(kp); off < usize; off += sizeof(zeros)) {
+            n = usize - off;
+            if (n > sizeof(zeros))
+                n = sizeof(zeros);
+            if (vm_copyout(current->vm, uaddr + off, zeros, n) < 0)
+                return (uint64)-EFAULT;
+        }
+    }
+
+    return 0;
 }
 
 uint64 sys_kstatsctl(void) {
