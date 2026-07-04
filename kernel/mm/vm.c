@@ -861,6 +861,18 @@ static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
         pagetable_t pagetable = vma->vm->pagetable;
         pte_t *l0 = NULL;
         uint64 l0_rgn = ~0ULL;
+        /*
+         * R5: start of the not-yet-shot-down span.  Frames must NEVER
+         * be released to the allocator while another CPU can still
+         * hold a stale TLB translation to them: the owning process
+         * legitimately reuses the VA range (munmap->mmap, heap), and
+         * a sibling thread writing through the stale entry would
+         * scribble on a recycled frame now owned by someone else
+         * (observed as the KWin startup .bss-tail corruption).  The
+         * mid-batch FLUSH_DEFERRED overflow path below therefore
+         * shoots down [flush_from, current) BEFORE releasing.
+         */
+        uint64 flush_from = start;
         for (uint64 a = start; a < end; a += PGSIZE) {
             pte_t *pte;
             uint64 rgn = a >> PXSHIFT(1);
@@ -896,8 +908,17 @@ static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
                         defer[ndefer].pa = pa;
                         defer[ndefer].pg = __pa_to_page(pa);
                         ndefer++;
-                        if (ndefer == VMA_FREE_DEFER_MAX)
+                        if (ndefer == VMA_FREE_DEFER_MAX) {
+                            /* Shoot down the cleared span BEFORE the
+                             * frames go back to the allocator. */
+                            uint64 fend = (a & HUGEPAGE_MASK) +
+                                          HUGEPAGE_SIZE;
+                            vm_remote_sfence_range(vma->vm, flush_from,
+                                                   fend - flush_from);
+                            flush_from = fend;
+                            tlb_needs_flush = 0;
                             FLUSH_DEFERRED();
+                        }
                     }
                     l0 = NULL;
                     /* Advance to end of this 2MB region. */
@@ -931,11 +952,18 @@ static void __vma_clear_range(vma_t *vma, uint64 start, uint64 end,
             defer[ndefer].pa = pa;
             defer[ndefer].pg = __pa_to_page(pa);
             ndefer++;
-            if (ndefer == VMA_FREE_DEFER_MAX)
+            if (ndefer == VMA_FREE_DEFER_MAX) {
+                /* Shoot down the cleared span BEFORE the frames go
+                 * back to the allocator (see flush_from comment). */
+                vm_remote_sfence_range(vma->vm, flush_from,
+                                       (a + PGSIZE) - flush_from);
+                flush_from = a + PGSIZE;
+                tlb_needs_flush = 0;
                 FLUSH_DEFERRED();
+            }
         }
         if (tlb_needs_flush)
-            vm_remote_sfence_range(vma->vm, start, end - start);
+            vm_remote_sfence_range(vma->vm, flush_from, end - flush_from);
         /* Phase 2: release all deferred pages after TLB flush. */
         FLUSH_DEFERRED();
     }
@@ -5607,6 +5635,12 @@ static int __vm_madvise_dontneed(vm_t *vm, uint64 addr, size_t size)
         if (vma == NULL || cur < vma->start)
             return -ENOMEM;
         uint64 seg_end = vma->end < end ? vma->end : end;
+        /* R5: span not yet shot down.  Anon frames must not return to
+         * the allocator while stale TLB translations to them can
+         * exist (see the flush_from comment in __vma_clear_range) —
+         * MADV_DONTNEED heap is immediately reused at the same VAs by
+         * other threads of this process. */
+        uint64 flush_from = cur;
         int shared_file_wb =
             (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
             (vma->flags & VMA_FLAG_FILE);
@@ -5693,8 +5727,21 @@ static int __vm_madvise_dontneed(vm_t *vm, uint64 addr, size_t size)
                     if (!is_pfnmap) {
                         defer[ndefer].pg = __pa_to_page(pa);
                         ndefer++;
-                        if (ndefer == MADVISE_DEFER_MAX)
+                        if (ndefer == MADVISE_DEFER_MAX) {
+                            /* Shoot down the cleared span BEFORE the
+                             * frames go back to the allocator.  The
+                             * IPI ack wait must not run under the
+                             * pgtable spinlock (waiters spin with
+                             * IRQs off), so drop and re-take it —
+                             * same dance as the writeback above. */
+                            vm_pgtable_unlock(vm);
+                            vm_remote_sfence_range(vm, flush_from,
+                                                   (va + PGSIZE) -
+                                                   flush_from);
+                            flush_from = va + PGSIZE;
                             FLUSH_MADVISE_DEFERRED();
+                            vm_pgtable_lock(vm);
+                        }
                     }
                 } else {
                     pte_clear(pte);
@@ -5706,6 +5753,17 @@ static int __vm_madvise_dontneed(vm_t *vm, uint64 addr, size_t size)
         if (resident_pages_cleared != 0)
             vm_account_resident_sub(vma, resident_pages_cleared);
         cur = seg_end;
+        /* Shoot down this segment's cleared span before releasing its
+         * frames (the final whole-range flush below would be too late
+         * for frames freed here).  The span [flush_from, seg_end)
+         * covers every clear in this segment — deferred pages AND
+         * pa==0 clears — so the flag can be reset; this replaces
+         * (rather than stacks on) the final flush for the common
+         * single-segment madvise. */
+        if (tlb_needs_flush) {
+            vm_remote_sfence_range(vm, flush_from, seg_end - flush_from);
+            tlb_needs_flush = 0;
+        }
         FLUSH_MADVISE_DEFERRED();
 
 #undef FLUSH_MADVISE_DEFERRED
