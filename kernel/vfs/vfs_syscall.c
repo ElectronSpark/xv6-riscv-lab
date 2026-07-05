@@ -8485,6 +8485,47 @@ static void inotify_notify_file_readable(struct vfs_file *file)
     vfs_fput(file);
 }
 
+/* N5 fix: an inode event must knote-notify EVERY watching inotify fd,
+ * not just the first — a notify-full-wait poller on the 2nd+ watcher
+ * otherwise never wakes (the tq_wakeup in queue_event only covers
+ * blocking read(), not poll()).  Bounded set with pointer dedupe (one
+ * ctx can hold several matching watches on the same inode/event). */
+#define INOTIFY_NOTIFY_SET_MAX 8
+struct inotify_notify_set {
+    struct vfs_file *files[INOTIFY_NOTIFY_SET_MAX];
+    int count;
+    bool overflow;
+};
+
+static void inotify_notify_set_add_locked(struct inotify_notify_set *set,
+                                          struct vfs_file *file)
+{
+    if (set == NULL || file == NULL)
+        return;
+    for (int i = 0; i < set->count; i++) {
+        if (set->files[i] == file)
+            return;
+    }
+    if (set->count >= INOTIFY_NOTIFY_SET_MAX) {
+        set->overflow = true;
+        return;
+    }
+    set->files[set->count++] = vfs_fdup(file);
+}
+
+/* Call WITHOUT inotify_global_lock held (kqueue may poll the source). */
+static void inotify_notify_set_fire(struct inotify_notify_set *set)
+{
+    for (int i = 0; i < set->count; i++)
+        inotify_notify_file_readable(set->files[i]);
+    if (set->overflow)
+        printf("inotify: notify set overflow (>%d watch fds on one "
+               "event); some pollers not notified\n",
+               INOTIFY_NOTIFY_SET_MAX);
+    set->count = 0;
+    set->overflow = false;
+}
+
 static void inotify_detach_watch_locked(struct inotify_watch *watch,
                                         list_node_t *free_list,
                                         bool queue_ignored)
@@ -8509,14 +8550,14 @@ static void inotify_free_detached_watch_list(list_node_t *free_list)
     }
 }
 
-static struct vfs_file *inotify_emit_locked(struct vfs_inode *inode,
-                                            uint32 mask, uint32 cookie,
-                                            const char *name,
-                                            size_t name_len,
-                                            bool remove_self,
-                                            list_node_t *free_list)
+static void inotify_emit_locked(struct vfs_inode *inode,
+                                uint32 mask, uint32 cookie,
+                                const char *name,
+                                size_t name_len,
+                                bool remove_self,
+                                list_node_t *free_list,
+                                struct inotify_notify_set *nset)
 {
-    struct vfs_file *notify_file = NULL;
     struct inotify_watch *watch, *tmp;
     list_foreach_node_safe(&inotify_global_watches, watch, tmp, global_entry) {
         if (!watch->active || watch->inode != inode)
@@ -8525,15 +8566,12 @@ static struct vfs_file *inotify_emit_locked(struct vfs_inode *inode,
             continue;
         if (inotify_mask_matches(watch->mask, mask)) {
             if (inotify_queue_event_locked(watch->ctx, watch->wd, mask,
-                                           cookie, name, name_len) &&
-                notify_file == NULL) {
-                notify_file = vfs_fdup(watch->ctx->file);
-            }
+                                           cookie, name, name_len))
+                inotify_notify_set_add_locked(nset, watch->ctx->file);
         }
         if (remove_self || (watch->mask & IN_ONESHOT))
             inotify_detach_watch_locked(watch, free_list, true);
     }
-    return notify_file;
 }
 
 void vfs_inotify_inode_event(struct vfs_inode *inode, uint32 mask)
@@ -8544,11 +8582,11 @@ void vfs_inotify_inode_event(struct vfs_inode *inode, uint32 mask)
         mask |= IN_ISDIR;
 
     list_node_t free_list = LIST_ENTRY_INITIALIZED(free_list);
+    struct inotify_notify_set nset = {0};
     spin_lock(&inotify_global_lock);
-    struct vfs_file *notify_file =
-        inotify_emit_locked(inode, mask, 0, NULL, 0, false, &free_list);
+    inotify_emit_locked(inode, mask, 0, NULL, 0, false, &free_list, &nset);
     spin_unlock(&inotify_global_lock);
-    inotify_notify_file_readable(notify_file);
+    inotify_notify_set_fire(&nset);
     inotify_free_detached_watch_list(&free_list);
 }
 
@@ -8561,11 +8599,12 @@ void vfs_inotify_child_event(struct vfs_inode *dir, struct vfs_inode *child,
         mask |= IN_ISDIR;
 
     list_node_t free_list = LIST_ENTRY_INITIALIZED(free_list);
+    struct inotify_notify_set nset = {0};
     spin_lock(&inotify_global_lock);
-    struct vfs_file *notify_file =
-        inotify_emit_locked(dir, mask, 0, name, name_len, false, &free_list);
+    inotify_emit_locked(dir, mask, 0, name, name_len, false, &free_list,
+                        &nset);
     spin_unlock(&inotify_global_lock);
-    inotify_notify_file_readable(notify_file);
+    inotify_notify_set_fire(&nset);
     inotify_free_detached_watch_list(&free_list);
 }
 
@@ -8577,11 +8616,11 @@ void vfs_inotify_inode_removed(struct vfs_inode *inode, uint32 mask)
         mask |= IN_ISDIR;
 
     list_node_t free_list = LIST_ENTRY_INITIALIZED(free_list);
+    struct inotify_notify_set nset = {0};
     spin_lock(&inotify_global_lock);
-    struct vfs_file *notify_file =
-        inotify_emit_locked(inode, mask, 0, NULL, 0, true, &free_list);
+    inotify_emit_locked(inode, mask, 0, NULL, 0, true, &free_list, &nset);
     spin_unlock(&inotify_global_lock);
-    inotify_notify_file_readable(notify_file);
+    inotify_notify_set_fire(&nset);
     inotify_free_detached_watch_list(&free_list);
 }
 
@@ -8598,32 +8637,21 @@ void vfs_inotify_move_event(struct vfs_inode *old_dir,
             __atomic_fetch_add(&inotify_next_cookie, 1, __ATOMIC_RELAXED);
     uint32 isdir = (target != NULL && S_ISDIR(target->mode)) ? IN_ISDIR : 0;
     list_node_t free_list = LIST_ENTRY_INITIALIZED(free_list);
-    struct vfs_file *notify_file = NULL;
+    struct inotify_notify_set nset = {0};
     spin_lock(&inotify_global_lock);
     if (old_dir != NULL)
-        notify_file = inotify_emit_locked(old_dir, IN_MOVED_FROM | isdir,
-                                          cookie, old_name, old_name_len,
-                                          false, &free_list);
-    if (new_dir != NULL) {
-        struct vfs_file *nf =
-            inotify_emit_locked(new_dir, IN_MOVED_TO | isdir, cookie,
-                                new_name, new_name_len, false, &free_list);
-        if (notify_file == NULL)
-            notify_file = nf;
-        else if (nf != NULL)
-            vfs_fput(nf);
-    }
-    if (target != NULL) {
-        struct vfs_file *nf = inotify_emit_locked(target, IN_MOVE_SELF | isdir,
-                                                  cookie, NULL, 0, false,
-                                                  &free_list);
-        if (notify_file == NULL)
-            notify_file = nf;
-        else if (nf != NULL)
-            vfs_fput(nf);
-    }
+        inotify_emit_locked(old_dir, IN_MOVED_FROM | isdir, cookie,
+                            old_name, old_name_len, false, &free_list,
+                            &nset);
+    if (new_dir != NULL)
+        inotify_emit_locked(new_dir, IN_MOVED_TO | isdir, cookie,
+                            new_name, new_name_len, false, &free_list,
+                            &nset);
+    if (target != NULL)
+        inotify_emit_locked(target, IN_MOVE_SELF | isdir, cookie, NULL, 0,
+                            false, &free_list, &nset);
     spin_unlock(&inotify_global_lock);
-    inotify_notify_file_readable(notify_file);
+    inotify_notify_set_fire(&nset);
     inotify_free_detached_watch_list(&free_list);
 }
 

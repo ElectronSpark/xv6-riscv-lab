@@ -396,8 +396,23 @@ ssize_t pipe_write(struct pipe *pi, const char *buf, size_t count, bool user) {
                         goto out;
                     return -EAGAIN;
                 }
+                /* N5 fix: also kick poll()-only readers before blocking.
+                 * The end-of-write knote notify (__pipe_file_write tail)
+                 * cannot fire while this write() is parked on a full
+                 * ring, so a notify-full-wait poller would never learn
+                 * the pipe is readable and never drain us: deadlock.
+                 * pi->read_file is protected by writer_lock (same
+                 * protocol as the write tail); notify outside the lock
+                 * because kqueue can synchronously poll the source. */
+                struct vfs_file *rf_wake = NULL;
+                if (pi->read_file != NULL)
+                    rf_wake = vfs_fdup(pi->read_file);
                 tq_wakeup_all(&pi->nread_queue, 0, 0);
                 spin_unlock(&pi->writer_lock);
+                if (rf_wake != NULL) {
+                    vfs_file_knote_notify(rf_wake, EVFILT_READ, 0);
+                    vfs_fput(rf_wake);
+                }
 
                 ret = __pipe_wait_reader(pi);
                 if (ret < 0) {

@@ -310,11 +310,29 @@ static void timerfd_timer_callback(struct timer_node *tn)
      * interrupt context.  kqueue locks may be held by the interrupted thread.
      */
     if (queue_deferred) {
-        if (timerfd_wq == NULL || !queue_work(timerfd_wq, &ctx->rearm_work)) {
+        if (timerfd_wq == NULL) {
+            /* Pre-worker boot window: nothing can flush, drop cleanly. */
             spin_lock(&ctx->lock);
             ctx->work_pending = false;
+            ctx->notify_pending = false;
             if (need_rearm)
                 ctx->armed = false;
+            spin_unlock(&ctx->lock);
+        } else if (!queue_work(timerfd_wq, &ctx->rearm_work)) {
+            /*
+             * N5 fix: the old destructive clear here DROPPED the poll
+             * notify (a notify-full-wait poller then slept to its full
+             * deadline, or forever at timeout=-1) and set armed=false,
+             * permanently KILLING a repeating timer.  queue_work
+             * failure with a live wq means the work item is still
+             * queued/running; its re-check loop consumes
+             * notify_pending/rearm_pending, so leave those and `armed`
+             * INTACT.  Clear only work_pending so the next
+             * expiry/settime re-attempts the deferral if the handler
+             * exited in the race window.
+             */
+            spin_lock(&ctx->lock);
+            ctx->work_pending = false;
             spin_unlock(&ctx->lock);
         }
     }
