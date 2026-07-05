@@ -703,6 +703,18 @@ struct virtio_gpu {
     struct virtio_gpu_queue ctrlq;
     spinlock_t lock;
     mutex_t op_lock;
+    /*
+     * N1: serializes async PROGRESS WAITERS (virtio_gpu_async_wait_progress)
+     * only — not ops.  g->async_wait is a single shared completion and
+     * completion_init() on a completion that still has a sleeping waiter
+     * corrupts its wait queue (PANIC tq_remove: queue is empty).  With
+     * the unlocked-wait submit path, multiple threads can wait for
+     * used-ring progress concurrently; they all want the same event, and
+     * a serialized second waiter re-checks the used ring first and
+     * returns without sleeping when the first waiter's wakeup already
+     * consumed the progress.
+     */
+    mutex_t async_wait_serialize;
     uint32 next_resource_id;
     struct virtio_gpu_resource resources[VIRTIO_GPU_MAX_RESOURCES];
     struct virtio_gpu_resource *scanout_resource;
@@ -3268,9 +3280,13 @@ static int virtio_gpu_async_wait_progress(struct virtio_gpu *g)
     int intena;
     int ret;
 
+    /* See async_wait_serialize's comment: one progress waiter at a time
+     * so completion_init never runs under a sleeping waiter. */
+    mutex_lock(&g->async_wait_serialize);
     intena = spin_lock_irqsave(&q->lock);
     if (q->used->idx != q->used_idx) {
         spin_unlock_irqrestore(&q->lock, intena);
+        mutex_unlock(&g->async_wait_serialize);
         ret = 1;
         goto out;
     }
@@ -3279,6 +3295,7 @@ static int virtio_gpu_async_wait_progress(struct virtio_gpu *g)
     spin_unlock_irqrestore(&q->lock, intena);
 
     ret = virtio_gpu_wait_for_used(g, q, &g->async_wait);
+    mutex_unlock(&g->async_wait_serialize);
 out:
     if (trace)
         virtio_gpu_submit_trace_record_async_wait_progress(
