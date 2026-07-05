@@ -836,6 +836,7 @@ void virtio_gpu_init(void)
     spin_init(&g->lock, "virtio_gpu");
     mutex_init(&g->op_lock, "virtio_gpuop");
     mutex_init(&g->async_wait_serialize, "virtio_gpuaw");
+    mutex_init(&g->async_reap_serialize, "virtio_gpurp");
     g->next_resource_id = 1;
     g->next_context_id = 2;
     g->pci.use_pci = 1;

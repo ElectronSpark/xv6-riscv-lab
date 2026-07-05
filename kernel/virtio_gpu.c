@@ -715,6 +715,16 @@ struct virtio_gpu {
      * consumed the progress.
      */
     mutex_t async_wait_serialize;
+    /*
+     * N1: single-consumer reap discipline.  Slot retire (find/validate/
+     * free) and abort teardown historically relied on op_lock
+     * exclusivity; the unlocked-wait submit path reaps without op_lock,
+     * so concurrent reapers/aborters must serialize here.  async_count
+     * and slot pending transitions are additionally q->lock-atomic so
+     * posters (reserve) and reapers never lose counter updates.
+     * Lock order: op_lock -> async_reap_serialize -> q->lock -> g->lock.
+     */
+    mutex_t async_reap_serialize;
     uint32 next_resource_id;
     struct virtio_gpu_resource resources[VIRTIO_GPU_MAX_RESOURCES];
     struct virtio_gpu_resource *scanout_resource;
@@ -2447,14 +2457,23 @@ static int virtio_gpu_submit_mixed_async(struct virtio_gpu *g, void *cmd,
                 return ret;
             }
 
+            /* Third-reaper fix (review Blocker 1): this retire path must
+             * honor the same single-consumer discipline as
+             * virtio_gpu_async_reap_completed_sample — reap mutex around
+             * retire, count transition under q->lock. */
+            mutex_lock(&g->async_reap_serialize);
             a = virtio_gpu_async_find_slot_by_desc(g, id);
             if (a == NULL) {
+                mutex_unlock(&g->async_reap_serialize);
                 printf("virtio_gpu: mixed reap unknown desc id=%u\n", id);
                 continue;
             }
             virtio_gpu_drain_sample_count(drain_sample, a->type);
             (void)virtio_gpu_async_validate_retire(g, a);
+            intena = spin_lock_irqsave(&q->lock);
             g->async_count--;
+            spin_unlock_irqrestore(&q->lock, intena);
+            mutex_unlock(&g->async_reap_serialize);
             spin_lock(&g->lock);
             g->stats.async_retired++;
             spin_unlock(&g->lock);
@@ -2586,7 +2605,20 @@ static void virtio_gpu_async_submit_free(struct virtio_gpu_async_submit *a)
         kfree(a->resp);
     if (a->data != NULL)
         page_free(a->data, a->data_order);
-    memset(a, 0, sizeof(*a));
+    /*
+     * N1: scrub the body FIRST and release the claim flag LAST.
+     * virtio_gpu_async_reserve_slot claims on pending==0 under q->lock;
+     * with unlocked-wait reapers this free can run concurrently with a
+     * reserve scan, and a mid-memset pending==0 would let the poster's
+     * fresh field writes race the remainder of the wipe.  `pending` is
+     * the first struct field, so wipe everything after it, then
+     * release-store the flag.
+     */
+    _Static_assert(offsetof(struct virtio_gpu_async_submit, pending) == 0,
+                   "pending must stay the first async slot field");
+    memset((char *)a + sizeof(a->pending), 0,
+           sizeof(*a) - sizeof(a->pending));
+    __atomic_store_n(&a->pending, 0, __ATOMIC_RELEASE);
 }
 
 static const char *virtio_gpu_virgl_cmd_name(uint32 cmd)
@@ -3234,6 +3266,8 @@ static int virtio_gpu_async_reap_completed_sample(
     struct virtio_gpu_queue *q = &g->ctrlq;
     int ret = 0;
 
+    /* Single consumer: see async_reap_serialize's comment. */
+    mutex_lock(&g->async_reap_serialize);
     for (;;) {
         struct virtio_gpu_async_submit *a;
         uint32 id = 0;
@@ -3258,11 +3292,16 @@ static int virtio_gpu_async_reap_completed_sample(
         virtio_gpu_drain_sample_count(sample, a->type);
         if (virtio_gpu_async_validate_retire(g, a) != 0)
             ret = -1;
+        /* Count transition under q->lock so a concurrent poster's
+         * reserve (++) never loses this decrement. */
+        intena = spin_lock_irqsave(&q->lock);
         g->async_count--;
+        spin_unlock_irqrestore(&q->lock, intena);
         spin_lock(&g->lock);
         g->stats.async_retired++;
         spin_unlock(&g->lock);
     }
+    mutex_unlock(&g->async_reap_serialize);
     return ret;
 }
 
@@ -3312,6 +3351,10 @@ static void virtio_gpu_async_abort_all(struct virtio_gpu *g)
     virtio_gpu_count_timeout(g);
     virtio_gpu_count_failure(g);
 
+    /* Abort tears down pending slots wholesale — it must never run
+     * concurrently with a reaper mid-retire on one of them. */
+    mutex_lock(&g->async_reap_serialize);
+
     /*
      * A host stall wedges the shared control queue, but only the contexts that
      * actually had a command in flight have undefined GPU state.  Fail just
@@ -3335,12 +3378,13 @@ static void virtio_gpu_async_abort_all(struct virtio_gpu *g)
             virtio_gpu_async_submit_free(&g->async_ring[i]);
         }
     }
-    g->async_count = 0;
 
     intena = spin_lock_irqsave(&q->lock);
+    g->async_count = 0;
     q->used_idx = q->used->idx;
     q->pending_completion = NULL;
     spin_unlock_irqrestore(&q->lock, intena);
+    mutex_unlock(&g->async_reap_serialize);
 }
 
 static int virtio_gpu_drain_async_submit_sample(
@@ -3560,6 +3604,13 @@ static void virtio_gpu_async_post_locked(struct virtio_gpu *g,
 static struct virtio_gpu_async_submit *
 virtio_gpu_async_reserve_slot(struct virtio_gpu *g)
 {
+    struct virtio_gpu_queue *q = &g->ctrlq;
+    struct virtio_gpu_async_submit *found = NULL;
+    int intena;
+
+    /* Claim + count under q->lock so reapers' decrements and this
+     * increment never race (see async_reap_serialize's comment). */
+    intena = spin_lock_irqsave(&q->lock);
     for (int i = 0; i < VIRTIO_GPU_ASYNC_MAX_DEPTH; i++) {
         struct virtio_gpu_async_submit *a = &g->async_ring[i];
 
@@ -3570,9 +3621,11 @@ virtio_gpu_async_reserve_slot(struct virtio_gpu *g)
         a->desc_base = VIRTIO_GPU_ASYNC_DESC_BASE +
                        i * VIRTIO_GPU_ASYNC_DESC_PER_SLOT;
         g->async_count++;
-        return a;
+        found = a;
+        break;
     }
-    return NULL;
+    spin_unlock_irqrestore(&q->lock, intena);
+    return found;
 }
 
 /*
