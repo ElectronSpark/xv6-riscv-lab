@@ -3963,14 +3963,22 @@ static const char *webkit_poll_fd_kind(struct vfs_file *f)
  * Opt out with poll_notify_full_wait=0 / af_unix_poll_notify_full_wait=0.
  */
 /*
- * REVERTED to default-OFF 2026-07-05 (both halves are now opt-in): the
- * global full-wait default froze a real interactive desktop even with
- * the AF_UNIX half off — lost wakeups on some notify-backed class that
- * the injected-input batteries cannot see (Failure Mode 24a).  The
- * 92% poll-churn reduction is real but UNSHIPPABLE until the notify
- * delivery paths (eventfd/pipe/timerfd/kqueue wakeup hooks) are audited
- * for complete transition coverage and validated INTERACTIVELY.
- * Opt in per boot with poll_notify_full_wait=1.
+ * DEFAULT-ON again 2026-07-05 after the lost-wakeup root causes were
+ * fixed and validated interactively (Failure Mode 24a).  The 07-05
+ * freezes were four real producer-side notify defects, all fixed:
+ * timerfd queue_work-failure drop, pipe blocking-write withheld
+ * EVFILT_READ, inotify first-watcher-only notify, and — the
+ * interactive killer — the evdev attach/notify list mismatch
+ * (dev/evdev.c: epoll/poll knotes live on the per-open FILE list but
+ * the producer only notified the empty cdev list, so input readiness
+ * NEVER reached kqueue; epoll's 20ms rescan masked it by default and
+ * the full wait froze KWin's libinput thread).  Validated by the
+ * 5-test poll-notify-probe (gates-ON and default boots) and a live
+ * gates-ON KDE session with working input.  The stuck-poller
+ * diagnostic below stays active whenever this gate is on and dumps
+ * any poller parked >10s in a notify-backed full wait — if a new
+ * lost-notify class appears, it names the fd class on serial.
+ * Opt out per boot with poll_notify_full_wait=0.
  */
 static int poll_notify_full_wait_enabled(void)
 {
@@ -3979,24 +3987,24 @@ static int poll_notify_full_wait_enabled(void)
     char value[8];
 
     if (!initialized) {
-        enabled = cmdline_get_param("poll_notify_full_wait", value,
-                                    sizeof(value)) == 0 &&
-            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        enabled = !(cmdline_get_param("poll_notify_full_wait", value,
+                                      sizeof(value)) == 0 &&
+                    (value[0] == '0' || value[0] == 'n' ||
+                     value[0] == 'N'));
         initialized = 1;
     }
     return enabled;
 }
 
 /*
- * REVERTED to default-OFF 2026-07-05: with the AF_UNIX full-wait default
- * on, an interactive desktop went unresponsive (Wayland clients + a
- * dbus client that never woke to finish auth) — consistent with a
- * missed unix-socket readiness notify on some transition.  The global
- * poll_notify_full_wait stays default-on (timerfd/eventfd/pipe notify
- * sources are soaked); unix-bearing poll sets keep the rescan cap.
- * Re-enable per-boot with af_unix_poll_notify_full_wait=1 only while
- * auditing the unix socket notify hooks for complete transition
- * coverage (data, EOF/hangup, connect/accept, credentials).
+ * DEFAULT-ON again 2026-07-05.  The 07-05 "dbus auth timeout" freeze
+ * attributed to this half was in fact the same fixed producer defects
+ * (see poll_notify_full_wait_enabled above — most sessions were killed
+ * by the evdev mismatch and the pipe blocking-write hole; the AF_UNIX
+ * stream hooks themselves audited transition-complete).  A live KDE
+ * session with BOTH gates forced on ran with working input, dbus, and
+ * Wayland traffic.  Opt out per boot with
+ * af_unix_poll_notify_full_wait=0.
  */
 static int af_unix_poll_notify_full_wait_enabled(void)
 {
@@ -4005,9 +4013,10 @@ static int af_unix_poll_notify_full_wait_enabled(void)
     char value[8];
 
     if (!initialized) {
-        enabled = cmdline_get_param("af_unix_poll_notify_full_wait", value,
-                                    sizeof(value)) == 0 &&
-            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        enabled = !(cmdline_get_param("af_unix_poll_notify_full_wait",
+                                      value, sizeof(value)) == 0 &&
+                    (value[0] == '0' || value[0] == 'n' ||
+                     value[0] == 'N'));
         initialized = 1;
     }
     return enabled;
