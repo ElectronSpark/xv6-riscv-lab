@@ -239,6 +239,7 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
 
 // Initialization that requires a thread context
 void start_kernel_post_init(void) {
+    console_async_init(); // Start the async console drain kthread
     consoledevinit();  // Initialize and register the console character device
     nullranddevinit(); // Register /dev/null, /dev/random, /dev/zero
     ossaudiodevinit(); // Register OSS-compatible virtual audio devices

@@ -279,6 +279,12 @@ static struct thread *__switch_to(struct thread *p) {
 // Yield the CPU to allow other threads to run.
 // lk will not be re-acquired after yielding.
 void scheduler_yield(void) {
+    /* With IRQ-exit kernel preemption, a voluntary caller (IF on) can
+     * be preempted and MIGRATE anywhere in this preamble; the
+     * cpuid()/mycpu() reads and non-atomic per-CPU tick/loadavg RMWs
+     * below would then hit another CPU's counters.  Pin the CPU by
+     * masking interrupts across the preamble. */
+    push_off();
     // Wake up threads with expired timers.
     // It may add processes to the run queue, so do it before acquiring rq_lock.
     __do_timer_tick();
@@ -320,6 +326,8 @@ void scheduler_yield(void) {
             prev_total[c] = tt;
         }
     }
+
+    pop_off();
 
     int intr = rq_lock_current_irqsave();
     struct thread *proc = current;
@@ -409,10 +417,20 @@ static void __scheduler_wakeup_assertion(struct thread *p) {
     // Note: pi_lock is now acquired inside __do_scheduler_wakeup, not by
     // callers. This avoids lock convoy when many processes wake the same
     // target.
+    //
+    // Sample the per-CPU ownership state under push_off(): with IRQ-exit
+    // kernel preemption, a caller running with interrupts enabled can be
+    // preempted and migrate between computing mycpu()/cpuid() and the
+    // comparison, falsely matching another CPU that transiently holds
+    // p->lock or its own rq_lock.  With IRQs off the checks are exact:
+    // a caller that really holds a spinlock already has IRQs masked, so
+    // it cannot have migrated and still trips the assert correctly.
+    push_off();
     assert(!spin_holding(&p->lock),
            "Process lock must not be held when waking up a process");
     assert(!sched_holding(),
            "Scheduler lock must not be held when waking up a process");
+    pop_off();
 }
 
 // Internal function to wake up a sleeping or stopped process.

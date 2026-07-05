@@ -36,6 +36,10 @@
 
 #define USER_FAULT_AROUND_PAGES 8UL
 
+/* IRQ-exit kernel preemption switch (kernel_preempt=0 disables; parsed in
+ * arch_trap_init, consumed in kernel_preempt_irq_exit below). */
+static int kernel_preempt_on = 1;
+
 extern char _rodata[];
 extern char _rodata_end[];
 extern void ext4fs_direct_read_debug_dump(const char *reason);
@@ -1428,6 +1432,15 @@ void arch_trap_init(void) {
         (void *)(TRAMPOLINE + ((uint64)userret - (uint64)trampoline));
     x86_cr3_noflush_enabled =
         x86_cr3_noflush_enabled_by_cmdline() && vm_asid_max() > 0;
+
+    /* IRQ-exit kernel preemption A/B switch: kernel_preempt=0 disables.
+     * Parsed once on the BSP (arch_trap_init runs after platform_init). */
+    {
+        char value[8];
+        if (cmdline_get_param("kernel_preempt", value, sizeof(value)) == 0 &&
+            cmdline_value_is_false(value))
+            kernel_preempt_on = 0;
+    }
     x86_gdt_init();
     x86_idt_init();
     x86_syscall_init();
@@ -1810,6 +1823,132 @@ extern void timer_tick_advance(void);
 /* ── Device IRQ dispatch (defined in kernel/irq/irq.c) ── */
 extern int do_device_irq(int hw_irq);
 
+/* ── IRQ-exit kernel preemption ──
+ *
+ * Historically this kernel honored NEEDS_RESCHED only at return-to-user
+ * (usertrapret) and in the idle loop, so kernel mode was fully
+ * cooperative: a long syscall or kernel-thread batch held its CPU until
+ * a voluntary yield, and woken threads could wait for hundreds of
+ * milliseconds.  kernel_preempt_irq_exit() closes that hole: when a
+ * hardware interrupt that arrived in KERNEL mode is about to iretq back
+ * to the interrupted kernel context, we call scheduler_yield() if a
+ * reschedule is pending and preemption is provably safe.
+ *
+ * kernel_preempt=0 on the kernel command line disables this (A/B
+ * isolation); default is enabled.  See kernel_preempt_on above.
+ */
+
+/* Total kernel-mode IRQ-exit preemptions (kstats: kernel_preempt_irq_total,
+ * defined in accounting.c). */
+extern uint64 g_kernel_preempt_irq_total;
+
+#define X86_RFLAGS_IF (1UL << 9)
+
+/*
+ * kernel_preempt_irq_exit — preempt the interrupted KERNEL context if safe.
+ *
+ * Called at the trap epilogue, after this IRQ's own nesting count has been
+ * dropped, only for asynchronous interrupt vectors (vec >= T_IRQ0) that
+ * arrived with CPL=0.  Interrupts are disabled here (interrupt gate) and
+ * remain disabled across scheduler_yield(); the eventual iretq restores
+ * the interrupted context's RFLAGS.
+ *
+ * The predicate below must guarantee __switch_to()'s invariants
+ * (kernel/proc/sched.c:247-264): interrupts off, noff == 0, and
+ * spin_depth == 1 once scheduler_yield() has taken the rq_lock — i.e.
+ * the *interrupted* context must hold no spinlocks and no push_off
+ * sections, and we must be at the outermost trap level so the saved
+ * trapframe/iretq frame on the kernel stack fully describes the context
+ * being suspended.
+ */
+static void kernel_preempt_irq_exit(struct trapframe *tf) {
+    if (!kernel_preempt_on)
+        return;
+    if (!NEEDS_RESCHED())
+        return;
+
+    struct cpu_local *c = mycpu();
+
+    /*
+     * Outermost trap level only: this IRQ's own intr_depth increment has
+     * already been undone at the epilogue, so any nonzero count means we
+     * interrupted another in-flight interrupt handler (cannot happen with
+     * IF held low through handlers, but keep the guard authoritative).
+     */
+    if (c->intr_depth != 0)
+        return;
+
+    /* Need a thread context to suspend; the idle thread already polls
+     * NEEDS_RESCHED in its own loop (start_kernel.c) and must never be
+     * enqueued on a run queue. */
+    struct thread *p = c->proc;
+    if (p == NULL || p == c->idle_thread)
+        return;
+
+    /*
+     * Only preempt a thread that is still THREAD_RUNNING.  Unlike Linux
+     * (whose preemptive __schedule(preempt=true) keeps a non-running
+     * prev on the runqueue), this kernel's context_switch_finish()
+     * dequeues any non-RUNNING prev unconditionally.  Two voluntary
+     * patterns set the state with IRQs still enabled *before* calling
+     * scheduler_yield():
+     *   - exit paths set THREAD_ZOMBIE, then finish teardown/parent
+     *     notification and yield (kernel/proc/exit.c:455-461, :517-571).
+     *     Preempting in that window would rq_task_dead() the thread so
+     *     it never runs again and the remaining exit code is lost.
+     *   - wait loops set INTERRUPTIBLE before re-checking their wake
+     *     condition (set-state-before-check, kernel/proc/exit.c:578).
+     *     Preempting there would dequeue the thread as if it had slept,
+     *     losing the wakeup it was about to consume.
+     * A RUNNING prev is simply rq_put_prev_task()ed and picked again
+     * later — exactly the tick-preemption semantic we want.
+     */
+    if (!THREAD_RUNNING(p))
+        return;
+
+    /*
+     * Only preempt code that was running with interrupts enabled.  A
+     * kernel context with RFLAGS.IF clear (intr_off/push_off critical
+     * section) must not be suspended: it may be manipulating scheduler
+     * or per-CPU state.  For a hardware IRQ this is always true, but
+     * check the saved frame rather than trusting the vector.
+     */
+    if (!(tf->rflags & X86_RFLAGS_IF))
+        return;
+
+    /*
+     * The interrupted context must hold no spinlocks and no push_off
+     * nesting.  Both counters are per-CPU and are balanced across this
+     * IRQ's own handlers by the time we reach the epilogue, so nonzero
+     * values belong to the interrupted context.  (push_off implies IF=0,
+     * so noff != 0 here would indicate an accounting leak — refuse.)
+     * __switch_to asserts noff == 0 and spin_depth == rq_lock only.
+     */
+    if (c->noff != 0 || c->spin_depth != 0)
+        return;
+
+    /* No active scheduler state: never re-enter while this CPU already
+     * holds its run-queue lock. */
+    if (sched_holding())
+        return;
+
+    if (panic_state())
+        return;
+
+    __atomic_fetch_add(&g_kernel_preempt_irq_total, 1, __ATOMIC_RELAXED);
+
+    /*
+     * Suspend the interrupted kernel context.  scheduler_yield() saves
+     * the callee-saved register context on this thread's kernel stack
+     * *below* the interrupt frame; when the thread is picked again it
+     * returns here, falls through to trapret (trapvec.S), pops the
+     * trapframe and iretqs back into the interrupted kernel code.  This
+     * is the same mechanism usertrapret() already uses on the tick path,
+     * and the same shape as the classic xv6 kerneltrap()->yield().
+     */
+    scheduler_yield();
+}
+
 /* ── x86_trap_handler ── */
 
 void x86_trap_handler(struct trapframe *tf) {
@@ -1832,6 +1971,22 @@ void x86_trap_handler(struct trapframe *tf) {
         if (__cr3 != trampoline_ksatp)
             asm volatile("movq %0, %%cr3" : : "r"(trampoline_ksatp) : "memory");
     }
+
+    /*
+     * Asynchronous hardware interrupt arrival?  Every IDT vector >=
+     * T_IRQ0 (32) is a hardware interrupt here (IO-APIC IRQs, LAPIC
+     * timer/IPI/error, Hyper-V SynIC, spurious): the kernel never
+     * executes software INT $n in that range and CPU exceptions are all
+     * < 32.  NMI (vec 2) is deliberately excluded — it can interrupt
+     * IF=0 code.  Track per-CPU interrupt nesting for these vectors so
+     * the epilogue knows when the outermost IRQ is about to unwind
+     * (kernel_preempt_irq_exit).  Exceptions nested inside an IRQ
+     * handler don't touch the count; they are synchronous and are not
+     * preemption points.
+     */
+    int is_irq = (vec >= T_IRQ0);
+    if (is_irq)
+        mycpu()->intr_depth++;
 
     /*
      * For user-mode traps, copy the stack-based trapframe into the thread's
@@ -2467,9 +2622,22 @@ void x86_trap_handler(struct trapframe *tf) {
      * entry and trapret does NOT swapgs on exit.
      */
 user_return:
+    /* This trap's own nesting count drops here, before any resched. */
+    if (is_irq)
+        mycpu()->intr_depth--;
+
     if (from_user && current) {
         usertrapret(); /* noreturn */
     }
+
+    /*
+     * Interrupts taken in KERNEL mode: honor a pending reschedule
+     * request before iretq when it is provably safe to suspend the
+     * interrupted kernel context (see kernel_preempt_irq_exit).
+     */
+    if (is_irq)
+        kernel_preempt_irq_exit(tf);
+
     /* Kernel traps return here and fall back to trapret/iretq. */
 }
 

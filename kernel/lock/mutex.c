@@ -87,7 +87,7 @@ void mutex_init(mutex_t *lk, char *name) {
 void mutex_lock(mutex_t *lk) {
     struct thread *self = current;
     assert(self != NULL, "mutex_lock: no current thread");
-    assert(mycpu()->spin_depth == 0, "mutex_lock called with spinlock held");
+    assert(spin_depth_snapshot() == 0, "mutex_lock called with spinlock held");
     assert(!CPU_IN_ITR(), "mutex_lock called in interrupt context");
 
     // If the lock is not held, acquire it and return success.
@@ -161,7 +161,7 @@ int holding_mutex(mutex_t *lk) {
 int mutex_trylock(mutex_t *lk) {
     struct thread *self = current;
     assert(self != NULL, "mutex_trylock: no current thread");
-    assert(mycpu()->spin_depth == 0, "mutex_trylock called with spinlock held");
+    assert(spin_depth_snapshot() == 0, "mutex_trylock called with spinlock held");
     assert(!CPU_IN_ITR(), "mutex_trylock called in interrupt context");
 
     // Try to acquire the lock without blocking
@@ -180,7 +180,7 @@ int mutex_lock_interruptible(mutex_t *lk) {
     struct thread *self = current;
     assert(self != NULL,
            "mutex_lock_interruptible: no current thread context");
-    assert(mycpu()->spin_depth == 0,
+    assert(spin_depth_snapshot() == 0,
            "mutex_lock_interruptible called with spinlock held");
     assert(!CPU_IN_ITR(),
            "mutex_lock_interruptible called in interrupt context");
@@ -232,7 +232,7 @@ int mutex_lock_interruptible(mutex_t *lk) {
 int mutex_lock_timed(mutex_t *lk, uint64 timeout_ms) {
     struct thread *self = current;
     assert(self != NULL, "mutex_lock_timed: no current thread");
-    assert(mycpu()->spin_depth == 0,
+    assert(spin_depth_snapshot() == 0,
            "mutex_lock_timed called with spinlock held");
     assert(!CPU_IN_ITR(), "mutex_lock_timed called in interrupt context");
 

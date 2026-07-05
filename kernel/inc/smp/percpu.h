@@ -204,6 +204,31 @@ struct thread *__current_thread(void);
 
 #endif /* ON_HOST_OS */
 
+/*
+ * Snapshot this CPU's spinlock-nesting depth with migration excluded.
+ *
+ * With IRQ-exit kernel preemption, a thread running with interrupts
+ * ENABLED can be preempted at any instruction and resume on another CPU.
+ * A bare mycpu()->spin_depth read from such a context can therefore
+ * observe a *different* CPU's transient counter (e.g. 1 while that CPU's
+ * scheduler holds its rq_lock during a pick), even though the calling
+ * thread holds nothing.  Sampling under push_off() pins the thread to
+ * one CPU for the read; with IRQs off, a nonzero value can only reflect
+ * spinlocks held by the caller itself (a caller that really holds a
+ * spinlock has IRQs masked already, so it cannot have migrated and the
+ * read is exact).  Use this in debug assertions instead of touching
+ * mycpu()->spin_depth directly from preemptible (IF=1) contexts.
+ */
+static inline int spin_depth_snapshot(void)
+{
+    int depth;
+
+    push_off();
+    depth = mycpu()->spin_depth;
+    pop_off();
+    return depth;
+}
+
 void cpus_init(void);
 void mycpu_init(uint64 hartid, bool trampoline);
 cpumask_t get_cpu_active_mask(void);

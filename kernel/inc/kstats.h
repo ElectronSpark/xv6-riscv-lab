@@ -345,9 +345,14 @@ struct kstats {
      * contention) and were recovered by TSC-compensated jiffies. */
     uint64 timer_bsp_ticks_total;
     uint64 timer_jiffies_tsc_comp_ms_total;
+
+    /* Version 10 append-only kernel preemption counter.
+     * kernel_preempt_irq_total: kernel-mode contexts preempted at IRQ
+     * exit (trap epilogue scheduler_yield; 0 when kernel_preempt=0). */
+    uint64 kernel_preempt_irq_total;
 };
 
-#define KSTATS_ABI_VERSION 9
+#define KSTATS_ABI_VERSION 10
 #define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
 /*
@@ -483,6 +488,8 @@ extern uint64 g_vm_copyout_ticks;
 
 extern uint64 g_timer_bsp_ticks_total;
 extern uint64 g_timer_jiffies_tsc_comp_ms_total;
+
+extern uint64 g_kernel_preempt_irq_total;
 
 extern uint64 g_ext4_pcache_read_page_calls;
 extern uint64 g_ext4_pcache_pages_filled;

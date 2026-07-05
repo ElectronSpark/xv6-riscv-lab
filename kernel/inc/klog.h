@@ -17,4 +17,12 @@ size_t klog_snapshot(char *dst, size_t max, uint64 *dropped);
 void klog_clear(void);
 uint64 klog_dropped(void);
 
+/* Asynchronous console output (klog.c).  console_async_init spawns the
+ * "consoled" drain kthread (no-op with console_async=0 on the cmdline);
+ * console_async_panic_flush synchronously drains staged bytes and
+ * disables the async path — called from __panic_start(). */
+void console_async_init(void);
+void console_async_panic_flush(void);
+uint64 console_async_dropped(void);
+
 #endif /* __KERNEL_KLOG_H */

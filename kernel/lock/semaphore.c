@@ -57,7 +57,7 @@ static int __sem_do_post(sem_t *sem) {
 
 int sem_wait(sem_t *sem) {
     assert(current != NULL, "sem_wait called from non-thread context");
-    assert(mycpu()->spin_depth == 0, "sem_wait called with spinlock held");
+    assert(spin_depth_snapshot() == 0, "sem_wait called with spinlock held");
     assert(!CPU_IN_ITR(), "sem_wait called in interrupt context");
     if (sem == NULL) {
         return -EINVAL;
@@ -155,7 +155,7 @@ int sem_getvalue(sem_t *sem, int *value) {
  */
 int sem_wait_timed(sem_t *sem, uint64 timeout_ms) {
     assert(current != NULL, "sem_wait_timed called from non-thread context");
-    assert(mycpu()->spin_depth == 0, "sem_wait_timed called with spinlock held");
+    assert(spin_depth_snapshot() == 0, "sem_wait_timed called with spinlock held");
     assert(!CPU_IN_ITR(), "sem_wait_timed called in interrupt context");
     if (sem == NULL) {
         return -EINVAL;
@@ -213,7 +213,7 @@ int sem_wait_timed(sem_t *sem, uint64 timeout_ms) {
 
 int sem_wait_interruptible(sem_t *sem) {
     assert(current != NULL, "sem_wait_interruptible called from non-thread context");
-    assert(mycpu()->spin_depth == 0,
+    assert(spin_depth_snapshot() == 0,
            "sem_wait_interruptible called with spinlock held");
     assert(!CPU_IN_ITR(), "sem_wait_interruptible called in interrupt context");
     if (sem == NULL) {

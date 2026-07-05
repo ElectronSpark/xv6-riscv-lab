@@ -259,6 +259,12 @@ void __panic_start() __acquires(__panic_msg_context)
     // Use atomic store with release semantics so other cores see it.
     __atomic_store_n(&pr.locking, 0, __ATOMIC_RELEASE);
 
+    // Push any console bytes still staged for the async drain thread out
+    // to the UART and disable the async path, so the panic output below
+    // follows (rather than interleaves with) earlier messages.  All
+    // panic-time printf output then takes the synchronous console path.
+    console_async_panic_flush();
+
     SET_CPU_CRASHED();
     panic_msg_lock();
     uint64 fp = r_fp();

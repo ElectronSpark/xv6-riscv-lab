@@ -79,6 +79,10 @@ uint64 g_vm_copyout_ticks;
 uint64 g_timer_bsp_ticks_total;
 uint64 g_timer_jiffies_tsc_comp_ms_total;
 
+/* Kernel-mode IRQ-exit preemptions (updated by the x86_64 trap epilogue;
+ * other arches leave it zero). */
+uint64 g_kernel_preempt_irq_total;
+
 uint64 g_ext4_pcache_read_page_calls;
 uint64 g_ext4_pcache_pages_filled;
 uint64 g_ext4_pcache_readahead_pages;
@@ -1203,6 +1207,10 @@ void kstats_collect(struct kstats *ks) {
         __atomic_load_n(&g_timer_bsp_ticks_total, __ATOMIC_RELAXED);
     ks->timer_jiffies_tsc_comp_ms_total =
         __atomic_load_n(&g_timer_jiffies_tsc_comp_ms_total, __ATOMIC_RELAXED);
+
+    /* Version 10 append-only kernel preemption counter. */
+    ks->kernel_preempt_irq_total =
+        __atomic_load_n(&g_kernel_preempt_irq_total, __ATOMIC_RELAXED);
 }
 
 static void kprofile_pgroup_add_acct(struct kprofile_pgroup *kp,

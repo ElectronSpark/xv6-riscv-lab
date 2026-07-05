@@ -223,7 +223,7 @@ int rwsem_init(rwsem_t *lock, uint64 flags, const char *name) {
 
 int rwsem_acquire_read_caller(rwsem_t *lock, void *caller) {
     assert(current != NULL, "rwsem_acquire_read: no current thread");
-    assert(mycpu()->spin_depth == 0,
+    assert(spin_depth_snapshot() == 0,
            "rwsem_acquire_read called with spinlock held");
     assert(!CPU_IN_ITR(), "rwsem_acquire_read called in interrupt context");
     if (!lock) {
@@ -278,7 +278,7 @@ int rwsem_acquire_read(rwsem_t *lock) {
 
 int rwsem_acquire_write_caller(rwsem_t *lock, void *caller) {
     assert(current != NULL, "rwsem_acquire_write: no current thread");
-    assert(mycpu()->spin_depth == 0,
+    assert(spin_depth_snapshot() == 0,
            "rwsem_acquire_write called with spinlock held");
     assert(!CPU_IN_ITR(), "rwsem_acquire_write called in interrupt context");
     if (!lock) {
@@ -422,7 +422,7 @@ bool rwsem_is_write_holding(rwsem_t *lock) {
  */
 int rwsem_acquire_read_interruptible_caller(rwsem_t *lock, void *caller) {
     assert(current != NULL, "rwsem_acquire_read_interruptible: no current thread");
-    assert(mycpu()->spin_depth == 0,
+    assert(spin_depth_snapshot() == 0,
            "rwsem_acquire_read_interruptible called with spinlock held");
     assert(!CPU_IN_ITR(),
            "rwsem_acquire_read_interruptible called in interrupt context");
@@ -485,7 +485,7 @@ int rwsem_acquire_read_interruptible(rwsem_t *lock) {
  */
 int rwsem_acquire_write_interruptible_caller(rwsem_t *lock, void *caller) {
     assert(current != NULL, "rwsem_acquire_write_interruptible: no current thread");
-    assert(mycpu()->spin_depth == 0,
+    assert(spin_depth_snapshot() == 0,
            "rwsem_acquire_write_interruptible called with spinlock held");
     assert(!CPU_IN_ITR(),
            "rwsem_acquire_write_interruptible called in interrupt context");
