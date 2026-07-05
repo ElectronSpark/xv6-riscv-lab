@@ -4057,6 +4057,191 @@ static int poll_fd_set_requires_rescan(struct pollfd_k *pfds, int nfds)
     return 0;
 }
 
+static void kstats_poll_unix_paths(struct vfs_file *f, char *self_path,
+                                   size_t self_len, char *peer_path,
+                                   size_t peer_len);
+
+/*
+ * N5 stuck-poller diagnostic.  A notify-backed full wait has NO rescan
+ * safety net, so a producer that misses one knote notify freezes its
+ * poller forever (the interactive-desktop failure the batteries cannot
+ * reproduce, Failure Mode 24a).  When the full-wait gate is on, every
+ * long/infinite full wait registers a park entry whose fd classes are
+ * captured up front (in the poller's own fd-table context); any OTHER
+ * thread entering a blocking poll opportunistically dumps entries
+ * parked >10s.  The dump names the fd class whose producer lost the
+ * wakeup.  Zero cost when the gate is off; entries only ever print for
+ * already-pathological waits.
+ */
+#define POLL_PARK_SLOTS 128
+#define POLL_PARK_DESC 384
+#define POLL_PARK_DUMP_AFTER_MS 10000
+#define POLL_PARK_SCAN_EVERY_MS 2000
+
+#define POLL_PARK_REDUMP_MS 30000
+
+struct poll_park_entry {
+    int in_use;
+    int pid;
+    int nfds;
+    int timeout_ms;
+    uint64 since_ms;
+    uint64 last_dump_ms; /* 0 = not yet dumped this episode */
+    char comm[16];
+    char desc[POLL_PARK_DESC];
+};
+
+static struct spinlock poll_park_lock;
+static int poll_park_lock_inited;
+static struct poll_park_entry poll_park_tab[POLL_PARK_SLOTS];
+
+static void poll_park_lock_init_once(void)
+{
+    /* boot is single-threaded long before the first blocking poll */
+    if (!poll_park_lock_inited) {
+        spin_init(&poll_park_lock, "poll_park");
+        poll_park_lock_inited = 1;
+    }
+}
+
+static void poll_park_classify_fd(struct vfs_file *f, int fd, char *out,
+                                  size_t len)
+{
+    char target[64];
+
+    if (f == NULL) {
+        snprintf(out, len, "fd%d:gone", fd);
+        return;
+    }
+    if (f->ops == &unix_socket_file_ops) {
+        char self_path[UNIX_PATH_MAX];
+        char peer_path[UNIX_PATH_MAX];
+        kstats_poll_unix_paths(f, self_path, sizeof(self_path),
+                               peer_path, sizeof(peer_path));
+        snprintf(out, len, "fd%d:unix(%s|%s)", fd,
+                 self_path[0] != '\0' ? self_path : "-",
+                 peer_path[0] != '\0' ? peer_path : "-");
+        return;
+    }
+    if (f->f_kind == VFS_FILE_KIND_PIPE) {
+        snprintf(out, len, "fd%d:pipe", fd);
+        return;
+    }
+    if (eventfd_file_is_eventfd(f)) {
+        snprintf(out, len, "fd%d:eventfd", fd);
+        return;
+    }
+    if (f->ops != NULL && f->ops->readlink != NULL) {
+        ssize_t n = f->ops->readlink(f, target, sizeof(target));
+        if (n > 0) {
+            size_t tlen = (n < (ssize_t)sizeof(target) - 1) ?
+                (size_t)n : sizeof(target) - 1;
+            target[tlen] = '\0';
+            snprintf(out, len, "fd%d:%s", fd, target);
+            return;
+        }
+    }
+    snprintf(out, len, "fd%d:ops=%p", fd, f->ops);
+}
+
+static int poll_park_register(struct pollfd_k *pfds, int nfds,
+                              int timeout_ms)
+{
+    char item[UNIX_PATH_MAX * 2 + 32];
+    int slot = -1;
+
+    poll_park_lock_init_once();
+
+    spin_lock(&poll_park_lock);
+    for (int i = 0; i < POLL_PARK_SLOTS; i++) {
+        if (!poll_park_tab[i].in_use) {
+            slot = i;
+            poll_park_tab[i].in_use = 1;
+            break;
+        }
+    }
+    spin_unlock(&poll_park_lock);
+    if (slot < 0)
+        return -1;
+
+    struct poll_park_entry *e = &poll_park_tab[slot];
+    e->last_dump_ms = 0;
+    e->pid = current->pid;
+    e->nfds = nfds;
+    e->timeout_ms = timeout_ms;
+    e->since_ms = get_jiffs();
+    memmove(e->comm, current->name, sizeof(e->comm));
+    e->comm[sizeof(e->comm) - 1] = '\0';
+    e->desc[0] = '\0';
+
+    size_t used = 0;
+    for (int i = 0; i < nfds && used + 8 < sizeof(e->desc); i++) {
+        struct vfs_file *f;
+
+        if (pfds[i].fd < 0)
+            continue;
+        f = __vfs_argfd(pfds[i].fd);
+        poll_park_classify_fd(f, pfds[i].fd, item, sizeof(item));
+        if (f != NULL)
+            vfs_fput(f);
+        size_t ilen = strlen(item);
+        if (used + ilen + 2 >= sizeof(e->desc)) {
+            e->desc[used++] = '+';
+            break;
+        }
+        if (used != 0)
+            e->desc[used++] = ',';
+        memmove(&e->desc[used], item, ilen);
+        used += ilen;
+    }
+    e->desc[used] = '\0';
+    return slot;
+}
+
+static void poll_park_unregister(int slot)
+{
+    if (slot < 0 || slot >= POLL_PARK_SLOTS)
+        return;
+    spin_lock(&poll_park_lock);
+    poll_park_tab[slot].in_use = 0;
+    spin_unlock(&poll_park_lock);
+}
+
+static void poll_park_dump_check(void)
+{
+    static uint64 last_scan_ms;
+    uint64 now = get_jiffs();
+    uint64 prev = __atomic_load_n(&last_scan_ms, __ATOMIC_RELAXED);
+
+    if (!poll_park_lock_inited)
+        return;
+    if (now - prev < POLL_PARK_SCAN_EVERY_MS)
+        return;
+    if (!__atomic_compare_exchange_n(&last_scan_ms, &prev, now, false,
+                                     __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        return;
+
+    spin_lock(&poll_park_lock);
+    for (int i = 0; i < POLL_PARK_SLOTS; i++) {
+        struct poll_park_entry *e = &poll_park_tab[i];
+        if (!e->in_use)
+            continue;
+        if (now - e->since_ms < POLL_PARK_DUMP_AFTER_MS)
+            continue;
+        /* re-dump long-lived parks so a frozen-forever thread stays
+         * distinguishable from one that woke and parked again */
+        if (e->last_dump_ms != 0 &&
+            now - e->last_dump_ms < POLL_PARK_REDUMP_MS)
+            continue;
+        e->last_dump_ms = now;
+        printf("poll-stuck: pid=%d comm=%s parked_ms=%llu timeout=%d "
+               "nfds=%d [%s]\n",
+               e->pid, e->comm, (unsigned long long)(now - e->since_ms),
+               e->timeout_ms, e->nfds, e->desc);
+    }
+    spin_unlock(&poll_park_lock);
+}
+
 static int kstats_poll_path_contains(const char *path, const char *needle)
 {
     return path != NULL && path[0] != '\0' &&
@@ -5025,6 +5210,11 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     if (notify_full_wait)
         has_unnotified_fds = poll_fd_set_requires_rescan(pfds, nfds);
 
+    /* N5 diagnostic: let this (still-running) poller report any peer
+     * that has been stuck in a notify-backed full wait for >10s. */
+    if (notify_full_wait)
+        poll_park_dump_check();
+
     struct kqueue *kq = kqueue_alloc_private();
     if (kq == NULL) {
         /* If private kqueue allocation fails, fall back to a single scan */
@@ -5117,7 +5307,14 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
         uint64 wait_start_ms = trace_ready ? sched_timer_now_ms() : 0;
         uint64 wait_start_ticks = profile_ready ? r_time() : 0;
         webkit_poll_summary("sleep", nfds, kq_tmo, ready, pfds);
+        /* N5 diagnostic: only notify-backed full waits (no rescan net)
+         * can freeze forever — park-track the long/infinite ones. */
+        int park_slot = -1;
+        if (notify_full_wait && !has_unnotified_fds &&
+            (kq_tmo < 0 || kq_tmo >= 5000))
+            park_slot = poll_park_register(pfds, nfds, kq_tmo);
         int nevents = kqueue_wait(kq, events, nfds, kq_tmo);
+        poll_park_unregister(park_slot);
 
         if (nevents < 0 && nevents == -EINTR) {
             ready = -EINTR;

@@ -9,6 +9,7 @@
 #include <lock/spinlock.h>
 #include <proc/sched.h>
 #include <kqueue.h>
+#include <kqueue_types.h>
 #include <vfs/poll.h>
 #include <vfs/file.h>
 #include <mm/vm.h>
@@ -142,10 +143,18 @@ struct evdev_state {
 struct evdev_client {
     struct evdev_state *state;
     struct evdev_client *next;
+    /* N5: back-pointer to the open file, protected by st->lock.  Knotes
+     * from poll/epoll attach to the per-open FILE knote list (because
+     * evdev_file_ops has .poll), so readiness must be delivered via
+     * vfs_file_knote_notify on this file — cdev_knote_notify walks only
+     * the cdev list, which stays empty for evdev fds. */
+    struct vfs_file *file;
     struct input_event ring[256];
     int head;
     int tail;
 };
+
+#define EVDEV_NOTIFY_MAX_CLIENTS 8
 
 static struct evdev_state evkbd;
 static struct evdev_state evptr;
@@ -200,12 +209,27 @@ static void ring_push_locked(struct evdev_state *st, uint16 type, uint16 code,
 static void notify(struct evdev_state *st)
 {
     struct evdev_client *client;
+    struct vfs_file *files[EVDEV_NOTIFY_MAX_CLIENTS];
+    int nfiles = 0;
 
     spin_lock(&st->lock);
-    for (client = st->clients; client != NULL; client = client->next)
+    for (client = st->clients; client != NULL; client = client->next) {
         wakeup_on_chan(&client->ring);
+        if (client->file != NULL && nfiles < EVDEV_NOTIFY_MAX_CLIENTS)
+            files[nfiles++] = vfs_fdup(client->file);
+    }
     spin_unlock(&st->lock);
     cdev_knote_notify(&st->cdev, EVFILT_READ, 0);
+    /* N5 fix: knotes for evdev fds live on the per-open FILE lists (see
+     * struct evdev_client.file) — without this, poll/epoll waiters only
+     * ever saw input via the rescan safety net, and a notify-backed
+     * full wait (poll_notify_full_wait=1) froze input forever.  Notify
+     * OUTSIDE st->lock: kqueue_wait re-checks levels via ops->poll
+     * (which takes st->lock) while holding kq->lock. */
+    for (int i = 0; i < nfiles; i++) {
+        vfs_file_knote_notify(files[i], EVFILT_READ, 0);
+        vfs_fput(files[i]);
+    }
 }
 
 static uint16 linux_key_from_kbd_event(const struct kbd_event *ev)
@@ -560,6 +584,7 @@ static int evdev_open_file(cdev_t *cdev, struct vfs_file *file)
         return -ENOMEM;
     memset(client, 0, sizeof(*client));
     client->state = st;
+    client->file = file;
 
     spin_lock(&st->lock);
     client->next = st->clients;
