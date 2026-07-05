@@ -3980,6 +3980,17 @@ static int poll_notify_full_wait_enabled(void)
     return enabled;
 }
 
+/*
+ * REVERTED to default-OFF 2026-07-05: with the AF_UNIX full-wait default
+ * on, an interactive desktop went unresponsive (Wayland clients + a
+ * dbus client that never woke to finish auth) — consistent with a
+ * missed unix-socket readiness notify on some transition.  The global
+ * poll_notify_full_wait stays default-on (timerfd/eventfd/pipe notify
+ * sources are soaked); unix-bearing poll sets keep the rescan cap.
+ * Re-enable per-boot with af_unix_poll_notify_full_wait=1 only while
+ * auditing the unix socket notify hooks for complete transition
+ * coverage (data, EOF/hangup, connect/accept, credentials).
+ */
 static int af_unix_poll_notify_full_wait_enabled(void)
 {
     static int initialized;
@@ -3987,12 +3998,9 @@ static int af_unix_poll_notify_full_wait_enabled(void)
     char value[8];
 
     if (!initialized) {
-        if (cmdline_get_param("af_unix_poll_notify_full_wait", value,
-                              sizeof(value)) != 0)
-            enabled = 1;
-        else
-            enabled = value[0] != '0' && value[0] != 'n' &&
-                value[0] != 'N';
+        enabled = cmdline_get_param("af_unix_poll_notify_full_wait", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
         initialized = 1;
     }
     return enabled;
