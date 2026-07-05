@@ -9,6 +9,16 @@
  * defaults on) ran a clean full video window — bisect is conclusive.
  * Re-enable only after making the used-ring wait multi-waiter-safe.
  * Opt in with virtio_gpu_submit_unlocked_wait=1 for that rework's A/B.
+ *
+ * 2026-07-05 redesign (B2/B3/progress, still default-OFF pending A/B):
+ * the reaper is now TOTAL (sync completions route through the queue's
+ * sync record instead of being stolen/discarded), aborts quarantine
+ * POSTED slots as ABANDONED instead of freeing device-owned memory
+ * (claim/fill/post/reap state machine under q->lock), and progress
+ * detection snapshot-compares used->idx / retire_seq MOVEMENT instead
+ * of occupancy.  These changes run unconditionally and are safe in
+ * default mode; this flag still only controls whether ctx_submit
+ * releases op_lock across make-room stalls.
  */
 static int virtio_gpu_submit_unlocked_wait_enabled(void)
 {

@@ -782,6 +782,29 @@ static int virtio_gpu_queue_init(struct virtio_gpu *g)
     q->size = qsize;
     q->notify_off = cfg->queue_notify_off;
     spin_init(&q->lock, "virtio_gpuq");
+    /*
+     * Async slot budget (review finding #7): slot i owns descriptors
+     * [8 + i*4, 8 + i*4 + 4), so the negotiated table must cover
+     * 8 + capacity*4 entries.  Clamp the usable slot count to what the
+     * device actually gave us; capacity 0 disables the async ring
+     * (async posts fail fast and callers use the sync path/error
+     * handling).  No async post may ever reference an out-of-range
+     * descriptor.
+     */
+    if (qsize > VIRTIO_GPU_ASYNC_DESC_BASE)
+        g->async_capacity =
+            (int)((qsize - VIRTIO_GPU_ASYNC_DESC_BASE) /
+                  VIRTIO_GPU_ASYNC_DESC_PER_SLOT);
+    else
+        g->async_capacity = 0;
+    if (g->async_capacity > VIRTIO_GPU_ASYNC_MAX_DEPTH)
+        g->async_capacity = VIRTIO_GPU_ASYNC_MAX_DEPTH;
+    if (g->async_capacity < VIRTIO_GPU_ASYNC_MAX_DEPTH)
+        printf("virtio_gpu: async ring clamped to %d slots (queue size %u < %u)\n",
+               g->async_capacity, qsize,
+               VIRTIO_GPU_ASYNC_DESC_BASE +
+                   VIRTIO_GPU_ASYNC_MAX_DEPTH *
+                       VIRTIO_GPU_ASYNC_DESC_PER_SLOT);
     printf("virtio_gpu: queue init done size=%u notify_off=%u\n",
            q->size, q->notify_off);
     return 0;
@@ -837,6 +860,13 @@ void virtio_gpu_init(void)
     mutex_init(&g->op_lock, "virtio_gpuop");
     mutex_init(&g->async_wait_serialize, "virtio_gpuaw");
     mutex_init(&g->async_reap_serialize, "virtio_gpurp");
+    /*
+     * One-time init of the shared progress completion (this kernel's
+     * completion_t embeds a spinlock and a tq that REQUIRE init).
+     * virtio_gpu_async_wait_progress only completion_reinit()s it from
+     * here on — a full re-init under a sleeping waiter corrupts the tq.
+     */
+    completion_init(&g->async_wait);
     g->next_resource_id = 1;
     g->next_context_id = 2;
     g->pci.use_pci = 1;
@@ -1010,7 +1040,8 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
 
     spin_lock(&g->lock);
     vg_stats = g->stats;
-    async_pending = g->async_count;
+    /* async_count is q->lock-protected; lock-free stats snapshot. */
+    async_pending = __atomic_load_n(&g->async_count, __ATOMIC_ACQUIRE);
     async_depth = g->async_depth ? (uint64)g->async_depth : 2;
     for (int i = 0; i < VIRTIO_GPU_SUBMIT_TRACE_OWNER_SLOTS; i++) {
         const struct virtio_gpu_submit_trace_owner *o =
