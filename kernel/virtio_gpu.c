@@ -2391,6 +2391,34 @@ static void virtio_gpu_intr(int irq, void *data, device_t *dev)
     spin_unlock(&q->lock);
 }
 
+/*
+ * Record a FENCED synchronous command's fence into the global fence
+ * progress after its response validated OK.  Only the async reaper ever
+ * advanced stats.last_fence (true before and after the total-reaper
+ * redesign), so a fenced submit that took the SYNC path (e.g. the
+ * ctx_submit ring-pressure fallback) left its fence unsignaled: a
+ * DRM fence waiter (gpu_drm_wait_virtio_fence 1ms-poll loop, 60s cap)
+ * was only released when a LATER async fence happened to retire past
+ * it — i.e. by unrelated activity.  Interactive symptom: hover/tooltip
+ * /menu updates stalled for seconds while idle, recovering faster the
+ * more the user moved the cursor.  Monotonic max: a stale sync fence
+ * must never regress fence progress.
+ */
+static void virtio_gpu_record_sync_fence(struct virtio_gpu *g,
+                                         const void *cmd)
+{
+    const struct virtio_gpu_ctrl_hdr *hdr = cmd;
+
+    if (hdr == NULL || !(hdr->flags & VIRTIO_GPU_FLAG_FENCE) ||
+        hdr->fence_id == 0)
+        return;
+    spin_lock(&g->lock);
+    g->stats.fences++;
+    if (hdr->fence_id > g->stats.last_fence)
+        g->stats.last_fence = hdr->fence_id;
+    spin_unlock(&g->lock);
+}
+
 /* Cumulative budget for movement-renewal retry loops: total wall time
  * equals ONE full wait window regardless of how many renewals occur. */
 static uint32 virtio_gpu_wait_window_ms(void)
@@ -2668,6 +2696,7 @@ static int virtio_gpu_submit_internal(struct virtio_gpu *g, void *cmd,
         return -1;
     }
 
+    virtio_gpu_record_sync_fence(g, cmd);
     virtio_gpu_count_command(g, type);
     return 0;
 }
@@ -2719,6 +2748,7 @@ static int virtio_gpu_submit_mixed_async(struct virtio_gpu *g, void *cmd,
                type, resp_hdr->type, expected);
         return -1;
     }
+    virtio_gpu_record_sync_fence(g, cmd);
     virtio_gpu_count_command(g, type);
     return 0;
 }
