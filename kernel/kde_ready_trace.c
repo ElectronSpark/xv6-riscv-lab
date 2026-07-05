@@ -7,23 +7,30 @@
 #include <smp/percpu.h>
 #include "kde_ready_trace.h"
 
-static int kde_ready_value_enabled(const char *key)
+/* NOTE: each gate needs its OWN cache.  The old shared-static version
+ * cached the FIRST queried key's answer for every key, silently
+ * aliasing konsole_ready_trace and kde_wake_to_run_trace (whichever
+ * ran first won — the wake-to-run trace was dead on boots where the
+ * poll path queried the ready-trace gate first). */
+static int kde_cmdline_flag_enabled(const char *key, int *initialized,
+                                    int *enabled)
 {
-    static int initialized;
-    static int enabled;
     char value[8];
 
-    if (!initialized) {
-        enabled = cmdline_get_param(key, value, sizeof(value)) == 0 &&
-                  value[0] != '0' && value[0] != 'n' && value[0] != 'N';
-        initialized = 1;
+    if (!*initialized) {
+        *enabled = cmdline_get_param(key, value, sizeof(value)) == 0 &&
+                   value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        *initialized = 1;
     }
-    return enabled;
+    return *enabled;
 }
 
 int kde_ready_trace_enabled(void)
 {
-    return kde_ready_value_enabled("konsole_ready_trace");
+    static int initialized, enabled;
+
+    return kde_cmdline_flag_enabled("konsole_ready_trace", &initialized,
+                                    &enabled);
 }
 
 int kde_ready_trace_path_match(const char *path)
@@ -80,7 +87,10 @@ void kde_ready_trace_event(const char *phase, int fd, int arg0, int arg1,
 
 int kde_wake_to_run_trace_enabled(void)
 {
-    return kde_ready_value_enabled("kde_wake_to_run_trace");
+    static int initialized, enabled;
+
+    return kde_cmdline_flag_enabled("kde_wake_to_run_trace", &initialized,
+                                    &enabled);
 }
 
 /* Optional min-latency filter: kde_wake_to_run_trace=<N> with N > 1 prints
@@ -106,12 +116,27 @@ static uint64 kde_wake_to_run_trace_min_ms(void)
     return min_ms;
 }
 
-/* Konsole-scoped only: match on the thread group's exec path so session
- * startup (kwin/plasmashell Wayland and DBus threads) stays quiet. */
+/* wake_to_run_trace_all=1 widens the scope to EVERY thread — diagnostic
+ * boots only, pair with a min-ms filter (kde_wake_to_run_trace=<N>) to
+ * bound serial volume.  Used to test the systemic-scheduling-latency
+ * hypothesis for desktop-wide slowness. */
+static int kde_wake_to_run_trace_all(void)
+{
+    static int initialized, enabled;
+
+    return kde_cmdline_flag_enabled("wake_to_run_trace_all", &initialized,
+                                    &enabled);
+}
+
+/* Konsole-scoped by default: match on the thread group's exec path so
+ * session startup (kwin/plasmashell Wayland and DBus threads) stays
+ * quiet. */
 static int kde_wake_to_run_thread_match(const struct thread *p)
 {
     if (p == NULL || p->thread_group == NULL)
         return 0;
+    if (kde_wake_to_run_trace_all())
+        return 1;
     return kde_ready_trace_path_match(p->thread_group->exec_path);
 }
 
