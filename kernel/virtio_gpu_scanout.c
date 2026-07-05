@@ -976,6 +976,9 @@ void virtio_gpu_init(void)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     g->initialized = 1;
 
+    /* IRQ-driven retire: must exist before the first interrupt fires. */
+    virtio_gpu_reap_wq_init(g);
+
     struct irq_desc virtio_gpu_irq_desc = {
         .handler = virtio_gpu_intr,
         .data = g,

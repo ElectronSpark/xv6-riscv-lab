@@ -28,6 +28,7 @@
 #include <mm/rmap.h>
 #include <mm/vm.h>
 #include <proc/thread.h>
+#include <proc/workqueue.h>
 #include "arch/vm.h"
 
 #if defined(__x86_64__) || defined(__i386__)
@@ -2368,10 +2369,52 @@ out:
     return ret;
 }
 
+/*
+ * IRQ-driven reap (interactive-latency root cause, 2026-07-05):
+ * completions used to be consumed only by SUBMIT/DRAIN/MAKE-ROOM
+ * callers, so on an idle desktop a finished frame's slot (and its
+ * fence) sat POSTED until the NEXT GPU activity reaped it — the
+ * owner-trace showed retire_max ≈ 60s (the DRM fence-wait cap) for
+ * kwin_wayland, felt as multi-second hover/tooltip/menu stalls that
+ * shrank with cursor activity.  The reaper needs async_reap_serialize
+ * (a mutex — unusable in IRQ context), so the interrupt queues this
+ * work item instead; queue_work dedups while it is already pending.
+ */
+static struct workqueue *virtio_gpu_reap_wq;
+static struct work_struct virtio_gpu_reap_work;
+/* queue_work() has NO double-queue guard (enqueueing an already-queued
+ * work_struct corrupts the list — first attempt hung boot at capset
+ * time).  Same discipline as timerfd's work_pending flag. */
+static int virtio_gpu_reap_work_queued;
+
+static void virtio_gpu_reap_worker(struct work_struct *work)
+{
+    struct virtio_gpu *g = (struct virtio_gpu *)work->data;
+
+    /* Clear BEFORE reaping: an IRQ arriving mid-reap re-queues us (the
+     * work_struct is already off the list while running), so no
+     * completion can be missed between our final consume and return. */
+    __atomic_store_n(&virtio_gpu_reap_work_queued, 0, __ATOMIC_RELEASE);
+    (void)virtio_gpu_async_reap_completed_sample(g, NULL);
+}
+
+static void virtio_gpu_reap_wq_init(struct virtio_gpu *g)
+{
+    virtio_gpu_reap_wq = workqueue_create("vgpu-reap", 1);
+    if (virtio_gpu_reap_wq == NULL) {
+        printf("virtio_gpu: reap workqueue unavailable; retire stays "
+               "activity-driven\n");
+        return;
+    }
+    init_work_struct(&virtio_gpu_reap_work, virtio_gpu_reap_worker,
+                     (uint64)g);
+}
+
 static void virtio_gpu_intr(int irq, void *data, device_t *dev)
 {
     struct virtio_gpu *g = (struct virtio_gpu *)data;
     struct virtio_gpu_queue *q;
+    int kick_reap = 0;
 
     (void)irq;
     (void)dev;
@@ -2388,7 +2431,18 @@ static void virtio_gpu_intr(int irq, void *data, device_t *dev)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (virtio_gpu_complete_pending_locked(g, q))
         virtio_gpu_count_irq_completion(g);
+    /* Unconsumed used elements: retire them promptly instead of
+     * waiting for the next submit/drain caller. */
+    kick_reap = q->used->idx != q->used_idx;
     spin_unlock(&q->lock);
+
+    if (kick_reap && virtio_gpu_reap_wq != NULL &&
+        !__atomic_exchange_n(&virtio_gpu_reap_work_queued, 1,
+                             __ATOMIC_ACQ_REL)) {
+        if (!queue_work(virtio_gpu_reap_wq, &virtio_gpu_reap_work))
+            __atomic_store_n(&virtio_gpu_reap_work_queued, 0,
+                             __ATOMIC_RELEASE);
+    }
 }
 
 /*
