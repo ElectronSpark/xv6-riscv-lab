@@ -3962,6 +3962,16 @@ static const char *webkit_poll_fd_kind(struct vfs_file *f)
  * A/B collapsed that churn by 92% with app-visible behavior unchanged.
  * Opt out with poll_notify_full_wait=0 / af_unix_poll_notify_full_wait=0.
  */
+/*
+ * REVERTED to default-OFF 2026-07-05 (both halves are now opt-in): the
+ * global full-wait default froze a real interactive desktop even with
+ * the AF_UNIX half off — lost wakeups on some notify-backed class that
+ * the injected-input batteries cannot see (Failure Mode 24a).  The
+ * 92% poll-churn reduction is real but UNSHIPPABLE until the notify
+ * delivery paths (eventfd/pipe/timerfd/kqueue wakeup hooks) are audited
+ * for complete transition coverage and validated INTERACTIVELY.
+ * Opt in per boot with poll_notify_full_wait=1.
+ */
 static int poll_notify_full_wait_enabled(void)
 {
     static int initialized;
@@ -3969,12 +3979,9 @@ static int poll_notify_full_wait_enabled(void)
     char value[8];
 
     if (!initialized) {
-        if (cmdline_get_param("poll_notify_full_wait", value,
-                              sizeof(value)) != 0)
-            enabled = 1;
-        else
-            enabled = value[0] != '0' && value[0] != 'n' &&
-                value[0] != 'N';
+        enabled = cmdline_get_param("poll_notify_full_wait", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
         initialized = 1;
     }
     return enabled;
