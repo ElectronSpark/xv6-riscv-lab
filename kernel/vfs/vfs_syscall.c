@@ -142,8 +142,29 @@ static int webkit_vfs_trace_enabled(void)
     return enabled;
 }
 
+/* vfs_trace_all=1 widens the webkit vfs trace to EVERY process —
+ * diagnostic boots only (serial volume + FM9 timing perturbation);
+ * used to attribute system-wide open/lookup churn that kprofile's
+ * pgroup split shows is not the browser's. */
+static int vfs_trace_all_processes(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("vfs_trace_all", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
 static int webkit_vfs_trace_process(void)
 {
+    if (vfs_trace_all_processes())
+        return current != NULL;
     return current != NULL &&
         (strncmp(current->name, "MiniBrowser", 11) == 0 ||
          strncmp(current->name, "WebKit", 6) == 0 ||
