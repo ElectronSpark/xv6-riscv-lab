@@ -34,6 +34,7 @@
 #include "seg.h"
 #include "timer/sched_timer_private.h"
 #include "sched_starve_probe.h"
+#include "cmdline.h"
 
 /* ══════════════════════════════════════════════════════════════
  *  Linker-compat globals (RISC-V legacy)
@@ -142,10 +143,73 @@ static uint32 tick_hz = PIT_HZ;
 
 /* ══════════════════════════════════════════════════════════════
  *  Jiffies
+ *
+ *  jiffies_count is the kernel's millisecond clock (HZ == 1000,
+ *  1 jiffy == 1 ms).  Historically it advanced only when the BSP
+ *  received a tick interrupt.  Under KVM vCPU contention a double-
+ *  digit percentage of ticks can be coalesced or dropped, which
+ *  made get_jiffs() fall behind wall clock and every ms-deadline
+ *  derived from it fire late.
+ *
+ *  When an invariant TSC with a calibrated frequency is available
+ *  (the normal case under QEMU/KVM and Hyper-V), jiffies is instead
+ *  DERIVED from the TSC on every read and on every BSP tick:
+ *      ms = ((tsc - tsc_jiffies_base) * tsc_jiffies_mult) >> 32
+ *  with tsc_jiffies_mult = (1000 << 32) / tsc_freq_hz precomputed at
+ *  boot (no division on any hot path; the 64x64->128 multiply is a
+ *  single mulq).  jiffies_count then acts as a global monotonic
+ *  clamp: readers advance it with a compare-exchange max, so time
+ *  never goes backwards even across CPUs with residual TSC skew
+ *  (KVM presents a synchronized invariant TSC, the clamp is a
+ *  belt-and-braces guarantee).  Lost/coalesced tick interrupts no
+ *  longer lose time.
+ *
+ *  Opt-out for A/B testing: boot with timer_tsc_jiffies=0 to fall
+ *  back to the legacy one-increment-per-BSP-tick behavior.
  * ══════════════════════════════════════════════════════════════ */
 static volatile uint64 jiffies_count = 0;
 
+#define TSC_JIFFIES_SHIFT 32
+static int    tsc_jiffies_enabled;      /* set once at boot, before APs run */
+static uint64 tsc_jiffies_base;         /* rdtsc() when compensation enabled */
+static uint64 tsc_jiffies_mult;         /* (1000 << SHIFT) / tsc_freq_hz */
+
+/* Observability counters, defined in kernel/accounting.c and exported
+ * through kstats (kstats_collect()):
+ *   g_timer_bsp_ticks_total          raw tick interrupts seen by the BSP
+ *   g_timer_jiffies_tsc_comp_ms_total  cumulative milliseconds that elapsed
+ *                                    without their own BSP tick and were
+ *                                    recovered by TSC compensation */
+extern uint64 g_timer_bsp_ticks_total;
+extern uint64 g_timer_jiffies_tsc_comp_ms_total;
+
+static inline uint64 tsc_jiffies_now_ms(void) {
+    uint64 delta = rdtsc() - tsc_jiffies_base;
+    /* Guard against TSC-below-base underflow (e.g. residual boot-time
+     * skew on an AP).  Without this, a wrapped delta would push the
+     * advance-only jiffies clamp to an astronomical value permanently.
+     * One signed compare; real skew is never anywhere near 2^63. */
+    if ((int64)delta < 0)
+        delta = 0;
+    return (uint64)(((unsigned __int128)delta * tsc_jiffies_mult)
+                    >> TSC_JIFFIES_SHIFT);
+}
+
 uint64 get_jiffs(void) {
+    if (__atomic_load_n(&tsc_jiffies_enabled, __ATOMIC_ACQUIRE)) {
+        uint64 now_ms = tsc_jiffies_now_ms();
+        uint64 old = __atomic_load_n(&jiffies_count, __ATOMIC_RELAXED);
+        /* Advance-only monotonic clamp.  At 1000 Hz resolution only the
+         * first reader inside each millisecond actually writes; all other
+         * reads are load + compare. */
+        while (now_ms > old) {
+            if (__atomic_compare_exchange_n(&jiffies_count, &old, now_ms,
+                                            false, __ATOMIC_RELAXED,
+                                            __ATOMIC_RELAXED))
+                return now_ms;
+        }
+        return old;
+    }
     return __atomic_load_n(&jiffies_count, __ATOMIC_RELAXED);
 }
 
@@ -199,7 +263,42 @@ void timer_tick_advance(void) {
      * so without this guard jiffies_count would advance at
      * N_CPUS × TIMER_HZ instead of TIMER_HZ. */
     if (cpu == 0) {
-        __atomic_fetch_add(&jiffies_count, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_timer_bsp_ticks_total, 1, __ATOMIC_RELAXED);
+        if (__atomic_load_n(&tsc_jiffies_enabled, __ATOMIC_ACQUIRE)) {
+            /* TSC-compensated mode: derive jiffies from the TSC so the
+             * full elapsed span is accounted even when tick interrupts
+             * were coalesced/dropped.  get_jiffs() performs the
+             * advance-only clamp on jiffies_count itself.
+             *
+             * bsp_last_tick_ms is only touched from the BSP tick path
+             * (serialized: same vector cannot nest on one CPU), so plain
+             * loads/stores suffice. */
+            static uint64 bsp_last_tick_ms;
+            uint64 now_ms = get_jiffs();
+            uint64 last = bsp_last_tick_ms;
+            /* Expected inter-tick gap for the ACTIVE tick source (the
+             * PIT fallback runs at 100 Hz = 10 ms/tick); measuring
+             * against a hardcoded 1 ms would count ~9 "lost" ms per
+             * healthy PIT tick forever. */
+            uint64 expect_ms = 1000 / (tick_hz ? tick_hz : TIMER_HZ);
+            if (expect_ms == 0)
+                expect_ms = 1;
+            bsp_last_tick_ms = now_ms;
+            if (last != 0 && now_ms > last + expect_ms) {
+                /* More than one tick period elapsed since the previous
+                 * accounted tick: the intervening ticks were lost.  Time
+                 * itself is already caught up (jiffies is TSC-derived)
+                 * and the timer wheel below expires against absolute ms,
+                 * so the whole span is accounted; record the recovery. */
+                __atomic_fetch_add(&g_timer_jiffies_tsc_comp_ms_total,
+                                   now_ms - last - expect_ms,
+                                   __ATOMIC_RELAXED);
+            }
+        } else {
+            /* Legacy mode (timer_tsc_jiffies=0 or no usable TSC):
+             * one tick == one jiffy; lost ticks lose time. */
+            __atomic_fetch_add(&jiffies_count, 1, __ATOMIC_RELAXED);
+        }
     }
 
     sched_starve_probe_note_timer_tick(cpu);
@@ -277,6 +376,12 @@ static int cpu_has_invariant_tsc(void) {
         return 0;
     x86_cpuid(0x80000007, 0, &a, &b, &c, &d);
     return (d >> 8) & 1;            /* CPUID.80000007H:EDX.InvTSC[bit 8] */
+}
+
+static int cpu_has_hypervisor(void) {
+    uint32 a, b, c, d;
+    x86_cpuid(1, 0, &a, &b, &c, &d);
+    return (c >> 31) & 1;           /* CPUID.01H:ECX.Hypervisor[bit 31] */
 }
 
 static uint64 cpuid_timer_frequency(uint64 *lapic_freq_out) {
@@ -719,6 +824,44 @@ void arch_timer_init(void) {
     setup_pit();
 
 done:
+    /* ── TSC-compensated jiffies (default ON, timer_tsc_jiffies=0 to opt
+     * out for A/B isolation).  Requires a calibrated STABLE TSC: either
+     * the invariant-TSC CPUID bit, or a hypervisor (KVM/Hyper-V keep the
+     * virtual TSC monotonic-stable and QEMU does not always advertise
+     * InvTSC — gating on the bit alone would disable the fix on the
+     * primary target).  A P/C-state-varying bare-metal TSC would skew
+     * the rate with no tick-driven self-correction, so bare metal still
+     * requires the bit.  Sanity-floor the frequency so a bogus
+     * calibration cannot produce a wild multiplier. */
+    if (have_tsc && (feat_inv_tsc || cpu_has_hypervisor()) &&
+        tsc_freq_hz >= 1000000ULL) {
+        char value[16];
+        int opt_out =
+            cmdline_get_param("timer_tsc_jiffies", value, sizeof(value)) == 0 &&
+            cmdline_value_is_false(value);
+        if (!opt_out) {
+            /* jiffies are milliseconds: HZ == 1000 (timer/timer.h).
+             * Round-to-nearest: a floored multiplier runs up to ~1/mult
+             * slow (hundreds of ppm ≈ tens of seconds/day) against the
+             * sched_timer wheel's own TSC-derived ms; rounding keeps
+             * the two ms clocks within ~0.2 ppm of each other. */
+            /* (HZ << 32) ≈ 4.3e12 fits u64, so this stays a native
+             * 64-bit division (no libgcc __udivti3 in the kernel). */
+            tsc_jiffies_mult = (((uint64)HZ << TSC_JIFFIES_SHIFT) +
+                                tsc_freq_hz / 2) / tsc_freq_hz;
+            tsc_jiffies_base = rdtsc();
+            /* Release-publish so AP readers of get_jiffs() observe
+             * base/mult before the enable flag. */
+            __atomic_store_n(&tsc_jiffies_enabled, 1, __ATOMIC_RELEASE);
+            printf("[x86] jiffies: TSC-compensated (mult=%ld)\n",
+                   (long)tsc_jiffies_mult);
+        } else {
+            printf("[x86] jiffies: tick-counted (timer_tsc_jiffies=0)\n");
+        }
+    } else {
+        printf("[x86] jiffies: tick-counted (no calibrated invariant TSC)\n");
+    }
+
     printf("[x86] Timer: %s @ %d Hz\n",
            timer_source_names[active_timer], tick_hz);
 }

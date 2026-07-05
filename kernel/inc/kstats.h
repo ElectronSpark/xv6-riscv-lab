@@ -337,9 +337,17 @@ struct kstats {
     /* Version 8 append-only scheduler starvation probe counters. */
     uint64 sched_starve_probe_snapshots;
     uint64 sched_starve_probe_idle_needs_resched_samples;
+
+    /* Version 9 append-only timer tick counters (lane N7).
+     * timer_bsp_ticks_total: raw tick interrupts received by the BSP.
+     * timer_jiffies_tsc_comp_ms_total: cumulative milliseconds that
+     * elapsed without their own BSP tick (lost/coalesced under vCPU
+     * contention) and were recovered by TSC-compensated jiffies. */
+    uint64 timer_bsp_ticks_total;
+    uint64 timer_jiffies_tsc_comp_ms_total;
 };
 
-#define KSTATS_ABI_VERSION 8
+#define KSTATS_ABI_VERSION 9
 #define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
 /*
@@ -472,6 +480,9 @@ extern uint64 g_vm_validate_hugepage_ticks;
 extern uint64 g_vm_validate_pte_check_ticks;
 extern uint64 g_vm_copyin_ticks;
 extern uint64 g_vm_copyout_ticks;
+
+extern uint64 g_timer_bsp_ticks_total;
+extern uint64 g_timer_jiffies_tsc_comp_ms_total;
 
 extern uint64 g_ext4_pcache_read_page_calls;
 extern uint64 g_ext4_pcache_pages_filled;

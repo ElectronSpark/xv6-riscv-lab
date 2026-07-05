@@ -74,6 +74,11 @@ uint64 g_vm_validate_pte_check_ticks;
 uint64 g_vm_copyin_ticks;
 uint64 g_vm_copyout_ticks;
 
+/* Timer tick observability (updated by arch timer tick path; x86_64 fills
+ * these, other arches leave them zero). */
+uint64 g_timer_bsp_ticks_total;
+uint64 g_timer_jiffies_tsc_comp_ms_total;
+
 uint64 g_ext4_pcache_read_page_calls;
 uint64 g_ext4_pcache_pages_filled;
 uint64 g_ext4_pcache_readahead_pages;
@@ -1192,6 +1197,12 @@ void kstats_collect(struct kstats *ks) {
     ks->sched_starve_probe_snapshots = sched_starve_probe_snapshots();
     ks->sched_starve_probe_idle_needs_resched_samples =
         sched_starve_probe_idle_needs_resched_samples();
+
+    /* Version 9 append-only timer tick counters. */
+    ks->timer_bsp_ticks_total =
+        __atomic_load_n(&g_timer_bsp_ticks_total, __ATOMIC_RELAXED);
+    ks->timer_jiffies_tsc_comp_ms_total =
+        __atomic_load_n(&g_timer_jiffies_tsc_comp_ms_total, __ATOMIC_RELAXED);
 }
 
 static void kprofile_pgroup_add_acct(struct kprofile_pgroup *kp,
