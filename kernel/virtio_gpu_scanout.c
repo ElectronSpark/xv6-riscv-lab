@@ -1444,7 +1444,7 @@ int virtio_gpu_bind_resource_scanout(uint32 resource_id, uint32 x, uint32 y,
         if (prepared_async_flush)
             ret = virtio_gpu_async_post_prepared(
                 g, &scanout_flush_prep,
-                VIRTIO_GPU_ASYNC_REASON_FLUSH) == 0 ? 0 : -EIO;
+                VIRTIO_GPU_ASYNC_REASON_FLUSH, 0) == 0 ? 0 : -EIO;
         else
             ret = virtio_gpu_resource_flush_async(g, res, x, y, w, h) == 0 ?
                   0 : -EIO;
@@ -1583,7 +1583,7 @@ int virtio_gpu_page_flip_resource(uint32 resource_id, uint32 w, uint32 h,
                 &scanout_prep) == 0) {
             if (virtio_gpu_async_post_prepared(
                     g, &scanout_prep,
-                    VIRTIO_GPU_ASYNC_REASON_OTHER) != 0) {
+                    VIRTIO_GPU_ASYNC_REASON_OTHER, 0) != 0) {
                 virtio_gpu_async_submit_free(&scanout_prep);
                 if (virtio_gpu_set_scanout(g, 0, res, 0, 0,
                                            scanout_w, scanout_h) != 0) {

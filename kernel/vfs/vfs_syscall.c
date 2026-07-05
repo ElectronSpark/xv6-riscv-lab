@@ -3954,6 +3954,14 @@ static const char *webkit_poll_fd_kind(struct vfs_file *f)
     return "regular";
 }
 
+/*
+ * N5 (2026-07-05): both notify full-wait gates are default-ON.  With
+ * them off, every blocking poll()/ppoll() was sliced into 10ms
+ * POLL_RESCAN_MS iterations (~4,500 timed-out waits/s system-wide under
+ * desktop load, each paying a double full fd-set walk); the flags-on
+ * A/B collapsed that churn by 92% with app-visible behavior unchanged.
+ * Opt out with poll_notify_full_wait=0 / af_unix_poll_notify_full_wait=0.
+ */
 static int poll_notify_full_wait_enabled(void)
 {
     static int initialized;
@@ -3961,9 +3969,12 @@ static int poll_notify_full_wait_enabled(void)
     char value[8];
 
     if (!initialized) {
-        enabled = cmdline_get_param("poll_notify_full_wait", value,
-                                    sizeof(value)) == 0 &&
-            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        if (cmdline_get_param("poll_notify_full_wait", value,
+                              sizeof(value)) != 0)
+            enabled = 1;
+        else
+            enabled = value[0] != '0' && value[0] != 'n' &&
+                value[0] != 'N';
         initialized = 1;
     }
     return enabled;
@@ -3976,9 +3987,12 @@ static int af_unix_poll_notify_full_wait_enabled(void)
     char value[8];
 
     if (!initialized) {
-        enabled = cmdline_get_param("af_unix_poll_notify_full_wait", value,
-                                    sizeof(value)) == 0 &&
-            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        if (cmdline_get_param("af_unix_poll_notify_full_wait", value,
+                              sizeof(value)) != 0)
+            enabled = 1;
+        else
+            enabled = value[0] != '0' && value[0] != 'n' &&
+                value[0] != 'N';
         initialized = 1;
     }
     return enabled;

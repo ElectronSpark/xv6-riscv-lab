@@ -1,3 +1,30 @@
+/*
+ * N1/M7 (2026-07-05): DEFAULT-OFF pending rework.  The first default-on
+ * battery hit `PANIC thread_queue.c:213 tq_remove: queue is empty` in
+ * virtio_gpu paths (2/2 GUI runs): releasing op_lock across the
+ * make-room stall allows MULTIPLE concurrent waiters on the used-ring
+ * wait queue, which the virtio_gpu_wait_for_used sleep/wake path
+ * implicitly assumed had at most one (it only ever ran under op_lock).
+ * The same-binary opt-out control (unlocked_wait=0, depth 60 + poll
+ * defaults on) ran a clean full video window — bisect is conclusive.
+ * Re-enable only after making the used-ring wait multi-waiter-safe.
+ * Opt in with virtio_gpu_submit_unlocked_wait=1 for that rework's A/B.
+ */
+static int virtio_gpu_submit_unlocked_wait_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("virtio_gpu_submit_unlocked_wait",
+                                    value, sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
 enum virtio_gpu_user_capset_policy {
     VIRTIO_GPU_USER_CAPSET_UNSUPPORTED,
     VIRTIO_GPU_USER_CAPSET_HOST_CREATABLE,
@@ -409,8 +436,39 @@ int virtio_gpu_user_submit(uint64 owner_id, pid_t owner_tgid, uint32 ctx_id,
 
     if (trace)
         trace_post_start = r_time();
-    if (async_submit)
-        ret = virtio_gpu_submit_3d_async_post_prepared(g, &prep);
+    if (async_submit && virtio_gpu_submit_unlocked_wait_enabled()) {
+        /*
+         * N1/M7 fix: never hold the op lock across a make-room stall.
+         * A full async ring means we are waiting on HOST retirement of
+         * earlier submits; holding op_lock through that wait serialized
+         * KWin's page-flip present behind it (measured 8.6ms average
+         * present vs 1.45ms unblocked) and paced the desktop to ~45Hz.
+         * Post without waiting; on -EAGAIN drop the lock, wait for room,
+         * re-take it and retry.  Resource attaches done above are
+         * idempotent context state, and cross-context submit order was
+         * never defined by op_lock arrival order anyway.
+         */
+        for (;;) {
+            ret = virtio_gpu_submit_3d_async_post_prepared(g, &prep, 1);
+            if (ret != -EAGAIN)
+                break;
+            if (trace)
+                virtio_gpu_submit_trace_clear_current(g);
+            virtio_gpu_op_unlock(g);
+            int room = virtio_gpu_async_make_room(
+                g, VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D);
+            virtio_gpu_op_lock(g, VIRTIO_GPU_OP_SUBMIT_3D);
+            if (trace)
+                virtio_gpu_submit_trace_set_current(g, owner_id,
+                                                    owner_tgid, ctx_id,
+                                                    shape);
+            if (room != 0) {
+                ret = -EIO;
+                break;
+            }
+        }
+    } else if (async_submit)
+        ret = virtio_gpu_submit_3d_async_post_prepared(g, &prep, 0);
     else
         ret = virtio_gpu_submit_3d(g, ctx_id, cmds, nr_dwords, fence_id);
     if (trace)

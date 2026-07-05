@@ -684,7 +684,15 @@ struct virtio_gpu_async_submit {
  * virtio-gpu control queue retires buffers in submission order, so the ring is
  * drained strictly FIFO.
  */
-#define VIRTIO_GPU_ASYNC_MAX_DEPTH 32
+/*
+ * N1/M7: 60 slots is the descriptor-table budget ceiling — the control
+ * queue has NUM=256 descriptors and each slot owns
+ * VIRTIO_GPU_ASYNC_DESC_PER_SLOT=4 starting at DESC_BASE=8
+ * (8 + 60*4 = 248 <= 256).  The deeper ring absorbs host (WSL D3D12)
+ * retire jitter that previously filled the 32-deep ring and stalled GL
+ * submits mid-frame.
+ */
+#define VIRTIO_GPU_ASYNC_MAX_DEPTH 60
 #define VIRTIO_GPU_ASYNC_DESC_PER_SLOT 4
 #define VIRTIO_GPU_ASYNC_DESC_BASE 8
 
@@ -3550,13 +3558,37 @@ virtio_gpu_async_reserve_slot(struct virtio_gpu *g)
     return NULL;
 }
 
+/*
+ * Non-blocking room probe: reap completed submits, then report whether a
+ * ring slot is free for @reason.  0 = room available, -EAGAIN = full.
+ * Unlike virtio_gpu_async_make_room() this never waits on host
+ * retirement, so callers holding the op lock can back off and wait with
+ * the lock RELEASED (the N1/M7 fix: a stalled GL submit must not
+ * serialize page-flip presents behind it).
+ */
+static int virtio_gpu_async_room_nowait(struct virtio_gpu *g,
+                                        enum virtio_gpu_async_reason reason)
+{
+    int depth = virtio_gpu_async_depth_for_reason(g, reason);
+
+    (void)virtio_gpu_async_reap_completed(g);
+    if ((int)g->async_count >= depth)
+        return -EAGAIN;
+    return 0;
+}
+
 static int virtio_gpu_async_post_prepared(
     struct virtio_gpu *g, struct virtio_gpu_async_submit *prep,
-    enum virtio_gpu_async_reason reason)
+    enum virtio_gpu_async_reason reason, int nowait)
 {
     struct virtio_gpu_async_submit *a;
 
-    if (virtio_gpu_async_make_room(g, reason) != 0)
+    if (nowait) {
+        int room = virtio_gpu_async_room_nowait(g, reason);
+
+        if (room != 0)
+            return room;
+    } else if (virtio_gpu_async_make_room(g, reason) != 0)
         return -1;
 
     a = virtio_gpu_async_reserve_slot(g);

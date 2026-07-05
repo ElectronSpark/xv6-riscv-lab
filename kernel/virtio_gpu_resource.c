@@ -892,7 +892,7 @@ static int virtio_gpu_resource_flush_async(struct virtio_gpu *g,
     prep.resp_len = sizeof(struct virtio_gpu_ctrl_hdr);
 
     if (virtio_gpu_async_post_prepared(
-            g, &prep, VIRTIO_GPU_ASYNC_REASON_FLUSH) != 0) {
+            g, &prep, VIRTIO_GPU_ASYNC_REASON_FLUSH, 0) != 0) {
         virtio_gpu_async_submit_free(&prep);
         return -1;
     }

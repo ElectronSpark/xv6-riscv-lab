@@ -184,10 +184,10 @@ static int virtio_gpu_submit_3d_async_prepare(
 }
 
 static int virtio_gpu_submit_3d_async_post_prepared(
-    struct virtio_gpu *g, struct virtio_gpu_async_submit *prep)
+    struct virtio_gpu *g, struct virtio_gpu_async_submit *prep, int nowait)
 {
     return virtio_gpu_async_post_prepared(
-        g, prep, VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D);
+        g, prep, VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D, nowait);
 }
 
 static void virtio_gpu_smoke_context(struct virtio_gpu *g)
