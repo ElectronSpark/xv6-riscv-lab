@@ -61,9 +61,18 @@ int snprintf(char *buf, size_t size, const char *fmt, ...);
 
 /* ---- Per-PTY state ---- */
 
+/* Open slave fds tracked for readiness notifies (protected by pair->lock).
+ * Knotes for pts fds attach to the per-open FILE knote list (the slave
+ * installs pts_slave_file_ops with .poll), so master→slave readiness
+ * edges must be delivered via vfs_file_knote_notify on these files —
+ * without this, a poller on the slave only ever saw keystrokes via the
+ * poll rescan safety net, and hangup was never delivered at all. */
+#define PTY_SLAVE_NOTIFY_MAX 4
+
 struct pty_pair {
     struct tty  *slave;         /* The slave tty (allocated by pty_alloc) */
     struct vfs_file *master_file; /* Master fd file for readiness wakeups */
+    struct vfs_file *slave_files[PTY_SLAVE_NOTIFY_MAX]; /* see above */
     cdev_t       slave_cdev;    /* Registered cdev for /dev/pts/N */
     int          index;         /* PTY index (N in /dev/pts/N) */
     int          refcount;      /* Open master + slave fds */
@@ -77,6 +86,26 @@ struct pty_pair {
 
 static spinlock_t ptmx_lock = SPINLOCK_INITIALIZED("ptmx");
 static struct pty_pair *pty_table[MAX_PTYS];
+
+/* Deliver a readable/hangup edge to every open slave fd's knotes.
+ * Snapshot with refs under pair->lock, notify outside it (kqueue can
+ * synchronously poll the source, which takes tty locks). */
+static void pty_notify_slaves_readable(struct pty_pair *pair)
+{
+    struct vfs_file *files[PTY_SLAVE_NOTIFY_MAX];
+    int n = 0;
+
+    spin_lock(&pair->lock);
+    for (int i = 0; i < PTY_SLAVE_NOTIFY_MAX; i++) {
+        if (pair->slave_files[i] != NULL)
+            files[n++] = vfs_fdup(pair->slave_files[i]);
+    }
+    spin_unlock(&pair->lock);
+    for (int i = 0; i < n; i++) {
+        vfs_file_knote_notify(files[i], EVFILT_READ, 0);
+        vfs_fput(files[i]);
+    }
+}
 
 static int pty_ready_trace_enabled(void)
 {
@@ -353,9 +382,24 @@ static int pts_fops_release(struct vfs_inode *inode, struct vfs_file *file)
      * destructive hangup belongs to master close or controlling-session
      * hangup, both of which call tty_hangup().
      */
+    struct vfs_file *master_file = NULL;
     spin_lock(&pair->lock);
     pair->slave_count--;
+    for (int i = 0; i < PTY_SLAVE_NOTIFY_MAX; i++) {
+        if (pair->slave_files[i] == file) {
+            pair->slave_files[i] = NULL;
+            break;
+        }
+    }
+    /* Last slave close is a master-visible edge (read returns EOF /
+     * POLLHUP); wake a master poller so it can observe it. */
+    if (pair->slave_count == 0 && pair->master_file != NULL)
+        master_file = vfs_fdup(pair->master_file);
     spin_unlock(&pair->lock);
+    if (master_file != NULL) {
+        vfs_file_knote_notify(master_file, EVFILT_READ, 0);
+        vfs_fput(master_file);
+    }
 
     /* Drop the pair ref — may destroy */
     if (pty_pair_put(pair))
@@ -474,6 +518,18 @@ static int pts_open_file(cdev_t *cdev, struct vfs_file *file)
 
     file->ops = &pts_slave_file_ops;
     file->private_data = pair;
+
+    /* Track this open for readiness notifies (best-effort: beyond
+     * PTY_SLAVE_NOTIFY_MAX opens, extra fds fall back to poll rescan) */
+    spin_lock(&pair->lock);
+    for (int i = 0; i < PTY_SLAVE_NOTIFY_MAX; i++) {
+        if (pair->slave_files[i] == NULL) {
+            pair->slave_files[i] = file;
+            break;
+        }
+    }
+    spin_unlock(&pair->lock);
+
     pts_maybe_set_controlling_tty(pair, file->f_flags);
     pty_ready_trace("pts-open", pair, file, file->f_flags, 0);
     return 0;
@@ -518,7 +574,25 @@ static ssize_t ptmx_fops_write(struct vfs_file *file, const char *buf,
     struct pty_pair *pair = (struct pty_pair *)file->private_data;
     if (pair == NULL || pair->slave == NULL)
         return -ENXIO;
-    return pty_master_write(pair->slave, buf, count, user);
+    ssize_t ret = pty_master_write(pair->slave, buf, count, user);
+    if (ret > 0) {
+        /* Master input makes the slave readable (raw ring or canonical
+         * line flush inside tty_input).  Mirror of the slave-write →
+         * master notify below. */
+        pty_notify_slaves_readable(pair);
+        /* Echo makes the master readable in the same call; a second
+         * master thread may be parked in poll on it. */
+        struct vfs_file *master_file = NULL;
+        spin_lock(&pair->lock);
+        if (pair->master_file != NULL)
+            master_file = vfs_fdup(pair->master_file);
+        spin_unlock(&pair->lock);
+        if (master_file != NULL) {
+            vfs_file_knote_notify(master_file, EVFILT_READ, 0);
+            vfs_fput(master_file);
+        }
+    }
+    return ret;
 }
 
 static int ptmx_fops_release(struct vfs_inode *inode, struct vfs_file *file) {
@@ -539,8 +613,13 @@ static int ptmx_fops_release(struct vfs_inode *inode, struct vfs_file *file) {
     spin_unlock(&pair->lock);
 
     /* Hang up the slave tty so any blocked readers/writers unblock */
-    if (pair->slave != NULL)
+    if (pair->slave != NULL) {
         tty_hangup(pair->slave);
+        /* Hangup must reach slave pollers (POLLHUP/EOF) and blocked
+         * tty_read sleepers — pty_slave_hangup itself wakes neither. */
+        tq_wakeup_all(&pair->slave->raw_wait, 0, 0);
+    }
+    pty_notify_slaves_readable(pair);
 
     /* Unregister the slave cdev.  device_unregister() will also
      * remove /dev/pts/N from devtmpfs via dev->devname.  Since all
