@@ -230,12 +230,14 @@ static int ext4fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         if (profile) {
             __atomic_add_fetch(&g_ext4_lookup_lock_hold_ticks,
                                r_time() - lock_acquired, __ATOMIC_RELAXED);
-            if (r == ENOENT)
+            if (r == ENOENT) {
                 __atomic_add_fetch(&g_ext4_lookup_enoent, 1,
                                    __ATOMIC_RELAXED);
-            else
+                kprofile_vfs_enoent_record_ext4_lookup(name, name_len);
+            } else {
                 __atomic_add_fetch(&g_ext4_lookup_errors, 1,
                                    __ATOMIC_RELAXED);
+            }
         }
         ext4fs_unlock(esb);
         return -r;

@@ -915,4 +915,5 @@ void context_switch_finish(struct thread *prev, struct thread *next, int intr) {
     // Opt-in diagnostic: report wake-to-run latency for Konsole-scoped
     // threads now that all scheduler locks are released.
     kde_wake_to_run_trace_note_run(next);
+    kde_konsole_child_launch_trace_child_run(next);
 }

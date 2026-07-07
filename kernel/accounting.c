@@ -12,6 +12,7 @@
 #include "accounting.h"
 #include "resource.h"
 #include "kstats.h"
+#include "kde_ready_trace.h"
 #include "sched_starve_probe.h"
 #include "proc/thread.h"
 #include "proc/thread_group.h"
@@ -24,10 +25,12 @@
 #include "string.h"
 #include "printf.h"
 #include "errno.h"
+#include "lock/spinlock.h"
 #include <mm/vm.h>
 #include "dev/fdt.h"
 #include "timer/timer.h"
 #include <smp/percpu.h>
+#include "vfs/fcntl.h"
 
 uint64 g_vfs_lookup_calls;
 uint64 g_vfs_lookup_dcache_hits;
@@ -82,6 +85,479 @@ uint64 g_timer_jiffies_tsc_comp_ms_total;
 /* Kernel-mode IRQ-exit preemptions (updated by the x86_64 trap epilogue;
  * other arches leave it zero). */
 uint64 g_kernel_preempt_irq_total;
+
+struct kprofile_userpc_ring_state {
+    spinlock_t lock;
+    int enabled;
+    int target_pgid;
+    uint64 period_ticks;
+    uint64 next_seq;
+    uint64 stored;
+    uint64 total_seen;
+    uint64 dropped;
+    uint64 overwritten;
+    struct kprofile_userpc_record records[KPROFILE_USERPC_RING_CAP];
+};
+
+static struct kprofile_userpc_ring_state g_kprofile_userpc = {
+    .lock = SPINLOCK_INITIALIZED("kprofile_userpc"),
+    .period_ticks = 1,
+    .next_seq = 1,
+};
+
+struct kprofile_vfs_enoent_state {
+    spinlock_t lock;
+    int enabled;
+    uint64 total;
+    uint64 stored;
+    uint64 dropped;
+    struct kprofile_vfs_enoent_row rows[KPROFILE_VFS_ENOENT_TABLE_CAP];
+};
+
+static struct kprofile_vfs_enoent_state g_kprofile_vfs_enoent = {
+    .lock = SPINLOCK_INITIALIZED("kprofile_vfs_enoent"),
+};
+
+static void kprofile_userpc_copy_comm(char dst[KPROFILE_USERPC_COMM_LEN],
+                                      const char *src)
+{
+    int i;
+
+    for (i = 0; i < KPROFILE_USERPC_COMM_LEN - 1; i++) {
+        char c = src != NULL ? src[i] : '\0';
+        dst[i] = c;
+        if (c == '\0')
+            break;
+    }
+    for (; i < KPROFILE_USERPC_COMM_LEN; i++)
+        dst[i] = '\0';
+}
+
+int kprofile_userpc_configure(const struct kprofile_userpc_config *cfg)
+{
+    int intena;
+    uint64 flags;
+    int enable;
+
+    if (cfg == NULL || cfg->abi_version != KPROFILE_USERPC_ABI_VERSION)
+        return -EINVAL;
+
+    flags = cfg->flags;
+    enable = (flags & KPROFILE_USERPC_CTL_F_ENABLE) != 0;
+    if (flags & ~((uint64)KPROFILE_USERPC_CTL_F_ENABLE))
+        return -EINVAL;
+    if (enable && cfg->target_pgid <= 0)
+        return -EINVAL;
+#ifndef __x86_64__
+    if (enable)
+        return -EOPNOTSUPP;
+#endif
+
+    intena = spin_lock_irqsave(&g_kprofile_userpc.lock);
+    if (enable) {
+        memset(g_kprofile_userpc.records, 0,
+               sizeof(g_kprofile_userpc.records));
+        g_kprofile_userpc.enabled = 1;
+        g_kprofile_userpc.target_pgid = cfg->target_pgid;
+        g_kprofile_userpc.period_ticks = cfg->period_ticks != 0 ?
+            cfg->period_ticks : 1;
+        g_kprofile_userpc.next_seq = 1;
+        g_kprofile_userpc.stored = 0;
+        g_kprofile_userpc.total_seen = 0;
+        g_kprofile_userpc.dropped = 0;
+        g_kprofile_userpc.overwritten = 0;
+    } else {
+        g_kprofile_userpc.enabled = 0;
+        g_kprofile_userpc.target_pgid = 0;
+        g_kprofile_userpc.period_ticks = cfg->period_ticks != 0 ?
+            cfg->period_ticks : 1;
+    }
+    spin_unlock_irqrestore(&g_kprofile_userpc.lock, intena);
+
+    return 0;
+}
+
+int kprofile_userpc_collect_snapshot(struct kprofile_userpc_snapshot *snap,
+                                     uint64 size)
+{
+    uint64 first_seq;
+    uint64 count;
+    int intena;
+
+    if (snap == NULL || size < offsetof(struct kprofile_userpc_snapshot,
+                                        records))
+        return -EINVAL;
+
+    memset(snap, 0, sizeof(*snap));
+    intena = spin_lock_irqsave(&g_kprofile_userpc.lock);
+    snap->abi_version = KPROFILE_USERPC_ABI_VERSION;
+    snap->record_size = sizeof(struct kprofile_userpc_record);
+    snap->capacity = KPROFILE_USERPC_RING_CAP;
+    snap->stored = g_kprofile_userpc.stored;
+    snap->total_seen = g_kprofile_userpc.total_seen;
+    snap->dropped = g_kprofile_userpc.dropped;
+    snap->overwritten = g_kprofile_userpc.overwritten;
+    snap->enabled = g_kprofile_userpc.enabled;
+    snap->target_pgid = g_kprofile_userpc.target_pgid;
+    snap->period_ticks = g_kprofile_userpc.period_ticks;
+    snap->next_seq = g_kprofile_userpc.next_seq;
+
+    count = g_kprofile_userpc.stored;
+    if (count > KPROFILE_USERPC_RING_CAP)
+        count = KPROFILE_USERPC_RING_CAP;
+    first_seq = g_kprofile_userpc.next_seq > count ?
+        g_kprofile_userpc.next_seq - count : 1;
+    snap->first_seq = count != 0 ? first_seq : 0;
+    snap->last_seq = count != 0 ? g_kprofile_userpc.next_seq - 1 : 0;
+    for (uint64 i = 0; i < count; i++) {
+        uint64 seq = first_seq + i;
+        uint64 slot = (seq - 1) % KPROFILE_USERPC_RING_CAP;
+
+        snap->records[i] = g_kprofile_userpc.records[slot];
+    }
+    spin_unlock_irqrestore(&g_kprofile_userpc.lock, intena);
+
+    return 0;
+}
+
+void kprofile_userpc_sample_trap(struct trapframe *tf, int from_user)
+{
+#ifdef __x86_64__
+    struct thread *p = current;
+    uint64 seq;
+    uint64 slot;
+    int target_pgid;
+    uint64 period;
+    int intena;
+    struct kprofile_userpc_record *rec;
+
+    if (!from_user || tf == NULL || p == NULL)
+        return;
+    if (__atomic_load_n(&g_kprofile_userpc.enabled,
+                        __ATOMIC_RELAXED) == 0)
+        return;
+
+    target_pgid = __atomic_load_n(&g_kprofile_userpc.target_pgid,
+                                  __ATOMIC_RELAXED);
+    if (target_pgid <= 0 || p->pgid != target_pgid)
+        return;
+
+    intena = spin_lock_irqsave(&g_kprofile_userpc.lock);
+    if (!g_kprofile_userpc.enabled ||
+        p->pgid != g_kprofile_userpc.target_pgid) {
+        spin_unlock_irqrestore(&g_kprofile_userpc.lock, intena);
+        return;
+    }
+
+    g_kprofile_userpc.total_seen++;
+    period = g_kprofile_userpc.period_ticks != 0 ?
+        g_kprofile_userpc.period_ticks : 1;
+    if (((g_kprofile_userpc.total_seen - 1) % period) != 0) {
+        spin_unlock_irqrestore(&g_kprofile_userpc.lock, intena);
+        return;
+    }
+
+    seq = g_kprofile_userpc.next_seq++;
+    slot = (seq - 1) % KPROFILE_USERPC_RING_CAP;
+    if (g_kprofile_userpc.stored < KPROFILE_USERPC_RING_CAP)
+        g_kprofile_userpc.stored++;
+    else
+        g_kprofile_userpc.overwritten++;
+
+    rec = &g_kprofile_userpc.records[slot];
+    memset(rec, 0, sizeof(*rec));
+    rec->seq = seq;
+    rec->timestamp = r_time();
+    rec->uptime_ms = (uint64)get_jiffs();
+    rec->rip = tf->rip;
+    rec->rsp = tf->rsp;
+    rec->rbp = tf->rbp;
+    rec->trapno = tf->trapno;
+    rec->flags = KPROFILE_USERPC_SAMPLE_F_USER;
+    rec->cpu = cpuid();
+    rec->pid = p->pid;
+    rec->tgid = p->tgid;
+    rec->pgid = p->pgid;
+    kprofile_userpc_copy_comm(rec->comm, p->name);
+    spin_unlock_irqrestore(&g_kprofile_userpc.lock, intena);
+#else
+    (void)tf;
+    (void)from_user;
+#endif
+}
+
+static void kprofile_vfs_enoent_copy_bytes(char *dst, uint64 dst_len,
+                                           const char *src, uint64 src_len)
+{
+    uint64 i = 0;
+
+    if (dst_len == 0)
+        return;
+    if (src == NULL || src_len == 0) {
+        dst[0] = '\0';
+        return;
+    }
+    if (src_len >= dst_len) {
+        dst[0] = '~';
+        i = 1;
+        src += src_len - (dst_len - 2);
+        src_len = dst_len - 2;
+    }
+    while (i + 1 < dst_len && src_len != 0) {
+        char c = *src++;
+
+        dst[i++] = c;
+        src_len--;
+        if (c == '\0') {
+            i--;
+            break;
+        }
+    }
+    dst[i] = '\0';
+}
+
+static uint64 kprofile_vfs_enoent_bounded_len(const char *s, uint64 max_len)
+{
+    uint64 len = 0;
+
+    if (s == NULL)
+        return 0;
+    while (len < max_len && s[len] != '\0')
+        len++;
+    return len;
+}
+
+static void kprofile_vfs_enoent_copy_comm(
+    char dst[KPROFILE_VFS_ENOENT_COMM_LEN])
+{
+    if (current == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+    kprofile_vfs_enoent_copy_bytes(dst, KPROFILE_VFS_ENOENT_COMM_LEN,
+                                   current->name,
+                                   kprofile_vfs_enoent_bounded_len(
+                                       current->name,
+                                       KPROFILE_VFS_ENOENT_COMM_LEN - 1));
+}
+
+static uint32 kprofile_vfs_enoent_flags_class(uint32 flags)
+{
+    uint32 class = 0;
+
+    if (flags & O_PATH)
+        class |= KPROFILE_VFS_ENOENT_F_PATH;
+    else {
+        switch (flags & 3) {
+        case O_WRONLY:
+            class |= KPROFILE_VFS_ENOENT_F_WRITE;
+            break;
+        case O_RDWR:
+            class |= KPROFILE_VFS_ENOENT_F_RDWR;
+            break;
+        case O_RDONLY:
+        default:
+            class |= KPROFILE_VFS_ENOENT_F_READ;
+            break;
+        }
+    }
+    if (flags & O_CREAT)
+        class |= KPROFILE_VFS_ENOENT_F_CREAT;
+    if (flags & O_DIRECTORY)
+        class |= KPROFILE_VFS_ENOENT_F_DIRECTORY;
+    if (flags & O_NOFOLLOW)
+        class |= KPROFILE_VFS_ENOENT_F_NOFOLLOW;
+    if ((flags & O_TMPFILE) == O_TMPFILE)
+        class |= KPROFILE_VFS_ENOENT_F_TMPFILE;
+    return class;
+}
+
+static int kprofile_vfs_enoent_row_matches(
+    const struct kprofile_vfs_enoent_row *a,
+    const struct kprofile_vfs_enoent_row *b)
+{
+    return a->count != 0 &&
+           a->source == b->source &&
+           a->tgid == b->tgid &&
+           a->dirfd_class == b->dirfd_class &&
+           a->flags_class == b->flags_class &&
+           strcmp(a->comm, b->comm) == 0 &&
+           strcmp(a->prefix, b->prefix) == 0 &&
+           strcmp(a->basename, b->basename) == 0;
+}
+
+static void kprofile_vfs_enoent_store(
+    const struct kprofile_vfs_enoent_row *key)
+{
+    struct kprofile_vfs_enoent_row *slot = NULL;
+    uint64 now = (uint64)get_jiffs();
+    int intena;
+
+    if (!kstats_profile_flag_enabled(KSTATS_PROFILE_F_VFS_ENOENT_ATTR))
+        return;
+
+    intena = spin_lock_irqsave(&g_kprofile_vfs_enoent.lock);
+    if (!g_kprofile_vfs_enoent.enabled ||
+        !kstats_profile_flag_enabled(KSTATS_PROFILE_F_VFS_ENOENT_ATTR)) {
+        spin_unlock_irqrestore(&g_kprofile_vfs_enoent.lock, intena);
+        return;
+    }
+
+    g_kprofile_vfs_enoent.total++;
+    for (int i = 0; i < KPROFILE_VFS_ENOENT_TABLE_CAP; i++) {
+        if (kprofile_vfs_enoent_row_matches(
+                &g_kprofile_vfs_enoent.rows[i], key)) {
+            slot = &g_kprofile_vfs_enoent.rows[i];
+            break;
+        }
+        if (slot == NULL && g_kprofile_vfs_enoent.rows[i].count == 0)
+            slot = &g_kprofile_vfs_enoent.rows[i];
+    }
+
+    if (slot == NULL) {
+        g_kprofile_vfs_enoent.dropped++;
+        spin_unlock_irqrestore(&g_kprofile_vfs_enoent.lock, intena);
+        return;
+    }
+
+    if (slot->count == 0) {
+        *slot = *key;
+        slot->first_ms = now;
+        slot->last_ms = now;
+        slot->count = 1;
+        g_kprofile_vfs_enoent.stored++;
+    } else {
+        slot->count++;
+        slot->last_ms = now;
+    }
+    spin_unlock_irqrestore(&g_kprofile_vfs_enoent.lock, intena);
+}
+
+static void kprofile_vfs_enoent_split_path(
+    const char *path, uint64 path_len,
+    char prefix[KPROFILE_VFS_ENOENT_PREFIX_LEN],
+    char basename[KPROFILE_VFS_ENOENT_BASENAME_LEN])
+{
+    uint64 end = path_len;
+    uint64 base_start = 0;
+    uint64 prefix_len = 0;
+
+    prefix[0] = '\0';
+    basename[0] = '\0';
+    if (path == NULL || path_len == 0)
+        return;
+
+    while (end > 1 && path[end - 1] == '/')
+        end--;
+    for (uint64 i = 0; i < end; i++) {
+        if (path[i] == '/')
+            base_start = i + 1;
+    }
+
+    if (base_start >= end) {
+        kprofile_vfs_enoent_copy_bytes(basename,
+                                       KPROFILE_VFS_ENOENT_BASENAME_LEN,
+                                       "/", 1);
+        return;
+    }
+
+    if (base_start == 1) {
+        kprofile_vfs_enoent_copy_bytes(prefix,
+                                       KPROFILE_VFS_ENOENT_PREFIX_LEN,
+                                       "/", 1);
+    } else if (base_start > 1) {
+        prefix_len = base_start - 1;
+        kprofile_vfs_enoent_copy_bytes(prefix,
+                                       KPROFILE_VFS_ENOENT_PREFIX_LEN,
+                                       path, prefix_len);
+    }
+    kprofile_vfs_enoent_copy_bytes(basename,
+                                   KPROFILE_VFS_ENOENT_BASENAME_LEN,
+                                   path + base_start, end - base_start);
+}
+
+void kprofile_vfs_enoent_record_openat(int dirfd, uint32 flags,
+                                       const char *path, uint64 path_len)
+{
+    struct kprofile_vfs_enoent_row key;
+
+    if (!kstats_profile_flag_enabled(KSTATS_PROFILE_F_VFS_ENOENT_ATTR))
+        return;
+    memset(&key, 0, sizeof(key));
+    key.source = KPROFILE_VFS_ENOENT_SOURCE_OPENAT_RET;
+    key.pid = current != NULL ? current->pid : -1;
+    key.tgid = current != NULL ? current->tgid : -1;
+    key.dirfd = dirfd;
+    if (path != NULL && path_len != 0 && path[0] == '/')
+        key.dirfd_class = KPROFILE_VFS_ENOENT_DIRFD_ABSOLUTE;
+    else if (dirfd == -100)
+        key.dirfd_class = KPROFILE_VFS_ENOENT_DIRFD_AT_FDCWD;
+    else
+        key.dirfd_class = KPROFILE_VFS_ENOENT_DIRFD_FD;
+    key.flags = flags;
+    key.flags_class = kprofile_vfs_enoent_flags_class(flags);
+    kprofile_vfs_enoent_copy_comm(key.comm);
+    kprofile_vfs_enoent_split_path(path, path_len, key.prefix,
+                                   key.basename);
+    kprofile_vfs_enoent_store(&key);
+}
+
+void kprofile_vfs_enoent_record_ext4_lookup(const char *name,
+                                            uint64 name_len)
+{
+    struct kprofile_vfs_enoent_row key;
+
+    if (!kstats_profile_flag_enabled(KSTATS_PROFILE_F_VFS_ENOENT_ATTR))
+        return;
+    memset(&key, 0, sizeof(key));
+    key.source = KPROFILE_VFS_ENOENT_SOURCE_EXT4_LOOKUP;
+    key.pid = current != NULL ? current->pid : -1;
+    key.tgid = current != NULL ? current->tgid : -1;
+    key.dirfd = -1;
+    key.dirfd_class = KPROFILE_VFS_ENOENT_DIRFD_UNKNOWN;
+    kprofile_vfs_enoent_copy_comm(key.comm);
+    kprofile_vfs_enoent_copy_bytes(key.basename,
+                                   KPROFILE_VFS_ENOENT_BASENAME_LEN,
+                                   name, name_len);
+    kprofile_vfs_enoent_store(&key);
+}
+
+static void kprofile_vfs_enoent_configure(int enabled)
+{
+    int intena = spin_lock_irqsave(&g_kprofile_vfs_enoent.lock);
+
+    g_kprofile_vfs_enoent.enabled = enabled != 0;
+    g_kprofile_vfs_enoent.total = 0;
+    g_kprofile_vfs_enoent.stored = 0;
+    g_kprofile_vfs_enoent.dropped = 0;
+    memset(g_kprofile_vfs_enoent.rows, 0,
+           sizeof(g_kprofile_vfs_enoent.rows));
+    spin_unlock_irqrestore(&g_kprofile_vfs_enoent.lock, intena);
+}
+
+int kprofile_vfs_enoent_collect_snapshot(
+    struct kprofile_vfs_enoent_snapshot *snap, uint64 size)
+{
+    int intena;
+
+    if (snap == NULL || size < offsetof(struct kprofile_vfs_enoent_snapshot,
+                                        rows))
+        return -EINVAL;
+
+    memset(snap, 0, sizeof(*snap));
+    intena = spin_lock_irqsave(&g_kprofile_vfs_enoent.lock);
+    snap->abi_version = KPROFILE_VFS_ENOENT_ABI_VERSION;
+    snap->row_size = sizeof(struct kprofile_vfs_enoent_row);
+    snap->capacity = KPROFILE_VFS_ENOENT_TABLE_CAP;
+    snap->enabled = g_kprofile_vfs_enoent.enabled;
+    snap->total = g_kprofile_vfs_enoent.total;
+    snap->stored = g_kprofile_vfs_enoent.stored;
+    snap->dropped = g_kprofile_vfs_enoent.dropped;
+    for (uint64 i = 0; i < KPROFILE_VFS_ENOENT_TABLE_CAP; i++)
+        snap->rows[i] = g_kprofile_vfs_enoent.rows[i];
+    spin_unlock_irqrestore(&g_kprofile_vfs_enoent.lock, intena);
+    return 0;
+}
 
 uint64 g_ext4_pcache_read_page_calls;
 uint64 g_ext4_pcache_pages_filled;
@@ -1404,9 +1880,16 @@ int kprofile_pgroup_collect(pid_t pgid, struct kprofile_pgroup *kp)
     return kp->found ? 0 : -ESRCH;
 }
 
-void kstats_profile_set(int enabled) {
-    __atomic_store_n(&g_kstats_profile_enabled, enabled != 0,
-                     __ATOMIC_RELAXED);
+void kstats_profile_set(int flags) {
+    if (flags == 0) {
+        __atomic_store_n(&g_kstats_profile_enabled, 0, __ATOMIC_RELAXED);
+        kprofile_vfs_enoent_configure(0);
+        return;
+    }
+    flags |= KSTATS_PROFILE_F_ENABLE;
+    kprofile_vfs_enoent_configure(
+        (flags & KSTATS_PROFILE_F_VFS_ENOENT_ATTR) != 0);
+    __atomic_store_n(&g_kstats_profile_enabled, flags, __ATOMIC_RELAXED);
 }
 
 static int kstats_konsole_path_match(const char *path)
@@ -1440,6 +1923,8 @@ void kstats_konsole_prepty_exec(const char *path)
     active = kstats_konsole_path_match(path);
     __atomic_store_n(&tg->konsole_prepty_active, active, __ATOMIC_RELAXED);
     __atomic_store_n(&tg->konsole_prepty_pty_seen, 0, __ATOMIC_RELAXED);
+    if (active)
+        kde_konsole_prepty_ring_arm(path);
 }
 
 void kstats_konsole_prepty_mark_pty(void)
@@ -1455,6 +1940,8 @@ void kstats_konsole_prepty_mark_pty(void)
                             __ATOMIC_RELAXED) == 0) {
         __atomic_add_fetch(&g_konsole_prepty_pty_seen, 1,
                            __ATOMIC_RELAXED);
+        kde_konsole_prepty_ring_disarm(
+            KDE_KONSOLE_PREPTY_RING_DISARM_PTY);
     }
     __atomic_store_n(&tg->konsole_prepty_active, 0, __ATOMIC_RELAXED);
 }
@@ -1582,9 +2069,182 @@ uint64 sys_kprofile_pgroup(void) {
     return 0;
 }
 
+uint64 sys_kprofile_userpc_ctl(void)
+{
+    uint64 uaddr;
+    uint64 usize;
+    uint64 n;
+    struct kprofile_userpc_config cfg;
+    int ret;
+
+    argaddr(0, &uaddr);
+    argaddr(1, &usize);
+
+    if (uaddr == 0 || usize == 0)
+        return (uint64)-EINVAL;
+    memset(&cfg, 0, sizeof(cfg));
+    n = usize < sizeof(cfg) ? usize : sizeof(cfg);
+    if (vm_copyin(current->vm, (char *)&cfg, uaddr, n) < 0)
+        return (uint64)-EFAULT;
+
+    ret = kprofile_userpc_configure(&cfg);
+    if (ret < 0)
+        return (uint64)ret;
+    return 0;
+}
+
+uint64 sys_kprofile_userpc_snapshot(void)
+{
+    uint64 uaddr;
+    uint64 usize;
+    uint64 n;
+    uint64 off;
+    char zeros[64];
+    struct kprofile_userpc_snapshot *snap;
+    int ret;
+
+    argaddr(0, &uaddr);
+    argaddr(1, &usize);
+
+    if (uaddr == 0 || usize == 0)
+        return (uint64)-EINVAL;
+
+    snap = kvmalloc(sizeof(*snap));
+    if (snap == NULL)
+        return (uint64)-ENOMEM;
+
+    ret = kprofile_userpc_collect_snapshot(snap, sizeof(*snap));
+    if (ret < 0) {
+        kvfree(snap);
+        return (uint64)ret;
+    }
+
+    n = usize < sizeof(*snap) ? usize : sizeof(*snap);
+    if (vm_copyout(current->vm, uaddr, (char *)snap, n) < 0) {
+        kvfree(snap);
+        return (uint64)-EFAULT;
+    }
+
+    kvfree(snap);
+    if (usize > sizeof(*snap)) {
+        memset(zeros, 0, sizeof(zeros));
+        for (off = sizeof(*snap); off < usize; off += sizeof(zeros)) {
+            n = usize - off;
+            if (n > sizeof(zeros))
+                n = sizeof(zeros);
+            if (vm_copyout(current->vm, uaddr + off, zeros, n) < 0)
+                return (uint64)-EFAULT;
+        }
+    }
+
+    return 0;
+}
+
+uint64 sys_kprofile_vfs_enoent_snapshot(void)
+{
+    uint64 uaddr;
+    uint64 usize;
+    uint64 n;
+    uint64 off;
+    char zeros[64];
+    struct kprofile_vfs_enoent_snapshot *snap;
+    int ret;
+
+    argaddr(0, &uaddr);
+    argaddr(1, &usize);
+
+    if (uaddr == 0 || usize == 0)
+        return (uint64)-EINVAL;
+
+    snap = kvmalloc(sizeof(*snap));
+    if (snap == NULL)
+        return (uint64)-ENOMEM;
+
+    ret = kprofile_vfs_enoent_collect_snapshot(snap, sizeof(*snap));
+    if (ret < 0) {
+        kvfree(snap);
+        return (uint64)ret;
+    }
+
+    n = usize < sizeof(*snap) ? usize : sizeof(*snap);
+    if (vm_copyout(current->vm, uaddr, (char *)snap, n) < 0) {
+        kvfree(snap);
+        return (uint64)-EFAULT;
+    }
+
+    kvfree(snap);
+    if (usize > sizeof(*snap)) {
+        memset(zeros, 0, sizeof(zeros));
+        for (off = sizeof(*snap); off < usize; off += sizeof(zeros)) {
+            n = usize - off;
+            if (n > sizeof(zeros))
+                n = sizeof(zeros);
+            if (vm_copyout(current->vm, uaddr + off, zeros, n) < 0)
+                return (uint64)-EFAULT;
+        }
+    }
+
+    return 0;
+}
+
+int kstats_konsole_prepty_ring_snapshot(
+    struct konsole_prepty_wake_snapshot *snap, uint64 size)
+{
+    return kde_konsole_prepty_ring_snapshot(snap, size);
+}
+
+uint64 sys_kprofile_prepty_ring(void)
+{
+    uint64 uaddr;
+    uint64 usize;
+    uint64 n;
+    uint64 off;
+    char zeros[64];
+    struct konsole_prepty_wake_snapshot *snap;
+    int ret;
+
+    argaddr(0, &uaddr);
+    argaddr(1, &usize);
+
+    if (uaddr == 0 || usize == 0)
+        return (uint64)-EINVAL;
+
+    snap = kvmalloc(sizeof(*snap));
+    if (snap == NULL)
+        return (uint64)-ENOMEM;
+
+    ret = kstats_konsole_prepty_ring_snapshot(snap, sizeof(*snap));
+    if (ret < 0) {
+        kvfree(snap);
+        return (uint64)ret;
+    }
+
+    n = usize < sizeof(*snap) ? usize : sizeof(*snap);
+    if (vm_copyout(current->vm, uaddr, (char *)snap, n) < 0) {
+        kvfree(snap);
+        return (uint64)-EFAULT;
+    }
+
+    kvfree(snap);
+    if (usize > sizeof(*snap)) {
+        memset(zeros, 0, sizeof(zeros));
+        for (off = sizeof(*snap); off < usize; off += sizeof(zeros)) {
+            n = usize - off;
+            if (n > sizeof(zeros))
+                n = sizeof(zeros);
+            if (vm_copyout(current->vm, uaddr + off, zeros, n) < 0)
+                return (uint64)-EFAULT;
+        }
+    }
+
+    return 0;
+}
+
 uint64 sys_kstatsctl(void) {
-    int enabled;
-    argint(0, &enabled);
-    kstats_profile_set(enabled != 0);
+    int flags;
+    argint(0, &flags);
+    if ((flags & ~KSTATS_PROFILE_F_MASK) != 0)
+        return (uint64)-EINVAL;
+    kstats_profile_set(flags);
     return 0;
 }

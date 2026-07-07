@@ -479,6 +479,7 @@ int exec(char *path, char **argv, char **envp) {
     chrome_exec_phase_trace(path, "begin", exec_start, &exec_phase_last);
     if (kde_ready_trace_enabled() && kde_ready_trace_path_match(path))
         kde_ready_trace_event("exec-begin", -1, 0, 0, 0, 0);
+    kde_konsole_child_launch_trace_exec_begin(path);
     if (p->thread_group != NULL)
         __atomic_store_n(&p->thread_group->exec_in_progress, 1,
                          __ATOMIC_RELEASE);
@@ -545,6 +546,7 @@ int exec(char *path, char **argv, char **envp) {
                              __ATOMIC_RELEASE);
         return -1;
     }
+    vfs_file_set_opened_path(file, path);
 
     // Read ELF header
     ssize_t n = vfs_fileread(file, &elf, sizeof(elf), false);
@@ -660,6 +662,7 @@ int exec(char *path, char **argv, char **envp) {
             exec_dbg("  FAIL: interpreter vfs_fileopen failed\n");
             goto bad_locked;
         }
+        vfs_file_set_opened_path(interp_file, interp_path);
 
         n = vfs_fileread(interp_file, &interp_elf, sizeof(interp_elf), false);
         if (n != sizeof(interp_elf) || interp_elf.magic != ELF_MAGIC ||
@@ -1139,6 +1142,9 @@ int exec(char *path, char **argv, char **envp) {
     if (kde_ready_trace_enabled() && kde_ready_trace_path_match(path))
         kde_ready_trace_event("exec-done", -1, (int)argc, has_interp, 0,
                               exec_ticks_to_us(r_time() - exec_start) / 1000);
+    kde_konsole_child_launch_trace_exec_done(
+        path, (int)argc, has_interp, 0,
+        exec_ticks_to_us(r_time() - exec_start) / 1000);
     return argc; // this ends up in a0, the first argument to main(argc, argv)
 
 bad_locked:
@@ -1149,6 +1155,8 @@ bad:
     if (kde_ready_trace_enabled() && kde_ready_trace_path_match(path))
         kde_ready_trace_event("exec-fail", -1, 0, 0, -1,
                               exec_ticks_to_us(r_time() - exec_start) / 1000);
+    kde_konsole_child_launch_trace_exec_done(
+        path, 0, 0, -1, exec_ticks_to_us(r_time() - exec_start) / 1000);
     vm_put(tmp_vm);
     tmp_vm = NULL;
     if (file) {

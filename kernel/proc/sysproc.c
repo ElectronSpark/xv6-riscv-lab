@@ -21,6 +21,7 @@
 #include "tty/session.h"
 #include "timer/goldfish_rtc.h"
 #include "list.h"
+#include "kde_ready_trace.h"
 
 #define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
     int __sys_profile = kstats_profile_enabled();                           \
@@ -662,7 +663,13 @@ uint64 sys_clone(void) {
 uint64 sys_wait(void) {
     uint64 p;
     argaddr(0, &p);
-    return wait(p);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_WAIT);
+    int ret = wait(p);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_WAIT, trace_start, 0, 0, ret);
+    return ret;
 }
 
 uint64 sys_waitpid(void) {
@@ -672,7 +679,13 @@ uint64 sys_waitpid(void) {
     argint(0, &pid);
     argaddr(1, &status_addr);
     argint(2, &options);
-    return waitpid(pid, status_addr, options);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_WAIT);
+    int ret = waitpid(pid, status_addr, options);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_WAIT, trace_start, pid, options, ret);
+    return ret;
 }
 
 uint64 sys_sbrk(void) {
@@ -890,7 +903,13 @@ uint64 sys_setpgid(void) {
     int pid, pgid;
     argint(0, &pid);
     argint(1, &pgid);
-    return pgroup_setpgid((pid_t)pid, (pid_t)pgid);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_SETPGID);
+    int ret = pgroup_setpgid((pid_t)pid, (pid_t)pgid);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_SETPGID, trace_start, pid, pgid, ret);
+    return ret;
 }
 
 uint64 sys_getpgid(void) {
@@ -899,7 +918,15 @@ uint64 sys_getpgid(void) {
     return pgroup_getpgid((pid_t)pid);
 }
 
-uint64 sys_setsid(void) { return session_setsid(); }
+uint64 sys_setsid(void) {
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_SETSID);
+    int ret = session_setsid();
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_SETSID, trace_start, 0, 0, ret);
+    return ret;
+}
 
 uint64 sys_getsid(void) {
     int pid;

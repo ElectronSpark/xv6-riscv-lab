@@ -31,6 +31,7 @@
 #include "vfs/file.h"
 #include "cmdline.h"
 #include "errno.h"
+#include "kstats.h"
 #include <mm/oom_kill.h>
 #include <mm/page.h>
 
@@ -2000,6 +2001,9 @@ void x86_trap_handler(struct trapframe *tf) {
         current->trapframe->trapframe = *tf;
         current->trapframe->user_gs_base = rdmsr(MSR_KERNEL_GS_BASE);
     }
+
+    if (from_user && (vec == T_IRQ0 || vec == LAPIC_TIMER_VEC))
+        kprofile_userpc_sample_trap(tf, from_user);
 
     /* Mark the current CPU offline for the user VM, online for the kernel VM */
     if (from_user && current && current->vm) {

@@ -190,9 +190,13 @@
 // --- Legacy xv6 tools ---
 #define SYS_dumpproc       1369
 #define SYS_kprofile_pgroup 1370
+#define SYS_kprofile_prepty_ring 1371
+#define SYS_kprofile_userpc_ctl 1372
+#define SYS_kprofile_userpc_snapshot 1373
+#define SYS_kprofile_vfs_enoent_snapshot 1374
 
 // Max syscall number (update when adding new syscalls)
-#define SYS_MAXNUM         1370
+#define SYS_MAXNUM         1374
 
 // --- Linux time64 compatibility stubs used by musl on rv64 ---
 // These are intentionally unsupported in xv6 and return -ENOSYS via

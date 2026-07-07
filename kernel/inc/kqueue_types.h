@@ -107,6 +107,10 @@ struct kqueue {
 void knote_enqueue(struct knote *kn);
 void knote_enqueue_with_data(struct knote *kn, int64 data, uint32 fflags);
 void vfs_file_knote_notify(struct vfs_file *file, int filter, int64 data);
+void vfs_file_knote_notify_eventfd(
+    struct vfs_file *file, int filter, int64 data, int eventfd_op,
+    uint64 counter_before, uint64 counter_after, uint64 value,
+    uint64 read_value, int ret, void *eventfd_caller);
 void vfs_inode_knote_notify(struct vfs_inode *inode, uint32 fflags);
 void kqueue_proc_notify(struct thread *p, uint32 fflags, int64 data);
 void kqueue_signal_notify(struct thread *p, int signo);

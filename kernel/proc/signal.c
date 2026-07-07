@@ -38,6 +38,7 @@
 #include <mm/slab.h>
 #include "proc/sched.h"
 #include "list.h"
+#include "kde_ready_trace.h"
 #include "bits.h"
 #include "smp/ipi.h"
 #include "clone_flags.h"
@@ -348,6 +349,12 @@ void sigpending_clone(struct thread_signal *dst, struct thread_signal *src,
     dst->sig_sigsuspend_active = 0;
     dst->sig_sigsuspend_saved_mask = 0;
     dst->sig_sigsuspend_ucontext = 0;
+    dst->kde_child_trace_active = 0;
+    dst->kde_child_trace_last_signal = 0;
+    dst->kde_child_trace_last_signal_source = 0;
+    dst->kde_child_trace_last_signal_code = 0;
+    dst->kde_child_trace_last_signal_pid = 0;
+    dst->kde_child_trace_last_signal_ms = 0;
 
     if (clone_flags & CLONE_THREAD) {
         // For CLONE_THREAD, the child does not send a signal to the parent
@@ -694,6 +701,9 @@ after_enqueue:
     // Always record the signal as pending (even for stop signals) to allow
     // later logic (e.g., mask changes) to notice it.
     sigaddset(&p->signal.sig_pending_mask, info->signo);
+    kde_konsole_child_launch_trace_signal_note(
+        p, info->signo, KDE_KONSOLE_CHILD_SIGNAL_THREAD_QUEUED,
+        info->info.si_code, info->info.si_pid);
 
     // Update sigpending flag after adding to pending mask
     recalc_sigpending_tsk(p);
@@ -1574,6 +1584,12 @@ void handle_signal(void) {
             assert(!IS_ERR(info),
                    "handle_signal: __dequeue_signal_update_pending failed");
         }
+        kde_konsole_child_launch_trace_signal_note(
+            p, signo,
+            from_shared ? KDE_KONSOLE_CHILD_SIGNAL_GROUP_DELIV :
+                          KDE_KONSOLE_CHILD_SIGNAL_THREAD_DELIV,
+            info != NULL ? info->info.si_code : 0,
+            info != NULL ? info->info.si_pid : 0);
 
         // Recalc sigpending after dequeue modified the pending mask
         recalc_sigpending_tsk(p);

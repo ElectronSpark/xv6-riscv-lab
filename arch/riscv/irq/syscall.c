@@ -152,6 +152,10 @@ static const char *syscall_name(int num) {
     case 159: return "prlimit64";
     case SYS_kstats: return "kstats";
     case SYS_kprofile_pgroup: return "kprofile_pgroup";
+    case SYS_kprofile_prepty_ring: return "kprofile_prepty_ring";
+    case SYS_kprofile_userpc_ctl: return "kprofile_userpc_ctl";
+    case SYS_kprofile_userpc_snapshot: return "kprofile_userpc_snapshot";
+    case SYS_kprofile_vfs_enoent_snapshot: return "kprofile_vfs_enoent_snapshot";
     case 161: return "netconf";
     case 842: return "sendmmsg";
     case 847: return "umask";
@@ -459,6 +463,10 @@ extern uint64 sys_kstats(void);
 extern uint64 sys_kstats2(void);
 extern uint64 sys_kstatsctl(void);
 extern uint64 sys_kprofile_pgroup(void);
+extern uint64 sys_kprofile_prepty_ring(void);
+extern uint64 sys_kprofile_userpc_ctl(void);
+extern uint64 sys_kprofile_userpc_snapshot(void);
+extern uint64 sys_kprofile_vfs_enoent_snapshot(void);
 
 // network configuration (lwip_port/lwip_glue.c)
 #ifdef USE_LWIP
@@ -673,6 +681,10 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_kstats2] sys_kstats2,
     [SYS_kstatsctl] sys_kstatsctl,
     [SYS_kprofile_pgroup] sys_kprofile_pgroup,
+    [SYS_kprofile_prepty_ring] sys_kprofile_prepty_ring,
+    [SYS_kprofile_userpc_ctl] sys_kprofile_userpc_ctl,
+    [SYS_kprofile_userpc_snapshot] sys_kprofile_userpc_snapshot,
+    [SYS_kprofile_vfs_enoent_snapshot] sys_kprofile_vfs_enoent_snapshot,
 #ifdef USE_LWIP
     [SYS_netconf] sys_netconf,
     [SYS_socket] sys_socket,

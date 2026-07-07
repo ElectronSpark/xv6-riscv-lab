@@ -1063,6 +1063,8 @@ static void __attribute__((unused)) __vfs_close_fd(int fd) {
     struct vfs_file *f = __vfs_fdfree(fd);
     spin_unlock(&current->fdtable->lock);
     if (f != NULL) {
+        kde_konsole_prepty_ring_record_fd_lifecycle(
+            KONSOLE_PREPTY_FD_LIFECYCLE_CLOSE, fd, -1, f, NULL, 0, 0);
         chrome_asset_lifecycle_trace_close("close-internal", fd, f);
         __vfs_finish_close_file(f);
     }
@@ -1075,6 +1077,9 @@ static void __attribute__((unused)) __vfs_close_fd(int fd) {
 uint64 sys_vfs_dup(void) {
     int fd;
     argint(0, &fd);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_DUP);
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
@@ -1084,6 +1089,8 @@ uint64 sys_vfs_dup(void) {
     spin_lock(&current->fdtable->lock);
     int newfd = __vfs_fdalloc(f);
     spin_unlock(&current->fdtable->lock);
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_DUP, fd, newfd, f, NULL, newfd, 0);
 
     CHROME_FD_TRACE("dup pid=%d tgid=%d name=%s oldfd=%d newfd=%d path=%s "
                     "file=%p f_flags=0x%x\n",
@@ -1091,6 +1098,8 @@ uint64 sys_vfs_dup(void) {
                     chrome_fd_trace_path(f), f, f->f_flags);
     chrome_asset_lifecycle_trace_dup("dup", fd, -1, newfd, f, NULL);
     vfs_fput(f); // remove the reference from __vfs_argfd
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_DUP, trace_start, fd, newfd, newfd);
     return newfd;
 }
 
@@ -1098,6 +1107,9 @@ uint64 sys_vfs_dup2(void) {
     int oldfd, newfd;
     argint(0, &oldfd);
     argint(1, &newfd);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_DUP);
 
     if (newfd < 0 || newfd >= NOFILE) {
         return -EBADF;
@@ -1121,10 +1133,15 @@ uint64 sys_vfs_dup2(void) {
     spin_unlock(&current->fdtable->lock);
 
     if (old_newfd) {
+        kde_konsole_prepty_ring_record_fd_lifecycle(
+            KONSOLE_PREPTY_FD_LIFECYCLE_REPLACE, oldfd, newfd, f,
+            old_newfd, ret, 0);
         chrome_asset_lifecycle_trace_dup("dup2-replace", oldfd, newfd, ret, f,
                                          old_newfd);
         __vfs_finish_close_file(old_newfd);
     } else {
+        kde_konsole_prepty_ring_record_fd_lifecycle(
+            KONSOLE_PREPTY_FD_LIFECYCLE_DUP, oldfd, newfd, f, NULL, ret, 0);
         chrome_asset_lifecycle_trace_dup("dup2", oldfd, newfd, ret, f, NULL);
     }
     CHROME_FD_TRACE("dup2 pid=%d tgid=%d name=%s oldfd=%d newfd=%d ret=%d "
@@ -1134,6 +1151,8 @@ uint64 sys_vfs_dup2(void) {
                     ret, chrome_fd_trace_path(f), f, f->f_flags, old_newfd,
                     replaced_path, replaced_flags);
     vfs_fput(f);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_DUP, trace_start, oldfd, newfd, ret);
     return ret;
 }
 
@@ -1252,6 +1271,9 @@ uint64 sys_vfs_write(void) {
 uint64 sys_vfs_close(void) {
     int fd;
     argint(0, &fd);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_CLOSE);
 
     spin_lock(&current->fdtable->lock);
     struct vfs_file *f = __vfs_fdfree(fd);
@@ -1263,6 +1285,8 @@ uint64 sys_vfs_close(void) {
     }
     spin_unlock(&current->fdtable->lock);
 
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_CLOSE, fd, -1, f, NULL, 0, 0);
     CHROME_FD_TRACE("close pid=%d tgid=%d name=%s fd=%d path=%s "
                     "file=%p f_flags=0x%x\n",
                     current->pid, current->tgid, current->name, fd,
@@ -1270,6 +1294,8 @@ uint64 sys_vfs_close(void) {
     chrome_asset_lifecycle_trace_close("close", fd, f);
     __vfs_finish_close_file(f);
     ACCT_INC(current->thread_group, fs_closes);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_CLOSE, trace_start, fd, -1, 0);
     return 0;
 }
 
@@ -1482,8 +1508,13 @@ uint64 sys_vfs_fcntl(void) {
     uint64 uarg = 0;
     argint(0, &fd);
     argint(1, &cmd);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_FCNTL);
 
     if (fd < 0 || fd >= NOFILE) {
+        kde_konsole_child_launch_trace_setup_end(
+            KDE_KONSOLE_CHILD_SETUP_FCNTL, trace_start, fd, cmd, -EBADF);
         return -EBADF;
     }
 
@@ -1517,6 +1548,8 @@ uint64 sys_vfs_fcntl(void) {
                             cmd, arg, ret);
         }
         spin_unlock(&current->fdtable->lock);
+        kde_konsole_child_launch_trace_setup_end(
+            KDE_KONSOLE_CHILD_SETUP_FCNTL, trace_start, fd, cmd, ret);
         return ret;
     }
 
@@ -1525,11 +1558,15 @@ uint64 sys_vfs_fcntl(void) {
         struct vfs_file *f = current->fdtable->files[fd];
         int ret = ((uint64)f > NOFILE) ? (f->f_flags & ~O_CLOEXEC) : -EBADF;
         spin_unlock(&current->fdtable->lock);
+        kde_konsole_child_launch_trace_setup_end(
+            KDE_KONSOLE_CHILD_SETUP_FCNTL, trace_start, fd, cmd, ret);
         return ret;
     }
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
+        kde_konsole_child_launch_trace_setup_end(
+            KDE_KONSOLE_CHILD_SETUP_FCNTL, trace_start, fd, cmd, -EBADF);
         return -EBADF;
     }
 
@@ -1760,6 +1797,8 @@ uint64 sys_vfs_fcntl(void) {
                         f->f_flags);
     }
     vfs_fput(f);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_FCNTL, trace_start, fd, cmd, ret);
     return ret;
 }
 
@@ -2340,6 +2379,8 @@ uint64 sys_vfs_open(void) {
                    fd, f);
     }
     chrome_media_fd_trace_open("open", fd, AT_FDCWD, path, omode, f, fd);
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_OPEN, -1, fd, f, NULL, fd, 0);
 
     // When success, the refcount of f will be increased by fdtable, thus we do
     // not put f here. When failure, we need to put f anyway.
@@ -2593,6 +2634,9 @@ uint64 sys_vfs_symlink(void) {
 uint64 sys_vfs_chdir(void) {
     char path[MAXPATH];
     int n;
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_CHDIR);
 
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
@@ -2632,6 +2676,8 @@ uint64 sys_vfs_chdir(void) {
     vfs_iput(inode);
 
     ACCT_INC(current->thread_group, fs_chdirs);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_CHDIR, trace_start, n, 0, 0);
     return 0;
 }
 
@@ -2787,6 +2833,10 @@ uint64 sys_vfs_pipe(void) {
         return fd1;
     }
     spin_unlock(&current->fdtable->lock);
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_PIPE, -1, fd0, rf, NULL, fd0, 0);
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_PIPE, -1, fd1, wf, NULL, fd1, 0);
 
     // vm_copyout may sleep (acquires rwsem), so must be outside spinlock
     struct thread *p = current;
@@ -3725,6 +3775,26 @@ uint64 sys_vfs_ioctl(void) {
     int ret;
     uint64 *bucket_calls = NULL;
     uint64 *bucket_ticks = NULL;
+    int trace_bucket = KDE_KONSOLE_CHILD_SETUP_IOCTL_OTHER;
+
+    switch (cmd) {
+    case TIOCSCTTY:
+        trace_bucket = KDE_KONSOLE_CHILD_SETUP_IOCTL_CTTY;
+        break;
+    case TIOCSPGRP:
+    case TIOCGPGRP:
+        trace_bucket = KDE_KONSOLE_CHILD_SETUP_IOCTL_PGRP;
+        break;
+    case TCSETS:
+    case TCSETSW:
+    case TCSETSF:
+        trace_bucket = KDE_KONSOLE_CHILD_SETUP_IOCTL_TCSETS;
+        break;
+    default:
+        break;
+    }
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(trace_bucket);
 
     /*
      * For known TTY ioctls, copy the data in/out of user space here,
@@ -3839,6 +3909,8 @@ uint64 sys_vfs_ioctl(void) {
     }
 
     vfs_fput(f);
+    kde_konsole_child_launch_trace_setup_end(
+        trace_bucket, trace_start, fd, (int)cmd, ret);
     if (bucket_calls != NULL && kde_ready_trace_current())
         kde_ready_trace_event("ioctl", fd, (int)cmd, 0, ret, 0);
     if (__sys_profile && bucket_calls != NULL && bucket_ticks != NULL) {
@@ -3996,10 +4068,10 @@ static const char *webkit_poll_fd_kind(struct vfs_file *f)
  * the full wait froze KWin's libinput thread).  Validated by the
  * 5-test poll-notify-probe (gates-ON and default boots) and a live
  * gates-ON KDE session with working input.  The stuck-poller
- * diagnostic below stays active whenever this gate is on and dumps
- * any poller parked >10s in a notify-backed full wait — if a new
- * lost-notify class appears, it names the fd class on serial.
- * Opt out per boot with poll_notify_full_wait=0.
+ * diagnostic below can be enabled with poll_stuck_trace=1 to dump any
+ * poller parked >10s in a notify-backed full wait; keep it off on
+ * interactive serial harnesses because the diagnostic shares the shell
+ * stream.  Opt out per boot with poll_notify_full_wait=0.
  */
 static int poll_notify_full_wait_enabled(void)
 {
@@ -4100,8 +4172,8 @@ static void kstats_poll_unix_paths(struct vfs_file *f, char *self_path,
  * captured up front (in the poller's own fd-table context); any OTHER
  * thread entering a blocking poll opportunistically dumps entries
  * parked >10s.  The dump names the fd class whose producer lost the
- * wakeup.  Zero cost when the gate is off; entries only ever print for
- * already-pathological waits.
+ * wakeup.  Keep the serial dump opt-in so normal GUI smoke harnesses do
+ * not corrupt prompt markers with diagnostic output.
  */
 #define POLL_PARK_SLOTS 128
 #define POLL_PARK_DESC 384
@@ -4109,6 +4181,21 @@ static void kstats_poll_unix_paths(struct vfs_file *f, char *self_path,
 #define POLL_PARK_SCAN_EVERY_MS 2000
 
 #define POLL_PARK_REDUMP_MS 30000
+
+static int poll_stuck_trace_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("poll_stuck_trace", value,
+                                    sizeof(value)) == 0 &&
+            cmdline_value_is_true(value);
+        initialized = 1;
+    }
+    return enabled;
+}
 
 struct poll_park_entry {
     int in_use;
@@ -4180,6 +4267,9 @@ static int poll_park_register(struct pollfd_k *pfds, int nfds,
     char item[UNIX_PATH_MAX * 2 + 32];
     int slot = -1;
 
+    if (!poll_stuck_trace_enabled())
+        return -1;
+
     poll_park_lock_init_once();
 
     spin_lock(&poll_park_lock);
@@ -4243,6 +4333,8 @@ static void poll_park_dump_check(void)
     uint64 now = get_jiffs();
     uint64 prev = __atomic_load_n(&last_scan_ms, __ATOMIC_RELAXED);
 
+    if (!poll_stuck_trace_enabled())
+        return;
     if (!poll_park_lock_inited)
         return;
     if (now - prev < POLL_PARK_SCAN_EVERY_MS)
@@ -4325,10 +4417,21 @@ static void kstats_poll_unix_paths(struct vfs_file *f, char *self_path,
     }
 }
 
+#define KSTATS_PREPTY_ROLE_PRIO(role)                                      \
+    ((role) == KONSOLE_PREPTY_WAKE_ROLE_WAYLAND ? 70 :                     \
+     (role) == KONSOLE_PREPTY_WAKE_ROLE_QDBUS ? 60 :                       \
+     (role) == KONSOLE_PREPTY_WAKE_ROLE_EVENTFD ? 50 :                     \
+     (role) == KONSOLE_PREPTY_WAKE_ROLE_PIPE ? 40 :                        \
+     (role) == KONSOLE_PREPTY_WAKE_ROLE_KQUEUE ? 30 :                      \
+     (role) == KONSOLE_PREPTY_WAKE_ROLE_UNIX_OTHER ? 20 : 10)
+
 static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                                      uint64 wait_ticks,
+                                     uint64 wait_start_ms,
+                                     uint64 waiter_run_ms,
                                      int has_unnotified_fds, int ready,
-                                     int kq_nevents, int kq_timeout_ms)
+                                     int kq_nevents, int kq_timeout_ms,
+                                     int poll_op)
 {
     int saw_unix = 0;
     int saw_eventfd = 0;
@@ -4352,6 +4455,18 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
     int timed_rescan = kq_nevents == 0 && kq_timeout_ms > 0;
     int current_qdbus_thread =
         kstats_current_thread_name_contains("QDBus");
+    uint32 prepty_role_mask = 0;
+    int prepty_primary_role = KONSOLE_PREPTY_WAKE_ROLE_OTHER;
+
+#define KSTATS_POLL_ADD_PREPTY_ROLE(role)                                  \
+    do {                                                                    \
+        if (prepty) {                                                       \
+            prepty_role_mask |= KONSOLE_PREPTY_WAKE_ROLE_BIT(role);         \
+            if (KSTATS_PREPTY_ROLE_PRIO(role) >                             \
+                KSTATS_PREPTY_ROLE_PRIO(prepty_primary_role))               \
+                prepty_primary_role = (role);                               \
+        }                                                                   \
+    } while (0)
 
     if (!kstats_profile_enabled() || wait_ticks == 0)
         return;
@@ -4371,6 +4486,7 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
         if (f == NULL) {
             saw_other = 1;
             saw_prepty_other = prepty;
+            KSTATS_POLL_ADD_PREPTY_ROLE(KONSOLE_PREPTY_WAKE_ROLE_OTHER);
             continue;
         }
 
@@ -4391,6 +4507,8 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                     kstats_poll_path_contains(peer_path, "wayland-")) {
                     saw_prepty_wayland = 1;
                     fd_prepty_wayland = 1;
+                    KSTATS_POLL_ADD_PREPTY_ROLE(
+                        KONSOLE_PREPTY_WAKE_ROLE_WAYLAND);
                 } else if (current_qdbus_thread ||
                            kstats_poll_path_contains(self_path, "/bus") ||
                            kstats_poll_path_contains(peer_path, "/bus") ||
@@ -4398,19 +4516,25 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                            kstats_poll_path_contains(peer_path, "dbus")) {
                     saw_prepty_qdbus = 1;
                     fd_prepty_qdbus = 1;
+                    KSTATS_POLL_ADD_PREPTY_ROLE(
+                        KONSOLE_PREPTY_WAKE_ROLE_QDBUS);
                 } else {
                     saw_prepty_unix_other = 1;
                     fd_prepty_unix_other = 1;
+                    KSTATS_POLL_ADD_PREPTY_ROLE(
+                        KONSOLE_PREPTY_WAKE_ROLE_UNIX_OTHER);
                 }
             }
         } else if (f->f_kind == VFS_FILE_KIND_PIPE) {
             saw_pipe = 1;
             saw_prepty_pipe = prepty;
             fd_prepty_pipe = prepty;
+            KSTATS_POLL_ADD_PREPTY_ROLE(KONSOLE_PREPTY_WAKE_ROLE_PIPE);
         } else if (eventfd_file_is_eventfd(f)) {
             saw_eventfd = 1;
             saw_prepty_eventfd = prepty;
             fd_prepty_eventfd = prepty;
+            KSTATS_POLL_ADD_PREPTY_ROLE(KONSOLE_PREPTY_WAKE_ROLE_EVENTFD);
         } else if (f->ops != NULL && f->ops->readlink != NULL) {
             ssize_t n = f->ops->readlink(f, target, sizeof(target));
             if (n >= 0) {
@@ -4421,17 +4545,29 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
                     saw_eventfd = 1;
                     saw_prepty_eventfd = prepty;
                     fd_prepty_eventfd = prepty;
+                    KSTATS_POLL_ADD_PREPTY_ROLE(
+                        KONSOLE_PREPTY_WAKE_ROLE_EVENTFD);
+                } else if (strstr(target, "kqueue") != NULL) {
+                    saw_other = 1;
+                    saw_prepty_other = prepty;
+                    KSTATS_POLL_ADD_PREPTY_ROLE(
+                        KONSOLE_PREPTY_WAKE_ROLE_KQUEUE);
                 } else {
                     saw_other = 1;
                     saw_prepty_other = prepty;
+                    KSTATS_POLL_ADD_PREPTY_ROLE(
+                        KONSOLE_PREPTY_WAKE_ROLE_OTHER);
                 }
             } else {
                 saw_other = 1;
                 saw_prepty_other = prepty;
+                KSTATS_POLL_ADD_PREPTY_ROLE(
+                    KONSOLE_PREPTY_WAKE_ROLE_OTHER);
             }
         } else {
             saw_other = 1;
             saw_prepty_other = prepty;
+            KSTATS_POLL_ADD_PREPTY_ROLE(KONSOLE_PREPTY_WAKE_ROLE_OTHER);
         }
 
         if (prepty && pfds[i].revents != 0) {
@@ -4499,6 +4635,14 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
     }
     if (!prepty)
         return;
+
+    kde_konsole_child_launch_trace_parent_wait(
+        "poll_wait", wait_start_ms, waiter_run_ms, nfds, kq_timeout_ms,
+        ready, prepty_role_mask, prepty_primary_role);
+    kde_konsole_prepty_ring_record_poll_wait(
+        wait_start_ms, waiter_run_ms, nfds, kq_timeout_ms,
+        has_unnotified_fds, ready, kq_nevents, prepty_role_mask,
+        prepty_primary_role, poll_op);
 
     __atomic_add_fetch(&g_konsole_prepty_poll_total_calls, 1,
                        __ATOMIC_RELAXED);
@@ -4677,7 +4821,10 @@ static void kstats_poll_wait_account(struct pollfd_k *pfds, int nfds,
     }
 
 #undef KSTATS_ADD_PREPTY_POLL
+#undef KSTATS_POLL_ADD_PREPTY_ROLE
 }
+
+#undef KSTATS_PREPTY_ROLE_PRIO
 
 static uint chrome_unix_scm_count_locked(struct unix_sock *sk)
 {
@@ -4813,7 +4960,7 @@ static inline short __vfs_poll_always_ready(short events, int f_flags) {
  *   4. everything else                → always ready
  *      (regular files, directories, block devices)
  */
-static int __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
+static int __vfs_poll_scan(struct pollfd_k *pfds, int nfds, int poll_op) {
     int ready = 0;
 
     for (int i = 0; i < nfds; i++) {
@@ -4887,6 +5034,8 @@ static int __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
 
 done:
         webkit_poll_trace_fd("scan", pfd, f);
+        kde_konsole_prepty_ring_record_poll_fd(
+            pfd->fd, f, pfd->events, pfd->revents, nfds, ready, poll_op);
         vfs_fput(f);
 
         if (pfd->revents != 0)
@@ -5170,6 +5319,128 @@ static void kde_ready_trace_kqueue_events(struct kevent *events, int nevents,
     }
 }
 
+static int kde_konsole_child_first_signal(sigset_t set)
+{
+    for (int s = 1; s <= NSIG; s++) {
+        if (sigismember(&set, s) > 0)
+            return s;
+    }
+    return 0;
+}
+
+static const char *kde_konsole_child_signal_source_name(int source)
+{
+    switch (source) {
+    case KDE_KONSOLE_CHILD_SIGNAL_THREAD_QUEUED:
+        return "thread_queued";
+    case KDE_KONSOLE_CHILD_SIGNAL_GROUP_QUEUED:
+        return "group_queued";
+    case KDE_KONSOLE_CHILD_SIGNAL_THREAD_DELIV:
+        return "thread_delivered";
+    case KDE_KONSOLE_CHILD_SIGNAL_GROUP_DELIV:
+        return "group_delivered";
+    default:
+        return "none";
+    }
+}
+
+static void kde_konsole_child_poll_detail(
+    int nfds, int timeout_ms, int ret, struct pollfd_k *pfds,
+    uint64 elapsed_ms, int has_unnotified_fds, int kq_tmo, int nevents,
+    int kqueue_eintr, int signal_check_eintr)
+{
+    static _Atomic uint64 seq_src;
+    struct thread *p = current;
+    sigset_t pending = 0;
+    sigset_t blocked = 0;
+    sigset_t shared_pending = 0;
+    sigset_t unblocked = 0;
+    int first_pending = 0;
+    int first_unblocked = 0;
+    int last_signal = 0;
+    int last_source = 0;
+    int last_code = 0;
+    int last_pid = 0;
+    uint64 last_signal_ms = 0;
+    uint64 seq;
+
+    if (!kde_konsole_child_launch_trace_current_child_setup() ||
+        p == NULL || pfds == NULL)
+        return;
+
+    if (p->sigacts != NULL) {
+        sigacts_lock(p->sigacts);
+        pending = p->signal.sig_pending_mask;
+        blocked = p->signal.sig_mask;
+        if (p->thread_group != NULL)
+            shared_pending =
+                p->thread_group->shared_pending.sig_pending_mask;
+        unblocked = (pending | shared_pending) & ~blocked;
+        first_pending =
+            kde_konsole_child_first_signal(pending | shared_pending);
+        first_unblocked = kde_konsole_child_first_signal(unblocked);
+        last_signal = p->signal.kde_child_trace_last_signal;
+        last_source = p->signal.kde_child_trace_last_signal_source;
+        last_code = p->signal.kde_child_trace_last_signal_code;
+        last_pid = p->signal.kde_child_trace_last_signal_pid;
+        last_signal_ms = p->signal.kde_child_trace_last_signal_ms;
+        sigacts_unlock(p->sigacts);
+    }
+
+    seq = __atomic_add_fetch(&seq_src, 1, __ATOMIC_RELAXED);
+    printf("konsole-child-poll-detail: seq=%lu ms=%lu pid=%d tgid=%d "
+           "name=%s nfds=%d timeout_ms=%d ret=%d elapsed_ms=%lu "
+           "has_unnotified_fds=%d kq_tmo=%d nevents=%d "
+           "kqueue_eintr=%d signal_check_eintr=%d pending=0x%lx "
+           "blocked=0x%lx shared_pending=0x%lx unblocked=0x%lx "
+           "first_pending=%d first_unblocked=%d last_signal=%d "
+           "last_signal_source=%s last_signal_source_id=%d "
+           "last_signal_code=%d last_signal_pid=%d "
+           "last_signal_ms=%lu last_signal_age_ms=%lu\n",
+           seq, sched_timer_now_ms(), p->pid, p->tgid, p->name, nfds,
+           timeout_ms, ret, elapsed_ms, has_unnotified_fds, kq_tmo,
+           nevents, kqueue_eintr, signal_check_eintr, pending, blocked,
+           shared_pending, unblocked, first_pending, first_unblocked,
+           last_signal, kde_konsole_child_signal_source_name(last_source),
+           last_source, last_code, last_pid, last_signal_ms,
+           last_signal_ms != 0 && sched_timer_now_ms() >= last_signal_ms ?
+               sched_timer_now_ms() - last_signal_ms : 0);
+
+    int max_detail = nfds < 4 ? nfds : 4;
+    for (int i = 0; i < max_detail; i++) {
+        struct vfs_file *f = NULL;
+        const char *kind = "neg";
+        const char *target_name;
+        char target[128];
+        int notify_backed = 0;
+        int requires_rescan = 1;
+
+        if (pfds[i].fd >= 0) {
+            f = __vfs_argfd(pfds[i].fd);
+            if (f != NULL) {
+                kind = webkit_poll_fd_kind(f);
+                notify_backed =
+                    f->ops != NULL && f->ops->poll != NULL &&
+                    (f->ops->flags & VFS_FILE_OPS_F_POLL_NOTIFY_BACKED) != 0;
+                requires_rescan = poll_fd_requires_rescan(f);
+            } else {
+                kind = "badfd";
+            }
+        }
+        target_name = kde_ready_poll_target(f, target, sizeof(target));
+        printf("konsole-child-poll-fd: poll_seq=%lu slot=%d fd=%d "
+               "events=0x%x revents=0x%x kind=%s notify_backed=%d "
+               "requires_rescan=%d ops=%p poll=%p file=%p f_flags=0x%x "
+               "target=%s\n",
+               seq, i, pfds[i].fd, (uint)pfds[i].events,
+               (uint)pfds[i].revents, kind, notify_backed, requires_rescan,
+               f ? f->ops : NULL, (f && f->ops) ? f->ops->poll : NULL, f,
+               f ? f->f_flags : 0, target_name);
+        if (f != NULL)
+            vfs_fput(f);
+    }
+}
+
 /*
  * sys_vfs_poll - event polling over file descriptors using kqueue
  *
@@ -5183,9 +5454,19 @@ static void kde_ready_trace_kqueue_events(struct kevent *events, int nevents,
  * is performed without kqueue overhead.
  */
 
-static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
+static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms,
+                              int poll_op) {
     int block_profile = 0;
     uint64 block_start = 0;
+    int child_poll_detail =
+        kde_konsole_child_launch_trace_current_child_setup();
+    uint64 child_poll_start_ms =
+        child_poll_detail ? sched_timer_now_ms() : 0;
+    int child_poll_has_unnotified_fds = 0;
+    int child_poll_kq_tmo = 0;
+    int child_poll_nevents = 0;
+    int child_poll_kqueue_eintr = 0;
+    int child_poll_signal_check_eintr = 0;
 
     if (nfds < 0 || nfds > NOFILE) {
         return -EINVAL;
@@ -5215,7 +5496,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     }
 
     /* --- Non-blocking fast path (timeout_ms == 0) --- */
-    int ready = __vfs_poll_scan(pfds, nfds);
+    int ready = __vfs_poll_scan(pfds, nfds, poll_op);
     webkit_poll_summary("initial", nfds, timeout_ms, ready, pfds);
     if (timeout_ms == 0 || ready > 0)
         goto copyout;
@@ -5239,6 +5520,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
     int notify_full_wait = poll_notify_full_wait_enabled();
     if (notify_full_wait)
         has_unnotified_fds = poll_fd_set_requires_rescan(pfds, nfds);
+    child_poll_has_unnotified_fds = has_unnotified_fds;
 
     /* N5 diagnostic: let this (still-running) poller report any peer
      * that has been stuck in a notify-backed full wait for >10s. */
@@ -5334,7 +5616,8 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
 
         int trace_ready = kde_ready_trace_current();
         int profile_ready = kstats_profile_enabled();
-        uint64 wait_start_ms = trace_ready ? sched_timer_now_ms() : 0;
+        uint64 wait_start_ms =
+            (trace_ready || profile_ready) ? sched_timer_now_ms() : 0;
         uint64 wait_start_ticks = profile_ready ? r_time() : 0;
         webkit_poll_summary("sleep", nfds, kq_tmo, ready, pfds);
         /* N5 diagnostic: only notify-backed full waits (no rescan net)
@@ -5344,27 +5627,33 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
             (kq_tmo < 0 || kq_tmo >= 5000))
             park_slot = poll_park_register(pfds, nfds, kq_tmo);
         int nevents = kqueue_wait(kq, events, nfds, kq_tmo);
+        uint64 wait_end_ms =
+            (trace_ready || profile_ready) ? sched_timer_now_ms() : 0;
         poll_park_unregister(park_slot);
+        child_poll_kq_tmo = kq_tmo;
+        child_poll_nevents = nevents;
 
         if (nevents < 0 && nevents == -EINTR) {
             ready = -EINTR;
+            child_poll_kqueue_eintr = 1;
             if (trace_ready)
                 kde_ready_trace_event("poll-wait", -1, nfds, kq_tmo,
                                       nevents,
-                                      sched_timer_now_ms() - wait_start_ms);
+                                      wait_end_ms - wait_start_ms);
             break;
         }
 
         /* Always re-scan: catches chardev events and ensures
          * revents is correctly populated for copyout. */
-        ready = __vfs_poll_scan(pfds, nfds);
+        ready = __vfs_poll_scan(pfds, nfds, poll_op);
         if (profile_ready)
             kstats_poll_wait_account(pfds, nfds, r_time() - wait_start_ticks,
+                                     wait_start_ms, wait_end_ms,
                                      has_unnotified_fds, ready, nevents,
-                                     kq_tmo);
+                                     kq_tmo, poll_op);
         webkit_poll_summary("wait", nfds, timeout_ms, ready, pfds);
         if (trace_ready) {
-            uint64 wait_ms = sched_timer_now_ms() - wait_start_ms;
+            uint64 wait_ms = wait_end_ms - wait_start_ms;
             int arg1 = has_unnotified_fds ? -kq_tmo - 1 : kq_tmo;
             if (wait_ms >= 50 || ready > 0 || nevents < 0) {
                 kde_ready_trace_kqueue_events(events, nevents, pfds, nfds,
@@ -5381,6 +5670,7 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
 
         if (signal_pending(current)) {
             ready = -EINTR;
+            child_poll_signal_check_eintr = 1;
             break;
         }
     }
@@ -5396,6 +5686,16 @@ static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
             __atomic_add_fetch(&g_sys_poll_blocking_ticks,
                                r_time() - block_start, __ATOMIC_RELAXED);
         }
+        if (child_poll_detail) {
+            uint64 now_ms = sched_timer_now_ms();
+            kde_konsole_child_poll_detail(
+                nfds, timeout_ms, -EINTR, pfds,
+                now_ms >= child_poll_start_ms ?
+                    now_ms - child_poll_start_ms : 0,
+                child_poll_has_unnotified_fds, child_poll_kq_tmo,
+                child_poll_nevents, child_poll_kqueue_eintr,
+                child_poll_signal_check_eintr);
+        }
         kvfree(pfds);
         return -EINTR;
     }
@@ -5406,6 +5706,15 @@ copyout:
                            r_time() - block_start, __ATOMIC_RELAXED);
     }
     webkit_poll_summary("copyout", nfds, timeout_ms, ready, pfds);
+    if (child_poll_detail) {
+        uint64 now_ms = sched_timer_now_ms();
+        kde_konsole_child_poll_detail(
+            nfds, timeout_ms, ready, pfds,
+            now_ms >= child_poll_start_ms ? now_ms - child_poll_start_ms : 0,
+            child_poll_has_unnotified_fds, child_poll_kq_tmo,
+            child_poll_nevents, child_poll_kqueue_eintr,
+            child_poll_signal_check_eintr);
+    }
     if (either_copyout(1, fds_addr, pfds, bytes) < 0) {
         kvfree(pfds);
         return -EFAULT;
@@ -5430,7 +5739,14 @@ uint64 sys_vfs_poll(void) {
     argint(1, &nfds);
     argint(2, &timeout_ms);
 
-    uint64 ret = __vfs_poll_impl(fds_addr, nfds, timeout_ms);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_POLL);
+    uint64 ret = __vfs_poll_impl(fds_addr, nfds, timeout_ms,
+                                 KONSOLE_PREPTY_POLL_OP_POLL);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_POLL, trace_start, nfds, timeout_ms,
+        (int)ret);
     SYSCALL_PROFILE_RETURN(ret, g_sys_poll_ticks);
 }
 
@@ -5483,9 +5799,16 @@ uint64 sys_vfs_ppoll(void) {
         use_mask = 1;
     }
 
-    uint64 ret = __vfs_poll_impl(fds_addr, nfds, timeout_ms);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_POLL);
+    uint64 ret = __vfs_poll_impl(fds_addr, nfds, timeout_ms,
+                                 KONSOLE_PREPTY_POLL_OP_PPOLL);
     if (use_mask)
         sigmask_swap(&oldmask, NULL);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_POLL, trace_start, nfds, timeout_ms,
+        (int)ret);
     SYSCALL_PROFILE_RETURN(ret, g_sys_ppoll_ticks);
 }
 
@@ -5702,7 +6025,8 @@ uint64 sys_pselect6(void) {
         ready = 0;
     } else {
         /* Non-blocking fast path */
-        ready = __vfs_poll_scan(pfds, npfds);
+        ready = __vfs_poll_scan(pfds, npfds,
+                                KONSOLE_PREPTY_POLL_OP_UNKNOWN);
         if (ready == 0 && timeout_ms != 0) {
             /* Blocking path: simple sleep+rescan loop */
             uint64 poll_start = get_jiffs();
@@ -5720,7 +6044,8 @@ uint64 sys_pselect6(void) {
                     ready = -EINTR;
                     break;
                 }
-                ready = __vfs_poll_scan(pfds, npfds);
+                ready = __vfs_poll_scan(pfds, npfds,
+                                        KONSOLE_PREPTY_POLL_OP_UNKNOWN);
                 if (ready > 0)
                     break;
             }
@@ -5889,7 +6214,8 @@ uint64 sys_select(void)
         }
     }
 
-    ready = npfds == 0 ? 0 : __vfs_poll_scan(pfds, npfds);
+    ready = npfds == 0 ? 0 :
+        __vfs_poll_scan(pfds, npfds, KONSOLE_PREPTY_POLL_OP_UNKNOWN);
     if (ready == 0 && timeout_ms != 0) {
         uint64 poll_start = get_jiffs();
         for (;;) {
@@ -5906,7 +6232,8 @@ uint64 sys_select(void)
                 ready = -EINTR;
                 break;
             }
-            ready = __vfs_poll_scan(pfds, npfds);
+            ready = __vfs_poll_scan(pfds, npfds,
+                                    KONSOLE_PREPTY_POLL_OP_UNKNOWN);
             if (ready > 0)
                 break;
         }
@@ -5979,6 +6306,7 @@ uint64 sys_vfs_openat(void) {
     int omode;
     int mode;
     int n;
+    int path_len = 0;
 
 #define SYS_OPENAT_PROFILE_STAGE(call_ctr, tick_ctr, expr)                   \
     ({                                                                       \
@@ -5998,6 +6326,7 @@ uint64 sys_vfs_openat(void) {
     if (path_ret < 0) {
         SYSCALL_PROFILE_RETURN(path_ret, g_sys_openat_ticks);
     }
+    path_len = n;
     WEBKIT_VFS_TRACE("openat begin pid=%d name=%s dirfd=%d path=%s "
                      "path_len=%d\n",
                      current->pid, current->name, dirfd, path, n);
@@ -6023,6 +6352,9 @@ uint64 sys_vfs_openat(void) {
     do {                                                                     \
         long __ret = (long)(ret_expr);                                       \
         if (__ret < 0) {                                                     \
+            if (__ret == -ENOENT)                                            \
+                kprofile_vfs_enoent_record_openat(dirfd, (uint32)omode,     \
+                                                  path, path_len);           \
             chrome_media_fd_trace_open("openat-fail", -1, dirfd, path,      \
                                        omode, NULL, __ret);                  \
             CHROME_FD_TRACE("openat fail pid=%d tgid=%d name=%s dirfd=%d "   \
@@ -6259,6 +6591,8 @@ uint64 sys_vfs_openat(void) {
                    omode, n, f);
     }
     chrome_media_fd_trace_open("openat", n, dirfd, path, omode, f, n);
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_OPEN, -1, n, f, NULL, n, 0);
 
     if (n >= 0 && webkit_vfs_trace_enabled() && webkit_vfs_trace_process()) {
         const char *fs_name = "(none)";
@@ -6334,6 +6668,9 @@ uint64 sys_vfs_close_range(void) {
     argint(0, (int *)&first);
     argint(1, (int *)&last);
     argint(2, &flags);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_CLOSE_RANGE);
 
     const int CLOSE_RANGE_UNSHARE = 1 << 1;
     const int CLOSE_RANGE_CLOEXEC = 1 << 2;
@@ -6367,11 +6704,15 @@ uint64 sys_vfs_close_range(void) {
             (void)vfs_fdtable_set_fdflags(current->fdtable, (int)fd,
                                           FD_CLOEXEC);
         spin_unlock(&current->fdtable->lock);
+        kde_konsole_child_launch_trace_setup_end(
+            KDE_KONSOLE_CHILD_SETUP_CLOSE_RANGE, trace_start, first, last, 0);
         return 0;
     }
 
     for (uint fd = first; fd <= last; fd++)
         __vfs_close_fd((int)fd);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_CLOSE_RANGE, trace_start, first, last, 0);
     return 0;
 }
 
@@ -7460,6 +7801,10 @@ uint64 sys_vfs_pipe2(void) {
         return fd1;
     }
     spin_unlock(&current->fdtable->lock);
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_PIPE, -1, fd0, rf, NULL, fd0, 0);
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_PIPE, -1, fd1, wf, NULL, fd1, 0);
 
     struct thread *p = current;
     if (vm_copyout(p->vm, fdarray, (char *)&fd0, sizeof(fd0)) < 0 ||
@@ -8118,6 +8463,9 @@ uint64 sys_vfs_dup3(void) {
     argint(0, &oldfd);
     argint(1, &newfd);
     argint(2, &flags);
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_DUP);
 
     if (oldfd == newfd)
         return -EINVAL;  /* Linux dup3 behavior: EINVAL if oldfd == newfd */
@@ -8140,10 +8488,15 @@ uint64 sys_vfs_dup3(void) {
     spin_unlock(&current->fdtable->lock);
 
     if (old_newfd) {
+        kde_konsole_prepty_ring_record_fd_lifecycle(
+            KONSOLE_PREPTY_FD_LIFECYCLE_REPLACE, oldfd, newfd, f,
+            old_newfd, ret, 0);
         chrome_asset_lifecycle_trace_dup("dup3-replace", oldfd, newfd, ret, f,
                                          old_newfd);
         __vfs_finish_close_file(old_newfd);
     } else {
+        kde_konsole_prepty_ring_record_fd_lifecycle(
+            KONSOLE_PREPTY_FD_LIFECYCLE_DUP, oldfd, newfd, f, NULL, ret, 0);
         chrome_asset_lifecycle_trace_dup("dup3", oldfd, newfd, ret, f, NULL);
     }
     CHROME_FD_TRACE("dup3 pid=%d tgid=%d name=%s oldfd=%d newfd=%d "
@@ -8154,6 +8507,8 @@ uint64 sys_vfs_dup3(void) {
                     old_newfd, replaced_path, replaced_flags);
     vfs_fput(f);
 
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_DUP, trace_start, oldfd, newfd, ret);
     return ret;
 }
 

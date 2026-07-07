@@ -10,6 +10,7 @@
 #include "syscall.h"
 #include "errno.h"
 #include "timer/timer.h"
+#include "kde_ready_trace.h"
 
 uint64 sys_sigprocmask(void) {
     int how;
@@ -28,7 +29,13 @@ uint64 sys_sigprocmask(void) {
         set = 0; // No set provided
     }
 
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_SIGMASK);
     int ret = sigprocmask(how, set_addr ? &set : NULL, &oldset);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_SIGMASK, trace_start, how,
+        set_addr != 0, ret);
     if (ret < 0) {
         return ret;
     }
@@ -73,7 +80,13 @@ uint64 sys_sigaction(void) {
         p_oldact = &oldact;
     }
 
+    uint64 trace_start =
+        kde_konsole_child_launch_trace_setup_begin(
+            KDE_KONSOLE_CHILD_SETUP_SIGACTION);
     int ret = sigaction(signum, p_act, p_oldact);
+    kde_konsole_child_launch_trace_setup_end(
+        KDE_KONSOLE_CHILD_SETUP_SIGACTION, trace_start, signum,
+        act_addr != 0, ret);
     if (ret < 0) {
         return ret;
     }

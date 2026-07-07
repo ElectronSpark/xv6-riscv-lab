@@ -79,6 +79,12 @@ typedef struct thread_signal {
     stack_t sig_stack;   // Alternate signal stack
     uint64 esignal;      // Signal to be sent to parent on exit
     int stop_signal;     // Signal number that caused THREAD_STOPPED
+    int kde_child_trace_active; // Trace-only: QProcess child pre-exec setup
+    int kde_child_trace_last_signal;
+    int kde_child_trace_last_signal_source;
+    int kde_child_trace_last_signal_code;
+    int kde_child_trace_last_signal_pid;
+    uint64 kde_child_trace_last_signal_ms;
 } thread_signal_t;
 
 typedef enum {

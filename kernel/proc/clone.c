@@ -40,6 +40,7 @@
 #include "arch_thread.h"
 #include "accounting.h"
 #include "resource.h"
+#include "kde_ready_trace.h"
 
 static const char *clone_asset_vma_path(vma_t *vma)
 {
@@ -278,6 +279,8 @@ int thread_clone(struct clone_args *args) {
         if (args->pidfd == 0)
             return -EFAULT;
     }
+
+    kde_konsole_child_launch_trace_clone_begin(p, args->flags);
 
     // Too many processes are already running
     if (__alloc_pid() < 0) {
@@ -570,10 +573,12 @@ int thread_clone(struct clone_args *args) {
 
     chrome_clone_dump_asset_state(p, ret_ptr, args->flags);
     chrome_clone_dump_fdtable_state(p, ret_ptr, args->flags);
+    kde_konsole_child_launch_trace_clone_done(p, ret_ptr, args->flags);
 
     // Wake up the new child thread
     // Note: pi_lock no longer needed - rq_lock serializes wakeups
     scheduler_wakeup(ret_ptr);
+    kde_konsole_child_launch_trace_child_woken(ret_ptr);
 
     /* kqueue: notify EVFILT_PROC watchers of fork */
     kqueue_proc_notify(p, NOTE_FORK, ret_ptr->pid);

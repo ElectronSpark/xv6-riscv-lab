@@ -417,6 +417,9 @@ void rseq_clear_thread(struct thread *p);
 // timerfd.c
 void timerfd_init(void);
 int eventfd_file_is_eventfd(struct vfs_file *file);
+int eventfd_file_count(struct vfs_file *file, uint64 *count_out);
+int eventfd_file_info(struct vfs_file *file, uint64 *count_out,
+                      uint64 *id_out, void **object_out);
 int eventfd_signal_file(struct vfs_file *file, uint64 value);
 
 // Legacy file.c removed - now using VFS exclusively (vfs/file.c)

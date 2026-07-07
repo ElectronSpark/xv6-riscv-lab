@@ -102,10 +102,22 @@
 #define SYS_dumprq 1294
 #define SYS_kernbase 1295
 #define SYS_dumpinode 1296
+#define SYS_dumpblk 1297
+#define SYS_losetup 1298
 // 1291 reserved for the old dumpproc slot.
-// 1297-1299 reserved
+// 1299 reserved
 
 // --- Legacy xv6 tools ---
+#define SYS_kstatsctl 1367
+#define SYS_kstats2 1368
 #define SYS_dumpproc 1369
+#define SYS_kprofile_pgroup 1370
+#define SYS_kprofile_prepty_ring 1371
+#define SYS_kprofile_userpc_ctl 1372
+#define SYS_kprofile_userpc_snapshot 1373
+#define SYS_kprofile_vfs_enoent_snapshot 1374
+
+// Max syscall number (update when adding new syscalls)
+#define SYS_MAXNUM 1374
 
 #endif /* __USER_ABI_SYSCALL_H */

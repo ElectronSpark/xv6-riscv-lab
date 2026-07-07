@@ -16,6 +16,8 @@
 #include "types.h"
 #include "param.h"
 
+struct trapframe;
+
 /* User ABI capacity for per-CPU statistics; runtime count is in kstats.ncpus. */
 #define KSTATS_MAX_CPUS 64
 
@@ -355,6 +357,163 @@ struct kstats {
 #define KSTATS_ABI_VERSION 10
 #define KSTATS_ABI_V1_SIZE offsetof(struct kstats, vfs_inode_cache_read_revive_attempts)
 
+#define KONSOLE_PREPTY_WAKE_RING_ABI_VERSION 7
+#define KONSOLE_PREPTY_WAKE_RING_CAP 4096
+#define KONSOLE_PREPTY_WAKE_COMM_LEN 16
+#define KONSOLE_PREPTY_WAKE_KIND_LEN 24
+#define KONSOLE_PREPTY_WAKE_TARGET_LEN 80
+#define KONSOLE_PREPTY_WAKE_PATH_LEN 96
+#define KONSOLE_PREPTY_WAKE_ORIGIN_LEN 64
+
+enum konsole_prepty_wake_event {
+    KONSOLE_PREPTY_WAKE_EVENT_NOTIFY = 1,
+    KONSOLE_PREPTY_WAKE_EVENT_PIPE_WRITE = 2,
+    KONSOLE_PREPTY_WAKE_EVENT_POLL_WAIT = 3,
+    KONSOLE_PREPTY_WAKE_EVENT_FD_LIFECYCLE = 4,
+    KONSOLE_PREPTY_WAKE_EVENT_EVENTFD_OP = 5,
+    KONSOLE_PREPTY_WAKE_EVENT_POLL_FD = 6,
+};
+
+enum konsole_prepty_wake_role {
+    KONSOLE_PREPTY_WAKE_ROLE_OTHER = 0,
+    KONSOLE_PREPTY_WAKE_ROLE_WAYLAND = 1,
+    KONSOLE_PREPTY_WAKE_ROLE_QDBUS = 2,
+    KONSOLE_PREPTY_WAKE_ROLE_EVENTFD = 3,
+    KONSOLE_PREPTY_WAKE_ROLE_PIPE = 4,
+    KONSOLE_PREPTY_WAKE_ROLE_KQUEUE = 5,
+    KONSOLE_PREPTY_WAKE_ROLE_UNIX_OTHER = 6,
+};
+
+#define KONSOLE_PREPTY_WAKE_ROLE_BIT(role) (1U << (role))
+
+enum konsole_prepty_eventfd_op {
+    KONSOLE_PREPTY_EVENTFD_OP_NONE = 0,
+    KONSOLE_PREPTY_EVENTFD_OP_SIGNAL = 1,
+    KONSOLE_PREPTY_EVENTFD_OP_WRITE = 2,
+    KONSOLE_PREPTY_EVENTFD_OP_READ = 3,
+};
+
+enum konsole_prepty_fd_lifecycle_op {
+    KONSOLE_PREPTY_FD_LIFECYCLE_NONE = 0,
+    KONSOLE_PREPTY_FD_LIFECYCLE_OPEN = 1,
+    KONSOLE_PREPTY_FD_LIFECYCLE_CLOSE = 2,
+    KONSOLE_PREPTY_FD_LIFECYCLE_DUP = 3,
+    KONSOLE_PREPTY_FD_LIFECYCLE_REPLACE = 4,
+    KONSOLE_PREPTY_FD_LIFECYCLE_EVENTFD_CREATE = 5,
+    KONSOLE_PREPTY_FD_LIFECYCLE_PIPE = 6,
+};
+
+enum konsole_prepty_poll_op {
+    KONSOLE_PREPTY_POLL_OP_UNKNOWN = 0,
+    KONSOLE_PREPTY_POLL_OP_POLL = 1,
+    KONSOLE_PREPTY_POLL_OP_PPOLL = 2,
+};
+
+struct konsole_prepty_wake_record {
+    uint64 seq;
+    uint64 notify_ms;
+    uint64 wait_start_ms;
+    uint64 waiter_run_ms;
+    uint64 file;
+    uint64 first_ident;
+    uint64 last_ident;
+    uint64 first_udata;
+    uint64 last_udata;
+    uint64 first_kq;
+    uint64 last_kq;
+    uint64 origin;
+    uint64 eventfd_counter_before;
+    uint64 eventfd_counter_after;
+    uint64 eventfd_value;
+    uint64 eventfd_read_value;
+    uint64 eventfd_caller;
+    uint64 eventfd_count;
+    uint64 eventfd_id;
+    uint64 eventfd_object;
+    uint64 fdtable;
+    uint64 replaced_file;
+    uint64 poll_file_count;
+    int32 event;
+    int32 role;
+    uint32 role_mask;
+    int32 pid;
+    int32 tgid;
+    int32 filter;
+    int32 fd;
+    int32 nfds;
+    int32 ready;
+    int32 nevents;
+    int32 timeout_ms;
+    int32 has_unnotified_fds;
+    int32 matched;
+    int32 enqueued_new;
+    int32 already_queued;
+    int32 propagated;
+    int32 data;
+    int32 bytes;
+    uint32 nread;
+    uint32 nwrite;
+    uint32 readable_before;
+    uint32 readable_after;
+    uint64 unix_ino;
+    uint64 unix_peer_ino;
+    int32 unix_type;
+    int32 unix_state;
+    int32 unix_shutdown;
+    int32 origin_off;
+    uint32 origin_line;
+    int32 eventfd_op;
+    int32 eventfd_ret;
+    int32 eventfd_caller_off;
+    uint32 eventfd_caller_line;
+    int32 fd_lifecycle_op;
+    int32 oldfd;
+    int32 newfd;
+    int32 first_visible;
+    int32 fd_visible_refs;
+    int32 file_ref_count;
+    int32 poll_events;
+    int32 poll_revents;
+    int32 eventfd_readable;
+    int32 eventfd_writable;
+    int32 poll_readable_mismatch;
+    int32 poll_op;
+    int32 first_kq_waiters;
+    int32 last_kq_waiters;
+    uint64 file_ops;
+    uint64 file_poll;
+    char comm[KONSOLE_PREPTY_WAKE_COMM_LEN];
+    char kind[KONSOLE_PREPTY_WAKE_KIND_LEN];
+    char target[KONSOLE_PREPTY_WAKE_TARGET_LEN];
+    char path[KONSOLE_PREPTY_WAKE_PATH_LEN];
+    char peer_path[KONSOLE_PREPTY_WAKE_PATH_LEN];
+    char origin_sym[KONSOLE_PREPTY_WAKE_ORIGIN_LEN];
+    char origin_file[KONSOLE_PREPTY_WAKE_ORIGIN_LEN];
+    char eventfd_caller_sym[KONSOLE_PREPTY_WAKE_ORIGIN_LEN];
+    char eventfd_caller_file[KONSOLE_PREPTY_WAKE_ORIGIN_LEN];
+};
+
+struct konsole_prepty_wake_snapshot {
+    uint64 abi_version;
+    uint64 record_size;
+    uint64 capacity;
+    uint64 count;
+    uint64 next_seq;
+    uint64 dropped;
+    uint64 armed;
+    uint64 disarm_reason;
+    struct konsole_prepty_wake_record records[KONSOLE_PREPTY_WAKE_RING_CAP];
+    uint64 total_seen;
+    uint64 stored;
+    uint64 overwritten;
+    uint64 configured_limit;
+    uint64 first_seq;
+    uint64 last_seq;
+    uint64 first_ms;
+    uint64 last_ms;
+    uint64 span_ms;
+};
+
 /*
  * On-demand process-group profile snapshot. This is intentionally separate
  * from struct kstats: kstats is a global append-only counter ABI, while this
@@ -418,6 +577,117 @@ struct kprofile_pgroup {
 };
 
 #define KPROFILE_PGROUP_ABI_VERSION 1
+
+#define KPROFILE_USERPC_ABI_VERSION 1
+#define KPROFILE_USERPC_RING_CAP 4096
+#define KPROFILE_USERPC_COMM_LEN 16
+
+#define KPROFILE_USERPC_CTL_F_ENABLE 0x1U
+#define KPROFILE_USERPC_SAMPLE_F_USER 0x1U
+
+#define KSTATS_PROFILE_F_ENABLE 0x1U
+#define KSTATS_PROFILE_F_VFS_ENOENT_ATTR 0x2U
+#define KSTATS_PROFILE_F_MASK \
+    (KSTATS_PROFILE_F_ENABLE | KSTATS_PROFILE_F_VFS_ENOENT_ATTR)
+
+struct kprofile_userpc_config {
+    uint64 abi_version;
+    uint64 flags;
+    int32 target_pgid;
+    int32 reserved0;
+    uint64 period_ticks;
+    uint64 reserved[4];
+};
+
+struct kprofile_userpc_record {
+    uint64 seq;
+    uint64 timestamp;
+    uint64 uptime_ms;
+    uint64 rip;
+    uint64 rsp;
+    uint64 rbp;
+    uint64 trapno;
+    uint64 flags;
+    int32 cpu;
+    int32 pid;
+    int32 tgid;
+    int32 pgid;
+    char comm[KPROFILE_USERPC_COMM_LEN];
+};
+
+struct kprofile_userpc_snapshot {
+    uint64 abi_version;
+    uint64 record_size;
+    uint64 capacity;
+    uint64 stored;
+    uint64 total_seen;
+    uint64 dropped;
+    uint64 overwritten;
+    uint64 enabled;
+    int32 target_pgid;
+    int32 reserved0;
+    uint64 period_ticks;
+    uint64 next_seq;
+    uint64 first_seq;
+    uint64 last_seq;
+    struct kprofile_userpc_record records[KPROFILE_USERPC_RING_CAP];
+};
+
+#define KPROFILE_VFS_ENOENT_ABI_VERSION 2
+#define KPROFILE_VFS_ENOENT_TABLE_CAP 512
+#define KPROFILE_VFS_ENOENT_COMM_LEN 16
+#define KPROFILE_VFS_ENOENT_PREFIX_LEN 96
+#define KPROFILE_VFS_ENOENT_BASENAME_LEN 64
+
+enum kprofile_vfs_enoent_source {
+    KPROFILE_VFS_ENOENT_SOURCE_OPENAT_RET = 1,
+    KPROFILE_VFS_ENOENT_SOURCE_EXT4_LOOKUP = 2,
+};
+
+enum kprofile_vfs_enoent_dirfd_class {
+    KPROFILE_VFS_ENOENT_DIRFD_UNKNOWN = 0,
+    KPROFILE_VFS_ENOENT_DIRFD_ABSOLUTE = 1,
+    KPROFILE_VFS_ENOENT_DIRFD_AT_FDCWD = 2,
+    KPROFILE_VFS_ENOENT_DIRFD_FD = 3,
+};
+
+enum kprofile_vfs_enoent_flags_class {
+    KPROFILE_VFS_ENOENT_F_READ = 0x1,
+    KPROFILE_VFS_ENOENT_F_WRITE = 0x2,
+    KPROFILE_VFS_ENOENT_F_RDWR = 0x4,
+    KPROFILE_VFS_ENOENT_F_CREAT = 0x8,
+    KPROFILE_VFS_ENOENT_F_DIRECTORY = 0x10,
+    KPROFILE_VFS_ENOENT_F_NOFOLLOW = 0x20,
+    KPROFILE_VFS_ENOENT_F_PATH = 0x40,
+    KPROFILE_VFS_ENOENT_F_TMPFILE = 0x80,
+};
+
+struct kprofile_vfs_enoent_row {
+    uint64 count;
+    uint64 first_ms;
+    uint64 last_ms;
+    int32 source;
+    int32 pid;
+    int32 tgid;
+    int32 dirfd;
+    int32 dirfd_class;
+    uint32 flags;
+    uint32 flags_class;
+    char comm[KPROFILE_VFS_ENOENT_COMM_LEN];
+    char prefix[KPROFILE_VFS_ENOENT_PREFIX_LEN];
+    char basename[KPROFILE_VFS_ENOENT_BASENAME_LEN];
+};
+
+struct kprofile_vfs_enoent_snapshot {
+    uint64 abi_version;
+    uint64 row_size;
+    uint64 capacity;
+    uint64 enabled;
+    uint64 total;
+    uint64 stored;
+    uint64 dropped;
+    struct kprofile_vfs_enoent_row rows[KPROFILE_VFS_ENOENT_TABLE_CAP];
+};
 
 /* ------------------------------------------------------------------ */
 /*  Global atomic counters (defined in bio.c / e1000.c)               */
@@ -698,7 +968,17 @@ extern uint64 g_konsole_prepty_poll_rescan_ready_pipe_ticks;
 extern int g_kstats_profile_enabled;
 
 static inline int kstats_profile_enabled(void) {
+    return (__atomic_load_n(&g_kstats_profile_enabled, __ATOMIC_RELAXED) &
+            KSTATS_PROFILE_F_ENABLE) != 0;
+}
+
+static inline int kstats_profile_flags(void) {
     return __atomic_load_n(&g_kstats_profile_enabled, __ATOMIC_RELAXED);
+}
+
+static inline int kstats_profile_flag_enabled(int flag) {
+    int flags = kstats_profile_flags();
+    return (flags & KSTATS_PROFILE_F_ENABLE) != 0 && (flags & flag) != 0;
 }
 
 #define KSTATS_PROFILE_INC(counter)                                         \
@@ -720,10 +1000,22 @@ static inline int kstats_profile_enabled(void) {
 /** Fill a kstats struct with a point-in-time snapshot. */
 void kstats_collect(struct kstats *ks);
 int kprofile_pgroup_collect(pid_t pgid, struct kprofile_pgroup *kp);
-void kstats_profile_set(int enabled);
+int kprofile_userpc_configure(const struct kprofile_userpc_config *cfg);
+int kprofile_userpc_collect_snapshot(struct kprofile_userpc_snapshot *snap,
+                                     uint64 size);
+void kprofile_userpc_sample_trap(struct trapframe *tf, int from_user);
+int kprofile_vfs_enoent_collect_snapshot(
+    struct kprofile_vfs_enoent_snapshot *snap, uint64 size);
+void kprofile_vfs_enoent_record_openat(int dirfd, uint32 flags,
+                                       const char *path, uint64 path_len);
+void kprofile_vfs_enoent_record_ext4_lookup(const char *name,
+                                            uint64 name_len);
+void kstats_profile_set(int flags);
 int kstats_konsole_prepty_current(void);
 void kstats_konsole_prepty_exec(const char *path);
 void kstats_konsole_prepty_mark_pty(void);
 void kstats_konsole_prepty_futex_account(int ret, uint64 wait_ticks);
+int kstats_konsole_prepty_ring_snapshot(
+    struct konsole_prepty_wake_snapshot *snap, uint64 size);
 
 #endif /* __KERNEL_KSTATS_H */

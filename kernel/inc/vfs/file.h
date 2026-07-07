@@ -99,6 +99,8 @@ int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable,
 int vfs_fdtable_install_fd_at(struct vfs_fdtable *fdtable,
                               struct vfs_file *file, int fd);
 struct vfs_file *vfs_fdtable_get_file(struct vfs_fdtable *fdtable, int fd);
+int vfs_fdtable_find_file(struct vfs_fdtable *fdtable,
+                          struct vfs_file *file);
 struct vfs_file *vfs_fdtable_dealloc_fd(struct vfs_fdtable *fdtable, int fd);
 int vfs_fdtable_get_fdflags(struct vfs_fdtable *fdtable, int fd);
 int vfs_fdtable_set_fdflags(struct vfs_fdtable *fdtable, int fd, int flags);

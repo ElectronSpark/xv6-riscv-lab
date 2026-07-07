@@ -456,6 +456,33 @@ struct vfs_file *vfs_fdtable_get_file(struct vfs_fdtable *fdtable, int fd) {
 }
 
 /**
+ * vfs_fdtable_find_file - Find a visible fd for a file pointer
+ * @fdtable: The file descriptor table
+ * @needle: The file object to look up
+ *
+ * Returns the lowest current fd that points at @needle, or -1 if the file is
+ * not present in the table.  This is intended for diagnostics and fd
+ * attribution only; duplicated descriptors are inherently ambiguous.
+ */
+int vfs_fdtable_find_file(struct vfs_fdtable *fdtable,
+                          struct vfs_file *needle)
+{
+    if (fdtable == NULL || needle == NULL)
+        return -1;
+
+    rcu_read_lock();
+    for (int fd = 0; fd < NOFILE; fd++) {
+        struct vfs_file *file = rcu_dereference(fdtable->files[fd]);
+        if (IS_FD(file) && file == needle) {
+            rcu_read_unlock();
+            return fd;
+        }
+    }
+    rcu_read_unlock();
+    return -1;
+}
+
+/**
  * vfs_fdtable_dealloc_fd - Remove a file descriptor from the table
  * @fdtable: The file descriptor table
  * @fd: The file descriptor to deallocate

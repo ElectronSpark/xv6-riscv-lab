@@ -29,6 +29,7 @@
 #include "kqueue.h"
 #include "signal.h"
 #include "cmdline.h"
+#include "kstats.h"
 #include "kde_ready_trace.h"
 
 static int kde_ipc_trace_enabled(void)
@@ -112,9 +113,16 @@ struct eventfd_ctx {
     tq_t        rq;       /* readers waiting for counter > 0 */
     tq_t        wq;       /* writers waiting for space */
     uint64      count;
+    uint64      id;
     int         flags;    /* EFD_SEMAPHORE */
     struct vfs_file *file; /* back-pointer for kqueue notification */
 };
+
+static _Atomic uint64 eventfd_next_id = 1;
+
+static void eventfd_record_op(struct vfs_file *file, int op, uint64 before,
+                              uint64 after, uint64 value, uint64 read_value,
+                              int ret, void *caller);
 
 /* ── read ─────────────────────────────────────────────────────────────── */
 static ssize_t eventfd_read(struct vfs_file *file, char *buf, size_t count,
@@ -133,12 +141,18 @@ static ssize_t eventfd_read(struct vfs_file *file, char *buf, size_t count,
 
         if (file->f_flags & O_NONBLOCK) {
             spin_unlock(&ctx->lock);
+            eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_READ, 0, 0,
+                              0, 0, -EAGAIN,
+                              __builtin_return_address(0));
             return -EAGAIN;
         }
         wait_ret = tq_wait_in_state(&ctx->rq, &ctx->lock, NULL,
                                     THREAD_INTERRUPTIBLE);
         if (wait_ret < 0 || signal_pending(current) || killed(current)) {
             spin_unlock(&ctx->lock);
+            eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_READ, 0, 0,
+                              0, 0, -EINTR,
+                              __builtin_return_address(0));
             return -EINTR;
         }
     }
@@ -159,7 +173,12 @@ static ssize_t eventfd_read(struct vfs_file *file, char *buf, size_t count,
 
     /* Notify epoll/kqueue if counter became zero */
     if (ctx->file)
-        vfs_file_knote_notify(ctx->file, EVFILT_WRITE, 0);
+        vfs_file_knote_notify_eventfd(
+            ctx->file, EVFILT_WRITE, 0, KONSOLE_PREPTY_EVENTFD_OP_READ,
+            before, after, 0, val, sizeof(uint64),
+            __builtin_return_address(0));
+    eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_READ, before, after,
+                      0, val, sizeof(uint64), __builtin_return_address(0));
 
     if (user) {
         if (vm_copyout(current->vm, (uint64)buf, (char *)&val,
@@ -185,25 +204,41 @@ static ssize_t eventfd_write(struct vfs_file *file, const char *buf,
 
     if (user) {
         if (vm_copyin(current->vm, (char *)&val, (uint64)buf,
-                      sizeof(val)) < 0)
+                      sizeof(val)) < 0) {
+            eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_WRITE, 0, 0,
+                              0, 0, -EFAULT,
+                              __builtin_return_address(0));
             return -EFAULT;
+        }
     } else {
         val = *(const uint64 *)buf;
     }
 
-    if (val == (uint64)~0ULL)
+    if (val == (uint64)~0ULL) {
+        eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_WRITE, 0, 0,
+                          val, 0, -EINVAL,
+                          __builtin_return_address(0));
         return -EINVAL;
+    }
 
     spin_lock(&ctx->lock);
     while (EVENTFD_MAX - ctx->count < val) {
         if (file->f_flags & O_NONBLOCK) {
+            uint64 before = ctx->count;
             spin_unlock(&ctx->lock);
+            eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_WRITE,
+                              before, before, val, 0, -EAGAIN,
+                              __builtin_return_address(0));
             return -EAGAIN;
         }
         tq_wait_in_state(&ctx->wq, &ctx->lock, NULL,
                          THREAD_INTERRUPTIBLE);
         if (signal_pending(current) || killed(current)) {
+            uint64 before = ctx->count;
             spin_unlock(&ctx->lock);
+            eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_WRITE,
+                              before, before, val, 0, -EINTR,
+                              __builtin_return_address(0));
             return -EINTR;
         }
     }
@@ -218,7 +253,13 @@ static ssize_t eventfd_write(struct vfs_file *file, const char *buf,
 
     /* Notify epoll/kqueue that the fd is now readable */
     if (val != 0 && ctx->file)
-        vfs_file_knote_notify(ctx->file, EVFILT_READ, 0);
+        vfs_file_knote_notify_eventfd(
+            ctx->file, EVFILT_READ, 0, KONSOLE_PREPTY_EVENTFD_OP_WRITE,
+            before, after, val, 0, sizeof(uint64),
+            __builtin_return_address(0));
+    eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_WRITE, before, after,
+                      val, 0, sizeof(uint64),
+                      __builtin_return_address(0));
 
     kde_ipc_eventfd_trace("write", file, before, after, val,
                           sizeof(uint64));
@@ -291,21 +332,68 @@ int eventfd_file_is_eventfd(struct vfs_file *file)
            file->private_data != NULL;
 }
 
-int eventfd_signal_file(struct vfs_file *file, uint64 value)
+int eventfd_file_count(struct vfs_file *file, uint64 *count_out)
+{
+    return eventfd_file_info(file, count_out, NULL, NULL);
+}
+
+int eventfd_file_info(struct vfs_file *file, uint64 *count_out,
+                      uint64 *id_out, void **object_out)
 {
     struct eventfd_ctx *ctx;
+    uint64 count;
+    uint64 id;
 
     if (!eventfd_file_is_eventfd(file))
-        return -EINVAL;
-    if (value == 0)
-        return 0;
-    if (value == (uint64)~0ULL)
         return -EINVAL;
 
     ctx = file->private_data;
     spin_lock(&ctx->lock);
+    count = ctx->count;
+    id = ctx->id;
+    spin_unlock(&ctx->lock);
+    if (count_out != NULL)
+        *count_out = count;
+    if (id_out != NULL)
+        *id_out = id;
+    if (object_out != NULL)
+        *object_out = ctx;
+    return 0;
+}
+
+static void eventfd_record_op(struct vfs_file *file, int op, uint64 before,
+                              uint64 after, uint64 value, uint64 read_value,
+                              int ret, void *caller)
+{
+    kde_konsole_prepty_ring_record_eventfd_op(
+        file, op, before, after, value, read_value, ret, caller);
+}
+
+int eventfd_signal_file(struct vfs_file *file, uint64 value)
+{
+    struct eventfd_ctx *ctx;
+    void *caller = __builtin_return_address(0);
+
+    if (!eventfd_file_is_eventfd(file))
+        return -EINVAL;
+    if (value == 0) {
+        eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_SIGNAL, 0, 0,
+                          value, 0, 0, caller);
+        return 0;
+    }
+    if (value == (uint64)~0ULL) {
+        eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_SIGNAL, 0, 0,
+                          value, 0, -EINVAL, caller);
+        return -EINVAL;
+    }
+
+    ctx = file->private_data;
+    spin_lock(&ctx->lock);
     if (EVENTFD_MAX - ctx->count < value) {
+        uint64 before = ctx->count;
         spin_unlock(&ctx->lock);
+        eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_SIGNAL, before,
+                          before, value, 0, -EAGAIN, caller);
         return -EAGAIN;
     }
     uint64 before = ctx->count;
@@ -315,7 +403,11 @@ int eventfd_signal_file(struct vfs_file *file, uint64 value)
     spin_unlock(&ctx->lock);
 
     if (ctx->file)
-        vfs_file_knote_notify(ctx->file, EVFILT_READ, 0);
+        vfs_file_knote_notify_eventfd(
+            ctx->file, EVFILT_READ, 0, KONSOLE_PREPTY_EVENTFD_OP_SIGNAL,
+            before, after, value, 0, 0, caller);
+    eventfd_record_op(file, KONSOLE_PREPTY_EVENTFD_OP_SIGNAL, before, after,
+                      value, 0, 0, caller);
     kde_ipc_eventfd_trace("signal", file, before, after, value, 0);
     return 0;
 }
@@ -339,6 +431,7 @@ uint64 sys_eventfd2(void)
     spin_init(&ctx->lock, "eventfd");
     tq_init(&ctx->rq, "eventfd_rq", NULL);
     tq_init(&ctx->wq, "eventfd_wq", NULL);
+    ctx->id = __atomic_fetch_add(&eventfd_next_id, 1, __ATOMIC_RELAXED);
     ctx->count = initval;
     ctx->flags = flags & EFD_SEMAPHORE;
 
@@ -359,6 +452,8 @@ uint64 sys_eventfd2(void)
     if (flags & EFD_CLOEXEC)
         vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
     spin_unlock(&current->fdtable->lock);
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_EVENTFD_CREATE, -1, fd, f, NULL, fd, 1);
 
     return (uint64)fd;
 }
@@ -380,6 +475,7 @@ uint64 sys_eventfd(void)
     spin_init(&ctx->lock, "eventfd");
     tq_init(&ctx->rq, "eventfd_rq", NULL);
     tq_init(&ctx->wq, "eventfd_wq", NULL);
+    ctx->id = __atomic_fetch_add(&eventfd_next_id, 1, __ATOMIC_RELAXED);
     ctx->count = initval;
     ctx->flags = 0;
 
@@ -392,5 +488,8 @@ uint64 sys_eventfd(void)
     spin_lock(&current->fdtable->lock);
     ctx->file = current->fdtable->files[fd];
     spin_unlock(&current->fdtable->lock);
+    kde_konsole_prepty_ring_record_fd_lifecycle(
+        KONSOLE_PREPTY_FD_LIFECYCLE_EVENTFD_CREATE, -1, fd, ctx->file,
+        NULL, fd, 1);
     return (uint64)fd;
 }

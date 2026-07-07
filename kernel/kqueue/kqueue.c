@@ -26,6 +26,7 @@
 #include "vfs/unix_socket.h"
 #include "kqueue.h"
 #include "kqueue_types.h"
+#include "kde_ready_trace.h"
 #include "ksymbols.h"
 #include "list.h"
 #include "signal.h"
@@ -42,9 +43,6 @@ static int kqueue_file_poll(struct vfs_file *file, short events);
 static ssize_t kqueue_file_readlink(struct vfs_file *file, char *buf,
                                     size_t buflen);
 
-static int konsole_prepty_wake_source_trace_enabled(void);
-static int konsole_prepty_wake_source_trace_armed(void);
-static int konsole_prepty_wake_source_trace_take_slot(void);
 static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
                                       int64 data, int matched,
                                       int enqueued_new, int already_queued,
@@ -53,7 +51,13 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
                                       uint64 last_udata,
                                       struct kqueue *first_kq,
                                       struct kqueue *last_kq,
-                                      void *origin);
+                                      void *origin, int eventfd_op,
+                                      uint64 eventfd_counter_before,
+                                      uint64 eventfd_counter_after,
+                                      uint64 eventfd_value,
+                                      uint64 eventfd_read_value,
+                                      int eventfd_ret,
+                                      void *eventfd_caller);
 
 /* External filter ops (defined in kqueue_filters.c) */
 extern struct knote_ops knote_read_ops;
@@ -97,83 +101,6 @@ static int knote_is_file_filter(struct knote *kn)
     return kn->filter == EVFILT_READ || kn->filter == EVFILT_WRITE;
 }
 
-static int konsole_prepty_wake_source_trace_enabled(void)
-{
-    static int initialized;
-    static int enabled;
-    char value[16];
-
-    if (!initialized) {
-        enabled = cmdline_get_param("konsole_prepty_wake_source_trace", value,
-                                    sizeof(value)) == 0 &&
-            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
-        initialized = 1;
-    }
-    return enabled;
-}
-
-static int konsole_prepty_current_is_konsole(void)
-{
-    if (current == NULL)
-        return 0;
-    if (strncmp(current->name, "konsole", 7) == 0 ||
-        strncmp(current->name, "kde-konsole-she", 15) == 0)
-        return 1;
-    if (current->thread_group == NULL)
-        return 0;
-    return strstr(current->thread_group->exec_path, "/konsole") != NULL ||
-           strstr(current->thread_group->exec_path,
-                  "/kde-konsole-shell-wrapper") != NULL;
-}
-
-static int konsole_prepty_wake_source_trace_armed(void)
-{
-    static int armed;
-
-    if (!armed && konsole_prepty_current_is_konsole())
-        armed = 1;
-    return armed;
-}
-
-static uint64 konsole_prepty_wake_source_trace_limit(void)
-{
-    static uint64 limit;
-    char value[32];
-
-    if (limit == 0) {
-        limit = 512;
-        if (cmdline_get_param("konsole_prepty_wake_source_trace_limit", value,
-                              sizeof(value)) == 0 && value[0] != '\0')
-            limit = strtoul(value, NULL, 10);
-    }
-    return limit;
-}
-
-static int konsole_prepty_wake_source_trace_take_slot(void)
-{
-    static uint64 emitted;
-    uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
-
-    return slot < konsole_prepty_wake_source_trace_limit();
-}
-
-static void konsole_prepty_readlink_target(struct vfs_file *file, char *buf,
-                                           size_t buflen)
-{
-    if (buflen == 0)
-        return;
-    buf[0] = '\0';
-    if (file == NULL || file->ops == NULL || file->ops->readlink == NULL)
-        return;
-    ssize_t n = file->ops->readlink(file, buf, buflen);
-    if (n < 0)
-        buf[0] = '\0';
-    else {
-        size_t end = (size_t)n < buflen - 1 ? (size_t)n : buflen - 1;
-        buf[end] = '\0';
-    }
-}
-
 static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
                                       int64 data, int matched,
                                       int enqueued_new, int already_queued,
@@ -182,108 +109,20 @@ static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
                                       uint64 last_udata,
                                       struct kqueue *first_kq,
                                       struct kqueue *last_kq,
-                                      void *origin)
+                                      void *origin, int eventfd_op,
+                                      uint64 eventfd_counter_before,
+                                      uint64 eventfd_counter_after,
+                                      uint64 eventfd_value,
+                                      uint64 eventfd_read_value,
+                                      int eventfd_ret,
+                                      void *eventfd_caller)
 {
-    if (!konsole_prepty_wake_source_trace_enabled())
-        return;
-    if (!konsole_prepty_wake_source_trace_armed())
-        return;
-    if (!konsole_prepty_wake_source_trace_take_slot())
-        return;
-
-    static uint64 seq;
-    uint64 id = __atomic_fetch_add(&seq, 1, __ATOMIC_RELAXED) + 1;
-    const char *kind = "file";
-    char target[64];
-    target[0] = '\0';
-
-    uint64 ino = 0;
-    uint64 peer_ino = 0;
-    int unix_type = -1;
-    int unix_state = -1;
-    int unix_shutdown = 0;
-    int unix_bind_len = 0;
-    int unix_peer_bind_len = 0;
-    char path[UNIX_PATH_MAX];
-    char peer_path[UNIX_PATH_MAX];
-    path[0] = '\0';
-    peer_path[0] = '\0';
-    char origin_sym[64];
-    char origin_file[64];
-    uint32 origin_line = 0;
-    int origin_off = 0;
-    origin_sym[0] = '\0';
-    origin_file[0] = '\0';
-    if (origin != NULL) {
-        if (ksym_lookup((uint64)origin, origin_sym, sizeof(origin_sym),
-                        NULL) < 0)
-            origin_sym[0] = '\0';
-        ksymbols_t *sym = ksym_search((uint64)origin);
-        if (sym != NULL) {
-            ksym_get_location(sym, origin_file, sizeof(origin_file),
-                              &origin_line);
-            origin_off = ksym_get_offset(sym, (uint64)origin);
-        }
-    }
-
-    if (file != NULL && file->ops == &unix_socket_file_ops) {
-        kind = "unix";
-        struct unix_sock *sk = file->private_data;
-        if (sk != NULL) {
-            struct unix_sock *peer = NULL;
-            spin_lock(&sk->lock);
-            ino = sk->proc_ino;
-            unix_type = sk->type;
-            unix_state = sk->state;
-            unix_shutdown = sk->shutdown_flags;
-            unix_bind_len = (int)sk->bind_len;
-            if (sk->bound && sk->bind_len > 0)
-                safestrcpy(path, sk->bind_path, sizeof(path));
-            peer = sk->peer;
-            if (peer != NULL)
-                unix_sock_get_ref(peer);
-            spin_unlock(&sk->lock);
-
-            if (peer != NULL) {
-                spin_lock(&peer->lock);
-                peer_ino = peer->proc_ino;
-                unix_peer_bind_len = (int)peer->bind_len;
-                if (peer->bound && peer->bind_len > 0)
-                    safestrcpy(peer_path, peer->bind_path, sizeof(peer_path));
-                spin_unlock(&peer->lock);
-                unix_sock_put_ref(peer);
-            }
-        }
-    } else if (file != NULL && file->f_kind == VFS_FILE_KIND_PIPE) {
-        kind = "pipe";
-    } else {
-        konsole_prepty_readlink_target(file, target, sizeof(target));
-        if (strncmp(target, "anon_inode:[eventfd]", 20) == 0)
-            kind = "eventfd";
-        else if (strncmp(target, "anon_inode:[kqueue]", 20) == 0)
-            kind = "kqueue";
-        else if (target[0] != '\0')
-            kind = target;
-    }
-
-    printf("konsole-prepty-wake-source: seq=%lu ms=%lu pid=%d tgid=%d "
-           "name=%s file=%p kind=%s target=%s filter=%d data=%ld "
-           "matched=%d enqueued_new=%d already_queued=%d propagated=%d "
-           "first_ident=%lu last_ident=%lu first_udata=%lu last_udata=%lu "
-           "first_kq=%p last_kq=%p unix_ino=%lu unix_peer_ino=%lu "
-           "unix_type=%d unix_state=%d unix_shutdown=0x%x "
-           "unix_bind_len=%d unix_peer_bind_len=%d path=%s peer_path=%s "
-           "origin=%p origin_sym=%s origin_off=%d origin_file=%s "
-           "origin_line=%u\n",
-           id, sched_timer_now_ms(), current ? current->pid : -1,
-           current ? current->tgid : -1, current ? current->name : "(none)",
-           file, kind, target, filter, (long)data, matched, enqueued_new,
-           already_queued, propagated, first_ident, last_ident, first_udata,
-           last_udata, first_kq, last_kq, ino, peer_ino, unix_type,
-           unix_state, unix_shutdown, unix_bind_len, unix_peer_bind_len,
-           path[0] ? path : "-", peer_path[0] ? peer_path : "-", origin,
-           origin_sym[0] ? origin_sym : "-", origin_off,
-           origin_file[0] ? origin_file : "-", origin_line);
+    kde_konsole_prepty_ring_record_notify_eventfd(
+        file, filter, data, matched, enqueued_new, already_queued,
+        propagated, first_ident, last_ident, first_udata, last_udata,
+        first_kq, last_kq, origin, eventfd_op, eventfd_counter_before,
+        eventfd_counter_after, eventfd_value, eventfd_read_value,
+        eventfd_ret, eventfd_caller);
 }
 
 static int knote_is_clear_file_filter(struct knote *kn)
@@ -723,8 +562,11 @@ void knote_enqueue_with_data(struct knote *kn, int64 data, uint32 fflags) {
  * the kqueue propagation path loops back to the original file.
  */
 #define MAX_KNOTE_PROPAGATE 16
-static void vfs_file_knote_notify_origin(struct vfs_file *file, int filter,
-                                         int64 data, void *origin)
+static void vfs_file_knote_notify_origin_eventfd(
+    struct vfs_file *file, int filter, int64 data, void *origin,
+    int eventfd_op, uint64 eventfd_counter_before,
+    uint64 eventfd_counter_after, uint64 eventfd_value,
+    uint64 eventfd_read_value, int eventfd_ret, void *eventfd_caller)
 {
     if (file == NULL)
         return;
@@ -786,19 +628,37 @@ static void vfs_file_knote_notify_origin(struct vfs_file *file, int filter,
     konsole_prepty_trace_file(file, filter, data, matched, enqueued_new,
                               already_queued, nprop, first_ident, last_ident,
                               first_udata, last_udata, first_kq, last_kq,
-                              origin);
+                              origin, eventfd_op, eventfd_counter_before,
+                              eventfd_counter_after, eventfd_value,
+                              eventfd_read_value, eventfd_ret,
+                              eventfd_caller);
 
     /* Propagate to outer kqueues/polls without holding any knote_lock */
     for (int i = 0; i < nprop; i++) {
-        vfs_file_knote_notify_origin(propagate[i], EVFILT_READ, 0, origin);
+        vfs_file_knote_notify_origin_eventfd(
+            propagate[i], EVFILT_READ, 0, origin, eventfd_op,
+            eventfd_counter_before, eventfd_counter_after, eventfd_value,
+            eventfd_read_value, eventfd_ret, eventfd_caller);
         vfs_fput(propagate[i]);
     }
 }
 
 void vfs_file_knote_notify(struct vfs_file *file, int filter, int64 data)
 {
-    vfs_file_knote_notify_origin(file, filter, data,
-                                 __builtin_return_address(0));
+    vfs_file_knote_notify_origin_eventfd(
+        file, filter, data, __builtin_return_address(0), 0, 0, 0, 0, 0,
+        0, NULL);
+}
+
+void vfs_file_knote_notify_eventfd(
+    struct vfs_file *file, int filter, int64 data, int eventfd_op,
+    uint64 counter_before, uint64 counter_after, uint64 value,
+    uint64 read_value, int ret, void *eventfd_caller)
+{
+    vfs_file_knote_notify_origin_eventfd(
+        file, filter, data, __builtin_return_address(0), eventfd_op,
+        counter_before, counter_after, value, read_value, ret,
+        eventfd_caller);
 }
 
 /*

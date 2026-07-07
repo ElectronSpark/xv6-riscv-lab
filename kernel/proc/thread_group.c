@@ -42,6 +42,7 @@
 #include <smp/ipi.h>
 #include "accounting.h"
 #include "resource.h"
+#include "kde_ready_trace.h"
 
 #define DEFAULT_TIMER_SLACK_NS 50000ULL
 
@@ -702,6 +703,9 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
         target = __tg_pick_thread(tg, signo);
         if (target != NULL) {
             THREAD_SET_SIGPENDING(target);
+            kde_konsole_child_launch_trace_signal_note(
+                target, signo, KDE_KONSOLE_CHILD_SIGNAL_GROUP_QUEUED,
+                info->info.si_code, info->info.si_pid);
         }
     }
 

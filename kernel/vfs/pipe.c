@@ -23,6 +23,7 @@
 #include "vfs/vfs_types.h"
 #include "vfs/fcntl.h"
 #include "vfs/poll.h"
+#include "kde_ready_trace.h"
 #include <mm/vm.h>
 #include "mm/slab.h"
 #include "proc/sched.h"
@@ -35,66 +36,6 @@ static uint64 __pipe_next_id = 1;
 int snprintf(char *buf, size_t size, const char *fmt, ...);
 
 #define PIPE_IO_CHUNK PAGE_SIZE
-
-static int konsole_prepty_wake_source_trace_enabled(void)
-{
-    static int initialized;
-    static int enabled;
-    char value[16];
-
-    if (!initialized) {
-        enabled = cmdline_get_param("konsole_prepty_wake_source_trace", value,
-                                    sizeof(value)) == 0 &&
-            value[0] != '0' && value[0] != 'n' && value[0] != 'N';
-        initialized = 1;
-    }
-    return enabled;
-}
-
-static int konsole_prepty_current_is_konsole(void)
-{
-    if (current == NULL)
-        return 0;
-    if (strncmp(current->name, "konsole", 7) == 0 ||
-        strncmp(current->name, "kde-konsole-she", 15) == 0)
-        return 1;
-    if (current->thread_group == NULL)
-        return 0;
-    return strstr(current->thread_group->exec_path, "/konsole") != NULL ||
-           strstr(current->thread_group->exec_path,
-                  "/kde-konsole-shell-wrapper") != NULL;
-}
-
-static int konsole_prepty_pipe_trace_armed(void)
-{
-    static int armed;
-
-    if (!armed && konsole_prepty_current_is_konsole())
-        armed = 1;
-    return armed;
-}
-
-static uint64 konsole_prepty_pipe_trace_limit(void)
-{
-    static uint64 limit;
-    char value[32];
-
-    if (limit == 0) {
-        limit = 512;
-        if (cmdline_get_param("konsole_prepty_wake_source_trace_limit", value,
-                              sizeof(value)) == 0 && value[0] != '\0')
-            limit = strtoul(value, NULL, 10);
-    }
-    return limit;
-}
-
-static int konsole_prepty_pipe_trace_take_slot(void)
-{
-    static uint64 emitted;
-    uint64 slot = __atomic_fetch_add(&emitted, 1, __ATOMIC_RELAXED);
-
-    return slot < konsole_prepty_pipe_trace_limit();
-}
 
 void pipe_init(void) {
     int ret = slab_cache_init(&__pipe_cache, "pipe_cache", sizeof(struct pipe),
@@ -502,26 +443,8 @@ static ssize_t __pipe_file_write(struct vfs_file *file, const char *buf,
         if (rf != NULL)
             rf_ref = vfs_fdup(rf);
         spin_unlock(&pi->writer_lock);
-        if (konsole_prepty_wake_source_trace_enabled() &&
-            konsole_prepty_pipe_trace_armed() &&
-            konsole_prepty_pipe_trace_take_slot()) {
-            uint readable_after = nwrite - nread;
-            uint readable_before = readable_after > (uint)ret
-                                       ? readable_after - (uint)ret
-                                       : 0;
-            static uint64 pipe_seq;
-            uint64 id = __atomic_fetch_add(&pipe_seq, 1,
-                                           __ATOMIC_RELAXED) + 1;
-            printf("konsole-prepty-pipe-write: seq=%lu ms=%lu pid=%d "
-                   "tgid=%d name=%s pipe=%p write_file=%p read_file=%p "
-                   "bytes=%ld count=%lu nread=%u nwrite=%u "
-                   "readable_before=%u readable_after=%u\n",
-                   id, sched_timer_now_ms(), current ? current->pid : -1,
-                   current ? current->tgid : -1,
-                   current ? current->name : "(none)", pi, wf, rf,
-                   (long)ret, (uint64)count, nread, nwrite,
-                   readable_before, readable_after);
-        }
+        kde_konsole_prepty_ring_record_pipe_write(pi, wf, rf, ret, count,
+                                                  nread, nwrite);
         if (rf_ref != NULL) {
             vfs_file_knote_notify(rf_ref, EVFILT_READ, 0);
             vfs_fput(rf_ref);
