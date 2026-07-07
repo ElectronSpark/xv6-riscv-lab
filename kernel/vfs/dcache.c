@@ -101,15 +101,23 @@ void __vfs_dcache_global_init(void) {
 
 int __vfs_dcache_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                         const char *name, size_t name_len) {
+    /*
+     * -EAGAIN means "cache says nothing, resolve via the driver" — used for
+     * every fall-through / sentinel case below.  -ENOENT is reserved to mean
+     * UNIQUELY "genuine cached negative hit" (see the negative-hit return
+     * further down), because vfs_ilookup treats -ENOENT as load-bearing when
+     * the neg-dcache gate is on.  Never return -ENOENT for bad-args or the
+     * "."/".." sentinels, or "." / ".." resolution would break.
+     */
     if (!__vfs_dcache_initialized || dir == NULL || dentry == NULL ||
         name == NULL || name_len == 0 || dir->sb == NULL) {
-        return -ENOENT;
+        return -EAGAIN;
     }
     if (name_len == 1 && name[0] == '.') {
-        return -ENOENT;
+        return -EAGAIN;
     }
     if (name_len == 2 && name[0] == '.' && name[1] == '.') {
-        return -ENOENT;
+        return -EAGAIN;
     }
 
     uint64 hash = __vfs_dcache_hash(dir->sb, dir->ino, name, name_len);
@@ -133,6 +141,16 @@ int __vfs_dcache_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             continue;
         }
         if (entry->negative) {
+            /*
+             * Only honor a negative hit against a still-valid superblock.
+             * The parent_seq guard above already covers in-dir mutations;
+             * this additionally rejects entries whose mount was torn down
+             * (dangling parent_sb), mirroring the positive branch's
+             * child_sb->valid check below.
+             */
+            if (entry->parent_sb == NULL || !entry->parent_sb->valid) {
+                continue;
+            }
             negative = true;
             hit = true;
             break;
@@ -153,6 +171,8 @@ int __vfs_dcache_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     }
     if (negative) {
         KSTATS_PROFILE_INC(g_vfs_lookup_negative_hits);
+        /* -ENOENT UNIQUELY means "genuine cached negative hit" — all
+         * fall-through/sentinel cases above return -EAGAIN instead. */
         return -ENOENT;
     }
 
@@ -234,6 +254,16 @@ void __vfs_dcache_store_negative(struct vfs_inode *dir, const char *name,
                                  size_t name_len) {
     if (!__vfs_dcache_initialized || dir == NULL || name == NULL ||
         name_len == 0 || dir->sb == NULL || !S_ISDIR(dir->mode)) {
+        return;
+    }
+    /*
+     * Synthetic filesystems (procfs/sysfs/devtmpfs) create/expose names
+     * dynamically without going through vfs_create -> bump_dir_seq, so a
+     * cached negative would never be invalidated and would shadow a
+     * later-appearing node (e.g. /proc/<pid>).  Never store negatives for
+     * such superblocks (honor site also refuses them, belt-and-suspenders).
+     */
+    if (dir->sb->no_neg_dcache) {
         return;
     }
     if (name_len == 1 && name[0] == '.') {

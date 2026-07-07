@@ -290,6 +290,7 @@ static int devtmpfs_mount(struct vfs_inode *mountpoint,
     sb->vfs_sb.block_size = PAGE_SIZE;
     sb->vfs_sb.root_inode = &root_inode->vfs_inode;
     sb->vfs_sb.backendless = 1;
+    sb->vfs_sb.no_neg_dcache = 1; /* dynamic dev nodes bypass vfs_create bump */
     sb->vfs_sb.ops = &devtmpfs_superblock_ops;
 
     *ret_sb = &sb->vfs_sb;

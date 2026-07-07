@@ -90,6 +90,13 @@ struct vfs_superblock {
         uint64 unmounting : 1; // Unmount initiated, blocking new operations
         uint64 attached : 1; // Attached to mount tree (set on mount, cleared on
                              // lazy unmount)
+        uint64 no_neg_dcache : 1; // Synthetic fs (procfs/sysfs/devtmpfs) that
+                                  // exposes names dynamically without going
+                                  // through vfs_create/bump_dir_seq. Negative
+                                  // dcache entries must never be stored for or
+                                  // honored against such a superblock, else a
+                                  // cached ENOENT would shadow a later-appearing
+                                  // node (e.g. /proc/<pid>).
     };
     struct vfs_superblock
         *parent_sb;               // parent superblock if mounted on another fs

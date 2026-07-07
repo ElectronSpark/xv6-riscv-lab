@@ -341,6 +341,7 @@ static int sysfs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
 
     sb = &ssb->vfs_sb;
     sb->backendless = 1;
+    sb->no_neg_dcache = 1; /* dynamic names — no vfs_create bump_dir_seq */
     sb->block_size = 512;
     sb->ops = &sysfs_sb_ops;
 

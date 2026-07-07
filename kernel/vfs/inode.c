@@ -19,6 +19,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
+#include "cmdline.h"
 #include <smp/atomic.h>
 #include "param.h"
 #include "errno.h"
@@ -596,6 +597,28 @@ static struct vfs_inode *__vfs_dotdot_target(struct vfs_inode *dir) {
     return NULL;
 }
 
+/*
+ * vfs_neg_dcache=1 lets vfs_ilookup honor a NEGATIVE dcache hit (skip the
+ * filesystem-driver descent on a cached ENOENT).  Diagnostic / opt-in only:
+ * default OFF, so gate-off behavior is byte-for-byte identical to today
+ * (negative hits fall through to dir->ops->lookup).  Parsed once and cached,
+ * mirroring the cmdline gate pattern in vfs_syscall.c.
+ */
+static int vfs_neg_dcache_enabled(void) {
+    static int initialized;
+    static int enabled;
+    char value[8];
+
+    if (!initialized) {
+        enabled = cmdline_get_param("vfs_neg_dcache", value,
+                                    sizeof(value)) == 0 &&
+            value[0] != '0' && value[0] != 'n' && value[0] != 'N' &&
+            value[0] != '\0';
+        initialized = 1;
+    }
+    return enabled;
+}
+
 // Lookup a dentry in a directory inode
 // Will assume the VFS handled "."
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
@@ -641,6 +664,19 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     int ret = __vfs_dcache_lookup(dir, dentry, name, name_len);
     if (ret == 0 || ret == -ENOMEM) {
         return ret;
+    }
+    /*
+     * Negative dcache hit: __vfs_dcache_lookup returns -ENOENT only for a
+     * cached negative on a still-valid superblock (parent_seq + sb->valid
+     * guarded inside the cache).  Honor it (skip the ext4/driver descent)
+     * only when the gate is on and the dir's fs is not a synthetic fs whose
+     * names appear dynamically without bump_dir_seq (no_neg_dcache — the
+     * store side already refuses these; this is belt-and-suspenders).
+     * Otherwise fall through as before.
+     */
+    if (ret == -ENOENT && vfs_neg_dcache_enabled() &&
+        !dir->sb->no_neg_dcache) {
+        return -ENOENT;
     }
     vfs_superblock_rlock(dir->sb);
     vfs_ilock(dir);
@@ -950,12 +986,19 @@ retry:
         goto retry;
     }
 out:
-    vfs_iunlock(dir);
-    vfs_superblock_unlock(sb);
-
+    /*
+     * Bump the dir seq while STILL holding vfs_ilock(dir), before unlock.
+     * The negative/positive dcache honor-read is lockless, so the seq must
+     * advance before the newly-created entry becomes visible to other CPUs
+     * (i.e. before we release the dir lock) — otherwise a concurrent
+     * honor-read could load the stale seq, match a cached negative, and
+     * return ENOENT for a file that now exists.
+     */
     if (!IS_ERR(ret_ptr)) {
         __vfs_dcache_bump_dir_seq(dir);
     }
+    vfs_iunlock(dir);
+    vfs_superblock_unlock(sb);
 
     // End transaction AFTER releasing locks
     if (sb->ops->end_transaction != NULL) {
@@ -1022,12 +1065,12 @@ retry:
         goto retry;
     }
 out:
-    vfs_iunlock(dir);
-    vfs_superblock_unlock(sb);
-
+    /* Bump seq under vfs_ilock(dir), before unlock — see vfs_create. */
     if (!IS_ERR(ret_ptr)) {
         __vfs_dcache_bump_dir_seq(dir);
     }
+    vfs_iunlock(dir);
+    vfs_superblock_unlock(sb);
 
     // End transaction AFTER releasing locks
     if (sb->ops->end_transaction != NULL) {
@@ -1098,13 +1141,13 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, const char *name,
     }
     ret = dir->ops->link(target, dir, name, name_len);
 out:
-    vfs_iunlock_two(target, dir);
-out_unlock_sb:
-    vfs_superblock_unlock(sb);
-
+    /* Bump seq under vfs_ilock(dir), before unlock — see vfs_create. */
     if (ret == 0) {
         __vfs_dcache_bump_dir_seq(dir);
     }
+    vfs_iunlock_two(target, dir);
+out_unlock_sb:
+    vfs_superblock_unlock(sb);
 
     // End transaction AFTER releasing locks
     if (sb->ops->end_transaction != NULL) {
@@ -1236,12 +1279,18 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
 out:
     vfs_iunlock(target);
 out_unlock:
-    vfs_iunlock(dir);
-    vfs_superblock_unlock(sb);
-
+    /*
+     * Bump seq under vfs_ilock(dir), before unlock — see vfs_create.
+     * For unlink/rmdir this also fixes a pre-existing positive-cache stale
+     * window: the removed entry's positive dcache must be invalidated
+     * before the dir lock is released, or a concurrent honor-read could
+     * still resolve the just-removed name.
+     */
     if (ret == 0) {
         __vfs_dcache_bump_dir_seq(dir);
     }
+    vfs_iunlock(dir);
+    vfs_superblock_unlock(sb);
 
     // End transaction AFTER releasing locks
     if (sb->ops->end_transaction != NULL) {
@@ -1322,12 +1371,12 @@ retry:
         vfs_iunlock(ret_ptr);
     }
 out:
-    vfs_iunlock(dir);
-    vfs_superblock_unlock(sb);
-
+    /* Bump seq under vfs_ilock(dir), before unlock — see vfs_create. */
     if (!IS_ERR(ret_ptr)) {
         __vfs_dcache_bump_dir_seq(dir);
     }
+    vfs_iunlock(dir);
+    vfs_superblock_unlock(sb);
 
     // End transaction AFTER releasing locks
     if (sb->ops->end_transaction != NULL) {
@@ -1380,15 +1429,24 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
         goto out_iunlock;
     }
     ret = old_dir->ops->move(old_dir, old_dentry, new_dir, name, name_len);
+    if (ret == 0) {
+        /*
+         * Bump BOTH dirs' seqs while still holding their inode locks,
+         * before unlock — see vfs_create.  The source dir gains a stale
+         * positive (old name removed) and the destination dir gains a
+         * new name that may have a cached negative; both must be
+         * invalidated before the locks are dropped.
+         */
+        __vfs_dcache_bump_dir_seq(old_dir);
+        if (new_dir != old_dir) {
+            __vfs_dcache_bump_dir_seq(new_dir);
+        }
+    }
 out_iunlock:
     vfs_iunlock_two(old_dir, new_dir);
 out:
     vfs_superblock_unlock(old_dir->sb);
     if (ret == 0) {
-        __vfs_dcache_bump_dir_seq(old_dir);
-        if (new_dir != old_dir) {
-            __vfs_dcache_bump_dir_seq(new_dir);
-        }
         vfs_inotify_move_event(old_dir, new_dir, NULL,
                                old_dentry->name, old_dentry->name_len,
                                name, name_len);
@@ -1452,12 +1510,12 @@ retry:
 
     // Note: symlinks don't need parent reference (no ".." traversal needed)
 out:
-    vfs_iunlock(dir);
-    vfs_superblock_unlock(sb);
-
+    /* Bump seq under vfs_ilock(dir), before unlock — see vfs_create. */
     if (!IS_ERR(ret_ptr)) {
         __vfs_dcache_bump_dir_seq(dir);
     }
+    vfs_iunlock(dir);
+    vfs_superblock_unlock(sb);
 
     // End transaction AFTER releasing locks
     if (sb->ops->end_transaction != NULL) {

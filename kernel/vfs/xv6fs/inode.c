@@ -106,7 +106,13 @@ int xv6fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
 
         buffer_head_t *bh = sb_bread(xv6_sb, addr);
         if (bh == NULL)
-            continue;
+            /*
+             * Transient directory-block read failure.  Must NOT fall through
+             * to ENOENT: the VFS would cache that as a negative dentry and a
+             * later honor-read would report the (possibly existing) name as
+             * absent.  Return the I/O error so no negative is stored.
+             */
+            return -EIO;
 
         memmove(&de, bh->b_data + block_off, sizeof(de));
         bh_release(bh);

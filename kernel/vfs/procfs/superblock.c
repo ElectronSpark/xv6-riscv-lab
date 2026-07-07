@@ -812,6 +812,7 @@ static int procfs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
 
     struct vfs_superblock *sb = &psb->vfs_sb;
     sb->backendless = 1;
+    sb->no_neg_dcache = 1; /* dynamic names (/proc/<pid>) — no vfs_create bump */
     sb->block_size  = 512;
     sb->ops         = &procfs_sb_ops;
 
