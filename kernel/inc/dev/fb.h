@@ -1752,6 +1752,17 @@ struct fb_gpu_stats {
     uint64 virtio_present_copy_drain_ticks; /* total present drain time */
     uint64 virtio_present_copy_drain_last_us; /* last present drain time */
     uint64 virtio_present_copy_drain_max_us; /* max present drain time */
+    /* Append-only ABI: FB_GPU_GET_STATS copies out sizeof(stats) and guest
+     * tools may be built against an older layout, so new fields must only be
+     * added at the END of this struct. */
+    uint64 kms_flips_paced_total; /* flips whose completion event was vblank-paced */
+    uint64 kms_paced_delay_us_total; /* summed vblank-edge deferral of paced events (us) */
+    uint64 kms_paced_dropped_total; /* paced flip-complete events dropped undelivered */
+    /* SLICE 3 (virtio_gpu_async_cursor): async cursor-plane image uploads.
+     * Append-only ABI — these MUST stay at the end of the struct. */
+    uint64 cursor_async_submits_total; /* cursor image uploads pushed by the async worker */
+    uint64 cursor_async_coalesced_total; /* pending cursor images superseded before submit (latest-wins) */
+    uint64 cursor_async_errors_total; /* async cursor image uploads that failed in the worker */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

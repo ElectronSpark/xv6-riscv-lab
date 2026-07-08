@@ -509,13 +509,44 @@ virtio_gpu_fill_default_injected_cursor(uint32 *pixels)
 }
 
 /*
+ * SLICE 3 gate: virtio_gpu_async_cursor (default OFF).  Cached like the other
+ * virtio_gpu trace toggles so the hot cursor path never re-parses cmdline.
+ */
+static int virtio_gpu_async_cursor_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = virtio_gpu_cmdline_enabled("virtio_gpu_async_cursor");
+    return cached;
+}
+
+/* Single-threaded workqueue that drains the pending cursor image off the
+ * ioctl caller's thread.  max_active=1 keeps cursor_async_work_pixels and
+ * cursor_async_inflight owned by exactly one context at a time. */
+static struct workqueue *virtio_gpu_cursor_async_wq;
+static struct work_struct virtio_gpu_cursor_async_work;
+/* queue_work() has no double-queue guard; this flag mirrors the reap
+ * worker's discipline (cleared at worker entry so a racing ioctl re-queues). */
+static int virtio_gpu_cursor_async_work_queued;
+
+static int virtio_gpu_user_set_cursor_sync(const void *pixels, uint32 width,
+                                           uint32 height, uint32 hot_x,
+                                           uint32 hot_y);
+
+/*
  * Upload (or replace) the hardware cursor image.  pixels points to a kernel
  * buffer of width*height BGRA pixels (0xAARRGGBB) with width,height <= 64.
  * Rotate among a few resources so QEMU never sees us rewrite the image
  * resource currently bound to the hardware cursor plane.
+ *
+ * This is the synchronous body: it runs the fenced TRANSFER_TO_HOST_2D on the
+ * control queue and blocks for the host ack.  Gate OFF calls it inline (the
+ * historical behavior); gate ON calls it from the async worker only.
  */
-int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
-                               uint32 height, uint32 hot_x, uint32 hot_y)
+static int virtio_gpu_user_set_cursor_sync(const void *pixels, uint32 width,
+                                           uint32 height, uint32 hot_x,
+                                           uint32 hot_y)
 {
     struct virtio_gpu *g = &gpu;
     struct virtio_gpu_update_cursor cmd;
@@ -620,6 +651,129 @@ int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
                qemu_gtk_cursor_compat);
     }
     mutex_unlock(&g->op_lock);
+    return 0;
+}
+
+/*
+ * Async cursor worker.  Runs on the single-threaded virtio_gpu_cursor_async_wq
+ * (process context).  Latest-wins loop: snapshot the newest pending image under
+ * cursor_async_lock (a fast memcpy), release the lock, then run the slow fenced
+ * upload from the private snapshot buffer.  If a newer image arrived while the
+ * upload was in flight, loop again; otherwise clear inflight and return.
+ *
+ * Lock discipline: cursor_async_lock is held only for the snapshot/bookkeeping
+ * and is always dropped before virtio_gpu_user_set_cursor_sync() takes op_lock,
+ * so the leaf lock never nests inside op_lock/g->lock.
+ */
+static void virtio_gpu_cursor_async_worker(struct work_struct *work)
+{
+    struct virtio_gpu *g = (struct virtio_gpu *)work->data;
+    uint32 width;
+    uint32 height;
+    uint32 hot_x;
+    uint32 hot_y;
+    int ret;
+
+    /* Clear BEFORE draining so an ioctl that posts a new image mid-upload
+     * re-queues us instead of being lost (the work_struct is off the list
+     * while running, so re-queue is safe). */
+    __atomic_store_n(&virtio_gpu_cursor_async_work_queued, 0,
+                     __ATOMIC_RELEASE);
+
+    for (;;) {
+        spin_lock(&g->cursor_async_lock);
+        if (!g->cursor_async_pending_valid) {
+            g->cursor_async_inflight = 0;
+            spin_unlock(&g->cursor_async_lock);
+            return;
+        }
+        width = g->cursor_async_pending_w;
+        height = g->cursor_async_pending_h;
+        hot_x = g->cursor_async_pending_hot_x;
+        hot_y = g->cursor_async_pending_hot_y;
+        memmove(g->cursor_async_work_pixels, g->cursor_async_pending_pixels,
+                (uint64)width * height * sizeof(uint32));
+        g->cursor_async_pending_valid = 0;
+        g->cursor_async_inflight = 1;
+        spin_unlock(&g->cursor_async_lock);
+
+        ret = virtio_gpu_user_set_cursor_sync(g->cursor_async_work_pixels,
+                                              width, height, hot_x, hot_y);
+        if (ret != 0)
+            __atomic_fetch_add(&g->cursor_async_errors_total, 1,
+                               __ATOMIC_RELAXED);
+        else
+            __atomic_fetch_add(&g->cursor_async_submits_total, 1,
+                               __ATOMIC_RELAXED);
+    }
+}
+
+static void virtio_gpu_cursor_async_init(struct virtio_gpu *g)
+{
+    spin_init(&g->cursor_async_lock, "vgpu_curasync");
+    g->cursor_async_lock_ready = 1;
+    virtio_gpu_cursor_async_wq = workqueue_create("vgpu-cursor", 1);
+    if (virtio_gpu_cursor_async_wq == NULL) {
+        printf("virtio_gpu: cursor async workqueue unavailable; "
+               "cursor uploads stay synchronous\n");
+        return;
+    }
+    init_work_struct(&virtio_gpu_cursor_async_work,
+                     virtio_gpu_cursor_async_worker, (uint64)g);
+}
+
+/*
+ * Public cursor-image entry point.  Gate OFF: byte-for-byte the historical
+ * synchronous upload.  Gate ON: copy the latest image into the single pending
+ * slot (latest-wins coalescing — rapid re-uploads drop the superseded image)
+ * and kick the worker, returning immediately so the compositor thread never
+ * blocks on the fenced host round trip.
+ */
+int virtio_gpu_user_set_cursor(const void *pixels, uint32 width,
+                               uint32 height, uint32 hot_x, uint32 hot_y)
+{
+    struct virtio_gpu *g = &gpu;
+
+    if (!virtio_gpu_async_cursor_enabled() ||
+        virtio_gpu_cursor_async_wq == NULL || !g->cursor_async_lock_ready)
+        return virtio_gpu_user_set_cursor_sync(pixels, width, height, hot_x,
+                                               hot_y);
+
+    /* Same cheap validation as the sync path so bad input still fails fast
+     * with the same errno.  The host-cursor-only / all-transparent policy and
+     * the actual upload run inside the worker's _sync call. */
+    if (!g->initialized || !g->cursor_ready || pixels == NULL)
+        return -ENODEV;
+    if (width == 0 || height == 0 ||
+        width > VIRTIO_GPU_CURSOR_DIM || height > VIRTIO_GPU_CURSOR_DIM)
+        return -EINVAL;
+
+    spin_lock(&g->cursor_async_lock);
+    /* Coalesce: a still-unsubmitted image is being dropped in favor of this
+     * newer one (latest-wins).  Never grows past this one pending slot. */
+    if (g->cursor_async_pending_valid)
+        __atomic_fetch_add(&g->cursor_async_coalesced_total, 1,
+                           __ATOMIC_RELAXED);
+    memmove(g->cursor_async_pending_pixels, pixels,
+            (uint64)width * height * sizeof(uint32));
+    g->cursor_async_pending_w = width;
+    g->cursor_async_pending_h = height;
+    g->cursor_async_pending_hot_x = hot_x;
+    g->cursor_async_pending_hot_y = hot_y;
+    g->cursor_async_pending_valid = 1;
+    spin_unlock(&g->cursor_async_lock);
+
+    /* Kick the worker unless one is already queued (queue_work has no
+     * double-queue guard; only the 0->1 winner enqueues).  queue_work only
+     * fails when the queue is inactive, in which case nothing was enqueued so
+     * we must release the flag for a later retry (same as the reap worker). */
+    if (__atomic_exchange_n(&virtio_gpu_cursor_async_work_queued, 1,
+                            __ATOMIC_ACQ_REL) == 0) {
+        if (!queue_work(virtio_gpu_cursor_async_wq,
+                        &virtio_gpu_cursor_async_work))
+            __atomic_store_n(&virtio_gpu_cursor_async_work_queued, 0,
+                             __ATOMIC_RELEASE);
+    }
     return 0;
 }
 
@@ -970,6 +1124,11 @@ void virtio_gpu_init(void)
      * compositor falls back to the software cursor. */
     (void)virtio_gpu_cursor_queue_init(g);
 
+    /* SLICE 3: async cursor-image workqueue (used only when the
+     * virtio_gpu_async_cursor gate is set; the lock/flag stay valid either
+     * way so the gate can be read on the hot path without further checks). */
+    virtio_gpu_cursor_async_init(g);
+
     printf("virtio_gpu: driver ok\n");
     status |= VIRTIO_CONFIG_S_DRIVER_OK;
     cfg->device_status = status;
@@ -1181,6 +1340,15 @@ void virtio_gpu_get_fb_stats(struct fb_gpu_stats *stats)
         virtio_gpu_ticks_to_us(hot_shape_retire_max_ticks);
     stats->virtio_hot_shape_failures = hot_shape_failures;
     stats->virtio_hot_shape_mixed = hot_shape_mixed;
+
+    /* SLICE 3: async cursor-image counters (append-only ABI, updated with
+     * relaxed atomics off g->lock; a torn read here is harmless). */
+    stats->cursor_async_submits_total =
+        __atomic_load_n(&g->cursor_async_submits_total, __ATOMIC_RELAXED);
+    stats->cursor_async_coalesced_total =
+        __atomic_load_n(&g->cursor_async_coalesced_total, __ATOMIC_RELAXED);
+    stats->cursor_async_errors_total =
+        __atomic_load_n(&g->cursor_async_errors_total, __ATOMIC_RELAXED);
 }
 
 int virtio_gpu_has_virgl(void)

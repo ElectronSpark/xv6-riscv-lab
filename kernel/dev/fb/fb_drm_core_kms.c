@@ -1330,6 +1330,200 @@ static void gpu_kms_sample_vblank_locked(uint64 min_sequence,
         *timestamp_ns_out = timestamp_ns;
 }
 
+/*
+ * Vblank-paced legacy page-flip completion (gate:
+ * virtio_gpu_vblank_paced_flip, DEFAULT OFF).
+ *
+ * kwin 5.27's legacy (non-atomic) RenderLoop paces itself off the
+ * DRM_MODE_PAGE_FLIP_EVENT completion. When that event is delivered
+ * synchronously from inside the page-flip ioctl its timestamp is grid-snapped
+ * and up to a refresh interval stale, so the RenderLoop has no real phase and
+ * free-runs. With the gate on, the flip's present work still happens in the
+ * ioctl exactly as before -- only the completion-event queue+notify is deferred
+ * to the next synthetic vblank edge, giving kwin a phase-accurate clock anchor.
+ *
+ * KNOWN TRADEOFF: pacing flip-complete to the vblank edge caps flip-event
+ * cadence at the synthetic refresh rate (~60 Hz). The M6 mesakmsgl direct-KMS
+ * benchmark (118-125 FPS unthrottled) will read ~60 under the gate -- that is
+ * the expected vsync semantic, not a regression; interpret the M6 A/B run
+ * accordingly.
+ */
+static int gpu_kms_vblank_paced_flip_enabled(void)
+{
+    static int initialized;
+    static int enabled; /* DEFAULT OFF: synchronous flip-complete delivery */
+    char value[8];
+
+    if (!initialized) {
+        if (cmdline_get_param("virtio_gpu_vblank_paced_flip", value,
+                              sizeof(value)) == 0)
+            enabled = value[0] != '0' && value[0] != 'n' &&
+                      value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+/*
+ * Deferred flip-complete descriptor. Deliberately holds the owner *id* (which
+ * is allocated monotonically and never reused, see gpu_alloc_render_owner_id)
+ * rather than a raw owner pointer: sched_timer timers are not cancelable, so
+ * the callback may still run after the drm file closes and kvfree()s its owner.
+ * The callback re-resolves the owner by id under fb_state.lock and drops the
+ * event if the file has since gone away, so there is no use-after-free.
+ */
+struct gpu_drm_paced_flip {
+    uint64 owner_id;
+    pid_t owner_tgid;
+    uint64 user_data;
+    uint64 sequence;
+    uint64 timestamp_ns;
+    uint32 crtc_id;
+};
+
+/*
+ * Timer callback for a deferred flip-complete event.
+ *
+ * CONTEXT: sched_timer_add() fires this from workqueue (kthread) context (the
+ * timer soft-IRQ only queue_work()s onto __sched_timer_wq, see
+ * timer/sched_timer.c __timer_callback -> __work_callback), so taking the
+ * fb_state.lock spinlock here is safe -- it is never a sleeping lock and no
+ * hard-IRQ handler takes it.
+ *
+ * LIFETIME: the owner is re-resolved by id under fb_state.lock. While the owner
+ * is registered and we hold that lock it cannot be freed, because
+ * gpu_fops_release() clears drm_event_file and unregisters (and only then
+ * kvfree()s) the owner under the very same lock. We fdup() the event file while
+ * still holding the lock so the notify below keeps the file alive independently
+ * of the owner.
+ *
+ * DROP OBSERVABILITY: once the flip ioctl has returned 0, a silently dropped
+ * completion event freezes the client's render loop with nothing to diagnose,
+ * so an undelivered event on a still-open file bumps kms_paced_dropped_total
+ * (an owner that already closed is a benign drop and is not counted). One
+ * residual silent path remains outside this file: sched_timer's
+ * __timer_callback drops the work item when queue_work() on __sched_timer_wq
+ * fails (timer/sched_timer.c:79-84). That workqueue is created at boot and
+ * never destroyed, so the path is unreachable today, but it is undefended;
+ * hardening it belongs to sched_timer core, not this slice.
+ */
+static void gpu_drm_paced_flip_timer_cb(void *arg)
+{
+    struct gpu_drm_paced_flip *pf = arg;
+    struct fb_gpu_render_owner *owner;
+    struct vfs_file *file = NULL;
+
+    if (pf == NULL)
+        return;
+
+    spin_lock(&fb_state.lock);
+    owner = fb_gpu_render_owner_lookup_locked(pf->owner_id, pf->owner_tgid);
+    if (owner != NULL && owner->drm_event_file != NULL) {
+        int ret = gpu_drm_event_queue_locked(owner, DRM_EVENT_FLIP_COMPLETE,
+                                             pf->user_data, pf->sequence,
+                                             pf->crtc_id, pf->timestamp_ns);
+        if (ret == 0)
+            file = vfs_fdup(owner->drm_event_file);
+        else
+            fb_state.stats.kms_paced_dropped_total++; /* ring full (-EAGAIN) */
+    }
+    spin_unlock(&fb_state.lock);
+
+    if (file != NULL)
+        gpu_drm_event_notify_file(file);
+    kvfree(pf);
+}
+
+/*
+ * Arm a deferred flip-complete event at the next synthetic vblank edge.
+ *
+ * Called from the page-flip ioctl (process context, holding a reference to the
+ * drm file) after the present work has already completed. Returns 0 when the
+ * event has been handled (either armed for the vblank edge or, on a rare arm
+ * failure, delivered synchronously so the event is never dropped), or a
+ * negative errno when the caller should fall back to the synchronous delivery
+ * path (only on allocation failure, before any accounting is touched).
+ */
+static int gpu_drm_page_flip_paced(struct fb_gpu_render_owner *owner,
+                                   uint64 user_data, uint32 fb_id)
+{
+    struct gpu_drm_paced_flip *pf;
+    uint64 sequence;
+    uint64 timestamp_ns;
+    uint64 next_seq;
+    uint64 next_ts;
+    uint64 now_ns;
+    uint64 delay_ns;
+    uint64 delay_ms;
+    int ret;
+
+    if (owner == NULL)
+        return -EBADF;
+    pf = kvmalloc(sizeof(*pf));
+    if (pf == NULL)
+        return -ENOMEM; /* caller falls back to synchronous delivery */
+
+    spin_lock(&fb_state.lock);
+    gpu_kms_sample_vblank_locked(0, &sequence, &timestamp_ns);
+    next_seq = sequence + 1;
+    next_ts = gpu_kms_predict_vblank_timestamp(sequence, timestamp_ns,
+                                               next_seq);
+    now_ns = gpu_kms_monotonic_ns();
+    delay_ns = next_ts > now_ns ? next_ts - now_ns : 0;
+
+    pf->owner_id = owner->id;
+    pf->owner_tgid = owner->tgid;
+    pf->user_data = user_data;
+    pf->sequence = next_seq;
+    pf->timestamp_ns = next_ts;
+    pf->crtc_id = GPU_DRM_CRTC_ID;
+
+    /* Present-completion accounting mirrors the synchronous path exactly. */
+    fb_state.stats.kms_vblank_page_flip_events++;
+    if (fb_state.stats.kms_present_last_lane ==
+        FB_GPU_KMS_PRESENT_LANE_NOUVEAU_HW)
+        fb_state.stats.kms_page_flip_events_native_hw++;
+    else
+        fb_state.stats.kms_page_flip_events_software_blit++;
+    fb_state.current_kms_fb_id = fb_id;
+    fb_state.stats.kms_page_flips++;
+    spin_unlock(&fb_state.lock);
+
+    delay_ms = (delay_ns + 999999ULL) / 1000000ULL;
+    if (delay_ms == 0)
+        delay_ms = 1; /* always cross at least one tick to the edge */
+
+    ret = sched_timer_add(gpu_drm_paced_flip_timer_cb, pf, delay_ms);
+    if (ret != 0) {
+        /*
+         * Could not arm the deferral: deliver the event synchronously right
+         * now (never drop it) and free the descriptor. Safe to touch owner
+         * directly: we are still inside the ioctl with a file reference held.
+         */
+        struct vfs_file *file = NULL;
+
+        spin_lock(&fb_state.lock);
+        ret = gpu_drm_event_queue_locked(owner, DRM_EVENT_FLIP_COMPLETE,
+                                         pf->user_data, pf->sequence,
+                                         pf->crtc_id, pf->timestamp_ns);
+        if (ret == 0)
+            file = vfs_fdup(owner->drm_event_file);
+        else
+            fb_state.stats.kms_paced_dropped_total++; /* ring full (-EAGAIN) */
+        spin_unlock(&fb_state.lock);
+        kvfree(pf);
+        if (file != NULL)
+            gpu_drm_event_notify_file(file);
+        return 0;
+    }
+
+    spin_lock(&fb_state.lock);
+    fb_state.stats.kms_flips_paced_total++;
+    fb_state.stats.kms_paced_delay_us_total += delay_ns / 1000ULL;
+    spin_unlock(&fb_state.lock);
+    return 0;
+}
+
 static int gpu_drm_crtc_get_sequence(uint64 arg)
 {
     struct drm_crtc_get_sequence_compat req;

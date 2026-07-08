@@ -892,6 +892,37 @@ struct virtio_gpu {
     int cursor_visible;
     uint32 cursor_hot_x;
     uint32 cursor_hot_y;
+    /*
+     * SLICE 3: async cursor-plane image upload (gate virtio_gpu_async_cursor,
+     * default OFF).  virtio_gpu_user_set_cursor()'s image upload runs a
+     * synchronous fenced TRANSFER_TO_HOST_2D on the control queue (17-36ms
+     * observed inside DRM_IOCTL_MODE_CURSOR).  When the gate is on, the ioctl
+     * copies the latest cursor image into cursor_async_pending_* and returns;
+     * a single-threaded workqueue drains it off the caller's thread.
+     *
+     * cursor_async_lock is a LEAF lock: taken only in process/worker context
+     * (never IRQ), always released before any op_lock/g->lock is acquired, so
+     * it cannot invert the op_lock -> ... -> g->lock order used by presents.
+     */
+    spinlock_t cursor_async_lock;
+    uint8 cursor_async_lock_ready;
+    uint8 cursor_async_pending_valid; /* an unsubmitted image is waiting */
+    uint8 cursor_async_inflight;      /* worker is mid-upload */
+    uint32 cursor_async_pending_w;
+    uint32 cursor_async_pending_h;
+    uint32 cursor_async_pending_hot_x;
+    uint32 cursor_async_pending_hot_y;
+    /* Latest-wins double buffer: pending = newest from the ioctl, work =
+     * private snapshot the worker uploads from (so the slow fenced transfer
+     * never holds cursor_async_lock and the host never reads a buffer the
+     * ioctl is concurrently overwriting). */
+    uint32 cursor_async_pending_pixels[VIRTIO_GPU_CURSOR_DIM *
+                                       VIRTIO_GPU_CURSOR_DIM];
+    uint32 cursor_async_work_pixels[VIRTIO_GPU_CURSOR_DIM *
+                                    VIRTIO_GPU_CURSOR_DIM];
+    uint64 cursor_async_submits_total;
+    uint64 cursor_async_coalesced_total;
+    uint64 cursor_async_errors_total;
     int host_visible_cap_present;
     int host_visible_blob_ok;
     int host_visible_mapped_once;

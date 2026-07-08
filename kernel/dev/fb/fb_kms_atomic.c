@@ -400,6 +400,19 @@ static int gpu_drm_mode_page_flip(struct fb_gpu_render_owner *owner,
     if (ret != 0)
         return ret;
 
+    /*
+     * Gate: virtio_gpu_vblank_paced_flip (DEFAULT OFF). When enabled, the
+     * present has already happened above; defer only the DRM_MODE_PAGE_FLIP
+     * completion event to the next synthetic vblank edge so kwin's legacy
+     * RenderLoop gets a phase-accurate clock anchor. gpu_drm_page_flip_paced()
+     * returns 0 once the event is handled; a negative return (allocation
+     * failure) falls through to the unchanged synchronous path below.
+     */
+    if (gpu_kms_vblank_paced_flip_enabled() &&
+        (req.flags & DRM_MODE_PAGE_FLIP_EVENT) != 0 &&
+        gpu_drm_page_flip_paced(owner, req.user_data, req.fb_id) == 0)
+        return 0;
+
     spin_lock(&fb_state.lock);
     {
         uint64 sequence;
