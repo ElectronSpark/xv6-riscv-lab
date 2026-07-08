@@ -21,6 +21,7 @@ struct workqueue {
     list_node_t worker_list;
     struct thread *manager;
     int pending_works;
+    int running_works; /* work items dequeued but whose func has not returned */
     list_node_t work_list;
     char name[WORKQUEUE_NAME_MAX + 1];
     struct {

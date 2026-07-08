@@ -396,6 +396,24 @@ static int gpu_drm_mode_page_flip(struct fb_gpu_render_owner *owner,
         spin_unlock(&fb_state.lock);
     }
 
+    /*
+     * Gate: virtio_gpu_async_present (DEFAULT OFF). Only event-carrying flips
+     * go async (the completion event is the whole point); the -EAGAIN ring
+     * guard above already ran, as legacy+U5 require. A return of 1 means the
+     * present+completion is now owned by the async worker (return success); a
+     * negative return (-EBUSY for an overlapping flip) propagates; 0 falls
+     * through to the byte-for-byte synchronous present below (gate OFF path).
+     */
+    if ((req.flags & DRM_MODE_PAGE_FLIP_EVENT) != 0) {
+        int async_ret =
+            gpu_kms_page_flip_async_try(owner, req.user_data, req.fb_id);
+
+        if (async_ret > 0)
+            return 0;
+        if (async_ret < 0)
+            return async_ret;
+    }
+
     ret = gpu_kms_present_fb(owner, req.fb_id);
     if (ret != 0)
         return ret;
@@ -565,6 +583,30 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
         in_fence_ref_count++;
     }
 
+    /*
+     * Event-ring backpressure, mirroring the legacy page-flip path
+     * (gpu_drm_mode_page_flip above): when the caller asked for a
+     * flip-complete event but its per-file event ring is already full, fail
+     * with -EAGAIN *before* any irreversible commit work (in-fence wait,
+     * cursor apply, out-fence arm, present), so a full ring can never silently
+     * drop the completion the client is blocking on. Only a real
+     * (non-TEST_ONLY) commit that flips the sole CRTC's scanout (has_new_fb)
+     * will emit an event, so the guard is scoped to that case; the ring
+     * capacity is checked under fb_state.lock exactly as the legacy path does.
+     */
+    if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 &&
+        (req.flags & DRM_MODE_PAGE_FLIP_EVENT) != 0 && has_new_fb) {
+        spin_lock(&fb_state.lock);
+        if (owner->drm_event_count >= FB_GPU_DRM_EVENT_QUEUE_CAPACITY) {
+            fb_state.stats.drm_event_queue_overflows++;
+            fb_state.stats.drm_event_queue_dropped++;
+            spin_unlock(&fb_state.lock);
+            gpu_kms_put_in_fence_file_refs(in_fence_files, in_fence_ref_count);
+            return -EAGAIN;
+        }
+        spin_unlock(&fb_state.lock);
+    }
+
     if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) != 0 && out_fence_ptr != 0) {
         int32 fence_fd = -1;
 
@@ -682,9 +724,52 @@ static int gpu_drm_mode_atomic(struct fb_gpu_render_owner *owner, uint64 arg)
         }
     }
     if ((req.flags & DRM_MODE_ATOMIC_TEST_ONLY) == 0 && has_new_fb) {
-        spin_lock(&fb_state.lock);
-        fb_state.current_kms_fb_id = new_fb;
-        spin_unlock(&fb_state.lock);
+        int want_event = (req.flags & DRM_MODE_PAGE_FLIP_EVENT) != 0;
+
+        /*
+         * Flip-complete event delivery for the atomic commit, mirroring the
+         * legacy page-flip path's semantics. This kernel exposes a single CRTC
+         * (GPU_DRM_CRTC_ID); a real multi-CRTC atomic driver would loop over
+         * every CRTC carrying changes in the commit and emit one completion
+         * per CRTC, keyed by the ioctl's user_data. Here the sole CRTC is "in
+         * the commit" exactly when its scanout changed (has_new_fb, tracked
+         * from the primary plane FB_ID / CRTC ACTIVE props), so at most one
+         * event is emitted no matter how many plane/CRTC props the commit
+         * touched -- there is no per-plane double-emit. The present above has
+         * already happened; ring backpressure was enforced with -EAGAIN before
+         * it, so the only failure possible from here is a rare concurrent-flip
+         * race on a shared fd, in which case the event is dropped (accounted by
+         * gpu_drm_event_queue_locked) rather than the commit being unwound.
+         */
+        if (want_event && gpu_kms_vblank_paced_flip_enabled() &&
+            gpu_drm_page_flip_paced(owner, req.user_data, new_fb) == 0) {
+            /*
+             * Gate: virtio_gpu_vblank_paced_flip. The paced helper performed
+             * the present-completion accounting, updated current_kms_fb_id and
+             * deferred the completion event to the next synthetic vblank edge,
+             * exactly as the legacy path does; a negative return (kvmalloc
+             * failure) falls through to the synchronous delivery below.
+             */
+        } else {
+            int queued_event = 0;
+
+            spin_lock(&fb_state.lock);
+            if (want_event) {
+                uint64 sequence;
+                uint64 timestamp_ns;
+
+                gpu_kms_sample_vblank_locked(0, &sequence, &timestamp_ns);
+                queued_event =
+                    gpu_drm_event_queue_locked(owner, DRM_EVENT_FLIP_COMPLETE,
+                                               req.user_data, sequence,
+                                               GPU_DRM_CRTC_ID,
+                                               timestamp_ns) == 0;
+            }
+            fb_state.current_kms_fb_id = new_fb;
+            spin_unlock(&fb_state.lock);
+            if (queued_event)
+                gpu_drm_event_notify_read(owner);
+        }
     }
     if (out_fence_fd >= 0) {
         spin_lock(&fb_state.lock);

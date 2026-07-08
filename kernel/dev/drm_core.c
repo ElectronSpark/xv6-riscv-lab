@@ -160,6 +160,39 @@ int drm_core_set_client_cap(struct drm_core_file *file, uint64 arg)
     return 0;
 }
 
+/*
+ * Linux parity (drm_master_open): the first opener of a primary-like node
+ * implicitly becomes DRM master when the device currently has none.  Without
+ * this, a lone client can never pass DRM_IOCTL_AUTH_MAGIC -- which correctly
+ * requires mastership -- because there is nobody to authenticate it.  A file
+ * that gains mastership here is also authenticated, matching Linux
+ * drm_new_set_master().  If a master already exists (e.g. a running
+ * compositor), this is a no-op and the semantics for additional clients are
+ * unchanged.  Mastership is released on file close (drm_core_release_file),
+ * so a transient probe cannot starve a later compositor's SET_MASTER.
+ */
+void drm_core_master_open(struct drm_core_file *file)
+{
+    struct drm_core_device *dev;
+
+    /* PRIMARY only (not legacy-like): legacy/render files are already born
+     * authenticated (drm_core_file_init), so only a true primary node needs
+     * the implicit grant, and a long-lived legacy /dev/gpu0 client must not
+     * steal mastership from a later compositor. */
+    if (file == NULL || file->node_type != DRM_CORE_NODE_PRIMARY)
+        return;
+    dev = file->dev;
+    if (dev == NULL)
+        return;
+    spin_lock(&dev->lock);
+    if (dev->master_owner_cookie == 0) {
+        dev->master_owner_cookie = file->owner_cookie;
+        file->is_master = 1;
+        file->authenticated = 1;
+    }
+    spin_unlock(&dev->lock);
+}
+
 int drm_core_set_master(struct drm_core_file *file)
 {
     struct drm_core_device *dev;

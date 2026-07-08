@@ -1763,6 +1763,20 @@ struct fb_gpu_stats {
     uint64 cursor_async_submits_total; /* cursor image uploads pushed by the async worker */
     uint64 cursor_async_coalesced_total; /* pending cursor images superseded before submit (latest-wins) */
     uint64 cursor_async_errors_total; /* async cursor image uploads that failed in the worker */
+    /* virtio_gpu_async_present (gate, DEFAULT OFF): non-blocking DRM page-flip
+     * present. The flip ioctl returns in ~us and the blit runs on a worker;
+     * DRM_EVENT_FLIP_COMPLETE is delivered at real completion. Append-only ABI
+     * — these MUST stay at the end of the struct. */
+    uint64 present_async_submits_total; /* page flips accepted into the async worker */
+    /* Counts async presents whose blit COMPLETED successfully, not events
+     * delivered: a failed present still delivers a flip-complete for liveness
+     * (see present_async_errors_total) but is not counted here, and a
+     * completion for an owner that closed mid-present is a benign drop yet is
+     * still counted as a completed present. */
+    uint64 present_async_complete_total; /* async presents whose blit completed OK */
+    uint64 present_async_fallback_sync_total; /* flips that fell back to synchronous present */
+    uint64 present_async_bo_hold_max_us; /* max BO ref-hold (host DMA) window, us */
+    uint64 present_async_errors_total; /* async presents whose blit FAILED (event still delivered for liveness; scanout not advanced) */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

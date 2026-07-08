@@ -791,7 +791,12 @@ int vfs_mount(const char *type, struct vfs_inode *mountpoint,
     ret_val = __vfs_dir_inode_valid_holding(mountpoint);
     if (ret_val != 0) {
         printf("vfs_mount: mountpoint inode not valid, errno=%d\n", ret_val);
-        return ret_val;
+        if (ret_val == -EPERM) {
+            // Inode lock not held: caller-contract violation; there is
+            // nothing of ours to release.
+            return ret_val;
+        }
+        goto fail_unlock;
     }
     if (mountpoint != &vfs_root_inode) {
         if (!vfs_superblock_wholding(mountpoint->sb)) {
@@ -800,18 +805,20 @@ int vfs_mount(const char *type, struct vfs_inode *mountpoint,
         }
         if (!mountpoint->sb->valid) {
             printf("vfs_mount: mountpoint superblock is not valid\n");
-            return -EINVAL; // Mountpoint's superblock is not valid
+            ret_val = -EINVAL; // Mountpoint's superblock is not valid
+            goto fail_unlock;
         }
         if (!S_ISDIR(mountpoint->mode)) {
             printf("vfs_mount: mountpoint is not a directory\n");
-            return -EINVAL; // Mountpoint must be a directory
+            ret_val = -EINVAL; // Mountpoint must be a directory
+            goto fail_unlock;
         }
     }
 
     ret_val = __vfs_turn_mountpoint(mountpoint);
     if (ret_val != 0) {
         printf("vfs_mount: failed to turn mountpoint, errno=%d\n", ret_val);
-        return ret_val; // Failed to turn mountpoint
+        goto fail_unlock; // Failed to turn mountpoint
     }
 
     fs_type = vfs_get_fs_type(type);
@@ -878,6 +885,9 @@ ret:
             if (sb->root_inode) {
                 sb->root_inode->ops->free_inode(sb->root_inode);
             }
+            /* Defensive: this sb was never attached/valid, so no dcache entry
+             * can reference it and the scan is a no-op; kept for uniformity. */
+            __vfs_dcache_invalidate_sb(sb);
             fs_type->ops->free(sb);
         }
         // On failure, need to revert mountpoint inode type
@@ -908,6 +918,24 @@ ret:
             devtmpfs_post_mount_populate();
     }
     vfs_put_fs_type(fs_type);
+    return ret_val;
+
+fail_unlock:
+    // Early failure, before any superblock was created or the mountpoint was
+    // converted.  Honor the documented failure contract (see the function
+    // header): on ANY failure vfs_mount releases the mountpoint inode lock and
+    // its superblock write lock.  Callers (e.g. vfs_mount_path) only unlock on
+    // success and then immediately vfs_iput(mountpoint); leaking the write
+    // lock here previously made that vfs_iput fire its "cannot hold superblock
+    // write lock" assertion (all-core crash) whenever a mount raced a busy
+    // mountpoint (__vfs_turn_mountpoint -EBUSY).
+    vfs_iunlock(mountpoint);
+    if (mountpoint->sb != NULL &&
+        vfs_superblock_wholding(mountpoint->sb)) {
+        // wholding guard: the inode-validity check can fail before the
+        // write-lock-held check has run; never unlock a lock we do not hold.
+        vfs_superblock_unlock(mountpoint->sb);
+    }
     return ret_val;
 }
 
@@ -940,6 +968,20 @@ static size_t __vfs_evict_unused_inodes(struct vfs_superblock *sb) {
             continue;
         }
 
+        // Backendless filesystems (e.g. tmpfs) keep idle inodes cached at
+        // ref_count == 0; a ref_count of exactly 1 therefore means the inode
+        // is still actively referenced -- most importantly by a file whose
+        // close() deferred its vfs_fput() (close -> call_rcu -> workqueue ->
+        // vfs_fput), which has not yet released the reference. Evicting and
+        // freeing it here would let that pending fput later iput a freed inode
+        // and put a freed/reused superblock (superblock refcount underflow).
+        // Leave it cached so unmount reports the superblock busy; the caller
+        // drains the deferred fput and retries. (tmpfs_unmount_begin already
+        // applies this ref_count > 0 policy; keep the generic evictor in step.)
+        if (sb->backendless && inode->ref_count >= 1) {
+            continue;
+        }
+
         // Skip inodes being destroyed
         if (inode->destroying) {
             continue;
@@ -958,9 +1000,12 @@ static size_t __vfs_evict_unused_inodes(struct vfs_superblock *sb) {
         // Lock the inode to safely remove it
         vfs_ilock(inode);
 
-        // Double-check after locking
+        // Double-check after locking (authoritative). Same backendless
+        // ref_count >= 1 guard as above: never free a still-referenced
+        // backendless inode out from under a pending deferred fput.
         if (inode->ref_count > 1 || inode->destroying || !inode->valid ||
-            inode->mount) {
+            inode->mount ||
+            (sb->backendless && inode->ref_count >= 1)) {
             vfs_iunlock(inode);
             continue;
         }
@@ -1188,6 +1233,10 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
 
     // Free the superblock (caller must release sb lock before this)
     struct vfs_fs_type *fs_type = sb->fs_type;
+    // Flush all dcache entries referencing this sb while the sb write lock is
+    // still held (excludes concurrent stores, which run under the sb read
+    // lock) so no entry can outlive the free below and dangle into freed slab.
+    __vfs_dcache_invalidate_sb(sb);
     vfs_superblock_unlock(sb);
 
     // Release mountpoint lock and put the reference from __vfs_turn_mountpoint
@@ -1406,6 +1455,9 @@ void __vfs_final_unmount_cleanup(struct vfs_superblock *sb) {
     }
 
     struct vfs_fs_type *fs_type = sb->fs_type;
+    // Flush dcache entries referencing this sb under the write lock, before the
+    // free below (see __vfs_dcache_invalidate_sb).
+    __vfs_dcache_invalidate_sb(sb);
     vfs_superblock_unlock(sb);
     vfs_mount_unlock();
 
@@ -1545,6 +1597,9 @@ int vfs_unmount_lazy(struct vfs_inode *mountpoint) {
         }
 
         struct vfs_fs_type *fs_type = sb->fs_type;
+        // Flush dcache entries referencing this sb under the write lock, before
+        // the free below (see __vfs_dcache_invalidate_sb).
+        __vfs_dcache_invalidate_sb(sb);
         vfs_superblock_unlock(sb);
         fs_type->ops->free(sb);
     } else {

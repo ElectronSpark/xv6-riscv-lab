@@ -62,7 +62,12 @@ void __vfs_inode_init(struct vfs_inode *inode) {
     list_entry_init(&inode->orphan_entry);
     list_entry_init(&inode->lru_entry);
     inode->orphan = 0;
-    inode->lookup_seq = 0;
+    /*
+     * Seed from the global monotonic generation source (never 0) so this
+     * incarnation cannot alias a dcache entry cached against a previous
+     * incarnation of the same (sb, ino).  See __vfs_dcache_alloc_seq.
+     */
+    inode->lookup_seq = __vfs_dcache_alloc_seq();
     inode->ref_count = 1;
     list_entry_init(&inode->file_locks);
     spin_init(&inode->file_lock, "vfs_inode_flock");

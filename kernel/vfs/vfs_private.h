@@ -25,6 +25,8 @@ void __vfs_dcache_store(struct vfs_inode *dir, struct vfs_dentry *dentry,
 void __vfs_dcache_store_negative(struct vfs_inode *dir, const char *name,
                                  size_t name_len);
 void __vfs_dcache_bump_dir_seq(struct vfs_inode *dir);
+uint64 __vfs_dcache_alloc_seq(void);
+void __vfs_dcache_invalidate_sb(struct vfs_superblock *sb);
 void __vfs_file_init(void);
 void __vfs_fdtable_global_init(void);
 void __vfs_file_shrink_cache(void);

@@ -1191,16 +1191,112 @@ static int gpu_kms_wait_vblank_sequence(uint64 min_sequence,
     return -ETIMEDOUT;
 }
 
+/*
+ * ── Async-present completion-event reservation (gate virtio_gpu_async_present)
+ *
+ * SHOULD-FIX #3: the accept-time ring check does NOT reserve, so between accept
+ * and the worker's completion delivery a burst of concurrent VBLANK /
+ * QUEUE_SEQUENCE events could fill the owner's 16-deep ring and force the
+ * flip-complete to be dropped -- which freezes kwin (it blocks forever on an
+ * event that never arrives). Fix: reserve one ring slot per in-flight async
+ * completion at accept time and keep it free until that completion is enqueued.
+ *
+ * MODEL: a single global reservation record holds a COUNT of ring slots owed to
+ * pending async completions for one owner. This suffices because the async path
+ * keeps a single present in flight per the sole CRTC and kwin is the one
+ * compositor owner that flips; only in the paced-composition mode (where the
+ * in-flight slot is cleared before the deferred event fires) can more than one
+ * completion be owed at once, and those are all for the same owner. An accept
+ * by a *second* owner while the first still holds a reservation simply proceeds
+ * UNRESERVED (acquire returns 0) -- degrading to pre-fix behavior for that rare
+ * case rather than corrupting the count. The count also cannot be a per-owner
+ * field here: the owner struct lives outside this slice's editable files.
+ *
+ * gpu_drm_event_queue_locked() honors the reservation as headroom: any enqueue
+ * that is NOT itself a DRM_EVENT_FLIP_COMPLETE (VBLANK / QUEUE_SEQUENCE) is
+ * rejected with -EAGAIN once (used + reserved) would exceed capacity, so the
+ * reserved slots stay free for the completions. A FLIP_COMPLETE always uses the
+ * full ring -- that is the ONLY completion class produced for the flipping
+ * owner while the async gate is on (legacy flips all go async; the sync/atomic/
+ * non-async-paced FLIP_COMPLETE producers are not reached for that owner), so
+ * it consumes a genuinely-reserved slot rather than stealing one.
+ *
+ * LIFETIME: the reservation is released by whoever finally disposes of the
+ * completion -- the worker (non-paced), the paced timer callback, or the
+ * immediate-deliver fallback -- so it is freed on EVERY path, including a
+ * mid-present fd close (the worker/timer always run; sched_timer timers are not
+ * cancelable). Because it is not stored in the owner, owner teardown needs no
+ * special handling. Guarded by fb_state.lock.
+ */
+static struct {
+    int active;
+    uint64 owner_id;
+    pid_t owner_tgid;
+    uint32 count;
+} gpu_drm_async_present_resv;
+
+/* Reserve one ring slot for a pending async completion. Returns 1 if reserved
+ * (caller must arrange exactly one matching release), 0 if skipped because a
+ * different owner already holds the reservation. Caller holds fb_state.lock. */
+static int gpu_drm_async_present_reserve_locked(uint64 owner_id,
+                                                pid_t owner_tgid)
+{
+    if (gpu_drm_async_present_resv.active &&
+        (gpu_drm_async_present_resv.owner_id != owner_id ||
+         gpu_drm_async_present_resv.owner_tgid != owner_tgid))
+        return 0;
+    gpu_drm_async_present_resv.active = 1;
+    gpu_drm_async_present_resv.owner_id = owner_id;
+    gpu_drm_async_present_resv.owner_tgid = owner_tgid;
+    gpu_drm_async_present_resv.count++;
+    return 1;
+}
+
+/* Release one previously-acquired reservation. Idempotent past zero (a stray
+ * double-release is a no-op). Caller holds fb_state.lock. */
+static void gpu_drm_async_present_unreserve_locked(void)
+{
+    if (gpu_drm_async_present_resv.count > 0 &&
+        --gpu_drm_async_present_resv.count == 0)
+        gpu_drm_async_present_resv.active = 0;
+}
+
+/* Ring slots currently reserved for pending async completions on this owner (0
+ * unless an async present is in flight for it). Caller holds fb_state.lock. */
+static uint32 gpu_drm_async_present_reserved_for_locked(
+    const struct fb_gpu_render_owner *owner)
+{
+    if (owner != NULL && gpu_drm_async_present_resv.active &&
+        gpu_drm_async_present_resv.owner_id == owner->id &&
+        gpu_drm_async_present_resv.owner_tgid == owner->tgid)
+        return gpu_drm_async_present_resv.count;
+    return 0;
+}
+
 static int gpu_drm_event_queue_locked(struct fb_gpu_render_owner *owner,
                                       uint32 type, uint64 user_data,
                                       uint64 sequence, uint32 crtc_id,
                                       uint64 timestamp_ns)
 {
     struct drm_event_vblank_compat *ev;
+    uint32 reserved;
+    uint32 effective_capacity;
 
     if (owner == NULL)
         return -EBADF;
-    if (owner->drm_event_count >= FB_GPU_DRM_EVENT_QUEUE_CAPACITY) {
+    /*
+     * Keep the ring slot(s) held for pending async flip-completions free for
+     * every enqueue except a FLIP_COMPLETE (the reserved event class), so a
+     * burst of VBLANK / QUEUE_SEQUENCE events can never displace a completion
+     * kwin is blocking on (SHOULD-FIX #3).
+     */
+    reserved = (type != DRM_EVENT_FLIP_COMPLETE)
+                   ? gpu_drm_async_present_reserved_for_locked(owner)
+                   : 0;
+    effective_capacity = reserved < FB_GPU_DRM_EVENT_QUEUE_CAPACITY
+                             ? FB_GPU_DRM_EVENT_QUEUE_CAPACITY - reserved
+                             : 0;
+    if (owner->drm_event_count >= effective_capacity) {
         fb_state.stats.drm_event_queue_overflows++;
         fb_state.stats.drm_event_queue_dropped++;
         return -EAGAIN;
@@ -1379,6 +1475,9 @@ struct gpu_drm_paced_flip {
     uint64 sequence;
     uint64 timestamp_ns;
     uint32 crtc_id;
+    /* Set only for an async-present completion (gate virtio_gpu_async_present)
+     * that carries a ring-slot reservation; the timer callback releases it. */
+    int owns_async_reservation;
 };
 
 /*
@@ -1427,6 +1526,11 @@ static void gpu_drm_paced_flip_timer_cb(void *arg)
         else
             fb_state.stats.kms_paced_dropped_total++; /* ring full (-EAGAIN) */
     }
+    /* Release the async-present ring-slot reservation this deferred completion
+     * carried (this is its sole terminal point, so it frees on every branch --
+     * owner-gone drop and ring-full drop included). */
+    if (pf->owns_async_reservation)
+        gpu_drm_async_present_unreserve_locked();
     spin_unlock(&fb_state.lock);
 
     if (file != NULL)
@@ -1477,6 +1581,7 @@ static int gpu_drm_page_flip_paced(struct fb_gpu_render_owner *owner,
     pf->sequence = next_seq;
     pf->timestamp_ns = next_ts;
     pf->crtc_id = GPU_DRM_CRTC_ID;
+    pf->owns_async_reservation = 0; /* non-async path holds no reservation */
 
     /* Present-completion accounting mirrors the synchronous path exactly. */
     fb_state.stats.kms_vblank_page_flip_events++;
@@ -1522,6 +1627,117 @@ static int gpu_drm_page_flip_paced(struct fb_gpu_render_owner *owner,
     fb_state.stats.kms_paced_delay_us_total += delay_ns / 1000ULL;
     spin_unlock(&fb_state.lock);
     return 0;
+}
+
+/*
+ * Deliver a DRM_EVENT_FLIP_COMPLETE by owner *id* (not pointer).
+ *
+ * Used by the async-present worker (gate virtio_gpu_async_present) to hand the
+ * completion to a drm file that may have closed while the present was in
+ * flight. The owner is re-resolved under fb_state.lock exactly as
+ * gpu_drm_paced_flip_timer_cb does: while the owner is registered and the lock
+ * is held it cannot be freed (gpu_fops_release clears drm_event_file and
+ * unregisters under the same lock before kvfree), and the event file is fdup'd
+ * under the lock so the notify keeps it alive independently of the owner. If
+ * the owner has gone the completion is a benign drop; a full ring is accounted
+ * by gpu_drm_event_queue_locked (drm_event_queue_dropped).
+ */
+static void gpu_drm_deliver_flip_complete_by_id(uint64 owner_id,
+                                                pid_t owner_tgid,
+                                                uint64 user_data,
+                                                uint64 sequence,
+                                                uint64 timestamp_ns,
+                                                uint32 crtc_id)
+{
+    struct fb_gpu_render_owner *owner;
+    struct vfs_file *file = NULL;
+
+    spin_lock(&fb_state.lock);
+    owner = fb_gpu_render_owner_lookup_locked(owner_id, owner_tgid);
+    if (owner != NULL && owner->drm_event_file != NULL) {
+        if (gpu_drm_event_queue_locked(owner, DRM_EVENT_FLIP_COMPLETE,
+                                       user_data, sequence, crtc_id,
+                                       timestamp_ns) == 0)
+            file = vfs_fdup(owner->drm_event_file);
+    }
+    spin_unlock(&fb_state.lock);
+
+    if (file != NULL)
+        gpu_drm_event_notify_file(file);
+}
+
+/*
+ * Compose virtio_gpu_async_present with virtio_gpu_vblank_paced_flip: when both
+ * gates are on the async worker has already run the *present* to completion and
+ * sampled the real completion-time vblank (base_seq/base_ts). Pace only the
+ * completion *event* to the next synthetic vblank edge PAST that real
+ * completion, so kwin gets a phase-accurate FUTURE anchor whose cost has
+ * already been paid. Mirrors gpu_drm_page_flip_paced's arming, minus the
+ * present-completion accounting (the worker already did it), and addresses the
+ * owner by id so it is safe after a file close. Never drops the event: on a
+ * kvmalloc / arm failure it is delivered immediately.
+ */
+static void gpu_drm_pace_completed_flip_by_id(uint64 owner_id,
+                                              pid_t owner_tgid,
+                                              uint64 user_data,
+                                              uint64 base_seq,
+                                              uint64 base_ts,
+                                              int reserved)
+{
+    struct gpu_drm_paced_flip *pf;
+    uint64 next_seq = base_seq + 1;
+    uint64 next_ts = gpu_kms_predict_vblank_timestamp(base_seq, base_ts,
+                                                      next_seq);
+    uint64 now_ns = gpu_kms_monotonic_ns();
+    uint64 delay_ns = next_ts > now_ns ? next_ts - now_ns : 0;
+    uint64 delay_ms;
+    int ret;
+
+    pf = kvmalloc(sizeof(*pf));
+    if (pf == NULL) {
+        /* Immediate delivery is this reservation's terminal point too. */
+        gpu_drm_deliver_flip_complete_by_id(owner_id, owner_tgid, user_data,
+                                            base_seq, base_ts,
+                                            GPU_DRM_CRTC_ID);
+        if (reserved) {
+            spin_lock(&fb_state.lock);
+            gpu_drm_async_present_unreserve_locked();
+            spin_unlock(&fb_state.lock);
+        }
+        return;
+    }
+    pf->owner_id = owner_id;
+    pf->owner_tgid = owner_tgid;
+    pf->user_data = user_data;
+    pf->sequence = next_seq;
+    pf->timestamp_ns = next_ts;
+    pf->crtc_id = GPU_DRM_CRTC_ID;
+    /* The reservation now rides the timer; gpu_drm_paced_flip_timer_cb frees
+     * it. */
+    pf->owns_async_reservation = reserved;
+
+    delay_ms = (delay_ns + 999999ULL) / 1000000ULL;
+    if (delay_ms == 0)
+        delay_ms = 1; /* always cross at least one tick to the edge */
+
+    ret = sched_timer_add(gpu_drm_paced_flip_timer_cb, pf, delay_ms);
+    if (ret != 0) {
+        kvfree(pf);
+        gpu_drm_deliver_flip_complete_by_id(owner_id, owner_tgid, user_data,
+                                            base_seq, base_ts,
+                                            GPU_DRM_CRTC_ID);
+        if (reserved) {
+            spin_lock(&fb_state.lock);
+            gpu_drm_async_present_unreserve_locked();
+            spin_unlock(&fb_state.lock);
+        }
+        return;
+    }
+
+    spin_lock(&fb_state.lock);
+    fb_state.stats.kms_flips_paced_total++;
+    fb_state.stats.kms_paced_delay_us_total += delay_ns / 1000ULL;
+    spin_unlock(&fb_state.lock);
 }
 
 static int gpu_drm_crtc_get_sequence(uint64 arg)

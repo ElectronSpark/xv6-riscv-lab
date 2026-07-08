@@ -3617,7 +3617,14 @@ uint64 sys_mount(void) {
  *
  * Returns 0 on success, negative errno on failure.
  */
-int vfs_umount_path(const char *target, int target_len) {
+/* Bounded drain rounds (rcu_barrier + deferred-iput workqueue flush + retry)
+ * before surfacing -EBUSY from an unmount (see vfs_umount_path).  One round
+ * suffices for a plain deferred close; a few extra cover a release that
+ * itself defers another release.  Kept small: each round costs an RCU grace
+ * period, and a genuinely busy mount pays for all of them before -EBUSY. */
+#define VFS_UMOUNT_DRAIN_ATTEMPTS 4
+
+static int __vfs_umount_path_once(const char *target, int target_len) {
     // Look up target directory - vfs_namei follows mounts, so we get the
     // mounted filesystem's root inode, not the mountpoint directory itself
     struct vfs_inode *mounted_root = vfs_namei(target, target_len);
@@ -3684,6 +3691,44 @@ int vfs_umount_path(const char *target, int target_len) {
     vfs_mount_unlock();
 
     return 0;
+}
+
+int vfs_umount_path(const char *target, int target_len) {
+    int ret = __vfs_umount_path_once(target, target_len);
+    if (ret != -EBUSY) {
+        return ret;
+    }
+
+    /*
+     * -EBUSY can be a transient artifact of a file that was just closed on this
+     * filesystem: close() releases the file's inode and superblock references
+     * asynchronously (close -> __vfs_fput_call_rcu -> call_rcu -> workqueue ->
+     * vfs_fput -> vfs_inode_put_ref). Until that runs, the superblock still
+     * holds a reference and a cached inode sits at ref_count == 1, so the
+     * unmount correctly reports the fs busy.
+     *
+     * Drain that pipeline and retry:
+     *   - rcu_barrier() waits for all pending RCU callbacks, guaranteeing
+     *     every deferred fput registered before this call has been QUEUED to
+     *     the deferred-iput workqueue;
+     *   - flush_workqueue() then waits until the workqueue has actually RUN
+     *     them, dropping the references.
+     * Both are called with no VFS locks held (we are between resolution
+     * attempts), so the fput worker can take the superblock/inode locks it
+     * needs. A bounded number of rounds covers a release that itself defers
+     * another release; a genuinely busy mount (a file truly held open
+     * elsewhere) stays -EBUSY through all rounds and returns -EBUSY as before.
+     */
+    for (int attempt = 0; attempt < VFS_UMOUNT_DRAIN_ATTEMPTS; attempt++) {
+        rcu_barrier();
+        flush_workqueue(vfs_get_deferred_iput_wq());
+        ret = __vfs_umount_path_once(target, target_len);
+        if (ret != -EBUSY) {
+            break;
+        }
+    }
+
+    return ret;
 }
 
 uint64 sys_umount(void) {

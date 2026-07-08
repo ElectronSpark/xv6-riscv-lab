@@ -42,6 +42,29 @@ static slab_cache_t __vfs_dcache_entry_cache;
 static int __vfs_dcache_initialized = 0;
 static struct vfs_dcache_bucket __vfs_dcache_buckets[VFS_DCACHE_BUCKETS];
 
+/*
+ * Global monotonic generation source for vfs_inode.lookup_seq.
+ *
+ * Every seed (inode init) and every bump draws a fresh, never-reused value so
+ * no dcache entry's parent_seq can ever alias a live inode's lookup_seq across
+ * incarnations.  This closes two aliasing gaps:
+ *   - an inode evicted from the cache and later reloaded is a new incarnation;
+ *     under the old per-inode reset to 0 it aliased stale entries cached
+ *     against the previous incarnation;
+ *   - an sb address returned to its slab and re-handed by an immediate remount
+ *     produced a colliding (parent_sb, parent_ino) whose tiny seq could match.
+ * First value handed out is 1, so 0 belongs to no live inode (0 was the old
+ * poisoned "reset" value).  RELAXED is sufficient: only atomicity/uniqueness of
+ * the allocation matters; the RELEASE store into dir->lookup_seq and the
+ * ACQUIRE honor-read (below) provide the ordering against publication.
+ * A uint64 counter wraps in centuries at any realistic lookup rate.
+ */
+static uint64 __vfs_dcache_seq_counter = 0;
+
+uint64 __vfs_dcache_alloc_seq(void) {
+    return __atomic_add_fetch(&__vfs_dcache_seq_counter, 1, __ATOMIC_RELAXED);
+}
+
 static inline uint64 __vfs_dcache_dir_seq(const struct vfs_inode *dir) {
     return __atomic_load_n(&dir->lookup_seq, __ATOMIC_ACQUIRE);
 }
@@ -50,7 +73,8 @@ void __vfs_dcache_bump_dir_seq(struct vfs_inode *dir) {
     if (dir == NULL || !S_ISDIR(dir->mode)) {
         return;
     }
-    __atomic_add_fetch(&dir->lookup_seq, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&dir->lookup_seq, __vfs_dcache_alloc_seq(),
+                     __ATOMIC_RELEASE);
 }
 
 static inline uint64 __vfs_dcache_hash(struct vfs_superblock *sb,
@@ -219,6 +243,13 @@ void __vfs_dcache_store(struct vfs_inode *dir, struct vfs_dentry *dentry,
     entry->parent_sb = dir->sb;
     entry->parent_ino = dir->ino;
     entry->parent_seq = __vfs_dcache_dir_seq(dir);
+    /*
+     * In the current tree every fs driver leaves dentry->sb unset on lookup,
+     * so child_sb always ends up == dir->sb (same superblock as the parent);
+     * negatives store child_sb = NULL.  __vfs_dcache_invalidate_sb does NOT
+     * rely on this: it matches entries on parent_sb OR child_sb, so a future
+     * driver returning a cross-sb dentry here stays UAF-safe at unmount.
+     */
     entry->child_sb = dentry->sb ? dentry->sb : dir->sb;
     entry->child_ino = dentry->ino;
     entry->negative = 0;
@@ -247,6 +278,65 @@ void __vfs_dcache_store(struct vfs_inode *dir, struct vfs_dentry *dentry,
     if (replaced != NULL) {
         kvfree(replaced->name);
         slab_free(replaced);
+    }
+}
+
+/*
+ * Remove every cached entry that references @sb as parent OR child.
+ *
+ * Called under the sb write lock immediately before the sb is freed.  Two
+ * concurrency cases:
+ *  - Stores: excluded entirely.  A store into @sb runs under the sb read lock
+ *    (vfs_ilookup, inode.c:681-707), which the caller's exclusive write lock
+ *    blocks, so no new entry referencing @sb can appear during or after this
+ *    scan.
+ *  - Lookups: NOT excluded — __vfs_dcache_lookup runs without any sb lock
+ *    (inode.c:664, before the rlock is taken).  It is safe purely via the
+ *    bucket spinlock: a concurrent lookup either observes an entry before we
+ *    unlink it here — at which point @sb memory is still live, since the
+ *    caller frees @sb only after this function returns — or it does not see
+ *    the entry at all.
+ * After this returns and @sb is freed, no surviving dcache entry references
+ * that sb address in either parent_sb or child_sb, so the honor-read guards
+ * entry->parent_sb->valid / entry->child_sb->valid can never dereference freed
+ * sb memory.
+ *
+ * Frees entries AFTER dropping each bucket lock (kvfree/slab_free must not run
+ * under the bucket spinlock), mirroring __vfs_dcache_store.  The bucket
+ * spinlock is the innermost (leaf) lock and is taken here strictly under the sb
+ * rwsem, so no lock-order inversion is possible.  The lock is released between
+ * buckets to bound the preempt-/irq-off window to one bucket.
+ */
+void __vfs_dcache_invalidate_sb(struct vfs_superblock *sb) {
+    if (!__vfs_dcache_initialized || sb == NULL) {
+        return;
+    }
+
+    for (uint32 b = 0; b < VFS_DCACHE_BUCKETS; b++) {
+        list_node_t dead;
+        list_entry_init(&dead);
+        struct vfs_dcache_entry *entry;
+        struct vfs_dcache_entry *tmp;
+
+        spin_lock(&__vfs_dcache_buckets[b].lock);
+        list_foreach_node_safe(&__vfs_dcache_buckets[b].head, entry, tmp,
+                               link) {
+            if (entry->parent_sb == sb || entry->child_sb == sb) {
+                list_entry_del_init_rcu(&entry->link);
+                list_node_push(&dead, entry, link);
+            }
+        }
+        spin_unlock(&__vfs_dcache_buckets[b].lock);
+
+        /*
+         * list_foreach_node_safe latches the next node before the body runs,
+         * so freeing the current entry (and its now-detached link) is safe;
+         * no separate delete from @dead is needed since @dead is discarded.
+         */
+        list_foreach_node_safe(&dead, entry, tmp, link) {
+            kvfree(entry->name);
+            slab_free(entry);
+        }
     }
 }
 

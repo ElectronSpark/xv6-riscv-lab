@@ -185,9 +185,12 @@ static void __worker_routine(void) {
             }
         }
         // Found a work to do
+        wq->running_works++;
         __wq_unlock(wq);
         work->func(work);
         __wq_lock(wq);
+        wq->running_works--;
+        assert(wq->running_works >= 0, "Workqueue running_works underflow");
     }
     __wq_unlock(wq);
 
@@ -326,6 +329,39 @@ struct workqueue *workqueue_create(const char *name, int max_active) {
     __wq_unlock(wq);
 
     return wq;
+}
+
+/*
+ * flush_workqueue - Wait until the workqueue is idle.
+ *
+ * Blocks (polling with scheduler_yield) until every work item that is either
+ * queued or currently executing has completed.  Work queued concurrently
+ * while flushing is also waited for; callers that need only "work queued
+ * before this call" semantics get a superset guarantee.
+ *
+ * Context: sleepable process/kthread context only.  The caller must not hold
+ * any lock that a queued work item may need to make progress (e.g. do not
+ * call this holding a superblock lock while flushing the VFS deferred-iput
+ * queue), and must never call it from a work item of @wq itself (deadlock).
+ */
+void flush_workqueue(struct workqueue *wq) {
+    if (wq == NULL) {
+        return;
+    }
+    for (;;) {
+        __wq_lock(wq);
+        bool idle = (wq->pending_works == 0 && wq->running_works == 0);
+        if (!idle && wq->pending_works > 0) {
+            // Kick the manager so sleeping workers get woken to drain the
+            // backlog even if the enqueuer's wakeup raced.
+            __wakeup_manager(wq);
+        }
+        __wq_unlock(wq);
+        if (idle) {
+            return;
+        }
+        scheduler_yield();
+    }
 }
 
 bool queue_work(struct workqueue *wq, struct work_struct *work) {

@@ -424,6 +424,11 @@ void fbdevinit(void)
         assert(ret == 0, "fbdevinit: failed to register gpu devices: %d", ret);
     if (!virtio_gpu_has_virgl())
         printf("GPU: virgl unavailable; exposing dumb-buffer DRM only\n");
+
+    /* virtio_gpu_async_present (gate, DEFAULT OFF): create the present
+     * workqueue up front. Cheap when the gate is never set (one idle kthread);
+     * the accept path stays fully synchronous unless the gate is on. */
+    gpu_kms_async_present_init();
 }
 
 /* ── Panic screen: BSOD-style framebuffer overlay ─────────────────── */

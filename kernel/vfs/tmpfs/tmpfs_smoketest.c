@@ -931,8 +931,12 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     vfs_superblock_wlock(root->sb);
     vfs_ilock(mp);
     ret = vfs_mount("tmpfs", mp, NULL, 0, NULL);
-    vfs_iunlock(mp);
-    vfs_superblock_unlock(root->sb);
+    // vfs_mount failure contract: on failure it has already released the
+    // mountpoint inode lock and the parent superblock write lock.
+    if (ret == 0) {
+        vfs_iunlock(mp);
+        vfs_superblock_unlock(root->sb);
+    }
     vfs_mount_unlock();
     if (ret != 0) {
         printf("dir_iter_mount: " FAIL " vfs_mount on %s errno=%d\n", mp_name,
@@ -1380,8 +1384,12 @@ void tmpfs_run_lazy_unmount_smoketest(void) {
     vfs_superblock_wlock(root->sb);
     vfs_ilock(mp);
     ret = vfs_mount("tmpfs", mp, NULL, 0, NULL);
-    vfs_iunlock(mp);
-    vfs_superblock_unlock(root->sb);
+    // vfs_mount failure contract: on failure it has already released the
+    // mountpoint inode lock and the parent superblock write lock.
+    if (ret == 0) {
+        vfs_iunlock(mp);
+        vfs_superblock_unlock(root->sb);
+    }
     vfs_mount_unlock();
     if (ret != 0) {
         printf("lazy_unmount: " FAIL " vfs_mount errno=%d\n", ret);
@@ -1450,8 +1458,12 @@ cleanup_test1_mp:
     vfs_superblock_wlock(root->sb);
     vfs_ilock(mp);
     ret = vfs_mount("tmpfs", mp, NULL, 0, NULL);
-    vfs_iunlock(mp);
-    vfs_superblock_unlock(root->sb);
+    // vfs_mount failure contract: on failure it has already released the
+    // mountpoint inode lock and the parent superblock write lock.
+    if (ret == 0) {
+        vfs_iunlock(mp);
+        vfs_superblock_unlock(root->sb);
+    }
     vfs_mount_unlock();
     if (ret != 0) {
         printf("lazy_unmount: " FAIL " test2 vfs_mount errno=%d\n", ret);
@@ -1590,8 +1602,12 @@ cleanup_test2_mp:
     vfs_superblock_wlock(root->sb);
     vfs_ilock(mp);
     ret = vfs_mount("tmpfs", mp, NULL, 0, NULL);
-    vfs_iunlock(mp);
-    vfs_superblock_unlock(root->sb);
+    // vfs_mount failure contract: on failure it has already released the
+    // mountpoint inode lock and the parent superblock write lock.
+    if (ret == 0) {
+        vfs_iunlock(mp);
+        vfs_superblock_unlock(root->sb);
+    }
     vfs_mount_unlock();
     if (ret != 0) {
         printf("lazy_unmount: " FAIL " test3 vfs_mount errno=%d\n", ret);

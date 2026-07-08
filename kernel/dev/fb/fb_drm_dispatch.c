@@ -2097,6 +2097,12 @@ static int gpu_open_file_common(cdev_t *cdev, struct vfs_file *file,
         (void)gpu_release(cdev);
         return ret;
     }
+    /* Linux parity: first primary opener becomes master when none exists
+     * (see drm_core_master_open); no-op for render nodes or when a
+     * compositor already holds mastership.  Placed after successful
+     * registration so an open that fails cannot leak the device master
+     * cookie (release_file would never run for it). */
+    drm_core_master_open(&owner->drm);
     file->ops = ops;
     file->private_data = owner;
     owner->drm_event_file = file;

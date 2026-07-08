@@ -731,22 +731,25 @@ static int gpu_kms_try_native_present_fb_locked(uint32 fb_id)
     return -EOPNOTSUPP;
 }
 
-static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
+/*
+ * Look up a KMS framebuffer and return the parameters needed to present it.
+ * Factored out of gpu_kms_present_fb so the synchronous present and the
+ * virtio_gpu_async_present accept path share one source of truth for the fb
+ * lookup + validation. Does NOT take a BO reference; the caller does.
+ */
+static int gpu_kms_present_lookup_params(struct fb_gpu_render_owner *owner,
+                                         uint32 fb_id, uint32 *bo_handle_out,
+                                         uint32 *width_out, uint32 *height_out,
+                                         uint32 *xres_out, uint32 *yres_out,
+                                         uint32 *pixel_format_out,
+                                         uint64 *modifier_out)
 {
-    struct fb_gpu_bo_entry *bo;
-    struct fb_gpu_bo_present present;
     uint32 bo_handle = 0;
     uint32 width = 0;
     uint32 height = 0;
-    uint32 xres = 0;
-    uint32 yres = 0;
     uint32 pixel_format = 0;
     uint64 modifier = DRM_FORMAT_MOD_LINEAR;
-    uint64 fence = 0;
-    int ret;
 
-    if (fb_id == 0)
-        return 0;
     spin_lock(&fb_state.lock);
     for (uint32 i = 0; i < FB_GPU_MAX_KMS_FBS; i++) {
         struct fb_gpu_kms_fb_entry *fb = &fb_state.kms_fbs[i];
@@ -760,8 +763,8 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
         modifier = fb->modifier;
         break;
     }
-    xres = fb_state.xres;
-    yres = fb_state.yres;
+    *xres_out = fb_state.xres;
+    *yres_out = fb_state.yres;
     spin_unlock(&fb_state.lock);
     if (bo_handle == 0)
         return -ENOENT;
@@ -769,14 +772,28 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
         return -EINVAL;
     if (!gpu_kms_primary_scanout_format_supported(pixel_format, modifier))
         return -EOPNOTSUPP;
+    *bo_handle_out = bo_handle;
+    *width_out = width;
+    *height_out = height;
+    *pixel_format_out = pixel_format;
+    *modifier_out = modifier;
+    return 0;
+}
 
-    spin_lock(&fb_state.lock);
-    (void)gpu_kms_try_native_present_fb_locked(fb_id);
-    spin_unlock(&fb_state.lock);
+/*
+ * Perform the full-surface present blit for an already-referenced BO. Byte-for-
+ * byte the flags decision + blit + scanout-fallback that lived inline in
+ * gpu_kms_present_fb; extracted so the synchronous path and the async worker
+ * run identical present work. Does NOT take or drop the BO reference.
+ */
+static int gpu_kms_present_blit(struct fb_gpu_bo_entry *bo, uint32 width,
+                                uint32 height, uint32 xres, uint32 yres,
+                                uint32 pixel_format, uint64 modifier)
+{
+    struct fb_gpu_bo_present present;
+    uint64 fence = 0;
+    int ret;
 
-    bo = fb_bo_get_owned(bo_handle, owner->id, owner->tgid);
-    if (bo == NULL)
-        return -ENOENT;
     memset(&present, 0, sizeof(present));
     present.w = width;
     present.h = height;
@@ -811,8 +828,375 @@ static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
         ret = fb_blit_from_bo_format(bo, present, pixel_format, modifier,
                                      &fence, NULL);
     }
+    return ret;
+}
+
+static int gpu_kms_present_fb(struct fb_gpu_render_owner *owner, uint32 fb_id)
+{
+    struct fb_gpu_bo_entry *bo;
+    uint32 bo_handle = 0;
+    uint32 width = 0;
+    uint32 height = 0;
+    uint32 xres = 0;
+    uint32 yres = 0;
+    uint32 pixel_format = 0;
+    uint64 modifier = DRM_FORMAT_MOD_LINEAR;
+    int ret;
+
+    if (fb_id == 0)
+        return 0;
+    ret = gpu_kms_present_lookup_params(owner, fb_id, &bo_handle, &width,
+                                        &height, &xres, &yres, &pixel_format,
+                                        &modifier);
+    if (ret != 0)
+        return ret;
+
+    spin_lock(&fb_state.lock);
+    (void)gpu_kms_try_native_present_fb_locked(fb_id);
+    spin_unlock(&fb_state.lock);
+
+    bo = fb_bo_get_owned(bo_handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return -ENOENT;
+    ret = gpu_kms_present_blit(bo, width, height, xres, yres, pixel_format,
+                               modifier);
     fb_bo_put(bo);
     return ret;
+}
+
+/*
+ * ── virtio_gpu_async_present (gate, DEFAULT OFF) ──────────────────────────
+ *
+ * PROBLEM (U2 root cause): the legacy DRM PAGE_FLIP ioctl runs the ENTIRE
+ * present synchronously inside the ioctl (gpu_kms_present_fb ->
+ * fb_blit_from_bo_format), blocking the compositor thread 10-26ms per flip
+ * under load. That inflates kwin 5.27's RenderLoop expectedCompositingTime
+ * above the 16.67ms refresh, so it schedules ~3-4 vblanks out (67ms cadence).
+ *
+ * FIX (gate ON): the ioctl takes a BO reference and hands the present to a
+ * single-threaded workqueue, returning in ~us. The worker runs the same blit
+ * off-thread, then delivers DRM_EVENT_FLIP_COMPLETE carrying the REAL
+ * completion-time vblank seq/ts. kwin's per-cycle cost collapses to sub-ms so
+ * it paces at one vblank.
+ *
+ * R5 / BUFFER LIFETIME (#1 correctness concern — host DMA into guest memory):
+ * the accept path pins the BO with fb_bo_get_owned() and transfers that ref to
+ * the worker, which drops it only after fb_blit_from_bo_format() returns (the
+ * blit is fenced and blocks for the host ack, so the host is done reading the
+ * buffer by then). fb_bo_put() frees a BO slot only when dead && refs==0, so
+ * an RMFB or fd-close during an in-flight present cannot free/reuse the BO the
+ * host is scanning out — it just defers the free to our put. (This same ref
+ * discipline is why the pre-existing SYNCHRONOUS path is not racy either: it
+ * holds an fb_bo_get_owned ref across its blit.)
+ *
+ * ORDERING / OVERLAP (req 2): a single in-flight async present per CRTC. A new
+ * flip submitted while one is in flight returns -EBUSY (legacy DRM semantics
+ * for a pending flip). This also subsumes req 7's tearing guard — if the new
+ * flip's target BO were the one still being scanned out, accepting it would let
+ * the guest overwrite a host-DMA buffer, so we never accept an overlapping
+ * flip. kwin keeps one outstanding flip and waits for the event, so -EBUSY is a
+ * safety net, not a hot path; the single-slot design also guarantees in-order
+ * completion. (Trace evidence fb107/110/111/112 alternating fb_ids confirms
+ * kwin double/triple-buffers, so the target BO of the next flip differs from
+ * the in-flight one in the common case.)
+ *
+ * COMPOSITION with virtio_gpu_vblank_paced_flip: pacing fixed the event TIMING;
+ * this fixes the event COST. Both on => the worker runs the present, samples
+ * the REAL completion vblank, then paces the completion event to the next
+ * synthetic edge past that real completion (gpu_drm_pace_completed_flip_by_id).
+ *
+ * LOST-COMPLETION = frozen kwin: every path delivers or falls back. On any
+ * accept-time failure (workqueue unavailable, queue_work failure) the ioctl
+ * falls back to the synchronous present+event path; the worker always delivers
+ * (or benignly drops for a closed owner).
+ */
+static int gpu_kms_async_present_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = fb_cmdline_enabled("virtio_gpu_async_present");
+    return cached;
+}
+
+/* Single in-flight async present descriptor for the sole CRTC. All fields are
+ * guarded by fb_state.lock; single-in-flight (the -EBUSY accept guard) means
+ * the worker is the sole reader between claim and clear. */
+struct gpu_kms_async_present_slot {
+    int inflight;
+    struct fb_gpu_bo_entry *bo; /* ref taken at accept, dropped by worker */
+    uint32 bo_handle;
+    uint64 owner_id;
+    pid_t owner_tgid;
+    uint64 user_data;
+    uint32 fb_id;
+    uint32 width;
+    uint32 height;
+    uint32 xres;
+    uint32 yres;
+    uint32 pixel_format;
+    uint64 modifier;
+    uint64 submit_ns;
+    int reserved; /* 1 if a completion ring-slot reservation was acquired */
+};
+static struct gpu_kms_async_present_slot gpu_kms_async_present;
+static struct workqueue *gpu_kms_async_present_wq;
+static struct work_struct gpu_kms_async_present_work;
+
+/*
+ * Async present worker (single-threaded workqueue, process context). Runs the
+ * present for the one in-flight flip, then delivers its completion event.
+ */
+static void gpu_kms_async_present_worker(struct work_struct *work)
+{
+    struct fb_gpu_bo_entry *bo;
+    struct fb_gpu_render_owner *owner;
+    struct vfs_file *file = NULL;
+    uint32 fb_id;
+    uint32 width;
+    uint32 height;
+    uint32 xres;
+    uint32 yres;
+    uint32 pixel_format;
+    uint64 modifier;
+    uint64 owner_id;
+    pid_t owner_tgid;
+    uint64 user_data;
+    uint64 submit_ns;
+    uint64 put_ns;
+    uint64 hold_us = 0;
+    uint64 sequence = 0;
+    uint64 timestamp_ns = 0;
+    int paced;
+    int slot_reserved;
+    int blit_ret = 0;
+
+    (void)work;
+
+    /* Snapshot the descriptor. inflight stays set (accept path -EBUSYs any
+     * overlapping flip) so we are the sole reader; the present-lane accounting
+     * mirrors the synchronous path's pre-blit try_native call. */
+    spin_lock(&fb_state.lock);
+    bo = gpu_kms_async_present.bo;
+    fb_id = gpu_kms_async_present.fb_id;
+    width = gpu_kms_async_present.width;
+    height = gpu_kms_async_present.height;
+    xres = gpu_kms_async_present.xres;
+    yres = gpu_kms_async_present.yres;
+    pixel_format = gpu_kms_async_present.pixel_format;
+    modifier = gpu_kms_async_present.modifier;
+    owner_id = gpu_kms_async_present.owner_id;
+    owner_tgid = gpu_kms_async_present.owner_tgid;
+    user_data = gpu_kms_async_present.user_data;
+    submit_ns = gpu_kms_async_present.submit_ns;
+    slot_reserved = gpu_kms_async_present.reserved;
+    (void)gpu_kms_try_native_present_fb_locked(fb_id);
+    spin_unlock(&fb_state.lock);
+
+    if (bo != NULL) {
+        blit_ret = gpu_kms_present_blit(bo, width, height, xres, yres,
+                                        pixel_format, modifier);
+        /* Host is done reading the buffer once the fenced blit returns; only
+         * now may the R5-critical BO reference be dropped. Hold window =
+         * accept-time ref (submit_ns) to this put. */
+        fb_bo_put(bo);
+        put_ns = gpu_kms_monotonic_ns();
+        if (put_ns > submit_ns)
+            hold_us = (put_ns - submit_ns) / 1000ULL;
+    }
+
+    paced = gpu_kms_vblank_paced_flip_enabled();
+
+    /*
+     * Completion accounting at REAL completion time (mirrors the synchronous
+     * flip path), then deliver the event carrying the real vblank seq/ts.
+     *
+     * Non-paced: the event is queued to the ring and the in-flight slot is
+     * cleared inside ONE fb_state.lock section. A client that submits its next
+     * flip the instant it reads the completion can therefore never see a
+     * spurious -EBUSY, and because ring insertion is serialized by this same
+     * lock, a later flip's completion can only land in the ring after this one
+     * — completions stay in submission order without relying on the client
+     * keeping just one flip outstanding.
+     *
+     * Owner is re-resolved by id: the drm fd may have closed mid-present
+     * (gpu_fops_release clears drm_event_file, unregisters and only then
+     * kvfree()s the owner under this same lock, so a live lookup cannot be
+     * freed while we hold it). Owner gone => benign drop (no one is waiting);
+     * ring full => drop accounted by gpu_drm_event_queue_locked.
+     *
+     * Paced (composition with virtio_gpu_vblank_paced_flip): the completion
+     * event is deferred to the next synthetic vblank edge AFTER this real
+     * completion (event timing paced, event cost already paid). The slot is
+     * cleared after the timer is armed; the client cannot observe the event
+     * before the edge fires (>=1ms away), so no spurious-EBUSY window there
+     * either.
+     */
+    spin_lock(&fb_state.lock);
+    gpu_kms_sample_vblank_locked(0, &sequence, &timestamp_ns);
+    if (blit_ret == 0) {
+        /* Present succeeded: mirror the synchronous flip path's accounting. */
+        fb_state.stats.kms_vblank_page_flip_events++;
+        if (fb_state.stats.kms_present_last_lane ==
+            FB_GPU_KMS_PRESENT_LANE_NOUVEAU_HW)
+            fb_state.stats.kms_page_flip_events_native_hw++;
+        else
+            fb_state.stats.kms_page_flip_events_software_blit++;
+        fb_state.current_kms_fb_id = fb_id;
+        fb_state.stats.kms_page_flips++;
+        fb_state.stats.present_async_complete_total++;
+    } else {
+        /*
+         * SHOULD-FIX #2 -- the present blit FAILED. We DELIBERATELY still
+         * deliver a flip-complete below: kwin blocks forever on a completion
+         * that never arrives, so a failed present must never swallow the event
+         * (liveness outranks accuracy here). But we must NOT pretend the
+         * present happened -- leave current_kms_fb_id on the last good scanout
+         * and skip the success/lane counters and present_async_complete_total,
+         * recording the failure separately so it stays observable.
+         */
+        fb_state.stats.present_async_errors_total++;
+    }
+    if (hold_us > fb_state.stats.present_async_bo_hold_max_us)
+        fb_state.stats.present_async_bo_hold_max_us = hold_us;
+    if (!paced) {
+        owner = fb_gpu_render_owner_lookup_locked(owner_id, owner_tgid);
+        if (owner != NULL && owner->drm_event_file != NULL) {
+            if (gpu_drm_event_queue_locked(owner, DRM_EVENT_FLIP_COMPLETE,
+                                           user_data, sequence,
+                                           GPU_DRM_CRTC_ID,
+                                           timestamp_ns) == 0)
+                file = vfs_fdup(owner->drm_event_file);
+        }
+        /* Release the reservation this completion consumed (its sole terminal
+         * point in the non-paced path -- runs whether or not the owner is still
+         * open, so it never leaks). */
+        if (slot_reserved)
+            gpu_drm_async_present_unreserve_locked();
+        gpu_kms_async_present.inflight = 0;
+        gpu_kms_async_present.bo = NULL;
+        gpu_kms_async_present.reserved = 0;
+    }
+    spin_unlock(&fb_state.lock);
+
+    if (!paced) {
+        if (file != NULL)
+            gpu_drm_event_notify_file(file);
+        return;
+    }
+
+    /* Paced: the reservation rides the deferred completion (slot_reserved ->
+     * pf->owns_async_reservation), so it is released when the timer delivers,
+     * NOT here. Clear the slot's ownership flag so the next accept starts
+     * fresh; the reservation count itself stays held for the pending event. */
+    gpu_drm_pace_completed_flip_by_id(owner_id, owner_tgid, user_data,
+                                      sequence, timestamp_ns, slot_reserved);
+    spin_lock(&fb_state.lock);
+    gpu_kms_async_present.inflight = 0;
+    gpu_kms_async_present.bo = NULL;
+    gpu_kms_async_present.reserved = 0;
+    spin_unlock(&fb_state.lock);
+}
+
+static void gpu_kms_async_present_init(void)
+{
+    if (gpu_kms_async_present_wq != NULL)
+        return;
+    gpu_kms_async_present_wq = workqueue_create("fb-present", 1);
+    if (gpu_kms_async_present_wq == NULL) {
+        printf("virtio_gpu: async-present workqueue unavailable; "
+               "page-flip present stays synchronous\n");
+        return;
+    }
+    init_work_struct(&gpu_kms_async_present_work,
+                     gpu_kms_async_present_worker, 0);
+}
+
+/*
+ * Accept an event-carrying page flip into the async present path.
+ * Returns 1 if accepted (ioctl returns 0), 0 if the caller must run the
+ * synchronous present+event path, or a negative errno to return to userspace
+ * (-EBUSY for an overlapping/in-flight flip). Gate OFF or no workqueue => 0,
+ * so behavior is byte-identical to the synchronous path.
+ */
+static int gpu_kms_page_flip_async_try(struct fb_gpu_render_owner *owner,
+                                       uint64 user_data, uint32 fb_id)
+{
+    struct fb_gpu_bo_entry *bo;
+    uint32 bo_handle = 0;
+    uint32 width = 0;
+    uint32 height = 0;
+    uint32 xres = 0;
+    uint32 yres = 0;
+    uint32 pixel_format = 0;
+    uint64 modifier = DRM_FORMAT_MOD_LINEAR;
+    int ret;
+
+    if (!gpu_kms_async_present_enabled() || gpu_kms_async_present_wq == NULL)
+        return 0;
+
+    ret = gpu_kms_present_lookup_params(owner, fb_id, &bo_handle, &width,
+                                        &height, &xres, &yres, &pixel_format,
+                                        &modifier);
+    if (ret != 0)
+        return 0; /* let the sync path reproduce the same errno */
+
+    /* Pin the BO now: this ref keeps the buffer the host will DMA from alive
+     * (and its slot un-reused) for the whole async window (R5). */
+    bo = fb_bo_get_owned(bo_handle, owner->id, owner->tgid);
+    if (bo == NULL)
+        return 0; /* fall back to sync path (same -ENOENT) */
+
+    spin_lock(&fb_state.lock);
+    if (gpu_kms_async_present.inflight) {
+        /* Legacy DRM: a flip is already pending -> -EBUSY. Also the tearing /
+         * R5 guard for req 7 (never accept a flip whose target BO could be the
+         * one still being scanned out). */
+        spin_unlock(&fb_state.lock);
+        fb_bo_put(bo);
+        return -EBUSY;
+    }
+    gpu_kms_async_present.inflight = 1;
+    gpu_kms_async_present.bo = bo; /* ref ownership transferred to the worker */
+    gpu_kms_async_present.bo_handle = bo_handle;
+    gpu_kms_async_present.owner_id = owner->id;
+    gpu_kms_async_present.owner_tgid = owner->tgid;
+    gpu_kms_async_present.user_data = user_data;
+    gpu_kms_async_present.fb_id = fb_id;
+    gpu_kms_async_present.width = width;
+    gpu_kms_async_present.height = height;
+    gpu_kms_async_present.xres = xres;
+    gpu_kms_async_present.yres = yres;
+    gpu_kms_async_present.pixel_format = pixel_format;
+    gpu_kms_async_present.modifier = modifier;
+    gpu_kms_async_present.submit_ns = gpu_kms_monotonic_ns();
+    /* Reserve a ring slot for this flip's completion (SHOULD-FIX #3) so
+     * concurrent VBLANK / QUEUE_SEQUENCE events cannot fill the ring and force
+     * the completion to be dropped before the worker delivers it. */
+    gpu_kms_async_present.reserved =
+        gpu_drm_async_present_reserve_locked(owner->id, owner->tgid);
+    fb_state.stats.present_async_submits_total++;
+    spin_unlock(&fb_state.lock);
+
+    if (!queue_work(gpu_kms_async_present_wq, &gpu_kms_async_present_work)) {
+        /* Could not queue: undo the claim (nothing else is in flight), release
+         * the reservation, and fall back to a synchronous present so the flip
+         * is never lost. */
+        spin_lock(&fb_state.lock);
+        gpu_kms_async_present.inflight = 0;
+        gpu_kms_async_present.bo = NULL;
+        if (gpu_kms_async_present.reserved) {
+            gpu_drm_async_present_unreserve_locked();
+            gpu_kms_async_present.reserved = 0;
+        }
+        if (fb_state.stats.present_async_submits_total > 0)
+            fb_state.stats.present_async_submits_total--;
+        fb_state.stats.present_async_fallback_sync_total++;
+        spin_unlock(&fb_state.lock);
+        fb_bo_put(bo);
+        return 0;
+    }
+    return 1;
 }
 
 static int gpu_kms_present_fb_rect(struct fb_gpu_render_owner *owner,

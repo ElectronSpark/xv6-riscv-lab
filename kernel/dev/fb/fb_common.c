@@ -30,6 +30,7 @@
 #include <mm/vm.h>
 #include <proc/sched.h>
 #include <proc/thread.h>
+#include <proc/workqueue.h>
 #include <printf.h>
 #include <lock/spinlock.h>
 #include <cmdline.h>

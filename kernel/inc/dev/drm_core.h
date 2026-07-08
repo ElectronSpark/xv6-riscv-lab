@@ -66,6 +66,7 @@ int drm_core_get_magic(struct drm_core_file *file, uint64 arg);
 int drm_core_auth_magic(struct drm_core_file *file, uint64 arg);
 int drm_core_get_client(struct drm_core_file *file, uint64 arg);
 int drm_core_set_client_cap(struct drm_core_file *file, uint64 arg);
+void drm_core_master_open(struct drm_core_file *file);
 int drm_core_set_master(struct drm_core_file *file);
 int drm_core_drop_master(struct drm_core_file *file);
 int drm_core_dispatch_ioctl(struct drm_core_file *file, void *driver_file,
