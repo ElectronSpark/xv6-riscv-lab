@@ -968,6 +968,7 @@ static void gpu_kms_async_present_worker(struct work_struct *work)
     uint64 sequence = 0;
     uint64 timestamp_ns = 0;
     int paced;
+    int clock60;
     int slot_reserved;
     int blit_ret = 0;
 
@@ -1005,7 +1006,24 @@ static void gpu_kms_async_present_worker(struct work_struct *work)
             hold_us = (put_ns - submit_ns) / 1000ULL;
     }
 
-    paced = gpu_kms_vblank_paced_flip_enabled();
+    /*
+     * virtio_gpu_present_clock_60hz (DEFAULT OFF): deliver the completion on a
+     * free-running phase-locked 60 Hz grid instead of the real-completion clock,
+     * giving kwin a stable vsync reference (see gpu_kms_present_clock_next_locked).
+     * It routes through the same deferred (paced) delivery path and SUPERSEDES
+     * vblank_paced_flip's completion timing when both gates are set (the free
+     * clock overrides the sampled seq/ts below). Requires async-present (we are
+     * in its worker); no effect otherwise.
+     */
+    clock60 = gpu_kms_present_clock_60hz_enabled();
+    if (clock60) {
+        static int announced; /* one-shot boot-log engagement marker */
+        if (!announced) {
+            announced = 1;
+            printf("virtio_gpu: present-clock 60Hz engaged\n");
+        }
+    }
+    paced = clock60 || gpu_kms_vblank_paced_flip_enabled();
 
     /*
      * Completion accounting at REAL completion time (mirrors the synchronous
@@ -1033,7 +1051,13 @@ static void gpu_kms_async_present_worker(struct work_struct *work)
      * either.
      */
     spin_lock(&fb_state.lock);
+    /* Always sample the real vblank for its side effects (keeps
+     * kms_vblank_sequence/samples + display-correlation coherent for fbstat,
+     * WAIT_VBLANK and CRTC_GET_SEQUENCE readers). Under clock60, OVERRIDE only
+     * the delivered event's seq/ts with the free-running grid — nothing else. */
     gpu_kms_sample_vblank_locked(0, &sequence, &timestamp_ns);
+    if (clock60)
+        gpu_kms_present_clock_next_locked(&sequence, &timestamp_ns);
     if (blit_ret == 0) {
         /* Present succeeded: mirror the synchronous flip path's accounting. */
         fb_state.stats.kms_vblank_page_flip_events++;

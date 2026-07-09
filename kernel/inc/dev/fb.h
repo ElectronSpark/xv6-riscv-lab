@@ -1777,6 +1777,8 @@ struct fb_gpu_stats {
     uint64 present_async_fallback_sync_total; /* flips that fell back to synchronous present */
     uint64 present_async_bo_hold_max_us; /* max BO ref-hold (host DMA) window, us */
     uint64 present_async_errors_total; /* async presents whose blit FAILED (event still delivered for liveness; scanout not advanced) */
+    uint64 present_clock60_events_total; /* flip-complete events issued on the free-running 60Hz present clock (gate virtio_gpu_present_clock_60hz) */
+    uint64 present_clock60_snap_total; /* present-clock frames snapped forward past a missed grid edge (async worker ran long / host stall) */
 };
 
 /* ── Bochs VGA (BGA) register interface ── */

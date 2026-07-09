@@ -1740,6 +1740,100 @@ static void gpu_drm_pace_completed_flip_by_id(uint64 owner_id,
     spin_unlock(&fb_state.lock);
 }
 
+/*
+ * Free-running phase-locked 60 Hz present clock (gate:
+ * virtio_gpu_present_clock_60hz, DEFAULT OFF; composes with — and requires —
+ * virtio_gpu_async_present; no effect while async-present is off, so the
+ * synchronous flip path stays byte-identical).
+ *
+ * WHY: kwin 5.27's legacy RenderLoop schedules its next repaint at
+ * lastPresentationTimestamp + vblankInterval. On xv6 the flip-complete event
+ * carries the *real* present-completion time (the display-correlated vblank —
+ * see gpu_kms_sample_vblank_locked's display_last_complete overwrite), which
+ * lags the 60 Hz grid by the accumulated per-frame processing (present
+ * round-trip ~3 ms + repaint + wakeup). That lag is ADDED to every 16.67 ms
+ * interval, so the loop slides to ~19.6 ms/frame = ~51 fps and never reaches
+ * 60: kwin has no free-running vsync reference (the recorded M4/M7/U5
+ * "kwin has no vsync/present clock" root cause). Neither async-present (removes
+ * the flip *ioctl* cost) nor virtio_gpu_vblank_paced_flip (paces the event to
+ * the next edge PAST real completion — still chained off real completion) breaks
+ * this; both measured M7-null (U2 kill-criterion, U7 A/B presentedFPS 51.2->51.0).
+ *
+ * FIX: hand kwin a completion timestamp/sequence taken from a wall-clock-anchored
+ * 60 Hz grid that is INDEPENDENT of when the present physically completed, and
+ * deliver it at that grid edge. The async worker has already run the blit to
+ * completion and dropped the R5-critical BO ref BEFORE this is armed
+ * (gpu_kms_async_present_worker: blit -> fb_bo_put -> [arm completion]), so the
+ * event is never delivered before the host finished reading the buffer — this
+ * changes only the event's *clock*, not its ordering vs the blit, and therefore
+ * carries NO new tearing/UAF risk over async-present. Grid slides are absorbed
+ * as a stable wait instead of accumulating, so the loop grid-locks at 16.67 ms
+ * = 60 fps.
+ */
+static int gpu_kms_present_clock_60hz_enabled(void)
+{
+    static int initialized;
+    static int enabled; /* DEFAULT OFF */
+    char value[8];
+
+    if (!initialized) {
+        if (cmdline_get_param("virtio_gpu_present_clock_60hz", value,
+                              sizeof(value)) == 0)
+            enabled = value[0] != '0' && value[0] != 'n' &&
+                      value[0] != 'N';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+/*
+ * Compute the next free-running 60 Hz grid point. Returns BASE values
+ * (grid_seq-1, grid_ts-period) so gpu_drm_pace_completed_flip_by_id's internal
+ * +1 lands the delivered event exactly on the target grid edge (grid_seq,
+ * grid_ts), reusing that path's tested timer / reservation / never-drop
+ * machinery verbatim. MUST be called under fb_state.lock (guards the grid
+ * statics). Timestamps are wall-clock-anchored so the grid self-heals if the
+ * worker runs late: a missed edge is skipped forward (a dropped frame, correct
+ * vsync behaviour) rather than delivered late-and-chained.
+ */
+static void gpu_kms_present_clock_next_locked(uint64 *base_seq_out,
+                                              uint64 *base_ts_out)
+{
+    static uint64 anchor_ns;   /* wall-clock phase anchor (first present) */
+    static uint64 grid_seq;    /* free-running 60 Hz frame counter */
+    const uint64 period_ns = gpu_kms_vblank_period_ns(); /* 16666667 */
+    uint64 now_ns = gpu_kms_monotonic_ns();
+    uint64 target_seq;
+    uint64 target_ts;
+
+    if (anchor_ns == 0) {
+        anchor_ns = now_ns != 0 ? now_ns : 1;
+        grid_seq = 0;
+    }
+
+    target_seq = grid_seq + 1;
+    target_ts = anchor_ns + target_seq * period_ns;
+
+    /* If the worker fell behind (long blit / host stall), the naive next edge is
+     * already in the past. Snap forward to the first grid edge strictly after
+     * now so the clock stays phase-locked and never accrues a backlog — kwin
+     * sees a dropped frame, not a late one. */
+    if (now_ns >= target_ts) {
+        uint64 elapsed = (now_ns > anchor_ns) ?
+                         (now_ns - anchor_ns) / period_ns : 0;
+        target_seq = elapsed + 1;
+        target_ts = anchor_ns + target_seq * period_ns;
+        fb_state.stats.present_clock60_snap_total++;
+    }
+
+    grid_seq = target_seq;
+    fb_state.stats.present_clock60_events_total++;
+
+    /* Previous grid point; pace_completed(+1) delivers on the target edge. */
+    *base_seq_out = target_seq - 1;
+    *base_ts_out = target_ts - period_ns;
+}
+
 static int gpu_drm_crtc_get_sequence(uint64 arg)
 {
     struct drm_crtc_get_sequence_compat req;
