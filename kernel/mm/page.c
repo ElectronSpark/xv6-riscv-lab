@@ -62,6 +62,9 @@
 #include <mm/shrinker.h>
 #include <mm/kasan.h>
 #include <mm/kmemleak.h>
+#include "cmdline.h"
+#include "timer/timer.h"
+#include "proc/thread.h"
 
 #ifdef __x86_64__
 static inline void x86_page_dbg_outb(uint16 port, uint8 value) {
@@ -1281,6 +1284,98 @@ STATIC int __no_sanitize_address __buddy_put(page_t *page) {
     return 0;
 }
 
+/* ---- U9b anon-frame recycling diagnostic (default OFF, cmdline-gated) ---- */
+int anon_free_poison_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+    if (cached == -1) {
+        /* Don't latch a negative before the cmdline exists: __page_free can
+         * run during early boot (kinit error paths, early slab churn). */
+        if (!platform.has_cmdline)
+            return 0;
+        cached = cmdline_get_param("anon_free_poison", value, sizeof(value)) ==
+                     0 &&
+                 cmdline_value_is_true(value);
+    }
+    return cached;
+}
+
+int anon_fault_verify_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+    if (cached == -1) {
+        if (!platform.has_cmdline)
+            return 0;
+        cached = cmdline_get_param("anon_fault_verify", value, sizeof(value)) ==
+                     0 &&
+                 cmdline_value_is_true(value);
+    }
+    return cached;
+}
+
+/* Free-site attribution table: pfn-indexed, lock-free, last-writer-wins.
+ * 8192 slots ~= covers the hot recycling window between a free and the next
+ * anon fault-in; collisions merely lose attribution for older frees. */
+#define ANON_POISON_REC_SLOTS 8192
+static struct anon_poison_free_rec anon_poison_recs[ANON_POISON_REC_SLOTS];
+
+void anon_poison_note_free(uint64 pa, uint64 order, uint8 sink,
+                           uint8 page_type)
+{
+    uint64 npages = 1UL << order;
+    struct thread *cur = current;
+    for (uint64 pg = 0; pg < npages; pg++) {
+        uint64 pfn = (pa + pg * PGSIZE) >> 12;
+        struct anon_poison_free_rec *r =
+            &anon_poison_recs[pfn & (ANON_POISON_REC_SLOTS - 1)];
+        r->pfn = 0; /* invalidate while updating (races are benign) */
+        r->jiffs = get_jiffs();
+        r->pid = cur ? cur->pid : -1;
+        if (cur) {
+            int i;
+            for (i = 0; i < 15 && cur->name[i]; i++)
+                r->name[i] = cur->name[i];
+            r->name[i] = '\0';
+        } else {
+            r->name[0] = '\0';
+        }
+        r->sink = sink;
+        r->page_type = page_type;
+        __atomic_store_n(&r->pfn, pfn, __ATOMIC_RELEASE);
+    }
+}
+
+int anon_poison_lookup_free(uint64 pa, struct anon_poison_free_rec *out)
+{
+    uint64 pfn = pa >> 12;
+    struct anon_poison_free_rec *r =
+        &anon_poison_recs[pfn & (ANON_POISON_REC_SLOTS - 1)];
+    if (__atomic_load_n(&r->pfn, __ATOMIC_ACQUIRE) != pfn)
+        return -1;
+    *out = *r;
+    return 0;
+}
+
+void __no_sanitize_address anon_frame_poison(uint64 pa, uint64 order)
+{
+    if (pa == 0)
+        return;
+    /* Fill each constituent page with its OWN pfn-encoded canary so the
+     * fault-side verify (which recomputes the word from a single faulting
+     * page's pa) matches even when a compound folio is later re-faulted as
+     * individual order-0 anon pages. */
+    uint64 npages = 1UL << order;
+    for (uint64 pg = 0; pg < npages; pg++) {
+        uint64 ppa = pa + pg * PGSIZE;
+        uint64 word = anon_poison_word_for_pa(ppa);
+        uint64 *p = (uint64 *)ppa;
+        for (uint64 i = 0; i < PGSIZE / sizeof(uint64); i++)
+            p[i] = word;
+    }
+}
+
 /**
  * page_free_anon_batch - Free a batch of order-0 anonymous pages efficiently.
  *
@@ -1297,6 +1392,7 @@ void __no_sanitize_address page_free_anon_batch(page_t **pages, int count)
 {
     page_t *overflow[256];
     int noverflow = 0;
+    int poison = anon_free_poison_enabled();
 
     push_off();
     for (int i = 0; i < count; i++) {
@@ -1316,6 +1412,10 @@ void __no_sanitize_address page_free_anon_batch(page_t **pages, int count)
             continue;
         }
         /* old == 1: we freed the last ref.  Page is exclusively ours. */
+        if (poison) {
+            anon_frame_poison(__page_to_pa(pg), 0);
+            anon_poison_note_free(__page_to_pa(pg), 0, 1, PAGE_TYPE_ANON);
+        }
         kmemleak_free((const void *)__page_to_pa(pg));
         kasan_page_free((const void *)__page_to_pa(pg), 0);
         pcpu_cache_t *cache = __get_pcpu_cache_for_page(pg, 0);
@@ -1803,6 +1903,20 @@ void __no_sanitize_address __page_free(page_t *page, uint64 order) {
         }
     }
 
+    /* U9b diagnostic: poison EVERY frame returning to the allocator through
+     * this sink (slab shrink, folio_free, page_free, bitmap pages, ...), not
+     * just anon.  A frame that leaves the allocator, is legitimately written
+     * by an intermediate owner (e.g. a slab freelist), and comes back through
+     * here is re-poisoned, so the anon fault-in verify can only fire for
+     * writes that happened while the frame was genuinely free.  The frame is
+     * exclusively ours here (freeable assertion above), before kasan marks it
+     * freed. */
+    if (anon_free_poison_enabled()) {
+        anon_frame_poison(__page_to_pa(page), order);
+        anon_poison_note_free(__page_to_pa(page), order, 3,
+                              (uint8)PAGE_FLAG_GET_TYPE(page->flags));
+    }
+
     kmemleak_free((const void *)__page_to_pa(page));
     kasan_page_free((const void *)__page_to_pa(page), order);
 
@@ -2017,6 +2131,18 @@ int __page_ref_dec(page_t *page) {
     page_lock_release(page);
     if (ret == 0) {
         uint8 order = page->compound_order;
+        /* U9b: poison EVERY frame (any type) as it returns to the allocator
+         * via the refcount sink (COW old-page drop, anon free, pcache drop,
+         * kfree, error paths).  Full-type coverage keeps the fault-in verify
+         * free of false positives from legitimately-dirtied intermediate
+         * owners.  Only the order==0 __buddy_put path poisons here; order>0
+         * delegates to __page_free which has its own hook.  Type flags are
+         * still valid here (buddy re-init happens below). */
+        if (order == 0 && anon_free_poison_enabled()) {
+            anon_frame_poison(__page_to_pa(page), order);
+            anon_poison_note_free(__page_to_pa(page), order, 2,
+                                  (uint8)PAGE_FLAG_GET_TYPE(page->flags));
+        }
         if (PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE) && page->pcache.pcache_node) {
             // Free the page cache node
             slab_free(page->pcache.pcache_node);

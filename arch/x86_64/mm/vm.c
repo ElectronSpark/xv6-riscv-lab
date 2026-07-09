@@ -496,6 +496,74 @@ pagetable_t kernel_pagetable;
 
 /* ── TLB management (x86_64: IPI-based TLB shootdown) ── */
 
+/* U9b R5-class diagnostic (default OFF, cmdline-gated). */
+static int vm_shootdown_cpumask_audit_enabled(void)
+{
+    static int cached = -1;
+    char value[8];
+    if (cached == -1) {
+        cached = cmdline_get_param("vm_shootdown_cpumask_audit", value,
+                                   sizeof(value)) == 0 &&
+                 cmdline_value_is_true(value);
+    }
+    return cached;
+}
+
+/*
+ * vm_shootdown_cpumask_audit - at a TLB shootdown, report any CPU whose
+ * currently-scheduled thread runs on the target pagetable yet is absent from
+ * the shootdown mask (@shot_mask == vm->cpumask minus the initiating CPU).
+ *
+ * Such a CPU entered the kernel from user mode (its cpumask bit is cleared at
+ * trap entry, trap.c) while still logically owning the target user pagetable,
+ * so the shootdown would skip it — the mechanism (a) "shootdown-miss / lock-
+ * drop timing residual" signature. Distinguishes (a) from (b) COW undercount:
+ * a verify hit WITH a concurrent audit MISS on the same pagetable => (a);
+ * a verify hit with NO audit miss => (b).
+ *
+ * Read-only, takes no locks — required because callers may run with the
+ * pgtable spinlock held. Runs only on the initiating CPU with interrupts
+ * already disabled (never in IPI context); cpus[] reads are a best-effort
+ * snapshot, acceptable for an opt-in diagnostic.
+ */
+static void vm_shootdown_cpumask_audit(vm_t *vm, cpumask_t shot_mask)
+{
+    if (!vm_shootdown_cpumask_audit_enabled())
+        return;
+    if (vm == NULL || vm->pagetable == NULL)
+        return;
+
+    int self = cpuid();
+    int n = cpu_possible_count();
+    for (int i = 0; i < n; i++) {
+        if (i == self)
+            continue;
+        if (shot_mask & (1ULL << i))
+            continue; /* already covered by the shootdown */
+        struct thread *t = cpus[i].proc;
+        if (t == NULL || t->vm == NULL)
+            continue;
+        if (t->vm->pagetable != vm->pagetable)
+            continue;
+        /* Misses are common under multithreaded teardown (siblings in-kernel);
+         * cap the log to sample "does the miss condition occur at all" without
+         * flooding the console. */
+        static int audit_misses;
+        int m = __atomic_fetch_add(&audit_misses, 1, __ATOMIC_RELAXED);
+        if (m >= 128) {
+            if (m == 128)
+                printf("vm_shootdown_cpumask_audit: further misses "
+                       "suppressed (miss condition confirmed present)\n");
+            continue;
+        }
+        printf("vm_shootdown_cpumask_audit: MISS cpu=%d pid=%d name=%s "
+               "pagetable=%p vm=%p cpumask=0x%lx (live CR3 matches target "
+               "pagetable but CPU is not in the shootdown mask)\n",
+               i, t->pid, t->name, vm->pagetable, vm,
+               (uint64)smp_load_acquire(&vm->cpumask));
+    }
+}
+
 void vm_remote_sfence(vm_t *vm)
 {
     push_off();
@@ -511,6 +579,8 @@ void vm_remote_sfence(vm_t *vm)
 
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());
+
+    vm_shootdown_cpumask_audit(vm, cpumask);
 
     uint64 seqs[MAX_CPUS] = {0};
     if (cpumask) {
@@ -542,6 +612,8 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
 
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());
+
+    vm_shootdown_cpumask_audit(vm, cpumask);
 
     uint64 seqs[MAX_CPUS] = {0};
     if (cpumask) {

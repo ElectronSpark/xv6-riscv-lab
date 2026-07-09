@@ -58,6 +58,7 @@
 #include <vfs/fs.h>
 #include <vfs/fcntl.h>
 #include <dev/bio.h>
+#include "timer/timer.h"
 
 /* MAP_POPULATE is capped so one mmap() cannot monopolize the VM lock. */
 #define VM_MMAP_POPULATE_MAX_PAGES 64
@@ -2280,6 +2281,111 @@ static unsigned int __folio_order_for_vma(vma_t *vma, uint64 fault_va)
 }
 
 /*
+ * anon_fault_verify_region - U9b R5-class diagnostic (default OFF).
+ *
+ * Called at each anon/.bss demand-fault zero-fill, BEFORE the frame is zeroed,
+ * over exactly the byte range the kernel is about to zero (@off..@off+@len).
+ * With anon_free_poison=1 every anon frame is canary-filled when freed, so a
+ * frame reaching this point should be all-canary (untouched since free) or
+ * all-zero (never poisoned / different origin). A frame that still carries our
+ * per-frame canary in most words but has a FOREIGN word (neither zero nor the
+ * canary) was written after it was freed but before this fault installed it —
+ * the R5-class kernel free-then-write.
+ *
+ * The predicate requires canary>=1 AND foreign>=1 AND canary>=foreign so it
+ * does NOT false-positive on legitimately recycled non-anon frames (page
+ * cache, slab) whose content is wholly foreign (canary==0), nor on a frame
+ * merely re-read by a later owner (foreign dominates). The allocator does not
+ * zero on alloc, so foreign-but-uncanaried content is the normal recycled
+ * state and is intentionally ignored.
+ */
+static void anon_fault_verify_region(vma_t *vma, uint64 fault_va, uint64 pa,
+                                     uint64 off, uint64 len)
+{
+    if (!anon_fault_verify_enabled())
+        return;
+    if (pa == 0 || len < sizeof(uint64))
+        return;
+
+    uint64 expect = anon_poison_word_for_pa(pa);
+    const uint64 *w = (const uint64 *)(pa + off);
+    uint64 nwords = len / sizeof(uint64);
+    uint64 canary = 0, zero = 0, foreign = 0;
+    uint64 first_foreign = (uint64)-1;
+
+    for (uint64 i = 0; i < nwords; i++) {
+        uint64 v = w[i];
+        if (v == expect) {
+            canary++;
+        } else if (v == 0) {
+            zero++;
+        } else {
+            foreign++;
+            if (first_foreign == (uint64)-1)
+                first_foreign = i;
+        }
+    }
+
+    if (!(canary >= 1 && foreign >= 1 && canary >= foreign))
+        return;
+
+    /* Corruption is expected to be rare (R5-class residual rate); cap the
+     * dump so a pathological storm cannot flood the console and mask itself. */
+    static int anon_fault_verify_hits;
+    int hit = __atomic_fetch_add(&anon_fault_verify_hits, 1, __ATOMIC_RELAXED);
+    if (hit >= 64) {
+        if (hit == 64)
+            printf("anon_fault_verify: further hits suppressed\n");
+        return;
+    }
+
+    struct thread *cur = current;
+    int pid = cur ? cur->pid : -1;
+    const char *name = cur ? cur->name : "?";
+    const uint8 *b = (const uint8 *)&w[first_foreign];
+
+    printf("anon_fault_verify: R5-CORRUPTION pa=0x%lx off=0x%lx len=0x%lx "
+           "va=0x%lx vma=[0x%lx-0x%lx) flags=0x%lx file=%d pid=%d name=%s "
+           "pagetable=%p canary=%lu zero=%lu foreign=%lu "
+           "first_foreign_off=0x%lx\n",
+           pa, off, len, fault_va, vma->start, vma->end, vma->flags,
+           vma->file != NULL, pid, name,
+           vma->vm != NULL ? (void *)vma->vm->pagetable : NULL, canary, zero,
+           foreign, off + first_foreign * sizeof(uint64));
+
+    int nbytes = (int)(len - first_foreign * sizeof(uint64));
+    if (nbytes > 32)
+        nbytes = 32;
+    printf("anon_fault_verify: hex:");
+    for (int k = 0; k < nbytes; k++)
+        printf(" %02x", b[k]);
+    printf("\nanon_fault_verify: ascii: ");
+    for (int k = 0; k < nbytes; k++)
+        printf("%c", (b[k] >= 0x20 && b[k] < 0x7f) ? (char)b[k] : '.');
+    printf("\n");
+    /* Also dump the page head: run-2 hits showed tidy zero writes starting at
+     * byte 0 whose word-0 state the first_foreign-anchored dump cannot show. */
+    const uint8 *h = (const uint8 *)(pa + off);
+    printf("anon_fault_verify: head:");
+    for (int k = 0; k < 32 && k < (int)len; k++)
+        printf(" %02x", h[k]);
+    printf("\n");
+
+    /* Free-site attribution: who poisoned this frame last, and how long ago.
+     * sink 1=anon_batch(munmap/madvise teardown) 2=ref_dec(COW/kfree/pcache)
+     * 3=page_free(slab shrink/folio_free). */
+    struct anon_poison_free_rec rec;
+    if (anon_poison_lookup_free(pa, &rec) == 0) {
+        printf("anon_fault_verify: freed-by pid=%d name=%s sink=%d "
+               "page_type=%d age_jiffs=%lu\n",
+               rec.pid, rec.name, rec.sink, rec.page_type,
+               get_jiffs() - rec.jiffs);
+    } else {
+        printf("anon_fault_verify: freed-by unknown (record evicted)\n");
+    }
+}
+
+/*
  * __vma_map_anon_folio - allocate an anonymous folio and install PTEs for
  * every page in it.  The caller must hold vm_pgtable_lock.
  *
@@ -2305,6 +2411,7 @@ static void *__vma_map_anon_folio(vma_t *vma, uint64 fault_va,
         return NULL;
 
     uint64 folio_pa = folio_address(folio);
+    anon_fault_verify_region(vma, fault_va, folio_pa, 0, PGSIZE);
     memset((void *)folio_pa, 0, PGSIZE);
 
     pte_t *pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
@@ -2346,6 +2453,7 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
         folio_t *folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
         if (folio == NULL)
             return NULL;
+        anon_fault_verify_region(vma, va, folio_address(folio), 0, PGSIZE);
         memset((void *)folio_address(folio), 0, PGSIZE);
         return (void *)folio_address(folio);
     }
@@ -2385,6 +2493,11 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
 
     void *pa = (void *)folio_address(anon_folio);
     memmove(pa, (char *)pcn->data + folio_byte_off, bytes_to_read);
+    /* Verify the zero-fill TAIL (the .bss-style tail of an RW ELF PT_LOAD) —
+     * the exact region the 07-04 R5 residue landed in — before we zero it.
+     * The head [0..bytes_to_read) is legitimate file data (excluded). */
+    anon_fault_verify_region(vma, va, (uint64)pa, bytes_to_read,
+                             PGSIZE - bytes_to_read);
     memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
     pcache_put_folio(pc, pcfolio);
