@@ -6510,6 +6510,78 @@ int kvm_register_region(uint64 start, uint64 size, uint64 flags)
     return 0;
 }
 
+/*
+ * Tear down the kernel-VM mapping [from, to) belonging to @vma:
+ * clear the leaf PTEs, flush the TLB on every CPU, and only then release
+ * the frames to the allocator.  Frees @vma and RELEASES vm_wlock before
+ * returning.  Caller must hold vm_wlock(vm) on entry.
+ *
+ * R5/U9b: the clear→flush→free ordering is load-bearing.  Kernel PTEs are
+ * GLOBAL, so they survive CR3 reloads on CPUs that were executing user
+ * code during the shootdown; vm_remote_sfence* therefore targets every
+ * active CPU for is_kernel VMs.  Freeing before the flush (the old
+ * kvm_munmap order) let a stale translation write into a recycled frame —
+ * the R5-class corruption family (kvm VAs are page-aligned, matching the
+ * caught page-offset-0 write-after-free signature).
+ *
+ * Lock discipline: vm_wlock(kernel_vm) is a SPINLOCK (irqs off), so the
+ * IPI shootdown must NEVER run while it is held — a second CPU spinning
+ * on the lock with interrupts off could not acknowledge the IPI and the
+ * sync-wait would deadlock (observed as a bring-up hang).  Each batch
+ * therefore: clear+collect up to KVM_FREE_DEFER_MAX PAs under the lock,
+ * DROP the lock, flush the cleared span everywhere, free the batch,
+ * re-acquire for the next batch.  @vma stays registered until the final
+ * batch so the VA range cannot be handed out by a concurrent kvm_mmap
+ * while stale translations may still exist.  A typical (≤2 MB) range
+ * takes exactly one flush round, same as the pre-fix code.
+ */
+#define KVM_FREE_DEFER_MAX 512
+static void __kvm_unmap_range_flush_free(vm_t *vm, vma_t *vma,
+                                         uint64 from, uint64 to)
+{
+    uint64 a = from;
+
+    /* The lock is dropped between batches: mark the vma mid-teardown so
+     * a concurrent (buggy) double kvfree of the same address fails with
+     * -EINVAL instead of racing to a double vma_free/page_free. */
+    vma->flags |= VMA_FLAG_KVM_DYING;
+
+    for (;;) {
+        uint64 defer_pa[KVM_FREE_DEFER_MAX];
+        int ndefer = 0;
+        uint64 flush_from = a;
+
+        for (; a < to && ndefer < KVM_FREE_DEFER_MAX; a += PGSIZE) {
+            pte_t *pte = walk(vm->pagetable, a, 0, NULL, NULL);
+            if (pte == NULL || !pte_present(pte))
+                continue;
+            defer_pa[ndefer++] = pte_pa(pte);
+            pte_clear(pte);
+        }
+        int done = (a >= to);
+        vm_wunlock(vm);
+
+        if (ndefer > 0) {
+            /* Flush the cleared span on this CPU and every remote CPU
+             * before the frames are released. */
+            for (uint64 f = flush_from; f < a; f += PGSIZE)
+                sfence_vma_page(f);
+            vm_remote_sfence_range(vm, flush_from, a - flush_from);
+            for (int i = 0; i < ndefer; i++)
+                page_free((void *)defer_pa[i], 0);
+        }
+        vm_wlock(vm);
+        if (done)
+            break;
+    }
+
+    /* Release the VA range only after every cleared span has been
+     * flushed everywhere, so a concurrent kvm_mmap can never hand out
+     * this range while a stale translation for it may still exist. */
+    vma_free(vm, vma);
+    vm_wunlock(vm);
+}
+
 uint64 kvm_mmap(uint64 addr, size_t size, uint64 flags)
 {
     vm_t *vm = kernel_vm;
@@ -6549,34 +6621,18 @@ uint64 kvm_mmap(uint64 addr, size_t size, uint64 flags)
         folio_t *folio = folio_alloc(0, PAGE_TYPE_ANON);
         void *pa = folio ? (void *)folio_address(folio) : NULL;
         if (pa == NULL) {
-            /* Roll back: unmap and free pages we already mapped. */
-            for (uint64 b = map_addr; b < a; b += PGSIZE) {
-                pte_t *pte = walk(vm->pagetable, b, 0, NULL, NULL);
-                if (pte && pte_present(pte)) {
-                    uint64 old_pa = pte_pa(pte);
-                    pte_clear(pte);
-                    page_free((void *)old_pa, 0);
-                }
-            }
-            vma_free(vm, vma);
-            vm_wunlock(vm);
+            /* Roll back: unmap (clear→flush→free) pages already mapped.
+             * Frees the vma and releases vm_wlock. */
+            __kvm_unmap_range_flush_free(vm, vma, map_addr, a);
             return 0;
         }
         memset(pa, 0, PGSIZE);
         pte_t pte_flags = vma2pte_flags(flags);
         if (mappages(vm->pagetable, a, PGSIZE, (uint64)pa, pte_flags) != 0) {
             page_free(pa, 0);
-            /* Roll back everything mapped so far. */
-            for (uint64 b = map_addr; b < a; b += PGSIZE) {
-                pte_t *pte = walk(vm->pagetable, b, 0, NULL, NULL);
-                if (pte && pte_present(pte)) {
-                    uint64 old_pa = pte_pa(pte);
-                    pte_clear(pte);
-                    page_free((void *)old_pa, 0);
-                }
-            }
-            vma_free(vm, vma);
-            vm_wunlock(vm);
+            /* Roll back everything mapped so far (clear→flush→free).
+             * Frees the vma and releases vm_wlock. */
+            __kvm_unmap_range_flush_free(vm, vma, map_addr, a);
             return 0;
         }
     }
@@ -6602,30 +6658,25 @@ int kvm_munmap(uint64 addr, size_t size)
     vm_wlock(vm);
 
     vma_t *vma = vm_find_area(vm, addr);
-    if (vma == NULL || vma->start != addr || vma->end != addr + size) {
+    if (vma == NULL || vma->start != addr || vma->end != addr + size ||
+        (vma->flags & VMA_FLAG_KVM_DYING)) {
         vm_wunlock(vm);
         return -EINVAL;
     }
 
     kasan_vmalloc_free((const void *)addr, size);
 
-    /* Free the physical pages and clear PTEs. */
-    for (uint64 a = addr; a < addr + size; a += PGSIZE) {
-        pte_t *pte = walk(vm->pagetable, a, 0, NULL, NULL);
-        if (pte == NULL || !pte_present(pte))
-            continue;
-        uint64 pa = pte_pa(pte);
-        pte_clear(pte);
-        page_free((void *)pa, 0);
-    }
-
-    vma_free(vm, vma);
-    vm_wunlock(vm);
-
-    /* Flush TLB on local CPU and send IPI to remote CPUs in cpumask. */
-    for (uint64 a = addr; a < addr + size; a += PGSIZE)
-        sfence_vma_page(a);
-    vm_remote_sfence_range(kernel_vm, addr, size);
+    /*
+     * R5/U9b fix: clear PTEs and flush the TLB (local + remote) BEFORE
+     * the frames go back to the allocator — the same clear→flush→free
+     * ordering 67d7b5c established for user VMAs (__vma_clear_range).
+     * The old order (free first, flush after vm_wunlock) let a CPU with
+     * a stale translation for this range write into a frame that the
+     * buddy allocator had already handed to a new owner.  Frees the vma
+     * and releases vm_wlock; see __kvm_unmap_range_flush_free for the
+     * spinlock-vs-IPI lock discipline.
+     */
+    __kvm_unmap_range_flush_free(vm, vma, addr, addr + size);
     return 0;
 }
 

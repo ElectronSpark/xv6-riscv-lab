@@ -578,6 +578,20 @@ void vm_remote_sfence(vm_t *vm)
     sfence_vma_global();
 
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    /*
+     * R5/U9b fix: kernel mappings are GLOBAL (PTE_G, vma2pte_flags), so
+     * they are NOT flushed by the CR3 reload on user entry/exit.  A CPU
+     * currently executing user code is absent from kernel_vm->cpumask
+     * (trap entry/exit bookkeeping) yet still caches kernel-VA
+     * translations; skipping it here leaves a stale global entry that
+     * survives until that CPU's next full flush.  Writes through such an
+     * entry land in frames the kernel VM already released — the R5-class
+     * write-after-free into recycled frames (kvm VAs are page-aligned,
+     * matching the caught page-offset-0 corruption).  For the kernel VM,
+     * target every active CPU.
+     */
+    if (vm->is_kernel)
+        cpumask = get_cpu_active_mask();
     cpumask &= ~(1ULL << cpuid());
 
     vm_shootdown_cpumask_audit(vm, cpumask);
@@ -611,6 +625,10 @@ void vm_remote_sfence_page(vm_t *vm, uint64 va)
         sfence_vma_page(va);
 
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    /* Kernel PTEs are global — CPUs in user mode retain them across CR3
+     * reloads; target every active CPU (see vm_remote_sfence). */
+    if (vm->is_kernel)
+        cpumask = get_cpu_active_mask();
     cpumask &= ~(1ULL << cpuid());
 
     vm_shootdown_cpumask_audit(vm, cpumask);

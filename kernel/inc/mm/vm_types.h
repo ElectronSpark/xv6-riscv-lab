@@ -91,6 +91,7 @@ typedef struct vma {
 #define VMA_FLAG_HUGEPAGE 0x20000  // Transparent hugepage advisory
 #define VMA_FLAG_NOHUGEPAGE 0x40000 // Disable transparent hugepage advisory
 #define VMA_FLAG_PFNMAP 0x80000 // Raw PFN/MMIO mapping; no page ref/rmap
+#define VMA_FLAG_KVM_DYING 0x100000 // kernel-VM area mid-teardown (kvm_munmap)
 
 #define VMA_FLAG_ADVICE_MASK                                                  \
     (VMA_FLAG_DONTFORK | VMA_FLAG_DONTDUMP | VMA_FLAG_WIPEONFORK |            \
