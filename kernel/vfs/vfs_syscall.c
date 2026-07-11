@@ -4068,13 +4068,14 @@ static void webkit_poll_trace_fd(const char *phase, const struct pollfd_k *pfd,
     }
 
     printf("webkit-poll: %s pid=%d name=%s fd=%d events=0x%x "
-           "revents=0x%x kind=%s flags=0x%x ops=%p poll=%p inode=%p\n",
+           "revents=0x%x kind=%s flags=0x%x ops=%p poll_capable=%d "
+           "inode=%p\n",
            phase, current->pid, current->name, pfd->fd,
            (uint)pfd->events, (uint)pfd->revents, kind,
            f != NULL ? (uint)f->f_flags : 0,
            f != NULL ? f->ops : NULL,
-           (f != NULL && f->ops != NULL) ? f->ops->poll : NULL,
-	           f != NULL ? f->inode.inode : NULL);
+           f != NULL && f->ops != NULL && f->ops->poll != NULL,
+	       f != NULL ? f->inode.inode : NULL);
 }
 
 static const char *webkit_poll_fd_kind(struct vfs_file *f)
@@ -5121,7 +5122,7 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
     short sample_events[6];
     short sample_revents[6];
     const char *sample_kind[6];
-    void *sample_poll[6];
+    int sample_poll_capable[6];
     char sample_detail[6][256];
     int nsample = 0;
     char line[2048];
@@ -5145,19 +5146,19 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
 
         if (take_sample) {
             const char *kind = "neg";
-            void *poll = NULL;
+            int poll_capable = 0;
             struct vfs_file *f = NULL;
             if (pfds[i].fd >= 0) {
                 f = __vfs_argfd(pfds[i].fd);
                 kind = webkit_poll_fd_kind(f);
                 if (f != NULL && f->ops != NULL)
-                    poll = f->ops->poll;
+                    poll_capable = f->ops->poll != NULL;
             }
             sample_fd[nsample] = pfds[i].fd;
             sample_events[nsample] = pfds[i].events;
             sample_revents[nsample] = r;
             sample_kind[nsample] = kind;
-            sample_poll[nsample] = poll;
+            sample_poll_capable[nsample] = poll_capable;
             chrome_poll_unix_snapshot(f, sample_detail[nsample],
                                       sizeof(sample_detail[nsample]));
             nsample++;
@@ -5186,10 +5187,10 @@ static void webkit_poll_summary(const char *phase, int nfds, int timeout_ms,
                         n, phase, current->pid, current->name, nfds,
                         timeout_ms, ready, in, out, err, zero);
     for (int i = 0; i < nsample; i++) {
-        POLL_SUMMARY_APPEND(" sample%d=fd%d/e%x/r%x/%s/%p", i,
+        POLL_SUMMARY_APPEND(" sample%d=fd%d/e%x/r%x/%s/poll%d", i,
                             sample_fd[i], (uint)sample_events[i],
                             (uint)sample_revents[i], sample_kind[i],
-                            sample_poll[i]);
+                            sample_poll_capable[i]);
         if (sample_detail[i][0] != '\0')
             POLL_SUMMARY_APPEND("%s", sample_detail[i]);
     }
@@ -5284,14 +5285,16 @@ static void kde_ready_trace_poll_fds(const char *phase, int nfds,
             (pfds[i].revents != 0 || ready <= 0 || requires_rescan)) {
             name = kde_ready_poll_target(f, target, sizeof(target));
             printf("kde-ready-poll-fd: phase=%s pid=%d tgid=%d name=%s "
-                   "fd=%d events=0x%x revents=0x%x kind=%s ops=%p poll=%p "
+                   "fd=%d events=0x%x revents=0x%x kind=%s ops=%p "
+                   "poll_capable=%d "
                    "file=%p f_flags=0x%x notify_backed=%d "
                    "requires_rescan=%d target=%s\n",
                    phase ? phase : "", current ? current->pid : -1,
                    current ? current->tgid : -1,
                    current ? current->name : "(none)", pfds[i].fd,
                    (uint)pfds[i].events, (uint)pfds[i].revents, kind,
-                   f ? f->ops : NULL, (f && f->ops) ? f->ops->poll : NULL,
+                   f ? f->ops : NULL,
+                   f != NULL && f->ops != NULL && f->ops->poll != NULL,
                    f, f ? f->f_flags : 0, notify_backed, requires_rescan,
                    name);
             printed++;
@@ -5475,11 +5478,13 @@ static void kde_konsole_child_poll_detail(
         target_name = kde_ready_poll_target(f, target, sizeof(target));
         printf("konsole-child-poll-fd: poll_seq=%lu slot=%d fd=%d "
                "events=0x%x revents=0x%x kind=%s notify_backed=%d "
-               "requires_rescan=%d ops=%p poll=%p file=%p f_flags=0x%x "
+               "requires_rescan=%d ops=%p poll_capable=%d file=%p "
+               "f_flags=0x%x "
                "target=%s\n",
                seq, i, pfds[i].fd, (uint)pfds[i].events,
                (uint)pfds[i].revents, kind, notify_backed, requires_rescan,
-               f ? f->ops : NULL, (f && f->ops) ? f->ops->poll : NULL, f,
+               f ? f->ops : NULL,
+               f != NULL && f->ops != NULL && f->ops->poll != NULL, f,
                f ? f->f_flags : 0, target_name);
         if (f != NULL)
             vfs_fput(f);

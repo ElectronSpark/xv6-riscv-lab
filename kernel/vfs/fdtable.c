@@ -652,10 +652,12 @@ void vfs_fdtable_debug_dump(struct thread *p, const char *tag, int max_fd)
             }
         }
         printf("chrome-fd-trace: fdtable-entry pid=%d tag=%s fd=%d "
-               "cloexec=%d file=%p kind=%d f_flags=0x%x ops=%p poll=%p "
+               "cloexec=%d file=%p kind=%d f_flags=0x%x ops=%p "
+               "poll_capable=%d "
                "path=%s target=%s\n",
                p->pid, tag ? tag : "", fd, cloexec, f, f->f_kind,
-               f->f_flags, f->ops, f->ops ? f->ops->poll : NULL,
+               f->f_flags, f->ops,
+               f->ops != NULL && f->ops->poll != NULL,
                vfs_fdtable_debug_path(f),
                target[0] != '\0' ? target : "(none)");
     }

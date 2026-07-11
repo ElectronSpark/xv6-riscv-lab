@@ -1142,8 +1142,8 @@ static void konsole_prepty_classify_file(
     rec->file_ref_count =
         __atomic_load_n(&file->ref_count, __ATOMIC_RELAXED);
     rec->file_ops = (uint64)file->ops;
-    rec->file_poll =
-        (uint64)((file->ops != NULL) ? file->ops->poll : NULL);
+    rec->file_poll_capable =
+        file->ops != NULL && file->ops->poll != NULL;
     if (file->opened_path != NULL)
         safestrcpy(rec->path, file->opened_path, sizeof(rec->path));
 

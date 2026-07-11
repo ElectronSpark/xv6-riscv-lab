@@ -25,6 +25,8 @@ struct knote;  /* forward declaration for knote_ops */
 #define KN_TIMER        0x10    /* knote has an active timer */
 #define KN_EDGE_ACTIVE  0x20    /* EV_CLEAR file filter is currently ready */
 #define KN_LEVEL_SEEN   0x40    /* raw kqueue level readiness delivered once */
+#define KN_DELIVERING   0x80    /* removed from ready while being reported */
+#define KN_PENDING      0x100   /* notification deferred until next wait */
 
 #define KQ_EPOLL_COMPAT 0x01    /* descriptor was created by epoll_create* */
 
@@ -73,6 +75,19 @@ struct knote {
     /* Internal state */
     uint32 status;
 
+    /*
+     * File-filter poll lifetime.  A .poll callback may synchronously notify
+     * this kqueue, so it must run without kq->lock held.  poll_refs pins the
+     * knote across that unlocked callback, registration_generation rejects a
+     * result after DEL/MOD/disable/close.  registration_id gives each ADD a
+     * monotonic position so concurrent rescans can use independent high-water
+     * snapshots without retaining a list cursor across the unlock.
+     */
+    uint32 poll_refs;
+    bool poll_free_pending;
+    uint64 registration_generation;
+    uint64 registration_id;
+
     /* Filter operations */
     struct knote_ops *ops;
 
@@ -99,7 +114,10 @@ struct kqueue {
     int nready;                    /* count of ready knotes */
     int closed;                    /* set when kqueue is being torn down */
     int waiters;                   /* threads currently inside kqueue_wait() */
+    int pollers;                   /* in-flight kqueue-file .poll calls */
+    int registrars;                /* in-flight kqueue_register calls */
     uint32 flags;                  /* KQ_* compatibility flags */
+    uint64 next_registration_id;   /* monotonic ADD order/high-water source */
     struct vfs_file *file;         /* back-pointer to owning vfs_file (for nested epoll) */
 };
 
@@ -121,6 +139,7 @@ struct kqueue *kqueue_alloc_private(void);
 void kqueue_close_private(struct kqueue *kq);
 struct kqueue *kqueue_from_file(struct vfs_file *file);
 int kqueue_file_is_epoll(struct vfs_file *file);
+int kqueue_file_filter_event_unlocked(struct knote *kn);
 int kqueue_epoll_contains_kqueue(struct kqueue *root, struct kqueue *needle,
                                  int depth_limit);
 int kqueue_epoll_has_ident(struct kqueue *kq, uint64 ident);

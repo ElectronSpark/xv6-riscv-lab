@@ -83,31 +83,7 @@ static void knote_read_detach(struct knote *kn) {
 
 static int knote_read_event(struct knote *kn, long hint) {
     (void)hint;
-    struct vfs_file *f = kn->attached_file;
-    if (f == NULL)
-        return 0;
-    if (f->ops && f->ops->poll) {
-        assert(f->ref_count > 0,
-               "knote_read_event: stale file %p (ref=%d, ops=%p, ident=%ld)",
-               f, f->ref_count, f->ops, kn->ident);
-        int revents = f->ops->poll(f, POLLIN | POLLPRI | POLLRDNORM |
-                                       POLLRDBAND | POLLRDHUP);
-        if (revents & (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND | POLLRDHUP |
-                       POLLHUP | POLLERR))
-            return 1;
-    }
-    /* Chardev files (e.g. /dev/console) have f->ops == NULL;
-     * dispatch through the device's poll callback instead. */
-    if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL &&
-        f->cdev->ops.poll != NULL) {
-        int revents = f->cdev->ops.poll(f->cdev, POLLIN | POLLPRI |
-                                                 POLLRDNORM | POLLRDBAND |
-                                                 POLLRDHUP);
-        if (revents & (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND | POLLRDHUP |
-                       POLLHUP | POLLERR))
-            return 1;
-    }
-    return 0;
+    return kqueue_file_filter_event_unlocked(kn);
 }
 
 struct knote_ops knote_read_ops = {
@@ -174,26 +150,7 @@ static void knote_write_detach(struct knote *kn) {
 
 static int knote_write_event(struct knote *kn, long hint) {
     (void)hint;
-    struct vfs_file *f = kn->attached_file;
-    if (f == NULL)
-        return 0;
-    if (f->ops && f->ops->poll) {
-        assert(f->ref_count > 0,
-               "knote_write_event: stale file %p (ref=%d, ops=%p, ident=%ld)",
-               f, f->ref_count, f->ops, kn->ident);
-        int revents = f->ops->poll(f, POLLOUT | POLLWRNORM | POLLWRBAND);
-        if (revents & (POLLOUT | POLLWRNORM | POLLWRBAND | POLLERR))
-            return 1;
-    }
-    /* Chardev fallback */
-    if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL &&
-        f->cdev->ops.poll != NULL) {
-        int revents = f->cdev->ops.poll(f->cdev, POLLOUT | POLLWRNORM |
-                                                 POLLWRBAND);
-        if (revents & (POLLOUT | POLLWRNORM | POLLWRBAND | POLLERR))
-            return 1;
-    }
-    return 0;
+    return kqueue_file_filter_event_unlocked(kn);
 }
 
 struct knote_ops knote_write_ops = {

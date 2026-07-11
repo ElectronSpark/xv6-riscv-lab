@@ -481,7 +481,7 @@ struct konsole_prepty_wake_record {
     int32 first_kq_waiters;
     int32 last_kq_waiters;
     uint64 file_ops;
-    uint64 file_poll;
+    uint64 file_poll_capable;
     char comm[KONSOLE_PREPTY_WAKE_COMM_LEN];
     char kind[KONSOLE_PREPTY_WAKE_KIND_LEN];
     char target[KONSOLE_PREPTY_WAKE_TARGET_LEN];

@@ -26,6 +26,7 @@
 #include "vfs/unix_socket.h"
 #include "kqueue.h"
 #include "kqueue_types.h"
+#include "kqueue_graph_walk.h"
 #include "kde_ready_trace.h"
 #include "ksymbols.h"
 #include "list.h"
@@ -36,12 +37,14 @@
 /* Slab caches */
 static slab_cache_t __kqueue_cache = {0};
 static slab_cache_t __knote_cache = {0};
+static spinlock_t __kqueue_graph_lock;
 
 /* Forward declarations */
 static int kqueue_file_release(struct vfs_inode *inode, struct vfs_file *file);
 static int kqueue_file_poll(struct vfs_file *file, short events);
 static ssize_t kqueue_file_readlink(struct vfs_file *file, char *buf,
                                     size_t buflen);
+static void knote_free(struct knote *kn);
 
 static void konsole_prepty_trace_file(struct vfs_file *file, int filter,
                                       int64 data, int matched,
@@ -130,58 +133,233 @@ static int knote_is_clear_file_filter(struct knote *kn)
     return (kn->flags & EV_CLEAR) && knote_is_file_filter(kn);
 }
 
-static int knote_poll_active(struct knote *kn)
+static int knote_nonfile_event_active(struct knote *kn)
 {
+    assert(!knote_is_file_filter(kn),
+           "knote_nonfile_event_active: file filter dispatched under kq lock");
     return kn->ops != NULL && kn->ops->event != NULL &&
            kn->ops->event(kn, 0);
 }
 
-static int knote_file_poll_revents(struct knote *kn)
+struct knote_poll_snapshot {
+    struct knote *kn;
+    struct vfs_file *file_ref;
+    struct vfs_file *file_identity;
+    uint64 ident;
+    int16 filter;
+    uint16 flags;
+    uint32 sfflags;
+    uint32 kq_flags;
+    uint64 generation;
+    bool pinned;
+};
+
+static void kqueue_assert_poll_unlocked(struct kqueue *kq)
 {
-    if (!knote_is_file_filter(kn) || kn->attached_file == NULL)
+    push_off();
+    int held = spin_holding(&kq->lock);
+    pop_off();
+    assert(!held, "kqueue: file poll dispatched while owning kq->lock");
+}
+
+static int knote_file_poll_dispatch(struct kqueue *kq,
+                                    struct knote_poll_snapshot *snapshot)
+{
+    kqueue_assert_poll_unlocked(kq);
+
+    struct vfs_file *f = snapshot->file_ref;
+    if (f == NULL)
         return 0;
 
-    struct vfs_file *f = kn->attached_file;
-    if (kn->kq != NULL && (kn->kq->flags & KQ_EPOLL_COMPAT) &&
+    if ((snapshot->kq_flags & KQ_EPOLL_COMPAT) &&
         __atomic_load_n(&f->visible_fd_refs, __ATOMIC_ACQUIRE) == 0) {
         return 0;
     }
 
-    short events = kn->filter == EVFILT_READ
+    short events = snapshot->filter == EVFILT_READ
         ? (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND | POLLRDHUP)
         : (POLLOUT | POLLWRNORM | POLLWRBAND);
     int revents = 0;
 
     if (f->ops && f->ops->poll) {
         assert(f->ref_count > 0,
-               "knote_file_poll_revents: stale file %p (ref=%d, ops=%p, ident=%ld)",
-               f, f->ref_count, f->ops, kn->ident);
+               "knote_file_poll_dispatch: stale file %p (ref=%d, ops=%p, ident=%ld)",
+               f, f->ref_count, f->ops, snapshot->ident);
         revents = f->ops->poll(f, events);
     } else if (f->f_kind == VFS_FILE_KIND_CDEV && f->cdev != NULL &&
                f->cdev->ops.poll != NULL) {
         revents = f->cdev->ops.poll(f->cdev, events);
     }
 
-    if (kn->kq != NULL && (kn->kq->flags & KQ_EPOLL_COMPAT)) {
+    if (snapshot->kq_flags & KQ_EPOLL_COMPAT) {
         int always = revents & (POLLERR | POLLHUP | POLLNVAL);
 
-        if (kn->filter == EVFILT_READ) {
+        if (snapshot->filter == EVFILT_READ) {
             int requested = 0;
-            if (kn->sfflags & (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND))
+            if (snapshot->sfflags &
+                (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND))
                 requested |= revents & (POLLIN | POLLPRI | POLLRDNORM |
                                         POLLRDBAND);
-            if (kn->sfflags & POLLRDHUP)
+            if (snapshot->sfflags & POLLRDHUP)
                 requested |= revents & POLLRDHUP;
             revents = requested | always;
         } else {
             int requested = 0;
-            if (kn->sfflags & (POLLOUT | POLLWRNORM | POLLWRBAND))
+            if (snapshot->sfflags &
+                (POLLOUT | POLLWRNORM | POLLWRBAND))
                 requested |= revents & (POLLOUT | POLLWRNORM | POLLWRBAND);
             revents = requested | always;
         }
     }
 
     return revents;
+}
+
+static void knote_generation_advance_locked(struct kqueue *kq,
+                                             struct knote *kn)
+{
+    assert(spin_holding(&kq->lock),
+           "knote_generation_advance_locked: kq lock not held");
+    kn->registration_generation++;
+    if (kn->registration_generation == 0)
+        kn->registration_generation = 1;
+}
+
+static bool knote_is_registered_locked(struct kqueue *kq, struct knote *target)
+{
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+
+    list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry) {
+        if (kn == target)
+            return true;
+    }
+    return false;
+}
+
+static bool knote_poll_snapshot_begin_locked(
+    struct kqueue *kq, struct knote *kn, struct knote_poll_snapshot *snapshot)
+{
+    assert(spin_holding(&kq->lock),
+           "knote_poll_snapshot_begin_locked: kq lock not held");
+    memset(snapshot, 0, sizeof(*snapshot));
+
+    if (!knote_is_file_filter(kn) || kn->attached_file == NULL ||
+        (kn->status & (KN_DISABLED | KN_DETACHED))) {
+        return false;
+    }
+
+    struct vfs_file *file_ref = vfs_fdup(kn->attached_file);
+    if (file_ref == NULL)
+        return false;
+
+    assert(kn->poll_refs != ~(uint32)0,
+           "knote poll ref overflow ident=%lu filter=%d", kn->ident,
+           kn->filter);
+    kn->poll_refs++;
+
+    snapshot->kn = kn;
+    snapshot->file_ref = file_ref;
+    snapshot->file_identity = kn->attached_file;
+    snapshot->ident = kn->ident;
+    snapshot->filter = kn->filter;
+    snapshot->flags = kn->flags;
+    snapshot->sfflags = kn->sfflags;
+    snapshot->kq_flags = kq->flags;
+    snapshot->generation = kn->registration_generation;
+    snapshot->pinned = true;
+    return true;
+}
+
+static bool knote_poll_snapshot_matches_locked(
+    struct kqueue *kq, const struct knote_poll_snapshot *snapshot)
+{
+    struct knote *kn = snapshot->kn;
+
+    assert(spin_holding(&kq->lock),
+           "knote_poll_snapshot_matches_locked: kq lock not held");
+    return snapshot->pinned && kn->kq == kq && !kq->closed &&
+           kq->flags == snapshot->kq_flags &&
+           !(kn->status & (KN_DISABLED | KN_DETACHED)) &&
+           kn->attached_file == snapshot->file_identity &&
+           kn->ident == snapshot->ident && kn->filter == snapshot->filter &&
+           kn->flags == snapshot->flags && kn->sfflags == snapshot->sfflags &&
+           kn->registration_generation == snapshot->generation &&
+           knote_is_registered_locked(kq, kn) &&
+           (!(snapshot->kq_flags & KQ_EPOLL_COMPAT) ||
+            __atomic_load_n(&kn->attached_file->visible_fd_refs,
+                            __ATOMIC_ACQUIRE) != 0);
+}
+
+static void knote_poll_snapshot_release_locked(
+    struct kqueue *kq, struct knote_poll_snapshot *snapshot)
+{
+    if (!snapshot->pinned)
+        return;
+
+    assert(spin_holding(&kq->lock),
+           "knote_poll_snapshot_release_locked: kq lock not held");
+    struct knote *kn = snapshot->kn;
+    assert(kn->poll_refs > 0, "knote poll ref underflow");
+    kn->poll_refs--;
+    bool free_now = kn->poll_refs == 0 && kn->poll_free_pending;
+    snapshot->pinned = false;
+    if (free_now)
+        knote_free(kn);
+}
+
+/*
+ * Poll one file registration.  The caller enters and returns with kq->lock
+ * held.  The snapshot pins both objects while the arbitrary file/cdev poll
+ * callback runs without the kqueue lock; stale results are rejected after
+ * DEL, close, disable, MOD, fd close/reuse, or delete/re-add.
+ */
+static int knote_file_poll_locked(struct kqueue *kq, struct knote *kn,
+                                  bool *valid, bool delivery_poll)
+{
+    struct knote_poll_snapshot snapshot;
+    *valid = false;
+
+    if (!knote_poll_snapshot_begin_locked(kq, kn, &snapshot)) {
+        if (delivery_poll && !(kn->status & KN_DETACHED) &&
+            knote_is_registered_locked(kq, kn))
+            kn->status &= ~KN_DELIVERING;
+        return 0;
+    }
+
+    spin_unlock(&kq->lock);
+    int revents = knote_file_poll_dispatch(kq, &snapshot);
+    vfs_fput(snapshot.file_ref);
+    snapshot.file_ref = NULL;
+    spin_lock(&kq->lock);
+
+    *valid = knote_poll_snapshot_matches_locked(kq, &snapshot);
+    if (!*valid && delivery_poll && !(kn->status & KN_DETACHED) &&
+        knote_is_registered_locked(kq, kn)) {
+        /* MOD/disable can invalidate a delivery poll without deleting the
+         * registration.  Do not strand its coalescing state permanently. */
+        kn->status &= ~KN_DELIVERING;
+    }
+    knote_poll_snapshot_release_locked(kq, &snapshot);
+    return revents;
+}
+
+/*
+ * Read/write filter vtables route here too.  This keeps every repository
+ * file/cdev poll call behind the same pin/snapshot/unlocked-dispatch gate.
+ */
+int kqueue_file_filter_event_unlocked(struct knote *kn)
+{
+    if (kn == NULL || kn->kq == NULL || !knote_is_file_filter(kn))
+        return 0;
+
+    struct kqueue *kq = kn->kq;
+    kqueue_assert_poll_unlocked(kq);
+    spin_lock(&kq->lock);
+    bool valid = false;
+    int revents = knote_file_poll_locked(kq, kn, &valid, false);
+    spin_unlock(&kq->lock);
+    return valid && revents != 0;
 }
 
 static int kqueue_kde_spin_trace_enabled(void)
@@ -248,11 +426,38 @@ static int kqueue_count_registered_locked(struct kqueue *kq)
 }
 
 static void kqueue_rescan_registered_locked(struct kqueue *kq) {
-    struct knote *kn = NULL;
-    struct knote *tmp = NULL;
+    assert(spin_holding(&kq->lock),
+           "kqueue_rescan_registered_locked: kq lock not held");
 
-    list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry) {
-        if ((kn->status & (KN_DISABLED | KN_QUEUED | KN_DETACHED)) ||
+    uint64 high_water = kq->next_registration_id;
+    uint64 cursor = 0;
+
+    /*
+     * A file poll drops kq->lock.  Never carry a list cursor across that
+     * boundary.  Each rescan owns its cursor and start high-water snapshot;
+     * after every relock it selects the lowest surviving registration id above
+     * the cursor.  Concurrent scans cannot clobber one another, and ADD/re-add
+     * after this pass began is intentionally left for the next pass.
+     */
+    for (;;) {
+        struct knote *kn = NULL;
+        struct knote *candidate = NULL;
+        struct knote *tmp = NULL;
+        list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry) {
+            if (kn->registration_id > cursor &&
+                kn->registration_id <= high_water &&
+                (candidate == NULL ||
+                 kn->registration_id < candidate->registration_id)) {
+                candidate = kn;
+            }
+        }
+        if (candidate == NULL)
+            break;
+
+        kn = candidate;
+        cursor = kn->registration_id;
+        if ((kn->status &
+             (KN_DISABLED | KN_QUEUED | KN_DETACHED | KN_DELIVERING)) ||
             kn->ops == NULL || kn->ops->event == NULL) {
             continue;
         }
@@ -264,7 +469,11 @@ static void kqueue_rescan_registered_locked(struct kqueue *kq) {
          * still observe edge-like timers, signals, process, and vnode events.
          */
         if (knote_is_file_filter(kn)) {
-            int revents = knote_file_poll_revents(kn);
+            bool valid = false;
+            int revents = knote_file_poll_locked(kq, kn, &valid, false);
+
+            if (!valid)
+                continue;
 
             if (revents == 0) {
                 kn->status &= ~KN_EDGE_ACTIVE;
@@ -279,9 +488,12 @@ static void kqueue_rescan_registered_locked(struct kqueue *kq) {
                 if (kn->status & KN_LEVEL_SEEN)
                     continue;
             }
-        } else if (!knote_poll_active(kn)) {
+        } else if (!knote_nonfile_event_active(kn)) {
             continue;
         }
+
+        if (kn->status & (KN_DISABLED | KN_QUEUED | KN_DETACHED))
+            continue;
 
         kn->status |= KN_QUEUED;
         list_node_push(&kq->ready, kn, ready_entry);
@@ -323,6 +535,7 @@ static struct knote *kqueue_pick_ready_locked(struct kqueue *kq) {
  */
 void kqueue_init(void) {
     int ret;
+    spin_init(&__kqueue_graph_lock, "kqueue_graph");
     ret = slab_cache_init(&__kqueue_cache, "kqueue_cache",
                           sizeof(struct kqueue), SLAB_FLAG_STATIC);
     assert(ret == 0, "kqueue_init: failed to init kqueue_cache, errno=%d", ret);
@@ -377,6 +590,141 @@ int kqueue_file_is_epoll(struct vfs_file *file)
 {
     struct kqueue *kq = kqueue_from_file(file);
     return kq != NULL && (kq->flags & KQ_EPOLL_COMPAT);
+}
+
+#define KQUEUE_GRAPH_MAX_NODES 1024
+
+struct kqueue_graph_walk {
+    struct kqueue_graph_walk_state state;
+    void *references[KQUEUE_GRAPH_MAX_NODES];
+    void *scratch[KQUEUE_GRAPH_MAX_NODES];
+};
+
+static void *kqueue_graph_file_identity(void *context, void *reference)
+{
+    (void)context;
+    return kqueue_from_file((struct vfs_file *)reference);
+}
+
+static void kqueue_graph_file_release(void *context, void *reference)
+{
+    (void)context;
+    vfs_fput((struct vfs_file *)reference);
+}
+
+static int kqueue_graph_snapshot_children(void *context, void *parent_reference,
+                                          void **children, int capacity,
+                                          int *count)
+{
+    (void)context;
+    *count = 0;
+    struct kqueue *node =
+        kqueue_from_file((struct vfs_file *)parent_reference);
+    if (node == NULL)
+        return 0;
+
+    spin_lock(&node->lock);
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+    int error = 0;
+    list_foreach_node_safe(&node->registered, kn, tmp, kq_entry) {
+        if (!knote_is_file_filter(kn) || kn->attached_file == NULL ||
+            (kn->status & KN_DETACHED) ||
+            kqueue_from_file(kn->attached_file) == NULL)
+            continue;
+        if (*count == capacity) {
+            error = -EOVERFLOW;
+            break;
+        }
+        struct vfs_file *child_ref = vfs_fdup(kn->attached_file);
+        if (child_ref == NULL) {
+            error = -EBADF;
+            break;
+        }
+        children[(*count)++] = child_ref;
+    }
+    spin_unlock(&node->lock);
+    return error;
+}
+
+static const struct kqueue_graph_walk_ops kqueue_graph_file_ops = {
+    .identity = kqueue_graph_file_identity,
+    .snapshot_children = kqueue_graph_snapshot_children,
+    .release = kqueue_graph_file_release,
+};
+
+static void kqueue_graph_walk_cleanup(struct kqueue_graph_walk *walk)
+{
+    kqueue_graph_walk_release_all(&kqueue_graph_file_ops, NULL, &walk->state);
+    kvfree(walk);
+}
+
+/* __kqueue_graph_lock serializes every pollable-kqueue edge admission. */
+static int kqueue_graph_reaches_locked(struct vfs_file *start_file,
+                                       struct kqueue *needle,
+                                       struct kqueue_graph_walk *walk)
+{
+    struct vfs_file *start_ref = vfs_fdup(start_file);
+    if (start_ref == NULL)
+        return -EBADF;
+    walk->state.references = walk->references;
+    walk->state.scratch = walk->scratch;
+    walk->state.capacity = KQUEUE_GRAPH_MAX_NODES;
+    return kqueue_graph_walk_reaches(&kqueue_graph_file_ops, NULL,
+                                     &walk->state, start_ref, needle,
+                                     -EOVERFLOW);
+}
+
+/*
+ * Publish a newly attached registration.  Pollable kqueue-file edges are
+ * serialized from reachability check through list insertion, so concurrent
+ * A->B and B->A additions cannot both pass.  Traversal holds references and
+ * never holds two kqueue locks at once; overflow fails closed.
+ */
+static int kqueue_admit_registration(struct kqueue *kq, struct knote *kn)
+{
+    struct kqueue *child = knote_is_file_filter(kn)
+        ? kqueue_from_file(kn->attached_file)
+        : NULL;
+
+    if (child == NULL) {
+        spin_lock(&kq->lock);
+        if (kq->closed) {
+            spin_unlock(&kq->lock);
+            return -EBADF;
+        }
+        list_node_push(&kq->registered, kn, kq_entry);
+        kq->nregistered++;
+        spin_unlock(&kq->lock);
+        return 0;
+    }
+
+    struct kqueue_graph_walk *walk = kvmalloc(sizeof(*walk));
+    if (walk == NULL)
+        return -ENOMEM;
+    memset(walk, 0, sizeof(*walk));
+
+    spin_lock(&__kqueue_graph_lock);
+    int reaches = kqueue_graph_reaches_locked(kn->attached_file, kq, walk);
+    int ret = 0;
+    if (reaches > 0) {
+        ret = -ELOOP;
+    } else if (reaches < 0) {
+        ret = reaches;
+    } else {
+        spin_lock(&kq->lock);
+        if (kq->closed) {
+            ret = -EBADF;
+        } else {
+            list_node_push(&kq->registered, kn, kq_entry);
+            kq->nregistered++;
+        }
+        spin_unlock(&kq->lock);
+    }
+    spin_unlock(&__kqueue_graph_lock);
+
+    kqueue_graph_walk_cleanup(walk);
+    return ret;
 }
 
 int kqueue_epoll_contains_kqueue(struct kqueue *root, struct kqueue *needle,
@@ -447,6 +795,80 @@ static struct knote_ops *knote_get_ops(int16 filter) {
     }
 }
 
+/* Caller holds kq->lock.  Return a referenced backing file for propagation. */
+static struct vfs_file *knote_enqueue_locked(struct knote *kn)
+{
+    struct kqueue *kq = kn->kq;
+
+    assert(kq != NULL && spin_holding(&kq->lock),
+           "knote_enqueue_locked: kq lock not held");
+    if (kq->closed || (kn->status & (KN_DISABLED | KN_DETACHED))) {
+        return NULL;
+    }
+    if (knote_is_clear_file_filter(kn))
+        kn->status |= KN_EDGE_ACTIVE;
+    if (kn->status & KN_DELIVERING) {
+        kn->status |= KN_PENDING;
+        tq_wakeup(&kq->waitq, 0, 0);
+        return NULL;
+    }
+    if (kn->status & KN_QUEUED)
+        return NULL;
+    kn->status |= KN_QUEUED;
+    list_node_push(&kq->ready, kn, ready_entry);
+    kq->nready++;
+    tq_wakeup(&kq->waitq, 0, 0);
+    return kq->file ? vfs_fdup(kq->file) : NULL;
+}
+
+static void knote_propagate_file(struct vfs_file *kq_file)
+{
+    if (kq_file == NULL)
+        return;
+    vfs_file_knote_notify(kq_file, EVFILT_READ, 0);
+    vfs_fput(kq_file);
+}
+
+/*
+ * Move notifications observed while a knote was being delivered onto the
+ * ready list only after the current drain is finished.  This coalesces any
+ * number of synchronous callbacks into one next-wait event and prevents a
+ * hot source from consuming maxevents repeatedly ahead of its peers.
+ */
+static struct vfs_file *kqueue_materialize_pending_locked(struct kqueue *kq,
+                                                           bool take_ref)
+{
+    assert(spin_holding(&kq->lock),
+           "kqueue_materialize_pending_locked: kq lock not held");
+    bool added = false;
+    struct knote *kn = NULL;
+    struct knote *tmp = NULL;
+
+    list_foreach_node_safe(&kq->registered, kn, tmp, kq_entry) {
+        if (!(kn->status & KN_PENDING))
+            continue;
+        if (kn->status & (KN_DISABLED | KN_DETACHED)) {
+            kn->status &= ~KN_PENDING;
+            continue;
+        }
+        if (kn->status & KN_DELIVERING)
+            continue;
+
+        kn->status &= ~KN_PENDING;
+        if (kn->status & KN_QUEUED)
+            continue;
+        kn->status |= KN_QUEUED;
+        list_node_push(&kq->ready, kn, ready_entry);
+        kq->nready++;
+        added = true;
+    }
+
+    if (!added)
+        return NULL;
+    tq_wakeup(&kq->waitq, 0, 0);
+    return take_ref && kq->file ? vfs_fdup(kq->file) : NULL;
+}
+
 /*
  * knote_enqueue - add a knote to the kqueue's ready list and wake a waiter
  *
@@ -463,28 +885,11 @@ void knote_enqueue(struct knote *kn) {
         return;
 
     spin_lock(&kq->lock);
-    /* Skip if disabled or already queued */
-    if ((kn->status & KN_DISABLED) || (kn->status & KN_QUEUED) ||
-        (kn->status & KN_DETACHED)) {
-        spin_unlock(&kq->lock);
-        return;
-    }
-    if (knote_is_clear_file_filter(kn))
-        kn->status |= KN_EDGE_ACTIVE;
-    kn->status |= KN_QUEUED;
-    list_node_push(&kq->ready, kn, ready_entry);
-    kq->nready++;
-    tq_wakeup(&kq->waitq, 0, 0);
-    struct vfs_file *kq_file = kq->file;
-    if (kq_file)
-        kq_file = vfs_fdup(kq_file);
+    struct vfs_file *kq_file = knote_enqueue_locked(kn);
     spin_unlock(&kq->lock);
 
     /* Propagate readiness to any outer kqueue/poll monitoring this kqueue fd */
-    if (kq_file) {
-        vfs_file_knote_notify(kq_file, EVFILT_READ, 0);
-        vfs_fput(kq_file);
-    }
+    knote_propagate_file(kq_file);
 }
 
 /*
@@ -514,6 +919,12 @@ static struct vfs_file *__knote_enqueue_core(struct knote *kn, int64 data,
     kn->fflags |= fflags;
     if (knote_is_clear_file_filter(kn))
         kn->status |= KN_EDGE_ACTIVE;
+    if (kn->status & KN_DELIVERING) {
+        kn->status |= KN_PENDING;
+        tq_wakeup(&kq->waitq, 0, 0);
+        spin_unlock(&kq->lock);
+        return NULL;
+    }
     if (!(kn->status & KN_QUEUED)) {
         kn->status |= KN_QUEUED;
         list_node_push(&kq->ready, kn, ready_entry);
@@ -833,7 +1244,9 @@ static void __kqueue_epoll_disable_oneshot_ident(struct kqueue *kq,
             (kn->filter != EVFILT_READ && kn->filter != EVFILT_WRITE))
             continue;
 
+        knote_generation_advance_locked(kq, kn);
         kn->status |= KN_DISABLED;
+        kn->status &= ~KN_PENDING;
         if (kn->status & KN_QUEUED) {
             list_node_detach(kn, ready_entry);
             kq->nready--;
@@ -859,7 +1272,9 @@ static void __kqueue_detach_knote(struct kqueue *kq, struct knote *kn) {
     /* Remove from registered list */
     list_node_detach(kn, kq_entry);
     kq->nregistered--;
+    knote_generation_advance_locked(kq, kn);
     kn->status |= KN_DETACHED;
+    kn->status &= ~(KN_PENDING | KN_DELIVERING);
 
     /* Detach from event source (outside kq lock) */
     spin_unlock(&kq->lock);
@@ -875,6 +1290,10 @@ static void __kqueue_detach_knote(struct kqueue *kq, struct knote *kn) {
     if (defer_free)
         return;
 
+    if (kn->poll_refs != 0) {
+        kn->poll_free_pending = true;
+        return;
+    }
     knote_free(kn);
 }
 
@@ -917,6 +1336,14 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
     if (kq == NULL)
         return -EINVAL;
 
+    spin_lock(&kq->lock);
+    if (kq->closed) {
+        spin_unlock(&kq->lock);
+        return -EBADF;
+    }
+    kq->registrars++;
+    spin_unlock(&kq->lock);
+
     for (int i = 0; i < nchanges; i++) {
         struct kevent *kev = &changelist[i];
         struct knote_ops *ops = knote_get_ops(kev->filter);
@@ -934,6 +1361,7 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
                                                     kev->filter);
             if (kn != NULL) {
                 /* Update existing knote */
+                knote_generation_advance_locked(kq, kn);
                 kn->flags = kev->flags;
                 kn->fflags = kev->fflags;
                 kn->sfflags = kev->fflags;
@@ -943,7 +1371,14 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
                     kn->status |= KN_DISABLED;
                 else
                     kn->status &= ~KN_DISABLED;
-                spin_unlock(&kq->lock);
+                if (kn->status & KN_DISABLED) {
+                    kn->status &= ~KN_PENDING;
+                    if (kn->status & KN_QUEUED) {
+                        list_node_detach(kn, ready_entry);
+                        kq->nready--;
+                        kn->status &= ~KN_QUEUED;
+                    }
+                }
 
                 /*
                  * EV_ADD also acts as a modify operation for an existing
@@ -952,13 +1387,27 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
                  * before the MOD, no new edge may arrive, so re-check the
                  * source after updating the knote.
                  */
-                if (!(kn->status & KN_DISABLED) &&
-                    kn->ops != NULL && kn->ops->event != NULL &&
-                    kn->ops->event(kn, 0)) {
-                    knote_enqueue(kn);
+                struct vfs_file *propagate = NULL;
+                if (!(kn->status & KN_DISABLED) && kn->ops != NULL &&
+                    kn->ops->event != NULL) {
+                    bool valid = true;
+                    int active = knote_is_file_filter(kn)
+                        ? knote_file_poll_locked(kq, kn, &valid, false)
+                        : knote_nonfile_event_active(kn);
+                    if (valid && active)
+                        propagate = knote_enqueue_locked(kn);
                 }
+                spin_unlock(&kq->lock);
+                knote_propagate_file(propagate);
             } else {
                 /* Create new knote */
+                if (kq->next_registration_id == ~(uint64)0) {
+                    spin_unlock(&kq->lock);
+                    kev->flags = EV_ERROR;
+                    kev->data = -ENOSPC;
+                    continue;
+                }
+                uint64 registration_id = ++kq->next_registration_id;
                 spin_unlock(&kq->lock);
 
                 kn = knote_alloc();
@@ -976,10 +1425,12 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
                 kn->data = kev->data;
                 kn->udata = kev->udata;
                 kn->ops = ops;
-                kn->status = KN_ACTIVE;
-
-                if (kev->flags & EV_DISABLE)
-                    kn->status |= KN_DISABLED;
+                /* Keep source notifications inert until graph admission and
+                 * registered-list publication are complete. */
+                kn->status = KN_ACTIVE | KN_DISABLED;
+                kn->registration_generation = 1;
+                kn->registration_id = registration_id;
+                kn->poll_refs = 1; /* publication pin across close/admission */
 
                 /* Attach to event source */
                 int ret = 0;
@@ -992,18 +1443,51 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
                     continue;
                 }
 
-                /* Add to kqueue's registered list */
+                ret = kqueue_admit_registration(kq, kn);
+                if (ret < 0) {
+                    if (ops->detach)
+                        ops->detach(kn);
+                    kev->flags = EV_ERROR;
+                    kev->data = ret;
+                    kn->poll_refs = 0;
+                    knote_free(kn);
+                    continue;
+                }
+
                 spin_lock(&kq->lock);
-                list_node_push(&kq->registered, kn, kq_entry);
-                kq->nregistered++;
-                spin_unlock(&kq->lock);
+                if ((kn->status & KN_DETACHED) || kq->closed) {
+                    assert(kn->poll_refs == 1,
+                           "kqueue publication pin imbalance");
+                    kn->poll_refs = 0;
+                    bool free_now = kn->poll_free_pending;
+                    spin_unlock(&kq->lock);
+                    if (free_now)
+                        knote_free(kn);
+                    kev->flags = EV_ERROR;
+                    kev->data = -EBADF;
+                    continue;
+                }
+                if (!(kev->flags & EV_DISABLE))
+                    kn->status &= ~KN_DISABLED;
 
                 /* Check if event is already active (e.g. pipe already has data) */
-                if (ops->event) {
-                    int active = ops->event(kn, 0);
-                    if (active)
-                        knote_enqueue(kn);
+                struct vfs_file *propagate = NULL;
+                if (!(kn->status & KN_DISABLED) && ops->event) {
+                    bool valid = true;
+                    int active = knote_is_file_filter(kn)
+                        ? knote_file_poll_locked(kq, kn, &valid, false)
+                        : knote_nonfile_event_active(kn);
+                    if (valid && active)
+                        propagate = knote_enqueue_locked(kn);
                 }
+                assert(kn->poll_refs == 1,
+                       "kqueue publication pin imbalance after poll");
+                kn->poll_refs = 0;
+                bool free_now = kn->poll_free_pending;
+                spin_unlock(&kq->lock);
+                knote_propagate_file(propagate);
+                if (free_now)
+                    knote_free(kn);
             }
         } else if (kev->flags & EV_DELETE) {
             struct knote *kn = __kqueue_find_knote(kq, kev->ident,
@@ -1020,14 +1504,20 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
             struct knote *kn = __kqueue_find_knote(kq, kev->ident,
                                                     kev->filter);
             if (kn != NULL) {
+                knote_generation_advance_locked(kq, kn);
                 kn->status &= ~KN_DISABLED;
                 /* Re-check if event is currently active */
-                spin_unlock(&kq->lock);
+                struct vfs_file *propagate = NULL;
                 if (kn->ops && kn->ops->event) {
-                    int active = kn->ops->event(kn, 0);
-                    if (active)
-                        knote_enqueue(kn);
+                    bool valid = true;
+                    int active = knote_is_file_filter(kn)
+                        ? knote_file_poll_locked(kq, kn, &valid, false)
+                        : knote_nonfile_event_active(kn);
+                    if (valid && active)
+                        propagate = knote_enqueue_locked(kn);
                 }
+                spin_unlock(&kq->lock);
+                knote_propagate_file(propagate);
             } else {
                 spin_unlock(&kq->lock);
                 kev->flags = EV_ERROR;
@@ -1037,7 +1527,14 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
             struct knote *kn = __kqueue_find_knote(kq, kev->ident,
                                                     kev->filter);
             if (kn != NULL) {
+                knote_generation_advance_locked(kq, kn);
                 kn->status |= KN_DISABLED;
+                kn->status &= ~KN_PENDING;
+                if (kn->status & KN_QUEUED) {
+                    list_node_detach(kn, ready_entry);
+                    kq->nready--;
+                    kn->status &= ~KN_QUEUED;
+                }
             } else {
                 kev->flags = EV_ERROR;
                 kev->data = -ENOENT;
@@ -1049,6 +1546,13 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
             kev->data = -EINVAL;
         }
     }
+    spin_lock(&kq->lock);
+    kq->registrars--;
+    int should_free = kq->closed && kq->waiters == 0 &&
+                      kq->pollers == 0 && kq->registrars == 0;
+    spin_unlock(&kq->lock);
+    if (should_free)
+        slab_free(kq);
     return 0;
 }
 
@@ -1142,19 +1646,11 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
         return -EINVAL;
 
     int total = 0;
-    uint64 *epoll_oneshot_idents = NULL;
-    int epoll_oneshot_count = 0;
+    struct vfs_file *pending_propagate = NULL;
     int trace_spin = kqueue_kde_spin_trace_enabled() &&
                      kqueue_kde_spin_trace_current();
     int trace_iter = 0;
     uint64 trace_start_ms = trace_spin ? sched_timer_now_ms() : 0;
-
-    if (kq->flags & KQ_EPOLL_COMPAT) {
-        epoll_oneshot_idents = kvmalloc((size_t)nevents *
-                                        sizeof(*epoll_oneshot_idents));
-        if (epoll_oneshot_idents == NULL)
-            return -ENOMEM;
-    }
 
     spin_lock(&kq->lock);
     kq->waiters++;
@@ -1184,6 +1680,7 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             list_node_detach(kn, ready_entry);
             kq->nready--;
             kn->status &= ~KN_QUEUED;
+            kn->status |= KN_DELIVERING;
 
             /*
              * EVFILT_READ/WRITE are level-triggered by default.  A readiness
@@ -1194,7 +1691,11 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
              */
             int poll_revents = 0;
             if (knote_is_file_filter(kn)) {
-                poll_revents = knote_file_poll_revents(kn);
+                bool valid = false;
+                poll_revents =
+                    knote_file_poll_locked(kq, kn, &valid, true);
+                if (!valid)
+                    continue;
                 if (poll_revents == 0) {
                     kn->status &= ~(KN_EDGE_ACTIVE | KN_LEVEL_SEEN);
                     if (trace_spin &&
@@ -1205,8 +1706,10 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                                current->pid, current->name, trace_iter,
                                kn->ident, kn->filter, kn->flags, kn->status);
                     }
-                    if (!knote_is_clear_file_filter(kn))
+                    if (!knote_is_clear_file_filter(kn)) {
+                        kn->status &= ~KN_DELIVERING;
                         continue;
+                    }
                 } else if (!knote_is_clear_file_filter(kn) &&
                            !(kq->flags & KQ_EPOLL_COMPAT)) {
                     kn->status |= KN_LEVEL_SEEN;
@@ -1238,7 +1741,12 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
                 kn->fflags = 0;
                 kn->data = 0;
                 if (knote_is_clear_file_filter(kn)) {
-                    if (knote_file_poll_revents(kn) != 0)
+                    bool valid = false;
+                    int clear_revents =
+                        knote_file_poll_locked(kq, kn, &valid, true);
+                    if (!valid)
+                        continue;
+                    if (clear_revents != 0)
                         kn->status |= KN_EDGE_ACTIVE;
                     else
                         kn->status &= ~KN_EDGE_ACTIVE;
@@ -1250,24 +1758,38 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
              * disables the whole fd until epoll_ctl(MOD) rearms it. */
             if (kn->flags & EV_ONESHOT) {
                 if (kq->flags & KQ_EPOLL_COMPAT) {
-                    int seen = 0;
-                    for (int i = 0; i < epoll_oneshot_count; i++) {
-                        if (epoll_oneshot_idents[i] == kn->ident) {
-                            seen = 1;
-                            break;
-                        }
-                    }
-                    if (!seen && epoll_oneshot_count < nevents)
-                        epoll_oneshot_idents[epoll_oneshot_count++] =
-                            kn->ident;
+                    /* Disable both read/write registrations before a callback
+                     * deferred during delivery can be materialized. */
+                    __kqueue_epoll_disable_oneshot_ident(kq, kn->ident);
+                    kn->status &= ~KN_DELIVERING;
                 } else {
                     __kqueue_detach_knote(kq, kn);
                 }
+            } else {
+                kn->status &= ~KN_DELIVERING;
             }
         }
 
+        struct vfs_file *new_propagate =
+            kqueue_materialize_pending_locked(kq,
+                                               pending_propagate == NULL);
+        if (new_propagate != NULL)
+            pending_propagate = new_propagate;
+
         if (total > 0)
             break;
+
+        /* A stale event may have received a new synchronous notification
+         * during its poll recheck.  Drain that deferred event in a fresh pass
+         * instead of sleeping with a non-empty ready list. */
+        if (!LIST_IS_EMPTY(&kq->ready))
+            continue;
+
+        /* A file poll above temporarily drops kq->lock. */
+        if (kq->closed) {
+            total = -EBADF;
+            break;
+        }
 
         /* Non-blocking poll */
         if (timeout_ms == 0)
@@ -1376,17 +1898,14 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
         }
     }
 
-    if (epoll_oneshot_count > 0) {
-        for (int i = 0; i < epoll_oneshot_count; i++)
-            __kqueue_epoll_disable_oneshot_ident(kq, epoll_oneshot_idents[i]);
-    }
-
     kq->waiters--;
-    int should_free = (kq->closed && kq->waiters == 0);
+    int should_free =
+        (kq->closed && kq->waiters == 0 && kq->pollers == 0 &&
+         kq->registrars == 0);
     spin_unlock(&kq->lock);
+    knote_propagate_file(pending_propagate);
     if (should_free)
         slab_free(kq);
-    kvfree(epoll_oneshot_idents);
     return total;
 }
 
@@ -1413,7 +1932,8 @@ static void kqueue_close(struct kqueue *kq) {
 
     /* Wake all waiters so they see the close */
     tq_wakeup_all(&kq->waitq, -EBADF, 0);
-    int should_free = (kq->waiters == 0);
+    int should_free =
+        (kq->waiters == 0 && kq->pollers == 0 && kq->registrars == 0);
     spin_unlock(&kq->lock);
 
     /* Only free if no threads are inside kqueue_wait().
@@ -1429,7 +1949,9 @@ void kqueue_close_private(struct kqueue *kq) {
 static int kqueue_file_release(struct vfs_inode *inode, struct vfs_file *file) {
     (void)inode;
     struct kqueue *kq = (struct kqueue *)file->private_data;
+    spin_lock(&kq->lock);
     kq->file = NULL;   /* break back-pointer before teardown */
+    spin_unlock(&kq->lock);
     kqueue_close(kq);
     file->private_data = NULL;
     return 0;
@@ -1441,11 +1963,20 @@ static int kqueue_file_poll(struct vfs_file *file, short events) {
     if (kq == NULL)
         return POLLNVAL;
     spin_lock(&kq->lock);
+    kq->pollers++;
     if (events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP))
         kqueue_rescan_registered_locked(kq);
-    if ((events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP)) &&
+    if (kq->closed)
+        revents = POLLNVAL;
+    else if ((events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP)) &&
         kq->nready > 0)
         revents |= (events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLRDHUP));
+    kq->pollers--;
+    int should_free =
+        (kq->closed && kq->waiters == 0 && kq->pollers == 0 &&
+         kq->registrars == 0);
     spin_unlock(&kq->lock);
+    if (should_free)
+        slab_free(kq);
     return revents;
 }
