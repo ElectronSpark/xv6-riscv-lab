@@ -11,6 +11,7 @@
 #include "types.h"
 #include "param.h"
 #include "lock/spinlock.h"
+#include "lock/mutex.h"
 #include "lock/mutex_types.h"
 #include <mm/memlayout.h>
 #include "riscv.h"
@@ -23,6 +24,7 @@
 #include "proc/proc_private.h"
 #include "mm/vm.h"
 #include "dev/cdev.h"
+#include "dev/console.h"
 #include "trap.h"
 #include "dev/uart.h"
 #include "sbi.h"
@@ -30,6 +32,7 @@
 #include "tty/tty.h"
 #include "tty/session.h"
 #include "vfs/pipe.h"
+#include <smp/percpu.h>
 
 #ifndef CONSOLE_MAJOR
 #define CONSOLE_MAJOR 1
@@ -60,12 +63,152 @@ static inline void early_console_putchar(int c) { sbi_console_putchar(c); }
 // Before this is set, consoleintr() falls back to the raw buffer.
 struct tty *console_tty = NULL;
 
+#ifdef __x86_64__
+/*
+ * Normal x86 serial producers share this sleepable mutex.  The UART's own
+ * spinlock remains intentionally per character: holding it across a record
+ * would leave interrupts disabled for tens of milliseconds.  Emergency
+ * contexts cannot sleep, so they bypass this lock and advance the generation;
+ * a concurrent record writer returns no-credit rather than claiming a clean
+ * row it could not protect.
+ */
+#define CONSOLE_RECORD_LOCK_TIMEOUT_MS 50
+
+static mutex_t console_wire_lock;
+static volatile uint64 console_wire_emergency_generation;
+
+static void console_wire_note_emergency(void)
+{
+    __atomic_fetch_add(&console_wire_emergency_generation, 1,
+                       __ATOMIC_ACQ_REL);
+}
+
+static void console_uart_raw_putc(unsigned char c)
+{
+    if (!uart_initialized)
+        early_console_putchar(c);
+    else
+        uartputc_sync(c);
+}
+
+static void console_wire_emit_raw_locked(const char *s, int n)
+{
+    for (int i = 0; i < n; i++)
+        console_uart_raw_putc((unsigned char)s[i]);
+}
+
+static void console_wire_emit_text_locked(const char *s, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (s[i] == BACKSPACE) {
+            console_uart_raw_putc('\b');
+            console_uart_raw_putc(' ');
+            console_uart_raw_putc('\b');
+        } else {
+            if (s[i] == '\n')
+                console_uart_raw_putc('\r');
+            console_uart_raw_putc((unsigned char)s[i]);
+        }
+    }
+}
+
+static int console_wire_can_sleep(void)
+{
+    return uart_initialized && !panic_state() && current != NULL &&
+           !CPU_IN_ITR() && spin_depth_snapshot() == 0;
+}
+
+static void console_wire_emit_raw(const char *s, int n)
+{
+    if (!console_wire_can_sleep()) {
+        console_wire_note_emergency();
+        console_wire_emit_raw_locked(s, n);
+        return;
+    }
+
+    mutex_lock(&console_wire_lock);
+    console_wire_emit_raw_locked(s, n);
+    mutex_unlock(&console_wire_lock);
+}
+
+static void console_wire_emit_text(const char *s, int n)
+{
+    if (!console_wire_can_sleep()) {
+        console_wire_note_emergency();
+        console_wire_emit_text_locked(s, n);
+        return;
+    }
+
+    mutex_lock(&console_wire_lock);
+    console_wire_emit_text_locked(s, n);
+    mutex_unlock(&console_wire_lock);
+}
+
+static int console_record_write_ioctl(void *arg)
+{
+    struct console_record_write_v1 request;
+    char record[CONSOLE_RECORD_MAX_INPUT_BYTES];
+    uint64 emergency_before;
+    int ret;
+
+    if (current == NULL || current->thread_group == NULL ||
+        current->thread_group->euid != 0)
+        return -EPERM;
+    if (arg == NULL ||
+        either_copyin(&request, 1, (uint64)arg, sizeof(request)) < 0)
+        return -EFAULT;
+    if (request.version != CONSOLE_RECORD_ABI_VERSION || request.flags != 0 ||
+        request.reserved != 0 || request.data_ptr == 0 ||
+        request.data_len == 0 ||
+        request.data_len > CONSOLE_RECORD_MAX_INPUT_BYTES)
+        return -EINVAL;
+    if (either_copyin(record, 1, request.data_ptr, request.data_len) < 0)
+        return -EFAULT;
+    if (!console_record_wire_text_valid(record, request.data_len))
+        return -EINVAL;
+
+    /* Every user byte is copied and checked before this sleepable lock. */
+    if (!uart_initialized || panic_state())
+        return -EAGAIN;
+    ret = mutex_lock_timed(&console_wire_lock, CONSOLE_RECORD_LOCK_TIMEOUT_MS);
+    if (ret != 0)
+        return ret;
+
+    emergency_before = __atomic_load_n(&console_wire_emergency_generation,
+                                       __ATOMIC_ACQUIRE);
+    if (!uart_initialized || panic_state()) {
+        ret = -EAGAIN;
+    } else {
+        console_wire_emit_text_locked(record, (int)request.data_len);
+        if (emergency_before !=
+            __atomic_load_n(&console_wire_emergency_generation,
+                            __ATOMIC_ACQUIRE))
+            ret = -EAGAIN; /* row may have been dirtied by an emergency bypass */
+        else
+            ret = (int)request.data_len;
+    }
+    /* The timed acquisition above has exactly this one release path. */
+    mutex_unlock(&console_wire_lock);
+    return ret;
+}
+#endif /* __x86_64__ */
+
 //
 // send one character to the uart.
 // called by printf(), and to echo input characters,
 // but not from write().
 //
 void consputc(int c) {
+#ifdef __x86_64__
+    if (c == BACKSPACE) {
+        const char erase[] = {'\b', ' ', '\b'};
+        console_wire_emit_raw(erase, sizeof(erase));
+        return;
+    }
+    char text = (char)c;
+    console_wire_emit_text(&text, 1);
+    return;
+#else
     if (!uart_initialized) {
         // Use early console output before UART is ready
         if (c == BACKSPACE) {
@@ -94,6 +237,7 @@ void consputc(int c) {
             uartputc_sync('\r');
         uartputc_sync(c);
     }
+#endif
 }
 
 //
@@ -101,6 +245,10 @@ void consputc(int c) {
 // for use by puts() and optimized printing.
 //
 void consputs(const char *s, int n) {
+#ifdef __x86_64__
+    console_wire_emit_text(s, n);
+    return;
+#else
     if (!uart_initialized) {
         // Use early console output before UART is ready
         for (int i = 0; i < n; i++) {
@@ -130,6 +278,7 @@ void consputs(const char *s, int n) {
             uartputc_sync(s[i]);
         }
     }
+#endif
 }
 
 struct {
@@ -187,12 +336,8 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
         }
 
 #ifdef __x86_64__
-        for (i = 0; i < olen; i++) {
-            if (!uart_initialized)
-                early_console_putchar((unsigned char)outbuf[i]);
-            else
-                uartputc_sync((unsigned char)outbuf[i]);
-        }
+        /* TTY post-processing already produced exact bytes in outbuf. */
+        console_wire_emit_raw(outbuf, olen);
         written += batch_size;
 #else
         // Submit output, waiting interruptibly when the TX buffer is full
@@ -314,10 +459,19 @@ static int consoleclose(cdev_t *cdev) { return 0; }
 //
 // Console ioctl - delegates to the TTY layer for termios/TIOCSPGRP/etc.
 //
-static int consoleioctl(cdev_t *cdev, uint64 cmd, void *arg) {
+static int console_ioctl_common(uint64 cmd, void *arg) {
+#ifdef __x86_64__
+    if (cmd == CONSOLE_IOC_WRITE_RECORD)
+        return console_record_write_ioctl(arg);
+#endif
     if (console_tty == NULL)
         return -ENOTTY;
     return tty_ioctl(console_tty, cmd, arg);
+}
+
+static int consoleioctl(cdev_t *cdev, uint64 cmd, void *arg) {
+    (void)cdev;
+    return console_ioctl_common(cmd, arg);
 }
 
 //
@@ -325,9 +479,8 @@ static int consoleioctl(cdev_t *cdev, uint64 cmd, void *arg) {
 // dev_ioctl via vfs_ioctl).
 //
 static int console_dev_ioctl(device_t *dev, uint64 cmd, void *arg) {
-    if (console_tty == NULL)
-        return -ENOTTY;
-    return tty_ioctl(console_tty, cmd, arg);
+    (void)dev;
+    return console_ioctl_common(cmd, arg);
 }
 
 //
@@ -478,6 +631,9 @@ void consoleintr(int c) {
 
 void consoleinit(void) {
     spin_init(&cons.lock, "cons");
+#ifdef __x86_64__
+    mutex_init(&console_wire_lock, "console_wire");
+#endif
 
     // Try to initialize UART hardware
     // Returns 1 if successful (QEMU), 0 if deferred (real hardware uses SBI)
@@ -572,12 +728,17 @@ static void console_tty_drain_thread(uint64 arg1, uint64 arg2) {
             sleep_ms(1);
             continue;
         }
+#ifdef __x86_64__
+        /* TTY has already performed ONLCR; send its bytes verbatim. */
+        console_wire_emit_raw(buf, (int)n);
+#else
         for (ssize_t i = 0; i < n; i++) {
             if (!uart_initialized)
                 early_console_putchar((unsigned char)buf[i]);
             else
                 uartputc_sync((unsigned char)buf[i]);
         }
+#endif
     }
 }
 
