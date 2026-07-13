@@ -17,9 +17,6 @@ int device_register(device_t *dev);
 // when the refcount reaches 0.
 int device_unregister(device_t *dev);
 
-// Device table stress tests
-void dev_table_test(void);
-
 int dev_ioctl(device_t *dev, uint64 cmd, void *arg);
 
 /*

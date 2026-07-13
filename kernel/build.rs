@@ -147,6 +147,11 @@ fn main() {
         .allowlist_type("^buf$")
         .allowlist_type("^bio$|bio_vec")
         .allowlist_type("blkdev_t|blkdev|blkdev_ops_t")
+        // Phase 2 Wave 24 (dev/nullrand.c + dev/netdev.c port): the
+        // network device registration/lookup table's ABI, shared with
+        // still-C `kernel/e1000.c`/`kernel/dev/x1_emac.c` (registrants)
+        // and `kernel/net.c` (consumer).
+        .allowlist_type("netdev|netdev_ops|netdev_link_cb_t")
         .allowlist_var("PROT_.*|VMA_FLAG_.*|PTE_.*|PGSIZE|PGSHIFT|PAGE_SHIFT|MAXVA|UVMTOP|UVMBOTTOM|TRAPFRAME|TRAPFRAME_POFFSET|NCPU")
         .allowlist_var("MAP_.*|MREMAP_.*|MS_ASYNC|MS_SYNC|MS_INVALIDATE|MADV_.*")
         .allowlist_var("MAXUSTACK|USTACKTOP|USTACK_MAX_BOTTOM|USERSTACK_GROWTH|USERSTACK_MINSZ|UHEAP_MAX_TOP|PROT_MASK")

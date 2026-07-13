@@ -33,12 +33,23 @@
 //! doc comment for the full written-globals inventory and the two C bugs
 //! discovered and preserved/fixed during the port.
 //!
-//! The rest of `kernel/dev/` (netdev.c, nullrand.c, the x1_*/yt8531
-//! drivers, dev_test.c) remains C for now -- see
-//! `kernel/dev/CMakeLists.txt`.
+//! `kernel/dev/nullrand.c` -> [`nullrand`] and `kernel/dev/netdev.c` ->
+//! [`netdev`] (Phase 2 Wave 24, see `docs/rustify/phase2_plan.md`):
+//! `/dev/null`/`/dev/zero`/`/dev/random` cdev registrants, and the
+//! network-device registration/lookup table still-C NIC drivers
+//! (`kernel/e1000.c`, `kernel/dev/x1_emac.c`) and `kernel/net.c` consume
+//! by exact C ABI. `kernel/dev/dev_test.c` (dead code -- its one call
+//! site was already commented out in `start_kernel.c`) was deleted
+//! outright rather than ported, same precedent as the tmpfs/xv6fs
+//! smoketests in Waves 18/19.
+//!
+//! The rest of `kernel/dev/` (the x1_*/yt8531 drivers) remains C for
+//! now -- see `kernel/dev/CMakeLists.txt`.
 
 pub mod dev;
 pub mod cdev;
 pub mod blkdev;
 pub mod bio;
 pub mod fdt;
+pub mod nullrand;
+pub mod netdev;

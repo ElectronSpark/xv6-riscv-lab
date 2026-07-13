@@ -1123,9 +1123,10 @@ set(RUST_FORCE_UNDEFINED
     # is declared `extern` in the still-live, unchanged C headers
     # `kernel/inc/dev/{dev,cdev,blkdev}.h` and called from still-C
     # drivers/callers (console.c-successor console.rs, tty_dev.rs,
-    # ptmx.rs, nullrand.c, virtio_disk.c, ramdisk.c, x1_sdhci.c,
-    # dev_test.c), so all are forced per the plan's "every new public
-    # symbol" rule.
+    # ptmx.rs, nullrand.c-successor nullrand.rs, virtio_disk.c,
+    # ramdisk.c, x1_sdhci.c), so all are forced per the plan's "every
+    # new public symbol" rule. (`dev_test.c`, formerly also a caller,
+    # was dead code -- deleted in Wave 24, see that wave's entry below.)
     --undefined=dev_table_init
     --undefined=device_get
     --undefined=device_dup
@@ -1204,6 +1205,30 @@ set(RUST_FORCE_UNDEFINED
     --undefined=fdt_compat_next
     --undefined=fdt_phandle_lookup
     --undefined=platform
+    # dev/nullrand.c + dev/netdev.c port (Phase 2 Wave 24).
+    # `nullranddevinit` is called from `kernel/start_kernel.c` (still C,
+    # Wave 27); `random_fill_bytes` is called from
+    # `kernel/proc/sysproc.rs`'s `sys_getrandom` (same-crate Rust call,
+    # forced anyway per the plan's "every new public symbol declared in
+    # a still-live header" rule -- `kernel/inc/defs.h` still declares
+    # it). `netdev_init` is called from `start_kernel.c`;
+    # `netdev_register`/`netdev_set_link` from the still-C NIC drivers
+    # (`kernel/e1000.c`, `kernel/dev/x1_emac.c`); `netdev_get_default`
+    # from still-C `kernel/net.c`. `netdev_get_by_index`/
+    # `netdev_get_by_name`/`netdev_set_link_callback` have no live
+    # caller today but stay declared `extern` in the still-live,
+    # unchanged `kernel/inc/dev/netdev.h` -- forced anyway, same
+    # precedent as `bio_dup`/`devtmpfs_populate_devices` above (part of
+    # the header's public contract).
+    --undefined=nullranddevinit
+    --undefined=random_fill_bytes
+    --undefined=netdev_init
+    --undefined=netdev_register
+    --undefined=netdev_get_default
+    --undefined=netdev_get_by_index
+    --undefined=netdev_get_by_name
+    --undefined=netdev_set_link
+    --undefined=netdev_set_link_callback
 )
 
 # ==============================================================================

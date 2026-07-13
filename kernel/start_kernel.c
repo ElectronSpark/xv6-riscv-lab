@@ -196,9 +196,6 @@ void start_kernel_post_init(void) {
     // RCU processing is now done per-CPU in idle loops
     // rcu_run_tests();
 
-    // Run device table stress tests
-    // dev_table_test();
-
     // #ifdef RQ_RUNTIME_TEST
     // Run queue priority tests
     // void rq_test_run(void);

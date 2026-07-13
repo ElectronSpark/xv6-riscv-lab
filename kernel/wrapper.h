@@ -62,6 +62,19 @@
  * not silently depend on an unrelated module's include chain. */
 #include "dev/dev.h"
 #include "dev/blkdev.h"
+/* dev/netdev.h -- Phase 2 Wave 24 (dev/nullrand.c + dev/netdev.c port).
+ * `struct netdev`/`struct netdev_ops`/`netdev_link_cb_t` are the network
+ * device registration/lookup table's ABI: still-C NIC drivers
+ * (`kernel/e1000.c`, `kernel/dev/x1_emac.c`) own a `static struct
+ * netdev` and pass `&their_ndev` by pointer into `kernel/dev/netdev.rs`,
+ * and still-C `kernel/net.c` reads the returned pointer's fields
+ * directly -- the full field layout (not an opaque stand-in) is needed
+ * on both sides. Transitively pulls in `dev/net.h`'s `struct mbuf`
+ * (referenced only as an opaque `*mut mbuf` in `netdev_ops.transmit`'s
+ * signature -- this port never dereferences it, matching the C
+ * original, which only forwards the pointer to the registrant's own
+ * callback). */
+#include "dev/netdev.h"
 /* vfs/pipe_types.h — Phase 2 Wave 11 (tty.c/ptmx.c port): full `struct
  * pipe` layout (nread/nwrite) read directly (via smp_load_acquire) by
  * tty_poll()/ptmx's master poll for a lock-free readiness check. Before
