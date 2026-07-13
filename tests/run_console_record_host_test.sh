@@ -51,6 +51,36 @@ require_source 'console_wire_emit_raw\(buf, \(int\)n\)' kernel/kernel/console.c
 require_source 'console_wire_note_emergency' kernel/kernel/console.c
 require_source 'The timed acquisition above has exactly this one release path' kernel/kernel/console.c
 
+# Batch C1 transport: fixed UAPI, off-stack copy/validation before one timed
+# lock, ordered rows, emergency no-credit checks, and both ioctl entrypoints.
+require_source 'static int console_record_batch_write_ioctl' kernel/kernel/console.c
+require_source 'struct console_record_batch_write_v1 request' kernel/kernel/console.c
+require_source 'records = kvmalloc\(request.data_len\)' kernel/kernel/console.c
+require_source 'either_copyin\(records, 1, request.data_ptr, request.data_len\)' kernel/kernel/console.c
+require_source 'console_record_batch_wire_text_valid\(records, request.data_len,' kernel/kernel/console.c
+require_source 'mutex_lock_timed\(&console_wire_lock,' kernel/kernel/console.c
+require_source 'console_wire_emit_text_locked\(records \+ record_start,' kernel/kernel/console.c
+require_source '__atomic_load_n\(&console_wire_emergency_generation,' kernel/kernel/console.c
+require_source 'records_emitted != request.record_count' kernel/kernel/console.c
+require_source 'kvfree\(records\)' kernel/kernel/console.c
+require_source 'cmd == CONSOLE_IOC_WRITE_RECORD_BATCH' kernel/kernel/console.c
+require_source 'static int consoleioctl' kernel/kernel/console.c
+require_source 'return console_ioctl_common\(cmd, arg\)' kernel/kernel/console.c
+require_source 'static int console_dev_ioctl' kernel/kernel/console.c
+require_literal '#define CONSOLE_RECORD_BATCH_MAX_RECORDS 701U' kernel/kernel/inc/dev/console.h
+require_literal '#define CONSOLE_RECORD_BATCH_MAX_LOGICAL_BYTES 357080U' kernel/kernel/inc/dev/console.h
+require_literal '#define CONSOLE_RECORD_BATCH_MAX_PHYSICAL_BYTES 357781U' kernel/kernel/inc/dev/console.h
+require_literal 'struct console_record_batch_write_v1 {' kernel/kernel/inc/dev/console.h
+require_literal '#define CONSOLE_RECORD_IOC_WRITE_BATCH_NR 0x02U' kernel/kernel/inc/dev/console.h
+require_source 'console_record_batch_write_v1_size_must_be_32' kernel/kernel/inc/dev/console.h
+require_source 'console_record_batch_write_v1_record_count_offset_must_be_20' kernel/kernel/inc/dev/console.h
+
+# Batch code remains inside the existing x86 block. The unchanged RISC-V
+# branches retain their uartputs_nb/uart_tx_wait and direct tty-drain paths.
+require_source 'uartputs_nb\(outbuf \+ sent, olen - sent\)' kernel/kernel/console.c
+require_source 'uart_tx_wait\(\)' kernel/kernel/console.c
+require_source 'uartputc_sync\(\(unsigned char\)buf\[i\]\)' kernel/kernel/console.c
+
 # The actual staging path is host-glibc, but xv6's program convention keeps
 # this command underscore-prefixed for the generated guest helper.
 require_source 'consolerecord\)' scripts/build/build-linux-host-probes.sh

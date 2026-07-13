@@ -26,12 +26,34 @@ typedef uint64 console_u64;
 #define CONSOLE_RECORD_MAX_INPUT_BYTES 511U
 #define CONSOLE_RECORD_MAX_PHYSICAL_BYTES 512U
 
+/*
+ * C1 V2 emits one complete BEGIN/META/CHUNK/END envelope as a batch so
+ * ordinary console writers cannot enter between its records.  These bounds
+ * are the exact reviewed maximum envelope: 701 LF-terminated logical records
+ * consume at most 357080 input bytes and 357781 bytes after LF-to-CRLF
+ * expansion.
+ */
+#define CONSOLE_RECORD_BATCH_ABI_VERSION 1U
+#define CONSOLE_RECORD_BATCH_MAX_RECORDS 701U
+#define CONSOLE_RECORD_BATCH_MAX_LOGICAL_BYTES 357080U
+#define CONSOLE_RECORD_BATCH_MAX_PHYSICAL_BYTES 357781U
+
 struct console_record_write_v1 {
     console_u32 version;
     console_u32 flags;
     console_u64 data_ptr;
     console_u32 data_len;
     console_u32 reserved;
+};
+
+struct console_record_batch_write_v1 {
+    console_u32 version;
+    console_u32 flags;
+    console_u64 data_ptr;
+    console_u32 data_len;
+    console_u32 record_count;
+    console_u32 reserved0;
+    console_u32 reserved1;
 };
 
 /* Keep this ABI fixed-width and naturally aligned on both x86 kernel and
@@ -48,6 +70,24 @@ typedef char console_record_write_v1_data_len_offset_must_be_16[
     offsetof(struct console_record_write_v1, data_len) == 16 ? 1 : -1];
 typedef char console_record_write_v1_reserved_offset_must_be_20[
     offsetof(struct console_record_write_v1, reserved) == 20 ? 1 : -1];
+
+typedef char console_record_batch_write_v1_size_must_be_32[
+    sizeof(struct console_record_batch_write_v1) == 32 ? 1 : -1];
+typedef char console_record_batch_write_v1_version_offset_must_be_0[
+    offsetof(struct console_record_batch_write_v1, version) == 0 ? 1 : -1];
+typedef char console_record_batch_write_v1_flags_offset_must_be_4[
+    offsetof(struct console_record_batch_write_v1, flags) == 4 ? 1 : -1];
+typedef char console_record_batch_write_v1_data_ptr_offset_must_be_8[
+    offsetof(struct console_record_batch_write_v1, data_ptr) == 8 ? 1 : -1];
+typedef char console_record_batch_write_v1_data_len_offset_must_be_16[
+    offsetof(struct console_record_batch_write_v1, data_len) == 16 ? 1 : -1];
+typedef char console_record_batch_write_v1_record_count_offset_must_be_20[
+    offsetof(struct console_record_batch_write_v1, record_count) == 20 ? 1 :
+                                                                         -1];
+typedef char console_record_batch_write_v1_reserved0_offset_must_be_24[
+    offsetof(struct console_record_batch_write_v1, reserved0) == 24 ? 1 : -1];
+typedef char console_record_batch_write_v1_reserved1_offset_must_be_28[
+    offsetof(struct console_record_batch_write_v1, reserved1) == 28 ? 1 : -1];
 
 /* Linux-compatible ioctl encoding, provided locally for the freestanding
  * kernel while using the host definition for HOST_LIBC_PROGRAM builds. */
@@ -71,9 +111,13 @@ typedef char console_record_write_v1_reserved_offset_must_be_20[
 
 #define CONSOLE_RECORD_IOC_MAGIC 0x59U /* 'Y' */
 #define CONSOLE_RECORD_IOC_WRITE_NR 0x01U
+#define CONSOLE_RECORD_IOC_WRITE_BATCH_NR 0x02U
 #define CONSOLE_IOC_WRITE_RECORD                                           \
     _IOW(CONSOLE_RECORD_IOC_MAGIC, CONSOLE_RECORD_IOC_WRITE_NR,             \
          struct console_record_write_v1)
+#define CONSOLE_IOC_WRITE_RECORD_BATCH                                     \
+    _IOW(CONSOLE_RECORD_IOC_MAGIC, CONSOLE_RECORD_IOC_WRITE_BATCH_NR,       \
+         struct console_record_batch_write_v1)
 
 static inline int console_record_wire_text_valid(const char *data,
                                                   console_u32 data_len)
@@ -90,6 +134,43 @@ static inline int console_record_wire_text_valid(const char *data,
             return 0;
     }
     return 1;
+}
+
+static inline int
+console_record_batch_wire_text_valid(const char *data, console_u32 data_len,
+                                     console_u32 record_count)
+{
+    console_u32 record_start = 0;
+    console_u32 records = 0;
+
+    if (data == 0 || data_len == 0 ||
+        data_len > CONSOLE_RECORD_BATCH_MAX_LOGICAL_BYTES ||
+        record_count == 0 ||
+        record_count > CONSOLE_RECORD_BATCH_MAX_RECORDS ||
+        (console_u64)data_len + (console_u64)record_count >
+            CONSOLE_RECORD_BATCH_MAX_PHYSICAL_BYTES)
+        return 0;
+
+    for (console_u32 i = 0; i < data_len; i++) {
+        unsigned char c = (unsigned char)data[i];
+
+        if (c == '\n') {
+            console_u32 record_len = i - record_start + 1;
+            if (record_len == 1 ||
+                record_len > CONSOLE_RECORD_MAX_INPUT_BYTES ||
+                !console_record_wire_text_valid(data + record_start,
+                                                record_len))
+                return 0;
+            records++;
+            if (records > record_count)
+                return 0;
+            record_start = i + 1;
+        } else if (c == '\r' || c == '\0' || c < 0x20 || c > 0x7e) {
+            return 0;
+        }
+    }
+
+    return record_start == data_len && records == record_count;
 }
 
 #endif /* __KERNEL_DEV_CONSOLE_H */

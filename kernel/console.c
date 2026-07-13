@@ -191,6 +191,112 @@ static int console_record_write_ioctl(void *arg)
     mutex_unlock(&console_wire_lock);
     return ret;
 }
+
+static int console_record_batch_write_ioctl(void *arg)
+{
+    struct console_record_batch_write_v1 request;
+    char *records = NULL;
+    uint64 batch_generation;
+    console_u32 record_start;
+    console_u32 records_emitted;
+    int ret;
+
+    if (current == NULL || current->thread_group == NULL ||
+        current->thread_group->euid != 0)
+        return -EPERM;
+    if (arg == NULL ||
+        either_copyin(&request, 1, (uint64)arg, sizeof(request)) < 0)
+        return -EFAULT;
+    if (request.version != CONSOLE_RECORD_BATCH_ABI_VERSION ||
+        request.flags != 0 || request.reserved0 != 0 ||
+        request.reserved1 != 0 || request.data_ptr == 0 ||
+        request.data_len == 0 ||
+        request.data_len > CONSOLE_RECORD_BATCH_MAX_LOGICAL_BYTES ||
+        request.record_count == 0 ||
+        request.record_count > CONSOLE_RECORD_BATCH_MAX_RECORDS ||
+        (uint64)request.data_len + (uint64)request.record_count >
+            CONSOLE_RECORD_BATCH_MAX_PHYSICAL_BYTES)
+        return -EINVAL;
+
+    records = kvmalloc(request.data_len);
+    if (records == NULL)
+        return -ENOMEM;
+    if (either_copyin(records, 1, request.data_ptr, request.data_len) < 0) {
+        ret = -EFAULT;
+        goto out_free;
+    }
+    if (!console_record_batch_wire_text_valid(records, request.data_len,
+                                              request.record_count)) {
+        ret = -EINVAL;
+        goto out_free;
+    }
+
+    /* Metadata, payload, and every record boundary are fixed before locking. */
+    if (!uart_initialized || panic_state()) {
+        ret = -EAGAIN;
+        goto out_free;
+    }
+    ret = mutex_lock_timed(&console_wire_lock,
+                           CONSOLE_RECORD_LOCK_TIMEOUT_MS);
+    if (ret != 0)
+        goto out_free;
+
+    batch_generation = __atomic_load_n(&console_wire_emergency_generation,
+                                        __ATOMIC_ACQUIRE);
+    if (!uart_initialized || panic_state()) {
+        ret = -EAGAIN;
+        goto out_unlock;
+    }
+
+    record_start = 0;
+    records_emitted = 0;
+    while (record_start < request.data_len) {
+        console_u32 record_end = record_start;
+        uint64 emergency_before;
+        uint64 emergency_after;
+
+        while (record_end < request.data_len && records[record_end] != '\n')
+            record_end++;
+        if (record_end >= request.data_len) {
+            ret = -EINVAL; /* defensive: validation above already found every LF */
+            goto out_unlock;
+        }
+        record_end++;
+
+        emergency_before =
+            __atomic_load_n(&console_wire_emergency_generation,
+                            __ATOMIC_ACQUIRE);
+        if (emergency_before != batch_generation) {
+            ret = -EAGAIN;
+            goto out_unlock;
+        }
+        console_wire_emit_text_locked(records + record_start,
+                                      (int)(record_end - record_start));
+        emergency_after =
+            __atomic_load_n(&console_wire_emergency_generation,
+                            __ATOMIC_ACQUIRE);
+        if (emergency_after != emergency_before) {
+            ret = -EAGAIN; /* emitted envelope may have emergency wire dirt */
+            goto out_unlock;
+        }
+
+        records_emitted++;
+        record_start = record_end;
+    }
+
+    if (records_emitted != request.record_count ||
+        __atomic_load_n(&console_wire_emergency_generation,
+                        __ATOMIC_ACQUIRE) != batch_generation)
+        ret = -EAGAIN;
+    else
+        ret = (int)request.data_len;
+
+out_unlock:
+    mutex_unlock(&console_wire_lock);
+out_free:
+    kvfree(records);
+    return ret;
+}
 #endif /* __x86_64__ */
 
 //
@@ -463,6 +569,8 @@ static int console_ioctl_common(uint64 cmd, void *arg) {
 #ifdef __x86_64__
     if (cmd == CONSOLE_IOC_WRITE_RECORD)
         return console_record_write_ioctl(arg);
+    if (cmd == CONSOLE_IOC_WRITE_RECORD_BATCH)
+        return console_record_batch_write_ioctl(arg);
 #endif
     if (console_tty == NULL)
         return -ENOTTY;
