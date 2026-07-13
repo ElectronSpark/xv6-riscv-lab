@@ -26,11 +26,19 @@
 //! `struct buf` disk-block cache) -- see [`bio`]'s module doc for the
 //! distinction.
 //!
-//! The rest of `kernel/dev/` (fdt.c, netdev.c, nullrand.c, the
-//! x1_*/yt8531 drivers, dev_test.c) remains C for now -- see
+//! `kernel/dev/fdt.c` -> [`fdt`] (Phase 2 Wave 23, see
+//! `docs/rustify/phase2_plan.md`): the Flattened Device Tree parser and
+//! platform-config applier. Runs at the earliest point in boot (only
+//! `early_allocator`/`kobject`/`printf` are up) -- see that module's own
+//! doc comment for the full written-globals inventory and the two C bugs
+//! discovered and preserved/fixed during the port.
+//!
+//! The rest of `kernel/dev/` (netdev.c, nullrand.c, the x1_*/yt8531
+//! drivers, dev_test.c) remains C for now -- see
 //! `kernel/dev/CMakeLists.txt`.
 
 pub mod dev;
 pub mod cdev;
 pub mod blkdev;
 pub mod bio;
+pub mod fdt;

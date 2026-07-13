@@ -1178,6 +1178,32 @@ set(RUST_FORCE_UNDEFINED
     --undefined=brelse
     --undefined=bpin
     --undefined=bunpin
+    # dev/fdt.c port (Phase 2 Wave 23) -- the FDT parser + platform-config
+    # applier (kernel/dev/fdt.rs). `fdt_early_scan_memory`/`fdt_init`/
+    # `fdt_apply_platform_config` are called from `kernel/start_kernel.c`
+    # (still C, Wave 27). The rest (`fdt_dump`/`fdt_walk`/
+    # `fdt_node_lookup`/`fdt_path_lookup`/`fdt_compat_lookup`/
+    # `fdt_compat_next`/`fdt_phandle_lookup`) have no live caller today
+    # (the one potential call site, `fdt_walk(fdt_base)` in
+    # `start_kernel.c`, is commented out) but stay declared `extern` in
+    # the still-live, unchanged `kernel/inc/dev/fdt.h` -- forced anyway,
+    # same precedent as `bio_dup`/`devtmpfs_populate_devices` above (part
+    # of the header's public contract). `fdt_valid`/`fdt_totalsize` are
+    # declared in the header too but were never real C symbols (only
+    # same-named macros local to the old `fdt.c` translation unit,
+    # verified by grep) -- not forced, since nothing was ever linkable
+    # there to preserve.
+    --undefined=fdt_early_scan_memory
+    --undefined=fdt_init
+    --undefined=fdt_apply_platform_config
+    --undefined=fdt_dump
+    --undefined=fdt_walk
+    --undefined=fdt_node_lookup
+    --undefined=fdt_path_lookup
+    --undefined=fdt_compat_lookup
+    --undefined=fdt_compat_next
+    --undefined=fdt_phandle_lookup
+    --undefined=platform
 )
 
 # ==============================================================================
