@@ -809,6 +809,45 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   runs. New standing rule + new-vector documentation added to Working
   notes.
 
+### Iteration 35 — 2026-07-13 — wait-status encoding design-and-fix
+
+- Completed the POSIX wait-status encoding Wave 26 flagged: exited →
+  `(code & 0xff) << 8`; killed by signal → `termsig & 0x7f`. New
+  `thread_signal_t::term_signal` field (`kernel/inc/signal_types.h`)
+  records the actual killing signal at every `THREAD_SET_KILLED` site in
+  `kernel/proc/signal.rs` (`__signal_send`, `sigaction`, `sigprocmask`,
+  `deliver_signal`, `handle_signal`, plus `sigreturn`'s corrupt-frame path
+  attributed to `SIGSEGV`); `xv6_exit_reap_zombie`
+  (`kernel/proc/proc_shims.rs`) branches on the zombie's
+  `THREAD_FLAG_KILLED` bit to pick the exited vs. signaled encoding. Full
+  rationale documented as a comment at the encode site. `kernel/inc/uabi/
+  wait.h`'s `WIFEXITED`/`WEXITSTATUS`/`WIFSIGNALED`/`WTERMSIG` macros
+  already existed (pre-Rust-rewrite `f0a652e`) and needed no changes.
+- Test inventory across all of `user/*.c`: only `usertests.c`'s
+  `copyinstr2`/`killstatus`/`exitwait` compared wait status by exact value
+  and needed updating to decode via the macros; every other status check
+  in the tree (`testsig.c` x11, `mmaptest.c`, `cowtest.c`, `devtest.c`,
+  `grind.c`, `symlinktest.c`) is a loose `==0`/`!=0` test, encoding-
+  agnostic, untouched; `sh.c` already used `WIFSTOPPED` correctly.
+- Flagged, not fixed (out of touch scope): `irq/trap.rs`'s
+  `push_sigframe` stack-exhaustion `exit(-1)` calls (~lines 931/934) don't
+  route through `THREAD_SET_KILLED`, so that rare edge case still
+  encodes as a misleading "exited 255" rather than `WIFSIGNALED`. Not
+  reachable by this wave's test battery.
+- Verified: zero-warning build (incl. a `cargo clean` rebuild), boot gate
+  x5 (3 standalone + embedded in every test run below), `usertests
+  copyinstr2`/`killstatus`/`exitwait` all `OK` individually, `usertests
+  -q` new baseline — proceeds through `forkfork` (all `OK`, including the
+  three fixed tests) and stops at the pre-existing `forkforkfork` panic
+  exactly as documented (confirms `execout`/`diskfull`/`outofinodes`
+  aren't reachable via `-q`: they're in the separate slow-test list, not
+  `quicktests`), testsig 21/21 (its own group-SIGKILL test prints
+  `status=9` — the raw `WTERMSIG` value — confirming the new encoding
+  live), vforktest 3/3, mmaptest 16/16 (its `test_mprotect_none` exercises
+  the page-fault → `SIGSEGV` → `THREAD_SET_KILLED` attribution path),
+  stressfs. C_COMPILER/CMAKE_BUILD_TYPE cache re-checked clean after the
+  full matrix.
+
 ## Known issues (pre-existing, not caused by the rewrite)
 
 - ~~`cat /dev/tty` panics ("pid lock not held")~~ FIXED in Wave 22
@@ -841,32 +880,77 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   of dereferencing, so a recurrence will be loud and diagnosable rather
   than silent memory corruption.
 
-- **`wait()` status encoding is POSIX-style, not classic-xv6 — one proc
-  bug, (at least) three test symptoms**: `xv6_exit_reap_zombie`
-  (`kernel/proc/proc_shims.rs`) writes `*xstate_out = ((*child).xstate &
-  0xff) << 8`, so a parent's `wait(&st)` never sees the child's raw exit
-  value. Symptoms, each confirmed identical on an unmodified pre-Wave-26
-  C baseline (git worktree at 074323c, Wave 26 verification 2026-07-13):
-  - `usertests killstatus` — SIGKILLed child's status is not -1 (first
-    observed 2026-07-12).
-  - `usertests copyinstr2` — **NOT an exec argument-size validation gap**
-    (this file's long-standing diagnosis below was wrong, disproven
-    empirically during Wave 26): debug instrumentation in the pre-port C
-    sys_exec showed `fetchstr(uarg, argv[i], PGSIZE)` already returns
-    -ENAMETOOLONG on the test's PGSIZE-long argument and exec correctly
-    returns -1 to userspace. The test's forked child then signals
-    success with `exit(747)`; the parent checks `st != 747`, but
-    747 > 255 means `(747 & 0xff) << 8 == 60160` can never equal 747 —
-    the check fails regardless of exec's behavior, and the test's
-    "exec(echo, BIG) succeeded" message is misleading.
-  - `usertests exitwait` — children `exit(i)` for i in 0..100, parent
-    expects `xstate == i` raw (fails from i==1 on). First observed
-    2026-07-13 (newly exercised by Wave 26's post-copyinstr2 singles).
-  - `usertests -q` therefore still stops at copyinstr2 — fixing this one
-    encoding line (or adapting the tests to POSIX semantics; decide
-    intended semantics first) unblocks copyinstr2, killstatus, and
-    exitwait at once. The fix is proc-side and out of Wave 26's
-    file-touch scope (exec files only).
+- ~~`wait()` status encoding is POSIX-style, not classic-xv6 — one proc
+  bug, (at least) three test symptoms~~ **FIXED** (wait-status encoding
+  wave, 2026-07-13). Root cause was two-fold, not one: (1) the exited-child
+  encode formula `(status & 0xff) << 8` in `xv6_exit_reap_zombie`
+  (`kernel/proc/proc_shims.rs`) was correct POSIX, but `copyinstr2`'s and
+  `exitwait`'s checks compared against the *raw* status instead of decoding
+  with `WEXITSTATUS`/`WIFEXITED`; (2) signal-killed children had no
+  well-formed encoding at all — every kill path (`__signal_send`,
+  `sigaction`/`sigprocmask` revealing an already-pending fatal signal,
+  `deliver_signal`'s bad-handler-address path, `handle_signal`'s
+  termination branch, `sigreturn`'s corrupt-frame path) funneled into a
+  generic `exit(-1)` that lost the actual signal number, so
+  `xv6_exit_reap_zombie` encoded it through the *exited* formula and
+  produced `(-1 & 0xff) << 8 == 0xff00` — a well-formed-looking but wrong
+  "exited with code 255", never `WIFSIGNALED`.
+  - **Design**: exited → `(code & 0xff) << 8` (`WIFEXITED`: low byte zero;
+    `WEXITSTATUS`: high byte) — POSIX's standard 8-bit truncation, so
+    `copyinstr2`'s `exit(747)` sentinel is only observable as `747 & 0xff
+    == 235`. Killed by signal → `termsig & 0x7f` (`WIFSIGNALED`: low 7 bits
+    in `(0, 0x7f)`; `WTERMSIG`: same 7 bits), nonzero.
+  - **Implementation**: new `thread_signal_t::term_signal` field
+    (`kernel/inc/signal_types.h`, mirrors the existing `stop_signal`
+    field/pattern for `THREAD_STOPPED`) records the actual killing signal
+    number the moment the kill decision is made — `set_term_signal_first`
+    (`kernel/proc/signal.rs`, first-cause-wins) is called alongside every
+    `THREAD_SET_KILLED` site (`__signal_send`'s `is_term` branch — the
+    primary path, covers `kill()`/`SIGKILL`/page-fault-`SIGSEGV`;
+    `sigaction`/`sigprocmask`'s pending-term reveals via `bits_ffs_g`;
+    `deliver_signal`'s bad-handler path; `handle_signal`'s termination
+    branch) plus `sigreturn`'s corrupt-frame `exit(-1)` (attributed to
+    `SIGSEGV`, the standard real-kernel attribution for a broken signal
+    context). `xv6_exit_reap_zombie` now branches on the zombie's
+    `THREAD_FLAG_KILLED` bit (read via the same acquire-load pattern as
+    `thread_user_space`): killed → `term_signal & 0x7f` (defensively
+    falls back to `SIGKILL` if `term_signal` is ever 0 despite the flag —
+    should not happen given the paired call sites); otherwise → the
+    original `(xstate & 0xff) << 8` formula, unchanged. Full design
+    rationale is a comment at the encode site
+    (`kernel/proc/proc_shims.rs::xv6_exit_reap_zombie`).
+  - `kernel/inc/uabi/wait.h` already had correct `WIFEXITED`/`WEXITSTATUS`/
+    `WIFSIGNALED`/`WTERMSIG`/`WIFSTOPPED`/`WSTOPSIG` macros (added in the
+    pre-Rust-rewrite `f0a652e` "unify user abi" commit) and `user/user.h`
+    already included it — no header work was needed, only the kernel-side
+    encode fix and adapting the tests that assumed raw/classic-xv6 status.
+  - **Test inventory** (grepped every `wait(&x)`/`waitpid(...)` status
+    check in `user/*.c`): only `user/usertests.c`'s `copyinstr2`,
+    `killstatus`, `exitwait` compared status values exactly and needed
+    updating (now `WIFEXITED(st) && WEXITSTATUS(st) == (747 & 0xff)`;
+    `WIFSIGNALED(xst) && WTERMSIG(xst) == SIGKILL`; `WIFEXITED(xstate) &&
+    WEXITSTATUS(xstate) == i` respectively). Every other status-checking
+    program (`testsig.c`'s 11 checks, `mmaptest.c`, `cowtest.c`,
+    `devtest.c`, `grind.c`, `symlinktest.c`'s `concur`) only tests `== 0`/
+    `!= 0`, which is encoding-agnostic and needed no change; `sh.c` already
+    used `WIFSTOPPED` correctly; `init.c`/`vforktest.c`/`forktest.c`/
+    `pingpong.c`/`primes.c`/`stressfs.c`/`clonetest.c` don't inspect status
+    content.
+  - One known gap, left unfixed (out of touch scope — lives in
+    `kernel/irq/trap.rs`, not proc): `push_sigframe`'s two `exit(-1)` calls
+    on stack-allocation failure while pushing a *legitimate* signal frame
+    (`irq/trap.rs` lines ~931/934) don't go through `THREAD_SET_KILLED`, so
+    a death on that path still encodes as a misleading "exited with code
+    255" rather than `WIFSIGNALED`. Not reachable by any test in this
+    wave's required battery (stack-exhaustion-during-signal-delivery is a
+    rare edge case); flagged for a future irq-focused pass.
+  - **`usertests -q` new baseline**: proceeds through `copyinstr2`,
+    `killstatus`, and `exitwait` (all `OK`) and every test in between/
+    after up to `forkfork`, then hits the pre-existing `forkforkfork`
+    panic (`"Failed to remove interrupted waiter from queue"`,
+    `kernel/proc/thread_queue.rs:421` — see the entry below) exactly as
+    documented. `execout`/`diskfull`/`outofinodes` are in the separate
+    slow-test list, not `quicktests`, so `-q` never reaches them.
 
 - `usertests forkforkfork` (fork-bomb stress, 3-deep nesting) panics the
   kernel: `"Failed to remove interrupted waiter from queue"`
@@ -903,10 +987,10 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 - ~~`usertests -q` fails at `copyinstr2`: `exec(echo, BIG)` succeeds where
   it should fail (argument-size validation gap in exec/vm path)~~ —
   diagnosis DISPROVEN during Wave 26 (2026-07-13): exec's argument-size
-  validation exists and fires correctly; the real root cause is the
-  POSIX-style `wait()` status encoding (see the consolidated entry
-  above). The `-q` run still stops at copyinstr2 until that proc-side
-  encoding decision is made.
+  validation exists and fires correctly; the real root cause was the
+  `wait()` status encoding, FIXED (see the consolidated entry above) — the
+  `-q` run now proceeds past `copyinstr2` to the pre-existing
+  `forkforkfork` panic.
 - ~~`map_pages`/`walk_internal` (vm_pgtab.rs): intermediate page-table pages
   from earlier loop iterations are never freed when a later iteration fails
   with ENOMEM~~ — fixed in Iteration 11 (`unwind_partial_map`).

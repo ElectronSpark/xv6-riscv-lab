@@ -41,6 +41,13 @@ typedef struct thread_signal {
     stack_t sig_stack;   // Alternate signal stack
     uint64 esignal;      // Signal to be sent to parent on exit
     int stop_signal;     // Signal number that caused THREAD_STOPPED
+    int term_signal;     // Signal number that caused THREAD_FLAG_KILLED (0 if
+                          // the thread has not been killed by a signal, e.g.
+                          // it is still running or exited voluntarily via
+                          // exit()). First cause wins: set once, never
+                          // overwritten. Consumed by xv6_exit_reap_zombie()
+                          // (kernel/proc/proc_shims.rs) to build the
+                          // POSIX wait-status word -- see uabi/wait.h.
 } thread_signal_t;
 
 typedef struct ksiginfo {

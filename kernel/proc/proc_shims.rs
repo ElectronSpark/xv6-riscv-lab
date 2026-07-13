@@ -629,6 +629,7 @@ unsafe fn atomic_or_fetch_u64(p: *mut u64, v: u64) -> u64 {
 // ===========================================================================
 const THREAD_FLAG_USER_SPACE: u64 = 5;
 const THREAD_FLAG_SELF_REAP: u64 = 6;
+const THREAD_FLAG_KILLED: u64 = 2;
 
 const THREAD_STATE_STOPPED: c_int = 9;
 const THREAD_STATE_ZOMBIE: c_int = 11;
@@ -1417,7 +1418,47 @@ pub extern "C" fn xv6_exit_reap_zombie(
             }
         }
         xv6_thread_state_set(parent, THREAD_STATE_RUNNING);
-        *xstate_out = ((*child).xstate & 0xff) << 8;
+        // -------------------------------------------------------------------
+        // POSIX wait-status encoding (consumed via the WIFEXITED/WEXITSTATUS/
+        // WIFSIGNALED/WTERMSIG macros in kernel/inc/uabi/wait.h; WIFSTOPPED's
+        // `(stop_signal << 8) | 0x7f` sibling encoding is built directly in
+        // `waitpid()`'s WUNTRACED branch, kernel/proc/exit.rs -- a stopped
+        // child is never reaped, so it never reaches this function):
+        //
+        //   * Exited normally: `(*child).xstate` holds the raw status the
+        //     process passed to `exit(status)` (kernel/proc/exit.rs sets it
+        //     verbatim via `ffi::set_xstate`). Encode as `(status & 0xff)
+        //     << 8` -- WIFEXITED checks the low byte is zero, WEXITSTATUS
+        //     extracts the high byte (the classic POSIX 8-bit-truncated
+        //     exit code).
+        //   * Killed by a fatal signal: `THREAD_FLAG_KILLED` is set on the
+        //     zombie and `signal.term_signal` holds the actual killing
+        //     signal number, recorded at the moment the kill decision was
+        //     made (see `set_term_signal_first` call sites in signal.rs,
+        //     alongside every `THREAD_SET_KILLED` call). Encode as
+        //     `term_signal & 0x7f` -- a nonzero low-7-bits value, matching
+        //     WIFSIGNALED's `(w & 0x7f) in (0, 0x7f)` test and WTERMSIG's
+        //     `w & 0x7f` extraction. `(*child).xstate` is deliberately NOT
+        //     consulted in this branch: it may still hold a stale value
+        //     from an internal `exit(-1)` call (sigreturn's corrupt-frame
+        //     path, trap.rs's already-killed fast-out) that predates the
+        //     kill decision and is no longer meaningful once the flag is
+        //     authoritative. `term_signal` is defensively re-validated
+        //     (falls back to SIGKILL) in case it is ever 0 despite the flag
+        //     being set -- should not happen given the paired call sites,
+        //     but a corrupt/garbage status word is worse than a slightly
+        //     wrong signal number.
+        // -------------------------------------------------------------------
+        let killed = (smp_load_acquire_u64(&(*child).flags as *const u64)
+            & (1u64 << THREAD_FLAG_KILLED)) != 0;
+        *xstate_out = if killed {
+            const SIGKILL_FALLBACK: c_int = 9;
+            let ts = (*child).signal.term_signal;
+            let ts = if ts > 0 && ts < 0x7f { ts } else { SIGKILL_FALLBACK };
+            ts & 0x7f
+        } else {
+            ((*child).xstate & 0xff) << 8
+        };
         let pid = (*child).pid;
 
         if xv6_pid_try_lock_upgrade() == 0 {
@@ -2650,3 +2691,7 @@ pub extern "C" fn ts_set_esignal(p: *mut thread, v: u64) { field_set!(p, signal.
 pub extern "C" fn ts_stop_signal(p: *mut thread) -> c_int { field_get!(p, signal.stop_signal) }
 #[no_mangle]
 pub extern "C" fn ts_set_stop_signal(p: *mut thread, v: c_int) { field_set!(p, signal.stop_signal, v) }
+#[no_mangle]
+pub extern "C" fn ts_term_signal(p: *mut thread) -> c_int { field_get!(p, signal.term_signal) }
+#[no_mangle]
+pub extern "C" fn ts_set_term_signal(p: *mut thread, v: c_int) { field_set!(p, signal.term_signal, v) }

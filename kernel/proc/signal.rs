@@ -281,6 +281,30 @@ fn THREAD_SIGPENDING(p: *mut thread) -> bool { if p.is_null() { false } else { t
 fn THREAD_USER_SPACE(p: *mut thread) -> bool { if p.is_null() { false } else { ta_of(p).flags_test_bit(THREAD_FLAG_USER_SPACE) } }
 #[inline]
 fn THREAD_SET_KILLED(p: *mut thread) { if !p.is_null() { ta_of(p).flags_set_bit(THREAD_FLAG_KILLED) } }
+
+/// Records the signal number that is about to terminate `p`, for the
+/// POSIX wait-status encoding built by `xv6_exit_reap_zombie`
+/// (`kernel/proc/proc_shims.rs`; see the encode-site comment there).
+/// First cause wins: a no-op once `signal.term_signal` is already nonzero,
+/// so whichever fatal signal is detected first keeps the attribution even
+/// if `THREAD_SET_KILLED` is (harmlessly) called again later by a
+/// different detection path. Call this alongside every `THREAD_SET_KILLED`
+/// call site that has a concrete `signo` in hand.
+#[inline]
+fn set_term_signal_first(p: *mut thread, signo: c_int) {
+    if p.is_null() || signo <= 0 {
+        return;
+    }
+    // SAFETY: `p` is checked non-null immediately above; every call site
+    // below shares the same live-thread precondition as the `THREAD_*`
+    // helpers in this file (the thread is either `current()` or a target
+    // already dereferenced by the caller for the matching
+    // `THREAD_SET_KILLED` call).
+    let ts = unsafe { ThreadSignalAccess::assume_thread(p) };
+    if ts.term_signal() == 0 {
+        ts.set_term_signal(signo);
+    }
+}
 #[inline]
 fn THREAD_SET_SIGPENDING(p: *mut thread) { if !p.is_null() { ta_of(p).flags_set_bit(THREAD_FLAG_SIGPENDING) } }
 #[inline]
@@ -792,6 +816,7 @@ pub extern "C" fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  
         }
         if is_term {
             THREAD_SET_KILLED(p);
+            set_term_signal_first(p, signo);
             if THREAD_STOPPED_p(p) {
                 scheduler_wakeup_stopped(p);
             }
@@ -1018,7 +1043,10 @@ pub extern "C" fn sigaction(signum: c_int, act: *mut sigaction_t,
                 }
                 let pending_term = (*p).signal.sig_pending_mask
                     & (*sa).sa_sigterm & !(*p).signal.sig_mask;
-                if pending_term != 0 { THREAD_SET_KILLED(p); }
+                if pending_term != 0 {
+                    THREAD_SET_KILLED(p);
+                    set_term_signal_first(p, bits_ffs_g(pending_term));
+                }
             } else {
                 SigactsAccess::assume(sa).copy_action_from(signum, act);
                 let stored_act = SigactsAccess::assume(sa).action_ref(signum);
@@ -1083,7 +1111,10 @@ pub extern "C" fn sigprocmask(how: c_int, set: *const sigset_t,
         }
         let pending_unmasked = pending & !(*p).signal.sig_mask;
         let pending_term = pending_unmasked & (*sa).sa_sigterm;
-        if pending_term != 0 { THREAD_SET_KILLED(p); }
+        if pending_term != 0 {
+            THREAD_SET_KILLED(p);
+            set_term_signal_first(p, bits_ffs_g(pending_term));
+        }
         sigacts_unlock(sa);
         if pending_unmasked != 0 {
             tcb_lock(p);
@@ -1138,6 +1169,17 @@ pub extern "C" fn sigreturn()-> c_int  {
         sigacts_unlock(sa);
         let mut uc: UContext = core::mem::zeroed();
         if restore_sigframe(p, &raw mut uc) != 0 {
+            // Corrupted/invalid saved signal context: not reachable via the
+            // normal signal-delivery path (so no `THREAD_SET_KILLED` call
+            // has run for this death yet), but every real POSIX kernel
+            // treats a broken user stack/context the same way it treats a
+            // stray bad memory access -- attribute it to SIGSEGV so
+            // `xv6_exit_reap_zombie`'s wait-status encode (proc_shims.rs)
+            // produces a well-formed WIFSIGNALED status instead of falling
+            // through to the WIFEXITED branch with this call's meaningless
+            // `-1` argument.
+            THREAD_SET_KILLED(p);
+            set_term_signal_first(p, SIGSEGV);
             exit(-1);
         }
         if signal_restore(p, &raw mut uc as *mut c_void) != 0 {
@@ -1193,6 +1235,7 @@ fn deliver_signal(p: *mut thread, signo: c_int, info: *mut ksiginfo_t,
                    h_addr as u64, signo);
             tcb_lock(p);
             THREAD_SET_KILLED(p);
+            set_term_signal_first(p, signo);
             tcb_unlock(p);
             return 0;
         }
@@ -1281,6 +1324,7 @@ pub extern "C" fn handle_signal() {
                     continue;
                 }
                 THREAD_SET_KILLED(p);
+                set_term_signal_first(p, bits_ffs_g(masked & sigterm));
                 sigacts_unlock(sa);
                 break;
             }

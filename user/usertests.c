@@ -188,12 +188,14 @@ void copyinstr2(char *s) {
             printf("exec(echo, BIG) returned %d, not -1\n", fd);
             exit(1);
         }
-        exit(747); // OK
+        exit(747); // OK (the kernel's POSIX wait-status encoding truncates
+                   // the exit code to its low 8 bits -- 747 & 0xff == 235 --
+                   // like every other POSIX kernel; see uabi/wait.h)
     }
 
     int st = 0;
     wait(&st);
-    if (st != 747) {
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != (747 & 0xff)) {
         printf("exec(echo, BIG) succeeded, should have failed\n");
         exit(1);
     }
@@ -803,7 +805,8 @@ void pipe1(char *s) {
     }
 }
 
-// test if child is killed (status = -1)
+// test if child is killed (status decodes as WIFSIGNALED with WTERMSIG ==
+// SIGKILL, per the kernel's POSIX wait-status encoding; see uabi/wait.h)
 void killstatus(char *s) {
     int xst;
 
@@ -822,8 +825,8 @@ void killstatus(char *s) {
         sleep(100);
         kill(pid1, SIGKILL);
         wait(&xst);
-        if (xst >= 0) {
-            printf("%s: status should be -1\n", s);
+        if (!WIFSIGNALED(xst) || WTERMSIG(xst) != SIGKILL) {
+            printf("%s: status should indicate death by SIGKILL\n", s);
             exit(1);
         }
     }
@@ -900,7 +903,7 @@ void exitwait(char *s) {
                 printf("%s: wait wrong pid %d\n", s, pid);
                 exit(1);
             }
-            if (i != xstate) {
+            if (!WIFEXITED(xstate) || WEXITSTATUS(xstate) != i) {
                 printf("%s: wait wrong exit status\n", s);
                 exit(1);
             }

@@ -1733,6 +1733,8 @@ impl<'a> ThreadSignalAccess<'a> {
     #[inline] pub fn set_esignal(&self, v: u64) { shim_call!(self, ts_set_esignal, v) }
     #[inline] pub fn stop_signal(&self) -> c_int { shim_call!(self, ts_stop_signal) }
     #[inline] pub fn set_stop_signal(&self, v: c_int) { shim_call!(self, ts_set_stop_signal, v) }
+    #[inline] pub fn term_signal(&self) -> c_int { shim_call!(self, ts_term_signal) }
+    #[inline] pub fn set_term_signal(&self, v: c_int) { shim_call!(self, ts_set_term_signal, v) }
     #[inline] pub fn ptr_ref(&self) -> ThreadSignalPtrRef<'a> {
         let p = raw_mut_ptr!(self, signal);
         // SAFETY: `p` is a field-address of the already-valid, non-null
