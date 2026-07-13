@@ -75,6 +75,25 @@
  * original, which only forwards the pointer to the registrant's own
  * callback). */
 #include "dev/netdev.h"
+/* dev/yt8531.h + dev/x1_emac.h -- Phase 2 Wave 25 (dev/{yt8531,x1_emac,
+ * x1_sdhci}.c port, the last C in kernel/dev/). Neither header has any
+ * static-inline bodies (plain macros + two structs each) -- clean,
+ * additive includes. `struct phy_state` (yt8531.h) is the link-state
+ * out-param shared between `kernel/dev/yt8531.rs` and
+ * `kernel/dev/x1_emac.rs`; `struct x1_rx_desc`/`struct x1_tx_desc`
+ * (x1_emac.h) are the **hardware-defined DMA descriptor ring layout**
+ * (64-byte, cache-line-padded entries the X1 EMAC's DMA engine reads/
+ * writes directly) -- real bindgen layouts here, not a hand-rolled
+ * `#[repr(C)]` guess, so `kernel/dev/x1_emac.rs`'s ring-init/TX/RX code
+ * gets the exact same field offsets the deleted C translation unit
+ * would have, with compile-time `size_of`/`offset_of` asserts pinning
+ * them further. `x1_sdhci.h` is NOT added here: it defines only
+ * register-offset/bit macros (no structs) -- `kernel/dev/x1_sdhci.rs`
+ * redeclares the handful it uses as local `const`s, same convention as
+ * every other macro-only header in this tree (see e.g. `fdt.rs`'s
+ * `FDT_MAGIC` et al.). */
+#include "dev/yt8531.h"
+#include "dev/x1_emac.h"
 /* vfs/pipe_types.h — Phase 2 Wave 11 (tty.c/ptmx.c port): full `struct
  * pipe` layout (nread/nwrite) read directly (via smp_load_acquire) by
  * tty_poll()/ptmx's master poll for a lock-free readiness check. Before

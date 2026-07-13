@@ -294,8 +294,16 @@ add_subdirectory(${KERNEL_DIR}/inc)
 # sources, so there is no add_subdirectory(${KERNEL_DIR}/vfs) / OBJECT
 # library for it, and no kernel/vfs/CMakeLists.txt (same precedent as
 # lock/, timer/, ipi/, tty/, proc/).
+# NOTE: kernel/dev has no C sources left anywhere either (fully ported to
+# Rust: dev/cdev/blkdev core in Phase 2 Wave 21, bio.c in Wave 22, fdt.c in
+# Wave 23, nullrand.c/netdev.c in Wave 24, and the Orange-Pi-only
+# yt8531.c/x1_emac.c/x1_sdhci.c -- the last C in kernel/dev/ -- in Wave 25;
+# see kernel/dev/*.rs, linked in via the xv6_rust staticlib above) and
+# never had any assembly sources, so there is no
+# add_subdirectory(${KERNEL_DIR}/dev) / OBJECT library for it, and no
+# kernel/dev/CMakeLists.txt (same precedent as lock/, timer/, ipi/, tty/,
+# vfs/, proc/).
 add_subdirectory(${KERNEL_DIR}/irq)
-add_subdirectory(${KERNEL_DIR}/dev)
 add_subdirectory(${KERNEL_DIR}/proc)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
@@ -308,13 +316,14 @@ set(KERNEL_OBJS ${KERNEL_S_FILES} ${KERNEL_C_FILES} ${KERNEL_SCAN_OBJS})
 # NOTE: vfs_tmpfs is gone (Phase 2 Wave 18), vfs_xv6fs is gone (Phase 2
 # Wave 19), and vfs_devtmpfs is gone too (Phase 2 Wave 20 — kernel/vfs/
 # has no C sources left anywhere; see the add_subdirectory NOTE above).
+# NOTE: dev is gone too (Phase 2 Wave 25 — kernel/dev/ has no C sources
+# left anywhere; see the add_subdirectory NOTE above).
 set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:irq>
-    $<TARGET_OBJECTS:dev>
     $<TARGET_OBJECTS:proc>
 )
 
-set(KERNEL_LINK_LIBS irq dev proc)
+set(KERNEL_LINK_LIBS irq proc)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding ")
 
@@ -1124,9 +1133,10 @@ set(RUST_FORCE_UNDEFINED
     # `kernel/inc/dev/{dev,cdev,blkdev}.h` and called from still-C
     # drivers/callers (console.c-successor console.rs, tty_dev.rs,
     # ptmx.rs, nullrand.c-successor nullrand.rs, virtio_disk.c,
-    # ramdisk.c, x1_sdhci.c), so all are forced per the plan's "every
-    # new public symbol" rule. (`dev_test.c`, formerly also a caller,
-    # was dead code -- deleted in Wave 24, see that wave's entry below.)
+    # ramdisk.c, x1_sdhci.c-successor x1_sdhci.rs -- Wave 25), so all are
+    # forced per the plan's "every new public symbol" rule. (`dev_test.c`,
+    # formerly also a caller, was dead code -- deleted in Wave 24, see
+    # that wave's entry below.)
     --undefined=dev_table_init
     --undefined=device_get
     --undefined=device_dup
@@ -1152,9 +1162,12 @@ set(RUST_FORCE_UNDEFINED
     # block-I/O request object (kernel/dev/bio.rs). Declared `extern` in
     # the still-live, unchanged `kernel/inc/dev/bio.h` and called from
     # `kernel/dev/blkdev.rs` (bio_validate), `kernel/bufcache.rs`
-    # (bio_alloc/bio_add_seg/bio_release), and still-C drivers
-    # (virtio_disk.c, ramdisk.c, x1_sdhci.c) -- forced per the plan's
-    # "every new public symbol" rule. `bio_dup` has no live caller today
+    # (bio_alloc/bio_add_seg/bio_release), still-C drivers (virtio_disk.c,
+    # ramdisk.c), and `kernel/dev/x1_sdhci.rs` (Wave 25, a same-crate Rust
+    # call now, but `bio_validate` is reached via `blkdev.rs` -- forced
+    # per the plan's "every new public symbol" rule regardless, since
+    # virtio_disk.c/ramdisk.c are still-C callers of this same symbol set.
+    # `bio_dup` has no live caller today
     # (forced anyway, same precedent as `devtmpfs_populate_devices`
     # above -- it is part of the header's public contract).
     --undefined=bio_alloc
@@ -1212,8 +1225,9 @@ set(RUST_FORCE_UNDEFINED
     # forced anyway per the plan's "every new public symbol declared in
     # a still-live header" rule -- `kernel/inc/defs.h` still declares
     # it). `netdev_init` is called from `start_kernel.c`;
-    # `netdev_register`/`netdev_set_link` from the still-C NIC drivers
-    # (`kernel/e1000.c`, `kernel/dev/x1_emac.c`); `netdev_get_default`
+    # `netdev_register`/`netdev_set_link` from still-C `kernel/e1000.c`
+    # and (Wave 25 on) same-crate Rust `kernel/dev/x1_emac.rs` --
+    # `e1000.c` alone already justifies forcing these; `netdev_get_default`
     # from still-C `kernel/net.c`. `netdev_get_by_index`/
     # `netdev_get_by_name`/`netdev_set_link_callback` have no live
     # caller today but stay declared `extern` in the still-live,
@@ -1229,6 +1243,21 @@ set(RUST_FORCE_UNDEFINED
     --undefined=netdev_get_by_name
     --undefined=netdev_set_link
     --undefined=netdev_set_link_callback
+    # dev/{yt8531,x1_emac,x1_sdhci}.c port (Phase 2 Wave 25) -- the last C
+    # in kernel/dev/ (kernel/dev/{yt8531,x1_emac,x1_sdhci}.rs). Only
+    # `x1_emac_init`/`x1_sdhci_init` are still called from C
+    # (`kernel/start_kernel.c`, still C, Wave 27) -- forced per the plan's
+    # "every new public symbol [a still-C caller reaches]" rule.
+    # `mdio_read`/`mdio_write`/`yt8531_init`/`yt8531_poll_link`/
+    # `yt8531_wait_autoneg` (declared `extern` in the now C-caller-less
+    # `kernel/inc/dev/yt8531.h`) are reached only via direct same-crate
+    # Rust calls from `kernel/dev/x1_emac.rs` -- ordinary Rust codegen
+    # reachability from the two forced entry points below already keeps
+    # them linked in, so they are deliberately NOT added here (no still-C
+    # caller exists to justify it, unlike the header-contract precedents
+    # elsewhere in this list).
+    --undefined=x1_emac_init
+    --undefined=x1_sdhci_init
 )
 
 # ==============================================================================

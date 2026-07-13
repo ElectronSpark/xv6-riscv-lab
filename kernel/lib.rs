@@ -192,10 +192,13 @@ mod vfs;
 // see that module's doc) + kernel/dev/cdev.rs (dev/cdev.c: character
 // device dispatch) + kernel/dev/blkdev.rs (dev/blkdev.c: block device
 // dispatch + bio submission) + kernel/dev/bio.rs (Phase 2 Wave 22 --
-// dev/bio.c: the Linux-style ref-counted block-I/O request object).
-// The rest of kernel/dev/ (fdt.c, netdev.c, nullrand.c, the
-// x1_*/yt8531 drivers, dev_test.c) remains C; see
-// kernel/dev/CMakeLists.txt.
+// dev/bio.c: the Linux-style ref-counted block-I/O request object) +
+// kernel/dev/fdt.rs (Phase 2 Wave 23 -- dev/fdt.c: the FDT parser) +
+// kernel/dev/nullrand.rs + kernel/dev/netdev.rs (Phase 2 Wave 24) +
+// kernel/dev/{yt8531,x1_emac,x1_sdhci}.rs (Phase 2 Wave 25 -- the
+// Orange-Pi-RV2-only drivers, the last C in kernel/dev/; probe nothing
+// on QEMU virt, see that module's doc). kernel/dev/ is now 100% Rust;
+// see the NOTE in kernel/CMakeLists.txt (no kernel/dev/CMakeLists.txt).
 #[path = "dev/mod.rs"]
 mod dev;
 

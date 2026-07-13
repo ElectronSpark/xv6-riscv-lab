@@ -152,6 +152,11 @@ fn main() {
         // still-C `kernel/e1000.c`/`kernel/dev/x1_emac.c` (registrants)
         // and `kernel/net.c` (consumer).
         .allowlist_type("netdev|netdev_ops|netdev_link_cb_t")
+        // Phase 2 Wave 25 (dev/{yt8531,x1_emac,x1_sdhci}.c port): the
+        // MDIO link-state struct shared between yt8531.rs/x1_emac.rs, and
+        // the hardware DMA descriptor ring layout (x1_emac.h) -- see
+        // wrapper.h's matching comment.
+        .allowlist_type("phy_state|x1_rx_desc|x1_tx_desc")
         .allowlist_var("PROT_.*|VMA_FLAG_.*|PTE_.*|PGSIZE|PGSHIFT|PAGE_SHIFT|MAXVA|UVMTOP|UVMBOTTOM|TRAPFRAME|TRAPFRAME_POFFSET|NCPU")
         .allowlist_var("MAP_.*|MREMAP_.*|MS_ASYNC|MS_SYNC|MS_INVALIDATE|MADV_.*")
         .allowlist_var("MAXUSTACK|USTACKTOP|USTACK_MAX_BOTTOM|USERSTACK_GROWTH|USERSTACK_MINSZ|UHEAP_MAX_TOP|PROT_MASK")

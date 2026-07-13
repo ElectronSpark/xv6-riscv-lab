@@ -36,15 +36,25 @@
 //! `kernel/dev/nullrand.c` -> [`nullrand`] and `kernel/dev/netdev.c` ->
 //! [`netdev`] (Phase 2 Wave 24, see `docs/rustify/phase2_plan.md`):
 //! `/dev/null`/`/dev/zero`/`/dev/random` cdev registrants, and the
-//! network-device registration/lookup table still-C NIC drivers
-//! (`kernel/e1000.c`, `kernel/dev/x1_emac.c`) and `kernel/net.c` consume
-//! by exact C ABI. `kernel/dev/dev_test.c` (dead code -- its one call
-//! site was already commented out in `start_kernel.c`) was deleted
-//! outright rather than ported, same precedent as the tmpfs/xv6fs
-//! smoketests in Waves 18/19.
+//! network-device registration/lookup table `kernel/e1000.c` (still C)
+//! and `kernel/net.c` consume by exact C ABI. `kernel/dev/dev_test.c`
+//! (dead code -- its one call site was already commented out in
+//! `start_kernel.c`) was deleted outright rather than ported, same
+//! precedent as the tmpfs/xv6fs smoketests in Waves 18/19.
 //!
-//! The rest of `kernel/dev/` (the x1_*/yt8531 drivers) remains C for
-//! now -- see `kernel/dev/CMakeLists.txt`.
+//! `kernel/dev/yt8531.c` -> [`yt8531`], `kernel/dev/x1_emac.c` ->
+//! [`x1_emac`], `kernel/dev/x1_sdhci.c` -> [`x1_sdhci`] (Phase 2 Wave 25,
+//! see `docs/rustify/phase2_plan.md`): the Orange-Pi-RV2-only drivers --
+//! the last C in `kernel/dev/`. Every entry point `start_kernel.c` calls
+//! (`x1_emac_init`/`x1_sdhci_init`) probes nothing on QEMU's `-machine
+//! virt` (no matching FDT node) -- **compile-verify + boot-no-regression
+//! only** for this trio, see each module's own doc for the full
+//! lower-confidence accounting and what real hardware would be needed to
+//! verify functionally.
+//!
+//! `kernel/dev/` is now 100% Rust -- `kernel/dev/CMakeLists.txt` and its
+//! `add_subdirectory()` in `kernel/CMakeLists.txt` are removed (same
+//! precedent as `lock/`, `timer/`, `ipi/`, `tty/`, `vfs/`).
 
 pub mod dev;
 pub mod cdev;
@@ -53,3 +63,6 @@ pub mod bio;
 pub mod fdt;
 pub mod nullrand;
 pub mod netdev;
+pub mod yt8531;
+pub mod x1_emac;
+pub mod x1_sdhci;
