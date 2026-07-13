@@ -41,11 +41,12 @@ static int __tmpfs_make_symlink_target(struct tmpfs_inode *tmpfs_inode,
     return 0;
 }
 
-// Initialize a tmpfs inode as a regular file
-static void __tmpfs_make_regfile(struct tmpfs_inode *tmpfs_inode) {
+// Initialize a tmpfs inode as a regular file while preserving the permission
+// bits already filtered by the VFS creation path (including umask).
+static void __tmpfs_make_regfile(struct tmpfs_inode *tmpfs_inode, mode_t mode) {
     tmpfs_inode->vfs_inode.size = 0;
     tmpfs_inode->embedded = true;
-    tmpfs_inode->vfs_inode.mode = S_IFREG | 0644;
+    tmpfs_inode->vfs_inode.mode = S_IFREG | (mode & 07777);
     memset(&tmpfs_inode->file, 0, sizeof(tmpfs_inode->file));
 }
 
@@ -361,7 +362,7 @@ struct vfs_inode *__tmpfs_create(struct vfs_inode *dir, mode_t mode,
     if (IS_ERR(tmpfs_inode)) {
         return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
-    __tmpfs_make_regfile(tmpfs_inode);
+    __tmpfs_make_regfile(tmpfs_inode, mode);
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     return &tmpfs_inode->vfs_inode;
 }

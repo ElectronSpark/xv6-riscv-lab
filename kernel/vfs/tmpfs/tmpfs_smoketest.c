@@ -63,6 +63,7 @@ void tmpfs_run_inode_smoketest(void) {
     struct vfs_inode *root = vfs_curroot();
     struct vfs_inode *subdir = NULL;
     struct vfs_inode *nested = NULL;
+    struct vfs_inode *private_file = NULL;
     struct vfs_inode *file_a = NULL;
     struct vfs_inode *file_b = NULL;
     struct vfs_inode *sym_a = NULL;
@@ -70,11 +71,14 @@ void tmpfs_run_inode_smoketest(void) {
     uint64 file_a_ino = 0;
     uint64 file_b_ino = 0;
     bool root_pinned = false;
+    bool private_file_present = false;
 
     const char *subdir_name = "tmpfs_subdir";
     const size_t subdir_len = sizeof("tmpfs_subdir") - 1;
     const char *nested_name = "nested";
     const size_t nested_len = sizeof("nested") - 1;
+    const char *private_file_name = "tmp_private_file";
+    const size_t private_file_len = sizeof("tmp_private_file") - 1;
     const char *file_a_name = "tmp_file_a";
     const size_t file_a_len = sizeof("tmp_file_a") - 1;
     const char *file_b_name = "tmp_file_b";
@@ -122,6 +126,36 @@ void tmpfs_run_inode_smoketest(void) {
            nested_name, nested->n_links);
     vfs_iunlock(nested);
 
+    /*
+     * vfs_create receives mode bits after the syscall layer applies umask.
+     * A 0666 creation under umask 0077 therefore reaches tmpfs as 0600 and
+     * must remain private.  Keep the ordinary 0644 case below as a separate
+     * regression so preserving private modes does not change default files.
+     */
+    private_file =
+        vfs_create(subdir, 0600, private_file_name, private_file_len);
+    if (IS_ERR_OR_NULL(private_file)) {
+        ret = PTR_ERR(private_file);
+        printf("inode_smoketest: " FAIL " vfs_create %s, errno=%d\n",
+               private_file_name, ret);
+        goto out_cleanup;
+    }
+    private_file_present = true;
+    vfs_ilock(private_file);
+    if (!S_ISREG(private_file->mode) ||
+        (private_file->mode & 07777) != 0600 || private_file->n_links != 1) {
+        printf("inode_smoketest: " FAIL
+               " private mode/type mode=%o nlink=%u expected=100600/1\n",
+               private_file->mode, private_file->n_links);
+    } else {
+        printf("inode_smoketest: " PASS
+               " private mode/type mode=%o nlink=%u expected=100600/1\n",
+               private_file->mode, private_file->n_links);
+    }
+    vfs_iunlock(private_file);
+    vfs_iput(private_file);
+    private_file = NULL;
+
     file_a = vfs_create(subdir, 0644, file_a_name, file_a_len);
     if (IS_ERR_OR_NULL(file_a)) {
         ret = PTR_ERR(file_a);
@@ -131,8 +165,16 @@ void tmpfs_run_inode_smoketest(void) {
     }
     file_a_ino = file_a->ino;
     vfs_ilock(file_a);
-    printf("inode_smoketest: " PASS " created /%s/%s ino=%lu nlink=%u\n",
-           subdir_name, file_a_name, file_a->ino, file_a->n_links);
+    if (!S_ISREG(file_a->mode) || (file_a->mode & 07777) != 0644 ||
+        file_a->n_links != 1) {
+        printf("inode_smoketest: " FAIL
+               " ordinary mode/type mode=%o nlink=%u expected=100644/1\n",
+               file_a->mode, file_a->n_links);
+    } else {
+        printf("inode_smoketest: " PASS
+               " ordinary mode/type mode=%o nlink=%u expected=100644/1\n",
+               file_a->mode, file_a->n_links);
+    }
     vfs_iunlock(file_a);
     vfs_iput(file_a);
     file_a = NULL;
@@ -348,6 +390,14 @@ out_cleanup:
         }
     }
     if (!IS_ERR_OR_NULL(subdir)) {
+        if (private_file_present) {
+            ret = vfs_unlink(subdir, private_file_name, private_file_len);
+            if (ret != 0) {
+                printf("inode_smoketest: " FAIL
+                       " cleanup unlink %s, errno=%d\n",
+                       private_file_name, ret);
+            }
+        }
         ret = vfs_unlink(subdir, symlink_a_name, symlink_a_len);
         if (ret != 0) {
             printf("inode_smoketest: " FAIL " cleanup unlink %s, errno=%d\n",
