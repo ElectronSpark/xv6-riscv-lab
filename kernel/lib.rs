@@ -191,11 +191,24 @@ mod vfs;
 // protected major/minor device table; includes two mandated bug fixes,
 // see that module's doc) + kernel/dev/cdev.rs (dev/cdev.c: character
 // device dispatch) + kernel/dev/blkdev.rs (dev/blkdev.c: block device
-// dispatch + bio submission). The rest of kernel/dev/ (bio.c, fdt.c,
-// netdev.c, nullrand.c, the x1_*/yt8531 drivers, dev_test.c) remains C;
-// see kernel/dev/CMakeLists.txt.
+// dispatch + bio submission) + kernel/dev/bio.rs (Phase 2 Wave 22 --
+// dev/bio.c: the Linux-style ref-counted block-I/O request object).
+// The rest of kernel/dev/ (fdt.c, netdev.c, nullrand.c, the
+// x1_*/yt8531 drivers, dev_test.c) remains C; see
+// kernel/dev/CMakeLists.txt.
 #[path = "dev/mod.rs"]
 mod dev;
+
+// kernel/bufcache.rs (Phase 2 Wave 22 -- kernel/bio.c: the classic xv6
+// `struct buf` disk-block cache: bread/bwrite/brelse/bwrite_async/
+// bsync/bpin/bunpin, keyed by (dev, blockno) through the Wave-1 Rust
+// hlist). NOT the same layer as kernel/dev/bio.c -> kernel/dev/bio.rs
+// (dev::bio, the Linux-style bio request object above) -- see
+// kernel/bufcache.rs's module doc for the distinction. Named
+// bufcache.rs, not bio.rs, specifically to avoid a file-name collision
+// with that sibling module; every C-ABI symbol it exports keeps its
+// original name unchanged.
+mod bufcache;
 
 // Re-export so the symbols end up in the staticlib's exported symbol table.
 pub use mm::*;

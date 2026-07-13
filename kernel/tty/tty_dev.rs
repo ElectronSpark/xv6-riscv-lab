@@ -37,6 +37,8 @@ unsafe extern "C" {
     pub safe fn tty_poll(t: *mut tty, events: c_short) -> c_int;
 
     pub safe fn session_get_ctrl_tty(s: *mut session) -> *mut tty;
+    pub safe fn pid_wlock();
+    pub safe fn pid_wunlock();
 
     pub safe fn printf(fmt: *const c_char, ...) -> c_int;
     pub safe fn __panic_start();
@@ -81,6 +83,18 @@ fn tty_dev_assert_errno(cond: bool, line: u32, msg: &core::ffi::CStr, errno: c_i
 /// Get the current thread's controlling terminal.
 ///
 /// Returns null if the thread has no session or no controlling tty.
+///
+/// # Mandated fix (Wave 22, `RUST_REWRITE.md` Known issues)
+///
+/// `session_get_ctrl_tty()` documents (and, since Wave 12,
+/// `pid_assert_wholding()`-asserts) that the caller must hold
+/// `pid_wlock`. This function previously called it bare, which was
+/// inert only because `/dev/tty` could not be opened at all (the
+/// pre-Wave-21 minor-0 bug) — Wave 21 fixed that bug and made the
+/// contract violation reachable, panicking on `cat /dev/tty`. Fixed by
+/// taking `pid_wlock`/`pid_wunlock` around the call, matching every
+/// other `session_get_ctrl_tty` caller's discipline (see
+/// `kernel/tty/session.rs`).
 #[inline]
 fn ctrl_tty() -> *mut tty {
     let t = crate::machine::current_thread_ptr();
@@ -95,7 +109,10 @@ fn ctrl_tty() -> *mut tty {
     if session.is_null() {
         return core::ptr::null_mut();
     }
-    session_get_ctrl_tty(session)
+    pid_wlock();
+    let t = session_get_ctrl_tty(session);
+    pid_wunlock();
+    t
 }
 
 // ===========================================================================

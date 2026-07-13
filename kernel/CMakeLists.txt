@@ -34,7 +34,6 @@ message(STATUS "Platform: ${PLATFORM}, kernel base: ${KERNEL_BASE}")
 # Core kernel sources in this directory (excluding subdirectories).
 set(KERNEL_C_FILES
     ${KERNEL_DIR}/start_kernel.c
-    ${KERNEL_DIR}/bio.c
     ${KERNEL_DIR}/exec.c
     ${KERNEL_DIR}/virtio_disk.c
     ${KERNEL_DIR}/ramdisk.c
@@ -73,6 +72,12 @@ set(KERNEL_C_FILES
     # NOTE: backtrace.c has been rewritten in Rust (kernel/backtrace.rs —
     # Phase 2 Wave 5). Its symbols are linked in via the xv6_rust
     # staticlib below.
+    # NOTE: bio.c (the classic xv6 struct buf disk-block cache) has been
+    # rewritten in Rust (kernel/bufcache.rs — Phase 2 Wave 22; named
+    # bufcache.rs, not bio.rs, to avoid colliding with the unrelated
+    # kernel/dev/bio.rs — see that file's module doc). Its symbols
+    # (binit/bread/bwrite/bwrite_async/bsync/bdirty_count/brelse/bpin/
+    # bunpin) are linked in via the xv6_rust staticlib below.
 )
 
 # ==============================================================================
@@ -187,7 +192,20 @@ file(GLOB_RECURSE RUST_CRATE_SOURCES
     # this wave, kernel/vfs/ as a whole has no C sources left at any
     # level — there is no more kernel/vfs/CMakeLists.txt / `vfs` OBJECT
     # library (same precedent as lock/, timer/, ipi/, tty/, proc/).
-    ${RUST_CRATE_DIR}/vfs/devtmpfs/*.rs)
+    ${RUST_CRATE_DIR}/vfs/devtmpfs/*.rs
+    # kernel/dev/{dev,cdev,blkdev}.rs (Phase 2 Wave 21 — dev/dev.c +
+    # cdev.c + blkdev.c) + kernel/dev/bio.rs (Phase 2 Wave 22 —
+    # dev/bio.c, the Linux-style bio request object; not to be confused
+    # with kernel/bufcache.rs below). Retroactively added here (Wave 21
+    # omitted it from this glob by oversight — cargo itself always
+    # compiles the true `mod`-declared source tree regardless of this
+    # list, which only drives CMake's rebuild-on-change tracking for the
+    # custom `cargo build` command below).
+    ${RUST_CRATE_DIR}/dev/*.rs
+    # kernel/bufcache.rs (Phase 2 Wave 22 — kernel/bio.c, the classic xv6
+    # struct buf disk-block cache; see that file's module doc for why
+    # it isn't named bio.rs).
+    ${RUST_CRATE_DIR}/bufcache.rs)
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
@@ -1129,6 +1147,37 @@ set(RUST_FORCE_UNDEFINED
     --undefined=blkdev_register
     --undefined=blkdev_unregister
     --undefined=blkdev_submit_bio
+    # dev/bio.c port (Phase 2 Wave 22) -- the Linux-style ref-counted
+    # block-I/O request object (kernel/dev/bio.rs). Declared `extern` in
+    # the still-live, unchanged `kernel/inc/dev/bio.h` and called from
+    # `kernel/dev/blkdev.rs` (bio_validate), `kernel/bufcache.rs`
+    # (bio_alloc/bio_add_seg/bio_release), and still-C drivers
+    # (virtio_disk.c, ramdisk.c, x1_sdhci.c) -- forced per the plan's
+    # "every new public symbol" rule. `bio_dup` has no live caller today
+    # (forced anyway, same precedent as `devtmpfs_populate_devices`
+    # above -- it is part of the header's public contract).
+    --undefined=bio_alloc
+    --undefined=bio_add_seg
+    --undefined=bio_dup
+    --undefined=bio_release
+    --undefined=bio_validate
+    # bio.c port (Phase 2 Wave 22) -- the classic xv6 struct buf
+    # disk-block cache (kernel/bufcache.rs; not kernel/dev/bio.rs above
+    # -- see that file's module doc). Declared `extern` in the
+    # still-live, unchanged `kernel/inc/defs.h` and called from
+    # `kernel/vfs/xv6fs/*.rs` (bread/brelse/bwrite/bwrite_async/bsync/
+    # bpin/bunpin) and `kernel/start_kernel.c` (binit) -- forced per the
+    # plan's "every new public symbol" rule. `bdirty_count` has no live
+    # caller today (forced anyway, same precedent as `bio_dup` above).
+    --undefined=binit
+    --undefined=bread
+    --undefined=bwrite
+    --undefined=bwrite_async
+    --undefined=bsync
+    --undefined=bdirty_count
+    --undefined=brelse
+    --undefined=bpin
+    --undefined=bunpin
 )
 
 # ==============================================================================

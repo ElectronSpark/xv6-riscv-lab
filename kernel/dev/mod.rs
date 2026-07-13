@@ -19,10 +19,18 @@
 //! 2. `device_register()` silently discarded `devtmpfs_create_node()`'s
 //!    return value.
 //!
-//! The rest of `kernel/dev/` (bio.c, fdt.c, netdev.c, nullrand.c, the
+//! `kernel/dev/bio.c` -> [`bio`] (Phase 2 Wave 22, see
+//! `docs/rustify/phase2_plan.md`): the Linux-style ref-counted block-I/O
+//! request object (`struct bio` + `bio_vec` segments). **Not the same
+//! layer** as `kernel/bio.c` -> `crate::bufcache` (the classic xv6
+//! `struct buf` disk-block cache) -- see [`bio`]'s module doc for the
+//! distinction.
+//!
+//! The rest of `kernel/dev/` (fdt.c, netdev.c, nullrand.c, the
 //! x1_*/yt8531 drivers, dev_test.c) remains C for now -- see
 //! `kernel/dev/CMakeLists.txt`.
 
 pub mod dev;
 pub mod cdev;
 pub mod blkdev;
+pub mod bio;

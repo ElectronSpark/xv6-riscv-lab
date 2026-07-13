@@ -24,7 +24,7 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 | machine / sync / ll / list | ✅ | — | Rust support layers |
 | tty | ✅ | — | termios/tty_dev/pty (W10), tty/ptmx (W11), session (W12); SIGINT ctrl-tty delivery FIXED (^C works now) |
 | vfs | ✅ | — | 100% Rust (W13-20: core, tmpfs, xv6fs root fs, devtmpfs); TIOCGPTN + tmpfs UAF + devtmpfs dentry-name leak fixed |
-| dev | 🟡 | bio.c, fdt.c, netdev.c, nullrand.c, x1_emac.c, x1_sdhci.c, yt8531.c, dev_test.c | dev.rs + cdev.rs + blkdev.rs (W21); /dev/tty minor-0 FIXED; devtmpfs failures now logged |
+| dev | 🟡 | fdt.c, netdev.c, nullrand.c, x1_emac.c, x1_sdhci.c, yt8531.c, dev_test.c | dev/cdev/blkdev (W21) + bio.rs + bufcache.rs (W22); /dev/tty fixed end-to-end (open + read + ^C) |
 | irq | ✅ | — (kernelvec.S, trampoline.S remain as assembly) | plic.rs + irq_core.rs (W5), trap.rs (W6), syscall.rs (W7) |
 | timer | ✅ | — | timer_core.rs + sched_timer.rs + goldfish_rtc.rs (Wave 8, 2026-07-12) |
 | ipi | ✅ | — | ipi.rs (Wave 9, 2026-07-12); cpus[] cpu_local storage kept link_section/page-aligned byte-identical |
@@ -759,10 +759,8 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 
 ## Known issues (pre-existing, not caused by the rewrite)
 
-- `cat /dev/tty` panics ("pid lock not held"): tty_dev.rs `ctrl_tty()`
-  calls session_get_ctrl_tty() without pid_wlock (contract violation,
-  IDENTICAL gap in the original C — unreachable until the minor-0 fix made
-  /dev/tty resolvable). One-line fix mandated in Wave 22.
+- ~~`cat /dev/tty` panics ("pid lock not held")~~ FIXED in Wave 22
+  (pid_wlock around session_get_ctrl_tty; cat blocks correctly, ^C works).
 
 - `usertests diskfull` hangs (never prints its `OK`/`FAILED` result).
   **Confirmed pre-existing**: reproduces identically on an unmodified C
