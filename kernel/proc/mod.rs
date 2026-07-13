@@ -25,6 +25,14 @@ mod pid;
 mod clone;
 mod exit;
 mod workqueue;
+// In-kernel runtime test suite for the real `workqueue` module (Phase 4,
+// docs/rustify/test_port_plan.md), re-homing the retired
+// `test/src/ut_workqueue_main.c` mock-only cmocka suite. Exposes a single
+// `#[no_mangle] extern "C"` launch entry point
+// (`workqueue_test_launch_tests`); only linked in, never called unless
+// `kernel/start_kernel.rs`'s `#[cfg(feature = "workqueue_test")]` gate is
+// enabled.
+mod workqueue_test;
 mod rq_test;
 mod thread_group;
 mod thread_queue;
@@ -43,6 +51,7 @@ pub use pid::*;
 pub use clone::*;
 pub use exit::*;
 pub use workqueue::*;
+pub use workqueue_test::*;
 pub use rq_test::*;
 pub use thread_group::*;
 pub use thread_queue::*;

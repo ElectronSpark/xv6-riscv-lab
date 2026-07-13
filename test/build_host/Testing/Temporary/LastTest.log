@@ -1,351 +1,76 @@
-Start testing: Jul 13 07:42 EDT
+Start testing: Jul 13 08:54 EDT
 ----------------------------------------------------------
-1/4 Testing: ut_list
-1/4 Test: ut_list
-Command: "/home/es/xv6/xv6-riscv/test/build_host/ut_list"
+4/7 Testing: qemu_rwsem
+4/7 Test: qemu_rwsem
+Command: "/home/es/xv6/xv6-riscv/scripts/run_qemu_test.sh" "/home/es/xv6/xv6-riscv/test/build_qemu_rwsem" "90" "\[rwsem\] tests finished" "\[rwsem\]\[T[0-9]+\].*FAIL" "--" "RWLOCK_TEST=1"
 Directory: /home/es/xv6/xv6-riscv/test/build_host
-"ut_list" start time: Jul 13 07:42 EDT
+"qemu_rwsem" start time: Jul 13 08:54 EDT
 Output:
 ----------------------------------------------------------
-[==========] Running 62 test(s).
-[ RUN      ] test_create_empty_list
-[       OK ] test_create_empty_list
-[ RUN      ] test_create_one_element_list
-[       OK ] test_create_one_element_list
-[ RUN      ] test_simple_create
-[       OK ] test_simple_create
-[ RUN      ] test_simple_create
-[       OK ] test_simple_create
-[ RUN      ] test_simple_create
-[       OK ] test_simple_create
-[ RUN      ] test_simple_create
-[       OK ] test_simple_create
-[ RUN      ] test_push_elements
-[       OK ] test_push_elements
-[ RUN      ] test_push_empty
-[       OK ] test_push_empty
-[ RUN      ] test_push_empty
-[       OK ] test_push_empty
-[ RUN      ] test_push_empty
-[       OK ] test_push_empty
-[ RUN      ] test_push_back_elements
-[       OK ] test_push_back_elements
-[ RUN      ] test_push_back_empty
-[       OK ] test_push_back_empty
-[ RUN      ] test_push_back_empty
-[       OK ] test_push_back_empty
-[ RUN      ] test_push_back_empty
-[       OK ] test_push_back_empty
-[ RUN      ] test_pop_elements
-[       OK ] test_pop_elements
-[ RUN      ] test_pop_empty
-[       OK ] test_pop_empty
-[ RUN      ] test_pop_1
-[       OK ] test_pop_1
-[ RUN      ] test_pop_2
-[       OK ] test_pop_2
-[ RUN      ] test_pop_3
-[       OK ] test_pop_3
-[ RUN      ] test_pop_back_elements
-[       OK ] test_pop_back_elements
-[ RUN      ] test_pop_back_empty
-[       OK ] test_pop_back_empty
-[ RUN      ] test_pop_back_1
-[       OK ] test_pop_back_1
-[ RUN      ] test_pop_back_2
-[       OK ] test_pop_back_2
-[ RUN      ] test_pop_back_3
-[       OK ] test_pop_back_3
-[ RUN      ] test_find_first_detach
-[       OK ] test_find_first_detach
-[ RUN      ] test_find_first_detach
-[       OK ] test_find_first_detach
-[ RUN      ] test_find_first_detach
-[       OK ] test_find_first_detach
-[ RUN      ] test_find_first_detach
-[       OK ] test_find_first_detach
-[ RUN      ] test_find_first_detach
-[       OK ] test_find_first_detach
-[ RUN      ] test_find_first_detach
-[       OK ] test_find_first_detach
-[ RUN      ] test_find_first_detach
-[       OK ] test_find_first_detach
-[ RUN      ] test_find_last_detach
-[       OK ] test_find_last_detach
-[ RUN      ] test_find_last_detach
-[       OK ] test_find_last_detach
-[ RUN      ] test_find_last_detach
-[       OK ] test_find_last_detach
-[ RUN      ] test_find_last_detach
-[       OK ] test_find_last_detach
-[ RUN      ] test_find_last_detach
-[       OK ] test_find_last_detach
-[ RUN      ] test_find_last_detach
-[       OK ] test_find_last_detach
-[ RUN      ] test_find_last_detach
-[       OK ] test_find_last_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_next_detach
-[       OK ] test_find_next_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[ RUN      ] test_find_prev_detach
-[       OK ] test_find_prev_detach
-[==========] 62 test(s) run.
-[  PASSED  ] 62 test(s).
+[run_qemu_test] build_dir=/home/es/xv6/xv6-riscv/test/build_qemu_rwsem TOOLPREFIX=/home/es/xv6/toolchain/build/bin/riscv64-unknown-elf- LAB=fs
+[run_qemu_test] PASS (log: /home/es/xv6/xv6-riscv/test/build_qemu_rwsem/qemu_test.log)
 <end of output>
-Test time =   0.00 sec
+Test time =  96.08 sec
 ----------------------------------------------------------
 Test Passed.
-"ut_list" end time: Jul 13 07:42 EDT
-"ut_list" time elapsed: 00:00:00
+"qemu_rwsem" end time: Jul 13 08:55 EDT
+"qemu_rwsem" time elapsed: 00:01:36
 ----------------------------------------------------------
 
-2/4 Testing: ut_bits
-2/4 Test: ut_bits
-Command: "/home/es/xv6/xv6-riscv/test/build_host/ut_bits"
+5/7 Testing: qemu_semaphore
+5/7 Test: qemu_semaphore
+Command: "/home/es/xv6/xv6-riscv/scripts/run_qemu_test.sh" "/home/es/xv6/xv6-riscv/test/build_qemu_semaphore" "90" "\[sem\] tests finished" "\[sem\]\[T[0-9]+\].*FAIL" "--" "SEMAPHORE_TEST=1"
 Directory: /home/es/xv6/xv6-riscv/test/build_host
-"ut_bits" start time: Jul 13 07:42 EDT
+"qemu_semaphore" start time: Jul 13 08:55 EDT
 Output:
 ----------------------------------------------------------
-[==========] Running 40 test(s).
-[ RUN      ] test_bits_ffs8_matches_naive
-[       OK ] test_bits_ffs8_matches_naive
-[ RUN      ] test_bits_ctz8_matches_naive
-[       OK ] test_bits_ctz8_matches_naive
-[ RUN      ] test_bits_clz8_matches_naive
-[       OK ] test_bits_clz8_matches_naive
-[ RUN      ] test_bits_popcount8_matches_naive
-[       OK ] test_bits_popcount8_matches_naive
-[ RUN      ] test_bits_ctzg_multiwidth
-[       OK ] test_bits_ctzg_multiwidth
-[ RUN      ] test_bits_clzg_multiwidth
-Testing value: 0x0000000000000001, expected: 63, got: 63
-Testing value: 0x0000000000000010, expected: 59, got: 59
-Testing value: 0x0000000000100000, expected: 43, got: 43
-Testing value: 0x0000000010000000, expected: 35, got: 35
-Testing value: 0x0000000f00000000, expected: 28, got: 28
-Testing value: 0x0f00000000000000, expected: 4, got: 4
-Testing value: 0x7fffffffffffffff, expected: 1, got: 1
-Testing value: 0x8000000000000000, expected: 0, got: 0
-[       OK ] test_bits_clzg_multiwidth
-[ RUN      ] test_bits_popcountg_multiwidth
-[       OK ] test_bits_popcountg_multiwidth
-[ RUN      ] test_bits_ffsg_matches_naive
-[       OK ] test_bits_ffsg_matches_naive
-[ RUN      ] test___bits_ctz_ptr_null
-[       OK ] test___bits_ctz_ptr_null
-[ RUN      ] test___bits_ctz_ptr_no_match
-[       OK ] test___bits_ctz_ptr_no_match
-[ RUN      ] test___bits_ctz_ptr_basic
-[       OK ] test___bits_ctz_ptr_basic
-[ RUN      ] test___bits_ctz_ptr_inverted
-[       OK ] test___bits_ctz_ptr_inverted
-[ RUN      ] test___bits_ctz_ptr_limit
-[       OK ] test___bits_ctz_ptr_limit
-[ RUN      ] test___bits_ctz_ptr_long_buffer
-[       OK ] test___bits_ctz_ptr_long_buffer
-[ RUN      ] test___bits_ctz_ptr_small_unaligned
-[       OK ] test___bits_ctz_ptr_small_unaligned
-[ RUN      ] test___bits_ctz_ptr_1byte_buffer
-[       OK ] test___bits_ctz_ptr_1byte_buffer
-[ RUN      ] test___bits_ctz_ptr_non_8byte_tail
-[       OK ] test___bits_ctz_ptr_non_8byte_tail
-[ RUN      ] test___bits_ctz_ptr_exact_8byte
-[       OK ] test___bits_ctz_ptr_exact_8byte
-[ RUN      ] test___bits_ctz_ptr_from_basic
-[       OK ] test___bits_ctz_ptr_from_basic
-[ RUN      ] test___bits_ctz_ptr_from_inv
-[       OK ] test___bits_ctz_ptr_from_inv
-[ RUN      ] test___bits_ctz_ptr_from_limit_clips_first_byte
-[       OK ] test___bits_ctz_ptr_from_limit_clips_first_byte
-[ RUN      ] test___bits_ctz_ptr_from_offset_multi_byte
-[       OK ] test___bits_ctz_ptr_from_offset_multi_byte
-[ RUN      ] test___bits_ctz_ptr_from_cross_chunk
-[       OK ] test___bits_ctz_ptr_from_cross_chunk
-[ RUN      ] test___bits_ctz_ptr_from_at_limit_boundary
-[       OK ] test___bits_ctz_ptr_from_at_limit_boundary
-[ RUN      ] test_bits_foreach_set_bit_zero
-[       OK ] test_bits_foreach_set_bit_zero
-[ RUN      ] test_bits_foreach_set_bit_all_ones
-[       OK ] test_bits_foreach_set_bit_all_ones
-[ RUN      ] test_bits_foreach_set_bit_single_lsb
-[       OK ] test_bits_foreach_set_bit_single_lsb
-[ RUN      ] test_bits_foreach_set_bit_single_msb
-[       OK ] test_bits_foreach_set_bit_single_msb
-[ RUN      ] test_bits_foreach_set_bit_single_middle
-[       OK ] test_bits_foreach_set_bit_single_middle
-[ RUN      ] test_bits_foreach_set_bit_alternating_01
-[       OK ] test_bits_foreach_set_bit_alternating_01
-[ RUN      ] test_bits_foreach_set_bit_alternating_10
-[       OK ] test_bits_foreach_set_bit_alternating_10
-[ RUN      ] test_bits_foreach_set_bit_sparse
-[       OK ] test_bits_foreach_set_bit_sparse
-[ RUN      ] test_bits_foreach_set_bit_dense_low_byte
-[       OK ] test_bits_foreach_set_bit_dense_low_byte
-[ RUN      ] test_bits_foreach_set_bit_dense_high_byte
-[       OK ] test_bits_foreach_set_bit_dense_high_byte
-[ RUN      ] test_bits_foreach_set_bit_boundary_32bit
-[       OK ] test_bits_foreach_set_bit_boundary_32bit
-[ RUN      ] test_bits_foreach_set_bit_powers_of_two
-[       OK ] test_bits_foreach_set_bit_powers_of_two
-[ RUN      ] test_bits_foreach_set_bit_two_extremes
-[       OK ] test_bits_foreach_set_bit_two_extremes
-[ RUN      ] test_bits_foreach_set_bit_consecutive_run
-[       OK ] test_bits_foreach_set_bit_consecutive_run
-[ RUN      ] test_bits_next_bit_set_no_more
-[       OK ] test_bits_next_bit_set_no_more
-[ RUN      ] test_bits_next_bit_set_zero
-[       OK ] test_bits_next_bit_set_zero
-[==========] 40 test(s) run.
-[  PASSED  ] 40 test(s).
+[run_qemu_test] build_dir=/home/es/xv6/xv6-riscv/test/build_qemu_semaphore TOOLPREFIX=/home/es/xv6/toolchain/build/bin/riscv64-unknown-elf- LAB=fs
+[run_qemu_test] PASS (log: /home/es/xv6/xv6-riscv/test/build_qemu_semaphore/qemu_test.log)
 <end of output>
-Test time =   0.00 sec
+Test time =  96.04 sec
 ----------------------------------------------------------
 Test Passed.
-"ut_bits" end time: Jul 13 07:42 EDT
-"ut_bits" time elapsed: 00:00:00
+"qemu_semaphore" end time: Jul 13 08:57 EDT
+"qemu_semaphore" time elapsed: 00:01:36
 ----------------------------------------------------------
 
-3/4 Testing: ut_workqueue
-3/4 Test: ut_workqueue
-Command: "/home/es/xv6/xv6-riscv/test/build_host/ut_workqueue"
+6/7 Testing: qemu_pcache
+6/7 Test: qemu_pcache
+Command: "/home/es/xv6/xv6-riscv/scripts/run_qemu_test.sh" "/home/es/xv6/xv6-riscv/test/build_qemu_pcache" "150" "PCACHE TESTS: [0-9]+/[0-9]+ PASSED" "PCACHE TESTS: [0-9]+/[0-9]+ FAILED" "--" "PCACHE_TEST=1"
 Directory: /home/es/xv6/xv6-riscv/test/build_host
-"ut_workqueue" start time: Jul 13 07:42 EDT
+"qemu_pcache" start time: Jul 13 08:57 EDT
 Output:
 ----------------------------------------------------------
-[==========] Running 5 test(s).
-[ RUN      ] test_create_with_callbacks_invokes_ctor
-[       OK ] test_create_with_callbacks_invokes_ctor
-[ RUN      ] test_kill_invokes_dtor_once
-[       OK ] test_kill_invokes_dtor_once
-[ RUN      ] test_init_and_create_work_struct_ex_fields
-[       OK ] test_init_and_create_work_struct_ex_fields
-[ RUN      ] test_queue_work_and_run_pending
-[       OK ] test_queue_work_and_run_pending
-[ RUN      ] test_queue_work_failure_injection
-[       OK ] test_queue_work_failure_injection
-[==========] 5 test(s) run.
-[  PASSED  ] 5 test(s).
+[run_qemu_test] build_dir=/home/es/xv6/xv6-riscv/test/build_qemu_pcache TOOLPREFIX=/home/es/xv6/toolchain/build/bin/riscv64-unknown-elf- LAB=fs
+[run_qemu_test] PASS (log: /home/es/xv6/xv6-riscv/test/build_qemu_pcache/qemu_test.log)
 <end of output>
-Test time =   0.00 sec
+Test time = 150.58 sec
 ----------------------------------------------------------
 Test Passed.
-"ut_workqueue" end time: Jul 13 07:42 EDT
-"ut_workqueue" time elapsed: 00:00:00
+"qemu_pcache" end time: Jul 13 08:59 EDT
+"qemu_pcache" time elapsed: 00:02:30
 ----------------------------------------------------------
 
-4/4 Testing: rust_host_unit_tests
-4/4 Test: rust_host_unit_tests
-Command: "/usr/bin/cargo" "test" "--target" "x86_64-unknown-linux-gnu"
-Directory: /home/es/xv6/xv6-riscv/test/../kernel
-"rust_host_unit_tests" start time: Jul 13 07:42 EDT
+7/7 Testing: qemu_workqueue
+7/7 Test: qemu_workqueue
+Command: "/home/es/xv6/xv6-riscv/scripts/run_qemu_test.sh" "/home/es/xv6/xv6-riscv/test/build_qemu_workqueue" "90" "WORKQUEUE TESTS: [0-9]+/[0-9]+ PASSED" "WORKQUEUE TESTS: [0-9]+/[0-9]+ FAILED" "--" "WORKQUEUE_TEST=1"
+Directory: /home/es/xv6/xv6-riscv/test/build_host
+"qemu_workqueue" start time: Jul 13 08:59 EDT
 Output:
 ----------------------------------------------------------
-warning: unused import: `core::ffi::c_void`
- --> list.rs:6:5
-  |
-6 | use core::ffi::c_void;
-  |     ^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
-warning: unused imports: `c_char` and `c_int`
-  --> mm/early_allocator.rs:21:17
-   |
-21 | use core::ffi::{c_char, c_int, c_void};
-   |                 ^^^^^^  ^^^^^
-
-warning: `xv6_rust` (lib test) generated 2 warnings (run `cargo fix --lib -p xv6_rust --tests` to apply 2 suggestions)
-    Finished `test` profile [optimized] target(s) in 0.01s
-     Running unittests lib.rs (../build/kernel/rust/x86_64-unknown-linux-gnu/debug/deps/xv6_rust-bab613305a02e3eb)
-
-running 35 tests
-test list::tests::iterator_visits_elements_in_link_order_head_next_to_head_prev ... ok
-test list::tests::iterator_over_empty_list_yields_nothing ... ok
-test machine::tests::host_mock_csr_writes_accept_any_value_and_are_noops ... ok
-test machine::tests::host_mock_intr_off_save_and_restore_do_not_panic ... ok
-test list::tests::container_of_style_offset_recovers_the_exact_payload ... ok
-test machine::tests::host_mock_intr_toggle_is_a_noop_and_intr_get_reports_off ... ok
-test list::tests::iterator_visits_the_single_element_in_a_one_item_list ... ok
-test list::tests::iterator_over_null_head_yields_nothing ... ok
-test list::tests::iterator_terminates_at_head_instead_of_looping_forever ... ok
-test machine::tests::host_mock_smp_mb_is_a_real_fence_and_does_not_panic ... ok
-test machine::tests::host_mock_wfi_and_cpu_relax_return_immediately ... ok
-test list::tests::list_for_each_macro_visits_every_element_exactly_once ... ok
-test machine::tests::host_mock_register_reads_return_the_documented_canned_zero ... ok
-test mm::bits::tests::build_functions_reproduce_the_exported_static_tables_exactly ... ok
-test mm::bits::tests::inverse_table_matches_naive_bit_reversal_for_every_byte_value ... ok
-test mm::bits::tests::popcount_table_matches_naive_popcount_for_every_byte_value ... ok
-test mm::bits::tests::leading_zeros_table_matches_naive_clz_for_every_byte_value ... ok
-test mm::bits::tests::trailing_zeros_table_matches_naive_ctz_for_every_byte_value ... ok
-test mm::bits::tests::zero_is_the_documented_sentinel_for_ctz_and_clz_tables ... ok
-test mm::early_allocator::tests::a_large_aligned_allocation_recycles_its_leading_gap_into_the_freelists ... ok
-test mm::early_allocator::tests::allocating_past_the_end_of_the_arena_panics - should panic ... ok
-test mm::early_allocator::tests::alloc_with_a_non_power_of_two_alignment_panics - should panic ... ok
-test mm::early_allocator::tests::allocation_sizes_round_up_to_the_next_power_of_two_chunk ... ok
-test mm::early_allocator::tests::allocations_after_freeing_a_gap_are_served_from_the_freelist_and_do_not_overlap ... ok
-test mm::early_allocator::tests::init_with_end_at_or_before_start_panics - should panic ... ok
-test mm::early_allocator::tests::small_allocations_are_self_aligned_and_do_not_overlap ... ok
-test mm::early_allocator::tests::small_allocations_ignore_the_caller_supplied_alignment_and_use_chunk_size_instead ... ok
-test mm::early_allocator::tests::one_hundred_mixed_size_allocations_all_stay_within_the_arena_and_are_aligned ... ok
-test mm::early_allocator::tests::freed_chunks_carry_the_documented_magic_number ... ok
-test mm::early_allocator::tests::init_aligns_current_and_records_the_full_range_with_empty_freelists ... ok
-test mm::early_allocator::tests::every_free_chunk_is_aligned_to_its_own_power_of_two_size ... ok
-test mm::early_allocator::tests::large_allocations_respect_the_caller_supplied_alignment ... ok
-test mm::early_allocator::tests::zero_size_allocation_returns_null_without_touching_the_freelists ... ok
-test mm::early_allocator::tests::the_current_pointer_advances_past_every_allocation_made_so_far ... ok
-test mm::early_allocator::tests::many_small_allocations_from_a_freed_region_are_all_unique_and_aligned ... ok
-
-test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-
+[run_qemu_test] build_dir=/home/es/xv6/xv6-riscv/test/build_qemu_workqueue TOOLPREFIX=/home/es/xv6/toolchain/build/bin/riscv64-unknown-elf- LAB=fs
+[run_qemu_test] PASS (log: /home/es/xv6/xv6-riscv/test/build_qemu_workqueue/qemu_test.log)
 <end of output>
-Test time =   0.05 sec
+Test time =  90.57 sec
 ----------------------------------------------------------
 Test Passed.
-"rust_host_unit_tests" end time: Jul 13 07:42 EDT
-"rust_host_unit_tests" time elapsed: 00:00:00
+"qemu_workqueue" end time: Jul 13 09:01 EDT
+"qemu_workqueue" time elapsed: 00:01:30
 ----------------------------------------------------------
 
-End testing: Jul 13 07:42 EDT
+End testing: Jul 13 09:01 EDT
+
+qemu = 433.27 sec*proc
+
+slow = 433.27 sec*proc
+

@@ -270,19 +270,6 @@ ut_bits/fast:
 .PHONY : ut_bits/fast
 
 #=============================================================================
-# Target rules for targets named ut_workqueue
-
-# Build rule for target.
-ut_workqueue: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 ut_workqueue
-.PHONY : ut_workqueue
-
-# fast build rule for target.
-ut_workqueue/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ut_workqueue.dir/build.make CMakeFiles/ut_workqueue.dir/build
-.PHONY : ut_workqueue/fast
-
-#=============================================================================
 # Target rules for targets named Experimental
 
 # Build rule for target.
@@ -770,54 +757,6 @@ src/ut_list_main.c.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/ut_list.dir/build.make CMakeFiles/ut_list.dir/src/ut_list_main.c.s
 .PHONY : src/ut_list_main.c.s
 
-src/ut_workqueue_main.o: src/ut_workqueue_main.c.o
-.PHONY : src/ut_workqueue_main.o
-
-# target to build an object file
-src/ut_workqueue_main.c.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ut_workqueue.dir/build.make CMakeFiles/ut_workqueue.dir/src/ut_workqueue_main.c.o
-.PHONY : src/ut_workqueue_main.c.o
-
-src/ut_workqueue_main.i: src/ut_workqueue_main.c.i
-.PHONY : src/ut_workqueue_main.i
-
-# target to preprocess a source file
-src/ut_workqueue_main.c.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ut_workqueue.dir/build.make CMakeFiles/ut_workqueue.dir/src/ut_workqueue_main.c.i
-.PHONY : src/ut_workqueue_main.c.i
-
-src/ut_workqueue_main.s: src/ut_workqueue_main.c.s
-.PHONY : src/ut_workqueue_main.s
-
-# target to generate assembly for a file
-src/ut_workqueue_main.c.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ut_workqueue.dir/build.make CMakeFiles/ut_workqueue.dir/src/ut_workqueue_main.c.s
-.PHONY : src/ut_workqueue_main.c.s
-
-src/wrappers/workqueue_wrappers.o: src/wrappers/workqueue_wrappers.c.o
-.PHONY : src/wrappers/workqueue_wrappers.o
-
-# target to build an object file
-src/wrappers/workqueue_wrappers.c.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ut_workqueue.dir/build.make CMakeFiles/ut_workqueue.dir/src/wrappers/workqueue_wrappers.c.o
-.PHONY : src/wrappers/workqueue_wrappers.c.o
-
-src/wrappers/workqueue_wrappers.i: src/wrappers/workqueue_wrappers.c.i
-.PHONY : src/wrappers/workqueue_wrappers.i
-
-# target to preprocess a source file
-src/wrappers/workqueue_wrappers.c.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ut_workqueue.dir/build.make CMakeFiles/ut_workqueue.dir/src/wrappers/workqueue_wrappers.c.i
-.PHONY : src/wrappers/workqueue_wrappers.c.i
-
-src/wrappers/workqueue_wrappers.s: src/wrappers/workqueue_wrappers.c.s
-.PHONY : src/wrappers/workqueue_wrappers.s
-
-# target to generate assembly for a file
-src/wrappers/workqueue_wrappers.c.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/ut_workqueue.dir/build.make CMakeFiles/ut_workqueue.dir/src/wrappers/workqueue_wrappers.c.s
-.PHONY : src/wrappers/workqueue_wrappers.c.s
-
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -871,7 +810,6 @@ help:
 	@echo "... list_test"
 	@echo "... ut_bits"
 	@echo "... ut_list"
-	@echo "... ut_workqueue"
 	@echo "... src/list_test.o"
 	@echo "... src/list_test.i"
 	@echo "... src/list_test.s"
@@ -881,12 +819,6 @@ help:
 	@echo "... src/ut_list_main.o"
 	@echo "... src/ut_list_main.i"
 	@echo "... src/ut_list_main.s"
-	@echo "... src/ut_workqueue_main.o"
-	@echo "... src/ut_workqueue_main.i"
-	@echo "... src/ut_workqueue_main.s"
-	@echo "... src/wrappers/workqueue_wrappers.o"
-	@echo "... src/wrappers/workqueue_wrappers.i"
-	@echo "... src/wrappers/workqueue_wrappers.s"
 .PHONY : help
 
 

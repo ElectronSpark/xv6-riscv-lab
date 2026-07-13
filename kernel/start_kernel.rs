@@ -252,6 +252,11 @@ unsafe extern "C" {
     fn semaphore_launch_tests();
     // proc/workqueue.rs — same story.
     fn workqueue_runtime_smoke_test();
+    // mm/pcache_test.rs (Phase 4) — same story: always linked in, gated
+    // call site only.
+    fn pcache_launch_tests();
+    // proc/workqueue_test.rs (Phase 4) — same story.
+    fn workqueue_test_launch_tests();
 
     // entry.S — `_entry` label; address taken below for
     // `sbi_start_secondary_harts`, never called directly from Rust.
@@ -478,6 +483,17 @@ pub extern "C" fn start_kernel_post_init() {
         semaphore_launch_tests();
     }
 
+    // Phase 4 (docs/rustify/test_port_plan.md) in-kernel suite:
+    // mm/pcache_test.rs. Same Wave-27 mechanism as the two gates above --
+    // `pcache_global_init()` has already run (see above), so the real
+    // pcache subsystem is up before this launches.
+    #[cfg(feature = "pcache_test")]
+    // SAFETY: single call, thread context, same point in boot order as the
+    // rwlock_test/semaphore_test gates above.
+    unsafe {
+        pcache_launch_tests();
+    }
+
     // Release secondary harts to proceed with their initialization
     // SAFETY: `printf` is safe to call from thread context.
     unsafe {
@@ -506,6 +522,17 @@ pub extern "C" fn start_kernel_post_init() {
     // SAFETY: single call, thread context.
     unsafe {
         workqueue_runtime_smoke_test();
+    }
+
+    // Phase 4 (docs/rustify/test_port_plan.md) in-kernel suite:
+    // proc/workqueue_test.rs. Same Wave-27 mechanism, an independent gate
+    // from `workqueue_smoke_test` above (see that module's doc). Placed
+    // after the secondary-hart release (like `workqueue_smoke_test`) so
+    // its multi-worker concurrency cases can actually use both harts.
+    #[cfg(feature = "workqueue_test")]
+    // SAFETY: single call, thread context.
+    unsafe {
+        workqueue_test_launch_tests();
     }
 
     // RCU processing is now done per-CPU in idle loops

@@ -299,18 +299,16 @@ target_include_directories(ut_bits PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 # (kernel/mm/early_allocator.rs). To be replaced by host-side cargo tests
 # per docs/rustify/test_port_plan.md.
 
-add_executable(ut_workqueue
-    ${CMAKE_SOURCE_DIR}/src/ut_workqueue_main.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/workqueue_wrappers.c
-)
-target_link_libraries(ut_workqueue PRIVATE cmocka-static)
-target_compile_options(ut_workqueue PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_workqueue PRIVATE ${ASAN_LINK_FLAGS}
-    -Wl,--wrap=workqueue_create,--wrap=workqueue_create_with_callbacks,--wrap=workqueue_kill,--wrap=queue_work
-    -Wl,--wrap=init_work_struct,--wrap=init_work_struct_flags,--wrap=init_work_struct_ex
-    -Wl,--wrap=create_work_struct,--wrap=create_work_struct_flags,--wrap=create_work_struct_ex,--wrap=free_work_struct
-)
-target_include_directories(ut_workqueue PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+# ut_workqueue RETIRED (2026-07-13, docs/rustify/test_port_plan.md Phase 4):
+# it never tested the real `kernel/proc/workqueue.c`/`workqueue.rs` at all
+# -- every entry point it linked against was `--wrap`'d to a host mock (see
+# the `-Wl,--wrap=...` list this target used to pass, and
+# src/wrappers/workqueue_wrappers.c), so this suite validated its own mock,
+# not the kernel. Re-homed as kernel/proc/workqueue_test.rs, a genuine
+# in-kernel Rust runtime suite driving the real implementation's real
+# manager/worker kthreads (wired below as the `qemu_workqueue` ctest via
+# test/cmake/QemuTests.cmake, WORKQUEUE_TEST=1). Original target/source in
+# git history (test/src/ut_workqueue_main.c still present on disk, unused).
 
 enable_testing()
 # ut_mock_test disabled - ut_page needs API updates
@@ -333,10 +331,9 @@ add_test(NAME ut_bits
 # add_test ut_pcache removed (target disabled/retired 2026-07-11)
 # add_test ut_tmpfs_truncate removed (target disabled/retired 2026-07-12)
 # add_test ut_early_allocator removed (target disabled/retired 2026-07-11)
-add_test(NAME ut_workqueue
-    COMMAND ut_workqueue
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
+# add_test ut_workqueue removed (target retired 2026-07-13, see the
+# add_executable comment above -- superseded by the qemu_workqueue ctest
+# below, which drives the real implementation instead of a mock of it).
 
 # ------------------------------------------------------------------------------
 # Rust host-test suite (docs/rustify/test_port_plan.md Phase 1/2 -- the
@@ -378,3 +375,13 @@ if(CARGO_EXECUTABLE_FOR_RUST_TESTS)
 else()
     message(STATUS "cargo not found -- rust_host_unit_tests ctest entry skipped")
 endif()
+
+# ------------------------------------------------------------------------------
+# QEMU-driven ctest entries for the in-kernel Rust runtime test suites
+# (docs/rustify/test_port_plan.md Phase 3/4: rwsem/semaphore -- pre-existing
+# suites now with QEMU ctest wiring for the first time -- and the two new
+# suites, pcache/workqueue). See test/cmake/QemuTests.cmake for the full
+# design (isolated per-suite build dirs, RESOURCE_LOCK serialization,
+# scripts/run_qemu_test.sh harness).
+# ------------------------------------------------------------------------------
+include(cmake/QemuTests.cmake)

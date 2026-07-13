@@ -37,3 +37,5 @@ CMakeFiles/
 # Doxygen generated documentation
 docs/
 *.doxyfile.bak
+test/build_qemu_*/
+

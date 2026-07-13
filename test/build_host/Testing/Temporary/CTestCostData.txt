@@ -1,5 +1,9 @@
-ut_list 2 0.00238988
-ut_bits 2 0.00202877
-ut_workqueue 2 0.00171663
-rust_host_unit_tests 3 0.0161054
+ut_list 4 0.00127905
+ut_bits 4 0.00115236
+ut_workqueue 3 0.00153486
+rust_host_unit_tests 5 0.0155925
+qemu_rwsem 1 96.081
+qemu_semaphore 1 96.0396
+qemu_pcache 1 150.58
+qemu_workqueue 1 90.5716
 ---

@@ -31,7 +31,7 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 | core / misc | ✅ | printf_shim.c ONLY (46 lines: variadic `printf()` C entry — `c_variadic` unavailable on stable rustc; documented remnant until stabilization) | string/sbi (W2), start (W3), uart/console/printf (W4), backtrace (W5), exec (W26), start_kernel (W27) |
 | block/net drivers | ✅ | — | bio+bufcache (W22), virtio_disk + ramdisk + pci + e1000 + net + sysnet (W28, final wave); virtqueue barriers 7/7, e1000 fences 8/8 exact |
 | data structures | ✅ | — | bintree.rs, rbtree.rs, hlist.rs, kobject.rs (Wave 1, 2026-07-11); list.rs pre-existing |
-| host tests (`test/`) | ⬜ | cmocka suites | port to Rust (cargo test or equivalent harness) |
+| host tests (`test/`) | ✅ | 3 cmocka suites remain BY DESIGN (ut_list/ut_bits/ut_tmpfs_truncate test still-C header layers) | 35 host cargo tests (bits/list/early_allocator) + 4 QEMU ctest in-kernel suites (rwsem, semaphore, pcache 30 cases, workqueue 7 cases); plan CLOSED |
 
 ## Iteration log
 
@@ -865,6 +865,45 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   ramdisk boot lines byte-identical, stressfs), bigfile 65k-block
   virtqueue exercise, second-disk mount, testsig 21/21, mmaptest,
   usertests -q baseline (through forkfork → documented forkforkfork stop).
+
+### Iteration 39 — 2026-07-13 — test port complete → GOAL ITEMS CLOSED
+
+- Host-test seam (cfg-gated machine.rs mocks, no_std test-gating, bindgen
+  reuse) + 35 cargo tests: bits 6, list 8, early_allocator 16 (all 13 C
+  cases + 3 should_panic guard rails). ctest `rust_host_unit_tests`.
+- QEMU ctest harness (scripts/run_qemu_test.sh + test/cmake/QemuTests.cmake):
+  isolated per-suite build dirs, env self-set + cache double-checks
+  (poisoning lessons institutionalized), RUN_SERIAL + RESOURCE_LOCK
+  (single-VM rule enforced in CI). 4 suites green: qemu_rwsem,
+  qemu_semaphore, qemu_pcache (30 cases: 23 ported, 7 dropped with
+  reasons, 2 added; real flush-retry behavior discovered + asserted),
+  qemu_workqueue (7 NEW cases — the retired C suite only tested a mock).
+- test_port_plan.md marked CLOSED; ~2GB of on-demand test build dirs
+  cleaned + gitignored.
+- Zero test leakage into normal boots (grep-verified).
+
+## Status vs the goal (2026-07-13)
+
+- ✅ Kernel rewritten in Rust — every module row done; sole C remnant is
+  the documented 46-line printf_shim.c (variadic entry; awaits stable
+  c_variadic). Assembly (entry/trampoline/kernelvec/swtch/sig_trampoline)
+  bridged from Rust as designed.
+- ✅ Idiomatic standards enforced (rust-skills governance + crate-wide
+  audits + corrective packages; RAII/newtypes/scoped-unsafe/Result
+  boundaries throughout; ~zero-warning builds).
+- ✅ cmocka tests ported (35 host cargo tests + 4 in-kernel QEMU suites;
+  3 cmocka suites intentionally retained for still-C header layers).
+- ✅ CMake build system maintained + hardened (BUILD_TYPE forced empty,
+  LINK_DEPENDS/staleness fixes, feature-gate wiring, ctest integration).
+- ✅ Single VM, -smp 2 (pinned in cmake + enforced via ctest locks).
+- ✅ LAB ignored (legacy default kept working; dead LAB=net block removed).
+- ✅ Artifact hygiene (single image set; test build dirs on-demand).
+- ✅ Progress recorded (this file, 39 iterations + plans/audits in
+  docs/rustify/).
+- Remaining backlog = Known issues below (pre-existing bugs discovered
+  and documented during the rewrite, each with attribution evidence) +
+  deferred polish (clippy ptr-deref lint sweep, doc-only SAFETY pattern
+  backfill, lock/*.rs u! consolidation, rb tie-group hardening).
 
 ## Known issues (pre-existing, not caused by the rewrite)
 

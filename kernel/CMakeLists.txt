@@ -284,6 +284,18 @@ if(DEFINED ENV{WORKQUEUE_RUNTIME_SMOKE_TEST})
     message(STATUS "WORKQUEUE_RUNTIME_SMOKE_TEST enabled")
     list(APPEND RUST_TEST_FEATURES "workqueue_smoke_test")
 endif()
+# Phase 4 (docs/rustify/test_port_plan.md) in-kernel test suites:
+# kernel/mm/pcache_test.rs + kernel/proc/workqueue_test.rs. Same mechanism,
+# new independent env vars/features -- additive to (not a replacement for)
+# the three gates above.
+if(DEFINED ENV{PCACHE_TEST})
+    message(STATUS "PCACHE_TEST enabled")
+    list(APPEND RUST_TEST_FEATURES "pcache_test")
+endif()
+if(DEFINED ENV{WORKQUEUE_TEST})
+    message(STATUS "WORKQUEUE_TEST enabled")
+    list(APPEND RUST_TEST_FEATURES "workqueue_test")
+endif()
 list(JOIN RUST_TEST_FEATURES "," RUST_TEST_FEATURES_STR)
 
 # CMake's `Unix Makefiles` generator (this project's generator) does not

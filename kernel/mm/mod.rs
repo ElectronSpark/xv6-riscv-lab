@@ -19,6 +19,15 @@ mod vm_pgtab;
 mod vm;
 pub mod mm_safe;
 
+// In-kernel runtime test suite, ported from the retired
+// `test/src/ut_pcache_main.c` cmocka suite (Phase 4,
+// docs/rustify/test_port_plan.md). Exposes a single
+// `#[no_mangle] extern "C"` launch entry point (`pcache_launch_tests`),
+// same pattern as `lock/{semaphore,rwsem}_test.rs`; only linked-in code,
+// never called unless `kernel/start_kernel.rs`'s
+// `#[cfg(feature = "pcache_test")]` gate is enabled.
+pub mod pcache_test;
+
 // Re-export the C-ABI exports so the crate root can flatten them.
 pub use bits::*;
 pub use page::*;

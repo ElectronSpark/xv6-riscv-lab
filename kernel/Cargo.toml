@@ -24,6 +24,16 @@ path = "lib.rs"
 rwlock_test = []
 semaphore_test = []
 workqueue_smoke_test = []
+# Phase 4 (docs/rustify/test_port_plan.md) in-kernel test suites, wired the
+# same way as the three features above: `ENV{PCACHE_TEST}` /
+# `ENV{WORKQUEUE_TEST}` at `cmake` configure time (see
+# `RUST_TEST_FEATURES` in kernel/CMakeLists.txt) select these, gating the
+# `pcache_launch_tests()` / `workqueue_test_launch_tests()` call sites in
+# `kernel/start_kernel.rs`. Deliberately independent, additive gates —
+# `workqueue_smoke_test` above is a separate, pre-existing (empty-stub)
+# gate this task leaves untouched.
+pcache_test = []
+workqueue_test = []
 
 [build-dependencies]
 bindgen = "0.72"
