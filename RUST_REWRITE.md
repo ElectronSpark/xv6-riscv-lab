@@ -23,7 +23,7 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 | proc | ✅ | — (swtch.S, sig_trampoline.S remain as assembly) | 100% Rust; C bridge/shims eliminated 2026-07-11 |
 | machine / sync / ll / list | ✅ | — | Rust support layers |
 | tty | ✅ | — | termios/tty_dev/pty (W10), tty/ptmx (W11), session (W12); SIGINT ctrl-tty delivery FIXED (^C works now) |
-| vfs | 🟡 | devtmpfs/ only | vfs core (W13-17) + tmpfs (W18) + xv6fs (W19, root filesystem) Rust; TIOCGPTN fixed; tmpfs rename use-after-free fixed |
+| vfs | ✅ | — | 100% Rust (W13-20: core, tmpfs, xv6fs root fs, devtmpfs); TIOCGPTN + tmpfs UAF + devtmpfs dentry-name leak fixed |
 | dev | ⬜ | dev.c, cdev.c, blkdev.c, bio.c, fdt.c, netdev.c, nullrand.c, x1_emac.c, x1_sdhci.c, yt8531.c | |
 | irq | ✅ | — (kernelvec.S, trampoline.S remain as assembly) | plic.rs + irq_core.rs (W5), trap.rs (W6), syscall.rs (W7) |
 | timer | ✅ | — | timer_core.rs + sched_timer.rs + goldfish_rtc.rs (Wave 8, 2026-07-12) |
@@ -726,6 +726,22 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   confirmed pre-existing deadlock somewhere in the disk-full handling
   path, unrelated to this port. Not fixed (out of scope: reproducible in
   code this wave never touched). See Known issues below.
+
+### Iteration 32 — 2026-07-13 — Wave 20: devtmpfs → vfs tree 100% Rust
+
+- devtmpfs/superblock.rs (927 lines): registry (spinlock + intrusive
+  list), tmpfs-delegating vtables, create/remove_node keeping exact ABI +
+  swallow-failures semantics for the pending Wave-21 dev.c fix.
+  devtmpfs_private.h deleted; public devtmpfs.h untouched (dev.c consumer).
+- Fixed: dentry-name strndup leak in __devtmpfs_walk_parent's ilookup-hit
+  branch. Flagged 1:1-preserved quirk: the registry-populate path's raw
+  get_inode vtable dispatch always -ENOENT under tmpfs (existing-dir
+  branch dead) — isolated to pts/N-style populate, normal mknod unaffected.
+- vfs aggregate OBJECT library + kernel/vfs/CMakeLists.txt removed — no C
+  remains anywhere under kernel/vfs/.
+- Verified: zero-warning build ×2, boot gate ×6 (+1 orchestrator audit),
+  ls /dev 9 nodes + types baseline-identical, mknod/mkdir round-trips,
+  usertests baseline, mmaptest 16/16, testsig 21/21, stressfs.
 
 ## Known issues (pre-existing, not caused by the rewrite)
 

@@ -150,17 +150,17 @@ file(GLOB_RECURSE RUST_CRATE_SOURCES
     # vfs/pipe.c), kernel/vfs/fdtable.rs (Phase 2 Wave 15 —
     # vfs/fdtable.c), kernel/vfs/fs.rs (Phase 2 Wave 16 — vfs/fs.c), and
     # kernel/vfs/vfs_syscall.rs (Phase 2 Wave 17 — vfs/vfs_syscall.c).
-    # The rest of kernel/vfs/ (xv6fs/, devtmpfs/) remains C for now —
-    # see kernel/vfs/CMakeLists.txt and kernel/vfs/mod.rs — so unlike
-    # lock/timer/ipi/tty/proc this glob does NOT replace a subdirectory's
-    # whole C source list, only these entries.
     ${RUST_CRATE_DIR}/vfs/*.rs
     # kernel/vfs/tmpfs/{superblock,inode,truncate,file}.rs (Phase 2 Wave
     # 18 — vfs/tmpfs/*.c, the first filesystem *driver*, as opposed to
     # vfs core, to move to Rust). kernel/vfs/tmpfs/ has no C sources left
     # (tmpfs_smoketest.c/.h deleted outright, dead code); its
-    # tmpfs_private.h header stays (kernel/vfs/devtmpfs/superblock.c,
-    # still C, includes it directly).
+    # tmpfs_private.h header stays — not because any C file still
+    # includes it (kernel/vfs/devtmpfs/superblock.c, its original reason
+    # for staying, was itself ported to Rust in Wave 20), but because
+    # kernel/vfs/tmpfs/*.rs's own bindgen layouts (struct tmpfs_inode /
+    # tmpfs_superblock / tmpfs_sb_private / tmpfs_dentry) still need it;
+    # see wrapper.h's own comment.
     ${RUST_CRATE_DIR}/vfs/tmpfs/*.rs
     # kernel/vfs/xv6fs/{superblock,inode,truncate,file,log,block_cache}.rs
     # (Phase 2 Wave 19 — the root filesystem, ported in two sub-waves:
@@ -174,7 +174,20 @@ file(GLOB_RECURSE RUST_CRATE_SOURCES
     # code, same precedent as Wave 18's tmpfs_smoketest.c); its
     # xv6fs_private.h/block_cache.h headers stay (kernel/wrapper.h
     # includes them directly for bindgen; see wrapper.h's own comment).
-    ${RUST_CRATE_DIR}/vfs/xv6fs/*.rs)
+    ${RUST_CRATE_DIR}/vfs/xv6fs/*.rs
+    # kernel/vfs/devtmpfs/superblock.rs (Phase 2 Wave 20 —
+    # vfs/devtmpfs/superblock.c, the last C file in kernel/vfs/). Reuses
+    # tmpfs's inode/dentry infrastructure via the tmpfs_private.h C-ABI
+    # contract kept alive since Wave 18 specifically for this wave (see
+    # kernel/vfs/devtmpfs/superblock.rs's module doc). kernel/vfs/
+    # devtmpfs/ has no C sources left (devtmpfs_private.h, its own
+    # private header, deleted outright — its sole consumer was
+    # superblock.c; the *public* kernel/inc/devtmpfs.h stays unchanged,
+    # kernel/dev/dev.c, still C — Wave 21, includes it directly). With
+    # this wave, kernel/vfs/ as a whole has no C sources left at any
+    # level — there is no more kernel/vfs/CMakeLists.txt / `vfs` OBJECT
+    # library (same precedent as lock/, timer/, ipi/, tty/, proc/).
+    ${RUST_CRATE_DIR}/vfs/devtmpfs/*.rs)
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
@@ -255,10 +268,17 @@ add_subdirectory(${KERNEL_DIR}/inc)
 # staticlib above) and never had any assembly sources, so there is no
 # add_subdirectory(${KERNEL_DIR}/tty) / OBJECT library for it (same
 # precedent as lock/, timer/, ipi/, proc/).
+# NOTE: kernel/vfs has no C sources anymore either, at any level (fully
+# ported to Rust: vfs core in Phase 2 Waves 13-17, tmpfs/ in Wave 18,
+# xv6fs/ in Wave 19, devtmpfs/ in Wave 20 — the last C file in the whole
+# vfs tree; see kernel/vfs/*.rs and kernel/vfs/{tmpfs,xv6fs,devtmpfs}/*.rs,
+# linked in via the xv6_rust staticlib above) and never had any assembly
+# sources, so there is no add_subdirectory(${KERNEL_DIR}/vfs) / OBJECT
+# library for it, and no kernel/vfs/CMakeLists.txt (same precedent as
+# lock/, timer/, ipi/, tty/, proc/).
 add_subdirectory(${KERNEL_DIR}/irq)
 add_subdirectory(${KERNEL_DIR}/dev)
 add_subdirectory(${KERNEL_DIR}/proc)
-add_subdirectory(${KERNEL_DIR}/vfs)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
@@ -267,18 +287,16 @@ set_source_files_properties(${KERNEL_S_FILES} PROPERTIES LANGUAGE C)
 set(KERNEL_OBJS ${KERNEL_S_FILES} ${KERNEL_C_FILES} ${KERNEL_SCAN_OBJS})
 
 # Object libraries to link
-# NOTE: vfs_tmpfs is gone (Phase 2 Wave 18 — kernel/vfs/tmpfs/ has no C
-# sources left; see kernel/vfs/CMakeLists.txt). vfs_xv6fs is gone too
-# (Phase 2 Wave 19 — kernel/vfs/xv6fs/ has no C sources left either; see
-# kernel/vfs/CMakeLists.txt).
+# NOTE: vfs_tmpfs is gone (Phase 2 Wave 18), vfs_xv6fs is gone (Phase 2
+# Wave 19), and vfs_devtmpfs is gone too (Phase 2 Wave 20 — kernel/vfs/
+# has no C sources left anywhere; see the add_subdirectory NOTE above).
 set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:irq>
     $<TARGET_OBJECTS:dev>
     $<TARGET_OBJECTS:proc>
-    $<TARGET_OBJECTS:vfs_devtmpfs>
 )
 
-set(KERNEL_LINK_LIBS irq dev proc vfs)
+set(KERNEL_LINK_LIBS irq dev proc)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding ")
 
@@ -1064,6 +1082,22 @@ set(RUST_FORCE_UNDEFINED
     --undefined=xv6fs_bcache_find_free_block
     --undefined=xv6fs_bcache_find_free_block_near
     --undefined=xv6fs_bcache_free_count
+    # vfs/devtmpfs/superblock.c port (Phase 2 Wave 20) -- the last C file
+    # in kernel/vfs/. `devtmpfs_init`/`devtmpfs_post_mount_populate` are
+    # called from `vfs/fs.rs`'s `vfs_init()` (real demand already);
+    # `devtmpfs_create_node`/`devtmpfs_remove_node`/
+    # `devtmpfs_populate_devices` are declared `extern` in the still-C
+    # `kernel/inc/devtmpfs.h` (`devtmpfs_create_node`/`_remove_node` are
+    # called from `kernel/dev/dev.c`, still C -- Wave 21;
+    # `devtmpfs_populate_devices` only self-called today but forced
+    # anyway per the plan's "every new public symbol declared in a
+    # still-live header" rule, same precedent as tmpfs's/xv6fs's own
+    # force-list entries above).
+    --undefined=devtmpfs_init
+    --undefined=devtmpfs_post_mount_populate
+    --undefined=devtmpfs_create_node
+    --undefined=devtmpfs_remove_node
+    --undefined=devtmpfs_populate_devices
 )
 
 # ==============================================================================

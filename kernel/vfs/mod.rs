@@ -18,12 +18,18 @@
 //! *driver* (as opposed to vfs core) to move to Rust -- see that
 //! module's own doc comment for the sub-wave breakdown.
 //!
-//! The rest of `kernel/vfs/` (`xv6fs/`, `devtmpfs/`) remains C for now
-//! (Waves 19-20; see `kernel/vfs/CMakeLists.txt`), so those filesystem
-//! drivers are compiled and linked together into the same `vfs` object
-//! library, exactly like `kernel/dev/` during its own partial-port
-//! period.
+//! `vfs/xv6fs/*.c` -> [`xv6fs`] (Phase 2 Wave 19): the root filesystem.
+//!
+//! `vfs/devtmpfs/superblock.c` -> [`devtmpfs`] (Phase 2 Wave 20): the
+//! `/dev` device-node filesystem, reusing `tmpfs`'s inode/dentry
+//! infrastructure via the `tmpfs_private.h` C-ABI contract (see
+//! `devtmpfs::superblock`'s module doc). This was the **last C file in
+//! `kernel/vfs/`** -- as of this wave, the entire vfs tree (core, tmpfs,
+//! xv6fs, devtmpfs) is 100% Rust; there is no more `kernel/vfs/
+//! CMakeLists.txt` / `vfs` OBJECT library (same precedent as lock/,
+//! timer/, ipi/, tty/, proc/).
 
+pub mod devtmpfs;
 pub mod fdtable;
 pub mod file;
 pub mod fs;

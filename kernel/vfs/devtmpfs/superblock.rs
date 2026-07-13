@@ -1,0 +1,927 @@
+//! devtmpfs filesystem type and superblock operations — Rust port of
+//! `kernel/vfs/devtmpfs/superblock.c` (Phase 2 Wave 20; see
+//! `docs/rustify/phase2_plan.md` and the module doc in `super`).
+//!
+//! devtmpfs reuses the tmpfs inode/dentry infrastructure but registers as
+//! a separate filesystem type. On mount it auto-populates `/dev` with the
+//! device nodes that have been registered so far via
+//! [`devtmpfs_create_node`].
+//!
+//! Unlike Linux's devtmpfs which uses a kernel thread to serialise node
+//! creation, this implementation directly creates/removes nodes under the
+//! global devtmpfs spinlock. This is sufficient for xv6 where device
+//! registration happens during early boot on a single hart.
+//!
+//! # tmpfs-contract reuse
+//!
+//! `kernel/vfs/tmpfs/tmpfs_private.h` was deliberately kept as a real,
+//! unmodified C header through Waves 18-19 specifically so this wave could
+//! consume it (see `kernel/vfs/tmpfs/mod.rs`'s module doc). Every tmpfs
+//! symbol this file needs (`tmpfs_alloc_inode`/`tmpfs_get_inode`/
+//! `tmpfs_sync_fs`/`tmpfs_unmount_begin`/`tmpfs_alloc_superblock`/
+//! `tmpfs_free`/`tmpfs_make_directory`) is declared in a local `unsafe
+//! extern "C"` block below rather than imported by Rust path, even though
+//! `tmpfs` and `devtmpfs` are now both submodules of the same Rust crate —
+//! matching the established per-file convention (`tmpfs/superblock.rs`'s
+//! own doc: "a cross-C-TU call", not a same-logical-unit call, since
+//! `devtmpfs/superblock.c` used to be a genuinely separate translation
+//! unit that `#include`d `tmpfs_private.h` to reach these symbols). Now
+//! that this is the last consumer of that C-ABI contract to move to Rust,
+//! `tmpfs_private.h` is *still* kept in `wrapper.h` (unlike
+//! `devtmpfs_private.h`, deleted by this wave, whose sole consumer was
+//! this file) — not because devtmpfs needs it any more (nothing `#include`s
+//! it now), but because `kernel/vfs/tmpfs/*.rs` itself still needs the
+//! header for bindgen's `struct tmpfs_inode`/`tmpfs_superblock` layouts.
+//! See the Wave 20 report for the full note.
+//!
+//! # C-ABI surface kept
+//!
+//! `kernel/inc/devtmpfs.h` (the *public* devtmpfs API, distinct from the
+//! now-deleted `kernel/vfs/devtmpfs/devtmpfs_private.h`) is unchanged by
+//! this port and still declares `devtmpfs_create_node`/
+//! `devtmpfs_remove_node`/`devtmpfs_populate_devices` as plain C externs —
+//! `kernel/dev/dev.c` (still C, Wave 21) calls the first two from
+//! `device_register()`/`device_unregister()`. All three, plus
+//! `devtmpfs_init`/`devtmpfs_post_mount_populate` (called from
+//! `kernel/vfs/fs.rs`'s `vfs_init()`), keep their exact C signatures and
+//! return-value semantics — in particular
+//! [`devtmpfs_create_node`]/[`devtmpfs_remove_node`] still swallow
+//! [`__devtmpfs_mknod_relative`]/[`__devtmpfs_unlink_relative`] failures
+//! into an unconditional `0` for the registry-buffering half of their
+//! contract (`device_register()` discarding *that* return value entirely
+//! is `dev.c`'s own pre-existing bug, out of scope here — see the Known
+//! issues list in `RUST_REWRITE.md`; fixing it belongs to Wave 21, and
+//! this port deliberately keeps the exact return-value shape so that fix
+//! lands cleanly).
+//!
+//! # Locking / concurrency
+//!
+//! * `__DEVTMPFS_LOCK` (`__devtmpfs_lock` in the C original) guards the
+//!   node registry list (`__DEVTMPFS_NODES`) and the one-time
+//!   registry-list initialisation flag.
+//! * `__DEVTMPFS_SB` (`__devtmpfs_sb` in the C original) is written once
+//!   per mount/unmount under the VFS-core mount lock
+//!   (`vfs_mount_lock()`, held by the generic mount/unmount machinery
+//!   that calls [`devtmpfs_mount`]/[`devtmpfs_umount_free`] as its
+//!   `vfs_fs_type_ops` callbacks) but *read* without any lock from
+//!   [`__devtmpfs_get_root`] — called from [`devtmpfs_create_node`]/
+//!   [`devtmpfs_remove_node`], which can run from arbitrary device-driver
+//!   contexts at any time. The C original used a plain (non-atomic)
+//!   pointer for this exact pattern; ported here as `AtomicPtr` with
+//!   `Relaxed` ordering, reproducing the identical observable behaviour
+//!   while removing the data race that the C pointer read/write
+//!   technically was — same upgrade, same rationale, as `console.rs`'s
+//!   `CONSOLE_TTY` (Phase 2 Wave 4).
+//! * `__devtmpfs_ensure_init`'s one-time `list_entry_init` + flag-set is
+//!   ported as a plain non-atomic `static mut` check-then-set, matching
+//!   the C exactly (including its implicit assumption that device
+//!   registration is single-hart at the point any of this runs — true
+//!   for every registrant in-tree today, see `dev_table_init`'s early-boot
+//!   call site). Not upgraded to a CAS-guarded once-init: doing so would
+//!   change observable behaviour under a hypothetical concurrent first
+//!   call, which the C never defined either, so there is no "identical
+//!   behaviour, race removed" upgrade available the way there was for
+//!   `__DEVTMPFS_SB` above. Flagged, not fixed, matching this crate's
+//!   documented-deviation convention.
+//! * [`devtmpfs_post_mount_populate`]'s walk of the registry list drops
+//!   and reacquires `__DEVTMPFS_LOCK` around each (potentially sleeping)
+//!   `__devtmpfs_mknod_relative` call, exactly like the C's
+//!   `list_foreach_node_safe` with a `spin_unlock`/`spin_lock` pair inside
+//!   the loop body — the "next" pointer is always captured while the lock
+//!   is held (either the initial acquire before the loop, or the
+//!   re-acquire at the bottom of the previous iteration), matching the
+//!   C's safe-iteration discipline exactly. As in the C, this does not
+//!   defend against a concurrent [`devtmpfs_remove_node`] freeing the
+//!   captured "next" node while the lock is dropped — a latent race in
+//!   the original, preserved here (early-boot single-hart in every
+//!   in-tree call site, same reasoning as above).
+//!
+//! # Deliberate fix
+//!
+//! [`__devtmpfs_walk_parent`]'s successful `vfs_ilookup()` branches
+//! (matching `.`/`..`-less intermediate path components) populate a
+//! `vfs_dentry` whose `name` field `vfs_ilookup` heap-allocates via
+//! `strndup` — the C original never released it (every other
+//! `vfs_ilookup` call site in the crate pairs it with
+//! `vfs_release_dentry`; this one didn't). Fixed here as a pure cleanup
+//! addition with zero control-flow/return-value change, same category of
+//! fix as Wave 18's tmpfs move-UAF fix and Wave-11-era map_pages leak fix.
+
+#![allow(non_camel_case_types, non_upper_case_globals, non_snake_case)]
+
+use core::ffi::{c_char, c_int, c_void};
+use core::ptr;
+use core::sync::atomic::{AtomicPtr, Ordering};
+
+use crate::bindings::{
+    device_t, dev_t, list_node_t, mode_t, spinlock_t, tmpfs_inode, tmpfs_superblock, vfs_dentry,
+    vfs_fs_type, vfs_fs_type_ops, vfs_inode, vfs_superblock, vfs_superblock_ops, EEXIST, EINVAL,
+    ENODEV, ENOENT, ENOMEM, PGSIZE,
+};
+
+// ===========================================================================
+// Externs — see the module doc above for the convention.
+// ===========================================================================
+
+unsafe extern "C" {
+    // tmpfs/{superblock,inode}.rs (Wave 18) -- the tmpfs_private.h C-ABI
+    // contract this file reuses (see the module doc above).
+    safe fn tmpfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode;
+    safe fn tmpfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode;
+    safe fn tmpfs_sync_fs(sb: *mut vfs_superblock, wait: c_int) -> c_int;
+    safe fn tmpfs_unmount_begin(sb: *mut vfs_superblock);
+    safe fn tmpfs_alloc_superblock() -> *mut tmpfs_superblock;
+    safe fn tmpfs_free(sb: *mut vfs_superblock);
+    safe fn tmpfs_make_directory(ti: *mut tmpfs_inode);
+
+    // vfs/fs.rs (Wave 16) -- fs-type registration + mount lock.
+    safe fn vfs_fs_type_allocate() -> *mut vfs_fs_type;
+    safe fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_int;
+    safe fn vfs_mount_lock();
+    safe fn vfs_mount_unlock();
+
+    // vfs/inode.rs (Wave 13) -- inode refcount + directory ops.
+    safe fn vfs_idup(inode: *mut vfs_inode);
+    safe fn vfs_iput(inode: *mut vfs_inode);
+    safe fn vfs_ilookup(
+        dir: *mut vfs_inode,
+        dentry: *mut vfs_dentry,
+        name: *const c_char,
+        name_len: usize,
+    ) -> c_int;
+    safe fn vfs_release_dentry(dentry: *mut vfs_dentry);
+    safe fn vfs_mkdir(
+        dir: *mut vfs_inode,
+        mode: mode_t,
+        name: *const c_char,
+        name_len: usize,
+    ) -> *mut vfs_inode;
+    safe fn vfs_mknod(
+        dir: *mut vfs_inode,
+        mode: mode_t,
+        dev: dev_t,
+        name: *const c_char,
+        name_len: usize,
+    ) -> *mut vfs_inode;
+    safe fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> c_int;
+
+    // proc module.
+    safe fn xv6_panic(msg: *const c_char) -> !;
+
+    // printf.rs -- C-variadic.
+    fn printf(fmt: *const c_char, ...) -> c_int;
+
+    // string.rs (Wave 2).
+    safe fn strlen(s: *const c_char) -> usize;
+    safe fn strncmp(s1: *const c_char, s2: *const c_char, n: usize) -> c_int;
+    safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
+
+    // mm/kalloc.rs.
+    safe fn kmm_alloc(size: usize) -> *mut c_void;
+    safe fn kmm_free(ptr: *mut c_void);
+
+    // lock/spinlock.rs.
+    safe fn spin_lock(lk: *mut spinlock_t);
+    safe fn spin_unlock(lk: *mut spinlock_t);
+
+    // dev/dev.c (still C, Wave 21) -- device-table iteration.
+    safe fn dev_for_each_device(
+        cb: extern "C" fn(*mut device_t, *mut c_void) -> c_int,
+        ctx: *mut c_void,
+    ) -> c_int;
+}
+
+/// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`) with its
+/// format arguments dropped -- see `vfs/fs.rs`'s identical macro/rationale.
+macro_rules! kassert {
+    ($cond:expr, $msg:expr) => {
+        if !($cond) {
+            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
+        }
+    };
+}
+
+#[inline(always)]
+const fn neg(e: u32) -> c_int {
+    -(e as c_int)
+}
+#[inline(always)]
+fn err_ptr<T>(errno: c_int) -> *mut T {
+    errno as isize as *mut T
+}
+const MAX_ERRNO: isize = 4095;
+#[inline(always)]
+fn is_err<T>(p: *mut T) -> bool {
+    (p as usize) >= (-(MAX_ERRNO)) as usize
+}
+#[inline(always)]
+fn is_err_or_null<T>(p: *mut T) -> bool {
+    p.is_null() || is_err(p)
+}
+#[inline(always)]
+fn ptr_err<T>(p: *mut T) -> isize {
+    p as isize
+}
+
+/// `mkdev(major, minor)` (`kernel/inc/defs.h`: `((uint)((m) << 20 | (n)))`).
+#[inline(always)]
+fn mkdev(major: c_int, minor: c_int) -> dev_t {
+    ((major << 20) | minor) as dev_t
+}
+
+// ===========================================================================
+// Global device-node registry
+// ===========================================================================
+
+/// Mirrors `struct devtmpfs_node` (`devtmpfs_private.h`, deleted by this
+/// port -- see the module doc). Purely internal now: no C translation
+/// unit ever touches this layout, so it is a private Rust struct rather
+/// than a bindgen type. `list_entry` is kept as the first field (offset
+/// 0), exactly like the C, so a `*mut DevtmpfsNode` <-> `*mut
+/// list_node_t` round-trip is a plain pointer cast with no `container_of`
+/// arithmetic needed -- the same trick `tmpfs_inode`/`tmpfs_superblock`
+/// use for their embedded `vfs_inode`/`vfs_sb` (offset 0).
+#[repr(C)]
+struct DevtmpfsNode {
+    list_entry: list_node_t,
+    name: *mut c_char,
+    name_len: usize,
+    mode: mode_t,
+    dev: dev_t,
+}
+
+static mut __DEVTMPFS_LOCK: spinlock_t = spinlock_t {
+    locked: 0,
+    name: c"devtmpfs".as_ptr() as *mut c_char,
+    cpu: ptr::null_mut(),
+};
+static mut __DEVTMPFS_NODES: list_node_t = list_node_t {
+    next: ptr::null_mut(),
+    prev: ptr::null_mut(),
+};
+static mut __DEVTMPFS_INITIALIZED: bool = false;
+
+/// The mounted devtmpfs superblock. Set by [`devtmpfs_mount`], cleared by
+/// [`devtmpfs_umount_free`]. See the module doc's "Locking / concurrency"
+/// section for the `AtomicPtr`/`Relaxed` rationale.
+static __DEVTMPFS_SB: AtomicPtr<vfs_superblock> = AtomicPtr::new(ptr::null_mut());
+
+fn __devtmpfs_ensure_init() {
+    // SAFETY: `__DEVTMPFS_INITIALIZED`/`__DEVTMPFS_NODES` are written here
+    // under the same non-atomic check-then-set discipline as the C
+    // original (see the module doc's "Locking / concurrency" section for
+    // why this is not upgraded to a CAS-guarded once-init).
+    unsafe {
+        if !__DEVTMPFS_INITIALIZED {
+            let head = &raw mut __DEVTMPFS_NODES;
+            (*head).next = head;
+            (*head).prev = head;
+            __DEVTMPFS_INITIALIZED = true;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Minimal intrusive doubly-linked list helpers, reimplementing the C
+// `static inline` primitives from `list.h` this file needs
+// (`list_entry_init`/`list_entry_insert`/`list_entry_detach`/
+// `LIST_FIRST_NODE`/`LIST_NEXT_NODE`) -- bindgen cannot call `static
+// inline` C functions, so these are hand-ported locally, same precedent
+// as `tmpfs/superblock.rs`'s `hlist_first_entry`/`hlist_next_entry`.
+// `DevtmpfsNode::list_entry` is this struct's first field (offset 0), so
+// every node pointer here doubles as its own `list_node_t*` with a plain
+// cast -- no `container_of` needed.
+// ---------------------------------------------------------------------
+
+/// Mirrors `LIST_FIRST_NODE(head, ...)`: the first node in the list, or
+/// null if empty.
+///
+/// # Safety
+/// `head` must point to a live, initialized `list_node_t` ring head.
+unsafe fn list_first(head: *mut list_node_t) -> *mut list_node_t {
+    unsafe {
+        let n = (*head).next;
+        if n == head {
+            ptr::null_mut()
+        } else {
+            n
+        }
+    }
+}
+
+/// Mirrors `LIST_NEXT_NODE(head, node, ...)`: the node after `node`, or
+/// null if `node` is the list's last node.
+///
+/// # Safety
+/// `head` must point to a live, initialized `list_node_t` ring head;
+/// `node` must be a live node currently linked into that ring.
+unsafe fn list_next(head: *mut list_node_t, node: *mut list_node_t) -> *mut list_node_t {
+    unsafe {
+        let n = (*node).next;
+        if n == head {
+            ptr::null_mut()
+        } else {
+            n
+        }
+    }
+}
+
+/// Mirrors `list_entry_push_front()` (== `list_entry_insert(head, entry)`).
+///
+/// # Safety
+/// `head` must point to a live, initialized `list_node_t` ring head;
+/// `node` must be a detached, initialized `list_node_t` not currently
+/// linked into any list.
+unsafe fn list_push_front(head: *mut list_node_t, node: *mut list_node_t) {
+    unsafe {
+        let next = (*head).next;
+        (*node).prev = head;
+        (*node).next = next;
+        (*head).next = node;
+        (*next).prev = node;
+    }
+}
+
+/// Mirrors `list_entry_detach()` / `list_node_detach()`.
+///
+/// # Safety
+/// `node` must be a live node currently linked into some ring (or a
+/// detached, self-referential node, which is a no-op).
+unsafe fn list_detach(node: *mut list_node_t) {
+    unsafe {
+        let p = (*node).prev;
+        let n = (*node).next;
+        (*p).next = n;
+        (*n).prev = p;
+        (*node).next = node;
+        (*node).prev = node;
+    }
+}
+
+// ------------------------------------------------------------------ */
+//  Mount-point-agnostic helpers (use root inode, not "/dev/")
+// ------------------------------------------------------------------ */
+
+/// `__devtmpfs_get_root` — return the devtmpfs root inode (no extra ref).
+/// Returns null if devtmpfs is not mounted. See the module doc's
+/// "Locking / concurrency" section: reads `__DEVTMPFS_SB` without any
+/// lock, matching the C original's exact (documented) race.
+fn __devtmpfs_get_root() -> *mut vfs_inode {
+    let sb = __DEVTMPFS_SB.load(Ordering::Relaxed);
+    if sb.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: a non-null `__DEVTMPFS_SB` is only ever a live
+    // `vfs_superblock` written by `devtmpfs_mount` (cleared by
+    // `devtmpfs_umount_free` before the superblock is freed); reading
+    // `root_inode` is a plain field load.
+    unsafe { (*sb).root_inode }
+}
+
+/// `__devtmpfs_walk_parent` — given a relative path like `"pts/0"`, walk
+/// from `root` through intermediate directories, creating them if needed.
+/// Returns the parent directory inode (with an extra iref) and writes the
+/// leaf name into `*leaf`/`*leaf_len`.
+///
+/// On failure returns null.
+///
+/// # Safety
+/// `root` must be a live, referenced `vfs_inode`; `name` must point to at
+/// least `name_len` readable bytes.
+unsafe fn __devtmpfs_walk_parent(
+    root: *mut vfs_inode,
+    name: *const c_char,
+    name_len: usize,
+    leaf: &mut *const c_char,
+    leaf_len: &mut usize,
+) -> *mut vfs_inode {
+    // SAFETY: caller's contract.
+    let name_bytes = unsafe { core::slice::from_raw_parts(name as *const u8, name_len) };
+
+    // Find the last '/' -- everything before it is a directory path.
+    let last_slash: isize = name_bytes
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map(|i| i as isize)
+        .unwrap_or(-1);
+
+    let mut dir = root;
+    vfs_idup(dir); // take a ref so caller can always iput the result
+
+    if last_slash > 0 {
+        let last_slash = last_slash as usize;
+        let mut start = 0usize;
+        while start < last_slash {
+            let mut end = start;
+            while end < last_slash && name_bytes[end] != b'/' {
+                end += 1;
+            }
+            if end == start {
+                start += 1;
+                continue;
+            }
+
+            let comp = unsafe { name.add(start) };
+            let comp_len = end - start;
+
+            let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
+            let ret = vfs_ilookup(dir, &mut dentry, comp, comp_len);
+            if ret == 0 && dentry.ino != 0 {
+                // Found -- get the inode.
+                // SAFETY: `dir` is non-null (loop invariant); `sb`/`ops`
+                // are set by the generic VFS mount machinery before any
+                // directory op can run. Mirrors the C's direct
+                // `dir->sb->ops->get_inode(dir->sb, dentry.ino)` vtable
+                // dispatch (deliberately not the generic
+                // `vfs_get_inode()` cache-lookup wrapper -- ported
+                // faithfully, see the Wave 20 report).
+                let sb = unsafe { (*dir).sb };
+                // SAFETY: `sb`/`ops` live per the comment above; calling
+                // through the vtable function pointer is unsafe in Rust
+                // regardless (raw fn-pointer call).
+                let child = unsafe {
+                    let get_inode = (*(*sb).ops).get_inode.unwrap();
+                    get_inode(sb, dentry.ino)
+                };
+                // Deliberate fix (see module doc): release the dentry's
+                // heap-allocated name now that `.ino` has been consumed.
+                vfs_release_dentry(&mut dentry);
+                vfs_iput(dir);
+                if is_err_or_null(child) {
+                    return ptr::null_mut();
+                }
+                dir = child;
+            } else {
+                // Not found -- create the directory.
+                let sub = vfs_mkdir(dir, 0o755, comp, comp_len);
+                vfs_iput(dir);
+                if is_err_or_null(sub) {
+                    return ptr::null_mut();
+                }
+                dir = sub;
+            }
+            start = end + 1;
+        }
+    }
+
+    // Leaf is the part after the last '/' (or the whole name).
+    if last_slash >= 0 {
+        let last_slash = last_slash as usize;
+        // SAFETY: `last_slash < name_len` (found within `name_bytes`).
+        *leaf = unsafe { name.add(last_slash + 1) };
+        *leaf_len = name_len - (last_slash + 1);
+    } else {
+        *leaf = name;
+        *leaf_len = name_len;
+    }
+    dir // caller must vfs_iput()
+}
+
+/// `__devtmpfs_mknod_relative` — create a device node under the devtmpfs
+/// root inode using the relative name (e.g. `"console"`, `"pts/0"`).
+/// Creates intermediate directories as needed.
+///
+/// # Safety
+/// `root` must be a live, referenced `vfs_inode`; `name` must point to at
+/// least `name_len` readable bytes.
+unsafe fn __devtmpfs_mknod_relative(
+    root: *mut vfs_inode,
+    name: *const c_char,
+    name_len: usize,
+    mode: mode_t,
+    dev: dev_t,
+) -> c_int {
+    let mut leaf: *const c_char = ptr::null();
+    let mut leaf_len: usize = 0;
+    // SAFETY: caller's contract, forwarded.
+    let parent = unsafe { __devtmpfs_walk_parent(root, name, name_len, &mut leaf, &mut leaf_len) };
+    if parent.is_null() {
+        return neg(ENOENT);
+    }
+
+    let inode = vfs_mknod(parent, mode, dev, leaf, leaf_len);
+    let mut ret = 0;
+    if is_err(inode) {
+        ret = ptr_err(inode) as c_int;
+        if ret == neg(EEXIST) {
+            ret = 0; // idempotent
+        }
+    } else {
+        vfs_iput(inode);
+    }
+    vfs_iput(parent);
+    ret
+}
+
+/// `__devtmpfs_unlink_relative` — remove a device node from under the
+/// devtmpfs root inode using the relative name (e.g. `"pts/0"`).
+///
+/// # Safety
+/// `root` must be a live, referenced `vfs_inode`; `name` must point to at
+/// least `name_len` readable bytes.
+unsafe fn __devtmpfs_unlink_relative(
+    root: *mut vfs_inode,
+    name: *const c_char,
+    name_len: usize,
+) -> c_int {
+    let mut leaf: *const c_char = ptr::null();
+    let mut leaf_len: usize = 0;
+    // SAFETY: caller's contract, forwarded.
+    let parent = unsafe { __devtmpfs_walk_parent(root, name, name_len, &mut leaf, &mut leaf_len) };
+    if parent.is_null() {
+        return neg(ENOENT);
+    }
+
+    let ret = vfs_unlink(parent, leaf, leaf_len);
+    vfs_iput(parent);
+    ret
+}
+
+// ------------------------------------------------------------------ */
+//  Populate a mounted devtmpfs with registered device nodes
+// ------------------------------------------------------------------ */
+
+/// Called AFTER `vfs_mount_path()` succeeds, so the superblock and all
+/// inodes are fully VFS-initialised. Uses the stored [`__DEVTMPFS_SB`]
+/// root inode so that the code is independent of the mount path.
+///
+/// Called from `kernel/vfs/fs.rs`'s `vfs_init()` -- kept `#[no_mangle]`
+/// per that extern declaration.
+#[no_mangle]
+pub extern "C" fn devtmpfs_post_mount_populate() -> c_int {
+    let root = __devtmpfs_get_root();
+    if root.is_null() {
+        // SAFETY: static format string, no arguments.
+        unsafe { printf(c"devtmpfs: post_mount_populate called but no sb\n".as_ptr()) };
+        return neg(ENODEV);
+    }
+
+    // SAFETY: see the module doc's "Locking / concurrency" section for
+    // the drop/reacquire discipline this loop follows (matches the C's
+    // `list_foreach_node_safe` + mid-body `spin_unlock`/`spin_lock`).
+    unsafe {
+        spin_lock(&raw mut __DEVTMPFS_LOCK);
+        let mut cur = list_first(&raw mut __DEVTMPFS_NODES);
+        while !cur.is_null() {
+            let node = cur as *mut DevtmpfsNode;
+            // Snapshot fields so we can release the lock.
+            let n = (*node).name;
+            let nl = (*node).name_len;
+            let m = (*node).mode;
+            let d = (*node).dev;
+            let next = list_next(&raw mut __DEVTMPFS_NODES, cur);
+            spin_unlock(&raw mut __DEVTMPFS_LOCK);
+
+            let ret = __devtmpfs_mknod_relative(root, n, nl, m, d);
+            if ret != 0 && ret != neg(EEXIST) {
+                printf(c"devtmpfs: mknod '%s' failed: %d\n".as_ptr(), n, ret);
+            }
+
+            spin_lock(&raw mut __DEVTMPFS_LOCK);
+            cur = next;
+        }
+        spin_unlock(&raw mut __DEVTMPFS_LOCK);
+    }
+    0
+}
+
+// ------------------------------------------------------------------ */
+//  Superblock ops — delegate to tmpfs
+// ------------------------------------------------------------------ */
+
+static DEVTMPFS_SUPERBLOCK_OPS: vfs_superblock_ops = vfs_superblock_ops {
+    alloc_inode: Some(tmpfs_alloc_inode),
+    get_inode: Some(tmpfs_get_inode),
+    sync_fs: Some(tmpfs_sync_fs),
+    unmount_begin: Some(tmpfs_unmount_begin),
+    add_orphan: None,
+    remove_orphan: None,
+    recover_orphans: None,
+    statfs: None,
+    begin_transaction: None,
+    end_transaction: None,
+};
+
+// ------------------------------------------------------------------ */
+//  Filesystem type mount/free
+// ------------------------------------------------------------------ */
+
+/// Mirrors `devtmpfs_mount()`. Only ever reached through
+/// [`DEVTMPFS_FS_TYPE_OPS`]'s `mount` function pointer (the generic VFS
+/// mount machinery in `vfs/fs.rs`), so this stays a private `extern "C"
+/// fn` -- no other caller, same precedent as `tmpfs/superblock.rs`'s
+/// `tmpfs_mount`.
+extern "C" fn devtmpfs_mount(
+    mountpoint: *mut vfs_inode,
+    device: *mut vfs_inode,
+    _flags: c_int,
+    _data: *const c_char,
+    ret_sb: *mut *mut vfs_superblock,
+) -> c_int {
+    if mountpoint.is_null() || ret_sb.is_null() {
+        return neg(EINVAL);
+    }
+    if !device.is_null() {
+        return neg(EINVAL); // devtmpfs is backendless
+    }
+
+    let sb = tmpfs_alloc_superblock();
+    if sb.is_null() {
+        return neg(ENOMEM);
+    }
+
+    // Initialise next_ino to 1 BEFORE allocating the root inode.
+    // tmpfs_alloc_inode calls __tmpfs_ino_alloc which returns next_ino++,
+    // so it would return 0 (and fail with ENOENT) if we leave it at the
+    // memset-zero default. The root inode gets ino 1, and we bump
+    // next_ino to 2 afterwards for subsequent allocations.
+    // SAFETY: `sb` is freshly allocated and exclusively owned here.
+    unsafe { (*sb).private_data.next_ino = 1 };
+
+    // Use tmpfs_alloc_inode to get a proper inode from the shared cache.
+    let vi = tmpfs_alloc_inode(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
+    if is_err(vi) {
+        tmpfs_free(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
+        return ptr_err(vi) as c_int;
+    }
+    let root_inode = vi as *mut tmpfs_inode;
+    tmpfs_make_directory(root_inode);
+    // SAFETY: `sb`/`root_inode` are freshly allocated and exclusively
+    // owned here.
+    unsafe {
+        (*root_inode).vfs_inode.n_links = 2;
+
+        (*sb).vfs_sb.block_size = PGSIZE as usize;
+        (*sb).vfs_sb.root_inode = ptr::addr_of_mut!((*root_inode).vfs_inode);
+        (*sb).vfs_sb.__bindgen_anon_2.set_backendless(1);
+        (*sb).vfs_sb.ops = ptr::addr_of!(DEVTMPFS_SUPERBLOCK_OPS) as *mut _;
+
+        *ret_sb = ptr::addr_of_mut!((*sb).vfs_sb);
+    }
+
+    // Save the superblock so create_node/remove_node can find the root
+    // inode without relying on the mount path (e.g. "/dev").
+    __DEVTMPFS_SB.store(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) }, Ordering::Relaxed);
+
+    // NOTE: Do NOT populate here. The superblock / root inode are not
+    // yet initialised by VFS (rwsem, mutex, inode hash, sb->valid are
+    // all set up by __vfs_init_superblock_structure / __vfs_init_sb_rooti
+    // which run AFTER the mount callback returns). Population is done by
+    // devtmpfs_post_mount_populate() called from vfs_init().
+
+    0
+}
+
+/// Mirrors `devtmpfs_umount_free()`. Only reached through
+/// [`DEVTMPFS_FS_TYPE_OPS`]'s `free` function pointer, same precedent as
+/// [`devtmpfs_mount`] above.
+extern "C" fn devtmpfs_umount_free(sb: *mut vfs_superblock) {
+    if __DEVTMPFS_SB.load(Ordering::Relaxed) == sb {
+        __DEVTMPFS_SB.store(ptr::null_mut(), Ordering::Relaxed);
+    }
+    tmpfs_free(sb);
+}
+
+static DEVTMPFS_FS_TYPE_OPS: vfs_fs_type_ops = vfs_fs_type_ops {
+    mount: Some(devtmpfs_mount),
+    free: Some(devtmpfs_umount_free),
+};
+
+// ------------------------------------------------------------------ */
+//  Public API: create / remove device nodes across all instances
+// ------------------------------------------------------------------ */
+
+/// Create a device node in all mounted devtmpfs instances.
+///
+/// Called by device registration code (`kernel/dev/dev.c`, still C --
+/// Wave 21). Kept `#[no_mangle]` per `kernel/inc/devtmpfs.h`'s `extern`
+/// declaration -- see the module doc's "C-ABI surface kept" section.
+#[no_mangle]
+pub extern "C" fn devtmpfs_create_node(name: *const c_char, mode: mode_t, dev: dev_t) -> c_int {
+    __devtmpfs_ensure_init();
+
+    if name.is_null() {
+        return neg(EINVAL);
+    }
+    let name_len = strlen(name);
+    if name_len == 0 {
+        return neg(EINVAL);
+    }
+
+    // Allocate a registry entry (node struct + name string in one block).
+    let alloc_size = core::mem::size_of::<DevtmpfsNode>() + name_len + 1;
+    let raw = kmm_alloc(alloc_size);
+    if raw.is_null() {
+        return neg(ENOMEM);
+    }
+    let node = raw as *mut DevtmpfsNode;
+
+    // SAFETY: `raw`/`node` is a freshly allocated, exclusively-owned
+    // block of at least `alloc_size` bytes; `name_copy` is the trailing
+    // `name_len + 1` bytes after the `DevtmpfsNode` header, exactly like
+    // the C `(char *)(node + 1)` pointer arithmetic.
+    unsafe {
+        let name_copy = (raw as *mut u8).add(core::mem::size_of::<DevtmpfsNode>()) as *mut c_char;
+        memmove(name_copy as *mut c_void, name as *const c_void, name_len);
+        *(name_copy.add(name_len)) = 0;
+        (*node).name = name_copy;
+        (*node).name_len = name_len;
+        (*node).mode = mode;
+        (*node).dev = dev;
+        let entry = &raw mut (*node).list_entry;
+        (*entry).next = entry;
+        (*entry).prev = entry;
+
+        spin_lock(&raw mut __DEVTMPFS_LOCK);
+        list_push_front(&raw mut __DEVTMPFS_NODES, entry);
+        spin_unlock(&raw mut __DEVTMPFS_LOCK);
+    }
+
+    // If devtmpfs is already mounted, create the node live using the
+    // stored superblock root inode (mount-point independent). This is
+    // needed for devices registered after boot (e.g. PTYs).
+    let root = __devtmpfs_get_root();
+    if !root.is_null() {
+        // SAFETY: `root`/`name`/`name_len` all satisfy
+        // `__devtmpfs_mknod_relative`'s contract.
+        unsafe {
+            __devtmpfs_mknod_relative(root, name, name_len, mode, dev);
+        }
+    }
+
+    0
+}
+
+/// Remove a device node from all mounted devtmpfs instances.
+///
+/// Kept `#[no_mangle]` per `kernel/inc/devtmpfs.h`'s `extern` declaration
+/// -- see the module doc's "C-ABI surface kept" section.
+#[no_mangle]
+pub extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
+    __devtmpfs_ensure_init();
+
+    if name.is_null() {
+        return neg(EINVAL);
+    }
+    let name_len = strlen(name);
+    if name_len == 0 {
+        return neg(EINVAL);
+    }
+
+    // Remove from the registry list.
+    let mut found_node: *mut DevtmpfsNode = ptr::null_mut();
+    // SAFETY: `__DEVTMPFS_LOCK`/`__DEVTMPFS_NODES` are the module-private
+    // registry, guarded by `__DEVTMPFS_LOCK` throughout.
+    unsafe {
+        spin_lock(&raw mut __DEVTMPFS_LOCK);
+        let mut cur = list_first(&raw mut __DEVTMPFS_NODES);
+        while !cur.is_null() {
+            let node = cur as *mut DevtmpfsNode;
+            if (*node).name_len == name_len && strncmp((*node).name, name, name_len) == 0 {
+                list_detach(cur);
+                found_node = node;
+                break;
+            }
+            cur = list_next(&raw mut __DEVTMPFS_NODES, cur);
+        }
+        spin_unlock(&raw mut __DEVTMPFS_LOCK);
+    }
+
+    if !found_node.is_null() {
+        kmm_free(found_node as *mut c_void);
+    }
+
+    // Also unlink the live filesystem node if devtmpfs is mounted. Uses
+    // the stored root inode so we don't depend on mount path.
+    let root = __devtmpfs_get_root();
+    if !root.is_null() {
+        // SAFETY: `root`/`name`/`name_len` all satisfy
+        // `__devtmpfs_unlink_relative`'s contract.
+        unsafe {
+            __devtmpfs_unlink_relative(root, name, name_len);
+        }
+    }
+
+    if found_node.is_null() {
+        neg(ENOENT)
+    } else {
+        0
+    }
+}
+
+// ------------------------------------------------------------------ */
+//  Retroactive population from device table
+// ------------------------------------------------------------------ */
+
+/// Callback for [`dev_for_each_device`]: create a devtmpfs registry entry
+/// for each device that has a devname set but hasn't been registered yet.
+/// Only ever reached through `dev_for_each_device`'s callback function
+/// pointer, so this stays private -- same precedent as [`devtmpfs_mount`].
+extern "C" fn __devtmpfs_register_one_device(dev: *mut device_t, _ctx: *mut c_void) -> c_int {
+    // SAFETY: `dev` is a live `device_t*` (caller contract:
+    // `dev_for_each_device`'s callback convention, `kernel/inc/dev/dev.h`).
+    let devname = unsafe { (*dev).devname };
+    if devname.is_null() {
+        return 0; // device has no devtmpfs binding -- skip
+    }
+
+    // Check if a node already exists in the registry (e.g. because
+    // device_register already called devtmpfs_create_node after the
+    // registry list was initialised). Avoid duplicates.
+    let name_len = strlen(devname);
+    let mut found = false;
+    // SAFETY: registry access guarded by `__DEVTMPFS_LOCK` throughout.
+    unsafe {
+        spin_lock(&raw mut __DEVTMPFS_LOCK);
+        let mut cur = list_first(&raw mut __DEVTMPFS_NODES);
+        while !cur.is_null() {
+            let node = cur as *mut DevtmpfsNode;
+            if (*node).name_len == name_len && strncmp((*node).name, devname, name_len) == 0 {
+                found = true;
+                break;
+            }
+            cur = list_next(&raw mut __DEVTMPFS_NODES, cur);
+        }
+        spin_unlock(&raw mut __DEVTMPFS_LOCK);
+    }
+
+    if !found {
+        // SAFETY: `dev` live per this function's own contract above.
+        let (major, minor, devmode) = unsafe { ((*dev).major, (*dev).minor, (*dev).devmode) };
+        devtmpfs_create_node(devname, devmode, mkdev(major, minor));
+    }
+    0
+}
+
+/// Retroactively create devtmpfs entries for all devices that were
+/// registered before devtmpfs became available. Called once by
+/// [`devtmpfs_init`] after the filesystem type is registered. Kept
+/// `#[no_mangle]` per `kernel/inc/devtmpfs.h`'s `extern` declaration --
+/// see the module doc's "C-ABI surface kept" section.
+#[no_mangle]
+pub extern "C" fn devtmpfs_populate_devices() {
+    __devtmpfs_ensure_init();
+
+    // Use the dev_for_each_device iterator to find all devices that were
+    // registered before devtmpfs was initialised.
+    dev_for_each_device(__devtmpfs_register_one_device, ptr::null_mut());
+
+    // Count how many nodes are now in the registry.
+    let mut count: c_int = 0;
+    // SAFETY: registry access guarded by `__DEVTMPFS_LOCK` throughout.
+    unsafe {
+        spin_lock(&raw mut __DEVTMPFS_LOCK);
+        let mut cur = list_first(&raw mut __DEVTMPFS_NODES);
+        while !cur.is_null() {
+            count += 1;
+            cur = list_next(&raw mut __DEVTMPFS_NODES, cur);
+        }
+        spin_unlock(&raw mut __DEVTMPFS_LOCK);
+    }
+
+    // SAFETY: format string matches the single `%d` argument.
+    unsafe {
+        printf(
+            c"devtmpfs: populated %d device nodes from device table\n".as_ptr(),
+            count,
+        );
+    }
+}
+
+// ------------------------------------------------------------------ */
+//  Initialisation
+// ------------------------------------------------------------------ */
+
+/// Initialise devtmpfs caches and register the filesystem type. Called
+/// from `kernel/vfs/fs.rs`'s `vfs_init()` -- kept `#[no_mangle]` per that
+/// extern declaration.
+#[no_mangle]
+pub extern "C" fn devtmpfs_init() {
+    __devtmpfs_ensure_init();
+
+    // Register the devtmpfs filesystem type.
+    let fs_type = vfs_fs_type_allocate();
+    kassert!(!fs_type.is_null(), "devtmpfs_init: vfs_fs_type_allocate failed");
+    // SAFETY: `fs_type` is freshly allocated and exclusively owned here.
+    unsafe {
+        (*fs_type).name = c"devtmpfs".as_ptr();
+        (*fs_type).ops = ptr::addr_of!(DEVTMPFS_FS_TYPE_OPS) as *mut _;
+    }
+
+    vfs_mount_lock();
+    let ret = vfs_register_fs_type(fs_type);
+    kassert!(ret == 0, "devtmpfs_init: vfs_register_fs_type failed");
+    vfs_mount_unlock();
+
+    // SAFETY: static format string, no arguments.
+    unsafe { printf(c"devtmpfs: filesystem type registered\n".as_ptr()) };
+
+    // Retroactively create devtmpfs entries for all devices that were
+    // registered before devtmpfs became available. device_register()
+    // calls devtmpfs_create_node() which buffers entries into the
+    // registry list even when devtmpfs is not yet mounted. However, for
+    // devices that were registered before this subsystem was initialised
+    // (i.e. before __devtmpfs_ensure_init ran), we now iterate them and
+    // add any that carry a devname.
+    devtmpfs_populate_devices();
+}
