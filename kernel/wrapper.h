@@ -200,7 +200,17 @@
 #include <smp/percpu_types.h>
 #include <proc/thread_types.h>
 
-/* Platform info + extern MMIO base symbols needed by Rust port of kvmmake. */
+/* Platform info + extern MMIO base symbols needed by Rust port of kvmmake.
+ * dev/virtio.h, dev/pci.h, dev/e1000_dev.h were bound here since day one
+ * (originally just for the `__virtio_mmio_base`/`__pcie_ecam_mmio_base`/
+ * `__e1000_pci_mmio_base` extern declarations `mm/vm_pgtab.rs`/
+ * `dev/fdt.rs` need). Phase 2 Wave 28 (virtio_disk.c/ramdisk.c, then
+ * pci.c/e1000.c/net.c/sysnet.c -- the final porting wave) is the first to
+ * also need their hardware-ABI struct layouts (`struct virtq_desc/
+ * virtq_avail/virtq_used/virtio_blk_req`, `struct
+ * pci_common_confspace_header`, `struct tx_desc/rx_desc`) -- added to
+ * build.rs's allowlist_type this wave; no new #include here since all
+ * three headers were already reachable. */
 #include <dev/fdt.h>
 #include <dev/uart.h>
 #include <dev/virtio.h>

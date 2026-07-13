@@ -163,6 +163,21 @@ fn main() {
         // are hand-copied local consts in exec.rs, not bindgen vars (same
         // convention as every other small-integer-macro header).
         .allowlist_type("elfhdr|proghdr")
+        // Phase 2 Wave 28 (virtio_disk.c/ramdisk.c, then pci.c/e1000.c/
+        // net.c/sysnet.c port -- the final porting wave). `virtq_desc`/
+        // `virtq_avail`/`virtq_used`/`virtq_used_elem`/`virtio_blk_req`
+        // (dev/virtio.h) are the virtio-mmio virtqueue's hardware-defined
+        // DMA layout -- the qemu device reads/writes these directly, so
+        // real bindgen layouts (not hand-rolled `#[repr(C)]` guesses) are
+        // required, same rationale as Wave 25's `x1_rx_desc`/`x1_tx_desc`.
+        // `pci_common_confspace_header` (dev/pci.h) is the PCI-E
+        // Configuration Space Header the qemu ECAM region exposes --
+        // likewise hardware ABI. `tx_desc`/`rx_desc` (dev/e1000_dev.h,
+        // anchored to avoid matching the unrelated `x1_tx_desc`/
+        // `x1_rx_desc`) are the e1000's DMA descriptor ring layout.
+        .allowlist_type("virtq_desc|virtq_avail|virtq_used|virtq_used_elem|virtio_blk_req")
+        .allowlist_type("pci_common_confspace_header")
+        .allowlist_type("^tx_desc$|^rx_desc$")
         .allowlist_var("PROT_.*|VMA_FLAG_.*|PTE_.*|PGSIZE|PGSHIFT|PAGE_SHIFT|MAXVA|UVMTOP|UVMBOTTOM|TRAPFRAME|TRAPFRAME_POFFSET|NCPU")
         .allowlist_var("MAP_.*|MREMAP_.*|MS_ASYNC|MS_SYNC|MS_INVALIDATE|MADV_.*")
         .allowlist_var("MAXUSTACK|USTACKTOP|USTACK_MAX_BOTTOM|USERSTACK_GROWTH|USERSTACK_MINSZ|UHEAP_MAX_TOP|PROT_MASK")

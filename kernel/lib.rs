@@ -235,6 +235,34 @@ mod exec;
 // of Rust-level visibility.
 mod start_kernel;
 
+// kernel/virtio_disk.rs + kernel/ramdisk.rs (Phase 2 Wave 28, sub-wave A
+// -- the final porting wave's block drivers, ported from
+// kernel/virtio_disk.c + kernel/ramdisk.c). Sit directly in kernel/ (no
+// subdirectory), same precedent as bufcache.rs/exec.rs/start_kernel.rs --
+// no `pub use` needed, their `#[no_mangle]` C-ABI symbols
+// (`virtio_disk_init`/`ramdisk_init`, called by `start_kernel.rs`;
+// `__virtio_mmio_base`/`__virtio_irqno`, extern-declared by
+// `dev/fdt.rs`/`mm/vm_pgtab.rs`) are found via the exported symbol table
+// regardless of Rust-level visibility.
+mod virtio_disk;
+mod ramdisk;
+
+// kernel/pci.rs + kernel/e1000.rs + kernel/net.rs + kernel/sysnet.rs
+// (Phase 2 Wave 28, sub-wave B -- the final porting wave's network
+// drivers, ported from kernel/pci.c + kernel/e1000.c + kernel/net.c +
+// kernel/sysnet.c; after this wave the only C left under kernel/ is
+// printf_shim.c). Same no-subdirectory/no-`pub use` precedent as above;
+// `pci_init`/`sockinit` are called by `start_kernel.rs`,
+// `__pcie_ecam_mmio_base`/`__e1000_pci_mmio_base` are extern-declared by
+// `mm/vm_pgtab.rs`, `sock_lock`/`sockets` are extern-declared by
+// `vfs/file.rs` (same symbol names/types, see `sysnet.rs`'s module
+// doc), and `mbufalloc`/`mbuffree`/`net_rx` are extern-declared by
+// `dev/x1_emac.rs`.
+mod pci;
+mod e1000;
+mod net;
+mod sysnet;
+
 // Re-export so the symbols end up in the staticlib's exported symbol table.
 pub use mm::*;
 pub use proc::*;

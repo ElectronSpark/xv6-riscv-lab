@@ -28,8 +28,8 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 | irq | ✅ | — (kernelvec.S, trampoline.S remain as assembly) | plic.rs + irq_core.rs (W5), trap.rs (W6), syscall.rs (W7) |
 | timer | ✅ | — | timer_core.rs + sched_timer.rs + goldfish_rtc.rs (Wave 8, 2026-07-12) |
 | ipi | ✅ | — | ipi.rs (Wave 9, 2026-07-12); cpus[] cpu_local storage kept link_section/page-aligned byte-identical |
-| core / misc | 🟡 | start_kernel.c, printf_shim.c (variadic `printf()` C remnant) | string.rs + sbi.rs (Wave 2), start.rs (Wave 3), uart.rs + console.rs + printf.rs (Wave 4), backtrace.rs (Wave 5), exec.rs (Wave 26) done; boot path bridges entry.S |
-| block/net drivers | ⬜ | bio.c, virtio_disk.c, ramdisk.c, e1000.c, pci.c, net.c, sysnet.c | |
+| core / misc | ✅ | printf_shim.c ONLY (46 lines: variadic `printf()` C entry — `c_variadic` unavailable on stable rustc; documented remnant until stabilization) | string/sbi (W2), start (W3), uart/console/printf (W4), backtrace (W5), exec (W26), start_kernel (W27) |
+| block/net drivers | ✅ | — | bio+bufcache (W22), virtio_disk + ramdisk + pci + e1000 + net + sysnet (W28, final wave); virtqueue barriers 7/7, e1000 fences 8/8 exact |
 | data structures | ✅ | — | bintree.rs, rbtree.rs, hlist.rs, kobject.rs (Wave 1, 2026-07-11); list.rs pre-existing |
 | host tests (`test/`) | ⬜ | cmocka suites | port to Rust (cargo test or equivalent harness) |
 
@@ -847,6 +847,24 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   the page-fault → `SIGSEGV` → `THREAD_SET_KILLED` attribution path),
   stressfs. C_COMPILER/CMAKE_BUILD_TYPE cache re-checked clean after the
   full matrix.
+
+### Iteration 38 — 2026-07-13 — Wave 28 (FINAL PORTING WAVE) → kernel C eliminated
+
+- virtio_disk.rs (virtqueue barriers 7/7 exact incl. the
+  compiler_fence-vs-fence distinction), ramdisk.rs, pci.rs (per-field
+  volatile ECAM), e1000.rs (fences 8/8, DMA ring layout asserts, 2 C bugs
+  preserved+documented), net.rs (packed headers close a real
+  unaligned-access UB gap without changing byte offsets), sysnet.rs
+  (plan's sys_connect claim was stale — documented; dead sock* trio
+  ported faithfully + flagged as a Wave-14 VFS-integration gap).
+- Dead LAB=net CMake block removed.
+- **MILESTONE (orchestrator-verified census): `find kernel -name '*.c'` →
+  printf_shim.c only. The kernel is C-free except the 46-line documented
+  variadic printf entry.**
+- Verified: zero-warning builds, 6 boots + orchestrator audit (PCI/e1000/
+  ramdisk boot lines byte-identical, stressfs), bigfile 65k-block
+  virtqueue exercise, second-disk mount, testsig 21/21, mmaptest,
+  usertests -q baseline (through forkfork → documented forkforkfork stop).
 
 ## Known issues (pre-existing, not caused by the rewrite)
 

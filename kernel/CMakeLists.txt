@@ -44,13 +44,19 @@ message(STATUS "Platform: ${PLATFORM}, kernel base: ${KERNEL_BASE}")
 # `target_compile_definitions` gates that used to apply to this file are
 # gone too -- see RUST_TEST_FEATURES below, which replaces them with cargo
 # features passed to the xv6_rust build.
+# NOTE: virtio_disk.c and ramdisk.c have been rewritten in Rust
+# (kernel/virtio_disk.rs, kernel/ramdisk.rs -- Phase 2 Wave 28, sub-wave
+# A: the final porting wave's block drivers). Their symbols
+# (virtio_disk_init/__virtio_mmio_base/__virtio_irqno, ramdisk_init) are
+# linked in via the xv6_rust staticlib below.
+# NOTE: e1000.c, net.c, pci.c, and sysnet.c have been rewritten in Rust
+# (kernel/e1000.rs, kernel/net.rs, kernel/pci.rs, kernel/sysnet.rs --
+# Phase 2 Wave 28, sub-wave B: the final porting wave's network drivers).
+# Their symbols are linked in via the xv6_rust staticlib below. After
+# this wave, the only C left under kernel/ (any depth) is printf_shim.c
+# (see its own NOTE below) -- a documented, deliberate remnant (stable
+# Rust cannot *define* a C-variadic function).
 set(KERNEL_C_FILES
-    ${KERNEL_DIR}/virtio_disk.c
-    ${KERNEL_DIR}/ramdisk.c
-    ${KERNEL_DIR}/e1000.c
-    ${KERNEL_DIR}/net.c
-    ${KERNEL_DIR}/pci.c
-    ${KERNEL_DIR}/sysnet.c
     # NOTE: hlist.c, bintree.c, rbtree.c, and kobject.c have been rewritten
     # in Rust (kernel/hlist.rs, kernel/bintree.rs, kernel/rbtree.rs,
     # kernel/kobject.rs — Phase 2 Wave 1). Their symbols are linked in via
@@ -222,7 +228,21 @@ file(GLOB_RECURSE RUST_CRATE_SOURCES
     # kernel/start_kernel.rs (Phase 2 Wave 27 — start_kernel.c: the boot
     # orchestrator; see that file's module doc for the init-order/hart-
     # sync/test-gate contracts).
-    ${RUST_CRATE_DIR}/start_kernel.rs)
+    ${RUST_CRATE_DIR}/start_kernel.rs
+    # kernel/virtio_disk.rs + kernel/ramdisk.rs (Phase 2 Wave 28, sub-wave
+    # A — the final porting wave's block drivers, ported from
+    # kernel/virtio_disk.c + kernel/ramdisk.c).
+    ${RUST_CRATE_DIR}/virtio_disk.rs
+    ${RUST_CRATE_DIR}/ramdisk.rs
+    # kernel/pci.rs + kernel/e1000.rs + kernel/net.rs + kernel/sysnet.rs
+    # (Phase 2 Wave 28, sub-wave B — the final porting wave's network
+    # drivers, ported from kernel/pci.c + kernel/e1000.c + kernel/net.c +
+    # kernel/sysnet.c; the last non-printf_shim.c C removed from
+    # kernel/).
+    ${RUST_CRATE_DIR}/pci.rs
+    ${RUST_CRATE_DIR}/e1000.rs
+    ${RUST_CRATE_DIR}/net.rs
+    ${RUST_CRATE_DIR}/sysnet.rs)
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
@@ -338,9 +358,14 @@ if($ENV{LAB} STREQUAL "lock")
     list(APPEND KERNEL_C_FILES ${KERNEL_DIR}/stats.c ${KERNEL_DIR}/sprintf.c)
 endif()
 
-if($ENV{LAB} STREQUAL "net")
-    list(APPEND KERNEL_C_FILES ${KERNEL_DIR}/e1000.c ${KERNEL_DIR}/net.c ${KERNEL_DIR}/pci.c)
-endif()
+# NOTE: the LAB=net duplicate-append block (previously here: `if($ENV{LAB}
+# STREQUAL "net") list(APPEND KERNEL_C_FILES e1000.c net.c pci.c)
+# endif()`) is removed — dead even before this wave (e1000.c/net.c/pci.c
+# were already unconditionally in KERNEL_C_FILES above, so this was a
+# harmless but pointless duplicate `list(APPEND ...)`; noted in the
+# Phase 2 plan §3 as cleanup-while-touching-this-file). Now that
+# e1000.c/net.c/pci.c are deleted (Phase 2 Wave 28, sub-wave B), the
+# block would also reference nonexistent files.
 
 set(KERNEL_S_FILES ${KERNEL_DIR}/entry.S)
 
@@ -1375,6 +1400,80 @@ set(RUST_FORCE_UNDEFINED
     --undefined=__physical_memory_start
     --undefined=__physical_memory_end
     --undefined=__physical_total_pages
+    # virtio_disk.c + ramdisk.c port (Phase 2 Wave 28, sub-wave A) --
+    # the final porting wave's block drivers (kernel/virtio_disk.rs,
+    # kernel/ramdisk.rs). `virtio_disk_init`/`ramdisk_init` are called
+    # from `kernel/start_kernel.rs`'s `start_kernel_post_init`
+    # (same-crate Rust since Wave 27); `__virtio_mmio_base`/
+    # `__virtio_irqno` are DATA symbols read via `extern` by
+    # `kernel/dev/fdt.rs` (`fdt_apply_platform_config`, populates them)
+    # and `kernel/mm/vm_pgtab.rs`/`kernel/dev/fdt.rs`'s own `kvmmake`
+    # path, but never referenced *by name* from outside the xv6_rust
+    # archive -- same class of concern as `start_kernel.c`'s
+    # `__physical_memory_start` above, forced for the same reason.
+    --undefined=virtio_disk_init
+    --undefined=ramdisk_init
+    --undefined=__virtio_mmio_base
+    --undefined=__virtio_irqno
+    # pci.c + e1000.c + net.c + sysnet.c port (Phase 2 Wave 28, sub-wave
+    # B) -- the final porting wave's network drivers
+    # (kernel/pci.rs/e1000.rs/net.rs/sysnet.rs). `pci_init` is called
+    # from `kernel/start_kernel.rs`'s boot-hart main init (same-crate
+    # Rust since Wave 27); `sockinit` from `start_kernel_post_init`.
+    # `__pcie_ecam_mmio_base` is read via `extern` by `kernel/mm/
+    # vm_pgtab.rs` (`kvminit`)/`kernel/dev/fdt.rs`; `__e1000_pci_mmio_base`
+    # likewise by `vm_pgtab.rs`; `__e1000_pci_irqno` has no other
+    # referencer today but stays declared `extern` in the still-live
+    # `kernel/inc/dev/e1000_dev.h` -- forced anyway, same precedent as
+    # `bio_dup`/`devtmpfs_populate_devices` elsewhere in this list (part
+    # of the header's public contract). `e1000_init` is called from
+    # `kernel/pci.rs` (same-crate Rust since this same wave);
+    # `e1000_transmit` only via the `netdev_ops.transmit` function
+    # pointer today but stays declared `extern` in the still-live
+    # `kernel/inc/defs.h`, same precedent. `net_rx`/`mbufalloc`/
+    # `mbuffree` are called from still-C-turned-Rust `kernel/dev/
+    # x1_emac.rs` (Wave 25) and this wave's own `e1000.rs`;
+    # `net_tx_udp` from `kernel/sysnet.rs`'s `sockwrite`.
+    # `mbufpull`/`mbufpush`/`mbufput`/`mbuftrim`/`mbufq_pushtail`/
+    # `mbufq_pophead`/`mbufq_empty`/`mbufq_init` are declared `extern` in
+    # the still-live `kernel/inc/dev/net.h` -- `mbufq_init` has a real
+    # same-crate caller (`kernel/vfs/file.rs`'s `vfs_sockalloc`, Wave
+    # 14), the rest are reached only via ordinary intra-file Rust
+    # codegen from `net_rx`/`net_tx_udp` (already forced above) except
+    # where no live caller exists at all, forced anyway per the header-
+    # contract precedent. `sockclose`/`sockread`/`sockwrite` are
+    # declared `extern` in `kernel/inc/defs.h` but have no live caller
+    # anywhere in the tree (see `kernel/sysnet.rs`'s module doc for the
+    # full investigation) -- forced anyway, same header-contract
+    # precedent; `sockrecvudp` is called from `kernel/net.rs`'s
+    # `net_rx_udp` (same-crate Rust since this same wave); `sock_lock`/
+    # `sockets` are DATA symbols read/written via `extern` by
+    # `kernel/vfs/file.rs`'s `vfs_sockalloc`.
+    --undefined=pci_init
+    --undefined=sockinit
+    --undefined=__pcie_ecam_mmio_base
+    --undefined=__e1000_pci_mmio_base
+    --undefined=__e1000_pci_irqno
+    --undefined=e1000_init
+    --undefined=e1000_transmit
+    --undefined=net_rx
+    --undefined=net_tx_udp
+    --undefined=mbufalloc
+    --undefined=mbuffree
+    --undefined=mbufpull
+    --undefined=mbufpush
+    --undefined=mbufput
+    --undefined=mbuftrim
+    --undefined=mbufq_init
+    --undefined=mbufq_pushtail
+    --undefined=mbufq_pophead
+    --undefined=mbufq_empty
+    --undefined=sockclose
+    --undefined=sockread
+    --undefined=sockwrite
+    --undefined=sockrecvudp
+    --undefined=sock_lock
+    --undefined=sockets
 )
 
 # ==============================================================================
