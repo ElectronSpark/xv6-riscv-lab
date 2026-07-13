@@ -32,9 +32,11 @@ set(KERNEL_SYMBOLS_IDX_SIZE "0x300000")
 message(STATUS "Platform: ${PLATFORM}, kernel base: ${KERNEL_BASE}")
 
 # Core kernel sources in this directory (excluding subdirectories).
+# NOTE: exec.c has been rewritten in Rust (kernel/exec.rs -- Phase 2
+# Wave 26: ELF loader + argv/envp stack machinery + sys_exec). Its symbols
+# are linked in via the xv6_rust staticlib below.
 set(KERNEL_C_FILES
     ${KERNEL_DIR}/start_kernel.c
-    ${KERNEL_DIR}/exec.c
     ${KERNEL_DIR}/virtio_disk.c
     ${KERNEL_DIR}/ramdisk.c
     ${KERNEL_DIR}/e1000.c
@@ -883,7 +885,7 @@ set(RUST_FORCE_UNDEFINED
     # lifecycle/dispatch and the pipe ring buffer. Called from other C
     # translation units still in kernel/vfs/ (fs.c, vfs_syscall.c,
     # tmpfs/, xv6fs/, devtmpfs/), from kernel/vfs/fdtable.rs, from
-    # kernel/mm/vm.rs (vfs_fput/vfs_fdup), from kernel/exec.c, and
+    # kernel/mm/vm.rs (vfs_fput/vfs_fdup), from kernel/exec.rs, and
     # (pipe_*) from kernel/tty/tty.rs, kernel/tty/pty.rs,
     # kernel/console.rs, and kernel/start_kernel.c (pipe_init) --
     # without these flags the
@@ -913,7 +915,7 @@ set(RUST_FORCE_UNDEFINED
     # vfs/fdtable.c port (Phase 2 Wave 15) -- per-thread fd table
     # (alloc/dealloc/clone/put, RCU-protected lookup, close-on-exec).
     # Called from other C translation units still in kernel/vfs/ (fs.c,
-    # vfs_syscall.c) and kernel/exec.c, and from kernel/proc/{clone,exit}.rs
+    # vfs_syscall.c) and kernel/exec.rs, and from kernel/proc/{clone,exit}.rs
     # / kernel/mm/vm.rs / kernel/vfs/file.rs via their own local extern
     # declarations -- without these flags the linker could drop the whole
     # object file from the static archive.
@@ -1258,6 +1260,15 @@ set(RUST_FORCE_UNDEFINED
     # elsewhere in this list).
     --undefined=x1_emac_init
     --undefined=x1_sdhci_init
+    # exec.c port (Phase 2 Wave 26) -- kernelvec.S/trampoline.S never
+    # reference these by symbol name, and (with exec.c gone) nothing in
+    # the remaining C tree references them either: both callers are
+    # same-crate Rust (`kernel/proc/thread.rs`'s `init_entry` calls `exec`
+    # to launch `/bin/init` at boot; `kernel/irq/syscall.rs`'s dispatch
+    # table calls `sys_exec` via its own function-pointer entry) --
+    # without these flags the linker could drop the whole module.
+    --undefined=exec
+    --undefined=sys_exec
 )
 
 # ==============================================================================

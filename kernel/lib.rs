@@ -213,6 +213,16 @@ mod dev;
 // original name unchanged.
 mod bufcache;
 
+// kernel/exec.rs (Phase 2 Wave 26 -- exec.c: ELF loader + argv/envp stack
+// machinery + sys_exec, ported now that the whole vfs tree and mm/vm.rs
+// are Rust). Sits directly in kernel/ (no subdirectory), matching
+// bufcache's own precedent -- no `#[path = ...]` needed since the module
+// name matches the file name. `exec`/`sys_exec` are called only from
+// other same-crate Rust (`proc/thread.rs`, `irq/syscall.rs`), which
+// declare their own local `extern "C"` for them, so no `pub use exec::*`
+// is needed either (same precedent as `vfs`/`dev`/`tty`/`bufcache`).
+mod exec;
+
 // Re-export so the symbols end up in the staticlib's exported symbol table.
 pub use mm::*;
 pub use proc::*;

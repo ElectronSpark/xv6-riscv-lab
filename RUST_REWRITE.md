@@ -28,7 +28,7 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 | irq | ✅ | — (kernelvec.S, trampoline.S remain as assembly) | plic.rs + irq_core.rs (W5), trap.rs (W6), syscall.rs (W7) |
 | timer | ✅ | — | timer_core.rs + sched_timer.rs + goldfish_rtc.rs (Wave 8, 2026-07-12) |
 | ipi | ✅ | — | ipi.rs (Wave 9, 2026-07-12); cpus[] cpu_local storage kept link_section/page-aligned byte-identical |
-| core / misc | 🟡 | start_kernel.c, exec.c, backtrace.c, printf_shim.c (variadic `printf()` C remnant) | string.rs + sbi.rs (Wave 2), start.rs (Wave 3), uart.rs + console.rs + printf.rs (Wave 4) done; boot path bridges entry.S |
+| core / misc | 🟡 | start_kernel.c, printf_shim.c (variadic `printf()` C remnant) | string.rs + sbi.rs (Wave 2), start.rs (Wave 3), uart.rs + console.rs + printf.rs (Wave 4), backtrace.rs (Wave 5), exec.rs (Wave 26) done; boot path bridges entry.S |
 | block/net drivers | ⬜ | bio.c, virtio_disk.c, ramdisk.c, e1000.c, pci.c, net.c, sysnet.c | |
 | data structures | ✅ | — | bintree.rs, rbtree.rs, hlist.rs, kobject.rs (Wave 1, 2026-07-11); list.rs pre-existing |
 | host tests (`test/`) | ⬜ | cmocka suites | port to Rust (cargo test or equivalent harness) |
@@ -757,6 +757,58 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   round-trips on real majors, stressfs ×3, mmaptest 16/16, testsig 21/21,
   usertests baseline, 8 fs singles.
 
+### Iteration 34 — 2026-07-13 — Wave 26: exec.c → Rust + copyinstr2 root-caused
+
+- exec.rs (~700 lines): full ELF loader (three-region LOAD-segment split:
+  file-backed mmap / eager boundary page / anonymous BSS, 1:1 with the C),
+  heap+stack VMA creation, entry-point fault-ahead, argv/envp stack ABI
+  (per-string 16-byte sp alignment, reverse-shift argv frame,
+  `sp[0]=argc ... NULL`-terminated argv/envp pointer arrays) ported
+  control-flow-for-control-flow; `sys_exec` byte-faithful incl. the
+  envp swallow-errors semantics. Goto-cleanup via local `bad!`/
+  `bad_locked!` macros; ELF headers read through `MaybeUninit` +
+  full-length-read check; elf.h structs added to wrapper.h/build.rs
+  (real bindgen layouts), `#define`s hand-copied per convention. Dead
+  `ustack_alloc` dropped (zero callers, tree-wide grep); `flags2vmperm`
+  demoted to a private `const fn` (single caller, not in defs.h).
+  `exec`/`sys_exec` added to RUST_FORCE_UNDEFINED (both callers are
+  same-crate Rust: proc/thread.rs init_entry, irq/syscall.rs table).
+- **copyinstr2 mandate — investigated, mandate's diagnosis disproven**:
+  debug instrumentation in the pre-port C showed exec ALREADY rejects the
+  oversized argument (`fetchstr` → -ENAMETOOLONG → exec returns -1).
+  Real root cause: `wait()`'s POSIX-style status encoding
+  (`xv6_exit_reap_zombie`) makes the test's `exit(747)` sentinel
+  unobservable (`(747&0xff)<<8 != 747` always). Same single bug also
+  explains killstatus AND newly-found exitwait. Proc-side, out of this
+  wave's touch scope — Known issues consolidated instead (see above);
+  exec.rs module doc carries the full evidence trail.
+- Post-copyinstr2 singles sweep (26 tests run individually, the -q
+  region the mandate wanted unlocked): copyinstr3, rwsbrk, truncate1-3,
+  openiput, exitiput, iput, opentest, writetest, writebig, createtest,
+  dirtest, exectest, vforktest, pipe1, preempt, reparent, twochildren,
+  forkfork, reparent2, mem, sharedfd, fourfiles, createdelete, badarg
+  (50k-bad-exec stress) — all OK. killstatus/exitwait fail
+  (wait-encoding, above), forkforkfork panics (tq bug, above), execout
+  >360s (slow, above) — ALL four reproduced identically on an
+  unmodified 074323c C-baseline worktree built this session.
+- Verified: zero-warning build (Rust crate + kernel C; only pre-existing
+  initcode RWX linker note, present on baseline), boot gate ×4 on the
+  final clean binary (init/sh spawn IS the exec path), testsig 21/21,
+  mmaptest 16/16, stressfs, pingpong, primes, vforktest (its Test-2
+  "FAIL: exec failed" line is baseline-identical: relative-path
+  `exec("echo",...)` from `/`, test still passes), ls/wc battery,
+  usertests -q (stops at copyinstr2, baseline-consistent), 26 singles.
+- **Cache-poisoning recurrence caught and neutralized**: mid-wave, an
+  expect-driven `cmake --build --target qemu` (no TOOLPREFIX/LAB in that
+  shell) regenerated the cache to system GCC 13.2 + LAB=util right after
+  a CMakeLists edit; roughly half the verification runs executed on that
+  poisoned kernel before the C_COMPILER cache check caught it. Full
+  verification matrix re-run from scratch on a clean `--clean-first`
+  toolchain rebuild (compiler provenance proven via the kernel ELF's
+  .comment section: GCC 14.2.0) — all results identical to the poisoned
+  runs. New standing rule + new-vector documentation added to Working
+  notes.
+
 ## Known issues (pre-existing, not caused by the rewrite)
 
 - ~~`cat /dev/tty` panics ("pid lock not held")~~ FIXED in Wave 22
@@ -789,11 +841,52 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   of dereferencing, so a recurrence will be loud and diagnosable rather
   than silent memory corruption.
 
-- `usertests killstatus` fails: wait status of a SIGKILLed process is not
-  -1 (classic-xv6 expectation) — probably reports POSIX-style status
-  instead. First observed 2026-07-12 (test newly reachable); proc exit
-  path predates this session. Decide intended semantics and fix or adapt
-  the test.
+- **`wait()` status encoding is POSIX-style, not classic-xv6 — one proc
+  bug, (at least) three test symptoms**: `xv6_exit_reap_zombie`
+  (`kernel/proc/proc_shims.rs`) writes `*xstate_out = ((*child).xstate &
+  0xff) << 8`, so a parent's `wait(&st)` never sees the child's raw exit
+  value. Symptoms, each confirmed identical on an unmodified pre-Wave-26
+  C baseline (git worktree at 074323c, Wave 26 verification 2026-07-13):
+  - `usertests killstatus` — SIGKILLed child's status is not -1 (first
+    observed 2026-07-12).
+  - `usertests copyinstr2` — **NOT an exec argument-size validation gap**
+    (this file's long-standing diagnosis below was wrong, disproven
+    empirically during Wave 26): debug instrumentation in the pre-port C
+    sys_exec showed `fetchstr(uarg, argv[i], PGSIZE)` already returns
+    -ENAMETOOLONG on the test's PGSIZE-long argument and exec correctly
+    returns -1 to userspace. The test's forked child then signals
+    success with `exit(747)`; the parent checks `st != 747`, but
+    747 > 255 means `(747 & 0xff) << 8 == 60160` can never equal 747 —
+    the check fails regardless of exec's behavior, and the test's
+    "exec(echo, BIG) succeeded" message is misleading.
+  - `usertests exitwait` — children `exit(i)` for i in 0..100, parent
+    expects `xstate == i` raw (fails from i==1 on). First observed
+    2026-07-13 (newly exercised by Wave 26's post-copyinstr2 singles).
+  - `usertests -q` therefore still stops at copyinstr2 — fixing this one
+    encoding line (or adapting the tests to POSIX semantics; decide
+    intended semantics first) unblocks copyinstr2, killstatus, and
+    exitwait at once. The fix is proc-side and out of Wave 26's
+    file-touch scope (exec files only).
+
+- `usertests forkforkfork` (fork-bomb stress, 3-deep nesting) panics the
+  kernel: `"Failed to remove interrupted waiter from queue"`
+  (`kernel/proc/thread_queue.rs:421`, tq interrupted-wait removal path)
+  under fork-exhaustion pressure, followed by IPI_REASON_CRASH on both
+  harts. **Confirmed pre-existing**: reproduces identically on the
+  unmodified pre-Wave-26 C baseline (074323c worktree, same
+  toolchain/env). Never reachable before (sits after copyinstr2 in -q;
+  no prior wave ran it individually). First observed 2026-07-13 (Wave 26
+  post-copyinstr2 singles sweep). Needs a dedicated proc/tq
+  investigation.
+
+- `usertests execout` (memory-exhaustion exec stress, 15 rounds of
+  sbrk-all-of-RAM) does not complete within 360s wall-clock under QEMU
+  TCG on this setup — **identical on the unmodified pre-Wave-26 C
+  baseline** (no completion, no crash; QEMU pegged >100% CPU, i.e.
+  genuinely grinding through ~780MB of touched pages ×15 rounds, not
+  hung). Likely impractically slow under emulation rather than a bug;
+  never exercised by any prior wave. Flagged for a longer-timeout run or
+  a RAM-reduced QEMU profile if a verdict is wanted.
 
 - `open("/dev/tty")` fails -EINVAL: `dev/dev.c::device_register()`
   auto-assigns a minor for minor==0 registrants but never writes it back
@@ -807,10 +900,13 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   limit (sched_timer's DEFAULT_RETRY_LIMIT=3 behaves as 1). Fix candidate:
   small dedicated dispatch once someone decides the intended semantics.
 
-- `usertests -q` fails at `copyinstr2`: `exec(echo, BIG)` succeeds where it
-  should fail (argument-size validation gap in exec/vm path). Reproduced on
-  unmodified baseline 2026-07-11. Fix candidate during Phase-2 Wave 26
-  (exec.c port).
+- ~~`usertests -q` fails at `copyinstr2`: `exec(echo, BIG)` succeeds where
+  it should fail (argument-size validation gap in exec/vm path)~~ —
+  diagnosis DISPROVEN during Wave 26 (2026-07-13): exec's argument-size
+  validation exists and fires correctly; the real root cause is the
+  POSIX-style `wait()` status encoding (see the consolidated entry
+  above). The `-q` run still stops at copyinstr2 until that proc-side
+  encoding decision is made.
 - ~~`map_pages`/`walk_internal` (vm_pgtab.rs): intermediate page-table pages
   from earlier loop iterations are never freed when a later iteration fails
   with ENOMEM~~ — fixed in Iteration 11 (`unwind_partial_map`).
@@ -826,6 +922,22 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   `grep CMAKE_BUILD_TYPE build/CMakeCache.txt` is **empty** — a stray
   `Release` appends `-O3 -DNDEBUG` after the project's `-O0` and the C
   kernel breaks under -O3 (same respawn-loop signature; see Iteration 23).
+  **NEW VECTOR (recurred during Wave 26, 2026-07-13)**: `cmake --build .
+  --target qemu` (e.g. from an expect/test-driver script) ALSO triggers a
+  full regenerate whenever any CMakeLists.txt is newer than the cache —
+  if that shell lacks the exports, the cache is silently rewritten to
+  system GCC + LAB=util *mid-verification* and every subsequent test runs
+  on a poisoned kernel (top-level CMakeLists defaults LAB to "util"
+  instead of erroring, so nothing fails loudly; this kernel even happened
+  to boot and pass most tests under GCC 13.2, making the poisoning easy
+  to miss). Wave 26 caught it via the C_COMPILER cache check + the
+  linker-warning path prefix (`/usr/bin/...-ld` vs the toolchain path)
+  and re-ran its full verification matrix on a clean toolchain rebuild
+  (results were identical, but that was luck, not safety). Rule: ANY
+  script that can invoke cmake — including QEMU-driving expect scripts —
+  must set TOOLPREFIX/LAB in its own environment, and every wave's
+  verification must re-check `C_COMPILER`/`CMAKE_BUILD_TYPE` in the cache
+  *after* its last QEMU run, not just before its first.
 
 - **Boot gate**: assert `grep -c "init: starting sh"` == 1 AND a `/ $` prompt
   in the console log — do not just tail the log.

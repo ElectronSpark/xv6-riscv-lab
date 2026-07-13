@@ -208,3 +208,18 @@
 #include <dev/plic.h>
 #include <dev/e1000_dev.h>
 #include <timer/goldfish_rtc.h>
+
+/* elf.h -- Phase 2 Wave 26 (exec.c port): `struct elfhdr`/`struct proghdr`,
+ * the ELF64 file/program headers `kernel/exec.rs` reads directly out of
+ * `vfs_fileread()`'s buffer field-by-field (`elf.magic`/`.entry`/`.phoff`/
+ * `.phnum`, `ph.type_`/`.flags`/`.off`/`.vaddr`/`.filesz`/`.memsz` --
+ * bindgen renames the `type` field to `type_`, Rust keyword). Real bindgen
+ * layout, not a hand-rolled struct: this is on-disk-adjacent ABI (the
+ * binary's own header bytes), same rationale as every ondisk.h struct
+ * added in Wave 19. No static-inline bodies (plain structs + `#define`
+ * constants only), so a clean additive include; the `#define`s
+ * (`ELF_MAGIC`/`ELF_PROG_LOAD`/`ELF_PROG_FLAG_*`) are hand-copied as local
+ * `const`s in `exec.rs` instead, matching this crate's established
+ * per-file convention for small integer macros (`vfs/inode.rs`'s
+ * `S_IFMT`, `vfs/xv6fs/mod.rs`'s `FSMAGIC`, ...). */
+#include "elf.h"

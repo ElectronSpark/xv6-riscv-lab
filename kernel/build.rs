@@ -157,6 +157,12 @@ fn main() {
         // the hardware DMA descriptor ring layout (x1_emac.h) -- see
         // wrapper.h's matching comment.
         .allowlist_type("phy_state|x1_rx_desc|x1_tx_desc")
+        // Phase 2 Wave 26 (exec.c port): the ELF64 file/program header
+        // structs `kernel/exec.rs` reads directly -- see wrapper.h's
+        // matching comment. `ELF_MAGIC`/`ELF_PROG_LOAD`/`ELF_PROG_FLAG_*`
+        // are hand-copied local consts in exec.rs, not bindgen vars (same
+        // convention as every other small-integer-macro header).
+        .allowlist_type("elfhdr|proghdr")
         .allowlist_var("PROT_.*|VMA_FLAG_.*|PTE_.*|PGSIZE|PGSHIFT|PAGE_SHIFT|MAXVA|UVMTOP|UVMBOTTOM|TRAPFRAME|TRAPFRAME_POFFSET|NCPU")
         .allowlist_var("MAP_.*|MREMAP_.*|MS_ASYNC|MS_SYNC|MS_INVALIDATE|MADV_.*")
         .allowlist_var("MAXUSTACK|USTACKTOP|USTACK_MAX_BOTTOM|USERSTACK_GROWTH|USERSTACK_MINSZ|UHEAP_MAX_TOP|PROT_MASK")
