@@ -37,6 +37,11 @@ impl<'a, T> Iterator for ListIterator<'a, T> {
         if self.head.is_null() || self.curr.is_null() || self.curr == self.head {
             return None;
         }
+        // SAFETY: `self.curr`/`self.offset` uphold the same contract as
+        // `ListIterator::new`'s `# Safety` (valid list node, correct
+        // `list_node_t` member offset within `T`) for every node in the
+        // list, since `new` established it for `head` and this loop
+        // only ever advances `curr` along that same list's `next` links.
         unsafe {
             let item_ptr = (self.curr as *mut u8).sub(self.offset) as *mut T;
             self.curr = (*self.curr).next;
@@ -49,6 +54,9 @@ impl<'a, T> Iterator for ListIterator<'a, T> {
 macro_rules! list_for_each {
     ($head:expr, $offset:expr, $t:ident, $body:block) => {
         if !$head.is_null() {
+            // SAFETY: caller of `list_for_each!` upholds `ListIterator::new`'s
+            // `# Safety` contract ($head is a valid, initialized `list_node_t`;
+            // $offset is the correct member offset within the element type).
             let iter = unsafe { $crate::list::ListIterator::new($head, $offset) };
             for $t in iter {
                 $body

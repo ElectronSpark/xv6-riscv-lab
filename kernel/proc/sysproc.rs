@@ -150,7 +150,11 @@ pub extern "C" fn sys_getpid() -> u64 {
 
 #[no_mangle]
 pub extern "C" fn sys_getppid() -> u64 {
-    let cta = crate::proc::access::ThreadAccess::assume(current());
+    // SAFETY: `current()` (`xv6_current_thread()`) is the running thread that the
+    // currently running thread's pointer (from
+    // `xv6_current_thread()`/`current()`) is a kernel-wide invariant: always
+    // non-null while executing kernel code on behalf of a thread.
+    let cta = unsafe { crate::proc::access::ThreadAccess::assume(current()) };
     let parent = cta.parent_ptr();
     if parent.is_null() {
         return 1;
@@ -160,7 +164,11 @@ pub extern "C" fn sys_getppid() -> u64 {
 
 #[no_mangle]
 pub extern "C" fn sys_gettid() -> u64 {
-    crate::proc::access::ThreadAccess::assume(current()).pid() as u64
+    // SAFETY: `current()` (`xv6_current_thread()`) is the running thread that the
+    // currently running thread's pointer (from
+    // `xv6_current_thread()`/`current()`) is a kernel-wide invariant: always
+    // non-null while executing kernel code on behalf of a thread.
+    unsafe { crate::proc::access::ThreadAccess::assume(current()) }.pid() as u64
 }
 
 #[no_mangle]
@@ -191,7 +199,11 @@ pub extern "C" fn sys_clone() -> u64 {
         args.flags   = SIGCHLD;
         args.esignal = SIGCHLD;
     } else {
-        let cta = crate::proc::access::ThreadAccess::assume(current());
+        // SAFETY: `current()` (`xv6_current_thread()`) is the running thread that the
+        // currently running thread's pointer (from
+        // `xv6_current_thread()`/`current()`) is a kernel-wide invariant:
+        // always non-null while executing kernel code on behalf of a thread.
+        let cta = unsafe { crate::proc::access::ThreadAccess::assume(current()) };
         if vm_copyin(cta.vm_ptr(),
                      &mut args as *mut _ as *mut c_void,
                      uargs,
@@ -228,7 +240,11 @@ pub extern "C" fn sys_waitpid() -> u64 {
 pub extern "C" fn sys_sbrk() -> u64 {
     let mut n: i64 = 0;
     argint64(0, &mut n);
-    let cta = crate::proc::access::ThreadAccess::assume(current());
+    // SAFETY: `current()` (`xv6_current_thread()`) is the running thread that the
+    // currently running thread's pointer (from
+    // `xv6_current_thread()`/`current()`) is a kernel-wide invariant: always
+    // non-null while executing kernel code on behalf of a thread.
+    let cta = unsafe { crate::proc::access::ThreadAccess::assume(current()) };
     if let Some(addr) = cta.get_heap_addr() {
         if vm_growheap(cta.vm_ptr(), n) < 0 {
             return (-1i64) as u64;

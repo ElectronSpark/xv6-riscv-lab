@@ -14,7 +14,7 @@ use crate::lock::spinlock::spin_init;
 use crate::lock::spinlock::spin_lock;
 use crate::lock::spinlock::spin_unlock;
 use crate::machine::cpuid;
-use crate::proc::access::{is_err_or_null, RqRef, SchedEntityRef, ThreadAccess, zeroed};
+use crate::proc::access::{is_err_or_null, zeroed_sched_attr, RqRef, SchedEntityRef, ThreadAccess};
 use crate::proc::xv6_rqport_pick_next_rq;
 use crate::proc::xv6_rqport_rq_lock;
 use crate::proc::xv6_rqport_rq_unlock;
@@ -70,7 +70,11 @@ macro_rules! rq_test_raw {
 
 #[inline]
 fn sched_entity_of(p: *mut thread) -> *mut sched_entity {
-    ThreadAccess::assume(p).sched_entity_ptr()
+    // SAFETY: `sched_entity_of` is this test module's choke point; every call site
+    // passes either `xv6_current_thread()` or a `test_procs[]` entry populated
+    // by this test's own thread-creation setup -- always a live, non-null
+    // thread pointer.
+    unsafe { ThreadAccess::assume(p) }.sched_entity_ptr()
 }
 
 #[inline]
@@ -109,7 +113,7 @@ fn test_priority_change() {
         printf(c"TEST: Priority Change via xv6_rqport_sched_setattr\n".as_ptr());
         let se = current_sched_entity();
 
-        let mut attr: sched_attr = zeroed();
+        let mut attr: sched_attr = zeroed_sched_attr();
         xv6_rqport_sched_getattr(se, &mut attr);
         let original_priority = attr.priority;
         let original_major = MAJOR_PRIORITY(original_priority);
@@ -123,7 +127,7 @@ fn test_priority_change() {
         let ret = xv6_rqport_sched_setattr(se, &attr);
         assert_msg(ret == 0, c"rq_test: xv6_rqport_sched_setattr failed".as_ptr());
 
-        let mut new_attr: sched_attr = zeroed();
+        let mut new_attr: sched_attr = zeroed_sched_attr();
         xv6_rqport_sched_getattr(se, &mut new_attr);
         let changed_major = MAJOR_PRIORITY(new_attr.priority);
         let changed_minor = MINOR_PRIORITY(new_attr.priority);
@@ -184,7 +188,7 @@ fn test_rq_selection() {
 // --- Test 5: priority ordering --------------------------------------------
 fn verify_priority(se: *mut sched_entity, expected_major: c_int, expected_minor: c_int) -> bool {
     rq_test_raw! {
-        let mut attr: sched_attr = zeroed();
+        let mut attr: sched_attr = zeroed_sched_attr();
         xv6_rqport_sched_getattr(se, &mut attr);
         let am = MAJOR_PRIORITY(attr.priority);
         let an = MINOR_PRIORITY(attr.priority);
@@ -199,7 +203,7 @@ fn verify_priority(se: *mut sched_entity, expected_major: c_int, expected_minor:
 
 fn set_and_check(se: *mut sched_entity, major: c_int, minor: c_int) {
     rq_test_raw! {
-        let mut attr: sched_attr = zeroed();
+        let mut attr: sched_attr = zeroed_sched_attr();
         xv6_rqport_sched_attr_init(&mut attr);
         attr.priority = MAKE_PRIORITY(major, minor);
         xv6_rqport_sched_setattr(se, &attr);
@@ -224,7 +228,7 @@ fn test_priority_ordering() {
         let se = current_sched_entity();
         let test_cpu = cpuid();
 
-        let mut original_attr: sched_attr = zeroed();
+        let mut original_attr: sched_attr = zeroed_sched_attr();
         xv6_rqport_sched_getattr(se, &mut original_attr);
 
         // Case 1: different top-layer groups
@@ -352,7 +356,7 @@ fn test_priority_ordered_activation() {
             assert_msg(!is_err_or_null(test_procs[i]), c"rq_test: kthread_create failed".as_ptr());
 
             let se = sched_entity_of(test_procs[i]);
-            let mut attr: sched_attr = zeroed();
+            let mut attr: sched_attr = zeroed_sched_attr();
             xv6_rqport_sched_attr_init(&mut attr);
             attr.priority = TEST_PRIORITIES[i];
             attr.affinity_mask = cpu_mask;
@@ -414,7 +418,7 @@ fn test_affinity_change() {
         printf(c"TEST: CPU Affinity Change\n".as_ptr());
         let se = current_sched_entity();
 
-        let mut attr: sched_attr = zeroed();
+        let mut attr: sched_attr = zeroed_sched_attr();
         xv6_rqport_sched_getattr(se, &mut attr);
         let original_mask = attr.affinity_mask;
 

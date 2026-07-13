@@ -168,7 +168,9 @@ pub extern "C" fn sys_sigreturn() -> u64 {
     }
     // Return the restored a0 from the sigframe so the syscall dispatcher
     // doesn't overwrite it (preserves e.g. -EINTR from sigsuspend).
-    crate::proc::access::ThreadAccess::assume(p).trapframe_a0()
+    // SAFETY: `p` is proven non-null by the diverging null check (`if p.is_null() {
+    // loop { ... } }`) above.
+    unsafe { crate::proc::access::ThreadAccess::assume(p) }.trapframe_a0()
 }
 
 #[no_mangle]

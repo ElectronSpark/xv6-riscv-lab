@@ -20,7 +20,6 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 #![allow(non_snake_case)]
-#![allow(clippy::missing_safety_doc)]
 
 use core::ffi::{c_char, c_int, c_void};
 use core::mem::offset_of;
@@ -130,6 +129,24 @@ impl PcpuCache {
 }
 
 // ---------------------------------------------------------------------------
+// Layout pins (compile-time). Formerly `_Static_assert`s in the deleted
+// `page_shims.c` / `page_shims.rs`; `Page`/`BuddyPool` are hand-rolled
+// mirrors of the C `page_t`/`buddy_pool_t`, so these guards are what
+// actually catches ABI drift between this file and the kernel headers.
+// ---------------------------------------------------------------------------
+const _: () = {
+    assert!(core::mem::size_of::<Page>() == 128, "Page size != 128");
+    assert!(core::mem::align_of::<Page>() == 64, "Page alignment != 64");
+    assert!(core::mem::size_of::<BuddyPool>() == 128, "BuddyPool size != 128");
+    assert!(core::mem::align_of::<BuddyPool>() == 64, "BuddyPool alignment != 64");
+    assert!(
+        core::mem::size_of::<crate::bindings::list_node_t>() == 16,
+        "list_node_t size != 16"
+    );
+    assert!(PAGE_BUDDY_MAX_ORDER == 10, "PAGE_BUDDY_MAX_ORDER must be 10");
+};
+
+// ---------------------------------------------------------------------------
 // Page accessor helpers. The union arms are stored inside `union_bytes`;
 // every read/write below is done through safe array indexing +
 // `from_ne_bytes` / `to_ne_bytes`, with no raw-pointer dereferences.
@@ -165,7 +182,7 @@ impl Page {
 
     #[inline]
     pub fn buddy_order(&self) -> u32 {
-        let b: [u8; 4] = self.union_bytes[16..20].try_into().unwrap();
+        let b: [u8; 4] = self.union_bytes[16..20].try_into().expect("BUG: fixed-width slice cast");
         u32::from_ne_bytes(b)
     }
     #[inline]
@@ -174,7 +191,7 @@ impl Page {
     }
     #[inline]
     pub fn buddy_state(&self) -> u32 {
-        let b: [u8; 4] = self.union_bytes[20..24].try_into().unwrap();
+        let b: [u8; 4] = self.union_bytes[20..24].try_into().expect("BUG: fixed-width slice cast");
         u32::from_ne_bytes(b)
     }
     #[inline]
@@ -187,7 +204,7 @@ impl Page {
     // slab.order  : u32         at offset 8..12
     #[inline]
     pub fn slab_slab(&self) -> *mut c_void {
-        let b: [u8; 8] = self.union_bytes[0..8].try_into().unwrap();
+        let b: [u8; 8] = self.union_bytes[0..8].try_into().expect("BUG: fixed-width slice cast");
         usize::from_ne_bytes(b) as *mut c_void
     }
     #[inline]
@@ -197,7 +214,7 @@ impl Page {
     }
     #[inline]
     pub fn slab_order(&self) -> u32 {
-        let b: [u8; 4] = self.union_bytes[8..12].try_into().unwrap();
+        let b: [u8; 4] = self.union_bytes[8..12].try_into().expect("BUG: fixed-width slice cast");
         u32::from_ne_bytes(b)
     }
     #[inline]
@@ -218,7 +235,7 @@ impl Page {
     // pcache.pcache_node*  : *mut c_void at 8..16
     #[inline]
     pub fn pcache_node(&self) -> *mut c_void {
-        let b: [u8; 8] = self.union_bytes[8..16].try_into().unwrap();
+        let b: [u8; 8] = self.union_bytes[8..16].try_into().expect("BUG: fixed-width slice cast");
         usize::from_ne_bytes(b) as *mut c_void
     }
     #[inline]
@@ -283,7 +300,7 @@ mod ffi {
         xv6_cpuid, xv6_push_off, xv6_pop_off,
         xv6_list_init, xv6_list_is_empty, xv6_list_is_detached,
         xv6_list_detach, xv6_list_push_front, xv6_list_pop_front,
-        memset,
+        memset, __panic_start, __panic_end,
     };
 
     unsafe extern "C" {
@@ -299,27 +316,9 @@ mod ffi {
         pub safe static __physical_memory_end: u64;
         pub safe static __physical_total_pages: u64;
 
-        // Platform info accessors (page_shims.c)
-        pub safe fn xv6_platform_has_ramdisk() -> c_int;
-        pub safe fn xv6_platform_ramdisk_base() -> u64;
-        pub safe fn xv6_platform_ramdisk_size() -> u64;
-        pub safe fn xv6_platform_reserved_count() -> c_int;
-        pub safe fn xv6_platform_reserved_base(i: c_int) -> u64;
-        pub safe fn xv6_platform_reserved_size(i: c_int) -> u64;
-
-        // Diagnostic / panic shims
-        pub safe fn xv6_buddy_panic(msg: *const c_char) -> !;
-        pub safe fn xv6_buddy_log_init_range(pa_start: u64, pa_end: u64, flags: u64);
-        pub safe fn xv6_buddy_log_init_invalid_range(pa_start: u64, pa_end: u64);
-        pub safe fn xv6_buddy_log_init_invalid_base(pa_start: u64, pa_end: u64);
-        pub safe fn xv6_buddy_log_init_invalid_flags(flags: u64);
-        pub safe fn xv6_buddy_log_init_get_page(pa: u64);
-        pub safe fn xv6_buddy_log_reserved_out_of_range(start: u64, end: u64);
-        pub safe fn xv6_buddy_log_reserving(start: u64, end: u64);
-        pub safe fn xv6_buddy_log_init_summary(pages_ptr: *mut c_void, size: usize);
-        pub safe fn xv6_buddy_log_init_range_phys(start: u64, end: u64);
-        pub safe fn xv6_buddy_log_buddy_range(start: u64, end: u64);
-        pub safe fn print_buddy_system_stat(detailed: c_int);
+        // argint() -- syscall argument fetch (kernel/inc/defs.h), needed by
+        // `sys_memstat` below.
+        pub safe fn argint(n: c_int, ip: *mut c_int);
     }
 
     // --- Type-adapting wrappers (safe Rust, no unsafe blocks). -----------
@@ -340,28 +339,100 @@ mod ffi {
     #[inline] pub fn phystop() -> u64 { __physical_memory_end }
     #[inline] pub fn totalpages() -> u64 { __physical_total_pages }
 
-    #[inline] pub fn has_ramdisk() -> bool { xv6_platform_has_ramdisk() != 0 }
-    #[inline] pub fn ramdisk_base() -> u64 { xv6_platform_ramdisk_base() }
-    #[inline] pub fn ramdisk_size() -> u64 { xv6_platform_ramdisk_size() }
-    #[inline] pub fn reserved_count() -> i32 { xv6_platform_reserved_count() }
-    #[inline] pub fn reserved_base(i: i32) -> u64 { xv6_platform_reserved_base(i) }
-    #[inline] pub fn reserved_size(i: i32) -> u64 { xv6_platform_reserved_size(i) }
-
-    #[inline] pub fn panic(msg: &'static [u8]) -> ! {
-        xv6_buddy_panic(msg.as_ptr() as *const c_char)
+    // --- Platform info -- reads the bindgen `platform` global directly.
+    // Previously ten `xv6_platform_*` round-trips through the deleted
+    // page_shims.rs; page.rs is the only caller, so there is no reason to
+    // cross the C-ABI boundary for a plain field read. ---------------------
+    #[inline]
+    pub fn has_ramdisk() -> bool {
+        // SAFETY: `platform` is populated once by `fdt_init()` before any mm
+        // init code runs; every reader here executes afterward on the
+        // single boot CPU, so this plain field read is race-free.
+        unsafe { crate::bindings::platform.has_ramdisk != 0 }
+    }
+    #[inline] pub fn ramdisk_base() -> u64 { unsafe { crate::bindings::platform.ramdisk_base } }
+    #[inline] pub fn ramdisk_size() -> u64 { unsafe { crate::bindings::platform.ramdisk_size } }
+    #[inline] pub fn reserved_count() -> i32 { unsafe { crate::bindings::platform.reserved_count } }
+    #[inline]
+    pub fn reserved_base(i: i32) -> u64 {
+        // SAFETY: bounds-checked against `platform.reserved_count` before
+        // indexing into the `platform.reserved` array.
+        unsafe {
+            if i < 0 || i >= crate::bindings::platform.reserved_count { return 0; }
+            (*crate::bindings::platform.reserved.offset(i as isize)).base
+        }
+    }
+    #[inline]
+    pub fn reserved_size(i: i32) -> u64 {
+        // SAFETY: see `reserved_base`.
+        unsafe {
+            if i < 0 || i >= crate::bindings::platform.reserved_count { return 0; }
+            (*crate::bindings::platform.reserved.offset(i as isize)).size
+        }
     }
 
-    #[inline] pub fn log_init_range(s: u64, e: u64, f: u64) { xv6_buddy_log_init_range(s, e, f) }
-    #[inline] pub fn log_init_invalid_range(s: u64, e: u64) { xv6_buddy_log_init_invalid_range(s, e) }
-    #[inline] pub fn log_init_invalid_base(s: u64, e: u64) { xv6_buddy_log_init_invalid_base(s, e) }
-    #[inline] pub fn log_init_invalid_flags(f: u64) { xv6_buddy_log_init_invalid_flags(f) }
-    #[inline] pub fn log_init_get_page(pa: u64) { xv6_buddy_log_init_get_page(pa) }
-    #[inline] pub fn log_reserved_out_of_range(s: u64, e: u64) { xv6_buddy_log_reserved_out_of_range(s, e) }
-    #[inline] pub fn log_reserving(s: u64, e: u64) { xv6_buddy_log_reserving(s, e) }
-    #[inline] pub fn log_init_summary(p: *mut c_void, sz: usize) { xv6_buddy_log_init_summary(p, sz) }
-    #[inline] pub fn log_init_range_phys(s: u64, e: u64) { xv6_buddy_log_init_range_phys(s, e) }
-    #[inline] pub fn log_buddy_range(s: u64, e: u64) { xv6_buddy_log_buddy_range(s, e) }
-    #[inline] pub fn print_stat(detailed: c_int) { print_buddy_system_stat(detailed) }
+    // --- Panic / diagnostic printf -- previously the `xv6_buddy_panic` and
+    // ten `xv6_buddy_log_*` round-trips through the deleted page_shims.rs;
+    // now direct `printf` calls guarded by a single-purpose format string
+    // each. `printf` is variadic so it cannot be declared `safe`. ---------
+    #[inline]
+    pub fn panic(msg: &'static [u8]) -> ! {
+        __panic_start();
+        // SAFETY: `msg` is always a NUL-terminated byte-string literal
+        // supplied by call sites in this module.
+        unsafe { super::printf(b"%s\n\0".as_ptr() as *const c_char, msg.as_ptr()); }
+        __panic_end()
+    }
+
+    #[inline] pub fn log_init_range(s: u64, e: u64, f: u64) {
+        static FMT: &[u8] = b"init pages from 0x%lx to 0x%lx with flags 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e, f); }
+    }
+    #[inline] pub fn log_init_invalid_range(s: u64, e: u64) {
+        static FMT: &[u8] = b"invalid range, pa_start: 0x%lx, pa_end: 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+    }
+    #[inline] pub fn log_init_invalid_base(s: u64, e: u64) {
+        static FMT: &[u8] = b"invalid range base, pa_start: 0x%lx, pa_end: 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+    }
+    #[inline] pub fn log_init_invalid_flags(f: u64) {
+        static FMT: &[u8] = b"invalid flags: 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, f); }
+    }
+    #[inline] pub fn log_init_get_page(pa: u64) {
+        static FMT: &[u8] = b"failed to get page for physical address 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, pa); }
+    }
+    #[inline] pub fn log_reserved_out_of_range(s: u64, e: u64) {
+        static FMT: &[u8] = b"reserved mem out of range: 0x%lx to 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+    }
+    #[inline] pub fn log_reserving(s: u64, e: u64) {
+        static FMT: &[u8] = b"reserving pages from 0x%lx to 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+    }
+    #[inline] pub fn log_init_summary(p: *mut c_void, sz: usize) {
+        static FMT: &[u8] = b"page_buddy_init(): page array at 0x%lx, size 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, p as u64, sz as u64); }
+    }
+    #[inline] pub fn log_init_range_phys(s: u64, e: u64) {
+        static FMT: &[u8] = b"__managed_start: 0x%lx, __managed_end: 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+    }
+    #[inline] pub fn log_buddy_range(s: u64, e: u64) {
+        static FMT: &[u8] = b"buddy init range: 0x%lx - 0x%lx\n\0";
+        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+    }
+    #[inline] pub fn print_stat(detailed: c_int) { super::print_buddy_system_stat(detailed) }
+}
+
+// `printf` is shared by every diagnostic-printing helper in this module
+// (the `ffi::log_*`/`ffi::panic` wrappers above, plus the statistics
+// printer and integrity checker below). Declared once here instead of
+// once per call site.
+unsafe extern "C" {
+    fn printf(fmt: *const c_char, ...) -> c_int;
 }
 
 // ===========================================================================
@@ -751,6 +822,12 @@ impl BuddyPool {
         let entry = page.buddy_lru_ptr();
         ffi::list_push_front(&mut self.lru_head, entry);
         self.count += 1;
+        // SeqCst: publishes the plain (non-atomic) list-node/count update
+        // to unlocked readers (e.g. `xv6_buddy_pool_count`,
+        // `page_buddy_stat`) that peek at pool state without taking the
+        // pool spinlock; kept conservative rather than proven-sufficient
+        // Release, since those readers use plain loads with no matching
+        // Acquire.
         fence(Ordering::SeqCst);
     }
 
@@ -761,6 +838,9 @@ impl BuddyPool {
             return None;
         }
         self.count -= 1;
+        // SeqCst: same rationale as `push_page` — publishes the count/list
+        // update to unlocked peekers before the popped page is handed
+        // back to the caller for reuse.
         fence(Ordering::SeqCst);
         lru_node_to_page(node)
     }
@@ -850,6 +930,10 @@ impl Page {
         self.set_buddy_order(order_after);
         let buddy = page_offset_from(self, half);
         buddy.as_buddy_header(order_after as u64, BUDDY_STATE_INTERMEDIATE);
+        // SeqCst: publishes the new buddy header's state/order fields
+        // before the caller (typically `buddy_get`, still holding the
+        // pool lock) inserts it back into a pool list that unlocked
+        // readers may peek at.
         fence(Ordering::SeqCst);
         Some(buddy)
     }
@@ -1220,8 +1304,18 @@ fn pa_to_page(physical: u64) -> Option<&'static mut Page> {
 // ===========================================================================
 // Borrow helpers for raw `*mut Page` arriving via FFI
 // ===========================================================================
+// `&'static mut Page` (not a free `<'a>`) because every `Page` lives in
+// the global page array allocated once by `page_buddy_init` and never
+// freed/moved for the rest of the kernel's lifetime, matching
+// `pa_to_page`'s return type above. Exclusivity of the resulting
+// `&mut` is a caller obligation documented on each public FFI entry
+// point that calls this helper (the C side must not hold or create a
+// second reference into the same `Page` for the call's duration).
 #[inline]
-fn page_ref<'a>(p: *mut Page) -> Option<&'a mut Page> {
+fn page_ref(p: *mut Page) -> Option<&'static mut Page> {
+    // SAFETY: `p`, if non-null, is trusted (by every caller's own
+    // `# Safety` contract) to be a live pointer into the global `Page`
+    // array with no other outstanding reference to the same page.
     NonNull::new(p).map(|mut nn| unsafe { nn.as_mut() })
 }
 
@@ -1229,6 +1323,20 @@ fn page_ref<'a>(p: *mut Page) -> Option<&'a mut Page> {
 // PUBLIC API (C ABI)
 // ===========================================================================
 
+/// Initializes the buddy page allocator: allocates the global `Page`
+/// array, sets `__pages`/`__managed_start`/`__managed_end`, and builds
+/// the free lists over the managed physical range.
+///
+/// # Safety
+///
+/// - Must be called exactly once, at boot time, before any other
+///   function in this module (all of them read `__pages` /
+///   `__managed_start` / `__managed_end`, which are unwritten until
+///   this returns).
+/// - Must run single-threaded (no other hart may be executing kernel
+///   code that touches page-allocator state concurrently) — the
+///   internal writes to the allocator's global statics are not
+///   synchronized.
 #[no_mangle]
 pub unsafe extern "C" fn page_buddy_init() -> c_int {
     let total_pages = ffi::totalpages();
@@ -1285,6 +1393,12 @@ pub unsafe extern "C" fn page_buddy_init() -> c_int {
     0
 }
 
+/// Allocates a `2^order`-page block from the buddy allocator. Returns
+/// null on failure or if `order` exceeds `PAGE_BUDDY_MAX_ORDER`.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called.
 #[no_mangle]
 pub unsafe extern "C" fn __page_alloc(order: u64, flags: u64) -> *mut Page {
     if order > PAGE_BUDDY_MAX_ORDER { return ptr::null_mut(); }
@@ -1294,6 +1408,18 @@ pub unsafe extern "C" fn __page_alloc(order: u64, flags: u64) -> *mut Page {
     }
 }
 
+/// Frees a `2^order`-page block previously returned by
+/// [`__page_alloc`]/[`page_alloc`] with the same `order`. No-op if
+/// `page` is null.
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array previously returned by [`__page_alloc`]/[`page_alloc`]
+///   at the given `order`, not already freed (no double free), and the
+///   caller must hold no other reference into the `count`-page group
+///   starting at `page` for the duration of this call.
+/// - `page_buddy_init` must have completed before this is called.
 #[no_mangle]
 pub unsafe extern "C" fn __page_free(page: *mut Page, order: u64) {
     let Some(p) = page_ref(page) else { return };
@@ -1338,6 +1464,15 @@ pub unsafe extern "C" fn __page_free(page: *mut Page, order: u64) {
     buddy_merge_and_insert(p, order);
 }
 
+/// Allocates a `2^order`-page block and returns its physical address
+/// as `*mut c_void`, zero-filled (byte pattern `5`, matching the C
+/// implementation's debug-fill convention). Panics if the allocation
+/// succeeds but its physical address cannot be computed.
+///
+/// # Safety
+///
+/// - Same preconditions as [`__page_alloc`]: `page_buddy_init` must
+///   have completed before this is called.
 #[no_mangle]
 pub unsafe extern "C" fn page_alloc(order: u64, flags: u64) -> *mut c_void {
     let page = __page_alloc(order, flags);
@@ -1348,6 +1483,16 @@ pub unsafe extern "C" fn page_alloc(order: u64, flags: u64) -> *mut c_void {
     pa
 }
 
+/// Frees the `2^order`-page block whose physical base address is
+/// `ptr`. No-op if `ptr` does not translate to a page inside the
+/// managed range.
+///
+/// # Safety
+///
+/// - `ptr`, if it does translate, must satisfy the same preconditions
+///   as [`__page_free`]: a live, previously-allocated block at this
+///   `order`, not already freed, with no other outstanding reference
+///   into the group.
 #[no_mangle]
 pub unsafe extern "C" fn page_free(ptr: *mut c_void, order: u64) {
     let page = __pa_to_page(ptr as u64);
@@ -1357,6 +1502,16 @@ pub unsafe extern "C" fn page_free(ptr: *mut c_void, order: u64) {
 // ---------------------------------------------------------------------------
 // Page locking
 // ---------------------------------------------------------------------------
+/// Acquires `page`'s embedded spinlock. No-op if `page` is null.
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array.
+/// - The lock is released by a *separate* call to
+///   [`page_lock_release`]; caller must not deadlock by re-acquiring
+///   without an intervening release, and must call `page_lock_release`
+///   exactly once for each successful acquire.
 #[no_mangle]
 pub unsafe extern "C" fn page_lock_acquire(page: *mut Page) {
     // Split-statement lock/unlock pair across C ABI boundary: matching
@@ -1369,11 +1524,25 @@ pub unsafe extern "C" fn page_lock_acquire(page: *mut Page) {
     }
 }
 
+/// Releases `page`'s embedded spinlock previously acquired via
+/// [`page_lock_acquire`]. No-op if `page` is null.
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array whose lock is currently held by the calling hart.
 #[no_mangle]
 pub unsafe extern "C" fn page_lock_release(page: *mut Page) {
     if let Some(p) = page_ref(page) { ffi::spin_unlock(p.lock_ptr()); }
 }
 
+/// Panics if `page`'s embedded spinlock is not held by the calling
+/// hart. No-op if `page` is null.
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array.
 #[no_mangle]
 pub unsafe extern "C" fn page_lock_assert_holding(page: *mut Page) {
     if let Some(p) = page_ref(page) {
@@ -1383,6 +1552,13 @@ pub unsafe extern "C" fn page_lock_assert_holding(page: *mut Page) {
     }
 }
 
+/// Panics if `page`'s embedded spinlock *is* held by the calling
+/// hart. No-op if `page` is null.
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array.
 #[no_mangle]
 pub unsafe extern "C" fn page_lock_assert_unholding(page: *mut Page) {
     if let Some(p) = page_ref(page) {
@@ -1395,6 +1571,15 @@ pub unsafe extern "C" fn page_lock_assert_unholding(page: *mut Page) {
 // ---------------------------------------------------------------------------
 // Reference counting
 // ---------------------------------------------------------------------------
+/// Locks `page` and increments its reference count. Returns -1 if
+/// `page` is null, otherwise the pre-increment behavior of
+/// `ref_inc_unlocked_impl` (new count).
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array whose lock is *not* already held by the calling
+///   hart (self-deadlock otherwise).
 #[no_mangle]
 pub unsafe extern "C" fn __page_ref_inc(page: *mut Page) -> c_int {
     let Some(p) = page_ref(page) else { return -1 };
@@ -1402,6 +1587,14 @@ pub unsafe extern "C" fn __page_ref_inc(page: *mut Page) -> c_int {
     p.ref_inc_unlocked_impl()
 }
 
+/// Increments `page`'s reference count. Caller must already hold
+/// `page`'s lock (checked by `ref_inc_unlocked_impl` via
+/// `spin_holding_b`, which panics if not held).
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array whose lock is held by the calling hart.
 #[no_mangle]
 pub unsafe extern "C" fn page_ref_inc_unlocked(page: *mut Page) -> c_int {
     match page_ref(page) {
@@ -1410,6 +1603,20 @@ pub unsafe extern "C" fn page_ref_inc_unlocked(page: *mut Page) -> c_int {
     }
 }
 
+/// Lockless (atomic) decrement of `page`'s reference count on the
+/// fast path; returns -1 without decrementing if the count would drop
+/// below 1.
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array.
+/// - No code path may treat `ref_count` as non-atomic while lockless
+///   decrements are in flight — this function reinterprets the field
+///   as `AtomicI32` for the duration of the RMW; callers that hold
+///   `page`'s spinlock and touch `ref_count` directly must ensure
+///   they are not doing so concurrently with a lockless decrement on
+///   another hart.
 #[no_mangle]
 pub unsafe extern "C" fn page_ref_dec_unlocked(page: *mut Page) -> c_int {
     let Some(p) = page_ref(page) else { return -1 };
@@ -1429,6 +1636,16 @@ pub unsafe extern "C" fn page_ref_dec_unlocked(page: *mut Page) -> c_int {
     old - 1
 }
 
+/// Locks `page`, decrements its reference count, and frees the page
+/// (returning its slab/pcache node and the block itself to the buddy
+/// allocator) if the count reaches zero. Returns 0 if `page` is null
+/// or the count was already zero.
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array whose lock is *not* already held by the calling
+///   hart.
 #[no_mangle]
 pub unsafe extern "C" fn __page_ref_dec(page: *mut Page) -> c_int {
     let Some(p) = page_ref(page) else { return -1 };
@@ -1459,18 +1676,45 @@ pub unsafe extern "C" fn __page_ref_dec(page: *mut Page) -> c_int {
     ret
 }
 
+/// Returns the reference count of the page containing physical
+/// address `physical`, or -1 if it does not translate to a managed
+/// page.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called.
+///   `physical` itself is validated internally (`pa_to_page` range
+///   checks), so no additional pointer-validity precondition applies.
 #[no_mangle]
 pub unsafe extern "C" fn page_refcnt(physical: *mut c_void) -> c_int {
     let page = __pa_to_page(physical as u64);
     page_ref_count(page)
 }
 
+/// Locks and increments the reference count of the page containing
+/// physical address `ptr`. See [`__page_ref_inc`] for the locking
+/// precondition once translated.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called.
+/// - If `ptr` translates to a managed page, that page's lock must not
+///   already be held by the calling hart.
 #[no_mangle]
 pub unsafe extern "C" fn page_ref_inc(ptr: *mut c_void) -> c_int {
     let page = __pa_to_page(ptr as u64);
     __page_ref_inc(page)
 }
 
+/// Locks and decrements the reference count of the page containing
+/// physical address `ptr`, freeing it if the count reaches zero. See
+/// [`__page_ref_dec`] for the locking precondition once translated.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called.
+/// - If `ptr` translates to a managed page, that page's lock must not
+///   already be held by the calling hart.
 #[no_mangle]
 pub unsafe extern "C" fn page_ref_dec(ptr: *mut c_void) -> c_int {
     let page = __pa_to_page(ptr as u64);
@@ -1480,6 +1724,13 @@ pub unsafe extern "C" fn page_ref_dec(ptr: *mut c_void) -> c_int {
 // ---------------------------------------------------------------------------
 // Address translation
 // ---------------------------------------------------------------------------
+/// Translates a physical address to its owning `Page*`, or null if
+/// `physical` is outside the managed range.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called
+///   (`__pages`/`__managed_start`/`__managed_end` must be set).
 #[no_mangle]
 pub unsafe extern "C" fn __pa_to_page(physical: u64) -> *mut Page {
     match pa_to_page(physical) {
@@ -1488,6 +1739,12 @@ pub unsafe extern "C" fn __pa_to_page(physical: u64) -> *mut Page {
     }
 }
 
+/// Returns `page`'s physical address, or 0 if `page` is null.
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array.
 #[no_mangle]
 pub unsafe extern "C" fn __page_to_pa(page: *mut Page) -> u64 {
     match page_ref(page) {
@@ -1496,6 +1753,14 @@ pub unsafe extern "C" fn __page_to_pa(page: *mut Page) -> u64 {
     }
 }
 
+/// Returns `page`'s current reference count, or -1 if `page` is null.
+///
+/// # Safety
+///
+/// - `page`, if non-null, must be a live pointer into the global
+///   `Page` array. The read is not synchronized with concurrent
+///   lockless decrements ([`page_ref_dec_unlocked`]); callers wanting
+///   a linearizable snapshot must hold `page`'s lock.
 #[no_mangle]
 pub unsafe extern "C" fn page_ref_count(page: *mut Page) -> c_int {
     match page_ref(page) {
@@ -1504,6 +1769,12 @@ pub unsafe extern "C" fn page_ref_count(page: *mut Page) -> c_int {
     }
 }
 
+/// Returns the physical base address of the managed page range.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called (the
+///   static is otherwise a leftover zero/uninitialized value).
 #[no_mangle]
 pub unsafe extern "C" fn managed_page_base() -> u64 {
     __managed_start
@@ -1512,6 +1783,17 @@ pub unsafe extern "C" fn managed_page_base() -> u64 {
 // ---------------------------------------------------------------------------
 // Statistics / sanity helpers
 // ---------------------------------------------------------------------------
+/// Fills `ret_arr[0..n]` with each buddy order's free-block count and,
+/// if `empty_arr` is non-null, `empty_arr[0..n]` with a 0/1 empty
+/// flag, where `n = min(size, PAGE_BUDDY_MAX_ORDER + 1)`. No-op if
+/// `ret_arr` is null or `size` is too small.
+///
+/// # Safety
+///
+/// - `ret_arr` must be valid for `size` writes of `u64`.
+/// - `empty_arr`, if non-null, must be valid for `size` writes of
+///   `u8`.
+/// - `page_buddy_init` must have completed before this is called.
 #[no_mangle]
 pub unsafe extern "C" fn page_buddy_stat(ret_arr: *mut u64,
                                          empty_arr: *mut u8,
@@ -1535,6 +1817,16 @@ pub unsafe extern "C" fn page_buddy_stat(ret_arr: *mut u64,
     buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
+/// Panics if `ptr` is null or does not fall strictly inside the
+/// global `Page` array's address range.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called
+///   (`pages_base()`/`totalpages()` must be valid).
+/// - `ptr` need not itself be dereferenced by this function — only
+///   its numeric value is compared — so no pointer-validity
+///   precondition applies to `ptr` beyond being non-null.
 #[no_mangle]
 pub unsafe extern "C" fn __check_page_pointer_in_range(ptr: *mut c_void) {
     if ptr.is_null() {
@@ -1551,31 +1843,392 @@ pub unsafe extern "C" fn __check_page_pointer_in_range(ptr: *mut c_void) {
 // ---------------------------------------------------------------------------
 // Helpers exposed to the C shim file (`page_shims.c`)
 // ---------------------------------------------------------------------------
+/// Returns the free-block count of buddy pool `order`, or 0 if
+/// `order` exceeds `PAGE_BUDDY_MAX_ORDER`.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called
+///   (the pool array is otherwise uninitialized).
+/// - The read is unsynchronized (no pool lock taken); caller must
+///   tolerate a torn/stale value or hold the range lock itself (see
+///   [`xv6_buddy_pool_lock_range_all`]).
 #[no_mangle]
 pub unsafe extern "C" fn xv6_buddy_pool_count(order: u64) -> u64 {
     if order > PAGE_BUDDY_MAX_ORDER { return 0; }
     buddy_pool(order).count
 }
 
+/// Returns the free-block count of `cpu`'s per-CPU cache at `order`,
+/// or 0 if `cpu`/`order` are out of range.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called.
+/// - `cpu` must be a valid hart index; the per-CPU cache array must
+///   have at least `NCPU` entries (invariant of the allocator's
+///   static layout, not caller-controlled).
 #[no_mangle]
 pub unsafe extern "C" fn xv6_pcpu_cache_count(cpu: u32, order: u64) -> u32 {
     if (cpu as usize) >= NCPU || order > PCPU_CACHE_MAX_ORDER { return 0; }
     pcpu_cache(cpu as usize, order).count.load(Ordering::Acquire)
 }
 
+/// Locks every buddy pool's spinlock, orders 0..=`PAGE_BUDDY_MAX_ORDER`.
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called.
+/// - Must be paired with exactly one later call to
+///   [`xv6_buddy_pool_unlock_range_all`] on the same hart before any
+///   other buddy-pool-locking call is made (the locks are held across
+///   the ABI boundary, mirroring [`page_lock_acquire`]).
 #[no_mangle]
 pub unsafe extern "C" fn xv6_buddy_pool_lock_range_all() {
     buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
+/// Releases the locks taken by [`xv6_buddy_pool_lock_range_all`].
+///
+/// # Safety
+///
+/// - Caller must currently hold every buddy pool lock, orders
+///   0..=`PAGE_BUDDY_MAX_ORDER`, acquired via a prior matching call to
+///   [`xv6_buddy_pool_lock_range_all`].
 #[no_mangle]
 pub unsafe extern "C" fn xv6_buddy_pool_unlock_range_all() {
     buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
+/// Returns the total number of managed pages
+/// (`(managed_end - managed_start) >> PAGE_SHIFT`).
+///
+/// # Safety
+///
+/// - `page_buddy_init` must have completed before this is called.
 #[no_mangle]
 pub unsafe extern "C" fn xv6_total_managed_pages() -> u64 {
     let s = __managed_start;
     let e = __managed_end;
     (e - s) >> PAGE_SHIFT
+}
+
+// ===========================================================================
+// Statistics reporting (`print_buddy_system_stat`) and the `memstat`
+// syscall body. Formerly `page_shims.rs`; moved here because it is real
+// logic (formatting + syscall dispatch), not a pure accessor round-trip.
+// ===========================================================================
+const ORDER_COUNT: usize = (PAGE_BUDDY_MAX_ORDER + 1) as usize;
+
+/// Print a byte count in the largest whole unit (G/M/K/B) that fits.
+fn print_size(bytes: u64) {
+    static F_G: &[u8] = b"%ld.%ldG\0";
+    static F_M: &[u8] = b"%ld.%ldM\0";
+    static F_K: &[u8] = b"%ldK\0";
+    static F_B: &[u8] = b"%ldB\0";
+    // SAFETY: every format string above matches its argument list exactly.
+    unsafe {
+        if bytes >= (1u64 << 30) {
+            let gb = bytes >> 30;
+            let mb = (bytes & ((1u64 << 30) - 1)) >> 20;
+            printf(F_G.as_ptr() as *const c_char, gb, (mb * 10) / 1024);
+        } else if bytes >= (1u64 << 20) {
+            let mb = bytes >> 20;
+            let kb = (bytes & ((1u64 << 20) - 1)) >> 10;
+            printf(F_M.as_ptr() as *const c_char, mb, (kb * 10) / 1024);
+        } else if bytes >= (1u64 << 10) {
+            let kb = bytes >> 10;
+            printf(F_K.as_ptr() as *const c_char, kb);
+        } else {
+            printf(F_B.as_ptr() as *const c_char, bytes);
+        }
+    }
+}
+
+/// Sum free + per-cpu-cached pages across every order. `empty_arr` mirrors
+/// `page_buddy_stat`'s raw `u8` output convention (0/1, not `bool`) so the
+/// call below needs no type-punning.
+fn buddy_stat_totals(
+    total_free_pages: &mut u64,
+    total_cached_pages: &mut u64,
+    ret_arr: &mut [u64; ORDER_COUNT],
+    empty_arr: &mut [u8; ORDER_COUNT],
+) {
+    *total_free_pages = 0;
+    *total_cached_pages = 0;
+
+    // SAFETY: `ret_arr`/`empty_arr` are stack arrays of exactly `ORDER_COUNT`
+    // elements, matching the `size` argument.
+    unsafe {
+        page_buddy_stat(ret_arr.as_mut_ptr(), empty_arr.as_mut_ptr(), ORDER_COUNT);
+    }
+
+    for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
+        let order_pages = (1u64 << i) * ret_arr[i];
+        *total_free_pages += order_pages;
+
+        if (i as u64) <= PCPU_CACHE_MAX_ORDER {
+            let mut cache_total: u64 = 0;
+            for cpu in 0..NCPU {
+                // SAFETY: `cpu`/`i` are within `xv6_pcpu_cache_count`'s
+                // documented bounds (checked internally; out-of-range
+                // returns 0).
+                cache_total += unsafe { xv6_pcpu_cache_count(cpu as u32, i as u64) } as u64;
+            }
+            if cache_total > 0 {
+                *total_cached_pages += (1u64 << i) * cache_total;
+            }
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn print_buddy_system_stat(detailed: c_int) {
+    static F_SUMMARY: &[u8] = b"Buddy: %ld free + %ld cached = %ld pages (\0";
+    static F_HDR: &[u8] = b"Buddy System Statistics:\n\0";
+    static F_BAR: &[u8] = b"========================\n\0";
+    static F_BAR2: &[u8] = b"------------------------\n\0";
+    static F_ORDER: &[u8] = b"order(%d): %ld blocks (\0";
+    static F_CACHED: &[u8] = b" + %ld cached (\0";
+    static F_CLOSE: &[u8] = b")\n\0";
+    static F_RCLOSE: &[u8] = b")\0";
+    static F_NEWLINE: &[u8] = b"\n\0";
+
+    let mut total_free_pages: u64 = 0;
+    let mut total_cached_pages: u64 = 0;
+    let mut ret_arr: [u64; ORDER_COUNT] = [0; ORDER_COUNT];
+    let mut empty_arr: [u8; ORDER_COUNT] = [0; ORDER_COUNT];
+
+    buddy_stat_totals(
+        &mut total_free_pages,
+        &mut total_cached_pages,
+        &mut ret_arr,
+        &mut empty_arr,
+    );
+
+    // SAFETY: every `printf` call below matches its own format string.
+    unsafe {
+        if detailed <= 0 {
+            printf(
+                F_SUMMARY.as_ptr() as *const c_char,
+                total_free_pages,
+                total_cached_pages,
+                total_free_pages + total_cached_pages,
+            );
+            print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
+            printf(F_CLOSE.as_ptr() as *const c_char);
+            return;
+        }
+
+        printf(F_HDR.as_ptr() as *const c_char);
+        printf(F_BAR.as_ptr() as *const c_char);
+
+        for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
+            let order_pages = (1u64 << i) * ret_arr[i];
+            let order_bytes = order_pages * PAGE_SIZE;
+
+            printf(F_ORDER.as_ptr() as *const c_char, i as c_int, ret_arr[i]);
+            print_size(order_bytes);
+            printf(F_RCLOSE.as_ptr() as *const c_char);
+
+            if (i as u64) <= PCPU_CACHE_MAX_ORDER {
+                let mut cache_total: u64 = 0;
+                for cpu in 0..NCPU {
+                    cache_total += xv6_pcpu_cache_count(cpu as u32, i as u64) as u64;
+                }
+                if cache_total > 0 {
+                    let cached_pages = (1u64 << i) * cache_total;
+                    let cached_bytes = cached_pages * PAGE_SIZE;
+                    printf(F_CACHED.as_ptr() as *const c_char, cache_total);
+                    print_size(cached_bytes);
+                    printf(F_RCLOSE.as_ptr() as *const c_char);
+                }
+            }
+            printf(F_NEWLINE.as_ptr() as *const c_char);
+        }
+
+        printf(F_BAR2.as_ptr() as *const c_char);
+        printf(
+            F_SUMMARY.as_ptr() as *const c_char,
+            total_free_pages,
+            total_cached_pages,
+            total_free_pages + total_cached_pages,
+        );
+        print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
+        printf(F_CLOSE.as_ptr() as *const c_char);
+    }
+}
+
+// ===========================================================================
+// check_buddy_system_integrity — walk every buddy pool and verify counts +
+// pointers. Diagnostic only; not on the hot path, and not currently called
+// from anywhere (no C caller, no Rust caller) -- kept as a plain fn
+// available for ad-hoc debugging rather than exported over the C ABI.
+//
+// The original `page_shims.rs` version reinterpreted `BuddyPool::lru_head`
+// (a `crate::mm::cffi::ListNode`) as `bindings::list_node_t` and computed
+// page addresses via a hardcoded `.wrapping_sub(48)`. Neither cast is
+// needed here: `lru_head` is already a `ListNode`, and `lru_node_to_page`
+// already encodes the head-offset via `offset_of!`, so the walk below
+// reuses both directly.
+// ===========================================================================
+#[allow(dead_code)]
+pub fn check_buddy_system_integrity() {
+    static FMT_PREVNEXT: &[u8] = b"prev page: %p, next page: %p\n\0";
+    static FMT_ENTRY: &[u8] = b"count = %d, buddy page: %p, order: %d, physical: 0x%lx\n\0";
+
+    let mut total_free_pages: u64 = 0;
+    buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
+    for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
+        let pool = buddy_pool(i as u64);
+        let count_field = pool.count as i64;
+        let head: *mut ListNode = &mut pool.lru_head;
+        // SAFETY: `head` is the address of a live, initialized `ListNode`
+        // embedded in the global `__buddy_pools` array; reading its
+        // `prev`/`next` fields through the raw pointer is a plain load.
+        let (head_prev, head_next) = unsafe { ((*head).prev, (*head).next) };
+        let empty = head_prev == head || head_prev.is_null();
+
+        if count_field < 0 {
+            ffi::panic(b"buddy pool count is negative\0");
+        }
+        if !(empty || count_field > 0) {
+            ffi::panic(b"buddy pool is not empty but count is zero\0");
+        }
+        if !(!empty || count_field == 0) {
+            ffi::panic(b"buddy pool is empty but count is not zero\0");
+        }
+        total_free_pages += (1u64 << i) * count_field as u64;
+
+        if !empty {
+            // SAFETY: `__check_page_pointer_in_range` and `printf` are
+            // C-ABI functions; the pointers passed are the raw list-node
+            // pointers just read above.
+            unsafe {
+                __check_page_pointer_in_range(head_prev as *mut c_void);
+                __check_page_pointer_in_range(head_next as *mut c_void);
+                printf(FMT_PREVNEXT.as_ptr() as *const c_char, head_prev, head_next);
+            }
+        }
+
+        // Walk from head.next until we loop back (list_foreach_node_safe).
+        let mut count_check = count_field as i32;
+        let mut pos = head_next;
+        while !pos.is_null() && pos != head {
+            // SAFETY: `pos` is a live list node inside the pool's LRU list.
+            let next = unsafe { (*pos).next };
+            let Some(page) = lru_node_to_page(pos) else {
+                ffi::panic(b"buddy pool LRU node has no owning page\0");
+            };
+            if !page.is_type(PAGE_TYPE_BUDDY) {
+                ffi::panic(b"buddy page is not a group head\0");
+            }
+            if page.buddy_order() as usize != i {
+                ffi::panic(b"buddy page order mismatch\0");
+            }
+            // SAFETY: `page` is a valid `&mut Page` from `lru_node_to_page`.
+            unsafe {
+                __check_page_pointer_in_range(page as *mut Page as *mut c_void);
+                if __page_to_pa(page as *mut Page) != page.physical_address {
+                    ffi::panic(b"buddy page physical address mismatch\0");
+                }
+                count_check -= 1;
+                printf(
+                    FMT_ENTRY.as_ptr() as *const c_char,
+                    count_check as c_int,
+                    page as *mut Page,
+                    page.buddy_order() as c_int,
+                    page.physical_address,
+                );
+            }
+            pos = next;
+        }
+        if count_check != 0 {
+            ffi::panic(b"buddy pool count mismatch\0");
+        }
+    }
+    buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
+    let _ = total_free_pages;
+}
+
+// ===========================================================================
+// sys_memstat — syscall body. Reads syscall arg 0 (flags), prints requested
+// stats, returns combined byte counts depending on flags.
+// ===========================================================================
+const MEMSTAT_VERBOSE: u32 = 1 << 0;
+const MEMSTAT_DETAILED: u32 = 1 << 1;
+const MEMSTAT_INCLUDE_SLAB: u32 = 1 << 2;
+const MEMSTAT_INCLUDE_BUDDY: u32 = 1 << 3;
+const MEMSTAT_ADD_FREE: u32 = 1 << 4;
+const MEMSTAT_ADD_USED: u32 = 1 << 5;
+
+#[no_mangle]
+pub extern "C" fn sys_memstat() -> u64 {
+    static FMT_FREE_LABEL: &[u8] = b"Free: \0";
+    static FMT_USED_LABEL: &[u8] = b"Used: \0";
+    static FMT_NEWLINE_ONLY: &[u8] = b"\n\0";
+
+    let mut flags_arg: c_int = 0;
+    ffi::argint(0, &mut flags_arg);
+    let flags = flags_arg as u32;
+
+    let mut total_free_pages: u64 = 0;
+    let mut total_cached_pages: u64 = 0;
+    let mut ret_arr: [u64; ORDER_COUNT] = [0; ORDER_COUNT];
+    let mut empty_arr: [u8; ORDER_COUNT] = [0; ORDER_COUNT];
+
+    if (flags & MEMSTAT_INCLUDE_BUDDY) != 0 {
+        if (flags & MEMSTAT_DETAILED) != 0 {
+            print_buddy_system_stat(1);
+        } else if (flags & MEMSTAT_VERBOSE) != 0 {
+            print_buddy_system_stat(0);
+        }
+    }
+    if (flags & MEMSTAT_INCLUDE_SLAB) != 0 {
+        if (flags & MEMSTAT_DETAILED) != 0 {
+            crate::mm::slab::slab_dump_all(2);
+        } else if (flags & MEMSTAT_VERBOSE) != 0 {
+            crate::mm::slab::slab_dump_all(1);
+        }
+    }
+
+    buddy_stat_totals(
+        &mut total_free_pages,
+        &mut total_cached_pages,
+        &mut ret_arr,
+        &mut empty_arr,
+    );
+    let free_bytes = (total_free_pages + total_cached_pages) * PAGE_SIZE;
+    // SAFETY: plain unsafe extern "C" fn call, defined earlier in this file.
+    let managed_bytes = unsafe { xv6_total_managed_pages() } * PAGE_SIZE;
+    let used_bytes = if managed_bytes > free_bytes {
+        managed_bytes - free_bytes
+    } else {
+        0
+    };
+
+    // SAFETY: every `printf` call below matches its own format string.
+    unsafe {
+        if (flags & (MEMSTAT_VERBOSE | MEMSTAT_DETAILED)) != 0 {
+            if (flags & MEMSTAT_ADD_FREE) != 0 {
+                printf(FMT_FREE_LABEL.as_ptr() as *const c_char);
+                print_size(free_bytes);
+                printf(FMT_NEWLINE_ONLY.as_ptr() as *const c_char);
+            }
+            if (flags & MEMSTAT_ADD_USED) != 0 {
+                printf(FMT_USED_LABEL.as_ptr() as *const c_char);
+                print_size(used_bytes);
+                printf(FMT_NEWLINE_ONLY.as_ptr() as *const c_char);
+            }
+        }
+    }
+
+    let mut ret: u64 = 0;
+    if (flags & MEMSTAT_ADD_FREE) != 0 {
+        ret += free_bytes;
+    }
+    if (flags & MEMSTAT_ADD_USED) != 0 {
+        ret += used_bytes;
+    }
+    ret
 }

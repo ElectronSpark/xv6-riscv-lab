@@ -1,5 +1,36 @@
 #![allow(dead_code)]
 
+//! # Safety
+//!
+//! Every `*Access`/`*Ref` type in this module (`ThreadAccess`, `PgroupAccess`,
+//! `RqRef`, `ListNodeRef`, ...) is a thin `NonNull<T>` newtype over a C
+//! struct owned by the kernel's object graph (proc table entries, embedded
+//! sub-structs reachable from them, static per-CPU/runqueue storage, ...).
+//! None of these types can verify at runtime that their pointee is a live,
+//! properly initialized `T` -- that is a kernel invariant enforced by the
+//! surrounding allocator/lifecycle code (an object is only handed to Rust
+//! after `*_alloc`/`*_init`, and is not freed while a live handle exists),
+//! not by the type system. Accordingly:
+//!
+//! - `from_raw`/`from_thread` are `unsafe fn`: if `p` is non-null, the
+//!   caller must guarantee it points to such a live, properly initialized
+//!   value for as long as the returned handle (and anything derived from
+//!   it) is used. Passing null is safe and yields `None`.
+//! - `assume`/`assume_thread` are `unsafe fn`: same contract as `from_raw`,
+//!   minus the null case -- `p` must additionally be non-null, since a null
+//!   `p` is UB here (`from_raw(p).unwrap_unchecked()`) rather than `None`.
+//! - `from_ptr` is a safe convenience wrapper that only rules out null; it
+//!   is meant for pointers already known-live by kernel convention (e.g.
+//!   another `*_ptr()` accessor's result, or an `extern "C"` argument whose
+//!   validity is documented at that FFI boundary).
+//! - The `raw_get!`/`raw_set!`/`raw_mut_ptr!`/`raw_const_ptr!`/`bit_get!`/
+//!   `bit_set!` (and sibling `raw_*_assign!`/`raw_index_*!`) macros below
+//!   all expand to a dereference of `($self).raw.as_ptr()`. Every expansion
+//!   site is sound under the same invariant: `$self.raw` was constructed
+//!   only via `from_raw`/`assume` (or their `_thread` variants) from a
+//!   pointer the caller vouched for above, so the pointee is valid for the
+//!   read/write the macro performs on the named field for `$self`'s `'a`.
+
 use core::ffi::{c_char, c_int, c_void};
 use core::marker::PhantomData;
 use core::ptr::NonNull;
@@ -12,6 +43,10 @@ use crate::bindings::{
 };
 use crate::proc::proc_shims;
 
+// SAFETY: `($self).raw.as_ptr()` is a live, non-null pointer per this
+// module's `# Safety` note (top of file); the callee (`proc_shims::$fn`)
+// is a C FFI function whose own contract is that it may dereference its
+// first argument as a valid pointer to the corresponding C struct.
 macro_rules! shim_call {
     ($self:expr, $fn:ident $(, $arg:expr)* $(,)?) => {{
         #[allow(unused_unsafe)]
@@ -19,6 +54,18 @@ macro_rules! shim_call {
     }};
 }
 
+// SAFETY (applies to every expansion of `raw_get!`, `raw_set!`,
+// `raw_mut_ptr!`, `raw_const_ptr!`, `raw_add_assign!`, `raw_sub_assign!`,
+// `raw_bitand_assign!`, `raw_bitor_assign!`, `raw_index_get!`,
+// `raw_index_set!`, `raw_index_ptr_mut!`, and `raw_method!` below):
+// `($self).raw` is a `NonNull<T>` established only via `from_raw`/
+// `assume` (or their `_thread` variants), whose caller guaranteed the
+// pointee is a live, properly initialized `T` for `$self`'s lifetime
+// (module-level `# Safety` note above). Dereferencing
+// `($self).raw.as_ptr()` and projecting `&raw {mut,const}` to the named
+// field is therefore sound; the field access itself (read, write, or
+// address-of) never widens the pointee's valid range beyond what the
+// caller already vouched for.
 macro_rules! raw_get {
     ($self:expr, $field:ident) => {{ unsafe { (*($self).raw.as_ptr()).$field } }};
     ($self:expr, $field:ident.$subfield:ident) => {{ unsafe { (*($self).raw.as_ptr()).$field.$subfield } }};
@@ -87,6 +134,11 @@ macro_rules! atomic_ptr_from_field {
     ($self:expr, $($field:tt)+, $ty:ty) => {{ raw_mut_ptr!($self, $($field)+) as *mut AtomicPtr<$ty> }};
 }
 
+// SAFETY (applies to `bit_get!`/`bit_set!` below): same invariant as
+// the `raw_*!` family above -- `($self).raw` is a `NonNull<T>` whose
+// pointee validity was established by `from_raw`/`assume`; calling the
+// bindgen-generated bitfield accessor/mutator on
+// `(*($self).raw.as_ptr()).$anon` is sound under that same invariant.
 macro_rules! bit_get {
     ($self:expr, $anon:ident, $method:ident) => {{ unsafe { (*($self).raw.as_ptr()).$anon.$method() } }};
 }
@@ -100,8 +152,35 @@ pub fn write_out<T>(p: *mut T, v: T) {
     unsafe { *p = v; }
 }
 
+/// Returns a `sched_attr` with every field zeroed.
+///
+/// `sched_attr` (`kernel/inc/proc/rq_types.h`) is composed entirely of
+/// `u32`/`cpumask_t` (`u64`)/`c_int` fields -- no references, `NonNull`,
+/// or niche-optimized enums -- so the all-zero bit pattern is a valid
+/// value for every field.
 #[inline]
-pub fn zeroed<T>() -> T {
+pub fn zeroed_sched_attr() -> sched_attr {
+    // SAFETY: see the doc comment above -- `sched_attr` is plain-integer
+    // POD, so `mem::zeroed` cannot produce an invalid value.
+    unsafe { core::mem::zeroed() }
+}
+
+/// Returns a `ksiginfo` with every field zeroed (null `list_entry`
+/// links, null `receiver`/`sender`, `signo == 0`, zeroed `siginfo_t`).
+///
+/// `ksiginfo` (`kernel/inc/signal_types.h`) is a `list_node_t` (two raw
+/// pointers), two `*mut thread` fields, an `i32`, and a `siginfo_t`
+/// (itself all `i32`/raw-pointer/union-of-primitives fields) -- every
+/// field is valid when null/zero, so the all-zero bit pattern is a
+/// valid `ksiginfo`. (Note: the zeroed `list_entry` is *not* a
+/// self-referential empty list node -- callers must still call
+/// `.list_entry_ref().init()` before treating it as list-linkable; this
+/// matches the pre-existing behavior of the generic `zeroed::<T>()` it
+/// replaces.)
+#[inline]
+pub fn zeroed_ksiginfo() -> ksiginfo {
+    // SAFETY: see the doc comment above -- every `ksiginfo` field is a
+    // plain integer or raw pointer, valid when zero/null.
     unsafe { core::mem::zeroed() }
 }
 
@@ -180,12 +259,37 @@ pub struct SpinLockRef<'a> {
 }
 
 impl<'a> SpinLockRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `spinlock_t` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut spinlock_t) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut spinlock_t) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut spinlock_t) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut spinlock_t) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `spinlock_t` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut spinlock_t) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut spinlock_t { self.raw.as_ptr() }
     #[inline] pub fn lock(&self) { unsafe { crate::lock::spinlock::spin_lock(self.raw.as_ptr()); } }
@@ -198,6 +302,7 @@ impl<'a> SpinLockRef<'a> {
     #[inline] pub fn scoped_lock(&self) -> SpinLockGuard<'a> { self.lock(); SpinLockGuard { lock: *self } }
 }
 
+#[must_use = "spinlock is released immediately if the guard is dropped"]
 pub struct SpinLockGuard<'a> { lock: SpinLockRef<'a> }
 
 impl Drop for SpinLockGuard<'_> {
@@ -212,12 +317,37 @@ pub struct ThreadAccess<'a> {
 }
 
 impl<'a> ThreadAccess<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `thread` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut thread) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut thread) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut thread) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut thread) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `thread` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut thread) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut thread { self.raw.as_ptr() }
 
@@ -279,9 +409,36 @@ pub struct PgroupAccess<'a> {
 }
 
 impl<'a> PgroupAccess<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `pgroup` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut pgroup) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
+    }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut pgroup) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `pgroup` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut pgroup) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
     }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut pgroup { self.raw.as_ptr() }
@@ -291,6 +448,11 @@ impl<'a> PgroupAccess<'a> {
     #[inline] pub fn p_cnt(&self) -> c_int { shim_call!(self, pg_p_cnt) }
     #[inline] pub fn exited(&self) -> c_int { shim_call!(self, pg_exited) }
     #[inline] pub fn is_kernel(&self) -> c_int { shim_call!(self, pg_is_kernel) }
+    /// Sets the `pgroup->is_kernel` bitfield (was the C `pgroup_mark_kernel`
+    /// bridge helper). Direct bitfield write via bindgen's
+    /// `__bindgen_anon_1` accessor — no FFI hop needed since every caller
+    /// is already Rust.
+    #[inline] pub fn mark_kernel(&self) { bit_set!(self, __bindgen_anon_1, set_is_kernel, 1) }
     #[inline] pub fn session_ptr(&self) -> *mut session { shim_call!(self, pg_session) }
     #[inline] pub fn set_pgid(&self, v: c_int) { shim_call!(self, pg_set_pgid, v) }
     #[inline] pub fn set_leader(&self, tg: *mut thread_group) { shim_call!(self, pg_set_leader, tg) }
@@ -311,12 +473,37 @@ pub struct ThreadGroupAccess<'a> {
 }
 
 impl<'a> ThreadGroupAccess<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `thread_group` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut thread_group) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut thread_group) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut thread_group) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut thread_group) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `thread_group` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut thread_group) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut thread_group { self.raw.as_ptr() }
 
@@ -327,14 +514,26 @@ impl<'a> ThreadGroupAccess<'a> {
     #[inline] pub fn set_group_leader(&self, p: *mut thread) { raw_set!(self, group_leader, p) }
     #[inline] pub fn set_tgid(&self, v: c_int) { shim_call!(self, tg_set_tgid, v) }
     #[inline] pub fn thread_list_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, thread_list) }
-    #[inline] pub fn thread_list_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.thread_list_ptr()) }
+    #[inline] pub fn thread_list_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.thread_list_ptr()) }
+    }
     #[inline] pub fn list_entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, list_entry) }
-    #[inline] pub fn list_entry_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.list_entry_ptr()) }
+    #[inline] pub fn list_entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.list_entry_ptr()) }
+    }
     #[inline] pub fn shared_pending_ptr(&self) -> *mut crate::bindings::tg_shared_pending {
         raw_mut_ptr!(self, shared_pending)
     }
     #[inline] pub fn shared_pending_ref(&self) -> TgSharedPendingRef<'a> {
-        TgSharedPendingRef::assume(self.shared_pending_ptr())
+        // SAFETY: `shared_pending_ptr()` is a field-address of the
+        // already-valid, non-null `self`; never null.
+        unsafe { TgSharedPendingRef::assume(self.shared_pending_ptr()) }
     }
     #[inline] pub fn refcount_store(&self, v: c_int) {
         let ap = raw_mut_ptr!(self, refcount) as *mut AtomicI32;
@@ -387,9 +586,36 @@ pub struct SessionAccess<'a> {
 }
 
 impl<'a> SessionAccess<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `session` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut session) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
+    }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut session) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `session` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut session) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
     }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut session { self.raw.as_ptr() }
@@ -398,6 +624,10 @@ impl<'a> SessionAccess<'a> {
     #[inline] pub fn t_cnt(&self) -> c_int { shim_call!(self, session_t_cnt) }
     #[inline] pub fn pg_cnt(&self) -> c_int { shim_call!(self, session_pg_cnt) }
     #[inline] pub fn fg_pgrp_ptr(&self) -> *mut pgroup { shim_call!(self, session_fg_pgrp) }
+    /// Sets the `session->is_kernel` bitfield (was the C
+    /// `session_mark_kernel` bridge helper). Same pattern as
+    /// [`PgroupAccess::mark_kernel`] / `ThreadGroupAccess::set_is_kernel`.
+    #[inline] pub fn mark_kernel(&self) { bit_set!(self, __bindgen_anon_1, set_is_kernel, 1) }
 }
 
 // =========================================================================
@@ -442,7 +672,13 @@ impl<'a> ThreadAccess<'a> {
     #[inline]
     pub fn lock_ref(&self) -> SpinLockRef<'a> {
         let p = self.raw.as_ptr();
+        // SAFETY: `p` is `self.raw` (already-valid, non-null), so
+        // `&raw mut (*p).lock` is an in-bounds field address; never
+        // null and doesn't dereference through `p` itself.
         let lp = unsafe { &raw mut (*p).lock };
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { SpinLockRef::from_raw(lp).unwrap_unchecked() }
     }
     #[inline]
@@ -473,19 +709,54 @@ impl<'a> ThreadAccess<'a> {
     #[inline] pub fn inc_children_count(&self) { raw_add_assign!(self, children_count, 1) }
     #[inline] pub fn dec_children_count(&self) { raw_sub_assign!(self, children_count, 1) }
     #[inline] pub fn tg_entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, tg_entry) }
-    #[inline] pub fn tg_entry_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.tg_entry_ptr()) }
+    #[inline] pub fn tg_entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.tg_entry_ptr()) }
+    }
     #[inline] pub fn sched_entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, sched_entry) }
     #[inline] pub fn dmp_list_entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, dmp_list_entry) }
     #[inline] pub fn siblings_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, siblings) }
     #[inline] pub fn children_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, children) }
     #[inline] pub fn pg_entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, pg_entry) }
     #[inline] pub fn sid_entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, sid_entry) }
-    #[inline] pub fn sched_entry_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.sched_entry_ptr()) }
-    #[inline] pub fn dmp_list_entry_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.dmp_list_entry_ptr()) }
-    #[inline] pub fn siblings_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.siblings_ptr()) }
-    #[inline] pub fn children_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.children_ptr()) }
-    #[inline] pub fn pg_entry_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.pg_entry_ptr()) }
-    #[inline] pub fn sid_entry_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.sid_entry_ptr()) }
+    #[inline] pub fn sched_entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.sched_entry_ptr()) }
+    }
+    #[inline] pub fn dmp_list_entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.dmp_list_entry_ptr()) }
+    }
+    #[inline] pub fn siblings_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.siblings_ptr()) }
+    }
+    #[inline] pub fn children_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.children_ptr()) }
+    }
+    #[inline] pub fn pg_entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.pg_entry_ptr()) }
+    }
+    #[inline] pub fn sid_entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.sid_entry_ptr()) }
+    }
     #[inline] pub fn proctab_entry_ptr(&self) -> *mut hlist_entry_t { raw_mut_ptr!(self, proctab_entry) }
     #[inline] pub fn rcu_head_ptr(&self) -> *mut crate::bindings::rcu_head_t { raw_mut_ptr!(self, rcu_head) }
     #[inline] pub fn zero_sched_entity_storage(&self) {
@@ -498,7 +769,9 @@ impl<'a> ThreadAccess<'a> {
         self.dmp_list_entry_ref().init();
         self.siblings_ref().init();
         self.children_ref().init();
-        ListNodeRef::assume(self.proctab_entry_ptr() as *mut list_node_t).init();
+        // SAFETY: `proctab_entry_ptr()` is a field-address of the
+        // already-valid, non-null `self`; never null.
+        unsafe { ListNodeRef::assume(self.proctab_entry_ptr() as *mut list_node_t) }.init();
         self.tg_entry_ref().init();
         self.pg_entry_ref().init();
         self.sid_entry_ref().init();
@@ -518,12 +791,37 @@ pub struct CpuLocalRef<'a> {
 }
 
 impl<'a> CpuLocalRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `cpu_local` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut cpu_local) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut cpu_local) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut cpu_local) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut cpu_local) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `cpu_local` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut cpu_local) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut cpu_local { self.raw.as_ptr() }
     #[inline] pub fn proc_ptr(&self) -> *mut thread { raw_get!(self, proc_) }
@@ -551,12 +849,37 @@ pub struct SchedEntityRef<'a> {
 }
 
 impl<'a> SchedEntityRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `sched_entity` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut sched_entity) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut sched_entity) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut sched_entity) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut sched_entity) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `sched_entity` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut sched_entity) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)] pub fn as_ptr(&self) -> *mut sched_entity { self.raw.as_ptr() }
 
     #[inline] pub fn thread_ptr(&self) -> *mut thread { raw_get!(self, thread) }
@@ -575,6 +898,9 @@ impl<'a> SchedEntityRef<'a> {
 
     #[inline] pub fn pi_lock_ptr(&self) -> *mut spinlock_t { raw_mut_ptr!(self, pi_lock) }
     #[inline] pub fn pi_lock_ref(&self) -> SpinLockRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { SpinLockRef::from_raw(self.pi_lock_ptr()).unwrap_unchecked() }
     }
     #[inline] pub fn context_ptr(&self) -> *mut context { raw_mut_ptr!(self, context) }
@@ -647,12 +973,37 @@ pub struct SchedClassRef<'a> {
 }
 
 impl<'a> SchedClassRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `sched_class` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut sched_class) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut sched_class) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut sched_class) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut sched_class) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `sched_class` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut sched_class) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)] pub fn as_ptr(&self) -> *mut sched_class { self.raw.as_ptr() }
     #[inline] pub fn has_pick_next_task(&self) -> bool { unsafe { (*self.raw.as_ptr()).pick_next_task.is_some() } }
     #[inline]
@@ -679,12 +1030,37 @@ pub struct RqRef<'a> {
 }
 
 impl<'a> RqRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `rq` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut rq) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut rq) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut rq) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut rq) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `rq` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut rq) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)] pub fn as_ptr(&self) -> *mut rq { self.raw.as_ptr() }
     #[inline] pub fn cpu_id(&self) -> c_int { raw_get!(self, cpu_id) }
     #[inline] pub fn set_cpu_id(&self, v: c_int) { raw_set!(self, cpu_id, v) }
@@ -727,15 +1103,43 @@ pub struct RqPercpuRef<'a> {
 }
 
 impl<'a> RqPercpuRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `rq_percpu` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut rq_percpu) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut rq_percpu) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut rq_percpu) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut rq_percpu) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `rq_percpu` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut rq_percpu) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)] pub fn as_ptr(&self) -> *mut rq_percpu { self.raw.as_ptr() }
     #[inline] pub fn lock_ptr(&self) -> *mut spinlock_t { raw_mut_ptr!(self, rq_lock) }
     #[inline] pub fn lock_ref(&self) -> SpinLockRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { SpinLockRef::from_raw(self.lock_ptr()).unwrap_unchecked() }
     }
     #[inline] pub fn zero_storage(&self) { unsafe { core::ptr::write_bytes(self.raw.as_ptr(), 0, 1); } }
@@ -808,12 +1212,37 @@ pub struct SchedAttrRef<'a> {
 }
 
 impl<'a> SchedAttrRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `sched_attr` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut sched_attr) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut sched_attr) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut sched_attr) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut sched_attr) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `sched_attr` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut sched_attr) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline] pub fn set_size(&self, v: u32) { raw_set!(self, size, v) }
     #[inline] pub fn affinity_mask(&self) -> u64 { raw_get!(self, affinity_mask) }
     #[inline] pub fn set_affinity_mask(&self, v: u64) { raw_set!(self, affinity_mask, v) }
@@ -830,12 +1259,37 @@ pub struct SchedAttrConstRef<'a> {
 }
 
 impl<'a> SchedAttrConstRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `sched_attr` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *const sched_attr) -> Option<Self> {
         NonNull::new(p as *mut sched_attr).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *const sched_attr) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *const sched_attr) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *const sched_attr) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `sched_attr` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *const sched_attr) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline] pub fn affinity_mask(&self) -> u64 { raw_get!(self, affinity_mask) }
     #[inline] pub fn priority(&self) -> c_int { raw_get!(self, priority) }
 }
@@ -850,12 +1304,37 @@ pub struct SigactsAccess<'a> {
 }
 
 impl<'a> SigactsAccess<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `crate::bindings::sigacts_t` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut crate::bindings::sigacts_t) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut crate::bindings::sigacts_t) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut crate::bindings::sigacts_t) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut crate::bindings::sigacts_t) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `crate::bindings::sigacts_t` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut crate::bindings::sigacts_t) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut crate::bindings::sigacts_t { self.raw.as_ptr() }
 
@@ -876,13 +1355,18 @@ impl<'a> SigactsAccess<'a> {
     #[inline] pub fn lock_ref(&self) -> SpinLockRef<'a> {
         let p = self.raw.as_ptr();
         let lp = unsafe { &raw mut (*p).lock };
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { SpinLockRef::from_raw(lp).unwrap_unchecked() }
     }
     #[inline] pub fn action_ptr(&self, signo: c_int) -> *mut crate::bindings::sigaction {
         raw_index_ptr_mut!(self, sa, signo as usize)
     }
     #[inline] pub fn action_ref(&self, signo: c_int) -> SigActionAccess<'a> {
-        SigActionAccess::assume(self.action_ptr(signo))
+        // SAFETY: `action_ptr(signo)` indexes the fixed-size `sa` array
+        // embedded in the already-valid, non-null `self`; never null.
+        unsafe { SigActionAccess::assume(self.action_ptr(signo)) }
     }
     #[inline] pub fn action_copy(&self, signo: c_int) -> crate::bindings::sigaction {
         self.action_ref(signo).copy()
@@ -902,12 +1386,37 @@ pub struct SigActionAccess<'a> {
 }
 
 impl<'a> SigActionAccess<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `sigaction_t` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut sigaction_t) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn from_ptr(p: *mut sigaction_t) -> Option<Self> { unsafe { Self::from_raw(p) } }
-    #[inline(always)] pub fn assume(p: *mut sigaction_t) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    #[inline(always)]
+    pub fn from_ptr(p: *mut sigaction_t) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `sigaction_t` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut sigaction_t) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)] pub fn as_ptr(&self) -> *mut sigaction_t { self.raw.as_ptr() }
     #[inline] pub fn copy(&self) -> sigaction_t { unsafe { *self.raw.as_ptr() } }
     #[inline] pub fn copy_to(&self, out: *mut sigaction_t) { if !out.is_null() { unsafe { *out = *self.raw.as_ptr(); } } }
@@ -938,7 +1447,7 @@ impl<'a> SigActionAccess<'a> {
 
 #[inline]
 pub fn make_ksiginfo(signo: c_int, sender: *mut thread, si_pid: c_int) -> ksiginfo {
-    let mut info: ksiginfo = zeroed();
+    let mut info: ksiginfo = zeroed_ksiginfo();
     info.signo = signo;
     info.sender = sender;
     info.info.si_pid = si_pid;
@@ -955,11 +1464,31 @@ pub struct KsigInfoAccess<'a> {
 }
 
 impl<'a> KsigInfoAccess<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `crate::bindings::ksiginfo` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut crate::bindings::ksiginfo) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn assume(p: *mut crate::bindings::ksiginfo) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `crate::bindings::ksiginfo` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut crate::bindings::ksiginfo) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut crate::bindings::ksiginfo { self.raw.as_ptr() }
 
@@ -970,7 +1499,12 @@ impl<'a> KsigInfoAccess<'a> {
     #[inline] pub fn sender(&self) -> *mut thread { shim_call!(self, ksi_sender) }
     #[inline] pub fn set_sender(&self, v: *mut thread) { shim_call!(self, ksi_set_sender, v) }
     #[inline] pub fn list_entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, list_entry) }
-    #[inline] pub fn list_entry_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.list_entry_ptr()) }
+    #[inline] pub fn list_entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.list_entry_ptr()) }
+    }
     #[inline] pub fn copy_from(&self, src: *const crate::bindings::ksiginfo) {
         if !src.is_null() { unsafe { *self.raw.as_ptr() = *src; } }
     }
@@ -983,19 +1517,45 @@ pub struct SigPendingRef<'a> {
 }
 
 impl<'a> SigPendingRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `crate::bindings::sigpending_t` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut crate::bindings::sigpending_t) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn assume(p: *mut crate::bindings::sigpending_t) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `crate::bindings::sigpending_t` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut crate::bindings::sigpending_t) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)] pub fn as_ptr(&self) -> *mut crate::bindings::sigpending_t { self.raw.as_ptr() }
     #[inline] pub fn queue_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, queue) }
-    #[inline] pub fn queue_ref(&self) -> ListNodeRef<'a> { ListNodeRef::assume(self.queue_ptr()) }
+    #[inline] pub fn queue_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is
+        // called on (module-level `# Safety` note); never null.
+        unsafe { ListNodeRef::assume(self.queue_ptr()) }
+    }
     #[inline]
     pub fn queue_len(&self) -> c_int {
         let head = self.queue_ptr();
         let mut n = 0;
-        $crate::list_for_each!(head, core::mem::offset_of!(crate::bindings::ksiginfo, list_entry), _node, {
+        crate::list_for_each!(head, core::mem::offset_of!(crate::bindings::ksiginfo, list_entry), _node, {
+            let _: *mut crate::bindings::ksiginfo = _node;
             n += 1;
         });
         n
@@ -1009,11 +1569,31 @@ pub struct ThreadSignalPtrRef<'a> {
 }
 
 impl<'a> ThreadSignalPtrRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `crate::bindings::thread_signal_t` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut crate::bindings::thread_signal_t) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn assume(p: *mut crate::bindings::thread_signal_t) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `crate::bindings::thread_signal_t` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut crate::bindings::thread_signal_t) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)] pub fn as_ptr(&self) -> *mut crate::bindings::thread_signal_t { self.raw.as_ptr() }
     #[inline] pub fn sig_mask(&self) -> u64 { raw_get!(self, sig_mask) }
     #[inline] pub fn set_sig_mask(&self, v: u64) { raw_set!(self, sig_mask, v) }
@@ -1032,7 +1612,10 @@ impl<'a> ThreadSignalPtrRef<'a> {
         raw_index_ptr_mut!(self, sig_pending, idx)
     }
     #[inline] pub fn sig_pending_ref_index(&self, idx: usize) -> SigPendingRef<'a> {
-        SigPendingRef::assume(self.sig_pending_ptr_index(idx))
+        // SAFETY: `sig_pending_ptr_index(idx)` indexes the fixed-size
+        // `sig_pending` array embedded in the already-valid, non-null
+        // `self`; never null.
+        unsafe { SigPendingRef::assume(self.sig_pending_ptr_index(idx)) }
     }
 }
 
@@ -1043,11 +1626,31 @@ pub struct TgSharedPendingRef<'a> {
 }
 
 impl<'a> TgSharedPendingRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `crate::bindings::tg_shared_pending` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut crate::bindings::tg_shared_pending) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn assume(p: *mut crate::bindings::tg_shared_pending) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `crate::bindings::tg_shared_pending` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume(p: *mut crate::bindings::tg_shared_pending) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)] pub fn as_ptr(&self) -> *mut crate::bindings::tg_shared_pending { self.raw.as_ptr() }
     #[inline] pub fn sig_pending_mask(&self) -> u64 { raw_get!(self, sig_pending_mask) }
     #[inline] pub fn set_sig_pending_mask(&self, v: u64) { raw_set!(self, sig_pending_mask, v) }
@@ -1061,7 +1664,10 @@ impl<'a> TgSharedPendingRef<'a> {
         raw_index_ptr_mut!(self, sig_pending, idx)
     }
     #[inline] pub fn sig_pending_ref_index(&self, idx: usize) -> SigPendingRef<'a> {
-        SigPendingRef::assume(self.sig_pending_ptr_index(idx))
+        // SAFETY: `sig_pending_ptr_index(idx)` indexes the fixed-size
+        // `sig_pending` array embedded in the already-valid, non-null
+        // `self`; never null.
+        unsafe { SigPendingRef::assume(self.sig_pending_ptr_index(idx)) }
     }
 }
 
@@ -1076,11 +1682,31 @@ pub struct ThreadSignalAccess<'a> {
 }
 
 impl<'a> ThreadSignalAccess<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `thread` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_thread(p: *mut thread) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
-    #[inline(always)] pub fn assume_thread(p: *mut thread) -> Self { unsafe { Self::from_thread(p).unwrap_unchecked() } }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `thread` (same contract as [`from_thread`](Self::from_thread), minus
+    /// the null case, which is UB here instead of `None`).
+    #[inline(always)]
+    pub unsafe fn assume_thread(p: *mut thread) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_thread` returns `Some`.
+        unsafe { Self::from_thread(p).unwrap_unchecked() }
+    }
     #[inline(always)]
     pub fn thread_ptr(&self) -> *mut thread { self.raw.as_ptr() }
 
@@ -1092,6 +1718,10 @@ impl<'a> ThreadSignalAccess<'a> {
     #[inline] pub fn set_sig_pending_mask(&self, v: u64) { shim_call!(self, ts_set_sig_pending_mask, v) }
     #[inline] pub fn sig_stack(&self) -> crate::bindings::stack { raw_get!(self, signal.sig_stack) }
     #[inline] pub fn set_sig_stack(&self, v: crate::bindings::stack) { raw_set!(self, signal.sig_stack, v) }
+    /// Pointer to the embedded `&p->signal.sig_stack` (was the C
+    /// `sigstack_init_for_thread` bridge helper's argument). Feed this
+    /// straight into [`crate::proc::sigstack_init`].
+    #[inline] pub fn sig_stack_ptr(&self) -> *mut crate::bindings::stack { raw_mut_ptr!(self, signal.sig_stack) }
     #[inline] pub fn sig_pending_mask_atomic_load(&self) -> u64 {
         let p = self.raw.as_ptr();
         let ap = unsafe { &raw const (*p).signal.sig_pending_mask } as *const AtomicU64;
@@ -1105,7 +1735,9 @@ impl<'a> ThreadSignalAccess<'a> {
     #[inline] pub fn set_stop_signal(&self, v: c_int) { shim_call!(self, ts_set_stop_signal, v) }
     #[inline] pub fn ptr_ref(&self) -> ThreadSignalPtrRef<'a> {
         let p = raw_mut_ptr!(self, signal);
-        ThreadSignalPtrRef::assume(p)
+        // SAFETY: `p` is a field-address of the already-valid, non-null
+        // `self`; never null.
+        unsafe { ThreadSignalPtrRef::assume(p) }
     }
     #[inline] pub fn sig_pending_ref_index(&self, idx: usize) -> SigPendingRef<'a> {
         self.ptr_ref().sig_pending_ref_index(idx)
@@ -1125,14 +1757,37 @@ pub struct ListNodeRef<'a> {
     _m: PhantomData<&'a mut list_node_t>,
 }
 impl<'a> ListNodeRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `list_node_t` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut list_node_t) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
-    pub fn from_ptr(p: *mut list_node_t) -> Option<Self> { unsafe { Self::from_raw(p) } }
+    pub fn from_ptr(p: *mut list_node_t) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
+    /// Wraps `p` in `Self` without the null check.
+    ///
+    /// # Safety
+    ///
+    /// `p` must be non-null and point to a live, properly initialized
+    /// `list_node_t` (same contract as [`from_raw`](Self::from_raw), minus
+    /// the null case, which is UB here instead of `None`).
     #[inline(always)]
-    pub fn assume(p: *mut list_node_t) -> Self { unsafe { Self::from_raw(p).unwrap_unchecked() } }
+    pub unsafe fn assume(p: *mut list_node_t) -> Self {
+        // SAFETY: caller upholds this fn's `# Safety` contract, so
+        // `from_raw` returns `Some`.
+        unsafe { Self::from_raw(p).unwrap_unchecked() }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut list_node_t { self.raw.as_ptr() }
     #[inline] pub fn next_ptr(&self) -> *mut list_node_t { raw_get!(self, next) }
@@ -1256,16 +1911,31 @@ pub struct TqRef<'a> {
     _m: PhantomData<&'a mut tq_t>,
 }
 impl<'a> TqRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `tq_t` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut tq_t) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
-    pub fn from_ptr(p: *mut tq_t) -> Option<Self> { unsafe { Self::from_raw(p) } }
+    pub fn from_ptr(p: *mut tq_t) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut tq_t { self.raw.as_ptr() }
     #[inline] pub fn head_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, head) }
     #[inline] pub fn head_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { ListNodeRef::from_raw(self.head_ptr()).unwrap_unchecked() }
     }
     #[inline] pub fn counter(&self) -> c_int { raw_get!(self, counter) }
@@ -1283,12 +1953,24 @@ pub struct TtreeRef<'a> {
     _m: PhantomData<&'a mut ttree_t>,
 }
 impl<'a> TtreeRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `ttree_t` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut ttree_t) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
-    pub fn from_ptr(p: *mut ttree_t) -> Option<Self> { unsafe { Self::from_raw(p) } }
+    pub fn from_ptr(p: *mut ttree_t) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut ttree_t { self.raw.as_ptr() }
     #[inline] pub fn root_ptr(&self) -> *mut rb_root { raw_mut_ptr!(self, root) }
@@ -1309,12 +1991,24 @@ pub struct TnodeRef<'a> {
     _m: PhantomData<&'a mut tnode_t>,
 }
 impl<'a> TnodeRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `tnode_t` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut tnode_t) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
-    pub fn from_ptr(p: *mut tnode_t) -> Option<Self> { unsafe { Self::from_raw(p) } }
+    pub fn from_ptr(p: *mut tnode_t) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut tnode_t { self.raw.as_ptr() }
     #[inline] pub fn type_get(&self) -> u32 { raw_get!(self, type_) }
@@ -1329,6 +2023,9 @@ impl<'a> TnodeRef<'a> {
         raw_mut_ptr!(self, __bindgen_anon_1.list.entry)
     }
     #[inline] pub fn list_entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { ListNodeRef::from_raw(self.list_entry_ptr()).unwrap_unchecked() }
     }
     #[inline] pub fn tree_entry_ptr(&self) -> *mut rb_node {
@@ -1403,21 +2100,39 @@ pub struct WorkqueueRef<'a> {
     _m: PhantomData<&'a mut workqueue>,
 }
 impl<'a> WorkqueueRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `workqueue` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut workqueue) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
-    pub fn from_ptr(p: *mut workqueue) -> Option<Self> { unsafe { Self::from_raw(p) } }
+    pub fn from_ptr(p: *mut workqueue) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut workqueue { self.raw.as_ptr() }
 
     #[inline] pub fn lock_ptr(&self) -> *mut spinlock_t { raw_mut_ptr!(self, lock) }
     #[inline] pub fn lock_ref(&self) -> SpinLockRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { SpinLockRef::from_raw(self.lock_ptr()).unwrap_unchecked() }
     }
     #[inline] pub fn idle_queue_ptr(&self) -> *mut tq_t { raw_mut_ptr!(self, idle_queue) }
     #[inline] pub fn idle_queue_ref(&self) -> TqRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { TqRef::from_raw(self.idle_queue_ptr()).unwrap_unchecked() }
     }
     #[inline] pub fn worker_list_ptr(&self) -> *mut list_node_t {
@@ -1489,16 +2204,31 @@ pub struct WorkStructRef<'a> {
     _m: PhantomData<&'a mut work_struct>,
 }
 impl<'a> WorkStructRef<'a> {
+    /// Wraps `p` in `Self`, or returns `None` if `p` is null.
+    ///
+    /// # Safety
+    ///
+    /// If `p` is non-null, it must point to a live, properly
+    /// initialized `work_struct` for as long as the returned handle (and
+    /// anything derived from it) is used — see the module-level
+    /// `# Safety` note at the top of this file.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut work_struct) -> Option<Self> {
         NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
-    pub fn from_ptr(p: *mut work_struct) -> Option<Self> { unsafe { Self::from_raw(p) } }
+    pub fn from_ptr(p: *mut work_struct) -> Option<Self> {
+        // SAFETY: same contract as `from_raw` (module-level note);
+        // this wrapper only adds the null check.
+        unsafe { Self::from_raw(p) }
+    }
     #[inline(always)]
     pub fn as_ptr(&self) -> *mut work_struct { self.raw.as_ptr() }
     #[inline] pub fn entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, entry) }
     #[inline] pub fn entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { ListNodeRef::from_raw(self.entry_ptr()).unwrap_unchecked() }
     }
     #[inline] pub fn flags(&self) -> u32 { raw_get!(self, flags) }
@@ -1526,6 +2256,9 @@ impl<'a> ThreadAccess<'a> {
     #[inline] pub fn set_wq_ptr(&self, v: *mut workqueue) { raw_set!(self, wq, v) }
     #[inline] pub fn wq_entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, wq_entry) }
     #[inline] pub fn wq_entry_ref(&self) -> ListNodeRef<'a> {
+        // SAFETY: the argument is a field-address of the
+        // already-valid, non-null `self` this method is called
+        // on (module-level `# Safety` note); never null.
         unsafe { ListNodeRef::from_raw(self.wq_entry_ptr()).unwrap_unchecked() }
     }
 }

@@ -9,12 +9,6 @@
 //! extern "C"` syscall entry points are `unsafe`.
 
 
-macro_rules! u {
-    ($($tokens:tt)*) => {
-        unsafe { $($tokens)* }
-    };
-}
-
 use core::ffi::{c_int, c_uchar, c_void};
 use crate::bindings::{cpu_local, thread};
 
@@ -67,7 +61,10 @@ struct Vm(*mut c_void);
 
 impl Vm {
     fn current() -> Self {
-        Self(u! { read_current_vm() })
+        // SAFETY: read_current_vm() only reads the per-CPU `tp` register
+        // and the resulting `cpu_local`/`thread` pointers with interrupts
+        // disabled around the read; see its SAFETY doc.
+        Self(unsafe { read_current_vm() })
     }
 
     fn mmap(self, addr: u64, length: usize, prot: i32, flags: i32, fd: i32, offset: u64) -> u64 {
@@ -99,8 +96,11 @@ impl Vm {
 /// Read `current->vm`. Reads the per-CPU `tp` register with interrupts off
 /// so the value of `tp` cannot change underneath us.
 ///
-/// SAFETY: assumes the kernel uses `tp` to hold the `cpu_local*` pointer.
-fn read_current_vm()-> *mut c_void  { u! {
+/// SAFETY: caller must ensure the kernel uses `tp` to hold the current
+/// CPU's `cpu_local*` pointer (true for every context this runs in), and
+/// that inline asm reading/toggling `sstatus`/`tp` is sound at the call
+/// site (i.e. not called from a context where clobbering flags is unsafe).
+unsafe fn read_current_vm() -> *mut c_void {
     let sstatus_before: u64;
     core::arch::asm!("csrr {0}, sstatus", out(reg) sstatus_before,
         options(nomem, nostack, preserves_flags));
@@ -124,7 +124,7 @@ fn read_current_vm()-> *mut c_void  { u! {
             options(nomem, nostack, preserves_flags));
     }
     vm
-}}
+}
 
 // ---------------------------------------------------------------------------
 // Syscall argument helpers.
@@ -145,43 +145,43 @@ fn arg_int(n: i32) -> i32 {
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
-pub extern "C" fn sys_mmap()-> u64  { u! {
+pub extern "C" fn sys_mmap()-> u64 {
     Vm::current().mmap(arg_addr(0), arg_int(1) as usize,
                        arg_int(2), arg_int(3), arg_int(4), arg_addr(5))
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn sys_munmap()-> u64  { u! {
+pub extern "C" fn sys_munmap()-> u64 {
     let length = arg_int(1);
     if length <= 0 { return neg_errno(EINVAL); }
     Vm::current().munmap(arg_addr(0), length as usize) as i64 as u64
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn sys_mprotect()-> u64  { u! {
+pub extern "C" fn sys_mprotect()-> u64 {
     let length = arg_int(1);
     if length <= 0 { return neg_errno(EINVAL); }
     Vm::current().mprotect(arg_addr(0), length as usize, arg_int(2)) as i64 as u64
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn sys_mremap()-> u64  { u! {
+pub extern "C" fn sys_mremap()-> u64 {
     let old_size = arg_int(1);
     let new_size = arg_int(2);
     if old_size < 0 || new_size <= 0 { return neg_errno(EINVAL); }
     Vm::current().mremap(arg_addr(0), old_size as usize,
                          new_size as usize, arg_int(3), arg_addr(4))
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn sys_msync()-> u64  { u! {
+pub extern "C" fn sys_msync()-> u64 {
     let length = arg_int(1);
     if length <= 0 { return neg_errno(EINVAL); }
     Vm::current().msync(arg_addr(0), length as usize, arg_int(2)) as i64 as u64
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn sys_mincore()-> u64  { u! {
+pub extern "C" fn sys_mincore()-> u64 {
     let addr = arg_addr(0);
     let length = arg_int(1);
     let vec_uaddr = arg_addr(2);
@@ -205,11 +205,11 @@ pub extern "C" fn sys_mincore()-> u64  { u! {
         done += chunk;
     }
     0
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn sys_madvise()-> u64  { u! {
+pub extern "C" fn sys_madvise()-> u64 {
     let length = arg_int(1);
     if length <= 0 { return neg_errno(EINVAL); }
     Vm::current().madvise(arg_addr(0), length as usize, arg_int(2)) as i64 as u64
-}}
+}

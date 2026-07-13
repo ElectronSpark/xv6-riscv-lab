@@ -8,7 +8,7 @@ use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int};
 use core::mem::{size_of, MaybeUninit};
 use core::ptr;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use crate::bindings::{cpu_local, rq, rq_percpu, sched_attr, sched_class, sched_entity, thread};
 use crate::machine::{cpuid, intr_get, intr_off, PreemptGuard};
@@ -80,6 +80,13 @@ macro_rules! rq_unsafe_call { ($e:expr) => {{ unsafe { $e } }}; }
 // Per-CPU run queue data — cache-line aligned per declaration in C
 #[repr(C, align(64))]
 struct PercpuArr([UnsafeCell<MaybeUninit<rq_percpu>>; NCPU]);
+// SAFETY: element `cpu_id` of this flat array is reached only via
+// `rqg_percpu_base().wrapping_add(cpu_id)` and is, by convention,
+// mutated only by the owning CPU's scheduler code; any field within a
+// slot that legitimately needs cross-CPU access (e.g. run-queue
+// spinlocks embedded in `rq_percpu`) provides its own synchronization,
+// matching every other per-CPU array in this crate (cf. `machine.rs`'s
+// CPU-indexed statics).
 unsafe impl Sync for PercpuArr {}
 
 const PERCPU_ELEM: UnsafeCell<MaybeUninit<rq_percpu>> =
@@ -88,10 +95,30 @@ static RQ_PERCPU_DATA: PercpuArr = PercpuArr([PERCPU_ELEM; NCPU]);
 
 #[repr(C)]
 struct RqGlobal {
+    // Single-owner fields: written once (single-threaded, boot CPU only)
+    // by `rq_global_init`/`rqg_set_sched_class` before any other CPU is
+    // brought up, then only ever read afterwards. Accessed via
+    // `rqg_ref()` (`&mut RqGlobal`), which is sound *only* because no
+    // other CPU is concurrently touching `RqGlobal` while these fields
+    // are live-written or -read that way.
     percpu: *mut rq_percpu,
     sched_class: [*mut sched_class; PRIORITY_MAINLEVELS],
-    active_cpu_mask: u64,
+    // Cross-CPU-shared field: `rq_cpu_activate` OR's in a bit from each
+    // CPU's independent bring-up path (see `idle_thread_init`), and
+    // `rq_select_task_rq`/`rq_cpu_is_idle` read it from any CPU with no
+    // lock held. MUST be accessed only through `rqg_active_mask_atomic()`
+    // (never through `rqg_ref()`/`&mut RqGlobal`) -- see that function for
+    // the ordering rationale.
+    active_cpu_mask: AtomicU64,
 }
+// SAFETY: see the field-level comments on `RqGlobal` above —
+// `percpu`/`sched_class` are single-owner (written once at boot before
+// any other CPU is up, read-only afterward), and `active_cpu_mask` is
+// the one field genuinely shared across CPUs, accessed exclusively
+// through `rqg_active_mask_atomic()`'s `AtomicU64` ops rather than
+// through `&mut RqGlobal`/`&RqGlobal` (see Package B's fix in the
+// rustify history: `&mut RqGlobal` is never materialized for that
+// field).
 unsafe impl Sync for RqGlobalCell {}
 #[repr(transparent)]
 struct RqGlobalCell(UnsafeCell<RqGlobal>);
@@ -99,16 +126,57 @@ struct RqGlobalCell(UnsafeCell<RqGlobal>);
 static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
     percpu: ptr::null_mut(),
     sched_class: [ptr::null_mut(); PRIORITY_MAINLEVELS],
-    active_cpu_mask: 0,
+    active_cpu_mask: AtomicU64::new(0),
 }));
 
 #[inline] fn rqg() -> *mut RqGlobal { RQ_GLOBAL.0.get() }
+// SAFETY: `rqg()` is a `'static` valid, aligned, non-null pointer into
+// `RQ_GLOBAL`. Callers of `rqg_ref()` must restrict use to the
+// single-owner fields documented on `RqGlobal` (`percpu`, `sched_class`)
+// -- never `active_cpu_mask`, which is shared cross-CPU and would make
+// this `&mut` alias a concurrently-read/written `AtomicU64` (see
+// `rqg_active_mask_atomic`).
 #[inline] fn rqg_ref<'a>() -> &'a mut RqGlobal { unsafe { &mut *rqg() } }
 #[inline] fn rqg_percpu_base() -> *mut rq_percpu { rqg_ref().percpu }
 #[inline] fn rqg_sched_class(cls_id: c_int) -> *mut sched_class { rqg_ref().sched_class[cls_id as usize] }
 #[inline] fn rqg_set_sched_class(cls_id: usize, cls: *mut sched_class) { rqg_ref().sched_class[cls_id] = cls; }
-#[inline] fn rqg_active_mask() -> u64 { rqg_ref().active_cpu_mask }
-#[inline] fn rqg_or_active_mask(mask: u64) { rqg_ref().active_cpu_mask |= mask; }
+
+/// Shared reference to just the `active_cpu_mask` field, obtained without
+/// ever materializing `&mut RqGlobal`. `AtomicU64` is `Sync`, so handing
+/// out `&AtomicU64` to any number of CPUs concurrently is sound; handing
+/// out `&mut RqGlobal` while other CPUs read/RMW this same field (as the
+/// old plain-`u64` code did) is a data race (Rust UB) regardless of
+/// whether the racing values are individually "safe" integers.
+#[inline] fn rqg_active_mask_atomic<'a>() -> &'a AtomicU64 {
+    // SAFETY: `rqg()` is `'static`-valid; `active_cpu_mask` is a
+    // `repr(C)` field at a fixed offset, so this is a plain field
+    // projection through a raw pointer (`addr_of!`, no intermediate
+    // reference to `RqGlobal` is created). The resulting `&AtomicU64`
+    // may be freely shared/aliased across CPUs.
+    unsafe { &*core::ptr::addr_of!((*rqg()).active_cpu_mask) }
+}
+
+// Ordering analysis (H-05): `rq_cpu_activate` is called once per CPU from
+// `idle_thread_init`, *after* that CPU has already made plain
+// (non-atomic) stores publishing its own scheduling state --
+// `CpuLocalRef::set_proc`/`set_idle_thread` (kernel/proc/thread.rs) both
+// run strictly before `xv6_rqport_rq_cpu_activate(cpuid())`. Readers on
+// *other* CPUs gate a cross-CPU, non-atomic read of exactly that state on
+// this bit: `rq_cpu_is_idle` returns early ("treat as idle") unless the
+// mask bit is set, and only then reads `CpuLocalRef::idle_thread_ptr()`
+// for that CPU. If the mask load did not synchronize with the activating
+// CPU's Release, that idle-thread-pointer read would be racing the
+// plain store above with no happens-before edge -- a second, adjacent
+// data race riding on this one. So the mask is not "advisory only": one
+// existing reader already depends on it as a publication fence.
+// Therefore: `Release` on the writer (`fetch_or`) paired with `Acquire`
+// on every reader (`load`), not `Relaxed`. `fetch_or`'s implicit read
+// side does not need `Acquire`: each CPU only ever sets its *own* bit
+// (`rq_cpu_activate(cpuid())`), so the RMW never needs to observe another
+// CPU's concurrent modification to make a decision -- only to publish
+// after it completes.
+#[inline] fn rqg_active_mask() -> u64 { rqg_active_mask_atomic().load(Ordering::Acquire) }
+#[inline] fn rqg_or_active_mask(mask: u64) { rqg_active_mask_atomic().fetch_or(mask, Ordering::Release); }
 #[inline] fn cpu_local_ptr(cpu_id: c_int) -> *mut cpu_local {
     unsafe { (&raw mut cpus).cast::<cpu_local>().wrapping_add(cpu_id as usize) }
 }
@@ -118,13 +186,24 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
 }
 #[inline] fn rqpc_current() -> *mut rq_percpu { rqpc(cpuid()) }
 #[inline] fn rqpc_ref<'a>(cpu_id: c_int) -> RqPercpuRef<'a> {
-    RqPercpuRef::assume(rqpc(cpu_id))
+    // SAFETY: `rqpc(cpu_id)` indexes into the statically-allocated, always-initialized
+    // per-CPU `rq_percpu` array; every caller passes an in-range `cpu_id`, so
+    // the result is never null.
+    unsafe { RqPercpuRef::assume(rqpc(cpu_id)) }
 }
 #[inline] fn rq_ref<'a>(r: *mut rq) -> RqRef<'a> {
-    RqRef::assume(r)
+    // SAFETY: `rq_ref` is this file's choke point for `RqRef::assume`; every call site
+    // passes an `rq` pointer obtained from `get_rq`/`rqpc_ref(..).rq_at(..)`
+    // (both index statically-allocated, always-initialized storage) or already
+    // null-checked by its own caller.
+    unsafe { RqRef::assume(r) }
 }
 #[inline] fn se_ref<'a>(se: *mut sched_entity) -> SchedEntityRef<'a> {
-    SchedEntityRef::assume(se)
+    // SAFETY: `se_ref` is this file's choke point for `SchedEntityRef::assume`; every
+    // call site passes a `sched_entity` pointer already null-checked by its
+    // own caller, or the running thread's embedded, always-allocated
+    // scheduling entity.
+    unsafe { SchedEntityRef::assume(se) }
 }
 #[inline] fn sched_class_of(cls_id: c_int) -> *mut sched_class {
     rqg_sched_class(cls_id)
@@ -316,7 +395,8 @@ pub extern "C" fn sched_class_register(id: c_int, cls: *mut sched_class) {
     if cls.is_null() {
         kpanic!("sched_class_register: cls is NULL");
     }
-    if !SchedClassRef::assume(cls).has_pick_next_task() {
+    // SAFETY: `cls` is proven non-null by the diverging `kpanic!` immediately above.
+    if !unsafe { SchedClassRef::assume(cls) }.has_pick_next_task() {
         kpanic!("sched_class_register: no pick_next_task");
     }
     rqg_set_sched_class(id as usize, cls);
@@ -436,7 +516,9 @@ pub extern "C" fn rq_holding(cpu_id: c_int) -> c_int {
 
 #[no_mangle]
 pub extern "C" fn rq_holding_current() -> c_int {
-    RqPercpuRef::assume(rqpc_current()).lock_ref().holding() as c_int
+    // SAFETY: `rqpc_current()` indexes into statically-allocated, always-initialized
+    // per-CPU storage; never null.
+    unsafe { RqPercpuRef::assume(rqpc_current()) }.lock_ref().holding() as c_int
 }
 #[no_mangle] pub extern "C" fn xv6_rqport_rq_holding_current() -> c_int { rq_holding_current() }
 
@@ -454,7 +536,9 @@ pub extern "C" fn rq_percpu_lock_get(cpu_id: c_int) -> *mut rq_percpu {
 pub extern "C" fn rq_percpu_lock_get_current() -> *mut rq_percpu {
     let _g = crate::machine::PreemptGuard::new();
     let pc = rqpc_current();
-    RqPercpuRef::assume(pc).lock_ref().lock();
+    // SAFETY: `pc` (`rqpc_current()`) indexes into statically-allocated, always-
+    // initialized per-CPU storage; never null.
+    unsafe { RqPercpuRef::assume(pc) }.lock_ref().lock();
     pc
 }
 #[no_mangle] pub extern "C" fn xv6_rqport_rq_percpu_lock_get_current() -> *mut rq_percpu { rq_percpu_lock_get_current() }
@@ -462,7 +546,8 @@ pub extern "C" fn rq_percpu_lock_get_current() -> *mut rq_percpu {
 #[no_mangle]
 pub extern "C" fn rq_percpu_put_unlock(pc: *mut rq_percpu) {
     if pc.is_null() { return; }
-    RqPercpuRef::assume(pc).lock_ref().unlock();
+    // SAFETY: `pc` is checked non-null immediately above.
+    unsafe { RqPercpuRef::assume(pc) }.lock_ref().unlock();
 }
 #[no_mangle] pub extern "C" fn xv6_rqport_rq_percpu_put_unlock(pc: *mut rq_percpu) { rq_percpu_put_unlock(pc) }
 
@@ -482,7 +567,9 @@ pub extern "C" fn rq_select_task_rq(se: *mut sched_entity, cpumask: cpumask_t) -
     let mut effective_mask = cpumask & active;
     if effective_mask == 0 { effective_mask = active; }
 
-    if let Some(selected) = SchedClassRef::assume(cls)
+    // SAFETY: `cls` is checked non-null immediately above (`if cls.is_null() { return
+    // err_ptr(-EINVAL); }`).
+    if let Some(selected) = unsafe { SchedClassRef::assume(cls) }
         .select_task_rq(sr.rq_ptr(), se, effective_mask)
     {
         return selected;
@@ -612,16 +699,23 @@ pub extern "C" fn rq_task_tick(se: *mut sched_entity) {
 #[no_mangle]
 pub extern "C" fn rq_task_fork(se: *mut sched_entity) {
     let sr = se_ref(se);
-    let cur = ThreadAccess::assume(xv6_current_thread()).sched_entity_ptr();
+    // SAFETY: `xv6_current_thread()` is the running thread; the currently running
+    // thread's pointer (from `xv6_current_thread()`/`current()`) is a kernel-
+    // wide invariant: always non-null while executing kernel code on behalf of
+    // a thread.
+    let cur = unsafe { ThreadAccess::assume(xv6_current_thread()) }.sched_entity_ptr();
     let cur_cls = se_ref(cur).sched_class_ptr();
     if !cur_cls.is_null()
-        && SchedClassRef::assume(cur_cls).task_fork(sr.rq_ptr(), se)
+        // SAFETY: `cur_cls` is proven non-null by the short-circuiting `&&`
+        // (`!cur_cls.is_null() && ...`).
+        && unsafe { SchedClassRef::assume(cur_cls) }.task_fork(sr.rq_ptr(), se)
     {
         return;
     }
     let def_cls = sched_class_of(DEFAULT_MAJOR_PRIORITY);
     if !def_cls.is_null() {
-        SchedClassRef::assume(def_cls).task_fork(sr.rq_ptr(), se);
+        // SAFETY: `def_cls` is checked non-null immediately above.
+        unsafe { SchedClassRef::assume(def_cls) }.task_fork(sr.rq_ptr(), se);
     }
 }
 #[no_mangle] pub extern "C" fn xv6_rqport_rq_task_fork(se: *mut sched_entity) { rq_task_fork(se) }
@@ -641,7 +735,11 @@ pub extern "C" fn rq_task_dead(se: *mut sched_entity) {
 
 #[no_mangle]
 pub extern "C" fn rq_yield_task() {
-    let cur = ThreadAccess::assume(xv6_current_thread()).sched_entity_ptr();
+    // SAFETY: `xv6_current_thread()` is the running thread; the currently running
+    // thread's pointer (from `xv6_current_thread()`/`current()`) is a kernel-
+    // wide invariant: always non-null while executing kernel code on behalf of
+    // a thread.
+    let cur = unsafe { ThreadAccess::assume(xv6_current_thread()) }.sched_entity_ptr();
     let current_rq = se_ref(cur).rq_ptr();
     kassert!(!current_rq.is_null(), "rq_yield_task: current_rq NULL");
     let rr = rq_ref(current_rq);
@@ -661,7 +759,10 @@ pub extern "C" fn rq_cpu_is_idle(cpu_id: c_int) -> bool {
     let idle_se = {
         let current_se = rqpc_ref(cpu_id).current_se_load_acquire();
         let cpu_local_p = cpu_local_ptr(cpu_id);
-        let idle = crate::proc::access::CpuLocalRef::assume(cpu_local_p).idle_thread_ptr();
+        // SAFETY: `cpu_local_ptr(cpu_id)` indexes into statically-allocated, always-
+        // initialized per-CPU storage; `cpu_id` was range-checked at this
+        // function's entry above.
+        let idle = unsafe { crate::proc::access::CpuLocalRef::assume(cpu_local_p) }.idle_thread_ptr();
         let idle_se = ThreadAccess::from_ptr(idle).map_or(ptr::null_mut(), |t| t.sched_entity_ptr());
         let _ = current_se;
         idle_se
@@ -718,7 +819,8 @@ pub extern "C" fn rq_add_wake_list(cpu_id: c_int, se: *mut sched_entity) -> c_in
     if !thread_awoken(p) { return -EINVAL; }
     let pc = rq_percpu_lock_get(cpu_id);
     if pc.is_null() { return -EINVAL; }
-    let pcr = RqPercpuRef::assume(pc);
+    // SAFETY: `pc` is checked non-null immediately above.
+    let pcr = unsafe { RqPercpuRef::assume(pc) };
     if sr.on_rq_load_acquire() != 0 {
         rq_percpu_put_unlock(pc);
         return -EALREADY;
@@ -732,7 +834,8 @@ pub extern "C" fn rq_add_wake_list(cpu_id: c_int, se: *mut sched_entity) -> c_in
 #[no_mangle]
 pub extern "C" fn rq_pop_all_wake_list(pc: *mut rq_percpu) -> *mut sched_entity {
     if pc.is_null() { return ptr::null_mut(); }
-    RqPercpuRef::assume(pc).wake_list_migrate()
+    // SAFETY: `pc` is checked non-null immediately above.
+    unsafe { RqPercpuRef::assume(pc) }.wake_list_migrate()
 }
 #[no_mangle] pub extern "C" fn xv6_rqport_rq_pop_all_wake_list(pc: *mut rq_percpu) -> *mut sched_entity { rq_pop_all_wake_list(pc) }
 
@@ -783,7 +886,8 @@ pub unsafe extern "C" fn rq_flush_wake_list(cpu_id: c_int) {
 #[no_mangle]
 pub extern "C" fn sched_attr_init(attr: *mut sched_attr) {
     if attr.is_null() { return; }
-    let ar = SchedAttrRef::assume(attr);
+    // SAFETY: `attr` is checked non-null immediately above.
+    let ar = unsafe { SchedAttrRef::assume(attr) };
     ar.set_size(size_of::<sched_attr>() as u32);
     ar.set_affinity_mask((1u64 << NCPU) - 1);
     ar.set_time_slice(DEFAULT_TIME_SLICE);
@@ -796,7 +900,8 @@ pub extern "C" fn sched_attr_init(attr: *mut sched_attr) {
 pub extern "C" fn sched_getattr(se: *mut sched_entity, attr: *mut sched_attr) -> c_int {
     if se.is_null() || attr.is_null() { return -EINVAL; }
     let sr = se_ref(se);
-    let ar = SchedAttrRef::assume(attr);
+    // SAFETY: `attr` is checked non-null at the top of `sched_getattr` above.
+    let ar = unsafe { SchedAttrRef::assume(attr) };
     let _g = sr.pi_lock_ref().scoped_lock();
     ar.set_size(size_of::<sched_attr>() as u32);
     ar.set_affinity_mask(sr.affinity_mask());
@@ -811,7 +916,8 @@ pub extern "C" fn sched_getattr(se: *mut sched_entity, attr: *mut sched_attr) ->
 pub extern "C" fn sched_setattr(se: *mut sched_entity, attr: *const sched_attr) -> c_int {
     if se.is_null() || attr.is_null() { return -EINVAL; }
     let sr = se_ref(se);
-    let ar = SchedAttrConstRef::assume(attr);
+    // SAFETY: `attr` is checked non-null at the top of `sched_setattr` above.
+    let ar = unsafe { SchedAttrConstRef::assume(attr) };
     let major = major_priority(ar.priority());
     if major < 0 || major >= PRIORITY_MAINLEVELS as c_int {
         return -EINVAL;

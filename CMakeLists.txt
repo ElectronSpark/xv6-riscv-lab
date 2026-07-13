@@ -1,5 +1,17 @@
 cmake_minimum_required(VERSION 3.10)
 
+# Hard-pin CMAKE_BUILD_TYPE to empty. This project hardcodes its own
+# optimization level (-O0, see CMAKE_C_FLAGS below) and the C kernel does
+# NOT survive being built with -O3 -DNDEBUG (a stray `CMAKE_BUILD_TYPE=
+# Release` -- e.g. left over in a cached build dir, or passed via `-D` --
+# silently appends -O3 -DNDEBUG after the project's -O0 and triggers
+# latent UB that manifests as an endless "init: starting sh" boot loop;
+# see docs/rustify RUST_REWRITE.md Iteration 23 for the root-cause
+# writeup). FORCE-ing it here means a stray cache entry or `-D
+# CMAKE_BUILD_TYPE=Release` on the command line can never poison the C
+# flags again.
+set(CMAKE_BUILD_TYPE "" CACHE STRING "Build type (forced empty -- see comment above)" FORCE)
+
 # Prevent in-source builds
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
     message(FATAL_ERROR "In-source builds are not allowed. Please create a 'build' directory and run 'cmake ..' from there.")

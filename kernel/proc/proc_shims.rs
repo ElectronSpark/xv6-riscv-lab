@@ -12,11 +12,8 @@
 
 #![allow(non_camel_case_types, non_snake_case)]
 
-macro_rules! u {
-    ($($tokens:tt)*) => {
-        unsafe { $($tokens)* }
-    };
-}
+// See `crate::u`'s doc comment (kernel/lib.rs) for the macro's contract.
+use crate::u;
 
 use crate::bindings::{
     ksiginfo, pgroup, session, slab_alloc, slab_cache_init, slab_cache_t, slab_free, thread, thread_group, SLAB_FLAG_EMBEDDED,
@@ -28,68 +25,132 @@ use core::ffi::{c_char, c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
 
+// SAFETY: `$ptr` must be a valid, non-null, properly-aligned pointer to a
+// live value of the pointee struct type for the duration of the read.
+// Every call site in this file passes either (a) a `#[no_mangle] extern
+// "C"` parameter, whose non-nullness/liveness is guaranteed by the C
+// caller / kernel convention that produced it (e.g. `current`, a proc-table
+// lookup result, a list-iteration callback argument), or (b) a pointer
+// derived from such a parameter via field projection. Reading a plain
+// (non-atomic) field like this additionally requires that no other thread
+// is concurrently writing it; callers rely on whatever lock the field's own
+// C-side contract names (see the individual `xv6_*`/`t_*`/`pg_*` wrappers
+// for which lock, if any, is expected to be held).
 macro_rules! field_get {
     ($ptr:expr, $field:ident) => {{ u! { (*($ptr)).$field } }};
     ($ptr:expr, $field:ident.$subfield:ident) => {{ u! { (*($ptr)).$field.$subfield } }};
     ($ptr:expr, $field:ident.$subfield:ident.$leaf:ident) => {{ u! { (*($ptr)).$field.$subfield.$leaf } }};
 }
 
+// SAFETY: see `field_get!` for the pointer-validity contract. Writing a
+// plain (non-atomic) field additionally requires that the caller has
+// exclusive access to it — either genuinely single-owner state (e.g.
+// initialisation before the object is published) or a held lock matching
+// the field's own C-side contract, same as `field_get!`.
 macro_rules! field_set {
     ($ptr:expr, $field:ident, $value:expr) => {{ u! { (*($ptr)).$field = $value } }};
     ($ptr:expr, $field:ident.$subfield:ident, $value:expr) => {{ u! { (*($ptr)).$field.$subfield = $value } }};
     ($ptr:expr, $field:ident.$subfield:ident.$leaf:ident, $value:expr) => {{ u! { (*($ptr)).$field.$subfield.$leaf = $value } }};
 }
 
+// SAFETY: see `field_get!`. Only the field projection (`&raw mut ...`)
+// happens here, which does not itself read or write through the pointer;
+// the returned pointer is not yet dereferenced, so this macro's own
+// precondition is just "`$ptr` is valid per `field_get!`". Any subsequent
+// deref by the caller is that caller's own obligation.
 macro_rules! field_ptr_mut {
     ($ptr:expr, $field:ident) => {{ u! { &raw mut (*($ptr)).$field } }};
     ($ptr:expr, $field:ident.$subfield:ident) => {{ u! { &raw mut (*($ptr)).$field.$subfield } }};
     ($ptr:expr, $field:ident.$subfield:ident.$leaf:ident) => {{ u! { &raw mut (*($ptr)).$field.$subfield.$leaf } }};
 }
 
+// SAFETY: see `field_ptr_mut!` (same reasoning, const projection).
 macro_rules! field_ptr_const {
     ($ptr:expr, $field:ident) => {{ u! { &raw const (*($ptr)).$field } }};
     ($ptr:expr, $field:ident.$subfield:ident) => {{ u! { &raw const (*($ptr)).$field.$subfield } }};
     ($ptr:expr, $field:ident.$subfield:ident.$leaf:ident) => {{ u! { &raw const (*($ptr)).$field.$subfield.$leaf } }};
 }
 
+// SAFETY: see `field_set!`. `+=` is a non-atomic read-modify-write, so this
+// additionally requires the caller hold exclusive access (or the field's
+// governing lock) across the whole operation, not just around a single
+// load or store.
 macro_rules! field_add_assign {
     ($ptr:expr, $field:ident, $value:expr) => {{ u! { (*($ptr)).$field += $value } }};
 }
 
+// SAFETY: see `field_add_assign!` (same reasoning, `-=`).
 macro_rules! field_sub_assign {
     ($ptr:expr, $field:ident, $value:expr) => {{ u! { (*($ptr)).$field -= $value } }};
 }
 
+// SAFETY: see `field_get!`. `$method` is a bindgen-generated bitfield
+// getter on an anonymous packed union/struct field; it only reads the
+// backing storage, so the same non-null/aligned/live + no-concurrent-writer
+// contract applies.
 macro_rules! bit_get {
     ($ptr:expr, $anon:ident, $method:ident) => {{ u! { (*($ptr)).$anon.$method() } }};
 }
 
+// SAFETY: see `field_set!`. `$method` is a bindgen-generated bitfield
+// setter; it read-modifies-writes the shared backing storage of the
+// anonymous field, so the caller needs exclusive access (or the field's
+// governing lock), same as `field_set!`.
 macro_rules! bit_set {
     ($ptr:expr, $anon:ident, $method:ident, $value:expr) => {{ u! { (*($ptr)).$anon.$method($value) } }};
 }
 
+// SAFETY: `$ptr` must satisfy `field_ptr_mut!`'s contract so the embedded
+// `list_node_t` field is a valid projection target. `list_init` only
+// stores `self` into `prev`/`next`, so no other invariant is required
+// beyond pointer validity — this is typically called before the node is
+// linked into any list (or right after unlinking it), so there is no
+// concurrent list traversal to race with.
 macro_rules! list_init_field {
     ($ptr:expr, $($field:tt)+) => {{ u! { list_init(field_ptr_mut!($ptr, $($field)+)) } }};
 }
 
+// SAFETY: see `list_init_field!` for pointer validity. `list_detach`
+// additionally mutates the neighbouring `prev`/`next` nodes in the list, so
+// the caller must hold whatever lock serialises mutation of that list
+// (e.g. `pid_lock`, a pgroup/session lock) to avoid racing a concurrent
+// insert/remove on the same list.
 macro_rules! list_detach_field {
     ($ptr:expr, $($field:tt)+) => {{ u! { list_detach(field_ptr_mut!($ptr, $($field)+)) } }};
 }
 
+// SAFETY: see `list_init_field!` for pointer validity. This only reads
+// `next == self`, so (unlike `list_detach_field!`) no list-wide lock is
+// strictly required for memory safety, though the caller may still need
+// one for a coherent answer (a concurrent mutator could change the result
+// out from under an unsynchronised caller).
 macro_rules! list_is_detached_field {
     ($ptr:expr, $($field:tt)+) => {{ u! { list_is_detached(field_ptr_mut!($ptr, $($field)+)) as c_int } }};
 }
 
+// SAFETY: see `list_detach_field!` — both `$head_ptr` and `$entry_ptr` must
+// be valid per `field_ptr_mut!`, and the caller must hold the lock
+// protecting the target list, since `list_push_back` mutates the head's
+// and the new entry's neighbouring pointers in place.
 macro_rules! list_push_back_fields {
     ($head_ptr:expr, $($head_field:ident)+, $entry_ptr:expr, $($entry_field:ident)+) => {{
         u! { list_push_back(field_ptr_mut!($head_ptr, $($head_field)+), field_ptr_mut!($entry_ptr, $($entry_field)+)) }
     }};
 }
 
+// SAFETY: relies solely on `field_ptr_const!`'s contract for pointer
+// validity; `smp_load_acquire_i32` itself has a safe signature and performs
+// an atomic acquire load, so unlike `field_get!` no additional
+// "no concurrent writer" precondition is needed — that's the whole point of
+// routing counters like `live_threads`/`refcount`/`group_exit` through it.
 macro_rules! atomic_load_i32_field {
     ($ptr:expr, $($field:tt)+) => {{ smp_load_acquire_i32(field_ptr_const!($ptr, $($field)+)) }};
 }
 
+// SAFETY: see `field_ptr_mut!` for pointer validity. `atomic_fetch_sub_i32`
+// performs an atomic RMW, so concurrent atomic accessors of the same field
+// are fine; the caller only needs the pointer itself to stay valid for the
+// call's duration (i.e. the pointee must not be freed concurrently).
 macro_rules! atomic_fetch_sub_i32_field {
     ($ptr:expr, $field:ident, $value:expr) => {{ u! { atomic_fetch_sub_i32(field_ptr_mut!($ptr, $field), $value) } }};
     ($ptr:expr, $field:ident.$subfield:ident, $value:expr) => {{ u! { atomic_fetch_sub_i32(field_ptr_mut!($ptr, $field.$subfield), $value) } }};
@@ -110,6 +171,37 @@ unsafe extern "C" {
     // Defined in proc_rust_shims.c SECTION 17 (thread body) — likewise.
     fn xv6_thport_tcb_lock(t: *mut crate::bindings::thread);
     fn xv6_thport_tcb_unlock(t: *mut crate::bindings::thread);
+}
+
+// ===========================================================================
+// xv6_panic — PORTED from proc_rust_bridge.c. The C bridge wrapped the
+// `panic("%s", msg)` macro (kernel/inc/printf.h); this replicates the same
+// halt sequence natively: `__panic_start` (disables interrupts, takes the
+// panic message lock, prints a backtrace), the caller's message, then
+// `__panic_end` (releases the lock and tail-calls `trigger_panic`, which
+// sends a crash IPI to every hart and never returns). Exported under the
+// original symbol name so the ~14 existing
+// `unsafe extern "C" { safe fn xv6_panic(...) -> !; }` declarations
+// scattered across kernel/proc/*.rs resolve unchanged.
+// ===========================================================================
+unsafe extern "C" {
+    fn __panic_start();
+    fn __panic_end() -> !;
+}
+
+#[no_mangle]
+pub extern "C" fn xv6_panic(msg: *const c_char) -> ! {
+    // SAFETY: `__panic_start`/`__panic_end` are the real kernel panic
+    // sequence and take no arguments beyond implicit global state.
+    // `printf` with a literal "%s\n" format only reads `msg`, which every
+    // caller passes as a NUL-terminated string (either a 'static C literal
+    // or a caller-owned stack buffer that outlives the call). Nothing in
+    // this function can itself panic or otherwise re-enter `xv6_panic`.
+    unsafe {
+        __panic_start();
+        printf(c"%s\n".as_ptr(), msg);
+        __panic_end()
+    }
 }
 
 // ===========================================================================
@@ -169,9 +261,9 @@ pub extern "C" fn xv6_pgroup_slab_free(pg: *mut crate::bindings::pgroup) {
 // ===========================================================================
 #[no_mangle]
 pub extern "C" fn xv6_tg_send_signo(tg: *mut thread_group, signo: c_int) -> c_int {
-    // ksiginfo is a plain C struct (no destructor); zero-init via
-    // MaybeUninit::zeroed() is layout-equivalent to the C `memset(&info, 0,
-    // sizeof(info))`.
+    // SAFETY: ksiginfo is a plain C struct (no destructor, all-bit-pattern
+    // valid fields); zero-init via MaybeUninit::zeroed().assume_init() is
+    // layout-equivalent to the C `memset(&info, 0, sizeof(info))`.
     let mut info: ksiginfo = u! { MaybeUninit::<ksiginfo>::zeroed().assume_init() };
     info.signo = signo;
     // SAFETY: tg comes from a Rust caller that already holds an appropriate
@@ -415,21 +507,36 @@ fn _ptr_unused() -> *mut () {
 use crate::bindings::list_node_t;
 
 /// Initialise an embedded list entry to the detached state (prev = next = self).
+///
+/// SAFETY (caller of this `unsafe fn`): `e` must be a valid, non-null,
+/// properly-aligned pointer to a live `list_node_t` (typically obtained via
+/// `field_ptr_mut!`/`list_init_field!` from a `#[no_mangle]` C parameter).
+/// Called either before the node is linked into any list or right after
+/// unlinking it, so there is nothing else concurrently traversing it.
 #[inline]
 unsafe fn list_init(e: *mut list_node_t) {
+    // SAFETY: see the fn-level contract above.
     u! {
         (*e).prev = e;
         (*e).next = e;
     }
 }
 
+/// SAFETY (caller): see `list_init`. Only reads `e->next`, so no list-wide
+/// lock is strictly required for memory safety.
 #[inline]
 unsafe fn list_is_detached(e: *mut list_node_t) -> bool {
+    // SAFETY: see the fn-level contract above.
     u! { (*e).next == e }
 }
 
+/// SAFETY (caller): see `list_init` for pointer validity. Additionally
+/// mutates the neighbouring `prev`/`next` nodes in place, so the caller
+/// must hold whatever lock serialises mutation of the list `e` is
+/// currently linked into (matching `list_detach_field!`'s contract).
 #[inline]
 unsafe fn list_detach(e: *mut list_node_t) {
+    // SAFETY: see the fn-level contract above.
     u! {
         let prev = (*e).prev;
         let next = (*e).next;
@@ -441,8 +548,14 @@ unsafe fn list_detach(e: *mut list_node_t) {
 
 /// `list_entry_push_back(head, new)` — insert `new` immediately before `head`,
 /// matching the kernel's static inline.
+///
+/// SAFETY (caller): `head` and `new` must both be valid per `list_init`'s
+/// contract, and the caller must hold the lock protecting the target list
+/// (matching `list_push_back_fields!`'s contract), since this mutates
+/// `head`'s and `new`'s neighbouring pointers in place.
 #[inline]
 unsafe fn list_push_back(head: *mut list_node_t, new: *mut list_node_t) {
+    // SAFETY: see the fn-level contract above.
     u! {
         let prev = (*head).prev;
         (*new).prev = prev;
@@ -455,12 +568,21 @@ unsafe fn list_push_back(head: *mut list_node_t, new: *mut list_node_t) {
 /// Iterate `list_foreach_node_safe(head, pos, tmp, member)` invoking `cb` on
 /// each containing struct. `member_offset` is the byte offset of the embedded
 /// `list_node_t` within the container struct (`core::mem::offset_of!`).
+///
+/// SAFETY (caller): `head` must be valid per `list_init`'s contract and
+/// `member_offset` must be the true offset of a `list_node_t` field
+/// embedded in `T` (every call site below passes a `core::mem::offset_of!`
+/// constant, never an arbitrary value), so `entry.sub(member_offset)`
+/// recovers a valid `*mut T`. The walk snapshots `next` before invoking
+/// `cb`, matching the "safe" (removal-tolerant) C iterator, but `cb` must
+/// not free or relink nodes further ahead in the list than the current one.
 #[inline]
 unsafe fn list_foreach_safe<T>(
     head: *mut list_node_t,
     member_offset: usize,
     mut cb: impl FnMut(*mut T),
 ) {
+    // SAFETY: see the fn-level contract above.
     u! {
         let mut entry = (*head).next;
         while entry != head && !entry.is_null() {
@@ -484,13 +606,21 @@ use crate::lock::rcu::rcu_read_lock;
 use crate::lock::rcu::rcu_read_unlock;
 use crate::mm::either_copyout;
 
+/// SAFETY (caller): `p` must be a valid, non-null, 4-byte-aligned pointer to
+/// a live `c_int` for the duration of the call (typically a field pointer
+/// from `field_ptr_mut!`). The RMW itself is atomic, so no additional
+/// exclusivity is required against other atomic accessors of the same word.
 #[inline]
 unsafe fn atomic_fetch_sub_i32(p: *mut c_int, v: c_int) -> c_int {
+    // SAFETY: see the fn-level contract above.
     u! { AtomicI32::from_ptr(p as *mut i32).fetch_sub(v, Ordering::SeqCst) }
 }
 
+/// SAFETY (caller): see `atomic_fetch_sub_i32` (same reasoning, 8-byte
+/// aligned `u64`).
 #[inline]
 unsafe fn atomic_or_fetch_u64(p: *mut u64, v: u64) -> u64 {
+    // SAFETY: see the fn-level contract above.
     u! { AtomicU64::from_ptr(p).fetch_or(v, Ordering::SeqCst) | v }
 }
 
@@ -503,30 +633,42 @@ const THREAD_FLAG_SELF_REAP: u64 = 6;
 const THREAD_STATE_STOPPED: c_int = 9;
 const THREAD_STATE_ZOMBIE: c_int = 11;
 
+/// SAFETY (caller): `p`, if non-null, must be a valid, live `*mut thread`
+/// (checked below); the null check makes the "if null, treat as not
+/// user-space" branch safe without dereferencing.
 #[inline]
 unsafe fn thread_user_space(p: *mut thread) -> bool {
     if p.is_null() {
         return false;
     }
+    // SAFETY: `p` was just checked non-null above; see the fn-level
+    // contract for the rest. Plain atomic acquire load — no lock needed.
     let flags = u! { smp_load_acquire_u64(&(*p).flags as *const u64) };
     (flags & (1u64 << THREAD_FLAG_USER_SPACE)) != 0
 }
 
+/// SAFETY (caller): see `thread_user_space`.
 #[inline]
 unsafe fn thread_set_flag(p: *mut thread, bit: u64) {
     if p.is_null() {
         return;
     }
+    // SAFETY: `p` was just checked non-null above. `atomic_or_fetch_u64` is
+    // an atomic RMW, so concurrent flag-setters on other bits of the same
+    // word don't race destructively.
     u! {
         let _ = atomic_or_fetch_u64(&(*p).flags as *const u64 as *mut u64, 1u64 << bit);
     }
 }
 
+/// SAFETY (caller): see `thread_user_space`.
 #[inline]
 unsafe fn thread_state_load(p: *mut thread) -> c_int {
     if p.is_null() {
         return 0;
     }
+    // SAFETY: `p` was just checked non-null above. Plain atomic acquire
+    // load of `state`, matching `__thread_state_get` — no lock needed.
     u! { smp_load_acquire_i32(&(*p).state as *const _ as *const c_int) }
 }
 
@@ -549,6 +691,10 @@ pub extern "C" fn t_pg_entry_is_detached(t: *mut thread) -> c_int {
 
 #[no_mangle]
 pub extern "C" fn t_user_space(p: *mut thread) -> c_int {
+    // SAFETY: `thread_user_space` null-checks internally; `p` is a
+    // caller-supplied thread pointer per this `#[no_mangle]` fn's C ABI
+    // contract (non-null when meaningful, otherwise treated as "not
+    // user-space").
     u! { thread_user_space(p) as c_int }
 }
 
@@ -567,6 +713,12 @@ pub extern "C" fn t_for_each_child(
 ) {
     let Some(cb) = fn_cb else { return };
     let off = core::mem::offset_of!(thread, siblings);
+    // SAFETY: `p` is a caller-supplied, live `*mut thread`; `off` is a
+    // genuine `offset_of!` constant for `thread::siblings`, matching
+    // `list_foreach_safe`'s contract. `cb` is an opaque C callback that may
+    // detach the *current* child (that's what the "safe"/next-snapshotting
+    // walk tolerates) but per that same contract must not relink nodes
+    // further ahead in the list.
     u! {
         list_foreach_safe::<thread>(&raw mut (*p).children, off, |child| {
             cb(child, arg);
@@ -636,6 +788,8 @@ pub extern "C" fn pg_for_each_tg(
 ) {
     let Some(cb) = fn_cb else { return };
     let off = core::mem::offset_of!(thread_group, list_entry);
+    // SAFETY: see `t_for_each_child`; `pg` is caller-supplied and live,
+    // `off` is a genuine `offset_of!` for `thread_group::list_entry`.
     u! {
         list_foreach_safe::<thread_group>(&raw mut (*pg).thread_groups, off, |tg| {
             cb(tg, arg);
@@ -672,6 +826,8 @@ pub extern "C" fn tg_for_each_thread(
 ) {
     let Some(cb) = fn_cb else { return };
     let off = core::mem::offset_of!(thread, tg_entry);
+    // SAFETY: see `t_for_each_child`; `tg` is caller-supplied and live,
+    // `off` is a genuine `offset_of!` for `thread::tg_entry`.
     u! {
         list_foreach_safe::<thread>(&raw mut (*tg).thread_list, off, |t| {
             cb(t, arg);
@@ -691,6 +847,8 @@ pub extern "C" fn session_for_each_pg(
 ) {
     let Some(cb) = fn_cb else { return };
     let off = core::mem::offset_of!(pgroup, list_entry);
+    // SAFETY: see `t_for_each_child`; `s` is caller-supplied and live,
+    // `off` is a genuine `offset_of!` for `pgroup::list_entry`.
     u! {
         list_foreach_safe::<pgroup>(&raw mut (*s).pgrps, off, |pg| {
             cb(pg, arg);
@@ -704,18 +862,24 @@ pub extern "C" fn session_for_each_pg(
 
 #[no_mangle]
 pub extern "C" fn xv6_thread_is_zombie(t: *mut thread) -> c_int {
+    // SAFETY: see `thread_state_load`; `t` is caller-supplied, null-checked
+    // internally by `thread_state_load`.
     u! { (thread_state_load(t) == THREAD_STATE_ZOMBIE) as c_int }
 }
 #[no_mangle]
 pub extern "C" fn xv6_thread_is_stopped(t: *mut thread) -> c_int {
+    // SAFETY: see `xv6_thread_is_zombie`.
     u! { (thread_state_load(t) == THREAD_STATE_STOPPED) as c_int }
 }
 #[no_mangle]
 pub extern "C" fn xv6_t_set_user_space(t: *mut thread) {
+    // SAFETY: see `thread_set_flag`; `t` is caller-supplied, null-checked
+    // internally by `thread_set_flag`.
     u! { thread_set_flag(t, THREAD_FLAG_USER_SPACE) }
 }
 #[no_mangle]
 pub extern "C" fn xv6_t_set_self_reap(t: *mut thread) {
+    // SAFETY: see `xv6_t_set_user_space`.
     u! { thread_set_flag(t, THREAD_FLAG_SELF_REAP) }
 }
 
@@ -800,18 +964,30 @@ pub extern "C" fn xv6_t_set_thread_group(t: *mut thread, tg: *mut thread_group) 
 #[no_mangle]
 pub extern "C" fn xv6_t_copy_trapframe(dst: *mut thread, src: *mut thread) {
     // C: *(dst->trapframe) = *(src->trapframe);  // copy utrapframe by value.
+    // SAFETY: `dst`/`src` are caller-supplied, live `*mut thread`s (per the
+    // clone.c call sites that use this shim); `.trapframe` is a non-null
+    // pointer to that thread's dedicated per-thread trapframe page for the
+    // lifetime of the thread, so a same-sized non-overlapping copy between
+    // two distinct threads' trapframes is valid. The caller (clone path) is
+    // setting up `dst` before it is published/scheduled, so nothing else
+    // is concurrently touching it.
     u! { ptr::copy_nonoverlapping((*src).trapframe, (*dst).trapframe, 1usize) }
 }
 #[no_mangle]
 pub extern "C" fn xv6_t_trapframe_set_sepc(t: *mut thread, v: u64) {
+    // SAFETY: see `xv6_t_copy_trapframe`; `t->trapframe` is non-null and
+    // live, and only `t` itself (or its clone-time parent, before `t` is
+    // published) writes these fields.
     u! { (*(*t).trapframe).trapframe.sepc = v }
 }
 #[no_mangle]
 pub extern "C" fn xv6_t_trapframe_set_sp(t: *mut thread, v: u64) {
+    // SAFETY: see `xv6_t_trapframe_set_sepc`.
     u! { (*(*t).trapframe).trapframe.sp = v }
 }
 #[no_mangle]
 pub extern "C" fn xv6_t_trapframe_set_a0(t: *mut thread, v: u64) {
+    // SAFETY: see `xv6_t_trapframe_set_sepc`.
     u! { (*(*t).trapframe).trapframe.a0 = v }
 }
 
@@ -861,6 +1037,9 @@ pub extern "C" fn xv6_tg_group_exit_task_is(
     tg: *mut thread_group,
     t: *mut thread,
 ) -> c_int {
+    // SAFETY: see `field_get!` — `tg` is a caller-supplied, live
+    // `*mut thread_group`; this only reads `group_exit_task` and compares
+    // the pointer value (no deref of `t`).
     u! { ((*tg).group_exit_task == t) as c_int }
 }
 #[no_mangle]
@@ -878,6 +1057,9 @@ pub extern "C" fn xv6_tg_is_exiting(tg: *mut thread_group) -> c_int {
     if tg.is_null() {
         return 0;
     }
+    // SAFETY: see `atomic_load_i32_field!` — `tg` was just checked
+    // non-null above; `smp_load_acquire_i32` is a safe atomic acquire load
+    // so no additional exclusivity is required.
     u! { (smp_load_acquire_i32(&raw const (*tg).group_exit) != 0) as c_int }
 }
 
@@ -901,6 +1083,8 @@ pub extern "C" fn xv6_thread_state_set(p: *mut thread, s: c_int) {
     if p.is_null() {
         return;
     }
+    // SAFETY: `p` was just checked non-null above; the store is atomic, so
+    // it doesn't race destructively with other atomic accessors of `state`.
     u! {
         AtomicI32::from_ptr(&raw mut (*p).state as *mut i32).store(s, Ordering::SeqCst);
     }
@@ -912,6 +1096,7 @@ pub extern "C" fn xv6_thread_state_get(p: *mut thread) -> c_int {
     if p.is_null() {
         return 0;
     }
+    // SAFETY: `p` was just checked non-null above; plain atomic load.
     u! {
         AtomicI32::from_ptr(&raw mut (*p).state as *mut i32).load(Ordering::SeqCst)
     }
@@ -953,6 +1138,11 @@ pub extern "C" fn xv6_ptr_err(p: *const c_void) -> i64 {
 
 #[no_mangle]
 pub extern "C" fn tg_is_group_leader(p: *mut thread) -> c_int {
+    // SAFETY: both derefs (`(*p).thread_group`, `(*tg).group_leader`) are
+    // preceded by their own null check inside this block, so by the time
+    // either pointer is dereferenced it is known non-null; both `p` and
+    // `tg` come from the live kernel object graph (caller-supplied thread,
+    // its own `thread_group` pointer).
     u! {
         if p.is_null() {
             return 1;
@@ -981,6 +1171,10 @@ pub extern "C" fn session_for_each_all(
 ) {
     let Some(cb) = fn_cb else { return };
     let off = core::mem::offset_of!(session, global_entry);
+    // SAFETY: see `t_for_each_child`. `session_list` is the kernel-global
+    // sentinel `list_node_t` (declared in the `unsafe extern "C"` block
+    // above), valid for `'static`; `off` is a genuine `offset_of!` for
+    // `session::global_entry`.
     u! {
         list_foreach_safe::<session>(&raw mut session_list, off, |s| {
             cb(s, arg);
@@ -1022,6 +1216,11 @@ unsafe extern "C" {
 
 #[no_mangle]
 pub extern "C" fn xv6_forkret_assert_user(p: *mut thread) {
+    // SAFETY: `thread_user_space` itself tolerates a null `p` (returns
+    // `false`), but the subsequent `(*p).pid` read does not — this
+    // function mirrors the C `assert(THREAD_USER_SPACE(p), ...)` call in
+    // forkret, which always passes the just-scheduled current thread, never
+    // null. `p` must be a live, non-null `*mut thread` for that reason.
     u! {
         if !thread_user_space(p) {
             // Format matches the C assert() output (file/line elided).
@@ -1038,6 +1237,10 @@ pub extern "C" fn xv6_forkret_assert_user(p: *mut thread) {
 pub extern "C" fn xv6_either_copyout_int(dst: u64, v: c_int) -> c_int {
     // C: either_copyout(1 /*user_dst*/, dst, &v, sizeof(v))
     let local = v;
+    // SAFETY: `either_copyout` validates `dst` against the current
+    // process's user address space itself (that's its whole job, mirroring
+    // the C helper); `&local` is a valid kernel stack pointer, non-null,
+    // and exactly `size_of::<c_int>()` bytes, for the duration of this call.
     u! {
         either_copyout(
             1,
@@ -1072,6 +1275,10 @@ pub extern "C" fn xv6_exit_find_zombie_child(
     let off_siblings = core::mem::offset_of!(thread, siblings);
     let head = field_ptr_mut!(p, children);
     let mut found: *mut thread = core::ptr::null_mut();
+    // SAFETY: `head` is valid per `field_ptr_mut!`'s contract (`p` is a
+    // caller-supplied live thread); `off_siblings` is a genuine
+    // `offset_of!` for `thread::siblings`. `thread_state_load` null-checks
+    // defensively, though every child reached here is a live thread.
     u! {
         list_foreach_safe::<thread>(head, off_siblings, |child| {
             if !found.is_null() {
@@ -1092,6 +1299,7 @@ pub extern "C" fn xv6_exit_find_stopped_child(
     let off_siblings = core::mem::offset_of!(thread, siblings);
     let head = field_ptr_mut!(p, children);
     let mut found: *mut thread = core::ptr::null_mut();
+    // SAFETY: see `xv6_exit_find_zombie_child`.
     u! {
         list_foreach_safe::<thread>(head, off_siblings, |child| {
             if !found.is_null() {
@@ -1137,6 +1345,14 @@ pub extern "C" fn xv6_exit_reparent_do(
 ) -> c_int {
     let mut zombie_found: c_int = 0;
     let off_siblings = core::mem::offset_of!(thread, siblings);
+    // SAFETY: `p` and `initproc` are caller-supplied, live `*mut thread`s;
+    // `off_siblings` is a genuine `offset_of!` for `thread::siblings`. The
+    // walk mutates the child's `signal.esignal` field and detaches/attaches
+    // it into a different parent's child list; per the C body this
+    // function mirrors (see comment above), the whole operation runs under
+    // `_rcu` (an RCU read-side section held for this scope) and
+    // `xv6_pid_wlock()` (acquired just below), matching the locking
+    // `xv6_thport_detach_child`/`xv6_thport_attach_child` require.
     u! {
         let _rcu = crate::lock::rcu::KRcuRead::new();
         xv6_pid_wlock();
@@ -1171,6 +1387,16 @@ pub extern "C" fn xv6_exit_reap_zombie(
     child: *mut thread,
     xstate_out: *mut c_int,
 ) -> c_int {
+    // SAFETY: `parent`/`child` are caller-supplied, live `*mut thread`s
+    // (per the fn-level doc comment above: caller holds `pid_rlock` and
+    // `parent`'s state is INTERRUPTIBLE); `child->sched_entity` is set at
+    // thread-creation time and is non-null for the lifetime of a live
+    // thread; `xstate_out` is a caller-supplied valid `*mut c_int`. The
+    // lock hand-off sequence (runlock/yield/rlock, then runlock/wlock)
+    // mirrors the C body exactly, so the pid-lock protocol invariants the
+    // extern helpers (`xv6_thport_detach_child`, `proctab_proc_remove`,
+    // `__free_pid`, `xv6_thport_thread_destroy`) rely on are upheld at each
+    // call.
     u! {
         let mut spin_count: i32 = 0;
         loop {
@@ -1271,8 +1497,15 @@ fn hlist_hash_int(key: c_int) -> ht_hash_t {
 
 /// `atomic_inc_unless(value, unless)` from kernel/inc/smp/atomic.h.
 /// Returns `true` if the increment succeeded, `false` if `*value == unless`.
+///
+/// SAFETY (caller): `p` must be a valid, non-null, 8-byte-aligned pointer
+/// to a live `i64` for the duration of the call (every call site below
+/// passes `&raw mut (*pt()).allocated_cnt`, i.e. a field of the `'static`
+/// `PROC_TABLE`). The loop is a lock-free CAS retry, so no additional
+/// exclusivity is required against other atomic accessors of the same word.
 #[inline]
 unsafe fn atomic_inc_unless_i64(p: *mut i64, unless: i64) -> bool {
+    // SAFETY: see the fn-level contract above.
     let a = u! { AtomicI64::from_ptr(p) };
     let mut cur = a.load(core::sync::atomic::Ordering::SeqCst);
     loop {
@@ -1292,14 +1525,24 @@ unsafe fn atomic_inc_unless_i64(p: *mut i64, unless: i64) -> bool {
 }
 
 /// `atomic_sub(value, amount)` — `__atomic_fetch_sub(SEQ_CST)`.
+///
+/// SAFETY (caller): see `atomic_inc_unless_i64` (same pointer contract).
 #[inline]
 unsafe fn atomic_sub_i64(p: *mut i64, n: i64) -> i64 {
+    // SAFETY: see the fn-level contract above.
     u! { AtomicI64::from_ptr(p).fetch_sub(n, core::sync::atomic::Ordering::SeqCst) }
 }
 
 /// `rcu_assign_pointer(p, v)` — release-store the pointer.
+///
+/// SAFETY (caller): `p` must be a valid, non-null, properly-aligned pointer
+/// to a live `*mut T` for the duration of the call. The store is atomic
+/// (release), so it doesn't race destructively with concurrent
+/// `rcu_dereference` readers of the same word — that's the point of routing
+/// pointer publication through this helper instead of a plain write.
 #[inline]
 unsafe fn rcu_assign_pointer<T>(p: *mut *mut T, v: *mut T) {
+    // SAFETY: see the fn-level contract above.
     u! {
         AtomicPtr::<T>::from_ptr(p).store(v, core::sync::atomic::Ordering::Release);
     }
@@ -1307,8 +1550,15 @@ unsafe fn rcu_assign_pointer<T>(p: *mut *mut T, v: *mut T) {
 
 /// `rcu_dereference(p)` — acquire-load the pointer. Caller must be inside a
 /// matching rcu_read_lock()/_unlock() region.
+///
+/// SAFETY (caller): see `rcu_assign_pointer` for the pointer contract; in
+/// addition the caller must be inside a matching RCU read-side critical
+/// section (or otherwise know the pointee can't be freed concurrently) to
+/// safely use the *returned* pointer, though this function's own atomic
+/// load only requires `p` itself to be valid.
 #[inline]
 unsafe fn rcu_dereference<T>(p: *mut *mut T) -> *mut T {
+    // SAFETY: see the fn-level contract above.
     u! { AtomicPtr::<T>::from_ptr(p).load(core::sync::atomic::Ordering::Acquire) }
 }
 
@@ -1364,6 +1614,16 @@ static PROC_TABLE: ProcTableCell = ProcTableCell(UnsafeCell::new(ProcTable {
     },
 }));
 
+/// Pointer to the file-scope `PROC_TABLE`. Always a valid, non-null,
+/// properly-aligned, `'static`-lived pointer — `UnsafeCell::get` never
+/// fails — so every `(*pt())` deref below is pointer-valid by construction.
+/// What each call site still needs to justify individually is the *access
+/// discipline* for the field(s) it touches: plain fields (`nextpid`,
+/// `registered_cnt`, `initproc` raw read) require the caller hold
+/// `pid_lock` (reader or writer, per field) exactly as the C code did,
+/// while `allocated_cnt` and the `initproc`/`procs_list` RCU-published
+/// fields go through the atomic/RCU helpers above instead and don't need
+/// `pid_lock`.
 #[inline]
 fn pt() -> *mut ProcTable {
     PROC_TABLE.0.get()
@@ -1383,6 +1643,11 @@ unsafe extern "C" fn proctab_hash_cmp(
 ) -> c_int {
     let pa = a as *mut thread;
     let pb = b as *mut thread;
+    // SAFETY: see `field_get!` — `a`/`b` are non-null node pointers
+    // supplied by the `hlist` implementation, which only ever passes
+    // pointers to genuine `thread` objects registered in this proc table
+    // (either lookup keys built by `xv6_proctab_get_*`/`_bt_pid`, or live
+    // entries already stored in the table).
     u! { (*pa).pid - (*pb).pid }
 }
 
@@ -1400,6 +1665,9 @@ unsafe extern "C" fn proctab_hash_get_node(entry: *mut hlist_entry_t) -> *mut c_
 
 #[no_mangle]
 pub extern "C" fn xv6_proctab_init_storage() {
+    // SAFETY: see `pt()` for pointer validity. Called exactly once at boot
+    // before any other thread can observe `PROC_TABLE`, so no lock is
+    // needed for this one-time initialisation (mirrors the C boot sequence).
     u! {
         let t = &mut *pt();
         let mut funcs = hlist_func_struct {
@@ -1422,22 +1690,32 @@ pub extern "C" fn xv6_proctab_init_storage() {
 
 #[no_mangle]
 pub extern "C" fn xv6_pid_wlock() {
+    // SAFETY: see `pt()`. These four are the `pid_lock` primitives
+    // themselves; `rwlock_w{,un}lock`/`rwlock_r{,un}lock` handle concurrent
+    // access to the lock's own state internally, so no external
+    // synchronisation is required to call them beyond `pt()`'s pointer
+    // validity and the usual lock/unlock balancing the caller owes.
     u! { rwlock_wlock(&raw mut (*pt()).pid_lock) }
 }
 #[no_mangle]
 pub extern "C" fn xv6_pid_wunlock() {
+    // SAFETY: see `xv6_pid_wlock`.
     u! { rwlock_wunlock(&raw mut (*pt()).pid_lock) }
 }
 #[no_mangle]
 pub extern "C" fn xv6_pid_rlock() {
+    // SAFETY: see `xv6_pid_wlock`.
     u! { rwlock_rlock(&raw mut (*pt()).pid_lock) }
 }
 #[no_mangle]
 pub extern "C" fn xv6_pid_runlock() {
+    // SAFETY: see `xv6_pid_wlock`.
     u! { rwlock_runlock(&raw mut (*pt()).pid_lock) }
 }
 #[no_mangle]
 pub extern "C" fn xv6_pid_try_lock_upgrade() -> c_int {
+    // SAFETY: see `xv6_pid_wlock`; `__rwl_try_update` is the primitive
+    // implementing a read-to-write lock upgrade attempt.
     if u! { __rwl_try_update(&raw mut (*pt()).pid_lock) } {
         1
     } else {
@@ -1446,6 +1724,8 @@ pub extern "C" fn xv6_pid_try_lock_upgrade() -> c_int {
 }
 #[no_mangle]
 pub extern "C" fn xv6_pid_wholding() -> c_int {
+    // SAFETY: see `xv6_pid_wlock`; `__rwl_w_holding` only inspects the
+    // lock's own internally-synchronised state.
     if u! { __rwl_w_holding(&raw mut (*pt()).pid_lock) } {
         1
     } else {
@@ -1455,39 +1735,59 @@ pub extern "C" fn xv6_pid_wholding() -> c_int {
 
 #[no_mangle]
 pub extern "C" fn xv6_proctab_initproc_load() -> *mut thread {
+    // SAFETY: see `pt()` and `rcu_dereference`'s fn-level contract; callers
+    // of this shim are expected to be inside a matching RCU read-side
+    // section before dereferencing the returned pointer, mirroring the C
+    // `rcu_dereference(initproc)` usage this replaces.
     u! { rcu_dereference(&raw mut (*pt()).initproc) }
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_initproc_store(p: *mut thread) {
+    // SAFETY: see `pt()` and `rcu_assign_pointer`'s fn-level contract;
+    // callers hold `pid_lock` (writer) to serialise against other writers
+    // of `initproc`, matching the C convention for this assignment.
     u! { rcu_assign_pointer(&raw mut (*pt()).initproc, p) }
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_initproc_raw() -> *mut thread {
+    // SAFETY: see `pt()`. Plain non-atomic read, used only where the
+    // caller has an independent guarantee of no concurrent writer (e.g.
+    // single-threaded boot-time access), unlike `xv6_proctab_initproc_load`.
     u! { (*pt()).initproc }
 }
 
 #[no_mangle]
 pub extern "C" fn xv6_proctab_nextpid_get() -> c_int {
+    // SAFETY: see `pt()`; `nextpid` is a plain field protected by
+    // `pid_lock`, which the caller is expected to hold (matching the C
+    // convention for this field).
     u! { (*pt()).nextpid }
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_nextpid_set(v: c_int) {
+    // SAFETY: see `xv6_proctab_nextpid_get`; caller holds `pid_lock` as a
+    // writer for this mutation.
     u! {
         (*pt()).nextpid = v;
     }
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_registered_cnt() -> i64 {
+    // SAFETY: see `xv6_proctab_nextpid_get` — `registered_cnt` is likewise
+    // a plain field protected by `pid_lock`.
     u! { (*pt()).registered_cnt }
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_registered_inc() {
+    // SAFETY: see `xv6_proctab_registered_cnt`; caller holds `pid_lock` as
+    // a writer for this non-atomic `+= 1`.
     u! {
         (*pt()).registered_cnt += 1;
     }
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_registered_dec() {
+    // SAFETY: see `xv6_proctab_registered_inc`.
     u! {
         (*pt()).registered_cnt -= 1;
     }
@@ -1497,6 +1797,8 @@ const EAGAIN: c_int = 11;
 
 #[no_mangle]
 pub extern "C" fn xv6_proctab_alloc_pid_slot() -> c_int {
+    // SAFETY: see `pt()` and `atomic_inc_unless_i64`'s fn-level contract;
+    // no `pid_lock` needed since the CAS loop is self-synchronising.
     if u! { atomic_inc_unless_i64(&raw mut (*pt()).allocated_cnt, NR_THREAD) } {
         0
     } else {
@@ -1505,12 +1807,20 @@ pub extern "C" fn xv6_proctab_alloc_pid_slot() -> c_int {
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_free_pid_slot() {
+    // SAFETY: see `xv6_proctab_alloc_pid_slot`; `atomic_sub_i64` is
+    // likewise self-synchronising.
     u! {
         let _ = atomic_sub_i64(&raw mut (*pt()).allocated_cnt, 1);
     }
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_allocated_cnt() -> i64 {
+    // SAFETY: see `pt()`. This is a plain (non-atomic) read of a counter
+    // that `xv6_proctab_alloc_pid_slot`/`_free_pid_slot` mutate atomically;
+    // it mirrors the original C code's informational/best-effort read of
+    // this counter (e.g. for diagnostics) rather than a correctness-
+    // critical decision, so the benign race is intentional, pre-existing
+    // behaviour and out of scope for this pass to change.
     u! { (*pt()).allocated_cnt }
 }
 
@@ -1520,6 +1830,12 @@ pub extern "C" fn xv6_proctab_get_locked(pid: c_int) -> *mut thread {
     // and large; using `MaybeUninit::zeroed()` keeps the discriminator fields
     // (only `pid`) deterministic and matches the C side's stack-allocated
     // `struct thread dummy = { .pid = pid };`.
+    // SAFETY: see `pt()`. `dummy` is a local, fully-owned stack value used
+    // only as a lookup key (its address never escapes this call), so
+    // zero-initialising the rest of `thread` is fine — `hlist_get` only
+    // reads `pid` via the registered `cmp_node`/`hash` callbacks. Caller
+    // holds `pid_lock` (reader) around this non-RCU lookup, matching the
+    // "_locked" naming and the C convention for `hlist_get`.
     u! {
         let mut dummy: MaybeUninit<thread> = MaybeUninit::zeroed();
         (*dummy.as_mut_ptr()).pid = pid;
@@ -1528,6 +1844,9 @@ pub extern "C" fn xv6_proctab_get_locked(pid: c_int) -> *mut thread {
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_get_rcu(pid: c_int) -> *mut thread {
+    // SAFETY: see `xv6_proctab_get_locked`, except this is the RCU-read
+    // variant: caller must be inside a matching RCU read-side critical
+    // section instead of holding `pid_lock`.
     u! {
         let mut dummy: MaybeUninit<thread> = MaybeUninit::zeroed();
         (*dummy.as_mut_ptr()).pid = pid;
@@ -1536,22 +1855,36 @@ pub extern "C" fn xv6_proctab_get_rcu(pid: c_int) -> *mut thread {
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_put_rcu(p: *mut thread) -> *mut thread {
+    // SAFETY: see `pt()`; `p` is a caller-supplied, live `*mut thread`
+    // being published into the table. Structural mutation of the hlist
+    // requires the caller hold `pid_lock` (writer) even though readers use
+    // RCU, matching the C convention for `hlist_put_rcu`.
     u! { hlist_put_rcu(&raw mut (*pt()).procs, p as *mut c_void, false) as *mut thread }
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_pop_rcu(p: *mut thread) -> *mut thread {
+    // SAFETY: see `xv6_proctab_put_rcu`.
     u! { hlist_pop_rcu(&raw mut (*pt()).procs, p as *mut c_void) as *mut thread }
 }
 
 // --- procs_list (RCU-safe doubly linked list for procdump iteration) ------
 
 /// `__list_entry_add_rcu(new, prev, next)` — internal helper from list.h.
+///
+/// SAFETY (caller): `new`, `prev`, and `next` must all be valid, non-null,
+/// properly-aligned `*mut list_node_t` (per `list_init`'s pointer
+/// contract), with `prev`/`next` genuinely adjacent in the target list, and
+/// the caller must hold the lock protecting that list (matching
+/// `list_detach_field!`'s contract) — this mutates three nodes' pointers
+/// in place, publishing `new` to concurrent RCU readers via
+/// `rcu_assign_pointer`.
 #[inline]
 unsafe fn __list_entry_add_rcu(
     new: *mut list_node_t,
     prev: *mut list_node_t,
     next: *mut list_node_t,
 ) {
+    // SAFETY: see the fn-level contract above.
     u! {
         (*new).next = next;
         (*new).prev = prev;
@@ -1561,15 +1894,25 @@ unsafe fn __list_entry_add_rcu(
 }
 
 /// `list_entry_add_tail_rcu(head, entry)` — insert before `head`.
+///
+/// SAFETY (caller): see `__list_entry_add_rcu`; `head` and `entry` must be
+/// valid, and the caller must hold the list's protecting lock.
 #[inline]
 unsafe fn list_entry_add_tail_rcu(head: *mut list_node_t, entry: *mut list_node_t) {
+    // SAFETY: see the fn-level contract above.
     u! { __list_entry_add_rcu(entry, (*head).prev, head) }
 }
 
 /// `list_entry_del_rcu(entry)` — RCU-safe unlink, leaves entry->next
 /// untouched so concurrent readers can still traverse it.
+///
+/// SAFETY (caller): `entry` must be valid per `list_init`'s contract and
+/// currently linked into a list; the caller must hold that list's
+/// protecting lock against other mutators (concurrent *readers* are fine —
+/// that's the point of leaving `entry->next` untouched).
 #[inline]
 unsafe fn list_entry_del_rcu(entry: *mut list_node_t) {
+    // SAFETY: see the fn-level contract above.
     u! {
         let prev = (*entry).prev;
         let next = (*entry).next;
@@ -1580,8 +1923,11 @@ unsafe fn list_entry_del_rcu(entry: *mut list_node_t) {
 }
 
 /// `list_entry_init_rcu(entry)` — reset to self-pointing with release publish.
+///
+/// SAFETY (caller): see `list_init`'s pointer contract for `entry`.
 #[inline]
 unsafe fn list_entry_init_rcu(entry: *mut list_node_t) {
+    // SAFETY: see the fn-level contract above.
     u! {
         rcu_assign_pointer(&raw mut (*entry).next, entry);
         (*entry).prev = entry;
@@ -1589,8 +1935,12 @@ unsafe fn list_entry_init_rcu(entry: *mut list_node_t) {
 }
 
 /// `list_entry_del_init_rcu(entry)` — unlink + reinit.
+///
+/// SAFETY (caller): see `list_entry_del_rcu` (the stricter of the two
+/// component contracts — protecting-lock held, `entry` linked and valid).
 #[inline]
 unsafe fn list_entry_del_init_rcu(entry: *mut list_node_t) {
+    // SAFETY: see the fn-level contract above.
     u! {
         list_entry_del_rcu(entry);
         list_entry_init_rcu(entry);
@@ -1599,48 +1949,163 @@ unsafe fn list_entry_del_init_rcu(entry: *mut list_node_t) {
 
 #[no_mangle]
 pub extern "C" fn xv6_proctab_dmplist_add(p: *mut thread) {
+    // SAFETY: see `pt()` and `list_entry_add_tail_rcu`'s fn-level contract;
+    // `p` is a caller-supplied, live `*mut thread` not yet in the dump
+    // list; caller holds `pid_lock` (writer) around this structural
+    // mutation of `procs_list`.
     u! { list_entry_add_tail_rcu(&raw mut (*pt()).procs_list, &raw mut (*p).dmp_list_entry) }
 }
 #[no_mangle]
 pub extern "C" fn xv6_proctab_dmplist_del(p: *mut thread) {
+    // SAFETY: see `xv6_proctab_dmplist_add`; `p` is currently linked into
+    // `procs_list`.
     u! { list_entry_del_init_rcu(&raw mut (*p).dmp_list_entry) }
 }
 
-// --- proc_table foreach helpers -------------------------------------------
+// --- proc_table RCU-guarded iteration --------------------------------------
 //
-// `hlist_foreach_node_rcu(hlist, pos, member)` (a macro that internally
-// calls `hlist_first_entry_rcu` + `hlist_next_entry_rcu`, both static
-// inline) is not bindgen-visible. The C accumulator's foreach helpers are
-// only used by procdump (called from human-driven console diagnostics), so
-// for now they are forwarded to the C-side trampolines that still live in
-// the original file. Once SECTION 10 (procdump) is folded into Rust we'll
-// either reimplement the iteration in pure Rust by walking the hlist
-// buckets directly, or expose `hlist_first_entry_rcu` via a tiny shim.
+// Native Rust reimplementation of the (deleted) C bridge's
+// `xv6_proctab_foreach_rcu`/`xv6_proctab_foreach_inner`, which drove the
+// `hlist_foreach_node_rcu(hlist, pos, proctab_entry)` macro from
+// kernel/inc/hlist.h. That macro expands to `hlist_first_entry_rcu` +
+// `hlist_next_entry_rcu` (both `static inline`, so bindgen cannot see
+// them); the two helpers below mirror their exact semantics:
 //
-// NOTE: The two functions below — `xv6_proctab_foreach_rcu` and
-// `xv6_proctab_foreach_inner` — remain in proc_rust_shims.c and are
-// declared `extern` here for SECTION 10 to use. Do not delete them from C
-// until the static-inline iteration helpers are also ported.
-unsafe extern "C" {
-    pub fn xv6_proctab_foreach_rcu(
-        cb: Option<unsafe extern "C" fn(*mut thread, *mut c_void)>,
-        arg: *mut c_void,
-    );
-    pub fn xv6_proctab_foreach_inner(
-        cb: Option<unsafe extern "C" fn(*mut thread, *mut c_void)>,
-        arg: *mut c_void,
-    );
+//   * each bucket is a sentinel-headed circular doubly-linked list (the
+//     bucket itself is a `list_node_t`, never counted as an element);
+//   * `next`/`prev` pointer loads go through `rcu_dereference` (an
+//     acquire load), matching `list_next_rcu()`, so this is safe to run
+//     concurrently with the `hlist_put_rcu`/`hlist_pop_rcu` writers above
+//     as long as the caller holds an RCU read-side critical section;
+//   * an exhausted bucket falls through to the next non-empty one.
+//
+// `hlist_entry_t.list_entry` sits at offset 0 (see kernel/inc/hlist_type.h),
+// so reinterpreting a `*mut list_node_t` as `*mut hlist_entry_t` is exactly
+// what the C `container_of(..., hlist_entry_t, list_entry)` does; recovering
+// the owning `*mut thread` reuses `proctab_hash_get_node` (SECTION 8, above).
+
+/// First entry in `bucket` (RCU-safe), or NULL if the bucket is empty.
+///
+/// SAFETY (caller): `bucket` must be a valid, non-null pointer into
+/// `PROC_TABLE.buckets` (every call site passes `&raw mut
+/// (*pt()).buckets[i]` for `i < NR_THREAD_HASH_BUCKETS`); the caller must
+/// be inside a matching RCU read-side critical section for the returned
+/// pointer to be safe to dereference afterwards (see `rcu_dereference`).
+/// Reinterpreting the `*mut list_node_t` as `*mut hlist_entry_t` is valid
+/// because `hlist_entry_t.list_entry` sits at offset 0 (module doc above).
+#[inline]
+unsafe fn hlist_bucket_first_rcu(bucket: *mut hlist_bucket_t) -> *mut hlist_entry_t {
+    // SAFETY: see the fn-level contract above.
+    u! {
+        let first = rcu_dereference(&raw mut (*bucket).next);
+        if first.is_null() || first == bucket {
+            ptr::null_mut()
+        } else {
+            first as *mut hlist_entry_t
+        }
+    }
 }
 
-/// Accessor exposed to the two C-side foreach helpers (which still rely on
-/// the `hlist_foreach_node_rcu` static-inline macro). Returns a raw pointer
-/// to `PROC_TABLE.procs`. The Rust-side `ProcTable` deliberately lays out
-/// `procs: hlist_t` followed immediately by `buckets: [hlist_bucket_t; 31]`
-/// so that the C macro's flexible-array bucket access lands on the correct
-/// memory.
-#[no_mangle]
-pub extern "C" fn xv6_proctab_hlist_ptr() -> *mut hlist_t {
-    u! { &raw mut (*pt()).procs }
+/// Next entry within `bucket` after `entry` (RCU-safe), or NULL at the
+/// bucket's sentinel head (i.e. `entry` was the last one).
+///
+/// SAFETY (caller): see `hlist_bucket_first_rcu` for `bucket`; `entry` must
+/// additionally be a valid, non-null `*mut hlist_entry_t` currently linked
+/// into `*bucket` (i.e. previously returned by `hlist_bucket_first_rcu` or
+/// this function for the same bucket).
+#[inline]
+unsafe fn hlist_bucket_next_rcu(
+    bucket: *mut hlist_bucket_t,
+    entry: *mut hlist_entry_t,
+) -> *mut hlist_entry_t {
+    // SAFETY: see the fn-level contract above.
+    u! {
+        let next = rcu_dereference(&raw mut (*entry).list_entry.next);
+        if next.is_null() || next == bucket {
+            ptr::null_mut()
+        } else {
+            next as *mut hlist_entry_t
+        }
+    }
+}
+
+/// RCU-guarded iterator over every thread currently registered in the
+/// proc table. Only constructed by [`for_each_proctab_thread`], which
+/// pins the iterator's lifetime to a single `rcu_read_lock`/`_unlock`
+/// critical section.
+struct ProcTableIter<'a> {
+    _guard: &'a crate::lock::rcu::KRcuRead,
+    bucket_idx: usize,
+    cur: *mut hlist_entry_t,
+}
+
+impl<'a> ProcTableIter<'a> {
+    fn new(guard: &'a crate::lock::rcu::KRcuRead) -> Self {
+        let mut bucket_idx = 0usize;
+        let mut cur = ptr::null_mut();
+        // SAFETY: see `pt()` and `hlist_bucket_first_rcu`'s fn-level
+        // contract; `guard` (the `&KRcuRead` borrow taken by this fn)
+        // proves the caller is inside the RCU read-side critical section
+        // this iteration requires.
+        u! {
+            while bucket_idx < NR_THREAD_HASH_BUCKETS {
+                cur = hlist_bucket_first_rcu(&raw mut (*pt()).buckets[bucket_idx]);
+                if !cur.is_null() {
+                    break;
+                }
+                bucket_idx += 1;
+            }
+        }
+        Self { _guard: guard, bucket_idx, cur }
+    }
+}
+
+impl<'a> Iterator for ProcTableIter<'a> {
+    type Item = *mut thread;
+
+    fn next(&mut self) -> Option<*mut thread> {
+        if self.cur.is_null() {
+            return None;
+        }
+        let entry = self.cur;
+        // SAFETY: see `ProcTableIter::new`; `self._guard` (held for the
+        // lifetime of `self`) proves we're still inside the RCU read-side
+        // critical section, and `entry`/`self.bucket_idx` were produced by
+        // a previous call into this same bucket-walking machinery.
+        u! {
+            let mut nxt = hlist_bucket_next_rcu(&raw mut (*pt()).buckets[self.bucket_idx], entry);
+            while nxt.is_null() {
+                self.bucket_idx += 1;
+                if self.bucket_idx >= NR_THREAD_HASH_BUCKETS {
+                    break;
+                }
+                nxt = hlist_bucket_first_rcu(&raw mut (*pt()).buckets[self.bucket_idx]);
+            }
+            self.cur = nxt;
+            Some(proctab_hash_get_node(entry) as *mut thread)
+        }
+    }
+}
+
+/// Runs `f` once for every thread currently registered in the proc
+/// table, inside a single RCU read-side critical section.
+///
+/// This is the safe, idiomatic replacement for the deleted C
+/// `xv6_proctab_foreach_rcu(void (*cb)(struct thread *, void *), void
+/// *arg)`: instead of a raw function-pointer + `void*` pair, callers pass
+/// an ordinary closure and get RCU protection for free (acquired here,
+/// released when this function returns).
+///
+/// `f` receives a raw `*mut thread`; dereferencing it is subject to the
+/// usual RCU-reader contract — the thread may be concurrently unlinked
+/// from the table, but its storage is guaranteed to stay valid at least
+/// until the end of this critical section (i.e. for the duration of the
+/// call to `f`).
+pub fn for_each_proctab_thread(mut f: impl FnMut(*mut thread)) {
+    let guard = crate::lock::rcu::KRcuRead::new();
+    for t in ProcTableIter::new(&guard) {
+        f(t);
+    }
 }
 
 // ===========================================================================
@@ -1657,11 +2122,19 @@ pub extern "C" fn xv6_t_copy_name(dst: *mut thread, src: *mut thread) {
     let n = 16usize;
     let mut i = 0usize;
     while i + 1 < n {
+        // SAFETY: `sn` points into `src`'s fixed `[c_char; 16]` `name`
+        // array (valid per `field_ptr_const!`); the loop guard `i + 1 < n`
+        // keeps `i <= n - 2`, so `sn.add(i)` stays in bounds.
         let c = u! { *sn.add(i) };
         if c == 0 { break; }
+        // SAFETY: see above (same bound on `i`), for `dn` into `dst`'s
+        // `name` array (valid per `field_ptr_mut!`).
         u! { *dn.add(i) = c; }
         i += 1;
     }
+    // SAFETY: `i <= n - 1` here (either it stopped at `i + 1 == n`, i.e.
+    // `i == n - 1`, or broke out earlier with a smaller `i`), so
+    // `dn.add(i)` is still in bounds of the 16-byte array.
     u! { *dn.add(i) = 0; }
 }
 
@@ -1687,51 +2160,82 @@ unsafe extern "C" {
     fn k_printf(fmt: *const c_char, ...) -> c_int;
 }
 
+/// SAFETY (caller): `p` must be a valid, non-null, live `*mut thread` —
+/// every helper below is only ever called (directly or transitively) from
+/// the `xv6_procdump_*`/`xv6_dump_session` entry points on a `p` obtained
+/// from proc-table iteration or a caller-checked lookup, generally while
+/// `xv6_thport_tcb_lock(p)` is held for the fields it protects.
 #[inline]
 unsafe fn t_name_ptr(p: *mut thread) -> *const c_char {
+    // SAFETY: see the fn-level contract above.
     u! { &raw const (*p).name as *const c_char }
 }
+/// SAFETY (caller): see `t_name_ptr`.
 #[inline]
 unsafe fn s10_t_user_space(p: *mut thread) -> bool {
     // THREAD_FLAG_USER_SPACE = 5
+    // SAFETY: see the fn-level contract above. Plain (non-atomic) read of
+    // `flags`, matching the call sites' expectation that `tcb_lock` (or
+    // equivalent) is held.
     u! { ((*p).flags & (1u64 << 5)) != 0 }
 }
+/// SAFETY (caller): see `t_name_ptr`; additionally `p->sched_entity` must
+/// be non-null, which holds for every live thread (set at creation time).
 #[inline]
 unsafe fn se_on_cpu(p: *mut thread) -> bool {
     use core::sync::atomic::{AtomicI32, Ordering};
+    // SAFETY: see the fn-level contract above.
     u! {
         let pse = (*p).sched_entity;
         AtomicI32::from_ptr(&raw mut (*pse).on_cpu).load(Ordering::Acquire) != 0
     }
 }
+/// SAFETY (caller): see `se_on_cpu`.
 #[inline]
 unsafe fn se_cpu_id(p: *mut thread) -> c_int {
+    // SAFETY: see the fn-level contract above.
     u! { (*(*p).sched_entity).cpu_id }
 }
+/// SAFETY (caller): see `t_name_ptr`.
 #[inline]
 unsafe fn t_state_load(p: *mut thread) -> c_int {
     // Mirror __thread_state_get: smp_load_acquire on thread.state.
     use core::sync::atomic::{AtomicU32, Ordering};
+    // SAFETY: see the fn-level contract above. Atomic acquire load, so no
+    // additional lock is required for this particular read.
     u! {
         AtomicU32::from_ptr(&raw mut (*p).state as *mut u32).load(Ordering::Acquire) as c_int
     }
 }
+/// SAFETY (caller): `p` must be a valid, non-null, live `*mut Tgroup`, and
+/// `off` must be the byte offset of a 4-byte-aligned `i32`-sized atomic
+/// field within `Tgroup` — every call site below passes a genuine
+/// `core::mem::offset_of!(Tgroup, ...)` constant for `live_threads`,
+/// `refcount`, or `group_exit`, never an arbitrary value.
 #[inline]
 unsafe fn tg_load_int(p: *mut Tgroup, off: usize) -> c_int {
     use core::sync::atomic::{AtomicI32, Ordering};
+    // SAFETY: see the fn-level contract above.
     u! {
         let base = p as *mut u8;
         AtomicI32::from_ptr(base.add(off) as *mut i32).load(Ordering::Acquire)
     }
 }
 
-// safestrcpy reimplementation, returns count written excluding NUL.
+/// safestrcpy reimplementation, returns count written excluding NUL.
+///
+/// SAFETY (caller): `src` must be a valid pointer to a NUL-terminated
+/// C string readable for at least `min(strlen(src), dst.len() - 1) + 1`
+/// bytes — every call site passes a `t_name_ptr(p)` result, i.e. a pointer
+/// into a live thread's fixed-size, always-NUL-terminated `name` array.
 #[inline]
 unsafe fn safestr(dst: &mut [u8], src: *const c_char) -> usize {
     let n = dst.len();
     if n == 0 { return 0; }
     let mut i = 0usize;
     while i + 1 < n {
+        // SAFETY: see the fn-level contract above; `i` stays `< n - 1 <=
+        // src`'s guaranteed-readable prefix length.
         let c = u! { *(src.add(i) as *const u8) };
         if c == 0 { break; }
         dst[i] = c;
@@ -1743,6 +2247,10 @@ unsafe fn safestr(dst: &mut [u8], src: *const c_char) -> usize {
 
 #[no_mangle]
 pub extern "C" fn xv6_procdump_header() {
+    // SAFETY: `k_printf` is a variadic FFI call, unsafe because the
+    // compiler cannot check the format string against the argument list;
+    // here both are fixed 'static literals, hand-verified to match (5 `%s`
+    // specifiers, 5 NUL-terminated `c"..."` string-literal pointer args).
     u! {
         k_printf(
             c"%-20s %-5s %-2s %-3s %s\n".as_ptr(),
@@ -1757,15 +2265,24 @@ pub extern "C" fn xv6_procdump_header() {
 
 #[no_mangle]
 pub extern "C" fn xv6_procdump_bt_header() {
+    // SAFETY: see `xv6_procdump_header`; fixed literal format, no args.
     u! { k_printf(c"\n=== Blocked Process Backtraces ===\n".as_ptr()); }
 }
 #[no_mangle]
 pub extern "C" fn xv6_procdump_bt_footer() {
+    // SAFETY: see `xv6_procdump_bt_header`.
     u! { k_printf(c"\n=== End Backtraces ===\n".as_ptr()); }
 }
 
 #[no_mangle]
 pub extern "C" fn xv6_procdump_one(p: *mut thread) -> c_int {
+    // SAFETY: `p` is a caller-supplied, live `*mut thread` (from proc-table
+    // iteration). `xv6_thport_tcb_lock(p)`/`_unlock` bracket every access
+    // to `p`'s (and `p->parent`'s) fields below, matching the C locking
+    // convention for reading a thread's identity/name fields; `p->parent`
+    // is null-checked before deref. Every `k_printf` format string is a
+    // fixed 'static literal hand-verified against its argument list (see
+    // `xv6_procdump_header`).
     u! {
         let mut name = [0u8; 16];
         let mut pname = [0u8; 16];
@@ -1853,6 +2370,10 @@ fn fmt_id(buf: &mut [u8], a: c_int, b: c_int, c: c_int, d: c_int) -> usize {
 
 #[no_mangle]
 pub extern "C" fn xv6_procdump_bt_one(p: *mut thread) {
+    // SAFETY: see `xv6_procdump_one`. `p->sched_entity` is non-null for a
+    // live thread (see `se_on_cpu`'s contract); `print_thread_backtrace` is
+    // an extern C helper given the thread's own `context`/`kstack`/
+    // `kstack_order`, matching the C call site's arguments.
     u! {
         let mut name = [0u8; 16];
         xv6_thport_tcb_lock(p);
@@ -1887,6 +2408,10 @@ pub extern "C" fn xv6_procdump_bt_one(p: *mut thread) {
 #[no_mangle]
 pub extern "C" fn xv6_procdump_bt_pid(pid: c_int) {
     use core::mem::MaybeUninit;
+    // SAFETY: see `pt()`, `xv6_proctab_get_rcu` (same lookup pattern, under
+    // `_rcu`'s RCU read-side section), and `xv6_procdump_one` for the
+    // `p`-field/`tcb_lock`/`print_thread_backtrace` reasoning once `p` is
+    // found non-null.
     u! {
         let _rcu = crate::lock::rcu::KRcuRead::new();
         let mut dummy: MaybeUninit<thread> = MaybeUninit::zeroed();
@@ -1925,6 +2450,14 @@ pub extern "C" fn xv6_procdump_bt_pid(pid: c_int) {
 
 #[no_mangle]
 pub extern "C" fn xv6_procdump_tree_node(p: *mut thread, depth: c_int) {
+    // SAFETY: `p` is a caller-supplied, live `*mut thread` (root of a
+    // debug tree dump). Unlike `xv6_procdump_one`/`_bt_one`, this reads
+    // `p`'s fields without `tcb_lock`, matching the original C tree-dump
+    // helper's best-effort (lock-free) debug-print semantics — the caller
+    // is expected to invoke this only where that's an acceptable trade-off
+    // (e.g. panic/diagnostic dumps), not a correctness change made here.
+    // `k_printf` format strings are fixed 'static literals hand-verified
+    // against their argument lists (see `xv6_procdump_header`).
     u! {
         let mut i = 0;
         while i < depth { k_printf(c"  ".as_ptr()); i += 1; }
@@ -1954,6 +2487,10 @@ pub extern "C" fn xv6_procdump_tree_node(p: *mut thread, depth: c_int) {
 
 #[no_mangle]
 pub extern "C" fn xv6_procdump_tree_recursive(p: *mut thread, depth: c_int) {
+    // SAFETY: see `xv6_procdump_tree_node`; `sib_off` is a genuine
+    // `offset_of!` for `thread::siblings`, matching `list_foreach_safe`'s
+    // contract. Recursion depth is bounded by the actual process tree
+    // depth, same as the C recursive implementation this replaces.
     u! {
         xv6_procdump_tree_node(p, depth);
         // Walk children list (member: siblings).
@@ -1966,6 +2503,17 @@ pub extern "C" fn xv6_procdump_tree_recursive(p: *mut thread, depth: c_int) {
 
 #[no_mangle]
 pub extern "C" fn xv6_dump_session(s: *mut Session) {
+    // SAFETY: `s` is a caller-supplied, live `*mut Session`. Each nested
+    // `list_foreach_safe` walk uses a genuine `offset_of!` for the
+    // relevant embedded `list_node_t` (`Pgroup::list_entry`,
+    // `Tgroup::list_entry`, `thread::tg_entry`), matching its contract;
+    // `pg`/`tg`/`t` are therefore live objects reached only through those
+    // walks. `tg_load_int` is given genuine `offset_of!` constants for
+    // `Tgroup`'s atomic counter fields (see its own fn-level contract).
+    // `k_printf` format strings are fixed 'static literals hand-verified
+    // against their argument lists (see `xv6_procdump_header`). This is a
+    // best-effort, lock-free debug dump, same trade-off as
+    // `xv6_procdump_tree_node`.
     u! {
         let fg_note = if (*s).fg_pgrp.is_null() { c", no fg".as_ptr() } else { c"".as_ptr() };
         k_printf(
@@ -2015,14 +2563,24 @@ pub extern "C" fn xv6_dump_session(s: *mut Session) {
 // Simple printf trampolines (used by Rust callers elsewhere).
 #[no_mangle]
 pub extern "C" fn xv6_print_str(s: *const c_char) {
+    // SAFETY: format is the fixed literal `"%s"` (see `xv6_procdump_header`);
+    // `s` is caller-supplied and must be a valid, non-null, NUL-terminated
+    // C string, matching the original `printf("%s", s)` call sites this
+    // trampoline replaces.
     u! { k_printf(c"%s".as_ptr(), s); }
 }
 #[no_mangle]
 pub extern "C" fn xv6_print_d(v: c_int) {
+    // SAFETY: fixed literal format `"%d"` with a matching `c_int` arg.
     u! { k_printf(c"%d".as_ptr(), v); }
 }
 #[no_mangle]
 pub extern "C" fn xv6_print_str_d(s: *const c_char, v: c_int) {
+    // SAFETY: unlike the two trampolines above, `s` here *is* the format
+    // string (not a fixed literal) — the caller must pass a valid, non-null,
+    // NUL-terminated C string containing exactly one `%d`-compatible
+    // specifier matching `v`'s type, mirroring the original C call sites
+    // that forwarded a caller-chosen format directly to `printf`.
     u! { k_printf(s, v); }
 }
 

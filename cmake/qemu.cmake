@@ -32,17 +32,8 @@ else()
     set(QEMUGDB -s -p ${GDBPORT})
 endif()
 
-# Set default CPUS
-if(NOT DEFINED ENV{CPUS} OR "$ENV{CPUS}" STREQUAL "")
-    set(CPUS 6)
-else()
-    set(CPUS $ENV{CPUS})
-endif()
-
-# If LAB is fs, set CPUS to 1
-if(DEFINED ENV{LAB} AND "$ENV{LAB}" STREQUAL "fs")
-    set(CPUS 1)
-endif()
+# Fixed CPU count: the kernel targets a single 2-core VM.
+set(CPUS 2)
 
 # Generate unique FWDPORT1 and FWDPORT2 using CMake math and user id
 execute_process(

@@ -163,6 +163,7 @@ impl KSpinlock {
 /// implies the current hart is in a critical section: `push_off`
 /// nesting is already incremented by `spin_lock` and is decremented
 /// by `spin_unlock` in `Drop`.
+#[must_use = "spinlock is released immediately if the guard is dropped"]
 pub struct KSpinGuard {
     raw: *mut Spinlock,
     _not_send_sync: PhantomData<*const ()>,
@@ -184,6 +185,7 @@ impl Drop for KSpinGuard {
 /// Releases in reverse acquisition order on drop (the higher-address
 /// lock first, then the lower). When the two input handles aliased
 /// the same lock, the lock is held only once and released once.
+#[must_use = "both spinlocks are released immediately if the guard is dropped"]
 pub struct KSpinPairGuard {
     /// Lock acquired first (lower address). Released second.
     first: *mut Spinlock,
@@ -357,6 +359,7 @@ impl KMutex {
     }
 }
 
+#[must_use = "mutex is released when the guard is dropped"]
 pub struct KMutexGuard {
     raw: *mut mutex_t,
     _not_send_sync: PhantomData<*const ()>,
@@ -447,6 +450,7 @@ impl KRwsem {
     }
 }
 
+#[must_use = "rwsem read lock is released when the guard is dropped"]
 pub struct KRwsemReadGuard {
     raw: *mut rwsem_t,
     _not_send_sync: PhantomData<*const ()>,
@@ -456,6 +460,7 @@ impl Drop for KRwsemReadGuard {
     fn drop(&mut self) { rwsem_release(self.raw); }
 }
 
+#[must_use = "rwsem write lock is released when the guard is dropped"]
 pub struct KRwsemWriteGuard {
     raw: *mut rwsem_t,
     _not_send_sync: PhantomData<*const ()>,
@@ -645,6 +650,7 @@ impl KRwlock {
     }
 }
 
+#[must_use = "rwlock read lock is released when the guard is dropped"]
 pub struct KRwlockReadGuard {
     raw: *mut rwlock_t,
     _not_send_sync: PhantomData<*const ()>,
@@ -654,6 +660,7 @@ impl Drop for KRwlockReadGuard {
     fn drop(&mut self) { rwlock_runlock(self.raw); }
 }
 
+#[must_use = "rwlock write lock is released when the guard is dropped"]
 pub struct KRwlockWriteGuard {
     raw: *mut rwlock_t,
     _not_send_sync: PhantomData<*const ()>,
@@ -663,6 +670,7 @@ impl Drop for KRwlockWriteGuard {
     fn drop(&mut self) { rwlock_wunlock(self.raw); }
 }
 
+#[must_use = "rwlock read lock is released when the guard is dropped"]
 pub struct KRwlockReadIrqGuard {
     raw: *mut rwlock_t,
     intena: c_int,
@@ -673,6 +681,7 @@ impl Drop for KRwlockReadIrqGuard {
     fn drop(&mut self) { rwlock_runlock_irqrestore(self.raw, self.intena); }
 }
 
+#[must_use = "rwlock write lock is released when the guard is dropped"]
 pub struct KRwlockWriteIrqGuard {
     raw: *mut rwlock_t,
     intena: c_int,

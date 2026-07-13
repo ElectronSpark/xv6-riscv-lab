@@ -125,6 +125,12 @@ fn thread_set_killed(t: *mut thread) {
 // -------- slab cache storage ----------------------------------------------
 #[repr(transparent)]
 struct CacheCell(UnsafeCell<MaybeUninit<slab_cache_t>>);
+// SAFETY: both `WQP_WORKQUEUE_CACHE` and `WQP_WORK_STRUCT_CACHE` are
+// written in full by `slab_cache_init` (called once during workqueue
+// subsystem init, before any `slab_alloc` on either cache) and
+// otherwise only accessed through the C slab allocator's own
+// internally-synchronized primitives — same pattern as
+// `thread_group.rs`'s `TG_POOL`.
 unsafe impl Sync for CacheCell {}
 static WQP_WORKQUEUE_CACHE: CacheCell = CacheCell(UnsafeCell::new(MaybeUninit::zeroed()));
 static WQP_WORK_STRUCT_CACHE: CacheCell = CacheCell(UnsafeCell::new(MaybeUninit::zeroed()));

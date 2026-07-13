@@ -15,8 +15,15 @@ set(PROC_C_SRCS
     # sched_fifo.c   -- ported to Rust (kernel/proc/sched_fifo.rs)
     # rq_test.c      -- ported to Rust (kernel/proc/rq_test.rs)
     # pgroup.c       -- ported to Rust (kernel/proc/pgroup.rs)
-    # proc_rust_shims.c -- fully replaced by Rust ports
-    proc_rust_bridge.c
+    # proc_rust_shims.c  -- deleted; every function had a live Rust port
+    #                       already (proc_shims.rs, access.rs, signal.rs,
+    #                       sys_signal.rs, thread_group.rs, thread.rs,
+    #                       sched.rs, rq.rs, rq_test.rs, workqueue.rs,
+    #                       thread_queue.rs).
+    # proc_rust_bridge.c -- deleted; its 7 functions ported to Rust
+    #                       (access.rs::{PgroupAccess,SessionAccess}::mark_kernel,
+    #                       thread.rs::install_user_root_finish,
+    #                       proc_shims.rs::{xv6_panic,for_each_proctab_thread}).
 )
 
 set(PROC_S_SRCS

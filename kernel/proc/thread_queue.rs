@@ -117,6 +117,13 @@ extern "C" fn q_root_keys_cmp_rdown(key1: uint64, key2: uint64) -> c_int {
 
 #[repr(transparent)]
 struct OptsCell(UnsafeCell<rb_root_opts>);
+// SAFETY: `Q_ROOT_OPTS`/`Q_ROOT_RDOWN_OPTS` below are initialised once
+// at compile time (`static ... = OptsCell(UnsafeCell::new(rb_root_opts
+// { .. }))`) and never mutated afterward — `q_root_opts()`/
+// `q_root_rdown_opts()` only ever read the function pointers back via
+// the raw pointer handed to `rb_root_init`. Sharing an immutable value
+// across harts is inherently data-race-free (mirrors `vm.rs`'s
+// `VmTreeOptsWrap`).
 unsafe impl Sync for OptsCell {}
 
 static Q_ROOT_OPTS: OptsCell = OptsCell(UnsafeCell::new(rb_root_opts {

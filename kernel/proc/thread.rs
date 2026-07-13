@@ -8,12 +8,8 @@
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 
-
-macro_rules! u {
-    ($($tokens:tt)*) => {
-        unsafe { $($tokens)* }
-    };
-}
+// See `crate::u`'s doc comment (kernel/lib.rs) for the macro's contract.
+use crate::u;
 
 use core::ffi::{c_char, c_int, c_void};
 use core::mem::offset_of;
@@ -21,19 +17,20 @@ use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::bindings::{
-    context, fs_struct, list_node_t, hlist_entry_t, page_t, rcu_head_t,
-    rq, sched_attr, sched_entity, sigacts as sigacts_t, spinlock_t, thread,
-    thread_group, thread_state, utrapframe, vfs_fdtable, vm,
+    context, fs_struct, list_node_t, hlist_entry_t, page_t, pgroup, rcu_head_t,
+    rq, sched_attr, sched_entity, session, sigacts as sigacts_t, spinlock_t, thread,
+    thread_group, thread_state, utrapframe, vfs_fdtable, vfs_inode, vfs_inode_ref, vm,
 };
 use crate::lock::rcu::rcu_check_callbacks;
 use crate::machine::{cpu_local_ptr, cpuid, intr_on, read_sp};
 use crate::proc::access::{
-    err_ptr, is_err, is_err_or_null, list_node_init_raw, CpuLocalRef, SchedEntityRef,
-    SpinLockRef, ThreadAccess,
+    err_ptr, is_err, is_err_or_null, list_node_init_raw, CpuLocalRef, PgroupAccess,
+    SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadSignalAccess,
 };
 use crate::proc::__proctab_init;
 use crate::proc::pid_assert_wholding;
 use crate::proc::sigacts_init;
+use crate::proc::sigstack_init;
 use crate::proc::xv6_rqport_rq_lock_current;
 use crate::proc::xv6_rqport_rq_unlock_current;
 use crate::proc::xv6_rqport_sched_attr_init;
@@ -143,11 +140,14 @@ unsafe extern "C" {
     // VFS
     fn vfs_struct_clone(old_fs: *mut fs_struct, flags: u64) -> *mut fs_struct;
     fn vfs_struct_put(fs: *mut fs_struct);
-    fn vfs_struct_lock(fs: *mut fs_struct);
-    fn vfs_struct_unlock(fs: *mut fs_struct);
+    // NOTE: `vfs_struct_lock`/`vfs_struct_unlock` (kernel/inc/vfs/fs.h) are
+    // `static inline` wrappers around `spin_lock`/`spin_unlock` — there is
+    // no linker symbol to bind to, so `install_user_root_finish` below
+    // reimplements them natively via `crate::sync::KSpinlock` instead of
+    // declaring them here.
     fn vfs_namei(path: *const c_char, path_len: usize) -> *mut c_void; // vfs_inode opaque
-    fn vfs_inode_get_ref(inode: *mut c_void, out: *mut c_void) -> c_int;
-    fn vfs_iput(inode: *mut c_void);
+    fn vfs_inode_get_ref(inode: *mut vfs_inode, out: *mut vfs_inode_ref) -> c_int;
+    fn vfs_iput(inode: *mut vfs_inode);
     fn vfs_fdtable_put(fdt: *mut vfs_fdtable);
 
     // exec / trap
@@ -170,12 +170,15 @@ unsafe extern "C" {
 
 // ---------------- inline helpers ----------------------------------------
 #[inline]
-fn hlist_entry_init_rs(e: *mut hlist_entry_t) { u! {
+fn hlist_entry_init_rs(e: *mut hlist_entry_t) {
     // hlist_entry_init zeroes the inner list_entry; struct hlist_entry has
     // a list_node_t list_entry plus other fields. The C inline does
     // list_entry_init(&entry->list_entry). list_entry is at offset 0.
+    // `list_node_init_raw` is a safe fn (encapsulates its own unsafe), and
+    // the cast is a pointer reinterpretation with no dereference — no
+    // unsafe context is actually needed here.
     list_node_init_raw(e as *mut list_node_t);
-}}
+}
 
 #[inline]
 fn ta_of<'a>(p: *mut thread) -> Option<ThreadAccess<'a>> {
@@ -184,7 +187,9 @@ fn ta_of<'a>(p: *mut thread) -> Option<ThreadAccess<'a>> {
 
 #[inline]
 fn current_thread() -> *mut thread {
-    CpuLocalRef::assume(cpu_local_ptr()).proc_ptr()
+    // SAFETY: `cpu_local_ptr()` indexes into statically-allocated, always-initialized
+    // per-CPU storage; never null.
+    unsafe { CpuLocalRef::assume(cpu_local_ptr()) }.proc_ptr()
 }
 
 #[inline]
@@ -218,11 +223,18 @@ fn thread_set_user_space(p: *mut thread) {
 }
 
 #[inline]
-fn thread_from_context(ctx: *mut context)-> *mut thread  { u! {
+fn thread_from_context(ctx: *mut context)-> *mut thread  {
+    // `wrapping_sub`/`as` are pointer arithmetic with no dereference;
+    // `SchedEntityRef::assume` is `unsafe fn` (see its `# Safety` doc in
+    // access.rs) and is wrapped below with the site-specific justification.
     let off = offset_of!(sched_entity, context);
     let se = (ctx as *mut u8).wrapping_sub(off) as *mut sched_entity;
-    SchedEntityRef::assume(se).thread_ptr()
-}}
+    // SAFETY: `se` is derived by pointer arithmetic assuming `ctx` points to the
+    // `context` field of a live `sched_entity` -- the documented contract of
+    // `thread_from_context`, a kernel-internal context-switch helper always
+    // invoked with such a pointer.
+    unsafe { SchedEntityRef::assume(se) }.thread_ptr()
+}
 
 // ---------------- panic macro -------------------------------------------
 macro_rules! kpanic {
@@ -231,8 +243,26 @@ macro_rules! kpanic {
 macro_rules! kassert {
     ($cond:expr, $msg:expr) => {{ if !($cond) { kpanic!($msg); } }};
 }
+// SAFETY: currently vacuous for every existing `thport_unsafe_alias!`
+// target (attach_child, detach_child, thread_create, kthread_create,
+// idle_thread_init, thread_destroy, userinit, install_user_root) — all
+// of them are plain `pub extern "C" fn`s, not `unsafe fn`, so calling
+// `$target(...)` needs no unsafe context on its own. Kept as a distinct
+// macro (rather than folding these aliases into `thport_alias!`) for
+// call-table symmetry with the analogous `xv6_sigport_*` alias split in
+// `proc/signal_ffi.rs` (`sigport_alias!` vs. `sigport_unsafe_alias!`),
+// and so a future target that does need unsafe can opt in without a
+// call-site rewrite.
 macro_rules! thport_unsafe_call { ($e:expr) => {{ u! { $e } }}; }
 
+/// SAFETY: wraps raw field/layout manipulation of a `thread` (and its
+/// embedded `sched_entity`/`utrapframe`) at a stack address computed by
+/// the specific call site — e.g. `kstack_arrange`'s caller-supplied
+/// `kstack`/`kstack_size`, or `idle_thread_init`'s `read_sp()`-derived
+/// boot stack. Validity of every raw pointer touched inside a
+/// `thread_raw_layout! { ... }` body comes from that call site's own
+/// arrangement/ownership logic, not from any single blanket invariant
+/// here; see the individual call sites for the actual argument.
 macro_rules! thread_raw_layout {
     ($($body:tt)*) => {{
         #[allow(unused_unsafe)]
@@ -245,7 +275,13 @@ static KERNEL_TG: AtomicPtr<thread_group> = AtomicPtr::new(ptr::null_mut());
 static KERNEL_PG: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static KERNEL_SESSION: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
-fn kthread_hierarchy_init_locked() { u! {
+fn kthread_hierarchy_init_locked() {
+    // Every call in this function is a safe `pub extern "C" fn`
+    // (`pid_assert_wholding`, `thread_group_alloc_kernel`, `pgroup_alloc`,
+    // `session_alloc`, `session_add_pg`, `pgroup_add_tg`, `xv6_panic` via
+    // `kassert!`), an atomic load/store, or a small `unsafe { }` block
+    // (`PgroupAccess::assume`/`SessionAccess::assume`, each justified
+    // in-line below) — no function-wide unsafe context is needed.
     pid_assert_wholding();
     if !KERNEL_TG.load(Ordering::Acquire).is_null() {
         return;
@@ -257,13 +293,15 @@ fn kthread_hierarchy_init_locked() { u! {
 
     let pg = pgroup_alloc(KERNEL_HIERARCHY_ID, ptr::null_mut());
     kassert!(!pg.is_null(), "kthread hierarchy: pgroup_alloc failed");
-    // pgroup_t->is_kernel = 1: we don't have the struct layout, so use a setter via extern.
-    // Fallback: rely on C helper. Add extern:
-    pgroup_mark_kernel(pg);
+    // pgroup->is_kernel = 1 (was the C `pgroup_mark_kernel` bridge helper;
+    // now a direct bitfield write through PgroupAccess — no FFI needed).
+    // SAFETY: `pg` is proven non-null by the diverging `kassert!` immediately above.
+    unsafe { PgroupAccess::assume(pg as *mut pgroup) }.mark_kernel();
 
     let s = session_alloc(KERNEL_HIERARCHY_ID);
     kassert!(!s.is_null(), "kthread hierarchy: session_alloc failed");
-    session_mark_kernel(s);
+    // SAFETY: `s` is proven non-null by the diverging `kassert!` immediately above.
+    unsafe { SessionAccess::assume(s as *mut session) }.mark_kernel();
 
     let ret = session_add_pg(s, pg);
     kassert!(ret == 0, "kthread hierarchy: session_add_pg failed");
@@ -273,14 +311,12 @@ fn kthread_hierarchy_init_locked() { u! {
     KERNEL_TG.store(tg, Ordering::Release);
     KERNEL_PG.store(pg, Ordering::Release);
     KERNEL_SESSION.store(s, Ordering::Release);
-}}
-
-unsafe extern "C" {
-    safe fn pgroup_mark_kernel(pg: *mut c_void);
-    safe fn session_mark_kernel(s: *mut c_void);
 }
 
-fn kthread_join_hierarchy_locked(p: *mut thread) { u! {
+fn kthread_join_hierarchy_locked(p: *mut thread) {
+    // Same rationale as `kthread_hierarchy_init_locked`: every call here
+    // is a safe `pub extern "C" fn` or `xv6_panic` via `kassert!` — no
+    // unsafe context is actually needed here.
     pid_assert_wholding();
     kassert!(!p.is_null(), "kthread hierarchy: thread is NULL");
     kthread_hierarchy_init_locked();
@@ -290,19 +326,23 @@ fn kthread_join_hierarchy_locked(p: *mut thread) { u! {
     kassert!(ret == 0, "kthread hierarchy: pgroup_add_thread failed");
     let ret = session_add_thread(KERNEL_SESSION.load(Ordering::Acquire), p);
     kassert!(ret == 0, "kthread hierarchy: session_add_thread failed");
-}}
+}
 
 // ---------------- pcb init / kstack arrange -----------------------------
-fn pcb_init(p: *mut thread, fdtable: *mut vfs_fdtable) { u! {
+// NOTE: these two functions' bodies are entirely a single
+// `thread_raw_layout! { ... }` invocation, which already supplies its own
+// `unsafe` block (see the macro's doc comment above) — an extra outer
+// `u! { ... }` around the whole function body would just be a redundant,
+// vacuous wrap, so it has been removed.
+fn pcb_init(p: *mut thread, fdtable: *mut vfs_fdtable) {
     thread_raw_layout! {
         let ta = ThreadAccess::assume(p);
         thread_state_set(p, THREAD_UNUSED);
         xv6_sigport_sigpending_init(p);
-        // sig_stack lives at &p->signal.sig_stack; we can't access nested
-        // fields easily, but the C used `&p->signal.sig_stack`. The bindgen
-        // `signal` field is opaque thread_signal_t. We rely on sigport to
-        // know its layout via this helper:
-        sigstack_init_for_thread(p);
+        // Was the C `sigstack_init_for_thread` bridge helper
+        // (`sigstack_init(&p->signal.sig_stack)`); now a direct call through
+        // the typed field pointer.
+        sigstack_init(ThreadSignalAccess::assume_thread(p).sig_stack_ptr());
         ta.init_embedded_lists_and_lock(c"thread".as_ptr() as *mut c_char);
         ta.set_thread_group(ptr::null_mut());
         ta.set_fs(ptr::null_mut());
@@ -312,13 +352,9 @@ fn pcb_init(p: *mut thread, fdtable: *mut vfs_fdtable) { u! {
             xv6_rqport_sched_entity_init(ta.sched_entity_ptr(), p);
         }
     }
-}}
-
-unsafe extern "C" {
-    fn sigstack_init_for_thread(p: *mut thread);
 }
 
-fn kstack_arrange(kstack: *mut c_void, kstack_size: u64, flags: u64)-> *mut thread  { u! {
+fn kstack_arrange(kstack: *mut c_void, kstack_size: u64, flags: u64)-> *mut thread  {
     thread_raw_layout! {
         let p = (kstack as *mut u8).add((kstack_size as usize) - core::mem::size_of::<thread>()) as *mut thread;
         let mut next_addr = p as u64;
@@ -347,7 +383,7 @@ fn kstack_arrange(kstack: *mut c_void, kstack_size: u64, flags: u64)-> *mut thre
 
         p
     }
-}}
+}
 
 // ---------------- public canonical ABI ----------------------------------
 fn thread_lock_ref<'a>(p: *mut thread) -> Option<SpinLockRef<'a>> {
@@ -356,15 +392,18 @@ fn thread_lock_ref<'a>(p: *mut thread) -> Option<SpinLockRef<'a>> {
 
 fn tcb_lock_impl(p: *mut thread) {
     kassert!(!p.is_null(), "tcb_lock: thread is NULL");
-    thread_lock_ref(p).unwrap().lock();
+    thread_lock_ref(p).expect("BUG: tcb_lock called with null/invalid thread pointer").lock();
 }
 fn tcb_unlock_impl(p: *mut thread) {
     kassert!(!p.is_null(), "tcb_unlock: thread is NULL");
-    thread_lock_ref(p).unwrap().unlock();
+    thread_lock_ref(p).expect("BUG: tcb_unlock called with null/invalid thread pointer").unlock();
 }
 fn proc_assert_holding_impl(p: *mut thread) {
     kassert!(!p.is_null(), "proc_assert_holding: thread is NULL");
-    kassert!(thread_lock_ref(p).unwrap().holding(), "proc_assert_holding: thread lock not held");
+    kassert!(
+        thread_lock_ref(p).expect("BUG: proc_assert_holding called with null/invalid thread pointer").holding(),
+        "proc_assert_holding: thread lock not held"
+    );
 }
 
 #[no_mangle]
@@ -378,7 +417,10 @@ pub extern "C" fn proc_assert_holding(p: *mut thread) { proc_assert_holding_impl
 pub extern "C" fn thread_init() { __proctab_init(); }
 
 #[no_mangle]
-pub extern "C" fn attach_child(parent: *mut thread, child: *mut thread) { u! {
+pub extern "C" fn attach_child(parent: *mut thread, child: *mut thread) {
+    // See `thread_raw_layout!`'s doc comment: the body below is entirely
+    // the macro invocation, which already supplies its own `unsafe`
+    // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         kassert!(!parent.is_null(), "attach_child: parent is NULL");
         kassert!(!child.is_null(), "attach_child: child is NULL");
@@ -393,10 +435,13 @@ pub extern "C" fn attach_child(parent: *mut thread, child: *mut thread) { u! {
         cta.siblings_ref().push_back(pta.children_ptr());
         pta.inc_children_count();
     }
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn detach_child(parent: *mut thread, child: *mut thread) { u! {
+pub extern "C" fn detach_child(parent: *mut thread, child: *mut thread) {
+    // See `thread_raw_layout!`'s doc comment: the body below is entirely
+    // the macro invocation, which already supplies its own `unsafe`
+    // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         kassert!(!parent.is_null(), "detach_child: parent is NULL");
         kassert!(!child.is_null(), "detach_child: child is NULL");
@@ -415,10 +460,14 @@ pub extern "C" fn detach_child(parent: *mut thread, child: *mut thread) { u! {
         kassert!(pta.children_count() > 0 || pta.children_ref().is_empty(),
                  "detach_child: parent has no children after detaching child");
     }
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int)-> *mut thread  { u! {
+pub extern "C" fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int)-> *mut thread  {
+    // The guard check and shift below are plain safe arithmetic/calls;
+    // the rest of the body is a `thread_raw_layout! { ... }` invocation,
+    // which already supplies its own `unsafe` block — so the outer wrap
+    // has been removed as redundant rather than genuinely needed.
     if kstack_order < 0 || kstack_order > PAGE_BUDDY_MAX_ORDER {
         return err_ptr(-EINVAL);
     }
@@ -451,15 +500,24 @@ pub extern "C" fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack
         xv6_rqport_sched_entity_init(se, p);
         p
     }
-}}
+}
 
-extern "C" fn kthread_entry(prev: *mut context) { u! {
+extern "C" fn kthread_entry(prev: *mut context) {
+    // See `thread_raw_layout!`'s doc comment: the body below is entirely
+    // the macro invocation, which already supplies its own `unsafe`
+    // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         kassert!(!prev.is_null(), "kthread_entry: prev context is NULL");
         let cur = current_thread();
         xv6_schport_context_switch_finish(thread_from_context(prev), cur, 0);
         CpuLocalRef::assume(cpu_local_ptr()).set_noff(0);
         intr_on();
+        // SAFETY: `rcu_check_callbacks` is `pub unsafe extern "C" fn`
+        // (kernel/lock/rcu.rs); it's sound to call here because we're on
+        // the boot path of a freshly-scheduled kernel thread right after
+        // `xv6_schport_context_switch_finish`, with interrupts just
+        // turned on above and no RCU read-side critical section held —
+        // matching every other call site of this function.
         u! { rcu_check_callbacks(); }
 
         let cur = current_thread();
@@ -468,11 +526,14 @@ extern "C" fn kthread_entry(prev: *mut context) { u! {
         let ret = entry_fn(cur_ref.arg(0), cur_ref.arg(1));
         exit(ret);
     }
-}}
+}
 
 #[no_mangle]
 pub extern "C" fn kthread_create(name: *const c_char, entry: *mut c_void,
-                                         arg1: u64, arg2: u64, stack_order: c_int)-> *mut thread  { u! {
+                                         arg1: u64, arg2: u64, stack_order: c_int)-> *mut thread  {
+    // See `thread_raw_layout!`'s doc comment: the body below is entirely
+    // the macro invocation, which already supplies its own `unsafe`
+    // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         let _rcu = crate::lock::rcu::KRcuRead::new();
         let initproc = __proctab_get_initproc();
@@ -516,10 +577,15 @@ pub extern "C" fn kthread_create(name: *const c_char, entry: *mut c_void,
 
         p
     }
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn idle_thread_init() { u! {
+pub extern "C" fn idle_thread_init() {
+    // The guard check and stack-pointer arithmetic below are plain safe
+    // calls/bit ops (`read_sp`/`cpuid`/etc. are all safe `pub fn`s); the
+    // rest of the body is a `thread_raw_layout! { ... }` invocation,
+    // which already supplies its own `unsafe` block — so the outer wrap
+    // has been removed as redundant rather than genuinely needed.
     let kstack_size = KERNEL_STACK_SIZE;
     let kstack = (read_sp() & !(kstack_size - 1)) as *mut c_void;
     kassert!((PAGE_SIZE << KERNEL_STACK_ORDER) == kstack_size, "idle_thread_init: invalid KERNEL_STACK_ORDER");
@@ -555,15 +621,26 @@ pub extern "C" fn idle_thread_init() { u! {
         printf(c"CPU %ld idle process initialized at kstack 0x%lx\n".as_ptr(),
                cpuid() as u64, kstack as u64);
     }
-}}
+}
 
-extern "C" fn thread_destroy_rcu_callback(data: *mut c_void) { u! {
-    let t = ThreadAccess::assume(data as *mut thread);
+extern "C" fn thread_destroy_rcu_callback(data: *mut c_void) {
+    // `.kstack_addr()`/`.kstack_order()` and `page_free` (declared `safe
+    // fn` in the `unsafe extern "C"` block above) are safe calls; the one
+    // `unsafe { }` block below (`ThreadAccess::assume`) is justified
+    // in-line.
+    // SAFETY: `thread_destroy_rcu_callback` is only ever invoked by the RCU subsystem
+    // with the `data` pointer registered for this specific thread's deferred
+    // destruction, so `data` is always a live `*mut thread` being destroyed,
+    // never null.
+    let t = unsafe { ThreadAccess::assume(data as *mut thread) };
     page_free(t.kstack_addr() as *mut c_void, t.kstack_order());
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn thread_destroy(p: *mut thread) { u! {
+pub extern "C" fn thread_destroy(p: *mut thread) {
+    // See `thread_raw_layout!`'s doc comment: the body below is entirely
+    // the macro invocation, which already supplies its own `unsafe`
+    // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         kassert!(!p.is_null(), "thread_destroy called with NULL thread");
         kassert!(!thread_is_awoken(p), "thread_destroy called with a runnable thread");
@@ -600,9 +677,12 @@ pub extern "C" fn thread_destroy(p: *mut thread) { u! {
 
         call_rcu(&mut (*p).rcu_head, Some(thread_destroy_rcu_callback), p as *mut c_void);
     }
-}}
+}
 
-extern "C" fn init_entry(prev: *mut context) { u! {
+extern "C" fn init_entry(prev: *mut context) {
+    // See `thread_raw_layout!`'s doc comment: the body below is entirely
+    // the macro invocation, which already supplies its own `unsafe`
+    // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         let cur = current_thread();
         xv6_schport_context_switch_finish(thread_from_context(prev), cur, 0);
@@ -620,10 +700,13 @@ extern "C" fn init_entry(prev: *mut context) { u! {
         core::sync::atomic::fence(Ordering::SeqCst);
         usertrapret();
     }
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn userinit() { u! {
+pub extern "C" fn userinit() {
+    // See `thread_raw_layout!`'s doc comment: the body below is entirely
+    // the macro invocation, which already supplies its own `unsafe`
+    // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         kassert!(__alloc_pid() == 0, "userinit: __alloc_pid failed");
 
@@ -660,10 +743,13 @@ pub extern "C" fn userinit() { u! {
         thread_state_set(p, THREAD_UNINTERRUPTIBLE);
         xv6_schport_scheduler_wakeup(p);
     }
-}}
+}
 
 #[no_mangle]
-pub extern "C" fn install_user_root() { u! {
+pub extern "C" fn install_user_root() {
+    // See `thread_raw_layout!`'s doc comment: the body below is entirely
+    // the macro invocation, which already supplies its own `unsafe`
+    // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         let p = current_thread();
 
@@ -678,14 +764,47 @@ pub extern "C" fn install_user_root() { u! {
         thread_set_user_space(p);
         tcb_unlock(p);
 
-        // vfs_inode_ref is a struct of {inode*, idx, gen} or similar; we
-        // can't introspect its layout here. Delegate to a tiny C helper:
         install_user_root_finish(p, root_inode);
     }
-}}
+}
 
-unsafe extern "C" {
-    fn install_user_root_finish(p: *mut thread, root_inode: *mut c_void);
+/// Native port of the (deleted) C `install_user_root_finish` bridge
+/// helper: takes a ref on `root_inode`, installs it as the thread's
+/// `fs->cwd` under the fs_struct spinlock (replicating the `static
+/// inline vfs_struct_lock`/`vfs_struct_unlock` bodies from
+/// kernel/inc/vfs/fs.h via `KSpinlock`), then drops the caller's
+/// original `vfs_namei` reference.
+fn install_user_root_finish(p: *mut thread, root_inode: *mut c_void) {
+    // SAFETY: `p` is the current thread (`current_thread()` in
+    // `install_user_root`, always a live pointer for the running
+    // thread) whose `fs` field was just null-checked by the caller
+    // right before this call, so `(*p).fs` and the subsequent
+    // `(*fs).lock`/`(*fs).cwd` accesses are on a valid, non-null
+    // `fs_struct`. `root_inode` is a just-returned, non-null
+    // `vfs_namei()` reference (also null-checked by the caller) that
+    // this function fully consumes: `vfs_inode_get_ref` takes a
+    // reference into `cwd_ref` (written back through the `MaybeUninit`
+    // out-pointer, then read via `assume_init` only after `ret >= 0`
+    // confirms it was initialized), and `vfs_iput` drops the caller's
+    // original reference once the new one has been installed. The
+    // `KSpinlock` over `fs->lock` mirrors the deleted C
+    // `vfs_struct_lock`/`vfs_struct_unlock` static-inline pair, so
+    // `(*fs).cwd` is written while that lock is held, as the C original
+    // required.
+    u! {
+    let root_inode = root_inode as *mut vfs_inode;
+    let mut cwd_ref: core::mem::MaybeUninit<vfs_inode_ref> = core::mem::MaybeUninit::uninit();
+    let ret = vfs_inode_get_ref(root_inode, cwd_ref.as_mut_ptr());
+    if ret < 0 {
+        kpanic!("install_user_root: failed to get ref to root inode");
+    }
+    let fs = (*p).fs;
+    {
+        let _g = crate::sync::KSpinlock::from_bindings(&raw mut (*fs).lock).lock();
+        (*fs).cwd = cwd_ref.assume_init();
+    }
+    vfs_iput(root_inode);
+    }
 }
 
 // ---------------- xv6_thport_* aliases ----------------------------------

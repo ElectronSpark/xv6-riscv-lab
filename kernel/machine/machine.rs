@@ -293,10 +293,59 @@ pub fn write_sie(v: u64) {
     }
 }
 
+/// Read the `sie` (supervisor interrupt-enable) CSR. Mirrors the C
+/// `r_sie()` inline.
+#[inline(always)]
+pub fn read_sie() -> u64 {
+    let v: u64;
+    // SAFETY: `csrr sie` reads a supervisor CSR; no memory effect,
+    // cannot trap.
+    unsafe {
+        core::arch::asm!("csrr {0}, sie", out(reg) v,
+            options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+
 /// `CPU_FLAG_CRASHED` bit, mirroring `kernel/inc/smp/percpu.h`.
 pub const CPU_FLAG_CRASHED: u64 = 8;
-/// `SIE_SSIE` bit, mirroring `kernel/inc/riscv.h`.
+/// `SIE_SSIE` bit (software), mirroring `kernel/inc/riscv.h`.
 pub const SIE_SSIE: u64 = 1 << 1;
+/// `SIE_STIE` bit (timer), mirroring `kernel/inc/riscv.h`.
+pub const SIE_STIE: u64 = 1 << 5;
+/// `SIE_SEIE` bit (external), mirroring `kernel/inc/riscv.h`.
+pub const SIE_SEIE: u64 = 1 << 9;
+
+/// Write the `satp` (supervisor address translation & protection) CSR.
+/// Mirrors the C `w_satp()` inline. Writing `0` disables paging.
+#[inline(always)]
+pub fn write_satp(v: u64) {
+    // SAFETY: writing `satp` cannot itself violate Rust memory safety;
+    // it changes how subsequent loads/stores are translated, which is
+    // why (matching the historical C site in `kernel/mm/vm_pgtab.rs`'s
+    // private `w_satp`) this omits `nomem`: the compiler must not
+    // reorder memory accesses across the mode switch as if the
+    // instruction had no effect on memory semantics.
+    unsafe {
+        core::arch::asm!("csrw satp, {0}", in(reg) v,
+            options(nostack, preserves_flags));
+    }
+}
+
+/// Write the `stimecmp` CSR (deadline for the next supervisor-timer
+/// interrupt). Mirrors the C `w_stimecmp()` inline, which uses the raw
+/// CSR number `0x14d` because the mnemonic `stimecmp` is not recognised
+/// by the assembler on this toolchain.
+#[inline(always)]
+pub fn write_stimecmp(v: u64) {
+    // SAFETY: `csrw 0x14d` writes the supervisor timer-compare CSR
+    // (sstc extension, already enabled by firmware before S-mode code
+    // runs); no memory effect, cannot trap.
+    unsafe {
+        core::arch::asm!("csrw 0x14d, {0}", in(reg) v,
+            options(nomem, nostack, preserves_flags));
+    }
+}
 
 /// Read the `time` CSR (mtime mirror). Mirrors the C `r_time()` inline.
 #[inline(always)]
@@ -776,21 +825,33 @@ impl Drop for PreemptGuard {
 
 #[inline(always)]
 pub fn atomic_load_acquire_i32(p: *const core::ffi::c_int) -> core::ffi::c_int {
+    // SAFETY: caller provides a valid, aligned `*const c_int`; `c_int`
+    // (4-byte, 4-byte-aligned on this target) has the same size and
+    // alignment as `AtomicI32`, so the reinterpret cast is layout-sound
+    // (cf. `lock/spinlock.rs`'s `locked_atomic`/`cpu_atomic` helpers).
     unsafe { (*(p as *const core::sync::atomic::AtomicI32)).load(core::sync::atomic::Ordering::Acquire) }
 }
 
 #[inline(always)]
 pub fn atomic_store_release_i32(p: *mut core::ffi::c_int, v: core::ffi::c_int) {
+    // SAFETY: caller provides a valid, aligned `*mut c_int`; same
+    // layout justification as `atomic_load_acquire_i32`.
     unsafe { (*(p as *mut core::sync::atomic::AtomicI32)).store(v, core::sync::atomic::Ordering::Release) }
 }
 
 #[inline(always)]
 pub fn atomic_inc_i32(p: *mut core::ffi::c_int) {
+    // SAFETY: caller provides a valid, aligned `*mut c_int`; same
+    // layout justification as `atomic_load_acquire_i32`.
     unsafe { (*(p as *mut core::sync::atomic::AtomicI32)).fetch_add(1, core::sync::atomic::Ordering::AcqRel); }
 }
 
 #[inline]
 pub fn atomic_dec_unless_i32(p: *mut core::ffi::c_int, unless: core::ffi::c_int) -> bool {
+    // SAFETY: caller provides a valid, aligned `*mut c_int`; same
+    // layout justification as `atomic_load_acquire_i32`. The resulting
+    // reference is used only for the atomic ops below, for the
+    // duration of this call.
     let a = unsafe { &*(p as *mut core::sync::atomic::AtomicI32) };
     let mut cur = a.load(core::sync::atomic::Ordering::Acquire);
     loop {
@@ -804,6 +865,9 @@ pub fn atomic_dec_unless_i32(p: *mut core::ffi::c_int, unless: core::ffi::c_int)
 
 #[inline(always)]
 pub fn atomic_store_release_u64(p: *mut u64, v: u64) {
+    // SAFETY: caller provides a valid, aligned `*mut u64`; `u64` has
+    // the same size and alignment as `AtomicU64`, so the reinterpret
+    // cast is layout-sound (cf. `lock/spinlock.rs`'s `locked_atomic`).
     unsafe { (*(p as *mut core::sync::atomic::AtomicU64)).store(v, core::sync::atomic::Ordering::Release) }
 }
 
@@ -834,6 +898,8 @@ pub fn smp_store_release_u64(p: *mut u64, v: u64) {
 
 #[inline(always)]
 pub fn smp_load_acquire_u64(p: *const u64) -> u64 {
+    // SAFETY: caller provides a valid, aligned `*const u64`; same
+    // layout justification as `atomic_store_release_u64`.
     unsafe { (*(p as *const core::sync::atomic::AtomicU64)).load(core::sync::atomic::Ordering::Acquire) }
 }
 

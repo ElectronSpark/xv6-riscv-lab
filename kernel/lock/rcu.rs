@@ -1214,6 +1214,15 @@ pub mod api {
     #[inline]
     pub fn kthread_wakeup() { kthread_wakeup_impl() }
 
+    /// Read CPU `cpu`'s last-recorded RCU quiescent-state timestamp
+    /// (`cpus[cpu].rcu_timestamp`). Diagnostic use only (e.g. tests
+    /// verifying that the mechanism is being updated); zero means "no
+    /// timestamp recorded yet".
+    #[inline]
+    pub fn cpu_timestamp(cpu: usize) -> u64 {
+        cpu_rcu_ts(cpu).load(Ordering::Acquire)
+    }
+
     /// One-shot subsystem init. Call once from CPU 0 during boot.
     #[inline]
     pub fn init() { init_impl() }

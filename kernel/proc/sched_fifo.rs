@@ -35,13 +35,18 @@ impl<T> SyncCell<T> {
 static FIFO_RQS: SyncCell<[*mut FifoRq; PRIORITY_MAINLEVELS]> =
     SyncCell::new([null_mut(); PRIORITY_MAINLEVELS]);
 
+// Safe (bounds-checked) indexing: `cls` is always `< PRIORITY_MAINLEVELS`
+// by construction (`major_priority()` masks with `PRIORITY_MAINLEVEL_MASK`,
+// sized to match this array), and this path is not hot enough for the
+// bounds check to matter — prefer a panic over `get_unchecked`'s UB if
+// that invariant is ever violated.
 #[inline]
 fn fifo_rqs_get(cls: usize) -> *mut FifoRq {
-    unsafe { *(*FIFO_RQS.get()).get_unchecked(cls) }
+    unsafe { (*FIFO_RQS.get())[cls] }
 }
 #[inline]
 fn fifo_rqs_set(cls: usize, p: *mut FifoRq) {
-    unsafe { *(*FIFO_RQS.get()).get_unchecked_mut(cls) = p };
+    unsafe { (*FIFO_RQS.get())[cls] = p };
 }
 
 // ---------------------------------------------------------------------------

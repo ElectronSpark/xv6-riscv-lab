@@ -258,117 +258,46 @@ target_compile_options(ut_list PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_link_options(ut_list PRIVATE ${ASAN_LINK_FLAGS})
 target_include_directories(ut_list PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
-add_executable(ut_hlist ${CMAKE_SOURCE_DIR}/src/ut_hlist_main.c ${CMAKE_SOURCE_DIR}/../kernel/hlist.c)
-target_link_libraries(ut_hlist PRIVATE cmocka-static)
-target_compile_options(ut_hlist PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_hlist PRIVATE ${ASAN_LINK_FLAGS})
-target_include_directories(ut_hlist PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+# ut_hlist / ut_rbtree RETIRED (2026-07-11): their kernel C sources
+# (kernel/hlist.c, kernel/rbtree.c, kernel/bintree.c) were rewritten in Rust
+# (kernel/hlist.rs, kernel/rbtree.rs, kernel/bintree.rs — Phase 2 Wave 1).
+# Coverage is to be re-homed as in-kernel Rust runtime tests or cargo-test
+# host suites per docs/rustify/test_port_plan.md. Original targets in git
+# history.
 
-add_executable(ut_rbtree
-    ${CMAKE_SOURCE_DIR}/src/ut_rbtree_main.c
-    ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
-    ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
-)
-target_link_libraries(ut_rbtree PRIVATE cmocka-static)
-target_compile_options(ut_rbtree PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_rbtree PRIVATE ${ASAN_LINK_FLAGS})
-target_include_directories(ut_rbtree PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
-
-add_executable(ut_semaphore
-    ${CMAKE_SOURCE_DIR}/src/ut_semaphore_main.c
-    ${CMAKE_SOURCE_DIR}/src/concurrency_harness.c
-    ${CMAKE_SOURCE_DIR}/../kernel/lock/semaphore.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/timer_wrappers.c
-)
-target_link_libraries(ut_semaphore PRIVATE cmocka-static pthread)
-target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_semaphore PRIVATE ${ASAN_LINK_FLAGS}
-    -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
-    -Wl,--wrap=push_off,--wrap=pop_off
-    -Wl,--wrap=tq_init,--wrap=tq_size,--wrap=tq_wait,--wrap=tq_wait_cb,--wrap=tq_wait_in_state,--wrap=tq_wakeup,--wrap=tq_wakeup_all
-    -Wl,--wrap=signal_pending
-    -Wl,--wrap=mycpu,--wrap=myproc,--wrap=__current_thread,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
-    -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep
-    -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
-)
-target_include_directories(ut_semaphore PRIVATE
-    ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
-    ${UNIT_TEST_INCLUDE_DIRS}
-)
-
-add_executable(ut_rwlock
-    ${CMAKE_SOURCE_DIR}/src/ut_rwlock_main.c
-    ${CMAKE_SOURCE_DIR}/src/concurrency_harness.c
-    ${CMAKE_SOURCE_DIR}/../kernel/lock/rwsem.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/timer_wrappers.c
-)
-target_link_libraries(ut_rwlock PRIVATE cmocka-static pthread)
-target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_rwlock PRIVATE ${ASAN_LINK_FLAGS}
-    -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
-    -Wl,--wrap=push_off,--wrap=pop_off
-    -Wl,--wrap=tq_init,--wrap=tq_size,--wrap=tq_wait,--wrap=tq_wait_cb,--wrap=tq_wait_in_state,--wrap=tq_wakeup,--wrap=tq_wakeup_all
-    -Wl,--wrap=signal_pending
-    -Wl,--wrap=mycpu,--wrap=myproc,--wrap=__current_thread,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
-    -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep
-    -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
-)
-target_include_directories(ut_rwlock PRIVATE
-    ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
-    ${UNIT_TEST_INCLUDE_DIRS}
-)
+# ut_semaphore / ut_rwlock RETIRED (2026-07-11): their kernel C sources
+# (lock/semaphore.c, lock/rwsem.c) were rewritten in Rust, and equivalent
+# in-kernel Rust test suites already exist (kernel/lock/semaphore_test.rs,
+# kernel/lock/rwsem_test.rs, run via SEMAPHORE_TEST=1 / RWLOCK_TEST=1
+# configure-time gates + QEMU boot). See docs/rustify/test_port_plan.md.
 
 add_executable(ut_bits
     ${CMAKE_SOURCE_DIR}/src/ut_bits_main.c
-    ${CMAKE_SOURCE_DIR}/../kernel/bits.c
+    # kernel/bits.c was deleted (Rust port); never actually needed here —
+    # bits.h uses compiler builtins unless USE_SOFTWARE_FFS=1 (off).
 )
 target_link_libraries(ut_bits PRIVATE cmocka-static)
 target_compile_options(ut_bits PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_link_options(ut_bits PRIVATE ${ASAN_LINK_FLAGS})
 target_include_directories(ut_bits PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
-add_executable(ut_pcache
-    ${CMAKE_SOURCE_DIR}/src/ut_pcache_main.c
-    ${CMAKE_SOURCE_DIR}/src/concurrency_harness.c
-    ${CMAKE_SOURCE_DIR}/../kernel/mm/pcache.c
-    ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
-    ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
-    ${WRAPPER_SRC}
-)
-target_link_libraries(ut_pcache PRIVATE cmocka-static pthread)
-target_compile_options(ut_pcache PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_pcache PRIVATE ${MOCK_COMPILE_OPTIONS} ${ASAN_LINK_FLAGS})
-target_include_directories(ut_pcache PRIVATE
-    ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
-    ${UNIT_TEST_INCLUDE_DIRS}
-)
+# ut_pcache DISABLED (2026-07-11): kernel/mm/pcache.c was rewritten in Rust
+# (kernel/mm/pcache.rs). Its 35 tests (incl. 4 concurrency stress tests) are
+# to be re-homed as an in-kernel Rust runtime suite (mm/pcache_test.rs) per
+# docs/rustify/test_port_plan.md. Original target in git history.
 
-# Tmpfs truncate test (linked version)
-# This test links directly to kernel/vfs/tmpfs/truncate.c using header guards
-# to block kernel headers and provide minimal test stubs.
-add_executable(ut_tmpfs_truncate
-    ${CMAKE_SOURCE_DIR}/src/ut_tmpfs_truncate_linked.c
-)
-target_link_libraries(ut_tmpfs_truncate PRIVATE cmocka-static)
-target_compile_options(ut_tmpfs_truncate PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_tmpfs_truncate PRIVATE ${ASAN_LINK_FLAGS})
-target_include_directories(ut_tmpfs_truncate PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+# ut_tmpfs_truncate DISABLED (2026-07-12): its kernel C source
+# (kernel/vfs/tmpfs/truncate.c) was rewritten in Rust
+# (kernel/vfs/tmpfs/truncate.rs — Phase 2 Wave 18); the test `#include`d
+# truncate.c directly, so that link-in strategy no longer applies to a
+# Rust file. Coverage is to be re-homed as an in-kernel Rust runtime
+# test or a cargo-test host suite per docs/rustify/test_port_plan.md.
+# Original target in git history.
 
-add_executable(ut_early_allocator
-    ${CMAKE_SOURCE_DIR}/src/ut_early_allocator_main.c
-)
-target_link_libraries(ut_early_allocator PRIVATE cmocka-static)
-target_compile_options(ut_early_allocator PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_early_allocator PRIVATE ${ASAN_LINK_FLAGS})
-target_include_directories(ut_early_allocator PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+# ut_early_allocator DISABLED (2026-07-11): its main.c #includes
+# kernel/mm/early_allocator.c which was rewritten in Rust
+# (kernel/mm/early_allocator.rs). To be replaced by host-side cargo tests
+# per docs/rustify/test_port_plan.md.
 
 add_executable(ut_workqueue
     ${CMAKE_SOURCE_DIR}/src/ut_workqueue_main.c
@@ -393,38 +322,17 @@ add_test(NAME ut_list
     COMMAND ut_list
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
-add_test(NAME ut_hlist
-    COMMAND ut_hlist
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-add_test(NAME ut_rbtree
-    COMMAND ut_rbtree
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-add_test(NAME ut_semaphore
-    COMMAND ut_semaphore
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-add_test(NAME ut_rwlock
-    COMMAND ut_rwlock
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
+# add_test ut_hlist removed (target disabled/retired 2026-07-11)
+# add_test ut_rbtree removed (target disabled/retired 2026-07-11)
+# add_test ut_semaphore removed (target disabled/retired 2026-07-11)
+# add_test ut_rwlock removed (target disabled/retired 2026-07-11)
 add_test(NAME ut_bits
     COMMAND ut_bits
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
-add_test(NAME ut_pcache
-    COMMAND ut_pcache
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-add_test(NAME ut_tmpfs_truncate
-    COMMAND ut_tmpfs_truncate
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-add_test(NAME ut_early_allocator
-    COMMAND ut_early_allocator
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
+# add_test ut_pcache removed (target disabled/retired 2026-07-11)
+# add_test ut_tmpfs_truncate removed (target disabled/retired 2026-07-12)
+# add_test ut_early_allocator removed (target disabled/retired 2026-07-11)
 add_test(NAME ut_workqueue
     COMMAND ut_workqueue
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}

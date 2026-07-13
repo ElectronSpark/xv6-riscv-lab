@@ -12,3 +12,11 @@ pub mod mutex;
 pub mod rwsem;
 pub mod rwlock;
 pub mod rcu;
+
+// Runtime test suites, ported 1:1 from the deleted `kernel/lock/*_test.c`
+// files. Each module exposes a single `#[no_mangle] extern "C"` launch
+// entry point, preserving the original symbol name for its C caller in
+// `kernel/start_kernel.c`.
+pub mod semaphore_test;
+pub mod rwsem_test;
+pub mod rcu_test;

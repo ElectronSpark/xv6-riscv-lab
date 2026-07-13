@@ -21,12 +21,13 @@
 #![allow(non_upper_case_globals)]
 #![allow(dead_code)]
 
+use core::cell::UnsafeCell;
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use crate::sync::KSpinlock;
 use core::sync::atomic::{
-    AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering,
+    AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering,
 };
 
 // ===========================================================================
@@ -50,6 +51,13 @@ const SLAB_STATE_DEQUEUED: u32 = 0;
 const SLAB_STATE_FREE: u32 = 1;
 const SLAB_STATE_PARTIAL: u32 = 2;
 const SLAB_STATE_FULL: u32 = 3;
+
+// Page-union flags (mirror of kernel/inc/mm/page_type.h), needed by the
+// page-union access helpers below (`page_attach`/`find_obj_slab`).
+const PAGE_FLAG_TYPE_BITS: u64 = 8;
+const PAGE_FLAG_TYPE_MASK: u64 = (1u64 << PAGE_FLAG_TYPE_BITS) - 1;
+const PAGE_TYPE_SLAB: u64 = 2;
+const PAGE_TYPE_TAIL: u64 = 5;
 
 // `sizeof(slab_t)` is needed by `__SLAB_OBJ_OFFSET`. The mirror struct
 // below is laid out the same as the C `slab_t`, so we can compute it
@@ -133,6 +141,80 @@ pub struct Slab {
 }
 
 // ===========================================================================
+// Layout pins (compile-time). Formerly `_Static_assert`s in the deleted
+// `slab_shims.c` / `slab_shims.rs`; `SlabCache`/`Slab`/`PercpuCache` are
+// hand-rolled mirrors of the bindgen-derived C structs, so these guards are
+// what actually catches ABI drift between this file and the kernel headers.
+// ===========================================================================
+const _: () = {
+    use crate::bindings::{percpu_slab_cache_t, slab_cache_t, slab_t, spinlock_t};
+
+    assert!(core::mem::size_of::<spinlock_t>() == 24, "spinlock_t size mismatch");
+    // NOTE: in C `spinlock_t` is `align(64)` via a GCC typedef-attribute
+    // extension that keeps `sizeof == 24`. Rust cannot express that
+    // combination (`#[repr(align(N))]` rounds size up to N), so bindgen
+    // emits the struct without alignment. The field-offset asserts below
+    // are what actually guarantee ABI parity — bindgen inserts explicit
+    // `__bindgen_padding_*` to place each embedded `spinlock_t` at the
+    // C-correct 64-aligned offset.
+    assert!(
+        core::mem::size_of::<percpu_slab_cache_t>() == 128,
+        "percpu_slab_cache_t size mismatch"
+    );
+    assert!(
+        core::mem::align_of::<percpu_slab_cache_t>() == 64,
+        "percpu_slab_cache_t alignment mismatch"
+    );
+    assert!(core::mem::size_of::<slab_cache_t>() == 1280, "cache total size");
+    assert!(NCPU == 8, "Rust slab mirror assumes NCPU == 8");
+
+    assert!(core::mem::offset_of!(slab_cache_t, name) == 0, "cache.name");
+    assert!(core::mem::offset_of!(slab_cache_t, flags) == 8, "cache.flags");
+    assert!(core::mem::offset_of!(slab_cache_t, obj_size) == 16, "cache.obj_size");
+    assert!(core::mem::offset_of!(slab_cache_t, offset) == 24, "cache.offset");
+    assert!(core::mem::offset_of!(slab_cache_t, slab_order) == 32, "cache.slab_order");
+    assert!(core::mem::offset_of!(slab_cache_t, slab_obj_num) == 36, "cache.slab_obj_num");
+    assert!(core::mem::offset_of!(slab_cache_t, bitmap_size) == 40, "cache.bitmap_size");
+    assert!(core::mem::offset_of!(slab_cache_t, limits) == 44, "cache.limits");
+    assert!(core::mem::offset_of!(slab_cache_t, percpu_caches) == 64, "cache.percpu_caches");
+    assert!(
+        core::mem::offset_of!(slab_cache_t, global_free_list) == 64 + 128 * NCPU,
+        "cache.global_free_list"
+    );
+    assert!(
+        core::mem::offset_of!(slab_cache_t, global_free_lock) == 1152,
+        "cache.global_free_lock"
+    );
+    assert!(
+        core::mem::offset_of!(slab_cache_t, global_free_count) == 1176,
+        "cache.global_free_count"
+    );
+    assert!(core::mem::offset_of!(slab_cache_t, slab_total) == 1184, "cache.slab_total");
+    assert!(core::mem::offset_of!(slab_cache_t, obj_active) == 1192, "cache.obj_active");
+    assert!(core::mem::offset_of!(slab_cache_t, obj_total) == 1200, "cache.obj_total");
+    assert!(
+        core::mem::offset_of!(slab_cache_t, cache_list_entry) == 1208,
+        "cache.cache_list_entry"
+    );
+
+    assert!(core::mem::offset_of!(slab_t, list_entry) == 0, "slab.list_entry");
+    assert!(core::mem::offset_of!(slab_t, cache) == 16, "slab.cache");
+    assert!(core::mem::offset_of!(slab_t, page) == 24, "slab.page");
+    assert!(core::mem::offset_of!(slab_t, slab_order) == 32, "slab.slab_order");
+    assert!(core::mem::offset_of!(slab_t, in_use) == 40, "slab.in_use");
+    assert!(core::mem::offset_of!(slab_t, next) == 48, "slab.next");
+    assert!(core::mem::offset_of!(slab_t, state) == 56, "slab.state");
+    assert!(core::mem::offset_of!(slab_t, bitmap) == 64, "slab.bitmap");
+    assert!(core::mem::offset_of!(slab_t, cpu_id) == 72, "slab.cpu_id");
+
+    // This module's own `Slab` mirror must match the field offsets pinned
+    // above (it is already asserted to start with `list_entry` at 0 via the
+    // separate `offset_of!(Slab, list_entry) == 0` check further down).
+    assert!(core::mem::offset_of!(Slab, cache) == core::mem::offset_of!(slab_t, cache));
+    assert!(core::mem::offset_of!(Slab, page) == core::mem::offset_of!(slab_t, page));
+};
+
+// ===========================================================================
 // FFI surface (declared in slab_shims.c, defs.h, mm/page.h).
 //
 // All raw extern declarations are wrapped in `unsafe extern "C" { pub safe }`
@@ -154,8 +236,9 @@ mod ffi {
         xv6_cpuid, xv6_push_off, xv6_pop_off,
         kmm_alloc, kmm_free,
         xv6_list_init, xv6_list_is_empty, xv6_list_is_detached,
-        xv6_list_detach, xv6_list_push_front, xv6_list_pop_front,
-        xv6_list_first, xv6_list_last,
+        xv6_list_detach, xv6_list_push_front, xv6_list_push_back,
+        xv6_list_pop_front, xv6_list_first, xv6_list_last,
+        __panic_start, __panic_end,
     };
 
     unsafe extern "C" {
@@ -169,31 +252,10 @@ mod ffi {
         pub safe fn __page_alloc(order: u64, flags: u64) -> *mut c_void;
         pub safe fn __page_free(page: *mut c_void, order: u64);
         pub safe fn __page_to_pa(page: *mut c_void) -> u64;
-
-        // Shims from slab_shims.c
-        pub safe fn xv6_slab_register_cache(cache: *mut SlabCache);
-        pub safe fn xv6_slab_unregister_cache(cache: *mut SlabCache);
-        pub safe fn xv6_slab_page_attach(head: *mut c_void, slab: *mut Slab, order: u32);
-        pub safe fn xv6_slab_page_set_order(head: *mut c_void, order: u32);
-        pub safe fn xv6_slab_find_obj_slab(ptr: *mut c_void) -> *mut Slab;
-        pub safe fn xv6_page_type_slab_value() -> u64;
-
-        pub safe fn xv6_slab_log_free_null(fn_name: *const c_char);
-        pub safe fn xv6_slab_log_no_slab(fn_name: *const c_char, obj: *mut c_void);
-        pub safe fn xv6_slab_log_unattached(slab: *mut Slab, obj: *mut c_void);
-        pub safe fn xv6_slab_log_from_free(
-            obj: *mut c_void,
-            slab: *mut Slab,
-            cache: *mut SlabCache,
-            cpu_id: c_int,
-        );
-        pub safe fn xv6_slab_panic(msg: *const c_char) -> !;
-
-        // `slab_shrink_all` lives in slab_shims.c (variadic printf, registry walk).
-        pub safe fn slab_shrink_all();
+        pub safe fn __pa_to_page(pa: u64) -> *mut c_void;
     }
 
-    // --- Type-adapting wrappers (safe Rust, no unsafe blocks). -----------
+    // --- Type-adapting wrappers (safe Rust, no unsafe blocks unless noted). ---
     #[inline] pub fn cpuid() -> c_int { xv6_cpuid() }
     #[inline] pub fn push_off() { xv6_push_off() }
     #[inline] pub fn pop_off() { xv6_pop_off() }
@@ -211,26 +273,23 @@ mod ffi {
     }
     #[inline] pub fn page_to_pa(page: *mut c_void) -> u64 { __page_to_pa(page) }
 
-    #[inline] pub fn register_cache(cache: &mut SlabCache) {
-        xv6_slab_register_cache(cache)
-    }
-    #[inline] pub fn unregister_cache(cache: &mut SlabCache) {
-        xv6_slab_unregister_cache(cache)
-    }
+    // --- Slab-cache registry, page-union access and diagnostics --
+    // previously round-tripped through the deleted `slab_shims.rs`; this
+    // is the only module that ever called them, so they are implemented
+    // directly below instead of behind a C-ABI hop. See the free-standing
+    // functions after this `mod ffi` block. ------------------------------
+    #[inline] pub fn register_cache(cache: &mut SlabCache) { super::register_cache(cache) }
+    #[inline] pub fn unregister_cache(cache: &mut SlabCache) { super::unregister_cache(cache) }
     #[inline] pub fn page_attach(head: *mut c_void, slab: &mut Slab, order: u32) {
-        xv6_slab_page_attach(head, slab, order)
+        super::page_attach(head, slab, order)
     }
     #[inline] pub fn page_set_order(head: *mut c_void, order: u32) {
-        xv6_slab_page_set_order(head, order)
+        super::page_set_order(head, order)
     }
     /// Returns the slab descriptor associated with `ptr`, or `None`.
     #[inline] pub fn find_obj_slab(ptr: *mut c_void) -> Option<&'static mut Slab> {
-        // SAFETY: turning a freshly-returned raw pointer into a `&mut` is
-        // sound because the slab descriptor is uniquely owned by the
-        // allocator's free path while held.
-        unsafe { xv6_slab_find_obj_slab(ptr).as_mut() }
+        super::find_obj_slab(ptr)
     }
-    #[inline] pub fn page_type_slab() -> u64 { xv6_page_type_slab_value() }
 
     #[inline] pub fn list_init(entry: &mut ListNode) { xv6_list_init(entry) }
     #[inline] pub fn list_is_empty(head: &ListNode) -> bool {
@@ -239,6 +298,9 @@ mod ffi {
     #[inline] pub fn list_detach(entry: &mut ListNode) { xv6_list_detach(entry) }
     #[inline] pub fn list_push_front(head: &mut ListNode, entry: &mut ListNode) {
         xv6_list_push_front(head, entry)
+    }
+    #[inline] pub fn list_push_back(head: &mut ListNode, entry: &mut ListNode) {
+        xv6_list_push_back(head, entry)
     }
     /// Pops a node from the head of `head`. Returns `None` if empty.
     /// The returned reference's lifetime is fictitious (`'static`) -- the
@@ -252,14 +314,12 @@ mod ffi {
         unsafe { xv6_list_first(head).as_mut() }
     }
 
-    #[inline] pub fn log_free_null(fn_name: *const c_char) {
-        xv6_slab_log_free_null(fn_name)
-    }
+    #[inline] pub fn log_free_null(fn_name: *const c_char) { super::log_free_null(fn_name) }
     #[inline] pub fn log_no_slab(fn_name: *const c_char, obj: *mut c_void) {
-        xv6_slab_log_no_slab(fn_name, obj)
+        super::log_no_slab(fn_name, obj)
     }
     #[inline] pub fn log_unattached(slab: &mut Slab, obj: *mut c_void) {
-        xv6_slab_log_unattached(slab, obj)
+        super::log_unattached(slab, obj)
     }
     #[inline] pub fn log_from_free(
         obj: *mut c_void,
@@ -267,12 +327,362 @@ mod ffi {
         cache: &mut SlabCache,
         cpu_id: c_int,
     ) {
-        xv6_slab_log_from_free(obj, slab, cache, cpu_id)
+        super::log_from_free(obj, slab, cache, cpu_id)
     }
-    #[inline] pub fn panic(msg: &'static [u8]) -> ! {
-        xv6_slab_panic(msg.as_ptr() as *const c_char)
+    #[inline] pub fn panic(msg: &'static [u8]) -> ! { super::slab_panic(msg) }
+    #[inline] pub fn shrink_all() { super::slab_shrink_all() }
+}
+
+// `printf` is shared by every diagnostic-printing helper in this module
+// (declared once here instead of once per call site). Variadic, so it
+// cannot be declared `safe`.
+unsafe extern "C" {
+    fn printf(fmt: *const c_char, ...) -> c_int;
+}
+
+// ===========================================================================
+// Panic / diagnostic printf -- previously the `xv6_slab_panic` and four
+// `xv6_slab_log_*` round-trips through the deleted `slab_shims.rs`; this
+// module is their only caller, so they are now direct `printf` calls.
+// ===========================================================================
+fn slab_panic(msg: &'static [u8]) -> ! {
+    ffi::__panic_start();
+    // SAFETY: `msg` is always a NUL-terminated byte-string literal supplied
+    // by call sites in this module.
+    unsafe { printf(b"%s\n\0".as_ptr() as *const c_char, msg.as_ptr()); }
+    ffi::__panic_end()
+}
+
+static LOG_FREE_NULL: &[u8] = b"%s: obj is NULL\n\0";
+static LOG_NO_SLAB: &[u8] = b"%s: slab is NULL for obj=%p\n\0";
+static LOG_UNATTACHED_1: &[u8] = b"slab_free: ERROR - slab=%p not attached to cache, obj=%p\n\0";
+static LOG_UNATTACHED_2: &[u8] =
+    b"  slab->page=%p, slab->in_use=%ld, slab->state=%d, slab->cpu_id=%d\n\0";
+static LOG_FROM_FREE_1: &[u8] = b"slab_free: ERROR - object from free slab\n\0";
+static LOG_FROM_FREE_2: &[u8] = b"  obj=%p, slab=%p, cache='%s'\n\0";
+static LOG_FROM_FREE_3: &[u8] = b"  slab->in_use=%ld, slab->state=%d, slab->cpu_id=%d\n\0";
+static LOG_FROM_FREE_4: &[u8] = b"  cache->global_free_count=%ld\n\0";
+
+fn log_free_null(fn_name: *const c_char) {
+    // SAFETY: format string matches the single `%s` argument.
+    unsafe { printf(LOG_FREE_NULL.as_ptr() as *const c_char, fn_name); }
+}
+fn log_no_slab(fn_name: *const c_char, obj: *mut c_void) {
+    // SAFETY: format string matches the argument list.
+    unsafe { printf(LOG_NO_SLAB.as_ptr() as *const c_char, fn_name, obj); }
+}
+fn log_unattached(slab: &mut Slab, obj: *mut c_void) {
+    let cpu_id = slab.cpu_id.load(Ordering::Acquire);
+    // SAFETY: format strings match their argument lists.
+    unsafe {
+        printf(LOG_UNATTACHED_1.as_ptr() as *const c_char, slab as *mut Slab, obj);
+        printf(
+            LOG_UNATTACHED_2.as_ptr() as *const c_char,
+            slab.page,
+            slab.in_use as i64,
+            slab.state as c_int,
+            cpu_id,
+        );
     }
-    #[inline] pub fn shrink_all() { slab_shrink_all() }
+}
+fn log_from_free(obj: *mut c_void, slab: &mut Slab, cache: &mut SlabCache, cpu_id: c_int) {
+    let gfc = cache.global_free_count.load(Ordering::Acquire);
+    // SAFETY: format strings match their argument lists.
+    unsafe {
+        printf(LOG_FROM_FREE_1.as_ptr() as *const c_char);
+        printf(LOG_FROM_FREE_2.as_ptr() as *const c_char, obj, slab as *mut Slab, cache.name);
+        printf(
+            LOG_FROM_FREE_3.as_ptr() as *const c_char,
+            slab.in_use as i64,
+            slab.state as c_int,
+            cpu_id,
+        );
+        printf(LOG_FROM_FREE_4.as_ptr() as *const c_char, gfc);
+    }
+}
+
+// ===========================================================================
+// Page-union access for slab pages -- previously `xv6_slab_page_attach` /
+// `xv6_slab_page_set_order` / `xv6_slab_find_obj_slab` in the deleted
+// `slab_shims.rs`. These still operate on the bindgen `page_struct` (rather
+// than `page::Page`) because that is the type the C-derived union layout
+// (`__bindgen_anon_2.{slab,tail}`) is expressed in; `page.rs` and `slab.rs`
+// otherwise stay decoupled from each other's internal representations.
+// ===========================================================================
+use crate::bindings::page_struct;
+
+#[inline]
+fn page_flags_raw(page: *mut page_struct) -> u64 {
+    // SAFETY: `page` is a valid page-array entry (guaranteed by every
+    // caller: freshly allocated or resolved via `__pa_to_page`).
+    unsafe { (*page).__bindgen_anon_1.flags }
+}
+#[inline]
+fn page_is_type(page: *mut page_struct, ty: u64) -> bool {
+    (page_flags_raw(page) & PAGE_FLAG_TYPE_MASK) == (ty & PAGE_FLAG_TYPE_MASK)
+}
+
+/// Stamp `slab`/`order` onto the head page of a freshly allocated slab, and
+/// mark every tail page as `PAGE_TYPE_TAIL` pointing back at the head.
+fn page_attach(head: *mut c_void, slab: &mut Slab, order: u32) {
+    let head = head as *mut page_struct;
+    // SAFETY: `head` is the first of `1 << order` freshly allocated,
+    // exclusively-owned pages (from `page_alloc`); every page in the group
+    // is valid to write through this whole function.
+    unsafe {
+        let slab_var = &raw mut (*head).__bindgen_anon_2.slab;
+        (*slab_var).slab = slab as *mut Slab as *mut crate::bindings::slab_t;
+        (*slab_var).order = order;
+        let page_count = 1u64 << order;
+        for i in 1..page_count {
+            let p = head.add(i as usize);
+            (*p).__bindgen_anon_1.flags = PAGE_TYPE_TAIL;
+            let tail_var = &raw mut (*p).__bindgen_anon_2.tail;
+            (*tail_var).head_page = head;
+        }
+    }
+}
+
+fn page_set_order(head: *mut c_void, order: u32) {
+    let head = head as *mut page_struct;
+    // SAFETY: `head` is a live PAGE_TYPE_SLAB head page.
+    unsafe {
+        let slab_var = &raw mut (*head).__bindgen_anon_2.slab;
+        (*slab_var).order = order;
+    }
+}
+
+/// Resolve `ptr` (an object inside some slab's data area) back to its
+/// owning `Slab` descriptor, or `None` if `ptr` is not slab-backed.
+fn find_obj_slab(ptr: *mut c_void) -> Option<&'static mut Slab> {
+    if ptr.is_null() {
+        return None;
+    }
+    let page_base = (ptr as u64) & !((PAGE_SIZE as u64) - 1);
+    // SAFETY: `page_base` is a page-aligned address; `__pa_to_page` bounds-
+    // checks it and returns NULL for anything outside the managed range.
+    let page = unsafe { ffi::__pa_to_page(page_base) } as *mut page_struct;
+    if page.is_null() {
+        return None;
+    }
+    let header: *mut page_struct = if page_is_type(page, PAGE_TYPE_SLAB) {
+        page
+    } else if page_is_type(page, PAGE_TYPE_TAIL) {
+        // SAFETY: `page` is a valid PAGE_TYPE_TAIL page; `tail.head_page`
+        // was set by `page_attach` above and always points at a live
+        // PAGE_TYPE_SLAB head page.
+        let h = unsafe { (*page).__bindgen_anon_2.tail.head_page } as *mut page_struct;
+        if h.is_null() || !page_is_type(h, PAGE_TYPE_SLAB) {
+            return None;
+        }
+        h
+    } else {
+        return None;
+    };
+    // SAFETY: `header` is a live PAGE_TYPE_SLAB head page.
+    let slab_ptr = unsafe { (*header).__bindgen_anon_2.slab.slab } as *mut Slab;
+    // SAFETY: turning a freshly-resolved raw pointer into a `&mut` is sound
+    // because the slab descriptor is uniquely owned by the allocator's
+    // free path while this reference is held.
+    unsafe { slab_ptr.as_mut() }
+}
+
+// ===========================================================================
+// Global slab-cache registry (`__all_slab_caches`) -- previously the
+// `xv6_slab_register_cache` / `xv6_slab_unregister_cache` / registry
+// globals in the deleted `slab_shims.rs`. A single intrusive list threading
+// every live `SlabCache` through its `cache_list_entry` field, guarded by
+// one global spinlock and lazily initialized on first use (mirrors the C
+// original's runtime-init dance -- Rust `static`s cannot run a
+// self-referential list initializer at compile time).
+// ===========================================================================
+// SAFETY: the only `ListNode` stored here is `ALL_SLAB_CACHES` below,
+// whose contents are never accessed except while holding
+// `ALL_SLAB_CACHES_LOCK` (see every `RegistryLock::lock_ptr()` call
+// site) — the spinlock is the actual synchronization, this impl just
+// tells the compiler the `UnsafeCell` may cross thread/hart
+// boundaries.
+struct RegistryList(UnsafeCell<ListNode>);
+unsafe impl Sync for RegistryList {}
+
+// SAFETY: the embedded `[u8; SPINLOCK_BYTES]` is the raw C `spinlock_t`
+// storage for `ALL_SLAB_CACHES_LOCK`; `spin_lock`/`spin_unlock`
+// (reached via `lock_ptr()`) already serialize concurrent access to
+// it, matching every other `spinlock_t`-backed `Sync` newtype in this
+// crate.
+struct RegistryLock(UnsafeCell<[u8; SPINLOCK_BYTES]>);
+unsafe impl Sync for RegistryLock {}
+impl RegistryLock {
+    fn lock_ptr(&self) -> *mut Spinlock { self.0.get() as *mut Spinlock }
+}
+
+static ALL_SLAB_CACHES: RegistryList = RegistryList(UnsafeCell::new(ListNode::new()));
+static ALL_SLAB_CACHES_LOCK: RegistryLock = RegistryLock(UnsafeCell::new([0u8; SPINLOCK_BYTES]));
+
+static REGISTRY_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+static REGISTRY_INIT_DONE: AtomicBool = AtomicBool::new(false);
+static REGISTRY_LOCK_NAME: &[u8] = b"all_slab_caches\0";
+
+fn ensure_registry_init() {
+    if REGISTRY_INIT_DONE.load(Ordering::Acquire) {
+        return;
+    }
+    if REGISTRY_INIT_STARTED
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        // SAFETY: single-writer section guarded by the CAS above; every
+        // other caller spins on `REGISTRY_INIT_DONE` until this completes.
+        // A list head must be self-referential (`next == prev == &head`)
+        // to represent "empty", not null -- `ffi::list_init` (not
+        // `ListNode::new()`, which leaves both pointers null) establishes
+        // that invariant, matching the C `LIST_ENTRY_INITIALIZED` original.
+        unsafe { ffi::list_init(&mut *ALL_SLAB_CACHES.0.get()); }
+        ffi::spin_init(ALL_SLAB_CACHES_LOCK.lock_ptr(), REGISTRY_LOCK_NAME.as_ptr() as *const c_char);
+        REGISTRY_INIT_DONE.store(true, Ordering::Release);
+    } else {
+        while !REGISTRY_INIT_DONE.load(Ordering::Acquire) {
+            core::hint::spin_loop();
+        }
+    }
+}
+
+fn registry_head() -> *mut ListNode {
+    // SAFETY: initialized exactly once by `ensure_registry_init` before any
+    // caller reaches here; the registry lock (held by every caller) then
+    // serializes all further access to the list contents (the head address
+    // itself is immutable for the process lifetime).
+    ALL_SLAB_CACHES.0.get()
+}
+
+/// `container_of(entry, SlabCache, cache_list_entry)`, in terms of the one
+/// canonical `crate::mm::cffi::container_of` helper.
+fn cache_from_entry(entry: *mut ListNode) -> *mut SlabCache {
+    crate::mm::cffi::container_of(entry, core::mem::offset_of!(SlabCache, cache_list_entry))
+}
+
+fn register_cache(cache: &mut SlabCache) {
+    ensure_registry_init();
+    ffi::list_init(&mut cache.cache_list_entry);
+    let _g = KSpinlock::from_ptr(ALL_SLAB_CACHES_LOCK.lock_ptr()).lock();
+    // SAFETY: `registry_head()` is a valid, initialized list head.
+    unsafe { ffi::list_push_back(&mut *registry_head(), &mut cache.cache_list_entry); }
+}
+
+fn unregister_cache(cache: &mut SlabCache) {
+    ensure_registry_init();
+    let _g = KSpinlock::from_ptr(ALL_SLAB_CACHES_LOCK.lock_ptr()).lock();
+    if ffi::xv6_list_is_detached(&cache.cache_list_entry) == 0 {
+        ffi::list_detach(&mut cache.cache_list_entry);
+    }
+}
+
+/// Drop up to half the free slabs of every registered cache under memory
+/// pressure (the OOM-shrink hook `Slab::make` falls back to on allocation
+/// failure). C-called via `kernel/inc/mm/slab.h`.
+#[no_mangle]
+pub extern "C" fn slab_shrink_all() {
+    ensure_registry_init();
+    let head = registry_head();
+    let mut guard = KSpinlock::from_ptr(ALL_SLAB_CACHES_LOCK.lock_ptr()).lock();
+    // SAFETY: `head` is a valid, initialized list head; walking it under
+    // the registry lock is race-free.
+    let mut cur = unsafe { (*head).next };
+    while cur != head {
+        let cache = unsafe { &mut *cache_from_entry(cur) };
+        let free_count = cache.global_free_count.load(Ordering::Acquire);
+        let next = unsafe { (*cur).next };
+        if free_count > 0 {
+            let to_shrink = ((free_count + 1) / 2) as c_int;
+            if to_shrink > 0 {
+                drop(guard);
+                // SAFETY: `cache` is a live, registered cache; shrinking it
+                // takes only its own locks, not the registry lock.
+                unsafe { slab_cache_shrink(cache as *mut SlabCache, to_shrink); }
+                guard = KSpinlock::from_ptr(ALL_SLAB_CACHES_LOCK.lock_ptr()).lock();
+                // Restart iteration: `next` may now be stale.
+                cur = unsafe { (*head).next };
+                continue;
+            }
+        }
+        cur = next;
+    }
+}
+
+// printf format strings for `slab_dump_all`.
+static DUMP_HDR: &[u8] = b"\n=== SLAB CACHE STATISTICS ===\n\0";
+static DUMP_COL: &[u8] = b"NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES\n\0";
+static DUMP_ROW: &[u8] = b"%s: objsz=%ld total=%ld active=%lu free=%ld pages=%lu\n\0";
+static DUMP_SEP: &[u8] = b"-----------------------------\n\0";
+static DUMP_END: &[u8] = b"=============================\n\0";
+static DUMP_SLAB_PG: &[u8] = b"Slab:  %lu pages (\0";
+static DUMP_MB: &[u8] = b"%lu.%luMB\0";
+static DUMP_KB: &[u8] = b"%luKB\0";
+static DUMP_TAIL: &[u8] = b")\n\0";
+
+/// Dump per-cache statistics: `detailed >= 2` prints a full table,
+/// `detailed >= 1` a one-line total, `0` prints nothing. Always returns the
+/// total byte footprint across every registered cache. C-called via
+/// `kernel/inc/mm/slab.h` (also from `page::sys_memstat`).
+#[no_mangle]
+pub extern "C" fn slab_dump_all(detailed: c_int) -> u64 {
+    ensure_registry_init();
+    let mut total_pages: u64 = 0;
+
+    // SAFETY: every `printf` call in this function matches its own format
+    // string.
+    unsafe {
+        if detailed >= 2 {
+            printf(DUMP_HDR.as_ptr() as *const c_char);
+            printf(DUMP_COL.as_ptr() as *const c_char);
+        }
+
+        let head = registry_head();
+        let _g = KSpinlock::from_ptr(ALL_SLAB_CACHES_LOCK.lock_ptr()).lock();
+        let mut cur = (*head).next;
+        while cur != head {
+            let cache = &mut *cache_from_entry(cur);
+            let next = (*cur).next;
+            let slab_total = cache.slab_total.load(Ordering::Acquire);
+            let obj_active = cache.obj_active.load(Ordering::Acquire);
+            let global_free = cache.global_free_count.load(Ordering::Acquire);
+            let pages = (slab_total as u64) * (1u64 << cache.slab_order);
+            total_pages += pages;
+            if detailed >= 2 {
+                printf(
+                    DUMP_ROW.as_ptr() as *const c_char,
+                    cache.name,
+                    cache.obj_size as i64,
+                    slab_total,
+                    obj_active,
+                    global_free,
+                    pages,
+                );
+            }
+            cur = next;
+        }
+        drop(_g);
+
+        if detailed >= 2 {
+            printf(DUMP_SEP.as_ptr() as *const c_char);
+        }
+        let total_bytes = total_pages * (PAGE_SIZE as u64);
+        if detailed >= 1 {
+            printf(DUMP_SLAB_PG.as_ptr() as *const c_char, total_pages);
+            if total_bytes >= 1024 * 1024 {
+                let mb = total_bytes / (1024 * 1024);
+                let kb_remainder = (total_bytes % (1024 * 1024)) / 1024;
+                printf(DUMP_MB.as_ptr() as *const c_char, mb, kb_remainder * 10 / 1024);
+            } else {
+                printf(DUMP_KB.as_ptr() as *const c_char, total_bytes / 1024);
+            }
+            printf(DUMP_TAIL.as_ptr() as *const c_char);
+            if detailed >= 2 {
+                printf(DUMP_END.as_ptr() as *const c_char);
+            }
+        }
+        total_bytes
+    }
 }
 
 // ===========================================================================
@@ -493,12 +903,11 @@ impl Slab {
             fn drop(&mut self) { ffi::slab_desc_free(self.desc); }
         }
 
-        let page_type_slab = ffi::page_type_slab();
-        let mut raw_page = ffi::page_alloc(order as u64, page_type_slab);
+        let mut raw_page = ffi::page_alloc(order as u64, PAGE_TYPE_SLAB);
         if raw_page.is_null() {
             // Emergency reclaim -- shrink everything and retry once.
             ffi::shrink_all();
-            raw_page = ffi::page_alloc(order as u64, page_type_slab);
+            raw_page = ffi::page_alloc(order as u64, PAGE_TYPE_SLAB);
         }
         if raw_page.is_null() { return None; }
         let page_guard = PageRollback { page: raw_page, order };
@@ -792,6 +1201,17 @@ impl SlabCache {
     }
 }
 
+/// Initializes an already-allocated `SlabCache` in place (used for
+/// statically-embedded caches; contrast with [`slab_cache_create`],
+/// which also allocates the descriptor).
+///
+/// # Safety
+///
+/// - `cache`, if non-null, must be a valid, writable `*mut SlabCache`
+///   (e.g. a `static mut` or embedding-struct field) that no other
+///   code is concurrently accessing.
+/// - `name`, if used by `init_impl`, must be a valid NUL-terminated
+///   C string for at least as long as the cache retains it.
 #[no_mangle]
 pub unsafe extern "C" fn slab_cache_init(
     cache: *mut SlabCache,
@@ -803,6 +1223,13 @@ pub unsafe extern "C" fn slab_cache_init(
     cache.init_impl(name, obj_size, flags)
 }
 
+/// Allocates and initializes a new `SlabCache` descriptor. Returns
+/// null on allocation or initialization failure.
+///
+/// # Safety
+///
+/// - `name` must be a valid NUL-terminated C string for at least as
+///   long as the cache retains it.
 #[no_mangle]
 pub unsafe extern "C" fn slab_cache_create(
     name: *mut c_char,
@@ -818,12 +1245,30 @@ pub unsafe extern "C" fn slab_cache_create(
     cache_ptr
 }
 
+/// Destroys `cache`: frees all its slabs and unregisters it. Fails
+/// (returns nonzero, leaves the cache intact) if any objects are
+/// still allocated out of it.
+///
+/// # Safety
+///
+/// - `cache`, if non-null, must be a live, exclusively-owned
+///   `*mut SlabCache` previously returned by [`slab_cache_create`] (or
+///   initialized via [`slab_cache_init`]) — not concurrently accessed
+///   by another hart, and not used again after this call succeeds.
 #[no_mangle]
 pub unsafe extern "C" fn slab_cache_destroy(cache: *mut SlabCache) -> c_int {
     let Some(cache) = cache.as_mut() else { return -1; };
     cache.destroy_impl()
 }
 
+/// Frees up to `nums` fully-empty slabs back to the page allocator.
+/// Returns the number actually freed, or -1 if `cache` is null.
+///
+/// # Safety
+///
+/// - `cache`, if non-null, must be a live `*mut SlabCache` previously
+///   returned by [`slab_cache_create`] or initialized via
+///   [`slab_cache_init`].
 #[no_mangle]
 pub unsafe extern "C" fn slab_cache_shrink(
     cache: *mut SlabCache,
@@ -842,6 +1287,14 @@ pub unsafe extern "C" fn slab_cache_shrink(
 // ===========================================================================
 // slab_alloc -- three-phase allocation.
 // ===========================================================================
+/// Allocates one object from `cache`. Returns null if `cache` is null
+/// or the allocation fails.
+///
+/// # Safety
+///
+/// - `cache`, if non-null, must be a live `*mut SlabCache` previously
+///   returned by [`slab_cache_create`] or initialized via
+///   [`slab_cache_init`].
 #[no_mangle]
 pub unsafe extern "C" fn slab_alloc(cache: *mut SlabCache) -> *mut c_void {
     let Some(cache) = cache.as_mut() else { return ptr::null_mut(); };
@@ -1072,8 +1525,14 @@ impl SlabCache {
     }
 }
 
-/// `obj` is a raw pointer crossing the C/Rust boundary -- the unsafe contract
-/// belongs to the caller (must point to a live object owned by a slab).
+/// Frees `obj` back to its owning slab, then opportunistically shrinks
+/// the cache's global free list. No-op if `obj` is null.
+///
+/// # Safety
+///
+/// - `obj`, if non-null, must be a pointer previously returned by
+///   [`slab_alloc`] on some live cache, not already freed (no double
+///   free), and not concurrently accessed by another hart.
 #[no_mangle]
 pub unsafe extern "C" fn slab_free(obj: *mut c_void) {
     if let Some(cache) =
@@ -1083,6 +1542,15 @@ pub unsafe extern "C" fn slab_free(obj: *mut c_void) {
     }
 }
 
+/// Frees `obj` back to its owning slab, identical to [`slab_free`] but
+/// skipping the opportunistic global-shrink phase (used by call sites
+/// that free in a loop and shrink once at the end).
+///
+/// # Safety
+///
+/// - Same as [`slab_free`]: `obj`, if non-null, must be a pointer
+///   previously returned by [`slab_alloc`] on some live cache, not
+///   already freed, and not concurrently accessed by another hart.
 #[no_mangle]
 pub unsafe extern "C" fn slab_free_noshrink(obj: *mut c_void) {
     // Phases 1-5 identical to slab_free; PHASE 6 deliberately skipped.

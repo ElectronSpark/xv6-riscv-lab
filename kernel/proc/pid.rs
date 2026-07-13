@@ -13,6 +13,8 @@
 use core::ffi::c_void;
 use core::ptr;
 
+use crate::proc::proc_shims;
+
 #[repr(C)] pub struct Thread { _p: [u8; 0] }
 #[repr(C)] pub struct Session { _p: [u8; 0] }
 
@@ -66,14 +68,6 @@ unsafe extern "C" {
     // RCU + thread shims.
     pub safe fn xv6_rcu_read_lock();
     pub safe fn xv6_rcu_read_unlock();
-    pub safe fn xv6_proctab_foreach_rcu(
-        fnp: unsafe extern "C" fn(*mut Thread, *mut c_void),
-        arg: *mut c_void,
-    );
-    pub safe fn xv6_proctab_foreach_inner(
-        fnp: unsafe extern "C" fn(*mut Thread, *mut c_void),
-        arg: *mut c_void,
-    );
 
     // Print helpers.
     pub safe fn xv6_procdump_header();
@@ -268,24 +262,20 @@ pub extern "C" fn proctab_proc_remove(p: *mut Thread) {
 // procdump (orchestrates; C shim prints each row).
 // ---------------------------------------------------------------------------
 
-unsafe extern "C" fn procdump_cb(p: *mut Thread, _arg: *mut c_void) {
-    let _ = xv6_procdump_one(p);
-}
-
 #[no_mangle]
 pub extern "C" fn procdump() {
     xv6_procdump_header();
-    xv6_proctab_foreach_rcu(procdump_cb, ptr::null_mut());
-}
-
-unsafe extern "C" fn procdump_bt_cb(p: *mut Thread, _arg: *mut c_void) {
-    xv6_procdump_bt_one(p);
+    proc_shims::for_each_proctab_thread(|p| {
+        let _ = xv6_procdump_one(p as *mut Thread);
+    });
 }
 
 #[no_mangle]
 pub extern "C" fn procdump_bt() {
     xv6_procdump_bt_header();
-    xv6_proctab_foreach_rcu(procdump_bt_cb, ptr::null_mut());
+    proc_shims::for_each_proctab_thread(|p| {
+        xv6_procdump_bt_one(p as *mut Thread);
+    });
     xv6_procdump_bt_footer();
 }
 
@@ -390,7 +380,10 @@ pub extern "C" fn sys_dumpproc() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// proctab_for_each_rcu
+// proctab_for_each_rcu — kept as a callback-taking `extern "C"` entry point
+// for any (currently nonexistent, but ABI-preserved) external C caller;
+// internally it now drives the safe `for_each_proctab_thread` iterator
+// instead of the old `xv6_proctab_foreach_rcu` C-callback trampoline.
 // ---------------------------------------------------------------------------
 
 #[no_mangle]
@@ -398,5 +391,9 @@ pub unsafe extern "C" fn proctab_for_each_rcu(
     fnp: unsafe extern "C" fn(*mut Thread, *mut c_void),
     arg: *mut c_void,
 ) {
-    xv6_proctab_foreach_rcu(fnp, arg);
+    proc_shims::for_each_proctab_thread(|p| {
+        // SAFETY: `fnp` is a valid C callback per this function's own
+        // (unsafe) contract; `arg` is caller-provided and opaque to us.
+        unsafe { fnp(p as *mut Thread, arg) };
+    });
 }

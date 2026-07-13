@@ -91,6 +91,7 @@ fn main() {
         .allowlist_type("sched_attr|hlist_bucket_t|hlist_entry_t|hlist_func_t")
         .allowlist_type("ht_hash_t|ht_hash_func_t")
         .allowlist_type("rb_node|rb_root|rb_root_opts")
+        .allowlist_type("kobject|kobject_ops")
         .allowlist_type("list_node_t|list_node|list_entry_t")
         .allowlist_type("rwsem_t|spinlock_t")
         .allowlist_type("rwlock|rwlock_t")
@@ -103,10 +104,49 @@ fn main() {
         .allowlist_type("pagetable_t|pte_t|pde_t|cpumask_t")
         .allowlist_type("slab_cache_t|slab_t|slab_struct")
         .allowlist_type("vfs_file|vfs_inode")
+        // Phase 2 Wave 13 (vfs/inode.c port): full field layouts for the
+        // rest of the vfs_types.h graph (already reachable transitively
+        // through vfs_file/vfs_inode's own fields; listed explicitly
+        // here for the same defensiveness as the wrapper.h comment).
+        .allowlist_type("vfs_superblock|vfs_superblock_ops|vfs_inode_ops")
+        .allowlist_type("vfs_dentry|vfs_dir_iter|vfs_fdtable|vfs_fs_type|vfs_fs_type_ops")
+        .allowlist_type("vfs_file_ops|vfs_inode_ref|fs_struct")
         .allowlist_type("platform_info|mem_region")
         .allowlist_type("page_type")
         .allowlist_type("timer_node|timer_root")
         .allowlist_type("thread_state")
+        // Phase 2 Wave 4 (console.c port): device/cdev vtable types +
+        // the tty/termios layout consolewrite reads (c_oflag).
+        .allowlist_type("device_t|device_instance|device_ops_t|device_major_t")
+        .allowlist_type("cdev_t|cdev|cdev_ops_t|dev_type_e")
+        .allowlist_type("tty|tty_ops|termios|winsize")
+        // Phase 2 Wave 18 (tmpfs port): tmpfs's private in-memory inode/
+        // superblock/dentry layout types (kernel/vfs/tmpfs/tmpfs_private.h,
+        // added to wrapper.h). Real field layouts, not opaque stand-ins --
+        // kernel/vfs/devtmpfs/superblock.c (still C) needs the identical
+        // layout via container_of on the very same header.
+        .allowlist_type("tmpfs_inode|tmpfs_superblock|tmpfs_sb_private|tmpfs_dentry")
+        // Phase 2 Wave 19 (xv6fs port): xv6fs's private in-memory structures
+        // (kernel/vfs/xv6fs/xv6fs_private.h, added to wrapper.h) plus,
+        // transitively, the on-disk format structs shared with mkfs
+        // (vfs/xv6fs/ondisk.h -- untouched, ABI surface) and the Wave-1
+        // Rust-rbtree-indexed free-block-extent cache
+        // (vfs/xv6fs/block_cache.h). Real field layouts throughout, no
+        // opaque stand-ins -- same rationale as every other filesystem
+        // driver wave.
+        .allowlist_type("xv6fs_superblock|xv6fs_inode|xv6fs_log|xv6fs_logheader")
+        .allowlist_type("xv6fs_block_cache|free_extent")
+        .allowlist_type("^superblock$|^dinode$|^dirent$")
+        // dev/buf.h's classic xv6 buffer-cache `struct buf` (kernel/bio.c,
+        // unchanged C) -- xv6fs reads/writes `bp->data`/`bp->blockno`
+        // directly. dev/bio_types.h's `struct bio`/`bio_vec` (dev/bio.c,
+        // unchanged C) -- xv6fs's per-inode pcache read_page/write_page
+        // set `bio->blkno` directly before submitting. dev/dev_types.h's
+        // `blkdev_t` -- xv6fs reads `blkdev->dev.{major,minor}` via the
+        // `xv6fs_sb_dev` macro (reimplemented natively in Rust).
+        .allowlist_type("^buf$")
+        .allowlist_type("^bio$|bio_vec")
+        .allowlist_type("blkdev_t|blkdev|blkdev_ops_t")
         .allowlist_var("PROT_.*|VMA_FLAG_.*|PTE_.*|PGSIZE|PGSHIFT|PAGE_SHIFT|MAXVA|UVMTOP|UVMBOTTOM|TRAPFRAME|TRAPFRAME_POFFSET|NCPU")
         .allowlist_var("MAP_.*|MREMAP_.*|MS_ASYNC|MS_SYNC|MS_INVALIDATE|MADV_.*")
         .allowlist_var("MAXUSTACK|USTACKTOP|USTACK_MAX_BOTTOM|USERSTACK_GROWTH|USERSTACK_MINSZ|UHEAP_MAX_TOP|PROT_MASK")
@@ -116,6 +156,9 @@ fn main() {
         .allowlist_var("N_VIRTIO|EMAC_MAX|SDHCI_MAX|PCIE_REG_.*")
         .allowlist_var("PAGE_TYPE_.*")
         .allowlist_var("platform")
+        // Phase 2 Wave 4 (console.c port): OPOST/ONLCR termios output
+        // flags read by consolewrite.
+        .allowlist_var("OPOST|ONLCR")
         .allowlist_function("slab_alloc|slab_free|slab_cache_init")
         .allowlist_function("rcu_read_lock|rcu_read_unlock|synchronize_rcu|call_rcu")
         .allowlist_function("hlist_init|hlist_get|hlist_get_rcu|hlist_put_rcu|hlist_pop_rcu|hlist_hash_int")

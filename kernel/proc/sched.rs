@@ -113,7 +113,9 @@ macro_rules! kassert { ($c:expr, $m:expr) => {{ if !($c) { kpanic!($m); } }}; }
 macro_rules! schport_unsafe_call { ($e:expr) => {{ unsafe { $e } }}; }
 
 #[inline] fn cpu_access<'a>() -> CpuLocalRef<'a> {
-    CpuLocalRef::assume(cpu_local_ptr())
+    // SAFETY: `cpu_local_ptr()` indexes into statically-allocated, always-initialized
+    // per-CPU storage; never null.
+    unsafe { CpuLocalRef::assume(cpu_local_ptr()) }
 }
 #[inline] fn current_thread() -> *mut thread { cpu_access().proc_ptr() }
 
@@ -179,12 +181,23 @@ fn thread_test_flag(p: *mut thread, bit: u64) -> bool {
 fn thread_from_context(ctx: *mut context) -> *mut thread {
     let off = offset_of!(sched_entity, context);
     let se = (ctx as *mut u8).wrapping_sub(off) as *mut sched_entity;
-    SchedEntityRef::assume(se).thread_ptr()
+    // SAFETY: `se` is derived by pointer arithmetic assuming `ctx` points to the
+    // `context` field of a live `sched_entity` -- the documented contract of
+    // `thread_from_context`, a kernel-internal context-switch helper always
+    // invoked with such a pointer.
+    unsafe { SchedEntityRef::assume(se) }.thread_ptr()
 }
 
 // ---------------- static lock + chan queue ------------------------------
 #[repr(transparent)]
 struct SyncBuf<T>(UnsafeCell<MaybeUninit<T>>);
+// SAFETY: `SyncBuf<T>` backs the two statics below only. `SLEEP_LOCK`
+// is written in full by its one-shot `spin_init` call before any other
+// use, then only ever touched through `spin_lock`/`spin_unlock`'s own
+// internal synchronization. `CHAN_QUEUE_ROOT` is written by its
+// one-shot tree-init call and every subsequent mutation happens while
+// `SLEEP_LOCK` is held (the sleep/wakeup "chan queue" protocol) — the
+// spinlock is the real serialization mechanism for both.
 unsafe impl<T> Sync for SyncBuf<T> {}
 
 static SLEEP_LOCK: SyncBuf<spinlock_t> = SyncBuf(UnsafeCell::new(MaybeUninit::uninit()));
@@ -199,7 +212,9 @@ static CHAN_QUEUE_ROOT: SyncBuf<ttree_t> = SyncBuf(UnsafeCell::new(MaybeUninit::
 
 #[inline]
 fn sleep_lock_ref<'a>() -> SpinLockRef<'a> {
-    SpinLockRef::assume(sleep_lock_ptr())
+    // SAFETY: `sleep_lock_ptr()` points into statically-allocated, always-initialized
+    // storage (`SLEEP_LOCK`); never null.
+    unsafe { SpinLockRef::assume(sleep_lock_ptr()) }
 }
 
 fn chan_queue_init() {
@@ -261,9 +276,18 @@ fn sched_pick_next() -> *mut thread {
     let se = xv6_rqport_rq_pick_next_task(rq);
     if se.is_null() { return core::ptr::null_mut(); }
     let cur = current_thread();
-    let cur_se = ThreadAccess::assume(cur).sched_entity_ptr();
-    let this_priority = SchedEntityRef::assume(cur_se).priority();
-    let next = SchedEntityRef::assume(se);
+    // SAFETY: `cur` is `current_thread()`, the currently running thread; the currently
+    // running thread's pointer (from `xv6_current_thread()`/`current()`) is a
+    // kernel-wide invariant: always non-null while executing kernel code on
+    // behalf of a thread.
+    let cur_se = unsafe { ThreadAccess::assume(cur) }.sched_entity_ptr();
+    // SAFETY: `cur_se` is `cur`'s embedded scheduling entity: every thread that is
+    // actually running (as `cur` is here) has a live, allocated `sched_entity`
+    // by kernel invariant.
+    let this_priority = unsafe { SchedEntityRef::assume(cur_se) }.priority();
+    // SAFETY: `se` is checked non-null immediately above (`if se.is_null() { return
+    // ...; }`).
+    let next = unsafe { SchedEntityRef::assume(se) };
     let next_priority = next.priority();
     if thread_running(cur) && this_priority < next_priority {
         return cur;
@@ -373,9 +397,13 @@ fn scheduler_sleep_impl(lk: Option<SpinLockRef<'_>>, sleep_state: thread_state) 
         "Thread must be in INTERRUPTIBLE or UNINTERRUPTIBLE state to sleep");
     thread_state_set(proc, sleep_state);
     let lk_holding = lk.is_some_and(|l| l.holding());
-    if lk_holding { lk.unwrap().unlock(); }
+    if lk_holding {
+        lk.expect("BUG: scheduler_sleep lk_holding true but lk is None").unlock();
+    }
     scheduler_yield_inner();
-    if lk_holding { lk.unwrap().lock(); }
+    if lk_holding {
+        lk.expect("BUG: scheduler_sleep lk_holding true but lk is None").lock();
+    }
     intr_restore(intr);
 }
 
@@ -548,21 +576,27 @@ fn sleep_on_chan_common(chan: *mut c_void, lk: Option<SpinLockRef<'_>>, state: t
     let cur = current_thread();
     kassert!(!cur.is_null(), "PCB is NULL");
     kassert!(!chan.is_null(), "Cannot sleep on a NULL channel");
-    ThreadAccess::assume(cur).set_chan(chan);
+    // SAFETY: `cur` is proven non-null by the diverging `kassert!` immediately above.
+    unsafe { ThreadAccess::assume(cur) }.set_chan(chan);
     thread_set_flag(cur, THREAD_FLAG_ONCHAN);
     thread_state_set(cur, state);
 
     let lk_holding = lk.is_some_and(|l| l.holding());
-    if lk_holding { lk.unwrap().unlock(); }
+    if lk_holding {
+        lk.expect("BUG: sleep_on_chan_common lk_holding true but lk is None").unlock();
+    }
 
     let ret = ttree_wait(chan_queue_ptr(), chan as u64, core::ptr::null_mut(), core::ptr::null_mut());
 
     sleep_lock_irqsave_impl();
     thread_clear_flag(cur, THREAD_FLAG_ONCHAN);
-    ThreadAccess::assume(cur).set_chan(core::ptr::null_mut());
+    // SAFETY: `cur` is proven non-null by the diverging `kassert!` above.
+    unsafe { ThreadAccess::assume(cur) }.set_chan(core::ptr::null_mut());
     sleep_unlock_irqrestore_impl(intr);
 
-    if lk_holding { lk.unwrap().lock(); }
+    if lk_holding {
+        lk.expect("BUG: sleep_on_chan_common lk_holding true but lk is None").lock();
+    }
     ret
 }
 
@@ -690,12 +724,17 @@ fn context_switch_prepare_impl(prev: *mut thread, next: *mut thread) {
     kassert!(!prev.is_null(), "Previous process is NULL");
     kassert!(!next.is_null(), "Next process is NULL");
     sched_assert_holding();
-    let next_se = ThreadAccess::assume(next).sched_entity_ptr();
-    let next_se_ref = SchedEntityRef::assume(next_se);
+    // SAFETY: `next` is proven non-null by the diverging `kassert!` immediately above.
+    let next_se = unsafe { ThreadAccess::assume(next) }.sched_entity_ptr();
+    // SAFETY: `next_se` is `next`'s embedded scheduling entity: every thread reaching
+    // a context switch has a live, allocated `sched_entity` by kernel
+    // invariant.
+    let next_se_ref = unsafe { SchedEntityRef::assume(next_se) };
     next_se_ref.on_cpu_store_release(1);
     next_se_ref.set_cpu_id(cpuid_rs());
     if thread_zombie(prev) {
-        rqport_rq_task_dead(ThreadAccess::assume(prev).sched_entity_ptr());
+        // SAFETY: `prev` is proven non-null by the diverging `kassert!` above.
+        rqport_rq_task_dead(unsafe { ThreadAccess::assume(prev) }.sched_entity_ptr());
     }
 }
 
@@ -708,7 +747,8 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
     kassert!(!prev.is_null(), "Previous process is NULL");
     kassert!(!next.is_null(), "Next process is NULL");
     let pstate = thread_state_get(prev);
-    let prev_access = ThreadAccess::assume(prev);
+    // SAFETY: `prev` is proven non-null by the diverging `kassert!` above.
+    let prev_access = unsafe { ThreadAccess::assume(prev) };
     let se = prev_access.sched_entity_ptr();
     let idle = cpu_access().idle_thread_ptr();
 
@@ -716,7 +756,9 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
         if state_is_running(pstate) {
             rqport_rq_put_prev_task(se);
         } else if state_is_sleeping(pstate) || state_is_stopped(pstate) {
-            let se_rq = SchedEntityRef::assume(se).rq_ptr();
+            // SAFETY: `se` is `prev_access`'s embedded scheduling entity, field-
+            // derived from the already-valid `prev_access` handle above.
+            let se_rq = unsafe { SchedEntityRef::assume(se) }.rq_ptr();
             if !se_rq.is_null() {
                 xv6_rqport_rq_dequeue_task(se_rq, se);
             }
@@ -728,7 +770,9 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
         page_free(kstack_addr as *mut c_void, kstack_order);
         // prev is now dangling -- do not touch.
     } else {
-        SchedEntityRef::assume(prev_access.sched_entity_ptr()).on_cpu_store_release(0);
+        // SAFETY: `prev_access` is already a valid handle (constructed above);
+        // `.sched_entity_ptr()` is a field-address derived from it.
+        unsafe { SchedEntityRef::assume(prev_access.sched_entity_ptr()) }.on_cpu_store_release(0);
     }
 
     if chan_holding_impl() != 0 {

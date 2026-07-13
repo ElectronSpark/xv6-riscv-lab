@@ -119,6 +119,7 @@ pub mod raw {
         pub safe fn xv6_list_is_detached(entry: *const ListNode) -> c_int;
         pub safe fn xv6_list_detach(entry: *mut ListNode);
         pub safe fn xv6_list_push_front(head: *mut ListNode, entry: *mut ListNode);
+        pub safe fn xv6_list_push_back(head: *mut ListNode, entry: *mut ListNode);
         pub safe fn xv6_list_pop_front(head: *mut ListNode) -> *mut ListNode;
         pub safe fn xv6_list_first(head: *const ListNode) -> *mut ListNode;
         pub safe fn xv6_list_last(head: *const ListNode) -> *mut ListNode;
@@ -195,6 +196,285 @@ pub fn panic_bytes(msg: &[u8]) -> ! {
         printf(b"%s\n\0".as_ptr() as *const c_char, msg.as_ptr());
     }
     raw::__panic_end()
+}
+
+// ===========================================================================
+// Canonical implementations of the cross-cutting primitives declared in
+// `raw` above (`xv6_cpuid`/`xv6_push_off`/`xv6_pop_off`, and the intrusive
+// list ops). These used to live in `slab_shims.rs`, which despite its name
+// was the sole definer of these crate-wide primitives (consumed by
+// `page.rs`, `slab.rs`, `early_allocator.rs`, `mm_safe.rs`, and
+// `proc::cffi`) — an accident of history, not a slab-specific concern.
+// Collapsing `slab_shims.rs` (mm WP3) means these need a real home; since
+// `cffi.rs` already owns the `raw` *declarations* exactly once, it owns
+// the *definitions* too. Consumers keep calling `cffi::raw::xv6_cpuid()`
+// etc. unchanged — Rust resolves the extern declaration to the
+// `#[no_mangle]` definition below via the linker, same as it would for a
+// declaration/definition split across two C translation units.
+// ===========================================================================
+const CPU_LOCAL_PAGE_SIZE: u64 = 4096;
+const SSTATUS_SIE: u64 = 1 << 1;
+
+#[inline(always)]
+fn read_tp() -> u64 {
+    let tp: u64;
+    // SAFETY: reads the `tp` register, which always holds this hart's
+    // per-cpu block pointer once boot has installed it.
+    unsafe {
+        core::arch::asm!("mv {0}, tp", out(reg) tp, options(nomem, nostack, preserves_flags));
+    }
+    tp
+}
+#[inline(always)]
+fn read_sstatus() -> u64 {
+    let v: u64;
+    // SAFETY: reads a CSR; no side effects.
+    unsafe {
+        core::arch::asm!("csrr {0}, sstatus", out(reg) v, options(nomem, nostack, preserves_flags));
+    }
+    v
+}
+#[inline(always)]
+fn intr_off_raw() {
+    // SAFETY: clears the supervisor interrupt-enable bit; always valid.
+    unsafe {
+        core::arch::asm!("csrc sstatus, {0}", in(reg) SSTATUS_SIE, options(nomem, nostack, preserves_flags));
+    }
+}
+#[inline(always)]
+fn intr_on_raw() {
+    // SAFETY: sets the supervisor interrupt-enable bit; always valid.
+    unsafe {
+        core::arch::asm!("csrs sstatus, {0}", in(reg) SSTATUS_SIE, options(nomem, nostack, preserves_flags));
+    }
+}
+#[inline(always)]
+fn intr_get_raw() -> bool {
+    (read_sstatus() & SSTATUS_SIE) != 0
+}
+#[inline(always)]
+fn mycpu_local() -> *mut crate::bindings::cpu_local {
+    read_tp() as *mut crate::bindings::cpu_local
+}
+
+/// Current hart's cpu index, derived from `tp`'s offset into the per-cpu
+/// page (mirrors the `cpuid()` static-inline from `kernel/inc/smp/percpu.h`).
+#[no_mangle]
+pub extern "C" fn xv6_cpuid() -> c_int {
+    let off = read_tp() & (CPU_LOCAL_PAGE_SIZE - 1);
+    (off / core::mem::size_of::<crate::bindings::cpu_local>() as u64) as c_int
+}
+
+/// Disable interrupts, tracking nesting depth (mirrors `push_off()`).
+#[no_mangle]
+pub extern "C" fn xv6_push_off() {
+    let old = intr_get_raw();
+    if old {
+        intr_off_raw();
+    }
+    // SAFETY: `mycpu_local()` points at this hart's per-cpu block, mapped
+    // for the entire kernel lifetime; only this hart touches its own noff.
+    unsafe {
+        let c = mycpu_local();
+        let noff = (*c).noff;
+        if noff == 0 {
+            (*c).intena = if old { 1 } else { 0 };
+        }
+        (*c).noff = noff + 1;
+    }
+}
+
+/// Re-enable interrupts once the nesting depth reaches zero (mirrors
+/// `pop_off()`).
+#[no_mangle]
+pub extern "C" fn xv6_pop_off() {
+    // SAFETY: see `xv6_push_off`.
+    unsafe {
+        let c = mycpu_local();
+        let n = (*c).noff - 1;
+        (*c).noff = n;
+        if n == 0 && (*c).intena != 0 {
+            intr_on_raw();
+        }
+    }
+}
+
+// --- Intrusive doubly-linked list primitives (kernel/inc/list.h
+// static-inlines, ported once for every mm/proc consumer). ----------------
+
+#[no_mangle]
+pub extern "C" fn xv6_list_init(entry: *mut ListNode) {
+    // SAFETY: `entry` is a valid, exclusively-accessible `ListNode`.
+    unsafe {
+        (*entry).next = entry;
+        (*entry).prev = entry;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn xv6_list_is_empty(head: *const ListNode) -> c_int {
+    // SAFETY: `head` is a valid, initialized `ListNode`.
+    unsafe { if (*head).next == head as *mut ListNode { 1 } else { 0 } }
+}
+
+#[no_mangle]
+pub extern "C" fn xv6_list_is_detached(entry: *const ListNode) -> c_int {
+    // SAFETY: `entry` is a valid, initialized `ListNode`.
+    unsafe {
+        let p = (*entry).prev;
+        let n = (*entry).next;
+        if p == entry as *mut ListNode && n == entry as *mut ListNode { 1 } else { 0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn xv6_list_detach(entry: *mut ListNode) {
+    // SAFETY: `entry` is currently linked into some list (or self-linked);
+    // unlinking it and re-initializing it as a singleton is always sound.
+    unsafe {
+        let p = (*entry).prev;
+        let n = (*entry).next;
+        (*p).next = n;
+        (*n).prev = p;
+    }
+    xv6_list_init(entry);
+}
+
+/// Not exported: no caller (C or Rust) needs it standalone, only
+/// `xv6_list_push_front`/`xv6_list_push_back` below.
+fn list_insert_after(prev: *mut ListNode, new: *mut ListNode) {
+    // SAFETY: `prev` is a linked (or head) node; `new` is detached storage
+    // the caller owns exclusively.
+    unsafe {
+        let nxt = (*prev).next;
+        (*new).next = nxt;
+        (*new).prev = prev;
+        (*nxt).prev = new;
+        (*prev).next = new;
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn xv6_list_push_front(head: *mut ListNode, entry: *mut ListNode) {
+    list_insert_after(head, entry);
+}
+
+#[no_mangle]
+pub extern "C" fn xv6_list_push_back(head: *mut ListNode, entry: *mut ListNode) {
+    // SAFETY: `head` is a valid, initialized `ListNode`.
+    unsafe { list_insert_after((*head).prev, entry) };
+}
+
+#[no_mangle]
+pub extern "C" fn xv6_list_pop_front(head: *mut ListNode) -> *mut ListNode {
+    if xv6_list_is_empty(head) != 0 {
+        return ptr::null_mut();
+    }
+    // SAFETY: `head` is non-empty, so `.next` is a live linked node.
+    let first = unsafe { (*head).next };
+    xv6_list_detach(first);
+    first
+}
+
+#[no_mangle]
+pub extern "C" fn xv6_list_first(head: *const ListNode) -> *mut ListNode {
+    if xv6_list_is_empty(head) != 0 {
+        ptr::null_mut()
+    } else {
+        // SAFETY: just proved non-empty above.
+        unsafe { (*head).next }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn xv6_list_last(head: *const ListNode) -> *mut ListNode {
+    if xv6_list_is_empty(head) != 0 {
+        ptr::null_mut()
+    } else {
+        // SAFETY: just proved non-empty above.
+        unsafe { (*head).prev }
+    }
+}
+
+// ===========================================================================
+// `container_of` — the one canonical intrusive-node-to-payload helper for
+// `mm`.
+// ===========================================================================
+//
+// Before this, `pcache.rs` (three call sites: pcache/list, node/LRU,
+// node/rb-tree), `slab.rs` (one: cache/registry-list), and `vm.rs` (two,
+// inline: rb-tree node/vma) each hand-rolled the identical
+// `(ptr as *mut u8).wrapping_sub(offset) as *mut T` byte-arithmetic
+// pattern. The crate already has a canonical `container_of` for
+// `bindings::list_node_t` specifically (`crate::machine::list_container_of`,
+// used crate-wide by `proc`/`ll`/`lock` as well as `vm.rs` — left as-is here
+// to avoid *adding* a second list_node_t-shaped duplicate). This generic
+// version fills the gap for every other intrusive-member type in `mm`
+// (`ListNode`, `rb_node`, …): the computation is pure pointer arithmetic
+// and doesn't care about the member's Rust type, only its byte offset
+// within `T`.
+#[inline(always)]
+pub fn container_of<T, M>(member: *mut M, member_offset: usize) -> *mut T {
+    (member as *mut u8).wrapping_sub(member_offset) as *mut T
+}
+
+// ===========================================================================
+// `Errno` — the one canonical negative-errno type for `mm`'s internal
+// (non-`#[no_mangle]`) helpers.
+// ===========================================================================
+//
+// The C ABI convention throughout this crate is "0 on success, negative
+// `E*` value on failure" (`bindings::E*` are the positive musl-libc
+// numbers from `kernel/inc/errno.h`). Internal helpers that used to
+// return a raw `c_int` encoding that convention now return
+// `Result<T, Errno>`; the `#[no_mangle]` C-ABI boundary function converts
+// back to a negative `c_int` exactly once, via [`Errno::neg`] (mirrors the
+// pre-existing `sysmm.rs::neg_errno` pattern). Only the handful of `E*`
+// values `mm` actually returns are represented — this is deliberately not
+// a general `errno.h` mirror.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Errno {
+    Inval,
+    NoMem,
+    Fault,
+    Access,
+    BadF,
+    Range,
+    NameTooLong,
+}
+
+impl Errno {
+    /// The positive `E*` value (e.g. `EINVAL`), as `bindgen` emits it.
+    #[inline]
+    pub const fn raw(self) -> c_int {
+        match self {
+            Errno::Inval => crate::bindings::EINVAL as c_int,
+            Errno::NoMem => crate::bindings::ENOMEM as c_int,
+            Errno::Fault => crate::bindings::EFAULT as c_int,
+            Errno::Access => crate::bindings::EACCES as c_int,
+            Errno::BadF => crate::bindings::EBADF as c_int,
+            Errno::Range => crate::bindings::ERANGE as c_int,
+            Errno::NameTooLong => crate::bindings::ENAMETOOLONG as c_int,
+        }
+    }
+
+    /// The `-errno` value used as a raw C ABI return code.
+    #[inline]
+    pub const fn neg(self) -> c_int {
+        -self.raw()
+    }
+}
+
+/// Convert a `Result<T, Errno>` into this crate's "0 / value on success,
+/// negative errno on failure" `c_int` ABI convention, for the common case
+/// where `T` doesn't carry a value the caller needs back through the
+/// return slot (e.g. `Result<(), Errno>`, or callers that discard `T`).
+#[inline]
+pub fn result_to_neg_errno<T>(r: Result<T, Errno>) -> c_int {
+    match r {
+        Ok(_) => 0,
+        Err(e) => e.neg(),
+    }
 }
 
 // ===========================================================================

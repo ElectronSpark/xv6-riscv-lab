@@ -9,17 +9,13 @@
 
 mod bits;
 pub(crate) mod cffi;
-mod page;
-mod slab;
+pub(crate) mod page;
+pub(crate) mod slab;
 mod sysmm;
 mod kalloc;
 mod early_allocator;
 mod pcache;
 mod vm_pgtab;
-mod vm_pgtab_shims;
-mod slab_shims;
-mod page_shims;
-mod pcache_shims;
 mod vm;
 pub mod mm_safe;
 
@@ -32,8 +28,4 @@ pub use kalloc::*;
 pub use early_allocator::*;
 pub use pcache::*;
 pub use vm_pgtab::*;
-pub use vm_pgtab_shims::*;
-pub use slab_shims::*;
-pub use page_shims::*;
-pub use pcache_shims::*;
 pub use vm::*;

@@ -1,40 +1,60 @@
 //! Rust port of `kernel/lock/rwlock.c`.
 //!
-//! All inline atomic CAS primitives from `rwlock.h` (and the
-//! `_Atomic uint64 state` / `_Atomic int w_holder` fields) are reached
-//! through the small C trampolines in `kernel/lock/rwlock_shim.c`. This
-//! keeps the atomic ABI fully on the C side while the Rust code drives the
-//! spin policy and IRQ wrappers.
+//! The state-word CAS primitives that used to live as `static inline`
+//! functions in the C header `kernel/inc/lock/rwlock.h` — reached via the
+//! non-inline trampolines in the now-deleted `kernel/lock/rwlock_shim.c` —
+//! are implemented natively here on top of `core::sync::atomic`. The C
+//! header still defines the `struct rwlock` layout (`rwlock_types.h`) for
+//! the handful of C call sites that only need the type, but no C code
+//! implements any of the locking logic anymore.
 
 #![allow(non_camel_case_types, non_snake_case)]
 
 use core::ffi::{c_char, c_int, c_void};
+use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use crate::bindings::rwlock as rwlock_t;
+use crate::machine;
 
-unsafe extern "C" {
-    // From kernel/lock/rwlock_shim.c.
-    pub safe fn __rwl_try_rlock(rw: *mut rwlock_t) -> bool;
-    pub safe fn __rwl_try_wlock(rw: *mut rwlock_t, expedite: bool) -> bool;
-    pub safe fn __rwl_state(rw: *mut rwlock_t) -> u64;
-    pub safe fn __rwl_w_holding(rw: *mut rwlock_t) -> bool;
-    pub safe fn __rwl_state_r_count(state: u64) -> u64;
-    pub safe fn __rwl_atomic_sub_reader(rw: *mut rwlock_t);
-    pub safe fn __rwl_store_unlocked(rw: *mut rwlock_t);
-    pub safe fn __rwl_store_holder_none(rw: *mut rwlock_t);
-    pub safe fn __rwl_cpu_relax();
-    pub safe fn __rwl_r_time() -> u64;
-    pub safe fn __rwl_expedite_threshold() -> u64;
-    pub safe fn __rwl_intr_off_save() -> c_int;
-    pub safe fn __rwl_intr_restore(state: c_int);
+// ---------------------------------------------------------------------------
+// State-word layout constants — mirror `kernel/inc/lock/rwlock.h` (the
+// `RWLOCK_STATE_*` macros) byte-for-byte. See that header for the full
+// bit-layout narrative.
+// ---------------------------------------------------------------------------
 
-    pub safe fn __rwl_push_off();
-    pub safe fn __rwl_pop_off();
+const RWLOCK_STATE_UNLOCKED: u64 = 0;
+const RWLOCK_STATE_WRITER_WAITING: u64 = 1 << 8;
+const RWLOCK_STATE_WRITER_HOLDING: u64 = (1 << 8) - 1;
+const RWLOCK_STATE_WRITER_MASK: u64 = RWLOCK_STATE_WRITER_WAITING | RWLOCK_STATE_WRITER_HOLDING;
+const RWLOCK_STATE_READER_BIAS_SHIFT: u32 = 9;
+const RWLOCK_STATE_READER_BIAS: u64 = 1 << RWLOCK_STATE_READER_BIAS_SHIFT;
+const RWLOCK_NONE_HOLDER: c_int = -1;
+
+/// Writer-starvation-prevention threshold (mirrors `RWLOCK_EXPEDITE_THRESHOLD`
+/// = `TICK_MS << 2`, i.e. 4ms of raw ticks).
+#[inline(always)]
+fn expedite_threshold() -> u64 {
+    machine::tick_ms() << 2
 }
 
 // ---------------------------------------------------------------------------
-// Centralised-unsafe accessor for the `name` field.
+// Centralised-unsafe field accessors
 // ---------------------------------------------------------------------------
+
+#[inline(always)]
+fn state_atomic<'a>(rw: *mut rwlock_t) -> &'a AtomicU64 {
+    // SAFETY: `state` is an `_Atomic uint64` (8-byte aligned) field of a
+    // live `struct rwlock`; every caller in this module passes a valid,
+    // non-dangling pointer supplied by the kernel.
+    unsafe { &*(addr_of_mut!((*rw).state) as *const AtomicU64) }
+}
+
+#[inline(always)]
+fn holder_atomic<'a>(rw: *mut rwlock_t) -> &'a AtomicI32 {
+    // SAFETY: `w_holder` is an `_Atomic int` field of a live `struct rwlock`.
+    unsafe { &*(addr_of_mut!((*rw).w_holder) as *const AtomicI32) }
+}
 
 #[inline(always)]
 fn set_name(rw: *mut rwlock_t, name: *const c_char) {
@@ -43,16 +63,147 @@ fn set_name(rw: *mut rwlock_t, name: *const c_char) {
 }
 
 // ---------------------------------------------------------------------------
-// Safe inner helpers — all logic is here. The `#[no_mangle] pub unsafe
-// extern "C" fn` wrappers below are thin trampolines that exist only to
-// hand back the C-ABI symbol; they delegate to these functions so that
+// State-machine predicates and CAS primitives — native Rust replacement for
+// the `static inline` functions previously in `kernel/inc/lock/rwlock.h`.
+// ---------------------------------------------------------------------------
+
+/// Mirrors `rwlock_can_rlock`.
+fn can_rlock(rw: *mut rwlock_t, state: u64) -> bool {
+    if state & RWLOCK_STATE_WRITER_MASK != 0 {
+        w_holding(rw)
+    } else {
+        true // No writers — readers can acquire.
+    }
+}
+
+/// Mirrors `rwlock_try_rlock`: single CAS attempt, reader count += bias.
+fn try_rlock(rw: *mut rwlock_t) -> bool {
+    let a = state_atomic(rw);
+    let mut val = a.load(Ordering::Acquire);
+    while can_rlock(rw, val) {
+        match a.compare_exchange(
+            val,
+            val + RWLOCK_STATE_READER_BIAS,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(cur) => val = cur,
+        }
+    }
+    false
+}
+
+/// Mirrors `rwlock_can_wlock`.
+fn can_wlock(state: u64, expedite: bool) -> bool {
+    if (state >> RWLOCK_STATE_READER_BIAS_SHIFT) > 0 {
+        return false; // Readers present — can't acquire write lock.
+    }
+    if state & RWLOCK_STATE_WRITER_HOLDING != 0 {
+        return false; // Another writer holds the lock.
+    }
+    if state & RWLOCK_STATE_WRITER_WAITING != 0 && !expedite {
+        return false; // Another writer is waiting and we're not expediting.
+    }
+    true
+}
+
+/// Mirrors `rwlock_try_wlock`, folding in the `__rwlock_expedite_hook`
+/// CAS-failure hook that sets the WRITER_WAITING soft-priority bit.
+fn try_wlock(rw: *mut rwlock_t, expedite: bool) -> bool {
+    let a = state_atomic(rw);
+    let mut val = a.load(Ordering::Acquire);
+    loop {
+        if !can_wlock(val, expedite) {
+            return false;
+        }
+        match a.compare_exchange(
+            val,
+            RWLOCK_STATE_WRITER_HOLDING,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => {
+                holder_atomic(rw).store(machine::cpuid(), Ordering::Release);
+                return true;
+            }
+            Err(cur) => {
+                val = cur;
+                if expedite && val & RWLOCK_STATE_WRITER_WAITING == 0 {
+                    a.fetch_or(RWLOCK_STATE_WRITER_WAITING, Ordering::SeqCst);
+                }
+            }
+        }
+    }
+}
+
+/// Mirrors `rwlock_can_update`.
+fn can_update(state: u64) -> bool {
+    if state & RWLOCK_STATE_WRITER_HOLDING != 0 {
+        return false; // A writer holds the lock (includes write→read→update).
+    }
+    let r_count = state >> RWLOCK_STATE_READER_BIAS_SHIFT;
+    if r_count != 1 || state & RWLOCK_STATE_WRITER_WAITING != 0 {
+        return false; // Not the sole reader, or another writer is waiting.
+    }
+    true
+}
+
+/// Mirrors `rwlock_try_update`: non-blocking read → write upgrade.
+fn try_update(rw: *mut rwlock_t) -> bool {
+    let a = state_atomic(rw);
+    let mut val = a.load(Ordering::Acquire);
+    while can_update(val) {
+        match a.compare_exchange(
+            val,
+            RWLOCK_STATE_WRITER_HOLDING,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => {
+                holder_atomic(rw).store(machine::cpuid(), Ordering::Release);
+                return true;
+            }
+            Err(cur) => val = cur,
+        }
+    }
+    false
+}
+
+/// Mirrors `RWLOCK_W_HOLDING`: true if the *calling* CPU holds the writer.
+/// Brackets the read in push_off/pop_off so `cpuid()` cannot change out
+/// from under the comparison.
+fn w_holding(rw: *mut rwlock_t) -> bool {
+    machine::push_off();
+    let ret = machine::cpuid() == holder_atomic(rw).load(Ordering::Acquire);
+    machine::pop_off();
+    ret
+}
+
+/// Mirrors `atomic_sub(&rw->state, READER_BIAS)`.
+fn atomic_sub_reader(rw: *mut rwlock_t) {
+    state_atomic(rw).fetch_sub(RWLOCK_STATE_READER_BIAS, Ordering::SeqCst);
+}
+
+fn store_unlocked(rw: *mut rwlock_t) {
+    state_atomic(rw).store(RWLOCK_STATE_UNLOCKED, Ordering::Release);
+}
+
+fn store_holder_none(rw: *mut rwlock_t) {
+    holder_atomic(rw).store(RWLOCK_NONE_HOLDER, Ordering::Release);
+}
+
+// ---------------------------------------------------------------------------
+// Safe inner helpers — spin policy and IRQ wrappers. The `#[no_mangle] pub
+// unsafe extern "C" fn` wrappers below are thin trampolines that exist only
+// to hand back the C-ABI symbol; they delegate to these functions so that
 // intra-module recursion does not need `unsafe { ... }` blocks.
 // ---------------------------------------------------------------------------
 
 fn init_inner(rw: *mut rwlock_t, name: *const c_char) {
     if rw.is_null() { return; }
-    __rwl_store_unlocked(rw);
-    __rwl_store_holder_none(rw);
+    store_unlocked(rw);
+    store_holder_none(rw);
     let fallback = b"unnamed\0".as_ptr() as *const c_char;
     let n = if name.is_null() { fallback } else { name };
     set_name(rw, n);
@@ -60,24 +211,24 @@ fn init_inner(rw: *mut rwlock_t, name: *const c_char) {
 
 fn racquire_inner(rw: *mut rwlock_t) {
     if rw.is_null() { return; }
-    while !__rwl_try_rlock(rw) {
-        __rwl_cpu_relax();
+    while !try_rlock(rw) {
+        machine::cpu_relax();
     }
 }
 
 fn rrelease_inner(rw: *mut rwlock_t) {
     if rw.is_null() { return; }
-    __rwl_atomic_sub_reader(rw);
+    atomic_sub_reader(rw);
 }
 
 fn wacquire_inner(rw: *mut rwlock_t) {
     if rw.is_null() { return; }
-    let start = __rwl_r_time();
-    let threshold = __rwl_expedite_threshold();
+    let start = machine::read_time();
+    let threshold = expedite_threshold();
     let mut expedite = false;
-    while !__rwl_try_wlock(rw, expedite) {
-        __rwl_cpu_relax();
-        if !expedite && __rwl_r_time().wrapping_sub(start) >= threshold {
+    while !try_wlock(rw, expedite) {
+        machine::cpu_relax();
+        if !expedite && machine::read_time().wrapping_sub(start) >= threshold {
             expedite = true;
         }
     }
@@ -85,42 +236,42 @@ fn wacquire_inner(rw: *mut rwlock_t) {
 
 fn wacquire_expedited_inner(rw: *mut rwlock_t) {
     if rw.is_null() { return; }
-    while !__rwl_try_wlock(rw, true) {
-        __rwl_cpu_relax();
+    while !try_wlock(rw, true) {
+        machine::cpu_relax();
     }
 }
 
 fn graceful_wacquire_inner(rw: *mut rwlock_t) {
     if rw.is_null() { return; }
-    while !__rwl_try_wlock(rw, false) {
-        __rwl_cpu_relax();
+    while !try_wlock(rw, false) {
+        machine::cpu_relax();
     }
 }
 
 fn writer_release_inner(rw: *mut rwlock_t) {
     if rw.is_null() { return; }
-    __rwl_store_holder_none(rw);
-    __rwl_store_unlocked(rw);
+    store_holder_none(rw);
+    store_unlocked(rw);
 }
 
 fn rlock_inner(rw: *mut rwlock_t) {
-    __rwl_push_off();
+    machine::push_off();
     racquire_inner(rw);
 }
 
 fn runlock_inner(rw: *mut rwlock_t) {
     rrelease_inner(rw);
-    __rwl_pop_off();
+    machine::pop_off();
 }
 
 fn wlock_inner(rw: *mut rwlock_t) {
-    __rwl_push_off();
+    machine::push_off();
     wacquire_inner(rw);
 }
 
 fn wunlock_inner(rw: *mut rwlock_t) {
     writer_release_inner(rw);
-    __rwl_pop_off();
+    machine::pop_off();
 }
 
 // ===========================================================================
@@ -167,13 +318,13 @@ pub unsafe extern "C" fn rwlock_wlock(rw: *mut rwlock_t) { wlock_inner(rw); }
 
 #[no_mangle]
 pub unsafe extern "C" fn rwlock_wlock_expedited(rw: *mut rwlock_t) {
-    __rwl_push_off();
+    machine::push_off();
     wacquire_expedited_inner(rw);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rwlock_graceful_wlock(rw: *mut rwlock_t) {
-    __rwl_push_off();
+    machine::push_off();
     graceful_wacquire_inner(rw);
 }
 
@@ -186,7 +337,7 @@ pub unsafe extern "C" fn rwlock_wunlock(rw: *mut rwlock_t) { wunlock_inner(rw); 
 
 #[no_mangle]
 pub unsafe extern "C" fn rwlock_rlock_irqsave(rw: *mut rwlock_t) -> c_int {
-    let intena = __rwl_intr_off_save();
+    let intena = machine::intr_off_save();
     racquire_inner(rw);
     intena
 }
@@ -194,26 +345,26 @@ pub unsafe extern "C" fn rwlock_rlock_irqsave(rw: *mut rwlock_t) -> c_int {
 #[no_mangle]
 pub unsafe extern "C" fn rwlock_runlock_irqrestore(rw: *mut rwlock_t, intena: c_int) {
     rrelease_inner(rw);
-    __rwl_intr_restore(intena);
+    machine::intr_restore(intena);
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rwlock_wlock_irqsave(rw: *mut rwlock_t) -> c_int {
-    let intena = __rwl_intr_off_save();
+    let intena = machine::intr_off_save();
     wacquire_inner(rw);
     intena
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rwlock_wlock_expedited_irqsave(rw: *mut rwlock_t) -> c_int {
-    let intena = __rwl_intr_off_save();
+    let intena = machine::intr_off_save();
     wacquire_expedited_inner(rw);
     intena
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rwlock_graceful_wlock_irqsave(rw: *mut rwlock_t) -> c_int {
-    let intena = __rwl_intr_off_save();
+    let intena = machine::intr_off_save();
     graceful_wacquire_inner(rw);
     intena
 }
@@ -221,7 +372,7 @@ pub unsafe extern "C" fn rwlock_graceful_wlock_irqsave(rw: *mut rwlock_t) -> c_i
 #[no_mangle]
 pub unsafe extern "C" fn rwlock_wunlock_irqrestore(rw: *mut rwlock_t, intena: c_int) {
     writer_release_inner(rw);
-    __rwl_intr_restore(intena);
+    machine::intr_restore(intena);
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +388,7 @@ pub unsafe extern "C" fn rwlock_r_sleep_cb(data: *mut c_void) -> c_int {
     let rw = data as *mut rwlock_t;
     runlock_inner(rw);
     let mut status = RW_CB_STATUS_READER;
-    if __rwl_w_holding(rw) {
+    if w_holding(rw) {
         // The reader may also hold the write lock (write→read recursion).
         wunlock_inner(rw);
         status |= RW_CB_STATUS_WRITER;
@@ -275,12 +426,22 @@ pub unsafe extern "C" fn rwlock_w_wake_cb(data: *mut c_void, status: c_int) {
     }
 }
 
-// Reference unused helper to keep symbols alive in release builds where
-// the public API may not exercise every shim path.
-#[allow(dead_code)]
-fn _keep_alive() -> u64 {
-    __rwl_state_r_count(0)
-}
+// ---------------------------------------------------------------------------
+// Extra C-ABI symbols kept for non-C callers.
+//
+// `kernel/proc/proc_shims.rs` declares its own `unsafe extern "C" { fn
+// __rwl_try_update(...); fn __rwl_w_holding(...); }` block and calls these
+// two symbols directly on `pid_lock` (a plain `struct rwlock`) rather than
+// going through the higher-level `rwlock_*` API. They used to be defined in
+// `kernel/lock/rwlock_shim.c`; now they are thin dispatchers onto the native
+// primitives above so that call site keeps working unmodified.
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn __rwl_try_update(rw: *mut rwlock_t) -> bool { try_update(rw) }
+
+#[no_mangle]
+pub unsafe extern "C" fn __rwl_w_holding(rw: *mut rwlock_t) -> bool { w_holding(rw) }
 
 // ===========================================================================
 // Rust-native typed handle
