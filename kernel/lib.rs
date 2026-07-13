@@ -187,6 +187,16 @@ mod tty;
 #[path = "vfs/mod.rs"]
 mod vfs;
 
+// kernel/dev/dev.rs (Phase 2 Wave 21 -- dev/dev.c: kobject-backed, RCU
+// protected major/minor device table; includes two mandated bug fixes,
+// see that module's doc) + kernel/dev/cdev.rs (dev/cdev.c: character
+// device dispatch) + kernel/dev/blkdev.rs (dev/blkdev.c: block device
+// dispatch + bio submission). The rest of kernel/dev/ (bio.c, fdt.c,
+// netdev.c, nullrand.c, the x1_*/yt8531 drivers, dev_test.c) remains C;
+// see kernel/dev/CMakeLists.txt.
+#[path = "dev/mod.rs"]
+mod dev;
+
 // Re-export so the symbols end up in the staticlib's exported symbol table.
 pub use mm::*;
 pub use proc::*;

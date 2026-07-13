@@ -24,7 +24,7 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 | machine / sync / ll / list | ✅ | — | Rust support layers |
 | tty | ✅ | — | termios/tty_dev/pty (W10), tty/ptmx (W11), session (W12); SIGINT ctrl-tty delivery FIXED (^C works now) |
 | vfs | ✅ | — | 100% Rust (W13-20: core, tmpfs, xv6fs root fs, devtmpfs); TIOCGPTN + tmpfs UAF + devtmpfs dentry-name leak fixed |
-| dev | ⬜ | dev.c, cdev.c, blkdev.c, bio.c, fdt.c, netdev.c, nullrand.c, x1_emac.c, x1_sdhci.c, yt8531.c | |
+| dev | 🟡 | bio.c, fdt.c, netdev.c, nullrand.c, x1_emac.c, x1_sdhci.c, yt8531.c, dev_test.c | dev.rs + cdev.rs + blkdev.rs (W21); /dev/tty minor-0 FIXED; devtmpfs failures now logged |
 | irq | ✅ | — (kernelvec.S, trampoline.S remain as assembly) | plic.rs + irq_core.rs (W5), trap.rs (W6), syscall.rs (W7) |
 | timer | ✅ | — | timer_core.rs + sched_timer.rs + goldfish_rtc.rs (Wave 8, 2026-07-12) |
 | ipi | ✅ | — | ipi.rs (Wave 9, 2026-07-12); cpus[] cpu_local storage kept link_section/page-aligned byte-identical |
@@ -743,7 +743,26 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   ls /dev 9 nodes + types baseline-identical, mknod/mkdir round-trips,
   usertests baseline, mmaptest 16/16, testsig 21/21, stressfs.
 
+### Iteration 33 — 2026-07-13 — Wave 21: dev core + /dev/tty fix
+
+- dev.rs/cdev.rs/blkdev.rs: AtomicPtr major table + RCU readers/KSpinlock
+  writers (CONSUME→Acquire mapping), offset-0 embedded device_t reinterprets,
+  vtable-forwarding cdev/blkdev registration.
+- **FIX 1**: device_register writes the auto-assigned minor back before
+  publish/devtmpfs — `/dev/tty` now opens (evidence: dumpinode shows
+  major 5 minor 1; ls /dev/tty open+fstat round-trip clean).
+- **FIX 2**: devtmpfs_create_node failures now logged (log-don't-propagate,
+  callers treat nonzero as device failure; documented).
+- Verified: zero-warning build ×2, boot ×6, devtest all passed, mknod
+  round-trips on real majors, stressfs ×3, mmaptest 16/16, testsig 21/21,
+  usertests baseline, 8 fs singles.
+
 ## Known issues (pre-existing, not caused by the rewrite)
+
+- `cat /dev/tty` panics ("pid lock not held"): tty_dev.rs `ctrl_tty()`
+  calls session_get_ctrl_tty() without pid_wlock (contract violation,
+  IDENTICAL gap in the original C — unreachable until the minor-0 fix made
+  /dev/tty resolvable). One-line fix mandated in Wave 22.
 
 - `usertests diskfull` hangs (never prints its `OK`/`FAILED` result).
   **Confirmed pre-existing**: reproduces identically on an unmodified C

@@ -1,8 +1,7 @@
+# dev.c, cdev.c, blkdev.c ported to Rust (Phase 2 Wave 21) -- see
+# kernel/dev/{dev,cdev,blkdev}.rs and kernel/dev/mod.rs.
 add_library(dev OBJECT
-    dev.c
     dev_test.c
-    cdev.c
-    blkdev.c
     bio.c
     fdt.c
     nullrand.c

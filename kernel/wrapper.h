@@ -46,6 +46,22 @@
  * transitive include is kept as the sole one. */
 #include "dev/cdev.h"
 #include "tty/tty.h"
+/* dev/dev.h + dev/blkdev.h -- Phase 2 Wave 21 (dev/dev.c + cdev.c +
+ * blkdev.c port). `dev/dev.h` has no additional types beyond
+ * `dev/dev_types.h` (already reachable via `dev/cdev.h` above); included
+ * explicitly per the plan's "verify the others" note rather than relying
+ * on the transitive path, same rationale as the `vfs/vfs_types.h`
+ * explicit-include precedent (Wave 13). `dev/blkdev.h` pulls in
+ * `dev/bio.h` (-> `dev/bio_types.h`'s real `struct bio`/`bio_vec`
+ * layout, `BLK_SIZE`/`BIO_MAX_VECS`/... macros, and several
+ * `static inline` helpers bindgen parses cleanly, no `_Atomic`/rwlock.h-
+ * style hazards) -- this path was already transitively open since Wave 19
+ * (`kernel/vfs/xv6fs/xv6fs_private.h` -> `dev/blkdev.h`, consumed by
+ * `xv6fs/superblock.rs`'s local `bio`/`blkdev_submit_bio` externs); made
+ * explicit here so `kernel/dev/blkdev.rs`'s own use of `struct bio` does
+ * not silently depend on an unrelated module's include chain. */
+#include "dev/dev.h"
+#include "dev/blkdev.h"
 /* vfs/pipe_types.h — Phase 2 Wave 11 (tty.c/ptmx.c port): full `struct
  * pipe` layout (nread/nwrite) read directly (via smp_load_acquire) by
  * tty_poll()/ptmx's master poll for a lock-free readiness check. Before

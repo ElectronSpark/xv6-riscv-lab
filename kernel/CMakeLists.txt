@@ -1088,7 +1088,7 @@ set(RUST_FORCE_UNDEFINED
     # `devtmpfs_create_node`/`devtmpfs_remove_node`/
     # `devtmpfs_populate_devices` are declared `extern` in the still-C
     # `kernel/inc/devtmpfs.h` (`devtmpfs_create_node`/`_remove_node` are
-    # called from `kernel/dev/dev.c`, still C -- Wave 21;
+    # called from `kernel/dev/dev.rs`, ported to Rust in Wave 21 below;
     # `devtmpfs_populate_devices` only self-called today but forced
     # anyway per the plan's "every new public symbol declared in a
     # still-live header" rule, same precedent as tmpfs's/xv6fs's own
@@ -1098,6 +1098,37 @@ set(RUST_FORCE_UNDEFINED
     --undefined=devtmpfs_create_node
     --undefined=devtmpfs_remove_node
     --undefined=devtmpfs_populate_devices
+    # dev/dev.c + cdev.c + blkdev.c port (Phase 2 Wave 21) -- the
+    # kobject-backed, RCU-protected major/minor device table
+    # (kernel/dev/dev.rs) plus the character/block dispatch layers on top
+    # of it (kernel/dev/cdev.rs, kernel/dev/blkdev.rs). Every symbol below
+    # is declared `extern` in the still-live, unchanged C headers
+    # `kernel/inc/dev/{dev,cdev,blkdev}.h` and called from still-C
+    # drivers/callers (console.c-successor console.rs, tty_dev.rs,
+    # ptmx.rs, nullrand.c, virtio_disk.c, ramdisk.c, x1_sdhci.c,
+    # dev_test.c), so all are forced per the plan's "every new public
+    # symbol" rule.
+    --undefined=dev_table_init
+    --undefined=device_get
+    --undefined=device_dup
+    --undefined=device_put
+    --undefined=device_register
+    --undefined=device_unregister
+    --undefined=dev_ioctl
+    --undefined=dev_for_each_device
+    --undefined=cdev_get
+    --undefined=cdev_dup
+    --undefined=cdev_put
+    --undefined=cdev_register
+    --undefined=cdev_unregister
+    --undefined=cdev_read
+    --undefined=cdev_write
+    --undefined=blkdev_get
+    --undefined=blkdev_dup
+    --undefined=blkdev_put
+    --undefined=blkdev_register
+    --undefined=blkdev_unregister
+    --undefined=blkdev_submit_bio
 )
 
 # ==============================================================================
