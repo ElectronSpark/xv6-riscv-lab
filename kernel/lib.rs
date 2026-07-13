@@ -223,6 +223,18 @@ mod bufcache;
 // is needed either (same precedent as `vfs`/`dev`/`tty`/`bufcache`).
 mod exec;
 
+// kernel/start_kernel.rs (Phase 2 Wave 27 -- start_kernel.c: the boot
+// orchestrator that calls nearly every other subsystem's `_init()` entry
+// point in a documented, invariant order; also the canonical definition
+// site of `__physical_memory_start`/`__physical_memory_end`/
+// `__physical_total_pages`, extern-declared by many other files). Sits
+// directly in kernel/ (no subdirectory), same precedent as bufcache.rs/
+// exec.rs -- no `pub use` needed, its `#[no_mangle]` C-ABI symbols
+// (`start_kernel`, called by `start.rs`; `start_kernel_post_init`, called
+// by `proc/thread.rs`) are found via the exported symbol table regardless
+// of Rust-level visibility.
+mod start_kernel;
+
 // Re-export so the symbols end up in the staticlib's exported symbol table.
 pub use mm::*;
 pub use proc::*;

@@ -35,8 +35,16 @@ message(STATUS "Platform: ${PLATFORM}, kernel base: ${KERNEL_BASE}")
 # NOTE: exec.c has been rewritten in Rust (kernel/exec.rs -- Phase 2
 # Wave 26: ELF loader + argv/envp stack machinery + sys_exec). Its symbols
 # are linked in via the xv6_rust staticlib below.
+# NOTE: start_kernel.c has been rewritten in Rust (kernel/start_kernel.rs
+# -- Phase 2 Wave 27: the boot orchestrator -- init order carried over
+# verbatim, see that file's module doc). Its symbols (start_kernel,
+# start_kernel_post_init, __physical_memory_start/__physical_memory_end/
+# __physical_total_pages) are linked in via the xv6_rust staticlib below.
+# The RWAD_WRITE_TEST/SEMAPHORE_RUNTIME_TEST/WORKQUEUE_RUNTIME_SMOKE_TEST
+# `target_compile_definitions` gates that used to apply to this file are
+# gone too -- see RUST_TEST_FEATURES below, which replaces them with cargo
+# features passed to the xv6_rust build.
 set(KERNEL_C_FILES
-    ${KERNEL_DIR}/start_kernel.c
     ${KERNEL_DIR}/virtio_disk.c
     ${KERNEL_DIR}/ramdisk.c
     ${KERNEL_DIR}/e1000.c
@@ -207,7 +215,14 @@ file(GLOB_RECURSE RUST_CRATE_SOURCES
     # kernel/bufcache.rs (Phase 2 Wave 22 — kernel/bio.c, the classic xv6
     # struct buf disk-block cache; see that file's module doc for why
     # it isn't named bio.rs).
-    ${RUST_CRATE_DIR}/bufcache.rs)
+    ${RUST_CRATE_DIR}/bufcache.rs
+    # kernel/exec.rs (Phase 2 Wave 26 — exec.c: ELF loader + argv/envp
+    # stack machinery + sys_exec).
+    ${RUST_CRATE_DIR}/exec.rs
+    # kernel/start_kernel.rs (Phase 2 Wave 27 — start_kernel.c: the boot
+    # orchestrator; see that file's module doc for the init-order/hart-
+    # sync/test-gate contracts).
+    ${RUST_CRATE_DIR}/start_kernel.rs)
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 
@@ -216,8 +231,78 @@ find_program(CARGO_EXECUTABLE cargo REQUIRED)
 set(RUST_BINDGEN_INCLUDES
     "${CMAKE_SOURCE_DIR};${KERNEL_DIR}/inc;${CMAKE_BINARY_DIR}/kernel/inc")
 
+# ==============================================================================
+# In-kernel test-suite launch gates (RWLOCK_TEST / SEMAPHORE_TEST /
+# WORKQUEUE_RUNTIME_SMOKE_TEST), wired through to xv6_rust as cargo
+# features.
+#
+# Before Phase 2 Wave 27, `start_kernel.c` gated the *calls* to
+# `rwsem_launch_tests()` / `semaphore_launch_tests()` /
+# `workqueue_runtime_smoke_test()` (all three suites themselves are Rust,
+# linked in unconditionally, exactly like the old always-built
+# kernel/lock/*_test.c object files) behind `#ifdef RWAD_WRITE_TEST` /
+# `#ifdef SEMAPHORE_RUNTIME_TEST` / `#ifdef WORKQUEUE_RUNTIME_SMOKE_TEST`,
+# themselves `target_compile_definitions`'d onto the KERNEL_BINARY /
+# kernel_with_symbols_elf targets from these same three ENV checks. That
+# mechanism only worked because start_kernel.c was a plain C target
+# source -- `target_compile_definitions` has no effect on the separate
+# `cargo build` custom command below. Wave 27 ported start_kernel.c to
+# Rust (kernel/start_kernel.rs), so the gates are now three Cargo
+# features (`rwlock_test`/`semaphore_test`/`workqueue_smoke_test`,
+# declared in kernel/Cargo.toml) selected via `cargo build --features`,
+# computed from the exact same three ENV checks -- `RWLOCK_TEST=1
+# SEMAPHORE_TEST=1 cmake ..` keeps working end-to-end unchanged from the
+# outside.
+set(RUST_TEST_FEATURES "")
+if(DEFINED ENV{RWLOCK_TEST})
+    list(APPEND RUST_TEST_FEATURES "rwlock_test")
+endif()
+if(DEFINED ENV{SEMAPHORE_TEST})
+    list(APPEND RUST_TEST_FEATURES "semaphore_test")
+endif()
+if(DEFINED ENV{WORKQUEUE_RUNTIME_SMOKE_TEST})
+    message(STATUS "WORKQUEUE_RUNTIME_SMOKE_TEST enabled")
+    list(APPEND RUST_TEST_FEATURES "workqueue_smoke_test")
+endif()
+list(JOIN RUST_TEST_FEATURES "," RUST_TEST_FEATURES_STR)
+
+# CMake's `Unix Makefiles` generator (this project's generator) does not
+# notice that only a custom command's *command line* changed between two
+# `cmake ..` reconfigures -- it only reruns a custom command whose
+# `DEPENDS` files are newer than its `OUTPUT`. Toggling
+# RWLOCK_TEST/SEMAPHORE_TEST/WORKQUEUE_RUNTIME_SMOKE_TEST and
+# reconfiguring changes RUST_TEST_FEATURES_STR (hence the `--features`
+# argument below) without touching any source file, so without this
+# stamp a stale libxv6_rust.a would silently keep the previous gate
+# state. `file(GENERATE)` only updates the output file's mtime when its
+# content actually changes, so the stamp -- and therefore a cargo
+# rebuild -- only fires when the resolved feature list actually differs.
+set(RUST_TEST_FEATURES_STAMP ${RUST_BUILD_DIR}/test_features.stamp)
+file(GENERATE OUTPUT ${RUST_TEST_FEATURES_STAMP} CONTENT "${RUST_TEST_FEATURES_STR}\n")
+
 add_custom_command(
     OUTPUT ${RUST_STATICLIB}
+    # Force-remove the previous artifact before invoking cargo, and
+    # unconditionally `touch` it afterwards. Both empirically verified
+    # necessary (not just defensive), via direct `cargo build`/`md5sum`/
+    # `stat` A/B testing outside CMake: cargo keeps fingerprinted build
+    # products for *every* feature combination it has ever seen in this
+    # target-dir, not just the most recent one. When a `cmake ..`
+    # reconfigure cycles back to a previously-seen combination (e.g.
+    # RWLOCK_TEST=1 build, then a plain build, then RWLOCK_TEST=1 again),
+    # cargo recognizes the fingerprint match and re-serves the
+    # byte-identical cached artifact -- correct content, but *not* with a
+    # freshly-advanced mtime (rm+recreate wasn't sufficient by itself:
+    # cargo's cache-hit copy can preserve an old cached timestamp rather
+    # than stamping "now"). CMake's own `LINK_DEPENDS` staleness check on
+    # ${RUST_STATICLIB} (see the plain/symbols kernel targets below) relies
+    # entirely on that mtime advancing past the *previous* link's mtime, so
+    # a same-content-stale-mtime miss there silently skips relinking the
+    # kernel executable, leaving the wrong feature combination's binary in
+    # place even though this custom command itself did rerun. The trailing
+    # `touch` guarantees "now" unconditionally, regardless of cargo's
+    # internal cache/hardlink behavior.
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${RUST_STATICLIB}
     COMMAND ${CMAKE_COMMAND} -E env
             "XV6_KERNEL_INCLUDES=${RUST_BINDGEN_INCLUDES}"
             "LAB=$ENV{LAB}"
@@ -225,23 +310,17 @@ add_custom_command(
             --target ${RUST_TARGET_TRIPLE}
             --target-dir ${RUST_BUILD_DIR}
             --manifest-path ${RUST_CRATE_DIR}/Cargo.toml
+            --features "${RUST_TEST_FEATURES_STR}"
+    COMMAND ${CMAKE_COMMAND} -E touch ${RUST_STATICLIB}
     DEPENDS ${RUST_CRATE_SOURCES}
             ${RUST_CRATE_DIR}/build.rs
             ${RUST_CRATE_DIR}/wrapper.h
-    COMMENT "Building xv6_rust staticlib (${RUST_TARGET_TRIPLE}, ${RUST_PROFILE})"
+            ${RUST_TEST_FEATURES_STAMP}
+    COMMENT "Building xv6_rust staticlib (${RUST_TARGET_TRIPLE}, ${RUST_PROFILE}, features=[${RUST_TEST_FEATURES_STR}])"
     VERBATIM
 )
 
 add_custom_target(xv6_rust DEPENDS ${RUST_STATICLIB})
-
-# NOTE: the semaphore/rwsem/rcu runtime test suites are now ported to Rust
-# (kernel/lock/{semaphore,rwsem,rcu}_test.rs) and linked in unconditionally
-# through the xv6_rust staticlib below, exactly like the old always-built
-# kernel/lock/*_test.c object files. `start_kernel.c` still gates the
-# *calls* to `rwsem_launch_tests()` / `semaphore_launch_tests()` behind the
-# RWAD_WRITE_TEST / SEMAPHORE_RUNTIME_TEST compile definitions (see
-# ENV{RWLOCK_TEST} / ENV{SEMAPHORE_TEST} below), so there is nothing left
-# to conditionally append to KERNEL_C_FILES here.
 
 set(KERNEL_SCAN_OBJS
     # NOTE: start.c has been rewritten in Rust (kernel/start.rs — Phase 2
@@ -678,8 +757,9 @@ set(RUST_FORCE_UNDEFINED
     --undefined=unregister_irq_handler
     --undefined=do_irq
     # irq/trap.c port (Phase 2 Wave 6) -- kernelvec.S/trampoline.S call
-    # these by symbol name (`call`/`.dword`), start_kernel.c calls
-    # trapinit()/trapinithart(), and proc/{clone,thread}.rs call
+    # these by symbol name (`call`/`.dword`), kernel/start_kernel.rs
+    # (same-crate Rust since Wave 27) calls trapinit()/trapinithart(),
+    # and proc/{clone,thread}.rs call
     # usertrapret(); proc/signal.rs calls push_sigframe()/
     # restore_sigframe(). enter_irq()/exit_irq() are part of trap.h's
     # declared API surface even though no current caller other than this
@@ -731,8 +811,9 @@ set(RUST_FORCE_UNDEFINED
     --undefined=timer_tick
     # timer/sched_timer.c port (Phase 2 Wave 8) -- scheduler-tick consumer
     # + sleep/timeout API. `sched_timer_init`/`sleep_ms` are also called
-    # directly from `start_kernel.c`, which already demands them; forced
-    # anyway per the plan's "every new public symbol" rule. `__do_timer_tick`
+    # directly from `kernel/start_kernel.rs` (same-crate Rust since Wave
+    # 27); forced per the plan's "every new public symbol" rule.
+    # `__do_timer_tick`
     # is called only from `proc/sched.rs`'s own `extern` declaration.
     --undefined=sched_timer_tick
     --undefined=__do_timer_tick
@@ -744,8 +825,8 @@ set(RUST_FORCE_UNDEFINED
     --undefined=sched_timer_add_deadline
     --undefined=sched_timer_add
     # timer/goldfish_rtc.c port (Phase 2 Wave 8) -- RTC MMIO driver.
-    # `goldfish_rtc_init` has no live caller at all (`start_kernel.c`'s call
-    # site is commented out, unchanged by this port -- see
+    # `goldfish_rtc_init` has no live caller at all (`kernel/start_kernel.rs`'s
+    # call site is commented out, unchanged since the C original -- see
     # `goldfish_rtc.rs`'s module doc); the rest are called only from
     # `proc/sysproc.rs`'s own `extern` declaration (`goldfish_rtc_read_ns`)
     # or have no external caller yet either.
@@ -761,8 +842,8 @@ set(RUST_FORCE_UNDEFINED
     --undefined=goldfish_rtc_init
     # ipi/ipi.c port (Phase 2 Wave 9) -- IPI send/receive + per-CPU
     # bring-up bookkeeping. `ipi_init`/`cpus_init`/`mycpu_init` are called
-    # from `start_kernel.c` (a live C translation unit, real demand
-    # already); `ipi_send_single`/`ipi_send_all` are called only from
+    # from `kernel/start_kernel.rs` (same-crate Rust since Wave 27, forced
+    # per the plan's rule); `ipi_send_single`/`ipi_send_all` are called only from
     # other Rust files' own `extern` declarations
     # (`proc/sched.rs`/`proc/signal.rs`/`proc/thread_group.rs`,
     # `printf.rs`); `ipi_send_mask`/`ipi_send_all_but_self` and
@@ -782,8 +863,9 @@ set(RUST_FORCE_UNDEFINED
     --undefined=cpus
     # tty/termios.c + tty/tty_dev.c + tty/pty.c port (Phase 2 Wave 10).
     # `termios_init_default`/`ttydevinit`/`pty_alloc`/`pty_master_read`/
-    # `pty_master_write` are all called from the still-C tty.c/ptmx.c/
-    # start_kernel.c (real demand already); `pty_dealloc` has no live
+    # `pty_master_write` are all called from tty.c/ptmx.c/start_kernel.c's
+    # Rust successors (tty/tty.rs, tty/ptmx.rs, kernel/start_kernel.rs --
+    # same-crate calls, no longer automatic linker demand); `pty_dealloc` has no live
     # caller anywhere (dead code carried over unchanged from the C
     # original, whose only reference was its own declaration too).
     # Forced anyway per the plan's "every new public symbol" rule.
@@ -796,8 +878,9 @@ set(RUST_FORCE_UNDEFINED
     # tty/tty.c + tty/ptmx.c port (Phase 2 Wave 11). tty_* are called
     # from console.rs/tty_dev.rs/pty.rs (still-live extern "C" call
     # sites) and from ptmx.rs (same-crate direct Rust calls); tty_init/
-    # ptmxinit are called from start_kernel.c. Forced anyway per the
-    # plan's "every new public symbol" rule.
+    # ptmxinit are called from kernel/start_kernel.rs (same-crate Rust
+    # since Wave 27). Forced anyway per the plan's "every new public
+    # symbol" rule.
     --undefined=tty_init
     --undefined=tty_alloc
     --undefined=tty_free
@@ -815,8 +898,8 @@ set(RUST_FORCE_UNDEFINED
     --undefined=ptmxinit
     # tty/session.c port (Phase 2 Wave 12) -- session lifecycle,
     # controlling-tty management, setsid/getsid. `session_init` is
-    # called from `start_kernel.c`/`proc/thread.rs` (real demand
-    # already); the rest are called only from other Rust files' own
+    # called from `kernel/start_kernel.rs` (same-crate Rust since Wave
+    # 27)/`proc/thread.rs`; the rest are called only from other Rust files' own
     # `extern` declarations (`console.rs`, `proc/{clone,exit,pgroup,
     # pid,sysproc,thread}.rs`, `tty/{tty,tty_dev}.rs`) -- without these
     # flags the linker could drop the whole module. `session_hangup` has
@@ -887,7 +970,8 @@ set(RUST_FORCE_UNDEFINED
     # tmpfs/, xv6fs/, devtmpfs/), from kernel/vfs/fdtable.rs, from
     # kernel/mm/vm.rs (vfs_fput/vfs_fdup), from kernel/exec.rs, and
     # (pipe_*) from kernel/tty/tty.rs, kernel/tty/pty.rs,
-    # kernel/console.rs, and kernel/start_kernel.c (pipe_init) --
+    # kernel/console.rs, and kernel/start_kernel.rs (pipe_init,
+    # same-crate Rust since Wave 27) --
     # without these flags the
     # linker could drop the whole object file from the static archive.
     --undefined=__vfs_file_init
@@ -936,7 +1020,8 @@ set(RUST_FORCE_UNDEFINED
     # as an extern), per-superblock inode hash cache, dentry-to-inode
     # resolution, and `fs_struct` lifecycle. Called from other C
     # translation units still in kernel/vfs/ (vfs_syscall.c, tmpfs/,
-    # xv6fs/, devtmpfs/), from kernel/start_kernel.c (vfs_init), and from
+    # xv6fs/, devtmpfs/), from kernel/start_kernel.rs (vfs_init,
+    # same-crate Rust since Wave 27), and from
     # kernel/proc/{thread,clone,exit}.rs via their own local extern
     # declarations -- without these flags the linker could drop the whole
     # object file from the static archive. `tmpfs_smoketest_start`/
@@ -1070,7 +1155,8 @@ set(RUST_FORCE_UNDEFINED
     # vfs/xv6fs/*.c port (Phase 2 Wave 19) -- the root filesystem, ported
     # in two sub-waves (see the RUST_CRATE_SOURCES comment above).
     # `xv6fs_init`/`xv6fs_mount_root` are called from `vfs/fs.rs`'s
-    # `vfs_init()`/`start_kernel.c` (real demand already). Every symbol
+    # `vfs_init()`/`kernel/start_kernel.rs` (same-crate Rust since Wave
+    # 27). Every symbol
     # below is also declared `extern` in `xv6fs_private.h`/
     # `block_cache.h` (unchanged C-ABI contracts), so all are forced per
     # the plan's "every new public symbol" rule even where today's only
@@ -1182,7 +1268,8 @@ set(RUST_FORCE_UNDEFINED
     # -- see that file's module doc). Declared `extern` in the
     # still-live, unchanged `kernel/inc/defs.h` and called from
     # `kernel/vfs/xv6fs/*.rs` (bread/brelse/bwrite/bwrite_async/bsync/
-    # bpin/bunpin) and `kernel/start_kernel.c` (binit) -- forced per the
+    # bpin/bunpin) and `kernel/start_kernel.rs` (binit, same-crate Rust
+    # since Wave 27) -- forced per the
     # plan's "every new public symbol" rule. `bdirty_count` has no live
     # caller today (forced anyway, same precedent as `bio_dup` above).
     --undefined=binit
@@ -1196,12 +1283,12 @@ set(RUST_FORCE_UNDEFINED
     --undefined=bunpin
     # dev/fdt.c port (Phase 2 Wave 23) -- the FDT parser + platform-config
     # applier (kernel/dev/fdt.rs). `fdt_early_scan_memory`/`fdt_init`/
-    # `fdt_apply_platform_config` are called from `kernel/start_kernel.c`
-    # (still C, Wave 27). The rest (`fdt_dump`/`fdt_walk`/
+    # `fdt_apply_platform_config` are called from `kernel/start_kernel.rs`
+    # (same-crate Rust since Wave 27). The rest (`fdt_dump`/`fdt_walk`/
     # `fdt_node_lookup`/`fdt_path_lookup`/`fdt_compat_lookup`/
     # `fdt_compat_next`/`fdt_phandle_lookup`) have no live caller today
     # (the one potential call site, `fdt_walk(fdt_base)` in
-    # `start_kernel.c`, is commented out) but stay declared `extern` in
+    # `kernel/start_kernel.rs`, is commented out) but stay declared `extern` in
     # the still-live, unchanged `kernel/inc/dev/fdt.h` -- forced anyway,
     # same precedent as `bio_dup`/`devtmpfs_populate_devices` above (part
     # of the header's public contract). `fdt_valid`/`fdt_totalsize` are
@@ -1221,12 +1308,12 @@ set(RUST_FORCE_UNDEFINED
     --undefined=fdt_phandle_lookup
     --undefined=platform
     # dev/nullrand.c + dev/netdev.c port (Phase 2 Wave 24).
-    # `nullranddevinit` is called from `kernel/start_kernel.c` (still C,
-    # Wave 27); `random_fill_bytes` is called from
+    # `nullranddevinit` is called from `kernel/start_kernel.rs`
+    # (same-crate Rust since Wave 27); `random_fill_bytes` is called from
     # `kernel/proc/sysproc.rs`'s `sys_getrandom` (same-crate Rust call,
     # forced anyway per the plan's "every new public symbol declared in
     # a still-live header" rule -- `kernel/inc/defs.h` still declares
-    # it). `netdev_init` is called from `start_kernel.c`;
+    # it). `netdev_init` is called from `kernel/start_kernel.rs`;
     # `netdev_register`/`netdev_set_link` from still-C `kernel/e1000.c`
     # and (Wave 25 on) same-crate Rust `kernel/dev/x1_emac.rs` --
     # `e1000.c` alone already justifies forcing these; `netdev_get_default`
@@ -1246,10 +1333,10 @@ set(RUST_FORCE_UNDEFINED
     --undefined=netdev_set_link
     --undefined=netdev_set_link_callback
     # dev/{yt8531,x1_emac,x1_sdhci}.c port (Phase 2 Wave 25) -- the last C
-    # in kernel/dev/ (kernel/dev/{yt8531,x1_emac,x1_sdhci}.rs). Only
-    # `x1_emac_init`/`x1_sdhci_init` are still called from C
-    # (`kernel/start_kernel.c`, still C, Wave 27) -- forced per the plan's
-    # "every new public symbol [a still-C caller reaches]" rule.
+    # in kernel/dev/ (kernel/dev/{yt8531,x1_emac,x1_sdhci}.rs).
+    # `x1_emac_init`/`x1_sdhci_init` are called from
+    # `kernel/start_kernel.rs` (same-crate Rust since Phase 2 Wave 27) --
+    # forced per the plan's "every new public symbol" rule regardless.
     # `mdio_read`/`mdio_write`/`yt8531_init`/`yt8531_poll_link`/
     # `yt8531_wait_autoneg` (declared `extern` in the now C-caller-less
     # `kernel/inc/dev/yt8531.h`) are reached only via direct same-crate
@@ -1269,6 +1356,25 @@ set(RUST_FORCE_UNDEFINED
     # without these flags the linker could drop the whole module.
     --undefined=exec
     --undefined=sys_exec
+    # start_kernel.c port (Phase 2 Wave 27) -- the boot orchestrator.
+    # `start_kernel` is called only from `kernel/start.rs` (same-crate
+    # Rust, `entry.S -> start() -> start_kernel()`); `start_kernel_post_init`
+    # only from `kernel/proc/thread.rs`'s `init_entry`. Both forced per the
+    # plan's "every new public symbol" rule, same precedent as `exec`/
+    # `sys_exec` above. `__physical_memory_start`/`__physical_memory_end`/
+    # `__physical_total_pages` are DATA symbols (not functions) whose sole
+    # definition now lives in `kernel/start_kernel.rs`, read via `extern`
+    # by a dozen other files (`printf.rs`, `ipi.rs`, `mm/vm_pgtab.rs`,
+    # `mm/page.rs`, `dev/fdt.rs`, `proc/sysproc.rs`, ...) but never
+    # referenced *by name* from outside the xv6_rust archive -- same class
+    # of concern as the page.c port's `--undefined=__buddy_pools` /
+    # `--undefined=xv6_total_managed_pages` above, forced for the same
+    # reason.
+    --undefined=start_kernel
+    --undefined=start_kernel_post_init
+    --undefined=__physical_memory_start
+    --undefined=__physical_memory_end
+    --undefined=__physical_total_pages
 )
 
 # ==============================================================================
@@ -1286,18 +1392,12 @@ target_link_libraries(${KERNEL_BINARY} PRIVATE ${KERNEL_LINK_LIBS})
 # only libxv6_rust.a changes.
 set_target_properties(${KERNEL_BINARY} PROPERTIES LINK_DEPENDS ${RUST_STATICLIB})
 
-if(DEFINED ENV{RWLOCK_TEST})
-    target_compile_definitions(${KERNEL_BINARY} PRIVATE RWAD_WRITE_TEST=1)
-endif()
-
-if(DEFINED ENV{SEMAPHORE_TEST})
-    target_compile_definitions(${KERNEL_BINARY} PRIVATE SEMAPHORE_RUNTIME_TEST=1)
-endif()
-
-if(DEFINED ENV{WORKQUEUE_RUNTIME_SMOKE_TEST})
-    message(STATUS "WORKQUEUE_RUNTIME_SMOKE_TEST enabled")
-    target_compile_definitions(${KERNEL_BINARY} PRIVATE WORKQUEUE_RUNTIME_SMOKE_TEST=1)
-endif()
+# NOTE: the RWLOCK_TEST/SEMAPHORE_TEST/WORKQUEUE_RUNTIME_SMOKE_TEST test
+# gates used to be applied here via target_compile_definitions (consumed
+# by start_kernel.c's #ifdefs). Since Phase 2 Wave 27 (start_kernel.c ->
+# kernel/start_kernel.rs), there is no C target source left that
+# references those macros -- the gates are now cargo features passed to
+# the xv6_rust build itself, see RUST_TEST_FEATURES above.
 
 # Decompile the kernel binary
 add_custom_target(${KERNEL_DECOMPILED}
@@ -1345,17 +1445,9 @@ target_link_libraries(kernel_with_symbols_elf PRIVATE ${KERNEL_LINK_LIBS})
 # kernel target above).
 set_target_properties(kernel_with_symbols_elf PROPERTIES LINK_DEPENDS ${RUST_STATICLIB})
 
-if(DEFINED ENV{RWLOCK_TEST})
-    target_compile_definitions(kernel_with_symbols_elf PRIVATE RWAD_WRITE_TEST=1)
-endif()
-
-if(DEFINED ENV{SEMAPHORE_TEST})
-    target_compile_definitions(kernel_with_symbols_elf PRIVATE SEMAPHORE_RUNTIME_TEST=1)
-endif()
-
-if(DEFINED ENV{WORKQUEUE_RUNTIME_SMOKE_TEST})
-    target_compile_definitions(kernel_with_symbols_elf PRIVATE WORKQUEUE_RUNTIME_SMOKE_TEST=1)
-endif()
+# NOTE: see the matching NOTE on the plain kernel target above -- the test
+# gates are cargo features now (RUST_TEST_FEATURES), not
+# target_compile_definitions on this target.
 
 # Generate symbols from kernel with placeholder
 set(KERNEL_SYM_FINAL ${CMAKE_CURRENT_BINARY_DIR}/kernel_with_symbols_elf.sym)

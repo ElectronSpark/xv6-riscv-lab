@@ -11,6 +11,20 @@ name = "xv6_rust"
 crate-type = ["staticlib"]
 path = "lib.rs"
 
+[features]
+# Wave 27 (kernel/start_kernel.rs) test-launch gates -- replace the C
+# original's `#ifdef RWAD_WRITE_TEST` / `#ifdef SEMAPHORE_RUNTIME_TEST` /
+# `#ifdef WORKQUEUE_RUNTIME_SMOKE_TEST` (previously wired via
+# `target_compile_definitions` on the now-deleted start_kernel.c). Wired
+# from `ENV{RWLOCK_TEST}` / `ENV{SEMAPHORE_TEST}` /
+# `ENV{WORKQUEUE_RUNTIME_SMOKE_TEST}` at `cmake` configure time -- see
+# `RUST_TEST_FEATURES` in kernel/CMakeLists.txt. Never enabled by default:
+# a plain `cargo build` (or `cmake ..` without the env vars) builds the
+# same normal-boot kernel as before this wave.
+rwlock_test = []
+semaphore_test = []
+workqueue_smoke_test = []
+
 [build-dependencies]
 bindgen = "0.72"
 
