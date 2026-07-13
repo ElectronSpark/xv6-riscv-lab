@@ -34,9 +34,12 @@ typedef uint64 console_u64;
  * expansion.
  */
 #define CONSOLE_RECORD_BATCH_ABI_VERSION 1U
+#define CONSOLE_RECORD_BATCH_F_TERMINAL_COMMIT 1U
 #define CONSOLE_RECORD_BATCH_MAX_RECORDS 701U
 #define CONSOLE_RECORD_BATCH_MAX_LOGICAL_BYTES 357080U
 #define CONSOLE_RECORD_BATCH_MAX_PHYSICAL_BYTES 357781U
+#define CONSOLE_RECORD_TERMINAL_MARKER_MAX_BYTES 64U
+#define CONSOLE_RECORD_TERMINAL_MAX_LOGICAL_BYTES 141U
 
 struct console_record_write_v1 {
     console_u32 version;
@@ -171,6 +174,77 @@ console_record_batch_wire_text_valid(const char *data, console_u32 data_len,
     }
 
     return record_start == data_len && records == record_count;
+}
+
+/*
+ * The terminal-commit flag deliberately narrows the generic batch grammar to
+ * two exact records.  The optional expected marker is used by the recorder;
+ * the kernel passes no expected marker and instead proves that both rows use
+ * the same bounded alphanumeric marker.
+ */
+static inline int console_record_terminal_commit_wire_text_valid(
+    const char *data, console_u32 data_len, console_u32 record_count,
+    const char *expected_marker, console_u32 expected_marker_len,
+    console_u32 *rc_record_len_out)
+{
+    console_u32 marker_len;
+    console_u32 rc_record_len;
+
+    if (data == 0 || record_count != 2 || data_len < 15 ||
+        data_len > CONSOLE_RECORD_TERMINAL_MAX_LOGICAL_BYTES)
+        return 0;
+
+    rc_record_len = 0;
+    while (rc_record_len < data_len && data[rc_record_len] != '\n')
+        rc_record_len++;
+    if (rc_record_len == data_len)
+        return 0;
+    rc_record_len++;
+    if (rc_record_len < 7)
+        return 0;
+    marker_len = rc_record_len - 6;
+    if (marker_len == 0 ||
+        marker_len > CONSOLE_RECORD_TERMINAL_MARKER_MAX_BYTES ||
+        data_len != marker_len * 2 + 13)
+        return 0;
+
+    for (console_u32 i = 0; i < marker_len; i++) {
+        unsigned char c = (unsigned char)data[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+              (c >= 'a' && c <= 'z')))
+            return 0;
+    }
+    if (data[marker_len] != ':' || data[marker_len + 1] != 'R' ||
+        data[marker_len + 2] != 'C' || data[marker_len + 3] != ':' ||
+        data[marker_len + 4] != '0' || data[marker_len + 5] != '\n')
+        return 0;
+    for (console_u32 i = 0; i < marker_len; i++) {
+        if (data[rc_record_len + i] != data[i])
+            return 0;
+    }
+    if (data[rc_record_len + marker_len] != ':' ||
+        data[rc_record_len + marker_len + 1] != 'F' ||
+        data[rc_record_len + marker_len + 2] != 'E' ||
+        data[rc_record_len + marker_len + 3] != 'N' ||
+        data[rc_record_len + marker_len + 4] != 'C' ||
+        data[rc_record_len + marker_len + 5] != 'E' ||
+        data[rc_record_len + marker_len + 6] != '\n')
+        return 0;
+
+    if (expected_marker != 0) {
+        if (expected_marker_len != marker_len)
+            return 0;
+        for (console_u32 i = 0; i < marker_len; i++) {
+            if (expected_marker[i] != data[i])
+                return 0;
+        }
+    } else if (expected_marker_len != 0) {
+        return 0;
+    }
+
+    if (rc_record_len_out != 0)
+        *rc_record_len_out = rc_record_len;
+    return 1;
 }
 
 #endif /* __KERNEL_DEV_CONSOLE_H */

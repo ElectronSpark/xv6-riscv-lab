@@ -162,6 +162,134 @@ unlock:
     return ret;
 }
 
+enum terminal_injection {
+    TERMINAL_INJECT_NONE,
+    TERMINAL_INJECT_BEFORE_RC,
+    TERMINAL_INJECT_DURING_RC,
+    TERMINAL_INJECT_AFTER_RC,
+    TERMINAL_INJECT_PRE_FENCE,
+    TERMINAL_INJECT_DURING_FENCE,
+    TERMINAL_INJECT_AFTER_FENCE,
+    TERMINAL_INJECT_POST_FENCE_GENERATION,
+};
+
+static void fake_batch_append(struct fake_batch_sink *sink, const char *data,
+                              console_u32 len)
+{
+    for (console_u32 i = 0; i < len; i++) {
+        if (data[i] == '\n')
+            sink->bytes[sink->len++] = '\r';
+        sink->bytes[sink->len++] = data[i];
+    }
+}
+
+/* Models only the terminal-commit branch.  RC remains provisional; the
+ * generation/availability recheck immediately before FENCE is the last
+ * operation permitted to reject. */
+static int fake_terminal_ioctl(
+    unsigned long cmd, const struct console_record_batch_write_v1 *request,
+    size_t request_copy_len, const char *records, int root, int allocation_ok,
+    int payload_copy_ok, int pre_lock_available, int lock_ret,
+    int post_lock_available, int pre_fence_available,
+    enum terminal_injection injection, const char *pending_normal_writer,
+    struct fake_batch_sink *sink)
+{
+    console_u32 rc_len = 0;
+    int generation_changed = 0;
+    int ret;
+
+    if (cmd != CONSOLE_IOC_WRITE_RECORD_BATCH)
+        return -ENOTTY;
+    if (!root)
+        return -EPERM;
+    if (request == NULL || request_copy_len != sizeof(*request))
+        return -EFAULT;
+    if (request->version != CONSOLE_RECORD_BATCH_ABI_VERSION ||
+        request->flags != CONSOLE_RECORD_BATCH_F_TERMINAL_COMMIT ||
+        request->reserved0 != 0 || request->reserved1 != 0 ||
+        request->data_ptr == 0 || request->data_len == 0 ||
+        request->data_len > CONSOLE_RECORD_BATCH_MAX_LOGICAL_BYTES ||
+        request->record_count == 0 ||
+        request->record_count > CONSOLE_RECORD_BATCH_MAX_RECORDS ||
+        (console_u64)request->data_len + request->record_count >
+            CONSOLE_RECORD_BATCH_MAX_PHYSICAL_BYTES)
+        return -EINVAL;
+    if (!allocation_ok)
+        return -ENOMEM;
+    if (!payload_copy_ok || records == NULL)
+        return -EFAULT;
+    if (!console_record_terminal_commit_wire_text_valid(
+            records, request->data_len, request->record_count, NULL, 0,
+            &rc_len))
+        return -EINVAL;
+    if (!pre_lock_available)
+        return -EAGAIN;
+    if (lock_ret != 0)
+        return lock_ret;
+
+    sink->lock_acquisitions++;
+    if (!post_lock_available) {
+        ret = -EAGAIN;
+        goto unlock;
+    }
+    if (injection == TERMINAL_INJECT_BEFORE_RC) {
+        sink->bytes[sink->len++] = '!';
+        generation_changed = 1;
+    }
+    sink->record_calls++;
+    if (injection == TERMINAL_INJECT_DURING_RC) {
+        fake_batch_append(sink, records, rc_len / 2);
+        sink->bytes[sink->len++] = '!';
+        fake_batch_append(sink, records + rc_len / 2, rc_len - rc_len / 2);
+        generation_changed = 1;
+    } else {
+        fake_batch_append(sink, records, rc_len);
+    }
+    if (injection == TERMINAL_INJECT_AFTER_RC) {
+        sink->bytes[sink->len++] = '!';
+        generation_changed = 1;
+    }
+    if (generation_changed) {
+        ret = -EAGAIN;
+        goto unlock;
+    }
+    if (injection == TERMINAL_INJECT_PRE_FENCE) {
+        sink->bytes[sink->len++] = '!';
+        generation_changed = 1;
+    }
+    if (!pre_fence_available || generation_changed) {
+        ret = -EAGAIN;
+        goto unlock;
+    }
+
+    sink->record_calls++;
+    if (injection == TERMINAL_INJECT_DURING_FENCE) {
+        console_u32 fence_len = request->data_len - rc_len;
+        fake_batch_append(sink, records + rc_len, fence_len / 2);
+        sink->bytes[sink->len++] = '!';
+        fake_batch_append(sink, records + rc_len + fence_len / 2,
+                          fence_len - fence_len / 2);
+    } else {
+        fake_batch_append(sink, records + rc_len,
+                          request->data_len - rc_len);
+    }
+    if (injection == TERMINAL_INJECT_AFTER_FENCE)
+        sink->bytes[sink->len++] = '!';
+    /* A generation change after FENCE, with or without later wire bytes, is
+     * deliberately not consulted. */
+    ret = (int)request->data_len;
+
+unlock:
+    sink->lock_releases++;
+    if (pending_normal_writer != NULL) {
+        size_t len = strlen(pending_normal_writer);
+        memcpy(sink->bytes + sink->len, pending_normal_writer, len);
+        sink->len += (unsigned int)len;
+        sink->normal_writer_calls++;
+    }
+    return ret;
+}
+
 static int check(int condition, const char *label)
 {
     if (condition)
@@ -201,6 +329,15 @@ batch_request_for(const char *records, console_u32 len, console_u32 count)
     };
 }
 
+static struct console_record_batch_write_v1
+terminal_request_for(const char *records, console_u32 len)
+{
+    struct console_record_batch_write_v1 request =
+        batch_request_for(records, len, 2);
+    request.flags = CONSOLE_RECORD_BATCH_F_TERMINAL_COMMIT;
+    return request;
+}
+
 static void reset_batch_sink(void)
 {
     memset(&batch_sink, 0, sizeof(batch_sink));
@@ -222,6 +359,23 @@ static int check_batch_pre_emission(
                  label);
 }
 
+static int check_terminal_pre_emission(
+    const char *label, const struct console_record_batch_write_v1 *request,
+    size_t request_copy_len, const char *records, int root, int allocation_ok,
+    int payload_copy_ok, int pre_lock_available, int lock_ret,
+    int post_lock_available, int expected)
+{
+    reset_batch_sink();
+    return check(fake_terminal_ioctl(
+                     CONSOLE_IOC_WRITE_RECORD_BATCH, request,
+                     request_copy_len, records, root, allocation_ok,
+                     payload_copy_ok, pre_lock_available, lock_ret,
+                     post_lock_available, 1, TERMINAL_INJECT_NONE, NULL,
+                     &batch_sink) == expected &&
+                     batch_sink.len == 0 && batch_sink.record_calls == 0,
+                 label);
+}
+
 int main(void)
 {
     const char valid[] = "YT_RECORD ok=1\n";
@@ -238,11 +392,23 @@ int main(void)
     const char batch_missing_lf[] = "A\nBB";
     const char batch_cr[] = "A\r\n";
     const char batch_nul[] = {'A', '\0', '\n'};
+    const char terminal_valid[] = "T:RC:0\nT:FENCE\n";
+    const char terminal_nonzero[] = "T:RC:7\nT:FENCE\n";
+    const char terminal_mismatch[] = "T:RC:0\nX:FENCE\n";
+    const char terminal_reversed[] = "T:FENCE\nT:RC:0\n";
+    const char terminal_duplicate[] = "T:RC:0\nT:RC:0\nT:FENCE\n";
+    char terminal_max[CONSOLE_RECORD_TERMINAL_MAX_LOGICAL_BYTES];
     struct console_record_batch_write_v1 batch_request =
         batch_request_for(batch_valid, sizeof(batch_valid) - 1, 2);
+    struct console_record_batch_write_v1 terminal_request =
+        terminal_request_for(terminal_valid, sizeof(terminal_valid) - 1);
 
     memset(max_record, 'x', sizeof(max_record));
     max_record[sizeof(max_record) - 1] = '\n';
+    memset(terminal_max, 'M', 64);
+    memcpy(terminal_max + 64, ":RC:0\n", 6);
+    memset(terminal_max + 70, 'M', 64);
+    memcpy(terminal_max + 134, ":FENCE\n", 7);
 
     if (!check(sizeof(request) == 24, "request size") ||
         !check(offsetof(struct console_record_write_v1, version) == 0,
@@ -291,7 +457,13 @@ int main(void)
                    sizeof(batch_request),
                "batch ioctl request size") ||
         !check(_IOC_DIR(CONSOLE_IOC_WRITE_RECORD_BATCH) == _IOC_WRITE,
-               "batch ioctl direction"))
+               "batch ioctl direction") ||
+        !check(CONSOLE_RECORD_BATCH_F_TERMINAL_COMMIT == 1,
+               "terminal commit flag value") ||
+        !check(CONSOLE_RECORD_TERMINAL_MARKER_MAX_BYTES == 64,
+               "terminal marker bound") ||
+        !check(CONSOLE_RECORD_TERMINAL_MAX_LOGICAL_BYTES == 141,
+               "terminal logical bound"))
         return 1;
 
     if (!check(fake_record_ioctl(CONSOLE_IOC_WRITE_RECORD, &request,
@@ -612,6 +784,170 @@ int main(void)
         !check(batch_sink.bytes[batch_sink.len - 1] == 'N',
                "normal writer remains outside failed batch lock"))
         return 1;
+
+    terminal_request = terminal_request_for(
+        terminal_valid, (console_u32)(sizeof(terminal_valid) - 1));
+    reset_batch_sink();
+    if (!check(fake_terminal_ioctl(
+                   CONSOLE_IOC_WRITE_RECORD_BATCH, &terminal_request,
+                   sizeof(terminal_request), terminal_valid, 1, 1, 1, 1, 0,
+                   1, 1, TERMINAL_INJECT_NONE, "N", &batch_sink) ==
+                   (int)terminal_request.data_len,
+               "terminal clean success") ||
+        !check(batch_sink.lock_acquisitions == 1 &&
+                   batch_sink.lock_releases == 1 &&
+                   batch_sink.record_calls == 2 &&
+                   batch_sink.normal_writer_calls == 1,
+               "terminal one lock and two ordered rows") ||
+        !check(batch_sink.len == 18 &&
+                   memcmp(batch_sink.bytes, "T:RC:0\r\nT:FENCE\r\nN", 18) ==
+                       0,
+               "terminal exact clean physical bytes"))
+        return 1;
+
+    terminal_request = terminal_request_for(
+        terminal_max, CONSOLE_RECORD_TERMINAL_MAX_LOGICAL_BYTES);
+    reset_batch_sink();
+    if (!check(fake_terminal_ioctl(
+                   CONSOLE_IOC_WRITE_RECORD_BATCH, &terminal_request,
+                   sizeof(terminal_request), terminal_max, 1, 1, 1, 1, 0, 1,
+                   1, TERMINAL_INJECT_NONE, NULL, &batch_sink) ==
+                   CONSOLE_RECORD_TERMINAL_MAX_LOGICAL_BYTES,
+               "terminal 64-byte marker success") ||
+        !check(batch_sink.len ==
+                   CONSOLE_RECORD_TERMINAL_MAX_LOGICAL_BYTES + 2,
+               "terminal maximum CRLF physical length"))
+        return 1;
+
+    terminal_request = terminal_request_for(
+        terminal_valid, (console_u32)(sizeof(terminal_valid) - 1));
+    if (!check_terminal_pre_emission(
+            "terminal short request copy", &terminal_request,
+            sizeof(terminal_request) - 1, terminal_valid, 1, 1, 1, 1, 0, 1,
+            -EFAULT) ||
+        !check_terminal_pre_emission(
+            "terminal root-only", &terminal_request, sizeof(terminal_request),
+            terminal_valid, 0, 1, 1, 1, 0, 1, -EPERM) ||
+        !check_terminal_pre_emission(
+            "terminal allocation failure", &terminal_request,
+            sizeof(terminal_request), terminal_valid, 1, 0, 1, 1, 0, 1,
+            -ENOMEM) ||
+        !check_terminal_pre_emission(
+            "terminal payload copy failure", &terminal_request,
+            sizeof(terminal_request), terminal_valid, 1, 1, 0, 1, 0, 1,
+            -EFAULT) ||
+        !check_terminal_pre_emission(
+            "terminal unavailable before lock", &terminal_request,
+            sizeof(terminal_request), terminal_valid, 1, 1, 1, 0, 0, 1,
+            -EAGAIN) ||
+        !check_terminal_pre_emission(
+            "terminal timed lock failure", &terminal_request,
+            sizeof(terminal_request), terminal_valid, 1, 1, 1, 1,
+            -ETIMEDOUT, 1, -ETIMEDOUT) ||
+        !check_terminal_pre_emission(
+            "terminal interrupted lock failure", &terminal_request,
+            sizeof(terminal_request), terminal_valid, 1, 1, 1, 1, -EINTR, 1,
+            -EINTR) ||
+        !check_terminal_pre_emission(
+            "terminal unavailable after lock", &terminal_request,
+            sizeof(terminal_request), terminal_valid, 1, 1, 1, 1, 0, 0,
+            -EAGAIN))
+        return 1;
+
+    terminal_request = terminal_request_for(
+        terminal_nonzero, (console_u32)(sizeof(terminal_nonzero) - 1));
+    if (!check_terminal_pre_emission(
+            "terminal nonzero RC rejected", &terminal_request,
+            sizeof(terminal_request), terminal_nonzero, 1, 1, 1, 1, 0, 1,
+            -EINVAL))
+        return 1;
+    terminal_request = terminal_request_for(
+        terminal_mismatch, (console_u32)(sizeof(terminal_mismatch) - 1));
+    if (!check_terminal_pre_emission(
+            "terminal marker mismatch rejected", &terminal_request,
+            sizeof(terminal_request), terminal_mismatch, 1, 1, 1, 1, 0, 1,
+            -EINVAL))
+        return 1;
+    terminal_request = terminal_request_for(
+        terminal_reversed, (console_u32)(sizeof(terminal_reversed) - 1));
+    if (!check_terminal_pre_emission(
+            "terminal order rejected", &terminal_request,
+            sizeof(terminal_request), terminal_reversed, 1, 1, 1, 1, 0, 1,
+            -EINVAL))
+        return 1;
+    terminal_request = terminal_request_for(
+        terminal_duplicate, (console_u32)(sizeof(terminal_duplicate) - 1));
+    if (!check_terminal_pre_emission(
+            "terminal duplicate rejected", &terminal_request,
+            sizeof(terminal_request), terminal_duplicate, 1, 1, 1, 1, 0, 1,
+            -EINVAL))
+        return 1;
+
+    terminal_request = terminal_request_for(
+        terminal_valid, (console_u32)(sizeof(terminal_valid) - 1));
+    terminal_request.version++;
+    if (!check_terminal_pre_emission(
+            "terminal version rejected", &terminal_request,
+            sizeof(terminal_request), terminal_valid, 1, 1, 1, 1, 0, 1,
+            -EINVAL))
+        return 1;
+    terminal_request = terminal_request_for(
+        terminal_valid, (console_u32)(sizeof(terminal_valid) - 1));
+    terminal_request.flags = 2;
+    if (!check_terminal_pre_emission(
+            "terminal unknown flag rejected", &terminal_request,
+            sizeof(terminal_request), terminal_valid, 1, 1, 1, 1, 0, 1,
+            -EINVAL))
+        return 1;
+    terminal_request.flags = 3;
+    if (!check_terminal_pre_emission(
+            "terminal composed flags rejected", &terminal_request,
+            sizeof(terminal_request), terminal_valid, 1, 1, 1, 1, 0, 1,
+            -EINVAL))
+        return 1;
+
+    terminal_request = terminal_request_for(
+        terminal_valid, (console_u32)(sizeof(terminal_valid) - 1));
+    for (enum terminal_injection injection = TERMINAL_INJECT_BEFORE_RC;
+         injection <= TERMINAL_INJECT_PRE_FENCE; injection++) {
+        reset_batch_sink();
+        if (!check(fake_terminal_ioctl(
+                       CONSOLE_IOC_WRITE_RECORD_BATCH, &terminal_request,
+                       sizeof(terminal_request), terminal_valid, 1, 1, 1, 1,
+                       0, 1, 1, injection, NULL, &batch_sink) == -EAGAIN &&
+                       strstr(batch_sink.bytes, "FENCE") == NULL,
+                   "terminal emergency before FENCE returns no credit and no FENCE"))
+            return 1;
+    }
+    reset_batch_sink();
+    if (!check(fake_terminal_ioctl(
+                   CONSOLE_IOC_WRITE_RECORD_BATCH, &terminal_request,
+                   sizeof(terminal_request), terminal_valid, 1, 1, 1, 1, 0,
+                   1, 0, TERMINAL_INJECT_NONE, NULL, &batch_sink) == -EAGAIN &&
+                   strstr(batch_sink.bytes, "FENCE") == NULL,
+               "terminal pre-FENCE availability recheck"))
+        return 1;
+
+    reset_batch_sink();
+    if (!check(fake_terminal_ioctl(
+                   CONSOLE_IOC_WRITE_RECORD_BATCH, &terminal_request,
+                   sizeof(terminal_request), terminal_valid, 1, 1, 1, 1, 0,
+                   1, 1, TERMINAL_INJECT_DURING_FENCE, NULL, &batch_sink) ==
+                   (int)terminal_request.data_len &&
+                   memchr(batch_sink.bytes, '!', batch_sink.len) != NULL,
+               "terminal during-FENCE contamination cannot reverse ioctl commit"))
+        return 1;
+    for (enum terminal_injection injection = TERMINAL_INJECT_AFTER_FENCE;
+         injection <= TERMINAL_INJECT_POST_FENCE_GENERATION; injection++) {
+        reset_batch_sink();
+        if (!check(fake_terminal_ioctl(
+                       CONSOLE_IOC_WRITE_RECORD_BATCH, &terminal_request,
+                       sizeof(terminal_request), terminal_valid, 1, 1, 1, 1,
+                       0, 1, 1, injection, NULL, &batch_sink) ==
+                       (int)terminal_request.data_len,
+                   "terminal post-FENCE event cannot create late failure"))
+            return 1;
+    }
 
     return 0;
 }

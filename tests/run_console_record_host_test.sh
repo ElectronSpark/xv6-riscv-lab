@@ -57,8 +57,13 @@ require_source 'static int console_record_batch_write_ioctl' kernel/kernel/conso
 require_source 'struct console_record_batch_write_v1 request' kernel/kernel/console.c
 require_source 'records = kvmalloc\(request.data_len\)' kernel/kernel/console.c
 require_source 'either_copyin\(records, 1, request.data_ptr, request.data_len\)' kernel/kernel/console.c
-require_source 'console_record_batch_wire_text_valid\(records, request.data_len,' kernel/kernel/console.c
+require_source 'console_record_batch_wire_text_valid\(' kernel/kernel/console.c
+require_source 'console_record_terminal_commit_wire_text_valid\(' kernel/kernel/console.c
+require_source 'request.flags != CONSOLE_RECORD_BATCH_F_TERMINAL_COMMIT' kernel/kernel/console.c
+require_source 'request.flags == CONSOLE_RECORD_BATCH_F_TERMINAL_COMMIT' kernel/kernel/console.c
 require_source 'mutex_lock_timed\(&console_wire_lock,' kernel/kernel/console.c
+require_source 'console_wire_emit_text_locked\(records, \(int\)terminal_rc_record_len\)' kernel/kernel/console.c
+require_source 'records \+ terminal_rc_record_len' kernel/kernel/console.c
 require_source 'console_wire_emit_text_locked\(records \+ record_start,' kernel/kernel/console.c
 require_source '__atomic_load_n\(&console_wire_emergency_generation,' kernel/kernel/console.c
 require_source 'records_emitted != request.record_count' kernel/kernel/console.c
@@ -70,6 +75,9 @@ require_source 'static int console_dev_ioctl' kernel/kernel/console.c
 require_literal '#define CONSOLE_RECORD_BATCH_MAX_RECORDS 701U' kernel/kernel/inc/dev/console.h
 require_literal '#define CONSOLE_RECORD_BATCH_MAX_LOGICAL_BYTES 357080U' kernel/kernel/inc/dev/console.h
 require_literal '#define CONSOLE_RECORD_BATCH_MAX_PHYSICAL_BYTES 357781U' kernel/kernel/inc/dev/console.h
+require_literal '#define CONSOLE_RECORD_BATCH_F_TERMINAL_COMMIT 1U' kernel/kernel/inc/dev/console.h
+require_literal '#define CONSOLE_RECORD_TERMINAL_MARKER_MAX_BYTES 64U' kernel/kernel/inc/dev/console.h
+require_literal '#define CONSOLE_RECORD_TERMINAL_MAX_LOGICAL_BYTES 141U' kernel/kernel/inc/dev/console.h
 require_literal 'struct console_record_batch_write_v1 {' kernel/kernel/inc/dev/console.h
 require_literal '#define CONSOLE_RECORD_IOC_WRITE_BATCH_NR 0x02U' kernel/kernel/inc/dev/console.h
 require_source 'console_record_batch_write_v1_size_must_be_32' kernel/kernel/inc/dev/console.h

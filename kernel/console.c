@@ -197,8 +197,10 @@ static int console_record_batch_write_ioctl(void *arg)
     struct console_record_batch_write_v1 request;
     char *records = NULL;
     uint64 batch_generation;
+    console_u32 terminal_rc_record_len = 0;
     console_u32 record_start;
     console_u32 records_emitted;
+    int terminal_commit;
     int ret;
 
     if (current == NULL || current->thread_group == NULL ||
@@ -208,7 +210,9 @@ static int console_record_batch_write_ioctl(void *arg)
         either_copyin(&request, 1, (uint64)arg, sizeof(request)) < 0)
         return -EFAULT;
     if (request.version != CONSOLE_RECORD_BATCH_ABI_VERSION ||
-        request.flags != 0 || request.reserved0 != 0 ||
+        (request.flags != 0 &&
+         request.flags != CONSOLE_RECORD_BATCH_F_TERMINAL_COMMIT) ||
+        request.reserved0 != 0 ||
         request.reserved1 != 0 || request.data_ptr == 0 ||
         request.data_len == 0 ||
         request.data_len > CONSOLE_RECORD_BATCH_MAX_LOGICAL_BYTES ||
@@ -217,6 +221,8 @@ static int console_record_batch_write_ioctl(void *arg)
         (uint64)request.data_len + (uint64)request.record_count >
             CONSOLE_RECORD_BATCH_MAX_PHYSICAL_BYTES)
         return -EINVAL;
+    terminal_commit =
+        request.flags == CONSOLE_RECORD_BATCH_F_TERMINAL_COMMIT;
 
     records = kvmalloc(request.data_len);
     if (records == NULL)
@@ -225,8 +231,12 @@ static int console_record_batch_write_ioctl(void *arg)
         ret = -EFAULT;
         goto out_free;
     }
-    if (!console_record_batch_wire_text_valid(records, request.data_len,
-                                              request.record_count)) {
+    if (terminal_commit ?
+            !console_record_terminal_commit_wire_text_valid(
+                records, request.data_len, request.record_count, NULL, 0,
+                &terminal_rc_record_len) :
+            !console_record_batch_wire_text_valid(
+                records, request.data_len, request.record_count)) {
         ret = -EINVAL;
         goto out_free;
     }
@@ -245,6 +255,34 @@ static int console_record_batch_write_ioctl(void *arg)
                                         __ATOMIC_ACQUIRE);
     if (!uart_initialized || panic_state()) {
         ret = -EAGAIN;
+        goto out_unlock;
+    }
+
+    if (terminal_commit) {
+        /*
+         * RC is still provisional.  An emergency bypass before or during it
+         * prevents FENCE.  Immediately before FENCE, recheck both the
+         * generation and UART availability.  Once FENCE emission starts the
+         * ioctl is committed: a concurrent emergency may contaminate that
+         * final row (which the host rejects), but no later check may turn a
+         * complete clean terminal into an error.
+         */
+        console_wire_emit_text_locked(records, (int)terminal_rc_record_len);
+        if (__atomic_load_n(&console_wire_emergency_generation,
+                            __ATOMIC_ACQUIRE) != batch_generation) {
+            ret = -EAGAIN;
+            goto out_unlock;
+        }
+        if (!uart_initialized || panic_state() ||
+            __atomic_load_n(&console_wire_emergency_generation,
+                            __ATOMIC_ACQUIRE) != batch_generation) {
+            ret = -EAGAIN;
+            goto out_unlock;
+        }
+        console_wire_emit_text_locked(
+            records + terminal_rc_record_len,
+            (int)(request.data_len - terminal_rc_record_len));
+        ret = (int)request.data_len;
         goto out_unlock;
     }
 
