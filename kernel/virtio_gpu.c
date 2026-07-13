@@ -3474,8 +3474,21 @@ static int virtio_gpu_async_depth_for_reason(
 
     if (reason == VIRTIO_GPU_ASYNC_REASON_SUBMIT_3D &&
         !virtio_gpu_cmdline_present("virtio_gpu_async_depth")) {
+        /*
+         * Keep one older RESOURCE_FLUSH in flight while admitting the next
+         * GL submit.  A default of one compares the total async population
+         * against one, so the flush re-serializes compose(N) even though the
+         * FIFO control queue already preserves producer-before-present order.
+         * Two is the smallest overlap that removes that serialization; a
+         * globally constrained one-slot ring must remain one.  The explicit
+         * submit-depth knob below stays authoritative and retains its existing
+         * range and negotiated-capacity clamps.
+         */
+        int submit_default_depth = depth < 2 ? depth : 2;
+
         depth = (int)virtio_gpu_cmdline_uint(
-            "virtio_gpu_async_submit_depth", 1, VIRTIO_GPU_ASYNC_MAX_DEPTH);
+            "virtio_gpu_async_submit_depth", (uint32)submit_default_depth,
+            VIRTIO_GPU_ASYNC_MAX_DEPTH);
         if (depth < 1)
             depth = 1;
         if (depth > g->async_capacity)
