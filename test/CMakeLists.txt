@@ -337,3 +337,44 @@ add_test(NAME ut_workqueue
     COMMAND ut_workqueue
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ------------------------------------------------------------------------------
+# Rust host-test suite (docs/rustify/test_port_plan.md Phase 1/2 -- the
+# host-test seam + the `#[cfg(test)]` suites in kernel/mm/bits.rs,
+# kernel/list.rs, kernel/mm/early_allocator.rs; see kernel/lib.rs's
+# "Host-test seam" doc comment for the full design). Unlike every ut_*
+# target above, this isn't a compiled cmocka executable added via
+# `add_executable` -- `cargo test` builds and runs its own test harness
+# binary, so the ctest entry just shells out to `cargo` directly.
+#
+# `--target x86_64-unknown-linux-gnu` is mandatory and explicit:
+# kernel/.cargo/config.toml pins `[build] target = riscv64gc-unknown-none-elf`
+# for the real kernel build (a `#![no_std]` staticlib full of riscv-only
+# `core::arch::asm!`), and only an explicit `--target` on the command line
+# overrides that pinned default -- an environment variable would not.
+# `WORKING_DIRECTORY` is `kernel/` so cargo's own config-file discovery
+# (which starts from the process's current directory, not `--manifest-path`)
+# still finds that same `.cargo/config.toml` for its `target-dir` redirect
+# (`../build/kernel/rust`), keeping host-test artifacts out of the
+# CMake-driven riscv build's target dir.
+#
+# `LAB=fs` mirrors this repo's one supported/verified configuration (see
+# RUST_REWRITE.md's "Build env" working note) -- hardcoded rather than
+# forwarded from whatever `$ENV{LAB}` this `cmake` invocation happened to
+# see, so this ctest entry can't be silently poisoned by an unset/different
+# LAB the way the main kernel build historically was (see RUST_REWRITE.md's
+# "NEW VECTOR" note). None of the three suites under test are LAB-gated
+# themselves; this only affects which conditional kernel-header defines
+# bindgen's libclang parse sees while generating `kernel_bindings.rs`.
+find_program(CARGO_EXECUTABLE_FOR_RUST_TESTS cargo)
+if(CARGO_EXECUTABLE_FOR_RUST_TESTS)
+    add_test(NAME rust_host_unit_tests
+        COMMAND ${CARGO_EXECUTABLE_FOR_RUST_TESTS} test --target x86_64-unknown-linux-gnu
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/../kernel
+    )
+    set_tests_properties(rust_host_unit_tests PROPERTIES
+        ENVIRONMENT "LAB=fs"
+    )
+else()
+    message(STATUS "cargo not found -- rust_host_unit_tests ctest entry skipped")
+endif()

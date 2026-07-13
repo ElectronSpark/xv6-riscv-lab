@@ -362,3 +362,390 @@ pub unsafe extern "C" fn early_alloc(size: usize) -> *mut c_void {
 pub unsafe extern "C" fn early_alloc_end_ptr() -> *mut c_void {
     allocator().current as *mut c_void
 }
+
+// ---------------------------------------------------------------------------
+// Host-test suite (`cargo test --target x86_64-unknown-linux-gnu`; see
+// `kernel/lib.rs`'s "Host-test seam" doc for the module-tree/mock design
+// this depends on -- `crate::mm::cffi` here resolves to the small
+// hand-written host mock declared in `lib.rs`, not the real `mm/cffi.rs`).
+//
+// Every test below constructs its own `EarlyAllocator` directly (bypassing
+// the `ALLOC` singleton / `#[no_mangle]` C-ABI wrappers above entirely) over
+// a private, heap-boxed arena, instead of sharing the one process-wide
+// static the C reference suite uses with a setup/teardown pair per test
+// (`setup_allocator`/`teardown_allocator` in `test/src/ut_early_allocator_main.c`).
+// This is a deliberate improvement, not just a style choice: Rust's `cargo
+// test` runs tests concurrently by default, and every test in this module
+// mutates allocator state, so sharing one global would be a data race
+// between test threads; giving each test its own allocator and arena gets
+// the C suite's per-test isolation *and* safe parallelism.
+//
+// The `EarlyAllocator` struct is self-referential once initialized (each
+// free-list head's `ListNode` self-loops to its own address via
+// `xv6_list_init`) -- exactly like the real kernel's `static ALLOC`, it must
+// never move after `init()` runs. `Box::new` gives it a stable heap address
+// up front, and `new_test_allocator` never moves the struct out of the box
+// afterward (only the `Box` handle itself moves, which is just a pointer).
+//
+// Reference-coverage note: all 13 cases in
+// `test/src/ut_early_allocator_main.c` are ported below (same scenario,
+// same assertions in spirit); nothing from that suite is skipped. Three
+// additional tests (marked below) exercise `#[should_panic]` guard-rail
+// paths (invalid init range, non-power-of-two alignment) that the C suite
+// cannot observe at all (its mock `panic()` calls cmocka's `fail_msg`,
+// which *fails* the test rather than letting it assert the panic was the
+// expected outcome) -- a strict improvement in coverage over the C
+// reference, called out explicitly rather than silently claimed as
+// "ported".
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ARENA_SIZE: usize = 2 * 1024 * 1024; // 2 MiB; C reference used 1 MiB.
+
+    /// Heap-boxed backing memory for one test's allocator. Boxed so the
+    /// byte range has a stable address for the test's lifetime regardless
+    /// of where the `Arena` value itself lives.
+    struct Arena {
+        buf: std::boxed::Box<[u8]>,
+    }
+
+    impl Arena {
+        fn new() -> Self {
+            Self { buf: std::vec![0u8; ARENA_SIZE].into_boxed_slice() }
+        }
+        fn start(&self) -> u64 {
+            self.buf.as_ptr() as u64
+        }
+        fn end(&self) -> u64 {
+            self.start() + self.buf.len() as u64
+        }
+    }
+
+    /// Construct a fresh, heap-pinned `EarlyAllocator` initialized over
+    /// `arena`. See this module's doc above for why `Box` is load-bearing
+    /// here (self-referential free-list heads).
+    fn new_test_allocator(arena: &Arena) -> std::boxed::Box<EarlyAllocator> {
+        let mut a = std::boxed::Box::new(EarlyAllocator {
+            free_lists: [const { null_list_node() }; EARLYALLOC_ORDERS],
+            current: 0,
+            end: 0,
+        });
+        a.init(arena.start(), arena.end());
+        a
+    }
+
+    /// Mirrors the C reference's `early_alloc(size)` wrapper: same default
+    /// alignment (`EARLYALLOC_SMALLEST_CHUNK`) as the real
+    /// `#[no_mangle] early_alloc` C-ABI function above.
+    fn early_alloc(a: &mut EarlyAllocator, size: u64) -> *mut c_void {
+        a.alloc(size, EARLYALLOC_SMALLEST_CHUNK)
+    }
+
+    /// Counts every chunk currently sitting in any free-list, across all
+    /// orders. Read-only traversal of the real `ListNode` chain (mirrors
+    /// the C reference's `list_foreach_entry` counting loops).
+    fn count_free_chunks(a: &EarlyAllocator) -> usize {
+        let mut total = 0usize;
+        for i in 0..EARLYALLOC_ORDERS {
+            let head = &a.free_lists[i] as *const ListNode as *mut ListNode;
+            // SAFETY: `head` is a valid, initialized (self-looped-or-linked)
+            // `ListNode` belonging to `a`, which outlives this read-only walk.
+            let mut cur = unsafe { (*head).next };
+            while cur != head {
+                total += 1;
+                cur = unsafe { (*cur).next };
+            }
+        }
+        total
+    }
+
+    // --- test_init -----------------------------------------------------
+    #[test]
+    fn init_aligns_current_and_records_the_full_range_with_empty_freelists() {
+        let arena = Arena::new();
+        let a = new_test_allocator(&arena);
+
+        assert!(a.current >= arena.start());
+        assert!(a.current < arena.end());
+        assert_eq!(a.current & (EARLYALLOC_SMALLEST_CHUNK - 1), 0);
+        assert_eq!(a.end, arena.end());
+        for i in 0..EARLYALLOC_ORDERS {
+            let head = &a.free_lists[i] as *const ListNode as *mut ListNode;
+            assert!(FreeList(head).is_empty(), "free list {i} should start empty");
+        }
+    }
+
+    // --- test_small_alloc_basic -----------------------------------------
+    #[test]
+    fn small_allocations_are_self_aligned_and_do_not_overlap() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let p1 = early_alloc(&mut a, 64) as u64;
+        let p2 = early_alloc(&mut a, 128) as u64;
+        let p3 = early_alloc(&mut a, 32) as u64;
+
+        assert_ne!(p1, 0);
+        assert_ne!(p2, 0);
+        assert_ne!(p3, 0);
+        assert_eq!(p1 & 63, 0);
+        assert_eq!(p2 & 127, 0);
+        assert_eq!(p3 & 31, 0);
+
+        assert!(p1 + 64 <= p2 || p2 + 128 <= p1);
+        assert!(p1 + 64 <= p3 || p3 + 32 <= p1);
+        assert!(p2 + 128 <= p3 || p3 + 32 <= p2);
+    }
+
+    // --- test_chunk_splitting --------------------------------------------
+    #[test]
+    fn allocations_after_freeing_a_gap_are_served_from_the_freelist_and_do_not_overlap() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let initial_chunks = count_free_chunks(&a);
+
+        let p1 = early_alloc(&mut a, 256);
+        assert_ne!(p1 as u64, 0);
+
+        let gap_start = align_up(a.current, 64);
+        let gap_end = gap_start + 2048;
+        a.free_region(gap_start, gap_end);
+
+        let after_free_chunks = count_free_chunks(&a);
+        assert!(after_free_chunks > initial_chunks);
+
+        let p2 = early_alloc(&mut a, 64) as u64;
+        let p3 = early_alloc(&mut a, 64) as u64;
+        assert_ne!(p2, 0);
+        assert_ne!(p3, 0);
+        assert!(p2 + 64 <= p3 || p3 + 64 <= p2);
+    }
+
+    // --- test_large_alloc_alignment ---------------------------------------
+    #[test]
+    fn large_allocations_respect_the_caller_supplied_alignment() {
+        const PAGE_SIZE: u64 = 4096;
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let p1 = a.alloc(128 * 1024, PAGE_SIZE) as u64;
+        assert_ne!(p1, 0);
+        assert_eq!(p1 & (PAGE_SIZE - 1), 0);
+
+        let p2 = a.alloc(256 * 1024, 8192) as u64;
+        assert_ne!(p2, 0);
+        assert_eq!(p2 & (8192 - 1), 0);
+
+        assert!(p1 + 128 * 1024 <= p2);
+    }
+
+    // --- test_small_alloc_ignores_user_alignment --------------------------
+    #[test]
+    fn small_allocations_ignore_the_caller_supplied_alignment_and_use_chunk_size_instead() {
+        const PAGE_SIZE: u64 = 4096;
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        // 128 bytes is well within `EARLYALLOC_LARGEST_CHUNK`, so this must
+        // come from the self-aligned freelist/bump path, not a page-aligned
+        // one -- even though `PAGE_SIZE` alignment was requested.
+        let p = a.alloc(128, PAGE_SIZE) as u64;
+        assert_ne!(p, 0);
+        assert_eq!(p & 127, 0);
+    }
+
+    // --- test_alignment_gap_recycling --------------------------------------
+    #[test]
+    fn a_large_aligned_allocation_recycles_its_leading_gap_into_the_freelists() {
+        const PAGE_SIZE: u64 = 4096;
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let p1 = early_alloc(&mut a, 100) as u64;
+        assert_ne!(p1, 0);
+
+        let p2 = a.alloc(128 * 1024, PAGE_SIZE) as u64;
+        assert_ne!(p2, 0);
+        assert_eq!(p2 & (PAGE_SIZE - 1), 0);
+
+        assert!(count_free_chunks(&a) > 0);
+    }
+
+    // --- test_end_ptr_tracking ----------------------------------------------
+    #[test]
+    fn the_current_pointer_advances_past_every_allocation_made_so_far() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let start = a.current;
+        let alloc1 = early_alloc(&mut a, 1024) as u64;
+        let alloc2 = early_alloc(&mut a, 2048) as u64;
+        let end = a.current;
+
+        assert!(end > start);
+        assert!(end >= alloc1 + 1024);
+        assert!(end >= alloc2 + 2048);
+    }
+
+    // --- test_multiple_small_from_freelist -----------------------------------
+    #[test]
+    fn many_small_allocations_from_a_freed_region_are_all_unique_and_aligned() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let old_current = a.current;
+        a.current = old_current + 4096;
+        a.free_region(old_current, a.current);
+
+        let mut ptrs = std::vec::Vec::new();
+        for _ in 0..10 {
+            let p = early_alloc(&mut a, 64) as u64;
+            assert_ne!(p, 0);
+            assert_eq!(p & 63, 0);
+            ptrs.push(p);
+        }
+
+        for i in 0..ptrs.len() {
+            for j in (i + 1)..ptrs.len() {
+                assert_ne!(ptrs[i], ptrs[j]);
+            }
+        }
+    }
+
+    // --- test_size_rounding ---------------------------------------------------
+    #[test]
+    fn allocation_sizes_round_up_to_the_next_power_of_two_chunk() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let p1 = early_alloc(&mut a, 100) as u64; // -> 128
+        assert_ne!(p1, 0);
+        assert_eq!(p1 & 127, 0);
+
+        let p2 = early_alloc(&mut a, 200) as u64; // -> 256
+        assert_ne!(p2, 0);
+        assert_eq!(p2 & 255, 0);
+
+        let p3 = early_alloc(&mut a, 10) as u64; // -> 32 (minimum chunk)
+        assert_ne!(p3, 0);
+        assert_eq!(p3 & 31, 0);
+    }
+
+    // --- test_zero_size -----------------------------------------------------
+    #[test]
+    fn zero_size_allocation_returns_null_without_touching_the_freelists() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let before = count_free_chunks(&a);
+        let p = early_alloc(&mut a, 0);
+        assert!(p.is_null());
+        assert_eq!(count_free_chunks(&a), before);
+    }
+
+    // --- test_chunk_magic -----------------------------------------------------
+    #[test]
+    fn freed_chunks_carry_the_documented_magic_number() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let old_current = a.current;
+        a.current = old_current + 1024;
+        a.free_region(old_current, a.current);
+
+        let mut checked_any = false;
+        for i in 0..EARLYALLOC_ORDERS {
+            let head = &a.free_lists[i] as *const ListNode as *mut ListNode;
+            // SAFETY: read-only walk of `a`'s own freelist chain, `a` is
+            // alive for the whole test.
+            let mut cur = unsafe { (*head).next };
+            while cur != head {
+                let chunk = (cur as *mut u8).wrapping_sub(LIST_ENTRY_OFFSET) as *mut Chunk;
+                assert_eq!(unsafe { (*chunk).magic }, EARLYALLOC_CHUNK_MAGIC);
+                checked_any = true;
+                cur = unsafe { (*cur).next };
+            }
+        }
+        assert!(checked_any, "the freed region should have produced at least one chunk");
+    }
+
+    // --- test_stress_many_allocations --------------------------------------
+    #[test]
+    fn one_hundred_mixed_size_allocations_all_stay_within_the_arena_and_are_aligned() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+        let sizes = [32u64, 64, 128, 256, 512, 1024, 2048];
+
+        for i in 0..100 {
+            let size = sizes[i % sizes.len()];
+            let p = early_alloc(&mut a, size) as u64;
+            assert_ne!(p, 0);
+            let order = size_to_order(size);
+            let actual_size = 1u64 << order;
+            assert_eq!(p & (actual_size - 1), 0);
+        }
+        assert!(a.current <= a.end);
+    }
+
+    // --- test_chunk_alignment_verification -----------------------------------
+    #[test]
+    fn every_free_chunk_is_aligned_to_its_own_power_of_two_size() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+
+        let old_current = a.current;
+        a.current = old_current + 8192;
+        a.free_region(old_current, a.current);
+
+        let mut checked_any = false;
+        for i in 0..EARLYALLOC_ORDERS {
+            let head = &a.free_lists[i] as *const ListNode as *mut ListNode;
+            // SAFETY: read-only walk of `a`'s own freelist chain.
+            let mut cur = unsafe { (*head).next };
+            while cur != head {
+                let chunk = (cur as *mut u8).wrapping_sub(LIST_ENTRY_OFFSET) as *mut Chunk;
+                let addr = chunk as u64;
+                let size = unsafe { (*chunk).size } as u64;
+                assert_eq!(addr & (size - 1), 0, "chunk not aligned to its own size");
+                assert_eq!(size & (size - 1), 0, "chunk size is not a power of two");
+                checked_any = true;
+                cur = unsafe { (*cur).next };
+            }
+        }
+        assert!(checked_any, "the freed region should have produced at least one chunk");
+    }
+
+    // --- Additional guard-rail coverage (beyond the C reference; see this
+    // module's doc for why the C suite cannot observe these itself) --------
+
+    #[test]
+    #[should_panic(expected = "invalid memory range")]
+    fn init_with_end_at_or_before_start_panics() {
+        let mut a = EarlyAllocator {
+            free_lists: [const { null_list_node() }; EARLYALLOC_ORDERS],
+            current: 0,
+            end: 0,
+        };
+        a.init(0x2000, 0x1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "alignment must be a power of 2")]
+    fn alloc_with_a_non_power_of_two_alignment_panics() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+        a.alloc(64, 3);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of memory")]
+    fn allocating_past_the_end_of_the_arena_panics() {
+        let arena = Arena::new();
+        let mut a = new_test_allocator(&arena);
+        let remaining = a.end - a.current;
+        // One allocation larger than everything left in the arena.
+        a.alloc(remaining + EARLYALLOC_LARGEST_CHUNK, EARLYALLOC_LARGEST_CHUNK);
+    }
+}

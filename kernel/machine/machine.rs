@@ -24,6 +24,30 @@
 //!   Returning the raw pointer is therefore safe — callers that
 //!   want to read or mutate fields go through the typed accessors
 //!   in [`CpuLocal`] below, which encapsulate the necessary deref.
+//!
+//! Host-test seam
+//! ---------------
+//!
+//! This is the crate's single concentrated point of `core::arch::asm!`
+//! (see `kernel/lib.rs`'s "Host-test seam" doc section for the full
+//! picture). Every primitive that is *directly* backed by an asm block
+//! below is split `#[cfg(target_arch = "riscv64")]` (the real body,
+//! unchanged) / `#[cfg(not(target_arch = "riscv64"))]` (a host mock) so
+//! that `cargo test --target x86_64-unknown-linux-gnu` can compile this
+//! module too. Each mock is documented at its definition; none of them
+//! attempt to emulate real per-CPU/interrupt semantics — they return
+//! fixed, canned values (or are no-ops), which is sufficient because no
+//! `cfg(test)` code in this crate today calls into `machine` at all (the
+//! two suites that exist, `mm::bits` and `mm::early_allocator`, don't
+//! touch per-CPU state). `smp_mb` is the one exception: a real host
+//! memory fence is just as cheap to provide as a no-op and is strictly
+//! more useful should a future host suite ever need it.
+//!
+//! Everything else in this file (`CpuLocal`, `ThreadRef`, `VfsFileRef`,
+//! the `list_entry_*`/`rb_node_init` pointer-surgery helpers, the
+//! `atomic_*`/`smp_*` helpers) is ordinary portable Rust — plain pointer
+//! dereferences and `core::sync::atomic` operations, nothing
+//! architecture-specific — so none of it needs gating.
 
 #![allow(dead_code)]
 
@@ -39,6 +63,7 @@ const PGSIZE: u64 = 4096;
 // ===========================================================================
 
 /// Read the `tp` (thread pointer) register.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn read_tp() -> u64 {
     let tp: u64;
@@ -51,7 +76,18 @@ pub fn read_tp() -> u64 {
     tp
 }
 
+/// Host mock of [`read_tp`]: there is no riscv `tp`/per-CPU register on
+/// the host, and no `cfg(test)` code in this crate constructs a
+/// [`CpuLocal`] today, so this is a canned `0`. Documented here rather
+/// than silently guessed at, per the host-test seam's mocking policy.
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn read_tp() -> u64 {
+    0
+}
+
 /// Read the `sp` (stack pointer) register.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn read_sp() -> u64 {
     let sp: u64;
@@ -64,7 +100,16 @@ pub fn read_sp() -> u64 {
     sp
 }
 
+/// Host mock of [`read_sp`]: canned `0` (see [`read_tp`]'s mock doc — no
+/// host test reads this value today).
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn read_sp() -> u64 {
+    0
+}
+
 /// Read SSTATUS.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn read_sstatus() -> u64 {
     let v: u64;
@@ -77,7 +122,18 @@ pub fn read_sstatus() -> u64 {
     v
 }
 
+/// Host mock of [`read_sstatus`]: canned `0` (SSTATUS.SIE reads as
+/// clear, i.e. [`intr_get`] reports "interrupts off" by default on the
+/// host — consistent with [`intr_off`]/[`intr_on`] below being no-ops
+/// that never actually flip a bit anywhere).
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn read_sstatus() -> u64 {
+    0
+}
+
 /// Clear SSTATUS.SIE (disable supervisor interrupts).
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn intr_off() {
     // SAFETY: `csrc sstatus, x` clears bits in a supervisor CSR. The
@@ -89,7 +145,15 @@ pub fn intr_off() {
     }
 }
 
+/// Host mock of [`intr_off`]: no-op. There is no interrupt-enable CSR on
+/// the host; combined with [`read_sstatus`]'s canned `0`, "interrupts"
+/// are simply always modeled as off.
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn intr_off() {}
+
 /// Set SSTATUS.SIE (enable supervisor interrupts).
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn intr_on() {
     // SAFETY: see `intr_off`.
@@ -98,6 +162,11 @@ pub fn intr_on() {
             options(nomem, nostack, preserves_flags));
     }
 }
+
+/// Host mock of [`intr_on`]: no-op (see [`intr_off`]'s mock doc).
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn intr_on() {}
 
 /// `true` if SSTATUS.SIE is currently set.
 #[inline(always)]
@@ -129,6 +198,7 @@ pub fn intr_restore(enabled: core::ffi::c_int) {
 }
 
 /// Issue a `wfi` (wait-for-interrupt) instruction.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn wfi() {
     // SAFETY: `wfi` either stalls until an interrupt arrives or is
@@ -138,6 +208,13 @@ pub fn wfi() {
         core::arch::asm!("wfi", options(nomem, nostack, preserves_flags));
     }
 }
+
+/// Host mock of [`wfi`]: no-op. There is no hart to idle on the host,
+/// and a real "block until interrupt" wait would just hang a test
+/// process forever with nothing to ever wake it.
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn wfi() {}
 
 // ===========================================================================
 // Per-CPU access
@@ -264,6 +341,7 @@ impl<'a> CpuLocal<'a> {
 
 /// Hint to the CPU that we are in a busy-wait loop. Emits a `nop`
 /// with `"memory"` clobber, matching the C `cpu_relax()` macro.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn cpu_relax() {
     // SAFETY: `nop` has no side effects beyond the instruction stream.
@@ -272,7 +350,17 @@ pub fn cpu_relax() {
     }
 }
 
+/// Host mock of [`cpu_relax`]: no-op. It is purely a CPU hint on riscv
+/// too (the `options(nostack, preserves_flags)` real body has no
+/// observable effect beyond a compiler memory-ordering barrier), so a
+/// plain no-op is behaviorally equivalent for anything that could run
+/// on the host.
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn cpu_relax() {}
+
 /// Full memory barrier, matching the kernel's `smp_mb()` macro.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn smp_mb() {
     // SAFETY: `fence rw, rw` orders memory operations; it cannot violate
@@ -282,7 +370,19 @@ pub fn smp_mb() {
     }
 }
 
+/// Host mock of [`smp_mb`]: unlike the other mocks in this file, this
+/// one is a *real* implementation, not a canned value — a full
+/// `SeqCst` fence is the host's direct equivalent of riscv's `fence rw,
+/// rw`, is just as cheap to write as a no-op, and remains correct
+/// (indeed useful) for any future host test that exercises concurrency.
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn smp_mb() {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+}
+
 /// Write the `sie` (supervisor interrupt-enable) CSR.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn write_sie(v: u64) {
     // SAFETY: `csrw sie` writes a supervisor CSR; cannot violate
@@ -293,8 +393,15 @@ pub fn write_sie(v: u64) {
     }
 }
 
+/// Host mock of [`write_sie`]: no-op (there is no `sie` CSR on the
+/// host; see [`read_sie`]'s matching canned-`0` mock).
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn write_sie(_v: u64) {}
+
 /// Read the `sie` (supervisor interrupt-enable) CSR. Mirrors the C
 /// `r_sie()` inline.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn read_sie() -> u64 {
     let v: u64;
@@ -305,6 +412,13 @@ pub fn read_sie() -> u64 {
             options(nomem, nostack, preserves_flags));
     }
     v
+}
+
+/// Host mock of [`read_sie`]: canned `0` (see [`write_sie`]'s mock doc).
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn read_sie() -> u64 {
+    0
 }
 
 /// `CPU_FLAG_CRASHED` bit, mirroring `kernel/inc/smp/percpu.h`.
@@ -318,6 +432,7 @@ pub const SIE_SEIE: u64 = 1 << 9;
 
 /// Write the `satp` (supervisor address translation & protection) CSR.
 /// Mirrors the C `w_satp()` inline. Writing `0` disables paging.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn write_satp(v: u64) {
     // SAFETY: writing `satp` cannot itself violate Rust memory safety;
@@ -332,10 +447,17 @@ pub fn write_satp(v: u64) {
     }
 }
 
+/// Host mock of [`write_satp`]: no-op. There is no MMU/`satp` CSR on
+/// the host to program.
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn write_satp(_v: u64) {}
+
 /// Write the `stimecmp` CSR (deadline for the next supervisor-timer
 /// interrupt). Mirrors the C `w_stimecmp()` inline, which uses the raw
 /// CSR number `0x14d` because the mnemonic `stimecmp` is not recognised
 /// by the assembler on this toolchain.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn write_stimecmp(v: u64) {
     // SAFETY: `csrw 0x14d` writes the supervisor timer-compare CSR
@@ -347,7 +469,13 @@ pub fn write_stimecmp(v: u64) {
     }
 }
 
+/// Host mock of [`write_stimecmp`]: no-op (no timer CSR on the host).
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn write_stimecmp(_v: u64) {}
+
 /// Read the `time` CSR (mtime mirror). Mirrors the C `r_time()` inline.
+#[cfg(target_arch = "riscv64")]
 #[inline(always)]
 pub fn read_time() -> u64 {
     let v: u64;
@@ -358,6 +486,18 @@ pub fn read_time() -> u64 {
             options(nomem, nostack, preserves_flags));
     }
     v
+}
+
+/// Host mock of [`read_time`]: canned `0`. A real host time source
+/// (`std::time::Instant`, say) is deliberately not wired in here: `#
+/// ![no_std]` is only lifted for `cfg(test)` builds, and no test today
+/// calls this, so returning a fixed value keeps this mock's contract
+/// (and every timing computation built on top of it, e.g. `tick_ms`)
+/// simple and documented rather than silently time-dependent.
+#[cfg(not(target_arch = "riscv64"))]
+#[inline(always)]
+pub fn read_time() -> u64 {
+    0
 }
 
 /// Sequentially-consistent store to a `thread`'s `state` field.
@@ -906,4 +1046,78 @@ pub fn smp_load_acquire_u64(p: *const u64) -> u64 {
 #[inline(always)]
 pub fn smp_rmb() {
     core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+}
+
+// ===========================================================================
+// Host-test seam smoke tests
+// ===========================================================================
+//
+// These exist to prove the `cfg(target_arch)` seam above actually compiles
+// and behaves as documented on a host build -- they are deliberately narrow
+// (canned-value/no-op checks only) and do not attempt to exercise
+// `CpuLocal`/`ThreadRef`/the per-CPU accessors: those dereference whatever
+// `read_tp()` returns, which the host mock defines as `0` (a null pointer,
+// not a real `cpu_local`) precisely because no `cfg(test)` suite needs a
+// working per-CPU slot today (see the module doc's "Host-test seam"
+// section). Exercising the real per-CPU accessors on the host is left to
+// whichever future suite actually needs it (a later phase).
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_mock_register_reads_return_the_documented_canned_zero() {
+        assert_eq!(read_tp(), 0);
+        assert_eq!(read_sp(), 0);
+        assert_eq!(read_sstatus(), 0);
+        assert_eq!(read_sie(), 0);
+        assert_eq!(read_time(), 0);
+    }
+
+    #[test]
+    fn host_mock_intr_toggle_is_a_noop_and_intr_get_reports_off() {
+        // Arrange/Act: flip both ways: since the host mock never sets any
+        // real bit, `intr_get()` must report "off" no matter what order
+        // these are called in.
+        intr_on();
+        intr_off();
+        assert!(!intr_get());
+
+        intr_off();
+        intr_on();
+        assert!(!intr_get());
+    }
+
+    #[test]
+    fn host_mock_intr_off_save_and_restore_do_not_panic() {
+        let saved = intr_off_save();
+        intr_restore(saved);
+    }
+
+    #[test]
+    fn host_mock_wfi_and_cpu_relax_return_immediately() {
+        // Regression guard: on riscv, `wfi` can legitimately block until an
+        // interrupt arrives. The host mock must be a plain no-op, or this
+        // test would hang forever instead of completing.
+        wfi();
+        cpu_relax();
+    }
+
+    #[test]
+    fn host_mock_smp_mb_is_a_real_fence_and_does_not_panic() {
+        // `smp_mb`'s host mock is the one exception that is a genuine
+        // implementation rather than a canned value (see its doc) --
+        // there's no single-threaded observable to assert on beyond "it
+        // runs to completion".
+        smp_mb();
+    }
+
+    #[test]
+    fn host_mock_csr_writes_accept_any_value_and_are_noops() {
+        write_sie(SIE_SSIE | SIE_STIE | SIE_SEIE);
+        write_satp(0);
+        write_stimecmp(u64::MAX);
+        // Nothing to assert beyond "compiles and returns" -- these are
+        // documented no-ops with no host-observable CSR to read back.
+    }
 }
