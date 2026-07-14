@@ -39,6 +39,28 @@ use crate::proc::xv6_rqport_sched_setattr;
 use crate::proc::xv6_sigport_sigacts_put;
 use crate::proc::xv6_sigport_sigpending_destroy;
 use crate::proc::xv6_sigport_sigpending_init;
+// P3-1B mesh sweep: all three cross top-level-module boundaries (proc's
+// submodules are private, so the fully-qualified submodule path is used
+// rather than risking an ambiguous glob re-export at `crate::<mod>::`
+// level -- see `timer/sched_timer.rs`'s module doc for the `E0659` class
+// this sidesteps).
+use crate::exec::exec;
+use crate::irq::trap::usertrapret;
+use crate::start_kernel::start_kernel_post_init;
+use crate::proc::pid::{__alloc_pid, __free_pid};
+
+/// `pid::proctab_proc_add`/`pid::__proctab_set_initproc` take
+/// `pid::Thread`, a distinct (but layout-identical) opaque marker from
+/// this file's own `bindings::thread` -- reinterpret via thin wrappers,
+/// same precedent as `sysproc.rs`'s `thread_clone`.
+#[inline(always)]
+fn proctab_proc_add(p: *mut thread) {
+    crate::proc::pid::proctab_proc_add(p as *mut c_void as *mut crate::proc::pid::Thread);
+}
+#[inline(always)]
+fn __proctab_set_initproc(p: *mut thread) {
+    crate::proc::pid::__proctab_set_initproc(p as *mut c_void as *mut crate::proc::pid::Thread);
+}
 
 // vm_t typedef
 type vm_t = vm;
@@ -100,11 +122,7 @@ unsafe extern "C" {
     // pid hierarchy
     fn pid_wlock();
     fn pid_wunlock();
-    fn proctab_proc_add(p: *mut thread);
-    fn __alloc_pid() -> c_int;
-    fn __free_pid();
     fn __proctab_get_initproc() -> *mut thread;
-    fn __proctab_set_initproc(p: *mut thread);
 
     // group/session
     safe fn thread_group_alloc_kernel(out: *mut *mut thread_group, hier_id: c_int) -> c_int;
@@ -112,7 +130,6 @@ unsafe extern "C" {
     safe fn thread_group_add(tg: *mut thread_group, p: *mut thread);
     fn thread_group_put(tg: *mut thread_group);
     safe fn pgroup_alloc(hier_id: c_int, parent: *mut c_void) -> *mut c_void;
-    fn pgroup_init(p: *mut thread);
     safe fn pgroup_add_tg(pg: *mut c_void, tg: *mut thread_group) -> c_int;
     safe fn pgroup_add_thread(pg: *mut c_void, p: *mut thread) -> c_int;
     safe fn session_alloc(hier_id: c_int) -> *mut c_void;
@@ -151,9 +168,6 @@ unsafe extern "C" {
     fn vfs_fdtable_put(fdt: *mut vfs_fdtable);
 
     // exec / trap
-    fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *mut *mut c_char) -> c_int;
-    fn usertrapret();
-    fn start_kernel_post_init();
     fn exit(code: c_int) -> !;
 
     // CPU / interrupts (only the cpuid trampoline exists as a real symbol)
@@ -413,8 +427,9 @@ pub extern "C" fn tcb_unlock(p: *mut thread) { tcb_unlock_impl(p) }
 #[no_mangle]
 pub extern "C" fn proc_assert_holding(p: *mut thread) { proc_assert_holding_impl(p) }
 
-#[no_mangle]
-pub extern "C" fn thread_init() { __proctab_init(); }
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn thread_init() { __proctab_init(); }
 
 #[no_mangle]
 pub extern "C" fn attach_child(parent: *mut thread, child: *mut thread) {
@@ -702,8 +717,9 @@ extern "C" fn init_entry(prev: *mut context) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn userinit() {
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn userinit() {
     // See `thread_raw_layout!`'s doc comment: the body below is entirely
     // the macro invocation, which already supplies its own `unsafe`
     // block, so the outer wrap has been removed as redundant.
@@ -716,7 +732,13 @@ pub extern "C" fn userinit() {
         pid_wlock();
         proctab_proc_add(p);
         thread_group_init(p);
-        pgroup_init(p);
+        // SAFETY: `p` is a live `*mut thread` (just created by
+        // `thread_create` above); `crate::proc::pgroup::Thread` is an
+        // opaque `#[repr(C)] struct { _p: [u8; 0] }` marker type standing
+        // in for the exact same underlying object -- reinterpreting the
+        // pointer is sound (same precedent as `sysproc.rs`'s `thread_clone`
+        // wrapper, P3-1B mesh sweep).
+        crate::proc::pgroup_init(p as *mut c_void as *mut crate::proc::pgroup::Thread);
         session_init(p);
         pid_wunlock();
 
@@ -745,8 +767,9 @@ pub extern "C" fn userinit() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn install_user_root() {
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn install_user_root() {
     // See `thread_raw_layout!`'s doc comment: the body below is entirely
     // the macro invocation, which already supplies its own `unsafe`
     // block, so the outer wrap has been removed as redundant.

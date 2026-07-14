@@ -35,7 +35,12 @@ use core::ptr;
 
 use crate::proc::access::is_err_const;
 
-#[repr(C)] struct Thread       { _p: [u8; 0] }
+// `Thread` widened `pub(crate)` (was private-to-module) in the P3-1B mesh
+// sweep so `exec.rs::vfork_done`'s typed wrapper (outside `proc` entirely)
+// can name it when reinterpreting its own `*mut bindings::thread` --
+// otherwise identical zero-field opaque marker, never constructed or
+// dereferenced.
+#[repr(C)] pub(crate) struct Thread { _p: [u8; 0] }
 #[repr(C)] struct ThreadGroup  { _p: [u8; 0] }
 #[repr(C)] struct Session      { _p: [u8; 0] }
 #[repr(C)] struct Pgroup       { _p: [u8; 0] }
@@ -73,7 +78,6 @@ mod raw {
         pub safe fn xv6_pid_rlock();
         pub safe fn xv6_pid_runlock();
         pub safe fn scheduler_yield();
-        pub safe fn __free_pid();
 
         // Field accessors / kernel calls that take raw pointers.
         // SAFETY for every line below: the caller in `ffi::*` enforces
@@ -139,8 +143,21 @@ mod raw {
         pub safe fn vfs_fdtable_put(fdt: *mut VfsFdtable);
         pub safe fn vfs_struct_put(fs: *mut FsStruct);
 
-        pub safe fn proctab_proc_remove(t: *mut Thread);
         pub safe fn get_pid_thread(pid: c_int) -> *mut Thread;
+    }
+
+    // P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this
+    // wave (only caller anywhere in the tree is this file) -- referenced
+    // via a crate path instead of `extern "C"` redeclarations.
+    // `pid::__free_pid` takes/returns nothing, no cast needed;
+    // `pid::proctab_proc_remove` takes `pid::Thread`, a distinct (but
+    // layout-identical) opaque marker from this file's own `Thread` --
+    // reinterpreted via a thin wrapper, same precedent as `sysproc.rs`'s
+    // `thread_clone`.
+    pub(crate) use crate::proc::pid::__free_pid;
+    #[inline(always)]
+    pub fn proctab_proc_remove(t: *mut Thread) {
+        crate::proc::pid::proctab_proc_remove(t as *mut core::ffi::c_void as *mut crate::proc::pid::Thread);
     }
 }
 
@@ -264,8 +281,9 @@ fn vfork_done_impl(p: *mut Thread) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vfork_done(p: *mut Thread) {
+// P3-1B: only caller is `exec.rs` (crate-path `use`, not an `extern`
+// redeclaration) -- demoted.
+pub(crate) extern "C" fn vfork_done(p: *mut Thread) {
     vfork_done_impl(p)
 }
 
@@ -289,8 +307,14 @@ fn reparent_impl(p: *mut Thread) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn reparent(p: *mut Thread) {
+// P3-1B: this public C-ABI wrapper has zero callers anywhere in the tree
+// (grep-verified -- `exit()`/`clone.rs` etc. all call `reparent_impl`
+// directly, never this wrapper). Demoted from `#[no_mangle]`;
+// `#[allow(dead_code)]` documents the gap rather than silently deleting
+// still-plausible public API (matches this wave's `goldfish_rtc_init`/
+// `sched_timer_add` precedent).
+#[allow(dead_code)]
+pub(crate) extern "C" fn reparent(p: *mut Thread) {
     reparent_impl(p)
 }
 
@@ -423,8 +447,9 @@ pub extern "C" fn exit(mut status: c_int) -> ! {
     ffi::panic_msg("exit: __exit_yield should not return");
 }
 
-#[no_mangle]
-pub extern "C" fn wait(addr: u64) -> c_int {
+// P3-1B: only caller is `proc/sysproc.rs::sys_wait` (crate-path `use`, not
+// an `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn wait(addr: u64) -> c_int {
     let p = ffi::current();
     let mut pid: c_int;
     let mut xstate: c_int = 0;
@@ -459,8 +484,9 @@ pub extern "C" fn wait(addr: u64) -> c_int {
     pid
 }
 
-#[no_mangle]
-pub extern "C" fn waitpid(target_pid: c_int, addr: u64, options: c_int) -> c_int {
+// P3-1B: only caller is `proc/sysproc.rs::sys_waitpid` (crate-path `use`,
+// not an `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn waitpid(target_pid: c_int, addr: u64, options: c_int) -> c_int {
     if options & !(WNOHANG | WUNTRACED) != 0 {
         return -EINVAL;
     }

@@ -507,10 +507,18 @@ fn queue_work_impl(wq_p: *mut workqueue, work_p: *mut work_struct) -> bool {
 
 // =========================================================================
 // Public ABI: canonical names AND xv6_wq_pub_* aliases.
+//
+// P3-1B mesh sweep: every `xv6_wq_pub_*` alias below is genuinely dead --
+// zero callers anywhere in the tree (grep-verified). They existed only to
+// mirror the canonical names for the long-deleted `proc_rust_shims.c`'s
+// C-ABI callers; demoted from `#[no_mangle]` rather than deleted, per
+// this wave's "preserve still-plausible public API, don't silently
+// delete" convention (see `goldfish_rtc_init`'s precedent). The file's
+// existing blanket `#![allow(dead_code)]` covers these, so no per-item
+// attribute is added.
 // =========================================================================
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_init_work_struct_ex(
+pub(crate) extern "C" fn xv6_wq_pub_init_work_struct_ex(
     work: *mut work_struct,
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
@@ -518,93 +526,77 @@ pub extern "C" fn xv6_wq_pub_init_work_struct_ex(
     flags: u32,
 ) { init_work_struct_ex_impl(work, func, fault, data, flags) }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_init_work_struct(
+pub(crate) extern "C" fn xv6_wq_pub_init_work_struct(
     work: *mut work_struct,
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
 ) { init_work_struct_ex_impl(work, func, None, data, WORK_STRUCT_DEFAULT_FLAGS) }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_init_work_struct_flags(
+pub(crate) extern "C" fn xv6_wq_pub_init_work_struct_flags(
     work: *mut work_struct,
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
     flags: u32,
 ) { init_work_struct_ex_impl(work, func, None, data, flags) }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_create_work_struct_ex(
+pub(crate) extern "C" fn xv6_wq_pub_create_work_struct_ex(
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
     flags: u32,
 ) -> *mut work_struct { create_work_struct_ex_impl(func, fault, data, flags) }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_create_work_struct(
+pub(crate) extern "C" fn xv6_wq_pub_create_work_struct(
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
 ) -> *mut work_struct {
     create_work_struct_ex_impl(func, None, data, WORK_STRUCT_DEFAULT_FLAGS)
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_create_work_struct_flags(
+pub(crate) extern "C" fn xv6_wq_pub_create_work_struct_flags(
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64,
     flags: u32,
 ) -> *mut work_struct { create_work_struct_ex_impl(func, None, data, flags) }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_free_work_struct(work: *mut work_struct) {
+pub(crate) extern "C" fn xv6_wq_pub_free_work_struct(work: *mut work_struct) {
     free_work_struct_impl(work)
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_workqueue_init() { workqueue_init_impl() }
+pub(crate) extern "C" fn xv6_wq_pub_workqueue_init() { workqueue_init_impl() }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_workqueue_create_with_callbacks(
+pub(crate) extern "C" fn xv6_wq_pub_workqueue_create_with_callbacks(
     name: *const c_char,
     max_active: c_int,
     callbacks: *const workqueue_callbacks,
 ) -> *mut workqueue { workqueue_create_with_callbacks_impl(name, max_active, callbacks) }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_workqueue_create(
+pub(crate) extern "C" fn xv6_wq_pub_workqueue_create(
     name: *const c_char,
     max_active: c_int,
 ) -> *mut workqueue { workqueue_create_with_callbacks_impl(name, max_active, ptr::null()) }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_workqueue_kill(wq: *mut workqueue) -> c_int {
+pub(crate) extern "C" fn xv6_wq_pub_workqueue_kill(wq: *mut workqueue) -> c_int {
     workqueue_kill_impl(wq)
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_queue_work(
+pub(crate) extern "C" fn xv6_wq_pub_queue_work(
     wq: *mut workqueue, work: *mut work_struct,
 ) -> bool { queue_work_impl(wq, work) }
 
-#[no_mangle]
-pub extern "C" fn xv6_wq_pub_workqueue_runtime_smoke_test() {}
+pub(crate) extern "C" fn xv6_wq_pub_workqueue_runtime_smoke_test() {}
 
 // ============== canonical ABI names ====================
-#[no_mangle]
-pub extern "C" fn workqueue_init() { workqueue_init_impl() }
-#[no_mangle]
-pub extern "C" fn workqueue_runtime_smoke_test() {}
+pub(crate) extern "C" fn workqueue_init() { workqueue_init_impl() }
+pub(crate) extern "C" fn workqueue_runtime_smoke_test() {}
 #[no_mangle]
 pub extern "C" fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue {
     workqueue_create_with_callbacks_impl(name, max_active, ptr::null())
 }
-#[no_mangle]
-pub extern "C" fn workqueue_create_with_callbacks(
+pub(crate) extern "C" fn workqueue_create_with_callbacks(
     name: *const c_char, max_active: c_int, callbacks: *const workqueue_callbacks,
 ) -> *mut workqueue { workqueue_create_with_callbacks_impl(name, max_active, callbacks) }
-#[no_mangle]
-pub extern "C" fn workqueue_kill(wq: *mut workqueue) -> c_int { workqueue_kill_impl(wq) }
+pub(crate) extern "C" fn workqueue_kill(wq: *mut workqueue) -> c_int { workqueue_kill_impl(wq) }
 #[no_mangle]
 pub extern "C" fn queue_work(wq: *mut workqueue, work: *mut work_struct) -> bool {
     queue_work_impl(wq, work)
@@ -613,12 +605,10 @@ pub extern "C" fn queue_work(wq: *mut workqueue, work: *mut work_struct) -> bool
 pub extern "C" fn init_work_struct(
     work: *mut work_struct, func: Option<unsafe extern "C" fn(*mut work_struct)>, data: u64,
 ) { init_work_struct_ex_impl(work, func, None, data, WORK_STRUCT_DEFAULT_FLAGS) }
-#[no_mangle]
-pub extern "C" fn init_work_struct_flags(
+pub(crate) extern "C" fn init_work_struct_flags(
     work: *mut work_struct, func: Option<unsafe extern "C" fn(*mut work_struct)>, data: u64, flags: u32,
 ) { init_work_struct_ex_impl(work, func, None, data, flags) }
-#[no_mangle]
-pub extern "C" fn init_work_struct_ex(
+pub(crate) extern "C" fn init_work_struct_ex(
     work: *mut work_struct,
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
@@ -630,12 +620,10 @@ pub extern "C" fn create_work_struct(
 ) -> *mut work_struct {
     create_work_struct_ex_impl(func, None, data, WORK_STRUCT_DEFAULT_FLAGS)
 }
-#[no_mangle]
-pub extern "C" fn create_work_struct_flags(
+pub(crate) extern "C" fn create_work_struct_flags(
     func: Option<unsafe extern "C" fn(*mut work_struct)>, data: u64, flags: u32,
 ) -> *mut work_struct { create_work_struct_ex_impl(func, None, data, flags) }
-#[no_mangle]
-pub extern "C" fn create_work_struct_ex(
+pub(crate) extern "C" fn create_work_struct_ex(
     func: Option<unsafe extern "C" fn(*mut work_struct)>,
     fault: Option<unsafe extern "C" fn(*mut work_struct)>,
     data: u64, flags: u32,

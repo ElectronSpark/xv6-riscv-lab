@@ -1083,6 +1083,13 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 - **Boot gate**: assert `grep -c "init: starting sh"` == 1 AND a `/ $` prompt
   in the console log — do not just tail the log.
 
+- **External VM caution (2026-07-13)**: another project's QEMU VM may be
+  running on this machine. NEVER blanket-kill qemu processes (`pkill
+  qemu-system`, `killall qemu`). Use timeout-bounded foreground QEMU runs
+  (self-terminating); if a kill is unavoidable, match OUR instance only
+  (`pgrep -f 'xv6-riscv/build.*xv6.bin'` or a recorded PID). The single-VM
+  rule applies to our xv6 instances only.
+
 - **Rust style authority (MANDATORY for anyone writing Rust here)**: read
   `/home/es/.claude/skills/rust-skills/SKILL.md` (265 rules; details in
   `rules/*.md` next to it) and apply it to all new/changed Rust. Highest

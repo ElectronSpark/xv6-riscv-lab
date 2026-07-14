@@ -116,8 +116,9 @@ fn panic_pid(msg: &str) -> ! {
 // __proctab_init
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn __proctab_init() {
+// P3-1B: only caller is `proc/thread.rs::thread_init` (already a direct
+// crate-path `use`) -- demoted.
+pub(crate) extern "C" fn __proctab_init() {
     xv6_proctab_init_storage();
 }
 
@@ -130,12 +131,13 @@ pub extern "C" fn __proctab_init() {
 #[no_mangle] pub extern "C" fn pid_rlock()   { xv6_pid_rlock(); }
 #[no_mangle] pub extern "C" fn pid_runlock() { xv6_pid_runlock(); }
 
-#[no_mangle]
-pub extern "C" fn pid_try_lock_upgrade() -> bool {
+// P3-1B: zero callers anywhere in the tree (grep-verified). Demoted from
+// `#[no_mangle]`; the file's blanket `#![allow(dead_code)]` (line 11)
+// already covers these, no per-item attribute needed.
+pub(crate) extern "C" fn pid_try_lock_upgrade() -> bool {
     xv6_pid_try_lock_upgrade() != 0
 }
-#[no_mangle]
-pub extern "C" fn pid_wholding() -> bool {
+pub(crate) extern "C" fn pid_wholding() -> bool {
     xv6_pid_wholding() != 0
 }
 #[no_mangle]
@@ -149,8 +151,10 @@ pub extern "C" fn pid_assert_wholding() {
 // initproc set / get
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn __proctab_set_initproc(p: *mut Thread) {
+// P3-1B: only caller is `proc/thread.rs` (crate-path `use`, casting its
+// own `*mut bindings::thread` to this file's `pub` opaque `Thread` marker
+// -- same precedent as `sysproc.rs`'s `thread_clone` wrapper) -- demoted.
+pub(crate) extern "C" fn __proctab_set_initproc(p: *mut Thread) {
     xv6_pid_wlock();
     if p.is_null() {
         panic_pid("NULL initproc");
@@ -174,13 +178,16 @@ pub extern "C" fn __proctab_get_initproc() -> *mut Thread {
 // __alloc_pid / __free_pid
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn __alloc_pid() -> i32 {
+// P3-1B: callers are `proc/thread.rs` and `proc/clone.rs` (both
+// crate-path `use`, not `extern` redeclarations) -- demoted.
+pub(crate) extern "C" fn __alloc_pid() -> i32 {
     xv6_proctab_alloc_pid_slot()
 }
 
-#[no_mangle]
-pub extern "C" fn __free_pid() {
+// P3-1B: callers are `proc/clone.rs`, `proc/thread.rs`, `proc/exit.rs`,
+// and `proc/proc_shims.rs` (all crate-path `use`, not `extern`
+// redeclarations) -- demoted.
+pub(crate) extern "C" fn __free_pid() {
     if xv6_proctab_allocated_cnt() <= 0 {
         panic_pid("__free_pid: allocated_cnt underflow");
     }
@@ -200,8 +207,11 @@ fn nextpid_advance(pid: i32) {
     xv6_proctab_nextpid_set(np);
 }
 
-#[no_mangle]
-pub extern "C" fn proctab_proc_add(p: *mut Thread) {
+// P3-1B: callers are `proc/clone.rs` and `proc/thread.rs` (both
+// crate-path `use`, casting their own thread-pointer types to this
+// file's `pub` opaque `Thread` marker -- same precedent as
+// `sysproc.rs`'s `thread_clone` wrapper) -- demoted.
+pub(crate) extern "C" fn proctab_proc_add(p: *mut Thread) {
     if xv6_pid_wholding() == 0 {
         panic_pid("pid lock not held");
     }
@@ -245,8 +255,10 @@ pub extern "C" fn get_pid_thread(pid: i32) -> *mut Thread {
     p
 }
 
-#[no_mangle]
-pub extern "C" fn proctab_proc_remove(p: *mut Thread) {
+// P3-1B: callers are `proc/exit.rs` and `proc/proc_shims.rs` (both
+// crate-path `use`, casting their own thread-pointer types to this
+// file's `pub` opaque `Thread` marker) -- demoted.
+pub(crate) extern "C" fn proctab_proc_remove(p: *mut Thread) {
     if xv6_pid_wholding() == 0 {
         panic_pid("pid lock not held");
     }
@@ -270,8 +282,8 @@ pub extern "C" fn procdump() {
     });
 }
 
-#[no_mangle]
-pub extern "C" fn procdump_bt() {
+// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
+pub(crate) extern "C" fn procdump_bt() {
     xv6_procdump_bt_header();
     proc_shims::for_each_proctab_thread(|p| {
         xv6_procdump_bt_one(p as *mut Thread);
@@ -279,8 +291,8 @@ pub extern "C" fn procdump_bt() {
     xv6_procdump_bt_footer();
 }
 
-#[no_mangle]
-pub extern "C" fn procdump_bt_pid(pid: i32) {
+// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
+pub(crate) extern "C" fn procdump_bt_pid(pid: i32) {
     xv6_procdump_bt_pid(pid);
 }
 
@@ -288,8 +300,8 @@ pub extern "C" fn procdump_bt_pid(pid: i32) {
 // procdump_tree / procdump_tree_pid
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn procdump_tree() {
+// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
+pub(crate) extern "C" fn procdump_tree() {
     xv6_print_str(b"Process Tree:\n\0".as_ptr());
     xv6_pid_rlock();
     let initproc = xv6_proctab_initproc_raw();
@@ -302,8 +314,8 @@ pub extern "C" fn procdump_tree() {
     xv6_pid_runlock();
 }
 
-#[no_mangle]
-pub extern "C" fn procdump_tree_pid(target_pid: i32) {
+// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
+pub(crate) extern "C" fn procdump_tree_pid(target_pid: i32) {
     xv6_print_str_d(b"Process Tree (from pid %d):\n\0".as_ptr(), target_pid);
     xv6_pid_rlock();
     let p = xv6_proctab_get_locked(target_pid);
@@ -324,8 +336,8 @@ unsafe extern "C" fn dump_session_cb(s: *mut Session, _arg: *mut c_void) {
     xv6_dump_session(s);
 }
 
-#[no_mangle]
-pub extern "C" fn procdump_sessions() {
+// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
+pub(crate) extern "C" fn procdump_sessions() {
     xv6_print_str(
         b"\n=== Process Hierarchy (Session / PGroup / Process / Thread) ===\n\0"
             .as_ptr(),
@@ -336,8 +348,8 @@ pub extern "C" fn procdump_sessions() {
     xv6_print_str(b"\n=== End Hierarchy ===\n\0".as_ptr());
 }
 
-#[no_mangle]
-pub extern "C" fn procdump_sessions_sid(target_sid: i32) {
+// P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
+pub(crate) extern "C" fn procdump_sessions_sid(target_sid: i32) {
     xv6_print_str_d(b"\n=== Session %d Hierarchy ===\n\0".as_ptr(), target_sid);
     xv6_pid_rlock();
     let leader = get_pid_thread(target_sid);
@@ -360,8 +372,9 @@ pub extern "C" fn procdump_sessions_sid(target_sid: i32) {
 // sys_dumpproc syscall
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn sys_dumpproc() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_dumpproc() -> u64 {
     let mut mode: i32 = 0;
     let mut id: i32 = 0;
     let _ = argint(0, &mut mode);
@@ -386,8 +399,9 @@ pub extern "C" fn sys_dumpproc() -> u64 {
 // instead of the old `xv6_proctab_foreach_rcu` C-callback trampoline.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn proctab_for_each_rcu(
+// P3-1B: zero callers anywhere in the tree (grep-verified) -- see
+// `pid_try_lock_upgrade` above.
+pub(crate) unsafe extern "C" fn proctab_for_each_rcu(
     fnp: unsafe extern "C" fn(*mut Thread, *mut c_void),
     arg: *mut c_void,
 ) {

@@ -41,6 +41,8 @@ use crate::proc::xv6_rqport_rq_set_next_task;
 use crate::proc::xv6_rqport_rq_task_dead;
 use crate::proc::xv6_rqport_rq_trylock_two;
 use crate::proc::xv6_rqport_rq_unlock_two;
+use crate::timer::sched_timer::__do_timer_tick;
+use crate::ipi::ipi_send_single;
 
 // ---------------- thread_state constants --------------------------------
 const THREAD_UNUSED: thread_state = 0;
@@ -70,10 +72,8 @@ unsafe extern "C" {
     fn printf(fmt: *const c_char, ...) -> c_int;
 
     safe fn get_jiffs() -> u64;
-    safe fn ipi_send_single(hartid: c_int, reason: c_int) -> c_int;
 
     fn __swtch_context(cur: *mut context, target: *mut context) -> *mut context;
-    safe fn __do_timer_tick();
 
     fn rb_first_node(root: *mut rb_root) -> *mut rb_node;
     fn rb_next_node(node: *mut rb_node) -> *mut rb_node;
@@ -244,8 +244,9 @@ pub extern "C" fn sleep_lock_irqsave() -> c_int { sleep_lock_irqsave_impl() }
 #[no_mangle]
 pub extern "C" fn sleep_unlock_irqrestore(state: c_int) { sleep_unlock_irqrestore_impl(state) }
 
-#[no_mangle]
-pub extern "C" fn sched_holding() -> c_int { sched_holding_impl() }
+// P3-1B: only cross-file caller is `timer/timer_core.rs::clockintr` (now a
+// direct crate-path `use`, no more `extern` redeclaration) -- demoted.
+pub(crate) fn sched_holding() -> c_int { sched_holding_impl() }
 
 #[inline]
 fn sched_assert_holding() {
@@ -265,8 +266,9 @@ fn scheduler_init_impl() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn scheduler_init() { scheduler_init_impl() }
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn scheduler_init() { scheduler_init_impl() }
 
 // ---------------- pick next ---------------------------------------------
 fn sched_pick_next() -> *mut thread {
@@ -716,8 +718,9 @@ fn sys_dumpchan_impl() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_dumpchan() -> u64 { sys_dumpchan_impl() }
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_dumpchan() -> u64 { sys_dumpchan_impl() }
 
 // ---------------- context switch ----------------------------------------
 fn context_switch_prepare_impl(prev: *mut thread, next: *mut thread) {

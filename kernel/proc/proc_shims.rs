@@ -1071,8 +1071,9 @@ pub extern "C" fn xv6_tg_is_exiting(tg: *mut thread_group) -> c_int {
 // helpers; everything else moves here.)
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn thread_sched_entity(
+// P3-1B: only caller is `proc/sched_idle.rs` (typed thin wrapper there,
+// not an `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn thread_sched_entity(
     t: *mut thread,
 ) -> *mut crate::bindings::sched_entity {
     field_get!(t, sched_entity)
@@ -1335,8 +1336,19 @@ unsafe extern "C" {
     fn xv6_thport_attach_child(parent: *mut thread, child: *mut thread);
     fn xv6_schport_scheduler_yield();
     fn xv6_thport_thread_destroy(p: *mut thread);
-    fn proctab_proc_remove(p: *mut thread);
-    fn __free_pid();
+}
+
+// P3-1B mesh sweep: same-crate `pub(crate)` items as of this wave,
+// referenced via a crate path instead of `extern "C"` redeclarations.
+// `pid::__free_pid` takes/returns nothing, no cast needed;
+// `pid::proctab_proc_remove` takes `pid::Thread`, a distinct (but
+// layout-identical) opaque marker from `crate::bindings::thread` --
+// reinterpreted via a thin wrapper, same precedent as `sysproc.rs`'s
+// `thread_clone`.
+use crate::proc::pid::__free_pid;
+#[inline(always)]
+fn proctab_proc_remove(p: *mut thread) {
+    crate::proc::pid::proctab_proc_remove(p as *mut c_void as *mut crate::proc::pid::Thread);
 }
 
 #[no_mangle]

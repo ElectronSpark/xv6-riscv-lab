@@ -63,8 +63,9 @@ use crate::sync::KSpinlock;
 /// `RISCV_S_TIMER_INTERRUPT` (`kernel/inc/trap.h`).
 const RISCV_S_TIMER_INTERRUPT: u64 = 5;
 
-#[no_mangle]
-pub static mut __clint_timer_irqno: u64 = RISCV_S_TIMER_INTERRUPT;
+// P3-1B: no other file references this symbol (grep-verified across the
+// whole tree) -- demoted from `#[no_mangle]`.
+pub(crate) static mut __clint_timer_irqno: u64 = RISCV_S_TIMER_INTERRUPT;
 
 #[no_mangle]
 pub static mut __timebase_frequency: u64 = 10_000_000;
@@ -89,14 +90,14 @@ fn set_needs_resched() {
 }
 
 // ===========================================================================
-// Externs — proc-module primitives crossed via C-ABI (proc's submodules are
-// private, not reachable through a Rust `use` path from here; see
-// `docs/rustify/phase2_plan.md`'s Wave 8 rule: "declare externs on your
-// side of the boundary").
+// `sched_holding` is a same-crate `pub(crate) fn` as of P3-1B (mesh sweep) --
+// called directly via its crate path instead of its own `extern "C"`
+// redeclaration. `__panic_start`/`__panic_end`/`printf` stay `extern`:
+// defined in `printf.rs`, out of this wave's scope.
 // ===========================================================================
-unsafe extern "C" {
-    pub safe fn sched_holding() -> c_int;
+use crate::proc::sched_holding;
 
+unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
@@ -142,6 +143,8 @@ static TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Rust port of `get_jiffs()`.
 // @TODO: consider overflow (matches the C original's own TODO comment).
+// Kept `#[no_mangle]`: read via `extern` by `mm/pcache.rs` and
+// `lock/rcu_test.rs` (both out of this wave's scope).
 #[no_mangle]
 pub extern "C" fn get_jiffs() -> u64 {
     TICKS.load(Ordering::SeqCst)
@@ -299,8 +302,9 @@ unsafe extern "C" fn clockintr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
 /// # Safety
 /// `timer` must be null or point at caller-owned, writable storage for a
 /// `timer_root` (it is unconditionally zeroed and reinitialized).
-#[no_mangle]
-pub unsafe extern "C" fn timer_init(timer: *mut timer_root) {
+// P3-1B: only caller is `timer/sched_timer.rs::sched_timer_init` (already a
+// direct crate-path `use`, not an extern block) -- demoted.
+pub(crate) unsafe fn timer_init(timer: *mut timer_root) {
     if timer.is_null() {
         return;
     }
@@ -359,8 +363,9 @@ pub unsafe extern "C" fn timer_init(timer: *mut timer_root) {
 /// # Safety
 /// `node` must be null or point at caller-owned, writable storage for a
 /// `timer_node` (it is unconditionally zeroed and reinitialized).
-#[no_mangle]
-pub unsafe extern "C" fn timer_node_init(
+// P3-1B: only caller is `timer/sched_timer.rs` (direct crate-path `use`) --
+// demoted.
+pub(crate) unsafe fn timer_node_init(
     node: *mut timer_node,
     expires: u64,
     callback: Option<unsafe extern "C" fn(*mut timer_node)>,
@@ -388,8 +393,9 @@ pub unsafe extern "C" fn timer_node_init(
 /// `timer` must be null or a live, initialized `timer_root`; `node` must
 /// be null or a live, initialized `timer_node` (via [`timer_node_init`])
 /// not currently linked into any `timer_root`.
-#[no_mangle]
-pub unsafe extern "C" fn timer_add(timer: *mut timer_root, node: *mut timer_node) -> c_int {
+// P3-1B: only caller is `timer/sched_timer.rs` (direct crate-path `use`) --
+// demoted.
+pub(crate) unsafe fn timer_add(timer: *mut timer_root, node: *mut timer_node) -> c_int {
     if timer.is_null() || node.is_null() {
         return neg(crate::bindings::EINVAL);
     }
@@ -467,8 +473,9 @@ unsafe fn timer_remove_unlocked(timer: *mut timer_root, node: *mut timer_node) {
 /// # Safety
 /// `node` must point at a live `timer_node` (matches the C original, which
 /// also does not null-check `node` itself -- only `node->timer`).
-#[no_mangle]
-pub unsafe extern "C" fn timer_remove(node: *mut timer_node) {
+// P3-1B: only caller is `timer/sched_timer.rs` (direct crate-path `use`) --
+// demoted.
+pub(crate) unsafe fn timer_remove(node: *mut timer_node) {
     // SAFETY: caller contract.
     let timer = unsafe { (*node).timer };
     if timer.is_null() {
@@ -489,8 +496,9 @@ pub unsafe extern "C" fn timer_remove(node: *mut timer_node) {
 ///
 /// # Safety
 /// `timer` must be null or a live, initialized `timer_root`.
-#[no_mangle]
-pub unsafe extern "C" fn timer_tick(timer: *mut timer_root, ticks: u64) {
+// P3-1B: only caller is `timer/sched_timer.rs::__do_timer_tick` (direct
+// crate-path `use`) -- demoted.
+pub(crate) unsafe fn timer_tick(timer: *mut timer_root, ticks: u64) {
     if timer.is_null() || ticks == 0 {
         return;
     }

@@ -28,6 +28,7 @@ use crate::proc::scheduler_wakeup_stopped;
 use crate::proc::tg_dequeue_signal;
 use crate::proc::tg_signal_send;
 use crate::proc::tg_sigpending_empty;
+use crate::ipi::ipi_send_single;
 use crate::proc::access::{
     KsigInfoAccess, SchedEntityRef, SigPendingRef, SigactsAccess, SpinLockRef, ThreadAccess,
     ThreadGroupAccess, ThreadSignalAccess, ThreadSignalPtrRef, atomic_dec_unless_i32,
@@ -150,9 +151,6 @@ unsafe extern "C" {
     safe fn tcb_lock(p: *mut thread);
     safe fn tcb_unlock(p: *mut thread);
 
-    // ipi
-    safe fn ipi_send_single(hartid: c_int, reason: c_int) -> c_int;
-
     // exit
     safe fn exit(code: c_int) -> !;
 
@@ -161,12 +159,24 @@ unsafe extern "C" {
 
     // RCU
 
-    // sigframe (defined in trap.c)
-    fn push_sigframe(p: *mut thread, signo: c_int, sa: *mut sigaction_t,
-                     info: *mut ksiginfo_t) -> c_int;
-    fn restore_sigframe(p: *mut thread, ret_uc: *mut UContext) -> c_int;
-
     // thread group helpers (Rust ports in thread_group.rs)
+}
+
+// P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this wave
+// (`irq/trap.rs`, only caller anywhere in the tree is this file) --
+// referenced via a typed thin wrapper instead of an `extern "C"`
+// redeclaration. `irq::trap::Ucontext` and this file's own `UContext`
+// (below) are two independently-written, layout-identical `#[repr(C)]`
+// mirrors of the same C `ucontext_t` -- reinterpreting the pointer is
+// sound, same precedent as `sysproc.rs`'s `thread_clone`/`exec.rs`'s
+// `vfork_done` wrappers from this same wave.
+#[inline(always)]
+fn push_sigframe(p: *mut thread, signo: c_int, sa: *mut sigaction_t, info: *mut ksiginfo_t) -> c_int {
+    crate::irq::trap::push_sigframe(p, signo, sa, info)
+}
+#[inline(always)]
+fn restore_sigframe(p: *mut thread, ret_uc: *mut UContext) -> c_int {
+    crate::irq::trap::restore_sigframe(p, ret_uc as *mut c_void as *mut _)
 }
 
 // ---------- ucontext_t (not in bindings - declare locally) ----------
@@ -704,8 +714,9 @@ pub extern "C" fn sigacts_put(sa: *mut sigacts_t) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn signal_init() {
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn signal_init() {
     raw_sig_abi! {
         slab_cache_init(sigacts_pool(),
             c"sigacts".as_ptr() as *mut c_char,

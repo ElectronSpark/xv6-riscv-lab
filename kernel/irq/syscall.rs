@@ -66,12 +66,36 @@ use crate::machine;
 // reaching through `crate::mm::...` / `crate::proc::...` module paths.
 // ===========================================================================
 
+// P3-1B mesh sweep: the callees below whose defining file is *in scope* for
+// this wave (`proc/sysproc.rs`, `proc/sys_signal.rs`, `proc/pid.rs`,
+// `proc/sched.rs`, `proc/rq.rs`, `exec.rs`, `proc/proc_shims.rs`) are now
+// referenced as plain crate-path items instead of `extern "C"`
+// redeclarations -- their definitions dropped `#[no_mangle]` accordingly
+// (each still keeps its `extern "C" fn() -> u64` *type*, since this table
+// stores them as `SyscallFn` function-pointer values, not calls by name).
+// Everything else here (mm/sysmm.rs, mm/page.rs, mm/pcache.rs,
+// vfs/vfs_syscall.rs, string.rs, mm/vm.rs) is out of this wave's scope and
+// keeps its `extern` declaration untouched.
+use crate::proc::{
+    sys_clone, sys_exit, sys_getpid, sys_getppid, sys_gettid, sys_exit_group, sys_vfork,
+    sys_wait, sys_waitpid, sys_sbrk, sys_sleep, sys_uptime, sys_gettimeofday, sys_nanosleep,
+    sys_uname, sys_kernbase, sys_setpgid, sys_getpgid, sys_setsid, sys_getsid, sys_getrandom,
+    sys_sigprocmask, sys_sigaction, sys_sigpending, sys_sigreturn, sys_pause, sys_kill,
+    sys_tgkill, sys_tkill, sys_sigsuspend, sys_sigwait, sys_dumpproc, sys_dumpchan, sys_dumprq,
+};
+use crate::exec::sys_exec;
+
 unsafe extern "C" {
     // printf.rs panic/print infra
     // printf is variadic, so it cannot be declared `safe`.
     fn printf(fmt: *const c_char, ...) -> c_int;
 
-    // proc/proc_shims.rs
+    // proc/proc_shims.rs. Kept as a local `extern` (not a `crate::proc::`
+    // path): `xv6_panic` isn't being demoted (it has plenty of
+    // out-of-scope callers), and several other `proc/*.rs` files declare
+    // their own separate `xv6_panic` extern item too -- resolving through
+    // `proc/mod.rs`'s glob re-export would hit the same `E0659`
+    // name-ambiguity class documented in `timer/sched_timer.rs`.
     safe fn xv6_panic(msg: *const c_char) -> !;
 
     // string.rs
@@ -82,39 +106,6 @@ unsafe extern "C" {
     safe fn vm_copyinstr(vm_ptr: *mut vm, dst: *mut c_char, srcva: u64, max: u64) -> c_int;
 
     // ---- Syscall implementations already ported to Rust ----
-    // proc/sysproc.rs
-    safe fn sys_clone() -> u64;
-    safe fn sys_exit() -> u64;
-    safe fn sys_getpid() -> u64;
-    safe fn sys_getppid() -> u64;
-    safe fn sys_gettid() -> u64;
-    safe fn sys_exit_group() -> u64;
-    safe fn sys_vfork() -> u64;
-    safe fn sys_wait() -> u64;
-    safe fn sys_waitpid() -> u64;
-    safe fn sys_sbrk() -> u64;
-    safe fn sys_sleep() -> u64;
-    safe fn sys_uptime() -> u64;
-    safe fn sys_gettimeofday() -> u64;
-    safe fn sys_nanosleep() -> u64;
-    safe fn sys_uname() -> u64;
-    safe fn sys_kernbase() -> u64;
-    safe fn sys_setpgid() -> u64;
-    safe fn sys_getpgid() -> u64;
-    safe fn sys_setsid() -> u64;
-    safe fn sys_getsid() -> u64;
-    safe fn sys_getrandom() -> u64;
-    // proc/sys_signal.rs
-    safe fn sys_sigprocmask() -> u64;
-    safe fn sys_sigaction() -> u64;
-    safe fn sys_sigpending() -> u64;
-    safe fn sys_sigreturn() -> u64;
-    safe fn sys_pause() -> u64;
-    safe fn sys_kill() -> u64;
-    safe fn sys_tgkill() -> u64;
-    safe fn sys_tkill() -> u64;
-    safe fn sys_sigsuspend() -> u64;
-    safe fn sys_sigwait() -> u64;
     // mm/sysmm.rs
     safe fn sys_mmap() -> u64;
     safe fn sys_munmap() -> u64;
@@ -123,17 +114,12 @@ unsafe extern "C" {
     safe fn sys_msync() -> u64;
     safe fn sys_mincore() -> u64;
     safe fn sys_madvise() -> u64;
-    // mm/page.rs, proc/pid.rs, proc/sched.rs, mm/pcache.rs, proc/rq.rs
+    // mm/page.rs, mm/pcache.rs
     safe fn sys_memstat() -> u64;
-    safe fn sys_dumpproc() -> u64;
-    safe fn sys_dumpchan() -> u64;
     safe fn sys_dumppcache() -> u64;
-    safe fn sys_dumprq() -> u64;
     safe fn sys_sync() -> u64;
 
     // ---- Syscall implementations still C ----
-    // exec.c
-    safe fn sys_exec() -> u64;
     // vfs/vfs_syscall.c
     safe fn sys_vfs_dup() -> u64;
     safe fn sys_vfs_read() -> u64;
@@ -491,8 +477,9 @@ static SYSCALLS: [Option<SyscallFn>; NSYSCALLS] = build_syscalls();
 /// call (its number is in trapframe register `a7`) and write the return
 /// value back into `a0`. Called from `usertrap()` (`irq/trap.rs`) exactly
 /// where the C original was.
-#[no_mangle]
-pub extern "C" fn syscall() {
+// P3-1B: only caller is `irq/trap.rs::usertrap` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn syscall() {
     let p = machine::current_thread_ptr();
 
     // SAFETY: `p` is the live current thread that just trapped into the

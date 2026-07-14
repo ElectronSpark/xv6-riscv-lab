@@ -286,8 +286,9 @@ pub static mut cpus: CpuLocalArray = CpuLocalArray([ZERO_CPU_LOCAL; NCPU]);
 static CPU_ACTIVE_MASK: AtomicU64 = AtomicU64::new(0);
 
 /// `kernel/ipi/ipi.c`'s `void cpus_init(void)`.
-#[no_mangle]
-pub extern "C" fn cpus_init() {
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn cpus_init() {
     // SAFETY: `memset`s the whole `cpus` array to zero. Sound under the
     // same contract the C relied on: `start_kernel.c` calls this only
     // once, on the boot hart, before any hart (including the boot hart
@@ -325,8 +326,9 @@ fn assert_hartid_in_range(hartid: u64) {
 }
 
 /// `kernel/ipi/ipi.c`'s `void mycpu_init(uint64 hartid, bool trampoline)`.
-#[no_mangle]
-pub extern "C" fn mycpu_init(hartid: u64, trampoline: bool) {
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn mycpu_init(hartid: u64, trampoline: bool) {
     assert_hartid_in_range(hartid);
     // SEQ_CST fetch-or in the C (`atomic_or`); weakest-correct is
     // `Release` -- see the module doc's ordering-map table.
@@ -374,8 +376,11 @@ pub extern "C" fn mycpu_init(hartid: u64, trampoline: bool) {
 /// (`kernel/inc/smp/percpu.h`) is unused too -- preserved for API
 /// completeness / future use, matching the C original's own dead-code
 /// status.
-#[no_mangle]
-pub extern "C" fn get_cpu_active_mask() -> cpumask_t {
+// P3-1B: demoted from `#[no_mangle]`; `#[allow(dead_code)]` documents the
+// gap (matches this wave's `goldfish_rtc_init`/`sched_timer_add`
+// precedent) instead of silently deleting still-plausible public API.
+#[allow(dead_code)]
+pub(crate) extern "C" fn get_cpu_active_mask() -> cpumask_t {
     CPU_ACTIVE_MASK.load(Ordering::Acquire)
 }
 
@@ -398,8 +403,10 @@ const TRAMPOLINE_CPULOCAL: u64 = crate::bindings::MAXVA - PGSIZE * 3;
 static IPI_PENDING: [AtomicU64; NCPU] = [const { AtomicU64::new(0) }; NCPU];
 
 /// `kernel/ipi/ipi.c`'s `int ipi_send_single(int hartid, int reason)`.
-#[no_mangle]
-pub extern "C" fn ipi_send_single(hartid: c_int, reason: c_int) -> c_int {
+// P3-1B: only callers are `proc/sched.rs`, `proc/thread_group.rs`, and
+// `proc/signal.rs` (all crate-path `use`, not `extern` redeclarations) --
+// demoted.
+pub(crate) extern "C" fn ipi_send_single(hartid: c_int, reason: c_int) -> c_int {
     if hartid < 0 || hartid >= NCPU as c_int {
         return neg(crate::bindings::EINVAL);
     }
@@ -424,8 +431,9 @@ pub extern "C" fn ipi_send_single(hartid: c_int, reason: c_int) -> c_int {
 /// silently skips any index that would be out of range, extending the
 /// existing "bits out of bounds are ignored" doc contract rather than
 /// reproducing the memory-corruption UB or introducing a new panic path.
-#[no_mangle]
-pub extern "C" fn ipi_send_mask(hart_mask: u64, hart_mask_base: u64, reason: c_int) -> c_int {
+// P3-1B: no caller anywhere outside this file (`ipi_send_all_but_self`/
+// `ipi_send_all`, both below) -- demoted.
+pub(crate) extern "C" fn ipi_send_mask(hart_mask: u64, hart_mask_base: u64, reason: c_int) -> c_int {
     if reason < 0 || reason >= NR_IPI_REASON {
         return neg(crate::bindings::EINVAL);
     }
@@ -444,8 +452,9 @@ pub extern "C" fn ipi_send_mask(hart_mask: u64, hart_mask_base: u64, reason: c_i
 }
 
 /// `kernel/ipi/ipi.c`'s `int ipi_send_all_but_self(int reason)`.
-#[no_mangle]
-pub extern "C" fn ipi_send_all_but_self(reason: c_int) -> c_int {
+// P3-1B: no caller anywhere outside this file (`ipi_irq_handler`'s
+// `IPI_REASON_CRASH` case, above) -- demoted.
+pub(crate) extern "C" fn ipi_send_all_but_self(reason: c_int) -> c_int {
     let hart_mask: cpumask_t = ((1u64 << NCPU) - 1) & !(1u64 << (machine::cpuid() as u64));
     ipi_send_mask(hart_mask, 0, reason)
 }
@@ -554,8 +563,9 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
 }
 
 /// `kernel/ipi/ipi.c`'s `void ipi_init(void)`.
-#[no_mangle]
-pub extern "C" fn ipi_init() {
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn ipi_init() {
     // Boot-time, single-threaded, before the handler below is even
     // registered -- see the module doc's ordering-map table entry for why
     // this store's ordering is provably unnecessary but kept for fidelity.

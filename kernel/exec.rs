@@ -106,6 +106,25 @@ use crate::bindings::{
     PGSIZE, PROT_EXEC, PROT_READ, PROT_WRITE, USTACKTOP, VMA_FLAG_FILE, VMA_FLAG_GROWSDOWN,
     VMA_FLAG_GROWSUP, VMA_FLAG_USER,
 };
+// P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this wave
+// (only caller anywhere in the tree is this file), referenced directly
+// instead of via their own `extern "C"` redeclarations.
+use crate::proc::sigacts_exec;
+use crate::proc::vfork_done as raw_vfork_done;
+
+/// `proc/exit.rs::vfork_done` takes its own local opaque `Thread` marker
+/// type (`proc::exit::Thread`), not `crate::bindings::thread` -- both are
+/// `#[repr(C)]` zero-sized marker structs standing in for the same
+/// underlying object, so reinterpreting the pointer is sound (same
+/// precedent as `sysproc.rs`'s `thread_clone` wrapper). `Thread` itself
+/// isn't nameable from here (module-private to `proc`, and ambiguous
+/// through `proc`'s glob re-export besides -- `pgroup.rs`/`clone.rs` etc.
+/// each define their own same-named opaque marker); `as _` lets the
+/// compiler infer it from `raw_vfork_done`'s own signature instead.
+#[inline(always)]
+fn vfork_done(p: *mut thread) {
+    raw_vfork_done(p as *mut c_void as *mut _);
+}
 
 // ===========================================================================
 // Externs — every cross-module C-ABI symbol this file calls, declared
@@ -159,11 +178,10 @@ unsafe extern "C" {
     // vfs/fdtable.rs (Wave 15).
     safe fn vfs_fdtable_close_on_exec(fdtable: *mut vfs_fdtable);
 
-    // proc module (kernel/proc/proc_shims.rs, kernel/proc/signal.rs,
-    // kernel/proc/exit.rs).
+    // proc module (kernel/proc/proc_shims.rs). Kept as its own `extern`:
+    // `xv6_current_thread` isn't being demoted (plenty of out-of-scope
+    // callers elsewhere).
     safe fn xv6_current_thread() -> *mut thread;
-    safe fn sigacts_exec(sa: *mut sigacts_t);
-    safe fn vfork_done(p: *mut thread);
 
     // irq/syscall.rs — arg-fetch helpers (`sys_exec` only).
     safe fn argaddr(n: c_int, ip: *mut u64);
@@ -262,8 +280,9 @@ const fn flags2vmperm(flags: u32) -> u64 {
 /// existing address space untouched (the new `vm_t` is built up
 /// out-of-place in `tmp_vm` and only installed into `p->vm` once every
 /// fallible step has succeeded).
-#[no_mangle]
-pub extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *mut *mut c_char) -> c_int {
+// P3-1B: only caller anywhere in the tree is `proc/thread.rs::init_entry`
+// (crate-path `use`, not an `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *mut *mut c_char) -> c_int {
     let stackbase = USTACKTOP - USERSTACK * PGSIZE as u64;
     let mut tmp_vm: *mut vm = ptr::null_mut();
     let mut file: *mut vfs_file = ptr::null_mut();
@@ -695,8 +714,9 @@ pub extern "C" fn exec(path: *mut c_char, argv: *mut *mut c_char, envp: *mut *mu
 // sys_exec — syscall entry point. Parses user arguments and calls exec().
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn sys_exec() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_exec() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut argv: [*mut c_char; MAXARG] = [ptr::null_mut(); MAXARG];
     let mut envp: [*mut c_char; MAXENV] = [ptr::null_mut(); MAXENV];

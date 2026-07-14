@@ -45,8 +45,9 @@ use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
 #[no_mangle]
 pub static mut __goldfish_rtc_mmio_base: u64 = 0x101000;
 
-#[no_mangle]
-pub static mut __goldfish_rtc_irqno: u64 = 11;
+// P3-1B: no other file references this symbol (grep-verified) -- demoted
+// from `#[no_mangle]`.
+pub(crate) static mut __goldfish_rtc_irqno: u64 = 11;
 
 // Goldfish RTC register offsets. The RTC returns time in nanoseconds since
 // the Unix epoch.
@@ -111,8 +112,7 @@ fn rtc_write_reg(offset: u64, value: u32) {
 /// Rust port of `goldfish_rtc_read_ns()`. Reads current time in
 /// nanoseconds since the Unix epoch using a high-low-high read pattern to
 /// handle the low word wrapping mid-read.
-#[no_mangle]
-pub extern "C" fn goldfish_rtc_read_ns() -> u64 {
+pub(crate) extern "C" fn goldfish_rtc_read_ns() -> u64 {
     loop {
         let high = rtc_read_reg(GOLDFISH_RTC_TIME_HIGH);
         let low = rtc_read_reg(GOLDFISH_RTC_TIME_LOW);
@@ -124,8 +124,7 @@ pub extern "C" fn goldfish_rtc_read_ns() -> u64 {
 }
 
 /// Rust port of `goldfish_rtc_read_sec()`.
-#[no_mangle]
-pub extern "C" fn goldfish_rtc_read_sec() -> u64 {
+pub(crate) extern "C" fn goldfish_rtc_read_sec() -> u64 {
     goldfish_rtc_read_ns() / NS_PER_SEC
 }
 
@@ -139,28 +138,24 @@ fn rtc_set_alarm_absolute(alarm_ns: u64) {
 /// Rust port of `goldfish_rtc_set_alarm_ns()`: fire an alarm `ns`
 /// nanoseconds from now. `wrapping_add` mirrors the C original's plain
 /// unsigned `+` (defined wraparound, not UB, for `uint64`).
-#[no_mangle]
-pub extern "C" fn goldfish_rtc_set_alarm_ns(ns: u64) {
+pub(crate) extern "C" fn goldfish_rtc_set_alarm_ns(ns: u64) {
     let now = goldfish_rtc_read_ns();
     rtc_set_alarm_absolute(now.wrapping_add(ns));
 }
 
 /// Rust port of `goldfish_rtc_set_alarm_sec()`. `wrapping_mul` mirrors the
 /// C original's plain unsigned `*`.
-#[no_mangle]
-pub extern "C" fn goldfish_rtc_set_alarm_sec(sec: u64) {
+pub(crate) extern "C" fn goldfish_rtc_set_alarm_sec(sec: u64) {
     goldfish_rtc_set_alarm_ns(sec.wrapping_mul(NS_PER_SEC));
 }
 
 /// Rust port of `goldfish_rtc_clear_alarm()`.
-#[no_mangle]
-pub extern "C" fn goldfish_rtc_clear_alarm() {
+pub(crate) extern "C" fn goldfish_rtc_clear_alarm() {
     rtc_write_reg(GOLDFISH_RTC_ALARM_CLEAR, 1);
 }
 
 /// Rust port of `goldfish_rtc_irq_enable()`.
-#[no_mangle]
-pub extern "C" fn goldfish_rtc_irq_enable(enable: c_int) {
+pub(crate) extern "C" fn goldfish_rtc_irq_enable(enable: c_int) {
     rtc_write_reg(GOLDFISH_RTC_IRQ_ENABLED, if enable != 0 { 1 } else { 0 });
 }
 
@@ -170,8 +165,7 @@ fn rtc_clear_interrupt() {
 }
 
 /// Rust port of `goldfish_rtc_get_alarm_count()`.
-#[no_mangle]
-pub extern "C" fn goldfish_rtc_get_alarm_count() -> u64 {
+pub(crate) extern "C" fn goldfish_rtc_get_alarm_count() -> u64 {
     RTC_ALARM_COUNT.load(Ordering::SeqCst)
 }
 
@@ -196,8 +190,15 @@ unsafe extern "C" fn goldfish_rtc_intr(_irq: c_int, _data: *mut c_void, _dev: *m
 /// arms a periodic 1-second alarm. See the module doc: not called by
 /// anything on the pre-port baseline, and stays that way after this port
 /// (`start_kernel.c` is out of Wave 8's touch scope).
-#[no_mangle]
-pub extern "C" fn goldfish_rtc_init() {
+// P3-1B: no live caller anywhere (see the module doc: the only call site,
+// `start_kernel.c`'s, is commented out and stays that way -- confirmed by
+// this wave's own grep survey). Demoted from `#[no_mangle]`;
+// `#[allow(dead_code)]` documents the gap instead of silently deleting
+// still-plausible public API (matches `timer/sched_timer.rs`'s
+// `sched_timer_add`/`sched_timer_add_deadline` precedent from this same
+// wave).
+#[allow(dead_code)]
+pub(crate) extern "C" fn goldfish_rtc_init() {
     // SAFETY: `goldfish_rtc_init` has no live caller (see the module doc),
     // so there is no concurrent access to guard against in practice; this
     // is a faithful 1:1 port of the C original's non-atomic

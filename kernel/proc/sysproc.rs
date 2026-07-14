@@ -96,17 +96,19 @@ unsafe extern "C" {
 
     // Process / thread primitives.
     pub safe fn exit(status: c_int) -> !;
-    pub safe fn wait(addr: u64) -> c_int;
-    pub safe fn waitpid(pid: c_int, addr: u64, opts: c_int) -> c_int;
-    pub safe fn thread_clone(args: *const CloneArgs) -> c_int;
+    // `thread_group_exit` is declared `-> !` here even though its real
+    // definition (`proc/thread_group.rs`) returns `()` in one path (`p ==
+    // NULL`, unreachable in practice since `current()` is never null) --
+    // pre-existing mismatch, found during the P3-1B mesh sweep, left
+    // untouched (fixing it is a behavior change, out of this wave's
+    // ABI-attributes-only charter); kept as its own `extern` rather than
+    // demoted+converted to a direct call, which would force a resolution.
     pub safe fn thread_group_exit(p: *mut bindings::thread, code: c_int) -> !;
     pub safe fn thread_tgid(p: *mut bindings::thread) -> c_int;
     pub safe fn vm_growheap(vm: *mut bindings::vm, n: i64) -> c_int;
 
     // Time.
-    pub safe fn sleep_ms_interruptible(ms: u64) -> u64;
     pub safe fn get_jiffs() -> u64;
-    pub safe fn goldfish_rtc_read_ns() -> u64;
     pub safe fn signal_pending(p: *mut bindings::thread) -> c_int;
 
     // Strings.
@@ -116,9 +118,7 @@ unsafe extern "C" {
     // RNG.
     pub safe fn random_fill_bytes(buf: *mut u8, len: c_int);
 
-    // Pgroup / session.
-    pub safe fn pgroup_setpgid(pid: c_int, pgid: c_int) -> c_int;
-    pub safe fn pgroup_getpgid(pid: c_int) -> c_int;
+    // Session.
     pub safe fn session_setsid() -> c_int;
     pub safe fn session_getsid(pid: c_int) -> c_int;
 
@@ -129,6 +129,33 @@ unsafe extern "C" {
     static __physical_memory_start: u64;
 }
 
+// P3-1B mesh sweep: the callees below are demoted (no more `#[no_mangle]`)
+// and referenced as plain crate-path items instead of `extern "C"`
+// redeclarations -- each has exactly one caller anywhere in the tree, this
+// file.
+use crate::proc::{wait, waitpid, pgroup_setpgid, pgroup_getpgid};
+use crate::timer::sched_timer::sleep_ms_interruptible;
+use crate::timer::goldfish_rtc::goldfish_rtc_read_ns;
+
+/// `thread_clone`'s real definition (`proc/clone.rs`) takes
+/// `*mut crate::proc::CloneArgs` -- a distinct (but `#[repr(C)]`,
+/// layout-identical) type from this file's own local `CloneArgs` mirror.
+/// Previously bridged via an untyped `extern "C"` redeclaration (which
+/// even had a `*const` vs `*mut` mismatch the ABI boundary papered over);
+/// now a thin typed wrapper, same precedent as `mm/vm_pgtab.rs`'s
+/// `page_alloc`/`__pa_to_page` re-typed wrappers from the P3-1A mesh sweep.
+#[inline(always)]
+fn thread_clone(args: *const CloneArgs) -> c_int {
+    // SAFETY: `CloneArgs` here and `crate::proc::CloneArgs` are both
+    // `#[repr(C)]` with the identical field layout (8 `u64`s, same order --
+    // both mirror `uabi/clone_flags.h`'s `struct clone_args`); reinterpreting
+    // the pointer is sound. `crate::proc::clone::thread_clone` only reads
+    // through this pointer (never writes), so passing it through as `*mut`
+    // is safe despite the `*const` source, matching the pre-existing
+    // extern-declaration's own (looser) contract.
+    crate::proc::thread_clone(args as *mut CloneArgs as *mut crate::proc::CloneArgs)
+}
+
 #[inline(always)]
 fn current() -> *mut bindings::thread { xv6_current_thread() }
 
@@ -136,20 +163,23 @@ fn current() -> *mut bindings::thread { xv6_current_thread() }
 // Syscall implementations.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn sys_exit() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_exit() -> u64 {
     let mut n: c_int = 0;
     argint(0, &mut n);
     exit(n); // does not return
 }
 
-#[no_mangle]
-pub extern "C" fn sys_getpid() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_getpid() -> u64 {
     thread_tgid(current()) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_getppid() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_getppid() -> u64 {
     // SAFETY: `current()` (`xv6_current_thread()`) is the running thread that the
     // currently running thread's pointer (from
     // `xv6_current_thread()`/`current()`) is a kernel-wide invariant: always
@@ -162,8 +192,9 @@ pub extern "C" fn sys_getppid() -> u64 {
     thread_tgid(parent) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_gettid() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_gettid() -> u64 {
     // SAFETY: `current()` (`xv6_current_thread()`) is the running thread that the
     // currently running thread's pointer (from
     // `xv6_current_thread()`/`current()`) is a kernel-wide invariant: always
@@ -171,15 +202,17 @@ pub extern "C" fn sys_gettid() -> u64 {
     unsafe { crate::proc::access::ThreadAccess::assume(current()) }.pid() as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_exit_group() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_exit_group() -> u64 {
     let mut n: c_int = 0;
     argint(0, &mut n);
     thread_group_exit(current(), n);
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfork() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_vfork() -> u64 {
     let args = CloneArgs {
         flags:   CLONE_VM | CLONE_VFORK,
         esignal: SIGCHLD,
@@ -188,8 +221,9 @@ pub extern "C" fn sys_vfork() -> u64 {
     thread_clone(&args) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_clone() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_clone() -> u64 {
     let mut uargs: u64 = 0;
     argaddr(0, &mut uargs);
 
@@ -218,15 +252,17 @@ pub extern "C" fn sys_clone() -> u64 {
     thread_clone(&args) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_wait() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_wait() -> u64 {
     let mut p: u64 = 0;
     argaddr(0, &mut p);
     wait(p) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_waitpid() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_waitpid() -> u64 {
     let mut pid:     c_int = 0;
     let mut opts:    c_int = 0;
     let mut status_addr: u64 = 0;
@@ -236,8 +272,9 @@ pub extern "C" fn sys_waitpid() -> u64 {
     waitpid(pid, status_addr, opts) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_sbrk() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_sbrk() -> u64 {
     let mut n: i64 = 0;
     argint64(0, &mut n);
     // SAFETY: `current()` (`xv6_current_thread()`) is the running thread that the
@@ -255,8 +292,9 @@ pub extern "C" fn sys_sbrk() -> u64 {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sys_sleep() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_sleep() -> u64 {
     let mut n: c_int = 0;
     argint(0, &mut n);
     let n = if n < 0 { 0u64 } else { n as u64 };
@@ -267,11 +305,13 @@ pub extern "C" fn sys_sleep() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_uptime() -> u64 { get_jiffs() }
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_uptime() -> u64 { get_jiffs() }
 
-#[no_mangle]
-pub extern "C" fn sys_gettimeofday() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_gettimeofday() -> u64 {
     let mut tv_addr: u64 = 0;
     let mut tz_addr: u64 = 0;
     argaddr(0, &mut tv_addr);
@@ -293,8 +333,9 @@ pub extern "C" fn sys_gettimeofday() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_nanosleep() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_nanosleep() -> u64 {
     let mut req_addr: u64 = 0;
     let mut rem_addr: u64 = 0;
     argaddr(0, &mut req_addr);
@@ -345,8 +386,9 @@ pub extern "C" fn sys_nanosleep() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_uname() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_uname() -> u64 {
     let mut addr: u64 = 0;
     argaddr(0, &mut addr);
     if addr == 0 {
@@ -367,16 +409,18 @@ pub extern "C" fn sys_uname() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_kernbase() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_kernbase() -> u64 {
     // SAFETY: read of a kernel-image extern variable; address is stable.
     unsafe { __physical_memory_start }
 }
 
 // ---- Process group / session syscalls --------------------------------------
 
-#[no_mangle]
-pub extern "C" fn sys_setpgid() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_setpgid() -> u64 {
     let mut pid:  c_int = 0;
     let mut pgid: c_int = 0;
     argint(0, &mut pid);
@@ -384,25 +428,29 @@ pub extern "C" fn sys_setpgid() -> u64 {
     pgroup_setpgid(pid, pgid) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_getpgid() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_getpgid() -> u64 {
     let mut pid: c_int = 0;
     argint(0, &mut pid);
     pgroup_getpgid(pid) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_setsid() -> u64 { session_setsid() as u64 }
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_setsid() -> u64 { session_setsid() as u64 }
 
-#[no_mangle]
-pub extern "C" fn sys_getsid() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_getsid() -> u64 {
     let mut pid: c_int = 0;
     argint(0, &mut pid);
     session_getsid(pid) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_getrandom() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_getrandom() -> u64 {
     let mut ubuf: u64 = 0;
     let mut len:  c_int = 0;
     argaddr(0, &mut ubuf);

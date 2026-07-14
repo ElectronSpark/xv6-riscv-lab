@@ -425,11 +425,11 @@ fn is_err_or_null<T>(p: *mut T) -> bool {
     (n as isize) < 0 && (n.wrapping_neg() as usize) <= 4095
 }
 
-/// Spawns the workqueue test-suite master kthread. `#[no_mangle]
-/// extern "C"` entry point called from `kernel/start_kernel.rs` under
-/// `#[cfg(feature = "workqueue_test")]`.
-#[no_mangle]
-pub extern "C" fn workqueue_test_launch_tests() {
+/// Spawns the workqueue test-suite master kthread. Entry point called
+/// from `kernel/start_kernel.rs` (crate-path `use`, not an `extern`
+/// redeclaration -- P3-1B mesh sweep) under `#[cfg(feature =
+/// "workqueue_test")]`.
+pub(crate) extern "C" fn workqueue_test_launch_tests() {
     const KERNEL_STACK_ORDER: c_int = 2;
     let np = kthread_create(
         c"workqueue_test_master".as_ptr(),

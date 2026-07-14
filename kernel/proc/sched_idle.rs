@@ -6,7 +6,7 @@
 #![allow(non_upper_case_globals)]
 
 use core::cell::UnsafeCell;
-use core::ffi::c_int;
+use core::ffi::{c_int, c_void};
 use core::ptr::null_mut;
 
 use super::cffi::{
@@ -80,12 +80,17 @@ static IDLE_SCHED_CLASS: SyncCell<SchedClass> = SyncCell::new(SchedClass {
 });
 
 // ---------------------------------------------------------------------------
-// Helper exported from the C proc code: returns `thread->sched_entity`.
-// Tiny C shim avoids replicating the full `struct thread` layout in
-// Rust just to dereference one field.
+// Helper exported from `proc/proc_shims.rs`: returns `thread->sched_entity`.
+// P3-1B: only caller anywhere in the tree is this file -- demoted from
+// `#[no_mangle]`; referenced via a typed thin wrapper since
+// `proc_shims::thread_sched_entity` uses `crate::bindings::{thread,
+// sched_entity}` while this file's `cffi::Thread`/`SchedEntity` are
+// independently-written, layout-identical mirrors (same precedent as
+// `sysproc.rs`'s `thread_clone` wrapper).
 // ---------------------------------------------------------------------------
-unsafe extern "C" {
-    fn thread_sched_entity(t: *mut super::cffi::Thread) -> *mut SchedEntity;
+#[inline(always)]
+unsafe fn thread_sched_entity(t: *mut super::cffi::Thread) -> *mut SchedEntity {
+    crate::proc::proc_shims::thread_sched_entity(t as *mut c_void as *mut _) as *mut c_void as *mut SchedEntity
 }
 
 // ---------------------------------------------------------------------------
@@ -107,8 +112,9 @@ unsafe fn alloc_idle_rqs() {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn init_idle_rq() {
+// P3-1B: only caller is `proc/rq.rs` (already a direct crate-path `use`,
+// not an `extern` redeclaration) -- demoted.
+pub(crate) unsafe extern "C" fn init_idle_rq() {
     cffi::sched_class_register(IDLE_MAJOR_PRIORITY, IDLE_SCHED_CLASS.get());
     alloc_idle_rqs();
 }

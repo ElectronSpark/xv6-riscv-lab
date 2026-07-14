@@ -1022,8 +1022,9 @@ pub unsafe extern "C" fn rq_dump() {
 }
 #[no_mangle] pub extern "C" fn xv6_rqport_rq_dump() { rq_unsafe_call!(rq_dump()) }
 
-#[no_mangle]
-pub extern "C" fn sys_dumprq() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_dumprq() -> u64 {
     rq_unsafe_call!(rq_dump());
     0
 }

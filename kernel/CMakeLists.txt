@@ -633,46 +633,46 @@ set(RUST_FORCE_UNDEFINED
     --undefined=print_thread_backtrace
     --undefined=bt_search
     --undefined=db_break
-    # irq/plic.c port
+    # irq/plic.c port. P3-1B mesh sweep (2026-07-13): `plicinit`/
+    # `plicinithart`/`plic_claim`/`plic_complete`/`plic_enable_irq` are all
+    # called only from other in-scope files via direct crate-path `use`
+    # (`start_kernel.rs`, `irq/irq_core.rs`) -- demoted to `pub(crate)`,
+    # flags removed. `__plic_mmio_base` keeps its flag: still written by
+    # `dev/fdt.rs` (out of scope) and read via `extern` by
+    # `mm/vm_pgtab.rs` (out of scope).
     --undefined=__plic_mmio_base
-    --undefined=plicinit
-    --undefined=plicinithart
-    --undefined=plic_claim
-    --undefined=plic_complete
-    --undefined=plic_enable_irq
-    # irq/irq.c port
-    --undefined=irq_desc_init
+    # irq/irq.c port. P3-1B: `irq_desc_init`/`do_irq` are called only from
+    # other in-scope files via direct crate-path `use` (`start_kernel.rs`,
+    # `irq/trap.rs`) -- demoted, flags removed. `unregister_irq_handler`
+    # has zero callers anywhere (matches the C original) -- demoted with
+    # `#[allow(dead_code)]`, flag removed. `register_irq_handler` keeps
+    # its flag: still called via `extern` by out-of-scope files
+    # (`timer/timer_core.rs`, `timer/goldfish_rtc.rs`, `console.rs`,
+    # `dev/x1_emac.rs`, `e1000.rs`, `virtio_disk.rs`).
     --undefined=register_irq_handler
-    --undefined=unregister_irq_handler
-    --undefined=do_irq
-    # irq/trap.c port (Phase 2 Wave 6) -- kernelvec.S/trampoline.S call
-    # these by symbol name (`call`/`.dword`), kernel/start_kernel.rs
-    # (same-crate Rust since Wave 27) calls trapinit()/trapinithart(),
-    # and proc/{clone,thread}.rs call
-    # usertrapret(); proc/signal.rs calls push_sigframe()/
-    # restore_sigframe(). enter_irq()/exit_irq() are part of trap.h's
-    # declared API surface even though no current caller other than this
-    # file's own kernel_irq()/user_kirq_entrance() reaches them.
-    --undefined=trapinit
-    --undefined=trapinithart
+    # irq/trap.c port (Phase 2 Wave 6). P3-1B mesh sweep: `trapinit`/
+    # `trapinithart` (called from `start_kernel.rs`), `usertrapret`
+    # (called from `proc/{clone,thread}.rs`), `push_sigframe`/
+    # `restore_sigframe` (called from `proc/signal.rs`, via a typed thin
+    # wrapper for the ucontext-mirror-type mismatch), and `enter_irq`/
+    # `exit_irq` (no caller outside this file -- `kernel_irq`/
+    # `user_kirq_entrance`, both below) are now demoted to `pub(crate)`,
+    # all referenced via direct crate-path `use`/wrappers rather than
+    # `extern` redeclarations -- flags removed. `kerneltrap`/`kernel_irq`/
+    # `usertrap`/`user_kirq_entrance` stay: the asm contract
+    # (kernelvec.S's `call kerneltrap`/`call kernel_irq`,
+    # trampoline.S's `.dword usertrap`/`.dword user_kirq_entrance`)
+    # requires these exact link names.
     --undefined=kerneltrap
     --undefined=kernel_irq
-    --undefined=enter_irq
-    --undefined=exit_irq
     --undefined=usertrap
-    --undefined=usertrapret
     --undefined=user_kirq_entrance
-    --undefined=__user_kirq_return
-    --undefined=push_sigframe
-    --undefined=restore_sigframe
-    # irq/syscall.c port (Phase 2 Wave 7) -- kernelvec.S/trampoline.S never
-    # reference these by symbol name, and (with syscall.c gone) nothing in
-    # the remaining C tree references them either: `irq/trap.rs`'s
-    # usertrap() -> syscall() call and the dispatch table's own function-
-    # pointer references to the still-C sys_vfs_*/sys_exec/etc. are both
-    # intra-staticlib (Rust calling Rust), so without these flags the
-    # linker could drop the whole module.
-    --undefined=syscall
+    # irq/syscall.c port (Phase 2 Wave 7). P3-1B: `syscall` is called only
+    # from `irq/trap.rs` (direct crate-path `use`) -- demoted, flag
+    # removed. `fetchaddr`/`fetchstr`/`argraw`/`argint`/`argint64`/
+    # `argaddr`/`argstr` keep their flags: still called via `extern` by
+    # out-of-scope files (`mm/sysmm.rs`, `mm/page.rs`,
+    # `vfs/vfs_syscall.rs`).
     --undefined=fetchaddr
     --undefined=fetchstr
     --undefined=argraw
@@ -681,74 +681,62 @@ set(RUST_FORCE_UNDEFINED
     --undefined=argaddr
     --undefined=argstr
     # timer/timer.c port (Phase 2 Wave 8) -- timer wheel core.
-    # `__clint_timer_irqno`/`__timebase_frequency` have no live C reader
-    # anymore (timer.c deleted); `get_jiffs`/`timer_add`/`timer_remove`/
-    # `timer_tick`/`timer_node_init` are called only by other Rust files
-    # (`timer/sched_timer.rs` intra-module, `lock/*.rs`/`proc/sysproc.rs`
-    # cross-module via their own `extern` declarations) -- without these
-    # flags the linker could drop the whole module. `timer_init` and
-    # `__jiff_ticks` are omitted: `timer_init` is reached transitively from
-    # `sched_timer_init` (forced below) and `__jiff_ticks` is still written
-    # by `dev/fdt.c` (a live C translation unit), which already creates a
-    # real undefined-symbol demand.
-    --undefined=__clint_timer_irqno
+    # P3-1B mesh sweep (2026-07-13): `__clint_timer_irqno` had zero readers
+    # outside this file (grep-verified) -- demoted to `pub(crate)`, flag
+    # removed. `timer_node_init`/`timer_add`/`timer_remove`/`timer_tick`/
+    # `timer_init` are called only from `timer/sched_timer.rs` via a direct
+    # crate-path `use` (already mesh-clean, no `extern` block existed) --
+    # demoted to `pub(crate)`, flags removed; ordinary same-crate
+    # reachability from `sched_timer_init`/`__do_timer_tick` (both still
+    # forced below) keeps them linked in. `get_jiffs`/`__timebase_frequency`
+    # keep their flags: still read via `extern` by out-of-scope files
+    # (`mm/pcache.rs`, `lock/rcu_test.rs`, `lock/spinlock.rs`,
+    # `machine/machine.rs`). `__jiff_ticks` is still written by `dev/fdt.rs`
+    # and `start.rs` (both out of scope), which already creates a real
+    # undefined-symbol demand -- no flag needed for it either (unchanged
+    # from before this wave).
     --undefined=__timebase_frequency
     --undefined=get_jiffs
-    --undefined=timer_node_init
-    --undefined=timer_add
-    --undefined=timer_remove
-    --undefined=timer_tick
     # timer/sched_timer.c port (Phase 2 Wave 8) -- scheduler-tick consumer
-    # + sleep/timeout API. `sched_timer_init`/`sleep_ms` are also called
-    # directly from `kernel/start_kernel.rs` (same-crate Rust since Wave
-    # 27); forced per the plan's "every new public symbol" rule.
-    # `__do_timer_tick`
-    # is called only from `proc/sched.rs`'s own `extern` declaration.
-    --undefined=sched_timer_tick
-    --undefined=__do_timer_tick
+    # + sleep/timeout API. P3-1B mesh sweep: `sched_timer_tick`/
+    # `__do_timer_tick`/`sched_timer_init` (called from `timer_core.rs`/
+    # `proc/sched.rs`/`start_kernel.rs`, all direct crate-path `use`) and
+    # `sched_timer_add_deadline`/`sched_timer_add` (zero callers anywhere,
+    # `#[allow(dead_code)]`) are demoted, flags removed.
+    # `sleep_ms_interruptible` is called only from `proc/sysproc.rs`
+    # (direct crate-path `use`) -- demoted, flag removed. `sched_timer_set`/
+    # `sched_timer_done`/`sleep_ms` keep their flags: still called via
+    # `extern` by out-of-scope files (`lock/{mutex,rwsem,completion,
+    # semaphore}.rs`, `console.rs`, `dev/*.rs`, `vfs/vfs_syscall.rs`, ...).
     --undefined=sched_timer_set
     --undefined=sched_timer_done
     --undefined=sleep_ms
-    --undefined=sleep_ms_interruptible
-    --undefined=sched_timer_init
-    --undefined=sched_timer_add_deadline
-    --undefined=sched_timer_add
     # timer/goldfish_rtc.c port (Phase 2 Wave 8) -- RTC MMIO driver.
-    # `goldfish_rtc_init` has no live caller at all (`kernel/start_kernel.rs`'s
-    # call site is commented out, unchanged since the C original -- see
-    # `goldfish_rtc.rs`'s module doc); the rest are called only from
-    # `proc/sysproc.rs`'s own `extern` declaration (`goldfish_rtc_read_ns`)
-    # or have no external caller yet either.
+    # P3-1B mesh sweep: `__goldfish_rtc_irqno` (zero readers outside this
+    # file), `goldfish_rtc_read_ns`/`_read_sec`/`_set_alarm_ns`/
+    # `_set_alarm_sec`/`_clear_alarm`/`_irq_enable`/`_get_alarm_count`
+    # (called only from `proc/sysproc.rs`/internally) and
+    # `goldfish_rtc_init` (no live caller at all, `#[allow(dead_code)]`,
+    # see this file's module doc) are demoted, flags removed.
+    # `__goldfish_rtc_mmio_base` keeps its flag: still read via `extern`
+    # by `mm/vm_pgtab.rs` (out of scope).
     --undefined=__goldfish_rtc_mmio_base
-    --undefined=__goldfish_rtc_irqno
-    --undefined=goldfish_rtc_read_ns
-    --undefined=goldfish_rtc_read_sec
-    --undefined=goldfish_rtc_set_alarm_ns
-    --undefined=goldfish_rtc_set_alarm_sec
-    --undefined=goldfish_rtc_clear_alarm
-    --undefined=goldfish_rtc_irq_enable
-    --undefined=goldfish_rtc_get_alarm_count
-    --undefined=goldfish_rtc_init
     # ipi/ipi.c port (Phase 2 Wave 9) -- IPI send/receive + per-CPU
-    # bring-up bookkeeping. `ipi_init`/`cpus_init`/`mycpu_init` are called
-    # from `kernel/start_kernel.rs` (same-crate Rust since Wave 27, forced
-    # per the plan's rule); `ipi_send_single`/`ipi_send_all` are called only from
-    # other Rust files' own `extern` declarations
-    # (`proc/sched.rs`/`proc/signal.rs`/`proc/thread_group.rs`,
-    # `printf.rs`); `ipi_send_mask`/`ipi_send_all_but_self` and
-    # `get_cpu_active_mask` have no live caller anywhere yet. `cpus` (the
-    # per-CPU array) is read by `proc/rq.rs`/`lock/rcu.rs`/`irq/trap.rs`/
-    # `mm/vm_pgtab.rs` via their own typed `extern` declarations of the
-    # same symbol. Forced anyway per the plan's "every new public symbol"
-    # rule -- without these flags the linker could drop the whole module.
-    --undefined=ipi_init
-    --undefined=ipi_send_single
-    --undefined=ipi_send_mask
-    --undefined=ipi_send_all_but_self
+    # bring-up bookkeeping. P3-1B mesh sweep: `ipi_init`/`cpus_init`/
+    # `mycpu_init` (called from `start_kernel.rs`, direct crate-path
+    # `use`), `ipi_send_single` (called from `proc/{sched,signal,
+    # thread_group}.rs`, direct crate-path `use`), `ipi_send_mask`/
+    # `ipi_send_all_but_self` (no caller outside this file) and
+    # `get_cpu_active_mask` (zero callers anywhere, `#[allow(dead_code)]`)
+    # are demoted, flags removed. `ipi_send_all` keeps its flag: still
+    # called via `extern` by `printf.rs` (out of scope). `cpus` (the
+    # per-CPU array) keeps its flag: still read via `extern` by
+    # `lock/rcu.rs`/`mm/vm_pgtab.rs` (out of scope; `proc/rq.rs`/
+    # `irq/trap.rs`, in scope, still read it via their own typed `extern`
+    # too -- left untouched, seeing no benefit to converting a read of an
+    # already-forced, already-public static purely for mesh-cosmetic
+    # reasons).
     --undefined=ipi_send_all
-    --undefined=cpus_init
-    --undefined=mycpu_init
-    --undefined=get_cpu_active_mask
     --undefined=cpus
     # tty/termios.c + tty/tty_dev.c + tty/pty.c port (Phase 2 Wave 10).
     # `termios_init_default`/`ttydevinit`/`pty_alloc`/`pty_master_read`/

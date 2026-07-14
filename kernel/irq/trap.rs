@@ -83,6 +83,12 @@ use crate::bindings::{
 };
 use crate::machine;
 use crate::machine::CpuLocal;
+// P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this wave
+// (only caller anywhere in the tree is this file), referenced via their
+// fully-qualified submodule paths rather than `extern "C"`
+// redeclarations.
+use crate::irq::irq_core::do_irq;
+use crate::irq::syscall::syscall;
 
 // ===========================================================================
 // scause / SSTATUS / signal ABI constants (`kernel/inc/trap.h`,
@@ -188,12 +194,6 @@ unsafe extern "C" {
     safe fn exit(status: c_int) -> !;
     safe fn handle_signal();
     safe fn scheduler_yield();
-
-    // irq/irq_core.rs (Wave 5)
-    fn do_irq(tf: *mut trapframe) -> c_int;
-
-    // irq/syscall.c (still C -- Wave 7)
-    safe fn syscall();
 
     // kernelvec.S -- address taken (`w_stvec((uint64)kernelvec)`), never
     // called directly from Rust.
@@ -454,8 +454,9 @@ macro_rules! kpanic {
 /// Rust port of `trapinit()`. Called once, on the boot hart, before any
 /// hart can reach [`usertrapret`] (hard boot-order invariant -- see the
 /// module doc).
-#[no_mangle]
-pub extern "C" fn trapinit() {
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn trapinit() {
     // SAFETY: boot-time, single-hart execution (before any other hart is
     // started and before any `usertrapret()` call anywhere in the
     // kernel); every static/extern touched below is either write-once
@@ -522,8 +523,10 @@ pub extern "C" fn trapinit() {
 
 /// Rust port of `trapinithart()`: set up to take exceptions and traps
 /// while in the kernel.
-#[no_mangle]
-pub extern "C" fn trapinithart() {
+// P3-1B: called internally (`user_kirq_entrance`/`usertrap`, this file)
+// and from `start_kernel.rs` (crate-path `use`, not an `extern`
+// redeclaration) -- demoted.
+pub(crate) extern "C" fn trapinithart() {
     let intr_sp = {
         let cpu = CpuLocal::current();
         // SAFETY: reads this hart's own `intr_sp`, set once for every
@@ -687,8 +690,13 @@ pub extern "C" fn user_kirq_entrance(_ksp: u64, s0: u64) {
 /// Rust port of `__user_kirq_return(uint64 irq_sp, uint64 s0)`: the
 /// `sw_noret_cb_t` callback `__switch_noreturn` jumps to after switching
 /// onto the thread's kernel stack.
-#[no_mangle]
-pub extern "C" fn __user_kirq_return(_irq_sp: u64, _s0: u64) {
+// P3-1B: no caller anywhere outside this file -- referenced only as a
+// fn-pointer value passed to `__switch_noreturn` (asm, `proc/swtch.S`)
+// from `user_kirq_entrance` above, which coerces fine without
+// `#[no_mangle]` (a plain item reference, not a link-name lookup) --
+// demoted; kept as `extern "C" fn` (not a plain `fn`) since its type must
+// still match `unsafe extern "C" fn(u64, u64)` at that coercion site.
+pub(crate) extern "C" fn __user_kirq_return(_irq_sp: u64, _s0: u64) {
     usertrapret();
 }
 
@@ -859,9 +867,13 @@ struct McContext {
     sc_fpregs: RiscvMcFpState,
 }
 
+// `pub(crate)` (was private-to-module) as of the P3-1B mesh sweep, so
+// `proc/signal.rs::restore_sigframe`'s typed wrapper (outside `irq`
+// entirely) can name it when reinterpreting its own, independently
+// written but layout-identical `UContext` mirror.
 #[repr(C)]
 #[derive(Copy, Clone)]
-struct Ucontext {
+pub(crate) struct Ucontext {
     uc_link: *mut Ucontext,
     uc_sigmask: sigset_t,
     uc_stack: stack_t,
@@ -878,8 +890,9 @@ struct Ucontext {
 /// `p`, if non-null, must point at a live `struct thread`; `sa`, if
 /// non-null, at a live `sigaction_t`; `info`, when `SA_SIGINFO` is set,
 /// at a live `ksiginfo_t`.
-#[no_mangle]
-pub extern "C" fn push_sigframe(
+// P3-1B: only caller is `proc/signal.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn push_sigframe(
     p: *mut thread,
     signo: c_int,
     sa: *mut sigaction_t,
@@ -1023,8 +1036,9 @@ pub extern "C" fn push_sigframe(
 /// contract)
 /// `p` must point at a live `struct thread`; `ret_uc`, if non-null, at
 /// writable memory at least `size_of::<Ucontext>()` bytes.
-#[no_mangle]
-pub extern "C" fn restore_sigframe(p: *mut thread, ret_uc: *mut Ucontext) -> c_int {
+// P3-1B: only caller is `proc/signal.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn restore_sigframe(p: *mut thread, ret_uc: *mut Ucontext) -> c_int {
     // SAFETY: see function-level `# Safety`.
     unsafe {
         let sig_ucontext = (*p).signal.sig_ucontext;
@@ -1093,8 +1107,10 @@ pub extern "C" fn restore_sigframe(p: *mut thread, ret_uc: *mut Ucontext) -> c_i
 // ===========================================================================
 
 /// Rust port of `usertrapret()`: return to user space.
-#[no_mangle]
-pub extern "C" fn usertrapret() {
+// P3-1B: only callers are `proc/clone.rs` and `proc/thread.rs` (both
+// crate-path `use crate::irq::trap::usertrapret`, not `extern`
+// redeclarations) -- demoted.
+pub(crate) extern "C" fn usertrapret() {
     let p = machine::current_thread_ptr();
 
     if killed(p) != 0 {
@@ -1238,8 +1254,9 @@ pub extern "C" fn kernel_irq(sp: *mut trapframe, s0: u64) {
 }
 
 /// Rust port of `enter_irq()`.
-#[no_mangle]
-pub extern "C" fn enter_irq() {
+// P3-1B: no caller anywhere outside this file (`kernel_irq`/
+// `user_kirq_entrance`, both below) -- demoted.
+pub(crate) extern "C" fn enter_irq() {
     if cpu_in_itr() {
         // Special-cased rather than routed through `kassert!`: the C
         // `assert(cond, fmt, ...)` here carries a runtime `%d` argument
@@ -1274,8 +1291,9 @@ pub extern "C" fn enter_irq() {
 }
 
 /// Rust port of `exit_irq()`.
-#[no_mangle]
-pub extern "C" fn exit_irq() {
+// P3-1B: no caller anywhere outside this file (`kernel_irq`/
+// `user_kirq_entrance`, both above) -- demoted.
+pub(crate) extern "C" fn exit_irq() {
     intr_depth_dec();
     if intr_depth() == 0 {
         cpu_clear_in_itr();

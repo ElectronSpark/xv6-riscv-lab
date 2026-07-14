@@ -83,6 +83,28 @@ use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::machine;
 
+// P3-1B mesh sweep: each of these is a same-crate `pub(crate)` item as of
+// this wave, with `start_kernel.rs` as its only caller anywhere in the
+// tree (boot-time, called-once entry points) -- referenced via a crate
+// path instead of an `extern "C"` redeclaration. `irq`/`timer`/`ipi`'s
+// submodules are `pub mod` (see their own `mod.rs`), so the
+// fully-qualified submodule path is used, avoiding any glob-re-export
+// ambiguity risk entirely. `proc`'s submodules are private (only visible
+// within `proc`'s own subtree, which `start_kernel.rs` -- a sibling
+// top-level module -- is not part of), so those seven go through
+// `proc/mod.rs`'s `pub use submodule::*;` crate-level re-export instead
+// (verified individually: none of these seven names is defined more than
+// once anywhere under `proc/`, so the glob resolves unambiguously).
+use crate::ipi::{cpus_init, ipi_init, mycpu_init};
+use crate::irq::irq_core::irq_desc_init;
+use crate::irq::plic::{plicinit, plicinithart};
+use crate::irq::trap::{trapinit, trapinithart};
+use crate::proc::{
+    install_user_root, scheduler_init, signal_init, thread_init, userinit, workqueue_init,
+    workqueue_runtime_smoke_test, workqueue_test_launch_tests,
+};
+use crate::timer::sched_timer::sched_timer_init;
+
 // ===========================================================================
 // Early physical-memory bounds — canonical definitions.
 // ===========================================================================
@@ -177,11 +199,6 @@ unsafe extern "C" {
     // vfs/pipe.rs (Wave 14)
     fn pipe_init();
 
-    // ipi.rs (Wave 9) — also owns cpus[]/cpus_init/mycpu_init bring-up.
-    fn cpus_init();
-    fn mycpu_init(hartid: u64, trampoline: bool);
-    fn ipi_init();
-
     // lock/rcu.rs
     fn rcu_init();
     fn rcu_cpu_init(cpu: c_int);
@@ -190,25 +207,15 @@ unsafe extern "C" {
     // dev/dev.rs (Wave 21)
     fn dev_table_init();
 
-    // proc/thread.rs, proc/sched.rs, proc/signal.rs, proc/workqueue.rs
-    fn thread_init();
-    fn scheduler_init();
-    fn workqueue_init();
-    fn userinit();
+    // proc/thread.rs, proc/sched.rs, proc/signal.rs, proc/workqueue.rs.
+    // `idle_thread_init`/`scheduler_yield` stay `extern`: not demoted (each
+    // still has an out-of-scope caller elsewhere -- `vfs/fs.rs` and a wide
+    // cross-crate set respectively).
     fn idle_thread_init();
-    fn install_user_root();
-    fn signal_init();
     fn scheduler_yield();
 
     // tty/tty.rs (Wave 11)
     fn tty_init();
-
-    // irq/irq_core.rs (Wave 5), irq/trap.rs (Wave 6), irq/plic.rs (Wave 5)
-    fn irq_desc_init();
-    fn trapinit();
-    fn trapinithart();
-    fn plicinit();
-    fn plicinithart();
 
     // console.rs (Wave 4)
     fn consoleinit();
@@ -222,8 +229,8 @@ unsafe extern "C" {
     // kernel/bufcache.rs (Wave 22)
     fn binit();
 
-    // timer/sched_timer.rs (Wave 8)
-    fn sched_timer_init();
+    // timer/sched_timer.rs (Wave 8). `sleep_ms` stays `extern`: not
+    // demoted (many out-of-scope callers elsewhere).
     fn sleep_ms(ms: u64);
 
     // dev/x1_emac.rs, dev/x1_sdhci.rs (Wave 25 — Orange-Pi-RV2 only,
@@ -248,15 +255,12 @@ unsafe extern "C" {
 
     // lock/rwsem_test.rs, lock/semaphore_test.rs — always linked in
     // (compiled unconditionally); only the *calls* below are feature-gated.
+    // Stay `extern`: out of this wave's scope (lock/*, mm/*).
     fn rwsem_launch_tests();
     fn semaphore_launch_tests();
-    // proc/workqueue.rs — same story.
-    fn workqueue_runtime_smoke_test();
     // mm/pcache_test.rs (Phase 4) — same story: always linked in, gated
     // call site only.
     fn pcache_launch_tests();
-    // proc/workqueue_test.rs (Phase 4) — same story.
-    fn workqueue_test_launch_tests();
 
     // entry.S — `_entry` label; address taken below for
     // `sbi_start_secondary_harts`, never called directly from Rust.

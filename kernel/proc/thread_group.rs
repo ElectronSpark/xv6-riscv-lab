@@ -35,6 +35,7 @@ use crate::proc::ksiginfo_alloc;
 use crate::proc::xv6_sigport_ksiginfo_free;
 use crate::proc::xv6_sigport_sigacts_lock;
 use crate::proc::xv6_sigport_sigacts_unlock;
+use crate::ipi::ipi_send_single;
 
 // ---------------- constants ----------------------------------------------
 const SLAB_FLAG_STATIC: u64 = 1 << 1;
@@ -73,7 +74,6 @@ unsafe extern "C" {
     // thread group needs these from sibling subsystems
     safe fn get_pid_thread(pid: c_int) -> *mut thread;
     safe fn pgroup_remove_tg(tg: *mut thread_group);
-    safe fn ipi_send_single(hartid: c_int, reason: c_int) -> c_int;
     safe fn exit(code: c_int) -> !;
 
     // pid global rwlock helpers (Rust shims)

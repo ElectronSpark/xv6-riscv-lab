@@ -66,14 +66,16 @@ fn s_enable_base(hart: u32) -> *mut u32 {
 
 /// Core PLIC initialization. Device-specific IRQ priorities are set by
 /// each device's init function via [`plic_enable_irq`].
-#[no_mangle]
-pub extern "C" fn plicinit() {}
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn plicinit() {}
 
 /// Set this hart's S-mode priority threshold to 0 (accept all priorities).
 /// Device-specific IRQ enables are done by each device's init function via
 /// [`plic_enable_irq`].
-#[no_mangle]
-pub extern "C" fn plicinithart() {
+// P3-1B: only callers are `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn plicinithart() {
     let hart = cpuid() as u32;
     // SAFETY: `s_priority_thresh` computes an address inside the PLIC MMIO
     // window, mapped uncached by `kvmmake` (`mm/vm_pgtab.rs`) for the
@@ -87,8 +89,9 @@ pub extern "C" fn plicinithart() {
 /// Ask the PLIC what interrupt we should serve. Returns 0 if none is
 /// pending (spurious interrupt) -- reading this register also claims the
 /// interrupt, so the read must not be reordered/elided.
-#[no_mangle]
-pub extern "C" fn plic_claim() -> c_int {
+// P3-1B: only caller is `irq/irq_core.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn plic_claim() -> c_int {
     let hart = cpuid() as u32;
     // SAFETY: see `plicinithart`; safe to call from any context (including
     // interrupt context) on the owning hart.
@@ -96,8 +99,9 @@ pub extern "C" fn plic_claim() -> c_int {
 }
 
 /// Tell the PLIC we've finished servicing `irq`.
-#[no_mangle]
-pub extern "C" fn plic_complete(irq: c_int) {
+// P3-1B: only caller is `irq/irq_core.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn plic_complete(irq: c_int) {
     let hart = cpuid() as u32;
     // SAFETY: see `plic_claim`.
     unsafe {
@@ -109,8 +113,9 @@ pub extern "C" fn plic_complete(irq: c_int) {
 /// Inlines the one bitmap-bit-set operation this file's C original needed
 /// (`bits_test_and_set_bit32`, see module doc) rather than porting the
 /// wider, otherwise-unused bitmap-helper macro family.
-#[no_mangle]
-pub extern "C" fn plic_enable_irq(irq: c_int) {
+// P3-1B: only caller is `irq/irq_core.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn plic_enable_irq(irq: c_int) {
     let irq = irq as u32;
     let word_index = (irq >> 5) as usize;
     let mask = 1u32 << (irq & 31);

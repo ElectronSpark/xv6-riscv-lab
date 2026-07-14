@@ -68,11 +68,12 @@ pub struct IrqDesc {
 // ===========================================================================
 // Externs.
 // ===========================================================================
-unsafe extern "C" {
-    pub safe fn plic_claim() -> c_int;
-    pub safe fn plic_complete(irq: c_int);
-    pub safe fn plic_enable_irq(irq: c_int);
+// P3-1B mesh sweep: all three are same-crate `pub(crate)` items as of this
+// wave (only caller anywhere in the tree is this file), referenced via
+// their crate path instead of `extern "C"` redeclarations.
+use crate::irq::plic::{plic_claim, plic_complete, plic_enable_irq};
 
+unsafe extern "C" {
     pub safe fn rcu_read_lock();
     pub safe fn rcu_read_unlock();
     pub safe fn call_rcu(head: *mut rcu_head, func: crate::bindings::rcu_callback_t, data: *mut c_void);
@@ -174,8 +175,9 @@ unsafe extern "C" fn rcu_free_irq_desc(data: *mut c_void) {
 }
 
 /// Rust port of `irq_desc_init()`, called once from `start_kernel.c`.
-#[no_mangle]
-pub extern "C" fn irq_desc_init() {
+// P3-1B: only caller is `start_kernel.rs` (crate-path `use`, not an
+// `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn irq_desc_init() {
     const NAME: &[u8] = b"irq_desc\0";
     // SAFETY: `NAME` is a 'static NUL-terminated string; `irq_desc_slab_ptr()`
     // is a unique static not yet touched by anything else at this boot
@@ -262,8 +264,13 @@ pub unsafe extern "C" fn register_irq_handler(irq_num: c_int, desc: *mut IrqDesc
 }
 
 /// Rust port of `unregister_irq_handler()`.
-#[no_mangle]
-pub extern "C" fn unregister_irq_handler(irq_num: c_int) -> c_int {
+// P3-1B: zero callers anywhere in the tree (grep-verified -- matches the
+// C original, which also never called it). Demoted from `#[no_mangle]`;
+// `#[allow(dead_code)]` documents the gap rather than silently deleting
+// still-plausible public API (matches this wave's `goldfish_rtc_init`/
+// `sched_timer_add` precedent).
+#[allow(dead_code)]
+pub(crate) extern "C" fn unregister_irq_handler(irq_num: c_int) -> c_int {
     if !(0..IRQCNT as c_int).contains(&irq_num) {
         return neg(crate::bindings::EINVAL);
     }
@@ -334,8 +341,9 @@ fn do_plic_irq() -> c_int {
 /// # Safety
 /// `tf` must point at a live `struct trapframe` for a trap that is
 /// actually an interrupt (`scause`'s top bit set).
-#[no_mangle]
-pub unsafe extern "C" fn do_irq(tf: *mut trapframe) -> c_int {
+// P3-1B: only caller is `irq/trap.rs` (crate-path `use`, not an `extern`
+// redeclaration) -- demoted.
+pub(crate) unsafe extern "C" fn do_irq(tf: *mut trapframe) -> c_int {
     // SAFETY: `tf` is supplied by the trap-entry asm contract
     // (`kernel/irq/trap.c`); this is the sole dereference in this
     // function, everything else operates on the resulting `scause` value.

@@ -69,9 +69,16 @@ const THREAD_UNINTERRUPTIBLE: thread_state = 6;
 const THREAD_RUNNING: thread_state = 8;
 
 // ===========================================================================
-// Externs — proc-module primitives crossed via C-ABI (see
-// `timer_core.rs`'s module doc for why: proc's submodules are private,
-// unreachable through a Rust `use` path from here).
+// `scheduler_yield`/`wakeup` (proc/sched.rs), `workqueue_create`/
+// `queue_work`/`init_work_struct` (proc/workqueue.rs) and the `slab_*`/
+// `__panic_*`/`printf` group all keep their own `extern "C"` declarations:
+// none of them are being demoted by this wave (each still has a genuine
+// out-of-scope caller elsewhere -- `workqueue_create`/`queue_work`/
+// `init_work_struct` in particular are also declared, as their own
+// separate items, by several other `proc/*.rs` files, so resolving them
+// here via `crate::proc::*` would risk `E0659` name-ambiguity through
+// `proc/mod.rs`'s glob re-exports; not worth the churn for symbols whose
+// ABI isn't changing).
 // ===========================================================================
 unsafe extern "C" {
     pub safe fn scheduler_yield();
@@ -312,17 +319,17 @@ unsafe fn free_sched_timer_work(stw: *mut SchedTimerWork) {
 // ===========================================================================
 
 /// Rust port of `sched_timer_tick()`. Called from `timer_core::clockintr`
-/// (raw ISR context) on the boot hart, once per timer interrupt.
-#[no_mangle]
-pub extern "C" fn sched_timer_tick() {
+/// (raw ISR context) on the boot hart, once per timer interrupt, via a
+/// direct crate-path call (`crate::timer::sched_timer::sched_timer_tick`) --
+/// P3-1B: no other caller anywhere, demoted from `#[no_mangle]`.
+pub(crate) fn sched_timer_tick() {
     SCHED_TICK_CLEAR.store(false, Ordering::Release);
 }
 
 /// Rust port of `__do_timer_tick()`. Called from `proc/sched.rs`'s
-/// `scheduler_yield_inner` (thread context) via its own `extern`
-/// declaration of this symbol, once per `scheduler_yield()`.
-#[no_mangle]
-pub extern "C" fn __do_timer_tick() {
+/// `scheduler_yield_inner` (thread context), now via a direct crate-path
+/// `use` -- P3-1B: demoted from `#[no_mangle]`.
+pub(crate) fn __do_timer_tick() {
     let was_cleared = SCHED_TICK_CLEAR.swap(true, Ordering::Acquire);
     if !was_cleared {
         // SAFETY: `sched_timer_ptr()` is initialized by `sched_timer_init`,
@@ -431,8 +438,9 @@ pub extern "C" fn sleep_ms(ms: u64) {
 /// Sleeps for up to `ms` milliseconds, interruptible by pending signals.
 /// Returns the remaining time in milliseconds (0 if the full duration
 /// elapsed, >0 if woken early).
-#[no_mangle]
-pub extern "C" fn sleep_ms_interruptible(ms: u64) -> u64 {
+// P3-1B: only caller is `proc/sysproc.rs` (in-scope; convert its own
+// `extern` redeclaration to a direct crate-path `use`) -- demoted.
+pub(crate) fn sleep_ms_interruptible(ms: u64) -> u64 {
     if ms == 0 {
         return 0;
     }
@@ -473,8 +481,9 @@ pub extern "C" fn sleep_ms_interruptible(ms: u64) -> u64 {
 /// comment: `idle_thread_init` must run first so `rq_cpu_activate()` has
 /// marked this CPU active before any `workqueue_create` can enqueue a
 /// worker thread).
-#[no_mangle]
-pub extern "C" fn sched_timer_init() {
+// P3-1B: only caller is `start_kernel.rs` (in-scope; convert its own
+// `extern` redeclaration to a direct crate-path `use`) -- demoted.
+pub(crate) fn sched_timer_init() {
     // SAFETY: `sched_timer_ptr()` points at `SCHED_TIMER`'s BSS-zeroed
     // storage, not yet published anywhere else; `timer_init` fully
     // initializes it (including registering the CLINT timer IRQ handler).
@@ -500,8 +509,13 @@ pub extern "C" fn sched_timer_init() {
 /// `callback` (if `Some`) must be safe to invoke later with `data`, from
 /// workqueue-worker thread context, at or after `deadline` (raw `time` CSR
 /// ticks).
-#[no_mangle]
-pub unsafe extern "C" fn sched_timer_add_deadline(
+// P3-1B: zero callers anywhere in the tree (grep-verified, same as the C
+// original -- this API was never wired up beyond `sched_timer_add` below,
+// itself also dead). Demoted from `#[no_mangle]`; `#[allow(dead_code)]`
+// documents the gap rather than silently deleting still-plausible public
+// API (matches `goldfish_rtc_init`'s precedent in this same wave/module).
+#[allow(dead_code)]
+pub(crate) unsafe fn sched_timer_add_deadline(
     callback: Option<unsafe extern "C" fn(*mut c_void)>,
     data: *mut c_void,
     deadline: u64,
@@ -529,8 +543,10 @@ pub unsafe extern "C" fn sched_timer_add_deadline(
 ///
 /// # Safety
 /// Same contract as [`sched_timer_add_deadline`].
-#[no_mangle]
-pub unsafe extern "C" fn sched_timer_add(
+// P3-1B: zero callers anywhere in the tree (grep-verified) -- see
+// `sched_timer_add_deadline`'s comment just above.
+#[allow(dead_code)]
+pub(crate) unsafe fn sched_timer_add(
     callback: Option<unsafe extern "C" fn(*mut c_void)>,
     data: *mut c_void,
     ms: u64,

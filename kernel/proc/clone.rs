@@ -139,7 +139,6 @@ unsafe extern "C" {
     pub safe fn scheduler_wakeup(t: *mut Thread);
     pub safe fn scheduler_yield();
     pub safe fn attach_child(parent: *mut Thread, child: *mut Thread);
-    pub safe fn proctab_proc_add(t: *mut Thread);
     pub safe fn thread_group_add(tg: *mut ThreadGroup, t: *mut Thread);
     pub safe fn thread_group_alloc(t: *mut Thread) -> c_int;
     pub safe fn pgroup_add_tg(pg: *mut Pgroup, tg: *mut ThreadGroup);
@@ -149,12 +148,22 @@ unsafe extern "C" {
     pub safe fn xv6_pid_wlock();
     pub safe fn xv6_pid_wunlock();
 
-    pub safe fn __alloc_pid() -> c_int;
-    pub safe fn __free_pid();
-
-    pub safe fn usertrapret();
     pub safe fn context_switch_finish(prev: *mut Thread, next: *mut Thread, intr: c_int);
     pub safe fn rcu_check_callbacks();
+}
+
+// P3-1B mesh sweep: same-crate `pub(crate)` items as of this wave,
+// referenced via a crate path instead of `extern "C"` redeclarations.
+// `usertrap`/`__alloc_pid`/`__free_pid` are the exact same underlying
+// type on both sides (zero-arg / `c_int`), no cast needed.
+// `proctab_proc_add` takes `pid::Thread`, a distinct (but layout-
+// identical) opaque marker from this file's own `Thread` -- reinterpret
+// via a thin wrapper, same precedent as `sysproc.rs`'s `thread_clone`.
+use crate::irq::trap::usertrapret;
+use crate::proc::pid::{__alloc_pid, __free_pid};
+#[inline(always)]
+fn proctab_proc_add(t: *mut Thread) {
+    crate::proc::pid::proctab_proc_add(t as *mut c_void as *mut crate::proc::pid::Thread);
 }
 
 #[cold]

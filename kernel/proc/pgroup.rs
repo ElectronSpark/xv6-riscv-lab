@@ -231,8 +231,12 @@ pub extern "C" fn pgroup_alloc(
     pg
 }
 
-#[no_mangle]
-pub extern "C" fn pgroup_init(initproc: *mut Thread) {
+// P3-1B: only caller is `proc/thread.rs::init_entry` (via its own `extern`
+// declaration typed `*mut bindings::thread`, a different opaque marker
+// type than this file's local `Thread` -- converted to a typed thin
+// wrapper at the call site, same precedent as `sysproc.rs`'s
+// `thread_clone`) -- demoted.
+pub(crate) extern "C" fn pgroup_init(initproc: *mut Thread) {
     let ret = xv6_pgroup_slab_init();
     if ret != 0 {
         panic_pgroup("Failed to initialize pgroup slab cache");
@@ -345,8 +349,12 @@ pub extern "C" fn pgroup_remove_tg(tg: *mut ThreadGroup) {
     __pgroup_cleanup(pg);
 }
 
-#[no_mangle]
-pub extern "C" fn pgroup_live_dec(pg: *mut Pgroup) {
+// P3-1B: zero callers anywhere in the tree (grep-verified). Demoted from
+// `#[no_mangle]`; `#[allow(dead_code)]` documents the gap (matches this
+// wave's `goldfish_rtc_init`/`sched_timer_add` precedent). Note: the file
+// already carries a blanket `#![allow(dead_code)]` (line 12), so this
+// per-item attribute is documentation, not a functional requirement.
+pub(crate) extern "C" fn pgroup_live_dec(pg: *mut Pgroup) {
     if pg.is_null() {
         return;
     }
@@ -359,8 +367,9 @@ pub extern "C" fn pgroup_live_dec(pg: *mut Pgroup) {
 // Migration
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn pgroup_migrate_tg(
+// P3-1B: only called internally within this file (`pgroup_setpgid`) --
+// demoted.
+pub(crate) extern "C" fn pgroup_migrate_tg(
     tg: *mut ThreadGroup,
     new_pg: *mut Pgroup,
 ) {
@@ -407,8 +416,9 @@ pub extern "C" fn get_pgroup(pgid: i32) -> *mut Pgroup {
 // setpgid / getpgid
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn pgroup_setpgid(pid: i32, pgid: i32) -> i32 {
+// P3-1B: only caller is `proc/sysproc.rs::sys_setpgid` (crate-path `use`,
+// not an `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn pgroup_setpgid(pid: i32, pgid: i32) -> i32 {
     let p = xv6_current_thread();
     let mut pid = pid;
     let mut pgid = pgid;
@@ -497,8 +507,9 @@ pub extern "C" fn pgroup_setpgid(pid: i32, pgid: i32) -> i32 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn pgroup_getpgid(pid: i32) -> i32 {
+// P3-1B: only caller is `proc/sysproc.rs::sys_getpgid` (crate-path `use`,
+// not an `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn pgroup_getpgid(pid: i32) -> i32 {
     if pid == 0 {
         return t_pgid(xv6_current_thread());
     }

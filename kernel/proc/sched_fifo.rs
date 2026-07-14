@@ -222,8 +222,8 @@ fn alloc_fifo_rqs_for_cls(cls_id: c_int) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn init_fifo_rq_range(start_cls_id: c_int, end_cls_id: c_int) {
+// P3-1B: only caller is `init_fifo_rq` (same file) -- demoted.
+pub(crate) extern "C" fn init_fifo_rq_range(start_cls_id: c_int, end_cls_id: c_int) {
     let mut cls = start_cls_id;
     while cls < end_cls_id {
         unsafe { cffi::sched_class_register(cls, FIFO_SCHED_CLASS.get()) };
@@ -232,7 +232,8 @@ pub extern "C" fn init_fifo_rq_range(start_cls_id: c_int, end_cls_id: c_int) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn init_fifo_rq() {
+// P3-1B: only caller is `proc/rq.rs` (already a direct crate-path `use`,
+// not an `extern` redeclaration) -- demoted.
+pub(crate) extern "C" fn init_fifo_rq() {
     init_fifo_rq_range(1, IDLE_MAJOR_PRIORITY);
 }

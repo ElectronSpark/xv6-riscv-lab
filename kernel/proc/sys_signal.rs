@@ -65,8 +65,9 @@ fn current() -> *mut bindings::thread { xv6_current_thread() }
 
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn sys_sigprocmask() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_sigprocmask() -> u64 {
     let mut how:        c_int = 0;
     let mut set_addr:   u64   = 0;
     let mut oldset_addr: u64  = 0;
@@ -96,8 +97,9 @@ pub extern "C" fn sys_sigprocmask() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_sigaction() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_sigaction() -> u64 {
     let mut signum:      c_int = 0;
     let mut act_addr:    u64   = 0;
     let mut oldact_addr: u64   = 0;
@@ -140,8 +142,9 @@ pub extern "C" fn sys_sigaction() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_sigpending() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_sigpending() -> u64 {
     let mut set_addr: u64 = 0;
     argaddr(0, &mut set_addr);
     let mut set: sigset_t = 0;
@@ -156,8 +159,9 @@ pub extern "C" fn sys_sigpending() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_sigreturn() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_sigreturn() -> u64 {
     let ret = sigreturn();
     if ret < 0 { return ret as u64; }
 
@@ -173,8 +177,9 @@ pub extern "C" fn sys_sigreturn() -> u64 {
     unsafe { crate::proc::access::ThreadAccess::assume(p) }.trapframe_a0()
 }
 
-#[no_mangle]
-pub extern "C" fn sys_pause() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_pause() -> u64 {
     let p = current();
     loop {
         xv6_thread_state_set(p, THREAD_INTERRUPTIBLE);
@@ -186,8 +191,9 @@ pub extern "C" fn sys_pause() -> u64 {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sys_kill() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_kill() -> u64 {
     let mut pid: c_int = 0;
     let mut sig: c_int = 0;
     argint(0, &mut pid);
@@ -195,8 +201,9 @@ pub extern "C" fn sys_kill() -> u64 {
     kill(pid, sig) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_tgkill() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_tgkill() -> u64 {
     let mut tgid: c_int = 0;
     let mut tid:  c_int = 0;
     let mut sig:  c_int = 0;
@@ -206,8 +213,9 @@ pub extern "C" fn sys_tgkill() -> u64 {
     tgkill(tgid, tid, sig) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_tkill() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_tkill() -> u64 {
     let mut tid: c_int = 0;
     let mut sig: c_int = 0;
     argint(0, &mut tid);
@@ -215,8 +223,9 @@ pub extern "C" fn sys_tkill() -> u64 {
     tkill(tid, sig) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_sigsuspend() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_sigsuspend() -> u64 {
     let mut mask_addr: u64 = 0;
     argaddr(0, &mut mask_addr);
     if mask_addr == 0 { return (-EINVAL) as u64; }
@@ -229,8 +238,9 @@ pub extern "C" fn sys_sigsuspend() -> u64 {
     sigsuspend(&mask) as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_sigwait() -> u64 {
+// P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
+// dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
+pub(crate) extern "C" fn sys_sigwait() -> u64 {
     let mut set_addr: u64 = 0;
     let mut sig_addr: u64 = 0;
     argaddr(0, &mut set_addr);
