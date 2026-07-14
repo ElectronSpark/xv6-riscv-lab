@@ -81,7 +81,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{
     fs_struct, hlist_bucket_t, hlist_entry_t, hlist_func_t, hlist_t, kobject, list_node_t,
-    mode_t, mutex_t, rwsem_t, slab_cache_t, spinlock_t, thread, vfs_dentry, vfs_fs_type,
+    mutex_t, rwsem_t, slab_cache_t, spinlock_t, thread, vfs_dentry, vfs_fs_type,
     vfs_fs_type_ops, vfs_inode, vfs_inode_ref, vfs_superblock, vfs_superblock_ops, work_struct,
     workqueue, EAGAIN, EALREADY, EBUSY, EEXIST, EINVAL, ENODEV, ENOENT, ENOSPC, ENOTDIR, EPERM,
     RWLOCK_PRIO_READ,
@@ -167,49 +167,23 @@ unsafe extern "C" {
     ) -> *mut work_struct;
     safe fn free_work_struct(work: *mut work_struct);
 
-    // vfs/inode.rs (Wave 13).
-    safe fn __vfs_inode_init(inode: *mut vfs_inode);
-    safe fn vfs_ilock(inode: *mut vfs_inode);
-    safe fn vfs_iunlock(inode: *mut vfs_inode);
-    safe fn vfs_idup(inode: *mut vfs_inode);
-    safe fn vfs_idup_not_zero(inode: *mut vfs_inode) -> bool;
-    safe fn vfs_iput(inode: *mut vfs_inode);
-    safe fn vfs_mkdir(
-        dir: *mut vfs_inode,
-        mode: mode_t,
-        name: *const c_char,
-        name_len: usize,
-    ) -> *mut vfs_inode;
-    safe fn vfs_namei(path: *const c_char, path_len: usize) -> *mut vfs_inode;
-    safe fn vfs_chroot(new_root: *mut vfs_inode) -> c_int;
-
-    // vfs/file.rs (Wave 14).
-    safe fn __vfs_file_init();
-    safe fn __vfs_file_shrink_cache();
-
-    // vfs/fdtable.rs (Wave 15).
-    safe fn __vfs_fdtable_global_init();
-    safe fn vfs_fdtable_init() -> *mut crate::bindings::vfs_fdtable;
-
-    // tmpfs/xv6fs/devtmpfs superblock.c (still C) — filesystem-type
-    // registration + root-mount entry points.
-    safe fn tmpfs_init();
-    safe fn tmpfs_mount_root();
-    safe fn xv6fs_init();
-    safe fn xv6fs_mount_root();
-    safe fn devtmpfs_init();
-    safe fn devtmpfs_post_mount_populate() -> c_int;
-
-    // vfs/vfs_syscall.c (still C, Wave 17) — path-based mount wrapper
-    // used only by `vfs_init`'s /tmp, /dev bring-up.
-    safe fn vfs_mount_path(
-        fstype: *const c_char,
-        target: *const c_char,
-        target_len: c_int,
-        source: *const c_char,
-        source_len: c_int,
-    ) -> c_int;
 }
+
+// P3-1C mesh sweep: every submodule below (`inode`/`file`/`fdtable`/
+// `tmpfs`/`xv6fs`/`devtmpfs`/`vfs_syscall`) is in scope for this wave, so
+// these become plain crate-path imports instead of `extern "C"`
+// redeclarations (all identical signatures -- same `crate::bindings::*`
+// types this file already imports).
+use crate::vfs::devtmpfs::superblock::{devtmpfs_init, devtmpfs_post_mount_populate};
+use crate::vfs::fdtable::{__vfs_fdtable_global_init, vfs_fdtable_init};
+use crate::vfs::file::{__vfs_file_init, __vfs_file_shrink_cache};
+use crate::vfs::inode::{
+    __vfs_inode_init, vfs_chroot, vfs_idup, vfs_idup_not_zero, vfs_ilock, vfs_iunlock, vfs_iput,
+    vfs_mkdir, vfs_namei,
+};
+use crate::vfs::tmpfs::superblock::{tmpfs_init, tmpfs_mount_root};
+use crate::vfs::vfs_syscall::vfs_mount_path;
+use crate::vfs::xv6fs::superblock::{xv6fs_init, xv6fs_mount_root};
 
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`) with
 /// its format arguments dropped — see the module doc's "Style notes" for
@@ -494,8 +468,7 @@ static mut __VFS_DEFERRED_IPUT_WQ: *mut workqueue = ptr::null_mut();
 /// superblock, data, or operations, serving only as the top of the mount
 /// tree. See the module doc for why its embedded lock types are never
 /// `mutex_init`-ed.
-#[no_mangle]
-pub static mut vfs_root_inode: vfs_inode = unsafe { core::mem::zeroed() };
+pub(crate) static mut vfs_root_inode: vfs_inode = unsafe { core::mem::zeroed() };
 
 // ===========================================================================
 // Superblock inode-hash function table (`__vfs_superblock_inode_*` in the
@@ -1056,8 +1029,7 @@ unsafe fn struct_free(fs: *mut fs_struct) {
 /// Mirrors `vfs_init()`.
 ///
 /// Locking: none.
-#[no_mangle]
-pub extern "C" fn vfs_init() {
+pub(crate) extern "C" fn vfs_init() {
     unsafe {
         vfs_rooti_init();
         ln_init(&raw mut VFS_FS_TYPES);
@@ -1168,8 +1140,7 @@ pub extern "C" fn vfs_init() {
 }
 
 /// Mirrors `vfs_get_deferred_iput_wq()`.
-#[no_mangle]
-pub extern "C" fn vfs_get_deferred_iput_wq() -> *mut workqueue {
+pub(crate) extern "C" fn vfs_get_deferred_iput_wq() -> *mut workqueue {
     unsafe { __VFS_DEFERRED_IPUT_WQ }
 }
 
@@ -1205,8 +1176,7 @@ unsafe fn queue_deferred_iput(inode: *mut vfs_inode) {
 /// Mirrors `__vfs_shrink_caches()`. Called from `tmpfs`/`xv6fs` smoketest
 /// C code when checking for leaks; real external linkage in the C
 /// original (declared in `vfs_private.h`, a shared header).
-#[no_mangle]
-pub extern "C" fn __vfs_shrink_caches() {
+pub(crate) extern "C" fn __vfs_shrink_caches() {
     unsafe {
         slab_cache_shrink(&raw mut VFS_SUPERBLOCK_CACHE, 0x7fffffff);
         slab_cache_shrink(&raw mut VFS_FS_TYPE_CACHE, 0x7fffffff);
@@ -1217,8 +1187,7 @@ pub extern "C" fn __vfs_shrink_caches() {
 /// Mirrors `vfs_fs_type_allocate()`.
 ///
 /// Locking: none.
-#[no_mangle]
-pub extern "C" fn vfs_fs_type_allocate() -> *mut vfs_fs_type {
+pub(crate) extern "C" fn vfs_fs_type_allocate() -> *mut vfs_fs_type {
     unsafe {
         let fs_type = slab_alloc(&raw mut VFS_FS_TYPE_CACHE) as *mut vfs_fs_type;
         if fs_type.is_null() {
@@ -1231,16 +1200,14 @@ pub extern "C" fn vfs_fs_type_allocate() -> *mut vfs_fs_type {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_fs_type_free(fs_type: *mut vfs_fs_type) {
+pub(crate) extern "C" fn vfs_fs_type_free(fs_type: *mut vfs_fs_type) {
     unsafe { slab_free(fs_type as *mut c_void) };
 }
 
 /// Mirrors `vfs_register_fs_type()`.
 ///
 /// Locking: caller must hold the mount mutex via [`vfs_mount_lock`].
-#[no_mangle]
-pub extern "C" fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_int {
+pub(crate) extern "C" fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_int {
     unsafe {
         if holding_mutex(&raw mut __MOUNT_MUTEX) == 0 {
             return neg(EPERM);
@@ -1275,8 +1242,7 @@ pub extern "C" fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_int {
 /// Mirrors `vfs_unregister_fs_type()`.
 ///
 /// Locking: caller must hold the mount mutex via [`vfs_mount_lock`].
-#[no_mangle]
-pub extern "C" fn vfs_unregister_fs_type(name: *const c_char) -> c_int {
+pub(crate) extern "C" fn vfs_unregister_fs_type(name: *const c_char) -> c_int {
     unsafe {
         if name.is_null() {
             return neg(EINVAL);
@@ -1295,14 +1261,12 @@ pub extern "C" fn vfs_unregister_fs_type(name: *const c_char) -> c_int {
 }
 
 /// Mirrors `vfs_mount_lock()`.
-#[no_mangle]
-pub extern "C" fn vfs_mount_lock() {
+pub(crate) extern "C" fn vfs_mount_lock() {
     mutex_lock(unsafe { &raw mut __MOUNT_MUTEX });
 }
 
 /// Mirrors `vfs_mount_unlock()`.
-#[no_mangle]
-pub extern "C" fn vfs_mount_unlock() {
+pub(crate) extern "C" fn vfs_mount_unlock() {
     mutex_unlock(unsafe { &raw mut __MOUNT_MUTEX });
 }
 
@@ -1311,8 +1275,7 @@ pub extern "C" fn vfs_mount_unlock() {
  *****************************************************************************/
 
 /// Mirrors `vfs_mount()`.
-#[no_mangle]
-pub extern "C" fn vfs_mount(
+pub(crate) extern "C" fn vfs_mount(
     type_: *const c_char,
     mountpoint: *mut vfs_inode,
     device: *mut vfs_inode,
@@ -1519,8 +1482,7 @@ unsafe fn evict_unused_inodes(sb: *mut vfs_superblock) -> usize {
 }
 
 /// Mirrors `vfs_unmount()`.
-#[no_mangle]
-pub extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
     unsafe {
         if mountpoint.is_null() {
             return neg(EINVAL);
@@ -1649,8 +1611,7 @@ pub extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
 ///
 /// Locking: caller must hold the superblock write lock and the inode
 /// mutex.
-#[no_mangle]
-pub extern "C" fn vfs_make_orphan(inode: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_make_orphan(inode: *mut vfs_inode) -> c_int {
     unsafe {
         if inode.is_null() {
             return neg(EINVAL);
@@ -1698,8 +1659,7 @@ pub extern "C" fn vfs_make_orphan(inode: *mut vfs_inode) -> c_int {
 
 /// Mirrors `__vfs_final_unmount_cleanup()`. Called from `vfs_iput`
 /// (`inode.rs`) when the last orphan inode is freed on a detached fs.
-#[no_mangle]
-pub extern "C" fn __vfs_final_unmount_cleanup(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn __vfs_final_unmount_cleanup(sb: *mut vfs_superblock) {
     unsafe {
         if sb.is_null() {
             return;
@@ -1742,8 +1702,7 @@ pub extern "C" fn __vfs_final_unmount_cleanup(sb: *mut vfs_superblock) {
 }
 
 /// Mirrors `vfs_unmount_lazy()`.
-#[no_mangle]
-pub extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
     unsafe {
         if mountpoint.is_null() {
             return neg(EINVAL);
@@ -1870,8 +1829,7 @@ pub extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
 }
 
 /// Mirrors `vfs_get_mnt_rooti()`.
-#[no_mangle]
-pub extern "C" fn vfs_get_mnt_rooti(
+pub(crate) extern "C" fn vfs_get_mnt_rooti(
     mountpoint: *mut vfs_inode,
     ret_rooti: *mut *mut vfs_inode,
 ) -> c_int {
@@ -1919,24 +1877,21 @@ pub extern "C" fn vfs_get_mnt_rooti(
 }
 
 /// Mirrors `vfs_superblock_rlock()`.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_rlock(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_superblock_rlock(sb: *mut vfs_superblock) {
     if !sb.is_null() {
         unsafe { rwsem_acquire_read(&raw mut (*sb).lock) };
     }
 }
 
 /// Mirrors `vfs_superblock_wlock()`.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_wlock(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_superblock_wlock(sb: *mut vfs_superblock) {
     if !sb.is_null() {
         unsafe { rwsem_acquire_write(&raw mut (*sb).lock) };
     }
 }
 
 /// Mirrors `vfs_superblock_wholding()`.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_wholding(sb: *mut vfs_superblock) -> bool {
+pub(crate) extern "C" fn vfs_superblock_wholding(sb: *mut vfs_superblock) -> bool {
     if sb.is_null() {
         return false;
     }
@@ -1944,16 +1899,14 @@ pub extern "C" fn vfs_superblock_wholding(sb: *mut vfs_superblock) -> bool {
 }
 
 /// Mirrors `vfs_superblock_unlock()`.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_unlock(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_superblock_unlock(sb: *mut vfs_superblock) {
     if !sb.is_null() {
         unsafe { rwsem_release(&raw mut (*sb).lock) };
     }
 }
 
 /// Mirrors `vfs_superblock_spin_lock()`.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_spin_lock(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_superblock_spin_lock(sb: *mut vfs_superblock) {
     unsafe {
         kassert!(!sb.is_null(), "Superblock cannot be NULL when acquiring spinlock");
         spin_lock(&raw mut (*sb).spinlock);
@@ -1961,8 +1914,7 @@ pub extern "C" fn vfs_superblock_spin_lock(sb: *mut vfs_superblock) {
 }
 
 /// Mirrors `vfs_superblock_spin_unlock()`.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_spin_unlock(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_superblock_spin_unlock(sb: *mut vfs_superblock) {
     unsafe {
         kassert!(!sb.is_null(), "Superblock cannot be NULL when releasing spinlock");
         spin_unlock(&raw mut (*sb).spinlock);
@@ -1970,8 +1922,7 @@ pub extern "C" fn vfs_superblock_spin_unlock(sb: *mut vfs_superblock) {
 }
 
 /// Mirrors `vfs_superblock_mountcount_inc()`.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_mountcount_inc(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_superblock_mountcount_inc(sb: *mut vfs_superblock) {
     unsafe {
         kassert!(!sb.is_null(), "Superblock cannot be NULL when incrementing mount count");
         let cnt = sb_mountcount_atomic(sb).fetch_add(1, Ordering::SeqCst) + 1;
@@ -1980,8 +1931,7 @@ pub extern "C" fn vfs_superblock_mountcount_inc(sb: *mut vfs_superblock) {
 }
 
 /// Mirrors `vfs_superblock_mountcount_dec()`.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_mountcount_dec(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_superblock_mountcount_dec(sb: *mut vfs_superblock) {
     unsafe {
         kassert!(!sb.is_null(), "Superblock cannot be NULL when decrementing mount count");
         let cnt = sb_mountcount_atomic(sb).fetch_sub(1, Ordering::SeqCst) - 1;
@@ -1995,8 +1945,7 @@ pub extern "C" fn vfs_superblock_mountcount_dec(sb: *mut vfs_superblock) {
 /// Uses only atomic operations: does not acquire locks, sleep, or
 /// allocate. Critical because `vfs_inode_get_ref()` may call this while
 /// holding the inode lock -- any blocking here would risk deadlock.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_dup(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_superblock_dup(sb: *mut vfs_superblock) {
     unsafe {
         kassert!(!sb.is_null(), "Superblock cannot be NULL when duplicating");
         let ret = sb_refcount_atomic(sb).fetch_add(1, Ordering::SeqCst) + 1;
@@ -2005,8 +1954,7 @@ pub extern "C" fn vfs_superblock_dup(sb: *mut vfs_superblock) {
 }
 
 /// Mirrors `vfs_superblock_put()`.
-#[no_mangle]
-pub extern "C" fn vfs_superblock_put(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_superblock_put(sb: *mut vfs_superblock) {
     unsafe {
         kassert!(!sb.is_null(), "Superblock cannot be NULL when putting");
         kassert!(
@@ -2025,8 +1973,7 @@ pub extern "C" fn vfs_superblock_put(sb: *mut vfs_superblock) {
 }
 
 /// Mirrors `vfs_alloc_inode()`.
-#[no_mangle]
-pub extern "C" fn vfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
     unsafe {
         if sb.is_null() {
             return err_ptr(neg(EINVAL));
@@ -2063,8 +2010,7 @@ pub extern "C" fn vfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
 }
 
 /// Mirrors `vfs_get_inode()`.
-#[no_mangle]
-pub extern "C" fn vfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
     unsafe {
         if sb.is_null() {
             return err_ptr(neg(EINVAL));
@@ -2107,8 +2053,7 @@ pub extern "C" fn vfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_i
 }
 
 /// Mirrors `vfs_sync_superblock()`.
-#[no_mangle]
-pub extern "C" fn vfs_sync_superblock(sb: *mut vfs_superblock, wait: c_int) -> c_int {
+pub(crate) extern "C" fn vfs_sync_superblock(sb: *mut vfs_superblock, wait: c_int) -> c_int {
     unsafe {
         if sb.is_null() {
             return neg(EINVAL);
@@ -2135,8 +2080,7 @@ pub extern "C" fn vfs_sync_superblock(sb: *mut vfs_superblock, wait: c_int) -> c
 /// Mirrors `vfs_get_fs_type()`.
 ///
 /// Locking: caller must hold the mount mutex via [`vfs_mount_lock`].
-#[no_mangle]
-pub extern "C" fn vfs_get_fs_type(name: *const c_char) -> *mut vfs_fs_type {
+pub(crate) extern "C" fn vfs_get_fs_type(name: *const c_char) -> *mut vfs_fs_type {
     unsafe {
         if name.is_null() {
             return ptr::null_mut();
@@ -2156,8 +2100,7 @@ pub extern "C" fn vfs_get_fs_type(name: *const c_char) -> *mut vfs_fs_type {
 /// Mirrors `vfs_put_fs_type()`.
 ///
 /// Locking: caller must hold the mount mutex via [`vfs_mount_lock`].
-#[no_mangle]
-pub extern "C" fn vfs_put_fs_type(fs_type: *mut vfs_fs_type) {
+pub(crate) extern "C" fn vfs_put_fs_type(fs_type: *mut vfs_fs_type) {
     unsafe {
         if fs_type.is_null() {
             return;
@@ -2280,8 +2223,7 @@ unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> *mut vfs_inode {
 }
 
 /// Mirrors `vfs_get_dentry_inode_locked()`.
-#[no_mangle]
-pub extern "C" fn vfs_get_dentry_inode_locked(dentry: *mut vfs_dentry) -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_get_dentry_inode_locked(dentry: *mut vfs_dentry) -> *mut vfs_inode {
     unsafe {
         if dentry.is_null() {
             return err_ptr(neg(EINVAL));
@@ -2303,8 +2245,7 @@ pub extern "C" fn vfs_get_dentry_inode_locked(dentry: *mut vfs_dentry) -> *mut v
 }
 
 /// Mirrors `vfs_get_dentry_inode()`.
-#[no_mangle]
-pub extern "C" fn vfs_get_dentry_inode(dentry: *mut vfs_dentry) -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_get_dentry_inode(dentry: *mut vfs_dentry) -> *mut vfs_inode {
     unsafe {
         if dentry.is_null() {
             return err_ptr(neg(EINVAL));
@@ -2340,8 +2281,7 @@ pub extern "C" fn vfs_get_dentry_inode(dentry: *mut vfs_dentry) -> *mut vfs_inod
 ///
 /// Locking: caller holds the superblock read or write lock for the
 /// entire call. On success, the returned inode is locked.
-#[no_mangle]
-pub extern "C" fn vfs_get_inode_cached(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_get_inode_cached(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
     unsafe {
         if sb.is_null() {
             return err_ptr(neg(EINVAL));
@@ -2385,8 +2325,7 @@ pub extern "C" fn vfs_get_inode_cached(sb: *mut vfs_superblock, ino: u64) -> *mu
 ///
 /// Locking: caller holds the superblock write lock. On success, the
 /// returned inode is locked.
-#[no_mangle]
-pub extern "C" fn vfs_add_inode(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_add_inode(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> *mut vfs_inode {
     unsafe {
         if sb.is_null() || inode.is_null() {
             return err_ptr(neg(EINVAL));
@@ -2439,8 +2378,7 @@ pub extern "C" fn vfs_add_inode(sb: *mut vfs_superblock, inode: *mut vfs_inode) 
 /// Mirrors `vfs_remove_inode()`.
 ///
 /// Locking: caller holds the superblock write lock and the inode mutex.
-#[no_mangle]
-pub extern "C" fn vfs_remove_inode(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_remove_inode(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> c_int {
     unsafe {
         if sb.is_null() || inode.is_null() {
             return neg(EINVAL);
@@ -2485,8 +2423,7 @@ pub extern "C" fn vfs_remove_inode(sb: *mut vfs_superblock, inode: *mut vfs_inod
 }
 
 /// Mirrors `vfs_release_dentry()`.
-#[no_mangle]
-pub extern "C" fn vfs_release_dentry(dentry: *mut vfs_dentry) {
+pub(crate) extern "C" fn vfs_release_dentry(dentry: *mut vfs_dentry) {
     unsafe {
         if dentry.is_null() {
             return;
@@ -2500,8 +2437,7 @@ pub extern "C" fn vfs_release_dentry(dentry: *mut vfs_dentry) {
 }
 
 /// Mirrors `vfs_struct_init()`.
-#[no_mangle]
-pub extern "C" fn vfs_struct_init() -> *mut fs_struct {
+pub(crate) extern "C" fn vfs_struct_init() -> *mut fs_struct {
     unsafe {
         let fs = struct_alloc_init();
         kassert!(!fs.is_null(), "idle_thread_init: failed to create fs_struct");
@@ -2521,8 +2457,7 @@ pub extern "C" fn vfs_struct_init() -> *mut fs_struct {
 }
 
 /// Mirrors `vfs_struct_clone()`.
-#[no_mangle]
-pub extern "C" fn vfs_struct_clone(old_fs: *mut fs_struct, clone_flags: u64) -> *mut fs_struct {
+pub(crate) extern "C" fn vfs_struct_clone(old_fs: *mut fs_struct, clone_flags: u64) -> *mut fs_struct {
     unsafe {
         if old_fs.is_null() {
             return err_ptr(neg(EINVAL));
@@ -2577,8 +2512,7 @@ pub extern "C" fn vfs_struct_clone(old_fs: *mut fs_struct, clone_flags: u64) -> 
 }
 
 /// Mirrors `vfs_struct_put()`.
-#[no_mangle]
-pub extern "C" fn vfs_struct_put(fs: *mut fs_struct) {
+pub(crate) extern "C" fn vfs_struct_put(fs: *mut fs_struct) {
     unsafe {
         if fs.is_null() {
             return;
@@ -2592,8 +2526,7 @@ pub extern "C" fn vfs_struct_put(fs: *mut fs_struct) {
 }
 
 /// Mirrors `vfs_inode_get_ref()`.
-#[no_mangle]
-pub extern "C" fn vfs_inode_get_ref(inode: *mut vfs_inode, r: *mut vfs_inode_ref) -> c_int {
+pub(crate) extern "C" fn vfs_inode_get_ref(inode: *mut vfs_inode, r: *mut vfs_inode_ref) -> c_int {
     unsafe {
         if inode.is_null() || r.is_null() {
             return neg(EINVAL);
@@ -2612,8 +2545,7 @@ pub extern "C" fn vfs_inode_get_ref(inode: *mut vfs_inode, r: *mut vfs_inode_ref
 }
 
 /// Mirrors `vfs_inode_put_ref()`.
-#[no_mangle]
-pub extern "C" fn vfs_inode_put_ref(r: *mut vfs_inode_ref) {
+pub(crate) extern "C" fn vfs_inode_put_ref(r: *mut vfs_inode_ref) {
     unsafe {
         if r.is_null() {
             return;
@@ -2630,8 +2562,7 @@ pub extern "C" fn vfs_inode_put_ref(r: *mut vfs_inode_ref) {
 }
 
 /// Mirrors `vfs_inode_deref()`.
-#[no_mangle]
-pub extern "C" fn vfs_inode_deref(r: *mut vfs_inode_ref) -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_inode_deref(r: *mut vfs_inode_ref) -> *mut vfs_inode {
     if r.is_null() {
         ptr::null_mut()
     } else {
@@ -2738,8 +2669,7 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
 }
 
 /// Mirrors `vfs_dump_sb_inodes()`.
-#[no_mangle]
-pub extern "C" fn vfs_dump_sb_inodes(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn vfs_dump_sb_inodes(sb: *mut vfs_superblock) {
     unsafe {
         if sb.is_null() {
             printf(c"vfs_dump_sb_inodes: NULL superblock\n".as_ptr());
@@ -2766,8 +2696,7 @@ pub extern "C" fn vfs_dump_sb_inodes(sb: *mut vfs_superblock) {
 /// `vfs_superblock.siblings` are both their struct's first field (offset
 /// 0), so these walks cast `list_node_t` pointers directly (see the
 /// hlist-walker section doc for the same reasoning).
-#[no_mangle]
-pub extern "C" fn vfs_dump_inodes() {
+pub(crate) extern "C" fn vfs_dump_inodes() {
     unsafe {
         printf(c"\n=== VFS Inode Dump ===\n".as_ptr());
 

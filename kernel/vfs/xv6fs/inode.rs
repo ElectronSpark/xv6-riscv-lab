@@ -96,14 +96,13 @@ unsafe extern "C" {
     safe fn bread(dev: u32, blockno: u32) -> *mut crate::bindings::buf;
     safe fn brelse(b: *mut crate::bindings::buf);
 
-    // vfs/fs.rs (Wave 16).
-    safe fn vfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode;
-
-    // vfs/inode.rs (Wave 13).
-    safe fn vfs_ilock(inode: *mut vfs_inode);
-    safe fn vfs_iunlock(inode: *mut vfs_inode);
-    safe fn vfs_release_dentry(dentry: *mut vfs_dentry);
 }
+
+// P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;
+// converted from `extern "C"` redeclarations to plain crate-path items
+// (identical signatures).
+use crate::vfs::fs::{vfs_alloc_inode, vfs_release_dentry};
+use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -149,8 +148,7 @@ const DIRENT_SIZE: u32 = core::mem::size_of::<dirent>() as u32;
 /// `ip` must point to a live `xv6fs_inode` whose `vfs_inode.sb` is a live
 /// `xv6fs_superblock`, with a transaction active (caller's contract, same
 /// as the C original).
-#[no_mangle]
-pub extern "C" fn xv6fs_iupdate(ip: *mut xv6fs_inode) {
+pub(crate) extern "C" fn xv6fs_iupdate(ip: *mut xv6fs_inode) {
     // SAFETY: `ip` is live (caller's contract).
     unsafe {
         let xv6_sb = (*ip).vfs_inode.sb as *mut xv6fs_superblock;
@@ -195,8 +193,7 @@ pub extern "C" fn xv6fs_iupdate(ip: *mut xv6fs_inode) {
 }
 
 /// Mirrors `xv6fs_sync_inode()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_sync_inode(inode: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn xv6fs_sync_inode(inode: *mut vfs_inode) -> c_int {
     if inode.is_null() {
         return neg(EINVAL);
     }
@@ -208,8 +205,7 @@ pub extern "C" fn xv6fs_sync_inode(inode: *mut vfs_inode) -> c_int {
 }
 
 /// Mirrors `xv6fs_dirty_inode()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_dirty_inode(inode: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn xv6fs_dirty_inode(inode: *mut vfs_inode) -> c_int {
     if inode.is_null() {
         return neg(EINVAL);
     }
@@ -934,8 +930,7 @@ extern "C" fn __xv6fs_mknod(dir: *mut vfs_inode, mode: mode_t, dev: dev_t, name:
 // ===========================================================================
 
 /// Mirrors `xv6fs_destroy_inode()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_destroy_inode(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn xv6fs_destroy_inode(inode: *mut vfs_inode) {
     if inode.is_null() {
         return;
     }
@@ -973,8 +968,7 @@ pub extern "C" fn xv6fs_destroy_inode(inode: *mut vfs_inode) {
 }
 
 /// Mirrors `xv6fs_free_inode()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_free_inode(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn xv6fs_free_inode(inode: *mut vfs_inode) {
     if inode.is_null() {
         return;
     }
@@ -998,8 +992,7 @@ pub extern "C" fn xv6fs_free_inode(inode: *mut vfs_inode) {
 // ===========================================================================
 
 /// Mirrors `xv6fs_open()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, _f_flags: c_int) -> c_int {
+pub(crate) extern "C" fn xv6fs_open(inode: *mut vfs_inode, file: *mut vfs_file, _f_flags: c_int) -> c_int {
     if inode.is_null() || file.is_null() {
         return neg(EINVAL);
     }

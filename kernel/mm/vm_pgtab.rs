@@ -68,6 +68,19 @@ mod ffi {
     // `__panic_start`/`__panic_end` are declared once in `crate::mm::cffi`.
     pub use crate::mm::cffi::raw::{__panic_start, __panic_end};
 
+    // P3-1C mesh sweep: `uart.rs` is in scope for this wave; its
+    // `__uart0_mmio_base` is now referenced via crate path. It's a
+    // `static mut` (single boot-time writer, `dev/fdt.rs`, before
+    // secondary harts start -- same convention as the FDT-published
+    // globals above), so this file's `pub safe static` extern mirror (which
+    // could be read without `unsafe`) becomes a thin accessor fn instead of
+    // a bare re-export.
+    pub fn __uart0_mmio_base() -> u64 {
+        // SAFETY: read-only after boot-time FDT probe, which completes
+        // before this function's only caller (`kvmmake`, boot-hart only).
+        unsafe { crate::uart::__uart0_mmio_base }
+    }
+
     unsafe extern "C" {
         // memory / pages
 
@@ -81,7 +94,6 @@ mod ffi {
         // FDT at boot) -- needed by `kvmmake` and the constant accessors.
         pub safe static __physical_memory_start: u64;
         pub safe static __physical_memory_end: u64;
-        pub safe static __uart0_mmio_base: u64;
         pub safe static __goldfish_rtc_mmio_base: u64;
         pub safe static __plic_mmio_base: u64;
         pub safe static __pcie_ecam_mmio_base: u64;
@@ -1039,7 +1051,7 @@ fn kvmmake() -> *mut u64 {
     ffi::memset(kpgtbl as *mut c_void, 0, PGSIZE as usize);
 
     // UART.
-    let uart_page = pgrounddown(ffi::__uart0_mmio_base);
+    let uart_page = pgrounddown(ffi::__uart0_mmio_base());
     kvmmap(kpgtbl, uart_page, uart_page, PGSIZE, (PTE_R | PTE_W) as c_int);
 
     // Goldfish RTC.

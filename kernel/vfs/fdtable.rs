@@ -152,11 +152,12 @@ unsafe extern "C" {
     ) -> c_int;
     safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
     safe fn slab_free(obj: *mut c_void);
-
-    // vfs/file.rs (Phase 2 Wave 14).
-    safe fn vfs_fdup(file: *mut vfs_file) -> *mut vfs_file;
-    safe fn vfs_fput(file: *mut vfs_file);
 }
+
+// P3-1C mesh sweep: vfs/file.rs is in scope for this wave, so these
+// become plain crate-path imports instead of `extern "C"` redeclarations
+// (identical signatures).
+use crate::vfs::file::{vfs_fdup, vfs_fput};
 
 // ===========================================================================
 // Small helpers: negative-errno constants, ERR_PTR family, fd-space
@@ -323,8 +324,7 @@ fn fdtable_slab() -> *mut slab_cache_t {
 
 /// Initialize the fdtable slab cache. Called once during VFS
 /// initialization.
-#[no_mangle]
-pub extern "C" fn __vfs_fdtable_global_init() {
+pub(crate) extern "C" fn __vfs_fdtable_global_init() {
     let ret = slab_cache_init(
         fdtable_slab(),
         c"vfs_fdtable_cache".as_ptr() as *mut c_char,
@@ -369,8 +369,7 @@ fn fdtable_free(fdtable: *mut vfs_fdtable) {
 /// Increments `file`'s reference count via `vfs_fdup`.
 ///
 /// LOCKING: caller MUST hold `fdtable.lock`.
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_alloc_fd_from(
+pub(crate) extern "C" fn vfs_fdtable_alloc_fd_from(
     fdtable: *mut vfs_fdtable,
     file: *mut vfs_file,
     start_fd: c_int,
@@ -417,16 +416,14 @@ pub extern "C" fn vfs_fdtable_alloc_fd_from(
 /// Allocate the lowest available file descriptor for `file`.
 ///
 /// LOCKING: caller MUST hold `fdtable.lock`.
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_alloc_fd(fdtable: *mut vfs_fdtable, file: *mut vfs_file) -> c_int {
+pub(crate) extern "C" fn vfs_fdtable_alloc_fd(fdtable: *mut vfs_fdtable, file: *mut vfs_file) -> c_int {
     vfs_fdtable_alloc_fd_from(fdtable, file, 0)
 }
 
 /// Create a new, empty fdtable. Used when a new thread doesn't share its
 /// parent's fdtable. Panics on allocation failure (matches the C
 /// original's `assert`).
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_init() -> *mut vfs_fdtable {
+pub(crate) extern "C" fn vfs_fdtable_init() -> *mut vfs_fdtable {
     let fdtable = fdtable_alloc_init();
     kassert!(!fdtable.is_null(), "vfs_fdtable_init: fdtable is NULL");
     // NOTE: the C original re-`memset`s `files`/`files_bitmap`/
@@ -441,8 +438,7 @@ pub extern "C" fn vfs_fdtable_init() -> *mut vfs_fdtable {
 /// otherwise deep-copies with duplicated file references.
 ///
 /// Returns the (possibly shared) fdtable, or `ERR_PTR` on failure.
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_clone(
+pub(crate) extern "C" fn vfs_fdtable_clone(
     src: *mut vfs_fdtable,
     clone_flags: c_int,
 ) -> *mut vfs_fdtable {
@@ -504,8 +500,7 @@ pub extern "C" fn vfs_fdtable_clone(
 /// Release a reference to an fdtable. On last reference, closes all open
 /// files and frees the fdtable. Called when a thread exits or unshares
 /// its fdtable.
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_put(fdtable: *mut vfs_fdtable) {
+pub(crate) extern "C" fn vfs_fdtable_put(fdtable: *mut vfs_fdtable) {
     if fdtable.is_null() {
         return;
     }
@@ -542,8 +537,7 @@ pub extern "C" fn vfs_fdtable_put(fdtable: *mut vfs_fdtable) {
 
 /// Look up the file for `fd`, returning it with an incremented refcount
 /// (caller must `vfs_fput()` when done). Wait-free (RCU read lock only).
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_get_file(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file {
+pub(crate) extern "C" fn vfs_fdtable_get_file(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file {
     if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
         return ptr::null_mut(); // Invalid arguments
     }
@@ -566,8 +560,7 @@ pub extern "C" fn vfs_fdtable_get_file(fdtable: *mut vfs_fdtable, fd: c_int) -> 
 /// [`vfs_fdtable_get_file`] can't observe a freed file).
 ///
 /// LOCKING: caller MUST hold `fdtable.lock`.
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_dealloc_fd(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file {
+pub(crate) extern "C" fn vfs_fdtable_dealloc_fd(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file {
     if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
         return ptr::null_mut(); // Invalid arguments
     }
@@ -596,8 +589,7 @@ pub extern "C" fn vfs_fdtable_dealloc_fd(fdtable: *mut vfs_fdtable, fd: c_int) -
 /// Get the `FD_CLOEXEC` flag for `fd`, or a negative errno.
 ///
 /// LOCKING: caller MUST hold `fdtable.lock`.
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_get_fdflags(fdtable: *mut vfs_fdtable, fd: c_int) -> c_int {
+pub(crate) extern "C" fn vfs_fdtable_get_fdflags(fdtable: *mut vfs_fdtable, fd: c_int) -> c_int {
     if fdtable.is_null() || fd < 0 || fd as usize >= NOFILE {
         return neg(EBADF);
     }
@@ -624,8 +616,7 @@ pub extern "C" fn vfs_fdtable_get_fdflags(fdtable: *mut vfs_fdtable, fd: c_int) 
 /// negative errno on failure.
 ///
 /// LOCKING: caller MUST hold `fdtable.lock`.
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_set_fdflags(
+pub(crate) extern "C" fn vfs_fdtable_set_fdflags(
     fdtable: *mut vfs_fdtable,
     fd: c_int,
     flags: c_int,
@@ -658,8 +649,7 @@ pub extern "C" fn vfs_fdtable_set_fdflags(
 
 /// Close every fd with `FD_CLOEXEC` set. Called from `exec.c` on a
 /// successful `execve`.
-#[no_mangle]
-pub extern "C" fn vfs_fdtable_close_on_exec(fdtable: *mut vfs_fdtable) {
+pub(crate) extern "C" fn vfs_fdtable_close_on_exec(fdtable: *mut vfs_fdtable) {
     if fdtable.is_null() {
         return;
     }

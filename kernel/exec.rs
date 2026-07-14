@@ -111,6 +111,15 @@ use crate::bindings::{
 // instead of via their own `extern "C"` redeclarations.
 use crate::proc::sigacts_exec;
 use crate::proc::vfork_done as raw_vfork_done;
+// P3-1C mesh sweep: vfs/{inode,file,fdtable}.rs are in scope for this wave,
+// so their callees are referenced as plain crate-path items instead of
+// `extern "C"` redeclarations -- their definitions dropped `#[no_mangle]`
+// accordingly. Signatures verified identical (same `crate::bindings::*`
+// types this file already imports above), so this is a pure mesh
+// simplification, not an ABI change.
+use crate::vfs::fdtable::vfs_fdtable_close_on_exec;
+use crate::vfs::file::{vfs_fileopen, vfs_filelseek, vfs_fileread, vfs_fput};
+use crate::vfs::inode::{vfs_iput, vfs_namei};
 
 /// `proc/exit.rs::vfork_done` takes its own local opaque `Thread` marker
 /// type (`proc::exit::Thread`), not `crate::bindings::thread` -- both are
@@ -164,19 +173,6 @@ unsafe extern "C" {
         pa: *mut c_void,
     ) -> c_int;
     safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
-
-    // vfs/inode.rs (Wave 13).
-    safe fn vfs_namei(path: *const c_char, path_len: usize) -> *mut vfs_inode;
-    safe fn vfs_iput(inode: *mut vfs_inode);
-
-    // vfs/file.rs (Wave 14).
-    safe fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> *mut vfs_file;
-    safe fn vfs_fput(file: *mut vfs_file);
-    safe fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_int) -> isize;
-    safe fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> loff_t;
-
-    // vfs/fdtable.rs (Wave 15).
-    safe fn vfs_fdtable_close_on_exec(fdtable: *mut vfs_fdtable);
 
     // proc module (kernel/proc/proc_shims.rs). Kept as its own `extern`:
     // `xv6_current_thread` isn't being demoted (plenty of out-of-scope

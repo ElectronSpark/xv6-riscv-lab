@@ -35,14 +35,18 @@ use crate::bindings::{bool_, pipe, tty, tty_ops};
 // ===========================================================================
 
 unsafe extern "C" {
-    pub safe fn tty_alloc(name: *const c_char, ops: *mut tty_ops) -> *mut tty;
-    pub safe fn tty_input(t: *mut tty, buf: *const c_char, count: u64) -> i64;
-
-    pub safe fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, user: c_int) -> i64;
-    pub safe fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u64, user: c_int) -> i64;
-
     pub safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
 }
+
+// P3-1C mesh sweep: tty/tty.rs and vfs/pipe.rs are in scope for this
+// wave; converted from `extern "C"` redeclarations to plain crate-path
+// items (identical signatures). ABI-truth note: `tty_alloc`/`tty_input`
+// are real `unsafe extern "C" fn`s -- this file's former mirror declared
+// them `safe`, but both call sites already sit inside an `unsafe fn`
+// body (`pty_alloc`) or an explicit `unsafe { }` block, so no behavior
+// changes.
+use crate::tty::tty::{tty_alloc, tty_input};
+use crate::vfs::pipe::{pipe_read, pipe_write};
 
 const EFAULT: i64 = 14;
 
@@ -124,8 +128,7 @@ static mut PTY_SLAVE_OPS: tty_ops = tty_ops {
 /// must point to at least `count` readable bytes if `user` is false,
 /// or be a valid userspace address range otherwise (checked internally
 /// by `either_copyin`).
-#[no_mangle]
-pub unsafe extern "C" fn pty_master_write(
+pub(crate) unsafe extern "C" fn pty_master_write(
     slave: *mut tty,
     buf: *const c_char,
     count: usize,
@@ -184,8 +187,7 @@ pub unsafe extern "C" fn pty_master_write(
 /// must point to at least `count` writable bytes if `user` is false,
 /// or be a valid userspace address range otherwise (checked internally
 /// by `pipe_read`).
-#[no_mangle]
-pub unsafe extern "C" fn pty_master_read(
+pub(crate) unsafe extern "C" fn pty_master_read(
     slave: *mut tty,
     buf: *mut c_char,
     count: usize,
@@ -219,8 +221,7 @@ pub unsafe extern "C" fn pty_master_read(
 /// `slave_out` must be a valid, writable `*mut *mut tty`. `name` must
 /// be a valid, NUL-terminated C string for the duration of this call
 /// (the `tty_alloc` contract).
-#[no_mangle]
-pub unsafe extern "C" fn pty_alloc(
+pub(crate) unsafe extern "C" fn pty_alloc(
     slave_out: *mut *mut tty,
     name: *const c_char,
     _minor: c_int,
@@ -252,7 +253,6 @@ pub unsafe extern "C" fn pty_alloc(
 /// `device_unregister()` when the slave cdev is unregistered (via
 /// `dev->devname`). This function is retained for any future
 /// non-devtmpfs cleanup.
-#[no_mangle]
-pub extern "C" fn pty_dealloc(_slave: *mut tty) {
+pub(crate) extern "C" fn pty_dealloc(_slave: *mut tty) {
     // devtmpfs removal is handled by cdev_unregister -> device_unregister.
 }

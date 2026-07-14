@@ -57,6 +57,9 @@ use crate::bindings::{
 };
 use crate::machine::{self, PreemptGuard};
 use crate::sync::KSpinlock;
+// P3-1C mesh sweep: printf.rs is in scope for this wave, so `trigger_panic`
+// becomes a plain crate-path import instead of an `extern "C"` redeclaration.
+use crate::printf::trigger_panic;
 
 // ---------------------------------------------------------------------------
 // External C symbols
@@ -127,7 +130,6 @@ fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
 // Variadic FFI cannot be marked safe.
 unsafe extern "C" {
     pub fn printf(fmt: *const c_char, ...) -> c_int;
-    pub fn trigger_panic() -> !;
 }
 
 // `sched_attr` is not in `bindings` (rq_types.h is not pulled in via

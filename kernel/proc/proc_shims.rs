@@ -1155,9 +1155,10 @@ pub extern "C" fn tg_is_group_leader(p: *mut thread) -> c_int {
 // declared in kernel/inc/tty/session.h.
 // ===========================================================================
 
-unsafe extern "C" {
-    static mut session_list: list_node_t;
-}
+// P3-1C mesh sweep: tty/session.rs is in scope for this wave, so
+// `session_list` becomes a plain crate-path import instead of an
+// `extern "C"` redeclaration (identical `list_node_t` type).
+use crate::tty::session::session_list;
 
 #[no_mangle]
 pub extern "C" fn session_for_each_all(
@@ -1204,9 +1205,11 @@ pub extern "C" fn xv6_mycpu_clear_noff() {
 
 // forkret_assert_user — die loudly if a kernel thread is about to return to
 // user space. Mirrors the C `assert(THREAD_USER_SPACE(p), "...", p->pid)`.
+// P3-1C mesh sweep: printf.rs is in scope for this wave, so `trigger_panic`
+// becomes a plain crate-path import instead of an `extern "C"` redeclaration.
+use crate::printf::trigger_panic;
 unsafe extern "C" {
     fn printf(fmt: *const c_char, ...) -> c_int;
-    fn trigger_panic() -> !;
 }
 
 #[no_mangle]

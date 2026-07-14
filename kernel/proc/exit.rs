@@ -130,7 +130,6 @@ mod raw {
         pub safe fn kill_thread(t: *mut Thread, signo: c_int) -> c_int;
 
         pub safe fn pgroup_remove_thread(p: *mut Thread);
-        pub safe fn session_remove_thread(s: *mut Session, t: *mut Thread);
         pub safe fn thread_group_remove(p: *mut Thread) -> bool;
         pub safe fn thread_group_put(tg: *mut ThreadGroup);
         pub safe fn thread_is_group_leader(p: *mut Thread) -> bool;
@@ -140,10 +139,32 @@ mod raw {
         pub safe fn sigpending_destroy(p: *mut Thread);
         pub safe fn signal_pending(p: *mut Thread) -> bool;
         pub safe fn vm_put(vm: *mut Vm);
-        pub safe fn vfs_fdtable_put(fdt: *mut VfsFdtable);
-        pub safe fn vfs_struct_put(fs: *mut FsStruct);
 
         pub safe fn get_pid_thread(pid: c_int) -> *mut Thread;
+    }
+
+    // P3-1C mesh sweep: tty/session.rs and vfs/{fdtable,fs}.rs are in
+    // scope for this wave, same opaque-marker reinterpret precedent as
+    // `proctab_proc_remove` below (this file's `Session`/`VfsFdtable`/
+    // `FsStruct` are distinct-but-layout-identical stand-ins for the real
+    // `crate::bindings` structs).
+    /// SAFETY: only called from `reparent`/`exit` with a live session and
+    /// a live thread being removed from it -- matches the real fn's
+    /// contract. Its `c_int` return is discarded here exactly as this
+    /// file's only call site always did.
+    pub fn session_remove_thread(s: *mut Session, t: *mut Thread) {
+        unsafe {
+            crate::tty::session::session_remove_thread(
+                s as *mut c_void as *mut crate::bindings::session,
+                t as *mut c_void as *mut crate::bindings::thread,
+            );
+        }
+    }
+    pub fn vfs_fdtable_put(fdt: *mut VfsFdtable) {
+        crate::vfs::fdtable::vfs_fdtable_put(fdt as *mut c_void as *mut crate::bindings::vfs_fdtable);
+    }
+    pub fn vfs_struct_put(fs: *mut FsStruct) {
+        crate::vfs::fs::vfs_struct_put(fs as *mut c_void as *mut crate::bindings::fs_struct);
     }
 
     // P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this

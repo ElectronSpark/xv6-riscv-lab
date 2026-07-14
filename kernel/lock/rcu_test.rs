@@ -27,6 +27,9 @@ use crate::bindings::{list_node_t, rcu_head_t, spinlock_t, thread};
 use crate::lock::rcu::{self as rcu, api as rcu_api, KRcuRead, RcuPtr};
 use crate::machine;
 use crate::sync::KSpinlock;
+// P3-1C mesh sweep: printf.rs is in scope for this wave, so `trigger_panic`
+// becomes a plain crate-path import instead of an `extern "C"` redeclaration.
+use crate::printf::trigger_panic;
 
 unsafe extern "C" {
 
@@ -69,7 +72,6 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
 // Variadic FFI / noreturn cannot be marked safe.
 unsafe extern "C" {
     pub fn printf(fmt: *const c_char, ...) -> c_int;
-    pub fn trigger_panic() -> !;
 }
 
 const KERNEL_STACK_ORDER: c_int = 2;

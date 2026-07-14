@@ -89,6 +89,9 @@ use crate::machine::CpuLocal;
 // redeclarations.
 use crate::irq::irq_core::do_irq;
 use crate::irq::syscall::syscall;
+// P3-1C mesh sweep: printf.rs is in scope for this wave, so `panic_disable_bt`
+// becomes a plain crate-path import instead of an `extern "C"` redeclaration.
+use crate::printf::panic_disable_bt;
 
 // ===========================================================================
 // scause / SSTATUS / signal ABI constants (`kernel/inc/trap.h`,
@@ -164,7 +167,6 @@ unsafe extern "C" {
     // printf.rs panic/print infra
     safe fn __panic_start();
     safe fn __panic_end() -> !;
-    safe fn panic_disable_bt();
     // printf is variadic, so it cannot be declared `safe`.
     fn printf(fmt: *const c_char, ...) -> c_int;
 

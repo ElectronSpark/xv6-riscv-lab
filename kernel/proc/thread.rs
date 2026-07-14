@@ -137,29 +137,17 @@ unsafe extern "C" {
     safe fn pgroup_alloc(hier_id: c_int, parent: *mut c_void) -> *mut c_void;
     safe fn pgroup_add_tg(pg: *mut c_void, tg: *mut thread_group) -> c_int;
     safe fn pgroup_add_thread(pg: *mut c_void, p: *mut thread) -> c_int;
-    safe fn session_alloc(hier_id: c_int) -> *mut c_void;
-    fn session_init(p: *mut thread);
-    safe fn session_add_pg(s: *mut c_void, pg: *mut c_void) -> c_int;
-    safe fn session_add_thread(s: *mut c_void, p: *mut thread) -> c_int;
-
     // memory
     fn page_alloc(order: u64, flags: u64) -> *mut c_void;
     safe fn page_free(ptr: *mut c_void, order: c_int);
     fn vm_init() -> *mut vm_t;
     fn vm_put(vm: *mut vm_t);
 
-    // VFS
-    fn vfs_struct_clone(old_fs: *mut fs_struct, flags: u64) -> *mut fs_struct;
-    fn vfs_struct_put(fs: *mut fs_struct);
     // NOTE: `vfs_struct_lock`/`vfs_struct_unlock` (kernel/inc/vfs/fs.h) are
     // `static inline` wrappers around `spin_lock`/`spin_unlock` — there is
     // no linker symbol to bind to, so `install_user_root_finish` below
     // reimplements them natively via `crate::sync::KSpinlock` instead of
     // declaring them here.
-    fn vfs_namei(path: *const c_char, path_len: usize) -> *mut c_void; // vfs_inode opaque
-    fn vfs_inode_get_ref(inode: *mut vfs_inode, out: *mut vfs_inode_ref) -> c_int;
-    fn vfs_iput(inode: *mut vfs_inode);
-    fn vfs_fdtable_put(fdt: *mut vfs_fdtable);
 
     // exec / trap
     fn exit(code: c_int) -> !;
@@ -174,6 +162,54 @@ unsafe extern "C" {
 
     // RCU
     fn call_rcu(head: *mut rcu_head_t, func: Option<unsafe extern "C" fn(*mut c_void)>, data: *mut c_void);
+}
+
+// P3-1C mesh sweep: tty/session.rs and vfs/{fs,inode,fdtable}.rs are in
+// scope for this wave. `vfs_struct_clone`/`vfs_struct_put`/
+// `vfs_inode_get_ref`/`vfs_iput`/`vfs_fdtable_put` have identical
+// signatures to their real definitions (same `crate::bindings::*` types
+// already imported above), so they become plain crate-path imports.
+use crate::vfs::fdtable::vfs_fdtable_put;
+use crate::vfs::fs::{vfs_inode_get_ref, vfs_struct_clone, vfs_struct_put};
+use crate::vfs::inode::vfs_iput;
+
+/// Thin opaque-pointer wrapper: this file treats the session/pgroup
+/// handle as `*mut c_void` uniformly with `pgroup_alloc` (proc-owned,
+/// genuinely opaque), while `tty::session::session_alloc`'s real
+/// signature uses the concrete `*mut session` type (same
+/// opaque-mirror-mismatch pattern the P3-1A/B mesh sweeps used
+/// elsewhere in this crate).
+fn session_alloc(sid: c_int) -> *mut c_void {
+    crate::tty::session::session_alloc(sid) as *mut c_void
+}
+
+/// SAFETY: only called from `kthread_hierarchy_init_locked` with `s`/`pg`
+/// just returned non-null by `session_alloc`/`pgroup_alloc` above (proven
+/// by the preceding `kassert!`s) -- matches the real fn's contract.
+fn session_add_pg(s: *mut c_void, pg: *mut c_void) -> c_int {
+    unsafe { crate::tty::session::session_add_pg(s as *mut session, pg as *mut pgroup) }
+}
+
+/// SAFETY: only called from `kthread_join_hierarchy_locked` with a live
+/// `s` (the kernel hierarchy's session, initialized once at first use)
+/// and a live `p` (the caller's own thread) -- matches the real fn's
+/// contract.
+fn session_add_thread(s: *mut c_void, p: *mut thread) -> c_int {
+    unsafe { crate::tty::session::session_add_thread(s as *mut session, p) }
+}
+
+/// SAFETY: only called from `userinit` while holding `pid_wlock`, with the
+/// just-created init thread -- matches the real fn's contract.
+fn session_init(p: *mut thread) {
+    unsafe { crate::tty::session::session_init(p) }
+}
+
+/// Thin opaque-pointer wrapper: `install_user_root`/`install_user_root_finish`
+/// deliberately keep the looked-up inode as `*mut c_void` until the callee
+/// casts it back (see `install_user_root_finish`'s doc); `vfs::inode`'s real
+/// `vfs_namei` returns the concrete `*mut vfs_inode`.
+fn vfs_namei(path: *const c_char, path_len: usize) -> *mut c_void {
+    crate::vfs::inode::vfs_namei(path, path_len) as *mut c_void
 }
 
 // ---------------- inline helpers ----------------------------------------

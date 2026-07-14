@@ -73,9 +73,10 @@ use crate::machine;
 // redeclarations -- their definitions dropped `#[no_mangle]` accordingly
 // (each still keeps its `extern "C" fn() -> u64` *type*, since this table
 // stores them as `SyscallFn` function-pointer values, not calls by name).
-// Everything else here (mm/sysmm.rs, mm/page.rs, mm/pcache.rs,
-// vfs/vfs_syscall.rs, string.rs, mm/vm.rs) is out of this wave's scope and
-// keeps its `extern` declaration untouched.
+// P3-1C mesh sweep additionally converts the vfs/vfs_syscall.rs group below
+// the same way. Everything else here (mm/sysmm.rs, mm/page.rs, mm/pcache.rs,
+// string.rs, mm/vm.rs) is out of scope for both waves and keeps its `extern`
+// declaration untouched.
 use crate::proc::{
     sys_clone, sys_exit, sys_getpid, sys_getppid, sys_gettid, sys_exit_group, sys_vfork,
     sys_wait, sys_waitpid, sys_sbrk, sys_sleep, sys_uptime, sys_gettimeofday, sys_nanosleep,
@@ -84,6 +85,20 @@ use crate::proc::{
     sys_tgkill, sys_tkill, sys_sigsuspend, sys_sigwait, sys_dumpproc, sys_dumpchan, sys_dumprq,
 };
 use crate::exec::sys_exec;
+// P3-1C mesh sweep: vfs/vfs_syscall.rs is in scope for this wave, so its
+// `sys_*` implementations are referenced as plain crate-path items instead
+// of `extern "C"` redeclarations -- their definitions dropped `#[no_mangle]`
+// accordingly (each still keeps its `extern "C" fn() -> u64` *type*, since
+// this table stores them as `SyscallFn` function-pointer values, not calls
+// by name).
+use crate::vfs::vfs_syscall::{
+    sys_chroot, sys_dumpinode, sys_getcwd, sys_getdents, sys_mount, sys_statfs, sys_tcgetattr,
+    sys_tcsetattr, sys_umount, sys_vfs_access, sys_vfs_chdir, sys_vfs_close, sys_vfs_connect,
+    sys_vfs_dup, sys_vfs_dup2, sys_vfs_fcntl, sys_vfs_fstat, sys_vfs_ftruncate, sys_vfs_ioctl,
+    sys_vfs_link, sys_vfs_lseek, sys_vfs_lstat, sys_vfs_mkdir, sys_vfs_mknod, sys_vfs_open,
+    sys_vfs_pipe, sys_vfs_poll, sys_vfs_read, sys_vfs_readlink, sys_vfs_rename, sys_vfs_stat,
+    sys_vfs_symlink, sys_vfs_unlink, sys_vfs_write,
+};
 
 unsafe extern "C" {
     // printf.rs panic/print infra
@@ -118,43 +133,6 @@ unsafe extern "C" {
     safe fn sys_memstat() -> u64;
     safe fn sys_dumppcache() -> u64;
     safe fn sys_sync() -> u64;
-
-    // ---- Syscall implementations still C ----
-    // vfs/vfs_syscall.c
-    safe fn sys_vfs_dup() -> u64;
-    safe fn sys_vfs_read() -> u64;
-    safe fn sys_vfs_write() -> u64;
-    safe fn sys_vfs_close() -> u64;
-    safe fn sys_vfs_fstat() -> u64;
-    safe fn sys_vfs_open() -> u64;
-    safe fn sys_vfs_lseek() -> u64;
-    safe fn sys_vfs_dup2() -> u64;
-    safe fn sys_vfs_fcntl() -> u64;
-    safe fn sys_vfs_access() -> u64;
-    safe fn sys_vfs_rename() -> u64;
-    safe fn sys_vfs_readlink() -> u64;
-    safe fn sys_vfs_stat() -> u64;
-    safe fn sys_vfs_lstat() -> u64;
-    safe fn sys_vfs_ftruncate() -> u64;
-    safe fn sys_vfs_mkdir() -> u64;
-    safe fn sys_vfs_mknod() -> u64;
-    safe fn sys_vfs_unlink() -> u64;
-    safe fn sys_vfs_link() -> u64;
-    safe fn sys_vfs_symlink() -> u64;
-    safe fn sys_vfs_chdir() -> u64;
-    safe fn sys_vfs_pipe() -> u64;
-    safe fn sys_vfs_connect() -> u64;
-    safe fn sys_getdents() -> u64;
-    safe fn sys_statfs() -> u64;
-    safe fn sys_chroot() -> u64;
-    safe fn sys_mount() -> u64;
-    safe fn sys_umount() -> u64;
-    safe fn sys_getcwd() -> u64;
-    safe fn sys_vfs_ioctl() -> u64;
-    safe fn sys_tcgetattr() -> u64;
-    safe fn sys_tcsetattr() -> u64;
-    safe fn sys_vfs_poll() -> u64;
-    safe fn sys_dumpinode() -> u64;
 }
 
 // ===========================================================================

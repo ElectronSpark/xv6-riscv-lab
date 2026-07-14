@@ -111,8 +111,6 @@ unsafe extern "C" {
     pub safe fn xv6_tg_send_signo(tg: *mut ThreadGroup, signo: i32) -> i32;
 
     // From session.h / thread.h / thread_group.h (real extern fns).
-    pub safe fn session_add_pg(s: *mut Session, pg: *mut Pgroup) -> i32;
-    pub safe fn session_remove_pg(s: *mut Session, pg: *mut Pgroup) -> i32;
     pub safe fn get_pid_thread(pid: i32) -> *mut Thread;
     // Not `pub`: shares a bare name with the real definition glob-
     // reexported from `thread_group.rs` at `crate::proc`. Making this
@@ -125,6 +123,32 @@ unsafe extern "C" {
     pub safe fn rcu_read_lock();
     pub safe fn rcu_read_unlock();
     pub safe fn xv6_panic(msg: *const u8) -> !;
+}
+
+// P3-1C mesh sweep: tty/session.rs is in scope for this wave, same
+// opaque-marker reinterpret precedent used throughout this file (this
+// file's `Session`/`Pgroup` are distinct-but-layout-identical stand-ins
+// for the real `crate::bindings` structs).
+/// SAFETY: only called with a live session and a live pgroup (both
+/// non-null-checked by the caller immediately before the call) --
+/// matches the real fn's contract. Its `c_int` return is discarded here
+/// exactly as both call sites in this file always did.
+fn session_add_pg(s: *mut Session, pg: *mut Pgroup) -> i32 {
+    unsafe {
+        crate::tty::session::session_add_pg(
+            s as *mut c_void as *mut crate::bindings::session,
+            pg as *mut c_void as *mut crate::bindings::pgroup,
+        )
+    }
+}
+/// SAFETY: see `session_add_pg`.
+fn session_remove_pg(s: *mut Session, pg: *mut Pgroup) -> i32 {
+    unsafe {
+        crate::tty::session::session_remove_pg(
+            s as *mut c_void as *mut crate::bindings::session,
+            pg as *mut c_void as *mut crate::bindings::pgroup,
+        )
+    }
 }
 
 // `rcu_read_lock` / `rcu_read_unlock` are static-inline; expose via shim.

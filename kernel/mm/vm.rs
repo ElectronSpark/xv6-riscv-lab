@@ -63,13 +63,9 @@ mod ffi {
         // xv6_vm_sfence_vma still lives in vm_pgtab_shims.c (until that file is
         // migrated). It wraps the riscv `sfence.vma` inline asm.
 
-        // Page-cache primitives (live in kernel/rust/src/pcache.rs as no_mangle).
-        pub safe fn vfs_inode_deref(refp: *mut vfs_inode_ref) -> *mut vfs_inode;
         // pcache accessors (live in pcache_shims.c).
         // Defined in kernel/rust/src/vm_pgtab.rs (no_mangle).
 
-        // V5 externs.
-        pub safe fn vfs_fdtable_get_file(fdtable: *mut c_void, fd: c_int) -> *mut vfs_file;
         pub safe fn printf(fmt: *const c_char, ...);
 
         // Real kernel panic helpers (kernel/printf.c) — replace the
@@ -81,6 +77,23 @@ mod ffi {
 pub(crate) use crate::lock::rwsem::{rwsem_acquire_read, rwsem_acquire_write, rwsem_init, rwsem_is_write_holding, rwsem_release};
 pub(crate) use crate::mm::vm_pgtab::{mappages, uvmcreate, uvmfree, vm_dump_flags, walkaddr, xv6_vm_sfence_vma};
 pub(crate) use crate::sbi::sbi_remote_hfence_vma;
+    // P3-1C mesh sweep: vfs/fs.rs is in scope for this wave; its
+    // `vfs_inode_deref` is now a plain crate-path re-export (signature is
+    // identical, no opaque-pointer mismatch). vfs/fdtable.rs's
+    // `vfs_fdtable_get_file` keeps a thin wrapper: this file's established
+    // per-file idiom types the fdtable handle as opaque `*mut c_void`
+    // (see `xv6_vm_current_fdtable` above and `pcache_get_page` below)
+    // rather than the real `*mut vfs_fdtable`, same opaque-mirror pattern
+    // as the pcache wrappers in this same block.
+    pub(crate) use crate::vfs::fs::vfs_inode_deref;
+    /// SAFETY: `fdtable` must be a live `vfs_fdtable` (caller's contract,
+    /// unchanged from the extern declaration this replaces).
+    pub fn vfs_fdtable_get_file(fdtable: *mut c_void, fd: c_int) -> *mut vfs_file {
+        crate::vfs::fdtable::vfs_fdtable_get_file(
+            fdtable as *mut crate::bindings::vfs_fdtable,
+            fd,
+        )
+    }
 
     // The bintree/rbtree/spinlock/page/string primitives below are all
     // genuinely `unsafe extern "C" fn`; this file's original extern
@@ -720,13 +733,15 @@ unsafe extern "C" {
     fn rb_node_init(node: *mut rb_node);
     fn list_entry_init(entry: *mut list_node_t);
 
-    fn vfs_fput(file: *mut vfs_file);
-    fn vfs_fdup(file: *mut vfs_file) -> *mut vfs_file;
-
     // xv6_vm_panic still lives in vm_pgtab_shims.c (it uses __FILE__/
     // __LINE__/__FUNCTION__ via the C `panic` macro). Migrated when that
     // shim file is eliminated.
 }
+// P3-1C mesh sweep: vfs/file.rs is in scope for this wave; signatures are
+// identical (`*mut vfs_file`, same type this file already imports), so
+// these become plain crate-path re-exports instead of `extern "C"`
+// redeclarations.
+use crate::vfs::file::{vfs_fdup, vfs_fput};
 pub(crate) use crate::mm::page::page_ref_inc;
 pub(crate) use crate::mm::slab::slab_free;
 pub(crate) use crate::mm::vm_pgtab::xv6_vm_panic;

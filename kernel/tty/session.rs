@@ -57,6 +57,12 @@ use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{ksiginfo, list_node_t, pgroup, pid_t, session, slab_cache_t, thread, thread_group, tty};
 
+// P3-1C mesh sweep: tty/tty.rs is in scope for this wave; converted from
+// `extern "C"` redeclarations to plain crate-path items (identical
+// signatures -- both real `unsafe extern "C" fn`s, every call site
+// already wrapped in `unsafe`).
+use crate::tty::tty::{tty_ref, tty_unref};
+
 // ===========================================================================
 // Externs -- every cross-module C-ABI symbol this file calls, declared
 // locally rather than imported by Rust path. Matches the established
@@ -92,13 +98,6 @@ unsafe extern "C" {
     pub safe fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo) -> c_int;
     pub safe fn rcu_read_lock();
     pub safe fn rcu_read_unlock();
-
-    // tty/tty.rs -- SIGINT-delivery fix (session <-> ctrl_tty back-pointer
-    // + refcount, see the module doc above). Both have real preconditions
-    // (`t` must be a live tty), so declared without `safe` -- every call
-    // site below is wrapped in `unsafe`.
-    fn tty_ref(t: *mut tty);
-    fn tty_unref(t: *mut tty);
 
     // printf/panic (matches `kernel/tty/tty.rs`'s own local
     // `tty_assert_errno` extern block exactly).
@@ -287,8 +286,7 @@ static SESSION_CACHE: SyncCell<slab_cache_t> = SyncCell::uninit();
 /// `list_entry_init(&session_list)` (the `{0}`-style zero value below is
 /// never itself treated as a valid empty-list sentinel -- nothing reads
 /// `session_list` before `session_init` runs).
-#[no_mangle]
-pub static mut session_list: list_node_t = list_node_t { prev: ptr::null_mut(), next: ptr::null_mut() };
+pub(crate) static mut session_list: list_node_t = list_node_t { prev: ptr::null_mut(), next: ptr::null_mut() };
 
 // ===========================================================================
 // Boot-time initialisation.
@@ -297,8 +295,7 @@ pub static mut session_list: list_node_t = list_node_t { prev: ptr::null_mut(), 
 /// # Safety
 /// `initproc` must be a live `thread` with a non-null `thread_group` and
 /// `pgroup` (mirrors the C original's unconditional derefs).
-#[no_mangle]
-pub unsafe extern "C" fn session_init(initproc: *mut thread) {
+pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
     // SAFETY: see fn doc; this runs once at boot before any other
     // `session_*` entry point, so `session_list` and `SESSION_CACHE` are
     // exclusively ours to initialize.
@@ -362,8 +359,7 @@ unsafe fn __session_alloc() -> *mut session {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn session_alloc(sid: pid_t) -> *mut session {
+pub(crate) extern "C" fn session_alloc(sid: pid_t) -> *mut session {
     // SAFETY: `s`, once non-null, is exclusively ours (just allocated by
     // `__session_alloc`) until it is linked into `session_list` and
     // returned to the caller.
@@ -386,8 +382,7 @@ pub extern "C" fn session_alloc(sid: pid_t) -> *mut session {
 /// # Safety
 /// `s`, if non-null, must be a live `session` (mirrors the C original's
 /// unconditional deref once past the null check).
-#[no_mangle]
-pub unsafe extern "C" fn session_ref(s: *mut session) {
+pub(crate) unsafe extern "C" fn session_ref(s: *mut session) {
     if s.is_null() {
         return;
     }
@@ -429,8 +424,7 @@ pub unsafe extern "C" fn session_ref(s: *mut session) {
 /// is ever fixed later) rather than something this wave's tests can
 /// exercise live -- documented honestly per this project's convention
 /// (compare Iteration 11's `unwind_partial_map` note).
-#[no_mangle]
-pub unsafe extern "C" fn session_unref(s: *mut session) {
+pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
     if s.is_null() {
         return;
     }
@@ -464,8 +458,7 @@ pub unsafe extern "C" fn session_unref(s: *mut session) {
 /// `s` and `t`, if non-null, must be live (mirrors the C original's
 /// unconditional derefs once past the null checks). Caller must hold
 /// `pid_wlock`.
-#[no_mangle]
-pub unsafe extern "C" fn session_add_thread(s: *mut session, t: *mut thread) -> c_int {
+pub(crate) unsafe extern "C" fn session_add_thread(s: *mut session, t: *mut thread) -> c_int {
     pid_assert_wholding();
     if s.is_null() || t.is_null() {
         return -EINVAL;
@@ -493,8 +486,7 @@ pub unsafe extern "C" fn session_add_thread(s: *mut session, t: *mut thread) -> 
 ///
 /// # Safety
 /// `s` and `t`, if non-null, must be live. Caller must hold `pid_wlock`.
-#[no_mangle]
-pub unsafe extern "C" fn session_remove_thread(s: *mut session, t: *mut thread) -> c_int {
+pub(crate) unsafe extern "C" fn session_remove_thread(s: *mut session, t: *mut thread) -> c_int {
     pid_assert_wholding();
     if s.is_null() || t.is_null() {
         return -EINVAL;
@@ -521,8 +513,7 @@ pub unsafe extern "C" fn session_remove_thread(s: *mut session, t: *mut thread) 
 
 /// # Safety
 /// `s` and `pg`, if non-null, must be live. Caller must hold `pid_wlock`.
-#[no_mangle]
-pub unsafe extern "C" fn session_add_pg(s: *mut session, pg: *mut pgroup) -> c_int {
+pub(crate) unsafe extern "C" fn session_add_pg(s: *mut session, pg: *mut pgroup) -> c_int {
     pid_assert_wholding();
     if s.is_null() || pg.is_null() {
         return -EINVAL;
@@ -546,8 +537,7 @@ pub unsafe extern "C" fn session_add_pg(s: *mut session, pg: *mut pgroup) -> c_i
 
 /// # Safety
 /// `s` and `pg`, if non-null, must be live. Caller must hold `pid_wlock`.
-#[no_mangle]
-pub unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgroup) -> c_int {
+pub(crate) unsafe extern "C" fn session_remove_pg(s: *mut session, pg: *mut pgroup) -> c_int {
     pid_assert_wholding();
     if s.is_null() || pg.is_null() {
         return -EINVAL;
@@ -634,8 +624,7 @@ unsafe fn __session_detach_ctrl_tty(s: *mut session) {
 /// live `tty` previously returned by `tty_alloc` (mirrors
 /// [`tty_ref`]/[`tty_unref`]'s own contract). Caller must hold
 /// `pid_wlock`.
-#[no_mangle]
-pub unsafe extern "C" fn session_set_ctrl_tty(s: *mut session, new_tty: *mut tty) {
+pub(crate) unsafe extern "C" fn session_set_ctrl_tty(s: *mut session, new_tty: *mut tty) {
     pid_assert_wholding();
     if s.is_null() {
         return;
@@ -659,8 +648,7 @@ pub unsafe extern "C" fn session_set_ctrl_tty(s: *mut session, new_tty: *mut tty
 
 /// # Safety
 /// `s`, if non-null, must be live. Caller must hold `pid_wlock`.
-#[no_mangle]
-pub unsafe extern "C" fn session_get_ctrl_tty(s: *mut session) -> *mut tty {
+pub(crate) unsafe extern "C" fn session_get_ctrl_tty(s: *mut session) -> *mut tty {
     pid_assert_wholding();
     if s.is_null() {
         return ptr::null_mut();
@@ -675,8 +663,7 @@ pub unsafe extern "C" fn session_get_ctrl_tty(s: *mut session) -> *mut tty {
 
 /// # Safety
 /// `s`, if non-null, must be live.
-#[no_mangle]
-pub unsafe extern "C" fn session_set_fg_pgid(s: *mut session, pgid: pid_t) {
+pub(crate) unsafe extern "C" fn session_set_fg_pgid(s: *mut session, pgid: pid_t) {
     if s.is_null() {
         return;
     }
@@ -701,8 +688,7 @@ pub unsafe extern "C" fn session_set_fg_pgid(s: *mut session, pgid: pid_t) {
 
 /// # Safety
 /// `s`, if non-null, must be live.
-#[no_mangle]
-pub unsafe extern "C" fn session_get_fg_pgid(s: *mut session) -> pid_t {
+pub(crate) unsafe extern "C" fn session_get_fg_pgid(s: *mut session) -> pid_t {
     if s.is_null() {
         return -1;
     }
@@ -769,8 +755,7 @@ unsafe fn __hangup_signal_tg(t: *mut thread) {
 ///
 /// # Safety
 /// `s`, if non-null, must be live. Caller must hold `pid_wlock`.
-#[no_mangle]
-pub unsafe extern "C" fn session_hangup(s: *mut session) {
+pub(crate) unsafe extern "C" fn session_hangup(s: *mut session) {
     if s.is_null() {
         return;
     }
@@ -800,8 +785,7 @@ pub unsafe extern "C" fn session_hangup(s: *mut session) {
 /// Create a new session: the calling thread becomes the session leader
 /// of a new session and the process-group leader of a new process
 /// group. POSIX: must not be called by a process-group leader.
-#[no_mangle]
-pub extern "C" fn session_setsid() -> pid_t {
+pub(crate) extern "C" fn session_setsid() -> pid_t {
     let p = crate::machine::current_thread_ptr();
     let tgid = thread_tgid(p);
 
@@ -867,8 +851,7 @@ pub extern "C" fn session_setsid() -> pid_t {
     tgid
 }
 
-#[no_mangle]
-pub extern "C" fn session_getsid(pid: pid_t) -> pid_t {
+pub(crate) extern "C" fn session_getsid(pid: pid_t) -> pid_t {
     if pid == 0 {
         let cur = crate::machine::current_thread_ptr();
         // SAFETY: `cur` is the live current thread.
@@ -901,8 +884,7 @@ pub extern "C" fn session_getsid(pid: pid_t) -> pid_t {
 /// caller must be inside an `rcu_read_lock()` section, or hold
 /// `pid_lock`; the returned pointer is only stable under that same
 /// protection.
-#[no_mangle]
-pub extern "C" fn get_session(sid: pid_t) -> *mut session {
+pub(crate) extern "C" fn get_session(sid: pid_t) -> *mut session {
     let t = get_pid_thread(sid);
     if is_err(t) {
         return err_ptr(-ESRCH);

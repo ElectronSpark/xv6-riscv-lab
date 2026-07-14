@@ -135,127 +135,31 @@ unsafe extern "C" {
     safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
     safe fn either_copyout(user_dst: c_int, dst: u64, src: *mut c_void, len: u64) -> c_int;
 
-    // vfs/inode.rs (Wave 13).
-    safe fn vfs_ilock(inode: *mut vfs_inode);
-    safe fn vfs_iunlock(inode: *mut vfs_inode);
-    safe fn vfs_idup(inode: *mut vfs_inode);
-    safe fn vfs_iput(inode: *mut vfs_inode);
-    safe fn vfs_ilookup(
-        dir: *mut vfs_inode,
-        dentry: *mut vfs_dentry,
-        name: *const c_char,
-        name_len: usize,
-    ) -> c_int;
-    safe fn vfs_dir_iter(
-        dir: *mut vfs_inode,
-        iter: *mut vfs_dir_iter,
-        ret_dentry: *mut vfs_dentry,
-    ) -> c_int;
-    safe fn vfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> isize;
-    safe fn vfs_create(
-        dir: *mut vfs_inode,
-        mode: mode_t,
-        name: *const c_char,
-        name_len: usize,
-    ) -> *mut vfs_inode;
-    safe fn vfs_mknod(
-        dir: *mut vfs_inode,
-        mode: mode_t,
-        dev: crate::bindings::dev_t,
-        name: *const c_char,
-        name_len: usize,
-    ) -> *mut vfs_inode;
-    safe fn vfs_link(
-        old: *mut vfs_dentry,
-        dir: *mut vfs_inode,
-        name: *const c_char,
-        name_len: usize,
-    ) -> c_int;
-    safe fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> c_int;
-    safe fn vfs_mkdir(
-        dir: *mut vfs_inode,
-        mode: mode_t,
-        name: *const c_char,
-        name_len: usize,
-    ) -> *mut vfs_inode;
-    safe fn vfs_move(
-        old_dir: *mut vfs_inode,
-        old_dentry: *mut vfs_dentry,
-        new_dir: *mut vfs_inode,
-        name: *const c_char,
-        name_len: usize,
-    ) -> c_int;
-    safe fn vfs_symlink(
-        dir: *mut vfs_inode,
-        mode: mode_t,
-        name: *const c_char,
-        name_len: usize,
-        target: *const c_char,
-        target_len: usize,
-    ) -> *mut vfs_inode;
-    safe fn vfs_itruncate(inode: *mut vfs_inode, new_size: crate::bindings::loff_t) -> c_int;
-    safe fn vfs_chdir(new_cwd: *mut vfs_inode) -> c_int;
-    safe fn vfs_chroot(new_root: *mut vfs_inode) -> c_int;
-    safe fn vfs_namei(path: *const c_char, path_len: usize) -> *mut vfs_inode;
-    safe fn vfs_nameiparent(
-        path: *const c_char,
-        path_len: usize,
-        name: *mut c_char,
-        name_size: usize,
-    ) -> *mut vfs_inode;
-
-    // vfs/file.rs (Wave 14).
-    safe fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> *mut vfs_file;
-    safe fn vfs_fput(file: *mut vfs_file);
-    safe fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int;
-    safe fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_int) -> isize;
-    safe fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_int;
-    safe fn vfs_filewrite(file: *mut vfs_file, buf: *const c_void, n: usize, user: c_int) -> isize;
-    safe fn vfs_filelseek(file: *mut vfs_file, offset: crate::bindings::loff_t, whence: c_int)
-        -> crate::bindings::loff_t;
-    safe fn truncate(file: *mut vfs_file, length: crate::bindings::loff_t) -> c_int;
-    safe fn vfs_pipealloc(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> c_int;
-    safe fn vfs_sockalloc(
-        out: *mut *mut vfs_file,
-        raddr: u32,
-        lport: u16,
-        rport: u16,
-    ) -> c_int;
-
-    // vfs/fdtable.rs (Wave 15).
-    safe fn vfs_fdtable_alloc_fd_from(
-        fdtable: *mut vfs_fdtable,
-        file: *mut vfs_file,
-        start_fd: c_int,
-    ) -> c_int;
-    safe fn vfs_fdtable_alloc_fd(fdtable: *mut vfs_fdtable, file: *mut vfs_file) -> c_int;
-    safe fn vfs_fdtable_get_file(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file;
-    safe fn vfs_fdtable_dealloc_fd(fdtable: *mut vfs_fdtable, fd: c_int) -> *mut vfs_file;
-    safe fn vfs_fdtable_get_fdflags(fdtable: *mut vfs_fdtable, fd: c_int) -> c_int;
-    safe fn vfs_fdtable_set_fdflags(fdtable: *mut vfs_fdtable, fd: c_int, flags: c_int) -> c_int;
-
-    // vfs/fs.rs (Wave 16).
-    safe fn vfs_get_deferred_iput_wq() -> *mut workqueue;
-    safe fn vfs_mount_lock();
-    safe fn vfs_mount_unlock();
-    safe fn vfs_mount(
-        type_: *const c_char,
-        mountpoint: *mut vfs_inode,
-        device: *mut vfs_inode,
-        flags: c_int,
-        data: *const c_char,
-    ) -> c_int;
-    safe fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int;
-    safe fn vfs_superblock_wlock(sb: *mut vfs_superblock);
-    safe fn vfs_superblock_unlock(sb: *mut vfs_superblock);
-    safe fn vfs_get_dentry_inode(dentry: *mut vfs_dentry) -> *mut vfs_inode;
-    safe fn vfs_release_dentry(dentry: *mut vfs_dentry);
-    safe fn vfs_inode_get_ref(inode: *mut vfs_inode, r: *mut vfs_inode_ref) -> c_int;
-    safe fn vfs_inode_put_ref(r: *mut vfs_inode_ref);
-    safe fn vfs_inode_deref(r: *mut vfs_inode_ref) -> *mut vfs_inode;
-    safe fn vfs_dump_inodes();
-    safe fn vfs_dump_sb_inodes(sb: *mut vfs_superblock);
 }
+
+// P3-1C mesh sweep: vfs/{inode,file,fdtable,fs}.rs are in scope for this
+// wave; converted from `extern "C"` redeclarations to plain crate-path
+// items (identical signatures, same `crate::bindings::*` types this file
+// already imports).
+use crate::vfs::fdtable::{
+    vfs_fdtable_alloc_fd, vfs_fdtable_alloc_fd_from, vfs_fdtable_dealloc_fd,
+    vfs_fdtable_get_fdflags, vfs_fdtable_get_file, vfs_fdtable_set_fdflags,
+};
+use crate::vfs::file::{
+    truncate, vfs_fileopen, vfs_fileread, vfs_filestat, vfs_filewrite, vfs_filelseek, vfs_fput,
+    vfs_ioctl, vfs_pipealloc, vfs_sockalloc,
+};
+use crate::vfs::fs::{
+    vfs_dump_inodes, vfs_dump_sb_inodes, vfs_get_dentry_inode, vfs_get_deferred_iput_wq,
+    vfs_inode_deref, vfs_inode_get_ref, vfs_inode_put_ref, vfs_mount, vfs_mount_lock,
+    vfs_mount_unlock, vfs_release_dentry, vfs_superblock_unlock, vfs_superblock_wlock,
+    vfs_unmount,
+};
+use crate::vfs::inode::{
+    vfs_chdir, vfs_chroot, vfs_create, vfs_dir_iter, vfs_idup, vfs_ilock, vfs_ilookup,
+    vfs_iput, vfs_itruncate, vfs_iunlock, vfs_link, vfs_mkdir, vfs_mknod, vfs_move, vfs_namei,
+    vfs_nameiparent, vfs_readlink, vfs_symlink, vfs_unlink,
+};
 
 // ===========================================================================
 // Small helpers: negative-errno constants, ERR_PTR family, mode bits, O_*/
@@ -556,8 +460,7 @@ fn vfs_fdfree(fd: c_int) -> *mut vfs_file {
  * File Operations Syscalls
  ******************************************************************************/
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_dup() -> u64 {
+pub(crate) extern "C" fn sys_vfs_dup() -> u64 {
     let mut fd: c_int = 0;
     argint(0, &mut fd);
 
@@ -576,8 +479,7 @@ pub extern "C" fn sys_vfs_dup() -> u64 {
     ret64(newfd)
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_dup2() -> u64 {
+pub(crate) extern "C" fn sys_vfs_dup2() -> u64 {
     let mut oldfd: c_int = 0;
     let mut newfd: c_int = 0;
     argint(0, &mut oldfd);
@@ -612,8 +514,7 @@ pub extern "C" fn sys_vfs_dup2() -> u64 {
     ret64(ret)
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_read() -> u64 {
+pub(crate) extern "C" fn sys_vfs_read() -> u64 {
     let mut fd: c_int = 0;
     let mut n: c_int = 0;
     let mut p: u64 = 0;
@@ -632,8 +533,7 @@ pub extern "C" fn sys_vfs_read() -> u64 {
     ret as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_write() -> u64 {
+pub(crate) extern "C" fn sys_vfs_write() -> u64 {
     let mut fd: c_int = 0;
     let mut n: c_int = 0;
     let mut p: u64 = 0;
@@ -652,8 +552,7 @@ pub extern "C" fn sys_vfs_write() -> u64 {
     ret as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_close() -> u64 {
+pub(crate) extern "C" fn sys_vfs_close() -> u64 {
     let mut fd: c_int = 0;
     argint(0, &mut fd);
 
@@ -670,8 +569,7 @@ pub extern "C" fn sys_vfs_close() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_fstat() -> u64 {
+pub(crate) extern "C" fn sys_vfs_fstat() -> u64 {
     let mut fd: c_int = 0;
     let mut st: u64 = 0;
 
@@ -705,8 +603,7 @@ pub extern "C" fn sys_vfs_fstat() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_lseek() -> u64 {
+pub(crate) extern "C" fn sys_vfs_lseek() -> u64 {
     let mut fd: c_int = 0;
     let mut whence: c_int = 0;
     let mut offset: i64 = 0;
@@ -724,8 +621,7 @@ pub extern "C" fn sys_vfs_lseek() -> u64 {
     ret as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_ftruncate() -> u64 {
+pub(crate) extern "C" fn sys_vfs_ftruncate() -> u64 {
     let mut fd: c_int = 0;
     let mut length: i64 = 0;
     argint(0, &mut fd);
@@ -741,8 +637,7 @@ pub extern "C" fn sys_vfs_ftruncate() -> u64 {
     ret64(ret)
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_fcntl() -> u64 {
+pub(crate) extern "C" fn sys_vfs_fcntl() -> u64 {
     let mut fd: c_int = 0;
     let mut cmd: c_int = 0;
     let mut arg: c_int = 0;
@@ -831,8 +726,7 @@ fn vfs_inode_stat_fallback(inode: *mut vfs_inode, kst: *mut stat) -> c_int {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_stat() -> u64 {
+pub(crate) extern "C" fn sys_vfs_stat() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut st_addr: u64 = 0;
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
@@ -883,8 +777,7 @@ pub extern "C" fn sys_vfs_stat() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_lstat() -> u64 {
+pub(crate) extern "C" fn sys_vfs_lstat() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let mut st_addr: u64 = 0;
@@ -933,8 +826,7 @@ pub extern "C" fn sys_vfs_lstat() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_access() -> u64 {
+pub(crate) extern "C" fn sys_vfs_access() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut mode: c_int = 0;
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
@@ -972,8 +864,7 @@ pub extern "C" fn sys_vfs_access() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_readlink() -> u64 {
+pub(crate) extern "C" fn sys_vfs_readlink() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let mut buf_addr: u64 = 0;
@@ -1037,8 +928,7 @@ pub extern "C" fn sys_vfs_readlink() -> u64 {
     len as u64
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_rename() -> u64 {
+pub(crate) extern "C" fn sys_vfs_rename() -> u64 {
     let mut oldpath: [c_char; MAXPATH] = [0; MAXPATH];
     let mut newpath: [c_char; MAXPATH] = [0; MAXPATH];
     let mut oldname: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
@@ -1094,8 +984,7 @@ pub extern "C" fn sys_vfs_rename() -> u64 {
  * File System Namespace Syscalls
  ******************************************************************************/
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_open() -> u64 {
+pub(crate) extern "C" fn sys_vfs_open() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let mut omode: c_int = 0;
@@ -1210,8 +1099,7 @@ pub extern "C" fn sys_vfs_open() -> u64 {
     ret64(fd)
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_mkdir() -> u64 {
+pub(crate) extern "C" fn sys_vfs_mkdir() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
@@ -1239,8 +1127,7 @@ pub extern "C" fn sys_vfs_mkdir() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_mknod() -> u64 {
+pub(crate) extern "C" fn sys_vfs_mknod() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let mut mode: c_int = 0;
@@ -1276,8 +1163,7 @@ pub extern "C" fn sys_vfs_mknod() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_unlink() -> u64 {
+pub(crate) extern "C" fn sys_vfs_unlink() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
@@ -1300,8 +1186,7 @@ pub extern "C" fn sys_vfs_unlink() -> u64 {
     ret64(ret)
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_link() -> u64 {
+pub(crate) extern "C" fn sys_vfs_link() -> u64 {
     let mut old: [c_char; MAXPATH] = [0; MAXPATH];
     let mut new: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
@@ -1452,8 +1337,7 @@ fn vfs_make_absolute_path(relpath: &[c_char], relpath_len: c_int, abspath: &mut 
     pathlen as c_int
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_symlink() -> u64 {
+pub(crate) extern "C" fn sys_vfs_symlink() -> u64 {
     let mut target: [c_char; MAXPATH] = [0; MAXPATH];
     let mut linkpath: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
@@ -1490,8 +1374,7 @@ pub extern "C" fn sys_vfs_symlink() -> u64 {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_chdir() -> u64 {
+pub(crate) extern "C" fn sys_vfs_chdir() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
@@ -1541,8 +1424,7 @@ pub extern "C" fn sys_vfs_chdir() -> u64 {
  * Getcwd Syscall
  ******************************************************************************/
 
-#[no_mangle]
-pub extern "C" fn sys_getcwd() -> u64 {
+pub(crate) extern "C" fn sys_getcwd() -> u64 {
     let mut buf_addr: u64 = 0;
     let mut size: c_int = 0;
 
@@ -1636,8 +1518,7 @@ pub extern "C" fn sys_getcwd() -> u64 {
  * Pipe Syscall
  ******************************************************************************/
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_pipe() -> u64 {
+pub(crate) extern "C" fn sys_vfs_pipe() -> u64 {
     let mut fdarray: u64 = 0;
     argaddr(0, &mut fdarray);
 
@@ -1708,8 +1589,7 @@ pub extern "C" fn sys_vfs_pipe() -> u64 {
  * Socket Syscall
  ******************************************************************************/
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_connect() -> u64 {
+pub(crate) extern "C" fn sys_vfs_connect() -> u64 {
     let mut raddr: c_int = 0;
     let mut lport: c_int = 0;
     let mut rport: c_int = 0;
@@ -1751,8 +1631,7 @@ fn mode_to_dtype(mode: mode_t) -> u8 {
     DT_UNKNOWN
 }
 
-#[no_mangle]
-pub extern "C" fn sys_getdents() -> u64 {
+pub(crate) extern "C" fn sys_getdents() -> u64 {
     let mut fd: c_int = 0;
     let mut dirp: u64 = 0;
     let mut count: c_int = 0;
@@ -1860,8 +1739,7 @@ pub extern "C" fn sys_getdents() -> u64 {
  * chroot - Change root directory
  ******************************************************************************/
 
-#[no_mangle]
-pub extern "C" fn sys_chroot() -> u64 {
+pub(crate) extern "C" fn sys_chroot() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
@@ -1902,8 +1780,7 @@ pub extern "C" fn sys_chroot() -> u64 {
 /// calls `vfs_mount()`. Called both from `sys_mount` and from
 /// `vfs_init()`'s `/tmp`/`/dev` bring-up (`vfs/fs.rs`, via its own local
 /// extern). Mirrors the C `vfs_mount_path()`.
-#[no_mangle]
-pub extern "C" fn vfs_mount_path(
+pub(crate) extern "C" fn vfs_mount_path(
     fstype: *const c_char,
     target: *const c_char,
     target_len: c_int,
@@ -1959,8 +1836,7 @@ pub extern "C" fn vfs_mount_path(
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn sys_mount() -> u64 {
+pub(crate) extern "C" fn sys_mount() -> u64 {
     let mut source: [c_char; MAXPATH] = [0; MAXPATH];
     let mut target: [c_char; MAXPATH] = [0; MAXPATH];
     let mut fstype: [c_char; 32] = [0; 32];
@@ -1982,8 +1858,7 @@ pub extern "C" fn sys_mount() -> u64 {
 /// via `vfs_namei` (which follows mounts), validates it is actually a
 /// mount root, acquires the lock nest `vfs_unmount()` requires, and calls
 /// it. Mirrors the C `vfs_umount_path()`.
-#[no_mangle]
-pub extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_int) -> c_int {
+pub(crate) extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_int) -> c_int {
     let mounted_root = vfs_namei(target, target_len as usize);
     if is_err(mounted_root) {
         return ptr_err(mounted_root) as c_int;
@@ -2045,8 +1920,7 @@ pub extern "C" fn vfs_umount_path(target: *const c_char, target_len: c_int) -> c
     0
 }
 
-#[no_mangle]
-pub extern "C" fn sys_umount() -> u64 {
+pub(crate) extern "C" fn sys_umount() -> u64 {
     let mut target: [c_char; MAXPATH] = [0; MAXPATH];
     let n = argstr(0, target.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
@@ -2060,8 +1934,7 @@ pub extern "C" fn sys_umount() -> u64 {
  * Debug: Dump active inodes
  ******************************************************************************/
 
-#[no_mangle]
-pub extern "C" fn sys_dumpinode() -> u64 {
+pub(crate) extern "C" fn sys_dumpinode() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
 
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
@@ -2097,8 +1970,7 @@ pub extern "C" fn sys_dumpinode() -> u64 {
  * TTY / ioctl Syscalls
  ******************************************************************************/
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_ioctl() -> u64 {
+pub(crate) extern "C" fn sys_vfs_ioctl() -> u64 {
     let mut fd: c_int = 0;
     let mut cmd_raw: u64 = 0;
     let mut arg: u64 = 0;
@@ -2202,8 +2074,7 @@ pub extern "C" fn sys_vfs_ioctl() -> u64 {
     ret64(ret)
 }
 
-#[no_mangle]
-pub extern "C" fn sys_tcgetattr() -> u64 {
+pub(crate) extern "C" fn sys_tcgetattr() -> u64 {
     let mut fd: c_int = 0;
     let mut termios_p: u64 = 0;
 
@@ -2226,8 +2097,7 @@ pub extern "C" fn sys_tcgetattr() -> u64 {
     ret64(ret)
 }
 
-#[no_mangle]
-pub extern "C" fn sys_tcsetattr() -> u64 {
+pub(crate) extern "C" fn sys_tcsetattr() -> u64 {
     let mut fd: c_int = 0;
     let mut optional_actions: c_int = 0;
     let mut termios_p: u64 = 0;
@@ -2260,8 +2130,7 @@ pub extern "C" fn sys_tcsetattr() -> u64 {
 }
 
 /// `sys_statfs` - get filesystem statistics.
-#[no_mangle]
-pub extern "C" fn sys_statfs() -> u64 {
+pub(crate) extern "C" fn sys_statfs() -> u64 {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut buf_addr: u64 = 0;
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
@@ -2417,8 +2286,7 @@ fn vfs_poll_scan(pfds: &mut [PollfdK]) -> c_int {
     ready
 }
 
-#[no_mangle]
-pub extern "C" fn sys_vfs_poll() -> u64 {
+pub(crate) extern "C" fn sys_vfs_poll() -> u64 {
     let mut fds_addr: u64 = 0;
     let mut nfds: c_int = 0;
     let mut timeout_ms: c_int = 0;

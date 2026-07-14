@@ -320,8 +320,7 @@ unsafe fn bcache_alloc_from_extent(bc: *mut xv6fs_block_cache, ext: *mut free_ex
 ///
 /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_bcache_mark_free(xv6_sb: *mut xv6fs_superblock, blockno: u32) {
+pub(crate) extern "C" fn xv6fs_bcache_mark_free(xv6_sb: *mut xv6fs_superblock, blockno: u32) {
     // SAFETY: `xv6_sb` is live (caller's contract).
     unsafe {
         let bc = ptr::addr_of_mut!((*xv6_sb).block_cache);
@@ -339,8 +338,7 @@ pub extern "C" fn xv6fs_bcache_mark_free(xv6_sb: *mut xv6fs_superblock, blockno:
 ///
 /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_bcache_find_free_block(xv6_sb: *mut xv6fs_superblock, blockno_out: *mut u32) -> c_int {
+pub(crate) extern "C" fn xv6fs_bcache_find_free_block(xv6_sb: *mut xv6fs_superblock, blockno_out: *mut u32) -> c_int {
     // SAFETY: `xv6_sb`/`blockno_out` are live (caller's contract).
     unsafe {
         let bc = ptr::addr_of_mut!((*xv6_sb).block_cache);
@@ -381,8 +379,7 @@ pub extern "C" fn xv6fs_bcache_find_free_block(xv6_sb: *mut xv6fs_superblock, bl
 ///
 /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_bcache_find_free_block_near(xv6_sb: *mut xv6fs_superblock, hint: u32, blockno_out: *mut u32) -> c_int {
+pub(crate) extern "C" fn xv6fs_bcache_find_free_block_near(xv6_sb: *mut xv6fs_superblock, hint: u32, blockno_out: *mut u32) -> c_int {
     // SAFETY: `xv6_sb`/`blockno_out` are live (caller's contract).
     unsafe {
         let bc = ptr::addr_of_mut!((*xv6_sb).block_cache);
@@ -434,8 +431,7 @@ pub extern "C" fn xv6fs_bcache_find_free_block_near(xv6_sb: *mut xv6fs_superbloc
 ///
 /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_bcache_free_count(xv6_sb: *mut xv6fs_superblock) -> u32 {
+pub(crate) extern "C" fn xv6fs_bcache_free_count(xv6_sb: *mut xv6fs_superblock) -> u32 {
     // SAFETY: `xv6_sb` is live (caller's contract).
     unsafe {
         let bc = ptr::addr_of_mut!((*xv6_sb).block_cache);
@@ -453,8 +449,7 @@ pub extern "C" fn xv6fs_bcache_free_count(xv6_sb: *mut xv6fs_superblock) -> u32 
 ///
 /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_bcache_init(xv6_sb: *mut xv6fs_superblock) -> c_int {
+pub(crate) extern "C" fn xv6fs_bcache_init(xv6_sb: *mut xv6fs_superblock) -> c_int {
     // SAFETY: `xv6_sb` is live (caller's contract, mount-time setup with
     // no concurrent access yet).
     unsafe {
@@ -575,8 +570,7 @@ pub extern "C" fn xv6fs_bcache_init(xv6_sb: *mut xv6fs_superblock) -> c_int {
 ///
 /// Kept `#[no_mangle]`/exported per `block_cache.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_bcache_destroy(xv6_sb: *mut xv6fs_superblock) {
+pub(crate) extern "C" fn xv6fs_bcache_destroy(xv6_sb: *mut xv6fs_superblock) {
     // SAFETY: `xv6_sb` is live (caller's contract).
     unsafe {
         let bc = ptr::addr_of_mut!((*xv6_sb).block_cache);

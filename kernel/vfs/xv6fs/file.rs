@@ -77,13 +77,13 @@ unsafe extern "C" {
     // mm/page.rs -- `page->pcache.pcache_node` accessor (pre-existing).
     safe fn xv6_page_pcache_get_node(page: *mut page_t) -> *mut pcache_node;
 
-    // vfs/fs.rs (Wave 16).
-    safe fn vfs_inode_deref(r: *mut crate::bindings::vfs_inode_ref) -> *mut vfs_inode;
-
-    // vfs/inode.rs (Wave 13).
-    safe fn vfs_ilock(inode: *mut vfs_inode);
-    safe fn vfs_iunlock(inode: *mut vfs_inode);
 }
+
+// P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;
+// converted from `extern "C"` redeclarations to plain crate-path items
+// (identical signatures).
+use crate::vfs::fs::vfs_inode_deref;
+use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {

@@ -99,32 +99,18 @@ unsafe extern "C" {
     safe fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t;
     safe fn blkdev_put(dev: *mut blkdev_t) -> c_int;
 
-    // vfs/fs.rs (Wave 16).
-    safe fn vfs_fs_type_allocate() -> *mut vfs_fs_type;
-    safe fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_int;
-    safe fn vfs_mount_lock();
-    safe fn vfs_mount_unlock();
-    safe fn vfs_mount(
-        type_: *const c_char,
-        mountpoint: *mut vfs_inode,
-        device: *mut vfs_inode,
-        flags: c_int,
-        data: *const c_char,
-    ) -> c_int;
-    safe fn vfs_superblock_wlock(sb: *mut vfs_superblock);
-    safe fn vfs_superblock_unlock(sb: *mut vfs_superblock);
-
-    // vfs/inode.rs (Wave 13).
-    safe fn vfs_ilock(inode: *mut vfs_inode);
-    safe fn vfs_iunlock(inode: *mut vfs_inode);
-    safe fn vfs_iput(inode: *mut vfs_inode);
-    safe fn vfs_chroot(new_root: *mut vfs_inode) -> c_int;
-    safe fn vfs_mkdir(dir: *mut vfs_inode, mode: u32, name: *const c_char, name_len: usize) -> *mut vfs_inode;
-    safe fn vfs_mknod(dir: *mut vfs_inode, mode: u32, dev: u32, name: *const c_char, name_len: usize) -> *mut vfs_inode;
-
-    // fs.c's single dummy VFS-root `vfs_inode` instance.
-    static mut vfs_root_inode: vfs_inode;
 }
+
+// P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;
+// converted from `extern "C"` redeclarations to plain crate-path items
+// (identical signatures -- `mode_t`/`dev_t` are transparent `u32` type
+// aliases, so the former `u32`-typed params are unaffected). `vfs_root_inode`
+// is fs.rs's single dummy VFS-root `vfs_inode` instance.
+use crate::vfs::fs::{
+    vfs_fs_type_allocate, vfs_mount, vfs_mount_lock, vfs_mount_unlock, vfs_register_fs_type,
+    vfs_root_inode, vfs_superblock_unlock, vfs_superblock_wlock,
+};
+use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iput, vfs_iunlock, vfs_mkdir, vfs_mknod};
 
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`).
 /// Reimplemented locally per this crate's established convention.
@@ -336,8 +322,7 @@ static XV6FS_PCACHE_OPS: pcache_ops = pcache_ops {
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_inode_pcache_init(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn xv6fs_inode_pcache_init(inode: *mut vfs_inode) {
     // SAFETY: `inode` is live (caller's contract).
     unsafe {
         if !super::s_isreg((*inode).mode) {
@@ -387,8 +372,7 @@ fn xv6fs_sb_cache() -> *mut slab_cache_t {
 /// precedent as `vfs/fs.rs`'s `vfs_root_inode`), even though no C
 /// translation unit outside this driver references it today (verified by
 /// full-tree grep).
-#[no_mangle]
-pub static mut __xv6fs_inode_cache: slab_cache_t = unsafe { core::mem::zeroed() };
+pub(crate) static mut __xv6fs_inode_cache: slab_cache_t = unsafe { core::mem::zeroed() };
 
 #[inline]
 fn xv6fs_inode_cache() -> *mut slab_cache_t {
@@ -417,8 +401,7 @@ fn __xv6fs_init_cache() -> c_int {
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_shrink_caches() {
+pub(crate) extern "C" fn xv6fs_shrink_caches() {
     slab_cache_shrink(xv6fs_inode_cache(), 0x7fffffff);
     slab_cache_shrink(xv6fs_sb_cache(), 0x7fffffff);
 }
@@ -477,8 +460,7 @@ fn __xv6fs_alloc_inode_structure() -> *mut xv6fs_inode {
 }
 
 /// Mirrors `xv6fs_alloc_inode()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
+pub(crate) extern "C" fn xv6fs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
     if sb.is_null() {
         return err_ptr(neg(EINVAL));
     }
@@ -529,8 +511,7 @@ pub extern "C" fn xv6fs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
 // ===========================================================================
 
 /// Mirrors `xv6fs_get_inode()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
+pub(crate) extern "C" fn xv6fs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
     if sb.is_null() || ino == 0 {
         return err_ptr(neg(EINVAL));
     }
@@ -593,8 +574,7 @@ pub extern "C" fn xv6fs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs
 // ===========================================================================
 
 /// Mirrors `xv6fs_sync_fs()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) -> c_int {
+pub(crate) extern "C" fn xv6fs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) -> c_int {
     if sb.is_null() {
         return neg(EINVAL);
     }
@@ -614,8 +594,7 @@ pub extern "C" fn xv6fs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) -> c_int 
 }
 
 /// Mirrors `xv6fs_unmount_begin()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_unmount_begin(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn xv6fs_unmount_begin(sb: *mut vfs_superblock) {
     xv6fs_sync_fs(sb, 1);
 }
 
@@ -644,8 +623,7 @@ extern "C" fn xv6fs_statfs(sb: *mut vfs_superblock, buf: *mut statfs) -> c_int {
 // ===========================================================================
 
 /// Mirrors `xv6fs_free()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_free(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn xv6fs_free(sb: *mut vfs_superblock) {
     let xv6_sb = sb as *mut xv6fs_superblock;
     // SAFETY: `xv6_sb` is live and being torn down (caller's contract).
     unsafe {
@@ -812,8 +790,7 @@ static XV6FS_FS_TYPE_OPS: vfs_fs_type_ops = vfs_fs_type_ops {
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration; called from `vfs/fs.rs`'s `vfs_init()`.
-#[no_mangle]
-pub extern "C" fn xv6fs_init() {
+pub(crate) extern "C" fn xv6fs_init() {
     let ret = __xv6fs_init_cache();
     kassert!(ret == 0, "xv6fs_init: __xv6fs_init_cache failed");
 
@@ -842,8 +819,7 @@ pub extern "C" fn xv6fs_init() {
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration; called from `start_kernel.c`.
-#[no_mangle]
-pub extern "C" fn xv6fs_mount_root() {
+pub(crate) extern "C" fn xv6fs_mount_root() {
     // SAFETY: `vfs_root_inode` is the crate-wide dummy VFS-root static
     // (`vfs/fs.rs`), always live.
     let tmpfs_root = unsafe { vfs_root_inode.__bindgen_anon_2.__bindgen_anon_1.mnt_rooti };

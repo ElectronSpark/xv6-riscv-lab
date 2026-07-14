@@ -95,6 +95,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::bindings::cpu_local;
 use crate::machine;
 use crate::machine::{CpuLocal, CPU_FLAG_CRASHED, SIE_SSIE};
+// P3-1C mesh sweep: printf.rs is in scope for this wave; both are thin
+// spinlock wrappers, unconditionally safe to call, so they become plain
+// crate-path imports instead of `extern "C"` redeclarations.
+use crate::printf::{panic_msg_lock, panic_msg_unlock};
 
 // ===========================================================================
 // Externs.
@@ -115,11 +119,6 @@ unsafe extern "C" {
     /// alloc-free (see that file's doc), but its own signature is
     /// `unsafe extern "C" fn`, so this stays a plain (non-`safe`) decl.
     fn print_backtrace(context: u64, stack_start: u64, stack_end: u64);
-
-    /// `kernel/printf.rs` (Wave 4). Both are thin spinlock wrappers --
-    /// unconditionally safe to call.
-    pub safe fn panic_msg_lock();
-    pub safe fn panic_msg_unlock();
 
     /// `kernel/sbi.rs` (Wave 2). A plain SBI `ecall` wrapper; safe for any
     /// argument values (may simply be a no-op SBI call if the mask/base

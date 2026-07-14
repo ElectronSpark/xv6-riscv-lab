@@ -46,7 +46,12 @@ use core::mem::MaybeUninit;
 use crate::bindings::{pid_t, pipe, session, slab_cache_t, spinlock_t, termios, thread, tty, tty_ops};
 use crate::sync::{KSpinGuard, KSpinlock};
 
+use super::session::{session_get_fg_pgid, session_set_ctrl_tty, session_set_fg_pgid};
 use super::termios::termios_init_default;
+// P3-1C mesh sweep: vfs/pipe.rs is in scope for this wave; converted from
+// `extern "C"` redeclarations to plain crate-path items (identical
+// signatures).
+use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_read, pipe_write};
 
 // ===========================================================================
 // Externs.
@@ -62,10 +67,6 @@ unsafe extern "C" {
         flags: u64,
     ) -> c_int;
 
-    pub safe fn pipe_alloc(flags: c_int) -> *mut pipe;
-    pub safe fn pipe_close(pi: *mut pipe, x: c_int);
-    pub safe fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, user: c_int) -> i64;
-    pub safe fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u64, user: c_int) -> i64;
 
     pub safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
     pub safe fn either_copyout(user_dst: c_int, dst: u64, src: *mut c_void, len: u64) -> c_int;
@@ -77,10 +78,6 @@ unsafe extern "C" {
     pub safe fn signal_pending(p: *mut thread) -> bool;
     pub safe fn kill_proc(p: *mut thread, signum: c_int) -> c_int;
     pub safe fn pgroup_kill(pgid: c_int, signum: c_int) -> c_int;
-
-    pub safe fn session_get_fg_pgid(s: *mut session) -> pid_t;
-    pub safe fn session_set_fg_pgid(s: *mut session, pgid: pid_t);
-    pub safe fn session_set_ctrl_tty(s: *mut session, t: *mut tty);
 
     pub safe fn safestrcpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
 
@@ -225,8 +222,7 @@ impl<T> SyncCell<T> {
 
 static TTY_CACHE: SyncCell<slab_cache_t> = SyncCell::uninit();
 
-#[no_mangle]
-pub extern "C" fn tty_init() {
+pub(crate) extern "C" fn tty_init() {
     // SAFETY: `TTY_CACHE` is written here (its first use) before any
     // other `tty_*` entry point can run (mirrors the C original's
     // `start_kernel.c`-ordered single call); `slab_cache_init`
@@ -258,8 +254,7 @@ pub extern "C" fn tty_init() {
 /// this call. `ops`, if non-null, must remain live for as long as the
 /// returned `tty` (every `tty_*` dispatcher checks `ops` for null
 /// before use, and the pointer is stored, not copied-from).
-#[no_mangle]
-pub unsafe extern "C" fn tty_alloc(name: *const c_char, ops: *mut tty_ops) -> *mut tty {
+pub(crate) unsafe extern "C" fn tty_alloc(name: *const c_char, ops: *mut tty_ops) -> *mut tty {
     let raw = slab_alloc(TTY_CACHE.get()) as *mut tty;
     if raw.is_null() {
         return err_ptr(-ENOMEM);
@@ -311,8 +306,7 @@ pub unsafe extern "C" fn tty_alloc(name: *const c_char, ops: *mut tty_ops) -> *m
 /// # Safety
 /// `t`, if non-null, must be a `tty` previously returned by
 /// [`tty_alloc`], not already freed, and not concurrently accessed.
-#[no_mangle]
-pub unsafe extern "C" fn tty_free(t: *mut tty) {
+pub(crate) unsafe extern "C" fn tty_free(t: *mut tty) {
     if t.is_null() {
         return;
     }
@@ -337,8 +331,7 @@ pub unsafe extern "C" fn tty_free(t: *mut tty) {
 /// # Safety
 /// `t` must be a live, non-null `tty` (mirrors the C original, which
 /// also unconditionally dereferences `t->lock`).
-#[no_mangle]
-pub unsafe extern "C" fn tty_ref(t: *mut tty) {
+pub(crate) unsafe extern "C" fn tty_ref(t: *mut tty) {
     // SAFETY: see fn doc.
     let guard = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
     unsafe {
@@ -350,8 +343,7 @@ pub unsafe extern "C" fn tty_ref(t: *mut tty) {
 /// # Safety
 /// `t` must be a live, non-null `tty` previously returned by
 /// [`tty_alloc`] (mirrors the C original's unconditional dereference).
-#[no_mangle]
-pub unsafe extern "C" fn tty_unref(t: *mut tty) {
+pub(crate) unsafe extern "C" fn tty_unref(t: *mut tty) {
     let should_free;
     {
         // SAFETY: see fn doc.
@@ -513,8 +505,7 @@ unsafe fn tty_signal_fg_pgroup(t: *mut tty, signum: c_int) {
 /// # Safety
 /// `t` must be a live `tty`. `buf` must point to at least `count`
 /// readable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count: u64) -> i64 {
+pub(crate) unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count: u64) -> i64 {
     let n = count as usize;
     let lock_ptr = unsafe { &raw mut (*t).lock };
     // SAFETY: `t` is caller-guaranteed live (fn doc).
@@ -683,8 +674,7 @@ pub unsafe extern "C" fn tty_input(t: *mut tty, buf: *const c_char, count: u64) 
 /// `t` must be a live `tty`. `buf` must point to at least `count`
 /// writable bytes if `user == 0`, or be a valid userspace address
 /// range otherwise (checked internally by `either_copyout`).
-#[no_mangle]
-pub unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u64, user: c_int) -> i64 {
+pub(crate) unsafe extern "C" fn tty_read(t: *mut tty, buf: *mut c_char, count: u64, user: c_int) -> i64 {
     let lock_ptr = unsafe { &raw mut (*t).lock };
 
     let canon = {
@@ -786,8 +776,7 @@ pub(super) unsafe fn load_acquire_u32(p: *const u32) -> u32 {
 ///
 /// # Safety
 /// `t` must be a live `tty`.
-#[no_mangle]
-pub unsafe extern "C" fn tty_poll(t: *mut tty, events: c_short) -> c_int {
+pub(crate) unsafe extern "C" fn tty_poll(t: *mut tty, events: c_short) -> c_int {
     let mut revents: c_short = 0;
 
     // SAFETY: `t` is caller-guaranteed live (fn doc).
@@ -835,8 +824,7 @@ pub unsafe extern "C" fn tty_poll(t: *mut tty, events: c_short) -> c_int {
 /// `t` must be a live `tty`. `buf` must point to at least `count`
 /// readable bytes if `user == 0`, or be a valid userspace address
 /// range otherwise (checked internally by `either_copyin`).
-#[no_mangle]
-pub unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count: u64, user: c_int) -> i64 {
+pub(crate) unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count: u64, user: c_int) -> i64 {
     let need_opost = {
         // SAFETY: `t` is caller-guaranteed live (fn doc).
         let _g = unsafe { KSpinlock::from_bindings(&raw mut (*t).lock).lock() };
@@ -919,8 +907,7 @@ pub unsafe extern "C" fn tty_write(t: *mut tty, buf: *const c_char, count: u64, 
 /// # Safety
 /// `t` must be a live `tty`. `buf` must point to at least `count`
 /// writable kernel bytes.
-#[no_mangle]
-pub unsafe extern "C" fn tty_output(t: *mut tty, buf: *mut c_char, count: u64) -> i64 {
+pub(crate) unsafe extern "C" fn tty_output(t: *mut tty, buf: *mut c_char, count: u64) -> i64 {
     // SAFETY: `t` is caller-guaranteed live (fn doc).
     unsafe { pipe_read((*t).output_pipe, buf, count, 0) }
 }
@@ -933,8 +920,7 @@ pub unsafe extern "C" fn tty_output(t: *mut tty, buf: *mut c_char, count: u64) -
 /// `t` must be a live `tty`. `arg`'s required validity depends on
 /// `cmd` (a `termios*`/`winsize*`/`pid_t*`/`int*` writable or readable
 /// pointer as appropriate) -- same contract as the C original.
-#[no_mangle]
-pub unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_void) -> c_int {
+pub(crate) unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_void) -> c_int {
     match cmd {
         TCGETS => {
             let tp = arg as *mut termios;
@@ -1062,8 +1048,7 @@ pub unsafe extern "C" fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_void) -> c
 
 /// # Safety
 /// `t` must be a live `tty` previously returned by [`tty_alloc`].
-#[no_mangle]
-pub unsafe extern "C" fn tty_open(t: *mut tty) -> c_int {
+pub(crate) unsafe extern "C" fn tty_open(t: *mut tty) -> c_int {
     // SAFETY: `t` is caller-guaranteed live (fn doc).
     unsafe { tty_ref(t) };
     unsafe {
@@ -1078,8 +1063,7 @@ pub unsafe extern "C" fn tty_open(t: *mut tty) -> c_int {
 
 /// # Safety
 /// `t` must be a live `tty` previously returned by [`tty_alloc`].
-#[no_mangle]
-pub unsafe extern "C" fn tty_close(t: *mut tty) {
+pub(crate) unsafe extern "C" fn tty_close(t: *mut tty) {
     unsafe {
         if let Some(ops) = (*t).ops.as_ref() {
             if let Some(f) = ops.close {
@@ -1097,8 +1081,7 @@ pub unsafe extern "C" fn tty_close(t: *mut tty) {
 
 /// # Safety
 /// `t` must be a live `tty`.
-#[no_mangle]
-pub unsafe extern "C" fn tty_hangup(t: *mut tty) {
+pub(crate) unsafe extern "C" fn tty_hangup(t: *mut tty) {
     unsafe {
         if let Some(ops) = (*t).ops.as_ref() {
             if let Some(f) = ops.hangup {

@@ -37,6 +37,12 @@ use super::{
     VFS_DENTRY_COOKIE_END, VFS_DENTRY_COOKIE_PARENT,
 };
 
+// P3-1C mesh sweep: vfs/{inode,fs}.rs are in scope for this wave;
+// converted from `extern "C"` redeclarations to plain crate-path items
+// (identical signatures).
+use crate::vfs::fs::{vfs_alloc_inode, vfs_remove_inode, vfs_release_dentry};
+use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
+
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
 // ===========================================================================
@@ -56,15 +62,6 @@ unsafe extern "C" {
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
     safe fn strncmp(s1: *const c_char, s2: *const c_char, n: usize) -> c_int;
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
-
-    // vfs/inode.rs (Wave 13).
-    safe fn vfs_ilock(inode: *mut vfs_inode);
-    safe fn vfs_iunlock(inode: *mut vfs_inode);
-    safe fn vfs_release_dentry(dentry: *mut vfs_dentry);
-
-    // vfs/fs.rs (Wave 16).
-    safe fn vfs_alloc_inode(sb: *mut crate::bindings::vfs_superblock) -> *mut vfs_inode;
-    safe fn vfs_remove_inode(sb: *mut crate::bindings::vfs_superblock, inode: *mut vfs_inode) -> c_int;
 
     // hlist.rs (Wave 1) -- the generic exported hash-table primitives
     // (bucket lookup/insert/remove); this file's own `hlist_first_entry`/
@@ -373,8 +370,7 @@ static __TMPFS_DIR_HLIST_FUNCS: hlist_func_struct = hlist_func_struct {
 /// Mirrors `tmpfs_make_directory()`. Kept `#[no_mangle]`/exported per
 /// `tmpfs_private.h`'s `extern` declaration -- `kernel/vfs/devtmpfs/
 /// superblock.c` (still C) calls this directly on its own root inode.
-#[no_mangle]
-pub extern "C" fn tmpfs_make_directory(ti: *mut tmpfs_inode) {
+pub(crate) extern "C" fn tmpfs_make_directory(ti: *mut tmpfs_inode) {
     // SAFETY: `ti` is a live, exclusively-owned `tmpfs_inode` (caller's
     // contract, matching the C original).
     unsafe {
@@ -501,8 +497,7 @@ fn __tmpfs_alloc_link_inode(
 ///
 /// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn tmpfs_free_symlink_target(ti: *mut tmpfs_inode) {
+pub(crate) extern "C" fn tmpfs_free_symlink_target(ti: *mut tmpfs_inode) {
     // SAFETY: `ti` is a live symlink `tmpfs_inode` (caller's contract).
     unsafe {
         if (*ti).vfs_inode.size as usize >= TMPFS_INODE_EMBEDDED_DATA_LEN {

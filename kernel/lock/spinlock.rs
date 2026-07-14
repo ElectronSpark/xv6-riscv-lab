@@ -30,12 +30,14 @@ use crate::machine::{
     self, cpu_relax, intr_off_save, intr_on, intr_restore, pop_off, push_off, wfi, write_sie,
     CpuLocal, CPU_FLAG_CRASHED, SIE_SSIE,
 };
+// P3-1C mesh sweep: printf.rs is in scope for this wave, so `panic_state`
+// becomes a plain crate-path import instead of an `extern "C"` redeclaration.
+use crate::printf::panic_state;
 
 // ---------------------------------------------------------------------------
 // Externs: the few C helpers we still rely on.
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
-    pub safe fn panic_state() -> c_int;
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }

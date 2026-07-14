@@ -67,8 +67,7 @@ const B115200: u32 = 115200;
 ///
 /// # Safety
 /// `t` must point to a valid, writable `termios`.
-#[no_mangle]
-pub unsafe extern "C" fn termios_init_default(t: *mut termios) {
+pub(crate) unsafe extern "C" fn termios_init_default(t: *mut termios) {
     // SAFETY: caller guarantees `t` is valid and writable (see fn doc).
     // `termios` is a plain-old-data struct (no padding-sensitive
     // invariants), so a field-by-field write fully initializes it.

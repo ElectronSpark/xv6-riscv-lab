@@ -29,14 +29,6 @@ use crate::bindings::{bool_, cdev_ops_t, cdev_t, mode_t, session, tty};
 unsafe extern "C" {
     pub safe fn cdev_register(dev: *mut cdev_t) -> c_int;
 
-    pub safe fn tty_open(t: *mut tty) -> c_int;
-    pub safe fn tty_close(t: *mut tty);
-    pub safe fn tty_read(t: *mut tty, buf: *mut c_char, count: u64, user: c_int) -> i64;
-    pub safe fn tty_write(t: *mut tty, buf: *const c_char, count: u64, user: c_int) -> i64;
-    pub safe fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_void) -> c_int;
-    pub safe fn tty_poll(t: *mut tty, events: c_short) -> c_int;
-
-    pub safe fn session_get_ctrl_tty(s: *mut session) -> *mut tty;
     pub safe fn pid_wlock();
     pub safe fn pid_wunlock();
 
@@ -44,6 +36,16 @@ unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }
+
+// P3-1C mesh sweep: tty/{tty,session}.rs are in scope for this wave;
+// converted from `extern "C"` redeclarations to plain crate-path items
+// (identical signatures). ABI-truth note: all six are real
+// `unsafe extern "C" fn`s -- this file's former mirror declared them
+// `safe`; every call site already sits inside an `unsafe extern "C" fn`
+// body except `ctrl_tty()`'s `session_get_ctrl_tty` call, which gets an
+// explicit `unsafe { }` block below.
+use super::session::session_get_ctrl_tty;
+use super::tty::{tty_close, tty_ioctl, tty_open, tty_poll, tty_read, tty_write};
 
 const ENXIO: c_int = 6;
 
@@ -110,7 +112,8 @@ fn ctrl_tty() -> *mut tty {
         return core::ptr::null_mut();
     }
     pid_wlock();
-    let t = session_get_ctrl_tty(session);
+    // SAFETY: `session` was just checked non-null above.
+    let t = unsafe { session_get_ctrl_tty(session) };
     pid_wunlock();
     t
 }
@@ -206,8 +209,7 @@ static mut TTY_CDEV_OPS: cdev_ops_t = cdev_ops_t {
 
 static mut TTY_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 
-#[no_mangle]
-pub extern "C" fn ttydevinit() {
+pub(crate) extern "C" fn ttydevinit() {
     // SAFETY: `ttydevinit()` runs exactly once, from `start_kernel.c`'s
     // single-hart init sequence, before any other code can observe
     // `TTY_CDEV`/`TTY_CDEV_OPS`.

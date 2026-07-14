@@ -453,6 +453,26 @@ configure_file(${KERNEL_LD_IN} ${KERNEL_LD} @ONLY)
 # Symbols that must be force-pulled from the Rust staticlib so the linker
 # keeps the corresponding object files. Avoid dragging in Rust's
 # compiler-builtins (built with medlow code model).
+#
+# P3-1C mesh sweep (2026-07-13): a caller-survey-driven prune of the
+# vfs/tty/console/uart/printf entries here (265 of them -- every symbol
+# demoted from `#[no_mangle]` in that wave) was attempted and then FULLY
+# REVERTED after it was empirically caught causing silent data corruption:
+# with the pruned list, `usertests writebig` (a single ~52 MB file spanning
+# xv6fs's double-indirect block range) read back block 53403's content as
+# 0 instead of 53403, both mid-`usertests -q` and in isolation -- reverting
+# just this list (keeping every P3-1C code change) made it pass again,
+# byte-for-byte matching the pre-wave baseline. Root cause not isolated
+# within this wave's budget (265-entry bisection × full rebuild × a
+# multi-minute writebig run each = too expensive to do exhaustively here);
+# the mechanism is presumably some object-file/section this repo's link
+# step only pulls from the archive via one of these forced-undefined
+# names, with no live symbol-table reference the linker's own reachability
+# pass can see (a real Rust caller not being sufficient in every case is
+# the whole reason this list exists at all, per the comment above). Do
+# NOT re-attempt a blanket prune of this list without a per-symbol
+# bisection that re-runs the *full* fs battery (mmaptest, stressfs,
+# usertests fs singles including writebig, testsig) after each removal.
 set(RUST_FORCE_UNDEFINED
     # bits.c port
     # slab.c port

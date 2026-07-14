@@ -152,14 +152,6 @@ unsafe extern "C" {
     static mut __physical_memory_start: u64;
     static mut __physical_memory_end: u64;
     static mut __physical_total_pages: u64;
-    /// `uart.rs` (Wave 4) -- single boot-time writer (this file), read-only
-    /// thereafter.
-    static mut __uart0_mmio_base: u64;
-    static mut __uart0_irqno: u64;
-    static mut __uart0_clock: u32;
-    static mut __uart0_baud: u32;
-    static mut __uart0_reg_shift: u32;
-    static mut __uart0_reg_io_width: u32;
     /// `irq/plic.rs` (Wave 5) -- single boot-time writer (this file).
     static mut __plic_mmio_base: u64;
     /// `pci.c`, still C (Wave 28) -- default-initialized nonzero
@@ -2613,12 +2605,15 @@ pub unsafe extern "C" fn fdt_apply_platform_config() {
         }
 
         if platform.uart_base != 0 {
-            __uart0_mmio_base = platform.uart_base;
-            __uart0_irqno = platform.uart_irq as u64;
-            __uart0_clock = platform.uart_clock;
-            __uart0_baud = platform.uart_baud;
-            __uart0_reg_shift = platform.uart_reg_shift;
-            __uart0_reg_io_width = platform.uart_reg_io_width;
+            // P3-1C mesh sweep: `uart.rs` is in scope for this wave, so its
+            // `__uart0_*` globals are written via crate path instead of an
+            // `extern "C"` redeclaration.
+            crate::uart::__uart0_mmio_base = platform.uart_base;
+            crate::uart::__uart0_irqno = platform.uart_irq as u64;
+            crate::uart::__uart0_clock = platform.uart_clock;
+            crate::uart::__uart0_baud = platform.uart_baud;
+            crate::uart::__uart0_reg_shift = platform.uart_reg_shift;
+            crate::uart::__uart0_reg_io_width = platform.uart_reg_io_width;
         }
         if platform.plic_base != 0 {
             __plic_mmio_base = platform.plic_base;

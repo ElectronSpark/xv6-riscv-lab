@@ -191,8 +191,7 @@ unsafe fn __xv6fs_bmap_ind(xv6_sb: *mut xv6fs_superblock, entry: *mut u32, dev: 
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_bmap_read(ip: *mut xv6fs_inode, mut bn: u32) -> u32 {
+pub(crate) extern "C" fn xv6fs_bmap_read(ip: *mut xv6fs_inode, mut bn: u32) -> u32 {
     // SAFETY: `ip` is live (caller's contract).
     unsafe {
         let dev = (*ip).dev;
@@ -258,8 +257,7 @@ pub extern "C" fn xv6fs_bmap_read(ip: *mut xv6fs_inode, mut bn: u32) -> u32 {
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_bmap(ip: *mut xv6fs_inode, mut bn: u32) -> u32 {
+pub(crate) extern "C" fn xv6fs_bmap(ip: *mut xv6fs_inode, mut bn: u32) -> u32 {
     // SAFETY: `ip` is live with a transaction active (caller's contract).
     unsafe {
         let xv6_sb = (*ip).vfs_inode.sb as *mut xv6fs_superblock;
@@ -432,8 +430,7 @@ const ITRUNC_BATCH_SIZE: i32 = (super::MAXOPBLOCKS - 5) / 2;
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
+pub(crate) extern "C" fn xv6fs_itrunc(ip: *mut xv6fs_inode) {
     // SAFETY: `ip` is live with a transaction active (caller's contract).
     unsafe {
         let xv6_sb = (*ip).vfs_inode.sb as *mut xv6fs_superblock;
@@ -711,8 +708,7 @@ unsafe fn __xv6fs_truncate_partial(ip: *mut xv6fs_inode, first_block: u32) -> c_
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration; this is also [`super::inode::XV6FS_INODE_OPS`]'s
 /// `.truncate` entry.
-#[no_mangle]
-pub extern "C" fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
+pub(crate) extern "C" fn xv6fs_truncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
     if inode.is_null() {
         return neg(EINVAL);
     }

@@ -118,53 +118,22 @@ use crate::bindings::{
     vfs_fs_type, vfs_fs_type_ops, vfs_inode, vfs_superblock, vfs_superblock_ops, EEXIST, EINVAL,
     ENODEV, ENOENT, ENOMEM, PGSIZE,
 };
+// P3-1C mesh sweep: vfs/{fs,inode}.rs and vfs/tmpfs/{superblock,inode}.rs
+// are in scope for this wave; converted from `extern "C"` redeclarations
+// to plain crate-path items (identical signatures).
+use crate::vfs::fs::{vfs_fs_type_allocate, vfs_mount_lock, vfs_mount_unlock, vfs_register_fs_type, vfs_release_dentry};
+use crate::vfs::inode::{vfs_idup, vfs_ilookup, vfs_iput, vfs_mkdir, vfs_mknod, vfs_unlink};
+use crate::vfs::tmpfs::inode::tmpfs_make_directory;
+use crate::vfs::tmpfs::superblock::{
+    tmpfs_alloc_inode, tmpfs_alloc_superblock, tmpfs_free, tmpfs_get_inode, tmpfs_sync_fs,
+    tmpfs_unmount_begin,
+};
 
 // ===========================================================================
 // Externs — see the module doc above for the convention.
 // ===========================================================================
 
 unsafe extern "C" {
-    // tmpfs/{superblock,inode}.rs (Wave 18) -- the tmpfs_private.h C-ABI
-    // contract this file reuses (see the module doc above).
-    safe fn tmpfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode;
-    safe fn tmpfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode;
-    safe fn tmpfs_sync_fs(sb: *mut vfs_superblock, wait: c_int) -> c_int;
-    safe fn tmpfs_unmount_begin(sb: *mut vfs_superblock);
-    safe fn tmpfs_alloc_superblock() -> *mut tmpfs_superblock;
-    safe fn tmpfs_free(sb: *mut vfs_superblock);
-    safe fn tmpfs_make_directory(ti: *mut tmpfs_inode);
-
-    // vfs/fs.rs (Wave 16) -- fs-type registration + mount lock.
-    safe fn vfs_fs_type_allocate() -> *mut vfs_fs_type;
-    safe fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_int;
-    safe fn vfs_mount_lock();
-    safe fn vfs_mount_unlock();
-
-    // vfs/inode.rs (Wave 13) -- inode refcount + directory ops.
-    safe fn vfs_idup(inode: *mut vfs_inode);
-    safe fn vfs_iput(inode: *mut vfs_inode);
-    safe fn vfs_ilookup(
-        dir: *mut vfs_inode,
-        dentry: *mut vfs_dentry,
-        name: *const c_char,
-        name_len: usize,
-    ) -> c_int;
-    safe fn vfs_release_dentry(dentry: *mut vfs_dentry);
-    safe fn vfs_mkdir(
-        dir: *mut vfs_inode,
-        mode: mode_t,
-        name: *const c_char,
-        name_len: usize,
-    ) -> *mut vfs_inode;
-    safe fn vfs_mknod(
-        dir: *mut vfs_inode,
-        mode: mode_t,
-        dev: dev_t,
-        name: *const c_char,
-        name_len: usize,
-    ) -> *mut vfs_inode;
-    safe fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> c_int;
-
     // proc module.
     safe fn xv6_panic(msg: *const c_char) -> !;
 
@@ -547,8 +516,7 @@ unsafe fn __devtmpfs_unlink_relative(
 ///
 /// Called from `kernel/vfs/fs.rs`'s `vfs_init()` -- kept `#[no_mangle]`
 /// per that extern declaration.
-#[no_mangle]
-pub extern "C" fn devtmpfs_post_mount_populate() -> c_int {
+pub(crate) extern "C" fn devtmpfs_post_mount_populate() -> c_int {
     let root = __devtmpfs_get_root();
     if root.is_null() {
         // SAFETY: static format string, no arguments.
@@ -696,8 +664,7 @@ static DEVTMPFS_FS_TYPE_OPS: vfs_fs_type_ops = vfs_fs_type_ops {
 /// Called by device registration code (`kernel/dev/dev.c`, still C --
 /// Wave 21). Kept `#[no_mangle]` per `kernel/inc/devtmpfs.h`'s `extern`
 /// declaration -- see the module doc's "C-ABI surface kept" section.
-#[no_mangle]
-pub extern "C" fn devtmpfs_create_node(name: *const c_char, mode: mode_t, dev: dev_t) -> c_int {
+pub(crate) extern "C" fn devtmpfs_create_node(name: *const c_char, mode: mode_t, dev: dev_t) -> c_int {
     __devtmpfs_ensure_init();
 
     if name.is_null() {
@@ -756,8 +723,7 @@ pub extern "C" fn devtmpfs_create_node(name: *const c_char, mode: mode_t, dev: d
 ///
 /// Kept `#[no_mangle]` per `kernel/inc/devtmpfs.h`'s `extern` declaration
 /// -- see the module doc's "C-ABI surface kept" section.
-#[no_mangle]
-pub extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
+pub(crate) extern "C" fn devtmpfs_remove_node(name: *const c_char) -> c_int {
     __devtmpfs_ensure_init();
 
     if name.is_null() {
@@ -858,8 +824,7 @@ extern "C" fn __devtmpfs_register_one_device(dev: *mut device_t, _ctx: *mut c_vo
 /// [`devtmpfs_init`] after the filesystem type is registered. Kept
 /// `#[no_mangle]` per `kernel/inc/devtmpfs.h`'s `extern` declaration --
 /// see the module doc's "C-ABI surface kept" section.
-#[no_mangle]
-pub extern "C" fn devtmpfs_populate_devices() {
+pub(crate) extern "C" fn devtmpfs_populate_devices() {
     __devtmpfs_ensure_init();
 
     // Use the dev_for_each_device iterator to find all devices that were
@@ -895,8 +860,7 @@ pub extern "C" fn devtmpfs_populate_devices() {
 /// Initialise devtmpfs caches and register the filesystem type. Called
 /// from `kernel/vfs/fs.rs`'s `vfs_init()` -- kept `#[no_mangle]` per that
 /// extern declaration.
-#[no_mangle]
-pub extern "C" fn devtmpfs_init() {
+pub(crate) extern "C" fn devtmpfs_init() {
     __devtmpfs_ensure_init();
 
     // Register the devtmpfs filesystem type.

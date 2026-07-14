@@ -104,6 +104,16 @@ use crate::proc::{
     workqueue_runtime_smoke_test, workqueue_test_launch_tests,
 };
 use crate::timer::sched_timer::sched_timer_init;
+// P3-1C mesh sweep: printf.rs/vfs/tty/console.rs are in scope for this
+// wave, so these become plain crate-path imports instead of `extern "C"`
+// redeclarations (all no-arg/no-return, identical signatures).
+use crate::console::{consoledevinit, consoleinit};
+use crate::printf::printfinit;
+use crate::tty::ptmx::ptmxinit;
+use crate::tty::tty::tty_init;
+use crate::tty::tty_dev::ttydevinit;
+use crate::vfs::fs::vfs_init;
+use crate::vfs::pipe::pipe_init;
 
 // ===========================================================================
 // Early physical-memory bounds — canonical definitions.
@@ -176,9 +186,6 @@ unsafe extern "C" {
     // kobject.rs
     fn kobject_global_init();
 
-    // printf.rs
-    fn printfinit();
-
     // dev/fdt.rs (Wave 23)
     fn fdt_early_scan_memory(dtb: *mut c_void, base_out: *mut u64, size_out: *mut u64) -> c_int;
     fn fdt_init(dtb: *mut c_void) -> c_int;
@@ -196,9 +203,6 @@ unsafe extern "C" {
     fn kvminit();
     fn kvminithart();
 
-    // vfs/pipe.rs (Wave 14)
-    fn pipe_init();
-
     // lock/rcu.rs
     fn rcu_init();
     fn rcu_cpu_init(cpu: c_int);
@@ -213,12 +217,6 @@ unsafe extern "C" {
     // cross-crate set respectively).
     fn idle_thread_init();
     fn scheduler_yield();
-
-    // tty/tty.rs (Wave 11)
-    fn tty_init();
-
-    // console.rs (Wave 4)
-    fn consoleinit();
 
     // dev/netdev.rs (Wave 24)
     fn netdev_init();
@@ -240,10 +238,7 @@ unsafe extern "C" {
     fn x1_sdhci_init();
 
     // Thread-context post-init (start_kernel_post_init below).
-    fn consoledevinit();
     fn nullranddevinit();
-    fn ttydevinit();
-    fn ptmxinit();
     // still C (kernel/virtio_disk.c — Wave 28).
     fn virtio_disk_init();
     // still C (kernel/ramdisk.c — Wave 28).
@@ -251,7 +246,6 @@ unsafe extern "C" {
     // still C (kernel/sysnet.c — Wave 28).
     fn sockinit();
     fn pcache_global_init();
-    fn vfs_init();
 
     // lock/rwsem_test.rs, lock/semaphore_test.rs — always linked in
     // (compiled unconditionally); only the *calls* below are feature-gated.

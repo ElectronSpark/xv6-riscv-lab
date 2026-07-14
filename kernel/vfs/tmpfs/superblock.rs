@@ -61,28 +61,17 @@ unsafe extern "C" {
     safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
     safe fn slab_free(obj: *mut c_void);
 
-    // vfs/fs.rs (Wave 16).
-    safe fn vfs_fs_type_allocate() -> *mut vfs_fs_type;
-    safe fn vfs_register_fs_type(fs_type: *mut vfs_fs_type) -> c_int;
-    safe fn vfs_mount_lock();
-    safe fn vfs_mount_unlock();
-    safe fn vfs_mount(
-        type_: *const c_char,
-        mountpoint: *mut vfs_inode,
-        device: *mut vfs_inode,
-        flags: c_int,
-        data: *const c_char,
-    ) -> c_int;
-    safe fn vfs_remove_inode(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> c_int;
-
-    // vfs/inode.rs (Wave 13).
-    safe fn vfs_ilock(inode: *mut vfs_inode);
-    safe fn vfs_iunlock(inode: *mut vfs_inode);
-    safe fn vfs_chroot(new_root: *mut vfs_inode) -> c_int;
-
-    // fs.c's single dummy VFS-root `vfs_inode` instance.
-    static mut vfs_root_inode: vfs_inode;
 }
+
+// P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;
+// converted from `extern "C"` redeclarations to plain crate-path items
+// (identical signatures). `vfs_root_inode` is fs.rs's single dummy
+// VFS-root `vfs_inode` instance.
+use crate::vfs::fs::{
+    vfs_fs_type_allocate, vfs_mount, vfs_mount_lock, vfs_mount_unlock, vfs_register_fs_type,
+    vfs_remove_inode, vfs_root_inode,
+};
+use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iunlock};
 
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`).
 /// Reimplemented locally per this crate's established per-file
@@ -157,8 +146,7 @@ fn __tmpfs_init_cache() -> c_int {
 /// declaration even though — like the C original — nothing calls it
 /// today (its only caller, `tmpfs_smoketest.c`, was dead code and is
 /// deleted with this port; see the module doc).
-#[no_mangle]
-pub extern "C" fn tmpfs_shrink_caches() {
+pub(crate) extern "C" fn tmpfs_shrink_caches() {
     slab_cache_shrink(tmpfs_inode_cache(), 0x7fffffff);
     slab_cache_shrink(tmpfs_sb_cache(), 0x7fffffff);
 }
@@ -188,8 +176,7 @@ fn __tmpfs_alloc_inode_structure() -> *mut tmpfs_inode {
 }
 
 /// Mirrors `tmpfs_alloc_inode()`.
-#[no_mangle]
-pub extern "C" fn tmpfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
+pub(crate) extern "C" fn tmpfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
     if sb.is_null() {
         return err_ptr(neg(EINVAL));
     }
@@ -225,15 +212,13 @@ pub extern "C" fn tmpfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
 /// (directories) before this is called. `inode` must be a live
 /// `vfs_inode` embedded in a `tmpfs_inode` allocated by
 /// [`tmpfs_alloc_inode`] (`vfs_inode` is its first field, offset 0).
-#[no_mangle]
-pub extern "C" fn tmpfs_free_inode(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn tmpfs_free_inode(inode: *mut vfs_inode) {
     let ti = inode as *mut tmpfs_inode;
     slab_free(ti as *mut c_void);
 }
 
 /// Mirrors `tmpfs_alloc_superblock()`.
-#[no_mangle]
-pub extern "C" fn tmpfs_alloc_superblock() -> *mut tmpfs_superblock {
+pub(crate) extern "C" fn tmpfs_alloc_superblock() -> *mut tmpfs_superblock {
     let sb = slab_alloc(tmpfs_sb_cache()) as *mut tmpfs_superblock;
     if sb.is_null() {
         return ptr::null_mut();
@@ -251,8 +236,7 @@ pub extern "C" fn tmpfs_alloc_superblock() -> *mut tmpfs_superblock {
 /// Mirrors `tmpfs_free()`. `sb` must be a live `vfs_superblock` embedded
 /// in a `tmpfs_superblock` allocated by [`tmpfs_alloc_superblock`]
 /// (`vfs_sb` is its first field, offset 0).
-#[no_mangle]
-pub extern "C" fn tmpfs_free(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn tmpfs_free(sb: *mut vfs_superblock) {
     let tsb = sb as *mut tmpfs_superblock;
     slab_free(tsb as *mut c_void);
 }
@@ -263,8 +247,7 @@ pub extern "C" fn tmpfs_free(sb: *mut vfs_superblock) {
 
 /// Mirrors `tmpfs_get_inode()`. tmpfs does not persist inodes, so it
 /// cannot load an inode by number -- always `-ENOENT`.
-#[no_mangle]
-pub extern "C" fn tmpfs_get_inode(sb: *mut vfs_superblock, _ino: u64) -> *mut vfs_inode {
+pub(crate) extern "C" fn tmpfs_get_inode(sb: *mut vfs_superblock, _ino: u64) -> *mut vfs_inode {
     if sb.is_null() {
         return err_ptr(neg(EINVAL));
     }
@@ -273,8 +256,7 @@ pub extern "C" fn tmpfs_get_inode(sb: *mut vfs_superblock, _ino: u64) -> *mut vf
 
 /// Mirrors `tmpfs_sync_fs()`. tmpfs is an in-memory filesystem, nothing
 /// to sync.
-#[no_mangle]
-pub extern "C" fn tmpfs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) -> c_int {
+pub(crate) extern "C" fn tmpfs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) -> c_int {
     // SAFETY: `sb` is a live `vfs_superblock` (caller's contract, same
     // as the C `vfs_superblock_ops.sync_fs` callback convention).
     unsafe { (*sb).__bindgen_anon_2.set_dirty(0) };
@@ -300,8 +282,7 @@ pub extern "C" fn tmpfs_sync_fs(sb: *mut vfs_superblock, _wait: c_int) -> c_int 
 /// never shared a function either (both are macro-expansion call
 /// sites), matching this crate's established per-file self-contained
 /// convention.
-#[no_mangle]
-pub extern "C" fn tmpfs_unmount_begin(sb: *mut vfs_superblock) {
+pub(crate) extern "C" fn tmpfs_unmount_begin(sb: *mut vfs_superblock) {
     if sb.is_null() {
         return;
     }
@@ -528,8 +509,7 @@ static TMPFS_FS_TYPE_OPS: vfs_fs_type_ops = vfs_fs_type_ops {
 /// This only initializes the tmpfs infrastructure. It does NOT mount
 /// anything. Call this once during kernel initialization before any
 /// tmpfs can be mounted.
-#[no_mangle]
-pub extern "C" fn tmpfs_init() {
+pub(crate) extern "C" fn tmpfs_init() {
     let ret = __tmpfs_init_cache();
     kassert!(ret == 0, "tmpfs_init: __tmpfs_init_cache failed");
 
@@ -565,8 +545,7 @@ pub extern "C" fn tmpfs_init() {
 ///
 /// This mounts a fresh tmpfs instance at the VFS root inode and sets it
 /// as the process root. Call this after [`tmpfs_init`] during early boot.
-#[no_mangle]
-pub extern "C" fn tmpfs_mount_root() {
+pub(crate) extern "C" fn tmpfs_mount_root() {
     vfs_mount_lock();
     // SAFETY: `vfs_root_inode` is the crate-wide dummy VFS-root static
     // (`vfs/fs.rs`), always live.

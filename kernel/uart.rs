@@ -58,23 +58,17 @@ use crate::bindings::spinlock_t;
 
 /// Physical MMIO base of UART0. Read by `mm/vm_pgtab.rs`'s `kvmmake` (as
 /// `extern`) and written by `dev/fdt.c` (still C) during platform probe.
-#[no_mangle]
-pub static mut __uart0_mmio_base: u64 = 0x1000_0000;
+pub(crate) static mut __uart0_mmio_base: u64 = 0x1000_0000;
 /// PLIC hardware IRQ number for UART0.
-#[no_mangle]
-pub static mut __uart0_irqno: u64 = 10;
+pub(crate) static mut __uart0_irqno: u64 = 10;
 /// UART clock in Hz; 0 = default (assume 1.8432 MHz for QEMU).
-#[no_mangle]
-pub static mut __uart0_clock: u32 = 0;
+pub(crate) static mut __uart0_clock: u32 = 0;
 /// Baud rate; 0 = default 115200.
-#[no_mangle]
-pub static mut __uart0_baud: u32 = 0;
+pub(crate) static mut __uart0_baud: u32 = 0;
 /// Register spacing: 0 = 1-byte, 2 = 4-byte (common on SoCs).
-#[no_mangle]
-pub static mut __uart0_reg_shift: u32 = 0;
+pub(crate) static mut __uart0_reg_shift: u32 = 0;
 /// Register access width: 1 = 8-bit, 4 = 32-bit (PXA UART).
-#[no_mangle]
-pub static mut __uart0_reg_io_width: u32 = 1;
+pub(crate) static mut __uart0_reg_io_width: u32 = 1;
 
 // ===========================================================================
 // 16550A/PXA UART registers.
@@ -171,12 +165,12 @@ unsafe extern "C" {
 
     pub safe fn xv6_push_off();
     pub safe fn xv6_pop_off();
-
-    /// Console line-discipline entry point (`kernel/console.rs`, ported
-    /// in this same wave). Forward declaration mirrors the C
-    /// `void consoleintr(int)` used by `uart.c`.
-    pub safe fn consoleintr(c: c_int);
 }
+
+// P3-1C mesh sweep: console.rs is in scope for this wave, so
+// `consoleintr` becomes a plain crate-path import instead of an
+// `extern "C"` redeclaration (identical signature).
+use crate::console::consoleintr;
 
 const EINTR: c_int = 4;
 
@@ -261,8 +255,7 @@ static mut UART_RX_R: u64 = 0;
 /// Bring up the UART hardware. Returns 1 on success (matches the C
 /// `int uartinit(void)` — always succeeds today, the return value
 /// exists for the real-hardware/SBI-fallback path in `console.rs`).
-#[no_mangle]
-pub extern "C" fn uartinit() -> c_int {
+pub(crate) extern "C" fn uartinit() -> c_int {
     // Disable interrupts to avoid spurious IRQs while reprogramming.
     write_reg(IER, 0x00);
 
@@ -320,8 +313,7 @@ pub extern "C" fn uartinit() -> c_int {
 /// sending if it isn't already. Blocks if the output buffer is full.
 /// Because it may block, it can't be called from interrupts; it's
 /// only suitable for use by `write()`.
-#[no_mangle]
-pub extern "C" fn uartputc(c: c_int) {
+pub(crate) extern "C" fn uartputc(c: c_int) {
     // SAFETY: `UART_TX_LOCK` is a valid, compile-time-initialised
     // spinlock (see its definition above); TX path is lock-protected
     // and can sleep, so it must not run from IRQ context (matches the
@@ -347,8 +339,7 @@ pub extern "C" fn uartputc(c: c_int) {
 ///
 /// # Safety
 /// `s` must point to at least `n` readable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn uartputs(s: *const c_char, n: c_int) {
+pub(crate) unsafe extern "C" fn uartputs(s: *const c_char, n: c_int) {
     // SAFETY: same lock contract as `uartputc`; `s`/`n` validity is
     // this function's documented precondition.
     unsafe {
@@ -374,8 +365,7 @@ pub unsafe extern "C" fn uartputs(s: *const c_char, n: c_int) {
 ///
 /// # Safety
 /// `s` must point to at least `n` readable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn uartputs_nb(s: *const c_char, n: c_int) -> c_int {
+pub(crate) unsafe extern "C" fn uartputs_nb(s: *const c_char, n: c_int) -> c_int {
     let mut enqueued: c_int = 0;
     // SAFETY: same lock contract as `uartputc`; `s`/`n` validity is
     // this function's documented precondition.
@@ -399,8 +389,7 @@ pub unsafe extern "C" fn uartputs_nb(s: *const c_char, n: c_int) -> c_int {
 
 /// Wait interruptibly for space in the UART TX buffer. Returns 0 when
 /// space is available, `-EINTR` on pending signal.
-#[no_mangle]
-pub extern "C" fn uart_tx_wait() -> c_int {
+pub(crate) extern "C" fn uart_tx_wait() -> c_int {
     // SAFETY: same lock contract as `uartputc`.
     unsafe {
         spin_lock(&raw mut UART_TX_LOCK);
@@ -420,8 +409,7 @@ pub extern "C" fn uart_tx_wait() -> c_int {
 /// use by kernel `printf()` and to echo characters. It spins waiting
 /// for the uart's output register to be empty. IRQ-safe: never sleeps,
 /// only spin-waits on hardware state.
-#[no_mangle]
-pub extern "C" fn uartputc_sync(c: c_int) {
+pub(crate) extern "C" fn uartputc_sync(c: c_int) {
     xv6_push_off();
     // Wait for Transmit Holding Empty to be set in LSR.
     while (read_reg(LSR) & LSR_TX_IDLE) == 0 {}
@@ -435,8 +423,7 @@ pub extern "C" fn uartputc_sync(c: c_int) {
 ///
 /// # Safety
 /// Caller must hold `UART_TX_LOCK`.
-#[no_mangle]
-pub unsafe extern "C" fn uartstart() {
+pub(crate) unsafe extern "C" fn uartstart() {
     // Check if UART TX FIFO is ready (THR empty).
     if (read_reg(LSR) & LSR_TX_IDLE) == 0 {
         // The UART transmit holding register is full; enable TX
@@ -521,8 +508,7 @@ unsafe fn uartrecv() {
 
 /// Read one input character from the UART. Return -1 if none is
 /// waiting.
-#[no_mangle]
-pub extern "C" fn uartgetc() -> c_int {
+pub(crate) extern "C" fn uartgetc() -> c_int {
     let mut c: c_int = -1;
     // SAFETY: `UART_RX_LOCK` is a valid, compile-time-initialised
     // spinlock; `uartrecv` is called with it held, as required.
@@ -546,8 +532,7 @@ pub extern "C" fn uartgetc() -> c_int {
 ///
 /// # Safety
 /// `buf` must point to at least `n` writable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn uartgets(buf: *mut c_char, n: c_int) -> c_int {
+pub(crate) unsafe extern "C" fn uartgets(buf: *mut c_char, n: c_int) -> c_int {
     let mut i: isize = 0;
     // SAFETY: `UART_RX_LOCK` valid as above; `buf`/`n` validity is
     // this function's documented precondition.
@@ -579,8 +564,7 @@ pub unsafe extern "C" fn uartgets(buf: *mut c_char, n: c_int) -> c_int {
 /// `irq_handler_t` calling convention (matches C `void uartintr(int,
 /// void*, device_t*)`); `data`/`dev` are unused, forwarded only for
 /// ABI compatibility with the registered `irq_desc`.
-#[no_mangle]
-pub extern "C" fn uartintr(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
+pub(crate) extern "C" fn uartintr(_irq: c_int, _data: *mut c_void, _dev: *mut c_void) {
     // SAFETY: `UART_RX_LOCK`/`UART_TX_LOCK` are valid,
     // compile-time-initialised spinlocks.
     unsafe {

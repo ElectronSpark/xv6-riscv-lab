@@ -643,8 +643,7 @@ unsafe extern "C" fn ptmx_cdev_release(_cdev: *mut cdev_t) -> c_int {
 // Initialization.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn ptmxinit() {
+pub(crate) extern "C" fn ptmxinit() {
     // SAFETY: `PTY_PAIR_CACHE`/`PTMX_LOCK`/`PTMX_CDEV` are written here
     // (their first use) before any other `ptmx_*`/`pts_*` entry point
     // can run (mirrors the C original's `start_kernel.c`-ordered single

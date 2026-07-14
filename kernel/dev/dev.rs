@@ -94,7 +94,7 @@ use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
 
 use crate::bindings::{
     device_major_t, device_ops_t, device_t, dev_type_e, dev_type_e_DEV_TYPE_BLOCK,
-    dev_type_e_DEV_TYPE_CHAR, kobject, mode_t, rcu_callback_t, rcu_head_t, slab_cache_t,
+    dev_type_e_DEV_TYPE_CHAR, kobject, rcu_callback_t, rcu_head_t, slab_cache_t,
     spinlock_t, EALREADY, EBUSY, EINVAL, ENODEV, ENOMEM, ENOSPC, ENOTTY, SLAB_FLAG_DEBUG_BITMAP,
     SLAB_FLAG_EMBEDDED,
 };
@@ -139,15 +139,15 @@ unsafe extern "C" {
     // kernel/lock/rcu.rs.
     fn call_rcu(head: *mut rcu_head_t, func: rcu_callback_t, data: *mut c_void);
 
-    // kernel/vfs/devtmpfs/superblock.rs (Wave 20). See the module doc's
-    // "Mandated fix 2" section for the devtmpfs_create_node() return-value
-    // contract this wave now checks.
-    pub safe fn devtmpfs_create_node(name: *const c_char, mode: mode_t, dev: crate::bindings::dev_t) -> c_int;
-    pub safe fn devtmpfs_remove_node(name: *const c_char) -> c_int;
-
     // printf.rs -- variadic, cannot be marked `safe`.
     fn printf(fmt: *const c_char, ...) -> c_int;
 }
+// P3-1C mesh sweep: vfs/devtmpfs/superblock.rs is in scope for this wave;
+// signatures are identical (same `mode_t`/`dev_t` types), so these become
+// plain crate-path imports instead of `extern "C"` redeclarations. See the
+// module doc's "Mandated fix 2" section for the devtmpfs_create_node()
+// return-value contract this wave checks.
+use crate::vfs::devtmpfs::superblock::{devtmpfs_create_node, devtmpfs_remove_node};
 
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`):
 /// panic the kernel if `$cond` is false. Simplified to a fixed message

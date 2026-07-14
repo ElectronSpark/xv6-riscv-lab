@@ -136,19 +136,6 @@ unsafe extern "C" {
     safe fn kalloc() -> *mut c_void;
     safe fn kfree(pa: *mut c_void);
 
-    // vfs/inode.rs (Wave 13).
-    safe fn vfs_ilock(inode: *mut vfs_inode);
-    safe fn vfs_iunlock(inode: *mut vfs_inode);
-    safe fn vfs_itruncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int;
-
-    // vfs/fs.c (still C) — inode-ref helpers.
-    safe fn vfs_inode_get_ref(inode: *mut vfs_inode, r: *mut vfs_inode_ref) -> c_int;
-    safe fn vfs_inode_put_ref(r: *mut vfs_inode_ref);
-    safe fn vfs_inode_deref(r: *mut vfs_inode_ref) -> *mut vfs_inode;
-
-    // vfs/fdtable.c (still C, Wave 15) — `vfs_custom_fd_alloc` only.
-    safe fn vfs_fdtable_alloc_fd(fdtable: *mut vfs_fdtable, file: *mut vfs_file) -> c_int;
-
     // dev/cdev.c, dev/blkdev.c, dev/dev.c (still C, Wave 21).
     safe fn cdev_get(major: c_int, minor: c_int) -> *mut cdev_t;
     safe fn cdev_put(dev: *mut cdev_t) -> c_int;
@@ -163,11 +150,6 @@ unsafe extern "C" {
     safe fn blkdev_put(dev: *mut blkdev_t) -> c_int;
     safe fn dev_ioctl(dev: *mut device_t, cmd: u64, arg: *mut c_void) -> c_int;
 
-    // vfs/pipe.rs (this wave's sibling file, see `super::pipe`).
-    safe fn pipe_alloc(flags: c_int) -> *mut pipe;
-    safe fn pipe_open(file: *mut vfs_file, pi: *mut pipe, f_flags: c_int);
-    safe fn pipe_close(pi: *mut pipe, writable: c_int);
-
     // sysnet.c (still C, Wave 28) — `vfs_sockalloc`'s socket table.
     // `sock_lock`/`sockets` are plain (non-static) C globals, exactly as
     // the C original externs them.
@@ -175,6 +157,15 @@ unsafe extern "C" {
     static mut sockets: *mut sock;
     safe fn mbufq_init(q: *mut mbufq);
 }
+
+// P3-1C mesh sweep: vfs/{inode,fs,fdtable,pipe}.rs are in scope for this
+// wave; converted from `extern "C"` redeclarations to plain crate-path
+// items (identical signatures, same `crate::bindings::*` types this file
+// already imports).
+use crate::vfs::fdtable::vfs_fdtable_alloc_fd;
+use crate::vfs::fs::{vfs_inode_deref, vfs_inode_get_ref, vfs_inode_put_ref};
+use crate::vfs::inode::{vfs_ilock, vfs_itruncate, vfs_iunlock};
+use crate::vfs::pipe::{pipe_alloc, pipe_close, pipe_open};
 
 /// Mirrors the C `assert(expr, fmt, ...)` macro (`kernel/inc/printf.h`)
 /// for this file's two call sites, both fixed-message `slab_cache_init`
@@ -443,8 +434,7 @@ fn file_free(file: *mut vfs_file) {
     slab_free(file as *mut c_void);
 }
 
-#[no_mangle]
-pub extern "C" fn __vfs_file_init() {
+pub(crate) extern "C" fn __vfs_file_init() {
     let ret = slab_cache_init(
         vfs_file_slab(),
         c"vfs_file_cache".as_ptr() as *mut c_char,
@@ -467,8 +457,7 @@ pub extern "C" fn __vfs_file_init() {
     __VFS_OPEN_FILE_COUNT.store(0, Ordering::SeqCst);
 }
 
-#[no_mangle]
-pub extern "C" fn __vfs_file_shrink_cache() {
+pub(crate) extern "C" fn __vfs_file_shrink_cache() {
     slab_cache_shrink(vfs_file_slab(), 0x7fffffff);
 }
 
@@ -546,8 +535,7 @@ fn open_blkdev(inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
 // Public VFS file API.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> *mut vfs_file {
+pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> *mut vfs_file {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
         return err_ptr(neg(EINVAL));
     }
@@ -647,8 +635,7 @@ pub extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> *mut vf
 /// last reference, detaches from the global table, flushes/closes the
 /// backing object (cdev/blkdev/pipe), drops the inode reference, and
 /// frees the `vfs_file`.
-#[no_mangle]
-pub extern "C" fn vfs_fput(file: *mut vfs_file) {
+pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
     if file.is_null() {
         return;
     }
@@ -719,8 +706,7 @@ pub extern "C" fn vfs_fput(file: *mut vfs_file) {
 
 /// Duplicate a file reference (increment refcount). Returns `NULL` if
 /// `file` was already closed (or `NULL`).
-#[no_mangle]
-pub extern "C" fn vfs_fdup(file: *mut vfs_file) -> *mut vfs_file {
+pub(crate) extern "C" fn vfs_fdup(file: *mut vfs_file) -> *mut vfs_file {
     if file.is_null() {
         return ptr::null_mut();
     }
@@ -730,8 +716,7 @@ pub extern "C" fn vfs_fdup(file: *mut vfs_file) -> *mut vfs_file {
     file
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
+pub(crate) extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
     if file.is_null() {
         return neg(EBADF);
     }
@@ -774,8 +759,7 @@ pub extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> 
     neg(ENOTTY)
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_int) -> isize {
+pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_int) -> isize {
     if file.is_null() {
         return neg(EBADF) as isize;
     }
@@ -871,8 +855,7 @@ pub extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: usize, 
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_int {
+pub(crate) extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_int {
     if file.is_null() {
         return neg(EBADF);
     }
@@ -920,8 +903,7 @@ pub extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_int {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_filewrite(
+pub(crate) extern "C" fn vfs_filewrite(
     file: *mut vfs_file,
     buf: *const c_void,
     n: usize,
@@ -1018,8 +1000,7 @@ pub extern "C" fn vfs_filewrite(
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> loff_t {
+pub(crate) extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> loff_t {
     if file.is_null() {
         return neg(EBADF) as loff_t;
     }
@@ -1052,8 +1033,7 @@ pub extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, whence: c_i
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn truncate(file: *mut vfs_file, length: loff_t) -> c_int {
+pub(crate) extern "C" fn truncate(file: *mut vfs_file, length: loff_t) -> c_int {
     if file.is_null() {
         return neg(EBADF);
     }
@@ -1081,8 +1061,7 @@ pub extern "C" fn truncate(file: *mut vfs_file, length: loff_t) -> c_int {
 // VFS pipe allocation.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn vfs_pipealloc(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> c_int {
+pub(crate) extern "C" fn vfs_pipealloc(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> c_int {
     // SAFETY: `rf`/`wf` are caller-owned out-params (every caller in the
     // tree passes stack-local `struct vfs_file *` addresses).
     unsafe {
@@ -1153,8 +1132,7 @@ struct mbufq {
 /// attach it to the global file table, install it into the current
 /// process's fd table, and return the fd number. Returns a negative
 /// errno on failure.
-#[no_mangle]
-pub extern "C" fn vfs_custom_fd_alloc(
+pub(crate) extern "C" fn vfs_custom_fd_alloc(
     ops: *mut vfs_file_ops,
     private_data: *mut c_void,
     flags: c_int,
@@ -1187,8 +1165,7 @@ pub extern "C" fn vfs_custom_fd_alloc(
     fd
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_sockalloc(
+pub(crate) extern "C" fn vfs_sockalloc(
     out: *mut *mut vfs_file,
     raddr: u32,
     lport: u16,

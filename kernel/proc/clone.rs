@@ -142,8 +142,6 @@ unsafe extern "C" {
     safe fn thread_destroy(t: *mut Thread);
     pub safe fn vm_dup(vm: *mut Vm) -> *mut Vm;
     pub safe fn vm_copy(vm: *mut Vm) -> *mut Vm;
-    pub safe fn vfs_struct_clone(old: *mut FsStruct, flags: u64) -> *mut FsStruct;
-    pub safe fn vfs_fdtable_clone(src: *mut VfsFdtable, flags: c_int) -> *mut VfsFdtable;
     pub safe fn sigacts_dup(psa: *mut Sigacts, flags: u64) -> *mut Sigacts;
     safe fn sigpending_clone(dst: *mut ThreadSignal, src: *mut ThreadSignal, flags: u64, esignal: u64);
     safe fn rq_task_fork(se: *mut SchedEntity);
@@ -154,7 +152,6 @@ unsafe extern "C" {
     safe fn thread_group_alloc(t: *mut Thread) -> c_int;
     pub safe fn pgroup_add_tg(pg: *mut Pgroup, tg: *mut ThreadGroup);
     pub safe fn pgroup_add_thread(pg: *mut Pgroup, t: *mut Thread);
-    pub safe fn session_add_thread(s: *mut Session, t: *mut Thread);
 
     pub safe fn xv6_pid_wlock();
     pub safe fn xv6_pid_wunlock();
@@ -175,6 +172,36 @@ use crate::proc::pid::{__alloc_pid, __free_pid};
 #[inline(always)]
 fn proctab_proc_add(t: *mut Thread) {
     crate::proc::pid::proctab_proc_add(t as *mut c_void as *mut crate::proc::pid::Thread);
+}
+
+// P3-1C mesh sweep: vfs/{fs,fdtable}.rs and tty/session.rs are in scope
+// for this wave, same reinterpret precedent as `proctab_proc_add` above
+// (this file's opaque markers are distinct-but-layout-identical stand-ins
+// for the real `crate::bindings` structs).
+#[inline(always)]
+fn vfs_struct_clone(old: *mut FsStruct, flags: u64) -> *mut FsStruct {
+    crate::vfs::fs::vfs_struct_clone(old as *mut c_void as *mut crate::bindings::fs_struct, flags)
+        as *mut c_void as *mut FsStruct
+}
+#[inline(always)]
+fn vfs_fdtable_clone(src: *mut VfsFdtable, flags: c_int) -> *mut VfsFdtable {
+    crate::vfs::fdtable::vfs_fdtable_clone(
+        src as *mut c_void as *mut crate::bindings::vfs_fdtable,
+        flags,
+    ) as *mut c_void as *mut VfsFdtable
+}
+/// SAFETY: only called from `thread_clone` with a live parent session and
+/// the just-created child thread (both non-null, verified by the
+/// caller) -- matches the real fn's contract. Its `c_int` return is
+/// discarded here exactly as this file's only call site always did.
+#[inline(always)]
+fn session_add_thread(s: *mut Session, t: *mut Thread) {
+    unsafe {
+        crate::tty::session::session_add_thread(
+            s as *mut c_void as *mut crate::bindings::session,
+            t as *mut c_void as *mut crate::bindings::thread,
+        );
+    }
 }
 
 #[cold]

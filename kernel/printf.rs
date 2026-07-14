@@ -149,8 +149,7 @@ const PAGE_SHIFT: u32 = 12;
 /// Mirrors the C `static volatile int __global_panic_state`.
 static GLOBAL_PANIC_STATE: AtomicBool = AtomicBool::new(false);
 
-#[no_mangle]
-pub extern "C" fn panic_state() -> c_int {
+pub(crate) extern "C" fn panic_state() -> c_int {
     GLOBAL_PANIC_STATE.load(Ordering::Acquire) as c_int
 }
 
@@ -440,8 +439,7 @@ pub unsafe extern "C" fn printf_rust(fmt: *const c_char, ap: *mut c_void) -> c_i
 /// Mirrors the C `static int __bt_enabled = 1;`.
 static BT_ENABLED: AtomicBool = AtomicBool::new(true);
 
-#[no_mangle]
-pub extern "C" fn panic_disable_bt() {
+pub(crate) extern "C" fn panic_disable_bt() {
     BT_ENABLED.store(false, Ordering::Relaxed);
 }
 
@@ -500,8 +498,7 @@ pub extern "C" fn __panic_start() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn trigger_panic() -> ! {
+pub(crate) extern "C" fn trigger_panic() -> ! {
     // SET_CPU_CRASHED()
     machine::CpuLocal::current().flags_or(machine::CPU_FLAG_CRASHED);
 
@@ -530,8 +527,7 @@ pub extern "C" fn __panic_end() -> ! {
     trigger_panic()
 }
 
-#[no_mangle]
-pub extern "C" fn printfinit() {
+pub(crate) extern "C" fn printfinit() {
     // SAFETY: runs once, from `start_kernel.c`'s single-hart init
     // sequence, before any concurrent access to `PR_LOCK` is possible.
     unsafe {
@@ -551,8 +547,7 @@ static mut PANIC_BT_LOCK: spinlock_t = spinlock_t {
     cpu: core::ptr::null_mut(),
 };
 
-#[no_mangle]
-pub extern "C" fn panic_msg_lock() {
+pub(crate) extern "C" fn panic_msg_lock() {
     // SAFETY: `PANIC_BT_LOCK` is a valid, compile-time-initialised
     // spinlock (see its definition above).
     unsafe {
@@ -560,8 +555,7 @@ pub extern "C" fn panic_msg_lock() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn panic_msg_unlock() {
+pub(crate) extern "C" fn panic_msg_unlock() {
     // SAFETY: see `panic_msg_lock`.
     unsafe {
         spin_unlock(&raw mut PANIC_BT_LOCK);
@@ -570,6 +564,21 @@ pub extern "C" fn panic_msg_unlock() {
 
 // ===========================================================================
 // puts / putchar.
+//
+// P3-1C mesh sweep: kept `#[no_mangle]` as a class, matching P3-1A's
+// documented `strdup` precedent -- these are libc-shaped names
+// (signature matches the C standard library's `puts`/`putchar` exactly),
+// and LLVM's libcall-recognition instcombine pass rewrites
+// `printf("literal with no specifiers\n")`/single-char `printf` calls
+// into direct calls to `puts`/`putchar` by that exact linker-symbol name,
+// completely invisible to any static Rust caller survey (empirically
+// confirmed: demoting these produced dozens of `undefined reference to
+// 'putchar'/'puts'` link errors from functions whose source never
+// mentions either name -- e.g. `irq::trap::kassert_fail`'s trailing
+// `printf(c"\n".as_ptr())` got compiled straight into a `putchar('\n')`
+// call). No amount of caller-import fixing can remove this dependency;
+// only deleting `printf_shim.c`'s C `printf` entirely (a later,
+// zero-C-printf wave) would.
 // ===========================================================================
 
 /// # Safety

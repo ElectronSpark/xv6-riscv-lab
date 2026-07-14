@@ -85,17 +85,6 @@ unsafe extern "C" {
 
     pub safe fn cdev_register(dev: *mut cdev_t) -> c_int;
 
-    pub safe fn tty_alloc(name: *const c_char, ops: *mut tty_ops) -> *mut tty;
-    pub safe fn tty_read(t: *mut tty, buf: *mut c_char, count: u64, user: c_int) -> i64;
-    pub safe fn tty_ioctl(t: *mut tty, cmd: u64, arg: *mut c_void) -> c_int;
-    pub safe fn tty_poll(t: *mut tty, events: c_short) -> c_int;
-    pub safe fn tty_input(t: *mut tty, buf: *const c_char, count: u64) -> i64;
-    pub safe fn tty_output(t: *mut tty, buf: *mut c_char, count: u64) -> i64;
-
-    pub safe fn pipe_set_flags(pi: *mut pipe, flags: c_int);
-
-    pub safe fn session_set_ctrl_tty(s: *mut session, t: *mut tty);
-
     pub safe fn __proctab_get_initproc() -> *mut thread;
     pub safe fn pid_wlock();
     pub safe fn pid_wunlock();
@@ -118,6 +107,17 @@ use crate::irq::irq_core::{plic_irq, IrqDesc, PLIC_IRQ_OFFSET};
 unsafe extern "C" {
     fn register_irq_handler(irq_num: c_int, desc: *mut IrqDesc) -> c_int;
 }
+
+// P3-1C mesh sweep: tty/tty.rs and vfs/pipe.rs are in scope for this wave,
+// so these become plain crate-path imports instead of `extern "C"`
+// redeclarations (identical signatures). ABI-truth note: `tty_alloc`/
+// `tty_read`/`tty_ioctl`/`tty_poll`/`tty_input`/`tty_output` are real
+// `unsafe extern "C" fn`s -- this file's former mirror declared them
+// `safe`, but every call site here already sits inside a broader
+// `unsafe { }` block (verified per call site), so no behavior changes.
+use crate::tty::tty::{tty_alloc, tty_input, tty_ioctl, tty_output, tty_poll, tty_read};
+use crate::tty::session::session_set_ctrl_tty;
+use crate::vfs::pipe::pipe_set_flags;
 
 const EINTR: c_int = 4;
 const EFAULT: c_int = 14;
@@ -219,8 +219,7 @@ fn console_tty() -> *mut tty {
 
 /// Send one character to the uart. Called by printf(), and to echo
 /// input characters, but not from write().
-#[no_mangle]
-pub extern "C" fn consputc(c: c_int) {
+pub(crate) extern "C" fn consputc(c: c_int) {
     if !UART_INITIALIZED.load(Ordering::Relaxed) {
         // Use SBI for early console output before UART is ready.
         if c == BACKSPACE {
@@ -259,8 +258,7 @@ pub extern "C" fn consputc(c: c_int) {
 ///
 /// # Safety
 /// `s` must point to at least `n` readable bytes.
-#[no_mangle]
-pub unsafe extern "C" fn consputs(s: *const c_char, n: c_int) {
+pub(crate) unsafe extern "C" fn consputs(s: *const c_char, n: c_int) {
     for i in 0..n as isize {
         // SAFETY: caller guarantees `s` has at least `n` readable bytes.
         let c = unsafe { *s.offset(i) } as u8 as c_int;
@@ -298,8 +296,7 @@ static mut CONS_E: u32 = 0; // Edit index
 /// `buffer` must point to at least `n` readable bytes if `user_src` is
 /// false, or be a valid userspace address range otherwise (checked by
 /// `either_copyin`).
-#[no_mangle]
-pub unsafe extern "C" fn consolewrite(
+pub(crate) unsafe extern "C" fn consolewrite(
     _cdev: *mut cdev_t,
     user_src: crate::bindings::bool_,
     buffer: *const c_void,
@@ -396,8 +393,7 @@ pub unsafe extern "C" fn consolewrite(
 /// `buffer` must point to at least `n` writable bytes if `user_dst` is
 /// false, or be a valid userspace address range otherwise (checked by
 /// `either_copyout`).
-#[no_mangle]
-pub unsafe extern "C" fn consoleread(
+pub(crate) unsafe extern "C" fn consoleread(
     _cdev: *mut cdev_t,
     user_dst: crate::bindings::bool_,
     buffer: *mut c_void,
@@ -592,8 +588,7 @@ impl TtyInbufCell {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn consoleintr(c: c_int) {
+pub(crate) extern "C" fn consoleintr(c: c_int) {
     // ---- TTY path: stage in ring buffer for deferred processing ----
     let tty_ptr = console_tty();
     if !tty_ptr.is_null() {
@@ -687,8 +682,7 @@ pub extern "C" fn consoleintr(c: c_int) {
 // consoleinit / consoledevinit.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn consoleinit() {
+pub(crate) extern "C" fn consoleinit() {
     // SAFETY: runs once, before any other hart or interrupt handler can
     // touch `CONS_LOCK`.
     unsafe {
@@ -816,8 +810,7 @@ static mut CONSOLE_CDEV_OPS: cdev_ops_t = cdev_ops_t {
 
 static mut CONSOLE_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 
-#[no_mangle]
-pub extern "C" fn consoledevinit() {
+pub(crate) extern "C" fn consoledevinit() {
     // SAFETY: `consoledevinit()` runs exactly once, from
     // `start_kernel.c`'s single-hart init sequence, before any other
     // code can observe `CONSOLE_CDEV`/`CONSOLE_CDEV_OPS`.

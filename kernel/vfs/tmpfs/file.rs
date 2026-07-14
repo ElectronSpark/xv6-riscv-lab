@@ -27,6 +27,12 @@ use crate::bindings::{
 
 use super::{s_isdir, s_islnk, s_isreg, TMPFS_MAX_FILE_SIZE};
 
+// P3-1C mesh sweep: vfs/{inode,fs}.rs are in scope for this wave;
+// converted from `extern "C"` redeclarations to plain crate-path items
+// (identical signatures).
+use crate::vfs::fs::vfs_inode_deref;
+use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
+
 // ===========================================================================
 // Externs — see `superblock.rs`'s module doc for the convention.
 // ===========================================================================
@@ -38,13 +44,6 @@ unsafe extern "C" {
     // string.rs.
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
     safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-
-    // vfs/inode.rs (Wave 13).
-    safe fn vfs_ilock(inode: *mut vfs_inode);
-    safe fn vfs_iunlock(inode: *mut vfs_inode);
-
-    // vfs/fs.rs (Wave 16).
-    safe fn vfs_inode_deref(r: *mut crate::bindings::vfs_inode_ref) -> *mut vfs_inode;
 
     // mm/vm.rs.
     safe fn vm_copyout(vm_ptr: *mut crate::bindings::vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
@@ -124,8 +123,7 @@ static TMPFS_PCACHE_OPS: pcache_ops = pcache_ops {
 ///
 /// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn tmpfs_inode_pcache_init(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn tmpfs_inode_pcache_init(inode: *mut vfs_inode) {
     // SAFETY: `inode` is live (caller's contract).
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
     // SAFETY: `pc` is embedded storage inside `inode`, exclusively owned
@@ -153,8 +151,7 @@ pub extern "C" fn tmpfs_inode_pcache_init(inode: *mut vfs_inode) {
 ///
 /// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn tmpfs_inode_pcache_teardown(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn tmpfs_inode_pcache_teardown(inode: *mut vfs_inode) {
     // SAFETY: `inode` is live (caller's contract).
     let pc = unsafe { ptr::addr_of_mut!((*inode).i_data) };
     // SAFETY: `pc` is live embedded storage.
@@ -574,8 +571,7 @@ static TMPFS_FILE_OPS: vfs_file_ops = vfs_file_ops {
 /// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
 /// declaration, and it is also the `.open` entry of
 /// [`super::inode::TMPFS_INODE_OPS`].
-#[no_mangle]
-pub extern "C" fn tmpfs_open(inode: *mut vfs_inode, file: *mut vfs_file, _f_flags: c_int) -> c_int {
+pub(crate) extern "C" fn tmpfs_open(inode: *mut vfs_inode, file: *mut vfs_file, _f_flags: c_int) -> c_int {
     if inode.is_null() || file.is_null() {
         return neg(EINVAL);
     }

@@ -293,8 +293,7 @@ fn pipe_slab() -> *mut slab_cache_t {
     __PIPE_CACHE.0.get() as *mut slab_cache_t
 }
 
-#[no_mangle]
-pub extern "C" fn pipe_init() {
+pub(crate) extern "C" fn pipe_init() {
     let ret = slab_cache_init(
         pipe_slab(),
         c"pipe_cache".as_ptr() as *mut c_char,
@@ -304,8 +303,7 @@ pub extern "C" fn pipe_init() {
     kassert!(ret == 0, "Failed to initialize pipe_cache slab cache");
 }
 
-#[no_mangle]
-pub extern "C" fn pipe_alloc(flags: c_int) -> *mut pipe {
+pub(crate) extern "C" fn pipe_alloc(flags: c_int) -> *mut pipe {
     let pi = slab_alloc(pipe_slab()) as *mut pipe;
     if pi.is_null() {
         return err_ptr(neg(ENOMEM));
@@ -347,8 +345,7 @@ pub extern "C" fn pipe_alloc(flags: c_int) -> *mut pipe {
     pi
 }
 
-#[no_mangle]
-pub extern "C" fn pipe_close(pi: *mut pipe, writable: c_int) {
+pub(crate) extern "C" fn pipe_close(pi: *mut pipe, writable: c_int) {
     let freed;
     if writable != 0 {
         let g = writer_lock(pi).lock();
@@ -372,8 +369,7 @@ pub extern "C" fn pipe_close(pi: *mut pipe, writable: c_int) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn pipe_set_flags(pi: *mut pipe, flags: c_int) {
+pub(crate) extern "C" fn pipe_set_flags(pi: *mut pipe, flags: c_int) {
     let set = flags & PIPE_NONBLOCK_MASK;
     let a = flags_atomic(pi);
     let mut old = a.load(Ordering::Acquire);
@@ -386,8 +382,7 @@ pub extern "C" fn pipe_set_flags(pi: *mut pipe, flags: c_int) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn pipe_get_flags(pi: *mut pipe) -> c_int {
+pub(crate) extern "C" fn pipe_get_flags(pi: *mut pipe) -> c_int {
     flags_atomic(pi).load(Ordering::Acquire) & PIPE_NONBLOCK_MASK
 }
 
@@ -483,8 +478,7 @@ fn pipe_wait_reader(pi: *mut pipe) -> c_int {
 // handling.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, user: c_int) -> i64 {
+pub(crate) extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, user: c_int) -> i64 {
     let count = count as usize;
     let pr = xv6_current_thread();
     let mut total: usize = 0;
@@ -620,8 +614,7 @@ pub extern "C" fn pipe_read(pi: *mut pipe, buf: *mut c_char, count: u64, user: c
     total as i64
 }
 
-#[no_mangle]
-pub extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u64, user: c_int) -> i64 {
+pub(crate) extern "C" fn pipe_write(pi: *mut pipe, buf: *const c_char, count: u64, user: c_int) -> i64 {
     let count = count as usize;
     let pr = xv6_current_thread();
     let mut total: usize = 0;
@@ -831,8 +824,7 @@ static PIPE_FILE_OPS: vfs_file_ops = vfs_file_ops {
     fault: None,
 };
 
-#[no_mangle]
-pub extern "C" fn pipe_open(file: *mut vfs_file, pi: *mut pipe, f_flags: c_int) {
+pub(crate) extern "C" fn pipe_open(file: *mut vfs_file, pi: *mut pipe, f_flags: c_int) {
     // SAFETY: `file` is a freshly allocated `vfs_file` (every caller's
     // precondition, e.g. `vfs_pipealloc` in `vfs/file.rs`).
     unsafe {

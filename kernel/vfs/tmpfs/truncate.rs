@@ -110,8 +110,7 @@ fn __tmpfs_truncate_shrink(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
 ///
 /// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn __tmpfs_migrate_to_allocated_blocks(ti: *mut tmpfs_inode) -> c_int {
+pub(crate) extern "C" fn __tmpfs_migrate_to_allocated_blocks(ti: *mut tmpfs_inode) -> c_int {
     // SAFETY: `ti` is a live, exclusively-owned `tmpfs_inode` (caller
     // holds the inode mutex).
     let inode = unsafe { core::ptr::addr_of_mut!((*ti).vfs_inode) };
@@ -221,8 +220,7 @@ fn __tmpfs_truncate_grow(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
 /// Kept `#[no_mangle]`/exported per `tmpfs_private.h`'s `extern`
 /// declaration (`int __tmpfs_truncate(...)`), and it is also the
 /// `.truncate` entry of [`super::inode::TMPFS_INODE_OPS`].
-#[no_mangle]
-pub extern "C" fn __tmpfs_truncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
+pub(crate) extern "C" fn __tmpfs_truncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
     if new_size > TMPFS_MAX_FILE_SIZE as loff_t {
         return neg(EFBIG);
     }

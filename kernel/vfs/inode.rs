@@ -126,23 +126,6 @@ unsafe extern "C" {
     safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
     safe fn holding_mutex(m: *mut mutex_t) -> c_int;
 
-    // vfs/fs.c — superblock lock/refcount + inode-cache/dentry/orphan
-    // helpers. `fs.c` stays C through this wave (ported later); these
-    // are its real exported symbols, called exactly as any other C
-    // translation unit calls them.
-    safe fn vfs_superblock_rlock(sb: *mut vfs_superblock);
-    safe fn vfs_superblock_wlock(sb: *mut vfs_superblock);
-    safe fn vfs_superblock_unlock(sb: *mut vfs_superblock);
-    safe fn vfs_superblock_wholding(sb: *mut vfs_superblock) -> bool;
-    safe fn vfs_remove_inode(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> c_int;
-    safe fn __vfs_final_unmount_cleanup(sb: *mut vfs_superblock);
-    safe fn vfs_make_orphan(inode: *mut vfs_inode) -> c_int;
-    safe fn vfs_get_dentry_inode(dentry: *mut vfs_dentry) -> *mut vfs_inode;
-    safe fn vfs_release_dentry(dentry: *mut vfs_dentry);
-    safe fn vfs_inode_get_ref(inode: *mut vfs_inode, r: *mut vfs_inode_ref) -> c_int;
-    safe fn vfs_inode_put_ref(r: *mut vfs_inode_ref);
-    safe fn vfs_inode_deref(r: *mut vfs_inode_ref) -> *mut vfs_inode;
-
     // mm/kalloc.rs
     safe fn kmm_alloc(size: usize) -> *mut c_void;
     safe fn kmm_free(ptr: *mut c_void);
@@ -151,12 +134,21 @@ unsafe extern "C" {
     safe fn strndup(s: *const c_char, n: usize) -> *mut c_char;
     safe fn strtok_r(s: *mut c_char, delim: *const c_char, saveptr: *mut *mut c_char) -> *mut c_char;
     safe fn strlen(s: *const c_char) -> usize;
-
-    // fs.c's single dummy VFS-root `vfs_inode` instance (no superblock;
-    // see `vfs_private.h`). Only its address is ever used here (pointer
-    // identity checks), never its contents.
-    static mut vfs_root_inode: vfs_inode;
 }
+
+// P3-1C mesh sweep: vfs/fs.rs is in scope for this wave; these were its
+// superblock lock/refcount + inode-cache/dentry/orphan helpers,
+// converted from `extern "C"` redeclarations to plain crate-path items
+// (identical signatures, same `crate::bindings::*` types this file
+// already imports). `vfs_root_inode` is fs.rs's single dummy VFS-root
+// `vfs_inode` instance (no superblock; see `vfs_private.h`) -- only its
+// address is ever used here (pointer identity checks), never its
+// contents.
+use crate::vfs::fs::{
+    __vfs_final_unmount_cleanup, vfs_get_dentry_inode, vfs_inode_deref, vfs_inode_get_ref,
+    vfs_inode_put_ref, vfs_make_orphan, vfs_release_dentry, vfs_remove_inode, vfs_root_inode,
+    vfs_superblock_rlock, vfs_superblock_unlock, vfs_superblock_wholding, vfs_superblock_wlock,
+};
 
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`):
 /// panic the kernel if `$cond` is false. Fixed message, no `printf`-style
@@ -422,8 +414,7 @@ fn vfs_inode_valid_locked(inode: *mut vfs_inode) -> c_int {
 /// Initialize VFS-managed inode fields. Called by `fs.c` (root inode init,
 /// `vfs_alloc_inode`/`vfs_get_inode`) before adding a freshly allocated
 /// inode to the superblock's inode hash list.
-#[no_mangle]
-pub extern "C" fn __vfs_inode_init(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn __vfs_inode_init(inode: *mut vfs_inode) {
     // SAFETY: caller supplies a freshly allocated, otherwise-untouched
     // `vfs_inode` (matches the C original's documented precondition).
     unsafe {
@@ -442,22 +433,19 @@ pub extern "C" fn __vfs_inode_init(inode: *mut vfs_inode) {
 // Inode Public APIs
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn vfs_ilock(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn vfs_ilock(inode: *mut vfs_inode) {
     kassert!(!inode.is_null(), "vfs_ilock: inode is NULL");
     // SAFETY: non-null `inode`.
     mutex_lock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_ilock_trylock(inode: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_ilock_trylock(inode: *mut vfs_inode) -> c_int {
     kassert!(!inode.is_null(), "vfs_ilock_trylock: inode is NULL");
     // SAFETY: non-null `inode`.
     mutex_trylock(unsafe { ptr::addr_of_mut!((*inode).mutex) })
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_iunlock(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn vfs_iunlock(inode: *mut vfs_inode) {
     kassert!(!inode.is_null(), "vfs_iunlock: inode is NULL");
     // SAFETY: non-null `inode`.
     mutex_unlock(unsafe { ptr::addr_of_mut!((*inode).mutex) });
@@ -465,15 +453,13 @@ pub extern "C" fn vfs_iunlock(inode: *mut vfs_inode) {
 
 /// Check if an inode is valid for use. Must be called while holding the
 /// inode lock.
-#[no_mangle]
-pub extern "C" fn vfs_inode_check_valid(inode: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_inode_check_valid(inode: *mut vfs_inode) -> c_int {
     vfs_inode_valid_locked(inode)
 }
 
 /// Increment inode reference count. Atomic-only: no locks, no sleeping,
 /// no allocation (may be called while holding the inode lock).
-#[no_mangle]
-pub extern "C" fn vfs_idup(inode: *mut vfs_inode) {
+pub(crate) extern "C" fn vfs_idup(inode: *mut vfs_inode) {
     kassert!(!inode.is_null(), "vfs_idup: inode is NULL");
     // SAFETY: non-null `inode`; only reads `sb` for the assert.
     let sb_null = unsafe { (*inode).sb.is_null() };
@@ -485,8 +471,7 @@ pub extern "C" fn vfs_idup(inode: *mut vfs_inode) {
 /// Try to increment inode reference count if not zero (and not at max).
 /// Use when obtaining a reference from a cache/lookup where the inode
 /// might be dying.
-#[no_mangle]
-pub extern "C" fn vfs_idup_not_zero(inode: *mut vfs_inode) -> bool {
+pub(crate) extern "C" fn vfs_idup_not_zero(inode: *mut vfs_inode) -> bool {
     kassert!(!inode.is_null(), "vfs_idup_not_zero: inode is NULL");
     atomic_inc_in_range(refcount_atomic(inode), 0, VFS_INODE_MAX_REFCOUNT)
 }
@@ -494,8 +479,7 @@ pub extern "C" fn vfs_idup_not_zero(inode: *mut vfs_inode) -> bool {
 /// Decrease inode ref count; free the inode when the last reference is
 /// dropped. Caller must not hold the inode lock or the superblock write
 /// lock when calling.
-#[no_mangle]
-pub extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
+pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
     kassert!(!inode_in.is_null(), "vfs_iput: inode is NULL");
     // SAFETY: non-null `inode_in`; preconditions mirror the C asserts.
     unsafe {
@@ -717,8 +701,7 @@ fn vfs_iput_finalize(inode: *mut vfs_inode, sb_to_free: Option<*mut vfs_superblo
 }
 
 /// Mark inode as dirty.
-#[no_mangle]
-pub extern "C" fn vfs_dirty_inode(inode: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_dirty_inode(inode: *mut vfs_inode) -> c_int {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
         return neg(EINVAL);
     }
@@ -734,8 +717,7 @@ pub extern "C" fn vfs_dirty_inode(inode: *mut vfs_inode) -> c_int {
 }
 
 /// Sync inode to disk.
-#[no_mangle]
-pub extern "C" fn vfs_sync_inode(inode: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_sync_inode(inode: *mut vfs_inode) -> c_int {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
         return neg(EINVAL);
     }
@@ -884,8 +866,7 @@ fn make_iter_parent(iter: *mut vfs_dir_iter, ret_dentry: *mut vfs_dentry) -> c_i
 
 /// Lookup a dentry in a directory inode. Assumes the VFS core already
 /// handled ".".
-#[no_mangle]
-pub extern "C" fn vfs_ilookup(
+pub(crate) extern "C" fn vfs_ilookup(
     dir: *mut vfs_inode,
     dentry: *mut vfs_dentry,
     name: *const c_char,
@@ -966,8 +947,7 @@ pub extern "C" fn vfs_ilookup(
 }
 
 /// Iterate over directory entries in a directory inode.
-#[no_mangle]
-pub extern "C" fn vfs_dir_iter(
+pub(crate) extern "C" fn vfs_dir_iter(
     dir: *mut vfs_inode,
     iter: *mut vfs_dir_iter,
     ret_dentry: *mut vfs_dentry,
@@ -1103,8 +1083,7 @@ pub extern "C" fn vfs_dir_iter(
 
 /// Check if a directory is empty (contains only "." and ".."). Caller
 /// must hold the inode lock.
-#[no_mangle]
-pub extern "C" fn vfs_dir_isempty(dir: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_dir_isempty(dir: *mut vfs_inode) -> c_int {
     if !is_dir(unsafe { (*dir).mode }) {
         return 0;
     }
@@ -1128,8 +1107,7 @@ pub extern "C" fn vfs_dir_isempty(dir: *mut vfs_inode) -> c_int {
     is_empty as c_int
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> isize {
+pub(crate) extern "C" fn vfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> isize {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
         return -(EINVAL as isize);
     }
@@ -1159,8 +1137,7 @@ pub extern "C" fn vfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: 
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_create(
+pub(crate) extern "C" fn vfs_create(
     dir: *mut vfs_inode,
     mode: mode_t,
     name: *const c_char,
@@ -1229,8 +1206,7 @@ pub extern "C" fn vfs_create(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_mknod(
+pub(crate) extern "C" fn vfs_mknod(
     dir: *mut vfs_inode,
     mode: mode_t,
     dev: dev_t,
@@ -1298,8 +1274,7 @@ pub extern "C" fn vfs_mknod(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_link(
+pub(crate) extern "C" fn vfs_link(
     old: *mut vfs_dentry,
     dir: *mut vfs_inode,
     name: *const c_char,
@@ -1377,8 +1352,7 @@ pub extern "C" fn vfs_link(
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> c_int {
+pub(crate) extern "C" fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> c_int {
     if dir.is_null() || unsafe { (*dir).sb.is_null() } {
         return neg(EINVAL);
     }
@@ -1487,8 +1461,7 @@ pub extern "C" fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, name_len:
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_mkdir(
+pub(crate) extern "C" fn vfs_mkdir(
     dir: *mut vfs_inode,
     mode: mode_t,
     name: *const c_char,
@@ -1562,8 +1535,7 @@ pub extern "C" fn vfs_mkdir(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_move(
+pub(crate) extern "C" fn vfs_move(
     old_dir: *mut vfs_inode,
     old_dentry: *mut vfs_dentry,
     new_dir: *mut vfs_inode,
@@ -1621,8 +1593,7 @@ pub extern "C" fn vfs_move(
     result
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_symlink(
+pub(crate) extern "C" fn vfs_symlink(
     dir: *mut vfs_inode,
     mode: mode_t,
     name: *const c_char,
@@ -1696,8 +1667,7 @@ pub extern "C" fn vfs_symlink(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_itruncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
+pub(crate) extern "C" fn vfs_itruncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
         return neg(EINVAL);
     }
@@ -1722,8 +1692,7 @@ pub extern "C" fn vfs_itruncate(inode: *mut vfs_inode, new_size: loff_t) -> c_in
 
 /// Lock two non-directory inodes to prevent deadlock (lower address
 /// first).
-#[no_mangle]
-pub extern "C" fn vfs_ilock_two_nondirectories(inode1: *mut vfs_inode, inode2: *mut vfs_inode) {
+pub(crate) extern "C" fn vfs_ilock_two_nondirectories(inode1: *mut vfs_inode, inode2: *mut vfs_inode) {
     kassert!(
         !inode1.is_null() && !inode2.is_null(),
         "vfs_ilock_two_nondirectories: inode is NULL"
@@ -1741,8 +1710,7 @@ pub extern "C" fn vfs_ilock_two_nondirectories(inode1: *mut vfs_inode, inode2: *
 
 /// Lock two directory inodes to prevent deadlock. Caller must hold the
 /// superblock read lock and ensure both inodes are directories.
-#[no_mangle]
-pub extern "C" fn vfs_ilock_two_directories(inode1: *mut vfs_inode, inode2: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_ilock_two_directories(inode1: *mut vfs_inode, inode2: *mut vfs_inode) -> c_int {
     if core::ptr::eq(inode1, inode2) {
         vfs_ilock(inode1);
         return 0;
@@ -1798,8 +1766,7 @@ pub extern "C" fn vfs_ilock_two_directories(inode1: *mut vfs_inode, inode2: *mut
     xv6_panic(c"vfs_ilock_two_directories: unexpected condition".as_ptr());
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_iunlock_two(inode1: *mut vfs_inode, inode2: *mut vfs_inode) {
+pub(crate) extern "C" fn vfs_iunlock_two(inode1: *mut vfs_inode, inode2: *mut vfs_inode) {
     if !inode1.is_null() {
         vfs_iunlock(inode1);
     }
@@ -1808,8 +1775,7 @@ pub extern "C" fn vfs_iunlock_two(inode1: *mut vfs_inode, inode2: *mut vfs_inode
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_chdir(new_cwd: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_chdir(new_cwd: *mut vfs_inode) -> c_int {
     if new_cwd.is_null() || unsafe { (*new_cwd).sb.is_null() } {
         return neg(EINVAL);
     }
@@ -1864,8 +1830,7 @@ pub extern "C" fn vfs_chdir(new_cwd: *mut vfs_inode) -> c_int {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn vfs_chroot(new_root: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_chroot(new_root: *mut vfs_inode) -> c_int {
     // NOTE (preserved 1:1 from the C original): `vfs_chdir`'s return
     // value is discarded here — if it fails (e.g. `new_root` is not a
     // directory or is invalid), `vfs_chroot` still proceeds to change
@@ -1899,8 +1864,7 @@ pub extern "C" fn vfs_chroot(new_root: *mut vfs_inode) -> c_int {
 
 /// Get current working directory inode of the current process. Caller
 /// must call `vfs_iput` on the returned inode when done.
-#[no_mangle]
-pub extern "C" fn vfs_curdir() -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_curdir() -> *mut vfs_inode {
     let fs = current_fs();
     // SAFETY: `fs` is live; `cwd` is a plain embedded field. Only the
     // current process can change its own cwd, so no lock is needed here
@@ -1913,8 +1877,7 @@ pub extern "C" fn vfs_curdir() -> *mut vfs_inode {
 
 /// Get current root directory inode of the current process. Caller must
 /// call `vfs_iput` on the returned inode when done.
-#[no_mangle]
-pub extern "C" fn vfs_curroot() -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_curroot() -> *mut vfs_inode {
     let fs = current_fs();
     // SAFETY: see `vfs_curdir`.
     let rooti = unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti)) };
@@ -2066,8 +2029,7 @@ fn vfs_namei_once(path: *const c_char, path_len: usize) -> *mut vfs_inode {
 ///
 /// Returns an inode pointer with its refcount incremented on success, or
 /// `ERR_PTR(errno)` on failure.
-#[no_mangle]
-pub extern "C" fn vfs_namei(path: *const c_char, path_len: usize) -> *mut vfs_inode {
+pub(crate) extern "C" fn vfs_namei(path: *const c_char, path_len: usize) -> *mut vfs_inode {
     let mut retries = 0;
     loop {
         let result = vfs_namei_once(path, path_len);
@@ -2088,8 +2050,7 @@ pub extern "C" fn vfs_namei(path: *const c_char, path_len: usize) -> *mut vfs_in
 /// Resolve the parent directory of a path and copy the final name
 /// component into `name`. Returns the parent directory inode with a
 /// reference held on success, or `ERR_PTR` on failure.
-#[no_mangle]
-pub extern "C" fn vfs_nameiparent(
+pub(crate) extern "C" fn vfs_nameiparent(
     path: *const c_char,
     path_len: usize,
     name: *mut c_char,

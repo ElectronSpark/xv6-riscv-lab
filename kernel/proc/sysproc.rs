@@ -108,10 +108,6 @@ unsafe extern "C" {
     // RNG.
     pub safe fn random_fill_bytes(buf: *mut u8, len: c_int);
 
-    // Session.
-    pub safe fn session_setsid() -> c_int;
-    pub safe fn session_getsid(pid: c_int) -> c_int;
-
     // C shim for `current` macro.
     pub safe fn xv6_current_thread() -> *mut bindings::thread;
 
@@ -124,6 +120,10 @@ unsafe extern "C" {
 // redeclarations -- each has exactly one caller anywhere in the tree, this
 // file.
 use crate::proc::{wait, waitpid, pgroup_setpgid, pgroup_getpgid};
+// P3-1C mesh sweep: tty/session.rs is in scope for this wave; identical
+// `pid_t`/`c_int` signatures, so these become plain crate-path imports
+// instead of `extern "C"` redeclarations.
+use crate::tty::session::{session_getsid, session_setsid};
 use crate::timer::sched_timer::sleep_ms_interruptible;
 use crate::timer::goldfish_rtc::goldfish_rtc_read_ns;
 // P3-1B2: `thread_group_exit`/`thread_tgid`/`signal_pending` used to be

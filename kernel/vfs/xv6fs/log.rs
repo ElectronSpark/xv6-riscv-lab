@@ -243,8 +243,7 @@ unsafe fn __xv6fs_commit(log: *mut xv6fs_log) {
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_initlog(xv6_sb: *mut xv6fs_superblock) {
+pub(crate) extern "C" fn xv6fs_initlog(xv6_sb: *mut xv6fs_superblock) {
     // SAFETY: `xv6_sb` is live (caller's contract, mount-time setup with
     // no concurrent access yet).
     unsafe {
@@ -325,8 +324,7 @@ unsafe fn __xv6fs_begin_op(xv6_sb: *mut xv6fs_superblock, state: c_int) -> c_int
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_begin_op(xv6_sb: *mut xv6fs_superblock) -> c_int {
+pub(crate) extern "C" fn xv6fs_begin_op(xv6_sb: *mut xv6fs_superblock) -> c_int {
     // SAFETY: `xv6_sb` is live (caller's contract).
     unsafe { __xv6fs_begin_op(xv6_sb, THREAD_INTERRUPTIBLE) }
 }
@@ -339,8 +337,7 @@ pub extern "C" fn xv6fs_begin_op(xv6_sb: *mut xv6fs_superblock) -> c_int {
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_begin_op_nointr(xv6_sb: *mut xv6fs_superblock) {
+pub(crate) extern "C" fn xv6fs_begin_op_nointr(xv6_sb: *mut xv6fs_superblock) {
     // SAFETY: `xv6_sb` is live (caller's contract).
     unsafe { __xv6fs_begin_op(xv6_sb, THREAD_UNINTERRUPTIBLE) };
 }
@@ -350,8 +347,7 @@ pub extern "C" fn xv6fs_begin_op_nointr(xv6_sb: *mut xv6fs_superblock) {
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_end_op(xv6_sb: *mut xv6fs_superblock) {
+pub(crate) extern "C" fn xv6fs_end_op(xv6_sb: *mut xv6fs_superblock) {
     // SAFETY: `xv6_sb` is live (caller's contract).
     unsafe {
         let log = ptr::addr_of_mut!((*xv6_sb).log);
@@ -395,8 +391,7 @@ pub extern "C" fn xv6fs_end_op(xv6_sb: *mut xv6fs_superblock) {
 ///
 /// Kept `#[no_mangle]`/exported per `xv6fs_private.h`'s `extern`
 /// declaration.
-#[no_mangle]
-pub extern "C" fn xv6fs_log_write(xv6_sb: *mut xv6fs_superblock, b: *mut buf) {
+pub(crate) extern "C" fn xv6fs_log_write(xv6_sb: *mut xv6fs_superblock, b: *mut buf) {
     // SAFETY: `xv6_sb`/`b` are live (caller's contract: called between
     // begin_op/end_op).
     unsafe {
