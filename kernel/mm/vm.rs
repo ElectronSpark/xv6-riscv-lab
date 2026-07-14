@@ -23,6 +23,7 @@
 
 use crate::walk;
 use core::ffi::{c_char, c_int, c_void};
+use core::marker::PhantomData;
 use core::sync::atomic::{compiler_fence, fence, AtomicU64, Ordering};
 
 use crate::bindings::{
@@ -543,13 +544,14 @@ pub(crate) extern "C" fn __cma_get_key(node: *mut rb_node) -> u64 {
     }
     let offset = core::mem::offset_of!(vma, rb_entry);
     // `container_of` itself is safe pointer arithmetic (see
-    // `crate::mm::cffi::container_of`); only the final field read is
-    // unsafe.
+    // `crate::mm::cffi::container_of`).
     let vma_ptr: *mut vma = crate::mm::cffi::container_of(node, offset);
-    // SAFETY: `node` is a live rb-tree node embedded in a `vma` (the
-    // rb-tree only ever stores `vma::rb_entry` nodes), so `vma_ptr` points
-    // at a valid `vma`.
-    unsafe { (*vma_ptr).start }
+    // `node` is a live rb-tree node embedded in a `vma` (the rb-tree only
+    // ever stores `vma::rb_entry` nodes), so `vma_ptr` points at a valid
+    // `vma`; `machine::vma_start` is the existing safe accessor for the
+    // one field this needs and carries its own soundness argument for the
+    // raw dereference behind it, so this function stays fully safe.
+    machine::vma_start(vma_ptr)
 }
 
 /// Acquire-load of `vm->cpumask` (cpumask_t == u64).
@@ -1160,35 +1162,103 @@ pub(crate) fn vm_pgtable_unlock(vm_ptr: *mut vm) {
 // paired form from `trap.c` / `exec.c` across function boundaries). These
 // guards only wrap *internal* same-function lock/unlock call sites within
 // this file, mirroring the `PcLocalGuard`-style helpers in `pcache.rs`.
+//
+// Unlike the original bare-newtype guards (Drop-unlock only, requiring every
+// caller to separately raw-deref `vm_ptr` / index `(*vm_ptr).field` under
+// the held lock, each such site carrying its own hand-written SAFETY
+// argument), these guards *carry* the protected `vm` reference via `Deref`
+// (`DerefMut` on the write guard). Each guard's `deref`/`deref_mut` impl
+// below has exactly one raw-pointer access, and its doc comment is the
+// entire soundness argument for every call site that now writes
+// `guard.field` instead of a manual raw deref: the reference's lifetime is
+// tied to `&self`/`&mut self`, i.e. to the guard binding itself, so it
+// cannot outlive the lock hold (the lock is released in `Drop`) and no
+// other racing access can alias it while it's live — exactly what each call
+// site's now-removed per-site justification used to have to argue by hand.
 // ---------------------------------------------------------------------------
 #[must_use = "vm read lock is released when the guard is dropped"]
-struct VmReadGuard(*mut vm);
-impl Drop for VmReadGuard {
-    fn drop(&mut self) { vm_runlock(self.0); }
+struct VmReadGuard<'a> {
+    vm_ptr: *mut vm,
+    _marker: PhantomData<&'a vm>,
 }
-fn rlock_vm(vm_ptr: *mut vm) -> VmReadGuard {
+impl Drop for VmReadGuard<'_> {
+    fn drop(&mut self) { vm_runlock(self.vm_ptr); }
+}
+impl<'a> core::ops::Deref for VmReadGuard<'a> {
+    type Target = vm;
+    fn deref(&self) -> &vm {
+        // SAFETY: `VmReadGuard` is only ever constructed by `rlock_vm`,
+        // which has just called `vm_rlock` (rwsem acquire-read) on
+        // `vm_ptr`; the returned reference's lifetime is bound to `&self`
+        // (this guard), which cannot outlive the read-lock hold (`Drop`
+        // releases it via `vm_runlock`).
+        unsafe { &*self.vm_ptr }
+    }
+}
+fn rlock_vm<'a>(vm_ptr: *mut vm) -> VmReadGuard<'a> {
     vm_rlock(vm_ptr);
-    VmReadGuard(vm_ptr)
+    VmReadGuard { vm_ptr, _marker: PhantomData }
 }
 
 #[must_use = "vm write lock is released when the guard is dropped"]
-struct VmWriteGuard(*mut vm);
-impl Drop for VmWriteGuard {
-    fn drop(&mut self) { vm_wunlock(self.0); }
+struct VmWriteGuard<'a> {
+    vm_ptr: *mut vm,
+    _marker: PhantomData<&'a mut vm>,
 }
-fn wlock_vm(vm_ptr: *mut vm) -> VmWriteGuard {
+impl Drop for VmWriteGuard<'_> {
+    fn drop(&mut self) { vm_wunlock(self.vm_ptr); }
+}
+impl<'a> core::ops::Deref for VmWriteGuard<'a> {
+    type Target = vm;
+    fn deref(&self) -> &vm {
+        // SAFETY: see `VmReadGuard::deref`; `vm_wlock` (rwsem
+        // acquire-write) additionally guarantees no other reader/writer
+        // is concurrently active for as long as this guard lives.
+        unsafe { &*self.vm_ptr }
+    }
+}
+impl<'a> core::ops::DerefMut for VmWriteGuard<'a> {
+    fn deref_mut(&mut self) -> &mut vm {
+        // SAFETY: `VmWriteGuard` is only ever constructed by `wlock_vm`,
+        // which has just called `vm_wlock` (rwsem acquire-write) — the
+        // write lock is exclusive, so this is the only live reference to
+        // `*vm_ptr`; the returned reference's lifetime is bound to
+        // `&mut self` and cannot outlive the write-lock hold (`Drop`
+        // releases it via `vm_wunlock`).
+        unsafe { &mut *self.vm_ptr }
+    }
+}
+fn wlock_vm<'a>(vm_ptr: *mut vm) -> VmWriteGuard<'a> {
     vm_wlock(vm_ptr);
-    VmWriteGuard(vm_ptr)
+    VmWriteGuard { vm_ptr, _marker: PhantomData }
 }
 
 #[must_use = "vm pgtable lock is released when the guard is dropped"]
-struct VmPgtableGuard(*mut vm);
-impl Drop for VmPgtableGuard {
-    fn drop(&mut self) { vm_pgtable_unlock(self.0); }
+struct VmPgtableGuard<'a> {
+    vm_ptr: *mut vm,
+    _marker: PhantomData<&'a vm>,
 }
-fn lock_vm_pgtable(vm_ptr: *mut vm) -> VmPgtableGuard {
+impl Drop for VmPgtableGuard<'_> {
+    fn drop(&mut self) { vm_pgtable_unlock(self.vm_ptr); }
+}
+impl<'a> core::ops::Deref for VmPgtableGuard<'a> {
+    type Target = vm;
+    fn deref(&self) -> &vm {
+        // SAFETY: `VmPgtableGuard` is only ever constructed by
+        // `lock_vm_pgtable`, which has just called `vm_pgtable_lock`
+        // (spinlock acquire); the returned reference's lifetime is bound
+        // to `&self`, cannot outlive the lock hold (`Drop` releases it
+        // via `vm_pgtable_unlock`). This guard protects PTE-level
+        // mutation through `vm->pagetable`; the `pagetable` pointer value
+        // itself is set once at `vm_init`/torn down at `__vm_destroy` and
+        // otherwise read-only, so a shared borrow of `vm` here is sound
+        // without also requiring the rwsem.
+        unsafe { &*self.vm_ptr }
+    }
+}
+fn lock_vm_pgtable<'a>(vm_ptr: *mut vm) -> VmPgtableGuard<'a> {
     vm_pgtable_lock(vm_ptr);
-    VmPgtableGuard(vm_ptr)
+    VmPgtableGuard { vm_ptr, _marker: PhantomData }
 }
 
 // ---------------------------------------------------------------------------
@@ -1971,7 +2041,7 @@ pub extern "C" fn vm_copyout(
                 ret = -(EFAULT as c_int);
                 break;
             }
-            let pte = walk((*vm_ptr).pagetable as *mut u64, va0, 0, core::ptr::null_mut(), core::ptr::null_mut());
+            let pte = walk(_g.pagetable as *mut u64, va0, 0, core::ptr::null_mut(), core::ptr::null_mut());
             if pte.is_null() {
                 xv6_vm_panic(b"vma_copyout: pte should not be null\0".as_ptr() as *const c_char);
             }
@@ -2016,7 +2086,7 @@ pub extern "C" fn vm_copyin(
                 ret = -(EFAULT as c_int);
                 break;
             }
-            let pa0 = walkaddr((*vm_ptr).pagetable as *mut u64, va0);
+            let pa0 = walkaddr(_g.pagetable as *mut u64, va0);
             if pa0 == 0 {
                 ret = -(EFAULT as c_int);
                 break;
@@ -2058,7 +2128,7 @@ pub extern "C" fn vm_copyinstr(
                 ret = -(EFAULT as c_int);
                 break;
             }
-            let pa0 = walkaddr((*vm_ptr).pagetable as *mut u64, va0);
+            let pa0 = walkaddr(_g.pagetable as *mut u64, va0);
             if pa0 == 0 {
                 ret = -(EFAULT as c_int);
                 break;
@@ -2226,113 +2296,116 @@ pub(crate) fn vm_growstack(vm_ptr: *mut vm, change_size: i64) -> c_int {
 
 #[no_mangle]
 pub extern "C" fn vm_try_growstack(vm_ptr: *mut vm, va: u64) -> c_int {
-    // SAFETY: `vm_ptr`, once past the null check just below, is a live
-    // `vm`; `stack`, when non-null, is a live `vma`.
-    unsafe {
-        let mut ret: c_int = 0;
-        let _g = wlock_vm(vm_ptr);
-        if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-            ret = -(EINVAL as c_int);
-        } else if va < USTACK_MAX_BOTTOM as u64 || va >= USTACKTOP as u64 {
-            ret = 0;
-        } else if (*vm_ptr).stack.is_null() {
-            ret = -(EINVAL as c_int);
-        } else if (*(*vm_ptr).stack).start <= va {
-            ret = 0;
+    // Fully safe body: `_g` (a `VmWriteGuard`) carries the `vm` reference
+    // for every field read below via `Deref`, and `machine::vma_start` is
+    // the existing safe accessor for the one `vma` field (`stack.start`)
+    // this function needs — `vm_growstack` re-derefs `vm_ptr` itself under
+    // its own SAFETY contract (asserted write-held).
+    let mut ret: c_int = 0;
+    let _g = wlock_vm(vm_ptr);
+    if vm_ptr.is_null() || _g.pagetable.is_null() {
+        ret = -(EINVAL as c_int);
+    } else if va < USTACK_MAX_BOTTOM as u64 || va >= USTACKTOP as u64 {
+        ret = 0;
+    } else if _g.stack.is_null() {
+        ret = -(EINVAL as c_int);
+    } else if machine::vma_start(_g.stack) <= va {
+        ret = 0;
+    } else {
+        let ustack_bottom_after = machine::vma_start(_g.stack)
+            .wrapping_sub((USERSTACK_GROWTH as u64) << PAGE_SHIFT);
+        if ustack_bottom_after < USTACK_MAX_BOTTOM as u64 {
+            ret = -(ENOMEM as c_int);
+        } else if ustack_bottom_after > va {
+            ret = -(EFAULT as c_int);
         } else {
-            let ustack_bottom_after = (*(*vm_ptr).stack)
-                .start
-                .wrapping_sub((USERSTACK_GROWTH as u64) << PAGE_SHIFT);
-            if ustack_bottom_after < USTACK_MAX_BOTTOM as u64 {
-                ret = -(ENOMEM as c_int);
-            } else if ustack_bottom_after > va {
-                ret = -(EFAULT as c_int);
-            } else {
-                ret = vm_growstack(vm_ptr, ((USERSTACK_GROWTH as i64) << PAGE_SHIFT) as i64);
-            }
+            ret = vm_growstack(vm_ptr, ((USERSTACK_GROWTH as i64) << PAGE_SHIFT) as i64);
         }
-        ret
     }
+    ret
 }
 
 #[no_mangle]
 pub extern "C" fn vm_growheap(vm_ptr: *mut vm, change_size: i64) -> c_int {
-    // SAFETY: `vm_ptr`, once past the null checks just below, is a live
-    // `vm`; every `*mut vma` touched (`heap`, `right`, …) is checked
-    // non-null before dereference.
-    unsafe {
-        let mut ret: c_int = 0;
-        let _g = wlock_vm(vm_ptr);
-        'done: {
-            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+    let mut ret: c_int = 0;
+    let mut _g = wlock_vm(vm_ptr);
+    'done: {
+        if vm_ptr.is_null() || _g.pagetable.is_null() {
+            ret = -(EINVAL as c_int);
+            break 'done;
+        }
+        if _g.heap.is_null() || _g.heap_size < PGSIZE as usize {
+            ret = -(EINVAL as c_int);
+            break 'done;
+        }
+        if (machine::vma_flags(_g.heap) & crate::bindings::VMA_FLAG_GROWSUP as u64) == 0 {
+            ret = -(EINVAL as c_int);
+            break 'done;
+        }
+        if change_size == 0 {
+            ret = 0;
+            break 'done;
+        }
+        let heap_size_u = _g.heap_size as u64;
+        if change_size < 0 {
+            if (-change_size) as u64 > heap_size_u - PGSIZE as u64 {
                 ret = -(EINVAL as c_int);
                 break 'done;
             }
-            if (*vm_ptr).heap.is_null() || (*vm_ptr).heap_size < PGSIZE as usize {
-                ret = -(EINVAL as c_int);
-                break 'done;
-            }
-            if ((*(*vm_ptr).heap).flags & crate::bindings::VMA_FLAG_GROWSUP as u64) == 0 {
-                ret = -(EINVAL as c_int);
-                break 'done;
-            }
-            if change_size == 0 {
-                ret = 0;
-                break 'done;
-            }
-            let heap_size_u = (*vm_ptr).heap_size as u64;
-            if change_size < 0 {
-                if (-change_size) as u64 > heap_size_u - PGSIZE as u64 {
-                    ret = -(EINVAL as c_int);
-                    break 'done;
-                }
-            } else if (change_size as u64) > (UHEAP_MAX_TOP as u64) - (*(*vm_ptr).heap).end {
+        } else if (change_size as u64) > (UHEAP_MAX_TOP as u64) - machine::vma_end(_g.heap) {
+            ret = -(ENOMEM as c_int);
+            break 'done;
+        }
+        let new_size = (heap_size_u as i64 + change_size) as u64;
+        let delta: i64 = pg_round_up(new_size) as i64 - vma_size_of(_g.heap) as i64;
+        if delta == 0 {
+            _g.heap_size = new_size as usize;
+            ret = 0;
+            break 'done;
+        }
+        let new_end = machine::vma_end(_g.heap).wrapping_add(delta as u64);
+        let right = xv6_vm_vma_right(_g.heap);
+
+        if delta < 0 {
+            let splitted = vma_split(_g.heap, new_end);
+            if splitted.is_null() {
                 ret = -(ENOMEM as c_int);
                 break 'done;
             }
-            let new_size = (heap_size_u as i64 + change_size) as u64;
-            let delta: i64 = pg_round_up(new_size) as i64 - vma_size_of((*vm_ptr).heap) as i64;
-            if delta == 0 {
-                (*vm_ptr).heap_size = new_size as usize;
-                ret = 0;
+            __vma_set_free(splitted);
+            if !right.is_null() && machine::vma_flags(right) == PROT_NONE as u64 {
+                vma_merge(splitted, right);
+            }
+        } else {
+            if right.is_null() || machine::vma_flags(right) != PROT_NONE as u64 {
+                ret = -(ENOMEM as c_int);
                 break 'done;
             }
-            let new_end = (*(*vm_ptr).heap).end.wrapping_add(delta as u64);
-            let right = xv6_vm_vma_right((*vm_ptr).heap);
-
-            if delta < 0 {
-                let splitted = vma_split((*vm_ptr).heap, new_end);
-                if splitted.is_null() {
-                    ret = -(ENOMEM as c_int);
-                    break 'done;
-                }
-                __vma_set_free(splitted);
-                if !right.is_null() && (*right).flags == PROT_NONE as u64 {
-                    vma_merge(splitted, right);
-                }
-            } else {
-                if right.is_null() || (*right).flags != PROT_NONE as u64 {
-                    ret = -(ENOMEM as c_int);
-                    break 'done;
-                }
-                if vma_size_of(right) < delta as u64 {
-                    ret = -(ENOMEM as c_int);
-                    break 'done;
-                }
-                if vma_split(right, new_end).is_null() {
-                    ret = -(ENOMEM as c_int);
-                    break 'done;
-                }
-                xv6_vm_list_detach_free_list_entry(right);
-                (*right).flags = (*(*vm_ptr).heap).flags;
-                let new_heap = vma_merge(right, (*vm_ptr).heap);
-                (*vm_ptr).heap = new_heap;
+            if vma_size_of(right) < delta as u64 {
+                ret = -(ENOMEM as c_int);
+                break 'done;
             }
-            (*vm_ptr).heap_size = new_size as usize;
-            ret = 0;
+            if vma_split(right, new_end).is_null() {
+                ret = -(ENOMEM as c_int);
+                break 'done;
+            }
+            xv6_vm_list_detach_free_list_entry(right);
+            // SAFETY: `right` was just checked non-null above and is a
+            // live `vma` freshly returned by `vma_split`/`xv6_vm_vma_right`
+            // and not yet reachable from any other thread; there is no
+            // safe `vma`-field setter for `flags` (only the getter
+            // `machine::vma_flags` exists), so this one write stays a raw
+            // deref.
+            unsafe {
+                (*right).flags = machine::vma_flags(_g.heap);
+            }
+            let new_heap = vma_merge(right, _g.heap);
+            _g.heap = new_heap;
         }
-        ret
+        _g.heap_size = new_size as usize;
+        ret = 0;
     }
+    ret
 }
 
 // ---------------------------------------------------------------------------
@@ -2341,61 +2414,61 @@ pub extern "C" fn vm_growheap(vm_ptr: *mut vm, change_size: i64) -> c_int {
 
 #[no_mangle]
 pub extern "C" fn vm_copy(src: *mut vm) -> *mut vm {
-    // SAFETY: `src`, once past the null check just below, is a live `vm`;
-    // `dst` comes from `vm_init`, checked non-null before use; every
-    // `*mut vma` walked (`vma_cur`, `next`, …) belongs to `src`'s own
-    // vma list.
-    unsafe {
-        if src.is_null() {
-            return ((-(EINVAL as isize)) as isize) as *mut vm;
-        }
-        let dst = vm_init();
-        if dst.is_null() {
-            return ((-(ENOMEM as isize)) as isize) as *mut vm;
-        }
-        // `dst` was just allocated above and is not yet reachable from any
-        // other thread, so acquiring `src`'s read lock then `dst`'s write
-        // lock cannot deadlock against another thread's lock ordering —
-        // `lock_two()` (sync.rs) is for two same-mode `KSpinlock`s and
-        // doesn't fit this asymmetric rwsem read+write pair, so a plain
-        // fixed-order acquire (matching the original) is used instead.
-        let _src_g = rlock_vm(src);
-        let _dst_g = wlock_vm(dst);
-
-        let mut vma_cur = xv6_vm_first_vma(src);
-        while !vma_cur.is_null() {
-            let next = xv6_vm_next_vma(src, vma_cur);
-            if (*vma_cur).flags != PROT_NONE as u64 {
-                let new_vma = vma_alloc(
-                    dst,
-                    (*vma_cur).start,
-                    vma_size_of(vma_cur),
-                    (*vma_cur).flags,
-                );
-                if new_vma.is_null() {
-                    drop(_dst_g);
-                    drop(_src_g);
-                    vm_put(dst);
-                    return ((-(ENOMEM as isize)) as isize) as *mut vm;
-                }
-                if vma_cur == (*src).stack {
-                    (*dst).stack = new_vma;
-                    (*dst).stack_size = (*src).stack_size;
-                } else if vma_cur == (*src).heap {
-                    (*dst).heap = new_vma;
-                    (*dst).heap_size = (*src).heap_size;
-                }
-                if __vma_copy(new_vma, vma_cur) != 0 {
-                    drop(_dst_g);
-                    drop(_src_g);
-                    vm_put(dst);
-                    return ((-(ENOMEM as isize)) as isize) as *mut vm;
-                }
-            }
-            vma_cur = next;
-        }
-        dst
+    // Fully safe body: `_src_g`/`_dst_g` (a `VmReadGuard`/`VmWriteGuard`
+    // pair) carry the `vm` references for every `src`/`dst` field access
+    // below via `Deref`/`DerefMut`, and `machine::vma_start`/
+    // `vma_flags` are the existing safe accessors for the `vma` fields
+    // touched on `vma_cur`; `vma_alloc`/`__vma_copy`/`vm_put` all take and
+    // return raw pointers without the caller needing to dereference them.
+    if src.is_null() {
+        return ((-(EINVAL as isize)) as isize) as *mut vm;
     }
+    let dst = vm_init();
+    if dst.is_null() {
+        return ((-(ENOMEM as isize)) as isize) as *mut vm;
+    }
+    // `dst` was just allocated above and is not yet reachable from any
+    // other thread, so acquiring `src`'s read lock then `dst`'s write
+    // lock cannot deadlock against another thread's lock ordering —
+    // `lock_two()` (sync.rs) is for two same-mode `KSpinlock`s and
+    // doesn't fit this asymmetric rwsem read+write pair, so a plain
+    // fixed-order acquire (matching the original) is used instead.
+    let _src_g = rlock_vm(src);
+    let mut _dst_g = wlock_vm(dst);
+
+    let mut vma_cur = xv6_vm_first_vma(src);
+    while !vma_cur.is_null() {
+        let next = xv6_vm_next_vma(src, vma_cur);
+        if machine::vma_flags(vma_cur) != PROT_NONE as u64 {
+            let new_vma = vma_alloc(
+                dst,
+                machine::vma_start(vma_cur),
+                vma_size_of(vma_cur),
+                machine::vma_flags(vma_cur),
+            );
+            if new_vma.is_null() {
+                drop(_dst_g);
+                drop(_src_g);
+                vm_put(dst);
+                return ((-(ENOMEM as isize)) as isize) as *mut vm;
+            }
+            if vma_cur == _src_g.stack {
+                _dst_g.stack = new_vma;
+                _dst_g.stack_size = _src_g.stack_size;
+            } else if vma_cur == _src_g.heap {
+                _dst_g.heap = new_vma;
+                _dst_g.heap_size = _src_g.heap_size;
+            }
+            if __vma_copy(new_vma, vma_cur) != 0 {
+                drop(_dst_g);
+                drop(_src_g);
+                vm_put(dst);
+                return ((-(ENOMEM as isize)) as isize) as *mut vm;
+            }
+        }
+        vma_cur = next;
+    }
+    dst
 }
 
 // ---------------------------------------------------------------------------
@@ -2473,45 +2546,44 @@ pub(crate) fn vm_mmap_region(
 }
 
 pub(crate) fn vm_munmap_region(vm_ptr: *mut vm, start: u64, size: usize) -> c_int {
+    // Fully safe body: `_g` carries the `vm` reference via `Deref`, and
+    // `machine::vma_start`/`vma_end` are the existing safe accessors for
+    // the `vma` fields `vma_ptr` needs; `vma_free` takes the raw pointer
+    // without the caller dereferencing it.
     let mut ret: c_int = 0;
     let _g = wlock_vm(vm_ptr);
-    // SAFETY: `vm_ptr`, once past the null checks just below, is a live
-    // `vm`; `vma_ptr` comes from `vm_find_area`, checked non-null before
-    // use.
-    unsafe {
-        'done: {
-            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-                ret = -(EINVAL as c_int);
-                break 'done;
-            }
-            if start < UVMBOTTOM as u64 || start + size as u64 > UVMTOP as u64 {
-                ret = -(EINVAL as c_int);
-                break 'done;
-            }
-            if (size as u64 & (PGSIZE as u64 - 1)) != 0 || (start & (PGSIZE as u64 - 1)) != 0 {
-                ret = -(EINVAL as c_int);
-                break 'done;
-            }
-            if size == 0 {
-                ret = 0;
-                break 'done;
-            }
-            let vma_ptr = vm_find_area(vm_ptr, start);
-            if vma_ptr.is_null()
-                || (*vma_ptr).start != start
-                || (*vma_ptr).end < start + size as u64
-            {
-                ret = -(EINVAL as c_int);
-                break 'done;
-            }
-            if vma_free(vm_ptr, vma_ptr) != 0 {
-                ret = -(EINVAL as c_int);
-                break 'done;
-            }
-            ret = 0;
+    'done: {
+        if vm_ptr.is_null() || _g.pagetable.is_null() {
+            ret = -(EINVAL as c_int);
+            break 'done;
         }
-        ret
+        if start < UVMBOTTOM as u64 || start + size as u64 > UVMTOP as u64 {
+            ret = -(EINVAL as c_int);
+            break 'done;
+        }
+        if (size as u64 & (PGSIZE as u64 - 1)) != 0 || (start & (PGSIZE as u64 - 1)) != 0 {
+            ret = -(EINVAL as c_int);
+            break 'done;
+        }
+        if size == 0 {
+            ret = 0;
+            break 'done;
+        }
+        let vma_ptr = vm_find_area(vm_ptr, start);
+        if vma_ptr.is_null()
+            || machine::vma_start(vma_ptr) != start
+            || machine::vma_end(vma_ptr) < start + size as u64
+        {
+            ret = -(EINVAL as c_int);
+            break 'done;
+        }
+        if vma_free(vm_ptr, vma_ptr) != 0 {
+            ret = -(EINVAL as c_int);
+            break 'done;
+        }
+        ret = 0;
     }
+    ret
 }
 
 // ---------------------------------------------------------------------------
@@ -2531,7 +2603,7 @@ pub(crate) fn vm_mprotect(
     // range-checked before use; every PTE pointer comes from `walk()`.
     unsafe {
         'done: {
-            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+            if vm_ptr.is_null() || _g.pagetable.is_null() {
                 ret = -(EINVAL as c_int);
                 break 'done;
             }
@@ -2550,11 +2622,11 @@ pub(crate) fn vm_mprotect(
                 ret = -(ENOMEM as c_int);
                 break 'done;
             }
-        if addr < (*vma_ptr).start || addr + size > (*vma_ptr).end {
+        if addr < machine::vma_start(vma_ptr) || addr + size > machine::vma_end(vma_ptr) {
             ret = -(ENOMEM as c_int);
             break 'done;
         }
-        let old_flags = (*vma_ptr).flags;
+        let old_flags = machine::vma_flags(vma_ptr);
         let new_flags = (old_flags & !(PROT_MASK as u64)) | ((prot as u64) & PROT_MASK as u64);
         let pte_flags = vma2pte_flags(new_flags);
 
@@ -2563,7 +2635,7 @@ pub(crate) fn vm_mprotect(
             let mut va = addr;
             while va < addr + size {
                 let pte = walk(
-                    (*vm_ptr).pagetable as *mut u64,
+                    _pgl.pagetable as *mut u64,
                     va,
                     0,
                     core::ptr::null_mut(),
@@ -2579,7 +2651,7 @@ pub(crate) fn vm_mprotect(
             }
         }
 
-        if addr == (*vma_ptr).start && addr + size == (*vma_ptr).end {
+        if addr == machine::vma_start(vma_ptr) && addr + size == machine::vma_end(vma_ptr) {
             (*vma_ptr).flags = new_flags;
         }
 
@@ -2609,7 +2681,7 @@ pub(crate) fn vm_mremap(
     // from `walk()`.
     unsafe {
         'done: {
-            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+            if vm_ptr.is_null() || _g.pagetable.is_null() {
                 break 'done;
             }
             let old_addr = pg_round_down(old_addr_in);
@@ -2620,8 +2692,8 @@ pub(crate) fn vm_mremap(
             }
             let vma_ptr = vm_find_area(vm_ptr, old_addr);
             if vma_ptr.is_null()
-                || (*vma_ptr).start != old_addr
-                || (*vma_ptr).end != old_addr + old_size
+                || machine::vma_start(vma_ptr) != old_addr
+                || machine::vma_end(vma_ptr) != old_addr + old_size
             {
                 break 'done;
             }
@@ -2653,7 +2725,7 @@ pub(crate) fn vm_mremap(
             let expand_size = new_size - old_size;
             let expand_start = old_addr + old_size;
             let next_vma = vm_find_area(vm_ptr, expand_start);
-            if next_vma.is_null() || (*next_vma).start >= expand_start + expand_size {
+            if next_vma.is_null() || machine::vma_start(next_vma) >= expand_start + expand_size {
                 (*vma_ptr).end = old_addr + new_size;
                 ret = old_addr;
                 break 'done;
@@ -2665,14 +2737,14 @@ pub(crate) fn vm_mremap(
             if new_location == 0 {
                 break 'done;
             }
-            let new_vma = vma_alloc(vm_ptr, new_location, new_size, (*vma_ptr).flags);
+            let new_vma = vma_alloc(vm_ptr, new_location, new_size, machine::vma_flags(vma_ptr));
             if new_vma.is_null() {
                 break 'done;
             }
             let mut offset: u64 = 0;
             while offset < old_size {
                 let old_pte = walk(
-                    (*vm_ptr).pagetable as *mut u64,
+                    _g.pagetable as *mut u64,
                     old_addr + offset,
                     0,
                     core::ptr::null_mut(),
@@ -2682,7 +2754,7 @@ pub(crate) fn vm_mremap(
                     let pa = ((*old_pte) >> 10) << 12;
                     let pte_flags = *old_pte & ((PTE_R | PTE_W | PTE_X | PTE_U) as u64);
                     let new_pte = walk(
-                        (*vm_ptr).pagetable as *mut u64,
+                        _g.pagetable as *mut u64,
                         new_location + offset,
                         1,
                         core::ptr::null_mut(),
@@ -2715,42 +2787,40 @@ pub(crate) fn vm_msync(
     size_in: usize,
     _flags: c_int,
 ) -> c_int {
+    // Fully safe body: `_g` carries the `vm` reference via `Deref`, and
+    // `machine::vma_start`/`vma_end`/`vma_file` are the existing safe
+    // accessors for the `vma` fields `vma_ptr` needs.
     let mut ret: c_int = 0;
     let _g = rlock_vm(vm_ptr);
-    // SAFETY: `vm_ptr`, once past the null checks just below, is a live
-    // `vm`; `vma_ptr` comes from `vm_find_area`, checked non-null and
-    // range-checked before use.
-    unsafe {
-        'done: {
-            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
-                ret = -(EINVAL as c_int);
-                break 'done;
-            }
-            let addr = pg_round_down(addr_in);
-            let size = pg_round_up(size_in as u64);
-            if addr < UVMBOTTOM as u64 || addr + size > UVMTOP as u64 {
-                ret = -(ENOMEM as c_int);
-                break 'done;
-            }
-            let vma_ptr = vm_find_area(vm_ptr, addr);
-            if vma_ptr.is_null() {
-                ret = -(ENOMEM as c_int);
-                break 'done;
-            }
-            if addr < (*vma_ptr).start || addr + size > (*vma_ptr).end {
-                ret = -(ENOMEM as c_int);
-                break 'done;
-            }
-            if !(*vma_ptr).file.is_null() {
-                // Kept at SeqCst: 1:1 port of the C source's explicit
-                // full barrier guarding the file-backed-dirty-state
-                // check that follows; `vm_msync` is not a hot path.
-                fence(Ordering::SeqCst);
-            }
-            ret = 0;
+    'done: {
+        if vm_ptr.is_null() || _g.pagetable.is_null() {
+            ret = -(EINVAL as c_int);
+            break 'done;
         }
-        ret
+        let addr = pg_round_down(addr_in);
+        let size = pg_round_up(size_in as u64);
+        if addr < UVMBOTTOM as u64 || addr + size > UVMTOP as u64 {
+            ret = -(ENOMEM as c_int);
+            break 'done;
+        }
+        let vma_ptr = vm_find_area(vm_ptr, addr);
+        if vma_ptr.is_null() {
+            ret = -(ENOMEM as c_int);
+            break 'done;
+        }
+        if addr < machine::vma_start(vma_ptr) || addr + size > machine::vma_end(vma_ptr) {
+            ret = -(ENOMEM as c_int);
+            break 'done;
+        }
+        if !machine::vma_file(vma_ptr).is_null() {
+            // Kept at SeqCst: 1:1 port of the C source's explicit
+            // full barrier guarding the file-backed-dirty-state
+            // check that follows; `vm_msync` is not a hot path.
+            fence(Ordering::SeqCst);
+        }
+        ret = 0;
     }
+    ret
 }
 
 pub(crate) fn vm_mincore(
@@ -2767,7 +2837,7 @@ pub(crate) fn vm_mincore(
     // `*mut vma` touched comes from `vm_find_area`, checked non-null.
     unsafe {
         'done: {
-            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() || vec.is_null() {
+            if vm_ptr.is_null() || _g.pagetable.is_null() || vec.is_null() {
                 ret = -(EINVAL as c_int);
                 break 'done;
             }
@@ -2791,14 +2861,14 @@ pub(crate) fn vm_mincore(
                 for i in 0..num_pages {
                     let va = addr_in + (i as u64) * (PGSIZE as u64);
                     *vec.add(i) = 0;
-                    if va < (*vma_ptr).start || va >= (*vma_ptr).end {
+                    if va < machine::vma_start(vma_ptr) || va >= machine::vma_end(vma_ptr) {
                         vma_ptr = vm_find_area(vm_ptr, va);
                         if vma_ptr.is_null() {
                             continue;
                         }
                     }
                     let pte = walk(
-                        (*vm_ptr).pagetable as *mut u64,
+                        _pgl.pagetable as *mut u64,
                         va,
                         0,
                         core::ptr::null_mut(),
@@ -2828,7 +2898,7 @@ pub(crate) fn vm_madvise(
     // range-checked before use; every PTE pointer comes from `walk()`.
     unsafe {
         'done: {
-            if vm_ptr.is_null() || (*vm_ptr).pagetable.is_null() {
+            if vm_ptr.is_null() || _g.pagetable.is_null() {
                 ret = -(EINVAL as c_int);
                 break 'done;
             }
@@ -2843,7 +2913,7 @@ pub(crate) fn vm_madvise(
                 ret = -(ENOMEM as c_int);
                 break 'done;
             }
-            if addr < (*vma_ptr).start || addr + size > (*vma_ptr).end {
+            if addr < machine::vma_start(vma_ptr) || addr + size > machine::vma_end(vma_ptr) {
                 ret = -(ENOMEM as c_int);
                 break 'done;
             }
@@ -2857,7 +2927,7 @@ pub(crate) fn vm_madvise(
                         let mut va = addr;
                         while va < addr + size {
                             let pte = walk(
-                                (*vm_ptr).pagetable as *mut u64,
+                                _pgl.pagetable as *mut u64,
                                 va,
                                 0,
                                 core::ptr::null_mut(),
