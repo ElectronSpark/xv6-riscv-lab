@@ -99,6 +99,12 @@ use crate::machine::{CpuLocal, CPU_FLAG_CRASHED, SIE_SSIE};
 // spinlock wrappers, unconditionally safe to call, so they become plain
 // crate-path imports instead of `extern "C"` redeclarations.
 use crate::printf::{panic_msg_lock, panic_msg_unlock};
+// P3-1D mesh sweep: backtrace.rs/sbi.rs are in scope for this wave; both
+// are thin/panic-safe calls, unconditionally safe or already-unsafe at
+// their call sites here, so they become plain crate-path imports instead
+// of `extern "C"` redeclarations.
+use crate::backtrace::print_backtrace;
+use crate::sbi::sbi_send_ipi;
 
 // ===========================================================================
 // Externs.
@@ -114,16 +120,6 @@ unsafe extern "C" {
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
     fn printf(fmt: *const c_char, ...) -> c_int;
-
-    /// `kernel/backtrace.rs` (Wave 5) -- stack-walk is panic-safe /
-    /// alloc-free (see that file's doc), but its own signature is
-    /// `unsafe extern "C" fn`, so this stays a plain (non-`safe`) decl.
-    fn print_backtrace(context: u64, stack_start: u64, stack_end: u64);
-
-    /// `kernel/sbi.rs` (Wave 2). A plain SBI `ecall` wrapper; safe for any
-    /// argument values (may simply be a no-op SBI call if the mask/base
-    /// don't name a real hart).
-    pub safe fn sbi_send_ipi(hart_mask: u64, hart_mask_base: u64) -> i64;
 
     /// `kernel/proc/rq.rs` (SECTION 19 of the former `proc_rust_shims.c`).
     /// Documented there as IRQ-safe (spinlock-guarded intrusive-list
@@ -470,8 +466,9 @@ pub(crate) extern "C" fn ipi_send_all_but_self(reason: c_int) -> c_int {
 /// caller (`printf.rs`'s panic path) always passes the compile-time
 /// constant `IPI_REASON_CRASH`, so this is behavior-preserving for the
 /// entire live call graph.
-#[no_mangle]
-pub extern "C" fn ipi_send_all(reason: c_int) -> c_int {
+// P3-1D mesh sweep: caller (`printf.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn ipi_send_all(reason: c_int) -> c_int {
     if reason < 0 || reason >= NR_IPI_REASON {
         return neg(crate::bindings::EINVAL);
     }

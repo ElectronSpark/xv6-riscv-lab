@@ -88,26 +88,47 @@
 
 #![cfg_attr(not(test), no_std)]
 #![allow(non_upper_case_globals)]
-// `page` and `slab` both define private mirror types named `ListNode` and
-// `Spinlock`. Re-exporting both modules with `pub use mod::*;` triggers
-// ambiguous-glob warnings. The actual exported symbols come from the
-// `#[no_mangle] pub unsafe extern "C" fn ...` declarations inside each
-// module — not from these re-exports — so the collision is cosmetic.
+// P3-1D re-audit: tried removing this; still fires 81 times, entirely
+// inside `mm/mod.rs`'s and `proc/mod.rs`'s own `pub use submodule::*;`
+// re-export lists (not this file's own re-exports) -- e.g. `mm::page`/
+// `mm::pcache` both defining `Page`, `proc::sysproc`/`proc::pid`/
+// `proc::sys_signal`/`proc::workqueue`/`proc::thread_queue` all defining
+// local mirrors of `argint`/`argaddr`/`exit`/`xv6_current_thread`/etc.
+// Every one of those name collisions predates this wave (mm/proc were
+// P3-1A/B territory) and the actual exported symbol comes from each
+// site's own `#[no_mangle]` declaration, not from which glob wins the
+// name -- the collision is cosmetic, matching the original comment's
+// reasoning, just relocated (it was never really about `page`/`slab`'s
+// `ListNode`/`Spinlock`, that specific pair no longer collides).
+// Untangling the mm/proc submodule re-export structure is out of this
+// wave's touch scope.
 #![allow(ambiguous_glob_reexports)]
-// Bindgen emits `unsafe extern "C" { pub fn X(...) }` for every kernel symbol,
-// while our hand-rolled `mod ffi`/`mod raw` blocks redeclare a subset using the
-// Rust 2024 `unsafe extern "C" { pub safe fn X(...) }` form so that they are
-// callable from safe code. Both declarations resolve to the same C symbol at
-// link time — they only differ in Rust's view of caller-side safety — so the
-// `clashing_extern_declarations` lint produces ~60 redundant warnings here.
+// P3-1D re-audit: down from ~60 warnings (pre-mesh-sweep) to exactly one
+// clash class now that the mesh sweep is crate-wide complete. Bindgen's
+// generated declaration for `printf` (`kernel_bindings.rs`, from the real
+// C prototype `int printf(char *fmt, ...)`, non-`const`) takes `*mut
+// c_char`; this crate's ~70 hand-written per-file `fn printf(fmt: *const
+// c_char, ...)` local redeclarations (the established convention, since
+// this function never writes through `fmt`) all agree with each other
+// but not with bindgen's -- both resolve to the same C symbol at link
+// time, only the pointer const-ness/caller-side-safety view differs.
+// Narrowing every one of the ~70 call sites to bindgen's `*mut` would
+// widen their signature for no behavioural gain (the read-only
+// convention is intentional) and is out of this wave's touch scope.
 #![allow(clashing_extern_declarations)]
-// Bindgen generates several opaque anonymous-struct types (e.g. the empty
-// `thread__bindgen_ty_1`) that appear as `*mut spinlock_t` / `*mut rwsem_t`
-// arguments. Our hand-rolled `mod ffi`/`mod raw` blocks redeclare those same
-// C functions; rustc then warns that the empty struct is not FFI-safe. The C
-// side only ever sees opaque pointers, so the warning is noise here.
+// P3-1D re-audit: tried removing this too -- still fires 382 times (up
+// from ~60 pre-mesh-sweep denominator context; the mesh sweep didn't
+// touch this class at all, it's unrelated to extern-block redeclaration
+// count). Bindgen generates several opaque anonymous-struct types (e.g.
+// the empty `thread__bindgen_ty_1`) that appear as `*mut spinlock_t` /
+// `*mut rwsem_t` arguments. Our hand-rolled `mod ffi`/`mod raw` blocks
+// redeclare those same C functions; rustc then warns that the empty
+// struct is not FFI-safe. The C side only ever sees opaque pointers, so
+// the warning is noise here. Fixing this at the root (real bindgen
+// layouts for every lock-primitive type family, replacing the opaque
+// stand-ins) is explicitly P3-3's charter ("bindgen-native types for
+// ~40 kernel-internal type families"), not this wave's.
 #![allow(improper_ctypes)]
-
 /// Crate-level "blanket unsafe" shim: `u! { EXPR }` expands to
 /// `unsafe { EXPR }`.
 ///

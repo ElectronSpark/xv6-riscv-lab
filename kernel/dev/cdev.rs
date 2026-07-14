@@ -116,8 +116,9 @@ fn cdev_opts_validate(ops: *const cdev_ops_t) -> bool {
 
 /// Get a character device by its major and minor numbers. Returns the
 /// cdev on success, or `ERR_PTR` on error.
-#[no_mangle]
-pub extern "C" fn cdev_get(major: c_int, minor: c_int) -> *mut cdev_t {
+// P3-1D mesh sweep: callers (`vfs/file.rs`) now import this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn cdev_get(major: c_int, minor: c_int) -> *mut cdev_t {
     let device = device_get(major, minor);
     if is_err(device) {
         return device as *mut cdev_t; // propagate error from device_get
@@ -131,16 +132,21 @@ pub extern "C" fn cdev_get(major: c_int, minor: c_int) -> *mut cdev_t {
     device as *mut cdev_t
 }
 
-#[no_mangle]
-pub extern "C" fn cdev_dup(dev: *mut cdev_t) -> c_int {
+// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+// grep) -- demoted; `#[allow(dead_code)]` documents the gap rather than
+// deleting still-plausible public API, matching this crate's established
+// precedent (e.g. `ipi.rs`'s `get_cpu_active_mask`).
+#[allow(dead_code)]
+pub(crate) extern "C" fn cdev_dup(dev: *mut cdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
     device_dup(dev as *mut device_t)
 }
 
-#[no_mangle]
-pub extern "C" fn cdev_put(dev: *mut cdev_t) -> c_int {
+// P3-1D mesh sweep: callers (`vfs/file.rs`) now import this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn cdev_put(dev: *mut cdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
@@ -148,8 +154,10 @@ pub extern "C" fn cdev_put(dev: *mut cdev_t) -> c_int {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn cdev_register(dev: *mut cdev_t) -> c_int {
+// P3-1D mesh sweep: callers (`console.rs`, `tty/tty_dev.rs`, `tty/ptmx.rs`,
+// `dev/nullrand.rs`) now import this via crate-path `use` instead of an
+// `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn cdev_register(dev: *mut cdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
@@ -168,16 +176,18 @@ pub extern "C" fn cdev_register(dev: *mut cdev_t) -> c_int {
     device_register(device)
 }
 
-#[no_mangle]
-pub extern "C" fn cdev_unregister(dev: *mut cdev_t) -> c_int {
+// P3-1D mesh sweep: callers (`tty/ptmx.rs`, `tty/pty.rs`) now import this
+// via crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn cdev_unregister(dev: *mut cdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
     device_unregister(dev as *mut device_t)
 }
 
-#[no_mangle]
-pub extern "C" fn cdev_read(cdev: *mut cdev_t, user: bool_, buf: *mut c_void, count: usize) -> c_int {
+// P3-1D mesh sweep: caller (`vfs/file.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn cdev_read(cdev: *mut cdev_t, user: bool_, buf: *mut c_void, count: usize) -> c_int {
     if cdev.is_null() || buf.is_null() || count == 0 {
         return neg(EINVAL); // invalid arguments
     }
@@ -195,8 +205,9 @@ pub extern "C" fn cdev_read(cdev: *mut cdev_t, user: bool_, buf: *mut c_void, co
     }
 }
 
-#[no_mangle]
-pub extern "C" fn cdev_write(
+// P3-1D mesh sweep: caller (`vfs/file.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn cdev_write(
     cdev: *mut cdev_t,
     user: bool_,
     buf: *const c_void,

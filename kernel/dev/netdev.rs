@@ -62,8 +62,9 @@ static mut NETDEV_LIST: *mut netdev = ptr::null_mut();
 static mut NETDEV_COUNT: c_int = 0;
 
 /// `void netdev_init(void)`.
-#[no_mangle]
-pub extern "C" fn netdev_init() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn netdev_init() {
     // SAFETY: called once, from `start_kernel.c`'s single-hart early
     // init, before any registration can race it (see module doc).
     unsafe {
@@ -75,8 +76,10 @@ pub extern "C" fn netdev_init() {
 /// `int netdev_register(struct netdev *dev)`. Registers a network
 /// device; the first registered device becomes the default transmit
 /// interface (via [`netdev_get_default`]'s tail-walk).
-#[no_mangle]
-pub extern "C" fn netdev_register(dev: *mut netdev) -> c_int {
+// P3-1D mesh sweep: callers (`e1000.rs`, `net.rs`, `dev/x1_emac.rs`) now
+// import this via crate-path `use` instead of an `extern` redeclaration --
+// demoted.
+pub(crate) extern "C" fn netdev_register(dev: *mut netdev) -> c_int {
     if dev.is_null() {
         return -1;
     }
@@ -121,8 +124,9 @@ pub extern "C" fn netdev_register(dev: *mut netdev) -> c_int {
 /// `struct netdev *netdev_get_default(void)` -- returns the
 /// first-registered device (walks to the tail of the prepend-ordered
 /// list, matching the C original exactly).
-#[no_mangle]
-pub extern "C" fn netdev_get_default() -> *mut netdev {
+// P3-1D mesh sweep: caller (`net.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn netdev_get_default() -> *mut netdev {
     // SAFETY: single-threaded boot-time list access (see module doc);
     // the list is a plain NULL-terminated singly-linked chain of
     // caller-owned, never-freed nodes.
@@ -138,8 +142,11 @@ pub extern "C" fn netdev_get_default() -> *mut netdev {
 }
 
 /// `struct netdev *netdev_get_by_index(int index)`.
-#[no_mangle]
-pub extern "C" fn netdev_get_by_index(index: c_int) -> *mut netdev {
+// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+// grep, matches the pre-existing RUST_FORCE_UNDEFINED comment) --
+// demoted; `#[allow(dead_code)]` documents the gap.
+#[allow(dead_code)]
+pub(crate) extern "C" fn netdev_get_by_index(index: c_int) -> *mut netdev {
     // SAFETY: see `netdev_get_default`.
     unsafe {
         let mut d = NETDEV_LIST;
@@ -154,8 +161,11 @@ pub extern "C" fn netdev_get_by_index(index: c_int) -> *mut netdev {
 }
 
 /// `struct netdev *netdev_get_by_name(const char *name)`.
-#[no_mangle]
-pub extern "C" fn netdev_get_by_name(name: *const c_char) -> *mut netdev {
+// P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
+// `#[allow(dead_code)]` documents the gap, same precedent as
+// `netdev_get_by_index` above.
+#[allow(dead_code)]
+pub(crate) extern "C" fn netdev_get_by_name(name: *const c_char) -> *mut netdev {
     if name.is_null() {
         return ptr::null_mut();
     }
@@ -179,8 +189,9 @@ pub extern "C" fn netdev_get_by_name(name: *const c_char) -> *mut netdev {
 /// `void netdev_set_link(struct netdev *dev, int link_up)` -- updates
 /// link state and notifies the registered link-change callback (if any)
 /// on a genuine transition.
-#[no_mangle]
-pub extern "C" fn netdev_set_link(dev: *mut netdev, link_up: c_int) {
+// P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn netdev_set_link(dev: *mut netdev, link_up: c_int) {
     if dev.is_null() {
         return;
     }
@@ -199,8 +210,11 @@ pub extern "C" fn netdev_set_link(dev: *mut netdev, link_up: c_int) {
 
 /// `void netdev_set_link_callback(struct netdev *dev, netdev_link_cb_t
 /// cb)`.
-#[no_mangle]
-pub extern "C" fn netdev_set_link_callback(dev: *mut netdev, cb: netdev_link_cb_t) {
+// P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
+// `#[allow(dead_code)]` documents the gap, same precedent as
+// `netdev_get_by_index` above.
+#[allow(dead_code)]
+pub(crate) extern "C" fn netdev_set_link_callback(dev: *mut netdev, cb: netdev_link_cb_t) {
     if dev.is_null() {
         return;
     }

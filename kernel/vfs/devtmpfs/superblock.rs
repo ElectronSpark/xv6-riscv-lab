@@ -153,12 +153,11 @@ unsafe extern "C" {
     safe fn spin_lock(lk: *mut spinlock_t);
     safe fn spin_unlock(lk: *mut spinlock_t);
 
-    // dev/dev.c (still C, Wave 21) -- device-table iteration.
-    safe fn dev_for_each_device(
-        cb: extern "C" fn(*mut device_t, *mut c_void) -> c_int,
-        ctx: *mut c_void,
-    ) -> c_int;
 }
+// P3-1D mesh sweep: dev/dev.rs is in scope for this wave; signature is
+// identical, so this becomes a plain crate-path import instead of an
+// `extern "C"` redeclaration.
+use crate::dev::dev::dev_for_each_device;
 
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`) with its
 /// format arguments dropped -- see `vfs/fs.rs`'s identical macro/rationale.

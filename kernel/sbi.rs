@@ -31,6 +31,15 @@
 //! return), so it's a private Rust struct here with no bindgen
 //! involvement and no `wrapper.h` changes needed.
 
+// P3-1D re-audit: tried removing this; surfaces ~55 "never used"
+// findings, the overwhelming majority of this file's SBI extension
+// wrapper API (timer/rfence/HSM/SRST/etc.) -- a deliberately broad
+// library surface matching `kernel/inc/sbi.h`'s original API-completeness
+// intent (see the module doc), not a mesh-sweep byproduct. Keeping the
+// allow rather than deleting dozens of functions that faithfully mirror
+// the C header's public contract and may gain callers as porting
+// continues (P3-4's virtio/e1000/pci DMA work, a future SRST-based
+// shutdown syscall, ...).
 #![allow(dead_code)]
 
 use core::ffi::{c_char, c_int};
@@ -297,8 +306,9 @@ pub(crate) fn sbi_set_timer(stime_value: u64) {
 // IPI extension.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn sbi_send_ipi(hart_mask: u64, hart_mask_base: u64) -> i64 {
+// P3-1D mesh sweep: caller (`ipi.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn sbi_send_ipi(hart_mask: u64, hart_mask_base: u64) -> i64 {
     sbi_ecall(SBI_EXT_IPI, SBI_IPI_SEND_IPI, hart_mask, hart_mask_base, 0, 0, 0, 0).errno()
 }
 
@@ -454,8 +464,9 @@ fn required_extension_missing(idx: usize) -> ! {
     __panic_end();
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_probe_extensions() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn sbi_probe_extensions() {
     printf(c"SBI extensions:\n".as_ptr());
     for i in 0..SBI_EXT_ID_COUNT {
         let result = sbi_probe_extension(SBI_EXT_IDS[i]);
@@ -548,8 +559,9 @@ pub(crate) fn sbi_print_version() {
     );
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_start_secondary_harts(start_addr: u64) {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn sbi_start_secondary_harts(start_addr: u64) {
     let boot_hart = machine::cpuid();
 
     printf(c"Starting secondary harts...\n".as_ptr());

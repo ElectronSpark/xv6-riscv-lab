@@ -2204,9 +2204,10 @@ use crate::bindings::{pgroup as Pgroup, session as Session, thread_group as Tgro
 // updated to use the `bool` result directly instead of `!= 0`.
 use crate::proc::thread_is_group_leader;
 
-unsafe extern "C" {
-    pub fn print_thread_backtrace(ctx: *mut crate::bindings::context, kstack: u64, kstack_order: c_int);
-}
+// P3-1D mesh sweep: backtrace.rs is in scope for this wave; signature is
+// identical, so this becomes a plain crate-path import instead of an
+// `extern "C"` redeclaration.
+use crate::backtrace::print_thread_backtrace;
 
 // Variadic printf alias for ergonomics (bindgen already exports it; we
 // re-shape the first arg as a *const c_char for use with `c"..."` literals).

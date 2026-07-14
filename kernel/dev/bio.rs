@@ -136,8 +136,10 @@ extern "C" fn bio_release_kobj_cb(obj: *mut kobject) {
 
 /// Allocate a `bio` with `vec_length` (uninitialised) segments. Returns
 /// an `ERR_PTR` on invalid arguments or allocation failure.
-#[no_mangle]
-pub extern "C" fn bio_alloc(
+// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`)
+// now import this via crate-path `use` instead of an `extern`
+// redeclaration -- demoted.
+pub(crate) extern "C" fn bio_alloc(
     bdev: *mut blkdev_t,
     vec_length: i16,
     rw: bool_,
@@ -176,8 +178,10 @@ pub extern "C" fn bio_alloc(
 /// Install a data segment (`page`/`len`/`offset`) at index `idx` of a
 /// not-yet-submitted `bio`. Returns `0` on success, a negative errno
 /// otherwise.
-#[no_mangle]
-pub extern "C" fn bio_add_seg(bio_ptr: *mut bio, page: *mut page_t, idx: i16, len: u16, offset: u16) -> c_int {
+// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`)
+// now import this via crate-path `use` instead of an `extern`
+// redeclaration -- demoted.
+pub(crate) extern "C" fn bio_add_seg(bio_ptr: *mut bio, page: *mut page_t, idx: i16, len: u16, offset: u16) -> c_int {
     if bio_ptr.is_null() || page.is_null() || len == 0 {
         return neg(crate::bindings::EINVAL);
     }
@@ -211,8 +215,12 @@ pub extern "C" fn bio_add_seg(bio_ptr: *mut bio, page: *mut page_t, idx: i16, le
 }
 
 /// Increment a `bio`'s reference count.
-#[no_mangle]
-pub extern "C" fn bio_dup(bio_ptr: *mut bio) -> c_int {
+// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+// grep, matches the pre-existing RUST_FORCE_UNDEFINED comment) --
+// demoted; `#[allow(dead_code)]` documents the gap, same precedent as
+// `dev/cdev.rs`'s `cdev_dup`.
+#[allow(dead_code)]
+pub(crate) extern "C" fn bio_dup(bio_ptr: *mut bio) -> c_int {
     if bio_ptr.is_null() {
         return neg(crate::bindings::EINVAL);
     }
@@ -224,8 +232,10 @@ pub extern "C" fn bio_dup(bio_ptr: *mut bio) -> c_int {
 
 /// Decrement a `bio`'s reference count, freeing it via
 /// [`bio_release_kobj_cb`] once it reaches zero.
-#[no_mangle]
-pub extern "C" fn bio_release(bio_ptr: *mut bio) -> c_int {
+// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`)
+// now import this via crate-path `use` instead of an `extern`
+// redeclaration -- demoted.
+pub(crate) extern "C" fn bio_release(bio_ptr: *mut bio) -> c_int {
     if bio_ptr.is_null() {
         return neg(crate::bindings::EINVAL);
     }
@@ -236,8 +246,10 @@ pub extern "C" fn bio_release(bio_ptr: *mut bio) -> c_int {
 
 /// Validate a `bio`'s fields against its target block device before
 /// submission. Returns `0` if valid, `-EINVAL` otherwise.
-#[no_mangle]
-pub extern "C" fn bio_validate(bio_ptr: *mut bio, blkdev: *mut blkdev_t) -> c_int {
+// P3-1D mesh sweep: callers (`dev/blkdev.rs`, `dev/x1_sdhci.rs`) now
+// import this via crate-path `use` instead of an `extern` redeclaration --
+// demoted.
+pub(crate) extern "C" fn bio_validate(bio_ptr: *mut bio, blkdev: *mut blkdev_t) -> c_int {
     if bio_ptr.is_null() || blkdev.is_null() {
         return neg(crate::bindings::EINVAL);
     }

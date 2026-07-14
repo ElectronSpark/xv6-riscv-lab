@@ -136,27 +136,25 @@ unsafe extern "C" {
     safe fn kalloc() -> *mut c_void;
     safe fn kfree(pa: *mut c_void);
 
-    // dev/cdev.c, dev/blkdev.c, dev/dev.c (still C, Wave 21).
-    safe fn cdev_get(major: c_int, minor: c_int) -> *mut cdev_t;
-    safe fn cdev_put(dev: *mut cdev_t) -> c_int;
-    safe fn cdev_read(cdev: *mut cdev_t, user: c_int, buf: *mut c_void, count: usize) -> c_int;
-    safe fn cdev_write(
-        cdev: *mut cdev_t,
-        user: c_int,
-        buf: *const c_void,
-        count: usize,
-    ) -> c_int;
-    safe fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t;
-    safe fn blkdev_put(dev: *mut blkdev_t) -> c_int;
-    safe fn dev_ioctl(dev: *mut device_t, cmd: u64, arg: *mut c_void) -> c_int;
-
     // sysnet.c (still C, Wave 28) — `vfs_sockalloc`'s socket table.
-    // `sock_lock`/`sockets` are plain (non-static) C globals, exactly as
-    // the C original externs them.
-    static mut sock_lock: spinlock_t;
+    // `sockets` is a plain (non-static) C global, exactly as the C
+    // original externs it. Kept `#[no_mangle]` in `sysnet.rs` (P3-1D mesh
+    // sweep: widely-shared data anchor, see that file's own comment) --
+    // this extern stays valid.
     static mut sockets: *mut sock;
-    safe fn mbufq_init(q: *mut mbufq);
 }
+// P3-1D mesh sweep: dev/cdev.rs, dev/blkdev.rs, dev/dev.rs, net.rs, and
+// sysnet.rs are all in scope for this wave; these become plain crate-path
+// imports instead of `extern "C"` redeclarations. `cdev_read`/`cdev_write`
+// take a real `bool_` (`c_uint`) `user` parameter (not `c_int`, this
+// file's former locally-declared view) — the two call sites below now
+// cast, matching the `ops.read`/`ops.write` custom-fn call sites right
+// next to them, which already did `user as bool_`.
+use crate::dev::cdev::{cdev_get, cdev_put, cdev_read, cdev_write};
+use crate::dev::blkdev::{blkdev_get, blkdev_put};
+use crate::dev::dev::dev_ioctl;
+use crate::net::mbufq_init;
+use crate::sysnet::sock_lock;
 
 // P3-1C mesh sweep: vfs/{inode,fs,fdtable,pipe}.rs are in scope for this
 // wave; converted from `extern "C"` redeclarations to plain crate-path
@@ -811,7 +809,7 @@ pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: 
         } else {
             // SAFETY: non-null `file`.
             let cdev = unsafe { (*file).__bindgen_anon_1.cdev };
-            cdev_read(cdev, user, buf, n) as isize
+            cdev_read(cdev, user as bool_, buf, n) as isize
         };
         return ret;
     }
@@ -956,7 +954,7 @@ pub(crate) extern "C" fn vfs_filewrite(
         } else {
             // SAFETY: non-null `file`.
             let cdev = unsafe { (*file).__bindgen_anon_1.cdev };
-            cdev_write(cdev, user, buf, n) as isize
+            cdev_write(cdev, user as bool_, buf, n) as isize
         };
         return ret;
     }
@@ -1192,7 +1190,11 @@ pub(crate) extern "C" fn vfs_sockalloc(
         (*si).lport = lport;
         (*si).rport = rport;
         spin_init(ptr::addr_of_mut!((*si).lock), c"sock".as_ptr() as *mut c_char);
-        mbufq_init(ptr::addr_of_mut!((*si).rxq));
+        // `mbufq_init` (`net.rs`) takes the real `crate::net::mbufq`; this
+        // file's `mbufq` is a byte-layout-identical local mirror (see this
+        // struct's own doc comment) -- pointer cast, same precedent as the
+        // `sock`/`crate::bindings::sock` handoff a few lines below.
+        mbufq_init(ptr::addr_of_mut!((*si).rxq) as *mut crate::net::mbufq);
     }
 
     // SAFETY: non-null `f`.

@@ -62,12 +62,12 @@ unsafe extern "C" {
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-    // dev/netdev.rs (Phase 2 Wave 24).
-    safe fn netdev_get_default() -> *mut crate::bindings::netdev;
-
-    // sysnet.rs (this wave, same crate).
-    fn sockrecvudp(m: *mut mbuf, raddr: u32, lport: u16, rport: u16);
 }
+// P3-1D mesh sweep: dev/netdev.rs/sysnet.rs are in scope for this wave;
+// signatures are identical, so these become plain crate-path imports
+// instead of `extern "C"` redeclarations.
+use crate::dev::netdev::netdev_get_default;
+use crate::sysnet::sockrecvudp;
 
 // ===========================================================================
 // Constants -- redeclared locally from `kernel/inc/dev/net.h`.
@@ -181,8 +181,8 @@ fn panic_fixed(msg: &core::ffi::CStr) -> ! {
 ///
 /// # Safety
 /// `m` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn mbufpull(m: *mut mbuf, len: c_uint) -> *mut c_char {
+// P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
+pub(crate) unsafe extern "C" fn mbufpull(m: *mut mbuf, len: c_uint) -> *mut c_char {
     // SAFETY: caller contract.
     unsafe {
         let tmp = (*m).head;
@@ -199,8 +199,8 @@ pub unsafe extern "C" fn mbufpull(m: *mut mbuf, len: c_uint) -> *mut c_char {
 ///
 /// # Safety
 /// `m` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn mbufpush(m: *mut mbuf, len: c_uint) -> *mut c_char {
+// P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
+pub(crate) unsafe extern "C" fn mbufpush(m: *mut mbuf, len: c_uint) -> *mut c_char {
     // SAFETY: caller contract.
     unsafe {
         (*m).head = (*m).head.sub(len as usize);
@@ -216,8 +216,8 @@ pub unsafe extern "C" fn mbufpush(m: *mut mbuf, len: c_uint) -> *mut c_char {
 ///
 /// # Safety
 /// `m` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn mbufput(m: *mut mbuf, len: c_uint) -> *mut c_char {
+// P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
+pub(crate) unsafe extern "C" fn mbufput(m: *mut mbuf, len: c_uint) -> *mut c_char {
     // SAFETY: caller contract.
     unsafe {
         let tmp = (*m).head.add((*m).len as usize);
@@ -234,8 +234,8 @@ pub unsafe extern "C" fn mbufput(m: *mut mbuf, len: c_uint) -> *mut c_char {
 ///
 /// # Safety
 /// `m` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn mbuftrim(m: *mut mbuf, len: c_uint) -> *mut c_char {
+// P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
+pub(crate) unsafe extern "C" fn mbuftrim(m: *mut mbuf, len: c_uint) -> *mut c_char {
     // SAFETY: caller contract.
     unsafe {
         if len > (*m).len {
@@ -248,8 +248,10 @@ pub unsafe extern "C" fn mbuftrim(m: *mut mbuf, len: c_uint) -> *mut c_char {
 
 /// Allocates a packet buffer. Returns null on allocation failure or if
 /// `headroom` exceeds the buffer size.
-#[no_mangle]
-pub extern "C" fn mbufalloc(headroom: c_uint) -> *mut mbuf {
+// P3-1D mesh sweep: callers (`e1000.rs`, `sysnet.rs`, `dev/x1_emac.rs`)
+// now import this via crate-path `use` instead of an `extern`
+// redeclaration -- demoted.
+pub(crate) extern "C" fn mbufalloc(headroom: c_uint) -> *mut mbuf {
     if headroom > MBUF_SIZE {
         return ptr::null_mut();
     }
@@ -275,8 +277,10 @@ pub extern "C" fn mbufalloc(headroom: c_uint) -> *mut mbuf {
 /// # Safety
 /// `m` must be a live `mbuf` previously returned by [`mbufalloc`], not
 /// freed since.
-#[no_mangle]
-pub unsafe extern "C" fn mbuffree(m: *mut mbuf) {
+// P3-1D mesh sweep: callers (`e1000.rs`, `sysnet.rs`, `dev/x1_emac.rs`)
+// now import this via crate-path `use` instead of an `extern`
+// redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn mbuffree(m: *mut mbuf) {
     // SAFETY: caller contract.
     unsafe { kfree(m as *mut c_void) };
 }
@@ -295,8 +299,9 @@ pub struct mbufq {
 ///
 /// # Safety
 /// `q` must be live; `m` must be a live, exclusively-owned `mbuf`.
-#[no_mangle]
-pub unsafe extern "C" fn mbufq_pushtail(q: *mut mbufq, m: *mut mbuf) {
+// P3-1D mesh sweep: caller (`sysnet.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn mbufq_pushtail(q: *mut mbufq, m: *mut mbuf) {
     // SAFETY: caller contract.
     unsafe {
         (*m).next = ptr::null_mut();
@@ -314,8 +319,9 @@ pub unsafe extern "C" fn mbufq_pushtail(q: *mut mbufq, m: *mut mbuf) {
 ///
 /// # Safety
 /// `q` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn mbufq_pophead(q: *mut mbufq) -> *mut mbuf {
+// P3-1D mesh sweep: caller (`sysnet.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn mbufq_pophead(q: *mut mbufq) -> *mut mbuf {
     // SAFETY: caller contract.
     unsafe {
         let head = (*q).head;
@@ -331,8 +337,9 @@ pub unsafe extern "C" fn mbufq_pophead(q: *mut mbufq) -> *mut mbuf {
 ///
 /// # Safety
 /// `q` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn mbufq_empty(q: *mut mbufq) -> c_int {
+// P3-1D mesh sweep: caller (`sysnet.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn mbufq_empty(q: *mut mbufq) -> c_int {
     // SAFETY: caller contract.
     (unsafe { (*q).head }.is_null()) as c_int
 }
@@ -341,8 +348,9 @@ pub unsafe extern "C" fn mbufq_empty(q: *mut mbufq) -> c_int {
 ///
 /// # Safety
 /// `q` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn mbufq_init(q: *mut mbufq) {
+// P3-1D mesh sweep: callers (`vfs/file.rs`, `sysnet.rs`) now import this
+// via crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn mbufq_init(q: *mut mbufq) {
     // SAFETY: caller contract.
     unsafe { (*q).head = ptr::null_mut() };
 }
@@ -455,8 +463,9 @@ fn net_tx_ip(m: *mut mbuf, proto: u8, dip: u32) {
 }
 
 /// Sends a UDP packet.
-#[no_mangle]
-pub extern "C" fn net_tx_udp(m: *mut mbuf, dip: u32, sport: u16, dport: u16) {
+// P3-1D mesh sweep: caller (`sysnet.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn net_tx_udp(m: *mut mbuf, dip: u32, sport: u16, dport: u16) {
     // SAFETY: `m` live; `mbufpush` always succeeds for this fixed,
     // in-bounds header size.
     let udphdr = unsafe { mbufpush(m, core::mem::size_of::<Udp>() as c_uint) as *mut Udp };
@@ -635,8 +644,10 @@ fn net_rx_ip(m: *mut mbuf) {
 
 /// Called by the e1000/x1_emac driver's interrupt handler to deliver a
 /// packet to the networking stack.
-#[no_mangle]
-pub extern "C" fn net_rx(m: *mut mbuf) {
+// P3-1D mesh sweep: callers (`e1000.rs`, `dev/x1_emac.rs`) now import
+// this via crate-path `use` instead of an `extern` redeclaration --
+// demoted.
+pub(crate) extern "C" fn net_rx(m: *mut mbuf) {
     // SAFETY: `m` live (caller contract).
     let ethhdr = unsafe { mbufpull(m, core::mem::size_of::<Eth>() as c_uint) as *mut Eth };
     if ethhdr.is_null() {

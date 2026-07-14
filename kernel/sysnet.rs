@@ -67,15 +67,11 @@ unsafe extern "C" {
     safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;
     safe fn vm_copyin(vm_ptr: *mut vm, dst: *mut c_void, srcva: u64, len: u64) -> c_int;
 
-    // net.rs (this wave, same crate).
-    fn mbufalloc(headroom: core::ffi::c_uint) -> *mut mbuf;
-    fn mbuffree(m: *mut mbuf);
-    fn mbufput(m: *mut mbuf, len: core::ffi::c_uint) -> *mut core::ffi::c_char;
-    fn mbufq_empty(q: *mut mbufq) -> c_int;
-    fn mbufq_pophead(q: *mut mbufq) -> *mut mbuf;
-    fn mbufq_pushtail(q: *mut mbufq, m: *mut mbuf);
-    fn net_tx_udp(m: *mut mbuf, dip: u32, sport: u16, dport: u16);
 }
+// P3-1D mesh sweep: net.rs is in scope for this wave; signatures are
+// identical, so these become plain crate-path imports instead of `extern
+// "C"` redeclarations.
+use crate::net::{mbufalloc, mbuffree, mbufput, mbufq_empty, mbufq_pophead, mbufq_pushtail, net_tx_udp};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -108,22 +104,26 @@ pub struct sock {
 /// `spinlock_t sock_lock = SPINLOCK_INITIALIZED("socktbl");` --
 /// compile-time initialised (matches `kernel/uart.rs`'s established
 /// convention for `SPINLOCK_INITIALIZED` statics). Keeps the exact C
-/// symbol name/type: `kernel/vfs/file.rs`'s `vfs_sockalloc` externs
-/// this by name.
-#[no_mangle]
-pub static mut sock_lock: spinlock_t =
+/// symbol name/type.
+// P3-1D mesh sweep: caller (`vfs/file.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) static mut sock_lock: spinlock_t =
     spinlock_t { locked: 0, name: c"socktbl".as_ptr() as *mut core::ffi::c_char, cpu: ptr::null_mut() };
 
 /// `struct sock *sockets;` -- head of the (unsorted) list of live
 /// sockets, protected by [`sock_lock`]. Keeps the exact C symbol name/
-/// type: `kernel/vfs/file.rs`'s `vfs_sockalloc` externs this by name.
+/// type. Kept `#[no_mangle]` -- read via `extern` by 3 out-of-scope
+/// files (`vfs/file.rs`, `vfs/vfs_syscall.rs`, `vfs/tmpfs/inode.rs`);
+/// same "widely-shared data anchor, no benefit purely for mesh-cosmetic
+/// reasons" judgment call `ipi.rs`'s `cpus` documents.
 #[no_mangle]
 pub static mut sockets: *mut sock = ptr::null_mut();
 
 /// `void sockinit(void) {}` -- empty stub, ported as such (matches the
 /// plan's explicit instruction for this file).
-#[no_mangle]
-pub extern "C" fn sockinit() {}
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn sockinit() {}
 
 // Legacy `sockalloc` removed -- VFS uses `vfs_sockalloc` in
 // `kernel/vfs/file.rs` instead.
@@ -135,8 +135,10 @@ pub extern "C" fn sockinit() {}
 /// # Safety
 /// `si` must be a live, exclusively-owned `sock` allocated via
 /// `kalloc()` (matches `vfs_sockalloc`'s allocation).
-#[no_mangle]
-pub unsafe extern "C" fn sockclose(si: *mut sock) {
+// P3-1D mesh sweep: no live caller anywhere in the tree today (see
+// module doc) -- demoted; `#[allow(dead_code)]` documents the gap.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn sockclose(si: *mut sock) {
     // Remove from the list of sockets.
     spin_lock(unsafe { &raw mut sock_lock });
     // SAFETY: `sock_lock` held; `sockets`/`(*node).next` form a plain
@@ -172,8 +174,10 @@ pub unsafe extern "C" fn sockclose(si: *mut sock) {
 ///
 /// # Safety
 /// `si` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn sockread(si: *mut sock, addr: u64, n: c_int) -> c_int {
+// P3-1D mesh sweep: no live caller anywhere in the tree today (see
+// module doc) -- demoted; `#[allow(dead_code)]` documents the gap.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn sockread(si: *mut sock, addr: u64, n: c_int) -> c_int {
     let pr = xv6_current_thread();
 
     spin_lock(unsafe { &raw mut (*si).lock });
@@ -218,12 +222,13 @@ pub unsafe extern "C" fn sockread(si: *mut sock, addr: u64, n: c_int) -> c_int {
 ///
 /// # Safety
 /// `si` must be live.
-#[no_mangle]
-pub unsafe extern "C" fn sockwrite(si: *mut sock, addr: u64, n: c_int) -> c_int {
+// P3-1D mesh sweep: no live caller anywhere in the tree today (see
+// module doc) -- demoted; `#[allow(dead_code)]` documents the gap.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn sockwrite(si: *mut sock, addr: u64, n: c_int) -> c_int {
     let pr = xv6_current_thread();
 
-    // SAFETY: no preconditions.
-    let m = unsafe { mbufalloc(MBUF_DEFAULT_HEADROOM) };
+    let m = mbufalloc(MBUF_DEFAULT_HEADROOM);
     if m.is_null() {
         return neg(ENOMEM);
     }
@@ -247,8 +252,9 @@ pub unsafe extern "C" fn sockwrite(si: *mut sock, addr: u64, n: c_int) -> c_int 
 /// # Safety
 /// `m` must be live, exclusively owned (ownership transferred to this
 /// function either way -- delivered or freed).
-#[no_mangle]
-pub unsafe extern "C" fn sockrecvudp(m: *mut mbuf, raddr: u32, lport: u16, rport: u16) {
+// P3-1D mesh sweep: caller (`net.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn sockrecvudp(m: *mut mbuf, raddr: u32, lport: u16, rport: u16) {
     spin_lock(unsafe { &raw mut sock_lock });
     // SAFETY: `sock_lock` held; `sockets` is a plain singly-linked list.
     let mut si = unsafe { sockets };

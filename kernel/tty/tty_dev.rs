@@ -27,8 +27,6 @@ use crate::bindings::{bool_, cdev_ops_t, cdev_t, mode_t, session, tty};
 // ===========================================================================
 
 unsafe extern "C" {
-    pub safe fn cdev_register(dev: *mut cdev_t) -> c_int;
-
     pub safe fn pid_wlock();
     pub safe fn pid_wunlock();
 
@@ -36,6 +34,10 @@ unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }
+// P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signature is
+// identical, so this becomes a plain crate-path import instead of an
+// `extern "C"` redeclaration.
+use crate::dev::cdev::cdev_register;
 
 // P3-1C mesh sweep: tty/{tty,session}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items

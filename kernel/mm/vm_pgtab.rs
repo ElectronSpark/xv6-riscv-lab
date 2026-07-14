@@ -81,6 +81,20 @@ mod ffi {
         unsafe { crate::uart::__uart0_mmio_base }
     }
 
+    // P3-1D mesh sweep: `pci.rs`/`e1000.rs` are in scope for this wave;
+    // same "`static mut` -> thin accessor fn" treatment as
+    // `__uart0_mmio_base` above (both demoted from `#[no_mangle]` in the
+    // same wave, this file being their only other reader).
+    pub fn __pcie_ecam_mmio_base() -> u64 {
+        // SAFETY: read-only after boot-time FDT probe, which completes
+        // before this function's only caller (`kvmmake`, boot-hart only).
+        unsafe { crate::pci::__pcie_ecam_mmio_base }
+    }
+    pub fn __e1000_pci_mmio_base() -> u64 {
+        // SAFETY: see `__pcie_ecam_mmio_base` above.
+        unsafe { crate::e1000::__e1000_pci_mmio_base }
+    }
+
     unsafe extern "C" {
         // memory / pages
 
@@ -96,8 +110,6 @@ mod ffi {
         pub safe static __physical_memory_end: u64;
         pub safe static __goldfish_rtc_mmio_base: u64;
         pub safe static __plic_mmio_base: u64;
-        pub safe static __pcie_ecam_mmio_base: u64;
-        pub safe static __e1000_pci_mmio_base: u64;
 
         // Kernel image / per-cpu / trampoline symbols.
         pub safe static _entry: u8;
@@ -1075,7 +1087,7 @@ fn kvmmake() -> *mut u64 {
     }
 
     // PCIe regions.
-    if ffi::platform.has_pcie != 0 && ffi::__pcie_ecam_mmio_base != 0 {
+    if ffi::platform.has_pcie != 0 && ffi::__pcie_ecam_mmio_base() != 0 {
         for i in 0..(ffi::platform.pcie_reg_count as usize) {
             let reg = &ffi::platform.pcie_reg[i];
             let base = reg.base;
@@ -1088,9 +1100,9 @@ fn kvmmake() -> *mut u64 {
                 (PTE_R | PTE_W) as c_int,
             );
         }
-        if ffi::platform.has_virtio != 0 && ffi::__e1000_pci_mmio_base != 0 {
+        if ffi::platform.has_virtio != 0 && ffi::__e1000_pci_mmio_base() != 0 {
             kvmmap(
-                kpgtbl, ffi::__e1000_pci_mmio_base, ffi::__e1000_pci_mmio_base,
+                kpgtbl, ffi::__e1000_pci_mmio_base(), ffi::__e1000_pci_mmio_base(),
                 0x20000, (PTE_R | PTE_W) as c_int,
             );
         }

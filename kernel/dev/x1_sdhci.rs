@@ -125,11 +125,15 @@ unsafe extern "C" {
     // lock/completion.rs.
     safe fn completion_reinit(c: *mut crate::bindings::completion_t);
     safe fn complete_all(c: *mut crate::bindings::completion_t);
-    // dev/blkdev.rs (Phase 2 Wave 21).
-    fn blkdev_register(dev: *mut blkdev_t) -> c_int;
-    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config.
+    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
+    // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
+    // anchor, see that file's own comment) -- this extern stays valid.
     static mut platform: platform_info;
 }
+// P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
+// identical, so this becomes a plain crate-path import instead of an
+// `extern "C"` redeclaration.
+use super::blkdev::blkdev_register;
 
 // ===========================================================================
 // Register/bit constants -- redeclared locally from `kernel/inc/dev/
@@ -2143,8 +2147,9 @@ extern "C" fn x1_sdhci_kthread(_arg1: u64, _arg2: u64) {
 /// card enumeration run in a dedicated kernel thread so that:
 /// 1. The scheduler is already running -> `sleep_ms()` works.
 /// 2. Boot proceeds without blocking on slow card init.
-#[no_mangle]
-pub extern "C" fn x1_sdhci_init() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn x1_sdhci_init() {
     // SAFETY: `platform` boot-time-populated by `fdt.rs` before
     // `start_kernel.c` calls this (documented boot-order contract).
     if !(unsafe { platform.has_sdhci } != 0) {

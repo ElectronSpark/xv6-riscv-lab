@@ -36,6 +36,10 @@ use crate::bindings::{cdev_ops_t, cdev_t, mode_t, slab_cache_t, spinlock_t, tty,
 use crate::sync::KSpinlock;
 
 use super::tty::load_acquire_u32;
+// P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signatures are
+// identical, so these become plain crate-path imports instead of `extern
+// "C"` redeclarations.
+use crate::dev::cdev::{cdev_register, cdev_unregister};
 
 // ===========================================================================
 // Externs.
@@ -50,9 +54,6 @@ unsafe extern "C" {
         obj_size: usize,
         flags: u64,
     ) -> c_int;
-
-    pub safe fn cdev_register(dev: *mut cdev_t) -> c_int;
-    pub safe fn cdev_unregister(dev: *mut cdev_t) -> c_int;
 
     pub safe fn printf(fmt: *const c_char, ...) -> c_int;
     pub safe fn __panic_start();

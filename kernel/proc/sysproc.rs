@@ -13,6 +13,11 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 
 use crate::bindings;
+// P3-1D mesh sweep: dev/nullrand.rs is in scope for this wave; real
+// signature is `(buf: *mut u8, count: usize)`, not this file's former
+// `len: c_int` mirror (ABI-truth drift -- `chunk` is bounds-checked
+// non-negative at every call site, so `chunk as usize` is exact).
+use crate::dev::nullrand::random_fill_bytes;
 
 // ---------------------------------------------------------------------------
 // Constants mirrored from C headers.
@@ -104,9 +109,6 @@ unsafe extern "C" {
     // Strings.
     pub safe fn safestrcpy(s: *mut c_char, t: *const c_char,
                            n: c_int) -> *mut c_char;
-
-    // RNG.
-    pub safe fn random_fill_bytes(buf: *mut u8, len: c_int);
 
     // C shim for `current` macro.
     pub safe fn xv6_current_thread() -> *mut bindings::thread;
@@ -478,7 +480,7 @@ pub(crate) extern "C" fn sys_getrandom() -> u64 {
         if chunk > kbuf.len() as c_int {
             chunk = kbuf.len() as c_int;
         }
-        random_fill_bytes(kbuf.as_mut_ptr(), chunk);
+        random_fill_bytes(kbuf.as_mut_ptr(), chunk as usize);
         if either_copyout(1, ubuf + done as u64,
                           kbuf.as_ptr() as *const c_void,
                           chunk as u64) < 0 {

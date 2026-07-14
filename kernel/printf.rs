@@ -58,6 +58,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::bindings::spinlock_t;
 use crate::machine;
+// P3-1D mesh sweep: ipi.rs/backtrace.rs are in scope for this wave;
+// signatures are identical, so these become plain crate-path imports
+// instead of `extern "C"` redeclarations.
+use crate::ipi::ipi_send_all;
+use crate::backtrace::print_backtrace;
 
 // ===========================================================================
 // Externs.
@@ -74,13 +79,6 @@ unsafe extern "C" {
     /// keeps working unchanged -- this is the same symbol name/ABI as
     /// the original `kernel/printf.c::printf()`.
     pub safe fn printf(fmt: *const c_char, ...) -> c_int;
-
-    /// `ipi/ipi.c` (not yet ported).
-    fn ipi_send_all(reason: c_int) -> c_int;
-
-    /// `kernel/backtrace.c` (not yet ported; needs Wave 1, already
-    /// done -- backtrace itself is a later wave).
-    fn print_backtrace(context: u64, stack_start: u64, stack_end: u64);
 
     /// FDT-configured kernel physical memory bounds
     /// (`kernel/inc/mm/memlayout.h`'s `KERNBASE`/`PHYSTOP` macros),
@@ -505,13 +503,10 @@ pub(crate) extern "C" fn trigger_panic() -> ! {
     // Mask all interrupts except software interrupt (IPI).
     machine::write_sie(machine::SIE_SSIE);
 
-    // Send IPI to all harts (including self) to crash.
-    // SAFETY: `ipi_send_all` is a plain C function taking a reason
-    // code; no preconditions beyond "callable from any context",
-    // which holds here (we are already committed to halting).
-    unsafe {
-        ipi_send_all(IPI_REASON_CRASH);
-    }
+    // Send IPI to all harts (including self) to crash. `ipi_send_all`
+    // takes a reason code; no preconditions beyond "callable from any
+    // context", which holds here (we are already committed to halting).
+    ipi_send_all(IPI_REASON_CRASH);
 
     // Enable interrupts so IPI can be received.
     machine::intr_on();

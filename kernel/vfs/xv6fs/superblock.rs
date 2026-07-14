@@ -85,21 +85,12 @@ unsafe extern "C" {
     safe fn brelse(b: *mut buf);
     safe fn bwrite(b: *mut buf);
 
-    // dev/bio.c + dev/blkdev.c (block I/O submission path, unchanged C).
-    safe fn bio_alloc(
-        bdev: *mut blkdev_t,
-        vec_length: i16,
-        rw: crate::bindings::bool_,
-        end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
-        private_data: *mut c_void,
-    ) -> *mut bio;
-    safe fn bio_add_seg(bio: *mut bio, page: *mut page_t, idx: i16, len: u16, offset: u16) -> c_int;
-    safe fn bio_release(bio: *mut bio) -> c_int;
-    safe fn blkdev_submit_bio(blkdev: *mut blkdev_t, bio: *mut bio) -> c_int;
-    safe fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t;
-    safe fn blkdev_put(dev: *mut blkdev_t) -> c_int;
-
 }
+// P3-1D mesh sweep: dev/bio.rs + dev/blkdev.rs (block I/O submission
+// path) are in scope for this wave; signatures are identical, so these
+// become plain crate-path imports instead of `extern "C"` redeclarations.
+use crate::dev::bio::{bio_add_seg, bio_alloc, bio_release};
+use crate::dev::blkdev::{blkdev_get, blkdev_put, blkdev_submit_bio};
 
 // P3-1C mesh sweep: vfs/{fs,inode}.rs are in scope for this wave;
 // converted from `extern "C"` redeclarations to plain crate-path items

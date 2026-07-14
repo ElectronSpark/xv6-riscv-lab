@@ -154,17 +154,18 @@ unsafe extern "C" {
     static mut __physical_total_pages: u64;
     /// `irq/plic.rs` (Wave 5) -- single boot-time writer (this file).
     static mut __plic_mmio_base: u64;
-    /// `pci.c`, still C (Wave 28) -- default-initialized nonzero
-    /// (`0x30000000`); this file only overwrites it when a PCIe node is
-    /// actually probed.
-    static mut __pcie_ecam_mmio_base: u64;
-    /// `virtio_disk.c`, still C (Wave 28).
-    static mut __virtio_mmio_base: [u64; N_VIRTIO as usize];
-    static mut __virtio_irqno: [u64; N_VIRTIO as usize];
     /// `timer/timer_core.rs` (Wave 8) -- single boot-time writer sequence
     /// (`start.rs`'s `timerinit()` first, this file refines second).
     static mut __jiff_ticks: u64;
 }
+// P3-1D mesh sweep: pci.rs/virtio_disk.rs are in scope for this wave;
+// default-initialized nonzero, this file only overwrites them when the
+// matching FDT node is actually probed. These become plain crate-path
+// imports instead of `extern "C"` redeclarations (both demoted from
+// `#[no_mangle]` in the same wave, each with only one other reader,
+// `mm/vm_pgtab.rs`, also fixed up).
+use crate::pci::__pcie_ecam_mmio_base;
+use crate::virtio_disk::{__virtio_irqno, __virtio_mmio_base};
 
 /// `HZ` (`kernel/inc/timer/timer.h`) -- simple integer macro, redeclared
 /// locally per this crate's established convention (see `printf.rs`'s
@@ -178,6 +179,10 @@ const HZ: u64 = 1000;
 // (`platform_info`, already allowlisted in `build.rs` for those other
 // consumers) -- exact same struct every C/Rust reader already expects.
 // ===========================================================================
+// P3-1D mesh sweep: kept `#[no_mangle]` -- read via `extern` by 4
+// out-of-scope files (`mm/page.rs`, `mm/vm_pgtab.rs`, `uart.rs`,
+// `start_kernel.rs`); same "widely-shared data anchor, no benefit purely
+// for mesh-cosmetic reasons" judgment call `ipi.rs`'s `cpus` documents.
 #[no_mangle]
 pub static mut platform: platform_info = unsafe { core::mem::zeroed() };
 
@@ -310,8 +315,9 @@ unsafe fn fdt_get_string(dtb: *const u8, offset: u32) -> *const c_char {
 /// # Safety
 /// `dtb` must be null or a valid FDT blob pointer; `base_out`/`size_out`
 /// must be null or valid `*mut u64` out-params.
-#[no_mangle]
-pub unsafe extern "C" fn fdt_early_scan_memory(
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn fdt_early_scan_memory(
     dtb: *mut c_void,
     base_out: *mut u64,
     size_out: *mut u64,
@@ -693,8 +699,11 @@ unsafe fn fdt_create_node(name_size: u32, data_size: u32) -> *mut FdtNode {
 /// `parent` must point to a live, initialized `FdtNode`; `name` must be a
 /// valid NUL-terminated C string; `addr` must be null or point to a
 /// readable `u64`.
-#[no_mangle]
-pub unsafe extern "C" fn fdt_node_lookup(
+// P3-1D mesh sweep: no live caller anywhere in the tree today, in C or
+// Rust (full-tree grep) -- demoted; `#[allow(dead_code)]` documents the
+// gap rather than deleting still-plausible public API.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn fdt_node_lookup(
     parent: *mut FdtNode,
     name: *const c_char,
     addr: *mut u64,
@@ -798,8 +807,11 @@ struct FdtBlobInfo {
 /// # Safety
 /// `blob` must be null or point to a live `FdtBlobInfo`; `path` must be
 /// null or a valid NUL-terminated C string.
-#[no_mangle]
-pub unsafe extern "C" fn fdt_path_lookup(blob: *mut FdtBlobInfo, path: *const c_char) -> *mut FdtNode {
+// P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
+// `#[allow(dead_code)]` documents the gap, same precedent as
+// `fdt_node_lookup` above.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn fdt_path_lookup(blob: *mut FdtBlobInfo, path: *const c_char) -> *mut FdtNode {
     if blob.is_null() || path.is_null() {
         return ptr::null_mut();
     }
@@ -1651,8 +1663,11 @@ unsafe fn fdt_build_indexes(blob: *mut FdtBlobInfo) {
 /// # Safety
 /// `blob` must be null or point to a live `FdtBlobInfo`; `compat` must be
 /// null or a valid NUL-terminated C string.
-#[no_mangle]
-pub unsafe extern "C" fn fdt_compat_lookup(blob: *mut FdtBlobInfo, compat: *const c_char) -> *mut FdtNode {
+// P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
+// `#[allow(dead_code)]` documents the gap, same precedent as
+// `fdt_node_lookup` above.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn fdt_compat_lookup(blob: *mut FdtBlobInfo, compat: *const c_char) -> *mut FdtNode {
     if blob.is_null() || compat.is_null() || unsafe { (*blob).compat_table }.is_null() {
         return ptr::null_mut();
     }
@@ -1680,8 +1695,11 @@ pub unsafe extern "C" fn fdt_compat_lookup(blob: *mut FdtBlobInfo, compat: *cons
 /// # Safety
 /// `link` must be null or point to a live `*mut FdtCompatLink` (which may
 /// itself be null).
-#[no_mangle]
-pub unsafe extern "C" fn fdt_compat_next(link: *mut *mut FdtCompatLink) -> *mut FdtNode {
+// P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
+// `#[allow(dead_code)]` documents the gap, same precedent as
+// `fdt_node_lookup` above.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn fdt_compat_next(link: *mut *mut FdtCompatLink) -> *mut FdtNode {
     if link.is_null() || unsafe { *link }.is_null() {
         return ptr::null_mut();
     }
@@ -1704,8 +1722,11 @@ pub unsafe extern "C" fn fdt_compat_next(link: *mut *mut FdtCompatLink) -> *mut 
 ///
 /// # Safety
 /// `blob` must be null or point to a live `FdtBlobInfo`.
-#[no_mangle]
-pub unsafe extern "C" fn fdt_phandle_lookup(blob: *mut FdtBlobInfo, phandle: u32) -> *mut FdtNode {
+// P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
+// `#[allow(dead_code)]` documents the gap, same precedent as
+// `fdt_node_lookup` above.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn fdt_phandle_lookup(blob: *mut FdtBlobInfo, phandle: u32) -> *mut FdtNode {
     if blob.is_null() || phandle == 0 || unsafe { (*blob).phandle_table }.is_null() {
         return ptr::null_mut();
     }
@@ -2287,8 +2308,9 @@ const fn platform_info_mem_regions() -> i32 {
 ///
 /// # Safety
 /// `dtb` must be null or a valid FDT blob pointer.
-#[no_mangle]
-pub unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
     printf(c"fdt: checking DTB at %p\n".as_ptr(), dtb);
 
     // SAFETY: caller contract.
@@ -2415,8 +2437,11 @@ pub unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
 ///
 /// # Safety
 /// `dtb` must be null or a valid FDT blob pointer.
-#[no_mangle]
-pub unsafe extern "C" fn fdt_dump(dtb: *mut c_void) {
+// P3-1D mesh sweep: no live caller anywhere in the tree today -- demoted;
+// `#[allow(dead_code)]` documents the gap, same precedent as
+// `fdt_node_lookup` above.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn fdt_dump(dtb: *mut c_void) {
     // SAFETY: caller contract.
     if !unsafe { fdt_valid(dtb) } {
         printf(c"fdt_dump: invalid DTB\n".as_ptr());
@@ -2564,8 +2589,12 @@ unsafe fn fdt_walk_node(node: *mut FdtNode, depth: i32) {
 /// # Safety
 /// No preconditions on `dtb` (unused -- matches the C original, which
 /// walks the already-parsed tree instead).
-#[no_mangle]
-pub unsafe extern "C" fn fdt_walk(_dtb: *mut c_void) {
+// P3-1D mesh sweep: no live caller anywhere in the tree today -- the one
+// potential call site (`start_kernel.rs`) is commented out (`// fdt_walk
+// (fdt_base);`) -- demoted; `#[allow(dead_code)]` documents the gap,
+// same precedent as `fdt_node_lookup` above.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn fdt_walk(_dtb: *mut c_void) {
     // SAFETY: `FDT_BLOB` is written once (single-threaded boot) by
     // `fdt_init` before this could ever run.
     let blob = unsafe { FDT_BLOB };
@@ -2593,8 +2622,9 @@ pub unsafe extern "C" fn fdt_walk(_dtb: *mut c_void) {
 /// any other hart or interrupt is live (matches the C original's
 /// `start_kernel.c` call site and every global it writes -- see this
 /// module's doc comment for the full inventory).
-#[no_mangle]
-pub unsafe extern "C" fn fdt_apply_platform_config() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn fdt_apply_platform_config() {
     // SAFETY: single boot-time writer, see module doc + this fn's own
     // Safety section.
     unsafe {

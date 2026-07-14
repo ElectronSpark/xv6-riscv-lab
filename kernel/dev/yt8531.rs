@@ -184,8 +184,8 @@ unsafe fn emac_wr(base: *mut u32, off: u32, val: u32) {
 ///
 /// # Safety
 /// `base` must be a live EMAC MMIO base pointer (see module doc).
-#[no_mangle]
-pub unsafe extern "C" fn mdio_read(base: *mut u32, phy_addr: c_int, reg: c_int) -> c_int {
+// P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
+pub(crate) unsafe extern "C" fn mdio_read(base: *mut u32, phy_addr: c_int, reg: c_int) -> c_int {
     let mut cmd: u32 = 0;
     cmd |= phy_addr as u32 & MDIO_PHY_ADDR_MASK;
     cmd |= ((reg as u32) & 0x1F) << MDIO_REG_ADDR_SHIFT;
@@ -217,8 +217,8 @@ pub unsafe extern "C" fn mdio_read(base: *mut u32, phy_addr: c_int, reg: c_int) 
 ///
 /// # Safety
 /// Same as [`mdio_read`].
-#[no_mangle]
-pub unsafe extern "C" fn mdio_write(base: *mut u32, phy_addr: c_int, reg: c_int, val: u16) -> c_int {
+// P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
+pub(crate) unsafe extern "C" fn mdio_write(base: *mut u32, phy_addr: c_int, reg: c_int, val: u16) -> c_int {
     let mut cmd: u32 = 0;
 
     // SAFETY: caller contract.
@@ -309,8 +309,9 @@ unsafe fn mdio_scan(base: *mut u32) -> c_int {
 ///
 /// # Safety
 /// Same as [`mdio_read`].
-#[no_mangle]
-pub unsafe extern "C" fn yt8531_init(base: *mut u32, mut phy_addr: c_int) -> c_int {
+// P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn yt8531_init(base: *mut u32, mut phy_addr: c_int) -> c_int {
     // If phy_addr < 0, auto-detect.
     if phy_addr < 0 {
         // SAFETY: caller contract.
@@ -408,8 +409,9 @@ pub unsafe extern "C" fn yt8531_init(base: *mut u32, mut phy_addr: c_int) -> c_i
 /// # Safety
 /// `base` per [`mdio_read`]; `state` must point to live, writable
 /// `phy_state` storage for the duration of this call.
-#[no_mangle]
-pub unsafe extern "C" fn yt8531_poll_link(base: *mut u32, phy_addr: c_int, state: *mut phy_state) -> c_int {
+// P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn yt8531_poll_link(base: *mut u32, phy_addr: c_int, state: *mut phy_state) -> c_int {
     // SAFETY: caller contract.
     unsafe {
         (*state).link_up = 0;
@@ -493,8 +495,9 @@ pub unsafe extern "C" fn yt8531_poll_link(base: *mut u32, phy_addr: c_int, state
 ///
 /// # Safety
 /// Same as [`yt8531_poll_link`].
-#[no_mangle]
-pub unsafe extern "C" fn yt8531_wait_autoneg(
+// P3-1D mesh sweep: caller (`dev/x1_emac.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) unsafe extern "C" fn yt8531_wait_autoneg(
     base: *mut u32,
     phy_addr: c_int,
     state: *mut phy_state,

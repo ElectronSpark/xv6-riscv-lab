@@ -101,16 +101,16 @@ unsafe extern "C" {
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
-    // kernel/net.c (still C, Wave 28) -- mbuf allocator + RX delivery.
-    fn mbufalloc(headroom: core::ffi::c_uint) -> *mut mbuf;
-    fn mbuffree(m: *mut mbuf);
-    fn net_rx(m: *mut mbuf);
-    // dev/netdev.rs (Phase 2 Wave 24).
-    fn netdev_register(dev: *mut netdev) -> c_int;
-    fn netdev_set_link(dev: *mut netdev, link_up: c_int);
-    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config.
+    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
+    // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
+    // anchor, see that file's own comment) -- this extern stays valid.
     static mut platform: platform_info;
 }
+// P3-1D mesh sweep: net.rs/dev/netdev.rs are in scope for this wave;
+// signatures are identical, so these become plain crate-path imports
+// instead of `extern "C"` redeclarations.
+use crate::net::{mbufalloc, mbuffree, net_rx};
+use super::netdev::{netdev_register, netdev_set_link};
 
 // ===========================================================================
 // Register/bit constants -- redeclared locally from `kernel/inc/dev/
@@ -794,8 +794,8 @@ unsafe fn x1_emac_rx_ring_init(sc: *mut X1EmacSoftc) -> c_int {
 
     // Allocate mbufs and set up each descriptor in chained mode.
     for i in 0..X1_EMAC_RX_RING_SIZE {
-        // SAFETY: `mbufalloc` returns a fresh mbuf or null.
-        let m = unsafe { mbufalloc(0) };
+        // `mbufalloc` returns a fresh mbuf or null.
+        let m = mbufalloc(0);
         if m.is_null() {
             // SAFETY: caller contract; format string matches its two arguments.
             unsafe { printf(c"x1_emac%d: failed to alloc rx mbuf %d\n".as_ptr(), (*sc).index, i as c_int) };
@@ -989,23 +989,21 @@ unsafe fn x1_emac_recv(sc: *mut X1EmacSoftc) {
         // SAFETY: `m` live.
         unsafe { (*m).len = frame_len };
 
-        // Deliver to network stack.
-        // SAFETY: `m` live, ownership transferred to `net_rx` (matches
-        // the C original's contract -- `net_rx` is responsible for
-        // `m`'s lifetime from here).
-        unsafe { net_rx(m) };
+        // Deliver to network stack. `m` live, ownership transferred to
+        // `net_rx` (matches the C original's contract -- `net_rx` is
+        // responsible for `m`'s lifetime from here).
+        net_rx(m);
 
-        // Allocate a replacement mbuf.
-        // SAFETY: `mbufalloc` returns a fresh mbuf or null.
-        let mut newm = unsafe { mbufalloc(0) };
+        // Allocate a replacement mbuf. `mbufalloc` returns a fresh mbuf
+        // or null.
+        let mut newm = mbufalloc(0);
         if newm.is_null() {
             // SAFETY: caller contract; format string matches its one argument.
             unsafe { printf(c"x1_emac%d: rx mbuf alloc failed\n".as_ptr(), (*sc).index) };
             // Reuse the old mbuf (we already gave it to net_rx, so
             // allocate or we'll have a dangling pointer). In practice
             // this shouldn't happen on xv6.
-            // SAFETY: `mbufalloc` returns a fresh mbuf or null.
-            newm = unsafe { mbufalloc(0) };
+            newm = mbufalloc(0);
             if newm.is_null() {
                 panic!("x1_emac: out of mbufs");
             }
@@ -1435,8 +1433,9 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
 /// init, and auto-negotiation run in a dedicated kernel thread so that:
 /// 1. The scheduler is already running -> `sleep_ms()` works.
 /// 2. Boot proceeds without blocking on slow PHY negotiation.
-#[no_mangle]
-pub extern "C" fn x1_emac_init() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn x1_emac_init() {
     // SAFETY: `platform` is boot-time-populated by `fdt.rs` before
     // `start_kernel.c` calls this (documented boot-order contract).
     if !(unsafe { platform.has_emac } != 0) {

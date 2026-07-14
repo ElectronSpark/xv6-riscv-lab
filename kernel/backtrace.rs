@@ -202,8 +202,9 @@ fn strtoul(s: &[u8], base: u32) -> (u64, usize) {
 /// observe `KSYM_RB_ROOT`/`KSYM_ENTRIES_BASE`/`KSYM_COUNT` -- matches the
 /// call site's existing contract (`start_kernel.c`'s init-order comment in
 /// `docs/rustify/phase2_plan.md` §1).
-#[no_mangle]
-pub unsafe extern "C" fn ksymbols_init() {
+// P3-1D mesh sweep: only caller is `start_kernel.rs` (crate-path `use`, not
+// an `extern` redeclaration) -- demoted.
+pub(crate) unsafe extern "C" fn ksymbols_init() {
     // SAFETY: see function-level `# Safety`; the whole body operates on
     // the boot-time-single-writer statics above and on the read-only
     // embedded `.ksymbols` section (part of the loaded kernel image, never
@@ -341,8 +342,14 @@ fn bt_search_sym(addr: u64) -> Option<*mut KSymEntry> {
 ///
 /// # Safety
 /// `buf` must be valid and writable for `buflen` bytes.
-#[no_mangle]
-pub unsafe extern "C" fn bt_search(
+// P3-1D mesh sweep: not declared in `kernel/inc/defs.h` (unlike
+// `print_backtrace`/`print_thread_backtrace` next to it) and no live caller
+// anywhere in the tree today, in C or Rust (full-tree grep) -- was already
+// non-`static` but unreferenced in the original `backtrace.c` too. Demoted;
+// `#[allow(dead_code)]` documents the gap rather than deleting still-
+// plausible public API, same precedent as `ipi.rs`'s `get_cpu_active_mask`.
+#[allow(dead_code)]
+pub(crate) unsafe extern "C" fn bt_search(
     addr: u64,
     buf: *mut c_char,
     buflen: usize,
@@ -473,8 +480,10 @@ fn is_top_frame(fp: u64) -> bool {
 /// `context` must be 0 or a currently-live frame pointer (e.g. `tf->s0`,
 /// `r_fp()`, or a saved `context.s0`); `[stack_start, stack_end)` must
 /// bound the stack that frame pointer chains through.
-#[no_mangle]
-pub unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, stack_end: u64) {
+// P3-1D mesh sweep: every caller (`printf.rs`, `ipi.rs`, `irq/trap.rs`) now
+// imports this via crate-path `use` instead of an `extern` redeclaration --
+// demoted.
+pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, stack_end: u64) {
     // SAFETY: see function-level `# Safety` and the frame-walking section
     // doc above.
     unsafe {
@@ -530,8 +539,9 @@ pub unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, stack_e
 /// The thread must not be running on any CPU; `ctx` must be null or point
 /// at a live `struct context`; `kstack`/`kstack_order` must describe that
 /// thread's kernel stack (`size = 1 << (PAGE_SHIFT + kstack_order)`).
-#[no_mangle]
-pub unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack: u64, kstack_order: c_int) {
+// P3-1D mesh sweep: only caller is `proc/proc_shims.rs` (crate-path `use`,
+// not an `extern` redeclaration) -- demoted.
+pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack: u64, kstack_order: c_int) {
     // SAFETY: see function-level `# Safety` and the frame-walking section
     // doc above; `ctx`/`kstack` are checked before any dereference,
     // matching the C original.
@@ -630,5 +640,10 @@ pub unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack: u64, 
 
 /// Set breakpoint for GDB (`b db_break`). Deliberately empty -- a stable
 /// symbol name to break on, matching the C original.
+// P3-1D: kept `#[no_mangle]` deliberately -- this symbol has no Rust or C
+// caller by design (an external debugger sets a breakpoint on it by linked
+// name, e.g. `b db_break` in a `.gdbinit`), the same "genuinely external
+// consumer" class as the linker-script/`.S`-defined symbols, not a mesh
+// leftover.
 #[no_mangle]
 pub extern "C" fn db_break() {}

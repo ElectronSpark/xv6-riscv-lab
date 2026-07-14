@@ -67,12 +67,11 @@ unsafe extern "C" {
     fn printf(fmt: *const c_char, ...) -> c_int;
     safe fn __panic_start();
     safe fn __panic_end() -> !;
-
-    // e1000.rs (this wave, same crate -- declared locally per this
-    // crate's established convention of not reaching through a shared
-    // facade even for same-crate calls).
-    fn e1000_init(xregs: *mut u32);
 }
+// P3-1D mesh sweep: e1000.rs is in scope for this wave; signature is
+// identical, so this becomes a plain crate-path import instead of an
+// `extern "C"` redeclaration.
+use crate::e1000::e1000_init;
 
 // ===========================================================================
 // PCI-E Configuration Space Command/Status/Header-Type bits --
@@ -93,15 +92,16 @@ mod layout_asserts {
     const _SIZE_HEADER: () = assert!(core::mem::size_of::<pci_common_confspace_header>() == 0x40);
 }
 
-/// `uint64 __pcie_ecam_mmio_base = 0x30000000L;` -- keeps the exact C
-/// symbol name/type: `kernel/mm/vm_pgtab.rs` (`kvmmake`) and
-/// `kernel/dev/fdt.rs` (`fdt_apply_platform_config`) extern this by name.
-#[no_mangle]
-pub static mut __pcie_ecam_mmio_base: u64 = 0x30000000;
+/// `uint64 __pcie_ecam_mmio_base = 0x30000000L;`.
+// P3-1D mesh sweep: callers (`mm/vm_pgtab.rs`, `dev/fdt.rs`) now import
+// this via crate-path `use` instead of an `extern` redeclaration --
+// demoted.
+pub(crate) static mut __pcie_ecam_mmio_base: u64 = 0x30000000;
 
 /// `void pci_init(void)`.
-#[no_mangle]
-pub extern "C" fn pci_init() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn pci_init() {
     // We'll place the e1000 registers at this address. vm_pgtab.rs
     // (kvmmake) maps this range.
     let e1000_regs: u64 = 0x40000000;
@@ -196,10 +196,10 @@ pub extern "C" fn pci_init() {
             // SAFETY: `dsc` live; volatile MMIO write.
             unsafe { core::ptr::write_volatile(&raw mut (*dsc).__bindgen_anon_2.header_type_0.base_addr[0], e1000_regs as u32) };
 
-            // SAFETY: `e1000_regs` is the physical address just
-            // programmed into BAR0 above, mapped by `vm_pgtab.rs`'s
-            // `kvmmake` (see the module doc's "We'll place..." comment).
-            unsafe { e1000_init(e1000_regs as *mut u32) };
+            // `e1000_regs` is the physical address just programmed into
+            // BAR0 above, mapped by `vm_pgtab.rs`'s `kvmmake` (see the
+            // module doc's "We'll place..." comment).
+            e1000_init(e1000_regs as *mut u32);
         }
     }
 }

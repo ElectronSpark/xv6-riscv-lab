@@ -15,17 +15,39 @@ only SlabBox carries Deref (data-carrying guards = biggest unsafe lever);
 
 ## Waves
 
-- **P3-1 (master enabler)**: module visibility (`pub(crate)`) + extern-block
-  mesh removal + no_mangle demotion per caller survey (cross-check
-  RUST_FORCE_UNDEFINED, .S files' symbol refs — the asm-mandated set:
-  kerneltrap, kernel_irq, usertrap, usertrapret, user_kirq_entrance,
-  __user_kirq_return, push_sigframe, restore_sigframe, start, stack0,
-  start_kernel, swtch, timervec-equivalents...; printf_shim imports;
-  test-launch symbols). Parameter types unchanged (that's P3-7).
+- **P3-1 (master enabler) — STATUS: COMPLETE (2026-07-14, sub-wave D
+  landed)**: module visibility (`pub(crate)`) + extern-block mesh removal
+  + no_mangle demotion per caller survey (cross-check RUST_FORCE_UNDEFINED,
+  .S files' symbol refs — the asm-mandated set: kerneltrap, kernel_irq,
+  usertrap, usertrapret, user_kirq_entrance, __user_kirq_return,
+  push_sigframe, restore_sigframe, start, stack0, start_kernel, swtch,
+  timervec-equivalents...; printf_shim imports; test-launch symbols).
+  Parameter types unchanged (that's P3-7).
   Sub-waves: (A) mm+lock+machine/sync/ll/list, (B) proc+irq+timer+ipi,
   (C) vfs+tty, (D) dev+drivers+root files + RUST_FORCE_UNDEFINED prune +
-  lib.rs lint-allow removal (clashing_extern_declarations,
-  ambiguous_glob_reexports, improper_ctypes become removable).
+  lib.rs lint-allow removal.
+  **Final crate-wide numbers (mesh sweep complete, all four sub-waves)**:
+  `#[no_mangle]` 1,438 (Phase 3 baseline) → 664 (start of D) → 576 (D
+  landed); hand-written `unsafe extern "C" { ... }` blocks 508 → 500 (D's
+  own files' blocks mostly shrank rather than vanished — many still
+  redeclare symbols from modules genuinely out of D's touch scope, e.g.
+  `kobject_init`/`kmm_alloc`/`spin_lock`, left alone per the crate's
+  established "don't touch a caller for a symbol you don't own" rule).
+  `RUST_FORCE_UNDEFINED` 495 (start of D) → 22 (final prune, verified
+  safe by relinking both kernel targets from the same `libxv6_rust.a`
+  with the maximal current no_mangle set vs. the 22-entry keep-set and
+  byte-diffing every `SHF_ALLOC` section — identical). Remaining
+  `unsafe extern "C"` inventory crate-wide: printf_shim.c's own two
+  imports (`printf_rust` + the reverse `printf`/`__printf_va_arg_*`
+  direction), the 4 asm-mandated + `start`/`stack0` + libc-shaped
+  mem*/str*/puts/putchar names, the `.S`-defined symbols (`swtch`,
+  `__switch_noreturn`, `sig_trampoline`, `trampoline`/`uservec`/
+  `userret`), and — the largest remaining category — same-crate
+  cross-module calls in mm/lock/proc/vfs/tty files that are individually
+  still `#[no_mangle]` for a documented reason (another Rust file not yet
+  swept in *this* symbol's owning wave, or the "widely-shared data
+  anchor" class: `cpus`, `platform`, `sockets`). Full accounting in the
+  P3-1D worker report.
 - **P3-2 (zero C)**: kprint!/kprintln! over core::fmt::Write on the existing
   console path (no alloc — panic-path-safe); scripted+reviewed rewrite of
   724 sites; panic/backtrace path as high-scrutiny solo pass; delete

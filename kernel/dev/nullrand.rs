@@ -168,8 +168,9 @@ fn xorshift64star() -> u64 {
 /// destination path) and, cross-module within this same crate, by
 /// `kernel/proc/sysproc.rs`'s `sys_getrandom` (see this module's doc
 /// comment for the signature-fidelity note on that caller).
-#[no_mangle]
-pub extern "C" fn random_fill_bytes(buf: *mut u8, count: usize) {
+// P3-1D mesh sweep: caller (`proc/sysproc.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn random_fill_bytes(buf: *mut u8, count: usize) {
     if buf.is_null() || count == 0 {
         return;
     }
@@ -339,8 +340,9 @@ static mut ZERO_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 /// `void nullranddevinit(void)` -- registers `/dev/null`, `/dev/random`,
 /// `/dev/zero`. Called once from `start_kernel.c`'s single-hart
 /// post-init sequence (see that file's `nullranddevinit();` call site).
-#[no_mangle]
-pub extern "C" fn nullranddevinit() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn nullranddevinit() {
     // SAFETY: `nullranddevinit()` runs exactly once, from
     // `start_kernel.c`'s single-hart init sequence, before any other
     // code can observe `NULL_CDEV`/`RANDOM_CDEV`/`ZERO_CDEV` (same

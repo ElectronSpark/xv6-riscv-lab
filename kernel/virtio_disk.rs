@@ -154,12 +154,15 @@ unsafe extern "C" {
     safe fn completion_reinit(c: *mut crate::bindings::completion_t);
     safe fn complete_all(c: *mut crate::bindings::completion_t);
 
-    // dev/blkdev.rs (Phase 2 Wave 21).
-    fn blkdev_register(dev: *mut blkdev_t) -> c_int;
-
-    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config.
+    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
+    // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
+    // anchor, see that file's own comment) -- this extern stays valid.
     static mut platform: platform_info;
 }
+// P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
+// identical, so this becomes a plain crate-path import instead of an
+// `extern "C"` redeclaration.
+use crate::dev::blkdev::blkdev_register;
 
 // ===========================================================================
 // virtio-mmio register offsets/bits, virtqueue constants -- redeclared
@@ -243,10 +246,13 @@ mod layout_asserts {
 // them before/around this driver's own init.
 // ===========================================================================
 
-#[no_mangle]
-pub static mut __virtio_mmio_base: [u64; 3] = [0x10001000, 0x10002000, 0x10003000];
-#[no_mangle]
-pub static mut __virtio_irqno: [u64; 3] = [1, 2, 3];
+// P3-1D mesh sweep: caller (`mm/vm_pgtab.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) static mut __virtio_mmio_base: [u64; 3] = [0x10001000, 0x10002000, 0x10003000];
+// P3-1D mesh sweep: no caller anywhere outside this file (in-scope writer
+// is `dev/fdt.rs`, itself in scope this wave and already using a
+// crate-path `use`) -- demoted.
+pub(crate) static mut __virtio_irqno: [u64; 3] = [1, 2, 3];
 
 /// `#define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))`.
 ///
@@ -924,8 +930,8 @@ fn virtio_blkdev_init(diskno: usize) {
         (*dev).ops = VIRTIO_DISK_OPS;
     }
 
-    // SAFETY: `dev` fully initialised above.
-    let errno = unsafe { blkdev_register(dev) };
+    // `dev` fully initialised above.
+    let errno = blkdev_register(dev);
     if errno != 0 {
         panic_fmt_i32(c"virtio_blkdev_init: blkdev_register failed: %d\n", errno);
     }
@@ -1066,8 +1072,9 @@ fn virtio_disk_init_one(diskno: usize) {
 }
 
 /// `void virtio_disk_init(void)`.
-#[no_mangle]
-pub extern "C" fn virtio_disk_init() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn virtio_disk_init() {
     // SAFETY: `platform` is populated by `fdt_apply_platform_config`
     // before this runs (boot-hart-main-init, strictly before
     // `start_kernel_post_init`, which is where this driver's init runs).

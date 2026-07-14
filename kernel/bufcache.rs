@@ -149,22 +149,12 @@ unsafe extern "C" {
 
     // kernel/mm/page.rs.
 
-    // kernel/dev/dev.rs + kernel/dev/blkdev.rs (Phase 2 Wave 21).
-    safe fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t;
-    safe fn blkdev_put(dev: *mut blkdev_t) -> c_int;
-    safe fn blkdev_submit_bio(blkdev: *mut blkdev_t, bio: *mut bio) -> c_int;
-
-    // kernel/dev/bio.rs (this wave's sibling file).
-    safe fn bio_alloc(
-        bdev: *mut blkdev_t,
-        vec_length: i16,
-        rw: bool_,
-        end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
-        private_data: *mut c_void,
-    ) -> *mut bio;
-    safe fn bio_add_seg(bio: *mut bio, page: *mut page_t, idx: i16, len: u16, offset: u16) -> c_int;
-    safe fn bio_release(bio: *mut bio) -> c_int;
 }
+// P3-1D mesh sweep: kernel/dev/{dev,blkdev,bio}.rs are in scope for this
+// wave; signatures are identical, so these become plain crate-path
+// imports instead of `extern "C"` redeclarations.
+use crate::dev::blkdev::{blkdev_get, blkdev_put, blkdev_submit_bio};
+use crate::dev::bio::{bio_add_seg, bio_alloc, bio_release};
 pub(crate) use crate::hlist::{hlist_get, hlist_init, hlist_pop, hlist_put};
 pub(crate) use crate::lock::completion::{wait_for_completion, wait_for_completion_interruptible};
 pub(crate) use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_unlock};

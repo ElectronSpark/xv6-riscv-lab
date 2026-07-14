@@ -62,12 +62,15 @@ unsafe extern "C" {
     safe fn completion_reinit(c: *mut crate::bindings::completion_t);
     safe fn complete_all(c: *mut crate::bindings::completion_t);
 
-    // dev/blkdev.rs (Phase 2 Wave 21).
-    fn blkdev_register(dev: *mut blkdev_t) -> c_int;
-
-    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config.
+    // dev/fdt.rs (Phase 2 Wave 23): boot-probed platform config. Kept
+    // `#[no_mangle]` in `dev/fdt.rs` (P3-1D mesh sweep: widely-shared data
+    // anchor, see that file's own comment) -- this extern stays valid.
     static mut platform: platform_info;
 }
+// P3-1D mesh sweep: dev/blkdev.rs is in scope for this wave; signature is
+// identical, so this becomes a plain crate-path import instead of an
+// `extern "C"` redeclaration.
+use crate::dev::blkdev::blkdev_register;
 
 /// `kernel/inc/uabi/stat.h` `S_IFBLK`, same local copy as other `dev/*.rs`.
 const S_IFBLK: u32 = 0o060_000;
@@ -330,8 +333,9 @@ static RAMDISK_OPS: blkdev_ops_t =
     blkdev_ops_t { open: Some(ramdisk_open), release: Some(ramdisk_release), submit_bio: Some(ramdisk_submit_bio) };
 
 /// `void ramdisk_init(void)`.
-#[no_mangle]
-pub extern "C" fn ramdisk_init() {
+// P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn ramdisk_init() {
     let rd = ramdisk_ptr();
     // SAFETY: `rd` exclusively owned at this point (boot-time, single
     // caller, `start_kernel.rs`'s `start_kernel_post_init`).
@@ -382,8 +386,8 @@ pub extern "C" fn ramdisk_init() {
         (*dev).ops = RAMDISK_OPS;
     }
 
-    // SAFETY: `dev` fully initialised above.
-    let errno = unsafe { blkdev_register(dev) };
+    // `dev` fully initialised above.
+    let errno = blkdev_register(dev);
     if errno != 0 {
         __panic_start();
         // SAFETY: format string matches its one argument.

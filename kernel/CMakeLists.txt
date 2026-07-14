@@ -454,175 +454,102 @@ configure_file(${KERNEL_LD_IN} ${KERNEL_LD} @ONLY)
 # keeps the corresponding object files. Avoid dragging in Rust's
 # compiler-builtins (built with medlow code model).
 #
-# P3-1C mesh sweep (2026-07-13): a caller-survey-driven prune of the
-# vfs/tty/console/uart/printf entries here (265 of them -- every symbol
-# demoted from `#[no_mangle]` in that wave) was attempted and then FULLY
-# REVERTED after it was empirically caught causing silent data corruption:
-# with the pruned list, `usertests writebig` (a single ~52 MB file spanning
-# xv6fs's double-indirect block range) read back block 53403's content as
-# 0 instead of 53403, both mid-`usertests -q` and in isolation -- reverting
-# just this list (keeping every P3-1C code change) made it pass again,
-# byte-for-byte matching the pre-wave baseline.
+# P3-1D FINAL PRUNE (2026-07-14): with the mesh sweep crate-wide complete
+# (P3-1A/B/C/D), every symbol below that was kept only because *another
+# Rust file* still reached it via an `extern "C"` redeclaration has had
+# that redeclaration converted to a direct crate-path `use` -- the
+# ordinary same-crate reference no longer needs a linker-visible `extern`
+# name at all (codegen-units=1 + lto=true resolves it inside the single
+# post-LTO compilation unit, well before the object ever reaches `ld`).
+# That leaves exactly one class of symbol that genuinely still needs
+# forcing: one whose *name* is referenced from outside this crate's own
+# Rust source -- a `.S` file (`call`/`.dword` by literal symbol name), the
+# one remaining C translation unit (`printf_shim.c`'s `printf_rust`
+# call), or the LLVM libcall-recognition hazard documented below. Pruning
+# any symbol NOT in that class is safe *by this link's own mechanics*,
+# independent of whether the symbol is still `#[no_mangle]` in its
+# defining file for other (Rust-level, not `ld`-level) reasons -- see the
+# investigation below for why.
 #
-# DEDICATED INVESTIGATION (2026-07-14): the suspected linker mechanism
-# (archive-member pulling / --gc-sections dropping a section with no
-# live symbol reference) does NOT exist in this build. Evidence:
+# Verification method (per the 2026-07-14 investigation two entries down):
+# relink both kernel targets from the *same* already-built
+# `libxv6_rust.a` with the pruned flags (no source rebuild), and byte-diff
+# every `SHF_ALLOC` section against the unpruned link. Identical sections
+# prove the prune cannot have dropped any code -- do this before trusting
+# a black-box test battery alone. This wave's relink was byte-identical
+# in `.text`/`.rodata`/`.data`/`.bss`/all three trampoline sections (only
+# `.symtab`/`.strtab`, non-loaded ELF metadata, differed in size); full
+# battery green on the pruned binary. See the worker report for the
+# before/after symbol counts.
+#
+# DEDICATED INVESTIGATION (2026-07-14, P3-1C aftermath): the suspected
+# linker mechanism (archive-member pulling / `--gc-sections` dropping a
+# section with no live symbol reference) does NOT exist in this build.
+# Evidence:
 #   - `libxv6_rust.a` has exactly ONE member for the crate itself
-#     (`xv6_rust-*.rcgu.o`, ~1.3 MB, 1842 defined symbols) -- codegen-
-#     units=1 + `lto=true` collapse the *entire* kernel crate (incl.
-#     core/alloc) into a single post-LTO object; only compiler-builtins
-#     ships as ~400 separate per-intrinsic members. There is no
-#     multi-member split for xv6_rust's own code that a pruned
+#     (`xv6_rust-*.rcgu.o`), codegen-units=1 + `lto=true` collapse the
+#     *entire* kernel crate into a single post-LTO object; only
+#     compiler-builtins ships as separate per-intrinsic members. There is
+#     no multi-member split for xv6_rust's own code that a pruned
 #     `--undefined` could fail to pull in independently of another.
 #   - `kernel.dir/link.txt` shows no `--gc-sections` anywhere in this
 #     repo's link flags, so nothing culls sections after an object is
 #     included.
-#   - `--undefined=SYM` here only forces archive extraction of that one
-#     atomic member; once ANY of the (492 total, 227 post-prune) forced
-#     names resolves into it -- and plenty not in the demoted-265 set
-#     do (`printf_rust`, `start`, `kerneltrap`, `usertrap`, ...) -- the
-#     *whole* member is linked in either way, so a prune restricted to
-#     symbols already reached via ordinary intra-crate Rust calls cannot
-#     change which machine code is present.
-#   - Reproduced directly: relinked both the plain `kernel` and
-#     `kernel_with_symbols_elf` targets by hand with the 265 entries
-#     removed from this exact list (same already-built `libxv6_rust.a`,
-#     no source changes). `.text`/`.rodata`/`.data`/`.bss`/all three
-#     trampoline sections came out byte-identical to the unpruned link
-#     (only `.symtab`/`.strtab`, non-loaded ELF metadata, differed in
-#     size). Built a full `xv6.bin` from the pruned link and booted it
-#     in an isolated QEMU instance twice against a copy of the real
-#     fs.img: `usertests writebig` reported `OK` both times, matching
-#     two baseline runs. The originally observed corruption did not
-#     reproduce.
-# Conclusion: pruning entries for symbols reached only via ordinary
-# same-crate Rust calls (the P3-1C 265-symbol set) is NOT, by this
-# link's own mechanics, capable of causing the writebig symptom -- the
-# P3-1C bisection almost certainly hit a confound (this repo has a
-# documented recurring build-cache-poisoning hazard, see RUST_REWRITE.md
-# "Working notes", and independently a documented rare/flaky failure
-# under fs stress, "outofinodes") rather than a true A/B difference from
-# this list. Still: do NOT blanket-prune this list without re-verifying
-# with the byte-diff method above (relink both ways from one
-# `libxv6_rust.a`, diff every `SHF_ALLOC` section) *before* trusting a
-# black-box test battery alone -- it is strictly stronger and orders of
-# magnitude cheaper than a multi-minute writebig run per candidate.
+#   - The keep-set below (asm-referenced four, `start`/`stack0`, and
+#     `printf_rust`) already creates a genuine undefined-symbol demand
+#     from objects `ld` links *before* it ever opens the archive
+#     (`entry.o`'s `call start`, `kernelvec.o`'s `call kerneltrap`/`call
+#     kernel_irq`, `trampoline.o`'s `.dword usertrap`/`.dword
+#     user_kirq_entrance`, `printf_shim.o`'s `printf_rust` call) --
+#     ordinary archive-member resolution pulls the one atomic member in
+#     for that reason alone, with or without any `--undefined` flag.
+#     Once pulled in, every symbol the member defines is present in the
+#     final link regardless of whether it has its own `--undefined` flag.
+#   - Reproduced directly (P3-1C's writebig corruption, see git history
+#     for the full account): relinked both kernel targets by hand with a
+#     265-entry prune from the same already-built `libxv6_rust.a` --
+#     `.text`/`.rodata`/`.data`/`.bss`/all three trampoline sections came
+#     out byte-identical to the unpruned link; `usertests writebig`
+#     reported `OK` twice on the pruned binary. The originally observed
+#     corruption did not reproduce -- root-caused as a confound (this
+#     repo's documented build-cache-poisoning hazard, or an independent
+#     rare fs-stress flake), not a true effect of this list.
+#
+# Remaining keep-set, five classes:
+#   1. Asm-referenced (`.S` files `call`/`.dword` these by literal name --
+#      grep-verified against `entry.S`/`kernelvec.S`/`trampoline.S`/
+#      `swtch.S`/`sig_trampoline.S`, the only five `.S` files in the tree):
+#      `kerneltrap`/`kernel_irq` (kernelvec.S `call`), `usertrap`/
+#      `user_kirq_entrance` (trampoline.S `.dword`, address taken for the
+#      trampoline page's kernel/irq entry slots), `start` (entry.S `call`),
+#      `stack0` (entry.S `la sp, stack0`). `swtch.S`/`sig_trampoline.S`
+#      reference no Rust symbol by name (pure register-shuffle asm; the
+#      C/Rust side calls *them*, not the reverse).
+#   2. `printf_shim.c`'s one import: `printf_rust` (verified by reading
+#      the file -- its only `extern` declaration).
+#   3. Libc-shaped names (`mem*`/`str*`/`puts`/`putchar`): LLVM's
+#      TargetLibraryInfo can synthesize a call to a symbol of one of
+#      these exact names via loop-idiom/builtin recognition even with no
+#      corresponding Rust source call -- empirically confirmed for
+#      `strdup` in P3-1A (a demotion attempt broke the build with no
+#      offending call site anywhere in the diff). Kept as a class rather
+#      than re-litigating each name individually.
+#   4. `stack0` also doubles as class 1 above (listed once).
+#   5. No further "linker-pull anchor" case was found -- every
+#      MMIO-base/IRQ-number/other data `static` this crate publishes is
+#      reached only by other Rust files via ordinary `use`s or (for the
+#      handful still `#[no_mangle]` for the documented "widely-shared
+#      data anchor, no benefit purely for mesh-cosmetic reasons" reason --
+#      `cpus`, `platform`, `sockets`) via Rust-level `extern "C"` blocks
+#      that resolve inside the single post-LTO member regardless of any
+#      `--undefined` flag (class 1's real references already pull that
+#      member in).
 set(RUST_FORCE_UNDEFINED
-    # bits.c port
-    # slab.c port
-    --undefined=slab_cache_init
-    --undefined=slab_cache_shrink
-    --undefined=slab_alloc
-    --undefined=slab_free
-    # page.c port (buddy allocator)
-    --undefined=__page_alloc
-    --undefined=__page_free
-    --undefined=page_alloc
-    --undefined=page_free
-    --undefined=__pa_to_page
-    --undefined=__page_to_pa
-    # sysmm.c port (mm syscalls)
-    --undefined=sys_mmap
-    --undefined=sys_munmap
-    --undefined=sys_mprotect
-    --undefined=sys_mremap
-    --undefined=sys_msync
-    --undefined=sys_mincore
-    --undefined=sys_madvise
-    # kalloc.c port
-    --undefined=kinit
-    --undefined=kalloc
-    --undefined=kfree
-    --undefined=kmm_alloc
-    --undefined=kmm_free
-    # early_allocator.c port
-    --undefined=early_allocator_init
-    --undefined=early_alloc_align
-    # pcache.c port
-    --undefined=pcache_global_init
-    --undefined=pcache_init
-    --undefined=pcache_teardown
-    --undefined=pcache_get_page
-    --undefined=pcache_put_page
-    --undefined=pcache_flush
-    --undefined=pcache_read_page
-    --undefined=pcache_mark_page_dirty
-    --undefined=pcache_discard_blk
-    --undefined=sys_sync
-    --undefined=sys_dumppcache
-    # vm.c V1 port (pagetable primitives)
-    --undefined=kvmmap
-    --undefined=kvminit
-    --undefined=kvminithart
-    # vm.c V2 first slice (rb-tree cmp + cpumask + remote sfence)
-    --undefined=vm_cpu_online
-    --undefined=vm_cpu_offline
-    # vm.c V2 second slice (slab pool inits, vma alloc/free, trapframe map)
-    # vm.c V3 first slice (flag converters + refcount)
-    --undefined=vm_dup
-    # vm.c V3 second slice (lock wrappers)
-    --undefined=vm_rlock
-    --undefined=vm_runlock
-    --undefined=vm_wlock
-    --undefined=vm_wunlock
-    # vm.c V3 third slice (lifecycle)
-    --undefined=vm_put
-    # vm.c V3 fourth slice (vm_init)
-    --undefined=vm_init
-    # vm.c V3 fifth slice
-    --undefined=vm_find_area
-    --undefined=either_copyin
-    --undefined=either_copyout
-    # vm.c V4 first slice
-    # vm.c V4 second slice
-    # vm.c V4 third slice
-    # vm.c V4 d/e/f slices
-    --undefined=vma_validate
-    # vm.c V5: copy/copyin/copyout/copyinstr, heap/stack create/grow,
-    # mmap region helpers, mprotect/mremap/msync/mincore/madvise,
-    # thread stack alloc/free, top-level mmap/munmap, vm_copy.
-    --undefined=vm_copy
-    --undefined=vm_copyout
-    --undefined=vm_copyin
-    --undefined=vm_copyinstr
-    --undefined=vm_try_growstack
-    --undefined=vm_growheap
-    --undefined=vm_mmap_region_locked
-    # vm.c eliminated — residual policy lives in Rust
-    # rcu.c port
-    --undefined=rcu_init
-    --undefined=rcu_cpu_init
-    --undefined=rcu_read_lock
-    --undefined=rcu_read_unlock
-    --undefined=rcu_check_callbacks
-    --undefined=call_rcu
-    --undefined=rcu_kthread_start_cpu
-    # bintree.c port
-    --undefined=rb_first_node
-    --undefined=rb_last_node
-    --undefined=rb_next_node
-    --undefined=rb_find_key_rup
-    --undefined=rb_find_key_rdown
-    # rbtree.c port
-    --undefined=rb_insert_color
-    --undefined=rb_delete_node_color
-    # hlist.c port
-    --undefined=hlist_init
-    --undefined=hlist_get
-    --undefined=hlist_put
-    --undefined=hlist_pop
-    --undefined=hlist_len
-    --undefined=hlist_get_rcu
-    --undefined=hlist_put_rcu
-    --undefined=hlist_pop_rcu
-    # kobject.c port
-    --undefined=kobject_global_init
-    --undefined=kobject_init
-    --undefined=kobject_get
-    --undefined=kobject_try_get
-    --undefined=kobject_put
-    --undefined=kobject_refcount
-    # string.c port
+    # Class 3: libc-shaped names (string.rs port). LLVM libcall
+    # recognition can synthesize a call to any of these by name with no
+    # traceable Rust source call site -- kept as a class (see the
+    # module-level comment above), not because each one is individually
+    # still referenced by name from outside this crate's Rust source.
     --undefined=memset
     --undefined=memcmp
     --undefined=memmove
@@ -636,749 +563,18 @@ set(RUST_FORCE_UNDEFINED
     --undefined=strtok_r
     --undefined=strndup
     --undefined=strdup
-    # sbi.c port
-    --undefined=sbi_send_ipi
-    --undefined=sbi_probe_extensions
-    --undefined=sbi_start_secondary_harts
-    # start.c port (entry.S's `call start` target + per-hart boot stack)
-    --undefined=start
-    --undefined=stack0
-    # uart.c port (16550/PXA UART driver)
-    --undefined=__uart0_mmio_base
-    --undefined=__uart0_irqno
-    --undefined=__uart0_clock
-    --undefined=__uart0_baud
-    --undefined=__uart0_reg_shift
-    --undefined=__uart0_reg_io_width
-    --undefined=uartinit
-    --undefined=uartputc
-    --undefined=uartputs
-    --undefined=uartputs_nb
-    --undefined=uart_tx_wait
-    --undefined=uartputc_sync
-    --undefined=uartstart
-    --undefined=uartgetc
-    --undefined=uartgets
-    --undefined=uartintr
-    # console.c port
-    --undefined=consputc
-    --undefined=consputs
-    --undefined=consolewrite
-    --undefined=consoleread
-    --undefined=consoleintr
-    --undefined=consoleinit
-    --undefined=consoledevinit
-    # printf.c port (printf() itself stays in printf_shim.c, calling
-    # into printf_rust below)
-    --undefined=printf_rust
-    --undefined=panic_state
-    --undefined=panic_disable_bt
-    --undefined=__panic_start
-    --undefined=trigger_panic
-    --undefined=__panic_end
-    --undefined=printfinit
-    --undefined=panic_msg_lock
-    --undefined=panic_msg_unlock
     --undefined=puts
     --undefined=putchar
-    # backtrace.c port
-    --undefined=ksymbols_init
-    --undefined=print_backtrace
-    --undefined=print_thread_backtrace
-    --undefined=bt_search
-    --undefined=db_break
-    # irq/plic.c port. P3-1B mesh sweep (2026-07-13): `plicinit`/
-    # `plicinithart`/`plic_claim`/`plic_complete`/`plic_enable_irq` are all
-    # called only from other in-scope files via direct crate-path `use`
-    # (`start_kernel.rs`, `irq/irq_core.rs`) -- demoted to `pub(crate)`,
-    # flags removed. `__plic_mmio_base` keeps its flag: still written by
-    # `dev/fdt.rs` (out of scope) and read via `extern` by
-    # `mm/vm_pgtab.rs` (out of scope).
-    --undefined=__plic_mmio_base
-    # irq/irq.c port. P3-1B: `irq_desc_init`/`do_irq` are called only from
-    # other in-scope files via direct crate-path `use` (`start_kernel.rs`,
-    # `irq/trap.rs`) -- demoted, flags removed. `unregister_irq_handler`
-    # has zero callers anywhere (matches the C original) -- demoted with
-    # `#[allow(dead_code)]`, flag removed. `register_irq_handler` keeps
-    # its flag: still called via `extern` by out-of-scope files
-    # (`timer/timer_core.rs`, `timer/goldfish_rtc.rs`, `console.rs`,
-    # `dev/x1_emac.rs`, `e1000.rs`, `virtio_disk.rs`).
-    --undefined=register_irq_handler
-    # irq/trap.c port (Phase 2 Wave 6). P3-1B mesh sweep: `trapinit`/
-    # `trapinithart` (called from `start_kernel.rs`), `usertrapret`
-    # (called from `proc/{clone,thread}.rs`), `push_sigframe`/
-    # `restore_sigframe` (called from `proc/signal.rs`, via a typed thin
-    # wrapper for the ucontext-mirror-type mismatch), and `enter_irq`/
-    # `exit_irq` (no caller outside this file -- `kernel_irq`/
-    # `user_kirq_entrance`, both below) are now demoted to `pub(crate)`,
-    # all referenced via direct crate-path `use`/wrappers rather than
-    # `extern` redeclarations -- flags removed. `kerneltrap`/`kernel_irq`/
-    # `usertrap`/`user_kirq_entrance` stay: the asm contract
-    # (kernelvec.S's `call kerneltrap`/`call kernel_irq`,
-    # trampoline.S's `.dword usertrap`/`.dword user_kirq_entrance`)
-    # requires these exact link names.
+    # Class 1: asm-referenced (entry.S).
+    --undefined=start
+    --undefined=stack0
+    # Class 1: asm-referenced (kernelvec.S `call`, trampoline.S `.dword`).
     --undefined=kerneltrap
     --undefined=kernel_irq
     --undefined=usertrap
     --undefined=user_kirq_entrance
-    # irq/syscall.c port (Phase 2 Wave 7). P3-1B: `syscall` is called only
-    # from `irq/trap.rs` (direct crate-path `use`) -- demoted, flag
-    # removed. `fetchaddr`/`fetchstr`/`argraw`/`argint`/`argint64`/
-    # `argaddr`/`argstr` keep their flags: still called via `extern` by
-    # out-of-scope files (`mm/sysmm.rs`, `mm/page.rs`,
-    # `vfs/vfs_syscall.rs`).
-    --undefined=fetchaddr
-    --undefined=fetchstr
-    --undefined=argraw
-    --undefined=argint
-    --undefined=argint64
-    --undefined=argaddr
-    --undefined=argstr
-    # timer/timer.c port (Phase 2 Wave 8) -- timer wheel core.
-    # P3-1B mesh sweep (2026-07-13): `__clint_timer_irqno` had zero readers
-    # outside this file (grep-verified) -- demoted to `pub(crate)`, flag
-    # removed. `timer_node_init`/`timer_add`/`timer_remove`/`timer_tick`/
-    # `timer_init` are called only from `timer/sched_timer.rs` via a direct
-    # crate-path `use` (already mesh-clean, no `extern` block existed) --
-    # demoted to `pub(crate)`, flags removed; ordinary same-crate
-    # reachability from `sched_timer_init`/`__do_timer_tick` (both still
-    # forced below) keeps them linked in. `get_jiffs`/`__timebase_frequency`
-    # keep their flags: still read via `extern` by out-of-scope files
-    # (`mm/pcache.rs`, `lock/rcu_test.rs`, `lock/spinlock.rs`,
-    # `machine/machine.rs`). `__jiff_ticks` is still written by `dev/fdt.rs`
-    # and `start.rs` (both out of scope), which already creates a real
-    # undefined-symbol demand -- no flag needed for it either (unchanged
-    # from before this wave).
-    --undefined=__timebase_frequency
-    --undefined=get_jiffs
-    # timer/sched_timer.c port (Phase 2 Wave 8) -- scheduler-tick consumer
-    # + sleep/timeout API. P3-1B mesh sweep: `sched_timer_tick`/
-    # `__do_timer_tick`/`sched_timer_init` (called from `timer_core.rs`/
-    # `proc/sched.rs`/`start_kernel.rs`, all direct crate-path `use`) and
-    # `sched_timer_add_deadline`/`sched_timer_add` (zero callers anywhere,
-    # `#[allow(dead_code)]`) are demoted, flags removed.
-    # `sleep_ms_interruptible` is called only from `proc/sysproc.rs`
-    # (direct crate-path `use`) -- demoted, flag removed. `sched_timer_set`/
-    # `sched_timer_done`/`sleep_ms` keep their flags: still called via
-    # `extern` by out-of-scope files (`lock/{mutex,rwsem,completion,
-    # semaphore}.rs`, `console.rs`, `dev/*.rs`, `vfs/vfs_syscall.rs`, ...).
-    --undefined=sched_timer_set
-    --undefined=sched_timer_done
-    --undefined=sleep_ms
-    # timer/goldfish_rtc.c port (Phase 2 Wave 8) -- RTC MMIO driver.
-    # P3-1B mesh sweep: `__goldfish_rtc_irqno` (zero readers outside this
-    # file), `goldfish_rtc_read_ns`/`_read_sec`/`_set_alarm_ns`/
-    # `_set_alarm_sec`/`_clear_alarm`/`_irq_enable`/`_get_alarm_count`
-    # (called only from `proc/sysproc.rs`/internally) and
-    # `goldfish_rtc_init` (no live caller at all, `#[allow(dead_code)]`,
-    # see this file's module doc) are demoted, flags removed.
-    # `__goldfish_rtc_mmio_base` keeps its flag: still read via `extern`
-    # by `mm/vm_pgtab.rs` (out of scope).
-    --undefined=__goldfish_rtc_mmio_base
-    # ipi/ipi.c port (Phase 2 Wave 9) -- IPI send/receive + per-CPU
-    # bring-up bookkeeping. P3-1B mesh sweep: `ipi_init`/`cpus_init`/
-    # `mycpu_init` (called from `start_kernel.rs`, direct crate-path
-    # `use`), `ipi_send_single` (called from `proc/{sched,signal,
-    # thread_group}.rs`, direct crate-path `use`), `ipi_send_mask`/
-    # `ipi_send_all_but_self` (no caller outside this file) and
-    # `get_cpu_active_mask` (zero callers anywhere, `#[allow(dead_code)]`)
-    # are demoted, flags removed. `ipi_send_all` keeps its flag: still
-    # called via `extern` by `printf.rs` (out of scope). `cpus` (the
-    # per-CPU array) keeps its flag: still read via `extern` by
-    # `lock/rcu.rs`/`mm/vm_pgtab.rs` (out of scope; `proc/rq.rs`/
-    # `irq/trap.rs`, in scope, still read it via their own typed `extern`
-    # too -- left untouched, seeing no benefit to converting a read of an
-    # already-forced, already-public static purely for mesh-cosmetic
-    # reasons).
-    --undefined=ipi_send_all
-    --undefined=cpus
-    # tty/termios.c + tty/tty_dev.c + tty/pty.c port (Phase 2 Wave 10).
-    # `termios_init_default`/`ttydevinit`/`pty_alloc`/`pty_master_read`/
-    # `pty_master_write` are all called from tty.c/ptmx.c/start_kernel.c's
-    # Rust successors (tty/tty.rs, tty/ptmx.rs, kernel/start_kernel.rs --
-    # same-crate calls, no longer automatic linker demand); `pty_dealloc` has no live
-    # caller anywhere (dead code carried over unchanged from the C
-    # original, whose only reference was its own declaration too).
-    # Forced anyway per the plan's "every new public symbol" rule.
-    --undefined=termios_init_default
-    --undefined=ttydevinit
-    --undefined=pty_alloc
-    --undefined=pty_dealloc
-    --undefined=pty_master_read
-    --undefined=pty_master_write
-    # tty/tty.c + tty/ptmx.c port (Phase 2 Wave 11). tty_* are called
-    # from console.rs/tty_dev.rs/pty.rs (still-live extern "C" call
-    # sites) and from ptmx.rs (same-crate direct Rust calls); tty_init/
-    # ptmxinit are called from kernel/start_kernel.rs (same-crate Rust
-    # since Wave 27). Forced anyway per the plan's "every new public
-    # symbol" rule.
-    --undefined=tty_init
-    --undefined=tty_alloc
-    --undefined=tty_free
-    --undefined=tty_ref
-    --undefined=tty_unref
-    --undefined=tty_input
-    --undefined=tty_read
-    --undefined=tty_poll
-    --undefined=tty_write
-    --undefined=tty_output
-    --undefined=tty_ioctl
-    --undefined=tty_open
-    --undefined=tty_close
-    --undefined=tty_hangup
-    --undefined=ptmxinit
-    # tty/session.c port (Phase 2 Wave 12) -- session lifecycle,
-    # controlling-tty management, setsid/getsid. `session_init` is
-    # called from `kernel/start_kernel.rs` (same-crate Rust since Wave
-    # 27)/`proc/thread.rs`; the rest are called only from other Rust files' own
-    # `extern` declarations (`console.rs`, `proc/{clone,exit,pgroup,
-    # pid,sysproc,thread}.rs`, `tty/{tty,tty_dev}.rs`) -- without these
-    # flags the linker could drop the whole module. `session_hangup` has
-    # no live caller anywhere yet (matches the C original -- see
-    # session.rs's module doc); forced anyway per the plan's "every new
-    # public symbol" rule. `session_list` is the global session list
-    # static, read via `proc/proc_shims.rs`'s own typed `extern`
-    # declaration of the same symbol (same precedent as `cpus` in the
-    # ipi.c port).
-    --undefined=session_init
-    --undefined=session_alloc
-    --undefined=session_ref
-    --undefined=session_unref
-    --undefined=session_add_thread
-    --undefined=session_remove_thread
-    --undefined=session_add_pg
-    --undefined=session_remove_pg
-    --undefined=session_set_ctrl_tty
-    --undefined=session_get_ctrl_tty
-    --undefined=session_set_fg_pgid
-    --undefined=session_get_fg_pgid
-    --undefined=session_hangup
-    --undefined=session_setsid
-    --undefined=session_getsid
-    --undefined=get_session
-    --undefined=session_list
-    # vfs/inode.c port (Phase 2 Wave 13) -- inode cache/refcount/locking
-    # core + vfs_namei path resolution. All 30 symbols are called from
-    # other C translation units still in kernel/vfs/ (fs.c, file.c,
-    # vfs_syscall.c, tmpfs/, xv6fs/, devtmpfs/) or from Rust
-    # (proc/thread.rs's install_user_root uses vfs_iput/vfs_namei via its
-    # own local extern declarations) -- without these flags the linker
-    # could drop the whole object file from the static archive.
-    --undefined=__vfs_inode_init
-    --undefined=vfs_ilock
-    --undefined=vfs_ilock_trylock
-    --undefined=vfs_iunlock
-    --undefined=vfs_inode_check_valid
-    --undefined=vfs_idup
-    --undefined=vfs_idup_not_zero
-    --undefined=vfs_iput
-    --undefined=vfs_dirty_inode
-    --undefined=vfs_sync_inode
-    --undefined=vfs_ilookup
-    --undefined=vfs_dir_iter
-    --undefined=vfs_dir_isempty
-    --undefined=vfs_readlink
-    --undefined=vfs_create
-    --undefined=vfs_mknod
-    --undefined=vfs_link
-    --undefined=vfs_unlink
-    --undefined=vfs_mkdir
-    --undefined=vfs_move
-    --undefined=vfs_symlink
-    --undefined=vfs_itruncate
-    --undefined=vfs_ilock_two_nondirectories
-    --undefined=vfs_ilock_two_directories
-    --undefined=vfs_iunlock_two
-    --undefined=vfs_chdir
-    --undefined=vfs_chroot
-    --undefined=vfs_curdir
-    --undefined=vfs_curroot
-    --undefined=vfs_namei
-    --undefined=vfs_nameiparent
-    # vfs/file.c + vfs/pipe.c port (Phase 2 Wave 14) -- vfs_file
-    # lifecycle/dispatch and the pipe ring buffer. Called from other C
-    # translation units still in kernel/vfs/ (fs.c, vfs_syscall.c,
-    # tmpfs/, xv6fs/, devtmpfs/), from kernel/vfs/fdtable.rs, from
-    # kernel/mm/vm.rs (vfs_fput/vfs_fdup), from kernel/exec.rs, and
-    # (pipe_*) from kernel/tty/tty.rs, kernel/tty/pty.rs,
-    # kernel/console.rs, and kernel/start_kernel.rs (pipe_init,
-    # same-crate Rust since Wave 27) --
-    # without these flags the
-    # linker could drop the whole object file from the static archive.
-    --undefined=__vfs_file_init
-    --undefined=__vfs_file_shrink_cache
-    --undefined=vfs_fileopen
-    --undefined=vfs_fput
-    --undefined=vfs_fdup
-    --undefined=vfs_ioctl
-    --undefined=vfs_fileread
-    --undefined=vfs_filestat
-    --undefined=vfs_filewrite
-    --undefined=vfs_filelseek
-    --undefined=truncate
-    --undefined=vfs_pipealloc
-    --undefined=vfs_custom_fd_alloc
-    --undefined=vfs_sockalloc
-    --undefined=pipe_init
-    --undefined=pipe_alloc
-    --undefined=pipe_close
-    --undefined=pipe_set_flags
-    --undefined=pipe_get_flags
-    --undefined=pipe_read
-    --undefined=pipe_write
-    --undefined=pipe_open
-    # vfs/fdtable.c port (Phase 2 Wave 15) -- per-thread fd table
-    # (alloc/dealloc/clone/put, RCU-protected lookup, close-on-exec).
-    # Called from other C translation units still in kernel/vfs/ (fs.c,
-    # vfs_syscall.c) and kernel/exec.rs, and from kernel/proc/{clone,exit}.rs
-    # / kernel/mm/vm.rs / kernel/vfs/file.rs via their own local extern
-    # declarations -- without these flags the linker could drop the whole
-    # object file from the static archive.
-    --undefined=__vfs_fdtable_global_init
-    --undefined=vfs_fdtable_alloc_fd_from
-    --undefined=vfs_fdtable_alloc_fd
-    --undefined=vfs_fdtable_init
-    --undefined=vfs_fdtable_clone
-    --undefined=vfs_fdtable_put
-    --undefined=vfs_fdtable_get_file
-    --undefined=vfs_fdtable_dealloc_fd
-    --undefined=vfs_fdtable_get_fdflags
-    --undefined=vfs_fdtable_set_fdflags
-    --undefined=vfs_fdtable_close_on_exec
-    # vfs/fs.c port (Phase 2 Wave 16) -- filesystem-type registry,
-    # mount/unmount state machine, superblock lock/refcount/mountcount
-    # API (the `vfs_superblock_{r,w}lock` pair `inode.rs` already calls
-    # as an extern), per-superblock inode hash cache, dentry-to-inode
-    # resolution, and `fs_struct` lifecycle. Called from other C
-    # translation units still in kernel/vfs/ (vfs_syscall.c, tmpfs/,
-    # xv6fs/, devtmpfs/), from kernel/start_kernel.rs (vfs_init,
-    # same-crate Rust since Wave 27), and from
-    # kernel/proc/{thread,clone,exit}.rs via their own local extern
-    # declarations -- without these flags the linker could drop the whole
-    # object file from the static archive. `tmpfs_smoketest_start`/
-    # `__tmpfs_smoketest_kthread` were not carried over (dead code: zero
-    # live callers, the C original's own call site was already commented
-    # out -- see fs.rs's module doc).
-    --undefined=vfs_init
-    --undefined=vfs_get_deferred_iput_wq
-    --undefined=__vfs_shrink_caches
-    --undefined=vfs_fs_type_allocate
-    --undefined=vfs_fs_type_free
-    --undefined=vfs_register_fs_type
-    --undefined=vfs_unregister_fs_type
-    --undefined=vfs_mount_lock
-    --undefined=vfs_mount_unlock
-    --undefined=vfs_mount
-    --undefined=vfs_unmount
-    --undefined=vfs_unmount_lazy
-    --undefined=vfs_make_orphan
-    --undefined=__vfs_final_unmount_cleanup
-    --undefined=vfs_get_mnt_rooti
-    --undefined=vfs_superblock_rlock
-    --undefined=vfs_superblock_wlock
-    --undefined=vfs_superblock_wholding
-    --undefined=vfs_superblock_unlock
-    --undefined=vfs_superblock_spin_lock
-    --undefined=vfs_superblock_spin_unlock
-    --undefined=vfs_superblock_mountcount_inc
-    --undefined=vfs_superblock_mountcount_dec
-    --undefined=vfs_superblock_dup
-    --undefined=vfs_superblock_put
-    --undefined=vfs_alloc_inode
-    --undefined=vfs_get_inode
-    --undefined=vfs_sync_superblock
-    --undefined=vfs_get_fs_type
-    --undefined=vfs_put_fs_type
-    --undefined=vfs_get_inode_cached
-    --undefined=vfs_add_inode
-    --undefined=vfs_remove_inode
-    --undefined=vfs_release_dentry
-    --undefined=vfs_get_dentry_inode_locked
-    --undefined=vfs_get_dentry_inode
-    --undefined=vfs_struct_init
-    --undefined=vfs_struct_clone
-    --undefined=vfs_struct_put
-    --undefined=vfs_inode_get_ref
-    --undefined=vfs_inode_put_ref
-    --undefined=vfs_inode_deref
-    --undefined=vfs_dump_inodes
-    --undefined=vfs_dump_sb_inodes
-    --undefined=vfs_root_inode
-    # vfs/vfs_syscall.c port (Phase 2 Wave 17) -- every VFS-facing
-    # syscall entry point (referenced only from the Wave-7 Rust
-    # dispatch table, kernel/irq/syscall.rs's own extern block) plus
-    # the two kernel-internal mount/unmount path helpers
-    # (vfs_mount_path/vfs_umount_path) called from kernel/vfs/fs.rs's
-    # vfs_init() via its own local extern declaration -- without these
-    # flags the linker could drop the whole object file from the
-    # static archive.
-    --undefined=sys_vfs_dup
-    --undefined=sys_vfs_dup2
-    --undefined=sys_vfs_read
-    --undefined=sys_vfs_write
-    --undefined=sys_vfs_close
-    --undefined=sys_vfs_fstat
-    --undefined=sys_vfs_lseek
-    --undefined=sys_vfs_ftruncate
-    --undefined=sys_vfs_fcntl
-    --undefined=sys_vfs_stat
-    --undefined=sys_vfs_lstat
-    --undefined=sys_vfs_access
-    --undefined=sys_vfs_readlink
-    --undefined=sys_vfs_rename
-    --undefined=sys_vfs_open
-    --undefined=sys_vfs_mkdir
-    --undefined=sys_vfs_mknod
-    --undefined=sys_vfs_unlink
-    --undefined=sys_vfs_link
-    --undefined=sys_vfs_symlink
-    --undefined=sys_vfs_chdir
-    --undefined=sys_getcwd
-    --undefined=sys_vfs_pipe
-    --undefined=sys_vfs_connect
-    --undefined=sys_getdents
-    --undefined=sys_chroot
-    --undefined=vfs_mount_path
-    --undefined=sys_mount
-    --undefined=vfs_umount_path
-    --undefined=sys_umount
-    --undefined=sys_dumpinode
-    --undefined=sys_vfs_ioctl
-    --undefined=sys_tcgetattr
-    --undefined=sys_tcsetattr
-    --undefined=sys_statfs
-    --undefined=sys_vfs_poll
-    # vfs/tmpfs/{superblock,inode,truncate,file}.c port (Phase 2 Wave 18)
-    # -- the first filesystem *driver* (as opposed to vfs core) to move
-    # to Rust. `tmpfs_init`/`tmpfs_mount_root` are called from
-    # `vfs/fs.rs`'s `vfs_init()` (real demand already); `tmpfs_alloc_inode`/
-    # `tmpfs_get_inode`/`tmpfs_sync_fs`/`tmpfs_unmount_begin`/
-    # `tmpfs_alloc_superblock`/`tmpfs_free`/`tmpfs_make_directory` are
-    # called from `kernel/vfs/devtmpfs/superblock.c` (still C, real
-    # demand already, via its own `#include "../tmpfs/tmpfs_private.h"`);
-    # the rest (`tmpfs_free_inode`, `tmpfs_free_symlink_target`,
-    # `tmpfs_shrink_caches`, `__tmpfs_truncate`,
-    # `__tmpfs_migrate_to_allocated_blocks`, `tmpfs_inode_pcache_init`,
-    # `tmpfs_inode_pcache_teardown`, `tmpfs_open`) are reachable today only
-    # through this crate's own `tmpfs_inode_ops`/`tmpfs_file_ops` vtable
-    # data (address-of relocations, not call instructions) or from a
-    # sibling tmpfs submodule -- forced anyway per the plan's "every new
-    # public symbol" rule, and because every one of them is also declared
-    # `extern` in `tmpfs_private.h` (kept as an honest C-ABI contract for
-    # Wave 20's devtmpfs work; see kernel/vfs/tmpfs/mod.rs's module doc).
-    --undefined=tmpfs_init
-    --undefined=tmpfs_mount_root
-    --undefined=tmpfs_alloc_inode
-    --undefined=tmpfs_free_inode
-    --undefined=tmpfs_alloc_superblock
-    --undefined=tmpfs_free
-    --undefined=tmpfs_get_inode
-    --undefined=tmpfs_sync_fs
-    --undefined=tmpfs_unmount_begin
-    --undefined=tmpfs_shrink_caches
-    --undefined=tmpfs_make_directory
-    --undefined=tmpfs_free_symlink_target
-    --undefined=__tmpfs_truncate
-    --undefined=__tmpfs_migrate_to_allocated_blocks
-    --undefined=tmpfs_inode_pcache_init
-    --undefined=tmpfs_inode_pcache_teardown
-    --undefined=tmpfs_open
-    # vfs/xv6fs/*.c port (Phase 2 Wave 19) -- the root filesystem, ported
-    # in two sub-waves (see the RUST_CRATE_SOURCES comment above).
-    # `xv6fs_init`/`xv6fs_mount_root` are called from `vfs/fs.rs`'s
-    # `vfs_init()`/`kernel/start_kernel.rs` (same-crate Rust since Wave
-    # 27). Every symbol
-    # below is also declared `extern` in `xv6fs_private.h`/
-    # `block_cache.h` (unchanged C-ABI contracts), so all are forced per
-    # the plan's "every new public symbol" rule even where today's only
-    # caller is a sibling xv6fs submodule (reached via a plain Rust-path
-    # call, not a `call`/relocation the linker would otherwise see from
-    # this force-list's own vantage point until something upstream roots
-    # it -- `xv6fs_init`/`xv6fs_mount_root` are that root).
-    # Sub-wave A (superblock.c + inode.c):
-    --undefined=xv6fs_init
-    --undefined=xv6fs_mount_root
-    --undefined=xv6fs_alloc_inode
-    --undefined=xv6fs_get_inode
-    --undefined=xv6fs_sync_fs
-    --undefined=xv6fs_unmount_begin
-    --undefined=xv6fs_free
-    --undefined=xv6fs_shrink_caches
-    --undefined=xv6fs_inode_pcache_init
-    --undefined=xv6fs_iupdate
-    --undefined=xv6fs_sync_inode
-    --undefined=xv6fs_dirty_inode
-    --undefined=xv6fs_destroy_inode
-    --undefined=xv6fs_free_inode
-    --undefined=xv6fs_open
-    --undefined=__xv6fs_inode_cache
-    # Sub-wave B (truncate.c + file.c + log.c + block_cache.c):
-    --undefined=xv6fs_bmap
-    --undefined=xv6fs_bmap_read
-    --undefined=xv6fs_itrunc
-    --undefined=xv6fs_truncate
-    --undefined=xv6fs_initlog
-    --undefined=xv6fs_begin_op
-    --undefined=xv6fs_begin_op_nointr
-    --undefined=xv6fs_end_op
-    --undefined=xv6fs_log_write
-    --undefined=xv6fs_bcache_init
-    --undefined=xv6fs_bcache_destroy
-    --undefined=xv6fs_bcache_mark_free
-    --undefined=xv6fs_bcache_find_free_block
-    --undefined=xv6fs_bcache_find_free_block_near
-    --undefined=xv6fs_bcache_free_count
-    # vfs/devtmpfs/superblock.c port (Phase 2 Wave 20) -- the last C file
-    # in kernel/vfs/. `devtmpfs_init`/`devtmpfs_post_mount_populate` are
-    # called from `vfs/fs.rs`'s `vfs_init()` (real demand already);
-    # `devtmpfs_create_node`/`devtmpfs_remove_node`/
-    # `devtmpfs_populate_devices` are declared `extern` in the still-C
-    # `kernel/inc/devtmpfs.h` (`devtmpfs_create_node`/`_remove_node` are
-    # called from `kernel/dev/dev.rs`, ported to Rust in Wave 21 below;
-    # `devtmpfs_populate_devices` only self-called today but forced
-    # anyway per the plan's "every new public symbol declared in a
-    # still-live header" rule, same precedent as tmpfs's/xv6fs's own
-    # force-list entries above).
-    --undefined=devtmpfs_init
-    --undefined=devtmpfs_post_mount_populate
-    --undefined=devtmpfs_create_node
-    --undefined=devtmpfs_remove_node
-    --undefined=devtmpfs_populate_devices
-    # dev/dev.c + cdev.c + blkdev.c port (Phase 2 Wave 21) -- the
-    # kobject-backed, RCU-protected major/minor device table
-    # (kernel/dev/dev.rs) plus the character/block dispatch layers on top
-    # of it (kernel/dev/cdev.rs, kernel/dev/blkdev.rs). Every symbol below
-    # is declared `extern` in the still-live, unchanged C headers
-    # `kernel/inc/dev/{dev,cdev,blkdev}.h` and called from still-C
-    # drivers/callers (console.c-successor console.rs, tty_dev.rs,
-    # ptmx.rs, nullrand.c-successor nullrand.rs, virtio_disk.c,
-    # ramdisk.c, x1_sdhci.c-successor x1_sdhci.rs -- Wave 25), so all are
-    # forced per the plan's "every new public symbol" rule. (`dev_test.c`,
-    # formerly also a caller, was dead code -- deleted in Wave 24, see
-    # that wave's entry below.)
-    --undefined=dev_table_init
-    --undefined=device_get
-    --undefined=device_dup
-    --undefined=device_put
-    --undefined=device_register
-    --undefined=device_unregister
-    --undefined=dev_ioctl
-    --undefined=dev_for_each_device
-    --undefined=cdev_get
-    --undefined=cdev_dup
-    --undefined=cdev_put
-    --undefined=cdev_register
-    --undefined=cdev_unregister
-    --undefined=cdev_read
-    --undefined=cdev_write
-    --undefined=blkdev_get
-    --undefined=blkdev_dup
-    --undefined=blkdev_put
-    --undefined=blkdev_register
-    --undefined=blkdev_unregister
-    --undefined=blkdev_submit_bio
-    # dev/bio.c port (Phase 2 Wave 22) -- the Linux-style ref-counted
-    # block-I/O request object (kernel/dev/bio.rs). Declared `extern` in
-    # the still-live, unchanged `kernel/inc/dev/bio.h` and called from
-    # `kernel/dev/blkdev.rs` (bio_validate), `kernel/bufcache.rs`
-    # (bio_alloc/bio_add_seg/bio_release), still-C drivers (virtio_disk.c,
-    # ramdisk.c), and `kernel/dev/x1_sdhci.rs` (Wave 25, a same-crate Rust
-    # call now, but `bio_validate` is reached via `blkdev.rs` -- forced
-    # per the plan's "every new public symbol" rule regardless, since
-    # virtio_disk.c/ramdisk.c are still-C callers of this same symbol set.
-    # `bio_dup` has no live caller today
-    # (forced anyway, same precedent as `devtmpfs_populate_devices`
-    # above -- it is part of the header's public contract).
-    --undefined=bio_alloc
-    --undefined=bio_add_seg
-    --undefined=bio_dup
-    --undefined=bio_release
-    --undefined=bio_validate
-    # bio.c port (Phase 2 Wave 22) -- the classic xv6 struct buf
-    # disk-block cache (kernel/bufcache.rs; not kernel/dev/bio.rs above
-    # -- see that file's module doc). Declared `extern` in the
-    # still-live, unchanged `kernel/inc/defs.h` and called from
-    # `kernel/vfs/xv6fs/*.rs` (bread/brelse/bwrite/bwrite_async/bsync/
-    # bpin/bunpin) and `kernel/start_kernel.rs` (binit, same-crate Rust
-    # since Wave 27) -- forced per the
-    # plan's "every new public symbol" rule. `bdirty_count` has no live
-    # caller today (forced anyway, same precedent as `bio_dup` above).
-    --undefined=binit
-    --undefined=bread
-    --undefined=bwrite
-    --undefined=bwrite_async
-    --undefined=bsync
-    --undefined=brelse
-    --undefined=bpin
-    --undefined=bunpin
-    # dev/fdt.c port (Phase 2 Wave 23) -- the FDT parser + platform-config
-    # applier (kernel/dev/fdt.rs). `fdt_early_scan_memory`/`fdt_init`/
-    # `fdt_apply_platform_config` are called from `kernel/start_kernel.rs`
-    # (same-crate Rust since Wave 27). The rest (`fdt_dump`/`fdt_walk`/
-    # `fdt_node_lookup`/`fdt_path_lookup`/`fdt_compat_lookup`/
-    # `fdt_compat_next`/`fdt_phandle_lookup`) have no live caller today
-    # (the one potential call site, `fdt_walk(fdt_base)` in
-    # `kernel/start_kernel.rs`, is commented out) but stay declared `extern` in
-    # the still-live, unchanged `kernel/inc/dev/fdt.h` -- forced anyway,
-    # same precedent as `bio_dup`/`devtmpfs_populate_devices` above (part
-    # of the header's public contract). `fdt_valid`/`fdt_totalsize` are
-    # declared in the header too but were never real C symbols (only
-    # same-named macros local to the old `fdt.c` translation unit,
-    # verified by grep) -- not forced, since nothing was ever linkable
-    # there to preserve.
-    --undefined=fdt_early_scan_memory
-    --undefined=fdt_init
-    --undefined=fdt_apply_platform_config
-    --undefined=fdt_dump
-    --undefined=fdt_walk
-    --undefined=fdt_node_lookup
-    --undefined=fdt_path_lookup
-    --undefined=fdt_compat_lookup
-    --undefined=fdt_compat_next
-    --undefined=fdt_phandle_lookup
-    --undefined=platform
-    # dev/nullrand.c + dev/netdev.c port (Phase 2 Wave 24).
-    # `nullranddevinit` is called from `kernel/start_kernel.rs`
-    # (same-crate Rust since Wave 27); `random_fill_bytes` is called from
-    # `kernel/proc/sysproc.rs`'s `sys_getrandom` (same-crate Rust call,
-    # forced anyway per the plan's "every new public symbol declared in
-    # a still-live header" rule -- `kernel/inc/defs.h` still declares
-    # it). `netdev_init` is called from `kernel/start_kernel.rs`;
-    # `netdev_register`/`netdev_set_link` from still-C `kernel/e1000.c`
-    # and (Wave 25 on) same-crate Rust `kernel/dev/x1_emac.rs` --
-    # `e1000.c` alone already justifies forcing these; `netdev_get_default`
-    # from still-C `kernel/net.c`. `netdev_get_by_index`/
-    # `netdev_get_by_name`/`netdev_set_link_callback` have no live
-    # caller today but stay declared `extern` in the still-live,
-    # unchanged `kernel/inc/dev/netdev.h` -- forced anyway, same
-    # precedent as `bio_dup`/`devtmpfs_populate_devices` above (part of
-    # the header's public contract).
-    --undefined=nullranddevinit
-    --undefined=random_fill_bytes
-    --undefined=netdev_init
-    --undefined=netdev_register
-    --undefined=netdev_get_default
-    --undefined=netdev_get_by_index
-    --undefined=netdev_get_by_name
-    --undefined=netdev_set_link
-    --undefined=netdev_set_link_callback
-    # dev/{yt8531,x1_emac,x1_sdhci}.c port (Phase 2 Wave 25) -- the last C
-    # in kernel/dev/ (kernel/dev/{yt8531,x1_emac,x1_sdhci}.rs).
-    # `x1_emac_init`/`x1_sdhci_init` are called from
-    # `kernel/start_kernel.rs` (same-crate Rust since Phase 2 Wave 27) --
-    # forced per the plan's "every new public symbol" rule regardless.
-    # `mdio_read`/`mdio_write`/`yt8531_init`/`yt8531_poll_link`/
-    # `yt8531_wait_autoneg` (declared `extern` in the now C-caller-less
-    # `kernel/inc/dev/yt8531.h`) are reached only via direct same-crate
-    # Rust calls from `kernel/dev/x1_emac.rs` -- ordinary Rust codegen
-    # reachability from the two forced entry points below already keeps
-    # them linked in, so they are deliberately NOT added here (no still-C
-    # caller exists to justify it, unlike the header-contract precedents
-    # elsewhere in this list).
-    --undefined=x1_emac_init
-    --undefined=x1_sdhci_init
-    # exec.c port (Phase 2 Wave 26) -- kernelvec.S/trampoline.S never
-    # reference these by symbol name, and (with exec.c gone) nothing in
-    # the remaining C tree references them either: both callers are
-    # same-crate Rust (`kernel/proc/thread.rs`'s `init_entry` calls `exec`
-    # to launch `/bin/init` at boot; `kernel/irq/syscall.rs`'s dispatch
-    # table calls `sys_exec` via its own function-pointer entry) --
-    # without these flags the linker could drop the whole module.
-    --undefined=exec
-    --undefined=sys_exec
-    # start_kernel.c port (Phase 2 Wave 27) -- the boot orchestrator.
-    # `start_kernel` is called only from `kernel/start.rs` (same-crate
-    # Rust, `entry.S -> start() -> start_kernel()`); `start_kernel_post_init`
-    # only from `kernel/proc/thread.rs`'s `init_entry`. Both forced per the
-    # plan's "every new public symbol" rule, same precedent as `exec`/
-    # `sys_exec` above. `__physical_memory_start`/`__physical_memory_end`/
-    # `__physical_total_pages` are DATA symbols (not functions) whose sole
-    # definition now lives in `kernel/start_kernel.rs`, read via `extern`
-    # by a dozen other files (`printf.rs`, `ipi.rs`, `mm/vm_pgtab.rs`,
-    # `mm/page.rs`, `dev/fdt.rs`, `proc/sysproc.rs`, ...) but never
-    # referenced *by name* from outside the xv6_rust archive -- same class
-    # of concern as the page.c port's `--undefined=__buddy_pools` /
-    # `--undefined=xv6_total_managed_pages` above, forced for the same
-    # reason.
-    --undefined=start_kernel
-    --undefined=start_kernel_post_init
-    --undefined=__physical_memory_start
-    --undefined=__physical_memory_end
-    --undefined=__physical_total_pages
-    # virtio_disk.c + ramdisk.c port (Phase 2 Wave 28, sub-wave A) --
-    # the final porting wave's block drivers (kernel/virtio_disk.rs,
-    # kernel/ramdisk.rs). `virtio_disk_init`/`ramdisk_init` are called
-    # from `kernel/start_kernel.rs`'s `start_kernel_post_init`
-    # (same-crate Rust since Wave 27); `__virtio_mmio_base`/
-    # `__virtio_irqno` are DATA symbols read via `extern` by
-    # `kernel/dev/fdt.rs` (`fdt_apply_platform_config`, populates them)
-    # and `kernel/mm/vm_pgtab.rs`/`kernel/dev/fdt.rs`'s own `kvmmake`
-    # path, but never referenced *by name* from outside the xv6_rust
-    # archive -- same class of concern as `start_kernel.c`'s
-    # `__physical_memory_start` above, forced for the same reason.
-    --undefined=virtio_disk_init
-    --undefined=ramdisk_init
-    --undefined=__virtio_mmio_base
-    --undefined=__virtio_irqno
-    # pci.c + e1000.c + net.c + sysnet.c port (Phase 2 Wave 28, sub-wave
-    # B) -- the final porting wave's network drivers
-    # (kernel/pci.rs/e1000.rs/net.rs/sysnet.rs). `pci_init` is called
-    # from `kernel/start_kernel.rs`'s boot-hart main init (same-crate
-    # Rust since Wave 27); `sockinit` from `start_kernel_post_init`.
-    # `__pcie_ecam_mmio_base` is read via `extern` by `kernel/mm/
-    # vm_pgtab.rs` (`kvminit`)/`kernel/dev/fdt.rs`; `__e1000_pci_mmio_base`
-    # likewise by `vm_pgtab.rs`; `__e1000_pci_irqno` has no other
-    # referencer today but stays declared `extern` in the still-live
-    # `kernel/inc/dev/e1000_dev.h` -- forced anyway, same precedent as
-    # `bio_dup`/`devtmpfs_populate_devices` elsewhere in this list (part
-    # of the header's public contract). `e1000_init` is called from
-    # `kernel/pci.rs` (same-crate Rust since this same wave);
-    # `e1000_transmit` only via the `netdev_ops.transmit` function
-    # pointer today but stays declared `extern` in the still-live
-    # `kernel/inc/defs.h`, same precedent. `net_rx`/`mbufalloc`/
-    # `mbuffree` are called from still-C-turned-Rust `kernel/dev/
-    # x1_emac.rs` (Wave 25) and this wave's own `e1000.rs`;
-    # `net_tx_udp` from `kernel/sysnet.rs`'s `sockwrite`.
-    # `mbufpull`/`mbufpush`/`mbufput`/`mbuftrim`/`mbufq_pushtail`/
-    # `mbufq_pophead`/`mbufq_empty`/`mbufq_init` are declared `extern` in
-    # the still-live `kernel/inc/dev/net.h` -- `mbufq_init` has a real
-    # same-crate caller (`kernel/vfs/file.rs`'s `vfs_sockalloc`, Wave
-    # 14), the rest are reached only via ordinary intra-file Rust
-    # codegen from `net_rx`/`net_tx_udp` (already forced above) except
-    # where no live caller exists at all, forced anyway per the header-
-    # contract precedent. `sockclose`/`sockread`/`sockwrite` are
-    # declared `extern` in `kernel/inc/defs.h` but have no live caller
-    # anywhere in the tree (see `kernel/sysnet.rs`'s module doc for the
-    # full investigation) -- forced anyway, same header-contract
-    # precedent; `sockrecvudp` is called from `kernel/net.rs`'s
-    # `net_rx_udp` (same-crate Rust since this same wave); `sock_lock`/
-    # `sockets` are DATA symbols read/written via `extern` by
-    # `kernel/vfs/file.rs`'s `vfs_sockalloc`.
-    --undefined=pci_init
-    --undefined=sockinit
-    --undefined=__pcie_ecam_mmio_base
-    --undefined=__e1000_pci_mmio_base
-    --undefined=__e1000_pci_irqno
-    --undefined=e1000_init
-    --undefined=e1000_transmit
-    --undefined=net_rx
-    --undefined=net_tx_udp
-    --undefined=mbufalloc
-    --undefined=mbuffree
-    --undefined=mbufpull
-    --undefined=mbufpush
-    --undefined=mbufput
-    --undefined=mbuftrim
-    --undefined=mbufq_init
-    --undefined=mbufq_pushtail
-    --undefined=mbufq_pophead
-    --undefined=mbufq_empty
-    --undefined=sockclose
-    --undefined=sockread
-    --undefined=sockwrite
-    --undefined=sockrecvudp
-    --undefined=sock_lock
-    --undefined=sockets
+    # Class 2: printf_shim.c's one import.
+    --undefined=printf_rust
 )
 
 # ==============================================================================

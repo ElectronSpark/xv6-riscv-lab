@@ -57,11 +57,9 @@ fn is_err<T>(p: *mut T) -> bool {
     is_err_value(p as usize)
 }
 
-// dev/bio.c (still C, Wave 22): validates a bio's fields against its
-// target block device.
-unsafe extern "C" {
-    fn bio_validate(bio: *mut bio, blkdev: *mut blkdev_t) -> c_int;
-}
+// P3-1D mesh sweep: dev/bio.rs is in scope for this wave; validates a
+// bio's fields against its target block device.
+use super::bio::bio_validate;
 
 // ---------------------------------------------------------------------------
 // Underlying device_ops_t vtable: forwards device_t-level calls into the
@@ -114,8 +112,10 @@ fn blkdev_ops_validate(ops: *const blkdev_ops_t) -> bool {
 
 /// Get a block device by its major and minor numbers. Returns the
 /// blkdev on success, or `ERR_PTR` on error.
-#[no_mangle]
-pub extern "C" fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t {
+// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`,
+// `vfs/file.rs`) now import this via crate-path `use` instead of an
+// `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t {
     let device = device_get(major, minor);
     if is_err(device) {
         return device as *mut blkdev_t;
@@ -129,24 +129,31 @@ pub extern "C" fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t {
     device as *mut blkdev_t
 }
 
-#[no_mangle]
-pub extern "C" fn blkdev_dup(dev: *mut blkdev_t) -> c_int {
+// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+// grep) -- demoted; `#[allow(dead_code)]` documents the gap, same
+// precedent as `dev/cdev.rs`'s `cdev_dup`.
+#[allow(dead_code)]
+pub(crate) extern "C" fn blkdev_dup(dev: *mut blkdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
     device_dup(dev as *mut device_t)
 }
 
-#[no_mangle]
-pub extern "C" fn blkdev_put(dev: *mut blkdev_t) -> c_int {
+// P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`,
+// `vfs/file.rs`) now import this via crate-path `use` instead of an
+// `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn blkdev_put(dev: *mut blkdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
     device_put(dev as *mut device_t)
 }
 
-#[no_mangle]
-pub extern "C" fn blkdev_register(dev: *mut blkdev_t) -> c_int {
+// P3-1D mesh sweep: callers (`ramdisk.rs`, `virtio_disk.rs`,
+// `dev/x1_sdhci.rs`) now import this via crate-path `use` instead of an
+// `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn blkdev_register(dev: *mut blkdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
@@ -165,16 +172,22 @@ pub extern "C" fn blkdev_register(dev: *mut blkdev_t) -> c_int {
     device_register(device)
 }
 
-#[no_mangle]
-pub extern "C" fn blkdev_unregister(dev: *mut blkdev_t) -> c_int {
+// P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree
+// grep) -- demoted; `#[allow(dead_code)]` documents the gap, same
+// precedent as `blkdev_dup` above.
+#[allow(dead_code)]
+pub(crate) extern "C" fn blkdev_unregister(dev: *mut blkdev_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
     device_unregister(dev as *mut device_t)
 }
 
-#[no_mangle]
-pub extern "C" fn blkdev_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
+// P3-1D mesh sweep: callers (`ramdisk.rs`, `bufcache.rs`,
+// `virtio_disk.rs`, `dev/x1_sdhci.rs`, `vfs/xv6fs/superblock.rs`) now
+// import this via crate-path `use` instead of an `extern` redeclaration --
+// demoted.
+pub(crate) extern "C" fn blkdev_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
     if blkdev.is_null() || bio_ptr.is_null() {
         return neg(EINVAL);
     }

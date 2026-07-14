@@ -98,15 +98,12 @@ unsafe extern "C" {
     // string.rs.
     fn strncpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
     fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
-
-    // net.rs (this wave, same crate).
-    fn mbufalloc(headroom: c_uint) -> *mut mbuf;
-    fn mbuffree(m: *mut mbuf);
-    fn net_rx(m: *mut mbuf);
-
-    // dev/netdev.rs (Phase 2 Wave 24).
-    fn netdev_register(dev: *mut netdev) -> c_int;
 }
+// P3-1D mesh sweep: net.rs/dev/netdev.rs are in scope for this wave;
+// signatures are identical, so these become plain crate-path imports
+// instead of `extern "C"` redeclarations.
+use crate::net::{mbufalloc, mbuffree, net_rx};
+use crate::dev::netdev::netdev_register;
 
 // ===========================================================================
 // Register offsets/bits -- redeclared locally from `kernel/inc/dev/
@@ -184,15 +181,14 @@ mod layout_asserts {
 }
 
 // ===========================================================================
-// Platform-probed MMIO base/IRQ. Keeps the exact C symbol names/types:
-// `kernel/mm/vm_pgtab.rs` (`kvmmake`) externs `__e1000_pci_mmio_base` by
-// name; `kernel/inc/dev/e1000_dev.h` declares both `extern`.
+// Platform-probed MMIO base/IRQ.
 // ===========================================================================
 
-#[no_mangle]
-pub static mut __e1000_pci_mmio_base: u64 = 0x40000000;
-#[no_mangle]
-pub static mut __e1000_pci_irqno: u64 = 33;
+// P3-1D mesh sweep: caller (`mm/vm_pgtab.rs`) now imports this via
+// crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) static mut __e1000_pci_mmio_base: u64 = 0x40000000;
+// P3-1D mesh sweep: no caller anywhere outside this file -- demoted.
+pub(crate) static mut __e1000_pci_irqno: u64 = 33;
 
 // ===========================================================================
 // Global driver state -- mirrors the C file's plain `STATIC`/file-scope
@@ -432,8 +428,9 @@ unsafe fn e1000_set_receive_descriptor_base(
 
 /// Called by [`crate::pci::pci_init`]. `xregs` is the memory address at
 /// which the e1000's registers are mapped.
-#[no_mangle]
-pub extern "C" fn e1000_init(xregs: *mut u32) {
+// P3-1D mesh sweep: caller (`pci.rs`) now imports this via crate-path
+// `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn e1000_init(xregs: *mut u32) {
     let default_mac_address: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
 
     // SAFETY: single-threaded boot-time init: `pci_init` (this driver's
@@ -546,8 +543,12 @@ pub extern "C" fn e1000_init(xregs: *mut u32) {
 /// descriptor ring so the e1000 sends it. Stashes a pointer so it can
 /// be freed after sending. Returns `0` on success, `-1` if the ring is
 /// full (the next descriptor hasn't finished transmitting yet).
-#[no_mangle]
-pub extern "C" fn e1000_transmit(m: *mut mbuf) -> c_int {
+// P3-1D mesh sweep: only referenced by address (as the `netdev_ops.
+// transmit` function-pointer value below), never called by name via an
+// `extern` redeclaration -- demoted. `extern "C"` (the calling-convention
+// marker) is kept: the fn-pointer-typed field it's stored into requires
+// it, per this wave's fn-pointer-value hazard class.
+pub(crate) extern "C" fn e1000_transmit(m: *mut mbuf) -> c_int {
     // Raw spin_lock/spin_unlock (not RAII): early-return-while-holding
     // exit path below (matches this crate's convention, see
     // `kernel/virtio_disk.rs`/`kernel/ramdisk.rs`'s identical rationale).
@@ -626,12 +627,11 @@ unsafe fn e1000_recv() {
         // Start processing the received packet.
         // SAFETY: `buf`/`desc` live.
         unsafe { (*buf).len = (*desc).length as c_uint };
-        // SAFETY: `buf` live; `net_rx` takes ownership (frees or
-        // forwards it, matching every other netdev driver's contract).
-        unsafe { net_rx(buf) };
-        // Allocate a new buffer for this slot.
-        // SAFETY: no preconditions.
-        let newbuf = unsafe { mbufalloc(0) };
+        // `buf` live; `net_rx` takes ownership (frees or forwards it,
+        // matching every other netdev driver's contract).
+        net_rx(buf);
+        // Allocate a new buffer for this slot. No preconditions.
+        let newbuf = mbufalloc(0);
         // Let the descriptor point to the newly allocated buffer and
         // tell the controller we've finished processing this packet.
         // SAFETY: `slot`/`desc` live; `newbuf` may be null on OOM (see

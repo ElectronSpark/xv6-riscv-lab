@@ -186,18 +186,6 @@ unsafe extern "C" {
     // kobject.rs
     fn kobject_global_init();
 
-    // dev/fdt.rs (Wave 23)
-    fn fdt_early_scan_memory(dtb: *mut c_void, base_out: *mut u64, size_out: *mut u64) -> c_int;
-    fn fdt_init(dtb: *mut c_void) -> c_int;
-    fn fdt_apply_platform_config();
-
-    // sbi.rs (Wave 2)
-    fn sbi_probe_extensions();
-    fn sbi_start_secondary_harts(start_addr: u64);
-
-    // backtrace.rs (Wave 5)
-    fn ksymbols_init();
-
     // mm/kalloc.rs, mm/vm_pgtab.rs
     fn kinit();
     fn kvminit();
@@ -208,21 +196,12 @@ unsafe extern "C" {
     fn rcu_cpu_init(cpu: c_int);
     fn rcu_kthread_start_cpu(cpu: c_int);
 
-    // dev/dev.rs (Wave 21)
-    fn dev_table_init();
-
     // proc/thread.rs, proc/sched.rs, proc/signal.rs, proc/workqueue.rs.
     // `idle_thread_init`/`scheduler_yield` stay `extern`: not demoted (each
     // still has an out-of-scope caller elsewhere -- `vfs/fs.rs` and a wide
     // cross-crate set respectively).
     fn idle_thread_init();
     fn scheduler_yield();
-
-    // dev/netdev.rs (Wave 24)
-    fn netdev_init();
-
-    // still C (kernel/pci.c — Wave 28).
-    fn pci_init();
 
     // kernel/bufcache.rs (Wave 22)
     fn binit();
@@ -231,20 +210,6 @@ unsafe extern "C" {
     // demoted (many out-of-scope callers elsewhere).
     fn sleep_ms(ms: u64);
 
-    // dev/x1_emac.rs, dev/x1_sdhci.rs (Wave 25 — Orange-Pi-RV2 only,
-    // compile-verify on QEMU virt; both probe nothing on `virt` and return
-    // early).
-    fn x1_emac_init();
-    fn x1_sdhci_init();
-
-    // Thread-context post-init (start_kernel_post_init below).
-    fn nullranddevinit();
-    // still C (kernel/virtio_disk.c — Wave 28).
-    fn virtio_disk_init();
-    // still C (kernel/ramdisk.c — Wave 28).
-    fn ramdisk_init();
-    // still C (kernel/sysnet.c — Wave 28).
-    fn sockinit();
     fn pcache_global_init();
 
     // lock/rwsem_test.rs, lock/semaphore_test.rs — always linked in
@@ -260,6 +225,22 @@ unsafe extern "C" {
     // `sbi_start_secondary_harts`, never called directly from Rust.
     static _entry: u8;
 }
+// P3-1D mesh sweep: dev/{fdt,dev,netdev,x1_emac,x1_sdhci,nullrand}.rs,
+// sbi.rs, backtrace.rs, pci.rs, virtio_disk.rs, ramdisk.rs, sysnet.rs are
+// all in scope for this wave; these become plain crate-path imports
+// instead of `extern "C"` redeclarations (identical signatures).
+use crate::backtrace::ksymbols_init;
+use crate::dev::dev::dev_table_init;
+use crate::dev::fdt::{fdt_apply_platform_config, fdt_early_scan_memory, fdt_init};
+use crate::dev::netdev::netdev_init;
+use crate::dev::nullrand::nullranddevinit;
+use crate::dev::x1_emac::x1_emac_init;
+use crate::dev::x1_sdhci::x1_sdhci_init;
+use crate::pci::pci_init;
+use crate::ramdisk::ramdisk_init;
+use crate::sbi::{sbi_probe_extensions, sbi_start_secondary_harts};
+use crate::sysnet::sockinit;
+use crate::virtio_disk::virtio_disk_init;
 
 // ===========================================================================
 // Boot-hart subsystem bring-up.

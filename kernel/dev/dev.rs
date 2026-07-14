@@ -410,8 +410,10 @@ fn dev_slot_get(major: c_int, minor: c_int, alloc: bool) -> Result<(*mut device_
 // Public C ABI.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn dev_table_init() {
+// P3-1D mesh sweep: callers (`start_kernel.rs`, `vfs/devtmpfs/superblock.rs`)
+// now import this via crate-path `use` instead of an `extern`
+// redeclaration -- demoted.
+pub(crate) extern "C" fn dev_table_init() {
     dev_tab_lock().init(c"dev_tab_lock".as_ptr());
     let ret = slab_cache_init(
         dev_type_cache_ptr(),
@@ -425,8 +427,9 @@ pub extern "C" fn dev_table_init() {
 
 /// Get a device by its major and minor numbers, incrementing its
 /// reference count. Returns the device on success, or `ERR_PTR` on error.
-#[no_mangle]
-pub extern "C" fn device_get(major: c_int, minor: c_int) -> *mut device_t {
+// P3-1D mesh sweep: callers (`dev/cdev.rs`, `dev/blkdev.rs`) now import this
+// via crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn device_get(major: c_int, minor: c_int) -> *mut device_t {
     let _rcu = KRcuRead::new();
 
     if major <= 0 || major as usize >= MAX_MAJOR_DEVICES || minor <= 0 || minor as usize >= MAX_MINOR_DEVICES {
@@ -464,8 +467,9 @@ pub extern "C" fn device_get(major: c_int, minor: c_int) -> *mut device_t {
 
 /// Increment the reference count of a device. Returns `-ENODEV` if the
 /// device is being unregistered or its refcount already reached 0.
-#[no_mangle]
-pub extern "C" fn device_dup(dev: *mut device_t) -> c_int {
+// P3-1D mesh sweep: callers (`dev/cdev.rs`, `dev/blkdev.rs`) now import this
+// via crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn device_dup(dev: *mut device_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
@@ -481,8 +485,9 @@ pub extern "C" fn device_dup(dev: *mut device_t) -> c_int {
 }
 
 /// Decrement the reference count of a device.
-#[no_mangle]
-pub extern "C" fn device_put(device: *mut device_t) -> c_int {
+// P3-1D mesh sweep: callers (`dev/cdev.rs`, `dev/blkdev.rs`) now import this
+// via crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn device_put(device: *mut device_t) -> c_int {
     if device.is_null() {
         return neg(EINVAL);
     }
@@ -584,8 +589,10 @@ fn dev_unregister_from_table(dev: *mut device_t) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn device_register(dev: *mut device_t) -> c_int {
+// P3-1D mesh sweep: callers (`dev/cdev.rs`, `dev/blkdev.rs`,
+// `tty/ptmx.rs`, `tty/pty.rs`, `vfs/devtmpfs/superblock.rs`) now import this
+// via crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn device_register(dev: *mut device_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
@@ -676,8 +683,10 @@ pub extern "C" fn device_register(dev: *mut device_t) -> c_int {
 /// `device_dup()` will fail for this device. The device is also removed
 /// from the lookup table immediately. The actual release callback runs
 /// once the refcount reaches 0.
-#[no_mangle]
-pub extern "C" fn device_unregister(dev: *mut device_t) -> c_int {
+// P3-1D mesh sweep: callers (`dev/cdev.rs`, `dev/blkdev.rs`,
+// `tty/ptmx.rs`, `tty/pty.rs`, `vfs/devtmpfs/superblock.rs`) now import this
+// via crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn device_unregister(dev: *mut device_t) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
@@ -706,8 +715,9 @@ pub extern "C" fn device_unregister(dev: *mut device_t) -> c_int {
     0
 }
 
-#[no_mangle]
-pub extern "C" fn dev_ioctl(dev: *mut device_t, cmd: u64, arg: *mut c_void) -> c_int {
+// P3-1D mesh sweep: callers (`console.rs`, `vfs/file.rs`) now import this
+// via crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn dev_ioctl(dev: *mut device_t, cmd: u64, arg: *mut c_void) -> c_int {
     if dev.is_null() {
         return neg(EINVAL);
     }
@@ -735,8 +745,9 @@ pub extern "C" fn dev_ioctl(dev: *mut device_t, cmd: u64, arg: *mut c_void) -> c
 /// the writer spinlock; the RCU read-side section is dropped and
 /// reacquired around each callback invocation so `cb` may sleep, matching
 /// the C original.
-#[no_mangle]
-pub extern "C" fn dev_for_each_device(
+// P3-1D mesh sweep: caller (`vfs/devtmpfs/superblock.rs`) now imports this
+// via crate-path `use` instead of an `extern` redeclaration -- demoted.
+pub(crate) extern "C" fn dev_for_each_device(
     cb: extern "C" fn(*mut device_t, *mut c_void) -> c_int,
     ctx: *mut c_void,
 ) -> c_int {
