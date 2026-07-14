@@ -3,8 +3,9 @@
 //! Owns the canonical public ABI symbols: tcb_lock/unlock,
 //! proc_assert_holding, thread_init, attach_child, detach_child,
 //! thread_create, kthread_create, idle_thread_init, thread_destroy,
-//! userinit, install_user_root, and the `xv6_thport_*` aliases used by
-//! sibling Rust/C ports.
+//! userinit, install_user_root. The `xv6_thport_*` C-ABI alias layer that
+//! used to front these for sibling Rust/C ports was collapsed in the
+//! P3-1B2 sweep -- callers now use these names directly.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 
@@ -31,14 +32,20 @@ use crate::proc::__proctab_init;
 use crate::proc::pid_assert_wholding;
 use crate::proc::sigacts_init;
 use crate::proc::sigstack_init;
-use crate::proc::xv6_rqport_rq_lock_current;
-use crate::proc::xv6_rqport_rq_unlock_current;
-use crate::proc::xv6_rqport_sched_attr_init;
-use crate::proc::xv6_rqport_sched_entity_init;
-use crate::proc::xv6_rqport_sched_setattr;
-use crate::proc::xv6_sigport_sigacts_put;
-use crate::proc::xv6_sigport_sigpending_destroy;
-use crate::proc::xv6_sigport_sigpending_init;
+use crate::proc::rq_lock_current;
+use crate::proc::rq_unlock_current;
+use crate::proc::sched_attr_init;
+use crate::proc::sched_entity_init;
+use crate::proc::sched_setattr;
+use crate::proc::sigacts_put;
+use crate::proc::sigpending_destroy;
+use crate::proc::sigpending_init;
+// P3-1B2: these cross into sibling proc submodules and were previously
+// bridged via `xv6_sigport_*`/`xv6_schport_*`/`xv6_rqport_*` `extern "C"`
+// redeclarations (some inline above, some in the block below); now direct
+// crate-path items, same precedent as the `use` imports above.
+use crate::proc::{sigpending_empty, context_switch_finish, scheduler_wakeup,
+    rq_cpu_activate, rq_enqueue_task, get_rq_for_cpu, thread_group_init, thread_group_put};
 // P3-1B mesh sweep: all three cross top-level-module boundaries (proc's
 // submodules are private, so the fully-qualified submodule path is used
 // rather than risking an ambiguous glob re-export at `crate::<mod>::`
@@ -126,9 +133,7 @@ unsafe extern "C" {
 
     // group/session
     safe fn thread_group_alloc_kernel(out: *mut *mut thread_group, hier_id: c_int) -> c_int;
-    fn thread_group_init(p: *mut thread);
     safe fn thread_group_add(tg: *mut thread_group, p: *mut thread);
-    fn thread_group_put(tg: *mut thread_group);
     safe fn pgroup_alloc(hier_id: c_int, parent: *mut c_void) -> *mut c_void;
     safe fn pgroup_add_tg(pg: *mut c_void, tg: *mut thread_group) -> c_int;
     safe fn pgroup_add_thread(pg: *mut c_void, p: *mut thread) -> c_int;
@@ -136,17 +141,6 @@ unsafe extern "C" {
     fn session_init(p: *mut thread);
     safe fn session_add_pg(s: *mut c_void, pg: *mut c_void) -> c_int;
     safe fn session_add_thread(s: *mut c_void, p: *mut thread) -> c_int;
-
-    // signal subsystem
-    fn xv6_sigport_sigpending_empty(p: *mut thread, locked: c_int);
-    fn xv6_sigport_sigstack_init(stk: *mut c_void);
-
-    // scheduler / rq
-    fn xv6_schport_context_switch_finish(prev: *mut thread, next: *mut thread, flags: c_int);
-    fn xv6_schport_scheduler_wakeup(p: *mut thread);
-    fn xv6_rqport_rq_cpu_activate(cpuid: c_int);
-    fn xv6_rqport_rq_enqueue_task(rq: *mut rq, se: *mut sched_entity);
-    fn get_rq_for_cpu(cls_id: c_int, cpuid: c_int) -> *mut rq;
 
     // memory
     fn page_alloc(order: u64, flags: u64) -> *mut c_void;
@@ -257,18 +251,6 @@ macro_rules! kpanic {
 macro_rules! kassert {
     ($cond:expr, $msg:expr) => {{ if !($cond) { kpanic!($msg); } }};
 }
-// SAFETY: currently vacuous for every existing `thport_unsafe_alias!`
-// target (attach_child, detach_child, thread_create, kthread_create,
-// idle_thread_init, thread_destroy, userinit, install_user_root) — all
-// of them are plain `pub extern "C" fn`s, not `unsafe fn`, so calling
-// `$target(...)` needs no unsafe context on its own. Kept as a distinct
-// macro (rather than folding these aliases into `thport_alias!`) for
-// call-table symmetry with the analogous `xv6_sigport_*` alias split in
-// `proc/signal_ffi.rs` (`sigport_alias!` vs. `sigport_unsafe_alias!`),
-// and so a future target that does need unsafe can opt in without a
-// call-site rewrite.
-macro_rules! thport_unsafe_call { ($e:expr) => {{ u! { $e } }}; }
-
 /// SAFETY: wraps raw field/layout manipulation of a `thread` (and its
 /// embedded `sched_entity`/`utrapframe`) at a stack address computed by
 /// the specific call site — e.g. `kstack_arrange`'s caller-supplied
@@ -352,7 +334,7 @@ fn pcb_init(p: *mut thread, fdtable: *mut vfs_fdtable) {
     thread_raw_layout! {
         let ta = ThreadAccess::assume(p);
         thread_state_set(p, THREAD_UNUSED);
-        xv6_sigport_sigpending_init(p);
+        sigpending_init(p);
         // Was the C `sigstack_init_for_thread` bridge helper
         // (`sigstack_init(&p->signal.sig_stack)`); now a direct call through
         // the typed field pointer.
@@ -363,7 +345,7 @@ fn pcb_init(p: *mut thread, fdtable: *mut vfs_fdtable) {
         ta.set_fdtable(fdtable);
         if !ta.sched_entity_ptr().is_null() {
             ta.zero_sched_entity_storage();
-            xv6_rqport_sched_entity_init(ta.sched_entity_ptr(), p);
+            sched_entity_init(ta.sched_entity_ptr(), p);
         }
     }
 }
@@ -512,7 +494,7 @@ pub extern "C" fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack
         ta.set_pgid(-1);
         ta.set_sid(-1);
 
-        xv6_rqport_sched_entity_init(se, p);
+        sched_entity_init(se, p);
         p
     }
 }
@@ -524,13 +506,13 @@ extern "C" fn kthread_entry(prev: *mut context) {
     thread_raw_layout! {
         kassert!(!prev.is_null(), "kthread_entry: prev context is NULL");
         let cur = current_thread();
-        xv6_schport_context_switch_finish(thread_from_context(prev), cur, 0);
+        context_switch_finish(thread_from_context(prev), cur, 0);
         CpuLocalRef::assume(cpu_local_ptr()).set_noff(0);
         intr_on();
         // SAFETY: `rcu_check_callbacks` is `pub unsafe extern "C" fn`
         // (kernel/lock/rcu.rs); it's sound to call here because we're on
         // the boot path of a freshly-scheduled kernel thread right after
-        // `xv6_schport_context_switch_finish`, with interrupts just
+        // `context_switch_finish`, with interrupts just
         // turned on above and no RCU read-side critical section held —
         // matching every other call site of this function.
         u! { rcu_check_callbacks(); }
@@ -616,18 +598,18 @@ pub extern "C" fn idle_thread_init() {
         cpu.set_proc(p);
         cpu.set_idle_thread(p);
 
-        xv6_rqport_rq_cpu_activate(cpuid());
+        rq_cpu_activate(cpuid());
 
         let mut attr: sched_attr = core::mem::zeroed();
-        xv6_rqport_sched_attr_init(&mut attr);
+        sched_attr_init(&mut attr);
         attr.priority = IDLE_PRIORITY;
         attr.affinity_mask = 1u64 << cpuid();
-        xv6_rqport_sched_setattr((*p).sched_entity, &attr);
+        sched_setattr((*p).sched_entity, &attr);
 
-        xv6_rqport_rq_lock_current();
+        rq_lock_current();
         let idle_rq = get_rq_for_cpu(IDLE_MAJOR_PRIORITY, cpuid());
-        xv6_rqport_rq_enqueue_task(idle_rq, (*p).sched_entity);
-        xv6_rqport_rq_unlock_current();
+        rq_enqueue_task(idle_rq, (*p).sched_entity);
+        rq_unlock_current();
         // smp_store_release on on_cpu
         let se = (*p).sched_entity;
         core::sync::atomic::fence(Ordering::Release);
@@ -665,7 +647,7 @@ pub extern "C" fn thread_destroy(p: *mut thread) {
 
         let ta_d = crate::proc::access::ThreadAccess::from_raw(p).unwrap_unchecked();
         if !ta_d.sigacts_ptr().is_null() {
-            xv6_sigport_sigacts_put(ta_d.sigacts_ptr());
+            sigacts_put(ta_d.sigacts_ptr());
             ta_d.set_sigacts(ptr::null_mut());
         }
         if !ta_d.vm_ptr().is_null() {
@@ -681,8 +663,8 @@ pub extern "C" fn thread_destroy(p: *mut thread) {
             (*p).fs = ptr::null_mut();
         }
 
-        xv6_sigport_sigpending_empty(p, 0);
-        xv6_sigport_sigpending_destroy(p);
+        sigpending_empty(p, 0);
+        sigpending_destroy(p);
 
         let ta = crate::proc::access::ThreadAccess::from_raw(p).unwrap_unchecked();
         if !ta.thread_group_ptr().is_null() {
@@ -700,7 +682,7 @@ extern "C" fn init_entry(prev: *mut context) {
     // block, so the outer wrap has been removed as redundant.
     thread_raw_layout! {
         let cur = current_thread();
-        xv6_schport_context_switch_finish(thread_from_context(prev), cur, 0);
+        context_switch_finish(thread_from_context(prev), cur, 0);
         CpuLocalRef::assume(cpu_local_ptr()).set_noff(0);
         intr_on();
 
@@ -759,11 +741,11 @@ pub(crate) extern "C" fn userinit() {
         thread_set_user_space(p);
 
         let mut attr: sched_attr = core::mem::zeroed();
-        xv6_rqport_sched_attr_init(&mut attr);
-        xv6_rqport_sched_setattr((*p).sched_entity, &attr);
+        sched_attr_init(&mut attr);
+        sched_setattr((*p).sched_entity, &attr);
 
         thread_state_set(p, THREAD_UNINTERRUPTIBLE);
-        xv6_schport_scheduler_wakeup(p);
+        scheduler_wakeup(p);
     }
 }
 
@@ -830,38 +812,8 @@ fn install_user_root_finish(p: *mut thread, root_inode: *mut c_void) {
     }
 }
 
-// ---------------- xv6_thport_* aliases ----------------------------------
-macro_rules! thport_alias {
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* ) -> $ret:ty) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) -> $ret { $target($($pn),*) }
-    };
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* )) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) { $target($($pn),*) }
-    };
-}
-
-macro_rules! thport_unsafe_alias {
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* ) -> $ret:ty) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) -> $ret { thport_unsafe_call!($target($($pn),*)) }
-    };
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* )) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) { thport_unsafe_call!($target($($pn),*)) }
-    };
-}
-
-thport_alias!(xv6_thport_tcb_lock => tcb_lock(p: *mut thread));
-thport_alias!(xv6_thport_tcb_unlock => tcb_unlock(p: *mut thread));
-thport_alias!(xv6_thport_proc_assert_holding => proc_assert_holding(p: *mut thread));
-thport_alias!(xv6_thport_thread_init => thread_init());
-thport_unsafe_alias!(xv6_thport_attach_child => attach_child(parent: *mut thread, child: *mut thread));
-thport_unsafe_alias!(xv6_thport_detach_child => detach_child(parent: *mut thread, child: *mut thread));
-thport_unsafe_alias!(xv6_thport_thread_create => thread_create(entry: *mut c_void, a1: u64, a2: u64, ord: c_int) -> *mut thread);
-thport_unsafe_alias!(xv6_thport_kthread_create => kthread_create(name: *const c_char, entry: *mut c_void, a1: u64, a2: u64, ord: c_int) -> *mut thread);
-thport_unsafe_alias!(xv6_thport_idle_thread_init => idle_thread_init());
-thport_unsafe_alias!(xv6_thport_thread_destroy => thread_destroy(p: *mut thread));
-thport_unsafe_alias!(xv6_thport_userinit => userinit());
-thport_unsafe_alias!(xv6_thport_install_user_root => install_user_root());
+// The `xv6_thport_*` C-ABI alias layer that used to front tcb_lock/
+// tcb_unlock/proc_assert_holding/thread_init/attach_child/detach_child/
+// thread_create/kthread_create/idle_thread_init/thread_destroy/userinit/
+// install_user_root was collapsed in the P3-1B2 sweep: every caller now
+// invokes these canonical names directly (crate-path, no FFI hop).

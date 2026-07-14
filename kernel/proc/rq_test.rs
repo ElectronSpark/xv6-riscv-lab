@@ -15,12 +15,16 @@ use crate::lock::spinlock::spin_lock;
 use crate::lock::spinlock::spin_unlock;
 use crate::machine::cpuid;
 use crate::proc::access::{is_err_or_null, zeroed_sched_attr, RqRef, SchedEntityRef, ThreadAccess};
-use crate::proc::xv6_rqport_pick_next_rq;
-use crate::proc::xv6_rqport_rq_lock;
-use crate::proc::xv6_rqport_rq_unlock;
-use crate::proc::xv6_rqport_sched_attr_init;
-use crate::proc::xv6_rqport_sched_getattr;
-use crate::proc::xv6_rqport_sched_setattr;
+use crate::proc::pick_next_rq;
+use crate::proc::rq_lock;
+use crate::proc::rq_unlock;
+use crate::proc::sched_attr_init;
+use crate::proc::sched_getattr;
+use crate::proc::sched_setattr;
+// P3-1B2: these used to be bridged via the `xv6_schport_*`/`xv6_thport_*`/
+// `xv6_tqport_*` C-ABI alias layers (`extern "C"` redeclarations below);
+// now direct crate-path calls to the real, already-Rust definitions.
+use crate::proc::{scheduler_yield, wakeup, kthread_create, tq_init, tq_wait, tq_wakeup_all};
 
 // --- priority macros (mirror inc/proc/rq.h) -------------------------------
 const PRIORITY_SUBLEVEL_MASK: c_int = 0x03;
@@ -37,22 +41,6 @@ unsafe extern "C" {
 
     pub safe fn xv6_current_thread() -> *mut thread;
     pub safe fn xv6_panic(msg: *const c_char) -> !;
-
-
-    pub safe fn xv6_schport_scheduler_yield();
-    pub safe fn xv6_schport_wakeup(t: *mut thread);
-
-    pub safe fn xv6_thport_kthread_create(
-        name: *const c_char,
-        entry: *mut c_void,
-        arg1: u64,
-        arg2: u64,
-        kstack_order: c_int,
-    ) -> *mut thread;
-
-    pub safe fn xv6_tqport_tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
-    pub safe fn xv6_tqport_tq_wait(q: *mut tq_t, lk: *mut spinlock_t, rdata: *mut u64) -> c_int;
-    pub safe fn xv6_tqport_tq_wakeup_all(q: *mut tq_t, errno: c_int, rdata: u64) -> c_int;
 }
 
 #[inline]
@@ -110,11 +98,11 @@ fn test_two_layer_mask() {
 // --- Test 2: priority change ----------------------------------------------
 fn test_priority_change() {
     rq_test_raw! {
-        printf(c"TEST: Priority Change via xv6_rqport_sched_setattr\n".as_ptr());
+        printf(c"TEST: Priority Change via sched_setattr\n".as_ptr());
         let se = current_sched_entity();
 
         let mut attr: sched_attr = zeroed_sched_attr();
-        xv6_rqport_sched_getattr(se, &mut attr);
+        sched_getattr(se, &mut attr);
         let original_priority = attr.priority;
         let original_major = MAJOR_PRIORITY(original_priority);
 
@@ -124,11 +112,11 @@ fn test_priority_change() {
         let new_major = if original_major == 10 { 12 } else { 10 };
         attr.priority = MAKE_PRIORITY(new_major, 1);
 
-        let ret = xv6_rqport_sched_setattr(se, &attr);
-        assert_msg(ret == 0, c"rq_test: xv6_rqport_sched_setattr failed".as_ptr());
+        let ret = sched_setattr(se, &attr);
+        assert_msg(ret == 0, c"rq_test: sched_setattr failed".as_ptr());
 
         let mut new_attr: sched_attr = zeroed_sched_attr();
-        xv6_rqport_sched_getattr(se, &mut new_attr);
+        sched_getattr(se, &mut new_attr);
         let changed_major = MAJOR_PRIORITY(new_attr.priority);
         let changed_minor = MINOR_PRIORITY(new_attr.priority);
 
@@ -137,10 +125,10 @@ fn test_priority_change() {
         assert_msg(changed_major == new_major, c"rq_test: major priority not changed".as_ptr());
         assert_msg(changed_minor == 1, c"rq_test: minor priority not changed".as_ptr());
 
-        xv6_schport_scheduler_yield();
+        scheduler_yield();
 
         attr.priority = original_priority;
-        xv6_rqport_sched_setattr(se, &attr);
+        sched_setattr(se, &attr);
 
         printf(c"  Restored original priority\n".as_ptr());
         printf(c"  PASSED\n".as_ptr());
@@ -158,7 +146,7 @@ fn test_yield_priority() {
 
         let mut yields_completed = 0;
         for _ in 0..5 {
-            xv6_schport_scheduler_yield();
+            scheduler_yield();
             yields_completed += 1;
         }
         assert_msg(yields_completed == 5, c"rq_test: not all yields completed".as_ptr());
@@ -173,11 +161,11 @@ fn test_rq_selection() {
         printf(c"TEST: RQ Selection Consistency\n".as_ptr());
         let test_cpu = cpuid();
 
-        xv6_rqport_rq_lock(test_cpu);
-        let rq1 = xv6_rqport_pick_next_rq();
-        let rq2 = xv6_rqport_pick_next_rq();
-        let rq3 = xv6_rqport_pick_next_rq();
-        xv6_rqport_rq_unlock(test_cpu);
+        rq_lock(test_cpu);
+        let rq1 = pick_next_rq();
+        let rq2 = pick_next_rq();
+        let rq3 = pick_next_rq();
+        rq_unlock(test_cpu);
 
         assert_msg(rq1 == rq2 && rq2 == rq3, c"rq_test: inconsistent rq selection".as_ptr());
         printf(c"  Consistent selection: class_id=%d\n".as_ptr(), RqRef::assume(rq1).class_id());
@@ -189,7 +177,7 @@ fn test_rq_selection() {
 fn verify_priority(se: *mut sched_entity, expected_major: c_int, expected_minor: c_int) -> bool {
     rq_test_raw! {
         let mut attr: sched_attr = zeroed_sched_attr();
-        xv6_rqport_sched_getattr(se, &mut attr);
+        sched_getattr(se, &mut attr);
         let am = MAJOR_PRIORITY(attr.priority);
         let an = MINOR_PRIORITY(attr.priority);
         if am != expected_major || an != expected_minor {
@@ -204,20 +192,20 @@ fn verify_priority(se: *mut sched_entity, expected_major: c_int, expected_minor:
 fn set_and_check(se: *mut sched_entity, major: c_int, minor: c_int) {
     rq_test_raw! {
         let mut attr: sched_attr = zeroed_sched_attr();
-        xv6_rqport_sched_attr_init(&mut attr);
+        sched_attr_init(&mut attr);
         attr.priority = MAKE_PRIORITY(major, minor);
-        xv6_rqport_sched_setattr(se, &attr);
+        sched_setattr(se, &attr);
         assert_msg(verify_priority(se, major, minor), c"rq_test: priority set failed".as_ptr());
-        xv6_schport_scheduler_yield();
+        scheduler_yield();
     }
 }
 
 fn pick_major(test_cpu: c_int) -> c_int {
     rq_test_raw! {
-        xv6_rqport_rq_lock(test_cpu);
-        let r = xv6_rqport_pick_next_rq();
+        rq_lock(test_cpu);
+        let r = pick_next_rq();
         let m = unsafe { (*r).class_id };
-        xv6_rqport_rq_unlock(test_cpu);
+        rq_unlock(test_cpu);
         m
     }
 }
@@ -229,14 +217,14 @@ fn test_priority_ordering() {
         let test_cpu = cpuid();
 
         let mut original_attr: sched_attr = zeroed_sched_attr();
-        xv6_rqport_sched_getattr(se, &mut original_attr);
+        sched_getattr(se, &mut original_attr);
 
         // Case 1: different top-layer groups
         printf(c"  Case 1: Different top-layer groups\n".as_ptr());
         for &(major, group) in &[(1i32, 0i32), (9, 1), (17, 2), (50, 6)] {
             set_and_check(se, major, 0);
             let pm = pick_major(test_cpu);
-            printf(c"    major=%d (group %d): xv6_rqport_pick_next_rq returned %d\n".as_ptr(), major, group, pm);
+            printf(c"    major=%d (group %d): pick_next_rq returned %d\n".as_ptr(), major, group, pm);
         }
         printf(c"    Case 1 PASSED\n".as_ptr());
 
@@ -245,7 +233,7 @@ fn test_priority_ordering() {
         for &major in &[1i32, 3, 5, 7] {
             set_and_check(se, major, 0);
             let pm = pick_major(test_cpu);
-            printf(c"    major=%d (bit %d): xv6_rqport_pick_next_rq returned %d\n".as_ptr(), major, major, pm);
+            printf(c"    major=%d (bit %d): pick_next_rq returned %d\n".as_ptr(), major, major, pm);
         }
         printf(c"    Case 2 PASSED\n".as_ptr());
 
@@ -260,9 +248,9 @@ fn test_priority_ordering() {
         // Case 4: boundary transitions
         printf(c"  Case 4: Group boundary transitions\n".as_ptr());
         for &(major, label) in &[
-            (7i32, c"    major=7 (end of group 0): xv6_rqport_pick_next_rq returned %d\n"),
-            (8,    c"    major=8 (start of group 1): xv6_rqport_pick_next_rq returned %d\n"),
-            (62,   c"    major=62 (lowest usable): xv6_rqport_pick_next_rq returned %d\n"),
+            (7i32, c"    major=7 (end of group 0): pick_next_rq returned %d\n"),
+            (8,    c"    major=8 (start of group 1): pick_next_rq returned %d\n"),
+            (62,   c"    major=62 (lowest usable): pick_next_rq returned %d\n"),
         ] {
             set_and_check(se, major, 0);
             let pm = pick_major(test_cpu);
@@ -270,7 +258,7 @@ fn test_priority_ordering() {
         }
         printf(c"    Case 4 PASSED\n".as_ptr());
 
-        xv6_rqport_sched_setattr(se, &original_attr);
+        sched_setattr(se, &original_attr);
         printf(c"  All priority ordering cases PASSED\n".as_ptr());
         printf(c"  PASSED\n".as_ptr());
     }
@@ -319,7 +307,7 @@ unsafe extern "C" fn priority_test_proc_entry(my_index: u64, _unused: u64) -> c_
         spin_unlock(lock_ptr());
 
         if all_done {
-            xv6_tqport_tq_wakeup_all(tq_ptr(), 0, 0);
+            tq_wakeup_all(tq_ptr(), 0, 0);
         }
         0
     }
@@ -330,7 +318,7 @@ fn test_priority_ordered_activation() {
         printf(c"TEST: Priority-Ordered Process Activation\n".as_ptr());
 
         spin_init(lock_ptr(), c"prio_test".as_ptr() as *mut c_char);
-        xv6_tqport_tq_init(tq_ptr(), c"main_wait".as_ptr(), lock_ptr());
+        tq_init(tq_ptr(), c"main_wait".as_ptr(), lock_ptr());
         ACTIVATION_INDEX.store(0, Ordering::Release);
         PROCESSES_DONE.store(0, Ordering::Release);
         for i in 0..PRIORITY_TEST_COUNT {
@@ -348,7 +336,7 @@ fn test_priority_ordered_activation() {
         let cpu_mask: cpumask_t = 1u64 << test_cpu;
 
         for i in 0..PRIORITY_TEST_COUNT {
-            test_procs[i] = xv6_thport_kthread_create(
+            test_procs[i] = kthread_create(
                 c"prio_test".as_ptr(),
                 priority_test_proc_entry as *mut c_void,
                 i as u64, 0, 0,
@@ -357,10 +345,10 @@ fn test_priority_ordered_activation() {
 
             let se = sched_entity_of(test_procs[i]);
             let mut attr: sched_attr = zeroed_sched_attr();
-            xv6_rqport_sched_attr_init(&mut attr);
+            sched_attr_init(&mut attr);
             attr.priority = TEST_PRIORITIES[i];
             attr.affinity_mask = cpu_mask;
-            xv6_rqport_sched_setattr(se, &attr);
+            sched_setattr(se, &attr);
 
             printf(c"    Created process %d (pid=%d) with priority major=%d on CPU %d\n".as_ptr(),
                 i as c_int, ThreadAccess::assume(test_procs[i]).pid(), MAJOR_PRIORITY(TEST_PRIORITIES[i]), test_cpu);
@@ -368,17 +356,17 @@ fn test_priority_ordered_activation() {
 
         printf(c"  Phase 2: Waking up all processes\n".as_ptr());
         for i in 0..PRIORITY_TEST_COUNT {
-            xv6_schport_wakeup(test_procs[i]);
+            wakeup(test_procs[i]);
         }
 
         printf(c"  Phase 3: Enabling preemption and yielding\n".as_ptr());
         drop(g);
-        xv6_schport_scheduler_yield();
+        scheduler_yield();
 
         printf(c"  Phase 4: Waiting for all processes to complete\n".as_ptr());
         spin_lock(lock_ptr());
         while PROCESSES_DONE.load(Ordering::Acquire) < PRIORITY_TEST_COUNT as c_int {
-            xv6_tqport_tq_wait(tq_ptr(), lock_ptr(), core::ptr::null_mut());
+            tq_wait(tq_ptr(), lock_ptr(), core::ptr::null_mut());
         }
         spin_unlock(lock_ptr());
 
@@ -419,27 +407,27 @@ fn test_affinity_change() {
         let se = current_sched_entity();
 
         let mut attr: sched_attr = zeroed_sched_attr();
-        xv6_rqport_sched_getattr(se, &mut attr);
+        sched_getattr(se, &mut attr);
         let original_mask = attr.affinity_mask;
 
         printf(c"  Original affinity mask: 0x%lx\n".as_ptr(), original_mask);
 
         let cur_cpu = cpuid();
         attr.affinity_mask = 1u64 << cur_cpu;
-        let ret = xv6_rqport_sched_setattr(se, &attr);
+        let ret = sched_setattr(se, &attr);
         assert_msg(ret == 0, c"rq_test: setattr for affinity failed".as_ptr());
 
-        xv6_rqport_sched_getattr(se, &mut attr);
+        sched_getattr(se, &mut attr);
         assert_msg(attr.affinity_mask == 1u64 << cur_cpu, c"rq_test: affinity not changed correctly".as_ptr());
 
         printf(c"  Pinned to CPU %d, mask: 0x%lx\n".as_ptr(), cur_cpu, attr.affinity_mask);
-        xv6_schport_scheduler_yield();
+        scheduler_yield();
 
         let new_cpu = cpuid();
         assert_msg(new_cpu == cur_cpu, c"rq_test: CPU changed despite affinity pin".as_ptr());
 
         attr.affinity_mask = original_mask;
-        xv6_rqport_sched_setattr(se, &attr);
+        sched_setattr(se, &attr);
         printf(c"  Restored original affinity\n".as_ptr());
         printf(c"  PASSED\n".as_ptr());
     }

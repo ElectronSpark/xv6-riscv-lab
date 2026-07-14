@@ -5,8 +5,10 @@
 //! `tg_shared_pending_init/destroy`, `thread_group_alloc[/_kernel]`,
 //! `thread_group_add/remove`, `thread_is_group_leader`, `thread_tgid`,
 //! `thread_group_exit`, `tg_signal_send`, `tg_signal_pending`,
-//! `tg_dequeue_signal`, `tg_sigpending_empty`, `tg_recalc_sigpending`,
-//! and the `xv6_tgport_*` aliases that earlier sections call.
+//! `tg_dequeue_signal`, `tg_sigpending_empty`, `tg_recalc_sigpending`.
+//! The `xv6_tgport_*` C-ABI alias layer that used to front these for
+//! sibling Rust/C ports was collapsed in the P3-1B2 sweep -- callers now
+//! use these names directly.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 
@@ -32,9 +34,13 @@ use crate::proc::access::{
     list_node_next_raw, list_node_push_back_raw,
 };
 use crate::proc::ksiginfo_alloc;
-use crate::proc::xv6_sigport_ksiginfo_free;
-use crate::proc::xv6_sigport_sigacts_lock;
-use crate::proc::xv6_sigport_sigacts_unlock;
+use crate::proc::ksiginfo_free;
+use crate::proc::sigacts_lock;
+use crate::proc::sigacts_unlock;
+// P3-1B2: previously bridged via the `xv6_schport_*` C-ABI alias layer
+// (`extern "C"` redeclarations above); now direct crate-path calls to the
+// real, already-Rust definitions in `sched.rs`.
+use crate::proc::{scheduler_wakeup_interruptible, scheduler_wakeup_stopped};
 use crate::ipi::ipi_send_single;
 
 // ---------------- constants ----------------------------------------------
@@ -82,10 +88,6 @@ unsafe extern "C" {
     safe fn xv6_pid_wholding() -> c_int;
 
     // signal helpers
-
-    // scheduler wake helpers
-    safe fn xv6_schport_scheduler_wakeup_interruptible(p: *mut thread);
-    safe fn xv6_schport_scheduler_wakeup_stopped(p: *mut thread);
 
     // cpu id (trampoline from slab_shims.rs)
 }
@@ -328,7 +330,7 @@ pub extern "C" fn tg_shared_pending_destroy(tg: *mut thread_group) {
             // shared-pending queue, which is only ever populated with real
             // `ksiginfo` entries allocated by `ksiginfo_alloc`.
             unsafe { KsigInfoAccess::assume(ksi) }.list_entry_ref().detach();
-            xv6_sigport_ksiginfo_free(ksi);
+            ksiginfo_free(ksi);
             cur = next;
         }
     }
@@ -545,9 +547,9 @@ unsafe fn tg_sigkill_all(tg: *mut thread_group, skip: *mut thread) {
             thread_set_killed(t);
             thread_set_sigpending(t);
             if THREAD_SLEEPING(t) {
-                xv6_schport_scheduler_wakeup_interruptible(t);
+                scheduler_wakeup_interruptible(t);
             } else if THREAD_STOPPED_p(t) {
-                xv6_schport_scheduler_wakeup_stopped(t);
+                scheduler_wakeup_stopped(t);
             }
         });
         xv6_pid_runlock();
@@ -606,7 +608,7 @@ pub extern "C" fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -
     // `leader` and `sigacts` are each null-checked immediately before
     // the first deref that uses them (`tga.group_leader_ptr()` /
     // `lta.sigacts_ptr()`), and `sigacts` stays live for the duration
-    // of this block because we hold `xv6_sigport_sigacts_lock(sigacts)`
+    // of this block because we hold `sigacts_lock(sigacts)`
     // across all subsequent field accesses through it, released only
     // just before each early return.
     u! {
@@ -637,13 +639,13 @@ pub extern "C" fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -
             return -ESRCH;
         }
         let sigacts = lta.sigacts_ptr();
-        xv6_sigport_sigacts_lock(sigacts);
+        sigacts_lock(sigacts);
 
         let stop_mask = (*sigacts).sa_sigstop;
         let cont_mask = (*sigacts).sa_sigcont;
 
         if sigismember((*sigacts).sa_sigignore, signo) {
-            xv6_sigport_sigacts_unlock(sigacts);
+            sigacts_unlock(sigacts);
             xv6_pid_runlock();
             return 0;
         }
@@ -676,7 +678,7 @@ pub extern "C" fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -
                     let old = container_of::<ksiginfo_t>(first, list_entry_offset_in_ksiginfo());
                     if !old.is_null() {
                         KsigInfoAccess::assume(old).list_entry_ref().detach();
-                        xv6_sigport_ksiginfo_free(old);
+                        ksiginfo_free(old);
                     }
                 }
             }
@@ -689,7 +691,7 @@ pub extern "C" fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -
             }
         } else {
             if sigismember(shared.sig_pending_mask(), signo) && !is_cont {
-                xv6_sigport_sigacts_unlock(sigacts);
+                sigacts_unlock(sigacts);
                 xv6_pid_runlock();
                 return 0;
             }
@@ -705,22 +707,22 @@ pub extern "C" fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -
             }
         }
 
-        xv6_sigport_sigacts_unlock(sigacts);
+        sigacts_unlock(sigacts);
 
         if is_cont {
             for_each_tg_thread(tga.thread_list_ptr(), |t| {
                 thread_set_sigpending(t);
                 if THREAD_STOPPED_p(t) {
-                    xv6_schport_scheduler_wakeup_stopped(t);
+                    scheduler_wakeup_stopped(t);
                 } else if THREAD_INTERRUPTIBLE_p(t) {
-                    xv6_schport_scheduler_wakeup_interruptible(t);
+                    scheduler_wakeup_interruptible(t);
                 }
             });
         } else if !target.is_null() {
             if is_term && THREAD_STOPPED_p(target) {
-                xv6_schport_scheduler_wakeup_stopped(target);
+                scheduler_wakeup_stopped(target);
             } else if THREAD_INTERRUPTIBLE_p(target) {
-                xv6_schport_scheduler_wakeup_interruptible(target);
+                scheduler_wakeup_interruptible(target);
             } else if THREAD_RUNNING_p(target) {
                 let se = ThreadAccess::assume(target).sched_entity_ptr();
                 let target_cpu = SchedEntityRef::assume(se).cpu_id_load_acquire();
@@ -789,7 +791,7 @@ pub extern "C" fn tg_sigpending_empty(tg: *mut thread_group, signo: c_int) {
         // being walked (`cur != head` loop invariant), which is only ever
         // populated with real `ksiginfo` entries.
         unsafe { KsigInfoAccess::assume(ksi) }.list_entry_ref().detach();
-        xv6_sigport_ksiginfo_free(ksi);
+        ksiginfo_free(ksi);
         cur = next;
     }
     shared.and_sig_pending_mask(!(1u64 << (signo - 1)));
@@ -822,58 +824,10 @@ pub extern "C" fn tg_recalc_sigpending(tg: *mut thread_group) {
     });
 }
 
-// ===========================================================================
-// xv6_tgport_* aliases (kept for existing callers in proc_rust_shims.c).
-// ===========================================================================
-macro_rules! tgport_alias {
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* ) -> $ret:ty) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) -> $ret { $target($($pn),*) }
-    };
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* )) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) { $target($($pn),*) }
-    };
-}
-
-// SAFETY: currently vacuous for every existing `tgport_unsafe_alias!`
-// target (thread_group_init, thread_group_put, thread_group_alloc,
-// thread_group_alloc_kernel, thread_group_exit, tg_signal_send) — all
-// of them are plain `pub extern "C" fn`s, not `unsafe fn`, so calling
-// `$target(...)` needs no unsafe context on its own. Kept as a distinct
-// macro (rather than folding these aliases into `tgport_alias!`) for
-// call-table symmetry with the analogous `thport_alias!` /
-// `thport_unsafe_alias!` split in `proc/thread.rs`, and so a future
-// target that does need unsafe can opt in without a call-site rewrite.
-macro_rules! tgport_unsafe_call { ($e:expr) => {{ u! { $e } }}; }
-
-macro_rules! tgport_unsafe_alias {
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* ) -> $ret:ty) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) -> $ret { tgport_unsafe_call!($target($($pn),*)) }
-    };
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* )) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) { tgport_unsafe_call!($target($($pn),*)) }
-    };
-}
-
-tgport_unsafe_alias!(xv6_tgport_thread_group_init => thread_group_init(initproc: *mut thread));
-tgport_alias!(xv6_tgport_thread_group_get => thread_group_get(tg: *mut thread_group));
-tgport_unsafe_alias!(xv6_tgport_thread_group_put => thread_group_put(tg: *mut thread_group));
-tgport_alias!(xv6_tgport_thread_group_live_dec => thread_group_live_dec(tg: *mut thread_group));
-tgport_alias!(xv6_tgport_get_thread_group => get_thread_group(tgid: pid_t) -> *mut thread_group);
-tgport_alias!(xv6_tgport_tg_shared_pending_init => tg_shared_pending_init(tg: *mut thread_group));
-tgport_alias!(xv6_tgport_tg_shared_pending_destroy => tg_shared_pending_destroy(tg: *mut thread_group));
-tgport_unsafe_alias!(xv6_tgport_thread_group_alloc => thread_group_alloc(leader: *mut thread) -> c_int);
-tgport_unsafe_alias!(xv6_tgport_thread_group_alloc_kernel => thread_group_alloc_kernel(out_tg: *mut *mut thread_group, tgid: pid_t) -> c_int);
-tgport_alias!(xv6_tgport_thread_group_add => thread_group_add(tg: *mut thread_group, child: *mut thread));
-tgport_alias!(xv6_tgport_thread_group_remove => thread_group_remove(p: *mut thread) -> bool);
-tgport_alias!(xv6_tgport_thread_is_group_leader => thread_is_group_leader(p: *mut thread) -> bool);
-tgport_alias!(xv6_tgport_thread_tgid => thread_tgid(p: *mut thread) -> c_int);
-tgport_unsafe_alias!(xv6_tgport_thread_group_exit => thread_group_exit(p: *mut thread, code: c_int));
-tgport_unsafe_alias!(xv6_tgport_tg_signal_send => tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -> c_int);
-tgport_alias!(xv6_tgport_tg_signal_pending => tg_signal_pending(tg: *mut thread_group, p: *mut thread) -> bool);
-tgport_alias!(xv6_tgport_tg_dequeue_signal => tg_dequeue_signal(tg: *mut thread_group, signo: c_int) -> *mut ksiginfo_t);
-tgport_alias!(xv6_tgport_tg_sigpending_empty => tg_sigpending_empty(tg: *mut thread_group, signo: c_int));
-tgport_alias!(xv6_tgport_tg_recalc_sigpending => tg_recalc_sigpending(tg: *mut thread_group));
+// The `xv6_tgport_*` C-ABI alias layer that used to front thread_group_init/
+// thread_group_get/put/live_dec, get_thread_group, tg_shared_pending_init/
+// destroy, thread_group_alloc[_kernel], thread_group_add/remove,
+// thread_is_group_leader, thread_tgid, thread_group_exit, tg_signal_send,
+// tg_signal_pending, tg_dequeue_signal, tg_sigpending_empty,
+// tg_recalc_sigpending was collapsed in the P3-1B2 sweep: every caller now
+// invokes these canonical names directly (crate-path, no FFI hop).

@@ -4,8 +4,9 @@
 //! wait-queue primitives used throughout the kernel for sleep/wakeup.
 //!
 //! Canonical C ABI names (`tq_init`, `tq_wait`, `ttree_wakeup_key`, ...)
-//! are exported as `#[no_mangle]`. Backwards-compat `xv6_tqport_*`
-//! aliases are also exported.
+//! are exported as `#[no_mangle]`, called directly by sibling Rust
+//! modules -- the backwards-compat `xv6_tqport_*` alias layer that used
+//! to front these was collapsed in the P3-1B2 sweep.
 
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
@@ -62,11 +63,12 @@ unsafe extern "C" {
     pub safe fn rb_first_node(root: *mut rb_root) -> *mut rb_node;
     pub safe fn rb_next_node(node: *mut rb_node) -> *mut rb_node;
     pub safe fn rb_find_key_rup(root: *mut rb_root, key: uint64) -> *mut rb_node;
-
-    // Scheduler hooks.
-    pub safe fn xv6_schport_scheduler_yield();
-    pub safe fn xv6_schport_scheduler_wakeup(p: *mut thread);
 }
+
+// Scheduler hooks. P3-1B2: previously bridged via the `xv6_schport_*`
+// C-ABI alias layer (`extern "C"` redeclarations above); now direct
+// crate-path calls to the real, already-Rust definitions in `sched.rs`.
+use crate::proc::{scheduler_yield, scheduler_wakeup};
 
 #[inline]
 fn invoke_sleep_cb(cb: unsafe extern "C" fn(*mut c_void) -> c_int, data: *mut c_void) -> c_int {
@@ -411,7 +413,7 @@ fn tq_wait_cb_impl(
     if let Some(cb) = sleep_callback {
         cb_status = invoke_sleep_cb(cb, callback_data);
     }
-    xv6_schport_scheduler_yield();
+    scheduler_yield();
     if let Some(cb) = wakeup_callback {
         invoke_wakeup_cb(cb, callback_data, cb_status);
     }
@@ -461,7 +463,7 @@ fn do_wakeup(woken: *mut tnode_t, error_no: c_int, rdata: u64) -> *mut thread {
     wr.set_error_no(error_no);
     wr.set_data(rdata);
     let p = wr.thread_ptr();
-    xv6_schport_scheduler_wakeup(p);
+    scheduler_wakeup(p);
     p
 }
 
@@ -618,7 +620,7 @@ fn ttree_wait_cb_impl(
     if let Some(cb) = sleep_callback {
         cb_status = invoke_sleep_cb(cb, callback_data);
     }
-    xv6_schport_scheduler_yield();
+    scheduler_yield();
     if let Some(cb) = wakeup_callback {
         invoke_wakeup_cb(cb, callback_data, cb_status);
     }
@@ -746,44 +748,11 @@ pub extern "C" fn ttree_wakeup_all(q: *mut ttree_t, error_no: c_int, rdata: u64)
     ttree_wakeup_all_impl(q, error_no, rdata)
 }
 
-// ---------------------------------------------------------------------------
-// Backwards-compat xv6_tqport_* aliases
-// ---------------------------------------------------------------------------
-macro_rules! tqport_alias {
-    ($alias:ident => $target:ident ( $($arg:ident : $ty:ty),* ) $(-> $ret:ty)?) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($arg : $ty),*) $(-> $ret)? {
-            $target($($arg),*)
-        }
-    };
-}
-
-tqport_alias!(xv6_tqport_tq_init => tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t));
-tqport_alias!(xv6_tqport_ttree_init => ttree_init(q: *mut ttree_t, name: *const c_char, lock: *mut spinlock_t));
-tqport_alias!(xv6_tqport_tq_set_lock => tq_set_lock(q: *mut tq_t, lock: *mut spinlock_t));
-tqport_alias!(xv6_tqport_ttree_set_lock => ttree_set_lock(q: *mut ttree_t, lock: *mut spinlock_t));
-tqport_alias!(xv6_tqport_tnode_init => tnode_init(node: *mut tnode_t));
-tqport_alias!(xv6_tqport_tq_size => tq_size(q: *mut tq_t) -> c_int);
-tqport_alias!(xv6_tqport_ttree_size => ttree_size(q: *mut ttree_t) -> c_int);
-tqport_alias!(xv6_tqport_tnode_get_queue => tnode_get_queue(node: *mut tnode_t) -> *mut tq_t);
-tqport_alias!(xv6_tqport_tnode_get_tree => tnode_get_tree(node: *mut tnode_t) -> *mut ttree_t);
-tqport_alias!(xv6_tqport_tnode_get_thread => tnode_get_thread(node: *mut tnode_t) -> *mut thread);
-tqport_alias!(xv6_tqport_tnode_get_errno => tnode_get_errno(node: *mut tnode_t, error_no: *mut c_int) -> c_int);
-tqport_alias!(xv6_tqport_tq_push => tq_push(q: *mut tq_t, node: *mut tnode_t) -> c_int);
-tqport_alias!(xv6_tqport_tq_first => tq_first(q: *mut tq_t) -> *mut tnode_t);
-tqport_alias!(xv6_tqport_tq_pop => tq_pop(q: *mut tq_t) -> *mut tnode_t);
-tqport_alias!(xv6_tqport_tq_remove => tq_remove(q: *mut tq_t, node: *mut tnode_t) -> c_int);
-tqport_alias!(xv6_tqport_tq_bulk_move => tq_bulk_move(to: *mut tq_t, from: *mut tq_t) -> c_int);
-tqport_alias!(xv6_tqport_tq_wait => tq_wait(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) -> c_int);
-tqport_alias!(xv6_tqport_tq_wait_cb => tq_wait_cb(q: *mut tq_t, sc: sleep_callback_t, wc: wakeup_callback_t, arg: *mut c_void, rdata: *mut u64) -> c_int);
-tqport_alias!(xv6_tqport_tq_wakeup => tq_wakeup(q: *mut tq_t, error_no: c_int, rdata: u64) -> *mut thread);
-tqport_alias!(xv6_tqport_tq_wakeup_all => tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int);
-tqport_alias!(xv6_tqport_ttree_add => ttree_add(q: *mut ttree_t, node: *mut tnode_t) -> c_int);
-tqport_alias!(xv6_tqport_ttree_first => ttree_first(q: *mut ttree_t) -> *mut tnode_t);
-tqport_alias!(xv6_tqport_ttree_key_min => ttree_key_min(q: *mut ttree_t, key: *mut u64) -> c_int);
-tqport_alias!(xv6_tqport_ttree_remove => ttree_remove(q: *mut ttree_t, node: *mut tnode_t) -> c_int);
-tqport_alias!(xv6_tqport_ttree_wait => ttree_wait(q: *mut ttree_t, key: uint64, lock: *mut spinlock_t, rdata: *mut u64) -> c_int);
-tqport_alias!(xv6_tqport_ttree_wait_cb => ttree_wait_cb(q: *mut ttree_t, key: uint64, sc: sleep_callback_t, wc: wakeup_callback_t, arg: *mut c_void, rdata: *mut u64) -> c_int);
-tqport_alias!(xv6_tqport_ttree_wakeup_one => ttree_wakeup_one(q: *mut ttree_t, key: uint64, error_no: c_int, rdata: u64) -> *mut thread);
-tqport_alias!(xv6_tqport_ttree_wakeup_key => ttree_wakeup_key(q: *mut ttree_t, key: uint64, error_no: c_int, rdata: u64) -> c_int);
-tqport_alias!(xv6_tqport_ttree_wakeup_all => ttree_wakeup_all(q: *mut ttree_t, error_no: c_int, rdata: u64) -> c_int);
+// The backwards-compat `xv6_tqport_*` C-ABI alias layer that used to
+// front tq_init/ttree_init/tq_set_lock/ttree_set_lock/tnode_init/
+// tq_size/ttree_size/tnode_get_queue/tnode_get_tree/tnode_get_thread/
+// tnode_get_errno/tq_push/tq_first/tq_pop/tq_remove/tq_bulk_move/tq_wait
+// [_cb]/tq_wakeup[_all]/ttree_add/ttree_first/ttree_key_min/ttree_remove/
+// ttree_wait[_cb]/ttree_wakeup_one/ttree_wakeup_key/ttree_wakeup_all was
+// collapsed in the P3-1B2 sweep: every caller now invokes these
+// canonical names directly (crate-path, no FFI hop).

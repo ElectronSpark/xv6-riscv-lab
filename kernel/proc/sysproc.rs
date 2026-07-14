@@ -96,20 +96,10 @@ unsafe extern "C" {
 
     // Process / thread primitives.
     pub safe fn exit(status: c_int) -> !;
-    // `thread_group_exit` is declared `-> !` here even though its real
-    // definition (`proc/thread_group.rs`) returns `()` in one path (`p ==
-    // NULL`, unreachable in practice since `current()` is never null) --
-    // pre-existing mismatch, found during the P3-1B mesh sweep, left
-    // untouched (fixing it is a behavior change, out of this wave's
-    // ABI-attributes-only charter); kept as its own `extern` rather than
-    // demoted+converted to a direct call, which would force a resolution.
-    pub safe fn thread_group_exit(p: *mut bindings::thread, code: c_int) -> !;
-    pub safe fn thread_tgid(p: *mut bindings::thread) -> c_int;
     pub safe fn vm_growheap(vm: *mut bindings::vm, n: i64) -> c_int;
 
     // Time.
     pub safe fn get_jiffs() -> u64;
-    pub safe fn signal_pending(p: *mut bindings::thread) -> c_int;
 
     // Strings.
     pub safe fn safestrcpy(s: *mut c_char, t: *const c_char,
@@ -136,6 +126,22 @@ unsafe extern "C" {
 use crate::proc::{wait, waitpid, pgroup_setpgid, pgroup_getpgid};
 use crate::timer::sched_timer::sleep_ms_interruptible;
 use crate::timer::goldfish_rtc::goldfish_rtc_read_ns;
+// P3-1B2: `thread_group_exit`/`thread_tgid`/`signal_pending` used to be
+// bridged via hand-maintained `extern "C"` redeclarations here, one of
+// which (`thread_group_exit`) had drifted from the truth -- declared
+// `-> !` even though the real definition (`proc/thread_group.rs`)
+// returns `()` on the `p == NULL` path (unreachable in practice since
+// `current()` is never null, but still ABI-unsound as a signature: a
+// caller could be miscompiled to assume this call never returns).
+// Direct crate-path calls make the compiler enforce the real signature
+// instead of trusting a hand-copied one; see `sys_exit_group` below for
+// the one adjustment this forced (an explicit trailing `0` since the
+// call is no longer diverging). `thread_tgid`/`signal_pending` had no
+// such drift (already `c_int`/`bool`-correct... `signal_pending`'s
+// return actually was declared `c_int` here vs the real `bool` --
+// harmless in practice, same as `sys_signal.rs`'s identical case, but
+// now moot) -- pulled in alongside for the same reason.
+use crate::proc::{thread_group_exit, thread_tgid, signal_pending};
 
 /// `thread_clone`'s real definition (`proc/clone.rs`) takes
 /// `*mut crate::proc::CloneArgs` -- a distinct (but `#[repr(C)]`,
@@ -207,7 +213,13 @@ pub(crate) extern "C" fn sys_gettid() -> u64 {
 pub(crate) extern "C" fn sys_exit_group() -> u64 {
     let mut n: c_int = 0;
     argint(0, &mut n);
+    // `thread_group_exit`'s real signature returns `()`, not `!` (see the
+    // P3-1B2 note above): every reachable path (`current()` is never
+    // null) actually diverges internally via `exit(code)`, but the type
+    // system no longer takes that on faith, so an explicit trailing
+    // value is required here same as any ordinary `-> u64` fn.
     thread_group_exit(current(), n);
+    0
 }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
@@ -299,7 +311,7 @@ pub(crate) extern "C" fn sys_sleep() -> u64 {
     argint(0, &mut n);
     let n = if n < 0 { 0u64 } else { n as u64 };
     let remaining = sleep_ms_interruptible(n);
-    if remaining > 0 && signal_pending(current()) != 0 {
+    if remaining > 0 && signal_pending(current()) {
         return (-EINTR) as u64;
     }
     0
@@ -362,7 +374,7 @@ pub(crate) extern "C" fn sys_nanosleep() -> u64 {
 
     let remaining_ms = sleep_ms_interruptible(ms);
 
-    if remaining_ms > 0 && signal_pending(current()) != 0 {
+    if remaining_ms > 0 && signal_pending(current()) {
         if rem_addr != 0 {
             let rem_ns = remaining_ms.wrapping_mul(1_000_000);
             let rem = Timespec {

@@ -162,16 +162,11 @@ macro_rules! atomic_fetch_sub_i32_field {
 // Passing them raw pointers preserves the same precondition contract as the
 // underlying C call site.
 // ---------------------------------------------------------------------------
-unsafe extern "C" {
-
-    // Defined in proc_rust_shims.c SECTION 15 (thread_group body) — will
-    // become a direct Rust call once that section is ported.
-    fn xv6_tgport_tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo) -> c_int;
-
-    // Defined in proc_rust_shims.c SECTION 17 (thread body) — likewise.
-    fn xv6_thport_tcb_lock(t: *mut crate::bindings::thread);
-    fn xv6_thport_tcb_unlock(t: *mut crate::bindings::thread);
-}
+// P3-1B2: these three used to be bridged via the `xv6_tgport_*`/
+// `xv6_thport_*` C-ABI alias layers (`extern "C"` redeclarations); now
+// direct crate-path calls to the real, already-Rust definitions in
+// `thread_group.rs`/`thread.rs`.
+use crate::proc::{tg_signal_send, tcb_lock, tcb_unlock};
 
 // ===========================================================================
 // xv6_panic — PORTED from proc_rust_bridge.c. The C bridge wrapped the
@@ -268,16 +263,16 @@ pub extern "C" fn xv6_tg_send_signo(tg: *mut thread_group, signo: c_int) -> c_in
     info.signo = signo;
     // SAFETY: tg comes from a Rust caller that already holds an appropriate
     // reference; info points to our own stack frame for the duration of the
-    // call (xv6_tgport_tg_signal_send is synchronous and does not retain it).
-    u! { xv6_tgport_tg_signal_send(tg, &mut info as *mut ksiginfo) }
+    // call (tg_signal_send is synchronous and does not retain it).
+    u! { tg_signal_send(tg, &mut info as *mut ksiginfo) }
 }
 
 // ===========================================================================
 // SECTION 9: RCU read-side and tcb_lock thin wrappers. The xv6_* names
 // existed only to give Rust a fixed symbol when the underlying primitives
 // were macros / inline functions. With bindgen exposing `rcu_read_lock` and
-// the soon-to-be-ported `xv6_thport_tcb_lock`, the wrappers are still
-// useful as the documented Rust-facing names.
+// `tcb_lock`/`tcb_unlock` (kernel/proc/thread.rs) being plain Rust fns, the
+// wrappers are still useful as the documented Rust-facing names.
 // ===========================================================================
 
 #[no_mangle]
@@ -296,14 +291,12 @@ pub extern "C" fn xv6_rcu_read_unlock() {
 
 #[no_mangle]
 pub extern "C" fn xv6_tcb_lock(p: *mut crate::bindings::thread) {
-    // SAFETY: p must be a live thread the caller has a reference to.
-    u! { xv6_thport_tcb_lock(p) }
+    tcb_lock(p)
 }
 
 #[no_mangle]
 pub extern "C" fn xv6_tcb_unlock(p: *mut crate::bindings::thread) {
-    // SAFETY: must be balanced with a prior xv6_tcb_lock(p).
-    u! { xv6_thport_tcb_unlock(p) }
+    tcb_unlock(p)
 }
 
 // SECTION 1 leftover: xv6_current_thread — replaces the `current` macro,
@@ -1323,20 +1316,19 @@ pub extern "C" fn xv6_exit_find_stopped_child(
 //     list_foreach_node_safe(&p->children, child, tmp, siblings) {
 //         child->signal.esignal = SIGCHLD;
 //         if (THREAD_ZOMBIE(child)) zombie_found = 1;
-//         xv6_thport_detach_child(p, child);
-//         xv6_thport_attach_child(initproc, child);
+//         detach_child(p, child);
+//         attach_child(initproc, child);
 //     }
 //     pid_wunlock(); rcu_read_unlock();
 // ---------------------------------------------------------------------------
 
 const SIGCHLD: u64 = 17;
 
-unsafe extern "C" {
-    fn xv6_thport_detach_child(parent: *mut thread, child: *mut thread);
-    fn xv6_thport_attach_child(parent: *mut thread, child: *mut thread);
-    fn xv6_schport_scheduler_yield();
-    fn xv6_thport_thread_destroy(p: *mut thread);
-}
+// P3-1B2: these four used to be bridged via the `xv6_thport_*`/
+// `xv6_schport_*` C-ABI alias layers (`extern "C"` redeclarations); now
+// direct crate-path calls to the real, already-Rust definitions in
+// `thread.rs`/`sched.rs`.
+use crate::proc::{detach_child, attach_child, thread_destroy, scheduler_yield};
 
 // P3-1B mesh sweep: same-crate `pub(crate)` items as of this wave,
 // referenced via a crate path instead of `extern "C"` redeclarations.
@@ -1365,7 +1357,7 @@ pub extern "C" fn xv6_exit_reparent_do(
     // function mirrors (see comment above), the whole operation runs under
     // `_rcu` (an RCU read-side section held for this scope) and
     // `xv6_pid_wlock()` (acquired just below), matching the locking
-    // `xv6_thport_detach_child`/`xv6_thport_attach_child` require.
+    // `detach_child`/`attach_child` require.
     u! {
         let _rcu = crate::lock::rcu::KRcuRead::new();
         xv6_pid_wlock();
@@ -1375,8 +1367,8 @@ pub extern "C" fn xv6_exit_reparent_do(
             if thread_state_load(child) == THREAD_STATE_ZOMBIE {
                 zombie_found = 1;
             }
-            xv6_thport_detach_child(p, child);
-            xv6_thport_attach_child(initproc, child);
+            detach_child(p, child);
+            attach_child(initproc, child);
         });
         xv6_pid_wunlock();
     }
@@ -1407,8 +1399,8 @@ pub extern "C" fn xv6_exit_reap_zombie(
     // thread; `xstate_out` is a caller-supplied valid `*mut c_int`. The
     // lock hand-off sequence (runlock/yield/rlock, then runlock/wlock)
     // mirrors the C body exactly, so the pid-lock protocol invariants the
-    // extern helpers (`xv6_thport_detach_child`, `proctab_proc_remove`,
-    // `__free_pid`, `xv6_thport_thread_destroy`) rely on are upheld at each
+    // extern helpers (`detach_child`, `proctab_proc_remove`,
+    // `__free_pid`, `thread_destroy`) rely on are upheld at each
     // call.
     u! {
         let mut spin_count: i32 = 0;
@@ -1423,7 +1415,7 @@ pub extern "C" fn xv6_exit_reap_zombie(
             if spin_count > 1000 {
                 xv6_thread_state_set(parent, THREAD_STATE_RUNNING);
                 xv6_pid_runlock();
-                xv6_schport_scheduler_yield();
+                scheduler_yield();
                 xv6_pid_rlock();
                 xv6_thread_state_set(parent, THREAD_STATE_INTERRUPTIBLE);
                 spin_count = 0;
@@ -1477,11 +1469,11 @@ pub extern "C" fn xv6_exit_reap_zombie(
             xv6_pid_runlock();
             xv6_pid_wlock();
         }
-        xv6_thport_detach_child(parent, child);
+        detach_child(parent, child);
         proctab_proc_remove(child);
         xv6_pid_wunlock();
         __free_pid();
-        xv6_thport_thread_destroy(child);
+        thread_destroy(child);
         pid
     }
 }
@@ -2199,10 +2191,17 @@ pub extern "C" fn xv6_t_copy_name(dst: *mut thread, src: *mut thread) {
 
 use crate::bindings::{pgroup as Pgroup, session as Session, thread_group as Tgroup};
 
+// `thread_is_group_leader` used to be bridged via the `xv6_tgport_*`
+// C-ABI alias layer; now a direct crate-path call to the real (already
+// Rust) definition in `thread_group.rs`. Its real signature returns
+// `bool`, not `c_int` -- the old `extern "C"` redeclaration here had
+// drifted from the truth (same declaration-mismatch class as the
+// `thread_group_exit -> !` finding in `sysproc.rs`), harmless in practice
+// only because both are 0/1 in the return register; call sites below are
+// updated to use the `bool` result directly instead of `!= 0`.
+use crate::proc::thread_is_group_leader;
+
 unsafe extern "C" {
-    // C-side helpers we reuse here. (xv6_thport_tcb_lock/unlock are
-    // already declared earlier in this file; do not redeclare.)
-    pub fn xv6_tgport_thread_is_group_leader(p: *mut thread) -> c_int;
     pub fn print_thread_backtrace(ctx: *mut crate::bindings::context, kstack: u64, kstack_order: c_int);
 }
 
@@ -2217,7 +2216,7 @@ unsafe extern "C" {
 /// every helper below is only ever called (directly or transitively) from
 /// the `xv6_procdump_*`/`xv6_dump_session` entry points on a `p` obtained
 /// from proc-table iteration or a caller-checked lookup, generally while
-/// `xv6_thport_tcb_lock(p)` is held for the fields it protects.
+/// `tcb_lock(p)` is held for the fields it protects.
 #[inline]
 unsafe fn t_name_ptr(p: *mut thread) -> *const c_char {
     // SAFETY: see the fn-level contract above.
@@ -2330,7 +2329,7 @@ pub extern "C" fn xv6_procdump_bt_footer() {
 #[no_mangle]
 pub extern "C" fn xv6_procdump_one(p: *mut thread) -> c_int {
     // SAFETY: `p` is a caller-supplied, live `*mut thread` (from proc-table
-    // iteration). `xv6_thport_tcb_lock(p)`/`_unlock` bracket every access
+    // iteration). `tcb_lock(p)`/`tcb_unlock(p)` bracket every access
     // to `p`'s (and `p->parent`'s) fields below, matching the C locking
     // convention for reading a thread's identity/name fields; `p->parent`
     // is null-checked before deref. Every `k_printf` format string is a
@@ -2340,7 +2339,7 @@ pub extern "C" fn xv6_procdump_one(p: *mut thread) -> c_int {
         let mut name = [0u8; 16];
         let mut pname = [0u8; 16];
 
-        xv6_thport_tcb_lock(p);
+        tcb_lock(p);
         let pstate = t_state_load(p);
         let tid = (*p).pid;
         let tgid = (*p).tgid;
@@ -2352,7 +2351,7 @@ pub extern "C" fn xv6_procdump_one(p: *mut thread) -> c_int {
         } else {
             pname[..4].copy_from_slice(b"N/A\0");
         }
-        xv6_thport_tcb_unlock(p);
+        tcb_unlock(p);
 
         // THREAD_UNUSED = 0
         if pstate == 0 { return 0; }
@@ -2429,7 +2428,7 @@ pub extern "C" fn xv6_procdump_bt_one(p: *mut thread) {
     // `kstack_order`, matching the C call site's arguments.
     u! {
         let mut name = [0u8; 16];
-        xv6_thport_tcb_lock(p);
+        tcb_lock(p);
         let pstate = t_state_load(p);
         let pid = (*p).pid;
         let tgid = (*p).tgid;
@@ -2454,7 +2453,7 @@ pub extern "C" fn xv6_procdump_bt_one(p: *mut thread) {
                 print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
             }
         }
-        xv6_thport_tcb_unlock(p);
+        tcb_unlock(p);
     }
 }
 
@@ -2474,7 +2473,7 @@ pub extern "C" fn xv6_procdump_bt_pid(pid: c_int) {
             k_printf(c"Process %d not found\n".as_ptr(), pid);
             return;
         }
-        xv6_thport_tcb_lock(p);
+        tcb_lock(p);
         let pstate = t_state_load(p);
         let mut name = [0u8; 16];
         safestr(&mut name, t_name_ptr(p));
@@ -2497,7 +2496,7 @@ pub extern "C" fn xv6_procdump_bt_pid(pid: c_int) {
             let pse = (*p).sched_entity;
             print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
         }
-        xv6_thport_tcb_unlock(p);
+        tcb_unlock(p);
     }
 }
 
@@ -2599,7 +2598,7 @@ pub extern "C" fn xv6_dump_session(s: *mut Session) {
                     let st = xv6_thread_state_to_str(t_state_load(t));
                     let on_cpu = se_on_cpu(t);
                     let ustr = if s10_t_user_space(t) { c"U".as_ptr() } else { c"K".as_ptr() };
-                    let leader = if xv6_tgport_thread_is_group_leader(t) != 0 { c" (leader)".as_ptr() } else { c"".as_ptr() };
+                    let leader = if thread_is_group_leader(t) { c" (leader)".as_ptr() } else { c"".as_ptr() };
                     let cpu_n = if on_cpu { c" *cpu".as_ptr() } else { c"".as_ptr() };
                     k_printf(
                         c"      tid %-4d [%s] %-2s %s%s%s\n".as_ptr(),

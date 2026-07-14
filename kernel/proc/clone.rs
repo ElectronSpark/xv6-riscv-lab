@@ -127,20 +127,31 @@ unsafe extern "C" {
     pub safe fn xv6_panic(msg: *const u8) -> !;
 
     // Existing kernel C symbols
-    pub safe fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int) -> *mut Thread;
-    pub safe fn thread_destroy(t: *mut Thread);
+    // Not `pub`: `thread_create`/`sigpending_clone`/`rq_task_fork`/
+    // `attach_child`/`scheduler_wakeup`/`scheduler_yield`/
+    // `context_switch_finish`/`thread_destroy`/`thread_group_add`/
+    // `thread_group_alloc` below collide (same bare name, different
+    // opaque-marker signature) with the real definitions glob-reexported
+    // from `thread.rs`/`sched.rs`/`thread_group.rs` at `crate::proc` --
+    // making these crate-visible triggered (or risked triggering)
+    // E0659 ambiguous-glob-reexport the moment any other proc submodule
+    // imports the real one by its bare name (P3-1B2 sweep). They're only
+    // ever called from within this file, so file-private is both
+    // sufficient and correct.
+    safe fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int) -> *mut Thread;
+    safe fn thread_destroy(t: *mut Thread);
     pub safe fn vm_dup(vm: *mut Vm) -> *mut Vm;
     pub safe fn vm_copy(vm: *mut Vm) -> *mut Vm;
     pub safe fn vfs_struct_clone(old: *mut FsStruct, flags: u64) -> *mut FsStruct;
     pub safe fn vfs_fdtable_clone(src: *mut VfsFdtable, flags: c_int) -> *mut VfsFdtable;
     pub safe fn sigacts_dup(psa: *mut Sigacts, flags: u64) -> *mut Sigacts;
-    pub safe fn sigpending_clone(dst: *mut ThreadSignal, src: *mut ThreadSignal, flags: u64, esignal: u64);
-    pub safe fn rq_task_fork(se: *mut SchedEntity);
-    pub safe fn scheduler_wakeup(t: *mut Thread);
-    pub safe fn scheduler_yield();
-    pub safe fn attach_child(parent: *mut Thread, child: *mut Thread);
-    pub safe fn thread_group_add(tg: *mut ThreadGroup, t: *mut Thread);
-    pub safe fn thread_group_alloc(t: *mut Thread) -> c_int;
+    safe fn sigpending_clone(dst: *mut ThreadSignal, src: *mut ThreadSignal, flags: u64, esignal: u64);
+    safe fn rq_task_fork(se: *mut SchedEntity);
+    safe fn scheduler_wakeup(t: *mut Thread);
+    safe fn scheduler_yield();
+    safe fn attach_child(parent: *mut Thread, child: *mut Thread);
+    safe fn thread_group_add(tg: *mut ThreadGroup, t: *mut Thread);
+    safe fn thread_group_alloc(t: *mut Thread) -> c_int;
     pub safe fn pgroup_add_tg(pg: *mut Pgroup, tg: *mut ThreadGroup);
     pub safe fn pgroup_add_thread(pg: *mut Pgroup, t: *mut Thread);
     pub safe fn session_add_thread(s: *mut Session, t: *mut Thread);
@@ -148,7 +159,7 @@ unsafe extern "C" {
     pub safe fn xv6_pid_wlock();
     pub safe fn xv6_pid_wunlock();
 
-    pub safe fn context_switch_finish(prev: *mut Thread, next: *mut Thread, intr: c_int);
+    safe fn context_switch_finish(prev: *mut Thread, next: *mut Thread, intr: c_int);
     pub safe fn rcu_check_callbacks();
 }
 

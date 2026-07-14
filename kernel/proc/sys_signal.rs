@@ -34,26 +34,34 @@ unsafe extern "C" {
     pub safe fn either_copyout(user_dst: c_int, dst: u64,
                                src: *const c_void, len: u64) -> c_int;
 
-    // The C function name `sigaction` collides with the C struct of the
-    // same name; we keep the struct opaque (pointer-only) below.
-    pub safe fn sigprocmask(how: c_int,
+    // Not `pub`: every fn below shares a bare name with a real definition
+    // glob-reexported from `signal.rs`/`sched.rs` at `crate::proc` (some,
+    // like `sigaction` here, additionally under a deliberately narrowed
+    // opaque-pointer signature -- "the C function name `sigaction`
+    // collides with the C struct of the same name; we keep the struct
+    // opaque (pointer-only) below"). Making these crate-visible would
+    // trigger E0659 ambiguous-glob-reexport the moment any other proc
+    // submodule imports the real one by its bare name (P3-1B2 sweep,
+    // same finding as `clone.rs`). Only ever called from within this
+    // file, so file-private is both sufficient and correct.
+    safe fn sigprocmask(how: c_int,
                             set: *const sigset_t,
                             oldset: *mut sigset_t) -> c_int;
-    pub safe fn sigaction(signum: c_int,
+    safe fn sigaction(signum: c_int,
                           act: *const c_void,
                           oldact: *mut c_void) -> c_int;
-    pub safe fn sigpending(p: *mut bindings::thread,
+    safe fn sigpending(p: *mut bindings::thread,
                            set: *mut sigset_t) -> c_int;
-    pub safe fn sigreturn() -> c_int;
-    pub safe fn sigsuspend(mask: *const sigset_t) -> c_int;
-    pub safe fn sigwait(set: *const sigset_t, sig: *mut c_int) -> c_int;
+    safe fn sigreturn() -> c_int;
+    safe fn sigsuspend(mask: *const sigset_t) -> c_int;
+    safe fn sigwait(set: *const sigset_t, sig: *mut c_int) -> c_int;
 
-    pub safe fn kill(pid: c_int, sig: c_int) -> c_int;
-    pub safe fn tgkill(tgid: c_int, tid: c_int, sig: c_int) -> c_int;
-    pub safe fn tkill(tid: c_int, sig: c_int) -> c_int;
+    safe fn kill(pid: c_int, sig: c_int) -> c_int;
+    safe fn tgkill(tgid: c_int, tid: c_int, sig: c_int) -> c_int;
+    safe fn tkill(tid: c_int, sig: c_int) -> c_int;
 
-    pub safe fn signal_pending(p: *mut bindings::thread) -> c_int;
-    pub safe fn scheduler_yield();
+    safe fn signal_pending(p: *mut bindings::thread) -> c_int;
+    safe fn scheduler_yield();
 
     pub safe fn xv6_current_thread() -> *mut bindings::thread;
     pub safe fn xv6_thread_state_set(p: *mut bindings::thread, s: c_int);

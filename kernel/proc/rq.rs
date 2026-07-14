@@ -1,6 +1,7 @@
 //! Pure-Rust port of `kernel/proc/rq.c` (SECTION 19 of the former
-//! `proc_rust_shims.c`).  Owns canonical public C ABI symbols and
-//! provides `xv6_rqport_*` aliases used by sibling Rust/C ports.
+//! `proc_rust_shims.c`).  Owns canonical public C ABI symbols, called
+//! directly by sibling Rust modules (the `xv6_rqport_*` C-ABI alias
+//! layer that used to front these was collapsed in the P3-1B2 sweep).
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 
@@ -160,7 +161,7 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
 // `idle_thread_init`, *after* that CPU has already made plain
 // (non-atomic) stores publishing its own scheduling state --
 // `CpuLocalRef::set_proc`/`set_idle_thread` (kernel/proc/thread.rs) both
-// run strictly before `xv6_rqport_rq_cpu_activate(cpuid())`. Readers on
+// run strictly before `rq_cpu_activate(cpuid())`. Readers on
 // *other* CPUs gate a cross-CPU, non-atomic read of exactly that state on
 // this bit: `rq_cpu_is_idle` returns early ("treat as idle") unless the
 // mask bit is set, and only then reads `CpuLocalRef::idle_thread_ptr()`
@@ -216,17 +217,13 @@ static RQ_GLOBAL: RqGlobalCell = RqGlobalCell(UnsafeCell::new(RqGlobal {
 }
 
 // =========================================================================
-// Public ABI (canonical, no_mangle) + xv6_rqport_* aliases via macro.
+// Public ABI (canonical, no_mangle) -- called directly cross-module.
 // =========================================================================
 
 // ---- rq_is_initialized ----
 #[no_mangle]
 pub extern "C" fn rq_is_initialized() -> bool {
     !rqg_percpu_base().is_null()
-}
-#[no_mangle]
-pub extern "C" fn xv6_rqport_rq_is_initialized() -> bool {
-    rq_is_initialized()
 }
 
 // ---- rq_set_ready / rq_clear_ready ----
@@ -237,10 +234,6 @@ pub extern "C" fn rq_set_ready(cls_id: c_int, cpu_id: c_int) {
     let secondary_mask = 1u64 << cls_id;
     pc.or_ready_mask(top_mask);
     pc.or_ready_mask_secondary(secondary_mask);
-}
-#[no_mangle]
-pub extern "C" fn xv6_rqport_rq_set_ready(cls_id: c_int, cpu_id: c_int) {
-    rq_set_ready(cls_id, cpu_id)
 }
 
 #[no_mangle]
@@ -255,10 +248,6 @@ pub extern "C" fn rq_clear_ready(cls_id: c_int, cpu_id: c_int) {
         pc.and_ready_mask(!top_mask);
     }
 }
-#[no_mangle]
-pub extern "C" fn xv6_rqport_rq_clear_ready(cls_id: c_int, cpu_id: c_int) {
-    rq_clear_ready(cls_id, cpu_id)
-}
 
 // ---- get_rq_for_cpu ----
 #[no_mangle]
@@ -270,10 +259,6 @@ pub extern "C" fn get_rq_for_cpu(cls_id: c_int, cpu_id: c_int) -> *mut rq {
         return err_ptr(-EINVAL);
     }
     get_rq(cls_id, cpu_id)
-}
-#[no_mangle]
-pub extern "C" fn xv6_rqport_get_rq_for_cpu(cls_id: c_int, cpu_id: c_int) -> *mut rq {
-    get_rq_for_cpu(cls_id, cpu_id)
 }
 
 // ---- pick_next_rq ----
@@ -301,8 +286,6 @@ pub extern "C" fn pick_next_rq() -> *mut rq {
     }
     r
 }
-#[no_mangle]
-pub extern "C" fn xv6_rqport_pick_next_rq() -> *mut rq { pick_next_rq() }
 
 // ---- rq_global_init ----
 #[no_mangle]
@@ -327,8 +310,6 @@ pub extern "C" fn rq_global_init() {
         init_fifo_rq();
     }
 }
-#[no_mangle]
-pub extern "C" fn xv6_rqport_rq_global_init() { rq_global_init() }
 
 // ---- rq_init ----
 #[no_mangle]
@@ -339,8 +320,6 @@ pub unsafe extern "C" fn rq_init(r: *mut rq) {
     }
     rq_ref(r).set_task_count(0);
 }
-#[no_mangle]
-pub extern "C" fn xv6_rqport_rq_init(r: *mut rq) { rq_unsafe_call!(rq_init(r)) }
 
 // ---- rq_register ----
 #[no_mangle]
@@ -357,10 +336,6 @@ pub extern "C" fn rq_register(r: *mut rq, cls_id: c_int, cpu_id: c_int) {
     rr.set_sched_class(cls);
     kassert!(!rr.sched_class_ptr().is_null(), "rq_register: sched_class is NULL");
     pc.set_rq_at(cls_id as usize, r);
-}
-#[no_mangle]
-pub extern "C" fn xv6_rqport_rq_register(r: *mut rq, cls_id: c_int, cpu_id: c_int) {
-    rq_register(r, cls_id, cpu_id)
 }
 
 // ---- sched_entity_init ----
@@ -381,10 +356,6 @@ pub extern "C" fn sched_entity_init(se: *mut sched_entity, p: *mut thread) {
     sr.set_exec_end(0);
     sr.set_thread(p);
 }
-#[no_mangle]
-pub extern "C" fn xv6_rqport_sched_entity_init(se: *mut sched_entity, p: *mut thread) {
-    sched_entity_init(se, p)
-}
 
 // ---- sched_class_register ----
 #[no_mangle]
@@ -401,10 +372,6 @@ pub extern "C" fn sched_class_register(id: c_int, cls: *mut sched_class) {
     }
     rqg_set_sched_class(id as usize, cls);
 }
-#[no_mangle]
-pub extern "C" fn xv6_rqport_sched_class_register(id: c_int, cls: *mut sched_class) {
-    sched_class_register(id, cls)
-}
 
 // ---- rq_lock / unlock / trylock / current variants ----
 #[no_mangle]
@@ -412,14 +379,12 @@ pub extern "C" fn rq_lock(cpu_id: c_int) {
     kassert!(cpu_id >= 0 && cpu_id < NCPU as c_int, "rq_lock: invalid cpu_id");
     rqpc_ref(cpu_id).lock_ref().lock();
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_lock(cpu_id: c_int) { rq_lock(cpu_id) }
 
 #[no_mangle]
 pub extern "C" fn rq_trylock(cpu_id: c_int) -> c_int {
     kassert!(cpu_id >= 0 && cpu_id < NCPU as c_int, "rq_trylock: invalid cpu_id");
     rqpc_ref(cpu_id).lock_ref().trylock()
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_trylock(cpu_id: c_int) -> c_int { rq_trylock(cpu_id) }
 
 #[no_mangle]
 pub extern "C" fn rq_unlock(cpu_id: c_int) {
@@ -427,14 +392,12 @@ pub extern "C" fn rq_unlock(cpu_id: c_int) {
     kassert!(rq_lock_held(cpu_id), "rq_unlock: lock not held");
     rqpc_ref(cpu_id).lock_ref().unlock();
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_unlock(cpu_id: c_int) { rq_unlock(cpu_id) }
 
 #[no_mangle]
 pub extern "C" fn rq_lock_irqsave(cpu_id: c_int) -> c_int {
     kassert!(cpu_id >= 0 && cpu_id < NCPU as c_int, "rq_lock_irqsave: invalid cpu_id");
     rqpc_ref(cpu_id).lock_ref().lock_irqsave()
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_lock_irqsave(cpu_id: c_int) -> c_int { rq_lock_irqsave(cpu_id) }
 
 #[no_mangle]
 pub extern "C" fn rq_unlock_irqrestore(cpu_id: c_int, state: c_int) {
@@ -442,7 +405,6 @@ pub extern "C" fn rq_unlock_irqrestore(cpu_id: c_int, state: c_int) {
     kassert!(rq_lock_held(cpu_id), "rq_unlock_irqrestore: lock not held");
     rqpc_ref(cpu_id).lock_ref().unlock_irqrestore(state);
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_unlock_irqrestore(cpu_id: c_int, state: c_int) { rq_unlock_irqrestore(cpu_id, state) }
 
 #[no_mangle]
 pub extern "C" fn rq_lock_current_irqsave() -> c_int {
@@ -451,13 +413,11 @@ pub extern "C" fn rq_lock_current_irqsave() -> c_int {
     rq_lock_irqsave(cpuid());
     intr_state
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_lock_current_irqsave() -> c_int { rq_lock_current_irqsave() }
 
 #[no_mangle]
 pub extern "C" fn rq_unlock_current_irqrestore(state: c_int) {
     rq_unlock_irqrestore(cpuid(), state)
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_unlock_current_irqrestore(state: c_int) { rq_unlock_current_irqrestore(state) }
 
 #[no_mangle]
 pub extern "C" fn rq_lock_two(c1: c_int, c2: c_int) {
@@ -467,7 +427,6 @@ pub extern "C" fn rq_lock_two(c1: c_int, c2: c_int) {
     else if c2 < c1 { rq_lock(c2); rq_lock(c1); }
     else { rq_lock(c1); }
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_lock_two(c1: c_int, c2: c_int) { rq_lock_two(c1, c2) }
 
 #[no_mangle]
 pub extern "C" fn rq_trylock_two(c1: c_int, c2: c_int) -> c_int {
@@ -482,7 +441,6 @@ pub extern "C" fn rq_trylock_two(c1: c_int, c2: c_int) -> c_int {
     }
     1
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_trylock_two(c1: c_int, c2: c_int) -> c_int { rq_trylock_two(c1, c2) }
 
 #[no_mangle]
 pub extern "C" fn rq_unlock_two(c1: c_int, c2: c_int) {
@@ -492,27 +450,23 @@ pub extern "C" fn rq_unlock_two(c1: c_int, c2: c_int) {
     else if c2 < c1 { rq_unlock(c1); rq_unlock(c2); }
     else { rq_unlock(c1); }
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_unlock_two(c1: c_int, c2: c_int) { rq_unlock_two(c1, c2) }
 
 #[no_mangle]
 pub extern "C" fn rq_lock_current() {
     let g = PreemptGuard::new();
     rq_lock(g.cpuid() as c_int);
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_lock_current() { rq_lock_current() }
 
 #[no_mangle]
 pub extern "C" fn rq_unlock_current() {
     rq_unlock(cpuid())
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_unlock_current() { rq_unlock_current() }
 
 #[no_mangle]
 pub extern "C" fn rq_holding(cpu_id: c_int) -> c_int {
     if cpu_id < 0 || cpu_id >= NCPU as c_int { return 0; }
     if rq_lock_held(cpu_id) { 1 } else { 0 }
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_holding(cpu_id: c_int) -> c_int { rq_holding(cpu_id) }
 
 #[no_mangle]
 pub extern "C" fn rq_holding_current() -> c_int {
@@ -520,7 +474,6 @@ pub extern "C" fn rq_holding_current() -> c_int {
     // per-CPU storage; never null.
     unsafe { RqPercpuRef::assume(rqpc_current()) }.lock_ref().holding() as c_int
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_holding_current() -> c_int { rq_holding_current() }
 
 // ---- rq_percpu_lock_get / put_unlock ----
 #[no_mangle]
@@ -530,7 +483,6 @@ pub extern "C" fn rq_percpu_lock_get(cpu_id: c_int) -> *mut rq_percpu {
     rqpc_ref(cpu_id).lock_ref().lock();
     pc
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_percpu_lock_get(cpu_id: c_int) -> *mut rq_percpu { rq_percpu_lock_get(cpu_id) }
 
 #[no_mangle]
 pub extern "C" fn rq_percpu_lock_get_current() -> *mut rq_percpu {
@@ -541,7 +493,6 @@ pub extern "C" fn rq_percpu_lock_get_current() -> *mut rq_percpu {
     unsafe { RqPercpuRef::assume(pc) }.lock_ref().lock();
     pc
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_percpu_lock_get_current() -> *mut rq_percpu { rq_percpu_lock_get_current() }
 
 #[no_mangle]
 pub extern "C" fn rq_percpu_put_unlock(pc: *mut rq_percpu) {
@@ -549,7 +500,6 @@ pub extern "C" fn rq_percpu_put_unlock(pc: *mut rq_percpu) {
     // SAFETY: `pc` is checked non-null immediately above.
     unsafe { RqPercpuRef::assume(pc) }.lock_ref().unlock();
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_percpu_put_unlock(pc: *mut rq_percpu) { rq_percpu_put_unlock(pc) }
 
 // ---- rq_select_task_rq ----
 #[no_mangle]
@@ -588,7 +538,6 @@ pub extern "C" fn rq_select_task_rq(se: *mut sched_entity, cpumask: cpumask_t) -
     }
     ptr::null_mut()
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_select_task_rq(se: *mut sched_entity, mask: cpumask_t) -> *mut rq { rq_select_task_rq(se, mask) }
 
 // ---- enqueue / dequeue / pick / put_prev / set_next ----
 #[no_mangle]
@@ -618,7 +567,6 @@ pub extern "C" fn rq_enqueue_task(r: *mut rq, se: *mut sched_entity) {
     rr.inc_task_count();
     rq_set_ready(rr.class_id(), rr.cpu_id());
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_enqueue_task(r: *mut rq, se: *mut sched_entity) { rq_enqueue_task(r, se) }
 
 #[no_mangle]
 pub extern "C" fn rq_dequeue_task(r: *mut rq, se: *mut sched_entity) {
@@ -637,7 +585,6 @@ pub extern "C" fn rq_dequeue_task(r: *mut rq, se: *mut sched_entity) {
         rq_clear_ready(rr.class_id(), rr.cpu_id());
     }
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_dequeue_task(r: *mut rq, se: *mut sched_entity) { rq_dequeue_task(r, se) }
 
 #[no_mangle]
 pub extern "C" fn rq_pick_next_task(r: *mut rq) -> *mut sched_entity {
@@ -645,7 +592,6 @@ pub extern "C" fn rq_pick_next_task(r: *mut rq) -> *mut sched_entity {
     kassert!(rq_lock_held(rr.cpu_id()), "rq_pick_next_task: rq lock not held");
     rr.pick_next_task()
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_pick_next_task(r: *mut rq) -> *mut sched_entity { rq_pick_next_task(r) }
 
 #[no_mangle]
 pub extern "C" fn rq_put_prev_task(se: *mut sched_entity) {
@@ -658,7 +604,6 @@ pub extern "C" fn rq_put_prev_task(se: *mut sched_entity) {
     kassert!(sr.sched_class_ptr() == rr.sched_class_ptr(), "rq_put_prev_task: sched_class mismatch");
     rr.put_prev_task(se);
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_put_prev_task(se: *mut sched_entity) { rq_put_prev_task(se) }
 
 #[no_mangle]
 pub extern "C" fn rq_set_next_task(se: *mut sched_entity) {
@@ -672,7 +617,6 @@ pub extern "C" fn rq_set_next_task(se: *mut sched_entity) {
     rqpc_ref(rr.cpu_id()).current_se_store_release(se);
     rr.set_next_task(se);
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_set_next_task(se: *mut sched_entity) { rq_set_next_task(se) }
 
 // ---- rq_cpu_allowed ----
 #[no_mangle]
@@ -680,7 +624,6 @@ pub extern "C" fn rq_cpu_allowed(se: *mut sched_entity, cpu_id: c_int) -> bool {
     if se.is_null() { return false; }
     (se_ref(se).affinity_mask() & (1u64 << cpu_id)) != 0
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_cpu_allowed(se: *mut sched_entity, cpu_id: c_int) -> bool { rq_cpu_allowed(se, cpu_id) }
 
 // ---- rq_task_tick / fork / dead / yield ----
 #[no_mangle]
@@ -694,7 +637,6 @@ pub extern "C" fn rq_task_tick(se: *mut sched_entity) {
     kassert!(sr.sched_class_ptr() == rr.sched_class_ptr(), "rq_task_tick: sched_class mismatch");
     rr.task_tick(se);
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_task_tick(se: *mut sched_entity) { rq_task_tick(se) }
 
 #[no_mangle]
 pub extern "C" fn rq_task_fork(se: *mut sched_entity) {
@@ -718,7 +660,6 @@ pub extern "C" fn rq_task_fork(se: *mut sched_entity) {
         unsafe { SchedClassRef::assume(def_cls) }.task_fork(sr.rq_ptr(), se);
     }
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_task_fork(se: *mut sched_entity) { rq_task_fork(se) }
 
 #[no_mangle]
 pub extern "C" fn rq_task_dead(se: *mut sched_entity) {
@@ -731,7 +672,6 @@ pub extern "C" fn rq_task_dead(se: *mut sched_entity) {
     }
     sr.set_sched_class(ptr::null_mut());
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_task_dead(se: *mut sched_entity) { rq_task_dead(se) }
 
 #[no_mangle]
 pub extern "C" fn rq_yield_task() {
@@ -746,7 +686,6 @@ pub extern "C" fn rq_yield_task() {
     kassert!(rq_lock_held(rr.cpu_id()), "rq_yield_task: rq lock not held");
     rr.yield_task();
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_yield_task() { rq_yield_task() }
 
 // ---- rq_cpu_is_idle ----
 #[no_mangle]
@@ -769,7 +708,6 @@ pub extern "C" fn rq_cpu_is_idle(cpu_id: c_int) -> bool {
     };
     current_se.is_null() || current_se == idle_se
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_cpu_is_idle(cpu_id: c_int) -> bool { rq_cpu_is_idle(cpu_id) }
 
 // ---- wake list (LLIST) ----
 #[inline]
@@ -829,7 +767,6 @@ pub extern "C" fn rq_add_wake_list(cpu_id: c_int, se: *mut sched_entity) -> c_in
     rq_percpu_put_unlock(pc);
     0
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_add_wake_list(cpu_id: c_int, se: *mut sched_entity) -> c_int { rq_add_wake_list(cpu_id, se) }
 
 #[no_mangle]
 pub extern "C" fn rq_pop_all_wake_list(pc: *mut rq_percpu) -> *mut sched_entity {
@@ -837,7 +774,6 @@ pub extern "C" fn rq_pop_all_wake_list(pc: *mut rq_percpu) -> *mut sched_entity 
     // SAFETY: `pc` is checked non-null immediately above.
     unsafe { RqPercpuRef::assume(pc) }.wake_list_migrate()
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_pop_all_wake_list(pc: *mut rq_percpu) -> *mut sched_entity { rq_pop_all_wake_list(pc) }
 
 #[no_mangle]
 pub unsafe extern "C" fn rq_flush_wake_list(cpu_id: c_int) {
@@ -880,7 +816,6 @@ pub unsafe extern "C" fn rq_flush_wake_list(cpu_id: c_int) {
         rq_percpu_put_unlock(pc);
     }
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_flush_wake_list(cpu_id: c_int) { rq_unsafe_call!(rq_flush_wake_list(cpu_id)) }
 
 // ---- sched_attr_init / getattr / setattr ----
 #[no_mangle]
@@ -894,7 +829,6 @@ pub extern "C" fn sched_attr_init(attr: *mut sched_attr) {
     ar.set_priority(DEFAULT_PRIORITY);
     ar.set_flags(0);
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_sched_attr_init(attr: *mut sched_attr) { sched_attr_init(attr) }
 
 #[no_mangle]
 pub extern "C" fn sched_getattr(se: *mut sched_entity, attr: *mut sched_attr) -> c_int {
@@ -910,7 +844,6 @@ pub extern "C" fn sched_getattr(se: *mut sched_entity, attr: *mut sched_attr) ->
     ar.set_flags(0);
     0
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_sched_getattr(se: *mut sched_entity, attr: *mut sched_attr) -> c_int { sched_getattr(se, attr) }
 
 #[no_mangle]
 pub extern "C" fn sched_setattr(se: *mut sched_entity, attr: *const sched_attr) -> c_int {
@@ -931,7 +864,6 @@ pub extern "C" fn sched_setattr(se: *mut sched_entity, attr: *const sched_attr) 
     sr.set_priority(ar.priority());
     0
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_sched_setattr(se: *mut sched_entity, attr: *const sched_attr) -> c_int { sched_setattr(se, attr) }
 
 // ---- rq_cpu_activate / get_active_cpu_mask ----
 #[no_mangle]
@@ -940,13 +872,11 @@ pub extern "C" fn rq_cpu_activate(cpu: c_int) {
         rqg_or_active_mask(1u64 << cpu);
     }
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_cpu_activate(cpu: c_int) { rq_cpu_activate(cpu) }
 
 #[no_mangle]
 pub extern "C" fn rq_get_active_cpu_mask() -> u64 {
     rqg_active_mask()
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_get_active_cpu_mask() -> u64 { rq_get_active_cpu_mask() }
 
 // ---- rq_dump / sys_dumprq ----
 #[no_mangle]
@@ -1020,7 +950,6 @@ pub unsafe extern "C" fn rq_dump() {
         printf(c"\n".as_ptr() as *const c_char);
     }
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_rq_dump() { rq_unsafe_call!(rq_dump()) }
 
 // P3-1B: referenced only as a fn-pointer value in `irq/syscall.rs`'s
 // dispatch table (crate-path `use`, not a link-name lookup) -- demoted.
@@ -1028,4 +957,3 @@ pub(crate) extern "C" fn sys_dumprq() -> u64 {
     rq_unsafe_call!(rq_dump());
     0
 }
-#[no_mangle] pub extern "C" fn xv6_rqport_sys_dumprq() -> u64 { sys_dumprq() }

@@ -1,7 +1,9 @@
 //! Pure-Rust port of `kernel/proc/sched.c` (SECTION 18 of the former
 //! `proc_rust_shims.c`).  Owns the canonical public ABI symbols
-//! (`sleep_lock`, `scheduler_yield`, `context_switch_finish`, ...) and
-//! provides the `xv6_schport_*` aliases used by sibling Rust/C ports.
+//! (`sleep_lock`, `scheduler_yield`, `context_switch_finish`, ...),
+//! called directly by sibling Rust modules -- the `xv6_schport_*` C-ABI
+//! alias layer that used to front these was collapsed in the P3-1B2
+//! sweep.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 
@@ -32,15 +34,17 @@ use crate::proc::tnode_get_thread;
 use crate::proc::ttree_init;
 use crate::proc::ttree_wait;
 use crate::proc::ttree_wakeup_key;
-use crate::proc::xv6_rqport_pick_next_rq;
-use crate::proc::xv6_rqport_rq_global_init;
-use crate::proc::xv6_rqport_rq_holding_current;
-use crate::proc::xv6_rqport_rq_lock_current_irqsave;
-use crate::proc::xv6_rqport_rq_put_prev_task;
-use crate::proc::xv6_rqport_rq_set_next_task;
-use crate::proc::xv6_rqport_rq_task_dead;
-use crate::proc::xv6_rqport_rq_trylock_two;
-use crate::proc::xv6_rqport_rq_unlock_two;
+// P3-1B2: the whole `xv6_rqport_*` C-ABI alias layer these used to name
+// (some via plain `use`, some via `extern "C"` redeclaration below -- one
+// symbol, `rq_unlock_current_irqrestore`, was even redeclared twice under
+// two different local names) was collapsed; every rq.rs function is now
+// imported once, by its real name, and called directly.
+use crate::proc::{
+    pick_next_rq, rq_global_init, rq_holding_current, rq_lock_current_irqsave,
+    rq_put_prev_task, rq_set_next_task, rq_task_dead, rq_trylock_two, rq_unlock_two,
+    rq_pick_next_task, rq_select_task_rq, rq_unlock_current_irqrestore, rq_add_wake_list,
+    rq_flush_wake_list, rq_dequeue_task, rq_enqueue_task,
+};
 use crate::timer::sched_timer::__do_timer_tick;
 use crate::ipi::ipi_send_single;
 
@@ -79,38 +83,11 @@ unsafe extern "C" {
     fn rb_next_node(node: *mut rb_node) -> *mut rb_node;
 
     safe fn page_free(ptr: *mut c_void, order: c_int);
-
-    // RQ port functions (provided by SECTION 19 in proc_rust_shims.c)
-    safe fn xv6_rqport_rq_pick_next_task(rq: *mut rq) -> *mut sched_entity;
-    safe fn xv6_rqport_rq_select_task_rq(se: *mut sched_entity, mask: u64) -> *mut rq;
-    safe fn xv6_rqport_rq_unlock_current_irqrestore(intr: c_int);
-    safe fn xv6_rqport_rq_add_wake_list(cpuid: c_int, se: *mut sched_entity);
-    safe fn xv6_rqport_rq_flush_wake_list(cpuid: c_int);
-    safe fn xv6_rqport_rq_dequeue_task(rq: *mut rq, se: *mut sched_entity);
-    safe fn xv6_rqport_rq_enqueue_task(rq: *mut rq, se: *mut sched_entity);
-
-    #[link_name = "xv6_rqport_pick_next_rq"]
-    safe fn rqport_pick_next_rq() -> *mut rq;
-    #[link_name = "xv6_rqport_rq_global_init"]
-    safe fn rqport_rq_global_init();
-    #[link_name = "xv6_rqport_rq_holding_current"]
-    safe fn rqport_rq_holding_current() -> c_int;
-    #[link_name = "xv6_rqport_rq_lock_current_irqsave"]
-    safe fn rqport_rq_lock_current_irqsave() -> c_int;
-    #[link_name = "xv6_rqport_rq_set_next_task"]
-    safe fn rqport_rq_set_next_task(se: *mut sched_entity);
-    #[link_name = "xv6_rqport_rq_task_dead"]
-    safe fn rqport_rq_task_dead(se: *mut sched_entity);
-    #[link_name = "xv6_rqport_rq_put_prev_task"]
-    safe fn rqport_rq_put_prev_task(se: *mut sched_entity);
-    #[link_name = "xv6_rqport_rq_unlock_current_irqrestore"]
-    safe fn rqport_rq_unlock_current_irqrestore(intr: c_int);
 }
 
 // ---------------- macros / helpers --------------------------------------
 macro_rules! kpanic { ($m:expr) => {{ xv6_panic(concat!($m, "\0").as_ptr() as *const c_char) }}; }
 macro_rules! kassert { ($c:expr, $m:expr) => {{ if !($c) { kpanic!($m); } }}; }
-macro_rules! schport_unsafe_call { ($e:expr) => {{ unsafe { $e } }}; }
 
 #[inline] fn cpu_access<'a>() -> CpuLocalRef<'a> {
     // SAFETY: `cpu_local_ptr()` indexes into statically-allocated, always-initialized
@@ -227,7 +204,7 @@ fn sleep_lock_impl() { sleep_lock_ref().lock(); }
 fn sleep_unlock_impl() { sleep_lock_ref().unlock(); }
 fn sleep_lock_irqsave_impl() -> c_int { sleep_lock_ref().lock_irqsave() }
 fn sleep_unlock_irqrestore_impl(state: c_int) { sleep_lock_ref().unlock_irqrestore(state); }
-fn sched_holding_impl() -> c_int { rqport_rq_holding_current() }
+fn sched_holding_impl() -> c_int { rq_holding_current() }
 
 #[no_mangle]
 pub extern "C" fn chan_holding() -> c_int { chan_holding_impl() }
@@ -262,7 +239,7 @@ fn scheduler_init_impl() {
     unsafe {
         spin_init(sleep_lock_ptr(), c"xv6_schport_sleep_lock".as_ptr() as *mut c_char);
         chan_queue_init();
-        rqport_rq_global_init();
+        rq_global_init();
     }
 }
 
@@ -273,9 +250,9 @@ pub(crate) extern "C" fn scheduler_init() { scheduler_init_impl() }
 // ---------------- pick next ---------------------------------------------
 fn sched_pick_next() -> *mut thread {
     sched_assert_holding();
-    let rq = rqport_pick_next_rq();
+    let rq = pick_next_rq();
     if is_err_or_null(rq) { return core::ptr::null_mut(); }
-    let se = xv6_rqport_rq_pick_next_task(rq);
+    let se = rq_pick_next_task(rq);
     if se.is_null() { return core::ptr::null_mut(); }
     let cur = current_thread();
     // SAFETY: `cur` is `current_thread()`, the currently running thread; the currently
@@ -296,7 +273,7 @@ fn sched_pick_next() -> *mut thread {
     }
     let p = next.thread_ptr();
     kassert!(!p.is_null(), "sched_pick_next: se->thread is NULL");
-    rqport_rq_set_next_task(se);
+    rq_set_next_task(se);
     next.on_cpu_store_release(1);
     let pstate = thread_state_get(p);
     if pstate == THREAD_WAKENING {
@@ -355,9 +332,15 @@ fn switch_to_internal(p: *mut thread) -> *mut thread {
 // ---------------- scheduler_yield ---------------------------------------
 fn scheduler_yield_inner() {
     __do_timer_tick();
-    xv6_rqport_rq_flush_wake_list(cpuid_rs());
+    // SAFETY: `rq_flush_wake_list` (kernel/proc/rq.rs) is `unsafe` because
+    // it walks the wake list through raw pointers; `cpuid_rs()` always
+    // yields a valid, in-range CPU id into the statically-allocated,
+    // always-initialized per-CPU `rq_percpu` storage this function
+    // indexes, and the function itself range-checks it again before
+    // touching anything.
+    unsafe { rq_flush_wake_list(cpuid_rs()); }
 
-    let intr = rqport_rq_lock_current_irqsave();
+    let intr = rq_lock_current_irqsave();
     let proc = current_thread();
 
     kassert!(!cpu_in_itr(), "Cannot yield CPU in interrupt context");
@@ -365,11 +348,11 @@ fn scheduler_yield_inner() {
     let mut p = sched_pick_next();
 
     if p == current_thread() {
-        xv6_rqport_rq_unlock_current_irqrestore(intr);
+        rq_unlock_current_irqrestore(intr);
     } else if p.is_null() {
         let idle = cpu_access().idle_thread_ptr();
         if proc == idle {
-            xv6_rqport_rq_unlock_current_irqrestore(intr);
+            rq_unlock_current_irqrestore(intr);
         } else {
             p = idle;
             kassert!(!p.is_null(), "Idle process is NULL");
@@ -383,7 +366,8 @@ fn scheduler_yield_inner() {
         context_switch_finish_impl(prev, current_thread(), intr);
     }
 
-    xv6_rqport_rq_flush_wake_list(cpuid_rs());
+    // SAFETY: see the matching call above.
+    unsafe { rq_flush_wake_list(cpuid_rs()); }
     unsafe { rcu_check_callbacks(); }
 }
 
@@ -467,13 +451,13 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
         // retry loop
         loop {
             push_off();
-            let rq = xv6_rqport_rq_select_task_rq(se, (*se).affinity_mask);
+            let rq = rq_select_task_rq(se, (*se).affinity_mask);
             kassert!(!is_err_or_null(rq), "do_scheduler_wakeup: rq_select_task_rq failed");
             let mut origin_cpuid = smp_load_acquire_i32(&(*se).cpu_id as *const _);
             let target_cpu = (*rq).cpu_id;
             if origin_cpuid < 0 { origin_cpuid = target_cpu; }
 
-            if xv6_rqport_rq_trylock_two(origin_cpuid, target_cpu) == 0 {
+            if rq_trylock_two(origin_cpuid, target_cpu) == 0 {
                 pop_off();
                 spin_unlock(&raw mut (*se).pi_lock);
                 for _ in 0..10 { cpu_relax(); }
@@ -494,7 +478,7 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
 
             let current_cpuid = smp_load_acquire_i32(&(*se).cpu_id as *const _);
             if current_cpuid >= 0 && current_cpuid != origin_cpuid {
-                xv6_rqport_rq_unlock_two(origin_cpuid, target_cpu);
+                rq_unlock_two(origin_cpuid, target_cpu);
                 spin_unlock(&raw mut (*se).pi_lock);
                 spin_lock(&raw mut (*se).pi_lock);
                 old_state = smp_load_acquire_state(&(*p).state as *const _);
@@ -515,21 +499,21 @@ unsafe fn do_scheduler_wakeup(p: *mut thread, from_stopped: bool) {
             if smp_load_acquire_i32(&(*se).on_rq as *const _) != 0 {
                 smp_store_release_state(&raw mut (*p).state, THREAD_RUNNING);
                 spin_unlock(&raw mut (*se).pi_lock);
-                xv6_rqport_rq_unlock_two(origin_cpuid, target_cpu);
+                rq_unlock_two(origin_cpuid, target_cpu);
                 return;
             }
 
             if smp_load_acquire_i32(&(*se).on_cpu as *const _) != 0 {
-                xv6_rqport_rq_add_wake_list(origin_cpuid, se);
+                rq_add_wake_list(origin_cpuid, se);
                 spin_unlock(&raw mut (*se).pi_lock);
-                xv6_rqport_rq_unlock_two(origin_cpuid, target_cpu);
+                rq_unlock_two(origin_cpuid, target_cpu);
                 ipi_send_single(origin_cpuid, IPI_REASON_RESCHEDULE);
                 return;
             }
 
-            xv6_rqport_rq_enqueue_task(rq, se);
+            rq_enqueue_task(rq, se);
             spin_unlock(&raw mut (*se).pi_lock);
-            xv6_rqport_rq_unlock_two(origin_cpuid, target_cpu);
+            rq_unlock_two(origin_cpuid, target_cpu);
             return;
         }
     }
@@ -737,7 +721,7 @@ fn context_switch_prepare_impl(prev: *mut thread, next: *mut thread) {
     next_se_ref.set_cpu_id(cpuid_rs());
     if thread_zombie(prev) {
         // SAFETY: `prev` is proven non-null by the diverging `kassert!` above.
-        rqport_rq_task_dead(unsafe { ThreadAccess::assume(prev) }.sched_entity_ptr());
+        rq_task_dead(unsafe { ThreadAccess::assume(prev) }.sched_entity_ptr());
     }
 }
 
@@ -757,13 +741,13 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
 
     if prev != idle {
         if state_is_running(pstate) {
-            rqport_rq_put_prev_task(se);
+            rq_put_prev_task(se);
         } else if state_is_sleeping(pstate) || state_is_stopped(pstate) {
             // SAFETY: `se` is `prev_access`'s embedded scheduling entity, field-
             // derived from the already-valid `prev_access` handle above.
             let se_rq = unsafe { SchedEntityRef::assume(se) }.rq_ptr();
             if !se_rq.is_null() {
-                xv6_rqport_rq_dequeue_task(se_rq, se);
+                rq_dequeue_task(se_rq, se);
             }
         }
     }
@@ -782,7 +766,7 @@ fn context_switch_finish_impl(prev: *mut thread, next: *mut thread, intr: c_int)
         sleep_unlock_irqrestore_impl(0);
     }
 
-    rqport_rq_unlock_current_irqrestore(intr);
+    rq_unlock_current_irqrestore(intr);
 }
 
 #[no_mangle]
@@ -790,52 +774,12 @@ pub extern "C" fn context_switch_finish(prev: *mut thread, next: *mut thread, in
     context_switch_finish_impl(prev, next, intr)
 }
 
-// ---------------- xv6_schport_* aliases ---------------------------------
-macro_rules! schport_alias {
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* ) -> $ret:ty) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) -> $ret { $target($($pn),*) }
-    };
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* )) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) { $target($($pn),*) }
-    };
-}
-
-macro_rules! schport_unsafe_alias {
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* ) -> $ret:ty) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) -> $ret { schport_unsafe_call!($target($($pn),*)) }
-    };
-    ($alias:ident => $target:ident ( $($pn:ident : $pt:ty),* )) => {
-        #[no_mangle]
-        pub extern "C" fn $alias($($pn: $pt),*) { schport_unsafe_call!($target($($pn),*)) }
-    };
-}
-
-schport_alias!(xv6_schport_chan_holding => chan_holding() -> c_int);
-schport_alias!(xv6_schport_sleep_lock => sleep_lock());
-schport_alias!(xv6_schport_sleep_unlock => sleep_unlock());
-schport_alias!(xv6_schport_sleep_lock_irqsave => sleep_lock_irqsave() -> c_int);
-schport_alias!(xv6_schport_sleep_unlock_irqrestore => sleep_unlock_irqrestore(state: c_int));
-schport_alias!(xv6_schport_sched_holding => sched_holding() -> c_int);
-schport_alias!(xv6_schport_scheduler_init => scheduler_init());
-schport_alias!(xv6_schport_switch_to => switch_to(cur: *mut thread, target: *mut thread) -> *mut thread);
-schport_alias!(xv6_schport_scheduler_yield => scheduler_yield());
-schport_alias!(xv6_schport_scheduler_sleep => scheduler_sleep(lk: *mut spinlock_t, s: thread_state));
-schport_alias!(xv6_schport_scheduler_wakeup => scheduler_wakeup(p: *mut thread));
-schport_alias!(xv6_schport_scheduler_wakeup_timeout => scheduler_wakeup_timeout(p: *mut thread));
-schport_alias!(xv6_schport_scheduler_wakeup_killable => scheduler_wakeup_killable(p: *mut thread));
-schport_alias!(xv6_schport_scheduler_wakeup_interruptible => scheduler_wakeup_interruptible(p: *mut thread));
-schport_alias!(xv6_schport_scheduler_wakeup_stopped => scheduler_wakeup_stopped(p: *mut thread));
-schport_alias!(xv6_schport_sleep_on_chan => sleep_on_chan(chan: *mut c_void, lk: *mut spinlock_t));
-schport_alias!(xv6_schport_sleep_on_chan_interruptible => sleep_on_chan_interruptible(chan: *mut c_void, lk: *mut spinlock_t) -> c_int);
-schport_alias!(xv6_schport_wakeup_on_chan => wakeup_on_chan(chan: *mut c_void));
-schport_unsafe_alias!(xv6_schport_scheduler_dump_chan_queue => scheduler_dump_chan_queue());
-schport_alias!(xv6_schport_wakeup => wakeup(p: *mut thread));
-schport_alias!(xv6_schport_wakeup_timeout => wakeup_timeout(p: *mut thread));
-schport_alias!(xv6_schport_wakeup_killable => wakeup_killable(p: *mut thread));
-schport_alias!(xv6_schport_wakeup_interruptible => wakeup_interruptible(p: *mut thread));
-schport_alias!(xv6_schport_sys_dumpchan => sys_dumpchan() -> u64);
-schport_alias!(xv6_schport_context_switch_prepare => context_switch_prepare(prev: *mut thread, next: *mut thread));
-schport_alias!(xv6_schport_context_switch_finish => context_switch_finish(prev: *mut thread, next: *mut thread, intr: c_int));
+// The `xv6_schport_*` C-ABI alias layer that used to front chan_holding/
+// sleep_lock[_irqsave]/sleep_unlock[_irqrestore]/sched_holding/
+// scheduler_init/switch_to/scheduler_yield/scheduler_sleep/
+// scheduler_wakeup[_timeout/_killable/_interruptible/_stopped]/
+// sleep_on_chan[_interruptible]/wakeup_on_chan/scheduler_dump_chan_queue/
+// wakeup[_timeout/_killable/_interruptible]/sys_dumpchan/
+// context_switch_prepare/context_switch_finish was collapsed in the
+// P3-1B2 sweep: every caller now invokes these canonical names directly
+// (crate-path, no FFI hop).

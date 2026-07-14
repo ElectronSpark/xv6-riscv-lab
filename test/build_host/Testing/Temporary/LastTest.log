@@ -1,76 +1,75 @@
-Start testing: Jul 13 08:54 EDT
+Start testing: Jul 13 23:53 EDT
 ----------------------------------------------------------
-4/7 Testing: qemu_rwsem
-4/7 Test: qemu_rwsem
-Command: "/home/es/xv6/xv6-riscv/scripts/run_qemu_test.sh" "/home/es/xv6/xv6-riscv/test/build_qemu_rwsem" "90" "\[rwsem\] tests finished" "\[rwsem\]\[T[0-9]+\].*FAIL" "--" "RWLOCK_TEST=1"
-Directory: /home/es/xv6/xv6-riscv/test/build_host
-"qemu_rwsem" start time: Jul 13 08:54 EDT
+3/7 Testing: rust_host_unit_tests
+3/7 Test: rust_host_unit_tests
+Command: "/usr/bin/cargo" "test" "--target" "x86_64-unknown-linux-gnu"
+Directory: /home/es/xv6/xv6-riscv/test/../kernel
+"rust_host_unit_tests" start time: Jul 13 23:53 EDT
 Output:
 ----------------------------------------------------------
-[run_qemu_test] build_dir=/home/es/xv6/xv6-riscv/test/build_qemu_rwsem TOOLPREFIX=/home/es/xv6/toolchain/build/bin/riscv64-unknown-elf- LAB=fs
-[run_qemu_test] PASS (log: /home/es/xv6/xv6-riscv/test/build_qemu_rwsem/qemu_test.log)
+warning: unused import: `core::ffi::c_void`
+ --> list.rs:6:5
+  |
+6 | use core::ffi::c_void;
+  |     ^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `c_char` and `c_int`
+  --> mm/early_allocator.rs:21:17
+   |
+21 | use core::ffi::{c_char, c_int, c_void};
+   |                 ^^^^^^  ^^^^^
+
+warning: `xv6_rust` (lib test) generated 2 warnings (run `cargo fix --lib -p xv6_rust --tests` to apply 2 suggestions)
+    Finished `test` profile [optimized] target(s) in 0.01s
+     Running unittests lib.rs (../build/kernel/rust/x86_64-unknown-linux-gnu/debug/deps/xv6_rust-bab613305a02e3eb)
+
+running 35 tests
+test list::tests::iterator_visits_elements_in_link_order_head_next_to_head_prev ... ok
+test list::tests::container_of_style_offset_recovers_the_exact_payload ... ok
+test list::tests::iterator_visits_the_single_element_in_a_one_item_list ... ok
+test list::tests::iterator_over_null_head_yields_nothing ... ok
+test list::tests::iterator_terminates_at_head_instead_of_looping_forever ... ok
+test list::tests::list_for_each_macro_visits_every_element_exactly_once ... ok
+test list::tests::iterator_over_empty_list_yields_nothing ... ok
+test machine::tests::host_mock_csr_writes_accept_any_value_and_are_noops ... ok
+test machine::tests::host_mock_intr_toggle_is_a_noop_and_intr_get_reports_off ... ok
+test machine::tests::host_mock_intr_off_save_and_restore_do_not_panic ... ok
+test machine::tests::host_mock_register_reads_return_the_documented_canned_zero ... ok
+test machine::tests::host_mock_smp_mb_is_a_real_fence_and_does_not_panic ... ok
+test mm::bits::tests::build_functions_reproduce_the_exported_static_tables_exactly ... ok
+test machine::tests::host_mock_wfi_and_cpu_relax_return_immediately ... ok
+test mm::bits::tests::inverse_table_matches_naive_bit_reversal_for_every_byte_value ... ok
+test mm::bits::tests::leading_zeros_table_matches_naive_clz_for_every_byte_value ... ok
+test mm::bits::tests::popcount_table_matches_naive_popcount_for_every_byte_value ... ok
+test mm::bits::tests::trailing_zeros_table_matches_naive_ctz_for_every_byte_value ... ok
+test mm::bits::tests::zero_is_the_documented_sentinel_for_ctz_and_clz_tables ... ok
+test mm::early_allocator::tests::a_large_aligned_allocation_recycles_its_leading_gap_into_the_freelists ... ok
+test mm::early_allocator::tests::allocating_past_the_end_of_the_arena_panics - should panic ... ok
+test mm::early_allocator::tests::alloc_with_a_non_power_of_two_alignment_panics - should panic ... ok
+test mm::early_allocator::tests::allocation_sizes_round_up_to_the_next_power_of_two_chunk ... ok
+test mm::early_allocator::tests::every_free_chunk_is_aligned_to_its_own_power_of_two_size ... ok
+test mm::early_allocator::tests::init_with_end_at_or_before_start_panics - should panic ... ok
+test mm::early_allocator::tests::init_aligns_current_and_records_the_full_range_with_empty_freelists ... ok
+test mm::early_allocator::tests::many_small_allocations_from_a_freed_region_are_all_unique_and_aligned ... ok
+test mm::early_allocator::tests::large_allocations_respect_the_caller_supplied_alignment ... ok
+test mm::early_allocator::tests::allocations_after_freeing_a_gap_are_served_from_the_freelist_and_do_not_overlap ... ok
+test mm::early_allocator::tests::small_allocations_ignore_the_caller_supplied_alignment_and_use_chunk_size_instead ... ok
+test mm::early_allocator::tests::one_hundred_mixed_size_allocations_all_stay_within_the_arena_and_are_aligned ... ok
+test mm::early_allocator::tests::freed_chunks_carry_the_documented_magic_number ... ok
+test mm::early_allocator::tests::zero_size_allocation_returns_null_without_touching_the_freelists ... ok
+test mm::early_allocator::tests::small_allocations_are_self_aligned_and_do_not_overlap ... ok
+test mm::early_allocator::tests::the_current_pointer_advances_past_every_allocation_made_so_far ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
 <end of output>
-Test time =  96.08 sec
+Test time =   0.05 sec
 ----------------------------------------------------------
 Test Passed.
-"qemu_rwsem" end time: Jul 13 08:55 EDT
-"qemu_rwsem" time elapsed: 00:01:36
+"rust_host_unit_tests" end time: Jul 13 23:53 EDT
+"rust_host_unit_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-5/7 Testing: qemu_semaphore
-5/7 Test: qemu_semaphore
-Command: "/home/es/xv6/xv6-riscv/scripts/run_qemu_test.sh" "/home/es/xv6/xv6-riscv/test/build_qemu_semaphore" "90" "\[sem\] tests finished" "\[sem\]\[T[0-9]+\].*FAIL" "--" "SEMAPHORE_TEST=1"
-Directory: /home/es/xv6/xv6-riscv/test/build_host
-"qemu_semaphore" start time: Jul 13 08:55 EDT
-Output:
-----------------------------------------------------------
-[run_qemu_test] build_dir=/home/es/xv6/xv6-riscv/test/build_qemu_semaphore TOOLPREFIX=/home/es/xv6/toolchain/build/bin/riscv64-unknown-elf- LAB=fs
-[run_qemu_test] PASS (log: /home/es/xv6/xv6-riscv/test/build_qemu_semaphore/qemu_test.log)
-<end of output>
-Test time =  96.04 sec
-----------------------------------------------------------
-Test Passed.
-"qemu_semaphore" end time: Jul 13 08:57 EDT
-"qemu_semaphore" time elapsed: 00:01:36
-----------------------------------------------------------
-
-6/7 Testing: qemu_pcache
-6/7 Test: qemu_pcache
-Command: "/home/es/xv6/xv6-riscv/scripts/run_qemu_test.sh" "/home/es/xv6/xv6-riscv/test/build_qemu_pcache" "150" "PCACHE TESTS: [0-9]+/[0-9]+ PASSED" "PCACHE TESTS: [0-9]+/[0-9]+ FAILED" "--" "PCACHE_TEST=1"
-Directory: /home/es/xv6/xv6-riscv/test/build_host
-"qemu_pcache" start time: Jul 13 08:57 EDT
-Output:
-----------------------------------------------------------
-[run_qemu_test] build_dir=/home/es/xv6/xv6-riscv/test/build_qemu_pcache TOOLPREFIX=/home/es/xv6/toolchain/build/bin/riscv64-unknown-elf- LAB=fs
-[run_qemu_test] PASS (log: /home/es/xv6/xv6-riscv/test/build_qemu_pcache/qemu_test.log)
-<end of output>
-Test time = 150.58 sec
-----------------------------------------------------------
-Test Passed.
-"qemu_pcache" end time: Jul 13 08:59 EDT
-"qemu_pcache" time elapsed: 00:02:30
-----------------------------------------------------------
-
-7/7 Testing: qemu_workqueue
-7/7 Test: qemu_workqueue
-Command: "/home/es/xv6/xv6-riscv/scripts/run_qemu_test.sh" "/home/es/xv6/xv6-riscv/test/build_qemu_workqueue" "90" "WORKQUEUE TESTS: [0-9]+/[0-9]+ PASSED" "WORKQUEUE TESTS: [0-9]+/[0-9]+ FAILED" "--" "WORKQUEUE_TEST=1"
-Directory: /home/es/xv6/xv6-riscv/test/build_host
-"qemu_workqueue" start time: Jul 13 08:59 EDT
-Output:
-----------------------------------------------------------
-[run_qemu_test] build_dir=/home/es/xv6/xv6-riscv/test/build_qemu_workqueue TOOLPREFIX=/home/es/xv6/toolchain/build/bin/riscv64-unknown-elf- LAB=fs
-[run_qemu_test] PASS (log: /home/es/xv6/xv6-riscv/test/build_qemu_workqueue/qemu_test.log)
-<end of output>
-Test time =  90.57 sec
-----------------------------------------------------------
-Test Passed.
-"qemu_workqueue" end time: Jul 13 09:01 EDT
-"qemu_workqueue" time elapsed: 00:01:30
-----------------------------------------------------------
-
-End testing: Jul 13 09:01 EDT
-
-qemu = 433.27 sec*proc
-
-slow = 433.27 sec*proc
-
+End testing: Jul 13 23:53 EDT

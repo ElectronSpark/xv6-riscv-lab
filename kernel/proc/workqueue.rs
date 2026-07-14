@@ -51,13 +51,21 @@ unsafe extern "C" {
 
     pub safe fn xv6_current_thread() -> *mut thread;
     pub safe fn xv6_thread_state_set(t: *mut thread, s: c_int);
-    pub safe fn tcb_lock(t: *mut thread);
-    pub safe fn tcb_unlock(t: *mut thread);
 
-    pub safe fn scheduler_wakeup(t: *mut thread);
-    pub safe fn scheduler_yield();
-    pub safe fn wakeup(t: *mut thread);
-    pub safe fn kill_thread(t: *mut thread, sig: c_int) -> c_int;
+    // Not `pub`: every fn below shares a bare name with a real definition
+    // glob-reexported from `thread.rs`/`sched.rs`/`thread_queue.rs`/
+    // `signal.rs` at `crate::proc`. Making these crate-visible would
+    // trigger E0659 ambiguous-glob-reexport the moment any other proc
+    // submodule imports the real one by its bare name (P3-1B2 sweep,
+    // same finding as `clone.rs`/`sys_signal.rs`). Only ever called from
+    // within this file, so file-private is both sufficient and correct.
+    safe fn tcb_lock(t: *mut thread);
+    safe fn tcb_unlock(t: *mut thread);
+
+    safe fn scheduler_wakeup(t: *mut thread);
+    safe fn scheduler_yield();
+    safe fn wakeup(t: *mut thread);
+    safe fn kill_thread(t: *mut thread, sig: c_int) -> c_int;
     pub safe fn exit(code: c_int) -> !;
 
     pub safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
@@ -68,13 +76,13 @@ unsafe extern "C" {
 
     pub safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
 
-    pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
-    pub safe fn tq_size(q: *mut tq_t) -> c_int;
-    pub safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, slot: *mut u64) -> c_int;
-    pub safe fn tq_wakeup(q: *mut tq_t, e: c_int, d: u64) -> *mut thread;
-    pub safe fn tq_wakeup_all(q: *mut tq_t, e: c_int, d: u64) -> c_int;
+    safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
+    safe fn tq_size(q: *mut tq_t) -> c_int;
+    safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, slot: *mut u64) -> c_int;
+    safe fn tq_wakeup(q: *mut tq_t, e: c_int, d: u64) -> *mut thread;
+    safe fn tq_wakeup_all(q: *mut tq_t, e: c_int, d: u64) -> c_int;
 
-    pub safe fn kthread_create(
+    safe fn kthread_create(
         name: *const c_char, entry: *mut c_void, arg: u64, prio: c_int, order: c_int,
     ) -> *mut thread;
 }

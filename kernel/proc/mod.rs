@@ -40,7 +40,6 @@ mod thread;
 mod sched;
 mod rq;
 mod signal;
-mod signal_ffi;
 
 pub use sched_idle::*;
 pub use sched_fifo::*;
@@ -59,4 +58,3 @@ pub use thread::*;
 pub use sched::*;
 pub use rq::*;
 pub use signal::*;
-pub use signal_ffi::*;

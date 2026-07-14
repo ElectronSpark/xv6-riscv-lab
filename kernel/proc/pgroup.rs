@@ -114,7 +114,14 @@ unsafe extern "C" {
     pub safe fn session_add_pg(s: *mut Session, pg: *mut Pgroup) -> i32;
     pub safe fn session_remove_pg(s: *mut Session, pg: *mut Pgroup) -> i32;
     pub safe fn get_pid_thread(pid: i32) -> *mut Thread;
-    pub safe fn thread_tgid(t: *mut Thread) -> i32;
+    // Not `pub`: shares a bare name with the real definition glob-
+    // reexported from `thread_group.rs` at `crate::proc`. Making this
+    // crate-visible would trigger E0659 ambiguous-glob-reexport the
+    // moment any other proc submodule imports the real one by its bare
+    // name (P3-1B2 sweep, same finding as `clone.rs`/`sys_signal.rs`).
+    // Only ever called from within this file, so file-private is both
+    // sufficient and correct.
+    safe fn thread_tgid(t: *mut Thread) -> i32;
     pub safe fn rcu_read_lock();
     pub safe fn rcu_read_unlock();
     pub safe fn xv6_panic(msg: *const u8) -> !;

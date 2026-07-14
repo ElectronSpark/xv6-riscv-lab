@@ -1,8 +1,10 @@
 //! Pure-Rust port of `kernel/proc/signal.c`.
 //!
 //! Owns the canonical signal handling ABI (`signal_init`, `kill`, `sigaction`,
-//! `sigprocmask`, `handle_signal`, etc.) and also provides the
-//! `xv6_sigport_*` aliases that earlier sections of the Rust kernel call.
+//! `sigprocmask`, `handle_signal`, etc.), called directly by sibling Rust
+//! modules -- the `xv6_sigport_*` C-ABI alias layer that used to front
+//! these (in the now-deleted `signal_ffi.rs`) was collapsed in the
+//! P3-1B2 sweep.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 
