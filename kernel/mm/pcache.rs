@@ -1611,44 +1611,114 @@ fn pcache_page_valid(p: *mut Pcache, page: *mut Page) -> bool {
 // RAII drop guards for the pcache's various locking primitives. Each
 // guard releases its matching shim on Drop, so callers can use scoped
 // `let _g = lock_*()` patterns instead of manual lock/unlock pairs.
+//
+// `PcLocalGuard`/`PcTreeReadGuard`/`PcTreeWriteGuard` additionally *carry*
+// the already-validated `PcacheHandle` for the locked `pcache` via `Deref`.
+// Before this, every call site that needed a field/method under one of
+// these locks had to separately reconstruct `unsafe { PcacheHandle::new(p)
+// }` on the same pointer the guard was already holding, each repeating the
+// same "non-null, live pcache" SAFETY argument. Now that argument is made
+// exactly once, in the guard's constructor below, and every call site that
+// holds the guard variable writes `guard.method()` (`PcacheHandle` is
+// `Copy`, so this works through the `Deref` chain like any other
+// pointer-to-handle smart pointer). Mirrors the `VmReadGuard`/
+// `VmWriteGuard`/`VmPgtableGuard` pattern in `vm.rs`.
 #[must_use = "global pcache lock is released immediately if the guard is dropped"]
 struct PcGlobalGuard;
 impl Drop for PcGlobalGuard {
     fn drop(&mut self) { spin_unlock(global_spinlock()); }
+}
+impl PcGlobalGuard {
+    /// Read `PCACHE_GLOBAL_COUNT` (registered-pcache count) under the held
+    /// global lock.
+    fn global_count(&self) -> c_int {
+        // SAFETY: `PcGlobalGuard` is only ever constructed by
+        // `lock_pcache_global`, which has just acquired `global_spinlock`;
+        // `PCACHE_GLOBAL_COUNT` is only ever mutated under this same lock
+        // (see `xv6_pcache_inc_global_count`/`_dec_global_count`), so a
+        // read through `&self` -- whose lifetime is bound to the lock hold,
+        // released in `Drop` -- cannot race a concurrent writer.
+        unsafe { *PCACHE_GLOBAL_COUNT.get() }
+    }
 }
 fn lock_pcache_global() -> PcGlobalGuard {
     spin_lock(global_spinlock());
     PcGlobalGuard
 }
 
+/// RAII guard for a pcache's per-instance spinlock
+/// (`xv6_pcache_spin_lock`/`_unlock`). Carries the locked pcache's
+/// [`PcacheHandle`] via `Deref` -- see the module comment above this block.
 #[must_use = "pcache lock is released immediately if the guard is dropped"]
-struct PcLocalGuard(*mut Pcache);
+struct PcLocalGuard {
+    handle: PcacheHandle,
+}
 impl Drop for PcLocalGuard {
-    fn drop(&mut self) { unsafe { PcacheHandle::new(self.0) }.spin_unlock(); }
+    fn drop(&mut self) { self.handle.spin_unlock(); }
+}
+impl core::ops::Deref for PcLocalGuard {
+    type Target = PcacheHandle;
+    fn deref(&self) -> &PcacheHandle {
+        &self.handle
+    }
 }
 fn lock_pcache_local(p: *mut Pcache) -> PcLocalGuard {
-    unsafe { PcacheHandle::new(p) }.spin_lock();
-    PcLocalGuard(p)
+    // SAFETY: every call site passes a `p` already known non-null/live --
+    // either checked directly by the caller just above (e.g.
+    // `pcache_register`, `pcache_teardown`, the `#[no_mangle]` public API
+    // functions all null-check `p` on entry) or a `p`/`cur` freshly
+    // returned from the global pcache list (`xv6_pcache_global_first`/
+    // `_next`, themselves walking a list that only ever holds live
+    // `pcache` pointers). Identical precondition to the bare-newtype
+    // guard this replaces, which reconstructed the same `PcacheHandle` in
+    // `Drop`.
+    let handle = unsafe { PcacheHandle::new(p) };
+    handle.spin_lock();
+    PcLocalGuard { handle }
 }
 
+/// RAII guard for a pcache's rb-tree read lock. See [`PcLocalGuard`] for
+/// the `Deref`-carries-`PcacheHandle` rationale.
 #[must_use = "pcache tree read lock is released when the guard is dropped"]
-struct PcTreeReadGuard(*mut Pcache);
+struct PcTreeReadGuard {
+    handle: PcacheHandle,
+}
 impl Drop for PcTreeReadGuard {
-    fn drop(&mut self) { unsafe { PcacheHandle::new(self.0) }.tree_runlock(); }
+    fn drop(&mut self) { self.handle.tree_runlock(); }
+}
+impl core::ops::Deref for PcTreeReadGuard {
+    type Target = PcacheHandle;
+    fn deref(&self) -> &PcacheHandle {
+        &self.handle
+    }
 }
 fn rlock_pcache_tree(p: *mut Pcache) -> PcTreeReadGuard {
-    unsafe { PcacheHandle::new(p) }.tree_rlock();
-    PcTreeReadGuard(p)
+    // SAFETY: see `lock_pcache_local`.
+    let handle = unsafe { PcacheHandle::new(p) };
+    handle.tree_rlock();
+    PcTreeReadGuard { handle }
 }
 
+/// RAII guard for a pcache's rb-tree write lock. See [`PcLocalGuard`] for
+/// the `Deref`-carries-`PcacheHandle` rationale.
 #[must_use = "pcache tree write lock is released when the guard is dropped"]
-struct PcTreeWriteGuard(*mut Pcache);
+struct PcTreeWriteGuard {
+    handle: PcacheHandle,
+}
 impl Drop for PcTreeWriteGuard {
-    fn drop(&mut self) { unsafe { PcacheHandle::new(self.0) }.tree_wunlock(); }
+    fn drop(&mut self) { self.handle.tree_wunlock(); }
+}
+impl core::ops::Deref for PcTreeWriteGuard {
+    type Target = PcacheHandle;
+    fn deref(&self) -> &PcacheHandle {
+        &self.handle
+    }
 }
 fn wlock_pcache_tree(p: *mut Pcache) -> PcTreeWriteGuard {
-    unsafe { PcacheHandle::new(p) }.tree_wlock();
-    PcTreeWriteGuard(p)
+    // SAFETY: see `lock_pcache_local`.
+    let handle = unsafe { PcacheHandle::new(p) };
+    handle.tree_wlock();
+    PcTreeWriteGuard { handle }
 }
 
 /// RAII guard for the per-`Page` sleep-free lock
@@ -1686,7 +1756,7 @@ fn pcache_register(p: *mut Pcache) {
     let _gg = lock_pcache_global();
     let _gp = lock_pcache_local(p);
     if xv6_pcache_list_entry_is_detached(p) != 0 {
-        unsafe { PcacheHandle::new(p) }.push_global();
+        _gp.push_global();
         xv6_pcache_inc_global_count();
     } else {
         crate::kprint!("warning: __pcache_register: pcache already registered");
@@ -1868,7 +1938,7 @@ fn pcache_schedule_flushes_locked(round_start: u64, force_round: bool) -> bool {
                 if dirty_threshold == 0 && dirty_count > 0 {
                     dirty_threshold = 1;
                 }
-                let last_flushed = (unsafe { PcacheHandle::new(cur) }.last_flushed());
+                let last_flushed = _g.last_flushed();
                 if dirty_threshold > 0 && dirty_count >= dirty_threshold {
                     should_flush = true;
                 } else if round_start >= last_flushed
@@ -1901,7 +1971,7 @@ fn pcache_pick_pending_before(jiffs: u64) -> *mut Pcache {
         let found = {
             let _g = lock_pcache_local(cur);
             if xv6_pcache_flush_requested(cur) != 0 {
-                let last_request = (unsafe { PcacheHandle::new(cur) }.last_request());
+                let last_request = _g.last_request();
                 last_request <= jiffs
             } else {
                 false
@@ -1923,7 +1993,7 @@ fn pcache_wait_for_pending_flushes() {
             let p = pcache_pick_pending_before(start_jiffs);
             if !p.is_null() {
                 let _gp = lock_pcache_local(p);
-                unsafe { PcacheHandle::new(p) }.inc_wait_refcount();
+                _gp.inc_wait_refcount();
             }
             p
         };
@@ -1938,7 +2008,7 @@ fn pcache_wait_for_pending_flushes() {
 
         {
             let _gp = lock_pcache_local(p);
-            unsafe { PcacheHandle::new(p) }.dec_wait_refcount();
+            _gp.dec_wait_refcount();
             xv6_pcache_wakeup_on_chan(p as *mut c_void);
         }
 
@@ -2013,13 +2083,13 @@ fn pcache_get_page_internal(
     if !default_page.is_null() {
         let _g = wlock_pcache_tree(p);
         let dp_node = xv6_page_pcache_get_node(default_page);
-        found_node = (unsafe { PcacheHandle::new(p) }.rb_insert(dp_node));
+        found_node = _g.rb_insert(dp_node);
         if found_node != dp_node {
             return xv6_pcache_node_page(found_node);
         }
     } else {
         let _g = rlock_pcache_tree(p);
-        found_node = (unsafe { PcacheHandle::new(p) }.rb_find(blkno));
+        found_node = _g.rb_find(blkno);
         if found_node.is_null() {
             return ptr::null_mut();
         }
@@ -2367,7 +2437,7 @@ pub extern "C" fn pcache_teardown(p: *mut Pcache) {
         let _gg = lock_pcache_global();
         let _gp = lock_pcache_local(p);
         if xv6_pcache_list_entry_is_detached(p) == 0 {
-            unsafe { PcacheHandle::new(p) }.detach_global();
+            _gp.detach_global();
             xv6_pcache_dec_global_count();
         }
     }
@@ -2375,7 +2445,7 @@ pub extern "C" fn pcache_teardown(p: *mut Pcache) {
     // 2. wait wait_refcount drain
     {
         let _gp = lock_pcache_local(p);
-        while (unsafe { PcacheHandle::new(p) }.wait_refcount()) > 0 {
+        while _gp.wait_refcount() > 0 {
             sleep_on_chan(p as *mut c_void, xv6_pcache_spinlock(p));
         }
     }
@@ -2408,7 +2478,7 @@ pub extern "C" fn pcache_teardown(p: *mut Pcache) {
         let _gp = lock_pcache_local(p);
         let _gt = wlock_pcache_tree(p);
         loop {
-            let node = (unsafe { PcacheHandle::new(p) }.rb_first());
+            let node = _gt.rb_first();
             if node.is_null() { break; }
             xv6_pcache_rb_delete(p, node);
             let pg = xv6_pcache_node_page(node);
@@ -2844,7 +2914,7 @@ pub(crate) fn dump_pcache_stats(p: *mut Pcache) {
 
 pub(crate) fn dump_all_pcache_stats() {
     let _gg = lock_pcache_global();
-    xv6_pcache_printf_dump_all_header((unsafe { *PCACHE_GLOBAL_COUNT.get() }));
+    xv6_pcache_printf_dump_all_header(_gg.global_count());
     let mut cur = xv6_pcache_global_first();
     while !cur.is_null() {
         let next = xv6_pcache_global_next(cur);
