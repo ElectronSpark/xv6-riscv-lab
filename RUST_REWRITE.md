@@ -921,6 +921,14 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   interaction between the log's wait-for-space path and block allocation,
   or in `kernel/bio.c`'s buffer cache under sustained write pressure with
   zero free blocks.
+- Rare `writebig` block-read-back-as-zero: observed exactly once during
+  P3-1C and initially misattributed to RUST_FORCE_UNDEFINED pruning — a
+  dedicated investigation (2026-07-14) proved the pruned link
+  byte-identical in all loadable sections and writebig green ×2 on it, so
+  the prune was exonerated and the observation reclassified as a rare
+  fs-stress flake (same family as the outofinodes fault below). Track;
+  investigate if it recurs. Meta-lesson recorded: A/B/A bisection can
+  misattribute nondeterministic failures.
 - `usertests outofinodes` (inode-exhaustion stress, not disk-block
   exhaustion) hit a null-superblock-pointer read fault inside
   `xv6fs_iupdate` once across ~30 runs during Wave 19 verification; did

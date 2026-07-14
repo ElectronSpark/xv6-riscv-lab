@@ -462,17 +462,51 @@ configure_file(${KERNEL_LD_IN} ${KERNEL_LD} @ONLY)
 # xv6fs's double-indirect block range) read back block 53403's content as
 # 0 instead of 53403, both mid-`usertests -q` and in isolation -- reverting
 # just this list (keeping every P3-1C code change) made it pass again,
-# byte-for-byte matching the pre-wave baseline. Root cause not isolated
-# within this wave's budget (265-entry bisection × full rebuild × a
-# multi-minute writebig run each = too expensive to do exhaustively here);
-# the mechanism is presumably some object-file/section this repo's link
-# step only pulls from the archive via one of these forced-undefined
-# names, with no live symbol-table reference the linker's own reachability
-# pass can see (a real Rust caller not being sufficient in every case is
-# the whole reason this list exists at all, per the comment above). Do
-# NOT re-attempt a blanket prune of this list without a per-symbol
-# bisection that re-runs the *full* fs battery (mmaptest, stressfs,
-# usertests fs singles including writebig, testsig) after each removal.
+# byte-for-byte matching the pre-wave baseline.
+#
+# DEDICATED INVESTIGATION (2026-07-14): the suspected linker mechanism
+# (archive-member pulling / --gc-sections dropping a section with no
+# live symbol reference) does NOT exist in this build. Evidence:
+#   - `libxv6_rust.a` has exactly ONE member for the crate itself
+#     (`xv6_rust-*.rcgu.o`, ~1.3 MB, 1842 defined symbols) -- codegen-
+#     units=1 + `lto=true` collapse the *entire* kernel crate (incl.
+#     core/alloc) into a single post-LTO object; only compiler-builtins
+#     ships as ~400 separate per-intrinsic members. There is no
+#     multi-member split for xv6_rust's own code that a pruned
+#     `--undefined` could fail to pull in independently of another.
+#   - `kernel.dir/link.txt` shows no `--gc-sections` anywhere in this
+#     repo's link flags, so nothing culls sections after an object is
+#     included.
+#   - `--undefined=SYM` here only forces archive extraction of that one
+#     atomic member; once ANY of the (492 total, 227 post-prune) forced
+#     names resolves into it -- and plenty not in the demoted-265 set
+#     do (`printf_rust`, `start`, `kerneltrap`, `usertrap`, ...) -- the
+#     *whole* member is linked in either way, so a prune restricted to
+#     symbols already reached via ordinary intra-crate Rust calls cannot
+#     change which machine code is present.
+#   - Reproduced directly: relinked both the plain `kernel` and
+#     `kernel_with_symbols_elf` targets by hand with the 265 entries
+#     removed from this exact list (same already-built `libxv6_rust.a`,
+#     no source changes). `.text`/`.rodata`/`.data`/`.bss`/all three
+#     trampoline sections came out byte-identical to the unpruned link
+#     (only `.symtab`/`.strtab`, non-loaded ELF metadata, differed in
+#     size). Built a full `xv6.bin` from the pruned link and booted it
+#     in an isolated QEMU instance twice against a copy of the real
+#     fs.img: `usertests writebig` reported `OK` both times, matching
+#     two baseline runs. The originally observed corruption did not
+#     reproduce.
+# Conclusion: pruning entries for symbols reached only via ordinary
+# same-crate Rust calls (the P3-1C 265-symbol set) is NOT, by this
+# link's own mechanics, capable of causing the writebig symptom -- the
+# P3-1C bisection almost certainly hit a confound (this repo has a
+# documented recurring build-cache-poisoning hazard, see RUST_REWRITE.md
+# "Working notes", and independently a documented rare/flaky failure
+# under fs stress, "outofinodes") rather than a true A/B difference from
+# this list. Still: do NOT blanket-prune this list without re-verifying
+# with the byte-diff method above (relink both ways from one
+# `libxv6_rust.a`, diff every `SHF_ALLOC` section) *before* trusting a
+# black-box test battery alone -- it is strictly stronger and orders of
+# magnitude cheaper than a multi-minute writebig run per candidate.
 set(RUST_FORCE_UNDEFINED
     # bits.c port
     # slab.c port
