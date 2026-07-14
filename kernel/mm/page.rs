@@ -69,7 +69,7 @@ pub const SPINLOCK_BYTES: usize = 24;
 // paths that other modules import.
 // ===========================================================================
 
-pub use crate::mm::cffi::{ListNode, Spinlock};
+use crate::mm::cffi::{ListNode, Spinlock};
 
 #[repr(C, align(64))]
 pub struct Page {
@@ -295,7 +295,7 @@ mod ffi {
     // Shared kernel primitives (spinlock, per-cpu, list, kmm, memset,
     // panic) are declared once in `crate::mm::cffi`; re-export them here so
     // the existing `ffi::spin_lock(...)` call sites compile unchanged.
-    pub use crate::mm::cffi::raw::{
+    pub(crate) use crate::mm::cffi::raw::{
         spin_init, spin_lock, spin_unlock, spin_holding,
         xv6_cpuid, xv6_push_off, xv6_pop_off,
         xv6_list_init, xv6_list_is_empty, xv6_list_is_detached,
@@ -305,11 +305,8 @@ mod ffi {
 
     unsafe extern "C" {
         // Early allocator
-        pub safe fn early_alloc_align(size: usize, align: usize) -> *mut c_void;
-        pub safe fn early_alloc_end_ptr() -> *mut c_void;
 
         // Slab interaction (for PCACHE refcount-zero teardown)
-        pub safe fn slab_free(obj: *mut c_void);
 
         // Runtime physical-memory globals (provided by linker / startup)
         pub safe static __physical_memory_start: u64;
@@ -320,6 +317,8 @@ mod ffi {
         // `sys_memstat` below.
         pub safe fn argint(n: c_int, ip: *mut c_int);
     }
+pub(crate) use crate::mm::early_allocator::{early_alloc_align, early_alloc_end_ptr};
+pub(crate) use crate::mm::slab::slab_free;
 
     // --- Type-adapting wrappers (safe Rust, no unsafe blocks). -----------
     // Renamed to avoid shadowing the extern; `spin_holding_b` returns bool.
@@ -439,22 +438,17 @@ unsafe extern "C" {
 // Global state (kept with C-compatible names so the existing C shims and
 // any leftover references still link).
 // ===========================================================================
-#[no_mangle]
-pub static mut __buddy_pools: [BuddyPool; (PAGE_BUDDY_MAX_ORDER + 1) as usize] =
+pub(crate) static mut __buddy_pools: [BuddyPool; (PAGE_BUDDY_MAX_ORDER + 1) as usize] =
     [const { BuddyPool::new() }; (PAGE_BUDDY_MAX_ORDER + 1) as usize];
 
-#[no_mangle]
-pub static mut __pcpu_caches: [[PcpuCache; (PCPU_CACHE_MAX_ORDER + 1) as usize]; NCPU] =
+pub(crate) static mut __pcpu_caches: [[PcpuCache; (PCPU_CACHE_MAX_ORDER + 1) as usize]; NCPU] =
     [const {
         [const { PcpuCache::new() }; (PCPU_CACHE_MAX_ORDER + 1) as usize]
     }; NCPU];
 
-#[no_mangle]
-pub static mut __pages: *mut Page = ptr::null_mut();
-#[no_mangle]
-pub static mut __managed_start: u64 = 0;
-#[no_mangle]
-pub static mut __managed_end: u64 = 0;
+pub(crate) static mut __pages: *mut Page = ptr::null_mut();
+pub(crate) static mut __managed_start: u64 = 0;
+pub(crate) static mut __managed_end: u64 = 0;
 
 static BUDDY_POOL_NAMES: [&[u8]; 11] = [
     b"buddy_pool_0\0",  b"buddy_pool_1\0",  b"buddy_pool_2\0",  b"buddy_pool_3\0",
@@ -1337,8 +1331,7 @@ fn page_ref(p: *mut Page) -> Option<&'static mut Page> {
 ///   code that touches page-allocator state concurrently) — the
 ///   internal writes to the allocator's global statics are not
 ///   synchronized.
-#[no_mangle]
-pub unsafe extern "C" fn page_buddy_init() -> c_int {
+pub(crate) unsafe fn page_buddy_init() -> c_int {
     let total_pages = ffi::totalpages();
     let page_arr_size = core::mem::size_of::<Page>() * total_pages as usize;
     let pages = ffi::early_alloc_align(page_arr_size, PAGE_SIZE as usize) as *mut Page;
@@ -1512,8 +1505,7 @@ pub unsafe extern "C" fn page_free(ptr: *mut c_void, order: u64) {
 ///   [`page_lock_release`]; caller must not deadlock by re-acquiring
 ///   without an intervening release, and must call `page_lock_release`
 ///   exactly once for each successful acquire.
-#[no_mangle]
-pub unsafe extern "C" fn page_lock_acquire(page: *mut Page) {
+pub(crate) unsafe fn page_lock_acquire(page: *mut Page) {
     // Split-statement lock/unlock pair across C ABI boundary: matching
     // `page_lock_release` provides the release. The `KSpinlock` handle
     // is constructed, used for `lock()`, and its guard `mem::forget`'d
@@ -1531,8 +1523,7 @@ pub unsafe extern "C" fn page_lock_acquire(page: *mut Page) {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array whose lock is currently held by the calling hart.
-#[no_mangle]
-pub unsafe extern "C" fn page_lock_release(page: *mut Page) {
+pub(crate) unsafe fn page_lock_release(page: *mut Page) {
     if let Some(p) = page_ref(page) { ffi::spin_unlock(p.lock_ptr()); }
 }
 
@@ -1543,8 +1534,7 @@ pub unsafe extern "C" fn page_lock_release(page: *mut Page) {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array.
-#[no_mangle]
-pub unsafe extern "C" fn page_lock_assert_holding(page: *mut Page) {
+pub(crate) unsafe fn page_lock_assert_holding(page: *mut Page) {
     if let Some(p) = page_ref(page) {
         if !ffi::spin_holding_b(p.lock_ptr()) {
             ffi::panic(b"page_lock_assert_holding failed\0");
@@ -1559,8 +1549,7 @@ pub unsafe extern "C" fn page_lock_assert_holding(page: *mut Page) {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array.
-#[no_mangle]
-pub unsafe extern "C" fn page_lock_assert_unholding(page: *mut Page) {
+pub(crate) unsafe fn page_lock_assert_unholding(page: *mut Page) {
     if let Some(p) = page_ref(page) {
         if ffi::spin_holding_b(p.lock_ptr()) {
             ffi::panic(b"page_lock_assert_unholding failed\0");
@@ -1580,8 +1569,7 @@ pub unsafe extern "C" fn page_lock_assert_unholding(page: *mut Page) {
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array whose lock is *not* already held by the calling
 ///   hart (self-deadlock otherwise).
-#[no_mangle]
-pub unsafe extern "C" fn __page_ref_inc(page: *mut Page) -> c_int {
+pub(crate) unsafe fn __page_ref_inc(page: *mut Page) -> c_int {
     let Some(p) = page_ref(page) else { return -1 };
     let _g = KSpinlock::from_ptr(p.lock_ptr()).lock();
     p.ref_inc_unlocked_impl()
@@ -1595,8 +1583,7 @@ pub unsafe extern "C" fn __page_ref_inc(page: *mut Page) -> c_int {
 ///
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array whose lock is held by the calling hart.
-#[no_mangle]
-pub unsafe extern "C" fn page_ref_inc_unlocked(page: *mut Page) -> c_int {
+pub(crate) unsafe fn page_ref_inc_unlocked(page: *mut Page) -> c_int {
     match page_ref(page) {
         Some(p) => p.ref_inc_unlocked_impl(),
         None => -1,
@@ -1617,8 +1604,7 @@ pub unsafe extern "C" fn page_ref_inc_unlocked(page: *mut Page) -> c_int {
 ///   `page`'s spinlock and touch `ref_count` directly must ensure
 ///   they are not doing so concurrently with a lockless decrement on
 ///   another hart.
-#[no_mangle]
-pub unsafe extern "C" fn page_ref_dec_unlocked(page: *mut Page) -> c_int {
+pub(crate) unsafe fn page_ref_dec_unlocked(page: *mut Page) -> c_int {
     let Some(p) = page_ref(page) else { return -1 };
     // Lockless decrement: treat ref_count as atomic on the fast path.
     // SAFETY: `&mut Page` proves the storage is valid and exclusively
@@ -1646,8 +1632,7 @@ pub unsafe extern "C" fn page_ref_dec_unlocked(page: *mut Page) -> c_int {
 /// - `page`, if non-null, must be a live pointer into the global
 ///   `Page` array whose lock is *not* already held by the calling
 ///   hart.
-#[no_mangle]
-pub unsafe extern "C" fn __page_ref_dec(page: *mut Page) -> c_int {
+pub(crate) unsafe fn __page_ref_dec(page: *mut Page) -> c_int {
     let Some(p) = page_ref(page) else { return -1 };
     let ret = {
         let _g = KSpinlock::from_ptr(p.lock_ptr()).lock();
@@ -1685,8 +1670,7 @@ pub unsafe extern "C" fn __page_ref_dec(page: *mut Page) -> c_int {
 /// - `page_buddy_init` must have completed before this is called.
 ///   `physical` itself is validated internally (`pa_to_page` range
 ///   checks), so no additional pointer-validity precondition applies.
-#[no_mangle]
-pub unsafe extern "C" fn page_refcnt(physical: *mut c_void) -> c_int {
+pub(crate) unsafe fn page_refcnt(physical: *mut c_void) -> c_int {
     let page = __pa_to_page(physical as u64);
     page_ref_count(page)
 }
@@ -1700,8 +1684,7 @@ pub unsafe extern "C" fn page_refcnt(physical: *mut c_void) -> c_int {
 /// - `page_buddy_init` must have completed before this is called.
 /// - If `ptr` translates to a managed page, that page's lock must not
 ///   already be held by the calling hart.
-#[no_mangle]
-pub unsafe extern "C" fn page_ref_inc(ptr: *mut c_void) -> c_int {
+pub(crate) unsafe fn page_ref_inc(ptr: *mut c_void) -> c_int {
     let page = __pa_to_page(ptr as u64);
     __page_ref_inc(page)
 }
@@ -1715,8 +1698,7 @@ pub unsafe extern "C" fn page_ref_inc(ptr: *mut c_void) -> c_int {
 /// - `page_buddy_init` must have completed before this is called.
 /// - If `ptr` translates to a managed page, that page's lock must not
 ///   already be held by the calling hart.
-#[no_mangle]
-pub unsafe extern "C" fn page_ref_dec(ptr: *mut c_void) -> c_int {
+pub(crate) unsafe fn page_ref_dec(ptr: *mut c_void) -> c_int {
     let page = __pa_to_page(ptr as u64);
     __page_ref_dec(page)
 }
@@ -1761,8 +1743,7 @@ pub unsafe extern "C" fn __page_to_pa(page: *mut Page) -> u64 {
 ///   `Page` array. The read is not synchronized with concurrent
 ///   lockless decrements ([`page_ref_dec_unlocked`]); callers wanting
 ///   a linearizable snapshot must hold `page`'s lock.
-#[no_mangle]
-pub unsafe extern "C" fn page_ref_count(page: *mut Page) -> c_int {
+pub(crate) unsafe fn page_ref_count(page: *mut Page) -> c_int {
     match page_ref(page) {
         Some(p) => p.ref_count,
         None => -1,
@@ -1775,8 +1756,7 @@ pub unsafe extern "C" fn page_ref_count(page: *mut Page) -> c_int {
 ///
 /// - `page_buddy_init` must have completed before this is called (the
 ///   static is otherwise a leftover zero/uninitialized value).
-#[no_mangle]
-pub unsafe extern "C" fn managed_page_base() -> u64 {
+pub(crate) unsafe fn managed_page_base() -> u64 {
     __managed_start
 }
 
@@ -1794,8 +1774,7 @@ pub unsafe extern "C" fn managed_page_base() -> u64 {
 /// - `empty_arr`, if non-null, must be valid for `size` writes of
 ///   `u8`.
 /// - `page_buddy_init` must have completed before this is called.
-#[no_mangle]
-pub unsafe extern "C" fn page_buddy_stat(ret_arr: *mut u64,
+pub(crate) unsafe fn page_buddy_stat(ret_arr: *mut u64,
                                          empty_arr: *mut u8,
                                          size: usize) {
     if ret_arr.is_null() || size < (PAGE_BUDDY_MAX_ORDER + 1) as usize { return; }
@@ -1827,8 +1806,7 @@ pub unsafe extern "C" fn page_buddy_stat(ret_arr: *mut u64,
 /// - `ptr` need not itself be dereferenced by this function — only
 ///   its numeric value is compared — so no pointer-validity
 ///   precondition applies to `ptr` beyond being non-null.
-#[no_mangle]
-pub unsafe extern "C" fn __check_page_pointer_in_range(ptr: *mut c_void) {
+pub(crate) unsafe fn __check_page_pointer_in_range(ptr: *mut c_void) {
     if ptr.is_null() {
         ffi::panic(b"__check_page_pointer_in_range: NULL pointer\0");
     }
@@ -1853,8 +1831,7 @@ pub unsafe extern "C" fn __check_page_pointer_in_range(ptr: *mut c_void) {
 /// - The read is unsynchronized (no pool lock taken); caller must
 ///   tolerate a torn/stale value or hold the range lock itself (see
 ///   [`xv6_buddy_pool_lock_range_all`]).
-#[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_pool_count(order: u64) -> u64 {
+pub(crate) unsafe fn xv6_buddy_pool_count(order: u64) -> u64 {
     if order > PAGE_BUDDY_MAX_ORDER { return 0; }
     buddy_pool(order).count
 }
@@ -1868,8 +1845,7 @@ pub unsafe extern "C" fn xv6_buddy_pool_count(order: u64) -> u64 {
 /// - `cpu` must be a valid hart index; the per-CPU cache array must
 ///   have at least `NCPU` entries (invariant of the allocator's
 ///   static layout, not caller-controlled).
-#[no_mangle]
-pub unsafe extern "C" fn xv6_pcpu_cache_count(cpu: u32, order: u64) -> u32 {
+pub(crate) unsafe fn xv6_pcpu_cache_count(cpu: u32, order: u64) -> u32 {
     if (cpu as usize) >= NCPU || order > PCPU_CACHE_MAX_ORDER { return 0; }
     pcpu_cache(cpu as usize, order).count.load(Ordering::Acquire)
 }
@@ -1883,8 +1859,7 @@ pub unsafe extern "C" fn xv6_pcpu_cache_count(cpu: u32, order: u64) -> u32 {
 ///   [`xv6_buddy_pool_unlock_range_all`] on the same hart before any
 ///   other buddy-pool-locking call is made (the locks are held across
 ///   the ABI boundary, mirroring [`page_lock_acquire`]).
-#[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_pool_lock_range_all() {
+pub(crate) unsafe fn xv6_buddy_pool_lock_range_all() {
     buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
@@ -1895,8 +1870,7 @@ pub unsafe extern "C" fn xv6_buddy_pool_lock_range_all() {
 /// - Caller must currently hold every buddy pool lock, orders
 ///   0..=`PAGE_BUDDY_MAX_ORDER`, acquired via a prior matching call to
 ///   [`xv6_buddy_pool_lock_range_all`].
-#[no_mangle]
-pub unsafe extern "C" fn xv6_buddy_pool_unlock_range_all() {
+pub(crate) unsafe fn xv6_buddy_pool_unlock_range_all() {
     buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
@@ -1906,8 +1880,7 @@ pub unsafe extern "C" fn xv6_buddy_pool_unlock_range_all() {
 /// # Safety
 ///
 /// - `page_buddy_init` must have completed before this is called.
-#[no_mangle]
-pub unsafe extern "C" fn xv6_total_managed_pages() -> u64 {
+pub(crate) unsafe fn xv6_total_managed_pages() -> u64 {
     let s = __managed_start;
     let e = __managed_end;
     (e - s) >> PAGE_SHIFT
@@ -1982,8 +1955,7 @@ fn buddy_stat_totals(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn print_buddy_system_stat(detailed: c_int) {
+pub(crate) fn print_buddy_system_stat(detailed: c_int) {
     static F_SUMMARY: &[u8] = b"Buddy: %ld free + %ld cached = %ld pages (\0";
     static F_HDR: &[u8] = b"Buddy System Statistics:\n\0";
     static F_BAR: &[u8] = b"========================\n\0";

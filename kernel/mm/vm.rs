@@ -50,68 +50,25 @@ mod ffi {
     use core::ffi::{c_char, c_int, c_void};
     unsafe extern "C" {
         // Real C kernel sync primitives (declared in defs.h / lock/rwsem.h).
-        pub safe fn spin_lock(lk: *mut spinlock_t);
-        pub safe fn spin_unlock(lk: *mut spinlock_t);
-        pub safe fn rwsem_acquire_read(lk: *mut rwsem_t) -> c_int;
-        pub safe fn rwsem_acquire_write(lk: *mut rwsem_t) -> c_int;
-        pub safe fn rwsem_release(lk: *mut rwsem_t);
-        pub safe fn rwsem_is_write_holding(lk: *mut rwsem_t) -> bool;
 
         // Page-table free, defined in vm_pgtab.rs.
-        pub safe fn uvmfree(pagetable: *mut u64, sz: u64);
         // Pagetable creation, defined in vm_pgtab.rs.
-        pub safe fn uvmcreate() -> *mut u64;
 
         // Real C symbols pulled in via bindgen-style externs.
-        pub safe fn rb_insert_color(
-            root: *mut crate::bindings::rb_root,
-            node: *mut rb_node,
-        ) -> *mut rb_node;
-        pub safe fn rb_next_node(node: *mut rb_node) -> *mut rb_node;
-        pub safe fn rb_prev_node(node: *mut rb_node) -> *mut rb_node;
-        pub safe fn spin_init(lk: *mut spinlock_t, name: *mut c_char);
-        pub safe fn rwsem_init(lk: *mut rwsem_t, flags: u64, name: *const c_char) -> c_int;
 
         // V3 fifth slice helpers.
-        pub safe fn rb_find_key_rdown(
-            root: *mut crate::bindings::rb_root,
-            key: u64,
-        ) -> *mut rb_node;
-        pub safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
-        pub safe fn rb_delete_node_color(
-            root: *mut crate::bindings::rb_root,
-            node: *mut rb_node,
-        ) -> *mut rb_node;
 
         // SBI remote TLB shootdown (kernel/sbi.c).
-        pub safe fn sbi_remote_hfence_vma(
-            hart_mask: u64,
-            hart_mask_base: u64,
-            start_addr: u64,
-            size: u64,
-        ) -> i64;
         // xv6_vm_sfence_vma still lives in vm_pgtab_shims.c (until that file is
         // migrated). It wraps the riscv `sfence.vma` inline asm.
-        pub safe fn xv6_vm_sfence_vma();
 
-        pub safe fn page_free(ptr: *mut c_void, order: u64);
         // Page-cache primitives (live in kernel/rust/src/pcache.rs as no_mangle).
-        pub safe fn page_alloc(order: u64, flags: u64) -> *mut c_void;
-        pub safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-        pub safe fn pcache_get_page(pc: *mut c_void, blkno: u64) -> *mut c_void;
-        pub safe fn pcache_put_page(pc: *mut c_void, page: *mut c_void);
-        pub safe fn pcache_read_page(pc: *mut c_void, page: *mut c_void) -> c_int;
         pub safe fn vfs_inode_deref(refp: *mut vfs_inode_ref) -> *mut vfs_inode;
         // pcache accessors (live in pcache_shims.c).
-        pub safe fn xv6_page_pcache_get_node(page: *mut c_void) -> *mut c_void;
-        pub safe fn xv6_pcache_node_data(n: *mut c_void) -> *mut c_void;
         // Defined in kernel/rust/src/vm_pgtab.rs (no_mangle).
-        pub safe fn vm_dump_flags(flags: u64, buf: *mut c_char, buf_size: usize) -> c_int;
 
         // V5 externs.
-        pub safe fn walkaddr(pagetable: *mut u64, va: u64) -> u64;
-        pub safe fn mappages(pagetable: *mut u64, va: u64, size: u64, pa: u64, perm: c_int) -> c_int;
         pub safe fn vfs_fdtable_get_file(fdtable: *mut c_void, fd: c_int) -> *mut vfs_file;
         pub safe fn printf(fmt: *const c_char, ...);
 
@@ -120,6 +77,94 @@ mod ffi {
         // here for now; see __vm_panic_str below).
         pub safe fn __panic_start();
         pub safe fn __panic_end() -> !;
+    }
+pub(crate) use crate::lock::rwsem::{rwsem_acquire_read, rwsem_acquire_write, rwsem_init, rwsem_is_write_holding, rwsem_release};
+pub(crate) use crate::mm::vm_pgtab::{mappages, uvmcreate, uvmfree, vm_dump_flags, walkaddr, xv6_vm_sfence_vma};
+pub(crate) use crate::sbi::sbi_remote_hfence_vma;
+
+    // The bintree/rbtree/spinlock/page/string primitives below are all
+    // genuinely `unsafe extern "C" fn`; this file's original extern
+    // declaration asserted `pub safe fn` (usual FFI facade) for every one
+    // of them. Thin safe wrappers preserve that facade. `pcache_*` and
+    // `xv6_page_pcache_get_node`/`xv6_pcache_node_data` are already safe
+    // fns, but this file's original view typed every pointer as opaque
+    // `*mut c_void` rather than `crate::mm::pcache::{Pcache, Page,
+    // PcacheNode}` (same "locally convenient pointer type" idiom).
+    /// SAFETY: see [`crate::bintree::rb_find_key_rdown`]'s contract.
+    pub fn rb_find_key_rdown(root: *mut crate::bindings::rb_root, key: u64) -> *mut rb_node {
+        unsafe { crate::bintree::rb_find_key_rdown(root, key) }
+    }
+    /// SAFETY: see [`crate::bintree::rb_next_node`]'s contract.
+    pub fn rb_next_node(node: *mut rb_node) -> *mut rb_node {
+        unsafe { crate::bintree::rb_next_node(node) }
+    }
+    /// SAFETY: see [`crate::bintree::rb_prev_node`]'s contract.
+    pub fn rb_prev_node(node: *mut rb_node) -> *mut rb_node {
+        unsafe { crate::bintree::rb_prev_node(node) }
+    }
+    /// SAFETY: see [`crate::rbtree::rb_insert_color`]'s contract.
+    pub fn rb_insert_color(root: *mut crate::bindings::rb_root, node: *mut rb_node) -> *mut rb_node {
+        unsafe { crate::rbtree::rb_insert_color(root, node) }
+    }
+    /// SAFETY: see [`crate::rbtree::rb_delete_node_color`]'s contract.
+    pub fn rb_delete_node_color(root: *mut crate::bindings::rb_root, node: *mut rb_node) -> *mut rb_node {
+        unsafe { crate::rbtree::rb_delete_node_color(root, node) }
+    }
+    /// SAFETY: see [`crate::lock::spinlock::spin_init`]'s contract.
+    pub fn spin_init(lk: *mut spinlock_t, name: *mut c_char) {
+        unsafe { crate::lock::spinlock::spin_init(lk, name) };
+    }
+    /// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+    pub fn spin_lock(lk: *mut spinlock_t) {
+        unsafe { crate::lock::spinlock::spin_lock(lk) };
+    }
+    /// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+    pub fn spin_unlock(lk: *mut spinlock_t) {
+        unsafe { crate::lock::spinlock::spin_unlock(lk) };
+    }
+    /// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
+    pub fn page_alloc(order: u64, flags: u64) -> *mut c_void {
+        unsafe { crate::mm::page::page_alloc(order, flags) }
+    }
+    /// SAFETY: `ptr` must originate from `page_alloc` above.
+    pub fn page_free(ptr: *mut c_void, order: u64) {
+        unsafe { crate::mm::page::page_free(ptr, order) };
+    }
+    /// SAFETY: see [`crate::string::memset`]'s contract.
+    pub fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void {
+        unsafe { crate::string::memset(s, c, n) }
+    }
+    /// SAFETY: see [`crate::string::memmove`]'s contract.
+    pub fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void {
+        unsafe { crate::string::memmove(dst, src, n) }
+    }
+    /// SAFETY: `pc` must be a live `Pcache` (`crate::mm::pcache::pcache_get_page`'s contract).
+    pub fn pcache_get_page(pc: *mut c_void, blkno: u64) -> *mut c_void {
+        crate::mm::pcache::pcache_get_page(pc as *mut crate::bindings::pcache, blkno)
+            as *mut c_void
+    }
+    /// SAFETY: `pc`/`page` must be live (`crate::mm::pcache::pcache_put_page`'s contract).
+    pub fn pcache_put_page(pc: *mut c_void, page: *mut c_void) {
+        crate::mm::pcache::pcache_put_page(
+            pc as *mut crate::bindings::pcache,
+            page as *mut crate::mm::pcache::Page,
+        );
+    }
+    /// SAFETY: see `pcache_put_page` above.
+    pub fn pcache_read_page(pc: *mut c_void, page: *mut c_void) -> c_int {
+        crate::mm::pcache::pcache_read_page(
+            pc as *mut crate::bindings::pcache,
+            page as *mut crate::mm::pcache::Page,
+        )
+    }
+    /// SAFETY: `page` must be a live `Page` (`xv6_page_pcache_get_node`'s contract).
+    pub fn xv6_page_pcache_get_node(page: *mut c_void) -> *mut c_void {
+        crate::mm::pcache::xv6_page_pcache_get_node(page as *mut crate::mm::pcache::Page)
+            as *mut c_void
+    }
+    /// SAFETY: `n` must be a live `PcacheNode` (`xv6_pcache_node_data`'s contract).
+    pub fn xv6_pcache_node_data(n: *mut c_void) -> *mut c_void {
+        crate::mm::pcache::xv6_pcache_node_data(n as *mut crate::mm::pcache::PcacheNode)
     }
 }
 use ffi::*;
@@ -151,8 +196,7 @@ fn xv6_vm_mycpu() -> *mut crate::bindings::cpu_local {
 }
 
 
-#[no_mangle]
-pub extern "C" fn xv6_vm_cpuid() -> c_int {
+pub(crate) fn xv6_vm_cpuid() -> c_int {
     machine::cpuid()
 }
 
@@ -457,8 +501,13 @@ fn xv6_vm_assert_vm_write_held(vm_ptr: *mut vm, msg: *const c_char) {
 ///
 /// Returns 0 for equal, -1 if `a < b`, +1 otherwise — same contract as the
 /// original C implementation.
-#[no_mangle]
-pub extern "C" fn __vma_cmp(a: u64, b: u64) -> c_int {
+///
+/// Kept `extern "C"`: passed *by value* as `Some(__vma_cmp)` into
+/// `bindings::rb_root::keys_cmp_fun`, a bindgen-generated `unsafe extern "C"
+/// fn` pointer field — the calling convention is part of the function's
+/// type here, not just a link-time symbol name, so it must stay even though
+/// `#[no_mangle]` (nothing looks this up by C symbol name) is dropped.
+pub(crate) extern "C" fn __vma_cmp(a: u64, b: u64) -> c_int {
     if a == b {
         0
     } else if a < b {
@@ -474,8 +523,11 @@ pub extern "C" fn __vma_cmp(a: u64, b: u64) -> c_int {
 /// `core::mem::offset_of!` against the bindgen-generated `vma` layout, which
 /// is guaranteed to match the C `vma_t` because both compilation units share
 /// the same header (`mm/vm_types.h`).
-#[no_mangle]
-pub extern "C" fn __cma_get_key(node: *mut rb_node) -> u64 {
+///
+/// Kept `extern "C"` for the same reason as [`__vma_cmp`]: bound by value
+/// into `bindings::rb_root::get_key_fun`, a bindgen `unsafe extern "C" fn`
+/// pointer field.
+pub(crate) extern "C" fn __cma_get_key(node: *mut rb_node) -> u64 {
     if node.is_null() {
         return 0;
     }
@@ -491,8 +543,7 @@ pub extern "C" fn __cma_get_key(node: *mut rb_node) -> u64 {
 }
 
 /// Acquire-load of `vm->cpumask` (cpumask_t == u64).
-#[no_mangle]
-pub extern "C" fn vm_get_cpumask(vm_ptr: *mut vm) -> u64 {
+pub(crate) fn vm_get_cpumask(vm_ptr: *mut vm) -> u64 {
     if vm_ptr.is_null() {
         return 0;
     }
@@ -567,8 +618,7 @@ pub extern "C" fn vm_cpu_offline(vm_ptr: *mut vm, cpu: c_int) {
 /// Send remote `sfence.vma` to all CPUs currently using this VM (other than
 /// the calling CPU). Disables interrupts around the SBI call to keep the
 /// `cpuid()` read coherent with the cpumask read.
-#[no_mangle]
-pub extern "C" fn vm_remote_sfence(vm_ptr: *mut vm) {
+pub(crate) fn vm_remote_sfence(vm_ptr: *mut vm) {
     if vm_ptr.is_null() {
         return;
     }
@@ -666,27 +716,48 @@ fn vm_pool_ptr() -> *mut slab_cache_t {
 
 
 unsafe extern "C" {
-    fn slab_cache_init(
-        cache: *mut slab_cache_t,
-        name: *mut c_char,
-        obj_size: usize,
-        flags: u64,
-    ) -> c_int;
-    fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    fn slab_free(obj: *mut c_void);
 
     fn rb_node_init(node: *mut rb_node);
     fn list_entry_init(entry: *mut list_node_t);
 
-    pub safe fn page_ref_dec(ptr: *mut c_void) -> c_int;
-    fn page_ref_inc(ptr: *mut c_void) -> c_int;
     fn vfs_fput(file: *mut vfs_file);
     fn vfs_fdup(file: *mut vfs_file) -> *mut vfs_file;
 
     // xv6_vm_panic still lives in vm_pgtab_shims.c (it uses __FILE__/
     // __LINE__/__FUNCTION__ via the C `panic` macro). Migrated when that
     // shim file is eliminated.
-    pub safe fn xv6_vm_panic(msg: *const c_char) -> !;
+}
+pub(crate) use crate::mm::page::page_ref_inc;
+pub(crate) use crate::mm::slab::slab_free;
+pub(crate) use crate::mm::vm_pgtab::xv6_vm_panic;
+
+/// `crate::mm::page::page_ref_dec` is genuinely `unsafe fn`; this file's
+/// original extern declaration asserted `pub safe fn` (usual FFI facade;
+/// contrast with `page_ref_inc` above, whose original declaration was a
+/// plain non-`safe` `fn` — its call sites already wrap `unsafe {}`).
+fn page_ref_dec(ptr: *mut c_void) -> c_int {
+    // SAFETY: see `crate::mm::page::page_ref_dec`'s contract.
+    unsafe { crate::mm::page::page_ref_dec(ptr) }
+}
+
+/// `slab_alloc`/`slab_cache_init`/`slab_free`: this file's original extern
+/// declaration typed the cache pointer as the bindgen `slab_cache_t`
+/// rather than `crate::mm::slab::SlabCache` (same "locally convenient
+/// pointer type" idiom used throughout this crate). Call sites here
+/// already wrap these in `unsafe {}` (the original declaration was a
+/// plain, non-`safe` `fn`), so only the type needs adapting.
+fn slab_cache_init(
+    cache: *mut slab_cache_t, name: *mut c_char, obj_size: usize, flags: u64,
+) -> c_int {
+    // SAFETY: caller's `unsafe` block carries the real contract; this is
+    // a pure pointer-type reinterpretation (see `crate::mm::slab::SlabCache`).
+    unsafe {
+        crate::mm::slab::slab_cache_init(cache as *mut crate::mm::slab::SlabCache, name, obj_size, flags)
+    }
+}
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    // SAFETY: see `slab_cache_init` above.
+    unsafe { crate::mm::slab::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
 }
 
 #[inline(always)]
@@ -695,8 +766,7 @@ fn list_node_is_detached(entry: *const list_node_t) -> bool {
 }
 
 /// Initialise the slab pool that backs `vma_t` objects.
-#[no_mangle]
-pub extern "C" fn __vma_pool_init() {
+pub(crate) fn __vma_pool_init() {
     // SAFETY: `slab_cache_init` is a plain FFI call; `vma_pool_ptr()` is a
     // valid, exclusively-owned static, and the name string is a `'static`
     // NUL-terminated literal.
@@ -711,8 +781,7 @@ pub extern "C" fn __vma_pool_init() {
 }
 
 /// Initialise the slab pool that backs `vm_t` objects.
-#[no_mangle]
-pub extern "C" fn __vm_pool_init() {
+pub(crate) fn __vm_pool_init() {
     // SAFETY: see `__vma_pool_init`.
     unsafe {
         slab_cache_init(
@@ -726,8 +795,7 @@ pub extern "C" fn __vm_pool_init() {
 
 /// Allocate and zero-initialise a fresh `vma_t`, linked into `vm`.
 /// Returns NULL on OOM. Mirrors the C `__vma_alloc`.
-#[no_mangle]
-pub extern "C" fn __vma_alloc(vm_ptr: *mut vm) -> *mut vma {
+pub(crate) fn __vma_alloc(vm_ptr: *mut vm) -> *mut vma {
     // SAFETY: `slab_alloc` returns either null or a fresh, exclusively-owned
     // `size_of::<vma>()`-sized allocation from `vma_pool_ptr()`; the
     // null-check below gates every subsequent write into it.
@@ -747,8 +815,7 @@ pub extern "C" fn __vma_alloc(vm_ptr: *mut vm) -> *mut vma {
 
 /// Free a `vma_t` previously returned by `__vma_alloc`. Includes double-free
 /// detection via a magic value poison.
-#[no_mangle]
-pub extern "C" fn __vma_free(vma_ptr: *mut vma) {
+pub(crate) fn __vma_free(vma_ptr: *mut vma) {
     if vma_ptr.is_null() {
         return;
     }
@@ -774,8 +841,7 @@ pub extern "C" fn __vma_free(vma_ptr: *mut vma) {
 
 /// Unmap every page covered by `vma`, drop its file reference, and mark it
 /// as `PROT_NONE`. Caller must hold the vm rwlock for write.
-#[no_mangle]
-pub extern "C" fn __vma_set_free(vma_ptr: *mut vma) {
+pub(crate) fn __vma_set_free(vma_ptr: *mut vma) {
     // SAFETY: `vma_ptr`, when non-null (checked first thing below), is a
     // live `vma` owned by a live `vm`; `pte`/leaf-PTE pointers below come
     // from `walk()`, which only returns valid PTE pointers into that same
@@ -833,8 +899,7 @@ pub extern "C" fn __vma_set_free(vma_ptr: *mut vma) {
 
 /// Tear down the per-CPU trapframe leaf PTEs without freeing the physical
 /// trapframe pages (those are owned by the kernel-stack allocator).
-#[no_mangle]
-pub extern "C" fn __vm_unmap_trapframe(vm_ptr: *mut vm) {
+pub(crate) fn __vm_unmap_trapframe(vm_ptr: *mut vm) {
     // SAFETY: `vm_ptr`/`trapframe_pte`, when non-null (checked first thing
     // below), point at a live `vm` and a live `NCPU`-sized leaf PTE array
     // installed by `__vm_map_trampoline`.
@@ -853,8 +918,7 @@ pub extern "C" fn __vm_unmap_trapframe(vm_ptr: *mut vm) {
 /// Walk the pagetable down to the leaf table covering `TRAPFRAME`, allocating
 /// any missing intermediate page-tables. Stores the leaf base pointer in
 /// `vm->trapframe_pte`. Returns 0 on success or `-ENOMEM` on OOM.
-#[no_mangle]
-pub extern "C" fn __vm_map_trampoline(vm_ptr: *mut vm) -> c_int {
+pub(crate) fn __vm_map_trampoline(vm_ptr: *mut vm) -> c_int {
     // SAFETY: `vm_ptr`, when non-null (checked first thing below), is a
     // live `vm` with a live `pagetable`.
     unsafe {
@@ -884,8 +948,7 @@ pub extern "C" fn __vm_map_trampoline(vm_ptr: *mut vm) -> c_int {
 /// file was already closed, or `-ENOMEM` if a new pagetable entry could not
 /// be allocated (in which case `dst` is reset to PROT_NONE via
 /// `__vma_set_free`).
-#[no_mangle]
-pub extern "C" fn __vma_copy(dst: *mut vma, src: *mut vma) -> c_int {
+pub(crate) fn __vma_copy(dst: *mut vma, src: *mut vma) -> c_int {
     // SAFETY: `dst`/`src`, when non-null (checked first thing below), are
     // live `vma`s each owned by a live `vm`; PTE pointers below come from
     // `walk()`, which only returns valid PTE pointers into a live
@@ -978,8 +1041,7 @@ pub extern "C" fn __vma_copy(dst: *mut vma, src: *mut vma) -> c_int {
 
 /// Convert VMA prot/flag bits into RISC-V PTE permission bits.
 /// Mirrors C `vma2pte_flags`.
-#[no_mangle]
-pub extern "C" fn vma2pte_flags(flags: u64) -> u64 {
+pub(crate) fn vma2pte_flags(flags: u64) -> u64 {
     let mut pte: u64 = 0;
     if flags & (PROT_READ as u64) != 0 {
         pte |= PTE_R as u64;
@@ -997,8 +1059,7 @@ pub extern "C" fn vma2pte_flags(flags: u64) -> u64 {
 }
 
 /// Inverse of `vma2pte_flags`.
-#[no_mangle]
-pub extern "C" fn pte2vma_flags(pte_flags: u64) -> u64 {
+pub(crate) fn pte2vma_flags(pte_flags: u64) -> u64 {
     let mut flags: u64 = 0;
     if pte_flags & (PTE_R as u64) != 0 {
         flags |= PROT_READ as u64;
@@ -1069,15 +1130,13 @@ pub extern "C" fn vm_wunlock(vm_ptr: *mut vm) {
 
 /// Acquire VM page-table spinlock for PTE modifications.
 /// Caller must not sleep while holding this.
-#[no_mangle]
-pub extern "C" fn vm_pgtable_lock(vm_ptr: *mut vm) {
+pub(crate) fn vm_pgtable_lock(vm_ptr: *mut vm) {
     // SAFETY: caller supplies a live `vm`.
     unsafe { spin_lock(&mut (*vm_ptr).spinlock as *mut spinlock_t) };
 }
 
 /// Release VM page-table spinlock.
-#[no_mangle]
-pub extern "C" fn vm_pgtable_unlock(vm_ptr: *mut vm) {
+pub(crate) fn vm_pgtable_unlock(vm_ptr: *mut vm) {
     // SAFETY: caller supplies a live `vm` currently locked by `vm_pgtable_lock`.
     unsafe { spin_unlock(&mut (*vm_ptr).spinlock as *mut spinlock_t) };
 }
@@ -1131,8 +1190,7 @@ const VM_DESTROYED_MAGIC: u64 = 0xDEAD0BADu64;
 /// Destroy a VM: free all VMAs, unmap trapframe / pagetable, then slab-free.
 /// Direct port of the C `__vm_destroy` static helper; exported (no_mangle)
 /// because `vm_put` is the only caller and lives in the same staticlib.
-#[no_mangle]
-pub extern "C" fn __vm_destroy(vm_ptr: *mut vm) {
+pub(crate) fn __vm_destroy(vm_ptr: *mut vm) {
     // SAFETY: `vm_ptr`, when non-null (checked first thing below), is a
     // live `vm` about to be torn down; every `vma` reached through
     // `xv6_vm_first_vma`/`xv6_vm_next_vma` belongs to this `vm`'s own
@@ -1386,8 +1444,7 @@ fn pg_round_up(x: u64) -> u64 {
 /// (stack-bottom - 16 * PGSIZE), searching the free-list back-to-front and
 /// allocating from the top of the first big-enough free area. Returns the
 /// chosen start address (page-aligned) or 0 if no fit.
-#[no_mangle]
-pub extern "C" fn vm_find_free_range(vm_ptr: *mut vm, size: usize, _hint: u64) -> u64 {
+pub(crate) fn vm_find_free_range(vm_ptr: *mut vm, size: usize, _hint: u64) -> u64 {
     if vm_ptr.is_null() || size == 0 {
         return 0;
     }
@@ -1458,8 +1515,7 @@ pub extern "C" fn vm_find_free_range(vm_ptr: *mut vm, size: usize, _hint: u64) -
 /// `vfs_fdup` and shift `pgoff` accordingly. The new vma is linked into
 /// the rb-tree and the per-vm list (and the free-list if the original
 /// flags == PROT_NONE).
-#[no_mangle]
-pub extern "C" fn vma_split(vma_ptr: *mut vma, va: u64) -> *mut vma {
+pub(crate) fn vma_split(vma_ptr: *mut vma, va: u64) -> *mut vma {
     // SAFETY: `vma_ptr`, when non-null and owning a non-null `vm` (checked
     // first thing below), is a live `vma`; `new_vma` comes from
     // `__vma_alloc`, itself checked non-null before use.
@@ -1514,8 +1570,7 @@ pub extern "C" fn vma_split(vma_ptr: *mut vma, va: u64) -> *mut vma {
 /// for file-backed). Returns the surviving left-side VMA, or NULL if the
 /// merge is illegal. The right-side VMA is unlinked from the rb-tree and
 /// both lists, its file reference released, and the descriptor freed.
-#[no_mangle]
-pub extern "C" fn vma_merge(mut vma1: *mut vma, mut vma2: *mut vma) -> *mut vma {
+pub(crate) fn vma_merge(mut vma1: *mut vma, mut vma2: *mut vma) -> *mut vma {
     // SAFETY: `vma1`/`vma2`, when non-null (checked first thing below), are
     // live `vma`s.
     unsafe {
@@ -1574,8 +1629,7 @@ fn vma_size(v: *mut vma) -> u64 {
 /// Allocate a VMA covering `[va, va+size)` with `flags`. If `va == 0`, the
 /// last free-list entry large enough is used. Returns the new (possibly
 /// split-out) VMA, or NULL on invalid input / OOM.
-#[no_mangle]
-pub extern "C" fn vma_alloc(vm_ptr: *mut vm, mut va: u64, size: u64, flags: u64) -> *mut vma {
+pub(crate) fn vma_alloc(vm_ptr: *mut vm, mut va: u64, size: u64, flags: u64) -> *mut vma {
     // SAFETY: `vm_ptr`, when non-null (checked first thing below), is a
     // live `vm`; every `*mut vma` touched below (`free_area`, `vma2`, …)
     // comes from `vm_find_area`/`xv6_vm_last_free`/`xv6_vm_prev_free`/
@@ -1663,8 +1717,7 @@ pub extern "C" fn vma_alloc(vm_ptr: *mut vm, mut va: u64, size: u64, flags: u64)
 
 /// Mark a VMA as free, link onto the free list, and merge with any
 /// adjacent free VMAs.
-#[no_mangle]
-pub extern "C" fn vma_free(vm_ptr: *mut vm, mut vma_ptr: *mut vma) -> c_int {
+pub(crate) fn vma_free(vm_ptr: *mut vm, mut vma_ptr: *mut vma) -> c_int {
     // SAFETY: `vma_ptr`, when non-null and owned by `vm_ptr` (checked
     // first thing below), is a live `vma`; `left`/`right` come from
     // `xv6_vm_vma_left`/`xv6_vm_vma_right`, each producing either null or a
@@ -2029,8 +2082,7 @@ pub extern "C" fn vm_copyinstr(
 // V5.2: vm_createheap / vm_createstack
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn vm_createheap(vm_ptr: *mut vm, va: u64, size_in: u64) -> c_int {
+pub(crate) fn vm_createheap(vm_ptr: *mut vm, va: u64, size_in: u64) -> c_int {
     xv6_vm_assert_vm_write_held(
         vm_ptr,
         b"vm_createheap: vm rwsem must be write-held\0".as_ptr() as *const c_char,
@@ -2057,8 +2109,7 @@ pub extern "C" fn vm_createheap(vm_ptr: *mut vm, va: u64, size_in: u64) -> c_int
     0
 }
 
-#[no_mangle]
-pub extern "C" fn vm_createstack(vm_ptr: *mut vm, stack_top: u64, size_in: u64) -> c_int {
+pub(crate) fn vm_createstack(vm_ptr: *mut vm, stack_top: u64, size_in: u64) -> c_int {
     xv6_vm_assert_vm_write_held(
         vm_ptr,
         b"vm_createstack: vm rwsem must be write-held\0".as_ptr() as *const c_char,
@@ -2088,8 +2139,7 @@ pub extern "C" fn vm_createstack(vm_ptr: *mut vm, stack_top: u64, size_in: u64) 
 // V5.3: vm_growstack / vm_try_growstack / vm_growheap
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn vm_growstack(vm_ptr: *mut vm, change_size: i64) -> c_int {
+pub(crate) fn vm_growstack(vm_ptr: *mut vm, change_size: i64) -> c_int {
     // SAFETY: `vm_ptr`, once past the null checks just below, is a live
     // `vm`; every `*mut vma` touched (`stack`, `left`, `right`, `grows`,
     // …) is checked non-null before dereference.
@@ -2396,8 +2446,7 @@ pub extern "C" fn vm_mmap_region_locked(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vm_mmap_region(
+pub(crate) fn vm_mmap_region(
     vm_ptr: *mut vm,
     start: u64,
     size: usize,
@@ -2411,8 +2460,7 @@ pub extern "C" fn vm_mmap_region(
     vm_mmap_region_locked(vm_ptr, start, size, flags, file, pgoff, pa)
 }
 
-#[no_mangle]
-pub extern "C" fn vm_munmap_region(vm_ptr: *mut vm, start: u64, size: usize) -> c_int {
+pub(crate) fn vm_munmap_region(vm_ptr: *mut vm, start: u64, size: usize) -> c_int {
     let mut ret: c_int = 0;
     let _g = wlock_vm(vm_ptr);
     // SAFETY: `vm_ptr`, once past the null checks just below, is a live
@@ -2458,8 +2506,7 @@ pub extern "C" fn vm_munmap_region(vm_ptr: *mut vm, start: u64, size: usize) -> 
 // V5.6: vm_mprotect / vm_mremap
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn vm_mprotect(
+pub(crate) fn vm_mprotect(
     vm_ptr: *mut vm,
     addr_in: u64,
     size_in: usize,
@@ -2534,8 +2581,7 @@ pub extern "C" fn vm_mprotect(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vm_mremap(
+pub(crate) fn vm_mremap(
     vm_ptr: *mut vm,
     old_addr_in: u64,
     old_size_in: usize,
@@ -2651,8 +2697,7 @@ pub extern "C" fn vm_mremap(
 // V5.7: vm_msync / vm_mincore / vm_madvise
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn vm_msync(
+pub(crate) fn vm_msync(
     vm_ptr: *mut vm,
     addr_in: u64,
     size_in: usize,
@@ -2696,8 +2741,7 @@ pub extern "C" fn vm_msync(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vm_mincore(
+pub(crate) fn vm_mincore(
     vm_ptr: *mut vm,
     addr_in: u64,
     size_in: usize,
@@ -2759,8 +2803,7 @@ pub extern "C" fn vm_mincore(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn vm_madvise(
+pub(crate) fn vm_madvise(
     vm_ptr: *mut vm,
     addr_in: u64,
     size_in: usize,
@@ -2834,8 +2877,7 @@ pub extern "C" fn vm_madvise(
 // V5.8: vm_alloc_thread_stack / vm_free_thread_stack
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn vm_alloc_thread_stack(
+pub(crate) fn vm_alloc_thread_stack(
     vm_ptr: *mut vm,
     stack_size_in: usize,
     stack_top_out: *mut u64,
@@ -2881,8 +2923,7 @@ pub extern "C" fn vm_alloc_thread_stack(
     0
 }
 
-#[no_mangle]
-pub extern "C" fn vm_free_thread_stack(
+pub(crate) fn vm_free_thread_stack(
     vm_ptr: *mut vm,
     stack_top: u64,
     stack_size_in: usize,
@@ -2913,8 +2954,7 @@ pub extern "C" fn vm_free_thread_stack(
 // V5.9: vm_mmap / vm_munmap (top-level syscall paths)
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn vm_mmap(
+pub(crate) fn vm_mmap(
     vm_ptr: *mut vm,
     addr: u64,
     length_in: usize,
@@ -3006,8 +3046,7 @@ pub extern "C" fn vm_mmap(
     map_addr
 }
 
-#[no_mangle]
-pub extern "C" fn vm_munmap(vm_ptr: *mut vm, addr: u64, length: usize) -> c_int {
+pub(crate) fn vm_munmap(vm_ptr: *mut vm, addr: u64, length: usize) -> c_int {
     vm_munmap_region(vm_ptr, addr, length)
 }
 
@@ -3038,8 +3077,7 @@ static __VM_TREE_OPTS: VmTreeOptsWrap = VmTreeOptsWrap(rb_root_opts {
 /// `struct rb_root` with the static `__VM_TREE_OPTS` (vma key cmp/extract).
 /// Inlines the body of `rb_root_init` (a `static inline` in bintree.h that
 /// merely validates and stores the opts pointer).
-#[no_mangle]
-pub extern "C" fn xv6_vm_rb_init_vm_tree(root: *mut rb_root) {
+pub(crate) fn xv6_vm_rb_init_vm_tree(root: *mut rb_root) {
     if root.is_null() {
         return;
     }
@@ -3052,8 +3090,7 @@ pub extern "C" fn xv6_vm_rb_init_vm_tree(root: *mut rb_root) {
 }
 
 /// Debug helper — prints every VMA in `vm`. Mirrors the C `dump_vm`.
-#[no_mangle]
-pub extern "C" fn dump_vm(vm_ptr: *mut vm) {
+pub(crate) fn dump_vm(vm_ptr: *mut vm) {
     if vm_ptr.is_null() {
         return;
     }
@@ -3282,8 +3319,7 @@ fn vma_validate_pte(vma_ptr: *mut vma, pte: *mut u64, flags: u64) -> Result<(), 
 
 /// C-ABI wrapper for `vma_validate_pte`. Was previously the C
 /// `xv6_vm_validate_pte` shim in vm.c.
-#[no_mangle]
-pub extern "C" fn xv6_vm_validate_pte(vma_ptr: *mut vma, pte: *mut u64, flags: u64) -> c_int {
+pub(crate) fn xv6_vm_validate_pte(vma_ptr: *mut vma, pte: *mut u64, flags: u64) -> c_int {
     // C-ABI boundary: convert `Result<(), Errno>` to a negative-errno
     // `c_int` exactly once, here.
     crate::mm::cffi::result_to_neg_errno(vma_validate_pte(vma_ptr, pte, flags))
@@ -3293,8 +3329,7 @@ pub extern "C" fn xv6_vm_validate_pte(vma_ptr: *mut vma, pte: *mut u64, flags: u
 /// `xv6_vm_call_vma_fault` shim in vm.c. If the VMA's file provides a
 /// custom `.fault` op, dispatch there; otherwise fall back to the generic
 /// file-page loader.
-#[no_mangle]
-pub extern "C" fn xv6_vm_call_vma_fault(
+pub(crate) fn xv6_vm_call_vma_fault(
     file: *mut vfs_file,
     vma_ptr: *mut vma,
     va: u64,

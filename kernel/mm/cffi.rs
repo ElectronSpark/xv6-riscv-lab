@@ -103,37 +103,81 @@ pub mod raw {
 
     unsafe extern "C" {
         // --- Spinlocks (kernel/lock/spin.c) -----------------------------
-        pub safe fn spin_init(lock: *mut Spinlock, name: *const c_char);
-        pub safe fn spin_lock(lock: *mut Spinlock);
-        pub safe fn spin_unlock(lock: *mut Spinlock);
-        pub safe fn spin_holding(lock: *mut Spinlock) -> c_int;
 
         // --- Per-CPU primitives (vm_pgtab_shims.c / slab_shims.c) ------
-        pub safe fn xv6_cpuid() -> c_int;
-        pub safe fn xv6_push_off();
-        pub safe fn xv6_pop_off();
 
         // --- Intrusive list helpers (slab_shims.c) ---------------------
-        pub safe fn xv6_list_init(entry: *mut ListNode);
-        pub safe fn xv6_list_is_empty(head: *const ListNode) -> c_int;
-        pub safe fn xv6_list_is_detached(entry: *const ListNode) -> c_int;
-        pub safe fn xv6_list_detach(entry: *mut ListNode);
-        pub safe fn xv6_list_push_front(head: *mut ListNode, entry: *mut ListNode);
-        pub safe fn xv6_list_push_back(head: *mut ListNode, entry: *mut ListNode);
-        pub safe fn xv6_list_pop_front(head: *mut ListNode) -> *mut ListNode;
-        pub safe fn xv6_list_first(head: *const ListNode) -> *mut ListNode;
-        pub safe fn xv6_list_last(head: *const ListNode) -> *mut ListNode;
 
         // --- Generic kernel heap (kalloc.rs) ---------------------------
-        pub safe fn kmm_alloc(n: usize) -> *mut c_void;
-        pub safe fn kmm_free(ptr: *mut c_void);
 
         // --- libc-shaped primitives (kernel/string.c) ------------------
-        pub safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
 
         // --- Kernel panic helpers (kernel/printf.c) --------------------
         pub safe fn __panic_start();
         pub safe fn __panic_end() -> !;
+    }
+pub(crate) use crate::mm::cffi::{xv6_cpuid, xv6_list_detach, xv6_list_first, xv6_list_init, xv6_list_is_detached, xv6_list_is_empty, xv6_list_last, xv6_list_pop_front, xv6_list_push_back, xv6_list_push_front, xv6_pop_off, xv6_push_off};
+
+    // `kmm_alloc`/`kmm_free`/`memset` are genuinely `unsafe fn` in their
+    // canonical (still-`#[no_mangle]`) modules; the original extern
+    // declarations here asserted `pub safe fn` (this whole module's
+    // documented purpose — see the doc comment above `pub mod raw`: "lets
+    // callers invoke them from outside an unsafe block ... the safe
+    // keyword only collapses the boilerplate, it does not waive the
+    // C-level invariants"). Thin safe wrappers preserve that facade for
+    // every consumer of `cffi::raw` (in- and out-of-scope alike) instead
+    // of pushing `unsafe {}` onto every call site.
+
+    /// SAFETY: see [`crate::mm::kalloc::kmm_alloc`]'s contract.
+    pub fn kmm_alloc(size: usize) -> *mut c_void {
+        unsafe { crate::mm::kalloc::kmm_alloc(size) }
+    }
+    /// SAFETY: see [`crate::mm::kalloc::kmm_free`]'s contract.
+    pub fn kmm_free(ptr: *mut c_void) {
+        unsafe { crate::mm::kalloc::kmm_free(ptr) };
+    }
+    /// SAFETY: see [`crate::string::memset`]'s contract.
+    pub fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void {
+        unsafe { crate::string::memset(dst, c, n) }
+    }
+
+    // --- Spinlocks (kernel/lock/spin.c) ---------------------------------
+    //
+    // NOT plain `use` re-exports of `crate::lock::spinlock::spin_*`: this
+    // module's `Spinlock` is a zero-sized opaque mirror type distinct from
+    // (but layout-identical to) `crate::bindings::spinlock_t` — the same
+    // "same C type, different Rust name" relationship documented at
+    // `sync::KSpinlock::from_bindings`. The real functions now take
+    // `*mut spinlock_t`; these thin wrappers preserve the original
+    // `*mut Spinlock`-typed call sites (this crate has three-plus distinct
+    // "locally convenient" pointer-type views of the one C `spinlock_t`)
+    // via a pointer reinterpretation, not a layout change.
+
+    /// SAFETY: see the module-level note above; `lock`/`name` carry the
+    /// same "already-allocated, caller-owned for the lock's lifetime"
+    /// contract the original C-ABI `spin_init` always had.
+    pub(crate) fn spin_init(lock: *mut Spinlock, name: *const c_char) {
+        unsafe {
+            crate::lock::spinlock::spin_init(
+                lock as *mut crate::bindings::spinlock_t,
+                name as *mut c_char,
+            );
+        }
+    }
+
+    /// SAFETY: see [`spin_init`].
+    pub(crate) fn spin_lock(lock: *mut Spinlock) {
+        unsafe { crate::lock::spinlock::spin_lock(lock as *mut crate::bindings::spinlock_t) };
+    }
+
+    /// SAFETY: see [`spin_init`].
+    pub(crate) fn spin_unlock(lock: *mut Spinlock) {
+        unsafe { crate::lock::spinlock::spin_unlock(lock as *mut crate::bindings::spinlock_t) };
+    }
+
+    /// SAFETY: see [`spin_init`].
+    pub(crate) fn spin_holding(lock: *mut Spinlock) -> c_int {
+        unsafe { crate::lock::spinlock::spin_holding(lock as *mut crate::bindings::spinlock_t) }
     }
 }
 
@@ -259,8 +303,7 @@ fn mycpu_local() -> *mut crate::bindings::cpu_local {
 
 /// Current hart's cpu index, derived from `tp`'s offset into the per-cpu
 /// page (mirrors the `cpuid()` static-inline from `kernel/inc/smp/percpu.h`).
-#[no_mangle]
-pub extern "C" fn xv6_cpuid() -> c_int {
+pub(crate) fn xv6_cpuid() -> c_int {
     let off = read_tp() & (CPU_LOCAL_PAGE_SIZE - 1);
     (off / core::mem::size_of::<crate::bindings::cpu_local>() as u64) as c_int
 }
@@ -302,8 +345,7 @@ pub extern "C" fn xv6_pop_off() {
 // --- Intrusive doubly-linked list primitives (kernel/inc/list.h
 // static-inlines, ported once for every mm/proc consumer). ----------------
 
-#[no_mangle]
-pub extern "C" fn xv6_list_init(entry: *mut ListNode) {
+pub(crate) fn xv6_list_init(entry: *mut ListNode) {
     // SAFETY: `entry` is a valid, exclusively-accessible `ListNode`.
     unsafe {
         (*entry).next = entry;
@@ -311,14 +353,12 @@ pub extern "C" fn xv6_list_init(entry: *mut ListNode) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_list_is_empty(head: *const ListNode) -> c_int {
+pub(crate) fn xv6_list_is_empty(head: *const ListNode) -> c_int {
     // SAFETY: `head` is a valid, initialized `ListNode`.
     unsafe { if (*head).next == head as *mut ListNode { 1 } else { 0 } }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_list_is_detached(entry: *const ListNode) -> c_int {
+pub(crate) fn xv6_list_is_detached(entry: *const ListNode) -> c_int {
     // SAFETY: `entry` is a valid, initialized `ListNode`.
     unsafe {
         let p = (*entry).prev;
@@ -327,8 +367,7 @@ pub extern "C" fn xv6_list_is_detached(entry: *const ListNode) -> c_int {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_list_detach(entry: *mut ListNode) {
+pub(crate) fn xv6_list_detach(entry: *mut ListNode) {
     // SAFETY: `entry` is currently linked into some list (or self-linked);
     // unlinking it and re-initializing it as a singleton is always sound.
     unsafe {
@@ -354,8 +393,7 @@ fn list_insert_after(prev: *mut ListNode, new: *mut ListNode) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_list_push_front(head: *mut ListNode, entry: *mut ListNode) {
+pub(crate) fn xv6_list_push_front(head: *mut ListNode, entry: *mut ListNode) {
     list_insert_after(head, entry);
 }
 
@@ -365,8 +403,7 @@ pub extern "C" fn xv6_list_push_back(head: *mut ListNode, entry: *mut ListNode) 
     unsafe { list_insert_after((*head).prev, entry) };
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_list_pop_front(head: *mut ListNode) -> *mut ListNode {
+pub(crate) fn xv6_list_pop_front(head: *mut ListNode) -> *mut ListNode {
     if xv6_list_is_empty(head) != 0 {
         return ptr::null_mut();
     }
@@ -376,8 +413,7 @@ pub extern "C" fn xv6_list_pop_front(head: *mut ListNode) -> *mut ListNode {
     first
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_list_first(head: *const ListNode) -> *mut ListNode {
+pub(crate) fn xv6_list_first(head: *const ListNode) -> *mut ListNode {
     if xv6_list_is_empty(head) != 0 {
         ptr::null_mut()
     } else {
@@ -386,8 +422,7 @@ pub extern "C" fn xv6_list_first(head: *const ListNode) -> *mut ListNode {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn xv6_list_last(head: *const ListNode) -> *mut ListNode {
+pub(crate) fn xv6_list_last(head: *const ListNode) -> *mut ListNode {
     if xv6_list_is_empty(head) != 0 {
         ptr::null_mut()
     } else {

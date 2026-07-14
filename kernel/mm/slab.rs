@@ -70,7 +70,7 @@ const SLAB_T_SIZE: usize = core::mem::size_of::<Slab>();
 // `crate::mm::slab::{Spinlock,ListNode}` callers compile unchanged.
 // ===========================================================================
 
-pub use crate::mm::cffi::{ListNode, Spinlock};
+use crate::mm::cffi::{ListNode, Spinlock};
 
 const SPINLOCK_BYTES: usize = 24;
 
@@ -231,7 +231,7 @@ mod ffi {
     // kmm, memset, panic) are declared once in `crate::mm::cffi`; bring
     // them in via re-export so the existing `ffi::spin_lock(...)`,
     // `ffi::xv6_list_first(...)`, etc. call sites compile unchanged.
-    pub use crate::mm::cffi::raw::{
+    pub(crate) use crate::mm::cffi::raw::{
         spin_init, spin_lock, spin_unlock,
         xv6_cpuid, xv6_push_off, xv6_pop_off,
         kmm_alloc, kmm_free,
@@ -241,18 +241,39 @@ mod ffi {
         __panic_start, __panic_end,
     };
 
-    unsafe extern "C" {
-        // Slab descriptor / cache descriptor allocators (defined in kalloc.c)
-        pub safe fn slab_t_desc_alloc() -> *mut Slab;
-        pub safe fn slab_t_desc_free(s: *mut Slab);
-        pub safe fn slab_cache_t_alloc() -> *mut SlabCache;
-        pub safe fn slab_cache_t_free(c: *mut SlabCache);
+pub(crate) use crate::mm::page::{__pa_to_page, __page_alloc, __page_free, __page_to_pa};
 
-        // Buddy page allocator
-        pub safe fn __page_alloc(order: u64, flags: u64) -> *mut c_void;
-        pub safe fn __page_free(page: *mut c_void, order: u64);
-        pub safe fn __page_to_pa(page: *mut c_void) -> u64;
-        pub safe fn __pa_to_page(pa: u64) -> *mut c_void;
+    // Slab descriptor / cache descriptor allocators (kalloc.rs). Its real
+    // signatures are the generic-allocator `*mut c_void`; this module's
+    // extern declaration always typed them with the local `Slab`/
+    // `SlabCache` views instead (same "locally convenient pointer type"
+    // idiom as `cffi::raw`'s spinlock wrappers) — these thin casts
+    // preserve that view for the adapter functions just below.
+    #[inline]
+    pub fn slab_t_desc_alloc() -> *mut Slab {
+        // SAFETY: `crate::mm::kalloc::slab_t_desc_alloc` hands back
+        // freshly-allocated, correctly-sized/aligned storage for one
+        // `Slab` (it is the dedicated backing allocator for this exact
+        // type); reinterpreting the returned `*mut c_void` as `*mut Slab`
+        // is the intended use.
+        unsafe { crate::mm::kalloc::slab_t_desc_alloc() as *mut Slab }
+    }
+    #[inline]
+    pub fn slab_t_desc_free(s: *mut Slab) {
+        // SAFETY: `s` must originate from `slab_t_desc_alloc` above,
+        // matching `crate::mm::kalloc::slab_t_desc_free`'s contract.
+        unsafe { crate::mm::kalloc::slab_t_desc_free(s as *mut c_void) };
+    }
+    #[inline]
+    pub fn slab_cache_t_alloc() -> *mut SlabCache {
+        // SAFETY: see `slab_t_desc_alloc` above; dedicated backing
+        // allocator for `SlabCache`.
+        unsafe { crate::mm::kalloc::slab_cache_t_alloc() as *mut SlabCache }
+    }
+    #[inline]
+    pub fn slab_cache_t_free(c: *mut SlabCache) {
+        // SAFETY: `c` must originate from `slab_cache_t_alloc` above.
+        unsafe { crate::mm::kalloc::slab_cache_t_free(c as *mut c_void) };
     }
 
     // --- Type-adapting wrappers (safe Rust, no unsafe blocks unless noted). ---
@@ -265,13 +286,28 @@ mod ffi {
     #[inline] pub fn cache_desc_alloc() -> *mut SlabCache { slab_cache_t_alloc() }
     #[inline] pub fn cache_desc_free(c: *mut SlabCache) { slab_cache_t_free(c) }
 
-    #[inline] pub fn page_alloc(order: u64, flags: u64) -> *mut c_void {
-        __page_alloc(order, flags)
+    // `__page_alloc`/`__page_free`/`__page_to_pa` are real bindgen-free
+    // C-ABI exports of `crate::mm::page` typed `*mut Page` (that module's
+    // own real page-descriptor struct); this file's original extern
+    // declaration typed them `*mut c_void` (its own opaque view, same
+    // idiom as the `Slab`/`SlabCache` wrappers above). Cast, don't `use`.
+    #[inline]
+    pub fn page_alloc(order: u64, flags: u64) -> *mut c_void {
+        // SAFETY: pure pointer-value reinterpretation of the allocator's
+        // own return value; ownership/lifetime contract is unchanged.
+        unsafe { __page_alloc(order, flags) as *mut c_void }
     }
-    #[inline] pub fn page_free(page: *mut c_void, order: u64) {
-        __page_free(page, order)
+    #[inline]
+    pub fn page_free(page: *mut c_void, order: u64) {
+        // SAFETY: `page` must be a value previously returned by
+        // `page_alloc` above (same contract `__page_free` always had).
+        unsafe { __page_free(page as *mut crate::mm::page::Page, order) };
     }
-    #[inline] pub fn page_to_pa(page: *mut c_void) -> u64 { __page_to_pa(page) }
+    #[inline]
+    pub fn page_to_pa(page: *mut c_void) -> u64 {
+        // SAFETY: see `page_free` above.
+        unsafe { __page_to_pa(page as *mut crate::mm::page::Page) }
+    }
 
     // --- Slab-cache registry, page-union access and diagnostics --
     // previously round-tripped through the deleted `slab_shims.rs`; this
@@ -580,8 +616,7 @@ fn unregister_cache(cache: &mut SlabCache) {
 /// Drop up to half the free slabs of every registered cache under memory
 /// pressure (the OOM-shrink hook `Slab::make` falls back to on allocation
 /// failure). C-called via `kernel/inc/mm/slab.h`.
-#[no_mangle]
-pub extern "C" fn slab_shrink_all() {
+pub(crate) fn slab_shrink_all() {
     ensure_registry_init();
     let head = registry_head();
     let mut guard = KSpinlock::from_ptr(ALL_SLAB_CACHES_LOCK.lock_ptr()).lock();
@@ -624,8 +659,7 @@ static DUMP_TAIL: &[u8] = b")\n\0";
 /// `detailed >= 1` a one-line total, `0` prints nothing. Always returns the
 /// total byte footprint across every registered cache. C-called via
 /// `kernel/inc/mm/slab.h` (also from `page::sys_memstat`).
-#[no_mangle]
-pub extern "C" fn slab_dump_all(detailed: c_int) -> u64 {
+pub(crate) fn slab_dump_all(detailed: c_int) -> u64 {
     ensure_registry_init();
     let mut total_pages: u64 = 0;
 
@@ -1230,8 +1264,7 @@ pub unsafe extern "C" fn slab_cache_init(
 ///
 /// - `name` must be a valid NUL-terminated C string for at least as
 ///   long as the cache retains it.
-#[no_mangle]
-pub unsafe extern "C" fn slab_cache_create(
+pub(crate) unsafe fn slab_cache_create(
     name: *mut c_char,
     obj_size: usize,
     flags: u64,
@@ -1255,8 +1288,7 @@ pub unsafe extern "C" fn slab_cache_create(
 ///   `*mut SlabCache` previously returned by [`slab_cache_create`] (or
 ///   initialized via [`slab_cache_init`]) — not concurrently accessed
 ///   by another hart, and not used again after this call succeeds.
-#[no_mangle]
-pub unsafe extern "C" fn slab_cache_destroy(cache: *mut SlabCache) -> c_int {
+pub(crate) unsafe fn slab_cache_destroy(cache: *mut SlabCache) -> c_int {
     let Some(cache) = cache.as_mut() else { return -1; };
     cache.destroy_impl()
 }
@@ -1551,8 +1583,7 @@ pub unsafe extern "C" fn slab_free(obj: *mut c_void) {
 /// - Same as [`slab_free`]: `obj`, if non-null, must be a pointer
 ///   previously returned by [`slab_alloc`] on some live cache, not
 ///   already freed, and not concurrently accessed by another hart.
-#[no_mangle]
-pub unsafe extern "C" fn slab_free_noshrink(obj: *mut c_void) {
+pub(crate) unsafe fn slab_free_noshrink(obj: *mut c_void) {
     // Phases 1-5 identical to slab_free; PHASE 6 deliberately skipped.
     let _ = slab_free_core(
         obj,

@@ -29,8 +29,6 @@ use crate::machine;
 use crate::sync::KSpinlock;
 
 unsafe extern "C" {
-    pub safe fn kmm_alloc(n: usize) -> *mut c_void;
-    pub safe fn kmm_free(ptr: *mut c_void);
 
     pub safe fn wakeup(p: *mut thread);
     pub safe fn scheduler_yield();
@@ -44,7 +42,28 @@ unsafe extern "C" {
         stack_order: c_int,
     ) -> *mut thread;
 
-    pub safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
+}
+/// `crate::kmm_alloc`/`kmm_free` are genuinely `unsafe fn`; this file's
+/// original extern declaration asserted `pub safe fn` (usual FFI facade).
+#[inline]
+fn kmm_alloc(size: usize) -> *mut c_void {
+    unsafe { crate::kmm_alloc(size) }
+}
+/// SAFETY: see [`kmm_alloc`] above.
+#[inline]
+fn kmm_free(ptr: *mut c_void) {
+    unsafe { crate::kmm_free(ptr) };
+}
+
+/// See `completion.rs`'s identical note: `crate::lock::spinlock::spin_init`
+/// takes `name: *mut c_char`; this file's original extern declaration
+/// typed it `*const c_char` (every call site passes a `'static`
+/// string-literal pointer, never written through).
+#[inline]
+fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+    // SAFETY: `name` is only read by the callee despite the `*mut`
+    // parameter; every call site here passes a `'static` string literal.
+    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
 }
 
 // Variadic FFI / noreturn cannot be marked safe.
@@ -1229,8 +1248,7 @@ fn banner() {
 /// rcu_run_tests(void)` C-ABI entry point declared in
 /// `kernel/inc/lock/rcu.h`; the call site in `kernel/start_kernel.c` is
 /// (and remains) commented out.
-#[no_mangle]
-pub extern "C" fn rcu_run_tests() {
+pub(crate) fn rcu_run_tests() {
     sleep_ms(100);
     unsafe { printf(c"\n".as_ptr()); }
     banner();

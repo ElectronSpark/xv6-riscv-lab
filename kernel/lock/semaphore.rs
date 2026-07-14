@@ -29,10 +29,6 @@ const SEM_VALUE_MAX: c_int = 2_147_483_640;
 // ---------------------------------------------------------------------------
 
 unsafe extern "C" {
-    pub safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
-    pub safe fn spin_lock(lk: *mut spinlock_t);
-    pub safe fn spin_unlock(lk: *mut spinlock_t);
-    pub safe fn spin_holding(lk: *mut spinlock_t) -> c_int;
 
     pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
     pub safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t,
@@ -48,6 +44,18 @@ unsafe extern "C" {
     pub safe fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int;
     pub safe fn sched_timer_done(tn: *mut timer_node);
     pub safe fn sleep_ms(ms: u64);
+}
+pub(crate) use crate::lock::spinlock::{spin_holding, spin_lock, spin_unlock};
+
+/// See `completion.rs`'s identical note: `crate::lock::spinlock::spin_init`
+/// takes `name: *mut c_char`; this file's original extern declaration
+/// typed it `*const c_char` (call site only ever passes a `'static`
+/// string-literal pointer, never written through).
+#[inline]
+fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+    // SAFETY: `name` is only read by the callee despite the `*mut`
+    // parameter; the sole call site passes a `'static` string literal.
+    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
 }
 
 // Variadic printf — must stay in its own (non-`safe`) extern block.
@@ -208,8 +216,7 @@ fn sem_do_post(s: *mut sem_t) -> c_int {
 // Public API
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int)-> c_int  { u! {
+pub(crate) fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     if value < 0 { return -(EINVAL as c_int); }
     let n = if name.is_null() {
@@ -225,8 +232,7 @@ pub extern "C" fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int)-> c
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn sem_trywait(s: *mut sem_t)-> c_int  { u! {
+pub(crate) fn sem_trywait(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     if value_get(s) > 0 {
@@ -236,8 +242,7 @@ pub extern "C" fn sem_trywait(s: *mut sem_t)-> c_int  { u! {
     -(EAGAIN as c_int)
 }}
 
-#[no_mangle]
-pub extern "C" fn sem_wait(s: *mut sem_t)-> c_int  { u! {
+pub(crate) fn sem_wait(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
 
@@ -259,8 +264,7 @@ pub extern "C" fn sem_wait(s: *mut sem_t)-> c_int  { u! {
     ret
 }}
 
-#[no_mangle]
-pub extern "C" fn sem_wait_interruptible(s: *mut sem_t)-> c_int  { u! {
+pub(crate) fn sem_wait_interruptible(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     loop {
@@ -272,8 +276,7 @@ pub extern "C" fn sem_wait_interruptible(s: *mut sem_t)-> c_int  { u! {
     }
 }}
 
-#[no_mangle]
-pub extern "C" fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
+pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
 
@@ -327,8 +330,7 @@ pub extern "C" fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
     ret
 }}
 
-#[no_mangle]
-pub extern "C" fn sem_post(s: *mut sem_t)-> c_int  { u! {
+pub(crate) fn sem_post(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     if value_get(s) == SEM_VALUE_MAX { return -(EOVERFLOW as c_int); }
@@ -336,8 +338,7 @@ pub extern "C" fn sem_post(s: *mut sem_t)-> c_int  { u! {
     if ret == -(ENOENT as c_int) { 0 } else { ret }
 }}
 
-#[no_mangle]
-pub extern "C" fn sem_getvalue(s: *mut sem_t, value: *mut c_int)-> c_int  { u! {
+pub(crate) fn sem_getvalue(s: *mut sem_t, value: *mut c_int)-> c_int  { u! {
     if s.is_null() || value.is_null() { return -(EINVAL as c_int); }
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     let v = value_get(s);

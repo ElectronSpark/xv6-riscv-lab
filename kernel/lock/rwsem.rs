@@ -22,10 +22,6 @@ use crate::machine;
 use crate::sync::KSpinlock;
 
 unsafe extern "C" {
-    pub safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
-    pub safe fn spin_lock(lk: *mut spinlock_t);
-    pub safe fn spin_unlock(lk: *mut spinlock_t);
-    pub safe fn spin_holding(lk: *mut spinlock_t) -> c_int;
 
     pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
     pub safe fn tq_size(q: *mut tq_t) -> c_int;
@@ -42,6 +38,18 @@ unsafe extern "C" {
     pub safe fn signal_pending(p: *mut thread) -> u32;
     pub safe fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int;
     pub safe fn sched_timer_done(tn: *mut timer_node);
+}
+pub(crate) use crate::lock::spinlock::{spin_holding, spin_lock, spin_unlock};
+
+/// See `completion.rs`'s identical note: `crate::lock::spinlock::spin_init`
+/// takes `name: *mut c_char`; this file's original extern declaration
+/// typed it `*const c_char` (call site only ever passes a `'static`
+/// string-literal pointer, never written through).
+#[inline]
+fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+    // SAFETY: `name` is only read by the callee despite the `*mut`
+    // parameter; the sole call site passes a `'static` string literal.
+    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
 }
 
 // ---------------------------------------------------------------------------
@@ -238,8 +246,7 @@ pub extern "C" fn rwsem_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_try_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_try_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     if !reader_should_wait(l) {
@@ -250,8 +257,7 @@ pub extern "C" fn rwsem_try_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     }
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_acquire_read_interruptible(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_read_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
@@ -265,8 +271,7 @@ pub extern "C" fn rwsem_acquire_read_interruptible(l: *mut rwsem_t)-> c_int  { u
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     if timeout_ms == 0 {
         return if rwsem_try_acquire_read(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
@@ -319,8 +324,7 @@ pub extern "C" fn rwsem_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_try_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_try_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -334,8 +338,7 @@ pub extern "C" fn rwsem_try_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     }
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_acquire_write_interruptible(l: *mut rwsem_t)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_write_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -351,8 +354,7 @@ pub extern "C" fn rwsem_acquire_write_interruptible(l: *mut rwsem_t)-> c_int  { 
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int  { u! {
+pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
     if timeout_ms == 0 {
         return if rwsem_try_acquire_write(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };

@@ -142,24 +142,12 @@ unsafe extern "C" {
     // original -- `kernel/dev/fdt.c`, still C, is the only other live
     // caller of these same three entry points, via the RCU-agnostic
     // non-`_rcu` names).
-    safe fn hlist_init(hlist: *mut hlist_t, bucket_cnt: u64, func: *mut hlist_func_t) -> i32;
-    safe fn hlist_get(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void;
-    safe fn hlist_put(hlist: *mut hlist_t, node: *mut c_void, replace: bool) -> *mut c_void;
-    safe fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void;
 
     // kernel/lock/mutex.rs.
-    safe fn mutex_init(m: *mut mutex_t, name: *mut core::ffi::c_char);
-    safe fn mutex_lock(m: *mut mutex_t);
-    safe fn mutex_unlock(m: *mut mutex_t);
-    safe fn holding_mutex(m: *mut mutex_t) -> c_int;
 
     // kernel/lock/completion.rs.
-    safe fn wait_for_completion(c: *mut completion_t);
-    safe fn wait_for_completion_interruptible(c: *mut completion_t) -> c_int;
 
     // kernel/mm/page.rs.
-    safe fn page_alloc(order: u64, flags: u64) -> *mut c_void;
-    safe fn __pa_to_page(physical: u64) -> *mut page_t;
 
     // kernel/dev/dev.rs + kernel/dev/blkdev.rs (Phase 2 Wave 21).
     safe fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t;
@@ -176,6 +164,25 @@ unsafe extern "C" {
     ) -> *mut bio;
     safe fn bio_add_seg(bio: *mut bio, page: *mut page_t, idx: i16, len: u16, offset: u16) -> c_int;
     safe fn bio_release(bio: *mut bio) -> c_int;
+}
+pub(crate) use crate::hlist::{hlist_get, hlist_init, hlist_pop, hlist_put};
+pub(crate) use crate::lock::completion::{wait_for_completion, wait_for_completion_interruptible};
+pub(crate) use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_unlock};
+
+// `page_alloc`/`__pa_to_page` are genuinely `unsafe fn` in `crate::mm::page`
+// (still `#[no_mangle]`, unchanged); this file's original extern
+// declaration asserted `pub safe fn` (this crate's usual "collapse the
+// FFI boilerplate" facade) and additionally typed `__pa_to_page`'s return
+// as `*mut page_t` (the bindgen type `bio_add_seg` below still expects)
+// rather than `crate::mm::page::Page` (that module's own struct — same
+// layout, different Rust name). Thin wrappers preserve both.
+/// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
+fn page_alloc(order: u64, flags: u64) -> *mut c_void {
+    unsafe { crate::mm::page::page_alloc(order, flags) }
+}
+/// SAFETY: see [`crate::mm::page::__pa_to_page`]'s contract.
+fn __pa_to_page(physical: u64) -> *mut page_t {
+    unsafe { crate::mm::page::__pa_to_page(physical) as *mut page_t }
 }
 
 // ---------------------------------------------------------------------------
@@ -765,8 +772,7 @@ pub extern "C" fn bsync() {
 }
 
 /// Get the count of dirty buffers (for debugging/stats).
-#[no_mangle]
-pub extern "C" fn bdirty_count() -> u32 {
+pub(crate) fn bdirty_count() -> u32 {
     let _g = bcache_lock().lock();
     // SAFETY: `bcache.lock` held.
     unsafe { (*bc()).dirty_count }

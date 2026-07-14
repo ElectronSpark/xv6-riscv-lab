@@ -188,8 +188,7 @@ pub unsafe extern "C" fn spin_init(lk: *mut spinlock_t, name: *mut c_char) {
 
 /// Spin until `lk` is acquired by the current hart. Caller must have
 /// interrupts disabled (the public entry point `spin_lock` does that).
-#[no_mangle]
-pub unsafe extern "C" fn spin_acquire(lk: *mut spinlock_t) {
+pub(crate) unsafe fn spin_acquire(lk: *mut spinlock_t) {
     if lk.is_null() || holding(lk) {
         fixed_msg_panic(MSG_REENTRY);
     }
@@ -204,8 +203,7 @@ pub unsafe extern "C" fn spin_acquire(lk: *mut spinlock_t) {
 }
 
 /// Release a spinlock previously acquired by this hart.
-#[no_mangle]
-pub unsafe extern "C" fn spin_release(lk: *mut spinlock_t) {
+pub(crate) unsafe fn spin_release(lk: *mut spinlock_t) {
     if lk.is_null() || !holding(lk) {
         fixed_msg_panic(MSG_UNLOCK);
     }
@@ -215,8 +213,7 @@ pub unsafe extern "C" fn spin_release(lk: *mut spinlock_t) {
 }
 
 /// Try-acquire variant that disables interrupts internally.
-#[no_mangle]
-pub unsafe extern "C" fn spin_trylock(lk: *mut spinlock_t) -> c_int {
+pub(crate) unsafe fn spin_trylock(lk: *mut spinlock_t) -> c_int {
     push_off();
     if holding(lk) {
         pop_off();
@@ -258,16 +255,14 @@ pub unsafe extern "C" fn spin_unlock(lk: *mut spinlock_t) {
 }
 
 /// `spin_lock` variant that saves the interrupt-enable flag.
-#[no_mangle]
-pub unsafe extern "C" fn spin_lock_irqsave(lk: *mut spinlock_t) -> c_int {
+pub(crate) unsafe fn spin_lock_irqsave(lk: *mut spinlock_t) -> c_int {
     let intena = intr_off_save();
     spin_acquire(lk);
     intena
 }
 
 /// Companion of `spin_lock_irqsave`.
-#[no_mangle]
-pub unsafe extern "C" fn spin_unlock_irqrestore(lk: *mut spinlock_t, intena: c_int) {
+pub(crate) unsafe fn spin_unlock_irqrestore(lk: *mut spinlock_t, intena: c_int) {
     spin_release(lk);
     intr_restore(intena);
 }
@@ -275,10 +270,19 @@ pub unsafe extern "C" fn spin_unlock_irqrestore(lk: *mut spinlock_t, intena: c_i
 // ---------------------------------------------------------------------------
 // Sleep/wake callbacks used by `tq_wait()` / `ttree_wait()`. Their
 // declarations live in `kernel/inc/lock/spinlock.h`.
+//
+// NOT demoted to a plain Rust fn like their neighbors: `proc/thread_queue.rs`
+// (out of this wave's scope) passes these *by value* as
+// `Option<unsafe extern "C" fn(...)>` callback arguments to
+// `tq_wait_cb_impl`/`ttree_wait_cb_impl` (function-pointer coercion, not a
+// symbol-table lookup) — the `extern "C"` calling convention is therefore
+// part of the function's *type*, not just its link-time symbol name, and
+// must stay for the coercion to type-check. `#[no_mangle]` is still dropped:
+// nothing resolves these by C symbol name (no out-of-scope extern-block
+// declares them), only by the Rust-level fn-pointer value.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn spin_sleep_cb(data: *mut c_void) -> c_int {
+pub(crate) unsafe extern "C" fn spin_sleep_cb(data: *mut c_void) -> c_int {
     if data.is_null() {
         return 0;
     }
@@ -290,8 +294,7 @@ pub unsafe extern "C" fn spin_sleep_cb(data: *mut c_void) -> c_int {
     status
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn spin_wake_cb(data: *mut c_void, sleep_cb_status: c_int) {
+pub(crate) unsafe extern "C" fn spin_wake_cb(data: *mut c_void, sleep_cb_status: c_int) {
     if !data.is_null() && sleep_cb_status != 0 {
         let lk = data as *mut spinlock_t;
         spin_lock(lk);

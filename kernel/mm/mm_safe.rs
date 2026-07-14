@@ -88,14 +88,39 @@ use crate::mm::slab::SlabCache;
 // ---------------------------------------------------------------------------
 mod ffi {
     use super::*;
-    unsafe extern "C" {
-        pub safe fn __page_alloc(order: u64, flags: u64) -> *mut Page;
-        pub safe fn __page_free(page: *mut Page, order: u64);
-        pub safe fn __page_to_pa(page: *mut Page) -> u64;
-        pub safe fn __pa_to_page(physical: u64) -> *mut Page;
 
-        pub safe fn slab_alloc(cache: *mut SlabCache) -> *mut c_void;
-        pub safe fn slab_free(obj: *mut c_void);
+    // `crate::mm::page::{__page_alloc,__page_free,__page_to_pa,__pa_to_page}`
+    // and `crate::mm::slab::{slab_alloc,slab_free}` are all genuinely
+    // `unsafe fn`/`unsafe extern "C" fn` (still `#[no_mangle]`, unchanged —
+    // out-of-scope callers still reach them via C-ABI extern blocks); this
+    // module's original extern declaration asserted `pub safe fn` (usual
+    // FFI-facade convention) and, unlike most other consumers in this
+    // crate, already used the exact canonical `Page`/`SlabCache` types
+    // (this file imports them directly), so only the safety facade needs
+    // preserving here, no pointer-type cast.
+    /// SAFETY: see [`crate::mm::page::__page_alloc`]'s contract.
+    pub fn __page_alloc(order: u64, flags: u64) -> *mut Page {
+        unsafe { crate::mm::page::__page_alloc(order, flags) }
+    }
+    /// SAFETY: `page` must originate from `__page_alloc` above.
+    pub fn __page_free(page: *mut Page, order: u64) {
+        unsafe { crate::mm::page::__page_free(page, order) };
+    }
+    /// SAFETY: `page` must be a live `Page`.
+    pub fn __page_to_pa(page: *mut Page) -> u64 {
+        unsafe { crate::mm::page::__page_to_pa(page) }
+    }
+    /// SAFETY: see [`crate::mm::page::__pa_to_page`]'s contract.
+    pub fn __pa_to_page(physical: u64) -> *mut Page {
+        unsafe { crate::mm::page::__pa_to_page(physical) }
+    }
+    /// SAFETY: `cache` must be a live `SlabCache`.
+    pub fn slab_alloc(cache: *mut SlabCache) -> *mut c_void {
+        unsafe { crate::mm::slab::slab_alloc(cache) }
+    }
+    /// SAFETY: `obj` must originate from `slab_alloc` above.
+    pub fn slab_free(obj: *mut c_void) {
+        unsafe { crate::mm::slab::slab_free(obj) };
     }
 }
 

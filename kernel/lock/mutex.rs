@@ -22,10 +22,6 @@ use crate::machine;
 use crate::sync::KSpinlock;
 
 unsafe extern "C" {
-    pub safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
-    pub safe fn spin_lock(lk: *mut spinlock_t);
-    pub safe fn spin_unlock(lk: *mut spinlock_t);
-    pub safe fn spin_holding(lk: *mut spinlock_t) -> c_int;
 
     pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
     pub safe fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t,
@@ -40,6 +36,18 @@ unsafe extern "C" {
     pub safe fn signal_pending(p: *mut thread) -> u32;
     pub safe fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int;
     pub safe fn sched_timer_done(tn: *mut timer_node);
+}
+pub(crate) use crate::lock::spinlock::{spin_holding, spin_lock, spin_unlock};
+
+/// See `completion.rs`'s identical note: `crate::lock::spinlock::spin_init`
+/// takes `name: *mut c_char`; this file's original extern declaration
+/// typed it `*const c_char` (call site only ever passes a `'static`
+/// string-literal pointer, never written through).
+#[inline]
+fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+    // SAFETY: `name` is only read by the callee despite the `*mut`
+    // parameter; the sole call site passes a `'static` string literal.
+    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
 }
 
 // ---------------------------------------------------------------------------
@@ -229,8 +237,7 @@ pub extern "C" fn mutex_trylock(m: *mut mutex_t)-> c_int  { u! {
     if try_set_holder(m, pid) { 1 } else { 0 }
 }}
 
-#[no_mangle]
-pub extern "C" fn mutex_lock_interruptible(m: *mut mutex_t)-> c_int  { u! {
+pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t)-> c_int  { u! {
     if m.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
@@ -251,8 +258,7 @@ pub extern "C" fn mutex_lock_interruptible(m: *mut mutex_t)-> c_int  { u! {
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64)-> c_int  { u! {
+pub(crate) fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64)-> c_int  { u! {
     if m.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);

@@ -26,7 +26,7 @@
 
 use core::ptr;
 
-use crate::bintree::{
+pub(crate) use crate::bintree::{
     __rb_find_key_link, __rb_node_link, __rb_replace_node, __rb_rotate_left, __rb_rotate_right,
     __rb_transplant, rb_insert_node, rb_left, rb_node_is_top, rb_parent, rb_right,
     rb_root_is_initialized, rb_set_parent, RbNode, RbRoot,
@@ -315,8 +315,7 @@ pub unsafe extern "C" fn rb_delete_node_color(root: *mut RbRoot, node: *mut RbNo
 
 /// # Safety
 /// `root` must be null or point to a live `rb_root`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_delete_key_color(root: *mut RbRoot, key: u64) -> *mut RbNode {
+pub(crate) unsafe fn rb_delete_key_color(root: *mut RbRoot, key: u64) -> *mut RbNode {
     unsafe {
         if !rb_root_is_initialized(root) {
             return ptr::null_mut();

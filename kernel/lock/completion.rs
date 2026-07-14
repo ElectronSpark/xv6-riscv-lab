@@ -39,10 +39,6 @@ const MAX_COMPLETIONS: c_int = 65535;
 // to wrap each invocation in `u! { ... }`.
 
 unsafe extern "C" {
-    pub safe fn spin_init(lk: *mut spinlock_t, name: *const c_char);
-    pub safe fn spin_lock(lk: *mut spinlock_t);
-    pub safe fn spin_unlock(lk: *mut spinlock_t);
-    pub safe fn spin_holding(lk: *mut spinlock_t) -> c_int;
 
     pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
     pub safe fn tq_size(q: *mut tq_t) -> c_int;
@@ -61,6 +57,19 @@ unsafe extern "C" {
 
     pub safe fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int;
     pub safe fn sched_timer_done(tn: *mut timer_node);
+}
+pub(crate) use crate::lock::spinlock::{spin_holding, spin_lock, spin_unlock};
+
+/// `crate::lock::spinlock::spin_init` takes `name: *mut c_char`; this
+/// file's (and several sibling lock modules') original extern declaration
+/// typed it `*const c_char` (call sites only ever pass a `&'static
+/// [u8]`-derived string literal pointer, never written through). Thin
+/// cast wrapper preserving the original call-site type.
+#[inline]
+fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
+    // SAFETY: `name` is only read by the callee despite the `*mut`
+    // parameter; every call site here passes a `'static` string literal.
+    unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +216,7 @@ pub extern "C" fn completion_reinit(c: *mut completion_t) { u! {
     done_set(c, 0);
 }}
 
-#[no_mangle]
-pub extern "C" fn try_wait_for_completion(c: *mut completion_t)-> bool  { u! {
+pub(crate) fn try_wait_for_completion(c: *mut completion_t)-> bool  { u! {
     if c.is_null() { return false; }
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     try_wait_for_completion_locked(c)
@@ -251,8 +259,7 @@ pub extern "C" fn wait_for_completion_interruptible(c: *mut completion_t)-> c_in
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn wait_for_completion_timed(c: *mut completion_t,
+pub(crate) fn wait_for_completion_timed(c: *mut completion_t,
                                                    timeout_ms: u64)-> c_int  { u! {
     if c.is_null() { return -(EINVAL as c_int); }
     let cur = machine::current_thread_ptr();
@@ -316,8 +323,7 @@ pub extern "C" fn wait_for_completion_timed(c: *mut completion_t,
     0
 }}
 
-#[no_mangle]
-pub extern "C" fn complete(c: *mut completion_t) { u! {
+pub(crate) fn complete(c: *mut completion_t) { u! {
     if c.is_null() { return; }
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     let d = done_get(c);
@@ -350,8 +356,7 @@ pub extern "C" fn complete_all(c: *mut completion_t) { u! {
     }
 }}
 
-#[no_mangle]
-pub extern "C" fn completion_done(c: *mut completion_t)-> bool  { u! {
+pub(crate) fn completion_done(c: *mut completion_t)-> bool  { u! {
     if c.is_null() { return false; }
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     tq_size(queue_ptr(c)) == 0

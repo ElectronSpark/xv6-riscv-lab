@@ -257,38 +257,31 @@ static SBI_EXT_AVAILABLE: [AtomicBool; SBI_EXT_ID_COUNT] = [
 // Base extension.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn sbi_get_spec_version() -> i64 {
+pub(crate) fn sbi_get_spec_version() -> i64 {
     sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_SPEC_VERSION, 0, 0, 0, 0, 0, 0).retval()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_get_impl_id() -> i64 {
+pub(crate) fn sbi_get_impl_id() -> i64 {
     sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_IMPL_ID, 0, 0, 0, 0, 0, 0).retval()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_get_impl_version() -> i64 {
+pub(crate) fn sbi_get_impl_version() -> i64 {
     sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_IMPL_VERSION, 0, 0, 0, 0, 0, 0).retval()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_probe_extension(extid: i64) -> i64 {
+pub(crate) fn sbi_probe_extension(extid: i64) -> i64 {
     sbi_ecall(SBI_EXT_BASE, SBI_BASE_PROBE_EXT, extid as u64, 0, 0, 0, 0, 0).retval()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_get_mvendorid() -> i64 {
+pub(crate) fn sbi_get_mvendorid() -> i64 {
     sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_MVENDORID, 0, 0, 0, 0, 0, 0).retval()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_get_marchid() -> i64 {
+pub(crate) fn sbi_get_marchid() -> i64 {
     sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_MARCHID, 0, 0, 0, 0, 0, 0).retval()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_get_mimpid() -> i64 {
+pub(crate) fn sbi_get_mimpid() -> i64 {
     sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_MIMPID, 0, 0, 0, 0, 0, 0).retval()
 }
 
@@ -296,8 +289,7 @@ pub extern "C" fn sbi_get_mimpid() -> i64 {
 // Timer extension.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn sbi_set_timer(stime_value: u64) {
+pub(crate) fn sbi_set_timer(stime_value: u64) {
     sbi_ecall(SBI_EXT_TIMER, SBI_TIMER_SET_TIMER, stime_value, 0, 0, 0, 0, 0);
 }
 
@@ -314,13 +306,11 @@ pub extern "C" fn sbi_send_ipi(hart_mask: u64, hart_mask_base: u64) -> i64 {
 // Remote fence extension.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn sbi_remote_hfence_i(hart_mask: u64, hart_mask_base: u64) {
+pub(crate) fn sbi_remote_hfence_i(hart_mask: u64, hart_mask_base: u64) {
     sbi_ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_I, hart_mask, hart_mask_base, 0, 0, 0, 0);
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_remote_hfence_vma(
+pub(crate) fn sbi_remote_hfence_vma(
     hart_mask: u64,
     hart_mask_base: u64,
     start_addr: u64,
@@ -332,8 +322,7 @@ pub extern "C" fn sbi_remote_hfence_vma(
     ).errno()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_remote_hfence_vma_asid(
+pub(crate) fn sbi_remote_hfence_vma_asid(
     hart_mask: u64,
     hart_mask_base: u64,
     start_addr: u64,
@@ -346,8 +335,7 @@ pub extern "C" fn sbi_remote_hfence_vma_asid(
     ).errno()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_remote_hfence_gvma_vmid(
+pub(crate) fn sbi_remote_hfence_gvma_vmid(
     hart_mask: u64,
     hart_mask_base: u64,
     start_addr: u64,
@@ -360,8 +348,7 @@ pub extern "C" fn sbi_remote_hfence_gvma_vmid(
     ).errno()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_remote_hfence_gvma(
+pub(crate) fn sbi_remote_hfence_gvma(
     hart_mask: u64,
     hart_mask_base: u64,
     start_addr: u64,
@@ -373,8 +360,7 @@ pub extern "C" fn sbi_remote_hfence_gvma(
     ).errno()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_remote_hfence_vvma_asid(
+pub(crate) fn sbi_remote_hfence_vvma_asid(
     hart_mask: u64,
     hart_mask_base: u64,
     start_addr: u64,
@@ -387,8 +373,7 @@ pub extern "C" fn sbi_remote_hfence_vvma_asid(
     ).errno()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_remote_hfence_vvma(
+pub(crate) fn sbi_remote_hfence_vvma(
     hart_mask: u64,
     hart_mask_base: u64,
     start_addr: u64,
@@ -404,23 +389,19 @@ pub extern "C" fn sbi_remote_hfence_vvma(
 // HSM (Hart State Management) extension.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn sbi_hart_start(hartid: u64, start_addr: u64, opaque: u64) -> i64 {
+pub(crate) fn sbi_hart_start(hartid: u64, start_addr: u64, opaque: u64) -> i64 {
     sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_START, hartid, start_addr, opaque, 0, 0, 0).errno()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_hart_stop() -> i64 {
+pub(crate) fn sbi_hart_stop() -> i64 {
     sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_STOP, 0, 0, 0, 0, 0, 0).errno()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_hart_get_status(hartid: u64) -> i64 {
+pub(crate) fn sbi_hart_get_status(hartid: u64) -> i64 {
     sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_GET_STATUS, hartid, 0, 0, 0, 0, 0).retval()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_hart_suspend(suspend_type: u32, resume_addr: u64, opaque: u64) -> i64 {
+pub(crate) fn sbi_hart_suspend(suspend_type: u32, resume_addr: u64, opaque: u64) -> i64 {
     sbi_ecall(
         SBI_EXT_HSM, SBI_HSM_HART_SUSPEND,
         suspend_type as u64, resume_addr, opaque, 0, 0, 0,
@@ -431,8 +412,7 @@ pub extern "C" fn sbi_hart_suspend(suspend_type: u32, resume_addr: u64, opaque: 
 // System reset extension.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn sbi_system_reset(reset_type: u32, reset_reason: u32) {
+pub(crate) fn sbi_system_reset(reset_type: u32, reset_reason: u32) {
     sbi_ecall(
         SBI_EXT_SRST, SBI_SRST_RESET,
         reset_type as u64, reset_reason as u64, 0, 0, 0, 0,
@@ -443,13 +423,11 @@ pub extern "C" fn sbi_system_reset(reset_type: u32, reset_reason: u32) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_shutdown() {
+pub(crate) fn sbi_shutdown() {
     sbi_system_reset(SBI_SRST_TYPE_SHUTDOWN, SBI_SRST_REASON_NONE);
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_reboot() {
+pub(crate) fn sbi_reboot() {
     sbi_system_reset(SBI_SRST_TYPE_COLD_REBOOT, SBI_SRST_REASON_NONE);
 }
 
@@ -495,16 +473,14 @@ pub extern "C" fn sbi_probe_extensions() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_ext_is_available(ext_id: c_int) -> c_int {
+pub(crate) fn sbi_ext_is_available(ext_id: c_int) -> c_int {
     if ext_id < 0 || ext_id as usize >= SBI_EXT_ID_COUNT {
         return 0;
     }
     SBI_EXT_AVAILABLE[ext_id as usize].load(Ordering::Relaxed) as c_int
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_ext_name(ext_id: c_int) -> *const c_char {
+pub(crate) fn sbi_ext_name(ext_id: c_int) -> *const c_char {
     if ext_id < 0 || ext_id as usize >= SBI_EXT_ID_COUNT {
         return UNKNOWN_EXT_NAME.as_ptr();
     }
@@ -515,8 +491,7 @@ pub extern "C" fn sbi_ext_name(ext_id: c_int) -> *const c_char {
 // Convenience functions.
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn sbi_error_str(error: i64) -> *const c_char {
+pub(crate) fn sbi_error_str(error: i64) -> *const c_char {
     (match error {
         SBI_SUCCESS => c"success",
         SBI_ERR_FAILED => c"failed",
@@ -532,8 +507,7 @@ pub extern "C" fn sbi_error_str(error: i64) -> *const c_char {
     .as_ptr()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_hart_state_str(state: i64) -> *const c_char {
+pub(crate) fn sbi_hart_state_str(state: i64) -> *const c_char {
     (match state {
         SBI_HSM_STATE_STARTED => c"started",
         SBI_HSM_STATE_STOPPED => c"stopped",
@@ -547,8 +521,7 @@ pub extern "C" fn sbi_hart_state_str(state: i64) -> *const c_char {
     .as_ptr()
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_print_version() {
+pub(crate) fn sbi_print_version() {
     let spec_ver = sbi_get_spec_version();
     let impl_id = sbi_get_impl_id();
     let impl_ver = sbi_get_impl_version();
@@ -606,8 +579,7 @@ pub extern "C" fn sbi_start_secondary_harts(start_addr: u64) {
 // Early console (before UART init).
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn sbi_console_putchar(c: c_int) {
+pub(crate) fn sbi_console_putchar(c: c_int) {
     if SBI_EXT_AVAILABLE[SBI_EXT_ID_DBCN].load(Ordering::Relaxed) {
         // DBCN write byte — more reliable than the legacy call on some
         // platforms.
@@ -621,8 +593,7 @@ pub extern "C" fn sbi_console_putchar(c: c_int) {
 
 /// # Safety
 /// `s` must point to a valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn sbi_console_puts(s: *const c_char) {
+pub(crate) unsafe fn sbi_console_puts(s: *const c_char) {
     unsafe {
         let mut p = s;
         while *p != 0 {
@@ -632,8 +603,7 @@ pub unsafe extern "C" fn sbi_console_puts(s: *const c_char) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sbi_console_getchar() -> c_int {
+pub(crate) fn sbi_console_getchar() -> c_int {
     let ret = sbi_ecall(SBI_EXT_LEGACY_CONSOLE_GETCHAR, 0, 0, 0, 0, 0, 0, 0);
     if ret.error < 0 {
         return -1;

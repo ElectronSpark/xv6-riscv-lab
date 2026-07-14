@@ -34,8 +34,8 @@ pub type Kobject = kobject;
 
 unsafe extern "C" {
     pub safe fn xv6_panic(msg: *const c_char) -> !;
-    pub safe fn kmm_free(ptr: *mut c_void);
 }
+pub(crate) use crate::kmm_free;
 
 /// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`):
 /// panic the kernel if `$cond` is false. Simplified to a fixed message
@@ -318,8 +318,7 @@ pub unsafe extern "C" fn kobject_refcount(obj: *mut Kobject) -> i64 {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn kobject_count() -> i64 {
+pub(crate) fn kobject_count() -> i64 {
     // Relaxed: diagnostic registry-size snapshot; real synchronization
     // for the registry itself is `kobject_lock()` (see `attach`/`detach`).
     KOBJECT_COUNT.load(Ordering::Relaxed)

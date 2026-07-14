@@ -46,24 +46,79 @@ mod ffi {
 
     unsafe extern "C" {
         // Page-level allocator.
-        pub safe fn page_buddy_init() -> c_int;
-        pub safe fn __page_alloc(order: u64, flags: u64) -> *mut c_void;
-        pub safe fn __pa_to_page(physical: u64) -> *mut c_void;
-        pub safe fn __page_to_pa(page: *mut c_void) -> u64;
-        pub safe fn __page_ref_dec(page: *mut c_void) -> c_int;
-        pub safe fn page_buddy_stat(ret_arr: *mut u64, empty_arr: *mut bool, size: usize);
 
         // Slab allocator.
-        pub safe fn slab_cache_init(cache: *mut c_void, name: *const c_char,
-                               obj_size: usize, flags: u64) -> c_int;
-        pub safe fn slab_cache_shrink(cache: *mut c_void, nums: c_int) -> c_int;
-        pub safe fn slab_alloc(cache: *mut c_void) -> *mut c_void;
-        pub safe fn slab_free(obj: *mut c_void);
 
         // libc-style helpers from C side.
-        pub safe fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
         pub safe fn __panic_start();
         pub safe fn __panic_end() -> !;
+    }
+    // The functions below are all genuinely `unsafe fn` in their canonical
+    // (still-`#[no_mangle]` or newly-`pub(crate)`) modules; this file's
+    // original extern declarations asserted `pub safe fn` (this crate's
+    // usual FFI-boilerplate-collapsing facade) and additionally typed the
+    // page/slab-cache pointers as the generic-allocator `*mut c_void`
+    // rather than `crate::mm::page::Page` / `crate::mm::slab::SlabCache`
+    // (those modules' own real structs — same layout, "locally convenient
+    // pointer type" idiom, see `cffi::raw`'s identical spinlock note).
+    // Thin cast + safe-facade wrappers preserve both properties.
+
+    /// SAFETY: see [`crate::mm::page::page_buddy_init`]'s contract.
+    pub fn page_buddy_init() -> c_int {
+        unsafe { crate::mm::page::page_buddy_init() }
+    }
+    /// SAFETY: see [`crate::mm::page::__page_alloc`]'s contract.
+    pub fn __page_alloc(order: u64, flags: u64) -> *mut c_void {
+        unsafe { crate::mm::page::__page_alloc(order, flags) as *mut c_void }
+    }
+    /// SAFETY: see [`crate::mm::page::__pa_to_page`]'s contract.
+    pub fn __pa_to_page(physical: u64) -> *mut c_void {
+        unsafe { crate::mm::page::__pa_to_page(physical) as *mut c_void }
+    }
+    /// SAFETY: `page` must originate from `__page_alloc`/`__pa_to_page`
+    /// above (`crate::mm::page::__page_to_pa`'s contract).
+    pub fn __page_to_pa(page: *mut c_void) -> u64 {
+        unsafe { crate::mm::page::__page_to_pa(page as *mut crate::mm::page::Page) }
+    }
+    /// SAFETY: see `__page_to_pa` above.
+    pub fn __page_ref_dec(page: *mut c_void) -> c_int {
+        unsafe { crate::mm::page::__page_ref_dec(page as *mut crate::mm::page::Page) }
+    }
+    /// SAFETY: see [`crate::mm::page::page_buddy_stat`]'s contract;
+    /// `bool` and `u8` share layout/values (0/1) here.
+    pub fn page_buddy_stat(ret_arr: *mut u64, empty_arr: *mut bool, size: usize) {
+        unsafe { crate::mm::page::page_buddy_stat(ret_arr, empty_arr as *mut u8, size) };
+    }
+
+    /// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract; `name`
+    /// is only read by the callee despite the `*mut` parameter.
+    pub fn slab_cache_init(
+        cache: *mut c_void, name: *const c_char, obj_size: usize, flags: u64,
+    ) -> c_int {
+        unsafe {
+            crate::mm::slab::slab_cache_init(
+                cache as *mut crate::mm::slab::SlabCache,
+                name as *mut c_char,
+                obj_size,
+                flags,
+            )
+        }
+    }
+    /// SAFETY: `cache` must originate from `slab_cache_init` above.
+    pub fn slab_cache_shrink(cache: *mut c_void, nums: c_int) -> c_int {
+        unsafe { crate::mm::slab::slab_cache_shrink(cache as *mut crate::mm::slab::SlabCache, nums) }
+    }
+    /// SAFETY: see `slab_cache_shrink` above.
+    pub fn slab_alloc(cache: *mut c_void) -> *mut c_void {
+        unsafe { crate::mm::slab::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+    }
+    /// SAFETY: `obj` must originate from `slab_alloc` above.
+    pub fn slab_free(obj: *mut c_void) {
+        unsafe { crate::mm::slab::slab_free(obj) };
+    }
+    /// SAFETY: see [`crate::string::memset`]'s contract.
+    pub fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void {
+        unsafe { crate::string::memset(dst, c, n) }
     }
 
     // `printf` is variadic and cannot be declared `safe`; keep the
@@ -295,25 +350,21 @@ pub unsafe extern "C" fn kinit() {
     init_kmm()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn slab_t_desc_alloc() -> *mut c_void {
+pub(crate) unsafe fn slab_t_desc_alloc() -> *mut c_void {
     slab_t_pool().alloc()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn slab_t_desc_free(slab_desc: *mut c_void) {
+pub(crate) unsafe fn slab_t_desc_free(slab_desc: *mut c_void) {
     if !slab_desc.is_null() {
         ffi::slab_free(slab_desc);
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn slab_cache_t_alloc() -> *mut c_void {
+pub(crate) unsafe fn slab_cache_t_alloc() -> *mut c_void {
     slab_cache_t_pool().alloc()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn slab_cache_t_free(cache_desc: *mut c_void) {
+pub(crate) unsafe fn slab_cache_t_free(cache_desc: *mut c_void) {
     if !cache_desc.is_null() {
         ffi::slab_free(cache_desc);
     }
@@ -332,15 +383,13 @@ pub unsafe extern "C" fn kmm_free(ptr: *mut c_void) {
     ffi::slab_free(ptr)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn kmm_shrink_all() {
+pub(crate) unsafe fn kmm_shrink_all() {
     for i in 0..SLAB_CACHE_NUMS {
         kmm_cache(i).shrink(c_int::MAX);
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn get_total_free_pages() -> u64 {
+pub(crate) unsafe fn get_total_free_pages() -> u64 {
     total_free_pages()
 }
 

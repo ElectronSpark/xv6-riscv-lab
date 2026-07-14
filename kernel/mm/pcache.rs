@@ -81,40 +81,14 @@ mod ffi {
     use super::*;
     unsafe extern "C" {
         // Spinlock / rwlock (kernel/lock/spinlock.rs, kernel/lock/rwlock.rs).
-        pub safe fn spin_init(l: *mut spinlock_t, name: *const c_char);
-        pub safe fn spin_lock(l: *mut spinlock_t);
-        pub safe fn spin_unlock(l: *mut spinlock_t);
-        pub safe fn spin_holding(l: *mut spinlock_t) -> c_int;
 
-        pub safe fn rwlock_init(rw: *mut rwlock, name: *const c_char);
-        pub safe fn rwlock_rlock(rw: *mut rwlock);
-        pub safe fn rwlock_runlock(rw: *mut rwlock);
-        pub safe fn rwlock_wlock(rw: *mut rwlock);
-        pub safe fn rwlock_wunlock(rw: *mut rwlock);
 
         // Completion (kernel/lock/completion.rs).
-        pub safe fn completion_init(c: *mut completion_t);
-        pub safe fn completion_reinit(c: *mut completion_t);
-        pub safe fn complete_all(c: *mut completion_t);
-        pub safe fn wait_for_completion(c: *mut completion_t);
 
         // RB tree (kernel/rbtree.c — not yet ported to Rust).
-        pub safe fn rb_find_key(root: *mut rb_root, key: u64) -> *mut rb_node;
-        pub safe fn rb_insert_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node;
-        pub safe fn rb_delete_node_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node;
-        pub safe fn rb_first_node(root: *mut rb_root) -> *mut rb_node;
 
         // Slab (kernel/mm/slab.rs; redeclared with the bindgen
         // `slab_cache_t` view rather than slab.rs's own `SlabCache`).
-        pub safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-        pub safe fn slab_free(p: *mut c_void);
-        pub safe fn slab_cache_init(
-            cache: *mut slab_cache_t,
-            name: *const c_char,
-            sz: usize,
-            flags: c_uint,
-        ) -> c_int;
-        pub safe fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int;
 
         // Timer (kernel/timer.c — not yet ported to Rust).
         pub safe fn get_jiffs() -> u64;
@@ -147,8 +121,6 @@ mod ffi {
             rdata: *mut u64,
         ) -> c_int;
         pub safe fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int;
-        pub safe fn rwlock_r_sleep_cb(data: *mut c_void) -> c_int;
-        pub safe fn rwlock_r_wake_cb(data: *mut c_void, status: c_int);
         pub safe fn workqueue_create(name: *const c_char, max_active: c_int) -> *mut workqueue;
         pub safe fn queue_work(wq: *mut workqueue, w: *mut work_struct) -> bool;
         pub safe fn init_work_struct(
@@ -159,20 +131,176 @@ mod ffi {
 
         // Page-level primitives (kernel/mm/page.rs; redeclared with the
         // bindgen `page_t` view rather than page.rs's own `Page`).
-        pub safe fn page_lock_acquire(p: *mut page_t);
-        pub safe fn page_lock_release(p: *mut page_t);
-        pub safe fn page_lock_assert_holding(p: *mut page_t);
-        pub safe fn page_ref_inc_unlocked(p: *mut page_t) -> c_int;
-        pub safe fn page_ref_dec_unlocked(p: *mut page_t) -> c_int;
-        pub safe fn page_ref_count(p: *mut page_t) -> c_int;
-        pub safe fn __page_ref_dec(p: *mut page_t) -> c_int;
-        pub safe fn __page_alloc(order: u64, flags: u64) -> *mut page_t;
-        pub safe fn __page_to_pa(p: *mut page_t) -> u64;
 
         // Panic/printf plumbing (kernel/printf.c).
         pub safe fn __panic_start();
         pub safe fn __panic_end() -> !;
         pub safe fn printf(fmt: *const c_char, ...);
+    }
+pub(crate) use crate::lock::completion::{complete_all, completion_init, completion_reinit, wait_for_completion};
+pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
+
+// The functions below (spinlock/rwlock/rbtree primitives) are all
+// genuinely `unsafe fn`/`unsafe extern "C" fn` in their canonical
+// modules; this file's original extern declaration asserted `pub safe
+// fn` for every one of them (this crate's usual FFI-facade convention).
+// Thin safe wrappers preserve that facade instead of pushing `unsafe {}`
+// onto the ~10 call sites below.
+/// SAFETY: see [`crate::lock::spinlock::spin_holding`]'s contract.
+#[inline]
+pub fn spin_holding(l: *mut spinlock_t) -> c_int {
+    unsafe { crate::lock::spinlock::spin_holding(l) }
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_lock`]'s contract.
+#[inline]
+pub fn spin_lock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_lock(l) };
+}
+/// SAFETY: see [`crate::lock::spinlock::spin_unlock`]'s contract.
+#[inline]
+pub fn spin_unlock(l: *mut spinlock_t) {
+    unsafe { crate::lock::spinlock::spin_unlock(l) };
+}
+/// SAFETY: see [`crate::lock::rwlock::rwlock_init`]'s contract.
+#[inline]
+pub fn rwlock_init(rw: *mut rwlock, name: *const c_char) {
+    unsafe { crate::lock::rwlock::rwlock_init(rw, name) };
+}
+/// SAFETY: see [`crate::lock::rwlock::rwlock_rlock`]'s contract.
+#[inline]
+pub fn rwlock_rlock(rw: *mut rwlock) {
+    unsafe { crate::lock::rwlock::rwlock_rlock(rw) };
+}
+/// SAFETY: see [`crate::lock::rwlock::rwlock_runlock`]'s contract.
+#[inline]
+pub fn rwlock_runlock(rw: *mut rwlock) {
+    unsafe { crate::lock::rwlock::rwlock_runlock(rw) };
+}
+/// SAFETY: see [`crate::lock::rwlock::rwlock_wlock`]'s contract.
+#[inline]
+pub fn rwlock_wlock(rw: *mut rwlock) {
+    unsafe { crate::lock::rwlock::rwlock_wlock(rw) };
+}
+/// SAFETY: see [`crate::lock::rwlock::rwlock_wunlock`]'s contract.
+#[inline]
+pub fn rwlock_wunlock(rw: *mut rwlock) {
+    unsafe { crate::lock::rwlock::rwlock_wunlock(rw) };
+}
+/// SAFETY: see [`crate::bintree::rb_find_key`]'s contract.
+#[inline]
+pub fn rb_find_key(root: *mut rb_root, key: u64) -> *mut rb_node {
+    unsafe { crate::bintree::rb_find_key(root, key) }
+}
+/// SAFETY: see [`crate::bintree::rb_first_node`]'s contract.
+#[inline]
+pub fn rb_first_node(root: *mut rb_root) -> *mut rb_node {
+    unsafe { crate::bintree::rb_first_node(root) }
+}
+/// SAFETY: see [`crate::rbtree::rb_insert_color`]'s contract.
+#[inline]
+pub fn rb_insert_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
+    unsafe { crate::rbtree::rb_insert_color(root, node) }
+}
+/// SAFETY: see [`crate::rbtree::rb_delete_node_color`]'s contract.
+#[inline]
+pub fn rb_delete_node_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node {
+    unsafe { crate::rbtree::rb_delete_node_color(root, node) }
+}
+
+    /// `crate::lock::spinlock::spin_init` takes `name: *mut c_char`; this
+    /// file's original extern declaration typed it `*const c_char` (same
+    /// note as every other lock-module consumer of `spin_init`).
+    #[inline]
+    pub fn spin_init(l: *mut spinlock_t, name: *const c_char) {
+        // SAFETY: `name` is only read by the callee despite the `*mut`
+        // parameter; this file's call sites pass `'static` string literals.
+        unsafe { crate::lock::spinlock::spin_init(l, name as *mut c_char) };
+    }
+
+    // `slab_alloc`/`slab_free`/`slab_cache_init`/`slab_cache_shrink`:
+    // this file's original extern declaration typed the cache pointer as
+    // the bindgen `slab_cache_t` rather than `crate::mm::slab::SlabCache`
+    // (same "locally convenient pointer type" idiom as everywhere else),
+    // and `slab_cache_init`'s `name`/`flags` as `*const c_char`/`c_uint`
+    // rather than `*mut c_char`/`u64`.
+    /// SAFETY: see [`crate::mm::slab::slab_alloc`]'s contract.
+    #[inline]
+    pub fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+        unsafe { crate::mm::slab::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
+    }
+    /// SAFETY: `p` must originate from `slab_alloc` above.
+    #[inline]
+    pub fn slab_free(p: *mut c_void) {
+        unsafe { crate::mm::slab::slab_free(p) };
+    }
+    /// SAFETY: see [`crate::mm::slab::slab_cache_init`]'s contract; `name`
+    /// is only read by the callee despite the `*mut` parameter.
+    #[inline]
+    pub fn slab_cache_init(
+        cache: *mut slab_cache_t, name: *const c_char, sz: usize, flags: c_uint,
+    ) -> c_int {
+        unsafe {
+            crate::mm::slab::slab_cache_init(
+                cache as *mut crate::mm::slab::SlabCache,
+                name as *mut c_char,
+                sz,
+                flags as u64,
+            )
+        }
+    }
+    /// SAFETY: `cache` must originate from `slab_cache_init` above.
+    #[inline]
+    pub fn slab_cache_shrink(cache: *mut slab_cache_t, nums: c_int) -> c_int {
+        unsafe { crate::mm::slab::slab_cache_shrink(cache as *mut crate::mm::slab::SlabCache, nums) }
+    }
+
+    // Page-level primitives (kernel/mm/page.rs; this file's original
+    // extern declaration used the bindgen `page_t` view rather than
+    // page.rs's own `Page` struct — same layout, different Rust name).
+    /// SAFETY: see [`crate::mm::page::page_lock_acquire`]'s contract.
+    #[inline]
+    pub fn page_lock_acquire(p: *mut page_t) {
+        unsafe { crate::mm::page::page_lock_acquire(p as *mut crate::mm::page::Page) };
+    }
+    /// SAFETY: see [`crate::mm::page::page_lock_release`]'s contract.
+    #[inline]
+    pub fn page_lock_release(p: *mut page_t) {
+        unsafe { crate::mm::page::page_lock_release(p as *mut crate::mm::page::Page) };
+    }
+    /// SAFETY: see [`crate::mm::page::page_lock_assert_holding`]'s contract.
+    #[inline]
+    pub fn page_lock_assert_holding(p: *mut page_t) {
+        unsafe { crate::mm::page::page_lock_assert_holding(p as *mut crate::mm::page::Page) };
+    }
+    /// SAFETY: see [`crate::mm::page::page_ref_inc_unlocked`]'s contract.
+    #[inline]
+    pub fn page_ref_inc_unlocked(p: *mut page_t) -> c_int {
+        unsafe { crate::mm::page::page_ref_inc_unlocked(p as *mut crate::mm::page::Page) }
+    }
+    /// SAFETY: see [`crate::mm::page::page_ref_dec_unlocked`]'s contract.
+    #[inline]
+    pub fn page_ref_dec_unlocked(p: *mut page_t) -> c_int {
+        unsafe { crate::mm::page::page_ref_dec_unlocked(p as *mut crate::mm::page::Page) }
+    }
+    /// SAFETY: see [`crate::mm::page::page_ref_count`]'s contract.
+    #[inline]
+    pub fn page_ref_count(p: *mut page_t) -> c_int {
+        unsafe { crate::mm::page::page_ref_count(p as *mut crate::mm::page::Page) }
+    }
+    /// SAFETY: see [`crate::mm::page::__page_ref_dec`]'s contract.
+    #[inline]
+    pub fn __page_ref_dec(p: *mut page_t) -> c_int {
+        unsafe { crate::mm::page::__page_ref_dec(p as *mut crate::mm::page::Page) }
+    }
+    /// SAFETY: see [`crate::mm::page::__page_alloc`]'s contract.
+    #[inline]
+    pub fn __page_alloc(order: u64, flags: u64) -> *mut page_t {
+        unsafe { crate::mm::page::__page_alloc(order, flags) as *mut page_t }
+    }
+    /// SAFETY: `p` must originate from `__page_alloc` above.
+    #[inline]
+    pub fn __page_to_pa(p: *mut page_t) -> u64 {
+        unsafe { crate::mm::page::__page_to_pa(p as *mut crate::mm::page::Page) }
     }
 }
 use ffi::*;
@@ -1137,8 +1265,7 @@ fn xv6_pcache_node_set_page(n: *mut PcacheNode, page: *mut Page) {
 /// with the existing `set_data`/`NodeHandle::set_data`) so the kernel
 /// links. Out of scope for the WP3 mm/page/slab/vm_pgtab refactor this
 /// file is otherwise part of.
-#[no_mangle]
-pub extern "C" fn xv6_pcache_node_data(n: *mut PcacheNode) -> *mut c_void {
+pub(crate) fn xv6_pcache_node_data(n: *mut PcacheNode) -> *mut c_void {
     unsafe { NodeHandle::new(n) }.data()
 }
 fn xv6_pcache_node_set_page_count(n: *mut PcacheNode, c: i64) {
@@ -2499,8 +2626,7 @@ pub extern "C" fn pcache_mark_page_dirty(p: *mut Pcache, page: *mut Page)-> c_in
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_invalidate_page(p: *mut Pcache, page: *mut Page)-> c_int  {
+pub(crate) fn pcache_invalidate_page(p: *mut Pcache, page: *mut Page)-> c_int  {
     if p.is_null() || page.is_null() { return -(EINVAL as c_int); }
     let mut ret: c_int = 0;
     let _gp = lock_pcache_local(p);
@@ -2524,8 +2650,7 @@ pub extern "C" fn pcache_invalidate_page(p: *mut Pcache, page: *mut Page)-> c_in
     ret
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_invalidate_blk(p: *mut Pcache, blkno: u64)-> c_int  {
+pub(crate) fn pcache_invalidate_blk(p: *mut Pcache, blkno: u64)-> c_int  {
     if p.is_null() || !pcache_is_active(p) { return -(EINVAL as c_int); }
     let base_blkno = xv6_pcache_align_blkno(blkno);
 
@@ -2609,8 +2734,7 @@ pub extern "C" fn pcache_flush(p: *mut Pcache)-> c_int  {
     pcache_wait_flush_complete(p)
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_sync()-> c_int  {
+pub(crate) fn pcache_sync()-> c_int  {
     {
         let _gg = lock_pcache_global();
         pcache_flusher_start();
@@ -2709,8 +2833,7 @@ pub extern "C" fn pcache_read_page(p: *mut Pcache, page: *mut Page)-> c_int  {
 // Diagnostics and syscall handlers
 // ===========================================================================
 
-#[no_mangle]
-pub extern "C" fn dump_pcache_stats(p: *mut Pcache) {
+pub(crate) fn dump_pcache_stats(p: *mut Pcache) {
     if p.is_null() { return; }
     let _gp = lock_pcache_local(p);
     xv6_pcache_printf_stats_header(p);
@@ -2727,8 +2850,7 @@ pub extern "C" fn dump_pcache_stats(p: *mut Pcache) {
     );
 }
 
-#[no_mangle]
-pub extern "C" fn dump_all_pcache_stats() {
+pub(crate) fn dump_all_pcache_stats() {
     let _gg = lock_pcache_global();
     xv6_pcache_printf_dump_all_header((unsafe { *PCACHE_GLOBAL_COUNT.get() }));
     let mut cur = xv6_pcache_global_first();
@@ -2739,8 +2861,7 @@ pub extern "C" fn dump_all_pcache_stats() {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn pcache_shrink_caches() {
+pub(crate) fn pcache_shrink_caches() {
     slab_cache_shrink(node_slab(), 0x7fff_ffff);
 }
 

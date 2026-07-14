@@ -198,8 +198,7 @@ unsafe fn rb_delink_node(link: *mut *mut RbNode, node: *mut RbNode) {
 /// # Safety
 /// `node` must be null or point to a live `rb_node` belonging to a
 /// well-formed tree.
-#[no_mangle]
-pub unsafe extern "C" fn rb_brother(node: *mut RbNode) -> *mut RbNode {
+pub(crate) unsafe fn rb_brother(node: *mut RbNode) -> *mut RbNode {
     unsafe {
         let parent = rb_parent(node);
         if parent.is_null() || parent == node {
@@ -217,8 +216,7 @@ pub unsafe extern "C" fn rb_brother(node: *mut RbNode) -> *mut RbNode {
 /// `root` must point to a live `rb_root`; `node` must point to a live
 /// `rb_node`; `ret_parent` must be null or a valid `*mut *mut rb_node`
 /// out-param slot.
-#[no_mangle]
-pub unsafe extern "C" fn __rb_node_link(
+pub(crate) unsafe fn __rb_node_link(
     root: *mut RbRoot,
     node: *mut RbNode,
     ret_parent: *mut *mut RbNode,
@@ -311,8 +309,7 @@ pub unsafe extern "C" fn rb_next_node(node: *mut RbNode) -> *mut RbNode {
 
 /// # Safety
 /// `node` must be null or point to a live `rb_node`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_prev_node(node: *mut RbNode) -> *mut RbNode {
+pub(crate) unsafe fn rb_prev_node(node: *mut RbNode) -> *mut RbNode {
     unsafe {
         if rb_node_is_empty(node) {
             return ptr::null_mut();
@@ -341,8 +338,7 @@ pub unsafe extern "C" fn rb_prev_node(node: *mut RbNode) -> *mut RbNode {
 /// # Safety
 /// `link` must point to a valid `*mut rb_node` slot that currently holds
 /// `old_node`; `new_node` and `old_node` must point to live `rb_node`s.
-#[no_mangle]
-pub unsafe extern "C" fn __rb_replace_node(
+pub(crate) unsafe fn __rb_replace_node(
     link: *mut *mut RbNode,
     new_node: *mut RbNode,
     old_node: *mut RbNode,
@@ -365,8 +361,7 @@ pub unsafe extern "C" fn __rb_replace_node(
 /// `root` must point to a live `rb_root`; `old_node` must point to a live
 /// `rb_node` currently linked into `*root`; `new_node` must be null or a
 /// live `rb_node`.
-#[no_mangle]
-pub unsafe extern "C" fn __rb_transplant(
+pub(crate) unsafe fn __rb_transplant(
     root: *mut RbRoot,
     new_node: *mut RbNode,
     old_node: *mut RbNode,
@@ -389,8 +384,7 @@ pub unsafe extern "C" fn __rb_transplant(
 /// # Safety
 /// `root` must point to a live, initialized `rb_root`; `ret_parent` must
 /// point to a valid `*mut rb_node` out-param slot.
-#[no_mangle]
-pub unsafe extern "C" fn __rb_find_key_link(
+pub(crate) unsafe fn __rb_find_key_link(
     root: *mut RbRoot,
     ret_parent: *mut *mut RbNode,
     key: u64,
@@ -446,6 +440,13 @@ pub unsafe extern "C" fn rb_find_key_rup(root: *mut RbRoot, key: u64) -> *mut Rb
 
 /// # Safety
 /// `root` must be null or point to a live `rb_root`.
+///
+/// NOT demoted: `backtrace.rs` (out of this wave's scope) calls this via
+/// `crate::bindings::rb_find_key_rdown(...)` — the bindgen-generated
+/// extern declaration from `kernel/inc/bintree.h`'s prototype, resolved
+/// by the linker against this exact C symbol name, not a Rust-level
+/// `crate::bintree::` path call. Discovered as a real link failure
+/// (`undefined reference to 'rb_find_key_rdown'`) when first demoted.
 #[no_mangle]
 pub unsafe extern "C" fn rb_find_key_rdown(root: *mut RbRoot, key: u64) -> *mut RbNode {
     unsafe {
@@ -473,8 +474,7 @@ pub unsafe extern "C" fn rb_find_key_rdown(root: *mut RbRoot, key: u64) -> *mut 
 
 /// # Safety
 /// `root` must be null or point to a live `rb_root`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_find_key(root: *mut RbRoot, key: u64) -> *mut RbNode {
+pub(crate) unsafe fn rb_find_key(root: *mut RbRoot, key: u64) -> *mut RbNode {
     unsafe {
         if !rb_root_is_initialized(root) {
             return ptr::null_mut();
@@ -491,8 +491,7 @@ pub unsafe extern "C" fn rb_find_key(root: *mut RbRoot, key: u64) -> *mut RbNode
 /// # Safety
 /// `root` must be null or point to a live, initialized `rb_root`;
 /// `new_node` must be null or point to a live, detached `rb_node`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_insert_node(root: *mut RbRoot, new_node: *mut RbNode) -> *mut RbNode {
+pub(crate) unsafe fn rb_insert_node(root: *mut RbRoot, new_node: *mut RbNode) -> *mut RbNode {
     unsafe {
         if !rb_root_is_initialized(root) || new_node.is_null() {
             return ptr::null_mut();
@@ -511,8 +510,7 @@ pub unsafe extern "C" fn rb_insert_node(root: *mut RbRoot, new_node: *mut RbNode
 
 /// # Safety
 /// `root` must be null or point to a live, initialized `rb_root`.
-#[no_mangle]
-pub unsafe extern "C" fn rb_delete_key(root: *mut RbRoot, key: u64) -> *mut RbNode {
+pub(crate) unsafe fn rb_delete_key(root: *mut RbRoot, key: u64) -> *mut RbNode {
     unsafe {
         if !rb_root_is_initialized(root) {
             return ptr::null_mut();
@@ -554,8 +552,7 @@ pub unsafe extern "C" fn rb_delete_key(root: *mut RbRoot, key: u64) -> *mut RbNo
 /// # Safety
 /// `root` must point to a live `rb_root`; `node` must be null or point to
 /// a live `rb_node` linked into `*root`.
-#[no_mangle]
-pub unsafe extern "C" fn __rb_rotate_left(root: *mut RbRoot, node: *mut RbNode) -> *mut RbNode {
+pub(crate) unsafe fn __rb_rotate_left(root: *mut RbRoot, node: *mut RbNode) -> *mut RbNode {
     unsafe {
         if node.is_null() {
             return ptr::null_mut();
@@ -583,8 +580,7 @@ pub unsafe extern "C" fn __rb_rotate_left(root: *mut RbRoot, node: *mut RbNode) 
 
 /// # Safety
 /// Same as [`__rb_rotate_left`].
-#[no_mangle]
-pub unsafe extern "C" fn __rb_rotate_right(root: *mut RbRoot, node: *mut RbNode) -> *mut RbNode {
+pub(crate) unsafe fn __rb_rotate_right(root: *mut RbRoot, node: *mut RbNode) -> *mut RbNode {
     unsafe {
         if node.is_null() {
             return ptr::null_mut();

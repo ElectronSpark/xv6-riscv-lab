@@ -283,27 +283,21 @@ pub unsafe extern "C" fn rwlock_init(rw: *mut rwlock_t, name: *const c_char) {
     init_inner(rw, name);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_racquire(rw: *mut rwlock_t) { racquire_inner(rw); }
+pub(crate) unsafe fn rwlock_racquire(rw: *mut rwlock_t) { racquire_inner(rw); }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_rrelease(rw: *mut rwlock_t) { rrelease_inner(rw); }
+pub(crate) unsafe fn rwlock_rrelease(rw: *mut rwlock_t) { rrelease_inner(rw); }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_wacquire(rw: *mut rwlock_t) { wacquire_inner(rw); }
+pub(crate) unsafe fn rwlock_wacquire(rw: *mut rwlock_t) { wacquire_inner(rw); }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_wacquire_expedited(rw: *mut rwlock_t) {
+pub(crate) unsafe fn rwlock_wacquire_expedited(rw: *mut rwlock_t) {
     wacquire_expedited_inner(rw);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_graceful_wacquire(rw: *mut rwlock_t) {
+pub(crate) unsafe fn rwlock_graceful_wacquire(rw: *mut rwlock_t) {
     graceful_wacquire_inner(rw);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_writer_release(rw: *mut rwlock_t) {
+pub(crate) unsafe fn rwlock_writer_release(rw: *mut rwlock_t) {
     writer_release_inner(rw);
 }
 
@@ -316,14 +310,12 @@ pub unsafe extern "C" fn rwlock_runlock(rw: *mut rwlock_t) { runlock_inner(rw); 
 #[no_mangle]
 pub unsafe extern "C" fn rwlock_wlock(rw: *mut rwlock_t) { wlock_inner(rw); }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_wlock_expedited(rw: *mut rwlock_t) {
+pub(crate) unsafe fn rwlock_wlock_expedited(rw: *mut rwlock_t) {
     machine::push_off();
     wacquire_expedited_inner(rw);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_graceful_wlock(rw: *mut rwlock_t) {
+pub(crate) unsafe fn rwlock_graceful_wlock(rw: *mut rwlock_t) {
     machine::push_off();
     graceful_wacquire_inner(rw);
 }
@@ -335,42 +327,36 @@ pub unsafe extern "C" fn rwlock_wunlock(rw: *mut rwlock_t) { wunlock_inner(rw); 
 // irqsave / irqrestore wrappers
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_rlock_irqsave(rw: *mut rwlock_t) -> c_int {
+pub(crate) unsafe fn rwlock_rlock_irqsave(rw: *mut rwlock_t) -> c_int {
     let intena = machine::intr_off_save();
     racquire_inner(rw);
     intena
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_runlock_irqrestore(rw: *mut rwlock_t, intena: c_int) {
+pub(crate) unsafe fn rwlock_runlock_irqrestore(rw: *mut rwlock_t, intena: c_int) {
     rrelease_inner(rw);
     machine::intr_restore(intena);
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_wlock_irqsave(rw: *mut rwlock_t) -> c_int {
+pub(crate) unsafe fn rwlock_wlock_irqsave(rw: *mut rwlock_t) -> c_int {
     let intena = machine::intr_off_save();
     wacquire_inner(rw);
     intena
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_wlock_expedited_irqsave(rw: *mut rwlock_t) -> c_int {
+pub(crate) unsafe fn rwlock_wlock_expedited_irqsave(rw: *mut rwlock_t) -> c_int {
     let intena = machine::intr_off_save();
     wacquire_expedited_inner(rw);
     intena
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_graceful_wlock_irqsave(rw: *mut rwlock_t) -> c_int {
+pub(crate) unsafe fn rwlock_graceful_wlock_irqsave(rw: *mut rwlock_t) -> c_int {
     let intena = machine::intr_off_save();
     graceful_wacquire_inner(rw);
     intena
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_wunlock_irqrestore(rw: *mut rwlock_t, intena: c_int) {
+pub(crate) unsafe fn rwlock_wunlock_irqrestore(rw: *mut rwlock_t, intena: c_int) {
     writer_release_inner(rw);
     machine::intr_restore(intena);
 }
@@ -382,8 +368,14 @@ pub unsafe extern "C" fn rwlock_wunlock_irqrestore(rw: *mut rwlock_t, intena: c_
 const RW_CB_STATUS_READER: c_int = 1;
 const RW_CB_STATUS_WRITER: c_int = 2;
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_r_sleep_cb(data: *mut c_void) -> c_int {
+// Kept `extern "C"` (not demoted to a plain Rust fn like their neighbors):
+// `mm/pcache.rs` (out of this file, in-scope but a separate module) passes
+// these *by value* as `Option<unsafe extern "C" fn(...)>` callback
+// arguments to `tq_wait_cb` — same fn-pointer-type-coercion reasoning as
+// `lock::spinlock::spin_sleep_cb`/`spin_wake_cb`'s identical note.
+// `#[no_mangle]` is still dropped: nothing resolves these by C symbol
+// name.
+pub(crate) unsafe extern "C" fn rwlock_r_sleep_cb(data: *mut c_void) -> c_int {
     if data.is_null() { return 0; }
     let rw = data as *mut rwlock_t;
     runlock_inner(rw);
@@ -396,8 +388,7 @@ pub unsafe extern "C" fn rwlock_r_sleep_cb(data: *mut c_void) -> c_int {
     status
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_r_wake_cb(data: *mut c_void, status: c_int) {
+pub(crate) unsafe extern "C" fn rwlock_r_wake_cb(data: *mut c_void, status: c_int) {
     if data.is_null() { return; }
     let rw = data as *mut rwlock_t;
     if (status & RW_CB_STATUS_WRITER) != 0 {
@@ -408,8 +399,7 @@ pub unsafe extern "C" fn rwlock_r_wake_cb(data: *mut c_void, status: c_int) {
     }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_w_sleep_cb(data: *mut c_void) -> c_int {
+pub(crate) unsafe fn rwlock_w_sleep_cb(data: *mut c_void) -> c_int {
     if !data.is_null() {
         let rw = data as *mut rwlock_t;
         wunlock_inner(rw);
@@ -417,8 +407,7 @@ pub unsafe extern "C" fn rwlock_w_sleep_cb(data: *mut c_void) -> c_int {
     RW_CB_STATUS_WRITER
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rwlock_w_wake_cb(data: *mut c_void, status: c_int) {
+pub(crate) unsafe fn rwlock_w_wake_cb(data: *mut c_void, status: c_int) {
     if data.is_null() { return; }
     if (status & RW_CB_STATUS_WRITER) != 0 {
         let rw = data as *mut rwlock_t;

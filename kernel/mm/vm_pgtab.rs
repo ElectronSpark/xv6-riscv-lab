@@ -70,21 +70,12 @@ mod ffi {
 
     unsafe extern "C" {
         // memory / pages
-        pub safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-        pub safe fn page_alloc(order: c_int, ptype: c_int) -> *mut c_void;
-        pub safe fn page_free(pa: *mut c_void, order: c_int);
-        pub safe fn __pa_to_page(pa: u64) -> *mut c_void;
-        pub safe fn page_lock_acquire(p: *mut Page);
-        pub safe fn page_lock_release(p: *mut Page);
 
-        pub safe fn xv6_vm_cpuid() -> c_int;
 
         // Slab-pool init for the vma/vm-area allocators (implemented in
         // vm.rs); formerly wrapped as `xv6_vm_vma_pool_init`/
         // `xv6_vm_vm_pool_init` by the deleted `vm_pgtab_shims.rs` for no
         // reason beyond naming symmetry -- call directly.
-        pub safe fn __vma_pool_init();
-        pub safe fn __vm_pool_init();
 
         // Runtime physical-memory bounds and MMIO base symbols (resolved by
         // FDT at boot) -- needed by `kvmmake` and the constant accessors.
@@ -126,14 +117,45 @@ mod ffi {
         // printf is variadic, so it cannot be declared `safe`.
         pub fn printf(fmt: *const c_char, ...) -> c_int;
     }
+pub(crate) use crate::mm::vm::{__vm_pool_init, __vma_pool_init, xv6_vm_cpuid};
+
+    // The functions below are genuinely `unsafe fn`/`unsafe extern "C" fn`
+    // in `crate::mm::{page,string}`; this file's original extern
+    // declaration asserted `pub safe fn` (usual FFI facade) and also typed
+    // `page_alloc`'s/`page_free`'s `order`/`ptype` as `c_int` rather than
+    // the real `u64`, and `__pa_to_page`'s return as `*mut c_void` rather
+    // than `crate::mm::page::Page` (same layout, different Rust name).
+    /// SAFETY: see [`crate::string::memset`]'s contract.
+    pub fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void {
+        unsafe { crate::string::memset(s, c, n) }
+    }
+    /// SAFETY: see [`crate::mm::page::page_alloc`]'s contract.
+    pub fn page_alloc(order: c_int, ptype: c_int) -> *mut c_void {
+        unsafe { crate::mm::page::page_alloc(order as u64, ptype as u64) }
+    }
+    /// SAFETY: `pa` must originate from `page_alloc` above.
+    pub fn page_free(pa: *mut c_void, order: c_int) {
+        unsafe { crate::mm::page::page_free(pa, order as u64) };
+    }
+    /// SAFETY: see [`crate::mm::page::__pa_to_page`]'s contract.
+    pub fn __pa_to_page(pa: u64) -> *mut c_void {
+        unsafe { crate::mm::page::__pa_to_page(pa) as *mut c_void }
+    }
+    /// SAFETY: `p` must be a live `Page` (`crate::mm::page::page_lock_acquire`'s contract).
+    pub fn page_lock_acquire(p: *mut Page) {
+        unsafe { crate::mm::page::page_lock_acquire(p) };
+    }
+    /// SAFETY: see `page_lock_acquire` above.
+    pub fn page_lock_release(p: *mut Page) {
+        unsafe { crate::mm::page::page_lock_release(p) };
+    }
 }
 
 /// `xv6_vm_panic` is called from both this module and `vm.rs` (out of
 /// scope for this refactor), so it must keep its exported name and
 /// signature; its body is now a direct `printf` + panic instead of a
 /// round-trip through the deleted `vm_pgtab_shims.rs`.
-#[no_mangle]
-pub extern "C" fn xv6_vm_panic(msg: *const c_char) -> ! {
+pub(crate) fn xv6_vm_panic(msg: *const c_char) -> ! {
     ffi::__panic_start();
     // SAFETY: every caller (this module, `vm.rs`) passes a NUL-terminated
     // C string.
@@ -338,8 +360,7 @@ fn page_is_pgtable(p: *mut Page) -> bool {
 // kernel_pagetable storage -- previously in the deleted
 // `vm_pgtab_shims.rs`.
 // ---------------------------------------------------------------------------
-#[no_mangle]
-pub static mut kernel_pagetable: *mut u64 = core::ptr::null_mut();
+pub(crate) static mut kernel_pagetable: *mut u64 = core::ptr::null_mut();
 
 fn kernel_pagetable_get() -> *mut u64 {
     // SAFETY: addr-of read of a `static mut`; written once by `kvminit()`
@@ -386,8 +407,7 @@ fn w_satp(v: u64) {
 
 /// Also called from `vm.rs` (out of scope for this refactor) via its own
 /// extern declaration, so it keeps its exported name.
-#[no_mangle]
-pub extern "C" fn xv6_vm_sfence_vma() {
+pub(crate) fn xv6_vm_sfence_vma() {
     // SAFETY: `sfence.vma zero, zero` flushes the entire TLB; always valid.
     unsafe { core::arch::asm!("sfence.vma zero, zero", options(nostack, preserves_flags)); }
 }
@@ -706,8 +726,7 @@ fn freewalk_internal(pt: PageTable, skip_idx: Option<usize>) {
 // Public C ABI — thin wrappers.
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn walk(
+pub(crate) fn walk(
     pagetable: *mut u64,
     va: u64,
     alloc: c_int,
@@ -733,8 +752,7 @@ pub extern "C" fn walk(
     l0
 }
 
-#[no_mangle]
-pub extern "C" fn walkaddr(pagetable: *mut u64, va: u64) -> u64 {
+pub(crate) fn walkaddr(pagetable: *mut u64, va: u64) -> u64 {
     if va >= crate::bindings::MAXVA {
         return 0;
     }
@@ -767,8 +785,7 @@ pub extern "C" fn kvmmap(
     }
 }
 
-#[no_mangle]
-pub extern "C" fn mappages(
+pub(crate) fn mappages(
     pagetable: *mut u64,
     va: u64,
     size: u64,
@@ -782,8 +799,7 @@ pub extern "C" fn mappages(
     crate::mm::cffi::result_to_neg_errno(map_pages(root, va, size, pa, perm))
 }
 
-#[no_mangle]
-pub extern "C" fn uvmunmap(
+pub(crate) fn uvmunmap(
     pagetable: *mut u64,
     va: u64,
     npages: u64,
@@ -794,8 +810,7 @@ pub extern "C" fn uvmunmap(
     unmap_pages(root, va, npages, do_free != 0);
 }
 
-#[no_mangle]
-pub extern "C" fn uvmcreate() -> *mut u64 {
+pub(crate) fn uvmcreate() -> *mut u64 {
     let Some(pt) = pgtab_alloc() else { return core::ptr::null_mut() };
     pt.zero();
 
@@ -808,16 +823,14 @@ pub extern "C" fn uvmcreate() -> *mut u64 {
     pt.as_ptr()
 }
 
-#[no_mangle]
-pub extern "C" fn freewalk(pagetable: *mut u64) {
+pub(crate) fn freewalk(pagetable: *mut u64) {
     // SAFETY: caller supplies a live page-table root about to be torn
     // down (no more live mappings/refs into it).
     let root = unsafe { PageTable::from_raw(pagetable) };
     freewalk_internal(root, Some(trampoline_pte_idx()));
 }
 
-#[no_mangle]
-pub extern "C" fn uvmfree(pagetable: *mut u64, _sz: u64) {
+pub(crate) fn uvmfree(pagetable: *mut u64, _sz: u64) {
     freewalk(pagetable);
 }
 
@@ -839,8 +852,7 @@ pub extern "C" fn kvminithart() {
     printf_kvminithart(ffi::xv6_vm_cpuid() as u64, satp);
 }
 
-#[no_mangle]
-pub extern "C" fn vm_dump_flags(
+pub(crate) fn vm_dump_flags(
     flags: u64,
     buf: *mut c_char,
     buf_size: usize,
@@ -866,8 +878,7 @@ fn flag_str(flag_set: bool, letter: &'static [u8]) -> *const c_char {
     if flag_set { letter.as_ptr() as *const c_char } else { b" \0".as_ptr() as *const c_char }
 }
 
-#[no_mangle]
-pub extern "C" fn dump_pagetable(
+pub(crate) fn dump_pagetable(
     pagetable: *mut u64,
     level: c_int,
     indent: c_int,

@@ -79,9 +79,7 @@ use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-unsafe extern "C" {
-    pub safe fn kmm_alloc(n: usize) -> *mut c_void;
-}
+pub(crate) use crate::kmm_alloc;
 
 // ---------------------------------------------------------------------------
 // memset / memcmp / memmove / memcpy — see module doc for the no-recursion
@@ -309,8 +307,7 @@ pub unsafe extern "C" fn strnlen(s: *const c_char, maxlen: usize) -> usize {
 /// `dest` must point to a NUL-terminated string with enough trailing
 /// room to also hold `src`'s contents plus a NUL; `src` must point to a
 /// valid NUL-terminated string.
-#[no_mangle]
-pub unsafe extern "C" fn strcat(dest: *mut c_char, src: *const c_char) -> *mut c_char {
+pub(crate) unsafe fn strcat(dest: *mut c_char, src: *const c_char) -> *mut c_char {
     unsafe {
         let n = strlen(dest);
         let m = strlen(src);
@@ -387,8 +384,7 @@ static STRTOK_SAVEPTR: AtomicPtr<c_char> = AtomicPtr::new(ptr::null_mut());
 /// # Safety
 /// Same contract as `strtok_r`'s `str_`/`delim`, using the shared
 /// `STRTOK_SAVEPTR` cursor in place of an explicit `saveptr`.
-#[no_mangle]
-pub unsafe extern "C" fn strtok(str_: *mut c_char, delim: *const c_char) -> *mut c_char {
+pub(crate) unsafe fn strtok(str_: *mut c_char, delim: *const c_char) -> *mut c_char {
     unsafe {
         let mut saveptr = STRTOK_SAVEPTR.load(Ordering::Relaxed);
         let result = strtok_r(str_, delim, &mut saveptr as *mut *mut c_char);
@@ -404,8 +400,7 @@ pub unsafe extern "C" fn strtok(str_: *mut c_char, delim: *const c_char) -> *mut
 ///
 /// # Safety
 /// `haystack` and `needle` must point to valid NUL-terminated strings.
-#[no_mangle]
-pub unsafe extern "C" fn strstr(
+pub(crate) unsafe fn strstr(
     haystack: *const c_char,
     needle: *const c_char,
 ) -> *const c_char {
@@ -451,6 +446,19 @@ pub unsafe extern "C" fn strndup(s: *const c_char, n: usize) -> *mut c_char {
 /// # Safety
 /// `s` must point to a valid NUL-terminated string. Returns null on
 /// allocation failure.
+///
+/// NOT demoted, despite having zero textual Rust callers anywhere in the
+/// tree: this function's body (measure length, allocate, copy) is exactly
+/// the pattern LLVM's `TargetLibraryInfo` recognizes as equivalent to the
+/// C `strdup()` libcall — several out-of-scope files (`vfs/inode.rs`'s
+/// `make_iter_parent`, `vfs/tmpfs/inode.rs`'s `__tmpfs_dir_iter`,
+/// `vfs/xv6fs/inode.rs`'s `__xv6fs_dir_iter`, plus `vfs_dir_iter`/
+/// `vfs_ilookup`) implement the identical "strlen + alloc + copy" idiom
+/// independently and get silently rewritten by the optimizer into a call
+/// to the external symbol `strdup`, discovered as a real link failure
+/// (`undefined reference to 'strdup'`) when this was first demoted. Same
+/// class of hazard the wave's caution note already flags for
+/// memcpy/memset/memmove/memcmp; keep `#[no_mangle] extern "C"` here too.
 #[no_mangle]
 pub unsafe extern "C" fn strdup(s: *const c_char) -> *mut c_char {
     unsafe {

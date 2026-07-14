@@ -39,17 +39,50 @@ mod ffi {
         pub safe fn argint(n: c_int, ip: *mut c_int);
 
         // vm.h prototypes.
-        pub safe fn vm_mmap(vm: *mut c_void, addr: u64, length: usize,
-                       prot: c_int, flags: c_int, fd: c_int, offset: u64) -> u64;
-        pub safe fn vm_munmap(vm: *mut c_void, addr: u64, length: usize) -> c_int;
-        pub safe fn vm_mprotect(vm: *mut c_void, addr: u64, size: usize, prot: c_int) -> c_int;
-        pub safe fn vm_mremap(vm: *mut c_void, old_addr: u64, old_size: usize,
-                         new_size: usize, flags: c_int, new_addr: u64) -> u64;
-        pub safe fn vm_msync(vm: *mut c_void, addr: u64, size: usize, flags: c_int) -> c_int;
-        pub safe fn vm_mincore(vm: *mut c_void, addr: u64, size: usize,
-                          vec: *mut c_uchar) -> c_int;
-        pub safe fn vm_madvise(vm: *mut c_void, addr: u64, size: usize, advice: c_int) -> c_int;
-        pub safe fn vm_copyout(vm: *mut c_void, dstva: u64, src: *const c_void, len: u64) -> c_int;
+    }
+
+    // `Vm` above only ever carries an opaque `*mut c_void` (it never
+    // touches the real `vm` layout); this file's original extern
+    // declarations typed every one of these the same way. Thin cast
+    // wrappers preserve that opaque-pointer call-site type while
+    // dispatching to `crate::mm::vm`'s real `*mut vm`-typed functions.
+    #[inline]
+    pub fn vm_mmap(
+        vm_ptr: *mut c_void, addr: u64, length: usize, prot: c_int, flags: c_int, fd: c_int,
+        offset: u64,
+    ) -> u64 {
+        crate::mm::vm::vm_mmap(vm_ptr as *mut crate::bindings::vm, addr, length, prot, flags, fd, offset)
+    }
+    #[inline]
+    pub fn vm_munmap(vm_ptr: *mut c_void, addr: u64, length: usize) -> c_int {
+        crate::mm::vm::vm_munmap(vm_ptr as *mut crate::bindings::vm, addr, length)
+    }
+    #[inline]
+    pub fn vm_mprotect(vm_ptr: *mut c_void, addr: u64, size: usize, prot: c_int) -> c_int {
+        crate::mm::vm::vm_mprotect(vm_ptr as *mut crate::bindings::vm, addr, size, prot)
+    }
+    #[inline]
+    pub fn vm_mremap(
+        vm_ptr: *mut c_void, old_addr: u64, old_size: usize, new_size: usize, flags: c_int,
+        new_addr: u64,
+    ) -> u64 {
+        crate::mm::vm::vm_mremap(vm_ptr as *mut crate::bindings::vm, old_addr, old_size, new_size, flags, new_addr)
+    }
+    #[inline]
+    pub fn vm_msync(vm_ptr: *mut c_void, addr: u64, size: usize, flags: c_int) -> c_int {
+        crate::mm::vm::vm_msync(vm_ptr as *mut crate::bindings::vm, addr, size, flags)
+    }
+    #[inline]
+    pub fn vm_mincore(vm_ptr: *mut c_void, addr: u64, size: usize, vec: *mut c_uchar) -> c_int {
+        crate::mm::vm::vm_mincore(vm_ptr as *mut crate::bindings::vm, addr, size, vec)
+    }
+    #[inline]
+    pub fn vm_madvise(vm_ptr: *mut c_void, addr: u64, size: usize, advice: c_int) -> c_int {
+        crate::mm::vm::vm_madvise(vm_ptr as *mut crate::bindings::vm, addr, size, advice)
+    }
+    #[inline]
+    pub fn vm_copyout(vm_ptr: *mut c_void, dstva: u64, src: *const c_void, len: u64) -> c_int {
+        crate::mm::vm::vm_copyout(vm_ptr as *mut crate::bindings::vm, dstva, src, len)
     }
 }
 

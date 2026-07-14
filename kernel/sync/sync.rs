@@ -237,62 +237,38 @@ use core::ffi::{c_char, c_int};
 
 use crate::bindings::{completion_t, mutex_t, rwlock as rwlock_t, rwsem_t, semaphore as sem_t};
 
-unsafe extern "C" {
-    // mutex.rs exports
-    pub safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
-    pub safe fn mutex_lock(m: *mut mutex_t);
-    pub safe fn mutex_trylock(m: *mut mutex_t) -> c_int;
-    pub safe fn mutex_unlock(m: *mut mutex_t);
-    pub safe fn mutex_lock_interruptible(m: *mut mutex_t) -> c_int;
-    pub safe fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64) -> c_int;
-    pub safe fn holding_mutex(m: *mut mutex_t) -> c_int;
-
-    // rwsem.rs exports
-    pub safe fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char) -> c_int;
-    pub safe fn rwsem_acquire_read(l: *mut rwsem_t) -> c_int;
-    pub safe fn rwsem_try_acquire_read(l: *mut rwsem_t) -> c_int;
-    pub safe fn rwsem_acquire_read_interruptible(l: *mut rwsem_t) -> c_int;
-    pub safe fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_int;
-    pub safe fn rwsem_acquire_write(l: *mut rwsem_t) -> c_int;
-    pub safe fn rwsem_try_acquire_write(l: *mut rwsem_t) -> c_int;
-    pub safe fn rwsem_acquire_write_interruptible(l: *mut rwsem_t) -> c_int;
-    pub safe fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64) -> c_int;
-    pub safe fn rwsem_release(l: *mut rwsem_t);
-    pub safe fn rwsem_is_write_holding(l: *mut rwsem_t) -> bool;
-
-    // completion.rs exports
-    pub safe fn completion_init(c: *mut completion_t);
-    pub safe fn completion_reinit(c: *mut completion_t);
-    pub safe fn try_wait_for_completion(c: *mut completion_t) -> bool;
-    pub safe fn wait_for_completion(c: *mut completion_t);
-    pub safe fn wait_for_completion_interruptible(c: *mut completion_t) -> c_int;
-    pub safe fn wait_for_completion_timed(c: *mut completion_t, timeout_ms: u64) -> c_int;
-    pub safe fn complete(c: *mut completion_t);
-    pub safe fn complete_all(c: *mut completion_t);
-    pub safe fn completion_done(c: *mut completion_t) -> bool;
-
-    // semaphore.rs exports
-    pub safe fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int) -> c_int;
-    pub safe fn sem_trywait(s: *mut sem_t) -> c_int;
-    pub safe fn sem_wait(s: *mut sem_t) -> c_int;
-    pub safe fn sem_wait_interruptible(s: *mut sem_t) -> c_int;
-    pub safe fn sem_timedwait(s: *mut sem_t, timeout_ms: u64) -> c_int;
-    pub safe fn sem_post(s: *mut sem_t) -> c_int;
-    pub safe fn sem_getvalue(s: *mut sem_t, value: *mut c_int) -> c_int;
-
-    // rwlock.rs exports
-    pub safe fn rwlock_init(rw: *mut rwlock_t, name: *const c_char);
-    pub safe fn rwlock_rlock(rw: *mut rwlock_t);
-    pub safe fn rwlock_runlock(rw: *mut rwlock_t);
-    pub safe fn rwlock_wlock(rw: *mut rwlock_t);
-    pub safe fn rwlock_wlock_expedited(rw: *mut rwlock_t);
-    pub safe fn rwlock_graceful_wlock(rw: *mut rwlock_t);
-    pub safe fn rwlock_wunlock(rw: *mut rwlock_t);
-    pub safe fn rwlock_rlock_irqsave(rw: *mut rwlock_t) -> c_int;
-    pub safe fn rwlock_runlock_irqrestore(rw: *mut rwlock_t, intena: c_int);
-    pub safe fn rwlock_wlock_irqsave(rw: *mut rwlock_t) -> c_int;
-    pub safe fn rwlock_wunlock_irqrestore(rw: *mut rwlock_t, intena: c_int);
+pub(crate) use crate::lock::completion::{complete, complete_all, completion_done, completion_init, completion_reinit, try_wait_for_completion, wait_for_completion, wait_for_completion_interruptible, wait_for_completion_timed};
+pub(crate) use crate::lock::mutex::{holding_mutex, mutex_init, mutex_lock, mutex_lock_interruptible, mutex_lock_timed, mutex_trylock, mutex_unlock};
+// `crate::lock::rwlock::rwlock_*` are genuinely `unsafe fn`; this file's
+// original extern declaration asserted `pub safe fn` (this crate's usual
+// FFI-facade convention — every method below already documents its own
+// pointer-validity contract via `KRwlock::from_ptr`'s doc). Thin safe
+// wrappers preserve that facade instead of pushing `unsafe {}` onto every
+// call site below.
+macro_rules! safe_rwlock_wrapper {
+    ($name:ident($($arg:ident: $ty:ty),*) $(-> $ret:ty)?) => {
+        #[inline(always)]
+        fn $name($($arg: $ty),*) $(-> $ret)? {
+            // SAFETY: see `crate::lock::rwlock::$name`'s contract; every
+            // call site here goes through `KRwlock`/`KRwlockGuard`, which
+            // only ever hold a pointer obtained from `KRwlock::from_ptr`.
+            unsafe { crate::lock::rwlock::$name($($arg),*) }
+        }
+    };
 }
+safe_rwlock_wrapper!(rwlock_init(l: *mut rwlock_t, name: *const c_char));
+safe_rwlock_wrapper!(rwlock_rlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_wlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_wlock_expedited(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_graceful_wlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_rlock_irqsave(l: *mut rwlock_t) -> c_int);
+safe_rwlock_wrapper!(rwlock_wlock_irqsave(l: *mut rwlock_t) -> c_int);
+safe_rwlock_wrapper!(rwlock_runlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_wunlock(l: *mut rwlock_t));
+safe_rwlock_wrapper!(rwlock_runlock_irqrestore(l: *mut rwlock_t, intena: c_int));
+safe_rwlock_wrapper!(rwlock_wunlock_irqrestore(l: *mut rwlock_t, intena: c_int));
+pub(crate) use crate::lock::rwsem::{rwsem_acquire_read, rwsem_acquire_read_interruptible, rwsem_acquire_read_timed, rwsem_acquire_write, rwsem_acquire_write_interruptible, rwsem_acquire_write_timed, rwsem_init, rwsem_is_write_holding, rwsem_release, rwsem_try_acquire_read, rwsem_try_acquire_write};
+pub(crate) use crate::lock::semaphore::{sem_getvalue, sem_init, sem_post, sem_timedwait, sem_trywait, sem_wait, sem_wait_interruptible};
 
 // ---------------------------------------------------------------------------
 // KMutex — typed handle + RAII guard around `mutex_t`.

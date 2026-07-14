@@ -86,25 +86,21 @@ const fn build_inverse() -> [u8; 256] {
 // occupying RAM. `#[no_mangle]` preserves the exact C symbol names referenced
 // by `kernel/inc/bits.h`.
 
-#[no_mangle]
 #[link_section = ".rodata"]
-pub static __uint8_bits_count: [i8; 256] = build_popcount();
+pub(crate) static __uint8_bits_count: [i8; 256] = build_popcount();
 
-#[no_mangle]
 #[link_section = ".rodata"]
-pub static __uint8_trailing_zeros: [i8; 256] = build_trailing_zeros();
+pub(crate) static __uint8_trailing_zeros: [i8; 256] = build_trailing_zeros();
 
-#[no_mangle]
 #[link_section = ".rodata"]
-pub static __uint8_leading_zeros: [i8; 256] = build_leading_zeros();
+pub(crate) static __uint8_leading_zeros: [i8; 256] = build_leading_zeros();
 
 // Stored as `[u8; 256]` because some entries exceed the i8 range. The C side
 // declares it as `const int8 [256]`, but only the byte representation matters
 // since the symbol is never dereferenced in the current code base; this
 // preserves backward ABI compatibility for any future caller.
-#[no_mangle]
 #[link_section = ".rodata"]
-pub static __uint8_inverse: [u8; 256] = build_inverse();
+pub(crate) static __uint8_inverse: [u8; 256] = build_inverse();
 
 // ---------------------------------------------------------------------------
 // Host-test suite (`cargo test --target x86_64-unknown-linux-gnu`; see

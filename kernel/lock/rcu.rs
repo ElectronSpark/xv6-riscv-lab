@@ -66,14 +66,6 @@ unsafe extern "C" {
     pub safe fn tq_init(q: *mut tq_t, name: *const c_char, lock: *mut spinlock_t);
     pub safe fn tq_wakeup_all(q: *mut tq_t, error_no: c_int, rdata: u64) -> c_int;
 
-    pub safe fn slab_cache_init(
-        cache: *mut slab_cache_t,
-        name: *const c_char,
-        obj_size: u64,
-        flags: u32,
-    ) -> c_int;
-    pub safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
-    pub safe fn slab_free(obj: *mut c_void);
 
     pub safe fn sleep_ms(ms: u64);
 
@@ -88,6 +80,48 @@ unsafe extern "C" {
         arg2: u64,
         stack_order: c_int,
     ) -> *mut thread;
+}
+/// `crate::mm::slab::slab_free` is genuinely `unsafe fn`; this file's
+/// original extern declaration asserted `pub safe fn` (usual FFI facade).
+#[inline]
+fn slab_free(obj: *mut c_void) {
+    // SAFETY: `obj` must originate from `slab_alloc` below (same contract
+    // `crate::mm::slab::slab_free` always had).
+    unsafe { crate::mm::slab::slab_free(obj) };
+}
+
+// `slab_cache_init`/`slab_alloc` are NOT plain `use` re-exports: this
+// file's extern declaration always typed the cache pointer as the bindgen
+// `slab_cache_t` (`RCU_HEAD_SLAB`'s storage type below) rather than
+// `crate::mm::slab::SlabCache` (that module's own local view of the same
+// C type — the same "locally convenient pointer type" idiom as
+// `cffi::raw`'s spinlock wrappers), and passed `obj_size` as `u64`/`name`
+// as `*const c_char` rather than `usize`/`*mut c_char`. These thin casts
+// preserve the original call-site types.
+#[inline]
+fn slab_cache_init(
+    cache: *mut slab_cache_t,
+    name: *const c_char,
+    obj_size: u64,
+    flags: u32,
+) -> c_int {
+    // SAFETY: `cache` is `RCU_HEAD_SLAB`'s storage (a real `SlabCache`-
+    // sized/aligned static, same C layout as `slab_cache_t`); `name` is
+    // only read (never written) by the callee despite the `*mut`
+    // parameter type.
+    unsafe {
+        crate::mm::slab::slab_cache_init(
+            cache as *mut crate::mm::slab::SlabCache,
+            name as *mut c_char,
+            obj_size as usize,
+            flags as u64,
+        )
+    }
+}
+#[inline]
+fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
+    // SAFETY: see `slab_cache_init` above.
+    unsafe { crate::mm::slab::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
 }
 
 // Variadic FFI cannot be marked safe.
@@ -1276,13 +1310,11 @@ pub unsafe extern "C" fn rcu_read_lock() { read_lock_impl() }
 #[no_mangle]
 pub unsafe extern "C" fn rcu_read_unlock() { read_unlock_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_is_watching() -> c_int {
+pub(crate) unsafe fn rcu_is_watching() -> c_int {
     if is_watching_impl() { 1 } else { 0 }
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_note_context_switch() { note_context_switch_impl() }
+pub(crate) unsafe fn rcu_note_context_switch() { note_context_switch_impl() }
 
 #[no_mangle]
 pub unsafe extern "C" fn rcu_check_callbacks() { note_context_switch_impl() }
@@ -1296,26 +1328,20 @@ pub unsafe extern "C" fn call_rcu(
     call_impl(head, func, data)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_process_callbacks() { process_callbacks_impl() }
+pub(crate) unsafe fn rcu_process_callbacks() { process_callbacks_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn synchronize_rcu() { synchronize_impl() }
+pub(crate) unsafe fn synchronize_rcu() { synchronize_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_barrier() { barrier_impl() }
+pub(crate) unsafe fn rcu_barrier() { barrier_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn synchronize_rcu_expedited() { synchronize_expedited_impl() }
+pub(crate) unsafe fn synchronize_rcu_expedited() { synchronize_expedited_impl() }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_kthread_wakeup() { kthread_wakeup_impl() }
+pub(crate) unsafe fn rcu_kthread_wakeup() { kthread_wakeup_impl() }
 
 #[no_mangle]
 pub unsafe extern "C" fn rcu_kthread_start_cpu(cpu: c_int) { kthread_start_cpu_impl(cpu) }
 
-#[no_mangle]
-pub unsafe extern "C" fn rcu_kthread_start() {
+pub(crate) unsafe fn rcu_kthread_start() {
     // Kept for ABI compatibility; per-CPU init is done by
     // `rcu_kthread_start_cpu` from each CPU's idle path.
 }

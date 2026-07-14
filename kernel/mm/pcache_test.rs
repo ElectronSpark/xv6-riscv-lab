@@ -115,7 +115,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 // checks, so the cast is layout-safe.
 use crate::bindings::page_t as Page;
 use crate::bindings::{pcache_ops, thread, EAGAIN, EBUSY, EINVAL, EIO};
-use crate::mm::{
+pub(crate) use crate::mm::{
     __page_alloc, __page_free, page_lock_acquire, page_lock_release, pcache_flush,
     pcache_get_page, pcache_init, pcache_invalidate_page, pcache_mark_page_dirty,
     pcache_put_page, pcache_read_page, pcache_teardown, xv6_page_pcache_get_node, Pcache,

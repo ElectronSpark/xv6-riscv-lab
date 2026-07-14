@@ -455,47 +455,18 @@ configure_file(${KERNEL_LD_IN} ${KERNEL_LD} @ONLY)
 # compiler-builtins (built with medlow code model).
 set(RUST_FORCE_UNDEFINED
     # bits.c port
-    --undefined=__uint8_bits_count
-    --undefined=__uint8_trailing_zeros
-    --undefined=__uint8_leading_zeros
-    --undefined=__uint8_inverse
     # slab.c port
     --undefined=slab_cache_init
-    --undefined=slab_cache_create
-    --undefined=slab_cache_destroy
     --undefined=slab_cache_shrink
     --undefined=slab_alloc
     --undefined=slab_free
-    --undefined=slab_free_noshrink
     # page.c port (buddy allocator)
-    --undefined=page_buddy_init
     --undefined=__page_alloc
     --undefined=__page_free
     --undefined=page_alloc
     --undefined=page_free
-    --undefined=page_lock_acquire
-    --undefined=page_lock_release
-    --undefined=page_lock_assert_holding
-    --undefined=page_lock_assert_unholding
-    --undefined=__page_ref_inc
-    --undefined=__page_ref_dec
-    --undefined=page_ref_inc
-    --undefined=page_ref_dec
-    --undefined=page_ref_inc_unlocked
-    --undefined=page_ref_dec_unlocked
-    --undefined=page_refcnt
-    --undefined=page_ref_count
     --undefined=__pa_to_page
     --undefined=__page_to_pa
-    --undefined=managed_page_base
-    --undefined=page_buddy_stat
-    --undefined=__check_page_pointer_in_range
-    --undefined=__buddy_pools
-    --undefined=xv6_buddy_pool_count
-    --undefined=xv6_pcpu_cache_count
-    --undefined=xv6_buddy_pool_lock_range_all
-    --undefined=xv6_buddy_pool_unlock_range_all
-    --undefined=xv6_total_managed_pages
     # sysmm.c port (mm syscalls)
     --undefined=sys_mmap
     --undefined=sys_munmap
@@ -510,78 +481,38 @@ set(RUST_FORCE_UNDEFINED
     --undefined=kfree
     --undefined=kmm_alloc
     --undefined=kmm_free
-    --undefined=kmm_shrink_all
-    --undefined=get_total_free_pages
-    --undefined=slab_t_desc_alloc
-    --undefined=slab_t_desc_free
-    --undefined=slab_cache_t_alloc
-    --undefined=slab_cache_t_free
     # early_allocator.c port
     --undefined=early_allocator_init
     --undefined=early_alloc_align
-    --undefined=early_alloc
-    --undefined=early_alloc_end_ptr
     # pcache.c port
     --undefined=pcache_global_init
     --undefined=pcache_init
     --undefined=pcache_teardown
     --undefined=pcache_get_page
     --undefined=pcache_put_page
-    --undefined=pcache_invalidate_page
     --undefined=pcache_flush
-    --undefined=pcache_sync
     --undefined=pcache_read_page
     --undefined=pcache_mark_page_dirty
-    --undefined=pcache_invalidate_blk
     --undefined=pcache_discard_blk
-    --undefined=pcache_shrink_caches
     --undefined=sys_sync
     --undefined=sys_dumppcache
-    --undefined=dump_pcache_stats
-    --undefined=dump_all_pcache_stats
     # vm.c V1 port (pagetable primitives)
-    --undefined=walk
-    --undefined=walkaddr
     --undefined=kvmmap
-    --undefined=mappages
-    --undefined=uvmunmap
-    --undefined=uvmcreate
-    --undefined=freewalk
-    --undefined=uvmfree
     --undefined=kvminit
     --undefined=kvminithart
-    --undefined=dump_pagetable
-    --undefined=vm_dump_flags
     # vm.c V2 first slice (rb-tree cmp + cpumask + remote sfence)
-    --undefined=__vma_cmp
-    --undefined=__cma_get_key
     --undefined=vm_cpu_online
     --undefined=vm_cpu_offline
-    --undefined=vm_get_cpumask
-    --undefined=vm_remote_sfence
     # vm.c V2 second slice (slab pool inits, vma alloc/free, trapframe map)
-    --undefined=__vma_pool_init
-    --undefined=__vm_pool_init
-    --undefined=__vma_alloc
-    --undefined=__vma_free
-    --undefined=__vma_set_free
-    --undefined=__vm_unmap_trapframe
-    --undefined=__vm_map_trampoline
-    --undefined=__vma_copy
     # vm.c V3 first slice (flag converters + refcount)
-    --undefined=vma2pte_flags
-    --undefined=pte2vma_flags
     --undefined=vm_dup
     # vm.c V3 second slice (lock wrappers)
     --undefined=vm_rlock
     --undefined=vm_runlock
     --undefined=vm_wlock
     --undefined=vm_wunlock
-    --undefined=vm_pgtable_lock
-    --undefined=vm_pgtable_unlock
     # vm.c V3 third slice (lifecycle)
     --undefined=vm_put
-    --undefined=__vm_destroy
     # vm.c V3 fourth slice (vm_init)
     --undefined=vm_init
     # vm.c V3 fifth slice
@@ -589,14 +520,9 @@ set(RUST_FORCE_UNDEFINED
     --undefined=either_copyin
     --undefined=either_copyout
     # vm.c V4 first slice
-    --undefined=vm_find_free_range
     # vm.c V4 second slice
-    --undefined=vma_split
     # vm.c V4 third slice
-    --undefined=vma_merge
     # vm.c V4 d/e/f slices
-    --undefined=vma_alloc
-    --undefined=vma_free
     --undefined=vma_validate
     # vm.c V5: copy/copyin/copyout/copyinstr, heap/stack create/grow,
     # mmap region helpers, mprotect/mremap/msync/mincore/madvise,
@@ -605,69 +531,29 @@ set(RUST_FORCE_UNDEFINED
     --undefined=vm_copyout
     --undefined=vm_copyin
     --undefined=vm_copyinstr
-    --undefined=vm_createheap
-    --undefined=vm_createstack
-    --undefined=vm_growstack
     --undefined=vm_try_growstack
     --undefined=vm_growheap
     --undefined=vm_mmap_region_locked
-    --undefined=vm_mmap_region
-    --undefined=vm_munmap_region
-    --undefined=vm_mprotect
-    --undefined=vm_mremap
-    --undefined=vm_msync
-    --undefined=vm_mincore
-    --undefined=vm_madvise
-    --undefined=vm_alloc_thread_stack
-    --undefined=vm_free_thread_stack
-    --undefined=vm_mmap
-    --undefined=vm_munmap
     # vm.c eliminated — residual policy lives in Rust
-    --undefined=dump_vm
-    --undefined=xv6_vm_rb_init_vm_tree
-    --undefined=xv6_vm_validate_pte
-    --undefined=xv6_vm_call_vma_fault
     # rcu.c port
     --undefined=rcu_init
     --undefined=rcu_cpu_init
     --undefined=rcu_read_lock
     --undefined=rcu_read_unlock
-    --undefined=rcu_is_watching
-    --undefined=rcu_note_context_switch
     --undefined=rcu_check_callbacks
     --undefined=call_rcu
-    --undefined=rcu_process_callbacks
-    --undefined=synchronize_rcu
-    --undefined=rcu_barrier
-    --undefined=synchronize_rcu_expedited
-    --undefined=rcu_kthread_wakeup
     --undefined=rcu_kthread_start_cpu
-    --undefined=rcu_kthread_start
     # bintree.c port
-    --undefined=rb_brother
-    --undefined=__rb_node_link
     --undefined=rb_first_node
     --undefined=rb_last_node
     --undefined=rb_next_node
-    --undefined=rb_prev_node
-    --undefined=__rb_replace_node
-    --undefined=__rb_transplant
-    --undefined=__rb_find_key_link
     --undefined=rb_find_key_rup
     --undefined=rb_find_key_rdown
-    --undefined=rb_find_key
-    --undefined=rb_insert_node
-    --undefined=rb_delete_key
-    --undefined=__rb_rotate_left
-    --undefined=__rb_rotate_right
     # rbtree.c port
     --undefined=rb_insert_color
     --undefined=rb_delete_node_color
-    --undefined=rb_delete_key_color
     # hlist.c port
-    --undefined=hlist_node_in_list
     --undefined=hlist_init
-    --undefined=hlist_get_node_hash
     --undefined=hlist_get
     --undefined=hlist_put
     --undefined=hlist_pop
@@ -682,7 +568,6 @@ set(RUST_FORCE_UNDEFINED
     --undefined=kobject_try_get
     --undefined=kobject_put
     --undefined=kobject_refcount
-    --undefined=kobject_count
     # string.c port
     --undefined=memset
     --undefined=memcmp
@@ -694,46 +579,13 @@ set(RUST_FORCE_UNDEFINED
     --undefined=safestrcpy
     --undefined=strlen
     --undefined=strnlen
-    --undefined=strcat
     --undefined=strtok_r
-    --undefined=strtok
-    --undefined=strstr
     --undefined=strndup
     --undefined=strdup
     # sbi.c port
-    --undefined=sbi_get_spec_version
-    --undefined=sbi_get_impl_id
-    --undefined=sbi_get_impl_version
-    --undefined=sbi_probe_extension
-    --undefined=sbi_get_mvendorid
-    --undefined=sbi_get_marchid
-    --undefined=sbi_get_mimpid
-    --undefined=sbi_set_timer
     --undefined=sbi_send_ipi
-    --undefined=sbi_remote_hfence_i
-    --undefined=sbi_remote_hfence_vma
-    --undefined=sbi_remote_hfence_vma_asid
-    --undefined=sbi_remote_hfence_gvma_vmid
-    --undefined=sbi_remote_hfence_gvma
-    --undefined=sbi_remote_hfence_vvma_asid
-    --undefined=sbi_remote_hfence_vvma
-    --undefined=sbi_hart_start
-    --undefined=sbi_hart_stop
-    --undefined=sbi_hart_get_status
-    --undefined=sbi_hart_suspend
-    --undefined=sbi_system_reset
-    --undefined=sbi_shutdown
-    --undefined=sbi_reboot
     --undefined=sbi_probe_extensions
-    --undefined=sbi_ext_is_available
-    --undefined=sbi_ext_name
-    --undefined=sbi_error_str
-    --undefined=sbi_hart_state_str
-    --undefined=sbi_print_version
     --undefined=sbi_start_secondary_harts
-    --undefined=sbi_console_putchar
-    --undefined=sbi_console_puts
-    --undefined=sbi_console_getchar
     # start.c port (entry.S's `call start` target + per-hart boot stack)
     --undefined=start
     --undefined=stack0
@@ -1314,7 +1166,6 @@ set(RUST_FORCE_UNDEFINED
     --undefined=bwrite
     --undefined=bwrite_async
     --undefined=bsync
-    --undefined=bdirty_count
     --undefined=brelse
     --undefined=bpin
     --undefined=bunpin

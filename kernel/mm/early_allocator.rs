@@ -56,7 +56,7 @@ const LIST_ENTRY_OFFSET: usize = 16;
 // compile unchanged.
 // ---------------------------------------------------------------------------
 mod ffi {
-    pub use crate::mm::cffi::raw::{
+    pub(crate) use crate::mm::cffi::raw::{
         xv6_list_init, xv6_list_is_empty,
         xv6_list_push_front, xv6_list_pop_front,
     };
@@ -353,13 +353,21 @@ pub unsafe extern "C" fn early_alloc_align(size: usize, align: usize) -> *mut c_
     allocator().alloc(size as u64, align as u64)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn early_alloc(size: usize) -> *mut c_void {
+// Demoted from `#[no_mangle]` (P3-1A mesh sweep): neither has any caller
+// outside this crate, so the C-ABI symbol was dropped. `#[no_mangle]`
+// previously suppressed `dead_code` for both regardless of real usage;
+// `early_alloc_end_ptr` gains a genuine in-crate caller (`mm/page.rs`,
+// full build only) but the `cfg(test)` host-test seam compiles this file
+// standalone (see the crate doc's "Host-test seam" section: only
+// `mm::bits`/`mm::early_allocator` are built for `cargo test`, not
+// `mm::page`), so both look unused from that reduced tree's perspective.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) unsafe fn early_alloc(size: usize) -> *mut c_void {
     early_alloc_align(size, EARLYALLOC_SMALLEST_CHUNK as usize)
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn early_alloc_end_ptr() -> *mut c_void {
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) unsafe fn early_alloc_end_ptr() -> *mut c_void {
     allocator().current as *mut c_void
 }
 

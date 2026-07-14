@@ -515,8 +515,7 @@ unsafe fn replace_node_entry(old: *mut HlistEntry, new: *mut HlistEntry) {
 /// `hlist` must be null or point to a live `Hlist`; `node` must be null
 /// or a live caller-owned node whose `func.get_entry` callback is safe to
 /// invoke.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_node_in_list(hlist: *mut Hlist, node: *mut c_void) -> bool {
+pub(crate) unsafe fn hlist_node_in_list(hlist: *mut Hlist, node: *mut c_void) -> bool {
     unsafe {
         let bucket = get_node_bucket(hlist, node);
         if bucket.is_null() || hlist.is_null() {
@@ -561,8 +560,7 @@ pub unsafe extern "C" fn hlist_init(hlist: *mut Hlist, bucket_cnt: u64, func: *m
 /// # Safety
 /// `hlist` must be null or point to a live `Hlist`; `node` must be null
 /// or a live caller-owned node.
-#[no_mangle]
-pub unsafe extern "C" fn hlist_get_node_hash(hlist: *mut Hlist, node: *mut c_void) -> HtHash {
+pub(crate) unsafe fn hlist_get_node_hash(hlist: *mut Hlist, node: *mut c_void) -> HtHash {
     unsafe {
         if hlist.is_null() || node.is_null() {
             return 0;
