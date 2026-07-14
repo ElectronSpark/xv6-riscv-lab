@@ -34,6 +34,103 @@ use crate::bindings::{rb_node, rb_root};
 pub type RbNode = rb_node;
 pub type RbRoot = rb_root;
 
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-3C.
+//
+// `RbNode`/`RbRoot` above stay aliased to the real bindgen types
+// (`crate::bindings::{rb_node, rb_root}`): both are used pervasively as
+// the actual parameter/field type across ~15 out-of-scope files (mm's
+// `pcache.rs`/`vm.rs`, proc's `thread_queue.rs`/`sched.rs`/`access.rs`,
+// `timer/timer_core.rs`, `vfs/xv6fs/block_cache.rs`, `backtrace.rs`,
+// `dev/fdt.rs`, `ll/ll.rs`, `machine/machine.rs`) that call this
+// module's `#[no_mangle]`/`pub(crate)` entry points directly with
+// bindgen-typed pointers -- retyping those signatures is out of this
+// wave's scope (see `docs/rustify/phase3_plan.md` P3-3's "aggregate
+// waves" split) and is deliberately deferred, same as
+// `kernel/lock/spinlock.rs`'s ~290 non-`lock/` `spinlock_t` referents in
+// Wave P3-3A.
+//
+// `RawRbNode`/`RawRbRoot`/`RawRbRootOpts` are this module's own native,
+// layout-identical mirrors: the ONE canonical native form of these three
+// bindgen-generated type families (`kernel/inc/bintree_type.h`'s
+// `struct rb_node` / `struct rb_root` / `struct rb_root_opts`), gated by
+// direct compile-time `size_of`/`align_of`/`offset_of!` cross-checks
+// against the real bindgen types below -- not pinned only to a literal,
+// the exact gap Wave P3-3B closed for `mm/page.rs`/`mm/slab.rs`.
+//
+// This is the type future aggregate-embedding waves (pcache's tree node,
+// `vma`'s rb-tree link, `timer_node`, `proc/thread_queue.rs`'s `tnode`)
+// need before they can replace a `bindings::rb_node`-typed field with a
+// native one -- `kernel/mm/kalloc.rs`'s P3-3B migration is the precedent
+// for what that follow-up move looks like once the mirror exists.
+//
+// Deliberately NOT wired into this file's own algorithm bodies today:
+// unlike `RawSpinlock` (which replaced ad-hoc `as *const AtomicU32`-style
+// reinterpret casts with one canonical cast point -- a genuine
+// unsafe-reduction win), `rb_parent`/`rb_left`/`rb_right`/etc. below
+// already do plain, correctly-typed field access on `RbNode` with no
+// casting to simplify. Rewiring their signatures to `RawRbNode` would
+// only relocate work (every one of the ~15 cross-module + `rbtree.rs`
+// call sites would need a matching cast) for zero unsafe-reduction
+// benefit, on the exact code path `rbtree.rs`'s own module doc calls
+// "easy to subtly break by improving it" and "on the hot path" for
+// `mm/vm.rs`/`mm/pcache.rs`/`proc/thread_queue.rs`. Left untouched by
+// this wave; the layout proof below is the deliverable.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct RawRbNode {
+    pub(crate) __parent_color: u64,
+    pub(crate) left: *mut RawRbNode,
+    pub(crate) right: *mut RawRbNode,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct RawRbRootOpts {
+    pub(crate) keys_cmp_fun: Option<unsafe extern "C" fn(u64, u64) -> core::ffi::c_int>,
+    pub(crate) get_key_fun: Option<unsafe extern "C" fn(*mut RawRbNode) -> u64>,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct RawRbRoot {
+    pub(crate) node: *mut RawRbNode,
+    pub(crate) opts: *mut RawRbRootOpts,
+}
+
+const _: () = {
+    use crate::bindings::rb_root_opts;
+
+    assert!(core::mem::size_of::<RawRbNode>() == core::mem::size_of::<rb_node>(),
+        "RawRbNode / rb_node size mismatch");
+    assert!(core::mem::align_of::<RawRbNode>() == core::mem::align_of::<rb_node>(),
+        "RawRbNode / rb_node alignment mismatch");
+    assert!(core::mem::offset_of!(RawRbNode, __parent_color) == core::mem::offset_of!(rb_node, __parent_color),
+        "RawRbNode.__parent_color / rb_node.__parent_color offset mismatch");
+    assert!(core::mem::offset_of!(RawRbNode, left) == core::mem::offset_of!(rb_node, left),
+        "RawRbNode.left / rb_node.left offset mismatch");
+    assert!(core::mem::offset_of!(RawRbNode, right) == core::mem::offset_of!(rb_node, right),
+        "RawRbNode.right / rb_node.right offset mismatch");
+
+    assert!(core::mem::size_of::<RawRbRootOpts>() == core::mem::size_of::<rb_root_opts>(),
+        "RawRbRootOpts / rb_root_opts size mismatch");
+    assert!(core::mem::align_of::<RawRbRootOpts>() == core::mem::align_of::<rb_root_opts>(),
+        "RawRbRootOpts / rb_root_opts alignment mismatch");
+    assert!(core::mem::offset_of!(RawRbRootOpts, keys_cmp_fun) == core::mem::offset_of!(rb_root_opts, keys_cmp_fun),
+        "RawRbRootOpts.keys_cmp_fun / rb_root_opts.keys_cmp_fun offset mismatch");
+    assert!(core::mem::offset_of!(RawRbRootOpts, get_key_fun) == core::mem::offset_of!(rb_root_opts, get_key_fun),
+        "RawRbRootOpts.get_key_fun / rb_root_opts.get_key_fun offset mismatch");
+
+    assert!(core::mem::size_of::<RawRbRoot>() == core::mem::size_of::<rb_root>(),
+        "RawRbRoot / rb_root size mismatch");
+    assert!(core::mem::align_of::<RawRbRoot>() == core::mem::align_of::<rb_root>(),
+        "RawRbRoot / rb_root alignment mismatch");
+    assert!(core::mem::offset_of!(RawRbRoot, node) == core::mem::offset_of!(rb_root, node),
+        "RawRbRoot.node / rb_root.node offset mismatch");
+    assert!(core::mem::offset_of!(RawRbRoot, opts) == core::mem::offset_of!(rb_root, opts),
+        "RawRbRoot.opts / rb_root.opts offset mismatch");
+};
+
 /// Low bits of `__parent_color` reserved for out-of-band data (only bit 0
 /// — the red/black color — is used today, by `kernel/rbtree.c`). Mirrors
 /// `_RB_COLOR_MASK` in `kernel/inc/bintree.h`.

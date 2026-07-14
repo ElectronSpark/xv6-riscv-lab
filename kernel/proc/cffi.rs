@@ -46,7 +46,16 @@ pub const fn minor_priority(prio: i32) -> i32 {
 // ===========================================================================
 #[repr(C)] pub struct Thread       { _opaque: [u8; 0] }
 #[repr(C)] pub struct Context      { _opaque: [u8; 0] }
-#[repr(C)] pub struct RbNode       { _opaque: [u8; 24] }
+// Wave P3-3C: the opaque `RbNode { _opaque: [u8; 24] }` placeholder that
+// used to live here was dead code -- grepped crate-wide, it had zero
+// referents (not even within this file beyond its own declaration;
+// `SchedEntity::_link` below models the `rb_entry`/`list_entry` union as
+// a raw `[u8; 24]` blob, never as `RbNode`). Dropped outright rather than
+// migrated. The crate's one canonical native rb_node mirror is now
+// `crate::bintree::RawRbNode` (`kernel/bintree.rs`, layout-asserted
+// directly against `bindings::rb_node`); a future wave that wants
+// `SchedEntity`'s union recovered as typed fields instead of a byte blob
+// should build on that, not reintroduce a second opaque stand-in here.
 
 // ===========================================================================
 // Mirror types — `#[repr(C)]`, pinned to the C layout.

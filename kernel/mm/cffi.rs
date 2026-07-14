@@ -62,28 +62,18 @@ pub struct Spinlock {
 
 /// Mirror of the C kernel's intrusive doubly-linked-list node.
 ///
-/// Layout: two raw `next` / `prev` pointers, 16 bytes on a 64-bit
-/// target. The `*_shims.c` files contain `_Static_assert`s pinning
-/// this size.
-#[repr(C)]
-pub struct ListNode {
-    pub prev: *mut ListNode,
-    pub next: *mut ListNode,
-}
-
-impl ListNode {
-    /// Construct a detached (self-referential is *not* assumed) node.
-    /// Equivalent to the old `ListNode { prev: null_mut(), next: null_mut() }`
-    /// literal scattered across modules; centralising it removes four
-    /// identical constructor sites.
-    #[inline]
-    pub const fn new() -> Self {
-        Self {
-            prev: ptr::null_mut(),
-            next: ptr::null_mut(),
-        }
-    }
-}
+/// Wave P3-3C: this used to be an independent local mirror (pinned only
+/// by a size/align *literal* assert at the bottom of this file, never
+/// cross-checked directly against the real bindgen type) — one of the
+/// "three-plus identical `ListNode` types" this module's own doc comment
+/// above already called out as an accident of history. It is now a
+/// re-export of the crate's one canonical native mirror,
+/// `crate::list::ListNode`, which carries the direct-against-bindgen
+/// `size_of`/`align_of`/`offset_of!` asserts (see `kernel/list.rs`).
+/// Every existing `use crate::mm::cffi::{Spinlock, ListNode}` import
+/// (and `ListNode::new()` call site, e.g. `mm/early_allocator.rs`,
+/// `mm/slab.rs`) keeps working unchanged.
+pub use crate::list::ListNode;
 
 // ===========================================================================
 // Raw extern declarations
@@ -517,7 +507,10 @@ pub fn result_to_neg_errno<T>(r: Result<T, Errno>) -> c_int {
 // changes the canonical layout. They also keep `c_char` / `c_void`
 // "used" so a no-import build still compiles cleanly.
 const _: () = {
-    // 16 bytes on a 64-bit target.
+    // `ListNode` is now `crate::list::ListNode` (re-export, see above),
+    // whose own `const _` block already cross-checks it directly against
+    // `bindings::list_node_t`. The literal check below is a cheap
+    // redundant local sanity net, not the layout gate itself.
     assert!(core::mem::size_of::<ListNode>() == 16);
     assert!(core::mem::align_of::<ListNode>() == 8);
     // Opaque, ZST.

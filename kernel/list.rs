@@ -7,9 +7,70 @@ use core::ffi::c_void;
 use core::marker::PhantomData;
 use crate::bindings::list_node_t;
 
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-3C.
+//
+// `crate::bindings::list_node_t` is bindgen-generated from
+// `kernel/inc/list_type.h`'s `struct list_node` (two raw `prev`/`next`
+// pointers, naturally 8-byte aligned -- no `__attribute__((aligned))` on
+// this one, unlike `spinlock_t`). It is the single most widely embedded
+// intrusive-structure type in the kernel (~390 referents across ~30
+// files: `hlist_entry_t`/`hlist_bucket_t`, `work_struct`, `tq_t`,
+// `vma`/`pcache_node`/`sched_entity`/... all embed it), which is exactly
+// why this wave nativizes it first (see `docs/rustify/phase3_plan.md`
+// P3-3C).
+//
+// `ListNode` below is this crate's ONE canonical native mirror --
+// previously `kernel/mm/cffi.rs` carried an independent (layout-correct
+// but only literal-pinned, not bindgen-cross-checked) duplicate; that
+// module now re-exports this type instead (see the comment there). The
+// layout equivalence is a compile-time-checked fact (`const _` block
+// below), not an assumption.
+//
+// `ListIterator` below is the only in-file consumer that benefits from
+// switching to the native type today (its `head`/`curr` fields are
+// private, so the switch is invisible to callers); `ListIterator::new`
+// and the `list_for_each!` macro keep their `*mut list_node_t`-typed
+// public signature unchanged -- every existing call site across the
+// crate (`proc/access.rs`, `proc/thread_group.rs`, `proc/pgroup.rs`,
+// `tty/session.rs`) passes a bindgen-typed pointer (e.g. `&raw mut
+// (*x).some_bindgen_field.list_head`), and retyping that public API is
+// out of this wave's scope (would ripple into every one of those
+// call sites' surrounding struct layouts). The one-line cast at
+// `ListIterator::new`'s entry is the same "cast once at the boundary"
+// pattern `kernel/lock/spinlock.rs`'s `RawSpinlock` established in
+// Wave P3-3A.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct ListNode {
+    pub prev: *mut ListNode,
+    pub next: *mut ListNode,
+}
+
+impl ListNode {
+    /// A detached node (self-references are NOT assumed -- matches the
+    /// old `ListNode { prev: null_mut(), next: null_mut() }` literal
+    /// this replaces at every construction site).
+    #[inline]
+    pub const fn new() -> Self {
+        Self { prev: core::ptr::null_mut(), next: core::ptr::null_mut() }
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<ListNode>() == core::mem::size_of::<list_node_t>(),
+        "ListNode / list_node_t size mismatch");
+    assert!(core::mem::align_of::<ListNode>() == core::mem::align_of::<list_node_t>(),
+        "ListNode / list_node_t alignment mismatch");
+    assert!(core::mem::offset_of!(ListNode, prev) == core::mem::offset_of!(list_node_t, prev),
+        "ListNode.prev / list_node_t.prev offset mismatch");
+    assert!(core::mem::offset_of!(ListNode, next) == core::mem::offset_of!(list_node_t, next),
+        "ListNode.next / list_node_t.next offset mismatch");
+};
+
 pub struct ListIterator<'a, T> {
-    head: *mut list_node_t,
-    curr: *mut list_node_t,
+    head: *mut ListNode,
+    curr: *mut ListNode,
     offset: usize,
     _marker: PhantomData<&'a T>,
 }
@@ -21,9 +82,13 @@ impl<'a, T> ListIterator<'a, T> {
     /// * `head` must be a valid pointer to an initialized `list_node_t`.
     /// * `offset` must be the byte offset of the `list_node_t` member within structures of type `T`.
     pub unsafe fn new(head: *mut list_node_t, offset: usize) -> Self {
+        // SAFETY: layout equivalence between `ListNode` and `list_node_t`
+        // is proven at compile time above; the cast is a reinterpretation
+        // of the same bytes, not a new allocation.
+        let head = head as *mut ListNode;
         Self {
             head,
-            curr: if head.is_null() { head } else { (*head).next },
+            curr: if head.is_null() { head } else { unsafe { (*head).next } },
             offset,
             _marker: PhantomData,
         }
