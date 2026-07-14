@@ -58,47 +58,88 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
     unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
 }
 
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-3A.
+//
+// `crate::bindings::semaphore` (`sem_t` alias; `kernel/inc/lock/
+// semaphore_types.h`) has ~30 non-`lock/` referents (`KSemaphore::raw`
+// and `sync::sync.rs`'s own `Semaphore` wrapper both embed bindgen
+// pointers), so the C-ABI-adjacent entry points below (`sem_init`,
+// `sem_wait`, ... — all re-exported and called directly by
+// `sync::sync.rs`) keep `*mut sem_t` unchanged. `RawSemaphore` is this
+// file's own native, layout-identical working type; `lk` reuses
+// `spinlock::RawSpinlock`, `wait_queue` stays the bindgen `tq_t`
+// (proc-owned, out of this wave's scope).
+#[repr(C, align(64))]
+pub(crate) struct RawSemaphore {
+    pub(crate) lk: crate::lock::spinlock::RawSpinlock,
+    pub(crate) wait_queue: tq_t,
+    pub(crate) value: c_int,
+    pub(crate) name: *const c_char,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<RawSemaphore>() == core::mem::size_of::<sem_t>());
+    assert!(core::mem::align_of::<RawSemaphore>() == core::mem::align_of::<sem_t>());
+    assert!(core::mem::offset_of!(RawSemaphore, lk) == core::mem::offset_of!(sem_t, lk));
+    assert!(
+        core::mem::offset_of!(RawSemaphore, wait_queue)
+            == core::mem::offset_of!(sem_t, wait_queue)
+    );
+    assert!(core::mem::offset_of!(RawSemaphore, value) == core::mem::offset_of!(sem_t, value));
+    assert!(core::mem::offset_of!(RawSemaphore, name) == core::mem::offset_of!(sem_t, name));
+};
+
+/// Reinterpret the bindgen `*mut sem_t` as the native mirror.
+///
+/// SAFETY: layout equivalence is proven at compile time by the
+/// assertions above; the caller provides a valid, non-dangling
+/// `*mut sem_t`.
+#[inline(always)]
+fn as_native(s: *mut sem_t) -> *mut RawSemaphore {
+    s as *mut RawSemaphore
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
-fn lk_ptr(s: *mut sem_t) -> *mut spinlock_t {
+fn lk_ptr(s: *mut RawSemaphore) -> *mut spinlock_t {
     // SAFETY: caller passes a structurally-valid semaphore.
-    u! { addr_of_mut!((*s).lk) }
+    u! { addr_of_mut!((*s).lk) as *mut spinlock_t }
 }
 #[inline(always)]
-fn wq_ptr(s: *mut sem_t) -> *mut tq_t {
+fn wq_ptr(s: *mut RawSemaphore) -> *mut tq_t {
     // SAFETY: see `lk_ptr`.
     u! { addr_of_mut!((*s).wait_queue) }
 }
 #[inline(always)]
-fn value_atomic<'a>(s: *mut sem_t) -> &'a AtomicI32 {
+fn value_atomic<'a>(s: *mut RawSemaphore) -> &'a AtomicI32 {
     // SAFETY: `value` is a `c_int` (4-byte aligned), and we model
     // it as an `AtomicI32` for SeqCst load/store/RMW. Caller asserts
     // pointer validity.
     u! { &*(addr_of_mut!((*s).value) as *const AtomicI32) }
 }
 #[inline(always)]
-fn value_inc(s: *mut sem_t) -> c_int {
+fn value_inc(s: *mut RawSemaphore) -> c_int {
     value_atomic(s).fetch_add(1, Ordering::SeqCst) + 1
 }
 #[inline(always)]
-fn value_dec(s: *mut sem_t) -> c_int {
+fn value_dec(s: *mut RawSemaphore) -> c_int {
     value_atomic(s).fetch_sub(1, Ordering::SeqCst) - 1
 }
 #[inline(always)]
-fn value_get(s: *mut sem_t) -> c_int {
+fn value_get(s: *mut RawSemaphore) -> c_int {
     value_atomic(s).load(Ordering::SeqCst)
 }
 #[inline(always)]
-fn name_of(s: *mut sem_t) -> *const c_char {
+fn name_of(s: *mut RawSemaphore) -> *const c_char {
     // SAFETY: structurally valid sem; `name` is a pointer field.
     u! { (*s).name }
 }
 #[inline(always)]
-fn set_name_value(s: *mut sem_t, n: *const c_char, value: c_int) {
+fn set_name_value(s: *mut RawSemaphore, n: *const c_char, value: c_int) {
     // SAFETY: caller has exclusive access at init time.
     u! { (*s).name = n; (*s).value = value; }
 }
@@ -123,7 +164,7 @@ fn printf_post_failed(name: *const c_char) {
 
 #[repr(C)]
 struct SemTimedCtx {
-    sem: *mut sem_t,
+    sem: *mut RawSemaphore,
     timer: timer_node,
     timeout_ms: u64,
     timer_armed: bool,
@@ -134,7 +175,7 @@ impl SemTimedCtx {
     unsafe fn from_raw<'a>(data: *mut c_void) -> Option<&'a mut Self> {
         if data.is_null() { None } else { Some(u! { &mut *(data as *mut Self) }) }
     }
-    #[inline(always)] fn sem_ptr(&self) -> *mut sem_t { self.sem }
+    #[inline(always)] fn sem_ptr(&self) -> *mut RawSemaphore { self.sem }
     #[inline(always)] fn timer_node_ptr(&mut self) -> *mut timer_node { addr_of_mut!(self.timer) }
     #[inline(always)] fn timeout(&self) -> u64 { self.timeout_ms }
     #[inline(always)] fn armed(&self) -> bool { self.timer_armed }
@@ -185,7 +226,7 @@ extern "C" fn sem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u! 
 // Wake one waiter; mirrors C `__sem_do_post`. Caller holds `sem->lk`.
 // ---------------------------------------------------------------------------
 
-fn sem_do_post(s: *mut sem_t) -> c_int {
+fn sem_do_post(s: *mut RawSemaphore) -> c_int {
     let val = value_inc(s);
     if val <= 0 {
         let t = tq_wakeup(wq_ptr(s), 0, 0);
@@ -214,6 +255,7 @@ fn sem_do_post(s: *mut sem_t) -> c_int {
 pub(crate) fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
     if value < 0 { return -(EINVAL as c_int); }
+    let s = as_native(s);
     let n = if name.is_null() {
         b"unnamed\0".as_ptr() as *const c_char
     } else {
@@ -229,6 +271,7 @@ pub(crate) fn sem_init(s: *mut sem_t, name: *const c_char, value: c_int)-> c_int
 
 pub(crate) fn sem_trywait(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
+    let s = as_native(s);
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     if value_get(s) > 0 {
         value_dec(s);
@@ -239,6 +282,7 @@ pub(crate) fn sem_trywait(s: *mut sem_t)-> c_int  { u! {
 
 pub(crate) fn sem_wait(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
+    let s = as_native(s);
     let cur = machine::current_thread_ptr();
 
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
@@ -279,6 +323,7 @@ pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
         return if sem_trywait(s) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
     }
 
+    let s = as_native(s);
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     let val = value_dec(s);
     if val < -SEM_VALUE_MAX {
@@ -326,6 +371,7 @@ pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
 
 pub(crate) fn sem_post(s: *mut sem_t)-> c_int  { u! {
     if s.is_null() { return -(EINVAL as c_int); }
+    let s = as_native(s);
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     if value_get(s) == SEM_VALUE_MAX { return -(EOVERFLOW as c_int); }
     let ret = sem_do_post(s);
@@ -334,6 +380,7 @@ pub(crate) fn sem_post(s: *mut sem_t)-> c_int  { u! {
 
 pub(crate) fn sem_getvalue(s: *mut sem_t, value: *mut c_int)-> c_int  { u! {
     if s.is_null() || value.is_null() { return -(EINVAL as c_int); }
+    let s = as_native(s);
     let _g = KSpinlock::from_bindings(lk_ptr(s)).lock();
     let v = value_get(s);
     // SAFETY: caller-supplied out-pointer.

@@ -206,13 +206,69 @@ const RCU_UINT64_MAX: u64 = u64::MAX;
 const KERNEL_STACK_ORDER: c_int = 2;
 
 // ---------------------------------------------------------------------------
+// Native layout — Wave P3-3A.
+//
+// `crate::bindings::rcu_head_t` (`kernel/inc/lock/rcu_type.h`'s `struct
+// rcu_head`) is embedded *by value* in bindgen structs crate-wide
+// (`struct thread`'s own `rcu_head` field, plus `dev/dev.rs`,
+// `irq/irq_core.rs`, `vfs/vfs_syscall.rs`; ~44 non-`lock/` referents),
+// so the two C-ABI-adjacent boundaries that hand a `*mut rcu_head_t`
+// into this module (`call_rcu` and `api::call`) keep that bindgen
+// type unchanged. Every *internal* pending-callback-list helper below
+// (all private, zero external referents — `head_*`, `CbList`,
+// `cblist_enqueue`/`drain_pending`/`requeue_notready`/
+// `partition_pending`/`invoke_ready`/`call_impl`, and `RcuCpuData`'s
+// own `pending_head`/`pending_tail`) is fully migrated to the native
+// `RawRcuHead`, with exactly one cast at each of the two boundaries.
+//
+// The bindgen struct's trailing field is an anonymous bitfield wrapper
+// (`rcu_head__bindgen_ty_1`: 1 bit `embedded_head` + 7 bytes padding,
+// `repr(align(8))`, 8 bytes total) — mirrored here as a plain `u64`
+// (bit 0 = `embedded_head`) with matching accessor semantics.
+#[repr(C)]
+pub(crate) struct RawRcuHead {
+    pub(crate) next: *mut RawRcuHead,
+    pub(crate) func: rcu_callback_t,
+    pub(crate) data: *mut c_void,
+    pub(crate) timestamp: u64,
+    pub(crate) flags: u64,
+}
+
+impl RawRcuHead {
+    #[inline(always)]
+    fn embedded_head(&self) -> bool {
+        self.flags & 1 != 0
+    }
+    #[inline(always)]
+    fn set_embedded_head(&mut self, v: bool) {
+        self.flags = v as u64;
+    }
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<RawRcuHead>() == core::mem::size_of::<rcu_head_t>());
+    assert!(core::mem::align_of::<RawRcuHead>() == core::mem::align_of::<rcu_head_t>());
+    assert!(core::mem::offset_of!(RawRcuHead, next) == core::mem::offset_of!(rcu_head_t, next));
+    assert!(core::mem::offset_of!(RawRcuHead, func) == core::mem::offset_of!(rcu_head_t, func));
+    assert!(core::mem::offset_of!(RawRcuHead, data) == core::mem::offset_of!(rcu_head_t, data));
+    assert!(
+        core::mem::offset_of!(RawRcuHead, timestamp)
+            == core::mem::offset_of!(rcu_head_t, timestamp)
+    );
+    assert!(
+        core::mem::offset_of!(RawRcuHead, flags)
+            == core::mem::offset_of!(rcu_head_t, __bindgen_anon_1)
+    );
+};
+
+// ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
 
 #[repr(C, align(64))]
 struct RcuCpuData {
-    pending_head: AtomicPtr<rcu_head_t>,
-    pending_tail: AtomicPtr<rcu_head_t>,
+    pending_head: AtomicPtr<RawRcuHead>,
+    pending_tail: AtomicPtr<RawRcuHead>,
     cb_count: AtomicU64,
     qs_count: AtomicU64,
     cb_invoked: AtomicU64,
@@ -368,18 +424,18 @@ fn warn_kthread_create_failed(cpu: c_int) {
 // ---------------------------------------------------------------------------
 
 #[inline]
-fn head_set_next(h: *mut rcu_head_t, n: *mut rcu_head_t) {
+fn head_set_next(h: *mut RawRcuHead, n: *mut RawRcuHead) {
     // SAFETY: caller exclusively owns `h` (just allocated, or walking
     // a list chain it has detached).
     unsafe { (*h).next = n; }
 }
 #[inline]
-fn head_next(h: *mut rcu_head_t) -> *mut rcu_head_t {
+fn head_next(h: *mut RawRcuHead) -> *mut RawRcuHead {
     // SAFETY: see `head_set_next`.
     unsafe { (*h).next }
 }
 #[inline]
-fn head_timestamp(h: *mut rcu_head_t) -> u64 {
+fn head_timestamp(h: *mut RawRcuHead) -> u64 {
     // SAFETY: see `head_set_next`.
     unsafe { (*h).timestamp }
 }
@@ -392,21 +448,21 @@ struct HeadFields {
 }
 
 #[inline]
-fn head_read(h: *mut rcu_head_t) -> HeadFields {
+fn head_read(h: *mut RawRcuHead) -> HeadFields {
     // SAFETY: caller owns `h` exclusively while reading.
     unsafe {
         let r = &*h;
         HeadFields {
             func: r.func,
             data: r.data,
-            embedded: r.__bindgen_anon_1.embedded_head() != 0,
+            embedded: r.embedded_head(),
         }
     }
 }
 
 #[inline]
 fn head_init(
-    h: *mut rcu_head_t,
+    h: *mut RawRcuHead,
     func: rcu_callback_t,
     data: *mut c_void,
     ts: u64,
@@ -420,8 +476,7 @@ fn head_init(
         r.func = func;
         r.data = data;
         r.timestamp = ts;
-        r.__bindgen_anon_1
-            .set_embedded_head(if embedded { 1 } else { 0 });
+        r.set_embedded_head(embedded);
     }
 }
 
@@ -440,8 +495,8 @@ unsafe fn invoke_cb(cb: unsafe extern "C" fn(*mut c_void), data: *mut c_void) {
 // ---------------------------------------------------------------------------
 
 struct CbList {
-    head: *mut rcu_head_t,
-    tail: *mut rcu_head_t,
+    head: *mut RawRcuHead,
+    tail: *mut RawRcuHead,
 }
 
 impl CbList {
@@ -450,7 +505,7 @@ impl CbList {
         Self { head: null_mut(), tail: null_mut() }
     }
     #[inline]
-    fn push(&mut self, h: *mut rcu_head_t) {
+    fn push(&mut self, h: *mut RawRcuHead) {
         head_set_next(h, null_mut());
         if self.tail.is_null() {
             self.head = h;
@@ -613,7 +668,7 @@ fn is_watching_impl() -> bool {
 
 // --- per-CPU pending list ---
 
-fn cblist_enqueue(rcp: &RcuCpuData, head: *mut rcu_head_t) {
+fn cblist_enqueue(rcp: &RcuCpuData, head: *mut RawRcuHead) {
     head_set_next(head, null_mut());
     let tail = rcp.pending_tail.load(Ordering::Acquire);
     if tail.is_null() {
@@ -625,7 +680,7 @@ fn cblist_enqueue(rcp: &RcuCpuData, head: *mut rcu_head_t) {
     }
 }
 
-fn drain_pending(rcp: &RcuCpuData) -> *mut rcu_head_t {
+fn drain_pending(rcp: &RcuCpuData) -> *mut RawRcuHead {
     let _preempt = PreemptGuard::new();
     let head = rcp.pending_head.swap(null_mut(), Ordering::AcqRel);
     rcp.pending_tail.store(null_mut(), Ordering::Release);
@@ -642,7 +697,7 @@ fn requeue_notready(rcp: &RcuCpuData, notready: &CbList) {
     }
 }
 
-fn partition_pending(mut p: *mut rcu_head_t, min_other: u64) -> (CbList, CbList) {
+fn partition_pending(mut p: *mut RawRcuHead, min_other: u64) -> (CbList, CbList) {
     let mut ready = CbList::new();
     let mut notready = CbList::new();
     while !p.is_null() {
@@ -698,14 +753,14 @@ fn note_context_switch_impl() {
 
 // --- call_rcu ---
 
-fn call_impl(head: *mut rcu_head_t, func: rcu_callback_t, data: *mut c_void) {
+fn call_impl(head: *mut RawRcuHead, func: rcu_callback_t, data: *mut c_void) {
     let Some(cb) = func else { return; };
 
     let caller_supplied = !head.is_null();
     let head = if caller_supplied {
         head
     } else {
-        let allocated = slab_alloc(RCU_HEAD_SLAB.as_mut_ptr()) as *mut rcu_head_t;
+        let allocated = slab_alloc(RCU_HEAD_SLAB.as_mut_ptr()) as *mut RawRcuHead;
         if allocated.is_null() {
             // Allocation failure → degrade to synchronous behaviour.
             synchronize_impl();
@@ -743,7 +798,7 @@ fn call_impl(head: *mut rcu_head_t, func: rcu_callback_t, data: *mut c_void) {
 
 // --- callback invocation ---
 
-fn invoke_ready(list: *mut rcu_head_t) -> c_int {
+fn invoke_ready(list: *mut RawRcuHead) -> c_int {
     let mut cur = list;
     let mut count: c_int = 0;
     while !cur.is_null() {
@@ -1277,7 +1332,10 @@ pub mod api {
         func: rcu_callback_t,
         data: *mut c_void,
     ) {
-        call_impl(head, func, data);
+        // SAFETY: layout equivalence between `rcu_head_t` and the
+        // native `RawRcuHead` is proven at compile time (see the
+        // assertions next to `RawRcuHead`'s definition).
+        call_impl(head as *mut RawRcuHead, func, data);
     }
 }
 
@@ -1314,7 +1372,8 @@ pub unsafe extern "C" fn call_rcu(
     func: rcu_callback_t,
     data: *mut c_void,
 ) {
-    call_impl(head, func, data)
+    // SAFETY: see the identical cast in `api::call`.
+    call_impl(head as *mut RawRcuHead, func, data)
 }
 
 pub(crate) unsafe fn rcu_process_callbacks() { process_callbacks_impl() }

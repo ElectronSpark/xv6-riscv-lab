@@ -73,27 +73,69 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
 }
 
 // ---------------------------------------------------------------------------
+// Native layout — Wave P3-3A.
+//
+// `crate::bindings::completion_t` (`kernel/inc/lock/completion_types.h`)
+// has ~60 non-`lock/` referents (`KCompletion::raw` is embedded in
+// bindgen structs across mm/dev/vfs), so the C-ABI entry points below
+// keep `*mut completion_t` unchanged. `RawCompletion` is this file's
+// own native, layout-identical working type; `lock` reuses
+// `spinlock::RawSpinlock`, `wait_queue` stays the bindgen `tq_t`
+// (proc-owned, out of this wave's scope).
+#[repr(C, align(64))]
+pub(crate) struct RawCompletion {
+    pub(crate) lock: crate::lock::spinlock::RawSpinlock,
+    pub(crate) done: c_int,
+    pub(crate) wait_queue: tq_t,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<RawCompletion>() == core::mem::size_of::<completion_t>());
+    assert!(core::mem::align_of::<RawCompletion>() == core::mem::align_of::<completion_t>());
+    assert!(
+        core::mem::offset_of!(RawCompletion, lock) == core::mem::offset_of!(completion_t, lock)
+    );
+    assert!(
+        core::mem::offset_of!(RawCompletion, done) == core::mem::offset_of!(completion_t, done)
+    );
+    assert!(
+        core::mem::offset_of!(RawCompletion, wait_queue)
+            == core::mem::offset_of!(completion_t, wait_queue)
+    );
+};
+
+/// Reinterpret the bindgen `*mut completion_t` as the native mirror.
+///
+/// SAFETY: layout equivalence is proven at compile time by the
+/// assertions above; the caller provides a valid, non-dangling
+/// `*mut completion_t`.
+#[inline(always)]
+fn as_native(c: *mut completion_t) -> *mut RawCompletion {
+    c as *mut RawCompletion
+}
+
+// ---------------------------------------------------------------------------
 // Field accessors (centralised unsafe)
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
-fn done_get(c: *mut completion_t) -> c_int {
+fn done_get(c: *mut RawCompletion) -> c_int {
     // SAFETY: caller holds `c->lock` (per the C contract).
     u! { (*c).done }
 }
 #[inline(always)]
-fn done_set(c: *mut completion_t, v: c_int) {
+fn done_set(c: *mut RawCompletion, v: c_int) {
     // SAFETY: caller holds `c->lock`.
     u! { (*c).done = v; }
 }
 #[inline(always)]
-fn lock_ptr(c: *mut completion_t) -> *mut spinlock_t {
+fn lock_ptr(c: *mut RawCompletion) -> *mut spinlock_t {
     // SAFETY: dereferences a structurally-valid completion. We only
     // take the address of the embedded lock; no field is read.
-    u! { addr_of_mut!((*c).lock) }
+    u! { addr_of_mut!((*c).lock) as *mut spinlock_t }
 }
 #[inline(always)]
-fn queue_ptr(c: *mut completion_t) -> *mut tq_t {
+fn queue_ptr(c: *mut RawCompletion) -> *mut tq_t {
     // SAFETY: see `lock_ptr`.
     u! { addr_of_mut!((*c).wait_queue) }
 }
@@ -108,7 +150,7 @@ fn tq_counter(q: *mut tq_t) -> c_int {
 // ---------------------------------------------------------------------------
 
 /// Try to consume one completion token. Caller must hold `c->lock`.
-fn try_wait_for_completion_locked(c: *mut completion_t) -> bool {
+fn try_wait_for_completion_locked(c: *mut RawCompletion) -> bool {
     let d = done_get(c);
     if d <= 0 {
         return false;
@@ -120,7 +162,7 @@ fn try_wait_for_completion_locked(c: *mut completion_t) -> bool {
 }
 
 /// Wake one waiter if any. Caller must hold `c->lock`.
-fn completion_do_wake(c: *mut completion_t) {
+fn completion_do_wake(c: *mut RawCompletion) {
     let q = queue_ptr(c);
     if tq_size(q) > 0 {
         // Return value (`*mut thread`) is intentionally discarded:
@@ -135,7 +177,7 @@ fn completion_do_wake(c: *mut completion_t) {
 
 #[repr(C)]
 struct CompletionTimedCtx {
-    comp: *mut completion_t,
+    comp: *mut RawCompletion,
     timer: timer_node,
     timeout_ms: u64,
     timer_armed: bool,
@@ -146,7 +188,7 @@ impl CompletionTimedCtx {
     unsafe fn from_raw<'a>(data: *mut c_void) -> Option<&'a mut Self> {
         if data.is_null() { None } else { Some(u! { &mut *(data as *mut Self) }) }
     }
-    #[inline(always)] fn comp_ptr(&self) -> *mut completion_t { self.comp }
+    #[inline(always)] fn comp_ptr(&self) -> *mut RawCompletion { self.comp }
     #[inline(always)] fn timer_node_ptr(&mut self) -> *mut timer_node { addr_of_mut!(self.timer) }
     #[inline(always)] fn timeout(&self) -> u64 { self.timeout_ms }
     #[inline(always)] fn armed(&self) -> bool { self.timer_armed }
@@ -203,6 +245,7 @@ extern "C" fn completion_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int
 #[no_mangle]
 pub extern "C" fn completion_init(c: *mut completion_t) { u! {
     if c.is_null() { return; }
+    let c = as_native(c);
     done_set(c, 0);
     spin_init(lock_ptr(c), b"completion_spin\0".as_ptr() as *const c_char);
     tq_init(queue_ptr(c),
@@ -213,11 +256,13 @@ pub extern "C" fn completion_init(c: *mut completion_t) { u! {
 #[no_mangle]
 pub extern "C" fn completion_reinit(c: *mut completion_t) { u! {
     if c.is_null() { return; }
+    let c = as_native(c);
     done_set(c, 0);
 }}
 
 pub(crate) fn try_wait_for_completion(c: *mut completion_t)-> bool  { u! {
     if c.is_null() { return false; }
+    let c = as_native(c);
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     try_wait_for_completion_locked(c)
 }}
@@ -225,6 +270,7 @@ pub(crate) fn try_wait_for_completion(c: *mut completion_t)-> bool  { u! {
 #[no_mangle]
 pub extern "C" fn wait_for_completion(c: *mut completion_t) { u! {
     if c.is_null() { return; }
+    let c = as_native(c);
     let cur = machine::current_thread_ptr();
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     while !try_wait_for_completion_locked(c) {
@@ -239,6 +285,7 @@ pub extern "C" fn wait_for_completion(c: *mut completion_t) { u! {
 #[no_mangle]
 pub extern "C" fn wait_for_completion_interruptible(c: *mut completion_t)-> c_int  { u! {
     if c.is_null() { return -(EINVAL as c_int); }
+    let c = as_native(c);
     let cur = machine::current_thread_ptr();
 
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
@@ -271,6 +318,7 @@ pub(crate) fn wait_for_completion_timed(c: *mut completion_t,
         return -(ETIMEDOUT as c_int);
     }
 
+    let c = as_native(c);
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     if try_wait_for_completion_locked(c) {
         if done_get(c) > 0 {
@@ -325,6 +373,7 @@ pub(crate) fn wait_for_completion_timed(c: *mut completion_t,
 
 pub(crate) fn complete(c: *mut completion_t) { u! {
     if c.is_null() { return; }
+    let c = as_native(c);
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     let d = done_get(c);
     if d != MAX_COMPLETIONS {
@@ -336,6 +385,7 @@ pub(crate) fn complete(c: *mut completion_t) { u! {
 #[no_mangle]
 pub extern "C" fn complete_all(c: *mut completion_t) { u! {
     if c.is_null() { return; }
+    let c = as_native(c);
 
     // Local temporary queue: collect waiters, release the completion
     // lock, then wake them outside the lock. Avoids a lock convoy on
@@ -358,6 +408,7 @@ pub extern "C" fn complete_all(c: *mut completion_t) { u! {
 
 pub(crate) fn completion_done(c: *mut completion_t)-> bool  { u! {
     if c.is_null() { return false; }
+    let c = as_native(c);
     let _g = KSpinlock::from_bindings(lock_ptr(c)).lock();
     tq_size(queue_ptr(c)) == 0
 }}

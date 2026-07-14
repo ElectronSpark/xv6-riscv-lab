@@ -53,51 +53,104 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
 }
 
 // ---------------------------------------------------------------------------
+// Native layout — Wave P3-3A.
+//
+// `crate::bindings::rwsem_t` (`kernel/inc/lock/rwlock_types.h`'s `struct
+// rwsem`) has ~90 non-`lock/` referents (`KRwSem::raw` is embedded in
+// bindgen structs across mm/proc/vfs), so the C-ABI entry points below
+// and `KRwSem`/its guards' public field type keep `*mut rwsem_t`
+// unchanged. `RawRwsem` is this file's own native, layout-identical
+// working type: every private helper operates on it directly. `lock`
+// reuses `spinlock::RawSpinlock`; `read_queue`/`write_queue` stay the
+// bindgen `tq_t` (proc-owned, out of this wave's scope).
+#[repr(C, align(64))]
+pub(crate) struct RawRwsem {
+    pub(crate) lock: crate::lock::spinlock::RawSpinlock,
+    pub(crate) readers: c_int,
+    pub(crate) holder_pid: c_int,
+    pub(crate) read_queue: tq_t,
+    pub(crate) write_queue: tq_t,
+    pub(crate) name: *const c_char,
+    pub(crate) flags: u64,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<RawRwsem>() == core::mem::size_of::<rwsem_t>());
+    assert!(core::mem::align_of::<RawRwsem>() == core::mem::align_of::<rwsem_t>());
+    assert!(core::mem::offset_of!(RawRwsem, lock) == core::mem::offset_of!(rwsem_t, lock));
+    assert!(
+        core::mem::offset_of!(RawRwsem, readers) == core::mem::offset_of!(rwsem_t, readers)
+    );
+    assert!(
+        core::mem::offset_of!(RawRwsem, holder_pid) == core::mem::offset_of!(rwsem_t, holder_pid)
+    );
+    assert!(
+        core::mem::offset_of!(RawRwsem, read_queue) == core::mem::offset_of!(rwsem_t, read_queue)
+    );
+    assert!(
+        core::mem::offset_of!(RawRwsem, write_queue)
+            == core::mem::offset_of!(rwsem_t, write_queue)
+    );
+    assert!(core::mem::offset_of!(RawRwsem, name) == core::mem::offset_of!(rwsem_t, name));
+    assert!(core::mem::offset_of!(RawRwsem, flags) == core::mem::offset_of!(rwsem_t, flags));
+};
+
+/// Reinterpret the bindgen `*mut rwsem_t` as the native mirror.
+///
+/// SAFETY: layout equivalence is proven at compile time by the
+/// assertions above; the caller provides a valid, non-dangling
+/// `*mut rwsem_t`.
+#[inline(always)]
+fn as_native(l: *mut rwsem_t) -> *mut RawRwsem {
+    l as *mut RawRwsem
+}
+
+// ---------------------------------------------------------------------------
 // Helpers — centralised unsafe field accessors
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
-fn lk_ptr(l: *mut rwsem_t) -> *mut spinlock_t {
+fn lk_ptr(l: *mut RawRwsem) -> *mut spinlock_t {
     // SAFETY: structurally valid rwsem.
-    u! { addr_of_mut!((*l).lock) }
+    u! { addr_of_mut!((*l).lock) as *mut spinlock_t }
 }
 #[inline(always)]
-fn rq_ptr(l: *mut rwsem_t) -> *mut tq_t {
+fn rq_ptr(l: *mut RawRwsem) -> *mut tq_t {
     // SAFETY: see `lk_ptr`.
     u! { addr_of_mut!((*l).read_queue) }
 }
 #[inline(always)]
-fn wq_ptr(l: *mut rwsem_t) -> *mut tq_t {
+fn wq_ptr(l: *mut RawRwsem) -> *mut tq_t {
     // SAFETY: see `lk_ptr`.
     u! { addr_of_mut!((*l).write_queue) }
 }
 #[inline(always)]
-fn get_readers(l: *mut rwsem_t) -> c_int {
+fn get_readers(l: *mut RawRwsem) -> c_int {
     // SAFETY: caller holds `l->lock`.
     u! { (*l).readers }
 }
 #[inline(always)]
-fn set_readers(l: *mut rwsem_t, v: c_int) {
+fn set_readers(l: *mut RawRwsem, v: c_int) {
     // SAFETY: caller holds `l->lock`.
     u! { (*l).readers = v; }
 }
 #[inline(always)]
-fn get_holder(l: *mut rwsem_t) -> c_int {
+fn get_holder(l: *mut RawRwsem) -> c_int {
     // SAFETY: caller holds `l->lock`.
     u! { (*l).holder_pid }
 }
 #[inline(always)]
-fn set_holder(l: *mut rwsem_t, v: c_int) {
+fn set_holder(l: *mut RawRwsem, v: c_int) {
     // SAFETY: caller holds `l->lock`.
     u! { (*l).holder_pid = v; }
 }
 #[inline(always)]
-fn get_flags(l: *mut rwsem_t) -> u64 {
+fn get_flags(l: *mut RawRwsem) -> u64 {
     // SAFETY: read-only of a constant-after-init field.
     u! { (*l).flags }
 }
 #[inline(always)]
-fn set_name_flags(l: *mut rwsem_t, name: *const c_char, flags: u64) {
+fn set_name_flags(l: *mut RawRwsem, name: *const c_char, flags: u64) {
     // SAFETY: caller has exclusive access at init time.
     u! { (*l).name = name; (*l).flags = flags; }
 }
@@ -106,7 +159,7 @@ fn set_name_flags(l: *mut rwsem_t, name: *const c_char, flags: u64) {
 // Wait-decision helpers (caller holds `l->lock`)
 // ---------------------------------------------------------------------------
 
-fn reader_should_wait(l: *mut rwsem_t) -> bool {
+fn reader_should_wait(l: *mut RawRwsem) -> bool {
     if get_readers(l) == 0 {
         return get_holder(l) != -1;
     }
@@ -116,7 +169,7 @@ fn reader_should_wait(l: *mut rwsem_t) -> bool {
     false
 }
 
-fn writer_should_wait(l: *mut rwsem_t, pid: c_int) -> bool {
+fn writer_should_wait(l: *mut RawRwsem, pid: c_int) -> bool {
     let h = get_holder(l);
     if h == pid { return false; }
     if h != -1 { return true; }
@@ -125,12 +178,12 @@ fn writer_should_wait(l: *mut rwsem_t, pid: c_int) -> bool {
 }
 
 // Caller holds `l->lock`.
-fn wake_readers(l: *mut rwsem_t) {
+fn wake_readers(l: *mut RawRwsem) {
     let _ = tq_wakeup_all(rq_ptr(l), 0, 0);
 }
 
 // Caller holds `l->lock`.
-fn wake_writer(l: *mut rwsem_t) {
+fn wake_writer(l: *mut RawRwsem) {
     let next = tq_wakeup(wq_ptr(l), 0, 0);
     let pid = machine::thread_pid(next);
     if pid != -1 {
@@ -138,7 +191,7 @@ fn wake_writer(l: *mut rwsem_t) {
     }
 }
 
-fn do_wake_up(l: *mut rwsem_t) {
+fn do_wake_up(l: *mut RawRwsem) {
     if (get_flags(l) & RWLOCK_PRIO_WRITE as u64) != 0 {
         if tq_size(wq_ptr(l)) > 0 {
             wake_writer(l);
@@ -162,7 +215,7 @@ fn do_wake_up(l: *mut rwsem_t) {
 
 #[repr(C)]
 struct RwsemTimedCtx {
-    lock: *mut rwsem_t,
+    lock: *mut RawRwsem,
     timer: timer_node,
     timeout_ms: u64,
     timer_armed: bool,
@@ -173,7 +226,7 @@ impl RwsemTimedCtx {
     unsafe fn from_raw<'a>(data: *mut c_void) -> Option<&'a mut Self> {
         if data.is_null() { None } else { Some(u! { &mut *(data as *mut Self) }) }
     }
-    #[inline(always)] fn lock_ptr(&self) -> *mut rwsem_t { self.lock }
+    #[inline(always)] fn lock_ptr(&self) -> *mut RawRwsem { self.lock }
     #[inline(always)] fn timer_node_ptr(&mut self) -> *mut timer_node { addr_of_mut!(self.timer) }
     #[inline(always)] fn timeout(&self) -> u64 { self.timeout_ms }
     #[inline(always)] fn armed(&self) -> bool { self.timer_armed }
@@ -223,6 +276,7 @@ extern "C" fn rwsem_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u
 #[no_mangle]
 pub extern "C" fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char)-> c_int  { u! {
     if l.is_null() || name.is_null() { return -1; }
+    let l = as_native(l);
     spin_init(lk_ptr(l), b"rwsem spinlock\0".as_ptr() as *const c_char);
     set_readers(l, 0);
     tq_init(rq_ptr(l), b"rwsem read queue\0".as_ptr() as *const c_char, lk_ptr(l));
@@ -235,6 +289,7 @@ pub extern "C" fn rwsem_init(l: *mut rwsem_t, flags: u64, name: *const c_char)->
 #[no_mangle]
 pub extern "C" fn rwsem_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -1; }
+    let l = as_native(l);
     let cur = machine::current_thread_ptr();
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     while reader_should_wait(l) {
@@ -248,6 +303,7 @@ pub extern "C" fn rwsem_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
 
 pub(crate) fn rwsem_try_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
+    let l = as_native(l);
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     if !reader_should_wait(l) {
         set_readers(l, get_readers(l) + 1);
@@ -259,6 +315,7 @@ pub(crate) fn rwsem_try_acquire_read(l: *mut rwsem_t)-> c_int  { u! {
 
 pub(crate) fn rwsem_acquire_read_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
+    let l = as_native(l);
     let cur = machine::current_thread_ptr();
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     while reader_should_wait(l) {
@@ -276,6 +333,7 @@ pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int
     if timeout_ms == 0 {
         return if rwsem_try_acquire_read(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
     }
+    let l = as_native(l);
     let cur = machine::current_thread_ptr();
     let start = machine::read_time();
     let timeout_ticks = machine::ms_to_rawticks(timeout_ms);
@@ -312,6 +370,7 @@ pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int
 #[no_mangle]
 pub extern "C" fn rwsem_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -1; }
+    let l = as_native(l);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
@@ -326,6 +385,7 @@ pub extern "C" fn rwsem_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
 
 pub(crate) fn rwsem_try_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
+    let l = as_native(l);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
@@ -340,6 +400,7 @@ pub(crate) fn rwsem_try_acquire_write(l: *mut rwsem_t)-> c_int  { u! {
 
 pub(crate) fn rwsem_acquire_write_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     if l.is_null() { return -(EINVAL as c_int); }
+    let l = as_native(l);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
@@ -359,6 +420,7 @@ pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_in
     if timeout_ms == 0 {
         return if rwsem_try_acquire_write(l) == 0 { 0 } else { -(ETIMEDOUT as c_int) };
     }
+    let l = as_native(l);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
     let start = machine::read_time();
@@ -397,6 +459,7 @@ pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_in
 #[no_mangle]
 pub extern "C" fn rwsem_release(l: *mut rwsem_t) { u! {
     if l.is_null() { return; }
+    let l = as_native(l);
     let cur = machine::current_thread_ptr();
     let self_pid = machine::thread_pid(cur);
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
@@ -417,6 +480,7 @@ pub extern "C" fn rwsem_release(l: *mut rwsem_t) { u! {
 #[no_mangle]
 pub extern "C" fn rwsem_is_write_holding(l: *mut rwsem_t)-> bool  { u! {
     if l.is_null() { return false; }
+    let l = as_native(l);
     let cur = machine::current_thread_ptr();
     if cur.is_null() { return false; }
     let pid = machine::thread_pid(cur);

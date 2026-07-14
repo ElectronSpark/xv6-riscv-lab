@@ -51,51 +51,94 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
 }
 
 // ---------------------------------------------------------------------------
+// Native layout — Wave P3-3A.
+//
+// `crate::bindings::mutex_t` (`kernel/inc/lock/mutex_types.h`) has ~70
+// non-`lock/` referents (`KMutex::raw` is embedded in bindgen structs
+// all over vfs/dev), so the C-ABI entry points below (`mutex_init`,
+// `mutex_lock`, ...) and `KMutex`/`KMutexGuard`'s public field type
+// keep `*mut mutex_t` unchanged. `RawMutex` is this file's own native,
+// layout-identical working type: every private helper below (and the
+// public entry points, via one cast each) operates on it directly. The
+// embedded `lk` field reuses `spinlock::RawSpinlock` (this wave's
+// other lock-owned type); `wait_queue` stays the bindgen `tq_t` because
+// thread-queues are proc-owned (`kernel/inc/proc/tq_type.h`), out of
+// this wave's scope.
+#[repr(C, align(64))]
+pub(crate) struct RawMutex {
+    pub(crate) lk: crate::lock::spinlock::RawSpinlock,
+    pub(crate) wait_queue: tq_t,
+    pub(crate) name: *mut c_char,
+    pub(crate) holder: c_int,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<RawMutex>() == core::mem::size_of::<mutex_t>());
+    assert!(core::mem::align_of::<RawMutex>() == core::mem::align_of::<mutex_t>());
+    assert!(core::mem::offset_of!(RawMutex, lk) == core::mem::offset_of!(mutex_t, lk));
+    assert!(
+        core::mem::offset_of!(RawMutex, wait_queue) == core::mem::offset_of!(mutex_t, wait_queue)
+    );
+    assert!(core::mem::offset_of!(RawMutex, name) == core::mem::offset_of!(mutex_t, name));
+    assert!(core::mem::offset_of!(RawMutex, holder) == core::mem::offset_of!(mutex_t, holder));
+};
+
+/// Reinterpret the bindgen `*mut mutex_t` as the native mirror.
+///
+/// SAFETY: layout equivalence is proven at compile time by the
+/// assertions above; the caller provides a valid, non-dangling
+/// `*mut mutex_t`.
+#[inline(always)]
+fn as_native(m: *mut mutex_t) -> *mut RawMutex {
+    m as *mut RawMutex
+}
+
+// ---------------------------------------------------------------------------
 // Centralised-unsafe field accessors
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
-fn lk_ptr(m: *mut mutex_t) -> *mut spinlock_t {
+fn lk_ptr(m: *mut RawMutex) -> *mut spinlock_t {
     // SAFETY: structurally valid mutex.
-    u! { addr_of_mut!((*m).lk) }
+    u! { addr_of_mut!((*m).lk) as *mut spinlock_t }
 }
 #[inline(always)]
-fn wq_ptr(m: *mut mutex_t) -> *mut tq_t {
+fn wq_ptr(m: *mut RawMutex) -> *mut tq_t {
     // SAFETY: see `lk_ptr`.
     u! { addr_of_mut!((*m).wait_queue) }
 }
 #[inline(always)]
-fn holder_atomic<'a>(m: *mut mutex_t) -> &'a AtomicI32 {
+fn holder_atomic<'a>(m: *mut RawMutex) -> &'a AtomicI32 {
     // SAFETY: `holder` is a 4-byte aligned `pid_t` (`c_int`). We model
     // it as `AtomicI32` to perform `smp_store_release` / `_load_acquire`
     // / `atomic_cas` matching the C macros.
     u! { &*(addr_of_mut!((*m).holder) as *const AtomicI32) }
 }
 #[inline(always)]
-fn set_name(m: *mut mutex_t, name: *mut c_char) {
+fn set_name(m: *mut RawMutex, name: *mut c_char) {
     // SAFETY: caller has exclusive access at init time.
     u! { (*m).name = name; }
 }
 /// Mirror `__mutex_set_holder` (smp_store_release).
 #[inline(always)]
-fn set_holder(m: *mut mutex_t, pid: c_int) {
+fn set_holder(m: *mut RawMutex, pid: c_int) {
     holder_atomic(m).store(pid, Ordering::Release);
 }
 /// Mirror `__mutex_holder` (smp_load_acquire).
 #[inline(always)]
-fn get_holder(m: *mut mutex_t) -> c_int {
+fn get_holder(m: *mut RawMutex) -> c_int {
     holder_atomic(m).load(Ordering::Acquire)
 }
 /// Mirror `__mutex_try_set_holder` = atomic_cas(&holder, -1, pid).
 /// Returns true on success (we took the lock).
 #[inline(always)]
-fn try_set_holder(m: *mut mutex_t, pid: c_int) -> bool {
+fn try_set_holder(m: *mut RawMutex, pid: c_int) -> bool {
     holder_atomic(m)
         .compare_exchange(-1, pid, Ordering::Acquire, Ordering::Relaxed)
         .is_ok()
 }
 /// Wake one waiter; caller holds `lk->lk`. Mirrors `__do_wakeup`.
-fn do_wakeup(m: *mut mutex_t) {
+fn do_wakeup(m: *mut RawMutex) {
     let next = tq_wakeup(wq_ptr(m), 0, 0);
     if next.is_null() {
         set_holder(m, -1);
@@ -121,7 +164,7 @@ fn do_wakeup(m: *mut mutex_t) {
 
 #[repr(C)]
 struct MutexTimedCtx {
-    lock: *mut mutex_t,
+    lock: *mut RawMutex,
     timer: timer_node,
     timeout_ms: u64,
     timer_armed: bool,
@@ -138,7 +181,7 @@ impl MutexTimedCtx {
     unsafe fn from_raw<'a>(data: *mut c_void) -> Option<&'a mut Self> {
         if data.is_null() { None } else { Some(u! { &mut *(data as *mut Self) }) }
     }
-    #[inline(always)] fn lock_ptr(&self) -> *mut mutex_t { self.lock }
+    #[inline(always)] fn lock_ptr(&self) -> *mut RawMutex { self.lock }
     #[inline(always)] fn timer_node_ptr(&mut self) -> *mut timer_node {
         addr_of_mut!(self.timer)
     }
@@ -191,6 +234,7 @@ extern "C" fn mutex_timed_wake_cb(data: *mut c_void, sleep_cb_status: c_int) { u
 
 #[no_mangle]
 pub extern "C" fn mutex_init(m: *mut mutex_t, name: *mut c_char) { u! {
+    let m = as_native(m);
     spin_init(lk_ptr(m), b"sleep lock\0".as_ptr() as *const c_char);
     tq_init(wq_ptr(m),
             b"sleep lock wait queue\0".as_ptr() as *const c_char,
@@ -201,6 +245,7 @@ pub extern "C" fn mutex_init(m: *mut mutex_t, name: *mut c_char) { u! {
 
 #[no_mangle]
 pub extern "C" fn mutex_lock(m: *mut mutex_t) { u! {
+    let m = as_native(m);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
 
@@ -217,12 +262,14 @@ pub extern "C" fn mutex_lock(m: *mut mutex_t) { u! {
 
 #[no_mangle]
 pub extern "C" fn mutex_unlock(m: *mut mutex_t) { u! {
+    let m = as_native(m);
     let _g = KSpinlock::from_bindings(lk_ptr(m)).lock();
     do_wakeup(m);
 }}
 
 #[no_mangle]
 pub extern "C" fn holding_mutex(m: *mut mutex_t)-> c_int  { u! {
+    let m = as_native(m);
     let cur = machine::current_thread_ptr();
     if cur.is_null() { return 0; }
     // SeqCst load to match `__atomic_load_n(..., SEQ_CST)` in C.
@@ -232,6 +279,7 @@ pub extern "C" fn holding_mutex(m: *mut mutex_t)-> c_int  { u! {
 
 #[no_mangle]
 pub extern "C" fn mutex_trylock(m: *mut mutex_t)-> c_int  { u! {
+    let m = as_native(m);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
     if try_set_holder(m, pid) { 1 } else { 0 }
@@ -239,6 +287,7 @@ pub extern "C" fn mutex_trylock(m: *mut mutex_t)-> c_int  { u! {
 
 pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t)-> c_int  { u! {
     if m.is_null() { return -(EINVAL as c_int); }
+    let m = as_native(m);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
 
@@ -260,6 +309,7 @@ pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t)-> c_int  { u! {
 
 pub(crate) fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64)-> c_int  { u! {
     if m.is_null() { return -(EINVAL as c_int); }
+    let m = as_native(m);
     let cur = machine::current_thread_ptr();
     let pid = machine::thread_pid(cur);
 

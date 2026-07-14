@@ -11,11 +11,61 @@
 #![allow(non_camel_case_types, non_snake_case)]
 
 use core::ffi::{c_char, c_int, c_void};
-use core::ptr::addr_of_mut;
 use core::sync::atomic::{AtomicI32, AtomicU64, Ordering};
 
 use crate::bindings::rwlock as rwlock_t;
 use crate::machine;
+
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-3A.
+//
+// `crate::bindings::rwlock` (`kernel/inc/lock/rwlock_types.h`) has ~70
+// non-`lock/` referents spread across mm/proc/tty/irq (`pid_lock` in
+// particular is a plain `struct rwlock` read directly by
+// `proc/proc_shims.rs` via `__rwl_try_update`/`__rwl_w_holding`), and
+// nearly every function in this file is itself reached directly by
+// some out-of-scope caller (not just through the small no_mangle
+// surface), so — unlike `mutex.rs`/`rwsem.rs`/`semaphore.rs`/
+// `completion.rs`, which have a clean public/private split — every
+// function here keeps its `*mut rwlock_t` parameter unchanged.
+//
+// `RawRwlock` is still genuinely useful: unlike the bindgen struct
+// (whose `state`/`w_holder` fields are plain `uint64`/`c_int`, forcing
+// every access through a pointer-cast-to-atomic reinterpretation), the
+// native mirror declares those fields as real `AtomicU64`/`AtomicI32`.
+// `as_native` below is the *only* unsafe cast in the file's
+// atomic-access path; `state_atomic`/`holder_atomic` (private, zero
+// external referents) become simple safe field projections on top of
+// it, replacing the two independent raw pointer-to-atomic
+// reinterpretations that existed previously.
+#[repr(C, align(64))]
+pub(crate) struct RawRwlock {
+    pub(crate) state: core::sync::atomic::AtomicU64,
+    pub(crate) w_holder: core::sync::atomic::AtomicI32,
+    pub(crate) name: *const c_char,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<RawRwlock>() == core::mem::size_of::<rwlock_t>());
+    assert!(core::mem::align_of::<RawRwlock>() == core::mem::align_of::<rwlock_t>());
+    assert!(core::mem::offset_of!(RawRwlock, state) == core::mem::offset_of!(rwlock_t, state));
+    assert!(
+        core::mem::offset_of!(RawRwlock, w_holder) == core::mem::offset_of!(rwlock_t, w_holder)
+    );
+    assert!(core::mem::offset_of!(RawRwlock, name) == core::mem::offset_of!(rwlock_t, name));
+};
+
+/// Reinterpret the bindgen `*mut rwlock_t` as the native mirror.
+///
+/// SAFETY: layout equivalence is proven at compile time by the
+/// assertions above; the caller provides a valid, non-dangling
+/// `*mut rwlock_t`.
+#[inline(always)]
+fn as_native<'a>(rw: *mut rwlock_t) -> &'a RawRwlock {
+    // SAFETY: see doc comment; `AtomicU64`/`AtomicI32` tolerate shared
+    // access from multiple hosts (that is the whole point of atomics).
+    unsafe { &*(rw as *const RawRwlock) }
+}
 
 // ---------------------------------------------------------------------------
 // State-word layout constants — mirror `kernel/inc/lock/rwlock.h` (the
@@ -44,22 +94,24 @@ fn expedite_threshold() -> u64 {
 
 #[inline(always)]
 fn state_atomic<'a>(rw: *mut rwlock_t) -> &'a AtomicU64 {
-    // SAFETY: `state` is an `_Atomic uint64` (8-byte aligned) field of a
-    // live `struct rwlock`; every caller in this module passes a valid,
-    // non-dangling pointer supplied by the kernel.
-    unsafe { &*(addr_of_mut!((*rw).state) as *const AtomicU64) }
+    &as_native(rw).state
 }
 
 #[inline(always)]
 fn holder_atomic<'a>(rw: *mut rwlock_t) -> &'a AtomicI32 {
-    // SAFETY: `w_holder` is an `_Atomic int` field of a live `struct rwlock`.
-    unsafe { &*(addr_of_mut!((*rw).w_holder) as *const AtomicI32) }
+    &as_native(rw).w_holder
 }
 
 #[inline(always)]
 fn set_name(rw: *mut rwlock_t, name: *const c_char) {
-    // SAFETY: caller has exclusive access during init.
-    unsafe { (*rw).name = name; }
+    // SAFETY: caller has exclusive access during init; writing through
+    // a shared `&RawRwlock` to a plain (non-atomic) field is sound
+    // here because init happens before the lock is published to any
+    // other hart (same precondition the C original relied on).
+    unsafe {
+        let p = core::ptr::addr_of!(as_native(rw).name) as *mut *const c_char;
+        p.write(name);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -35,6 +35,53 @@ use crate::machine::{
 use crate::printf::panic_state;
 
 // ---------------------------------------------------------------------------
+// Native layout — Wave P3-3A.
+//
+// `crate::bindings::spinlock_t` is bindgen-generated from
+// `kernel/inc/lock/spinlock.h`'s `struct spinlock`. That type is
+// referenced by essentially every lock-protected struct in the kernel
+// (~290 non-`lock/` referents at last count) via the C-ABI
+// `spin_init`/`spin_lock`/`spin_unlock`/... entry points below, so
+// those entry points keep their `*mut spinlock_t` signatures unchanged
+// — retyping them would ripple into hundreds of out-of-scope call
+// sites across mm/proc/vfs/tty/dev (explicitly out of this wave's
+// scope; see `docs/rustify/phase3_plan.md` Wave P3-3).
+//
+// `RawSpinlock` is this module's own native, layout-identical
+// counterpart, used internally by the private field-accessor helpers
+// below (and available to sibling `lock/*.rs` files that embed a
+// spinlock by value — `mutex.rs`/`rwsem.rs`/`semaphore.rs`/
+// `completion.rs`). The layout-equivalence is a compile-time-checked
+// fact (see the `const _` assertions), not an assumption: every public
+// function still hands back/receives `*mut spinlock_t` at its boundary
+// and casts to `*mut RawSpinlock` exactly once per call.
+//
+// Note the C typedef's `__ALIGNED_CACHELINE` (`__attribute__((aligned(64)))`)
+// is attached to the *typedef name* `spinlock_t`, not to `struct
+// spinlock` itself — clang/bindgen does not propagate that to the bare
+// record type, so `crate::bindings::spinlock_t` (and this native
+// mirror) is naturally aligned (align 8, size 24), not cacheline
+// aligned. Confirmed by the pre-existing assertion in
+// `kernel/mm/slab.rs` (`size_of::<spinlock_t>() == 24`) and re-proven
+// below.
+#[repr(C)]
+pub(crate) struct RawSpinlock {
+    pub(crate) locked: u32,
+    pub(crate) name: *mut c_char,
+    pub(crate) cpu: *mut cpu_local,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<RawSpinlock>() == core::mem::size_of::<spinlock_t>());
+    assert!(core::mem::align_of::<RawSpinlock>() == core::mem::align_of::<spinlock_t>());
+    assert!(
+        core::mem::offset_of!(RawSpinlock, locked) == core::mem::offset_of!(spinlock_t, locked)
+    );
+    assert!(core::mem::offset_of!(RawSpinlock, name) == core::mem::offset_of!(spinlock_t, name));
+    assert!(core::mem::offset_of!(RawSpinlock, cpu) == core::mem::offset_of!(spinlock_t, cpu));
+};
+
+// ---------------------------------------------------------------------------
 // Externs: the few C helpers we still rely on.
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
@@ -46,32 +93,35 @@ unsafe extern "C" {
 // ---------------------------------------------------------------------------
 // Centralised raw-pointer / atomic accessors on `spinlock_t`.
 //
-// Each helper performs exactly one field access through the raw `*mut
-// spinlock_t` and confines the resulting `unsafe` block to one line.
+// Each helper performs exactly one field access through the raw
+// `*mut RawSpinlock` (the native mirror of `spinlock_t`) and confines
+// the resulting `unsafe` block to one line. Every public entry point
+// below casts its incoming `*mut spinlock_t` to `*mut RawSpinlock`
+// exactly once, so these helpers themselves need no further casting.
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
-fn locked_atomic<'a>(lk: *mut spinlock_t) -> &'a AtomicU32 {
-    // SAFETY: caller provides a valid `*mut spinlock_t`; the `locked`
+fn locked_atomic<'a>(lk: *mut RawSpinlock) -> &'a AtomicU32 {
+    // SAFETY: caller provides a valid `*mut RawSpinlock`; the `locked`
     // field has the same layout and alignment as `AtomicU32`.
     unsafe { &*((&raw mut (*lk).locked) as *const AtomicU32) }
 }
 
 #[inline(always)]
-fn cpu_atomic<'a>(lk: *mut spinlock_t) -> &'a AtomicPtr<cpu_local> {
+fn cpu_atomic<'a>(lk: *mut RawSpinlock) -> &'a AtomicPtr<cpu_local> {
     // SAFETY: see `locked_atomic`. `*mut cpu_local` has the same
     // layout as `AtomicPtr<cpu_local>`.
     unsafe { &*((&raw mut (*lk).cpu) as *const AtomicPtr<cpu_local>) }
 }
 
 #[inline(always)]
-fn read_name(lk: *mut spinlock_t) -> *mut c_char {
-    // SAFETY: caller provides a valid `*mut spinlock_t`.
+fn read_name(lk: *mut RawSpinlock) -> *mut c_char {
+    // SAFETY: caller provides a valid `*mut RawSpinlock`.
     unsafe { (*lk).name }
 }
 
 #[inline(always)]
-fn set_name(lk: *mut spinlock_t, name: *mut c_char) {
+fn set_name(lk: *mut RawSpinlock, name: *mut c_char) {
     // SAFETY: see `read_name`. Exclusive at init time.
     unsafe {
         (*lk).name = name;
@@ -79,7 +129,7 @@ fn set_name(lk: *mut spinlock_t, name: *mut c_char) {
 }
 
 #[inline(always)]
-fn set_locked_plain(lk: *mut spinlock_t, v: u32) {
+fn set_locked_plain(lk: *mut RawSpinlock, v: u32) {
     // SAFETY: init-time only; no concurrent access yet.
     unsafe {
         (*lk).locked = v;
@@ -87,7 +137,7 @@ fn set_locked_plain(lk: *mut spinlock_t, v: u32) {
 }
 
 #[inline(always)]
-fn set_cpu_plain(lk: *mut spinlock_t, p: *mut cpu_local) {
+fn set_cpu_plain(lk: *mut RawSpinlock, p: *mut cpu_local) {
     // SAFETY: init-time only.
     unsafe {
         (*lk).cpu = p;
@@ -100,6 +150,16 @@ fn set_cpu_plain(lk: *mut spinlock_t, p: *mut cpu_local) {
 // ---------------------------------------------------------------------------
 static MSG_REENTRY: &[u8] = b"spin_lock reentry\0";
 static MSG_UNLOCK: &[u8] = b"spin_unlock\0";
+
+/// Reinterpret the bindgen `*mut spinlock_t` as the native mirror.
+///
+/// SAFETY: layout equivalence is proven at compile time by the
+/// assertions above; the caller provides a valid, non-dangling
+/// `*mut spinlock_t`.
+#[inline(always)]
+unsafe fn as_native(lk: *mut spinlock_t) -> *mut RawSpinlock {
+    lk as *mut RawSpinlock
+}
 
 #[inline(never)]
 #[cold]
@@ -124,7 +184,7 @@ fn fixed_msg_panic(msg: &'static [u8]) -> ! {
 // Internal: is the current hart already the recorded owner of `lk`?
 // ---------------------------------------------------------------------------
 #[inline]
-fn holding(lk: *mut spinlock_t) -> bool {
+fn holding(lk: *mut RawSpinlock) -> bool {
     cpu_atomic(lk).load(Ordering::Acquire) == CpuLocal::current().as_ptr()
 }
 
@@ -132,7 +192,7 @@ fn holding(lk: *mut spinlock_t) -> bool {
 // Slow path of `spin_acquire`: contention loop with panic-state checks.
 // ---------------------------------------------------------------------------
 #[inline(never)]
-fn acquire_contended(lk: *mut spinlock_t) {
+fn acquire_contended(lk: *mut RawSpinlock) {
     let locked = locked_atomic(lk);
     let mut count: u64 = 0;
     // `TICK_S` is `__timebase_frequency` in the C original; the
@@ -175,6 +235,7 @@ fn acquire_contended(lk: *mut spinlock_t) {
 /// Initialise a spinlock. Mirrors C `spin_init`.
 #[no_mangle]
 pub unsafe extern "C" fn spin_init(lk: *mut spinlock_t, name: *mut c_char) {
+    let lk = as_native(lk);
     set_name(lk, name);
     set_locked_plain(lk, 0);
     set_cpu_plain(lk, core::ptr::null_mut());
@@ -183,9 +244,10 @@ pub unsafe extern "C" fn spin_init(lk: *mut spinlock_t, name: *mut c_char) {
 /// Spin until `lk` is acquired by the current hart. Caller must have
 /// interrupts disabled (the public entry point `spin_lock` does that).
 pub(crate) unsafe fn spin_acquire(lk: *mut spinlock_t) {
-    if lk.is_null() || holding(lk) {
+    if lk.is_null() || holding(as_native(lk)) {
         fixed_msg_panic(MSG_REENTRY);
     }
+    let lk = as_native(lk);
     let locked = locked_atomic(lk);
     // Fast path: try once before entering the contention loop.
     if locked.swap(1, Ordering::Acquire) != 0 {
@@ -198,9 +260,10 @@ pub(crate) unsafe fn spin_acquire(lk: *mut spinlock_t) {
 
 /// Release a spinlock previously acquired by this hart.
 pub(crate) unsafe fn spin_release(lk: *mut spinlock_t) {
-    if lk.is_null() || !holding(lk) {
+    if lk.is_null() || !holding(as_native(lk)) {
         fixed_msg_panic(MSG_UNLOCK);
     }
+    let lk = as_native(lk);
     cpu_atomic(lk).store(core::ptr::null_mut(), Ordering::Release);
     locked_atomic(lk).store(0, Ordering::Release);
     CpuLocal::current().spin_depth_add(-1);
@@ -209,6 +272,7 @@ pub(crate) unsafe fn spin_release(lk: *mut spinlock_t) {
 /// Try-acquire variant that disables interrupts internally.
 pub(crate) unsafe fn spin_trylock(lk: *mut spinlock_t) -> c_int {
     push_off();
+    let lk = as_native(lk);
     if holding(lk) {
         pop_off();
         return 0;
@@ -227,7 +291,7 @@ pub(crate) unsafe fn spin_trylock(lk: *mut spinlock_t) -> c_int {
 /// must be disabled by the caller (the per-hart check uses `tp`).
 #[no_mangle]
 pub unsafe extern "C" fn spin_holding(lk: *mut spinlock_t) -> c_int {
-    if holding(lk) {
+    if holding(as_native(lk)) {
         1
     } else {
         0
