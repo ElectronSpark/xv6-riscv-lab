@@ -46,7 +46,6 @@ use crate::string::strncmp;
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 }
 
 /// `kernel/inc/dev/netdev.h`: `#define NETDEV_MAX 4`.
@@ -106,15 +105,15 @@ pub(crate) extern "C" fn netdev_register(dev: *mut netdev) -> c_int {
         (*dev).next = NETDEV_LIST;
         NETDEV_LIST = dev;
 
-        printf(
-            c"netdev: registered %s (MAC %x:%x:%x:%x:%x:%x) idx %d\n".as_ptr(),
-            (*dev).name.as_ptr(),
-            (*dev).mac[0] as c_int,
-            (*dev).mac[1] as c_int,
-            (*dev).mac[2] as c_int,
-            (*dev).mac[3] as c_int,
-            (*dev).mac[4] as c_int,
-            (*dev).mac[5] as c_int,
+        crate::kprintln!(
+            "netdev: registered {} (MAC {:x}:{:x}:{:x}:{:x}:{:x}:{:x}) idx {}",
+            crate::printf::Cs((*dev).name.as_ptr()),
+            ((*dev).mac[0] as c_int as i64) as u64,
+            ((*dev).mac[1] as c_int as i64) as u64,
+            ((*dev).mac[2] as c_int as i64) as u64,
+            ((*dev).mac[3] as c_int as i64) as u64,
+            ((*dev).mac[4] as c_int as i64) as u64,
+            ((*dev).mac[5] as c_int as i64) as u64,
             (*dev).index,
         );
     }

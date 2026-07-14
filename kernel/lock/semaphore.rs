@@ -58,10 +58,6 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
     unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
 }
 
-// Variadic printf — must stay in its own (non-`safe`) extern block.
-unsafe extern "C" {
-    pub fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -115,10 +111,9 @@ fn printf_post_failed(name: *const c_char) {
     // SAFETY: format string is a static NUL-terminated literal;
     // `name` is a pointer field of a semaphore (always valid C string).
     u! {
-        printf(
-            b"Failed to post semaphore '%s' when thread was interrupted\n\0"
-                .as_ptr() as *const c_char,
-            name);
+        crate::kprintln!(
+            "Failed to post semaphore '{}' when thread was interrupted",
+            crate::printf::Cs(name));
     }
 }
 
@@ -316,10 +311,9 @@ pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
         if wake_ret != 0 && wake_ret != -(ENOENT as c_int) {
             // SAFETY: variadic printf.
             u! {
-                printf(
-                    b"Failed to post semaphore '%s' after timed wait wakeup\n\0"
-                        .as_ptr() as *const c_char,
-                    name_of(s));
+                crate::kprintln!(
+                    "Failed to post semaphore '{}' after timed wait wakeup",
+                    crate::printf::Cs(name_of(s)));
             }
         }
         if signal_pending(cur) != 0 { return -(EINTR as c_int); }

@@ -59,7 +59,6 @@ unsafe extern "C" {
     safe fn xv6_panic(msg: *const c_char) -> !;
 
     // printf.rs — C-variadic.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // string.rs.
     safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
@@ -679,8 +678,8 @@ extern "C" fn xv6fs_mount(
         // Initialize block allocation cache.
         let ret = xv6fs_bcache_init(xv6_sb);
         if ret != 0 {
-            printf(
-                c"xv6fs: warning: block cache init failed (%d), using fallback\n".as_ptr(),
+            crate::kprintln!(
+                "xv6fs: warning: block cache init failed ({}), using fallback",
                 ret,
             );
             // Don't fail mount -- the fallback linear scan will still work.
@@ -798,8 +797,7 @@ pub(crate) extern "C" fn xv6fs_init() {
     kassert!(ret == 0, "xv6fs_init: vfs_register_fs_type failed");
     vfs_mount_unlock();
 
-    // SAFETY: `printf` is C-variadic; no format arguments.
-    unsafe { printf(c"xv6fs: filesystem type registered\n".as_ptr()) };
+    crate::kprintln!("xv6fs: filesystem type registered");
 }
 
 /// Mount xv6fs at `/root` and chroot into it. Requires tmpfs already
@@ -815,16 +813,14 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
     // (`vfs/fs.rs`), always live.
     let tmpfs_root = unsafe { vfs_root_inode.__bindgen_anon_2.__bindgen_anon_1.mnt_rooti };
     if tmpfs_root.is_null() {
-        // SAFETY: no format arguments.
-        unsafe { printf(c"xv6fs: no root filesystem to mount onto\n".as_ptr()) };
+        crate::kprintln!("xv6fs: no root filesystem to mount onto");
         return;
     }
 
     // Create /root directory in tmpfs root (vfs_mkdir handles its own locking).
     let root_dir = vfs_mkdir(tmpfs_root, 0o755, c"root".as_ptr(), 4);
     if is_err_or_null(root_dir) {
-        // SAFETY: no format arguments.
-        unsafe { printf(c"xv6fs: failed to create /root directory\n".as_ptr()) };
+        crate::kprintln!("xv6fs: failed to create /root directory");
         return;
     }
 
@@ -836,8 +832,7 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
     let dev_inode = vfs_mknod(tmpfs_root, super::S_IFBLK | 0o600, root_dev, c"rootdev".as_ptr(), 7);
     if is_err_or_null(dev_inode) {
         let errno = if dev_inode.is_null() { neg(ENOMEM) } else { dev_inode as isize as c_int };
-        // SAFETY: format matches the single %ld argument.
-        unsafe { printf(c"xv6fs: failed to create device inode, errno=%ld\n".as_ptr(), errno as i64) };
+        crate::kprintln!("xv6fs: failed to create device inode, errno={}", errno as i64);
         vfs_iput(root_dir);
         return;
     }
@@ -863,8 +858,7 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
     vfs_iput(dev_inode);
 
     if ret == 0 {
-        // SAFETY: no format arguments.
-        unsafe { printf(c"xv6fs: mounted at /root\n".as_ptr()) };
+        crate::kprintln!("xv6fs: mounted at /root");
 
         // Now chroot into the xv6fs root.
         // SAFETY: `root_dir` is live.
@@ -872,16 +866,13 @@ pub(crate) extern "C" fn xv6fs_mount_root() {
         if !xv6fs_root.is_null() {
             let ret = vfs_chroot(xv6fs_root);
             if ret == 0 {
-                // SAFETY: no format arguments.
-                unsafe { printf(c"xv6fs: chroot to /root successful\n".as_ptr()) };
+                crate::kprintln!("xv6fs: chroot to /root successful");
             } else {
-                // SAFETY: format matches the single %d argument.
-                unsafe { printf(c"xv6fs: chroot to /root failed, errno=%d\n".as_ptr(), ret) };
+                crate::kprintln!("xv6fs: chroot to /root failed, errno={}", ret);
             }
         }
     } else {
-        // SAFETY: format matches the single %d argument.
-        unsafe { printf(c"xv6fs: failed to mount at /root, errno=%d\n".as_ptr(), ret) };
+        crate::kprintln!("xv6fs: failed to mount at /root, errno={}", ret);
     }
     vfs_iput(root_dir);
 

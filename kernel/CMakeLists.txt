@@ -75,16 +75,19 @@ set(KERNEL_C_FILES
     # Phase 2 Wave 4). Its symbols are linked in via the xv6_rust
     # staticlib below.
     # NOTE: printf.c has been rewritten in Rust (kernel/printf.rs — Phase
-    # 2 Wave 4), EXCEPT for the C-variadic entry point `printf()` itself:
-    # stable rustc 1.95 cannot *define* a C-variadic function
-    # (`c_variadic` is nightly-only — verified empirically). printf_shim.c
-    # is the minimal last-resort C remnant (the variadic `printf()` entry
-    # point plus three one-line va_arg fetchers); every other symbol from
-    # printf.c (printf_rust's real formatter, __panic_start/__panic_end,
-    # panic_state, panic_disable_bt, printfinit, panic_msg_lock/unlock,
-    # puts, putchar) is linked in via the xv6_rust staticlib below. Delete
-    # this file once c_variadic stabilizes.
-    ${KERNEL_DIR}/printf_shim.c
+    # 2 Wave 4). Its last C remnant, printf_shim.c (the C-variadic
+    # `printf()` entry point + three va_arg fetchers, needed while
+    # `printf_rust` still parsed C format strings via an opaque va_list),
+    # was DELETED in Wave P3-2 (the zero-C milestone): every
+    # `printf(fmt, ...)` call site crate-wide was migrated to the native
+    # `core::fmt`-based `kprint!`/`kprintln!` macros (kernel/printf.rs), so
+    # the variadic entry point, `printf_rust`, and its va_arg fetchers were
+    # all removed. printf_shim.c was the last C file anywhere under
+    # kernel/ — with it gone, `find kernel -name '*.c'` is empty and the
+    # kernel builds with no C compiler step. All console/panic symbols
+    # (__panic_start/__panic_end, panic_state, panic_disable_bt, printfinit,
+    # panic_msg_lock/unlock, puts, putchar, and the kprint! backend) are
+    # linked in via the xv6_rust staticlib below.
     # NOTE: backtrace.c has been rewritten in Rust (kernel/backtrace.rs —
     # Phase 2 Wave 5). Its symbols are linked in via the xv6_rust
     # staticlib below.
@@ -573,8 +576,10 @@ set(RUST_FORCE_UNDEFINED
     --undefined=kernel_irq
     --undefined=usertrap
     --undefined=user_kirq_entrance
-    # Class 2: printf_shim.c's one import.
-    --undefined=printf_rust
+    # (Class 2 -- printf_shim.c's `printf_rust` import -- removed in Wave
+    # P3-2: printf_shim.c is deleted and `printf_rust` no longer exists;
+    # the zero-C printf path is all `core::fmt`-based `kprint!`/`kprintln!`
+    # now, with no external-name entry point to force-keep.)
 )
 
 # ==============================================================================

@@ -91,7 +91,7 @@ use crate::irq::irq_core::do_irq;
 use crate::irq::syscall::syscall;
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `panic_disable_bt`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
-use crate::printf::panic_disable_bt;
+use crate::printf::{panic_disable_bt, Cs, Ptr};
 // P3-1D mesh sweep: backtrace.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.
@@ -172,7 +172,6 @@ unsafe extern "C" {
     safe fn __panic_start();
     safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // mm/vm.rs
     safe fn vm_cpu_offline(vm_ptr: *mut vm, cpu: c_int);
@@ -404,35 +403,28 @@ fn scause_to_str(scause: u64) -> &'static CStr {
 #[cold]
 fn kpanic_msg(line: u32, function: &CStr, msg: &CStr) -> ! {
     __panic_start();
-    // SAFETY: every argument is a `'static` or caller-owned
-    // NUL-terminated C string matching its `%s` specifier.
-    unsafe {
-        printf(
-            c"PANIC %s:%d: In function '%s':\n".as_ptr(),
-            c"kernel/irq/trap.rs".as_ptr(),
-            line as c_int,
-            function.as_ptr(),
-        );
-        printf(msg.as_ptr());
-        printf(c"\n".as_ptr());
-    }
+    crate::kprintln!(
+        "PANIC {}:{}: In function '{}':",
+        Cs(c"kernel/irq/trap.rs".as_ptr()),
+        line,
+        Cs(function.as_ptr()),
+    );
+    crate::kprint!("{}", Cs(msg.as_ptr()));
+    crate::kprintln!();
     __panic_end()
 }
 
 #[cold]
 fn kassert_fail(line: u32, function: &CStr, msg: &CStr) -> ! {
     __panic_start();
-    // SAFETY: see `kpanic_msg`.
-    unsafe {
-        printf(
-            c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-            c"kernel/irq/trap.rs".as_ptr(),
-            line as c_int,
-            function.as_ptr(),
-        );
-        printf(msg.as_ptr());
-        printf(c"\n".as_ptr());
-    }
+    crate::kprintln!(
+        "ASSERTION_FAILURE {}:{}: In function '{}':",
+        Cs(c"kernel/irq/trap.rs".as_ptr()),
+        line,
+        Cs(function.as_ptr()),
+    );
+    crate::kprint!("{}", Cs(msg.as_ptr()));
+    crate::kprintln!();
     __panic_end()
 }
 
@@ -475,17 +467,14 @@ pub(crate) extern "C" fn trapinit() {
         TRAMPOLINE_USERRET = Some(core::mem::transmute::<u64, unsafe extern "C" fn(u64, u64)>(
             target,
         ));
-        printf(
-            c"trapinit: trampoline_userret at %p\n".as_ptr(),
-            target as *mut c_void,
-        );
+        crate::kprintln!("trapinit: trampoline_userret at {}", Ptr(target));
 
         // send syscalls, interrupts, and exceptions to uservec in
         // trampoline.S
         trampoline_uservec = TRAMPOLINE + (uservec_addr - trampoline_addr);
-        printf(
-            c"trapinit: trampoline_uservec at %p\n".as_ptr(),
-            trampoline_uservec as *mut c_void,
+        crate::kprintln!(
+            "trapinit: trampoline_uservec at {}",
+            Ptr(trampoline_uservec),
         );
 
         // Allocate and map interrupt stacks for each CPU hart.
@@ -514,11 +503,11 @@ pub(crate) extern "C" fn trapinit() {
             // boundary).
             CPUS[i as usize].intr_stacks = kirqstack(i) as *mut *mut c_void;
             CPUS[i as usize].intr_sp = CPUS[i as usize].intr_stacks as u64 + INTR_STACK_SIZE;
-            printf(
-                c"trapinit: CPU %d intr_stack at %lx -> %p\n".as_ptr(),
+            crate::kprintln!(
+                "trapinit: CPU {} intr_stack at {:x} -> {}",
                 i as c_int,
                 kirqstack(i),
-                stack_mem,
+                Ptr(stack_mem as u64),
             );
         }
     }
@@ -548,43 +537,43 @@ fn kerneltrap_dump_regs(tf: *mut trapframe) {
     // SAFETY: `tf` is a live trapframe for the duration of this call (see
     // callers).
     unsafe {
-        printf(c"kerneltrap_dump_regs:\n".as_ptr());
-        printf(c"pc: 0x%lx\n".as_ptr(), (*tf).sepc);
-        printf(
-            c"ra: 0x%lx, sp: 0x%lx, s0: 0x%lx\n".as_ptr(),
+        crate::kprintln!("kerneltrap_dump_regs:");
+        crate::kprintln!("pc: 0x{:x}", (*tf).sepc);
+        crate::kprintln!(
+            "ra: 0x{:x}, sp: 0x{:x}, s0: 0x{:x}",
             (*tf).ra,
             (*tf).sp,
             (*tf).s0,
         );
-        printf(
-            c"tp: 0x%lx, t0: 0x%lx, t1: 0x%lx, t2: 0x%lx\n".as_ptr(),
+        crate::kprintln!(
+            "tp: 0x{:x}, t0: 0x{:x}, t1: 0x{:x}, t2: 0x{:x}",
             machine::read_tp(),
             (*tf).t0,
             (*tf).t1,
             (*tf).t2,
         );
-        printf(
-            c"a0: 0x%lx, a1: 0x%lx, a2: 0x%lx, a3: 0x%lx\n".as_ptr(),
+        crate::kprintln!(
+            "a0: 0x{:x}, a1: 0x{:x}, a2: 0x{:x}, a3: 0x{:x}",
             (*tf).a0,
             (*tf).a1,
             (*tf).a2,
             (*tf).a3,
         );
-        printf(
-            c"a4: 0x%lx, a5: 0x%lx, a6: 0x%lx, a7: 0x%lx\n".as_ptr(),
+        crate::kprintln!(
+            "a4: 0x{:x}, a5: 0x{:x}, a6: 0x{:x}, a7: 0x{:x}",
             (*tf).a4,
             (*tf).a5,
             (*tf).a6,
             (*tf).a7,
         );
-        printf(
-            c"t3: 0x%lx, t4: 0x%lx, t5: 0x%lx, t6: 0x%lx\n".as_ptr(),
+        crate::kprintln!(
+            "t3: 0x{:x}, t4: 0x{:x}, t5: 0x{:x}, t6: 0x{:x}",
             (*tf).t3,
             (*tf).t4,
             (*tf).t5,
             (*tf).t6,
         );
-        printf(c"gp: 0x%lx\n".as_ptr(), read_gp());
+        crate::kprintln!("gp: 0x{:x}", read_gp());
     }
 }
 
@@ -605,10 +594,10 @@ fn trap_panic_dump(tf: *mut trapframe, s0: u64) -> ! {
     // trapframe, which is live stack memory on both the kernel-stack and
     // interrupt-stack trap-entry paths.
     unsafe {
-        printf(
-            c"scause=0x%lx(%s) sepc=0x%lx stval=0x%lx\n".as_ptr(),
+        crate::kprintln!(
+            "scause=0x{:x}({}) sepc=0x{:x} stval=0x{:x}",
             (*tf).scause,
-            scause_to_str((*tf).scause).as_ptr(),
+            Cs(scause_to_str((*tf).scause).as_ptr()),
             (*tf).sepc,
             (*tf).stval,
         );
@@ -618,8 +607,7 @@ fn trap_panic_dump(tf: *mut trapframe, s0: u64) -> ! {
 
     let p = machine::current_thread_ptr();
     if p.is_null() {
-        // SAFETY: no live thread pointer touched here.
-        unsafe { printf(c"kerneltrap: no current thread\n".as_ptr()) };
+        crate::kprintln!("kerneltrap: no current thread");
         kerneltrap_dump_regs(tf);
         panic_disable_bt();
         kpanic!(c"trap_panic_dump", c"kerneltrap");
@@ -1198,42 +1186,34 @@ pub(crate) extern "C" fn usertrapret() {
 #[no_mangle]
 pub extern "C" fn kerneltrap(sp: *mut trapframe, s0: u64) {
     if cpu_in_itr() {
-        // SAFETY: format string matches its argument.
-        unsafe {
-            printf(
-                c"kerneltrap: exception preempted interrupt. level=%d".as_ptr(),
-                intr_depth(),
-            )
-        };
+        crate::kprint!(
+            "kerneltrap: exception preempted interrupt. level={}",
+            intr_depth(),
+        );
         trap_panic_dump(sp, s0);
     }
     if intr_depth_postinc() != 0 {
-        // SAFETY: format string matches its argument.
-        unsafe {
-            printf(
-                c"kerneltrap: nested interrupts not supported. level=%d".as_ptr(),
-                intr_depth(),
-            )
-        };
+        crate::kprint!(
+            "kerneltrap: nested interrupts not supported. level={}",
+            intr_depth(),
+        );
         trap_panic_dump(sp, s0);
     }
     // SAFETY: `sp` is a live trapframe supplied by kernelvec.S's asm
     // trap-entry contract.
     let sstatus = unsafe { (*sp).sstatus };
     if (sstatus & SSTATUS_SPP) == 0 {
-        // SAFETY: no format args.
-        unsafe { printf(c"kerneltrap: not from supervisor mode".as_ptr()) };
+        crate::kprint!("kerneltrap: not from supervisor mode");
         trap_panic_dump(sp, s0);
     }
     if machine::intr_get() {
-        // SAFETY: no format args.
-        unsafe { printf(c"kerneltrap: interrupts enabled".as_ptr()) };
+        crate::kprint!("kerneltrap: interrupts enabled");
         trap_panic_dump(sp, s0);
     }
 
     // By now there's no valid exception from kernel mode.
     // SAFETY: format string matches its argument.
-    unsafe { printf(c"kerneltrap: unexpected scause 0x%lx\n".as_ptr(), (*sp).scause) };
+    unsafe { crate::kprintln!("kerneltrap: unexpected scause 0x{:x}", (*sp).scause) };
     trap_panic_dump(sp, s0);
 }
 
@@ -1266,20 +1246,17 @@ pub(crate) extern "C" fn enter_irq() {
         // (`mycpu()->intr_depth`), unlike every other assert in this
         // file, which pass a fixed literal message.
         __panic_start();
-        // SAFETY: every argument matches its format specifier.
-        unsafe {
-            printf(
-                c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-                c"kernel/irq/trap.rs".as_ptr(),
-                line!() as c_int,
-                c"enter_irq".as_ptr(),
-            );
-            printf(
-                c"enter_irq: nested interrupts not supported. level=%d".as_ptr(),
-                intr_depth(),
-            );
-            printf(c"\n".as_ptr());
-        }
+        crate::kprintln!(
+            "ASSERTION_FAILURE {}:{}: In function '{}':",
+            Cs(c"kernel/irq/trap.rs".as_ptr()),
+            line!(),
+            Cs(c"enter_irq".as_ptr()),
+        );
+        crate::kprint!(
+            "enter_irq: nested interrupts not supported. level={}",
+            intr_depth(),
+        );
+        crate::kprintln!();
         __panic_end();
     }
     intr_depth_inc();

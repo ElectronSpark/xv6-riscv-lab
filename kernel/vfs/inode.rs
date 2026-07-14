@@ -117,7 +117,6 @@ unsafe extern "C" {
     safe fn xv6_panic(msg: *const c_char) -> !;
 
     // printf.rs — C-variadic.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // lock/mutex.rs — `inode->mutex`.
     safe fn mutex_lock(m: *mut mutex_t);
@@ -399,7 +398,7 @@ fn vfs_inode_valid_locked(inode: *mut vfs_inode) -> c_int {
         if !core::ptr::eq(inode, root_inode_ptr()) {
             let sb = (*inode).sb;
             if sb.is_null() || (*sb).__bindgen_anon_2.valid() == 0 {
-                printf(c"__vfs_inode_valid: inode's superblock is not valid\n".as_ptr());
+                crate::kprintln!("__vfs_inode_valid: inode's superblock is not valid");
                 return neg(EINVAL);
             }
         }
@@ -559,10 +558,9 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
                 if let Some(remove_orphan) = (*(*sb).ops).remove_orphan {
                     let ret = remove_orphan(sb, inode);
                     if ret != 0 {
-                        printf(
-                            c"vfs_iput: warning: failed to remove orphan inode %lu from journal\n"
-                                .as_ptr(),
-                            (*inode).ino,
+                        crate::kprintln!(
+                            "vfs_iput: warning: failed to remove orphan inode {} from journal",
+                            (*inode).ino as u64,
                         );
                     }
                 }
@@ -627,13 +625,10 @@ pub(crate) extern "C" fn vfs_iput(inode_in: *mut vfs_inode) {
                     if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
                         let end_ret = unsafe { end_fn(sb) };
                         if end_ret != 0 {
-                            unsafe {
-                                printf(
-                                    c"vfs_iput: warning: end_transaction failed with error %d\n"
-                                        .as_ptr(),
-                                    end_ret,
-                                )
-                            };
+                            crate::kprintln!(
+                                "vfs_iput: warning: end_transaction failed with error {}",
+                                end_ret,
+                            );
                         }
                     }
 
@@ -751,12 +746,10 @@ pub(crate) extern "C" fn vfs_sync_inode(inode: *mut vfs_inode) -> c_int {
     if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
         let end_ret = unsafe { end_fn(sb) };
         if end_ret != 0 {
-            unsafe {
-                printf(
-                    c"vfs_sync_inode: warning: end_transaction failed with error %d\n".as_ptr(),
-                    end_ret,
-                )
-            };
+            crate::kprintln!(
+                "vfs_sync_inode: warning: end_transaction failed with error {}",
+                end_ret,
+            );
         }
     }
     ret
@@ -1194,12 +1187,10 @@ pub(crate) extern "C" fn vfs_create(
         if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
             let end_ret = unsafe { end_fn(sb) };
             if end_ret != 0 {
-                unsafe {
-                    printf(
-                        c"vfs_create: warning: end_transaction failed with error %d\n".as_ptr(),
-                        end_ret,
-                    )
-                };
+                crate::kprintln!(
+                    "vfs_create: warning: end_transaction failed with error {}",
+                    end_ret,
+                );
             }
         }
         return ret_ptr;
@@ -1262,12 +1253,10 @@ pub(crate) extern "C" fn vfs_mknod(
         if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
             let end_ret = unsafe { end_fn(sb) };
             if end_ret != 0 {
-                unsafe {
-                    printf(
-                        c"vfs_mknod: warning: end_transaction failed with error %d\n".as_ptr(),
-                        end_ret,
-                    )
-                };
+                crate::kprintln!(
+                    "vfs_mknod: warning: end_transaction failed with error {}",
+                    end_ret,
+                );
             }
         }
         return ret_ptr;
@@ -1339,12 +1328,10 @@ pub(crate) extern "C" fn vfs_link(
     if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
         let end_ret = unsafe { end_fn(sb) };
         if end_ret != 0 {
-            unsafe {
-                printf(
-                    c"vfs_link: warning: end_transaction failed with error %d\n".as_ptr(),
-                    end_ret,
-                )
-            };
+            crate::kprintln!(
+                "vfs_link: warning: end_transaction failed with error {}",
+                end_ret,
+            );
         }
     }
 
@@ -1448,12 +1435,10 @@ pub(crate) extern "C" fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, na
     if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
         let end_ret = unsafe { end_fn(sb) };
         if end_ret != 0 {
-            unsafe {
-                printf(
-                    c"vfs_unlink: warning: end_transaction failed with error %d\n".as_ptr(),
-                    end_ret,
-                )
-            };
+            crate::kprintln!(
+                "vfs_unlink: warning: end_transaction failed with error {}",
+                end_ret,
+            );
         }
     }
     vfs_iput(target); // Drop our reference from lookup
@@ -1523,12 +1508,10 @@ pub(crate) extern "C" fn vfs_mkdir(
         if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
             let end_ret = unsafe { end_fn(sb) };
             if end_ret != 0 {
-                unsafe {
-                    printf(
-                        c"vfs_mkdir: warning: end_transaction failed with error %d\n".as_ptr(),
-                        end_ret,
-                    )
-                };
+                crate::kprintln!(
+                    "vfs_mkdir: warning: end_transaction failed with error {}",
+                    end_ret,
+                );
             }
         }
         return ret_ptr;
@@ -1655,12 +1638,10 @@ pub(crate) extern "C" fn vfs_symlink(
         if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
             let end_ret = unsafe { end_fn(sb) };
             if end_ret != 0 {
-                unsafe {
-                    printf(
-                        c"vfs_symlink: warning: end_transaction failed with error %d\n".as_ptr(),
-                        end_ret,
-                    )
-                };
+                crate::kprintln!(
+                    "vfs_symlink: warning: end_transaction failed with error {}",
+                    end_ret,
+                );
             }
         }
         return ret_ptr;

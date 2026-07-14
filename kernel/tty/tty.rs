@@ -81,7 +81,6 @@ unsafe extern "C" {
 
     pub safe fn safestrcpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
 
-    pub safe fn printf(fmt: *const c_char, ...) -> c_int;
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }
@@ -180,21 +179,11 @@ fn err_ptr<T>(err: c_int) -> *mut T {
 // expansion (same pattern as `kernel/tty/tty_dev.rs::tty_dev_assert_errno`).
 // ===========================================================================
 
-fn tty_assert_errno(cond: bool, line: u32, msg: &core::ffi::CStr, errno: c_int) {
-    if cond {
-        return;
-    }
-    __panic_start();
-    printf(
-        c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-        c"kernel/tty/tty.rs".as_ptr(),
-        line as c_int,
-        c"tty_init".as_ptr(),
-    );
-    printf(msg.as_ptr(), errno);
-    printf(c"\n".as_ptr());
-    __panic_end();
-}
+// P3-2 (zero-C wave): `tty_assert_errno` used to take its assertion
+// message as a runtime `&CStr` embedding a `%d` -- `core::fmt`'s
+// `format_args!` requires a literal format string, so (matching
+// `tty_dev.rs`'s equivalent fix) its one call site below was inlined
+// directly instead of kept as a helper.
 
 // ===========================================================================
 // Slab cache.
@@ -235,12 +224,17 @@ pub(crate) extern "C" fn tty_init() {
             crate::bindings::SLAB_FLAG_STATIC as u64,
         )
     };
-    tty_assert_errno(
-        ret == 0,
-        line!(),
-        c"tty_init: failed to init tty_cache slab, errno=%d\n",
-        ret,
-    );
+    if ret != 0 {
+        __panic_start();
+        crate::kprintln!(
+            "ASSERTION_FAILURE {}:{}: In function '{}':",
+            "kernel/tty/tty.rs",
+            line!(),
+            "tty_init",
+        );
+        crate::kprintln!("tty_init: failed to init tty_cache slab, errno={}", ret);
+        __panic_end();
+    }
 }
 
 // ===========================================================================

@@ -46,7 +46,6 @@ mod ffi {
         pub safe static _ksymbols_idx_end: u8;
 
         // printf is variadic, so it cannot be declared `safe`.
-        pub fn printf(fmt: *const c_char, ...) -> core::ffi::c_int;
     }
 }
 
@@ -222,11 +221,11 @@ pub(crate) unsafe extern "C" fn ksymbols_init() {
         let sym_size = (sym_end as usize).wrapping_sub(sym_start as usize);
 
         if sym_size == 0 {
-            ffi::printf(c"ksymbols: no embedded symbols found\n".as_ptr());
+            crate::kprintln!("ksymbols: no embedded symbols found");
             return;
         }
-        ffi::printf(
-            c"ksymbols: loading embedded symbols from 0x%lx-0x%lx (%ld bytes)\n".as_ptr(),
+        crate::kprintln!(
+            "ksymbols: loading embedded symbols from 0x{:x}-0x{:x} ({} bytes)",
             sym_start as u64,
             sym_end as u64,
             sym_size as u64,
@@ -280,7 +279,7 @@ pub(crate) unsafe extern "C" fn ksymbols_init() {
             i += 1;
         }
 
-        ffi::printf(c"Kernel symbols initialized: %d entries\n".as_ptr(), KSYM_COUNT);
+        crate::kprintln!("Kernel symbols initialized: {} entries", KSYM_COUNT);
     }
 }
 
@@ -487,14 +486,14 @@ pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, 
     // SAFETY: see function-level `# Safety` and the frame-walking section
     // doc above.
     unsafe {
-        ffi::printf(c"backtrace:\n".as_ptr());
+        crate::kprintln!("backtrace:");
 
         let mut last_fp = context;
         let mut fp = frame_top(context);
         let mut depth = 0u32;
         while !is_top_frame(fp) && depth < BACKTRACE_MAX_DEPTH {
             if fp < stack_start || fp >= stack_end {
-                ffi::printf(c"  * unknown frame: %p\n".as_ptr(), fp as *const c_void);
+                crate::kprintln!("  * unknown frame: {}", crate::printf::Ptr(fp));
                 break;
             }
 
@@ -502,25 +501,28 @@ pub(crate) unsafe extern "C" fn print_backtrace(context: u64, stack_start: u64, 
             let mut filebuf = [0u8; 128];
             let return_addr_val = return_address(last_fp);
             if return_addr_val == 0 {
-                ffi::printf(c"  top frame\n".as_ptr());
+                crate::kprintln!("  top frame");
                 break;
             }
 
             let entry = bt_search_sym(return_addr_val);
             match entry {
                 None => {
-                    ffi::printf(c"  * %p: unknown\n".as_ptr(), return_addr_val as *const c_void);
+                    crate::kprintln!(
+                        "  * {}: unknown",
+                        crate::printf::Ptr(return_addr_val),
+                    );
                 }
                 Some(e) => {
                     fill_symbol(e, &mut symbuf);
                     let line = bt_get_location(entry, &mut filebuf);
                     let offset = bt_get_offset(entry, return_addr_val);
-                    ffi::printf(
-                        c"  * %s:%d: %s+%d\n".as_ptr(),
-                        filebuf.as_ptr(),
-                        line as c_int,
-                        symbuf.as_ptr(),
-                        offset as c_int,
+                    crate::kprintln!(
+                        "  * {}:{}: {}+{}",
+                        crate::printf::Cs(filebuf.as_ptr() as *const c_char),
+                        line,
+                        crate::printf::Cs(symbuf.as_ptr() as *const c_char),
+                        offset,
                     );
                 }
             }
@@ -547,7 +549,7 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
     // matching the C original.
     unsafe {
         if ctx.is_null() || kstack == 0 {
-            ffi::printf(c"backtrace: invalid context or stack\n".as_ptr());
+            crate::kprintln!("backtrace: invalid context or stack");
             return;
         }
 
@@ -556,7 +558,7 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
         let stack_start = kstack;
         let stack_end = kstack + stack_size;
 
-        ffi::printf(c"backtrace:\n".as_ptr());
+        crate::kprintln!("backtrace:");
 
         let mut symbuf = [0u8; 64];
         let mut filebuf = [0u8; 128];
@@ -565,19 +567,22 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
         let entry0 = bt_search_sym((*ctx).ra);
         match entry0 {
             None => {
-                ffi::printf(c"  > %p: unknown (resume point)\n".as_ptr(), (*ctx).ra as *const c_void);
+                crate::kprintln!(
+                    "  > {}: unknown (resume point)",
+                    crate::printf::Ptr((*ctx).ra),
+                );
             }
             Some(e) => {
                 fill_symbol(e, &mut symbuf);
                 let line = bt_get_location(entry0, &mut filebuf);
                 let offset = bt_get_offset(entry0, (*ctx).ra);
-                ffi::printf(
-                    c"  > %s:%d: %s+%d (resume point) [%p]\n".as_ptr(),
-                    filebuf.as_ptr(),
-                    line as c_int,
-                    symbuf.as_ptr(),
-                    offset as c_int,
-                    (*ctx).ra as *const c_void,
+                crate::kprintln!(
+                    "  > {}:{}: {}+{} (resume point) [{}]",
+                    crate::printf::Cs(filebuf.as_ptr() as *const c_char),
+                    line,
+                    crate::printf::Cs(symbuf.as_ptr() as *const c_char),
+                    offset,
+                    crate::printf::Ptr((*ctx).ra),
                 );
             }
         }
@@ -591,7 +596,7 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
         let mut depth = 0u32;
         while !is_top_frame(curr_fp) && depth < BACKTRACE_MAX_DEPTH {
             if curr_fp < stack_start || curr_fp >= stack_end {
-                ffi::printf(c"  * frame outside stack: %p\n".as_ptr(), curr_fp as *const c_void);
+                crate::kprintln!("  * frame outside stack: {}", crate::printf::Ptr(curr_fp));
                 break;
             }
 
@@ -603,7 +608,7 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
             if return_addr_val == last_return_addr {
                 repeat_count += 1;
                 if repeat_count >= MAX_REPEATS {
-                    ffi::printf(c"  * ... (%ld more repeated frames)\n".as_ptr(), depth as u64);
+                    crate::kprintln!("  * ... ({} more repeated frames)", depth as u64);
                     break;
                 }
             } else {
@@ -614,19 +619,22 @@ pub(crate) unsafe extern "C" fn print_thread_backtrace(ctx: *mut context, kstack
             let entry = bt_search_sym(return_addr_val);
             match entry {
                 None => {
-                    ffi::printf(c"  * %p: unknown\n".as_ptr(), return_addr_val as *const c_void);
+                    crate::kprintln!(
+                        "  * {}: unknown",
+                        crate::printf::Ptr(return_addr_val),
+                    );
                 }
                 Some(e) => {
                     fill_symbol(e, &mut symbuf);
                     let line = bt_get_location(entry, &mut filebuf);
                     let offset = bt_get_offset(entry, return_addr_val);
-                    ffi::printf(
-                        c"  * %s:%d: %s+%d [%p]\n".as_ptr(),
-                        filebuf.as_ptr(),
-                        line as c_int,
-                        symbuf.as_ptr(),
-                        offset as c_int,
-                        return_addr_val as *const c_void,
+                    crate::kprintln!(
+                        "  * {}:{}: {}+{} [{}]",
+                        crate::printf::Cs(filebuf.as_ptr() as *const c_char),
+                        line,
+                        crate::printf::Cs(symbuf.as_ptr() as *const c_char),
+                        offset,
+                        crate::printf::Ptr(return_addr_val),
                     );
                 }
             }

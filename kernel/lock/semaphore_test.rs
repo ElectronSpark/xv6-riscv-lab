@@ -37,10 +37,6 @@ unsafe extern "C" {
     ) -> *mut thread;
 }
 
-// Variadic FFI cannot be marked safe.
-unsafe extern "C" {
-    pub fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 const KERNEL_STACK_ORDER: c_int = 2;
 // Matches `SEM_VALUE_MAX` in kernel/inc/lock/semaphore.h.
@@ -94,11 +90,9 @@ fn fail() {
 
 fn print_result() {
     if SEM_ERROR_FLAG.load(Ordering::SeqCst) != 0 {
-        // SAFETY: static NUL-terminated format string, no arguments.
-        unsafe { printf(c"FAIL\n".as_ptr()); }
+        crate::kprintln!("FAIL");
     } else {
-        // SAFETY: see above.
-        unsafe { printf(c"OK\n".as_ptr()); }
+        crate::kprintln!("OK");
     }
 }
 
@@ -113,15 +107,12 @@ fn sem_wait_for(cell: &AtomicI32, expected: i32, mut spin_loops: i32) -> bool {
         scheduler_yield();
     }
     if SEM_T4_LOG_BUDGET.fetch_add(1, Ordering::SeqCst) + 1 <= 8 {
-        // SAFETY: static format string; args match %p/%d/%d.
-        unsafe {
-            printf(
-                c"[sem][diag] wait_for timed out target=%p value=%d expected=%d\n".as_ptr(),
-                cell as *const AtomicI32,
-                cell.load(Ordering::SeqCst),
-                expected,
-            );
-        }
+        crate::kprintln!(
+            "[sem][diag] wait_for timed out target={} value={} expected={}",
+            crate::printf::Ptr(cell as *const AtomicI32 as u64),
+            cell.load(Ordering::SeqCst),
+            expected,
+        );
     }
     false
 }
@@ -149,8 +140,7 @@ extern "C" fn sem_test1_waiter(_a1: u64, _a2: u64) {
 }
 
 fn sem_run_test1() {
-    // SAFETY: static format string.
-    unsafe { printf(c"[sem][T1] waiters block until posted tokens... ".as_ptr()); }
+    crate::kprint!("[sem][T1] waiters block until posted tokens... ");
     SEM_ERROR_FLAG.store(0, Ordering::SeqCst);
     SEM_T1_WAIT_REQUESTS.store(0, Ordering::SeqCst);
     SEM_T1_ACQUIRED.store(0, Ordering::SeqCst);
@@ -197,8 +187,7 @@ fn sem_run_test1() {
 // ---------------------------------------------------------------------------
 
 fn sem_run_test2() {
-    // SAFETY: static format string.
-    unsafe { printf(c"[sem][T2] trywait semantics... ".as_ptr()); }
+    crate::kprint!("[sem][T2] trywait semantics... ");
     SEM_ERROR_FLAG.store(0, Ordering::SeqCst);
 
     let mut storage: MaybeUninit<sem_t> = MaybeUninit::uninit();
@@ -230,8 +219,7 @@ fn sem_run_test2() {
 // ---------------------------------------------------------------------------
 
 fn sem_run_test3() {
-    // SAFETY: static format string.
-    unsafe { printf(c"[sem][T3] overflow guard... ".as_ptr()); }
+    crate::kprint!("[sem][T3] overflow guard... ");
     SEM_ERROR_FLAG.store(0, Ordering::SeqCst);
 
     let mut storage: MaybeUninit<sem_t> = MaybeUninit::uninit();
@@ -297,8 +285,7 @@ extern "C" fn sem_t4_producer(_a1: u64, _a2: u64) {
         }
         if sem_t4_empty().wait().is_err() {
             if t4_log_budget_ok() {
-                // SAFETY: static format string, no arguments.
-                unsafe { printf(c"[sem][T4][prod] sem_wait(empty) failed\n".as_ptr()); }
+                crate::kprintln!("[sem][T4][prod] sem_wait(empty) failed");
             }
             fail();
             return;
@@ -314,8 +301,7 @@ extern "C" fn sem_t4_producer(_a1: u64, _a2: u64) {
         }
         if sem_t4_full().post().is_err() {
             if t4_log_budget_ok() {
-                // SAFETY: see above.
-                unsafe { printf(c"[sem][T4][prod] sem_post(full) failed\n".as_ptr()); }
+                crate::kprintln!("[sem][T4][prod] sem_post(full) failed");
             }
             fail();
             return;
@@ -335,8 +321,7 @@ extern "C" fn sem_t4_consumer(_a1: u64, _a2: u64) {
 
         if sem_t4_full().wait().is_err() {
             if t4_log_budget_ok() {
-                // SAFETY: static format string, no arguments.
-                unsafe { printf(c"[sem][T4][cons] sem_wait(full) failed\n".as_ptr()); }
+                crate::kprintln!("[sem][T4][cons] sem_wait(full) failed");
             }
             fail();
             return;
@@ -368,23 +353,14 @@ extern "C" fn sem_t4_consumer(_a1: u64, _a2: u64) {
         }
         if bad && t4_log_budget_ok() {
             if value < 0 || value >= SEM_T4_TOTAL_ITEMS {
-                // SAFETY: static format string; args match %d/%d/%d.
-                unsafe {
-                    printf(
-                        c"[sem][T4][cons] out-of-range value=%d tail=%d head=%d\n".as_ptr(),
-                        value,
-                        SEM_T4_TAIL.load(Ordering::SeqCst),
-                        SEM_T4_HEAD.load(Ordering::SeqCst),
-                    );
-                }
+                crate::kprintln!(
+                    "[sem][T4][cons] out-of-range value={} tail={} head={}",
+                    value,
+                    SEM_T4_TAIL.load(Ordering::SeqCst),
+                    SEM_T4_HEAD.load(Ordering::SeqCst),
+                );
             } else {
-                // SAFETY: see above.
-                unsafe {
-                    printf(
-                        c"[sem][T4][cons] duplicate value=%d\n".as_ptr(),
-                        value,
-                    );
-                }
+                crate::kprintln!("[sem][T4][cons] duplicate value={}", value);
             }
         }
 
@@ -392,8 +368,7 @@ extern "C" fn sem_t4_consumer(_a1: u64, _a2: u64) {
 
         if sem_t4_empty().post().is_err() {
             if t4_log_budget_ok() {
-                // SAFETY: static format string, no arguments.
-                unsafe { printf(c"[sem][T4][cons] sem_post(empty) failed\n".as_ptr()); }
+                crate::kprintln!("[sem][T4][cons] sem_post(empty) failed");
             }
             fail();
             return;
@@ -409,8 +384,7 @@ extern "C" fn sem_t4_consumer(_a1: u64, _a2: u64) {
 }
 
 fn sem_run_test4() {
-    // SAFETY: static format string.
-    unsafe { printf(c"[sem][T4] producer/consumer stress... ".as_ptr()); }
+    crate::kprint!("[sem][T4] producer/consumer stress... ");
     SEM_ERROR_FLAG.store(0, Ordering::SeqCst);
 
     if sem_t4_empty().init(c"sem-empty".as_ptr(), SEM_T4_BUFFER_CAP).is_err() {
@@ -448,8 +422,7 @@ fn sem_run_test4() {
     } else {
         for _ in 0..SEM_T4_CONSUMERS {
             if sem_t4_full().post().is_err() && t4_log_budget_ok() {
-                // SAFETY: static format string, no arguments.
-                unsafe { printf(c"[sem][T4] failed to post wake sentinel for consumers\n".as_ptr()); }
+                crate::kprintln!("[sem][T4] failed to post wake sentinel for consumers");
             }
         }
     }
@@ -460,14 +433,7 @@ fn sem_run_test4() {
     let consumed = SEM_T4_ITEMS_CONSUMED.load(Ordering::SeqCst);
     if consumed != SEM_T4_TOTAL_ITEMS {
         if t4_log_budget_ok() {
-            // SAFETY: static format string; args match %d/%d.
-            unsafe {
-                printf(
-                    c"[sem][T4] consumed=%d expected=%d\n".as_ptr(),
-                    consumed,
-                    SEM_T4_TOTAL_ITEMS,
-                );
-            }
+            crate::kprintln!("[sem][T4] consumed={} expected={}", consumed, SEM_T4_TOTAL_ITEMS);
         }
         fail();
     }
@@ -475,8 +441,7 @@ fn sem_run_test4() {
     for i in 0..SEM_T4_TOTAL_ITEMS {
         if SEM_T4_SEEN[i as usize].load(Ordering::SeqCst) == 0 {
             if t4_log_budget_ok() {
-                // SAFETY: static format string; arg matches %d.
-                unsafe { printf(c"[sem][T4] missing item %d\n".as_ptr(), i); }
+                crate::kprintln!("[sem][T4] missing item {}", i);
             }
             fail();
         }
@@ -494,13 +459,12 @@ extern "C" fn semaphore_test_master(_a1: u64, _a2: u64) {
         scheduler_yield();
     }
 
-    // SAFETY: static format strings, no arguments, throughout this fn.
-    unsafe { printf(c"[sem] starting semaphore tests\n".as_ptr()); }
+    crate::kprintln!("[sem] starting semaphore tests");
     sem_run_test1();
     sem_run_test2();
     sem_run_test3();
     sem_run_test4();
-    unsafe { printf(c"[sem] tests finished\n".as_ptr()); }
+    crate::kprintln!("[sem] tests finished");
 }
 
 /// Spawn the semaphore test-suite master kthread. Preserves the original
@@ -509,7 +473,6 @@ extern "C" fn semaphore_test_master(_a1: u64, _a2: u64) {
 #[no_mangle]
 pub extern "C" fn semaphore_launch_tests() {
     if !spawn(c"semaphore_test_master", semaphore_test_master, 0, 0) {
-        // SAFETY: static format string, no arguments.
-        unsafe { printf(c"[sem] cannot create test master thread\n".as_ptr()); }
+        crate::kprintln!("[sem] cannot create test master thread");
     }
 }

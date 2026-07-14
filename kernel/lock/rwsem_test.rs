@@ -36,10 +36,6 @@ unsafe extern "C" {
     pub safe fn tq_size(q: *mut tq_t) -> c_int;
 }
 
-// Variadic FFI cannot be marked safe.
-unsafe extern "C" {
-    pub fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 const KERNEL_STACK_ORDER: c_int = 2;
 
@@ -111,10 +107,10 @@ fn fail() {
 fn print_result() {
     if ERROR_FLAG.load(Ordering::SeqCst) != 0 {
         // SAFETY: static NUL-terminated format string, no arguments.
-        unsafe { printf(c"FAIL\n".as_ptr()); }
+        unsafe { crate::kprintln!("FAIL"); }
     } else {
         // SAFETY: see above.
-        unsafe { printf(c"OK\n".as_ptr()); }
+        unsafe { crate::kprintln!("OK"); }
     }
 }
 
@@ -124,10 +120,10 @@ fn record_integrity_failure(label: &CStr, reason: &CStr, v1: i64, v2: i64) {
     if INTEGRITY_LOG_COUNT.fetch_add(1, Ordering::SeqCst) + 1 <= 8 {
         // SAFETY: static format string; args match %s/%s/%ld/%ld.
         unsafe {
-            printf(
-                c"[rwsem][integrity][%s] %s (v1=%ld v2=%ld)\n".as_ptr(),
-                label.as_ptr(),
-                reason.as_ptr(),
+            crate::kprintln!(
+                "[rwsem][integrity][{}] {} (v1={} v2={})",
+                crate::printf::Cs(label.as_ptr()),
+                crate::printf::Cs(reason.as_ptr()),
                 v1,
                 v2,
             );
@@ -246,7 +242,7 @@ extern "C" fn t1_reader(_a1: u64, _a2: u64) {
 
 fn run_test1() {
     // SAFETY: static format string.
-    unsafe { printf(c"[rwsem][T1] multiple readers... ".as_ptr()); }
+    unsafe { crate::kprint!("[rwsem][T1] multiple readers... "); }
     let target: i32 = 4;
     T1_TARGET_READERS.store(target, Ordering::SeqCst);
     T1_DONE_READERS.store(0, Ordering::SeqCst);
@@ -272,8 +268,8 @@ fn run_test1() {
     if observed_max != target {
         // SAFETY: static format string; args match %d/%d/%d.
         unsafe {
-            printf(
-                c"(observed max=%d started=%d expected=%d) ".as_ptr(),
+            crate::kprint!(
+                "(observed max={} started={} expected={}) ",
                 observed_max,
                 T1_STARTED_READERS.load(Ordering::SeqCst),
                 target,
@@ -318,8 +314,8 @@ extern "C" fn t2_writer(_a1: u64, _a2: u64) {
     if ACTIVE_READERS.load(Ordering::SeqCst) != 0 {
         // SAFETY: static format string; arg matches %d.
         unsafe {
-            printf(
-                c"[rwsem][T2] writer saw active_readers=%d (expected 0)\n".as_ptr(),
+            crate::kprintln!(
+                "[rwsem][T2] writer saw active_readers={} (expected 0)",
                 ACTIVE_READERS.load(Ordering::SeqCst),
             );
         }
@@ -337,7 +333,7 @@ extern "C" fn t2_writer(_a1: u64, _a2: u64) {
 
 fn run_test2() {
     // SAFETY: static format string.
-    unsafe { printf(c"[rwsem][T2] writer waits for readers... ".as_ptr()); }
+    unsafe { crate::kprint!("[rwsem][T2] writer waits for readers... "); }
     let target: i32 = 3;
     T2_TARGET_READERS.store(target, Ordering::SeqCst);
     T2_DONE_READERS.store(0, Ordering::SeqCst);
@@ -382,8 +378,8 @@ extern "C" fn t3_writer(_a1: u64, _a2: u64) {
     if ACTIVE_WRITERS.load(Ordering::SeqCst) != 0 {
         // SAFETY: static format string; arg matches %d.
         unsafe {
-            printf(
-                c"[rwsem][T3] mutual exclusion violated (active_writers=%d)\n".as_ptr(),
+            crate::kprintln!(
+                "[rwsem][T3] mutual exclusion violated (active_writers={})",
                 ACTIVE_WRITERS.load(Ordering::SeqCst),
             );
         }
@@ -401,7 +397,7 @@ extern "C" fn t3_writer(_a1: u64, _a2: u64) {
 
 fn run_test3() {
     // SAFETY: static format string.
-    unsafe { printf(c"[rwsem][T3] mutual exclusion for writers... ".as_ptr()); }
+    unsafe { crate::kprint!("[rwsem][T3] mutual exclusion for writers... "); }
     T3_DONE_WRITERS.store(0, Ordering::SeqCst);
     ACTIVE_WRITERS.store(0, Ordering::SeqCst);
     ERROR_FLAG.store(0, Ordering::SeqCst);
@@ -508,7 +504,7 @@ extern "C" fn t4_reader(_a1: u64, _a2: u64) {
         if len != T4_DATA_LEN as i32 {
             if t4_log_budget_ok() {
                 // SAFETY: static format string; arg matches %d.
-                unsafe { printf(c"[rwsem][T4] len mismatch %d\n".as_ptr(), len); }
+                unsafe { crate::kprintln!("[rwsem][T4] len mismatch {}", len); }
             }
             fail();
         } else if version > 0 {
@@ -521,11 +517,11 @@ extern "C" fn t4_reader(_a1: u64, _a2: u64) {
                     if t4_log_budget_ok() {
                         // SAFETY: static format string; args match %d/%x/%x/%d.
                         unsafe {
-                            printf(
-                                c"[rwsem][T4] data[%d]=%x expected %x (ver=%d)\n".as_ptr(),
+                            crate::kprintln!(
+                                "[rwsem][T4] data[{}]={:x} expected {:x} (ver={})",
                                 i as i32,
-                                got,
-                                expected,
+                                ((got as i32 as i64) as u64),
+                                ((expected as i32 as i64) as u64),
                                 version,
                             );
                         }
@@ -540,10 +536,10 @@ extern "C" fn t4_reader(_a1: u64, _a2: u64) {
                 if t4_log_budget_ok() {
                     // SAFETY: static format string; args match %x/%x/%d.
                     unsafe {
-                        printf(
-                            c"[rwsem][T4] checksum mismatch sum=%x stored=%x ver=%d\n".as_ptr(),
-                            sum,
-                            checksum,
+                        crate::kprintln!(
+                            "[rwsem][T4] checksum mismatch sum={:x} stored={:x} ver={}",
+                            ((sum as i32 as i64) as u64),
+                            ((checksum as i32 as i64) as u64),
                             version,
                         );
                     }
@@ -563,7 +559,7 @@ extern "C" fn t4_reader(_a1: u64, _a2: u64) {
 
 fn run_test4() {
     // SAFETY: static format string.
-    unsafe { printf(c"[rwsem][T4] data consistency under stress... ".as_ptr()); }
+    unsafe { crate::kprint!("[rwsem][T4] data consistency under stress... "); }
     ERROR_FLAG.store(0, Ordering::SeqCst);
     // SAFETY: exclusive access — no test thread has been spawned yet.
     unsafe {
@@ -614,9 +610,9 @@ extern "C" fn rwsem_test_master(_a1: u64, _a2: u64) {
         scheduler_yield();
     }
     // SAFETY: static format strings, no arguments, throughout this fn.
-    unsafe { printf(c"[rwsem] starting simple rwsem tests\n".as_ptr()); }
+    unsafe { crate::kprintln!("[rwsem] starting simple rwsem tests"); }
     if test_lock().init(0, c"rwsem-test".as_ptr()).is_err() {
-        unsafe { printf(c"[rwsem] init failed\n".as_ptr()); }
+        unsafe { crate::kprintln!("[rwsem] init failed"); }
         return;
     }
     check_rwsem_integrity(c"init");
@@ -624,7 +620,7 @@ extern "C" fn rwsem_test_master(_a1: u64, _a2: u64) {
     run_test2();
     run_test3();
     run_test4();
-    unsafe { printf(c"[rwsem] tests finished\n".as_ptr()); }
+    unsafe { crate::kprintln!("[rwsem] tests finished"); }
 }
 
 /// Spawn the rwsem test-suite master kthread. Preserves the original `void
@@ -634,6 +630,6 @@ extern "C" fn rwsem_test_master(_a1: u64, _a2: u64) {
 pub extern "C" fn rwsem_launch_tests() {
     if !spawn(c"rwsem_test_master", rwsem_test_master) {
         // SAFETY: static format string, no arguments.
-        unsafe { printf(c"[rwsem] cannot create test master thread\n".as_ptr()); }
+        unsafe { crate::kprintln!("[rwsem] cannot create test master thread"); }
     }
 }

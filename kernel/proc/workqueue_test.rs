@@ -88,10 +88,6 @@ use crate::proc::{
     workqueue_create_with_callbacks, workqueue_kill,
 };
 
-// Variadic FFI cannot be marked safe.
-unsafe extern "C" {
-    pub fn printf(fmt: *const c_char, ...) -> c_int;
-}
 unsafe extern "C" {
     // Not `pub`: shares a bare name with the real definition glob-
     // reexported from `sched.rs` at `crate::proc` -- see the identical
@@ -116,18 +112,15 @@ fn case_fail() {
 }
 
 fn run_test(name: &core::ffi::CStr, body: fn()) {
-    // SAFETY: static format string; one %s arg.
-    unsafe { printf(c"[workqueue][%s] ".as_ptr(), name.as_ptr()); }
+    crate::kprint!("[workqueue][{}] ", crate::printf::Cs(name.as_ptr()));
     CASE_ERROR.store(0, Ordering::SeqCst);
     body();
     TESTS_RUN.fetch_add(1, Ordering::SeqCst);
     if CASE_ERROR.load(Ordering::SeqCst) == 0 {
         TESTS_PASSED.fetch_add(1, Ordering::SeqCst);
-        // SAFETY: static format string, no args.
-        unsafe { printf(c"OK\n".as_ptr()); }
+        crate::kprintln!("OK");
     } else {
-        // SAFETY: static format string, no args.
-        unsafe { printf(c"FAIL\n".as_ptr()); }
+        crate::kprintln!("FAIL");
     }
 }
 
@@ -324,14 +317,7 @@ fn t6_multi_worker_concurrency() {
         *slot = w;
     }
     if !wait_for(&RUN_COUNT, T6_ITEMS as i32, 4000) {
-        // SAFETY: static format string; two %d args.
-        unsafe {
-            printf(
-                c"(ran %d/%d) ".as_ptr(),
-                RUN_COUNT.load(Ordering::SeqCst),
-                T6_ITEMS as i32,
-            );
-        }
+        crate::kprint!("(ran {}/{}) ", RUN_COUNT.load(Ordering::SeqCst), T6_ITEMS as i32);
         case_fail();
     }
     for &w in items.iter() {
@@ -386,8 +372,7 @@ extern "C" fn workqueue_test_master(_a1: u64, _a2: u64) {
     for _ in 0..10_000 {
         scheduler_yield();
     }
-    // SAFETY: static format string, no arguments.
-    unsafe { printf(c"[workqueue] starting workqueue tests\n".as_ptr()); }
+    crate::kprintln!("[workqueue] starting workqueue tests");
 
     run_test(c"T1 ctor_invoked_on_create", t1_ctor_invoked_on_create);
     run_test(c"T2 dtor_invoked_once_on_kill", t2_dtor_invoked_once_on_kill);
@@ -400,11 +385,9 @@ extern "C" fn workqueue_test_master(_a1: u64, _a2: u64) {
     let passed = TESTS_PASSED.load(Ordering::SeqCst);
     let total = TESTS_RUN.load(Ordering::SeqCst);
     if passed == total {
-        // SAFETY: static format string; two %d args.
-        unsafe { printf(c"WORKQUEUE TESTS: %d/%d PASSED\n".as_ptr(), passed, total); }
+        crate::kprintln!("WORKQUEUE TESTS: {}/{} PASSED", passed, total);
     } else {
-        // SAFETY: see above.
-        unsafe { printf(c"WORKQUEUE TESTS: %d/%d FAILED\n".as_ptr(), passed, total); }
+        crate::kprintln!("WORKQUEUE TESTS: {}/{} FAILED", passed, total);
     }
 }
 
@@ -449,8 +432,7 @@ pub(crate) extern "C" fn workqueue_test_launch_tests() {
         KERNEL_STACK_ORDER,
     );
     if is_err_or_null(np) {
-        // SAFETY: static format string, no arguments.
-        unsafe { printf(c"[workqueue] cannot create test master thread\n".as_ptr()); }
+        crate::kprintln!("[workqueue] cannot create test master thread");
     } else {
         wakeup(np);
     }

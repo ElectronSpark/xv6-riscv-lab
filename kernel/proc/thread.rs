@@ -123,7 +123,6 @@ unsafe extern "C" {
     fn strncpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
     fn safestrcpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
 
-    fn printf(fmt: *const c_char, ...) -> c_int;
     pub safe fn xv6_panic(msg: *const c_char) -> !;
 
     // pid hierarchy
@@ -651,8 +650,7 @@ pub extern "C" fn idle_thread_init() {
         core::sync::atomic::fence(Ordering::Release);
         core::ptr::write_volatile(&mut (*se).on_cpu as *mut c_int, 1);
 
-        printf(c"CPU %ld idle process initialized at kstack 0x%lx\n".as_ptr(),
-               cpuid() as u64, kstack as u64);
+        crate::kprintln!("CPU {} idle process initialized at kstack 0x{:x}", cpuid() as u64, kstack as u64);
     }
 }
 
@@ -760,7 +758,7 @@ pub(crate) extern "C" fn userinit() {
         session_init(p);
         pid_wunlock();
 
-        printf(c"Init process kernel stack size order: %d\n".as_ptr(), (*p).kstack_order);
+        crate::kprintln!("Init process kernel stack size order: {}", (*p).kstack_order);
 
         let vm = vm_init();
         kassert!(!is_err_or_null(vm), "userinit: vm_init failed");

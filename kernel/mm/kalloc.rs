@@ -123,9 +123,6 @@ mod ffi {
 
     // `printf` is variadic and cannot be declared `safe`; keep the
     // legacy unsafe-callable form for the few callers that need it.
-    unsafe extern "C" {
-        pub fn printf(fmt: *const c_char, ...) -> c_int;
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -216,21 +213,12 @@ fn kmm_name_ptr(i: usize) -> *const c_char {
 fn panic_kalloc(msg: &[u8]) -> ! {
     debug_assert!(msg.last() == Some(&0), "panic msg must be NUL-terminated");
     ffi::__panic_start();
-    // SAFETY: variadic printf; format and `msg` are NUL-terminated.
-    unsafe {
-        ffi::printf(b"PANIC kalloc: %s\n\0".as_ptr() as *const c_char,
-                    msg.as_ptr() as *const c_char);
-    }
+    crate::kprintln!("PANIC kalloc: {}", crate::printf::Cs(msg.as_ptr() as *const c_char));
     ffi::__panic_end()
 }
 
 fn log_slab_init_failed(name: *const c_char) {
-    // SAFETY: variadic printf; format is NUL-terminated; `name` is a
-    // NUL-terminated string supplied by the caller.
-    unsafe {
-        ffi::printf(b"failed to initialize kmm slab: %s\n\0".as_ptr() as *const c_char,
-                    name);
-    }
+    crate::kprintln!("failed to initialize kmm slab: {}", crate::printf::Cs(name));
 }
 
 // ---------------------------------------------------------------------------

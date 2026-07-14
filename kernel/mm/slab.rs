@@ -372,9 +372,6 @@ pub(crate) use crate::mm::page::{__pa_to_page, __page_alloc, __page_free, __page
 // `printf` is shared by every diagnostic-printing helper in this module
 // (declared once here instead of once per call site). Variadic, so it
 // cannot be declared `safe`.
-unsafe extern "C" {
-    fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 // ===========================================================================
 // Panic / diagnostic printf -- previously the `xv6_slab_panic` and four
@@ -383,58 +380,54 @@ unsafe extern "C" {
 // ===========================================================================
 fn slab_panic(msg: &'static [u8]) -> ! {
     ffi::__panic_start();
-    // SAFETY: `msg` is always a NUL-terminated byte-string literal supplied
-    // by call sites in this module.
-    unsafe { printf(b"%s\n\0".as_ptr() as *const c_char, msg.as_ptr()); }
+    // `msg` is always a NUL-terminated byte-string literal supplied by call
+    // sites in this module; render it via the `Cs` adapter as a runtime C
+    // string (its content is not known at this call site).
+    crate::kprintln!("{}", crate::printf::Cs(msg.as_ptr() as *const c_char));
     ffi::__panic_end()
 }
 
-static LOG_FREE_NULL: &[u8] = b"%s: obj is NULL\n\0";
-static LOG_NO_SLAB: &[u8] = b"%s: slab is NULL for obj=%p\n\0";
-static LOG_UNATTACHED_1: &[u8] = b"slab_free: ERROR - slab=%p not attached to cache, obj=%p\n\0";
-static LOG_UNATTACHED_2: &[u8] =
-    b"  slab->page=%p, slab->in_use=%ld, slab->state=%d, slab->cpu_id=%d\n\0";
-static LOG_FROM_FREE_1: &[u8] = b"slab_free: ERROR - object from free slab\n\0";
-static LOG_FROM_FREE_2: &[u8] = b"  obj=%p, slab=%p, cache='%s'\n\0";
-static LOG_FROM_FREE_3: &[u8] = b"  slab->in_use=%ld, slab->state=%d, slab->cpu_id=%d\n\0";
-static LOG_FROM_FREE_4: &[u8] = b"  cache->global_free_count=%ld\n\0";
-
 fn log_free_null(fn_name: *const c_char) {
-    // SAFETY: format string matches the single `%s` argument.
-    unsafe { printf(LOG_FREE_NULL.as_ptr() as *const c_char, fn_name); }
+    crate::kprintln!("{}: obj is NULL", crate::printf::Cs(fn_name));
 }
 fn log_no_slab(fn_name: *const c_char, obj: *mut c_void) {
-    // SAFETY: format string matches the argument list.
-    unsafe { printf(LOG_NO_SLAB.as_ptr() as *const c_char, fn_name, obj); }
+    crate::kprintln!(
+        "{}: slab is NULL for obj={}",
+        crate::printf::Cs(fn_name),
+        crate::printf::Ptr(obj as u64),
+    );
 }
 fn log_unattached(slab: &mut Slab, obj: *mut c_void) {
     let cpu_id = slab.cpu_id.load(Ordering::Acquire);
-    // SAFETY: format strings match their argument lists.
-    unsafe {
-        printf(LOG_UNATTACHED_1.as_ptr() as *const c_char, slab as *mut Slab, obj);
-        printf(
-            LOG_UNATTACHED_2.as_ptr() as *const c_char,
-            slab.page,
-            slab.in_use as i64,
-            slab.state as c_int,
-            cpu_id,
-        );
-    }
+    crate::kprintln!(
+        "slab_free: ERROR - slab={} not attached to cache, obj={}",
+        crate::printf::Ptr(slab as *mut Slab as u64),
+        crate::printf::Ptr(obj as u64),
+    );
+    crate::kprintln!(
+        "  slab->page={}, slab->in_use={}, slab->state={}, slab->cpu_id={}",
+        crate::printf::Ptr(slab.page as u64),
+        slab.in_use as i64,
+        slab.state as c_int,
+        cpu_id,
+    );
 }
 fn log_from_free(obj: *mut c_void, slab: &mut Slab, cache: &mut SlabCache, cpu_id: c_int) {
     let gfc = cache.global_free_count.load(Ordering::Acquire);
-    // SAFETY: format strings match their argument lists.
-    unsafe {
-        printf(LOG_FROM_FREE_1.as_ptr() as *const c_char);
-        printf(LOG_FROM_FREE_2.as_ptr() as *const c_char, obj, slab as *mut Slab, cache.name);
-        printf(
-            LOG_FROM_FREE_3.as_ptr() as *const c_char,
-            slab.in_use as i64,
-            slab.state as c_int,
-            cpu_id,
-        );
-        printf(LOG_FROM_FREE_4.as_ptr() as *const c_char, gfc);
-    }
+    crate::kprintln!("slab_free: ERROR - object from free slab");
+    crate::kprintln!(
+        "  obj={}, slab={}, cache='{}'",
+        crate::printf::Ptr(obj as u64),
+        crate::printf::Ptr(slab as *mut Slab as u64),
+        crate::printf::Cs(cache.name),
+    );
+    crate::kprintln!(
+        "  slab->in_use={}, slab->state={}, slab->cpu_id={}",
+        slab.in_use as i64,
+        slab.state as c_int,
+        cpu_id,
+    );
+    crate::kprintln!("  cache->global_free_count={}", gfc);
 }
 
 // ===========================================================================
@@ -644,17 +637,6 @@ pub(crate) fn slab_shrink_all() {
     }
 }
 
-// printf format strings for `slab_dump_all`.
-static DUMP_HDR: &[u8] = b"\n=== SLAB CACHE STATISTICS ===\n\0";
-static DUMP_COL: &[u8] = b"NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES\n\0";
-static DUMP_ROW: &[u8] = b"%s: objsz=%ld total=%ld active=%lu free=%ld pages=%lu\n\0";
-static DUMP_SEP: &[u8] = b"-----------------------------\n\0";
-static DUMP_END: &[u8] = b"=============================\n\0";
-static DUMP_SLAB_PG: &[u8] = b"Slab:  %lu pages (\0";
-static DUMP_MB: &[u8] = b"%lu.%luMB\0";
-static DUMP_KB: &[u8] = b"%luKB\0";
-static DUMP_TAIL: &[u8] = b")\n\0";
-
 /// Dump per-cache statistics: `detailed >= 2` prints a full table,
 /// `detailed >= 1` a one-line total, `0` prints nothing. Always returns the
 /// total byte footprint across every registered cache. C-called via
@@ -663,12 +645,13 @@ pub(crate) fn slab_dump_all(detailed: c_int) -> u64 {
     ensure_registry_init();
     let mut total_pages: u64 = 0;
 
-    // SAFETY: every `printf` call in this function matches its own format
-    // string.
+    // SAFETY: every pointer dereference in this function operates on the
+    // slab-cache registry list, valid for the duration of the registry lock
+    // held below.
     unsafe {
         if detailed >= 2 {
-            printf(DUMP_HDR.as_ptr() as *const c_char);
-            printf(DUMP_COL.as_ptr() as *const c_char);
+            crate::kprintln!("\n=== SLAB CACHE STATISTICS ===");
+            crate::kprintln!("NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES");
         }
 
         let head = registry_head();
@@ -683,9 +666,9 @@ pub(crate) fn slab_dump_all(detailed: c_int) -> u64 {
             let pages = (slab_total as u64) * (1u64 << cache.slab_order);
             total_pages += pages;
             if detailed >= 2 {
-                printf(
-                    DUMP_ROW.as_ptr() as *const c_char,
-                    cache.name,
+                crate::kprintln!(
+                    "{}: objsz={} total={} active={} free={} pages={}",
+                    crate::printf::Cs(cache.name),
                     cache.obj_size as i64,
                     slab_total,
                     obj_active,
@@ -698,21 +681,21 @@ pub(crate) fn slab_dump_all(detailed: c_int) -> u64 {
         drop(_g);
 
         if detailed >= 2 {
-            printf(DUMP_SEP.as_ptr() as *const c_char);
+            crate::kprintln!("-----------------------------");
         }
         let total_bytes = total_pages * (PAGE_SIZE as u64);
         if detailed >= 1 {
-            printf(DUMP_SLAB_PG.as_ptr() as *const c_char, total_pages);
+            crate::kprint!("Slab:  {} pages (", total_pages);
             if total_bytes >= 1024 * 1024 {
                 let mb = total_bytes / (1024 * 1024);
                 let kb_remainder = (total_bytes % (1024 * 1024)) / 1024;
-                printf(DUMP_MB.as_ptr() as *const c_char, mb, kb_remainder * 10 / 1024);
+                crate::kprint!("{}.{}MB", mb, kb_remainder * 10 / 1024);
             } else {
-                printf(DUMP_KB.as_ptr() as *const c_char, total_bytes / 1024);
+                crate::kprint!("{}KB", total_bytes / 1024);
             }
-            printf(DUMP_TAIL.as_ptr() as *const c_char);
+            crate::kprintln!(")");
             if detailed >= 2 {
-                printf(DUMP_END.as_ptr() as *const c_char);
+                crate::kprintln!("=============================");
             }
         }
         total_bytes

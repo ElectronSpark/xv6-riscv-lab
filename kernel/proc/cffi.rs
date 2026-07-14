@@ -166,9 +166,6 @@ pub mod raw {
         pub safe fn sched_class_register(id: c_int, cls: *mut SchedClass);
     }
 
-    unsafe extern "C" {
-        pub safe fn printf(fmt: *const c_char, ...) -> c_int;
-    }
 }
 
 pub use raw::*;
@@ -217,8 +214,7 @@ pub fn list_push_back(head: *mut ListNode, entry: *mut ListNode) {
 pub fn panic_proc(msg: &[u8]) -> ! {
     debug_assert!(msg.last() == Some(&0), "panic msg must be NUL-terminated");
     mm_raw::__panic_start();
-    raw::printf(b"PANIC proc: %s\n\0".as_ptr() as *const c_char,
-                msg.as_ptr() as *const c_char);
+    crate::kprintln!("PANIC proc: {}", crate::printf::Cs(msg.as_ptr() as *const c_char));
     mm_raw::__panic_end()
 }
 

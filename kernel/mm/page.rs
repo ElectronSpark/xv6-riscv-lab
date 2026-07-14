@@ -377,51 +377,42 @@ pub(crate) use crate::mm::slab::slab_free;
     #[inline]
     pub fn panic(msg: &'static [u8]) -> ! {
         __panic_start();
-        // SAFETY: `msg` is always a NUL-terminated byte-string literal
-        // supplied by call sites in this module.
-        unsafe { super::printf(b"%s\n\0".as_ptr() as *const c_char, msg.as_ptr()); }
+        // `msg` is always a NUL-terminated byte-string literal supplied by
+        // call sites in this module; render it via the `Cs` adapter as a
+        // runtime C string (its content is not known at this call site).
+        crate::kprintln!("{}", crate::printf::Cs(msg.as_ptr() as *const c_char));
         __panic_end()
     }
 
     #[inline] pub fn log_init_range(s: u64, e: u64, f: u64) {
-        static FMT: &[u8] = b"init pages from 0x%lx to 0x%lx with flags 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e, f); }
+        crate::kprintln!("init pages from 0x{:x} to 0x{:x} with flags 0x{:x}", s, e, f);
     }
     #[inline] pub fn log_init_invalid_range(s: u64, e: u64) {
-        static FMT: &[u8] = b"invalid range, pa_start: 0x%lx, pa_end: 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+        crate::kprintln!("invalid range, pa_start: 0x{:x}, pa_end: 0x{:x}", s, e);
     }
     #[inline] pub fn log_init_invalid_base(s: u64, e: u64) {
-        static FMT: &[u8] = b"invalid range base, pa_start: 0x%lx, pa_end: 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+        crate::kprintln!("invalid range base, pa_start: 0x{:x}, pa_end: 0x{:x}", s, e);
     }
     #[inline] pub fn log_init_invalid_flags(f: u64) {
-        static FMT: &[u8] = b"invalid flags: 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, f); }
+        crate::kprintln!("invalid flags: 0x{:x}", f);
     }
     #[inline] pub fn log_init_get_page(pa: u64) {
-        static FMT: &[u8] = b"failed to get page for physical address 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, pa); }
+        crate::kprintln!("failed to get page for physical address 0x{:x}", pa);
     }
     #[inline] pub fn log_reserved_out_of_range(s: u64, e: u64) {
-        static FMT: &[u8] = b"reserved mem out of range: 0x%lx to 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+        crate::kprintln!("reserved mem out of range: 0x{:x} to 0x{:x}", s, e);
     }
     #[inline] pub fn log_reserving(s: u64, e: u64) {
-        static FMT: &[u8] = b"reserving pages from 0x%lx to 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+        crate::kprintln!("reserving pages from 0x{:x} to 0x{:x}", s, e);
     }
     #[inline] pub fn log_init_summary(p: *mut c_void, sz: usize) {
-        static FMT: &[u8] = b"page_buddy_init(): page array at 0x%lx, size 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, p as u64, sz as u64); }
+        crate::kprintln!("page_buddy_init(): page array at 0x{:x}, size 0x{:x}", p as u64, sz as u64);
     }
     #[inline] pub fn log_init_range_phys(s: u64, e: u64) {
-        static FMT: &[u8] = b"__managed_start: 0x%lx, __managed_end: 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+        crate::kprintln!("__managed_start: 0x{:x}, __managed_end: 0x{:x}", s, e);
     }
     #[inline] pub fn log_buddy_range(s: u64, e: u64) {
-        static FMT: &[u8] = b"buddy init range: 0x%lx - 0x%lx\n\0";
-        unsafe { super::printf(FMT.as_ptr() as *const c_char, s, e); }
+        crate::kprintln!("buddy init range: 0x{:x} - 0x{:x}", s, e);
     }
     #[inline] pub fn print_stat(detailed: c_int) { super::print_buddy_system_stat(detailed) }
 }
@@ -430,9 +421,6 @@ pub(crate) use crate::mm::slab::slab_free;
 // (the `ffi::log_*`/`ffi::panic` wrappers above, plus the statistics
 // printer and integrity checker below). Declared once here instead of
 // once per call site.
-unsafe extern "C" {
-    fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 // ===========================================================================
 // Global state (kept with C-compatible names so the existing C shims and
@@ -1895,26 +1883,19 @@ const ORDER_COUNT: usize = (PAGE_BUDDY_MAX_ORDER + 1) as usize;
 
 /// Print a byte count in the largest whole unit (G/M/K/B) that fits.
 fn print_size(bytes: u64) {
-    static F_G: &[u8] = b"%ld.%ldG\0";
-    static F_M: &[u8] = b"%ld.%ldM\0";
-    static F_K: &[u8] = b"%ldK\0";
-    static F_B: &[u8] = b"%ldB\0";
-    // SAFETY: every format string above matches its argument list exactly.
-    unsafe {
-        if bytes >= (1u64 << 30) {
-            let gb = bytes >> 30;
-            let mb = (bytes & ((1u64 << 30) - 1)) >> 20;
-            printf(F_G.as_ptr() as *const c_char, gb, (mb * 10) / 1024);
-        } else if bytes >= (1u64 << 20) {
-            let mb = bytes >> 20;
-            let kb = (bytes & ((1u64 << 20) - 1)) >> 10;
-            printf(F_M.as_ptr() as *const c_char, mb, (kb * 10) / 1024);
-        } else if bytes >= (1u64 << 10) {
-            let kb = bytes >> 10;
-            printf(F_K.as_ptr() as *const c_char, kb);
-        } else {
-            printf(F_B.as_ptr() as *const c_char, bytes);
-        }
+    if bytes >= (1u64 << 30) {
+        let gb = bytes >> 30;
+        let mb = (bytes & ((1u64 << 30) - 1)) >> 20;
+        crate::kprint!("{}.{}G", gb, (mb * 10) / 1024);
+    } else if bytes >= (1u64 << 20) {
+        let mb = bytes >> 20;
+        let kb = (bytes & ((1u64 << 20) - 1)) >> 10;
+        crate::kprint!("{}.{}M", mb, (kb * 10) / 1024);
+    } else if bytes >= (1u64 << 10) {
+        let kb = bytes >> 10;
+        crate::kprint!("{}K", kb);
+    } else {
+        crate::kprint!("{}B", bytes);
     }
 }
 
@@ -1956,16 +1937,6 @@ fn buddy_stat_totals(
 }
 
 pub(crate) fn print_buddy_system_stat(detailed: c_int) {
-    static F_SUMMARY: &[u8] = b"Buddy: %ld free + %ld cached = %ld pages (\0";
-    static F_HDR: &[u8] = b"Buddy System Statistics:\n\0";
-    static F_BAR: &[u8] = b"========================\n\0";
-    static F_BAR2: &[u8] = b"------------------------\n\0";
-    static F_ORDER: &[u8] = b"order(%d): %ld blocks (\0";
-    static F_CACHED: &[u8] = b" + %ld cached (\0";
-    static F_CLOSE: &[u8] = b")\n\0";
-    static F_RCLOSE: &[u8] = b")\0";
-    static F_NEWLINE: &[u8] = b"\n\0";
-
     let mut total_free_pages: u64 = 0;
     let mut total_cached_pages: u64 = 0;
     let mut ret_arr: [u64; ORDER_COUNT] = [0; ORDER_COUNT];
@@ -1978,57 +1949,57 @@ pub(crate) fn print_buddy_system_stat(detailed: c_int) {
         &mut empty_arr,
     );
 
-    // SAFETY: every `printf` call below matches its own format string.
-    unsafe {
-        if detailed <= 0 {
-            printf(
-                F_SUMMARY.as_ptr() as *const c_char,
-                total_free_pages,
-                total_cached_pages,
-                total_free_pages + total_cached_pages,
-            );
-            print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
-            printf(F_CLOSE.as_ptr() as *const c_char);
-            return;
-        }
-
-        printf(F_HDR.as_ptr() as *const c_char);
-        printf(F_BAR.as_ptr() as *const c_char);
-
-        for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
-            let order_pages = (1u64 << i) * ret_arr[i];
-            let order_bytes = order_pages * PAGE_SIZE;
-
-            printf(F_ORDER.as_ptr() as *const c_char, i as c_int, ret_arr[i]);
-            print_size(order_bytes);
-            printf(F_RCLOSE.as_ptr() as *const c_char);
-
-            if (i as u64) <= PCPU_CACHE_MAX_ORDER {
-                let mut cache_total: u64 = 0;
-                for cpu in 0..NCPU {
-                    cache_total += xv6_pcpu_cache_count(cpu as u32, i as u64) as u64;
-                }
-                if cache_total > 0 {
-                    let cached_pages = (1u64 << i) * cache_total;
-                    let cached_bytes = cached_pages * PAGE_SIZE;
-                    printf(F_CACHED.as_ptr() as *const c_char, cache_total);
-                    print_size(cached_bytes);
-                    printf(F_RCLOSE.as_ptr() as *const c_char);
-                }
-            }
-            printf(F_NEWLINE.as_ptr() as *const c_char);
-        }
-
-        printf(F_BAR2.as_ptr() as *const c_char);
-        printf(
-            F_SUMMARY.as_ptr() as *const c_char,
+    if detailed <= 0 {
+        crate::kprint!(
+            "Buddy: {} free + {} cached = {} pages (",
             total_free_pages,
             total_cached_pages,
             total_free_pages + total_cached_pages,
         );
         print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
-        printf(F_CLOSE.as_ptr() as *const c_char);
+        crate::kprintln!(")");
+        return;
     }
+
+    crate::kprintln!("Buddy System Statistics:");
+    crate::kprintln!("========================");
+
+    for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
+        let order_pages = (1u64 << i) * ret_arr[i];
+        let order_bytes = order_pages * PAGE_SIZE;
+
+        crate::kprint!("order({}): {} blocks (", i as c_int, ret_arr[i]);
+        print_size(order_bytes);
+        crate::kprint!(")");
+
+        if (i as u64) <= PCPU_CACHE_MAX_ORDER {
+            let mut cache_total: u64 = 0;
+            for cpu in 0..NCPU {
+                // SAFETY: `cpu`/`i` are within `xv6_pcpu_cache_count`'s
+                // documented bounds (checked internally; out-of-range
+                // returns 0).
+                cache_total += unsafe { xv6_pcpu_cache_count(cpu as u32, i as u64) } as u64;
+            }
+            if cache_total > 0 {
+                let cached_pages = (1u64 << i) * cache_total;
+                let cached_bytes = cached_pages * PAGE_SIZE;
+                crate::kprint!(" + {} cached (", cache_total);
+                print_size(cached_bytes);
+                crate::kprint!(")");
+            }
+        }
+        crate::kprintln!();
+    }
+
+    crate::kprintln!("------------------------");
+    crate::kprint!(
+        "Buddy: {} free + {} cached = {} pages (",
+        total_free_pages,
+        total_cached_pages,
+        total_free_pages + total_cached_pages,
+    );
+    print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
+    crate::kprintln!(")");
 }
 
 // ===========================================================================
@@ -2046,9 +2017,6 @@ pub(crate) fn print_buddy_system_stat(detailed: c_int) {
 // ===========================================================================
 #[allow(dead_code)]
 pub fn check_buddy_system_integrity() {
-    static FMT_PREVNEXT: &[u8] = b"prev page: %p, next page: %p\n\0";
-    static FMT_ENTRY: &[u8] = b"count = %d, buddy page: %p, order: %d, physical: 0x%lx\n\0";
-
     let mut total_free_pages: u64 = 0;
     buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
     for i in 0..=(PAGE_BUDDY_MAX_ORDER as usize) {
@@ -2073,14 +2041,18 @@ pub fn check_buddy_system_integrity() {
         total_free_pages += (1u64 << i) * count_field as u64;
 
         if !empty {
-            // SAFETY: `__check_page_pointer_in_range` and `printf` are
-            // C-ABI functions; the pointers passed are the raw list-node
-            // pointers just read above.
+            // SAFETY: `__check_page_pointer_in_range` is a C-ABI function;
+            // the pointers passed are the raw list-node pointers just read
+            // above.
             unsafe {
                 __check_page_pointer_in_range(head_prev as *mut c_void);
                 __check_page_pointer_in_range(head_next as *mut c_void);
-                printf(FMT_PREVNEXT.as_ptr() as *const c_char, head_prev, head_next);
             }
+            crate::kprintln!(
+                "prev page: {}, next page: {}",
+                crate::printf::Ptr(head_prev as u64),
+                crate::printf::Ptr(head_next as u64),
+            );
         }
 
         // Walk from head.next until we loop back (list_foreach_node_safe).
@@ -2104,15 +2076,15 @@ pub fn check_buddy_system_integrity() {
                 if __page_to_pa(page as *mut Page) != page.physical_address {
                     ffi::panic(b"buddy page physical address mismatch\0");
                 }
-                count_check -= 1;
-                printf(
-                    FMT_ENTRY.as_ptr() as *const c_char,
-                    count_check as c_int,
-                    page as *mut Page,
-                    page.buddy_order() as c_int,
-                    page.physical_address,
-                );
             }
+            count_check -= 1;
+            crate::kprintln!(
+                "count = {}, buddy page: {}, order: {}, physical: 0x{:x}",
+                count_check as c_int,
+                crate::printf::Ptr(page as *mut Page as u64),
+                page.buddy_order() as c_int,
+                page.physical_address,
+            );
             pos = next;
         }
         if count_check != 0 {
@@ -2136,10 +2108,6 @@ const MEMSTAT_ADD_USED: u32 = 1 << 5;
 
 #[no_mangle]
 pub extern "C" fn sys_memstat() -> u64 {
-    static FMT_FREE_LABEL: &[u8] = b"Free: \0";
-    static FMT_USED_LABEL: &[u8] = b"Used: \0";
-    static FMT_NEWLINE_ONLY: &[u8] = b"\n\0";
-
     let mut flags_arg: c_int = 0;
     ffi::argint(0, &mut flags_arg);
     let flags = flags_arg as u32;
@@ -2179,19 +2147,16 @@ pub extern "C" fn sys_memstat() -> u64 {
         0
     };
 
-    // SAFETY: every `printf` call below matches its own format string.
-    unsafe {
-        if (flags & (MEMSTAT_VERBOSE | MEMSTAT_DETAILED)) != 0 {
-            if (flags & MEMSTAT_ADD_FREE) != 0 {
-                printf(FMT_FREE_LABEL.as_ptr() as *const c_char);
-                print_size(free_bytes);
-                printf(FMT_NEWLINE_ONLY.as_ptr() as *const c_char);
-            }
-            if (flags & MEMSTAT_ADD_USED) != 0 {
-                printf(FMT_USED_LABEL.as_ptr() as *const c_char);
-                print_size(used_bytes);
-                printf(FMT_NEWLINE_ONLY.as_ptr() as *const c_char);
-            }
+    if (flags & (MEMSTAT_VERBOSE | MEMSTAT_DETAILED)) != 0 {
+        if (flags & MEMSTAT_ADD_FREE) != 0 {
+            crate::kprint!("Free: ");
+            print_size(free_bytes);
+            crate::kprintln!();
+        }
+        if (flags & MEMSTAT_ADD_USED) != 0 {
+            crate::kprint!("Used: ");
+            print_size(used_bytes);
+            crate::kprintln!();
         }
     }
 

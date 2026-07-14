@@ -47,7 +47,6 @@ unsafe extern "C" {
     pub safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     pub safe fn strncpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
     pub safe fn xv6_panic(msg: *const c_char) -> !;
-    pub safe fn printf(fmt: *const c_char, ...);
 
     pub safe fn xv6_current_thread() -> *mut thread;
     pub safe fn xv6_thread_state_set(t: *mut thread, s: c_int);
@@ -202,9 +201,9 @@ fn mark_workqueue_dtor_once(wq: WorkqueueRef<'_>) -> bool {
 fn wakeup_all_idle_workers(wq: WorkqueueRef<'_>) {
     let ret = tq_wakeup_all(wq.idle_queue_ptr(), 0, 0);
     if ret < 0 {
-        printf(
-            c"warning: failed to wake idle workers for workqueue %s\n".as_ptr() as *mut c_char,
-            wq.name_ptr(),
+        crate::kprintln!(
+            "warning: failed to wake idle workers for workqueue {}",
+            crate::printf::Cs(wq.name_ptr()),
         );
     }
 }
@@ -351,7 +350,7 @@ unsafe extern "C" fn manager_routine() {
         while tq_size(idle) != 0 && wq.nr_workers() - tq_size(idle) < wq.pending_works() {
             let p = tq_wakeup(idle, 0, 0);
             if is_err_or_null(p) {
-                printf(c"warning: Failed to wake up idle worker\n".as_ptr() as *mut c_char);
+                crate::kprintln!("warning: Failed to wake up idle worker");
             }
         }
         xv6_thread_state_set(cur_t, THREAD_INTERRUPTIBLE);
@@ -445,7 +444,7 @@ fn workqueue_init_impl() {
         core::mem::size_of::<work_struct>(), SLAB_FLAG_EMBEDDED,
     );
     if ret != 0 { xv6_panic(c"Failed to initialize work_struct slab cache".as_ptr()); }
-    printf(c"workqueue subsystem initialized\n".as_ptr() as *mut c_char);
+    crate::kprintln!("workqueue subsystem initialized");
 }
 
 fn workqueue_create_with_callbacks_impl(

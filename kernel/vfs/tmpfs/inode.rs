@@ -52,7 +52,6 @@ unsafe extern "C" {
     safe fn xv6_panic(msg: *const c_char) -> !;
 
     // printf.rs — C-variadic.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // mm/kalloc.rs.
     safe fn kmm_alloc(size: usize) -> *mut c_void;
@@ -866,8 +865,7 @@ extern "C" fn __tmpfs_move(
     let target = unsafe { ptr::addr_of_mut!((*(*tmpfs_old_dentry).inode).vfs_inode) };
     let refcount = vfs_inode_refcount(target);
     if refcount > 2 {
-        // SAFETY: `printf` args match the format string.
-        unsafe { printf(c"Tmpfs move: target inode is busy, %d\n".as_ptr(), refcount) };
+        crate::kprintln!("Tmpfs move: target inode is busy, {}", refcount);
         return neg(EBUSY); // Target inode is busy
     }
     // SAFETY: `target` is live.

@@ -73,7 +73,6 @@ const IPI_REASON_RESCHEDULE: c_int = 2;
 // ---------------- extern C primitives -----------------------------------
 unsafe extern "C" {
     pub safe fn xv6_panic(msg: *const c_char) -> !;
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     safe fn get_jiffs() -> u64;
 
@@ -640,8 +639,8 @@ fn state_str(s: thread_state) -> *const c_char {
 
 #[no_mangle]
 pub unsafe extern "C" fn scheduler_dump_chan_queue() {
+    crate::kprintln!("Channel Queue Dump:");
     unsafe {
-        printf(c"Channel Queue Dump:\n".as_ptr() as *const c_char);
         let root = &raw mut (*chan_queue_ptr()).root;
         let tree_entry_off = offset_of!(tnode, __bindgen_anon_1) + offset_of!(crate::bindings::tnode__bindgen_ty_1__bindgen_ty_2, entry);
         let mut node = rb_first_node(root);
@@ -650,15 +649,15 @@ pub unsafe extern "C" fn scheduler_dump_chan_queue() {
             let tn = (node as *mut u8).wrapping_sub(tree_entry_off) as *mut tnode_t;
             let proc = tnode_get_thread(tn);
             if proc.is_null() {
-                printf(c"  Process: NULL\n".as_ptr() as *const c_char);
+                crate::kprintln!("  Process: NULL");
             } else {
                 let t = ThreadAccess::from_raw(proc).unwrap_unchecked();
-                printf(
-                    c"Chan: %p,  Proc: %s (PID: %d, State: %s)\n".as_ptr() as *const c_char,
-                    (*proc).chan,
-                    (*proc).name.as_ptr(),
+                crate::kprintln!(
+                    "Chan: {},  Proc: {} (PID: {}, State: {})",
+                    crate::printf::Ptr((*proc).chan as u64),
+                    crate::printf::Cs((*proc).name.as_ptr()),
                     t.pid(),
-                    state_str(thread_state_get(proc)),
+                    crate::printf::Cs(state_str(thread_state_get(proc))),
                 );
             }
             node = next;

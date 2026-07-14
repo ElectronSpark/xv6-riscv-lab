@@ -135,10 +135,6 @@ unsafe extern "C" {
     ) -> *mut thread;
 }
 
-// Variadic FFI cannot be marked safe.
-unsafe extern "C" {
-    pub fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 const KERNEL_STACK_ORDER: c_int = 2;
 const BLK_SIZE_SHIFT: u64 = 9; // kernel/inc/dev/bio.h
@@ -222,18 +218,15 @@ fn case_fail() {
 /// `print_result`, generalized into a wrapper so all 30 cases share one
 /// bookkeeping path.
 fn run_test(name: &core::ffi::CStr, body: fn()) {
-    // SAFETY: static format string; one `%s` arg.
-    unsafe { printf(c"[pcache][%s] ".as_ptr(), name.as_ptr()); }
+    crate::kprint!("[pcache][{}] ", crate::printf::Cs(name.as_ptr()));
     CASE_ERROR.store(0, Ordering::SeqCst);
     body();
     TESTS_RUN.fetch_add(1, Ordering::SeqCst);
     if CASE_ERROR.load(Ordering::SeqCst) == 0 {
         TESTS_PASSED.fetch_add(1, Ordering::SeqCst);
-        // SAFETY: static format string, no args.
-        unsafe { printf(c"OK\n".as_ptr()); }
+        crate::kprintln!("OK");
     } else {
-        // SAFETY: static format string, no args.
-        unsafe { printf(c"FAIL\n".as_ptr()); }
+        crate::kprintln!("FAIL");
     }
 }
 
@@ -365,8 +358,7 @@ fn with_cache(blk_count: u64, max_pages: u64, body: impl FnOnce(*mut Pcache)) {
     }
     let rc = pcache_init(p);
     if rc != 0 {
-        // SAFETY: static format string; one %d arg.
-        unsafe { printf(c"pcache_init failed rc=%d\n".as_ptr(), rc); }
+        crate::kprintln!("pcache_init failed rc={}", rc);
         case_fail();
         return;
     }
@@ -1349,8 +1341,7 @@ extern "C" fn pcache_test_master(_a1: u64, _a2: u64) {
     for _ in 0..10_000 {
         scheduler_yield();
     }
-    // SAFETY: static format string, no arguments.
-    unsafe { printf(c"[pcache] starting pcache tests\n".as_ptr()); }
+    crate::kprintln!("[pcache] starting pcache tests");
 
     run_test(c"T01 init_defaults", t01_init_defaults);
     run_test(c"T02 get_page_from_lru", t02_get_page_from_lru);
@@ -1386,11 +1377,9 @@ extern "C" fn pcache_test_master(_a1: u64, _a2: u64) {
     let passed = TESTS_PASSED.load(Ordering::SeqCst);
     let total = TESTS_RUN.load(Ordering::SeqCst);
     if passed == total {
-        // SAFETY: static format string; two %d args.
-        unsafe { printf(c"PCACHE TESTS: %d/%d PASSED\n".as_ptr(), passed, total); }
+        crate::kprintln!("PCACHE TESTS: {}/{} PASSED", passed, total);
     } else {
-        // SAFETY: see above.
-        unsafe { printf(c"PCACHE TESTS: %d/%d FAILED\n".as_ptr(), passed, total); }
+        crate::kprintln!("PCACHE TESTS: {}/{} FAILED", passed, total);
     }
 }
 
@@ -1400,7 +1389,6 @@ extern "C" fn pcache_test_master(_a1: u64, _a2: u64) {
 #[no_mangle]
 pub extern "C" fn pcache_launch_tests() {
     if !spawn(c"pcache_test_master", pcache_test_master, 0, 0) {
-        // SAFETY: static format string, no arguments.
-        unsafe { printf(c"[pcache] cannot create test master thread\n".as_ptr()); }
+        crate::kprintln!("[pcache] cannot create test master thread");
     }
 }

@@ -64,7 +64,6 @@ use crate::bindings::pci_common_confspace_header;
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
     safe fn __panic_start();
     safe fn __panic_end() -> !;
 }
@@ -114,16 +113,15 @@ pub(crate) extern "C" fn pci_init() {
         __panic_start();
         // SAFETY: format string matches its one argument.
         unsafe {
-            printf(
-                c"sizeof pci_common_confspace_header: %lx\n".as_ptr(),
+            crate::kprintln!(
+                "sizeof pci_common_confspace_header: {:x}",
                 core::mem::size_of::<pci_common_confspace_header>() as u64,
             )
         };
         // SAFETY: fixed message, no format args.
         unsafe {
-            printf(
-                c"The size of PCI-E Common Configuration Space Header Structure is not 0x40 Bytes!\n"
-                    .as_ptr(),
+            crate::kprintln!(
+                "The size of PCI-E Common Configuration Space Header Structure is not 0x40 Bytes!",
             )
         };
         __panic_end();
@@ -149,13 +147,13 @@ pub(crate) extern "C" fn pci_init() {
         if dev < 8 {
             // SAFETY: format string matches its four arguments.
             unsafe {
-                printf(
-                    c"PCI device %d:%d:%d - vendor ID: 0x%x, device ID: 0x%x\n".as_ptr(),
+                crate::kprintln!(
+                    "PCI device {}:{}:{} - vendor ID: 0x{:x}, device ID: 0x{:x}",
                     bus as c_int,
                     dev as c_int,
                     func as c_int,
-                    vendor_id as c_int,
-                    device_id as c_int,
+                    ((vendor_id as c_int) as i32 as i64) as u64,
+                    ((device_id as c_int) as i32 as i64) as u64,
                 )
             };
         }
@@ -163,7 +161,7 @@ pub(crate) extern "C" fn pci_init() {
         // 100e:8086 is an e1000.
         if device_id == 0x100e && vendor_id == 0x8086 {
             // SAFETY: fixed message, no format args.
-            unsafe { printf(c"E1000 Ethernet Controller detected.\n".as_ptr()) };
+            unsafe { crate::kprintln!("E1000 Ethernet Controller detected.") };
 
             // Command and status register:
             //   bit 0: I/O access enable

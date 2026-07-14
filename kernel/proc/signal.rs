@@ -130,7 +130,6 @@ unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void;
     safe fn xv6_panic(msg: *const c_char) -> !;
-    safe fn printf(fmt: *const c_char, ...);
 
     // current thread / cpu
     safe fn xv6_current_thread() -> *mut thread;
@@ -1244,8 +1243,8 @@ fn deliver_signal(p: *mut thread, signo: c_int, info: *mut ksiginfo_t,
         // SA_SIGINFO path: info must not be null (assert relaxed: skip if null)
         let h_addr = action.handler_addr() as u64;
         if h_addr < PAGE_SIZE {
-            printf(c"deliver_signal: invalid handler addr %p signo %d\n".as_ptr(),
-                   h_addr as u64, signo);
+            crate::kprintln!("deliver_signal: invalid handler addr {} signo {}",
+                   crate::printf::Ptr(h_addr as u64), signo);
             tcb_lock(p);
             THREAD_SET_KILLED(p);
             set_term_signal_first(p, signo);

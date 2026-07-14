@@ -41,7 +41,6 @@ type cpumask_t = u64;
 
 unsafe extern "C" {
     pub safe fn xv6_panic(msg: *const c_char) -> !;
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // Per-CPU array exported by C code.
     static mut cpus: [crate::bindings::cpu_local; NCPU];
@@ -550,13 +549,11 @@ pub extern "C" fn rq_enqueue_task(r: *mut rq, se: *mut sched_entity) {
         let pt = ThreadAccess::from_ptr(p);
         let pn = pt.map_or(c"NULL".as_ptr(), |t| t.name_ptr());
         let se_rq = sr.rq_ptr();
-        unsafe {
-            printf(c"rq_enqueue_task BUG: se->rq=%p (cpu=%d), target rq=%p (cpu=%d)\n".as_ptr() as *const c_char,
-                se_rq, if se_rq.is_null() { -1 } else { rq_ref(se_rq).cpu_id() }, r, rr.cpu_id());
-            printf(c"  thread=%s pid=%d state=%d on_rq=%d on_cpu=%d se_cpu=%d\n".as_ptr() as *const c_char,
-                pn, pt.map_or(-1, |t| t.pid()), if p.is_null() { -1 } else { thread_state_get(p) },
-                sr.on_rq_plain(), sr.on_cpu_plain(), sr.cpu_id());
-        }
+        crate::kprintln!("rq_enqueue_task BUG: se->rq={} (cpu={}), target rq={} (cpu={})",
+            crate::printf::Ptr(se_rq as u64), if se_rq.is_null() { -1 } else { rq_ref(se_rq).cpu_id() }, crate::printf::Ptr(r as u64), rr.cpu_id());
+        crate::kprintln!("  thread={} pid={} state={} on_rq={} on_cpu={} se_cpu={}",
+            crate::printf::Cs(pn), pt.map_or(-1, |t| t.pid()), if p.is_null() { -1 } else { thread_state_get(p) },
+            sr.on_rq_plain(), sr.on_cpu_plain(), sr.cpu_id());
         kpanic!("rq_enqueue_task: se rq is not NULL");
     }
     rr.enqueue_task(se);
@@ -882,17 +879,17 @@ pub extern "C" fn rq_get_active_cpu_mask() -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn rq_dump() {
     unsafe {
-        printf(c"Run Queue Status:\n".as_ptr() as *const c_char);
-        printf(c"Priority    ".as_ptr() as *const c_char);
+        crate::kprintln!("Run Queue Status:");
+        crate::kprint!("Priority    ");
         for cpu in 0..NCPU as c_int {
-            printf(c"CPU%d        ".as_ptr() as *const c_char, cpu);
+            crate::kprint!("CPU{}        ", cpu);
         }
-        printf(c"\n".as_ptr() as *const c_char);
-        printf(c"--------    ".as_ptr() as *const c_char);
+        crate::kprintln!();
+        crate::kprint!("--------    ");
         for _ in 0..NCPU {
-            printf(c"--------    ".as_ptr() as *const c_char);
+            crate::kprint!("--------    ");
         }
-        printf(c"\n".as_ptr() as *const c_char);
+        crate::kprintln!();
 
         for prio in 0..PRIORITY_MAINLEVELS as c_int {
             let mut has = false;
@@ -904,50 +901,50 @@ pub unsafe extern "C" fn rq_dump() {
             }
             if !has { continue; }
             if prio < 10 {
-                printf(c"%d           ".as_ptr() as *const c_char, prio);
+                crate::kprint!("{}           ", prio);
             } else {
-                printf(c"%d          ".as_ptr() as *const c_char, prio);
+                crate::kprint!("{}          ", prio);
             }
             for cpu in 0..NCPU as c_int {
                 let r = get_rq_for_cpu(prio, cpu);
                 if is_err_or_null(r) {
-                    printf(c"-           ".as_ptr() as *const c_char);
+                    crate::kprint!("-           ");
                 } else {
                     let count = (*r).task_count;
                     if count < 10 {
-                        printf(c"%d           ".as_ptr() as *const c_char, count);
+                        crate::kprint!("{}           ", count);
                     } else if count < 100 {
-                        printf(c"%d          ".as_ptr() as *const c_char, count);
+                        crate::kprint!("{}          ", count);
                     } else {
-                        printf(c"%d         ".as_ptr() as *const c_char, count);
+                        crate::kprint!("{}         ", count);
                     }
                 }
             }
-            printf(c"\n".as_ptr() as *const c_char);
+            crate::kprintln!();
         }
 
-        printf(c"\nReady Masks:\n".as_ptr() as *const c_char);
-        printf(c"            ".as_ptr() as *const c_char);
+        crate::kprintln!("\nReady Masks:");
+        crate::kprint!("            ");
         for cpu in 0..NCPU as c_int {
-            printf(c"CPU%d        ".as_ptr() as *const c_char, cpu);
+            crate::kprint!("CPU{}        ", cpu);
         }
-        printf(c"\n".as_ptr() as *const c_char);
+        crate::kprintln!();
 
-        printf(c"Top (8b)    ".as_ptr() as *const c_char);
-        for cpu in 0..NCPU as c_int {
-            let pc = rq_percpu_lock_get(cpu);
-            printf(c"0x%lx        ".as_ptr() as *const c_char, (*pc).ready_mask & 0xff);
-            rq_percpu_put_unlock(pc);
-        }
-        printf(c"\n".as_ptr() as *const c_char);
-
-        printf(c"Secondary   ".as_ptr() as *const c_char);
+        crate::kprint!("Top (8b)    ");
         for cpu in 0..NCPU as c_int {
             let pc = rq_percpu_lock_get(cpu);
-            printf(c"0x%lx ".as_ptr() as *const c_char, (*pc).ready_mask_secondary);
+            crate::kprint!("0x{:x}        ", ((*pc).ready_mask & 0xff) as u64);
             rq_percpu_put_unlock(pc);
         }
-        printf(c"\n".as_ptr() as *const c_char);
+        crate::kprintln!();
+
+        crate::kprint!("Secondary   ");
+        for cpu in 0..NCPU as c_int {
+            let pc = rq_percpu_lock_get(cpu);
+            crate::kprint!("0x{:x} ", (*pc).ready_mask_secondary as u64);
+            rq_percpu_put_unlock(pc);
+        }
+        crate::kprintln!();
     }
 }
 

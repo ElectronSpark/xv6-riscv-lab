@@ -93,7 +93,6 @@ use crate::sync::KSpinlock;
 
 unsafe extern "C" {
     // printf.rs — C-variadic.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // string.rs.
     safe fn strlen(s: *const c_char) -> usize;
@@ -417,13 +416,7 @@ unsafe extern "C" fn vfs_fd_rcucb(data: *mut c_void) {
 
     let work = create_work_struct(Some(vfs_fput_work_func), file as u64);
     if work.is_null() {
-        // SAFETY: `printf` is variadic C-ABI.
-        unsafe {
-            printf(
-                c"__vfs_fd_rcucb: failed to allocate work_struct, falling back to direct vfs_fput\n"
-                    .as_ptr(),
-            );
-        }
+        crate::kprintln!("__vfs_fd_rcucb: failed to allocate work_struct, falling back to direct vfs_fput");
         vfs_fput(file);
         return;
     }
@@ -1946,9 +1939,7 @@ pub(crate) extern "C" fn sys_dumpinode() -> u64 {
 
     let inode = vfs_namei(path.as_ptr(), n as usize);
     if inode.is_null() {
-        // SAFETY: `printf` is variadic C-ABI; `path` is a live, NUL-terminated
-        // buffer.
-        unsafe { printf(c"dumpinode: cannot find path '%s'\n".as_ptr(), path.as_ptr()) };
+        crate::kprintln!("dumpinode: cannot find path '{}'", crate::printf::Cs(path.as_ptr()));
         return ret64(neg(ENOENT));
     }
 
@@ -1957,8 +1948,7 @@ pub(crate) extern "C" fn sys_dumpinode() -> u64 {
     vfs_iput(inode);
 
     if sb.is_null() {
-        // SAFETY: `printf` is variadic C-ABI.
-        unsafe { printf(c"dumpinode: inode has no superblock\n".as_ptr()) };
+        crate::kprintln!("dumpinode: inode has no superblock");
         return ret64(neg(EINVAL));
     }
 

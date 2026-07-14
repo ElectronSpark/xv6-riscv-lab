@@ -79,8 +79,6 @@ unsafe extern "C" {
     pub safe fn xv6_procdump_tree_node(p: *mut Thread, depth: i32);
     pub safe fn xv6_procdump_tree_recursive(p: *mut Thread, depth: i32);
     pub safe fn xv6_dump_session(s: *mut Session);
-    pub safe fn xv6_print_str(s: *const u8);
-    pub safe fn xv6_print_str_d(s: *const u8, v: i32);
 
     // session iteration.
     pub safe fn session_for_each_all(
@@ -302,11 +300,11 @@ pub(crate) extern "C" fn procdump_bt_pid(pid: i32) {
 
 // P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
 pub(crate) extern "C" fn procdump_tree() {
-    xv6_print_str(b"Process Tree:\n\0".as_ptr());
+    crate::kprintln!("Process Tree:");
     xv6_pid_rlock();
     let initproc = xv6_proctab_initproc_raw();
     if initproc.is_null() {
-        xv6_print_str(b"No init process\n\0".as_ptr());
+        crate::kprintln!("No init process");
         xv6_pid_runlock();
         return;
     }
@@ -316,11 +314,11 @@ pub(crate) extern "C" fn procdump_tree() {
 
 // P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
 pub(crate) extern "C" fn procdump_tree_pid(target_pid: i32) {
-    xv6_print_str_d(b"Process Tree (from pid %d):\n\0".as_ptr(), target_pid);
+    crate::kprintln!("Process Tree (from pid {}):", target_pid);
     xv6_pid_rlock();
     let p = xv6_proctab_get_locked(target_pid);
     if p.is_null() {
-        xv6_print_str_d(b"Process %d not found\n\0".as_ptr(), target_pid);
+        crate::kprintln!("Process {} not found", target_pid);
         xv6_pid_runlock();
         return;
     }
@@ -338,19 +336,16 @@ unsafe extern "C" fn dump_session_cb(s: *mut Session, _arg: *mut c_void) {
 
 // P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
 pub(crate) extern "C" fn procdump_sessions() {
-    xv6_print_str(
-        b"\n=== Process Hierarchy (Session / PGroup / Process / Thread) ===\n\0"
-            .as_ptr(),
-    );
+    crate::kprintln!("\n=== Process Hierarchy (Session / PGroup / Process / Thread) ===");
     xv6_pid_rlock();
     session_for_each_all(dump_session_cb, ptr::null_mut());
     xv6_pid_runlock();
-    xv6_print_str(b"\n=== End Hierarchy ===\n\0".as_ptr());
+    crate::kprintln!("\n=== End Hierarchy ===");
 }
 
 // P3-1B: only caller is `sys_dumpproc` (same file) -- demoted.
 pub(crate) extern "C" fn procdump_sessions_sid(target_sid: i32) {
-    xv6_print_str_d(b"\n=== Session %d Hierarchy ===\n\0".as_ptr(), target_sid);
+    crate::kprintln!("\n=== Session {} Hierarchy ===", target_sid);
     xv6_pid_rlock();
     let leader = get_pid_thread(target_sid);
     let bad = xv6_is_err(leader as *const c_void) != 0 || {
@@ -358,14 +353,14 @@ pub(crate) extern "C" fn procdump_sessions_sid(target_sid: i32) {
         s.is_null() || session_sid(s) != target_sid
     };
     if bad {
-        xv6_print_str_d(b"Session %d not found\n\0".as_ptr(), target_sid);
+        crate::kprintln!("Session {} not found", target_sid);
         xv6_pid_runlock();
-        xv6_print_str(b"\n=== End Hierarchy ===\n\0".as_ptr());
+        crate::kprintln!("\n=== End Hierarchy ===");
         return;
     }
     xv6_dump_session(t_session(leader));
     xv6_pid_runlock();
-    xv6_print_str(b"\n=== End Hierarchy ===\n\0".as_ptr());
+    crate::kprintln!("\n=== End Hierarchy ===");
 }
 
 // ---------------------------------------------------------------------------

@@ -69,10 +69,6 @@ fn spin_init(lk: *mut spinlock_t, name: *const c_char) {
     unsafe { crate::lock::spinlock::spin_init(lk, name as *mut c_char) };
 }
 
-// Variadic FFI / noreturn cannot be marked safe.
-unsafe extern "C" {
-    pub fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 const KERNEL_STACK_ORDER: c_int = 2;
 const RCU_TEST_NUM_READERS: i32 = 4;
@@ -105,8 +101,9 @@ fn kpanic(msg: &CStr) -> ! {
     // SAFETY: `msg` is NUL-terminated by construction (either a `c"..."`
     // literal or otherwise validated); `printf`/`trigger_panic` are
     // kernel C symbols with the declared ABI.
+    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
+    // SAFETY: `trigger_panic` is a kernel C symbol with the declared ABI.
     unsafe {
-        printf(msg.as_ptr());
         trigger_panic();
     }
 }
@@ -178,7 +175,7 @@ fn alloc_test_node(value: i32) -> *mut TestNode {
 // ============================================================================
 
 fn test_rcu_read_lock() {
-    unsafe { printf(c"TEST: RCU Read Lock/Unlock\n".as_ptr()); }
+    crate::kprintln!("TEST: RCU Read Lock/Unlock");
 
     // Test nested locking.
     let g1 = KRcuRead::new();
@@ -193,7 +190,7 @@ fn test_rcu_read_lock() {
     drop(g1); // Final unlock.
     kassert(!rcu_api::is_watching(), c"CPU should not be in RCU critical section\n");
 
-    unsafe { printf(c"  PASS: Nested RCU read locks work correctly\n".as_ptr()); }
+    crate::kprintln!("  PASS: Nested RCU read locks work correctly");
 }
 
 // ============================================================================
@@ -201,7 +198,7 @@ fn test_rcu_read_lock() {
 // ============================================================================
 
 fn test_rcu_pointers() {
-    unsafe { printf(c"TEST: RCU Pointer Operations\n".as_ptr()); }
+    crate::kprintln!("TEST: RCU Pointer Operations");
 
     let node = alloc_test_node(42);
 
@@ -222,7 +219,7 @@ fn test_rcu_pointers() {
     let access_node = TEST_LIST.load_raw();
     kassert(!access_node.is_null(), c"rcu_access_pointer should return non-NULL\n");
 
-    unsafe { printf(c"  PASS: RCU pointer operations work correctly\n".as_ptr()); }
+    crate::kprintln!("  PASS: RCU pointer operations work correctly");
 
     // Cleanup.
     kmm_free(node as *mut c_void);
@@ -236,7 +233,7 @@ fn test_rcu_pointers() {
 // ============================================================================
 
 fn test_synchronize_rcu() {
-    unsafe { printf(c"TEST: synchronize_rcu()\n".as_ptr()); }
+    crate::kprintln!("TEST: synchronize_rcu()");
 
     let old_node = alloc_test_node(100);
     // SAFETY: publishing the first version; no prior value to reclaim.
@@ -248,9 +245,9 @@ fn test_synchronize_rcu() {
     // contract.
     unsafe { TEST_LIST.swap(new_node); }
 
-    unsafe { printf(c"  Waiting for grace period...\n".as_ptr()); }
+    crate::kprintln!("  Waiting for grace period...");
     rcu_api::synchronize();
-    unsafe { printf(c"  Grace period completed\n".as_ptr()); }
+    crate::kprintln!("  Grace period completed");
 
     // Now safe to free the old node.
     kmm_free(old_node as *mut c_void);
@@ -263,7 +260,7 @@ fn test_synchronize_rcu() {
         kassert(cur.map(|n| n.value) == Some(200), c"Should read new value\n");
     }
 
-    unsafe { printf(c"  PASS: synchronize_rcu() allows safe reclamation\n".as_ptr()); }
+    crate::kprintln!("  PASS: synchronize_rcu() allows safe reclamation");
 
     kmm_free(new_node as *mut c_void);
     // SAFETY: single-threaded cleanup, no outstanding readers.
@@ -278,13 +275,13 @@ unsafe extern "C" fn test_callback(data: *mut c_void) {
     // SAFETY: `data` is the `Box`-like `*mut i32` allocated in
     // `test_call_rcu` and handed to `call_rcu` unchanged.
     let value = data as *mut i32;
-    printf(c"  Callback invoked with value: %d\n".as_ptr(), *value);
+    crate::kprintln!("  Callback invoked with value: {}", *value);
     CALLBACK_INVOKED.fetch_add(1, Ordering::Release);
     kmm_free(data);
 }
 
 fn test_call_rcu() {
-    unsafe { printf(c"TEST: call_rcu() Callbacks\n".as_ptr()); }
+    crate::kprintln!("TEST: call_rcu() Callbacks");
     CALLBACK_INVOKED.store(0, Ordering::Release);
 
     let data = kmm_alloc(size_of::<i32>()) as *mut i32;
@@ -303,7 +300,7 @@ fn test_call_rcu() {
     // `rcu_head_t`; `test_callback` matches the required ABI; `data`
     // stays valid until the callback (which owns and frees it) runs.
     unsafe { rcu_api::call(head, Some(test_callback), data as *mut c_void); }
-    unsafe { printf(c"  Callback registered\n".as_ptr()); }
+    crate::kprintln!("  Callback registered");
 
     rcu_api::synchronize();
     rcu_api::process_callbacks();
@@ -317,7 +314,7 @@ fn test_call_rcu() {
     }
 
     kassert(CALLBACK_INVOKED.load(Ordering::Acquire) == 1, c"Callback should have been invoked\n");
-    unsafe { printf(c"  PASS: call_rcu() callback executed successfully\n".as_ptr()); }
+    crate::kprintln!("  PASS: call_rcu() callback executed successfully");
 
     // The callback frees `data`; we only own `head`.
     kmm_free(head as *mut c_void);
@@ -330,8 +327,7 @@ fn test_call_rcu() {
 static CONCURRENT_READERS_DONE: AtomicI32 = AtomicI32::new(0);
 
 extern "C" fn reader_thread(id: u64, iterations: u64) {
-    // SAFETY: static format string; args match %ld.
-    unsafe { printf(c"  Reader %ld starting (%ld iterations)\n".as_ptr(), id, iterations); }
+    crate::kprintln!("  Reader {} starting ({} iterations)", id, iterations);
 
     for i in 0..iterations {
         {
@@ -349,13 +345,12 @@ extern "C" fn reader_thread(id: u64, iterations: u64) {
         }
     }
 
-    // SAFETY: see above.
-    unsafe { printf(c"  Reader %ld completed\n".as_ptr(), id); }
+    crate::kprintln!("  Reader {} completed", id);
     CONCURRENT_READERS_DONE.fetch_add(1, Ordering::Release);
 }
 
 fn test_concurrent_readers() {
-    unsafe { printf(c"TEST: Concurrent Readers\n".as_ptr()); }
+    crate::kprintln!("TEST: Concurrent Readers");
     CONCURRENT_READERS_DONE.store(0, Ordering::Release);
 
     let node = alloc_test_node(777);
@@ -366,12 +361,12 @@ fn test_concurrent_readers() {
         spawn(c"rcu_reader", reader_thread, i as u64, RCU_TEST_ITERATIONS);
     }
 
-    unsafe { printf(c"  Waiting for readers to complete...\n".as_ptr()); }
+    crate::kprintln!("  Waiting for readers to complete...");
     while CONCURRENT_READERS_DONE.load(Ordering::Acquire) < RCU_TEST_NUM_READERS {
         scheduler_yield();
     }
 
-    unsafe { printf(c"  PASS: Concurrent readers completed successfully\n".as_ptr()); }
+    crate::kprintln!("  PASS: Concurrent readers completed successfully");
 
     rcu_api::synchronize();
     kmm_free(node as *mut c_void);
@@ -384,7 +379,7 @@ fn test_concurrent_readers() {
 // ============================================================================
 
 fn test_grace_period() {
-    unsafe { printf(c"TEST: Grace Period Detection\n".as_ptr()); }
+    crate::kprintln!("TEST: Grace Period Detection");
     TEST_COUNTER.store(0, Ordering::Release);
 
     {
@@ -404,7 +399,7 @@ fn test_grace_period() {
 
     rcu_api::synchronize();
 
-    unsafe { printf(c"  PASS: Grace period detection through context switches\n".as_ptr()); }
+    crate::kprintln!("  PASS: Grace period detection through context switches");
 }
 
 // ============================================================================
@@ -419,7 +414,7 @@ unsafe extern "C" fn negative_callback(data: *mut c_void) {
 }
 
 fn test_callback_not_invoked_early() {
-    unsafe { printf(c"NEGATIVE TEST: Callback Not Invoked Synchronously in call_rcu\n".as_ptr()); }
+    crate::kprintln!("NEGATIVE TEST: Callback Not Invoked Synchronously in call_rcu");
     NEGATIVE_CALLBACK_COUNT.store(0, Ordering::Release);
 
     let data = kmm_alloc(size_of::<i32>()) as *mut i32;
@@ -438,14 +433,14 @@ fn test_callback_not_invoked_early() {
 
     let early_count = NEGATIVE_CALLBACK_COUNT.load(Ordering::Acquire);
     kassert(early_count == 0, c"Callback should NOT be invoked synchronously in call_rcu\n");
-    unsafe { printf(c"  PASS: Callback correctly NOT invoked synchronously in call_rcu\n".as_ptr()); }
+    crate::kprintln!("  PASS: Callback correctly NOT invoked synchronously in call_rcu");
 
     rcu_api::synchronize();
     rcu_api::process_callbacks();
 
     let final_count = NEGATIVE_CALLBACK_COUNT.load(Ordering::Acquire);
     kassert(final_count == 1, c"Callback should be invoked after synchronize_rcu\n");
-    unsafe { printf(c"  PASS: Callback invoked after grace period\n".as_ptr()); }
+    crate::kprintln!("  PASS: Callback invoked after grace period");
 
     kmm_free(head as *mut c_void);
 }
@@ -455,7 +450,7 @@ fn test_callback_not_invoked_early() {
 // ============================================================================
 
 fn test_read_lock_no_yield_delays_gp() {
-    unsafe { printf(c"NEGATIVE TEST: Read Lock Without Yield Delays GP\n".as_ptr()); }
+    crate::kprintln!("NEGATIVE TEST: Read Lock Without Yield Delays GP");
 
     let g = KRcuRead::new();
     kassert(rcu_api::is_watching(), c"Should be in RCU critical section\n");
@@ -467,12 +462,12 @@ fn test_read_lock_no_yield_delays_gp() {
     core::hint::black_box(sum);
 
     kassert(rcu_api::is_watching(), c"Should still be in RCU critical section\n");
-    unsafe { printf(c"  Read lock held without yielding - nesting counter works\n".as_ptr()); }
+    crate::kprintln!("  Read lock held without yielding - nesting counter works");
 
     drop(g);
     kassert(!rcu_api::is_watching(), c"Should not be in RCU critical section after unlock\n");
 
-    unsafe { printf(c"  PASS: Read lock semantics work correctly\n".as_ptr()); }
+    crate::kprintln!("  PASS: Read lock semantics work correctly");
 }
 
 // ============================================================================
@@ -480,8 +475,8 @@ fn test_read_lock_no_yield_delays_gp() {
 // ============================================================================
 
 fn test_timestamp_overflow() {
-    unsafe { printf(c"NEGATIVE TEST: Timestamp Overflow Handling\n".as_ptr()); }
-    unsafe { printf(c"  Testing timestamp update mechanism\n".as_ptr()); }
+    crate::kprintln!("NEGATIVE TEST: Timestamp Overflow Handling");
+    crate::kprintln!("  Testing timestamp update mechanism");
 
     let cpu = machine::cpuid() as usize;
     let start_time = get_jiffs();
@@ -494,16 +489,15 @@ fn test_timestamp_overflow() {
     let after_time = get_jiffs();
     let cpu_ts_after = rcu_api::cpu_timestamp(cpu);
 
-    // SAFETY: static format string; args match %ld/%ld.
-    unsafe { printf(c"  Time before: %ld, after: %ld\n".as_ptr(), start_time, after_time); }
-    unsafe { printf(c"  CPU timestamp before: %ld, after: %ld\n".as_ptr(), cpu_ts_before, cpu_ts_after); }
+    crate::kprintln!("  Time before: {}, after: {}", start_time, after_time);
+    crate::kprintln!("  CPU timestamp before: {}, after: {}", cpu_ts_before, cpu_ts_after);
 
     kassert(after_time >= start_time, c"Time should move forward\n");
     // CPU timestamp may or may not have changed on this specific CPU
     // (depends on which CPU completed the GP) — we only verify the
     // mechanism exists, matching the original C test's intent.
 
-    unsafe { printf(c"  PASS: Timestamp handling and overflow protection works correctly\n".as_ptr()); }
+    crate::kprintln!("  PASS: Timestamp handling and overflow protection works correctly");
 }
 
 // ============================================================================
@@ -521,7 +515,7 @@ fn current_nesting() -> i32 {
 }
 
 fn test_unbalanced_unlock() {
-    unsafe { printf(c"NEGATIVE TEST: Unbalanced Unlock Detection\n".as_ptr()); }
+    crate::kprintln!("NEGATIVE TEST: Unbalanced Unlock Detection");
 
     // We can't actually trigger the panic in a test; verify the nesting
     // counter behaves correctly instead.
@@ -539,7 +533,7 @@ fn test_unbalanced_unlock() {
     drop(g1);
     kassert(current_nesting() == initial, c"Nesting should return to initial\n");
 
-    unsafe { printf(c"  PASS: Lock/unlock nesting tracking works correctly\n".as_ptr()); }
+    crate::kprintln!("  PASS: Lock/unlock nesting tracking works correctly");
 }
 
 // ============================================================================
@@ -547,7 +541,7 @@ fn test_unbalanced_unlock() {
 // ============================================================================
 
 fn test_concurrent_grace_periods() {
-    unsafe { printf(c"NEGATIVE TEST: Multiple Concurrent Grace Periods\n".as_ptr()); }
+    crate::kprintln!("NEGATIVE TEST: Multiple Concurrent Grace Periods");
 
     // If there's a deadlock or state-corruption issue, this will hang or
     // crash.
@@ -555,8 +549,8 @@ fn test_concurrent_grace_periods() {
         rcu_api::synchronize();
     }
 
-    unsafe { printf(c"  Successfully completed multiple grace periods without deadlock\n".as_ptr()); }
-    unsafe { printf(c"  PASS: Multiple concurrent grace periods handled correctly\n".as_ptr()); }
+    crate::kprintln!("  Successfully completed multiple grace periods without deadlock");
+    crate::kprintln!("  PASS: Multiple concurrent grace periods handled correctly");
 }
 
 // ============================================================================
@@ -564,13 +558,13 @@ fn test_concurrent_grace_periods() {
 // ============================================================================
 
 fn test_gp_requires_context_switch() {
-    unsafe { printf(c"NEGATIVE TEST: Grace Period Completion Verification\n".as_ptr()); }
-    unsafe { printf(c"  Calling synchronize_rcu() multiple times...\n".as_ptr()); }
+    crate::kprintln!("NEGATIVE TEST: Grace Period Completion Verification");
+    crate::kprintln!("  Calling synchronize_rcu() multiple times...");
     for _ in 0..3 {
         rcu_api::synchronize();
     }
-    unsafe { printf(c"  All grace periods completed successfully\n".as_ptr()); }
-    unsafe { printf(c"  PASS: Grace period mechanism works correctly\n".as_ptr()); }
+    crate::kprintln!("  All grace periods completed successfully");
+    crate::kprintln!("  PASS: Grace period mechanism works correctly");
 }
 
 // ============================================================================
@@ -658,13 +652,19 @@ fn asan_check_node(node: *mut ListTestNode, context: &CStr) {
     let (id, value) = unsafe { ((*node).id, (*node).value) };
     ASAN_CHECKS_PERFORMED.fetch_add(1, Ordering::Relaxed);
     if asan_is_poisoned_int(id) {
-        // SAFETY: static format string; args match %x/%s.
-        unsafe { printf(c"ASAN: Use-after-free detected! id=0x%x at %s\n".as_ptr(), id as u32, context.as_ptr()); }
+        crate::kprintln!(
+            "ASAN: Use-after-free detected! id=0x{:x} at {}",
+            ((id as u32) as i32 as i64) as u64,
+            crate::printf::Cs(context.as_ptr())
+        );
         kpanic(c"panic: ASAN: use-after-free\n");
     }
     if asan_is_poisoned_int(value) {
-        // SAFETY: see above.
-        unsafe { printf(c"ASAN: Use-after-free detected! value=0x%x at %s\n".as_ptr(), value as u32, context.as_ptr()); }
+        crate::kprintln!(
+            "ASAN: Use-after-free detected! value=0x{:x} at {}",
+            ((value as u32) as i32 as i64) as u64,
+            crate::printf::Cs(context.as_ptr())
+        );
         kpanic(c"panic: ASAN: use-after-free\n");
     }
 }
@@ -717,7 +717,7 @@ fn alloc_list_node(id: i32, value: i32) -> *mut ListTestNode {
 // ============================================================================
 
 fn test_list_rcu_basic() {
-    unsafe { printf(c"TEST: Basic List RCU Operations\n".as_ptr()); }
+    crate::kprintln!("TEST: Basic List RCU Operations");
 
     spin_init(RCU_TEST_LIST_LOCK.as_mut_ptr(), c"rcu_test_list".as_ptr());
     list_entry_init(test_list_head());
@@ -775,11 +775,10 @@ fn test_list_rcu_basic() {
     }
 
     let invoked = LIST_CALLBACK_COUNT.load(Ordering::Acquire);
-    // SAFETY: static format string; arg matches %d.
-    unsafe { printf(c"  Callbacks invoked: %d/10\n".as_ptr(), invoked); }
+    crate::kprintln!("  Callbacks invoked: {}/10", invoked);
     kassert(invoked == 10, c"All 10 callbacks should have been invoked\n");
 
-    unsafe { printf(c"  PASS: Basic list RCU add/delete works correctly\n".as_ptr()); }
+    crate::kprintln!("  PASS: Basic list RCU add/delete works correctly");
 }
 
 // ============================================================================
@@ -813,7 +812,7 @@ extern "C" fn list_stress_reader(iterations: u64, _unused: u64) {
 }
 
 fn test_list_rcu_concurrent_rw() {
-    unsafe { printf(c"TEST: List RCU Concurrent Read While Write\n".as_ptr()); }
+    crate::kprintln!("TEST: List RCU Concurrent Read While Write");
 
     spin_init(RCU_TEST_LIST_LOCK.as_mut_ptr(), c"rcu_test_list".as_ptr());
     list_entry_init(test_list_head());
@@ -879,8 +878,8 @@ fn test_list_rcu_concurrent_rw() {
     let errors = LIST_STRESS_ERRORS.load(Ordering::Acquire);
     kassert(errors == 0, c"No errors should occur during concurrent read/write\n");
 
-    unsafe { printf(c"  Completed concurrent read/write with 0 errors\n".as_ptr()); }
-    unsafe { printf(c"  PASS: List RCU concurrent read/write works correctly\n".as_ptr()); }
+    crate::kprintln!("  Completed concurrent read/write with 0 errors");
+    crate::kprintln!("  PASS: List RCU concurrent read/write works correctly");
 }
 
 // ============================================================================
@@ -908,8 +907,7 @@ unsafe extern "C" fn stress_node_free_callback(data: *mut c_void) {
 // ----------------------------------------------------------------------
 
 fn test_stress_call_rcu() {
-    // SAFETY: static format string; arg matches %d.
-    unsafe { printf(c"STRESS TEST: %d call_rcu() Operations\n".as_ptr(), STRESS_ITERATIONS); }
+    crate::kprintln!("STRESS TEST: {} call_rcu() Operations", STRESS_ITERATIONS);
     STRESS_CALLBACKS_INVOKED.store(0, Ordering::Release);
 
     for batch in 0..(STRESS_ITERATIONS / STRESS_BATCH_SIZE) {
@@ -942,11 +940,10 @@ fn test_stress_call_rcu() {
     rcu_api::barrier();
 
     let invoked = STRESS_CALLBACKS_INVOKED.load(Ordering::Acquire);
-    // SAFETY: static format string; args match %d/%d.
-    unsafe { printf(c"  Final: %d callbacks invoked out of %d\n".as_ptr(), invoked, STRESS_ITERATIONS); }
+    crate::kprintln!("  Final: {} callbacks invoked out of {}", invoked, STRESS_ITERATIONS);
     kassert(invoked == STRESS_ITERATIONS, c"All callbacks should be invoked\n");
 
-    unsafe { printf(c"  PASS: %d call_rcu() operations completed successfully\n".as_ptr(), STRESS_ITERATIONS); }
+    crate::kprintln!("  PASS: {} call_rcu() operations completed successfully", STRESS_ITERATIONS);
 }
 
 // ----------------------------------------------------------------------
@@ -986,13 +983,7 @@ extern "C" fn stress_list_reader(reader_id: u64, _unused: u64) {
 }
 
 fn test_stress_list_rcu() {
-    // SAFETY: static format string; arg matches %d.
-    unsafe {
-        printf(
-            c"STRESS TEST: %d List Add/Remove with Concurrent Readers\n".as_ptr(),
-            STRESS_ITERATIONS,
-        );
-    }
+    crate::kprintln!("STRESS TEST: {} List Add/Remove with Concurrent Readers", STRESS_ITERATIONS);
 
     spin_init(RCU_TEST_LIST_LOCK.as_mut_ptr(), c"stress_list".as_ptr());
     list_entry_init(test_list_head());
@@ -1058,12 +1049,11 @@ fn test_stress_list_rcu() {
         scheduler_yield();
     }
 
-    unsafe { printf(c"  Reader iterations: ".as_ptr()); }
+    crate::kprint!("  Reader iterations: ");
     for slot in STRESS_READER_ITERATIONS.iter() {
-        // SAFETY: static format string; arg matches %d.
-        unsafe { printf(c"%d ".as_ptr(), slot.load(Ordering::Acquire)); }
+        crate::kprint!("{} ", slot.load(Ordering::Acquire));
     }
-    unsafe { printf(c"\n".as_ptr()); }
+    crate::kprintln!();
 
     // Cleanup remaining nodes.
     let mut remaining: i32 = 0;
@@ -1081,24 +1071,20 @@ fn test_stress_list_rcu() {
             pos = next;
         }
     }
-    // SAFETY: static format string; arg matches %d.
-    unsafe { printf(c"  Cleaning up %d remaining nodes\n".as_ptr(), remaining); }
+    crate::kprintln!("  Cleaning up {} remaining nodes", remaining);
 
     rcu_api::barrier();
 
     let freed = STRESS_CALLBACKS_INVOKED.load(Ordering::Acquire);
-    // SAFETY: static format string; args match %d/%d/%d.
-    unsafe {
-        printf(
-            c"  Total: added=%d, removed=%d (via call_rcu), freed=%d\n".as_ptr(),
-            total_added,
-            total_removed + remaining,
-            freed,
-        );
-    }
+    crate::kprintln!(
+        "  Total: added={}, removed={} (via call_rcu), freed={}",
+        total_added,
+        total_removed + remaining,
+        freed
+    );
     kassert(freed == total_removed + remaining, c"All removed nodes should be freed\n");
 
-    unsafe { printf(c"  PASS: %d list operations with concurrent readers completed\n".as_ptr(), STRESS_ITERATIONS); }
+    crate::kprintln!("  PASS: {} list operations with concurrent readers completed", STRESS_ITERATIONS);
 }
 
 // ----------------------------------------------------------------------
@@ -1106,8 +1092,7 @@ fn test_stress_list_rcu() {
 // ----------------------------------------------------------------------
 
 fn test_stress_grace_periods() {
-    // SAFETY: static format string; arg matches %d.
-    unsafe { printf(c"STRESS TEST: %d Rapid Grace Periods\n".as_ptr(), STRESS_ITERATIONS); }
+    crate::kprintln!("STRESS TEST: {} Rapid Grace Periods", STRESS_ITERATIONS);
 
     let start_time = get_jiffs();
     for _ in 0..STRESS_ITERATIONS {
@@ -1116,9 +1101,8 @@ fn test_stress_grace_periods() {
     let end_time = get_jiffs();
     let elapsed = end_time.wrapping_sub(start_time);
 
-    // SAFETY: static format string; args match %d/%ld.
-    unsafe { printf(c"  Completed %d grace periods in %ld jiffies\n".as_ptr(), STRESS_ITERATIONS, elapsed); }
-    unsafe { printf(c"  PASS: Rapid grace period stress test completed\n".as_ptr()); }
+    crate::kprintln!("  Completed {} grace periods in {} jiffies", STRESS_ITERATIONS, elapsed);
+    crate::kprintln!("  PASS: Rapid grace period stress test completed");
 }
 
 // ----------------------------------------------------------------------
@@ -1156,8 +1140,7 @@ extern "C" fn mixed_reader_thread(_id: u64, target_ops: u64) {
 }
 
 fn test_stress_mixed_workload() {
-    // SAFETY: static format string; arg matches %d.
-    unsafe { printf(c"STRESS TEST: Mixed Workload (%d total operations)\n".as_ptr(), STRESS_ITERATIONS); }
+    crate::kprintln!("STRESS TEST: Mixed Workload ({} total operations)", STRESS_ITERATIONS);
 
     spin_init(RCU_TEST_LIST_LOCK.as_mut_ptr(), c"mixed_list".as_ptr());
     list_entry_init(test_list_head());
@@ -1209,8 +1192,7 @@ fn test_stress_mixed_workload() {
     }
 
     let total_ops = MIXED_OPS_COMPLETED.load(Ordering::Acquire);
-    // SAFETY: static format string; arg matches %d.
-    unsafe { printf(c"  Total operations completed: %d (target: 10,000)\n".as_ptr(), total_ops); }
+    crate::kprintln!("  Total operations completed: {} (target: 10,000)", total_ops);
 
     // Cleanup.
     {
@@ -1233,7 +1215,7 @@ fn test_stress_mixed_workload() {
         scheduler_yield();
     }
 
-    unsafe { printf(c"  PASS: Mixed workload stress test completed\n".as_ptr()); }
+    crate::kprintln!("  PASS: Mixed workload stress test completed");
 }
 
 // ============================================================================
@@ -1241,9 +1223,7 @@ fn test_stress_mixed_workload() {
 // ============================================================================
 
 fn banner() {
-    unsafe {
-        printf(c"====================================================================================\n".as_ptr());
-    }
+    crate::kprintln!("====================================================================================");
 }
 
 /// Run the full RCU test suite. Preserves the original `void
@@ -1252,22 +1232,21 @@ fn banner() {
 /// (and remains) commented out.
 pub(crate) fn rcu_run_tests() {
     sleep_ms(100);
-    unsafe { printf(c"\n".as_ptr()); }
+    crate::kprintln!();
     banner();
-    unsafe { printf(c"RCU Test Suite Starting\n".as_ptr()); }
+    crate::kprintln!("RCU Test Suite Starting");
     banner();
-    unsafe { printf(c"  Configuration:\n".as_ptr()); }
-    // SAFETY: static format string; arg matches %d.
-    unsafe { printf(c"    - Concurrent reader threads: %d\n".as_ptr(), RCU_TEST_NUM_READERS); }
-    unsafe { printf(c"    - Iterations per reader: %ld\n".as_ptr(), RCU_TEST_ITERATIONS); }
-    unsafe { printf(c"    - Stress test iterations: %d\n".as_ptr(), STRESS_ITERATIONS); }
+    crate::kprintln!("  Configuration:");
+    crate::kprintln!("    - Concurrent reader threads: {}", RCU_TEST_NUM_READERS);
+    crate::kprintln!("    - Iterations per reader: {}", RCU_TEST_ITERATIONS);
+    crate::kprintln!("    - Stress test iterations: {}", STRESS_ITERATIONS);
     banner();
-    unsafe { printf(c"\n".as_ptr()); }
+    crate::kprintln!();
 
     macro_rules! run {
         ($f:expr) => {
             $f();
-            unsafe { printf(c"\n".as_ptr()); }
+            crate::kprintln!();
         };
     }
 
@@ -1281,17 +1260,17 @@ pub(crate) fn rcu_run_tests() {
 
     // List RCU tests.
     banner();
-    unsafe { printf(c"Starting List RCU Tests\n".as_ptr()); }
+    crate::kprintln!("Starting List RCU Tests");
     banner();
-    unsafe { printf(c"\n".as_ptr()); }
+    crate::kprintln!();
     run!(test_list_rcu_basic);
     run!(test_list_rcu_concurrent_rw);
 
     // Negative tests.
     banner();
-    unsafe { printf(c"Starting Negative Tests (Edge Cases and Error Conditions)\n".as_ptr()); }
+    crate::kprintln!("Starting Negative Tests (Edge Cases and Error Conditions)");
     banner();
-    unsafe { printf(c"\n".as_ptr()); }
+    crate::kprintln!();
     run!(test_callback_not_invoked_early);
     run!(test_read_lock_no_yield_delays_gp);
     run!(test_timestamp_overflow);
@@ -1301,10 +1280,9 @@ pub(crate) fn rcu_run_tests() {
 
     // Stress tests.
     banner();
-    // SAFETY: static format string; arg matches %d.
-    unsafe { printf(c"Starting Stress Tests (%d scale)\n".as_ptr(), STRESS_ITERATIONS); }
+    crate::kprintln!("Starting Stress Tests ({} scale)", STRESS_ITERATIONS);
     banner();
-    unsafe { printf(c"\n".as_ptr()); }
+    crate::kprintln!();
     run!(test_stress_call_rcu);
     run!(test_stress_list_rcu);
     run!(test_stress_grace_periods);
@@ -1312,17 +1290,16 @@ pub(crate) fn rcu_run_tests() {
 
     // ASAN summary.
     banner();
-    unsafe { printf(c"ASAN Summary\n".as_ptr()); }
+    crate::kprintln!("ASAN Summary");
     banner();
-    // SAFETY: static format string; arg matches %d.
-    unsafe { printf(c"  Total ASAN checks performed: %d\n".as_ptr(), ASAN_CHECKS_PERFORMED.load(Ordering::Acquire)); }
-    unsafe { printf(c"  Total nodes poisoned: %d\n".as_ptr(), ASAN_NODES_POISONED.load(Ordering::Acquire)); }
-    unsafe { printf(c"  Use-after-free errors detected: 0 (would have panicked)\n".as_ptr()); }
+    crate::kprintln!("  Total ASAN checks performed: {}", ASAN_CHECKS_PERFORMED.load(Ordering::Acquire));
+    crate::kprintln!("  Total nodes poisoned: {}", ASAN_NODES_POISONED.load(Ordering::Acquire));
+    crate::kprintln!("  Use-after-free errors detected: 0 (would have panicked)");
     banner();
-    unsafe { printf(c"\n".as_ptr()); }
+    crate::kprintln!();
 
     banner();
-    unsafe { printf(c"RCU Test Suite Completed - ALL TESTS PASSED\n".as_ptr()); }
+    crate::kprintln!("RCU Test Suite Completed - ALL TESTS PASSED");
     banner();
-    unsafe { printf(c"\n".as_ptr()); }
+    crate::kprintln!();
 }

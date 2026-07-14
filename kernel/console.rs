@@ -146,48 +146,21 @@ const fn ctrl(x: u8) -> c_int {
 // ===========================================================================
 
 unsafe extern "C" {
-    pub safe fn printf(fmt: *const c_char, ...) -> c_int;
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }
 
-fn console_assert_errno(
-    cond: bool,
-    line: u32,
-    function: &core::ffi::CStr,
-    msg: &core::ffi::CStr,
-    errno: c_int,
-) {
-    if cond {
-        return;
-    }
-    __panic_start();
-    printf(
-        c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-        c"kernel/console.rs".as_ptr(),
-        line as c_int,
-        function.as_ptr(),
-    );
-    printf(msg.as_ptr(), errno);
-    printf(c"\n".as_ptr());
-    __panic_end();
-}
-
-fn console_assert_plain(cond: bool, line: u32, function: &core::ffi::CStr, msg: &core::ffi::CStr) {
-    if cond {
-        return;
-    }
-    __panic_start();
-    printf(
-        c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-        c"kernel/console.rs".as_ptr(),
-        line as c_int,
-        function.as_ptr(),
-    );
-    printf(msg.as_ptr());
-    printf(c"\n".as_ptr());
-    __panic_end();
-}
+// P3-2 (zero-C wave): `console_assert_errno`/`console_assert_plain` used to
+// take their assertion message as a runtime `&CStr` (with the errno variant
+// embedding a `%d` inside that string) -- `core::fmt`'s `format_args!` (and
+// therefore `kprintln!`/`kprint!`) requires a literal format string, so a
+// generic "assert with a caller-chosen dynamic format" helper has no
+// equivalent. Both had exactly 3 call sites total (all in
+// `consoledevinit()` below), so they were inlined at each call site instead
+// of preserved as a shared helper -- see the `macro-rules-hygiene`/
+// `own-*` rust-skills guidance against over-abstracting a 3-call-site
+// pattern behind a signature that can no longer be generic over its
+// message.
 
 /// `IS_ERR_OR_NULL(ptr)` (`kernel/inc/errno.h`).
 #[inline]
@@ -837,13 +810,15 @@ pub(crate) extern "C" fn consoledevinit() {
         (*cdev).ops = CONSOLE_CDEV_OPS;
 
         let errno = cdev_register(cdev);
-        console_assert_errno(
-            errno == 0,
-            line!(),
-            c"consoledevinit",
-            c"consoleinit: cdev_register failed: %d\n",
-            errno,
-        );
+        if errno != 0 {
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                "kernel/console.rs", line!(), "consoledevinit",
+            );
+            crate::kprintln!("consoleinit: cdev_register failed: {}", errno);
+            __panic_end();
+        }
 
         // Install ioctl on the device_t level (used by vfs_ioctl ->
         // dev_ioctl).
@@ -862,22 +837,30 @@ pub(crate) extern "C" fn consoledevinit() {
             rcu_head: unsafe { core::mem::zeroed() },
         };
         let errno = register_irq_handler(plic_irq(crate::uart::__uart0_irqno as c_int), &raw mut irq_desc);
-        console_assert_errno(
-            errno == 0,
-            line!(),
-            c"consoledevinit",
-            c"consoledevinit: register_irq_handler failed, error code: %d\n",
-            errno,
-        );
+        if errno != 0 {
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                "kernel/console.rs", line!(), "consoledevinit",
+            );
+            crate::kprintln!(
+                "consoledevinit: register_irq_handler failed, error code: {}",
+                errno,
+            );
+            __panic_end();
+        }
 
         // --- Allocate the console TTY ---
         let t = tty_alloc(c"console".as_ptr(), core::ptr::null_mut());
-        console_assert_plain(
-            !is_err_or_null(t),
-            line!(),
-            c"consoledevinit",
-            c"consoledevinit: tty_alloc failed",
-        );
+        if is_err_or_null(t) {
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                "kernel/console.rs", line!(), "consoledevinit",
+            );
+            crate::kprintln!("consoledevinit: tty_alloc failed");
+            __panic_end();
+        }
         CONSOLE_TTY.store(t, Ordering::Relaxed);
 
         // Make both TTY pipes non-blocking for writes so that

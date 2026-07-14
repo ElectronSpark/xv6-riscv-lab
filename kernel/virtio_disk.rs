@@ -121,7 +121,6 @@ use crate::machine;
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
     safe fn __panic_start();
     safe fn __panic_end() -> !;
 
@@ -509,35 +508,41 @@ unsafe fn bio_complete(bio_ptr: *mut bio) {
 // Panic helpers -- see module doc's "Deliberate simplifications".
 // ===========================================================================
 
-#[cold]
-#[inline(never)]
-fn panic_fmt_i32(fmt: &core::ffi::CStr, val: c_int) -> ! {
-    __panic_start();
-    // SAFETY: `fmt` is 'static, nul-terminated, and matches its one %d arg.
-    unsafe { printf(fmt.as_ptr(), val) };
-    __panic_end()
+// P3-2 (zero-C wave): `panic_fmt_i32` used to take its format string as a
+// runtime `&CStr` argument (each call site's literal embedding a `%d`) --
+// `core::fmt`'s `format_args!` requires a literal format string, so it
+// became a macro (format captured as `:literal` at each call site) instead
+// of a plain function. `panic_fixed` never had a dynamic format piece (no
+// vararg), so it stays a plain function, just taking `&str` instead of
+// `&CStr`.
+macro_rules! panic_fmt_i32 {
+    ($fmt:literal, $val:expr) => {{
+        __panic_start();
+        crate::kprintln!($fmt, $val);
+        __panic_end()
+    }};
 }
 
 #[cold]
 #[inline(never)]
-fn panic_fixed(msg: &core::ffi::CStr) -> ! {
+fn panic_fixed(msg: &str) -> ! {
     __panic_start();
-    // SAFETY: `msg` is 'static, nul-terminated, no format args.
-    unsafe { printf(msg.as_ptr()) };
+    crate::kprintln!("{}", msg);
     __panic_end()
 }
 
 #[cold]
 #[inline(never)]
 fn panic_intr_status(id: c_int, status: c_int, bio_ptr: *mut c_void, blockno: u64) -> ! {
-    // SAFETY: fixed format string; matches the C original's
+    // Matches the C original's
     // `printf("ERROR: id=%d status=%d buf=%p blockno=0x%lx\n", ...)`
     // immediately preceding its `panic("virtio_disk_intr status: %d", status)`.
-    unsafe {
-        printf(c"ERROR: id=%d status=%d buf=%p blockno=0x%lx\n".as_ptr(), id, status, bio_ptr, blockno);
-    }
+    crate::kprintln!(
+        "ERROR: id={} status={} buf={} blockno=0x{:x}",
+        id, status, crate::printf::Ptr(bio_ptr as u64), blockno,
+    );
     __panic_start();
-    unsafe { printf(c"virtio_disk_intr status: %d\n".as_ptr(), status) };
+    crate::kprintln!("virtio_disk_intr status: {}", status);
     __panic_end()
 }
 
@@ -581,7 +586,7 @@ unsafe fn alloc_desc(disk: *mut Disk) -> i32 {
 unsafe fn free_desc(disk: *mut Disk, i: i32) {
     // SAFETY: caller contract.
     if unsafe { (*disk).desc_freelist.free_item(i) } != 0 {
-        panic_fixed(c"free_desc: invalid free");
+        panic_fixed("free_desc: invalid free");
     }
 
     // SAFETY: caller contract; `i` just validated as a real descriptor
@@ -667,10 +672,10 @@ unsafe fn virtio_disk_rw(diskno: usize, bio_ptr: *mut bio, sector: u64, buf: *mu
     let disk = unsafe { disk_ptr(diskno) };
 
     if size != BSIZE {
-        panic_fixed(c"virtio_disk_rw: size must be BSIZE");
+        panic_fixed("virtio_disk_rw: size must be BSIZE");
     }
     if buf.is_null() {
-        panic_fixed(c"virtio_disk_rw: buf is NULL");
+        panic_fixed("virtio_disk_rw: buf is NULL");
     }
 
     // Raw spin_lock/spin_unlock (not RAII): interacts with `tq_wait`'s
@@ -805,7 +810,7 @@ extern "C" fn virtio_disk_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void
 
         // SAFETY: `disk` live.
         if unsafe { (*disk).info[id].done } {
-            panic_fixed(c"virtio_disk_intr: already done");
+            panic_fixed("virtio_disk_intr: already done");
         }
         // SAFETY: `disk` live.
         unsafe { (*disk).info[id].done = true };
@@ -866,11 +871,11 @@ extern "C" fn virtio_disk_submit_bio(blkdev: *mut blkdev_t, bio_ptr: *mut bio) -
         let sector = iter.blkno;
         let page: *mut page_t = bvec.bv_page;
         if page.is_null() {
-            panic_fixed(c"virtio_disk_submit_bio: page is NULL");
+            panic_fixed("virtio_disk_submit_bio: page is NULL");
         }
         let pa = __page_to_pa(page) as *mut c_void;
         if pa.is_null() {
-            panic_fixed(c"virtio_disk_submit_bio: page has no physical address");
+            panic_fixed("virtio_disk_submit_bio: page has no physical address");
         }
         // SAFETY: `bio_ptr` live.
         let write = unsafe { bio_dir_write(bio_ptr) };
@@ -933,7 +938,7 @@ fn virtio_blkdev_init(diskno: usize) {
     // `dev` fully initialised above.
     let errno = blkdev_register(dev);
     if errno != 0 {
-        panic_fmt_i32(c"virtio_blkdev_init: blkdev_register failed: %d\n", errno);
+        panic_fmt_i32!("virtio_blkdev_init: blkdev_register failed: {}", errno);
     }
 
     // SAFETY: `dev` live; `virtio_irq` is a live, fully-initialised
@@ -953,7 +958,7 @@ fn virtio_blkdev_init(diskno: usize) {
         register_irq_handler(plic_irq((__virtio_irqno[0] + diskno as u64) as c_int), &raw mut virtio_irq)
     };
     if ret != 0 {
-        panic_fmt_i32(c"virtio_blkdev_init: register_irq_handler failed: %d\n", ret);
+        panic_fmt_i32!("virtio_blkdev_init: register_irq_handler failed: {}", ret);
     }
 }
 
@@ -978,7 +983,7 @@ fn virtio_disk_init_one(diskno: usize) {
             && core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_VENDOR_ID)) == 0x554d4551
     };
     if !magic_ok {
-        panic_fmt_i32(c"could not find virtio disk %d\n", diskno as c_int);
+        panic_fmt_i32!("could not find virtio disk {}", diskno as c_int);
     }
 
     // SAFETY: `diskno` valid throughout this function.
@@ -1013,7 +1018,7 @@ fn virtio_disk_init_one(diskno: usize) {
         // re-read status to ensure FEATURES_OK is set.
         status = core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_STATUS));
         if status & VIRTIO_CONFIG_S_FEATURES_OK == 0 {
-            panic_fmt_i32(c"virtio disk %d FEATURES_OK unset\n", diskno as c_int);
+            panic_fmt_i32!("virtio disk {} FEATURES_OK unset", diskno as c_int);
         }
 
         // initialize queue 0.
@@ -1021,16 +1026,16 @@ fn virtio_disk_init_one(diskno: usize) {
 
         // ensure queue 0 is not in use.
         if core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_READY)) != 0 {
-            panic_fmt_i32(c"virtio disk %d should not be ready\n", diskno as c_int);
+            panic_fmt_i32!("virtio disk {} should not be ready", diskno as c_int);
         }
 
         // check maximum queue size.
         let max = core::ptr::read_volatile(reg(diskno, VIRTIO_MMIO_QUEUE_NUM_MAX));
         if max == 0 {
-            panic_fmt_i32(c"virtio disk %d has no queue 0\n", diskno as c_int);
+            panic_fmt_i32!("virtio disk {} has no queue 0", diskno as c_int);
         }
         if (max as usize) < NUM {
-            panic_fmt_i32(c"virtio disk %d max queue too short\n", diskno as c_int);
+            panic_fmt_i32!("virtio disk {} max queue too short", diskno as c_int);
         }
 
         // allocate and zero queue memory.
@@ -1038,7 +1043,7 @@ fn virtio_disk_init_one(diskno: usize) {
         (*disk).avail = kalloc() as *mut virtq_avail;
         (*disk).used = kalloc() as *mut virtq_used;
         if (*disk).desc.is_null() || (*disk).avail.is_null() || (*disk).used.is_null() {
-            panic_fmt_i32(c"virtio disk %d kalloc\n", diskno as c_int);
+            panic_fmt_i32!("virtio disk {} kalloc", diskno as c_int);
         }
         memset((*disk).desc as *mut c_void, 0, PGSIZE as usize);
         memset((*disk).avail as *mut c_void, 0, PGSIZE as usize);

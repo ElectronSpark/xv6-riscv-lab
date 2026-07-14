@@ -36,7 +36,6 @@ use crate::bindings::{bio, bio_vec, blkdev_ops_t, blkdev_t, mode_t, page_t, plat
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
     safe fn __panic_start();
     safe fn __panic_end() -> !;
 
@@ -269,14 +268,12 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
         // SAFETY: `rd` live.
         if offset + bvec.len as u64 > unsafe { (*rd).size_bytes } {
             // SAFETY: format string matches its three arguments.
-            unsafe {
-                printf(
-                    c"ramdisk: access beyond end of device (offset=%lx, len=%d, size=%lx)\n".as_ptr(),
-                    offset,
-                    bvec.len as c_int,
-                    (*rd).size_bytes,
-                );
-            }
+            crate::kprintln!(
+                "ramdisk: access beyond end of device (offset={:x}, len={}, size={:x})",
+                offset,
+                bvec.len as c_int,
+                unsafe { (*rd).size_bytes },
+            );
             spin_unlock(unsafe { &raw mut (*rd).lock });
             // SAFETY: `bio_ptr` live.
             unsafe {
@@ -360,8 +357,8 @@ pub(crate) extern "C" fn ramdisk_init() {
         (*rd).size_bytes = ramdisk_size;
         (*rd).size_blocks = ramdisk_size / 512;
 
-        printf(
-            c"ramdisk: initialized %ld KB ramdisk (%ld sectors) at 0x%lx\n".as_ptr(),
+        crate::kprintln!(
+            "ramdisk: initialized {} KB ramdisk ({} sectors) at 0x{:x}",
             (*rd).size_bytes / 1024,
             (*rd).size_blocks,
             (*rd).base,
@@ -391,7 +388,7 @@ pub(crate) extern "C" fn ramdisk_init() {
     if errno != 0 {
         __panic_start();
         // SAFETY: format string matches its one argument.
-        unsafe { printf(c"ramdisk_init: blkdev_register failed: %d\n".as_ptr(), errno) };
+        crate::kprintln!("ramdisk_init: blkdev_register failed: {}", errno);
         __panic_end();
     }
 }

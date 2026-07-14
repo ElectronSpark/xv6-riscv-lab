@@ -99,7 +99,6 @@ unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 }
 
 /// Replicates the C `assert(expr, fmt)` macro expansion. Same pattern as
@@ -109,18 +108,14 @@ fn sched_timer_assert(cond: bool, line: u32, function: &core::ffi::CStr, msg: &c
         return;
     }
     __panic_start();
-    // SAFETY: all arguments are 'static or caller-owned NUL-terminated C
-    // strings matching their format specifiers.
-    unsafe {
-        printf(
-            c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-            c"kernel/timer/sched_timer.rs".as_ptr(),
-            line as c_int,
-            function.as_ptr(),
-        );
-        printf(msg.as_ptr());
-        printf(c"\n".as_ptr());
-    }
+    crate::kprintln!(
+        "ASSERTION_FAILURE {}:{}: In function '{}':",
+        "kernel/timer/sched_timer.rs",
+        line as c_int,
+        crate::printf::Cs(function.as_ptr()),
+    );
+    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
+    crate::kprintln!();
     __panic_end()
 }
 
@@ -231,8 +226,7 @@ unsafe extern "C" fn work_callback(work: *mut work_struct) {
     // dereferencing to check `callback` is safe (the pointer itself is
     // trusted to be a `SchedTimerWork` this module allocated).
     if stw.is_null() || unsafe { (*stw).callback }.is_none() {
-        // SAFETY: format string matches its arguments (none).
-        unsafe { printf(c"warning: __work_callback: Invalid work or callback\n".as_ptr()) };
+        crate::kprintln!("warning: __work_callback: Invalid work or callback");
         return;
     }
     // SAFETY: `stw` is live and non-null (checked above); `tn` is the
@@ -255,8 +249,7 @@ unsafe extern "C" fn timer_callback(tn: *mut timer_node) {
     let data = unsafe { (*tn).data };
     let stw = data as *mut SchedTimerWork;
     if stw.is_null() {
-        // SAFETY: format string matches its arguments (none).
-        unsafe { printf(c"warning: __timer_callback: Invalid work\n".as_ptr()) };
+        crate::kprintln!("warning: __timer_callback: Invalid work");
         return;
     }
     let wq = SCHED_TIMER_WQ.load(Ordering::Relaxed);
@@ -264,8 +257,7 @@ unsafe extern "C" fn timer_callback(tn: *mut timer_node) {
     // embedded work item `alloc_sched_timer_work` initialized.
     let ok = unsafe { queue_work(wq, &raw mut (*stw).work) };
     if !ok {
-        // SAFETY: format string matches its arguments (none).
-        unsafe { printf(c"warning: __sched_timer_add_timer_callback: Failed to queue work\n".as_ptr()) };
+        crate::kprintln!("warning: __sched_timer_add_timer_callback: Failed to queue work");
         // SAFETY: `stw` is live and non-null; queueing failed so it will
         // never be freed by `work_callback` -- this is the only remaining
         // owner.

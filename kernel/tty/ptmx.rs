@@ -55,7 +55,6 @@ unsafe extern "C" {
         flags: u64,
     ) -> c_int;
 
-    pub safe fn printf(fmt: *const c_char, ...) -> c_int;
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }
@@ -98,20 +97,25 @@ const S_IFCHR: u32 = 0o020_000;
 // the established pattern this mirrors.
 // ===========================================================================
 
-fn ptmx_assert_errno(cond: bool, line: u32, msg: &core::ffi::CStr, errno: c_int) {
-    if cond {
-        return;
-    }
-    __panic_start();
-    printf(
-        c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-        c"kernel/tty/ptmx.rs".as_ptr(),
-        line as c_int,
-        c"ptmxinit".as_ptr(),
-    );
-    printf(msg.as_ptr(), errno);
-    printf(c"\n".as_ptr());
-    __panic_end();
+// P3-2 (zero-C wave): `ptmx_assert_errno` used to take its assertion
+// message as a runtime `&CStr` embedding a `%d` -- `core::fmt`'s
+// `format_args!` requires a literal format string, so (matching
+// `console.rs`/`tty_dev.rs`'s equivalent fix) it became a macro, message
+// captured as a `:literal` at each of its two call sites below.
+macro_rules! ptmx_assert_errno {
+    ($cond:expr, $msg:literal, $errno:expr $(,)?) => {
+        if !($cond) {
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                "kernel/tty/ptmx.rs",
+                line!(),
+                "ptmxinit",
+            );
+            crate::kprintln!($msg, $errno);
+            __panic_end();
+        }
+    };
 }
 
 // ===========================================================================
@@ -602,11 +606,7 @@ unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> 
 
     let ret = unsafe { cdev_register(&raw mut (*pair).slave_cdev) };
     if ret != 0 {
-        printf(
-            c"ptmx: failed to register pts/%d cdev: %d\n".as_ptr(),
-            idx,
-            ret,
-        );
+        crate::kprintln!("ptmx: failed to register pts/{} cdev: {}", idx, ret);
         unsafe { tty_unref(slave) };
         let _g = ptmx_lock().lock();
         unsafe { (*PTY_TABLE.0.get())[idx as usize] = core::ptr::null_mut() };
@@ -657,7 +657,7 @@ pub(crate) extern "C" fn ptmxinit() {
             crate::bindings::SLAB_FLAG_STATIC as u64,
         )
     };
-    ptmx_assert_errno(ret == 0, line!(), c"ptmxinit: slab_cache_init failed: %d\n", ret);
+    ptmx_assert_errno!(ret == 0, "ptmxinit: slab_cache_init failed: {}", ret);
 
     ptmx_lock().init(c"ptmx".as_ptr());
 
@@ -680,11 +680,11 @@ pub(crate) extern "C" fn ptmxinit() {
         };
 
         let ret = cdev_register(cdev);
-        ptmx_assert_errno(ret == 0, line!(), c"ptmxinit: cdev_register failed: %d\n", ret);
+        ptmx_assert_errno!(ret == 0, "ptmxinit: cdev_register failed: {}", ret);
     }
 
-    printf(
-        c"ptmx: /dev/ptmx registered (major %d, minor %d)\n".as_ptr(),
+    crate::kprintln!(
+        "ptmx: /dev/ptmx registered (major {}, minor {})",
         PTMX_MAJOR,
         PTMX_MINOR,
     );

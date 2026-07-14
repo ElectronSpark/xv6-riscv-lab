@@ -28,7 +28,7 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
 | irq | ✅ | — (kernelvec.S, trampoline.S remain as assembly) | plic.rs + irq_core.rs (W5), trap.rs (W6), syscall.rs (W7) |
 | timer | ✅ | — | timer_core.rs + sched_timer.rs + goldfish_rtc.rs (Wave 8, 2026-07-12) |
 | ipi | ✅ | — | ipi.rs (Wave 9, 2026-07-12); cpus[] cpu_local storage kept link_section/page-aligned byte-identical |
-| core / misc | ✅ | printf_shim.c ONLY (46 lines: variadic `printf()` C entry — `c_variadic` unavailable on stable rustc; documented remnant until stabilization) | string/sbi (W2), start (W3), uart/console/printf (W4), backtrace (W5), exec (W26), start_kernel (W27) |
+| core / misc | ✅ | — (printf_shim.c DELETED in P3-2: kprint!/kprintln! over core::fmt replaced the C-variadic printf; kernel is now 100% C-free) | string/sbi (W2), start (W3), uart/console/printf (W4), backtrace (W5), exec (W26), start_kernel (W27) |
 | block/net drivers | ✅ | — | bio+bufcache (W22), virtio_disk + ramdisk + pci + e1000 + net + sysnet (W28, final wave); virtqueue barriers 7/7, e1000 fences 8/8 exact |
 | data structures | ✅ | — | bintree.rs, rbtree.rs, hlist.rs, kobject.rs (Wave 1, 2026-07-11); list.rs pre-existing |
 | host tests (`test/`) | ✅ | 3 cmocka suites remain BY DESIGN (ut_list/ut_bits/ut_tmpfs_truncate test still-C header layers) | 35 host cargo tests (bits/list/early_allocator) + 4 QEMU ctest in-kernel suites (rwsem, semaphore, pcache 30 cases, workqueue 7 cases); plan CLOSED |
@@ -848,6 +848,26 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   stressfs. C_COMPILER/CMAKE_BUILD_TYPE cache re-checked clean after the
   full matrix.
 
+### Phase 3 (de-C-ification) — 2026-07-14
+
+P3-1 enabler wave (A/B/B2/C/D): C-ABI mesh removed — `#[no_mangle]`
+1438→576, `RUST_FORCE_UNDEFINED` 495→22 (byte-identical-link verified),
+5 alias families + signal_ffi.rs dissolved, ~9 signature-drift bugs fixed,
+CMakeLists 1527→723 lines. RFU-prune corruption scare investigated →
+pruning exonerated (rare fs flake misattributed by A/B/A bisection).
+
+**P3-2 — ZERO C**: variadic printf → `kprint!`/`kprintln!` over
+`core::fmt::Write` on the existing console path (`Cs`/`Ptr` Display
+newtypes for %s/%p); ~750 sites across 63 files migrated; panic/backtrace
+path as high-scrutiny solo pass. `printf_shim.c` DELETED —
+`find kernel -name '*.c'` is EMPTY. Kernel is 100% Rust (C toolchain now
+only assembles the .S files). Verified: clean-cache zero-warning build,
+boot-log byte-identical to baseline (3 benign size-derived deltas),
+mmaptest 16/16, testsig 21/21, stressfs, usertests baseline, host 35/35,
+qemu_pcache 30/30 + qemu_rwsem, panic legibility + ps/free format
+fidelity confirmed. Remaining Phase 3: P3-3..P3-12 (bindgen retirement,
+ref params, Deref guards, KArc, dyn/enum dispatch, unsafe census).
+
 ### Iteration 38 — 2026-07-13 — Wave 28 (FINAL PORTING WAVE) → kernel C eliminated
 
 - virtio_disk.rs (virtqueue barriers 7/7 exact incl. the
@@ -882,12 +902,91 @@ kernel boots to `init: starting sh` in QEMU (2 cores).
   cleaned + gitignored.
 - Zero test leakage into normal boots (grep-verified).
 
+### Iteration 40 — 2026-07-14 — Wave P3-2: ZERO-C milestone (kprint!/kprintln!)
+
+- **printf_shim.c DELETED — the kernel is now 100% C-free**
+  (`find kernel -name '*.c'` returns empty). Replaced the C-variadic
+  `printf()` (whose only reason to exist was that stable rustc can't
+  *define* a `c_variadic` fn) with native `core::fmt`-based
+  `kprint!`/`kprintln!` macros. `core::fmt::Arguments` needs no variadic
+  ABI — `format_args!` builds the arg list at each call site — so the
+  shim, `printf_rust` (the old C-format-string parser), and its three
+  `va_arg` fetchers were all removed.
+- **Design** (kernel/printf.rs): a `struct Console;` impl of
+  `core::fmt::Write` pushes bytes, unbuffered and alloc-free, through the
+  exact same `console::consputs` path the old `printf_rust`/`flush` used.
+  `kprint!`/`kprintln!` (`#[macro_export]`, `$crate`-hygienic) forward to
+  `_kprint(args: core::fmt::Arguments)`, which locks the same `PR_LOCK`
+  and reprints the `[timestamp] ` fresh-line prefix with the *identical*
+  per-call `NNEWLINE` swap logic as the old `printf_rust`, so boot output
+  stays byte-identical. Two `Display` adapters — `Cs(*const c_char)` (%s,
+  via `CStr::from_ptr`, `(null)` on null, non-UTF8 byte fallback) and
+  `Ptr(u64)` (%p → `0x{:016x}`, matching the old `printptr` exactly).
+  `kprintln!`'s arg matcher is `$($arg:tt)*` (not `$arg:expr`) so dynamic
+  `%*s` width (`"{:w$}", "", w = n`) forwards through.
+- **Panic-path safety**: the `Console`/`_kprint` path is the *same*
+  primitive the panic code already used (no alloc, no sleep, reentrant via
+  the same `PR_LOCK` that `__panic_start` disables). Migrated the whole
+  panic/backtrace path as a high-scrutiny pass: `printf.rs::__panic_start`,
+  `proc/proc_shims.rs::xv6_panic`, `irq/trap.rs` (kpanic/kassert/
+  trap_panic_dump/kerneltrap register dump), `backtrace.rs`
+  (print_backtrace/print_thread_backtrace) — all now use `kprintln!`+
+  `Cs`/`Ptr`. `kprint!` (no trailing newline) used where the C used a
+  newline-less `printf` so panic lines still concatenate identically
+  (e.g. `kerneltrap: ...level=1` runs straight into `scause=0xd(...)`).
+- **Migration**: ~750 call sites across 63 files → `kprint!`/`kprintln!`,
+  one macro call per original `printf()` (never merged/split — required
+  for byte-identical timestamp-per-call output). Scripted the mechanical
+  specifier map (%d→{}, %x/%lx→{:x} with the fetcher's sign-extension
+  cast, %p→Ptr, %s→Cs for raw `char*` or literal `&str` for `c"..."`
+  args, %-Ns→{:<N}) + per-file review across six parallel workers, with
+  the panic path done solo. `%s`-with-raw-`char*` sites (the ones needing
+  `Cs`): ~40 across the tree (thread/device/fs/inode names, path buffers,
+  scause strings). Several files had a local
+  `foo_assert_errno(msg: &CStr, errno)` helper that used its `&CStr` arg
+  *as* the format string (embedded `%d`) — impossible under
+  `format_args!`'s literal-only rule; resolved by inlining (1–2 sites) or
+  a local `macro_rules!` taking the message as `:literal` (3+ sites, e.g.
+  `session_assert!`). Removed all 62 now-unused per-file
+  `extern "C" { fn printf(...) }` decls + the `k_printf` alias +
+  `xv6_print_str`/`_d` trampolines (their sole caller, `pid.rs::procdump_*`,
+  now uses literal-format `kprintln!`).
+- CMake: `printf_shim.c` removed from `KERNEL_C_FILES` (now empty);
+  `--undefined=printf_rust` dropped from `RUST_FORCE_UNDEFINED`. Kernel
+  builds with NO C compiler step for any `.c` (only the C-preprocessed
+  `.S` files still use the C toolchain, by design).
+- **Boot-log fidelity** (strongest gate): full boot ×3, normalized diff vs
+  pre-wave baseline — every message byte-identical modulo timestamps/
+  addresses. The only 3 numeric differences are size-derived and benign:
+  buddy free pages 200041→200037 (kernel image grew ~16KB from linking
+  core::fmt) + the derived order-2/3 split, and ksymbols 175→865 (core::fmt
+  pulls in many symbols → *richer* backtraces). No message text changed,
+  none reordered.
+- **Verified**: zero-warning `cargo clean` full rebuild; boot ×3 (init/sh
+  + `/ $`); `find kernel -name '*.c'` EMPTY; mmaptest 16/16; testsig 21/21;
+  stressfs; `usertests -q` full quicktests battery all OK
+  (copyin/copyout/copyinstr1-3/killstatus/exitwait/forkfork…) up to the
+  documented pre-existing `forkforkfork` panic; host cargo 35/35;
+  qemu_rwsem PASS + qemu_pcache 30/30 PASSED (their markers print via the
+  new macros); interactive ls/ps/`free -v`/echo. **Panic legibility**:
+  the forkforkfork panic renders cleanly through the migrated path —
+  `[Core: 1] In thread 396 (usertests) at 0x00000000...` (Cs name + Ptr
+  fp), `Failed to remove interrupted waiter from queue` (xv6_panic),
+  `Received IPI_REASON_CRASH`, and `kerneltrap: ...scause=0xd(Load page
+  fault) sepc=... stval=...` (Cs scause decode). **Format fidelity**: `ps`
+  `{:<20} {:<5} {:<2}` columns = `%-20s %-5s %-2s` exactly; `free -v`
+  buddy/slab G/M/K/B numbers preserved.
+
 ## Status vs the goal (2026-07-13)
 
-- ✅ Kernel rewritten in Rust — every module row done; sole C remnant is
-  the documented 46-line printf_shim.c (variadic entry; awaits stable
-  c_variadic). Assembly (entry/trampoline/kernelvec/swtch/sig_trampoline)
-  bridged from Rust as designed.
+- ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
+  of Wave P3-2 (2026-07-14) `find kernel -name '*.c'` is EMPTY.** The last
+  remnant, the 46-line printf_shim.c variadic-printf entry, was eliminated
+  by migrating all ~750 `printf()` call sites to `core::fmt`-based
+  `kprint!`/`kprintln!` macros (no `c_variadic` needed). Assembly
+  (entry/trampoline/kernelvec/swtch/sig_trampoline) bridged from Rust as
+  designed; the C toolchain is still used only to assemble those
+  C-preprocessed `.S` files.
 - ✅ Idiomatic standards enforced (rust-skills governance + crate-wide
   audits + corrective packages; RAII/newtypes/scoped-unsafe/Result
   boundaries throughout; ~zero-warning builds).

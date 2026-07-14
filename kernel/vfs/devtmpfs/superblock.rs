@@ -138,7 +138,6 @@ unsafe extern "C" {
     safe fn xv6_panic(msg: *const c_char) -> !;
 
     // printf.rs -- C-variadic.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // string.rs (Wave 2).
     safe fn strlen(s: *const c_char) -> usize;
@@ -518,8 +517,7 @@ unsafe fn __devtmpfs_unlink_relative(
 pub(crate) extern "C" fn devtmpfs_post_mount_populate() -> c_int {
     let root = __devtmpfs_get_root();
     if root.is_null() {
-        // SAFETY: static format string, no arguments.
-        unsafe { printf(c"devtmpfs: post_mount_populate called but no sb\n".as_ptr()) };
+        crate::kprintln!("devtmpfs: post_mount_populate called but no sb");
         return neg(ENODEV);
     }
 
@@ -541,7 +539,7 @@ pub(crate) extern "C" fn devtmpfs_post_mount_populate() -> c_int {
 
             let ret = __devtmpfs_mknod_relative(root, n, nl, m, d);
             if ret != 0 && ret != neg(EEXIST) {
-                printf(c"devtmpfs: mknod '%s' failed: %d\n".as_ptr(), n, ret);
+                crate::kprintln!("devtmpfs: mknod '{}' failed: {}", crate::printf::Cs(n), ret);
             }
 
             spin_lock(&raw mut __DEVTMPFS_LOCK);
@@ -843,13 +841,7 @@ pub(crate) extern "C" fn devtmpfs_populate_devices() {
         spin_unlock(&raw mut __DEVTMPFS_LOCK);
     }
 
-    // SAFETY: format string matches the single `%d` argument.
-    unsafe {
-        printf(
-            c"devtmpfs: populated %d device nodes from device table\n".as_ptr(),
-            count,
-        );
-    }
+    crate::kprintln!("devtmpfs: populated {} device nodes from device table", count);
 }
 
 // ------------------------------------------------------------------ */
@@ -876,8 +868,7 @@ pub(crate) extern "C" fn devtmpfs_init() {
     kassert!(ret == 0, "devtmpfs_init: vfs_register_fs_type failed");
     vfs_mount_unlock();
 
-    // SAFETY: static format string, no arguments.
-    unsafe { printf(c"devtmpfs: filesystem type registered\n".as_ptr()) };
+    crate::kprintln!("devtmpfs: filesystem type registered");
 
     // Retroactively create devtmpfs entries for all devices that were
     // registered before devtmpfs became available. device_register()

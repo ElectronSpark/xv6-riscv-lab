@@ -1,46 +1,29 @@
-//! Formatted console output -- printf, panic.
+//! Formatted console output -- `kprint!`/`kprintln!`, panic.
 //!
-//! Rust port of `kernel/printf.c` (Phase 2 Wave 4, see
-//! `docs/rustify/phase2_plan.md`). Top of the console/panic chain:
+//! Rust port of `kernel/printf.c` (Phase 2 Wave 4), completed by Wave
+//! P3-2 (the "zero-C" milestone). Top of the console/panic chain:
 //! `xv6_panic`/callers -> this file -> `console.rs` -> `uart.rs`.
 //!
-//! # Variadic ABI (Step 0 of the Wave 4 plan)
+//! # From C-variadic `printf()` to `core::fmt` (Wave P3-2)
 //!
-//! `printf(char *, ...)` is a C-ABI variadic function. Empirically
-//! verified against this workspace's pinned **stable** `rustc 1.95.0**:
-//! *defining* a variadic function (`c_variadic`/`VaList`) still requires
-//! `#![feature(c_variadic)]`, which is nightly-only and rejected outright
-//! on stable (`error[E0554]: #![feature] may not be used on the stable
-//! release channel`). *Calling* an externally-declared C variadic
-//! function from Rust (`unsafe extern "C" { fn printf(fmt: *const
-//! c_char, ...) -> c_int; }`) has always been stable and is used
-//! extensively elsewhere in this crate (`sbi.rs`, `lock/spinlock.rs`,
-//! this file's own `__panic_start`).
+//! The original console output primitive was a C-ABI variadic
+//! `printf(char *, ...)`. Because *defining* a C-variadic function needs
+//! `#![feature(c_variadic)]` (nightly-only; rejected on this workspace's
+//! pinned stable `rustc 1.95.0` with `error[E0554]`), the variadic entry
+//! point used to live in a tiny C shim (`kernel/printf_shim.c`) that did
+//! `va_start`/`va_end` + three `va_arg` fetchers and handed an opaque
+//! `va_list *` back to a Rust format-string parser (`printf_rust`).
 //!
-//! So: `printf()`'s C-variadic *entry point* stays a minimal C shim
-//! (`kernel/printf_shim.c`) — the last-resort C remnant in this
-//! otherwise-Rust module, to be deleted once `c_variadic` stabilizes.
-//! The shim is as small as it can be: it does `va_start`/`va_end` and
-//! three one-line `va_arg` fetcher functions (`__printf_va_arg_int` /
-//! `__printf_va_arg_u64` / `__printf_va_arg_str`, matching the three
-//! distinct `va_arg(ap, T)` call shapes the original C `printf()`
-//! used), then hands the format string and an opaque `va_list *` to
-//! [`printf_rust`] below. `printf_rust` never interprets the `va_list`
-//! itself (its concrete layout is a C/target ABI detail Rust has no
-//! stable way to model without `c_variadic`) -- it only holds the
-//! pointer and calls back through the three fetchers whenever the
-//! format string calls for the next argument. Every format-string
-//! conversion the original C `printf()` supported is preserved exactly
-//! (`%d %ld %lld %u %lu %llu %x %lx %llx %p %s %c` -- wait, there is no
-//! `%c` in the original; see [`printf_rust`]'s match arms for the exact
-//! list carried over: `%d %ld %lld %u %lu %llu %x %lx %llx %p %s %%`,
-//! plus the `-`/field-width prefix and the `%*s` padding special case),
-//! no more.
-//!
-//! `snprintf`/`sprintf`/`vprintf` do not exist anywhere in
-//! `kernel/printf.c` or its header (`kernel/inc/printf.h` declares only
-//! `printf`) -- confirmed by a full-tree grep before starting this
-//! port -- so there is no wider variadic surface to replicate.
+//! Wave P3-2 removed all of that. `core::fmt::Arguments` needs no
+//! variadic ABI at all -- `format_args!` builds the argument list at each
+//! macro-expansion call site -- so every `printf(fmt, args...)` call site
+//! crate-wide was migrated to the native [`kprint!`]/[`kprintln!`] macros
+//! below (which format through [`Console`], a `core::fmt::Write` sink
+//! that pushes bytes down the exact same [`crate::console::consputs`]
+//! path the old `printf_rust` used). With no caller left, `printf_rust`,
+//! its three `va_arg` fetchers, and `printf_shim.c` itself were all
+//! deleted -- `printf_shim.c` was the last C file anywhere in the
+//! kernel, so its deletion is the zero-C milestone.
 //!
 //! # Panic machinery
 //!
@@ -53,7 +36,8 @@
 
 #![allow(non_upper_case_globals)]
 
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_char, c_int};
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::bindings::spinlock_t;
@@ -73,48 +57,12 @@ unsafe extern "C" {
     pub safe fn spin_lock(lk: *mut spinlock_t);
     pub safe fn spin_unlock(lk: *mut spinlock_t);
 
-    /// `printf()` itself: defined in `kernel/printf_shim.c` (the
-    /// variadic C-ABI entry point), forwards to [`printf_rust`]. Every
-    /// other file in the tree that calls `printf(...)` (C or Rust)
-    /// keeps working unchanged -- this is the same symbol name/ABI as
-    /// the original `kernel/printf.c::printf()`.
-    pub safe fn printf(fmt: *const c_char, ...) -> c_int;
-
     /// FDT-configured kernel physical memory bounds
     /// (`kernel/inc/mm/memlayout.h`'s `KERNBASE`/`PHYSTOP` macros),
     /// mirrored here exactly like `mm/page.rs`/`mm/vm_pgtab.rs`'s
     /// identical extern pair.
     pub safe static __physical_memory_start: u64;
     pub safe static __physical_memory_end: u64;
-}
-
-// The three va_list fetchers implemented in `kernel/printf_shim.c` --
-// see the module doc comment above. `ap` is an opaque pointer to the
-// shim's live `va_list`; only the shim ever dereferences it.
-unsafe extern "C" {
-    fn __printf_va_arg_int(ap: *mut c_void) -> i64;
-    fn __printf_va_arg_u64(ap: *mut c_void) -> u64;
-    fn __printf_va_arg_str(ap: *mut c_void) -> *const c_char;
-}
-
-#[inline(always)]
-fn va_int(ap: *mut c_void) -> i64 {
-    // SAFETY: `ap` is the live `va_list *` forwarded unchanged from
-    // `printf_shim.c`'s `printf()`; this is called at most once per
-    // format-string conversion, in the same left-to-right order the C
-    // original consumed arguments, so each call fetches the next
-    // genuine vararg.
-    unsafe { __printf_va_arg_int(ap) }
-}
-#[inline(always)]
-fn va_u64(ap: *mut c_void) -> u64 {
-    // SAFETY: see `va_int`.
-    unsafe { __printf_va_arg_u64(ap) }
-}
-#[inline(always)]
-fn va_str(ap: *mut c_void) -> *const c_char {
-    // SAFETY: see `va_int`.
-    unsafe { __printf_va_arg_str(ap) }
 }
 
 /// Read the frame pointer (`s0`). Mirrors the C `r_fp()` static inline
@@ -173,261 +121,167 @@ static PR_LOCKING: AtomicBool = AtomicBool::new(false);
 static NNEWLINE: AtomicBool = AtomicBool::new(false);
 
 // ===========================================================================
-// Formatting helpers. Operate on a caller-owned `&mut [u8]` + running
-// length instead of the C `char *outbuf, int *outlen` pointer pair --
-// plain safe slice indexing, no unsafe needed (the buffer is always the
-// fixed-size local array in `printf_rust`, never escapes).
+// kprint! / kprintln! -- core::fmt::Write-based console output (Wave P3-2,
+// "the zero-C milestone"). These replaced the C-variadic `printf()`
+// entirely: `#![feature(c_variadic)]` is nightly-only (see the module doc
+// comment), but Rust's native `core::fmt::Arguments` machinery needs no
+// variadic ABI at all -- `format_args!` builds the argument list at the
+// macro-expansion call site, so there is no `va_list` to fetch through a C
+// shim.
+//
+// Output path: byte-for-byte the same as `printf_rust`'s `flush()` above --
+// [`Console::write_str`] forwards straight to [`crate::console::consputs`]
+// (no intermediate buffering; `consputs` itself is already the primitive
+// `puts`/panic output use). No allocation anywhere in this path.
+//
+// Locking/timestamp semantics are mirrored exactly from `printf_rust`
+// above, at the same granularity (once per `kprint!`/`kprintln!` call,
+// matching "once per `printf()` call" in the C-derived version):
+//   - `PR_LOCKING`/`PR_LOCK`: identical acquire/release around the whole
+//     call (skipped pre-`printfinit()` and for the panic path, which
+//     disables locking via `__panic_start` exactly as before).
+//   - `NNEWLINE`: the same swap-then-maybe-print-timestamp dance, and the
+//     same "any '\n' byte anywhere in this call's output clears the flag"
+//     rule (not just a trailing '\n') -- see [`Console::write_str`].
+//
+// Call-site migration rule (see the P3-2 worker report): every original
+// `printf(fmt, args...)` call site became exactly one `kprint!`/`kprintln!`
+// call at the same position, with the same argument count/order -- calls
+// were never merged or split, specifically so this timestamp-per-call
+// granularity stays byte-identical to the pre-migration boot log (modulo
+// the timestamp values/addresses themselves).
 // ===========================================================================
 
-const DIGITS: &[u8; 16] = b"0123456789abcdef";
+/// The kernel console output sink for [`kprint!`]/[`kprintln!`]. Implements
+/// [`core::fmt::Write`] by forwarding each formatted chunk, unbuffered,
+/// through the exact same [`crate::console::consputs`] path `printf_rust`'s
+/// `flush()` uses -- no allocation, no new buffering, so output is
+/// byte-identical to the legacy `printf()` for the same content.
+pub struct Console;
 
-fn printint(xx: i64, base: i64, sign: bool, outbuf: &mut [u8], outlen: &mut usize) {
-    let mut buf = [0u8; 16];
-    let mut i = 0usize;
-
-    let neg = sign && xx < 0;
-    // `wrapping_neg` mirrors the C `x = -xx` (assigned into an
-    // `unsigned long long`): even for `xx == i64::MIN`, where plain
-    // negation would overflow, the C original's negate-then-reinterpret
-    // recovers the correct unsigned magnitude via two's-complement
-    // wraparound; `wrapping_neg` reproduces that bit pattern exactly
-    // without Rust's debug-mode overflow panic.
-    let mut x: u64 = if neg { xx.wrapping_neg() as u64 } else { xx as u64 };
-
-    loop {
-        buf[i] = DIGITS[(x % base as u64) as usize];
-        i += 1;
-        x /= base as u64;
-        if x == 0 {
-            break;
+impl core::fmt::Write for Console {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        if !s.is_empty() {
+            // SAFETY: `s` is a valid `&str` (borrow-checked, UTF-8, backed
+            // by real memory for its full length); `consputs` only reads
+            // exactly `s.len()` bytes starting at `s.as_ptr()`, matching
+            // the slice's own bounds.
+            unsafe {
+                crate::console::consputs(s.as_ptr() as *const c_char, s.len() as c_int);
+            }
+            // Mirrors printf_rust's per-byte `if cx == b'\n' {
+            // NNEWLINE.store(false, ...) }` inside its format loop: ANY
+            // newline byte in this chunk clears the flag, even if this
+            // chunk has trailing non-newline bytes after it (an
+            // intentionally-preserved quirk of the original -- see the
+            // module doc above).
+            if s.as_bytes().contains(&b'\n') {
+                NNEWLINE.store(false, Ordering::Release);
+            }
         }
-    }
-    if neg {
-        buf[i] = b'-';
-        i += 1;
-    }
-    while i > 0 {
-        i -= 1;
-        outbuf[*outlen] = buf[i];
-        *outlen += 1;
+        Ok(())
     }
 }
 
-fn printptr(mut x: u64, outbuf: &mut [u8], outlen: &mut usize) {
-    outbuf[*outlen] = b'0';
-    *outlen += 1;
-    outbuf[*outlen] = b'x';
-    *outlen += 1;
-    for _ in 0..16 {
-        outbuf[*outlen] = DIGITS[(x >> 60) as usize];
-        *outlen += 1;
-        x <<= 4;
-    }
-}
-
-fn print_padding(len: i32, outbuf: &mut [u8], outlen: &mut usize) {
-    for _ in 0..len {
-        outbuf[*outlen] = b' ';
-        *outlen += 1;
-    }
-}
-
-fn print_timestamp(outbuf: &mut [u8], outlen: &mut usize) {
-    let stime = machine::read_time();
-    outbuf[*outlen] = b'[';
-    *outlen += 1;
-    printint(stime as i64, 10, false, outbuf, outlen);
-    outbuf[*outlen] = b']';
-    *outlen += 1;
-    outbuf[*outlen] = b' ';
-    *outlen += 1;
-}
-
-/// Flush `outbuf[..*outlen]` to the console and reset the length.
-#[inline]
-fn flush(outbuf: &mut [u8], outlen: &mut usize) {
-    // SAFETY: `outbuf[..*outlen]` is always initialised (every byte
-    // was just written by this same function before `*outlen` grew
-    // past it).
-    unsafe {
-        crate::console::consputs(outbuf.as_ptr() as *const c_char, *outlen as c_int);
-    }
-    *outlen = 0;
-}
-
-// ===========================================================================
-// printf_rust -- the real formatter, called from the C variadic shim.
-// ===========================================================================
-
-/// # Safety
-/// `fmt` must be a valid NUL-terminated string. `ap` must be a live
-/// `va_list *` (opaque to Rust) produced by `printf_shim.c`'s
-/// `printf()`, positioned at the first vararg, and valid for the
-/// duration of this call.
-#[no_mangle]
-pub unsafe extern "C" fn printf_rust(fmt: *const c_char, ap: *mut c_void) -> c_int {
-    let mut outbuf = [0u8; 512];
-    let mut outlen: usize = 0;
-
-    // Use atomic load to see if panic disabled locking.
+/// Backend for the [`kprint!`]/[`kprintln!`] macros. Not normally called
+/// directly -- use the macros, which build the [`core::fmt::Arguments`]
+/// via `format_args!`.
+pub fn _kprint(args: core::fmt::Arguments<'_>) {
+    // Same locking discipline as printf_rust: skip the lock entirely
+    // before printfinit() / after a panic disables it (PR_LOCKING is
+    // cleared by __panic_start with Release ordering; this Acquire load
+    // observes that on any core).
     let locking = PR_LOCKING.load(Ordering::Acquire);
     if locking {
         spin_lock(&raw mut PR_LOCK);
     }
 
+    // Same fresh-line timestamp dance as printf_rust: print once per
+    // call, only if the previous call (on any core, thanks to the
+    // shared atomic) ended with a newline byte.
     if !NNEWLINE.swap(true, Ordering::Acquire) {
-        print_timestamp(&mut outbuf, &mut outlen);
+        let _ = write!(Console, "[{}] ", machine::read_time());
     }
 
-    let mut i: isize = 0;
-    loop {
-        // SAFETY: `fmt` is NUL-terminated (caller contract); this loop
-        // never reads past the terminator.
-        let cx = unsafe { *fmt.offset(i) } as u8;
-        if cx == 0 {
-            break;
-        }
-        if cx != b'%' {
-            outbuf[outlen] = cx;
-            outlen += 1;
-            if cx == b'\n' {
-                NNEWLINE.store(false, Ordering::Release);
-            }
-            if outlen >= 500 {
-                flush(&mut outbuf, &mut outlen);
-            }
-            i += 1;
-            continue;
-        }
-        i += 1;
-
-        // Parse optional '-' flag (left-align) and field width.
-        let mut left_align = false;
-        let mut field_width: i32 = 0;
-        // SAFETY: see above.
-        if unsafe { *fmt.offset(i) as u8 } == b'-' {
-            left_align = true;
-            i += 1;
-        }
-        // SAFETY: see above.
-        while {
-            let d = unsafe { *fmt.offset(i) as u8 };
-            d.is_ascii_digit()
-        } {
-            // SAFETY: see above.
-            let d = unsafe { *fmt.offset(i) as u8 };
-            field_width = field_width * 10 + (d - b'0') as i32;
-            i += 1;
-        }
-        let start_pos = outlen;
-
-        // SAFETY: see above.
-        let mut c0 = unsafe { *fmt.offset(i) as u8 };
-        let mut c1 = 0u8;
-        if c0 != 0 {
-            // SAFETY: see above.
-            c1 = unsafe { *fmt.offset(i + 1) as u8 };
-        }
-        if c0 != 0 && c1 != 0 && c0 == b'*' && c1 == b's' {
-            let len = va_int(ap) as i32;
-            print_padding(len, &mut outbuf, &mut outlen);
-            i += 1;
-            c0 = c1;
-            // SAFETY: see above.
-            c1 = unsafe { *fmt.offset(i + 1) as u8 };
-        }
-        let c2 = if c1 != 0 {
-            // SAFETY: see above.
-            unsafe { *fmt.offset(i + 2) as u8 }
-        } else {
-            0u8
-        };
-
-        if c0 == b'd' {
-            printint(va_int(ap), 10, true, &mut outbuf, &mut outlen);
-        } else if c0 == b'l' && c1 == b'd' {
-            printint(va_u64(ap) as i64, 10, true, &mut outbuf, &mut outlen);
-            i += 1;
-        } else if c0 == b'l' && c1 == b'l' && c2 == b'd' {
-            printint(va_u64(ap) as i64, 10, true, &mut outbuf, &mut outlen);
-            i += 2;
-        } else if c0 == b'u' {
-            printint(va_int(ap), 10, false, &mut outbuf, &mut outlen);
-        } else if c0 == b'l' && c1 == b'u' {
-            printint(va_u64(ap) as i64, 10, false, &mut outbuf, &mut outlen);
-            i += 1;
-        } else if c0 == b'l' && c1 == b'l' && c2 == b'u' {
-            printint(va_u64(ap) as i64, 10, false, &mut outbuf, &mut outlen);
-            i += 2;
-        } else if c0 == b'x' {
-            printint(va_int(ap), 16, false, &mut outbuf, &mut outlen);
-        } else if c0 == b'l' && c1 == b'x' {
-            printint(va_u64(ap) as i64, 16, false, &mut outbuf, &mut outlen);
-            i += 1;
-        } else if c0 == b'l' && c1 == b'l' && c2 == b'x' {
-            printint(va_u64(ap) as i64, 16, false, &mut outbuf, &mut outlen);
-            i += 2;
-        } else if c0 == b'p' {
-            printptr(va_u64(ap), &mut outbuf, &mut outlen);
-        } else if c0 == b's' {
-            let mut s = va_str(ap);
-            if s.is_null() {
-                s = c"(null)".as_ptr();
-            }
-            let mut j: isize = 0;
-            loop {
-                // SAFETY: `s` is either the caller's NUL-terminated
-                // string vararg or the `"(null)"` literal above.
-                let ch = unsafe { *s.offset(j) };
-                if ch == 0 {
-                    break;
-                }
-                outbuf[outlen] = ch as u8;
-                outlen += 1;
-                j += 1;
-                if outlen >= 500 {
-                    flush(&mut outbuf, &mut outlen);
-                }
-            }
-        } else if c0 == b'%' {
-            outbuf[outlen] = b'%';
-            outlen += 1;
-        } else if c0 == 0 {
-            break;
-        } else {
-            // Print unknown % sequence to draw attention.
-            outbuf[outlen] = b'%';
-            outlen += 1;
-            outbuf[outlen] = c0;
-            outlen += 1;
-        }
-
-        // Apply left-aligned field width padding.
-        if left_align && field_width > 0 {
-            let mut written = (outlen - start_pos) as i32;
-            while written < field_width {
-                outbuf[outlen] = b' ';
-                outlen += 1;
-                written += 1;
-            }
-        }
-        if outlen >= 500 {
-            flush(&mut outbuf, &mut outlen);
-        }
-
-        i += 1;
-    }
-
-    // Flush remaining buffer.
-    if outlen > 0 {
-        flush(&mut outbuf, &mut outlen);
-    }
+    let _ = Console.write_fmt(args);
 
     if locking {
         spin_unlock(&raw mut PR_LOCK);
     }
+}
 
-    0
+/// Format and print to the kernel console, exactly like the C-derived
+/// `printf()` above but via `core::fmt` (no C-variadic ABI, no allocation).
+/// See the module section doc above for the exact locking/timestamp
+/// semantics this preserves.
+#[macro_export]
+macro_rules! kprint {
+    ($($arg:tt)*) => {
+        $crate::printf::_kprint(::core::format_args!($($arg)*))
+    };
+}
+
+/// Like [`kprint!`], with a trailing newline appended to the format
+/// string. The format string must be a string literal (matching every
+/// call site this macro replaces -- the original C `printf()` calls it
+/// supersedes always passed a literal format string too).
+#[macro_export]
+macro_rules! kprintln {
+    () => {
+        $crate::kprint!("\n")
+    };
+    ($fmt:literal) => {
+        $crate::kprint!(::core::concat!($fmt, "\n"))
+    };
+    // `$($arg:tt)*` (rather than `$($arg:expr),*`) so that named/width
+    // arguments -- e.g. the dynamic-width `"{:w$}", "", w = indent` idiom
+    // used to reproduce C's `%*s` padding in `mm/vm_pgtab.rs`'s page-table
+    // dump -- forward through to `format_args!` unchanged; a plain
+    // `$arg:expr` matcher cannot capture `w = expr`.
+    ($fmt:literal, $($arg:tt)*) => {
+        $crate::kprint!(::core::concat!($fmt, "\n"), $($arg)*)
+    };
+}
+
+/// `%s`-equivalent `Display` adapter for a raw NUL-terminated C string
+/// pointer, matching `printf_rust`'s `%s` semantics exactly: a null
+/// pointer prints as `(null)`; otherwise the string's bytes are copied
+/// through (falling back to a byte-for-byte, non-UTF-8-validated pass
+/// if the string isn't valid UTF-8 -- the legacy `%s` handler never
+/// validated encoding either, it just walked bytes to the NUL).
+pub struct Cs(pub *const c_char);
+
+impl core::fmt::Display for Cs {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let p = if self.0.is_null() { c"(null)".as_ptr() } else { self.0 };
+        // SAFETY: `p` is either the caller-supplied NUL-terminated C
+        // string (every `Cs` construction site's contract, matching the
+        // original `%s` vararg contract) or the `"(null)"` literal above.
+        let cstr = unsafe { core::ffi::CStr::from_ptr(p) };
+        match cstr.to_str() {
+            Ok(s) => f.write_str(s),
+            Err(_) => {
+                for &b in cstr.to_bytes() {
+                    f.write_char(b as char)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// `%p`-equivalent `Display` adapter, matching `printptr`'s exact output:
+/// `0x` followed by all 16 lowercase hex nibbles of the 64-bit value
+/// (always full width, never trimmed) -- deliberately not using
+/// `core::fmt`'s built-in `{:p}` (`Pointer`) formatting, whose exact
+/// zero-padding behavior isn't part of any stability guarantee this
+/// kernel wants to depend on for boot-log byte-fidelity.
+pub struct Ptr(pub u64);
+
+impl core::fmt::Display for Ptr {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "0x{:016x}", self.0)
+    }
 }
 
 // ===========================================================================
@@ -471,10 +325,10 @@ pub extern "C" fn __panic_start() {
         if p.is_null() || (*p).kstack == 0 {
             // No thread context - use kernel memory bounds for
             // backtrace.
-            printf(
-                c"[Core: %ld] No thread context, fp=%p\n".as_ptr(),
+            crate::kprintln!(
+                "[Core: {}] No thread context, fp={}",
                 machine::cpuid() as i64,
-                fp as *mut c_void,
+                Ptr(fp),
             );
             if BT_ENABLED.load(Ordering::Relaxed) {
                 // Use KERNBASE to PHYSTOP as conservative stack bounds.
@@ -482,12 +336,12 @@ pub extern "C" fn __panic_start() {
             }
             return;
         }
-        printf(
-            c"[Core: %ld] In thread %d (%s) at %p\n".as_ptr(),
+        crate::kprintln!(
+            "[Core: {}] In thread {} ({}) at {}",
             machine::cpuid() as i64,
             (*p).pid,
-            (*p).name.as_ptr(),
-            fp as *mut c_void,
+            Cs((*p).name.as_ptr()),
+            Ptr(fp),
         );
         if BT_ENABLED.load(Ordering::Relaxed) {
             let kstack_size = 1u64 << (PAGE_SHIFT + (*p).kstack_order as u32);

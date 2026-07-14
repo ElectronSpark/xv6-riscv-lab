@@ -48,7 +48,6 @@ unsafe extern "C" {
     safe fn xv6_panic(msg: *const c_char) -> !;
 
     // printf.rs — C-variadic.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // mm/slab.rs.
     safe fn slab_cache_init(
@@ -529,14 +528,14 @@ pub(crate) extern "C" fn tmpfs_init() {
     // SAFETY: `printf` is C-variadic; arguments match the `%lu %lu`/`%lu`
     // format strings exactly.
     unsafe {
-        printf(
-            c"sizeof(tmpfs_inode)=%lu, TMPFS_INODE_EMBEDDED_DATA_LEN=%lu\n".as_ptr(),
+        crate::kprintln!(
+            "sizeof(tmpfs_inode)={}, TMPFS_INODE_EMBEDDED_DATA_LEN={}",
             core::mem::size_of::<tmpfs_inode>() as u64,
             super::inode::TMPFS_INODE_EMBEDDED_DATA_LEN as u64,
         );
-        printf(
-            c"tmpfs max file size=%lu bytes\n".as_ptr(),
-            super::TMPFS_MAX_FILE_SIZE,
+        crate::kprintln!(
+            "tmpfs max file size={} bytes",
+            super::TMPFS_MAX_FILE_SIZE as u64,
         );
     }
 }

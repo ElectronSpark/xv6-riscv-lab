@@ -54,7 +54,6 @@ const TYPE_TREE: u32 = 2;
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
     pub safe fn xv6_panic(msg: *const c_char) -> !;
-    pub safe fn printf(fmt: *const c_char, ...);
     pub safe fn xv6_current_thread() -> *mut thread;
 
     // rbtree primitives.
@@ -457,7 +456,7 @@ pub extern "C" fn tq_wait(q: *mut tq_t, lock: *mut spinlock_t, rdata: *mut u64) 
 fn do_wakeup(woken: *mut tnode_t, error_no: c_int, rdata: u64) -> *mut thread {
     let Some(wr) = tn_of(woken) else { return err_ptr::<thread>(EINVAL) };
     if wr.thread_ptr().is_null() {
-        printf(c"woken thread is NULL\n".as_ptr());
+        crate::kprintln!("woken thread is NULL");
         return err_ptr::<thread>(EINVAL);
     }
     wr.set_error_no(error_no);
@@ -732,7 +731,7 @@ fn ttree_wakeup_all_impl(q: *mut ttree_t, error_no: c_int, rdata: u64) -> c_int 
             xv6_panic(c"Thread node is not in the tree".as_ptr());
         }
         if ttree_do_remove(q, pos) != 0 {
-            printf(c"warning: Failed to remove node from tree during wakeup all\n".as_ptr());
+            crate::kprintln!("warning: Failed to remove node from tree during wakeup all");
         }
         do_wakeup(pos, error_no, rdata);
         count += 1;

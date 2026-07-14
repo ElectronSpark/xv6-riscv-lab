@@ -54,7 +54,6 @@ use crate::bindings::mbuf;
 unsafe extern "C" {
     safe fn __panic_start();
     safe fn __panic_end() -> !;
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // mm/kalloc.rs, string.rs.
     fn kalloc() -> *mut c_void;
@@ -167,8 +166,7 @@ static BROADCAST_MAC: [u8; ETHADDR_LEN] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
 #[inline(never)]
 fn panic_fixed(msg: &core::ffi::CStr) -> ! {
     __panic_start();
-    // SAFETY: `msg` is 'static, nul-terminated, no format args.
-    unsafe { printf(msg.as_ptr()) };
+    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
     __panic_end()
 }
 

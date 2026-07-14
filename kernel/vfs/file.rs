@@ -108,7 +108,6 @@ unsafe extern "C" {
     safe fn xv6_panic(msg: *const c_char) -> !;
 
     // printf.rs — C-variadic.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // lock/mutex.rs — `file->lock`.
     safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
@@ -422,10 +421,7 @@ fn file_free(file: *mut vfs_file) {
         if let Some(release) = ops.as_ref().and_then(|o| o.release) {
             let ret = release((*file).inode.inode, file);
             if ret != 0 {
-                printf(
-                    c"__vfs_file_free: file ops release failed, errno=%d\n".as_ptr(),
-                    ret,
-                );
+                crate::kprintln!("__vfs_file_free: file ops release failed, errno={}", ret);
             }
         }
     }
@@ -615,7 +611,7 @@ pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> 
         vfs_iunlock(inode);
         vfs_inode_put_ref(unsafe { ptr::addr_of_mut!((*file).inode) });
         file_free(file);
-        unsafe { printf(c"vfs_fileopen: file operations not set by inode open\n".as_ptr()) };
+        crate::kprintln!("vfs_fileopen: file operations not set by inode open");
         return err_ptr(neg(EINVAL));
     }
 
@@ -658,7 +654,7 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
         // callback with the documented "flush dirty data" contract.
         let ret = unsafe { fflush(file) };
         if ret != 0 && ret != neg(EAGAIN) {
-            unsafe { printf(c"vfs_fput: fflush failed: %d\n".as_ptr(), ret) };
+            crate::kprintln!("vfs_fput: fflush failed: {}", ret);
         }
     }
 
@@ -675,7 +671,7 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
                 let ret = cdev_put(cdev);
                 unsafe { (*file).__bindgen_anon_1.cdev = ptr::null_mut() };
                 if ret != 0 {
-                    unsafe { printf(c"vfs_fput: cdev_put failed: %d\n".as_ptr(), ret) };
+                    crate::kprintln!("vfs_fput: cdev_put failed: {}", ret);
                 }
             }
         } else if is_blk(mode) {
@@ -683,7 +679,7 @@ pub(crate) extern "C" fn vfs_fput(file: *mut vfs_file) {
             let ret = unsafe { blkdev_put((*file).__bindgen_anon_1.blkdev) };
             unsafe { (*file).__bindgen_anon_1.blkdev = ptr::null_mut() };
             if ret != 0 {
-                unsafe { printf(c"vfs_fput: blkdev_put failed: %d\n".as_ptr(), ret) };
+                crate::kprintln!("vfs_fput: blkdev_put failed: {}", ret);
             }
         } else if is_fifo(mode) {
             // SAFETY: non-null `file`.

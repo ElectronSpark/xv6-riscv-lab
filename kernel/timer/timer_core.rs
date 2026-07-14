@@ -101,7 +101,6 @@ unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 }
 
 #[inline]
@@ -117,18 +116,14 @@ fn timer_assert(cond: bool, line: u32, function: &core::ffi::CStr, msg: &core::f
         return;
     }
     __panic_start();
-    // SAFETY: all arguments are 'static or caller-owned NUL-terminated C
-    // strings matching their format specifiers.
-    unsafe {
-        printf(
-            c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-            c"kernel/timer/timer_core.rs".as_ptr(),
-            line as c_int,
-            function.as_ptr(),
-        );
-        printf(msg.as_ptr());
-        printf(c"\n".as_ptr());
-    }
+    crate::kprintln!(
+        "ASSERTION_FAILURE {}:{}: In function '{}':",
+        "kernel/timer/timer_core.rs",
+        line as c_int,
+        crate::printf::Cs(function.as_ptr()),
+    );
+    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
+    crate::kprintln!();
     __panic_end()
 }
 
@@ -538,8 +533,7 @@ pub(crate) unsafe fn timer_tick(timer: *mut timer_root, ticks: u64) {
         let callback = unsafe { (*node).callback };
         match callback {
             None => {
-                // SAFETY: format string matches its arguments (none).
-                unsafe { printf(c"Warning: Timer expired without callback\n".as_ptr()) };
+                crate::kprintln!("Warning: Timer expired without callback");
                 // SAFETY: `node->timer` is still `timer` -- `node` has not
                 // been removed yet.
                 let nt = unsafe { (*node).timer };

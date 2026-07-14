@@ -79,7 +79,6 @@ static mut RTC_INITIALIZED: bool = false;
 // ===========================================================================
 unsafe extern "C" {
     // printf is variadic, so it cannot be declared `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 }
 
 #[inline(always)]
@@ -181,8 +180,11 @@ unsafe extern "C" fn goldfish_rtc_intr(_irq: c_int, _data: *mut c_void, _dev: *m
     let count = goldfish_rtc_get_alarm_count();
     if count % 10 == 0 {
         let now_sec = goldfish_rtc_read_sec();
-        // SAFETY: format string matches its two `%lu` arguments.
-        unsafe { printf(c"goldfish_rtc: alarm #%lu, unix time: %lu\n".as_ptr(), count, now_sec) };
+        crate::kprintln!(
+            "goldfish_rtc: alarm #{}, unix time: {}",
+            count as u64,
+            now_sec as u64
+        );
     }
 }
 
@@ -209,8 +211,10 @@ pub(crate) extern "C" fn goldfish_rtc_init() {
 
     let now_ns = goldfish_rtc_read_ns();
     let now_sec = now_ns / NS_PER_SEC;
-    // SAFETY: format string matches its one `%lu` argument.
-    unsafe { printf(c"goldfish_rtc: initializing, current unix time: %lu\n".as_ptr(), now_sec) };
+    crate::kprintln!(
+        "goldfish_rtc: initializing, current unix time: {}",
+        now_sec as u64
+    );
 
     let mut rtc_irq_desc = IrqDesc {
         handler: Some(goldfish_rtc_intr),
@@ -230,8 +234,7 @@ pub(crate) extern "C" fn goldfish_rtc_init() {
         register_irq_handler(plic_irq(irqno), &raw mut rtc_irq_desc)
     };
     if ret != 0 {
-        // SAFETY: format string matches its one `%d` argument.
-        unsafe { printf(c"goldfish_rtc: failed to register IRQ handler: %d\n".as_ptr(), ret) };
+        crate::kprintln!("goldfish_rtc: failed to register IRQ handler: {}", ret);
         return;
     }
 
@@ -247,6 +250,5 @@ pub(crate) extern "C" fn goldfish_rtc_init() {
 
     // SAFETY: see the read above -- same "no live caller" justification.
     unsafe { RTC_INITIALIZED = true };
-    // SAFETY: format string matches its arguments (none).
-    unsafe { printf(c"goldfish_rtc: initialized, alarm set for 1 second intervals\n".as_ptr()) };
+    crate::kprintln!("goldfish_rtc: initialized, alarm set for 1 second intervals");
 }

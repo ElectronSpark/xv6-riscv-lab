@@ -36,7 +36,6 @@ const PRIORITY_MAINLEVEL_SHIFT: c_int = 2;
 
 // --- C primitives ---------------------------------------------------------
 unsafe extern "C" {
-    pub safe fn printf(fmt: *const c_char, ...) -> c_int;
 
 
     pub safe fn xv6_current_thread() -> *mut thread;
@@ -73,7 +72,7 @@ fn current_sched_entity() -> *mut sched_entity {
 // --- Test 1: two-layer bitmask --------------------------------------------
 fn test_two_layer_mask() {
     rq_test_raw! {
-        printf(c"TEST: Two-Layer Bitmask Logic\n".as_ptr());
+        crate::kprintln!("TEST: Two-Layer Bitmask Logic");
         let cases: [[c_int; 3]; 7] = [
             [0, 0, 0], [1, 0, 1], [7, 0, 7], [8, 1, 0],
             [15, 1, 7], [16, 2, 0], [63, 7, 7],
@@ -86,19 +85,19 @@ fn test_two_layer_mask() {
             if ag == eg && ab == eb {
                 passed += 1;
             } else {
-                printf(c"  FAIL: major %d -> group %d bit %d, expected group %d bit %d\n".as_ptr(),
+                crate::kprintln!("  FAIL: major {} -> group {} bit {}, expected group {} bit {}",
                     major, ag, ab, eg, eb);
             }
         }
         assert_msg(passed == cases.len() as c_int, c"rq_test: bitmask mapping failed".as_ptr());
-        printf(c"  PASSED: %d/%d bitmask mappings correct\n".as_ptr(), passed, cases.len() as c_int);
+        crate::kprintln!("  PASSED: {}/{} bitmask mappings correct", passed, cases.len() as c_int);
     }
 }
 
 // --- Test 2: priority change ----------------------------------------------
 fn test_priority_change() {
     rq_test_raw! {
-        printf(c"TEST: Priority Change via sched_setattr\n".as_ptr());
+        crate::kprintln!("TEST: Priority Change via sched_setattr");
         let se = current_sched_entity();
 
         let mut attr: sched_attr = zeroed_sched_attr();
@@ -106,7 +105,7 @@ fn test_priority_change() {
         let original_priority = attr.priority;
         let original_major = MAJOR_PRIORITY(original_priority);
 
-        printf(c"  Original priority: major=%d minor=%d\n".as_ptr(),
+        crate::kprintln!("  Original priority: major={} minor={}",
             original_major, MINOR_PRIORITY(original_priority));
 
         let new_major = if original_major == 10 { 12 } else { 10 };
@@ -120,7 +119,7 @@ fn test_priority_change() {
         let changed_major = MAJOR_PRIORITY(new_attr.priority);
         let changed_minor = MINOR_PRIORITY(new_attr.priority);
 
-        printf(c"  Changed priority: major=%d minor=%d\n".as_ptr(), changed_major, changed_minor);
+        crate::kprintln!("  Changed priority: major={} minor={}", changed_major, changed_minor);
 
         assert_msg(changed_major == new_major, c"rq_test: major priority not changed".as_ptr());
         assert_msg(changed_minor == 1, c"rq_test: minor priority not changed".as_ptr());
@@ -130,19 +129,19 @@ fn test_priority_change() {
         attr.priority = original_priority;
         sched_setattr(se, &attr);
 
-        printf(c"  Restored original priority\n".as_ptr());
-        printf(c"  PASSED\n".as_ptr());
+        crate::kprintln!("  Restored original priority");
+        crate::kprintln!("  PASSED");
     }
 }
 
 // --- Test 3: yield priority -----------------------------------------------
 fn test_yield_priority() {
     rq_test_raw! {
-        printf(c"TEST: Yield Respects Priority\n".as_ptr());
+        crate::kprintln!("TEST: Yield Respects Priority");
         let p = xv6_current_thread();
         let my_priority = SchedEntityRef::assume(sched_entity_of(p)).priority();
-        printf(c"  Current process '%s' at priority major=%d\n".as_ptr(),
-            ThreadAccess::assume(p).name_ptr(), MAJOR_PRIORITY(my_priority));
+        crate::kprintln!("  Current process '{}' at priority major={}",
+            crate::printf::Cs(ThreadAccess::assume(p).name_ptr()), MAJOR_PRIORITY(my_priority));
 
         let mut yields_completed = 0;
         for _ in 0..5 {
@@ -150,15 +149,15 @@ fn test_yield_priority() {
             yields_completed += 1;
         }
         assert_msg(yields_completed == 5, c"rq_test: not all yields completed".as_ptr());
-        printf(c"  Successfully yielded %d times and got rescheduled\n".as_ptr(), yields_completed);
-        printf(c"  PASSED\n".as_ptr());
+        crate::kprintln!("  Successfully yielded {} times and got rescheduled", yields_completed);
+        crate::kprintln!("  PASSED");
     }
 }
 
 // --- Test 4: rq selection consistency -------------------------------------
 fn test_rq_selection() {
     rq_test_raw! {
-        printf(c"TEST: RQ Selection Consistency\n".as_ptr());
+        crate::kprintln!("TEST: RQ Selection Consistency");
         let test_cpu = cpuid();
 
         rq_lock(test_cpu);
@@ -168,8 +167,8 @@ fn test_rq_selection() {
         rq_unlock(test_cpu);
 
         assert_msg(rq1 == rq2 && rq2 == rq3, c"rq_test: inconsistent rq selection".as_ptr());
-        printf(c"  Consistent selection: class_id=%d\n".as_ptr(), RqRef::assume(rq1).class_id());
-        printf(c"  PASSED\n".as_ptr());
+        crate::kprintln!("  Consistent selection: class_id={}", RqRef::assume(rq1).class_id());
+        crate::kprintln!("  PASSED");
     }
 }
 
@@ -181,7 +180,7 @@ fn verify_priority(se: *mut sched_entity, expected_major: c_int, expected_minor:
         let am = MAJOR_PRIORITY(attr.priority);
         let an = MINOR_PRIORITY(attr.priority);
         if am != expected_major || an != expected_minor {
-            printf(c"    FAIL: expected (%d,%d) got (%d,%d)\n".as_ptr(),
+            crate::kprintln!("    FAIL: expected ({},{}) got ({},{})",
                 expected_major, expected_minor, am, an);
             return false;
         }
@@ -212,7 +211,7 @@ fn pick_major(test_cpu: c_int) -> c_int {
 
 fn test_priority_ordering() {
     rq_test_raw! {
-        printf(c"TEST: Priority Ordering (Comprehensive)\n".as_ptr());
+        crate::kprintln!("TEST: Priority Ordering (Comprehensive)");
         let se = current_sched_entity();
         let test_cpu = cpuid();
 
@@ -220,47 +219,53 @@ fn test_priority_ordering() {
         sched_getattr(se, &mut original_attr);
 
         // Case 1: different top-layer groups
-        printf(c"  Case 1: Different top-layer groups\n".as_ptr());
+        crate::kprintln!("  Case 1: Different top-layer groups");
         for &(major, group) in &[(1i32, 0i32), (9, 1), (17, 2), (50, 6)] {
             set_and_check(se, major, 0);
             let pm = pick_major(test_cpu);
-            printf(c"    major=%d (group %d): pick_next_rq returned %d\n".as_ptr(), major, group, pm);
+            crate::kprintln!("    major={} (group {}): pick_next_rq returned {}", major, group, pm);
         }
-        printf(c"    Case 1 PASSED\n".as_ptr());
+        crate::kprintln!("    Case 1 PASSED");
 
         // Case 2: same group, different bits
-        printf(c"  Case 2: Same group, different secondary bits\n".as_ptr());
+        crate::kprintln!("  Case 2: Same group, different secondary bits");
         for &major in &[1i32, 3, 5, 7] {
             set_and_check(se, major, 0);
             let pm = pick_major(test_cpu);
-            printf(c"    major=%d (bit %d): pick_next_rq returned %d\n".as_ptr(), major, major, pm);
+            crate::kprintln!("    major={} (bit {}): pick_next_rq returned {}", major, major, pm);
         }
-        printf(c"    Case 2 PASSED\n".as_ptr());
+        crate::kprintln!("    Case 2 PASSED");
 
         // Case 3: same major, different minor
-        printf(c"  Case 3: Same major, different minor priorities\n".as_ptr());
+        crate::kprintln!("  Case 3: Same major, different minor priorities");
         for minor in 0..4 {
             set_and_check(se, 5, minor);
-            printf(c"    major=5, minor=%d: priority set and yield OK\n".as_ptr(), minor);
+            crate::kprintln!("    major=5, minor={}: priority set and yield OK", minor);
         }
-        printf(c"    Case 3 PASSED\n".as_ptr());
+        crate::kprintln!("    Case 3 PASSED");
 
         // Case 4: boundary transitions
-        printf(c"  Case 4: Group boundary transitions\n".as_ptr());
-        for &(major, label) in &[
-            (7i32, c"    major=7 (end of group 0): pick_next_rq returned %d\n"),
-            (8,    c"    major=8 (start of group 1): pick_next_rq returned %d\n"),
-            (62,   c"    major=62 (lowest usable): pick_next_rq returned %d\n"),
-        ] {
-            set_and_check(se, major, 0);
+        crate::kprintln!("  Case 4: Group boundary transitions");
+        {
+            set_and_check(se, 7, 0);
             let pm = pick_major(test_cpu);
-            printf(label.as_ptr(), pm);
+            crate::kprintln!("    major=7 (end of group 0): pick_next_rq returned {}", pm);
         }
-        printf(c"    Case 4 PASSED\n".as_ptr());
+        {
+            set_and_check(se, 8, 0);
+            let pm = pick_major(test_cpu);
+            crate::kprintln!("    major=8 (start of group 1): pick_next_rq returned {}", pm);
+        }
+        {
+            set_and_check(se, 62, 0);
+            let pm = pick_major(test_cpu);
+            crate::kprintln!("    major=62 (lowest usable): pick_next_rq returned {}", pm);
+        }
+        crate::kprintln!("    Case 4 PASSED");
 
         sched_setattr(se, &original_attr);
-        printf(c"  All priority ordering cases PASSED\n".as_ptr());
-        printf(c"  PASSED\n".as_ptr());
+        crate::kprintln!("  All priority ordering cases PASSED");
+        crate::kprintln!("  PASSED");
     }
 }
 
@@ -315,7 +320,7 @@ unsafe extern "C" fn priority_test_proc_entry(my_index: u64, _unused: u64) -> c_
 
 fn test_priority_ordered_activation() {
     rq_test_raw! {
-        printf(c"TEST: Priority-Ordered Process Activation\n".as_ptr());
+        crate::kprintln!("TEST: Priority-Ordered Process Activation");
 
         spin_init(lock_ptr(), c"prio_test".as_ptr() as *mut c_char);
         tq_init(tq_ptr(), c"main_wait".as_ptr(), lock_ptr());
@@ -327,7 +332,7 @@ fn test_priority_ordered_activation() {
 
         let mut test_procs: [*mut thread; PRIORITY_TEST_COUNT] = [core::ptr::null_mut(); PRIORITY_TEST_COUNT];
 
-        printf(c"  Phase 1: Creating %d processes with preemption disabled\n".as_ptr(),
+        crate::kprintln!("  Phase 1: Creating {} processes with preemption disabled",
             PRIORITY_TEST_COUNT as c_int);
 
         let g = crate::machine::PreemptGuard::new();
@@ -350,34 +355,34 @@ fn test_priority_ordered_activation() {
             attr.affinity_mask = cpu_mask;
             sched_setattr(se, &attr);
 
-            printf(c"    Created process %d (pid=%d) with priority major=%d on CPU %d\n".as_ptr(),
+            crate::kprintln!("    Created process {} (pid={}) with priority major={} on CPU {}",
                 i as c_int, ThreadAccess::assume(test_procs[i]).pid(), MAJOR_PRIORITY(TEST_PRIORITIES[i]), test_cpu);
         }
 
-        printf(c"  Phase 2: Waking up all processes\n".as_ptr());
+        crate::kprintln!("  Phase 2: Waking up all processes");
         for i in 0..PRIORITY_TEST_COUNT {
             wakeup(test_procs[i]);
         }
 
-        printf(c"  Phase 3: Enabling preemption and yielding\n".as_ptr());
+        crate::kprintln!("  Phase 3: Enabling preemption and yielding");
         drop(g);
         scheduler_yield();
 
-        printf(c"  Phase 4: Waiting for all processes to complete\n".as_ptr());
+        crate::kprintln!("  Phase 4: Waiting for all processes to complete");
         spin_lock(lock_ptr());
         while PROCESSES_DONE.load(Ordering::Acquire) < PRIORITY_TEST_COUNT as c_int {
             tq_wait(tq_ptr(), lock_ptr(), core::ptr::null_mut());
         }
         spin_unlock(lock_ptr());
 
-        printf(c"  Phase 5: Verifying activation order\n".as_ptr());
-        printf(c"    Expected: ".as_ptr());
+        crate::kprintln!("  Phase 5: Verifying activation order");
+        crate::kprint!("    Expected: ");
         for i in 0..PRIORITY_TEST_COUNT {
-            printf(c"proc[%d] ".as_ptr(), EXPECTED_ORDER[i]);
+            crate::kprint!("proc[{}] ", EXPECTED_ORDER[i]);
         }
-        printf(c"\n".as_ptr());
+        crate::kprintln!();
 
-        printf(c"    Actual:   ".as_ptr());
+        crate::kprint!("    Actual:   ");
         let mut correct = true;
         for i in 0..PRIORITY_TEST_COUNT {
             let mut proc_at_pos: c_int = -1;
@@ -387,30 +392,30 @@ fn test_priority_ordered_activation() {
                     break;
                 }
             }
-            printf(c"proc[%d] ".as_ptr(), proc_at_pos);
+            crate::kprint!("proc[{}] ", proc_at_pos);
             if proc_at_pos != EXPECTED_ORDER[i] {
                 correct = false;
             }
         }
-        printf(c"\n".as_ptr());
+        crate::kprintln!();
 
         assert_msg(correct, c"rq_test: Priority ordering failed".as_ptr());
-        printf(c"    Processes activated in correct priority order!\n".as_ptr());
-        printf(c"  PASSED\n".as_ptr());
+        crate::kprintln!("    Processes activated in correct priority order!");
+        crate::kprintln!("  PASSED");
     }
 }
 
 // --- Test 7: affinity change ----------------------------------------------
 fn test_affinity_change() {
     rq_test_raw! {
-        printf(c"TEST: CPU Affinity Change\n".as_ptr());
+        crate::kprintln!("TEST: CPU Affinity Change");
         let se = current_sched_entity();
 
         let mut attr: sched_attr = zeroed_sched_attr();
         sched_getattr(se, &mut attr);
         let original_mask = attr.affinity_mask;
 
-        printf(c"  Original affinity mask: 0x%lx\n".as_ptr(), original_mask);
+        crate::kprintln!("  Original affinity mask: 0x{:x}", original_mask as u64);
 
         let cur_cpu = cpuid();
         attr.affinity_mask = 1u64 << cur_cpu;
@@ -420,7 +425,7 @@ fn test_affinity_change() {
         sched_getattr(se, &mut attr);
         assert_msg(attr.affinity_mask == 1u64 << cur_cpu, c"rq_test: affinity not changed correctly".as_ptr());
 
-        printf(c"  Pinned to CPU %d, mask: 0x%lx\n".as_ptr(), cur_cpu, attr.affinity_mask);
+        crate::kprintln!("  Pinned to CPU {}, mask: 0x{:x}", cur_cpu, attr.affinity_mask as u64);
         scheduler_yield();
 
         let new_cpu = cpuid();
@@ -428,8 +433,8 @@ fn test_affinity_change() {
 
         attr.affinity_mask = original_mask;
         sched_setattr(se, &attr);
-        printf(c"  Restored original affinity\n".as_ptr());
-        printf(c"  PASSED\n".as_ptr());
+        crate::kprintln!("  Restored original affinity");
+        crate::kprintln!("  PASSED");
     }
 }
 
@@ -437,10 +442,10 @@ fn test_affinity_change() {
 #[no_mangle]
 pub extern "C" fn rq_test_run() {
     rq_test_raw! {
-        printf(c"\n========================================\n".as_ptr());
-        printf(c"Run Queue Priority Integration Tests\n".as_ptr());
-        printf(c"Running on CPU %ld\n".as_ptr(), cpuid() as i64);
-        printf(c"========================================\n\n".as_ptr());
+        crate::kprintln!("\n========================================");
+        crate::kprintln!("Run Queue Priority Integration Tests");
+        crate::kprintln!("Running on CPU {}", cpuid() as i64);
+        crate::kprintln!("========================================\n");
 
         test_two_layer_mask();
         test_priority_change();
@@ -450,9 +455,9 @@ pub extern "C" fn rq_test_run() {
         test_priority_ordered_activation();
         test_affinity_change();
 
-        printf(c"\n========================================\n".as_ptr());
-        printf(c"All Integration Tests PASSED!\n".as_ptr());
-        printf(c"========================================\n\n".as_ptr());
+        crate::kprintln!("\n========================================");
+        crate::kprintln!("All Integration Tests PASSED!");
+        crate::kprintln!("========================================\n");
     }
 }
 

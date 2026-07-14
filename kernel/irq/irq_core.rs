@@ -85,7 +85,6 @@ unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
-    pub fn printf(fmt: *const c_char, ...) -> c_int;
 }
 
 #[inline]
@@ -101,18 +100,14 @@ fn irq_assert(cond: bool, line: u32, function: &core::ffi::CStr, msg: &core::ffi
         return;
     }
     __panic_start();
-    // SAFETY: all arguments are 'static or caller-owned NUL-terminated C
-    // strings matching their format specifiers.
-    unsafe {
-        printf(
-            c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-            c"kernel/irq/irq_core.rs".as_ptr(),
-            line as c_int,
-            function.as_ptr(),
-        );
-        printf(msg.as_ptr());
-        printf(c"\n".as_ptr());
-    }
+    crate::kprintln!(
+        "ASSERTION_FAILURE {}:{}: In function '{}':",
+        "kernel/irq/irq_core.rs",
+        line as c_int,
+        crate::printf::Cs(function.as_ptr()),
+    );
+    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
+    crate::kprintln!();
     __panic_end()
 }
 
@@ -303,8 +298,7 @@ fn do_plic_irq() -> c_int {
         return 0; // Assume the hart may receive spurious interrupts.
     }
     if irq >= PLIC_IRQ_CNT {
-        // SAFETY: format string matches its argument.
-        unsafe { printf(c"do_irq: invalid PLIC irq %d\n".as_ptr(), irq) };
+        crate::kprintln!("do_irq: invalid PLIC irq {}", irq);
         return neg(crate::bindings::ENODEV);
     }
     let irq_full = irq + PLIC_IRQ_OFFSET;
@@ -313,8 +307,7 @@ fn do_plic_irq() -> c_int {
     let desc = IRQ_DESCS[irq_full as usize].load(Ordering::Acquire);
     if desc.is_null() {
         rcu_read_unlock();
-        // SAFETY: format string matches its argument.
-        unsafe { printf(c"do_irq: no handler for irq_num %d\n".as_ptr(), irq_full) };
+        crate::kprintln!("do_irq: no handler for irq_num {}", irq_full);
         plic_complete(irq);
         return neg(crate::bindings::ENODEV);
     }
@@ -351,8 +344,7 @@ pub(crate) unsafe extern "C" fn do_irq(tf: *mut trapframe) -> c_int {
     irq_assert(scause >> 63 != 0, line!(), c"do_irq", c"do_irq: not an interrupt");
     let irq_num = (scause & ((1u64 << 63) - 1)) as c_int;
     if irq_num >= CLINT_IRQ_CNT {
-        // SAFETY: format string matches its argument.
-        unsafe { printf(c"do_irq: invalid irq_num %d\n".as_ptr(), irq_num) };
+        crate::kprintln!("do_irq: invalid irq_num {}", irq_num);
         return neg(crate::bindings::ENODEV);
     }
 
@@ -365,8 +357,7 @@ pub(crate) unsafe extern "C" fn do_irq(tf: *mut trapframe) -> c_int {
     let desc = IRQ_DESCS[irq_num as usize].load(Ordering::Acquire);
     if desc.is_null() {
         rcu_read_unlock();
-        // SAFETY: format string matches its argument.
-        unsafe { printf(c"do_irq: no handler for irq_num %d\n".as_ptr(), irq_num) };
+        crate::kprintln!("do_irq: no handler for irq_num {}", irq_num);
         return neg(crate::bindings::ENODEV);
     }
 

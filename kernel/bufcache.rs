@@ -135,7 +135,6 @@ use crate::sync::KSpinlock;
 
 unsafe extern "C" {
     safe fn xv6_panic(msg: *const core::ffi::c_char) -> !;
-    safe fn printf(fmt: *const core::ffi::c_char, ...) -> c_int;
 
     // kernel/hlist.rs (Phase 2 Wave 1). Non-RCU variants: this file uses
     // `bcache.lock` for mutual exclusion, not RCU (matches the C
@@ -433,7 +432,7 @@ fn buf_bio_cleanup(bio_ptr: *mut bio) {
 /// module doc's "Panic-message fidelity" note).
 fn assert_blkdev_put_ok(ret: c_int) {
     if ret != 0 {
-        printf(c"blkdev_put failed: %d\n".as_ptr(), ret);
+        crate::kprintln!("blkdev_put failed: {}", ret);
         xv6_panic(c"blkdev_put failed".as_ptr());
     }
 }
@@ -551,9 +550,8 @@ fn bget(dev: u32, blockno: u32) -> *mut buf {
         unsafe {
             if (*b).blockno != 0 || (*b).dev != 0 {
                 // Only unused buffers could clash, otherwise it is a bug.
-                printf(
-                    c"bget: found a buffer with blockno %d, dev %d, but it is not the same as the one we are recycling\n"
-                        .as_ptr(),
+                crate::kprintln!(
+                    "bget: found a buffer with blockno {}, dev {}, but it is not the same as the one we are recycling",
                     (*b1).blockno,
                     (*b1).dev,
                 );
@@ -585,7 +583,7 @@ fn bget(dev: u32, blockno: u32) -> *mut buf {
     }
     let ret = unsafe { hlist_put(&raw mut (*bc_ptr).cached, b as *mut c_void, false) };
     if !ret.is_null() {
-        printf(c"dev: %d, blockno: %d\n".as_ptr(), dev, blockno);
+        crate::kprintln!("dev: {}, blockno: {}", dev, blockno);
         xv6_panic(c"bget: failed to push recycled buffer into hash list".as_ptr());
     }
     drop(guard);

@@ -66,7 +66,6 @@ mod ffi {
         // pcache accessors (live in pcache_shims.c).
         // Defined in kernel/rust/src/vm_pgtab.rs (no_mangle).
 
-        pub safe fn printf(fmt: *const c_char, ...);
 
         // Real kernel panic helpers (kernel/printf.c) — replace the
         // `xv6_vm_panic` shim that lived in vm_pgtab_shims.c (still declared
@@ -458,21 +457,20 @@ fn xv6_vm_smp_mb() {
 // --- printf-only warnings (formerly out-of-line in vm_shims.c) ----------
 #[inline]
 fn xv6_vm_warn_vma_double_free(v: *mut c_void) {
-    printf(b"__vma_free: DOUBLE FREE detected for vma=%p\n\0".as_ptr() as *const c_char, v);
+    crate::kprintln!("__vma_free: DOUBLE FREE detected for vma={}", crate::printf::Ptr(v as u64));
 }
 
 #[inline]
 fn xv6_vm_warn_vma_null_vm(v: *mut c_void) {
-    printf(
-        b"__vma_free: vma->vm is NULL for vma=%p (possible double-free or corruption)\n\0".as_ptr()
-            as *const c_char,
-        v,
+    crate::kprintln!(
+        "__vma_free: vma->vm is NULL for vma={} (possible double-free or corruption)",
+        crate::printf::Ptr(v as u64),
     );
 }
 
 #[inline]
 fn xv6_vm_warn_double_destroy(v: *mut c_void) {
-    printf(b"__vm_destroy: DOUBLE DESTROY detected for vm=%p\n\0".as_ptr() as *const c_char, v);
+    crate::kprintln!("__vm_destroy: DOUBLE DESTROY detected for vm={}", crate::printf::Ptr(v as u64));
 }
 
 #[inline]
@@ -481,18 +479,17 @@ fn xv6_vm_warn_vma_vm_mismatch(
     vma_vm: *mut c_void,
     expected: *mut c_void,
 ) {
-    printf(
-        b"__vm_destroy: vma->vm mismatch! vma=%p vma->vm=%p expected=%p\n\0".as_ptr()
-            as *const c_char,
-        v,
-        vma_vm,
-        expected,
+    crate::kprintln!(
+        "__vm_destroy: vma->vm mismatch! vma={} vma->vm={} expected={}",
+        crate::printf::Ptr(v as u64),
+        crate::printf::Ptr(vma_vm as u64),
+        crate::printf::Ptr(expected as u64),
     );
 }
 
 #[inline]
 fn xv6_vm_warn_vma_already_freed(v: *mut c_void) {
-    printf(b"__vm_destroy: vma already freed! vma=%p\n\0".as_ptr() as *const c_char, v);
+    crate::kprintln!("__vm_destroy: vma already freed! vma={}", crate::printf::Ptr(v as u64));
 }
 
 
@@ -503,9 +500,9 @@ fn xv6_vm_assert_vm_write_held(vm_ptr: *mut vm, msg: *const c_char) {
     if rwsem_is_write_holding(machine::vm_rw_lock_ptr(vm_ptr)) { return; }
     __panic_start();
     if msg.is_null() {
-        printf(b"PANIC: vm rwsem must be write-held\n\0".as_ptr() as *const c_char);
+        crate::kprintln!("PANIC: vm rwsem must be write-held");
     } else {
-        printf(b"PANIC: %s\n\0".as_ptr() as *const c_char, msg);
+        crate::kprintln!("PANIC: {}", crate::printf::Cs(msg));
     }
     __panic_end();
 }
@@ -1970,7 +1967,7 @@ pub extern "C" fn vm_copyout(
             if vma.is_null()
                 || vma_validate(vma, va0, PGSIZE as u64, (VMA_FLAG_USER | PROT_WRITE) as u64) != 0
             {
-                printf(b"vma_copyout: invalid vma for va %lx\n\0".as_ptr() as *const c_char, va0);
+                crate::kprintln!("vma_copyout: invalid vma for va {:x}", va0 as u64);
                 ret = -(EFAULT as c_int);
                 break;
             }
@@ -3113,12 +3110,9 @@ pub(crate) fn dump_vm(vm_ptr: *mut vm) {
     // comes from `xv6_vm_first_vma`/`xv6_vm_next_vma`, both null-checked
     // in the loop condition; `printf` is variadic so can't be `safe`.
     unsafe {
-        printf(b"VM dump:\n\0".as_ptr() as *const c_char);
-        printf(
-            b"Pagetable: %p\n\0".as_ptr() as *const c_char,
-            (*vm_ptr).pagetable,
-        );
-        printf(b"VMAs:\n\0".as_ptr() as *const c_char);
+        crate::kprintln!("VM dump:");
+        crate::kprintln!("Pagetable: {}", crate::printf::Ptr((*vm_ptr).pagetable as u64));
+        crate::kprintln!("VMAs:");
         let mut vma_ptr = xv6_vm_first_vma(vm_ptr);
         while !vma_ptr.is_null() {
             let mut flags_buf: [c_char; 10] = [0; 10];
@@ -3127,13 +3121,13 @@ pub(crate) fn dump_vm(vm_ptr: *mut vm) {
                 flags_buf.as_mut_ptr(),
                 flags_buf.len(),
             );
-            printf(
-                b"VMA: start=%lx, end=%lx, flags=%s, file=%p, pgoff=%lx\n\0".as_ptr() as *const c_char,
-                (*vma_ptr).start,
-                (*vma_ptr).end,
-                flags_buf.as_ptr(),
-                (*vma_ptr).file,
-                (*vma_ptr).pgoff,
+            crate::kprintln!(
+                "VMA: start={:x}, end={:x}, flags={}, file={}, pgoff={:x}",
+                (*vma_ptr).start as u64,
+                (*vma_ptr).end as u64,
+                crate::printf::Cs(flags_buf.as_ptr()),
+                crate::printf::Ptr((*vma_ptr).file as u64),
+                (*vma_ptr).pgoff as u64,
             );
             vma_ptr = xv6_vm_next_vma(vm_ptr, vma_ptr);
         }

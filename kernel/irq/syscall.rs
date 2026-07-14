@@ -103,7 +103,6 @@ use crate::vfs::vfs_syscall::{
 unsafe extern "C" {
     // printf.rs panic/print infra
     // printf is variadic, so it cannot be declared `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // proc/proc_shims.rs. Kept as a local `extern` (not a `crate::proc::`
     // path): `xv6_panic` isn't being demoted (it has plenty of
@@ -481,12 +480,7 @@ pub(crate) extern "C" fn syscall() {
     // thread; `num` is a plain scalar already read above. Matches
     // `printf("%d %s: unknown sys call %d\n", p->pid, p->name, num);`.
     unsafe {
-        printf(
-            c"%d %s: unknown sys call %d\n".as_ptr(),
-            (*p).pid,
-            (*p).name.as_ptr(),
-            num,
-        );
+        crate::kprintln!("{} {}: unknown sys call {}", (*p).pid, crate::printf::Cs((*p).name.as_ptr()), num);
         (*(*p).trapframe).trapframe.a0 = (-(ENOSYS as i32)) as i64 as u64;
     }
 }

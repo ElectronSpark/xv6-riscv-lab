@@ -130,7 +130,6 @@ use crate::machine;
 // ===========================================================================
 unsafe extern "C" {
     /// Variadic; see `printf.rs`'s module doc for the ABI rationale.
-    pub safe fn printf(fmt: *const c_char, ...) -> c_int;
 
     /// `mm/early_allocator.rs` (Wave "core/misc"); the only allocator live
     /// at the point `fdt_init`/`fdt_early_scan_memory` run.
@@ -953,14 +952,14 @@ unsafe fn list_push_front(head: *mut list_node_t, entry: *mut list_node_t) {
 unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
     // SAFETY: caller contract.
     if !unsafe { fdt_valid(dtb) } {
-        printf(c"fdt: invalid magic\n".as_ptr());
+        crate::kprintln!("fdt: invalid magic");
         return ptr::null_mut();
     }
 
     // SAFETY: fresh allocation.
     let blob = unsafe { early_alloc_align(size_of::<FdtBlobInfo>(), align_of::<u64>()) } as *mut FdtBlobInfo;
     if blob.is_null() {
-        printf(c"fdt: alloc blob failed\n".as_ptr());
+        crate::kprintln!("fdt: alloc blob failed");
         return ptr::null_mut();
     }
     // SAFETY: `blob` freshly allocated.
@@ -999,7 +998,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
             early_alloc_align(rsv_count * size_of::<mem_region>(), align_of::<u64>())
         } as *mut mem_region;
         if reserved.is_null() {
-            printf(c"fdt: alloc reserved failed\n".as_ptr());
+            crate::kprintln!("fdt: alloc reserved failed");
             return ptr::null_mut();
         }
         // SAFETY: `reserved` sized for `rsv_count` entries above; `blob`
@@ -1026,7 +1025,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
     // SAFETY: fresh node.
     let virtual_root = unsafe { fdt_create_node(0, 0) };
     if virtual_root.is_null() {
-        printf(c"fdt: alloc virtual root failed\n".as_ptr());
+        crate::kprintln!("fdt: alloc virtual root failed");
         return ptr::null_mut();
     }
     // SAFETY: `virtual_root` freshly allocated, exclusively owned.
@@ -1052,7 +1051,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
                 // SAFETY: allocator call.
                 let new_node = unsafe { fdt_create_node(dummy.name_size, 0) };
                 if new_node.is_null() {
-                    printf(c"fdt: alloc node '%s' failed\n".as_ptr(), name);
+                    crate::kprintln!("fdt: alloc node '{}' failed", crate::printf::Cs(name));
                     return ptr::null_mut();
                 }
 
@@ -1075,14 +1074,14 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
 
                     let parent = node_stack[depth];
                     if !fdt_insert_node(blob, parent, new_node) {
-                        printf(c"fdt: insert node '%s' failed (dup?)\n".as_ptr(), name);
+                        crate::kprintln!("fdt: insert node '{}' failed (dup?)", crate::printf::Cs(name));
                         return ptr::null_mut();
                     }
                 }
 
                 depth += 1;
                 if depth >= FDT_MAX_DEPTH {
-                    printf(c"fdt: tree too deep\n".as_ptr());
+                    crate::kprintln!("fdt: tree too deep");
                     return ptr::null_mut();
                 }
                 node_stack[depth] = new_node;
@@ -1137,7 +1136,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
                 // SAFETY: allocator call.
                 let prop_node = unsafe { fdt_create_node(dummy.name_size, len) };
                 if prop_node.is_null() {
-                    printf(c"fdt: alloc prop '%s' failed\n".as_ptr(), propname);
+                    crate::kprintln!("fdt: alloc prop '{}' failed", crate::printf::Cs(propname));
                     return ptr::null_mut();
                 }
 
@@ -1162,10 +1161,10 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
                     fdt_rb_root_init(&raw mut (*prop_node).children);
 
                     if !fdt_insert_node(blob, parent, prop_node) {
-                        printf(
-                            c"fdt: insert prop '%s' in '%s' failed\n".as_ptr(),
-                            propname,
-                            (*parent).name,
+                        crate::kprintln!(
+                            "fdt: insert prop '{}' in '{}' failed",
+                            crate::printf::Cs(propname),
+                            crate::printf::Cs((*parent).name),
                         );
                         return ptr::null_mut();
                     }
@@ -1181,7 +1180,7 @@ unsafe fn fdt_build_blob_info(dtb: *mut c_void) -> *mut FdtBlobInfo {
             }
 
             _ => {
-                printf(c"fdt: unknown token 0x%x\n".as_ptr(), token as c_int);
+                crate::kprintln!("fdt: unknown token 0x{:x}", ((token as c_int as i32 as i64) as u64));
                 return ptr::null_mut();
             }
         }
@@ -1627,7 +1626,7 @@ unsafe fn fdt_build_indexes(blob: *mut FdtBlobInfo) {
         (*blob).compat_table = fdt_alloc_hlist(FDT_COMPAT_HASH_BUCKETS, &raw const FDT_COMPAT_HLIST_FUNCS);
     }
     if unsafe { (*blob).compat_table }.is_null() {
-        printf(c"fdt: failed to alloc compat hash table\n".as_ptr());
+        crate::kprintln!("fdt: failed to alloc compat hash table");
         return;
     }
 
@@ -1636,7 +1635,7 @@ unsafe fn fdt_build_indexes(blob: *mut FdtBlobInfo) {
         (*blob).phandle_table = fdt_alloc_hlist(FDT_PHANDLE_HASH_BUCKETS, &raw const FDT_PHANDLE_HLIST_FUNCS);
     }
     if unsafe { (*blob).phandle_table }.is_null() {
-        printf(c"fdt: failed to alloc phandle hash table\n".as_ptr());
+        crate::kprintln!("fdt: failed to alloc phandle hash table");
         return;
     }
 
@@ -1978,15 +1977,14 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                 let reg_io_width = fdt_get_prop(node, c"reg-io-width".as_ptr());
                 platform.uart_reg_io_width =
                     if !reg_io_width.is_null() { fdt_prop_u32(reg_io_width, 0) } else { 1 };
-                printf(
-                    c"fdt: found UART at 0x%lx, IRQ %d, clock %u Hz, baud %u, reg-shift %u, io-width %u\n"
-                        .as_ptr(),
-                    platform.uart_base as i64,
+                crate::kprintln!(
+                    "fdt: found UART at 0x{:x}, IRQ {}, clock {} Hz, baud {}, reg-shift {}, io-width {}",
+                    (platform.uart_base as i64) as u64,
                     platform.uart_irq as c_int,
-                    platform.uart_clock as c_int,
-                    platform.uart_baud as c_int,
-                    platform.uart_reg_shift as c_int,
-                    platform.uart_reg_io_width as c_int,
+                    ((platform.uart_clock as c_int) as i32 as i64) as u64,
+                    ((platform.uart_baud as c_int) as i32 as i64) as u64,
+                    ((platform.uart_reg_shift as c_int) as i32 as i64) as u64,
+                    ((platform.uart_reg_io_width as c_int) as i32 as i64) as u64,
                 );
             }
         }
@@ -2101,11 +2099,11 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                 if !p.is_null() && (*p).data_size >= 8 {
                     platform.emac[idx].reset_gpio = fdt_prop_u32(p, 1);
                 }
-                printf(
-                    c"fdt: found EMAC%d at 0x%lx size 0x%lx IRQ %d gpio %d tx-phase %d rx-phase %d\n".as_ptr(),
+                crate::kprintln!(
+                    "fdt: found EMAC{} at 0x{:x} size 0x{:x} IRQ {} gpio {} tx-phase {} rx-phase {}",
                     idx as c_int,
-                    platform.emac[idx].base as i64,
-                    platform.emac[idx].size as i64,
+                    (platform.emac[idx].base as i64) as u64,
+                    (platform.emac[idx].size as i64) as u64,
                     platform.emac[idx].irq as c_int,
                     platform.emac[idx].reset_gpio as c_int,
                     platform.emac[idx].tx_phase as c_int,
@@ -2200,19 +2198,18 @@ unsafe fn fdt_extract_platform_info(blob: *mut FdtBlobInfo) {
                     platform.sdhci[idx].is_sdio = 1;
                 }
 
-                printf(
-                    c"fdt: found SDHCI%d at 0x%lx size 0x%lx IRQ %d bus-width %d apmu 0x%x+0x%x apbc 0x%x %s%s\n"
-                        .as_ptr(),
+                crate::kprintln!(
+                    "fdt: found SDHCI{} at 0x{:x} size 0x{:x} IRQ {} bus-width {} apmu 0x{:x}+0x{:x} apbc 0x{:x} {}{}",
                     idx as c_int,
-                    platform.sdhci[idx].base as i64,
-                    platform.sdhci[idx].size as i64,
+                    (platform.sdhci[idx].base as i64) as u64,
+                    (platform.sdhci[idx].size as i64) as u64,
                     platform.sdhci[idx].irq as c_int,
                     platform.sdhci[idx].bus_width as c_int,
-                    platform.sdhci[idx].apmu_base as c_int,
-                    platform.sdhci[idx].apmu_offset as c_int,
-                    platform.sdhci[idx].apbc_base as c_int,
-                    if platform.sdhci[idx].is_emmc != 0 { c"(eMMC)".as_ptr() } else { c"".as_ptr() },
-                    if platform.sdhci[idx].is_sdio != 0 { c"(SDIO)".as_ptr() } else { c"".as_ptr() },
+                    ((platform.sdhci[idx].apmu_base as c_int) as i32 as i64) as u64,
+                    ((platform.sdhci[idx].apmu_offset as c_int) as i32 as i64) as u64,
+                    ((platform.sdhci[idx].apbc_base as c_int) as i32 as i64) as u64,
+                    crate::printf::Cs(if platform.sdhci[idx].is_emmc != 0 { c"(eMMC)".as_ptr() } else { c"".as_ptr() }),
+                    crate::printf::Cs(if platform.sdhci[idx].is_sdio != 0 { c"(SDIO)".as_ptr() } else { c"".as_ptr() }),
                 );
                 platform.sdhci_count += 1;
             }
@@ -2311,16 +2308,16 @@ const fn platform_info_mem_regions() -> i32 {
 // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
 // crate-path `use` instead of an `extern` redeclaration -- demoted.
 pub(crate) unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
-    printf(c"fdt: checking DTB at %p\n".as_ptr(), dtb);
+    crate::kprintln!("fdt: checking DTB at {}", crate::printf::Ptr(dtb as u64));
 
     // SAFETY: caller contract.
     if !unsafe { fdt_valid(dtb) } {
-        printf(c"fdt: no valid DTB found!\n".as_ptr());
+        crate::kprintln!("fdt: no valid DTB found!");
         return -1;
     }
 
     // SAFETY: `dtb` valid per the check above.
-    printf(c"fdt: using DTB at %p (size %d bytes)\n".as_ptr(), dtb, unsafe { fdt_totalsize(dtb) } as c_int);
+    crate::kprintln!("fdt: using DTB at {} (size {} bytes)", crate::printf::Ptr(dtb as u64), unsafe { fdt_totalsize(dtb) } as c_int);
 
     // SAFETY: `platform` is exclusively written here at single-threaded
     // boot, before any other hart or interrupt is live (see module doc).
@@ -2329,95 +2326,95 @@ pub(crate) unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
     // SAFETY: `dtb` valid.
     let blob = unsafe { fdt_build_blob_info(dtb) };
     if blob.is_null() {
-        printf(c"fdt: failed to build blob info!\n".as_ptr());
+        crate::kprintln!("fdt: failed to build blob info!");
         return -1;
     }
     unsafe { FDT_BLOB = blob };
 
-    printf(c"fdt: parsed %d nodes\n".as_ptr(), unsafe { (*blob).n_nodes });
+    crate::kprintln!("fdt: parsed {} nodes", unsafe { (*blob).n_nodes });
 
     // SAFETY: `blob` live.
     unsafe { fdt_build_indexes(blob) };
     unsafe { fdt_extract_platform_info(blob) };
 
-    printf(c"fdt: probed platform info:\n".as_ptr());
+    crate::kprintln!("fdt: probed platform info:");
     unsafe {
-        printf(
-            c"  Memory regions: %d (total %ld MB)\n".as_ptr(),
+        crate::kprintln!(
+            "  Memory regions: {} (total {} MB)",
             platform.mem_count,
             (platform.total_mem / (1024 * 1024)) as i64,
         );
         for i in 0..platform.mem_count {
             let idx = i as usize;
-            printf(
-                c"    [%d] 0x%lx - 0x%lx (%ld MB)\n".as_ptr(),
+            crate::kprintln!(
+                "    [{}] 0x{:x} - 0x{:x} ({} MB)",
                 i,
-                platform.mem[idx].base as i64,
-                (platform.mem[idx].base + platform.mem[idx].size) as i64,
+                (platform.mem[idx].base as i64) as u64,
+                ((platform.mem[idx].base + platform.mem[idx].size) as i64) as u64,
                 (platform.mem[idx].size / (1024 * 1024)) as i64,
             );
         }
-        printf(c"  Reserved regions: %d\n".as_ptr(), platform.reserved_count);
+        crate::kprintln!("  Reserved regions: {}", platform.reserved_count);
         for i in 0..platform.reserved_count {
             let r = *platform.reserved.offset(i as isize);
-            printf(
-                c"    [%d] 0x%lx - 0x%lx (%ld KB)\n".as_ptr(),
+            crate::kprintln!(
+                "    [{}] 0x{:x} - 0x{:x} ({} KB)",
                 i,
-                r.base as i64,
-                (r.base + r.size) as i64,
+                (r.base as i64) as u64,
+                ((r.base + r.size) as i64) as u64,
                 (r.size / 1024) as i64,
             );
         }
         if platform.has_ramdisk != 0 {
-            printf(
-                c"  Ramdisk: 0x%lx - 0x%lx (%ld KB)\n".as_ptr(),
-                platform.ramdisk_base as i64,
-                (platform.ramdisk_base + platform.ramdisk_size) as i64,
+            crate::kprintln!(
+                "  Ramdisk: 0x{:x} - 0x{:x} ({} KB)",
+                (platform.ramdisk_base as i64) as u64,
+                ((platform.ramdisk_base + platform.ramdisk_size) as i64) as u64,
                 (platform.ramdisk_size / 1024) as i64,
             );
         }
-        printf(c"  UART: 0x%lx, IRQ %d".as_ptr(), platform.uart_base as i64, platform.uart_irq as c_int);
+        crate::kprint!("  UART: 0x{:x}, IRQ {}", (platform.uart_base as i64) as u64, platform.uart_irq as c_int);
         if platform.uart_clock != 0 || platform.uart_baud != 0 {
-            printf(
-                c", clock %u Hz, baud %u".as_ptr(),
-                (if platform.uart_clock != 0 { platform.uart_clock } else { 1_843_200 }) as c_int,
-                (if platform.uart_baud != 0 { platform.uart_baud } else { 115_200 }) as c_int,
+            crate::kprint!(
+                ", clock {} Hz, baud {}",
+                (((if platform.uart_clock != 0 { platform.uart_clock } else { 1_843_200 }) as c_int) as i32 as i64) as u64,
+                (((if platform.uart_baud != 0 { platform.uart_baud } else { 115_200 }) as c_int) as i32 as i64) as u64,
             );
         }
-        printf(c"\n".as_ptr());
-        printf(c"  PLIC: 0x%lx (size 0x%lx)\n".as_ptr(), platform.plic_base as i64, platform.plic_size as i64);
+        crate::kprintln!();
+        crate::kprintln!("  PLIC: 0x{:x} (size 0x{:x})", (platform.plic_base as i64) as u64, (platform.plic_size as i64) as u64);
         if platform.has_pcie != 0 {
-            printf(c"  PCIe regions: %d\n".as_ptr(), platform.pcie_reg_count);
+            crate::kprintln!("  PCIe regions: {}", platform.pcie_reg_count);
             for i in 0..platform.pcie_reg_count {
                 let idx = i as usize;
                 if !platform.pcie_reg[idx].name.is_null() {
-                    printf(
-                        c"    [%d] %s: 0x%lx (size 0x%lx)\n".as_ptr(),
+                    crate::kprintln!(
+                        "    [{}] {}: 0x{:x} (size 0x{:x})",
                         i,
-                        platform.pcie_reg[idx].name,
-                        platform.pcie_reg[idx].base as i64,
-                        platform.pcie_reg[idx].size as i64,
+                        crate::printf::Cs(platform.pcie_reg[idx].name),
+                        (platform.pcie_reg[idx].base as i64) as u64,
+                        (platform.pcie_reg[idx].size as i64) as u64,
                     );
                 } else {
-                    printf(
-                        c"    [%d] 0x%lx (size 0x%lx)\n".as_ptr(),
+                    crate::kprintln!(
+                        "    [{}] 0x{:x} (size 0x{:x})",
                         i,
-                        platform.pcie_reg[idx].base as i64,
-                        platform.pcie_reg[idx].size as i64,
+                        (platform.pcie_reg[idx].base as i64) as u64,
+                        (platform.pcie_reg[idx].size as i64) as u64,
                     );
                 }
             }
         }
-        printf(c"  CPUs: %d, timebase: %ld Hz\n".as_ptr(), platform.ncpu, platform.timebase_freq as i64);
+        crate::kprintln!("  CPUs: {}, timebase: {} Hz", platform.ncpu, platform.timebase_freq as i64);
 
         if platform.has_virtio != 0 {
-            printf(c"  VirtIO devices: %d\n".as_ptr(), platform.virtio_count);
+            crate::kprintln!("  VirtIO devices: {}", platform.virtio_count);
             for i in 0..platform.virtio_count {
                 let idx = i as usize;
-                printf(
-                    c"    [%d] 0x%lx, IRQ %d\n".as_ptr(),
+                crate::kprintln!(
+                    "    [{}] 0x{:x}, IRQ {}",
                     i,
-                    platform.virtio_base[idx] as i64,
+                    (platform.virtio_base[idx] as i64) as u64,
                     platform.virtio_irq[idx] as c_int,
                 );
             }
@@ -2444,24 +2441,24 @@ pub(crate) unsafe extern "C" fn fdt_init(dtb: *mut c_void) -> c_int {
 pub(crate) unsafe extern "C" fn fdt_dump(dtb: *mut c_void) {
     // SAFETY: caller contract.
     if !unsafe { fdt_valid(dtb) } {
-        printf(c"fdt_dump: invalid DTB\n".as_ptr());
+        crate::kprintln!("fdt_dump: invalid DTB");
         return;
     }
     let base = dtb as *const u8;
-    printf(c"FDT at %p:\n".as_ptr(), dtb);
+    crate::kprintln!("FDT at {}:", crate::printf::Ptr(dtb as u64));
     // SAFETY: `dtb` valid per the check above.
     unsafe {
-        printf(c"  magic: 0x%x\n".as_ptr(), read_be32(base, FDT_HDR_MAGIC) as c_int);
-        printf(c"  totalsize: %d\n".as_ptr(), read_be32(base, FDT_HDR_TOTALSIZE) as c_int);
-        printf(c"  off_dt_struct: 0x%x\n".as_ptr(), read_be32(base, FDT_HDR_OFF_DT_STRUCT) as c_int);
-        printf(c"  off_dt_strings: 0x%x\n".as_ptr(), read_be32(base, FDT_HDR_OFF_DT_STRINGS) as c_int);
-        printf(c"  version: %d\n".as_ptr(), read_be32(base, 20) as c_int);
+        crate::kprintln!("  magic: 0x{:x}", ((read_be32(base, FDT_HDR_MAGIC) as c_int) as i32 as i64) as u64);
+        crate::kprintln!("  totalsize: {}", read_be32(base, FDT_HDR_TOTALSIZE) as c_int);
+        crate::kprintln!("  off_dt_struct: 0x{:x}", ((read_be32(base, FDT_HDR_OFF_DT_STRUCT) as c_int) as i32 as i64) as u64);
+        crate::kprintln!("  off_dt_strings: 0x{:x}", ((read_be32(base, FDT_HDR_OFF_DT_STRINGS) as c_int) as i32 as i64) as u64);
+        crate::kprintln!("  version: {}", read_be32(base, 20) as c_int);
     }
 }
 
 fn fdt_print_indent(depth: i32) {
     for _ in 0..depth {
-        printf(c"  ".as_ptr());
+        crate::kprint!("  ");
     }
 }
 
@@ -2471,7 +2468,7 @@ fn fdt_print_indent(depth: i32) {
 /// `data` must point to at least `len` readable bytes.
 unsafe fn fdt_print_prop_value(data: *const u8, len: u32) {
     if len == 0 {
-        printf(c"(empty)\n".as_ptr());
+        crate::kprintln!("(empty)");
         return;
     }
 
@@ -2499,9 +2496,9 @@ unsafe fn fdt_print_prop_value(data: *const u8, len: u32) {
             // SAFETY: `s < end`, in-bounds.
             if unsafe { *s } != 0 {
                 if !first {
-                    printf(c", ".as_ptr());
+                    crate::kprint!(", ");
                 }
-                printf(c"\"%s\"".as_ptr(), s as *const c_char);
+                crate::kprint!("\"{}\"", crate::printf::Cs(s as *const c_char));
                 first = false;
                 while s < end && unsafe { *s } != 0 {
                     s = unsafe { s.add(1) };
@@ -2509,39 +2506,42 @@ unsafe fn fdt_print_prop_value(data: *const u8, len: u32) {
             }
             s = unsafe { s.add(1) };
         }
-        printf(c"\n".as_ptr());
+        crate::kprintln!();
         return;
     }
 
     if len % 4 == 0 {
-        printf(c"<".as_ptr());
+        crate::kprint!("<");
         let ncells = len / 4;
         for i in 0..ncells {
             // SAFETY: caller contract; `i*4+4 <= len`.
             let cell = unsafe { read_be32(data, i as usize * 4) };
-            printf(c"0x%x".as_ptr(), cell as c_int);
+            crate::kprint!("0x{:x}", ((cell as c_int) as i32 as i64) as u64);
             if i < ncells - 1 {
-                printf(c" ".as_ptr());
+                crate::kprint!(" ");
             }
         }
-        printf(c">\n".as_ptr());
+        crate::kprintln!(">");
         return;
     }
 
-    printf(c"[".as_ptr());
+    crate::kprint!("[");
     let show = if len < 32 { len } else { 32 };
     for i in 0..show {
         // SAFETY: caller contract; `i < len`.
         let b = unsafe { *data.add(i as usize) };
-        printf(c"%02x".as_ptr(), b as c_int);
+        // NOTE: preserved bug -- legacy printf_rust never zero-pads a
+        // non-left-aligned width (see migration spec); `%02x` is really
+        // just `%x` in the original's actual behavior.
+        crate::kprint!("{:x}", ((b as c_int) as i32 as i64) as u64);
         if i < len - 1 {
-            printf(c" ".as_ptr());
+            crate::kprint!(" ");
         }
     }
     if len > 32 {
-        printf(c" ...".as_ptr());
+        crate::kprint!(" ...");
     }
-    printf(c"]\n".as_ptr());
+    crate::kprintln!("]");
 }
 
 /// Mirrors `__fdt_walk_node()`.
@@ -2557,21 +2557,21 @@ unsafe fn fdt_walk_node(node: *mut FdtNode, depth: i32) {
     // SAFETY: caller contract.
     let data_size = unsafe { (*node).data_size };
     if data_size > 0 {
-        unsafe { printf(c"%s = ".as_ptr(), (*node).name) };
+        unsafe { crate::kprint!("{} = ", crate::printf::Cs((*node).name)) };
         unsafe { fdt_print_prop_value(fdt_data_ptr(node), data_size) };
     } else {
         unsafe {
             if *(*node).name == 0 {
-                printf(c"/\n".as_ptr());
+                crate::kprintln!("/");
             } else if (*node).has_addr {
-                printf(c"%s@%lx/\n".as_ptr(), (*node).name, (*node).addr as i64);
+                crate::kprintln!("{}@{:x}/", crate::printf::Cs((*node).name), ((*node).addr as i64) as u64);
             } else {
-                printf(c"%s/\n".as_ptr(), (*node).name);
+                crate::kprintln!("{}/", crate::printf::Cs((*node).name));
             }
 
             if (*node).has_phandle {
                 fdt_print_indent(depth + 1);
-                printf(c"phandle = <0x%x>\n".as_ptr(), (*node).phandle as c_int);
+                crate::kprintln!("phandle = <0x{:x}>", (((*node).phandle as c_int) as i32 as i64) as u64);
             }
 
             let mut rb = crate::bintree::rb_first_node(&raw mut (*node).children);
@@ -2599,12 +2599,12 @@ pub(crate) unsafe extern "C" fn fdt_walk(_dtb: *mut c_void) {
     // `fdt_init` before this could ever run.
     let blob = unsafe { FDT_BLOB };
     if blob.is_null() {
-        printf(c"fdt_walk: no parsed FDT tree available\n".as_ptr());
+        crate::kprintln!("fdt_walk: no parsed FDT tree available");
         return;
     }
 
-    printf(c"=== FDT Walk (from parsed tree) ===\n".as_ptr());
-    printf(c"Parsed %d nodes\n\n".as_ptr(), unsafe { (*blob).n_nodes });
+    crate::kprintln!("=== FDT Walk (from parsed tree) ===");
+    crate::kprintln!("Parsed {} nodes\n", unsafe { (*blob).n_nodes });
 
     // SAFETY: `blob` live.
     let root_rb = unsafe { (*blob).root.node };
@@ -2612,7 +2612,7 @@ pub(crate) unsafe extern "C" fn fdt_walk(_dtb: *mut c_void) {
         unsafe { fdt_walk_node(root_rb as *mut FdtNode, 0) };
     }
 
-    printf(c"\n=== End of FDT ===\n".as_ptr());
+    crate::kprintln!("\n=== End of FDT ===");
 }
 
 /// Rust port of `fdt_apply_platform_config()`.

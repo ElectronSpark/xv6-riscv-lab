@@ -58,7 +58,6 @@ use crate::bindings::phy_state;
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
     // timer/sched_timer.rs.
     safe fn sleep_ms(ms: u64);
     // proc/sched.rs.
@@ -208,8 +207,7 @@ pub(crate) unsafe extern "C" fn mdio_read(base: *mut u32, phy_addr: c_int, reg: 
         }
     }
 
-    // SAFETY: format string matches its two `%d` arguments.
-    unsafe { printf(c"mdio_read: timeout phy=%d reg=%d\n".as_ptr(), phy_addr, reg) };
+    crate::kprintln!("mdio_read: timeout phy={} reg={}", phy_addr, reg);
     -1
 }
 
@@ -241,15 +239,12 @@ pub(crate) unsafe extern "C" fn mdio_write(base: *mut u32, phy_addr: c_int, reg:
         }
     }
 
-    // SAFETY: format string matches its three arguments.
-    unsafe {
-        printf(
-            c"mdio_write: timeout phy=%d reg=%d val=0x%x\n".as_ptr(),
-            phy_addr,
-            reg,
-            val as c_int,
-        )
-    };
+    crate::kprintln!(
+        "mdio_write: timeout phy={} reg={} val=0x{:x}",
+        phy_addr,
+        reg,
+        ((val as c_int) as i32 as i64) as u64,
+    );
     -1
 }
 
@@ -295,8 +290,7 @@ unsafe fn mdio_scan(base: *mut u32) -> c_int {
             continue;
         }
         let phy_id = ((id1 as u32) << 16) | (id2 as u32);
-        // SAFETY: format string matches its two arguments.
-        unsafe { printf(c"mdio: found PHY at addr %d, ID=0x%x\n".as_ptr(), addr, phy_id) };
+        crate::kprintln!("mdio: found PHY at addr {}, ID=0x{:x}", addr, ((phy_id as i32) as i64) as u64);
         return addr;
     }
     -1
@@ -317,7 +311,7 @@ pub(crate) unsafe extern "C" fn yt8531_init(base: *mut u32, mut phy_addr: c_int)
         // SAFETY: caller contract.
         phy_addr = unsafe { mdio_scan(base) };
         if phy_addr < 0 {
-            unsafe { printf(c"yt8531: no PHY found on MDIO bus\n".as_ptr()) };
+            crate::kprintln!("yt8531: no PHY found on MDIO bus");
             return -1;
         }
     }
@@ -331,8 +325,7 @@ pub(crate) unsafe extern "C" fn yt8531_init(base: *mut u32, mut phy_addr: c_int)
         return -1;
     }
     let phy_id = ((id1 as u32) << 16) | (id2 as u32);
-    // SAFETY: format string matches its two arguments.
-    unsafe { printf(c"yt8531: PHY ID = 0x%x at addr %d\n".as_ptr(), phy_id, phy_addr) };
+    crate::kprintln!("yt8531: PHY ID = 0x{:x} at addr {}", ((phy_id as i32) as i64) as u64, phy_addr);
 
     // Soft reset the PHY.
     // SAFETY: caller contract.
@@ -353,14 +346,14 @@ pub(crate) unsafe extern "C" fn yt8531_init(base: *mut u32, mut phy_addr: c_int)
         }
     }
     if !reset_ok {
-        unsafe { printf(c"yt8531: PHY reset timeout\n".as_ptr()) };
+        crate::kprintln!("yt8531: PHY reset timeout");
         return -1;
     }
 
     // reset_done:
     // YT8531 LED fixup (from Linux vendor driver).
     if (phy_id & 0xFFFF_FFF0) == (YT8531_PHY_ID & 0xFFFF_FFF0) {
-        unsafe { printf(c"yt8531: applying LED fixup\n".as_ptr()) };
+        crate::kprintln!("yt8531: applying LED fixup");
         // SAFETY: caller contract.
         unsafe {
             yt8531_ext_write(base, phy_addr, YT8531_LED0_CFG, YT8531_LED0_VAL);
@@ -395,7 +388,7 @@ pub(crate) unsafe extern "C" fn yt8531_init(base: *mut u32, mut phy_addr: c_int)
         return -1;
     }
 
-    unsafe { printf(c"yt8531: auto-negotiation started\n".as_ptr()) };
+    crate::kprintln!("yt8531: auto-negotiation started");
     phy_addr
 }
 
@@ -510,8 +503,7 @@ pub(crate) unsafe extern "C" fn yt8531_wait_autoneg(
         // SAFETY: caller contract.
         let bmsr = unsafe { mdio_read(base, phy_addr, MII_BMSR) };
         if bmsr >= 0 && (bmsr as u32 & BMSR_ANEGCOMPLETE as u32) != 0 {
-            // SAFETY: format string matches its one argument.
-            unsafe { printf(c"yt8531: auto-negotiation complete (%dms)\n".as_ptr(), elapsed) };
+            crate::kprintln!("yt8531: auto-negotiation complete ({}ms)", elapsed);
             // SAFETY: caller contract.
             return unsafe { yt8531_poll_link(base, phy_addr, state) };
         }
@@ -520,25 +512,19 @@ pub(crate) unsafe extern "C" fn yt8531_wait_autoneg(
     }
 
     // Timeout -- check link anyway.
-    // SAFETY: format string matches its one argument.
-    unsafe {
-        printf(
-            c"yt8531: auto-negotiation timeout after %dms, checking link...\n".as_ptr(),
-            timeout_ms,
-        )
-    };
+    crate::kprintln!("yt8531: auto-negotiation timeout after {}ms, checking link...", timeout_ms);
     // SAFETY: caller contract.
     unsafe { yt8531_poll_link(base, phy_addr, state) };
     // SAFETY: caller contract.
     if unsafe { (*state).link_up } != 0 {
-        // SAFETY: caller contract; format string matches its two arguments.
+        // SAFETY: caller contract.
         unsafe {
-            printf(
-                c"yt8531: link up despite AN timeout: %dMbps %s\n".as_ptr(),
+            crate::kprintln!(
+                "yt8531: link up despite AN timeout: {}Mbps {}",
                 (*state).speed,
-                if (*state).full_duplex != 0 { c"full".as_ptr() } else { c"half".as_ptr() },
-            )
-        };
+                if (*state).full_duplex != 0 { "full" } else { "half" },
+            );
+        }
         return 0;
     }
     -1

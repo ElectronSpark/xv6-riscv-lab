@@ -101,7 +101,6 @@ unsafe extern "C" {
 
     // printf/panic (matches `kernel/tty/tty.rs`'s own local
     // `tty_assert_errno` extern block exactly).
-    pub safe fn printf(fmt: *const c_char, ...) -> c_int;
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }
@@ -148,36 +147,44 @@ fn err_ptr<T>(err: c_int) -> *mut T {
 // (session.c's asserts span several functions, not just one).
 // ===========================================================================
 
-fn session_assert(cond: bool, line: u32, func: &core::ffi::CStr, msg: &core::ffi::CStr) {
-    if cond {
-        return;
-    }
-    __panic_start();
-    printf(
-        c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-        c"kernel/tty/session.rs".as_ptr(),
-        line as c_int,
-        func.as_ptr(),
-    );
-    printf(msg.as_ptr());
-    printf(c"\n".as_ptr());
-    __panic_end();
+// P3-2 (zero-C wave): `session_assert`/`session_assert_errno` used to take
+// their assertion message as a runtime `&CStr` (the errno variant embedding
+// a `%d` inside it); `core::fmt::format_args!` requires a literal format
+// string, so they became macros (message/function name captured as
+// `:literal` at each invocation, forwarded straight to `kprintln!`) instead
+// of plain functions -- same fix as `console.rs`'s equivalent helpers, but
+// kept as macros here (rather than inlined) since this file calls them from
+// several different functions, not just one.
+macro_rules! session_assert {
+    ($cond:expr, $func:literal, $msg:literal $(,)?) => {
+        if !($cond) {
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                "kernel/tty/session.rs",
+                line!(),
+                $func,
+            );
+            crate::kprintln!($msg);
+            __panic_end();
+        }
+    };
 }
 
-fn session_assert_errno(cond: bool, line: u32, func: &core::ffi::CStr, msg: &core::ffi::CStr, errno: c_int) {
-    if cond {
-        return;
-    }
-    __panic_start();
-    printf(
-        c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-        c"kernel/tty/session.rs".as_ptr(),
-        line as c_int,
-        func.as_ptr(),
-    );
-    printf(msg.as_ptr(), errno);
-    printf(c"\n".as_ptr());
-    __panic_end();
+macro_rules! session_assert_errno {
+    ($cond:expr, $func:literal, $msg:literal, $errno:expr $(,)?) => {
+        if !($cond) {
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                "kernel/tty/session.rs",
+                line!(),
+                $func,
+            );
+            crate::kprintln!($msg, $errno);
+            __panic_end();
+        }
+    };
 }
 
 // ===========================================================================
@@ -308,22 +315,21 @@ pub(crate) unsafe extern "C" fn session_init(initproc: *mut thread) {
             core::mem::size_of::<session>(),
             crate::bindings::SLAB_FLAG_STATIC as u64,
         );
-        session_assert_errno(
+        session_assert_errno!(
             ret == 0,
-            line!(),
-            c"session_init",
-            c"session_init: failed to init session_cache, errno=%d\n",
+            "session_init",
+            "session_init: failed to init session_cache, errno={}",
             ret,
         );
 
         let tg = (*initproc).thread_group;
-        session_assert(!tg.is_null(), line!(), c"session_init", c"session_init: initproc has no thread_group\n");
+        session_assert!(!tg.is_null(), "session_init", "session_init: initproc has no thread_group");
 
         let pg = (*initproc).pgroup;
-        session_assert(!pg.is_null(), line!(), c"session_init", c"session_init: initproc has no pgroup\n");
+        session_assert!(!pg.is_null(), "session_init", "session_init: initproc has no pgroup");
 
         let s = session_alloc((*initproc).pid);
-        session_assert(!s.is_null(), line!(), c"session_init", c"session_init: session_alloc failed\n");
+        session_assert!(!s.is_null(), "session_init", "session_init: session_alloc failed");
 
         session_add_pg(s, pg);
         session_add_thread(s, initproc);
@@ -432,7 +438,7 @@ pub(crate) unsafe extern "C" fn session_unref(s: *mut session) {
     // `session_ref`.
     unsafe {
         let old_val = AtomicI32::from_ptr(&raw mut (*s).ref_cnt).fetch_sub(1, Ordering::SeqCst);
-        session_assert(old_val >= 0, line!(), c"session_unref", c"Session reference count went negative\n");
+        session_assert!(old_val >= 0, "session_unref", "Session reference count went negative");
         if old_val == 0 {
             (*s).__bindgen_anon_1.set_exited(1);
             // Defensive teardown (see the fn doc above): make sure a

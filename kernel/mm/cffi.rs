@@ -229,16 +229,13 @@ pub fn list_is_detached_b(e: *const ListNode) -> bool {
 #[inline]
 pub fn panic_bytes(msg: &[u8]) -> ! {
     raw::__panic_start();
-    // The C panic macros print a final message and halt; we feed the
-    // raw bytes through `printf("%s", msg)`. Since `printf` is
-    // variadic we can't declare it as `safe`, so callers that want
-    // a richer message keep their existing module-local panic shim.
-    unsafe extern "C" {
-        fn printf(fmt: *const c_char, ...) -> c_int;
-    }
-    unsafe {
-        printf(b"%s\n\0".as_ptr() as *const c_char, msg.as_ptr());
-    }
+    // The C panic macros print a final message and halt; `msg` is always a
+    // NUL-terminated byte-string supplied by call sites, rendered via the
+    // `Cs` adapter as a runtime C string (content unknown at this site).
+    // `printf` is no longer called directly here (migrated to `kprintln!`
+    // below) but its extern decl is left in place -- unused now, removed
+    // crate-wide once every file is migrated.
+    crate::kprintln!("{}", crate::printf::Cs(msg.as_ptr() as *const c_char));
     raw::__panic_end()
 }
 

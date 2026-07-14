@@ -188,15 +188,15 @@ unsafe extern "C" {
 pub extern "C" fn xv6_panic(msg: *const c_char) -> ! {
     // SAFETY: `__panic_start`/`__panic_end` are the real kernel panic
     // sequence and take no arguments beyond implicit global state.
-    // `printf` with a literal "%s\n" format only reads `msg`, which every
-    // caller passes as a NUL-terminated string (either a 'static C literal
-    // or a caller-owned stack buffer that outlives the call). Nothing in
-    // this function can itself panic or otherwise re-enter `xv6_panic`.
+    // `kprintln!` with `Cs(msg)` only reads `msg`, which every caller
+    // passes as a NUL-terminated string (either a 'static C literal or a
+    // caller-owned stack buffer that outlives the call). Nothing in this
+    // function can itself panic or otherwise re-enter `xv6_panic`.
     unsafe {
         __panic_start();
-        printf(c"%s\n".as_ptr(), msg);
-        __panic_end()
     }
+    crate::kprintln!("{}", crate::printf::Cs(msg));
+    unsafe { __panic_end() }
 }
 
 // ===========================================================================
@@ -1208,9 +1208,6 @@ pub extern "C" fn xv6_mycpu_clear_noff() {
 // P3-1C mesh sweep: printf.rs is in scope for this wave, so `trigger_panic`
 // becomes a plain crate-path import instead of an `extern "C"` redeclaration.
 use crate::printf::trigger_panic;
-unsafe extern "C" {
-    fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 #[no_mangle]
 pub extern "C" fn xv6_forkret_assert_user(p: *mut thread) {
@@ -1222,8 +1219,8 @@ pub extern "C" fn xv6_forkret_assert_user(p: *mut thread) {
     u! {
         if !thread_user_space(p) {
             // Format matches the C assert() output (file/line elided).
-            printf(
-                c"ASSERTION_FAILURE: kernel thread %d tries to return to user space\n".as_ptr(),
+            crate::kprintln!(
+                "ASSERTION_FAILURE: kernel thread {} tries to return to user space",
                 (*p).pid,
             );
             trigger_panic();
@@ -2211,10 +2208,6 @@ use crate::backtrace::print_thread_backtrace;
 
 // Variadic printf alias for ergonomics (bindgen already exports it; we
 // re-shape the first arg as a *const c_char for use with `c"..."` literals).
-unsafe extern "C" {
-    #[link_name = "printf"]
-    fn k_printf(fmt: *const c_char, ...) -> c_int;
-}
 
 /// SAFETY (caller): `p` must be a valid, non-null, live `*mut thread` —
 /// every helper below is only ever called (directly or transitively) from
@@ -2303,31 +2296,23 @@ unsafe fn safestr(dst: &mut [u8], src: *const c_char) -> usize {
 
 #[no_mangle]
 pub extern "C" fn xv6_procdump_header() {
-    // SAFETY: `k_printf` is a variadic FFI call, unsafe because the
-    // compiler cannot check the format string against the argument list;
-    // here both are fixed 'static literals, hand-verified to match (5 `%s`
-    // specifiers, 5 NUL-terminated `c"..."` string-literal pointer args).
-    u! {
-        k_printf(
-            c"%-20s %-5s %-2s %-3s %s\n".as_ptr(),
-            c"SID:PGID:TGID:TID".as_ptr(),
-            c"CPU".as_ptr(),
-            c"ST".as_ptr(),
-            c"U/K".as_ptr(),
-            c"COMMAND".as_ptr(),
-        );
-    }
+    crate::kprintln!(
+        "{:<20} {:<5} {:<2} {:<3} {}",
+        "SID:PGID:TGID:TID",
+        "CPU",
+        "ST",
+        "U/K",
+        "COMMAND",
+    );
 }
 
 #[no_mangle]
 pub extern "C" fn xv6_procdump_bt_header() {
-    // SAFETY: see `xv6_procdump_header`; fixed literal format, no args.
-    u! { k_printf(c"\n=== Blocked Process Backtraces ===\n".as_ptr()); }
+    crate::kprintln!("\n=== Blocked Process Backtraces ===");
 }
 #[no_mangle]
 pub extern "C" fn xv6_procdump_bt_footer() {
-    // SAFETY: see `xv6_procdump_bt_header`.
-    u! { k_printf(c"\n=== End Backtraces ===\n".as_ptr()); }
+    crate::kprintln!("\n=== End Backtraces ===");
 }
 
 #[no_mangle]
@@ -2380,15 +2365,15 @@ pub extern "C" fn xv6_procdump_one(p: *mut thread) -> c_int {
         let pos = fmt_id(&mut idbuf, sid_v, pgid_v, tgid, tid);
         idbuf[pos] = 0;
 
-        let ustr = if s10_t_user_space(p) { c"U".as_ptr() } else { c"K".as_ptr() };
-        k_printf(
-            c"%-20s %-5s %-2s [%s] %s/%s\n".as_ptr(),
-            idbuf.as_ptr() as *const c_char,
-            cpubuf.as_ptr() as *const c_char,
-            xv6_thread_state_short(pstate),
+        let ustr = if s10_t_user_space(p) { "U" } else { "K" };
+        crate::kprintln!(
+            "{:<20} {:<5} {:<2} [{}] {}/{}",
+            crate::printf::Cs(idbuf.as_ptr() as *const c_char),
+            crate::printf::Cs(cpubuf.as_ptr() as *const c_char),
+            crate::printf::Cs(xv6_thread_state_short(pstate)),
             ustr,
-            pname.as_ptr() as *const c_char,
-            name.as_ptr() as *const c_char,
+            crate::printf::Cs(pname.as_ptr() as *const c_char),
+            crate::printf::Cs(name.as_ptr() as *const c_char),
         );
         1
     }
@@ -2442,16 +2427,16 @@ pub extern "C" fn xv6_procdump_bt_one(p: *mut thread) {
 
         // INTERRUPTIBLE=2, UNINTERRUPTIBLE=6
         if pstate == 2 || pstate == 6 {
-            let stype = if pstate == 2 { c"interruptible".as_ptr() } else { c"uninterruptible".as_ptr() };
+            let stype = if pstate == 2 { "interruptible" } else { "uninterruptible" };
             if se_on_cpu(p) {
-                k_printf(
-                    c"\n--- %d:%d:%d:%d [%s] %s --- (on CPU, cannot backtrace)\n".as_ptr(),
-                    sid_v, pgid_v, tgid, pid, stype, name.as_ptr() as *const c_char,
+                crate::kprintln!(
+                    "\n--- {}:{}:{}:{} [{}] {} --- (on CPU, cannot backtrace)",
+                    sid_v, pgid_v, tgid, pid, stype, crate::printf::Cs(name.as_ptr() as *const c_char),
                 );
             } else {
-                k_printf(
-                    c"\n--- %d:%d:%d:%d [%s] %s ---\n".as_ptr(),
-                    sid_v, pgid_v, tgid, pid, stype, name.as_ptr() as *const c_char,
+                crate::kprintln!(
+                    "\n--- {}:{}:{}:{} [{}] {} ---",
+                    sid_v, pgid_v, tgid, pid, stype, crate::printf::Cs(name.as_ptr() as *const c_char),
                 );
                 let pse = (*p).sched_entity;
                 print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
@@ -2474,7 +2459,7 @@ pub extern "C" fn xv6_procdump_bt_pid(pid: c_int) {
         (*dummy.as_mut_ptr()).pid = pid;
         let p = hlist_get_rcu(&raw mut (*pt()).procs, dummy.as_mut_ptr() as *mut c_void) as *mut thread;
         if p.is_null() {
-            k_printf(c"Process %d not found\n".as_ptr(), pid);
+            crate::kprintln!("Process {} not found", pid);
             return;
         }
         tcb_lock(p);
@@ -2484,18 +2469,18 @@ pub extern "C" fn xv6_procdump_bt_pid(pid: c_int) {
         let tgid = (*p).tgid;
         let pgid_v = (*p).pgid;
         let sid_v = (*p).sid;
-        k_printf(
-            c"\n--- %d:%d:%d:%d [%s] %s ---\n".as_ptr(),
+        crate::kprintln!(
+            "\n--- {}:{}:{}:{} [{}] {} ---",
             sid_v, pgid_v, tgid, pid,
-            xv6_thread_state_short(pstate),
-            name.as_ptr() as *const c_char,
+            crate::printf::Cs(xv6_thread_state_short(pstate)),
+            crate::printf::Cs(name.as_ptr() as *const c_char),
         );
         if se_on_cpu(p) {
-            k_printf(c"Process is currently on a CPU, context not saved\n".as_ptr());
+            crate::kprintln!("Process is currently on a CPU, context not saved");
         } else if pstate == 0 {
             // THREAD_UNUSED
-            k_printf(c"Process is %s, no valid context\n".as_ptr(),
-                     xv6_thread_state_to_str(pstate));
+            crate::kprintln!("Process is {}, no valid context",
+                     crate::printf::Cs(xv6_thread_state_to_str(pstate)));
         } else {
             let pse = (*p).sched_entity;
             print_thread_backtrace(&raw mut (*pse).context, (*p).kstack, (*p).kstack_order);
@@ -2516,8 +2501,8 @@ pub extern "C" fn xv6_procdump_tree_node(p: *mut thread, depth: c_int) {
     // against their argument lists (see `xv6_procdump_header`).
     u! {
         let mut i = 0;
-        while i < depth { k_printf(c"  ".as_ptr()); i += 1; }
-        if depth > 0 { k_printf(c"\xe2\x94\x94\xe2\x94\x80 ".as_ptr()); /* └─ */ }
+        while i < depth { crate::kprint!("  "); i += 1; }
+        if depth > 0 { crate::kprint!("└─ "); }
         let pstate = t_state_load(p);
         let pid = (*p).pid;
         let tgid = (*p).tgid;
@@ -2525,18 +2510,18 @@ pub extern "C" fn xv6_procdump_tree_node(p: *mut thread, depth: c_int) {
         let sid_v = (*p).sid;
         let mut name = [0u8; 16];
         safestr(&mut name, t_name_ptr(p));
-        let ustr = if s10_t_user_space(p) { c"U".as_ptr() } else { c"K".as_ptr() };
-        k_printf(
-            c"%d:%d:%d:%d %s [%s] %s".as_ptr(),
+        let ustr = if s10_t_user_space(p) { "U" } else { "K" };
+        crate::kprint!(
+            "{}:{}:{}:{} {} [{}] {}",
             sid_v, pgid_v, tgid, pid,
-            xv6_thread_state_short(pstate),
+            crate::printf::Cs(xv6_thread_state_short(pstate)),
             ustr,
-            name.as_ptr() as *const c_char,
+            crate::printf::Cs(name.as_ptr() as *const c_char),
         );
         if se_on_cpu(p) {
-            k_printf(c" (CPU: %d)\n".as_ptr(), se_cpu_id(p));
+            crate::kprintln!(" (CPU: {})", se_cpu_id(p));
         } else {
-            k_printf(c"\n".as_ptr());
+            crate::kprintln!();
         }
     }
 }
@@ -2571,18 +2556,18 @@ pub extern "C" fn xv6_dump_session(s: *mut Session) {
     // best-effort, lock-free debug dump, same trade-off as
     // `xv6_procdump_tree_node`.
     u! {
-        let fg_note = if (*s).fg_pgrp.is_null() { c", no fg".as_ptr() } else { c"".as_ptr() };
-        k_printf(
-            c"\nSession %d  (threads=%d, pgroups=%d%s)\n".as_ptr(),
+        let fg_note = if (*s).fg_pgrp.is_null() { ", no fg" } else { "" };
+        crate::kprintln!(
+            "\nSession {}  (threads={}, pgroups={}{})",
             (*s).sid, (*s).t_cnt, (*s).pg_cnt, fg_note,
         );
 
         let pg_off = core::mem::offset_of!(Pgroup, list_entry);
         list_foreach_safe::<Pgroup>(&raw mut (*s).pgrps, pg_off, |pg| {
-            let fg = if (*s).fg_pgrp == pg { c" [fg]".as_ptr() } else { c"".as_ptr() };
-            let exited = if (*pg).__bindgen_anon_1.exited() != 0 { c", exited".as_ptr() } else { c"".as_ptr() };
-            k_printf(
-                c"  PGroup %d%s  (threads=%d, tgroups=%d%s)\n".as_ptr(),
+            let fg = if (*s).fg_pgrp == pg { " [fg]" } else { "" };
+            let exited = if (*pg).__bindgen_anon_1.exited() != 0 { ", exited" } else { "" };
+            crate::kprintln!(
+                "  PGroup {}{}  (threads={}, tgroups={}{})",
                 (*pg).pgid, fg, (*pg).t_cnt, (*pg).p_cnt, exited,
             );
 
@@ -2591,9 +2576,9 @@ pub extern "C" fn xv6_dump_session(s: *mut Session) {
                 let live = tg_load_int(tg, core::mem::offset_of!(Tgroup, live_threads));
                 let refc = tg_load_int(tg, core::mem::offset_of!(Tgroup, refcount));
                 let gex  = tg_load_int(tg, core::mem::offset_of!(Tgroup, group_exit));
-                let gex_note = if gex != 0 { c", exiting".as_ptr() } else { c"".as_ptr() };
-                k_printf(
-                    c"    Process %d  (live=%d, refs=%d%s)\n".as_ptr(),
+                let gex_note = if gex != 0 { ", exiting" } else { "" };
+                crate::kprintln!(
+                    "    Process {}  (live={}, refs={}{})",
                     (*tg).tgid, live, refc, gex_note,
                 );
 
@@ -2601,13 +2586,13 @@ pub extern "C" fn xv6_dump_session(s: *mut Session) {
                 list_foreach_safe::<thread>(&raw mut (*tg).thread_list, tge_off, |t| {
                     let st = xv6_thread_state_to_str(t_state_load(t));
                     let on_cpu = se_on_cpu(t);
-                    let ustr = if s10_t_user_space(t) { c"U".as_ptr() } else { c"K".as_ptr() };
-                    let leader = if thread_is_group_leader(t) { c" (leader)".as_ptr() } else { c"".as_ptr() };
-                    let cpu_n = if on_cpu { c" *cpu".as_ptr() } else { c"".as_ptr() };
-                    k_printf(
-                        c"      tid %-4d [%s] %-2s %s%s%s\n".as_ptr(),
-                        (*t).pid, ustr, st,
-                        t_name_ptr(t),
+                    let ustr = if s10_t_user_space(t) { "U" } else { "K" };
+                    let leader = if thread_is_group_leader(t) { " (leader)" } else { "" };
+                    let cpu_n = if on_cpu { " *cpu" } else { "" };
+                    crate::kprintln!(
+                        "      tid {:<4} [{}] {:<2} {}{}{}",
+                        (*t).pid, ustr, crate::printf::Cs(st),
+                        crate::printf::Cs(t_name_ptr(t)),
                         leader, cpu_n,
                     );
                 });
@@ -2616,29 +2601,15 @@ pub extern "C" fn xv6_dump_session(s: *mut Session) {
     }
 }
 
-// Simple printf trampolines (used by Rust callers elsewhere).
-#[no_mangle]
-pub extern "C" fn xv6_print_str(s: *const c_char) {
-    // SAFETY: format is the fixed literal `"%s"` (see `xv6_procdump_header`);
-    // `s` is caller-supplied and must be a valid, non-null, NUL-terminated
-    // C string, matching the original `printf("%s", s)` call sites this
-    // trampoline replaces.
-    u! { k_printf(c"%s".as_ptr(), s); }
-}
-#[no_mangle]
-pub extern "C" fn xv6_print_d(v: c_int) {
-    // SAFETY: fixed literal format `"%d"` with a matching `c_int` arg.
-    u! { k_printf(c"%d".as_ptr(), v); }
-}
-#[no_mangle]
-pub extern "C" fn xv6_print_str_d(s: *const c_char, v: c_int) {
-    // SAFETY: unlike the two trampolines above, `s` here *is* the format
-    // string (not a fixed literal) — the caller must pass a valid, non-null,
-    // NUL-terminated C string containing exactly one `%d`-compatible
-    // specifier matching `v`'s type, mirroring the original C call sites
-    // that forwarded a caller-chosen format directly to `printf`.
-    u! { k_printf(s, v); }
-}
+// P3-2 (zero-C wave): the `xv6_print_str`/`xv6_print_d`/`xv6_print_str_d`
+// printf trampolines that used to live here were deleted -- their only
+// caller (`proc/pid.rs`'s `procdump_*` family) now calls `kprintln!`/
+// `kprint!` directly with its own literal format strings. `xv6_print_str_d`
+// in particular took its *format string* as a runtime argument (the
+// caller's message text embedded a `%d`), which has no equivalent under
+// `core::fmt` (format strings must be literals) -- the fix was to give each
+// `pid.rs` call site its own literal, not to preserve a dynamic-format
+// trampoline.
 
 // ==========================================================================
 // SECTION 6: sigacts / ksiginfo / thread_signal scalar accessors.

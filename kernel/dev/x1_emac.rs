@@ -86,7 +86,6 @@ use crate::sync::KSpinlock;
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
     // timer/sched_timer.rs.
     safe fn sleep_ms(ms: u64);
     // proc/sched.rs.
@@ -477,13 +476,11 @@ extern "C" fn x1_emac_intr(_irq: c_int, data: *mut c_void, _dev: *mut c_void) {
 
     if status & (DMA_IRQ_TX_STOPPED | DMA_IRQ_RX_STOPPED) != 0 {
         // SAFETY: `sc` live; format string matches its two arguments.
-        unsafe {
-            printf(
-                c"x1_emac%d: DMA stopped! status=0x%x\n".as_ptr(),
-                (*sc).index,
-                status,
-            )
-        };
+        crate::kprintln!(
+            "x1_emac{}: DMA stopped! status=0x{:x}",
+            unsafe { (*sc).index },
+            ((status as i32 as i64) as u64),
+        );
     }
 }
 
@@ -533,7 +530,7 @@ unsafe fn x1_emac_apmu_config(sc: *mut X1EmacSoftc) {
     let ctrl_reg = unsafe { (*sc).ctrl_reg };
     if ctrl_reg.is_null() {
         // SAFETY: caller contract; format string matches its one argument.
-        unsafe { printf(c"x1_emac%d: no ctrl_reg, skipping APMU config\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_emac{}: no ctrl_reg, skipping APMU config", unsafe { (*sc).index });
         return;
     }
 
@@ -571,9 +568,7 @@ unsafe fn x1_emac_dline_config(sc: *mut X1EmacSoftc) {
     let dline_reg = unsafe { (*sc).dline_reg };
     if dline_reg.is_null() {
         // SAFETY: caller contract; format string matches its one argument.
-        unsafe {
-            printf(c"x1_emac%d: no dline_reg, skipping delay-line config\n".as_ptr(), (*sc).index)
-        };
+        crate::kprintln!("x1_emac{}: no dline_reg, skipping delay-line config", unsafe { (*sc).index });
         return;
     }
 
@@ -597,14 +592,12 @@ unsafe fn x1_emac_dline_config(sc: *mut X1EmacSoftc) {
     fence(Ordering::SeqCst);
 
     // SAFETY: caller contract; format string matches its three arguments.
-    unsafe {
-        printf(
-            c"x1_emac%d: delay-line tx=%d rx=%d\n".as_ptr(),
-            (*sc).index,
-            (*sc).tx_phase,
-            (*sc).rx_phase,
-        )
-    };
+    crate::kprintln!(
+        "x1_emac{}: delay-line tx={} rx={}",
+        unsafe { (*sc).index },
+        unsafe { (*sc).tx_phase },
+        unsafe { (*sc).rx_phase },
+    );
 }
 
 // ===========================================================================
@@ -798,7 +791,7 @@ unsafe fn x1_emac_rx_ring_init(sc: *mut X1EmacSoftc) -> c_int {
         let m = mbufalloc(0);
         if m.is_null() {
             // SAFETY: caller contract; format string matches its two arguments.
-            unsafe { printf(c"x1_emac%d: failed to alloc rx mbuf %d\n".as_ptr(), (*sc).index, i as c_int) };
+            crate::kprintln!("x1_emac{}: failed to alloc rx mbuf {}", unsafe { (*sc).index }, i as c_int);
             return -1;
         }
         // SAFETY: caller contract; `i` in range.
@@ -999,7 +992,7 @@ unsafe fn x1_emac_recv(sc: *mut X1EmacSoftc) {
         let mut newm = mbufalloc(0);
         if newm.is_null() {
             // SAFETY: caller contract; format string matches its one argument.
-            unsafe { printf(c"x1_emac%d: rx mbuf alloc failed\n".as_ptr(), (*sc).index) };
+            crate::kprintln!("x1_emac{}: rx mbuf alloc failed", unsafe { (*sc).index });
             // Reuse the old mbuf (we already gave it to net_rx, so
             // allocate or we'll have a dangling pointer). In practice
             // this shouldn't happen on xv6.
@@ -1137,26 +1130,26 @@ unsafe fn x1_emac_init_one(idx: usize) -> c_int {
 
         // Map EMAC registers (already identity-mapped by vm.c).
         (*sc).regs = platform.emac[idx].base as *mut u32;
-        printf(
-            c"x1_emac%d: MMIO base 0x%lx, IRQ %d\n".as_ptr(),
+        crate::kprintln!(
+            "x1_emac{}: MMIO base 0x{:x}, IRQ {}",
             idx as c_int,
-            platform.emac[idx].base,
+            platform.emac[idx].base as u64,
             platform.emac[idx].irq,
         );
 
         // Map APMU ctrl and dline registers.
         if platform.emac[idx].apmu_base != 0 && platform.emac[idx].ctrl_reg != 0 {
             (*sc).ctrl_reg = (platform.emac[idx].apmu_base as u64 + platform.emac[idx].ctrl_reg as u64) as *mut u32;
-            printf(
-                c"x1_emac%d: ctrl_reg @ 0x%lx\n".as_ptr(),
+            crate::kprintln!(
+                "x1_emac{}: ctrl_reg @ 0x{:x}",
                 idx as c_int,
                 platform.emac[idx].apmu_base as u64 + platform.emac[idx].ctrl_reg as u64,
             );
         }
         if platform.emac[idx].apmu_base != 0 && platform.emac[idx].dline_reg != 0 {
             (*sc).dline_reg = (platform.emac[idx].apmu_base as u64 + platform.emac[idx].dline_reg as u64) as *mut u32;
-            printf(
-                c"x1_emac%d: dline_reg @ 0x%lx\n".as_ptr(),
+            crate::kprintln!(
+                "x1_emac{}: dline_reg @ 0x{:x}",
                 idx as c_int,
                 platform.emac[idx].apmu_base as u64 + platform.emac[idx].dline_reg as u64,
             );
@@ -1185,8 +1178,7 @@ unsafe fn x1_emac_init_one(idx: usize) -> c_int {
     // requests auto-detect (see `yt8531::yt8531_init`).
     let phy_addr = unsafe { super::yt8531::yt8531_init((*sc).regs, (*sc).phy_addr) };
     if phy_addr < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_emac%d: PHY init failed\n".as_ptr(), idx as c_int) };
+        crate::kprintln!("x1_emac{}: PHY init failed", idx as c_int);
         return -1;
     }
     // SAFETY: `sc` live.
@@ -1196,17 +1188,14 @@ unsafe fn x1_emac_init_one(idx: usize) -> c_int {
     // SAFETY: `sc` live.
     if unsafe { super::yt8531::yt8531_wait_autoneg((*sc).regs, (*sc).phy_addr, &raw mut (*sc).phy, 5000) } == 0 {
         // SAFETY: format string matches its three arguments.
-        unsafe {
-            printf(
-                c"x1_emac%d: link up %dMbps %s-duplex\n".as_ptr(),
-                idx as c_int,
-                (*sc).phy.speed,
-                if (*sc).phy.full_duplex != 0 { c"full".as_ptr() } else { c"half".as_ptr() },
-            )
-        };
+        crate::kprintln!(
+            "x1_emac{}: link up {}Mbps {}-duplex",
+            idx as c_int,
+            unsafe { (*sc).phy.speed },
+            if unsafe { (*sc).phy.full_duplex } != 0 { "full" } else { "half" },
+        );
     } else {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_emac%d: no link\n".as_ptr(), idx as c_int) };
+        crate::kprintln!("x1_emac{}: no link", idx as c_int);
         // Continue anyway -- link may come up later.
         // SAFETY: `sc` live.
         unsafe {
@@ -1228,16 +1217,14 @@ unsafe fn x1_emac_init_one(idx: usize) -> c_int {
     // Init TX ring.
     // SAFETY: `sc` live.
     if unsafe { x1_emac_tx_ring_init(sc) } < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_emac%d: TX ring init failed\n".as_ptr(), idx as c_int) };
+        crate::kprintln!("x1_emac{}: TX ring init failed", idx as c_int);
         return -1;
     }
 
     // Init RX ring.
     // SAFETY: `sc` live.
     if unsafe { x1_emac_rx_ring_init(sc) } < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_emac%d: RX ring init failed\n".as_ptr(), idx as c_int) };
+        crate::kprintln!("x1_emac{}: RX ring init failed", idx as c_int);
         return -1;
     }
 
@@ -1256,8 +1243,7 @@ unsafe fn x1_emac_init_one(idx: usize) -> c_int {
         register_irq_handler(plic_irq((*sc).irq), &raw mut emac_irq)
     };
     if ret != 0 {
-        // SAFETY: format string matches its two arguments.
-        unsafe { printf(c"x1_emac%d: failed to register IRQ %d\n".as_ptr(), idx as c_int, (*sc).irq) };
+        crate::kprintln!("x1_emac{}: failed to register IRQ {}", idx as c_int, unsafe { (*sc).irq });
         return -1;
     }
 
@@ -1282,16 +1268,16 @@ unsafe fn x1_emac_init_one(idx: usize) -> c_int {
         (*sc).ndev.priv_ = sc as *mut c_void;
         netdev_register(&raw mut (*sc).ndev);
 
-        printf(
-            c"x1_emac%d: initialised as %s (MAC %x:%x:%x:%x:%x:%x)\n".as_ptr(),
+        crate::kprintln!(
+            "x1_emac{}: initialised as {} (MAC {:x}:{:x}:{:x}:{:x}:{:x}:{:x})",
             idx as c_int,
-            (*sc).ndev.name.as_ptr(),
-            mac[0] as c_int,
-            mac[1] as c_int,
-            mac[2] as c_int,
-            mac[3] as c_int,
-            mac[4] as c_int,
-            mac[5] as c_int,
+            crate::printf::Cs((*sc).ndev.name.as_ptr()),
+            ((mac[0] as c_int as i64) as u64),
+            ((mac[1] as c_int as i64) as u64),
+            ((mac[2] as c_int as i64) as u64),
+            ((mac[3] as c_int as i64) as u64),
+            ((mac[4] as c_int as i64) as u64),
+            ((mac[5] as c_int as i64) as u64),
         );
     }
 
@@ -1311,8 +1297,7 @@ extern "C" fn x1_emac_init_kthread(idx: u64, _arg2: u64) {
     let ret = unsafe { x1_emac_init_one(idx as usize) };
     EMAC_INIT_DONE[idx as usize].store(if ret < 0 { -1 } else { 1 }, Ordering::Release);
     if ret < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_emac%d: init failed, skipping\n".as_ptr(), idx as c_int) };
+        crate::kprintln!("x1_emac{}: init failed, skipping", idx as c_int);
     }
 }
 
@@ -1336,8 +1321,7 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
         n = MAX_EMAC_INSTANCES;
     }
 
-    // SAFETY: format string matches its one argument.
-    unsafe { printf(c"x1_emac: found %d instance(s)\n".as_ptr(), n as c_int) };
+    crate::kprintln!("x1_emac: found {} instance(s)", n as c_int);
 
     // Spawn one init kthread per instance so they probe in parallel.
     for i in 0..n {
@@ -1350,8 +1334,7 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
             KERNEL_STACK_ORDER,
         );
         if is_err_or_null(t) {
-            // SAFETY: format string matches its one argument.
-            unsafe { printf(c"x1_emac%d: failed to create init kthread\n".as_ptr(), i as c_int) };
+            crate::kprintln!("x1_emac{}: failed to create init kthread", i as c_int);
             EMAC_INIT_DONE[i].store(-1, Ordering::Release);
         } else {
             wakeup(t);
@@ -1408,17 +1391,14 @@ extern "C" fn x1_emac_kthread(_arg1: u64, _arg2: u64) {
                     // SAFETY: `sc` live.
                     unsafe { x1_emac_adjust_link(sc) };
                     // SAFETY: format string matches its three arguments.
-                    unsafe {
-                        printf(
-                            c"x1_emac%d: link up %dMbps %s-duplex\n".as_ptr(),
-                            (*sc).index,
-                            ps.speed,
-                            if ps.full_duplex != 0 { c"full".as_ptr() } else { c"half".as_ptr() },
-                        )
-                    };
+                    crate::kprintln!(
+                        "x1_emac{}: link up {}Mbps {}-duplex",
+                        unsafe { (*sc).index },
+                        ps.speed,
+                        if ps.full_duplex != 0 { "full" } else { "half" },
+                    );
                 } else {
-                    // SAFETY: caller contract; format string matches its one argument.
-                    unsafe { printf(c"x1_emac%d: link down\n".as_ptr(), (*sc).index) };
+                    crate::kprintln!("x1_emac{}: link down", unsafe { (*sc).index });
                 }
 
                 // SAFETY: `sc` live.
@@ -1444,7 +1424,7 @@ pub(crate) extern "C" fn x1_emac_init() {
 
     let t = kthread_create(c"x1_emac".as_ptr(), x1_emac_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
     if is_err_or_null(t) {
-        unsafe { printf(c"x1_emac: failed to create init kthread\n".as_ptr()) };
+        crate::kprintln!("x1_emac: failed to create init kthread");
         return;
     }
     wakeup(t);

@@ -140,7 +140,6 @@ unsafe extern "C" {
     fn call_rcu(head: *mut rcu_head_t, func: rcu_callback_t, data: *mut c_void);
 
     // printf.rs -- variadic, cannot be marked `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 }
 // P3-1C mesh sweep: vfs/devtmpfs/superblock.rs is in scope for this wave;
 // signatures are identical (same `mode_t`/`dev_t` types), so these become
@@ -663,16 +662,14 @@ pub(crate) extern "C" fn device_register(dev: *mut device_t) -> c_int {
             // FIX 2: log the failure instead of discarding it silently
             // -- see the module doc's "Mandated fix 2" section for why
             // this is a warning, not a `device_register()` failure.
-            // SAFETY: fixed format string with 2 matching arguments
-            // (`%s`/`%d`); `devname` is a live NUL-terminated C string
-            // (the device's own, still valid).
-            unsafe {
-                printf(
-                    c"device_register: devtmpfs_create_node('%s') failed: %d\n".as_ptr(),
-                    devname,
-                    ret,
-                );
-            }
+            // `devname` is a live NUL-terminated C string (the device's
+            // own, still valid) rendered via the `Cs` runtime-C-string
+            // adapter (kernel/printf.rs).
+            crate::kprintln!(
+                "device_register: devtmpfs_create_node('{}') failed: {}",
+                crate::printf::Cs(devname),
+                ret
+            );
         }
     }
 

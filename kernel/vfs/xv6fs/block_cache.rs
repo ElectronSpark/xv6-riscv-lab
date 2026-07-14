@@ -48,7 +48,6 @@ use crate::bindings::{
 
 unsafe extern "C" {
     // printf.rs -- C-variadic.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // mm/slab.rs.
     safe fn slab_cache_init(cache: *mut slab_cache_t, name: *const c_char, obj_size: usize, flags: u64) -> c_int;
@@ -553,10 +552,8 @@ pub(crate) extern "C" fn xv6fs_bcache_init(xv6_sb: *mut xv6fs_superblock) -> c_i
         }
 
         (*bc).initialized = 1;
-        // SAFETY: `printf` is C-variadic; arguments match the `%d %d %d`
-        // format string exactly.
-        printf(
-            c"xv6fs: block cache initialized: %d data blocks, %d free in %d extents\n".as_ptr(),
+        crate::kprintln!(
+            "xv6fs: block cache initialized: {} data blocks, {} free in {} extents",
             nblocks as c_int,
             (*bc).free_count as c_int,
             (*bc).extent_count as c_int,

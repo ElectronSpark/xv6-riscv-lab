@@ -119,7 +119,6 @@ unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
     // printf is variadic, so it cannot be declared `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     /// `kernel/proc/rq.rs` (SECTION 19 of the former `proc_rust_shims.c`).
     /// Documented there as IRQ-safe (spinlock-guarded intrusive-list
@@ -307,16 +306,13 @@ fn assert_hartid_in_range(hartid: u64) {
         return;
     }
     __panic_start();
-    // SAFETY: format strings match their argument lists exactly.
-    unsafe {
-        printf(
-            c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-            c"kernel/ipi.rs".as_ptr(),
-            line!() as c_int,
-            c"mycpu_init".as_ptr(),
-        );
-        printf(c"mycpu_init: invalid hartid %ld\n".as_ptr(), hartid);
-    }
+    crate::kprintln!(
+        "ASSERTION_FAILURE {}:{}: In function '{}':",
+        "kernel/ipi.rs",
+        line!() as c_int,
+        "mycpu_init",
+    );
+    crate::kprintln!("mycpu_init: invalid hartid {}", hartid);
     __panic_end();
 }
 
@@ -343,26 +339,20 @@ pub(crate) extern "C" fn mycpu_init(hartid: u64, trampoline: bool) {
         let offset = (cpu_ptr as u64) & PAGE_MASK;
         let c = TRAMPOLINE_CPULOCAL + offset;
         write_tp(c);
-        // SAFETY: format string matches its three pointer/int arguments.
-        unsafe {
-            printf(
-                c"hart %ld mycpu_init: setting tp to %p - %p\n".as_ptr(),
-                hartid,
-                c as *mut c_void,
-                (c + core::mem::size_of::<cpu_local>() as u64) as *mut c_void,
-            );
-        }
+        crate::kprintln!(
+            "hart {} mycpu_init: setting tp to {} - {}",
+            hartid,
+            crate::printf::Ptr(c),
+            crate::printf::Ptr(c + core::mem::size_of::<cpu_local>() as u64),
+        );
     } else {
         write_tp(cpu_ptr as u64);
-        // SAFETY: see above.
-        unsafe {
-            printf(
-                c"hart %ld mycpu_init: setting tp to %p - %p\n".as_ptr(),
-                hartid,
-                cpu_ptr as *mut c_void,
-                (cpu_ptr as u64 + core::mem::size_of::<cpu_local>() as u64) as *mut c_void,
-            );
-        }
+        crate::kprintln!(
+            "hart {} mycpu_init: setting tp to {} - {}",
+            hartid,
+            crate::printf::Ptr(cpu_ptr as u64),
+            crate::printf::Ptr(cpu_ptr as u64 + core::mem::size_of::<cpu_local>() as u64),
+        );
     }
 }
 
@@ -518,12 +508,9 @@ unsafe extern "C" fn ipi_irq_handler(_irq: c_int, _data: *mut c_void, _dev: *mut
             IPI_REASON_CRASH => {
                 CpuLocal::current().flags_or(CPU_FLAG_CRASHED);
                 panic_msg_lock();
-                // SAFETY: format string matches its one `%d` argument.
+                crate::kprintln!("[Core: {}] Received IPI_REASON_CRASH, crashing...", hartid);
+                // SAFETY: same as the removed `printf` call above.
                 unsafe {
-                    printf(
-                        c"[Core: %d] Received IPI_REASON_CRASH, crashing...\n".as_ptr(),
-                        hartid,
-                    );
                     print_backtrace(read_fp(), __physical_memory_start, __physical_memory_end);
                 }
                 panic_msg_unlock();
@@ -584,26 +571,14 @@ pub(crate) extern "C" fn ipi_init() {
     let ret = unsafe { register_irq_handler(IRQ_S_SOFT, &raw mut ipi_desc) };
     if ret != 0 {
         __panic_start();
-        // SAFETY: format strings match their argument lists exactly.
-        unsafe {
-            printf(
-                c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-                c"kernel/ipi.rs".as_ptr(),
-                line!() as c_int,
-                c"ipi_init".as_ptr(),
-            );
-            printf(
-                c"ipi_init: failed to register IPI handler: %d\n".as_ptr(),
-                ret,
-            );
-        }
+        crate::kprintln!(
+            "ASSERTION_FAILURE {}:{}: In function '{}':",
+            "kernel/ipi.rs",
+            line!() as c_int,
+            "ipi_init",
+        );
+        crate::kprintln!("ipi_init: failed to register IPI handler: {}", ret);
         __panic_end();
     }
-    // SAFETY: format string matches its one `%d` argument.
-    unsafe {
-        printf(
-            c"ipi_init: IPI subsystem initialized (IRQ %d)\n".as_ptr(),
-            IRQ_S_SOFT,
-        );
-    }
+    crate::kprintln!("ipi_init: IPI subsystem initialized (IRQ {})", IRQ_S_SOFT);
 }

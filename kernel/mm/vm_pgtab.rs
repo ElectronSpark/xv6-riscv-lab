@@ -139,7 +139,6 @@ mod ffi {
         pub safe static mut trampoline_ksatp: u64;
 
         // printf is variadic, so it cannot be declared `safe`.
-        pub fn printf(fmt: *const c_char, ...) -> c_int;
     }
 pub(crate) use crate::mm::vm::{__vm_pool_init, __vma_pool_init, xv6_vm_cpuid};
 
@@ -181,9 +180,7 @@ pub(crate) use crate::mm::vm::{__vm_pool_init, __vma_pool_init, xv6_vm_cpuid};
 /// round-trip through the deleted `vm_pgtab_shims.rs`.
 pub(crate) fn xv6_vm_panic(msg: *const c_char) -> ! {
     ffi::__panic_start();
-    // SAFETY: every caller (this module, `vm.rs`) passes a NUL-terminated
-    // C string.
-    unsafe { ffi::printf(b"PANIC: %s\n\0".as_ptr() as *const c_char, msg) };
+    crate::kprintln!("PANIC: {}", crate::printf::Cs(msg));
     ffi::__panic_end()
 }
 
@@ -199,60 +196,36 @@ fn panic_vm(msg: &[u8]) -> ! {
 // ---------------------------------------------------------------------------
 fn panic_mappages_va(va: u64) -> ! {
     ffi::__panic_start();
-    // SAFETY: format string matches its argument.
-    unsafe {
-        ffi::printf(
-            b"mappages: va not aligned, va %p\n\0".as_ptr() as *const c_char,
-            va as *const c_void,
-        );
-    }
+    crate::kprintln!("mappages: va not aligned, va {}", crate::printf::Ptr(va));
     ffi::__panic_end()
 }
 fn panic_mappages_size(va: u64, size: u64) -> ! {
     ffi::__panic_start();
-    // SAFETY: format string matches its arguments.
-    unsafe {
-        ffi::printf(
-            b"mappages: size not aligned, va %p, size %p\n\0".as_ptr() as *const c_char,
-            va as *const c_void,
-            size as *const c_void,
-        );
-    }
+    crate::kprintln!(
+        "mappages: size not aligned, va {}, size {}",
+        crate::printf::Ptr(va),
+        crate::printf::Ptr(size),
+    );
     ffi::__panic_end()
 }
 fn panic_mappages_zero(va: u64) -> ! {
     ffi::__panic_start();
-    // SAFETY: format string matches its argument.
-    unsafe {
-        ffi::printf(
-            b"mappages: size zero, va %p\n\0".as_ptr() as *const c_char,
-            va as *const c_void,
-        );
-    }
+    crate::kprintln!("mappages: size zero, va {}", crate::printf::Ptr(va));
     ffi::__panic_end()
 }
 fn panic_mappages_remap(a: u64) -> ! {
     ffi::__panic_start();
-    // SAFETY: format string matches its argument.
-    unsafe {
-        ffi::printf(
-            b"mappages: remap, %p\n\0".as_ptr() as *const c_char,
-            a as *const c_void,
-        );
-    }
+    crate::kprintln!("mappages: remap, {}", crate::printf::Ptr(a));
     ffi::__panic_end()
 }
 fn panic_uvmunmap_notmapped(va: u64, pa: u64, flags: u64) -> ! {
     ffi::__panic_start();
-    // SAFETY: format string matches its arguments.
-    unsafe {
-        ffi::printf(
-            b"uvmunmap: not mapped, va=%p, pa=%p, flags: %lx\n\0".as_ptr() as *const c_char,
-            va as *const c_void,
-            pa as *const c_void,
-            flags,
-        );
-    }
+    crate::kprintln!(
+        "uvmunmap: not mapped, va={}, pa={}, flags: {:x}",
+        crate::printf::Ptr(va),
+        crate::printf::Ptr(pa),
+        flags,
+    );
     ffi::__panic_end()
 }
 
@@ -262,22 +235,10 @@ fn panic_uvmunmap_notmapped(va: u64, pa: u64, flags: u64) -> ! {
 // calls them.
 // ---------------------------------------------------------------------------
 fn printf_kvminithart(hart: u64, satp: u64) {
-    // SAFETY: format string matches its arguments.
-    unsafe {
-        ffi::printf(
-            b"hart %ld switched to kernel page table, satp: %lx\n\0".as_ptr() as *const c_char,
-            hart, satp,
-        );
-    }
+    crate::kprintln!("hart {} switched to kernel page table, satp: {:x}", hart, satp);
 }
 fn printf_invalid_level(level: c_int) {
-    // SAFETY: format string matches its argument.
-    unsafe {
-        ffi::printf(
-            b"Invalid level %d for pagetable dump\n\0".as_ptr() as *const c_char,
-            level,
-        );
-    }
+    crate::kprintln!("Invalid level {} for pagetable dump", level);
 }
 #[allow(clippy::too_many_arguments)]
 fn printf_dump_pte_single(
@@ -287,16 +248,23 @@ fn printf_dump_pte_single(
     sx: *const c_char, sr: *const c_char, src: *const c_char,
     va: u64, pa: u64,
 ) {
-    // SAFETY: format string matches its arguments.
-    unsafe {
-        ffi::printf(
-            b"%*sPTE[%d](%p): %lx(%s%s%s%s%s%s), (va, pa): (%p, %p)\n\0".as_ptr() as *const c_char,
-            indent, b"\0".as_ptr() as *const c_char,
-            idx, pte_ptr,
-            flags_no_v, sv, su, sw, sx, sr, src,
-            va as *const c_void, pa as *const c_void,
-        );
-    }
+    crate::kprintln!(
+        "{:w$}{}PTE[{}]({}): {:x}({}{}{}{}{}{}), (va, pa): ({}, {})",
+        "",
+        crate::printf::Cs(b"\0".as_ptr() as *const c_char),
+        idx,
+        crate::printf::Ptr(pte_ptr as u64),
+        flags_no_v,
+        crate::printf::Cs(sv),
+        crate::printf::Cs(su),
+        crate::printf::Cs(sw),
+        crate::printf::Cs(sx),
+        crate::printf::Cs(sr),
+        crate::printf::Cs(src),
+        crate::printf::Ptr(va),
+        crate::printf::Ptr(pa),
+        w = indent as usize,
+    );
 }
 #[allow(clippy::too_many_arguments)]
 fn printf_dump_pte_range(
@@ -307,19 +275,26 @@ fn printf_dump_pte_range(
     va_start: u64, va_end: u64, pa_start: u64, pa_end: u64,
     count: c_int,
 ) {
-    // SAFETY: format string matches its arguments.
-    unsafe {
-        ffi::printf(
-            b"%*sPTE[%d-%d]: %lx(%s%s%s%s%s%s), (va, pa): (%p-%p, %p-%p) [%d pages]\n\0"
-                .as_ptr() as *const c_char,
-            indent, b"\0".as_ptr() as *const c_char,
-            start_idx, end_idx,
-            flags_no_v, sv, su, sw, sx, sr, src,
-            va_start as *const c_void, va_end as *const c_void,
-            pa_start as *const c_void, pa_end as *const c_void,
-            count,
-        );
-    }
+    crate::kprintln!(
+        "{:w$}{}PTE[{}-{}]: {:x}({}{}{}{}{}{}), (va, pa): ({}-{}, {}-{}) [{} pages]",
+        "",
+        crate::printf::Cs(b"\0".as_ptr() as *const c_char),
+        start_idx,
+        end_idx,
+        flags_no_v,
+        crate::printf::Cs(sv),
+        crate::printf::Cs(su),
+        crate::printf::Cs(sw),
+        crate::printf::Cs(sx),
+        crate::printf::Cs(sr),
+        crate::printf::Cs(src),
+        crate::printf::Ptr(va_start),
+        crate::printf::Ptr(va_end),
+        crate::printf::Ptr(pa_start),
+        crate::printf::Ptr(pa_end),
+        count,
+        w = indent as usize,
+    );
 }
 #[allow(clippy::too_many_arguments)]
 fn printf_dump_pte_inner(
@@ -329,24 +304,29 @@ fn printf_dump_pte_inner(
     sx: *const c_char, sr: *const c_char, src: *const c_char,
     va: u64, pa: *mut c_void,
 ) {
-    // SAFETY: format string matches its arguments.
-    unsafe {
-        ffi::printf(
-            b"%*sPTE[%d](%p): %x(%s%s%s%s%s%s), (va, pa): (%p, %p)\0".as_ptr() as *const c_char,
-            indent, b"\0".as_ptr() as *const c_char,
-            idx, pte_ptr,
-            flags, sv, su, sw, sx, sr, src,
-            va as *const c_void, pa,
-        );
-    }
+    crate::kprint!(
+        "{:w$}{}PTE[{}]({}): {:x}({}{}{}{}{}{}), (va, pa): ({}, {})",
+        "",
+        crate::printf::Cs(b"\0".as_ptr() as *const c_char),
+        idx,
+        crate::printf::Ptr(pte_ptr as u64),
+        ((flags as i32) as i64) as u64,
+        crate::printf::Cs(sv),
+        crate::printf::Cs(su),
+        crate::printf::Cs(sw),
+        crate::printf::Cs(sx),
+        crate::printf::Cs(sr),
+        crate::printf::Cs(src),
+        crate::printf::Ptr(va),
+        crate::printf::Ptr(pa as u64),
+        w = indent as usize,
+    );
 }
 fn printf_newline() {
-    // SAFETY: format string takes no arguments.
-    unsafe { ffi::printf(b"\n\0".as_ptr() as *const c_char); }
+    crate::kprintln!();
 }
 fn printf_colon_newline() {
-    // SAFETY: format string takes no arguments.
-    unsafe { ffi::printf(b":\n\0".as_ptr() as *const c_char); }
+    crate::kprintln!(":");
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,26 +1166,10 @@ fn kvmmake() -> *mut u64 {
         (PTE_R | PTE_X | PTE_U) as c_int,
     );
 
-    // SAFETY: `printf` is variadic (can't be declared `safe`); every
-    // format string below matches its argument list exactly.
-    unsafe {
-        ffi::printf(
-            b"trampoline 0x%lx -> %p\n\0".as_ptr() as *const c_char,
-            TRAMPOLINE, trampoline_addr as *const c_void,
-        );
-        ffi::printf(
-            b"trampoline data 0x%lx -> %p\n\0".as_ptr() as *const c_char,
-            TRAMPOLINE_DATA, tramp_data_addr as *const c_void,
-        );
-        ffi::printf(
-            b"trampoline cpu local 0x%lx -> %p\n\0".as_ptr() as *const c_char,
-            TRAMPOLINE_CPULOCAL, cpus_addr as *const c_void,
-        );
-        ffi::printf(
-            b"signal trampoline 0x%lx -> %p\n\0".as_ptr() as *const c_char,
-            SIG_TRAMPOLINE, sig_tramp_addr as *const c_void,
-        );
-    }
+    crate::kprintln!("trampoline 0x{:x} -> {}", TRAMPOLINE, crate::printf::Ptr(trampoline_addr));
+    crate::kprintln!("trampoline data 0x{:x} -> {}", TRAMPOLINE_DATA, crate::printf::Ptr(tramp_data_addr));
+    crate::kprintln!("trampoline cpu local 0x{:x} -> {}", TRAMPOLINE_CPULOCAL, crate::printf::Ptr(cpus_addr));
+    crate::kprintln!("signal trampoline 0x{:x} -> {}", SIG_TRAMPOLINE, crate::printf::Ptr(sig_tramp_addr));
 
     // rodata / data / bss / remainder of physical memory.
     let rodata_addr = &raw const ffi::_rodata as u64;
@@ -1232,26 +1196,14 @@ fn kvmmake() -> *mut u64 {
     let ksym_size = ksym_end - ksym_start;
     if ksym_size > 0 {
         kvmmap(kpgtbl, ksym_start, ksym_start, ksym_size, PTE_R as c_int);
-        // SAFETY: format string matches its arguments.
-        unsafe {
-            ffi::printf(
-                b"kernel symbols 0x%lx - 0x%lx (size: %ld)\n\0".as_ptr() as *const c_char,
-                ksym_start, ksym_end, ksym_size,
-            );
-        }
+        crate::kprintln!("kernel symbols 0x{:x} - 0x{:x} (size: {})", ksym_start, ksym_end, ksym_size);
     }
 
     let ksym_idx_start = &raw const ffi::_ksymbols_idx_start as u64;
     let ksym_idx_end = &raw const ffi::_ksymbols_idx_end as u64;
     let ksym_idx_size = ksym_idx_end - ksym_idx_start;
     if ksym_idx_size > 0 {
-        // SAFETY: format string matches its arguments.
-        unsafe {
-            ffi::printf(
-                b"kernel symbols index 0x%lx - 0x%lx (size: %ld)\n\0".as_ptr() as *const c_char,
-                ksym_idx_start, ksym_idx_end, ksym_idx_size,
-            );
-        }
+        crate::kprintln!("kernel symbols index 0x{:x} - 0x{:x} (size: {})", ksym_idx_start, ksym_idx_end, ksym_idx_size);
     }
 
     kpgtbl

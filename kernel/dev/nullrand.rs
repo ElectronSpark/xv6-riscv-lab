@@ -64,7 +64,6 @@ use super::cdev::cdev_register;
 unsafe extern "C" {
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
-    fn printf(fmt: *const core::ffi::c_char, ...) -> c_int;
 
     /// `kernel/inc/mm/vm.h`: `int either_copyout(int user_dst, uint64
     /// dst, void *src, uint64 len)`.
@@ -84,20 +83,17 @@ fn assert_registered(ret: c_int, which: &core::ffi::CStr, func: &core::ffi::CStr
         return;
     }
     __panic_start();
-    // SAFETY: format strings match their argument lists exactly.
-    unsafe {
-        printf(
-            c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-            c"kernel/dev/nullrand.rs".as_ptr(),
-            line!() as c_int,
-            func.as_ptr(),
-        );
-        printf(
-            c"nullranddevinit: failed to register %s cdev: %d\n".as_ptr(),
-            which.as_ptr(),
-            ret,
-        );
-    }
+    crate::kprintln!(
+        "ASSERTION_FAILURE {}:{}: In function '{}':",
+        "kernel/dev/nullrand.rs",
+        line!() as c_int,
+        crate::printf::Cs(func.as_ptr()),
+    );
+    crate::kprintln!(
+        "nullranddevinit: failed to register {} cdev: {}",
+        crate::printf::Cs(which.as_ptr()),
+        ret,
+    );
     __panic_end();
 }
 

@@ -178,7 +178,6 @@ const CPU_FLAG_BOOT_HART: u64 = 2;
 
 unsafe extern "C" {
     // printf.rs (variadic, so it cannot be declared `safe`).
-    fn printf(fmt: *const core::ffi::c_char, ...) -> c_int;
 
     // mm/early_allocator.rs
     fn early_allocator_init(pa_start: *mut c_void, pa_end: *mut c_void);
@@ -275,8 +274,8 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         early_allocator_init(&raw const end as *mut c_void, __physical_memory_end as *mut c_void);
         kobject_global_init();
         printfinit();
-        printf(
-            c"\nxv6 kernel booting (hart %d)\n\n".as_ptr(),
+        crate::kprintln!(
+            "\nxv6 kernel booting (hart {})\n",
             hartid,
         );
         fdt_init(fdt_base);
@@ -289,12 +288,12 @@ fn __start_kernel_main_hart(hartid: c_int, fdt_base: *mut c_void) {
         ksymbols_init(); // Initialize kernel symbols
         kinit(); // physical page allocator
         kvminit(); // create kernel page table
-        printf(c"page table initialized\n".as_ptr());
+        crate::kprintln!("page table initialized");
         kvminithart(); // turn on paging
-        printf(c"paging enabled\n".as_ptr());
+        crate::kprintln!("paging enabled");
         pipe_init(); // initialize pipe subsystem
         mycpu_init(hartid as u64, true); // Change mycpu pointer to use trampoline stack
-        printf(c"mycpu initialized\n".as_ptr());
+        crate::kprintln!("mycpu initialized");
         rcu_init(); // RCU subsystem initialization
         dev_table_init(); // Initialize the device table
         thread_init(); // process table
@@ -383,10 +382,10 @@ pub extern "C" fn start_kernel(hartid: c_int, fdt_base: *mut c_void, is_boot_har
     // above on both paths) and `printf` are both safe to call from any
     // hart at this point.
     unsafe {
-        printf(
-            c"hart %d initialized. intr_sp: %p\n".as_ptr(),
+        crate::kprintln!(
+            "hart {} initialized. intr_sp: {}",
             hartid,
-            (*machine::CpuLocal::current().as_ptr()).intr_sp as *mut c_void,
+            crate::printf::Ptr((*machine::CpuLocal::current().as_ptr()).intr_sp as u64),
         );
     }
 
@@ -476,7 +475,7 @@ pub extern "C" fn start_kernel_post_init() {
     // Release secondary harts to proceed with their initialization
     // SAFETY: `printf` is safe to call from thread context.
     unsafe {
-        printf(c"Releasing secondary harts...\n".as_ptr());
+        crate::kprintln!("Releasing secondary harts...");
     }
     STARTED.store(1, Ordering::Release);
     // Start secondary harts using SBI HSM extension.

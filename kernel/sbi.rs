@@ -48,7 +48,6 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use crate::machine;
 
 unsafe extern "C" {
-    pub safe fn printf(fmt: *const c_char, ...) -> c_int;
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }
@@ -451,15 +450,15 @@ pub(crate) fn sbi_reboot() {
 /// in `kernel/inc/printf.h` expands to.
 fn required_extension_missing(idx: usize) -> ! {
     __panic_start();
-    printf(
-        c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-        c"kernel/sbi.rs".as_ptr(),
+    crate::kprintln!(
+        "ASSERTION_FAILURE {}:{}: In function '{}':",
+        "kernel/sbi.rs",
         line!() as c_int,
-        c"sbi_probe_extensions".as_ptr(),
+        "sbi_probe_extensions",
     );
-    printf(
-        c"Required SBI extension %s not available!\n".as_ptr(),
-        SBI_EXT_NAMES[idx].as_ptr(),
+    crate::kprintln!(
+        "Required SBI extension {} not available!",
+        crate::printf::Cs(SBI_EXT_NAMES[idx].as_ptr()),
     );
     __panic_end();
 }
@@ -467,16 +466,16 @@ fn required_extension_missing(idx: usize) -> ! {
 // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
 // crate-path `use` instead of an `extern` redeclaration -- demoted.
 pub(crate) extern "C" fn sbi_probe_extensions() {
-    printf(c"SBI extensions:\n".as_ptr());
+    crate::kprintln!("SBI extensions:");
     for i in 0..SBI_EXT_ID_COUNT {
         let result = sbi_probe_extension(SBI_EXT_IDS[i]);
         let available = result > 0;
         SBI_EXT_AVAILABLE[i].store(available, Ordering::Relaxed);
-        printf(
-            c"  %s: %s%s\n".as_ptr(),
-            SBI_EXT_NAMES[i].as_ptr(),
-            if available { c"AVAILABLE".as_ptr() } else { c"UNSUPPORTED".as_ptr() },
-            if SBI_EXT_OPTIONAL[i] { c" (OPTIONAL)".as_ptr() } else { c"".as_ptr() },
+        crate::kprintln!(
+            "  {}: {}{}",
+            crate::printf::Cs(SBI_EXT_NAMES[i].as_ptr()),
+            if available { "AVAILABLE" } else { "UNSUPPORTED" },
+            if SBI_EXT_OPTIONAL[i] { " (OPTIONAL)" } else { "" },
         );
         if !(available || SBI_EXT_OPTIONAL[i]) {
             required_extension_missing(i);
@@ -550,12 +549,12 @@ pub(crate) fn sbi_print_version() {
         _ => c"Unknown",
     };
 
-    printf(c"SBI specification v%d.%d\n".as_ptr(), major as c_int, minor as c_int);
-    printf(
-        c"SBI implementation: %s (id=%ld, version=0x%lx)\n".as_ptr(),
-        impl_name.as_ptr(),
+    crate::kprintln!("SBI specification v{}.{}", major as c_int, minor as c_int);
+    crate::kprintln!(
+        "SBI implementation: {} (id={}, version=0x{:x})",
+        crate::printf::Cs(impl_name.as_ptr()),
         impl_id,
-        impl_ver,
+        impl_ver as u64,
     );
 }
 
@@ -564,7 +563,7 @@ pub(crate) fn sbi_print_version() {
 pub(crate) extern "C" fn sbi_start_secondary_harts(start_addr: u64) {
     let boot_hart = machine::cpuid();
 
-    printf(c"Starting secondary harts...\n".as_ptr());
+    crate::kprintln!("Starting secondary harts...");
     for i in 0..crate::bindings::NCPU as c_int {
         if i == boot_hart {
             continue;
@@ -577,10 +576,10 @@ pub(crate) extern "C" fn sbi_start_secondary_harts(start_addr: u64) {
                 && ret != SBI_ERR_ALREADY_AVAILABLE
                 && ret != SBI_ERR_ALREADY_STARTED
             {
-                printf(
-                    c"hart %d: failed to start (%s)\n".as_ptr(),
+                crate::kprintln!(
+                    "hart {}: failed to start ({})",
                     i,
-                    sbi_error_str(ret),
+                    crate::printf::Cs(sbi_error_str(ret)),
                 );
             }
         }

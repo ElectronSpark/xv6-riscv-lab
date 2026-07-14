@@ -86,7 +86,6 @@ use crate::irq::irq_core::{plic_irq, register_irq_handler, IrqDesc};
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
     safe fn __panic_start();
     safe fn __panic_end() -> !;
 
@@ -266,8 +265,7 @@ unsafe fn reg_write(offset: usize, val: u32) {
 #[inline(never)]
 fn panic_fixed(msg: &core::ffi::CStr) -> ! {
     __panic_start();
-    // SAFETY: `msg` is 'static, nul-terminated, no format args.
-    unsafe { printf(msg.as_ptr()) };
+    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
     __panic_end()
 }
 

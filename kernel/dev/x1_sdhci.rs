@@ -102,7 +102,6 @@ use crate::sync::KMutex;
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
-    fn printf(fmt: *const c_char, ...) -> c_int;
     // timer/sched_timer.rs.
     safe fn sleep_ms(ms: u64);
     // proc/sched.rs.
@@ -508,10 +507,7 @@ unsafe fn sdhci_apmu_enable(sc: *mut SdhciSoftc) {
     // SAFETY: caller contract.
     let apmu_reg = unsafe { (*sc).apmu_reg };
     if apmu_reg.is_null() {
-        // SAFETY: format string matches its one argument.
-        unsafe {
-            printf(c"x1_sdhci%d: no APMU register, skipping clock enable\n".as_ptr(), (*sc).index)
-        };
+        crate::kprintln!("x1_sdhci{}: no APMU register, skipping clock enable", unsafe { (*sc).index });
         return;
     }
 
@@ -522,16 +518,16 @@ unsafe fn sdhci_apmu_enable(sc: *mut SdhciSoftc) {
     // Read current APMU register -- U-Boot should have configured MUX/DIV.
     // SAFETY: `apmu_reg` non-null, live per caller contract.
     let mut val = unsafe { ptr::read_volatile(apmu_reg) };
-    // SAFETY: format string matches its two arguments.
-    unsafe { printf(c"x1_sdhci%d: APMU initial value = 0x%x\n".as_ptr(), (*sc).index, val) };
+    crate::kprintln!(
+        "x1_sdhci{}: APMU initial value = 0x{:x}",
+        unsafe { (*sc).index },
+        ((val as i32) as i64) as u64,
+    );
 
     // Configure clock source if not already set up by firmware. Only
     // reconfigure if IO clock is off AND MUX/DIV are at reset defaults.
     if (val & SDH_APMU_IO_CLK_EN == 0) || ((val & SDH_APMU_MUX_MASK) == 0 && (val & SDH_APMU_DIV_MASK) == 0) {
-        // SAFETY: caller contract.
-        unsafe {
-            printf(c"x1_sdhci%d: configuring clock (MUX=0 PLL1_D6, DIV=1)\n".as_ptr(), (*sc).index)
-        };
+        crate::kprintln!("x1_sdhci{}: configuring clock (MUX=0 PLL1_D6, DIV=1)", unsafe { (*sc).index });
         val &= !(SDH_APMU_MUX_MASK | SDH_APMU_DIV_MASK);
         val |= SDH_MUX_PLL1_D6_409M << SDH_APMU_MUX_SHIFT;
         val |= 1 << SDH_APMU_DIV_SHIFT;
@@ -546,8 +542,7 @@ unsafe fn sdhci_apmu_enable(sc: *mut SdhciSoftc) {
         fence(Ordering::SeqCst);
         // SAFETY: `apmu_reg` live.
         if unsafe { sdhci_apmu_wait_fc(apmu_reg, 20000) } < 0 {
-            // SAFETY: format string matches its one argument.
-            unsafe { printf(c"x1_sdhci%d: APMU FC timeout\n".as_ptr(), (*sc).index) };
+            crate::kprintln!("x1_sdhci{}: APMU FC timeout", unsafe { (*sc).index });
         }
         // SAFETY: `apmu_reg` live.
         val = unsafe { ptr::read_volatile(apmu_reg) };
@@ -609,14 +604,18 @@ unsafe fn sdhci_apmu_enable(sc: *mut SdhciSoftc) {
 
     // SAFETY: caller contract; `apmu_reg`/`apmu_axi_reg` live (or null,
     // handled by the `0` fallback matching the C ternary).
-    unsafe {
-        printf(
-            c"x1_sdhci%d: APMU enabled (reg=0x%x, axi=0x%x)\n".as_ptr(),
-            (*sc).index,
+    let (reg_val, axi_val) = unsafe {
+        (
             ptr::read_volatile(apmu_reg),
             if apmu_axi_reg.is_null() { 0 } else { ptr::read_volatile(apmu_axi_reg) },
         )
     };
+    crate::kprintln!(
+        "x1_sdhci{}: APMU enabled (reg=0x{:x}, axi=0x{:x})",
+        unsafe { (*sc).index },
+        ((reg_val as i32) as i64) as u64,
+        ((axi_val as i32) as i64) as u64,
+    );
 }
 
 // ===========================================================================
@@ -665,8 +664,11 @@ unsafe fn sdhci_reset(sc: *mut SdhciSoftc, mask: u8) -> c_int {
         }
         scheduler_yield();
     }
-    // SAFETY: format string matches its two arguments.
-    unsafe { printf(c"x1_sdhci%d: reset timeout (mask=0x%x)\n".as_ptr(), (*sc).index, mask as c_int) };
+    crate::kprintln!(
+        "x1_sdhci{}: reset timeout (mask=0x{:x})",
+        unsafe { (*sc).index },
+        ((mask as c_int) as i32 as i64) as u64,
+    );
     -1
 }
 
@@ -717,8 +719,7 @@ unsafe fn sdhci_set_clock(sc: *mut SdhciSoftc, target_hz: u32) {
     // Wait for internal clock stable.
     // SAFETY: caller contract.
     if unsafe { sdhci_wait_bit(sc, SDHCI_CLOCK_CONTROL, SDHCI_CLOCK_INT_STABLE as u32, true, SDHCI_CLK_TIMEOUT_MS) } < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: internal clock not stable\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: internal clock not stable", unsafe { (*sc).index });
         return;
     }
 
@@ -818,14 +819,14 @@ unsafe fn sdhci_hw_init(sc: *mut SdhciSoftc) -> c_int {
         // SAFETY: caller contract.
         unsafe {
             sdhci_writeb(sc, SDHCI_HOST_CONTROL, ctrl);
-            printf(c"x1_sdhci%d: SDMA enabled\n".as_ptr(), (*sc).index);
         }
+        crate::kprintln!("x1_sdhci{}: SDMA enabled", unsafe { (*sc).index });
     } else {
         // SAFETY: caller contract.
         unsafe {
             (*sc).use_dma = 0;
-            printf(c"x1_sdhci%d: no SDMA capability, using PIO\n".as_ptr(), (*sc).index);
         }
+        crate::kprintln!("x1_sdhci{}: no SDMA capability, using PIO", unsafe { (*sc).index });
     }
 
     0
@@ -850,8 +851,7 @@ unsafe fn sdhci_send_cmd_to(sc: *mut SdhciSoftc, cmd_idx: u32, arg: u32, flags: 
     // Wait for command line to be free.
     // SAFETY: caller contract.
     if unsafe { sdhci_wait_bit(sc, SDHCI_PRESENT_STATE, mask, false, timeout_ms) } < 0 {
-        // SAFETY: format string matches its two arguments.
-        unsafe { printf(c"x1_sdhci%d: CMD%d inhibit timeout\n".as_ptr(), (*sc).index, cmd_idx) };
+        crate::kprintln!("x1_sdhci{}: CMD{} inhibit timeout", unsafe { (*sc).index }, cmd_idx);
         return neg(crate::bindings::ETIMEDOUT);
     }
 
@@ -875,15 +875,12 @@ unsafe fn sdhci_send_cmd_to(sc: *mut SdhciSoftc, cmd_idx: u32, arg: u32, flags: 
         // SAFETY: caller contract.
         let err = unsafe { sdhci_readw(sc, SDHCI_ERR_INT_STATUS) };
         if cmd_idx != MMC_GO_IDLE_STATE && cmd_idx != SD_SEND_IF_COND && cmd_idx != MMC_SEND_OP_COND {
-            // SAFETY: format string matches its three arguments.
-            unsafe {
-                printf(
-                    c"x1_sdhci%d: CMD%d timeout (err=0x%x)\n".as_ptr(),
-                    (*sc).index,
-                    cmd_idx,
-                    err as c_int,
-                )
-            };
+            crate::kprintln!(
+                "x1_sdhci{}: CMD{} timeout (err=0x{:x})",
+                unsafe { (*sc).index },
+                cmd_idx,
+                ((err as c_int) as i32 as i64) as u64,
+            );
         }
         // SAFETY: caller contract.
         unsafe { sdhci_reset(sc, SDHCI_RESET_CMD) };
@@ -896,15 +893,15 @@ unsafe fn sdhci_send_cmd_to(sc: *mut SdhciSoftc, cmd_idx: u32, arg: u32, flags: 
     if int_status & SDHCI_INT_ERROR != 0 {
         // SAFETY: caller contract.
         let err = unsafe { sdhci_readw(sc, SDHCI_ERR_INT_STATUS) };
-        // SAFETY: format string matches its four arguments.
+        crate::kprintln!(
+            "x1_sdhci{}: CMD{} error (int=0x{:x}, err=0x{:x})",
+            unsafe { (*sc).index },
+            cmd_idx,
+            ((int_status as c_int) as i32 as i64) as u64,
+            ((err as c_int) as i32 as i64) as u64,
+        );
+        // SAFETY: caller contract.
         unsafe {
-            printf(
-                c"x1_sdhci%d: CMD%d error (int=0x%x, err=0x%x)\n".as_ptr(),
-                (*sc).index,
-                cmd_idx,
-                int_status as c_int,
-                err as c_int,
-            );
             sdhci_writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
             sdhci_reset(sc, SDHCI_RESET_CMD);
         }
@@ -993,15 +990,15 @@ unsafe fn sdhci_sdma_wait(sc: *mut SdhciSoftc, dma_addr_in: u64, is_write: bool)
         if int_st & SDHCI_INT_ERROR != 0 {
             // SAFETY: caller contract.
             let err = unsafe { sdhci_readw(sc, SDHCI_ERR_INT_STATUS) };
-            // SAFETY: caller contract; format string matches its four arguments.
+            crate::kprintln!(
+                "x1_sdhci{}: DMA {} error (int=0x{:x}, err=0x{:x})",
+                unsafe { (*sc).index },
+                if is_write { "write" } else { "read" },
+                ((int_st as c_int) as i32 as i64) as u64,
+                ((err as c_int) as i32 as i64) as u64,
+            );
+            // SAFETY: caller contract.
             unsafe {
-                printf(
-                    c"x1_sdhci%d: DMA %s error (int=0x%x, err=0x%x)\n".as_ptr(),
-                    (*sc).index,
-                    if is_write { c"write".as_ptr() } else { c"read".as_ptr() },
-                    int_st as c_int,
-                    err as c_int,
-                );
                 sdhci_writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
                 sdhci_reset(sc, SDHCI_RESET_DATA);
             }
@@ -1029,13 +1026,13 @@ unsafe fn sdhci_sdma_wait(sc: *mut SdhciSoftc, dma_addr_in: u64, is_write: bool)
         scheduler_yield();
     }
 
-    // SAFETY: caller contract; format string matches its two arguments.
+    crate::kprintln!(
+        "x1_sdhci{}: DMA {} timeout",
+        unsafe { (*sc).index },
+        if is_write { "write" } else { "read" },
+    );
+    // SAFETY: caller contract.
     unsafe {
-        printf(
-            c"x1_sdhci%d: DMA %s timeout\n".as_ptr(),
-            (*sc).index,
-            if is_write { c"write".as_ptr() } else { c"read".as_ptr() },
-        );
         sdhci_reset(sc, SDHCI_RESET_DATA);
     }
     neg(crate::bindings::ETIMEDOUT)
@@ -1056,8 +1053,7 @@ unsafe fn sdhci_pio_read_block(sc: *mut SdhciSoftc, buf: *mut c_void) -> c_int {
     // Wait for data available.
     // SAFETY: caller contract.
     if unsafe { sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_AVAIL as u32, true, SDHCI_TIMEOUT_MS) } < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: PIO read data timeout\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: PIO read data timeout", unsafe { (*sc).index });
         return neg(crate::bindings::ETIMEDOUT);
     }
 
@@ -1085,8 +1081,7 @@ unsafe fn sdhci_pio_write_block(sc: *mut SdhciSoftc, buf: *const c_void) -> c_in
     // Wait for space available.
     // SAFETY: caller contract.
     if unsafe { sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_SPACE_AVAIL as u32, true, SDHCI_TIMEOUT_MS) } < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: PIO write space timeout\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: PIO write space timeout", unsafe { (*sc).index });
         return neg(crate::bindings::ETIMEDOUT);
     }
 
@@ -1110,8 +1105,7 @@ unsafe fn sdhci_pio_write_block(sc: *mut SdhciSoftc, buf: *const c_void) -> c_in
 unsafe fn sdhci_wait_xfer_done(sc: *mut SdhciSoftc) -> c_int {
     // SAFETY: caller contract.
     if unsafe { sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END as u32, true, SDHCI_TIMEOUT_MS) } < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: transfer complete timeout\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: transfer complete timeout", unsafe { (*sc).index });
         return neg(crate::bindings::ETIMEDOUT);
     }
 
@@ -1119,9 +1113,13 @@ unsafe fn sdhci_wait_xfer_done(sc: *mut SdhciSoftc) -> c_int {
     // SAFETY: caller contract.
     let err = unsafe { sdhci_readw(sc, SDHCI_ERR_INT_STATUS) };
     if err != 0 {
-        // SAFETY: caller contract; format string matches its two arguments.
+        crate::kprintln!(
+            "x1_sdhci{}: transfer error 0x{:x}",
+            unsafe { (*sc).index },
+            ((err as c_int) as i32 as i64) as u64,
+        );
+        // SAFETY: caller contract.
         unsafe {
-            printf(c"x1_sdhci%d: transfer error 0x%x\n".as_ptr(), (*sc).index, err as c_int);
             sdhci_writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
             sdhci_reset(sc, SDHCI_RESET_DATA);
         }
@@ -1202,8 +1200,7 @@ unsafe fn sdhci_read_blocks(sc: *mut SdhciSoftc, lba: u32, nblocks: u32, buf: *m
         unsafe { dma_cache_inval(buf, total as usize) };
         0
     } else {
-        // SAFETY: caller contract.
-        unsafe { printf(c"sdhci_read_blocks: fallback to bio.\n".as_ptr()) };
+        crate::kprintln!("sdhci_read_blocks: fallback to bio.");
         // Read blocks via PIO.
         for i in 0..nblocks {
             // SAFETY: `buf` valid for `total` bytes; `i < nblocks`.
@@ -1270,8 +1267,7 @@ unsafe fn sdhci_write_blocks(sc: *mut SdhciSoftc, lba: u32, nblocks: u32, buf: *
         // SAFETY: caller contract.
         unsafe { sdhci_sdma_wait(sc, buf as u64, true) }
     } else {
-        // SAFETY: caller contract.
-        unsafe { printf(c"sdhci_write_blocks: fallback to bio.\n".as_ptr()) };
+        crate::kprintln!("sdhci_write_blocks: fallback to bio.");
         // Write blocks via PIO.
         for i in 0..nblocks {
             // SAFETY: `buf` valid for `total` bytes; `i < nblocks`.
@@ -1326,12 +1322,14 @@ unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
         sdhci_send_cmd(sc, SD_SEND_IF_COND, 0x1AA, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
     };
     if ret < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: CMD8 failed -- legacy SD v1.x card?\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: CMD8 failed -- legacy SD v1.x card?", unsafe { (*sc).index });
         // Might be SD v1.x -- try ACMD41 anyway.
     } else if resp[0] & 0xFF != 0xAA {
-        // SAFETY: format string matches its two arguments.
-        unsafe { printf(c"x1_sdhci%d: CMD8 bad echo: 0x%x\n".as_ptr(), (*sc).index, resp[0]) };
+        crate::kprintln!(
+            "x1_sdhci{}: CMD8 bad echo: 0x{:x}",
+            unsafe { (*sc).index },
+            ((resp[0] as i32) as i64) as u64,
+        );
     }
 
     // ACMD41: SD_APP_OP_COND -- negotiate operating conditions. Requests
@@ -1341,14 +1339,12 @@ unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
         // SAFETY: caller contract.
         let ret = unsafe { sdhci_send_acmd(sc, SD_APP_OP_COND, MMC_OCR_HCS | MMC_OCR_3V3, SDHCI_CMD_RESP_48, resp.as_mut_ptr()) };
         if ret < 0 {
-            // SAFETY: format string matches its one argument.
-            unsafe { printf(c"x1_sdhci%d: ACMD41 failed\n".as_ptr(), (*sc).index) };
+            crate::kprintln!("x1_sdhci{}: ACMD41 failed", unsafe { (*sc).index });
             return ret;
         }
         tries += 1;
         if tries > 100 {
-            // SAFETY: format string matches its one argument.
-            unsafe { printf(c"x1_sdhci%d: ACMD41 timeout -- card not ready\n".as_ptr(), (*sc).index) };
+            crate::kprintln!("x1_sdhci{}: ACMD41 timeout -- card not ready", unsafe { (*sc).index });
             return neg(crate::bindings::ETIMEDOUT);
         }
         sleep_ms(10);
@@ -1363,21 +1359,17 @@ unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
         unsafe { (*sc).card_type = CARD_TYPE_SDHC };
     }
 
-    // SAFETY: caller contract; format string matches its two arguments.
-    unsafe {
-        printf(
-            c"x1_sdhci%d: card type: %s\n".as_ptr(),
-            (*sc).index,
-            if (*sc).card_type == CARD_TYPE_SDHC { c"SDHC/SDXC".as_ptr() } else { c"SD".as_ptr() },
-        )
-    };
+    crate::kprintln!(
+        "x1_sdhci{}: card type: {}",
+        unsafe { (*sc).index },
+        if unsafe { (*sc).card_type } == CARD_TYPE_SDHC { "SDHC/SDXC" } else { "SD" },
+    );
 
     // CMD2: ALL_SEND_CID -- get card identification.
     // SAFETY: caller contract.
     let ret = unsafe { sdhci_send_cmd(sc, MMC_ALL_SEND_CID, 0, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
     if ret < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: CMD2 failed\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: CMD2 failed", unsafe { (*sc).index });
         return ret;
     }
 
@@ -1387,14 +1379,16 @@ unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
         sdhci_send_cmd(sc, MMC_SET_RELATIVE_ADDR, 0, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, resp.as_mut_ptr())
     };
     if ret < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: CMD3 failed\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: CMD3 failed", unsafe { (*sc).index });
         return ret;
     }
     // SAFETY: caller contract.
     unsafe { (*sc).rca = (resp[0] >> 16) & 0xFFFF };
-    // SAFETY: format string matches its two arguments.
-    unsafe { printf(c"x1_sdhci%d: RCA = 0x%x\n".as_ptr(), (*sc).index, (*sc).rca) };
+    crate::kprintln!(
+        "x1_sdhci{}: RCA = 0x{:x}",
+        unsafe { (*sc).index },
+        ((unsafe { (*sc).rca } as i32) as i64) as u64,
+    );
 
     // CMD9: SEND_CSD -- get card-specific data (read capacity etc.).
     // SAFETY: caller contract.
@@ -1402,8 +1396,7 @@ unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
     // SAFETY: caller contract.
     let ret = unsafe { sdhci_send_cmd(sc, MMC_SEND_CSD, rca << 16, SDHCI_CMD_RESP_136 | SDHCI_CMD_CRC, resp.as_mut_ptr()) };
     if ret < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: CMD9 failed\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: CMD9 failed", unsafe { (*sc).index });
         return ret;
     }
 
@@ -1435,15 +1428,12 @@ unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
     };
     // SAFETY: caller contract.
     unsafe { (*sc).capacity_blocks = capacity_blocks };
-    // SAFETY: format string matches its three arguments.
-    unsafe {
-        printf(
-            c"x1_sdhci%d: capacity = %ld sectors (%ld MB)\n".as_ptr(),
-            (*sc).index,
-            capacity_blocks,
-            capacity_blocks / 2048,
-        )
-    };
+    crate::kprintln!(
+        "x1_sdhci{}: capacity = {} sectors ({} MB)",
+        unsafe { (*sc).index },
+        capacity_blocks,
+        capacity_blocks / 2048,
+    );
 
     // CMD7: SELECT_CARD -- move card to transfer state.
     // SAFETY: caller contract.
@@ -1457,8 +1447,7 @@ unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
         )
     };
     if ret < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: CMD7 failed\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: CMD7 failed", unsafe { (*sc).index });
         return ret;
     }
 
@@ -1476,8 +1465,7 @@ unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
             )
         };
         if ret < 0 {
-            // SAFETY: format string matches its one argument.
-            unsafe { printf(c"x1_sdhci%d: CMD16 failed\n".as_ptr(), (*sc).index) };
+            crate::kprintln!("x1_sdhci{}: CMD16 failed", unsafe { (*sc).index });
             return ret;
         }
     }
@@ -1490,9 +1478,9 @@ unsafe fn sdhci_enumerate_sd(sc: *mut SdhciSoftc) -> c_int {
         sdhci_send_acmd(sc, SD_APP_SET_BUS_WIDTH, 2, SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX, ptr::null_mut())
     };
     if ret < 0 {
-        // SAFETY: caller contract; format string matches its one argument.
+        crate::kprintln!("x1_sdhci{}: ACMD6 (set 4-bit) failed, using 1-bit", unsafe { (*sc).index });
+        // SAFETY: caller contract.
         unsafe {
-            printf(c"x1_sdhci%d: ACMD6 (set 4-bit) failed, using 1-bit\n".as_ptr(), (*sc).index);
             (*sc).bus_width = 1;
         }
     } else {
@@ -1548,27 +1536,26 @@ unsafe fn sdhci_enumerate_emmc(sc: *mut SdhciSoftc) -> c_int {
         // Retry on timeout -- eMMC may still be powering up.
         tries += 1;
         if tries > 30 {
-            // SAFETY: caller contract; format string matches its two arguments.
-            unsafe {
-                printf(
-                    c"x1_sdhci%d: CMD1 no response after %d attempts -- eMMC not present or not powered\n".as_ptr(),
-                    (*sc).index,
-                    tries,
-                )
-            };
+            crate::kprintln!(
+                "x1_sdhci{}: CMD1 no response after {} attempts -- eMMC not present or not powered",
+                unsafe { (*sc).index },
+                tries,
+            );
             return neg(crate::bindings::ETIMEDOUT);
         }
         sleep_ms(10);
     }
 
     if !cmd1_ok {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: CMD1 never succeeded\n".as_ptr(), (*sc).index) };
+        crate::kprintln!("x1_sdhci{}: CMD1 never succeeded", unsafe { (*sc).index });
         return neg(crate::bindings::EIO);
     }
 
-    // SAFETY: caller contract; format string matches its two arguments.
-    unsafe { printf(c"x1_sdhci%d: eMMC OCR = 0x%x\n".as_ptr(), (*sc).index, resp[0]) };
+    crate::kprintln!(
+        "x1_sdhci{}: eMMC OCR = 0x{:x}",
+        unsafe { (*sc).index },
+        ((resp[0] as i32) as i64) as u64,
+    );
 
     // CMD2: ALL_SEND_CID.
     // SAFETY: caller contract.
@@ -1670,15 +1657,12 @@ unsafe fn sdhci_enumerate_emmc(sc: *mut SdhciSoftc) -> c_int {
         }
     }
 
-    // SAFETY: format string matches its three arguments.
-    unsafe {
-        printf(
-            c"x1_sdhci%d: eMMC capacity = %ld sectors (%ld MB)\n".as_ptr(),
-            (*sc).index,
-            capacity_blocks,
-            capacity_blocks / 2048,
-        )
-    };
+    crate::kprintln!(
+        "x1_sdhci{}: eMMC capacity = {} sectors ({} MB)",
+        unsafe { (*sc).index },
+        capacity_blocks,
+        capacity_blocks / 2048,
+    );
 
     // Switch to 8-bit bus width via CMD6 (SWITCH): Access=Write Byte
     // (0x03), Index=183 (BUS_WIDTH), Value=2 (8-bit).
@@ -1703,11 +1687,11 @@ unsafe fn sdhci_enumerate_emmc(sc: *mut SdhciSoftc) -> c_int {
         }
         sleep_ms(1);
     } else {
-        // SAFETY: caller contract; format string matches its one argument.
+        // SAFETY: caller contract.
         unsafe {
             (*sc).bus_width = 1;
-            printf(c"x1_sdhci%d: 8-bit bus switch failed, using 1-bit\n".as_ptr(), (*sc).index);
         }
+        crate::kprintln!("x1_sdhci{}: 8-bit bus switch failed, using 1-bit", unsafe { (*sc).index });
     }
 
     // Increase clock to 26 MHz (eMMC backward-compatible speed).
@@ -1946,8 +1930,8 @@ unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
 
         // Map SDHCI registers (already identity-mapped by vm.c).
         (*sc).regs = platform.sdhci[idx].base as *mut u8;
-        printf(
-            c"x1_sdhci%d: MMIO base 0x%lx, IRQ %d\n".as_ptr(),
+        crate::kprintln!(
+            "x1_sdhci{}: MMIO base 0x{:x}, IRQ {}",
             idx as c_int,
             platform.sdhci[idx].base,
             platform.sdhci[idx].irq,
@@ -1956,8 +1940,8 @@ unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
         // Map APMU register (per-instance).
         if platform.sdhci[idx].apmu_base != 0 && platform.sdhci[idx].apmu_offset != 0 {
             (*sc).apmu_reg = (platform.sdhci[idx].apmu_base as u64 + platform.sdhci[idx].apmu_offset as u64) as *mut u32;
-            printf(
-                c"x1_sdhci%d: APMU ctrl @ 0x%lx\n".as_ptr(),
+            crate::kprintln!(
+                "x1_sdhci{}: APMU ctrl @ 0x{:x}",
                 idx as c_int,
                 platform.sdhci[idx].apmu_base as u64 + platform.sdhci[idx].apmu_offset as u64,
             );
@@ -1986,33 +1970,31 @@ unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
     // SAFETY: `sc` live.
     let ver = unsafe { sdhci_readw(sc, SDHCI_HOST_VERSION) };
     if ver == 0xFFFF || ver == 0x0000 {
-        // SAFETY: format string matches its two arguments.
-        unsafe {
-            printf(
-                c"x1_sdhci%d: controller not responding (version=0x%x), aborting\n".as_ptr(),
-                idx as c_int,
-                ver as c_int,
-            )
-        };
+        crate::kprintln!(
+            "x1_sdhci{}: controller not responding (version=0x{:x}), aborting",
+            idx as c_int,
+            ((ver as c_int) as i32 as i64) as u64,
+        );
         return -1;
     }
-    // SAFETY: format string matches its two arguments.
-    unsafe { printf(c"x1_sdhci%d: controller alive (version=0x%x)\n".as_ptr(), idx as c_int, ver as c_int) };
+    crate::kprintln!(
+        "x1_sdhci{}: controller alive (version=0x{:x})",
+        idx as c_int,
+        ((ver as c_int) as i32 as i64) as u64,
+    );
 
     // Initialise SDHCI controller hardware.
     // SAFETY: `sc` live.
     let ret = unsafe { sdhci_hw_init(sc) };
     if ret < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: hardware init failed\n".as_ptr(), idx as c_int) };
+        crate::kprintln!("x1_sdhci{}: hardware init failed", idx as c_int);
         return -1;
     }
 
     // Check card presence (for SD card slots).
     // SAFETY: `sc` live.
     if !is_emmc && !unsafe { sdhci_card_present(sc) } {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: no card detected\n".as_ptr(), idx as c_int) };
+        crate::kprintln!("x1_sdhci{}: no card detected", idx as c_int);
         // Not a fatal error -- slot is empty.
         return 0;
     }
@@ -2022,8 +2004,7 @@ unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
     let ret = if is_emmc { unsafe { sdhci_enumerate_emmc(sc) } } else { unsafe { sdhci_enumerate_sd(sc) } };
 
     if ret < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: card enumeration failed\n".as_ptr(), idx as c_int) };
+        crate::kprintln!("x1_sdhci{}: card enumeration failed", idx as c_int);
         return -1;
     }
 
@@ -2047,21 +2028,17 @@ unsafe fn sdhci_init_one(idx: usize, is_emmc: bool) -> c_int {
     // SAFETY: `sc` live.
     let ret = unsafe { blkdev_register(&raw mut (*sc).bdev) };
     if ret != 0 {
-        // SAFETY: format string matches its two arguments.
-        unsafe { printf(c"x1_sdhci%d: blkdev_register failed: %d\n".as_ptr(), idx as c_int, ret) };
+        crate::kprintln!("x1_sdhci{}: blkdev_register failed: {}", idx as c_int, ret);
         return -1;
     }
 
-    // SAFETY: format string matches its three arguments.
-    unsafe {
-        printf(
-            c"x1_sdhci%d: registered as %s (%ld MB, %d-bit bus)\n".as_ptr(),
-            idx as c_int,
-            (*sc).bdev.dev.devname,
-            (*sc).capacity_blocks / 2048,
-            (*sc).bus_width,
-        )
-    };
+    crate::kprintln!(
+        "x1_sdhci{}: registered as {} ({} MB, {}-bit bus)",
+        idx as c_int,
+        crate::printf::Cs(unsafe { (*sc).bdev.dev.devname }),
+        unsafe { (*sc).capacity_blocks } / 2048,
+        unsafe { (*sc).bus_width },
+    );
 
     SDHCI_COUNT.fetch_add(1, Ordering::SeqCst);
     0
@@ -2093,8 +2070,7 @@ extern "C" fn x1_sdhci_init_one_kthread(idx: u64, _arg2: u64) {
     // Skip SDIO (sdhci1) -- WiFi, not a block device.
     // SAFETY: see above.
     if unsafe { platform.sdhci[i].is_sdio } != 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: SDIO instance, skipping\n".as_ptr(), i as c_int) };
+        crate::kprintln!("x1_sdhci{}: SDIO instance, skipping", i as c_int);
         return;
     }
 
@@ -2103,8 +2079,7 @@ extern "C" fn x1_sdhci_init_one_kthread(idx: u64, _arg2: u64) {
     // SAFETY: `i < MAX_SDH_INSTANCES` (caller contract, see
     // `x1_sdhci_kthread`); called at most once per `i`.
     if unsafe { sdhci_init_one(i, is_emmc) } < 0 {
-        // SAFETY: format string matches its one argument.
-        unsafe { printf(c"x1_sdhci%d: init failed, skipping\n".as_ptr(), i as c_int) };
+        crate::kprintln!("x1_sdhci{}: init failed, skipping", i as c_int);
     }
 }
 
@@ -2119,8 +2094,7 @@ extern "C" fn x1_sdhci_kthread(_arg1: u64, _arg2: u64) {
         n = MAX_SDH_INSTANCES;
     }
 
-    // SAFETY: format string matches its one argument.
-    unsafe { printf(c"x1_sdhci: found %d instance(s)\n".as_ptr(), n as c_int) };
+    crate::kprintln!("x1_sdhci: found {} instance(s)", n as c_int);
 
     for i in 0..n {
         let name: [u8; 5] = [b's', b'd', b'h', b'0' + i as u8, 0];
@@ -2132,8 +2106,7 @@ extern "C" fn x1_sdhci_kthread(_arg1: u64, _arg2: u64) {
             KERNEL_STACK_ORDER,
         );
         if is_err_or_null(t) {
-            // SAFETY: format string matches its one argument.
-            unsafe { printf(c"x1_sdhci%d: failed to create init kthread\n".as_ptr(), i as c_int) };
+            crate::kprintln!("x1_sdhci{}: failed to create init kthread", i as c_int);
         } else {
             wakeup(t);
         }
@@ -2158,7 +2131,7 @@ pub(crate) extern "C" fn x1_sdhci_init() {
 
     let t = kthread_create(c"x1_sdhci".as_ptr(), x1_sdhci_kthread as *mut c_void, 0, 0, KERNEL_STACK_ORDER);
     if is_err_or_null(t) {
-        unsafe { printf(c"x1_sdhci: failed to create init kthread\n".as_ptr()) };
+        crate::kprintln!("x1_sdhci: failed to create init kthread");
         return;
     }
     wakeup(t);

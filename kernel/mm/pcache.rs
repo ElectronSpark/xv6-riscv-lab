@@ -135,7 +135,6 @@ mod ffi {
         // Panic/printf plumbing (kernel/printf.c).
         pub safe fn __panic_start();
         pub safe fn __panic_end() -> !;
-        pub safe fn printf(fmt: *const c_char, ...);
     }
 pub(crate) use crate::lock::completion::{complete_all, completion_init, completion_reinit, wait_for_completion};
 pub(crate) use crate::lock::rwlock::{rwlock_r_sleep_cb, rwlock_r_wake_cb};
@@ -518,7 +517,6 @@ fn node_from_tree_entry(node: *mut rb_node) -> *mut PcacheNode {
 // ---------------------------------------------------------------------------
 // Panic helper
 // ---------------------------------------------------------------------------
-static PANIC_PCACHE_FMT: &[u8] = b"PANIC: %s\n\0";
 
 #[inline]
 fn pcache_assert(cond: bool, msg: &'static [u8]) {
@@ -529,11 +527,11 @@ fn pcache_assert(cond: bool, msg: &'static [u8]) {
 #[inline(never)]
 fn xv6_pcache_panic(msg: *const c_char) -> ! {
     __panic_start();
-    // SAFETY: `printf` is a variadic C function; `msg` is always a
-    // `'static` NUL-terminated byte-string literal from this module's
-    // call sites, matching the `%s` format spec.
+    // SAFETY: `msg` is always a `'static` NUL-terminated byte-string
+    // literal from this module's call sites, matching the `%s` format
+    // spec.
     unsafe {
-        printf(PANIC_PCACHE_FMT.as_ptr() as *const c_char, msg);
+        crate::kprintln!("PANIC: {}", crate::printf::Cs(msg));
     }
     __panic_end()
 }
@@ -1450,73 +1448,67 @@ fn xv6_pcache_node_free(p: *mut PcacheNode) {
 // ---------------------------------------------------------------------------
 fn xv6_pcache_printf_flush_queue_warn(p: *mut Pcache) {
     unsafe {
-        printf(
-            b"warning: flusher failed to queue work for pcache %p\n\0".as_ptr() as *const c_char,
-            p,
+        crate::kprintln!(
+            "warning: flusher failed to queue work for pcache {}",
+            crate::printf::Ptr(p as u64),
         );
     }
 }
 fn xv6_pcache_printf_flush_wait_err(p: *mut Pcache, ret: c_int) {
     unsafe {
-        printf(
-            b"warning: __pcache_wait_for_pending_flushes: pcache %p flush error %d\n\0".as_ptr()
-                as *const c_char,
-            p,
+        crate::kprintln!(
+            "warning: __pcache_wait_for_pending_flushes: pcache {} flush error {}",
+            crate::printf::Ptr(p as u64),
             ret,
         );
     }
 }
 fn xv6_pcache_printf_default_page_invalid() {
-    printf(
-        b"__pcache_get_page: default_page is not from the given pcache\n\0".as_ptr()
-            as *const c_char,
+    crate::kprintln!(
+        "__pcache_get_page: default_page is not from the given pcache",
     );
 }
 fn xv6_pcache_printf_invalid_page(page: *mut Page, p: *mut Pcache) {
     unsafe {
-        printf(
-            b"pcache_put_page(): invalid page %p for cache %p\n\0".as_ptr() as *const c_char,
-            page,
-            p,
+        crate::kprintln!(
+            "pcache_put_page(): invalid page {} for cache {}",
+            crate::printf::Ptr(page as u64),
+            crate::printf::Ptr(p as u64),
         );
     }
 }
 fn xv6_pcache_printf_refcount_too_small(page: *mut Page, refcount: c_int) {
     unsafe {
-        printf(
-            b"pcache_put_page(): page %p refcount %d is too small to drop\n\0".as_ptr()
-                as *const c_char,
-            page,
+        crate::kprintln!(
+            "pcache_put_page(): page {} refcount {} is too small to drop",
+            crate::printf::Ptr(page as u64),
             refcount,
         );
     }
 }
 fn xv6_pcache_printf_read_refcount_too_small(page: *mut Page, refcount: c_int) {
     unsafe {
-        printf(
-            b"pcache_read_page(): page %p refcount %d is too small to read\n\0".as_ptr()
-                as *const c_char,
-            page,
+        crate::kprintln!(
+            "pcache_read_page(): page {} refcount {} is too small to read",
+            crate::printf::Ptr(page as u64),
             refcount,
         );
     }
 }
 fn xv6_pcache_printf_read_invalid_meta(page: *mut Page, blkno: u64, sz: usize) {
     unsafe {
-        printf(
-            b"pcache_read_page(): invalid metadata for page %p (blkno=%llu size=%zu)\n\0"
-                .as_ptr() as *const c_char,
-            page,
+        crate::kprintln!(
+            "pcache_read_page(): invalid metadata for page {} (blkno={} size={})",
+            crate::printf::Ptr(page as u64),
             blkno,
-            sz,
+            sz as u64,
         );
     }
 }
 fn xv6_pcache_printf_io_unexpected(dirty: c_int, uptodate: c_int) {
     unsafe {
-        printf(
-            b"pcache_read_page(): io in progress with unexpected state (dirty=%d uptodate=%d)\n\0"
-                .as_ptr() as *const c_char,
+        crate::kprintln!(
+            "pcache_read_page(): io in progress with unexpected state (dirty={} uptodate={})",
             dirty,
             uptodate,
         );
@@ -1524,12 +1516,12 @@ fn xv6_pcache_printf_io_unexpected(dirty: c_int, uptodate: c_int) {
 }
 fn xv6_pcache_printf_sys_sync_failed(ret: c_int) {
     unsafe {
-        printf(b"sys_sync: pcache_sync failed with error %d\n\0".as_ptr() as *const c_char, ret);
+        crate::kprintln!("sys_sync: pcache_sync failed with error {}", ret);
     }
 }
 fn xv6_pcache_printf_stats_header(p: *mut Pcache) {
     unsafe {
-        printf(b"Pcache %p stats:\n\0".as_ptr() as *const c_char, p);
+        crate::kprintln!("Pcache {} stats:", crate::printf::Ptr(p as u64));
     }
 }
 fn xv6_pcache_printf_stats_body(
@@ -1544,20 +1536,20 @@ fn xv6_pcache_printf_stats_body(
     err: c_int,
 ) {
     unsafe {
-        printf(b"  Active: %d\n\0".as_ptr() as *const c_char, active);
-        printf(b"  Block count: %llu\n\0".as_ptr() as *const c_char, blk_count);
-        printf(b"  Dirty count: %ld\n\0".as_ptr() as *const c_char, dirty);
-        printf(b"  LRU count: %ld\n\0".as_ptr() as *const c_char, lru);
-        printf(b"  Page count / Max pages: %ld/%ld\n\0".as_ptr() as *const c_char, page, max);
-        printf(b"  Dirty rate: %d%%\n\0".as_ptr() as *const c_char, rate);
-        printf(b"  Flush requested: %d\n\0".as_ptr() as *const c_char, requested);
-        printf(b"  Flush error: %d\n\0".as_ptr() as *const c_char, err);
+        crate::kprintln!("  Active: {}", active);
+        crate::kprintln!("  Block count: {}", blk_count);
+        crate::kprintln!("  Dirty count: {}", dirty);
+        crate::kprintln!("  LRU count: {}", lru);
+        crate::kprintln!("  Page count / Max pages: {}/{}", page, max);
+        crate::kprintln!("  Dirty rate: {}%", rate);
+        crate::kprintln!("  Flush requested: {}", requested);
+        crate::kprintln!("  Flush error: {}", err);
     }
 }
 fn xv6_pcache_printf_dump_all_header(total: c_int) {
     unsafe {
-        printf(b"Dumping all pcache stats:\n\0".as_ptr() as *const c_char);
-        printf(b"Total pcaches: %d\n\0".as_ptr() as *const c_char, total);
+        crate::kprintln!("Dumping all pcache stats:");
+        crate::kprintln!("Total pcaches: {}", total);
     }
 }
 
@@ -1697,7 +1689,7 @@ fn pcache_register(p: *mut Pcache) {
         unsafe { PcacheHandle::new(p) }.push_global();
         xv6_pcache_inc_global_count();
     } else {
-        printf(b"warning: __pcache_register: pcache already registered\0".as_ptr() as *const c_char);
+        crate::kprint!("warning: __pcache_register: pcache already registered");
     }
 }
 
@@ -1775,7 +1767,7 @@ extern "C" fn pcache_flush_worker(work: *mut WorkStruct) {
     let start_jiffs = xv6_pcache_get_jiffs();
 
     if p.is_null() {
-        printf(b"__pcache_flush_worker: pcache is NULL\n\0".as_ptr() as *const c_char);
+        crate::kprintln!("__pcache_flush_worker: pcache is NULL");
         return;
     }
 
@@ -1955,7 +1947,7 @@ fn pcache_wait_for_pending_flushes() {
 }
 
 extern "C" fn flusher_thread(_a1: u64, _a2: u64) {
-    printf(b"pcache flusher thread started\n\0".as_ptr() as *const c_char);
+    crate::kprintln!("pcache flusher thread started");
     loop {
         let round_start = xv6_pcache_get_jiffs();
         let pending = {
@@ -2321,7 +2313,7 @@ pub extern "C" fn pcache_global_init() {
     let wq = (workqueue_create(PCACHE_FLUSH_WQ_NAME.as_ptr() as *const c_char, WORKQUEUE_DEFAULT_MAX_ACTIVE));
     assert_msg(!wq.is_null(), b"Failed to create global pcache flush workqueue\0");
     xv6_pcache_set_flush_wq(wq);
-    printf(b"Page cache subsystem initialized\n\0".as_ptr() as *const c_char);
+    crate::kprintln!("Page cache subsystem initialized");
     completion_init(global_completion());
     xv6_pcache_global_flusher_complete_all();
     create_flusher_thread();

@@ -30,7 +30,6 @@ unsafe extern "C" {
     pub safe fn pid_wlock();
     pub safe fn pid_wunlock();
 
-    pub safe fn printf(fmt: *const c_char, ...) -> c_int;
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }
@@ -64,21 +63,11 @@ const TTY_DEV_MINOR: c_int = 0;
 // wave).
 // ===========================================================================
 
-fn tty_dev_assert_errno(cond: bool, line: u32, msg: &core::ffi::CStr, errno: c_int) {
-    if cond {
-        return;
-    }
-    __panic_start();
-    printf(
-        c"ASSERTION_FAILURE %s:%d: In function '%s':\n".as_ptr(),
-        c"kernel/tty/tty_dev.rs".as_ptr(),
-        line as c_int,
-        c"ttydevinit".as_ptr(),
-    );
-    printf(msg.as_ptr(), errno);
-    printf(c"\n".as_ptr());
-    __panic_end();
-}
+// P3-2 (zero-C wave): `tty_dev_assert_errno` used to take its assertion
+// message as a runtime `&CStr` embedding a `%d` -- `core::fmt`'s
+// `format_args!` requires a literal format string, so (matching
+// `console.rs`'s equivalent fix) its one call site below was inlined
+// directly instead of kept as a helper.
 
 // ===========================================================================
 // Controlling-terminal lookup.
@@ -236,11 +225,16 @@ pub(crate) extern "C" fn ttydevinit() {
         (*cdev).ops = TTY_CDEV_OPS;
 
         let ret = cdev_register(cdev);
-        tty_dev_assert_errno(
-            ret == 0,
-            line!(),
-            c"ttydevinit: cdev_register failed: %d\n",
-            ret,
-        );
+        if ret != 0 {
+            __panic_start();
+            crate::kprintln!(
+                "ASSERTION_FAILURE {}:{}: In function '{}':",
+                "kernel/tty/tty_dev.rs",
+                line!(),
+                "ttydevinit",
+            );
+            crate::kprintln!("ttydevinit: cdev_register failed: {}", ret);
+            __panic_end();
+        }
     }
 }

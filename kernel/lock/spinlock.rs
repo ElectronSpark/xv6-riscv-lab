@@ -42,9 +42,6 @@ unsafe extern "C" {
     pub safe fn __panic_end() -> !;
 }
 
-unsafe extern "C" {
-    pub fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 // ---------------------------------------------------------------------------
 // Centralised raw-pointer / atomic accessors on `spinlock_t`.
@@ -101,7 +98,6 @@ fn set_cpu_plain(lk: *mut spinlock_t, p: *mut cpu_local) {
 // Panic helpers — keep the panic-message formatting strings here so
 // they live alongside the call sites.
 // ---------------------------------------------------------------------------
-static FMT_DEADLOCK: &[u8] = b"spin_acquire: deadlock detected on lock %s\n\0";
 static MSG_REENTRY: &[u8] = b"spin_lock reentry\0";
 static MSG_UNLOCK: &[u8] = b"spin_unlock\0";
 
@@ -109,22 +105,18 @@ static MSG_UNLOCK: &[u8] = b"spin_unlock\0";
 #[cold]
 fn deadlock_panic(name: *mut c_char) -> ! {
     __panic_start();
-    // SAFETY: variadic call; FMT_DEADLOCK is a nul-terminated string.
-    unsafe {
-        printf(FMT_DEADLOCK.as_ptr() as *const c_char, name);
-    }
+    crate::kprintln!(
+        "spin_acquire: deadlock detected on lock {}",
+        crate::printf::Cs(name)
+    );
     __panic_end()
 }
 
 #[inline(never)]
 #[cold]
 fn fixed_msg_panic(msg: &'static [u8]) -> ! {
-    static FMT: &[u8] = b"%s\n\0";
     __panic_start();
-    // SAFETY: variadic call; `msg` and FMT are nul-terminated.
-    unsafe {
-        printf(FMT.as_ptr() as *const c_char, msg.as_ptr() as *const c_char);
-    }
+    crate::kprintln!("{}", crate::printf::Cs(msg.as_ptr() as *const c_char));
     __panic_end()
 }
 

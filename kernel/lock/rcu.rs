@@ -127,10 +127,6 @@ fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void {
     unsafe { crate::mm::slab::slab_alloc(cache as *mut crate::mm::slab::SlabCache) }
 }
 
-// Variadic FFI cannot be marked safe.
-unsafe extern "C" {
-    pub fn printf(fmt: *const c_char, ...) -> c_int;
-}
 
 // `sched_attr` is not in `bindings` (rq_types.h is not pulled in via
 // wrapper.h). Mirror the layout from `kernel/inc/proc/rq_types.h`.
@@ -330,18 +326,16 @@ fn gp_waitq_lock() -> KSpinlock {
 #[inline(never)]
 #[cold]
 fn kpanic_msg(msg: &'static CStr) -> ! {
-    // SAFETY: `msg` is NUL-terminated by construction; `printf` /
-    // `trigger_panic` are kernel C symbols with the declared ABI.
+    // SAFETY: `trigger_panic` is a kernel C symbol with the declared ABI.
+    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
     unsafe {
-        printf(msg.as_ptr());
         trigger_panic();
     }
 }
 
 #[inline]
 fn kwarn_msg(msg: &'static CStr) {
-    // SAFETY: see `kpanic_msg`.
-    unsafe { printf(msg.as_ptr()); }
+    crate::kprint!("{}", crate::printf::Cs(msg.as_ptr()));
 }
 
 /// Panic helper for the unbalanced-unlock diagnostic. Centralises
@@ -351,29 +345,22 @@ fn kwarn_msg(msg: &'static CStr) {
 fn kpanic_unbalanced_unlock(name_ptr: *const c_char, pid: c_int) -> ! {
     // SAFETY: `name_ptr` is a NUL-terminated buffer inside the
     // live current `thread`; `pid` is an `i32`.
+    crate::kprintln!(
+        "PANIC: rcu_read_unlock: unbalanced unlock in thread {} (pid {})",
+        crate::printf::Cs(name_ptr),
+        pid,
+    );
     unsafe {
-        printf(
-            c"PANIC: rcu_read_unlock: unbalanced unlock in thread %s (pid %d)\n"
-                .as_ptr(),
-            name_ptr,
-            pid,
-        );
         trigger_panic();
     }
 }
 
 fn print_kthread_started(cpu: u64) {
-    // SAFETY: literal format string; one u64 argument matches %lu.
-    unsafe {
-        printf(c"RCU callback kthread started on CPU %lu\n".as_ptr(), cpu);
-    }
+    crate::kprintln!("RCU callback kthread started on CPU {}", cpu);
 }
 
 fn warn_kthread_create_failed(cpu: c_int) {
-    // SAFETY: literal format string; one c_int matches %d.
-    unsafe {
-        printf(c"Failed to create RCU kthread for CPU %d\n".as_ptr(), cpu);
-    }
+    crate::kprintln!("Failed to create RCU kthread for CPU {}", cpu);
 }
 
 // ---------------------------------------------------------------------------

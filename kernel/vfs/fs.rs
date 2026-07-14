@@ -103,7 +103,6 @@ unsafe extern "C" {
     safe fn xv6_panic(msg: *const c_char) -> !;
 
     // printf.rs — C-variadic.
-    fn printf(fmt: *const c_char, ...) -> c_int;
 
     // lock/mutex.rs.
     safe fn mutex_init(m: *mut mutex_t, name: *mut c_char);
@@ -656,9 +655,7 @@ unsafe fn inode_valid(inode: *mut vfs_inode) -> c_int {
         if !ptr::eq(inode, &raw const vfs_root_inode) {
             let sb = (*inode).sb;
             if sb.is_null() || (*sb).__bindgen_anon_2.valid() == 0 {
-                printf(
-                    c"__vfs_inode_valid: inode's superblock is not valid\n".as_ptr(),
-                );
+                crate::kprintln!("__vfs_inode_valid: inode's superblock is not valid");
                 return neg(EINVAL);
             }
         }
@@ -1088,11 +1085,11 @@ pub(crate) extern "C" fn vfs_init() {
         // Mount tmpfs at /tmp (after chroot to xv6fs).
         ret = vfs_mount_path(c"tmpfs".as_ptr(), c"/tmp".as_ptr(), 4, ptr::null(), 0);
         if ret == 0 {
-            printf(c"tmpfs: mounted at /tmp\n".as_ptr());
+            crate::kprintln!("tmpfs: mounted at /tmp");
         } else if ret == neg(ENOENT) {
-            printf(c"tmpfs: /tmp directory not found\n".as_ptr());
+            crate::kprintln!("tmpfs: /tmp directory not found");
         } else {
-            printf(c"tmpfs: failed to mount at /tmp, errno=%d\n".as_ptr(), ret);
+            crate::kprintln!("tmpfs: failed to mount at /tmp, errno={}", ret);
         }
 
         // Mount devtmpfs at /dev (auto-populated with device nodes).
@@ -1113,7 +1110,7 @@ pub(crate) extern "C" fn vfs_init() {
         }
         ret = vfs_mount_path(c"devtmpfs".as_ptr(), c"/dev".as_ptr(), 4, ptr::null(), 0);
         if ret == 0 {
-            printf(c"devtmpfs: mounted at /dev\n".as_ptr());
+            crate::kprintln!("devtmpfs: mounted at /dev");
             // Now that the superblock & root inode are fully VFS-initialised,
             // populate the registered device nodes using VFS-level APIs.
             devtmpfs_post_mount_populate();
@@ -1128,9 +1125,9 @@ pub(crate) extern "C" fn vfs_init() {
                 vfs_iput(dev_inode);
             }
         } else if ret == neg(ENOENT) {
-            printf(c"devtmpfs: /dev directory not found\n".as_ptr());
+            crate::kprintln!("devtmpfs: /dev directory not found");
         } else {
-            printf(c"devtmpfs: failed to mount at /dev, errno=%d\n".as_ptr(), ret);
+            crate::kprintln!("devtmpfs: failed to mount at /dev, errno={}", ret);
         }
 
         // Smoke tests: not carried over (dead code -- see module doc /
@@ -1162,9 +1159,8 @@ unsafe fn queue_deferred_iput(inode: *mut vfs_inode) {
         }
         let work = create_work_struct(Some(iput_work_func), inode as u64);
         if work.is_null() {
-            printf(
-                c"__vfs_queue_deferred_iput: failed to allocate work_struct, falling back to direct vfs_iput\n"
-                    .as_ptr(),
+            crate::kprintln!(
+                "__vfs_queue_deferred_iput: failed to allocate work_struct, falling back to direct vfs_iput"
             );
             vfs_iput(inode);
             return;
@@ -1288,49 +1284,49 @@ pub(crate) extern "C" fn vfs_mount(
         let mut ret_val: c_int;
 
         if type_.is_null() || mountpoint.is_null() {
-            printf(c"vfs_mount: invalid arguments\n".as_ptr());
+            crate::kprintln!("vfs_mount: invalid arguments");
             return neg(EINVAL);
         }
         if holding_mutex(&raw mut __MOUNT_MUTEX) == 0 {
-            printf(c"vfs_mount: mount mutex not held\n".as_ptr());
+            crate::kprintln!("vfs_mount: mount mutex not held");
             return neg(EPERM);
         }
 
         ret_val = dir_inode_valid_holding(mountpoint);
         if ret_val != 0 {
-            printf(c"vfs_mount: mountpoint inode not valid, errno=%d\n".as_ptr(), ret_val);
+            crate::kprintln!("vfs_mount: mountpoint inode not valid, errno={}", ret_val);
             return ret_val;
         }
         if !ptr::eq(mountpoint, &raw const vfs_root_inode) {
             if !rwsem_is_write_holding(&raw mut (*(*mountpoint).sb).lock) {
-                printf(c"vfs_mount: mountpoint superblock write lock not held\n".as_ptr());
+                crate::kprintln!("vfs_mount: mountpoint superblock write lock not held");
                 return neg(EPERM);
             }
             if (*(*mountpoint).sb).__bindgen_anon_2.valid() == 0 {
-                printf(c"vfs_mount: mountpoint superblock is not valid\n".as_ptr());
+                crate::kprintln!("vfs_mount: mountpoint superblock is not valid");
                 return neg(EINVAL);
             }
             if !is_dir((*mountpoint).mode) {
-                printf(c"vfs_mount: mountpoint is not a directory\n".as_ptr());
+                crate::kprintln!("vfs_mount: mountpoint is not a directory");
                 return neg(EINVAL);
             }
         }
 
         ret_val = turn_mountpoint(mountpoint);
         if ret_val != 0 {
-            printf(c"vfs_mount: failed to turn mountpoint, errno=%d\n".as_ptr(), ret_val);
+            crate::kprintln!("vfs_mount: failed to turn mountpoint, errno={}", ret_val);
             return ret_val;
         }
 
         'cleanup: {
             fs_type = vfs_get_fs_type(type_);
             if fs_type.is_null() {
-                printf(c"vfs_mount: filesystem type '%s' not found\n".as_ptr(), type_);
+                crate::kprintln!("vfs_mount: filesystem type '{}' not found", crate::printf::Cs(type_));
                 ret_val = neg(ENODEV);
                 break 'cleanup;
             }
             if (*fs_type).__bindgen_anon_1.registered() == 0 {
-                printf(c"vfs_mount: filesystem type '%s' not registered\n".as_ptr(), type_);
+                crate::kprintln!("vfs_mount: filesystem type '{}' not registered", crate::printf::Cs(type_));
                 ret_val = neg(ENODEV);
                 break 'cleanup;
             }
@@ -1340,30 +1336,30 @@ pub(crate) extern "C" fn vfs_mount(
             let mount_fn = (*(*fs_type).ops).mount.unwrap();
             ret_val = mount_fn(mountpoint, device, flags, data, &mut sb);
             if ret_val != 0 {
-                printf(
-                    c"vfs_mount: filesystem type '%s' mount failed, errno=%d\n".as_ptr(),
-                    type_,
+                crate::kprintln!(
+                    "vfs_mount: filesystem type '{}' mount failed, errno={}",
+                    crate::printf::Cs(type_),
                     ret_val,
                 );
                 break 'cleanup;
             }
             if !init_superblock_valid(sb) {
-                printf(c"vfs_mount: invalid superblock returned by mount\n".as_ptr());
+                crate::kprintln!("vfs_mount: invalid superblock returned by mount");
                 ret_val = neg(EINVAL);
                 break 'cleanup;
             }
             if (*sb).total_blocks != 0 && (*sb).used_blocks > (*sb).total_blocks {
-                printf(c"vfs_mount: superblock used_blocks exceeds total_blocks\n".as_ptr());
+                crate::kprintln!("vfs_mount: superblock used_blocks exceeds total_blocks");
                 ret_val = neg(EINVAL);
                 break 'cleanup;
             }
             if (*sb).root_inode.is_null() {
-                printf(c"vfs_mount: superblock has no root inode\n".as_ptr());
+                crate::kprintln!("vfs_mount: superblock has no root inode");
                 ret_val = neg(EINVAL);
                 break 'cleanup;
             }
             if (*(*sb).root_inode).__bindgen_anon_1.valid() != 0 {
-                printf(c"vfs_mount: root inode already marked valid\n".as_ptr());
+                crate::kprintln!("vfs_mount: root inode already marked valid");
                 ret_val = neg(EINVAL);
                 break 'cleanup;
             }
@@ -1371,8 +1367,8 @@ pub(crate) extern "C" fn vfs_mount(
             vfs_superblock_wlock(sb); // Must hold sb lock to init root inode.
             ret_val = init_sb_rooti(sb);
             if ret_val != 0 {
-                printf(
-                    c"vfs_mount: failed to initialize superblock root inode, errno=%d\n".as_ptr(),
+                crate::kprintln!(
+                    "vfs_mount: failed to initialize superblock root inode, errno={}",
                     ret_val,
                 );
                 break 'cleanup;
@@ -1532,14 +1528,14 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         }
         let mc = superblock_mountcount(sb);
         if mc > 0 {
-            printf(c"vfs_unmount: mount_count=%d\n".as_ptr(), mc);
+            crate::kprintln!("vfs_unmount: mount_count={}", mc);
             return neg(EBUSY);
         }
         if (*sb).__bindgen_anon_2.dirty() != 0 {
-            printf(
-                c"vfs_unmount: sb valid=%u dirty=%u\n".as_ptr(),
-                (*sb).__bindgen_anon_2.valid() as c_int,
-                (*sb).__bindgen_anon_2.dirty() as c_int,
+            crate::kprintln!(
+                "vfs_unmount: sb valid={} dirty={}",
+                ((*sb).__bindgen_anon_2.valid() as c_int as i32 as i64) as u64,
+                ((*sb).__bindgen_anon_2.dirty() as c_int as i32 as i64) as u64,
             );
             return neg(EBUSY);
         }
@@ -1555,18 +1551,18 @@ pub(crate) extern "C" fn vfs_unmount(mountpoint: *mut vfs_inode) -> c_int {
         // Superblock should have no active inodes except the root inode.
         let remaining_inodes = hlist_len(&raw mut (*sb).__bindgen_anon_1.inodes);
         if remaining_inodes > 1 {
-            printf(
-                c"vfs_unmount: remaining inodes=%lu (expected 1 for root)\n".as_ptr(),
-                remaining_inodes,
+            crate::kprintln!(
+                "vfs_unmount: remaining inodes={} (expected 1 for root)",
+                remaining_inodes as u64,
             );
             return neg(EBUSY);
         }
         if remaining_inodes == 1 {
             let only_inode = sb_inodes_first(sb);
             if only_inode != mounted_inode {
-                printf(
-                    c"vfs_unmount: remaining inode is not root (ino=%lu)\n".as_ptr(),
-                    (*only_inode).ino,
+                crate::kprintln!(
+                    "vfs_unmount: remaining inode is not root (ino={})",
+                    (*only_inode).ino as u64,
                 );
                 return neg(EBUSY);
             }
@@ -1645,9 +1641,9 @@ pub(crate) extern "C" fn vfs_make_orphan(inode: *mut vfs_inode) -> c_int {
         if let Some(add_orphan) = (*(*sb).ops).add_orphan {
             let ret = add_orphan(sb, inode);
             if ret != 0 {
-                printf(
-                    c"vfs: warning: failed to persist orphan inode %lu, errno=%d\n".as_ptr(),
-                    (*inode).ino,
+                crate::kprintln!(
+                    "vfs: warning: failed to persist orphan inode {}, errno={}",
+                    (*inode).ino as u64,
                     ret,
                 );
             }
@@ -1769,10 +1765,7 @@ pub(crate) extern "C" fn vfs_unmount_lazy(mountpoint: *mut vfs_inode) -> c_int {
             let sret = sync_fs(sb, 1);
             (*sb).__bindgen_anon_2.set_syncing(0);
             if sret != 0 {
-                printf(
-                    c"vfs_unmount_lazy: warning: sync failed, errno=%d\n".as_ptr(),
-                    sret,
-                );
+                crate::kprintln!("vfs_unmount_lazy: warning: sync failed, errno={}", sret);
             }
         }
 
@@ -2616,10 +2609,9 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
             pos = sb_inodes_next(sb, pos);
         }
 
-        printf(
-            c"  Superblock %p: valid=%d attached=%d backendless=%d inodes: total=%d active=%d\n"
-                .as_ptr(),
-            sb,
+        crate::kprintln!(
+            "  Superblock {}: valid={} attached={} backendless={} inodes: total={} active={}",
+            crate::printf::Ptr(sb as u64),
             (*sb).__bindgen_anon_2.valid() as c_int,
             (*sb).__bindgen_anon_2.attached() as c_int,
             (*sb).__bindgen_anon_2.backendless() as c_int,
@@ -2632,11 +2624,10 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
             let inode = pos;
             pos = sb_inodes_next(sb, pos);
             if (*inode).ref_count > 0 || (*inode).n_links > 0 {
-                printf(
-                    c"    ino=%lu type=%s ref=%d n_links=%d valid=%d dirty=%d destroying=%d orphan=%d"
-                        .as_ptr(),
-                    (*inode).ino,
-                    inode_mode_str((*inode).mode),
+                crate::kprint!(
+                    "    ino={} type={} ref={} n_links={} valid={} dirty={} destroying={} orphan={}",
+                    (*inode).ino as u64,
+                    crate::printf::Cs(inode_mode_str((*inode).mode)),
                     (*inode).ref_count,
                     (*inode).n_links,
                     (*inode).__bindgen_anon_1.valid() as c_int,
@@ -2646,23 +2637,29 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
                 );
                 if is_dir((*inode).mode) {
                     if !(*inode).name.is_null() {
-                        printf(c" name=\"%s\"".as_ptr(), (*inode).name);
+                        crate::kprint!(" name=\"{}\"", crate::printf::Cs((*inode).name));
                     }
                     if !(*inode).parent.is_null() {
-                        printf(c" parent_ino=%lu".as_ptr(), (*(*inode).parent).ino);
+                        crate::kprint!(" parent_ino={}", (*(*inode).parent).ino as u64);
                     }
                 }
                 if (*inode).__bindgen_anon_1.mount() != 0 {
-                    printf(
-                        c" [mountpoint mnt_sb=%p]".as_ptr(),
-                        (*inode).__bindgen_anon_2.__bindgen_anon_1.mnt_sb,
+                    crate::kprint!(
+                        " [mountpoint mnt_sb={}]",
+                        crate::printf::Ptr((*inode).__bindgen_anon_2.__bindgen_anon_1.mnt_sb as u64),
                     );
                 } else if is_chr((*inode).mode) {
-                    printf(c" cdev=%u".as_ptr(), (*inode).__bindgen_anon_2.cdev);
+                    crate::kprint!(
+                        " cdev={}",
+                        ((*inode).__bindgen_anon_2.cdev as i32 as i64) as u64,
+                    );
                 } else if is_blk((*inode).mode) {
-                    printf(c" bdev=%u".as_ptr(), (*inode).__bindgen_anon_2.bdev);
+                    crate::kprint!(
+                        " bdev={}",
+                        ((*inode).__bindgen_anon_2.bdev as i32 as i64) as u64,
+                    );
                 }
-                printf(c"\n".as_ptr());
+                crate::kprintln!();
             }
         }
     }
@@ -2672,23 +2669,23 @@ unsafe fn dump_sb_inodes(sb: *mut vfs_superblock) {
 pub(crate) extern "C" fn vfs_dump_sb_inodes(sb: *mut vfs_superblock) {
     unsafe {
         if sb.is_null() {
-            printf(c"vfs_dump_sb_inodes: NULL superblock\n".as_ptr());
+            crate::kprintln!("vfs_dump_sb_inodes: NULL superblock");
             return;
         }
 
-        printf(c"\n=== VFS Superblock Inode Dump ===\n".as_ptr());
+        crate::kprintln!("\n=== VFS Superblock Inode Dump ===");
         let fs_type = (*sb).fs_type;
         if fs_type.is_null() {
-            printf(c"Filesystem type: (null)\n".as_ptr());
+            crate::kprintln!("Filesystem type: (null)");
         } else {
-            printf(c"Filesystem type: %s\n".as_ptr(), (*fs_type).name);
+            crate::kprintln!("Filesystem type: {}", crate::printf::Cs((*fs_type).name));
         }
 
         vfs_superblock_rlock(sb);
         dump_sb_inodes(sb);
         vfs_superblock_unlock(sb);
 
-        printf(c"\n=== End of Superblock Inode Dump ===\n\n".as_ptr());
+        crate::kprintln!("\n=== End of Superblock Inode Dump ===\n");
     }
 }
 
@@ -2698,7 +2695,7 @@ pub(crate) extern "C" fn vfs_dump_sb_inodes(sb: *mut vfs_superblock) {
 /// hlist-walker section doc for the same reasoning).
 pub(crate) extern "C" fn vfs_dump_inodes() {
     unsafe {
-        printf(c"\n=== VFS Inode Dump ===\n".as_ptr());
+        crate::kprintln!("\n=== VFS Inode Dump ===");
 
         vfs_mount_lock();
 
@@ -2712,9 +2709,9 @@ pub(crate) extern "C" fn vfs_dump_inodes() {
                 continue;
             }
 
-            printf(
-                c"\nFilesystem type: %s (superblocks: %d)\n".as_ptr(),
-                (*fstype).name,
+            crate::kprintln!(
+                "\nFilesystem type: {} (superblocks: {})",
+                crate::printf::Cs((*fstype).name),
                 (*fstype).sb_count,
             );
 
@@ -2731,6 +2728,6 @@ pub(crate) extern "C" fn vfs_dump_inodes() {
         }
 
         vfs_mount_unlock();
-        printf(c"\n=== End of Inode Dump ===\n\n".as_ptr());
+        crate::kprintln!("\n=== End of Inode Dump ===\n");
     }
 }
