@@ -28,6 +28,184 @@ use crate::proc::access::{
     tnode_from_list_entry, tnode_from_tree_entry, write_out, ListNodeRef, TnodeRef, TqRef,
     TtreeRef, zero_tnode_ptr, zeroed_tnode,
 };
+use crate::list::ListNode;
+
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-3D.
+//
+// `tq_t`/`ttree_t`/`tnode_t` (`kernel/inc/proc/tq_type.h`) are the
+// remaining tier-1 aggregates P3-3C's leaf nativization
+// (`list_node_t` -> `crate::list::ListNode`, `rb_node`/`rb_root` proven
+// layout-identical to their bindgen forms) unblocks
+// (`docs/rustify/phase3_plan.md` P3-3D). All three embed only
+// already-native leaves plus plain scalars/pointers -- pointer *fields*
+// (`name`, `lock`, the `list`/`tree` union arms' `queue` back-pointers)
+// are left typed exactly as bindgen has them below: a pointer's own
+// layout never depends on its pointee's type, so there is no
+// nativization benefit (and no cast burden) in retyping them, unlike
+// the by-value `list_node_t`/`rb_node` embeds, which genuinely swap to
+// this crate's canonical native mirrors.
+//
+// All three are naturally aligned (align 8) -- none embeds a lock *by
+// value* (only `*mut spinlock_t` pointers), so (unlike `workqueue`,
+// which embeds `spinlock_t`/`tq_t` by value and picks up
+// `#[repr(align(64))]`) there is no alignment surprise here; confirmed
+// directly below, not assumed.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct Tq {
+    pub(crate) head: ListNode,
+    pub(crate) counter: c_int,
+    pub(crate) name: *const c_char,
+    pub(crate) lock: *mut spinlock_t,
+    pub(crate) flags: u64,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<Tq>() == core::mem::size_of::<tq_t>(),
+        "Tq / tq_t size mismatch");
+    assert!(core::mem::align_of::<Tq>() == core::mem::align_of::<tq_t>(),
+        "Tq / tq_t alignment mismatch");
+    assert!(core::mem::align_of::<tq_t>() == 8,
+        "tq_t unexpectedly gained a non-natural alignment -- it only holds a \
+         *mut spinlock_t pointer, not an embedded spinlock_t by value");
+    assert!(core::mem::offset_of!(Tq, head) == core::mem::offset_of!(tq_t, head),
+        "Tq.head / tq_t.head offset mismatch");
+    assert!(core::mem::offset_of!(Tq, counter) == core::mem::offset_of!(tq_t, counter),
+        "Tq.counter / tq_t.counter offset mismatch");
+    assert!(core::mem::offset_of!(Tq, name) == core::mem::offset_of!(tq_t, name),
+        "Tq.name / tq_t.name offset mismatch");
+    assert!(core::mem::offset_of!(Tq, lock) == core::mem::offset_of!(tq_t, lock),
+        "Tq.lock / tq_t.lock offset mismatch");
+    assert!(core::mem::offset_of!(Tq, flags) == core::mem::offset_of!(tq_t, flags),
+        "Tq.flags / tq_t.flags offset mismatch");
+};
+
+/// `root`'s field type is `crate::bindings::rb_root` itself, not a
+/// re-wrapped mirror: `bintree.rs`'s own P3-3C convention keeps
+/// `RbRoot = rb_root` as the *working* type (its `RawRbRoot` is a
+/// separate, deliberately-unwired compile-time layout proof) -- so
+/// embedding `rb_root` here already **is** the native form, with zero
+/// benefit to introducing a second parallel type.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct Ttree {
+    pub(crate) root: rb_root,
+    pub(crate) counter: c_int,
+    pub(crate) name: *const c_char,
+    pub(crate) lock: *mut spinlock_t,
+    pub(crate) flags: u64,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<Ttree>() == core::mem::size_of::<ttree_t>(),
+        "Ttree / ttree_t size mismatch");
+    assert!(core::mem::align_of::<Ttree>() == core::mem::align_of::<ttree_t>(),
+        "Ttree / ttree_t alignment mismatch");
+    assert!(core::mem::align_of::<ttree_t>() == 8,
+        "ttree_t unexpectedly gained a non-natural alignment");
+    assert!(core::mem::offset_of!(Ttree, root) == core::mem::offset_of!(ttree_t, root),
+        "Ttree.root / ttree_t.root offset mismatch");
+    assert!(core::mem::offset_of!(Ttree, counter) == core::mem::offset_of!(ttree_t, counter),
+        "Ttree.counter / ttree_t.counter offset mismatch");
+    assert!(core::mem::offset_of!(Ttree, name) == core::mem::offset_of!(ttree_t, name),
+        "Ttree.name / ttree_t.name offset mismatch");
+    assert!(core::mem::offset_of!(Ttree, lock) == core::mem::offset_of!(ttree_t, lock),
+        "Ttree.lock / ttree_t.lock offset mismatch");
+    assert!(core::mem::offset_of!(Ttree, flags) == core::mem::offset_of!(ttree_t, flags),
+        "Ttree.flags / ttree_t.flags offset mismatch");
+};
+
+// `tnode_t`'s union is the one genuinely tricky part of this wave: the
+// C `union { struct { list_node_t entry; tq_t *queue; } list; struct {
+// rb_node entry; ttree_t *queue; uint64 key; } tree; }` becomes a real
+// Rust `union` of two `#[repr(C)]` arm structs below. `entry` in the
+// list arm is the native `ListNode`; `entry` in the tree arm stays
+// `rb_node` for the same "already native by convention" reason as
+// `Ttree::root` above. `offset_of!` cannot chain *through* a union
+// field, so the layout gate below checks the union's own size/align
+// plus each arm struct independently against its bindgen counterpart,
+// rather than chaining `Tnode -> u -> list -> entry` in one expression.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct TnodeListArm {
+    pub(crate) entry: ListNode,
+    pub(crate) queue: *mut tq_t,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct TnodeTreeArm {
+    pub(crate) entry: rb_node,
+    pub(crate) queue: *mut ttree_t,
+    pub(crate) key: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) union TnodeUnion {
+    pub(crate) list: TnodeListArm,
+    pub(crate) tree: TnodeTreeArm,
+}
+
+#[repr(C)]
+pub(crate) struct Tnode {
+    pub(crate) type_: u32,
+    pub(crate) u: TnodeUnion,
+    pub(crate) error_no: c_int,
+    pub(crate) data: u64,
+    pub(crate) thread: *mut thread,
+}
+
+const _: () = {
+    use crate::bindings::{
+        tnode__bindgen_ty_1 as BindgenTnodeUnion,
+        tnode__bindgen_ty_1__bindgen_ty_1 as BindgenListArm,
+        tnode__bindgen_ty_1__bindgen_ty_2 as BindgenTreeArm,
+    };
+
+    assert!(core::mem::size_of::<Tnode>() == core::mem::size_of::<tnode_t>(),
+        "Tnode / tnode_t size mismatch");
+    assert!(core::mem::align_of::<Tnode>() == core::mem::align_of::<tnode_t>(),
+        "Tnode / tnode_t alignment mismatch");
+    assert!(core::mem::align_of::<tnode_t>() == 8,
+        "tnode_t unexpectedly gained a non-natural alignment");
+    assert!(core::mem::offset_of!(Tnode, type_) == core::mem::offset_of!(tnode_t, type_),
+        "Tnode.type_ / tnode_t.type_ offset mismatch");
+    assert!(core::mem::offset_of!(Tnode, u) == core::mem::offset_of!(tnode_t, __bindgen_anon_1),
+        "Tnode.u / tnode_t.__bindgen_anon_1 offset mismatch");
+    assert!(core::mem::offset_of!(Tnode, error_no) == core::mem::offset_of!(tnode_t, error_no),
+        "Tnode.error_no / tnode_t.error_no offset mismatch");
+    assert!(core::mem::offset_of!(Tnode, data) == core::mem::offset_of!(tnode_t, data),
+        "Tnode.data / tnode_t.data offset mismatch");
+    assert!(core::mem::offset_of!(Tnode, thread) == core::mem::offset_of!(tnode_t, thread),
+        "Tnode.thread / tnode_t.thread offset mismatch");
+
+    assert!(core::mem::size_of::<TnodeUnion>() == core::mem::size_of::<BindgenTnodeUnion>(),
+        "TnodeUnion / tnode__bindgen_ty_1 size mismatch");
+    assert!(core::mem::align_of::<TnodeUnion>() == core::mem::align_of::<BindgenTnodeUnion>(),
+        "TnodeUnion / tnode__bindgen_ty_1 alignment mismatch");
+
+    assert!(core::mem::size_of::<TnodeListArm>() == core::mem::size_of::<BindgenListArm>(),
+        "TnodeListArm / tnode__bindgen_ty_1__bindgen_ty_1 size mismatch");
+    assert!(core::mem::align_of::<TnodeListArm>() == core::mem::align_of::<BindgenListArm>(),
+        "TnodeListArm / tnode__bindgen_ty_1__bindgen_ty_1 alignment mismatch");
+    assert!(core::mem::offset_of!(TnodeListArm, entry) == core::mem::offset_of!(BindgenListArm, entry),
+        "TnodeListArm.entry offset mismatch");
+    assert!(core::mem::offset_of!(TnodeListArm, queue) == core::mem::offset_of!(BindgenListArm, queue),
+        "TnodeListArm.queue offset mismatch");
+
+    assert!(core::mem::size_of::<TnodeTreeArm>() == core::mem::size_of::<BindgenTreeArm>(),
+        "TnodeTreeArm / tnode__bindgen_ty_1__bindgen_ty_2 size mismatch");
+    assert!(core::mem::align_of::<TnodeTreeArm>() == core::mem::align_of::<BindgenTreeArm>(),
+        "TnodeTreeArm / tnode__bindgen_ty_1__bindgen_ty_2 alignment mismatch");
+    assert!(core::mem::offset_of!(TnodeTreeArm, entry) == core::mem::offset_of!(BindgenTreeArm, entry),
+        "TnodeTreeArm.entry offset mismatch");
+    assert!(core::mem::offset_of!(TnodeTreeArm, queue) == core::mem::offset_of!(BindgenTreeArm, queue),
+        "TnodeTreeArm.queue offset mismatch");
+    assert!(core::mem::offset_of!(TnodeTreeArm, key) == core::mem::offset_of!(BindgenTreeArm, key),
+        "TnodeTreeArm.key offset mismatch");
+};
 
 // Safe wrappers around null-safe pointer constructors.
 #[inline] fn tq_of<'a>(p: *mut tq_t) -> Option<TqRef<'a>> { TqRef::from_ptr(p) }

@@ -16,9 +16,64 @@ use crate::bindings::{
     list_node_t, slab_cache_t, spinlock_t, thread, tq_t, work_struct, workqueue,
     workqueue_callbacks,
 };
+use crate::list::ListNode;
 use crate::proc::access::{
     is_err_or_null, list_node_init_raw, list_node_pop_back_raw, ptr_err_or, ListNodeRef,
     ThreadAccess, WorkStructRef, WorkqueueRef,
+};
+
+// ---------------------------------------------------------------------------
+// Native layout — Wave P3-3D.
+//
+// `work_struct` (`kernel/inc/proc/workqueue_types.h`) embeds only a
+// `list_node_t` by value plus two C-ABI function pointers, a `u64` and a
+// `u32` -- exactly the "aggregate that embeds only now-native leaves"
+// case P3-3C unblocked (`docs/rustify/phase3_plan.md` P3-3D): `entry`
+// below is the crate's one canonical `crate::list::ListNode`
+// (established in P3-3C), proven layout-identical to `list_node_t`
+// there.
+//
+// Unlike `workqueue` (which embeds a `spinlock_t`/`tq_t` and picks up
+// `#[repr(align(64))]` from that), `work_struct` has no embedded lock,
+// so its bindgen layout stays naturally aligned -- confirmed directly
+// below rather than assumed (this is exactly the surprise the P3-3B/C
+// waves flagged as worth checking per aggregate).
+//
+// `func`/`fault` deliberately keep the bindgen `*mut work_struct`
+// callback signature (not `*mut WorkStruct`): they are genuine C-ABI
+// function pointers invoked by `invoke_work_cb` and stored by callers
+// across the crate that already pass `*mut work_struct`; only this
+// struct's own field *storage* is native, the callback ABI is
+// untouched.
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub(crate) struct WorkStruct {
+    pub(crate) entry: ListNode,
+    pub(crate) func: Option<unsafe extern "C" fn(*mut work_struct)>,
+    pub(crate) fault: Option<unsafe extern "C" fn(*mut work_struct)>,
+    pub(crate) data: u64,
+    pub(crate) flags: u32,
+}
+
+const _: () = {
+    assert!(core::mem::size_of::<WorkStruct>() == core::mem::size_of::<work_struct>(),
+        "WorkStruct / work_struct size mismatch");
+    assert!(core::mem::align_of::<WorkStruct>() == core::mem::align_of::<work_struct>(),
+        "WorkStruct / work_struct alignment mismatch");
+    assert!(core::mem::align_of::<work_struct>() == 8,
+        "work_struct unexpectedly gained a non-natural alignment -- unlike `workqueue` \
+         (which gets align(64) from its embedded spinlock_t/tq_t), work_struct has no \
+         embedded lock and must stay naturally (8-byte) aligned");
+    assert!(core::mem::offset_of!(WorkStruct, entry) == core::mem::offset_of!(work_struct, entry),
+        "WorkStruct.entry / work_struct.entry offset mismatch");
+    assert!(core::mem::offset_of!(WorkStruct, func) == core::mem::offset_of!(work_struct, func),
+        "WorkStruct.func / work_struct.func offset mismatch");
+    assert!(core::mem::offset_of!(WorkStruct, fault) == core::mem::offset_of!(work_struct, fault),
+        "WorkStruct.fault / work_struct.fault offset mismatch");
+    assert!(core::mem::offset_of!(WorkStruct, data) == core::mem::offset_of!(work_struct, data),
+        "WorkStruct.data / work_struct.data offset mismatch");
+    assert!(core::mem::offset_of!(WorkStruct, flags) == core::mem::offset_of!(work_struct, flags),
+        "WorkStruct.flags / work_struct.flags offset mismatch");
 };
 
 // -------- mirrored constants ----------------------------------------------

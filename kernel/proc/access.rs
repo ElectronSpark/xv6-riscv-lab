@@ -42,6 +42,17 @@ use crate::bindings::{
     thread_state,
 };
 use crate::proc::proc_shims;
+// Wave P3-3D native mirrors (owning-module definitions, layout-asserted
+// directly against the bindgen types in `workqueue.rs`/`thread_queue.rs`).
+// `WorkStructRef`/`TqRef`/`TtreeRef`/`TnodeRef` below wrap these natively
+// instead of the raw bindgen `work_struct`/`tq`/`ttree`/`tnode` -- same
+// "cast once at the boundary" pattern as `lock/spinlock.rs`'s
+// `RawSpinlock` (P3-3A). Every `pub fn from_ptr`/`from_raw` here keeps
+// taking the bindgen-typed pointer unchanged (the many out-of-scope
+// callers across lock/mm/vfs/tty are unaffected), so this is purely an
+// internal representation swap.
+use crate::proc::thread_queue::{Tnode, Tq, Ttree};
+use crate::proc::workqueue::WorkStruct;
 
 // SAFETY: `($self).raw.as_ptr()` is a live, non-null pointer per this
 // module's `# Safety` note (top of file); the callee (`proc_shims::$fn`)
@@ -1909,7 +1920,7 @@ pub fn tnode_entry_offset() -> usize {
 
 #[derive(Clone, Copy)]
 pub struct TqRef<'a> {
-    raw: NonNull<tq_t>,
+    raw: NonNull<Tq>,
     _m: PhantomData<&'a mut tq_t>,
 }
 impl<'a> TqRef<'a> {
@@ -1920,10 +1931,12 @@ impl<'a> TqRef<'a> {
     /// If `p` is non-null, it must point to a live, properly
     /// initialized `tq_t` for as long as the returned handle (and
     /// anything derived from it) is used — see the module-level
-    /// `# Safety` note at the top of this file.
+    /// `# Safety` note at the top of this file. Reinterpreting as the
+    /// native `Tq` mirror is sound: layout equivalence is proven at
+    /// compile time by `thread_queue.rs`'s `const _` assertions.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut tq_t) -> Option<Self> {
-        NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
+        NonNull::new(p as *mut Tq).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
     pub fn from_ptr(p: *mut tq_t) -> Option<Self> {
@@ -1932,8 +1945,10 @@ impl<'a> TqRef<'a> {
         unsafe { Self::from_raw(p) }
     }
     #[inline(always)]
-    pub fn as_ptr(&self) -> *mut tq_t { self.raw.as_ptr() }
-    #[inline] pub fn head_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, head) }
+    pub fn as_ptr(&self) -> *mut tq_t { self.raw.as_ptr() as *mut tq_t }
+    #[inline] pub fn head_ptr(&self) -> *mut list_node_t {
+        raw_mut_ptr!(self, head) as *mut list_node_t
+    }
     #[inline] pub fn head_ref(&self) -> ListNodeRef<'a> {
         // SAFETY: the argument is a field-address of the
         // already-valid, non-null `self` this method is called
@@ -1951,7 +1966,7 @@ impl<'a> TqRef<'a> {
 
 #[derive(Clone, Copy)]
 pub struct TtreeRef<'a> {
-    raw: NonNull<ttree_t>,
+    raw: NonNull<Ttree>,
     _m: PhantomData<&'a mut ttree_t>,
 }
 impl<'a> TtreeRef<'a> {
@@ -1962,10 +1977,12 @@ impl<'a> TtreeRef<'a> {
     /// If `p` is non-null, it must point to a live, properly
     /// initialized `ttree_t` for as long as the returned handle (and
     /// anything derived from it) is used — see the module-level
-    /// `# Safety` note at the top of this file.
+    /// `# Safety` note at the top of this file. Reinterpreting as the
+    /// native `Ttree` mirror is sound: layout equivalence is proven at
+    /// compile time by `thread_queue.rs`'s `const _` assertions.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut ttree_t) -> Option<Self> {
-        NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
+        NonNull::new(p as *mut Ttree).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
     pub fn from_ptr(p: *mut ttree_t) -> Option<Self> {
@@ -1974,7 +1991,7 @@ impl<'a> TtreeRef<'a> {
         unsafe { Self::from_raw(p) }
     }
     #[inline(always)]
-    pub fn as_ptr(&self) -> *mut ttree_t { self.raw.as_ptr() }
+    pub fn as_ptr(&self) -> *mut ttree_t { self.raw.as_ptr() as *mut ttree_t }
     #[inline] pub fn root_ptr(&self) -> *mut rb_root { raw_mut_ptr!(self, root) }
     #[inline] pub fn root_copy(&self) -> rb_root { raw_get!(self, root) }
     #[inline] pub fn set_root_node(&self, n: *mut rb_node) { raw_set!(self, root.node, n) }
@@ -1989,7 +2006,7 @@ impl<'a> TtreeRef<'a> {
 
 #[derive(Clone, Copy)]
 pub struct TnodeRef<'a> {
-    raw: NonNull<tnode_t>,
+    raw: NonNull<Tnode>,
     _m: PhantomData<&'a mut tnode_t>,
 }
 impl<'a> TnodeRef<'a> {
@@ -2000,10 +2017,14 @@ impl<'a> TnodeRef<'a> {
     /// If `p` is non-null, it must point to a live, properly
     /// initialized `tnode_t` for as long as the returned handle (and
     /// anything derived from it) is used — see the module-level
-    /// `# Safety` note at the top of this file.
+    /// `# Safety` note at the top of this file. Reinterpreting as the
+    /// native `Tnode` mirror is sound: layout equivalence is proven at
+    /// compile time by `thread_queue.rs`'s `const _` assertions
+    /// (struct fields directly, union arms independently -- `offset_of!`
+    /// cannot chain through a union).
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut tnode_t) -> Option<Self> {
-        NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
+        NonNull::new(p as *mut Tnode).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
     pub fn from_ptr(p: *mut tnode_t) -> Option<Self> {
@@ -2012,7 +2033,7 @@ impl<'a> TnodeRef<'a> {
         unsafe { Self::from_raw(p) }
     }
     #[inline(always)]
-    pub fn as_ptr(&self) -> *mut tnode_t { self.raw.as_ptr() }
+    pub fn as_ptr(&self) -> *mut tnode_t { self.raw.as_ptr() as *mut tnode_t }
     #[inline] pub fn type_get(&self) -> u32 { raw_get!(self, type_) }
     #[inline] pub fn set_type(&self, t: u32) { raw_set!(self, type_, t) }
     #[inline] pub fn thread_ptr(&self) -> *mut thread { raw_get!(self, thread) }
@@ -2022,7 +2043,7 @@ impl<'a> TnodeRef<'a> {
     #[inline] pub fn data(&self) -> u64 { raw_get!(self, data) }
     #[inline] pub fn set_data(&self, v: u64) { raw_set!(self, data, v) }
     #[inline] pub fn list_entry_ptr(&self) -> *mut list_node_t {
-        raw_mut_ptr!(self, __bindgen_anon_1.list.entry)
+        raw_mut_ptr!(self, u.list.entry) as *mut list_node_t
     }
     #[inline] pub fn list_entry_ref(&self) -> ListNodeRef<'a> {
         // SAFETY: the argument is a field-address of the
@@ -2031,25 +2052,25 @@ impl<'a> TnodeRef<'a> {
         unsafe { ListNodeRef::from_raw(self.list_entry_ptr()).unwrap_unchecked() }
     }
     #[inline] pub fn tree_entry_ptr(&self) -> *mut rb_node {
-        raw_mut_ptr!(self, __bindgen_anon_1.tree.entry)
+        raw_mut_ptr!(self, u.tree.entry)
     }
     #[inline] pub fn list_queue_ptr(&self) -> *mut tq_t {
-        raw_get!(self, __bindgen_anon_1.list.queue)
+        raw_get!(self, u.list.queue)
     }
     #[inline] pub fn set_list_queue(&self, q: *mut tq_t) {
-        raw_set!(self, __bindgen_anon_1.list.queue, q)
+        raw_set!(self, u.list.queue, q)
     }
     #[inline] pub fn tree_queue_ptr(&self) -> *mut ttree_t {
-        raw_get!(self, __bindgen_anon_1.tree.queue)
+        raw_get!(self, u.tree.queue)
     }
     #[inline] pub fn set_tree_queue(&self, q: *mut ttree_t) {
-        raw_set!(self, __bindgen_anon_1.tree.queue, q)
+        raw_set!(self, u.tree.queue, q)
     }
     #[inline] pub fn tree_key(&self) -> u64 {
-        raw_get!(self, __bindgen_anon_1.tree.key)
+        raw_get!(self, u.tree.key)
     }
     #[inline] pub fn set_tree_key(&self, k: u64) {
-        raw_set!(self, __bindgen_anon_1.tree.key, k)
+        raw_set!(self, u.tree.key, k)
     }
     #[inline] pub fn is_enqueued(&self) -> bool {
         match self.type_get() {
@@ -2202,7 +2223,7 @@ impl<'a> WorkqueueRef<'a> {
 
 #[derive(Clone, Copy)]
 pub struct WorkStructRef<'a> {
-    raw: NonNull<work_struct>,
+    raw: NonNull<WorkStruct>,
     _m: PhantomData<&'a mut work_struct>,
 }
 impl<'a> WorkStructRef<'a> {
@@ -2213,10 +2234,12 @@ impl<'a> WorkStructRef<'a> {
     /// If `p` is non-null, it must point to a live, properly
     /// initialized `work_struct` for as long as the returned handle (and
     /// anything derived from it) is used — see the module-level
-    /// `# Safety` note at the top of this file.
+    /// `# Safety` note at the top of this file. Reinterpreting as the
+    /// native `WorkStruct` mirror is sound: layout equivalence is
+    /// proven at compile time by `workqueue.rs`'s `const _` assertions.
     #[inline(always)]
     pub unsafe fn from_raw(p: *mut work_struct) -> Option<Self> {
-        NonNull::new(p).map(|n| Self { raw: n, _m: PhantomData })
+        NonNull::new(p as *mut WorkStruct).map(|n| Self { raw: n, _m: PhantomData })
     }
     #[inline(always)]
     pub fn from_ptr(p: *mut work_struct) -> Option<Self> {
@@ -2225,8 +2248,10 @@ impl<'a> WorkStructRef<'a> {
         unsafe { Self::from_raw(p) }
     }
     #[inline(always)]
-    pub fn as_ptr(&self) -> *mut work_struct { self.raw.as_ptr() }
-    #[inline] pub fn entry_ptr(&self) -> *mut list_node_t { raw_mut_ptr!(self, entry) }
+    pub fn as_ptr(&self) -> *mut work_struct { self.raw.as_ptr() as *mut work_struct }
+    #[inline] pub fn entry_ptr(&self) -> *mut list_node_t {
+        raw_mut_ptr!(self, entry) as *mut list_node_t
+    }
     #[inline] pub fn entry_ref(&self) -> ListNodeRef<'a> {
         // SAFETY: the argument is a field-address of the
         // already-valid, non-null `self` this method is called
