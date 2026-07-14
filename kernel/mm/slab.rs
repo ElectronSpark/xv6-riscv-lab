@@ -168,6 +168,36 @@ const _: () = {
     assert!(core::mem::size_of::<slab_cache_t>() == 1280, "cache total size");
     assert!(NCPU == 8, "Rust slab mirror assumes NCPU == 8");
 
+    // Wave P3-3B: the size/align literals above were previously only
+    // pinned indirectly (native mirror asserted against a literal,
+    // bindgen type asserted against the same literal, with no direct
+    // cross-check tying the two together). Close that gap with direct
+    // comparisons.
+    assert!(
+        core::mem::size_of::<SlabCache>() == core::mem::size_of::<slab_cache_t>(),
+        "SlabCache / slab_cache_t size mismatch"
+    );
+    assert!(
+        core::mem::align_of::<SlabCache>() == core::mem::align_of::<slab_cache_t>(),
+        "SlabCache / slab_cache_t alignment mismatch"
+    );
+    assert!(
+        core::mem::size_of::<Slab>() == core::mem::size_of::<slab_t>(),
+        "Slab / slab_t size mismatch"
+    );
+    assert!(
+        core::mem::align_of::<Slab>() == core::mem::align_of::<slab_t>(),
+        "Slab / slab_t alignment mismatch"
+    );
+    assert!(
+        core::mem::size_of::<PercpuCache>() == core::mem::size_of::<percpu_slab_cache_t>(),
+        "PercpuCache / percpu_slab_cache_t size mismatch"
+    );
+    assert!(
+        core::mem::align_of::<PercpuCache>() == core::mem::align_of::<percpu_slab_cache_t>(),
+        "PercpuCache / percpu_slab_cache_t alignment mismatch"
+    );
+
     assert!(core::mem::offset_of!(slab_cache_t, name) == 0, "cache.name");
     assert!(core::mem::offset_of!(slab_cache_t, flags) == 8, "cache.flags");
     assert!(core::mem::offset_of!(slab_cache_t, obj_size) == 16, "cache.obj_size");

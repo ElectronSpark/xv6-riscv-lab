@@ -146,6 +146,75 @@ const _: () = {
     assert!(PAGE_BUDDY_MAX_ORDER == 10, "PAGE_BUDDY_MAX_ORDER must be 10");
 };
 
+// Wave P3-3B: field-level layout gate against the real bindgen
+// `page_struct` (`kernel/inc/mm/page_type.h`'s `struct page_struct`,
+// aliased `page_t`). `Page` (above) already existed as a hand-rolled
+// `#[repr(C)]` mirror from the earlier mm shim-collapse work, but --
+// unlike `slab.rs`'s `SlabCache`/`Slab` mirrors -- it was only pinned by
+// hardcoded size/align literals, never cross-checked directly against
+// the bindgen type itself. This closes that gap.
+//
+// Note: unlike the *standalone* `spinlock_t` (bindgen's bare `struct
+// spinlock` record, align 8 -- see `kernel/lock/spinlock.rs`'s
+// `RawSpinlock` comment for why the typedef-level `__ALIGNED_CACHELINE`
+// attribute doesn't attach to that bare record), bindgen *does* compute
+// `#[repr(align(64))]` for `page_struct` itself: clang's layout engine
+// accounts for the embedded `spinlock_t lock` field's real (attributed)
+// alignment when laying out the *containing* struct, even though it
+// doesn't attach that attribute to the field's own standalone type
+// binding. So `Page`'s explicit `align(64)` matches bindgen exactly here
+// (verified below), not just the real C ABI.
+const _: () = {
+    use crate::bindings::page_struct;
+    assert!(
+        core::mem::size_of::<Page>() == core::mem::size_of::<page_struct>(),
+        "Page / page_struct size mismatch"
+    );
+    assert!(
+        core::mem::align_of::<Page>() == core::mem::align_of::<page_struct>(),
+        "Page / page_struct alignment mismatch"
+    );
+    assert!(
+        core::mem::offset_of!(Page, lock_bytes) == core::mem::offset_of!(page_struct, lock),
+        "Page.lock_bytes / page_struct.lock offset mismatch"
+    );
+    assert!(
+        core::mem::offset_of!(Page, physical_address)
+            == core::mem::offset_of!(page_struct, physical_address),
+        "Page.physical_address / page_struct.physical_address offset mismatch"
+    );
+    assert!(
+        core::mem::offset_of!(Page, flags) == core::mem::offset_of!(page_struct, __bindgen_anon_1),
+        "Page.flags / page_struct.__bindgen_anon_1 (flags union) offset mismatch"
+    );
+    assert!(
+        core::mem::offset_of!(Page, ref_count) == core::mem::offset_of!(page_struct, ref_count),
+        "Page.ref_count / page_struct.ref_count offset mismatch"
+    );
+    assert!(
+        core::mem::offset_of!(Page, union_bytes)
+            == core::mem::offset_of!(page_struct, __bindgen_anon_2),
+        "Page.union_bytes / page_struct.__bindgen_anon_2 (buddy/slab/tail/pcache union) offset mismatch"
+    );
+    // The buddy/slab/tail/pcache union arms accessed via `union_bytes`
+    // slicing (see the `impl Page` accessor methods below) against the
+    // real bindgen union member structs.
+    use crate::bindings::{
+        page_struct__bindgen_ty_2__bindgen_ty_2 as BuddyArm,
+        page_struct__bindgen_ty_2__bindgen_ty_3 as SlabArm,
+        page_struct__bindgen_ty_2__bindgen_ty_4 as PcacheArm,
+        page_struct__bindgen_ty_2__bindgen_ty_5 as TailArm,
+    };
+    assert!(core::mem::offset_of!(BuddyArm, lru_entry) == 0, "buddy.lru_entry offset");
+    assert!(core::mem::offset_of!(BuddyArm, order) == 16, "buddy.order offset");
+    assert!(core::mem::offset_of!(BuddyArm, state) == 20, "buddy.state offset");
+    assert!(core::mem::offset_of!(SlabArm, slab) == 0, "slab.slab offset");
+    assert!(core::mem::offset_of!(SlabArm, order) == 8, "slab.order offset");
+    assert!(core::mem::offset_of!(PcacheArm, pcache) == 0, "pcache.pcache offset");
+    assert!(core::mem::offset_of!(PcacheArm, pcache_node) == 8, "pcache.pcache_node offset");
+    assert!(core::mem::offset_of!(TailArm, head_page) == 0, "tail.head_page offset");
+};
+
 // ---------------------------------------------------------------------------
 // Page accessor helpers. The union arms are stored inside `union_bytes`;
 // every read/write below is done through safe array indexing +

@@ -21,7 +21,16 @@ use core::ffi::{c_char, c_int, c_void};
 use core::mem::{size_of, MaybeUninit};
 use core::ptr::NonNull;
 
-use crate::bindings::{slab_cache_t, slab_t};
+// Wave P3-3B: the descriptor-pool storage below used to be typed with
+// the bindgen `slab_cache_t`/`slab_t` (opaque-sized storage only — no
+// field access happens through these types in this file). `slab.rs`
+// already carries its own native, layout-asserted `SlabCache`/`Slab`
+// mirrors (`kernel/mm/slab.rs`'s `const _` block proves them
+// size/align/offset-identical to the bindgen types), and its public
+// `slab_cache_init`/`slab_alloc`/`slab_cache_shrink` entry points
+// already take `*mut SlabCache` natively -- so this file's own storage
+// can use the native types directly instead of pulling in bindgen.
+use crate::mm::slab::{Slab, SlabCache};
 
 // ---------------------------------------------------------------------------
 // Constants — mirrored from kernel headers.
@@ -141,18 +150,18 @@ impl<T> Storage<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Safe wrapper around a `*mut slab_cache_t`.
+// Safe wrapper around a `*mut SlabCache`.
 //
 // The wrapped storage is protected by an internal C spinlock; from Rust's
 // view it's a shared opaque handle (no `&mut` ever taken).
 // ---------------------------------------------------------------------------
 #[derive(Copy, Clone)]
-struct SlabCachePtr(NonNull<slab_cache_t>);
+struct SlabCachePtr(NonNull<SlabCache>);
 
 impl SlabCachePtr {
-    /// SAFETY: `ptr` must point at live storage suitable for a `slab_cache_t`
+    /// SAFETY: `ptr` must point at live storage suitable for a `SlabCache`
     /// and remain valid for `'static`.
-    const unsafe fn from_storage(ptr: *mut slab_cache_t) -> Self {
+    const unsafe fn from_storage(ptr: *mut SlabCache) -> Self {
         Self(NonNull::new_unchecked(ptr))
     }
 
@@ -177,10 +186,10 @@ impl SlabCachePtr {
 // ---------------------------------------------------------------------------
 // Backing storage — formerly C arrays in `kalloc_shims.c`.
 // ---------------------------------------------------------------------------
-static KMM_SLAB_CACHE: [Storage<slab_cache_t>; SLAB_CACHE_NUMS] =
+static KMM_SLAB_CACHE: [Storage<SlabCache>; SLAB_CACHE_NUMS] =
     [const { Storage::zeroed() }; SLAB_CACHE_NUMS];
-static SLAB_T_POOL:        Storage<slab_cache_t> = Storage::zeroed();
-static SLAB_CACHE_T_POOL:  Storage<slab_cache_t> = Storage::zeroed();
+static SLAB_T_POOL:        Storage<SlabCache> = Storage::zeroed();
+static SLAB_CACHE_T_POOL:  Storage<SlabCache> = Storage::zeroed();
 static KMM_SLAB_NAMES: [Storage<[u8; 32]>; SLAB_CACHE_NUMS] =
     [const { Storage::zeroed() }; SLAB_CACHE_NUMS];
 
@@ -283,8 +292,8 @@ fn init_kmm() {
     ffi::page_buddy_init();
 
     let flags = SLAB_FLAG_STATIC | SLAB_FLAG_EMBEDDED;
-    let slab_t_size = size_of::<slab_t>();
-    let slab_cache_t_size = size_of::<slab_cache_t>();
+    let slab_t_size = size_of::<Slab>();
+    let slab_cache_t_size = size_of::<SlabCache>();
 
     if slab_t_pool().init(b"slab_t_pool\0".as_ptr() as *const c_char,
                           slab_t_size, flags) != 0 {
