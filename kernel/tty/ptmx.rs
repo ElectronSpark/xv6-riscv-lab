@@ -22,8 +22,8 @@
 //!
 //! # Locking / concurrency
 //!
-//! `PTMX_LOCK` (a [`crate::sync::KSpinlock`]) protects the
-//! `PTY_TABLE` index-allocation array; each [`PtyPair`] has its own
+//! [`PTY_TABLE`] (a [`crate::sync::SpinLock`]-owned index-allocation
+//! array, Wave P3-8b) protects itself; each [`PtyPair`] has its own
 //! `lock` protecting `refcount`/`master_open`/`cdev_live`. Both are
 //! plain non-sleeping spinlock critical sections, same as the C
 //! original.
@@ -146,12 +146,11 @@ struct PtyPair {
 /// redeclare this tiny wrapper per file -- see e.g. `irq_core.rs`'s
 /// `CacheCell`, `kernel/tty/tty.rs`'s own copy).
 struct SyncCell<T>(UnsafeCell<MaybeUninit<T>>);
-// SAFETY: `PTMX_LOCK`'s and `PTY_PAIR_CACHE`'s storage is written once
-// by `ptmxinit()` before any other entry point runs, then only ever
-// touched through the C kernel's own synchronised primitives
-// (`spin_lock`/`spin_unlock` via `KSpinlock`, `slab_alloc`'s internal
-// locking). `PTY_TABLE`'s array is only ever mutated while holding
-// `ptmx_lock()`.
+// SAFETY: `PTY_PAIR_CACHE`'s storage is written once by `ptmxinit()`
+// before any other entry point runs, then only ever touched through the
+// C kernel's own synchronised primitives (`slab_alloc`'s internal
+// locking). `PTY_TABLE` (the other former user of this pattern) is now a
+// `crate::sync::SpinLock` -- see its own doc comment.
 unsafe impl<T> Sync for SyncCell<T> {}
 impl<T> SyncCell<T> {
     const fn uninit() -> Self {
@@ -163,25 +162,24 @@ impl<T> SyncCell<T> {
     }
 }
 
-static PTMX_LOCK: SyncCell<spinlock_t> = SyncCell::uninit();
-#[inline(always)]
-fn ptmx_lock() -> KSpinlock {
-    KSpinlock::from_bindings(PTMX_LOCK.get())
-}
-
 static PTY_PAIR_CACHE: SyncCell<slab_cache_t> = SyncCell::uninit();
 #[inline(always)]
 fn pty_pair_cache_ptr() -> *mut slab_cache_t {
     PTY_PAIR_CACHE.get()
 }
 
-/// `static struct pty_pair *pty_table[MAX_PTYS];` -- protected by
-/// [`ptmx_lock`].
-struct PtyTableCell(UnsafeCell<[*mut PtyPair; MAX_PTYS]>);
-// SAFETY: see `SyncCell`'s note above -- all mutation happens under
-// `ptmx_lock()`.
-unsafe impl Sync for PtyTableCell {}
-static PTY_TABLE: PtyTableCell = PtyTableCell(UnsafeCell::new([core::ptr::null_mut(); MAX_PTYS]));
+/// `static spinlock_t ptmx_lock;` + `static struct pty_pair
+/// *pty_table[MAX_PTYS];` in the C original, now a single lock-owns-data
+/// [`crate::sync::SpinLock`] (Wave P3-8b): the lock and the array it
+/// protects are one Rust value instead of a separate lock handle plus a
+/// raw `UnsafeCell` the caller had to trust was only touched under that
+/// lock. `.lock()` returns a guard that `Deref`s/`DerefMut`s straight to
+/// `&[*mut PtyPair; MAX_PTYS]` / `&mut [..]` -- every call site below
+/// indexes it like a plain array, no `unsafe` required for the access
+/// itself (only the pointers *stored* in the array are still raw, same
+/// as before).
+static PTY_TABLE: crate::sync::SpinLock<[*mut PtyPair; MAX_PTYS]> =
+    crate::sync::SpinLock::new(c"ptmx", [core::ptr::null_mut(); MAX_PTYS]);
 
 static mut PTMX_CDEV: MaybeUninit<cdev_t> = MaybeUninit::zeroed();
 
@@ -210,16 +208,12 @@ unsafe fn pty_pair_put(pair: *mut PtyPair) -> bool {
 unsafe fn pty_pair_destroy(pair: *mut PtyPair) {
     // Clear the table slot so the index can be reused.
     {
-        let _g = ptmx_lock().lock();
-        // SAFETY: mutation is serialised by `ptmx_lock()` (fn doc of
-        // `PTY_TABLE`); `index` is always in `[0, MAX_PTYS)` (only ever
-        // set from the scan loop in `ptmx_open_file`).
-        unsafe {
-            let table = &mut *PTY_TABLE.0.get();
-            let idx = (*pair).index as usize;
-            if table[idx] == pair {
-                table[idx] = core::ptr::null_mut();
-            }
+        let mut table = PTY_TABLE.lock();
+        // SAFETY: `index` is always in `[0, MAX_PTYS)` (only ever set
+        // from the scan loop in `ptmx_open_file`).
+        let idx = unsafe { (*pair).index as usize };
+        if table[idx] == pair {
+            table[idx] = core::ptr::null_mut();
         }
     }
 
@@ -519,9 +513,7 @@ unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> 
     // Allocate a PTY index -- reuse freed slots.
     let idx: i32;
     {
-        let _g = ptmx_lock().lock();
-        // SAFETY: mutation serialised by `ptmx_lock()`.
-        let table = unsafe { &mut *PTY_TABLE.0.get() };
+        let mut table = PTY_TABLE.lock();
         let mut found: i32 = -1;
         for (i, slot) in table.iter().enumerate() {
             if slot.is_null() {
@@ -541,9 +533,7 @@ unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> 
     // Allocate the pair structure.
     let pair = unsafe { slab_alloc(pty_pair_cache_ptr()) } as *mut PtyPair;
     if pair.is_null() {
-        let _g = ptmx_lock().lock();
-        unsafe { (*PTY_TABLE.0.get())[idx as usize] = core::ptr::null_mut() };
-        drop(_g);
+        PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
         return -ENOMEM;
     }
 
@@ -575,9 +565,7 @@ unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> 
     let dev_minor = idx + 1; // device framework rejects minor 0
     let ret = unsafe { pty_alloc(&mut slave, name.as_ptr() as *const c_char, dev_minor) };
     if ret != 0 {
-        let _g = ptmx_lock().lock();
-        unsafe { (*PTY_TABLE.0.get())[idx as usize] = core::ptr::null_mut() };
-        drop(_g);
+        PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
         unsafe { slab_free(pair as *mut c_void) };
         return ret;
     }
@@ -608,19 +596,14 @@ unsafe extern "C" fn ptmx_open_file(_cdev: *mut cdev_t, file: *mut vfs_file) -> 
     if ret != 0 {
         crate::kprintln!("ptmx: failed to register pts/{} cdev: {}", idx, ret);
         unsafe { tty_unref(slave) };
-        let _g = ptmx_lock().lock();
-        unsafe { (*PTY_TABLE.0.get())[idx as usize] = core::ptr::null_mut() };
-        drop(_g);
+        PTY_TABLE.lock()[idx as usize] = core::ptr::null_mut();
         unsafe { slab_free(pair as *mut c_void) };
         return ret;
     }
     unsafe { (*pair).cdev_live = 1 };
 
     // Record in global table.
-    {
-        let _g = ptmx_lock().lock();
-        unsafe { (*PTY_TABLE.0.get())[idx as usize] = pair };
-    }
+    PTY_TABLE.lock()[idx as usize] = pair;
 
     // Install master file ops on the opened file.
     unsafe {
@@ -645,10 +628,11 @@ unsafe extern "C" fn ptmx_cdev_release(_cdev: *mut cdev_t) -> c_int {
 // ===========================================================================
 
 pub(crate) extern "C" fn ptmxinit() {
-    // SAFETY: `PTY_PAIR_CACHE`/`PTMX_LOCK`/`PTMX_CDEV` are written here
-    // (their first use) before any other `ptmx_*`/`pts_*` entry point
-    // can run (mirrors the C original's `start_kernel.c`-ordered single
-    // call).
+    // SAFETY: `PTY_PAIR_CACHE`/`PTMX_CDEV` are written here (their first
+    // use) before any other `ptmx_*`/`pts_*` entry point can run
+    // (mirrors the C original's `start_kernel.c`-ordered single call).
+    // `PTY_TABLE` needs no such runtime init -- its `SpinLock::new` is a
+    // `const fn`, already in the initialised state.
     let ret = unsafe {
         slab_cache_init(
             pty_pair_cache_ptr(),
@@ -658,8 +642,6 @@ pub(crate) extern "C" fn ptmxinit() {
         )
     };
     ptmx_assert_errno!(ret == 0, "ptmxinit: slab_cache_init failed: {}", ret);
-
-    ptmx_lock().init(c"ptmx".as_ptr());
 
     unsafe {
         let cdev = PTMX_CDEV.as_mut_ptr();

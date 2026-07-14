@@ -23,12 +23,12 @@
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals)]
 
 use core::cell::UnsafeCell;
-use core::ffi::{c_char, c_int, c_void};
+use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{fence, Ordering};
 
-use crate::bindings::{bio, bio_vec, blkdev_ops_t, blkdev_t, mode_t, page_t, platform_info, spinlock_t, EINVAL};
+use crate::bindings::{bio, bio_vec, blkdev_ops_t, blkdev_t, mode_t, page_t, platform_info, EINVAL};
 
 // ---------------------------------------------------------------------------
 // Externs -- local per-file `unsafe extern "C"` block (this crate's
@@ -38,15 +38,6 @@ unsafe extern "C" {
     // printf.rs -- variadic, cannot be marked `safe`.
     safe fn __panic_start();
     safe fn __panic_end() -> !;
-
-    // lock/spinlock.rs -- raw calls (not `sync::KSpinlock` RAII):
-    // `ramdisk_submit_bio` below has several early-return-while-holding-
-    // the-lock exit paths (matching the C original's several
-    // early-`spin_unlock`-then-`return` sites), which raw calls express
-    // more directly than threading a guard through each branch.
-    safe fn spin_init(l: *mut spinlock_t, name: *mut c_char);
-    safe fn spin_lock(l: *mut spinlock_t);
-    safe fn spin_unlock(l: *mut spinlock_t);
 
     // string.rs.
     fn memset(dst: *mut c_void, c: c_int, n: usize) -> *mut c_void;
@@ -191,12 +182,26 @@ unsafe fn bio_complete(bio_ptr: *mut bio) {
 // State.
 // ===========================================================================
 
+/// `base`/`size_bytes`/`size_blocks` -- the ramdisk's location/extent,
+/// set up once by [`ramdisk_init`] and read (never mutated again) by
+/// every [`ramdisk_submit_bio`] call thereafter.
+///
+/// Wave P3-8b: this used to be a `spinlock_t` field embedded in the
+/// struct plus a raw `spin_lock`/`spin_unlock` pair around every access
+/// (see git history) -- now a [`crate::sync::SpinLock`] owns the data
+/// directly, so a held [`crate::sync::SpinLockGuard`] `Deref`s straight
+/// to these three fields with no `unsafe` needed for the field access
+/// itself, and every early-return exit path in `ramdisk_submit_bio`
+/// releases the lock for free when the guard drops (RAII) instead of a
+/// hand-paired `spin_unlock` before each `return`.
 struct RamdiskState {
-    lock: spinlock_t,
     base: u64,
     size_bytes: u64,
     size_blocks: u64,
 }
+
+static RAMDISK: crate::sync::SpinLock<RamdiskState> =
+    crate::sync::SpinLock::new(c"ramdisk", RamdiskState { base: 0, size_bytes: 0, size_blocks: 0 });
 
 #[repr(transparent)]
 struct SyncCell<T>(UnsafeCell<T>);
@@ -208,13 +213,8 @@ impl<T> SyncCell<T> {
     }
 }
 
-static RAMDISK: SyncCell<MaybeUninit<RamdiskState>> = SyncCell(UnsafeCell::new(MaybeUninit::uninit()));
 static RAMDISK_DEV: SyncCell<MaybeUninit<blkdev_t>> = SyncCell(UnsafeCell::new(MaybeUninit::uninit()));
 
-#[inline(always)]
-fn ramdisk_ptr() -> *mut RamdiskState {
-    RAMDISK.get() as *mut RamdiskState
-}
 #[inline(always)]
 fn ramdisk_dev_ptr() -> *mut blkdev_t {
     RAMDISK_DEV.get() as *mut blkdev_t
@@ -232,12 +232,7 @@ extern "C" fn ramdisk_release(_blkdev: *mut blkdev_t) -> c_int {
 }
 
 extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c_int {
-    let rd = ramdisk_ptr();
-
-    // SAFETY: `rd` initialised once in `ramdisk_init`, before any
-    // `submit_bio` call can race it (block device registered only after
-    // `rd` is fully set up).
-    spin_lock(unsafe { &raw mut (*rd).lock });
+    let rd = RAMDISK.lock();
 
     // SAFETY: `bio_ptr` live (blkdev_submit_bio's contract).
     unsafe { bio_start_io_acct(bio_ptr) };
@@ -252,7 +247,10 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
         let page: *mut page_t = bvec.bv_page;
 
         if page.is_null() {
-            spin_unlock(unsafe { &raw mut (*rd).lock });
+            // Release the lock before invoking the completion callback
+            // (matches the original's lock-hold window: never call out
+            // to `bio_complete` while still holding `RAMDISK`).
+            drop(rd);
             // SAFETY: `bio_ptr` live.
             unsafe {
                 (*bio_ptr).error = -(EINVAL as c_int);
@@ -264,17 +262,17 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
         // Calculate offset in ramdisk.
         let offset = sector * 512;
 
-        // Check bounds.
-        // SAFETY: `rd` live.
-        if offset + bvec.len as u64 > unsafe { (*rd).size_bytes } {
+        // Check bounds. `rd.size_bytes` -- plain field read through the
+        // guard, no `unsafe` (the lock proves exclusive access).
+        if offset + bvec.len as u64 > rd.size_bytes {
             // SAFETY: format string matches its three arguments.
             crate::kprintln!(
                 "ramdisk: access beyond end of device (offset={:x}, len={}, size={:x})",
                 offset,
                 bvec.len as c_int,
-                unsafe { (*rd).size_bytes },
+                rd.size_bytes,
             );
-            spin_unlock(unsafe { &raw mut (*rd).lock });
+            drop(rd);
             // SAFETY: `bio_ptr` live.
             unsafe {
                 (*bio_ptr).error = -(EINVAL as c_int);
@@ -285,7 +283,7 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
 
         let pa = __page_to_pa(page) as *mut c_void;
         if pa.is_null() {
-            spin_unlock(unsafe { &raw mut (*rd).lock });
+            drop(rd);
             // SAFETY: `bio_ptr` live.
             unsafe {
                 (*bio_ptr).error = -(EINVAL as c_int);
@@ -295,8 +293,7 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
         }
 
         // Direct access to contiguous physical memory.
-        // SAFETY: `rd` live.
-        let ramdisk_addr = (unsafe { (*rd).base } + offset) as *mut c_void;
+        let ramdisk_addr = (rd.base + offset) as *mut c_void;
 
         // SAFETY: `bio_ptr` live.
         if unsafe { bio_dir_write(bio_ptr) } {
@@ -316,7 +313,7 @@ extern "C" fn ramdisk_submit_bio(_blkdev: *mut blkdev_t, bio_ptr: *mut bio) -> c
         unsafe { bio_iter_next_seg(bio_ptr, &mut iter) };
     }
 
-    spin_unlock(unsafe { &raw mut (*rd).lock });
+    drop(rd);
 
     // SAFETY: `bio_ptr` live.
     unsafe {
@@ -333,15 +330,11 @@ static RAMDISK_OPS: blkdev_ops_t =
 // P3-1D mesh sweep: caller (`start_kernel.rs`) now imports this via
 // crate-path `use` instead of an `extern` redeclaration -- demoted.
 pub(crate) extern "C" fn ramdisk_init() {
-    let rd = ramdisk_ptr();
-    // SAFETY: `rd` exclusively owned at this point (boot-time, single
-    // caller, `start_kernel.rs`'s `start_kernel_post_init`).
-    unsafe {
-        (*rd).base = 0;
-        (*rd).size_bytes = 0;
-        (*rd).size_blocks = 0;
-        spin_init(&raw mut (*rd).lock, c"ramdisk".as_ptr() as *mut c_char);
-    }
+    // `RAMDISK` starts life already in the `{ base: 0, size_bytes: 0,
+    // size_blocks: 0 }` state (its `SpinLock::new` is a `const fn`), so
+    // there is no separate "zero it, then `spin_init` the lock" step
+    // left to do here -- unlike the C original / this file's pre-P3-8b
+    // Rust port.
 
     // SAFETY: `platform` populated by `fdt_apply_platform_config` before
     // this runs.
@@ -351,17 +344,17 @@ pub(crate) extern "C" fn ramdisk_init() {
         return;
     }
 
-    // SAFETY: `rd` live.
-    unsafe {
-        (*rd).base = ramdisk_base;
-        (*rd).size_bytes = ramdisk_size;
-        (*rd).size_blocks = ramdisk_size / 512;
+    {
+        let mut rd = RAMDISK.lock();
+        rd.base = ramdisk_base;
+        rd.size_bytes = ramdisk_size;
+        rd.size_blocks = ramdisk_size / 512;
 
         crate::kprintln!(
             "ramdisk: initialized {} KB ramdisk ({} sectors) at 0x{:x}",
-            (*rd).size_bytes / 1024,
-            (*rd).size_blocks,
-            (*rd).base,
+            rd.size_bytes / 1024,
+            rd.size_blocks,
+            rd.base,
         );
     }
 

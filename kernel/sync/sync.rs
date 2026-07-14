@@ -40,7 +40,9 @@
 
 #![allow(dead_code)]
 
+use core::cell::UnsafeCell;
 use core::marker::PhantomData;
+use core::ops::{Deref, DerefMut};
 
 use crate::mm::cffi::{raw, Spinlock};
 
@@ -202,6 +204,184 @@ impl Drop for KSpinPairGuard {
             raw::spin_unlock(self.second);
         }
         raw::spin_unlock(self.first);
+    }
+}
+
+// ===========================================================================
+// Lock-owns-data primitive — `SpinLock<T>` / `SpinLockGuard<'_, T>`
+// ===========================================================================
+//
+// `KSpinlock` above is a *handle* to a lock the C kernel already owns
+// (embedded in some `#[repr(C)]` struct, or a bare `spinlock_t` static):
+// the lock and the data it protects are two separate things, so the
+// guard it returns is data-less — callers still reach through a raw
+// pointer for the protected fields.
+//
+// `SpinLock<T>` is the other idiomatic shape (`std::sync::Mutex<T>`'s):
+// the lock *owns* its data. `lock()` returns a guard that `Deref`s /
+// `DerefMut`s straight to `&T` / `&mut T`, so a correctly-used call
+// site needs no `unsafe` at all -- the borrow checker enforces
+// "only while holding the lock", the same way it enforces any other
+// borrow.
+//
+// ```ignore
+// static COUNTERS: SpinLock<[u32; 4]> = SpinLock::new(c"counters", [0; 4]);
+//
+// fn bump(i: usize) {
+//     let mut g = COUNTERS.lock();   // acquires
+//     g[i] += 1;                     // plain slice indexing, no unsafe
+// }                                  // g drops here -> releases
+// ```
+//
+// Implementation notes:
+//   * The embedded `spinlock_t` is the *exact* compile-time-initialised
+//     literal every other file in this crate already uses for
+//     `SPINLOCK_INITIALIZED("...")` statics (see `uart.rs`, `console.rs`,
+//     `sysnet.rs`, `irq/irq_core.rs`, ...) -- `{ locked: 0, name, cpu:
+//     null }` *is* the initialised state (`spin_init` just writes those
+//     same three fields), so `SpinLock::new` needs no runtime `spin_init`
+//     call and is a `const fn`, usable directly in a `static`.
+//   * `lock()`/`try_lock()` call straight through to this crate's one
+//     canonical spinlock primitive (`crate::lock::spinlock::spin_lock` /
+//     `spin_trylock` / `spin_unlock`, from `kernel/lock/spinlock.rs`,
+//     Wave P3-3A) -- the same `push_off`/`spin_acquire`/... machinery
+//     `KSpinlock` above delegates to (via `crate::mm::cffi::raw`), just
+//     without the extra opaque-pointer hop, since we already hold the
+//     real `crate::bindings::spinlock_t`.
+//   * Interrupt-disable semantics are unchanged: `spin_lock`/`spin_unlock`
+//     already do `push_off`/`pop_off` internally, so holding a
+//     `SpinLockGuard` implies interrupts are disabled on this hart,
+//     exactly like holding a `KSpinGuard`.
+
+/// A spinlock that owns the data it protects (`std::sync::Mutex<T>`'s
+/// shape, `spinlock_t`'s locking semantics). See the module section
+/// above for the full design rationale and a usage example.
+#[repr(C)]
+pub struct SpinLock<T> {
+    raw: UnsafeCell<crate::bindings::spinlock_t>,
+    data: UnsafeCell<T>,
+}
+
+// SAFETY: `SpinLock<T>` only ever exposes `&T`/`&mut T` to callers that
+// are provably holding the underlying spinlock (via `SpinLockGuard`),
+// and the lock guarantees at most one hart holds it at a time -- the
+// same serialisation argument `std::sync::Mutex<T>`'s `Sync` impl
+// relies on.
+//
+// Deliberately *no* `T: Send` bound (std's `Mutex<T>` has one, since
+// the lock can hand `data` to a different OS thread than the one that
+// created it). This kernel's globals overwhelmingly store raw pointers
+// (`*mut Foo`, `!Send` by std's blanket-conservative default) inside
+// their lock-protected storage -- and every existing per-file
+// `unsafe impl Sync for FooCell<T>` in this crate (`SyncCell<T>` in
+// `tty/ptmx.rs`/`kobject.rs`/`irq/irq_core.rs`/..., `PtyTableCell`,
+// `mm/kalloc.rs`'s `Storage<T>`, ...) already makes exactly this same
+// judgment call unconditionally, with the same underlying argument:
+// hart-to-hart handoff of a `*mut Foo` is just handing over an address,
+// no different from handing over a `u64` -- there is no OS-thread-local
+// destructor/allocator state a raw pointer's `Send`-ness would need to
+// protect here, unlike e.g. `Rc<T>`/`MutexGuard<T>` in a hosted
+// program. A future caller instantiating `SpinLock<T>` with a type that
+// *does* carry genuine thread-affinity state (rare in this crate) is
+// still responsible for confirming that at the call site, same as
+// every other `unsafe impl Sync` in this file already requires.
+unsafe impl<T> Sync for SpinLock<T> {}
+
+impl<T> SpinLock<T> {
+    /// Construct an already-initialised lock around `data`. `name` is
+    /// used verbatim as the lock's diagnostic name (deadlock-panic
+    /// messages -- see `deadlock_panic` in `kernel/lock/spinlock.rs`),
+    /// matching every other named `spinlock_t` in this crate.
+    ///
+    /// `const fn`: see the module section above for why no runtime
+    /// `spin_init` call is needed.
+    #[inline]
+    pub const fn new(name: &'static core::ffi::CStr, data: T) -> Self {
+        Self {
+            raw: UnsafeCell::new(crate::bindings::spinlock_t {
+                locked: 0,
+                name: name.as_ptr() as *mut core::ffi::c_char,
+                cpu: core::ptr::null_mut(),
+            }),
+            data: UnsafeCell::new(data),
+        }
+    }
+
+    /// Acquire the lock, blocking until it is free. Returns a RAII
+    /// guard that `Deref`s/`DerefMut`s to the protected data and
+    /// releases the lock when dropped.
+    #[must_use]
+    #[inline]
+    pub fn lock(&self) -> SpinLockGuard<'_, T> {
+        // SAFETY: `self.raw.get()` is a valid, non-dangling
+        // `*mut spinlock_t` for at least the lifetime of `&self` (it is
+        // storage embedded in `self`, never freed while `self` is
+        // alive) -- the same contract every other `spin_lock` call site
+        // in this crate relies on.
+        unsafe { crate::lock::spinlock::spin_lock(self.raw.get()) };
+        SpinLockGuard { lock: self, _not_send_sync: PhantomData }
+    }
+
+    /// Non-blocking variant of [`lock`](Self::lock): returns `None`
+    /// immediately, without side effects, if the lock is currently held
+    /// (by this hart or another).
+    #[must_use]
+    #[inline]
+    pub fn try_lock(&self) -> Option<SpinLockGuard<'_, T>> {
+        // SAFETY: see `lock`.
+        let acquired = unsafe { crate::lock::spinlock::spin_trylock(self.raw.get()) } != 0;
+        if acquired {
+            Some(SpinLockGuard { lock: self, _not_send_sync: PhantomData })
+        } else {
+            None
+        }
+    }
+}
+
+/// RAII guard returned by [`SpinLock::lock`] / [`SpinLock::try_lock`].
+///
+/// `Deref`s/`DerefMut`s to the protected `T`; releases the underlying
+/// spinlock when dropped. `!Send`/`!Sync` for the same reason
+/// [`KSpinGuard`] is: dropping (releasing) from a hart other than the
+/// one that acquired it would fail `spin_unlock`'s "does this hart hold
+/// the lock" check in `kernel/lock/spinlock.rs`.
+#[must_use = "the lock is released immediately if the guard is dropped"]
+pub struct SpinLockGuard<'a, T> {
+    lock: &'a SpinLock<T>,
+    _not_send_sync: PhantomData<*const ()>,
+}
+
+impl<'a, T> Deref for SpinLockGuard<'a, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        // SAFETY: holding a `SpinLockGuard` proves this hart holds the
+        // spinlock, so no other hart can concurrently access `data`
+        // through another guard -- the lock-owns-data invariant that
+        // licenses this `UnsafeCell` projection (same argument
+        // `std::sync::Mutex<T>`'s `Deref` relies on).
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<'a, T> DerefMut for SpinLockGuard<'a, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: see `Deref`; taking `&mut self` here additionally
+        // proves no other `&T`/`&mut T` borrowed from this same guard
+        // is live, so the exclusive borrow is sound.
+        unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl<'a, T> Drop for SpinLockGuard<'a, T> {
+    #[inline]
+    fn drop(&mut self) {
+        // SAFETY: this guard's existence proves the lock is held by
+        // this hart (established in `SpinLock::lock`/`try_lock`, never
+        // forged elsewhere -- `lock`/`_not_send_sync` are private
+        // fields).
+        unsafe { crate::lock::spinlock::spin_unlock(self.lock.raw.get()) };
     }
 }
 
