@@ -55,9 +55,6 @@ use super::{xv6fs_iblock, xv6fs_type_to_mode, FSMAGIC, IPB, ROOTINO};
 // ===========================================================================
 
 unsafe extern "C" {
-    // proc module.
-    safe fn xv6_panic(msg: *const c_char) -> !;
-
     // printf.rs — C-variadic.
 
     // string.rs.
@@ -108,31 +105,14 @@ use crate::vfs::fs::{
 };
 use crate::vfs::inode::{vfs_chroot, vfs_ilock, vfs_iput, vfs_iunlock, vfs_mkdir, vfs_mknod};
 
-/// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`).
-/// Reimplemented locally per this crate's established convention.
-macro_rules! kassert {
-    ($cond:expr, $msg:expr) => {
-        if !($cond) {
-            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
-        }
-    };
-}
+// `kassert!`/`err_ptr`/`is_err`/`is_err_or_null`'s canonical homes are
+// `crate::kstd`/crate root (P3-CS1 centralization).
+use crate::kassert;
+use crate::kstd::{err_ptr, is_err, is_err_or_null};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
     -(e as c_int)
-}
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
-}
-#[inline(always)]
-fn is_err<T>(p: *mut T) -> bool {
-    (p as usize) >= (-(4095isize)) as usize
-}
-#[inline(always)]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    p.is_null() || is_err(p)
 }
 
 /// Mirrors `mkdev(m, n)` (`kernel/inc/defs.h`) — hardcoded locally per

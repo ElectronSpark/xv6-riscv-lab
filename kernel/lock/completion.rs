@@ -11,15 +11,10 @@
 #![allow(non_camel_case_types, non_snake_case)]
 
 
-macro_rules! u {
-    ($($tokens:tt)*) => {
-        unsafe { $($tokens)* }
-    };
-}
-
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr::{addr_of_mut, null_mut};
 
+use crate::u;
 use crate::bindings::{
     completion_t, spinlock_t, thread, timer_node, tq_t,
     thread_state_THREAD_INTERRUPTIBLE, thread_state_THREAD_UNINTERRUPTIBLE,

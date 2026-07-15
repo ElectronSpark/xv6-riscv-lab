@@ -148,9 +148,6 @@ use crate::vfs::tmpfs::superblock::{
 // ===========================================================================
 
 unsafe extern "C" {
-    // proc module.
-    safe fn xv6_panic(msg: *const c_char) -> !;
-
     // printf.rs -- C-variadic.
 
     // string.rs (Wave 2).
@@ -167,36 +164,17 @@ unsafe extern "C" {
 // `extern "C"` redeclaration.
 use crate::dev::dev::dev_for_each_device;
 
-/// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`) with its
-/// format arguments dropped -- see `vfs/fs.rs`'s identical macro/rationale.
-macro_rules! kassert {
-    ($cond:expr, $msg:expr) => {
-        if !($cond) {
-            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
-        }
-    };
-}
+// `kassert!`/`err_ptr`/`is_err`/`is_err_or_null`/`ptr_err`'s canonical
+// homes are `crate::kstd`/crate root (P3-CS1 centralization). Note
+// `ptr_err` now returns `c_int` directly (this file's former local copy
+// returned `isize`; both of its call sites already cast the result to
+// `c_int` immediately, see below).
+use crate::kassert;
+use crate::kstd::{err_ptr, is_err, is_err_or_null, ptr_err};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
     -(e as c_int)
-}
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
-}
-const MAX_ERRNO: isize = 4095;
-#[inline(always)]
-fn is_err<T>(p: *mut T) -> bool {
-    (p as usize) >= (-(MAX_ERRNO)) as usize
-}
-#[inline(always)]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    p.is_null() || is_err(p)
-}
-#[inline(always)]
-fn ptr_err<T>(p: *mut T) -> isize {
-    p as isize
 }
 
 /// `mkdev(major, minor)` (`kernel/inc/defs.h`: `((uint)((m) << 20 | (n)))`).
@@ -490,7 +468,7 @@ unsafe fn __devtmpfs_mknod_relative(
     let inode = vfs_mknod(parent, mode, dev, leaf, leaf_len);
     let mut ret = 0;
     if is_err(inode) {
-        ret = ptr_err(inode) as c_int;
+        ret = ptr_err(inode);
         if ret == neg(EEXIST) {
             ret = 0; // idempotent
         }
@@ -632,7 +610,7 @@ extern "C" fn devtmpfs_mount(
     let vi = tmpfs_alloc_inode(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
     if is_err(vi) {
         tmpfs_free(unsafe { ptr::addr_of_mut!((*sb).vfs_sb) });
-        return ptr_err(vi) as c_int;
+        return ptr_err(vi);
     }
     let root_inode = vi as *mut tmpfs_inode;
     tmpfs_make_directory(root_inode);

@@ -1092,6 +1092,93 @@ spend-limit throttle; all green + committed.
   cached stable — no page-level leak or corruption; session-list growth
   is the documented slab-level leak above, not a page leak).
 
+### Iteration 41 — 2026-07-14 — Wave P3-CS1: `kernel/kstd.rs` created, ERR_PTR/kassert!/u! centralization begun
+
+- **New module** `kernel/kstd.rs` (`pub(crate) mod kstd;`, `#[cfg(not(test))]`,
+  wired into `lib.rs` right after `list`): the crate's "std"/prelude for
+  shared low-level utilities, direct response to the standing user
+  directive to stop scattering libc/std-like helpers per-file. Confirmed
+  the survey's headline claim first — read all 30 files' `err_ptr`/
+  `is_err`/`is_err_or_null`/`ptr_err` copies; two syntactically different
+  but mathematically identical `is_err_value` encodings exist in the tree
+  (`p >= (-4095isize) as usize` vs `(p as isize) < 0 && wrapping_neg(p) <=
+  4095`), both proven equivalent before unifying into one.
+- **Mid-wave directive landed**: reframed the `ERR_PTR` family as a
+  *transitional C-ABI/storage-boundary shim*, not the target idiom — added
+  `KResult<T> = Result<T, Errno>` and bidirectional bridging helpers
+  (`result_to_errptr`/`errptr_to_result`) so future waves have the
+  Result-first tools ready; module doc's "Result-first" section states the
+  policy explicitly. `errptr_to_result` deliberately returns
+  `Result<*mut T, c_int>` rather than `Result<*mut T, Errno>` — `Errno`'s 7
+  variants can't losslessly represent an arbitrary encoded errno.
+- `container_of`/`Errno`/`result_to_neg_errno` moved from `mm/cffi.rs` into
+  `kstd`, re-exported at their old paths (`mm::cffi::{container_of, Errno,
+  result_to_neg_errno}`) — zero call-site changes anywhere in `mm`.
+  `mm/sysmm.rs`'s `neg_errno` likewise moved + re-imported under its
+  original name.
+- **First migration batch, 12 of 30 files** (dev/vfs leaf files, as
+  planned): `dev/{bio,blkdev,cdev,dev}.rs`, `vfs/pipe.rs`,
+  `vfs/tmpfs/{inode,superblock}.rs`, `vfs/xv6fs/{inode,superblock}.rs`,
+  `vfs/devtmpfs/superblock.rs`, `vfs/fdtable.rs`, `tty/pty.rs` — local
+  `err_ptr`/`is_err`/`is_err_or_null`/`ptr_err`/`is_err_value` definitions
+  deleted, replaced by `use crate::kstd::{...}`. 7 of those files' local
+  `kassert!` copies also deleted in favor of the new canonical
+  `#[macro_export] macro_rules! kassert!` (`$crate::kstd::xv6_panic`
+  path, `$crate`-hygienic); `devtmpfs/superblock.rs`'s local `ptr_err`
+  returned `isize` where the canonical one returns `c_int` — both of its
+  2 call sites already immediately cast to `c_int`, so the cast was
+  dropped as dead weight, not left in place.
+- The 4 stale `kernel/lock/{mutex,rwsem,completion,semaphore}.rs` local
+  `u!` copies deleted (`use crate::u;` added instead) — `lib.rs`'s
+  existing canonical `#[macro_export]` copy (from a prior wave) is now
+  genuinely the crate's only definition. `lib.rs`'s doc comment updated
+  to stop describing them as still-present.
+- Investigated the survey's flagged `container_of` duplicate in
+  `lock/rcu_test.rs:629` — it's `container_of_list_node`, a typed wrapper
+  that already calls the canonical `machine::list_container_of`, not an
+  independent reimplementation. Nothing to deduplicate there; left as-is
+  and noted for the record rather than "fixed" incorrectly.
+- **Self-caught bug during the mid-wave doc rewrite**: an over-broad
+  `old_string` in the `vfs/devtmpfs/superblock.rs` edit accidentally
+  deleted its unrelated `neg(e: u32) -> c_int` helper along with the
+  `ERR_PTR` block, breaking the crate build (`cannot find function neg`).
+  Caught immediately by the next incremental `cargo build`; fixed by
+  restoring the `neg` fn. Left in the log as a reminder that large
+  multi-line `Edit` replacements over doc-comment-heavy blocks need a
+  post-edit diff/build check even when the intent seems obviously scoped.
+- **Handoff — 18 of 30 files still carry local `ERR_PTR` copies**:
+  `bufcache.rs`, `console.rs`, `dev/x1_emac.rs`, `dev/x1_sdhci.rs`,
+  `exec.rs`, `lock/rcu.rs`, `lock/rcu_test.rs`, `lock/rwsem_test.rs`,
+  `lock/semaphore_test.rs`, `mm/pcache_test.rs`, `proc/access.rs`,
+  `proc/workqueue_test.rs`, `tty/session.rs`, `tty/tty.rs`, `vfs/file.rs`,
+  `vfs/fs.rs`, `vfs/inode.rs`, `vfs/vfs_syscall.rs`. 8 files still carry
+  local `kassert!` copies matching the canonical `xv6_panic`-calling form
+  (`irq/trap.rs`'s is a different 3-arg `kassert_fail` variant and
+  `proc/{rq,sched,thread}.rs`'s calls `kpanic!` instead — both
+  deliberately left alone, see module doc). Future waves: finish the
+  `ERR_PTR`/`kassert!` migration file-by-file, then start converting
+  Rust-internal-only local helpers (few callers, no C-ABI boundary) to
+  `KResult<T>` per the Result-first directive — `mm/pcache_test.rs`,
+  `proc/workqueue_test.rs`, and the `lock/*_test.rs` in-kernel test
+  modules are plausible easy wins for that since their `is_err_or_null`
+  callers are entirely test assertions, not C-ABI boundaries.
+- Net: 19 existing files changed (`-346`/`+84` lines, various small
+  per-file deletions), + new `kstd.rs` (310 lines, doc-heavy per
+  `doc-module-inner`); duplicate-definition count: `ERR_PTR` family
+  30→18 files, `kassert!` 15→8 files, `u!` 5→1 file (canonical only),
+  `container_of`/`Errno`/`neg_errno` 1 home each (previously split
+  across `mm/cffi.rs`/`mm/sysmm.rs`, now `kstd` with back-compat
+  re-exports).
+- Verified: zero-warning build (`cargo clean` rebuild + full `cmake`
+  rebuild both 0 warnings), cache re-check (GCC 14.2 toolchain,
+  `CMAKE_BUILD_TYPE` empty) before and after, boot gate ×3 (plain `qemu`
+  target + 2 expect-driven interactive sessions, `init: starting sh` ×1
+  and `/ $` each), interactive fs battery (`ls`, `mkdir`, `ls /dev` — 9
+  nodes, `cat /nonexistent` → `cat: cannot open /nonexistent`, exercising
+  the migrated `is_err`/`ptr_err` path through devtmpfs/xv6fs/vfs_syscall
+  end-to-end), mmaptest 16/16. No stray QEMU processes left running
+  (PID-matched, timeout-bounded throughout).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

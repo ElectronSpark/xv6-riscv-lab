@@ -121,7 +121,6 @@ use crate::sync::KSpinlock;
 unsafe extern "C" {
     // proc module.
     safe fn xv6_current_thread() -> *mut thread;
-    safe fn xv6_panic(msg: *const c_char) -> !;
     safe fn killed(p: *mut thread) -> c_int;
     safe fn signal_pending(p: *mut thread) -> c_int;
 
@@ -153,16 +152,10 @@ unsafe extern "C" {
     safe fn slab_free(obj: *mut c_void);
 }
 
-/// Mirrors the C `assert(expr, fmt, ...)` macro for this file's one
-/// call site (see `vfs/file.rs`'s identical `kassert!` for the
-/// dropped-`%d`-argument rationale).
-macro_rules! kassert {
-    ($cond:expr, $msg:expr) => {
-        if !($cond) {
-            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
-        }
-    };
-}
+// `kassert!`/`err_ptr`'s canonical homes are `crate::kstd`/crate root
+// (P3-CS1 centralization).
+use crate::kassert;
+use crate::kstd::err_ptr;
 
 // ===========================================================================
 // Small helpers.
@@ -171,11 +164,6 @@ macro_rules! kassert {
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
     -(e as c_int)
-}
-
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
 }
 
 // `uabi/fcntl.h`.

@@ -109,8 +109,6 @@ use crate::sync::KSpinlock;
 // ---------------------------------------------------------------------------
 
 unsafe extern "C" {
-    pub safe fn xv6_panic(msg: *const c_char) -> !;
-
     // mm/slab.rs -- signature matches kernel/lock/rcu.rs's own (already
     // proven, boot-tested) declaration rather than mm/slab.rs's literal
     // Rust definition; both resolve to the same C symbol/ABI (RISC-V lp64d
@@ -149,32 +147,16 @@ unsafe extern "C" {
 // return-value contract this wave checks.
 use crate::vfs::devtmpfs::superblock::{devtmpfs_create_node, devtmpfs_remove_node};
 
-/// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`):
-/// panic the kernel if `$cond` is false. Simplified to a fixed message
-/// (no `printf`-style formatting), matching the convention already used
-/// by `kernel/kobject.rs`'s `kassert!`.
-macro_rules! kassert {
-    ($cond:expr, $msg:expr) => {
-        if !($cond) {
-            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
-        }
-    };
-}
+// `kassert!`/`err_ptr`'s canonical homes are `crate::kstd`/crate root
+// (P3-CS1 centralization); `kassert!` still panics via `xv6_panic`
+// (`kernel/proc/proc_shims.rs`), just through `kstd`'s single extern
+// declaration of it instead of this file's own copy.
+use crate::kassert;
+use crate::kstd::err_ptr;
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
     -(e as c_int)
-}
-
-/// `ERR_PTR` (`kernel/inc/errno.h`), generic over the pointee type.
-/// Reimplemented locally rather than shared, matching the established
-/// per-file convention (see `kernel/vfs/inode.rs`'s identical local
-/// copy). This file only ever *produces* error-pointers (`device_get`),
-/// never consumes one, so `IS_ERR`/`MAX_ERRNO` are not needed here (see
-/// `kernel/dev/cdev.rs`/`kernel/dev/blkdev.rs` for the consumer side).
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
 }
 
 const MAX_MAJOR_DEVICES: usize = 256; // kernel/inc/dev/dev_types.h

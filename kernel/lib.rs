@@ -148,10 +148,11 @@
 /// (raw-pointer field projections, reborrows), not necessarily on a
 /// pure pass-through wrapper around already-safe calls.
 ///
-/// Several `kernel/lock/*.rs` files (not reachable from this
-/// consolidation due to file-touch scoping in the pass that introduced
-/// this macro) still carry their own identical local copy; this
-/// crate-level definition is the canonical one for any *new* use.
+/// This is the crate's one canonical definition; `kernel/lock/{mutex,
+/// rwsem,completion,semaphore}.rs` used to carry their own identical
+/// local copies (a file-touch-scoping leftover from the pass that
+/// introduced this macro) — removed in P3-CS1, which also added
+/// `use crate::u;` to each of those files.
 #[macro_export]
 macro_rules! u {
     ($($tokens:tt)*) => {
@@ -183,6 +184,16 @@ mod machine;
 
 #[path = "list.rs"]
 pub mod list;
+
+// kernel/kstd.rs — the kernel's "std"/prelude: canonical ERR_PTR family,
+// `container_of`, `Errno`/`neg_errno`, `kassert!` (Phase 3 wave P3-CS1,
+// see that module's doc for the centralization rationale). Depends only
+// on `bindings` (unconditional) and the `xv6_panic` C-ABI symbol, so it
+// follows the same `#[cfg(not(test))]` gating as every module below it
+// that isn't part of the host-test seam.
+#[cfg(not(test))]
+#[path = "kstd.rs"]
+pub(crate) mod kstd;
 
 // Every module below this point is excluded from the `cargo test` (host)
 // build -- see the crate-level doc comment's "Host-test seam" section for

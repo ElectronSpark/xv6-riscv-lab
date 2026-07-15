@@ -50,21 +50,9 @@ use crate::vfs::pipe::{pipe_read, pipe_write};
 
 const EFAULT: i64 = 14;
 
-/// `IS_ERR(ptr)` (`kernel/inc/errno.h`), specialised to pointers (the
-/// only use in this file).
-#[inline]
-fn is_err<T>(p: *mut T) -> bool {
-    const MAX_ERRNO: usize = 4095;
-    (p as usize) >= usize::MAX - MAX_ERRNO + 1
-}
-
-/// `PTR_ERR(ptr)` (`kernel/inc/errno.h`): reinterpret an `ERR_PTR`-encoded
-/// pointer as the negative errno it carries. Only meaningful when
-/// `is_err(p)` is true.
-#[inline]
-fn ptr_err<T>(p: *mut T) -> c_int {
-    p as isize as c_int
-}
+// `is_err`/`ptr_err`'s canonical home is `crate::kstd` (P3-CS1
+// centralization).
+use crate::kstd::{is_err, ptr_err};
 
 // ===========================================================================
 // PTY slave ops.

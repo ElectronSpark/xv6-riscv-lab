@@ -48,9 +48,6 @@ use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 // ===========================================================================
 
 unsafe extern "C" {
-    // proc module.
-    safe fn xv6_panic(msg: *const c_char) -> !;
-
     // printf.rs — C-variadic.
 
     // mm/kalloc.rs.
@@ -73,26 +70,14 @@ unsafe extern "C" {
     safe fn hlist_pop(hlist: *mut hlist_t, node: *mut c_void) -> *mut c_void;
 }
 
-/// Mirrors the C `assert(expr, fmt)` macro. See `superblock.rs`.
-macro_rules! kassert {
-    ($cond:expr, $msg:expr) => {
-        if !($cond) {
-            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
-        }
-    };
-}
+// `kassert!`/`err_ptr`/`is_err`'s canonical homes are `crate::kstd`/crate
+// root (P3-CS1 centralization). See `superblock.rs`.
+use crate::kassert;
+use crate::kstd::{err_ptr, is_err};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
     -(e as c_int)
-}
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
-}
-#[inline(always)]
-fn is_err<T>(p: *mut T) -> bool {
-    (p as usize) >= (-(4095isize)) as usize
 }
 
 // ===========================================================================

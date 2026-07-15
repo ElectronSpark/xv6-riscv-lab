@@ -99,18 +99,8 @@ const fn neg(e: u32) -> c_int {
     -(e as c_int)
 }
 
-/// `ERR_PTR`/`IS_ERR` (`kernel/inc/errno.h`), generic over the pointee
-/// type. Reimplemented locally, matching this crate's established
-/// per-file convention (see `kernel/dev/blkdev.rs`, `kernel/vfs/inode.rs`).
-const MAX_ERRNO: isize = 4095;
-#[inline(always)]
-fn is_err_value(p: usize) -> bool {
-    p >= (-(MAX_ERRNO)) as usize
-}
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
-}
+// `err_ptr`'s canonical home is `crate::kstd` (P3-CS1 centralization).
+use crate::kstd::err_ptr;
 
 // ---------------------------------------------------------------------------
 // KArc<bio> plumbing (Phase 3 P3-9b).

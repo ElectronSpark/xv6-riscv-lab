@@ -108,18 +108,9 @@ use crate::vfs::inode::{vfs_ilock, vfs_iunlock};
 const fn neg(e: u32) -> c_int {
     -(e as c_int)
 }
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
-}
-#[inline(always)]
-fn is_err<T>(p: *mut T) -> bool {
-    (p as usize) >= (-(4095isize)) as usize
-}
-#[inline(always)]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    p.is_null() || is_err(p)
-}
+// `err_ptr`/`is_err`/`is_err_or_null`'s canonical home is `crate::kstd`
+// (P3-CS1 centralization).
+use crate::kstd::{err_ptr, is_err, is_err_or_null};
 
 /// Mirrors `major(dev)`/`minor(dev)` (`kernel/inc/defs.h`) — hardcoded
 /// locally, same rationale/precedent as `superblock.rs`'s own copy.

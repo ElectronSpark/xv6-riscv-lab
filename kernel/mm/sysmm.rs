@@ -24,9 +24,10 @@ fn pgroundup(sz: u64) -> u64 {
     (sz + PGSIZE - 1) & !(PGSIZE - 1)
 }
 
-fn neg_errno(e: i32) -> u64 {
-    (-e) as i64 as u64
-}
+// `neg_errno`'s canonical home is `crate::kstd` (P3-CS1 centralization) —
+// re-imported under its original name so every call site below is
+// unchanged.
+use crate::kstd::neg_errno;
 
 // ---------------------------------------------------------------------------
 // FFI boundary.

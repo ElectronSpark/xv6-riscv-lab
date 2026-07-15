@@ -131,9 +131,6 @@ use crate::sync::KSpinlock;
 // ===========================================================================
 
 unsafe extern "C" {
-    // proc module.
-    safe fn xv6_panic(msg: *const c_char) -> !;
-
     // lock/spinlock.rs — init only (lock/unlock go through
     // `crate::sync::KSpinlock` RAII or the caller-holds-it contract, see
     // the module doc's Lock map).
@@ -164,41 +161,14 @@ use crate::vfs::file::{vfs_fdup, vfs_fput};
 // constants, `bits.h`/`errno.h` static-inline reimplementations.
 // ===========================================================================
 
-/// Mirrors the C `assert(expr, fmt)` macro (`kernel/inc/printf.h`):
-/// panic the kernel if `$cond` is false. Fixed message, no `printf`-style
-/// formatting — matches every dynamic-format `assert()` call site in this
-/// file's C original being reduced to a fixed message, same precedent as
-/// `vfs/file.rs`'s identical `__vfs_file_init` slab-init assert.
-macro_rules! kassert {
-    ($cond:expr, $msg:expr) => {
-        if !($cond) {
-            xv6_panic(concat!($msg, "\0").as_ptr() as *const c_char)
-        }
-    };
-}
+// `kassert!`/`err_ptr`/`is_err_or_null`'s canonical homes are
+// `crate::kstd`/crate root (P3-CS1 centralization).
+use crate::kassert;
+use crate::kstd::{err_ptr, is_err_or_null};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
     -(e as c_int)
-}
-
-/// `MAX_ERRNO`/`IS_ERR_VALUE`/`ERR_PTR`/`IS_ERR_OR_NULL` (`errno.h`),
-/// generic over the pointee type. Reimplemented locally rather than
-/// reused from `vfs/inode.rs`/`vfs/file.rs`, per this crate's established
-/// per-file C-ABI-surface-is-self-contained convention.
-const MAX_ERRNO: isize = 4095;
-
-#[inline(always)]
-fn is_err_value(p: usize) -> bool {
-    p >= (-(MAX_ERRNO)) as usize
-}
-#[inline(always)]
-fn err_ptr<T>(errno: c_int) -> *mut T {
-    errno as isize as *mut T
-}
-#[inline(always)]
-fn is_err_or_null<T>(p: *mut T) -> bool {
-    p.is_null() || is_err_value(p as usize)
 }
 
 /// `kernel/inc/param.h`: `#define NOFILE 64` — open files per thread.

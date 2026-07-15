@@ -419,85 +419,18 @@ pub(crate) fn xv6_list_last(head: *const ListNode) -> *mut ListNode {
 }
 
 // ===========================================================================
-// `container_of` — the one canonical intrusive-node-to-payload helper for
-// `mm`.
-// ===========================================================================
-//
-// Before this, `pcache.rs` (three call sites: pcache/list, node/LRU,
-// node/rb-tree), `slab.rs` (one: cache/registry-list), and `vm.rs` (two,
-// inline: rb-tree node/vma) each hand-rolled the identical
-// `(ptr as *mut u8).wrapping_sub(offset) as *mut T` byte-arithmetic
-// pattern. The crate already has a canonical `container_of` for
-// `bindings::list_node_t` specifically (`crate::machine::list_container_of`,
-// used crate-wide by `proc`/`ll`/`lock` as well as `vm.rs` — left as-is here
-// to avoid *adding* a second list_node_t-shaped duplicate). This generic
-// version fills the gap for every other intrusive-member type in `mm`
-// (`ListNode`, `rb_node`, …): the computation is pure pointer arithmetic
-// and doesn't care about the member's Rust type, only its byte offset
-// within `T`.
-#[inline(always)]
-pub fn container_of<T, M>(member: *mut M, member_offset: usize) -> *mut T {
-    (member as *mut u8).wrapping_sub(member_offset) as *mut T
-}
-
-// ===========================================================================
-// `Errno` — the one canonical negative-errno type for `mm`'s internal
-// (non-`#[no_mangle]`) helpers.
-// ===========================================================================
-//
-// The C ABI convention throughout this crate is "0 on success, negative
-// `E*` value on failure" (`bindings::E*` are the positive musl-libc
-// numbers from `kernel/inc/errno.h`). Internal helpers that used to
-// return a raw `c_int` encoding that convention now return
-// `Result<T, Errno>`; the `#[no_mangle]` C-ABI boundary function converts
-// back to a negative `c_int` exactly once, via [`Errno::neg`] (mirrors the
-// pre-existing `sysmm.rs::neg_errno` pattern). Only the handful of `E*`
-// values `mm` actually returns are represented — this is deliberately not
-// a general `errno.h` mirror.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Errno {
-    Inval,
-    NoMem,
-    Fault,
-    Access,
-    BadF,
-    Range,
-    NameTooLong,
-}
-
-impl Errno {
-    /// The positive `E*` value (e.g. `EINVAL`), as `bindgen` emits it.
-    #[inline]
-    pub const fn raw(self) -> c_int {
-        match self {
-            Errno::Inval => crate::bindings::EINVAL as c_int,
-            Errno::NoMem => crate::bindings::ENOMEM as c_int,
-            Errno::Fault => crate::bindings::EFAULT as c_int,
-            Errno::Access => crate::bindings::EACCES as c_int,
-            Errno::BadF => crate::bindings::EBADF as c_int,
-            Errno::Range => crate::bindings::ERANGE as c_int,
-            Errno::NameTooLong => crate::bindings::ENAMETOOLONG as c_int,
-        }
-    }
-
-    /// The `-errno` value used as a raw C ABI return code.
-    #[inline]
-    pub const fn neg(self) -> c_int {
-        -self.raw()
-    }
-}
-
-/// Convert a `Result<T, Errno>` into this crate's "0 / value on success,
-/// negative errno on failure" `c_int` ABI convention, for the common case
-/// where `T` doesn't carry a value the caller needs back through the
-/// return slot (e.g. `Result<(), Errno>`, or callers that discard `T`).
-#[inline]
-pub fn result_to_neg_errno<T>(r: Result<T, Errno>) -> c_int {
-    match r {
-        Ok(_) => 0,
-        Err(e) => e.neg(),
-    }
-}
+// `container_of` / `Errno` / `result_to_neg_errno` — re-exported from
+// `crate::kstd` (P3-CS1 centralization), which is now their canonical
+// home. Kept re-exported here under their original `mm::cffi::*` paths so
+// every existing `mm` call site (`pcache.rs`, `slab.rs`, `vm.rs`, ...)
+// needed zero changes. See `kstd.rs`'s module doc for the full history:
+// this generic `container_of` fills the gap `machine::list_container_of`
+// (the `bindings::list_node_t`-specific one, still used crate-wide as-is)
+// doesn't cover — any other intrusive-member type (`ListNode`, `rb_node`,
+// …) — and `Errno` is `mm`'s "0 / value on success, negative `E*` on
+// failure" `c_int` ABI convention, deliberately not a general `errno.h`
+// mirror.
+pub use crate::kstd::{container_of, result_to_neg_errno, Errno};
 
 // ===========================================================================
 // Compile-time guards
