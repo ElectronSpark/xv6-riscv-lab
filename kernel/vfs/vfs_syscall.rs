@@ -1140,7 +1140,24 @@ pub(crate) extern "C" fn sys_vfs_rename() -> u64 {
  * File System Namespace Syscalls
  ******************************************************************************/
 
-pub(crate) extern "C" fn sys_vfs_open() -> u64 {
+/// Core logic behind [`sys_vfs_open`], factored out as a private helper
+/// returning [`KResult`] (P3-CS5b — the wave this cluster was cut off
+/// before finishing). Every early-return site keeps its exact errno:
+/// `EFAULT` on the `argstr` copy-in failure, the `ERR_PTR`-decoded
+/// `vfs_nameiparent`/`vfs_create`/`vfs_namei`/`vfs_fileopen` failures stay
+/// `Err(Errno::Raw(..))` (cross into `vfs/inode.rs`/`vfs/file.rs`, a
+/// boundary this cluster doesn't own — same precedent as
+/// [`mkdir_inner`]/[`link_inner`]), `ENOENT` on a null resolve,
+/// `EEXIST`-with-`O_EXCL`-clear's fallback-lookup-hits-a-directory branch
+/// is `Err(Errno::IsDir)`, the symlink loop's `vfs_readlink` failure
+/// passes its already-negative `c_int` through as `Err(Errno::Raw(..))`
+/// (same shape as [`stat_inner`]'s), `ELOOP` past `VFS_SYMLOOP_MAX`, the
+/// post-resolve directory-with-write-mode check is another
+/// `Err(Errno::IsDir)`, and the post-truncate `vfs_itruncate` failure
+/// passes its already-negative `c_int` through unchanged. `vfs_fdalloc`'s
+/// `fd` (positive or negative) passes through as `Ok`/`Err(Errno::Raw(..))`
+/// unconditionally, matching the original's unconditional `ret64(fd)`.
+fn open_inner() -> KResult<c_int> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let mut omode: c_int = 0;
@@ -1148,7 +1165,7 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
     argint(1, &mut omode);
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let mut inode: *mut vfs_inode = ptr::null_mut();
@@ -1156,10 +1173,10 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
     if omode & O_CREAT != 0 {
         let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
         if is_err(parent) {
-            return ptr_err(parent) as u64;
+            return Err(Errno::Raw(ptr_err(parent)));
         }
         if parent.is_null() {
-            return ret64(neg(ENOENT));
+            return Err(Errno::NoEnt);
         }
 
         let name_len = unsafe { strlen(name.as_ptr()) };
@@ -1171,10 +1188,10 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
                 inode = vfs_namei(path.as_ptr(), n as usize);
                 if !is_err_or_null(inode) && is_dir(unsafe { (*inode).mode }) {
                     vfs_iput(inode);
-                    return ret64(neg(EISDIR));
+                    return Err(Errno::IsDir);
                 }
             } else {
-                return ptr_err(inode) as u64;
+                return Err(Errno::Raw(ptr_err(inode)));
             }
         }
     } else {
@@ -1182,10 +1199,10 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
         loop {
             inode = vfs_namei(path.as_ptr(), unsafe { strlen(path.as_ptr()) });
             if is_err(inode) {
-                return ptr_err(inode) as u64;
+                return Err(Errno::Raw(ptr_err(inode)));
             }
             if inode.is_null() {
-                return ret64(neg(ENOENT));
+                return Err(Errno::NoEnt);
             }
 
             if !is_lnk(unsafe { (*inode).mode }) || omode & O_NOFOLLOW != 0 {
@@ -1197,7 +1214,7 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
             inode = ptr::null_mut();
 
             if link_len < 0 {
-                return link_len as u64;
+                return Err(Errno::Raw(link_len as c_int));
             }
             unsafe { path[link_len as usize] = 0 };
 
@@ -1208,20 +1225,20 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
         }
 
         if symloop_count >= VFS_SYMLOOP_MAX {
-            return ret64(neg(ELOOP));
+            return Err(Errno::Loop);
         }
     }
 
     if is_err(inode) {
-        return ptr_err(inode) as u64;
+        return Err(Errno::Raw(ptr_err(inode)));
     }
     if inode.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     if is_dir(unsafe { (*inode).mode }) && (omode & O_WRONLY != 0 || omode & O_RDWR != 0) {
         vfs_iput(inode);
-        return ret64(neg(EISDIR));
+        return Err(Errno::IsDir);
     }
 
     let should_truncate = omode & O_TRUNC != 0 && is_reg(unsafe { (*inode).mode });
@@ -1230,14 +1247,14 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
     vfs_iput(inode);
 
     if is_err(f) {
-        return ptr_err(f) as u64;
+        return Err(Errno::Raw(ptr_err(f)));
     }
 
     if should_truncate {
         let ret = vfs_itruncate(vfs_inode_deref(unsafe { ptr::addr_of_mut!((*f).inode) }), 0);
         if ret != 0 {
             vfs_fput(f);
-            return ret64(ret);
+            return Err(Errno::Raw(ret));
         }
     }
 
@@ -1252,7 +1269,14 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
     // When success, the refcount of f will be increased by fdtable, thus we do
     // not put f here. When failure, we need to put f anyway.
     vfs_fput(f);
-    ret64(fd)
+    Ok(fd)
+}
+
+pub(crate) extern "C" fn sys_vfs_open() -> u64 {
+    match open_inner() {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /// Core logic behind [`sys_vfs_mkdir`], factored out as a private helper
