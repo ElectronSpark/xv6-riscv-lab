@@ -1244,6 +1244,47 @@ updated at CS1); each wave was committed and boot/fs-battery-gated green.
   bug (Iteration 25, pre-existing) and the single-test "lost some free pages"
   line are unchanged pre-existing artifacts, not regressions.
 
+### Iteration 43 — 2026-07-15 — Wave P3-CS9: `vfs/fs.rs` ERR_PTR→`KResult` (err_ptr 30→0)
+
+- Completes the VFS-layer Result migration begun in CS3–CS8. All 8
+  ERR_PTR-returning fns in `vfs/fs.rs` converted: `get_dentry_inode_impl`
+  (internal helper, converted directly + `?`-propagated by its callers) and
+  the 7 `pub(crate) extern "C"` boundary getters `vfs_alloc_inode`/
+  `vfs_get_inode`/`vfs_get_dentry_inode(_locked)`/`vfs_get_inode_cached`/
+  `vfs_add_inode`/`vfs_struct_clone` — each now a private `*_inner() ->
+  KResult<*mut …>` with ONE `result_to_errptr(inner())` at the wrapper.
+- **ABI unchanged on purpose**: these boundaries have 37 cross-module
+  callers and inode.rs holds `Errno::Raw(ptr_err(...))` passthroughs against
+  them, so the `extern "C"` signatures + ERR_PTR-encoded returns are
+  byte-for-byte identical. Only fs.rs's internals changed.
+- Error mapping used existing variants (`Inval`/`NoMem`/`Again`/`NoEnt`) +
+  `Errno::Raw(n)` for not-yet-owned driver/cross-module ERR_PTR values; no
+  new Errno variant, `kstd.rs` untouched. All manual cleanup preserved at
+  the original return points (`vfs_get_dentry_inode` captures the impl
+  result then `vfs_superblock_unlock` *before* returning — not
+  `?`-propagated past the unlock; `vfs_get_inode_cached`'s
+  `vfs_iunlock`+`queue_deferred_iput`, `vfs_add_inode`'s EAGAIN
+  `vfs_iunlock(existing)`, `vfs_struct_clone`'s dual `vfs_iput`/
+  `vfs_inode_put_ref`/`struct_free` unwinds all intact). Lock ordering
+  byte-identical.
+- Census (`vfs/fs.rs`): `err_ptr` 30→**0**, `neg(` 113→85 (survivors are
+  out-of-scope fns + C-mirrored comparisons like `ptr_err(inode) !=
+  neg(ENOENT)`, never boundary encoding), `KResult`/`result_to_errptr` 0→9/8.
+- Verified: 0-warning `cargo clean`+`cmake` rebuild; cache clean before+
+  after; boot gate ×2 (OpenSBI/`xv6.bin`/dual disk); fs battery on fresh
+  `fs_img` — `mkdir`+EEXIST, `ln /README.md rr`+`cat rr` reads through the
+  hard link (exercises `vfs_get_dentry_inode`/`vfs_get_inode_cached`),
+  `cat /nonexistent`→ENOENT, symlinktest both subtests ok, usertests
+  createdelete/linktest/unlinkread/concreate all OK, stressfs. `vfs_struct_clone`
+  (fork CLONE_FS) has no isolated shell binary — verified by inspection,
+  exercised implicitly by every usertests fork (honest gap, same class as
+  CS8's `vfs_move`). Pre-existing sh `>`-redirect bug + single-test "lost
+  some free pages" artifact unchanged.
+- **Whole VFS fallible stack now returns `Result` internally** (fdtable →
+  vfs_syscall → file → inode → fs). Next (CS10): the proc cluster's ~20
+  scattered `err_ptr` sites, and typing inode.rs's `Errno::Raw(ptr_err(…))`
+  passthroughs against these fs.rs producers now that they carry `KResult`.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

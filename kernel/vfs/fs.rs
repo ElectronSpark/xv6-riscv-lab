@@ -210,7 +210,7 @@ const fn neg(e: u32) -> c_int {
 // to `c_int`/`u64` or compares it against another `c_int` (`neg(...)`),
 // so the narrower return type is a no-op change (see `is_eagain_ptr`,
 // whose `as isize` comparison cast is dropped accordingly).
-use crate::kstd::{err_ptr, is_err, is_err_or_null, ptr_err};
+use crate::kstd::{is_err, is_err_or_null, ptr_err, result_to_errptr, Errno, KResult};
 
 #[inline(always)]
 fn is_eagain_ptr<T>(p: *mut T) -> bool {
@@ -1981,23 +1981,22 @@ pub(crate) extern "C" fn vfs_superblock_put(sb: *mut vfs_superblock) {
     }
 }
 
-/// Mirrors `vfs_alloc_inode()`.
-pub(crate) extern "C" fn vfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
+fn vfs_alloc_inode_inner(sb: *mut vfs_superblock) -> KResult<*mut vfs_inode> {
     unsafe {
         if sb.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         kassert!(
             rwsem_is_write_holding(&raw mut (*sb).lock),
             "vfs_alloc_inode: must hold superblock write lock"
         );
         if (*sb).__bindgen_anon_2.valid() == 0 {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         let alloc_inode = (*(*sb).ops).alloc_inode.unwrap();
         let inode = alloc_inode(sb);
         if is_err(inode) {
-            return inode;
+            return Err(Errno::Raw(ptr_err(inode)));
         }
         __vfs_inode_init(inode);
         let existing = vfs_add_inode(sb, inode);
@@ -2005,36 +2004,40 @@ pub(crate) extern "C" fn vfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_in
             if is_eagain_ptr(existing) {
                 let free_inode = (*(*inode).ops).free_inode.unwrap();
                 free_inode(inode);
-                return err_ptr(neg(EAGAIN));
+                return Err(Errno::Again);
             }
             let free_inode = (*(*inode).ops).free_inode.unwrap();
             free_inode(inode);
             if existing.is_null() {
-                return err_ptr(neg(ENOENT));
+                return Err(Errno::NoEnt);
             }
-            return existing;
+            return Err(Errno::Raw(ptr_err(existing)));
         }
-        inode // locked
+        Ok(inode) // locked
     }
 }
 
-/// Mirrors `vfs_get_inode()`.
-pub(crate) extern "C" fn vfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
+/// Mirrors `vfs_alloc_inode()`.
+pub(crate) extern "C" fn vfs_alloc_inode(sb: *mut vfs_superblock) -> *mut vfs_inode {
+    result_to_errptr(vfs_alloc_inode_inner(sb))
+}
+
+fn vfs_get_inode_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_inode> {
     unsafe {
         if sb.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         kassert!(
             rwsem_is_write_holding(&raw mut (*sb).lock),
             "vfs_get_inode: must hold superblock write lock"
         );
         if (*sb).__bindgen_anon_2.valid() == 0 {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         let get_inode = (*(*sb).ops).get_inode.unwrap();
         let inode = get_inode(sb, ino);
         if is_err(inode) {
-            return inode;
+            return Err(Errno::Raw(ptr_err(inode)));
         }
         __vfs_inode_init(inode);
         let existing = vfs_add_inode(sb, inode);
@@ -2042,23 +2045,28 @@ pub(crate) extern "C" fn vfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mu
             if is_eagain_ptr(existing) {
                 let free_inode = (*(*inode).ops).free_inode.unwrap();
                 free_inode(inode);
-                return err_ptr(neg(EAGAIN));
+                return Err(Errno::Again);
             }
             let free_inode = (*(*inode).ops).free_inode.unwrap();
             free_inode(inode);
             if existing.is_null() {
-                return err_ptr(neg(ENOENT));
+                return Err(Errno::NoEnt);
             }
-            return existing;
+            return Err(Errno::Raw(ptr_err(existing)));
         }
         if existing != inode {
             // Found existing inode in hash -- free the newly loaded one.
             let free_inode = (*(*inode).ops).free_inode.unwrap();
             free_inode(inode);
-            return existing; // locked
+            return Ok(existing); // locked
         }
-        inode // locked
+        Ok(inode) // locked
     }
+}
+
+/// Mirrors `vfs_get_inode()`.
+pub(crate) extern "C" fn vfs_get_inode(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
+    result_to_errptr(vfs_get_inode_inner(sb, ino))
 }
 
 /// Mirrors `vfs_sync_superblock()`.
@@ -2180,7 +2188,7 @@ unsafe fn set_name_if_null(inode: *mut vfs_inode, dentry: *mut vfs_dentry) {
 ///
 /// Locking: caller holds the dentry's superblock read lock on entry; this
 /// helper may drop the read lock and acquire the write lock internally.
-unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> *mut vfs_inode {
+unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> KResult<*mut vfs_inode> {
     unsafe {
         let sb = (*dentry).sb;
 
@@ -2189,10 +2197,10 @@ unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> *mut vfs_inode {
         if !is_err_or_null(inode) {
             set_name_if_null(inode, dentry);
             vfs_iunlock(inode);
-            return inode;
+            return Ok(inode);
         }
         if ptr_err(inode) != neg(ENOENT) {
-            return inode;
+            return if is_err(inode) { Err(Errno::Raw(ptr_err(inode))) } else { Ok(inode) };
         }
 
         if !rwsem_is_write_holding(&raw mut (*sb).lock) {
@@ -2201,22 +2209,22 @@ unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> *mut vfs_inode {
         }
 
         if (*sb).__bindgen_anon_2.valid() == 0 {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
 
         inode = vfs_get_inode_cached(sb, (*dentry).ino);
         if !is_err_or_null(inode) {
             set_name_if_null(inode, dentry);
             vfs_iunlock(inode);
-            return inode;
+            return Ok(inode);
         }
         if ptr_err(inode) != neg(ENOENT) {
-            return inode;
+            return if is_err(inode) { Err(Errno::Raw(ptr_err(inode))) } else { Ok(inode) };
         }
 
         inode = vfs_get_inode(sb, (*dentry).ino);
         if is_err_or_null(inode) {
-            return inode;
+            return if is_err(inode) { Err(Errno::Raw(ptr_err(inode))) } else { Ok(inode) };
         }
 
         // "." and ".." are synthesized by VFS and should always hit the
@@ -2235,57 +2243,65 @@ unsafe fn get_dentry_inode_impl(dentry: *mut vfs_dentry) -> *mut vfs_inode {
         set_parent_from_dentry(inode, (*dentry).parent);
         set_name_if_null(inode, dentry);
         vfs_iunlock(inode);
-        inode
+        Ok(inode)
     }
 }
 
-/// Mirrors `vfs_get_dentry_inode_locked()`.
-pub(crate) extern "C" fn vfs_get_dentry_inode_locked(dentry: *mut vfs_dentry) -> *mut vfs_inode {
+fn vfs_get_dentry_inode_locked_inner(dentry: *mut vfs_dentry) -> KResult<*mut vfs_inode> {
     unsafe {
         if dentry.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         if (*dentry).sb.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         if (*(*dentry).sb).__bindgen_anon_2.valid() == 0 {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
 
         let inode = dentry_get_self_inode(dentry);
         if !inode.is_null() {
-            return inode;
+            return Ok(inode);
         }
 
         get_dentry_inode_impl(dentry)
     }
 }
 
-/// Mirrors `vfs_get_dentry_inode()`.
-pub(crate) extern "C" fn vfs_get_dentry_inode(dentry: *mut vfs_dentry) -> *mut vfs_inode {
+/// Mirrors `vfs_get_dentry_inode_locked()`.
+pub(crate) extern "C" fn vfs_get_dentry_inode_locked(dentry: *mut vfs_dentry) -> *mut vfs_inode {
+    result_to_errptr(vfs_get_dentry_inode_locked_inner(dentry))
+}
+
+fn vfs_get_dentry_inode_inner(dentry: *mut vfs_dentry) -> KResult<*mut vfs_inode> {
     unsafe {
         if dentry.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         if (*dentry).sb.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
 
         let inode = dentry_get_self_inode(dentry);
         if !inode.is_null() {
-            return inode;
+            return Ok(inode);
         }
 
         let sb = (*dentry).sb;
         vfs_superblock_rlock(sb);
         if (*sb).__bindgen_anon_2.valid() == 0 {
             vfs_superblock_unlock(sb);
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         let inode = get_dentry_inode_impl(dentry);
         vfs_superblock_unlock(sb);
         inode
     }
+}
+
+/// Mirrors `vfs_get_dentry_inode()`.
+pub(crate) extern "C" fn vfs_get_dentry_inode(dentry: *mut vfs_dentry) -> *mut vfs_inode {
+    result_to_errptr(vfs_get_dentry_inode_inner(dentry))
 }
 
 /******************************************************************************
@@ -2294,21 +2310,17 @@ pub(crate) extern "C" fn vfs_get_dentry_inode(dentry: *mut vfs_dentry) -> *mut v
  * include that header).
  *****************************************************************************/
 
-/// Mirrors `vfs_get_inode_cached()`.
-///
-/// Locking: caller holds the superblock read or write lock for the
-/// entire call. On success, the returned inode is locked.
-pub(crate) extern "C" fn vfs_get_inode_cached(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
+fn vfs_get_inode_cached_inner(sb: *mut vfs_superblock, ino: u64) -> KResult<*mut vfs_inode> {
     unsafe {
         if sb.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         if (*sb).__bindgen_anon_2.valid() == 0 {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         let inode = inode_hash_get(sb, ino);
         if inode.is_null() {
-            return err_ptr(neg(ENOENT));
+            return Err(Errno::NoEnt);
         }
         // CRITICAL: take a reference BEFORE locking to prevent
         // use-after-free. Backendless filesystems keep refcount=0,
@@ -2322,7 +2334,7 @@ pub(crate) extern "C" fn vfs_get_inode_cached(sb: *mut vfs_superblock, ino: u64)
             {
                 inode_refcount_atomic(inode).fetch_add(1, Ordering::SeqCst);
             } else {
-                return err_ptr(neg(ENOENT)); // Inode is dying.
+                return Err(Errno::NoEnt); // Inode is dying.
             }
         }
         vfs_ilock(inode);
@@ -2332,33 +2344,37 @@ pub(crate) extern "C" fn vfs_get_inode_cached(sb: *mut vfs_superblock, ino: u64)
             // queue to the workqueue instead.
             vfs_iunlock(inode);
             queue_deferred_iput(inode);
-            return err_ptr(neg(ENOENT));
+            return Err(Errno::NoEnt);
         }
-        inode
+        Ok(inode)
     }
 }
 
-/// Mirrors `vfs_add_inode()`.
+/// Mirrors `vfs_get_inode_cached()`.
 ///
-/// Locking: caller holds the superblock write lock. On success, the
-/// returned inode is locked.
-pub(crate) extern "C" fn vfs_add_inode(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> *mut vfs_inode {
+/// Locking: caller holds the superblock read or write lock for the
+/// entire call. On success, the returned inode is locked.
+pub(crate) extern "C" fn vfs_get_inode_cached(sb: *mut vfs_superblock, ino: u64) -> *mut vfs_inode {
+    result_to_errptr(vfs_get_inode_cached_inner(sb, ino))
+}
+
+fn vfs_add_inode_inner(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> KResult<*mut vfs_inode> {
     unsafe {
         if sb.is_null() || inode.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         kassert!(
             rwsem_is_write_holding(&raw mut (*sb).lock),
             "Superblock lock must be write held to add inode"
         );
         if (*sb).__bindgen_anon_2.valid() == 0 && (*sb).__bindgen_anon_2.initialized() != 0 {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         if !(*inode).sb.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         if (*inode).__bindgen_anon_1.valid() != 0 {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
         let existing = inode_hash_get(sb, (*inode).ino);
         if !existing.is_null() {
@@ -2368,16 +2384,16 @@ pub(crate) extern "C" fn vfs_add_inode(sb: *mut vfs_superblock, inode: *mut vfs_
             // if it's set, the destroying thread has released sb lock and
             // is in destroy_inode).
             if (*existing).__bindgen_anon_1.destroying() != 0 {
-                return err_ptr(neg(EAGAIN));
+                return Err(Errno::Again);
             }
             vfs_ilock(existing);
             if (*existing).__bindgen_anon_1.destroying() != 0
                 || (*existing).__bindgen_anon_1.valid() == 0
             {
                 vfs_iunlock(existing);
-                return err_ptr(neg(EAGAIN));
+                return Err(Errno::Again);
             }
-            return existing;
+            return Ok(existing);
         }
         let popped = inode_hash_add(sb, inode);
         if !popped.is_null() {
@@ -2388,8 +2404,16 @@ pub(crate) extern "C" fn vfs_add_inode(sb: *mut vfs_superblock, inode: *mut vfs_
         (*inode).__bindgen_anon_1.set_valid(1);
         (*inode).sb = sb;
         vfs_ilock(inode);
-        inode
+        Ok(inode)
     }
+}
+
+/// Mirrors `vfs_add_inode()`.
+///
+/// Locking: caller holds the superblock write lock. On success, the
+/// returned inode is locked.
+pub(crate) extern "C" fn vfs_add_inode(sb: *mut vfs_superblock, inode: *mut vfs_inode) -> *mut vfs_inode {
+    result_to_errptr(vfs_add_inode_inner(sb, inode))
 }
 
 /// Mirrors `vfs_remove_inode()`.
@@ -2473,22 +2497,21 @@ pub(crate) extern "C" fn vfs_struct_init() -> *mut fs_struct {
     }
 }
 
-/// Mirrors `vfs_struct_clone()`.
-pub(crate) extern "C" fn vfs_struct_clone(old_fs: *mut fs_struct, clone_flags: u64) -> *mut fs_struct {
+fn vfs_struct_clone_inner(old_fs: *mut fs_struct, clone_flags: u64) -> KResult<*mut fs_struct> {
     unsafe {
         if old_fs.is_null() {
-            return err_ptr(neg(EINVAL));
+            return Err(Errno::Inval);
         }
 
         if clone_flags & CLONE_FS != 0 {
             // Share the fs_struct.
             fs_refcount_atomic(old_fs).fetch_add(1, Ordering::SeqCst);
-            return old_fs;
+            return Ok(old_fs);
         }
 
         let new_fs = struct_alloc_init();
         if new_fs.is_null() {
-            return err_ptr(neg(crate::bindings::ENOMEM));
+            return Err(Errno::NoMem);
         }
 
         // Get inode pointers under spinlock, but take references outside
@@ -2511,7 +2534,7 @@ pub(crate) extern "C" fn vfs_struct_clone(old_fs: *mut fs_struct, clone_flags: u
                 vfs_inode_put_ref(&raw mut (*new_fs).rooti);
                 vfs_inode_put_ref(&raw mut (*new_fs).cwd);
                 struct_free(new_fs);
-                return err_ptr(ret);
+                return Err(Errno::Raw(ret));
             }
         }
         if cwdi_ok {
@@ -2521,11 +2544,16 @@ pub(crate) extern "C" fn vfs_struct_clone(old_fs: *mut fs_struct, clone_flags: u
                 vfs_inode_put_ref(&raw mut (*new_fs).rooti);
                 vfs_inode_put_ref(&raw mut (*new_fs).cwd);
                 struct_free(new_fs);
-                return err_ptr(ret);
+                return Err(Errno::Raw(ret));
             }
         }
-        new_fs
+        Ok(new_fs)
     }
+}
+
+/// Mirrors `vfs_struct_clone()`.
+pub(crate) extern "C" fn vfs_struct_clone(old_fs: *mut fs_struct, clone_flags: u64) -> *mut fs_struct {
+    result_to_errptr(vfs_struct_clone_inner(old_fs, clone_flags))
 }
 
 /// Mirrors `vfs_struct_put()`.
