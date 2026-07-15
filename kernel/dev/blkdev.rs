@@ -32,6 +32,7 @@ use crate::bindings::{
     bio, blkdev_ops_t, blkdev_t, device_ops_t, device_t, dev_type_e_DEV_TYPE_BLOCK, EACCES,
     EINVAL, ENODEV, ENOSYS,
 };
+use crate::kobject::KArc;
 
 use super::dev::{device_dup, device_get, device_put, device_register, device_unregister};
 
@@ -115,18 +116,24 @@ fn blkdev_ops_validate(ops: *const blkdev_ops_t) -> bool {
 // P3-1D mesh sweep: callers (`bufcache.rs`, `vfs/xv6fs/superblock.rs`,
 // `vfs/file.rs`) now import this via crate-path `use` instead of an
 // `extern` redeclaration -- demoted.
+// P3-9: converted to `KArc<device_t>` -- same manual-get/conditional-put
+// leak hazard fixed as `dev/cdev.rs::cdev_get` (see its comment); the
+// `Drop` on the "wrong type" branch now releases the reference
+// automatically.
 pub(crate) extern "C" fn blkdev_get(major: c_int, minor: c_int) -> *mut blkdev_t {
     let device = device_get(major, minor);
     if is_err(device) {
         return device as *mut blkdev_t;
     }
     // SAFETY: `device` is non-null and not an error-pointer here --
-    // `device_get`'s success contract.
-    if unsafe { (*device).type_ } != dev_type_e_DEV_TYPE_BLOCK {
-        device_put(device);
+    // `device_get`'s success postcondition (one held kobject reference)
+    // is exactly `KArc::from_raw`'s precondition.
+    let device = unsafe { KArc::<device_t>::from_raw(device) };
+    if device.type_ != dev_type_e_DEV_TYPE_BLOCK {
+        // `device` (the KArc) drops here, releasing the reference.
         return err_ptr(neg(ENODEV));
     }
-    device as *mut blkdev_t
+    KArc::into_raw(device) as *mut blkdev_t
 }
 
 // P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree

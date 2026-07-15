@@ -24,6 +24,7 @@ use crate::bindings::{
     bool_, cdev_ops_t, cdev_t, device_ops_t, device_t, dev_type_e_DEV_TYPE_CHAR, EINVAL, ENODEV,
     ENOSYS,
 };
+use crate::kobject::KArc;
 
 use super::dev::{device_dup, device_get, device_put, device_register, device_unregister};
 
@@ -118,18 +119,27 @@ fn cdev_opts_validate(ops: *const cdev_ops_t) -> bool {
 /// cdev on success, or `ERR_PTR` on error.
 // P3-1D mesh sweep: callers (`vfs/file.rs`) now import this via crate-path
 // `use` instead of an `extern` redeclaration -- demoted.
+// P3-9: converted to `KArc<device_t>` -- was a manual
+// `device_get()`/conditional-`device_put()` pair (see git history); the
+// `device_put` on the "wrong type" branch was easy to forget if a third
+// branch were ever added, and easy to double-call by accident. Now the
+// KArc's `Drop` releases the reference automatically on every exit path
+// except the one that hands it back out via `into_raw`.
 pub(crate) extern "C" fn cdev_get(major: c_int, minor: c_int) -> *mut cdev_t {
     let device = device_get(major, minor);
     if is_err(device) {
         return device as *mut cdev_t; // propagate error from device_get
     }
     // SAFETY: `device` is non-null and not an error-pointer here --
-    // `device_get`'s success contract.
-    if unsafe { (*device).type_ } != dev_type_e_DEV_TYPE_CHAR {
-        device_put(device); // release the device reference
+    // `device_get`'s success postcondition (one held kobject reference)
+    // is exactly `KArc::from_raw`'s precondition.
+    let device = unsafe { KArc::<device_t>::from_raw(device) };
+    if device.type_ != dev_type_e_DEV_TYPE_CHAR {
+        // `device` (the KArc) drops here, releasing the reference --
+        // no manual `device_put` call needed.
         return err_ptr(neg(ENODEV)); // not a character device
     }
-    device as *mut cdev_t
+    KArc::into_raw(device) as *mut cdev_t
 }
 
 // P3-1D mesh sweep: no live caller anywhere in the tree today (full-tree

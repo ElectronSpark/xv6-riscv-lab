@@ -98,6 +98,7 @@ use crate::bindings::{
     spinlock_t, EALREADY, EBUSY, EINVAL, ENODEV, ENOMEM, ENOSPC, ENOTTY, SLAB_FLAG_DEBUG_BITMAP,
     SLAB_FLAG_EMBEDDED,
 };
+use crate::kobject::{HasKobject, KArc, Kobject};
 use crate::lock::rcu::KRcuRead;
 use crate::sync::KSpinlock;
 
@@ -179,6 +180,21 @@ fn err_ptr<T>(errno: c_int) -> *mut T {
 const MAX_MAJOR_DEVICES: usize = 256; // kernel/inc/dev/dev_types.h
 const MAX_MINOR_DEVICES: usize = 256; // kernel/inc/dev/dev_types.h
 const PAGE_TYPE_ANON: u64 = 0; // mm/page_type.h: PAGE_TYPE_ANON
+
+// P3-9: `KArc<device_t>` -- see `kernel/kobject.rs`'s `HasKobject`/`KArc`
+// doc. `device_t.kobj` is the struct's first field (offset 0, see the
+// module doc's opening paragraph), so this is a plain reinterpret cast,
+// the same reasoning already used throughout this file's other
+// `kobject`<->`device_t` casts.
+// SAFETY: `device_t.kobj` is a stable, non-moving offset-0 field, live
+// (`kobject_init`-ed) for the entire time any `device_t` is reachable
+// through the device table or a caller's raw pointer -- exactly
+// `HasKobject`'s contract.
+unsafe impl HasKobject for device_t {
+    fn kobj_ptr(this: *mut Self) -> *mut Kobject {
+        this as *mut Kobject
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Global registry storage. `SyncCell<T>` is redefined locally per this
@@ -767,16 +783,21 @@ pub(crate) extern "C" fn dev_for_each_device(
                 continue;
             }
             // SAFETY: `dev` is live for the duration of the current RCU
-            // read-side section (`guard` still held at this point).
-            if !unsafe { kobject_try_get(&raw mut (*dev).kobj) } {
-                continue;
-            }
+            // read-side section (`guard` still held at this point) --
+            // exactly `KArc::try_from_raw`'s precondition.
+            let dev_arc = match unsafe { KArc::<device_t>::try_from_raw(dev) } {
+                Some(a) => a,
+                None => continue,
+            };
             // Release RCU so the callback can sleep if needed.
             drop(guard.take());
-            ret = cb(dev, ctx);
-            // SAFETY: `dev` is still live -- this call owns the
-            // reference `kobject_try_get` just acquired above.
-            unsafe { kobject_put(&raw mut (*dev).kobj) };
+            ret = cb(KArc::as_ptr(&dev_arc), ctx);
+            // `dev_arc` owns the reference `try_from_raw` acquired above;
+            // dropping it here runs the equivalent of the old manual
+            // `kobject_put` automatically -- no separate call needed (and
+            // no way to forget it on a future early-`continue`/`break`
+            // added to this loop body).
+            drop(dev_arc);
             guard = Some(KRcuRead::new());
             if ret != 0 {
                 break 'outer;
