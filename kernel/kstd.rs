@@ -183,6 +183,9 @@ pub enum Errno {
     BadF,
     Range,
     NameTooLong,
+    /// `EMFILE`: per-process open-file-descriptor limit reached (added for
+    /// P3-CS3, `vfs/fdtable.rs`'s fd-allocation cluster).
+    MFile,
 }
 
 /// This crate's canonical fallible-return type for Rust-internal
@@ -207,6 +210,7 @@ impl Errno {
             Errno::BadF => crate::bindings::EBADF as c_int,
             Errno::Range => crate::bindings::ERANGE as c_int,
             Errno::NameTooLong => crate::bindings::ENAMETOOLONG as c_int,
+            Errno::MFile => crate::bindings::EMFILE as c_int,
         }
     }
 

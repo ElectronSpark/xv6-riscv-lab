@@ -110,14 +110,33 @@
 //! caller-controlled input: every `fd` is range-checked against
 //! [`NOFILE`] before use, matching the C's `fd < 0 || fd >= NOFILE`
 //! guard at each entry point.
+//!
+//! # Result-over-ERR_PTR (P3-CS3)
+//!
+//! This file is the first contained proof-of-concept for the standing
+//! directive to prefer `Result` over the `ERR_PTR`/negative-`errno`
+//! encoding (`kernel/kstd.rs`'s "Result-first" section) for
+//! Rust-internal fallible code. Three file-private helpers whose callers
+//! all live in this same file — [`fdtable_alloc_init`],
+//! `alloc_fd_from_locked`, `clone_locked` — now return
+//! `crate::kstd::KResult<T>` and compose with `?`/`match` instead of
+//! hand-rolling `err_ptr`/null-pointer checks. Every public
+//! `pub(crate) extern "C"` entry point in this file is a real
+//! cross-module boundary (called from `vfs/vfs_syscall.rs` and
+//! `proc/clone.rs`), so those keep their exact `c_int`/`ERR_PTR`-pointer
+//! C-ABI signatures unchanged — the one `KResult` -> C-encoding
+//! conversion happens right at each entry point's return, via a plain
+//! `match` (`c_int` case) or [`crate::kstd::result_to_errptr`] (pointer
+//! case), never inside the helpers themselves.
 
 use core::ffi::{c_char, c_int, c_void};
 use core::ptr;
+use core::ptr::NonNull;
 use core::sync::atomic::{fence, AtomicI32, AtomicPtr, Ordering};
 
 use crate::bindings::{
-    slab_cache_t, spinlock_t, vfs_fdtable, vfs_file, EBADF, EINVAL, EMFILE, ENOMEM,
-    SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
+    slab_cache_t, spinlock_t, vfs_fdtable, vfs_file, EBADF, SLAB_FLAG_DEBUG_BITMAP,
+    SLAB_FLAG_STATIC,
 };
 use crate::sync::KSpinlock;
 
@@ -161,10 +180,16 @@ use crate::vfs::file::{vfs_fdup, vfs_fput};
 // constants, `bits.h`/`errno.h` static-inline reimplementations.
 // ===========================================================================
 
-// `kassert!`/`err_ptr`/`is_err_or_null`'s canonical homes are
-// `crate::kstd`/crate root (P3-CS1 centralization).
+// `kassert!`/`is_err_or_null`/`result_to_errptr`'s canonical homes are
+// `crate::kstd`/crate root (P3-CS1 centralization). `is_err_or_null` is
+// still needed here to consume `vfs_fdup`'s `ERR_PTR`-encoded return (a
+// genuine cross-module/file.rs C-ABI boundary, out of this cluster's
+// scope — see the P3-CS3 module doc note below); the fd-allocation and
+// clone helpers below no longer hand-roll `err_ptr`/null-pointer checks
+// themselves, using [`KResult`]/[`Errno`] internally instead
+// (P3-CS3: Result-over-ERR_PTR proof-of-concept cluster).
 use crate::kassert;
-use crate::kstd::{err_ptr, is_err_or_null};
+use crate::kstd::{is_err_or_null, result_to_errptr, Errno, KResult};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -305,24 +330,31 @@ pub(crate) extern "C" fn __vfs_fdtable_global_init() {
 }
 
 /// Allocate and initialize a new fdtable (`ref_count = 1`, all fields
-/// zeroed). Returns `NULL` on allocation failure.
-fn fdtable_alloc_init() -> *mut vfs_fdtable {
+/// zeroed). Returns `Err(Errno::NoMem)` on allocation failure.
+///
+/// P3-CS3 (Result-over-ERR_PTR): this is a private, file-internal helper
+/// (both call sites — [`vfs_fdtable_init`] and [`clone_locked`] — live in
+/// this file), so it returns [`KResult`] directly instead of the
+/// transitional `ERR_PTR`/null-pointer convention: neither caller can
+/// forget to check for failure (the compiler forces it via `?`/`match`),
+/// unlike the previous `if fdtable.is_null() { ... }` duplicated at both
+/// sites.
+fn fdtable_alloc_init() -> KResult<NonNull<vfs_fdtable>> {
     let fdtable = slab_alloc(fdtable_slab()) as *mut vfs_fdtable;
-    if fdtable.is_null() {
-        return ptr::null_mut();
-    }
+    let fdtable = NonNull::new(fdtable).ok_or(Errno::NoMem)?;
     // SAFETY: `slab_alloc` returned a fresh, exclusively-owned
-    // `size_of::<vfs_fdtable>()` allocation; zeroing then field-init
-    // mirrors the C original's `memset` + explicit-field-init.
+    // `size_of::<vfs_fdtable>()` allocation (confirmed non-null just
+    // above); zeroing then field-init mirrors the C original's `memset` +
+    // explicit-field-init.
     unsafe {
-        ptr::write_bytes(fdtable, 0, 1);
+        ptr::write_bytes(fdtable.as_ptr(), 0, 1);
         spin_init(
-            ptr::addr_of_mut!((*fdtable).lock),
+            ptr::addr_of_mut!((*fdtable.as_ptr()).lock),
             c"vfs_fdtable_lock".as_ptr() as *mut c_char,
         );
-        (*fdtable).ref_count = 1;
+        (*fdtable.as_ptr()).ref_count = 1;
     }
-    fdtable
+    Ok(fdtable)
 }
 
 fn fdtable_free(fdtable: *mut vfs_fdtable) {
@@ -335,20 +367,27 @@ fn fdtable_free(fdtable: *mut vfs_fdtable) {
 // Public C-ABI entry points.
 // ===========================================================================
 
-/// Allocate a file descriptor starting from a minimum fd `>= start_fd`.
-/// Increments `file`'s reference count via `vfs_fdup`.
+/// Core fd-allocation logic behind [`vfs_fdtable_alloc_fd_from`], factored
+/// out as a private helper returning [`KResult`] (P3-CS3: this function's
+/// only caller is in this same file, so the `Result` cascade is fully
+/// contained — see the module's Result-over-ERR_PTR note). Every early
+/// failure used to be a separate `return neg(E*)` the caller had to trust
+/// was exhaustive; here the three distinct failure modes (bad args, out of
+/// fds, OOM duplicating the file reference) are ordinary `Err` returns
+/// composed with `?`, and the one success path is the one `Ok`.
 ///
-/// LOCKING: caller MUST hold `fdtable.lock`.
-pub(crate) extern "C" fn vfs_fdtable_alloc_fd_from(
+/// LOCKING: caller MUST hold `fdtable.lock` (same contract as
+/// [`vfs_fdtable_alloc_fd_from`]).
+fn alloc_fd_from_locked(
     fdtable: *mut vfs_fdtable,
     file: *mut vfs_file,
     start_fd: c_int,
-) -> c_int {
+) -> KResult<usize> {
     if fdtable.is_null() || file.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     if start_fd < 0 || start_fd as usize >= NOFILE {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     kassert!(
         // SAFETY: non-null `fdtable` (checked above); only the lock's
@@ -359,18 +398,18 @@ pub(crate) extern "C" fn vfs_fdtable_alloc_fd_from(
     // SAFETY: non-null `fdtable`; lock held (asserted above), so this
     // plain field read cannot race a concurrent writer.
     if unsafe { (*fdtable).fd_count } as usize >= NOFILE {
-        return neg(EMFILE); // Too many open files
+        return Err(Errno::MFile); // Too many open files
     }
     // SAFETY: non-null `fdtable`; lock held.
     let word = unsafe { (*fdtable).files_bitmap[0] };
     let fd = first_clear_bit_from(word, start_fd as usize);
     if fd < 0 || fd as usize >= NOFILE {
-        return neg(EMFILE); // No free file descriptor
+        return Err(Errno::MFile); // No free file descriptor
     }
     let fd = fd as usize;
 
     if vfs_fdup(file).is_null() {
-        return neg(ENOMEM); // Failed to duplicate file reference
+        return Err(Errno::NoMem); // Failed to duplicate file reference
     }
 
     // SAFETY: non-null `fdtable`; `fd` in `[0, NOFILE)`; lock held.
@@ -380,7 +419,29 @@ pub(crate) extern "C" fn vfs_fdtable_alloc_fd_from(
         rcu_assign_file(ptr::addr_of_mut!((*fdtable).files[fd]), file);
     }
     fd_count_atomic(fdtable).fetch_add(1, Ordering::SeqCst);
-    fd as c_int
+    Ok(fd)
+}
+
+/// Allocate a file descriptor starting from a minimum fd `>= start_fd`.
+/// Increments `file`'s reference count via `vfs_fdup`.
+///
+/// LOCKING: caller MUST hold `fdtable.lock`.
+///
+/// C-ABI boundary (P3-CS3): this `pub(crate) extern "C"` entry point is
+/// called from `vfs/vfs_syscall.rs` (a different module) expecting the
+/// crate's established "fd or negative errno" `c_int` convention, so the
+/// one [`KResult`] -> `c_int` conversion happens right here, at the edge —
+/// [`alloc_fd_from_locked`] itself never constructs a negative-errno
+/// `c_int` or an `ERR_PTR`.
+pub(crate) extern "C" fn vfs_fdtable_alloc_fd_from(
+    fdtable: *mut vfs_fdtable,
+    file: *mut vfs_file,
+    start_fd: c_int,
+) -> c_int {
+    match alloc_fd_from_locked(fdtable, file, start_fd) {
+        Ok(fd) => fd as c_int,
+        Err(e) => e.neg(),
+    }
 }
 
 /// Allocate the lowest available file descriptor for `file`.
@@ -395,40 +456,50 @@ pub(crate) extern "C" fn vfs_fdtable_alloc_fd(fdtable: *mut vfs_fdtable, file: *
 /// original's `assert`).
 pub(crate) extern "C" fn vfs_fdtable_init() -> *mut vfs_fdtable {
     let fdtable = fdtable_alloc_init();
-    kassert!(!fdtable.is_null(), "vfs_fdtable_init: fdtable is NULL");
+    kassert!(fdtable.is_ok(), "vfs_fdtable_init: fdtable is NULL");
     // NOTE: the C original re-`memset`s `files`/`files_bitmap`/
     // `cloexec_bitmap` here, redundant with `fdtable_alloc_init`'s own
     // `write_bytes(0)` (which already zeroed the whole struct including
     // these fields) — elided as a provable no-op, not a behavior change.
-    fdtable
+    //
+    // PANIC: `kassert!` above already diverged on `Err`; this `expect`
+    // never fires — same guarantee the original `!fdtable.is_null()`
+    // assert gave the raw-pointer return.
+    fdtable.expect("BUG: fdtable_alloc_init returned Err after kassert passed").as_ptr()
 }
 
-/// Clone or share an fdtable for fork/clone. If `clone_flags &
-/// CLONE_FILES`, shares `src` (bumps its refcount and returns it);
-/// otherwise deep-copies with duplicated file references.
+/// Core clone/share logic behind [`vfs_fdtable_clone`], factored out as a
+/// private helper returning [`KResult`] (P3-CS3: only called from this
+/// file). The two failure modes (`src` null, `dest` allocation OOM) are
+/// `Err` returns instead of hand-encoded `ERR_PTR`s; the two success
+/// paths (share `src`, or the freshly built `dest`) are `Ok(NonNull)` —
+/// there is no representable state where this helper hands back a raw
+/// pointer that might secretly be an encoded error, unlike the pointer
+/// this replaces.
 ///
-/// Returns the (possibly shared) fdtable, or `ERR_PTR` on failure.
-pub(crate) extern "C" fn vfs_fdtable_clone(
-    src: *mut vfs_fdtable,
-    clone_flags: c_int,
-) -> *mut vfs_fdtable {
-    if src.is_null() {
-        return err_ptr(neg(EINVAL));
-    }
+/// `vfs_fdup`'s own return (`dst_file` below) stays `ERR_PTR`-checked via
+/// [`is_err_or_null`] on purpose: that call crosses into `vfs/file.rs`, a
+/// different file's still-transitional C-ABI surface, out of this
+/// cluster's contained scope (see the module's Result-over-ERR_PTR note).
+fn clone_locked(src: *mut vfs_fdtable, clone_flags: c_int) -> KResult<NonNull<vfs_fdtable>> {
+    let src_nn = NonNull::new(src).ok_or(Errno::Inval)?;
 
     rcu_read_lock();
     if clone_flags & CLONE_FILES != 0 {
         // Share the fdtable.
         refcount_atomic(src).fetch_add(1, Ordering::SeqCst);
         rcu_read_unlock();
-        return src;
+        return Ok(src_nn);
     }
 
-    let dest = fdtable_alloc_init();
-    if dest.is_null() {
-        rcu_read_unlock();
-        return err_ptr(neg(ENOMEM)); // Allocation failed
-    }
+    let dest_nn = match fdtable_alloc_init() {
+        Ok(nn) => nn,
+        Err(e) => {
+            rcu_read_unlock();
+            return Err(e); // Allocation failed
+        }
+    };
+    let dest = dest_nn.as_ptr();
     // NOTE: `dest` is freshly allocated & fully zeroed by
     // `fdtable_alloc_init`; the C original's `dest->fd_count = 0` plus
     // `memset` of `files`/`files_bitmap`/`cloexec_bitmap` here is
@@ -464,7 +535,26 @@ pub(crate) extern "C" fn vfs_fdtable_clone(
     // original's explicit `smp_mb()`).
     fence(Ordering::SeqCst);
 
-    dest
+    Ok(dest_nn)
+}
+
+/// Clone or share an fdtable for fork/clone. If `clone_flags &
+/// CLONE_FILES`, shares `src` (bumps its refcount and returns it);
+/// otherwise deep-copies with duplicated file references.
+///
+/// Returns the (possibly shared) fdtable, or `ERR_PTR` on failure.
+///
+/// C-ABI boundary (P3-CS3): `proc/clone.rs` (a different module) calls
+/// this expecting the crate's transitional `ERR_PTR`-encoded-pointer
+/// convention (it decodes the result with its own local `check_ptr`
+/// helper), so [`result_to_errptr`] does the one `KResult` -> `ERR_PTR`
+/// conversion right here, at the edge — [`clone_locked`] itself never
+/// constructs an `ERR_PTR`.
+pub(crate) extern "C" fn vfs_fdtable_clone(
+    src: *mut vfs_fdtable,
+    clone_flags: c_int,
+) -> *mut vfs_fdtable {
+    result_to_errptr(clone_locked(src, clone_flags).map(NonNull::as_ptr))
 }
 
 /// Release a reference to an fdtable. On last reference, closes all open
