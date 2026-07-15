@@ -1471,14 +1471,15 @@ updated at CS1); each wave was committed and boot/fs-battery-gated green.
   - **`usertests -q` new baseline**: proceeds through `copyinstr2`,
     `killstatus`, and `exitwait` (all `OK`) and every test in between/
     after up to `forkfork`, then hits the pre-existing `forkforkfork`
-    panic (`"Failed to remove interrupted waiter from queue"`,
-    `kernel/proc/thread_queue.rs:421` — see the entry below) exactly as
+    panic (`"Failed to remove interrupted waiter from queue"` in
+    `kernel/proc/thread_queue.rs` — see the entry below) exactly as
     documented. `execout`/`diskfull`/`outofinodes` are in the separate
     slow-test list, not `quicktests`, so `-q` never reaches them.
 
 - `usertests forkforkfork` (fork-bomb stress, 3-deep nesting) panics the
   kernel: `"Failed to remove interrupted waiter from queue"`
-  (`kernel/proc/thread_queue.rs:421`, tq interrupted-wait removal path)
+  (`kernel/proc/thread_queue.rs:600` as of 2026-07-15; the line drifts as
+  the file is edited — the site is the tq interrupted-wait removal path)
   under fork-exhaustion pressure, followed by IPI_REASON_CRASH on both
   harts. **Confirmed pre-existing**: reproduces identically on the
   unmodified pre-Wave-26 C baseline (074323c worktree, same
