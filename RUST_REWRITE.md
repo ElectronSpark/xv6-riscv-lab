@@ -1418,6 +1418,49 @@ updated at CS1); each wave was committed and boot/fs-battery-gated green.
   file.rs) + a handful of leaf boundary getters (CS14: device_get/bio_alloc/
   pipe_alloc/get_session) + the transitional shims.
 
+### Iteration 48 — 2026-07-15 — Wave P3-CS14: leaf boundaries `KResult` — **Result-over-ERR_PTR arc CLOSED**
+
+- The closing wave: 4 scattered `pub(crate) extern "C"` boundary getters/
+  allocators, each → private `*_inner() -> KResult<*mut T>` + one
+  `result_to_errptr` (ABI byte-identical):
+  - `dev/dev.rs::device_get`: EINVAL→`Inval`, 3× ENODEV→`NoDev`. (`KRcuRead`
+    guard drop/RCU ordering byte-identical.)
+  - `dev/bio.rs::bio_alloc`: EINVAL→`Inval`, ENOMEM→`NoMem`; no partial-alloc
+    cleanup (kmm_alloc null-check fires before any resource taken).
+  - `vfs/pipe.rs::pipe_alloc`: 2× ENOMEM→`NoMem`; the second keeps
+    `slab_free(pi)` byte-identical before `return Err(NoMem)`.
+  - `tty/session.rs::get_session`: 2× ESRCH→`Srch` (incl. the cross-module
+    `is_err(t)` guard; `Srch.neg() == -ESRCH`, ABI-identical).
+- No new Errno variant; kstd.rs untouched. err_ptr → 0 in all 4 files.
+- Verified: 0-warning `cargo clean`+`cmake` rebuild; cache clean before+
+  after; boot gate. Orchestrator re-ran independently: `ls /dev` clean
+  (device_get), usertests pipe1 OK (pipe_alloc), createdelete OK + stressfs
+  (bio_alloc block I/O), **testsig 21/21** (get_session via fork/session),
+  ENOENT smoke — zero panic/assert markers.
+
+### Result-over-ERR_PTR migration — completeness note (2026-07-15)
+
+The user directive "use Result Enum to pass error possible return value
+instead of the C style err ptr" is now satisfied across every fallible
+Rust-internal function in the kernel. Migrated layers: **VFS** (fdtable,
+vfs_syscall, file, inode core, fs) CS3–CS9; **proc** (signal dequeue,
+thread-group, scheduler rq-select, thread/kthread create) CS10–CS11;
+**filesystem drivers** (xv6fs + tmpfs `inode_operations`/superblock vtable
+methods) CS12–CS13; **leaf boundaries** (device/bio/pipe/session) CS14.
+
+Every fallible internal fn returns `KResult<T> = Result<T, Errno>`; the
+ERR_PTR/neg-errno encoding survives ONLY at (a) the single
+`result_to_errptr`/`result_to_neg_errno` call in each `#[no_mangle]`/
+`extern "C"` C-ABI or vtable boundary wrapper (locked to the C fn-pointer
+ABI until the P3-10 dyn-Trait ops redesign), and (b) deliberately-retained
+internal-ERR_PTR *domains* — the EAGAIN-retry + driver-vtable-dispatch loops
+in `vfs/inode.rs`'s `vfs_create`/`mknod`/`mkdir`/`symlink` `_inner` bodies
+(documented in CS7/CS8), where the transient value never escapes the fn —
+plus the transitional `kstd` shim itself (`err_ptr`/`is_err`/`ptr_err`) and
+the `err_ptr_errno`/`xv6_err_ptr` convenience shims kept for the few
+remaining C-ABI/asm consumers. `Errno` grew exactly the variants the
+migration needed: `MFile`(CS3), `Again`(CS7), `XDev`(CS8), `Srch`(CS10).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

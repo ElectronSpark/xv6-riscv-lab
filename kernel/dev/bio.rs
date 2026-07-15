@@ -99,8 +99,11 @@ const fn neg(e: u32) -> c_int {
     -(e as c_int)
 }
 
-// `err_ptr`'s canonical home is `crate::kstd` (P3-CS1 centralization).
-use crate::kstd::err_ptr;
+// P3-CS14: `bio_alloc` now builds a `KResult<*mut bio>` internally and
+// encodes it to the ABI-fixed `ERR_PTR` exactly once at the `extern "C"`
+// boundary via `result_to_errptr`; only the error-return encoding changed
+// (canonical home `crate::kstd`, P3-CS1 centralization).
+use crate::kstd::{result_to_errptr, Errno, KResult};
 
 // ---------------------------------------------------------------------------
 // KArc<bio> plumbing (Phase 3 P3-9b).
@@ -157,13 +160,23 @@ pub(crate) extern "C" fn bio_alloc(
     end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
     private_data: *mut c_void,
 ) -> *mut bio {
+    result_to_errptr(bio_alloc_inner(bdev, vec_length, rw, end_io, private_data))
+}
+
+fn bio_alloc_inner(
+    bdev: *mut blkdev_t,
+    vec_length: i16,
+    rw: bool_,
+    end_io: Option<unsafe extern "C" fn(bio: *mut bio)>,
+    private_data: *mut c_void,
+) -> KResult<*mut bio> {
     if bdev.is_null() || vec_length <= 0 || vec_length > BIO_MAX_VECS {
-        return err_ptr(neg(crate::bindings::EINVAL));
+        return Err(Errno::Inval);
     }
     let bio_size = core::mem::size_of::<bio>() + (vec_length as usize) * core::mem::size_of::<bio_vec>();
     let bio_ptr = unsafe { kmm_alloc(bio_size) } as *mut bio;
     if bio_ptr.is_null() {
-        return err_ptr(neg(crate::bindings::ENOMEM));
+        return Err(Errno::NoMem);
     }
     // SAFETY: `bio_ptr` is a freshly-allocated, uniquely-owned
     // `bio_size`-byte region (checked non-null above); zeroing it before
@@ -183,7 +196,7 @@ pub(crate) extern "C" fn bio_alloc(
         kobject_init(&raw mut (*bio_ptr).kobj);
         completion_init(&raw mut (*bio_ptr).io_completion);
     }
-    bio_ptr
+    Ok(bio_ptr)
 }
 
 /// Install a data segment (`page`/`len`/`offset`) at index `idx` of a

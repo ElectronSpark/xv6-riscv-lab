@@ -147,12 +147,15 @@ unsafe extern "C" {
 // return-value contract this wave checks.
 use crate::vfs::devtmpfs::superblock::{devtmpfs_create_node, devtmpfs_remove_node};
 
-// `kassert!`/`err_ptr`'s canonical homes are `crate::kstd`/crate root
+// `kassert!`'s canonical homes are `crate::kstd`/crate root
 // (P3-CS1 centralization); `kassert!` still panics via `xv6_panic`
 // (`kernel/proc/proc_shims.rs`), just through `kstd`'s single extern
-// declaration of it instead of this file's own copy.
+// declaration of it instead of this file's own copy. P3-CS14: `device_get`
+// now builds a `KResult<*mut device_t>` internally and encodes it to the
+// ABI-fixed `ERR_PTR` exactly once at the `extern "C"` boundary via
+// `result_to_errptr`; only the error-return encoding changed.
 use crate::kassert;
-use crate::kstd::err_ptr;
+use crate::kstd::{result_to_errptr, Errno, KResult};
 
 #[inline(always)]
 const fn neg(e: u32) -> c_int {
@@ -427,28 +430,32 @@ pub(crate) extern "C" fn dev_table_init() {
 // P3-1D mesh sweep: callers (`dev/cdev.rs`, `dev/blkdev.rs`) now import this
 // via crate-path `use` instead of an `extern` redeclaration -- demoted.
 pub(crate) extern "C" fn device_get(major: c_int, minor: c_int) -> *mut device_t {
+    result_to_errptr(device_get_inner(major, minor))
+}
+
+fn device_get_inner(major: c_int, minor: c_int) -> KResult<*mut device_t> {
     let _rcu = KRcuRead::new();
 
     if major <= 0 || major as usize >= MAX_MAJOR_DEVICES || minor <= 0 || minor as usize >= MAX_MINOR_DEVICES {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     // rcu_dereference (CONSUME -> Acquire, house mapping).
     let dmajor = major_slot(major).load(Ordering::Acquire);
     if dmajor.is_null() {
-        return err_ptr(neg(ENODEV));
+        return Err(Errno::NoDev);
     }
 
     // SAFETY: `dmajor`/`minor` satisfy `minor_slot_atomic`'s contract
     // (range-checked above).
     let device = unsafe { minor_slot_atomic(dmajor, minor) }.load(Ordering::Acquire);
     if device.is_null() {
-        return err_ptr(neg(ENODEV));
+        return Err(Errno::NoDev);
     }
 
     // smp_load_acquire(&device->unregistering).
     if unregistering_atomic(device).load(Ordering::Acquire) != 0 {
-        return err_ptr(neg(ENODEV));
+        return Err(Errno::NoDev);
     }
 
     // Use kobject_try_get to avoid racing with a concurrent final put;
@@ -456,10 +463,10 @@ pub(crate) extern "C" fn device_get(major: c_int, minor: c_int) -> *mut device_t
     // SAFETY: `device` is live for the duration of this RCU read-side
     // section (`_rcu` still held); `.kobj` is device_t's first field.
     if !unsafe { kobject_try_get(&raw mut (*device).kobj) } {
-        return err_ptr(neg(ENODEV));
+        return Err(Errno::NoDev);
     }
 
-    device
+    Ok(device)
 }
 
 /// Increment the reference count of a device. Returns `-ENODEV` if the

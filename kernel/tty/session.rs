@@ -138,9 +138,11 @@ const EINVAL: c_int = 22;
 const SIGHUP: c_int = 1;
 const SIGCONT: c_int = 18;
 
-// `is_err`/`err_ptr`'s canonical home is `crate::kstd` (P3-CS2
-// centralization).
-use crate::kstd::{err_ptr, is_err};
+// `is_err`'s canonical home is `crate::kstd` (P3-CS2 centralization).
+// P3-CS14: `get_session` now builds a `KResult<*mut session>` internally
+// and encodes it to the ABI-fixed `ERR_PTR` exactly once at the `extern "C"`
+// boundary via `result_to_errptr`; only the error-return encoding changed.
+use crate::kstd::{is_err, result_to_errptr, Errno, KResult};
 
 // ===========================================================================
 // Panic helper -- replicates the C `assert(expr, fmt, ...)` macro
@@ -1146,16 +1148,20 @@ pub(crate) extern "C" fn session_getsid(pid: pid_t) -> pid_t {
 /// `pid_lock`; the returned pointer is only stable under that same
 /// protection.
 pub(crate) extern "C" fn get_session(sid: pid_t) -> *mut session {
+    result_to_errptr(get_session_inner(sid))
+}
+
+fn get_session_inner(sid: pid_t) -> KResult<*mut session> {
     let t = get_pid_thread(sid);
     if is_err(t) {
-        return err_ptr(-ESRCH);
+        return Err(Errno::Srch);
     }
     // SAFETY: `t` is a live thread (not an ERR_PTR, checked above) for
     // as long as the caller's RCU read-side section / `pid_lock` hold
     // lasts (fn doc).
     let s = unsafe { (*t).session };
     if s.is_null() {
-        return err_ptr(-ESRCH);
+        return Err(Errno::Srch);
     }
-    s
+    Ok(s)
 }

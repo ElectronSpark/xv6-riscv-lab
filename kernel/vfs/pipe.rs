@@ -108,7 +108,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 
 use crate::bindings::{
     bool_, pipe, slab_cache_t, thread, thread_state_THREAD_INTERRUPTIBLE, tq_t, vfs_file,
-    vfs_file_ops, vfs_inode, vm, EAGAIN, EINTR, ENOMEM, SLAB_FLAG_STATIC,
+    vfs_file_ops, vfs_inode, vm, EAGAIN, EINTR, SLAB_FLAG_STATIC,
 };
 use crate::sync::KSpinlock;
 
@@ -152,10 +152,13 @@ unsafe extern "C" {
     safe fn slab_free(obj: *mut c_void);
 }
 
-// `kassert!`/`err_ptr`'s canonical homes are `crate::kstd`/crate root
-// (P3-CS1 centralization).
+// `kassert!`'s canonical home is `crate::kstd`/crate root
+// (P3-CS1 centralization). P3-CS14: `pipe_alloc` now builds a
+// `KResult<*mut pipe>` internally and encodes it to the ABI-fixed `ERR_PTR`
+// exactly once at the `extern "C"` boundary via `result_to_errptr`; only the
+// error-return encoding changed (the `slab_free` unwind stays byte-identical).
 use crate::kassert;
-use crate::kstd::err_ptr;
+use crate::kstd::{result_to_errptr, Errno, KResult};
 
 // ===========================================================================
 // Small helpers.
@@ -292,15 +295,19 @@ pub(crate) extern "C" fn pipe_init() {
 }
 
 pub(crate) extern "C" fn pipe_alloc(flags: c_int) -> *mut pipe {
+    result_to_errptr(pipe_alloc_inner(flags))
+}
+
+fn pipe_alloc_inner(flags: c_int) -> KResult<*mut pipe> {
     let pi = slab_alloc(pipe_slab()) as *mut pipe;
     if pi.is_null() {
-        return err_ptr(neg(ENOMEM));
+        return Err(Errno::NoMem);
     }
 
     let data = kalloc();
     if data.is_null() {
         slab_free(pi as *mut c_void);
-        return err_ptr(neg(ENOMEM));
+        return Err(Errno::NoMem);
     }
 
     // SAFETY: `pi` was just slab-allocated and is exclusively owned by
@@ -330,7 +337,7 @@ pub(crate) extern "C" fn pipe_alloc(flags: c_int) -> *mut pipe {
             ptr::null_mut(),
         );
     }
-    pi
+    Ok(pi)
 }
 
 pub(crate) extern "C" fn pipe_close(pi: *mut pipe, writable: c_int) {
