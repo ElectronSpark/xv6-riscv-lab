@@ -50,10 +50,13 @@ use crate::proc::{tq_bulk_move, tq_init, tq_wait, tq_wakeup_all};
 // Externs — see `superblock.rs`'s module doc for the convention.
 // ===========================================================================
 
-unsafe extern "C" {
-    // proc module.
-    safe fn signal_pending(p: *mut thread) -> crate::bindings::bool_;
+// P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
+// now that its `#[no_mangle]` export is gone. The old redeclaration here
+// said `-> bool_` (c_uint); the real fn returns `bool` (same 0/1 in `a0`
+// under the old C ABI), so the call sites drop their `!= 0`.
+use crate::proc::signal_pending;
 
+unsafe extern "C" {
     // string.rs.
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
@@ -277,25 +280,25 @@ unsafe fn __xv6fs_begin_op(xv6_sb: *mut xv6fs_superblock, state: c_int) -> c_int
         spin_lock(ptr::addr_of_mut!((*log).lock));
         loop {
             if (*log).committing != 0 {
-                if interruptible && signal_pending(current) != 0 {
+                if interruptible && signal_pending(current) {
                     spin_unlock(ptr::addr_of_mut!((*log).lock));
                     return neg(crate::bindings::EINTR);
                 }
                 xv6_thread_state_set(current, state);
                 let ret = tq_wait(ptr::addr_of_mut!((*log).wait_queue), ptr::addr_of_mut!((*log).lock), ptr::null_mut());
-                if interruptible && ret != 0 && signal_pending(current) != 0 {
+                if interruptible && ret != 0 && signal_pending(current) {
                     spin_unlock(ptr::addr_of_mut!((*log).lock));
                     return neg(crate::bindings::EINTR);
                 }
             } else if (*log).lh.n + ((*log).outstanding + 1) * super::MAXOPBLOCKS > super::XV6FS_LOGSIZE {
                 // This op might exhaust log space; wait for commit.
-                if interruptible && signal_pending(current) != 0 {
+                if interruptible && signal_pending(current) {
                     spin_unlock(ptr::addr_of_mut!((*log).lock));
                     return neg(crate::bindings::EINTR);
                 }
                 xv6_thread_state_set(current, state);
                 let ret = tq_wait(ptr::addr_of_mut!((*log).wait_queue), ptr::addr_of_mut!((*log).lock), ptr::null_mut());
-                if interruptible && ret != 0 && signal_pending(current) != 0 {
+                if interruptible && ret != 0 && signal_pending(current) {
                     spin_unlock(ptr::addr_of_mut!((*log).lock));
                     return neg(crate::bindings::EINTR);
                 }

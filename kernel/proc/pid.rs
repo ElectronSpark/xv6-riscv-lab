@@ -74,10 +74,12 @@ pub(crate) extern "C" fn __proctab_init() {
 // pid lock public surface (callable from other C code).
 // ---------------------------------------------------------------------------
 
-#[no_mangle] pub extern "C" fn pid_wlock()   { xv6_pid_wlock(); }
-#[no_mangle] pub extern "C" fn pid_wunlock() { xv6_pid_wunlock(); }
-#[no_mangle] pub extern "C" fn pid_rlock()   { xv6_pid_rlock(); }
-#[no_mangle] pub extern "C" fn pid_runlock() { xv6_pid_runlock(); }
+pub(crate) fn pid_wlock()   { xv6_pid_wlock(); }
+pub(crate) fn pid_wunlock() { xv6_pid_wunlock(); }
+// P3-D2b: the `pid_rlock`/`pid_runlock` wrappers deleted -- zero callers
+// anywhere in the tree (proc/exit.rs's `ffi::pid_rlock`/`ffi::pid_runlock`
+// wrap `proc_shims::xv6_pid_rlock`/`xv6_pid_runlock` directly, and the
+// kernel/inc header prototypes do not count, 9d35f95 precedent).
 
 // P3-1B: zero callers anywhere in the tree (grep-verified). Demoted from
 // `#[no_mangle]`; the file's blanket `#![allow(dead_code)]` (line 11)
@@ -88,8 +90,7 @@ pub(crate) extern "C" fn pid_try_lock_upgrade() -> bool {
 pub(crate) extern "C" fn pid_wholding() -> bool {
     xv6_pid_wholding() != 0
 }
-#[no_mangle]
-pub extern "C" fn pid_assert_wholding() {
+pub(crate) fn pid_assert_wholding() {
     if xv6_pid_wholding() == 0 {
         panic_pid("pid lock not held");
     }
@@ -114,8 +115,7 @@ pub(crate) extern "C" fn __proctab_set_initproc(p: *mut Thread) {
     xv6_pid_wunlock();
 }
 
-#[no_mangle]
-pub extern "C" fn __proctab_get_initproc() -> *mut Thread {
+pub(crate) fn __proctab_get_initproc() -> *mut Thread {
     if xv6_proctab_initproc_raw().is_null() {
         panic_pid("initproc not set");
     }
@@ -193,8 +193,7 @@ pub(crate) extern "C" fn proctab_proc_add(p: *mut Thread) {
     xv6_proctab_registered_inc();
 }
 
-#[no_mangle]
-pub extern "C" fn get_pid_thread(pid: i32) -> *mut Thread {
+pub(crate) fn get_pid_thread(pid: i32) -> *mut Thread {
     let p = xv6_proctab_get_rcu(pid);
     if p.is_null() {
         // ERR_PTR(-ESRCH) = (void *)(long)(-ESRCH)
@@ -222,8 +221,7 @@ pub(crate) extern "C" fn proctab_proc_remove(p: *mut Thread) {
 // procdump (orchestrates; C shim prints each row).
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn procdump() {
+pub(crate) fn procdump() {
     xv6_procdump_header();
     proc_shims::for_each_proctab_thread(|p| {
         let _ = xv6_procdump_one(p as *mut Thread);

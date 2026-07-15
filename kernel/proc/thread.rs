@@ -48,6 +48,17 @@ use crate::proc::sigpending_init;
 // crate-path items, same precedent as the `use` imports above.
 use crate::proc::{sigpending_empty, context_switch_finish, scheduler_wakeup,
     rq_cpu_activate, rq_enqueue_task, get_rq_for_cpu, thread_group_init, thread_group_put};
+// P3-D2b: the pid/thread-group/pgroup entry points (proc/{pid,
+// thread_group,pgroup}.rs) are ordinary Rust fns now that their
+// `#[no_mangle]` exports are gone; reached as plain crate-path items
+// instead of the `extern "C"` redeclarations that used to sit in the
+// "extern C primitives" block below. `pgroup_alloc`/`pgroup_add_tg`/
+// `pgroup_add_thread` used to be redeclared here with `*mut c_void`
+// pgroup handles; the call sites now use the real `*mut pgroup` type
+// (see `KERNEL_PG`).
+use crate::proc::{__proctab_get_initproc, pid_wlock, pid_wunlock,
+    thread_group_alloc_kernel, thread_group_add,
+    pgroup_alloc, pgroup_add_tg, pgroup_add_thread};
 // P3-1B mesh sweep: all three cross top-level-module boundaries (proc's
 // submodules are private, so the fully-qualified submodule path is used
 // rather than risking an ambiguous glob re-export at `crate::<mod>::`
@@ -125,17 +136,6 @@ unsafe extern "C" {
     fn strncpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
     fn safestrcpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
 
-    // pid hierarchy
-    fn pid_wlock();
-    fn pid_wunlock();
-    fn __proctab_get_initproc() -> *mut thread;
-
-    // group/session
-    safe fn thread_group_alloc_kernel(out: *mut *mut thread_group, hier_id: c_int) -> c_int;
-    safe fn thread_group_add(tg: *mut thread_group, p: *mut thread);
-    safe fn pgroup_alloc(hier_id: c_int, parent: *mut c_void) -> *mut c_void;
-    safe fn pgroup_add_tg(pg: *mut c_void, tg: *mut thread_group) -> c_int;
-    safe fn pgroup_add_thread(pg: *mut c_void, p: *mut thread) -> c_int;
     // memory
     fn page_alloc(order: u64, flags: u64) -> *mut c_void;
     safe fn page_free(ptr: *mut c_void, order: c_int);
@@ -303,7 +303,7 @@ macro_rules! thread_raw_layout {
 
 // ---------------- kernel hierarchy statics ------------------------------
 static KERNEL_TG: AtomicPtr<thread_group> = AtomicPtr::new(ptr::null_mut());
-static KERNEL_PG: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static KERNEL_PG: AtomicPtr<pgroup> = AtomicPtr::new(ptr::null_mut());
 static KERNEL_SESSION: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 
 fn kthread_hierarchy_init_locked() {
@@ -327,14 +327,14 @@ fn kthread_hierarchy_init_locked() {
     // pgroup->is_kernel = 1 (was the C `pgroup_mark_kernel` bridge helper;
     // now a direct bitfield write through PgroupAccess — no FFI needed).
     // SAFETY: `pg` is proven non-null by the diverging `kassert!` immediately above.
-    unsafe { PgroupAccess::assume(pg as *mut pgroup) }.mark_kernel();
+    unsafe { PgroupAccess::assume(pg) }.mark_kernel();
 
     let s = session_alloc(KERNEL_HIERARCHY_ID);
     kassert!(!s.is_null(), "kthread hierarchy: session_alloc failed");
     // SAFETY: `s` is proven non-null by the diverging `kassert!` immediately above.
     unsafe { SessionAccess::assume(s as *mut session) }.mark_kernel();
 
-    let ret = session_add_pg(s, pg);
+    let ret = session_add_pg(s, pg as *mut c_void);
     kassert!(ret == 0, "kthread hierarchy: session_add_pg failed");
     let ret = pgroup_add_tg(pg, tg);
     kassert!(ret == 0, "kthread hierarchy: pgroup_add_tg failed");

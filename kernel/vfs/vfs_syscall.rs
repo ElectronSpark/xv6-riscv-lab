@@ -92,6 +92,12 @@ use crate::sync::KSpinlock;
 // locally per this crate's established convention (see the module doc).
 // ===========================================================================
 
+// P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
+// now that its `#[no_mangle]` export is gone. The old redeclaration here
+// said `-> c_int`; the real fn returns `bool` (same 0/1 in `a0` under
+// the old C ABI), so the call sites drop their `!= 0`.
+use crate::proc::signal_pending;
+
 unsafe extern "C" {
     // printf.rs — C-variadic.
 
@@ -105,7 +111,6 @@ unsafe extern "C" {
     safe fn kmm_free(ptr: *mut c_void);
 
     // proc module (kernel/proc/thread.rs, kernel/proc/sched.rs).
-    safe fn signal_pending(p: *mut thread) -> c_int;
     safe fn sleep_ms(ms: u64);
 
     // proc/workqueue.rs — deferred vfs_fput after an RCU grace period.
@@ -2682,7 +2687,7 @@ fn poll_inner(fds_addr: u64, nfds: c_int, timeout_ms: c_int) -> KResult<c_int> {
                 break;
             }
             sleep_ms(1);
-            if signal_pending(current()) != 0 {
+            if signal_pending(current()) {
                 return Err(Errno::Intr);
             }
         }
@@ -2719,7 +2724,7 @@ fn poll_inner(fds_addr: u64, nfds: c_int, timeout_ms: c_int) -> KResult<c_int> {
             break;
         }
         sleep_ms(1);
-        if signal_pending(current()) != 0 {
+        if signal_pending(current()) {
             ready = neg(EINTR);
             break;
         }

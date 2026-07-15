@@ -99,28 +99,31 @@ mod raw {
         scheduler_wakeup, scheduler_wakeup_interruptible, scheduler_yield,
     };
 
+    // P3-D2b: the proc-object entry points (proc/{signal,thread_group,
+    // pgroup,pid}.rs) are ordinary Rust fns now that their `#[no_mangle]`
+    // exports are gone; re-exported here so every `raw::NAME` call site
+    // stays unchanged (`Thread`/`ThreadGroup` are plain aliases of the
+    // `crate::bindings` structs, so the signatures are identical).
+    pub(crate) use crate::proc::{
+        __proctab_get_initproc, get_pid_thread, kill_thread,
+        pgroup_remove_thread, sigpending_destroy, sigpending_empty,
+        signal_pending, thread_group_put, thread_group_remove,
+        thread_is_group_leader,
+    };
+
+    // This file's `Sigacts` is an opaque `c_void` stand-in; the real
+    // `sigacts_put` takes `*mut crate::bindings::sigacts` (layout-identical
+    // pointer, same cast-adapter precedent as `session_remove_thread`
+    // below).
+    #[inline]
+    pub fn sigacts_put(sa: *mut Sigacts) {
+        crate::proc::sigacts_put(sa as *mut crate::bindings::sigacts)
+    }
+
     unsafe extern "C" {
-        // Zero-arg, no-precondition entry points may be `safe`.
-        pub safe fn __proctab_get_initproc() -> *mut Thread;
-
-        // Field accessors / kernel calls that take raw pointers.
-        // SAFETY for every line below: the caller in `ffi::*` enforces
-        // the "valid live kernel pointer" precondition documented in
-        // the module header.
-        pub safe fn kill_thread(t: *mut Thread, signo: c_int) -> c_int;
-
-        pub safe fn pgroup_remove_thread(p: *mut Thread);
-        pub safe fn thread_group_remove(p: *mut Thread) -> bool;
-        pub safe fn thread_group_put(tg: *mut ThreadGroup);
-        pub safe fn thread_is_group_leader(p: *mut Thread) -> bool;
-
-        pub safe fn sigacts_put(sa: *mut Sigacts);
-        pub safe fn sigpending_empty(p: *mut Thread, signo: c_int) -> c_int;
-        pub safe fn sigpending_destroy(p: *mut Thread);
-        pub safe fn signal_pending(p: *mut Thread) -> bool;
+        // SAFETY: the caller in `ffi::*` enforces the "valid live kernel
+        // pointer" precondition documented in the module header.
         pub safe fn vm_put(vm: *mut Vm);
-
-        pub safe fn get_pid_thread(pid: c_int) -> *mut Thread;
     }
 
     // P3-1C mesh sweep: tty/session.rs and vfs/{fdtable,fs}.rs are in

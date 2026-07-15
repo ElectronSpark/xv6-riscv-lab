@@ -21,9 +21,13 @@ use crate::sync::KSpinlock;
 // `extern "C"` redeclarations.
 use crate::proc::{tq_init, tq_wait, tq_wait_cb, tq_wakeup};
 
-unsafe extern "C" {
+// P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
+// now that its `#[no_mangle]` export is gone. The old redeclaration here
+// said `-> u32`; the real fn returns `bool` (same 0/1 in `a0` under the
+// old C ABI), so the call sites drop their `!= 0`.
+use crate::proc::signal_pending;
 
-    pub safe fn signal_pending(p: *mut thread) -> u32;
+unsafe extern "C" {
     pub safe fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int;
     pub safe fn sched_timer_done(tn: *mut timer_node);
 }
@@ -287,10 +291,10 @@ pub(crate) fn mutex_lock_interruptible(m: *mut mutex_t)-> c_int  { u! {
     if try_set_holder(m, pid) { return 0; }
 
     while get_holder(m) != pid {
-        if signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if signal_pending(cur) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
         let ret = tq_wait(wq_ptr(m), lk_ptr(m), null_mut());
-        if ret != 0 && signal_pending(cur) != 0 && get_holder(m) != pid {
+        if ret != 0 && signal_pending(cur) && get_holder(m) != pid {
             return -(EINTR as c_int);
         }
     }
@@ -336,7 +340,7 @@ pub(crate) fn mutex_lock_timed(m: *mut mutex_t, timeout_ms: u64)-> c_int  { u! {
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
         );
-        if ret != 0 && signal_pending(cur) != 0 && get_holder(m) != pid {
+        if ret != 0 && signal_pending(cur) && get_holder(m) != pid {
             return -(EINTR as c_int);
         }
     }

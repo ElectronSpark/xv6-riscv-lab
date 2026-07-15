@@ -48,6 +48,10 @@ use crate::sync::{KSpinGuard, KSpinlock};
 // P3-D2a: proc/thread_queue.rs primitives, reached as plain crate-path
 // items instead of `extern "C"` redeclarations.
 use crate::proc::{tq_init, tq_wait, tq_wakeup_all};
+// P3-D2b: `signal_pending`/`kill_proc` (proc/signal.rs) and `pgroup_kill`
+// (proc/pgroup.rs) are plain crate-path items now that their
+// `#[no_mangle]` exports are gone (identical signatures).
+use crate::proc::{kill_proc, pgroup_kill, signal_pending};
 
 use super::session::{session_get_fg_pgid, session_set_ctrl_tty, session_set_fg_pgid};
 use super::termios::termios_init_default;
@@ -73,10 +77,6 @@ unsafe extern "C" {
 
     pub safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
     pub safe fn either_copyout(user_dst: c_int, dst: u64, src: *mut c_void, len: u64) -> c_int;
-
-    pub safe fn signal_pending(p: *mut thread) -> bool;
-    pub safe fn kill_proc(p: *mut thread, signum: c_int) -> c_int;
-    pub safe fn pgroup_kill(pgid: c_int, signum: c_int) -> c_int;
 
     pub safe fn safestrcpy(s: *mut c_char, t: *const c_char, n: usize) -> *mut c_char;
 

@@ -138,25 +138,20 @@ unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void;
 
-    // pid lookups
-    safe fn get_pid_thread(pid: c_int) -> *mut thread;
-    safe fn __proctab_get_initproc() -> *mut thread;
-    safe fn thread_tgid(p: *mut thread) -> c_int;
-
     // tcb_lock
     safe fn tcb_lock(p: *mut thread);
     safe fn tcb_unlock(p: *mut thread);
 
     // exit
     safe fn exit(code: c_int) -> !;
-
-    // pgroup
-    safe fn pgroup_kill(pgid: c_int, signum: c_int) -> c_int;
-
-    // RCU
-
-    // thread group helpers (Rust ports in thread_group.rs)
 }
+
+// P3-D2b: the pid lookups (proc/pid.rs), `thread_tgid`
+// (proc/thread_group.rs) and `pgroup_kill` (proc/pgroup.rs) are plain
+// crate-path items now that their `#[no_mangle]` exports are gone
+// (identical signatures) -- they used to be `extern "C"` redeclarations
+// in the block above.
+use crate::proc::{__proctab_get_initproc, get_pid_thread, pgroup_kill, thread_tgid};
 
 // P3-1B mesh sweep: both are same-crate `pub(crate)` items as of this wave
 // (`irq/trap.rs`, only caller anywhere in the tree is this file) --
@@ -395,8 +390,7 @@ macro_rules! raw_sig_abi {
 // ============================================================================
 // signo_default_action
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn signo_default_action(signo: c_int) -> c_int {
+pub(crate) fn signo_default_action(signo: c_int) -> c_int {
     match signo {
         SIGCHLD | SIGURG | SIGWINCH => SIG_ACT_IGN,
         SIGALRM | SIGUSR1 | SIGUSR2 | SIGHUP | SIGINT | SIGIO | SIGKILL
@@ -412,8 +406,7 @@ pub extern "C" fn signo_default_action(signo: c_int) -> c_int {
 // ============================================================================
 // recalc_sigpending_tsk / recalc_sigpending
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn recalc_sigpending_tsk(p: *mut thread) -> bool {
+pub(crate) fn recalc_sigpending_tsk(p: *mut thread) -> bool {
     if p.is_null() { return false; }
     // SAFETY: `p` is checked non-null at the top of `recalc_sigpending_tsk` above.
     let ta = unsafe { ThreadAccess::assume(p) };
@@ -434,8 +427,7 @@ pub extern "C" fn recalc_sigpending_tsk(p: *mut thread) -> bool {
     false
 }
 
-#[no_mangle]
-pub extern "C" fn recalc_sigpending() {
+pub(crate) fn recalc_sigpending() {
     let p = xv6_current_thread();
     if p.is_null() { return; }
     // SAFETY: `p` is checked non-null at the top of `recalc_sigpending` above.
@@ -452,8 +444,7 @@ pub extern "C" fn recalc_sigpending() {
 // ============================================================================
 // sigpending_init / sigpending_destroy / sigpending_clone / sigstack_init
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn sigpending_init(p: *mut thread) {
+pub(crate) fn sigpending_init(p: *mut thread) {
     if p.is_null() { return; }
     // SAFETY: `p` is checked non-null at the top of `sigpending_init` above.
     let ts = unsafe { ThreadSignalAccess::assume_thread(p) };
@@ -462,8 +453,7 @@ pub extern "C" fn sigpending_init(p: *mut thread) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sigpending_destroy(p: *mut thread) {
+pub(crate) fn sigpending_destroy(p: *mut thread) {
     if p.is_null() { return; }
     // SAFETY: `p` is checked non-null at the top of `sigpending_destroy` above.
     let ta = unsafe { ThreadAccess::assume(p) };
@@ -484,8 +474,7 @@ pub extern "C" fn sigpending_destroy(p: *mut thread) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sigpending_clone(dst: *mut thread_signal_t,
+pub(crate) fn sigpending_clone(dst: *mut thread_signal_t,
                                           src: *mut thread_signal_t,
                                           clone_flags: u64,
                                           esignal: c_int) {
@@ -506,8 +495,7 @@ pub extern "C" fn sigpending_clone(dst: *mut thread_signal_t,
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sigstack_init(stack: *mut stack_t) {
+pub(crate) fn sigstack_init(stack: *mut stack_t) {
     if stack.is_null() { return; }
     raw_sig_abi! {
         (*stack).ss_sp = ptr::null_mut();
@@ -519,8 +507,7 @@ pub extern "C" fn sigstack_init(stack: *mut stack_t) {
 // ============================================================================
 // ksiginfo_alloc / ksiginfo_free
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn ksiginfo_alloc()-> *mut ksiginfo_t  {
+pub(crate) fn ksiginfo_alloc()-> *mut ksiginfo_t  {
     raw_sig_abi! {
         let ksi = slab_alloc(ksiginfo_pool()) as *mut ksiginfo_t;
         if ksi.is_null() { return ptr::null_mut(); }
@@ -532,8 +519,7 @@ pub extern "C" fn ksiginfo_alloc()-> *mut ksiginfo_t  {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn ksiginfo_free(ksi: *mut ksiginfo_t) {
+pub(crate) fn ksiginfo_free(ksi: *mut ksiginfo_t) {
     if !ksi.is_null() {
         raw_sig_abi! { slab_free(ksi as *mut c_void); }
     }
@@ -551,22 +537,17 @@ fn sigacts_lock_impl(sa: *mut sigacts_t) {
 fn sigacts_unlock_impl(sa: *mut sigacts_t) {
     sigacts_lock_ref(sa).expect("BUG: sigacts_unlock called with null/invalid sigacts pointer").unlock();
 }
-fn sigacts_holding_impl(sa: *mut sigacts_t) -> c_int {
-    sigacts_lock_ref(sa).expect("BUG: sigacts_holding called with null/invalid sigacts pointer").holding() as c_int
-}
+// P3-D2b: `sigacts_holding` (+ its `_impl`) deleted -- zero callers
+// anywhere in the tree (kernel/inc/signal.h's legacy prototype does not
+// count, 9d35f95 precedent).
 
-#[no_mangle]
-pub extern "C" fn sigacts_lock(sa: *mut sigacts_t) { sigacts_lock_impl(sa) }
-#[no_mangle]
-pub extern "C" fn sigacts_unlock(sa: *mut sigacts_t) { sigacts_unlock_impl(sa) }
-#[no_mangle]
-pub extern "C" fn sigacts_holding(sa: *mut sigacts_t) -> c_int { sigacts_holding_impl(sa) }
+pub(crate) fn sigacts_lock(sa: *mut sigacts_t) { sigacts_lock_impl(sa) }
+pub(crate) fn sigacts_unlock(sa: *mut sigacts_t) { sigacts_unlock_impl(sa) }
 
 // ============================================================================
 // sigpending_empty
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn sigpending_empty(p: *mut thread, signo: c_int)-> c_int  {
+pub(crate) fn sigpending_empty(p: *mut thread, signo: c_int)-> c_int  {
     if p.is_null() { return -EINVAL; }
     raw_sig_abi! {
         let ta = ThreadAccess::assume(p);
@@ -640,8 +621,7 @@ fn sig_setdefault(sa: *mut sigacts_t, signo: c_int)-> c_int  {
 // ============================================================================
 // sigacts_init / sigacts_exec / sigacts_dup / sigacts_put / signal_init
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn sigacts_init()-> *mut sigacts_t  {
+pub(crate) fn sigacts_init()-> *mut sigacts_t  {
     raw_sig_abi! {
         let sa = slab_alloc(sigacts_pool()) as *mut sigacts_t;
         if sa.is_null() { return ptr::null_mut(); }
@@ -661,8 +641,7 @@ pub extern "C" fn sigacts_init()-> *mut sigacts_t  {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sigacts_exec(sa: *mut sigacts_t) {
+pub(crate) fn sigacts_exec(sa: *mut sigacts_t) {
     if sa.is_null() { return; }
     raw_sig_abi! {
         sigacts_lock(sa);
@@ -680,8 +659,7 @@ pub extern "C" fn sigacts_exec(sa: *mut sigacts_t) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sigacts_dup(psa: *mut sigacts_t, clone_flags: u64)-> *mut sigacts_t  {
+pub(crate) fn sigacts_dup(psa: *mut sigacts_t, clone_flags: u64)-> *mut sigacts_t  {
     if psa.is_null() { return ptr::null_mut(); }
     raw_sig_abi! {
         if (clone_flags & CLONE_SIGHAND) != 0 {
@@ -700,8 +678,7 @@ pub extern "C" fn sigacts_dup(psa: *mut sigacts_t, clone_flags: u64)-> *mut siga
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sigacts_put(sa: *mut sigacts_t) {
+pub(crate) fn sigacts_put(sa: *mut sigacts_t) {
     if sa.is_null() { return; }
     raw_sig_abi! {
         if !atomic_dec_unless_i32(&raw mut (*sa).refcount, 1) {
@@ -737,8 +714,7 @@ fn siginfo_queue_len(p: *mut thread, signo: c_int) -> c_int {
         .queue_len()
 }
 
-#[no_mangle]
-pub extern "C" fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
+pub(crate) fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  {
     if p.is_null() || info.is_null() { return -EINVAL; }
     raw_sig_abi! {
         let signo = (*info).signo;
@@ -840,8 +816,7 @@ pub extern "C" fn __signal_send(p: *mut thread, info: *mut ksiginfo_t)-> c_int  
     }
 }
 
-#[no_mangle]
-pub extern "C" fn signal_send(pid: c_int, info: *mut ksiginfo_t)-> c_int  {
+pub(crate) fn signal_send(pid: c_int, info: *mut ksiginfo_t)-> c_int  {
     if pid < 0 || info.is_null() { return -EINVAL; }
     // SAFETY: `info` is checked non-null immediately above.
     if sigbad(unsafe { KsigInfoAccess::assume(info) }.signo()) { return -EINVAL; }
@@ -864,8 +839,7 @@ pub extern "C" fn signal_send(pid: c_int, info: *mut ksiginfo_t)-> c_int  {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn signal_pending(p: *mut thread) -> bool {
+pub(crate) fn signal_pending(p: *mut thread) -> bool {
     if p.is_null() { return false; }
     if !THREAD_SIGPENDING(p) { return false; }
     let cur = xv6_current_thread();
@@ -880,26 +854,10 @@ pub extern "C" fn signal_pending(p: *mut thread) -> bool {
     has_pending
 }
 
-#[no_mangle]
-pub extern "C" fn signal_pending_locked(p: *mut thread, sa: *mut sigacts_t) -> bool {
-    if p.is_null() || sa.is_null() { return false; }
-    if !THREAD_SIGPENDING(p) { return false; }
-    // SAFETY: `p` is checked non-null at the top of `signal_pending_locked` above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    // SAFETY: `p` is checked non-null at the top of `signal_pending_locked` above.
-    let ts = unsafe { ThreadSignalAccess::assume_thread(p) };
-    let mut pending = ts.sig_pending_mask_atomic_load();
-    let blocked = ts.sig_mask();
-    let tg = ta.thread_group_ptr();
-    if !tg.is_null() {
-        // SAFETY: `tg` is checked non-null immediately above.
-        pending |= unsafe { ThreadGroupAccess::assume(tg) }.shared_pending_ref().sig_pending_mask_atomic_load();
-    }
-    (pending & !blocked) != 0
-}
+// P3-D2b: `signal_pending_locked` deleted -- zero callers anywhere in
+// the tree.
 
-#[no_mangle]
-pub extern "C" fn signal_notify(p: *mut thread)-> c_int  {
+pub(crate) fn signal_notify(p: *mut thread)-> c_int  {
     if p.is_null() { return -EINVAL; }
     raw_sig_abi! {
         proc_assert_holding(p);
@@ -915,77 +873,19 @@ pub extern "C" fn signal_notify(p: *mut thread)-> c_int  {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn signal_terminated(p: *mut thread) -> bool {
-    if p.is_null() { return false; }
-    // SAFETY: `p` is checked non-null at the top of `signal_terminated` above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    let sa = ta.sigacts_ptr();
-    if sa.is_null() { return false; }
-    sigacts_lock_impl(sa);
-    // SAFETY: `p` is checked non-null at the top of `signal_terminated` above.
-    let ts = unsafe { ThreadSignalAccess::assume_thread(p) };
-    let masked = ts.sig_pending_mask() & !ts.sig_mask();
-    // SAFETY: `sa` is checked non-null immediately above (`if sa.is_null() { return
-    // false; }`).
-    let t = (masked & unsafe { SigactsAccess::assume(sa) }.sigterm()) != 0;
-    sigacts_unlock_impl(sa);
-    t
-}
+// P3-D2b: `signal_terminated` deleted -- zero callers anywhere in the
+// tree (kernel/inc/signal.h's legacy prototype does not count).
 
 // ============================================================================
 // signal_test_clear_stopped
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn signal_test_clear_stopped(p: *mut thread)-> bool  {
-    if p.is_null() { return false; }
-    raw_sig_abi! {
-        let ta = ThreadAccess::from_raw(p).unwrap_unchecked();
-        let sa = ta.sigacts_ptr();
-        if sa.is_null() { return THREAD_STOPPED_p(p); }
-        sigacts_lock(sa);
-        let sigmask = (*p).signal.sig_mask;
-        let sigstop_mask = (*sa).sa_sigstop;
-        let sigcont_mask = (*sa).sa_sigcont;
-        let masked = (*p).signal.sig_pending_mask & !sigmask;
-        let pending_stopped = masked & sigstop_mask;
-        let pending_cont = masked & sigcont_mask;
-
-        if pending_cont != 0 {
-            let mut user_handler = false;
-            for signo in 1..=NSIG {
-                if sigismember(sigcont_mask, signo) > 0 && sigismember(pending_cont, signo) > 0 {
-                    let act = &raw const (*sa).sa[signo as usize];
-                    let h = (*act).__bindgen_anon_1.sa_handler;
-                    let is_dfl = h.is_none();
-                    let is_ign = matches!(h, Some(f) if (f as *const () as usize) == 1);
-                    if !is_dfl && !is_ign { user_handler = true; break; }
-                }
-            }
-            (*p).signal.sig_pending_mask &= !sigstop_mask;
-            if !user_handler {
-                (*p).signal.sig_pending_mask &= !pending_cont;
-            }
-            recalc_sigpending_tsk(p);
-            sigacts_unlock(sa);
-            return false;
-        }
-        if pending_stopped != 0 {
-            (*p).signal.sig_pending_mask &= !pending_stopped;
-            recalc_sigpending_tsk(p);
-            sigacts_unlock(sa);
-            return true;
-        }
-        sigacts_unlock(sa);
-        THREAD_STOPPED_p(p)
-    }
-}
+// P3-D2b: `signal_test_clear_stopped` deleted -- zero callers anywhere
+// in the tree.
 
 // ============================================================================
 // signal_restore
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn signal_restore(p: *mut thread, context: *mut c_void)-> c_int  {
+pub(crate) fn signal_restore(p: *mut thread, context: *mut c_void)-> c_int  {
     if p.is_null() || context.is_null() { return -EINVAL; }
     raw_sig_abi! {
         let ctx = context as *mut UContext;
@@ -1014,8 +914,7 @@ pub extern "C" fn signal_restore(p: *mut thread, context: *mut c_void)-> c_int  
 // ============================================================================
 // sigaction
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn sigaction(signum: c_int, act: *mut sigaction_t,
+pub(crate) fn sigaction(signum: c_int, act: *mut sigaction_t,
                                    oldact: *mut sigaction_t)-> c_int  {
     if signum < 1 || signum > NSIG { return -EINVAL; }
     if signum == SIGKILL || signum == SIGSTOP { return -EINVAL; }
@@ -1079,8 +978,7 @@ pub extern "C" fn sigaction(signum: c_int, act: *mut sigaction_t,
 // ============================================================================
 // sigprocmask
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn sigprocmask(how: c_int, set: *const sigset_t,
+pub(crate) fn sigprocmask(how: c_int, set: *const sigset_t,
                                      oldset: *mut sigset_t)-> c_int  {
     if !set.is_null() && how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK {
         return -EINVAL;
@@ -1135,8 +1033,7 @@ pub extern "C" fn sigprocmask(how: c_int, set: *const sigset_t,
 // ============================================================================
 // sigpending (query)
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn sigpending(p: *mut thread, set: *mut sigset_t) -> c_int {
+pub(crate) fn sigpending(p: *mut thread, set: *mut sigset_t) -> c_int {
     if set.is_null() { return -EINVAL; }
     if p.is_null() { xv6_panic(c"sigpending: thread NULL".as_ptr()); }
     // SAFETY: `p` is proven non-null by the `xv6_panic` (diverging) null check
@@ -1160,8 +1057,7 @@ pub extern "C" fn sigpending(p: *mut thread, set: *mut sigset_t) -> c_int {
 // ============================================================================
 // sigreturn
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn sigreturn()-> c_int  {
+pub(crate) fn sigreturn()-> c_int  {
     raw_sig_abi! {
         let p = xv6_current_thread();
         if p.is_null() { xv6_panic(c"sigreturn: current NULL".as_ptr()); }
@@ -1297,8 +1193,7 @@ fn notify_parent_child_stopped(p: *mut thread) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn handle_signal() {
+pub(crate) fn handle_signal() {
     raw_sig_abi! {
         let p = xv6_current_thread();
         if p.is_null() { xv6_panic(c"handle_signal: current NULL".as_ptr()); }
@@ -1447,8 +1342,7 @@ fn make_ksiginfo(signum: c_int, sender: *mut thread, si_pid: c_int) -> ksiginfo_
     crate::proc::access::make_ksiginfo(signum, sender, si_pid)
 }
 
-#[no_mangle]
-pub extern "C" fn kill(pid: c_int, signum: c_int) -> c_int {
+pub(crate) fn kill(pid: c_int, signum: c_int) -> c_int {
     if pid < -1 { return pgroup_kill(-pid, signum); }
     if pid == -1 { return -EINVAL; }
     let cur = xv6_current_thread();
@@ -1456,16 +1350,14 @@ pub extern "C" fn kill(pid: c_int, signum: c_int) -> c_int {
     signal_send(pid, &mut info)
 }
 
-#[no_mangle]
-pub extern "C" fn kill_thread(p: *mut thread, signum: c_int)-> c_int  {
+pub(crate) fn kill_thread(p: *mut thread, signum: c_int)-> c_int  {
     let cur = xv6_current_thread();
     let mut info = make_ksiginfo(signum, cur, thread_tgid(cur));
     let _rcu = crate::lock::rcu::KRcuRead::new();
     __signal_send(p, &mut info)
 }
 
-#[no_mangle]
-pub extern "C" fn tgkill(tgid: c_int, tid: c_int, signum: c_int) -> c_int {
+pub(crate) fn tgkill(tgid: c_int, tid: c_int, signum: c_int) -> c_int {
     if tgid < 0 || tid < 0 || sigbad(signum) { return -EINVAL; }
     let _rcu = crate::lock::rcu::KRcuRead::new();
     let p = get_pid_thread(tid);
@@ -1483,8 +1375,7 @@ pub extern "C" fn tgkill(tgid: c_int, tid: c_int, signum: c_int) -> c_int {
     __signal_send(p, &mut info)
 }
 
-#[no_mangle]
-pub extern "C" fn tkill(tid: c_int, signum: c_int) -> c_int {
+pub(crate) fn tkill(tid: c_int, signum: c_int) -> c_int {
     if tid < 0 || sigbad(signum) { return -EINVAL; }
     let _rcu = crate::lock::rcu::KRcuRead::new();
     let p = get_pid_thread(tid);
@@ -1494,8 +1385,7 @@ pub extern "C" fn tkill(tid: c_int, signum: c_int) -> c_int {
     __signal_send(p, &mut info)
 }
 
-#[no_mangle]
-pub extern "C" fn killed(p: *mut thread) -> c_int {
+pub(crate) fn killed(p: *mut thread) -> c_int {
     if p.is_null() { return 0; }
     if THREAD_KILLED(p) { 1 } else { 0 }
 }
@@ -1519,21 +1409,10 @@ fn signal_send_to_tgroup(tgid: c_int, info: *mut ksiginfo_t)-> c_int  {
     __signal_send(leader, info)
 }
 
-#[no_mangle]
-pub extern "C" fn kill_from_kernel(pid: c_int, signum: c_int) -> c_int {
-    if sigbad(signum) && signum != 0 { return -EINVAL; }
-    let mut info = make_ksiginfo(signum, ptr::null_mut(), 0);
-    if signum == 0 {
-        let _rcu = crate::lock::rcu::KRcuRead::new();
-        let p = get_pid_thread(pid);
-        if is_err(p) { return -ESRCH; }
-        return 0;
-    }
-    signal_send_to_tgroup(pid, &mut info)
-}
+// P3-D2b: `kill_from_kernel` deleted -- zero callers anywhere in the
+// tree (kernel/inc/signal.h's legacy prototype does not count).
 
-#[no_mangle]
-pub extern "C" fn kill_proc(p: *mut thread, signum: c_int)-> c_int  {
+pub(crate) fn kill_proc(p: *mut thread, signum: c_int)-> c_int  {
     if p.is_null() || sigbad(signum) { return -EINVAL; }
     let cur = xv6_current_thread();
     let mut info = make_ksiginfo(signum, cur, if cur.is_null() { 0 } else { thread_tgid(cur) });
@@ -1549,8 +1428,7 @@ pub extern "C" fn kill_proc(p: *mut thread, signum: c_int)-> c_int  {
 // ============================================================================
 // sigsuspend / sigwait
 // ============================================================================
-#[no_mangle]
-pub extern "C" fn sigsuspend(mask: *const sigset_t)-> c_int  {
+pub(crate) fn sigsuspend(mask: *const sigset_t)-> c_int  {
     raw_sig_abi! {
         let p = xv6_current_thread();
         if p.is_null() || mask.is_null() { return -EINVAL; }
@@ -1583,8 +1461,7 @@ pub extern "C" fn sigsuspend(mask: *const sigset_t)-> c_int  {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn sigwait(set: *const sigset_t, sig: *mut c_int)-> c_int  {
+pub(crate) fn sigwait(set: *const sigset_t, sig: *mut c_int)-> c_int  {
     raw_sig_abi! {
         let p = xv6_current_thread();
         if p.is_null() || set.is_null() || sig.is_null() { return -EINVAL; }

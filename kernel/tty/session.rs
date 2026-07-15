@@ -99,20 +99,7 @@ unsafe extern "C" {
         flags: u64,
     ) -> c_int;
 
-    // pid lock (proc/pid.rs).
-    pub safe fn pid_wlock();
-    pub safe fn pid_wunlock();
-    pub safe fn pid_assert_wholding();
-
-    // proc/pid.rs, proc/pgroup.rs, proc/thread_group.rs, lock/rcu.rs.
-    pub safe fn get_pid_thread(pid: c_int) -> *mut thread;
-    pub safe fn thread_tgid(p: *mut thread) -> c_int;
-    pub safe fn pgroup_alloc(pgid: c_int, leader: *mut thread_group) -> *mut pgroup;
-    pub safe fn pgroup_add_tg(pg: *mut pgroup, tg: *mut thread_group) -> c_int;
-    pub safe fn pgroup_remove_tg(tg: *mut thread_group);
-    pub safe fn pgroup_add_thread(pg: *mut pgroup, t: *mut thread) -> c_int;
-    pub safe fn pgroup_remove_thread(t: *mut thread);
-    pub safe fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo) -> c_int;
+    // lock/rcu.rs.
     pub safe fn rcu_read_lock();
     pub safe fn rcu_read_unlock();
 
@@ -943,14 +930,16 @@ pub(crate) unsafe extern "C" fn session_get_fg_pgid(s: *mut session) -> pid_t {
     }
 }
 
-// cross-module: proc/pgroup.rs (real signature: `pgroup_getpgid`-style
-// module, `pgroup_alloc`/`pgroup_add_tg`/... already declared above;
-// `get_pgroup` is declared separately since `session_set_fg_pgid` is the
-// only user in this file).
-unsafe extern "C" {
-    #[link_name = "get_pgroup"]
-    safe fn get_pgroup(pgid: c_int) -> *mut pgroup;
-}
+// P3-D2b: the proc-object entry points (proc/{pid,thread_group,
+// pgroup}.rs) are plain crate-path items now that their `#[no_mangle]`
+// exports are gone (identical signatures) -- this replaces both the
+// `extern "C"` redeclarations that sat in the block above and the
+// `#[link_name = "get_pgroup"]` block that used to sit here.
+use crate::proc::{
+    get_pgroup, get_pid_thread, pgroup_add_tg, pgroup_add_thread,
+    pgroup_alloc, pgroup_remove_tg, pgroup_remove_thread,
+    pid_assert_wholding, pid_wlock, pid_wunlock, tg_signal_send, thread_tgid,
+};
 
 // ===========================================================================
 // setsid / getsid (POSIX).

@@ -27,12 +27,13 @@ use crate::bindings::{bool_, cdev_ops_t, cdev_t, mode_t, session, tty};
 // ===========================================================================
 
 unsafe extern "C" {
-    pub safe fn pid_wlock();
-    pub safe fn pid_wunlock();
-
     pub safe fn __panic_start();
     pub safe fn __panic_end() -> !;
 }
+// P3-D2b: `pid_wlock`/`pid_wunlock` (proc/pid.rs) are plain crate-path
+// items now that their `#[no_mangle]` exports are gone (identical
+// signatures).
+use crate::proc::{pid_wlock, pid_wunlock};
 // P3-1D mesh sweep: dev/cdev.rs is in scope for this wave; signature is
 // identical, so this becomes a plain crate-path import instead of an
 // `extern "C"` redeclaration.

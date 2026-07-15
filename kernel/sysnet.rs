@@ -56,6 +56,8 @@ use crate::proc::proc_shims::xv6_current_thread;
 // P3-D2a: proc/sched.rs sleep/wake entry points, reached as plain
 // crate-path items instead of `extern "C"` redeclarations.
 use crate::proc::{sleep_on_chan_interruptible, wakeup_on_chan};
+// P3-D2b: `killed` (proc/signal.rs) likewise (identical signature).
+use crate::proc::killed;
 use crate::net::mbufq;
 use crate::sync::SpinLock;
 
@@ -72,9 +74,6 @@ unsafe extern "C" {
 
     // string.rs.
     fn kfree(pa: *mut c_void);
-
-    // proc/signal.rs.
-    safe fn killed(p: *mut thread) -> c_int;
 
     // mm/vm.rs.
     safe fn vm_copyout(vm_ptr: *mut vm, dstva: u64, src: *const c_void, len: u64) -> c_int;

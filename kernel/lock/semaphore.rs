@@ -28,9 +28,13 @@ const SEM_VALUE_MAX: c_int = 2_147_483_640;
 // `extern "C"` redeclarations.
 use crate::proc::{tq_init, tq_wait, tq_wait_cb, tq_wakeup};
 
-unsafe extern "C" {
+// P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
+// now that its `#[no_mangle]` export is gone. The old redeclaration here
+// said `-> u32`; the real fn returns `bool` (same 0/1 in `a0` under the
+// old C ABI), so the call sites drop their `!= 0`.
+use crate::proc::signal_pending;
 
-    pub safe fn signal_pending(p: *mut thread) -> u32;
+unsafe extern "C" {
     pub safe fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int;
     pub safe fn sched_timer_done(tn: *mut timer_node);
     pub safe fn sleep_ms(ms: u64);
@@ -300,7 +304,7 @@ pub(crate) fn sem_wait_interruptible(s: *mut sem_t)-> c_int  { u! {
         let ret = sem_trywait(s);
         if ret == 0 { return 0; }
         if ret != -(EAGAIN as c_int) { return ret; }
-        if signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if signal_pending(cur) { return -(EINTR as c_int); }
         sleep_ms(1);
     }
 }}
@@ -351,7 +355,7 @@ pub(crate) fn sem_timedwait(s: *mut sem_t, timeout_ms: u64)-> c_int  { u! {
                     crate::printf::Cs(name_of(s)));
             }
         }
-        if signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if signal_pending(cur) { return -(EINTR as c_int); }
         if (machine::read_time().wrapping_sub(start)) >= timeout_ticks {
             return -(ETIMEDOUT as c_int);
         }

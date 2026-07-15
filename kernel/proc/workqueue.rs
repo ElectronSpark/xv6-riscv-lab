@@ -113,7 +113,6 @@ unsafe extern "C" {
     safe fn tcb_lock(t: *mut thread);
     safe fn tcb_unlock(t: *mut thread);
 
-    safe fn kill_thread(t: *mut thread, sig: c_int) -> c_int;
     pub safe fn exit(code: c_int) -> !;
 
     pub safe fn slab_alloc(cache: *mut slab_cache_t) -> *mut c_void;
@@ -137,6 +136,8 @@ use crate::proc::{
     scheduler_wakeup, scheduler_yield, tq_init, tq_size, tq_wait, tq_wakeup, tq_wakeup_all,
     wakeup,
 };
+// P3-D2b: `kill_thread` (proc/signal.rs) likewise.
+use crate::proc::kill_thread;
 
 // =========================================================================
 // Wrapper-construction helpers. Each pointer constructor is null-safe.

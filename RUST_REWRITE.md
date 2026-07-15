@@ -1575,6 +1575,27 @@ guards are already done (8a–8d).
   interrupted waiter from queue"); ENOENT. (Worker: boot ×4, forktest OK,
   stressfs, nm sweep.) Net diff 36 files, +296/−666.
 
+### Iteration 53 — 2026-07-15 — Wave P3-D2b: proc-object cluster C-ABI surface dismantled (signal/thread_group/pid/pgroup `no_mangle` 73→0)
+
+- Owner-driven mesh sweep: signal.rs 39→0 (34 demoted, 5 dead deleted),
+  thread_group.rs 19→0 (14+5 — incl. `get_thread_group`+`_inner`, dead
+  after D1a's caller conversions), pid.rs 8→0 (6+2), pgroup.rs 7→0 (7+0).
+  Crate-wide `#[no_mangle]` 267→**194**.
+- 19 consumer files converted (sys_signal 10, exit 11 via `mod raw` +
+  one `#[inline]` cast adapter, session 12 incl. a `#[link_name]` block
+  deletion, thread 8, clone 6, tty/trap/console/pipe/xv6fs/lock files…).
+  Divergent-signature unifications (ABI-identical, 9d35f95 precedent):
+  `signal_pending` → real `bool` (24 call sites drop `!= 0`), sigaction
+  buffer + clone.rs opaque handles → real bindings types, thread.rs
+  `KERNEL_PG` retyped `AtomicPtr<pgroup>`.
+- Zero kept-`extern "C"` exceptions; no .S refs (sig_trampoline.S only
+  *defines* `sig_trampoline`; `push_sigframe` already private); keep-set
+  untouched. nm: none of the 73 names in the linked kernel.
+- Verified (orchestrator): 0-warning clean rebuild; cache clean; boot
+  gate; **testsig 21/21**; killstatus/forkfork OK; ENOENT; no panics.
+  (Worker: boot ×2, exitwait/reparent OK, stressfs.) Net diff 23 files,
+  +323/−496.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

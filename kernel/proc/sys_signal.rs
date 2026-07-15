@@ -35,34 +35,22 @@ unsafe extern "C" {
     pub safe fn either_copyout(user_dst: c_int, dst: u64,
                                src: *const c_void, len: u64) -> c_int;
 
-    // Not `pub`: every fn below shares a bare name with a real definition
-    // glob-reexported from `signal.rs`/`sched.rs` at `crate::proc` (some,
-    // like `sigaction` here, additionally under a deliberately narrowed
-    // opaque-pointer signature -- "the C function name `sigaction`
-    // collides with the C struct of the same name; we keep the struct
-    // opaque (pointer-only) below"). Making these crate-visible would
-    // trigger E0659 ambiguous-glob-reexport the moment any other proc
-    // submodule imports the real one by its bare name (P3-1B2 sweep,
-    // same finding as `clone.rs`). Only ever called from within this
-    // file, so file-private is both sufficient and correct.
-    safe fn sigprocmask(how: c_int,
-                            set: *const sigset_t,
-                            oldset: *mut sigset_t) -> c_int;
-    safe fn sigaction(signum: c_int,
-                          act: *const c_void,
-                          oldact: *mut c_void) -> c_int;
-    safe fn sigpending(p: *mut bindings::thread,
-                           set: *mut sigset_t) -> c_int;
-    safe fn sigreturn() -> c_int;
-    safe fn sigsuspend(mask: *const sigset_t) -> c_int;
-    safe fn sigwait(set: *const sigset_t, sig: *mut c_int) -> c_int;
-
-    safe fn kill(pid: c_int, sig: c_int) -> c_int;
-    safe fn tgkill(tgid: c_int, tid: c_int, sig: c_int) -> c_int;
-    safe fn tkill(tid: c_int, sig: c_int) -> c_int;
-
-    safe fn signal_pending(p: *mut bindings::thread) -> c_int;
 }
+
+// P3-D2b: the signal syscall backends (proc/signal.rs) are ordinary Rust
+// fns now that their `#[no_mangle]` exports are gone; reached as plain
+// (file-private, so no E0659 glob-reexport ambiguity) crate-path items
+// instead of the `extern "C"` redeclarations that used to sit in the
+// block above. `sigaction` used to be redeclared here with a narrowed
+// opaque-pointer signature (`*const c_void`/`*mut c_void`); its single
+// call site now casts to the real `*mut bindings::sigaction` instead
+// (ABI-identical pointer casts). `signal_pending` used to be redeclared
+// `-> c_int`; the real fn returns `bool` (same 0/1 in `a0` under the old
+// C ABI), so its single call site drops the `!= 0`.
+use crate::proc::{
+    kill, sigaction, sigpending, sigprocmask, sigreturn, sigsuspend, sigwait,
+    signal_pending, tgkill, tkill,
+};
 
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
@@ -135,7 +123,15 @@ pub(crate) extern "C" fn sys_sigaction() -> u64 {
         p_oldact = oldact_buf.as_mut_ptr() as *mut c_void;
     }
 
-    let ret = sigaction(signum, p_act, p_oldact);
+    // Cast the raw byte buffers to the real `struct sigaction` pointers
+    // (the old extern redeclaration took `*const c_void`/`*mut c_void`;
+    // the buffers are `SIZEOF_SIGACTION`-byte copies of the user struct,
+    // pinned by the drift guard above).
+    let ret = sigaction(
+        signum,
+        p_act as *mut bindings::sigaction,
+        p_oldact as *mut bindings::sigaction,
+    );
     if ret < 0 {
         return ret as u64;
     }
@@ -191,7 +187,7 @@ pub(crate) extern "C" fn sys_pause() -> u64 {
     let p = current();
     loop {
         xv6_thread_state_set(p, THREAD_INTERRUPTIBLE);
-        if signal_pending(p) != 0 {
+        if signal_pending(p) {
             xv6_thread_state_set(p, THREAD_RUNNING);
             return (-EINTR) as u64;
         }

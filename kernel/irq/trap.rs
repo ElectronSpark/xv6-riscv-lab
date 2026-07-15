@@ -99,6 +99,8 @@ use crate::backtrace::print_backtrace;
 // P3-D2a: `scheduler_yield` (proc/sched.rs) is a plain crate-path item
 // now that its `extern "C"` redeclaration is gone.
 use crate::proc::scheduler_yield;
+// P3-D2b: `kill`/`killed`/`handle_signal` (proc/signal.rs) likewise.
+use crate::proc::{handle_signal, kill, killed};
 
 // ===========================================================================
 // scause / SSTATUS / signal ABI constants (`kernel/inc/trap.h`,
@@ -193,11 +195,8 @@ unsafe extern "C" {
     // mm/page.rs
     fn page_alloc(order: u64, flags: u64) -> *mut c_void;
 
-    // proc/signal.rs, proc/exit.rs
-    safe fn killed(p: *mut thread) -> c_int;
-    safe fn kill(pid: c_int, signum: c_int) -> c_int;
+    // proc/exit.rs
     safe fn exit(status: c_int) -> !;
-    safe fn handle_signal();
 
     // kernelvec.S -- address taken (`w_stvec((uint64)kernelvec)`), never
     // called directly from Rust.

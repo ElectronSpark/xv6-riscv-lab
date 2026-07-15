@@ -122,11 +122,13 @@ use crate::sync::KSpinlock;
 // / `vfs/file.rs`'s externs-block docs).
 // ===========================================================================
 
-unsafe extern "C" {
-    // proc module.
-    safe fn killed(p: *mut thread) -> c_int;
-    safe fn signal_pending(p: *mut thread) -> c_int;
+// P3-D2b: `killed`/`signal_pending` (proc/signal.rs) are plain crate-path
+// items now that their `#[no_mangle]` exports are gone. `signal_pending`
+// used to be redeclared `-> c_int`; the real fn returns `bool` (same 0/1
+// in `a0` under the old C ABI), so its call sites drop their `!= 0`.
+use crate::proc::{killed, signal_pending};
 
+unsafe extern "C" {
     // lock/spinlock.rs — init only (lock/unlock go through
     // `crate::sync::KSpinlock` RAII, see the module doc).
     safe fn spin_init(l: *mut crate::bindings::spinlock_t, name: *mut c_char);
@@ -422,7 +424,7 @@ fn pipe_wait_writer(pi: *mut pipe) -> c_int {
         )
     };
     drop(g);
-    if signal_pending(cur) != 0 {
+    if signal_pending(cur) {
         return neg(EINTR);
     }
     // Return 0 to re-check conditions (the wakeup may be from close or
@@ -458,7 +460,7 @@ fn pipe_wait_reader(pi: *mut pipe) -> c_int {
         )
     };
     drop(g);
-    if signal_pending(cur) != 0 {
+    if signal_pending(cur) {
         return neg(EINTR);
     }
     0

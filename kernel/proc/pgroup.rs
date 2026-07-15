@@ -53,19 +53,16 @@ use crate::proc::proc_shims::{
 };
 
 unsafe extern "C" {
-    // From session.h / thread.h / thread_group.h (real extern fns).
-    pub safe fn get_pid_thread(pid: i32) -> *mut Thread;
-    // Not `pub`: shares a bare name with the real definition glob-
-    // reexported from `thread_group.rs` at `crate::proc`. Making this
-    // crate-visible would trigger E0659 ambiguous-glob-reexport the
-    // moment any other proc submodule imports the real one by its bare
-    // name (P3-1B2 sweep, same finding as `clone.rs`/`sys_signal.rs`).
-    // Only ever called from within this file, so file-private is both
-    // sufficient and correct.
-    safe fn thread_tgid(t: *mut Thread) -> i32;
     pub safe fn rcu_read_lock();
     pub safe fn rcu_read_unlock();
 }
+
+// P3-D2b: `get_pid_thread` (proc/pid.rs) and `thread_tgid`
+// (proc/thread_group.rs) are plain (file-private, so no E0659
+// glob-reexport ambiguity) crate-path items now that their
+// `#[no_mangle]` exports are gone (identical signatures) -- they used
+// to be `extern "C"` redeclarations in the block above.
+use crate::proc::{get_pid_thread, thread_tgid};
 
 // P3-1C mesh sweep: tty/session.rs is in scope for this wave, same
 // opaque-marker reinterpret precedent used throughout this file (this
@@ -177,8 +174,7 @@ fn __pgroup_cleanup(pg: *mut Pgroup) {
 // Allocation
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn pgroup_alloc(
+pub(crate) fn pgroup_alloc(
     pgid: i32,
     leader: *mut ThreadGroup,
 ) -> *mut Pgroup {
@@ -227,8 +223,7 @@ pub(crate) extern "C" fn pgroup_init(initproc: *mut Thread) {
 // Thread membership
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn pgroup_add_thread(
+pub(crate) fn pgroup_add_thread(
     pg: *mut Pgroup,
     t: *mut Thread,
 ) -> i32 {
@@ -250,8 +245,7 @@ pub extern "C" fn pgroup_add_thread(
     0
 }
 
-#[no_mangle]
-pub extern "C" fn pgroup_remove_thread(t: *mut Thread) {
+pub(crate) fn pgroup_remove_thread(t: *mut Thread) {
     pid_assert_wholding();
     if t.is_null() {
         return;
@@ -276,8 +270,7 @@ pub extern "C" fn pgroup_remove_thread(t: *mut Thread) {
 // Thread group membership
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn pgroup_add_tg(
+pub(crate) fn pgroup_add_tg(
     pg: *mut Pgroup,
     tg: *mut ThreadGroup,
 ) -> i32 {
@@ -298,8 +291,7 @@ pub extern "C" fn pgroup_add_tg(
     0
 }
 
-#[no_mangle]
-pub extern "C" fn pgroup_remove_tg(tg: *mut ThreadGroup) {
+pub(crate) fn pgroup_remove_tg(tg: *mut ThreadGroup) {
     pid_assert_wholding();
     if tg.is_null() {
         return;
@@ -369,8 +361,7 @@ pub(crate) extern "C" fn pgroup_migrate_tg(
 // Lookup
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn get_pgroup(pgid: i32) -> *mut Pgroup {
+pub(crate) fn get_pgroup(pgid: i32) -> *mut Pgroup {
     let t = get_pid_thread(pgid);
     if is_err_const(t as *const c_void) {
         return err_ptr::<Pgroup>(-ESRCH);
@@ -502,8 +493,7 @@ pub(crate) extern "C" fn pgroup_getpgid(pid: i32) -> i32 {
 // Process-group-wide signal delivery
 // ---------------------------------------------------------------------------
 
-#[no_mangle]
-pub extern "C" fn pgroup_kill(pgid: i32, signum: i32) -> i32 {
+pub(crate) fn pgroup_kill(pgid: i32, signum: i32) -> i32 {
     xv6_pid_rlock();
     let pg = get_pgroup(pgid);
     if is_err_const(pg as *const c_void) || pg_exited(pg) != 0 {

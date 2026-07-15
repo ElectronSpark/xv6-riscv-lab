@@ -73,9 +73,6 @@ unsafe extern "C" {
 
     pub safe fn sleep_ms(ms: u64);
 
-    pub safe fn killed(p: *mut thread) -> c_int;
-    pub safe fn procdump();
-
     pub safe fn either_copyin(dst: *mut c_void, user_src: c_int, src: u64, len: u64) -> c_int;
     pub safe fn either_copyout(user_dst: c_int, dst: u64, src: *mut c_void, len: u64) -> c_int;
 
@@ -87,10 +84,12 @@ unsafe extern "C" {
         stack_order: c_int,
     ) -> *mut thread;
 
-    pub safe fn __proctab_get_initproc() -> *mut thread;
-    pub safe fn pid_wlock();
-    pub safe fn pid_wunlock();
 }
+
+// P3-D2b: the proc-object entry points (proc/{signal,pid}.rs) are plain
+// crate-path items now that their `#[no_mangle]` exports are gone
+// (identical signatures).
+use crate::proc::{__proctab_get_initproc, killed, pid_wlock, pid_wunlock, procdump};
 
 /// `struct irq_desc`/`register_irq_handler`/`PLIC_IRQ_OFFSET` now live in
 /// `kernel/irq/irq_core.rs` (Phase 2 Wave 5 — irq/irq.c port). Previously

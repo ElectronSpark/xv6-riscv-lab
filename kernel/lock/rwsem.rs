@@ -21,9 +21,13 @@ use crate::sync::KSpinlock;
 // `extern "C"` redeclarations.
 use crate::proc::{tq_init, tq_size, tq_wait, tq_wait_cb, tq_wakeup, tq_wakeup_all};
 
-unsafe extern "C" {
+// P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
+// now that its `#[no_mangle]` export is gone. The old redeclaration here
+// said `-> u32`; the real fn returns `bool` (same 0/1 in `a0` under the
+// old C ABI), so the call sites drop their `!= 0`.
+use crate::proc::signal_pending;
 
-    pub safe fn signal_pending(p: *mut thread) -> u32;
+unsafe extern "C" {
     pub safe fn sched_timer_set(tn: *mut timer_node, ticks: u64) -> c_int;
     pub safe fn sched_timer_done(tn: *mut timer_node);
 }
@@ -307,10 +311,10 @@ pub(crate) fn rwsem_acquire_read_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     let cur = machine::current_thread_ptr();
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     while reader_should_wait(l) {
-        if signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if signal_pending(cur) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
         let ret = tq_wait(rq_ptr(l), lk_ptr(l), null_mut());
-        if ret != 0 && signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
     }
     set_readers(l, get_readers(l) + 1);
     0
@@ -328,7 +332,7 @@ pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int
     let tm = machine::tick_ms();
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     while reader_should_wait(l) {
-        if signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if signal_pending(cur) { return -(EINTR as c_int); }
         let elapsed = machine::read_time().wrapping_sub(start);
         if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
         let remaining_ticks = timeout_ticks - elapsed;
@@ -349,7 +353,7 @@ pub(crate) fn rwsem_acquire_read_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_int
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
         );
-        if ret != 0 && signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
     }
     set_readers(l, get_readers(l) + 1);
     0
@@ -394,10 +398,10 @@ pub(crate) fn rwsem_acquire_write_interruptible(l: *mut rwsem_t)-> c_int  { u! {
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     if get_holder(l) == pid { return -(EDEADLK as c_int); }
     while writer_should_wait(l, pid) {
-        if signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if signal_pending(cur) { return -(EINTR as c_int); }
         machine::thread_state_set(cur, thread_state_THREAD_INTERRUPTIBLE);
         let ret = tq_wait(wq_ptr(l), lk_ptr(l), null_mut());
-        if ret != 0 && signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
     }
     set_holder(l, pid);
     0
@@ -417,7 +421,7 @@ pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_in
     let _g = KSpinlock::from_bindings(lk_ptr(l)).lock();
     if get_holder(l) == pid { return -(EDEADLK as c_int); }
     while writer_should_wait(l, pid) {
-        if signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if signal_pending(cur) { return -(EINTR as c_int); }
         let elapsed = machine::read_time().wrapping_sub(start);
         if elapsed >= timeout_ticks { return -(ETIMEDOUT as c_int); }
         let remaining_ticks = timeout_ticks - elapsed;
@@ -438,7 +442,7 @@ pub(crate) fn rwsem_acquire_write_timed(l: *mut rwsem_t, timeout_ms: u64)-> c_in
             &mut ctx as *mut _ as *mut c_void,
             null_mut(),
         );
-        if ret != 0 && signal_pending(cur) != 0 { return -(EINTR as c_int); }
+        if ret != 0 && signal_pending(cur) { return -(EINTR as c_int); }
     }
     set_holder(l, pid);
     0

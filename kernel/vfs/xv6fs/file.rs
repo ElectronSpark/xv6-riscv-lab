@@ -53,10 +53,13 @@ use super::truncate::xv6fs_bmap;
 // block: symbols outside the xv6fs driver).
 // ===========================================================================
 
-unsafe extern "C" {
-    // proc module.
-    safe fn signal_pending(p: *mut thread) -> bool_;
+// P3-D2b: `signal_pending` (proc/signal.rs) is a plain crate-path item
+// now that its `#[no_mangle]` export is gone. The old redeclaration here
+// said `-> bool_` (c_uint); the real fn returns `bool` (same 0/1 in `a0`
+// under the old C ABI), so the call sites drop their `!= 0`.
+use crate::proc::signal_pending;
 
+unsafe extern "C" {
     // string.rs.
     safe fn memmove(dst: *mut c_void, src: *const c_void, n: usize) -> *mut c_void;
 
@@ -167,7 +170,7 @@ extern "C" fn __xv6fs_file_read(file: *mut vfs_file, buf: *mut c_char, mut count
             if bytes_read > 0 {
                 return bytes_read as isize;
             }
-            return if signal_pending(current()) != 0 { neg(EINTR) as isize } else { neg(EIO) as isize };
+            return if signal_pending(current()) { neg(EINTR) as isize } else { neg(EIO) as isize };
         }
         let ret = pcache_read_page(pc, page);
         if ret != 0 {
@@ -312,7 +315,7 @@ extern "C" fn __xv6fs_file_write(file: *mut vfs_file, buf: *const c_char, count:
                 if bytes_written > 0 {
                     return bytes_written as isize;
                 }
-                return if signal_pending(current()) != 0 { neg(EINTR) as isize } else { neg(EIO) as isize };
+                return if signal_pending(current()) { neg(EINTR) as isize } else { neg(EIO) as isize };
             }
             let ret = pcache_read_page(pc, page);
             if ret != 0 {

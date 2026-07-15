@@ -30,16 +30,16 @@ use core::ptr;
 // c_void`), so the direct Rust calls type-check with call sites unchanged.
 // ---------------------------------------------------------------------------
 type Thread       = crate::bindings::thread;
-type ThreadGroup  = crate::bindings::thread_group;
-type Pgroup       = crate::bindings::pgroup;
 type Session      = crate::bindings::session;
 type SchedEntity  = c_void;
 type Context      = c_void;
 type VfsFdtable   = c_void;
 type FsStruct     = c_void;
 type Vm           = c_void;
-type Sigacts      = c_void;
-type ThreadSignal = c_void;
+// P3-D2b: `ThreadGroup`/`Pgroup`/`Sigacts`/`ThreadSignal` aliases deleted --
+// their only users were the `extern "C"` redeclarations of proc-object
+// entry points, now plain crate-path imports typed with the real
+// `crate::bindings` structs.
 
 // ---------------------------------------------------------------------------
 // Errno + constants (mirrors of C headers)
@@ -99,30 +99,42 @@ use crate::proc::proc_shims::{
 
 unsafe extern "C" {
     // Existing kernel C symbols
-    // Not `pub`: `thread_create`/`sigpending_clone`/`attach_child`/
-    // `thread_destroy`/`thread_group_add`/
-    // `thread_group_alloc` below collide (same bare name, different
-    // opaque-marker signature) with the real definitions glob-reexported
-    // from `thread.rs`/`sched.rs`/`thread_group.rs` at `crate::proc` --
-    // making these crate-visible triggered (or risked triggering)
-    // E0659 ambiguous-glob-reexport the moment any other proc submodule
-    // imports the real one by its bare name (P3-1B2 sweep). They're only
-    // ever called from within this file, so file-private is both
-    // sufficient and correct.
+    // Not `pub`: `thread_create`/`attach_child`/`thread_destroy` below
+    // collide (same bare name, different opaque-marker signature) with
+    // the real definitions glob-reexported from `thread.rs` at
+    // `crate::proc` -- making these crate-visible triggered (or risked
+    // triggering) E0659 ambiguous-glob-reexport the moment any other
+    // proc submodule imports the real one by its bare name (P3-1B2
+    // sweep). They're only ever called from within this file, so
+    // file-private is both sufficient and correct.
     safe fn thread_create(entry: *mut c_void, arg1: u64, arg2: u64, kstack_order: c_int) -> *mut Thread;
     safe fn thread_destroy(t: *mut Thread);
     pub safe fn vm_dup(vm: *mut Vm) -> *mut Vm;
     pub safe fn vm_copy(vm: *mut Vm) -> *mut Vm;
-    pub safe fn sigacts_dup(psa: *mut Sigacts, flags: u64) -> *mut Sigacts;
-    safe fn sigpending_clone(dst: *mut ThreadSignal, src: *mut ThreadSignal, flags: u64, esignal: u64);
     safe fn attach_child(parent: *mut Thread, child: *mut Thread);
-    safe fn thread_group_add(tg: *mut ThreadGroup, t: *mut Thread);
-    safe fn thread_group_alloc(t: *mut Thread) -> c_int;
-    pub safe fn pgroup_add_tg(pg: *mut Pgroup, tg: *mut ThreadGroup);
-    pub safe fn pgroup_add_thread(pg: *mut Pgroup, t: *mut Thread);
 
     pub safe fn rcu_check_callbacks();
 }
+
+// P3-D2b: the signal/thread-group/pgroup entry points (proc/{signal,
+// thread_group,pgroup}.rs) are ordinary Rust fns now that their
+// `#[no_mangle]` exports are gone; reached as plain (file-private, so
+// no E0659 glob-reexport ambiguity) crate-path items instead of the
+// `extern "C"` redeclarations that used to sit in the block above.
+// Divergences the old redeclarations papered over, now handled at the
+// call sites instead:
+//  - `sigacts_dup`/`sigpending_clone` were declared with opaque
+//    `c_void` handles; the real fns take `*mut bindings::sigacts` /
+//    `*mut bindings::thread_signal_t` (layout-identical pointer casts).
+//  - `sigpending_clone`'s `esignal` was declared `u64`; the real param
+//    is `c_int` (the C ABI already only ever read the low 32 bits).
+//  - `pgroup_add_tg`/`pgroup_add_thread` were declared `-> ()`; the
+//    real fns return `c_int`, which the call sites discard exactly as
+//    the old ABI did.
+use crate::proc::{
+    pgroup_add_thread, pgroup_add_tg, sigacts_dup, sigpending_clone,
+    thread_group_add, thread_group_alloc,
+};
 
 // P3-D2a: `rq_task_fork` (kernel/proc/rq.rs) and `scheduler_wakeup`/
 // `scheduler_yield`/`context_switch_finish` (kernel/proc/sched.rs) are
@@ -315,21 +327,21 @@ pub extern "C" fn thread_clone(args: *mut CloneArgs) -> c_int {
     // sigacts
     let p_sigacts = xv6_t_sigacts(p);
     if !p_sigacts.is_null() {
-        let dup = sigacts_dup(p_sigacts, args.flags);
+        let dup = sigacts_dup(p_sigacts as *mut crate::bindings::sigacts, args.flags);
         if dup.is_null() {
             thread_destroy(child);
             __free_pid();
             return -ENOMEM;
         }
-        xv6_t_set_sigacts(child, dup);
+        xv6_t_set_sigacts(child, dup as *mut c_void);
     }
 
     // Per-thread signal mask
     sigpending_clone(
-        xv6_t_signal_ptr(child),
-        xv6_t_signal_ptr(p),
+        xv6_t_signal_ptr(child) as *mut crate::bindings::thread_signal_t,
+        xv6_t_signal_ptr(p) as *mut crate::bindings::thread_signal_t,
         args.flags,
-        args.esignal,
+        args.esignal as c_int,
     );
     xv6_t_set_clone_flags(child, args.flags);
 

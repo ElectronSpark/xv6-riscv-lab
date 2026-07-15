@@ -1,14 +1,16 @@
 //! Pure-Rust port of `kernel/proc/thread_group.c`.
 //!
-//! Owns the canonical public ABI symbols `thread_group_init`,
-//! `thread_group_get/put/live_dec`, `get_thread_group`,
-//! `tg_shared_pending_init/destroy`, `thread_group_alloc[/_kernel]`,
-//! `thread_group_add/remove`, `thread_is_group_leader`, `thread_tgid`,
-//! `thread_group_exit`, `tg_signal_send`, `tg_signal_pending`,
-//! `tg_dequeue_signal`, `tg_sigpending_empty`, `tg_recalc_sigpending`.
+//! Owns the canonical thread-group entry points `thread_group_init`,
+//! `thread_group_put`, `tg_shared_pending_init/destroy`,
+//! `thread_group_alloc[/_kernel]`, `thread_group_add/remove`,
+//! `thread_is_group_leader`, `thread_tgid`, `thread_group_exit`,
+//! `tg_signal_send`, `tg_dequeue_signal`, `tg_sigpending_empty`.
 //! The `xv6_tgport_*` C-ABI alias layer that used to front these for
-//! sibling Rust/C ports was collapsed in the P3-1B2 sweep -- callers now
-//! use these names directly.
+//! sibling Rust/C ports was collapsed in the P3-1B2 sweep; the
+//! `#[no_mangle]` C-ABI exports themselves were dismantled in P3-D2b
+//! (callers are plain crate-path Rust calls now), which also deleted the
+//! caller-less `thread_group_get`, `thread_group_live_dec`,
+//! `get_thread_group`, `tg_signal_pending`, `tg_recalc_sigpending`.
 
 #![allow(non_camel_case_types, non_upper_case_globals, non_snake_case, dead_code)]
 
@@ -33,7 +35,6 @@ use crate::proc::access::{
     list_node_detach_raw, list_node_init_raw, list_node_is_detached_raw, list_node_is_empty_raw,
     list_node_next_raw, list_node_push_back_raw,
 };
-use crate::kstd::{result_to_errptr, Errno, KResult};
 use crate::proc::proc_shims::{xv6_panic, xv6_pid_rlock, xv6_pid_runlock, xv6_pid_wholding};
 use crate::proc::ksiginfo_alloc;
 use crate::proc::ksiginfo_free;
@@ -72,13 +73,15 @@ const THREAD_RUNNING: thread_state = 8;
 const THREAD_STOPPED: thread_state = 9;
 const THREAD_ZOMBIE: thread_state = 11;
 
+// P3-D2b: `get_pid_thread` (proc/pid.rs) and `pgroup_remove_tg`
+// (proc/pgroup.rs) are plain crate-path items now that their
+// `#[no_mangle]` exports are gone (identical signatures) -- they used
+// to be `extern "C"` redeclarations in the block below.
+use crate::proc::{get_pid_thread, pgroup_remove_tg};
+
 // ---------------- extern C primitives -----------------------------------
 unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
-
-    // thread group needs these from sibling subsystems
-    safe fn get_pid_thread(pid: c_int) -> *mut thread;
-    safe fn pgroup_remove_tg(tg: *mut thread_group);
     safe fn exit(code: c_int) -> !;
 
     // signal helpers
@@ -214,8 +217,7 @@ fn tg_pool() -> *mut slab_cache_t { TG_POOL.0.get() as *mut slab_cache_t }
 // ===========================================================================
 // SECTION 15.1  subsystem init
 // ===========================================================================
-#[no_mangle]
-pub extern "C" fn thread_group_init(initproc: *mut thread) {
+pub(crate) fn thread_group_init(initproc: *mut thread) {
     // SAFETY: `slab_cache_init` is a bindgen `unsafe extern "C"`
     // function. `tg_pool()` points into the static `TG_POOL` cell,
     // which is valid for `'static` and not yet visible to any other
@@ -239,18 +241,16 @@ pub extern "C" fn thread_group_init(initproc: *mut thread) {
 // ===========================================================================
 // SECTION 15.2  reference counting
 // ===========================================================================
-#[no_mangle]
-pub extern "C" fn thread_group_get(tg: *mut thread_group) {
-    thread_group_get_impl(tg)
-}
+// P3-D2b: the `thread_group_get` wrapper deleted -- zero callers
+// anywhere in the tree; `thread_group_get_impl` stays (live caller in
+// `thread_group_add`).
 
 fn thread_group_get_impl(tg: *mut thread_group) {
     if tg.is_null() { return; }
     if let Some(tga) = ThreadGroupAccess::from_ptr(tg) { tga.refcount_fetch_add(1); }
 }
 
-#[no_mangle]
-pub extern "C" fn thread_group_put(tg: *mut thread_group) {
+pub(crate) fn thread_group_put(tg: *mut thread_group) {
     if tg.is_null() { return; }
     // SAFETY: `tg` is checked non-null above, and `refcount_dec_unless`
     // returning `false` means this call observed (and dropped) the
@@ -267,39 +267,17 @@ pub extern "C" fn thread_group_put(tg: *mut thread_group) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn thread_group_live_dec(tg: *mut thread_group) {
-    if tg.is_null() { return; }
-    // atomic_dec returns the *new* value via sub_fetch in C; original
-    // assert was "non-negative". Use fetch_sub and check previous > 0.
-    // SAFETY: `tg` is checked non-null at the top of `thread_group_live_dec` above.
-    let prev = unsafe { ThreadGroupAccess::assume(tg) }.live_threads_fetch_sub(1);
-    if prev <= 0 {
-        xv6_panic(c"Thread group live thread count went negative".as_ptr());
-    }
-}
+// P3-D2b: `thread_group_live_dec` deleted -- zero callers anywhere in
+// the tree (kernel/inc/proc/thread_group.h's legacy prototype does not
+// count).
 
-fn get_thread_group_inner(tgid: pid_t) -> KResult<*mut thread_group> {
-    let t = get_pid_thread(tgid);
-    if is_err(t) { return Err(Errno::Srch); }
-    if t.is_null() { return Err(Errno::Srch); }
-    // SAFETY: `t` is checked non-null (`is_err(t)` / `t.is_null()`) immediately above.
-    let ta = unsafe { ThreadAccess::assume(t) };
-    let tg = ta.thread_group_ptr();
-    if tg.is_null() { return Err(Errno::Srch); }
-    Ok(tg)
-}
-
-#[no_mangle]
-pub extern "C" fn get_thread_group(tgid: pid_t) -> *mut thread_group {
-    result_to_errptr(get_thread_group_inner(tgid))
-}
+// P3-D2b: `get_thread_group` (+ its `_inner`) deleted -- zero callers
+// anywhere in the tree.
 
 // ===========================================================================
 // SECTION 15.3  shared pending signal helpers
 // ===========================================================================
-#[no_mangle]
-pub extern "C" fn tg_shared_pending_init(tg: *mut thread_group) {
+pub(crate) fn tg_shared_pending_init(tg: *mut thread_group) {
     if tg.is_null() {
         xv6_panic(c"tg_shared_pending_init: NULL".as_ptr());
     }
@@ -311,8 +289,7 @@ pub extern "C" fn tg_shared_pending_init(tg: *mut thread_group) {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn tg_shared_pending_destroy(tg: *mut thread_group) {
+pub(crate) fn tg_shared_pending_destroy(tg: *mut thread_group) {
     if tg.is_null() { return; }
     // SAFETY: `tg` is checked non-null at the top of `tg_shared_pending_destroy`
     // above.
@@ -338,8 +315,7 @@ pub extern "C" fn tg_shared_pending_destroy(tg: *mut thread_group) {
 // ===========================================================================
 // SECTION 15.4  thread group lifecycle
 // ===========================================================================
-#[no_mangle]
-pub extern "C" fn thread_group_alloc(leader: *mut thread) -> c_int {
+pub(crate) fn thread_group_alloc(leader: *mut thread) -> c_int {
     if leader.is_null() {
         xv6_panic(c"thread_group_alloc: NULL leader".as_ptr());
     }
@@ -380,8 +356,7 @@ pub extern "C" fn thread_group_alloc(leader: *mut thread) -> c_int {
     }
 }
 
-#[no_mangle]
-pub extern "C" fn thread_group_alloc_kernel(
+pub(crate) fn thread_group_alloc_kernel(
     out_tg: *mut *mut thread_group,
     tgid: pid_t,
 ) -> c_int {
@@ -417,8 +392,7 @@ pub extern "C" fn thread_group_alloc_kernel(
 }
 
 // Caller must hold pid_wlock.
-#[no_mangle]
-pub extern "C" fn thread_group_add(tg: *mut thread_group, child: *mut thread) {
+pub(crate) fn thread_group_add(tg: *mut thread_group, child: *mut thread) {
     if tg.is_null() {
         xv6_panic(c"thread_group_add: NULL tg".as_ptr());
     }
@@ -447,8 +421,7 @@ pub extern "C" fn thread_group_add(tg: *mut thread_group, child: *mut thread) {
 }
 
 // Caller must hold pid_wlock.
-#[no_mangle]
-pub extern "C" fn thread_group_remove(p: *mut thread) -> bool {
+pub(crate) fn thread_group_remove(p: *mut thread) -> bool {
     if p.is_null() { return true; }
     // SAFETY: `p` is checked non-null at the top of `thread_group_remove` above.
     let ta = unsafe { ThreadAccess::assume(p) };
@@ -475,8 +448,7 @@ pub extern "C" fn thread_group_remove(p: *mut thread) -> bool {
 // ===========================================================================
 // SECTION 15.5  queries
 // ===========================================================================
-#[no_mangle]
-pub extern "C" fn thread_is_group_leader(p: *mut thread) -> bool {
+pub(crate) fn thread_is_group_leader(p: *mut thread) -> bool {
     if p.is_null() { return true; }
     // SAFETY: `p` is checked non-null at the top of `thread_is_group_leader` above.
     let ta = unsafe { ThreadAccess::assume(p) };
@@ -487,8 +459,7 @@ pub extern "C" fn thread_is_group_leader(p: *mut thread) -> bool {
     unsafe { ThreadGroupAccess::assume(tg) }.group_leader_ptr() == p
 }
 
-#[no_mangle]
-pub extern "C" fn thread_tgid(p: *mut thread) -> c_int {
+pub(crate) fn thread_tgid(p: *mut thread) -> c_int {
     if p.is_null() { return -1; }
     // SAFETY: `p` is checked non-null at the top of `thread_tgid` above.
     let ta = unsafe { ThreadAccess::assume(p) };
@@ -504,8 +475,7 @@ pub extern "C" fn thread_tgid(p: *mut thread) -> c_int {
 // ===========================================================================
 // SECTION 15.6  group exit
 // ===========================================================================
-#[no_mangle]
-pub extern "C" fn thread_group_exit(p: *mut thread, code: c_int) {
+pub(crate) fn thread_group_exit(p: *mut thread, code: c_int) {
     if p.is_null() { return; }
     // SAFETY: `p` is checked non-null above; `tg` is checked non-null
     // immediately after being read from `ta.thread_group_ptr()`, so it
@@ -597,8 +567,7 @@ unsafe fn tg_pick_thread(tg: *mut thread_group, signo: c_int) -> *mut thread {
 // ===========================================================================
 // SECTION 15.8  tg_signal_send / pending / dequeue / sigpending_empty
 // ===========================================================================
-#[no_mangle]
-pub extern "C" fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -> c_int {
+pub(crate) fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -> c_int {
     if tg.is_null() || info.is_null() { return -EINVAL; }
     // SAFETY: `tg` and `info` are checked non-null above, so
     // `(*info).signo` and `(*tg).__bindgen_anon_1` are valid.
@@ -737,22 +706,11 @@ pub extern "C" fn tg_signal_send(tg: *mut thread_group, info: *mut ksiginfo_t) -
     }
 }
 
-#[no_mangle]
-pub extern "C" fn tg_signal_pending(tg: *mut thread_group, p: *mut thread) -> bool {
-    if tg.is_null() || p.is_null() { return false; }
-    // SAFETY: `p` is checked non-null at the top of `tg_signal_pending` above.
-    let ta = unsafe { ThreadAccess::assume(p) };
-    if ta.sigacts_ptr().is_null() { return false; }
-    // SAFETY: `tg` is checked non-null at the top of `tg_signal_pending` above.
-    let shared = unsafe { ThreadGroupAccess::assume(tg) }.shared_pending_ref().sig_pending_mask_atomic_load();
-    // SAFETY: `p` is checked non-null at the top of `tg_signal_pending` above.
-    let blocked = unsafe { ThreadSignalAccess::assume_thread(p) }.sig_mask();
-    (shared & !blocked) != 0
-}
+// P3-D2b: `tg_signal_pending` deleted -- zero callers anywhere in the
+// tree.
 
 // Caller must hold sigacts lock and pid_rlock (or pid_wlock).
-#[no_mangle]
-pub extern "C" fn tg_dequeue_signal(tg: *mut thread_group, signo: c_int) -> *mut ksiginfo_t {
+pub(crate) fn tg_dequeue_signal(tg: *mut thread_group, signo: c_int) -> *mut ksiginfo_t {
     if tg.is_null() || sigbad(signo) { return ptr::null_mut(); }
     // SAFETY: `tg` is checked non-null at the top of `tg_dequeue_signal` above.
     let shared = unsafe { ThreadGroupAccess::assume(tg) }.shared_pending_ref();
@@ -774,8 +732,7 @@ pub extern "C" fn tg_dequeue_signal(tg: *mut thread_group, signo: c_int) -> *mut
 }
 
 // Caller must hold sigacts lock.
-#[no_mangle]
-pub extern "C" fn tg_sigpending_empty(tg: *mut thread_group, signo: c_int) {
+pub(crate) fn tg_sigpending_empty(tg: *mut thread_group, signo: c_int) {
     if tg.is_null() || sigbad(signo) { return; }
     // SAFETY: `tg` is checked non-null at the top of `tg_sigpending_empty` above.
     let shared = unsafe { ThreadGroupAccess::assume(tg) }.shared_pending_ref();
@@ -796,31 +753,8 @@ pub extern "C" fn tg_sigpending_empty(tg: *mut thread_group, signo: c_int) {
 }
 
 // Caller must hold pid_rlock or pid_wlock.
-#[no_mangle]
-pub extern "C" fn tg_recalc_sigpending(tg: *mut thread_group) {
-    if tg.is_null() { return; }
-    // SAFETY: `tg` is checked non-null at the top of `tg_recalc_sigpending` above.
-    let tga = unsafe { ThreadGroupAccess::assume(tg) };
-    let shared = tga.shared_pending_ref().sig_pending_mask();
-    for_each_tg_thread(tga.thread_list_ptr(), |t| {
-        // SAFETY: `t` is yielded by `for_each_tg_thread` walking
-        // `tga.thread_list_ptr()`, which by kernel invariant only links
-        // threads currently live in this group.
-        let tt = unsafe { ThreadAccess::assume(t) };
-        if tt.sigacts_ptr().is_null() { return; }
-        // SAFETY: `t` is yielded by `for_each_tg_thread` walking
-        // `tga.thread_list_ptr()`, which by kernel invariant only links
-        // threads currently live in this group.
-        let ts = unsafe { ThreadSignalAccess::assume_thread(t) };
-        let blocked = ts.sig_mask();
-        let thread_pending = ts.sig_pending_mask_atomic_load();
-        if ((thread_pending | shared) & !blocked) != 0 {
-            thread_set_sigpending(t);
-        } else {
-            thread_clear_sigpending(t);
-        }
-    });
-}
+// P3-D2b: `tg_recalc_sigpending` deleted -- zero callers anywhere in
+// the tree.
 
 // The `xv6_tgport_*` C-ABI alias layer that used to front thread_group_init/
 // thread_group_get/put/live_dec, get_thread_group, tg_shared_pending_init/
