@@ -88,11 +88,16 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::sync::atomic::{AtomicI32, Ordering};
 
+// P3-CS6: every `neg(E*)` site that used to build a raw negative `c_int`
+// by hand is now `Errno::<Variant>` (converted to the C ABI encoding
+// exactly once, at each function's boundary, via
+// `result_to_errptr`/`result_to_neg_errno`/`Errno::neg`) -- only
+// `EAGAIN` survives as a real import, for `vfs_fput`'s untouched
+// (infallible-return) `fflush`-result comparison.
 use crate::bindings::{
     blkdev_t, bool_, cdev_t, device_t, list_node_t, loff_t, mutex_t, pipe, slab_cache_t,
     spinlock_t, stat, thread, vfs_fdtable, vfs_file, vfs_file_ops, vfs_inode, vfs_inode_ref,
-    EADDRINUSE, EAGAIN, EBADF, EFAULT, EINVAL, EISDIR, EMFILE, ENODEV, ENOMEM, ENOSYS, ENOTTY,
-    ENXIO, EOPNOTSUPP, ESPIPE, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
+    EAGAIN, SLAB_FLAG_DEBUG_BITMAP, SLAB_FLAG_STATIC,
 };
 use crate::sync::{KMutex, KSpinlock};
 
@@ -178,11 +183,18 @@ const fn neg(e: u32) -> c_int {
     -(e as c_int)
 }
 
-// `err_ptr`/`is_err`/`ptr_err`'s canonical home is `crate::kstd` (P3-CS2
+// `is_err`/`ptr_err`'s canonical home is `crate::kstd` (P3-CS2
 // centralization). Note `kstd::ptr_err` returns `c_int`, not `isize` —
-// this file's two call sites already cast the result to `c_int` at the
-// use site, so the narrower return type is a no-op there.
-use crate::kstd::{err_ptr, is_err, ptr_err};
+// this file's call sites already cast the result to `c_int` at the use
+// site, so the narrower return type is a no-op there.
+//
+// P3-CS6: this file's internal fallible logic now returns [`KResult<T>`]
+// (see the module doc's "Result-first" note in `kstd.rs`) — `err_ptr` is
+// no longer needed locally (every former `err_ptr(..)` call site below is
+// now `Err(Errno::..)`, converted to the transitional `ERR_PTR` encoding
+// exactly once at each function's C-ABI boundary via
+// [`result_to_errptr`]/[`result_to_neg_errno`]).
+use crate::kstd::{is_err, ptr_err, result_to_errptr, result_to_neg_errno, Errno, KResult};
 
 // `uabi/stat.h`'s `S_IF*`/`S_IS*` macros (full set — this file touches
 // every file type `vfs/inode.rs` didn't need).
@@ -430,8 +442,11 @@ pub(crate) extern "C" fn __vfs_file_shrink_cache() {
 // Open-path helpers: character/block device files.
 // ===========================================================================
 
-/// Open a character device file.
-fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
+/// Open a character device file. Internal helper (P3-CS6: returns
+/// [`KResult`] — its sole caller, [`vfs_fileopen_inner`], is itself
+/// `KResult`-returning, so the former `c_int` error encoding just added
+/// an extra decode step at the one call site).
+fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> KResult<()> {
     // SAFETY: non-null `inode` (every call site checks `S_ISCHR` first,
     // which already dereferenced `inode->mode`).
     let raw_cdev = unsafe { (*inode).__bindgen_anon_2.cdev };
@@ -439,10 +454,13 @@ fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
     let minor = (raw_cdev & 0xFFFFF) as c_int;
     let cdev = cdev_get(major, minor);
     if is_err(cdev) {
-        return ptr_err(cdev) as c_int;
+        // Cross-module `ERR_PTR` this cluster doesn't own (`dev/cdev.rs`)
+        // -- passed through verbatim, same precedent as
+        // `vfs_syscall.rs`'s `Errno::Raw` sites.
+        return Err(Errno::Raw(ptr_err(cdev)));
     }
     if cdev.is_null() {
-        return neg(ENODEV);
+        return Err(Errno::NoDev);
     }
 
     // SAFETY: `cdev` is non-null and non-error (checked above); reading
@@ -455,7 +473,7 @@ fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
         let ret = unsafe { open_file_fn(cdev, file) };
         if ret != 0 {
             cdev_put(cdev);
-            return ret;
+            return Err(Errno::Raw(ret));
         }
         // SAFETY: non-null `file`.
         if unsafe { !(*file).ops.is_null() } {
@@ -463,7 +481,7 @@ fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
             // `file->cdev` (the cdev manages its own refcount in that
             // case), matching the C original's comment exactly.
             cdev_put(cdev);
-            return 0;
+            return Ok(());
         }
     }
 
@@ -472,11 +490,19 @@ fn open_cdev(inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
         (*file).__bindgen_anon_1.cdev = cdev;
         (*file).ops = ptr::null_mut(); // Device files use direct device I/O.
     }
-    0
+    Ok(())
 }
 
-/// Open a block device file.
-fn open_blkdev(inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
+/// Open a block device file. Always succeeds: if the device can't be
+/// found, the file is left with a null `blkdev`/`ops` so it can still be
+/// `stat`ed but not used for I/O (matches the C original's "device not
+/// found -- allow open for stat but not I/O" comment). P3-CS6: dropped
+/// the always-`0` `c_int` return the C ABI encoding required — this
+/// helper's only caller ([`vfs_fileopen_inner`]) never observed a
+/// non-zero result (verified by inspection: every path below ends in
+/// `return`, none in a nonzero value), so the signature change is a
+/// behavior-preserving simplification, not a semantic one.
+fn open_blkdev(inode: *mut vfs_inode, file: *mut vfs_file) {
     // SAFETY: non-null `inode`.
     let raw_bdev = unsafe { (*inode).__bindgen_anon_2.bdev };
     let major = ((raw_bdev >> 20) & 0xFFF) as c_int;
@@ -488,30 +514,38 @@ fn open_blkdev(inode: *mut vfs_inode, file: *mut vfs_file) -> c_int {
             // Device not found -- allow open for stat but not I/O.
             (*file).__bindgen_anon_1.blkdev = ptr::null_mut();
             (*file).ops = ptr::null_mut();
-            return 0;
+            return;
         }
         (*file).__bindgen_anon_1.blkdev = blkdev;
         (*file).ops = ptr::null_mut(); // Device files use direct device I/O.
     }
-    0
 }
 
 // ===========================================================================
 // Public VFS file API.
 // ===========================================================================
 
-pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> *mut vfs_file {
+/// Core logic behind [`vfs_fileopen`], factored out as a private helper
+/// returning [`KResult`] (P3-CS6, following the `vfs_syscall.rs` P3-CS4/5
+/// `*_inner` precedent). Every former `err_ptr(..)` site below is now
+/// `Err(Errno::..)` with the exact same errno value; the one `KResult` ->
+/// `ERR_PTR` conversion happens once, in [`vfs_fileopen`] itself, via
+/// [`result_to_errptr`]. Cross-module already-negative `c_int` results
+/// (`vfs_inode_get_ref`, the inode `open` callback) stay `Err(Errno::Raw(..))`
+/// — a boundary this cluster doesn't own, same precedent as
+/// `vfs_syscall.rs`'s `open_inner`.
+fn vfs_fileopen_inner(inode: *mut vfs_inode, f_flags: c_int) -> KResult<*mut vfs_file> {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     // SAFETY: non-null `inode`.
     let mode = unsafe { (*inode).mode };
 
     if is_sock(mode) {
-        return err_ptr(neg(ENXIO)); // Sockets cannot be opened via inode.
+        return Err(Errno::NxIo); // Sockets cannot be opened via inode.
     }
     if is_fifo(mode) {
-        return err_ptr(neg(ENXIO)); // Named pipes not supported via open yet.
+        return Err(Errno::NxIo); // Named pipes not supported via open yet.
     }
 
     vfs_ilock(inode);
@@ -519,43 +553,36 @@ pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> 
     let file = file_alloc();
     if file.is_null() {
         vfs_iunlock(inode);
-        return err_ptr(neg(ENOMEM));
+        return Err(Errno::NoMem);
     }
     // SAFETY: non-null `file`.
     let ret = vfs_inode_get_ref(inode, unsafe { ptr::addr_of_mut!((*file).inode) });
     if ret != 0 {
         file_free(file);
         vfs_iunlock(inode);
-        return err_ptr(ret);
+        return Err(Errno::Raw(ret));
     }
 
     if is_chr(mode) {
-        let ret = open_cdev(inode, file);
-        if ret != 0 {
+        if let Err(e) = open_cdev(inode, file) {
             vfs_iunlock(inode);
             // SAFETY: non-null `file`.
             vfs_inode_put_ref(unsafe { ptr::addr_of_mut!((*file).inode) });
             file_free(file);
-            return err_ptr(ret);
+            return Err(e);
         }
         vfs_iunlock(inode);
         ftable_attach(file);
         unsafe { (*file).f_flags = f_flags };
-        return file;
+        return Ok(file);
     }
 
     if is_blk(mode) {
-        let ret = open_blkdev(inode, file);
-        if ret != 0 {
-            vfs_iunlock(inode);
-            vfs_inode_put_ref(unsafe { ptr::addr_of_mut!((*file).inode) });
-            file_free(file);
-            return err_ptr(ret);
-        }
+        open_blkdev(inode, file); // Infallible -- see its own doc comment.
         vfs_iunlock(inode);
         ftable_attach(file);
         unsafe { (*file).f_flags = f_flags };
-        return file;
+        return Ok(file);
     }
 
     // Regular files and directories use inode->ops->open.
@@ -565,7 +592,7 @@ pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> 
         vfs_iunlock(inode);
         vfs_inode_put_ref(unsafe { ptr::addr_of_mut!((*file).inode) });
         file_free(file);
-        return err_ptr(neg(ENOSYS));
+        return Err(Errno::NoSys);
     };
     // SAFETY: `inode`/`file` are both live; `open` is a filesystem
     // driver callback invoked with the inode lock held, matching its
@@ -575,7 +602,7 @@ pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> 
         vfs_iunlock(inode);
         vfs_inode_put_ref(unsafe { ptr::addr_of_mut!((*file).inode) });
         file_free(file);
-        return err_ptr(ret);
+        return Err(Errno::Raw(ret));
     }
     // SAFETY: non-null `file`.
     if unsafe { (*file).ops.is_null() } {
@@ -583,7 +610,7 @@ pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> 
         vfs_inode_put_ref(unsafe { ptr::addr_of_mut!((*file).inode) });
         file_free(file);
         crate::kprintln!("vfs_fileopen: file operations not set by inode open");
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     vfs_iunlock(inode);
@@ -593,7 +620,11 @@ pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> 
         (*file).f_flags = f_flags;
         (*file).__bindgen_anon_1.f_pos = 0;
     }
-    file
+    Ok(file)
+}
+
+pub(crate) extern "C" fn vfs_fileopen(inode: *mut vfs_inode, f_flags: c_int) -> *mut vfs_file {
+    result_to_errptr(vfs_fileopen_inner(inode, f_flags))
 }
 
 /// Release a file reference. Decrements the file's reference count; on
@@ -681,9 +712,15 @@ pub(crate) extern "C" fn vfs_fdup(file: *mut vfs_file) -> *mut vfs_file {
     file
 }
 
-pub(crate) extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
+/// Core logic behind [`vfs_ioctl`], factored out as a private helper
+/// returning [`KResult`] (P3-CS6). Only `EBADF`/`ENODEV`/`ENOTTY` are
+/// this function's own failures; the driver-callback (`ops.ioctl`) and
+/// `dev_ioctl` results pass through as `Ok` unconditionally (they may
+/// themselves already be a negative `E*` value), matching the original's
+/// unconditional early `return`s.
+fn vfs_ioctl_inner(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> KResult<c_int> {
     if file.is_null() {
-        return neg(EBADF);
+        return Err(Errno::BadF);
     }
 
     // Fast path: character / block device files -- dispatch to the
@@ -700,16 +737,16 @@ pub(crate) extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_vo
             let ops = unsafe { (*file).ops };
             if let Some(ioctl) = unsafe { ops.as_ref() }.and_then(|o| o.ioctl) {
                 // SAFETY: `file` is live; `ioctl` is a driver callback.
-                return unsafe { ioctl(file, cmd, arg) };
+                return Ok(unsafe { ioctl(file, cmd, arg) });
             }
             // SAFETY: non-null `file`; the cdev pointer reinterprets as
             // `device_t*` because `device_t dev` is `cdev_t`'s first
             // field (repr(C), matches the C original's cast exactly).
             let dev = unsafe { (*file).__bindgen_anon_1.cdev as *mut device_t };
             if !dev.is_null() {
-                return dev_ioctl(dev, cmd, arg);
+                return Ok(dev_ioctl(dev, cmd, arg));
             }
-            return neg(ENODEV);
+            return Err(Errno::NoDev);
         }
     }
 
@@ -718,21 +755,35 @@ pub(crate) extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_vo
     let ops = unsafe { (*file).ops };
     if let Some(ioctl) = unsafe { ops.as_ref() }.and_then(|o| o.ioctl) {
         // SAFETY: `file` is live; `ioctl` is a driver callback.
-        return unsafe { ioctl(file, cmd, arg) };
+        return Ok(unsafe { ioctl(file, cmd, arg) });
     }
 
-    neg(ENOTTY)
+    Err(Errno::NotTy)
 }
 
-pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_int) -> isize {
+pub(crate) extern "C" fn vfs_ioctl(file: *mut vfs_file, cmd: u64, arg: *mut c_void) -> c_int {
+    match vfs_ioctl_inner(file, cmd, arg) {
+        Ok(v) => v,
+        Err(e) => e.neg(),
+    }
+}
+
+/// Core logic behind [`vfs_fileread`], factored out as a private helper
+/// returning [`KResult`] (P3-CS6). Every own-failure early return
+/// (`EBADF`/`EOPNOTSUPP`/`EISDIR`/`EINVAL`) is now the matching `Errno`
+/// variant; the driver-callback (`ops.read`) and `cdev_read` results
+/// pass through as `Ok` unconditionally (their `isize` may itself
+/// already be a negative errno), matching the original's unconditional
+/// `return`s of those values.
+fn vfs_fileread_inner(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_int) -> KResult<isize> {
     if file.is_null() {
-        return neg(EBADF) as isize;
+        return Err(Errno::BadF);
     }
     if buf.is_null() {
-        return neg(EFAULT) as isize;
+        return Err(Errno::Fault);
     }
     if n == 0 {
-        return 0; // POSIX: zero-length read succeeds.
+        return Ok(0); // POSIX: zero-length read succeeds.
     }
 
     // SAFETY: non-null `file`.
@@ -743,18 +794,18 @@ pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: 
         // SAFETY: non-null `file`.
         let ops = unsafe { (*file).ops };
         let Some(read) = unsafe { ops.as_ref() }.and_then(|o| o.read) else {
-            return neg(EBADF) as isize; // Not a readable file object.
+            return Err(Errno::BadF); // Not a readable file object.
         };
         let _g = file_lock(file).lock();
         // SAFETY: non-null `file`.
         if unsafe { (*file).f_flags } & O_ACCMODE == O_WRONLY {
-            return neg(EBADF) as isize; // File not opened for reading.
+            return Err(Errno::BadF); // File not opened for reading.
         }
         // SAFETY: `file`/`buf` are live for the call; `read` is a
         // filesystem driver callback that may sleep, matching its
         // documented contract -- held under `file_lock` exactly as the
         // C original does for this path.
-        return unsafe { read(file, buf as *mut c_char, n, user as bool_) };
+        return Ok(unsafe { read(file, buf as *mut c_char, n, user as bool_) });
     }
 
     // Character device read: check access and call without holding the
@@ -765,7 +816,7 @@ pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: 
         let _g = file_lock(file).lock();
         // SAFETY: non-null `file`.
         if unsafe { (*file).f_flags } & O_ACCMODE == O_WRONLY {
-            return neg(EBADF) as isize;
+            return Err(Errno::BadF);
         }
         // SAFETY: non-null `file`.
         let ops = unsafe { (*file).ops };
@@ -778,19 +829,19 @@ pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: 
             let cdev = unsafe { (*file).__bindgen_anon_1.cdev };
             cdev_read(cdev, user as bool_, buf, n) as isize
         };
-        return ret;
+        return Ok(ret);
     }
 
     let _g = file_lock(file).lock();
     // SAFETY: non-null `file`.
     if unsafe { (*file).f_flags } & O_ACCMODE == O_WRONLY {
-        return neg(EBADF) as isize; // File not opened for reading.
+        return Err(Errno::BadF); // File not opened for reading.
     }
 
     // Block device read -- not directly supported, use the buffer cache.
     // SAFETY: non-null `inode`.
     if is_blk(unsafe { (*inode).mode }) {
-        return neg(EOPNOTSUPP) as isize;
+        return Err(Errno::OpNotSupp);
     }
 
     // Regular files.
@@ -802,12 +853,12 @@ pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: 
     // SAFETY: non-null `inode`.
     let mode = unsafe { (*inode).mode };
     if !is_reg(mode) {
-        return (if is_dir(mode) { neg(EISDIR) } else { neg(EINVAL) }) as isize;
+        return Err(if is_dir(mode) { Errno::IsDir } else { Errno::Inval });
     }
     // SAFETY: non-null `file`.
     let ops = unsafe { (*file).ops };
     let Some(read) = unsafe { ops.as_ref() }.and_then(|o| o.read) else {
-        return neg(EOPNOTSUPP) as isize;
+        return Err(Errno::OpNotSupp);
     };
     // Pass the requested size to the driver; the driver handles EOF and
     // size checks internally.
@@ -817,15 +868,27 @@ pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: 
         // SAFETY: non-null `file`.
         unsafe { (*file).__bindgen_anon_1.f_pos += ret as loff_t };
     }
-    ret
+    Ok(ret)
 }
 
-pub(crate) extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_int {
+pub(crate) extern "C" fn vfs_fileread(file: *mut vfs_file, buf: *mut c_void, n: usize, user: c_int) -> isize {
+    match vfs_fileread_inner(file, buf, n, user) {
+        Ok(v) => v,
+        Err(e) => e.neg() as isize,
+    }
+}
+
+/// Core logic behind [`vfs_filestat`], factored out as a private helper
+/// returning [`KResult`] (P3-CS6). Only `EBADF`/`EFAULT` are this
+/// function's own failures; a filesystem-supplied `getattr`'s result
+/// passes through as `Ok` unconditionally (it may itself already be a
+/// negative errno), matching the original's unconditional `return`.
+fn vfs_filestat_inner(file: *mut vfs_file, out: *mut stat) -> KResult<c_int> {
     if file.is_null() {
-        return neg(EBADF);
+        return Err(Errno::BadF);
     }
     if out.is_null() {
-        return neg(EFAULT);
+        return Err(Errno::Fault);
     }
 
     // SAFETY: non-null `file`.
@@ -840,16 +903,16 @@ pub(crate) extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_
                 ptr::write_bytes(out, 0, 1);
                 (*out).mode = S_IFCHR | 0o666;
             }
-            return 0;
+            return Ok(0);
         }
-        return neg(EBADF);
+        return Err(Errno::BadF);
     }
 
     // SAFETY: non-null `inode`.
     if let Some(getattr) = unsafe { (*(*inode).ops).getattr } {
         // SAFETY: `inode`/`out` are both live; `getattr` is a
         // filesystem driver callback.
-        return unsafe { getattr(inode, out) };
+        return Ok(unsafe { getattr(inode, out) });
     }
 
     // Generic fallback when the filesystem doesn't implement inode
@@ -865,23 +928,34 @@ pub(crate) extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_
         (*out).size = (*inode).size as u64;
     }
     vfs_iunlock(inode);
-    0
+    Ok(0)
 }
 
-pub(crate) extern "C" fn vfs_filewrite(
+pub(crate) extern "C" fn vfs_filestat(file: *mut vfs_file, out: *mut stat) -> c_int {
+    match vfs_filestat_inner(file, out) {
+        Ok(v) => v,
+        Err(e) => e.neg(),
+    }
+}
+
+/// Core logic behind [`vfs_filewrite`], factored out as a private helper
+/// returning [`KResult`] (P3-CS6) — same shape/rationale as
+/// [`vfs_fileread_inner`] with the `O_RDONLY`/`O_WRONLY` access checks
+/// swapped.
+fn vfs_filewrite_inner(
     file: *mut vfs_file,
     buf: *const c_void,
     n: usize,
     user: c_int,
-) -> isize {
+) -> KResult<isize> {
     if file.is_null() {
-        return neg(EBADF) as isize;
+        return Err(Errno::BadF);
     }
     if buf.is_null() {
-        return neg(EFAULT) as isize;
+        return Err(Errno::Fault);
     }
     if n == 0 {
-        return 0; // POSIX: zero-length write succeeds.
+        return Ok(0); // POSIX: zero-length write succeeds.
     }
 
     // SAFETY: non-null `file`.
@@ -892,16 +966,16 @@ pub(crate) extern "C" fn vfs_filewrite(
         // SAFETY: non-null `file`.
         let ops = unsafe { (*file).ops };
         let Some(write) = unsafe { ops.as_ref() }.and_then(|o| o.write) else {
-            return neg(EBADF) as isize; // Not a writable file object.
+            return Err(Errno::BadF); // Not a writable file object.
         };
         let _g = file_lock(file).lock();
         // SAFETY: non-null `file`.
         if unsafe { (*file).f_flags } & O_ACCMODE == O_RDONLY {
-            return neg(EBADF) as isize; // File not opened for writing.
+            return Err(Errno::BadF); // File not opened for writing.
         }
         // SAFETY: `file`/`buf` live for the call; `write` may sleep,
         // held under `file_lock` exactly as the C original does.
-        return unsafe { write(file, buf as *const c_char, n, user as bool_) };
+        return Ok(unsafe { write(file, buf as *const c_char, n, user as bool_) });
     }
 
     // Character device write: same no-file-lock-across-I/O rationale as
@@ -911,7 +985,7 @@ pub(crate) extern "C" fn vfs_filewrite(
         let _g = file_lock(file).lock();
         // SAFETY: non-null `file`.
         if unsafe { (*file).f_flags } & O_ACCMODE == O_RDONLY {
-            return neg(EBADF) as isize;
+            return Err(Errno::BadF);
         }
         // SAFETY: non-null `file`.
         let ops = unsafe { (*file).ops };
@@ -923,19 +997,19 @@ pub(crate) extern "C" fn vfs_filewrite(
             let cdev = unsafe { (*file).__bindgen_anon_1.cdev };
             cdev_write(cdev, user as bool_, buf, n) as isize
         };
-        return ret;
+        return Ok(ret);
     }
 
     let _g = file_lock(file).lock();
     // SAFETY: non-null `file`.
     if unsafe { (*file).f_flags } & O_ACCMODE == O_RDONLY {
-        return neg(EBADF) as isize; // File not opened for writing.
+        return Err(Errno::BadF); // File not opened for writing.
     }
 
     // Block device write -- not directly supported, use the buffer cache.
     // SAFETY: non-null `inode`.
     if is_blk(unsafe { (*inode).mode }) {
-        return neg(EOPNOTSUPP) as isize;
+        return Err(Errno::OpNotSupp);
     }
 
     // Regular files. We do NOT lock the inode here -- the driver
@@ -947,12 +1021,12 @@ pub(crate) extern "C" fn vfs_filewrite(
     // SAFETY: non-null `inode`.
     let mode = unsafe { (*inode).mode };
     if !is_reg(mode) {
-        return (if is_dir(mode) { neg(EISDIR) } else { neg(EINVAL) }) as isize;
+        return Err(if is_dir(mode) { Errno::IsDir } else { Errno::Inval });
     }
     // SAFETY: non-null `file`.
     let ops = unsafe { (*file).ops };
     let Some(write) = unsafe { ops.as_ref() }.and_then(|o| o.write) else {
-        return neg(EOPNOTSUPP) as isize;
+        return Err(Errno::OpNotSupp);
     };
     // The driver handles file extension, size updates, and truncation
     // internally.
@@ -962,23 +1036,40 @@ pub(crate) extern "C" fn vfs_filewrite(
         // SAFETY: non-null `file`.
         unsafe { (*file).__bindgen_anon_1.f_pos += ret as loff_t };
     }
-    ret
+    Ok(ret)
 }
 
-pub(crate) extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> loff_t {
+pub(crate) extern "C" fn vfs_filewrite(
+    file: *mut vfs_file,
+    buf: *const c_void,
+    n: usize,
+    user: c_int,
+) -> isize {
+    match vfs_filewrite_inner(file, buf, n, user) {
+        Ok(v) => v,
+        Err(e) => e.neg() as isize,
+    }
+}
+
+/// Core logic behind [`vfs_filelseek`], factored out as a private helper
+/// returning [`KResult`] (P3-CS6). Only `EBADF`/`EINVAL`/`ESPIPE` are
+/// this function's own failures; the driver-callback (`ops.llseek`)
+/// result passes through as `Ok` unconditionally, matching the
+/// original's unconditional `return ret`.
+fn vfs_filelseek_inner(file: *mut vfs_file, offset: loff_t, whence: c_int) -> KResult<loff_t> {
     if file.is_null() {
-        return neg(EBADF) as loff_t;
+        return Err(Errno::BadF);
     }
     // SAFETY: non-null `file`.
     let inode = vfs_inode_deref(unsafe { ptr::addr_of_mut!((*file).inode) });
     if inode.is_null() {
-        return neg(EINVAL) as loff_t;
+        return Err(Errno::Inval);
     }
 
     // lseek only applies to regular files.
     // SAFETY: non-null `inode`.
     if !is_reg(unsafe { (*inode).mode }) {
-        return neg(ESPIPE) as loff_t; // Illegal seek.
+        return Err(Errno::SPipe); // Illegal seek.
     }
     let _g = file_lock(file).lock();
     // Note: we do NOT lock the inode here -- the driver callback (e.g.
@@ -987,7 +1078,7 @@ pub(crate) extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, when
     // SAFETY: non-null `file`.
     let ops = unsafe { (*file).ops };
     let Some(llseek) = unsafe { ops.as_ref() }.and_then(|o| o.llseek) else {
-        return neg(ESPIPE) as loff_t; // Not seekable.
+        return Err(Errno::SPipe); // Not seekable.
     };
     // SAFETY: `file` is live; `llseek` is a filesystem driver callback.
     let ret = unsafe { llseek(file, offset, whence) };
@@ -995,38 +1086,61 @@ pub(crate) extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, when
         // SAFETY: non-null `file`.
         unsafe { (*file).__bindgen_anon_1.f_pos = ret };
     }
-    ret
+    Ok(ret)
 }
 
-pub(crate) extern "C" fn truncate(file: *mut vfs_file, length: loff_t) -> c_int {
+pub(crate) extern "C" fn vfs_filelseek(file: *mut vfs_file, offset: loff_t, whence: c_int) -> loff_t {
+    match vfs_filelseek_inner(file, offset, whence) {
+        Ok(v) => v,
+        Err(e) => e.neg() as loff_t,
+    }
+}
+
+/// Core logic behind [`truncate`], factored out as a private helper
+/// returning [`KResult`] (P3-CS6). Only `EBADF`/`EISDIR`/`EINVAL` are
+/// this function's own failures; `vfs_itruncate`'s result passes through
+/// as `Ok` unconditionally (it may itself already be a negative errno),
+/// matching the original's unconditional `return`.
+fn truncate_inner(file: *mut vfs_file, length: loff_t) -> KResult<c_int> {
     if file.is_null() {
-        return neg(EBADF);
+        return Err(Errno::BadF);
     }
     // SAFETY: non-null `file`.
     let inode = vfs_inode_deref(unsafe { ptr::addr_of_mut!((*file).inode) });
     if inode.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
 
     // SAFETY: non-null `inode`.
     let mode = unsafe { (*inode).mode };
     if !is_reg(mode) {
-        return if is_dir(mode) { neg(EISDIR) } else { neg(EINVAL) };
+        return Err(if is_dir(mode) { Errno::IsDir } else { Errno::Inval });
     }
     if length < 0 {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
 
     let _g = file_lock(file).lock();
     // `vfs_ilock` is acquired inside `vfs_itruncate`.
-    vfs_itruncate(inode, length)
+    Ok(vfs_itruncate(inode, length))
+}
+
+pub(crate) extern "C" fn truncate(file: *mut vfs_file, length: loff_t) -> c_int {
+    match truncate_inner(file, length) {
+        Ok(v) => v,
+        Err(e) => e.neg(),
+    }
 }
 
 // ===========================================================================
 // VFS pipe allocation.
 // ===========================================================================
 
-pub(crate) extern "C" fn vfs_pipealloc(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> c_int {
+/// Core logic behind [`vfs_pipealloc`], factored out as a private helper
+/// returning [`KResult`] (P3-CS6). The `pipe_alloc` `ERR_PTR` failure is a
+/// cross-module boundary this cluster doesn't own -- stays
+/// `Err(Errno::Raw(..))`, same precedent as `open_cdev`.
+fn vfs_pipealloc_inner(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> KResult<()> {
     // SAFETY: `rf`/`wf` are caller-owned out-params (every caller in the
     // tree passes stack-local `struct vfs_file *` addresses).
     unsafe {
@@ -1036,20 +1150,20 @@ pub(crate) extern "C" fn vfs_pipealloc(rf: *mut *mut vfs_file, wf: *mut *mut vfs
 
     let read_file = file_alloc();
     if read_file.is_null() {
-        return neg(ENOMEM);
+        return Err(Errno::NoMem);
     }
 
     let write_file = file_alloc();
     if write_file.is_null() {
         file_free(read_file);
-        return neg(ENOMEM);
+        return Err(Errno::NoMem);
     }
 
     let pi = pipe_alloc(0);
     if is_err(pi) {
         file_free(read_file);
         file_free(write_file);
-        return ptr_err(pi) as c_int;
+        return Err(Errno::Raw(ptr_err(pi)));
     }
 
     pipe_open(read_file, pi, O_RDONLY);
@@ -1063,7 +1177,11 @@ pub(crate) extern "C" fn vfs_pipealloc(rf: *mut *mut vfs_file, wf: *mut *mut vfs
         *rf = read_file;
         *wf = write_file;
     }
-    0
+    Ok(())
+}
+
+pub(crate) extern "C" fn vfs_pipealloc(rf: *mut *mut vfs_file, wf: *mut *mut vfs_file) -> c_int {
+    result_to_neg_errno(vfs_pipealloc_inner(rf, wf))
 }
 
 // ===========================================================================
@@ -1097,14 +1215,18 @@ struct mbufq {
 /// attach it to the global file table, install it into the current
 /// process's fd table, and return the fd number. Returns a negative
 /// errno on failure.
-pub(crate) extern "C" fn vfs_custom_fd_alloc(
+/// Core logic behind [`vfs_custom_fd_alloc`], factored out as a private
+/// helper returning [`KResult`] (P3-CS6). `fd`'s sole failure mode (fd
+/// table exhaustion) becomes `Err(Errno::MFile)`; a successful fd passes
+/// through as `Ok`.
+fn vfs_custom_fd_alloc_inner(
     ops: *mut vfs_file_ops,
     private_data: *mut c_void,
     flags: c_int,
-) -> c_int {
+) -> KResult<c_int> {
     let f = file_alloc();
     if f.is_null() {
-        return neg(ENOMEM);
+        return Err(Errno::NoMem);
     }
 
     // SAFETY: non-null `f`.
@@ -1125,29 +1247,49 @@ pub(crate) extern "C" fn vfs_custom_fd_alloc(
     vfs_fput(f); // Drop our ref; the fdtable now owns it.
 
     if fd < 0 {
-        return neg(EMFILE);
+        return Err(Errno::MFile);
     }
-    fd
+    Ok(fd)
 }
 
-pub(crate) extern "C" fn vfs_sockalloc(
+pub(crate) extern "C" fn vfs_custom_fd_alloc(
+    ops: *mut vfs_file_ops,
+    private_data: *mut c_void,
+    flags: c_int,
+) -> c_int {
+    match vfs_custom_fd_alloc_inner(ops, private_data, flags) {
+        Ok(fd) => fd,
+        Err(e) => e.neg(),
+    }
+}
+
+/// Core logic behind [`vfs_sockalloc`], factored out as a private helper
+/// returning [`KResult`] (P3-CS6). The duplicate-tuple check is this
+/// function's only "real" runtime failure mode -- `Err(Errno::AddrInUse)`.
+/// Note the exact original control flow is preserved on that path: `f`
+/// was already `ftable_attach`ed before the duplicate check runs, and
+/// the original never called the matching `ftable_detach`/`vfs_fput`
+/// before `file_free`ing it (a pre-existing quirk, not introduced by
+/// this conversion -- kept byte-for-byte since behavior must stay
+/// identical).
+fn vfs_sockalloc_inner(
     out: *mut *mut vfs_file,
     raddr: u32,
     lport: u16,
     rport: u16,
-) -> c_int {
+) -> KResult<()> {
     // SAFETY: caller-owned out-param.
     unsafe { *out = ptr::null_mut() };
 
     let f = file_alloc();
     if f.is_null() {
-        return neg(ENOMEM);
+        return Err(Errno::NoMem);
     }
 
     let si = kalloc() as *mut sock;
     if si.is_null() {
         file_free(f);
-        return neg(ENOMEM);
+        return Err(Errno::NoMem);
     }
 
     // SAFETY: `si` is a fresh, exclusively-owned `sock`-sized allocation
@@ -1173,7 +1315,7 @@ pub(crate) extern "C" fn vfs_sockalloc(
     ftable_attach(f);
 
     // Add to the list of sockets (checking for duplicates).
-    let ret: c_int = {
+    let dup: bool = {
         // SAFETY: `SOCKETS` (`sysnet.rs`) is a live `SpinLock<*mut
         // crate::sysnet::sock>`; this file's local `sock` (above) is a
         // byte-layout-identical mirror of that type (see the module
@@ -1193,25 +1335,32 @@ pub(crate) extern "C" fn vfs_sockalloc(
             }
             pos = unsafe { (*pos).next };
         }
-        if dup {
-            neg(EADDRINUSE)
-        } else {
+        if !dup {
             // SAFETY: `si` is a freshly initialized, exclusively-owned node.
             unsafe {
                 (*si).next = *guard as *mut sock;
             }
             *guard = si as *mut crate::sysnet::sock;
-            0
         }
+        dup
     };
 
-    if ret != 0 {
+    if dup {
         kfree(si as *mut c_void);
         file_free(f);
-        return ret;
+        return Err(Errno::AddrInUse);
     }
 
     // SAFETY: caller-owned out-param.
     unsafe { *out = f };
-    0
+    Ok(())
+}
+
+pub(crate) extern "C" fn vfs_sockalloc(
+    out: *mut *mut vfs_file,
+    raddr: u32,
+    lport: u16,
+    rport: u16,
+) -> c_int {
+    result_to_neg_errno(vfs_sockalloc_inner(out, raddr, lport, rport))
 }

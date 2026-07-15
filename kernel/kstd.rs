@@ -210,6 +210,25 @@ pub enum Errno {
     /// `EEXIST`: file already exists (added for P3-CS5, `sys_vfs_open`'s
     /// `O_CREAT | O_EXCL` path).
     Exist,
+    /// `ENODEV`: no such device (added for P3-CS6, `vfs/file.rs`'s
+    /// `open_cdev`/`vfs_ioctl` device-lookup-miss paths).
+    NoDev,
+    /// `ENXIO`: no such device or address (added for P3-CS6,
+    /// `vfs/file.rs`'s `vfs_fileopen` socket/named-pipe-via-open
+    /// rejection).
+    NxIo,
+    /// `ENOTTY`: inappropriate ioctl for device (added for P3-CS6,
+    /// `vfs/file.rs`'s `vfs_ioctl` fallback).
+    NotTy,
+    /// `EOPNOTSUPP`: operation not supported (added for P3-CS6,
+    /// `vfs/file.rs`'s block-device/no-driver-callback read/write paths).
+    OpNotSupp,
+    /// `ESPIPE`: illegal seek (added for P3-CS6, `vfs/file.rs`'s
+    /// `vfs_filelseek` non-regular-file/non-seekable paths).
+    SPipe,
+    /// `EADDRINUSE`: address already in use (added for P3-CS6,
+    /// `vfs/file.rs`'s `vfs_sockalloc` duplicate-socket-tuple check).
+    AddrInUse,
     /// Passthrough for an already-computed raw `-errno` `c_int` obtained
     /// from a cross-file boundary this cluster doesn't own — e.g. an
     /// `ERR_PTR`-encoded pointer from `vfs/inode.rs`
@@ -257,6 +276,12 @@ impl Errno {
             Errno::Perm => crate::bindings::EPERM as c_int,
             Errno::NoSys => crate::bindings::ENOSYS as c_int,
             Errno::Exist => crate::bindings::EEXIST as c_int,
+            Errno::NoDev => crate::bindings::ENODEV as c_int,
+            Errno::NxIo => crate::bindings::ENXIO as c_int,
+            Errno::NotTy => crate::bindings::ENOTTY as c_int,
+            Errno::OpNotSupp => crate::bindings::EOPNOTSUPP as c_int,
+            Errno::SPipe => crate::bindings::ESPIPE as c_int,
+            Errno::AddrInUse => crate::bindings::EADDRINUSE as c_int,
             // `n` is already the raw negative `-errno` value; `raw()`'s
             // contract is to return the *positive* `E*` code, so negate
             // it back. `neg()` (below, `-self.raw()`) then recovers `n`
