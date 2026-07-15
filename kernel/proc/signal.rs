@@ -25,6 +25,9 @@ use crate::bindings::{
 };
 use crate::lock::spinlock::spin_holding;
 use crate::machine::{cpuid, CpuLocal};
+use crate::proc::proc_shims::{
+    xv6_current_thread, xv6_panic, xv6_pid_rlock, xv6_pid_runlock,
+};
 use crate::proc::proc_assert_holding;
 use crate::proc::scheduler_wakeup_stopped;
 use crate::proc::tg_dequeue_signal;
@@ -130,10 +133,6 @@ const IPI_REASON_RESCHEDULE: c_int = 2;
 unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn memmove(d: *mut c_void, s: *const c_void, n: usize) -> *mut c_void;
-    safe fn xv6_panic(msg: *const c_char) -> !;
-
-    // current thread / cpu
-    safe fn xv6_current_thread() -> *mut thread;
 
     // sched / wake
     safe fn scheduler_wakeup(p: *mut thread);
@@ -144,10 +143,6 @@ unsafe extern "C" {
     safe fn get_pid_thread(pid: c_int) -> *mut thread;
     safe fn __proctab_get_initproc() -> *mut thread;
     safe fn thread_tgid(p: *mut thread) -> c_int;
-
-    // pid rw lock shims (declared in proc_shims.rs)
-    safe fn xv6_pid_rlock();
-    safe fn xv6_pid_runlock();
 
     // tcb_lock
     safe fn tcb_lock(p: *mut thread);

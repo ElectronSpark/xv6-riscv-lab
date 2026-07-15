@@ -34,6 +34,7 @@ use crate::proc::access::{
     list_node_next_raw, list_node_push_back_raw,
 };
 use crate::kstd::{result_to_errptr, Errno, KResult};
+use crate::proc::proc_shims::{xv6_panic, xv6_pid_rlock, xv6_pid_runlock, xv6_pid_wholding};
 use crate::proc::ksiginfo_alloc;
 use crate::proc::ksiginfo_free;
 use crate::proc::sigacts_lock;
@@ -75,18 +76,10 @@ const THREAD_ZOMBIE: thread_state = 11;
 unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
 
-    // panic / printf
-    safe fn xv6_panic(msg: *const c_char) -> !;
-
     // thread group needs these from sibling subsystems
     safe fn get_pid_thread(pid: c_int) -> *mut thread;
     safe fn pgroup_remove_tg(tg: *mut thread_group);
     safe fn exit(code: c_int) -> !;
-
-    // pid global rwlock helpers (Rust shims)
-    safe fn xv6_pid_rlock();
-    safe fn xv6_pid_runlock();
-    safe fn xv6_pid_wholding() -> c_int;
 
     // signal helpers
 

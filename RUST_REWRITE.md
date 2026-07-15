@@ -1498,6 +1498,31 @@ blocked behind asm-offset nativization. The easy P3-8 globals (e1000,
 ramdisk, sockets, devtmpfs, bufcache, ptmx) + vm/pcache data-carrying
 guards are already done (8a–8d).
 
+### Iteration 50 — 2026-07-15 — Wave P3-D1a: proc mesh consumers off C-ABI (user directive: remove C-compatible interfaces)
+
+- Opens the **owner-driven mesh-dismantling arc** (P3-D): `proc_shims.rs`
+  (204 `#[no_mangle]` exports — the C-ABI mesh's last stronghold, a Phase-2
+  relic of `t_*`/`xv6_*`/`pg_*`/`tg_*` field-accessor shims) gets its
+  consumers converted from `unsafe extern "C"` redeclarations to direct
+  `use crate::proc::proc_shims::…` calls.
+- **205 redeclarations converted across 14 proc/* files** (+122/−323):
+  pgroup.rs 56, clone.rs 43, pid.rs 42, exit.rs 41, + 23 across
+  signal/thread_group/workqueue/sys_signal/rq/rq_test/thread_queue/sched/
+  sysproc/thread. Opaque `[u8;0]` marker types unified to `pub type`
+  aliases of the real `bindings` types (ABI-identical thin pointers) —
+  avoids hundreds of per-site casts. exit.rs re-exports via `pub use` inside
+  its `mod raw` so `raw::NAME` call sites stayed untouched. Call sites
+  otherwise unchanged (one `Some()` wrap for an `Option<fn>` callback).
+- 14 dead shim exports identified (no consumers anywhere) → D1c dead-sweep
+  list. Dead decls `pg_for_each_tg`/`tg_for_each_thread` (shadowed by Rust
+  macros) dropped.
+- **Cache incident**: worker found a stale system-GCC cache at wave start
+  and reconfigured; orchestrator re-reconfigured with full env
+  (TOOLPREFIX + LAB=fs → "Lab: fs" confirmed) and re-verified from clean.
+- Verified (orchestrator, post-reconfigure): 0-warning `cargo clean`+full
+  rebuild; boot gate; testsig **21/21**; forkfork + killstatus OK; stressfs;
+  ENOENT smoke; no panics. (Worker additionally: reparent OK, boot ×2.)
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

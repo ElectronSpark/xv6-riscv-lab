@@ -18,6 +18,7 @@ use crate::bindings;
 // `len: c_int` mirror (ABI-truth drift -- `chunk` is bounds-checked
 // non-negative at every call site, so `chunk as usize` is exact).
 use crate::dev::nullrand::random_fill_bytes;
+use crate::proc::proc_shims::xv6_current_thread;
 
 // ---------------------------------------------------------------------------
 // Constants mirrored from C headers.
@@ -109,9 +110,6 @@ unsafe extern "C" {
     // Strings.
     pub safe fn safestrcpy(s: *mut c_char, t: *const c_char,
                            n: c_int) -> *mut c_char;
-
-    // C shim for `current` macro.
-    pub safe fn xv6_current_thread() -> *mut bindings::thread;
 
     // Extern variable: KERNBASE physical address.
     static __physical_memory_start: u64;

@@ -29,6 +29,7 @@ use crate::proc::access::{
     TtreeRef, zero_tnode_ptr, zeroed_tnode,
 };
 use crate::list::ListNode;
+use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 
 // ---------------------------------------------------------------------------
 // Native layout — Wave P3-3D.
@@ -231,9 +232,6 @@ const TYPE_TREE: u32 = 2;
 // External C dependencies. `memset` remains unsafe because it writes raw memory.
 // ---------------------------------------------------------------------------
 unsafe extern "C" {
-    pub safe fn xv6_panic(msg: *const c_char) -> !;
-    pub safe fn xv6_current_thread() -> *mut thread;
-
     // rbtree primitives.
     pub safe fn rb_insert_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node;
     pub safe fn rb_delete_node_color(root: *mut rb_root, node: *mut rb_node) -> *mut rb_node;

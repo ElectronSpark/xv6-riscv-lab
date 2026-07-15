@@ -15,8 +15,10 @@ use core::ptr;
 
 use crate::proc::proc_shims;
 
-#[repr(C)] pub struct Thread { _p: [u8; 0] }
-#[repr(C)] pub struct Session { _p: [u8; 0] }
+// P3-D1a: formerly opaque `[u8; 0]` markers; now the real `crate::bindings`
+// types so the direct Rust calls into `proc_shims` type-check unchanged.
+pub type Thread = crate::bindings::thread;
+pub type Session = crate::bindings::session;
 
 // errno values used here.
 const ESRCH:  i32 = 3;
@@ -27,79 +29,27 @@ const THREAD_UNUSED: i32 = 0;
 
 const MAXPID: i32 = 0x7FFFFFF0;
 
+// P3-D1a: the `xv6_*`/`t_*`/`session_*` accessor shims are ordinary Rust fns
+// in `proc_shims.rs`; call them via crate paths instead of `extern "C"`
+// redeclarations. Call sites keep the same bare names.
+use crate::proc::proc_shims::{
+    session_for_each_all, session_sid, t_dmp_list_entry_is_detached, t_pid, t_session, t_set_pid,
+    xv6_dump_session, xv6_is_err, xv6_panic, xv6_pid_rlock, xv6_pid_runlock,
+    xv6_pid_try_lock_upgrade, xv6_pid_wholding, xv6_pid_wlock, xv6_pid_wunlock,
+    xv6_procdump_bt_footer, xv6_procdump_bt_header, xv6_procdump_bt_one, xv6_procdump_bt_pid,
+    xv6_procdump_header, xv6_procdump_one, xv6_procdump_tree_node, xv6_procdump_tree_recursive,
+    xv6_proctab_alloc_pid_slot, xv6_proctab_allocated_cnt, xv6_proctab_dmplist_add,
+    xv6_proctab_dmplist_del, xv6_proctab_free_pid_slot, xv6_proctab_get_locked,
+    xv6_proctab_get_rcu, xv6_proctab_init_storage, xv6_proctab_initproc_load,
+    xv6_proctab_initproc_raw, xv6_proctab_initproc_store, xv6_proctab_nextpid_get,
+    xv6_proctab_nextpid_set, xv6_proctab_pop_rcu, xv6_proctab_put_rcu,
+    xv6_proctab_registered_dec, xv6_proctab_registered_inc, xv6_rcu_read_lock,
+    xv6_rcu_read_unlock,
+};
+
 unsafe extern "C" {
-    // pid lock & assertions.
-    pub safe fn xv6_pid_wlock();
-    pub safe fn xv6_pid_wunlock();
-    pub safe fn xv6_pid_rlock();
-    pub safe fn xv6_pid_runlock();
-    pub safe fn xv6_pid_wholding() -> i32;
-    pub safe fn xv6_pid_try_lock_upgrade() -> i32;
-
-    // proc_table storage init.
-    pub safe fn xv6_proctab_init_storage();
-
-    // initproc.
-    pub safe fn xv6_proctab_initproc_load() -> *mut Thread;
-    pub safe fn xv6_proctab_initproc_store(p: *mut Thread);
-    pub safe fn xv6_proctab_initproc_raw() -> *mut Thread;
-
-    // PID slot reservation.
-    pub safe fn xv6_proctab_alloc_pid_slot() -> i32;
-    pub safe fn xv6_proctab_free_pid_slot();
-    pub safe fn xv6_proctab_allocated_cnt() -> i64;
-
-    // nextpid + registered_cnt.
-    pub safe fn xv6_proctab_nextpid_get() -> i32;
-    pub safe fn xv6_proctab_nextpid_set(v: i32);
-    pub safe fn xv6_proctab_registered_inc();
-    pub safe fn xv6_proctab_registered_dec();
-
-    // hlist ops on proc_table.procs.
-    pub safe fn xv6_proctab_get_locked(pid: i32) -> *mut Thread;
-    pub safe fn xv6_proctab_get_rcu(pid: i32) -> *mut Thread;
-    pub safe fn xv6_proctab_put_rcu(p: *mut Thread) -> *mut Thread;
-    pub safe fn xv6_proctab_pop_rcu(p: *mut Thread) -> *mut Thread;
-
-    // dump list.
-    pub safe fn xv6_proctab_dmplist_add(p: *mut Thread);
-    pub safe fn xv6_proctab_dmplist_del(p: *mut Thread);
-
-    // RCU + thread shims.
-    pub safe fn xv6_rcu_read_lock();
-    pub safe fn xv6_rcu_read_unlock();
-
-    // Print helpers.
-    pub safe fn xv6_procdump_header();
-    pub safe fn xv6_procdump_one(p: *mut Thread) -> i32;
-    pub safe fn xv6_procdump_bt_header();
-    pub safe fn xv6_procdump_bt_footer();
-    pub safe fn xv6_procdump_bt_one(p: *mut Thread);
-    pub safe fn xv6_procdump_bt_pid(pid: i32);
-    pub safe fn xv6_procdump_tree_node(p: *mut Thread, depth: i32);
-    pub safe fn xv6_procdump_tree_recursive(p: *mut Thread, depth: i32);
-    pub safe fn xv6_dump_session(s: *mut Session);
-
-    // session iteration.
-    pub safe fn session_for_each_all(
-        fnp: unsafe extern "C" fn(*mut Session, *mut c_void),
-        arg: *mut c_void,
-    );
-
-    // dmp_list_entry detached predicate.
-    pub safe fn t_dmp_list_entry_is_detached(t: *mut Thread) -> i32;
-
-    // misc thread accessors.
-    pub safe fn t_pid(p: *mut Thread) -> i32;
-    pub safe fn t_set_pid(p: *mut Thread, pid: i32);
-    pub safe fn t_session(p: *mut Thread) -> *mut Session;
-    pub safe fn session_sid(s: *mut Session) -> i32;
-    pub safe fn xv6_is_err(p: *const c_void) -> i32;
-
     // syscall arg helper.
     pub safe fn argint(n: i32, ip: *mut i32) -> i32;
-
-    pub safe fn xv6_panic(msg: *const u8) -> !;
 }
 
 #[cold]
@@ -338,7 +288,7 @@ unsafe extern "C" fn dump_session_cb(s: *mut Session, _arg: *mut c_void) {
 pub(crate) extern "C" fn procdump_sessions() {
     crate::kprintln!("\n=== Process Hierarchy (Session / PGroup / Process / Thread) ===");
     xv6_pid_rlock();
-    session_for_each_all(dump_session_cb, ptr::null_mut());
+    session_for_each_all(Some(dump_session_cb), ptr::null_mut());
     xv6_pid_runlock();
     crate::kprintln!("\n=== End Hierarchy ===");
 }

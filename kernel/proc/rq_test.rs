@@ -15,6 +15,7 @@ use crate::lock::spinlock::spin_lock;
 use crate::lock::spinlock::spin_unlock;
 use crate::machine::cpuid;
 use crate::proc::access::{is_err_or_null, zeroed_sched_attr, RqRef, SchedEntityRef, ThreadAccess};
+use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 use crate::proc::pick_next_rq;
 use crate::proc::rq_lock;
 use crate::proc::rq_unlock;
@@ -34,13 +35,6 @@ const PRIORITY_MAINLEVEL_SHIFT: c_int = 2;
 #[inline] const fn MINOR_PRIORITY(p: c_int) -> c_int { p & PRIORITY_SUBLEVEL_MASK }
 #[inline] const fn MAKE_PRIORITY(major: c_int, minor: c_int) -> c_int { (major << PRIORITY_MAINLEVEL_SHIFT) | minor }
 
-// --- C primitives ---------------------------------------------------------
-unsafe extern "C" {
-
-
-    pub safe fn xv6_current_thread() -> *mut thread;
-    pub safe fn xv6_panic(msg: *const c_char) -> !;
-}
 
 #[inline]
 fn assert_msg(cond: bool, msg: *const c_char) {

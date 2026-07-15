@@ -23,19 +23,23 @@ use core::ffi::{c_int, c_void};
 use core::ptr;
 
 // ---------------------------------------------------------------------------
-// Opaque pointer types
+// Pointer type aliases.
+// P3-D1a: formerly opaque `[u8; 0]` markers; now aliases of the real types
+// used by the `proc_shims` accessor signatures (`crate::bindings` structs
+// where the shim is typed, `c_void` where the shim traffics in `*mut
+// c_void`), so the direct Rust calls type-check with call sites unchanged.
 // ---------------------------------------------------------------------------
-#[repr(C)] struct Thread       { _p: [u8; 0] }
-#[repr(C)] struct ThreadGroup  { _p: [u8; 0] }
-#[repr(C)] struct Pgroup       { _p: [u8; 0] }
-#[repr(C)] struct Session      { _p: [u8; 0] }
-#[repr(C)] struct SchedEntity  { _p: [u8; 0] }
-#[repr(C)] struct Context      { _p: [u8; 0] }
-#[repr(C)] struct VfsFdtable   { _p: [u8; 0] }
-#[repr(C)] struct FsStruct     { _p: [u8; 0] }
-#[repr(C)] struct Vm           { _p: [u8; 0] }
-#[repr(C)] struct Sigacts      { _p: [u8; 0] }
-#[repr(C)] struct ThreadSignal { _p: [u8; 0] }
+type Thread       = crate::bindings::thread;
+type ThreadGroup  = crate::bindings::thread_group;
+type Pgroup       = crate::bindings::pgroup;
+type Session      = crate::bindings::session;
+type SchedEntity  = c_void;
+type Context      = c_void;
+type VfsFdtable   = c_void;
+type FsStruct     = c_void;
+type Vm           = c_void;
+type Sigacts      = c_void;
+type ThreadSignal = c_void;
 
 // ---------------------------------------------------------------------------
 // Errno + constants (mirrors of C headers)
@@ -76,56 +80,24 @@ pub struct CloneArgs {
 // External C symbols — centralized unsafe boundary.
 // See module-level safety contract above.
 // ---------------------------------------------------------------------------
+// P3-D1a: the `xv6_*` accessor shims are ordinary Rust fns in
+// `proc_shims.rs`; call them via crate paths instead of `extern "C"`
+// redeclarations (`t_*` accessors imported under their old local alias
+// names). Call sites keep the same bare names.
+use crate::proc::proc_shims::{
+    t_parent as xv6_t_parent, t_pgroup as xv6_t_pgroup, t_pid as xv6_t_pid,
+    t_session as xv6_t_session, t_tgid as xv6_t_tgid, t_thread_group as xv6_t_thread_group,
+    t_user_space as xv6_t_user_space, xv6_current_thread, xv6_err_ptr, xv6_forkret_assert_user,
+    xv6_intr_on, xv6_is_err, xv6_mycpu_clear_noff, xv6_panic, xv6_pid_wlock, xv6_pid_wunlock,
+    xv6_ptr_err, xv6_smp_mb, xv6_t_copy_name, xv6_t_copy_trapframe, xv6_t_fdtable, xv6_t_fs,
+    xv6_t_kstack_order, xv6_t_sched_entity, xv6_t_set_clone_flags, xv6_t_set_fdtable,
+    xv6_t_set_fs, xv6_t_set_parent, xv6_t_set_sigacts, xv6_t_set_tgid, xv6_t_set_user_space,
+    xv6_t_set_vfork_parent, xv6_t_set_vm, xv6_t_sigacts, xv6_t_signal_ptr,
+    xv6_t_trapframe_set_a0, xv6_t_trapframe_set_sepc, xv6_t_trapframe_set_sp, xv6_t_vm,
+    xv6_tcb_lock, xv6_tcb_unlock, xv6_thread_from_context, xv6_thread_state_set,
+};
+
 unsafe extern "C" {
-    // Field accessors / shims
-    pub safe fn xv6_current_thread() -> *mut Thread;
-    pub safe fn xv6_is_err(p: *const c_void) -> c_int;
-    pub safe fn xv6_ptr_err(p: *const c_void) -> isize;
-    pub safe fn xv6_err_ptr(err: isize) -> *mut c_void;
-
-    pub safe fn xv6_t_kstack_order(t: *mut Thread) -> c_int;
-    pub safe fn xv6_t_vm(t: *mut Thread) -> *mut Vm;
-    pub safe fn xv6_t_set_vm(t: *mut Thread, v: *mut Vm);
-    pub safe fn xv6_t_fs(t: *mut Thread) -> *mut FsStruct;
-    pub safe fn xv6_t_set_fs(t: *mut Thread, f: *mut FsStruct);
-    pub safe fn xv6_t_fdtable(t: *mut Thread) -> *mut VfsFdtable;
-    pub safe fn xv6_t_set_fdtable(t: *mut Thread, f: *mut VfsFdtable);
-    pub safe fn xv6_t_sigacts(t: *mut Thread) -> *mut Sigacts;
-    pub safe fn xv6_t_set_sigacts(t: *mut Thread, s: *mut Sigacts);
-    pub safe fn xv6_t_signal_ptr(t: *mut Thread) -> *mut ThreadSignal;
-    pub safe fn xv6_t_sched_entity(t: *mut Thread) -> *mut SchedEntity;
-    pub safe fn xv6_t_set_clone_flags(t: *mut Thread, f: u64);
-    pub safe fn xv6_t_set_vfork_parent(t: *mut Thread, p: *mut Thread);
-    pub safe fn xv6_t_set_tgid(t: *mut Thread, tgid: c_int);
-    pub safe fn xv6_t_set_user_space(t: *mut Thread);
-    pub safe fn xv6_t_set_parent(t: *mut Thread, p: *mut Thread);
-    #[link_name = "t_parent"]       pub safe fn xv6_t_parent(t: *mut Thread) -> *mut Thread;
-    #[link_name = "t_thread_group"] pub safe fn xv6_t_thread_group(t: *mut Thread) -> *mut ThreadGroup;
-    #[link_name = "t_pgroup"]       pub safe fn xv6_t_pgroup(t: *mut Thread) -> *mut Pgroup;
-    #[link_name = "t_session"]      pub safe fn xv6_t_session(t: *mut Thread) -> *mut Session;
-    #[link_name = "t_tgid"]         pub safe fn xv6_t_tgid(t: *mut Thread) -> c_int;
-    #[link_name = "t_pid"]          pub safe fn xv6_t_pid(t: *mut Thread) -> c_int;
-    #[link_name = "t_user_space"]   pub safe fn xv6_t_user_space(t: *mut Thread) -> c_int;
-
-    pub safe fn xv6_t_copy_trapframe(dst: *mut Thread, src: *mut Thread);
-    pub safe fn xv6_t_trapframe_set_sepc(t: *mut Thread, v: u64);
-    pub safe fn xv6_t_trapframe_set_sp(t: *mut Thread, v: u64);
-    pub safe fn xv6_t_trapframe_set_a0(t: *mut Thread, v: u64);
-    pub safe fn xv6_t_copy_name(dst: *mut Thread, src: *mut Thread);
-
-    pub safe fn xv6_thread_state_set(t: *mut Thread, s: c_int);
-    pub safe fn xv6_tcb_lock(t: *mut Thread);
-    pub safe fn xv6_tcb_unlock(t: *mut Thread);
-
-    pub safe fn xv6_thread_from_context(ctx: *mut Context) -> *mut Thread;
-    pub safe fn xv6_mycpu_clear_noff();
-    pub safe fn xv6_intr_on();
-    pub safe fn xv6_smp_mb();
-    pub safe fn xv6_forkret_assert_user(p: *mut Thread);
-
-    // Panic — returns `!`, safe to call after building a NUL-terminated buf.
-    pub safe fn xv6_panic(msg: *const u8) -> !;
-
     // Existing kernel C symbols
     // Not `pub`: `thread_create`/`sigpending_clone`/`rq_task_fork`/
     // `attach_child`/`scheduler_wakeup`/`scheduler_yield`/
@@ -152,9 +124,6 @@ unsafe extern "C" {
     safe fn thread_group_alloc(t: *mut Thread) -> c_int;
     pub safe fn pgroup_add_tg(pg: *mut Pgroup, tg: *mut ThreadGroup);
     pub safe fn pgroup_add_thread(pg: *mut Pgroup, t: *mut Thread);
-
-    pub safe fn xv6_pid_wlock();
-    pub safe fn xv6_pid_wunlock();
 
     safe fn context_switch_finish(prev: *mut Thread, next: *mut Thread, intr: c_int);
     pub safe fn rcu_check_callbacks();

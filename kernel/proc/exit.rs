@@ -40,14 +40,18 @@ use crate::proc::access::is_err_const;
 // can name it when reinterpreting its own `*mut bindings::thread` --
 // otherwise identical zero-field opaque marker, never constructed or
 // dereferenced.
-#[repr(C)] pub(crate) struct Thread { _p: [u8; 0] }
-#[repr(C)] struct ThreadGroup  { _p: [u8; 0] }
-#[repr(C)] struct Session      { _p: [u8; 0] }
+// P3-D1a: formerly opaque `[u8; 0]` markers; now aliases of the real types
+// used by the `proc_shims` accessor signatures (`crate::bindings` structs
+// where the shim is typed, `c_void` where the shim traffics in `*mut
+// c_void`), so the direct Rust calls type-check with call sites unchanged.
+pub(crate) type Thread = crate::bindings::thread;
+type ThreadGroup = crate::bindings::thread_group;
+type Session     = crate::bindings::session;
 #[repr(C)] struct Pgroup       { _p: [u8; 0] }
-#[repr(C)] struct Vm           { _p: [u8; 0] }
-#[repr(C)] struct FsStruct     { _p: [u8; 0] }
-#[repr(C)] struct VfsFdtable   { _p: [u8; 0] }
-#[repr(C)] struct Sigacts      { _p: [u8; 0] }
+type Vm         = c_void;
+type FsStruct   = c_void;
+type VfsFdtable = c_void;
+type Sigacts    = c_void;
 
 const EINVAL: c_int = 22;
 const EFAULT: c_int = 14;
@@ -69,62 +73,33 @@ const THREAD_ZOMBIE:         c_int = 11;
 mod raw {
     use super::*;
 
+    // P3-D1a: the `xv6_*`/`t_*` accessor shims are ordinary Rust fns in
+    // `proc_shims.rs`; re-exported here so every `raw::NAME` call site
+    // stays unchanged. The "valid live kernel pointer" precondition from
+    // the module header is unchanged — it is documented on the shims
+    // themselves.
+    pub use crate::proc::proc_shims::{
+        t_parent, t_pid, t_session, t_thread_group, xv6_current_thread,
+        xv6_either_copyout_int, xv6_exit_find_stopped_child, xv6_exit_find_zombie_child,
+        xv6_exit_reap_zombie, xv6_exit_reparent_do, xv6_panic, xv6_pid_rlock, xv6_pid_runlock,
+        xv6_pid_wlock, xv6_pid_wunlock, xv6_t_children_count, xv6_t_clone_flags, xv6_t_fdtable,
+        xv6_t_fs, xv6_t_set_fdtable, xv6_t_set_fs, xv6_t_set_self_reap, xv6_t_set_sigacts,
+        xv6_t_set_thread_group, xv6_t_set_vfork_parent, xv6_t_set_vm, xv6_t_set_xstate,
+        xv6_t_sigacts, xv6_t_signal_esignal, xv6_t_signal_stop_signal, xv6_t_vfork_parent,
+        xv6_t_vm, xv6_tcb_lock, xv6_tcb_unlock, xv6_tg_group_exit_code,
+        xv6_tg_group_exit_task_is, xv6_tg_group_leader, xv6_tg_is_exiting, xv6_thread_is_stopped,
+        xv6_thread_is_zombie, xv6_thread_state_set,
+    };
+
     unsafe extern "C" {
         // Zero-arg, no-precondition entry points may be `safe`.
-        pub safe fn xv6_current_thread() -> *mut Thread;
         pub safe fn __proctab_get_initproc() -> *mut Thread;
-        pub safe fn xv6_pid_wlock();
-        pub safe fn xv6_pid_wunlock();
-        pub safe fn xv6_pid_rlock();
-        pub safe fn xv6_pid_runlock();
         pub safe fn scheduler_yield();
 
         // Field accessors / kernel calls that take raw pointers.
         // SAFETY for every line below: the caller in `ffi::*` enforces
         // the "valid live kernel pointer" precondition documented in
         // the module header.
-        pub safe fn xv6_panic(msg: *const u8) -> !;
-        pub safe fn xv6_either_copyout_int(dst: u64, v: c_int) -> c_int;
-
-        #[link_name = "t_parent"]       pub safe fn t_parent(t: *mut Thread) -> *mut Thread;
-        #[link_name = "t_session"]      pub safe fn t_session(t: *mut Thread) -> *mut Session;
-        #[link_name = "t_thread_group"] pub safe fn t_thread_group(t: *mut Thread) -> *mut ThreadGroup;
-        #[link_name = "t_pid"]          pub safe fn t_pid(t: *mut Thread) -> c_int;
-
-        pub safe fn xv6_t_set_xstate(t: *mut Thread, v: c_int);
-        pub safe fn xv6_t_clone_flags(t: *mut Thread) -> u64;
-        pub safe fn xv6_t_signal_esignal(t: *mut Thread) -> c_int;
-        pub safe fn xv6_t_signal_stop_signal(t: *mut Thread) -> c_int;
-        pub safe fn xv6_t_children_count(t: *mut Thread) -> c_int;
-        pub safe fn xv6_t_set_self_reap(t: *mut Thread);
-        pub safe fn xv6_t_set_vfork_parent(t: *mut Thread, p: *mut Thread);
-        pub safe fn xv6_t_vfork_parent(t: *mut Thread) -> *mut Thread;
-        pub safe fn xv6_t_fdtable(t: *mut Thread) -> *mut VfsFdtable;
-        pub safe fn xv6_t_set_fdtable(t: *mut Thread, f: *mut VfsFdtable);
-        pub safe fn xv6_t_fs(t: *mut Thread) -> *mut FsStruct;
-        pub safe fn xv6_t_set_fs(t: *mut Thread, f: *mut FsStruct);
-        pub safe fn xv6_t_vm(t: *mut Thread) -> *mut Vm;
-        pub safe fn xv6_t_set_vm(t: *mut Thread, v: *mut Vm);
-        pub safe fn xv6_t_sigacts(t: *mut Thread) -> *mut Sigacts;
-        pub safe fn xv6_t_set_sigacts(t: *mut Thread, s: *mut Sigacts);
-        pub safe fn xv6_t_set_thread_group(t: *mut Thread, tg: *mut ThreadGroup);
-        pub safe fn xv6_thread_is_zombie(t: *mut Thread) -> c_int;
-        pub safe fn xv6_thread_is_stopped(t: *mut Thread) -> c_int;
-
-        pub safe fn xv6_tg_group_exit_task_is(tg: *mut ThreadGroup, t: *mut Thread) -> c_int;
-        pub safe fn xv6_tg_group_exit_code(tg: *mut ThreadGroup) -> c_int;
-        pub safe fn xv6_tg_group_leader(tg: *mut ThreadGroup) -> *mut Thread;
-        pub safe fn xv6_tg_is_exiting(tg: *mut ThreadGroup) -> c_int;
-
-        pub safe fn xv6_thread_state_set(t: *mut Thread, s: c_int);
-        pub safe fn xv6_tcb_lock(t: *mut Thread);
-        pub safe fn xv6_tcb_unlock(t: *mut Thread);
-
-        pub safe fn xv6_exit_reparent_do(p: *mut Thread, initproc: *mut Thread) -> c_int;
-        pub safe fn xv6_exit_find_zombie_child(p: *mut Thread) -> *mut Thread;
-        pub safe fn xv6_exit_find_stopped_child(p: *mut Thread) -> *mut Thread;
-        pub safe fn xv6_exit_reap_zombie(parent: *mut Thread, child: *mut Thread, xstate_out: *mut c_int) -> c_int;
-
         pub safe fn scheduler_wakeup(t: *mut Thread);
         pub safe fn scheduler_wakeup_interruptible(t: *mut Thread);
         pub safe fn kill_thread(t: *mut Thread, signo: c_int) -> c_int;

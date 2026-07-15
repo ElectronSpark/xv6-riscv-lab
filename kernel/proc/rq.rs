@@ -19,6 +19,7 @@ use crate::proc::access::{
     ThreadAccess, sched_entity_llist_push_head,
 };
 use crate::kstd::{result_to_errptr, Errno, KResult};
+use crate::proc::proc_shims::{xv6_current_thread, xv6_panic};
 use crate::proc::init_fifo_rq;
 use crate::proc::init_idle_rq;
 
@@ -41,13 +42,8 @@ const THREAD_WAKENING: i32 = 7;
 type cpumask_t = u64;
 
 unsafe extern "C" {
-    pub safe fn xv6_panic(msg: *const c_char) -> !;
-
     // Per-CPU array exported by C code.
     static mut cpus: [crate::bindings::cpu_local; NCPU];
-
-    // From sched.c port (state accessors)
-    safe fn xv6_current_thread() -> *mut thread;
 }
 
 #[inline]

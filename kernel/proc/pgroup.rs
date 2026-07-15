@@ -17,12 +17,14 @@ use core::ptr;
 use crate::proc::access::{err_ptr, is_err_const};
 
 // ---------------------------------------------------------------------------
-// Opaque kernel structs — never dereferenced from Rust.
+// Kernel struct aliases — never dereferenced directly from this file.
+// (P3-D1a: formerly opaque `[u8; 0]` markers; now the real `crate::bindings`
+// types so the direct Rust calls into `proc_shims` type-check unchanged.)
 // ---------------------------------------------------------------------------
-#[repr(C)] pub struct Pgroup       { _p: [u8; 0] }
-#[repr(C)] pub struct Thread       { _p: [u8; 0] }
-#[repr(C)] pub struct ThreadGroup  { _p: [u8; 0] }
-#[repr(C)] pub struct Session      { _p: [u8; 0] }
+pub type Pgroup      = crate::bindings::pgroup;
+pub type Thread      = crate::bindings::thread;
+pub type ThreadGroup = crate::bindings::thread_group;
+pub type Session     = crate::bindings::session;
 
 // Errno constants used here (matches kernel/inc/errno.h).
 const EPERM:  i32 = 1;
@@ -34,82 +36,23 @@ const EINVAL: i32 = 22;
 // ---------------------------------------------------------------------------
 // extern shim surface
 // ---------------------------------------------------------------------------
+// P3-D1a: the `xv6_*`/`pg_*`/`t_*`/`tg_*` accessor shims are ordinary Rust
+// fns in `proc_shims.rs`; call them via crate paths instead of `extern "C"`
+// redeclarations. Call sites keep the same bare names.
+use crate::proc::proc_shims::{
+    pg_atomic_dec_t_cnt, pg_dec_p_cnt, pg_dec_t_cnt, pg_exited, pg_inc_p_cnt, pg_inc_t_cnt,
+    pg_is_kernel, pg_list_entry_detach, pg_list_entry_init, pg_list_entry_is_detached, pg_p_cnt,
+    pg_pgid, pg_session, pg_set_exited, pg_set_leader, pg_set_p_cnt, pg_set_pgid, pg_set_session,
+    pg_set_t_cnt, pg_t_cnt, pg_tg_list_entry_is_detached, pg_tgs_detach, pg_tgs_init,
+    pg_tgs_push_back, pg_threads_detach, pg_threads_init, pg_threads_push_back, t_parent,
+    t_pg_entry_init, t_pg_entry_is_detached, t_pgid, t_pgroup, t_pid, t_session, t_set_pgid,
+    t_set_pgroup, t_sid, t_thread_group, tg_list_entry_init, tg_pgroup, tg_set_pgroup,
+    xv6_current_thread, xv6_panic, xv6_pgroup_slab_alloc, xv6_pgroup_slab_free,
+    xv6_pgroup_slab_init, xv6_pid_rlock, xv6_pid_runlock, xv6_pid_wholding, xv6_pid_wlock,
+    xv6_pid_wunlock, xv6_tg_send_signo,
+};
+
 unsafe extern "C" {
-    // pid lock + assertion.
-    pub safe fn xv6_pid_wlock();
-    pub safe fn xv6_pid_wunlock();
-    pub safe fn xv6_pid_rlock();
-    pub safe fn xv6_pid_runlock();
-    pub safe fn xv6_pid_wholding() -> i32;
-
-    // misc helpers.
-    pub safe fn xv6_current_thread() -> *mut Thread;
-
-    // pgroup slab.
-    pub safe fn xv6_pgroup_slab_init() -> i32;
-    pub safe fn xv6_pgroup_slab_alloc() -> *mut Pgroup;
-    pub safe fn xv6_pgroup_slab_free(pg: *mut Pgroup);
-
-    // pgroup field accessors.
-    pub safe fn pg_pgid(pg: *mut Pgroup) -> i32;
-    pub safe fn pg_t_cnt(pg: *mut Pgroup) -> i32;
-    pub safe fn pg_p_cnt(pg: *mut Pgroup) -> i32;
-    pub safe fn pg_exited(pg: *mut Pgroup) -> i32;
-    pub safe fn pg_is_kernel(pg: *mut Pgroup) -> i32;
-    pub safe fn pg_session(pg: *mut Pgroup) -> *mut Session;
-    pub safe fn pg_set_pgid(pg: *mut Pgroup, v: i32);
-    pub safe fn pg_set_leader(pg: *mut Pgroup, tg: *mut ThreadGroup);
-    pub safe fn pg_set_session(pg: *mut Pgroup, s: *mut Session);
-    pub safe fn pg_set_exited(pg: *mut Pgroup, v: i32);
-    pub safe fn pg_set_t_cnt(pg: *mut Pgroup, v: i32);
-    pub safe fn pg_set_p_cnt(pg: *mut Pgroup, v: i32);
-    pub safe fn pg_inc_t_cnt(pg: *mut Pgroup);
-    pub safe fn pg_dec_t_cnt(pg: *mut Pgroup);
-    pub safe fn pg_inc_p_cnt(pg: *mut Pgroup);
-    pub safe fn pg_dec_p_cnt(pg: *mut Pgroup);
-    pub safe fn pg_atomic_dec_t_cnt(pg: *mut Pgroup) -> i32;
-    pub safe fn pg_list_entry_init(pg: *mut Pgroup);
-    pub safe fn pg_list_entry_detach(pg: *mut Pgroup);
-    pub safe fn pg_list_entry_is_detached(pg: *mut Pgroup) -> i32;
-    pub safe fn pg_threads_init(pg: *mut Pgroup);
-    pub safe fn pg_tgs_init(pg: *mut Pgroup);
-    pub safe fn pg_threads_push_back(pg: *mut Pgroup, t: *mut Thread);
-    pub safe fn pg_threads_detach(t: *mut Thread);
-    pub safe fn pg_tgs_push_back(pg: *mut Pgroup, tg: *mut ThreadGroup);
-    pub safe fn pg_tgs_detach(tg: *mut ThreadGroup);
-    pub safe fn pg_tg_list_entry_is_detached(tg: *mut ThreadGroup) -> i32;
-    pub safe fn pg_for_each_tg(
-        pg: *mut Pgroup,
-        fnp: unsafe extern "C" fn(*mut ThreadGroup, *mut c_void),
-        arg: *mut c_void,
-    );
-
-    // thread field accessors.
-    pub safe fn t_pid(p: *mut Thread) -> i32;
-    pub safe fn t_pgid(p: *mut Thread) -> i32;
-    pub safe fn t_sid(p: *mut Thread) -> i32;
-    pub safe fn t_set_pgid(p: *mut Thread, v: i32);
-    pub safe fn t_parent(p: *mut Thread) -> *mut Thread;
-    pub safe fn t_pgroup(p: *mut Thread) -> *mut Pgroup;
-    pub safe fn t_session(p: *mut Thread) -> *mut Session;
-    pub safe fn t_thread_group(p: *mut Thread) -> *mut ThreadGroup;
-    pub safe fn t_set_pgroup(p: *mut Thread, pg: *mut Pgroup);
-    pub safe fn t_pg_entry_init(t: *mut Thread);
-    pub safe fn t_pg_entry_is_detached(t: *mut Thread) -> i32;
-
-    // thread_group accessors.
-    pub safe fn tg_pgroup(tg: *mut ThreadGroup) -> *mut Pgroup;
-    pub safe fn tg_set_pgroup(tg: *mut ThreadGroup, pg: *mut Pgroup);
-    pub safe fn tg_list_entry_init(tg: *mut ThreadGroup);
-    pub safe fn tg_for_each_thread(
-        tg: *mut ThreadGroup,
-        fnp: unsafe extern "C" fn(*mut Thread, *mut c_void),
-        arg: *mut c_void,
-    );
-
-    // ksiginfo helper.
-    pub safe fn xv6_tg_send_signo(tg: *mut ThreadGroup, signo: i32) -> i32;
-
     // From session.h / thread.h / thread_group.h (real extern fns).
     pub safe fn get_pid_thread(pid: i32) -> *mut Thread;
     // Not `pub`: shares a bare name with the real definition glob-
@@ -122,7 +65,6 @@ unsafe extern "C" {
     safe fn thread_tgid(t: *mut Thread) -> i32;
     pub safe fn rcu_read_lock();
     pub safe fn rcu_read_unlock();
-    pub safe fn xv6_panic(msg: *const u8) -> !;
 }
 
 // P3-1C mesh sweep: tty/session.rs is in scope for this wave, same
@@ -151,11 +93,8 @@ fn session_remove_pg(s: *mut Session, pg: *mut Pgroup) -> i32 {
     }
 }
 
-// `rcu_read_lock` / `rcu_read_unlock` are static-inline; expose via shim.
-unsafe extern "C" {
-    #[link_name = "xv6_rcu_read_lock"]   safe fn rcu_lock();
-    #[link_name = "xv6_rcu_read_unlock"] safe fn rcu_unlock();
-}
+// `rcu_read_lock` / `rcu_read_unlock` are static-inline; use the Rust shims.
+use crate::proc::proc_shims::{xv6_rcu_read_lock as rcu_lock, xv6_rcu_read_unlock as rcu_unlock};
 
 #[inline]
 fn pid_assert_wholding() {

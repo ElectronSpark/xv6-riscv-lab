@@ -29,6 +29,7 @@ use crate::proc::access::{
     SchedEntityRef, SessionAccess, SpinLockRef, ThreadAccess, ThreadSignalAccess,
 };
 use crate::kstd::{result_to_errptr, Errno, KResult};
+use crate::proc::proc_shims::xv6_panic;
 use crate::proc::__proctab_init;
 use crate::proc::pid_assert_wholding;
 use crate::proc::sigacts_init;
@@ -123,8 +124,6 @@ unsafe extern "C" {
     fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     fn strncpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
     fn safestrcpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
-
-    pub safe fn xv6_panic(msg: *const c_char) -> !;
 
     // pid hierarchy
     fn pid_wlock();

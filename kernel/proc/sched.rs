@@ -20,6 +20,7 @@ use crate::machine::{
     push_off,
 };
 use crate::lock::rcu::rcu_check_callbacks;
+use crate::proc::proc_shims::xv6_panic;
 use crate::lock::spinlock::spin_holding;
 use crate::lock::spinlock::spin_init;
 use crate::lock::spinlock::spin_lock;
@@ -72,8 +73,6 @@ const IPI_REASON_RESCHEDULE: c_int = 2;
 
 // ---------------- extern C primitives -----------------------------------
 unsafe extern "C" {
-    pub safe fn xv6_panic(msg: *const c_char) -> !;
-
     safe fn get_jiffs() -> u64;
 
     fn __swtch_context(cur: *mut context, target: *mut context) -> *mut context;

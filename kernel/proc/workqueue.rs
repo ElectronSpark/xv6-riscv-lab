@@ -17,6 +17,7 @@ use crate::bindings::{
     workqueue_callbacks,
 };
 use crate::list::ListNode;
+use crate::proc::proc_shims::{xv6_current_thread, xv6_panic, xv6_thread_state_set};
 use crate::proc::access::{
     is_err_or_null, list_node_init_raw, list_node_pop_back_raw, ptr_err_or, ListNodeRef,
     ThreadAccess, WorkStructRef, WorkqueueRef,
@@ -101,10 +102,6 @@ const THREAD_INTERRUPTIBLE: c_int = 2;
 unsafe extern "C" {
     pub safe fn memset(s: *mut c_void, c: c_int, n: usize) -> *mut c_void;
     pub safe fn strncpy(d: *mut c_char, s: *const c_char, n: usize) -> *mut c_char;
-    pub safe fn xv6_panic(msg: *const c_char) -> !;
-
-    pub safe fn xv6_current_thread() -> *mut thread;
-    pub safe fn xv6_thread_state_set(t: *mut thread, s: c_int);
 
     // Not `pub`: every fn below shares a bare name with a real definition
     // glob-reexported from `thread.rs`/`sched.rs`/`thread_queue.rs`/

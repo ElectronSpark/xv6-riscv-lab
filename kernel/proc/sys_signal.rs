@@ -10,6 +10,7 @@
 use core::ffi::{c_int, c_void};
 
 use crate::bindings;
+use crate::proc::proc_shims::{xv6_current_thread, xv6_sizeof_sigaction, xv6_thread_state_set};
 
 // errno
 const EINVAL: i64 = 22;
@@ -62,10 +63,6 @@ unsafe extern "C" {
 
     safe fn signal_pending(p: *mut bindings::thread) -> c_int;
     safe fn scheduler_yield();
-
-    pub safe fn xv6_current_thread() -> *mut bindings::thread;
-    pub safe fn xv6_thread_state_set(p: *mut bindings::thread, s: c_int);
-    pub safe fn xv6_sizeof_sigaction() -> u64;
 }
 
 #[inline(always)]
