@@ -1461,6 +1461,43 @@ the `err_ptr_errno`/`xv6_err_ptr` convenience shims kept for the few
 remaining C-ABI/asm consumers. `Errno` grew exactly the variants the
 migration needed: `MFile`(CS3), `Again`(CS7), `XDev`(CS8), `Srch`(CS10).
 
+### Iteration 49 — 2026-07-15 — Interim measured census (post-Result-migration, HEAD 26bc2b1)
+
+Snapshot after the Result-over-ERR_PTR arc + the CS/P3-8 waves. NOT the
+final acceptance census — Phase-3 structural work remains (see below).
+
+| Metric | Phase-3 baseline (4593c1a) | Now (26bc2b1) |
+|---|---|---|
+| C files in `kernel/` | 0 (since P3-2) | **0** |
+| `#[no_mangle]` attributes | 1,438 | **571** (−60%) |
+| `unsafe` occurrences | 5,088 | **4,929** |
+| `err_ptr(` fallible-return sites | ~200+ scattered | **15** |
+| `KResult<T>` use sites | 51 (mostly mm) | **192** |
+| boundary conversions (`result_to_errptr`/`result_to_neg_errno`) | ~0 | **68 / 36** |
+| `SpinLock<T>` global adopters (files) | 1 (SlabBox only) | **9** |
+| `KArc`/`IRef`/`SRef` adopter files | 0 | **9 / 3 / 1** |
+
+The **15 remaining `err_ptr(` sites**: 12 in `vfs/inode.rs` (the deliberate
+internal-ERR_PTR domain of `vfs_create`/`mknod`/`mkdir`/`symlink`'s
+`_inner` retry+driver-dispatch loops, documented CS7/CS8 — the value never
+escapes the fn), + 1 each in `tty/tty.rs`, `proc/access.rs` (the
+`err_ptr_errno` shim), `dev/blkdev.rs`. **Zero fallible-function ERR_PTR
+returns remain outside that internal domain** — the Result migration is
+complete.
+
+Consolidated regression on this HEAD: mmaptest 16/16, testsig 21/21,
+usertests `-q` clean through `forkfork` (stops at the documented
+pre-existing `forkforkfork` `thread_queue.rs` panic).
+
+**Genuinely-remaining Phase-3 work** (for the eventual real acceptance
+census): P3-3/4/5 bindgen-type nativization (asm-offset danger zone),
+P3-6 wrapper.h/bindgen deletion, P3-10 VFS/device ops → `dyn Trait`, and
+the tail of P3-8 — the *delicate* remaining lock globals (uart panic-path,
+virtio DMA, kobject/rcu) plus the proc struct-embedded locks that are
+blocked behind asm-offset nativization. The easy P3-8 globals (e1000,
+ramdisk, sockets, devtmpfs, bufcache, ptmx) + vm/pcache data-carrying
+guards are already done (8a–8d).
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as
