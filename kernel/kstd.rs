@@ -234,6 +234,10 @@ pub enum Errno {
     /// retry loop — an inode/mount-root was caught mid-destroy; the
     /// caller yields and retries the whole lookup).
     Again,
+    /// `EXDEV`: cross-device link/rename/lock not supported (added for
+    /// P3-CS8, `vfs/inode.rs`'s `vfs_link`/`vfs_move`/
+    /// `vfs_ilock_two_directories` cross-filesystem precondition checks).
+    XDev,
     /// Passthrough for an already-computed raw `-errno` `c_int` obtained
     /// from a cross-file boundary this cluster doesn't own — e.g. an
     /// `ERR_PTR`-encoded pointer from `vfs/inode.rs`
@@ -288,6 +292,7 @@ impl Errno {
             Errno::SPipe => crate::bindings::ESPIPE as c_int,
             Errno::AddrInUse => crate::bindings::EADDRINUSE as c_int,
             Errno::Again => crate::bindings::EAGAIN as c_int,
+            Errno::XDev => crate::bindings::EXDEV as c_int,
             // `n` is already the raw negative `-errno` value; `raw()`'s
             // contract is to return the *positive* `E*` code, so negate
             // it back. `neg()` (below, `-self.raw()`) then recovers `n`

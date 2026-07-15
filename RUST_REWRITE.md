@@ -1179,6 +1179,71 @@ spend-limit throttle; all green + committed.
   end-to-end), mmaptest 16/16. No stray QEMU processes left running
   (PID-matched, timeout-bounded throughout).
 
+### Iteration 42 — 2026-07-15 — Waves P3-CS2…CS8: ERR_PTR centralization finished + `KResult` migration swept the whole VFS stack
+
+Consolidated log for the Result-over-ERR_PTR arc (the tracker was last
+updated at CS1); each wave was committed and boot/fs-battery-gated green.
+
+- **CS2** (`7b04408`): finished the centralization — the remaining 18
+  `ERR_PTR`-duplicate files migrated to `kstd`; grep confirms all 30 now
+  `use crate::kstd::{...}` with zero local copies. Closes the user's
+  "centralize the libc/std-like tools" directive.
+- **CS3** (`b67a923`): proof-of-pattern for the user's "Result over C-style
+  err ptr" directive on the file-private `vfs/fdtable.rs` cluster —
+  `fdtable_alloc_init -> KResult<NonNull<vfs_fdtable>>`, new
+  `alloc_fd_from_locked -> KResult<usize>`, `clone_locked -> KResult<...>`;
+  `?`-propagation between them; the C-ABI boundaries keep the encoding via
+  `result_to_errptr`/`e.neg()`. Added `Errno::MFile` (EMFILE).
+- **CS4/CS5/CS5b** (`9539b2f`, `785f4a3`, `5ed1019`): scaled through the
+  syscall layer. Every `sys_vfs_*` now has a `*_inner() -> KResult<T>` body
+  with one boundary `ret64(result_to_neg_errno(inner()))` (or the explicit
+  `open_inner` match preserving EFAULT/ENOENT/EISDIR/ELOOP/EEXIST). `grep`
+  confirms **zero** manual `return ret64(neg(` / `err_ptr(neg(` /
+  `ptr_err as u64` remain in any `sys_*`. (`vfs_mount_path`/`umount_path`,
+  internal helpers shared with `fs.rs`, correctly stay `c_int`.)
+- **CS6** (`5dbaac1`): `vfs/file.rs` — 12 fallible fns to `*_inner() ->
+  KResult<T>`; hand-built `err_ptr` 10→0, hand-built `neg()` 50→1 (the lone
+  survivor is in the infallible `vfs_fput`). `pipealloc`/`sockalloc`/
+  `open_cdev` included; `vfs_fput`/`vfs_fdup` left infallible.
+- **CS7** (`4275cf9`): `vfs/inode.rs` batch 1 — the path-resolution family
+  (`vfs_namei`/`nameiparent`/`create`/`ilookup` + `vfs_namei_once`) →
+  `KResult<*mut vfs_inode>`; file-wide `err_ptr` 49→35. Added `Errno::Again`.
+  `vfs_iput` (infallible) untouched; lock ordering byte-identical.
+- **CS8** (this wave): `vfs/inode.rs` batch 2 — the remaining 12 fallible
+  fns. `vfs_mknod`/`vfs_mkdir`/`vfs_symlink` mirror CS7's `vfs_create_inner`
+  template exactly (retry loop + internal `ERR_PTR` domain for the
+  eagain-retry check and driver-vtable dispatch, one tail `result_to_errptr`);
+  `vfs_link`/`vfs_unlink`/`vfs_move`/`vfs_itruncate`/`vfs_ilock_two_directories`/
+  `vfs_chdir`/`vfs_chroot`/`vfs_dirty_inode`/`vfs_sync_inode` →
+  `KResult<()>` via `result_to_neg_errno`; `vfs_readlink` keeps a custom
+  boundary (`e.neg() as isize`) since success carries a byte count. Added
+  `Errno::XDev` (EXDEV) for the cross-filesystem precondition checks in
+  link/move/two-directory-lock. `EBUSY`/`ENOTEMPTY` stay as raw `neg(...)`
+  inside `vfs_unlink_inner`'s C-mirrored internal block (same single-tail
+  pattern). No fallible inode fn still does manual error encoding at its
+  C-ABI boundary. All manual C-resource cleanup (`vfs_iput`,
+  `vfs_release_dentry`, `vfs_inode_put_ref`, lock unwind) preserved at the
+  exact original return points — never `?`-propagated past cleanup; lock
+  ordering byte-identical.
+- **Net direction**: the whole VFS fallible-return stack (fdtable →
+  vfs_syscall → file → inode core) now returns `Result<T, Errno>` internally,
+  encoding to the pointer/-errno C-ABI form only at the `#[no_mangle]`
+  boundary. `Errno::Raw(n)` (lossless `neg(Raw(n)) == n`) carries
+  not-yet-owned cross-module ERR_PTR values through — those passthroughs
+  become typed as their producing layers convert (fs.rs next, CS9).
+- **Verified (CS8)**: `cargo clean` + full `cmake` rebuild 0 warnings; cache
+  clean (GCC 14.2, `CMAKE_BUILD_TYPE` empty) before and after; boot gate ×1
+  (`-bios default`, `xv6.bin`, dual virtio disk, per `scripts/run_qemu_test.sh`
+  — note: this kernel links at `0x80200000` and boots **via OpenSBI**, not
+  `-bios none`); fs battery on a freshly-built `fs_img`: `mkdir` new dir OK +
+  repeat → EEXIST, `ln /README.md rr` + `cat rr` reads through the hard link
+  (`vfs_link`), `cat /nonexistent` → ENOENT, symlinktest both subtests ok
+  (`vfs_symlink`/`vfs_readlink`), usertests createdelete/linktest/unlinkread
+  all OK, stressfs. `vfs_move`/rename has no shell binary in this image —
+  verified by inspection only (honest gap, flagged). The `sh` `>`-redirection
+  bug (Iteration 25, pre-existing) and the single-test "lost some free pages"
+  line are unchanged pre-existing artifacts, not regressions.
+
 ## Status vs the goal (2026-07-13)
 
 - ✅ Kernel rewritten in Rust — every module row done. **ZERO C files: as

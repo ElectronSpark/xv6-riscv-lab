@@ -812,48 +812,53 @@ impl Deref for IRef {
 }
 
 /// Mark inode as dirty.
-pub(crate) extern "C" fn vfs_dirty_inode(inode: *mut vfs_inode) -> c_int {
+fn vfs_dirty_inode_inner(inode: *mut vfs_inode) -> KResult<()> {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     let ret = vfs_inode_valid_locked(inode);
     if ret != 0 {
-        return ret;
+        return Err(Errno::Raw(ret));
     }
     // SAFETY: non-null `inode`.
-    match unsafe { (*(*inode).ops).dirty_inode } {
+    let ret = match unsafe { (*(*inode).ops).dirty_inode } {
         Some(f) => unsafe { f(inode) },
         None => ret,
-    }
+    };
+    if ret == 0 { Ok(()) } else { Err(Errno::Raw(ret)) }
+}
+
+pub(crate) extern "C" fn vfs_dirty_inode(inode: *mut vfs_inode) -> c_int {
+    result_to_neg_errno(vfs_dirty_inode_inner(inode))
 }
 
 /// Sync inode to disk.
-pub(crate) extern "C" fn vfs_sync_inode(inode: *mut vfs_inode) -> c_int {
+fn vfs_sync_inode_inner(inode: *mut vfs_inode) -> KResult<()> {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     let sb = unsafe { (*inode).sb };
-    let mut ret: c_int = 0;
 
     // Begin transaction BEFORE acquiring the inode lock, to avoid
     // sleeping with locks held.
     if let Some(begin_fn) = unsafe { (*(*sb).ops).begin_transaction } {
-        ret = unsafe { begin_fn(sb) };
-        if ret != 0 {
-            return ret;
+        let r = unsafe { begin_fn(sb) };
+        if r != 0 {
+            return Err(Errno::Raw(r));
         }
     }
 
     vfs_ilock(inode);
-    ret = vfs_inode_valid_locked(inode);
-    if ret != 0 {
+    let v = vfs_inode_valid_locked(inode);
+    if v != 0 {
         vfs_iunlock(inode);
         if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
             unsafe { end_fn(sb) };
         }
-        return ret;
+        return Err(Errno::Raw(v));
     }
 
+    let mut ret: c_int = 0;
     if let Some(f) = unsafe { (*(*inode).ops).sync_inode } {
         ret = unsafe { f(inode) };
     }
@@ -868,7 +873,11 @@ pub(crate) extern "C" fn vfs_sync_inode(inode: *mut vfs_inode) -> c_int {
             );
         }
     }
-    ret
+    if ret == 0 { Ok(()) } else { Err(Errno::Raw(ret)) }
+}
+
+pub(crate) extern "C" fn vfs_sync_inode(inode: *mut vfs_inode) -> c_int {
+    result_to_neg_errno(vfs_sync_inode_inner(inode))
 }
 
 /// Get the outermost mount layer. Caller must hold a reference to
@@ -1227,12 +1236,12 @@ pub(crate) extern "C" fn vfs_dir_isempty(dir: *mut vfs_inode) -> c_int {
     is_empty as c_int
 }
 
-pub(crate) extern "C" fn vfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> isize {
+fn vfs_readlink_inner(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> KResult<isize> {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
-        return -(EINVAL as isize);
+        return Err(Errno::Inval);
     }
     if buf.is_null() || buflen == 0 {
-        return -(EINVAL as isize);
+        return Err(Errno::Inval);
     }
     vfs_ilock(inode);
     let ret: isize = 'out: {
@@ -1254,7 +1263,14 @@ pub(crate) extern "C" fn vfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, b
         r
     };
     vfs_iunlock(inode);
-    ret
+    if ret < 0 { Err(Errno::Raw(ret as c_int)) } else { Ok(ret) }
+}
+
+pub(crate) extern "C" fn vfs_readlink(inode: *mut vfs_inode, buf: *mut c_char, buflen: usize) -> isize {
+    match vfs_readlink_inner(inode, buf, buflen) {
+        Ok(r) => r,
+        Err(e) => e.neg() as isize,
+    }
 }
 
 fn vfs_create_inner(
@@ -1339,18 +1355,18 @@ pub(crate) extern "C" fn vfs_create(
     result_to_errptr(vfs_create_inner(dir, mode, name, name_len))
 }
 
-pub(crate) extern "C" fn vfs_mknod(
+fn vfs_mknod_inner(
     dir: *mut vfs_inode,
     mode: mode_t,
     dev: dev_t,
     name: *const c_char,
     name_len: usize,
-) -> *mut vfs_inode {
+) -> KResult<*mut vfs_inode> {
     if dir.is_null() || unsafe { (*dir).sb.is_null() } {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     loop {
@@ -1358,7 +1374,7 @@ pub(crate) extern "C" fn vfs_mknod(
         if let Some(begin_fn) = unsafe { (*(*sb).ops).begin_transaction } {
             let r = unsafe { begin_fn(sb) };
             if r != 0 {
-                return err_ptr(r);
+                return Err(Errno::Raw(r));
             }
         }
 
@@ -1401,26 +1417,36 @@ pub(crate) extern "C" fn vfs_mknod(
                 );
             }
         }
-        return ret_ptr;
+        return if is_err(ret_ptr) { Err(Errno::Raw(ptr_err(ret_ptr))) } else { Ok(ret_ptr) };
     }
 }
 
-pub(crate) extern "C" fn vfs_link(
+pub(crate) extern "C" fn vfs_mknod(
+    dir: *mut vfs_inode,
+    mode: mode_t,
+    dev: dev_t,
+    name: *const c_char,
+    name_len: usize,
+) -> *mut vfs_inode {
+    result_to_errptr(vfs_mknod_inner(dir, mode, dev, name, name_len))
+}
+
+fn vfs_link_inner(
     old: *mut vfs_dentry,
     dir: *mut vfs_inode,
     name: *const c_char,
     name_len: usize,
-) -> c_int {
+) -> KResult<()> {
     if dir.is_null() || unsafe { (*dir).sb.is_null() } {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 || old.is_null() {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
 
     let target = vfs_get_dentry_inode(old);
     if is_err(target) {
-        return ptr_err(target) as c_int;
+        return Err(Errno::Raw(ptr_err(target)));
     }
     kassert!(!target.is_null(), "vfs_link: old dentry inode is NULL");
     // `IRef::from_raw`: `vfs_get_dentry_inode` succeeded (non-null,
@@ -1431,30 +1457,27 @@ pub(crate) extern "C" fn vfs_link(
     // SAFETY: see the comment above.
     let target = unsafe { IRef::from_raw(target) };
     if target.sb != unsafe { (*dir).sb } {
-        return neg(EXDEV); // Cross-device hard link not supported
+        return Err(Errno::XDev); // Cross-device hard link not supported
     }
 
     let sb = unsafe { (*dir).sb };
-    let mut ret: c_int = 0;
     if let Some(begin_fn) = unsafe { (*(*sb).ops).begin_transaction } {
-        ret = unsafe { begin_fn(sb) };
-        if ret != 0 {
-            return ret;
+        let r = unsafe { begin_fn(sb) };
+        if r != 0 {
+            return Err(Errno::Raw(r));
         }
     }
 
     vfs_superblock_wlock(sb);
-    'out_unlock_sb: {
+    let ret: c_int = 'out_unlock_sb: {
         if is_dir(target.mode) {
-            ret = neg(EPERM); // Cannot create hard link to a directory
-            break 'out_unlock_sb;
+            break 'out_unlock_sb neg(EPERM); // Cannot create hard link to a directory
         }
         if !is_dir(unsafe { (*dir).mode }) {
-            ret = neg(ENOTDIR);
-            break 'out_unlock_sb;
+            break 'out_unlock_sb neg(ENOTDIR);
         }
         vfs_ilock_two_nondirectories(dir, IRef::as_ptr(&target));
-        ret = 'out: {
+        let r = 'out: {
             let v = vfs_inode_valid_locked(dir);
             if v != 0 {
                 break 'out v;
@@ -1469,7 +1492,8 @@ pub(crate) extern "C" fn vfs_link(
             }
         };
         vfs_iunlock_two(IRef::as_ptr(&target), dir);
-    }
+        r
+    };
     vfs_superblock_unlock(sb);
 
     if let Some(end_fn) = unsafe { (*(*sb).ops).end_transaction } {
@@ -1486,44 +1510,52 @@ pub(crate) extern "C" fn vfs_link(
     // matches the deleted final `vfs_iput(target)`; unlike the original,
     // every early `return` above also runs this same drop (no separate
     // manual call to remember).
-    ret
+    if ret == 0 { Ok(()) } else { Err(Errno::Raw(ret)) }
 }
 
-pub(crate) extern "C" fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> c_int {
+pub(crate) extern "C" fn vfs_link(
+    old: *mut vfs_dentry,
+    dir: *mut vfs_inode,
+    name: *const c_char,
+    name_len: usize,
+) -> c_int {
+    result_to_neg_errno(vfs_link_inner(old, dir, name, name_len))
+}
+
+fn vfs_unlink_inner(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> KResult<()> {
     if dir.is_null() || unsafe { (*dir).sb.is_null() } {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
 
     // SAFETY: `name`/`name_len` describe a valid byte range.
     let name_bytes = unsafe { core::slice::from_raw_parts(name as *const u8, name_len) };
     if (name_len == 1 && name_bytes == b".") || (name_len == 2 && name_bytes == b"..") {
-        return neg(EINVAL); // Cannot unlink "." or ".."
+        return Err(Errno::Inval); // Cannot unlink "." or ".."
     }
 
     let mut dentry: vfs_dentry = unsafe { core::mem::zeroed() };
     let lret = vfs_ilookup(dir, &mut dentry, name, name_len);
     if lret != 0 {
-        return lret;
+        return Err(Errno::Raw(lret));
     }
 
     let target = vfs_get_dentry_inode(&mut dentry);
     if is_err(target) {
-        let e = ptr_err(target) as c_int;
+        let e = ptr_err(target);
         vfs_release_dentry(&mut dentry);
-        return e;
+        return Err(Errno::Raw(e));
     }
 
     let sb = unsafe { (*dir).sb };
-    let mut ret: c_int = 0;
     if let Some(begin_fn) = unsafe { (*(*sb).ops).begin_transaction } {
-        ret = unsafe { begin_fn(sb) };
-        if ret != 0 {
+        let r = unsafe { begin_fn(sb) };
+        if r != 0 {
             vfs_iput(target); // Drop our reference from lookup
             vfs_release_dentry(&mut dentry);
-            return ret;
+            return Err(Errno::Raw(r));
         }
     }
 
@@ -1531,7 +1563,7 @@ pub(crate) extern "C" fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, na
     vfs_ilock(dir);
     vfs_ilock(target);
 
-    ret = 'out: {
+    let ret: c_int = 'out: {
         let v = vfs_inode_valid_locked(dir);
         if v != 0 {
             break 'out v;
@@ -1593,20 +1625,24 @@ pub(crate) extern "C" fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, na
     }
     vfs_iput(target); // Drop our reference from lookup
     vfs_release_dentry(&mut dentry);
-    ret
+    if ret == 0 { Ok(()) } else { Err(Errno::Raw(ret)) }
 }
 
-pub(crate) extern "C" fn vfs_mkdir(
+pub(crate) extern "C" fn vfs_unlink(dir: *mut vfs_inode, name: *const c_char, name_len: usize) -> c_int {
+    result_to_neg_errno(vfs_unlink_inner(dir, name, name_len))
+}
+
+fn vfs_mkdir_inner(
     dir: *mut vfs_inode,
     mode: mode_t,
     name: *const c_char,
     name_len: usize,
-) -> *mut vfs_inode {
+) -> KResult<*mut vfs_inode> {
     if dir.is_null() || unsafe { (*dir).sb.is_null() } {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     loop {
@@ -1614,7 +1650,7 @@ pub(crate) extern "C" fn vfs_mkdir(
         if let Some(begin_fn) = unsafe { (*(*sb).ops).begin_transaction } {
             let r = unsafe { begin_fn(sb) };
             if r != 0 {
-                return err_ptr(r);
+                return Err(Errno::Raw(r));
             }
         }
 
@@ -1664,38 +1700,47 @@ pub(crate) extern "C" fn vfs_mkdir(
                 );
             }
         }
-        return ret_ptr;
+        return if is_err(ret_ptr) { Err(Errno::Raw(ptr_err(ret_ptr))) } else { Ok(ret_ptr) };
     }
 }
 
-pub(crate) extern "C" fn vfs_move(
+pub(crate) extern "C" fn vfs_mkdir(
+    dir: *mut vfs_inode,
+    mode: mode_t,
+    name: *const c_char,
+    name_len: usize,
+) -> *mut vfs_inode {
+    result_to_errptr(vfs_mkdir_inner(dir, mode, name, name_len))
+}
+
+fn vfs_move_inner(
     old_dir: *mut vfs_inode,
     old_dentry: *mut vfs_dentry,
     new_dir: *mut vfs_inode,
     name: *const c_char,
     name_len: usize,
-) -> c_int {
+) -> KResult<()> {
     if old_dir.is_null()
         || unsafe { (*old_dir).sb.is_null() }
         || new_dir.is_null()
         || unsafe { (*new_dir).sb.is_null() }
     {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     if old_dentry.is_null() || name.is_null() || name_len == 0 {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     let mut ret = vfs_inode_valid_locked(old_dir);
     if ret != 0 && ret != neg(EPERM) {
-        return ret;
+        return Err(Errno::Raw(ret));
     }
     ret = vfs_inode_valid_locked(new_dir);
     if ret != 0 && ret != neg(EPERM) {
-        return ret;
+        return Err(Errno::Raw(ret));
     }
     let sb = unsafe { (*old_dir).sb };
     if sb != unsafe { (*new_dir).sb } {
-        return neg(EXDEV); // Cross-device move not supported
+        return Err(Errno::XDev); // Cross-device move not supported
     }
 
     vfs_superblock_wlock(sb);
@@ -1723,25 +1768,35 @@ pub(crate) extern "C" fn vfs_move(
         r
     };
     vfs_superblock_unlock(sb);
-    result
+    if result == 0 { Ok(()) } else { Err(Errno::Raw(result)) }
 }
 
-pub(crate) extern "C" fn vfs_symlink(
+pub(crate) extern "C" fn vfs_move(
+    old_dir: *mut vfs_inode,
+    old_dentry: *mut vfs_dentry,
+    new_dir: *mut vfs_inode,
+    name: *const c_char,
+    name_len: usize,
+) -> c_int {
+    result_to_neg_errno(vfs_move_inner(old_dir, old_dentry, new_dir, name, name_len))
+}
+
+fn vfs_symlink_inner(
     dir: *mut vfs_inode,
     mode: mode_t,
     name: *const c_char,
     name_len: usize,
     target: *const c_char,
     target_len: usize,
-) -> *mut vfs_inode {
+) -> KResult<*mut vfs_inode> {
     if dir.is_null() || unsafe { (*dir).sb.is_null() } {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     if target.is_null() || target_len == 0 || target_len > VFS_PATH_MAX {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
     if name.is_null() || name_len == 0 {
-        return err_ptr(neg(EINVAL));
+        return Err(Errno::Inval);
     }
 
     loop {
@@ -1749,7 +1804,7 @@ pub(crate) extern "C" fn vfs_symlink(
         if let Some(begin_fn) = unsafe { (*(*sb).ops).begin_transaction } {
             let r = unsafe { begin_fn(sb) };
             if r != 0 {
-                return err_ptr(r);
+                return Err(Errno::Raw(r));
             }
         }
 
@@ -1794,13 +1849,24 @@ pub(crate) extern "C" fn vfs_symlink(
                 );
             }
         }
-        return ret_ptr;
+        return if is_err(ret_ptr) { Err(Errno::Raw(ptr_err(ret_ptr))) } else { Ok(ret_ptr) };
     }
 }
 
-pub(crate) extern "C" fn vfs_itruncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
+pub(crate) extern "C" fn vfs_symlink(
+    dir: *mut vfs_inode,
+    mode: mode_t,
+    name: *const c_char,
+    name_len: usize,
+    target: *const c_char,
+    target_len: usize,
+) -> *mut vfs_inode {
+    result_to_errptr(vfs_symlink_inner(dir, mode, name, name_len, target, target_len))
+}
+
+fn vfs_itruncate_inner(inode: *mut vfs_inode, new_size: loff_t) -> KResult<()> {
     if inode.is_null() || unsafe { (*inode).sb.is_null() } {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     vfs_ilock(inode);
     let ret: c_int = 'out: {
@@ -1818,7 +1884,11 @@ pub(crate) extern "C" fn vfs_itruncate(inode: *mut vfs_inode, new_size: loff_t) 
         unsafe { f(inode, new_size) }
     };
     vfs_iunlock(inode);
-    ret
+    if ret == 0 { Ok(()) } else { Err(Errno::Raw(ret)) }
+}
+
+pub(crate) extern "C" fn vfs_itruncate(inode: *mut vfs_inode, new_size: loff_t) -> c_int {
+    result_to_neg_errno(vfs_itruncate_inner(inode, new_size))
 }
 
 /// Lock two non-directory inodes to prevent deadlock (lower address
@@ -1841,13 +1911,13 @@ pub(crate) extern "C" fn vfs_ilock_two_nondirectories(inode1: *mut vfs_inode, in
 
 /// Lock two directory inodes to prevent deadlock. Caller must hold the
 /// superblock read lock and ensure both inodes are directories.
-pub(crate) extern "C" fn vfs_ilock_two_directories(inode1: *mut vfs_inode, inode2: *mut vfs_inode) -> c_int {
+fn vfs_ilock_two_directories_inner(inode1: *mut vfs_inode, inode2: *mut vfs_inode) -> KResult<()> {
     if core::ptr::eq(inode1, inode2) {
         vfs_ilock(inode1);
-        return 0;
+        return Ok(());
     }
     if unsafe { (*inode1).sb } != unsafe { (*inode2).sb } {
-        return neg(EXDEV); // Cross-filesystem locking not supported
+        return Err(Errno::XDev); // Cross-filesystem locking not supported
     }
 
     // Borrowed from Linux kernel's lockdep strategy.
@@ -1865,7 +1935,7 @@ pub(crate) extern "C" fn vfs_ilock_two_directories(inode1: *mut vfs_inode, inode
         // inode2 is the ancestor of inode1
         vfs_ilock(inode2);
         vfs_ilock(inode1);
-        return 0;
+        return Ok(());
     }
     q = inode2;
     loop {
@@ -1879,7 +1949,7 @@ pub(crate) extern "C" fn vfs_ilock_two_directories(inode1: *mut vfs_inode, inode
         // inode1 is the ancestor of inode2
         vfs_ilock(inode1);
         vfs_ilock(inode2);
-        return 0;
+        return Ok(());
     } else if core::ptr::eq(r, p) {
         // inode1 and inode2 are in different branches
         if (inode1 as usize) < (inode2 as usize) {
@@ -1889,12 +1959,16 @@ pub(crate) extern "C" fn vfs_ilock_two_directories(inode1: *mut vfs_inode, inode
             vfs_ilock(inode2);
             vfs_ilock(inode1);
         }
-        return 0;
+        return Ok(());
     }
 
     // Since both inodes are on the same filesystem, they must share a
     // common ancestor (the fs root).
     xv6_panic(c"vfs_ilock_two_directories: unexpected condition".as_ptr());
+}
+
+pub(crate) extern "C" fn vfs_ilock_two_directories(inode1: *mut vfs_inode, inode2: *mut vfs_inode) -> c_int {
+    result_to_neg_errno(vfs_ilock_two_directories_inner(inode1, inode2))
 }
 
 pub(crate) extern "C" fn vfs_iunlock_two(inode1: *mut vfs_inode, inode2: *mut vfs_inode) {
@@ -1906,16 +1980,16 @@ pub(crate) extern "C" fn vfs_iunlock_two(inode1: *mut vfs_inode, inode2: *mut vf
     }
 }
 
-pub(crate) extern "C" fn vfs_chdir(new_cwd: *mut vfs_inode) -> c_int {
+fn vfs_chdir_inner(new_cwd: *mut vfs_inode) -> KResult<()> {
     if new_cwd.is_null() || unsafe { (*new_cwd).sb.is_null() } {
-        return neg(EINVAL);
+        return Err(Errno::Inval);
     }
     if core::ptr::eq(new_cwd, root_inode_ptr()) {
-        return neg(EINVAL); // not allowed to change to the dummy root
+        return Err(Errno::Inval); // not allowed to change to the dummy root
     }
     let fs = current_fs();
     if core::ptr::eq(new_cwd, unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).cwd)) }) {
-        return 0; // No change
+        return Ok(()); // No change
     }
 
     let sb = unsafe { (*new_cwd).sb };
@@ -1929,13 +2003,13 @@ pub(crate) extern "C" fn vfs_chdir(new_cwd: *mut vfs_inode) -> c_int {
         vfs_iunlock(new_cwd);
         vfs_superblock_unlock(sb);
         vfs_inode_put_ref(&mut old);
-        return v;
+        return Err(Errno::Raw(v));
     }
     if !is_dir(unsafe { (*new_cwd).mode }) {
         vfs_iunlock(new_cwd);
         vfs_superblock_unlock(sb);
         vfs_inode_put_ref(&mut old);
-        return neg(ENOTDIR);
+        return Err(Errno::NotDir);
     }
 
     let mut new_ref: vfs_inode_ref = unsafe { core::mem::zeroed() };
@@ -1944,7 +2018,7 @@ pub(crate) extern "C" fn vfs_chdir(new_cwd: *mut vfs_inode) -> c_int {
         vfs_iunlock(new_cwd);
         vfs_superblock_unlock(sb);
         vfs_inode_put_ref(&mut old);
-        return r;
+        return Err(Errno::Raw(r));
     }
     vfs_iunlock(new_cwd);
     vfs_superblock_unlock(sb);
@@ -1958,10 +2032,14 @@ pub(crate) extern "C" fn vfs_chdir(new_cwd: *mut vfs_inode) -> c_int {
         unsafe { (*fs).cwd = new_ref };
     }
     vfs_inode_put_ref(&mut old);
-    0
+    Ok(())
 }
 
-pub(crate) extern "C" fn vfs_chroot(new_root: *mut vfs_inode) -> c_int {
+pub(crate) extern "C" fn vfs_chdir(new_cwd: *mut vfs_inode) -> c_int {
+    result_to_neg_errno(vfs_chdir_inner(new_cwd))
+}
+
+fn vfs_chroot_inner(new_root: *mut vfs_inode) -> KResult<()> {
     // NOTE (preserved 1:1 from the C original): `vfs_chdir`'s return
     // value is discarded here — if it fails (e.g. `new_root` is not a
     // directory or is invalid), `vfs_chroot` still proceeds to change
@@ -1969,17 +2047,17 @@ pub(crate) extern "C" fn vfs_chroot(new_root: *mut vfs_inode) -> c_int {
     let _ = vfs_chdir(new_root);
 
     if core::ptr::eq(new_root, root_inode_ptr()) {
-        return neg(EINVAL); // not allowed to change to the dummy root
+        return Err(Errno::Inval); // not allowed to change to the dummy root
     }
     let fs = current_fs();
     if core::ptr::eq(new_root, unsafe { vfs_inode_deref(ptr::addr_of_mut!((*fs).rooti)) }) {
-        return 0; // No change
+        return Ok(()); // No change
     }
 
     let mut new_ref: vfs_inode_ref = unsafe { core::mem::zeroed() };
     let r = vfs_inode_get_ref(new_root, &mut new_ref);
     if r != 0 {
-        return r;
+        return Err(Errno::Raw(r));
     }
     vfs_idup(new_root);
 
@@ -1990,7 +2068,11 @@ pub(crate) extern "C" fn vfs_chroot(new_root: *mut vfs_inode) -> c_int {
         unsafe { (*fs).rooti = new_ref };
     }
     vfs_inode_put_ref(&mut old);
-    0
+    Ok(())
+}
+
+pub(crate) extern "C" fn vfs_chroot(new_root: *mut vfs_inode) -> c_int {
+    result_to_neg_errno(vfs_chroot_inner(new_root))
 }
 
 /// Get current working directory inode of the current process. Caller
