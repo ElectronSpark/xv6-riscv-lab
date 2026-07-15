@@ -186,6 +186,25 @@ pub enum Errno {
     /// `EMFILE`: per-process open-file-descriptor limit reached (added for
     /// P3-CS3, `vfs/fdtable.rs`'s fd-allocation cluster).
     MFile,
+    /// `ENOENT`: no such file or directory (added for P3-CS4,
+    /// `vfs/vfs_syscall.rs`'s path-resolution cluster).
+    NoEnt,
+    /// `ENOTDIR`: not a directory (added for P3-CS4, `sys_vfs_chdir`).
+    NotDir,
+    /// Passthrough for an already-computed raw `-errno` `c_int` obtained
+    /// from a cross-file boundary this cluster doesn't own — e.g. an
+    /// `ERR_PTR`-encoded pointer from `vfs/inode.rs`
+    /// (`vfs_nameiparent`/`vfs_mkdir`/`vfs_mknod`/...), or another
+    /// file's own already-negative-errno `c_int` return
+    /// (`vfs_filestat`/`vfs_inode_get_ref`/...). `n` is the raw negative
+    /// value itself (`PTR_ERR`'s result, or the `c_int` as-is), not a
+    /// positive `E*` code — added for P3-CS4 (`vfs/vfs_syscall.rs`) so
+    /// composing a [`KResult`] from such a boundary never has to guess or
+    /// narrow an arbitrary errno into one of the enumerated variants
+    /// above (which would either lose information or panic on an
+    /// unmapped value). See [`Errno::raw`]/[`Errno::neg`] for the exact
+    /// round-trip.
+    Raw(c_int),
 }
 
 /// This crate's canonical fallible-return type for Rust-internal
@@ -211,6 +230,14 @@ impl Errno {
             Errno::Range => crate::bindings::ERANGE as c_int,
             Errno::NameTooLong => crate::bindings::ENAMETOOLONG as c_int,
             Errno::MFile => crate::bindings::EMFILE as c_int,
+            Errno::NoEnt => crate::bindings::ENOENT as c_int,
+            Errno::NotDir => crate::bindings::ENOTDIR as c_int,
+            // `n` is already the raw negative `-errno` value; `raw()`'s
+            // contract is to return the *positive* `E*` code, so negate
+            // it back. `neg()` (below, `-self.raw()`) then recovers `n`
+            // exactly: `-(-n) == n`, a lossless round-trip with no
+            // separate special case needed there.
+            Errno::Raw(n) => -n,
         }
     }
 

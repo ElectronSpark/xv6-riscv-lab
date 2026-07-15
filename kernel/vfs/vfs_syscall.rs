@@ -186,7 +186,15 @@ const fn ret64(v: c_int) -> u64 {
 // `isize` — every call site below already casts its result to `c_int`/
 // `u64` or compares it against another `c_int` (`neg(...)`), so the
 // narrower return type is a no-op change.
-use crate::kstd::{is_err, is_err_or_null, ptr_err};
+//
+// P3-CS4 (Result-over-ERR_PTR): `Errno`/`KResult`/`result_to_neg_errno`
+// are this file's target idiom for the bodies of the syscalls converted
+// this wave (see each `*_inner` helper below) — `is_err`/`is_err_or_null`/
+// `ptr_err` remain in use for the not-yet-converted syscalls and for
+// decoding cross-file `ERR_PTR` pointers inside the converted bodies
+// themselves (via `Errno::Raw`, since those pointers can carry any `E*`
+// value, not just the handful `Errno` enumerates).
+use crate::kstd::{is_err, is_err_or_null, ptr_err, result_to_neg_errno, Errno, KResult};
 
 // `uabi/stat.h`'s `S_IF*`/`S_IS*` macros and permission bits.
 const S_IFMT: u32 = 0o170000;
@@ -438,13 +446,16 @@ fn vfs_fdfree(fd: c_int) -> *mut vfs_file {
  * File Operations Syscalls
  ******************************************************************************/
 
-pub(crate) extern "C" fn sys_vfs_dup() -> u64 {
-    let mut fd: c_int = 0;
-    argint(0, &mut fd);
-
+/// Core logic behind [`sys_vfs_dup`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4: this file's `sys_vfs_*` functions are
+/// the real C-ABI/syscall boundary — `fd`'s only failure mode, a bad
+/// descriptor, is now an ordinary `Err(Errno::BadF)` composed with early
+/// `return`s instead of a hand-rolled `ret64(neg(EBADF))`; the one
+/// `KResult` -> `u64` conversion happens once, in [`sys_vfs_dup`] itself).
+fn dup_inner(fd: c_int) -> KResult<c_int> {
     let f = vfs_argfd(fd);
     if f.is_null() {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
     let newfd;
@@ -454,27 +465,40 @@ pub(crate) extern "C" fn sys_vfs_dup() -> u64 {
     }
 
     vfs_fput(f); // remove the reference from vfs_argfd
-    ret64(newfd)
+    Ok(newfd)
 }
 
-pub(crate) extern "C" fn sys_vfs_dup2() -> u64 {
-    let mut oldfd: c_int = 0;
-    let mut newfd: c_int = 0;
-    argint(0, &mut oldfd);
-    argint(1, &mut newfd);
+pub(crate) extern "C" fn sys_vfs_dup() -> u64 {
+    let mut fd: c_int = 0;
+    argint(0, &mut fd);
 
+    match dup_inner(fd) {
+        Ok(newfd) => ret64(newfd),
+        Err(e) => ret64(e.neg()),
+    }
+}
+
+/// Core logic behind [`sys_vfs_dup2`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4). The two `EBADF` early-return sites
+/// (bad `newfd` range, unresolvable `oldfd`) are `Err(Errno::BadF)`; the
+/// `oldfd == newfd` short-circuit and the final `vfs_fdtable_alloc_fd_from`
+/// result are both `Ok` (the latter carries the raw fd-or-negative-errno
+/// `c_int` through unchanged, matching the original's unconditional
+/// `ret64(ret)` — this function's own failure surface is only the two
+/// `EBADF` checks, not that pass-through value).
+fn dup2_inner(oldfd: c_int, newfd: c_int) -> KResult<c_int> {
     if newfd < 0 || newfd as usize >= NOFILE {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
     let f = vfs_argfd(oldfd);
     if f.is_null() {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
     if oldfd == newfd {
         vfs_fput(f);
-        return ret64(newfd);
+        return Ok(newfd);
     }
 
     let old_newfd;
@@ -489,7 +513,19 @@ pub(crate) extern "C" fn sys_vfs_dup2() -> u64 {
         vfs_fput_call_rcu(old_newfd);
     }
     vfs_fput(f);
-    ret64(ret)
+    Ok(ret)
+}
+
+pub(crate) extern "C" fn sys_vfs_dup2() -> u64 {
+    let mut oldfd: c_int = 0;
+    let mut newfd: c_int = 0;
+    argint(0, &mut oldfd);
+    argint(1, &mut newfd);
+
+    match dup2_inner(oldfd, newfd) {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 pub(crate) extern "C" fn sys_vfs_read() -> u64 {
@@ -530,21 +566,63 @@ pub(crate) extern "C" fn sys_vfs_write() -> u64 {
     ret as u64
 }
 
-pub(crate) extern "C" fn sys_vfs_close() -> u64 {
-    let mut fd: c_int = 0;
-    argint(0, &mut fd);
-
+/// Core logic behind [`sys_vfs_close`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4). The single `EBADF` early return
+/// (`vfs_fdfree` finding no such open fd) is `Err(Errno::BadF)`; there is
+/// no pass-through value on success (`close` always reports plain 0).
+fn close_inner(fd: c_int) -> KResult<()> {
     let f;
     {
         let _g = KSpinlock::from_bindings(unsafe { ptr::addr_of_mut!((*current_fdtable()).lock) }).lock();
         f = vfs_fdfree(fd);
         if f.is_null() {
-            return ret64(neg(EBADF));
+            return Err(Errno::BadF);
         }
     }
 
     vfs_fput_call_rcu(f);
-    0
+    Ok(())
+}
+
+pub(crate) extern "C" fn sys_vfs_close() -> u64 {
+    let mut fd: c_int = 0;
+    argint(0, &mut fd);
+
+    ret64(result_to_neg_errno(close_inner(fd)))
+}
+
+/// Core logic behind [`sys_vfs_fstat`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4). Three failure modes — bad `fd`,
+/// `vfs_filestat`'s own already-negative `c_int` (a cross-file boundary
+/// result, preserved exactly via [`Errno::Raw`] rather than narrowed to
+/// `EBADF`/`EFAULT`), and the userspace copy-out failing — are ordinary
+/// `Err` returns; the lone success path carries no value.
+fn fstat_inner(fd: c_int, st_addr: u64) -> KResult<()> {
+    let f = vfs_argfd(fd);
+    if f.is_null() {
+        return Err(Errno::BadF);
+    }
+
+    let mut kst: stat = unsafe { core::mem::zeroed() };
+    let ret = vfs_filestat(f, &mut kst);
+    if ret != 0 {
+        vfs_fput(f);
+        return Err(Errno::Raw(ret));
+    }
+
+    if vm_copyout(
+        unsafe { (*current()).vm },
+        st_addr,
+        &kst as *const stat as *const c_void,
+        core::mem::size_of::<stat>() as u64,
+    ) < 0
+    {
+        vfs_fput(f);
+        return Err(Errno::Fault);
+    }
+
+    vfs_fput(f);
+    Ok(())
 }
 
 pub(crate) extern "C" fn sys_vfs_fstat() -> u64 {
@@ -554,31 +632,25 @@ pub(crate) extern "C" fn sys_vfs_fstat() -> u64 {
     argint(0, &mut fd);
     argaddr(1, &mut st);
 
+    ret64(result_to_neg_errno(fstat_inner(fd, st)))
+}
+
+/// Core logic behind [`sys_vfs_lseek`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4). Only `EBADF` (unresolvable `fd`) is
+/// this function's own failure; `vfs_filelseek`'s result — a full 64-bit
+/// `loff_t`, not just a `c_int`-range negative errno — passes through as
+/// `Ok` unconditionally, matching the original's unconditional `ret as
+/// u64` (note: **not** the 32-bit-narrowing [`ret64`] helper, since a
+/// legitimate large file offset would overflow a `c_int`).
+fn lseek_inner(fd: c_int, offset: i64, whence: c_int) -> KResult<i64> {
     let f = vfs_argfd(fd);
     if f.is_null() {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
-    let mut kst: stat = unsafe { core::mem::zeroed() };
-    let ret = vfs_filestat(f, &mut kst);
-    if ret != 0 {
-        vfs_fput(f);
-        return ret64(ret);
-    }
-
-    if vm_copyout(
-        unsafe { (*current()).vm },
-        st,
-        &kst as *const stat as *const c_void,
-        core::mem::size_of::<stat>() as u64,
-    ) < 0
-    {
-        vfs_fput(f);
-        return ret64(neg(EFAULT));
-    }
-
+    let ret = vfs_filelseek(f, offset, whence);
     vfs_fput(f);
-    0
+    Ok(ret)
 }
 
 pub(crate) extern "C" fn sys_vfs_lseek() -> u64 {
@@ -589,14 +661,26 @@ pub(crate) extern "C" fn sys_vfs_lseek() -> u64 {
     argint64(1, &mut offset);
     argint(2, &mut whence);
 
+    match lseek_inner(fd, offset, whence) {
+        Ok(v) => v as u64,
+        Err(e) => ret64(e.neg()),
+    }
+}
+
+/// Core logic behind [`sys_vfs_ftruncate`], factored out as a private
+/// helper returning [`KResult`] (P3-CS4). Only `EBADF` is this
+/// function's own failure; `truncate`'s `c_int` result (0 or a
+/// cross-file negative errno) passes through as `Ok` unconditionally,
+/// matching the original's unconditional `ret64(ret)`.
+fn ftruncate_inner(fd: c_int, length: i64) -> KResult<c_int> {
     let f = vfs_argfd(fd);
     if f.is_null() {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
-    let ret = vfs_filelseek(f, offset, whence);
+    let ret = truncate(f, length);
     vfs_fput(f);
-    ret as u64
+    Ok(ret)
 }
 
 pub(crate) extern "C" fn sys_vfs_ftruncate() -> u64 {
@@ -605,26 +689,24 @@ pub(crate) extern "C" fn sys_vfs_ftruncate() -> u64 {
     argint(0, &mut fd);
     argint64(1, &mut length);
 
-    let f = vfs_argfd(fd);
-    if f.is_null() {
-        return ret64(neg(EBADF));
+    match ftruncate_inner(fd, length) {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
     }
-
-    let ret = truncate(f, length);
-    vfs_fput(f);
-    ret64(ret)
 }
 
-pub(crate) extern "C" fn sys_vfs_fcntl() -> u64 {
-    let mut fd: c_int = 0;
-    let mut cmd: c_int = 0;
-    let mut arg: c_int = 0;
-    argint(0, &mut fd);
-    argint(1, &mut cmd);
-    argint(2, &mut arg);
-
+/// Core logic behind [`sys_vfs_fcntl`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4). The two `EBADF` early-return sites
+/// (`fd` out of range, unresolvable `fd`) are `Err(Errno::BadF)`; both of
+/// the function's two successful-resolution paths (the `F_GETFD`/
+/// `F_SETFD` fast path, and the general `match cmd` below it) return
+/// their computed `ret` — which may itself already be a negative `E*`
+/// value for an unsupported/invalid `cmd`/`arg` — as `Ok`, matching the
+/// original's unconditional `ret64(ret)` at each of those two return
+/// points.
+fn fcntl_inner(fd: c_int, cmd: c_int, arg: c_int) -> KResult<c_int> {
     if fd < 0 || fd as usize >= NOFILE {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
     if cmd == F_GETFD || cmd == F_SETFD {
@@ -638,12 +720,12 @@ pub(crate) extern "C" fn sys_vfs_fcntl() -> u64 {
                 vfs_fdtable_set_fdflags(current_fdtable(), fd, arg & FD_CLOEXEC)
             };
         }
-        return ret64(ret);
+        return Ok(ret);
     }
 
     let f = vfs_argfd(fd);
     if f.is_null() {
-        return ret64(neg(EBADF));
+        return Err(Errno::BadF);
     }
 
     let mut ret = neg(EINVAL);
@@ -678,7 +760,21 @@ pub(crate) extern "C" fn sys_vfs_fcntl() -> u64 {
     }
 
     vfs_fput(f);
-    ret64(ret)
+    Ok(ret)
+}
+
+pub(crate) extern "C" fn sys_vfs_fcntl() -> u64 {
+    let mut fd: c_int = 0;
+    let mut cmd: c_int = 0;
+    let mut arg: c_int = 0;
+    argint(0, &mut fd);
+    argint(1, &mut cmd);
+    argint(2, &mut arg);
+
+    match fcntl_inner(fd, cmd, arg) {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 /// Fallback `getattr` when the inode has no filesystem-supplied
@@ -1083,20 +1179,28 @@ pub(crate) extern "C" fn sys_vfs_open() -> u64 {
     ret64(fd)
 }
 
-pub(crate) extern "C" fn sys_vfs_mkdir() -> u64 {
+/// Core logic behind [`sys_vfs_mkdir`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4). The `argstr`/`vfs_nameiparent`-null
+/// failures become `Err(Errno::Fault)`/`Err(Errno::NoEnt)`; the two
+/// `vfs_nameiparent`/`vfs_mkdir` `ERR_PTR` checks stay is_err-gated (they
+/// cross into `vfs/inode.rs`, a boundary this cluster doesn't own — same
+/// precedent as `fdtable.rs`'s P3-CS3 `vfs_fdup` note) but now decode
+/// into `Err(Errno::Raw(..))` instead of an early `ptr_err(..) as u64`
+/// return, so the exact encoded errno still reaches the caller unchanged.
+fn mkdir_inner() -> KResult<()> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
-        return ptr_err(parent) as u64;
+        return Err(Errno::Raw(ptr_err(parent)));
     }
     if parent.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let name_len = unsafe { strlen(name.as_ptr()) };
@@ -1104,14 +1208,21 @@ pub(crate) extern "C" fn sys_vfs_mkdir() -> u64 {
     vfs_iput(parent);
 
     if is_err(dir) {
-        return ptr_err(dir) as u64;
+        return Err(Errno::Raw(ptr_err(dir)));
     }
 
     vfs_iput(dir);
-    0
+    Ok(())
 }
 
-pub(crate) extern "C" fn sys_vfs_mknod() -> u64 {
+pub(crate) extern "C" fn sys_vfs_mkdir() -> u64 {
+    ret64(result_to_neg_errno(mkdir_inner()))
+}
+
+/// Core logic behind [`sys_vfs_mknod`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4) — same shape/rationale as
+/// [`mkdir_inner`], one extra `argint` triple for `mode`/`major`/`minor`.
+fn mknod_inner() -> KResult<()> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let mut mode: c_int = 0;
@@ -1120,7 +1231,7 @@ pub(crate) extern "C" fn sys_vfs_mknod() -> u64 {
 
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
     argint(1, &mut mode);
     argint(2, &mut major);
@@ -1128,10 +1239,10 @@ pub(crate) extern "C" fn sys_vfs_mknod() -> u64 {
 
     let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
-        return ptr_err(parent) as u64;
+        return Err(Errno::Raw(ptr_err(parent)));
     }
     if parent.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let name_len = unsafe { strlen(name.as_ptr()) };
@@ -1140,34 +1251,50 @@ pub(crate) extern "C" fn sys_vfs_mknod() -> u64 {
     vfs_iput(parent);
 
     if is_err(node) {
-        return ptr_err(node) as u64;
+        return Err(Errno::Raw(ptr_err(node)));
     }
 
     vfs_iput(node);
-    0
+    Ok(())
 }
 
-pub(crate) extern "C" fn sys_vfs_unlink() -> u64 {
+pub(crate) extern "C" fn sys_vfs_mknod() -> u64 {
+    ret64(result_to_neg_errno(mknod_inner()))
+}
+
+/// Core logic behind [`sys_vfs_unlink`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4). The `argstr`/`vfs_nameiparent`-null
+/// failures become `Err`; `vfs_unlink` itself already returns a plain
+/// `c_int` (not an `ERR_PTR`), so its result passes through as `Ok`
+/// unconditionally, matching the original's unconditional `ret64(ret)`.
+fn unlink_inner() -> KResult<c_int> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let mut name: [c_char; DIRSIZ + 1] = [0; DIRSIZ + 1];
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let parent = vfs_nameiparent(path.as_ptr(), n as usize, name.as_mut_ptr(), DIRSIZ + 1);
     if is_err(parent) {
-        return ptr_err(parent) as u64;
+        return Err(Errno::Raw(ptr_err(parent)));
     }
     if parent.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     let name_len = unsafe { strlen(name.as_ptr()) };
     let ret = vfs_unlink(parent, name.as_ptr(), name_len);
     vfs_iput(parent);
 
-    ret64(ret)
+    Ok(ret)
+}
+
+pub(crate) extern "C" fn sys_vfs_unlink() -> u64 {
+    match unlink_inner() {
+        Ok(v) => ret64(v),
+        Err(e) => ret64(e.neg()),
+    }
 }
 
 pub(crate) extern "C" fn sys_vfs_link() -> u64 {
@@ -1358,24 +1485,31 @@ pub(crate) extern "C" fn sys_vfs_symlink() -> u64 {
     0
 }
 
-pub(crate) extern "C" fn sys_vfs_chdir() -> u64 {
+/// Core logic behind [`sys_vfs_chdir`], factored out as a private helper
+/// returning [`KResult`] (P3-CS4). Four failure modes — bad path copy-in,
+/// unresolvable path (both the `ERR_PTR` and plain-`ENOENT` shapes of
+/// `vfs_namei`'s result), non-directory target, and `vfs_inode_get_ref`'s
+/// own already-negative `c_int` — are ordinary `Err` returns; the success
+/// path (cwd swapped under the process's `fs_struct` lock) carries no
+/// value.
+fn chdir_inner() -> KResult<()> {
     let mut path: [c_char; MAXPATH] = [0; MAXPATH];
     let n = argstr(0, path.as_mut_ptr(), MAXPATH as c_int);
     if n < 0 {
-        return ret64(neg(EFAULT));
+        return Err(Errno::Fault);
     }
 
     let inode = vfs_namei(path.as_ptr(), n as usize);
     if is_err(inode) {
-        return ptr_err(inode) as u64;
+        return Err(Errno::Raw(ptr_err(inode)));
     }
     if inode.is_null() {
-        return ret64(neg(ENOENT));
+        return Err(Errno::NoEnt);
     }
 
     if !is_dir(unsafe { (*inode).mode }) {
         vfs_iput(inode);
-        return ret64(neg(ENOTDIR));
+        return Err(Errno::NotDir);
     }
 
     // Get a reference to the new cwd BEFORE acquiring the spinlock
@@ -1384,7 +1518,7 @@ pub(crate) extern "C" fn sys_vfs_chdir() -> u64 {
     let ret = vfs_inode_get_ref(inode, &mut new_cwd_ref);
     if ret != 0 {
         vfs_iput(inode);
-        return ret64(ret);
+        return Err(Errno::Raw(ret));
     }
 
     // Update the process cwd (only the assignment happens under the
@@ -1401,7 +1535,11 @@ pub(crate) extern "C" fn sys_vfs_chdir() -> u64 {
     vfs_inode_put_ref(&mut old_cwd);
     vfs_iput(inode);
 
-    0
+    Ok(())
+}
+
+pub(crate) extern "C" fn sys_vfs_chdir() -> u64 {
+    ret64(result_to_neg_errno(chdir_inner()))
 }
 
 /******************************************************************************
